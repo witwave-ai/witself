@@ -103,6 +103,27 @@ avatar-bearing import/export during the brief old/new-writer convergence
 window; compatibility is data-safe, but the freeze avoids new legacy active
 rows that need later operator replacement.
 
+Transcript retention is disabled by default. `transcriptRetention` renders the
+enabled gate, `preview`/`enforce` mode, bounded batch size, and interval as
+`WITSELF_TRANSCRIPT_RETENTION_*`. Use three separate rollout states:
+
+1. `enabled: false`, `mode: preview` while compatible code and schema converge;
+2. `enabled: true`, `mode: preview` while value-free eligibility and hold
+   counts are reviewed;
+3. `enabled: true`, `mode: enforce` only after the preview is accepted.
+
+The mode defaults to `preview`, so merely enabling the worker cannot delete
+transcripts. Changing these ConfigMap values changes the pod checksum and
+restarts the workers.
+
+Keep the separate control-plane plan-lifecycle feature gate disabled during
+the initial rolling cell deployment. Wait for the Deployment rollout to
+complete, confirm every ready pod is on the fenced-snapshot-capable image and
+the old ReplicaSet is at zero, and verify the plan snapshot GET endpoint
+through the Service before enabling control-plane snapshot writes in a
+separate deployment. Old cell binaries accept an unfenced plan request and
+cannot safely overlap those writes.
+
 For an existing multi-replica database, the rollout sequence is mandatory:
 first deploy schema-27-compatible writers with the flag off and wait for full
 convergence; next deploy schema 28 with the flag still off and wait again; only
@@ -140,7 +161,7 @@ See [values.yaml](values.yaml) for the full set and [values.schema.json](values.
 for validation. Most-used: `image.tag`, `replicaCount`, `backend.kind`,
 `features.factDeletion.enabled`, `avatar.payloadCompaction.enabled`,
 `avatar.styleRollout.*`, `agentEmail.receivePilot.*`, `database.existingSecret.*`,
-`bootstrap.existingSecret.*`, `resources`,
+`transcriptRetention.*`, `bootstrap.existingSecret.*`, `resources`,
 `metrics.serviceMonitor.enabled`, `autoscaling.*`, `ingress.*`,
 `networkPolicy.*`, `strategy.*`, `minReadySeconds`,
 `lifecycle.preStopSleepSeconds`, and `terminationGracePeriodSeconds`.

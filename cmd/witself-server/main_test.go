@@ -241,6 +241,61 @@ func TestAvatarStyleRolloutConfigFromEnv(t *testing.T) {
 	}
 }
 
+func TestTranscriptRetentionConfigFromEnv(t *testing.T) {
+	keys := []string{
+		transcriptRetentionEnabledEnv,
+		transcriptRetentionModeEnv,
+		transcriptRetentionBatchSizeEnv,
+		transcriptRetentionIntervalEnv,
+	}
+	original := map[string]string{}
+	present := map[string]bool{}
+	for _, key := range keys {
+		original[key], present[key] = os.LookupEnv(key)
+		_ = os.Unsetenv(key)
+	}
+	t.Cleanup(func() {
+		for _, key := range keys {
+			if present[key] {
+				_ = os.Setenv(key, original[key])
+			} else {
+				_ = os.Unsetenv(key)
+			}
+		}
+	})
+
+	enabled, cfg, err := transcriptRetentionConfigFromEnv()
+	if err != nil || enabled || cfg != store.DefaultTranscriptRetentionWorkerConfig() {
+		t.Fatalf("defaults = %t %+v / %v", enabled, cfg, err)
+	}
+	_ = os.Setenv(transcriptRetentionEnabledEnv, "true")
+	_ = os.Setenv(transcriptRetentionModeEnv, "enforce")
+	_ = os.Setenv(transcriptRetentionBatchSizeEnv, "250")
+	_ = os.Setenv(transcriptRetentionIntervalEnv, "15m")
+	enabled, cfg, err = transcriptRetentionConfigFromEnv()
+	if err != nil || !enabled || cfg.Mode != store.TranscriptRetentionModeEnforce ||
+		cfg.BatchSize != 250 || cfg.Interval != 15*time.Minute {
+		t.Fatalf("configured = %t %+v / %v", enabled, cfg, err)
+	}
+	_ = os.Setenv(transcriptRetentionEnabledEnv, "sometimes")
+	if _, _, err := transcriptRetentionConfigFromEnv(); err == nil ||
+		!strings.Contains(err.Error(), transcriptRetentionEnabledEnv) {
+		t.Fatalf("invalid enabled error = %v", err)
+	}
+	_ = os.Setenv(transcriptRetentionEnabledEnv, "true")
+	_ = os.Setenv(transcriptRetentionModeEnv, "destructive")
+	if _, _, err := transcriptRetentionConfigFromEnv(); err == nil ||
+		!strings.Contains(err.Error(), transcriptRetentionModeEnv) {
+		t.Fatalf("invalid mode error = %v", err)
+	}
+	_ = os.Setenv(transcriptRetentionModeEnv, "preview")
+	_ = os.Setenv(transcriptRetentionBatchSizeEnv, "0")
+	if _, _, err := transcriptRetentionConfigFromEnv(); err == nil ||
+		!strings.Contains(err.Error(), transcriptRetentionBatchSizeEnv) {
+		t.Fatalf("invalid batch error = %v", err)
+	}
+}
+
 func TestConfigureFactMutationsDeletionGate(t *testing.T) {
 	var disabled server.Config
 	configureFactMutations(&disabled, nil, false)

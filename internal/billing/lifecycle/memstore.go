@@ -84,5 +84,30 @@ func clone(r Record) Record {
 		t := *r.PastDueSince
 		r.PastDueSince = &t
 	}
+	if r.PlanOverride != nil {
+		override := *r.PlanOverride
+		r.PlanOverride = &override
+	}
+	if r.TranscriptRetentionOverride != nil {
+		override := *r.TranscriptRetentionOverride
+		if override.Days != nil {
+			days := *override.Days
+			override.Days = &days
+		}
+		r.TranscriptRetentionOverride = &override
+	}
+	if r.AdminHistory != nil {
+		r.AdminHistory = append([]AdminChange(nil), r.AdminHistory...)
+		for i := range r.AdminHistory {
+			if r.AdminHistory[i].RetentionFrom != nil {
+				value := *r.AdminHistory[i].RetentionFrom
+				r.AdminHistory[i].RetentionFrom = &value
+			}
+			if r.AdminHistory[i].RetentionTo != nil {
+				value := *r.AdminHistory[i].RetentionTo
+				r.AdminHistory[i].RetentionTo = &value
+			}
+		}
+	}
 	return r
 }

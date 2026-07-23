@@ -32,6 +32,10 @@ const (
 	avatarStyleRolloutIntervalEnv     = "WITSELF_AVATAR_STYLE_ROLLOUT_INTERVAL"
 	avatarStyleRolloutBatchTimeoutEnv = "WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_TIMEOUT"
 	avatarPayloadCompactionEnabledEnv = "WITSELF_AVATAR_PAYLOAD_COMPACTION_ENABLED"
+	transcriptRetentionEnabledEnv     = "WITSELF_TRANSCRIPT_RETENTION_ENABLED"
+	transcriptRetentionModeEnv        = "WITSELF_TRANSCRIPT_RETENTION_MODE"
+	transcriptRetentionBatchSizeEnv   = "WITSELF_TRANSCRIPT_RETENTION_BATCH_SIZE"
+	transcriptRetentionIntervalEnv    = "WITSELF_TRANSCRIPT_RETENTION_INTERVAL"
 )
 
 func main() {
@@ -79,6 +83,11 @@ func serve() int {
 		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
 		return 1
 	}
+	transcriptRetentionEnabled, transcriptRetentionConfig, err := transcriptRetentionConfigFromEnv()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
+		return 1
+	}
 	agentEmailPilot, err := agentEmailPilotConfigFromEnv()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
@@ -90,6 +99,7 @@ func serve() int {
 
 	cfg := server.ConfigFromEnv()
 	var stopAvatarRolloutWorker func()
+	var stopTranscriptRetentionWorker func()
 	if dsn := dbDSN(); dsn != "" {
 		st, err := store.Open(ctx, dsn,
 			store.WithAvatarPayloadCompactionEnabled(avatarPayloadCompactionEnabled))
@@ -985,21 +995,25 @@ func serve() int {
 				return server.AccountRecord{}, err
 			}
 			return server.AccountRecord{
-				ID:              a.ID,
-				Email:           a.Email,
-				DisplayName:     a.DisplayName,
-				Status:          a.Status,
-				CreatedAt:       a.CreatedAt,
-				ClosedAt:        a.ClosedAt,
-				ClosedReason:    a.ClosedReason,
-				SuspendedAt:     a.SuspendedAt,
-				SuspendedFor:    a.SuspendedFor,
-				SuspendedReason: a.SuspendedReason,
-				SupportPolicy:   a.SupportPolicy,
-				Plan:            a.Plan,
-				PlanLimits:      a.PlanLimits,
-				PlanFeatures:    a.PlanFeatures,
-				PlacementPolicy: a.PlacementPolicy,
+				ID:                   a.ID,
+				Email:                a.Email,
+				DisplayName:          a.DisplayName,
+				Status:               a.Status,
+				CreatedAt:            a.CreatedAt,
+				ClosedAt:             a.ClosedAt,
+				ClosedReason:         a.ClosedReason,
+				SuspendedAt:          a.SuspendedAt,
+				SuspendedFor:         a.SuspendedFor,
+				SuspendedReason:      a.SuspendedReason,
+				SupportPolicy:        a.SupportPolicy,
+				Plan:                 a.Plan,
+				PlanLimits:           a.PlanLimits,
+				PlanPolicies:         a.PlanPolicies,
+				PlanFeatures:         a.PlanFeatures,
+				PlanAppliedAt:        a.PlanAppliedAt,
+				PlanSnapshotRevision: a.PlanSnapshotRevision,
+				PlanSnapshotHash:     a.PlanSnapshotHash,
+				PlacementPolicy:      a.PlacementPolicy,
 			}, nil
 		}
 		cfg.GetPlacementPolicy = func(ctx context.Context, accountID, operatorID string) (placement.Policy, error) {
@@ -1297,21 +1311,56 @@ func serve() int {
 			}
 			return err
 		}
-		cfg.SetAccountPlan = func(ctx context.Context, accountID, plan string, limits map[string]int64, features []string) error {
-			err := st.SetAccountPlan(ctx, accountID, plan, limits, features)
-			if errors.Is(err, store.ErrAccountNotFound) {
-				return server.ErrNotFound
+		toPlanSnapshot := func(snapshot store.AccountPlanSnapshot) server.PlanSnapshotRecord {
+			return server.PlanSnapshotRecord{
+				AccountID: snapshot.AccountID, Revision: snapshot.Revision,
+				SnapshotHash: snapshot.Hash, Plan: snapshot.Plan,
+				Limits: snapshot.Limits, Policies: snapshot.Policies,
+				Features: snapshot.Features, AppliedAt: snapshot.AppliedAt,
 			}
-			return err
+		}
+		cfg.SetAccountPlan = func(
+			ctx context.Context,
+			accountID string,
+			revision int64,
+			snapshotHash, plan string,
+			limits, policies map[string]int64,
+			features []string,
+		) (server.PlanSnapshotRecord, error) {
+			snapshot, err := st.SetAccountPlan(
+				ctx, accountID, revision, snapshotHash, plan, limits, policies, features)
+			switch {
+			case errors.Is(err, store.ErrAccountNotFound):
+				return server.PlanSnapshotRecord{}, server.ErrNotFound
+			case errors.Is(err, store.ErrPlanSnapshotStale):
+				return server.PlanSnapshotRecord{}, server.ErrConflict
+			case errors.Is(err, store.ErrPlanSnapshotInvalid),
+				errors.Is(err, store.ErrPlanPolicyInvalid):
+				return server.PlanSnapshotRecord{}, server.ErrInvalidPlanSnapshot
+			case err != nil:
+				return server.PlanSnapshotRecord{}, err
+			default:
+				return toPlanSnapshot(snapshot), nil
+			}
+		}
+		cfg.GetAccountPlan = func(ctx context.Context, accountID string) (server.PlanSnapshotRecord, error) {
+			snapshot, err := st.GetAccountPlan(ctx, accountID)
+			if errors.Is(err, store.ErrAccountNotFound) {
+				return server.PlanSnapshotRecord{}, server.ErrNotFound
+			}
+			if err != nil {
+				return server.PlanSnapshotRecord{}, err
+			}
+			return toPlanSnapshot(snapshot), nil
 		}
 		// Surface the deployment account's applied plan in /v1/capabilities.
 		if acctID := cfg.AccountID; acctID != "" {
-			cfg.PlanInfo = func(ctx context.Context) (string, map[string]int64, []string, error) {
+			cfg.PlanInfo = func(ctx context.Context) (string, map[string]int64, map[string]int64, []string, error) {
 				a, err := st.GetAccount(ctx, acctID)
 				if err != nil {
-					return "", nil, nil, err
+					return "", nil, nil, nil, err
 				}
-				return a.Plan, a.PlanLimits, a.PlanFeatures, nil
+				return a.Plan, a.PlanLimits, a.PlanPolicies, a.PlanFeatures, nil
 			}
 		}
 		if pt := strings.TrimSpace(os.Getenv("WITSELF_PROVISION_TOKEN")); pt != "" {
@@ -1442,6 +1491,45 @@ func serve() int {
 			fmt.Fprintf(os.Stderr, "witself-server: avatar style rollout worker enabled (batch %d, interval %s)\n",
 				avatarRolloutConfig.BatchSize, avatarRolloutConfig.Interval)
 		}
+		if transcriptRetentionEnabled {
+			workerCtx, cancelWorker := context.WithCancel(ctx)
+			workerDone := make(chan error, 1)
+			go func() {
+				workerDone <- st.RunTranscriptRetentionWorker(
+					workerCtx,
+					transcriptRetentionConfig,
+					func(result store.TranscriptRetentionBatchResult) {
+						if result.Scanned == 0 && result.Eligible == 0 && result.Deleted == 0 &&
+							result.DeferredEvidence == 0 &&
+							result.DeferredCuration == 0 &&
+							result.ReleasedCurationInputs == 0 &&
+							result.DeletedCurationCursors == 0 {
+							return
+						}
+						fmt.Fprintf(os.Stderr,
+							"witself-server: transcript retention: mode=%s scanned=%d skipped_locked=%d scan_capped=%t eligible=%d eligible_scan_capped=%t deleted=%d deferred_evidence=%d deferred_curation=%d deferred_scan_capped=%t released_curation_inputs=%d deleted_curation_cursors=%d\n",
+							transcriptRetentionConfig.Mode, result.Scanned,
+							result.SkippedLocked, result.ScanCapped, result.Eligible,
+							result.EligibleScanCapped, result.Deleted, result.DeferredEvidence,
+							result.DeferredCuration, result.DeferredScanCapped,
+							result.ReleasedCurationInputs, result.DeletedCurationCursors)
+					},
+					func(err error) {
+						fmt.Fprintf(os.Stderr, "witself-server: transcript retention: %v\n", err)
+					},
+				)
+			}()
+			stopTranscriptRetentionWorker = func() {
+				cancelWorker()
+				if err := <-workerDone; err != nil {
+					fmt.Fprintf(os.Stderr, "witself-server: transcript retention stopped: %v\n", err)
+				}
+			}
+			fmt.Fprintf(os.Stderr,
+				"witself-server: transcript retention worker enabled (mode %s, batch %d, interval %s)\n",
+				transcriptRetentionConfig.Mode, transcriptRetentionConfig.BatchSize,
+				transcriptRetentionConfig.Interval)
+		}
 		fmt.Fprintf(os.Stderr, "witself-server: avatar payload compaction enabled=%t\n",
 			avatarPayloadCompactionEnabled)
 		fmt.Fprintf(os.Stderr, "witself-server: migrated; account %s, root operator %s ready; /readyz gates on it\n", acctID, oprID)
@@ -1456,6 +1544,9 @@ func serve() int {
 	runErr := server.Run(ctx, cfg)
 	if stopAvatarRolloutWorker != nil {
 		stopAvatarRolloutWorker()
+	}
+	if stopTranscriptRetentionWorker != nil {
+		stopTranscriptRetentionWorker()
 	}
 	if runErr != nil {
 		fmt.Fprintf(os.Stderr, "witself-server: %v\n", runErr)
@@ -1476,6 +1567,45 @@ func avatarPayloadCompactionEnabledFromEnv() (bool, error) {
 			avatarPayloadCompactionEnabledEnv, err)
 	}
 	return enabled, nil
+}
+
+func transcriptRetentionConfigFromEnv() (bool, store.TranscriptRetentionWorkerConfig, error) {
+	enabled := false
+	if raw, ok := os.LookupEnv(transcriptRetentionEnabledEnv); ok {
+		parsed, err := strconv.ParseBool(strings.TrimSpace(raw))
+		if err != nil {
+			return false, store.TranscriptRetentionWorkerConfig{},
+				fmt.Errorf("%s must be a boolean: %w", transcriptRetentionEnabledEnv, err)
+		}
+		enabled = parsed
+	}
+	cfg := store.DefaultTranscriptRetentionWorkerConfig()
+	if raw, ok := os.LookupEnv(transcriptRetentionModeEnv); ok {
+		cfg.Mode = store.TranscriptRetentionMode(strings.ToLower(strings.TrimSpace(raw)))
+	}
+	if raw, ok := os.LookupEnv(transcriptRetentionBatchSizeEnv); ok {
+		parsed, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil {
+			return false, store.TranscriptRetentionWorkerConfig{},
+				fmt.Errorf("%s must be an integer: %w", transcriptRetentionBatchSizeEnv, err)
+		}
+		cfg.BatchSize = parsed
+	}
+	if raw, ok := os.LookupEnv(transcriptRetentionIntervalEnv); ok {
+		parsed, err := time.ParseDuration(strings.TrimSpace(raw))
+		if err != nil {
+			return false, store.TranscriptRetentionWorkerConfig{},
+				fmt.Errorf("%s must be a duration: %w", transcriptRetentionIntervalEnv, err)
+		}
+		cfg.Interval = parsed
+	}
+	if err := cfg.Validate(); err != nil {
+		return false, store.TranscriptRetentionWorkerConfig{},
+			fmt.Errorf("%s/%s/%s transcript retention configuration: %w",
+				transcriptRetentionModeEnv, transcriptRetentionBatchSizeEnv,
+				transcriptRetentionIntervalEnv, err)
+	}
+	return enabled, cfg, nil
 }
 
 func avatarStyleRolloutConfigFromEnv() (bool, store.AvatarStyleRolloutWorkerConfig, error) {

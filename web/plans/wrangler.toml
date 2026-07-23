@@ -1,5 +1,6 @@
 # Cloudflare Worker serving the public Witself plan catalog (plans.json).
-# Deploy: npx wrangler deploy   (from this directory; CLOUDFLARE_API_TOKEN auth)
+# Deploy from infra/cloudflare/control-plane with its committed Wrangler lock:
+#   npm ci && npm run deploy:plans
 name = "witself-plans"
 main = "index.js"
 compatibility_date = "2026-06-01"

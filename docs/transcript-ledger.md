@@ -309,7 +309,11 @@ owned by Stripe or another billing provider.
   ids, titles, and transcript metadata. Generated database ids and storage
   engine overhead are excluded.
 
-Usage events and rollups move inside the account archive. Import restores them
+Usage events and rollups move inside the account archive. They are immutable,
+value-free accounting history and survive expiration of the referenced
+transcript payload. Import therefore accepts a well-formed transcript subject
+that retention enforcement deleted, while still requiring an exact agent/realm
+match whenever that transcript is present in the archive. Import restores usage
 verbatim and does not meter the restore itself. `GET /v1/usage` and
 `witself usage` expose only the bearer-token agent's own rollups in this slice;
 realm/account aggregation and billing conversion remain deferred.
@@ -374,11 +378,18 @@ the transcript or promotes the candidate to canonical truth. Semantic
 interpretation stays in the supported agent integration, so transcript capture
 remains provider-neutral and the service gains no model dependency.
 
-Transcript rows are included in the account's logical export/import stream in
-foreign-key order. Bodies and payloads must never appear in logs, metrics,
-errors, or account-event metadata.
+Transcript rows physically present in the account snapshot are included in the
+logical export/import stream in foreign-key order. Export never doubles as
+retention enforcement: an expired conversation not yet reached by the bounded
+worker moves with the account, including while the worker is disabled or in
+preview. Once enforcement deletes an unheld conversation, later archives omit
+the already-absent conversation and entries; terminal curation inputs retain
+value-free counts and intervals as detached metadata. Bodies and payloads must
+never appear in logs, metrics, errors, or account-event metadata.
 
-The first slice has no edit or delete endpoint: entries remain immutable and
-are retained with the account. Configurable retention, legal holds, redaction,
-and an explicitly audited deletion workflow are later enterprise-policy work,
-not implicit side effects of reading or moving an account.
+Entries have no user-facing edit or delete endpoint. The account-level
+retention worker may delete an expired whole conversation under the resolved
+control-plane policy; it never truncates individual entries, and evidence or
+curation provenance holds defer deletion. See
+[transcript-retention.md](transcript-retention.md) for tier defaults, admin
+exceptions, worker bounds, and the separation from memory retention.

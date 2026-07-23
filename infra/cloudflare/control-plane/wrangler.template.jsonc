@@ -7,7 +7,9 @@
 //   Fine for the cold path (signup/webhooks/registry). The future hot path
 //   (account->cell directory reads) must be answered IN this Worker from a KV
 //   binding and never reach the container.
-// - Deploy: npm install && npx wrangler deploy (CLOUDFLARE_API_TOKEN in env).
+// - Deploy only through `npm ci && npm run deploy`. The renderer requires a
+//   clean, exactly tagged checkout and injects immutable release metadata into
+//   the container build before Wrangler runs.
 {
   "name": "witself-control-plane",
   "main": "src/index.js",
@@ -20,6 +22,11 @@
       "class_name": "Backend",
       "image": "../../../images/witself-control-plane/Dockerfile",
       "image_build_context": "../../..",
+      "image_vars": {
+        "VERSION": "__WITSELF_VERSION__",
+        "COMMIT": "__WITSELF_COMMIT__",
+        "DATE": "__WITSELF_DATE__"
+      },
       "instance_type": "lite",
       "max_instances": 2
     }
@@ -54,9 +61,10 @@
       "custom_domain": true
     }
   ],
-  // Fleet maintenance tick. The pending-account reaper no-ops unless
-  // config:reaper enables it; the placement runner no-ops unless
-  // config:placement_runner enables it.
+  // Fleet maintenance tick. The pending-account reaper and placement runner
+  // keep their own opt-in gates. Plan lifecycle also no-ops unless its explicit
+  // runtime gate and private bridge credential are configured; when enabled it
+  // wakes the scale-to-zero Go container for one bounded, KV-cursor-backed page.
   "triggers": {
     "crons": ["*/5 * * * *"]
   },
@@ -110,4 +118,15 @@
   "observability": {
     "enabled": true
   }
+  // Runtime-only Worker secrets used by the Go plan lifecycle are deliberately
+  // absent from this file. Render the release config first, then configure them
+  // with `npm run secret:put -- NAME`:
+  // INTERNAL_BRIDGE_TOKEN (required), CP_PLAN_LIFECYCLE_ENABLED=true (only
+  // when intentionally activating lifecycle), CP_R2_ENDPOINT, CP_R2_BUCKET,
+  // CP_R2_ACCESS_KEY, CP_R2_SECRET_KEY, and optionally CP_R2_PREFIX. To enable
+  // Stripe, also set CP_BILLING_PROVIDER=stripe, CP_STRIPE_SECRET_KEY, and
+  // CP_STRIPE_WEBHOOK_SECRET; CP_STRIPE_SUCCESS_URL and CP_STRIPE_CANCEL_URL
+  // are optional. The Backend class explicitly maps only these bindings to
+  // WITSELF_CP_* container env vars; the ARCHIVES R2 binding itself remains
+  // Worker-only.
 }

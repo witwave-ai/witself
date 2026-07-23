@@ -2,6 +2,7 @@ package client_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -16,8 +17,8 @@ import (
 
 type noopApplier struct{}
 
-func (noopApplier) Apply(context.Context, string, string, map[string]int64, []string) error {
-	return nil
+func (noopApplier) Apply(_ context.Context, _ string, request lifecycle.ApplyRequest) (lifecycle.ApplyAck, error) {
+	return lifecycle.ApplyAck{Revision: request.Revision, Hash: request.Hash}, nil
 }
 
 // TestCLIPlanFlowAgainstCPServer wires the CP HTTP server, then drives the
@@ -87,5 +88,72 @@ func TestCLIPlanFlowAgainstCPServer(t *testing.T) {
 	if _, err := client.UpgradePlan(ctx, srv.URL, "acct_1", "good", "standard", ""); err == nil ||
 		err.Error() == "" {
 		t.Fatalf("re-upgrade to same plan = %v; want the refusal message", err)
+	}
+}
+
+func TestResolveAccountViaBridgeRequiresSecureCellEndpoint(t *testing.T) {
+	tests := []struct {
+		name     string
+		endpoint string
+		want     string
+		wantErr  bool
+	}{
+		{
+			name:     "https",
+			endpoint: "https://cell.example.invalid/",
+			want:     "https://cell.example.invalid",
+		},
+		{name: "plaintext", endpoint: "http://cell.example.invalid", wantErr: true},
+		{
+			name:     "userinfo",
+			endpoint: "https://user:secret@cell.example.invalid",
+			wantErr:  true,
+		},
+		{
+			name:     "query",
+			endpoint: "https://cell.example.invalid?token=secret",
+			wantErr:  true,
+		},
+		{
+			name:     "fragment",
+			endpoint: "https://cell.example.invalid#fragment",
+			wantErr:  true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet ||
+					r.URL.Path != "/v1/internal/accounts/acct_1:resolve" {
+					t.Fatalf("request = %s %s", r.Method, r.URL.RequestURI())
+				}
+				if got := r.Header.Get("Authorization"); got != "Bearer bridge-secret" {
+					t.Fatalf("Authorization = %q", got)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if err := json.NewEncoder(w).Encode(map[string]string{
+					"schema_version": "witself.v0",
+					"account_id":     "acct_1",
+					"state":          "active",
+					"cell":           "cell-a",
+					"endpoint":       tc.endpoint,
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			got, err := client.ResolveAccountViaBridge(
+				context.Background(), srv.URL, "bridge-secret", "acct_1")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("ResolveAccountViaBridge endpoint %q = %q; want error", tc.endpoint, got)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("ResolveAccountViaBridge = %q, %v; want %q", got, err, tc.want)
+			}
+		})
 	}
 }

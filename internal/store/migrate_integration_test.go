@@ -1635,6 +1635,131 @@ func TestMigration41Postgres(t *testing.T) {
 	})
 }
 
+func TestMigrateSerializesReplicasWithAdvisoryLockPostgres(t *testing.T) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+
+	first, dsn := newMigrationTestStore(t, baseDSN)
+	migrationTestUpTo(t, dsn, 61)
+
+	second, err := Open(context.Background(), dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(second.Close)
+	if err := second.Ping(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	gateDB := migrationTestSQLDB(t, dsn)
+	t.Cleanup(func() { _ = gateDB.Close() })
+	gateConn, err := gateDB.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = gateConn.Close() })
+	if err := acquireMigrationAdvisoryLock(context.Background(), gateConn); err != nil {
+		t.Fatalf("acquire test migration gate: %v", err)
+	}
+	gateHeld := true
+	t.Cleanup(func() {
+		if gateHeld {
+			_ = releaseMigrationAdvisoryLock(context.Background(), gateConn)
+		}
+	})
+
+	started := make(chan struct{}, 2)
+	results := make(chan error, 2)
+	run := func(st *Store) {
+		started <- struct{}{}
+		results <- st.Migrate()
+	}
+	go run(first)
+	go run(second)
+	<-started
+	<-started
+
+	var completed []error
+	select {
+	case err := <-results:
+		completed = append(completed, err)
+		t.Errorf("Migrate returned while another session held the migration advisory lock: %v", err)
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	if err := releaseMigrationAdvisoryLock(context.Background(), gateConn); err != nil {
+		t.Fatalf("release test migration gate: %v", err)
+	}
+	gateHeld = false
+
+	timeout := time.NewTimer(30 * time.Second)
+	defer timeout.Stop()
+	for len(completed) < 2 {
+		select {
+		case err := <-results:
+			completed = append(completed, err)
+		case <-timeout.C:
+			t.Fatalf("timed out waiting for concurrent Migrate calls; completed %d of 2", len(completed))
+		}
+	}
+	for i, err := range completed {
+		if err != nil {
+			t.Errorf("concurrent Migrate call %d: %v", i+1, err)
+		}
+	}
+	assertMigrationTestVersion(t, dsn, int64(SchemaVersion()))
+}
+
+func TestTranscriptRetentionCheckUsesStagedValidationPostgres(t *testing.T) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	st, dsn := newMigrationTestStore(t, baseDSN)
+	const (
+		legacyConstraint = "memory_curation_run_inputs_check"
+		stagedConstraint = "memory_curation_run_inputs_retention_check"
+	)
+	assertConstraint := func(name string, wantExists, wantValidated bool) {
+		t.Helper()
+		var exists, validated bool
+		if err := st.pool.QueryRow(context.Background(), `
+			SELECT count(*) = 1,
+			       COALESCE(bool_and(convalidated), false)
+			  FROM pg_constraint
+			 WHERE conrelid=to_regclass('memory_curation_run_inputs')
+			   AND conname=$1`, name).Scan(&exists, &validated); err != nil {
+			t.Fatal(err)
+		}
+		if exists != wantExists || validated != wantValidated {
+			t.Fatalf("constraint %s = exists:%t validated:%t; want %t/%t",
+				name, exists, validated, wantExists, wantValidated)
+		}
+	}
+
+	migrationTestUpTo(t, dsn, 61)
+	assertConstraint(legacyConstraint, true, true)
+	assertConstraint(stagedConstraint, false, false)
+
+	// 0062 adds the widened check without scanning existing rows under the
+	// metadata lock; the legacy validated constraint remains authoritative.
+	migrationTestUpTo(t, dsn, 62)
+	assertConstraint(legacyConstraint, true, true)
+	assertConstraint(stagedConstraint, true, false)
+
+	// 0063 validates with PostgreSQL's lower-lock validation path.
+	migrationTestUpTo(t, dsn, 63)
+	assertConstraint(legacyConstraint, true, true)
+	assertConstraint(stagedConstraint, true, true)
+
+	// 0064 is only a brief metadata drop/rename after both shapes are valid.
+	migrationTestUpTo(t, dsn, 64)
+	assertConstraint(legacyConstraint, true, true)
+	assertConstraint(stagedConstraint, false, false)
+}
+
 func insertMigrationTestMemoryPrincipals(t *testing.T, st *Store) {
 	t.Helper()
 	ctx := context.Background()

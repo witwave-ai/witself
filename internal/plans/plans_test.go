@@ -24,6 +24,9 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 	if free.Limits["agents"] != 25 || free.Limits["realms"] != 1 {
 		t.Fatalf("free limits = %v; want 25 agents / 1 realm", free.Limits)
 	}
+	if free.Name != "Personal" || free.Policies[TranscriptRetentionDaysPolicy] != 30 {
+		t.Fatalf("free = %+v; want Personal with 30-day transcript retention", free)
+	}
 	if !free.HasFeature("memory") || !free.HasFeature("facts") || free.HasFeature("secrets") {
 		t.Fatalf("free features = %v; want memory+facts, no secrets", free.Features)
 	}
@@ -35,12 +38,27 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 	if !std.HasFeature("secrets") || !std.HasFeature("collaboration") || !std.HasFeature("support") {
 		t.Fatalf("standard features = %v; want secrets+collaboration+support", std.Features)
 	}
+	if std.Name != "Professional" || std.Policies[TranscriptRetentionDaysPolicy] != 90 {
+		t.Fatalf("standard = %+v; want Professional with 90-day transcript retention", std)
+	}
 
-	// Team and Enterprise: priced but not purchasable yet.
-	for _, id := range []string{"team", "enterprise"} {
-		p, ok := c.Get(id)
-		if !ok || p.Available || p.Purchasable() || !p.Paid() || !p.UsageBilled {
-			t.Fatalf("%s = %+v; want priced + usage-billed but not available", id, p)
+	team, ok := c.Get("team")
+	if !ok || team.Available || team.Purchasable() || !team.Paid() || !team.UsageBilled {
+		t.Fatalf("team = %+v; want priced + usage-billed but not available", team)
+	}
+	if team.Policies[TranscriptRetentionDaysPolicy] != 365 {
+		t.Fatalf("team policies = %v; want 365-day transcript retention", team.Policies)
+	}
+	enterprise, _ := c.Get("enterprise")
+	if enterprise.Available || enterprise.Purchasable() || enterprise.Paid() || !enterprise.UsageBilled {
+		t.Fatalf("enterprise = %+v; want custom/unpriced + usage-billed but not available", enterprise)
+	}
+	if _, capped := enterprise.Policies[TranscriptRetentionDaysPolicy]; capped {
+		t.Fatalf("enterprise policies = %v; want indefinite transcript retention", enterprise.Policies)
+	}
+	for _, feature := range team.Features {
+		if !enterprise.HasFeature(feature) {
+			t.Fatalf("enterprise features = %v; missing Team feature %q", enterprise.Features, feature)
 		}
 	}
 
@@ -64,6 +82,8 @@ func TestParseValidation(t *testing.T) {
 		{"missing free", `{"schema_version":"witself.plans.v0","plans":[{"id":"standard","price_monthly":30,"available":true}]}`, `missing the "free" plan`},
 		{"paid free", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","price_monthly":5,"available":true}]}`, "must cost 0"},
 		{"unavailable free", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":false}]}`, "must be available"},
+		{"zero retention", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"policies":{"transcript_retention_days":0}}]}`, "between 1"},
+		{"unknown policy", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"policies":{"transcript_retention_dayz":30}}]}`, "unknown policy"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

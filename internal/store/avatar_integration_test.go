@@ -948,6 +948,7 @@ func TestAvatarMigrationsBackfillStateAndAddStyleRolloutsPostgres(t *testing.T) 
 	assertMigrationTestTable(t, st, "avatar_style_rollout_jobs", true)
 	assertMigrationTestColumn(t, st, "agent_avatar_profiles", "style_revision", true)
 	assertMigrationTestIndex(t, st, "agent_avatar_profiles", "agent_avatar_profiles_by_style_revision", true)
+	assertMigrationTestColumn(t, st, "accounts", "plan_policies", true)
 	view, err := st.GetAvatar(ctx, Principal{Kind: PrincipalAgent,
 		ID: "agent_memory_owner", AccountID: "acc_memory_trigger",
 		RealmID: "realm_memory_trigger", AgentName: "owner"})
@@ -962,6 +963,33 @@ func TestAvatarMigrationsBackfillStateAndAddStyleRolloutsPostgres(t *testing.T) 
 		view.Active.LockedLayersSHA256 == "" {
 		t.Fatalf("backfilled avatar = %#v", view)
 	}
+	if err := migrationTestDown(t, dsn, false); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, 64)
+	assertMigrationTestColumn(t, st, "accounts", "plan_policies", true)
+	assertMigrationTestColumn(t, st, "memory_curation_run_inputs", "transcript_pruned_at", true)
+	assertMigrationTestIndex(t, st, "memory_curation_run_inputs",
+		"memory_curation_run_inputs_by_transcript_cursor", false)
+	if err := migrationTestDown(t, dsn, false); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, 63)
+	assertMigrationTestColumn(t, st, "accounts", "plan_policies", true)
+	if err := migrationTestDown(t, dsn, false); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, 62)
+	assertMigrationTestColumn(t, st, "accounts", "plan_policies", true)
+	if err := migrationTestDown(t, dsn, false); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, 61)
+	assertMigrationTestColumn(t, st, "accounts", "plan_policies", false)
+	assertMigrationTestColumn(t, st, "memory_curation_run_inputs", "transcript_pruned_at", false)
+	assertMigrationTestTable(t, st, "transcript_retention_sweep_state", false)
+	assertMigrationTestTable(t, st, "transcript_retention_account_scan_state", false)
+	assertMigrationTestTable(t, st, "agent_email_retry_canary_arms", true)
 	if err := migrationTestDown(t, dsn, false); err != nil {
 		t.Fatal(err)
 	}

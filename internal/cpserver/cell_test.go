@@ -3,12 +3,13 @@ package cpserver
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/witwave-ai/witself/internal/billing/lifecycle"
 )
 
 // fakeCell stands in for a witself-server: it exposes /v1/accounts/{id}:plan
@@ -53,17 +54,29 @@ func (c *fakeCell) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		accountID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/accounts/"), ":plan")
+		if r.Method == http.MethodGet {
+			c.mu.Lock()
+			body, ok := c.applied[accountID]
+			c.mu.Unlock()
+			if !ok {
+				http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(body)
+			return
+		}
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, `{"error":"decode"}`, http.StatusBadRequest)
 			return
 		}
-		body["_account"] = accountID
+		body["account_id"] = accountID
+		body["applied_at"] = nil
 		c.mu.Lock()
 		c.applied[accountID] = body
 		c.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, `{"schema_version":"witself.v0"}`)
+		_ = json.NewEncoder(w).Encode(body)
 		return
 	}
 
@@ -82,9 +95,13 @@ func (c *fakeCell) snapshot(accountID string) map[string]any {
 func TestCellApplierPushesSnapshot(t *testing.T) {
 	cell, url := newFakeCell(t, "witself_prv_test", nil)
 	applier := NewCellApplier(StaticCell(url, "witself_prv_test"))
-	err := applier.Apply(context.Background(), "acct_1", "standard",
-		map[string]int64{"agents": 250, "realms": 10},
-		[]string{"memory", "facts", "secrets"})
+	request := lifecycle.ApplyRequest{Revision: 7, PlanSnapshot: lifecycle.PlanSnapshot{
+		Plan: "standard", Hash: strings.Repeat("a", 64),
+		Limits:   map[string]int64{"agents": 250, "realms": 10},
+		Policies: map[string]int64{"transcript_retention_days": 90},
+		Features: []string{"memory", "facts", "secrets"},
+	}}
+	_, err := applier.Apply(context.Background(), "acct_1", request)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -98,6 +115,91 @@ func TestCellApplierPushesSnapshot(t *testing.T) {
 	if feats, ok := snap["features"].([]any); !ok || feats[2] != "secrets" {
 		t.Fatalf("features missing/wrong: %v", snap["features"])
 	}
+	if policies, ok := snap["policies"].(map[string]any); !ok || policies["transcript_retention_days"].(float64) != 90 {
+		t.Fatalf("policies missing/wrong: %v", snap["policies"])
+	}
+	reader, ok := applier.(lifecycle.ApplyFenceReader)
+	if !ok {
+		t.Fatal("production cell applier has no fence read side")
+	}
+	fence, err := reader.ReadApplyFence(context.Background(), "acct_1")
+	if err != nil || fence.Revision != 7 || fence.Hash != request.Hash {
+		t.Fatalf("ReadApplyFence = %+v, %v", fence, err)
+	}
+}
+
+func TestBridgeApplierReadsValueMinimalFence(t *testing.T) {
+	hash := strings.Repeat("b", 64)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet ||
+			r.URL.Path != "/v1/internal/accounts/acct_1:apply-plan" ||
+			r.Header.Get("Authorization") != "Bearer bridge-secret" {
+			http.Error(w, `{"error":"bad bridge request"}`, http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"account_id":    "acct_1",
+			"revision":      41,
+			"snapshot_hash": hash,
+			// Payload is present because this relays the cell GET, but the
+			// bridge applier must return only the fence.
+			"plan":     "stale-cell-plan",
+			"limits":   map[string]int64{"agents": 999},
+			"policies": map[string]int64{"transcript_retention_days": 999},
+			"features": []string{"stale-cell-feature"},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	applier := NewBridgeApplier(srv.URL, "bridge-secret")
+	reader, ok := applier.(lifecycle.ApplyFenceReader)
+	if !ok {
+		t.Fatal("production bridge applier has no fence read side")
+	}
+	fence, err := reader.ReadApplyFence(context.Background(), "acct_1")
+	if err != nil || fence.Revision != 41 || fence.Hash != hash {
+		t.Fatalf("ReadApplyFence = %+v, %v", fence, err)
+	}
+}
+
+func TestBridgeAccountExistsChecksCellFence(t *testing.T) {
+	hash := strings.Repeat("c", 64)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet ||
+			r.Header.Get("Authorization") != "Bearer bridge-secret" {
+			http.Error(w, `{"error":"bad bridge request"}`, http.StatusBadRequest)
+			return
+		}
+		switch r.URL.Path {
+		case "/v1/internal/accounts/acct_present:apply-plan":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"account_id":    "acct_present",
+				"revision":      9,
+				"snapshot_hash": hash,
+			})
+		case "/v1/internal/accounts/acct_missing:apply-plan":
+			http.Error(w, `{"error":"account not found"}`, http.StatusNotFound)
+		case "/v1/internal/accounts/acct_unavailable:apply-plan":
+			http.Error(w, `{"error":"cell unavailable"}`, http.StatusBadGateway)
+		default:
+			http.Error(w, `{"error":"unexpected bridge path"}`, http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	exists := BridgeAccountExists(srv.URL, "bridge-secret")
+	ctx := context.Background()
+	ok, err := exists(ctx, "acct_present")
+	if err != nil || !ok {
+		t.Fatalf("present account = (%v, %v), want (true, nil)", ok, err)
+	}
+	ok, err = exists(ctx, "acct_missing")
+	if err != nil || ok {
+		t.Fatalf("missing account = (%v, %v), want (false, nil)", ok, err)
+	}
+	if _, err := exists(ctx, "acct_unavailable"); err == nil {
+		t.Fatal("cell/bridge failure must propagate instead of reading as absent")
+	}
 }
 
 func TestCellApplierPropagatesErrors(t *testing.T) {
@@ -105,8 +207,30 @@ func TestCellApplierPropagatesErrors(t *testing.T) {
 	// Wrong provision token: the cell 401s, the Applier fails, Reconcile
 	// will retry — Applied stays behind Entitled, truthfully.
 	applier := NewCellApplier(StaticCell(url, "WRONG"))
-	if err := applier.Apply(context.Background(), "acct_1", "standard", nil, nil); err == nil {
+	request := lifecycle.ApplyRequest{Revision: 1, PlanSnapshot: lifecycle.PlanSnapshot{
+		Plan: "standard", Hash: strings.Repeat("a", 64),
+		Limits: map[string]int64{}, Policies: map[string]int64{}, Features: []string{},
+	}}
+	if _, err := applier.Apply(context.Background(), "acct_1", request); err == nil {
 		t.Fatal("bad provision token must fail; Reconcile retries — never silently swallow")
+	}
+}
+
+func TestCellApplierRejectsLegacyCellAcknowledgement(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// An older cell ignores the new policies/revision fields and returns
+		// its historical generic success document. The control plane must not
+		// record the new snapshot as applied.
+		_, _ = w.Write([]byte(`{"schema_version":"witself.v0"}`))
+	}))
+	t.Cleanup(srv.Close)
+	applier := NewCellApplier(StaticCell(srv.URL, "witself_prv_test"))
+	request := lifecycle.ApplyRequest{Revision: 1, PlanSnapshot: lifecycle.PlanSnapshot{
+		Plan: "free", Hash: strings.Repeat("a", 64),
+		Limits: map[string]int64{}, Policies: map[string]int64{}, Features: []string{},
+	}}
+	if _, err := applier.Apply(context.Background(), "acct_1", request); err == nil {
+		t.Fatal("legacy generic success was accepted as an exact snapshot acknowledgement")
 	}
 }
 

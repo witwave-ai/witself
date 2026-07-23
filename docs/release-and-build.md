@@ -47,6 +47,27 @@ artifact exists, roll only the intended canary or wave with
 application is actually installed and healthy. See
 [Deployment Cells](deployment-cells.md) and [`.gitops/README.md`](../.gitops/README.md).
 
+The public plan Worker and the Cloudflare control-plane Worker/container are
+also separate deployments. Deploy both from the same clean, exactly tagged
+checkout only after its release workflow succeeds:
+
+```sh
+cd infra/cloudflare/control-plane
+npm ci
+npm run deploy:plans
+npm run deploy
+```
+
+Both commands use the committed Wrangler lock. The control-plane renderer
+injects the release version, full commit, and commit timestamp as Docker build
+arguments, and `npm run deploy` polls `/v1/version` until all four identity
+fields match. The renderer rejects a dirty checkout and a HEAD without exactly
+one `vMAJOR.MINOR.PATCH` tag, so a local source build cannot silently identify
+itself as `dev`/`none` in production. Feature-specific runtime secrets and
+activation ordering remain separate rollout gates; transcript retention's
+disabled-to-preview sequence is in
+[Transcript Retention](transcript-retention.md#control-plane-lifecycle-rollout).
+
 The current Helm chart does not render a migration Job. With a database DSN,
 `witself-server serve` applies its embedded Goose migrations before opening the
 service; a migration failure prevents that process from serving. A rollout is

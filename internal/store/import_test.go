@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/witwave-ai/witself/internal/plans"
 )
 
 // TestValidateAndRecordEnforcesAccountScoping pins the row-content boundary:
@@ -282,6 +284,43 @@ func TestValidateAndRecordEnforcesAccountScoping(t *testing.T) {
 				ic.transcripts["trn_1"] = transcriptImportScope{realmID: "rlm_ok", ownerAgentID: "agt_ok"}
 			},
 			wantOK: true,
+		},
+		{
+			name:  "transcript usage with a retention-pruned subject is accepted",
+			table: "usage_events",
+			row: map[string]any{
+				"id": "usg_retained", "account_id": acc,
+				"realm_id": "rlm_ok", "agent_id": "agt_ok",
+				"dimension": "transcript_entry_write", "quantity": float64(2), "unit": "entry",
+				"subject_type": "transcript", "subject_id": "trn_aaaaaaaaaaaaaaaa",
+				"idempotency_key": "write:pruned",
+			},
+			setup: func(ic *importCtx) {
+				ic.realms["rlm_ok"] = true
+				ic.agents["agt_ok"] = true
+				ic.agentRealms["agt_ok"] = "rlm_ok"
+			},
+			wantOK: true,
+		},
+		{
+			name:  "transcript usage cannot graft a present foreign transcript",
+			table: "usage_events",
+			row: map[string]any{
+				"id": "usg_present_foreign", "account_id": acc,
+				"realm_id": "rlm_ok", "agent_id": "agt_ok",
+				"dimension": "transcript_entry_read", "quantity": float64(1), "unit": "entry",
+				"subject_type": "transcript", "subject_id": "trn_bbbbbbbbbbbbbbbb",
+				"idempotency_key": "read:present-foreign",
+			},
+			setup: func(ic *importCtx) {
+				ic.realms["rlm_ok"] = true
+				ic.agents["agt_ok"] = true
+				ic.agentRealms["agt_ok"] = "rlm_ok"
+				ic.transcripts["trn_bbbbbbbbbbbbbbbb"] = transcriptImportScope{
+					realmID: "rlm_other", ownerAgentID: "agt_other",
+				}
+			},
+			want: "does not belong to its agent scope",
 		},
 		{
 			name:  "transcript usage cannot graft a foreign transcript",
@@ -906,6 +945,15 @@ func (r *recordingExec) Exec(_ context.Context, sql string, _ ...any) (pgconn.Co
 // 0017 fall back to the column defaults.
 func TestValidateAndRecordPlanShapes(t *testing.T) {
 	const acc = "acc_target"
+	fencedHash, err := plans.SnapshotHash(
+		"standard",
+		map[string]int64{"agents": 250, "realms": 10},
+		map[string]int64{plans.TranscriptRetentionDaysPolicy: 90},
+		[]string{"memory", "facts", "secrets"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tests := []struct {
 		name   string
 		row    map[string]any
@@ -918,6 +966,30 @@ func TestValidateAndRecordPlanShapes(t *testing.T) {
 				"plan_limits":   map[string]any{"agents": float64(250), "realms": float64(10)},
 				"plan_features": []any{"memory", "facts", "secrets"}},
 			wantOK: true,
+		},
+		{
+			name: "matching fenced snapshot is accepted",
+			row: map[string]any{
+				"id": acc, "plan": "standard",
+				"plan_limits":            map[string]any{"agents": float64(250), "realms": float64(10)},
+				"plan_policies":          map[string]any{plans.TranscriptRetentionDaysPolicy: float64(90)},
+				"plan_features":          []any{"memory", "facts", "secrets"},
+				"plan_snapshot_revision": float64(7),
+				"plan_snapshot_hash":     fencedHash,
+			},
+			wantOK: true,
+		},
+		{
+			name: "fenced snapshot hash must match payload",
+			row: map[string]any{
+				"id": acc, "plan": "standard",
+				"plan_limits":            map[string]any{"agents": float64(250), "realms": float64(10)},
+				"plan_policies":          map[string]any{plans.TranscriptRetentionDaysPolicy: float64(30)},
+				"plan_features":          []any{"memory", "facts", "secrets"},
+				"plan_snapshot_revision": float64(7),
+				"plan_snapshot_hash":     fencedHash,
+			},
+			wantOK: false, want: "snapshot hash does not match payload",
 		},
 		{
 			name:   "absent plan keys are accepted (pre-0017 archives)",

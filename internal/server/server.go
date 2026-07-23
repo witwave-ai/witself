@@ -219,14 +219,25 @@ type Config struct {
 	// computed — it never consults a plan catalog, so comped and
 	// custom-limit accounts need nothing special here. A missing limits key
 	// means unlimited. ErrNotFound for unknown accounts.
-	SetAccountPlan func(ctx context.Context, accountID, plan string, limits map[string]int64, features []string) error
+	SetAccountPlan func(
+		ctx context.Context,
+		accountID string,
+		revision int64,
+		snapshotHash, plan string,
+		limits, policies map[string]int64,
+		features []string,
+	) (PlanSnapshotRecord, error)
+	// GetAccountPlan is the provision-token read side of the snapshot
+	// protocol. It proves account existence and returns the cell's exact
+	// persisted revision/hash acknowledgement.
+	GetAccountPlan func(ctx context.Context, accountID string) (PlanSnapshotRecord, error)
 
 	// PlanInfo, when set, surfaces the deployment account's applied plan in
 	// GET /v1/capabilities: the plan label on the account block, the limits
 	// snapshot in "limits", and the feature list. Single-account backends
 	// wire this to the default account's record; without it capabilities
 	// reports no plan (self-host default).
-	PlanInfo func(ctx context.Context) (plan string, limits map[string]int64, features []string, err error)
+	PlanInfo func(ctx context.Context) (plan string, limits, policies map[string]int64, features []string, err error)
 
 	// OpenSupportTicket / ListSupportTickets / GetSupportTicket /
 	// ReplySupportTicket / ChangeSupportTicketState, when set (with
@@ -625,11 +636,28 @@ type AccountRecord struct {
 	SupportPolicy   string     `json:"support_policy,omitempty"`
 	// Plan snapshot as applied by the control plane (empty = never applied:
 	// the self-host / pre-provisioning default, unlimited).
-	Plan         string           `json:"plan,omitempty"`
-	PlanLimits   map[string]int64 `json:"plan_limits,omitempty"`
-	PlanFeatures []string         `json:"plan_features,omitempty"`
+	Plan                 string           `json:"plan,omitempty"`
+	PlanLimits           map[string]int64 `json:"plan_limits,omitempty"`
+	PlanPolicies         map[string]int64 `json:"plan_policies,omitempty"`
+	PlanFeatures         []string         `json:"plan_features,omitempty"`
+	PlanAppliedAt        *time.Time       `json:"plan_applied_at,omitempty"`
+	PlanSnapshotRevision int64            `json:"plan_snapshot_revision"`
+	PlanSnapshotHash     string           `json:"plan_snapshot_hash,omitempty"`
 
 	PlacementPolicy placement.Policy `json:"placement_policy,omitempty"`
+}
+
+// PlanSnapshotRecord is the provision-token wire shape for a cell's exact
+// applied plan snapshot.
+type PlanSnapshotRecord struct {
+	AccountID    string           `json:"account_id"`
+	Revision     int64            `json:"revision"`
+	SnapshotHash string           `json:"snapshot_hash"`
+	Plan         string           `json:"plan"`
+	Limits       map[string]int64 `json:"limits"`
+	Policies     map[string]int64 `json:"policies"`
+	Features     []string         `json:"features"`
+	AppliedAt    *time.Time       `json:"applied_at"`
 }
 
 // ProvisionedAccount is the API view of a freshly provisioned account. The
@@ -1329,6 +1357,10 @@ type Realm struct {
 // it (e.g. for a duplicate realm name) without coupling the server to the store.
 var ErrConflict = errors.New("conflict")
 
+// ErrInvalidPlanSnapshot is returned by the cell store when a provision-token
+// request's revision/hash envelope does not match its payload.
+var ErrInvalidPlanSnapshot = errors.New("invalid plan snapshot")
+
 // ErrBusy signals an active lease held by another processing worker (-> 409).
 var ErrBusy = errors.New("busy")
 
@@ -1611,8 +1643,9 @@ func apiMux(cfg Config) http.Handler {
 		if cfg.ReapAccount != nil || cfg.ActivateAccount != nil || cfg.AccountContact != nil || cfg.RecoverAccount != nil || cfg.UpdateAccountEmail != nil || cfg.SuspendAccountSystem != nil || cfg.StreamAccountExport != nil || cfg.ImportAccountArchive != nil || cfg.ResumeAccountSystem != nil || cfg.LogAccountEvent != nil || cfg.SetAccountPlan != nil {
 			mux.HandleFunc("POST /v1/accounts/", accountLifecycleHandler(cfg))
 		}
-		if cfg.GetPlacementPolicySystem != nil {
-			mux.HandleFunc("GET /v1/accounts/", accountPlacementPolicySystemHandler(cfg.ProvisionToken, cfg.GetPlacementPolicySystem))
+		if cfg.GetPlacementPolicySystem != nil || cfg.GetAccountPlan != nil {
+			mux.HandleFunc("GET /v1/accounts/", accountSystemGetHandler(
+				cfg.ProvisionToken, cfg.GetPlacementPolicySystem, cfg.GetAccountPlan))
 		}
 		if cfg.SetPlacementPolicySystem != nil {
 			mux.HandleFunc("PATCH /v1/accounts/", accountPlacementPolicySystemSetHandler(cfg.ProvisionToken, cfg.SetPlacementPolicySystem))
@@ -2168,8 +2201,9 @@ type feature struct {
 type accountInfo struct {
 	ID string `json:"id"`
 	// Plan snapshot surfaced from the account record (empty = none applied).
-	Plan         string   `json:"plan,omitempty"`
-	PlanFeatures []string `json:"plan_features,omitempty"`
+	Plan         string           `json:"plan,omitempty"`
+	PlanPolicies map[string]int64 `json:"plan_policies,omitempty"`
+	PlanFeatures []string         `json:"plan_features,omitempty"`
 }
 
 type capabilities struct {
@@ -2193,7 +2227,7 @@ type billingInfo struct {
 	Reason    string `json:"reason,omitempty"`   // e.g. "self_hosted"
 }
 
-func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (string, map[string]int64, []string, error), selfDigestSupported, transcriptsSupported, messagingSupported, messageListenSupported, messageReplySupported, messageProcessingSupported, messageRequestsSupported, memoriesSupported, memoryRecallSupported, memorySupersedeSupported, memoryDeleteSupported, memoryCurationSupported, memoryVectorsSupported, avatarsSupported, secretsSupported bool) http.HandlerFunc {
+func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (string, map[string]int64, map[string]int64, []string, error), selfDigestSupported, transcriptsSupported, messagingSupported, messageListenSupported, messageReplySupported, messageProcessingSupported, messageRequestsSupported, memoriesSupported, memoryRecallSupported, memorySupersedeSupported, memoryDeleteSupported, memoryCurationSupported, memoryVectorsSupported, avatarsSupported, secretsSupported bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		notImpl := feature{Reason: "not_implemented"}
 		featureState := func(supported bool) feature {
@@ -2259,10 +2293,13 @@ func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (s
 		if planInfo != nil && caps.Account != nil {
 			// Best-effort: capabilities is a discovery document, not a health
 			// probe — a store hiccup degrades to "no plan surfaced".
-			if plan, limits, features, err := planInfo(r.Context()); err == nil && plan != "" {
+			if plan, limits, policies, features, err := planInfo(r.Context()); err == nil && plan != "" {
 				caps.Account.Plan = plan
 				for k, v := range limits {
 					caps.Limits[k] = v
+				}
+				if len(policies) > 0 {
+					caps.Account.PlanPolicies = policies
 				}
 				if len(features) > 0 {
 					caps.Account.PlanFeatures = features
@@ -3056,19 +3093,37 @@ func provisionAccountHandler(provisionToken string, provision func(ctx context.C
 	}
 }
 
-func accountPlacementPolicySystemHandler(provisionToken string, get func(ctx context.Context, accountID string) (placement.Policy, error)) http.HandlerFunc {
+func accountSystemGetHandler(
+	provisionToken string,
+	getPlacement func(ctx context.Context, accountID string) (placement.Policy, error),
+	getPlan func(ctx context.Context, accountID string) (PlanSnapshotRecord, error),
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tok, ok := bearerToken(r)
 		if !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(provisionToken)) != 1 {
 			writeJSONError(w, http.StatusUnauthorized, "invalid provision token")
 			return
 		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "plan"); ok && getPlan != nil {
+			snapshot, err := getPlan(r.Context(), accountID)
+			switch {
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "account not found")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not read account plan")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(snapshot)
+			return
+		}
 		accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "placement-policy")
-		if !ok {
+		if !ok || getPlacement == nil {
 			writeJSONError(w, http.StatusNotFound, "not found")
 			return
 		}
-		policy, err := get(r.Context(), accountID)
+		policy, err := getPlacement(r.Context(), accountID)
 		switch {
 		case errors.Is(err, ErrNotFound):
 			writeJSONError(w, http.StatusNotFound, "account not found")
@@ -3291,31 +3346,44 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 		}
 		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "plan"); ok && cfg.SetAccountPlan != nil {
 			var req struct {
-				Plan     string           `json:"plan"`
-				Limits   map[string]int64 `json:"limits"`
-				Features []string         `json:"features"`
+				Revision     int64            `json:"revision"`
+				SnapshotHash string           `json:"snapshot_hash"`
+				Plan         string           `json:"plan"`
+				Limits       map[string]int64 `json:"limits"`
+				Policies     map[string]int64 `json:"policies"`
+				Features     []string         `json:"features"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Plan) == "" {
 				writeJSONError(w, http.StatusBadRequest, "a plan is required")
 				return
 			}
-			err := cfg.SetAccountPlan(r.Context(), accountID, strings.TrimSpace(req.Plan), req.Limits, req.Features)
+			for key, value := range req.Policies {
+				if key != "transcript_retention_days" || value < 1 || value > 36500 {
+					writeJSONError(w, http.StatusBadRequest,
+						"policies must contain only transcript_retention_days between 1 and 36500 (omit it for indefinite)")
+					return
+				}
+			}
+			applied, err := cfg.SetAccountPlan(
+				r.Context(), accountID, req.Revision, req.SnapshotHash,
+				strings.TrimSpace(req.Plan), req.Limits, req.Policies, req.Features,
+			)
 			switch {
 			case errors.Is(err, ErrNotFound):
 				writeJSONError(w, http.StatusNotFound, "account not found")
+				return
+			case errors.Is(err, ErrConflict):
+				writeJSONError(w, http.StatusConflict, "stale plan snapshot")
+				return
+			case errors.Is(err, ErrInvalidPlanSnapshot):
+				writeJSONError(w, http.StatusBadRequest, "invalid plan snapshot")
 				return
 			case err != nil:
 				writeJSONError(w, http.StatusInternalServerError, "could not set account plan")
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"schema_version": "witself.v0",
-				"account_id":     accountID,
-				"plan":           strings.TrimSpace(req.Plan),
-				"limits":         req.Limits,
-				"features":       req.Features,
-			})
+			_ = json.NewEncoder(w).Encode(applied)
 			return
 		}
 		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "suspend"); ok && cfg.SuspendAccountSystem != nil {

@@ -84,9 +84,13 @@ type Account struct {
 	// Plan snapshot, as applied by the control plane (see migration 0017):
 	// the plan label, the resolved account-wide limits (missing key =
 	// unlimited), and the included features.
-	Plan         string
-	PlanLimits   map[string]int64
-	PlanFeatures []string
+	Plan                 string
+	PlanLimits           map[string]int64
+	PlanPolicies         map[string]int64
+	PlanFeatures         []string
+	PlanAppliedAt        *time.Time
+	PlanSnapshotRevision int64
+	PlanSnapshotHash     string
 
 	PlacementPolicy placement.Policy
 }
@@ -96,15 +100,19 @@ type Account struct {
 func (s *Store) GetAccount(ctx context.Context, accountID string) (Account, error) {
 	var a Account
 	var email, closedReason, suspendedFor, suspendedReason *string
-	var planLimits, planFeatures, placementPolicy []byte
+	var planLimits, planPolicies, planFeatures, placementPolicy []byte
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, email, display_name, status, created_at,
 		        closed_at, closed_reason, suspended_at, suspended_for, suspended_reason,
-		        support_policy, plan, plan_limits, plan_features, placement_policy
+		        support_policy, plan, plan_limits, plan_policies, plan_features,
+		        plan_applied_at, plan_snapshot_revision, plan_snapshot_hash,
+		        placement_policy
 		 FROM accounts WHERE id = $1`, accountID).
 		Scan(&a.ID, &email, &a.DisplayName, &a.Status, &a.CreatedAt,
 			&a.ClosedAt, &closedReason, &a.SuspendedAt, &suspendedFor, &suspendedReason,
-			&a.SupportPolicy, &a.Plan, &planLimits, &planFeatures, &placementPolicy)
+			&a.SupportPolicy, &a.Plan, &planLimits, &planPolicies, &planFeatures,
+			&a.PlanAppliedAt, &a.PlanSnapshotRevision, &a.PlanSnapshotHash,
+			&placementPolicy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Account{}, ErrAccountNotFound
 	}
@@ -116,6 +124,9 @@ func (s *Store) GetAccount(ctx context.Context, accountID string) (Account, erro
 	}
 	if err := json.Unmarshal(planFeatures, &a.PlanFeatures); err != nil {
 		return Account{}, fmt.Errorf("decode plan features: %w", err)
+	}
+	if err := json.Unmarshal(planPolicies, &a.PlanPolicies); err != nil {
+		return Account{}, fmt.Errorf("decode plan policies: %w", err)
 	}
 	a.PlacementPolicy, err = placement.FromJSON(placementPolicy)
 	if err != nil {

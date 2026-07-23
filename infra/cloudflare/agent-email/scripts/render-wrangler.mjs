@@ -11,7 +11,7 @@ if (!/^[a-z][a-z0-9_-]{0,63}$/.test(keyID)) throw new Error("RELAY_KEY_ID is mis
 
 // Defense in depth against accidentally pasting the broad control-plane KV id.
 // The route manager also requires the dedicated namespace's exact title.
-const controlPlaneConfig = await readFile(join(root, "../control-plane/wrangler.jsonc"), "utf8");
+const controlPlaneConfig = await readFile(join(root, "../control-plane/wrangler.template.jsonc"), "utf8");
 const controlPlaneDirectory = /"binding"\s*:\s*"DIRECTORY"[\s\S]{0,200}?"id"\s*:\s*"([0-9a-f]{32})"/.exec(controlPlaneConfig);
 if (!controlPlaneDirectory) throw new Error("could not identify the control-plane DIRECTORY binding");
 if (namespaceID === controlPlaneDirectory[1]) {

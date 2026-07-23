@@ -106,6 +106,9 @@ Production chart defaults should assume:
 - A bounded, restart-safe avatar style rollout worker on every replica, tuned
   with `avatar.styleRollout.enabled`, `batchSize`, `interval`, and
   `batchTimeout`.
+- Transcript retention disabled by default, with a separate bounded
+  `transcriptRetention.mode: preview` stage before an explicit switch to
+  `enforce`.
 - Resource requests and limits.
 - Pod disruption budget where practical.
 - Optional horizontal pod autoscaling.
