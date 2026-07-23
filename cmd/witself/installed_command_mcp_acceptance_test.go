@@ -32,6 +32,12 @@ func TestProviderIntegrationContractCodexInstalledCommandMCPStdio(t *testing.T) 
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// Build before changing HOME. On a fresh Go installation the default GOPATH,
+	// module cache, and build cache are derived from HOME; putting those caches
+	// under t.TempDir leaves read-only module entries that the test runner cannot
+	// clean up after an otherwise successful acceptance test.
+	witselfExecutable := buildInstalledCommandTestWitself(t, root)
+	provider := buildFakeProviderCLI(t, root)
 	t.Setenv("HOME", home)
 	// os.UserHomeDir uses USERPROFILE on Windows. The explicit Witself and
 	// Codex roots below remain authoritative on every platform, while setting
@@ -40,11 +46,9 @@ func TestProviderIntegrationContractCodexInstalledCommandMCPStdio(t *testing.T) 
 	t.Setenv("WITSELF_HOME", witselfHome)
 	t.Setenv("CODEX_HOME", codexHome)
 
-	witselfExecutable := buildInstalledCommandTestWitself(t, root)
 	// The input path is a test-runner concern only. Do not propagate it into
 	// the installed client or the MCP process that client registers.
 	t.Setenv(installedCommandAcceptanceBinaryEnv, "")
-	provider := buildFakeProviderCLI(t, root)
 	isolateProviderDiscoveryPATHForTest(t)
 	t.Setenv("CODEX_CLI_PATH", provider.Path)
 	t.Setenv(witselfExecutableTestEnv, "")
