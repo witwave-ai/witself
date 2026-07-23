@@ -87,7 +87,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself-admin ticket ...    Read/reply/transition support tickets across the fleet")
 	usageLine(w, "                                (list|watch|show|reply|state|resolve|close|states)")
 	usageLine(w, "  witself-admin account ...   Read/set per-account fleet settings")
-	usageLine(w, "                                (support-policy)")
+	usageLine(w, "                                (support-policy|transcript-retention|plan-override)")
 	usageLine(w, "  witself-admin cells ...     Fleet cell registry with account counts (list)")
 	usageLine(w, "  witself-admin events ...    Fleet-wide audit-event tail (list|watch)")
 	usageLine(w, "  witself-admin placement ... Rescue archived accounts blocked by hard pins")
@@ -942,17 +942,25 @@ func supportPolicyChangeJSONMap(res *client.SupportPolicyChange) map[string]any 
 	return map[string]any{"support_policy_change": res}
 }
 
+func accountPolicyJSONMap(res *client.AdminAccountPolicy) map[string]any {
+	return map[string]any{"account_policy": res}
+}
+
 // accountCmd handles `witself-admin account ...`. Slice 1b.iv seeds
 // it with support-policy; future admin-only per-account settings hang
 // off the same tree.
 func accountCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself-admin account support-policy ...")
+		fmt.Fprintln(os.Stderr, "usage: witself-admin account (support-policy|transcript-retention|plan-override) ...")
 		return 2
 	}
 	switch args[0] {
 	case "support-policy":
 		return accountSupportPolicy(args[1:])
+	case "transcript-retention":
+		return accountTranscriptRetention(args[1:])
+	case "plan-override":
+		return accountPlanOverride(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "witself-admin account: unknown subcommand %q\n", args[0])
 		return 2
@@ -1012,4 +1020,232 @@ func accountSupportPolicy(args []string) int {
 		fmt.Printf("%s: %s → %s\n", res.AccountID, res.PolicyFrom, res.PolicyTo)
 	}
 	return 0
+}
+
+func resolveAdminAccountAction(endpoint, token, tokenFile string) (string, string, error) {
+	tok, err := resolveAdminToken(token, tokenFile)
+	if err != nil {
+		return "", "", err
+	}
+	return cpEndpoint(endpoint), tok, nil
+}
+
+func printAdminAccountPolicy(res *client.AdminAccountPolicy) int {
+	retention := "indefinite"
+	if res.TranscriptRetention.EffectiveDays != nil {
+		retention = fmt.Sprintf("%d days", *res.TranscriptRetention.EffectiveDays)
+	}
+	override := "none"
+	if res.PlanOverride != nil {
+		override = res.PlanOverride.Plan
+	}
+	applyState := "applied"
+	if res.ApplyPending {
+		applyState = "pending"
+	}
+	fmt.Printf("%s: plan=%s billing_plan=%s retention=%s retention_override=%t plan_override=%s apply=%s desired_revision=%d applied_revision=%d\n",
+		safeText(res.AccountID), safeText(res.Plan), safeText(res.BillingPlan),
+		retention, res.TranscriptRetention.Overridden, safeText(override),
+		applyState, res.DesiredRevision, res.AppliedRevision)
+	return reportAdminAccountPolicyPending(res)
+}
+
+func printAdminAccountPolicyJSON(res *client.AdminAccountPolicy) int {
+	if code := printJSON(accountPolicyJSONMap(res)); code != 0 {
+		return code
+	}
+	return reportAdminAccountPolicyPending(res)
+}
+
+func reportAdminAccountPolicyPending(res *client.AdminAccountPolicy) int {
+	if res.ApplyPending {
+		fmt.Fprintln(os.Stderr,
+			"witself-admin: policy is saved but still pending cell application; verify convergence before relying on it")
+		return 1
+	}
+	return 0
+}
+
+// accountTranscriptRetention manages an account exception independently from
+// plan and price:
+//
+//	witself-admin account transcript-retention get --account ACCOUNT
+//	witself-admin account transcript-retention set --account ACCOUNT --days 60 --reason "..."
+//	witself-admin account transcript-retention set --account ACCOUNT --indefinite --reason "..."
+//	witself-admin account transcript-retention clear --account ACCOUNT --reason "..."
+func accountTranscriptRetention(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: witself-admin account transcript-retention (get|set|clear) ...")
+		return 2
+	}
+	action := args[0]
+	if action != "get" && action != "set" && action != "clear" {
+		fmt.Fprintf(os.Stderr, "witself-admin account transcript-retention: unknown action %q\n", action)
+		return 2
+	}
+
+	fs := flag.NewFlagSet("account transcript-retention "+action, flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	endpoint := fs.String("endpoint", "", "control-plane URL")
+	token := fs.String("token", "", "admin token")
+	tokenFile := fs.String("token-file", "", "file containing the admin token")
+	account := fs.String("account", "", "account id (required)")
+	days := fs.Int64("days", 0, "finite retention window (1-36500)")
+	indefinite := fs.Bool("indefinite", false, "retain transcripts indefinitely")
+	reason := fs.String("reason", "", "required audit reason for set/clear")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args[1:]); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 || strings.TrimSpace(*account) == "" {
+		fmt.Fprintf(os.Stderr, "usage: witself-admin account transcript-retention %s --account ACCOUNT_ID", action)
+		switch action {
+		case "set":
+			fmt.Fprint(os.Stderr, " (--days N|--indefinite) --reason REASON")
+		case "clear":
+			fmt.Fprint(os.Stderr, " --reason REASON")
+		}
+		fmt.Fprintln(os.Stderr)
+		return 2
+	}
+	switch action {
+	case "get":
+		if *days != 0 || *indefinite || strings.TrimSpace(*reason) != "" {
+			fmt.Fprintln(os.Stderr, "witself-admin: get does not accept --days, --indefinite, or --reason")
+			return 2
+		}
+	case "set":
+		if (*days == 0) == !*indefinite {
+			fmt.Fprintln(os.Stderr, "witself-admin: set exactly one of --days N or --indefinite")
+			return 2
+		}
+		if *days < 0 || *days > client.MaxAdminTranscriptRetentionDays {
+			fmt.Fprintf(os.Stderr, "witself-admin: --days must be between 1 and %d\n", client.MaxAdminTranscriptRetentionDays)
+			return 2
+		}
+		if strings.TrimSpace(*reason) == "" {
+			fmt.Fprintln(os.Stderr, "witself-admin: --reason is required for set")
+			return 2
+		}
+	case "clear":
+		if *days != 0 || *indefinite {
+			fmt.Fprintln(os.Stderr, "witself-admin: clear does not accept --days or --indefinite")
+			return 2
+		}
+		if strings.TrimSpace(*reason) == "" {
+			fmt.Fprintln(os.Stderr, "witself-admin: --reason is required for clear")
+			return 2
+		}
+	}
+
+	ep, tok, err := resolveAdminAccountAction(*endpoint, *token, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
+		return 2
+	}
+	var res *client.AdminAccountPolicy
+	switch action {
+	case "get":
+		res, err = client.GetAdminTranscriptRetention(context.Background(), ep, tok, *account)
+	case "set":
+		var finite *int64
+		if !*indefinite {
+			finite = days
+		}
+		res, err = client.SetAdminTranscriptRetention(context.Background(), ep, tok, *account,
+			client.AdminTranscriptRetentionInput{Days: finite, Indefinite: *indefinite, Reason: *reason})
+	case "clear":
+		res, err = client.ClearAdminTranscriptRetention(context.Background(), ep, tok, *account, *reason)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printAdminAccountPolicyJSON(res)
+	}
+	return printAdminAccountPolicy(res)
+}
+
+// accountPlanOverride manages an effective classification exception without
+// creating or changing a provider subscription.
+func accountPlanOverride(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: witself-admin account plan-override (get|set|clear) ...")
+		return 2
+	}
+	action := args[0]
+	if action != "get" && action != "set" && action != "clear" {
+		fmt.Fprintf(os.Stderr, "witself-admin account plan-override: unknown action %q\n", action)
+		return 2
+	}
+
+	fs := flag.NewFlagSet("account plan-override "+action, flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	endpoint := fs.String("endpoint", "", "control-plane URL")
+	token := fs.String("token", "", "admin token")
+	tokenFile := fs.String("token-file", "", "file containing the admin token")
+	account := fs.String("account", "", "account id (required)")
+	plan := fs.String("plan", "", "effective plan id")
+	reason := fs.String("reason", "", "required audit reason for set/clear")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args[1:]); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 || strings.TrimSpace(*account) == "" {
+		fmt.Fprintf(os.Stderr, "usage: witself-admin account plan-override %s --account ACCOUNT_ID", action)
+		switch action {
+		case "set":
+			fmt.Fprint(os.Stderr, " --plan PLAN_ID --reason REASON")
+		case "clear":
+			fmt.Fprint(os.Stderr, " --reason REASON")
+		}
+		fmt.Fprintln(os.Stderr)
+		return 2
+	}
+
+	switch action {
+	case "get":
+		if strings.TrimSpace(*plan) != "" || strings.TrimSpace(*reason) != "" {
+			fmt.Fprintln(os.Stderr, "witself-admin: get does not accept --plan or --reason")
+			return 2
+		}
+	case "set":
+		if strings.TrimSpace(*plan) == "" || strings.TrimSpace(*reason) == "" {
+			fmt.Fprintln(os.Stderr, "witself-admin: --plan and --reason are required for set")
+			return 2
+		}
+	case "clear":
+		if strings.TrimSpace(*plan) != "" {
+			fmt.Fprintln(os.Stderr, "witself-admin: clear does not accept --plan")
+			return 2
+		}
+		if strings.TrimSpace(*reason) == "" {
+			fmt.Fprintln(os.Stderr, "witself-admin: --reason is required for clear")
+			return 2
+		}
+	}
+
+	ep, tok, err := resolveAdminAccountAction(*endpoint, *token, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
+		return 2
+	}
+	var res *client.AdminAccountPolicy
+	switch action {
+	case "get":
+		res, err = client.GetAdminPlanOverride(context.Background(), ep, tok, *account)
+	case "set":
+		res, err = client.SetAdminPlanOverride(context.Background(), ep, tok, *account, *plan, *reason)
+	case "clear":
+		res, err = client.ClearAdminPlanOverride(context.Background(), ep, tok, *account, *reason)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printAdminAccountPolicyJSON(res)
+	}
+	return printAdminAccountPolicy(res)
 }

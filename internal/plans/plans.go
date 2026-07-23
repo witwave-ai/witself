@@ -8,6 +8,8 @@
 package plans
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -23,6 +25,18 @@ const SchemaVersion = "witself.plans.v0"
 // through a billing provider.
 const Free = "free"
 
+const (
+	// TranscriptRetentionDaysPolicy is the resolved behavioral-policy key
+	// cells enforce. Its absence means indefinite retention; zero is never a
+	// synonym for indefinite because an accidental zero must fail closed at
+	// the control-plane boundary instead of immediately deleting transcripts.
+	TranscriptRetentionDaysPolicy = "transcript_retention_days"
+	// MaxTranscriptRetentionDays is a defensive representation bound, not a
+	// product-tier cap. Enterprise indefinite retention is represented by a
+	// missing key.
+	MaxTranscriptRetentionDays int64 = 36500
+)
+
 // Plan is one catalog entry.
 type Plan struct {
 	ID   string `json:"id"`
@@ -30,14 +44,17 @@ type Plan struct {
 	// PriceMonthly is whole dollars per month (display units, matching the
 	// public document). Use PriceCents for billing math.
 	PriceMonthly *int64 `json:"price_monthly"`
-	// PriceMonthlyMin is whole dollars per month for minimum-commitment tiers
-	// (Enterprise). Set instead of PriceMonthly.
+	// PriceMonthlyMin is whole dollars per month for minimum-commitment tiers.
+	// Set instead of PriceMonthly.
 	PriceMonthlyMin *int64           `json:"price_monthly_min"`
 	Available       bool             `json:"available"`
 	UsageBilled     bool             `json:"usage_billed"`
 	Limits          map[string]int64 `json:"limits"` // nil = not yet defined (TBD tiers)
-	Features        []string         `json:"features"`
-	Summary         string           `json:"summary"`
+	// Policies are non-cap behavioral entitlements resolved by the control
+	// plane and pushed to cells. A missing policy means no restriction.
+	Policies map[string]int64 `json:"policies"`
+	Features []string         `json:"features"`
+	Summary  string           `json:"summary"`
 }
 
 // PriceCents returns the monthly price in cents (minimum commitment for
@@ -58,8 +75,8 @@ func (p Plan) Paid() bool { return p.PriceCents() > 0 }
 
 // Purchasable reports whether a billing provider can sell this plan today:
 // available in the catalog and actually priced. Free is available but not
-// purchasable (it is the absence of a subscription); Team/Enterprise are
-// priced but not yet available.
+// purchasable (it is the absence of a subscription); unavailable and
+// custom-priced tiers are also absent.
 func (p Plan) Purchasable() bool { return p.Available && p.Paid() }
 
 // HasFeature reports whether the plan includes the named feature.
@@ -132,6 +149,9 @@ func Parse(raw []byte) (*Catalog, error) {
 		if p.PriceMonthly != nil && p.PriceMonthlyMin != nil {
 			return nil, fmt.Errorf("plan catalog: plan %q sets both price_monthly and price_monthly_min", p.ID)
 		}
+		if err := ValidatePolicies(p.Policies); err != nil {
+			return nil, fmt.Errorf("plan catalog: plan %q: %w", p.ID, err)
+		}
 		c.byID[p.ID] = p
 	}
 	free, ok := c.byID[Free]
@@ -144,4 +164,54 @@ func Parse(raw []byte) (*Catalog, error) {
 		return nil, fmt.Errorf("plan catalog: the %q plan must be available", Free)
 	}
 	return c, nil
+}
+
+// ValidatePolicies validates one resolved policy snapshot. Policy keys are
+// deliberately closed while this contract has only one implemented member:
+// silently accepting a misspelling would make a paid retention promise appear
+// applied while the cell ignored it.
+func ValidatePolicies(policies map[string]int64) error {
+	for key, value := range policies {
+		switch key {
+		case TranscriptRetentionDaysPolicy:
+			if value < 1 || value > MaxTranscriptRetentionDays {
+				return fmt.Errorf("%s must be between 1 and %d days (omit it for indefinite retention)",
+					TranscriptRetentionDaysPolicy, MaxTranscriptRetentionDays)
+			}
+		default:
+			return fmt.Errorf("unknown policy %q", key)
+		}
+	}
+	return nil
+}
+
+// SnapshotHash returns the canonical digest of one resolved account snapshot.
+// Both the control plane and the cell use this exact function so the hash
+// acknowledged by the cell proves that every behavioral field was understood
+// and persisted.
+func SnapshotHash(plan string, limits, policies map[string]int64, features []string) (string, error) {
+	if limits == nil {
+		limits = map[string]int64{}
+	}
+	if policies == nil {
+		policies = map[string]int64{}
+	}
+	features = append([]string(nil), features...)
+	if features == nil {
+		features = []string{}
+	}
+	slices.Sort(features)
+	raw, err := json.Marshal(struct {
+		Plan     string           `json:"plan"`
+		Limits   map[string]int64 `json:"limits"`
+		Policies map[string]int64 `json:"policies"`
+		Features []string         `json:"features"`
+	}{
+		Plan: plan, Limits: limits, Policies: policies, Features: features,
+	})
+	if err != nil {
+		return "", fmt.Errorf("hash plan snapshot: %w", err)
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:]), nil
 }

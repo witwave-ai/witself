@@ -191,6 +191,13 @@ func TestJSONEnvelopes(t *testing.T) {
 			}),
 			wantKeys: []string{"placement_rescue"},
 		},
+		{
+			name: "account policy",
+			value: accountPolicyJSONMap(&client.AdminAccountPolicy{
+				AccountID: "acc_1", Plan: "enterprise", BillingPlan: "free",
+			}),
+			wantKeys: []string{"account_policy"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -218,6 +225,85 @@ func TestJSONEnvelopes(t *testing.T) {
 				if _, ok := got[forbidden]; ok && !contains(tc.wantKeys, forbidden) {
 					t.Errorf("domain field %q leaked to top level — envelope collapsed", forbidden)
 				}
+			}
+		})
+	}
+}
+
+func TestPrintAdminAccountPolicyReturnsFailureWhileApplyPending(t *testing.T) {
+	days := int64(60)
+	res := &client.AdminAccountPolicy{
+		AccountID:       "acct_1",
+		Plan:            "free",
+		BillingPlan:     "free",
+		ApplyPending:    true,
+		DesiredRevision: 4,
+		AppliedRevision: 3,
+		TranscriptRetention: client.AdminTranscriptRetention{
+			EffectiveDays: &days,
+			Overridden:    true,
+		},
+	}
+	if code := printAdminAccountPolicy(res); code != 1 {
+		t.Fatalf("pending policy exit code = %d, want 1", code)
+	}
+	if code := printAdminAccountPolicyJSON(res); code != 1 {
+		t.Fatalf("pending JSON policy exit code = %d, want 1", code)
+	}
+
+	res.ApplyPending = false
+	res.AppliedRevision = res.DesiredRevision
+	if code := printAdminAccountPolicy(res); code != 0 {
+		t.Fatalf("applied policy exit code = %d, want 0", code)
+	}
+}
+
+func TestAccountPolicyCommandsRejectUnsafeMutations(t *testing.T) {
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	t.Setenv("WITSELF_ADMIN_TOKEN", "")
+
+	tests := []struct {
+		name string
+		call func() int
+	}{
+		{
+			name: "retention set needs reason",
+			call: func() int {
+				return accountTranscriptRetention([]string{"set", "--account", "acct_1", "--days", "60"})
+			},
+		},
+		{
+			name: "retention set rejects both values",
+			call: func() int {
+				return accountTranscriptRetention([]string{
+					"set", "--account", "acct_1", "--days", "60",
+					"--indefinite", "--reason", "bad",
+				})
+			},
+		},
+		{
+			name: "retention clear needs reason",
+			call: func() int {
+				return accountTranscriptRetention([]string{"clear", "--account", "acct_1"})
+			},
+		},
+		{
+			name: "plan set needs plan",
+			call: func() int {
+				return accountPlanOverride([]string{"set", "--account", "acct_1", "--reason", "bad"})
+			},
+		},
+		{
+			name: "plan clear needs reason",
+			call: func() int {
+				return accountPlanOverride([]string{"clear", "--account", "acct_1"})
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.call(); got != 2 {
+				t.Fatalf("exit code = %d, want 2", got)
 			}
 		})
 	}

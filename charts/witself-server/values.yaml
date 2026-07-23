@@ -76,6 +76,15 @@ avatar:
     interval: 2s
     batchTimeout: 30s
 
+# Transcript retention is an explicit three-stage rollout:
+# disabled -> preview -> enforce. Enabling the worker still defaults to preview,
+# so deletion requires both enabled: true and mode: enforce.
+transcriptRetention:
+  enabled: false
+  mode: preview
+  batchSize: 100
+  interval: 5m
+
 database:
   existingSecret:
     # Name of a Secret containing the Postgres DSN. Empty disables DB wiring.

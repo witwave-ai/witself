@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -19,7 +20,10 @@ func (c *clock) now() time.Time { return c.t }
 
 type applyCall struct {
 	accountID, plan string
+	revision        int64
+	hash            string
 	limits          map[string]int64
+	policies        map[string]int64
 	features        []string
 }
 
@@ -30,14 +34,18 @@ type recApplier struct {
 	calls []applyCall
 }
 
-func (a *recApplier) Apply(_ context.Context, accountID, plan string, limits map[string]int64, features []string) error {
+func (a *recApplier) Apply(_ context.Context, accountID string, request ApplyRequest) (ApplyAck, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.fail {
-		return context.DeadlineExceeded
+		return ApplyAck{}, context.DeadlineExceeded
 	}
-	a.calls = append(a.calls, applyCall{accountID, plan, limits, features})
-	return nil
+	a.calls = append(a.calls, applyCall{
+		accountID: accountID, plan: request.Plan, revision: request.Revision,
+		hash: request.Hash, limits: request.Limits, policies: request.Policies,
+		features: request.Features,
+	})
+	return ApplyAck{Revision: request.Revision, Hash: request.Hash}, nil
 }
 
 func (a *recApplier) last(t *testing.T) applyCall {
@@ -96,6 +104,10 @@ type harness struct {
 	fit     *fitStub
 }
 
+func testAdminActor() AdminActor {
+	return AdminActor{ID: "adm_abcdefghijklmnopqrst", Handle: "scott"}
+}
+
 func newHarness(t *testing.T, interactive bool) *harness {
 	t.Helper()
 	catalog, err := plans.Load()
@@ -139,6 +151,221 @@ func TestStatusIsReadOnly(t *testing.T) {
 	// Probing an account id must not create phantom rows.
 	if all, _ := h.store.List(context.Background()); len(all) != 0 {
 		t.Fatalf("Status persisted %d record(s); reads must not write", len(all))
+	}
+}
+
+func TestAccountTranscriptRetentionOverrideIsIndependentOfBilling(t *testing.T) {
+	h := newHarness(t, false)
+	ctx := context.Background()
+	days := int64(60)
+	if _, err := h.m.SetTranscriptRetentionOverride(
+		ctx, "acct_retention", &days, testAdminActor(), "early enterprise evaluation",
+	); err != nil {
+		t.Fatalf("SetTranscriptRetentionOverride: %v", err)
+	}
+	r, snapshot, err := h.m.ResolvedStatus(ctx, "acct_retention", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Entitled != plans.Free || r.Provider != "" || r.CustomerID != "" {
+		t.Fatalf("billing state changed by policy override: %+v", r)
+	}
+	if snapshot.Plan != plans.Free ||
+		snapshot.DefaultPolicies[plans.TranscriptRetentionDaysPolicy] != 30 ||
+		snapshot.Policies[plans.TranscriptRetentionDaysPolicy] != 60 {
+		t.Fatalf("resolved snapshot = %+v; want free default 30, effective 60", snapshot)
+	}
+	if r.TranscriptRetentionOverride == nil ||
+		r.TranscriptRetentionOverride.ActorID != testAdminActor().ID ||
+		r.TranscriptRetentionOverride.ActorHandle != testAdminActor().Handle ||
+		r.TranscriptRetentionOverride.Reason != "early enterprise evaluation" {
+		t.Fatalf("override attribution = %+v", r.TranscriptRetentionOverride)
+	}
+	if len(h.applier.calls) != 1 ||
+		h.applier.calls[0].policies[plans.TranscriptRetentionDaysPolicy] != 60 {
+		t.Fatalf("apply calls = %+v; want one 60-day snapshot", h.applier.calls)
+	}
+
+	if _, err := h.m.ClearTranscriptRetentionOverride(
+		ctx, "acct_retention", testAdminActor(), "restore Personal default",
+	); err != nil {
+		t.Fatalf("ClearTranscriptRetentionOverride: %v", err)
+	}
+	r, snapshot, err = h.m.ResolvedStatus(ctx, "acct_retention", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.TranscriptRetentionOverride != nil ||
+		snapshot.Policies[plans.TranscriptRetentionDaysPolicy] != 30 {
+		t.Fatalf("cleared snapshot = %+v record=%+v", snapshot, r)
+	}
+	if len(r.AdminHistory) != 2 ||
+		r.AdminHistory[0].Kind != "transcript_retention_override_set" ||
+		r.AdminHistory[1].Kind != "transcript_retention_override_cleared" ||
+		r.AdminHistory[0].ActorID != testAdminActor().ID ||
+		r.AdminHistory[0].ActorHandle != testAdminActor().Handle {
+		t.Fatalf("admin history = %+v", r.AdminHistory)
+	}
+	if len(h.applier.calls) != 2 ||
+		h.applier.calls[1].policies[plans.TranscriptRetentionDaysPolicy] != 30 {
+		t.Fatalf("apply calls after clear = %+v", h.applier.calls)
+	}
+}
+
+func TestRetentionOverrideFailureRemainsExplicitlyPending(t *testing.T) {
+	h := newHarness(t, false)
+	h.applier.fail = true
+	days := int64(60)
+	if _, err := h.m.SetTranscriptRetentionOverride(
+		context.Background(), "acct_pending", &days, testAdminActor(), "pending test",
+	); err != nil {
+		t.Fatal(err)
+	}
+	r, snapshot, err := h.m.ResolvedStatus(context.Background(), "acct_pending", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.SnapshotRevision == 0 || r.DesiredSnapshotHash != snapshot.Hash {
+		t.Fatalf("desired fence was not persisted: record=%+v snapshot=%+v", r, snapshot)
+	}
+	if !SnapshotApplyPending(r, snapshot) || r.AppliedSnapshotRevision != 0 {
+		t.Fatalf("failed cell apply was reported converged: %+v", r)
+	}
+}
+
+func TestAccountTranscriptRetentionCanBeExplicitlyIndefinite(t *testing.T) {
+	h := newHarness(t, false)
+	ctx := context.Background()
+	if _, err := h.m.SetTranscriptRetentionOverride(
+		ctx, "acct_indefinite", nil, testAdminActor(), "contract exception",
+	); err != nil {
+		t.Fatalf("SetTranscriptRetentionOverride: %v", err)
+	}
+	r, snapshot, err := h.m.ResolvedStatus(ctx, "acct_indefinite", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.TranscriptRetentionOverride == nil || r.TranscriptRetentionOverride.Days != nil {
+		t.Fatalf("override = %+v; want explicit indefinite", r.TranscriptRetentionOverride)
+	}
+	if _, capped := snapshot.Policies[plans.TranscriptRetentionDaysPolicy]; capped {
+		t.Fatalf("effective policies = %v; want indefinite", snapshot.Policies)
+	}
+}
+
+func TestEnterpriseBackfillOverrideDoesNotFabricateBilling(t *testing.T) {
+	h := newHarness(t, false)
+	ctx := context.Background()
+	if _, err := h.m.SetAccountPlanOverride(
+		ctx, "acct_scott", "enterprise", testAdminActor(), "founder account backfill",
+	); err != nil {
+		t.Fatalf("SetAccountPlanOverride: %v", err)
+	}
+	r, snapshot, err := h.m.ResolvedStatus(ctx, "acct_scott", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Entitled != plans.Free || r.Provider != "" || r.CustomerID != "" {
+		t.Fatalf("provider billing was fabricated: %+v", r)
+	}
+	if r.PlanOverride == nil || snapshot.Plan != "enterprise" {
+		t.Fatalf("override/snapshot = %+v / %+v", r.PlanOverride, snapshot)
+	}
+	if r.PlanOverride.ActorID != testAdminActor().ID ||
+		r.PlanOverride.ActorHandle != testAdminActor().Handle {
+		t.Fatalf("plan override attribution = %+v", r.PlanOverride)
+	}
+	if _, capped := snapshot.Policies[plans.TranscriptRetentionDaysPolicy]; capped {
+		t.Fatalf("enterprise backfill should inherit indefinite retention: %v", snapshot.Policies)
+	}
+	for _, feature := range []string{"memory", "facts", "secrets", "collaboration", "support"} {
+		if !slices.Contains(snapshot.Features, feature) {
+			t.Fatalf("enterprise backfill features = %v; missing %q", snapshot.Features, feature)
+		}
+	}
+	if len(h.applier.calls) != 1 || h.applier.calls[0].plan != "enterprise" {
+		t.Fatalf("apply calls = %+v", h.applier.calls)
+	}
+	for _, feature := range snapshot.Features {
+		if !slices.Contains(h.applier.calls[0].features, feature) {
+			t.Fatalf("applied enterprise features = %v; missing %q", h.applier.calls[0].features, feature)
+		}
+	}
+
+	if _, err := h.m.ClearAccountPlanOverride(
+		ctx, "acct_scott", testAdminActor(), "backfill rollback test",
+	); err != nil {
+		t.Fatal(err)
+	}
+	r, snapshot, err = h.m.ResolvedStatus(ctx, "acct_scott", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.PlanOverride != nil || snapshot.Plan != plans.Free || r.Entitled != plans.Free {
+		t.Fatalf("cleared override = %+v / %+v", r, snapshot)
+	}
+}
+
+func TestClearingEnterpriseOverrideCannotBypassPersonalFitCheck(t *testing.T) {
+	h := newHarness(t, false)
+	ctx := context.Background()
+	if _, err := h.m.SetAccountPlanOverride(
+		ctx, "acct_scott_fit", "enterprise", testAdminActor(), "founder account backfill",
+	); err != nil {
+		t.Fatal(err)
+	}
+	h.fit.set([]string{"agents 26 > 25"})
+	if _, err := h.m.ClearAccountPlanOverride(
+		ctx, "acct_scott_fit", testAdminActor(), "restore Personal classification",
+	); err != nil {
+		t.Fatal(err)
+	}
+	r, snapshot, err := h.m.ResolvedStatus(ctx, "acct_scott_fit", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Plan != plans.Free || r.Applied != "enterprise" ||
+		!strings.Contains(r.ApplyBlocked, "agents 26 > 25") ||
+		!SnapshotApplyPending(r, snapshot) {
+		t.Fatalf("unsafe override clear was reported applied: record=%+v snapshot=%+v", r, snapshot)
+	}
+	if call := h.applier.last(t); call.plan != "enterprise" {
+		t.Fatalf("Personal snapshot bypassed the fit check: %+v", call)
+	}
+
+	h.fit.set(nil)
+	if err := h.m.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	r, snapshot, err = h.m.ResolvedStatus(ctx, "acct_scott_fit", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Applied != plans.Free || r.ApplyBlocked != "" || SnapshotApplyPending(r, snapshot) {
+		t.Fatalf("pruned account did not converge to Personal: record=%+v snapshot=%+v", r, snapshot)
+	}
+}
+
+func TestRetentionOverrideValidation(t *testing.T) {
+	h := newHarness(t, false)
+	ctx := context.Background()
+	for _, days := range []int64{0, plans.MaxTranscriptRetentionDays + 1} {
+		days := days
+		if _, err := h.m.SetTranscriptRetentionOverride(
+			ctx, "acct_bad", &days, testAdminActor(), "invalid test",
+		); !errors.Is(err, ErrAdminInput) {
+			t.Fatalf("days=%d error=%v; want ErrAdminInput", days, err)
+		}
+	}
+	if _, err := h.m.SetTranscriptRetentionOverride(
+		ctx, "acct_bad", nil, AdminActor{Handle: "scott"}, "missing actor",
+	); !errors.Is(err, ErrAdminInput) {
+		t.Fatalf("missing actor id error=%v; want ErrAdminInput", err)
+	}
+	if _, err := h.m.SetTranscriptRetentionOverride(
+		ctx, "acct_bad", nil, AdminActor{ID: testAdminActor().ID}, "missing handle",
+	); !errors.Is(err, ErrAdminInput) {
+		t.Fatalf("missing actor handle error=%v; want ErrAdminInput", err)
 	}
 }
 
@@ -847,8 +1074,7 @@ type slowApplier struct {
 	onApply func(accountID string)
 }
 
-func (s *slowApplier) Apply(_ context.Context, accountID, plan string, _ map[string]int64, _ []string) error {
-	_ = plan
+func (s *slowApplier) Apply(_ context.Context, accountID string, request ApplyRequest) (ApplyAck, error) {
 	s.onApply(accountID)
-	return nil
+	return ApplyAck{Revision: request.Revision, Hash: request.Hash}, nil
 }

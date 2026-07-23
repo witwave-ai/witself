@@ -16,13 +16,15 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"os/signal"
+	"regexp"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/witwave-ai/witself/internal/billing"
-	"github.com/witwave-ai/witself/internal/billing/fake"
 	"github.com/witwave-ai/witself/internal/billing/lifecycle"
 	stripeprovider "github.com/witwave-ai/witself/internal/billing/stripe"
 	"github.com/witwave-ai/witself/internal/blob"
@@ -116,9 +118,15 @@ func run() int {
 	return 0
 }
 
-// setupBilling wires the plan lifecycle when WITSELF_CP_BILLING_PROVIDER is
-// set. Configuration (all env, 12-factor):
+// setupBilling wires the account plan lifecycle only when
+// WITSELF_CP_PLAN_LIFECYCLE_ENABLED is explicitly true. Billing is optional:
+// without a provider, status/defaults/admin overrides and cell enforcement
+// work normally while customer subscription mutations remain absent.
+// Configuration (all env, 12-factor):
 //
+//	WITSELF_CP_PLAN_LIFECYCLE_ENABLED  explicit true/false feature gate
+//	WITSELF_CP_BRIDGE_URL         directory-owning Worker base URL
+//	WITSELF_CP_BRIDGE_TOKEN       shared Worker/container bridge credential
 //	WITSELF_CP_BILLING_PROVIDER  "fake" or "stripe"
 //	WITSELF_CP_STRIPE_SECRET_KEY      sk_live_/sk_test_ API key   (stripe)
 //	WITSELF_CP_STRIPE_WEBHOOK_SECRET  whsec_ signing secret       (stripe)
@@ -129,23 +137,22 @@ func run() int {
 //	WITSELF_CP_R2_ACCESS_KEY     R2 S3 credentials (Object Read & Write)
 //	WITSELF_CP_R2_SECRET_KEY
 //	WITSELF_CP_R2_PREFIX         key prefix (default "registry/")
-//	WITSELF_CP_CELL_ENDPOINT         production auth+apply: the single cell
-//	WITSELF_CP_CELL_PROVISION_TOKEN  the CP presents to the cell for :plan;
-//	                                 also introspects operator tokens via GET
-//	                                 /v1/whoami — the plan verbs authorize
-//	                                 only when the token's account matches
-//	                                 the request's. (Directory-backed
-//	                                 resolver replaces this when the fleet
-//	                                 grows past one cell.)
-//	WITSELF_CP_DEV_TOKEN         interim single-token auth for smoke tests
-//	                             without a cell — refused when a cell is
-//	                             configured (no dual-mode). One of these two
-//	                             is required — there is no default-open.
-//	WITSELF_CP_RECONCILE         sweep interval (Go duration, default 1m)
 func setupBilling(ctx context.Context, mux *http.ServeMux) error {
-	providerName := os.Getenv("WITSELF_CP_BILLING_PROVIDER")
-	if providerName == "" {
-		return nil // billing not configured; the bare CP is a valid deployment
+	enabled, err := explicitBoolEnv("WITSELF_CP_PLAN_LIFECYCLE_ENABLED")
+	if err != nil {
+		return err
+	}
+	if !enabled {
+		return nil
+	}
+
+	bridgeURL := strings.TrimSpace(os.Getenv("WITSELF_CP_BRIDGE_URL"))
+	bridgeToken := strings.TrimSpace(os.Getenv("WITSELF_CP_BRIDGE_TOKEN"))
+	if bridgeURL == "" || bridgeToken == "" {
+		return errors.New("plan lifecycle requires WITSELF_CP_BRIDGE_URL and WITSELF_CP_BRIDGE_TOKEN")
+	}
+	if err := validateProductionBridgeURL(bridgeURL); err != nil {
+		return err
 	}
 
 	catalog, err := plans.Load()
@@ -153,9 +160,14 @@ func setupBilling(ctx context.Context, mux *http.ServeMux) error {
 		return err
 	}
 
+	providerName := strings.TrimSpace(os.Getenv("WITSELF_CP_BILLING_PROVIDER"))
 	var provider billing.Provider
 	var bootstrap func(context.Context) error
 	switch providerName {
+	case "":
+		// Providerless/manual mode is intentional. It powers defaults,
+		// administrator overrides, seeding, status, and cell enforcement
+		// without pretending a customer can purchase or cancel anything.
 	case "stripe":
 		// The webhook secret is mandatory: without it the binary would boot
 		// cleanly, mint checkout links, take payments — and refuse every
@@ -180,17 +192,12 @@ func setupBilling(ctx context.Context, mux *http.ServeMux) error {
 		// plans.json change needs no dashboard clicks.
 		bootstrap = sp.EnsurePrices
 	case "fake":
-		// Headless dev provider: every action completes instantly, no
-		// partner account required. The Stripe provider replaces this by
-		// name — records pin their provider, so the cutover is this env var.
-		// The dev token doubles as the fake's webhook signature: the route
-		// is public, and an unsigned fake would accept forged entitlement
-		// events from anonymous callers.
-		// See the fake+cell refusal below (after cell config is read).
-		webhookSecret := os.Getenv("WITSELF_CP_DEV_TOKEN")
-		provider = fake.New(fake.Config{Prices: catalog.Prices(), WebhookSecret: webhookSecret})
+		// Never put the dev fake behind the production Worker bridge. It can
+		// manufacture completed subscriptions and therefore has no place in
+		// a providerless/manual rollout.
+		return errors.New("WITSELF_CP_BILLING_PROVIDER=fake is not allowed with the production cell plan lifecycle bridge")
 	default:
-		return fmt.Errorf("unknown WITSELF_CP_BILLING_PROVIDER %q (have: fake, stripe)", providerName)
+		return fmt.Errorf("unknown WITSELF_CP_BILLING_PROVIDER %q (have: stripe, or empty for manual mode)", providerName)
 	}
 	if bootstrap != nil {
 		// Best-effort: prices also resolve lazily on first checkout, so a
@@ -199,7 +206,10 @@ func setupBilling(ctx context.Context, mux *http.ServeMux) error {
 			fmt.Fprintf(os.Stderr, "witself-control-plane: price bootstrap failed (will resolve lazily): %v\n", err)
 		}
 	}
-	providers := map[string]billing.Provider{providerName: provider}
+	providers := map[string]billing.Provider{}
+	if provider != nil {
+		providers[providerName] = provider
+	}
 
 	blobClient, err := blob.New(blob.Config{
 		Endpoint:  os.Getenv("WITSELF_CP_R2_ENDPOINT"),
@@ -215,35 +225,9 @@ func setupBilling(ctx context.Context, mux *http.ServeMux) error {
 		prefix = "registry/"
 	}
 
-	// Single-cell fleet for now: one env-configured endpoint + provision
-	// token serves every account. The account->cell directory takes over
-	// when the fleet grows past one — same CellResolver seam.
-	var applier lifecycle.Applier = unwiredApplier{}
-	var authenticate cpserver.AuthFunc
-	cellEndpoint := os.Getenv("WITSELF_CP_CELL_ENDPOINT")
-	cellProvisionToken := os.Getenv("WITSELF_CP_CELL_PROVISION_TOKEN")
-	// The fake is dev-only. Refuse fake+cell: reusing the cell provision
-	// token as the fake's webhook signature would transmit that secret in a
-	// request header on every legit webhook delivery, and any intermediary
-	// logging headers (CF Worker access log, ingress) would capture a
-	// fleet-wide plan-mint credential.
-	if providerName == "fake" && cellEndpoint != "" {
-		return errors.New("WITSELF_CP_BILLING_PROVIDER=fake refused with a cell configured — the fake is dev-only; wire a real provider or run without a cell")
-	}
-	if cellEndpoint != "" && cellProvisionToken != "" {
-		resolve := cpserver.StaticCell(cellEndpoint, cellProvisionToken)
-		applier = cpserver.NewCellApplier(resolve)
-		authenticate = cpserver.CellAuthenticate(resolve)
-	} else {
-		devToken := os.Getenv("WITSELF_CP_DEV_TOKEN")
-		if devToken == "" {
-			return errors.New("billing needs either a cell (WITSELF_CP_CELL_ENDPOINT + WITSELF_CP_CELL_PROVISION_TOKEN) or the interim WITSELF_CP_DEV_TOKEN")
-		}
-		authenticate = func(_ context.Context, _ string, bearer string) (bool, error) {
-			return subtle.ConstantTimeCompare([]byte(bearer), []byte(devToken)) == 1, nil
-		}
-	}
-
+	cellResolve := cpserver.BridgeCell(bridgeURL, bridgeToken)
+	applier := cpserver.NewBridgeApplier(bridgeURL, bridgeToken)
+	authenticate := cpserver.CellAuthenticate(cellResolve)
 	manager, err := lifecycle.NewManager(lifecycle.Config{
 		Catalog:   catalog,
 		Providers: providers,
@@ -254,57 +238,81 @@ func setupBilling(ctx context.Context, mux *http.ServeMux) error {
 	if err != nil {
 		return err
 	}
+
+	adminAuthenticate := bridgeAdminAuthenticator(bridgeToken)
+	internalAuthenticate := func(_ context.Context, bearer string) (bool, error) {
+		return subtle.ConstantTimeCompare([]byte(bearer), []byte(bridgeToken)) == 1, nil
+	}
+	observer := cpserver.NewPlanLifecycleObserver(manager.BillingAvailable())
 	if err := cpserver.Register(mux, cpserver.Config{
-		Manager:      manager,
-		Catalog:      catalog,
-		Providers:    providers,
-		Authenticate: authenticate,
+		Manager:              manager,
+		Catalog:              catalog,
+		Providers:            providers,
+		Authenticate:         authenticate,
+		AdminAuthenticate:    adminAuthenticate,
+		AdminAccountExists:   cpserver.BridgeAccountExists(bridgeURL, bridgeToken),
+		LifecycleObserver:    observer,
+		InternalAuthenticate: internalAuthenticate,
 	}); err != nil {
 		return err
 	}
 
-	interval := time.Minute
-	if v := os.Getenv("WITSELF_CP_RECONCILE"); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return fmt.Errorf("WITSELF_CP_RECONCILE: %w", err)
-		}
-		interval = d
+	providerLabel := providerName
+	if providerLabel == "" {
+		providerLabel = "manual"
 	}
-	go cpserver.RunReconciler(ctx, manager, interval, func(format string, args ...any) {
-		fmt.Fprintf(os.Stderr, format+"\n", args...)
-	})
-	// Dev-harness: real partners announce period ends by webhook; the fake
-	// has no scheduler, so the binary drives its due downgrades on the same
-	// cadence — otherwise a "scheduled" downgrade would never take effect.
-	if fakeP, ok := provider.(*fake.Fake); ok {
-		go func() {
-			t := time.NewTicker(interval)
-			defer t.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-t.C:
-					if events := fakeP.ApplyDue(); len(events) > 0 {
-						if err := manager.OnEvents(ctx, providerName, events); err != nil {
-							fmt.Fprintf(os.Stderr, "witself-control-plane: fake period-end: %v\n", err)
-						}
-					}
-				}
-			}
-		}()
-	}
-	fmt.Fprintf(os.Stderr, "witself-control-plane: billing enabled (provider %s, reconcile %s)\n", providerName, interval)
+	// Hosted reconciliation is driven by the Worker's authenticated cron tick.
+	// The Worker persists the directory cursor in KV, so container sleep and
+	// process restarts cannot reset fleet progress.
+	fmt.Fprintf(os.Stderr, "witself-control-plane: plan lifecycle enabled (provider %s, worker-cron scheduled)\n", providerLabel)
 	return nil
 }
 
-// unwiredApplier is the placeholder cell push: it fails loudly so records
-// truthfully show Entitled != Applied (and Reconcile keeps retrying) until
-// the cell-apply client — the CP calling POST /v1/accounts/{id}:plan on the
-// account's cell — lands. Pretending to succeed would hide a real gap.
-type unwiredApplier struct{}
+func validateProductionBridgeURL(rawURL string) error {
+	parsed, err := neturl.Parse(rawURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" ||
+		parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("WITSELF_CP_BRIDGE_URL must be an HTTPS base URL without credentials, query, or fragment")
+	}
+	return nil
+}
 
-func (unwiredApplier) Apply(context.Context, string, string, map[string]int64, []string) error {
-	return errors.New("cell apply not wired yet")
+var (
+	bridgeAdminIDPattern     = regexp.MustCompile(`^adm_[a-z0-9]{20}$`)
+	bridgeAdminHandlePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{1,31}$`)
+	bridgeReservedHandles    = map[string]bool{
+		"system": true, "control_plane": true, "root": true, "admin": true,
+		"fleet": true, "owner": true, "operator": true,
+	}
+)
+
+func bridgeAdminAuthenticator(bridgeToken string) cpserver.AdminAuthFunc {
+	return func(
+		_ context.Context,
+		bearer, claimedID, claimedHandle string,
+	) (lifecycle.AdminActor, bool, error) {
+		if subtle.ConstantTimeCompare([]byte(bearer), []byte(bridgeToken)) != 1 {
+			return lifecycle.AdminActor{}, false, nil
+		}
+		adminID := strings.TrimSpace(claimedID)
+		handle := strings.TrimSpace(claimedHandle)
+		if !bridgeAdminIDPattern.MatchString(adminID) ||
+			!bridgeAdminHandlePattern.MatchString(handle) ||
+			bridgeReservedHandles[handle] {
+			return lifecycle.AdminActor{}, false, nil
+		}
+		return lifecycle.AdminActor{ID: adminID, Handle: handle}, true, nil
+	}
+}
+
+func explicitBoolEnv(name string) (bool, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	switch {
+	case value == "", strings.EqualFold(value, "false"):
+		return false, nil
+	case strings.EqualFold(value, "true"):
+		return true, nil
+	default:
+		return false, fmt.Errorf("%s must be true or false", name)
+	}
 }

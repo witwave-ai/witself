@@ -20,6 +20,7 @@ import (
 	"github.com/witwave-ai/witself/internal/agentemail"
 	"github.com/witwave-ai/witself/internal/export"
 	"github.com/witwave-ai/witself/internal/placement"
+	"github.com/witwave-ai/witself/internal/plans"
 )
 
 // ErrAccountExists is returned when an import targets an account id already
@@ -66,7 +67,9 @@ var importColumns = map[string]map[string]bool{
 		"status": true, "created_at": true, "closed_at": true, "closed_reason": true,
 		"suspended_at": true, "suspended_for": true, "suspended_reason": true,
 		"support_policy": true,
-		"plan":           true, "plan_limits": true, "plan_features": true,
+		"plan":           true, "plan_limits": true, "plan_policies": true,
+		"plan_features": true, "plan_applied_at": true,
+		"plan_snapshot_revision": true, "plan_snapshot_hash": true,
 		"placement_policy": true,
 	},
 	"operators": {
@@ -604,7 +607,8 @@ var importColumns = map[string]map[string]bool{
 		"transcript_id": true, "sequence_from": true, "sequence_until": true,
 		"cursor_source_kind": true, "cursor_stream_id": true,
 		"cursor_expected_prior": true, "cursor_upper": true,
-		"coverage_counts": true, "created_at": true,
+		"coverage_counts": true, "transcript_pruned_at": true,
+		"created_at": true,
 	},
 	"memory_curation_actions": {
 		"id": true, "run_id": true, "account_id": true,
@@ -1402,6 +1406,24 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 				}
 			}
 		}
+		if v, present := obj["plan_policies"]; present {
+			m, ok := v.(map[string]any)
+			if !ok {
+				return badf("accounts row plan_policies must be an object of integer policies")
+			}
+			for key, raw := range m {
+				value, ok := importedInteger(raw)
+				if !ok {
+					return badf("accounts row plan_policies[%q] must be an integer", key)
+				}
+				if key != TranscriptRetentionDaysPolicy {
+					return badf("accounts row plan_policies contains unknown policy %q", key)
+				}
+				if value < 1 || value > 36500 {
+					return badf("accounts row plan_policies[%q] must be between 1 and 36500", key)
+				}
+			}
+		}
 		if v, present := obj["plan_features"]; present {
 			fs, ok := v.([]any)
 			if !ok {
@@ -1410,6 +1432,61 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			for _, raw := range fs {
 				if _, ok := raw.(string); !ok {
 					return badf("accounts row plan_features entries must be strings")
+				}
+			}
+		}
+		revision, revisionPresent := importedInteger(obj["plan_snapshot_revision"])
+		hash, hashPresent := obj["plan_snapshot_hash"].(string)
+		if _, present := obj["plan_snapshot_revision"]; present && !revisionPresent {
+			return badf("accounts row plan_snapshot_revision must be an integer")
+		}
+		if _, present := obj["plan_snapshot_hash"]; present && !hashPresent {
+			return badf("accounts row plan_snapshot_hash must be a string")
+		}
+		if revisionPresent != hashPresent {
+			return badf("accounts row plan snapshot revision and hash must be present together")
+		}
+		if revisionPresent {
+			decodedHash, decodeErr := hex.DecodeString(hash)
+			validHash := decodeErr == nil && len(decodedHash) == sha256.Size &&
+				hash == strings.ToLower(hash)
+			if revision < 0 {
+				return badf("accounts row plan_snapshot_revision must be non-negative")
+			}
+			if (revision == 0 && hash != "") ||
+				(revision > 0 && !validHash) {
+				return badf("accounts row plan snapshot fence is invalid")
+			}
+			if revision > 0 {
+				plan := plans.Free
+				if importedPlan, present := obj["plan"].(string); present {
+					plan = importedPlan
+				}
+				limits := map[string]int64{}
+				if importedLimits, present := obj["plan_limits"].(map[string]any); present {
+					for key, raw := range importedLimits {
+						limits[key], _ = importedInteger(raw)
+					}
+				}
+				policies := map[string]int64{}
+				if importedPolicies, present := obj["plan_policies"].(map[string]any); present {
+					for key, raw := range importedPolicies {
+						policies[key], _ = importedInteger(raw)
+					}
+				}
+				features := []string{}
+				if importedFeatures, present := obj["plan_features"].([]any); present {
+					features = make([]string, 0, len(importedFeatures))
+					for _, raw := range importedFeatures {
+						features = append(features, raw.(string))
+					}
+				}
+				expectedHash, err := plans.SnapshotHash(plan, limits, policies, features)
+				if err != nil {
+					return badf("accounts row plan snapshot hash could not be verified")
+				}
+				if hash != expectedHash {
+					return badf("accounts row plan snapshot hash does not match payload")
 				}
 			}
 		}
@@ -2126,7 +2203,14 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			scope, ok := ic.transcripts[subjectID]
 			agentID, _ := stringField(obj, "agent_id")
 			realmID, _ := stringField(obj, "realm_id")
-			if subjectType != "transcript" || !ok || scope.ownerAgentID != agentID || scope.realmID != realmID {
+			// Transcript payload retention deliberately outlives neither the
+			// immutable, value-free usage fact nor its rollup. An absent,
+			// well-shaped subject may therefore be a conversation already
+			// deleted by retention enforcement. If the conversation is
+			// present, keep the exact owner/realm anti-grafting check.
+			if subjectType != "transcript" ||
+				(ok && (scope.ownerAgentID != agentID || scope.realmID != realmID)) ||
+				(!ok && !validImportedGeneratedID(subjectID, "trn")) {
 				return badf("usage_events row transcript subject %q does not belong to its agent scope", subjectID)
 			}
 		}
@@ -3289,8 +3373,52 @@ func (ic *importCtx) validateImportedCurationRunInput(
 	if err != nil || len(orderKey) > 512 {
 		return fmt.Errorf("order_key is invalid")
 	}
+	prunedAt, pruned, err := importedOptionalTimestamp(obj, "transcript_pruned_at")
+	if err != nil {
+		return err
+	}
+	if pruned && (prunedAt == nil ||
+		ic.requireTimestampAtOrBeforeExport("transcript_pruned_at", *prunedAt) != nil) {
+		return fmt.Errorf("transcript_pruned_at is later than the archive or invalid")
+	}
+	activeRun := run.state == MemoryCurationRunOpen || run.state == MemoryCurationRunPlanned
+	validateTranscriptRange := func() error {
+		from, fromOK := importedGeneration(obj["sequence_from"], false)
+		until, untilOK := importedGeneration(obj["sequence_until"], false)
+		if !fromOK || !untilOK || until < from {
+			return fmt.Errorf("transcript input range is invalid")
+		}
+		return nil
+	}
+	validateTranscriptReference := func() error {
+		raw, supplied := obj["transcript_id"]
+		transcriptID, attached := optionalStringField(obj, "transcript_id")
+		if supplied && raw != nil && !attached {
+			return fmt.Errorf("transcript_id is invalid")
+		}
+		if !attached {
+			if !pruned || activeRun {
+				return fmt.Errorf("detached transcript input requires terminal run pruning metadata")
+			}
+			return nil
+		}
+		if pruned {
+			return fmt.Errorf("attached transcript input carries pruning metadata")
+		}
+		transcript, exists := ic.transcripts[transcriptID]
+		until, _ := importedGeneration(obj["sequence_until"], false)
+		if !exists || transcript.realmID != run.owner.realmID ||
+			transcript.ownerAgentID != run.owner.ownerID ||
+			until >= transcript.nextSequence {
+			return fmt.Errorf("transcript input range is outside its owner stream")
+		}
+		return nil
+	}
 	switch kind {
 	case "memory":
+		if pruned {
+			return fmt.Errorf("memory input carries transcript pruning metadata")
+		}
 		memoryID, err := requireStringField(obj, "memory_id")
 		version, ok := importedPositiveInteger(obj["memory_version"])
 		scope, exists := ic.memoryVersions[memoryVersionImportKey{memoryID: memoryID, version: version}]
@@ -3298,6 +3426,9 @@ func (ic *importCtx) validateImportedCurationRunInput(
 			return fmt.Errorf("memory input is outside its owner scope")
 		}
 	case "evidence":
+		if pruned {
+			return fmt.Errorf("evidence input carries transcript pruning metadata")
+		}
 		evidenceID, err := requireStringField(obj, "evidence_id")
 		evidence, exists := ic.memoryEvidence[evidenceID]
 		version := ic.memoryVersions[evidence.target]
@@ -3305,24 +3436,18 @@ func (ic *importCtx) validateImportedCurationRunInput(
 			return fmt.Errorf("evidence input is outside its owner scope")
 		}
 	case "transcript":
-		transcriptID, err := requireStringField(obj, "transcript_id")
-		transcript, exists := ic.transcripts[transcriptID]
-		from, fromOK := importedGeneration(obj["sequence_from"], false)
-		until, untilOK := importedGeneration(obj["sequence_until"], false)
-		if err != nil || !exists || transcript.realmID != run.owner.realmID ||
-			transcript.ownerAgentID != run.owner.ownerID || !fromOK || !untilOK ||
-			until < from || until >= transcript.nextSequence {
-			return fmt.Errorf("transcript input range is outside its owner stream")
+		if err := validateTranscriptRange(); err != nil {
+			return err
+		}
+		if err := validateTranscriptReference(); err != nil {
+			return err
 		}
 	case "transcript_coverage":
-		transcriptID, err := requireStringField(obj, "transcript_id")
-		transcript, exists := ic.transcripts[transcriptID]
-		from, fromOK := importedGeneration(obj["sequence_from"], false)
-		until, untilOK := importedGeneration(obj["sequence_until"], false)
-		if err != nil || !exists || transcript.realmID != run.owner.realmID ||
-			transcript.ownerAgentID != run.owner.ownerID || !fromOK || !untilOK ||
-			until < from || until >= transcript.nextSequence {
-			return fmt.Errorf("transcript coverage range is outside its owner stream")
+		if err := validateTranscriptRange(); err != nil {
+			return err
+		}
+		if err := validateTranscriptReference(); err != nil {
+			return err
 		}
 		counts, ok := obj["coverage_counts"].(map[string]any)
 		if !ok {
@@ -3335,14 +3460,29 @@ func (ic *importCtx) validateImportedCurationRunInput(
 		}
 	case "cursor":
 		sourceKind, err := requireStringField(obj, "cursor_source_kind")
-		streamID, streamErr := requireStringField(obj, "cursor_stream_id")
+		rawStream, streamSupplied := obj["cursor_stream_id"]
+		streamID, attached := optionalStringField(obj, "cursor_stream_id")
+		if streamSupplied && rawStream != nil && !attached {
+			return fmt.Errorf("cursor_stream_id is invalid")
+		}
 		expected, expectedOK := importedGeneration(obj["cursor_expected_prior"], true)
 		upper, upperOK := importedGeneration(obj["cursor_upper"], true)
+		if err != nil || !expectedOK || !upperOK || upper < expected {
+			return fmt.Errorf("cursor input interval is invalid")
+		}
+		if sourceKind == MemoryCurationSourceTranscript && !attached {
+			if !pruned || activeRun {
+				return fmt.Errorf("detached transcript cursor requires terminal run pruning metadata")
+			}
+			return nil
+		}
+		if pruned {
+			return fmt.Errorf("attached cursor input carries transcript pruning metadata")
+		}
 		position, exists := ic.memoryCurationCursors[memoryCurationCursorImportKey{
 			owner: run.owner, sourceKind: sourceKind, streamID: streamID,
 		}]
-		if err != nil || streamErr != nil || !expectedOK || !upperOK ||
-			upper < expected || !exists || position < expected {
+		if !attached || !exists || position < expected {
 			return fmt.Errorf("cursor input interval is invalid")
 		}
 	default:

@@ -52,6 +52,8 @@ var upgraders = map[int]Upgrader{
 	58: preserveSchema58Rows,
 	59: preserveSchema59Rows,
 	60: preserveSchema60Rows,
+	61: preserveSchema61Rows,
+	63: preserveSchema63Rows,
 }
 
 const (
@@ -98,6 +100,23 @@ func preserveSchema59Rows(_ string, row map[string]any) (map[string]any, error) 
 // all existing rows pass through unchanged; live canary work is deliberately
 // cell-local and is never synthesized during restore.
 func preserveSchema60Rows(_ string, row map[string]any) (map[string]any, error) {
+	return row, nil
+}
+
+// preserveSchema61Rows acknowledges migration 0062. Its account plan-policy
+// fields and curation-input pruning marker are additive, and its staged
+// retention check only widens the accepted shape. A schema-61 archive
+// therefore remains valid unchanged; the destination supplies column
+// defaults and starts its cell-local retention sweep cursors independently.
+func preserveSchema61Rows(_ string, row map[string]any) (map[string]any, error) {
+	return row, nil
+}
+
+// preserveSchema63Rows acknowledges migration 0064's metadata-only constraint
+// swap. Migration 0062 already introduced the nullable archive shape and 0063
+// validated it, so rows need no additional transformation when the widened
+// constraint takes the canonical name.
+func preserveSchema63Rows(_ string, row map[string]any) (map[string]any, error) {
 	return row, nil
 }
 

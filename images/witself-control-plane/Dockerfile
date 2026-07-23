@@ -1,8 +1,8 @@
 # witself-control-plane image, built by wrangler for Cloudflare Containers.
 # Unlike images/witself-server (COPY-only, binary prebuilt by GoReleaser), this
 # is multi-stage: wrangler builds straight from source with the repo root as the
-# build context (image_build_context in wrangler.jsonc). Cloudflare Containers
-# requires linux/amd64.
+# build context. The release renderer injects VERSION, COMMIT, and DATE through
+# wrangler.generated.jsonc image_vars. Cloudflare Containers requires linux/amd64.
 FROM golang:1.26 AS build
 WORKDIR /src
 COPY go.mod go.sum ./

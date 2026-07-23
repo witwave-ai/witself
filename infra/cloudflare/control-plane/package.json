@@ -3,14 +3,19 @@
   "private": true,
   "description": "Cloudflare Worker + Container deployment for witself-control-plane",
   "scripts": {
-    "deploy": "wrangler deploy",
-    "dev": "wrangler dev",
-    "test": "node --test test/*.test.mjs"
+    "activate:plan-lifecycle": "node scripts/activate-plan-lifecycle.mjs",
+    "config": "node scripts/render-wrangler.mjs",
+    "deploy": "npm run config && wrangler deploy --config wrangler.generated.jsonc && npm run verify",
+    "deploy:plans": "npm run config && wrangler deploy --config ../../../web/plans/wrangler.toml",
+    "dev": "wrangler dev --config wrangler.template.jsonc",
+    "secret:put": "npm run config && wrangler secret put --config wrangler.generated.jsonc",
+    "test": "node --test test/*.test.mjs",
+    "verify": "node scripts/verify-deployment.mjs"
   },
   "dependencies": {
     "@cloudflare/containers": "^0.0.28"
   },
   "devDependencies": {
-    "wrangler": "^4"
+    "wrangler": "4.112.0"
   }
 }

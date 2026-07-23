@@ -100,6 +100,10 @@ Expected server environment variables may include:
 | `WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE` | Maximum agents advanced by one style-rollout batch. Default: `100`; valid range: `1`-`1000`. |
 | `WITSELF_AVATAR_STYLE_ROLLOUT_INTERVAL` | Delay between style-rollout worker attempts. Default: `2s`; valid range: `100ms`-`1h`. |
 | `WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_TIMEOUT` | Deadline for one bounded style-rollout batch. Default: `30s`; valid range: `100ms`-`5m`. |
+| `WITSELF_TRANSCRIPT_RETENTION_ENABLED` | Enable the account-policy transcript-retention worker. Default: `false`. Leave false while the schema and binary converge; enabling alone remains non-destructive because the default mode is `preview`. |
+| `WITSELF_TRANSCRIPT_RETENTION_MODE` | Transcript-retention worker mode: `preview` (default) or `enforce`. Deletion requires both this value to be `enforce` and the enabled gate to be true. |
+| `WITSELF_TRANSCRIPT_RETENTION_BATCH_SIZE` | Maximum whole conversations considered by one retention batch. Default: `100`; valid range: `1`-`1000`. |
+| `WITSELF_TRANSCRIPT_RETENTION_INTERVAL` | Delay between retention batches. Default: `5m`; valid range: `1m`-`24h`. |
 | `WITSELF_OBJECT_STORE_PROVIDER` | Object/blob store provider when configured (exports, attachments, backups). |
 | `WITSELF_OBJECT_STORE_BUCKET` | Object/blob store bucket/container. |
 | `WITSELF_SEALED_PLANE_ENABLED` | Enable the sealed plane (secrets, TOTP). When true, the KMS variables below are required. An open-plane-only deployment may leave the sealed plane disabled. |

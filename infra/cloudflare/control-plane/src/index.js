@@ -73,6 +73,16 @@
 // counters at the same time.
 import { Container, getContainer } from "@cloudflare/containers";
 import {
+  containerEnvVars,
+  forwardAdminPolicyRequest,
+  handleInternalBridgeRequest,
+  isInternalBridgePath,
+  matchAdminPolicyPath,
+  PLAN_LIFECYCLE_ACTIVATE_PATH,
+  restartContainerWithEnvironment,
+  runScheduledPlanLifecycle,
+} from "./bridge.mjs";
+import {
   bestPlacementCell,
   bestPolicyCell,
   bestRebalanceCell,
@@ -84,6 +94,22 @@ import {
 export class Backend extends Container {
   defaultPort = 8080;
   sleepAfter = "10m";
+
+  constructor(ctx, env) {
+    super(ctx, env);
+    // Secrets are injected at runtime from the Worker's bindings, never
+    // embedded in wrangler.jsonc. Only bridge configuration crosses into the
+    // container; R2 bindings/credentials remain Worker-only.
+    this.envVars = containerEnvVars(env);
+  }
+
+  // Worker secrets are projected only when a container process starts. This
+  // RPC is the explicit activation boundary for a secret-only lifecycle gate
+  // change: replace the old process and wait for the new port before returning.
+  async restartWithEnvironment(freshEnv) {
+    await restartContainerWithEnvironment(this, freshEnv);
+    return { restarted: true };
+  }
 }
 
 const json = (obj, status = 200, extra = {}) =>
@@ -4259,6 +4285,23 @@ export default {
       return handleAdmins(request, env, url);
     }
 
+    // Account retention and plan-override administration crosses a strict
+    // Worker->Go trust bridge. The caller's witself_adm_* token is verified at
+    // the edge and is never forwarded. Go receives only the internal bridge
+    // bearer plus the Worker-verified immutable X-Witself-Admin-ID and display
+    // X-Witself-Admin-Handle for its audit record.
+    if (matchAdminPolicyPath(url.pathname)) {
+      const admin = await adminAuthorized(request, env);
+      if (!admin) return err("unauthorized", 401);
+      return forwardAdminPolicyRequest(
+        request,
+        env,
+        admin,
+        (bridgedRequest) =>
+          getContainer(env.CONTROL_PLANE, "singleton").fetch(bridgedRequest),
+      );
+    }
+
     // Admin-side fan-out routes (admin-token authorized). Fleet-wide
     // ticket list + per-account thread/reply/state. The Worker is the
     // only door — the CLI never touches a cell directly.
@@ -4375,6 +4418,20 @@ export default {
       return handleUndoEmail(env, uem[1]);
     }
 
+    // Go->Worker callbacks for account discovery and cell plan application.
+    // This namespace always terminates at the Worker, including unknown paths,
+    // so a callback can never fall through and loop back into Go.
+    if (isInternalBridgePath(url.pathname)) {
+      return handleInternalBridgeRequest(
+        request,
+        env,
+        fetch,
+        url.pathname === PLAN_LIFECYCLE_ACTIVATE_PATH
+          ? () => getContainer(env.CONTROL_PLANE, "singleton")
+          : undefined,
+      );
+    }
+
     // Cold path: the Go container.
     return getContainer(env.CONTROL_PLANE, "singleton").fetch(request);
   },
@@ -4383,5 +4440,9 @@ export default {
   async scheduled(_event, env, ctx) {
     ctx.waitUntil(reapExpiredPendings(env));
     ctx.waitUntil(runScheduledPlacementRunner(env));
+    ctx.waitUntil(runScheduledPlanLifecycle(
+      env,
+      (request) => getContainer(env.CONTROL_PLANE, "singleton").fetch(request),
+    ));
   },
 };

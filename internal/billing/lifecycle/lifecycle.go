@@ -76,6 +76,50 @@ type Pending struct {
 	Requested time.Time
 }
 
+// AdminActor is the immutable administrator identity attached to a policy
+// mutation. ID is the durable registry key; Handle is non-secret display
+// metadata and must never be used as the audit identity by itself.
+type AdminActor struct {
+	ID     string `json:"id"`
+	Handle string `json:"handle"`
+}
+
+// AccountPlanOverride classifies an account independently of its billing
+// provider. It is the comp/backfill seam: billing Entitled remains truthful
+// while the effective plan snapshot can be Enterprise (or another tier).
+type AccountPlanOverride struct {
+	Plan        string    `json:"plan"`
+	ActorID     string    `json:"actor_id"`
+	ActorHandle string    `json:"actor_handle"`
+	Reason      string    `json:"reason"`
+	SetAt       time.Time `json:"set_at"`
+}
+
+// TranscriptRetentionOverride is an account-specific exception to its plan
+// default. Days=nil is an explicit indefinite override; absence of the whole
+// struct means inherit the current plan default.
+type TranscriptRetentionOverride struct {
+	Days        *int64    `json:"days"`
+	ActorID     string    `json:"actor_id"`
+	ActorHandle string    `json:"actor_handle"`
+	Reason      string    `json:"reason"`
+	SetAt       time.Time `json:"set_at"`
+}
+
+// AdminChange is the append-only audit history embedded in the account's
+// compare-and-swap record. Kind determines how nil values are interpreted.
+type AdminChange struct {
+	Kind          string    `json:"kind"`
+	ActorID       string    `json:"actor_id"`
+	ActorHandle   string    `json:"actor_handle"`
+	Reason        string    `json:"reason"`
+	At            time.Time `json:"at"`
+	PlanFrom      string    `json:"plan_from,omitempty"`
+	PlanTo        string    `json:"plan_to,omitempty"`
+	RetentionFrom *int64    `json:"retention_from,omitempty"`
+	RetentionTo   *int64    `json:"retention_to,omitempty"`
+}
+
 // Record is one account's billing state. Plan facts only — identity stays in
 // the control plane's registry, and the account -> cell mapping stays in the
 // directory.
@@ -96,6 +140,12 @@ type Record struct {
 	// predates it is stale (redelivered or out of order) and is dropped.
 	EntitledAt time.Time
 	Pending    *Pending
+	// PlanOverride and TranscriptRetentionOverride are administrator-owned
+	// entitlement exceptions. They never create or mutate provider billing
+	// objects. AdminHistory preserves every real transition with attribution.
+	PlanOverride                *AccountPlanOverride
+	TranscriptRetentionOverride *TranscriptRetentionOverride
+	AdminHistory                []AdminChange
 	// PastDueSince is set while the provider reports failed renewals. Grace
 	// policy (when to suspend) is a control-plane decision layered on top.
 	PastDueSince *time.Time
@@ -110,6 +160,14 @@ type Record struct {
 	// Entitled != Applied) until the account is pruned and Reconcile clears
 	// this — never a silent degrade.
 	ApplyBlocked string
+	// DesiredSnapshotHash/SnapshotRevision are the current control-plane
+	// apply fence. AppliedSnapshotRevision/Hash are updated only after the cell
+	// returns an exact acknowledgement for that revision. The cell rejects
+	// lower revisions, fencing concurrent CP replicas and rolling restarts.
+	DesiredSnapshotHash     string
+	SnapshotRevision        int64
+	AppliedSnapshotRevision int64
+	AppliedSnapshotHash     string
 	// Version is the optimistic-concurrency token. Zero means "not yet
 	// stored"; Store.Put refuses stale versions (ErrStale) and increments on
 	// success. Callers never touch it.
@@ -129,6 +187,17 @@ var ErrStale = errors.New("lifecycle: stale record version")
 // else to a generic 500, so an R2 outage never reads as a policy conflict
 // and backend detail never reaches the CLI.
 var ErrRefusal = errors.New("plan change refused")
+
+// ErrBillingUnavailable means the control plane is running the account plan
+// lifecycle without a payment provider. Status, plan defaults, administrator
+// overrides, seeding, and cell enforcement remain available in this mode, but
+// no customer billing mutation may fabricate a charge or subscription.
+var ErrBillingUnavailable = errors.New("billing provider is not configured")
+
+// ErrAdminInput identifies a malformed administrator override. It is separate
+// from ErrRefusal because these endpoints are an operator surface, not a
+// customer plan-change decision.
+var ErrAdminInput = errors.New("invalid admin plan override")
 
 // refuse builds a user-addressed refusal.
 func refuse(format string, args ...any) error {
@@ -155,7 +224,15 @@ type Store interface {
 // system endpoint). The control plane implements it with its cell client; the
 // cell then enforces autonomously.
 type Applier interface {
-	Apply(ctx context.Context, accountID, plan string, limits map[string]int64, features []string) error
+	Apply(ctx context.Context, accountID string, request ApplyRequest) (ApplyAck, error)
+}
+
+// ApplyFenceReader is the optional read side of Applier. Production appliers
+// implement it so a restored/rolled-back lifecycle store cannot reuse a
+// revision the cell has already accepted. Only the fence is returned: the
+// control plane never adopts plan payload from a cell.
+type ApplyFenceReader interface {
+	ReadApplyFence(ctx context.Context, accountID string) (ApplyFence, error)
 }
 
 // FitChecker reports why an account does NOT fit a downgrade target (agents
@@ -190,6 +267,36 @@ type Outcome struct {
 	Effective time.Time
 }
 
+// PlanSnapshot is the control plane's resolved account policy. DefaultPolicies
+// are the effective plan's catalog defaults; Policies additionally reflect
+// account-level overrides and are the exact map pushed to the cell.
+type PlanSnapshot struct {
+	Plan            string
+	Limits          map[string]int64
+	DefaultPolicies map[string]int64
+	Policies        map[string]int64
+	Features        []string
+	Hash            string
+}
+
+// ApplyRequest is one monotonic cell snapshot write.
+type ApplyRequest struct {
+	Revision int64
+	PlanSnapshot
+}
+
+// ApplyAck proves the exact revision/hash the cell durably accepted.
+type ApplyAck struct {
+	Revision int64
+	Hash     string
+}
+
+// ApplyFence is the value-minimal current cell acknowledgement.
+type ApplyFence struct {
+	Revision int64
+	Hash     string
+}
+
 // Config assembles a Manager.
 type Config struct {
 	Catalog *plans.Catalog
@@ -211,13 +318,10 @@ type Manager struct {
 	cfg Config
 
 	// applyMu serializes apply() PER ACCOUNT. The state machine's own
-	// concurrency (CAS on Record.Version) prevents lost writes, but the
-	// PUSH to the cell is an unconditional POST — two concurrent applies
-	// for the same account (a webhook fold + a Reconcile sweep) could
-	// reach the cell out of order, and the cell has no idempotency token
-	// to reject the stale one. Serialization here keeps the local order
-	// authoritative. Multi-replica CPs would need a per-account lease
-	// (registry object with TTL), which lands with the fleet.
+	// concurrency (CAS on Record.Version) prevents lost writes. The mutex
+	// avoids redundant local pushes while the revision/hash fence on the
+	// cell remains authoritative across control-plane replicas and rejects
+	// stale or conflicting snapshots.
 	applyMuMap sync.Mutex
 	applyMu    map[string]*sync.Mutex
 }
@@ -228,10 +332,17 @@ func NewManager(cfg Config) (*Manager, error) {
 		return nil, fmt.Errorf("lifecycle: Catalog, Store, and Applier are all required")
 	}
 	if len(cfg.Providers) == 0 {
-		return nil, fmt.Errorf("lifecycle: at least one named provider is required")
-	}
-	if _, ok := cfg.Providers[cfg.Default]; !ok {
-		return nil, fmt.Errorf("lifecycle: Default %q is not a configured provider", cfg.Default)
+		if cfg.Default != "" {
+			return nil, fmt.Errorf("lifecycle: Default %q requires a configured provider", cfg.Default)
+		}
+		cfg.Providers = map[string]billing.Provider{}
+	} else {
+		if cfg.Default == "" {
+			return nil, fmt.Errorf("lifecycle: Default is required when providers are configured")
+		}
+		if _, ok := cfg.Providers[cfg.Default]; !ok {
+			return nil, fmt.Errorf("lifecycle: Default %q is not a configured provider", cfg.Default)
+		}
 	}
 	if cfg.Fit == nil {
 		cfg.Fit = AlwaysFits{}
@@ -243,6 +354,13 @@ func NewManager(cfg Config) (*Manager, error) {
 		cfg.Now = time.Now
 	}
 	return &Manager{cfg: cfg, applyMu: map[string]*sync.Mutex{}}, nil
+}
+
+// BillingAvailable reports whether customer-initiated subscription mutations
+// have a real configured provider. It does not affect administrator-owned
+// plan/policy overrides.
+func (m *Manager) BillingAvailable() bool {
+	return len(m.cfg.Providers) > 0 && m.cfg.Default != ""
 }
 
 // perAccountApplyMu returns (creating on demand) the mutex serializing apply
@@ -263,6 +381,9 @@ func (m *Manager) perAccountApplyMu(accountID string) *sync.Mutex {
 // a configuration error — a partner was removed while accounts still lived
 // on it — and every operation on such a record fails loudly.
 func (m *Manager) providerFor(r Record) (string, billing.Provider, error) {
+	if !m.BillingAvailable() {
+		return "", nil, ErrBillingUnavailable
+	}
 	name := r.Provider
 	if name == "" {
 		name = m.cfg.Default
@@ -329,6 +450,363 @@ func (m *Manager) Status(ctx context.Context, accountID, email string) (Record, 
 	return m.load(ctx, accountID, email)
 }
 
+// EnsureAccount persists the Personal/free lifecycle baseline for one
+// directory-authoritative account and converges its exact fenced snapshot onto
+// the cell. It never creates provider objects. Existing lifecycle records are
+// preserved and merely reconciled, making this safe for both initial backfill
+// and recurring discovery of newly activated accounts.
+//
+// The returned created flag describes only whether this call won the
+// create-only store race. applyPending remains true when the cell could not
+// acknowledge the exact snapshot, so callers can expose aggregate retryable
+// work without logging account identifiers.
+func (m *Manager) EnsureAccount(ctx context.Context, accountID string) (created, applyPending bool, err error) {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return false, false, errors.New("lifecycle: account id is required")
+	}
+	for range casAttempts {
+		_, ok, err := m.cfg.Store.Get(ctx, accountID)
+		if err != nil {
+			return false, false, err
+		}
+		if ok {
+			if err := m.ReconcileAccount(ctx, accountID); err != nil {
+				current, snapshot, readErr := m.ResolvedStatus(ctx, accountID, "")
+				if readErr != nil {
+					return false, true, errors.Join(err, readErr)
+				}
+				return false, SnapshotApplyPending(current, snapshot), err
+			}
+			current, snapshot, err := m.ResolvedStatus(ctx, accountID, "")
+			if err != nil {
+				return false, false, err
+			}
+			return false, SnapshotApplyPending(current, snapshot), nil
+		}
+		r := Record{
+			AccountID: accountID,
+			Entitled:  plans.Free,
+			Applied:   plans.Free,
+		}
+		switch err := m.cfg.Store.Put(ctx, r); {
+		case err == nil:
+		case errors.Is(err, ErrStale):
+			continue
+		default:
+			return false, false, err
+		}
+		if err := m.apply(ctx, accountID); err != nil {
+			current, snapshot, readErr := m.ResolvedStatus(ctx, accountID, "")
+			if readErr != nil {
+				return true, true, errors.Join(err, readErr)
+			}
+			return true, SnapshotApplyPending(current, snapshot), err
+		}
+		current, snapshot, err := m.ResolvedStatus(ctx, accountID, "")
+		if err != nil {
+			return true, false, err
+		}
+		return true, SnapshotApplyPending(current, snapshot), nil
+	}
+	return false, false, fmt.Errorf("lifecycle: account %s: too much contention", accountID)
+}
+
+// ResolvedStatus returns billing state plus the exact effective snapshot. It
+// is read-only: an unknown account still synthesizes Personal/free defaults
+// without creating a registry object.
+func (m *Manager) ResolvedStatus(ctx context.Context, accountID, email string) (Record, PlanSnapshot, error) {
+	r, err := m.load(ctx, accountID, email)
+	if err != nil {
+		return Record{}, PlanSnapshot{}, err
+	}
+	snapshot, err := m.resolveSnapshot(r)
+	if err != nil {
+		return Record{}, PlanSnapshot{}, err
+	}
+	return r, snapshot, nil
+}
+
+func (m *Manager) resolveSnapshot(r Record) (PlanSnapshot, error) {
+	planID := r.Entitled
+	if r.PlanOverride != nil {
+		planID = r.PlanOverride.Plan
+	}
+	p, ok := m.cfg.Catalog.Get(planID)
+	if !ok {
+		return PlanSnapshot{}, fmt.Errorf("effective plan %q is not in the catalog", planID)
+	}
+	snapshot := PlanSnapshot{
+		Plan:            p.ID,
+		Limits:          cloneInt64Map(p.Limits),
+		DefaultPolicies: cloneInt64Map(p.Policies),
+		Policies:        cloneInt64Map(p.Policies),
+		Features:        append([]string(nil), p.Features...),
+	}
+	if snapshot.Limits == nil {
+		snapshot.Limits = map[string]int64{}
+	}
+	if snapshot.DefaultPolicies == nil {
+		snapshot.DefaultPolicies = map[string]int64{}
+	}
+	if snapshot.Policies == nil {
+		snapshot.Policies = map[string]int64{}
+	}
+	if override := r.TranscriptRetentionOverride; override != nil {
+		if override.Days == nil {
+			delete(snapshot.Policies, plans.TranscriptRetentionDaysPolicy)
+		} else {
+			snapshot.Policies[plans.TranscriptRetentionDaysPolicy] = *override.Days
+		}
+	}
+	if err := plans.ValidatePolicies(snapshot.Policies); err != nil {
+		return PlanSnapshot{}, fmt.Errorf("resolve account %s policies: %w", r.AccountID, err)
+	}
+	sort.Strings(snapshot.Features)
+	hash, err := plans.SnapshotHash(
+		snapshot.Plan, snapshot.Limits, snapshot.Policies, snapshot.Features)
+	if err != nil {
+		return PlanSnapshot{}, fmt.Errorf("hash account plan snapshot: %w", err)
+	}
+	snapshot.Hash = hash
+	return snapshot, nil
+}
+
+func cloneInt64Map(in map[string]int64) map[string]int64 {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]int64, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+// planRank uses the catalog's documented cheapest-to-richest display order.
+// Price cannot establish this ordering for custom-priced Enterprise because
+// an intentionally absent price is represented as zero.
+func (m *Manager) planRank(planID string) (int, bool) {
+	for i, plan := range m.cfg.Catalog.Plans {
+		if plan.ID == planID {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+func retentionDays(policies map[string]int64) *int64 {
+	value, ok := policies[plans.TranscriptRetentionDaysPolicy]
+	if !ok {
+		return nil
+	}
+	valueCopy := value
+	return &valueCopy
+}
+
+func sameOptionalDays(a, b *int64) bool {
+	return (a == nil && b == nil) || (a != nil && b != nil && *a == *b)
+}
+
+func validateAdminChange(actor AdminActor, reason string) (AdminActor, string, error) {
+	actor.ID = strings.TrimSpace(actor.ID)
+	actor.Handle = strings.TrimSpace(actor.Handle)
+	reason = strings.TrimSpace(reason)
+	switch {
+	case actor.ID == "" || len(actor.ID) > 128:
+		return AdminActor{}, "", fmt.Errorf("%w: actor id must be 1-128 characters", ErrAdminInput)
+	case actor.Handle == "" || len(actor.Handle) > 128:
+		return AdminActor{}, "", fmt.Errorf("%w: actor handle must be 1-128 characters", ErrAdminInput)
+	case reason == "" || len(reason) > 512:
+		return AdminActor{}, "", fmt.Errorf("%w: reason must be 1-512 characters", ErrAdminInput)
+	default:
+		return actor, reason, nil
+	}
+}
+
+// SetAccountPlanOverride changes the account's effective plan classification
+// without changing Entitled, Provider, CustomerID, invoices, or subscriptions.
+// This is the safe backfill/comp path for an existing Personal account that
+// should be treated as Enterprise.
+func (m *Manager) SetAccountPlanOverride(
+	ctx context.Context,
+	accountID, planID string,
+	actor AdminActor,
+	reason string,
+) (Record, error) {
+	actor, reason, err := validateAdminChange(actor, reason)
+	if err != nil {
+		return Record{}, err
+	}
+	target, ok := m.cfg.Catalog.Get(strings.TrimSpace(planID))
+	if !ok {
+		return Record{}, fmt.Errorf("%w: unknown plan %q", ErrAdminInput, planID)
+	}
+	now := m.cfg.Now()
+	r, err := m.mutate(ctx, accountID, "", func(r *Record) error {
+		currentPlan := r.Entitled
+		if r.PlanOverride != nil {
+			currentPlan = r.PlanOverride.Plan
+			if currentPlan == target.ID {
+				return errSkipWrite
+			}
+		}
+		r.PlanOverride = &AccountPlanOverride{
+			Plan: target.ID, ActorID: actor.ID, ActorHandle: actor.Handle,
+			Reason: reason, SetAt: now,
+		}
+		r.AdminHistory = append(r.AdminHistory, AdminChange{
+			Kind: "plan_override_set", ActorID: actor.ID, ActorHandle: actor.Handle,
+			Reason: reason, At: now,
+			PlanFrom: currentPlan, PlanTo: target.ID,
+		})
+		return nil
+	})
+	if err != nil {
+		return Record{}, err
+	}
+	// The override is already durable. A failed cell push is intentionally
+	// represented as apply_pending and retried by reconciliation.
+	_ = m.apply(ctx, accountID)
+	return r, nil
+}
+
+// ClearAccountPlanOverride restores the provider-backed entitlement. Clearing
+// an absent override is an idempotent no-op.
+func (m *Manager) ClearAccountPlanOverride(
+	ctx context.Context,
+	accountID string,
+	actor AdminActor,
+	reason string,
+) (Record, error) {
+	actor, reason, err := validateAdminChange(actor, reason)
+	if err != nil {
+		return Record{}, err
+	}
+	now := m.cfg.Now()
+	r, err := m.mutate(ctx, accountID, "", func(r *Record) error {
+		if r.PlanOverride == nil {
+			return errSkipWrite
+		}
+		from := r.PlanOverride.Plan
+		r.PlanOverride = nil
+		r.AdminHistory = append(r.AdminHistory, AdminChange{
+			Kind: "plan_override_cleared", ActorID: actor.ID, ActorHandle: actor.Handle,
+			Reason: reason, At: now,
+			PlanFrom: from, PlanTo: r.Entitled,
+		})
+		return nil
+	})
+	if err != nil {
+		return Record{}, err
+	}
+	// The override is already durable. A failed cell push is intentionally
+	// represented as apply_pending and retried by reconciliation.
+	_ = m.apply(ctx, accountID)
+	return r, nil
+}
+
+// SetTranscriptRetentionOverride sets an account policy exception independent
+// of its plan. days=nil is an explicit indefinite exception. The caller must
+// use ClearTranscriptRetentionOverride to resume inheritance.
+func (m *Manager) SetTranscriptRetentionOverride(
+	ctx context.Context,
+	accountID string,
+	days *int64,
+	actor AdminActor,
+	reason string,
+) (Record, error) {
+	actor, reason, err := validateAdminChange(actor, reason)
+	if err != nil {
+		return Record{}, err
+	}
+	if days != nil {
+		if err := plans.ValidatePolicies(map[string]int64{
+			plans.TranscriptRetentionDaysPolicy: *days,
+		}); err != nil {
+			return Record{}, fmt.Errorf("%w: %v", ErrAdminInput, err)
+		}
+	}
+	now := m.cfg.Now()
+	r, err := m.mutate(ctx, accountID, "", func(r *Record) error {
+		if current := r.TranscriptRetentionOverride; current != nil &&
+			sameOptionalDays(current.Days, days) {
+			return errSkipWrite
+		}
+		before, err := m.resolveSnapshot(*r)
+		if err != nil {
+			return err
+		}
+		var storedDays *int64
+		if days != nil {
+			value := *days
+			storedDays = &value
+		}
+		r.TranscriptRetentionOverride = &TranscriptRetentionOverride{
+			Days: storedDays, ActorID: actor.ID, ActorHandle: actor.Handle,
+			Reason: reason, SetAt: now,
+		}
+		r.AdminHistory = append(r.AdminHistory, AdminChange{
+			Kind:    "transcript_retention_override_set",
+			ActorID: actor.ID, ActorHandle: actor.Handle,
+			Reason: reason, At: now,
+			RetentionFrom: retentionDays(before.Policies), RetentionTo: storedDays,
+		})
+		return nil
+	})
+	if err != nil {
+		return Record{}, err
+	}
+	// The override is already durable. A failed cell push is intentionally
+	// represented as apply_pending and retried by reconciliation.
+	_ = m.apply(ctx, accountID)
+	return r, nil
+}
+
+// ClearTranscriptRetentionOverride restores the current effective plan
+// default. A later plan-default change therefore flows through automatically.
+func (m *Manager) ClearTranscriptRetentionOverride(
+	ctx context.Context,
+	accountID string,
+	actor AdminActor,
+	reason string,
+) (Record, error) {
+	actor, reason, err := validateAdminChange(actor, reason)
+	if err != nil {
+		return Record{}, err
+	}
+	now := m.cfg.Now()
+	r, err := m.mutate(ctx, accountID, "", func(r *Record) error {
+		if r.TranscriptRetentionOverride == nil {
+			return errSkipWrite
+		}
+		before, err := m.resolveSnapshot(*r)
+		if err != nil {
+			return err
+		}
+		r.TranscriptRetentionOverride = nil
+		after, err := m.resolveSnapshot(*r)
+		if err != nil {
+			return err
+		}
+		r.AdminHistory = append(r.AdminHistory, AdminChange{
+			Kind:    "transcript_retention_override_cleared",
+			ActorID: actor.ID, ActorHandle: actor.Handle,
+			Reason: reason, At: now,
+			RetentionFrom: retentionDays(before.Policies),
+			RetentionTo:   retentionDays(after.Policies),
+		})
+		return nil
+	})
+	if err != nil {
+		return Record{}, err
+	}
+	// The override is already durable. A failed cell push is intentionally
+	// represented as apply_pending and retried by reconciliation.
+	_ = m.apply(ctx, accountID)
+	return r, nil
+}
+
 // cancelReplacedPending cancels the provider-side state of a pending change
 // that is being replaced (one pending at a time — but the partner must agree,
 // or a "replaced" scheduled downgrade would still fire at period end and a
@@ -349,6 +827,9 @@ func (m *Manager) cancelReplacedPending(ctx context.Context, r Record) error {
 // lead recorded). A new request replaces any pending change — including its
 // provider-side state.
 func (m *Manager) RequestUpgrade(ctx context.Context, accountID, email, planID string) (Outcome, error) {
+	if !m.BillingAvailable() {
+		return Outcome{}, ErrBillingUnavailable
+	}
 	target, ok := m.cfg.Catalog.Get(planID)
 	if !ok {
 		return Outcome{}, refuse("unknown plan %q", planID)
@@ -365,15 +846,17 @@ func (m *Manager) RequestUpgrade(ctx context.Context, accountID, email, planID s
 		if target.ID == r.Entitled {
 			return refuse("already on the %s plan", target.ID)
 		}
-		if target.PriceCents() <= current.PriceCents() {
-			return refuse("%s is not an upgrade from %s — use downgrade", target.ID, current.ID)
-		}
 		if !target.Available {
 			// Not self-serve yet: the stored desire IS the sales lead; the
-			// hoop is "talk to us" instead of "pay".
+			// hoop is "talk to us" instead of "pay". This check precedes
+			// price ordering because custom-priced Enterprise intentionally
+			// has no catalog amount.
 			replaced = *r
 			r.Pending = &Pending{Kind: PendingContact, Plan: target.ID, Requested: now}
 			return nil
+		}
+		if target.PriceCents() <= current.PriceCents() {
+			return refuse("%s is not an upgrade from %s — use downgrade", target.ID, current.ID)
 		}
 		if !target.Purchasable() {
 			return refuse("plan %q is not purchasable", target.ID)
@@ -440,7 +923,10 @@ func (m *Manager) RequestUpgrade(ctx context.Context, accountID, email, planID s
 		return Outcome{}, err
 	}
 	if act.Done {
-		m.apply(ctx, folded.AccountID)
+		// Billing is already durable. apply records its own pending/error
+		// fence for reconciliation, so a transient cell failure must not
+		// make the caller retry the provider mutation.
+		_ = m.apply(ctx, folded.AccountID)
 		return Outcome{Kind: "done", Plan: target.ID}, nil
 	}
 	return Outcome{Kind: "action", Plan: target.ID, URL: act.URL}, nil
@@ -464,6 +950,9 @@ func (m *Manager) releaseClaim(ctx context.Context, accountID string, claim Reco
 // the account must be pruned first; nothing is silently degraded. The check
 // runs again, authoritatively, before the snapshot is applied.
 func (m *Manager) RequestDowngrade(ctx context.Context, accountID, email, planID string) (Outcome, error) {
+	if !m.BillingAvailable() {
+		return Outcome{}, ErrBillingUnavailable
+	}
 	target, ok := m.cfg.Catalog.Get(planID)
 	if !ok {
 		return Outcome{}, refuse("unknown plan %q", planID)
@@ -526,6 +1015,9 @@ func (m *Manager) RequestDowngrade(ctx context.Context, accountID, email, planID
 // sees it and this returns "nothing is pending" instead of clobbering the new
 // entitlement.
 func (m *Manager) CancelPending(ctx context.Context, accountID string) error {
+	if !m.BillingAvailable() {
+		return ErrBillingUnavailable
+	}
 	// Disarm the provider FIRST: if its cancel fails, the record still shows
 	// the pending change (truthful, retryable). The old order cleared local
 	// state first, so a provider blip left a schedule armed at the partner
@@ -637,14 +1129,63 @@ func (m *Manager) OnEvents(ctx context.Context, provider string, events []billin
 		if err != nil {
 			return err
 		}
-		m.apply(ctx, r.AccountID)
+		// The provider event is already folded. Keep webhook processing
+		// successful and let the durable apply fence reconcile any
+		// transient cell failure.
+		_ = m.apply(ctx, r.AccountID)
 	}
 	return nil
 }
 
-// Reconcile is the periodic sweep: it expires lapsed upgrade requests (the
-// abandoned-checkout TTL) and retries every record whose cell snapshot lags
-// its entitlement — entitled != applied never rests.
+// ReconcileAccount expires a lapsed upgrade request and retries one account's
+// exact cell snapshot. Directory-driven callers use this bounded form so a
+// control-plane tick performs no all-account R2 scan.
+func (m *Manager) ReconcileAccount(ctx context.Context, accountID string) error {
+	return m.reconcileAccount(ctx, accountID, m.cfg.Now())
+}
+
+func (m *Manager) reconcileAccount(ctx context.Context, accountID string, now time.Time) error {
+	r, err := m.load(ctx, accountID, "")
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	if p := r.Pending; p != nil &&
+		p.Kind == PendingUpgrade && now.After(p.Expires) {
+		// Provider state is disarmed BEFORE the local pending marker is
+		// cleared. In providerless recovery mode a pinned legacy record
+		// therefore remains truthful and retryable until its provider is
+		// configured again.
+		if err := m.cancelReplacedPending(ctx, r); err != nil {
+			firstErr = err
+		} else {
+			expected := *p
+			r, err = m.mutate(ctx, accountID, "", func(r *Record) error {
+				current := r.Pending
+				if current == nil ||
+					current.Kind != expected.Kind ||
+					current.Plan != expected.Plan ||
+					!current.Requested.Equal(expected.Requested) ||
+					!now.After(current.Expires) {
+					return errSkipWrite
+				}
+				r.Pending = nil
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if err := m.apply(ctx, r.AccountID); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
+
+// Reconcile is the compatibility full sweep used by standalone callers. The
+// hosted directory reconciler uses ReconcileAccount through EnsureAccount so
+// each tick remains bounded to one directory page.
 func (m *Manager) Reconcile(ctx context.Context) error {
 	records, err := m.cfg.Store.List(ctx)
 	if err != nil {
@@ -653,84 +1194,155 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 	now := m.cfg.Now()
 	var firstErr error
 	for _, snapshot := range records {
-		var expired Record
-		r, err := m.mutate(ctx, snapshot.AccountID, "", func(r *Record) error {
-			p := r.Pending
-			if p == nil || p.Kind != PendingUpgrade || !now.After(p.Expires) {
-				return errSkipWrite
-			}
-			expired = *r
-			r.Pending = nil
-			return nil
-		})
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		if expired.Pending != nil {
-			if err := m.cancelReplacedPending(ctx, expired); err != nil && firstErr == nil {
-				firstErr = err
-			}
-		}
-		if r.Entitled != r.Applied {
-			m.apply(ctx, r.AccountID)
+		if err := m.reconcileAccount(ctx, snapshot.AccountID, now); err != nil &&
+			firstErr == nil {
+			firstErr = err
 		}
 	}
 	return firstErr
 }
 
-// apply converges the cell onto the entitled plan. For downgrades it runs the
+// apply converges the cell onto the effective plan. For downgrades it runs the
 // AUTHORITATIVE fit check first — the advisory one ran at request time, but
 // usage kept moving while the hoops were jumped — and refuses to push a
 // snapshot the account no longer fits: the cell keeps enforcing the old plan
 // (in the customer's favor), the gap stays visible as Entitled != Applied plus
 // ApplyBlocked, and every Reconcile retries until the account is pruned.
-// Push failures are likewise left for Reconcile — the one state that never
-// rests. Errors are deliberately not returned: convergence is eventual.
-func (m *Manager) apply(ctx context.Context, accountID string) {
+// Push failures are likewise left pending for Reconcile — the one state that
+// never rests — and are returned to the caller for aggregate observability.
+func (m *Manager) apply(ctx context.Context, accountID string) error {
 	// Serialize per account. See applyMuMap on Manager.
 	mu := m.perAccountApplyMu(accountID)
 	mu.Lock()
 	defer mu.Unlock()
 	r, err := m.load(ctx, accountID, "")
-	if err != nil || r.Version == 0 || r.Entitled == r.Applied {
-		return
+	if err != nil {
+		return err
 	}
-	target, ok := m.cfg.Catalog.Get(r.Entitled)
+	if r.Version == 0 {
+		return fmt.Errorf("lifecycle: account %s has no stored plan record", accountID)
+	}
+	// Read only the cell's acknowledgement fence. A restored lifecycle store
+	// can be behind the cell, but the cell payload is not entitlement
+	// authority and is never adopted. Instead we advance above the observed
+	// revision and reapply our own resolved snapshot.
+	observed := ApplyFence{
+		Revision: r.AppliedSnapshotRevision,
+		Hash:     r.AppliedSnapshotHash,
+	}
+	if reader, ok := m.cfg.Applier.(ApplyFenceReader); ok {
+		observed, err = reader.ReadApplyFence(ctx, accountID)
+		if err != nil {
+			return fmt.Errorf("read cell plan fence: %w", err)
+		}
+		if observed.Revision < 0 ||
+			(observed.Revision == 0 && observed.Hash != "") ||
+			(observed.Revision > 0 && observed.Hash == "") {
+			return errors.New("cell returned an invalid plan snapshot fence")
+		}
+	}
+	// Mint a monotonic apply revision whenever the resolved snapshot changes
+	// OR the cell fence differs from the record's acknowledged state. The
+	// latter is the R2 rollback/cell rollback recovery path.
+	r, err = m.mutate(ctx, accountID, "", func(r *Record) error {
+		current, err := m.resolveSnapshot(*r)
+		if err != nil {
+			return err
+		}
+		cellMatchesRecord := observed.Revision == r.AppliedSnapshotRevision &&
+			observed.Hash == r.AppliedSnapshotHash
+		if !SnapshotApplyPending(*r, current) && cellMatchesRecord {
+			return errSkipWrite
+		}
+		// A previously minted desired revision that is already above the
+		// observed cell fence remains safe to retry verbatim. Do not burn a
+		// new R2 version/revision on every transient apply failure.
+		if r.DesiredSnapshotHash == current.Hash &&
+			r.SnapshotRevision > observed.Revision {
+			return errSkipWrite
+		}
+		maxRevision := r.SnapshotRevision
+		if observed.Revision > maxRevision {
+			maxRevision = observed.Revision
+		}
+		if maxRevision == int64(^uint64(0)>>1) {
+			return errors.New("lifecycle: plan snapshot revision exhausted")
+		}
+		r.SnapshotRevision = maxRevision + 1
+		r.DesiredSnapshotHash = current.Hash
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	snapshot, err := m.resolveSnapshot(r)
+	if err != nil {
+		return err
+	}
+	cellMatchesRecord := observed.Revision == r.AppliedSnapshotRevision &&
+		observed.Hash == r.AppliedSnapshotHash
+	if !SnapshotApplyPending(r, snapshot) && cellMatchesRecord {
+		return nil
+	}
+	target, ok := m.cfg.Catalog.Get(snapshot.Plan)
 	if !ok {
-		return
+		return fmt.Errorf("effective plan %q is not in the catalog", snapshot.Plan)
 	}
-	applied, _ := m.cfg.Catalog.Get(r.Applied)
-	if target.PriceCents() < applied.PriceCents() {
+	targetRank, targetRankOK := m.planRank(target.ID)
+	appliedRank, appliedRankOK := m.planRank(r.Applied)
+	if !targetRankOK || !appliedRankOK {
+		return fmt.Errorf("cannot order applied plan %q and target plan %q", r.Applied, target.ID)
+	}
+	if targetRank < appliedRank {
 		violations, err := m.cfg.Fit.Fit(ctx, accountID, target)
 		if err != nil {
-			return
+			return err
 		}
 		if len(violations) > 0 {
 			_, _ = m.mutate(ctx, accountID, "", func(r *Record) error {
 				report := strings.Join(violations, "; ")
-				if r.Entitled != target.ID || r.ApplyBlocked == report {
+				current, err := m.resolveSnapshot(*r)
+				if err != nil || current.Plan != target.ID || r.ApplyBlocked == report {
 					return errSkipWrite
 				}
 				r.ApplyBlocked = report
 				return nil
 			})
-			return
+			return fmt.Errorf("plan apply blocked: %s", strings.Join(violations, "; "))
 		}
 	}
-	features := append([]string(nil), target.Features...)
-	sort.Strings(features)
-	if err := m.cfg.Applier.Apply(ctx, accountID, target.ID, target.Limits, features); err != nil {
-		return
+	request := ApplyRequest{Revision: r.SnapshotRevision, PlanSnapshot: snapshot}
+	ack, err := m.cfg.Applier.Apply(ctx, accountID, request)
+	if err != nil {
+		return err
 	}
-	_, _ = m.mutate(ctx, accountID, "", func(r *Record) error {
-		if r.Entitled != target.ID {
-			return errSkipWrite // entitlement moved again while we pushed
+	if ack.Revision != request.Revision || ack.Hash != request.Hash {
+		return errors.New("cell returned a mismatched plan snapshot acknowledgement")
+	}
+	_, err = m.mutate(ctx, accountID, "", func(r *Record) error {
+		current, err := m.resolveSnapshot(*r)
+		if err != nil {
+			return err
 		}
-		r.Applied = target.ID
+		if current.Hash != request.Hash ||
+			r.DesiredSnapshotHash != request.Hash ||
+			r.SnapshotRevision != request.Revision {
+			return errSkipWrite // entitlement/override moved while we pushed
+		}
+		r.Applied = request.Plan
+		r.AppliedSnapshotRevision = request.Revision
+		r.AppliedSnapshotHash = request.Hash
 		r.ApplyBlocked = ""
 		return nil
 	})
+	return err
+}
+
+// SnapshotApplyPending reports whether the cell has acknowledged the exact
+// currently resolved snapshot, not merely the same plan label.
+func SnapshotApplyPending(r Record, snapshot PlanSnapshot) bool {
+	return r.SnapshotRevision == 0 ||
+		r.DesiredSnapshotHash != snapshot.Hash ||
+		r.AppliedSnapshotRevision != r.SnapshotRevision ||
+		r.AppliedSnapshotHash != snapshot.Hash
 }
