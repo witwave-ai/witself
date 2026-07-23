@@ -435,19 +435,31 @@ func writeHookJSONAtomicCAS(path string, value any, expected hookFileSnapshot) e
 		_ = tmp.Close()
 		return err
 	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	stagedInfo, err := os.Lstat(tmpPath)
+	// File.Stat captures Windows file identity from the open handle. Lstat only
+	// records a path and resolves its identity lazily, after the staged path has
+	// already been moved away.
+	stagedInfo, err := tmp.Stat()
 	if err != nil {
+		_ = tmp.Close()
 		return fmt.Errorf("inspect staged hook config %s: %w", tmpPath, err)
 	}
 	if !stagedInfo.Mode().IsRegular() {
+		_ = tmp.Close()
 		return fmt.Errorf("staged hook config %s must be a regular file", tmpPath)
+	}
+	if err := tmp.Close(); err != nil {
+		return err
 	}
 	runOwnedHookBeforeMutationForTest(path)
 	if err := verifyHookFileSnapshot(path, expected); err != nil {
 		return err
+	}
+	stagedPathInfo, err := os.Lstat(tmpPath)
+	if err != nil {
+		return fmt.Errorf("inspect staged hook config %s: %w", tmpPath, err)
+	}
+	if !stagedPathInfo.Mode().IsRegular() || !os.SameFile(stagedInfo, stagedPathInfo) {
+		return fmt.Errorf("staged hook config %s must be a regular file", tmpPath)
 	}
 	if err := replaceFileAtomic(tmpPath, path); err != nil {
 		return err
@@ -456,7 +468,7 @@ func writeHookJSONAtomicCAS(path string, value any, expected hookFileSnapshot) e
 	if err != nil {
 		return fmt.Errorf("verify hook config commit %s: %w", path, err)
 	}
-	if !committed.exists || !os.SameFile(committed.info, stagedInfo) || !bytes.Equal(committed.raw, raw) {
+	if !committed.exists || !replacementCommitIdentityMatches(stagedInfo, expected.info, committed.info) || !bytes.Equal(committed.raw, raw) {
 		return fmt.Errorf("hook config %s changed during commit; refusing to overwrite the later value", path)
 	}
 	return nil
