@@ -51,7 +51,7 @@ AI egress rule. An open-plane-only deployment requires no KMS configuration. See
 - Chart name: `witself-server`
 - Public OCI package: `ghcr.io/witwave-ai/charts/witself-server`
 - Primary image: `ghcr.io/witwave-ai/images/witself-server`
-- Primary process: `witself-server`
+- Processes in the image: `witself-server` and `witself-worker`
 
 Expected install shape:
 
@@ -74,7 +74,8 @@ agent, or, if a hosted endpoint is ever offered, as a streamable-HTTP route on
 
 ## Chart Goals
 
-- Deploy `witself-server` for self-hosted Witself.
+- Deploy independent `witself-server` API and `witself-worker` background
+  Deployments for self-hosted Witself from one versioned image.
 - Keep production dependencies explicit and operator-owned.
 - Avoid storing raw credentials in chart defaults or recommended values files.
 - Support deployment-native identity and secret references.
@@ -103,12 +104,15 @@ Production chart defaults should assume:
 - Structured logs with redaction.
 - An explicit `avatar.payloadCompaction.enabled` expand/activate gate that is
   false by default and changed only after all legacy writers have drained.
-- A bounded, restart-safe avatar style rollout worker on every replica, tuned
-  with `avatar.styleRollout.enabled`, `batchSize`, `interval`, and
+- A disabled-by-default general-purpose worker Deployment for portable
+  installs. Enabling it requires the PostgreSQL Secret reference; managed cells
+  start with two replicas.
+- A bounded, restart-safe avatar style rollout job on every worker replica,
+  tuned with `worker.avatarStyleRollout.enabled`, `batchSize`, `interval`, and
   `batchTimeout`.
 - Transcript retention disabled by default, with a separate bounded
-  `transcriptRetention.mode: preview` stage before an explicit switch to
-  `enforce`.
+  `worker.transcriptRetention.mode: preview` stage before an explicit switch
+  to `enforce`.
 - Resource requests and limits.
 - Pod disruption budget where practical.
 - Optional horizontal pod autoscaling.
@@ -147,6 +151,8 @@ consumes the connection reference. See
 Initial templates should include:
 
 - `Deployment` for `witself-server`.
+- Optional independent `Deployment` for `witself-worker`, using the same image
+  with an explicit worker command.
 - `Service`.
 - `ServiceAccount`.
 - `ConfigMap` for non-secret server config.
@@ -156,6 +162,7 @@ Initial templates should include:
 - Optional `HorizontalPodAutoscaler`.
 - Optional dedicated health `Service` for cluster-internal diagnostics.
 - Optional dedicated metrics `Service`.
+- Optional worker metrics `Service`.
 - Optional Prometheus Operator `ServiceMonitor`.
 - Optional Prometheus Operator `PodMonitor`.
 - Optional migration `Job`.

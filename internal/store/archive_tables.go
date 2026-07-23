@@ -31,6 +31,7 @@ const avatarStyleRolloutArchiveSchema = 52
 var cellLocalArchiveExclusions = map[string]struct{}{
 	"transcript_retention_account_scan_state": {},
 	"transcript_retention_sweep_state":        {},
+	"transcript_retention_worker_lanes":       {},
 }
 
 var canonicalArchiveTables = []archiveTableIntroduction{

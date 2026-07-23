@@ -25,14 +25,18 @@ model/provider configuration or a pgvector prerequisite. See
 
 ## Decision
 
-`witself-server` is a separate binary from `witself`.
+`witself-server` and `witself-worker` are separate binaries from `witself`.
 
 - `witself` is for humans, agents, and MCP usage.
 - `witself-server` is for running and operating the backend API service.
+- `witself-worker` is the continuously running cell-local background service.
 
 There should not be a public `witself server` subcommand for production service
 operation. Keeping the server process separate makes service packaging,
 container images, process permissions, and self-hosting documentation clearer.
+The server and worker ship in one cell-runtime image but run as independent
+Kubernetes Deployments. Scheduled maintenance does not run inside API
+replicas. See [cell-worker.md](cell-worker.md).
 
 The platform spine is shared; this one process serves both planes — the OPEN
 plane (memories, facts, policy, groups, messaging) and the SEALED plane (secrets,
@@ -96,14 +100,15 @@ Expected server environment variables may include:
 | `WITSELF_BOOTSTRAP_TOKEN_TTL` | Lifetime applied when the server adopts the bootstrap token. Current deployment default: `24h`. |
 | `WITSELF_FACT_DELETION_ENABLED` | Enable permanent fact deletion routes and explicit recreation of a deleted fact. Default: `false`. Invalid booleans fail startup, and enabling requires compiled store schema 28 or newer. Existing deployments must first converge all writers on the schema-27 compatibility release, then converge schema 28 with this flag still false, and only then set it true; skipping the compatibility release is unsafe. Helm maps `features.factDeletion.enabled` to this variable. |
 | `WITSELF_AVATAR_PAYLOAD_COMPACTION_ENABLED` | Enable irreversible cleanup of eligible inactive avatar SVG payloads. Default: `false`. Keep it false through the compatible image/chart rollout and old-writer convergence, then enable it in a separate config-only Phase-B rollout. Requests that need cleanup fail retryably while it is false. Helm maps `avatar.payloadCompaction.enabled` to this variable. |
-| `WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED` | Enable the durable bounded avatar-style propagation worker. Default: `true` in both the server and chart. Every replica may run it; PostgreSQL job fencing prevents duplicate progress. |
+| `WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED` | Enable the durable bounded avatar-style propagation job in `witself-worker`. API deployments set it false. PostgreSQL job fencing prevents duplicate progress across worker replicas. |
 | `WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE` | Maximum agents advanced by one style-rollout batch. Default: `100`; valid range: `1`-`1000`. |
 | `WITSELF_AVATAR_STYLE_ROLLOUT_INTERVAL` | Delay between style-rollout worker attempts. Default: `2s`; valid range: `100ms`-`1h`. |
 | `WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_TIMEOUT` | Deadline for one bounded style-rollout batch. Default: `30s`; valid range: `100ms`-`5m`. |
-| `WITSELF_TRANSCRIPT_RETENTION_ENABLED` | Enable the account-policy transcript-retention worker. Default: `false`. Leave false while the schema and binary converge; enabling alone remains non-destructive because the default mode is `preview`. |
+| `WITSELF_TRANSCRIPT_RETENTION_ENABLED` | Enable the account-policy transcript-retention job in `witself-worker`. API deployments set it false. Enabling alone remains non-destructive because the default mode is `preview`. |
 | `WITSELF_TRANSCRIPT_RETENTION_MODE` | Transcript-retention worker mode: `preview` (default) or `enforce`. Deletion requires both this value to be `enforce` and the enabled gate to be true. |
 | `WITSELF_TRANSCRIPT_RETENTION_BATCH_SIZE` | Maximum whole conversations considered by one retention batch. Default: `100`; valid range: `1`-`1000`. |
 | `WITSELF_TRANSCRIPT_RETENTION_INTERVAL` | Delay between retention batches. Default: `5m`; valid range: `1m`-`24h`. |
+| `WITSELF_TRANSCRIPT_RETENTION_BATCH_TIMEOUT` | Deadline for one bounded retention batch. Default: `2m`; valid range: `1s`-`5m`. The worker cancels an overlong database attempt so another lane and replica can continue. |
 | `WITSELF_OBJECT_STORE_PROVIDER` | Object/blob store provider when configured (exports, attachments, backups). |
 | `WITSELF_OBJECT_STORE_BUCKET` | Object/blob store bucket/container. |
 | `WITSELF_SEALED_PLANE_ENABLED` | Enable the sealed plane (secrets, TOTP). When true, the KMS variables below are required. An open-plane-only deployment may leave the sealed plane disabled. |

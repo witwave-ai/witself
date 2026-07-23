@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -325,6 +326,9 @@ func TestTranscriptRetentionDeletesOnlyExpiredWholeConversationsPostgres(t *test
 	assertMigrationTestColumn(t, st, "memory_curation_run_inputs", "transcript_pruned_at", true)
 	assertMigrationTestIndex(t, st, "memory_curation_run_inputs",
 		"memory_curation_run_inputs_by_transcript_cursor", true)
+	assertMigrationTestTable(t, st, "transcript_retention_worker_lanes", true)
+	assertMigrationTestIndex(t, st, "accounts",
+		"accounts_transcript_retention_worker_lane_idx", true)
 }
 
 func TestTranscriptRetentionBatchIsFairAndOldestFirstAcrossAccountsPostgres(t *testing.T) {
@@ -628,7 +632,9 @@ func TestTranscriptRetentionWorkerCadenceAndModeProgressAreDurablePostgres(t *te
 			done <- st.RunTranscriptRetentionWorker(workerCtx,
 				TranscriptRetentionWorkerConfig{
 					BatchSize: 1, Interval: time.Minute,
-					Mode: TranscriptRetentionModeEnforce,
+					BatchTimeout: 5 * time.Second,
+					LaneCount:    defaultTranscriptRetentionWorkerLaneCount,
+					Mode:         TranscriptRetentionModeEnforce,
 				},
 				func(result TranscriptRetentionBatchResult) {
 					results <- result
@@ -657,12 +663,21 @@ func TestTranscriptRetentionWorkerCadenceAndModeProgressAreDurablePostgres(t *te
 	if firstWorker.Scanned != 1 || firstWorker.Deleted != 1 {
 		t.Fatalf("first enforce worker after preview = %+v", firstWorker)
 	}
+	var workerLane int
+	if err := st.pool.QueryRow(ctx, `
+		SELECT get_byte(decode(md5(id), 'hex'), 0) % 16
+		  FROM accounts
+		 WHERE id=$1`, p.AccountID).Scan(&workerLane); err != nil {
+		t.Fatal(err)
+	}
 	var generationAfterFirst int64
 	var nextRunAfterFirst time.Time
 	if err := st.pool.QueryRow(ctx, `
-		SELECT generation,next_run_at
-		  FROM transcript_retention_sweep_state
-		 WHERE singleton`).Scan(&generationAfterFirst, &nextRunAfterFirst); err != nil {
+			SELECT generation,next_run_at
+			  FROM transcript_retention_worker_lanes
+			 WHERE mode='enforce' AND lane_id=$1`, workerLane).Scan(
+		&generationAfterFirst, &nextRunAfterFirst,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if !nextRunAfterFirst.After(time.Now()) {
@@ -675,13 +690,31 @@ func TestTranscriptRetentionWorkerCadenceAndModeProgressAreDurablePostgres(t *te
 	}
 	var generationAfterSecond int64
 	if err := st.pool.QueryRow(ctx, `
-		SELECT generation FROM transcript_retention_sweep_state WHERE singleton`,
+			SELECT generation
+			  FROM transcript_retention_worker_lanes
+			 WHERE mode='enforce' AND lane_id=$1`, workerLane,
 	).Scan(&generationAfterSecond); err != nil {
 		t.Fatal(err)
 	}
 	if generationAfterSecond != generationAfterFirst {
 		t.Fatalf("gated worker advanced generation from %d to %d",
 			generationAfterFirst, generationAfterSecond)
+	}
+	// Sparse-lane draining is deliberate: the two immediate attempts together
+	// advance every empty lane once, but the account's non-empty lane remains
+	// protected by its own future cadence fence.
+	var emptyLanesAdvanced int
+	if err := st.pool.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM transcript_retention_worker_lanes
+		 WHERE mode='enforce' AND lane_id<>$1 AND generation=1`,
+		workerLane,
+	).Scan(&emptyLanesAdvanced); err != nil {
+		t.Fatal(err)
+	}
+	if emptyLanesAdvanced != defaultTranscriptRetentionWorkerLaneCount-1 {
+		t.Fatalf("advanced empty worker lanes = %d, want %d",
+			emptyLanesAdvanced, defaultTranscriptRetentionWorkerLaneCount-1)
 	}
 
 	direct, err := st.ProcessTranscriptRetentionBatch(ctx, 1)
@@ -693,7 +726,9 @@ func TestTranscriptRetentionWorkerCadenceAndModeProgressAreDurablePostgres(t *te
 	}
 	var nextRunAfterDirect time.Time
 	if err := st.pool.QueryRow(ctx, `
-		SELECT next_run_at FROM transcript_retention_sweep_state WHERE singleton`,
+			SELECT next_run_at
+			  FROM transcript_retention_worker_lanes
+			 WHERE mode='enforce' AND lane_id=$1`, workerLane,
 	).Scan(&nextRunAfterDirect); err != nil {
 		t.Fatal(err)
 	}
@@ -746,6 +781,27 @@ func TestTranscriptRetentionSweepClaimSkipsBusyReplicaPostgres(t *testing.T) {
 		t.Fatalf("losing replica advanced sweep generation from %d to %d",
 			generationBefore, generationWhileClaimed)
 	}
+	workerCfg := DefaultTranscriptRetentionWorkerConfig()
+	workerCfg.BatchSize = 10
+	workerCfg.Interval = time.Minute
+	workerCfg.BatchTimeout = 2 * time.Second
+	workerResult, err := st.processTranscriptRetentionWorkerBatch(noWaitCtx, workerCfg)
+	if err != nil {
+		t.Fatalf("lane worker behind legacy claim failed: %v", err)
+	}
+	if workerResult != (TranscriptRetentionBatchResult{}) {
+		t.Fatalf("lane worker behind legacy claim = %+v; want clean no-op", workerResult)
+	}
+	var advancedWorkerLanes int
+	if err := st.pool.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM transcript_retention_worker_lanes
+		 WHERE generation<>0`).Scan(&advancedWorkerLanes); err != nil {
+		t.Fatal(err)
+	}
+	if advancedWorkerLanes != 0 {
+		t.Fatalf("lane worker advanced %d lanes behind legacy claim", advancedWorkerLanes)
+	}
 	if err := claim.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -763,6 +819,581 @@ func TestTranscriptRetentionSweepClaimSkipsBusyReplicaPostgres(t *testing.T) {
 		t.Fatalf("winning replica sweep generation = %d, want %d",
 			generationAfter, generationBefore+1)
 	}
+}
+
+func TestTranscriptRetentionLaneMigrationHandsOffScheduledCadencePostgres(t *testing.T) {
+	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	st, schemaDSN := newMigrationTestStore(t, dsn)
+	migrationTestUpTo(t, schemaDSN, 65)
+
+	principal, _ := provisionTranscriptRetentionWorkerPrincipal(
+		ctx, t, st, "lane-migration-handoff",
+	)
+	first := enableTranscriptRetentionAndCreateExpired(
+		ctx, t, st, principal, "lane-migration-first",
+	)
+	second, err := st.CreateTranscript(
+		ctx,
+		principal.AccountID,
+		principal.RealmID,
+		principal.ID,
+		CreateTranscriptInput{ExternalID: "lane-migration-second"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AppendTranscriptEntry(
+		ctx,
+		principal.AccountID,
+		principal.RealmID,
+		principal.ID,
+		second.ID,
+		AppendTranscriptEntryInput{
+			Role: TranscriptRoleUser,
+			Body: "lane-migration-second",
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE transcript_conversations
+		   SET updated_at=statement_timestamp() - interval '31 days'
+		 WHERE id=$1`, second.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Model an old scheduled worker that already owns the singleton while
+	// migration 66 builds its concurrent account index. The migration must not
+	// copy lane state until this claim finishes.
+	legacyClaim, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = legacyClaim.Rollback(ctx) }()
+	if _, err := legacyClaim.Exec(ctx, `LOCK TABLE accounts IN SHARE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	var claimedGeneration int64
+	if err := legacyClaim.QueryRow(ctx, `
+		SELECT generation
+		  FROM transcript_retention_sweep_state
+		 WHERE singleton
+		 FOR UPDATE`).Scan(&claimedGeneration); err != nil {
+		t.Fatal(err)
+	}
+	migrationDone := make(chan error, 1)
+	go func() {
+		migrationDone <- st.Migrate()
+	}()
+	indexDeadline := time.Now().Add(10 * time.Second)
+	for {
+		var indexWaiting bool
+		if err := st.pool.QueryRow(ctx, `
+			SELECT EXISTS (
+			  SELECT 1
+			    FROM pg_locks lock
+			    JOIN pg_class relation ON relation.oid=lock.relation
+			   WHERE relation.relname='accounts'
+			     AND relation.relnamespace=(current_schema())::regnamespace
+			     AND NOT lock.granted
+			)`).Scan(&indexWaiting); err != nil {
+			t.Fatal(err)
+		}
+		if indexWaiting {
+			break
+		}
+		select {
+		case err := <-migrationDone:
+			t.Fatalf("migration finished before legacy claim was released: %v", err)
+		default:
+		}
+		if time.Now().After(indexDeadline) {
+			t.Fatal("timed out waiting for migration 66 concurrent index lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	var lanesBeforeHandoff int
+	if err := st.pool.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM transcript_retention_worker_lanes`).Scan(&lanesBeforeHandoff); err != nil {
+		t.Fatal(err)
+	}
+	if lanesBeforeHandoff != 0 {
+		t.Fatalf("worker lanes seeded before legacy claim handoff = %d, want 0",
+			lanesBeforeHandoff)
+	}
+
+	const inheritedLaneDue = "2001-01-02 03:04:05+00"
+	if _, err := legacyClaim.Exec(ctx, `
+		UPDATE transcript_retention_sweep_state
+		   SET generation=generation + 1,
+		       next_run_at=$1::timestamptz,
+		       updated_at=statement_timestamp()
+		 WHERE singleton`, inheritedLaneDue); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacyClaim.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-migrationDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for migration 66 handoff")
+	}
+	assertMigrationTestVersion(t, schemaDSN, 66)
+
+	var singletonParked bool
+	if err := st.pool.QueryRow(ctx, `
+		SELECT next_run_at='infinity'::timestamptz
+		  FROM transcript_retention_sweep_state
+		 WHERE singleton`).Scan(&singletonParked); err != nil {
+		t.Fatal(err)
+	}
+	if !singletonParked {
+		t.Fatal("migration did not park the legacy scheduled singleton")
+	}
+	var inheritedDueLanes int
+	if err := st.pool.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM transcript_retention_worker_lanes
+		 WHERE next_run_at=$1::timestamptz`, inheritedLaneDue).Scan(
+		&inheritedDueLanes,
+	); err != nil {
+		t.Fatal(err)
+	}
+	wantLanes := 2 * defaultTranscriptRetentionWorkerLaneCount
+	if inheritedDueLanes != wantLanes {
+		t.Fatalf("due lanes inherited from singleton = %d, want %d",
+			inheritedDueLanes, wantLanes)
+	}
+
+	var generationBefore int64
+	if err := st.pool.QueryRow(ctx, `
+		SELECT generation
+		  FROM transcript_retention_sweep_state
+		 WHERE singleton`).Scan(&generationBefore); err != nil {
+		t.Fatal(err)
+	}
+	if generationBefore != claimedGeneration+1 {
+		t.Fatalf("migration changed legacy generation = %d, want %d",
+			generationBefore, claimedGeneration+1)
+	}
+	oldScheduled, err := st.processTranscriptRetentionBatch(
+		ctx, 1, true, time.Minute, 0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if oldScheduled != (TranscriptRetentionBatchResult{}) {
+		t.Fatalf("old scheduled batch after lane migration = %+v; want clean no-op",
+			oldScheduled)
+	}
+	var generationAfter int64
+	if err := st.pool.QueryRow(ctx, `
+		SELECT generation
+		  FROM transcript_retention_sweep_state
+		 WHERE singleton`).Scan(&generationAfter); err != nil {
+		t.Fatal(err)
+	}
+	if generationAfter != generationBefore {
+		t.Fatalf("old scheduled batch advanced singleton generation from %d to %d",
+			generationBefore, generationAfter)
+	}
+	for _, transcript := range []Transcript{first, second} {
+		if _, _, err := st.GetTranscript(ctx, principal, transcript.ID); err != nil {
+			t.Fatalf("old scheduled batch touched transcript %s: %v",
+				transcript.ID, err)
+		}
+	}
+
+	cfg := DefaultTranscriptRetentionWorkerConfig()
+	cfg.BatchSize = 1
+	cfg.Interval = time.Minute
+	cfg.BatchTimeout = 5 * time.Second
+	cfg.Mode = TranscriptRetentionModeEnforce
+	workerResult, err := st.processTranscriptRetentionWorkerBatch(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workerResult.Scanned != 1 || workerResult.Eligible != 1 ||
+		workerResult.Deleted != 1 {
+		t.Fatalf("lane worker after migration = %+v; want one deletion", workerResult)
+	}
+
+	directResult, err := st.ProcessTranscriptRetentionBatch(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if directResult.Scanned != 1 || directResult.Eligible != 1 ||
+		directResult.Deleted != 1 {
+		t.Fatalf("direct interval-zero batch after migration = %+v; want one deletion",
+			directResult)
+	}
+	for _, transcript := range []Transcript{first, second} {
+		if _, _, err := st.GetTranscript(
+			ctx, principal, transcript.ID,
+		); !errors.Is(err, ErrTranscriptNotFound) {
+			t.Fatalf("handoff transcript %s error = %v; want deleted",
+				transcript.ID, err)
+		}
+	}
+
+	const earliestLaneDue = "2040-01-02 03:04:05+00"
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE transcript_retention_worker_lanes
+		   SET next_run_at=$1::timestamptz +
+		       (lane_id * interval '1 minute')`, earliestLaneDue); err != nil {
+		t.Fatal(err)
+	}
+	var wantRestored time.Time
+	if err := st.pool.QueryRow(ctx, `
+		SELECT min(next_run_at)
+		  FROM transcript_retention_worker_lanes`).Scan(&wantRestored); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrationTestDown(t, schemaDSN, false); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, schemaDSN, 65)
+	assertMigrationTestTable(t, st, "transcript_retention_worker_lanes", false)
+	assertMigrationTestIndex(t, st, "accounts",
+		"accounts_transcript_retention_worker_lane_idx", false)
+	var restored time.Time
+	if err := st.pool.QueryRow(ctx, `
+		SELECT next_run_at
+		  FROM transcript_retention_sweep_state
+		 WHERE singleton`).Scan(&restored); err != nil {
+		t.Fatal(err)
+	}
+	if !restored.Equal(wantRestored) {
+		t.Fatalf("restored legacy next_run_at = %s, want earliest lane due %s",
+			restored, wantRestored)
+	}
+}
+
+func TestTranscriptRetentionWorkersClaimDifferentLanesConcurrentlyPostgres(t *testing.T) {
+	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	firstStore, schemaDSN := newMigrationTestStore(t, dsn)
+	if err := firstStore.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	secondStore, err := Open(ctx, schemaDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondStore.Close()
+
+	first, firstLane := provisionTranscriptRetentionWorkerPrincipal(
+		ctx, t, firstStore, "parallel-first",
+	)
+	var second Principal
+	var secondLane int
+	for candidate := 0; candidate < 64; candidate++ {
+		second, secondLane = provisionTranscriptRetentionWorkerPrincipal(
+			ctx, t, firstStore, fmt.Sprintf("parallel-second-%d", candidate),
+		)
+		if secondLane != firstLane {
+			break
+		}
+	}
+	if secondLane == firstLane {
+		t.Fatalf("failed to provision accounts in different worker lanes; lane=%d", firstLane)
+	}
+	firstTranscript := enableTranscriptRetentionAndCreateExpired(
+		ctx, t, firstStore, first, "parallel-first",
+	)
+	secondTranscript := enableTranscriptRetentionAndCreateExpired(
+		ctx, t, firstStore, second, "parallel-second",
+	)
+	if _, err := firstStore.pool.Exec(ctx, `
+		UPDATE transcript_retention_worker_lanes
+		   SET next_run_at=statement_timestamp() + interval '1 hour'
+		 WHERE mode='enforce'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := firstStore.pool.Exec(ctx, `
+		UPDATE transcript_retention_worker_lanes
+		   SET next_run_at='-infinity'::timestamptz
+		 WHERE mode='enforce' AND lane_id=ANY($1::smallint[])`,
+		[]int16{int16(firstLane), int16(secondLane)}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultTranscriptRetentionWorkerConfig()
+	cfg.BatchSize = 1
+	cfg.Interval = time.Minute
+	cfg.BatchTimeout = 5 * time.Second
+	cfg.Mode = TranscriptRetentionModeEnforce
+	type outcome struct {
+		result TranscriptRetentionBatchResult
+		err    error
+	}
+	start := make(chan struct{})
+	outcomes := make(chan outcome, 2)
+	var ready sync.WaitGroup
+	ready.Add(2)
+	run := func(st *Store) {
+		ready.Done()
+		<-start
+		result, err := st.processTranscriptRetentionWorkerBatch(ctx, cfg)
+		outcomes <- outcome{result: result, err: err}
+	}
+	go run(firstStore)
+	go run(secondStore)
+	ready.Wait()
+	close(start)
+
+	for worker := 0; worker < 2; worker++ {
+		select {
+		case got := <-outcomes:
+			if got.err != nil {
+				t.Fatal(got.err)
+			}
+			if got.result.Scanned != 1 || got.result.Eligible != 1 ||
+				got.result.Deleted != 1 {
+				t.Fatalf("parallel worker result = %+v; want one deletion", got.result)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("timed out waiting for parallel retention workers")
+		}
+	}
+	for _, item := range []struct {
+		principal  Principal
+		transcript Transcript
+	}{
+		{first, firstTranscript},
+		{second, secondTranscript},
+	} {
+		if _, _, err := firstStore.GetTranscript(
+			ctx, item.principal, item.transcript.ID,
+		); !errors.Is(err, ErrTranscriptNotFound) {
+			t.Fatalf("parallel transcript %s error = %v; want deleted",
+				item.transcript.ID, err)
+		}
+	}
+	var advanced int
+	if err := firstStore.pool.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM transcript_retention_worker_lanes
+		 WHERE mode='enforce'
+		   AND lane_id=ANY($1::smallint[])
+		   AND generation=1`,
+		[]int16{int16(firstLane), int16(secondLane)}).Scan(&advanced); err != nil {
+		t.Fatal(err)
+	}
+	if advanced != 2 {
+		t.Fatalf("advanced worker lanes = %d, want 2", advanced)
+	}
+}
+
+func TestTranscriptRetentionBusyLaneDoesNotBlockAnotherPostgres(t *testing.T) {
+	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	lockingStore, schemaDSN := newMigrationTestStore(t, dsn)
+	if err := lockingStore.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	workerStore, err := Open(ctx, schemaDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer workerStore.Close()
+
+	busy, busyLane := provisionTranscriptRetentionWorkerPrincipal(
+		ctx, t, lockingStore, "busy-lane",
+	)
+	var available Principal
+	var availableLane int
+	for candidate := 0; candidate < 64; candidate++ {
+		available, availableLane = provisionTranscriptRetentionWorkerPrincipal(
+			ctx, t, lockingStore, fmt.Sprintf("available-lane-%d", candidate),
+		)
+		if availableLane != busyLane {
+			break
+		}
+	}
+	if availableLane == busyLane {
+		t.Fatalf("failed to provision accounts in different worker lanes; lane=%d", busyLane)
+	}
+	busyTranscript := enableTranscriptRetentionAndCreateExpired(
+		ctx, t, lockingStore, busy, "busy-lane",
+	)
+	availableTranscript := enableTranscriptRetentionAndCreateExpired(
+		ctx, t, lockingStore, available, "available-lane",
+	)
+	if _, err := lockingStore.pool.Exec(ctx, `
+		UPDATE transcript_retention_worker_lanes
+		   SET next_run_at=statement_timestamp() + interval '1 hour'
+		 WHERE mode='enforce'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lockingStore.pool.Exec(ctx, `
+		UPDATE transcript_retention_worker_lanes
+		   SET next_run_at=CASE
+		         WHEN lane_id=$1 THEN '-infinity'::timestamptz
+		         ELSE statement_timestamp() - interval '1 hour'
+		       END
+		 WHERE mode='enforce' AND lane_id IN ($1,$2)`,
+		busyLane, availableLane); err != nil {
+		t.Fatal(err)
+	}
+
+	claim, err := lockingStore.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = claim.Rollback(ctx) }()
+	var generation int64
+	if err := claim.QueryRow(ctx, `
+		SELECT generation
+		  FROM transcript_retention_worker_lanes
+		 WHERE mode='enforce' AND lane_id=$1
+		 FOR UPDATE`, busyLane).Scan(&generation); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultTranscriptRetentionWorkerConfig()
+	cfg.BatchSize = 1
+	cfg.Interval = time.Minute
+	cfg.BatchTimeout = 5 * time.Second
+	cfg.Mode = TranscriptRetentionModeEnforce
+	result, err := workerStore.processTranscriptRetentionWorkerBatch(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Scanned != 1 || result.Eligible != 1 || result.Deleted != 1 {
+		t.Fatalf("worker behind busy lane = %+v; want available-lane deletion", result)
+	}
+	if _, _, err := lockingStore.GetTranscript(
+		ctx, available, availableTranscript.ID,
+	); !errors.Is(err, ErrTranscriptNotFound) {
+		t.Fatalf("available-lane transcript error = %v; want deleted", err)
+	}
+	if _, _, err := lockingStore.GetTranscript(ctx, busy, busyTranscript.ID); err != nil {
+		t.Fatalf("busy-lane transcript was touched: %v", err)
+	}
+}
+
+func TestTranscriptRetentionWorkerRefusesIncompleteLaneSetPostgres(t *testing.T) {
+	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	st, _ := newMigrationTestStore(t, dsn)
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	principal, _ := provisionTranscriptRetentionWorkerPrincipal(
+		ctx, t, st, "incomplete-lanes",
+	)
+	transcript := enableTranscriptRetentionAndCreateExpired(
+		ctx, t, st, principal, "incomplete-lanes",
+	)
+	if _, err := st.pool.Exec(ctx, `
+		DELETE FROM transcript_retention_worker_lanes
+		 WHERE mode='enforce' AND lane_id=15`); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultTranscriptRetentionWorkerConfig()
+	cfg.BatchSize = 1
+	cfg.Interval = time.Minute
+	cfg.BatchTimeout = 5 * time.Second
+	cfg.Mode = TranscriptRetentionModeEnforce
+	if _, err := st.processTranscriptRetentionWorkerBatch(ctx, cfg); err == nil ||
+		!strings.Contains(err.Error(), "worker lanes are missing") {
+		t.Fatalf("incomplete worker lanes error = %v", err)
+	}
+	if _, _, err := st.GetTranscript(ctx, principal, transcript.ID); err != nil {
+		t.Fatalf("incomplete lane set touched transcript: %v", err)
+	}
+}
+
+func provisionTranscriptRetentionWorkerPrincipal(
+	ctx context.Context,
+	t *testing.T,
+	st *Store,
+	label string,
+) (Principal, int) {
+	t.Helper()
+	account, err := st.ProvisionAccount(
+		ctx, label+"@witwave.ai", label, time.Hour,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activated, err := st.ActivateAccount(ctx, account.AccountID); err != nil || !activated {
+		t.Fatalf("activate %s = %v / %v", label, activated, err)
+	}
+	realm, err := st.CreateRealm(ctx, account.AccountID, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := st.CreateAgent(ctx, account.AccountID, realm.ID, "recorder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lane int
+	if err := st.pool.QueryRow(ctx, `
+		SELECT get_byte(decode(md5(id), 'hex'), 0) % 16
+		  FROM accounts
+		 WHERE id=$1`, account.AccountID).Scan(&lane); err != nil {
+		t.Fatal(err)
+	}
+	return Principal{
+		Kind: PrincipalAgent, ID: agent.ID, AccountID: account.AccountID,
+		RealmID: realm.ID, AccountStatus: "active",
+	}, lane
+}
+
+func enableTranscriptRetentionAndCreateExpired(
+	ctx context.Context,
+	t *testing.T,
+	st *Store,
+	p Principal,
+	externalID string,
+) Transcript {
+	t.Helper()
+	if _, err := st.SetAccountPlan(ctx, p.AccountID, 0, "", "free",
+		map[string]int64{},
+		map[string]int64{TranscriptRetentionDaysPolicy: 30}, nil); err != nil {
+		t.Fatal(err)
+	}
+	transcript, err := st.CreateTranscript(ctx, p.AccountID, p.RealmID, p.ID,
+		CreateTranscriptInput{ExternalID: externalID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AppendTranscriptEntry(
+		ctx, p.AccountID, p.RealmID, p.ID, transcript.ID,
+		AppendTranscriptEntryInput{
+			Role: TranscriptRoleUser, Body: externalID,
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE transcript_conversations
+		   SET updated_at=statement_timestamp() - interval '31 days'
+		 WHERE id=$1`, transcript.ID); err != nil {
+		t.Fatal(err)
+	}
+	return transcript
 }
 
 func TestTranscriptRetentionPrunedRunCannotReplayPostgres(t *testing.T) {

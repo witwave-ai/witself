@@ -1409,8 +1409,9 @@ Public backend goals:
 
 Self-hosted backend requirements:
 
-- Provide a separate `witself-server` backend API binary/process from the public
-  repository.
+- Provide separate `witself-server` API and `witself-worker` background-service
+  binaries from the public repository. Ship them in one versioned cell-runtime
+  image while deploying and scaling the processes independently.
 - Support configuration by environment variables and files suitable for
   containers, Kubernetes, and ordinary service managers.
 - Use Postgres as the first production storage adapter and sole authoritative
@@ -1428,8 +1429,10 @@ Self-hosted backend requirements:
 - Support database migrations, backup/restore guidance, upgrade notes, and (when
   enabled) vector re-index guidance before claiming production self-host
   support.
-- Provide a Helm chart that deploys `witself-server` and supports externally
-  managed production dependencies.
+- Provide a Helm chart that deploys independent `witself-server` and
+  `witself-worker` Deployments and supports externally managed production
+  dependencies. The worker starts with two replicas and uses durable
+  PostgreSQL work claims so replicas cooperate rather than duplicate work.
 - Include Helm chart values and templates for health probes, metrics scraping,
   ServiceMonitor, PodMonitor, resources, autoscaling, disruption budgets, security
   context, and network policy where practical.

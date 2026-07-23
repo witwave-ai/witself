@@ -1,0 +1,13 @@
+{{- if and .Values.worker.enabled .Values.worker.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "witself-server.workerFullname" . }}
+  labels:
+    {{- include "witself-server.workerLabels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.worker.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "witself-server.workerSelectorLabels" . | nindent 6 }}
+{{- end }}

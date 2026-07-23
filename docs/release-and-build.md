@@ -245,7 +245,8 @@ The implemented release action owns:
   before publication. Cursor's native-Windows cell skips because Windows is
   supported through WSL-as-Linux.
 - Building release archives for macOS, Linux, and Windows x64.
-- Building `witself`, `witself-server`, `witself-admin`, and `witself-infra`.
+- Building `witself`, `witself-server`, `witself-worker`, `witself-admin`, and
+  `witself-infra`.
 - Generating SHA256 checksums.
 - Signing the checksum manifest into a keyless Sigstore bundle, while retaining
   the detached `.sig` and `.pem` assets required by older updaters.
@@ -328,8 +329,8 @@ Current release artifacts include:
 
 - `witself` `.tar.gz` archives for macOS and Linux, plus
   `witself_<version>_windows_amd64.zip` for Windows x64.
-- Separate `.tar.gz` archives for `witself-server`, `witself-admin`, and
-  `witself-infra` on the macOS and Linux targets.
+- Separate `.tar.gz` archives for `witself-server`, `witself-worker`,
+  `witself-admin`, and `witself-infra` on the macOS and Linux targets.
 - SHA256 checksums.
 - A keyless `checksums.txt.sigstore.json` bundle for the checksum manifest,
   plus transitional `checksums.txt.sig` and `checksums.txt.pem` compatibility
@@ -364,7 +365,8 @@ Initial chart:
 
 - Chart path: `charts/witself-server`
 - OCI package: `ghcr.io/witwave-ai/charts/witself-server`
-- Primary workload: `witself-server`
+- Primary API workload: `witself-server`
+- Background workload: `witself-worker`
 
 Install shape, where `VERSION` omits the tag's `v` prefix:
 
@@ -388,9 +390,9 @@ Chart requirements:
   in default values.
 - Values should support existing Kubernetes Secret references and
   deployment-native identity such as service account annotations.
-- The chart includes Deployment, Service, ServiceAccount, ConfigMap, optional
-  Ingress, and optional NetworkPolicy templates. It does not currently render a
-  migration Job.
+- The chart includes independent API and worker Deployments, Services,
+  ServiceAccount, ConfigMaps, optional Ingress, and optional NetworkPolicy
+  templates. It does not currently render a migration Job.
 - The chart should include liveness, readiness, startup, metrics,
   ServiceMonitor, PodMonitor, resource, autoscaling, disruption-budget,
   security-context, and network-policy support where practical.
@@ -477,7 +479,8 @@ The backend image is:
 - Dockerfile: `images/witself-server/Dockerfile`
 - Image package: `ghcr.io/witwave-ai/images/witself-server`
 - Platforms: `linux/amd64`, `linux/arm64`
-- Entrypoint: `witself-server`
+- Default entrypoint: `witself-server`
+- Additional executable: `/usr/local/bin/witself-worker`
 
 Example:
 
@@ -485,6 +488,9 @@ Example:
 VERSION="${VERSION:?set VERSION to a published version without the v prefix}"
 docker run --rm "ghcr.io/witwave-ai/images/witself-server:${VERSION}" version
 docker run --rm -p 8080:8080 -p 8081:8081 -p 9090:9090 \
+  "ghcr.io/witwave-ai/images/witself-server:${VERSION}" serve
+docker run --rm --entrypoint /usr/local/bin/witself-worker \
+  -p 8081:8081 -p 9090:9090 \
   "ghcr.io/witwave-ai/images/witself-server:${VERSION}" serve
 ```
 

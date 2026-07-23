@@ -284,19 +284,38 @@ be tuned with:
 - `WITSELF_TRANSCRIPT_RETENTION_ENABLED` (default `false`);
 - `WITSELF_TRANSCRIPT_RETENTION_MODE` (`preview`, the default, or `enforce`);
 - `WITSELF_TRANSCRIPT_RETENTION_BATCH_SIZE` (1-1000);
-- `WITSELF_TRANSCRIPT_RETENTION_INTERVAL` (1 minute-24 hours).
+- `WITSELF_TRANSCRIPT_RETENTION_INTERVAL` (1 minute-24 hours); and
+- `WITSELF_TRANSCRIPT_RETENTION_BATCH_TIMEOUT` (default 2 minutes, 1 second-5
+  minutes).
 
 Enabling the worker without setting a mode is therefore non-destructive.
 Deletion requires both `WITSELF_TRANSCRIPT_RETENTION_ENABLED=true` and
 `WITSELF_TRANSCRIPT_RETENTION_MODE=enforce`.
 
-The interval is enforced by a durable cell-local `next_run_at` fence, not only
-by each process's ticker. A successful worker attempt advances that fence in
-the same transaction as its scan progress. Staggered replicas and restarted
-pods can attempt work, but they cannot multiply configured batch throughput;
-only one worker batch is admitted per interval. Explicit store preview/process
-operations bypass the cadence fence for tests and manual operator runs without
-moving `next_run_at`.
+Worker scheduling uses 16 fixed, durable lanes for each mode. An account's
+immutable id assigns it to exactly one lane, so changing the pod count never
+reshuffles accounts. Each lane has its own cursor, generation, and
+`next_run_at` fence. A worker claims one due lane with
+`FOR UPDATE SKIP LOCKED`; another replica immediately skips that row and can
+claim a different due lane. The lane lock is held in the same transaction as
+the account-policy recheck, scan progress, hold classification, and deletion.
+This permits useful parallel work without allowing two replicas to process the
+same account or conversation.
+
+Each non-empty lane admits at most one bounded batch per interval. A worker may
+advance up to all 16 empty due lanes in one bounded attempt so sparse account
+distribution does not delay useful work for many intervals. Explicit store
+preview/process operations retain the legacy singleton path for tests and
+manual operator runs and do not move worker-lane cadence.
+
+Migration 66 locks the legacy singleton, copies its latest cursors and due time
+into all lane rows, and parks its positive-interval scheduled cadence in one
+atomic handoff. The singleton row remains as a rolling-upgrade in-flight fence.
+Older API-embedded workers lock it exclusively; `witself-worker` takes a shared
+lock before claiming a lane. Old and new scheduling paths therefore cannot
+delete concurrently or alternate batches after the handoff, while multiple new
+worker replicas can hold compatible shared locks and process different lanes.
+Explicit interval-zero operator batches still bypass cadence.
 
 Non-zero runs log only counts and the selected mode: eligible conversations,
 deleted conversations, evidence-deferred conversations, curation-deferred

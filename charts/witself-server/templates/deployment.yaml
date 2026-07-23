@@ -23,6 +23,9 @@ spec:
         {{- end }}
       labels:
         {{- include "witself-server.selectorLabels" . | nindent 8 }}
+        # Non-selector label for the staged API/worker split. Existing API
+        # selectors remain unchanged so this chart can upgrade in place.
+        app.kubernetes.io/component: server
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

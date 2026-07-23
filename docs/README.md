@@ -106,6 +106,9 @@ plane.
   the integrity/authenticity attacker model, required controls, and non-goals.
 - [backend-architecture.md](backend-architecture.md): public backend,
   self-hosting, storage adapters, process boundaries, and implementation path.
+- [cell-worker.md](cell-worker.md): the independently scalable cell background
+  runtime, cooperative PostgreSQL work ownership, health, metrics, and rollout
+  model.
 - [observability-and-operations.md](observability-and-operations.md):
   Prometheus metrics, Kubernetes health probes, structured logs, Helm values,
   and operational checks.
@@ -114,7 +117,7 @@ plane.
 - [self-host-support.md](self-host-support.md): local, preview, and paid
   production self-hosted support boundary.
 - [server-command-surface.md](server-command-surface.md): separate
-  `witself-server` backend service command design.
+  `witself-server` API and `witself-worker` background-service command design.
 - [api-contract.md](api-contract.md): public `/v1` HTTP API shape,
   authentication, capabilities, idempotency, pagination, and route groups.
 - [api-routes.md](api-routes.md): resource-oriented `/v1` route style and
