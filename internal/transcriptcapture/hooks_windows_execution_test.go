@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"syscall"
 	"testing"
 )
 
@@ -55,7 +56,14 @@ func TestCodexHooksWindowsCommandExecutesLiteralArguments(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(shadowDirectory, "powershell.exe"), []byte("untrusted decoy"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command("cmd.exe", "/d", "/s", "/c", commandWindows)
+	command := exec.Command("cmd.exe")
+	// os/exec uses CommandLineToArgvW quoting for ordinary Args, while cmd.exe
+	// has its own incompatible parser. Supply the exact command-processor line
+	// and standard outer quotes so this exercises the stored hook command rather
+	// than Go's application-argument escaping.
+	command.SysProcAttr = &syscall.SysProcAttr{
+		CmdLine: `/d /s /c "` + commandWindows + `"`,
+	}
 	command.Dir = shadowDirectory
 	command.Env = append(
 		os.Environ(),
