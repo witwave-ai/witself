@@ -2,11 +2,7 @@
 
 package transcriptcapture
 
-import (
-	"os"
-
-	"golang.org/x/sys/windows"
-)
+import "golang.org/x/sys/windows"
 
 func replaceFileAtomic(source, destination string) error {
 	sourcePointer, err := windows.UTF16PtrFromString(source)
@@ -27,14 +23,4 @@ func replaceFileAtomic(source, destination string) error {
 		destinationPointer,
 		windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH,
 	)
-}
-
-func replacementCommitIdentityMatches(staged, previous, committed os.FileInfo) bool {
-	// MOVEFILE_REPLACE_EXISTING replaces the contents of an existing destination
-	// and preserves that destination's file identity. When there was no
-	// destination, the staged file itself is moved into place.
-	if previous != nil {
-		return os.SameFile(previous, committed)
-	}
-	return os.SameFile(staged, committed)
 }

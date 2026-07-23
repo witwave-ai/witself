@@ -32,10 +32,6 @@ func TestReplaceFileAtomicCreatesAndReplaces(t *testing.T) {
 			t.Fatal(err)
 		}
 		stagedInfo := statReplacementTestFileByHandle(t, source)
-		var previousInfo os.FileInfo
-		if index > 0 {
-			previousInfo = statReplacementTestFileByHandle(t, destination)
-		}
 		if err := replaceFileAtomic(source, destination); err != nil {
 			t.Fatalf("replace %d: %v", index, err)
 		}
@@ -53,7 +49,7 @@ func TestReplaceFileAtomicCreatesAndReplaces(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !replacementCommitIdentityMatches(stagedInfo, previousInfo, committedInfo) {
+		if !os.SameFile(stagedInfo, committedInfo) {
 			t.Fatalf("replacement %d has unexpected committed identity", index)
 		}
 	}

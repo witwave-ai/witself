@@ -468,7 +468,7 @@ func writeHookJSONAtomicCAS(path string, value any, expected hookFileSnapshot) e
 	if err != nil {
 		return fmt.Errorf("verify hook config commit %s: %w", path, err)
 	}
-	if !committed.exists || !replacementCommitIdentityMatches(stagedInfo, expected.info, committed.info) || !bytes.Equal(committed.raw, raw) {
+	if !committed.exists || !os.SameFile(committed.info, stagedInfo) || !bytes.Equal(committed.raw, raw) {
 		return fmt.Errorf("hook config %s changed during commit; refusing to overwrite the later value", path)
 	}
 	return nil
