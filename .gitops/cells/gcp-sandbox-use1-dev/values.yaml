@@ -17,7 +17,7 @@ apps:
     imageTag: 0.0.203
     transcriptRetention:
       enabled: true
-      mode: preview
+      mode: enforce
       batchSize: 100
       interval: 5m
     factDeletionEnabled: true
