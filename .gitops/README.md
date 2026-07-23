@@ -89,11 +89,13 @@ child applications use automated sync, pruning, and self-healing.
 
 Do not treat a committed pin as deployment proof. For every provisioned cell,
 verify Argo health/sync, replacement-pod readiness, and the public
-`/v1/version` response before advancing the wave. With a database DSN,
-`witself-server serve` applies its embedded migrations before serving, so a
-migration failure prevents the replacement pod from becoming Ready. Complete
-release-specific API and client smoke tests before calling a feature
-operational. The full procedure is in
+`/v1/version` response before advancing the wave. When the worker is enabled,
+also verify both worker replicas are Ready, their health and metrics endpoints
+respond, every configured job reports running, and the API pods report no
+legacy in-process background loops. With a database DSN, both cell executables
+apply embedded migrations before serving, so a migration failure prevents the
+replacement pod from becoming Ready. Complete release-specific API and client
+smoke tests before calling a feature operational. The full procedure is in
 [`docs/deployment-cells.md`](../docs/deployment-cells.md).
 
 Avatar creative-payload compaction uses two GitOps phases. Keep

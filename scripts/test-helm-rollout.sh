@@ -43,8 +43,8 @@ helm template witself-apps "$apps_chart" \
   --values "$gcp_cell" \
   --values "$apps_profile" \
   --set apps.witselfServer.avatarPayloadCompactionEnabled=false \
-  --set apps.witselfServer.transcriptRetention.enabled=false \
-  --set apps.witselfServer.transcriptRetention.mode=preview >"$apps_render"
+  --set apps.witselfServer.worker.transcriptRetention.enabled=false \
+  --set apps.witselfServer.worker.transcriptRetention.mode=preview >"$apps_render"
 helm template witself-apps "$apps_chart" \
   --values "$gcp_cell" \
   --values "$apps_profile" >"$live_apps_render"
@@ -72,13 +72,13 @@ helm template witself-server "$server_chart" --namespace witself \
 helm template witself-apps "$apps_chart" \
   --values "$gcp_cell" \
   --values "$apps_profile" \
-  --set apps.witselfServer.transcriptRetention.enabled=true \
-  --set apps.witselfServer.transcriptRetention.mode=preview >"$retention_preview_apps_render"
+  --set apps.witselfServer.worker.transcriptRetention.enabled=true \
+  --set apps.witselfServer.worker.transcriptRetention.mode=preview >"$retention_preview_apps_render"
 helm template witself-apps "$apps_chart" \
   --values "$gcp_cell" \
   --values "$apps_profile" \
-  --set apps.witselfServer.transcriptRetention.enabled=true \
-  --set apps.witselfServer.transcriptRetention.mode=enforce >"$retention_enforce_apps_render"
+  --set apps.witselfServer.worker.transcriptRetention.enabled=true \
+  --set apps.witselfServer.worker.transcriptRetention.mode=enforce >"$retention_enforce_apps_render"
 helm template witself-server "$server_chart" --namespace witself \
   --values "$gcp_profile" \
   --set worker.avatarStyleRollout.batchSize=101 >"$style_tuned_render"
@@ -158,7 +158,7 @@ extract_document() {
     }
     {
       document = document $0 ORS
-      if ($1 == "kind:") {
+      if ($0 ~ /^kind:/) {
         document_kind = $2
       }
       if ($0 == "metadata:") {
@@ -177,6 +177,32 @@ extract_document() {
   ' "$source" >"$destination"
   if [[ ! -s "$destination" ]]; then
     echo "missing rendered $kind/$name" >&2
+    return 1
+  fi
+}
+
+extract_application_helm_values() {
+  local source="$1"
+  local destination="$2"
+  awk '
+    $0 == "      values: |" {
+      in_values = 1
+      next
+    }
+    in_values {
+      if ($0 == "") {
+        print
+        next
+      }
+      if (substr($0, 1, 8) == "        ") {
+        print substr($0, 9)
+        next
+      }
+      exit
+    }
+  ' "$source" >"$destination"
+  if [[ ! -s "$destination" ]]; then
+    echo "missing nested Application Helm values" >&2
     return 1
   fi
 }
@@ -207,6 +233,12 @@ gcp_worker_network_policy="$render_dir/gcp-worker-network-policy.yaml"
 gcp_server_pdb="$render_dir/gcp-server-pdb.yaml"
 gcp_worker_pdb="$render_dir/gcp-worker-pdb.yaml"
 portable_worker_deployment="$render_dir/portable-worker-deployment.yaml"
+live_server_application="$render_dir/live-server-application.yaml"
+live_nested_values="$render_dir/live-nested-values.yaml"
+live_nested_render="$render_dir/live-nested-render.yaml"
+live_nested_server_config="$render_dir/live-nested-server-config.yaml"
+live_nested_worker_config="$render_dir/live-nested-worker-config.yaml"
+live_nested_worker_deployment="$render_dir/live-nested-worker-deployment.yaml"
 
 extract_document ConfigMap witself-server "$default_render" "$default_server_config"
 extract_document Deployment witself-server "$default_render" "$default_server_deployment"
@@ -224,6 +256,13 @@ extract_document Deployment witself-worker "$portable_worker_render" "$portable_
 extract_document Deployment "$long_fullname" "$long_name_render" "$render_dir/long-name-server-deployment.yaml"
 extract_document Deployment "$long_worker_fullname" "$long_name_render" "$render_dir/long-name-worker-deployment.yaml"
 extract_document Service "$long_worker_metrics_fullname" "$long_name_render" "$render_dir/long-name-worker-metrics-service.yaml"
+extract_document Application witself-server "$live_apps_render" "$live_server_application"
+extract_application_helm_values "$live_server_application" "$live_nested_values"
+helm template witself-server "$server_chart" --namespace witself \
+  --values "$live_nested_values" >"$live_nested_render"
+extract_document ConfigMap witself-server "$live_nested_render" "$live_nested_server_config"
+extract_document ConfigMap witself-worker "$live_nested_render" "$live_nested_worker_config"
+extract_document Deployment witself-worker "$live_nested_render" "$live_nested_worker_deployment"
 
 # Portable defaults keep the API rollout-safe and fail closed on a worker that
 # has no shared database Secret.
@@ -305,6 +344,16 @@ if grep -Eq 'WITSELF_(API_ADDR|BOOTSTRAP|PROVISION|AGENT_EMAIL|BACKEND_KIND|FACT
 fi
 require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED: "false"' "$gcp_server_config"
 require_line '  WITSELF_TRANSCRIPT_RETENTION_ENABLED: "false"' "$gcp_server_config"
+
+# The exact live app-of-apps payload must satisfy the released server chart,
+# render two worker replicas, keep API loops off, and preserve enforcement.
+require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED: "false"' "$live_nested_server_config"
+require_line '  WITSELF_TRANSCRIPT_RETENTION_ENABLED: "false"' "$live_nested_server_config"
+require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED: "true"' "$live_nested_worker_config"
+require_line '  WITSELF_TRANSCRIPT_RETENTION_ENABLED: "true"' "$live_nested_worker_config"
+require_line '  WITSELF_TRANSCRIPT_RETENTION_MODE: "enforce"' "$live_nested_worker_config"
+require_line '  WITSELF_TRANSCRIPT_RETENTION_BATCH_TIMEOUT: "2m"' "$live_nested_worker_config"
+require_line "  replicas: 2" "$live_nested_worker_deployment"
 
 require_sequence "$gcp_worker_metrics_service" \
   "  selector:" \
@@ -502,8 +551,9 @@ require_sequence "$email_pilot_apps_render" \
   "            relayReplayWindow: 5m" \
   "            retryCanaryAgentID: agent_aaaaaaaaaaaaaaaa"
 
-# Keep the currently pinned app-of-apps contract unchanged. Worker activation
-# is staged for the later atomic chart/image/app-values pin update.
+# The chart/image pin and the app-of-apps value-shape migration are atomic.
+# Prove the API remains API-only while the nested worker contract carries both
+# managed jobs and the two-replica availability settings.
 require_line "    drainingTimeoutSec: 60" "$apps_render"
 require_line "        minReadySeconds: 10" "$apps_render"
 require_line "        strategy:" "$apps_render"
@@ -518,45 +568,64 @@ require_line "          minAvailable: 1" "$apps_render"
 require_line "          minDomains: 2" "$apps_render"
 require_line "          topologyKey: topology.kubernetes.io/zone" "$apps_render"
 require_line "          whenUnsatisfiable: DoNotSchedule" "$apps_render"
-reject_line "        worker:" "$apps_render"
 require_sequence "$apps_render" \
   "        avatar:" \
   "          payloadCompaction:" \
   "            enabled: false" \
-  "          styleRollout:" \
-  "            batchSize: 100" \
-  "            batchTimeout: 30s" \
-  "            enabled: true" \
-  "            interval: 2s"
+  "        backend:"
 require_sequence "$phase_b_apps_render" \
   "        avatar:" \
   "          payloadCompaction:" \
   "            enabled: true" \
-  "          styleRollout:" \
+  "        backend:"
+require_sequence "$apps_render" \
+  "        worker:" \
+  "          avatarStyleRollout:" \
   "            batchSize: 100" \
   "            batchTimeout: 30s" \
   "            enabled: true" \
-  "            interval: 2s"
+  "            interval: 2s" \
+  "          enabled: true" \
+  "          minReadySeconds: 10"
+require_sequence "$apps_render" \
+  "          replicaCount: 2" \
+  "          resources:" \
+  "            limits:" \
+  "              memory: 512Mi" \
+  "            requests:" \
+  "              cpu: 100m" \
+  "              memory: 128Mi"
+require_sequence "$apps_render" \
+  "          terminationGracePeriodSeconds: 30" \
+  "          topologySpreadConstraints:" \
+  "          - labelSelector:" \
+  "              matchLabels:" \
+  "                app.kubernetes.io/component: worker" \
+  "                app.kubernetes.io/instance: witself-server" \
+  "                app.kubernetes.io/name: witself-worker"
 extract_document ConfigMap witself-server "$phase_b_gcp_render" "$render_dir/phase-b-server-config.yaml"
 require_line '  WITSELF_AVATAR_PAYLOAD_COMPACTION_ENABLED: "true"' "$render_dir/phase-b-server-config.yaml"
 require_sequence "$live_apps_render" \
-  "        transcriptRetention:" \
-  "          batchSize: 100" \
-  "          enabled: true" \
-  "          interval: 5m" \
-  "          mode: enforce"
+  "          transcriptRetention:" \
+  "            batchSize: 100" \
+  "            batchTimeout: 2m" \
+  "            enabled: true" \
+  "            interval: 5m" \
+  "            mode: enforce"
 require_sequence "$retention_preview_apps_render" \
-  "        transcriptRetention:" \
-  "          batchSize: 100" \
-  "          enabled: true" \
-  "          interval: 5m" \
-  "          mode: preview"
+  "          transcriptRetention:" \
+  "            batchSize: 100" \
+  "            batchTimeout: 2m" \
+  "            enabled: true" \
+  "            interval: 5m" \
+  "            mode: preview"
 require_sequence "$retention_enforce_apps_render" \
-  "        transcriptRetention:" \
-  "          batchSize: 100" \
-  "          enabled: true" \
-  "          interval: 5m" \
-  "          mode: enforce"
+  "          transcriptRetention:" \
+  "            batchSize: 100" \
+  "            batchTimeout: 2m" \
+  "            enabled: true" \
+  "            interval: 5m" \
+  "            mode: enforce"
 
 # API-only changes restart API pods only; worker job tuning and retention phase
 # changes restart worker pods only.
