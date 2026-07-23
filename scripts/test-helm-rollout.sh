@@ -53,7 +53,8 @@ helm template witself-server "$server_chart" --namespace witself \
 helm template witself-apps "$apps_chart" \
   --values "$gcp_cell" \
   --values "$apps_profile" \
-  --set apps.witselfServer.transcriptRetention.enabled=true >"$retention_preview_apps_render"
+  --set apps.witselfServer.transcriptRetention.enabled=true \
+  --set apps.witselfServer.transcriptRetention.mode=preview >"$retention_preview_apps_render"
 helm template witself-apps "$apps_chart" \
   --values "$gcp_cell" \
   --values "$apps_profile" \
