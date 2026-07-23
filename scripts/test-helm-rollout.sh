@@ -17,7 +17,11 @@ phase_b_gcp_render="$(mktemp)"
 phase_b_apps_render="$(mktemp)"
 email_pilot_render="$(mktemp)"
 email_pilot_apps_render="$(mktemp)"
-trap 'rm -f "$default_render" "$gcp_render" "$apps_render" "$phase_b_gcp_render" "$phase_b_apps_render" "$email_pilot_render" "$email_pilot_apps_render"' EXIT
+retention_preview_render="$(mktemp)"
+retention_enforce_render="$(mktemp)"
+retention_preview_apps_render="$(mktemp)"
+retention_enforce_apps_render="$(mktemp)"
+trap 'rm -f "$default_render" "$gcp_render" "$apps_render" "$phase_b_gcp_render" "$phase_b_apps_render" "$email_pilot_render" "$email_pilot_apps_render" "$retention_preview_render" "$retention_enforce_render" "$retention_preview_apps_render" "$retention_enforce_apps_render"' EXIT
 
 helm template witself-server "$server_chart" --namespace witself >"$default_render"
 helm template witself-server "$server_chart" --namespace witself \
@@ -39,6 +43,20 @@ helm template witself-apps "$apps_chart" \
   --values "$gcp_cell" \
   --values "$apps_profile" \
   --values "$apps_email_pilot_profile" >"$email_pilot_apps_render"
+helm template witself-server "$server_chart" --namespace witself \
+  --set transcriptRetention.enabled=true >"$retention_preview_render"
+helm template witself-server "$server_chart" --namespace witself \
+  --set transcriptRetention.enabled=true \
+  --set transcriptRetention.mode=enforce >"$retention_enforce_render"
+helm template witself-apps "$apps_chart" \
+  --values "$gcp_cell" \
+  --values "$apps_profile" \
+  --set apps.witselfServer.transcriptRetention.enabled=true >"$retention_preview_apps_render"
+helm template witself-apps "$apps_chart" \
+  --values "$gcp_cell" \
+  --values "$apps_profile" \
+  --set apps.witselfServer.transcriptRetention.enabled=true \
+  --set apps.witselfServer.transcriptRetention.mode=enforce >"$retention_enforce_apps_render"
 
 require_line() {
   local expected="$1"
@@ -88,6 +106,10 @@ require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE: "100"' "$default_render
 require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_INTERVAL: "2s"' "$default_render"
 require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_TIMEOUT: "30s"' "$default_render"
 require_line '  WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED: "false"' "$default_render"
+require_line '  WITSELF_TRANSCRIPT_RETENTION_ENABLED: "false"' "$default_render"
+require_line '  WITSELF_TRANSCRIPT_RETENTION_MODE: "preview"' "$default_render"
+require_line '  WITSELF_TRANSCRIPT_RETENTION_BATCH_SIZE: "100"' "$default_render"
+require_line '  WITSELF_TRANSCRIPT_RETENTION_INTERVAL: "5m"' "$default_render"
 if [[ "$(grep -c '^  WITSELF_AGENT_EMAIL_' "$default_render")" -ne 1 ]]; then
   echo "default render exposed agent-email configuration beyond the disabled gate" >&2
   exit 1
@@ -138,6 +160,26 @@ fi
 if helm template witself-server "$server_chart" --namespace witself \
   --set avatar.styleRollout.batchTimeout=6m >/dev/null 2>&1; then
   echo "oversized avatar.styleRollout.batchTimeout unexpectedly passed schema validation" >&2
+  exit 1
+fi
+if helm template witself-server "$server_chart" --namespace witself \
+  --set transcriptRetention.mode=delete >/dev/null 2>&1; then
+  echo "unknown transcriptRetention.mode unexpectedly passed schema validation" >&2
+  exit 1
+fi
+if helm template witself-server "$server_chart" --namespace witself \
+  --set transcriptRetention.batchSize=1001 >/dev/null 2>&1; then
+  echo "oversized transcriptRetention.batchSize unexpectedly passed schema validation" >&2
+  exit 1
+fi
+if helm template witself-server "$server_chart" --namespace witself \
+  --set transcriptRetention.interval=59s >/dev/null 2>&1; then
+  echo "undersized transcriptRetention.interval unexpectedly passed schema validation" >&2
+  exit 1
+fi
+if helm template witself-server "$server_chart" --namespace witself \
+  --set transcriptRetention.interval=25h >/dev/null 2>&1; then
+  echo "oversized transcriptRetention.interval unexpectedly passed schema validation" >&2
   exit 1
 fi
 if helm template witself-server "$server_chart" --namespace witself \
@@ -272,5 +314,41 @@ if [[ -z "$phase_a_checksum" || -z "$phase_b_checksum" || "$phase_a_checksum" ==
   echo "avatar compaction phase flip did not change the pod config checksum" >&2
   exit 1
 fi
+
+# Transcript retention requires distinct disabled, preview, and enforce
+# configurations. Enabling without a mode remains non-destructive, and each
+# phase changes the ConfigMap checksum so every replica converges.
+require_line '  WITSELF_TRANSCRIPT_RETENTION_ENABLED: "true"' "$retention_preview_render"
+require_line '  WITSELF_TRANSCRIPT_RETENTION_MODE: "preview"' "$retention_preview_render"
+require_line '  WITSELF_TRANSCRIPT_RETENTION_ENABLED: "true"' "$retention_enforce_render"
+require_line '  WITSELF_TRANSCRIPT_RETENTION_MODE: "enforce"' "$retention_enforce_render"
+retention_disabled_checksum="$(config_checksum "$default_render")"
+retention_preview_checksum="$(config_checksum "$retention_preview_render")"
+retention_enforce_checksum="$(config_checksum "$retention_enforce_render")"
+if [[ -z "$retention_disabled_checksum" || -z "$retention_preview_checksum" ||
+  -z "$retention_enforce_checksum" ||
+  "$retention_disabled_checksum" == "$retention_preview_checksum" ||
+  "$retention_preview_checksum" == "$retention_enforce_checksum" ]]; then
+  echo "transcript-retention rollout states did not produce distinct pod config checksums" >&2
+  exit 1
+fi
+require_sequence "$apps_render" \
+  "        transcriptRetention:" \
+  "          batchSize: 100" \
+  "          enabled: false" \
+  "          interval: 5m" \
+  "          mode: preview"
+require_sequence "$retention_preview_apps_render" \
+  "        transcriptRetention:" \
+  "          batchSize: 100" \
+  "          enabled: true" \
+  "          interval: 5m" \
+  "          mode: preview"
+require_sequence "$retention_enforce_apps_render" \
+  "        transcriptRetention:" \
+  "          batchSize: 100" \
+  "          enabled: true" \
+  "          interval: 5m" \
+  "          mode: enforce"
 
 echo "Helm rollout rendering checks passed"

@@ -14,6 +14,12 @@ The account is the billing target, and usage rolls up by realm. One paying
 customer can run many realms, each holding many named agents, and the plan
 attaches to the account.
 
+Transcript retention is the first implemented behavioral plan policy. Personal,
+Professional, Team, and Enterprise default to 30, 90, 365, and indefinite
+retention respectively. Account-specific admin exceptions are independent of
+billing and follow `account override > plan default > missing/indefinite`; see
+[transcript-retention.md](transcript-retention.md).
+
 V0 should meter meaningful usage internally, but charge primarily by plan tier.
 This gives Witself enough data to understand real service load without making
 the first pricing model feel like nickel-and-dime metering.

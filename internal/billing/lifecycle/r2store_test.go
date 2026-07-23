@@ -42,7 +42,19 @@ func TestR2StoreContract(t *testing.T) {
 	}
 
 	// Version 0 creates; a second create loses.
-	r := Record{AccountID: "acct_1", Email: "s@example.com", Entitled: plans.Free, Applied: plans.Free}
+	r := Record{
+		AccountID: "acct_1", Email: "s@example.com",
+		Entitled: plans.Free, Applied: plans.Free,
+		PlanOverride: &AccountPlanOverride{
+			Plan: "enterprise", ActorID: "adm_abcdefghijklmnopqrst",
+			ActorHandle: "scott", Reason: "founder account", SetAt: time.Now(),
+		},
+		AdminHistory: []AdminChange{{
+			Kind: "plan_override_set", ActorID: "adm_abcdefghijklmnopqrst",
+			ActorHandle: "scott", Reason: "founder account", At: time.Now(),
+			PlanFrom: plans.Free, PlanTo: "enterprise",
+		}},
+	}
 	if err := s.Put(ctx, r); err != nil {
 		t.Fatalf("create Put: %v", err)
 	}
@@ -54,6 +66,14 @@ func TestR2StoreContract(t *testing.T) {
 	got, ok, err := s.Get(ctx, "acct_1")
 	if err != nil || !ok || got.Version != 1 {
 		t.Fatalf("Get = %+v, %v, %v; want Version 1", got, ok, err)
+	}
+	if got.PlanOverride == nil ||
+		got.PlanOverride.ActorID != "adm_abcdefghijklmnopqrst" ||
+		got.PlanOverride.ActorHandle != "scott" ||
+		len(got.AdminHistory) != 1 ||
+		got.AdminHistory[0].ActorID != "adm_abcdefghijklmnopqrst" ||
+		got.AdminHistory[0].ActorHandle != "scott" {
+		t.Fatalf("immutable admin attribution did not round-trip: %+v", got)
 	}
 	got.Provider, got.CustomerID = "fake", "fake_cus_0001"
 	if err := s.Put(ctx, got); err != nil {

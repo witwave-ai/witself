@@ -24,6 +24,15 @@ type archiveTableIntroduction struct {
 // lazy profile style revisions and their resumable rollout job.
 const avatarStyleRolloutArchiveSchema = 52
 
+// cellLocalArchiveExclusions are durable worker-coordination tables whose
+// contents describe one cell rather than one account. They are intentionally
+// absent from account export/import manifests. The archive contract test
+// requires every CREATE TABLE migration to be either canonical or listed here.
+var cellLocalArchiveExclusions = map[string]struct{}{
+	"transcript_retention_account_scan_state": {},
+	"transcript_retention_sweep_state":        {},
+}
+
 var canonicalArchiveTables = []archiveTableIntroduction{
 	{name: "accounts", introducedSchema: 1},
 	{name: "operators", introducedSchema: 2},

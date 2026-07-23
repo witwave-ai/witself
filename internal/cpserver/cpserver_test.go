@@ -23,8 +23,14 @@ func (c *clock) now() time.Time { return c.t }
 
 type noopApplier struct{}
 
-func (noopApplier) Apply(context.Context, string, string, map[string]int64, []string) error {
-	return nil
+func (noopApplier) Apply(_ context.Context, _ string, request lifecycle.ApplyRequest) (lifecycle.ApplyAck, error) {
+	return lifecycle.ApplyAck{Revision: request.Revision, Hash: request.Hash}, nil
+}
+
+type failingApplier struct{}
+
+func (failingApplier) Apply(context.Context, string, lifecycle.ApplyRequest) (lifecycle.ApplyAck, error) {
+	return lifecycle.ApplyAck{}, errors.New("cell unavailable")
 }
 
 type harness struct {
@@ -33,9 +39,15 @@ type harness struct {
 	ck   *clock
 }
 
+const testAdminID = "adm_abcdefghijklmnopqrst"
+
 // newHarness builds the full CP HTTP stack over MemStore + the interactive
 // fake. Auth stub: token "good" may act on acct_1 only.
 func newHarness(t *testing.T) *harness {
+	return newHarnessWithApplier(t, noopApplier{})
+}
+
+func newHarnessWithApplier(t *testing.T, applier lifecycle.Applier) *harness {
 	t.Helper()
 	catalog, err := plans.Load()
 	if err != nil {
@@ -46,7 +58,7 @@ func newHarness(t *testing.T) *harness {
 	providers := map[string]billing.Provider{"fake": f}
 	m, err := lifecycle.NewManager(lifecycle.Config{
 		Catalog: catalog, Providers: providers, Default: "fake",
-		Store: lifecycle.NewMemStore(), Applier: noopApplier{}, Now: ck.now,
+		Store: lifecycle.NewMemStore(), Applier: applier, Now: ck.now,
 	})
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
@@ -56,6 +68,16 @@ func newHarness(t *testing.T) *harness {
 		Manager: m, Catalog: catalog, Providers: providers,
 		Authenticate: func(_ context.Context, accountID, bearer string) (bool, error) {
 			return bearer == "good" && accountID == "acct_1", nil
+		},
+		AdminAuthenticate: func(
+			_ context.Context,
+			bearer, adminID, handle string,
+		) (lifecycle.AdminActor, bool, error) {
+			return lifecycle.AdminActor{ID: adminID, Handle: handle},
+				bearer == "admin-good" && adminID == testAdminID && handle == "scott", nil
+		},
+		AdminAccountExists: func(_ context.Context, accountID string) (bool, error) {
+			return accountID == "acct_1", nil
 		},
 	})
 	if err != nil {
@@ -79,6 +101,10 @@ func (h *harness) call(t *testing.T, method, path, bearer, body string) (int, ma
 	}
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	if bearer == "admin-good" {
+		req.Header.Set("X-Witself-Admin-ID", testAdminID)
+		req.Header.Set("X-Witself-Admin-Handle", "scott")
 	}
 	req.Header.Set("X-Witself-Email", "s@example.com")
 	resp, err := http.DefaultClient.Do(req)
@@ -114,6 +140,173 @@ func TestAuthGates(t *testing.T) {
 	}
 	if status, _ := h.call(t, "GET", "/v1/accounts/acct_2/plan", "good", ""); status != 403 {
 		t.Fatalf("wrong account = %d; want 403", status)
+	}
+}
+
+func TestAdminBridgeRequiresImmutableIDAndHandle(t *testing.T) {
+	h := newHarness(t)
+	path := h.srv.URL + "/v1/admin/accounts/acct_1/transcript-retention"
+	tests := []struct {
+		name, adminID, handle string
+		want                  int
+	}{
+		{name: "missing both", want: http.StatusForbidden},
+		{name: "missing id", handle: "scott", want: http.StatusForbidden},
+		{name: "missing handle", adminID: testAdminID, want: http.StatusForbidden},
+		{name: "forged id", adminID: "adm_zyxwvutsrqponmlkjihg", handle: "scott", want: http.StatusForbidden},
+		{name: "verified pair", adminID: testAdminID, handle: "scott", want: http.StatusOK},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodGet, path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer admin-good")
+			if tc.adminID != "" {
+				req.Header.Set("X-Witself-Admin-ID", tc.adminID)
+			}
+			if tc.handle != "" {
+				req.Header.Set("X-Witself-Admin-Handle", tc.handle)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != tc.want {
+				t.Fatalf("status = %d; want %d", resp.StatusCode, tc.want)
+			}
+		})
+	}
+}
+
+func TestAdminRetentionOverrideShowsDefaultEffectiveAndAttribution(t *testing.T) {
+	h := newHarness(t)
+	path := "/v1/admin/accounts/acct_1/transcript-retention"
+	if status, _ := h.call(t, "GET", path, "good", ""); status != 403 {
+		t.Fatalf("owner token on admin route = %d; want 403", status)
+	}
+	status, doc := h.call(t, "PUT", path, "admin-good",
+		`{"days":60,"reason":"founder evaluation"}`)
+	if status != 200 {
+		t.Fatalf("PUT retention = %d %v", status, doc)
+	}
+	view := doc["transcript_retention"].(map[string]any)
+	if view["default_days"] != float64(30) ||
+		view["effective_days"] != float64(60) || view["overridden"] != true {
+		t.Fatalf("retention view = %v", view)
+	}
+	override := view["override"].(map[string]any)
+	if override["actor_id"] != testAdminID ||
+		override["actor_handle"] != "scott" ||
+		override["reason"] != "founder evaluation" {
+		t.Fatalf("override attribution = %v", override)
+	}
+
+	// Customer-facing plan status exposes the same effective-vs-default
+	// distinction without granting owner tokens an override mutation.
+	status, doc = h.call(t, "GET", "/v1/accounts/acct_1/plan", "good", "")
+	if status != 200 {
+		t.Fatalf("GET plan = %d %v", status, doc)
+	}
+	view = doc["transcript_retention"].(map[string]any)
+	if view["default_days"] != float64(30) || view["effective_days"] != float64(60) {
+		t.Fatalf("owner retention view = %v", view)
+	}
+	if _, exposed := view["override"]; exposed {
+		t.Fatalf("customer response exposed internal retention attribution: %v", view)
+	}
+	if _, exposed := doc["plan_override"]; exposed {
+		t.Fatalf("customer response exposed internal plan override: %v", doc)
+	}
+
+	status, doc = h.call(t, "DELETE", path, "admin-good",
+		`{"reason":"restore current plan default"}`)
+	if status != 200 {
+		t.Fatalf("DELETE retention = %d %v", status, doc)
+	}
+	view = doc["transcript_retention"].(map[string]any)
+	if view["overridden"] != false || view["effective_days"] != float64(30) {
+		t.Fatalf("cleared retention view = %v", view)
+	}
+	if history := doc["admin_history"].([]any); len(history) != 2 {
+		t.Fatalf("admin history = %v; want two transitions", history)
+	}
+}
+
+func TestAdminCanSetExplicitIndefiniteRetention(t *testing.T) {
+	h := newHarness(t)
+	status, doc := h.call(t, "PUT",
+		"/v1/admin/accounts/acct_1/transcript-retention", "admin-good",
+		`{"indefinite":true,"reason":"legal contract"}`)
+	if status != 200 {
+		t.Fatalf("PUT indefinite = %d %v", status, doc)
+	}
+	view := doc["transcript_retention"].(map[string]any)
+	if view["default_days"] != float64(30) || view["effective_days"] != nil ||
+		view["overridden"] != true {
+		t.Fatalf("indefinite view = %v", view)
+	}
+}
+
+func TestAdminRetentionMutationReportsAcceptedWhenCellApplyFails(t *testing.T) {
+	h := newHarnessWithApplier(t, failingApplier{})
+	status, doc := h.call(t, "PUT",
+		"/v1/admin/accounts/acct_1/transcript-retention", "admin-good",
+		`{"days":60,"reason":"temporary exception"}`)
+	if status != http.StatusAccepted {
+		t.Fatalf("PUT retention = %d %v; want 202 while apply is pending", status, doc)
+	}
+	if doc["apply_pending"] != true ||
+		doc["desired_revision"] != float64(1) ||
+		doc["applied_revision"] != float64(0) {
+		t.Fatalf("pending apply fence = %v", doc)
+	}
+}
+
+func TestAdminEnterpriseBackfillDoesNotChangeBillingPlan(t *testing.T) {
+	h := newHarness(t)
+	path := "/v1/admin/accounts/acct_1/plan-override"
+	status, doc := h.call(t, "PUT", path, "admin-good",
+		`{"plan":"enterprise","reason":"founder account backfill"}`)
+	if status != 200 {
+		t.Fatalf("PUT plan override = %d %v", status, doc)
+	}
+	if doc["plan"] != "enterprise" || doc["billing_plan"] != "free" {
+		t.Fatalf("backfill status = %v; want enterprise effective, free billing", doc)
+	}
+	view := doc["transcript_retention"].(map[string]any)
+	if view["default_days"] != nil || view["effective_days"] != nil {
+		t.Fatalf("enterprise retention = %v; want indefinite", view)
+	}
+	override := doc["plan_override"].(map[string]any)
+	if override["actor_id"] != testAdminID ||
+		override["actor_handle"] != "scott" ||
+		override["reason"] != "founder account backfill" {
+		t.Fatalf("plan override attribution = %v", override)
+	}
+
+	status, doc = h.call(t, "DELETE", path, "admin-good",
+		`{"reason":"rollback test"}`)
+	if status != 200 || doc["plan"] != "free" || doc["billing_plan"] != "free" ||
+		doc["plan_override"] != nil {
+		t.Fatalf("cleared plan override = %d %v", status, doc)
+	}
+}
+
+func TestAdminOverrideValidation(t *testing.T) {
+	h := newHarness(t)
+	path := "/v1/admin/accounts/acct_1/transcript-retention"
+	for _, body := range []string{
+		`{"reason":"missing value"}`,
+		`{"days":60,"indefinite":true,"reason":"two values"}`,
+		`{"days":0,"reason":"zero is unsafe"}`,
+		`{"days":60}`,
+	} {
+		if status, _ := h.call(t, "PUT", path, "admin-good", body); status != 400 {
+			t.Fatalf("PUT %s = %d; want 400", body, status)
+		}
 	}
 }
 

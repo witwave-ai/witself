@@ -153,6 +153,8 @@ plane.
   realm-rolled metered dimensions, limits, and overage behavior.
 - [audit-retention.md](audit-retention.md): managed, self-hosted, and local
   audit retention defaults and audit content rules.
+- [transcript-retention.md](transcript-retention.md): account plan defaults,
+  admin overrides, cell snapshots, and whole-conversation enforcement.
 - [backup-and-recovery.md](backup-and-recovery.md): operational backups
   (including vector data), first-class plaintext identity export, and
   round-trippable import.

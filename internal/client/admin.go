@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/witwave-ai/witself/internal/placement"
 )
@@ -307,6 +308,217 @@ func SetAdminSupportPolicy(ctx context.Context, cpEndpoint, adminToken, accountI
 		strings.TrimRight(cpEndpoint, "/"), accountID)
 	var out SupportPolicyChange
 	if err := doJSON(ctx, http.MethodPatch, url, adminToken, body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// AdminAccountPolicy is the resolved control-plane view returned by both
+// transcript-retention and plan-override admin routes. BillingPlan remains the
+// provider-backed entitlement; Plan is the effective classification after an
+// optional administrator override.
+type AdminAccountPolicy struct {
+	SchemaVersion       string                            `json:"schema_version"`
+	AccountID           string                            `json:"account_id"`
+	Plan                string                            `json:"plan"`
+	BillingPlan         string                            `json:"billing_plan"`
+	Applied             string                            `json:"applied"`
+	PlanOverride        *AdminAccountPlanOverride         `json:"plan_override"`
+	TranscriptRetention AdminTranscriptRetention          `json:"transcript_retention"`
+	AdminHistory        []AdminAccountPolicyHistoryChange `json:"admin_history"`
+	ApplyPending        bool                              `json:"apply_pending"`
+	DesiredRevision     int64                             `json:"desired_revision"`
+	AppliedRevision     int64                             `json:"applied_revision"`
+}
+
+// AdminAccountPlanOverride is the audited account classification exception.
+type AdminAccountPlanOverride struct {
+	Plan        string    `json:"plan"`
+	ActorID     string    `json:"actor_id"`
+	ActorHandle string    `json:"actor_handle"`
+	Reason      string    `json:"reason"`
+	SetAt       time.Time `json:"set_at"`
+}
+
+// AdminTranscriptRetention describes inherited and effective retention.
+// A nil day value means indefinite. Override is present only when Overridden
+// is true; Override.Days=nil represents an explicit indefinite exception.
+type AdminTranscriptRetention struct {
+	DefaultDays   *int64                            `json:"default_days"`
+	EffectiveDays *int64                            `json:"effective_days"`
+	Overridden    bool                              `json:"overridden"`
+	Override      *AdminTranscriptRetentionOverride `json:"override,omitempty"`
+}
+
+// AdminTranscriptRetentionOverride is the audited account retention exception.
+// Days is nil when the administrator selected explicit indefinite retention.
+type AdminTranscriptRetentionOverride struct {
+	Days        *int64    `json:"days"`
+	ActorID     string    `json:"actor_id"`
+	ActorHandle string    `json:"actor_handle"`
+	Reason      string    `json:"reason"`
+	SetAt       time.Time `json:"set_at"`
+}
+
+// AdminAccountPolicyHistoryChange is one append-only administrator policy
+// transition returned by the control plane.
+type AdminAccountPolicyHistoryChange struct {
+	Kind          string    `json:"kind"`
+	ActorID       string    `json:"actor_id"`
+	ActorHandle   string    `json:"actor_handle"`
+	Reason        string    `json:"reason"`
+	At            time.Time `json:"at"`
+	PlanFrom      string    `json:"plan_from,omitempty"`
+	PlanTo        string    `json:"plan_to,omitempty"`
+	RetentionFrom *int64    `json:"retention_from,omitempty"`
+	RetentionTo   *int64    `json:"retention_to,omitempty"`
+}
+
+// AdminTranscriptRetentionInput sets either a finite day window or an
+// explicit indefinite exception. Exactly one of Days and Indefinite must be
+// selected and Reason is always required.
+type AdminTranscriptRetentionInput struct {
+	Days       *int64
+	Indefinite bool
+	Reason     string
+}
+
+// MaxAdminTranscriptRetentionDays is the finite retention representation
+// bound accepted by both the control-plane client and cell.
+const MaxAdminTranscriptRetentionDays int64 = 36500
+
+func validateAdminPolicyTarget(accountID string) error {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" || len(accountID) > 128 {
+		return fmt.Errorf("account id must be 1-128 characters")
+	}
+	for _, r := range accountID {
+		if unicode.IsSpace(r) || unicode.IsControl(r) || r == '/' || r == '\\' {
+			return fmt.Errorf("account id contains an unsafe character")
+		}
+	}
+	return nil
+}
+
+func validateAdminPolicyReason(reason string) (string, error) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" || len(reason) > 512 {
+		return "", fmt.Errorf("reason must be 1-512 characters")
+	}
+	return reason, nil
+}
+
+func adminAccountPolicyURL(cpEndpoint, accountID, resource string) (string, error) {
+	if err := validateAdminPolicyTarget(accountID); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s/v1/admin/accounts/%s/%s",
+		strings.TrimRight(cpEndpoint, "/"), neturl.PathEscape(strings.TrimSpace(accountID)), resource), nil
+}
+
+func getAdminAccountPolicy(ctx context.Context, cpEndpoint, adminToken, accountID, resource string) (*AdminAccountPolicy, error) {
+	url, err := adminAccountPolicyURL(cpEndpoint, accountID, resource)
+	if err != nil {
+		return nil, err
+	}
+	var out AdminAccountPolicy
+	if err := doJSON(ctx, http.MethodGet, url, adminToken, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetAdminTranscriptRetention returns the inherited and effective retention
+// policy for one account.
+func GetAdminTranscriptRetention(ctx context.Context, cpEndpoint, adminToken, accountID string) (*AdminAccountPolicy, error) {
+	return getAdminAccountPolicy(ctx, cpEndpoint, adminToken, accountID, "transcript-retention")
+}
+
+// SetAdminTranscriptRetention creates or replaces an account-level retention
+// exception without changing the account's billing plan.
+func SetAdminTranscriptRetention(ctx context.Context, cpEndpoint, adminToken, accountID string, in AdminTranscriptRetentionInput) (*AdminAccountPolicy, error) {
+	if (in.Days == nil) == !in.Indefinite {
+		return nil, fmt.Errorf("set exactly one of days or indefinite")
+	}
+	reason, err := validateAdminPolicyReason(in.Reason)
+	if err != nil {
+		return nil, err
+	}
+	payload := map[string]any{"reason": reason}
+	if in.Indefinite {
+		payload["indefinite"] = true
+	} else {
+		if *in.Days < 1 || *in.Days > MaxAdminTranscriptRetentionDays {
+			return nil, fmt.Errorf("days must be between 1 and %d", MaxAdminTranscriptRetentionDays)
+		}
+		payload["days"] = *in.Days
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	url, err := adminAccountPolicyURL(cpEndpoint, accountID, "transcript-retention")
+	if err != nil {
+		return nil, err
+	}
+	var out AdminAccountPolicy
+	if err := doJSON(ctx, http.MethodPut, url, adminToken, body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ClearAdminTranscriptRetention removes an account exception so the account
+// inherits its effective plan's current default again.
+func ClearAdminTranscriptRetention(ctx context.Context, cpEndpoint, adminToken, accountID, reason string) (*AdminAccountPolicy, error) {
+	return changeAdminAccountPolicy(ctx, cpEndpoint, adminToken, accountID,
+		"transcript-retention", http.MethodDelete, map[string]string{"reason": reason})
+}
+
+// GetAdminPlanOverride returns the account's effective and billing plan plus
+// any administrator-owned classification override.
+func GetAdminPlanOverride(ctx context.Context, cpEndpoint, adminToken, accountID string) (*AdminAccountPolicy, error) {
+	return getAdminAccountPolicy(ctx, cpEndpoint, adminToken, accountID, "plan-override")
+}
+
+// SetAdminPlanOverride changes effective classification without mutating the
+// provider-backed billing relationship.
+func SetAdminPlanOverride(ctx context.Context, cpEndpoint, adminToken, accountID, plan, reason string) (*AdminAccountPolicy, error) {
+	plan = strings.TrimSpace(plan)
+	if plan == "" || len(plan) > 64 {
+		return nil, fmt.Errorf("plan must be 1-64 characters")
+	}
+	for _, r := range plan {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' && r != '_' {
+			return nil, fmt.Errorf("plan contains an unsafe character")
+		}
+	}
+	return changeAdminAccountPolicy(ctx, cpEndpoint, adminToken, accountID,
+		"plan-override", http.MethodPut, map[string]string{"plan": plan, "reason": reason})
+}
+
+// ClearAdminPlanOverride restores the provider-backed plan classification.
+func ClearAdminPlanOverride(ctx context.Context, cpEndpoint, adminToken, accountID, reason string) (*AdminAccountPolicy, error) {
+	return changeAdminAccountPolicy(ctx, cpEndpoint, adminToken, accountID,
+		"plan-override", http.MethodDelete, map[string]string{"reason": reason})
+}
+
+func changeAdminAccountPolicy(ctx context.Context, cpEndpoint, adminToken, accountID, resource, method string, fields map[string]string) (*AdminAccountPolicy, error) {
+	reason, err := validateAdminPolicyReason(fields["reason"])
+	if err != nil {
+		return nil, err
+	}
+	fields["reason"] = reason
+	body, err := json.Marshal(fields)
+	if err != nil {
+		return nil, err
+	}
+	url, err := adminAccountPolicyURL(cpEndpoint, accountID, resource)
+	if err != nil {
+		return nil, err
+	}
+	var out AdminAccountPolicy
+	if err := doJSON(ctx, method, url, adminToken, body, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

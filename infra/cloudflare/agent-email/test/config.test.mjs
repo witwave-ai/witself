@@ -7,7 +7,7 @@ const root = new URL("..", import.meta.url);
 const script = new URL("../scripts/render-wrangler.mjs", import.meta.url);
 
 test("deployment config is email-only and cannot reuse the control-plane DIRECTORY id", async () => {
-  const controlPlane = await readFile(new URL("../../control-plane/wrangler.jsonc", import.meta.url), "utf8");
+  const controlPlane = await readFile(new URL("../../control-plane/wrangler.template.jsonc", import.meta.url), "utf8");
   const directoryID = /"binding"\s*:\s*"DIRECTORY"[\s\S]{0,200}?"id"\s*:\s*"([0-9a-f]{32})"/.exec(controlPlane)?.[1];
   assert.match(directoryID, /^[0-9a-f]{32}$/);
   const rejected = spawnSync(process.execPath, [script.pathname], {

@@ -1,25 +1,27 @@
 {
   "schema_version": "witself.plans.v0",
-  "updated": "2026-07-04",
+  "updated": "2026-07-22",
   "currency": "USD",
   "plans": [
     {
       "id": "free",
-      "name": "Free",
+      "name": "Personal",
       "price_monthly": 0,
       "available": true,
       "usage_billed": false,
       "limits": { "agents": 25, "realms": 1 },
+      "policies": { "transcript_retention_days": 30 },
       "features": ["memory", "facts"],
       "summary": "Limited and capped. Agent memory and facts for up to 25 agents in one realm. No support included."
     },
     {
       "id": "standard",
-      "name": "Standard",
+      "name": "Professional",
       "price_monthly": 30,
       "available": true,
       "usage_billed": false,
       "limits": { "agents": 250, "realms": 10 },
+      "policies": { "transcript_retention_days": 90 },
       "features": ["memory", "facts", "secrets", "collaboration", "support"],
       "summary": "Capped. Memory, facts, secrets, and collaboration for 250 agents across 10 realms, support included."
     },
@@ -30,18 +32,19 @@
       "available": false,
       "usage_billed": true,
       "limits": null,
+      "policies": { "transcript_retention_days": 365 },
       "features": ["memory", "facts", "secrets", "collaboration", "support"],
-      "summary": "Coming soon. Everything in Standard with higher limits, plus usage-based billing."
+      "summary": "Coming soon. Everything in Professional with higher limits, plus usage-based billing."
     },
     {
       "id": "enterprise",
       "name": "Enterprise",
-      "price_monthly_min": 4000,
       "available": false,
       "usage_billed": true,
       "limits": null,
-      "features": ["support"],
-      "summary": "Coming soon. Minimum commitment plus usage; support included; details to follow."
+      "policies": {},
+      "features": ["memory", "facts", "secrets", "collaboration", "support"],
+      "summary": "Coming soon. Everything in Team with custom pricing and support; details to follow."
     }
   ]
 }

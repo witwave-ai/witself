@@ -30,6 +30,17 @@ import (
 // the zero configuration refuses everything.
 type AuthFunc func(ctx context.Context, accountID, bearer string) (bool, error)
 
+// AdminAuthFunc authenticates the Worker's internal bridge credential and
+// validates the already-authenticated immutable admin id plus display handle it
+// forwards.
+type AdminAuthFunc func(
+	ctx context.Context,
+	bearer, claimedID, claimedHandle string,
+) (actor lifecycle.AdminActor, ok bool, err error)
+
+// InternalAuthFunc authenticates platform-only value-free observability reads.
+type InternalAuthFunc func(ctx context.Context, bearer string) (bool, error)
+
 // Config assembles the HTTP layer.
 type Config struct {
 	Manager *lifecycle.Manager
@@ -40,12 +51,28 @@ type Config struct {
 	// Authenticate guards the plan verbs. Required — there is deliberately
 	// no default-open mode.
 	Authenticate AuthFunc
+	// AdminAuthenticate enables account policy/plan override routes. nil keeps
+	// the routes absent; account-owner tokens can never mint these exceptions.
+	AdminAuthenticate AdminAuthFunc
+	// AdminAccountExists verifies the target against the routed cell before
+	// an override record can be created. Required with AdminAuthenticate.
+	AdminAccountExists func(ctx context.Context, accountID string) (bool, error)
+	// LifecycleObserver exposes aggregate seed/apply progress when paired
+	// with InternalAuthenticate. Both nil keeps the route absent.
+	LifecycleObserver    *PlanLifecycleObserver
+	InternalAuthenticate InternalAuthFunc
 }
 
 // Register mounts the control plane's billing/plan routes onto mux.
 func Register(mux *http.ServeMux, cfg Config) error {
 	if cfg.Manager == nil || cfg.Catalog == nil || cfg.Authenticate == nil {
 		return fmt.Errorf("cpserver: Manager, Catalog, and Authenticate are required")
+	}
+	if cfg.AdminAuthenticate != nil && cfg.AdminAccountExists == nil {
+		return fmt.Errorf("cpserver: AdminAccountExists is required with AdminAuthenticate")
+	}
+	if (cfg.LifecycleObserver == nil) != (cfg.InternalAuthenticate == nil) {
+		return fmt.Errorf("cpserver: LifecycleObserver and InternalAuthenticate must be configured together")
 	}
 
 	// The public plan catalog — the same witself.plans.v0 document the
@@ -61,9 +88,78 @@ func Register(mux *http.ServeMux, cfg Config) error {
 
 	// Plan verbs, mirroring the cell's :verb idiom.
 	mux.HandleFunc("GET /v1/accounts/{id}/plan", withAccount(cfg, planStatus))
-	mux.HandleFunc("POST /v1/accounts/{id}/plan:upgrade", withAccount(cfg, planUpgrade))
-	mux.HandleFunc("POST /v1/accounts/{id}/plan:downgrade", withAccount(cfg, planDowngrade))
-	mux.HandleFunc("POST /v1/accounts/{id}/plan:cancel", withAccount(cfg, planCancel))
+	if cfg.Manager.BillingAvailable() {
+		mux.HandleFunc("POST /v1/accounts/{id}/plan:upgrade", withAccount(cfg, planUpgrade))
+		mux.HandleFunc("POST /v1/accounts/{id}/plan:downgrade", withAccount(cfg, planDowngrade))
+		mux.HandleFunc("POST /v1/accounts/{id}/plan:cancel", withAccount(cfg, planCancel))
+	}
+
+	if cfg.AdminAuthenticate != nil {
+		mux.HandleFunc("GET /v1/admin/accounts/{id}/transcript-retention",
+			withAdmin(cfg, adminGetTranscriptRetention))
+		mux.HandleFunc("PUT /v1/admin/accounts/{id}/transcript-retention",
+			withAdmin(cfg, adminPutTranscriptRetention))
+		mux.HandleFunc("DELETE /v1/admin/accounts/{id}/transcript-retention",
+			withAdmin(cfg, adminDeleteTranscriptRetention))
+		mux.HandleFunc("GET /v1/admin/accounts/{id}/plan-override",
+			withAdmin(cfg, adminGetPlanOverride))
+		mux.HandleFunc("PUT /v1/admin/accounts/{id}/plan-override",
+			withAdmin(cfg, adminPutPlanOverride))
+		mux.HandleFunc("DELETE /v1/admin/accounts/{id}/plan-override",
+			withAdmin(cfg, adminDeletePlanOverride))
+	}
+	if cfg.LifecycleObserver != nil {
+		mux.HandleFunc("GET /v1/plan-lifecycle/status", func(w http.ResponseWriter, r *http.Request) {
+			if !authorizeInternal(cfg, w, r) {
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"schema_version": "witself.v0",
+				"plan_lifecycle": cfg.LifecycleObserver.Snapshot(),
+			})
+		})
+		mux.HandleFunc("POST /v1/plan-lifecycle:tick", func(w http.ResponseWriter, r *http.Request) {
+			if !authorizeInternal(cfg, w, r) {
+				return
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+			var req struct {
+				AccountIDs []string `json:"account_ids"`
+			}
+			decoder := json.NewDecoder(r.Body)
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&req); err != nil || req.AccountIDs == nil {
+				writeError(w, http.StatusBadRequest, "a bounded account_ids array is required")
+				return
+			}
+			if err := validatePlanLifecycleAccountIDs(
+				req.AccountIDs, maxPlanLifecycleTickAccounts); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid lifecycle account page")
+				return
+			}
+
+			cfg.LifecycleObserver.begin(time.Now())
+			tickCtx, cancel := context.WithTimeout(
+				r.Context(), planLifecycleTickTimeout)
+			defer cancel()
+			summary, reconcileErr := ReconcileAccountIDs(
+				tickCtx, cfg.Manager, req.AccountIDs,
+				maxPlanLifecycleTickAccounts,
+			)
+			succeeded := reconcileErr == nil
+			cfg.LifecycleObserver.complete(time.Now(), summary, succeeded)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"schema_version": "witself.v0",
+				"plan_lifecycle": map[string]any{
+					"scanned":       summary.Scanned,
+					"seeded":        summary.Seeded,
+					"apply_pending": summary.ApplyPending,
+					"failed":        summary.Failed,
+					"succeeded":     succeeded,
+				},
+			})
+		})
+	}
 
 	// One webhook route per configured provider: each partner has its own
 	// signature scheme, and provider-scoped event folding is what keeps
@@ -72,6 +168,24 @@ func Register(mux *http.ServeMux, cfg Config) error {
 		mux.HandleFunc("POST /v1/billing/webhook/"+name, webhook(cfg, name, p))
 	}
 	return nil
+}
+
+func authorizeInternal(cfg Config, w http.ResponseWriter, r *http.Request) bool {
+	bearer, ok := bearerToken(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "missing internal bearer token")
+		return false
+	}
+	authorized, err := cfg.InternalAuthenticate(r.Context(), bearer)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not authenticate")
+		return false
+	}
+	if !authorized {
+		writeError(w, http.StatusForbidden, "not authorized")
+		return false
+	}
+	return true
 }
 
 // RunReconciler sweeps the Manager on interval until ctx ends: expiring
@@ -141,16 +255,22 @@ type pendingView struct {
 }
 
 func planStatus(cfg Config, w http.ResponseWriter, r *http.Request, accountID string) {
-	rec, err := cfg.Manager.Status(r.Context(), accountID, r.Header.Get("X-Witself-Email"))
+	rec, snapshot, err := cfg.Manager.ResolvedStatus(r.Context(), accountID, r.Header.Get("X-Witself-Email"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not read plan status")
 		return
 	}
 	out := map[string]any{
-		"schema_version": "witself.v0",
-		"account_id":     rec.AccountID,
-		"plan":           rec.Entitled,
-		"applied":        rec.Applied,
+		"schema_version":       "witself.v0",
+		"account_id":           rec.AccountID,
+		"billing_available":    cfg.Manager.BillingAvailable(),
+		"plan":                 snapshot.Plan,
+		"billing_plan":         rec.Entitled,
+		"applied":              rec.Applied,
+		"policies":             snapshot.Policies,
+		"policy_defaults":      snapshot.DefaultPolicies,
+		"transcript_retention": transcriptRetentionView(rec, snapshot, false),
+		"apply_pending":        lifecycle.SnapshotApplyPending(rec, snapshot),
 	}
 	if rec.PastDueSince != nil {
 		out["past_due_since"] = rec.PastDueSince
@@ -169,6 +289,229 @@ func planStatus(cfg Config, w http.ResponseWriter, r *http.Request, accountID st
 		out["pending"] = pv
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+type adminAccountHandler func(
+	cfg Config,
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	actor lifecycle.AdminActor,
+)
+
+func withAdmin(cfg Config, h adminAccountHandler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		accountID := strings.TrimSpace(r.PathValue("id"))
+		if accountID == "" {
+			writeError(w, http.StatusBadRequest, "missing account id")
+			return
+		}
+		bearer, ok := bearerToken(r)
+		if !ok {
+			writeError(w, http.StatusUnauthorized, "missing admin bearer token")
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+		actor, authorized, err := cfg.AdminAuthenticate(
+			r.Context(), bearer,
+			r.Header.Get("X-Witself-Admin-ID"),
+			r.Header.Get("X-Witself-Admin-Handle"),
+		)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "could not authenticate admin")
+			return
+		}
+		if !authorized {
+			writeError(w, http.StatusForbidden, "not authorized as an admin")
+			return
+		}
+		exists, err := cfg.AdminAccountExists(r.Context(), accountID)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "could not verify admin account target")
+			return
+		}
+		if !exists {
+			writeError(w, http.StatusNotFound, "account not found")
+			return
+		}
+		h(cfg, w, r, accountID, actor)
+	}
+}
+
+func transcriptRetentionView(
+	rec lifecycle.Record,
+	snapshot lifecycle.PlanSnapshot,
+	includeAdminDetail bool,
+) map[string]any {
+	var defaultDays any
+	if days, ok := snapshot.DefaultPolicies[plans.TranscriptRetentionDaysPolicy]; ok {
+		defaultDays = days
+	}
+	var effectiveDays any
+	if days, ok := snapshot.Policies[plans.TranscriptRetentionDaysPolicy]; ok {
+		effectiveDays = days
+	}
+	out := map[string]any{
+		"default_days":   defaultDays,
+		"effective_days": effectiveDays,
+		"overridden":     rec.TranscriptRetentionOverride != nil,
+	}
+	if includeAdminDetail && rec.TranscriptRetentionOverride != nil {
+		out["override"] = rec.TranscriptRetentionOverride
+	}
+	return out
+}
+
+func writeAdminAccountPolicy(
+	cfg Config,
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	mutation bool,
+) {
+	rec, snapshot, err := cfg.Manager.ResolvedStatus(r.Context(), accountID, "")
+	if err != nil {
+		writeManagerError(w, err)
+		return
+	}
+	pending := lifecycle.SnapshotApplyPending(rec, snapshot)
+	status := http.StatusOK
+	if mutation && pending {
+		status = http.StatusAccepted
+	}
+	writeJSON(w, status, map[string]any{
+		"schema_version":       "witself.v0",
+		"account_id":           accountID,
+		"plan":                 snapshot.Plan,
+		"billing_plan":         rec.Entitled,
+		"applied":              rec.Applied,
+		"plan_override":        rec.PlanOverride,
+		"transcript_retention": transcriptRetentionView(rec, snapshot, true),
+		"admin_history":        rec.AdminHistory,
+		"apply_pending":        pending,
+		"desired_revision":     rec.SnapshotRevision,
+		"applied_revision":     rec.AppliedSnapshotRevision,
+	})
+}
+
+func adminGetTranscriptRetention(
+	cfg Config,
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	_ lifecycle.AdminActor,
+) {
+	writeAdminAccountPolicy(cfg, w, r, accountID, false)
+}
+
+func adminPutTranscriptRetention(
+	cfg Config,
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	actor lifecycle.AdminActor,
+) {
+	var req struct {
+		Days       *int64 `json:"days"`
+		Indefinite bool   `json:"indefinite"`
+		Reason     string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil ||
+		(req.Days == nil) == !req.Indefinite {
+		writeError(w, http.StatusBadRequest, "set exactly one of days or indefinite=true")
+		return
+	}
+	var days *int64
+	if !req.Indefinite {
+		days = req.Days
+	}
+	if _, err := cfg.Manager.SetTranscriptRetentionOverride(
+		r.Context(), accountID, days, actor, req.Reason,
+	); err != nil {
+		writeManagerError(w, err)
+		return
+	}
+	writeAdminAccountPolicy(cfg, w, r, accountID, true)
+}
+
+func adminDeleteTranscriptRetention(
+	cfg Config,
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	actor lifecycle.AdminActor,
+) {
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "a JSON body with reason is required")
+		return
+	}
+	if _, err := cfg.Manager.ClearTranscriptRetentionOverride(
+		r.Context(), accountID, actor, req.Reason,
+	); err != nil {
+		writeManagerError(w, err)
+		return
+	}
+	writeAdminAccountPolicy(cfg, w, r, accountID, true)
+}
+
+func adminGetPlanOverride(
+	cfg Config,
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	_ lifecycle.AdminActor,
+) {
+	writeAdminAccountPolicy(cfg, w, r, accountID, false)
+}
+
+func adminPutPlanOverride(
+	cfg Config,
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	actor lifecycle.AdminActor,
+) {
+	var req struct {
+		Plan   string `json:"plan"`
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "a JSON body with plan and reason is required")
+		return
+	}
+	if _, err := cfg.Manager.SetAccountPlanOverride(
+		r.Context(), accountID, req.Plan, actor, req.Reason,
+	); err != nil {
+		writeManagerError(w, err)
+		return
+	}
+	writeAdminAccountPolicy(cfg, w, r, accountID, true)
+}
+
+func adminDeletePlanOverride(
+	cfg Config,
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	actor lifecycle.AdminActor,
+) {
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "a JSON body with reason is required")
+		return
+	}
+	if _, err := cfg.Manager.ClearAccountPlanOverride(
+		r.Context(), accountID, actor, req.Reason,
+	); err != nil {
+		writeManagerError(w, err)
+		return
+	}
+	writeAdminAccountPolicy(cfg, w, r, accountID, true)
 }
 
 // decodePlan reads the {"plan": "..."} body the change verbs share.
@@ -270,6 +613,10 @@ func webhook(cfg Config, name string, p billing.Provider) http.HandlerFunc {
 // failures, CAS exhaustion) becomes a generic 500 so infrastructure trouble
 // neither masquerades as a policy refusal nor leaks backend detail.
 func writeManagerError(w http.ResponseWriter, err error) {
+	if errors.Is(err, lifecycle.ErrAdminInput) {
+		writeError(w, http.StatusBadRequest, strings.TrimPrefix(err.Error(), lifecycle.ErrAdminInput.Error()+": "))
+		return
+	}
 	if errors.Is(err, lifecycle.ErrRefusal) {
 		writeError(w, http.StatusConflict, strings.TrimPrefix(err.Error(), lifecycle.ErrRefusal.Error()+": "))
 		return

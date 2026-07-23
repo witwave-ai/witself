@@ -57,6 +57,14 @@ apps:
       batchSize: 100
       interval: 2s
       batchTimeout: 30s
+    # Keep retention disabled during the code/schema rollout. The first
+    # config-only activation uses preview; enforcement is a later explicit
+    # config-only change after preview counts are reviewed.
+    transcriptRetention:
+      enabled: false
+      mode: preview
+      batchSize: 100
+      interval: 5m
     awsAlbIngress:
       enabled: false
       className: alb

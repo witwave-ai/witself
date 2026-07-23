@@ -130,6 +130,7 @@ func archiveTableIntroductionsFromMigrations(t *testing.T) map[string]int {
 
 	createTableRE := regexp.MustCompile(`(?im)^\s*create\s+table\s+(?:if\s+not\s+exists\s+)?([a-z_]+)\s*\(`)
 	introductions := make(map[string]int)
+	exclusionsFound := make(map[string]bool, len(cellLocalArchiveExclusions))
 	for _, entry := range entries {
 		if !strings.HasSuffix(entry.Name(), ".sql") {
 			continue
@@ -148,10 +149,19 @@ func archiveTableIntroductionsFromMigrations(t *testing.T) map[string]int {
 		}
 		for _, match := range createTableRE.FindAllStringSubmatch(string(raw), -1) {
 			table := match[1]
+			if _, excluded := cellLocalArchiveExclusions[table]; excluded {
+				exclusionsFound[table] = true
+				continue
+			}
 			if previous, duplicate := introductions[table]; duplicate {
 				t.Fatalf("table %q created in migrations %d and %d", table, previous, schema)
 			}
 			introductions[table] = schema
+		}
+	}
+	for table := range cellLocalArchiveExclusions {
+		if !exclusionsFound[table] {
+			t.Fatalf("cell-local archive exclusion %q is not created by a migration", table)
 		}
 	}
 	return introductions

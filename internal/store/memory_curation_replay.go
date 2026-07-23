@@ -30,6 +30,23 @@ func materializeMemoryCurationReplayInputsTx(
 	if original.State != MemoryCurationRunRolledBack || original.RollbackReceiptID == "" {
 		return counts, 0, 0, ErrMemoryCurationConflict
 	}
+	var transcriptInputsPruned bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+		  SELECT 1
+		    FROM memory_curation_run_inputs
+		   WHERE run_id=$1 AND account_id=$2 AND realm_id=$3
+		     AND owner_kind='agent' AND owner_id=$4
+		     AND transcript_pruned_at IS NOT NULL
+		)`, original.ID, p.AccountID, p.RealmID, p.ID).Scan(&transcriptInputsPruned); err != nil {
+		return counts, 0, 0, fmt.Errorf("check original replay transcript inputs: %w", err)
+	}
+	if transcriptInputsPruned {
+		return counts, 0, 0, fmt.Errorf(
+			"%w: source run transcript inputs were pruned by transcript retention",
+			ErrMemoryCurationConflict,
+		)
+	}
 	stored, err := loadMemoryCurationStoredPlan(ctx, tx, p, original)
 	if err != nil {
 		return counts, 0, 0, err

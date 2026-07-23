@@ -6,6 +6,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // register the "pgx" database/sql driver
 	"github.com/pressly/goose/v3"
@@ -17,6 +18,19 @@ var migrationsFS embed.FS
 const (
 	factDeletionCompatibilitySchema = int64(27)
 	factDeletionActivationSchema    = int64(28)
+
+	// Every server replica takes the same database-derived session advisory
+	// lock before inspecting or changing the Goose schema. The database name
+	// scopes the otherwise cluster-wide application key while keeping it
+	// stable across rolling-deployment pods.
+	migrationAdvisoryTryLockSQL = `
+		SELECT pg_try_advisory_lock(
+			hashtextextended(current_database() || ':witself:store:migrate:v1', 0)
+		)`
+	migrationAdvisoryUnlockSQL = `
+		SELECT pg_advisory_unlock(
+			hashtextextended(current_database() || ':witself:store:migrate:v1', 0)
+		)`
 )
 
 var (
@@ -54,36 +68,101 @@ func (s *Store) Migrate() error {
 	}
 	defer func() { _ = db.Close() }()
 
-	goose.SetBaseFS(migrationsFS)
-	if err := goose.SetDialect("postgres"); err != nil {
-		return fmt.Errorf("goose dialect: %w", err)
-	}
-	state, err := inspectMigrationPreflightState(db, int64(SchemaVersion()))
+	current, err := migrateSchemaWithAdvisoryLock(db, int64(SchemaVersion()))
 	if err != nil {
-		return fmt.Errorf("inspect migration state: %w", err)
-	}
-	if err := validateMigrationPreflight(state); err != nil {
 		return err
 	}
-	if err := goose.Up(db, "migrations"); err != nil {
-		return fmt.Errorf("apply migrations: %w", err)
+	if current >= 51 {
+		if _, err := s.finalizeAvatarLockedLayerDigestMigration(context.Background()); err != nil {
+			return fmt.Errorf("finalize avatar locked-layer digests: %w", err)
+		}
 	}
-	current, err := goose.GetDBVersion(db)
+	return nil
+}
+
+// migrateSchemaWithAdvisoryLock serializes startup migration preflight, Goose
+// application, and final version verification across every replica connected
+// to the database. The dedicated connection is intentional: PostgreSQL
+// session advisory locks are owned by a connection, not a transaction.
+func migrateSchemaWithAdvisoryLock(db *sql.DB, target int64) (current int64, retErr error) {
+	ctx := context.Background()
+	lockConn, err := db.Conn(ctx)
 	if err != nil {
-		return fmt.Errorf("verify migration version: %w", err)
+		return 0, fmt.Errorf("open migration lock connection: %w", err)
+	}
+	defer func() { _ = lockConn.Close() }()
+
+	if err := acquireMigrationAdvisoryLock(ctx, lockConn); err != nil {
+		return 0, fmt.Errorf("acquire migration advisory lock: %w", err)
+	}
+	defer func() {
+		if err := releaseMigrationAdvisoryLock(context.Background(), lockConn); err != nil && retErr == nil {
+			retErr = fmt.Errorf("release migration advisory lock: %w", err)
+		}
+	}()
+
+	goose.SetBaseFS(migrationsFS)
+	if err := goose.SetDialect("postgres"); err != nil {
+		return 0, fmt.Errorf("goose dialect: %w", err)
+	}
+	state, err := inspectMigrationPreflightState(db, target)
+	if err != nil {
+		return 0, fmt.Errorf("inspect migration state: %w", err)
+	}
+	if err := validateMigrationPreflight(state); err != nil {
+		return 0, err
+	}
+	if err := goose.Up(db, "migrations"); err != nil {
+		return 0, fmt.Errorf("apply migrations: %w", err)
+	}
+	current, err = goose.GetDBVersion(db)
+	if err != nil {
+		return 0, fmt.Errorf("verify migration version: %w", err)
 	}
 	if current != state.TargetVersion {
-		return fmt.Errorf(
+		return 0, fmt.Errorf(
 			"%w: migration finished at schema %d, compiled target is %d",
 			ErrMigrationStateInvalid,
 			current,
 			state.TargetVersion,
 		)
 	}
-	if current >= 51 {
-		if _, err := s.finalizeAvatarLockedLayerDigestMigration(context.Background()); err != nil {
-			return fmt.Errorf("finalize avatar locked-layer digests: %w", err)
+	return current, nil
+}
+
+func acquireMigrationAdvisoryLock(ctx context.Context, conn *sql.Conn) error {
+	const retryInterval = 100 * time.Millisecond
+	for {
+		var acquired bool
+		// Poll instead of blocking inside pg_advisory_lock. A blocked SELECT
+		// keeps an autocommit transaction's virtual XID alive, which can in
+		// turn block CREATE INDEX CONCURRENTLY run by the lock holder.
+		if err := conn.QueryRowContext(ctx, migrationAdvisoryTryLockSQL).Scan(&acquired); err != nil {
+			return err
 		}
+		if acquired {
+			return nil
+		}
+
+		timer := time.NewTimer(retryInterval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func releaseMigrationAdvisoryLock(ctx context.Context, conn *sql.Conn) error {
+	var released bool
+	if err := conn.QueryRowContext(ctx, migrationAdvisoryUnlockSQL).Scan(&released); err != nil {
+		return err
+	}
+	if !released {
+		return errors.New("lock was not held")
 	}
 	return nil
 }
