@@ -724,7 +724,11 @@ func recoverManagedInstructionsExchange(
 	tempPattern string,
 ) ([]string, error) {
 	dir := filepath.Dir(path)
-	capture, err := os.CreateTemp(dir, tempPattern+"-recovery-*")
+	recoveryPattern, err := managedInstructionsDerivedTempPattern(tempPattern, "recovery")
+	if err != nil {
+		return []string{displacedPath}, err
+	}
+	capture, err := os.CreateTemp(dir, recoveryPattern)
 	if err != nil {
 		return []string{displacedPath}, err
 	}
@@ -820,7 +824,11 @@ func removeManagedInstructionsFile(
 	if tempPattern == "" {
 		tempPattern = "." + fileName + ".witself-*"
 	}
-	tomb, err := os.CreateTemp(filepath.Dir(path), tempPattern+"-delete-*")
+	deletionPattern, err := managedInstructionsDerivedTempPattern(tempPattern, "delete")
+	if err != nil {
+		return fmt.Errorf("create temporary %s deletion: %w", fileName, err)
+	}
+	tomb, err := os.CreateTemp(filepath.Dir(path), deletionPattern)
 	if err != nil {
 		return fmt.Errorf("create temporary %s deletion: %w", fileName, err)
 	}
@@ -889,6 +897,16 @@ func removeManagedInstructionsFile(
 		_ = managedInstructionsSyncDirectory(path)
 	}
 	return nil
+}
+
+func managedInstructionsDerivedTempPattern(tempPattern, purpose string) (string, error) {
+	if !strings.HasSuffix(tempPattern, "*") || strings.Count(tempPattern, "*") != 1 {
+		return "", errors.New("managed-instruction temporary pattern must contain exactly one trailing wildcard")
+	}
+	if purpose == "" || strings.ContainsAny(purpose, `*?[]/\`) {
+		return "", errors.New("managed-instruction temporary purpose is invalid")
+	}
+	return strings.TrimSuffix(tempPattern, "*") + purpose + "-*", nil
 }
 
 func restoreManagedInstructionsRenamedDeletion(path, tombPath string) ([]string, error) {

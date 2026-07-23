@@ -24,6 +24,29 @@ func testManagedInstructionsSpec(path string) managedInstructionsSpec {
 	}
 }
 
+func TestManagedInstructionDerivedTempPatterns(t *testing.T) {
+	for purpose, want := range map[string]string{
+		"delete":   ".runtime-rules.witself-delete-*",
+		"recovery": ".runtime-rules.witself-recovery-*",
+	} {
+		pattern, err := managedInstructionsDerivedTempPattern(".runtime-rules.witself-*", purpose)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pattern != want || strings.Count(pattern, "*") != 1 {
+			t.Fatalf("%s pattern = %q, want %q", purpose, pattern, want)
+		}
+	}
+	for _, invalid := range []string{".runtime-rules.witself", ".runtime-*.witself-*"} {
+		if _, err := managedInstructionsDerivedTempPattern(invalid, "delete"); err == nil {
+			t.Fatalf("invalid pattern %q was accepted", invalid)
+		}
+	}
+	if _, err := managedInstructionsDerivedTempPattern(".runtime-rules.witself-*", `bad/name`); err == nil {
+		t.Fatal("invalid purpose was accepted")
+	}
+}
+
 func TestManagedInstructionsLifecyclePreservesArbitraryFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "RUNTIME-RULES.md")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
