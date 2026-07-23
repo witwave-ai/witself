@@ -13,8 +13,8 @@ apps:
   witselfServer:
     enabled: true
     namespace: witself
-    chartVersion: 0.0.197
-    imageTag: 0.0.197
+    chartVersion: 0.0.203
+    imageTag: 0.0.203
     factDeletionEnabled: true
     # Receive-only pilot for one internal realm. The matching Ed25519 private
     # key remains only in the isolated Cloudflare Email Worker secret.
