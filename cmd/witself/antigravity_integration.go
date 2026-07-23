@@ -461,7 +461,7 @@ func writeAntigravitySourceBundle(path string, bundle antigravityPluginBundle) e
 	}
 	switch antigravityBundlePathState(staged, bundle) {
 	case antigravityPathExact:
-		if err := renameManagedInstructionFileNoReplace(staged, path); err != nil {
+		if err := renameAntigravityBundleDirectoryNoReplace(staged, path); err != nil {
 			return err
 		}
 		return verifyAntigravityBundleDirectory(path, bundle)
@@ -1053,8 +1053,9 @@ func installAntigravityBundleDirectory(path string, desired antigravityPluginBun
 	}
 	// Never place a complete staged or backup plugin beneath a live `plugins/`
 	// discovery directory. Antigravity may watch it and briefly load a second
-	// credential-bound MCP server. The config-root sibling is on the same
-	// filesystem, so final renames remain atomic without becoming discoverable.
+	// credential-bound MCP server. The config-root sibling remains on the same
+	// volume, so each journal-fenced publish or quarantine move is atomic
+	// without making the scratch bundle discoverable.
 	scratchParent := antigravityBundleScratchParent(path)
 	if err := os.MkdirAll(scratchParent, 0o700); err != nil {
 		return err
@@ -1078,6 +1079,9 @@ func installAntigravityBundleDirectory(path string, desired antigravityPluginBun
 	if err := verifyAntigravityBundleDirectory(stage, desired); err != nil {
 		return fmt.Errorf("verify staged Antigravity plugin: %w", err)
 	}
+	if err := syncAntigravityBundleDirectory(stage, desired); err != nil {
+		return fmt.Errorf("sync staged Antigravity plugin: %w", err)
+	}
 
 	if expectedCurrent == nil {
 		if _, err := os.Lstat(path); err == nil {
@@ -1085,7 +1089,7 @@ func installAntigravityBundleDirectory(path string, desired antigravityPluginBun
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		if err := renameManagedInstructionFileNoReplace(stage, path); err != nil {
+		if err := renameAntigravityBundleDirectoryNoReplace(stage, path); err != nil {
 			return err
 		}
 		stageOwned = false
@@ -1095,21 +1099,22 @@ func installAntigravityBundleDirectory(path string, desired antigravityPluginBun
 	if err := verifyAntigravityBundleDirectory(path, *expectedCurrent); err != nil {
 		return err
 	}
-	if err := exchangeManagedInstructionFiles(path, stage); err != nil {
+	backup, err := exchangeAntigravityBundleDirectories(path, stage, *expectedCurrent)
+	if err != nil {
 		return err
 	}
+	// From this boundary onward the transaction journal, rather than the local
+	// defer, owns whichever exact backup path the platform returned.
+	stageOwned = false
 	if err := verifyAntigravityBundleDirectory(path, desired); err != nil {
-		_ = exchangeManagedInstructionFiles(path, stage)
 		return fmt.Errorf("verify installed Antigravity plugin: %w", err)
 	}
-	if err := verifyAntigravityBundleDirectory(stage, *expectedCurrent); err != nil {
-		_ = exchangeManagedInstructionFiles(path, stage)
-		return errors.New("antigravity plugin changed during atomic exchange; prior state was restored")
+	if err := verifyAntigravityBundleDirectory(backup, *expectedCurrent); err != nil {
+		return errors.New("antigravity plugin changed during exchange; recovery state was preserved")
 	}
-	if err := os.RemoveAll(stage); err != nil {
+	if err := os.RemoveAll(backup); err != nil {
 		return fmt.Errorf("remove verified Antigravity plugin backup: %w", err)
 	}
-	stageOwned = false
 	return nil
 }
 
@@ -1147,20 +1152,18 @@ func removeExactAntigravityBundleDirectory(path string, expected antigravityPlug
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if err := renameManagedInstructionFileNoReplace(path, quarantine); err != nil {
+	if err := renameAntigravityBundleDirectoryNoReplace(path, quarantine); err != nil {
 		return err
 	}
 	if err := verifyAntigravityBundleDirectory(quarantine, expected); err != nil {
-		if _, statErr := os.Lstat(path); errors.Is(statErr, os.ErrNotExist) {
-			_ = os.Rename(quarantine, path)
-		}
-		return errors.New("antigravity plugin changed during removal; refusing to delete it")
+		return fmt.Errorf(
+			"antigravity plugin changed during removal; preserved quarantine at %s: %w",
+			quarantine,
+			err,
+		)
 	}
 	if err := os.RemoveAll(quarantine); err != nil {
-		if _, statErr := os.Lstat(path); errors.Is(statErr, os.ErrNotExist) {
-			_ = os.Rename(quarantine, path)
-		}
-		return err
+		return fmt.Errorf("remove verified Antigravity plugin quarantine at %s: %w", quarantine, err)
 	}
 	return nil
 }

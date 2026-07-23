@@ -1109,6 +1109,61 @@ func TestAntigravityInterruptedTransactionsRecoverExactState(t *testing.T) {
 		assertAntigravityTransactionAbsent(t, desired.RuntimeConfigRoot, journal)
 	})
 
+	for _, tc := range []struct {
+		name           string
+		publishDesired bool
+	}{
+		{name: "Windows upgrade after live quarantine", publishDesired: false},
+		{name: "Windows upgrade after staged plugin publish", publishDesired: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := setupAntigravityIntegrationFixture(t)
+			previous := installAntigravityFixtureConfig(t, fixture)
+			previousBundle, err := verifiedAntigravitySourceBundle(previous)
+			if err != nil {
+				t.Fatal(err)
+			}
+			desired, desiredBundle := prepareAntigravityUpgrade(t, fixture, previous)
+			journal, err := beginAntigravityTransaction(antigravityTransactionInstall, &previous, &desired)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := transcriptcapture.SaveConfig(desired); err != nil {
+				t.Fatal(err)
+			}
+			swapPath := antigravityBundleSwapPath(desired.RuntimePluginPath, desiredBundle)
+			if err := os.Mkdir(swapPath, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := populateAntigravityBundleDirectory(swapPath, desiredBundle); err != nil {
+				t.Fatal(err)
+			}
+			removalPath := antigravityBundleRemovalPath(desired.RuntimePluginPath, previousBundle)
+			if err := renameAntigravityBundleDirectoryNoReplace(desired.RuntimePluginPath, removalPath); err != nil {
+				t.Fatal(err)
+			}
+			if tc.publishDesired {
+				if err := renameAntigravityBundleDirectoryNoReplace(swapPath, desired.RuntimePluginPath); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := recoverAntigravityTransaction(desired.RuntimeConfigRoot); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeAntigravity)
+			if err != nil || !equalAntigravityTransactionConfig(loaded, previous) {
+				t.Fatalf("previous config was not restored: %#v, %v", loaded, err)
+			}
+			if err := verifyAntigravityBundleDirectory(previous.RuntimePluginPath, previousBundle); err != nil {
+				t.Fatalf("previous plugin was not restored: %v", err)
+			}
+			if _, err := os.Lstat(removalPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("Windows exchange quarantine remains after recovery: %v", err)
+			}
+			assertAntigravityTransactionAbsent(t, desired.RuntimeConfigRoot, journal)
+		})
+	}
+
 	t.Run("upgrade after plugin exchange before shared MCP", func(t *testing.T) {
 		fixture := setupAntigravityIntegrationFixture(t)
 		previous := installAntigravityFixtureConfig(t, fixture)
@@ -1131,7 +1186,7 @@ func TestAntigravityInterruptedTransactionsRecoverExactState(t *testing.T) {
 		if err := populateAntigravityBundleDirectory(swapPath, desiredBundle); err != nil {
 			t.Fatal(err)
 		}
-		if err := exchangeManagedInstructionFiles(desired.RuntimePluginPath, swapPath); err != nil {
+		if _, err := exchangeAntigravityBundleDirectories(desired.RuntimePluginPath, swapPath, previousBundle); err != nil {
 			t.Fatal(err)
 		}
 		if err := recoverAntigravityTransaction(desired.RuntimeConfigRoot); err != nil {
@@ -1168,7 +1223,11 @@ func TestAntigravityInterruptedTransactionsRecoverExactState(t *testing.T) {
 		if err := populateAntigravityBundleDirectory(swapPath, desiredBundle); err != nil {
 			t.Fatal(err)
 		}
-		if err := exchangeManagedInstructionFiles(desired.RuntimePluginPath, swapPath); err != nil {
+		previousBundle, err := verifiedAntigravitySourceBundle(previous)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := exchangeAntigravityBundleDirectories(desired.RuntimePluginPath, swapPath, previousBundle); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := convergeAntigravitySharedMCP(&previous, &desired); err != nil {
@@ -1244,7 +1303,7 @@ func TestAntigravityInterruptedTransactionsRecoverExactState(t *testing.T) {
 			t.Fatal(err)
 		}
 		removalPath := antigravityBundleRemovalPath(cfg.RuntimePluginPath, bundle)
-		if err := renameManagedInstructionFileNoReplace(cfg.RuntimePluginPath, removalPath); err != nil {
+		if err := renameAntigravityBundleDirectoryNoReplace(cfg.RuntimePluginPath, removalPath); err != nil {
 			t.Fatal(err)
 		}
 		if err := recoverAntigravityTransaction(cfg.RuntimeConfigRoot); err != nil {
@@ -1277,7 +1336,7 @@ func TestAntigravityInterruptedTransactionsRecoverExactState(t *testing.T) {
 			t.Fatal(err)
 		}
 		removalPath := antigravityBundleRemovalPath(cfg.RuntimePluginPath, bundle)
-		if err := renameManagedInstructionFileNoReplace(cfg.RuntimePluginPath, removalPath); err != nil {
+		if err := renameAntigravityBundleDirectoryNoReplace(cfg.RuntimePluginPath, removalPath); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Remove(filepath.Join(removalPath, "rules", "witself.md")); err != nil {

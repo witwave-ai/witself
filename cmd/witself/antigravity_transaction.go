@@ -251,8 +251,8 @@ func clearAntigravityTransaction(configRoot string, expected antigravityTransact
 
 // syncAntigravityCommittedState makes the selected config, plugin, and recovery
 // source durable before the journal that can reconstruct them is removed. This
-// covers host/power loss as well as an ordinary process stop on the supported
-// macOS and Linux providers.
+// covers host/power loss as well as an ordinary process stop on supported
+// native platforms.
 func syncAntigravityCommittedState(journal antigravityTransactionJournal) error {
 	binding := journal.Desired
 	if binding == nil {
@@ -535,12 +535,16 @@ func recoverAntigravityInstallTransaction(configRoot string, journal antigravity
 	pluginMissing := livePluginState == antigravityPathMissing
 	var previousBundle antigravityPluginBundle
 	previousPlugin := false
+	previousRemovalPath := ""
+	previousRemovalState := antigravityPathMissing
 	if journal.Previous != nil {
 		previousBundle, err = verifiedAntigravitySourceBundle(*journal.Previous)
 		if err != nil {
 			return fmt.Errorf("recover previous Antigravity bundle: %w", err)
 		}
 		previousPlugin = antigravityBundlePathState(desired.RuntimePluginPath, previousBundle) == antigravityPathExact
+		previousRemovalPath = antigravityBundleRemovalPath(desired.RuntimePluginPath, previousBundle)
+		previousRemovalState = antigravityBundlePathState(previousRemovalPath, previousBundle)
 	} else {
 		_, statErr := os.Lstat(desired.RuntimePluginPath)
 		previousPlugin = errors.Is(statErr, os.ErrNotExist)
@@ -618,15 +622,21 @@ func recoverAntigravityInstallTransaction(configRoot string, journal antigravity
 		} else {
 			previous := *journal.Previous
 			if !previousPlugin {
-				if err := verifyAntigravityBundleDirectory(previous.RuntimePluginSource, previousBundle); err != nil {
-					return fmt.Errorf("verify previous Antigravity recovery source: %w", err)
-				}
-				var currentBundle *antigravityPluginBundle
-				if desiredPlugin {
-					currentBundle = &desiredBundle
-				}
-				if err := installAntigravityBundleDirectory(previous.RuntimePluginPath, previousBundle, currentBundle); err != nil {
-					return err
+				if pluginMissing && previousRemovalState == antigravityPathExact {
+					if err := renameAntigravityBundleDirectoryNoReplace(previousRemovalPath, previous.RuntimePluginPath); err != nil {
+						return fmt.Errorf("restore quarantined previous Antigravity plugin: %w", err)
+					}
+				} else {
+					if err := verifyAntigravityBundleDirectory(previous.RuntimePluginSource, previousBundle); err != nil {
+						return fmt.Errorf("verify previous Antigravity recovery source: %w", err)
+					}
+					var currentBundle *antigravityPluginBundle
+					if desiredPlugin {
+						currentBundle = &desiredBundle
+					}
+					if err := installAntigravityBundleDirectory(previous.RuntimePluginPath, previousBundle, currentBundle); err != nil {
+						return err
+					}
 				}
 			}
 			if err := syncAntigravityBundleDirectory(previous.RuntimePluginPath, previousBundle); err != nil {
@@ -651,6 +661,15 @@ func recoverAntigravityInstallTransaction(configRoot string, journal antigravity
 		return errors.New("antigravity plugin or shared MCP entry changed during interrupted install; refusing automatic recovery")
 	}
 	if err := removeAntigravityRecoveryScratch(swapPath, desiredBundle, journal.Previous, previousBundle); err != nil {
+		return err
+	}
+	if journal.Previous != nil {
+		if err := removeAntigravityRecoveryScratch(previousRemovalPath, previousBundle, nil, antigravityPluginBundle{}); err != nil {
+			return err
+		}
+	}
+	desiredRemovalPath := antigravityBundleRemovalPath(desired.RuntimePluginPath, desiredBundle)
+	if err := removeAntigravityRecoveryScratch(desiredRemovalPath, desiredBundle, journal.Previous, previousBundle); err != nil {
 		return err
 	}
 	if err := clearAntigravityTransaction(configRoot, journal); err != nil {
@@ -703,7 +722,7 @@ func recoverAntigravityUninstallTransaction(configRoot string, journal antigravi
 	case antigravityConfigPrevious:
 		if liveState == antigravityPathMissing {
 			if removalState == antigravityPathExact {
-				if err := renameManagedInstructionFileNoReplace(removalPath, previous.RuntimePluginPath); err != nil {
+				if err := renameAntigravityBundleDirectoryNoReplace(removalPath, previous.RuntimePluginPath); err != nil {
 					return err
 				}
 			} else {

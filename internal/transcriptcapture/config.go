@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	goruntime "runtime"
 	"strings"
 	"time"
 
@@ -500,10 +501,20 @@ func validateRuntimeIntegrationFields(runtime, hookMode, runtimeCLICommand, mcpC
 	if mcpConnectTimeoutSeconds != 0 {
 		return fmt.Errorf("mcp_connect_timeout_seconds is not supported for %s", runtime)
 	}
-	if hookMode == HookModeNone {
-		return fmt.Errorf("hook_mode none is not supported for %s", runtime)
+	if err := validateGenericHookModeForPlatform(goruntime.GOOS, runtime, hookMode); err != nil {
+		return err
 	}
 	return nil
+}
+
+func validateGenericHookModeForPlatform(platform, runtime, hookMode string) error {
+	if hookMode != HookModeNone {
+		return nil
+	}
+	if platform == "windows" && (runtime == RuntimeClaudeCode || runtime == RuntimeGrokBuild) {
+		return nil
+	}
+	return fmt.Errorf("hook_mode none is not supported for %s", runtime)
 }
 
 func validateGenericMCPEnvironment(runtime string, environment map[string]string) error {
