@@ -240,7 +240,7 @@ jobs:
       - name: Managed instruction platform primitives
         run: >-
           go test ./cmd/witself
-          -run '^(TestManagedInstructionExchangePrimitive|TestManagedInstructionNoReplacePrimitive|TestWindowsManagedInstruction)'
+          -run '^(TestManagedInstructionExchangePrimitive|TestManagedInstructionNoReplacePrimitive|TestWindowsManagedInstruction|TestWindowsIntegrationTransactionSyncPrimitives)'
           -count=1
 
       - name: Codex Windows hook contract
