@@ -59,6 +59,8 @@ type copilotMCPConfigSnapshot struct {
 	targetExists bool
 	exists       bool
 	mode         os.FileMode
+	raw          []byte
+	fileInfo     os.FileInfo
 }
 
 // The indirection keeps command construction and JSON validation production
@@ -309,7 +311,8 @@ func inspectCopilotMCPState(runtimeCLI string, cfg transcriptcapture.Config) (co
 	}
 	raw, err := runCopilotCLI(runtimeCLI, cfg.RuntimeConfigRoot, copilotCLIReadTimeout, "mcp", "list", "--json")
 	if err != nil {
-		return copilotMCPBinding{}, false, copilotMCPConfigSnapshot{}, fmt.Errorf("list GitHub Copilot MCP servers: %w", err)
+		return copilotMCPBinding{}, false, copilotMCPConfigSnapshot{},
+			unavailableIntegrationTopology(fmt.Errorf("list GitHub Copilot MCP servers: %w", err))
 	}
 	if err := rejectDuplicateJSONKeys(raw); err != nil {
 		return copilotMCPBinding{}, false, copilotMCPConfigSnapshot{}, fmt.Errorf("parse GitHub Copilot MCP server list: %w", err)
@@ -407,6 +410,8 @@ func readCopilotMCPConfigSnapshot(path, targetName string) (copilotMCPConfigSnap
 	if err := rejectDuplicateJSONKeys(raw); err != nil {
 		return copilotMCPConfigSnapshot{}, fmt.Errorf("parse GitHub Copilot MCP config %s: %w", path, err)
 	}
+	snapshot.raw = bytes.Clone(raw)
+	snapshot.fileInfo = openedInfo
 	var root map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &root); err != nil || root == nil {
 		if err == nil {
@@ -543,8 +548,26 @@ func verifyCopilotNonTargetPreservation(before, after copilotMCPConfigSnapshot) 
 	return nil
 }
 
+func copilotMCPConfigSnapshotMatchesExact(left, right copilotMCPConfigSnapshot) bool {
+	if left.path != right.path || left.targetName != right.targetName ||
+		left.exists != right.exists || left.targetExists != right.targetExists ||
+		left.mode.Perm() != right.mode.Perm() || !bytes.Equal(left.raw, right.raw) ||
+		!equalCopilotSemanticFields(left.rootFields, right.rootFields) ||
+		!equalCopilotSemanticFields(left.siblings, right.siblings) {
+		return false
+	}
+	if left.exists &&
+		(left.fileInfo == nil || right.fileInfo == nil || !os.SameFile(left.fileInfo, right.fileInfo)) {
+		return false
+	}
+	if left.targetExists && !equalCopilotMCPBinding(left.target, right.target) {
+		return false
+	}
+	return true
+}
+
 func verifyCopilotMutationPermissions(after copilotMCPConfigSnapshot) error {
-	if after.exists && after.mode.Perm() != 0o600 {
+	if after.exists && !integrationFileModeMatches(after.mode, 0o600) {
 		return fmt.Errorf("GitHub Copilot MCP config permissions are %04o after mutation; want 0600", after.mode.Perm())
 	}
 	return nil
@@ -604,82 +627,121 @@ func parseCopilotMCPBinding(raw []byte) (copilotMCPBinding, error) {
 	return binding, nil
 }
 
-// prepareCopilotMCPInstall permits replacement only when the live definition
-// exactly matches the prior durable integration. If stable binding IDs change,
-// it verifies and removes the old collision-resistant name before registration
-// under the new one. The returned boolean reports that a removal was attempted
-// and therefore rollback may be required even when the error is non-nil.
-func prepareCopilotMCPInstall(runtimeCLI, executable string, desired transcriptcapture.Config, previous *transcriptcapture.Config) (bool, error) {
+type copilotMCPInstallPlan struct {
+	desired          transcriptcapture.Config
+	desiredName      string
+	desiredBinding   copilotMCPBinding
+	expected         copilotMCPConfigSnapshot
+	registerRequired bool
+}
+
+// prepareCopilotMCPInstallPlan permits replacement only when the live
+// definition exactly matches the prior durable integration. It returns an
+// exact persisted-registry snapshot that register must revalidate immediately
+// before invoking the provider CLI.
+func prepareCopilotMCPInstallPlan(runtimeCLI, executable string, desired transcriptcapture.Config, previous *transcriptcapture.Config) (copilotMCPInstallPlan, bool, error) {
 	if err := validateCopilotCLISelection(runtimeCLI, desired); err != nil {
-		return false, err
+		return copilotMCPInstallPlan{}, false, err
 	}
 	desiredName, desiredBinding, err := copilotMCPBindingFromConfig(executable, desired)
 	if err != nil {
-		return false, err
+		return copilotMCPInstallPlan{}, false, err
 	}
-	desiredCurrent, desiredExists, err := inspectCopilotMCP(runtimeCLI, desired)
+	desiredCurrent, desiredExists, desiredSnapshot, err := inspectCopilotMCPState(runtimeCLI, desired)
 	if err != nil {
-		return false, err
+		return copilotMCPInstallPlan{}, false, err
+	}
+	plan := copilotMCPInstallPlan{
+		desired: desired, desiredName: desiredName, desiredBinding: desiredBinding,
+		expected: desiredSnapshot, registerRequired: true,
 	}
 	if previous == nil {
 		if desiredExists {
-			return false, fmt.Errorf("GitHub Copilot MCP server %s exists without a Witself integration record; refusing to claim or replace it", desiredName)
+			return copilotMCPInstallPlan{}, false, fmt.Errorf("GitHub Copilot MCP server %s exists without a Witself integration record; refusing to claim or replace it", desiredName)
 		}
-		return false, nil
+		return plan, false, nil
 	}
 	if err := validateCopilotPreviousSelection(runtimeCLI, desired, *previous); err != nil {
-		return false, err
+		return copilotMCPInstallPlan{}, false, err
 	}
 	previousName, previousBinding, err := copilotMCPBindingFromConfig(previous.MCPCommand, *previous)
 	if err != nil {
-		return false, err
+		return copilotMCPInstallPlan{}, false, err
 	}
 	if previousName == desiredName {
-		if !desiredExists || equalCopilotMCPBinding(desiredCurrent, desiredBinding) {
-			return false, nil
+		if !desiredExists {
+			return plan, false, nil
+		}
+		if equalCopilotMCPBinding(desiredCurrent, desiredBinding) {
+			if !equalCopilotMCPBinding(previousBinding, desiredBinding) {
+				return copilotMCPInstallPlan{}, false, fmt.Errorf("GitHub Copilot MCP server %s matches the requested binding but not the prior durable integration; refusing to claim an unjournaled interrupted rebind", desiredName)
+			}
+			plan.registerRequired = false
+			return plan, false, nil
 		}
 		if !equalCopilotMCPBinding(desiredCurrent, previousBinding) {
-			return false, fmt.Errorf("GitHub Copilot MCP server %s differs from both the prior and requested bindings; refusing to replace it", desiredName)
+			return copilotMCPInstallPlan{}, false, fmt.Errorf("GitHub Copilot MCP server %s differs from both the prior and requested bindings; refusing to replace it", desiredName)
 		}
-		err := unregisterCopilotMCP(runtimeCLI, previous)
-		return true, err
+		touched, err := unregisterCopilotMCPWithSnapshot(runtimeCLI, previous, &desiredSnapshot)
+		if err != nil {
+			return copilotMCPInstallPlan{}, touched, err
+		}
+		_, exists, expected, err := inspectCopilotMCPState(runtimeCLI, desired)
+		if err != nil {
+			return copilotMCPInstallPlan{}, touched, err
+		}
+		if exists {
+			return copilotMCPInstallPlan{}, touched, &providerMutationUncertainError{err: fmt.Errorf("GitHub Copilot MCP server %s reappeared after removal; refusing unsafe recovery", desiredName)}
+		}
+		plan.expected = expected
+		return plan, touched, nil
 	}
 
-	previousCurrent, previousExists, err := inspectCopilotMCP(runtimeCLI, *previous)
+	previousCurrent, previousExists, previousSnapshot, err := inspectCopilotMCPState(runtimeCLI, *previous)
 	if err != nil {
-		return false, err
+		return copilotMCPInstallPlan{}, false, err
 	}
 	if desiredExists {
 		if previousExists {
-			return false, fmt.Errorf("GitHub Copilot MCP servers %s and %s both exist during rebind recovery; refusing to choose or remove either", previousName, desiredName)
+			return copilotMCPInstallPlan{}, false, fmt.Errorf("GitHub Copilot MCP servers %s and %s both exist during rebind recovery; refusing to choose or remove either", previousName, desiredName)
 		}
 		if equalCopilotMCPBinding(desiredCurrent, desiredBinding) {
-			// The prior durable config intentionally remains the commit marker
-			// until finalize. An exact desired key with the prior key absent is a
-			// safely interrupted rebind after add and before that final commit.
-			return false, nil
+			return copilotMCPInstallPlan{}, false, fmt.Errorf("GitHub Copilot MCP server %s matches the requested binding while prior server %s is absent, but no active recovery journal authorizes claiming it", desiredName, previousName)
 		}
-		return false, fmt.Errorf("GitHub Copilot MCP server %s differs from the interrupted requested binding; refusing to claim or replace it", desiredName)
+		return copilotMCPInstallPlan{}, false, fmt.Errorf("GitHub Copilot MCP server %s differs from the interrupted requested binding; refusing to claim or replace it", desiredName)
 	}
 	if !previousExists {
-		return false, nil
+		return copilotMCPInstallPlan{}, false, fmt.Errorf("prior GitHub Copilot MCP server %s is missing and requested server %s is absent; refusing an unjournaled rebind", previousName, desiredName)
 	}
 	if !equalCopilotMCPBinding(previousCurrent, previousBinding) {
-		return false, fmt.Errorf("GitHub Copilot MCP server %s no longer matches the prior durable binding; refusing to replace it", previousName)
+		return copilotMCPInstallPlan{}, false, fmt.Errorf("GitHub Copilot MCP server %s no longer matches the prior durable binding; refusing to replace it", previousName)
 	}
-	err = unregisterCopilotMCP(runtimeCLI, previous)
-	return true, err
+	touched, err := unregisterCopilotMCPWithSnapshot(runtimeCLI, previous, &previousSnapshot)
+	if err != nil {
+		return copilotMCPInstallPlan{}, touched, err
+	}
+	_, exists, expected, err := inspectCopilotMCPState(runtimeCLI, desired)
+	if err != nil {
+		return copilotMCPInstallPlan{}, touched, err
+	}
+	if exists {
+		return copilotMCPInstallPlan{}, touched, &providerMutationUncertainError{err: fmt.Errorf("GitHub Copilot MCP server %s appeared after prior binding removal; refusing unsafe recovery", desiredName)}
+	}
+	plan.expected = expected
+	return plan, touched, nil
+}
+
+func prepareCopilotMCPInstall(runtimeCLI, executable string, desired transcriptcapture.Config, previous *transcriptcapture.Config) (bool, error) {
+	_, touched, err := prepareCopilotMCPInstallPlan(runtimeCLI, executable, desired, previous)
+	return touched, err
 }
 
 func registerCopilotMCP(runtimeCLI string, cfg transcriptcapture.Config) error {
-	if err := validateCopilotCLISelection(runtimeCLI, cfg); err != nil {
-		return err
-	}
-	name, desired, err := copilotMCPBindingFromConfig(cfg.MCPCommand, cfg)
+	current, exists, snapshot, err := inspectCopilotMCPState(runtimeCLI, cfg)
 	if err != nil {
 		return err
 	}
-	current, exists, before, err := inspectCopilotMCPState(runtimeCLI, cfg)
+	name, desired, err := copilotMCPBindingFromConfig(cfg.MCPCommand, cfg)
 	if err != nil {
 		return err
 	}
@@ -688,6 +750,35 @@ func registerCopilotMCP(runtimeCLI string, cfg transcriptcapture.Config) error {
 			return nil
 		}
 		return fmt.Errorf("GitHub Copilot MCP server %s has a foreign registration; refusing to replace it", name)
+	}
+	_, err = registerCopilotMCPWithPlan(runtimeCLI, copilotMCPInstallPlan{
+		desired: cfg, desiredName: name, desiredBinding: desired,
+		expected: snapshot, registerRequired: true,
+	})
+	return err
+}
+
+func registerCopilotMCPWithPlan(runtimeCLI string, plan copilotMCPInstallPlan) (bool, error) {
+	cfg := plan.desired
+	if err := validateCopilotCLISelection(runtimeCLI, cfg); err != nil {
+		return false, err
+	}
+	name, desired := plan.desiredName, plan.desiredBinding
+	current, exists, before, err := inspectCopilotMCPState(runtimeCLI, cfg)
+	if err != nil {
+		return false, err
+	}
+	if !copilotMCPConfigSnapshotMatchesExact(plan.expected, before) {
+		return false, &providerPreflightChangedError{err: fmt.Errorf("GitHub Copilot MCP registry changed after preflight; refusing to claim, replace, or remove server %s", name)}
+	}
+	if !plan.registerRequired {
+		if !exists || !equalCopilotMCPBinding(current, desired) {
+			return false, &providerPreflightChangedError{err: fmt.Errorf("GitHub Copilot MCP server %s changed after preflight; refusing to claim, replace, or remove it", name)}
+		}
+		return false, nil
+	}
+	if exists {
+		return false, &providerPreflightChangedError{err: fmt.Errorf("GitHub Copilot MCP server %s appeared after preflight; refusing to claim, replace, or remove it", name)}
 	}
 
 	args := []string{"mcp", "add", name, "--tools", "*"}
@@ -702,69 +793,74 @@ func registerCopilotMCP(runtimeCLI string, cfg transcriptcapture.Config) error {
 	args = append(args, "--", desired.Command)
 	args = append(args, desired.Args...)
 	if _, err := runCopilotCLI(runtimeCLI, cfg.RuntimeConfigRoot, copilotCLIMutationTimeout, args...); err != nil {
-		// A CLI may durably commit before returning a non-zero status. Treat only
-		// an independently verified exact binding with preserved siblings as success.
-		if after, afterExists, afterSnapshot, inspectErr := inspectCopilotMCPState(runtimeCLI, cfg); inspectErr == nil && afterExists && equalCopilotMCPBinding(after, desired) &&
-			verifyCopilotNonTargetPreservation(before, afterSnapshot) == nil &&
-			verifyCopilotMutationPermissions(afterSnapshot) == nil {
-			return nil
+		_, _, afterSnapshot, inspectErr := inspectCopilotMCPState(runtimeCLI, cfg)
+		if inspectErr == nil && copilotMCPConfigSnapshotMatchesExact(before, afterSnapshot) {
+			return false, fmt.Errorf("add GitHub Copilot MCP server %s: %w", name, err)
 		}
-		return fmt.Errorf("add GitHub Copilot MCP server %s: %w", name, err)
+		return false, &providerMutationUncertainError{err: fmt.Errorf("add GitHub Copilot MCP server %s returned an error after provider state changed; refusing unsafe attribution: %w", name, err)}
 	}
 	after, afterExists, afterSnapshot, err := inspectCopilotMCPState(runtimeCLI, cfg)
 	if err != nil {
-		return fmt.Errorf("verify GitHub Copilot MCP server %s: %w", name, err)
+		return true, &providerMutationUncertainError{err: fmt.Errorf("verify GitHub Copilot MCP server %s: %w", name, err)}
 	}
 	if !afterExists || !equalCopilotMCPBinding(after, desired) {
-		return fmt.Errorf("GitHub Copilot did not persist the exact Witself MCP server %s", name)
+		return true, &providerMutationUncertainError{err: fmt.Errorf("GitHub Copilot did not retain the exact Witself MCP server %s after a successful add", name)}
 	}
 	if err := verifyCopilotNonTargetPreservation(before, afterSnapshot); err != nil {
-		return err
+		return true, &providerMutationUncertainError{err: err}
 	}
 	if err := verifyCopilotMutationPermissions(afterSnapshot); err != nil {
-		return err
+		return true, &providerMutationUncertainError{err: err}
 	}
-	return nil
+	return true, nil
 }
 
 func unregisterCopilotMCP(runtimeCLI string, expected *transcriptcapture.Config) error {
+	_, err := unregisterCopilotMCPWithSnapshot(runtimeCLI, expected, nil)
+	return err
+}
+
+func unregisterCopilotMCPWithSnapshot(runtimeCLI string, expected *transcriptcapture.Config, expectedSnapshot *copilotMCPConfigSnapshot) (bool, error) {
 	if expected == nil {
-		return errors.New("expected Copilot integration binding is required for safe MCP removal")
+		return false, errors.New("expected Copilot integration binding is required for safe MCP removal")
 	}
 	if err := validateCopilotCLISelection(runtimeCLI, *expected); err != nil {
-		return err
+		return false, err
 	}
 	name, expectedBinding, err := copilotMCPBindingFromConfig(expected.MCPCommand, *expected)
 	if err != nil {
-		return err
+		return false, err
 	}
 	current, exists, before, err := inspectCopilotMCPState(runtimeCLI, *expected)
 	if err != nil {
-		return err
+		return false, err
+	}
+	if expectedSnapshot != nil && !copilotMCPConfigSnapshotMatchesExact(*expectedSnapshot, before) {
+		return false, &providerPreflightChangedError{err: fmt.Errorf("GitHub Copilot MCP registry changed after preflight; refusing to remove server %s", name)}
 	}
 	if !exists {
-		return nil
+		return false, nil
 	}
 	if !equalCopilotMCPBinding(current, expectedBinding) {
-		return fmt.Errorf("GitHub Copilot MCP server %s does not match the installed binding; refusing to remove it", name)
+		return false, fmt.Errorf("GitHub Copilot MCP server %s does not match the installed binding; refusing to remove it", name)
 	}
 	if _, err := runCopilotCLI(runtimeCLI, expected.RuntimeConfigRoot, copilotCLIMutationTimeout, "mcp", "remove", name); err != nil {
-		if _, afterExists, afterSnapshot, inspectErr := inspectCopilotMCPState(runtimeCLI, *expected); inspectErr == nil && !afterExists && verifyCopilotNonTargetPreservation(before, afterSnapshot) == nil &&
-			verifyCopilotMutationPermissions(afterSnapshot) == nil {
-			return nil
+		_, _, afterSnapshot, inspectErr := inspectCopilotMCPState(runtimeCLI, *expected)
+		if inspectErr == nil && copilotMCPConfigSnapshotMatchesExact(before, afterSnapshot) {
+			return false, fmt.Errorf("remove GitHub Copilot MCP server %s: %w", name, err)
 		}
-		return fmt.Errorf("remove GitHub Copilot MCP server %s: %w", name, err)
+		return false, &providerMutationUncertainError{err: fmt.Errorf("remove GitHub Copilot MCP server %s returned an error after provider state changed; refusing unsafe attribution: %w", name, err)}
 	}
 	if _, afterExists, afterSnapshot, err := inspectCopilotMCPState(runtimeCLI, *expected); err != nil {
-		return fmt.Errorf("verify GitHub Copilot MCP server %s removal: %w", name, err)
+		return true, &providerMutationUncertainError{err: fmt.Errorf("verify GitHub Copilot MCP server %s removal: %w", name, err)}
 	} else if afterExists {
-		return fmt.Errorf("GitHub Copilot retained MCP server %s after removal", name)
+		return true, &providerMutationUncertainError{err: fmt.Errorf("GitHub Copilot retained or replaced MCP server %s after a successful removal", name)}
 	} else if err := verifyCopilotNonTargetPreservation(before, afterSnapshot); err != nil {
-		return err
+		return true, &providerMutationUncertainError{err: err}
 	} else if err := verifyCopilotMutationPermissions(afterSnapshot); err != nil {
-		return err
+		return true, &providerMutationUncertainError{err: err}
 	}
-	return nil
+	return true, nil
 }
 
 func validateCopilotInstalledTopology(cfg transcriptcapture.Config) error {
@@ -782,6 +878,13 @@ func validateCopilotInstalledTopology(cfg transcriptcapture.Config) error {
 	if !equalCopilotEnvironment(environment, cfg.MCPEnvironment) {
 		return errors.New("WITSELF_HOME changed from the installed GitHub Copilot binding; refusing to expose the credential-bound MCP server")
 	}
+	return validateCopilotPersistedTopology(cfg)
+}
+
+func validateCopilotPersistedTopology(cfg transcriptcapture.Config) error {
+	if err := validateCopilotCLISelection(cfg.RuntimeCLICommand, cfg); err != nil {
+		return err
+	}
 	_, expected, err := copilotMCPBindingFromConfig(cfg.MCPCommand, cfg)
 	if err != nil {
 		return err
@@ -791,19 +894,22 @@ func validateCopilotInstalledTopology(cfg transcriptcapture.Config) error {
 		return fmt.Errorf("inspect installed GitHub Copilot MCP topology: %w", err)
 	}
 	if !exists || !equalCopilotMCPBinding(current, expected) {
+		if !exists {
+			return incompleteIntegrationTopology(errors.New("GitHub Copilot MCP topology is missing the installed Witself binding"))
+		}
 		return errors.New("GitHub Copilot MCP topology no longer matches the installed Witself binding")
 	}
 	if err := verifyCopilotMutationPermissions(persisted); err != nil {
 		return err
 	}
-	if err := validateCopilotManagedInstructions(); err != nil {
+	if err := validateCopilotManagedInstructionsAt(cfg.RuntimeConfigRoot); err != nil {
 		return fmt.Errorf("GitHub Copilot managed instructions no longer match the installed policy: %w", err)
 	}
 	return nil
 }
 
-func validateCopilotManagedInstructions() error {
-	spec, err := copilotManagedInstructionsSpec()
+func validateCopilotManagedInstructionsAt(configRoot string) error {
+	spec, err := copilotManagedInstructionsSpecAt(configRoot)
 	if err != nil {
 		return err
 	}
@@ -816,7 +922,7 @@ func validateCopilotManagedInstructions() error {
 		return err
 	}
 	if !snapshot.existed {
-		return errors.New("managed instruction file is missing")
+		return incompleteIntegrationTopology(errors.New("managed instruction file is missing"))
 	}
 	if err := validateExclusiveManagedInstructionsContent(snapshot.data, spec, true); err != nil {
 		return err
@@ -878,7 +984,7 @@ func cleanCopilotInvocationPath(label, value string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("inspect %s: %w", label, err)
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+	if !integrationExecutableModeIsUsable(info) {
 		return "", fmt.Errorf("%s must resolve to an executable regular file", label)
 	}
 	return absolute, nil
@@ -898,17 +1004,16 @@ func validateCopilotPreviousSelection(runtimeCLI string, desired, previous trans
 }
 
 func runCopilotCLICommand(runtimeCLI, configRoot string, timeout time.Duration, args ...string) ([]byte, error) {
-	isolatedDirectory, err := os.MkdirTemp("", "witself-copilot-cli-")
-	if err != nil {
-		return nil, fmt.Errorf("create isolated GitHub Copilot CLI directory: %w", err)
-	}
-	defer func() { _ = os.Remove(isolatedDirectory) }()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, runtimeCLI, args...)
+	cleanup, err := isolateProviderCLIWorkingDirectory(cmd, "GitHub Copilot")
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
 	cmd.WaitDelay = copilotCLIWaitDelay
 	cmd.Env = copilotCommandEnvironment(os.Environ(), configRoot)
-	cmd.Dir = isolatedDirectory
 	output := &copilotBoundedBuffer{limit: copilotCLIOutputLimit}
 	cmd.Stdout = output
 	cmd.Stderr = output

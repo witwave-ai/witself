@@ -25,7 +25,7 @@ classifier.
 | Codex | `$CODEX_HOME/AGENTS.md`, normally `~/.codex/AGENTS.md` | The full Codex-specific policy is prepended to the implemented Witself protocol. |
 | Claude Code | `$CLAUDE_CONFIG_DIR/rules/witself-memory-routing.md`, normally `~/.claude/rules/witself-memory-routing.md` | A high-salience Claude-specific synopsis plus an operational suffix, kept within Claude Code's 2 KiB server-instruction limit. |
 | Grok Build | `$GROK_HOME/AGENTS.md`, normally `~/.grok/AGENTS.md` | The Grok-specific policy plus an operational suffix, with MCP tool names rewritten to Grok's underscore-safe namespace. |
-| Cursor | `$CURSOR_CONFIG_DIR/rules/witself-memory-routing.mdc`, normally `~/.cursor/rules/witself-memory-routing.mdc` | The Cursor-specific policy plus the operational suffix, retaining Cursor's supported dotted MCP tool names. |
+| Cursor | `~/.cursor/rules/witself-memory-routing.mdc` | The Cursor-specific policy plus the operational suffix, retaining Cursor's supported dotted MCP tool names. |
 | OpenClaw preview | `AGENTS.md` in the sole default agent's configured workspace | OpenClaw exposes the full configured stdio MCP catalog under its own transformed names; the managed workspace block carries its safety and routing contract because no Witself prompt hook injects it automatically. |
 | Antigravity preview | A rules-only plugin at `~/.gemini/config/plugins/witself-managed-<binding-id>/` with `plugin.json` and `rules/witself.md`, plus one exact server entry in `~/.gemini/config/mcp_config.json` | Antigravity loads the native plugin's always-on rule and the collision-resistant shared MCP entry. The rule uses names such as `mcp_ws-<server-id>_witself.memory.recall`; the server entry pins the absolute Witself binary and identity. |
 | GitHub Copilot preview | `$COPILOT_HOME/instructions/witself-memory-routing.instructions.md`, normally `~/.copilot/instructions/witself-memory-routing.instructions.md`, plus one exact `witself-managed-<24-hex>` server entry in `$COPILOT_HOME/mcp-config.json` | Copilot loads the dedicated global instruction file and collision-resistant user MCP entry. The server entry pins the absolute Witself binary and identity; phase 1 uses guided MCP fallback. |
@@ -43,11 +43,10 @@ Cursor receives a dedicated managed ancestor MDC rule with `alwaysApply: true` Y
 frontmatter. Cursor discovers `.cursor/rules` while walking the current
 workspace and its ancestors, so the normal `~/.cursor/rules` location applies
 to workspaces beneath the user's home directory without modifying each project.
-`CURSOR_CONFIG_DIR` relocates the MCP, hook, and routing files Witself manages;
-automatic rule loading from a custom directory additionally requires the
-selected Cursor installation to discover that directory. Witself does not copy
-the rule into project repositories to work around a custom path outside the
-runtime's rule-discovery boundary.
+Current `cursor-agent` builds ignore `CURSOR_CONFIG_DIR` for MCP discovery.
+Witself therefore rejects that selector and manages the native home-scoped MCP,
+hook, permission, and routing files under `~/.cursor`; it does not copy a rule
+into project repositories.
 
 OpenClaw phase 1 requires an installed `openclaw` CLI on `PATH`, or an explicit
 `OPENCLAW_CLI_PATH`, and exactly one configured agent. That sole agent must be
@@ -58,9 +57,9 @@ in this preview. This is a CLI/MCP adapter, not a native OpenClaw plugin, and it
 does not install an OpenClaw transcript, session, or prompt hook.
 
 The MCP definition includes a 60-second connection timeout and a strict
-non-secret environment allowlist: the effective absolute `WITSELF_HOME`, plus
-any non-empty `OPENCLAW_CONFIG_PATH`, `OPENCLAW_STATE_DIR`, and
-`OPENCLAW_PROFILE` selectors used during installation. This preserves the same
+non-secret environment allowlist: the effective absolute `WITSELF_HOME`, exact
+absolute `OPENCLAW_CONFIG_PATH` and `OPENCLAW_STATE_DIR` (including resolved
+defaults), and an optional non-empty `OPENCLAW_PROFILE`. This preserves the same
 Witself state and OpenClaw configuration namespace when OpenClaw launches the
 server from its reduced SDK environment. A profile without explicit path
 selectors is expanded to OpenClaw's normal
@@ -81,8 +80,8 @@ to the complete resulting `AGENTS.md`. If the existing file plus the managed
 block would exceed the guard, installation fails closed before changing the file
 instead of allowing partial safety policy through truncation.
 
-Antigravity phase 1 requires macOS or Linux and `agy` on `PATH`, at
-`~/.local/bin/agy`, or selected with `ANTIGRAVITY_CLI_PATH`. Witself first validates an immutable,
+Antigravity phase 1 requires `agy` on `PATH`, at `~/.local/bin/agy`, or selected
+with `ANTIGRAVITY_CLI_PATH`. Witself first validates an immutable,
 digest-addressed source bundle with `agy plugin validate`, then atomically
 installs a copy at
 `~/.gemini/config/plugins/witself-managed-<binding-id>`. Plugins in that standard
@@ -99,10 +98,11 @@ second policy bundle during replacement. The binding id is the first
 realm, agent, and `WITSELF_HOME` selectors; raw selectors are not exposed in the
 plugin name. The MCP server uses the first 16 hex characters as a shorter
 server id so every prefixed Witself tool remains within a 64-character provider
-ceiling. A non-blocking per-home operation lock serializes Witself
-mutations, while a 0600 transaction journal and native atomic directory exchange
-recover process interruption across the integration config, rules plugin,
-shared MCP entry, and immutable recovery bundle.
+ceiling. A non-blocking per-home operation lock serializes Witself mutations,
+while a 0600 transaction journal and atomic directory replacement recover
+process interruption across the integration config, rules plugin, shared MCP
+entry, and immutable recovery bundle. Windows uses a protected lock DACL and
+refuses reparse-point lock paths.
 
 The Antigravity MCP definition persists only the absolute Witself executable,
 the exact account/realm/agent and optional location arguments, and an absolute

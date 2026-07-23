@@ -249,7 +249,7 @@ func antigravitySharedMCPDocumentMatches(
 	if err != nil {
 		return false, err
 	}
-	return present && document.mode == 0o600 && antigravitySharedMCPEntryIsExact(raw, expectedServer), nil
+	return present && integrationFileModeMatches(document.mode, 0o600) && antigravitySharedMCPEntryIsExact(raw, expectedServer), nil
 }
 
 func preflightAntigravitySharedMCPTransition(previous, desired *transcriptcapture.Config) error {
@@ -395,7 +395,7 @@ func antigravitySharedMCPDocumentFingerprint(document antigravitySharedMCPDocume
 	sum := sha256.Sum256(document.raw)
 	return antigravitySharedMCPFingerprint{
 		Exists: true,
-		Mode:   uint32(document.mode.Perm()),
+		Mode:   integrationFileModeFingerprint(document.mode),
 		SHA256: fmt.Sprintf("%x", sum[:]),
 	}
 }
@@ -526,7 +526,7 @@ func writeAntigravitySharedMCPDocument(document antigravitySharedMCPDocument) er
 		installed, readErr := os.ReadFile(document.path)
 		info, statErr := os.Lstat(document.path)
 		if readErr != nil || statErr != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 ||
-			info.Mode().Perm() != 0o600 || !bytes.Equal(installed, desiredRaw) {
+			!integrationFileModeMatches(info.Mode(), 0o600) || !bytes.Equal(installed, desiredRaw) {
 			// Preserve both versions under the fingerprint fence for fail-closed
 			// recovery.
 			return errors.New("antigravity shared MCP config changed after atomic exchange")
@@ -613,7 +613,7 @@ func antigravitySharedMCPFileMatchesDocument(path string, expected antigravitySh
 
 func antigravitySharedMCPFileMatchesRaw(path string, expectedRaw []byte, expectedMode os.FileMode) bool {
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != expectedMode {
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || !integrationFileModeMatches(info.Mode(), expectedMode) {
 		return false
 	}
 	raw, err := os.ReadFile(path)
@@ -681,7 +681,7 @@ func loadAntigravitySharedMCPMutation(
 	if err != nil {
 		return antigravitySharedMCPMutation{}, err
 	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o600 {
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || !integrationFileModeMatches(info.Mode(), 0o600) {
 		return antigravitySharedMCPMutation{}, errors.New("antigravity shared MCP mutation fence must be a real 0600 regular file")
 	}
 	raw, err := os.ReadFile(path)
@@ -760,7 +760,7 @@ func antigravitySharedMCPFingerprintAt(path string) (antigravitySharedMCPFingerp
 	sum := sha256.Sum256(raw)
 	return antigravitySharedMCPFingerprint{
 		Exists: true,
-		Mode:   uint32(info.Mode().Perm()),
+		Mode:   integrationFileModeFingerprint(info.Mode()),
 		SHA256: fmt.Sprintf("%x", sum[:]),
 	}, nil
 }

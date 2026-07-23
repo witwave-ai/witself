@@ -21,7 +21,6 @@ import (
 
 	"github.com/witwave-ai/witself/internal/id"
 	"github.com/witwave-ai/witself/internal/local"
-	"golang.org/x/sys/unix"
 )
 
 // AutoConfigSchemaV1 and the related schema constants identify persisted
@@ -729,7 +728,7 @@ func (s AutoStore) acquire() (release func(), acquired bool, err error) {
 	// lease. Unlinking here or on release could let contenders lock different
 	// inodes for the same path. The file contents are deliberately irrelevant to
 	// ownership, so malformed bytes or a crashed predecessor never delay work.
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|unix.O_NOFOLLOW, 0o600)
+	file, err := openAutoLockFileNoFollow(path)
 	if err != nil {
 		return nil, false, err
 	}
@@ -739,28 +738,39 @@ func (s AutoStore) acquire() (release func(), acquired bool, err error) {
 			_ = file.Close()
 		}
 	}()
-	info, err := file.Stat()
-	if err != nil {
+	if _, err := validateAutoLockFileIdentity(path, file); err != nil {
 		return nil, false, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, false, fmt.Errorf("curator automation lock %s is not a regular file", path)
 	}
 	if err := file.Chmod(0o600); err != nil {
 		return nil, false, err
 	}
-	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
-			return func() {}, false, nil
-		}
+	info, err := validateAutoLockFileIdentity(path, file)
+	if err != nil {
 		return nil, false, err
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return nil, false, fmt.Errorf("curator automation lock %s is accessible by group or other users", path)
+	}
+	lockAcquired, err := tryLockAutoFile(file)
+	if err != nil {
+		return nil, false, err
+	}
+	if !lockAcquired {
+		return func() {}, false, nil
 	}
 	locked := true
 	defer func() {
 		if locked {
-			_ = unix.Flock(int(file.Fd()), unix.LOCK_UN)
+			_ = unlockAutoFile(file)
 		}
 	}()
+	info, err = validateAutoLockFileIdentity(path, file)
+	if err != nil {
+		return nil, false, err
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return nil, false, fmt.Errorf("curator automation lock %s is accessible by group or other users", path)
+	}
 	if err := file.Truncate(0); err != nil {
 		return nil, false, err
 	}
@@ -778,7 +788,7 @@ func (s AutoStore) acquire() (release func(), acquired bool, err error) {
 	processLocked, closeFile, locked = false, false, false
 	return func() {
 		releaseOnce.Do(func() {
-			_ = unix.Flock(int(file.Fd()), unix.LOCK_UN)
+			_ = unlockAutoFile(file)
 			_ = file.Close()
 			processLock.Unlock()
 		})

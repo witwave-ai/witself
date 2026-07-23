@@ -622,15 +622,7 @@ func acceptanceIntegrationPreflight(runtimeName string) (transcriptcapture.Confi
 	if currentVersion != cfg.RuntimeVersion {
 		return transcriptcapture.Config{}, "", false, false, fmt.Errorf("%s client is %s but the installed binding records %s; rerun `witself install %s`", runtimeName, currentVersion, cfg.RuntimeVersion, runtimeName)
 	}
-	hooks, err := snapshotRuntimeHooks(runtimeName)
-	if err != nil {
-		return transcriptcapture.Config{}, "", false, false, err
-	}
-	wantManaged := cfg.HookMode == transcriptcapture.HookModeManaged
-	hooksCurrent := hooks.userPresent != wantManaged
-	if supportsManagedHooks(runtimeName) {
-		hooksCurrent = hooksCurrent && hooks.managedPresent == wantManaged
-	}
+	hooksCurrent := verifyRuntimeHooksOwned(cfg) == nil
 	if !hooksCurrent {
 		return transcriptcapture.Config{}, "", false, false, fmt.Errorf("%s hooks do not match the installed %s hook mode; reinstall it", runtimeName, cfg.HookMode)
 	}
@@ -645,31 +637,7 @@ func acceptanceIntegrationPreflight(runtimeName string) (transcriptcapture.Confi
 }
 
 func acceptanceInstructionsCurrent(runtimeName string) (bool, error) {
-	spec, displayName, managed, err := runtimeMemoryRoutingSpec(runtimeName)
-	if err != nil {
-		return false, err
-	}
-	if !managed {
-		return true, nil
-	}
-	spec, err = normalizeManagedInstructionsSpec(spec)
-	if err != nil {
-		return false, fmt.Errorf("inspect %s instructions: %w", displayName, err)
-	}
-	snapshot, err := readManagedInstructionsSnapshot(spec)
-	if err != nil {
-		return false, fmt.Errorf("inspect %s instructions: %w", displayName, err)
-	}
-	if !snapshot.existed {
-		return false, nil
-	}
-	if spec.exclusive {
-		if err := validateExclusiveManagedInstructionsContent(snapshot.data, spec, true); err != nil {
-			return false, err
-		}
-	}
-	_, changed, err := upsertManagedInstructionsBlock(snapshot.data, spec)
-	return !changed, err
+	return runtimeMemoryRoutingCurrentAt(runtimeName, "")
 }
 
 func acceptanceRuntimeConnection(ctx context.Context, cfg transcriptcapture.Config) (agentConnection, client.SelfDigest, error) {

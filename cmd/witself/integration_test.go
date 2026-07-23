@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -60,7 +62,78 @@ func TestVerifyInstallAgentIdentityPinsRequestedScope(t *testing.T) {
 	}
 }
 
-func TestInstallCodexRegistersMCPAndHooksWithoutEmbeddingToken(t *testing.T) {
+func TestManagedHookSupportMatchesNativePlatformContract(t *testing.T) {
+	for _, tc := range []struct {
+		platform string
+		runtime  string
+		want     bool
+	}{
+		{platform: "darwin", runtime: transcriptcapture.RuntimeCodex, want: true},
+		{platform: "linux", runtime: transcriptcapture.RuntimeCodex, want: true},
+		{platform: "windows", runtime: transcriptcapture.RuntimeCodex, want: false},
+		{platform: "darwin", runtime: transcriptcapture.RuntimeClaudeCode, want: true},
+		{platform: "linux", runtime: transcriptcapture.RuntimeClaudeCode, want: true},
+		{platform: "windows", runtime: transcriptcapture.RuntimeClaudeCode, want: false},
+		{platform: "darwin", runtime: transcriptcapture.RuntimeGrokBuild, want: false},
+	} {
+		t.Run(tc.platform+"/"+tc.runtime, func(t *testing.T) {
+			if got := supportsManagedHooksForPlatform(tc.runtime, tc.platform); got != tc.want {
+				t.Fatalf("managed hooks = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTranscriptHookSupportMatchesNativePlatformContract(t *testing.T) {
+	for _, tc := range []struct {
+		platform string
+		runtime  string
+		want     bool
+	}{
+		{platform: "darwin", runtime: transcriptcapture.RuntimeCodex, want: true},
+		{platform: "linux", runtime: transcriptcapture.RuntimeClaudeCode, want: true},
+		{platform: "linux", runtime: transcriptcapture.RuntimeGrokBuild, want: true},
+		{platform: "linux", runtime: transcriptcapture.RuntimeCursor, want: true},
+		{platform: "windows", runtime: transcriptcapture.RuntimeCodex, want: true},
+		{platform: "windows", runtime: transcriptcapture.RuntimeClaudeCode, want: false},
+		{platform: "windows", runtime: transcriptcapture.RuntimeGrokBuild, want: false},
+		{platform: "windows", runtime: transcriptcapture.RuntimeCursor, want: false},
+		{platform: "linux", runtime: transcriptcapture.RuntimeOpenClaw, want: false},
+		{platform: "linux", runtime: transcriptcapture.RuntimeAntigravity, want: false},
+		{platform: "linux", runtime: transcriptcapture.RuntimeCopilot, want: false},
+	} {
+		t.Run(tc.platform+"/"+tc.runtime, func(t *testing.T) {
+			if got := supportsTranscriptHooksForPlatform(tc.runtime, tc.platform); got != tc.want {
+				t.Fatalf("transcript hooks = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIntegrationInstallPlatformRejectsNativeWindowsCursor(t *testing.T) {
+	err := validateIntegrationInstallPlatform(transcriptcapture.RuntimeCursor, "windows")
+	if err == nil || !strings.Contains(err.Error(), "same WSL") {
+		t.Fatalf("Windows Cursor platform error = %v", err)
+	}
+	if err := validateIntegrationInstallPlatform(transcriptcapture.RuntimeCursor, "linux"); err != nil {
+		t.Fatalf("Linux Cursor platform error = %v", err)
+	}
+}
+
+func TestRuntimeCLIPlatformBoundaryRejectsWindowsInteropExecutableInLinux(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "provider.exe")
+	if err := os.WriteFile(path, []byte{'M', 'Z', 0, 0}, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRuntimeCLIPlatformBoundaryForPlatform("linux", path); !errors.Is(err, errRuntimeCLIIncompatible) {
+		t.Fatalf("Linux boundary error = %v", err)
+	}
+	if err := validateRuntimeCLIPlatformBoundaryForPlatform("windows", path); err != nil {
+		t.Fatalf("Windows boundary error = %v", err)
+	}
+}
+
+func TestProviderIntegrationContractCodex(t *testing.T) {
 	home := t.TempDir()
 	setInstallExecutableForTest(t)
 	witselfHome := filepath.Join(home, ".witself")
@@ -68,14 +141,24 @@ func TestInstallCodexRegistersMCPAndHooksWithoutEmbeddingToken(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("WITSELF_HOME", witselfHome)
 	t.Setenv("CODEX_HOME", codexHome)
-	logPath := filepath.Join(home, "codex-args.log")
-	t.Setenv("FAKE_CLI_LOG", logPath)
-	fakeCLI := filepath.Join(home, "codex")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_CLI_LOG\"\nexit 0\n"
-	if err := os.WriteFile(fakeCLI, []byte(script), 0o700); err != nil {
+	provider := buildFakeProviderCLI(t, home)
+	t.Setenv("CODEX_CLI_PATH", provider.Path)
+	siblingMCP := []string{"sibling-mcp", "serve", "--safe"}
+	provider.writeRegistry(t, map[string][]string{"sibling": siblingMCP})
+
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("CODEX_CLI_PATH", fakeCLI)
+	originalHooks := `{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"custom-check"}]}]}}`
+	hooksPath := filepath.Join(codexHome, "hooks.json")
+	if err := os.WriteFile(hooksPath, []byte(originalHooks), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	originalInstructions := "# Personal Codex instructions\n\nKeep this paragraph.\n"
+	instructionsPath := filepath.Join(codexHome, "AGENTS.md")
+	if err := os.WriteFile(instructionsPath, []byte(originalInstructions), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/self" || r.Header.Get("Authorization") != "Bearer agent-token" {
@@ -89,38 +172,154 @@ func TestInstallCodexRegistersMCPAndHooksWithoutEmbeddingToken(t *testing.T) {
 	if err := os.WriteFile(tokenPath, []byte("agent-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code := installCmd([]string{
+	installArgs := []string{
 		"codex", "--account", "default", "--realm", "default", "--agent", "scott",
 		"--location", "home", "--capture", "raw", "--endpoint", srv.URL,
 		"--token-file", tokenPath, "--user-hooks",
-	}); code != 0 {
+	}
+	if code := installCmd(installArgs); code != 0 {
 		t.Fatalf("install code = %d", code)
 	}
 	cfg, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeCodex)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AccountID != "acc_1" || cfg.RealmID != "realm_1" ||
-		cfg.AgentID != "agent_1" || cfg.AgentName != "scott" || cfg.Location.Name != "home" {
+	if cfg.AccountID != "acc_1" || cfg.RealmID != "realm_1" || cfg.AgentID != "agent_1" ||
+		cfg.AgentName != "scott" || cfg.Location.Name != "home" || cfg.RuntimeVersion != "1.2.3" {
 		t.Fatalf("config = %#v", cfg)
 	}
-	hooks, err := os.ReadFile(filepath.Join(codexHome, "hooks.json"))
+	hooks, err := os.ReadFile(hooksPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cliLog, err := os.ReadFile(logPath)
+	instructions, err := os.ReadFile(instructionsPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	combined := string(hooks) + string(cliLog)
-	if strings.Contains(combined, "agent-token") {
-		t.Fatal("agent token was embedded in runtime configuration")
+	if !strings.Contains(string(hooks), "custom-check") ||
+		!strings.Contains(string(hooks), "transcript hook --runtime codex") ||
+		!strings.Contains(string(hooks), "--account 'default' --realm 'default' --agent 'scott' --location 'home'") {
+		t.Fatalf("installed hooks = %s", hooks)
 	}
-	if !strings.Contains(string(hooks), "transcript hook --runtime codex") ||
-		!strings.Contains(string(hooks), "--account 'default' --realm 'default' --agent 'scott' --location 'home'") ||
-		!strings.Contains(string(cliLog), "mcp add witself --") ||
-		!strings.Contains(string(cliLog), "mcp serve --runtime codex --account default --realm default --agent scott --location home") {
-		t.Fatalf("hooks/log = %s\n---\n%s", hooks, cliLog)
+	if !strings.Contains(string(instructions), originalInstructions) ||
+		strings.Count(string(instructions), codexMemoryRoutingInstructions) != 1 {
+		t.Fatalf("installed instructions = %s", instructions)
+	}
+	installedHooks := append([]byte(nil), hooks...)
+	installedInstructions := append([]byte(nil), instructions...)
+
+	state := provider.readRegistry(t)
+	if !slices.Equal(state.Servers["sibling"], siblingMCP) {
+		t.Fatalf("sibling MCP entry = %q, want %q", state.Servers["sibling"], siblingMCP)
+	}
+	witselfServeArgs := state.Servers["witself"]
+	if len(witselfServeArgs) == 0 {
+		t.Fatalf("Witself MCP entry is missing: %#v", state.Servers)
+	}
+
+	// A second install is the supported upgrade/reinstall operation. It must
+	// replace the exact Witself MCP entry without duplicating hooks, routing, or
+	// disturbing provider-owned siblings.
+	if code := installCmd(installArgs); code != 0 {
+		t.Fatalf("reinstall code = %d", code)
+	}
+	reinstalledHooks, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reinstalledInstructions, err := os.ReadFile(instructionsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(reinstalledHooks, installedHooks) {
+		t.Fatalf("reinstall changed hooks:\n%s\n---\n%s", installedHooks, reinstalledHooks)
+	}
+	if !slices.Equal(reinstalledInstructions, installedInstructions) {
+		t.Fatalf("reinstall changed managed instructions:\n%s\n---\n%s", installedInstructions, reinstalledInstructions)
+	}
+	state = provider.readRegistry(t)
+	if !slices.Equal(state.Servers["sibling"], siblingMCP) || !slices.Equal(state.Servers["witself"], witselfServeArgs) {
+		t.Fatalf("reinstall changed provider siblings or MCP args: %#v", state.Servers)
+	}
+
+	if code := uninstallCmd([]string{"codex"}); code != 0 {
+		t.Fatalf("uninstall code = %d", code)
+	}
+	uninstalledHooks, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(uninstalledHooks), "custom-check") || strings.Contains(string(uninstalledHooks), "transcript hook --runtime codex") {
+		t.Fatalf("uninstall did not preserve only sibling hooks: %s", uninstalledHooks)
+	}
+	uninstalledInstructions, err := os.ReadFile(instructionsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(uninstalledInstructions) != originalInstructions {
+		t.Fatalf("uninstall instructions = %q, want %q", uninstalledInstructions, originalInstructions)
+	}
+	state = provider.readRegistry(t)
+	if _, exists := state.Servers["witself"]; exists || !slices.Equal(state.Servers["sibling"], siblingMCP) {
+		t.Fatalf("uninstall changed provider siblings or retained Witself: %#v", state.Servers)
+	}
+	configPath, err := transcriptcapture.ConfigPath(transcriptcapture.RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("integration config remains after uninstall: %v", err)
+	}
+	if _, err := os.Stat(tokenPath); err != nil {
+		t.Fatalf("uninstall removed token file: %v", err)
+	}
+
+	calls := provider.invocations(t)
+	var adds, removes [][]string
+	for _, call := range calls {
+		switch {
+		case len(call.Args) >= 2 && call.Args[0] == "mcp" && call.Args[1] == "add" &&
+			(len(call.Args) != 3 || call.Args[2] != "--help"):
+			adds = append(adds, call.Args)
+		case len(call.Args) >= 2 && call.Args[0] == "mcp" && call.Args[1] == "remove":
+			removes = append(removes, call.Args)
+		}
+	}
+	if len(adds) != 1 || len(removes) != 1 {
+		t.Fatalf("MCP lifecycle calls: adds=%#v removes=%#v all=%#v", adds, removes, calls)
+	}
+	for _, remove := range removes {
+		if !slices.Equal(remove, []string{"mcp", "remove", "witself"}) {
+			t.Fatalf("MCP remove args = %q", remove)
+		}
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, err = filepath.Abs(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantAdd := append([]string{"mcp", "add", "witself", "--env", "WITSELF_HOME=" + cfg.MCPEnvironment["WITSELF_HOME"], "--"}, runtimeMCPServeArgs(
+		transcriptcapture.RuntimeCodex, executable, "default", "default", "scott", "home",
+	)...)
+	for _, add := range adds {
+		if !slices.Equal(add, wantAdd) {
+			t.Fatalf("MCP add args = %q, want %q", add, wantAdd)
+		}
+	}
+	providerArtifacts := string(installedHooks) + string(installedInstructions)
+	for _, call := range calls {
+		providerArtifacts += strings.Join(call.Args, "\x00")
+	}
+	registryRaw, err := os.ReadFile(provider.StatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerArtifacts += string(registryRaw)
+	if strings.Contains(providerArtifacts, "agent-token") {
+		t.Fatal("agent token was embedded in a Codex hook, instruction, MCP argument, or provider registry")
 	}
 }
 
@@ -133,10 +332,10 @@ func TestBareInstallReusesBindingAndDefaultsToManagedHooks(t *testing.T) {
 	t.Setenv(managedHooksTestRootEnv, filepath.Join(home, "managed"))
 	logPath := filepath.Join(home, "codex-args.log")
 	t.Setenv("FAKE_CLI_LOG", logPath)
-	fakeCLI := filepath.Join(home, "codex")
-	if err := os.WriteFile(fakeCLI, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_CLI_LOG\"\nexit 0\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	t.Setenv(fakeGenericRuntimeEnv, transcriptcapture.RuntimeCodex)
+	t.Setenv(fakeGenericLogEnv, filepath.Join(home, "codex-invocations.jsonl"))
+	t.Setenv(fakeGenericStateEnv, filepath.Join(home, "codex-provider-state.json"))
+	fakeCLI := copyGenericProviderFixture(t, filepath.Join(home, "codex"))
 	t.Setenv("CODEX_CLI_PATH", fakeCLI)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/self" || r.Header.Get("Authorization") != "Bearer agent-token" {
@@ -159,6 +358,25 @@ func TestBareInstallReusesBindingAndDefaultsToManagedHooks(t *testing.T) {
 		HookMode: transcriptcapture.HookModeUser, Account: "default", Realm: "default", Agent: "scott",
 		AgentID: "agent_1", AgentName: "scott", Endpoint: srv.URL, TokenFile: tokenPath, Location: loc,
 	}); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, err := currentExecutablePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err = hydrateLegacyGenericProviderConfig(legacy, fakeCLI, executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyBinding, err := genericMCPBindingFromConfig(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := addGenericMCPUnchecked(fakeCLI, legacy, legacyBinding); err != nil {
 		t.Fatal(err)
 	}
 	if code := installCmd([]string{"codex"}); code != 0 {
@@ -232,9 +450,12 @@ func TestCommaSeparatedInstallConfiguresEveryRuntime(t *testing.T) {
 	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
 	t.Setenv("GROK_HOME", filepath.Join(home, ".grok"))
-	t.Setenv("CURSOR_CONFIG_DIR", filepath.Join(home, ".cursor"))
+	t.Setenv("CURSOR_CONFIG_DIR", "")
 	managedRoot := filepath.Join(home, "managed")
 	t.Setenv(managedHooksTestRootEnv, managedRoot)
+	t.Setenv(fakeGenericRuntimeEnv, "")
+	t.Setenv(fakeGenericLogEnv, filepath.Join(home, "generic-invocations.jsonl"))
+	t.Setenv(fakeGenericStateEnv, filepath.Join(home, "generic-provider-state.json"))
 
 	for envName, cliName := range map[string]string{
 		"CODEX_CLI_PATH":  "codex",
@@ -242,14 +463,7 @@ func TestCommaSeparatedInstallConfiguresEveryRuntime(t *testing.T) {
 		"GROK_CLI_PATH":   "grok",
 		"CURSOR_CLI_PATH": "cursor",
 	} {
-		fakeCLI := filepath.Join(home, cliName)
-		if cliName == "grok" {
-			writeFakeGrokInstallCLI(t, fakeCLI)
-		} else {
-			if err := os.WriteFile(fakeCLI, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-				t.Fatal(err)
-			}
-		}
+		fakeCLI := copyGenericProviderFixture(t, filepath.Join(home, cliName))
 		t.Setenv(envName, fakeCLI)
 	}
 
@@ -305,12 +519,29 @@ func TestCommaSeparatedInstallConfiguresEveryRuntime(t *testing.T) {
 
 func TestCommaSeparatedUninstallRemovesEveryRuntimeBinding(t *testing.T) {
 	home := t.TempDir()
+	setInstallExecutableForTest(t)
 	t.Setenv("HOME", home)
 	t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
 	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
 	t.Setenv("GROK_HOME", filepath.Join(home, ".grok"))
-	t.Setenv("CURSOR_CONFIG_DIR", filepath.Join(home, ".cursor"))
+	t.Setenv("CURSOR_CONFIG_DIR", "")
+	t.Setenv(fakeGenericRuntimeEnv, "")
+	t.Setenv(fakeGenericLogEnv, filepath.Join(home, "generic-invocations.jsonl"))
+	t.Setenv(fakeGenericStateEnv, filepath.Join(home, "generic-provider-state.json"))
+	providerCommands := map[string]string{}
+	for runtimeName, cliName := range map[string]string{
+		transcriptcapture.RuntimeClaudeCode: "claude",
+		transcriptcapture.RuntimeCodex:      "codex",
+		transcriptcapture.RuntimeGrokBuild:  "grok",
+		transcriptcapture.RuntimeCursor:     "cursor",
+	} {
+		providerCommands[runtimeName] = copyGenericProviderFixture(t, filepath.Join(home, cliName))
+	}
+	t.Setenv("CLAUDE_CLI_PATH", providerCommands[transcriptcapture.RuntimeClaudeCode])
+	t.Setenv("CODEX_CLI_PATH", providerCommands[transcriptcapture.RuntimeCodex])
+	t.Setenv("GROK_CLI_PATH", providerCommands[transcriptcapture.RuntimeGrokBuild])
+	t.Setenv("CURSOR_CLI_PATH", providerCommands[transcriptcapture.RuntimeCursor])
 	loc, err := transcriptcapture.EnsureLocation("home")
 	if err != nil {
 		t.Fatal(err)
@@ -328,13 +559,28 @@ func TestCommaSeparatedUninstallRemovesEveryRuntimeBinding(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-	}
-	fakeCLI := filepath.Join(home, "runtime-cli")
-	if err := os.WriteFile(fakeCLI, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	for _, envName := range []string{"CLAUDE_CLI_PATH", "CODEX_CLI_PATH", "GROK_CLI_PATH", "CURSOR_CLI_PATH"} {
-		t.Setenv(envName, fakeCLI)
+		legacy, err := transcriptcapture.LoadConfig(runtimeName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		executable, err := currentExecutablePath()
+		if err != nil {
+			t.Fatal(err)
+		}
+		legacy, err = hydrateLegacyGenericProviderConfig(legacy, providerCommands[runtimeName], executable)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(legacy.RuntimeConfigRoot, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		binding, err := genericMCPBindingFromConfig(legacy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := addGenericMCPUnchecked(providerCommands[runtimeName], legacy, binding); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if code := uninstallCmd([]string{"claude,codex,grok,cursor"}); code != 0 {
 		t.Fatalf("uninstall code = %d", code)
@@ -399,11 +645,10 @@ func TestManagedInstallAndUninstallAcrossRuntimes(t *testing.T) {
 
 			logPath := filepath.Join(home, tc.name+"-args.log")
 			t.Setenv("FAKE_CLI_LOG", logPath)
-			fakeCLI := filepath.Join(home, tc.name)
-			script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_CLI_LOG\"\nexit 0\n"
-			if err := os.WriteFile(fakeCLI, []byte(script), 0o700); err != nil {
-				t.Fatal(err)
-			}
+			t.Setenv(fakeGenericRuntimeEnv, tc.runtime)
+			t.Setenv(fakeGenericLogEnv, filepath.Join(home, tc.name+"-invocations.jsonl"))
+			t.Setenv(fakeGenericStateEnv, filepath.Join(home, tc.name+"-provider-state.json"))
+			fakeCLI := copyGenericProviderFixture(t, filepath.Join(home, tc.name))
 			t.Setenv(tc.cliEnv, fakeCLI)
 
 			settingsPath := filepath.Join(runtimeRoot, "settings.json")
@@ -521,7 +766,7 @@ func TestGlobalUserInstallAndUninstallAcrossNativeRuntimes(t *testing.T) {
 		},
 		{
 			name: "cursor", installName: "cursor", runtime: transcriptcapture.RuntimeCursor,
-			cliEnv: "CURSOR_CLI_PATH", configRootEnv: "CURSOR_CONFIG_DIR",
+			cliEnv:        "CURSOR_CLI_PATH",
 			hookPath:      func(root string) string { return filepath.Join(root, "hooks.json") },
 			routingPath:   func(root string) string { return filepath.Join(root, "rules", cursorMemoryRoutingRuleFile) },
 			routingText:   cursorMemoryRoutingInstructions,
@@ -534,18 +779,16 @@ func TestGlobalUserInstallAndUninstallAcrossNativeRuntimes(t *testing.T) {
 			runtimeRoot := filepath.Join(home, "."+tc.name)
 			t.Setenv("HOME", home)
 			t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
-			t.Setenv(tc.configRootEnv, runtimeRoot)
+			if tc.configRootEnv != "" {
+				t.Setenv(tc.configRootEnv, runtimeRoot)
+			}
 
 			logPath := filepath.Join(home, tc.name+"-args.log")
 			t.Setenv("FAKE_CLI_LOG", logPath)
-			fakeCLI := filepath.Join(home, tc.name)
-			if tc.runtime == transcriptcapture.RuntimeGrokBuild {
-				writeFakeGrokInstallCLI(t, fakeCLI)
-			} else {
-				if err := os.WriteFile(fakeCLI, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_CLI_LOG\"\nexit 0\n"), 0o700); err != nil {
-					t.Fatal(err)
-				}
-			}
+			t.Setenv(fakeGenericRuntimeEnv, tc.runtime)
+			t.Setenv(fakeGenericLogEnv, filepath.Join(home, tc.name+"-invocations.jsonl"))
+			t.Setenv(fakeGenericStateEnv, filepath.Join(home, tc.name+"-provider-state.json"))
+			fakeCLI := copyGenericProviderFixture(t, filepath.Join(home, tc.name))
 			t.Setenv(tc.cliEnv, fakeCLI)
 
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -595,7 +838,7 @@ func TestGlobalUserInstallAndUninstallAcrossNativeRuntimes(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if !strings.Contains(string(log), "mcp add --scope user witself --") || !strings.Contains(string(log), "mcp serve --runtime grok-build") {
+				if !strings.Contains(string(log), "mcp add --scope user --env WITSELF_HOME=") || !strings.Contains(string(log), "mcp serve --runtime grok-build") {
 					t.Fatalf("Grok CLI log = %s", log)
 				}
 			} else {
@@ -610,7 +853,7 @@ func TestGlobalUserInstallAndUninstallAcrossNativeRuntimes(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if !strings.Contains(string(log), "agent mcp enable witself") {
+				if !strings.Contains(string(log), "mcp enable witself") {
 					t.Fatalf("Cursor CLI log = %s", log)
 				}
 			}
@@ -651,7 +894,7 @@ func TestGlobalUserInstallAndUninstallAcrossNativeRuntimes(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if !strings.Contains(string(log), "agent mcp disable witself") {
+				if !strings.Contains(string(log), "mcp disable witself") {
 					t.Fatalf("Cursor uninstall log = %s", log)
 				}
 			}
@@ -703,9 +946,9 @@ func TestDetectRuntimeVersion(t *testing.T) {
 }
 
 func TestDetectRuntimeVersionUsesCursorAgentBuild(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "cursor")
+	path := filepath.Join(t.TempDir(), "cursor-agent")
 	script := "#!/bin/sh\n" +
-		"if [ \"$1\" != agent ] || [ \"$2\" != --version ]; then exit 2; fi\n" +
+		"if [ \"$1\" != --version ]; then exit 2; fi\n" +
 		"printf '%s\\n' '2026.07.16-899851b'\n"
 	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
@@ -718,6 +961,41 @@ func TestDetectRuntimeVersionUsesCursorAgentBuild(t *testing.T) {
 func TestRuntimeCLICapabilityProbeAllowsColdGUIStartup(t *testing.T) {
 	if runtimeCLICapabilityProbeTimeout < 20*time.Second {
 		t.Fatalf("runtime CLI capability probe timeout = %s, want at least 20s", runtimeCLICapabilityProbeTimeout)
+	}
+}
+
+func TestFindRuntimeCLICursorRequiresAgentMCPHelpContract(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		helpOutput string
+		wantError  bool
+	}{
+		{name: "exact Cursor Agent capability", helpOutput: "Manage MCP servers\n"},
+		{name: "desktop launcher false positive", helpOutput: "Cursor command line launcher\n", wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			path := filepath.Join(home, "cursor")
+			script := "#!/bin/sh\n" +
+				"if [ \"$1 $2\" != \"mcp --help\" ]; then exit 9; fi\n" +
+				"printf '%s' '" + tc.helpOutput + "'\n"
+			if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("HOME", home)
+			t.Setenv("PATH", home)
+			t.Setenv("CURSOR_CLI_PATH", path)
+			got, err := findRuntimeCLI(transcriptcapture.RuntimeCursor)
+			if tc.wantError {
+				if err == nil {
+					t.Fatalf("desktop launcher accepted as Cursor Agent: %s", got)
+				}
+				return
+			}
+			if err != nil || got != path {
+				t.Fatalf("Cursor Agent selection = %q, %v; want %q", got, err, path)
+			}
+		})
 	}
 }
 

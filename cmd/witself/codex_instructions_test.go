@@ -461,8 +461,8 @@ func TestCodexUninstallPreflightsMalformedRoutingBlockBeforeTeardown(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(log) != 0 {
-		t.Fatalf("uninstall invoked Codex before instruction preflight: %q", log)
+	if bytes.Contains(log, []byte(`"remove"`)) || bytes.Contains(log, []byte(`"add","witself"`)) {
+		t.Fatalf("uninstall mutated Codex before instruction preflight: %q", log)
 	}
 }
 
@@ -475,18 +475,14 @@ func setupCodexInstructionIntegrationTest(t *testing.T, failRegistration bool) (
 	t.Setenv("CODEX_HOME", codexHome)
 	setInstallExecutableForTest(t)
 
-	fakeCLI := filepath.Join(home, "codex")
 	logPath := filepath.Join(home, "codex-args.log")
-	t.Setenv("FAKE_CLI_LOG", logPath)
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_CLI_LOG\"\n"
+	provider := buildFakeProviderCLI(t, home)
+	t.Setenv(fakeProviderLogEnv, logPath)
+	provider.writeRegistry(t, map[string][]string{})
 	if failRegistration {
-		script += "if [ \"$1 $2 $3\" = \"mcp add witself\" ]; then exit 9; fi\n"
+		provider.failNextMCPAdd(t)
 	}
-	script += "exit 0\n"
-	if err := os.WriteFile(fakeCLI, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CODEX_CLI_PATH", fakeCLI)
+	t.Setenv("CODEX_CLI_PATH", provider.Path)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/self" || r.Header.Get("Authorization") != "Bearer agent-token" {

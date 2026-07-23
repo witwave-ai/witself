@@ -100,9 +100,11 @@ witself install cursor
 witself install claude,codex,grok,cursor --agent scott --location home
 ```
 
-Each command verifies the agent token against `/v1/self`, installs a stdio MCP
-server named `witself`, and merges Witself command hooks into the runtime's
-existing hook configuration. It does not put a token in a hook or MCP command.
+Each command verifies the agent token against `/v1/self` and installs a stdio
+MCP server named `witself`. On macOS and Linux it also merges Witself command
+hooks into the runtime's existing hook configuration. Native Windows installs
+hooks only for Codex; Claude Code and Grok Build receive MCP and routing without
+capture hooks, and Cursor is WSL-only. No token is put in a hook or MCP command.
 The local binding stores the account, realm, agent selector, endpoint, optional
 token-file path, capture mode, and server-confirmed agent identity under
 `~/.witself/integrations/<runtime>/config.json`.
@@ -118,14 +120,21 @@ The runtime name, native session id, generated run id, turn id, and event id
 distinguish overlapping sessions across all four runtimes at that location.
 `WITSELF_HOME` replaces `~/.witself` when set.
 
-Installing again replaces only Witself's MCP registration and hook handlers for
-that runtime; unrelated runtime configuration is preserved. One local binding
-per runtime is supported in this slice. Codex and Claude Code default to
-administrator-managed hooks; the CLI keeps identity and MCP configuration
-user-scoped, then uses a narrow elevation only for system policy. Do not run
-the whole command with `sudo`. Grok Build and Cursor use their native
-approval-free global user hook locations and require neither elevation nor
-project trust.
+The local binding also pins the exact provider CLI, provider configuration root
+and MCP path, Witself command/arguments, and absolute non-secret
+`WITSELF_HOME`. A foreign `witself` MCP entry is never claimed or overwritten.
+Installing again replaces only the exact recorded MCP registration and hook
+handlers for that runtime; provider selector, CLI, root, home, or binding drift
+fails closed and unrelated runtime configuration is preserved. Install and
+uninstall hold one provider-root operation lock across MCP, routing, hook, and
+integration-record changes. One local binding per runtime is supported in this
+slice. On macOS and Linux, Codex and Claude
+Code default to administrator-managed hooks; the CLI keeps identity and MCP
+configuration user-scoped, then uses a narrow elevation only for system policy.
+Do not run the whole command with `sudo`. Native Windows Codex uses user-scoped
+hooks and does not request that elevation. Native Windows Claude Code and Grok
+Build install no transcript hooks. Grok Build and Cursor use their user-scoped
+hook locations on macOS and Linux, including Cursor inside WSL as Linux.
 
 On macOS, Codex policy is merged into `/etc/codex/requirements.toml`; an
 existing managed hook directory is reused when one is already defined. Claude
@@ -142,12 +151,10 @@ Grok Build receives `~/.grok/hooks/witself.json` and a native MCP entry in
 preserves unrelated entries in `~/.cursor/mcp.json`, and asks the Cursor CLI to
 enable the `witself` MCP registration. Cursor also receives an always-applied
 MDC routing rule at
-`$CURSOR_CONFIG_DIR/rules/witself-memory-routing.mdc` (normally
-`~/.cursor/rules/witself-memory-routing.mdc`). The default path is discovered as
-an ancestor rule for workspaces beneath the user's home. A custom
-`CURSOR_CONFIG_DIR` relocates the files Witself manages, but the selected Cursor
-installation must also discover that custom `rules` directory; Witself does not
-write a routing rule into each project.
+`~/.cursor/rules/witself-memory-routing.mdc`. The path is discovered as an
+ancestor rule for workspaces beneath the user's home. Current `cursor-agent`
+builds ignore `CURSOR_CONFIG_DIR` for MCP discovery, so Witself rejects that
+selector and does not write a routing rule into each project.
 
 Grok Build also discovers Claude and Cursor hooks and MCP servers through its
 compatibility layer. That discovery can otherwise run a Claude- or

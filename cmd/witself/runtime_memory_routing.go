@@ -44,10 +44,6 @@ func installRuntimeMemoryRoutingInstructionsAt(runtimeName, runtimeWorkspace str
 	}, nil
 }
 
-func removeRuntimeMemoryRoutingInstructions(runtimeName string) (runtimeMemoryRoutingSnapshot, error) {
-	return removeRuntimeMemoryRoutingInstructionsAt(runtimeName, "")
-}
-
 func removeRuntimeMemoryRoutingInstructionsAt(runtimeName, runtimeWorkspace string) (runtimeMemoryRoutingSnapshot, error) {
 	spec, displayName, managed, err := runtimeMemoryRoutingSpecAt(runtimeName, runtimeWorkspace)
 	if err != nil {
@@ -76,8 +72,32 @@ func (state runtimeMemoryRoutingSnapshot) restore() error {
 	return state.snapshot.restore()
 }
 
-func runtimeMemoryRoutingSpec(runtimeName string) (managedInstructionsSpec, string, bool, error) {
-	return runtimeMemoryRoutingSpecAt(runtimeName, "")
+func runtimeMemoryRoutingCurrentAt(runtimeName, runtimeWorkspace string) (bool, error) {
+	spec, displayName, managed, err := runtimeMemoryRoutingSpecAt(runtimeName, runtimeWorkspace)
+	if err != nil {
+		return false, err
+	}
+	if !managed {
+		return true, nil
+	}
+	spec, err = normalizeManagedInstructionsSpec(spec)
+	if err != nil {
+		return false, fmt.Errorf("inspect %s instructions: %w", displayName, err)
+	}
+	snapshot, err := readManagedInstructionsSnapshot(spec)
+	if err != nil {
+		return false, fmt.Errorf("inspect %s instructions: %w", displayName, err)
+	}
+	if !snapshot.existed {
+		return false, nil
+	}
+	if spec.exclusive {
+		if err := validateExclusiveManagedInstructionsContent(snapshot.data, spec, true); err != nil {
+			return false, err
+		}
+	}
+	_, changed, err := upsertManagedInstructionsBlock(snapshot.data, spec)
+	return !changed, err
 }
 
 func runtimeMemoryRoutingSpecAt(runtimeName, runtimeWorkspace string) (managedInstructionsSpec, string, bool, error) {

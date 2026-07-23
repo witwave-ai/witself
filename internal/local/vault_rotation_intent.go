@@ -16,7 +16,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/witwave-ai/witself/internal/sealed"
-	"golang.org/x/sys/unix"
 )
 
 const (
@@ -286,14 +285,12 @@ func acquireAgentVaultKeyRotationIntentLock(home, directory string) (*agentVault
 			return nil, ErrAgentVaultKeyRotationIntentUnsafe
 		}
 	}
-	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	file, _, err := openLocalLockFileNoFollow(path, false)
 	if err != nil {
+		if errors.Is(err, errLocalLockFileStorage) {
+			return nil, ErrAgentVaultKeyRotationIntentStorage
+		}
 		return nil, ErrAgentVaultKeyRotationIntentUnsafe
-	}
-	file := os.NewFile(uintptr(fd), path)
-	if file == nil {
-		_ = unix.Close(fd)
-		return nil, ErrAgentVaultKeyRotationIntentStorage
 	}
 	cleanup := true
 	defer func() {
@@ -307,7 +304,7 @@ func acquireAgentVaultKeyRotationIntentLock(home, directory string) (*agentVault
 		!privateAgentVaultKeyEnrollmentFile(opened) || !privateAgentVaultKeyEnrollmentFile(linked) {
 		return nil, ErrAgentVaultKeyRotationIntentUnsafe
 	}
-	if err := unix.Flock(fd, unix.LOCK_EX); err != nil {
+	if err := lockLocalFile(file); err != nil {
 		return nil, ErrAgentVaultKeyRotationIntentStorage
 	}
 	// Revalidate the stable inode and its owner-only directory chain after the
@@ -315,11 +312,11 @@ func acquireAgentVaultKeyRotationIntentLock(home, directory string) (*agentVault
 	// cooperating CLI processes across different lock inodes.
 	linked, linkErr = os.Lstat(path)
 	if linkErr != nil || !os.SameFile(opened, linked) || !privateAgentVaultKeyEnrollmentFile(linked) {
-		_ = unix.Flock(fd, unix.LOCK_UN)
+		_ = unlockLocalFile(file)
 		return nil, ErrAgentVaultKeyRotationIntentUnsafe
 	}
 	if err := validateAgentVaultKeyEnrollmentDirectories(home, directory); err != nil {
-		_ = unix.Flock(fd, unix.LOCK_UN)
+		_ = unlockLocalFile(file)
 		return nil, err
 	}
 	cleanup = false
@@ -330,7 +327,7 @@ func (lock *agentVaultKeyRotationIntentLock) release() {
 	if lock == nil || lock.file == nil {
 		return
 	}
-	_ = unix.Flock(int(lock.file.Fd()), unix.LOCK_UN)
+	_ = unlockLocalFile(lock.file)
 	_ = lock.file.Close()
 	lock.file = nil
 }

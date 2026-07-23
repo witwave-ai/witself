@@ -79,6 +79,9 @@ jobs:
             echo "gofmt needs to run on:"; echo "$unformatted"; exit 1
           fi
 
+      - name: Pin and run ShellCheck and actionlint
+        run: bash scripts/test-ci-static-analysis.sh
+
       - name: go vet
         run: go vet ./...
 
@@ -86,7 +89,7 @@ jobs:
         run: go build ./...
 
       - name: test
-        run: go test ./... -race
+        run: go test ./... -race -timeout=20m
 
       - name: golangci-lint
         run: |
@@ -135,6 +138,151 @@ jobs:
             helm template r charts/witself-server "${args[@]}" -n witself | kubeconform -strict -ignore-missing-schemas -summary
             echo "::endgroup::"
           done
+
+  # A tag push does not trigger ci.yml, so repeat the complete native provider
+  # and installer matrix here before GoReleaser is allowed to publish. Keep
+  # these cells aligned with ci.yml's provider-integration-contract matrix.
+  provider-integration-verify:
+    name: provider integration release gate / ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            runner: ubuntu-latest
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+          - target: macos-intel
+            runner: macos-15-intel
+          - target: macos-arm64
+            runner: macos-15
+          - target: windows-x64
+            runner: windows-latest
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Record native target
+        run: go env GOOS GOARCH
+
+      - name: Build native Witself client
+        run: go build ./cmd/witself
+
+      - name: Install GoReleaser for exact client artifact gate
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: v2.17.0
+          install-only: true
+
+      - name: Derive CLI-only smoke config from release config
+        shell: bash
+        run: >-
+          scripts/render-goreleaser-witself-smoke-config.sh
+          "$RUNNER_TEMP/goreleaser-witself-smoke.yaml"
+          .goreleaser.yaml
+
+      - name: Build exact GoReleaser Unix archive and checksums
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          goreleaser release \
+            --config "$RUNNER_TEMP/goreleaser-witself-smoke.yaml" \
+            --snapshot \
+            --clean \
+            --skip=before,sign,sbom,docker \
+            --parallelism 1 \
+            --timeout 30m
+
+      - name: Build exact GoReleaser Windows archive
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $config = Join-Path $env:RUNNER_TEMP 'goreleaser-witself-smoke.yaml'
+          & goreleaser release --config $config --snapshot --clean '--skip=before,sign,sbom,docker' --parallelism 1 --timeout 30m
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Universal installer artifact smoke
+        if: runner.os != 'Windows'
+        env:
+          WITSELF_INSTALL_SMOKE_GORELEASER_DIST: ${{ github.workspace }}/dist
+          WITSELF_INSTALL_SMOKE_OUTPUT: ${{ runner.temp }}/witself-installed
+        run: bash scripts/test-install-unix.sh
+
+      - name: Windows binary installer smoke
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: >-
+          .\scripts\test-install-windows.ps1
+          -GoReleaserDist .\dist
+          -InstalledBinaryOutput "$env:RUNNER_TEMP\witself-installed.exe"
+
+      - name: PowerShell static analysis
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: .\scripts\test-powershell-static-analysis.ps1
+
+      - name: Native platform safety primitives
+        run: >-
+          go test
+          ./internal/local
+          ./internal/memorycurator
+          ./internal/dashboard
+          ./internal/transcriptcapture
+          -run '^(TestLocalLockFile|TestAutoLockPlatform|TestAutoLockIdentity|TestRegistryClaimLock|TestPIDRunning|TestCapturePlatform|TestReplaceFileAtomic)'
+          -count=1
+
+      - name: Managed instruction platform primitives
+        run: >-
+          go test ./cmd/witself
+          -run '^(TestManagedInstructionExchangePrimitive|TestManagedInstructionNoReplacePrimitive|TestManagedInstructionDerivedTempPatterns|TestWindowsManagedInstruction|TestWindowsIntegrationTransactionSyncPrimitives)'
+          -count=1
+
+      - name: Codex Windows hook contract
+        run: >-
+          go test ./internal/transcriptcapture
+          -run '^TestCodexHooksWindows'
+          -count=1
+
+      - name: Codex provider installation contract
+        run: >-
+          go test ./cmd/witself
+          -run '^(TestProviderIntegrationContractCodex|TestProviderIntegrationContractCodexRollbackRestoresPriorInstall)$'
+          -count=1
+
+      - name: Credential-free provider lifecycle contracts
+        run: >-
+          go test ./cmd/witself
+          -run '^TestProviderIntegrationContract(Claude|Grok|Cursor|OpenClaw|Antigravity|Copilot)$'
+          -count=1
+
+      - name: Installed release binary provider acceptance
+        if: runner.os != 'Windows'
+        env:
+          WITSELF_INSTALLED_COMMAND_ACCEPTANCE_BINARY: ${{ runner.temp }}/witself-installed
+        run: >-
+          go test ./cmd/witself
+          -run '^(TestProviderIntegrationContractCodexInstalledCommandMCPStdio|TestProviderIntegrationContract(Claude|Grok|Cursor|OpenClaw|Antigravity|Copilot))$'
+          -count=1
+
+      - name: Installed release binary provider acceptance
+        if: runner.os == 'Windows'
+        env:
+          WITSELF_INSTALLED_COMMAND_ACCEPTANCE_BINARY: ${{ runner.temp }}\witself-installed.exe
+        run: >-
+          go test ./cmd/witself
+          -run '^(TestProviderIntegrationContractCodexInstalledCommandMCPStdio|TestProviderIntegrationContract(Claude|Grok|Cursor|OpenClaw|Antigravity|Copilot))$'
+          -count=1
 
   # A tag can point at a commit that never went through normal branch CI. Keep
   # the real Homebrew style/audit gate in the release workflow as well.
@@ -221,7 +369,7 @@ jobs:
         run: bash scripts/test-promote-latest-images.sh
 
   goreleaser:
-    needs: [verify, homebrew-verify]
+    needs: [verify, provider-integration-verify, homebrew-verify]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -461,7 +609,9 @@ jobs:
         if: github.event_name == 'push'
         uses: actions/attest-build-provenance@v4
         with:
-          subject-path: "dist/*.tar.gz"
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
 
       # Package the chart with version + appVersion pinned to the release tag, so
       # the chart's default image tag matches the image built in this same run.

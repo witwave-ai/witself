@@ -436,6 +436,42 @@ func TestPrepareCopilotMCPInstallRequiresDurableOwnership(t *testing.T) {
 	}
 }
 
+func TestCopilotRegisterFenceNeverClaimsPostPreflightAppearance(t *testing.T) {
+	for _, variant := range []string{"exact", "foreign"} {
+		t.Run(variant, func(t *testing.T) {
+			cfg := configuredCopilotTestConfig(t)
+			fixture := installCopilotCLIFixture(t)
+			plan, touched, err := prepareCopilotMCPInstallPlan(cfg.RuntimeCLICommand, cfg.MCPCommand, cfg, nil)
+			if err != nil || touched {
+				t.Fatalf("prepare plan touched=%t err=%v", touched, err)
+			}
+			binding := plan.desiredBinding
+			if variant == "foreign" {
+				binding.Args = append(binding.Args, "--foreign")
+			}
+			fixture.setBinding(t, plan.desiredName, binding)
+
+			registerTouched, err := registerCopilotMCPWithPlan(cfg.RuntimeCLICommand, plan)
+			if err == nil || !providerPreflightChanged(err) || registerTouched {
+				t.Fatalf("post-preflight %s appearance touched=%t err=%v", variant, registerTouched, err)
+			}
+			current, exists, bindingErr := fixture.binding(plan.desiredName)
+			if bindingErr != nil {
+				t.Fatal(bindingErr)
+			}
+			if !exists || !equalCopilotMCPBinding(current, binding) {
+				t.Fatalf("post-preflight %s binding changed: %#v exists=%t", variant, current, exists)
+			}
+			if got := fixture.operationCount("add"); got != 0 {
+				t.Fatalf("post-preflight %s appearance triggered %d add operations", variant, got)
+			}
+			if got := fixture.operationCount("remove"); got != 0 {
+				t.Fatalf("post-preflight %s appearance triggered %d remove operations", variant, got)
+			}
+		})
+	}
+}
+
 func TestPrepareCopilotMCPInstallReplacesOnlyExactPreviousBinding(t *testing.T) {
 	previous := configuredCopilotTestConfig(t)
 	fixture := installCopilotCLIFixture(t)
@@ -508,7 +544,7 @@ func TestPrepareCopilotMCPInstallMigratesCollisionResistantName(t *testing.T) {
 	}
 }
 
-func TestPrepareCopilotMCPInstallRecoversInterruptedNameRebind(t *testing.T) {
+func TestPrepareCopilotMCPInstallRefusesUnjournaledInterruptedNameRebind(t *testing.T) {
 	previous := configuredCopilotTestConfig(t)
 	fixture := installCopilotCLIFixture(t)
 	desired := previous
@@ -522,17 +558,11 @@ func TestPrepareCopilotMCPInstallRecoversInterruptedNameRebind(t *testing.T) {
 	fixture.setBinding(t, desiredName, desiredBinding)
 
 	touched, err := prepareCopilotMCPInstall(desired.RuntimeCLICommand, desired.MCPCommand, desired, &previous)
-	if err != nil || touched {
-		t.Fatalf("interrupted rebind recovery touched=%t err=%v", touched, err)
+	if err == nil || !strings.Contains(err.Error(), "no active recovery journal") || touched {
+		t.Fatalf("unjournaled interrupted rebind touched=%t err=%v", touched, err)
 	}
 	if got := fixture.operationCount("remove"); got != 0 {
-		t.Fatalf("interrupted rebind recovery issued %d removes", got)
-	}
-	if err := registerCopilotMCP(desired.RuntimeCLICommand, desired); err != nil {
-		t.Fatal(err)
-	}
-	if got := fixture.operationCount("add"); got != 0 {
-		t.Fatalf("interrupted rebind recovery issued %d adds", got)
+		t.Fatalf("unjournaled interrupted rebind issued %d removes", got)
 	}
 
 	previousName, previousBinding, err := copilotMCPBindingFromConfig(previous.MCPCommand, previous)
@@ -543,6 +573,297 @@ func TestPrepareCopilotMCPInstallRecoversInterruptedNameRebind(t *testing.T) {
 	if touched, err := prepareCopilotMCPInstall(desired.RuntimeCLICommand, desired.MCPCommand, desired, &previous); err == nil ||
 		!strings.Contains(err.Error(), "both exist") || touched {
 		t.Fatalf("ambiguous interrupted rebind touched=%t err=%v", touched, err)
+	}
+}
+
+func TestCopilotTransactionRecoversInterruptedRebindAndFinalize(t *testing.T) {
+	for _, phase := range []string{"after add", "after config finalize"} {
+		t.Run(phase, func(t *testing.T) {
+			previous := configuredCopilotTestConfig(t)
+			previous.CaptureMode = transcriptcapture.ModeRaw
+			previous.HookMode = transcriptcapture.HookModeNone
+			fixture := installCopilotCLIFixture(t)
+			previousName, previousBinding, err := copilotMCPBindingFromConfig(previous.MCPCommand, previous)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixture.setBinding(t, previousName, previousBinding)
+			if err := transcriptcapture.SaveConfig(previous); err != nil {
+				t.Fatal(err)
+			}
+			previous, err = transcriptcapture.LoadConfig(transcriptcapture.RuntimeCopilot)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			desired := previous
+			desired.AgentID = "agt_rebound"
+			desired.Agent = "rebound-agent"
+			desired.AgentName = "rebound-agent"
+			desiredName, desiredBinding, err := copilotMCPBindingFromConfig(desired.MCPCommand, desired)
+			if err != nil {
+				t.Fatal(err)
+			}
+			journal, err := beginCopilotTransaction(copilotTransactionInstall, &previous, &desired)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			fixture.mu.Lock()
+			delete(fixture.servers, previousName)
+			fixture.setBindingLocked(desiredName, desiredBinding)
+			if err := fixture.persistLocked(); err != nil {
+				fixture.mu.Unlock()
+				t.Fatal(err)
+			}
+			fixture.mu.Unlock()
+			if phase == "after config finalize" {
+				if err := transcriptcapture.SaveConfig(desired); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if err := recoverCopilotTransaction(desired.RuntimeConfigRoot); err != nil {
+				t.Fatal(err)
+			}
+			installed, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeCopilot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !equalCopilotTransactionConfig(installed, desired) {
+				t.Fatalf("recovered config = %#v, want desired %#v", installed, desired)
+			}
+			current, exists, err := inspectCopilotMCP(desired.RuntimeCLICommand, desired)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !exists || !equalCopilotMCPBinding(current, desiredBinding) {
+				t.Fatalf("recovered desired binding = %#v exists=%t", current, exists)
+			}
+			if _, err := os.Lstat(copilotTransactionPath(desired.RuntimeConfigRoot)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("transaction journal remained after recovery: %v (%#v)", err, journal)
+			}
+		})
+	}
+}
+
+func TestCopilotTransactionRecoversInterruptedUninstall(t *testing.T) {
+	cfg := configuredCopilotTestConfig(t)
+	cfg.CaptureMode = transcriptcapture.ModeRaw
+	cfg.HookMode = transcriptcapture.HookModeNone
+	fixture := installCopilotCLIFixture(t)
+	name, binding, err := copilotMCPBindingFromConfig(cfg.MCPCommand, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.setBinding(t, name, binding)
+	if err := transcriptcapture.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = transcriptcapture.LoadConfig(transcriptcapture.RuntimeCopilot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := installRuntimeMemoryRoutingInstructionsAt(transcriptcapture.RuntimeCopilot, cfg.RuntimeWorkspace); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := beginCopilotTransaction(copilotTransactionUninstall, &cfg, nil); err != nil {
+		t.Fatal(err)
+	}
+	fixture.mu.Lock()
+	delete(fixture.servers, name)
+	if err := fixture.persistLocked(); err != nil {
+		fixture.mu.Unlock()
+		t.Fatal(err)
+	}
+	fixture.mu.Unlock()
+
+	if err := recoverCopilotTransaction(cfg.RuntimeConfigRoot); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeCopilot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("integration config remained after uninstall recovery: %v", err)
+	}
+	if _, err := os.Lstat(copilotTransactionPath(cfg.RuntimeConfigRoot)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("uninstall transaction journal remained: %v", err)
+	}
+}
+
+func TestCopilotTransactionRecoveryUsesPersistedRootAfterSelectorDrift(t *testing.T) {
+	for _, operation := range []string{copilotTransactionInstall, copilotTransactionUninstall} {
+		t.Run(operation, func(t *testing.T) {
+			cfg := configuredCopilotTestConfig(t)
+			cfg.CaptureMode = transcriptcapture.ModeRaw
+			cfg.HookMode = transcriptcapture.HookModeNone
+			fixture := installCopilotCLIFixture(t)
+			name, binding, err := copilotMCPBindingFromConfig(cfg.MCPCommand, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixture.setBinding(t, name, binding)
+			if err := transcriptcapture.SaveConfig(cfg); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err = transcriptcapture.LoadConfig(transcriptcapture.RuntimeCopilot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if operation == copilotTransactionUninstall {
+				routing, err := copilotManagedInstructionsSpecAt(cfg.RuntimeConfigRoot)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := installManagedInstructions(routing); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := beginCopilotTransaction(operation, &cfg, nil); err != nil {
+					t.Fatal(err)
+				}
+			} else if _, err := beginCopilotTransaction(operation, &cfg, &cfg); err != nil {
+				t.Fatal(err)
+			}
+
+			driftRoot := filepath.Join(filepath.Dir(cfg.RuntimeConfigRoot), "copilot-drift")
+			t.Setenv("COPILOT_HOME", driftRoot)
+
+			recoveryRoot, err := copilotOperationLockRoot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if recoveryRoot != cfg.RuntimeConfigRoot {
+				t.Fatalf("recovery root = %q, want persisted %q", recoveryRoot, cfg.RuntimeConfigRoot)
+			}
+			release, err := acquireProviderIntegrationOperationLock(transcriptcapture.RuntimeCopilot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			release()
+			if _, err := os.Lstat(filepath.Join(cfg.RuntimeConfigRoot, copilotOperationLockFile)); err != nil {
+				t.Fatalf("persisted-root operation lock is missing: %v", err)
+			}
+			if _, err := os.Lstat(filepath.Join(driftRoot, copilotOperationLockFile)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("selector-drift root received an operation lock: %v", err)
+			}
+
+			if err := recoverCopilotTransaction(recoveryRoot); err != nil {
+				t.Fatalf("recover %s after selector drift: %v", operation, err)
+			}
+			if _, err := os.Lstat(copilotTransactionPath(cfg.RuntimeConfigRoot)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("persisted-root journal remains after %s recovery: %v", operation, err)
+			}
+			_, configErr := transcriptcapture.LoadConfig(transcriptcapture.RuntimeCopilot)
+			if operation == copilotTransactionInstall {
+				if configErr != nil {
+					t.Fatalf("recovered install config is missing: %v", configErr)
+				}
+				if err := validateCopilotPersistedTopology(cfg); err != nil {
+					t.Fatalf("recovered persisted topology: %v", err)
+				}
+			} else if !errors.Is(configErr, os.ErrNotExist) {
+				t.Fatalf("recovered uninstall config remains: %v", configErr)
+			}
+		})
+	}
+}
+
+func TestCopilotInstallStopsAfterRecoveredUninstallChangesLockRoot(t *testing.T) {
+	cfg := configuredCopilotTestConfig(t)
+	cfg.CaptureMode = transcriptcapture.ModeRaw
+	cfg.HookMode = transcriptcapture.HookModeNone
+	fixture := installCopilotCLIFixture(t)
+	name, binding, err := copilotMCPBindingFromConfig(cfg.MCPCommand, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.setBinding(t, name, binding)
+	if err := transcriptcapture.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = transcriptcapture.LoadConfig(transcriptcapture.RuntimeCopilot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routing, err := copilotManagedInstructionsSpecAt(cfg.RuntimeConfigRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := installManagedInstructions(routing); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := beginCopilotTransaction(copilotTransactionUninstall, &cfg, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	driftRoot := filepath.Join(filepath.Dir(cfg.RuntimeConfigRoot), "copilot-drift")
+	t.Setenv("COPILOT_HOME", driftRoot)
+
+	_, stderr, code := captureIntegrationsCLI(t, func() int {
+		return installCmd([]string{transcriptcapture.RuntimeCopilot})
+	})
+	if code != 1 || !strings.Contains(stderr, "rerun install") {
+		t.Fatalf("install after recovered uninstall code=%d stderr=%q", code, stderr)
+	}
+	if _, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeCopilot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("recovered uninstall config remains: %v", err)
+	}
+	if _, err := os.Lstat(copilotTransactionPath(cfg.RuntimeConfigRoot)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("recovered uninstall journal remains: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(driftRoot, copilotOperationLockFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("install mutated or locked the new selector root before rerun: %v", err)
+	}
+}
+
+func TestCopilotTransactionJournalRejectsUnknownFieldsAndSelectorTampering(t *testing.T) {
+	for _, variant := range []string{"unknown", "selector"} {
+		t.Run(variant, func(t *testing.T) {
+			previous := configuredCopilotTestConfig(t)
+			previous.CaptureMode = transcriptcapture.ModeRaw
+			previous.HookMode = transcriptcapture.HookModeNone
+			fixture := installCopilotCLIFixture(t)
+			name, binding, err := copilotMCPBindingFromConfig(previous.MCPCommand, previous)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixture.setBinding(t, name, binding)
+			if err := transcriptcapture.SaveConfig(previous); err != nil {
+				t.Fatal(err)
+			}
+			previous, err = transcriptcapture.LoadConfig(transcriptcapture.RuntimeCopilot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			desired := previous
+			if _, err := beginCopilotTransaction(copilotTransactionInstall, &previous, &desired); err != nil {
+				t.Fatal(err)
+			}
+			path := copilotTransactionPath(previous.RuntimeConfigRoot)
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var document map[string]any
+			if err := json.Unmarshal(raw, &document); err != nil {
+				t.Fatal(err)
+			}
+			if variant == "unknown" {
+				document["foreign"] = true
+			} else {
+				desiredDocument := document["desired"].(map[string]any)
+				environment := desiredDocument["mcp_environment"].(map[string]any)
+				environment["WITSELF_HOME"] = filepath.Join(t.TempDir(), "foreign-witself")
+			}
+			raw, err = json.Marshal(document)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := loadCopilotTransactionJournal(previous.RuntimeConfigRoot); err == nil {
+				t.Fatalf("%s journal tampering was accepted", variant)
+			}
+		})
 	}
 }
 

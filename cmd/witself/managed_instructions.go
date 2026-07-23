@@ -11,6 +11,8 @@ import (
 	"strings"
 )
 
+const managedInstructionsReadLimit = 8 * 1024 * 1024
+
 // managedInstructionsSpec describes one marker-delimited instruction block in
 // a runtime-owned Markdown file. The filename and temporary-file pattern are
 // kept explicit so diagnostics and atomic writes use the runtime's own names.
@@ -316,6 +318,9 @@ func verifyManagedInstructionsFileState(path string, expected []byte, expectedIn
 	if !sameManagedInstructionsFileIdentity(before, expectedInfo) {
 		return fmt.Errorf("%s was replaced", path)
 	}
+	if before.Size() != int64(len(expected)) || before.Size() > managedInstructionsReadLimit {
+		return fmt.Errorf("%s size changed or exceeds the %d-byte managed-instructions read limit", path, managedInstructionsReadLimit)
+	}
 	if before.Mode().Perm() != expectedInfo.Mode().Perm() {
 		return fmt.Errorf("%s permissions changed from %04o to %04o", path, expectedInfo.Mode().Perm(), before.Mode().Perm())
 	}
@@ -331,15 +336,22 @@ func verifyManagedInstructionsFileState(path string, expected []byte, expectedIn
 	if !sameManagedInstructionsFileIdentity(before, opened) {
 		return fmt.Errorf("%s changed while it was opened", path)
 	}
-	raw, err := io.ReadAll(file)
+	if opened.Size() != before.Size() {
+		return fmt.Errorf("%s size changed while it was opened", path)
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, managedInstructionsReadLimit+1))
 	if err != nil {
 		return err
+	}
+	if len(raw) > managedInstructionsReadLimit {
+		return fmt.Errorf("%s exceeds the %d-byte managed-instructions read limit", path, managedInstructionsReadLimit)
 	}
 	after, err := os.Lstat(path)
 	if err != nil {
 		return err
 	}
-	if !after.Mode().IsRegular() || !sameManagedInstructionsFileIdentity(before, after) {
+	if !after.Mode().IsRegular() || !sameManagedInstructionsFileIdentity(before, after) ||
+		after.Size() != int64(len(raw)) {
 		return fmt.Errorf("%s changed while it was read", path)
 	}
 	if after.Mode().Perm() != expectedInfo.Mode().Perm() {
@@ -416,14 +428,45 @@ func readManagedInstructionsSnapshot(spec managedInstructionsSpec) (managedInstr
 	if !info.Mode().IsRegular() {
 		return managedInstructionsSnapshot{}, fmt.Errorf("%s is not a regular file", path)
 	}
-	raw, err := os.ReadFile(path)
+	if info.Size() > managedInstructionsReadLimit {
+		return managedInstructionsSnapshot{}, fmt.Errorf("%s exceeds the %d-byte managed-instructions read limit", path, managedInstructionsReadLimit)
+	}
+	file, err := os.Open(path)
 	if err != nil {
 		return managedInstructionsSnapshot{}, fmt.Errorf("read %s: %w", path, err)
+	}
+	opened, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return managedInstructionsSnapshot{}, fmt.Errorf("inspect opened %s: %w", path, err)
+	}
+	if !opened.Mode().IsRegular() || !sameManagedInstructionsFileIdentity(info, opened) {
+		_ = file.Close()
+		return managedInstructionsSnapshot{}, fmt.Errorf("%s changed while it was opened", path)
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, managedInstructionsReadLimit+1))
+	closeErr := file.Close()
+	if err != nil {
+		return managedInstructionsSnapshot{}, fmt.Errorf("read %s: %w", path, err)
+	}
+	if closeErr != nil {
+		return managedInstructionsSnapshot{}, fmt.Errorf("close %s: %w", path, closeErr)
+	}
+	if len(raw) > managedInstructionsReadLimit {
+		return managedInstructionsSnapshot{}, fmt.Errorf("%s exceeds the %d-byte managed-instructions read limit", path, managedInstructionsReadLimit)
+	}
+	after, err := os.Lstat(path)
+	if err != nil {
+		return managedInstructionsSnapshot{}, fmt.Errorf("inspect %s after read: %w", path, err)
+	}
+	if !after.Mode().IsRegular() || !sameManagedInstructionsFileIdentity(opened, after) ||
+		after.Size() != int64(len(raw)) || after.Mode().Perm() != info.Mode().Perm() {
+		return managedInstructionsSnapshot{}, fmt.Errorf("%s changed while it was read", path)
 	}
 	snapshot.data = raw
 	snapshot.mode = info.Mode()
 	snapshot.existed = true
-	snapshot.originalInfo = info
+	snapshot.originalInfo = after
 	return snapshot, nil
 }
 
@@ -681,7 +724,11 @@ func recoverManagedInstructionsExchange(
 	tempPattern string,
 ) ([]string, error) {
 	dir := filepath.Dir(path)
-	capture, err := os.CreateTemp(dir, tempPattern+"-recovery-*")
+	recoveryPattern, err := managedInstructionsDerivedTempPattern(tempPattern, "recovery")
+	if err != nil {
+		return []string{displacedPath}, err
+	}
+	capture, err := os.CreateTemp(dir, recoveryPattern)
 	if err != nil {
 		return []string{displacedPath}, err
 	}
@@ -777,7 +824,11 @@ func removeManagedInstructionsFile(
 	if tempPattern == "" {
 		tempPattern = "." + fileName + ".witself-*"
 	}
-	tomb, err := os.CreateTemp(filepath.Dir(path), tempPattern+"-delete-*")
+	deletionPattern, err := managedInstructionsDerivedTempPattern(tempPattern, "delete")
+	if err != nil {
+		return fmt.Errorf("create temporary %s deletion: %w", fileName, err)
+	}
+	tomb, err := os.CreateTemp(filepath.Dir(path), deletionPattern)
 	if err != nil {
 		return fmt.Errorf("create temporary %s deletion: %w", fileName, err)
 	}
@@ -846,6 +897,16 @@ func removeManagedInstructionsFile(
 		_ = managedInstructionsSyncDirectory(path)
 	}
 	return nil
+}
+
+func managedInstructionsDerivedTempPattern(tempPattern, purpose string) (string, error) {
+	if !strings.HasSuffix(tempPattern, "*") || strings.Count(tempPattern, "*") != 1 {
+		return "", errors.New("managed-instruction temporary pattern must contain exactly one trailing wildcard")
+	}
+	if purpose == "" || strings.ContainsAny(purpose, `*?[]/\`) {
+		return "", errors.New("managed-instruction temporary purpose is invalid")
+	}
+	return strings.TrimSuffix(tempPattern, "*") + purpose + "-*", nil
 }
 
 func restoreManagedInstructionsRenamedDeletion(path, tombPath string) ([]string, error) {

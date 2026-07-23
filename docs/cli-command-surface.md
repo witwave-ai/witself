@@ -3116,6 +3116,8 @@ detection separately from Witself installation state:
 ```sh
 witself integrations
 witself integrations --json
+witself integrations --verify
+witself integrations --verify --json
 ```
 
 "Detected" means the supported runtime is currently discoverable on this
@@ -3123,7 +3125,24 @@ machine. "Installed" means a local Witself integration record exists for that
 runtime. These states are intentionally independent: a detected runtime may not
 yet be integrated, while an installed integration may remain after its provider
 executable becomes unavailable. Human output is a concise per-runtime status
-view; `--json` exposes the same distinction for scripts.
+view; `--json` emits the stable `witself.integrations.v2` report for scripts.
+Every row also reports `native`, `wsl_only`, or `unsupported` platform support
+separately from detection and installed state.
+
+`--verify` checks each installed runtime against its persisted exact binding,
+including the pinned runtime executable and provider-specific owned topology.
+Health is reported as `healthy`, `drifted`, `incomplete`, `unavailable`, or
+`unsupported`; a platform-supported runtime without an integration is
+`not_installed`. The command exits nonzero when an installed binding is
+drifted, incomplete, unavailable, or unsupported, while an ordinary inventory
+remains a fast discovery/status read. Use `--verify --json` when automation
+needs both the per-runtime result and the verification summary.
+
+Inventory and verification are read-only. A pending provider transaction is
+reported as `incomplete`; rerun its install or uninstall command to recover it
+under the provider operation lock. `witself integrations --help` and
+`witself integrations help` print usage and exit successfully without probing
+providers.
 
 GitHub Copilot is reported under its canonical `copilot` runtime name and is
 detected when the discovered CLI is version 1.0.73 or newer and passes the
@@ -3148,8 +3167,13 @@ witself install copilot
 witself install copilot --routing-only
 witself install all --agent scott --location home --dry-run
 witself install all --agent scott --location home
+witself install all --agent scott --location home --json
 witself install claude,codex --routing-only
 ```
+
+Use `witself install --help`, `witself install <runtime> --help`, or
+`witself install all --help` to inspect options without detecting a provider,
+opening credentials, or changing integration state.
 
 The literal `all` selector chooses every supported runtime currently detected
 on the machine. It is a CLI keyword, not a shell wildcard: do not write `*`,
@@ -3164,8 +3188,9 @@ hooks on every hook-capable target; `--managed-hooks` requests
 administrator-managed hooks where that capability exists and leaves other
 hook-capable targets user-scoped. Without either flag, refreshes preserve each
 installed runtime's hook mode, while new integrations retain their normal
-provider defaults. In particular, new Codex and Claude Code integrations may
-request administrator access unless `--user-hooks` is supplied.
+provider defaults. In particular, new Codex and Claude Code integrations on
+macOS and Linux may request administrator access unless `--user-hooks` is
+supplied. Native Windows Codex uses user-scoped hooks.
 Provider-specific capture and routing flags are rejected with `all`; use an
 explicit runtime selector for those controls. `--dry-run` reports the detected
 target set, identity effects, and intended per-runtime actions without changing
@@ -3194,6 +3219,15 @@ when omitted, no `--location` argument is written. `--endpoint` and
 `--token-file` are optional and otherwise use the normal managed endpoint and
 token-file conventions. No token is copied into MCP or hook configuration.
 
+Platform support is resolved before provider discovery. `install all` reports
+and skips a platform-unsupported target rather than invoking it. On native
+Windows, Cursor is `wsl_only`; install both Witself and Cursor inside the same
+WSL distribution, where the pair is treated as Linux. On Linux, discovery also
+refuses a selected Windows PE provider executable, preventing a Linux Witself
+process from binding through Windows interop to a different provider namespace.
+The other six runtime integrations expose their core MCP/routing surface on
+native Windows, subject to the hook limits below.
+
 OpenClaw phase 1 requires an installed `openclaw` CLI on `PATH`, or selected
 with `OPENCLAW_CLI_PATH`, and exactly one configured agent. That sole agent must
 be the default and have a clean absolute workspace path. Install registers the
@@ -3207,9 +3241,10 @@ If the existing content plus the managed policy exceeds that guard, install
 fails before changing the file rather than risk a truncated safety contract.
 
 The registered MCP server has a 60-second connection timeout. Its persisted
-environment contains only the effective absolute `WITSELF_HOME` and any
-non-empty `OPENCLAW_CONFIG_PATH`, `OPENCLAW_STATE_DIR`, and
-`OPENCLAW_PROFILE` selectors. This lets OpenClaw's reduced child-process
+environment contains only the effective absolute `WITSELF_HOME`, the exact
+absolute `OPENCLAW_CONFIG_PATH` and `OPENCLAW_STATE_DIR` (including their
+resolved defaults), and an optional non-empty `OPENCLAW_PROFILE`. This lets
+OpenClaw's reduced child-process
 environment reopen the same Witself and OpenClaw namespaces without persisting
 arbitrary host variables or credentials. A profile-only selection is expanded
 to OpenClaw's normal `~/.openclaw-PROFILE/openclaw.json` namespace before any
@@ -3217,8 +3252,8 @@ CLI call. `HOME` and `PATH` are not copied.
 Reinstall rejects selector drift, and phase 1 rejects other OpenClaw
 home/workspace/agent-directory/include-root overrides.
 
-Antigravity phase 1 requires macOS or Linux and `agy` on `PATH`, at
-`~/.local/bin/agy`, or selected with `ANTIGRAVITY_CLI_PATH`. Install creates one
+Antigravity phase 1 requires `agy` on `PATH`, at `~/.local/bin/agy`, or selected
+with `ANTIGRAVITY_CLI_PATH`. Install creates one
 exact-owned plugin at
 `~/.gemini/config/plugins/witself-managed-<binding-id>/` containing only
 `plugin.json` and `rules/witself.md`. Witself validates its immutable source with
@@ -3255,6 +3290,16 @@ does not require `agy`. Transaction recovery covers both current surfaces and
 the legacy-to-current transition: it commits only a complete exact tuple,
 restores a previous complete tuple when safe, and refuses ambiguous foreign
 state.
+
+Codex, Claude Code, Grok Build, and Cursor use the provider's canonical
+user-scoped MCP registry but do not infer ownership from the server name alone.
+The integration record pins the exact provider CLI, configuration root, MCP
+file, Witself command/arguments, and absolute non-secret `WITSELF_HOME`.
+Installation refuses a pre-existing foreign `witself` entry. Reinstall,
+uninstall, startup validation, and `integrations --verify` compare the live
+provider entry with the recorded binding and fail closed on provider selector,
+CLI, root, home, or binding drift. Unrelated provider settings and sibling MCP
+servers are preserved, and a symlinked registry is refused.
 
 GitHub Copilot phase 1 requires GitHub Copilot CLI 1.0.73 or newer. Witself
 discovers `copilot` on `PATH` or uses `COPILOT_CLI_PATH`, parses its semantic
@@ -3355,12 +3400,11 @@ guarantee that the model follows the managed rule.
 
 Install also writes the managed fact-versus-native-memory routing policy for
 the selected runtime. Cursor uses
-`$CURSOR_CONFIG_DIR/rules/witself-memory-routing.mdc` (normally
-`~/.cursor/rules/witself-memory-routing.mdc`) with `alwaysApply: true`
-frontmatter and dotted Witself MCP tool names. The default rule is discovered
-for workspaces beneath the user's home through Cursor's ancestor rule search;
-a custom `CURSOR_CONFIG_DIR` works for routing only when that Cursor
-installation also discovers its `rules` directory. Cursor Memories remain
+`~/.cursor/rules/witself-memory-routing.mdc` with `alwaysApply: true`
+frontmatter and dotted Witself MCP tool names. The rule is discovered for
+workspaces beneath the user's home through Cursor's ancestor rule search.
+Current `cursor-agent` builds ignore `CURSOR_CONFIG_DIR` for MCP discovery, so
+Witself rejects that selector. Cursor Memories remain
 project-scoped advisory context, so broad native-memory recall reports partial
 coverage rather than claiming an exhaustive search.
 
@@ -3383,15 +3427,20 @@ drift prevents credential-bound tools from being exposed. It also requires the
 exact current managed instruction content; stale, missing, unmarked, or
 extra-content instructions prevent server startup.
 
-Administrator-managed hooks are the default for Codex and Claude Code while
-identity and MCP registration remain user-scoped. The command prompts for
-administrator access only for that system policy write. Codex uses
+Administrator-managed hooks are the macOS and Linux default for Codex and
+Claude Code while identity and MCP registration remain user-scoped. The command
+prompts for administrator access only for that system policy write. Codex uses
 `/etc/codex/requirements.toml`; Claude Code uses the platform
-`managed-settings.d/50-witself.json` drop-in. Grok Build and Cursor use their
-approval-free global user hook locations. Existing configuration is preserved,
-Witself handlers are idempotent, and unrelated hooks are not disabled. Pass
-`--user-hooks` to use Codex or Claude user settings instead; Codex asks for
-one-time approval through `/hooks` in that mode.
+`managed-settings.d/50-witself.json` drop-in. Native Windows Codex uses
+user-scoped hooks because administrator-managed hook installation is not yet
+supported there. Native Windows Claude Code and Grok Build install core MCP and
+managed routing without transcript hooks because their current hook command
+fields use a POSIX execution contract. Native Windows Cursor is WSL-only. On
+macOS and Linux, Grok Build and Cursor use their global user hook locations.
+Existing configuration is preserved, Witself handlers are idempotent, and
+unrelated hooks are not disabled. On macOS and Linux, pass `--user-hooks` to
+use Codex or Claude user settings instead; Codex asks for one-time approval
+through `/hooks` in that mode.
 
 ```sh
 witself uninstall codex
@@ -3403,6 +3452,7 @@ witself uninstall antigravity
 witself uninstall copilot
 witself uninstall all --dry-run
 witself uninstall all
+witself uninstall all --json
 ```
 
 The literal `all` selector chooses runtimes with an installed Witself
@@ -3414,7 +3464,21 @@ without changing integration state.
 Bulk uninstall processes targets sequentially, continues after an individual
 failure, preserves successful removals, and prints a final per-runtime summary.
 It exits nonzero when any target fails and does not roll successful removals
-back merely because a later runtime could not be uninstalled.
+back merely because a later runtime could not be uninstalled. Bulk install and
+uninstall accept `--json` and emit the stable
+`witself.integration-operation.v1` envelope with the operation, dry-run flag,
+per-runtime results, and summary counts.
+
+`witself uninstall --help`, `witself uninstall <runtime> --help`, and
+`witself uninstall all --help` are also successful, side-effect-free help
+paths.
+
+Each runtime mutation holds one provider-root, value-free operation lock across
+the entire install or uninstall transaction, including MCP, routing, hook, and
+integration-record changes. The lock is a private persistent regular file:
+macOS/Linux use nonblocking advisory locking, while Windows uses a protected
+user DACL and refuses reparse points. A competing operation fails without
+partially changing the provider.
 
 For hook-capable runtimes, uninstall infers user versus managed hook mode from
 the local integration record and preserves tokens and pending transcript events.

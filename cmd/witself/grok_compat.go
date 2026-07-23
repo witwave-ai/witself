@@ -17,7 +17,11 @@ import (
 	"github.com/witwave-ai/witself/internal/transcriptcapture"
 )
 
-const grokHookEventEnv = "GROK_HOOK_EVENT"
+const (
+	grokHookEventEnv       = "GROK_HOOK_EVENT"
+	grokJSONOutputLimit    = 8 * 1024 * 1024
+	grokCLIOutputWaitDelay = 2 * time.Second
+)
 
 type grokInspectSource struct {
 	Type string `json:"type"`
@@ -64,13 +68,8 @@ type grokCompatibilityReport struct {
 // intentionally broad, so an imported Witself hook or MCP server may otherwise
 // execute with a Claude or Cursor binding inside a Grok session.
 func inspectGrokCompatibility(runtimeCLI string) (grokCompatibilityReport, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	output, err := exec.CommandContext(ctx, runtimeCLI, "inspect", "--json").Output()
+	output, err := runGrokJSONCLI(runtimeCLI, 10*time.Second, "inspect", "--json")
 	if err != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return grokCompatibilityReport{}, errors.New("grok compatibility inspection timed out")
-		}
 		return grokCompatibilityReport{}, fmt.Errorf("run grok inspect --json: %w", err)
 	}
 	if len(strings.TrimSpace(string(output))) == 0 {
@@ -363,13 +362,8 @@ type grokMCPListEntry struct {
 }
 
 func verifyGrokNativeMCPBinding(runtimeCLI string, serveArgs []string) (bool, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	output, err := exec.CommandContext(ctx, runtimeCLI, "mcp", "list", "--json").Output()
+	output, err := runGrokJSONCLI(runtimeCLI, 10*time.Second, "mcp", "list", "--json")
 	if err != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return false, errors.New("grok MCP verification timed out")
-		}
 		return false, fmt.Errorf("run grok mcp list --json: %w", err)
 	}
 	if len(strings.TrimSpace(string(output))) == 0 {
@@ -379,6 +373,37 @@ func verifyGrokNativeMCPBinding(runtimeCLI string, serveArgs []string) (bool, er
 		return true, err
 	}
 	return true, nil
+}
+
+func runGrokJSONCLI(runtimeCLI string, timeout time.Duration, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, runtimeCLI, args...)
+	cleanup, err := isolateProviderCLIWorkingDirectory(cmd, "Grok")
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	cmd.WaitDelay = grokCLIOutputWaitDelay
+	stdout := &antigravityValidationOutput{limit: grokJSONOutputLimit}
+	stderr := &antigravityValidationOutput{limit: genericProviderCLIOutputLimit}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	err = cmd.Run()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return nil, fmt.Errorf("the Grok CLI timed out after %s", timeout)
+	}
+	if stdout.truncated {
+		return nil, fmt.Errorf("the Grok CLI JSON output exceeds %d bytes", grokJSONOutputLimit)
+	}
+	if err != nil {
+		message := strings.TrimSpace(stderr.String())
+		if message == "" {
+			message = err.Error()
+		}
+		return nil, errors.New(message)
+	}
+	return stdout.buffer.Bytes(), nil
 }
 
 func validateGrokMCPList(raw []byte, serveArgs []string) error {

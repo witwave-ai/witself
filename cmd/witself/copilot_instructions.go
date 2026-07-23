@@ -49,16 +49,27 @@ func currentCopilotConfigRoot() (string, error) {
 	return cleanCopilotAbsolutePath("COPILOT_HOME", root)
 }
 
-func copilotMemoryRoutingPath() (string, error) {
-	root, err := currentCopilotConfigRoot()
+func copilotMemoryRoutingPathAt(configRoot string) (string, error) {
+	root, err := cleanCopilotAbsolutePath("GitHub Copilot routing config root", configRoot)
 	if err != nil {
 		return "", err
+	}
+	if root != configRoot {
+		return "", errors.New("GitHub Copilot routing config root must be canonical")
 	}
 	return filepath.Join(root, "instructions", copilotMemoryRoutingRuleFile), nil
 }
 
 func copilotManagedInstructionsSpec() (managedInstructionsSpec, error) {
-	path, err := copilotMemoryRoutingPath()
+	root, err := currentCopilotConfigRoot()
+	if err != nil {
+		return managedInstructionsSpec{}, err
+	}
+	return copilotManagedInstructionsSpecAt(root)
+}
+
+func copilotManagedInstructionsSpecAt(configRoot string) (managedInstructionsSpec, error) {
+	path, err := copilotMemoryRoutingPathAt(configRoot)
 	if err != nil {
 		return managedInstructionsSpec{}, err
 	}

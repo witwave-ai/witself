@@ -34,6 +34,13 @@ var (
 
 func main() {
 	args := os.Args[1:]
+	// Hook commands serialize the integration's exact WITSELF_HOME as an
+	// argument. Apply it before any startup migration or cleanup can inspect
+	// local state; transcriptHook validates the same binding again before use.
+	if err := applyStartupWitselfHome(args); err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		os.Exit(2)
+	}
 	explicitCleanup := len(args) >= 3 && args[0] == "message" && args[1] == "runner" && args[2] == "disable"
 	if runtimeName, tombstone := legacyRunnerServeRuntime(args); tombstone {
 		if err := retireLegacyMessageRunnerServeTombstone(runtimeName); err != nil {
@@ -50,6 +57,62 @@ func main() {
 		}
 	}
 	os.Exit(run(args))
+}
+
+func applyStartupWitselfHome(args []string) error {
+	start := -1
+	if len(args) >= 2 && args[0] == "transcript" && args[1] == "hook" {
+		start = 2
+	} else if len(args) >= 2 && args[0] == "_managed-hooks" {
+		start = 2
+	}
+	if start < 0 {
+		return nil
+	}
+
+	value := ""
+	found := false
+	for index := start; index < len(args); index++ {
+		argument := args[index]
+		if argument == "--" {
+			break
+		}
+		candidate := ""
+		matched := false
+		switch {
+		case argument == "--witself-home":
+			if index+1 >= len(args) {
+				return errors.New("--witself-home requires a value")
+			}
+			index++
+			candidate = args[index]
+			matched = true
+		case strings.HasPrefix(argument, "--witself-home="):
+			candidate = strings.TrimPrefix(argument, "--witself-home=")
+			matched = true
+		}
+		if !matched {
+			continue
+		}
+		if found {
+			return errors.New("--witself-home may be specified only once")
+		}
+		value, found = candidate, true
+	}
+	if !found {
+		return nil
+	}
+	canonical, err := cleanCopilotAbsolutePath("hook WITSELF_HOME", value)
+	if err != nil {
+		return err
+	}
+	if canonical != value {
+		return errors.New("hook WITSELF_HOME must be canonical")
+	}
+	if err := os.Setenv("WITSELF_HOME", canonical); err != nil {
+		return fmt.Errorf("set hook WITSELF_HOME before startup: %w", err)
+	}
+	return nil
 }
 
 func run(args []string) int {

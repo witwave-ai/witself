@@ -1077,6 +1077,33 @@ func mcpCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself mcp: %v\n", err)
 		return 1
 	}
+	if isGenericProviderRuntime(cfg.Runtime) {
+		if !genericProviderConfigIsPinned(cfg) {
+			runtimeCLI, selectionErr := validateGenericProviderCurrentSelection(cfg)
+			if selectionErr != nil {
+				fmt.Fprintf(os.Stderr, "witself mcp: reconstruct legacy provider binding: %v\n", selectionErr)
+				return 1
+			}
+			witselfExecutable, executableErr := currentExecutablePath()
+			if executableErr != nil {
+				fmt.Fprintf(os.Stderr, "witself mcp: reconstruct legacy provider binding: %v\n", executableErr)
+				return 1
+			}
+			cfg, err = hydrateLegacyGenericProviderConfig(cfg, runtimeCLI, witselfExecutable)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "witself mcp: reconstruct legacy provider binding: %v\n", err)
+				return 1
+			}
+		}
+		if err := validateGenericProviderCurrentRoots(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "witself mcp: %v\n", err)
+			return 1
+		}
+		if err := validateGenericInstalledTopology(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "witself mcp: %v\n", err)
+			return 1
+		}
+	}
 	if cfg.Runtime == transcriptcapture.RuntimeOpenClaw {
 		if err := validateOpenClawInstalledTopology(cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "witself mcp: %v\n", err)

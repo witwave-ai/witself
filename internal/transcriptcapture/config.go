@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	goruntime "runtime"
 	"strings"
 	"time"
 
@@ -85,6 +86,11 @@ type Config struct {
 	RuntimePluginDigest      string            `json:"runtime_plugin_digest,omitempty"`
 	CaptureMode              string            `json:"capture_mode"`
 	HookMode                 string            `json:"hook_mode"`
+	HookConfigPath           string            `json:"hook_config_path,omitempty"`
+	HookManagedDir           string            `json:"hook_managed_dir,omitempty"`
+	HookRunnerPath           string            `json:"hook_runner_path,omitempty"`
+	HookRunnerDigest         string            `json:"hook_runner_digest,omitempty"`
+	HookPolicyDigest         string            `json:"hook_policy_digest,omitempty"`
 	Account                  string            `json:"account"`
 	AccountID                string            `json:"account_id,omitempty"`
 	Realm                    string            `json:"realm"`
@@ -225,6 +231,14 @@ func SaveConfig(cfg Config) error {
 	cfg.RuntimePluginPath = strings.TrimSpace(cfg.RuntimePluginPath)
 	cfg.RuntimePluginSource = strings.TrimSpace(cfg.RuntimePluginSource)
 	cfg.RuntimePluginDigest = strings.TrimSpace(cfg.RuntimePluginDigest)
+	cfg.HookConfigPath = strings.TrimSpace(cfg.HookConfigPath)
+	cfg.HookManagedDir = strings.TrimSpace(cfg.HookManagedDir)
+	cfg.HookRunnerPath = strings.TrimSpace(cfg.HookRunnerPath)
+	cfg.HookRunnerDigest = strings.TrimSpace(cfg.HookRunnerDigest)
+	cfg.HookPolicyDigest = strings.TrimSpace(cfg.HookPolicyDigest)
+	if err := validateHookOwnershipFields(runtime, hookMode, cfg.HookConfigPath, cfg.HookManagedDir, cfg.HookRunnerPath, cfg.HookRunnerDigest, cfg.HookPolicyDigest); err != nil {
+		return err
+	}
 	if err := validateRuntimeIntegrationFields(runtime, hookMode, cfg.RuntimeCLICommand, cfg.MCPCommand, cfg.MCPEnvironment, cfg.MCPConnectTimeoutSeconds, cfg.RuntimeWorkspace, cfg.RuntimeAgentID, cfg.RuntimeConfigRoot, cfg.RuntimeMCPConfigPath, cfg.RuntimePluginPath, cfg.RuntimePluginSource, cfg.RuntimePluginDigest); err != nil {
 		return err
 	}
@@ -288,10 +302,52 @@ func LoadConfig(runtime string) (Config, error) {
 	cfg.RuntimePluginPath = strings.TrimSpace(cfg.RuntimePluginPath)
 	cfg.RuntimePluginSource = strings.TrimSpace(cfg.RuntimePluginSource)
 	cfg.RuntimePluginDigest = strings.TrimSpace(cfg.RuntimePluginDigest)
+	cfg.HookConfigPath = strings.TrimSpace(cfg.HookConfigPath)
+	cfg.HookManagedDir = strings.TrimSpace(cfg.HookManagedDir)
+	cfg.HookRunnerPath = strings.TrimSpace(cfg.HookRunnerPath)
+	cfg.HookRunnerDigest = strings.TrimSpace(cfg.HookRunnerDigest)
+	cfg.HookPolicyDigest = strings.TrimSpace(cfg.HookPolicyDigest)
+	if err := validateHookOwnershipFields(runtime, cfg.HookMode, cfg.HookConfigPath, cfg.HookManagedDir, cfg.HookRunnerPath, cfg.HookRunnerDigest, cfg.HookPolicyDigest); err != nil {
+		return Config{}, fmt.Errorf("parse integration config %s: %w", path, err)
+	}
 	if err := validateRuntimeIntegrationFields(runtime, cfg.HookMode, cfg.RuntimeCLICommand, cfg.MCPCommand, cfg.MCPEnvironment, cfg.MCPConnectTimeoutSeconds, cfg.RuntimeWorkspace, cfg.RuntimeAgentID, cfg.RuntimeConfigRoot, cfg.RuntimeMCPConfigPath, cfg.RuntimePluginPath, cfg.RuntimePluginSource, cfg.RuntimePluginDigest); err != nil {
 		return Config{}, fmt.Errorf("parse integration config %s: %w", path, err)
 	}
 	return cfg, nil
+}
+
+func validateHookOwnershipFields(runtime, hookMode, configPath, managedDir, runnerPath, runnerDigest, policyDigest string) error {
+	fieldsEmpty := configPath == "" && managedDir == "" && runnerPath == "" && runnerDigest == "" && policyDigest == ""
+	if hookMode == HookModeNone {
+		if !fieldsEmpty {
+			return errors.New("hook ownership fields are not supported when hook_mode is none")
+		}
+		return nil
+	}
+	if hookMode == HookModeUser {
+		if managedDir != "" || runnerPath != "" || runnerDigest != "" || policyDigest != "" {
+			return errors.New("managed hook ownership fields are not supported for user hooks")
+		}
+		// An empty config path is the narrowly supported legacy schema. The next
+		// successful install reconstructs the exact handler set and persists it.
+		if configPath == "" {
+			return nil
+		}
+		if len(configPath) > 4096 || strings.ContainsAny(configPath, "\x00\r\n") || !filepath.IsAbs(configPath) || filepath.Clean(configPath) != configPath {
+			return errors.New("hook_config_path must be a clean absolute path")
+		}
+		return nil
+	}
+	// All-empty managed ownership is the legacy schema accepted solely so the
+	// elevated helper can reconstruct the exact former policy and runner.
+	if fieldsEmpty {
+		return nil
+	}
+	ownership := ManagedHookOwnership{
+		PolicyPath: configPath, ManagedDir: managedDir, RunnerPath: runnerPath,
+		RunnerDigest: runnerDigest, PolicyDigest: policyDigest,
+	}
+	return validateManagedHookOwnership(runtime, ownership)
 }
 
 func validateRuntimeIntegrationFields(runtime, hookMode, runtimeCLICommand, mcpCommand string, mcpEnvironment map[string]string, mcpConnectTimeoutSeconds int, workspace, runtimeAgentID, configRoot, mcpConfigPath, pluginPath, pluginSource, pluginDigest string) error {
@@ -405,17 +461,69 @@ func validateRuntimeIntegrationFields(runtime, hookMode, runtimeCLICommand, mcpC
 		}
 		return nil
 	}
-	if configRoot != "" || mcpConfigPath != "" || pluginPath != "" || pluginSource != "" || pluginDigest != "" {
+	if runtime == RuntimeCodex || runtime == RuntimeClaudeCode || runtime == RuntimeGrokBuild || runtime == RuntimeCursor {
+		if pluginPath != "" || pluginSource != "" || pluginDigest != "" {
+			return fmt.Errorf("runtime plugin fields are not supported for %s", runtime)
+		}
+		// Configs written before generic-provider ownership pinning did not
+		// persist the runtime command, provider root, MCP config path, or
+		// WITSELF_HOME. Continue to load that all-empty legacy shape so an
+		// exact live binding can be inspected and migrated during reinstall.
+		legacy := runtimeCLICommand == "" && mcpCommand == "" && configRoot == "" && mcpConfigPath == "" && len(mcpEnvironment) == 0
+		if !legacy {
+			if runtimeCLICommand == "" || mcpCommand == "" || configRoot == "" || mcpConfigPath == "" {
+				return fmt.Errorf("runtime_cli_command, mcp_command, runtime_config_root, and runtime_mcp_config_path are required for %s", runtime)
+			}
+			if err := validateGenericMCPEnvironment(runtime, mcpEnvironment); err != nil {
+				return err
+			}
+			expectedName := "config.toml"
+			switch runtime {
+			case RuntimeClaudeCode:
+				defaultPath := filepath.Join(filepath.Dir(configRoot), ".claude.json")
+				explicitPath := filepath.Join(configRoot, ".claude.json")
+				if mcpConfigPath != defaultPath && mcpConfigPath != explicitPath {
+					return errors.New("runtime_mcp_config_path must be the canonical Claude user MCP config")
+				}
+				expectedName = ""
+			case RuntimeCursor:
+				expectedName = "mcp.json"
+			}
+			if expectedName != "" && mcpConfigPath != filepath.Join(configRoot, expectedName) {
+				return fmt.Errorf("runtime_mcp_config_path must be the canonical %s MCP config under runtime_config_root", runtime)
+			}
+		}
+	} else if configRoot != "" || mcpConfigPath != "" || pluginPath != "" || pluginSource != "" || pluginDigest != "" {
 		return fmt.Errorf("runtime plugin fields are not supported for %s", runtime)
-	}
-	if len(mcpEnvironment) != 0 {
+	} else if len(mcpEnvironment) != 0 {
 		return fmt.Errorf("mcp_environment is not supported for %s", runtime)
 	}
 	if mcpConnectTimeoutSeconds != 0 {
 		return fmt.Errorf("mcp_connect_timeout_seconds is not supported for %s", runtime)
 	}
-	if hookMode == HookModeNone {
-		return fmt.Errorf("hook_mode none is not supported for %s", runtime)
+	if err := validateGenericHookModeForPlatform(goruntime.GOOS, runtime, hookMode); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateGenericHookModeForPlatform(platform, runtime, hookMode string) error {
+	if hookMode != HookModeNone {
+		return nil
+	}
+	if platform == "windows" && (runtime == RuntimeClaudeCode || runtime == RuntimeGrokBuild) {
+		return nil
+	}
+	return fmt.Errorf("hook_mode none is not supported for %s", runtime)
+}
+
+func validateGenericMCPEnvironment(runtime string, environment map[string]string) error {
+	if len(environment) != 1 {
+		return fmt.Errorf("mcp_environment must contain only WITSELF_HOME for %s", runtime)
+	}
+	home := environment["WITSELF_HOME"]
+	if home == "" || len(home) > 4096 || strings.ContainsAny(home, "\x00\r\n") || !filepath.IsAbs(home) || filepath.Clean(home) != home {
+		return fmt.Errorf("mcp_environment WITSELF_HOME must be a clean absolute path for %s", runtime)
 	}
 	return nil
 }
@@ -542,5 +650,5 @@ func writeJSONAtomic(path string, value any) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	return replaceFileAtomic(tmpPath, path)
 }

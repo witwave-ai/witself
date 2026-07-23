@@ -34,6 +34,28 @@ func TestSupportedRuntimesOrderAndMutationIsolation(t *testing.T) {
 	}
 }
 
+func TestGenericHookModeNoneMatchesNativeWindowsContract(t *testing.T) {
+	for _, test := range []struct {
+		platform string
+		runtime  string
+		wantErr  bool
+	}{
+		{"windows", RuntimeClaudeCode, false},
+		{"windows", RuntimeGrokBuild, false},
+		{"windows", RuntimeCodex, true},
+		{"windows", RuntimeCursor, true},
+		{"darwin", RuntimeClaudeCode, true},
+		{"linux", RuntimeGrokBuild, true},
+	} {
+		t.Run(test.platform+"/"+test.runtime, func(t *testing.T) {
+			err := validateGenericHookModeForPlatform(test.platform, test.runtime, HookModeNone)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("validation error = %v, want error %t", err, test.wantErr)
+			}
+		})
+	}
+}
+
 func TestCopilotConfigRequiresAndRoundTripsOwnedUserBinding(t *testing.T) {
 	witselfHome := filepath.Join(t.TempDir(), ".witself")
 	t.Setenv("WITSELF_HOME", witselfHome)

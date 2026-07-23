@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -88,6 +89,10 @@ if [ "$1 $2 $3" = "agents list --json" ]; then
   exit 0
 fi
 if [ "$1 $2 $3" = "mcp list --json" ]; then
+  if [ -n "$FAKE_OPENCLAW_LARGE_JSON" ]; then
+    /usr/bin/awk -v n="$FAKE_OPENCLAW_LARGE_JSON" 'BEGIN { for (i = 0; i < n; i++) printf "x" }'
+    exit 0
+  fi
   if [ -f "$FAKE_OPENCLAW_STATE" ]; then
     if [ -n "$FAKE_OPENCLAW_VERIFY_MISMATCH_ONCE" ] && [ ! -f "$FAKE_OPENCLAW_VERIFY_MISMATCH_ONCE" ]; then
       printf '%s\n' 'used' > "$FAKE_OPENCLAW_VERIFY_MISMATCH_ONCE"
@@ -101,6 +106,10 @@ if [ "$1 $2 $3" = "mcp list --json" ]; then
   exit 0
 fi
 if [ "$1 $2 $3" = "mcp add witself" ]; then
+  if [ -n "$FAKE_OPENCLAW_LARGE_MUTATION_OUTPUT" ]; then
+    /usr/bin/awk -v n="$FAKE_OPENCLAW_LARGE_MUTATION_OUTPUT" 'BEGIN { for (i = 0; i < n; i++) printf "x" }' >&2
+    exit 12
+  fi
   if [ -f "$FAKE_OPENCLAW_STATE" ]; then
     printf '%s\n' 'witself already exists' >&2
     exit 9
@@ -109,6 +118,10 @@ if [ "$1 $2 $3" = "mcp add witself" ]; then
   exit 0
 fi
 if [ "$1 $2 $3" = "mcp unset witself" ]; then
+  if [ -n "$FAKE_OPENCLAW_LARGE_MUTATION_OUTPUT" ]; then
+    /usr/bin/awk -v n="$FAKE_OPENCLAW_LARGE_MUTATION_OUTPUT" 'BEGIN { for (i = 0; i < n; i++) printf "x" }' >&2
+    exit 12
+  fi
   if [ ! -f "$FAKE_OPENCLAW_STATE" ]; then
     printf '%s\n' 'No MCP server named "witself"' >&2
     exit 1
@@ -430,6 +443,34 @@ func TestOpenClawProfileOnlyDerivesAndPersistsProfileNamespace(t *testing.T) {
 	}
 }
 
+func TestOpenClawCLIOutputIsBounded(t *testing.T) {
+	fixture := setupOpenClawIntegrationFixture(t)
+	t.Setenv("FAKE_OPENCLAW_LARGE_JSON", strconv.Itoa(openClawCLIJSONLimit+1))
+	if _, err := openClawCLIJSONWithEnvironment(fixture.cli, fixture.mcpEnvironment(t), "mcp", "list", "--json"); err == nil ||
+		!strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized OpenClaw JSON error = %v", err)
+	}
+
+	t.Setenv("FAKE_OPENCLAW_LARGE_JSON", "")
+	t.Setenv("FAKE_OPENCLAW_LARGE_MUTATION_OUTPUT", strconv.Itoa(genericProviderCLIOutputLimit+1))
+	ctx, cancel := context.WithTimeout(context.Background(), openClawCLIMutationTimeout)
+	defer cancel()
+	output, err := runOpenClawMutationCommand(
+		ctx,
+		fixture.cli,
+		fixture.mcpEnvironment(t),
+		"mcp", "add", "witself",
+	)
+	if err == nil {
+		t.Fatal("oversized failing OpenClaw mutation unexpectedly succeeded")
+	}
+	marker := "[validation output truncated]"
+	if len(output) > genericProviderCLIOutputLimit+len(marker)+2 ||
+		!strings.Contains(string(output), marker) {
+		t.Fatalf("bounded mutation output length=%d marker=%t", len(output), strings.Contains(string(output), marker))
+	}
+}
+
 func TestOpenClawInstallRecoversAfterFirstInstallInterruption(t *testing.T) {
 	fixture := setupOpenClawIntegrationFixture(t)
 	location, err := transcriptcapture.EnsureLocation("home")
@@ -463,7 +504,7 @@ func TestOpenClawInstallRecoversAfterFirstInstallInterruption(t *testing.T) {
 	}
 }
 
-func TestOpenClawFirstInstallRollbackPreservesPolicyAndRecoveryStateWhenMCPRemovalFails(t *testing.T) {
+func TestOpenClawFirstInstallPreservesRecoveryStateWhenPostAddOwnershipIsAmbiguous(t *testing.T) {
 	fixture := setupOpenClawIntegrationFixture(t)
 	if err := os.MkdirAll(fixture.workspace, 0o700); err != nil {
 		t.Fatal(err)
@@ -474,7 +515,6 @@ func TestOpenClawFirstInstallRollbackPreservesPolicyAndRecoveryStateWhenMCPRemov
 		t.Fatal(err)
 	}
 	t.Setenv("FAKE_OPENCLAW_VERIFY_MISMATCH_ONCE", filepath.Join(fixture.home, "verification-mismatch-used"))
-	t.Setenv("FAKE_OPENCLAW_UNSET_FAIL", "1")
 	if code := installCmd(fixture.installArgs()); code != 1 {
 		t.Fatalf("failed-verification install code = %d", code)
 	}
@@ -499,8 +539,8 @@ func TestOpenClawFirstInstallRollbackPreservesPolicyAndRecoveryStateWhenMCPRemov
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(log), "mcp unset witself") {
-		t.Fatalf("rollback never attempted exact MCP removal:\n%s", log)
+	if strings.Contains(string(log), "mcp unset witself") {
+		t.Fatalf("ambiguous post-add state was unsafely removed:\n%s", log)
 	}
 }
 
@@ -542,6 +582,54 @@ func TestOpenClawInterruptedStageNeverClaimsChangedForeignMCP(t *testing.T) {
 	}
 	if loaded.RuntimeCLICommand != staged.RuntimeCLICommand || loaded.MCPCommand != staged.MCPCommand {
 		t.Fatalf("interrupted stage config changed: %#v", loaded)
+	}
+}
+
+func TestOpenClawRegisterFenceNeverClaimsPostPreflightAppearance(t *testing.T) {
+	for _, variant := range []string{"exact", "foreign"} {
+		t.Run(variant, func(t *testing.T) {
+			fixture := setupOpenClawIntegrationFixture(t)
+			cfg := transcriptcapture.Config{
+				Runtime: transcriptcapture.RuntimeOpenClaw, MCPCommand: fixture.witself,
+				MCPEnvironment: fixture.mcpEnvironment(t), MCPConnectTimeoutSeconds: openClawMCPConnectTimeoutSeconds,
+				Account: "default", Realm: "default", Agent: "scott", AgentName: "scott",
+				Location: transcriptcapture.Location{Name: "home"},
+			}
+			plan, touched, err := prepareOpenClawMCPInstallPlan(fixture.cli, fixture.witself, cfg, nil)
+			if err != nil || touched {
+				t.Fatalf("prepare plan touched=%t err=%v", touched, err)
+			}
+			binding := plan.desired
+			if variant == "foreign" {
+				binding.Args = append(binding.Args, "--foreign")
+			}
+			raw, err := json.Marshal(map[string]openClawMCPBinding{"witself": binding})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(fixture.state, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			registerTouched, err := registerOpenClawMCPBindingWithPlan(fixture.cli, plan)
+			if err == nil || !providerPreflightChanged(err) || registerTouched {
+				t.Fatalf("post-preflight %s appearance touched=%t err=%v", variant, registerTouched, err)
+			}
+			got, err := os.ReadFile(fixture.state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, raw) {
+				t.Fatalf("post-preflight %s appearance changed: %s", variant, got)
+			}
+			log, err := os.ReadFile(fixture.log)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(log), "mcp add witself") || strings.Contains(string(log), "mcp unset witself") {
+				t.Fatalf("post-preflight %s appearance triggered a mutation:\n%s", variant, log)
+			}
+		})
 	}
 }
 
@@ -844,6 +932,80 @@ func TestOpenClawMCPEnvironmentCaptureAndExactOwnership(t *testing.T) {
 		if err := validateOpenClawProfile(profile); err == nil {
 			t.Errorf("profile %q unexpectedly validated", profile)
 		}
+	}
+}
+
+func TestOpenClawMCPEnvironmentPinsDefaultNamespace(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+	for _, key := range append([]string{
+		"OPENCLAW_CONFIG_PATH", "OPENCLAW_STATE_DIR", "OPENCLAW_PROFILE",
+	}, openClawUnsupportedSelectorEnvironment...) {
+		t.Setenv(key, "")
+	}
+
+	environment, err := captureOpenClawMCPEnvironment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDirectory := filepath.Join(home, ".openclaw")
+	want := map[string]string{
+		"WITSELF_HOME":         filepath.Join(home, ".witself"),
+		"OPENCLAW_STATE_DIR":   stateDirectory,
+		"OPENCLAW_CONFIG_PATH": filepath.Join(stateDirectory, "openclaw.json"),
+	}
+	if !equalOpenClawMCPEnvironment(environment, want) {
+		t.Fatalf("default namespace = %#v, want %#v", environment, want)
+	}
+}
+
+func TestLegacyOpenClawDefaultEnvironmentMigrationIsNarrow(t *testing.T) {
+	home := t.TempDir()
+	witselfHome := filepath.Join(home, ".witself")
+	stateDirectory := filepath.Join(home, ".openclaw")
+	desired := map[string]string{
+		"WITSELF_HOME":         witselfHome,
+		"OPENCLAW_STATE_DIR":   stateDirectory,
+		"OPENCLAW_CONFIG_PATH": filepath.Join(stateDirectory, "openclaw.json"),
+	}
+	if !legacyOpenClawDefaultEnvironmentCanMigrate(map[string]string{"WITSELF_HOME": witselfHome}, desired) {
+		t.Fatal("legacy default namespace was not migration-compatible")
+	}
+	for name, mutate := range map[string]func(map[string]string){
+		"witself home drift": func(values map[string]string) { values["WITSELF_HOME"] += "-other" },
+		"profile":            func(values map[string]string) { values["OPENCLAW_PROFILE"] = "work" },
+		"config path":        func(values map[string]string) { values["OPENCLAW_CONFIG_PATH"] += "-other" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := cloneOpenClawEnvironment(desired)
+			mutate(changed)
+			if legacyOpenClawDefaultEnvironmentCanMigrate(map[string]string{"WITSELF_HOME": witselfHome}, changed) {
+				t.Fatalf("accepted drifted migration environment %#v", changed)
+			}
+		})
+	}
+}
+
+func TestOpenClawStateOnlySelectorPinsDerivedConfig(t *testing.T) {
+	home := t.TempDir()
+	stateDirectory := filepath.Join(home, "openclaw-state")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("WITSELF_HOME", filepath.Join(home, ".witself"))
+	t.Setenv("OPENCLAW_STATE_DIR", stateDirectory)
+	t.Setenv("OPENCLAW_CONFIG_PATH", "")
+	t.Setenv("OPENCLAW_PROFILE", "")
+	for _, key := range openClawUnsupportedSelectorEnvironment {
+		t.Setenv(key, "")
+	}
+	environment, err := captureOpenClawMCPEnvironment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if environment["OPENCLAW_CONFIG_PATH"] != filepath.Join(stateDirectory, "openclaw.json") {
+		t.Fatalf("state-only config path = %q", environment["OPENCLAW_CONFIG_PATH"])
 	}
 }
 
