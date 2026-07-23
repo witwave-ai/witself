@@ -511,8 +511,12 @@ try {
         Assert-ReplaceableTarget $alias
 
         $transaction = [Guid]::NewGuid().ToString('N')
-        $primaryStage = Join-Path $InstallDir (".witself.exe.stage.$transaction")
-        $aliasStage = Join-Path $InstallDir (".ws.exe.stage.$transaction")
+        # Keep the native executable suffix last. Windows PowerShell does not
+        # reliably classify a PE file with a transaction suffix as a native
+        # command, so a successful staged self-test may leave LASTEXITCODE
+        # undefined under Set-StrictMode.
+        $primaryStage = Join-Path $InstallDir (".witself.stage.$transaction.exe")
+        $aliasStage = Join-Path $InstallDir (".ws.stage.$transaction.exe")
         $primaryBackup = Join-Path $InstallDir (".witself.exe.backup.$transaction")
         $aliasBackup = Join-Path $InstallDir (".ws.exe.backup.$transaction")
         $primaryTargetQuarantine = Join-Path $InstallDir (".witself.exe.rollback-target.$transaction")
