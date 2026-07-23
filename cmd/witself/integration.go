@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	runtimepkg "runtime"
 	"strings"
 	"time"
 
@@ -101,7 +102,7 @@ func installCmd(args []string) int {
 		return 2
 	}
 	if *managedHooks && !supportsManagedHooks(runtime) {
-		fmt.Fprintf(os.Stderr, "witself: %s uses approval-free global user hooks; --managed-hooks is not supported\n", runtime)
+		fmt.Fprintf(os.Stderr, "witself: %s does not support administrator-managed hooks on %s; use user-scoped hooks\n", runtime, runtimepkg.GOOS)
 		return 2
 	}
 	if runtime == transcriptcapture.RuntimeCopilot {
@@ -1814,6 +1815,13 @@ func currentExecutablePath() (string, error) {
 }
 
 func supportsManagedHooks(runtime string) bool {
+	return supportsManagedHooksForPlatform(runtime, runtimepkg.GOOS)
+}
+
+func supportsManagedHooksForPlatform(runtime, platform string) bool {
+	if platform != "darwin" && platform != "linux" {
+		return false
+	}
 	return runtime == transcriptcapture.RuntimeCodex || runtime == transcriptcapture.RuntimeClaudeCode
 }
 

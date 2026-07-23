@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -60,7 +61,29 @@ func TestVerifyInstallAgentIdentityPinsRequestedScope(t *testing.T) {
 	}
 }
 
-func TestInstallCodexRegistersMCPAndHooksWithoutEmbeddingToken(t *testing.T) {
+func TestManagedHookSupportMatchesNativePlatformContract(t *testing.T) {
+	for _, tc := range []struct {
+		platform string
+		runtime  string
+		want     bool
+	}{
+		{platform: "darwin", runtime: transcriptcapture.RuntimeCodex, want: true},
+		{platform: "linux", runtime: transcriptcapture.RuntimeCodex, want: true},
+		{platform: "windows", runtime: transcriptcapture.RuntimeCodex, want: false},
+		{platform: "darwin", runtime: transcriptcapture.RuntimeClaudeCode, want: true},
+		{platform: "linux", runtime: transcriptcapture.RuntimeClaudeCode, want: true},
+		{platform: "windows", runtime: transcriptcapture.RuntimeClaudeCode, want: false},
+		{platform: "darwin", runtime: transcriptcapture.RuntimeGrokBuild, want: false},
+	} {
+		t.Run(tc.platform+"/"+tc.runtime, func(t *testing.T) {
+			if got := supportsManagedHooksForPlatform(tc.runtime, tc.platform); got != tc.want {
+				t.Fatalf("managed hooks = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestProviderIntegrationContractCodex(t *testing.T) {
 	home := t.TempDir()
 	setInstallExecutableForTest(t)
 	witselfHome := filepath.Join(home, ".witself")
@@ -68,14 +91,24 @@ func TestInstallCodexRegistersMCPAndHooksWithoutEmbeddingToken(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("WITSELF_HOME", witselfHome)
 	t.Setenv("CODEX_HOME", codexHome)
-	logPath := filepath.Join(home, "codex-args.log")
-	t.Setenv("FAKE_CLI_LOG", logPath)
-	fakeCLI := filepath.Join(home, "codex")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_CLI_LOG\"\nexit 0\n"
-	if err := os.WriteFile(fakeCLI, []byte(script), 0o700); err != nil {
+	provider := buildFakeProviderCLI(t, home)
+	t.Setenv("CODEX_CLI_PATH", provider.Path)
+	siblingMCP := []string{"sibling-mcp", "serve", "--safe"}
+	provider.writeRegistry(t, map[string][]string{"sibling": siblingMCP})
+
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("CODEX_CLI_PATH", fakeCLI)
+	originalHooks := `{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"custom-check"}]}]}}`
+	hooksPath := filepath.Join(codexHome, "hooks.json")
+	if err := os.WriteFile(hooksPath, []byte(originalHooks), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	originalInstructions := "# Personal Codex instructions\n\nKeep this paragraph.\n"
+	instructionsPath := filepath.Join(codexHome, "AGENTS.md")
+	if err := os.WriteFile(instructionsPath, []byte(originalInstructions), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/self" || r.Header.Get("Authorization") != "Bearer agent-token" {
@@ -89,38 +122,154 @@ func TestInstallCodexRegistersMCPAndHooksWithoutEmbeddingToken(t *testing.T) {
 	if err := os.WriteFile(tokenPath, []byte("agent-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code := installCmd([]string{
+	installArgs := []string{
 		"codex", "--account", "default", "--realm", "default", "--agent", "scott",
 		"--location", "home", "--capture", "raw", "--endpoint", srv.URL,
 		"--token-file", tokenPath, "--user-hooks",
-	}); code != 0 {
+	}
+	if code := installCmd(installArgs); code != 0 {
 		t.Fatalf("install code = %d", code)
 	}
 	cfg, err := transcriptcapture.LoadConfig(transcriptcapture.RuntimeCodex)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AccountID != "acc_1" || cfg.RealmID != "realm_1" ||
-		cfg.AgentID != "agent_1" || cfg.AgentName != "scott" || cfg.Location.Name != "home" {
+	if cfg.AccountID != "acc_1" || cfg.RealmID != "realm_1" || cfg.AgentID != "agent_1" ||
+		cfg.AgentName != "scott" || cfg.Location.Name != "home" || cfg.RuntimeVersion != "1.2.3" {
 		t.Fatalf("config = %#v", cfg)
 	}
-	hooks, err := os.ReadFile(filepath.Join(codexHome, "hooks.json"))
+	hooks, err := os.ReadFile(hooksPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cliLog, err := os.ReadFile(logPath)
+	instructions, err := os.ReadFile(instructionsPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	combined := string(hooks) + string(cliLog)
-	if strings.Contains(combined, "agent-token") {
-		t.Fatal("agent token was embedded in runtime configuration")
+	if !strings.Contains(string(hooks), "custom-check") ||
+		!strings.Contains(string(hooks), "transcript hook --runtime codex") ||
+		!strings.Contains(string(hooks), "--account 'default' --realm 'default' --agent 'scott' --location 'home'") {
+		t.Fatalf("installed hooks = %s", hooks)
 	}
-	if !strings.Contains(string(hooks), "transcript hook --runtime codex") ||
-		!strings.Contains(string(hooks), "--account 'default' --realm 'default' --agent 'scott' --location 'home'") ||
-		!strings.Contains(string(cliLog), "mcp add witself --") ||
-		!strings.Contains(string(cliLog), "mcp serve --runtime codex --account default --realm default --agent scott --location home") {
-		t.Fatalf("hooks/log = %s\n---\n%s", hooks, cliLog)
+	if !strings.Contains(string(instructions), originalInstructions) ||
+		strings.Count(string(instructions), codexMemoryRoutingInstructions) != 1 {
+		t.Fatalf("installed instructions = %s", instructions)
+	}
+	installedHooks := append([]byte(nil), hooks...)
+	installedInstructions := append([]byte(nil), instructions...)
+
+	state := provider.readRegistry(t)
+	if !slices.Equal(state.Servers["sibling"], siblingMCP) {
+		t.Fatalf("sibling MCP entry = %q, want %q", state.Servers["sibling"], siblingMCP)
+	}
+	witselfServeArgs := state.Servers["witself"]
+	if len(witselfServeArgs) == 0 {
+		t.Fatalf("Witself MCP entry is missing: %#v", state.Servers)
+	}
+
+	// A second install is the supported upgrade/reinstall operation. It must
+	// replace the exact Witself MCP entry without duplicating hooks, routing, or
+	// disturbing provider-owned siblings.
+	if code := installCmd(installArgs); code != 0 {
+		t.Fatalf("reinstall code = %d", code)
+	}
+	reinstalledHooks, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reinstalledInstructions, err := os.ReadFile(instructionsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(reinstalledHooks, installedHooks) {
+		t.Fatalf("reinstall changed hooks:\n%s\n---\n%s", installedHooks, reinstalledHooks)
+	}
+	if !slices.Equal(reinstalledInstructions, installedInstructions) {
+		t.Fatalf("reinstall changed managed instructions:\n%s\n---\n%s", installedInstructions, reinstalledInstructions)
+	}
+	state = provider.readRegistry(t)
+	if !slices.Equal(state.Servers["sibling"], siblingMCP) || !slices.Equal(state.Servers["witself"], witselfServeArgs) {
+		t.Fatalf("reinstall changed provider siblings or MCP args: %#v", state.Servers)
+	}
+
+	if code := uninstallCmd([]string{"codex"}); code != 0 {
+		t.Fatalf("uninstall code = %d", code)
+	}
+	uninstalledHooks, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(uninstalledHooks), "custom-check") || strings.Contains(string(uninstalledHooks), "transcript hook --runtime codex") {
+		t.Fatalf("uninstall did not preserve only sibling hooks: %s", uninstalledHooks)
+	}
+	uninstalledInstructions, err := os.ReadFile(instructionsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(uninstalledInstructions) != originalInstructions {
+		t.Fatalf("uninstall instructions = %q, want %q", uninstalledInstructions, originalInstructions)
+	}
+	state = provider.readRegistry(t)
+	if _, exists := state.Servers["witself"]; exists || !slices.Equal(state.Servers["sibling"], siblingMCP) {
+		t.Fatalf("uninstall changed provider siblings or retained Witself: %#v", state.Servers)
+	}
+	configPath, err := transcriptcapture.ConfigPath(transcriptcapture.RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("integration config remains after uninstall: %v", err)
+	}
+	if _, err := os.Stat(tokenPath); err != nil {
+		t.Fatalf("uninstall removed token file: %v", err)
+	}
+
+	calls := provider.invocations(t)
+	var adds, removes [][]string
+	for _, call := range calls {
+		switch {
+		case len(call.Args) >= 2 && call.Args[0] == "mcp" && call.Args[1] == "add" &&
+			(len(call.Args) != 3 || call.Args[2] != "--help"):
+			adds = append(adds, call.Args)
+		case len(call.Args) >= 2 && call.Args[0] == "mcp" && call.Args[1] == "remove":
+			removes = append(removes, call.Args)
+		}
+	}
+	if len(adds) != 2 || len(removes) != 3 {
+		t.Fatalf("MCP lifecycle calls: adds=%#v removes=%#v all=%#v", adds, removes, calls)
+	}
+	for _, remove := range removes {
+		if !slices.Equal(remove, []string{"mcp", "remove", "witself"}) {
+			t.Fatalf("MCP remove args = %q", remove)
+		}
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, err = filepath.Abs(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantAdd := append([]string{"mcp", "add", "witself", "--"}, runtimeMCPServeArgs(
+		transcriptcapture.RuntimeCodex, executable, "default", "default", "scott", "home",
+	)...)
+	for _, add := range adds {
+		if !slices.Equal(add, wantAdd) {
+			t.Fatalf("MCP add args = %q, want %q", add, wantAdd)
+		}
+	}
+	providerArtifacts := string(installedHooks) + string(installedInstructions)
+	for _, call := range calls {
+		providerArtifacts += strings.Join(call.Args, "\x00")
+	}
+	registryRaw, err := os.ReadFile(provider.StatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerArtifacts += string(registryRaw)
+	if strings.Contains(providerArtifacts, "agent-token") {
+		t.Fatal("agent token was embedded in a Codex hook, instruction, MCP argument, or provider registry")
 	}
 }
 

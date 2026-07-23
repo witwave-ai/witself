@@ -100,6 +100,11 @@ jobs:
       - name: Validate GoReleaser configuration
         run: goreleaser check
 
+      - name: Validate derived Witself CLI smoke configuration
+        run: |
+          scripts/render-goreleaser-witself-smoke-config.sh "$RUNNER_TEMP/goreleaser-witself-smoke.yaml" .goreleaser.yaml
+          goreleaser check -f "$RUNNER_TEMP/goreleaser-witself-smoke.yaml"
+
       - name: Test Homebrew tap publisher
         run: bash scripts/test-publish-homebrew-formulas.sh
 
@@ -118,6 +123,79 @@ jobs:
 
       - name: Render and audit Homebrew formulae
         run: bash scripts/test-homebrew-formulas.sh
+
+  # Prove the provider installation transaction on every native platform we
+  # advertise. These tests use a portable fake runtime and disposable homes;
+  # they need no vendor account and never touch a developer's real profile.
+  # Real-client/model acceptance is a separate scheduled or manual release
+  # gate documented in docs/provider-integration-certification.md.
+  provider-integration-contract:
+    name: provider integration / ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            runner: ubuntu-latest
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+          - target: macos-intel
+            runner: macos-15-intel
+          - target: macos-arm64
+            runner: macos-15
+          - target: windows-x64
+            runner: windows-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Record native target
+        run: go env GOOS GOARCH
+
+      - name: Build native Witself client
+        run: go build ./cmd/witself
+
+      - name: Universal installer artifact smoke
+        if: runner.os != 'Windows'
+        run: bash scripts/test-install-unix.sh
+
+      - name: Windows binary installer smoke
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: .\scripts\test-install-windows.ps1
+
+      - name: Native platform safety primitives
+        run: >-
+          go test
+          ./internal/local
+          ./internal/memorycurator
+          ./internal/dashboard
+          ./internal/transcriptcapture
+          -run '^(TestLocalLockFile|TestAutoLockPlatform|TestAutoLockIdentity|TestRegistryClaimLock|TestPIDRunning|TestCapturePlatform|TestReplaceFileAtomic)'
+          -count=1
+
+      - name: Managed instruction platform primitives
+        run: >-
+          go test ./cmd/witself
+          -run '^(TestManagedInstructionExchangePrimitive|TestManagedInstructionNoReplacePrimitive|TestWindowsManagedInstruction)'
+          -count=1
+
+      - name: Codex Windows hook contract
+        run: >-
+          go test ./internal/transcriptcapture
+          -run '^TestCodexHooksWindows'
+          -count=1
+
+      - name: Codex provider installation contract
+        run: >-
+          go test ./cmd/witself
+          -run '^TestProviderIntegrationContractCodex'
+          -count=1
 
   avatar-renderer-portability:
     strategy:

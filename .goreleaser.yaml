@@ -16,9 +16,13 @@ builds:
     goos:
       - linux
       - darwin
+      - windows
     goarch:
       - amd64
       - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
     ldflags:
       - -s -w
       - -X github.com/witwave-ai/witself/internal/version.Version={{ .Version }}
@@ -85,6 +89,10 @@ archives:
       - witself
     formats:
       - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
     name_template: "witself_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
   - id: witself-server
     ids:

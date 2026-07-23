@@ -1,12 +1,15 @@
 package transcriptcapture
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
+	"unicode/utf16"
 )
 
 const hookCommandMarker = " transcript hook --runtime "
@@ -14,6 +17,12 @@ const hookCommandMarker = " transcript hook --runtime "
 // InstallHooks idempotently adds Witself capture handlers while preserving
 // unrelated user and plugin hooks.
 func InstallHooks(runtime, mode, executable, account, realm, agent, location string) (string, error) {
+	return installHooksForPlatform(goruntime.GOOS, runtime, mode, executable, account, realm, agent, location)
+}
+
+// installHooksForPlatform keeps platform-specific command serialization
+// testable without requiring the test process itself to run on that platform.
+func installHooksForPlatform(platform, runtime, mode, executable, account, realm, agent, location string) (string, error) {
 	runtime, err := NormalizeRuntime(runtime)
 	if err != nil {
 		return "", err
@@ -34,6 +43,13 @@ func InstallHooks(runtime, mode, executable, account, realm, agent, location str
 		return "", err
 	}
 	command := shellQuote(executable) + " transcript hook " + hookBindingArgs(runtime, account, realm, agent, location)
+	commandWindows := ""
+	if runtime == RuntimeCodex && platform == "windows" {
+		commandWindows, err = codexWindowsHookCommand(executable, runtime, account, realm, agent, location)
+		if err != nil {
+			return "", err
+		}
+	}
 	if runtime == RuntimeGrokBuild {
 		hooks := map[string]any{}
 		addWitselfHandlers(hooks, runtime, mode, command)
@@ -58,12 +74,15 @@ func InstallHooks(runtime, mode, executable, account, realm, agent, location str
 	}
 	removeWitselfHandlers(hooks)
 
-	if runtime == RuntimeCursor {
+	switch runtime {
+	case RuntimeCursor:
 		addCursorWitselfHandlers(hooks, mode, command)
 		if _, ok := root["version"]; !ok {
 			root["version"] = 1
 		}
-	} else {
+	case RuntimeCodex:
+		addWitselfHandlersWithWindowsCommand(hooks, runtime, mode, command, commandWindows)
+	default:
 		addWitselfHandlers(hooks, runtime, mode, command)
 	}
 	root["hooks"] = hooks
@@ -167,13 +186,21 @@ func HooksInstalled(runtime string) (bool, error) {
 }
 
 func addWitselfHandlers(hooks map[string]any, runtime, mode, command string) {
+	addWitselfHandlersWithWindowsCommand(hooks, runtime, mode, command, "")
+}
+
+func addWitselfHandlersWithWindowsCommand(hooks map[string]any, runtime, mode, command, commandWindows string) {
 	for _, event := range hookEvents(runtime, mode) {
+		handler := map[string]any{
+			"type":    "command",
+			"command": command,
+			"timeout": 10,
+		}
+		if commandWindows != "" {
+			handler["commandWindows"] = commandWindows
+		}
 		group := map[string]any{
-			"hooks": []any{map[string]any{
-				"type":    "command",
-				"command": command,
-				"timeout": 10,
-			}},
+			"hooks": []any{handler},
 		}
 		if eventNeedsToolMatcher(event) {
 			group["matcher"] = "*"
@@ -362,4 +389,86 @@ func hookSettingsPath(runtime string) (string, error) {
 
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func codexWindowsHookCommand(executable, runtime, account, realm, agent, location string) (string, error) {
+	if err := validateWindowsHookExecutable(executable); err != nil {
+		return "", err
+	}
+	powerShellExecutable, err := codexWindowsPowerShellExecutable()
+	if err != nil {
+		return "", fmt.Errorf("resolve trusted Windows PowerShell executable: %w", err)
+	}
+	if err := validateWindowsHookExecutable(powerShellExecutable); err != nil {
+		return "", fmt.Errorf("validate trusted Windows PowerShell executable: %w", err)
+	}
+	args := []string{
+		executable, "transcript", "hook", "--runtime", runtime,
+		"--account", account, "--realm", realm, "--agent", agent,
+	}
+	if location != "" {
+		args = append(args, "--location", location)
+	}
+
+	// Codex executes commandWindows through cmd.exe. Encoding the PowerShell
+	// program keeps cmd from expanding %, !, carets, or command separators from
+	// authenticated binding names while still presenting every value to
+	// witself.exe as a literal argument.
+	var script strings.Builder
+	script.WriteString("$ErrorActionPreference = 'Stop'; & ")
+	for index, arg := range args {
+		if index > 0 {
+			script.WriteByte(' ')
+		}
+		script.WriteString(powerShellSingleQuotedLiteral(arg))
+	}
+	script.WriteString("; exit $LASTEXITCODE")
+	encoded := base64.StdEncoding.EncodeToString(utf16LEBytes(script.String()))
+	// Pin the kernel-reported system PowerShell path. A bare powershell.exe
+	// would let a checked-out project shadow the interpreter when Codex runs a
+	// hook from that project's working directory.
+	return `"` + powerShellExecutable + `" -NoLogo -NoProfile -NonInteractive -EncodedCommand ` + encoded, nil
+}
+
+func validateWindowsHookExecutable(executable string) error {
+	if executable == "" || executable != strings.TrimSpace(executable) || strings.ContainsAny(executable, "\x00\r\n") {
+		return errors.New("codex Windows hook executable must be a clean absolute .exe path")
+	}
+	lower := strings.ToLower(executable)
+	if !strings.HasSuffix(lower, ".exe") || !windowsPathIsAbs(executable) {
+		return errors.New("codex Windows hook executable must be a clean absolute .exe path")
+	}
+	return nil
+}
+
+func windowsPathIsAbs(path string) bool {
+	if len(path) >= 3 && isASCIIAlpha(path[0]) && path[1] == ':' && isWindowsPathSeparator(path[2]) {
+		return true
+	}
+	if len(path) < 5 || !isWindowsPathSeparator(path[0]) || !isWindowsPathSeparator(path[1]) {
+		return false
+	}
+	parts := strings.FieldsFunc(path[2:], func(r rune) bool { return r == '\\' || r == '/' })
+	return len(parts) >= 3 && parts[0] != "" && parts[1] != ""
+}
+
+func isASCIIAlpha(value byte) bool {
+	return value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z'
+}
+
+func isWindowsPathSeparator(value byte) bool {
+	return value == '\\' || value == '/'
+}
+
+func powerShellSingleQuotedLiteral(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
+func utf16LEBytes(value string) []byte {
+	encoded := utf16.Encode([]rune(value))
+	out := make([]byte, 0, len(encoded)*2)
+	for _, unit := range encoded {
+		out = append(out, byte(unit), byte(unit>>8))
+	}
+	return out
 }

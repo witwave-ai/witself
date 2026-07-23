@@ -120,12 +120,12 @@ distinguish overlapping sessions across all four runtimes at that location.
 
 Installing again replaces only Witself's MCP registration and hook handlers for
 that runtime; unrelated runtime configuration is preserved. One local binding
-per runtime is supported in this slice. Codex and Claude Code default to
-administrator-managed hooks; the CLI keeps identity and MCP configuration
-user-scoped, then uses a narrow elevation only for system policy. Do not run
-the whole command with `sudo`. Grok Build and Cursor use their native
-approval-free global user hook locations and require neither elevation nor
-project trust.
+per runtime is supported in this slice. On macOS and Linux, Codex and Claude
+Code default to administrator-managed hooks; the CLI keeps identity and MCP
+configuration user-scoped, then uses a narrow elevation only for system policy.
+Do not run the whole command with `sudo`. Native Windows Codex uses user-scoped
+hooks and does not request that elevation. Grok Build and Cursor use their
+user-scoped hook locations on platforms where those runtimes are supported.
 
 On macOS, Codex policy is merged into `/etc/codex/requirements.toml`; an
 existing managed hook directory is reused when one is already defined. Claude

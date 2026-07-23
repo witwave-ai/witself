@@ -2,6 +2,7 @@ package transcriptcapture
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf16"
 )
 
 func TestClaudeCaptureCorrelatesSessionTurnAndLocation(t *testing.T) {
@@ -943,6 +945,170 @@ func TestCodexHookSetUsesOnlySupportedEvents(t *testing.T) {
 	if strings.Contains(string(raw), "--location") {
 		t.Fatalf("unlabeled install contains a location flag:\n%s", raw)
 	}
+}
+
+func TestCodexHooksWindowsCommandOverridePreservesLifecycle(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	codexHome := filepath.Join(home, ".codex")
+	t.Setenv("CODEX_HOME", codexHome)
+	path := filepath.Join(codexHome, "hooks.json")
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	original := `{"description":"keep me","hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"custom-check","commandWindows":"custom-check.exe"}]}]}}`
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	executable := `C:\Program Files\Witself O'Brien\witself.exe`
+	account := `acct%PATH%&`
+	realm := `realm^|`
+	agent := `agent 'quoted'`
+	for range 2 {
+		if _, err := installHooksForPlatform("windows", RuntimeCodex, ModeRaw, executable, account, realm, agent, "home"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		t.Fatal(err)
+	}
+	if root["description"] != "keep me" {
+		t.Fatalf("unrelated top-level settings were lost: %#v", root)
+	}
+	hooks, ok := root["hooks"].(map[string]any)
+	if !ok {
+		t.Fatalf("hooks = %#v", root["hooks"])
+	}
+	wantCommand := shellQuote(executable) + " transcript hook " + hookBindingArgs(RuntimeCodex, account, realm, agent, "home")
+	wantScript := "$ErrorActionPreference = 'Stop'; & 'C:\\Program Files\\Witself O''Brien\\witself.exe' 'transcript' 'hook' '--runtime' 'codex' '--account' 'acct%PATH%&' '--realm' 'realm^|' '--agent' 'agent ''quoted''' '--location' 'home'; exit $LASTEXITCODE"
+	witselfHandlerCount := 0
+	for _, event := range hookEvents(RuntimeCodex, ModeRaw) {
+		groups, ok := hooks[event].([]any)
+		if !ok {
+			t.Fatalf("%s groups = %#v", event, hooks[event])
+		}
+		for _, rawGroup := range groups {
+			group, _ := rawGroup.(map[string]any)
+			handlers, _ := group["hooks"].([]any)
+			for _, rawHandler := range handlers {
+				handler, _ := rawHandler.(map[string]any)
+				command, _ := handler["command"].(string)
+				if !strings.Contains(command, hookCommandMarker) {
+					continue
+				}
+				witselfHandlerCount++
+				if command != wantCommand {
+					t.Fatalf("%s POSIX command = %q, want %q", event, command, wantCommand)
+				}
+				commandWindows, ok := handler["commandWindows"].(string)
+				if !ok || commandWindows == "" {
+					t.Fatalf("%s commandWindows = %#v", event, handler["commandWindows"])
+				}
+				if strings.Contains(commandWindows, account) || strings.Contains(commandWindows, agent) {
+					t.Fatalf("%s commandWindows exposes unescaped binding text: %q", event, commandWindows)
+				}
+				if got := decodePowerShellEncodedCommand(t, commandWindows); got != wantScript {
+					t.Fatalf("%s Windows script:\n got: %s\nwant: %s", event, got, wantScript)
+				}
+			}
+		}
+	}
+	if witselfHandlerCount != len(hookEvents(RuntimeCodex, ModeRaw)) {
+		t.Fatalf("Witself handler count = %d, want %d", witselfHandlerCount, len(hookEvents(RuntimeCodex, ModeRaw)))
+	}
+	if !hasHookCommand(hooks, "custom-check", "custom-check.exe") {
+		t.Fatalf("unrelated cross-platform hook was lost:\n%s", raw)
+	}
+
+	if _, err := RemoveHooks(RuntimeCodex); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root = map[string]any{}
+	if err := json.Unmarshal(raw, &root); err != nil {
+		t.Fatal(err)
+	}
+	hooks, _ = root["hooks"].(map[string]any)
+	if strings.Contains(string(raw), hookCommandMarker) || !hasHookCommand(hooks, "custom-check", "custom-check.exe") {
+		t.Fatalf("uninstall did not remove only Witself hooks:\n%s", raw)
+	}
+}
+
+func TestCodexHooksWindowsRequiresAbsoluteExecutable(t *testing.T) {
+	for _, executable := range []string{
+		"witself.exe",
+		`C:\Program Files\Witself\witself`,
+		`/usr/local/bin/witself.exe`,
+		"C:\\Witself\\witself.exe\nnext-command",
+	} {
+		t.Run(executable, func(t *testing.T) {
+			if _, err := codexWindowsHookCommand(executable, RuntimeCodex, "default", "default", "scott", "home"); err == nil || !strings.Contains(err.Error(), "absolute .exe path") {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+	for _, executable := range []string{
+		`C:\Program Files\Witself\witself.exe`,
+		`d:/tools/witself.EXE`,
+		`\\server\share\witself.exe`,
+	} {
+		t.Run(executable, func(t *testing.T) {
+			if _, err := codexWindowsHookCommand(executable, RuntimeCodex, "default", "default", "scott", "home"); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func decodePowerShellEncodedCommand(t *testing.T, command string) string {
+	t.Helper()
+	powerShellExecutable, err := codexWindowsPowerShellExecutable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := `"` + powerShellExecutable + `" -NoLogo -NoProfile -NonInteractive -EncodedCommand `
+	if !strings.HasPrefix(command, prefix) {
+		t.Fatalf("commandWindows = %q", command)
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(command, prefix))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw)%2 != 0 {
+		t.Fatalf("encoded PowerShell command has odd UTF-16LE byte count: %d", len(raw))
+	}
+	units := make([]uint16, len(raw)/2)
+	for index := range units {
+		units[index] = uint16(raw[index*2]) | uint16(raw[index*2+1])<<8
+	}
+	return string(utf16.Decode(units))
+}
+
+func hasHookCommand(hooks map[string]any, command, commandWindows string) bool {
+	for _, rawGroups := range hooks {
+		groups, _ := rawGroups.([]any)
+		for _, rawGroup := range groups {
+			group, _ := rawGroup.(map[string]any)
+			handlers, _ := group["hooks"].([]any)
+			for _, rawHandler := range handlers {
+				handler, _ := rawHandler.(map[string]any)
+				if handler["command"] == command && handler["commandWindows"] == commandWindows {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func TestRawHookCoverageByRuntime(t *testing.T) {

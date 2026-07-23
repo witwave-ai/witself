@@ -21,6 +21,8 @@
 #   WITSELF_BINARY   back-compat binary selector; positional BINARY wins
 #   WS_VERSION       version to install (e.g. v0.0.1); default: latest release
 #   WS_INSTALL_DIR   install directory; default: /usr/local/bin (sudo if needed)
+#   WS_RELEASE_DIR   absolute directory containing an archive and checksums.txt;
+#                    requires an explicit version and skips all network access
 #
 # Note: witself-infra drives the `pulumi` engine at runtime. Unlike `brew install`
 # (which pulls it automatically), this installer cannot — install pulumi yourself.
@@ -29,6 +31,7 @@ set -eu
 
 REPO="witwave-ai/witself"
 INSTALL_DIR="${WS_INSTALL_DIR:-/usr/local/bin}"
+RELEASE_DIR="${WS_RELEASE_DIR:-}"
 
 err() { printf 'install: %s\n' "$1" >&2; exit 1; }
 info() { printf '%s\n' "$1" >&2; }
@@ -87,6 +90,7 @@ esac
 
 # Resolve the version: positional arg, then WS_VERSION, then the latest release.
 if [ -z "$version" ]; then
+  [ -z "$RELEASE_DIR" ] || err "WS_RELEASE_DIR requires an explicit version"
   info "Resolving latest ${BINARY} release..."
   version=$(fetch "https://api.github.com/repos/${REPO}/releases/latest" |
     grep '"tag_name"' | head -1 | sed -e 's/.*"tag_name":[[:space:]]*"//' -e 's/".*//')
@@ -97,17 +101,40 @@ case "$version" in
   v*) tag="$version"; ver="${version#v}" ;;
   *) tag="v$version"; ver="$version" ;;
 esac
+case "$ver" in
+  "" | *[!A-Za-z0-9._+-]*) err "invalid version \"${version}\"" ;;
+esac
 
 asset="${BINARY}_${ver}_${os}_${arch}.tar.gz"
 base="https://github.com/${REPO}/releases/download/${tag}"
+
+if [ -n "$RELEASE_DIR" ]; then
+  case "$RELEASE_DIR" in
+    /*) ;;
+    *) err "WS_RELEASE_DIR must be an absolute path" ;;
+  esac
+  [ -d "$RELEASE_DIR" ] || err "WS_RELEASE_DIR is not a directory: ${RELEASE_DIR}"
+  RELEASE_DIR=$(CDPATH='' cd -P "$RELEASE_DIR" 2>/dev/null && pwd) \
+    || err "could not resolve WS_RELEASE_DIR: ${RELEASE_DIR}"
+fi
 
 info "Installing ${BINARY} ${tag} (${os}/${arch})..."
 
 tmp=$(mktemp -d 2>/dev/null || mktemp -d -t ws-install)
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
-download "${base}/${asset}" "${tmp}/${asset}"
-download "${base}/checksums.txt" "${tmp}/checksums.txt"
+if [ -n "$RELEASE_DIR" ]; then
+  for name in "$asset" checksums.txt; do
+    source_path="${RELEASE_DIR}/${name}"
+    [ -f "$source_path" ] && [ ! -L "$source_path" ] \
+      || err "local release asset is missing or not a regular file: ${source_path}"
+    cp "$source_path" "${tmp}/${name}" \
+      || err "could not copy local release asset: ${source_path}"
+  done
+else
+  download "${base}/${asset}" "${tmp}/${asset}"
+  download "${base}/checksums.txt" "${tmp}/checksums.txt"
+fi
 
 # Verify the SHA-256 checksum before trusting the binary.
 expected=$(awk -v f="$asset" '$2 == f {print $1}' "${tmp}/checksums.txt")

@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -1191,7 +1190,7 @@ func readCursorVisibleMessages(path, expectedSessionID string) (string, string, 
 		return "", "", err
 	}
 	if !info.Mode().IsRegular() || !os.SameFile(linkInfo, info) ||
-		info.Mode().Perm()&0o022 != 0 || !ownedByCurrentUser(info) ||
+		!trustedPathIdentity(resolvedPath, info) ||
 		info.Size() > maxNativeTranscriptTailBytes || !trustedNativeDirectoryChain(projectsRoot, resolvedPath) {
 		return "", "", errors.New("cursor transcript is not a bounded trusted regular file")
 	}
@@ -1268,7 +1267,7 @@ func trustedNativeDirectoryChain(projectsRoot, transcriptPath string) bool {
 	dir := filepath.Dir(transcriptPath)
 	for {
 		info, err := os.Stat(dir)
-		if err != nil || !info.IsDir() || info.Mode().Perm()&0o022 != 0 || !ownedByCurrentUser(info) {
+		if err != nil || !info.IsDir() || !trustedPathIdentity(dir, info) {
 			return false
 		}
 		if dir == projectsRoot {
@@ -1280,11 +1279,6 @@ func trustedNativeDirectoryChain(projectsRoot, transcriptPath string) bool {
 		}
 		dir = parent
 	}
-}
-
-func ownedByCurrentUser(info os.FileInfo) bool {
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	return ok && stat.Uid == uint32(os.Geteuid())
 }
 
 func cursorVisibleText(raw json.RawMessage) (string, error) {
@@ -1400,7 +1394,7 @@ func readGrokAssistantTurn(path, promptID, expectedSessionID string) (string, st
 		return "", "", false, err
 	}
 	if !info.Mode().IsRegular() || !os.SameFile(linkInfo, info) ||
-		info.Mode().Perm()&0o022 != 0 || !ownedByCurrentUser(info) ||
+		!trustedPathIdentity(resolvedPath, info) ||
 		!trustedNativeDirectoryChain(sessionsRoot, resolvedPath) {
 		return "", "", false, errors.New("grok transcript is not a trusted regular file")
 	}
@@ -2341,7 +2335,7 @@ func validatePendingRewritePath(path string, event Event) error {
 		return err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() ||
-		info.Mode().Perm()&0o022 != 0 || !ownedByCurrentUser(info) {
+		!trustedPathIdentity(path, info) {
 		return errors.New("pending event is not a trusted regular file")
 	}
 	return nil
@@ -2397,12 +2391,7 @@ func flushLockOwnerRunning(path string) (running, known bool) {
 	if err != nil || pid <= 0 {
 		return false, false
 	}
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false, true
-	}
-	err = process.Signal(syscall.Signal(0))
-	return err == nil || os.IsPermission(err), true
+	return processRunning(pid)
 }
 
 func outboxDir(runtime string) (string, error) {

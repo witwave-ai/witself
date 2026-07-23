@@ -3,7 +3,8 @@
 Status: implemented release path with additional hardening targets. The current
 automation is defined by `.github/workflows/release.yml`, `.goreleaser.yaml`,
 the Homebrew renderer and publisher, the latest-image reconciler, the Helm
-chart, and `install.sh`; those executable sources win if this document drifts.
+chart, `install.sh`, and `install.ps1`; those executable sources win if this
+document drifts.
 
 Narrative-memory decision (accepted 2026-07-14): release artifacts have no
 backend LLM, model, embedder, or provider credential. PostgreSQL supplies the
@@ -25,8 +26,9 @@ git push origin "v${VERSION}"
 ```
 
 The tag-triggered `release` workflow reruns the Go, PostgreSQL, lint, nested
-Pulumi-module, and vulnerability gates before publishing. GoReleaser then
-publishes the macOS/Linux archives, checksum Sigstore bundle and transitional
+Pulumi-module, vulnerability, and native Windows x64 provider-integration gates
+before publishing. GoReleaser then publishes the macOS and Linux archives, the
+Windows x64 `witself` CLI archive, checksum Sigstore bundle and transitional
 detached-signature compatibility assets,
 archive SBOMs, GitHub release, multi-architecture CLI and server images,
 and signed immutable image manifests. The workflow renders the `witself`,
@@ -67,7 +69,8 @@ before any future explicit migration Job is introduced.
 - Ship the `witself` binary with CLI commands and `witself mcp serve`.
 - Ship a separate `witself-server` binary from the same public repository once
   backend implementation starts.
-- Support Homebrew and universal `curl | sh` installation from the beginning.
+- Support Homebrew, universal `curl | sh`, and native Windows PowerShell
+  installation from the beginning.
 - Make release artifacts verifiable with checksums.
 - Sign checksum manifests and container-image manifests.
 - Publish SBOMs and build provenance for release archives and container images
@@ -210,7 +213,9 @@ The implemented release action owns:
 - Verifying the Go toolchain from `go.mod`.
 - Running gofmt, vet, build, race tests, golangci-lint, the nested Pulumi module
   gates, and govulncheck against PostgreSQL-backed store tests.
-- Building release archives for macOS and Linux.
+- Running native Windows x64 installer, platform-safety, managed-instruction,
+  Codex-hook, and Codex provider-contract gates before publication.
+- Building release archives for macOS, Linux, and Windows x64.
 - Building `witself`, `witself-server`, `witself-admin`, and `witself-infra`.
 - Generating SHA256 checksums.
 - Signing the checksum manifest into a keyless Sigstore bundle, while retaining
@@ -233,8 +238,10 @@ The implemented release action owns:
 - Re-running that reconciliation from the current default-branch workflow after
   any historical release workflow completes.
 
-Broader published-artifact installation smoke tests remain release-hardening
-targets; they are not silently implied by the current workflow.
+CI performs hermetic local-artifact installer smoke tests on native macOS,
+Linux, and Windows x64 runners. Broader smoke tests against artifacts from an
+actual published GitHub Release remain release-hardening targets; they are not
+silently implied by the current workflow.
 
 Required workflow permissions:
 
@@ -278,11 +285,14 @@ Target platforms:
 - macOS x86-64.
 - Linux ARM64.
 - Linux x86-64.
+- Windows x86-64 (`witself` CLI/MCP only).
 
 Current release artifacts include:
 
-- Separate compressed archives for `witself`, `witself-server`,
-  `witself-admin`, and `witself-infra` on each target platform.
+- `witself` `.tar.gz` archives for macOS and Linux, plus
+  `witself_<version>_windows_amd64.zip` for Windows x64.
+- Separate `.tar.gz` archives for `witself-server`, `witself-admin`, and
+  `witself-infra` on the macOS and Linux targets.
 - SHA256 checksums.
 - A keyless `checksums.txt.sigstore.json` bundle for the checksum manifest,
   plus transitional `checksums.txt.sig` and `checksums.txt.pem` compatibility
@@ -524,15 +534,21 @@ The default CLI install should stay lean. Operators who provision cells install
 `witself-infra` explicitly; most `witself` users should not receive the
 infrastructure provisioner or its Pulumi dependency.
 
-## Universal Installer
+## Native Binary Installers
 
-The universal installer should install released binaries for macOS and Linux.
+The shell installer installs released binaries for macOS and Linux. The
+PowerShell installer installs the native Windows x64 CLI.
 
 Expected invocation:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh | sh
 curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh | sh -s witself-infra
+```
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+irm https://raw.githubusercontent.com/witwave-ai/witself/main/install.ps1 | iex
 ```
 
 Later, this can move to a product-owned domain such as `https://witself.dev` if
@@ -554,6 +570,34 @@ Installer requirements:
 - Support selecting a version through `WS_VERSION`, or through the second
   positional argument when a binary is also supplied.
 - Print the installed version and next-step PATH guidance.
+
+The Windows installer has a deliberately narrower first slice:
+
+- Require native Windows x64 and the exact
+  `witself_<version>_windows_amd64.zip` release asset.
+- Verify the matching SHA-256 entry before extraction.
+- Install per-user to `%LOCALAPPDATA%\Witself\bin` by default, with no
+  elevation or symlink requirement.
+- Write both `witself.exe` and a real `ws.exe` alias, update the user PATH
+  idempotently unless `-NoPathUpdate` is supplied, serialize pair mutation with
+  a per-install-directory transaction lock, and restore the previous pair when
+  an installed version self-test fails. If either installed target changes
+  concurrently, refuse to overwrite it and retain the prior recovery backup
+  instead.
+- Support latest-release resolution and an explicit `-Version` when the
+  script is downloaded and invoked as a file.
+- Print `witself integrations` as the next client-integration discovery
+  command.
+
+Windows x64 CI executes this installer from local checksummed release fixtures,
+including reinstall, checksum refusal, and failed-upgrade rollback. The same
+native matrix exercises the isolated Codex provider contract. Tag releases
+repeat all five native cells; the Windows release cell additionally builds the
+Witself CLI slice mechanically derived from the main GoReleaser configuration,
+then feeds its exact ZIP and checksum manifest through the PowerShell installer
+before publication can proceed. This evidence is contract coverage, not a
+claim that an authenticated Codex model has completed an end-to-end MCP
+invocation on Windows; that remains a separate real-client acceptance gate.
 
 ## Release Readiness Checklist
 

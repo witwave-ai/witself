@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-
-	"golang.org/x/sys/unix"
 )
 
 // MaxSecretCreateJournalBytes bounds one serialized secret-create request.
@@ -353,18 +351,12 @@ func acquireSecretCreateJournalLock(home, directory string) (*secretCreateJourna
 		return nil, classifySecretCreateJournalDirectoryError(err)
 	}
 	path := filepath.Join(directory, secretCreateJournalLockFile)
-	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_CREAT|unix.O_EXCL, 0o600)
-	created := err == nil
-	if errors.Is(err, unix.EEXIST) {
-		fd, err = unix.Open(path, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-	}
+	file, created, err := openLocalLockFileNoFollow(path, true)
 	if err != nil {
+		if errors.Is(err, errLocalLockFileStorage) {
+			return nil, ErrSecretCreateJournalStorage
+		}
 		return nil, ErrSecretCreateJournalUnsafe
-	}
-	file := os.NewFile(uintptr(fd), path)
-	if file == nil {
-		_ = unix.Close(fd)
-		return nil, ErrSecretCreateJournalStorage
 	}
 	cleanup := true
 	defer func() {
@@ -386,16 +378,16 @@ func acquireSecretCreateJournalLock(home, directory string) (*secretCreateJourna
 			return nil, ErrSecretCreateJournalStorage
 		}
 	}
-	if err := unix.Flock(fd, unix.LOCK_EX); err != nil {
+	if err := lockLocalFile(file); err != nil {
 		return nil, ErrSecretCreateJournalStorage
 	}
 	linked, linkErr = os.Lstat(path)
 	if linkErr != nil || !os.SameFile(opened, linked) || !privateRegularSecretCreateJournalFile(linked) {
-		_ = unix.Flock(fd, unix.LOCK_UN)
+		_ = unlockLocalFile(file)
 		return nil, ErrSecretCreateJournalUnsafe
 	}
 	if err := validateSecretCreateJournalDirectories(home, directory); err != nil {
-		_ = unix.Flock(fd, unix.LOCK_UN)
+		_ = unlockLocalFile(file)
 		return nil, classifySecretCreateJournalDirectoryError(err)
 	}
 	cleanup = false
@@ -406,7 +398,7 @@ func (lock *secretCreateJournalLock) release() {
 	if lock == nil || lock.file == nil {
 		return
 	}
-	_ = unix.Flock(int(lock.file.Fd()), unix.LOCK_UN)
+	_ = unlockLocalFile(lock.file)
 	_ = lock.file.Close()
 	lock.file = nil
 }

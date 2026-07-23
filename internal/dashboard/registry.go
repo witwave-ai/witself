@@ -11,10 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"syscall"
 	"time"
-
-	"golang.org/x/sys/unix"
 
 	"github.com/witwave-ai/witself/internal/local"
 )
@@ -127,26 +124,23 @@ func ClaimRegistryEntry(entry RegistryEntry) (RegistryEntry, bool, error) {
 	return entry, true, nil
 }
 
-// lockRegistryClaim takes the exclusive advisory lock guarding one agent's
-// registry slot, blocking until it is free (the critical section is a
-// bounded liveness probe plus one atomic write). The lock file persists
-// after release; it holds no state.
-func lockRegistryClaim(path string) (func(), error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, err
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+// validateLockedRegistryFile proves the locked handle still names the regular
+// file at path. Platform lock implementations call it only after acquiring the
+// blocking exclusive lock, closing the rename-between-open-and-lock window.
+func validateLockedRegistryFile(path string, file *os.File) error {
+	opened, err := file.Stat()
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("dashboard: stat locked registry claim %s: %w", path, err)
 	}
-	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX); err != nil {
-		_ = file.Close()
-		return nil, fmt.Errorf("dashboard: lock registry claim %s: %w", path, err)
+	linked, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("dashboard: inspect locked registry claim %s: %w", path, err)
 	}
-	return func() {
-		_ = unix.Flock(int(file.Fd()), unix.LOCK_UN)
-		_ = file.Close()
-	}, nil
+	if !opened.Mode().IsRegular() || !linked.Mode().IsRegular() ||
+		linked.Mode()&os.ModeSymlink != 0 || !os.SameFile(opened, linked) {
+		return fmt.Errorf("dashboard: registry claim lock %s is not a stable regular file", path)
+	}
+	return nil
 }
 
 // ReadRegistryEntry loads one agent's registry file.
@@ -320,20 +314,6 @@ func dashboardResponds(port int) bool {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	return resp.Header.Get(markerHeader) != ""
-}
-
-// pidRunning mirrors transcriptcapture's flush-lock liveness probe: signal 0,
-// treating permission errors as alive and any unusable pid as unknown.
-func pidRunning(pid int) (running, known bool) {
-	if pid <= 0 {
-		return false, false
-	}
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false, true
-	}
-	err = process.Signal(syscall.Signal(0))
-	return err == nil || os.IsPermission(err), true
 }
 
 // writeJSONAtomic is this package's private copy of the repo-conventional

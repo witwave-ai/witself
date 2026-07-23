@@ -131,6 +131,106 @@ jobs:
             echo "::endgroup::"
           done
 
+  # A tag push does not trigger ci.yml, so repeat the complete native provider
+  # and installer matrix here before GoReleaser is allowed to publish. Keep
+  # these cells aligned with ci.yml's provider-integration-contract matrix.
+  provider-integration-verify:
+    name: provider integration release gate / ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            runner: ubuntu-latest
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+          - target: macos-intel
+            runner: macos-15-intel
+          - target: macos-arm64
+            runner: macos-15
+          - target: windows-x64
+            runner: windows-latest
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Record native target
+        run: go env GOOS GOARCH
+
+      - name: Build native Witself client
+        run: go build ./cmd/witself
+
+      - name: Install GoReleaser for exact Windows archive gate
+        if: runner.os == 'Windows'
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: v2.17.0
+          install-only: true
+
+      - name: Derive CLI-only smoke config from release config
+        if: runner.os == 'Windows'
+        shell: bash
+        run: >-
+          scripts/render-goreleaser-witself-smoke-config.sh
+          "$RUNNER_TEMP/goreleaser-witself-smoke.yaml"
+          .goreleaser.yaml
+
+      - name: Build exact GoReleaser Windows archive
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $config = Join-Path $env:RUNNER_TEMP 'goreleaser-witself-smoke.yaml'
+          & goreleaser release --config $config --snapshot --clean '--skip=before,sign,sbom,docker' --parallelism 1 --timeout 30m
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Universal installer artifact smoke
+        if: runner.os != 'Windows'
+        run: bash scripts/test-install-unix.sh
+
+      - name: Windows binary installer smoke
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: .\scripts\test-install-windows.ps1 -GoReleaserDist .\dist
+
+      - name: Native platform safety primitives
+        run: >-
+          go test
+          ./internal/local
+          ./internal/memorycurator
+          ./internal/dashboard
+          ./internal/transcriptcapture
+          -run '^(TestLocalLockFile|TestAutoLockPlatform|TestAutoLockIdentity|TestRegistryClaimLock|TestPIDRunning|TestCapturePlatform|TestReplaceFileAtomic)'
+          -count=1
+
+      - name: Managed instruction platform primitives
+        run: >-
+          go test ./cmd/witself
+          -run '^(TestManagedInstructionExchangePrimitive|TestManagedInstructionNoReplacePrimitive|TestWindowsManagedInstruction)'
+          -count=1
+
+      - name: Codex Windows hook contract
+        run: >-
+          go test ./internal/transcriptcapture
+          -run '^TestCodexHooksWindows'
+          -count=1
+
+      - name: Codex provider installation contract
+        run: >-
+          go test ./cmd/witself
+          -run '^TestProviderIntegrationContractCodex'
+          -count=1
+
   # A tag can point at a commit that never went through normal branch CI. Keep
   # the real Homebrew style/audit gate in the release workflow as well.
   # Runs on ubuntu, not macOS: the formula checks (brew style/audit, tap
@@ -216,7 +316,7 @@ jobs:
         run: bash scripts/test-promote-latest-images.sh
 
   goreleaser:
-    needs: [verify, homebrew-verify]
+    needs: [verify, provider-integration-verify, homebrew-verify]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -456,7 +556,9 @@ jobs:
         if: github.event_name == 'push'
         uses: actions/attest-build-provenance@v4
         with:
-          subject-path: "dist/*.tar.gz"
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
 
       # Package the chart with version + appVersion pinned to the release tag, so
       # the chart's default image tag matches the image built in this same run.

@@ -24,7 +24,24 @@ curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh 
 
 # Fleet-admin CLI
 curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh | sh -s witself-admin
+```
 
+Windows x64, from Windows PowerShell 5.1 or newer:
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+irm https://raw.githubusercontent.com/witwave-ai/witself/main/install.ps1 | iex
+```
+
+The Windows installer verifies the release ZIP checksum, installs per-user to
+`%LOCALAPPDATA%\Witself\bin`, creates a real `ws.exe` alias, and adds that
+directory to the user PATH without requiring administrator rights. Download
+`install.ps1` first to use `-Version`, `-InstallDir`, or `-NoPathUpdate`.
+Windows x64 currently covers the binary installer and isolated Codex contract;
+it does not yet certify every Witself feature or provider, or a signed-in
+Codex model.
+
+```sh
 witself version
 ```
 
@@ -96,10 +113,12 @@ and participates in both `install all` detection and `uninstall all` cleanup.
 The `github-copilot` alias resolves to the same row rather than creating a
 second integration.
 
-Bulk refreshes preserve each installed runtime's existing hook ownership. New
-Codex and Claude Code integrations use their normal administrator-managed hook
-default, which may request access; add `--user-hooks` to keep every hook-capable
-runtime user-scoped instead.
+Bulk refreshes preserve each installed runtime's existing hook ownership. On
+macOS and Linux, new Codex and Claude Code integrations use their normal
+administrator-managed hook default, which may request access; add
+`--user-hooks` to keep every hook-capable runtime user-scoped instead. Native
+Windows Codex currently uses user-scoped hooks because Witself does not install
+administrator-managed hook policy there.
 
 OpenClaw phase 1 requires an installed `openclaw` CLI on `PATH` (or selected
 with `OPENCLAW_CLI_PATH`) and exactly one configured agent. That sole agent must
@@ -278,11 +297,12 @@ Copilot. Plain “forget” remains
 ambiguous with each runtime's native memory and is clarified before any
 destructive call.
 
-Administrator-managed hooks are the Codex and Claude Code default. Run the
-command as your normal user; Witself requests administrator access only for the
-system hook policy, while identity, tokens, and MCP registration stay in the
-user's configuration. Grok Build and Cursor use approval-free global user
-hooks. On a workstation where Codex or Claude system policy cannot be
+On macOS and Linux, administrator-managed hooks are the Codex and Claude Code
+default. Run the command as your normal user; Witself requests administrator
+access only for the system hook policy, while identity, tokens, and MCP
+registration stay in the user's configuration. Native Windows Codex uses
+user-scoped hooks, as do Grok Build and Cursor on their supported platforms.
+On a macOS or Linux workstation where Codex or Claude system policy cannot be
 installed, pass `--user-hooks`; Codex then asks you to review the command hook
 through `/hooks` once.
 

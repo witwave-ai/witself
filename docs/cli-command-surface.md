@@ -3164,8 +3164,9 @@ hooks on every hook-capable target; `--managed-hooks` requests
 administrator-managed hooks where that capability exists and leaves other
 hook-capable targets user-scoped. Without either flag, refreshes preserve each
 installed runtime's hook mode, while new integrations retain their normal
-provider defaults. In particular, new Codex and Claude Code integrations may
-request administrator access unless `--user-hooks` is supplied.
+provider defaults. In particular, new Codex and Claude Code integrations on
+macOS and Linux may request administrator access unless `--user-hooks` is
+supplied. Native Windows Codex uses user-scoped hooks.
 Provider-specific capture and routing flags are rejected with `all`; use an
 explicit runtime selector for those controls. `--dry-run` reports the detected
 target set, identity effects, and intended per-runtime actions without changing
@@ -3383,15 +3384,17 @@ drift prevents credential-bound tools from being exposed. It also requires the
 exact current managed instruction content; stale, missing, unmarked, or
 extra-content instructions prevent server startup.
 
-Administrator-managed hooks are the default for Codex and Claude Code while
-identity and MCP registration remain user-scoped. The command prompts for
-administrator access only for that system policy write. Codex uses
+Administrator-managed hooks are the macOS and Linux default for Codex and
+Claude Code while identity and MCP registration remain user-scoped. The command
+prompts for administrator access only for that system policy write. Codex uses
 `/etc/codex/requirements.toml`; Claude Code uses the platform
-`managed-settings.d/50-witself.json` drop-in. Grok Build and Cursor use their
-approval-free global user hook locations. Existing configuration is preserved,
-Witself handlers are idempotent, and unrelated hooks are not disabled. Pass
-`--user-hooks` to use Codex or Claude user settings instead; Codex asks for
-one-time approval through `/hooks` in that mode.
+`managed-settings.d/50-witself.json` drop-in. Native Windows Codex uses
+user-scoped hooks because administrator-managed hook installation is not yet
+supported there. Grok Build and Cursor use their global user hook locations.
+Existing configuration is preserved, Witself handlers are idempotent, and
+unrelated hooks are not disabled. On macOS and Linux, pass `--user-hooks` to
+use Codex or Claude user settings instead; Codex asks for one-time approval
+through `/hooks` in that mode.
 
 ```sh
 witself uninstall codex

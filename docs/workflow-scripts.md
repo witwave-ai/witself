@@ -54,6 +54,22 @@ curl -fsSL https://raw.githubusercontent.com/witwave-ai/witself/main/install.sh 
 witself version
 ```
 
+Windows x64, from Windows PowerShell 5.1 or newer:
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+irm https://raw.githubusercontent.com/witwave-ai/witself/main/install.ps1 | iex
+witself version
+witself integrations
+```
+
+This installs `witself.exe` and the real `ws.exe` alias under the current
+user's `%LOCALAPPDATA%\Witself\bin`. The installer verifies SHA-256 before
+extraction and does not require administrator rights. Windows x64 CI exercises
+the binary installer and the isolated Codex integration contract; that is not
+yet an end-to-end certification of a signed-in Codex model or of every Witself
+provider on Windows.
+
 Optional shell completion:
 
 ```sh
@@ -986,12 +1002,13 @@ when a human location label is useful. The resolved account, realm, and agent
 are pinned explicitly in the hook and MCP commands. A supplied location is
 pinned in both; an omitted location is left out of both commands.
 
-Administrator-managed hooks are the Codex and Claude Code default and do not
-move the user's identity, token lookup, or MCP registration into the
-administrator account. Grok Build and Cursor use approval-free global user
-hooks. Run the command normally; Witself performs narrow privilege elevation
-only where needed. Use `--user-hooks` for Codex or Claude where the system
-policy layer is unavailable.
+On macOS and Linux, administrator-managed hooks are the Codex and Claude Code
+default and do not move the user's identity, token lookup, or MCP registration
+into the administrator account. Native Windows Codex uses user-scoped hooks;
+Grok Build and Cursor also use their global user hook locations on supported
+platforms. Run the command normally; Witself performs narrow privilege
+elevation only where supported and needed. On macOS or Linux, use
+`--user-hooks` for Codex or Claude where the system policy layer is unavailable.
 
 Grok's default Claude/Cursor compatibility can discover those runtimes' Witself
 hooks and MCP servers. The Grok installer inspects the effective configuration,

@@ -542,5 +542,5 @@ func writeJSONAtomic(path string, value any) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	return replaceFileAtomic(tmpPath, path)
 }
