@@ -70,7 +70,6 @@
 {{- $apiHost := required "cell.apiHost is required for Civo ingress" .Values.cell.apiHost -}}
 {{- $_ := set $serverValues "ingress" (dict
       "enabled" true
-      "className" (default "traefik" $civoIngress.className)
       "annotations" (dict
         "cert-manager.io/cluster-issuer" (default "letsencrypt-prod" $civoIngress.clusterIssuer)
         "kubernetes.io/ingress.class" (default "traefik" $civoIngress.className))
