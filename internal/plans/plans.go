@@ -26,6 +26,12 @@ const SchemaVersion = "witself.plans.v0"
 const Free = "free"
 
 const (
+	// MessagingFeature enables the durable realm-local agent messaging
+	// surface. Cells enforce this feature from the resolved account snapshot;
+	// clients install the messaging tools once and do not reinstall when the
+	// account's effective entitlement changes.
+	MessagingFeature = "messaging"
+
 	// RealmLimit caps live realms account-wide.
 	RealmLimit = "realms"
 	// AgentLimit is the legacy account-wide live-agent cap. Existing snapshots
@@ -48,10 +54,26 @@ const (
 	// synonym for indefinite because an accidental zero must fail closed at
 	// the control-plane boundary instead of immediately deleting transcripts.
 	TranscriptRetentionDaysPolicy = "transcript_retention_days"
+	// MessageRetentionDaysPolicy is the maximum age of retained durable
+	// message content. It remains meaningful while messaging is disabled so a
+	// downgrade can make the mailbox inaccessible immediately and clean up on
+	// the account's finite retention schedule. Its absence means indefinite
+	// retention.
+	MessageRetentionDaysPolicy = "message_retention_days"
+	// MessagingEntitlementVersionPolicy is the rollout marker that makes the
+	// explicit MessagingFeature authoritative. Legacy applied snapshots omit
+	// it and preserve pre-entitlement messaging behavior. This marker remains
+	// present even when message retention is explicitly indefinite.
+	MessagingEntitlementVersionPolicy = "messaging_entitlement_version"
+	// MessagingEntitlementVersion is the only marker version understood by
+	// this release.
+	MessagingEntitlementVersion int64 = 1
 	// MaxTranscriptRetentionDays is a defensive representation bound, not a
-	// product-tier cap. Enterprise indefinite retention is represented by a
-	// missing key.
+	// product-tier cap. Explicit indefinite transcript or message retention is
+	// represented by a missing key.
 	MaxTranscriptRetentionDays int64 = 36500
+	// MaxMessageRetentionDays is the matching defensive bound for messages.
+	MaxMessageRetentionDays int64 = 36500
 )
 
 // Plan is one catalog entry.
@@ -206,9 +228,8 @@ func ValidateLimits(limits map[string]int64) error {
 }
 
 // ValidatePolicies validates one resolved policy snapshot. Policy keys are
-// deliberately closed while this contract has only one implemented member:
-// silently accepting a misspelling would make a paid retention promise appear
-// applied while the cell ignored it.
+// deliberately closed: silently accepting a misspelling would make a paid
+// retention promise appear applied while the cell ignored it.
 func ValidatePolicies(policies map[string]int64) error {
 	for key, value := range policies {
 		switch key {
@@ -216,6 +237,17 @@ func ValidatePolicies(policies map[string]int64) error {
 			if value < 1 || value > MaxTranscriptRetentionDays {
 				return fmt.Errorf("%s must be between 1 and %d days (omit it for indefinite retention)",
 					TranscriptRetentionDaysPolicy, MaxTranscriptRetentionDays)
+			}
+		case MessageRetentionDaysPolicy:
+			if value < 1 || value > MaxMessageRetentionDays {
+				return fmt.Errorf("%s must be between 1 and %d days (omit it for indefinite retention)",
+					MessageRetentionDaysPolicy, MaxMessageRetentionDays)
+			}
+		case MessagingEntitlementVersionPolicy:
+			if value != MessagingEntitlementVersion {
+				return fmt.Errorf("%s must be %d",
+					MessagingEntitlementVersionPolicy,
+					MessagingEntitlementVersion)
 			}
 		default:
 			return fmt.Errorf("unknown policy %q", key)

@@ -55,6 +55,7 @@ var upgraders = map[int]Upgrader{
 	61: preserveSchema61Rows,
 	63: preserveSchema63Rows,
 	66: preserveSchema66Rows,
+	67: preserveSchema67Rows,
 }
 
 const (
@@ -68,6 +69,14 @@ const (
 // contain secret_delete receipts, so every existing row remains valid without
 // transformation in schema 67.
 func preserveSchema66Rows(_ string, row map[string]any) (map[string]any, error) {
+	return row, nil
+}
+
+// preserveSchema67Rows acknowledges migration 0068's message-retention
+// projection trigger. The trigger writes only a rebuildable, cell-local
+// activity row and neither rejects nor transforms the archived message row, so
+// every schema-67 archive row remains valid without transformation.
+func preserveSchema67Rows(_ string, row map[string]any) (map[string]any, error) {
 	return row, nil
 }
 

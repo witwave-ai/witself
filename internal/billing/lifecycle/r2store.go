@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/witwave-ai/witself/internal/blob"
+	"github.com/witwave-ai/witself/internal/plans"
 )
 
 // R2Store implements Store on an S3-compatible bucket (Cloudflare R2) — the
@@ -39,6 +40,7 @@ var _ Store = (*R2Store)(nil)
 // fields into Kind therefore lets a later Phase A binary reconstruct the exact
 // override state by replaying history, without a second non-atomic R2 object.
 const r2LimitAuditKindPrefix = "witself.limit-override.v1:"
+const r2MessagingPolicyAuditKindPrefix = "witself.messaging-policy-override.v1:"
 
 type r2LimitAuditEnvelope struct {
 	Kind       string             `json:"kind"`
@@ -47,6 +49,20 @@ type r2LimitAuditEnvelope struct {
 	To         *AccountLimitValue `json:"to"`
 	FromSource string             `json:"from_source"`
 	ToSource   string             `json:"to_source"`
+}
+
+// r2MessagingPolicyAuditEnvelope preserves messaging override state across a
+// rollback to a binary whose Record predates the fields. Older binaries retain
+// the encoded Kind plus common audit attribution, allowing a newer binary to
+// replay the exact override without a second non-atomic R2 object.
+type r2MessagingPolicyAuditEnvelope struct {
+	Kind          string `json:"kind"`
+	MessagingFrom *bool  `json:"messaging_from,omitempty"`
+	MessagingTo   *bool  `json:"messaging_to,omitempty"`
+	RetentionFrom *int64 `json:"retention_from,omitempty"`
+	RetentionTo   *int64 `json:"retention_to,omitempty"`
+	FromSource    string `json:"from_source"`
+	ToSource      string `json:"to_source"`
 }
 
 // NewR2Store returns an R2Store on c, namespacing every key under prefix
@@ -341,6 +357,206 @@ func replayR2LimitOverrides(
 	return overrides
 }
 
+func normalizeR2MessagingPolicyAudit(
+	change AdminChange,
+) (r2MessagingPolicyAuditEnvelope, error) {
+	switch change.Kind {
+	case "messaging_override_set":
+		if change.MessagingFrom == nil || change.MessagingTo == nil ||
+			change.MessagingToSource != "override" ||
+			(change.MessagingFromSource != "inherited" &&
+				change.MessagingFromSource != "override") {
+			return r2MessagingPolicyAuditEnvelope{}, errors.New("invalid messaging set audit")
+		}
+		return r2MessagingPolicyAuditEnvelope{
+			Kind:          change.Kind,
+			MessagingFrom: change.MessagingFrom,
+			MessagingTo:   change.MessagingTo,
+			FromSource:    change.MessagingFromSource,
+			ToSource:      change.MessagingToSource,
+		}, nil
+	case "messaging_override_cleared":
+		if change.MessagingFrom == nil || change.MessagingTo == nil ||
+			change.MessagingFromSource != "override" ||
+			change.MessagingToSource != "inherited" {
+			return r2MessagingPolicyAuditEnvelope{}, errors.New("invalid messaging clear audit")
+		}
+		return r2MessagingPolicyAuditEnvelope{
+			Kind:          change.Kind,
+			MessagingFrom: change.MessagingFrom,
+			MessagingTo:   change.MessagingTo,
+			FromSource:    change.MessagingFromSource,
+			ToSource:      change.MessagingToSource,
+		}, nil
+	case "message_retention_override_set":
+		if change.MessageRetentionToSource != "override" ||
+			(change.MessageRetentionFromSource != "inherited" &&
+				change.MessageRetentionFromSource != "override") {
+			return r2MessagingPolicyAuditEnvelope{}, errors.New("invalid message retention set audit")
+		}
+		if err := validateOptionalMessageRetention(change.MessageRetentionFrom); err != nil {
+			return r2MessagingPolicyAuditEnvelope{}, fmt.Errorf("invalid from retention: %w", err)
+		}
+		if err := validateOptionalMessageRetention(change.MessageRetentionTo); err != nil {
+			return r2MessagingPolicyAuditEnvelope{}, fmt.Errorf("invalid to retention: %w", err)
+		}
+		return r2MessagingPolicyAuditEnvelope{
+			Kind:          change.Kind,
+			RetentionFrom: change.MessageRetentionFrom,
+			RetentionTo:   change.MessageRetentionTo,
+			FromSource:    change.MessageRetentionFromSource,
+			ToSource:      change.MessageRetentionToSource,
+		}, nil
+	case "message_retention_override_cleared":
+		if change.MessageRetentionFromSource != "override" ||
+			change.MessageRetentionToSource != "inherited" {
+			return r2MessagingPolicyAuditEnvelope{}, errors.New("invalid message retention clear audit")
+		}
+		if err := validateOptionalMessageRetention(change.MessageRetentionFrom); err != nil {
+			return r2MessagingPolicyAuditEnvelope{}, fmt.Errorf("invalid from retention: %w", err)
+		}
+		if err := validateOptionalMessageRetention(change.MessageRetentionTo); err != nil {
+			return r2MessagingPolicyAuditEnvelope{}, fmt.Errorf("invalid to retention: %w", err)
+		}
+		return r2MessagingPolicyAuditEnvelope{
+			Kind:          change.Kind,
+			RetentionFrom: change.MessageRetentionFrom,
+			RetentionTo:   change.MessageRetentionTo,
+			FromSource:    change.MessageRetentionFromSource,
+			ToSource:      change.MessageRetentionToSource,
+		}, nil
+	default:
+		return r2MessagingPolicyAuditEnvelope{}, fmt.Errorf(
+			"unsupported normalized kind %q", change.Kind)
+	}
+}
+
+func validateOptionalMessageRetention(days *int64) error {
+	if days == nil {
+		return nil
+	}
+	return plans.ValidatePolicies(map[string]int64{
+		plans.MessageRetentionDaysPolicy: *days,
+	})
+}
+
+func encodeR2MessagingPolicyAuditKind(change AdminChange) (string, error) {
+	envelope, err := normalizeR2MessagingPolicyAudit(change)
+	if err != nil {
+		return "", err
+	}
+	payload, err := json.Marshal(envelope)
+	if err != nil {
+		return "", err
+	}
+	return r2MessagingPolicyAuditKindPrefix +
+		base64.RawURLEncoding.EncodeToString(payload), nil
+}
+
+func decodeR2MessagingPolicyAuditKind(
+	kind string,
+) (r2MessagingPolicyAuditEnvelope, error) {
+	encoded := strings.TrimPrefix(kind, r2MessagingPolicyAuditKindPrefix)
+	if encoded == kind || encoded == "" {
+		return r2MessagingPolicyAuditEnvelope{}, errors.New(
+			"missing messaging-policy audit envelope")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return r2MessagingPolicyAuditEnvelope{}, fmt.Errorf("decode base64url: %w", err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	var envelope r2MessagingPolicyAuditEnvelope
+	if err := decoder.Decode(&envelope); err != nil {
+		return r2MessagingPolicyAuditEnvelope{}, fmt.Errorf("decode JSON: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return r2MessagingPolicyAuditEnvelope{}, errors.New("multiple JSON values")
+		}
+		return r2MessagingPolicyAuditEnvelope{}, fmt.Errorf("decode trailing JSON: %w", err)
+	}
+	change := AdminChange{Kind: envelope.Kind}
+	switch envelope.Kind {
+	case "messaging_override_set", "messaging_override_cleared":
+		change.MessagingFrom = envelope.MessagingFrom
+		change.MessagingTo = envelope.MessagingTo
+		change.MessagingFromSource = envelope.FromSource
+		change.MessagingToSource = envelope.ToSource
+	case "message_retention_override_set", "message_retention_override_cleared":
+		change.MessageRetentionFrom = envelope.RetentionFrom
+		change.MessageRetentionTo = envelope.RetentionTo
+		change.MessageRetentionFromSource = envelope.FromSource
+		change.MessageRetentionToSource = envelope.ToSource
+	}
+	return normalizeR2MessagingPolicyAudit(change)
+}
+
+func restoreR2MessagingPolicyAudit(
+	change *AdminChange,
+	envelope r2MessagingPolicyAuditEnvelope,
+) {
+	change.Kind = envelope.Kind
+	switch envelope.Kind {
+	case "messaging_override_set", "messaging_override_cleared":
+		change.MessagingFrom = envelope.MessagingFrom
+		change.MessagingTo = envelope.MessagingTo
+		change.MessagingFromSource = envelope.FromSource
+		change.MessagingToSource = envelope.ToSource
+	case "message_retention_override_set", "message_retention_override_cleared":
+		change.MessageRetentionFrom = envelope.RetentionFrom
+		change.MessageRetentionTo = envelope.RetentionTo
+		change.MessageRetentionFromSource = envelope.FromSource
+		change.MessageRetentionToSource = envelope.ToSource
+	}
+}
+
+func replayR2MessagingPolicyOverrides(
+	currentMessaging *MessagingOverride,
+	currentRetention *MessageRetentionOverride,
+	changes []AdminChange,
+) (*MessagingOverride, *MessageRetentionOverride) {
+	var messaging *MessagingOverride
+	if currentMessaging != nil {
+		value := *currentMessaging
+		messaging = &value
+	}
+	var retention *MessageRetentionOverride
+	if currentRetention != nil {
+		value := *currentRetention
+		if value.Days != nil {
+			days := *value.Days
+			value.Days = &days
+		}
+		retention = &value
+	}
+	for _, change := range changes {
+		switch change.Kind {
+		case "messaging_override_set":
+			messaging = &MessagingOverride{
+				Enabled: *change.MessagingTo,
+				ActorID: change.ActorID, ActorHandle: change.ActorHandle,
+				Reason: change.Reason, SetAt: change.At,
+			}
+		case "messaging_override_cleared":
+			messaging = nil
+		case "message_retention_override_set":
+			retention = &MessageRetentionOverride{
+				ActorID: change.ActorID, ActorHandle: change.ActorHandle,
+				Reason: change.Reason, SetAt: change.At,
+			}
+			if change.MessageRetentionTo != nil {
+				days := *change.MessageRetentionTo
+				retention.Days = &days
+			}
+		case "message_retention_override_cleared":
+			retention = nil
+		}
+	}
+	return messaging, retention
+}
+
 func marshalR2Record(r Record) ([]byte, error) {
 	stored := clone(r)
 	for i := range stored.AdminHistory {
@@ -351,6 +567,25 @@ func marshalR2Record(r Record) ([]byte, error) {
 				return nil, fmt.Errorf("admin history %d: malformed reserved kind: %w", i, err)
 			}
 			restoreR2LimitAudit(change, envelope)
+		}
+		if strings.HasPrefix(change.Kind, r2MessagingPolicyAuditKindPrefix) {
+			envelope, err := decodeR2MessagingPolicyAuditKind(change.Kind)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"admin history %d: malformed reserved kind: %w", i, err)
+			}
+			restoreR2MessagingPolicyAudit(change, envelope)
+		}
+		switch change.Kind {
+		case "messaging_override_set", "messaging_override_cleared",
+			"message_retention_override_set", "message_retention_override_cleared":
+			kind, err := encodeR2MessagingPolicyAuditKind(*change)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"admin history %d: encode messaging policy audit: %w", i, err)
+			}
+			change.Kind = kind
+			continue
 		}
 		if change.Kind != "limit_override_set" &&
 			change.Kind != "limit_override_cleared" {
@@ -371,6 +606,7 @@ func unmarshalR2Record(data []byte) (Record, error) {
 		return Record{}, err
 	}
 	replay := make([]AdminChange, 0)
+	policyReplay := make([]AdminChange, 0)
 	for i := range r.AdminHistory {
 		change := &r.AdminHistory[i]
 		if strings.HasPrefix(change.Kind, r2LimitAuditKindPrefix) {
@@ -383,6 +619,16 @@ func unmarshalR2Record(data []byte) (Record, error) {
 			replay = append(replay, *change)
 			continue
 		}
+		if strings.HasPrefix(change.Kind, r2MessagingPolicyAuditKindPrefix) {
+			envelope, err := decodeR2MessagingPolicyAuditKind(change.Kind)
+			if err != nil {
+				return Record{}, fmt.Errorf(
+					"admin history %d: malformed reserved kind: %w", i, err)
+			}
+			restoreR2MessagingPolicyAudit(change, envelope)
+			policyReplay = append(policyReplay, *change)
+			continue
+		}
 		// Before this envelope existed, development builds could write the
 		// normal kind plus the new fields directly. Replay those when they are
 		// complete, but leave unrelated/legacy history untouched.
@@ -392,7 +638,17 @@ func unmarshalR2Record(data []byte) (Record, error) {
 				replay = append(replay, *change)
 			}
 		}
+		switch change.Kind {
+		case "messaging_override_set", "messaging_override_cleared",
+			"message_retention_override_set", "message_retention_override_cleared":
+			if _, err := normalizeR2MessagingPolicyAudit(*change); err == nil {
+				policyReplay = append(policyReplay, *change)
+			}
+		}
 	}
 	r.LimitOverrides = replayR2LimitOverrides(r.LimitOverrides, replay)
+	r.MessagingOverride, r.MessageRetentionOverride =
+		replayR2MessagingPolicyOverrides(
+			r.MessagingOverride, r.MessageRetentionOverride, policyReplay)
 	return r, nil
 }

@@ -20,6 +20,17 @@ retention respectively. Account-specific admin exceptions are independent of
 billing and follow `account override > plan default > missing/indefinite`; see
 [transcript-retention.md](transcript-retention.md).
 
+Messaging is an independent feature entitlement plus an independent retention
+policy. Personal does not include messaging; Professional, Team, and Enterprise
+include it with 90-, 365-, and 365-day message-retention defaults. Personal
+still carries a 30-day message-retention policy so a downgrade can make the
+mailbox unavailable immediately and then clean up on a finite grace schedule.
+An explicit account override may independently enable or disable messaging and
+may set finite or indefinite retention without changing plan, price,
+subscription, or invoice history. Finite windows are subject to explicit
+memory-provenance holds; the worker reports those holds without deleting the
+memory or its source graph.
+
 V0 should meter meaningful usage internally, but charge primarily by plan tier.
 This gives Witself enough data to understand real service load without making
 the first pricing model feel like nickel-and-dime metering.
@@ -54,7 +65,7 @@ the other rows remain subject to their own implementation and rollout gates.
 | Active memories per agent | 1,000 | 10,000 | 50,000 | Contracted; 250,000 default |
 | Transcript retention | 30 days | 90 days | 365 days | Configurable, including indefinite |
 | Secrets per agent | 0 | 100 | 250 | 1,000 |
-| Agent messages | 0 | Unlimited; retained 90 days | Unlimited; retained 365 days | Contracted; configurable retention |
+| Agent messages | Disabled; 30-day downgrade cleanup | Unlimited; retained 90 days | Unlimited; retained 365 days | Enabled; retained 365 days by default, contract override |
 | Receive agent email | No | Unlimited; retained 90 days | Unlimited; retained 365 days | Contracted; configurable retention |
 | Raw MIME and attachment retention | None stored | 90 days | 365 days | Configurable, including indefinite |
 | Maximum raw email size | Not available | 10 MiB | 25 MiB | Contracted; 25 MiB default |
@@ -74,6 +85,76 @@ technical rate limits. Inbound hostile traffic must not create recipient
 charges. "Included" confirms that outbound agent email is available, but its
 sending allowance and overage treatment remain to be decided. "Contracted"
 means the quantity or policy is negotiated for the Enterprise account.
+
+### Messaging availability and retention
+
+The resolved cell snapshot uses the feature key `messaging` and the behavioral
+policy key `message_retention_days`. Their meanings are deliberately separate:
+
+- `messaging_entitlement_version: 1` activates explicit entitlement
+  enforcement for the snapshot;
+- absence of `messaging` disables all message send, receive, mailbox, reply,
+  processing, and open-request operations;
+- presence of `messaging` enables those operations;
+- a finite `message_retention_days` value is the age window for whole inactive
+  message threads; and
+- an absent `message_retention_days` key means explicit indefinite retention.
+
+The client integration is installed once. Plan changes and account overrides do
+not add or remove tools, rewrite managed instructions, or require runtime
+reinstallation. The control plane pushes a new monotonic, hash-acknowledged
+account snapshot to the cell. The cell is the authoritative enforcement point,
+while capability/checkpoint hints let installed clients avoid useless retries.
+
+If messaging is disabled, a message operation fails before content is stored
+with a stable, non-retryable `feature_not_enabled` refusal for feature
+`messaging`. No recipient notification message is created. Only value-free
+refusal telemetry may be retained. Messages that already exist become
+inaccessible immediately and are then eligible for cleanup under the effective
+retention policy.
+
+Account policy resolution is `account override > effective-plan default`.
+Availability and retention each have their own attributed override and their
+own clear-to-inheritance operation. Administrator mutations are
+compare-and-swap persisted, append an actor/reason/timestamp audit transition,
+and advance the same desired/applied snapshot revision fence used by plan
+changes. The operator surface is:
+
+```sh
+witself-admin account messaging get --account ACCOUNT_ID
+witself-admin account messaging set --account ACCOUNT_ID --enabled --reason "..."
+witself-admin account messaging set --account ACCOUNT_ID --disabled --reason "..."
+witself-admin account messaging clear --account ACCOUNT_ID --reason "..."
+
+witself-admin account message-retention get --account ACCOUNT_ID
+witself-admin account message-retention set --account ACCOUNT_ID --days 365 --reason "..."
+witself-admin account message-retention set --account ACCOUNT_ID --indefinite --reason "..."
+witself-admin account message-retention clear --account ACCOUNT_ID --reason "..."
+```
+
+The matching authenticated control-plane resources are
+`/v1/admin/accounts/{id}/messaging` and
+`/v1/admin/accounts/{id}/message-retention` with `GET`, `PUT`, and `DELETE`.
+Owner plan status exposes inherited and effective values but never admin
+attribution or audit history.
+
+Activation is cell-first. A new cell treats an already-applied snapshot that
+does not contain `messaging_entitlement_version: 1` as a legacy
+pre-entitlement snapshot and keeps messaging enabled. Once the control plane
+applies a snapshot containing that marker, the explicit `messaging` feature
+becomes authoritative. The dedicated marker remains present when
+`message_retention_days` is absent for explicit indefinite retention. This
+avoids both disabling existing mailboxes between the cell rollout and catalog
+reconciliation and accidentally re-enabling a disabled account whose retention
+is indefinite.
+
+Before catalog reconciliation is activated, the founder account receives an
+explicit indefinite message-retention override and an explicit enabled
+messaging override. The indefinite override is applied first, so the first new
+founder snapshot never temporarily inherits Enterprise's 365-day default.
+After any new-policy snapshot is accepted, pre-feature cell or control-plane
+rollback is prohibited: an old cell ignores the entitlement and an old control
+plane can recompute a legacy snapshot without the new policy.
 
 ### Realm and agent limits
 

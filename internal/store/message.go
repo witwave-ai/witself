@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/witwave-ai/witself/internal/id"
+	"github.com/witwave-ai/witself/internal/plans"
 )
 
 // Message direction, recipient, delivery, and read-state values form the
@@ -76,7 +78,25 @@ var (
 	ErrMessageClaimLost = errors.New("message processing claim was lost")
 	// ErrMessageCursorInvalid reports an invalid mailbox cursor.
 	ErrMessageCursorInvalid = errors.New("malformed message cursor")
+	// ErrFeatureNotEnabled reports an account-plan feature refusal. Callers
+	// should inspect FeatureNotEnabledError rather than parsing error text.
+	ErrFeatureNotEnabled = errors.New("feature not enabled")
 )
+
+// FeatureNotEnabledError is a value-free, non-retryable account-plan refusal.
+// Feature is a closed server-owned plan key and never contains tenant input.
+type FeatureNotEnabledError struct {
+	Feature string
+}
+
+func (e *FeatureNotEnabledError) Error() string {
+	if e == nil || strings.TrimSpace(e.Feature) == "" {
+		return ErrFeatureNotEnabled.Error()
+	}
+	return fmt.Sprintf("%s: %s", ErrFeatureNotEnabled, e.Feature)
+}
+
+func (e *FeatureNotEnabledError) Unwrap() error { return ErrFeatureNotEnabled }
 
 // MessageAgent identifies the token-derived sender.
 type MessageAgent struct {
@@ -233,6 +253,76 @@ type MessagePage struct {
 	NextCursor string
 }
 
+// lockAccountForMessaging is the authoritative account-plan gate below every
+// messaging frontend. The share lock is held for the operation's transaction
+// and conflicts with SetAccountPlan's account-row update, so a message
+// operation and an enable/disable transition have one unambiguous order.
+//
+// Accounts with no applied snapshot retain the self-hosted/unmanaged behavior
+// that predates plan enforcement. Applied snapshots from before messaging
+// entitlements also remain allowed: messaging_entitlement_version=1 is the
+// rollout marker that makes the explicit messaging feature authoritative.
+func lockAccountForMessaging(ctx context.Context, tx pgx.Tx, accountID string) (bool, error) {
+	var status string
+	var policiesJSON, featuresJSON []byte
+	var appliedAt *time.Time
+	err := tx.QueryRow(ctx,
+		`SELECT status, plan_policies, plan_features, plan_applied_at
+		   FROM accounts
+		  WHERE id = $1
+		  FOR SHARE`,
+		accountID,
+	).Scan(&status, &policiesJSON, &featuresJSON, &appliedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, ErrAccountNotFound
+	}
+	if err != nil {
+		return false, fmt.Errorf("lock account for messaging: %w", err)
+	}
+	if status != "active" {
+		return false, ErrAccountNotActive
+	}
+	if appliedAt == nil {
+		return true, nil
+	}
+	var policies map[string]int64
+	if err := json.Unmarshal(policiesJSON, &policies); err != nil {
+		return false, fmt.Errorf("decode plan policies for messaging: %w", err)
+	}
+	var features []string
+	if err := json.Unmarshal(featuresJSON, &features); err != nil {
+		return false, fmt.Errorf("decode plan features for messaging: %w", err)
+	}
+	return messagingEnabledForSnapshot(appliedAt, policies, features), nil
+}
+
+func messagingEnabledForSnapshot(appliedAt *time.Time, policies map[string]int64, features []string) bool {
+	if appliedAt == nil {
+		return true
+	}
+	version, entitlementSnapshot := policies[plans.MessagingEntitlementVersionPolicy]
+	if !entitlementSnapshot {
+		// Snapshots produced before messaging became plan-backed do not carry
+		// the entitlement-version marker. Treat them as legacy allow so a cell
+		// rollout cannot disable messaging before the control plane converges
+		// the new catalog revision.
+		return true
+	}
+	return version == plans.MessagingEntitlementVersion &&
+		slices.Contains(features, plans.MessagingFeature)
+}
+
+func requireMessagingEnabled(ctx context.Context, tx pgx.Tx, accountID string) error {
+	enabled, err := lockAccountForMessaging(ctx, tx, accountID)
+	if err != nil {
+		return err
+	}
+	if !enabled {
+		return &FeatureNotEnabledError{Feature: plans.MessagingFeature}
+	}
+	return nil
+}
+
 // SendMessage resolves one direct, explicit-list, or realm audience inside the
 // token-derived realm and atomically creates the immutable message and its
 // bounded send-time delivery snapshot.
@@ -254,7 +344,7 @@ func (s *Store) SendMessage(ctx context.Context, p Principal, in SendMessageInpu
 		return Message{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
+	if err := requireMessagingEnabled(ctx, tx, p.AccountID); err != nil {
 		return Message{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
@@ -315,7 +405,7 @@ func (s *Store) ReplyMessage(ctx context.Context, p Principal, parentMessageID s
 		return Message{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
+	if err := requireMessagingEnabled(ctx, tx, p.AccountID); err != nil {
 		return Message{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
@@ -386,7 +476,7 @@ func (s *Store) ClaimMessage(ctx context.Context, p Principal, messageID string,
 		return Message{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
+	if err := requireMessagingEnabled(ctx, tx, p.AccountID); err != nil {
 		return Message{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
@@ -483,7 +573,7 @@ func (s *Store) RenewMessageClaim(ctx context.Context, p Principal, messageID st
 		return Message{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
+	if err := requireMessagingEnabled(ctx, tx, p.AccountID); err != nil {
 		return Message{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
@@ -547,7 +637,7 @@ func (s *Store) ReleaseMessageClaim(ctx context.Context, p Principal, messageID 
 		return Message{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
+	if err := requireMessagingEnabled(ctx, tx, p.AccountID); err != nil {
 		return Message{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
@@ -635,7 +725,7 @@ func (s *Store) CompleteMessage(ctx context.Context, p Principal, messageID stri
 		return CompleteMessageResult{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
+	if err := requireMessagingEnabled(ctx, tx, p.AccountID); err != nil {
 		return CompleteMessageResult{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
@@ -967,7 +1057,7 @@ func (s *Store) ListMessages(ctx context.Context, p Principal, filter MessageFil
 	// cached principal in every short mailbox snapshot so an agent deletion or
 	// account suspension committed between polls immediately closes metadata
 	// access on the next query.
-	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
+	if err := requireMessagingEnabled(ctx, tx, p.AccountID); err != nil {
 		return MessagePage{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
@@ -1067,7 +1157,7 @@ func (s *Store) transitionMessage(ctx context.Context, p Principal, messageID st
 		return Message{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
+	if err := requireMessagingEnabled(ctx, tx, p.AccountID); err != nil {
 		return Message{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {

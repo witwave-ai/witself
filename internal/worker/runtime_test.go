@@ -66,6 +66,24 @@ func TestMetricsAreBoundedAndContainRetentionCounts(t *testing.T) {
 		ScanCapped:             true,
 	})
 	metrics.ObserveRetentionBatch("account_private", RetentionResultSuccess, RetentionCounts{Deleted: 99})
+	metrics.ObserveMessageRetentionBatch("enforce", RetentionResultSuccess, MessageRetentionCounts{
+		Scanned:          5,
+		EligibleThreads:  4,
+		DeletedThreads:   3,
+		DeletedMessages:  8,
+		DeferredEvidence: 1,
+		DeferredActive:   1,
+		DeferredLocked:   2,
+		DeferredOversize: 3,
+		DeferredBudget:   4,
+		RepairedActivity: 5,
+		ScanCapped:       true,
+	})
+	metrics.ObserveMessageRetentionBatch(
+		"account_private",
+		RetentionResultSuccess,
+		MessageRetentionCounts{DeletedMessages: 99},
+	)
 
 	var output strings.Builder
 	metrics.writePrometheus(&output)
@@ -78,6 +96,15 @@ func TestMetricsAreBoundedAndContainRetentionCounts(t *testing.T) {
 		`witself_worker_retention_items_total{mode="enforce",kind="deleted"} 4`,
 		`witself_worker_retention_items_total{mode="enforce",kind="scan_capped_batches"} 1`,
 		`witself_worker_retention_last_success_timestamp_seconds{mode="enforce"} 1234`,
+		`witself_worker_message_retention_batches_total{mode="enforce",result="success"} 1`,
+		`witself_worker_message_retention_items_total{mode="enforce",kind="deleted_threads"} 3`,
+		`witself_worker_message_retention_items_total{mode="enforce",kind="deleted_messages"} 8`,
+		`witself_worker_message_retention_items_total{mode="enforce",kind="deferred_locked"} 2`,
+		`witself_worker_message_retention_items_total{mode="enforce",kind="deferred_oversize"} 3`,
+		`witself_worker_message_retention_items_total{mode="enforce",kind="deferred_budget"} 4`,
+		`witself_worker_message_retention_items_total{mode="enforce",kind="repaired_activity"} 5`,
+		`witself_worker_message_retention_items_total{mode="enforce",kind="scan_capped_batches"} 1`,
+		`witself_worker_message_retention_last_success_timestamp_seconds{mode="enforce"} 1234`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("metrics missing %q:\n%s", want, text)
@@ -93,7 +120,7 @@ func TestMetricsAreBoundedAndContainRetentionCounts(t *testing.T) {
 func TestRegistryRunsJobsSeparatelyAndStopsGracefully(t *testing.T) {
 	registry := NewRegistry()
 	started := make(chan string, 2)
-	for _, name := range []string{"avatar_style_rollout", "transcript_retention"} {
+	for _, name := range []string{"avatar_style_rollout", "transcript_retention", "message_retention"} {
 		name := name
 		if err := registry.Register(Job{
 			Name: name,
@@ -117,7 +144,7 @@ func TestRegistryRunsJobsSeparatelyAndStopsGracefully(t *testing.T) {
 		})
 	}()
 	seen := map[string]bool{}
-	for range 2 {
+	for range 3 {
 		select {
 		case name := <-started:
 			seen[name] = true
@@ -125,7 +152,9 @@ func TestRegistryRunsJobsSeparatelyAndStopsGracefully(t *testing.T) {
 			t.Fatal("timed out waiting for separate job loops")
 		}
 	}
-	if !seen["avatar_style_rollout"] || !seen["transcript_retention"] {
+	if !seen["avatar_style_rollout"] ||
+		!seen["transcript_retention"] ||
+		!seen["message_retention"] {
 		t.Fatalf("started jobs = %#v", seen)
 	}
 	cancel()

@@ -2711,7 +2711,9 @@ func selfShow(args []string) int {
 		}
 	}
 	if digest.MessageCheckpoint != nil {
-		if digest.MessageCheckpoint.Unavailable {
+		if digest.MessageCheckpoint.Enabled != nil && !*digest.MessageCheckpoint.Enabled {
+			fmt.Println("message-checkpoint:\tdisabled")
+		} else if digest.MessageCheckpoint.Unavailable {
 			fmt.Println("message-checkpoint:\tunavailable")
 		} else if digest.MessageCheckpoint.Pending {
 			lanes := make([]string, 0, 4)

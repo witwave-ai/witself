@@ -10,8 +10,10 @@ import (
 
 // SelfMessageCheckpoint is a content-free projection of durable messaging work
 // that may need the authenticated agent's attention. It is advisory discovery
-// state, not a processing fence, availability signal, or authorization grant.
+// state plus the explicit account feature switch, not a processing fence or
+// authorization grant.
 type SelfMessageCheckpoint struct {
+	Enabled                     bool
 	Pending                     bool
 	MailboxPending              bool
 	CandidateOfferPending       bool
@@ -28,9 +30,25 @@ func (s *Store) GetSelfMessageCheckpoint(ctx context.Context, p Principal) (Self
 		return SelfMessageCheckpoint{}, ErrMessageForbidden
 	}
 
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return SelfMessageCheckpoint{}, fmt.Errorf("begin self message checkpoint: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	enabled, err := lockAccountForMessaging(ctx, tx, p.AccountID)
+	if err != nil {
+		return SelfMessageCheckpoint{}, err
+	}
+	if !enabled {
+		if err := tx.Commit(ctx); err != nil {
+			return SelfMessageCheckpoint{}, fmt.Errorf("commit disabled self message checkpoint: %w", err)
+		}
+		return SelfMessageCheckpoint{Enabled: false}, nil
+	}
+
 	var live bool
-	var checkpoint SelfMessageCheckpoint
-	err := s.pool.QueryRow(ctx, `
+	checkpoint := SelfMessageCheckpoint{Enabled: true}
+	err = tx.QueryRow(ctx, `
 		WITH checkpoint_clock AS MATERIALIZED (
 			SELECT clock_timestamp() AS now
 		), live_scope AS MATERIALIZED (
@@ -122,5 +140,8 @@ func (s *Store) GetSelfMessageCheckpoint(ctx context.Context, p Principal) (Self
 	}
 	checkpoint.Pending = checkpoint.MailboxPending || checkpoint.CandidateOfferPending ||
 		checkpoint.CoordinatorSelectionPending || checkpoint.CandidateAssignmentPending
+	if err := tx.Commit(ctx); err != nil {
+		return SelfMessageCheckpoint{}, fmt.Errorf("commit self message checkpoint: %w", err)
+	}
 	return checkpoint, nil
 }

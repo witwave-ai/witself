@@ -21,6 +21,7 @@ import (
 const (
 	avatarStyleRolloutJob  = "avatar_style_rollout"
 	transcriptRetentionJob = "transcript_retention"
+	messageRetentionJob    = "message_retention"
 
 	avatarStyleRolloutEnabledEnv      = "WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED"
 	avatarStyleRolloutBatchSizeEnv    = "WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE"
@@ -32,13 +33,21 @@ const (
 	transcriptRetentionBatchSizeEnv    = "WITSELF_TRANSCRIPT_RETENTION_BATCH_SIZE"
 	transcriptRetentionIntervalEnv     = "WITSELF_TRANSCRIPT_RETENTION_INTERVAL"
 	transcriptRetentionBatchTimeoutEnv = "WITSELF_TRANSCRIPT_RETENTION_BATCH_TIMEOUT"
+
+	messageRetentionEnabledEnv      = "WITSELF_MESSAGE_RETENTION_ENABLED"
+	messageRetentionModeEnv         = "WITSELF_MESSAGE_RETENTION_MODE"
+	messageRetentionBatchSizeEnv    = "WITSELF_MESSAGE_RETENTION_BATCH_SIZE"
+	messageRetentionIntervalEnv     = "WITSELF_MESSAGE_RETENTION_INTERVAL"
+	messageRetentionBatchTimeoutEnv = "WITSELF_MESSAGE_RETENTION_BATCH_TIMEOUT"
 )
 
 type jobConfig struct {
-	avatarEnabled    bool
-	avatar           store.AvatarStyleRolloutWorkerConfig
-	retentionEnabled bool
-	retention        store.TranscriptRetentionWorkerConfig
+	avatarEnabled           bool
+	avatar                  store.AvatarStyleRolloutWorkerConfig
+	retentionEnabled        bool
+	retention               store.TranscriptRetentionWorkerConfig
+	messageRetentionEnabled bool
+	messageRetention        store.MessageRetentionWorkerConfig
 }
 
 func main() {
@@ -144,6 +153,42 @@ func serve() int {
 			"witself-worker: transcript retention enabled (mode %s, batch %d, interval %s, timeout %s)\n",
 			cfg.Mode, cfg.BatchSize, cfg.Interval, cfg.BatchTimeout)
 	}
+	if jobs.messageRetentionEnabled {
+		cfg := jobs.messageRetention
+		mode := string(cfg.Mode)
+		if err := registry.Register(worker.Job{
+			Name: messageRetentionJob,
+			Run: func(jobCtx context.Context) error {
+				return st.RunMessageRetentionWorker(
+					jobCtx,
+					cfg,
+					func(result store.MessageRetentionBatchResult) {
+						metrics.ObserveMessageRetentionBatch(
+							mode,
+							messageRetentionMetricResult(result),
+							messageRetentionMetricCounts(result),
+						)
+						logMessageRetentionResult(cfg.Mode, result)
+					},
+					func(err error) {
+						metrics.RecordJobFailure(messageRetentionJob)
+						metrics.ObserveMessageRetentionBatch(
+							mode,
+							worker.RetentionResultError,
+							worker.MessageRetentionCounts{},
+						)
+						fmt.Fprintf(os.Stderr, "witself-worker: message retention: %v\n", err)
+					},
+				)
+			},
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "witself-worker: register message retention: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(os.Stderr,
+			"witself-worker: message retention enabled (mode %s, batch %d, interval %s, timeout %s)\n",
+			cfg.Mode, cfg.BatchSize, cfg.Interval, cfg.BatchTimeout)
+	}
 
 	healthAddr := envOr(os.LookupEnv, "WITSELF_HEALTH_ADDR", ":8081")
 	metricsAddr := envOr(os.LookupEnv, "WITSELF_METRICS_ADDR", ":9090")
@@ -232,11 +277,55 @@ func jobConfigFromEnv(lookup func(string) (string, bool)) (jobConfig, error) {
 			err,
 		)
 	}
+
+	messageRetentionEnabled, err := boolEnv(lookup, messageRetentionEnabledEnv, false)
+	if err != nil {
+		return jobConfig{}, err
+	}
+	messageRetention := store.DefaultMessageRetentionWorkerConfig()
+	if raw, ok := lookup(messageRetentionModeEnv); ok {
+		messageRetention.Mode = store.MessageRetentionMode(
+			strings.ToLower(strings.TrimSpace(raw)),
+		)
+	}
+	if raw, ok := lookup(messageRetentionBatchSizeEnv); ok {
+		messageRetention.BatchSize, err = parseIntEnv(messageRetentionBatchSizeEnv, raw)
+		if err != nil {
+			return jobConfig{}, err
+		}
+	}
+	if raw, ok := lookup(messageRetentionIntervalEnv); ok {
+		messageRetention.Interval, err = parseDurationEnv(messageRetentionIntervalEnv, raw)
+		if err != nil {
+			return jobConfig{}, err
+		}
+	}
+	if raw, ok := lookup(messageRetentionBatchTimeoutEnv); ok {
+		messageRetention.BatchTimeout, err = parseDurationEnv(
+			messageRetentionBatchTimeoutEnv,
+			raw,
+		)
+		if err != nil {
+			return jobConfig{}, err
+		}
+	}
+	if err := messageRetention.Validate(); err != nil {
+		return jobConfig{}, fmt.Errorf(
+			"%s/%s/%s/%s message retention configuration: %w",
+			messageRetentionModeEnv,
+			messageRetentionBatchSizeEnv,
+			messageRetentionIntervalEnv,
+			messageRetentionBatchTimeoutEnv,
+			err,
+		)
+	}
 	return jobConfig{
-		avatarEnabled:    avatarEnabled,
-		avatar:           avatar,
-		retentionEnabled: retentionEnabled,
-		retention:        retention,
+		avatarEnabled:           avatarEnabled,
+		avatar:                  avatar,
+		retentionEnabled:        retentionEnabled,
+		retention:               retention,
+		messageRetentionEnabled: messageRetentionEnabled,
+		messageRetention:        messageRetention,
 	}, nil
 }
 
@@ -308,6 +397,42 @@ func retentionMetricCounts(result store.TranscriptRetentionBatchResult) worker.R
 	}
 }
 
+func messageRetentionMetricResult(
+	result store.MessageRetentionBatchResult,
+) worker.RetentionResult {
+	if result.Scanned == 0 &&
+		result.EligibleThreads == 0 &&
+		result.DeletedThreads == 0 &&
+		result.DeferredEvidence == 0 &&
+		result.DeferredActive == 0 &&
+		result.DeferredLocked == 0 &&
+		result.DeferredOversize == 0 &&
+		result.DeferredBudget == 0 &&
+		result.RepairedActivity == 0 {
+		return worker.RetentionResultNoWork
+	}
+	return worker.RetentionResultSuccess
+}
+
+func messageRetentionMetricCounts(
+	result store.MessageRetentionBatchResult,
+) worker.MessageRetentionCounts {
+	return worker.MessageRetentionCounts{
+		Scanned:          result.Scanned,
+		SkippedLocked:    result.SkippedLocked,
+		EligibleThreads:  result.EligibleThreads,
+		DeletedThreads:   result.DeletedThreads,
+		DeletedMessages:  result.DeletedMessages,
+		DeferredEvidence: result.DeferredEvidence,
+		DeferredActive:   result.DeferredActive,
+		DeferredLocked:   result.DeferredLocked,
+		DeferredOversize: result.DeferredOversize,
+		DeferredBudget:   result.DeferredBudget,
+		RepairedActivity: result.RepairedActivity,
+		ScanCapped:       result.ScanCapped,
+	}
+}
+
 func logRetentionResult(mode store.TranscriptRetentionMode, result store.TranscriptRetentionBatchResult) {
 	if result == (store.TranscriptRetentionBatchResult{}) {
 		return
@@ -318,6 +443,31 @@ func logRetentionResult(mode store.TranscriptRetentionMode, result store.Transcr
 		result.EligibleScanCapped, result.Deleted, result.DeferredEvidence,
 		result.DeferredCuration, result.DeferredScanCapped,
 		result.ReleasedCurationInputs, result.DeletedCurationCursors)
+}
+
+func logMessageRetentionResult(
+	mode store.MessageRetentionMode,
+	result store.MessageRetentionBatchResult,
+) {
+	if messageRetentionMetricResult(result) == worker.RetentionResultNoWork {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"witself-worker: message retention: mode=%s scanned=%d skipped_locked=%d scan_capped=%t eligible_threads=%d deleted_threads=%d deleted_messages=%d deferred_evidence=%d deferred_active=%d deferred_locked=%d deferred_oversize=%d deferred_budget=%d repaired_activity=%d\n",
+		mode,
+		result.Scanned,
+		result.SkippedLocked,
+		result.ScanCapped,
+		result.EligibleThreads,
+		result.DeletedThreads,
+		result.DeletedMessages,
+		result.DeferredEvidence,
+		result.DeferredActive,
+		result.DeferredLocked,
+		result.DeferredOversize,
+		result.DeferredBudget,
+		result.RepairedActivity,
+	)
 }
 
 func usage(w io.Writer) {

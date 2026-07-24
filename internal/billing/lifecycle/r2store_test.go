@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -381,6 +382,172 @@ func TestR2AgentPerRealmUnlimitedRoundTrip(t *testing.T) {
 	}
 }
 
+func TestR2MessagingOverridesSurviveLegacyControlPlaneRoundTrip(t *testing.T) {
+	at := time.Date(2026, 7, 24, 14, 0, 0, 0, time.UTC)
+	inheritedDays := int64(30)
+	record := Record{
+		AccountID: "acct_founder",
+		MessagingOverride: &MessagingOverride{
+			Enabled: true, ActorID: "adm_founder", ActorHandle: "scott",
+			Reason: "founder messaging enabled", SetAt: at,
+		},
+		MessageRetentionOverride: &MessageRetentionOverride{
+			Days: nil, ActorID: "adm_founder", ActorHandle: "scott",
+			Reason: "founder messages retained indefinitely", SetAt: at,
+		},
+		AdminHistory: []AdminChange{
+			{
+				Kind:    "messaging_override_set",
+				ActorID: "adm_founder", ActorHandle: "scott",
+				Reason: "founder messaging enabled", At: at,
+				MessagingFrom: boolValue(false), MessagingTo: boolValue(true),
+				MessagingFromSource: "inherited", MessagingToSource: "override",
+			},
+			{
+				Kind:    "message_retention_override_set",
+				ActorID: "adm_founder", ActorHandle: "scott",
+				Reason: "founder messages retained indefinitely", At: at,
+				MessageRetentionFrom:       &inheritedDays,
+				MessageRetentionTo:         nil,
+				MessageRetentionFromSource: "inherited",
+				MessageRetentionToSource:   "override",
+			},
+		},
+	}
+	encoded, err := marshalR2Record(record)
+	if err != nil {
+		t.Fatalf("marshal current record: %v", err)
+	}
+
+	// Model a rollback binary that knows only the common audit fields. It
+	// drops the new top-level overrides and structured audit fields, while the
+	// reserved Kind remains byte-for-byte durable.
+	type legacyChange struct {
+		Kind        string    `json:"kind"`
+		ActorID     string    `json:"actor_id"`
+		ActorHandle string    `json:"actor_handle"`
+		Reason      string    `json:"reason"`
+		At          time.Time `json:"at"`
+	}
+	var legacy struct {
+		AccountID    string         `json:"AccountID"`
+		AdminHistory []legacyChange `json:"AdminHistory"`
+	}
+	if err := json.Unmarshal(encoded, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	rolledBack, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := unmarshalR2Record(rolledBack)
+	if err != nil {
+		t.Fatalf("restore after legacy round trip: %v", err)
+	}
+	if got.MessagingOverride == nil || !got.MessagingOverride.Enabled ||
+		got.MessagingOverride.ActorID != "adm_founder" ||
+		got.MessageRetentionOverride == nil ||
+		got.MessageRetentionOverride.Days != nil ||
+		got.MessageRetentionOverride.Reason !=
+			"founder messages retained indefinitely" {
+		t.Fatalf("replayed messaging overrides = messaging=%+v retention=%+v",
+			got.MessagingOverride, got.MessageRetentionOverride)
+	}
+	if len(got.AdminHistory) != 2 ||
+		got.AdminHistory[0].Kind != "messaging_override_set" ||
+		got.AdminHistory[1].Kind != "message_retention_override_set" ||
+		got.AdminHistory[1].MessageRetentionFrom == nil ||
+		*got.AdminHistory[1].MessageRetentionFrom != 30 ||
+		got.AdminHistory[1].MessageRetentionTo != nil {
+		t.Fatalf("restored messaging audit = %+v", got.AdminHistory)
+	}
+}
+
+func TestR2MessagingClearEventsSurviveLegacyControlPlaneRoundTrip(t *testing.T) {
+	at := time.Date(2026, 7, 24, 15, 0, 0, 0, time.UTC)
+	inheritedDays := int64(365)
+	overrideDays := int64(45)
+	history := []AdminChange{
+		{
+			Kind:    "messaging_override_set",
+			ActorID: "adm_ops", ActorHandle: "scott",
+			Reason: "temporarily disable messaging", At: at,
+			MessagingFrom: boolValue(true), MessagingTo: boolValue(false),
+			MessagingFromSource: "inherited", MessagingToSource: "override",
+		},
+		{
+			Kind:    "message_retention_override_set",
+			ActorID: "adm_ops", ActorHandle: "scott",
+			Reason: "temporary finite retention", At: at.Add(time.Minute),
+			MessageRetentionFrom:       &inheritedDays,
+			MessageRetentionTo:         &overrideDays,
+			MessageRetentionFromSource: "inherited",
+			MessageRetentionToSource:   "override",
+		},
+		{
+			Kind:    "messaging_override_cleared",
+			ActorID: "adm_ops", ActorHandle: "scott",
+			Reason: "restore inherited messaging", At: at.Add(2 * time.Minute),
+			MessagingFrom: boolValue(false), MessagingTo: boolValue(true),
+			MessagingFromSource: "override", MessagingToSource: "inherited",
+		},
+		{
+			Kind:    "message_retention_override_cleared",
+			ActorID: "adm_ops", ActorHandle: "scott",
+			Reason: "restore inherited retention", At: at.Add(3 * time.Minute),
+			MessageRetentionFrom:       &overrideDays,
+			MessageRetentionTo:         &inheritedDays,
+			MessageRetentionFromSource: "override",
+			MessageRetentionToSource:   "inherited",
+		},
+	}
+	encoded, err := marshalR2Record(Record{
+		AccountID: "acct_cleared_messaging",
+		// Both top-level overrides are deliberately absent: replaying the set
+		// events without their later clears would resurrect stale exceptions.
+		AdminHistory: history,
+	})
+	if err != nil {
+		t.Fatalf("marshal current record: %v", err)
+	}
+
+	// Model a rollback binary that retains only fields common to the old
+	// AdminChange shape. The reserved Kind must carry the false bool, finite
+	// days, and both clear transitions through this destructive round trip.
+	type legacyChange struct {
+		Kind        string    `json:"kind"`
+		ActorID     string    `json:"actor_id"`
+		ActorHandle string    `json:"actor_handle"`
+		Reason      string    `json:"reason"`
+		At          time.Time `json:"at"`
+	}
+	var legacy struct {
+		AccountID    string         `json:"AccountID"`
+		AdminHistory []legacyChange `json:"AdminHistory"`
+	}
+	if err := json.Unmarshal(encoded, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	rolledBack, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := unmarshalR2Record(rolledBack)
+	if err != nil {
+		t.Fatalf("restore after legacy round trip: %v", err)
+	}
+	if got.MessagingOverride != nil || got.MessageRetentionOverride != nil {
+		t.Fatalf(
+			"cleared overrides were resurrected: messaging=%+v retention=%+v",
+			got.MessagingOverride,
+			got.MessageRetentionOverride,
+		)
+	}
+	if !reflect.DeepEqual(got.AdminHistory, history) {
+		t.Fatalf("restored messaging audit = %#v; want %#v", got.AdminHistory, history)
+	}
+}
+
 func TestR2LimitAuditMalformedReservedKindFailsClosed(t *testing.T) {
 	for _, kind := range []string{
 		r2LimitAuditKindPrefix,
@@ -435,6 +602,39 @@ func TestR2LimitAuditMalformedReservedKindFailsClosed(t *testing.T) {
 	}
 	if _, err := s.List(ctx); err == nil {
 		t.Fatal("R2 List accepted malformed reserved Kind")
+	}
+}
+
+func TestR2MessagingPolicyAuditMalformedReservedKindFailsClosed(t *testing.T) {
+	for _, kind := range []string{
+		r2MessagingPolicyAuditKindPrefix,
+		r2MessagingPolicyAuditKindPrefix + "not-base64!",
+		r2MessagingPolicyAuditKindPrefix + "e30",
+	} {
+		raw, err := json.Marshal(Record{
+			AccountID: "acct_bad",
+			AdminHistory: []AdminChange{{
+				Kind: kind, ActorID: "adm_bad", ActorHandle: "bad",
+				Reason: "bad", At: time.Now(),
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := unmarshalR2Record(raw); err == nil ||
+			!strings.Contains(err.Error(), "malformed reserved kind") {
+			t.Fatalf("unmarshal reserved kind %q = %v; want fail closed", kind, err)
+		}
+		if _, err := marshalR2Record(Record{
+			AccountID: "acct_bad",
+			AdminHistory: []AdminChange{{
+				Kind: kind, ActorID: "adm_bad", ActorHandle: "bad",
+				Reason: "bad", At: time.Now(),
+			}},
+		}); err == nil ||
+			!strings.Contains(err.Error(), "malformed reserved kind") {
+			t.Fatalf("marshal reserved kind %q = %v; want fail closed", kind, err)
+		}
 	}
 }
 

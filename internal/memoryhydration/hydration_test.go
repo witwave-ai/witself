@@ -322,6 +322,26 @@ func TestUnavailableMessageCheckpointIsVisibleWithoutBlockingHydration(t *testin
 	}
 }
 
+func TestDisabledMessageCheckpointSuppressesForegroundPollingPolicy(t *testing.T) {
+	disabled := false
+	source := &hydrationSourceStub{self: client.SelfDigest{
+		Identity:          exactIdentity(),
+		MessageCheckpoint: &client.SelfMessageCheckpoint{Enabled: &disabled},
+	}}
+	result, err := Execute(context.Background(), Config{}, exactBinding(), Request{
+		Runtime: transcriptcapture.RuntimeCodex, Event: EventUserPromptSubmit, Prompt: "write a parser",
+	}, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Attempted || !result.Injected || source.recallCalls != 0 ||
+		!strings.Contains(result.Context, `"message_checkpoint":{"enabled":false,"pending":false}`) ||
+		strings.Contains(result.Context, foregroundMessageCheckpointPolicy) ||
+		strings.Contains(result.Context, `"unavailable":true`) {
+		t.Fatalf("disabled message checkpoint result/source = %#v / %#v", result, source)
+	}
+}
+
 func TestOrdinaryPromptInjectsPendingEmailCheckpointPolicy(t *testing.T) {
 	source := &hydrationSourceStub{self: client.SelfDigest{
 		Identity:        exactIdentity(),

@@ -29,6 +29,9 @@ const avatarStyleRolloutArchiveSchema = 52
 // absent from account export/import manifests. The archive contract test
 // requires every CREATE TABLE migration to be either canonical or listed here.
 var cellLocalArchiveExclusions = map[string]struct{}{
+	"message_retention_thread_activity":       {},
+	"message_retention_account_scan_state":    {},
+	"message_retention_worker_lanes":          {},
 	"transcript_retention_account_scan_state": {},
 	"transcript_retention_sweep_state":        {},
 	"transcript_retention_worker_lanes":       {},

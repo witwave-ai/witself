@@ -23,6 +23,14 @@ func TestJobConfigFromEnvDefaultsAndOverrides(t *testing.T) {
 	if defaults.retention.BatchTimeout != 2*time.Minute {
 		t.Fatalf("retention batch timeout default = %s, want 2m", defaults.retention.BatchTimeout)
 	}
+	if defaults.messageRetentionEnabled ||
+		defaults.messageRetention != store.DefaultMessageRetentionWorkerConfig() {
+		t.Fatalf(
+			"message retention defaults = enabled %t config %#v",
+			defaults.messageRetentionEnabled,
+			defaults.messageRetention,
+		)
+	}
 
 	configured, err := jobConfigFromEnv(mapLookup(map[string]string{
 		avatarStyleRolloutEnabledEnv:       "false",
@@ -34,6 +42,11 @@ func TestJobConfigFromEnvDefaultsAndOverrides(t *testing.T) {
 		transcriptRetentionBatchSizeEnv:    "250",
 		transcriptRetentionIntervalEnv:     "15m",
 		transcriptRetentionBatchTimeoutEnv: "90s",
+		messageRetentionEnabledEnv:         "true",
+		messageRetentionModeEnv:            "ENFORCE",
+		messageRetentionBatchSizeEnv:       "50",
+		messageRetentionIntervalEnv:        "10m",
+		messageRetentionBatchTimeoutEnv:    "75s",
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -49,6 +62,17 @@ func TestJobConfigFromEnvDefaultsAndOverrides(t *testing.T) {
 		configured.retention.Interval != 15*time.Minute ||
 		configured.retention.BatchTimeout != 90*time.Second {
 		t.Fatalf("configured retention = enabled %t config %#v", configured.retentionEnabled, configured.retention)
+	}
+	if !configured.messageRetentionEnabled ||
+		configured.messageRetention.Mode != store.MessageRetentionModeEnforce ||
+		configured.messageRetention.BatchSize != 50 ||
+		configured.messageRetention.Interval != 10*time.Minute ||
+		configured.messageRetention.BatchTimeout != 75*time.Second {
+		t.Fatalf(
+			"configured message retention = enabled %t config %#v",
+			configured.messageRetentionEnabled,
+			configured.messageRetention,
+		)
 	}
 }
 
@@ -67,6 +91,13 @@ func TestJobConfigFromEnvRejectsNamedInvalidValues(t *testing.T) {
 		{transcriptRetentionIntervalEnv, "30s"},
 		{transcriptRetentionBatchTimeoutEnv, "999ms"},
 		{transcriptRetentionBatchTimeoutEnv, "6m"},
+		{messageRetentionEnabledEnv, "sometimes"},
+		{messageRetentionModeEnv, "destructive"},
+		{messageRetentionBatchSizeEnv, "0"},
+		{messageRetentionBatchSizeEnv, "101"},
+		{messageRetentionIntervalEnv, "30s"},
+		{messageRetentionBatchTimeoutEnv, "9s"},
+		{messageRetentionBatchTimeoutEnv, "6m"},
 	}
 	for _, test := range tests {
 		t.Run(test.key+"="+test.value, func(t *testing.T) {
@@ -118,6 +149,40 @@ func TestRetentionMetricMappingContainsNoIdentifiers(t *testing.T) {
 	if counts.Scanned != 10 || counts.Deleted != 6 || counts.ReleasedCurationInputs != 3 ||
 		!counts.ScanCapped || !counts.EligibleScanCapped || !counts.DeferredScanCapped {
 		t.Fatalf("mapped counts = %#v", counts)
+	}
+}
+
+func TestMessageRetentionMetricMappingContainsNoIdentifiers(t *testing.T) {
+	result := store.MessageRetentionBatchResult{
+		Scanned:          8,
+		SkippedLocked:    1,
+		ScanCapped:       true,
+		EligibleThreads:  6,
+		DeletedThreads:   5,
+		DeletedMessages:  13,
+		DeferredEvidence: 1,
+		DeferredActive:   2,
+		DeferredLocked:   3,
+		DeferredOversize: 4,
+		DeferredBudget:   5,
+		RepairedActivity: 6,
+		LaneAdvanced:     true,
+	}
+	if got := messageRetentionMetricResult(store.MessageRetentionBatchResult{
+		LaneAdvanced: true,
+	}); got != worker.RetentionResultNoWork {
+		t.Fatalf("empty message result metric = %q", got)
+	}
+	if got := messageRetentionMetricResult(result); got != worker.RetentionResultSuccess {
+		t.Fatalf("non-empty message result metric = %q", got)
+	}
+	counts := messageRetentionMetricCounts(result)
+	if counts.Scanned != 8 || counts.DeletedThreads != 5 ||
+		counts.DeletedMessages != 13 || counts.DeferredActive != 2 ||
+		counts.DeferredLocked != 3 || counts.DeferredOversize != 4 ||
+		counts.DeferredBudget != 5 || counts.RepairedActivity != 6 ||
+		!counts.ScanCapped {
+		t.Fatalf("mapped message counts = %#v", counts)
 	}
 }
 

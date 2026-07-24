@@ -86,8 +86,9 @@ exact enrolled agent in a config-only rollout and wait for convergence again.
 Keep canary automation manual-only until a manual run succeeds. For rollback,
 turn off any recurring schedule that has been added and settle the unused arm
 or let its 15-minute TTL expire before clearing this value or downgrading code.
-A future 15-minute cadence would retain about 96 acknowledged synthetic
-messages per day until ordinary mailbox retention or deletion is implemented.
+A future 15-minute cadence would create about 96 acknowledged synthetic
+messages per day; ordinary account message-retention policy now governs their
+eventual whole-thread cleanup.
 
 The Ed25519 relay private key is not a chart value, Secret reference, or server
 environment variable. It remains exclusively in the isolated Cloudflare Email
@@ -131,6 +132,16 @@ delete transcripts. Changing these values changes only the worker ConfigMap
 checksum and restarts worker pods; it does not restart API pods. The API
 ConfigMap always renders the legacy retention enabled gate as `false`.
 
+Message retention follows the same three-stage operational gate through
+`worker.messageRetention`, but it is a separate job with separate database
+lanes and `WITSELF_MESSAGE_RETENTION_*` variables. It deletes whole inactive
+message threads, never individual graph rows. Its defaults are `enabled:
+false`, `mode: preview`, 25 threads per batch, a five-minute interval, and a
+two-minute attempt timeout. Enabling or changing this job restarts worker pods
+only. Contended graph rows are skipped without waiting, and bounded oversize
+graphs are quarantined and surfaced through value-free Prometheus counters so
+one thread cannot monopolize a worker lane.
+
 The public chart default keeps `worker.enabled: false` because it has no shared
 database Secret. After PostgreSQL is configured, enabling it starts the
 two-replica default; operators can deliberately override `worker.replicaCount`.
@@ -141,9 +152,10 @@ the managed cell also enables a PDB and zonal spread. Work ownership remains a
 database concern, so rolling overlap and future manual scale-out do not cause
 two pods to own the same row.
 
-The old top-level `transcriptRetention` and `avatar.styleRollout` value paths
-are rejected by schema validation instead of being silently ignored. Move them
-under `worker` when enabling a released chart that contains this workload.
+The old top-level `transcriptRetention` and `avatar.styleRollout` value paths,
+and any top-level `messageRetention` path, are rejected by schema validation
+instead of being silently ignored. Move them under `worker` when enabling a
+released chart that contains this workload.
 
 Keep the separate control-plane plan-lifecycle feature gate disabled during
 the initial rolling cell deployment. Wait for the Deployment rollout to

@@ -189,7 +189,8 @@
         "affinity",
         "topologySpreadConstraints",
         "avatarStyleRollout",
-        "transcriptRetention"
+        "transcriptRetention",
+        "messageRetention"
       ],
       "properties": {
         "enabled": { "type": "boolean" },
@@ -384,10 +385,29 @@
               "pattern": "^(([1-9][0-9]{3}|[1-9][0-9]{4}|[12][0-9]{5}|300000)ms|([1-9]|[1-9][0-9]|[12][0-9]{2}|300)s|[1-5]m)$"
             }
           }
+        },
+        "messageRetention": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "mode", "batchSize", "interval", "batchTimeout"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "mode": { "type": "string", "enum": ["preview", "enforce"] },
+            "batchSize": { "type": "integer", "minimum": 1, "maximum": 100 },
+            "interval": {
+              "type": "string",
+              "pattern": "^(([1-9]|[1-9][0-9]|[1-9][0-9]{2}|1[0-3][0-9]{2}|14[0-3][0-9]|1440)m|([1-9]|1[0-9]|2[0-4])h)$"
+            },
+            "batchTimeout": {
+              "type": "string",
+              "pattern": "^((1[0-9]{4}|[2-9][0-9]{4}|[12][0-9]{5}|300000)ms|([1-9][0-9]|[12][0-9]{2}|300)s|[1-5]m)$"
+            }
+          }
         }
       }
     },
     "transcriptRetention": false,
+    "messageRetention": false,
     "database": {
       "type": "object",
       "properties": {

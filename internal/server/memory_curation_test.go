@@ -603,6 +603,11 @@ func TestMemoryCurationErrorMapping(t *testing.T) {
 		status int
 		text   string
 	}{
+		{
+			&FeatureNotEnabledError{Feature: "messaging"},
+			http.StatusForbidden,
+			`"code":"feature_not_enabled"`,
+		},
 		{ErrBadInput, http.StatusBadRequest, "invalid memory curation request"},
 		{ErrForbidden, http.StatusForbidden, "memory curation access forbidden"},
 		{ErrNotFound, http.StatusNotFound, "memory curation resource not found"},
@@ -620,6 +625,21 @@ func TestMemoryCurationErrorMapping(t *testing.T) {
 		}
 		if recorder.Code != test.status || !strings.Contains(recorder.Body.String(), test.text) {
 			t.Fatalf("error %v => %d %s", test.err, recorder.Code, recorder.Body.String())
+		}
+		if errors.Is(test.err, ErrFeatureNotEnabled) {
+			for _, fragment := range []string{
+				`"feature":"messaging"`,
+				`"retryable":false`,
+				`"error":"Sorry, this feature is not enabled on this account."`,
+			} {
+				if !strings.Contains(recorder.Body.String(), fragment) {
+					t.Fatalf(
+						"feature-disabled response missing %s: %s",
+						fragment,
+						recorder.Body.String(),
+					)
+				}
+			}
 		}
 	}
 	blocked := &MemoryCurationRollbackBlockedError{Blockers: []MemoryCurationRollbackBlocker{{

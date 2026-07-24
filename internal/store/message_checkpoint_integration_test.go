@@ -55,6 +55,7 @@ func TestSelfMessageCheckpointTracksDurableForegroundWorkPostgres(t *testing.T) 
 
 	assertCheckpoint := func(p Principal, want SelfMessageCheckpoint) {
 		t.Helper()
+		want.Enabled = true
 		got, err := st.GetSelfMessageCheckpoint(ctx, p)
 		if err != nil {
 			t.Fatal(err)

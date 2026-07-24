@@ -106,6 +106,28 @@ type TranscriptRetentionOverride struct {
 	SetAt       time.Time `json:"set_at"`
 }
 
+// MessagingOverride is an account-specific exception to whether the durable
+// messaging feature is enabled. Absence means inherit the current plan feature
+// list; the explicit bool supports both enable and disable exceptions.
+type MessagingOverride struct {
+	Enabled     bool      `json:"enabled"`
+	ActorID     string    `json:"actor_id"`
+	ActorHandle string    `json:"actor_handle"`
+	Reason      string    `json:"reason"`
+	SetAt       time.Time `json:"set_at"`
+}
+
+// MessageRetentionOverride is an account-specific exception to its message
+// retention default. Days=nil is an explicit indefinite override; absence of
+// the whole struct means inherit the current plan default.
+type MessageRetentionOverride struct {
+	Days        *int64    `json:"days"`
+	ActorID     string    `json:"actor_id"`
+	ActorHandle string    `json:"actor_handle"`
+	Reason      string    `json:"reason"`
+	SetAt       time.Time `json:"set_at"`
+}
+
 // AccountLimitOverride is an account-specific hard-cap exception. Max=nil is
 // an explicit unlimited override; absence of the dimension from
 // Record.LimitOverrides means inherit the current plan default.
@@ -126,20 +148,28 @@ type AccountLimitValue struct {
 // AdminChange is the append-only audit history embedded in the account's
 // compare-and-swap record. Kind determines how nil values are interpreted.
 type AdminChange struct {
-	Kind            string             `json:"kind"`
-	ActorID         string             `json:"actor_id"`
-	ActorHandle     string             `json:"actor_handle"`
-	Reason          string             `json:"reason"`
-	At              time.Time          `json:"at"`
-	PlanFrom        string             `json:"plan_from,omitempty"`
-	PlanTo          string             `json:"plan_to,omitempty"`
-	RetentionFrom   *int64             `json:"retention_from,omitempty"`
-	RetentionTo     *int64             `json:"retention_to,omitempty"`
-	LimitDimension  string             `json:"limit_dimension,omitempty"`
-	LimitFrom       *AccountLimitValue `json:"limit_from,omitempty"`
-	LimitTo         *AccountLimitValue `json:"limit_to,omitempty"`
-	LimitFromSource string             `json:"limit_from_source,omitempty"`
-	LimitToSource   string             `json:"limit_to_source,omitempty"`
+	Kind                       string             `json:"kind"`
+	ActorID                    string             `json:"actor_id"`
+	ActorHandle                string             `json:"actor_handle"`
+	Reason                     string             `json:"reason"`
+	At                         time.Time          `json:"at"`
+	PlanFrom                   string             `json:"plan_from,omitempty"`
+	PlanTo                     string             `json:"plan_to,omitempty"`
+	RetentionFrom              *int64             `json:"retention_from,omitempty"`
+	RetentionTo                *int64             `json:"retention_to,omitempty"`
+	MessagingFrom              *bool              `json:"messaging_from,omitempty"`
+	MessagingTo                *bool              `json:"messaging_to,omitempty"`
+	MessagingFromSource        string             `json:"messaging_from_source,omitempty"`
+	MessagingToSource          string             `json:"messaging_to_source,omitempty"`
+	MessageRetentionFrom       *int64             `json:"message_retention_from,omitempty"`
+	MessageRetentionTo         *int64             `json:"message_retention_to,omitempty"`
+	MessageRetentionFromSource string             `json:"message_retention_from_source,omitempty"`
+	MessageRetentionToSource   string             `json:"message_retention_to_source,omitempty"`
+	LimitDimension             string             `json:"limit_dimension,omitempty"`
+	LimitFrom                  *AccountLimitValue `json:"limit_from,omitempty"`
+	LimitTo                    *AccountLimitValue `json:"limit_to,omitempty"`
+	LimitFromSource            string             `json:"limit_from_source,omitempty"`
+	LimitToSource              string             `json:"limit_to_source,omitempty"`
 }
 
 // Record is one account's billing state. Plan facts only — identity stays in
@@ -162,12 +192,14 @@ type Record struct {
 	// predates it is stale (redelivered or out of order) and is dropped.
 	EntitledAt time.Time
 	Pending    *Pending
-	// PlanOverride, TranscriptRetentionOverride, and LimitOverrides are
-	// administrator-owned entitlement exceptions. They never create or mutate
-	// provider billing objects. AdminHistory preserves every real transition
-	// with attribution.
+	// PlanOverride, retention overrides, MessagingOverride, and LimitOverrides
+	// are administrator-owned entitlement exceptions. They never create or
+	// mutate provider billing objects. AdminHistory preserves every real
+	// transition with attribution.
 	PlanOverride                *AccountPlanOverride
 	TranscriptRetentionOverride *TranscriptRetentionOverride
+	MessagingOverride           *MessagingOverride
+	MessageRetentionOverride    *MessageRetentionOverride
 	LimitOverrides              map[string]AccountLimitOverride
 	AdminHistory                []AdminChange
 	// PastDueSince is set while the provider reports failed renewals. Grace
@@ -291,16 +323,17 @@ type Outcome struct {
 	Effective time.Time
 }
 
-// PlanSnapshot is the control plane's resolved account policy. DefaultLimits
-// and DefaultPolicies are the effective plan's catalog defaults; Limits and
-// Policies additionally reflect account-level overrides and are the exact
-// maps pushed to the cell.
+// PlanSnapshot is the control plane's resolved account policy. DefaultLimits,
+// DefaultPolicies, and DefaultFeatures are the effective plan's catalog
+// defaults; Limits, Policies, and Features additionally reflect account-level
+// overrides. The effective fields are the exact snapshot pushed to the cell.
 type PlanSnapshot struct {
 	Plan            string
 	DefaultLimits   map[string]int64
 	Limits          map[string]int64
 	DefaultPolicies map[string]int64
 	Policies        map[string]int64
+	DefaultFeatures []string
 	Features        []string
 	Hash            string
 }
@@ -568,6 +601,7 @@ func (m *Manager) resolveSnapshot(r Record) (PlanSnapshot, error) {
 		Limits:          cloneInt64Map(p.Limits),
 		DefaultPolicies: cloneInt64Map(p.Policies),
 		Policies:        cloneInt64Map(p.Policies),
+		DefaultFeatures: append([]string(nil), p.Features...),
 		Features:        append([]string(nil), p.Features...),
 	}
 	if snapshot.DefaultLimits == nil {
@@ -582,12 +616,29 @@ func (m *Manager) resolveSnapshot(r Record) (PlanSnapshot, error) {
 	if snapshot.Policies == nil {
 		snapshot.Policies = map[string]int64{}
 	}
+	if snapshot.DefaultFeatures == nil {
+		snapshot.DefaultFeatures = []string{}
+	}
+	if snapshot.Features == nil {
+		snapshot.Features = []string{}
+	}
 	if override := r.TranscriptRetentionOverride; override != nil {
 		if override.Days == nil {
 			delete(snapshot.Policies, plans.TranscriptRetentionDaysPolicy)
 		} else {
 			snapshot.Policies[plans.TranscriptRetentionDaysPolicy] = *override.Days
 		}
+	}
+	if override := r.MessageRetentionOverride; override != nil {
+		if override.Days == nil {
+			delete(snapshot.Policies, plans.MessageRetentionDaysPolicy)
+		} else {
+			snapshot.Policies[plans.MessageRetentionDaysPolicy] = *override.Days
+		}
+	}
+	if override := r.MessagingOverride; override != nil {
+		snapshot.Features = setFeature(
+			snapshot.Features, plans.MessagingFeature, override.Enabled)
 	}
 	for dimension, override := range r.LimitOverrides {
 		validationValue := int64(0)
@@ -609,6 +660,7 @@ func (m *Manager) resolveSnapshot(r Record) (PlanSnapshot, error) {
 	if err := plans.ValidatePolicies(snapshot.Policies); err != nil {
 		return PlanSnapshot{}, fmt.Errorf("resolve account %s policies: %w", r.AccountID, err)
 	}
+	sort.Strings(snapshot.DefaultFeatures)
 	sort.Strings(snapshot.Features)
 	hash, err := plans.SnapshotHash(
 		snapshot.Plan, snapshot.Limits, snapshot.Policies, snapshot.Features)
@@ -630,6 +682,34 @@ func cloneInt64Map(in map[string]int64) map[string]int64 {
 	return out
 }
 
+func featureEnabled(features []string, feature string) bool {
+	for _, candidate := range features {
+		if candidate == feature {
+			return true
+		}
+	}
+	return false
+}
+
+func setFeature(features []string, feature string, enabled bool) []string {
+	out := make([]string, 0, len(features)+1)
+	found := false
+	for _, candidate := range features {
+		if candidate == feature {
+			if !found && enabled {
+				out = append(out, candidate)
+			}
+			found = true
+			continue
+		}
+		out = append(out, candidate)
+	}
+	if enabled && !found {
+		out = append(out, feature)
+	}
+	return out
+}
+
 // planRank uses the catalog's documented cheapest-to-richest display order.
 // Price cannot establish this ordering for custom-priced Enterprise because
 // an intentionally absent price is represented as zero.
@@ -643,10 +723,23 @@ func (m *Manager) planRank(planID string) (int, bool) {
 }
 
 func retentionDays(policies map[string]int64) *int64 {
-	value, ok := policies[plans.TranscriptRetentionDaysPolicy]
+	return policyDays(policies, plans.TranscriptRetentionDaysPolicy)
+}
+
+func messageRetentionDays(policies map[string]int64) *int64 {
+	return policyDays(policies, plans.MessageRetentionDaysPolicy)
+}
+
+func policyDays(policies map[string]int64, key string) *int64 {
+	value, ok := policies[key]
 	if !ok {
 		return nil
 	}
+	valueCopy := value
+	return &valueCopy
+}
+
+func boolValue(value bool) *bool {
 	valueCopy := value
 	return &valueCopy
 }
@@ -997,6 +1090,206 @@ func (m *Manager) ClearTranscriptRetentionOverride(
 	}
 	// The override is already durable. A failed cell push is intentionally
 	// represented as apply_pending and retried by reconciliation.
+	_ = m.apply(ctx, accountID)
+	return r, nil
+}
+
+// SetMessagingOverride enables or disables durable messaging for one account
+// independently of its plan and billing relationship. The client integration
+// remains installed; the resolved snapshot changes what the cell permits.
+func (m *Manager) SetMessagingOverride(
+	ctx context.Context,
+	accountID string,
+	enabled bool,
+	actor AdminActor,
+	reason string,
+) (Record, error) {
+	actor, reason, err := validateAdminChange(actor, reason)
+	if err != nil {
+		return Record{}, err
+	}
+	now := m.cfg.Now()
+	r, err := m.mutate(ctx, accountID, "", func(r *Record) error {
+		if current := r.MessagingOverride; current != nil &&
+			current.Enabled == enabled {
+			return errSkipWrite
+		}
+		before, err := m.resolveSnapshot(*r)
+		if err != nil {
+			return err
+		}
+		fromSource := "inherited"
+		if r.MessagingOverride != nil {
+			fromSource = "override"
+		}
+		r.MessagingOverride = &MessagingOverride{
+			Enabled: enabled, ActorID: actor.ID, ActorHandle: actor.Handle,
+			Reason: reason, SetAt: now,
+		}
+		r.AdminHistory = append(r.AdminHistory, AdminChange{
+			Kind:    "messaging_override_set",
+			ActorID: actor.ID, ActorHandle: actor.Handle,
+			Reason: reason, At: now,
+			MessagingFrom:       boolValue(featureEnabled(before.Features, plans.MessagingFeature)),
+			MessagingTo:         boolValue(enabled),
+			MessagingFromSource: fromSource,
+			MessagingToSource:   "override",
+		})
+		return nil
+	})
+	if err != nil {
+		return Record{}, err
+	}
+	_ = m.apply(ctx, accountID)
+	return r, nil
+}
+
+// ClearMessagingOverride restores the messaging feature state inherited from
+// the account's current effective plan.
+func (m *Manager) ClearMessagingOverride(
+	ctx context.Context,
+	accountID string,
+	actor AdminActor,
+	reason string,
+) (Record, error) {
+	actor, reason, err := validateAdminChange(actor, reason)
+	if err != nil {
+		return Record{}, err
+	}
+	now := m.cfg.Now()
+	r, err := m.mutate(ctx, accountID, "", func(r *Record) error {
+		if r.MessagingOverride == nil {
+			return errSkipWrite
+		}
+		before, err := m.resolveSnapshot(*r)
+		if err != nil {
+			return err
+		}
+		r.MessagingOverride = nil
+		after, err := m.resolveSnapshot(*r)
+		if err != nil {
+			return err
+		}
+		r.AdminHistory = append(r.AdminHistory, AdminChange{
+			Kind:    "messaging_override_cleared",
+			ActorID: actor.ID, ActorHandle: actor.Handle,
+			Reason: reason, At: now,
+			MessagingFrom:       boolValue(featureEnabled(before.Features, plans.MessagingFeature)),
+			MessagingTo:         boolValue(featureEnabled(after.Features, plans.MessagingFeature)),
+			MessagingFromSource: "override",
+			MessagingToSource:   "inherited",
+		})
+		return nil
+	})
+	if err != nil {
+		return Record{}, err
+	}
+	_ = m.apply(ctx, accountID)
+	return r, nil
+}
+
+// SetMessageRetentionOverride sets a finite or explicit indefinite account
+// exception independently of messaging availability and billing. Keeping the
+// controls independent lets an administrator safely configure retention
+// before enabling messaging.
+func (m *Manager) SetMessageRetentionOverride(
+	ctx context.Context,
+	accountID string,
+	days *int64,
+	actor AdminActor,
+	reason string,
+) (Record, error) {
+	actor, reason, err := validateAdminChange(actor, reason)
+	if err != nil {
+		return Record{}, err
+	}
+	if days != nil {
+		if err := plans.ValidatePolicies(map[string]int64{
+			plans.MessageRetentionDaysPolicy: *days,
+		}); err != nil {
+			return Record{}, fmt.Errorf("%w: %v", ErrAdminInput, err)
+		}
+	}
+	now := m.cfg.Now()
+	r, err := m.mutate(ctx, accountID, "", func(r *Record) error {
+		if current := r.MessageRetentionOverride; current != nil &&
+			sameOptionalDays(current.Days, days) {
+			return errSkipWrite
+		}
+		before, err := m.resolveSnapshot(*r)
+		if err != nil {
+			return err
+		}
+		fromSource := "inherited"
+		if r.MessageRetentionOverride != nil {
+			fromSource = "override"
+		}
+		var storedDays *int64
+		if days != nil {
+			value := *days
+			storedDays = &value
+		}
+		r.MessageRetentionOverride = &MessageRetentionOverride{
+			Days: storedDays, ActorID: actor.ID, ActorHandle: actor.Handle,
+			Reason: reason, SetAt: now,
+		}
+		r.AdminHistory = append(r.AdminHistory, AdminChange{
+			Kind:    "message_retention_override_set",
+			ActorID: actor.ID, ActorHandle: actor.Handle,
+			Reason: reason, At: now,
+			MessageRetentionFrom:       messageRetentionDays(before.Policies),
+			MessageRetentionTo:         storedDays,
+			MessageRetentionFromSource: fromSource,
+			MessageRetentionToSource:   "override",
+		})
+		return nil
+	})
+	if err != nil {
+		return Record{}, err
+	}
+	_ = m.apply(ctx, accountID)
+	return r, nil
+}
+
+// ClearMessageRetentionOverride restores the current plan default.
+func (m *Manager) ClearMessageRetentionOverride(
+	ctx context.Context,
+	accountID string,
+	actor AdminActor,
+	reason string,
+) (Record, error) {
+	actor, reason, err := validateAdminChange(actor, reason)
+	if err != nil {
+		return Record{}, err
+	}
+	now := m.cfg.Now()
+	r, err := m.mutate(ctx, accountID, "", func(r *Record) error {
+		if r.MessageRetentionOverride == nil {
+			return errSkipWrite
+		}
+		before, err := m.resolveSnapshot(*r)
+		if err != nil {
+			return err
+		}
+		r.MessageRetentionOverride = nil
+		after, err := m.resolveSnapshot(*r)
+		if err != nil {
+			return err
+		}
+		r.AdminHistory = append(r.AdminHistory, AdminChange{
+			Kind:    "message_retention_override_cleared",
+			ActorID: actor.ID, ActorHandle: actor.Handle,
+			Reason: reason, At: now,
+			MessageRetentionFrom:       messageRetentionDays(before.Policies),
+			MessageRetentionTo:         messageRetentionDays(after.Policies),
+			MessageRetentionFromSource: "override",
+			MessageRetentionToSource:   "inherited",
+		})
+		return nil
+	})
+	if err != nil {
+		return Record{}, err
+	}
 	_ = m.apply(ctx, accountID)
 	return r, nil
 }

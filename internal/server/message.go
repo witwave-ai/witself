@@ -18,6 +18,7 @@ const (
 	maxConcurrentMessageListens         = 128
 	maxConcurrentMessageListensPerAgent = 2
 	maxMessageProcessingLeaseSeconds    = 15 * 60
+	messageFeatureDisabledText          = "Sorry, this feature is not enabled on this account."
 )
 
 // messageListenLimiter bounds the number of long-lived handlers and database
@@ -81,6 +82,9 @@ func sendMessageHandler(auth PrincipalAuthFunc, send func(context.Context, Domai
 		req.IdempotencyKey = strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 		msg, err := send(r.Context(), p, req)
 		switch {
+		case errors.Is(err, ErrFeatureNotEnabled):
+			writeFeatureNotEnabledError(w, err)
+			return
 		case errors.Is(err, ErrBadInput):
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
@@ -138,6 +142,9 @@ func listMessagesHandler(auth PrincipalAuthFunc, list func(context.Context, Doma
 		}
 		page, err := list(r.Context(), p, opts)
 		switch {
+		case errors.Is(err, ErrFeatureNotEnabled):
+			writeFeatureNotEnabledError(w, err)
+			return
 		case errors.Is(err, ErrBadInput):
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
@@ -203,6 +210,9 @@ func messageListenHandler(auth PrincipalAuthFunc, list func(context.Context, Dom
 		for {
 			page, err := list(r.Context(), p, opts)
 			switch {
+			case errors.Is(err, ErrFeatureNotEnabled):
+				writeFeatureNotEnabledError(w, err)
+				return
 			case errors.Is(err, ErrBadInput):
 				writeJSONError(w, http.StatusBadRequest, err.Error())
 				return
@@ -317,6 +327,9 @@ func messageActionHandler(
 			msg, err = reply(r.Context(), p, messageID, req)
 		}
 		switch {
+		case errors.Is(err, ErrFeatureNotEnabled):
+			writeFeatureNotEnabledError(w, err)
+			return
 		case errors.Is(err, ErrBadInput):
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
@@ -460,6 +473,8 @@ func writeMessageProcessingError(w http.ResponseWriter, err error) bool {
 	switch {
 	case err == nil:
 		return false
+	case errors.Is(err, ErrFeatureNotEnabled):
+		writeFeatureNotEnabledError(w, err)
 	case errors.Is(err, ErrBadInput):
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrNotFound), errors.Is(err, ErrForbidden):
@@ -472,6 +487,24 @@ func writeMessageProcessingError(w http.ResponseWriter, err error) bool {
 		writeJSONError(w, http.StatusInternalServerError, "could not update message processing")
 	}
 	return true
+}
+
+func writeFeatureNotEnabledError(w http.ResponseWriter, err error) {
+	feature := "messaging"
+	var featureErr *FeatureNotEnabledError
+	if errors.As(err, &featureErr) && strings.TrimSpace(featureErr.Feature) != "" {
+		feature = featureErr.Feature
+	}
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"schema_version": "witself.v0",
+		"code":           "feature_not_enabled",
+		"feature":        feature,
+		"error":          messageFeatureDisabledText,
+		"retryable":      false,
+	})
 }
 
 func messageNoStore(next http.HandlerFunc) http.HandlerFunc {

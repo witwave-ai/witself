@@ -323,6 +323,11 @@ func TestTranscriptRetentionDeletesOnlyExpiredWholeConversationsPostgres(t *test
 	if err := migrationTestDown(t, schemaDSN, false); err != nil {
 		t.Fatal(err)
 	}
+	assertMigrationTestVersion(t, schemaDSN, 67)
+	assertMigrationTestTable(t, st, "message_retention_worker_lanes", false)
+	if err := migrationTestDown(t, schemaDSN, false); err != nil {
+		t.Fatal(err)
+	}
 	assertMigrationTestVersion(t, schemaDSN, 66)
 	if err := migrationTestDown(t, schemaDSN, true); err == nil ||
 		!strings.Contains(err.Error(), "pruned curation inputs exist") {

@@ -764,6 +764,139 @@ func TestAccountTranscriptRetentionCanBeExplicitlyIndefinite(t *testing.T) {
 	}
 }
 
+func TestAccountMessagingAndRetentionOverridesAreIndependentOfBilling(t *testing.T) {
+	h := newHarness(t, false)
+	ctx := t.Context()
+	const accountID = "acct_founder_messaging"
+
+	_, inherited, err := h.m.ResolvedStatus(ctx, accountID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(inherited.Features, plans.MessagingFeature) ||
+		inherited.Policies[plans.MessageRetentionDaysPolicy] != 30 {
+		t.Fatalf("Personal messaging snapshot = %+v; want disabled with 30-day cleanup", inherited)
+	}
+
+	if _, err := h.m.SetMessagingOverride(
+		ctx, accountID, true, testAdminActor(), "founder messaging enabled",
+	); err != nil {
+		t.Fatalf("SetMessagingOverride: %v", err)
+	}
+	if _, err := h.m.SetMessageRetentionOverride(
+		ctx, accountID, nil, testAdminActor(), "founder messages retained indefinitely",
+	); err != nil {
+		t.Fatalf("SetMessageRetentionOverride: %v", err)
+	}
+	r, snapshot, err := h.m.ResolvedStatus(ctx, accountID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Entitled != plans.Free || r.Provider != "" || r.CustomerID != "" {
+		t.Fatalf("messaging overrides fabricated billing: %+v", r)
+	}
+	if r.SnapshotRevision < 1 ||
+		r.AppliedSnapshotRevision != r.SnapshotRevision ||
+		r.DesiredSnapshotHash != snapshot.Hash ||
+		r.AppliedSnapshotHash != snapshot.Hash ||
+		SnapshotApplyPending(r, snapshot) {
+		t.Fatalf("messaging override did not converge through the snapshot fence: record=%+v snapshot=%+v",
+			r, snapshot)
+	}
+	if r.MessagingOverride == nil || !r.MessagingOverride.Enabled ||
+		r.MessageRetentionOverride == nil ||
+		r.MessageRetentionOverride.Days != nil {
+		t.Fatalf("founder messaging overrides = messaging=%+v retention=%+v",
+			r.MessagingOverride, r.MessageRetentionOverride)
+	}
+	if !slices.Contains(snapshot.Features, plans.MessagingFeature) ||
+		slices.Contains(snapshot.DefaultFeatures, plans.MessagingFeature) {
+		t.Fatalf("feature snapshot = defaults %v effective %v",
+			snapshot.DefaultFeatures, snapshot.Features)
+	}
+	if snapshot.DefaultPolicies[plans.MessageRetentionDaysPolicy] != 30 {
+		t.Fatalf("message retention defaults = %v; want 30", snapshot.DefaultPolicies)
+	}
+	if _, finite := snapshot.Policies[plans.MessageRetentionDaysPolicy]; finite {
+		t.Fatalf("message retention policies = %v; want explicit indefinite", snapshot.Policies)
+	}
+	if snapshot.Policies[plans.MessagingEntitlementVersionPolicy] !=
+		plans.MessagingEntitlementVersion {
+		t.Fatalf("explicit indefinite removed entitlement marker: %v", snapshot.Policies)
+	}
+	if len(r.AdminHistory) != 2 ||
+		r.AdminHistory[0].Kind != "messaging_override_set" ||
+		r.AdminHistory[0].MessagingFrom == nil ||
+		*r.AdminHistory[0].MessagingFrom ||
+		r.AdminHistory[0].MessagingTo == nil ||
+		!*r.AdminHistory[0].MessagingTo ||
+		r.AdminHistory[1].Kind != "message_retention_override_set" ||
+		r.AdminHistory[1].MessageRetentionFrom == nil ||
+		*r.AdminHistory[1].MessageRetentionFrom != 30 ||
+		r.AdminHistory[1].MessageRetentionTo != nil {
+		t.Fatalf("messaging audit history = %+v", r.AdminHistory)
+	}
+	last := h.applier.last(t)
+	if !slices.Contains(last.features, plans.MessagingFeature) {
+		t.Fatalf("applied features = %v; want messaging", last.features)
+	}
+	if _, finite := last.policies[plans.MessageRetentionDaysPolicy]; finite {
+		t.Fatalf("applied policies = %v; want indefinite messages", last.policies)
+	}
+	if last.policies[plans.MessagingEntitlementVersionPolicy] !=
+		plans.MessagingEntitlementVersion {
+		t.Fatalf("applied policies lost entitlement marker: %v", last.policies)
+	}
+
+	if _, err := h.m.SetMessagingOverride(
+		ctx, accountID, false, testAdminActor(), "temporarily disable founder messaging",
+	); err != nil {
+		t.Fatal(err)
+	}
+	r, snapshot, err = h.m.ResolvedStatus(ctx, accountID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(snapshot.Features, plans.MessagingFeature) ||
+		r.MessageRetentionOverride == nil ||
+		r.MessageRetentionOverride.Days != nil {
+		t.Fatalf("availability change disturbed retention: record=%+v snapshot=%+v", r, snapshot)
+	}
+
+	if _, err := h.m.ClearMessagingOverride(
+		ctx, accountID, testAdminActor(), "restore Personal availability",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.m.ClearMessageRetentionOverride(
+		ctx, accountID, testAdminActor(), "restore Personal cleanup window",
+	); err != nil {
+		t.Fatal(err)
+	}
+	r, snapshot, err = h.m.ResolvedStatus(ctx, accountID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.MessagingOverride != nil || r.MessageRetentionOverride != nil ||
+		slices.Contains(snapshot.Features, plans.MessagingFeature) ||
+		snapshot.Policies[plans.MessageRetentionDaysPolicy] != 30 {
+		t.Fatalf("cleared messaging policy = record=%+v snapshot=%+v", r, snapshot)
+	}
+}
+
+func TestMessageRetentionOverrideValidation(t *testing.T) {
+	h := newHarness(t, false)
+	for _, days := range []int64{0, plans.MaxMessageRetentionDays + 1} {
+		days := days
+		if _, err := h.m.SetMessageRetentionOverride(
+			t.Context(), "acct_bad_message_retention", &days,
+			testAdminActor(), "invalid test",
+		); !errors.Is(err, ErrAdminInput) {
+			t.Fatalf("days=%d error=%v; want ErrAdminInput", days, err)
+		}
+	}
+}
+
 func TestEnterpriseBackfillOverrideDoesNotFabricateBilling(t *testing.T) {
 	h := newHarness(t, false)
 	ctx := context.Background()
@@ -789,7 +922,10 @@ func TestEnterpriseBackfillOverrideDoesNotFabricateBilling(t *testing.T) {
 	if _, capped := snapshot.Policies[plans.TranscriptRetentionDaysPolicy]; capped {
 		t.Fatalf("enterprise backfill should inherit indefinite retention: %v", snapshot.Policies)
 	}
-	for _, feature := range []string{"memory", "facts", "secrets", "collaboration", "support"} {
+	for _, feature := range []string{
+		"memory", "facts", "secrets", plans.MessagingFeature,
+		"collaboration", "support",
+	} {
 		if !slices.Contains(snapshot.Features, feature) {
 			t.Fatalf("enterprise backfill features = %v; missing %q", snapshot.Features, feature)
 		}

@@ -749,15 +749,16 @@ type SelfMemoryCheckpoint struct {
 }
 
 // SelfMessageCheckpoint is an authenticated, content-free projection of
-// durable messaging work that may need the foreground agent's attention. It is
+// durable messaging work and the explicit account feature switch. It is
 // advisory discovery state, never a processing fence or authority grant.
 type SelfMessageCheckpoint struct {
-	Pending                     bool `json:"pending"`
-	Unavailable                 bool `json:"unavailable,omitempty"`
-	MailboxPending              bool `json:"mailbox_pending,omitempty"`
-	CandidateOfferPending       bool `json:"candidate_offer_pending,omitempty"`
-	CoordinatorSelectionPending bool `json:"coordinator_selection_pending,omitempty"`
-	CandidateAssignmentPending  bool `json:"candidate_assignment_pending,omitempty"`
+	Enabled                     *bool `json:"enabled,omitempty"`
+	Pending                     bool  `json:"pending"`
+	Unavailable                 bool  `json:"unavailable,omitempty"`
+	MailboxPending              bool  `json:"mailbox_pending,omitempty"`
+	CandidateOfferPending       bool  `json:"candidate_offer_pending,omitempty"`
+	CoordinatorSelectionPending bool  `json:"coordinator_selection_pending,omitempty"`
+	CandidateAssignmentPending  bool  `json:"candidate_assignment_pending,omitempty"`
 }
 
 // SelfAvatarCheckpoint is authenticated, value-free lifecycle state for an
@@ -1428,6 +1429,26 @@ var ErrBadInput = errors.New("bad input")
 // ErrForbidden signals an authenticated principal crossing a resource's
 // authorization boundary (-> 403).
 var ErrForbidden = errors.New("forbidden")
+
+// ErrFeatureNotEnabled signals a non-retryable account-plan feature refusal
+// (-> 403). The HTTP response uses a stable machine code and closed feature
+// key so installed clients can stop polling without changing their tool set.
+var ErrFeatureNotEnabled = errors.New("feature not enabled")
+
+// FeatureNotEnabledError preserves the closed plan feature key across the
+// store/server boundary without carrying tenant identifiers or content.
+type FeatureNotEnabledError struct {
+	Feature string
+}
+
+func (e *FeatureNotEnabledError) Error() string {
+	if e == nil || strings.TrimSpace(e.Feature) == "" {
+		return ErrFeatureNotEnabled.Error()
+	}
+	return fmt.Sprintf("%s: %s", ErrFeatureNotEnabled, e.Feature)
+}
+
+func (e *FeatureNotEnabledError) Unwrap() error { return ErrFeatureNotEnabled }
 
 // ErrCannotCloseDefault signals an attempt to close the deployment's seeded
 // default account (-> 403).

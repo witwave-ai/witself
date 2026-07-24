@@ -63,13 +63,28 @@ coordination, and fenced foreground processing inside one realm:
 - PostgreSQL account archives include audience snapshots and the complete open
   request graph. Active source-cell reservations/claims are interrupted during
   import so their old fences cannot complete in the destination cell.
+- Account snapshots gate every messaging surface through the explicit
+  `messaging` feature. Disabled accounts receive a stable, non-retryable
+  `feature_not_enabled` refusal before message content is stored. The installed
+  MCP tools and managed instructions remain in place across entitlement
+  changes; no client reinstall is required. The
+  `messaging_entitlement_version: 1` policy distinguishes an enforcing snapshot
+  from a legacy applied snapshot during the cell-first rollout.
+- The general-purpose cell worker applies the account's
+  `message_retention_days` policy to whole inactive threads in bounded,
+  multi-replica-safe batches. Active claims/requests and threads referenced as
+  memory evidence are deferred. Memory provenance is an explicit retention
+  hold; finite plan windows remain subject to that hold. Contended graphs are
+  skipped without blocking foreground work, stale activity is repaired from
+  the message table, and oversize graphs are quarantined with value-free
+  operator metrics. An absent policy means indefinite retention.
 
 Named-group fan-out, cross-realm delivery, dry-run, operator metadata
-inspection, policy scopes, plan-backed metering, and send/delivery rate limits
-are follow-on platform features rather than blockers for the agreed realm-local
-core. The tagged and deployed activation record for that core is separate from
-the implementation inventory below and makes no claim about dormant cells or
-narrative-memory production certification.
+inspection, finer policy scopes, plan-backed metering, and send/delivery rate
+limits are follow-on platform features rather than blockers for the agreed
+realm-local core. The tagged and deployed activation record for that core is
+separate from the implementation inventory below and makes no claim about
+dormant cells or narrative-memory production certification.
 
 ## Goal
 

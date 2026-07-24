@@ -506,12 +506,13 @@ type contextMemoryCheckpoint struct {
 }
 
 type contextMessageCheckpoint struct {
-	Pending                     bool `json:"pending"`
-	Unavailable                 bool `json:"unavailable,omitempty"`
-	MailboxPending              bool `json:"mailbox_pending,omitempty"`
-	CandidateOfferPending       bool `json:"candidate_offer_pending,omitempty"`
-	CoordinatorSelectionPending bool `json:"coordinator_selection_pending,omitempty"`
-	CandidateAssignmentPending  bool `json:"candidate_assignment_pending,omitempty"`
+	Enabled                     *bool `json:"enabled,omitempty"`
+	Pending                     bool  `json:"pending"`
+	Unavailable                 bool  `json:"unavailable,omitempty"`
+	MailboxPending              bool  `json:"mailbox_pending,omitempty"`
+	CandidateOfferPending       bool  `json:"candidate_offer_pending,omitempty"`
+	CoordinatorSelectionPending bool  `json:"coordinator_selection_pending,omitempty"`
+	CandidateAssignmentPending  bool  `json:"candidate_assignment_pending,omitempty"`
 }
 
 type contextEmailCheckpoint struct {
@@ -636,6 +637,10 @@ func setMessageCheckpoint(envelope *contextEnvelope, checkpoint *client.SelfMess
 		envelope.MessageCheckpoint = &contextMessageCheckpoint{Unavailable: true}
 		return
 	}
+	if checkpoint.Enabled != nil && !*checkpoint.Enabled {
+		envelope.MessageCheckpoint = &contextMessageCheckpoint{Enabled: checkpoint.Enabled}
+		return
+	}
 	if !checkpoint.Pending || (!checkpoint.MailboxPending && !checkpoint.CandidateOfferPending &&
 		!checkpoint.CoordinatorSelectionPending && !checkpoint.CandidateAssignmentPending) {
 		return
@@ -643,6 +648,7 @@ func setMessageCheckpoint(envelope *contextEnvelope, checkpoint *client.SelfMess
 	checkpointPending := checkpoint.MailboxPending || checkpoint.CandidateOfferPending ||
 		checkpoint.CoordinatorSelectionPending || checkpoint.CandidateAssignmentPending
 	envelope.MessageCheckpoint = &contextMessageCheckpoint{
+		Enabled:                     checkpoint.Enabled,
 		Pending:                     checkpointPending,
 		MailboxPending:              checkpoint.MailboxPending,
 		CandidateOfferPending:       checkpoint.CandidateOfferPending,

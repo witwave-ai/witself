@@ -4285,11 +4285,11 @@ export default {
       return handleAdmins(request, env, url);
     }
 
-    // Account retention and plan-override administration crosses a strict
-    // Worker->Go trust bridge. The caller's witself_adm_* token is verified at
-    // the edge and is never forwarded. Go receives only the internal bridge
-    // bearer plus the Worker-verified immutable X-Witself-Admin-ID and display
-    // X-Witself-Admin-Handle for its audit record.
+    // Account policy and plan-override administration crosses a strict
+    // Worker->Go trust bridge. The caller's witself_adm_* token is verified
+    // at the edge and is never forwarded. Go receives only the internal
+    // bridge bearer plus the Worker-verified immutable X-Witself-Admin-ID and
+    // display X-Witself-Admin-Handle for its audit record.
     if (matchAdminPolicyPath(url.pathname)) {
       const admin = await adminAuthorized(request, env);
       if (!admin) return err("unauthorized", 401);

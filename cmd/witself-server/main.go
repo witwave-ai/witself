@@ -494,7 +494,9 @@ func serve() int {
 			if err != nil {
 				return nil, mapMessageError(err)
 			}
+			enabled := checkpoint.Enabled
 			return &server.SelfMessageCheckpoint{
+				Enabled:                     &enabled,
 				Pending:                     checkpoint.Pending,
 				MailboxPending:              checkpoint.MailboxPending,
 				CandidateOfferPending:       checkpoint.CandidateOfferPending,
@@ -1777,9 +1779,12 @@ func mapTranscriptError(err error) error {
 }
 
 func mapMessageError(err error) error {
+	var featureErr *store.FeatureNotEnabledError
 	switch {
 	case err == nil:
 		return nil
+	case errors.As(err, &featureErr):
+		return &server.FeatureNotEnabledError{Feature: featureErr.Feature}
 	case errors.Is(err, store.ErrMessageInputInvalid), errors.Is(err, store.ErrMessageCursorInvalid):
 		return wrapAsSentinel(server.ErrBadInput, store.ErrMessageInputInvalid, err)
 	case errors.Is(err, store.ErrMessageRecipientMissing), errors.Is(err, store.ErrMessageNotFound):
@@ -1798,9 +1803,12 @@ func mapMessageError(err error) error {
 }
 
 func mapMessageRequestError(err error) error {
+	var featureErr *store.FeatureNotEnabledError
 	switch {
 	case err == nil:
 		return nil
+	case errors.As(err, &featureErr):
+		return &server.FeatureNotEnabledError{Feature: featureErr.Feature}
 	case errors.Is(err, store.ErrMessageRequestInputInvalid):
 		return wrapAsSentinel(server.ErrBadInput, store.ErrMessageRequestInputInvalid, err)
 	case errors.Is(err, store.ErrMessageRequestCursorInvalid):

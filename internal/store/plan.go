@@ -105,14 +105,8 @@ func (s *Store) SetAccountPlan(
 	if policies == nil {
 		policies = map[string]int64{}
 	}
-	for key, value := range policies {
-		if key != TranscriptRetentionDaysPolicy {
-			return AccountPlanSnapshot{}, fmt.Errorf("%w: unknown policy %q", ErrPlanPolicyInvalid, key)
-		}
-		if value < 1 || value > 36500 {
-			return AccountPlanSnapshot{}, fmt.Errorf("%w: %s must be between 1 and 36500 days",
-				ErrPlanPolicyInvalid, TranscriptRetentionDaysPolicy)
-		}
+	if err := plans.ValidatePolicies(policies); err != nil {
+		return AccountPlanSnapshot{}, fmt.Errorf("%w: %v", ErrPlanPolicyInvalid, err)
 	}
 	legacy := revision == 0 && snapshotHash == ""
 	if !legacy {

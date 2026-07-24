@@ -10,7 +10,7 @@
       "available": true,
       "usage_billed": false,
       "limits": { "agents": 10, "agents_per_realm": 10, "realms": 1, "stored_secret": 0 },
-      "policies": { "transcript_retention_days": 30 },
+      "policies": { "message_retention_days": 30, "messaging_entitlement_version": 1, "transcript_retention_days": 30 },
       "features": ["memory", "facts"],
       "summary": "Limited and capped. Agent memory and facts for up to 10 agents in one realm. No support included."
     },
@@ -21,8 +21,8 @@
       "available": true,
       "usage_billed": false,
       "limits": { "agents": 100, "agents_per_realm": 100, "realms": 1, "stored_secret": 100 },
-      "policies": { "transcript_retention_days": 90 },
-      "features": ["memory", "facts", "secrets", "collaboration", "support"],
+      "policies": { "message_retention_days": 90, "messaging_entitlement_version": 1, "transcript_retention_days": 90 },
+      "features": ["memory", "facts", "secrets", "messaging", "collaboration", "support"],
       "summary": "Capped. Memory, facts, secrets, and collaboration for up to 100 agents in one realm, support included."
     },
     {
@@ -32,8 +32,8 @@
       "available": false,
       "usage_billed": true,
       "limits": { "agents": 2500, "agents_per_realm": 100, "realms": 25, "stored_secret": 250 },
-      "policies": { "transcript_retention_days": 365 },
-      "features": ["memory", "facts", "secrets", "collaboration", "support"],
+      "policies": { "message_retention_days": 365, "messaging_entitlement_version": 1, "transcript_retention_days": 365 },
+      "features": ["memory", "facts", "secrets", "messaging", "collaboration", "support"],
       "summary": "Coming soon. Everything in Professional for up to 100 agents per realm across 25 realms, plus usage-based billing."
     },
     {
@@ -42,8 +42,8 @@
       "available": false,
       "usage_billed": true,
       "limits": { "stored_secret": 1000 },
-      "policies": {},
-      "features": ["memory", "facts", "secrets", "collaboration", "support"],
+      "policies": { "message_retention_days": 365, "messaging_entitlement_version": 1 },
+      "features": ["memory", "facts", "secrets", "messaging", "collaboration", "support"],
       "summary": "Coming soon. Everything in Team with custom pricing and support; details to follow."
     }
   ]

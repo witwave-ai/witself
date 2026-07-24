@@ -40,9 +40,9 @@ Worker jobs must be:
 - coordinated through durable PostgreSQL state;
 - free of tenant identifiers or payload values in metrics and logs.
 
-The first registered jobs are transcript retention and avatar-style rollout.
-New job types must opt in explicitly; the worker is not an arbitrary command
-runner.
+The registered jobs are transcript retention, message retention, and
+avatar-style rollout. New job types must opt in explicitly; the worker is not
+an arbitrary command runner.
 
 ## Cooperative Scaling
 
@@ -68,6 +68,19 @@ The configured batch timeout bounds a stuck database operation. The existing
 account and conversation locks, PostgreSQL clock cutoff, evidence and active
 curation holds, and whole-conversation atomic delete remain the final safety
 boundary.
+
+Message retention uses its own fixed preview/enforcement lanes, account
+cursors, and per-account thread-scan cursors. A small rebuildable activity
+projection supplies an indexed last-message timestamp for each thread. Its
+`BEFORE INSERT` trigger is also the synchronization fence: a new send cannot
+materialize content while retention owns that thread, and retention cannot
+classify the thread while a send is advancing its activity. The batch locks the
+complete message/request graph and deletes only whole inactive threads.
+Memory-evidence references and live delivery/request claims defer deletion.
+Per-thread and cumulative batch graph ceilings keep work bounded. Lane
+selection first records a short durable lease, so a timeout or crash backs off
+that exact lane while another replica can claim a different due lane. Message
+and transcript retention never share a lane or cadence.
 
 Scaling is not guaranteed to be perfectly linear. Two replicas can approach
 twice the throughput when at least two lanes have work and PostgreSQL has
@@ -103,6 +116,12 @@ bounded job names and result classes only:
 - retention last-success time; and
 - retention scanned, eligible, deleted, capped, and deferred counts.
 
+Message retention has separate
+`witself_worker_message_retention_*` batch, item, and last-success families.
+Its item kinds distinguish eligible/deleted threads, deleted messages,
+evidence holds, active-work holds, lock deferrals, oversize quarantine, and
+cumulative-budget deferrals.
+
 Account, realm, agent, conversation, task, transcript, memory, and secret
 identifiers must never be metric labels. Error text and stored content must
 never enter metrics.
@@ -132,3 +151,14 @@ The initial migration is deliberately overlap-safe:
 
 The old singleton retention state remains schema-compatible during this
 transition. It is not the scheduling path for `witself-worker`.
+
+Message retention has a separate activation sequence:
+
+1. migrate the activity projection, per-account scan state, and 16
+   preview/enforcement lanes while the job is disabled;
+2. enable `preview` and review only value-free counts;
+3. switch to `enforce` in a config-only worker rollout.
+
+The API process never runs this loop. Multiple worker replicas claim different
+database lanes with `SKIP LOCKED`; replica count is not encoded in the lane
+cardinality.

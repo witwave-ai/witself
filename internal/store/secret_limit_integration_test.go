@@ -226,6 +226,11 @@ func TestSecretDeleteReceiptMigrationDowngradeWithoutDeleteReceipts(t *testing.T
 	if err := migrationTestDown(t, dsn, false); err != nil {
 		t.Fatal(err)
 	}
+	assertMigrationTestVersion(t, dsn, 67)
+	assertMigrationTestTable(t, st, "message_retention_worker_lanes", false)
+	if err := migrationTestDown(t, dsn, false); err != nil {
+		t.Fatal(err)
+	}
 	assertMigrationTestVersion(t, dsn, 66)
 	for _, name := range []string{
 		"secret_mutation_receipts_operation_check",
@@ -260,12 +265,17 @@ func TestSecretDeleteReceiptMigrationDowngradeRefusesCommittedDelete(t *testing.
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := migrationTestDown(t, dsn, false); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, 67)
+	assertMigrationTestTable(t, st, "message_retention_worker_lanes", false)
 	downErr := migrationTestDown(t, dsn, true)
 	if downErr == nil || !strings.Contains(downErr.Error(),
 		"delete receipts exist") {
 		t.Fatalf("downgrade error = %v", downErr)
 	}
-	assertMigrationTestVersion(t, dsn, int64(SchemaVersion()))
+	assertMigrationTestVersion(t, dsn, 67)
 	for _, name := range []string{
 		"secret_mutation_receipts_operation_check",
 		"secret_mutation_receipts_check",

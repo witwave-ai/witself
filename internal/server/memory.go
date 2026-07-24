@@ -942,6 +942,8 @@ func writeMemoryError(w http.ResponseWriter, err error, operation string) bool {
 		return false
 	}
 	switch {
+	case errors.Is(err, ErrFeatureNotEnabled):
+		writeFeatureNotEnabledError(w, err)
 	case errors.Is(err, ErrBadInput):
 		writeJSONError(w, http.StatusBadRequest, "invalid memory request")
 	case errors.Is(err, ErrForbidden):
