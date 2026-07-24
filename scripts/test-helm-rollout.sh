@@ -350,6 +350,11 @@ require_line '  WITSELF_TRANSCRIPT_RETENTION_ENABLED: "false"' "$gcp_server_conf
 require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED: "false"' "$live_nested_server_config"
 require_line '  WITSELF_TRANSCRIPT_RETENTION_ENABLED: "false"' "$live_nested_server_config"
 require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED: "true"' "$live_nested_worker_config"
+require_line '  WITSELF_MESSAGE_RETENTION_ENABLED: "true"' "$live_nested_worker_config"
+require_line '  WITSELF_MESSAGE_RETENTION_MODE: "preview"' "$live_nested_worker_config"
+require_line '  WITSELF_MESSAGE_RETENTION_BATCH_SIZE: "25"' "$live_nested_worker_config"
+require_line '  WITSELF_MESSAGE_RETENTION_INTERVAL: "5m"' "$live_nested_worker_config"
+require_line '  WITSELF_MESSAGE_RETENTION_BATCH_TIMEOUT: "2m"' "$live_nested_worker_config"
 require_line '  WITSELF_TRANSCRIPT_RETENTION_ENABLED: "true"' "$live_nested_worker_config"
 require_line '  WITSELF_TRANSCRIPT_RETENTION_MODE: "enforce"' "$live_nested_worker_config"
 require_line '  WITSELF_TRANSCRIPT_RETENTION_BATCH_TIMEOUT: "2m"' "$live_nested_worker_config"
@@ -586,6 +591,12 @@ require_sequence "$apps_render" \
   "            enabled: true" \
   "            interval: 2s" \
   "          enabled: true" \
+  "          messageRetention:" \
+  "            batchSize: 25" \
+  "            batchTimeout: 2m" \
+  "            enabled: true" \
+  "            interval: 5m" \
+  "            mode: preview" \
   "          minReadySeconds: 10"
 require_sequence "$apps_render" \
   "          replicaCount: 2" \
