@@ -364,8 +364,8 @@ func TestAdminAgentPerRealmUnlimitedOverrideLifecycle(t *testing.T) {
 	}
 	view := doc["limit"].(map[string]any)
 	if view["dimension"] != plans.AgentPerRealmLimit ||
-		view["default_max"] != nil ||
-		view["effective_max"] != nil ||
+		view["default_max"] != float64(10) ||
+		view["effective_max"] != float64(10) ||
 		view["overridden"] != false {
 		t.Fatalf("inherited view = %v", view)
 	}
@@ -411,8 +411,8 @@ func TestAdminAgentPerRealmUnlimitedOverrideLifecycle(t *testing.T) {
 	}
 	view = doc["limit"].(map[string]any)
 	if view["overridden"] != false ||
-		view["default_max"] != nil ||
-		view["effective_max"] != nil {
+		view["default_max"] != float64(10) ||
+		view["effective_max"] != float64(10) {
 		t.Fatalf("cleared view = %v", view)
 	}
 	history = doc["admin_history"].([]any)
