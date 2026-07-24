@@ -43,9 +43,9 @@ remain deferred.
 The following table records the current product direction as of 2026-07-24. It
 is a working packaging decision, not a claim that every entitlement is already
 implemented or enforced. Each row moves into the canonical plan catalog and
-resolved cell policy only through its own implementation and rollout decision;
-the realm and agent values remain unchanged during the Phase A compatibility
-release described below.
+resolved cell policy only through its own implementation and rollout decision.
+The realm and agent values are the Phase B canonical defaults described below;
+the other rows remain subject to their own implementation and rollout gates.
 
 | Capability | Personal — $0 | Professional — $30/month | Team — $250/month | Enterprise — contact us |
 |---|---:|---:|---:|---:|
@@ -94,16 +94,19 @@ requests reaching different server replicas cannot overshoot either maximum.
 Duplicate or tombstone-reserved names and invalid realms are resolved before
 the capacity gate so callers are not incorrectly told to upgrade.
 
-Catalog activation is two-phase:
+Catalog activation uses two phases:
 
-1. Deploy cells and the control plane that understand `agents_per_realm`,
+1. Phase A deploys cells and the control plane that understand
+   `agents_per_realm`,
    retain legacy `agents`, expose the audited override through the strict edge
    allow-list, and leave `web/plans/plans.json` unchanged.
-2. After every cell is converged and founder explicit-unlimited overrides exist
-   for `realms`, `agents`, and `agents_per_realm`, promote the working table's
-   values in a separate catalog release and reconcile every hosted account.
+2. Phase B promotes the working table's values in a separate catalog release
+   after every cell is converged and founder explicit-unlimited overrides exist
+   for `realms`, `agents`, and `agents_per_realm`; every hosted account is then
+   reconciled.
 
-The Phase A implementation does not modify `web/plans/plans.json`.
+The compatibility Phase A implementation did not modify
+`web/plans/plans.json`; this Phase B catalog release activates the defaults.
 After `agents_per_realm` audit data exists, Phase A is the control-plane rollback
 floor: an older control plane rejects the unknown audited dimension. Old cells
 reject a newly pushed snapshot containing the closed key, but rolling an old
@@ -196,7 +199,8 @@ Catalog promotion is intentionally two-phase:
    override both immediately before and after catalog promotion; do not rely on
    a plan label or a missing catalog entry to make the founder unlimited.
 
-Phase A does not modify `web/plans/plans.json`.
+The stored-secret compatibility Phase A did not modify
+`web/plans/plans.json`; its catalog promotion was a separate release.
 
 Memories are durable knowledge and do not expire by age. The allowance counts
 only active memories; revisions, replacements, and superseded versions do not

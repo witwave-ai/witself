@@ -163,9 +163,11 @@ func TestAccountLimitOverrideLifecycleAndAttribution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if inherited.DefaultLimits[plans.AgentLimit] != 25 ||
-		inherited.Limits[plans.AgentLimit] != 25 {
-		t.Fatalf("inherited agent limit = defaults %v effective %v; want 25",
+	if inherited.DefaultLimits[plans.AgentLimit] != 10 ||
+		inherited.Limits[plans.AgentLimit] != 10 ||
+		inherited.DefaultLimits[plans.AgentPerRealmLimit] != 10 ||
+		inherited.Limits[plans.AgentPerRealmLimit] != 10 {
+		t.Fatalf("inherited agent limits = defaults %v effective %v; want 10 account-wide and per realm",
 			inherited.DefaultLimits, inherited.Limits)
 	}
 	if got, ok := inherited.DefaultLimits[plans.StoredSecretLimit]; !ok || got != 0 {
@@ -325,9 +327,9 @@ func TestAccountLimitOverrideLifecycleAndAttribution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.DefaultLimits[plans.AgentLimit] != 25 ||
-		snapshot.Limits[plans.AgentLimit] != 25 {
-		t.Fatalf("cleared agent limit = defaults %v effective %v; want 25",
+	if snapshot.DefaultLimits[plans.AgentLimit] != 10 ||
+		snapshot.Limits[plans.AgentLimit] != 10 {
+		t.Fatalf("cleared agent limit = defaults %v effective %v; want 10",
 			snapshot.DefaultLimits, snapshot.Limits)
 	}
 
@@ -563,7 +565,19 @@ func TestFounderUnlimitedOverrideOnAppliedUnlimitedSnapshotDoesNotReapply(t *tes
 			len(h.applier.calls))
 	}
 
-	phaseB, err := plans.Load()
+	phaseB, err := plans.Parse([]byte(`{
+		"schema_version":"witself.plans.v0",
+		"plans":[{
+			"id":"free",
+			"name":"Personal",
+			"price_monthly":0,
+			"available":true,
+			"usage_billed":false,
+			"limits":{"agents":25,"realms":1,"stored_secret":0},
+			"policies":{"transcript_retention_days":30},
+			"features":["memory","facts"]
+		}]
+	}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -811,7 +825,7 @@ func TestClearingEnterpriseOverrideCannotBypassPersonalFitCheck(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	h.fit.set([]string{"agents 26 > 25"})
+	h.fit.set([]string{"agents 26 > 10"})
 	if _, err := h.m.ClearAccountPlanOverride(
 		ctx, "acct_scott_fit", testAdminActor(), "restore Personal classification",
 	); err != nil {
@@ -822,7 +836,7 @@ func TestClearingEnterpriseOverrideCannotBypassPersonalFitCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	if snapshot.Plan != plans.Free || r.Applied != "enterprise" ||
-		!strings.Contains(r.ApplyBlocked, "agents 26 > 25") ||
+		!strings.Contains(r.ApplyBlocked, "agents 26 > 10") ||
 		!SnapshotApplyPending(r, snapshot) {
 		t.Fatalf("unsafe override clear was reported applied: record=%+v snapshot=%+v", r, snapshot)
 	}
@@ -879,8 +893,11 @@ func TestHeadlessUpgrade(t *testing.T) {
 		t.Fatalf("record = %+v; want entitled+applied standard", r)
 	}
 	call := h.applier.last(t)
-	if call.plan != "standard" || call.limits["agents"] != 250 || call.limits["realms"] != 10 {
-		t.Fatalf("applied snapshot = %+v; want standard 250/10", call)
+	if call.plan != "standard" ||
+		call.limits[plans.AgentLimit] != 100 ||
+		call.limits[plans.AgentPerRealmLimit] != 100 ||
+		call.limits[plans.RealmLimit] != 1 {
+		t.Fatalf("applied snapshot = %+v; want standard 100 agents, 100 agents per realm, 1 realm", call)
 	}
 	joined := strings.Join(call.features, ",")
 	if !strings.Contains(joined, "secrets") || !strings.Contains(joined, "collaboration") {
@@ -1003,9 +1020,9 @@ func TestDowngradeFitBlocked(t *testing.T) {
 		t.Fatalf("RequestUpgrade: %v", err)
 	}
 
-	h.fit.set([]string{"agents 112 > 25", "3 realms > 1", "14 secrets in use"})
+	h.fit.set([]string{"agents 112 > 10", "3 realms > 1", "14 secrets in use"})
 	_, err := h.m.RequestDowngrade(ctx, "acct_1", "s@example.com", "free")
-	if err == nil || !strings.Contains(err.Error(), "agents 112 > 25") {
+	if err == nil || !strings.Contains(err.Error(), "agents 112 > 10") {
 		t.Fatalf("blocked downgrade error = %v; want the violation report", err)
 	}
 	if r := h.record(t, "acct_1"); r.Pending != nil {
@@ -1039,8 +1056,11 @@ func TestScheduledDowngradeFlow(t *testing.T) {
 	if r.Entitled != plans.Free || r.Applied != plans.Free || r.Pending != nil {
 		t.Fatalf("after period end record = %+v; want free/free, no pending", r)
 	}
-	if call := h.applier.last(t); call.plan != plans.Free || call.limits["agents"] != 25 {
-		t.Fatalf("applied snapshot = %+v; want free 25/1", call)
+	if call := h.applier.last(t); call.plan != plans.Free ||
+		call.limits[plans.AgentLimit] != 10 ||
+		call.limits[plans.AgentPerRealmLimit] != 10 ||
+		call.limits[plans.RealmLimit] != 1 {
+		t.Fatalf("applied snapshot = %+v; want free 10 agents, 10 agents per realm, 1 realm", call)
 	}
 }
 
@@ -1300,7 +1320,7 @@ func TestApplyTimeFitCheck(t *testing.T) {
 	}
 
 	// Usage grows during the wait; at period end billing cancels regardless.
-	h.fit.set([]string{"agents 112 > 25"})
+	h.fit.set([]string{"agents 112 > 10"})
 	h.ck.t = periodEnd.Add(time.Hour)
 	if err := h.m.OnEvents(ctx, "fake", h.fake.ApplyDue()); err != nil {
 		t.Fatalf("OnEvents: %v", err)
@@ -1309,7 +1329,7 @@ func TestApplyTimeFitCheck(t *testing.T) {
 	if r.Entitled != plans.Free {
 		t.Fatalf("entitled = %q; billing did end the subscription", r.Entitled)
 	}
-	if r.Applied != "standard" || !strings.Contains(r.ApplyBlocked, "agents 112 > 25") {
+	if r.Applied != "standard" || !strings.Contains(r.ApplyBlocked, "agents 112 > 10") {
 		t.Fatalf("record = %+v; the cell must keep the old plan and the block must be visible", r)
 	}
 	if call := h.applier.last(t); call.plan != "standard" {

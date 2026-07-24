@@ -1,6 +1,8 @@
 package plans
 
 import (
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -16,13 +18,16 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 	if len(c.Plans) != 4 {
 		t.Fatalf("catalog has %d plans; want 4", len(c.Plans))
 	}
+	if c.Updated != "2026-07-24" {
+		t.Fatalf("catalog updated = %q; want 2026-07-24", c.Updated)
+	}
+	if c.Currency != "USD" {
+		t.Fatalf("catalog currency = %q; want USD", c.Currency)
+	}
 
 	free, ok := c.Get(Free)
 	if !ok || free.Paid() || !free.Available || free.Purchasable() {
 		t.Fatalf("free = %+v; want available, unpaid, not purchasable", free)
-	}
-	if free.Limits["agents"] != 25 || free.Limits["realms"] != 1 {
-		t.Fatalf("free limits = %v; want 25 agents / 1 realm", free.Limits)
 	}
 	if free.Name != "Personal" || free.Policies[TranscriptRetentionDaysPolicy] != 30 {
 		t.Fatalf("free = %+v; want Personal with 30-day transcript retention", free)
@@ -56,20 +61,88 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 	if _, capped := enterprise.Policies[TranscriptRetentionDaysPolicy]; capped {
 		t.Fatalf("enterprise policies = %v; want indefinite transcript retention", enterprise.Policies)
 	}
-	for planID, want := range map[string]int64{
-		Free:         0,
-		"standard":   100,
-		"team":       250,
-		"enterprise": 1000,
-	} {
+	monthly := func(value int64) *int64 { return &value }
+	type expectedPlan struct {
+		name         string
+		priceMonthly *int64
+		available    bool
+		usageBilled  bool
+		limits       map[string]int64
+		policies     map[string]int64
+		features     []string
+		summary      string
+	}
+	wantPlans := map[string]expectedPlan{
+		Free: {
+			name:         "Personal",
+			priceMonthly: monthly(0),
+			available:    true,
+			limits: map[string]int64{
+				AgentLimit:         10,
+				AgentPerRealmLimit: 10,
+				RealmLimit:         1,
+				StoredSecretLimit:  0,
+			},
+			policies: map[string]int64{TranscriptRetentionDaysPolicy: 30},
+			features: []string{"memory", "facts"},
+			summary:  "Limited and capped. Agent memory and facts for up to 10 agents in one realm. No support included.",
+		},
+		"standard": {
+			name:         "Professional",
+			priceMonthly: monthly(30),
+			available:    true,
+			limits: map[string]int64{
+				AgentLimit:         100,
+				AgentPerRealmLimit: 100,
+				RealmLimit:         1,
+				StoredSecretLimit:  100,
+			},
+			policies: map[string]int64{TranscriptRetentionDaysPolicy: 90},
+			features: []string{"memory", "facts", "secrets", "collaboration", "support"},
+			summary:  "Capped. Memory, facts, secrets, and collaboration for up to 100 agents in one realm, support included.",
+		},
+		"team": {
+			name:         "Team",
+			priceMonthly: monthly(250),
+			usageBilled:  true,
+			limits: map[string]int64{
+				AgentLimit:         2500,
+				AgentPerRealmLimit: 100,
+				RealmLimit:         25,
+				StoredSecretLimit:  250,
+			},
+			policies: map[string]int64{TranscriptRetentionDaysPolicy: 365},
+			features: []string{"memory", "facts", "secrets", "collaboration", "support"},
+			summary:  "Coming soon. Everything in Professional for up to 100 agents per realm across 25 realms, plus usage-based billing.",
+		},
+		"enterprise": {
+			name:        "Enterprise",
+			usageBilled: true,
+			limits:      map[string]int64{StoredSecretLimit: 1000},
+			policies:    map[string]int64{},
+			features:    []string{"memory", "facts", "secrets", "collaboration", "support"},
+			summary:     "Coming soon. Everything in Team with custom pricing and support; details to follow.",
+		},
+	}
+	equalOptionalInt64 := func(left, right *int64) bool {
+		return left == nil && right == nil ||
+			left != nil && right != nil && *left == *right
+	}
+	for planID, want := range wantPlans {
 		plan, ok := c.Get(planID)
 		if !ok {
 			t.Fatalf("catalog missing plan %q", planID)
 		}
-		got, present := plan.Limits[StoredSecretLimit]
-		if !present || got != want {
-			t.Fatalf("%s stored-secret limit = %d (present %v); want %d",
-				planID, got, present, want)
+		if plan.Name != want.name ||
+			!equalOptionalInt64(plan.PriceMonthly, want.priceMonthly) ||
+			plan.PriceMonthlyMin != nil ||
+			plan.Available != want.available ||
+			plan.UsageBilled != want.usageBilled ||
+			!maps.Equal(plan.Limits, want.limits) ||
+			!maps.Equal(plan.Policies, want.policies) ||
+			!slices.Equal(plan.Features, want.features) ||
+			plan.Summary != want.summary {
+			t.Fatalf("%s catalog entry = %+v; want exactly %+v", planID, plan, want)
 		}
 	}
 	for _, feature := range team.Features {
@@ -77,19 +150,6 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 			t.Fatalf("enterprise features = %v; missing Team feature %q", enterprise.Features, feature)
 		}
 	}
-	// Phase A rollout guard: cells and the control plane understand the new
-	// dimension before any canonical plan can emit it. Phase B deliberately
-	// replaces this assertion with exact per-plan defaults.
-	for _, plan := range c.Plans {
-		if _, active := plan.Limits[AgentPerRealmLimit]; active {
-			t.Fatalf(
-				"Phase A catalog plan %q activated %q before fleet convergence",
-				plan.ID,
-				AgentPerRealmLimit,
-			)
-		}
-	}
-
 	prices := c.Prices()
 	if len(prices) != 1 || prices["standard"] != 3000 {
 		t.Fatalf("Prices() = %v; want exactly {standard: 3000} while team/enterprise are unavailable", prices)
