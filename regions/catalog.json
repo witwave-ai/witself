@@ -18,11 +18,16 @@
           "name": "South Carolina",
           "match": "native"
         },
-        "azure": {
-          "region": "eastus",
-          "name": "East US",
-          "match": "native"
-        }
+      "azure": {
+        "region": "eastus",
+        "name": "East US",
+        "match": "native"
+      },
+      "civo": {
+        "region": "nyc1",
+        "name": "New York 1",
+        "match": "nearest"
+      }
       }
     },
     "usw1": {

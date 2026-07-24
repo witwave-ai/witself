@@ -20,6 +20,14 @@ func TestResolveRegionCode(t *testing.T) {
 			wantOK:        true,
 		},
 		{
+			name:          "Civo region participates in placement",
+			cloud:         "civo",
+			region:        "nyc1",
+			wantNameCode:  "use1",
+			wantPlaceCode: "use1",
+			wantOK:        true,
+		},
+		{
 			name:          "legacy-only region remains provisionable",
 			cloud:         "azure",
 			region:        "eastus2",
