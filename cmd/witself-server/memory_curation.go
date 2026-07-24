@@ -182,6 +182,10 @@ func mapMemoryCurationError(err error) error {
 	if err == nil {
 		return nil
 	}
+	var featureErr *store.FeatureNotEnabledError
+	if errors.As(err, &featureErr) {
+		return &server.FeatureNotEnabledError{Feature: featureErr.Feature}
+	}
 	var blocked *store.MemoryCurationRollbackBlockedError
 	if errors.As(err, &blocked) {
 		out := &server.MemoryCurationRollbackBlockedError{

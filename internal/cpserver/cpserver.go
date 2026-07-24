@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -102,6 +103,18 @@ func Register(mux *http.ServeMux, cfg Config) error {
 			withAdmin(cfg, adminPutTranscriptRetention))
 		mux.HandleFunc("DELETE /v1/admin/accounts/{id}/transcript-retention",
 			withAdmin(cfg, adminDeleteTranscriptRetention))
+		mux.HandleFunc("GET /v1/admin/accounts/{id}/messaging",
+			withAdmin(cfg, adminGetMessaging))
+		mux.HandleFunc("PUT /v1/admin/accounts/{id}/messaging",
+			withAdmin(cfg, adminPutMessaging))
+		mux.HandleFunc("DELETE /v1/admin/accounts/{id}/messaging",
+			withAdmin(cfg, adminDeleteMessaging))
+		mux.HandleFunc("GET /v1/admin/accounts/{id}/message-retention",
+			withAdmin(cfg, adminGetMessageRetention))
+		mux.HandleFunc("PUT /v1/admin/accounts/{id}/message-retention",
+			withAdmin(cfg, adminPutMessageRetention))
+		mux.HandleFunc("DELETE /v1/admin/accounts/{id}/message-retention",
+			withAdmin(cfg, adminDeleteMessageRetention))
 		mux.HandleFunc("GET /v1/admin/accounts/{id}/plan-override",
 			withAdmin(cfg, adminGetPlanOverride))
 		mux.HandleFunc("PUT /v1/admin/accounts/{id}/plan-override",
@@ -278,6 +291,10 @@ func planStatus(cfg Config, w http.ResponseWriter, r *http.Request, accountID st
 		"limit_defaults":       snapshot.DefaultLimits,
 		"policies":             snapshot.Policies,
 		"policy_defaults":      snapshot.DefaultPolicies,
+		"features":             snapshot.Features,
+		"feature_defaults":     snapshot.DefaultFeatures,
+		"messaging":            messagingView(rec, snapshot, false),
+		"message_retention":    messageRetentionView(rec, snapshot, false),
 		"transcript_retention": transcriptRetentionView(rec, snapshot, false),
 		"apply_pending":        lifecycle.SnapshotApplyPending(rec, snapshot),
 	}
@@ -298,6 +315,47 @@ func planStatus(cfg Config, w http.ResponseWriter, r *http.Request, accountID st
 		out["pending"] = pv
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func messagingView(
+	rec lifecycle.Record,
+	snapshot lifecycle.PlanSnapshot,
+	includeAdminDetail bool,
+) map[string]any {
+	out := map[string]any{
+		"default_enabled": slices.Contains(
+			snapshot.DefaultFeatures, plans.MessagingFeature),
+		"enabled":    slices.Contains(snapshot.Features, plans.MessagingFeature),
+		"overridden": rec.MessagingOverride != nil,
+	}
+	if includeAdminDetail && rec.MessagingOverride != nil {
+		out["override"] = rec.MessagingOverride
+	}
+	return out
+}
+
+func messageRetentionView(
+	rec lifecycle.Record,
+	snapshot lifecycle.PlanSnapshot,
+	includeAdminDetail bool,
+) map[string]any {
+	var defaultDays any
+	if days, ok := snapshot.DefaultPolicies[plans.MessageRetentionDaysPolicy]; ok {
+		defaultDays = days
+	}
+	var effectiveDays any
+	if days, ok := snapshot.Policies[plans.MessageRetentionDaysPolicy]; ok {
+		effectiveDays = days
+	}
+	out := map[string]any{
+		"default_days":   defaultDays,
+		"effective_days": effectiveDays,
+		"overridden":     rec.MessageRetentionOverride != nil,
+	}
+	if includeAdminDetail && rec.MessageRetentionOverride != nil {
+		out["override"] = rec.MessageRetentionOverride
+	}
+	return out
 }
 
 type adminAccountHandler func(
@@ -398,7 +456,11 @@ func writeAdminAccountPolicy(
 		"limits":               snapshot.Limits,
 		"limit_defaults":       snapshot.DefaultLimits,
 		"limit_overrides":      rec.LimitOverrides,
+		"features":             snapshot.Features,
+		"feature_defaults":     snapshot.DefaultFeatures,
 		"plan_override":        rec.PlanOverride,
+		"messaging":            messagingView(rec, snapshot, true),
+		"message_retention":    messageRetentionView(rec, snapshot, true),
 		"transcript_retention": transcriptRetentionView(rec, snapshot, true),
 		"admin_history":        rec.AdminHistory,
 		"apply_pending":        pending,
@@ -484,6 +546,128 @@ func adminDeleteTranscriptRetention(
 		return
 	}
 	if _, err := cfg.Manager.ClearTranscriptRetentionOverride(
+		r.Context(), accountID, actor, req.Reason,
+	); err != nil {
+		writeManagerError(w, err)
+		return
+	}
+	writeAdminAccountPolicy(cfg, w, r, accountID, true, "")
+}
+
+func adminGetMessaging(
+	cfg Config,
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	_ lifecycle.AdminActor,
+) {
+	writeAdminAccountPolicy(cfg, w, r, accountID, false, "")
+}
+
+func adminPutMessaging(
+	cfg Config,
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	actor lifecycle.AdminActor,
+) {
+	var req struct {
+		Enabled *bool  `json:"enabled"`
+		Reason  string `json:"reason"`
+	}
+	if err := decodeStrictJSON(r, &req); err != nil || req.Enabled == nil {
+		writeError(w, http.StatusBadRequest,
+			"a JSON body with enabled and reason is required")
+		return
+	}
+	if _, err := cfg.Manager.SetMessagingOverride(
+		r.Context(), accountID, *req.Enabled, actor, req.Reason,
+	); err != nil {
+		writeManagerError(w, err)
+		return
+	}
+	writeAdminAccountPolicy(cfg, w, r, accountID, true, "")
+}
+
+func adminDeleteMessaging(
+	cfg Config,
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	actor lifecycle.AdminActor,
+) {
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if err := decodeStrictJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "a JSON body with reason is required")
+		return
+	}
+	if _, err := cfg.Manager.ClearMessagingOverride(
+		r.Context(), accountID, actor, req.Reason,
+	); err != nil {
+		writeManagerError(w, err)
+		return
+	}
+	writeAdminAccountPolicy(cfg, w, r, accountID, true, "")
+}
+
+func adminGetMessageRetention(
+	cfg Config,
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	_ lifecycle.AdminActor,
+) {
+	writeAdminAccountPolicy(cfg, w, r, accountID, false, "")
+}
+
+func adminPutMessageRetention(
+	cfg Config,
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	actor lifecycle.AdminActor,
+) {
+	var req struct {
+		Days       *int64 `json:"days"`
+		Indefinite bool   `json:"indefinite"`
+		Reason     string `json:"reason"`
+	}
+	if err := decodeStrictJSON(r, &req); err != nil ||
+		(req.Days == nil) == !req.Indefinite {
+		writeError(w, http.StatusBadRequest,
+			"set exactly one of days or indefinite=true")
+		return
+	}
+	var days *int64
+	if !req.Indefinite {
+		days = req.Days
+	}
+	if _, err := cfg.Manager.SetMessageRetentionOverride(
+		r.Context(), accountID, days, actor, req.Reason,
+	); err != nil {
+		writeManagerError(w, err)
+		return
+	}
+	writeAdminAccountPolicy(cfg, w, r, accountID, true, "")
+}
+
+func adminDeleteMessageRetention(
+	cfg Config,
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	actor lifecycle.AdminActor,
+) {
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if err := decodeStrictJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "a JSON body with reason is required")
+		return
+	}
+	if _, err := cfg.Manager.ClearMessageRetentionOverride(
 		r.Context(), accountID, actor, req.Reason,
 	); err != nil {
 		writeManagerError(w, err)

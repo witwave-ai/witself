@@ -87,7 +87,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself-admin ticket ...    Read/reply/transition support tickets across the fleet")
 	usageLine(w, "                                (list|watch|show|reply|state|resolve|close|states)")
 	usageLine(w, "  witself-admin account ...   Read/set per-account fleet settings")
-	usageLine(w, "                                (support-policy|transcript-retention|plan-override|limit-override)")
+	usageLine(w, "                                (support-policy|transcript-retention|messaging|message-retention|plan-override|limit-override)")
 	usageLine(w, "  witself-admin cells ...     Fleet cell registry with account counts (list)")
 	usageLine(w, "  witself-admin events ...    Fleet-wide audit-event tail (list|watch)")
 	usageLine(w, "  witself-admin placement ... Rescue archived accounts blocked by hard pins")
@@ -951,7 +951,7 @@ func accountPolicyJSONMap(res *client.AdminAccountPolicy) map[string]any {
 // off the same tree.
 func accountCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself-admin account (support-policy|transcript-retention|plan-override|limit-override) ...")
+		fmt.Fprintln(os.Stderr, "usage: witself-admin account (support-policy|transcript-retention|messaging|message-retention|plan-override|limit-override) ...")
 		return 2
 	}
 	switch args[0] {
@@ -959,6 +959,10 @@ func accountCmd(args []string) int {
 		return accountSupportPolicy(args[1:])
 	case "transcript-retention":
 		return accountTranscriptRetention(args[1:])
+	case "messaging":
+		return accountMessaging(args[1:])
+	case "message-retention":
+		return accountMessageRetention(args[1:])
 	case "plan-override":
 		return accountPlanOverride(args[1:])
 	case "limit-override":
@@ -1033,9 +1037,15 @@ func resolveAdminAccountAction(endpoint, token, tokenFile string) (string, strin
 }
 
 func printAdminAccountPolicy(res *client.AdminAccountPolicy) int {
-	retention := "indefinite"
+	transcriptRetention := "indefinite"
 	if res.TranscriptRetention.EffectiveDays != nil {
-		retention = fmt.Sprintf("%d days", *res.TranscriptRetention.EffectiveDays)
+		transcriptRetention = fmt.Sprintf(
+			"%d days", *res.TranscriptRetention.EffectiveDays)
+	}
+	messageRetention := "indefinite"
+	if res.MessageRetention.EffectiveDays != nil {
+		messageRetention = fmt.Sprintf(
+			"%d days", *res.MessageRetention.EffectiveDays)
 	}
 	override := "none"
 	if res.PlanOverride != nil {
@@ -1045,9 +1055,12 @@ func printAdminAccountPolicy(res *client.AdminAccountPolicy) int {
 	if res.ApplyPending {
 		applyState = "pending"
 	}
-	fmt.Printf("%s: plan=%s billing_plan=%s retention=%s retention_override=%t plan_override=%s apply=%s desired_revision=%d applied_revision=%d\n",
+	fmt.Printf("%s: plan=%s billing_plan=%s messaging=%t messaging_override=%t message_retention=%s message_retention_override=%t transcript_retention=%s transcript_retention_override=%t plan_override=%s apply=%s desired_revision=%d applied_revision=%d\n",
 		safeText(res.AccountID), safeText(res.Plan), safeText(res.BillingPlan),
-		retention, res.TranscriptRetention.Overridden, safeText(override),
+		res.Messaging.Enabled, res.Messaging.Overridden,
+		messageRetention, res.MessageRetention.Overridden,
+		transcriptRetention, res.TranscriptRetention.Overridden,
+		safeText(override),
 		applyState, res.DesiredRevision, res.AppliedRevision)
 	if res.Limit != nil {
 		defaultMax := "unlimited"
@@ -1170,6 +1183,221 @@ func accountTranscriptRetention(args []string) int {
 			client.AdminTranscriptRetentionInput{Days: finite, Indefinite: *indefinite, Reason: *reason})
 	case "clear":
 		res, err = client.ClearAdminTranscriptRetention(context.Background(), ep, tok, *account, *reason)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printAdminAccountPolicyJSON(res)
+	}
+	return printAdminAccountPolicy(res)
+}
+
+// accountMessaging manages the account feature exception without changing the
+// installed client integration or provider-backed billing relationship.
+func accountMessaging(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr,
+			"usage: witself-admin account messaging (get|set|clear) ...")
+		return 2
+	}
+	action := args[0]
+	if action != "get" && action != "set" && action != "clear" {
+		fmt.Fprintf(os.Stderr,
+			"witself-admin account messaging: unknown action %q\n", action)
+		return 2
+	}
+
+	fs := flag.NewFlagSet("account messaging "+action, flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	endpoint := fs.String("endpoint", "", "control-plane URL")
+	token := fs.String("token", "", "admin token")
+	tokenFile := fs.String("token-file", "", "file containing the admin token")
+	account := fs.String("account", "", "account id (required)")
+	enabled := fs.Bool("enabled", false, "enable durable messaging")
+	disabled := fs.Bool("disabled", false, "disable durable messaging")
+	reason := fs.String("reason", "", "required audit reason for set/clear")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args[1:]); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 || strings.TrimSpace(*account) == "" {
+		fmt.Fprintf(os.Stderr,
+			"usage: witself-admin account messaging %s --account ACCOUNT_ID",
+			action)
+		switch action {
+		case "set":
+			fmt.Fprint(os.Stderr, " (--enabled|--disabled) --reason REASON")
+		case "clear":
+			fmt.Fprint(os.Stderr, " --reason REASON")
+		}
+		fmt.Fprintln(os.Stderr)
+		return 2
+	}
+	switch action {
+	case "get":
+		if *enabled || *disabled || strings.TrimSpace(*reason) != "" {
+			fmt.Fprintln(os.Stderr,
+				"witself-admin: get does not accept --enabled, --disabled, or --reason")
+			return 2
+		}
+	case "set":
+		if *enabled == *disabled {
+			fmt.Fprintln(os.Stderr,
+				"witself-admin: set exactly one of --enabled or --disabled")
+			return 2
+		}
+		if strings.TrimSpace(*reason) == "" {
+			fmt.Fprintln(os.Stderr,
+				"witself-admin: --reason is required for set")
+			return 2
+		}
+	case "clear":
+		if *enabled || *disabled {
+			fmt.Fprintln(os.Stderr,
+				"witself-admin: clear does not accept --enabled or --disabled")
+			return 2
+		}
+		if strings.TrimSpace(*reason) == "" {
+			fmt.Fprintln(os.Stderr,
+				"witself-admin: --reason is required for clear")
+			return 2
+		}
+	}
+
+	ep, tok, err := resolveAdminAccountAction(
+		*endpoint, *token, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
+		return 2
+	}
+	var res *client.AdminAccountPolicy
+	switch action {
+	case "get":
+		res, err = client.GetAdminMessaging(
+			context.Background(), ep, tok, *account)
+	case "set":
+		res, err = client.SetAdminMessaging(
+			context.Background(), ep, tok, *account, *enabled, *reason)
+	case "clear":
+		res, err = client.ClearAdminMessaging(
+			context.Background(), ep, tok, *account, *reason)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printAdminAccountPolicyJSON(res)
+	}
+	return printAdminAccountPolicy(res)
+}
+
+// accountMessageRetention manages message cleanup independently from whether
+// messaging is enabled.
+func accountMessageRetention(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr,
+			"usage: witself-admin account message-retention (get|set|clear) ...")
+		return 2
+	}
+	action := args[0]
+	if action != "get" && action != "set" && action != "clear" {
+		fmt.Fprintf(os.Stderr,
+			"witself-admin account message-retention: unknown action %q\n",
+			action)
+		return 2
+	}
+
+	fs := flag.NewFlagSet(
+		"account message-retention "+action, flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	endpoint := fs.String("endpoint", "", "control-plane URL")
+	token := fs.String("token", "", "admin token")
+	tokenFile := fs.String("token-file", "", "file containing the admin token")
+	account := fs.String("account", "", "account id (required)")
+	days := fs.Int64("days", 0, "finite retention window (1-36500)")
+	indefinite := fs.Bool("indefinite", false, "retain messages indefinitely")
+	reason := fs.String("reason", "", "required audit reason for set/clear")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args[1:]); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 || strings.TrimSpace(*account) == "" {
+		fmt.Fprintf(os.Stderr,
+			"usage: witself-admin account message-retention %s --account ACCOUNT_ID",
+			action)
+		switch action {
+		case "set":
+			fmt.Fprint(os.Stderr, " (--days N|--indefinite) --reason REASON")
+		case "clear":
+			fmt.Fprint(os.Stderr, " --reason REASON")
+		}
+		fmt.Fprintln(os.Stderr)
+		return 2
+	}
+	switch action {
+	case "get":
+		if *days != 0 || *indefinite || strings.TrimSpace(*reason) != "" {
+			fmt.Fprintln(os.Stderr,
+				"witself-admin: get does not accept --days, --indefinite, or --reason")
+			return 2
+		}
+	case "set":
+		if (*days == 0) == !*indefinite {
+			fmt.Fprintln(os.Stderr,
+				"witself-admin: set exactly one of --days N or --indefinite")
+			return 2
+		}
+		if *days < 0 || *days > client.MaxAdminMessageRetentionDays {
+			fmt.Fprintf(os.Stderr,
+				"witself-admin: --days must be between 1 and %d\n",
+				client.MaxAdminMessageRetentionDays)
+			return 2
+		}
+		if strings.TrimSpace(*reason) == "" {
+			fmt.Fprintln(os.Stderr,
+				"witself-admin: --reason is required for set")
+			return 2
+		}
+	case "clear":
+		if *days != 0 || *indefinite {
+			fmt.Fprintln(os.Stderr,
+				"witself-admin: clear does not accept --days or --indefinite")
+			return 2
+		}
+		if strings.TrimSpace(*reason) == "" {
+			fmt.Fprintln(os.Stderr,
+				"witself-admin: --reason is required for clear")
+			return 2
+		}
+	}
+
+	ep, tok, err := resolveAdminAccountAction(
+		*endpoint, *token, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
+		return 2
+	}
+	var res *client.AdminAccountPolicy
+	switch action {
+	case "get":
+		res, err = client.GetAdminMessageRetention(
+			context.Background(), ep, tok, *account)
+	case "set":
+		var finite *int64
+		if !*indefinite {
+			finite = days
+		}
+		res, err = client.SetAdminMessageRetention(
+			context.Background(), ep, tok, *account,
+			client.AdminMessageRetentionInput{
+				Days: finite, Indefinite: *indefinite, Reason: *reason,
+			})
+	case "clear":
+		res, err = client.ClearAdminMessageRetention(
+			context.Background(), ep, tok, *account, *reason)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)

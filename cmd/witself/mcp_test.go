@@ -1709,6 +1709,9 @@ func TestGenericMCPInstructionsCoverNaturalDeletionAuthority(t *testing.T) {
 		"MCP and the Witself backend never wake or launch an AI client",
 		"Protocol-linked `open_request`, `offer`, and `result` messages are notifications",
 		"never use ordinary `witself.message.claim` or `complete`",
+		"enabled=false",
+		"do not retry feature_not_enabled",
+		"full tool set remains installed",
 	} {
 		if !strings.Contains(witselfMCPInstructions, want) {
 			t.Errorf("generic MCP deletion contract does not contain %q", want)

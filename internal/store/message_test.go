@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/plans"
 )
 
 func TestNormalizeSendMessageInput(t *testing.T) {
@@ -105,6 +107,37 @@ func TestSendMessageRejectsCallerSuppliedReplyParent(t *testing.T) {
 	})
 	if !errors.Is(err, ErrMessageInputInvalid) || !strings.Contains(err.Error(), "direct send cannot set") {
 		t.Fatalf("error = %v, want caller-supplied reply parent refusal", err)
+	}
+}
+
+func TestMessagingFeatureSnapshotSemantics(t *testing.T) {
+	now := time.Now()
+	if !messagingEnabledForSnapshot(nil, nil, nil) {
+		t.Fatal("unmanaged account without plan_applied_at must retain messaging")
+	}
+	if !messagingEnabledForSnapshot(&now,
+		map[string]int64{TranscriptRetentionDaysPolicy: 30}, []string{"memory", "facts"}) {
+		t.Fatal("legacy applied snapshot without entitlement marker must retain messaging")
+	}
+	messagePolicies := map[string]int64{
+		plans.MessagingEntitlementVersionPolicy: plans.MessagingEntitlementVersion,
+	}
+	if messagingEnabledForSnapshot(&now, messagePolicies, nil) ||
+		messagingEnabledForSnapshot(&now, messagePolicies, []string{"memory", "facts"}) {
+		t.Fatal("applied snapshot without messaging must disable messaging")
+	}
+	if !messagingEnabledForSnapshot(&now, messagePolicies, []string{"memory", "messaging"}) {
+		t.Fatal("applied snapshot with messaging must enable messaging")
+	}
+	if messagingEnabledForSnapshot(&now,
+		map[string]int64{plans.MessagingEntitlementVersionPolicy: 2},
+		[]string{"memory", "messaging"}) {
+		t.Fatal("unknown entitlement marker version must fail closed")
+	}
+
+	err := &FeatureNotEnabledError{Feature: "messaging"}
+	if !errors.Is(err, ErrFeatureNotEnabled) || !strings.Contains(err.Error(), "messaging") {
+		t.Fatalf("typed feature error = %v", err)
 	}
 }
 

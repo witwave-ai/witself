@@ -96,6 +96,18 @@ func clone(r Record) Record {
 		}
 		r.TranscriptRetentionOverride = &override
 	}
+	if r.MessagingOverride != nil {
+		override := *r.MessagingOverride
+		r.MessagingOverride = &override
+	}
+	if r.MessageRetentionOverride != nil {
+		override := *r.MessageRetentionOverride
+		if override.Days != nil {
+			days := *override.Days
+			override.Days = &days
+		}
+		r.MessageRetentionOverride = &override
+	}
 	if r.LimitOverrides != nil {
 		overrides := make(map[string]AccountLimitOverride, len(r.LimitOverrides))
 		for dimension, override := range r.LimitOverrides {
@@ -117,6 +129,22 @@ func clone(r Record) Record {
 			if r.AdminHistory[i].RetentionTo != nil {
 				value := *r.AdminHistory[i].RetentionTo
 				r.AdminHistory[i].RetentionTo = &value
+			}
+			if r.AdminHistory[i].MessagingFrom != nil {
+				value := *r.AdminHistory[i].MessagingFrom
+				r.AdminHistory[i].MessagingFrom = &value
+			}
+			if r.AdminHistory[i].MessagingTo != nil {
+				value := *r.AdminHistory[i].MessagingTo
+				r.AdminHistory[i].MessagingTo = &value
+			}
+			if r.AdminHistory[i].MessageRetentionFrom != nil {
+				value := *r.AdminHistory[i].MessageRetentionFrom
+				r.AdminHistory[i].MessageRetentionFrom = &value
+			}
+			if r.AdminHistory[i].MessageRetentionTo != nil {
+				value := *r.AdminHistory[i].MessageRetentionTo
+				r.AdminHistory[i].MessageRetentionTo = &value
 			}
 			if r.AdminHistory[i].LimitFrom != nil {
 				value := *r.AdminHistory[i].LimitFrom

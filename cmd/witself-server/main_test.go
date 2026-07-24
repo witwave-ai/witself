@@ -392,6 +392,7 @@ func TestMapMessageRequestErrors(t *testing.T) {
 		{name: "state conflict", in: store.ErrMessageRequestConflict, want: server.ErrConflict},
 		{name: "forbidden", in: store.ErrMessageRequestForbidden, want: server.ErrForbidden},
 		{name: "inactive account", in: store.ErrAccountNotActive, want: server.ErrForbidden},
+		{name: "feature disabled", in: &store.FeatureNotEnabledError{Feature: "messaging"}, want: server.ErrFeatureNotEnabled},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -399,6 +400,19 @@ func TestMapMessageRequestErrors(t *testing.T) {
 				t.Fatalf("mapMessageRequestError(%v) = %v, want errors.Is(_, %v)", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestMapMessageFeatureErrorPreservesFeature(t *testing.T) {
+	for _, mapped := range []error{
+		mapMessageError(&store.FeatureNotEnabledError{Feature: "messaging"}),
+		mapMessageRequestError(&store.FeatureNotEnabledError{Feature: "messaging"}),
+	} {
+		var featureErr *server.FeatureNotEnabledError
+		if !errors.Is(mapped, server.ErrFeatureNotEnabled) ||
+			!errors.As(mapped, &featureErr) || featureErr.Feature != "messaging" {
+			t.Fatalf("mapped feature error = %#v", mapped)
+		}
 	}
 }
 

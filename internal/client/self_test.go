@@ -78,6 +78,23 @@ func TestGetSelfDecodesAndRequestsMessageCheckpoint(t *testing.T) {
 	}
 }
 
+func TestGetSelfDecodesExplicitlyDisabledMessageCheckpoint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","identity":{"account_id":"acc_1","agent_id":"agt_1","agent_name":"scott","realm_id":"rlm_1","realm_name":"default"},"primary_facts":[],"salient_memories":[],"message_checkpoint":{"enabled":false,"pending":false},"index":{"kinds":[],"tags":[],"counts":{}},"elided":false}`))
+	}))
+	defer srv.Close()
+
+	got, err := GetSelf(context.Background(), srv.URL, "token", SelfOptions{IncludeMessageCheckpoint: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MessageCheckpoint == nil || got.MessageCheckpoint.Enabled == nil ||
+		*got.MessageCheckpoint.Enabled || got.MessageCheckpoint.Pending ||
+		got.MessageCheckpoint.Unavailable {
+		t.Fatalf("message checkpoint = %#v", got.MessageCheckpoint)
+	}
+}
+
 func TestGetSelfDecodesAndRequestsAvatarLineageCheckpoint(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("include_avatar_checkpoint") != "true" {

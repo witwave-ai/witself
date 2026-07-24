@@ -49,6 +49,22 @@ type RetentionCounts struct {
 	DeferredScanCapped     bool
 }
 
+// MessageRetentionCounts contains value-free whole-thread cleanup counts.
+type MessageRetentionCounts struct {
+	Scanned          int64
+	SkippedLocked    int64
+	EligibleThreads  int64
+	DeletedThreads   int64
+	DeletedMessages  int64
+	DeferredEvidence int64
+	DeferredActive   int64
+	DeferredLocked   int64
+	DeferredOversize int64
+	DeferredBudget   int64
+	RepairedActivity int64
+	ScanCapped       bool
+}
+
 type jobMetric struct {
 	Running  bool
 	Failures uint64
@@ -69,20 +85,26 @@ type retentionItemLabels struct {
 type Metrics struct {
 	mu sync.Mutex
 
-	jobs                 map[string]*jobMetric
-	retentionBatches     map[retentionBatchLabels]uint64
-	retentionItems       map[retentionItemLabels]uint64
-	retentionLastSuccess map[string]float64
-	now                  func() time.Time
+	jobs                        map[string]*jobMetric
+	retentionBatches            map[retentionBatchLabels]uint64
+	retentionItems              map[retentionItemLabels]uint64
+	retentionLastSuccess        map[string]float64
+	messageRetentionBatches     map[retentionBatchLabels]uint64
+	messageRetentionItems       map[retentionItemLabels]uint64
+	messageRetentionLastSuccess map[string]float64
+	now                         func() time.Time
 }
 
 func newMetrics() *Metrics {
 	return &Metrics{
-		jobs:                 make(map[string]*jobMetric),
-		retentionBatches:     make(map[retentionBatchLabels]uint64),
-		retentionItems:       make(map[retentionItemLabels]uint64),
-		retentionLastSuccess: make(map[string]float64),
-		now:                  time.Now,
+		jobs:                        make(map[string]*jobMetric),
+		retentionBatches:            make(map[retentionBatchLabels]uint64),
+		retentionItems:              make(map[retentionItemLabels]uint64),
+		retentionLastSuccess:        make(map[string]float64),
+		messageRetentionBatches:     make(map[retentionBatchLabels]uint64),
+		messageRetentionItems:       make(map[retentionItemLabels]uint64),
+		messageRetentionLastSuccess: make(map[string]float64),
+		now:                         time.Now,
 	}
 }
 
@@ -165,6 +187,53 @@ func (m *Metrics) ObserveRetentionBatch(mode string, result RetentionResult, cou
 	}
 }
 
+// ObserveMessageRetentionBatch records one value-free whole-thread retention
+// attempt. Mode, result, and item kinds are process-owned bounded labels.
+func (m *Metrics) ObserveMessageRetentionBatch(
+	mode string,
+	result RetentionResult,
+	counts MessageRetentionCounts,
+) {
+	if mode != "preview" && mode != "enforce" {
+		return
+	}
+	if result != RetentionResultSuccess &&
+		result != RetentionResultNoWork &&
+		result != RetentionResultError {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.messageRetentionBatches[retentionBatchLabels{Mode: mode, Result: result}]++
+	if result == RetentionResultSuccess || result == RetentionResultNoWork {
+		m.messageRetentionLastSuccess[mode] = float64(m.now().Unix())
+	}
+	for kind, value := range map[string]int64{
+		"scanned":           counts.Scanned,
+		"skipped_locked":    counts.SkippedLocked,
+		"eligible_threads":  counts.EligibleThreads,
+		"deleted_threads":   counts.DeletedThreads,
+		"deleted_messages":  counts.DeletedMessages,
+		"deferred_evidence": counts.DeferredEvidence,
+		"deferred_active":   counts.DeferredActive,
+		"deferred_locked":   counts.DeferredLocked,
+		"deferred_oversize": counts.DeferredOversize,
+		"deferred_budget":   counts.DeferredBudget,
+		"repaired_activity": counts.RepairedActivity,
+	} {
+		if value > 0 {
+			m.messageRetentionItems[retentionItemLabels{Mode: mode, Kind: kind}] += uint64(value)
+		}
+	}
+	if counts.ScanCapped {
+		m.messageRetentionItems[retentionItemLabels{
+			Mode: mode,
+			Kind: "scan_capped_batches",
+		}]++
+	}
+}
+
 func (m *Metrics) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
@@ -199,6 +268,18 @@ func (m *Metrics) writePrometheus(w io.Writer) {
 	lastSuccess := make(map[string]float64, len(m.retentionLastSuccess))
 	for mode, value := range m.retentionLastSuccess {
 		lastSuccess[mode] = value
+	}
+	messageBatches := make(map[retentionBatchLabels]uint64, len(m.messageRetentionBatches))
+	for labels, value := range m.messageRetentionBatches {
+		messageBatches[labels] = value
+	}
+	messageItems := make(map[retentionItemLabels]uint64, len(m.messageRetentionItems))
+	for labels, value := range m.messageRetentionItems {
+		messageItems[labels] = value
+	}
+	messageLastSuccess := make(map[string]float64, len(m.messageRetentionLastSuccess))
+	for mode, value := range m.messageRetentionLastSuccess {
+		messageLastSuccess[mode] = value
 	}
 	m.mu.Unlock()
 
@@ -290,4 +371,63 @@ func (m *Metrics) writePrometheus(w io.Writer) {
 			"witself_worker_retention_last_success_timestamp_seconds{mode=%q} %.0f\n",
 			mode, lastSuccess[mode])
 	}
+
+	_, _ = fmt.Fprintln(w, "# HELP witself_worker_message_retention_batches_total Message-retention batches by bounded mode and result.")
+	_, _ = fmt.Fprintln(w, "# TYPE witself_worker_message_retention_batches_total counter")
+	messageBatchLabels := sortedRetentionBatchLabels(messageBatches)
+	for _, labels := range messageBatchLabels {
+		_, _ = fmt.Fprintf(w,
+			"witself_worker_message_retention_batches_total{mode=%q,result=%q} %d\n",
+			labels.Mode, labels.Result, messageBatches[labels])
+	}
+
+	_, _ = fmt.Fprintln(w, "# HELP witself_worker_message_retention_items_total Value-free message-retention counts by bounded kind.")
+	_, _ = fmt.Fprintln(w, "# TYPE witself_worker_message_retention_items_total counter")
+	messageItemLabels := sortedRetentionItemLabels(messageItems)
+	for _, labels := range messageItemLabels {
+		_, _ = fmt.Fprintf(w,
+			"witself_worker_message_retention_items_total{mode=%q,kind=%q} %d\n",
+			labels.Mode, labels.Kind, messageItems[labels])
+	}
+
+	_, _ = fmt.Fprintln(w, "# HELP witself_worker_message_retention_last_success_timestamp_seconds Unix timestamp of the last successful or no-work message-retention batch.")
+	_, _ = fmt.Fprintln(w, "# TYPE witself_worker_message_retention_last_success_timestamp_seconds gauge")
+	messageModes := make([]string, 0, len(messageLastSuccess))
+	for mode := range messageLastSuccess {
+		messageModes = append(messageModes, mode)
+	}
+	sort.Strings(messageModes)
+	for _, mode := range messageModes {
+		_, _ = fmt.Fprintf(w,
+			"witself_worker_message_retention_last_success_timestamp_seconds{mode=%q} %.0f\n",
+			mode, messageLastSuccess[mode])
+	}
+}
+
+func sortedRetentionBatchLabels(values map[retentionBatchLabels]uint64) []retentionBatchLabels {
+	labels := make([]retentionBatchLabels, 0, len(values))
+	for value := range values {
+		labels = append(labels, value)
+	}
+	sort.Slice(labels, func(i, j int) bool {
+		if labels[i].Mode != labels[j].Mode {
+			return labels[i].Mode < labels[j].Mode
+		}
+		return labels[i].Result < labels[j].Result
+	})
+	return labels
+}
+
+func sortedRetentionItemLabels(values map[retentionItemLabels]uint64) []retentionItemLabels {
+	labels := make([]retentionItemLabels, 0, len(values))
+	for value := range values {
+		labels = append(labels, value)
+	}
+	sort.Slice(labels, func(i, j int) bool {
+		if labels[i].Mode != labels[j].Mode {
+			return labels[i].Mode < labels[j].Mode
+		}
+		return labels[i].Kind < labels[j].Kind
+	})
+	return labels
 }

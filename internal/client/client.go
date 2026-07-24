@@ -31,6 +31,28 @@ var ErrSecretVaultKeyMismatch = errors.New("agent vault key mismatch")
 // the authenticated owner's retained-secret plan cap.
 var ErrSecretLimitReached = errors.New("stored secret limit reached")
 
+// ErrFeatureNotEnabled identifies a non-retryable account-plan feature
+// refusal. Installed clients keep their complete tool surface and use this
+// typed error to stop retrying until the account policy changes.
+var ErrFeatureNotEnabled = errors.New("feature not enabled")
+
+// FeatureNotEnabledError preserves the server-owned feature key and friendly
+// response text without carrying account or message data.
+type FeatureNotEnabledError struct {
+	Feature   string
+	Retryable bool
+	Message   string
+}
+
+func (e *FeatureNotEnabledError) Error() string {
+	if e != nil && strings.TrimSpace(e.Message) != "" {
+		return e.Message
+	}
+	return ErrFeatureNotEnabled.Error()
+}
+
+func (e *FeatureNotEnabledError) Unwrap() error { return ErrFeatureNotEnabled }
+
 // SecretLimitError preserves the server's value-free capacity snapshot.
 type SecretLimitError struct {
 	Status SecretLimitStatus
@@ -237,9 +259,11 @@ func doJSONWithHeadersTimeout(ctx context.Context, method, url, token string, he
 
 func responseError(resp *http.Response, fallback string) error {
 	var out struct {
-		Error string            `json:"error"`
-		Code  string            `json:"code"`
-		Limit SecretLimitStatus `json:"limit"`
+		Error     string            `json:"error"`
+		Code      string            `json:"code"`
+		Feature   string            `json:"feature"`
+		Retryable bool              `json:"retryable"`
+		Limit     SecretLimitStatus `json:"limit"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err == nil && out.Error != "" {
 		if resp.StatusCode == http.StatusConflict && out.Code == "secret_vault_key_mismatch" {
@@ -247,6 +271,11 @@ func responseError(resp *http.Response, fallback string) error {
 		}
 		if resp.StatusCode == http.StatusForbidden && out.Code == "stored_secret_limit_reached" {
 			return &SecretLimitError{Status: out.Limit}
+		}
+		if resp.StatusCode == http.StatusForbidden && out.Code == "feature_not_enabled" {
+			return &FeatureNotEnabledError{
+				Feature: out.Feature, Retryable: out.Retryable, Message: out.Error,
+			}
 		}
 		return fmt.Errorf("%s", out.Error)
 	}

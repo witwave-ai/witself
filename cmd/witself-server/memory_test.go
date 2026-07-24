@@ -160,6 +160,15 @@ func TestMemorySupersedeAdapterPreservesAtomicSetAndAuthority(t *testing.T) {
 }
 
 func TestMemoryAdapterErrorsAndSnippet(t *testing.T) {
+	var featureErr *server.FeatureNotEnabledError
+	mappedFeature := mapMemoryError(
+		&store.FeatureNotEnabledError{Feature: "messaging"},
+	)
+	if !errors.Is(mappedFeature, server.ErrFeatureNotEnabled) ||
+		!errors.As(mappedFeature, &featureErr) ||
+		featureErr.Feature != "messaging" {
+		t.Fatalf("message evidence feature error was not preserved: %v", mappedFeature)
+	}
 	if !errors.Is(mapMemoryError(store.ErrMemoryInputInvalid), server.ErrBadInput) {
 		t.Fatal("invalid memory input was not mapped to bad input")
 	}

@@ -202,6 +202,38 @@ func TestSelfDigestIncludesContentFreeMessageCheckpoint(t *testing.T) {
 	}
 }
 
+func TestSelfDigestExposesExplicitlyDisabledMessaging(t *testing.T) {
+	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
+		return DomainPrincipal{
+			Kind: PrincipalKindAgent, ID: "agent_1", AgentName: "scott",
+			AccountID: "acc_1", RealmID: "realm_1", RealmName: "default", AccountStatus: "active",
+		}, true, nil
+	}
+	disabled := false
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: auth,
+		GetSelfMessageCheckpoint: func(context.Context, DomainPrincipal) (*SelfMessageCheckpoint, error) {
+			return &SelfMessageCheckpoint{Enabled: &disabled}, nil
+		},
+	}))
+	defer srv.Close()
+
+	resp := selfRequest(t, srv.URL+"/v1/self", "agent-token")
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("self status = %d", resp.StatusCode)
+	}
+	var digest SelfDigest
+	if err := json.NewDecoder(resp.Body).Decode(&digest); err != nil {
+		t.Fatal(err)
+	}
+	if digest.MessageCheckpoint == nil || digest.MessageCheckpoint.Enabled == nil ||
+		*digest.MessageCheckpoint.Enabled || digest.MessageCheckpoint.Pending ||
+		digest.MessageCheckpoint.Unavailable {
+		t.Fatalf("message checkpoint = %+v", digest.MessageCheckpoint)
+	}
+}
+
 func TestSelfDigestIncludesValueFreeEmailCheckpointOnlyForEnrolledAgent(t *testing.T) {
 	auth := func(_ context.Context, token string) (DomainPrincipal, bool, error) {
 		agentID := "agent_aaaaaaaaaaaaaaaa"

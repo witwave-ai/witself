@@ -290,6 +290,54 @@ func TestAccountPolicyCommandsRejectUnsafeMutations(t *testing.T) {
 			},
 		},
 		{
+			name: "messaging set needs selection",
+			call: func() int {
+				return accountMessaging([]string{
+					"set", "--account", "acct_1", "--reason", "bad",
+				})
+			},
+		},
+		{
+			name: "messaging set rejects both values",
+			call: func() int {
+				return accountMessaging([]string{
+					"set", "--account", "acct_1", "--enabled", "--disabled",
+					"--reason", "bad",
+				})
+			},
+		},
+		{
+			name: "messaging clear needs reason",
+			call: func() int {
+				return accountMessaging([]string{"clear", "--account", "acct_1"})
+			},
+		},
+		{
+			name: "message retention set needs reason",
+			call: func() int {
+				return accountMessageRetention([]string{
+					"set", "--account", "acct_1", "--days", "90",
+				})
+			},
+		},
+		{
+			name: "message retention set rejects both values",
+			call: func() int {
+				return accountMessageRetention([]string{
+					"set", "--account", "acct_1", "--days", "90",
+					"--indefinite", "--reason", "bad",
+				})
+			},
+		},
+		{
+			name: "message retention clear needs reason",
+			call: func() int {
+				return accountMessageRetention([]string{
+					"clear", "--account", "acct_1",
+				})
+			},
+		},
+		{
 			name: "plan set needs plan",
 			call: func() int {
 				return accountPlanOverride([]string{"set", "--account", "acct_1", "--reason", "bad"})
@@ -423,6 +471,79 @@ func TestAccountLimitOverrideCLITransmitsExplicitZero(t *testing.T) {
 	}
 	if _, present := gotBody["unlimited"]; present {
 		t.Fatalf("explicit zero body also selected unlimited: %#v", gotBody)
+	}
+}
+
+func TestAccountMessagingCLITransmitsIndependentOverrides(t *testing.T) {
+	var requests []struct {
+		method string
+		path   string
+		body   map[string]any
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		requests = append(requests, struct {
+			method string
+			path   string
+			body   map[string]any
+		}{method: r.Method, path: r.URL.Path, body: body})
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0",
+			"account_id":     "acct_1",
+			"plan":           "free",
+			"billing_plan":   "free",
+			"applied":        "free",
+			"messaging": map[string]any{
+				"default_enabled": false,
+				"enabled":         true,
+				"overridden":      true,
+			},
+			"message_retention": map[string]any{
+				"default_days": 30, "effective_days": nil, "overridden": true,
+			},
+			"transcript_retention": map[string]any{
+				"default_days": 30, "effective_days": 30, "overridden": false,
+			},
+			"admin_history":    []any{},
+			"apply_pending":    false,
+			"desired_revision": 2,
+			"applied_revision": 2,
+		})
+	}))
+	defer srv.Close()
+
+	if code := accountMessaging([]string{
+		"set", "--endpoint", srv.URL, "--token", "admin-token",
+		"--account", "acct_1", "--enabled",
+		"--reason", " founder messaging ", "--json",
+	}); code != 0 {
+		t.Fatalf("messaging exit code = %d, want 0", code)
+	}
+	if code := accountMessageRetention([]string{
+		"set", "--endpoint", srv.URL, "--token", "admin-token",
+		"--account", "acct_1", "--indefinite",
+		"--reason", " founder retention ", "--json",
+	}); code != 0 {
+		t.Fatalf("message retention exit code = %d, want 0", code)
+	}
+
+	if len(requests) != 2 {
+		t.Fatalf("requests = %#v", requests)
+	}
+	if requests[0].method != http.MethodPut ||
+		requests[0].path != "/v1/admin/accounts/acct_1/messaging" ||
+		requests[0].body["enabled"] != true ||
+		requests[0].body["reason"] != "founder messaging" {
+		t.Fatalf("messaging request = %#v", requests[0])
+	}
+	if requests[1].method != http.MethodPut ||
+		requests[1].path != "/v1/admin/accounts/acct_1/message-retention" ||
+		requests[1].body["indefinite"] != true ||
+		requests[1].body["reason"] != "founder retention" {
+		t.Fatalf("retention request = %#v", requests[1])
 	}
 }
 

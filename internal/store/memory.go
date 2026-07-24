@@ -1653,14 +1653,14 @@ func logMemoryVersionEventTx(ctx context.Context, tx pgx.Tx, p Principal, memory
 	})
 }
 
-func validateMemoryEvidenceSourceTx(ctx context.Context, q memoryQuerier, p Principal, in MemoryEvidenceInput) error {
+func validateMemoryEvidenceSourceTx(ctx context.Context, tx pgx.Tx, p Principal, in MemoryEvidenceInput) error {
 	if in.ResolutionState != MemoryEvidenceResolved {
 		return nil
 	}
 	var exists bool
 	switch in.ResolvedKind {
 	case "transcript":
-		err := q.QueryRow(ctx, `SELECT EXISTS (
+		err := tx.QueryRow(ctx, `SELECT EXISTS (
 			SELECT 1 FROM transcript_conversations c
 			WHERE c.id=$1 AND c.account_id=$2 AND c.realm_id=$3
 			  AND c.owner_agent_id=$4
@@ -1672,7 +1672,7 @@ func validateMemoryEvidenceSourceTx(ctx context.Context, q memoryQuerier, p Prin
 			return fmt.Errorf("validate transcript evidence: %w", err)
 		}
 	case "memory":
-		err := q.QueryRow(ctx, `SELECT EXISTS (
+		err := tx.QueryRow(ctx, `SELECT EXISTS (
 			SELECT 1 FROM memory_versions v JOIN memories m ON m.id=v.memory_id
 			WHERE v.memory_id=$1 AND v.version=$2 AND m.account_id=$3
 			  AND m.realm_id=$4 AND m.owner_kind='agent' AND m.owner_id=$5
@@ -1682,7 +1682,10 @@ func validateMemoryEvidenceSourceTx(ctx context.Context, q memoryQuerier, p Prin
 			return fmt.Errorf("validate source memory evidence: %w", err)
 		}
 	case "message":
-		err := q.QueryRow(ctx, `SELECT EXISTS (
+		if err := requireMessagingEnabled(ctx, tx, p.AccountID); err != nil {
+			return err
+		}
+		err := tx.QueryRow(ctx, `SELECT EXISTS (
 			SELECT 1 FROM agent_messages
 			WHERE id=$1 AND account_id=$2 AND realm_id=$3
 			  AND (from_agent_id=$4 OR to_agent_id=$4)

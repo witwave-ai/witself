@@ -1417,17 +1417,16 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			if !ok {
 				return badf("accounts row plan_policies must be an object of integer policies")
 			}
+			policies := make(map[string]int64, len(m))
 			for key, raw := range m {
 				value, ok := importedInteger(raw)
 				if !ok {
 					return badf("accounts row plan_policies[%q] must be an integer", key)
 				}
-				if key != TranscriptRetentionDaysPolicy {
-					return badf("accounts row plan_policies contains unknown policy %q", key)
-				}
-				if value < 1 || value > 36500 {
-					return badf("accounts row plan_policies[%q] must be between 1 and 36500", key)
-				}
+				policies[key] = value
+			}
+			if err := plans.ValidatePolicies(policies); err != nil {
+				return badf("accounts row plan_policies is invalid: %v", err)
 			}
 		}
 		if v, present := obj["plan_features"]; present {

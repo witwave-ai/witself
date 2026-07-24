@@ -297,9 +297,12 @@ func memoryLifecycleAdapter(mutate storeMemoryLifecycleFunc) func(context.Contex
 }
 
 func mapMemoryError(err error) error {
+	var featureErr *store.FeatureNotEnabledError
 	switch {
 	case err == nil:
 		return nil
+	case errors.As(err, &featureErr):
+		return &server.FeatureNotEnabledError{Feature: featureErr.Feature}
 	case errors.Is(err, store.ErrMemoryInputInvalid):
 		return fmt.Errorf("%w: %v", server.ErrBadInput, err)
 	case errors.Is(err, store.ErrMemoryNotFound):

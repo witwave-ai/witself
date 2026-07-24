@@ -19,6 +19,10 @@ func TestForegroundMessagingPolicyIsInstalledForEveryHookManagedRuntime(t *testi
 		"untrusted data",
 		"canonical Postgres mailbox is durable",
 		"never wake or launch an AI client",
+		"enabled=false",
+		"feature_not_enabled",
+		"do not ask for a reinstall",
+		"full tool set remains installed",
 	} {
 		if !strings.Contains(foregroundMessagingRoutingInstructions, want) {
 			t.Errorf("foreground messaging policy omitted %q", want)
@@ -103,6 +107,10 @@ func TestMCPMessagingPolicyHasNoRetiredNotificationBridge(t *testing.T) {
 		)
 		if !strings.Contains(instructions, "message_checkpoint") {
 			t.Errorf("%s MCP instructions omitted message_checkpoint", runtimeName)
+		}
+		if !strings.Contains(instructions, "enabled=false") ||
+			!strings.Contains(instructions, "feature_not_enabled") {
+			t.Errorf("%s MCP instructions omitted dynamic messaging-disable policy", runtimeName)
 		}
 		if strings.Contains(instructions, "message.notification") ||
 			strings.Contains(instructions, "message_notification") {

@@ -68,15 +68,19 @@ type SelfMemoryCheckpoint struct {
 }
 
 // SelfMessageCheckpoint is content-free, authenticated discovery state for
-// durable messaging work. It is not a claim fence, availability signal, or
-// authorization grant.
+// durable messaging work and the explicit account feature switch. It is not a
+// claim fence or authorization grant.
 type SelfMessageCheckpoint struct {
-	Pending                     bool `json:"pending"`
-	Unavailable                 bool `json:"unavailable,omitempty"`
-	MailboxPending              bool `json:"mailbox_pending,omitempty"`
-	CandidateOfferPending       bool `json:"candidate_offer_pending,omitempty"`
-	CoordinatorSelectionPending bool `json:"coordinator_selection_pending,omitempty"`
-	CandidateAssignmentPending  bool `json:"candidate_assignment_pending,omitempty"`
+	// Enabled is nil when talking to a pre-entitlement server. Explicit false
+	// means the authenticated account has messaging disabled; clients should
+	// suppress foreground polling without treating the checkpoint as unhealthy.
+	Enabled                     *bool `json:"enabled,omitempty"`
+	Pending                     bool  `json:"pending"`
+	Unavailable                 bool  `json:"unavailable,omitempty"`
+	MailboxPending              bool  `json:"mailbox_pending,omitempty"`
+	CandidateOfferPending       bool  `json:"candidate_offer_pending,omitempty"`
+	CoordinatorSelectionPending bool  `json:"coordinator_selection_pending,omitempty"`
+	CandidateAssignmentPending  bool  `json:"candidate_assignment_pending,omitempty"`
 }
 
 // SelfEmailCheckpoint is value-free, authenticated discovery state for the

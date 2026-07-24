@@ -457,6 +457,8 @@ func writeMessageRequestError(w http.ResponseWriter, err error, internalMessage 
 	switch {
 	case err == nil:
 		return false
+	case errors.Is(err, ErrFeatureNotEnabled):
+		writeFeatureNotEnabledError(w, err)
 	case errors.Is(err, ErrBadInput):
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrNotFound), errors.Is(err, ErrForbidden):

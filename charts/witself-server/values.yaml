@@ -157,6 +157,15 @@ worker:
     batchSize: 100
     interval: 5m
     batchTimeout: 2m
+  # Message retention is an independent whole-thread cleanup job. Keep it
+  # disabled through the compatible cell rollout, then observe preview before
+  # selecting enforce in a later config-only rollout.
+  messageRetention:
+    enabled: false
+    mode: preview
+    batchSize: 25
+    interval: 5m
+    batchTimeout: 2m
 
 database:
   existingSecret:

@@ -716,6 +716,35 @@ func TestMemoryCapabilityRequiresCompleteSurface(t *testing.T) {
 	}
 }
 
+func TestMemoryErrorPreservesMessagingFeatureRefusal(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	if !writeMemoryError(
+		recorder,
+		&FeatureNotEnabledError{Feature: "messaging"},
+		"capture memory",
+	) {
+		t.Fatal("feature refusal was not handled")
+	}
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", recorder.Code)
+	}
+	var body struct {
+		Code      string `json:"code"`
+		Feature   string `json:"feature"`
+		Error     string `json:"error"`
+		Retryable bool   `json:"retryable"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Code != "feature_not_enabled" ||
+		body.Feature != "messaging" ||
+		body.Error != "Sorry, this feature is not enabled on this account." ||
+		body.Retryable {
+		t.Fatalf("body = %+v", body)
+	}
+}
+
 func memoryTestLifecycle(t *testing.T, action string, calls *[]string, now time.Time) func(context.Context, DomainPrincipal, string, MemoryLifecycleRequest) (MemoryMutationResult, error) {
 	t.Helper()
 	return func(_ context.Context, p DomainPrincipal, id string, in MemoryLifecycleRequest) (MemoryMutationResult, error) {

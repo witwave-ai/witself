@@ -250,6 +250,112 @@ func TestAdminCanSetExplicitIndefiniteRetention(t *testing.T) {
 	}
 }
 
+func TestAdminMessagingAndRetentionOverridesAreIndependent(t *testing.T) {
+	h := newHarness(t)
+	messagingPath := "/v1/admin/accounts/acct_1/messaging"
+	retentionPath := "/v1/admin/accounts/acct_1/message-retention"
+
+	status, doc := h.call(
+		t, http.MethodGet, "/v1/accounts/acct_1/plan", "good", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET owner plan = %d %v", status, doc)
+	}
+	messaging := doc["messaging"].(map[string]any)
+	retention := doc["message_retention"].(map[string]any)
+	if messaging["default_enabled"] != false ||
+		messaging["enabled"] != false ||
+		retention["default_days"] != float64(30) ||
+		retention["effective_days"] != float64(30) {
+		t.Fatalf("Personal message policy = messaging %v retention %v",
+			messaging, retention)
+	}
+
+	status, doc = h.call(t, http.MethodPut, messagingPath, "admin-good",
+		`{"enabled":true,"reason":"founder messaging enabled"}`)
+	if status != http.StatusOK {
+		t.Fatalf("PUT messaging = %d %v", status, doc)
+	}
+	messaging = doc["messaging"].(map[string]any)
+	if messaging["default_enabled"] != false ||
+		messaging["enabled"] != true || messaging["overridden"] != true {
+		t.Fatalf("messaging override = %v", messaging)
+	}
+	override := messaging["override"].(map[string]any)
+	if override["enabled"] != true ||
+		override["actor_id"] != testAdminID ||
+		override["actor_handle"] != "scott" ||
+		override["reason"] != "founder messaging enabled" {
+		t.Fatalf("messaging attribution = %v", override)
+	}
+
+	status, doc = h.call(t, http.MethodPut, retentionPath, "admin-good",
+		`{"indefinite":true,"reason":"founder retention exception"}`)
+	if status != http.StatusOK {
+		t.Fatalf("PUT message retention = %d %v", status, doc)
+	}
+	retention = doc["message_retention"].(map[string]any)
+	if retention["default_days"] != float64(30) ||
+		retention["effective_days"] != nil ||
+		retention["overridden"] != true {
+		t.Fatalf("message retention override = %v", retention)
+	}
+
+	status, ownerDoc := h.call(
+		t, http.MethodGet, "/v1/accounts/acct_1/plan", "good", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET owner plan after override = %d %v", status, ownerDoc)
+	}
+	messaging = ownerDoc["messaging"].(map[string]any)
+	retention = ownerDoc["message_retention"].(map[string]any)
+	if messaging["enabled"] != true || retention["effective_days"] != nil {
+		t.Fatalf("owner effective policy = messaging %v retention %v",
+			messaging, retention)
+	}
+	if _, exposed := messaging["override"]; exposed {
+		t.Fatalf("owner response exposed messaging attribution: %v", messaging)
+	}
+	if _, exposed := retention["override"]; exposed {
+		t.Fatalf("owner response exposed retention attribution: %v", retention)
+	}
+
+	status, doc = h.call(t, http.MethodDelete, messagingPath, "admin-good",
+		`{"reason":"restore Personal messaging"}`)
+	if status != http.StatusOK {
+		t.Fatalf("DELETE messaging = %d %v", status, doc)
+	}
+	if doc["messaging"].(map[string]any)["enabled"] != false {
+		t.Fatalf("cleared messaging = %v", doc["messaging"])
+	}
+	// Availability did not clear the independent indefinite-retention
+	// exception.
+	if doc["message_retention"].(map[string]any)["effective_days"] != nil ||
+		doc["message_retention"].(map[string]any)["overridden"] != true {
+		t.Fatalf("messaging clear disturbed retention: %v",
+			doc["message_retention"])
+	}
+
+	status, doc = h.call(t, http.MethodDelete, retentionPath, "admin-good",
+		`{"reason":"restore Personal cleanup"}`)
+	if status != http.StatusOK {
+		t.Fatalf("DELETE message retention = %d %v", status, doc)
+	}
+	retention = doc["message_retention"].(map[string]any)
+	if retention["effective_days"] != float64(30) ||
+		retention["overridden"] != false {
+		t.Fatalf("cleared retention = %v", retention)
+	}
+	if history := doc["admin_history"].([]any); len(history) != 4 {
+		t.Fatalf("admin history = %v; want four transitions", history)
+	}
+
+	if status, _ := h.call(
+		t, http.MethodPut, messagingPath, "admin-good",
+		`{"reason":"missing enabled"}`,
+	); status != http.StatusBadRequest {
+		t.Fatalf("missing enabled status = %d; want 400", status)
+	}
+}
+
 func TestAdminLimitOverrideLifecycleAndAttribution(t *testing.T) {
 	h := newHarness(t)
 	path := "/v1/admin/accounts/acct_1/limit-overrides/stored_secret"

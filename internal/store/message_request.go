@@ -514,7 +514,7 @@ func (s *Store) OpenMessageRequest(ctx context.Context, p Principal, in OpenMess
 		return OpenMessageRequestResult{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
+	if err := requireMessagingEnabled(ctx, tx, p.AccountID); err != nil {
 		return OpenMessageRequestResult{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
@@ -660,7 +660,7 @@ func (s *Store) ListMessageRequests(ctx context.Context, p Principal, filter Mes
 		return MessageRequestPage{}, fmt.Errorf("begin message request list snapshot: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
+	if err := requireMessagingEnabled(ctx, tx, p.AccountID); err != nil {
 		return MessageRequestPage{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
@@ -758,7 +758,7 @@ func (s *Store) GetMessageRequest(ctx context.Context, p Principal, requestID st
 		return MessageRequestDetail{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
+	if err := requireMessagingEnabled(ctx, tx, p.AccountID); err != nil {
 		return MessageRequestDetail{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
@@ -1505,7 +1505,7 @@ func (s *Store) OfferMessageRequest(ctx context.Context, p Principal, requestID 
 		return OfferMessageRequestResult{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
+	if err := requireMessagingEnabled(ctx, tx, p.AccountID); err != nil {
 		return OfferMessageRequestResult{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
@@ -1630,7 +1630,7 @@ func (s *Store) DeclineMessageRequest(ctx context.Context, p Principal, requestI
 		return MessageRequest{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
+	if err := requireMessagingEnabled(ctx, tx, p.AccountID); err != nil {
 		return MessageRequest{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
@@ -1811,7 +1811,7 @@ func (s *Store) SelectMessageRequest(ctx context.Context, p Principal, requestID
 		return SelectMessageRequestResult{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
+	if err := requireMessagingEnabled(ctx, tx, p.AccountID); err != nil {
 		return SelectMessageRequestResult{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
@@ -2011,7 +2011,7 @@ func (s *Store) CancelMessageRequest(ctx context.Context, p Principal, requestID
 		return MessageRequest{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
+	if err := requireMessagingEnabled(ctx, tx, p.AccountID); err != nil {
 		return MessageRequest{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
@@ -2211,7 +2211,7 @@ func (s *Store) ClaimMessageRequest(ctx context.Context, p Principal, requestID 
 		return MessageRequestClaim{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
+	if err := requireMessagingEnabled(ctx, tx, p.AccountID); err != nil {
 		return MessageRequestClaim{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
@@ -2310,7 +2310,7 @@ func (s *Store) RenewMessageRequest(ctx context.Context, p Principal, requestID 
 		return MessageRequestClaim{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
+	if err := requireMessagingEnabled(ctx, tx, p.AccountID); err != nil {
 		return MessageRequestClaim{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
@@ -2393,7 +2393,7 @@ func (s *Store) ReleaseMessageRequest(ctx context.Context, p Principal, requestI
 		return MessageRequestClaim{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
+	if err := requireMessagingEnabled(ctx, tx, p.AccountID); err != nil {
 		return MessageRequestClaim{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
@@ -2496,7 +2496,7 @@ func (s *Store) CompleteMessageRequest(ctx context.Context, p Principal, request
 		return CompleteMessageRequestResult{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
+	if err := requireMessagingEnabled(ctx, tx, p.AccountID); err != nil {
 		return CompleteMessageRequestResult{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {

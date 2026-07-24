@@ -753,6 +753,8 @@ func writeMemoryCurationError(w http.ResponseWriter, err error) bool {
 	}
 	var blocked *MemoryCurationRollbackBlockedError
 	switch {
+	case errors.Is(err, ErrFeatureNotEnabled):
+		writeFeatureNotEnabledError(w, err)
 	case errors.As(err, &blocked):
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)

@@ -131,6 +131,19 @@ func equalOptionalTime(left, right *time.Time) bool {
 }
 
 func TestMapMemoryCurationErrorPreservesExactConditions(t *testing.T) {
+	var featureErr *server.FeatureNotEnabledError
+	mappedFeature := mapMemoryCurationError(
+		&store.FeatureNotEnabledError{Feature: "messaging"},
+	)
+	if !errors.Is(mappedFeature, server.ErrFeatureNotEnabled) ||
+		!errors.As(mappedFeature, &featureErr) ||
+		featureErr.Feature != "messaging" {
+		t.Fatalf(
+			"message evidence feature error was not preserved: %v",
+			mappedFeature,
+		)
+	}
+
 	tests := []struct {
 		storeErr  error
 		serverErr error

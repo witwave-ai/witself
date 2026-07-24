@@ -328,7 +328,11 @@ type AdminAccountPolicy struct {
 	LimitDefaults       map[string]int64                     `json:"limit_defaults"`
 	LimitOverrides      map[string]AdminAccountLimitOverride `json:"limit_overrides"`
 	Limit               *AdminAccountLimit                   `json:"limit,omitempty"`
+	Features            []string                             `json:"features"`
+	FeatureDefaults     []string                             `json:"feature_defaults"`
 	PlanOverride        *AdminAccountPlanOverride            `json:"plan_override"`
+	Messaging           AdminMessaging                       `json:"messaging"`
+	MessageRetention    AdminMessageRetention                `json:"message_retention"`
 	TranscriptRetention AdminTranscriptRetention             `json:"transcript_retention"`
 	AdminHistory        []AdminAccountPolicyHistoryChange    `json:"admin_history"`
 	ApplyPending        bool                                 `json:"apply_pending"`
@@ -365,6 +369,44 @@ type AdminTranscriptRetentionOverride struct {
 	SetAt       time.Time `json:"set_at"`
 }
 
+// AdminMessaging describes the plan default and effective messaging
+// entitlement. An override can explicitly enable or disable messaging without
+// changing the account's billing plan.
+type AdminMessaging struct {
+	DefaultEnabled bool                    `json:"default_enabled"`
+	Enabled        bool                    `json:"enabled"`
+	Overridden     bool                    `json:"overridden"`
+	Override       *AdminMessagingOverride `json:"override,omitempty"`
+}
+
+// AdminMessagingOverride is the attributed account feature exception.
+type AdminMessagingOverride struct {
+	Enabled     bool      `json:"enabled"`
+	ActorID     string    `json:"actor_id"`
+	ActorHandle string    `json:"actor_handle"`
+	Reason      string    `json:"reason"`
+	SetAt       time.Time `json:"set_at"`
+}
+
+// AdminMessageRetention describes inherited and effective durable message
+// retention. Nil days means indefinite retention.
+type AdminMessageRetention struct {
+	DefaultDays   *int64                         `json:"default_days"`
+	EffectiveDays *int64                         `json:"effective_days"`
+	Overridden    bool                           `json:"overridden"`
+	Override      *AdminMessageRetentionOverride `json:"override,omitempty"`
+}
+
+// AdminMessageRetentionOverride is an attributed finite or explicit
+// indefinite message retention exception.
+type AdminMessageRetentionOverride struct {
+	Days        *int64    `json:"days"`
+	ActorID     string    `json:"actor_id"`
+	ActorHandle string    `json:"actor_handle"`
+	Reason      string    `json:"reason"`
+	SetAt       time.Time `json:"set_at"`
+}
+
 // AdminAccountLimit is the requested dimension's inherited and effective
 // hard-cap view. Nil maximums mean unlimited.
 type AdminAccountLimit struct {
@@ -393,26 +435,42 @@ type AdminAccountLimitValue struct {
 // AdminAccountPolicyHistoryChange is one append-only administrator policy
 // transition returned by the control plane.
 type AdminAccountPolicyHistoryChange struct {
-	Kind            string                  `json:"kind"`
-	ActorID         string                  `json:"actor_id"`
-	ActorHandle     string                  `json:"actor_handle"`
-	Reason          string                  `json:"reason"`
-	At              time.Time               `json:"at"`
-	PlanFrom        string                  `json:"plan_from,omitempty"`
-	PlanTo          string                  `json:"plan_to,omitempty"`
-	RetentionFrom   *int64                  `json:"retention_from,omitempty"`
-	RetentionTo     *int64                  `json:"retention_to,omitempty"`
-	LimitDimension  string                  `json:"limit_dimension,omitempty"`
-	LimitFrom       *AdminAccountLimitValue `json:"limit_from,omitempty"`
-	LimitTo         *AdminAccountLimitValue `json:"limit_to,omitempty"`
-	LimitFromSource string                  `json:"limit_from_source,omitempty"`
-	LimitToSource   string                  `json:"limit_to_source,omitempty"`
+	Kind                       string                  `json:"kind"`
+	ActorID                    string                  `json:"actor_id"`
+	ActorHandle                string                  `json:"actor_handle"`
+	Reason                     string                  `json:"reason"`
+	At                         time.Time               `json:"at"`
+	PlanFrom                   string                  `json:"plan_from,omitempty"`
+	PlanTo                     string                  `json:"plan_to,omitempty"`
+	RetentionFrom              *int64                  `json:"retention_from,omitempty"`
+	RetentionTo                *int64                  `json:"retention_to,omitempty"`
+	MessagingFrom              *bool                   `json:"messaging_from,omitempty"`
+	MessagingTo                *bool                   `json:"messaging_to,omitempty"`
+	MessagingFromSource        string                  `json:"messaging_from_source,omitempty"`
+	MessagingToSource          string                  `json:"messaging_to_source,omitempty"`
+	MessageRetentionFrom       *int64                  `json:"message_retention_from,omitempty"`
+	MessageRetentionTo         *int64                  `json:"message_retention_to,omitempty"`
+	MessageRetentionFromSource string                  `json:"message_retention_from_source,omitempty"`
+	MessageRetentionToSource   string                  `json:"message_retention_to_source,omitempty"`
+	LimitDimension             string                  `json:"limit_dimension,omitempty"`
+	LimitFrom                  *AdminAccountLimitValue `json:"limit_from,omitempty"`
+	LimitTo                    *AdminAccountLimitValue `json:"limit_to,omitempty"`
+	LimitFromSource            string                  `json:"limit_from_source,omitempty"`
+	LimitToSource              string                  `json:"limit_to_source,omitempty"`
 }
 
 // AdminTranscriptRetentionInput sets either a finite day window or an
 // explicit indefinite exception. Exactly one of Days and Indefinite must be
 // selected and Reason is always required.
 type AdminTranscriptRetentionInput struct {
+	Days       *int64
+	Indefinite bool
+	Reason     string
+}
+
+// AdminMessageRetentionInput sets either a finite day window or an explicit
+// indefinite exception. Exactly one mode and a reason are required.
+type AdminMessageRetentionInput struct {
 	Days       *int64
 	Indefinite bool
 	Reason     string
@@ -429,6 +487,10 @@ type AdminAccountLimitInput struct {
 // MaxAdminTranscriptRetentionDays is the finite retention representation
 // bound accepted by both the control-plane client and cell.
 const MaxAdminTranscriptRetentionDays int64 = 36500
+
+// MaxAdminMessageRetentionDays is a defensive representation bound, not a
+// product-tier cap.
+const MaxAdminMessageRetentionDays int64 = plans.MaxMessageRetentionDays
 
 // MaxAdminAccountLimit is the largest finite hard cap safely represented by
 // both Go and JavaScript JSON numbers.
@@ -520,6 +582,120 @@ func SetAdminTranscriptRetention(ctx context.Context, cpEndpoint, adminToken, ac
 func ClearAdminTranscriptRetention(ctx context.Context, cpEndpoint, adminToken, accountID, reason string) (*AdminAccountPolicy, error) {
 	return changeAdminAccountPolicy(ctx, cpEndpoint, adminToken, accountID,
 		"transcript-retention", http.MethodDelete, map[string]string{"reason": reason})
+}
+
+// GetAdminMessaging returns the account's inherited and effective messaging
+// entitlement.
+func GetAdminMessaging(
+	ctx context.Context,
+	cpEndpoint, adminToken, accountID string,
+) (*AdminAccountPolicy, error) {
+	return getAdminAccountPolicy(
+		ctx, cpEndpoint, adminToken, accountID, "messaging")
+}
+
+// SetAdminMessaging creates or replaces an account messaging exception
+// without changing the provider-backed billing relationship.
+func SetAdminMessaging(
+	ctx context.Context,
+	cpEndpoint, adminToken, accountID string,
+	enabled bool,
+	reason string,
+) (*AdminAccountPolicy, error) {
+	reason, err := validateAdminPolicyReason(reason)
+	if err != nil {
+		return nil, err
+	}
+	body, err := json.Marshal(map[string]any{
+		"enabled": enabled,
+		"reason":  reason,
+	})
+	if err != nil {
+		return nil, err
+	}
+	url, err := adminAccountPolicyURL(
+		cpEndpoint, accountID, "messaging")
+	if err != nil {
+		return nil, err
+	}
+	var out AdminAccountPolicy
+	if err := doJSON(
+		ctx, http.MethodPut, url, adminToken, body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ClearAdminMessaging restores the feature state inherited from the current
+// effective plan.
+func ClearAdminMessaging(
+	ctx context.Context,
+	cpEndpoint, adminToken, accountID, reason string,
+) (*AdminAccountPolicy, error) {
+	return changeAdminAccountPolicy(ctx, cpEndpoint, adminToken, accountID,
+		"messaging", http.MethodDelete, map[string]string{"reason": reason})
+}
+
+// GetAdminMessageRetention returns inherited and effective durable message
+// retention for one account.
+func GetAdminMessageRetention(
+	ctx context.Context,
+	cpEndpoint, adminToken, accountID string,
+) (*AdminAccountPolicy, error) {
+	return getAdminAccountPolicy(
+		ctx, cpEndpoint, adminToken, accountID, "message-retention")
+}
+
+// SetAdminMessageRetention creates or replaces a finite or explicit
+// indefinite account exception without changing messaging availability.
+func SetAdminMessageRetention(
+	ctx context.Context,
+	cpEndpoint, adminToken, accountID string,
+	in AdminMessageRetentionInput,
+) (*AdminAccountPolicy, error) {
+	if (in.Days == nil) == !in.Indefinite {
+		return nil, fmt.Errorf("set exactly one of days or indefinite")
+	}
+	reason, err := validateAdminPolicyReason(in.Reason)
+	if err != nil {
+		return nil, err
+	}
+	payload := map[string]any{"reason": reason}
+	if in.Indefinite {
+		payload["indefinite"] = true
+	} else {
+		if *in.Days < 1 || *in.Days > MaxAdminMessageRetentionDays {
+			return nil, fmt.Errorf(
+				"days must be between 1 and %d",
+				MaxAdminMessageRetentionDays)
+		}
+		payload["days"] = *in.Days
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	url, err := adminAccountPolicyURL(
+		cpEndpoint, accountID, "message-retention")
+	if err != nil {
+		return nil, err
+	}
+	var out AdminAccountPolicy
+	if err := doJSON(
+		ctx, http.MethodPut, url, adminToken, body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ClearAdminMessageRetention restores the account's current plan default.
+func ClearAdminMessageRetention(
+	ctx context.Context,
+	cpEndpoint, adminToken, accountID, reason string,
+) (*AdminAccountPolicy, error) {
+	return changeAdminAccountPolicy(ctx, cpEndpoint, adminToken, accountID,
+		"message-retention", http.MethodDelete,
+		map[string]string{"reason": reason})
 }
 
 // GetAdminPlanOverride returns the account's effective and billing plan plus

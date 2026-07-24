@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 
 	"github.com/witwave-ai/witself/internal/plans"
@@ -102,6 +103,138 @@ func TestAdminTranscriptRetentionOperations(t *testing.T) {
 	}
 	if requests[3].body["reason"] != "restore" {
 		t.Fatalf("clear body = %#v", requests[3].body)
+	}
+}
+
+func TestAdminMessagingPolicyOperations(t *testing.T) {
+	var requests []struct {
+		method string
+		path   string
+		body   map[string]any
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/admin/accounts/acct_1/messaging" &&
+			r.URL.Path != "/v1/admin/accounts/acct_1/message-retention" {
+			http.NotFound(w, r)
+			return
+		}
+		var body map[string]any
+		if r.Method != http.MethodGet {
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+		}
+		requests = append(requests, struct {
+			method string
+			path   string
+			body   map[string]any
+		}{method: r.Method, path: r.URL.Path, body: body})
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version":   "witself.v0",
+			"account_id":       "acct_1",
+			"plan":             "free",
+			"billing_plan":     "free",
+			"applied":          "free",
+			"features":         []string{plans.MessagingFeature},
+			"feature_defaults": []string{},
+			"messaging": map[string]any{
+				"default_enabled": false,
+				"enabled":         true,
+				"overridden":      true,
+				"override": map[string]any{
+					"enabled": true, "actor_id": "adm_abcdefghijklmnopqrst",
+					"actor_handle": "scott", "reason": "founder",
+					"set_at": "2026-07-24T00:00:00Z",
+				},
+			},
+			"message_retention": map[string]any{
+				"default_days": 30, "effective_days": nil, "overridden": true,
+				"override": map[string]any{
+					"days": nil, "actor_id": "adm_abcdefghijklmnopqrst",
+					"actor_handle": "scott", "reason": "founder",
+					"set_at": "2026-07-24T00:00:00Z",
+				},
+			},
+			"admin_history": []any{},
+		})
+	}))
+	defer srv.Close()
+
+	ctx := t.Context()
+	got, err := GetAdminMessaging(
+		ctx, srv.URL, "witself_adm_test", "acct_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Messaging.Enabled || !got.Messaging.Overridden ||
+		got.Messaging.DefaultEnabled ||
+		got.Messaging.Override == nil ||
+		got.Messaging.Override.ActorID != "adm_abcdefghijklmnopqrst" ||
+		!slices.Contains(got.Features, plans.MessagingFeature) {
+		t.Fatalf("messaging response = %#v", got)
+	}
+	if _, err := SetAdminMessaging(
+		ctx, srv.URL, "witself_adm_test", "acct_1", true, " founder ",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ClearAdminMessaging(
+		ctx, srv.URL, "witself_adm_test", "acct_1", " restore ",
+	); err != nil {
+		t.Fatal(err)
+	}
+	got, err = GetAdminMessageRetention(
+		ctx, srv.URL, "witself_adm_test", "acct_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MessageRetention.EffectiveDays != nil ||
+		!got.MessageRetention.Overridden ||
+		got.MessageRetention.Override == nil ||
+		got.MessageRetention.Override.Days != nil {
+		t.Fatalf("message retention response = %#v", got.MessageRetention)
+	}
+	days := int64(365)
+	if _, err := SetAdminMessageRetention(
+		ctx, srv.URL, "witself_adm_test", "acct_1",
+		AdminMessageRetentionInput{Days: &days, Reason: " team "},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetAdminMessageRetention(
+		ctx, srv.URL, "witself_adm_test", "acct_1",
+		AdminMessageRetentionInput{
+			Indefinite: true,
+			Reason:     "founder",
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ClearAdminMessageRetention(
+		ctx, srv.URL, "witself_adm_test", "acct_1", " restore ",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(requests) != 7 {
+		t.Fatalf("requests = %#v; want seven", requests)
+	}
+	if requests[1].method != http.MethodPut ||
+		requests[1].body["enabled"] != true ||
+		requests[1].body["reason"] != "founder" {
+		t.Fatalf("messaging PUT = %#v", requests[1])
+	}
+	if requests[2].method != http.MethodDelete ||
+		requests[2].body["reason"] != "restore" {
+		t.Fatalf("messaging DELETE = %#v", requests[2])
+	}
+	if requests[4].body["days"] != float64(365) ||
+		requests[4].body["reason"] != "team" {
+		t.Fatalf("finite retention PUT = %#v", requests[4])
+	}
+	if requests[5].body["indefinite"] != true ||
+		requests[5].body["reason"] != "founder" {
+		t.Fatalf("indefinite retention PUT = %#v", requests[5])
 	}
 }
 
@@ -383,6 +516,31 @@ func TestAdminAccountPolicyValidation(t *testing.T) {
 		{"excessive days", func() error {
 			_, err := SetAdminTranscriptRetention(t.Context(), "http://invalid", "t", "acct_1",
 				AdminTranscriptRetentionInput{Days: &daysTooHigh, Reason: "r"})
+			return err
+		}},
+		{"message retention missing selection", func() error {
+			_, err := SetAdminMessageRetention(
+				t.Context(), "http://invalid", "t", "acct_1",
+				AdminMessageRetentionInput{Reason: "r"})
+			return err
+		}},
+		{"message retention conflicting selection", func() error {
+			_, err := SetAdminMessageRetention(
+				t.Context(), "http://invalid", "t", "acct_1",
+				AdminMessageRetentionInput{
+					Days: &days0, Indefinite: true, Reason: "r",
+				})
+			return err
+		}},
+		{"message retention zero days", func() error {
+			_, err := SetAdminMessageRetention(
+				t.Context(), "http://invalid", "t", "acct_1",
+				AdminMessageRetentionInput{Days: &days0, Reason: "r"})
+			return err
+		}},
+		{"messaging missing reason", func() error {
+			_, err := SetAdminMessaging(
+				t.Context(), "http://invalid", "t", "acct_1", true, "")
 			return err
 		}},
 		{"missing reason", func() error {

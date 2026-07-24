@@ -12,6 +12,8 @@
 // Go contract:
 //   external proxy:
 //     GET|PUT|DELETE /v1/admin/accounts/{id}/transcript-retention
+//     GET|PUT|DELETE /v1/admin/accounts/{id}/messaging
+//     GET|PUT|DELETE /v1/admin/accounts/{id}/message-retention
 //     GET|PUT|DELETE /v1/admin/accounts/{id}/plan-override
 //     GET|PUT|DELETE /v1/admin/accounts/{id}/limit-overrides/{dimension}
 //     Authorization: Bearer $INTERNAL_BRIDGE_TOKEN
@@ -33,7 +35,7 @@ const ACCOUNT_ID_PATTERN = "[A-Za-z0-9_-]{1,128}";
 const LIMIT_DIMENSION_PATTERN =
   "(?:realms|agents|agents_per_realm|stored_secret)";
 const ADMIN_POLICY_PATH = new RegExp(
-  `^/v1/admin/accounts/(${ACCOUNT_ID_PATTERN})/(?:transcript-retention|plan-override|limit-overrides/${LIMIT_DIMENSION_PATTERN})$`,
+  `^/v1/admin/accounts/(${ACCOUNT_ID_PATTERN})/(?:transcript-retention|messaging|message-retention|plan-override|limit-overrides/${LIMIT_DIMENSION_PATTERN})$`,
 );
 const INTERNAL_RESOLVE_PATH = new RegExp(
   `^/v1/internal/accounts/(${ACCOUNT_ID_PATTERN}):resolve$`,

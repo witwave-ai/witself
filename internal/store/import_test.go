@@ -978,6 +978,25 @@ func TestValidateAndRecordPlanShapes(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			name: "finite message retention snapshot is accepted",
+			row: map[string]any{"id": acc, "plan": "professional",
+				"plan_policies": map[string]any{
+					plans.MessageRetentionDaysPolicy:        float64(90),
+					plans.MessagingEntitlementVersionPolicy: float64(1),
+				},
+				"plan_features": []any{"memory", "facts", plans.MessagingFeature}},
+			wantOK: true,
+		},
+		{
+			name: "explicit indefinite message retention snapshot is accepted",
+			row: map[string]any{"id": acc, "plan": "enterprise",
+				"plan_policies": map[string]any{
+					plans.MessagingEntitlementVersionPolicy: float64(1),
+				},
+				"plan_features": []any{"memory", "facts", plans.MessagingFeature}},
+			wantOK: true,
+		},
+		{
 			name: "matching fenced snapshot is accepted",
 			row: map[string]any{
 				"id": acc, "plan": "standard",
@@ -1035,6 +1054,27 @@ func TestValidateAndRecordPlanShapes(t *testing.T) {
 			name:   "plan_limits reject negative values",
 			row:    map[string]any{"id": acc, "plan_limits": map[string]any{plans.StoredSecretLimit: float64(-1)}},
 			wantOK: false, want: "must be between 0",
+		},
+		{
+			name: "plan policies reject unknown dimensions",
+			row: map[string]any{"id": acc, "plan_policies": map[string]any{
+				"unknown_retention_days": float64(30),
+			}},
+			wantOK: false, want: `unknown policy "unknown_retention_days"`,
+		},
+		{
+			name: "message retention must be positive",
+			row: map[string]any{"id": acc, "plan_policies": map[string]any{
+				plans.MessageRetentionDaysPolicy: float64(0),
+			}},
+			wantOK: false, want: "must be between 1",
+		},
+		{
+			name: "messaging entitlement marker must be supported",
+			row: map[string]any{"id": acc, "plan_policies": map[string]any{
+				plans.MessagingEntitlementVersionPolicy: float64(2),
+			}},
+			wantOK: false, want: "must be 1",
 		},
 		{
 			name:   "plan_features must be an array",
