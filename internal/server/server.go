@@ -19,6 +19,7 @@ import (
 	"unicode"
 
 	"github.com/witwave-ai/witself/internal/placement"
+	"github.com/witwave-ai/witself/internal/plans"
 	"github.com/witwave-ai/witself/internal/version"
 )
 
@@ -3408,12 +3409,10 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 				writeJSONError(w, http.StatusBadRequest, "a plan is required")
 				return
 			}
-			for key, value := range req.Policies {
-				if key != "transcript_retention_days" || value < 1 || value > 36500 {
-					writeJSONError(w, http.StatusBadRequest,
-						"policies must contain only transcript_retention_days between 1 and 36500 (omit it for indefinite)")
-					return
-				}
+			if err := plans.ValidatePolicies(req.Policies); err != nil {
+				writeJSONError(w, http.StatusBadRequest,
+					"invalid plan policies: "+err.Error())
+				return
 			}
 			applied, err := cfg.SetAccountPlan(
 				r.Context(), accountID, req.Revision, req.SnapshotHash,
