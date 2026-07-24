@@ -87,10 +87,9 @@ func provisionCivo(ctx *pulumi.Context, c civoCell) error {
 		ClusterType: pulumi.String("k3s"),
 		Cni:         pulumi.String("cilium"),
 		Pools: civo.KubernetesClusterPoolsArgs{
-			Label:            pulumi.String("development"),
-			NodeCount:        pulumi.Int(1),
-			PublicIpNodePool: pulumi.Bool(true),
-			Size:             pulumi.String(c.nodeSize),
+			Label:     pulumi.String("development"),
+			NodeCount: pulumi.Int(1),
+			Size:      pulumi.String(c.nodeSize),
 		},
 		Tags:            pulumi.String("witself " + c.name + " development"),
 		WriteKubeconfig: pulumi.Bool(c.argocd),
