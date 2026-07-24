@@ -25,7 +25,7 @@ apps:
         batchTimeout: 30s
       messageRetention:
         enabled: true
-        mode: preview
+        mode: enforce
         batchSize: 25
         interval: 5m
         batchTimeout: 2m
