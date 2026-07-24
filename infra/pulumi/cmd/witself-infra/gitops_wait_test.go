@@ -69,6 +69,18 @@ func TestArgoApplicationsReady(t *testing.T) {
 	}
 }
 
+func TestArgoApplicationsReadyWithSyncedOnlyRoot(t *testing.T) {
+	apps := []argoApplication{
+		mkArgoApp("bootstrap", "Synced", "Progressing", ""),
+		mkArgoApp("apps", "Synced", "Healthy", ""),
+		mkArgoApp("witself-server", "Synced", "Healthy", ""),
+	}
+	ready, why := argoApplicationsReadyWithSyncedOnly(apps, map[string]bool{"bootstrap": true})
+	if !ready {
+		t.Fatalf("ready = false, want true (why %q)", why)
+	}
+}
+
 func TestWaitForArgoApplicationsHealthy(t *testing.T) {
 	t.Run("waits through progressing parent", func(t *testing.T) {
 		lister := &fakeArgoLister{responses: []argoListResponse{

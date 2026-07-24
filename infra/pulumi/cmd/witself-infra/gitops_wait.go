@@ -80,7 +80,9 @@ func waitForCivoArgoApplicationsHealthy(ctx context.Context, stack auto.Stack, m
 	if err != nil {
 		return err
 	}
-	return waitForArgoApplicationsHealthy(ctx, lister, namespace, maxWait, pollEvery)
+	return waitForArgoApplicationsHealthyWithSyncedOnly(
+		ctx, lister, namespace, maxWait, pollEvery, map[string]bool{"bootstrap": true},
+	)
 }
 
 func newCivoArgoListerFromOutputs(outs auto.OutputMap) (*tokenArgoLister, string, error) {
@@ -124,6 +126,10 @@ func waitForAzureArgoApplicationsHealthy(ctx context.Context, stack auto.Stack, 
 }
 
 func waitForArgoApplicationsHealthy(ctx context.Context, lister argoApplicationLister, namespace string, maxWait, pollEvery time.Duration) error {
+	return waitForArgoApplicationsHealthyWithSyncedOnly(ctx, lister, namespace, maxWait, pollEvery, nil)
+}
+
+func waitForArgoApplicationsHealthyWithSyncedOnly(ctx context.Context, lister argoApplicationLister, namespace string, maxWait, pollEvery time.Duration, syncedOnly map[string]bool) error {
 	deadline := time.Now().Add(maxWait)
 	started := time.Now()
 
@@ -139,7 +145,7 @@ func waitForArgoApplicationsHealthy(ctx context.Context, lister argoApplicationL
 		}
 		var reason string
 		if err == nil {
-			ready, why := argoApplicationsReady(apps)
+			ready, why := argoApplicationsReadyWithSyncedOnly(apps, syncedOnly)
 			if ready {
 				fmt.Fprintf(os.Stderr, "Argo CD applications Synced/Healthy (took %s)\n", time.Since(started).Round(time.Second))
 				return nil
@@ -163,6 +169,10 @@ func waitForArgoApplicationsHealthy(ctx context.Context, lister argoApplicationL
 }
 
 func argoApplicationsReady(apps []argoApplication) (bool, string) {
+	return argoApplicationsReadyWithSyncedOnly(apps, nil)
+}
+
+func argoApplicationsReadyWithSyncedOnly(apps []argoApplication, syncedOnly map[string]bool) (bool, string) {
 	if len(apps) == 0 {
 		return false, "no Argo CD applications reported yet"
 	}
@@ -174,6 +184,9 @@ func argoApplicationsReady(apps []argoApplication) (bool, string) {
 		}
 		sync := app.Status.Sync.Status
 		health := app.Status.Health.Status
+		if syncedOnly[name] && sync == "Synced" {
+			continue
+		}
 		if sync == "Synced" && health == "Healthy" {
 			continue
 		}
