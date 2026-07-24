@@ -56,6 +56,22 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 	if _, capped := enterprise.Policies[TranscriptRetentionDaysPolicy]; capped {
 		t.Fatalf("enterprise policies = %v; want indefinite transcript retention", enterprise.Policies)
 	}
+	for planID, want := range map[string]int64{
+		Free:         0,
+		"standard":   100,
+		"team":       250,
+		"enterprise": 1000,
+	} {
+		plan, ok := c.Get(planID)
+		if !ok {
+			t.Fatalf("catalog missing plan %q", planID)
+		}
+		got, present := plan.Limits[StoredSecretLimit]
+		if !present || got != want {
+			t.Fatalf("%s stored-secret limit = %d (present %v); want %d",
+				planID, got, present, want)
+		}
+	}
 	for _, feature := range team.Features {
 		if !enterprise.HasFeature(feature) {
 			t.Fatalf("enterprise features = %v; missing Team feature %q", enterprise.Features, feature)

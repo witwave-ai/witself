@@ -1,6 +1,6 @@
 {
   "schema_version": "witself.plans.v0",
-  "updated": "2026-07-22",
+  "updated": "2026-07-23",
   "currency": "USD",
   "plans": [
     {
@@ -9,7 +9,7 @@
       "price_monthly": 0,
       "available": true,
       "usage_billed": false,
-      "limits": { "agents": 25, "realms": 1 },
+      "limits": { "agents": 25, "realms": 1, "stored_secret": 0 },
       "policies": { "transcript_retention_days": 30 },
       "features": ["memory", "facts"],
       "summary": "Limited and capped. Agent memory and facts for up to 25 agents in one realm. No support included."
@@ -20,7 +20,7 @@
       "price_monthly": 30,
       "available": true,
       "usage_billed": false,
-      "limits": { "agents": 250, "realms": 10 },
+      "limits": { "agents": 250, "realms": 10, "stored_secret": 100 },
       "policies": { "transcript_retention_days": 90 },
       "features": ["memory", "facts", "secrets", "collaboration", "support"],
       "summary": "Capped. Memory, facts, secrets, and collaboration for 250 agents across 10 realms, support included."
@@ -31,7 +31,7 @@
       "price_monthly": 250,
       "available": false,
       "usage_billed": true,
-      "limits": null,
+      "limits": { "stored_secret": 250 },
       "policies": { "transcript_retention_days": 365 },
       "features": ["memory", "facts", "secrets", "collaboration", "support"],
       "summary": "Coming soon. Everything in Professional with higher limits, plus usage-based billing."
@@ -41,7 +41,7 @@
       "name": "Enterprise",
       "available": false,
       "usage_billed": true,
-      "limits": null,
+      "limits": { "stored_secret": 1000 },
       "policies": {},
       "features": ["memory", "facts", "secrets", "collaboration", "support"],
       "summary": "Coming soon. Everything in Team with custom pricing and support; details to follow."
