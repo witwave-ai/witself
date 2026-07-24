@@ -1,6 +1,6 @@
 {
   "schema_version": "witself.plans.v0",
-  "updated": "2026-07-23",
+  "updated": "2026-07-24",
   "currency": "USD",
   "plans": [
     {
@@ -9,10 +9,10 @@
       "price_monthly": 0,
       "available": true,
       "usage_billed": false,
-      "limits": { "agents": 25, "realms": 1, "stored_secret": 0 },
+      "limits": { "agents": 10, "agents_per_realm": 10, "realms": 1, "stored_secret": 0 },
       "policies": { "transcript_retention_days": 30 },
       "features": ["memory", "facts"],
-      "summary": "Limited and capped. Agent memory and facts for up to 25 agents in one realm. No support included."
+      "summary": "Limited and capped. Agent memory and facts for up to 10 agents in one realm. No support included."
     },
     {
       "id": "standard",
@@ -20,10 +20,10 @@
       "price_monthly": 30,
       "available": true,
       "usage_billed": false,
-      "limits": { "agents": 250, "realms": 10, "stored_secret": 100 },
+      "limits": { "agents": 100, "agents_per_realm": 100, "realms": 1, "stored_secret": 100 },
       "policies": { "transcript_retention_days": 90 },
       "features": ["memory", "facts", "secrets", "collaboration", "support"],
-      "summary": "Capped. Memory, facts, secrets, and collaboration for 250 agents across 10 realms, support included."
+      "summary": "Capped. Memory, facts, secrets, and collaboration for up to 100 agents in one realm, support included."
     },
     {
       "id": "team",
@@ -31,10 +31,10 @@
       "price_monthly": 250,
       "available": false,
       "usage_billed": true,
-      "limits": { "stored_secret": 250 },
+      "limits": { "agents": 2500, "agents_per_realm": 100, "realms": 25, "stored_secret": 250 },
       "policies": { "transcript_retention_days": 365 },
       "features": ["memory", "facts", "secrets", "collaboration", "support"],
-      "summary": "Coming soon. Everything in Professional with higher limits, plus usage-based billing."
+      "summary": "Coming soon. Everything in Professional for up to 100 agents per realm across 25 realms, plus usage-based billing."
     },
     {
       "id": "enterprise",
