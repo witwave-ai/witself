@@ -168,8 +168,13 @@ func TestAccountLimitOverrideLifecycleAndAttribution(t *testing.T) {
 		t.Fatalf("inherited agent limit = defaults %v effective %v; want 25",
 			inherited.DefaultLimits, inherited.Limits)
 	}
-	if _, ok := inherited.Limits[plans.StoredSecretLimit]; ok {
-		t.Fatalf("Phase A stored-secret default unexpectedly finite: %v", inherited.Limits)
+	if got, ok := inherited.DefaultLimits[plans.StoredSecretLimit]; !ok || got != 0 {
+		t.Fatalf("inherited stored-secret default = %v; want explicit zero",
+			inherited.DefaultLimits)
+	}
+	if got, ok := inherited.Limits[plans.StoredSecretLimit]; !ok || got != 0 {
+		t.Fatalf("inherited stored-secret limit = %v; want explicit zero",
+			inherited.Limits)
 	}
 
 	zero := int64(0)
@@ -193,7 +198,7 @@ func TestAccountLimitOverrideLifecycleAndAttribution(t *testing.T) {
 	if r.Entitled != plans.Free || r.Provider != "" || r.CustomerID != "" {
 		t.Fatalf("limit override mutated billing state: %+v", r)
 	}
-	if _, finiteByDefault := snapshot.DefaultLimits[plans.StoredSecretLimit]; finiteByDefault ||
+	if got, ok := snapshot.DefaultLimits[plans.StoredSecretLimit]; !ok || got != 0 ||
 		snapshot.Limits[plans.StoredSecretLimit] != 0 {
 		t.Fatalf("zero snapshot = defaults %v effective %v",
 			snapshot.DefaultLimits, snapshot.Limits)
@@ -235,8 +240,8 @@ func TestAccountLimitOverrideLifecycleAndAttribution(t *testing.T) {
 			again.Version, len(again.AdminHistory), len(h.applier.calls))
 	}
 
-	// A present nil Max is an explicit unlimited override even though the
-	// Phase A catalog currently also omits this dimension.
+	// A present nil Max is an explicit unlimited override to the finite
+	// Personal catalog default.
 	if _, err := h.m.SetAccountLimitOverride(
 		ctx, accountID, plans.StoredSecretLimit, nil,
 		testAdminActor(), "founder account is unlimited",
@@ -250,6 +255,9 @@ func TestAccountLimitOverrideLifecycleAndAttribution(t *testing.T) {
 	override, ok = r.LimitOverrides[plans.StoredSecretLimit]
 	if !ok || override.Max != nil {
 		t.Fatalf("explicit unlimited override = %+v, present=%v", override, ok)
+	}
+	if got, ok := snapshot.DefaultLimits[plans.StoredSecretLimit]; !ok || got != 0 {
+		t.Fatalf("unlimited default limits = %v; want Personal zero", snapshot.DefaultLimits)
 	}
 	if _, finite := snapshot.Limits[plans.StoredSecretLimit]; finite {
 		t.Fatalf("unlimited effective limits = %v", snapshot.Limits)
@@ -287,8 +295,10 @@ func TestAccountLimitOverrideLifecycleAndAttribution(t *testing.T) {
 		r.LimitOverrides != nil {
 		t.Fatalf("cleared overrides = %v; want absent inheritance", r.LimitOverrides)
 	}
-	if _, finite := snapshot.Limits[plans.StoredSecretLimit]; finite {
-		t.Fatalf("cleared effective limits = %v; want catalog inheritance", snapshot.Limits)
+	if got, ok := snapshot.DefaultLimits[plans.StoredSecretLimit]; !ok || got != 0 ||
+		snapshot.Limits[plans.StoredSecretLimit] != 0 {
+		t.Fatalf("cleared effective limits = defaults %v effective %v; want catalog zero",
+			snapshot.DefaultLimits, snapshot.Limits)
 	}
 	clearAudit := r.AdminHistory[len(r.AdminHistory)-1]
 	if clearAudit.Kind != "limit_override_cleared" ||
@@ -339,6 +349,24 @@ func TestFounderUnlimitedOverrideOnAppliedUnlimitedSnapshotDoesNotReapply(t *tes
 	h := newHarness(t, false)
 	ctx := t.Context()
 	const accountID = "acct_founder"
+
+	phaseA, err := plans.Parse([]byte(`{
+		"schema_version":"witself.plans.v0",
+		"plans":[{
+			"id":"free",
+			"name":"Personal",
+			"price_monthly":0,
+			"available":true,
+			"usage_billed":false,
+			"limits":{"agents":25,"realms":1},
+			"policies":{"transcript_retention_days":30},
+			"features":["memory","facts"]
+		}]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.m.cfg.Catalog = phaseA
 
 	created, pending, err := h.m.EnsureAccount(ctx, accountID)
 	if err != nil || !created || pending {
@@ -391,6 +419,34 @@ func TestFounderUnlimitedOverrideOnAppliedUnlimitedSnapshotDoesNotReapply(t *tes
 	if len(h.applier.calls) != 1 {
 		t.Fatalf("unchanged founder snapshot made %d cell calls; want baseline call only",
 			len(h.applier.calls))
+	}
+
+	phaseB, err := plans.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.m.cfg.Catalog = phaseB
+	if err := h.m.ReconcileAccount(ctx, accountID); err != nil {
+		t.Fatal(err)
+	}
+	promoted, promotedSnapshot, err := h.m.ResolvedStatus(ctx, accountID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := promotedSnapshot.DefaultLimits[plans.StoredSecretLimit]; !ok || got != 0 {
+		t.Fatalf("promoted founder default limits = %v; want Personal zero",
+			promotedSnapshot.DefaultLimits)
+	}
+	if _, finite := promotedSnapshot.Limits[plans.StoredSecretLimit]; finite {
+		t.Fatalf("promoted founder effective limits = %v; want explicit unlimited",
+			promotedSnapshot.Limits)
+	}
+	if promotedSnapshot.Hash != afterSnapshot.Hash ||
+		SnapshotApplyPending(promoted, promotedSnapshot) ||
+		len(h.applier.calls) != 1 {
+		t.Fatalf("catalog promotion changed founder effective snapshot: before=%s after=%s pending=%v calls=%d",
+			afterSnapshot.Hash, promotedSnapshot.Hash,
+			SnapshotApplyPending(promoted, promotedSnapshot), len(h.applier.calls))
 	}
 }
 

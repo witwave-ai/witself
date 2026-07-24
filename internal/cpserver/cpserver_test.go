@@ -263,7 +263,7 @@ func TestAdminLimitOverrideLifecycleAndAttribution(t *testing.T) {
 	}
 	view := doc["limit"].(map[string]any)
 	if view["dimension"] != plans.StoredSecretLimit ||
-		view["default_max"] != nil || view["effective_max"] != nil ||
+		view["default_max"] != float64(0) || view["effective_max"] != float64(0) ||
 		view["overridden"] != false {
 		t.Fatalf("inherited limit view = %v", view)
 	}
@@ -277,7 +277,7 @@ func TestAdminLimitOverrideLifecycleAndAttribution(t *testing.T) {
 		t.Fatalf("limit override mutated billing classification: %v", doc)
 	}
 	view = doc["limit"].(map[string]any)
-	if view["default_max"] != nil || view["effective_max"] != float64(0) ||
+	if view["default_max"] != float64(0) || view["effective_max"] != float64(0) ||
 		view["overridden"] != true {
 		t.Fatalf("zero limit view = %v", view)
 	}
@@ -301,8 +301,8 @@ func TestAdminLimitOverrideLifecycleAndAttribution(t *testing.T) {
 		t.Fatalf("idempotent PUT = %d %v", status, doc)
 	}
 
-	// Explicit unlimited remains a present, attributed exception despite the
-	// current Phase A catalog also omitting stored_secret.
+	// Explicit unlimited remains a present, attributed exception to the
+	// finite Personal catalog default.
 	status, doc = h.call(t, "PUT", path, "admin-good",
 		`{"unlimited":true,"reason":"founder account is unlimited"}`)
 	if status != http.StatusOK {
@@ -342,7 +342,8 @@ func TestAdminLimitOverrideLifecycleAndAttribution(t *testing.T) {
 		t.Fatalf("DELETE limit = %d %v", status, doc)
 	}
 	view = doc["limit"].(map[string]any)
-	if view["overridden"] != false || view["effective_max"] != nil {
+	if view["overridden"] != false || view["default_max"] != float64(0) ||
+		view["effective_max"] != float64(0) {
 		t.Fatalf("cleared limit view = %v", view)
 	}
 	history = doc["admin_history"].([]any)
