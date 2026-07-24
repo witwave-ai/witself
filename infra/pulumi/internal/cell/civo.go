@@ -95,7 +95,10 @@ func provisionCivo(ctx *pulumi.Context, c civoCell) error {
 		},
 		Tags:            pulumi.String("witself " + c.name + " development"),
 		WriteKubeconfig: pulumi.Bool(c.argocd),
-	}, pulumi.DependsOn([]pulumi.Resource{firewall}))
+	},
+		pulumi.DependsOn([]pulumi.Resource{firewall}),
+		pulumi.IgnoreChanges([]string{"tags"}),
+	)
 	if err != nil {
 		return err
 	}
