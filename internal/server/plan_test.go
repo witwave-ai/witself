@@ -59,6 +59,7 @@ func TestSetAccountPlanEndpoint(t *testing.T) {
 	var gotLimits map[string]int64
 	var gotPolicies map[string]int64
 	var gotFeatures []string
+	setPlanCalls := 0
 	srv := planTestServer(t, func(
 		_ context.Context,
 		accountID string,
@@ -67,6 +68,7 @@ func TestSetAccountPlanEndpoint(t *testing.T) {
 		limits, policies map[string]int64,
 		features []string,
 	) (PlanSnapshotRecord, error) {
+		setPlanCalls++
 		if accountID == "acct_missing" {
 			return PlanSnapshotRecord{}, ErrNotFound
 		}
@@ -84,7 +86,7 @@ func TestSetAccountPlanEndpoint(t *testing.T) {
 	// Happy path: the control plane applies a snapshot.
 	hash := strings.Repeat("a", 64)
 	resp := postPlan(t, srv.URL+"/v1/accounts/acct_1:plan", "witself_prv_test",
-		`{"revision":7,"snapshot_hash":"`+hash+`","plan":"standard","limits":{"agents":250,"agents_per_realm":100,"realms":10},"policies":{"transcript_retention_days":90},"features":["memory","facts","secrets","collaboration","support"]}`)
+		`{"revision":7,"snapshot_hash":"`+hash+`","plan":"standard","limits":{"agents":250,"agents_per_realm":100,"realms":10},"policies":{"transcript_retention_days":90,"message_retention_days":90,"messaging_entitlement_version":1},"features":["memory","facts","secrets","messaging","collaboration","support"]}`)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d; want 200", resp.StatusCode)
 	}
@@ -97,11 +99,14 @@ func TestSetAccountPlanEndpoint(t *testing.T) {
 	if gotRevision != 7 || gotHash != hash {
 		t.Fatalf("fence = %d/%q; want 7/%q", gotRevision, gotHash, hash)
 	}
-	if len(gotFeatures) != 5 || gotFeatures[2] != "secrets" {
-		t.Fatalf("features = %v; want the 5 standard features", gotFeatures)
+	if len(gotFeatures) != 6 || gotFeatures[2] != "secrets" ||
+		gotFeatures[3] != "messaging" {
+		t.Fatalf("features = %v; want the standard plan's 6 features", gotFeatures)
 	}
-	if gotPolicies["transcript_retention_days"] != 90 {
-		t.Fatalf("policies = %v; want transcript retention 90", gotPolicies)
+	if gotPolicies["transcript_retention_days"] != 90 ||
+		gotPolicies["message_retention_days"] != 90 ||
+		gotPolicies["messaging_entitlement_version"] != 1 {
+		t.Fatalf("policies = %v; want all retention and messaging policies", gotPolicies)
 	}
 	var body struct {
 		Revision int64            `json:"revision"`
@@ -114,8 +119,21 @@ func TestSetAccountPlanEndpoint(t *testing.T) {
 		body.Revision != 7 || body.Hash != hash || body.Plan != "standard" ||
 		body.Limits["agents"] != 250 ||
 		body.Limits["agents_per_realm"] != 100 ||
-		body.Policies["transcript_retention_days"] != 90 {
+		body.Policies["transcript_retention_days"] != 90 ||
+		body.Policies["message_retention_days"] != 90 ||
+		body.Policies["messaging_entitlement_version"] != 1 {
 		t.Fatalf("response body = %+v, %v; want the snapshot echoed", body, err)
+	}
+
+	// An omitted retention window is the explicit indefinite policy used by
+	// account overrides; the entitlement marker must still reach the store.
+	resp = postPlan(t, srv.URL+"/v1/accounts/acct_indefinite:plan", "witself_prv_test",
+		`{"revision":8,"snapshot_hash":"`+strings.Repeat("b", 64)+`","plan":"enterprise","limits":{},"policies":{"messaging_entitlement_version":1},"features":["collaboration","facts","memory","messaging","secrets","support"]}`)
+	if resp.StatusCode != http.StatusOK ||
+		gotPolicies["messaging_entitlement_version"] != 1 ||
+		len(gotPolicies) != 1 {
+		t.Fatalf("indefinite messaging policy status/policies = %d/%v; want 200 and only the entitlement marker",
+			resp.StatusCode, gotPolicies)
 	}
 
 	// Wrong token -> 401 (constant-time provision check).
@@ -129,6 +147,25 @@ func TestSetAccountPlanEndpoint(t *testing.T) {
 	if resp := postPlan(t, srv.URL+"/v1/accounts/acct_1:plan", "witself_prv_test",
 		`{"plan":"free","policies":{"transcript_retention_days":0}}`); resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("zero retention status = %d; want 400", resp.StatusCode)
+	}
+	if resp := postPlan(t, srv.URL+"/v1/accounts/acct_1:plan", "witself_prv_test",
+		`{"plan":"free","policies":{"message_retention_days":0}}`); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("zero message retention status = %d; want 400", resp.StatusCode)
+	}
+	if resp := postPlan(t, srv.URL+"/v1/accounts/acct_1:plan", "witself_prv_test",
+		`{"plan":"free","policies":{"message_retention_days":36501}}`); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("oversized message retention status = %d; want 400", resp.StatusCode)
+	}
+	if resp := postPlan(t, srv.URL+"/v1/accounts/acct_1:plan", "witself_prv_test",
+		`{"plan":"free","policies":{"messaging_entitlement_version":2}}`); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unknown messaging entitlement version status = %d; want 400", resp.StatusCode)
+	}
+	if resp := postPlan(t, srv.URL+"/v1/accounts/acct_1:plan", "witself_prv_test",
+		`{"plan":"free","policies":{"unknown_policy":1}}`); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unknown policy status = %d; want 400", resp.StatusCode)
+	}
+	if setPlanCalls != 2 {
+		t.Fatalf("SetAccountPlan calls after invalid requests = %d; want only the two valid snapshots", setPlanCalls)
 	}
 	// Unknown account -> 404.
 	if resp := postPlan(t, srv.URL+"/v1/accounts/acct_missing:plan", "witself_prv_test", `{"plan":"free"}`); resp.StatusCode != http.StatusNotFound {
