@@ -17,5 +17,5 @@ spec:
     solvers:
       - http01:
           ingress:
-            ingressClassName: {{ default "traefik" $ingress.className | quote }}
+            class: {{ default "traefik" $ingress.className | quote }}
 {{- end }}
