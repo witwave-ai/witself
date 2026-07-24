@@ -23,6 +23,12 @@ apps:
         batchSize: 100
         interval: 2s
         batchTimeout: 30s
+      messageRetention:
+        enabled: true
+        mode: preview
+        batchSize: 25
+        interval: 5m
+        batchTimeout: 2m
       transcriptRetention:
         enabled: true
         mode: enforce
