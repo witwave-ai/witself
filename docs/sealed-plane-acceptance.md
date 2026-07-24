@@ -723,8 +723,9 @@ copy. The larger
 21-case certification still depends on the live harness and deferred runtime
 injection. Neither gate certifies secret update/replacement, grants or
 group/cross-agent sharing, dedicated TOTP enrollment/removal commands,
-permanent secret deletion, OS keychains or secure enclaves, encrypted
-attachments, browser-native filling, or additional installation
+irreversible secret purge or crypto-shred (guarded tombstone deletion is
+implemented separately through schema 67), OS keychains or secure enclaves,
+encrypted attachments, browser-native filling, or additional installation
 proof-of-possession. Those features require separate threat models and
 acceptance suites.
 

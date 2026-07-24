@@ -250,6 +250,178 @@ func TestAdminCanSetExplicitIndefiniteRetention(t *testing.T) {
 	}
 }
 
+func TestAdminLimitOverrideLifecycleAndAttribution(t *testing.T) {
+	h := newHarness(t)
+	path := "/v1/admin/accounts/acct_1/limit-overrides/stored_secret"
+
+	if status, _ := h.call(t, "GET", path, "good", ""); status != http.StatusForbidden {
+		t.Fatalf("owner token on limit override route = %d; want 403", status)
+	}
+	status, doc := h.call(t, "GET", path, "admin-good", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET inherited limit = %d %v", status, doc)
+	}
+	view := doc["limit"].(map[string]any)
+	if view["dimension"] != plans.StoredSecretLimit ||
+		view["default_max"] != nil || view["effective_max"] != nil ||
+		view["overridden"] != false {
+		t.Fatalf("inherited limit view = %v", view)
+	}
+
+	status, doc = h.call(t, "PUT", path, "admin-good",
+		`{"max":0,"reason":"pause founder secret writes"}`)
+	if status != http.StatusOK {
+		t.Fatalf("PUT zero limit = %d %v", status, doc)
+	}
+	if doc["billing_plan"] != plans.Free || doc["plan"] != plans.Free {
+		t.Fatalf("limit override mutated billing classification: %v", doc)
+	}
+	view = doc["limit"].(map[string]any)
+	if view["default_max"] != nil || view["effective_max"] != float64(0) ||
+		view["overridden"] != true {
+		t.Fatalf("zero limit view = %v", view)
+	}
+	override := view["override"].(map[string]any)
+	if override["max"] != float64(0) ||
+		override["actor_id"] != testAdminID ||
+		override["actor_handle"] != "scott" ||
+		override["reason"] != "pause founder secret writes" {
+		t.Fatalf("zero override attribution = %v", override)
+	}
+	history := doc["admin_history"].([]any)
+	if len(history) != 1 {
+		t.Fatalf("history after set = %v", history)
+	}
+
+	// Same value is an idempotent retry even with a different reason.
+	status, doc = h.call(t, "PUT", path, "admin-good",
+		`{"max":0,"reason":"retry must not rewrite attribution"}`)
+	if status != http.StatusOK ||
+		len(doc["admin_history"].([]any)) != 1 {
+		t.Fatalf("idempotent PUT = %d %v", status, doc)
+	}
+
+	// Explicit unlimited remains a present, attributed exception despite the
+	// current Phase A catalog also omitting stored_secret.
+	status, doc = h.call(t, "PUT", path, "admin-good",
+		`{"unlimited":true,"reason":"founder account is unlimited"}`)
+	if status != http.StatusOK {
+		t.Fatalf("PUT unlimited = %d %v", status, doc)
+	}
+	view = doc["limit"].(map[string]any)
+	override = view["override"].(map[string]any)
+	if view["effective_max"] != nil || view["overridden"] != true ||
+		override["max"] != nil ||
+		override["reason"] != "founder account is unlimited" {
+		t.Fatalf("unlimited view = %v", view)
+	}
+	history = doc["admin_history"].([]any)
+	unlimitedAudit := history[len(history)-1].(map[string]any)
+	limitTo := unlimitedAudit["limit_to"].(map[string]any)
+	if unlimitedAudit["limit_to_source"] != "override" ||
+		limitTo["max"] != nil {
+		t.Fatalf("unlimited audit = %v", unlimitedAudit)
+	}
+
+	// Owner status receives effective/default limits but never override
+	// attribution or admin history.
+	status, ownerDoc := h.call(t, "GET", "/v1/accounts/acct_1/plan", "good", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET owner plan = %d %v", status, ownerDoc)
+	}
+	if _, exposed := ownerDoc["limit_overrides"]; exposed {
+		t.Fatalf("owner response exposed limit override attribution: %v", ownerDoc)
+	}
+	if _, exposed := ownerDoc["admin_history"]; exposed {
+		t.Fatalf("owner response exposed admin history: %v", ownerDoc)
+	}
+
+	status, doc = h.call(t, "DELETE", path, "admin-good",
+		`{"reason":"resume catalog inheritance"}`)
+	if status != http.StatusOK {
+		t.Fatalf("DELETE limit = %d %v", status, doc)
+	}
+	view = doc["limit"].(map[string]any)
+	if view["overridden"] != false || view["effective_max"] != nil {
+		t.Fatalf("cleared limit view = %v", view)
+	}
+	history = doc["admin_history"].([]any)
+	clearAudit := history[len(history)-1].(map[string]any)
+	if clearAudit["limit_from_source"] != "override" ||
+		clearAudit["limit_to_source"] != "inherited" {
+		t.Fatalf("clear audit = %v", clearAudit)
+	}
+}
+
+func TestAdminLimitOverrideValidation(t *testing.T) {
+	h := newHarness(t)
+	validPath := "/v1/admin/accounts/acct_1/limit-overrides/stored_secret"
+	if status, _ := h.call(t, "GET", validPath, "", ""); status != http.StatusUnauthorized {
+		t.Fatalf("missing admin bearer = %d; want 401", status)
+	}
+	if status, _ := h.call(t, "GET",
+		"/v1/admin/accounts/acct_1/limit-overrides/not_a_limit",
+		"admin-good", ""); status != http.StatusBadRequest {
+		t.Fatalf("unknown dimension = %d; want 400", status)
+	}
+	for _, body := range []string{
+		`{"reason":"missing selection"}`,
+		`{"max":0,"unlimited":true,"reason":"two selections"}`,
+		`{"unlimited":false,"reason":"false is not a selection"}`,
+		`{"max":-1,"reason":"negative"}`,
+		`{"max":9007199254740992,"reason":"too large"}`,
+		`{"max":1}`,
+		`{"max":1,"reason":"unknown field","extra":true}`,
+		`{"max":1,"reason":"trailing"} {}`,
+	} {
+		if status, _ := h.call(t, "PUT", validPath, "admin-good", body); status != http.StatusBadRequest {
+			t.Fatalf("PUT %s = %d; want 400", body, status)
+		}
+	}
+	for _, body := range []string{
+		`{}`,
+		`{"reason":""}`,
+		`{"reason":"valid","extra":true}`,
+		`{"reason":"valid"} {}`,
+	} {
+		if status, _ := h.call(t, "DELETE", validPath, "admin-good", body); status != http.StatusBadRequest {
+			t.Fatalf("DELETE %s = %d; want 400", body, status)
+		}
+	}
+
+	req, err := http.NewRequest(http.MethodGet,
+		h.srv.URL+validPath+"/extra", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer admin-good")
+	req.Header.Set("X-Witself-Admin-ID", testAdminID)
+	req.Header.Set("X-Witself-Admin-Handle", "scott")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("extra path segment = %d; want 404", resp.StatusCode)
+	}
+}
+
+func TestAdminLimitMutationReportsAcceptedWhenCellApplyFails(t *testing.T) {
+	h := newHarnessWithApplier(t, failingApplier{})
+	status, doc := h.call(t, "PUT",
+		"/v1/admin/accounts/acct_1/limit-overrides/agents", "admin-good",
+		`{"max":0,"reason":"temporary safety cap"}`)
+	if status != http.StatusAccepted {
+		t.Fatalf("PUT limit = %d %v; want 202 while apply is pending", status, doc)
+	}
+	if doc["apply_pending"] != true ||
+		doc["desired_revision"] != float64(1) ||
+		doc["applied_revision"] != float64(0) {
+		t.Fatalf("pending limit apply fence = %v", doc)
+	}
+}
+
 func TestAdminRetentionMutationReportsAcceptedWhenCellApplyFails(t *testing.T) {
 	h := newHarnessWithApplier(t, failingApplier{})
 	status, doc := h.call(t, "PUT",

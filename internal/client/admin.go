@@ -12,6 +12,7 @@ import (
 	"unicode"
 
 	"github.com/witwave-ai/witself/internal/placement"
+	"github.com/witwave-ai/witself/internal/plans"
 )
 
 // Admin is the public shape of a fleet-admin credential (as returned
@@ -318,17 +319,21 @@ func SetAdminSupportPolicy(ctx context.Context, cpEndpoint, adminToken, accountI
 // provider-backed entitlement; Plan is the effective classification after an
 // optional administrator override.
 type AdminAccountPolicy struct {
-	SchemaVersion       string                            `json:"schema_version"`
-	AccountID           string                            `json:"account_id"`
-	Plan                string                            `json:"plan"`
-	BillingPlan         string                            `json:"billing_plan"`
-	Applied             string                            `json:"applied"`
-	PlanOverride        *AdminAccountPlanOverride         `json:"plan_override"`
-	TranscriptRetention AdminTranscriptRetention          `json:"transcript_retention"`
-	AdminHistory        []AdminAccountPolicyHistoryChange `json:"admin_history"`
-	ApplyPending        bool                              `json:"apply_pending"`
-	DesiredRevision     int64                             `json:"desired_revision"`
-	AppliedRevision     int64                             `json:"applied_revision"`
+	SchemaVersion       string                               `json:"schema_version"`
+	AccountID           string                               `json:"account_id"`
+	Plan                string                               `json:"plan"`
+	BillingPlan         string                               `json:"billing_plan"`
+	Applied             string                               `json:"applied"`
+	Limits              map[string]int64                     `json:"limits"`
+	LimitDefaults       map[string]int64                     `json:"limit_defaults"`
+	LimitOverrides      map[string]AdminAccountLimitOverride `json:"limit_overrides"`
+	Limit               *AdminAccountLimit                   `json:"limit,omitempty"`
+	PlanOverride        *AdminAccountPlanOverride            `json:"plan_override"`
+	TranscriptRetention AdminTranscriptRetention             `json:"transcript_retention"`
+	AdminHistory        []AdminAccountPolicyHistoryChange    `json:"admin_history"`
+	ApplyPending        bool                                 `json:"apply_pending"`
+	DesiredRevision     int64                                `json:"desired_revision"`
+	AppliedRevision     int64                                `json:"applied_revision"`
 }
 
 // AdminAccountPlanOverride is the audited account classification exception.
@@ -360,18 +365,48 @@ type AdminTranscriptRetentionOverride struct {
 	SetAt       time.Time `json:"set_at"`
 }
 
+// AdminAccountLimit is the requested dimension's inherited and effective
+// hard-cap view. Nil maximums mean unlimited.
+type AdminAccountLimit struct {
+	Dimension    string                     `json:"dimension"`
+	DefaultMax   *int64                     `json:"default_max"`
+	EffectiveMax *int64                     `json:"effective_max"`
+	Overridden   bool                       `json:"overridden"`
+	Override     *AdminAccountLimitOverride `json:"override,omitempty"`
+}
+
+// AdminAccountLimitOverride is the audited account hard-cap exception. Max is
+// nil when the administrator explicitly selected unlimited.
+type AdminAccountLimitOverride struct {
+	Max         *int64    `json:"max"`
+	ActorID     string    `json:"actor_id"`
+	ActorHandle string    `json:"actor_handle"`
+	Reason      string    `json:"reason"`
+	SetAt       time.Time `json:"set_at"`
+}
+
+// AdminAccountLimitValue preserves explicit unlimited in audit history.
+type AdminAccountLimitValue struct {
+	Max *int64 `json:"max"`
+}
+
 // AdminAccountPolicyHistoryChange is one append-only administrator policy
 // transition returned by the control plane.
 type AdminAccountPolicyHistoryChange struct {
-	Kind          string    `json:"kind"`
-	ActorID       string    `json:"actor_id"`
-	ActorHandle   string    `json:"actor_handle"`
-	Reason        string    `json:"reason"`
-	At            time.Time `json:"at"`
-	PlanFrom      string    `json:"plan_from,omitempty"`
-	PlanTo        string    `json:"plan_to,omitempty"`
-	RetentionFrom *int64    `json:"retention_from,omitempty"`
-	RetentionTo   *int64    `json:"retention_to,omitempty"`
+	Kind            string                  `json:"kind"`
+	ActorID         string                  `json:"actor_id"`
+	ActorHandle     string                  `json:"actor_handle"`
+	Reason          string                  `json:"reason"`
+	At              time.Time               `json:"at"`
+	PlanFrom        string                  `json:"plan_from,omitempty"`
+	PlanTo          string                  `json:"plan_to,omitempty"`
+	RetentionFrom   *int64                  `json:"retention_from,omitempty"`
+	RetentionTo     *int64                  `json:"retention_to,omitempty"`
+	LimitDimension  string                  `json:"limit_dimension,omitempty"`
+	LimitFrom       *AdminAccountLimitValue `json:"limit_from,omitempty"`
+	LimitTo         *AdminAccountLimitValue `json:"limit_to,omitempty"`
+	LimitFromSource string                  `json:"limit_from_source,omitempty"`
+	LimitToSource   string                  `json:"limit_to_source,omitempty"`
 }
 
 // AdminTranscriptRetentionInput sets either a finite day window or an
@@ -383,9 +418,21 @@ type AdminTranscriptRetentionInput struct {
 	Reason     string
 }
 
+// AdminAccountLimitInput sets either a finite maximum (including zero) or an
+// explicit unlimited exception. Exactly one mode and a reason are required.
+type AdminAccountLimitInput struct {
+	Max       *int64
+	Unlimited bool
+	Reason    string
+}
+
 // MaxAdminTranscriptRetentionDays is the finite retention representation
 // bound accepted by both the control-plane client and cell.
 const MaxAdminTranscriptRetentionDays int64 = 36500
+
+// MaxAdminAccountLimit is the largest finite hard cap safely represented by
+// both Go and JavaScript JSON numbers.
+const MaxAdminAccountLimit int64 = plans.MaxPlanLimit
 
 func validateAdminPolicyTarget(accountID string) error {
 	accountID = strings.TrimSpace(accountID)
@@ -501,6 +548,91 @@ func SetAdminPlanOverride(ctx context.Context, cpEndpoint, adminToken, accountID
 func ClearAdminPlanOverride(ctx context.Context, cpEndpoint, adminToken, accountID, reason string) (*AdminAccountPolicy, error) {
 	return changeAdminAccountPolicy(ctx, cpEndpoint, adminToken, accountID,
 		"plan-override", http.MethodDelete, map[string]string{"reason": reason})
+}
+
+func validateAdminLimitDimension(dimension string) (string, error) {
+	dimension = strings.TrimSpace(dimension)
+	if err := plans.ValidateLimits(map[string]int64{dimension: 0}); err != nil {
+		return "", err
+	}
+	return dimension, nil
+}
+
+func adminLimitOverrideResource(dimension string) (string, error) {
+	dimension, err := validateAdminLimitDimension(dimension)
+	if err != nil {
+		return "", err
+	}
+	return "limit-overrides/" + neturl.PathEscape(dimension), nil
+}
+
+// GetAdminLimitOverride returns one limit dimension's inherited, effective,
+// and attributed account override state.
+func GetAdminLimitOverride(
+	ctx context.Context,
+	cpEndpoint, adminToken, accountID, dimension string,
+) (*AdminAccountPolicy, error) {
+	resource, err := adminLimitOverrideResource(dimension)
+	if err != nil {
+		return nil, err
+	}
+	return getAdminAccountPolicy(ctx, cpEndpoint, adminToken, accountID, resource)
+}
+
+// SetAdminLimitOverride creates or replaces one account hard-cap exception
+// without changing the provider-backed billing relationship.
+func SetAdminLimitOverride(
+	ctx context.Context,
+	cpEndpoint, adminToken, accountID, dimension string,
+	in AdminAccountLimitInput,
+) (*AdminAccountPolicy, error) {
+	if (in.Max == nil) == !in.Unlimited {
+		return nil, fmt.Errorf("set exactly one of max or unlimited")
+	}
+	dimension, err := validateAdminLimitDimension(dimension)
+	if err != nil {
+		return nil, err
+	}
+	reason, err := validateAdminPolicyReason(in.Reason)
+	if err != nil {
+		return nil, err
+	}
+	resource := "limit-overrides/" + neturl.PathEscape(dimension)
+	payload := map[string]any{"reason": reason}
+	if in.Unlimited {
+		payload["unlimited"] = true
+	} else {
+		if err := plans.ValidateLimits(map[string]int64{dimension: *in.Max}); err != nil {
+			return nil, err
+		}
+		payload["max"] = *in.Max
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	url, err := adminAccountPolicyURL(cpEndpoint, accountID, resource)
+	if err != nil {
+		return nil, err
+	}
+	var out AdminAccountPolicy
+	if err := doJSON(ctx, http.MethodPut, url, adminToken, body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ClearAdminLimitOverride restores inheritance for one hard-cap dimension.
+func ClearAdminLimitOverride(
+	ctx context.Context,
+	cpEndpoint, adminToken, accountID, dimension, reason string,
+) (*AdminAccountPolicy, error) {
+	resource, err := adminLimitOverrideResource(dimension)
+	if err != nil {
+		return nil, err
+	}
+	return changeAdminAccountPolicy(ctx, cpEndpoint, adminToken, accountID,
+		resource, http.MethodDelete, map[string]string{"reason": reason})
 }
 
 func changeAdminAccountPolicy(ctx context.Context, cpEndpoint, adminToken, accountID, resource, method string, fields map[string]string) (*AdminAccountPolicy, error) {

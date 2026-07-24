@@ -169,6 +169,114 @@ func TestAdminPlanOverrideOperations(t *testing.T) {
 	}
 }
 
+func TestAdminLimitOverrideOperations(t *testing.T) {
+	var requests []struct {
+		method string
+		body   map[string]any
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/admin/accounts/acct_1/limit-overrides/stored_secret" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer witself_adm_test" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		var body map[string]any
+		if r.Method != http.MethodGet {
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+		}
+		requests = append(requests, struct {
+			method string
+			body   map[string]any
+		}{r.Method, body})
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0",
+			"account_id":     "acct_1",
+			"plan":           "free",
+			"billing_plan":   "free",
+			"applied":        "free",
+			"limits":         map[string]int64{},
+			"limit_defaults": map[string]int64{},
+			"limit_overrides": map[string]any{
+				"stored_secret": map[string]any{
+					"max": nil, "actor_id": "adm_abcdefghijklmnopqrst",
+					"actor_handle": "scott", "reason": "founder",
+					"set_at": "2026-07-23T00:00:00Z",
+				},
+			},
+			"limit": map[string]any{
+				"dimension": "stored_secret", "default_max": nil,
+				"effective_max": nil, "overridden": true,
+				"override": map[string]any{
+					"max": nil, "actor_id": "adm_abcdefghijklmnopqrst",
+					"actor_handle": "scott", "reason": "founder",
+					"set_at": "2026-07-23T00:00:00Z",
+				},
+			},
+			"transcript_retention": map[string]any{
+				"default_days": 30, "effective_days": 30, "overridden": false,
+			},
+			"admin_history": []any{},
+		})
+	}))
+	defer srv.Close()
+
+	ctx := t.Context()
+	got, err := GetAdminLimitOverride(
+		ctx, srv.URL, "witself_adm_test", "acct_1", "stored_secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Limit == nil || got.Limit.Dimension != "stored_secret" ||
+		!got.Limit.Overridden || got.Limit.Override == nil ||
+		got.Limit.Override.Max != nil ||
+		got.Limit.Override.ActorID != "adm_abcdefghijklmnopqrst" ||
+		got.LimitOverrides["stored_secret"].ActorHandle != "scott" {
+		t.Fatalf("get limit = %#v", got)
+	}
+	zero := int64(0)
+	if _, err := SetAdminLimitOverride(
+		ctx, srv.URL, "witself_adm_test", "acct_1", "stored_secret",
+		AdminAccountLimitInput{Max: &zero, Reason: " pause "},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetAdminLimitOverride(
+		ctx, srv.URL, "witself_adm_test", "acct_1", "stored_secret",
+		AdminAccountLimitInput{Unlimited: true, Reason: " founder "},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ClearAdminLimitOverride(
+		ctx, srv.URL, "witself_adm_test", "acct_1", "stored_secret", " restore ",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(requests) != 4 ||
+		requests[0].method != http.MethodGet ||
+		requests[1].method != http.MethodPut ||
+		requests[2].method != http.MethodPut ||
+		requests[3].method != http.MethodDelete {
+		t.Fatalf("requests = %#v", requests)
+	}
+	if requests[1].body["max"] != float64(0) ||
+		requests[1].body["reason"] != "pause" {
+		t.Fatalf("zero body = %#v", requests[1].body)
+	}
+	if requests[2].body["unlimited"] != true ||
+		requests[2].body["reason"] != "founder" {
+		t.Fatalf("unlimited body = %#v", requests[2].body)
+	}
+	if requests[3].body["reason"] != "restore" {
+		t.Fatalf("clear body = %#v", requests[3].body)
+	}
+}
+
 func TestAdminPolicyAcceptedResponsePreservesApplyFence(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -206,6 +314,7 @@ func TestAdminPolicyAcceptedResponsePreservesApplyFence(t *testing.T) {
 
 func TestAdminAccountPolicyValidation(t *testing.T) {
 	days0, daysTooHigh := int64(0), MaxAdminTranscriptRetentionDays+1
+	negativeLimit, excessiveLimit := int64(-1), MaxAdminAccountLimit+1
 	tests := []struct {
 		name string
 		call func() error
@@ -240,6 +349,40 @@ func TestAdminAccountPolicyValidation(t *testing.T) {
 		}},
 		{"unsafe plan", func() error {
 			_, err := SetAdminPlanOverride(t.Context(), "http://invalid", "t", "acct_1", "../../x", "r")
+			return err
+		}},
+		{"limit missing selection", func() error {
+			_, err := SetAdminLimitOverride(
+				t.Context(), "http://invalid", "t", "acct_1", "stored_secret",
+				AdminAccountLimitInput{Reason: "r"})
+			return err
+		}},
+		{"limit conflicting selection", func() error {
+			_, err := SetAdminLimitOverride(
+				t.Context(), "http://invalid", "t", "acct_1", "stored_secret",
+				AdminAccountLimitInput{Max: &days0, Unlimited: true, Reason: "r"})
+			return err
+		}},
+		{"limit negative", func() error {
+			_, err := SetAdminLimitOverride(
+				t.Context(), "http://invalid", "t", "acct_1", "stored_secret",
+				AdminAccountLimitInput{Max: &negativeLimit, Reason: "r"})
+			return err
+		}},
+		{"limit excessive", func() error {
+			_, err := SetAdminLimitOverride(
+				t.Context(), "http://invalid", "t", "acct_1", "stored_secret",
+				AdminAccountLimitInput{Max: &excessiveLimit, Reason: "r"})
+			return err
+		}},
+		{"limit unknown dimension", func() error {
+			_, err := GetAdminLimitOverride(
+				t.Context(), "http://invalid", "t", "acct_1", "not_a_limit")
+			return err
+		}},
+		{"limit clear missing reason", func() error {
+			_, err := ClearAdminLimitOverride(
+				t.Context(), "http://invalid", "t", "acct_1", "stored_secret", "")
 			return err
 		}},
 	}

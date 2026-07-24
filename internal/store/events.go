@@ -187,6 +187,7 @@ const (
 	VerbSecretUpdated             = "secret.updated"
 	VerbSecretArchived            = "secret.archived"
 	VerbSecretRestored            = "secret.restored"
+	VerbSecretDeleted             = "secret.deleted"
 	VerbSecretMaterialDelivered   = "secret.material.delivered"
 	VerbSecretDEKRewrapped        = "secret.dek.rewrapped"
 
@@ -662,6 +663,9 @@ var verbMetadataSchema = map[string]verbSpec{
 		"agent_id", "secret_id", "secret_revision",
 	),
 	VerbSecretRestored: secretEventSpec(
+		"agent_id", "secret_id", "secret_revision",
+	),
+	VerbSecretDeleted: secretEventSpec(
 		"agent_id", "secret_id", "secret_revision",
 	),
 	VerbSecretMaterialDelivered: secretEventSpec(

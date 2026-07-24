@@ -162,3 +162,31 @@ func TestRuntimeMetricsObserveRecallErrorWithoutErrorText(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeMetricsObserveSecretLimitRejectionWithBoundedLabels(t *testing.T) {
+	metrics := newRuntimeMetrics()
+	maximum, remaining := int64(1), int64(0)
+	cfg := metrics.instrumentConfig(Config{
+		CreateSecret: func(context.Context, DomainPrincipal, CreateSecretRequest) (SecretMutationResult, error) {
+			return SecretMutationResult{}, &SecretLimitError{Status: SecretLimitStatus{
+				Used: 1, Max: &maximum, Remaining: &remaining,
+			}}
+		},
+	})
+	_, _ = cfg.CreateSecret(context.Background(), DomainPrincipal{
+		Kind: PrincipalKindAgent, ID: "agent_private_identifier",
+	}, CreateSecretRequest{Name: "secret_private_name"})
+
+	var output bytes.Buffer
+	metrics.writePrometheus(&output)
+	text := output.String()
+	want := `witself_secret_limit_rejections_total{limit_dimension="stored_secret",operation="create"} 1`
+	if !strings.Contains(text, want) {
+		t.Fatalf("secret-limit counter missing %q:\n%s", want, text)
+	}
+	for _, forbidden := range []string{"agent_private_identifier", "secret_private_name"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("metrics exposed %q:\n%s", forbidden, text)
+		}
+	}
+}

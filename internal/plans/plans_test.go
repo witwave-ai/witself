@@ -82,6 +82,9 @@ func TestParseValidation(t *testing.T) {
 		{"missing free", `{"schema_version":"witself.plans.v0","plans":[{"id":"standard","price_monthly":30,"available":true}]}`, `missing the "free" plan`},
 		{"paid free", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","price_monthly":5,"available":true}]}`, "must cost 0"},
 		{"unavailable free", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":false}]}`, "must be available"},
+		{"negative limit", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"limits":{"stored_secret":-1}}]}`, "between 0"},
+		{"unknown limit", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"limits":{"stored_secrets":1}}]}`, "unknown limit"},
+		{"unsafe integer limit", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"limits":{"stored_secret":9007199254740992}}]}`, "between 0"},
 		{"zero retention", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"policies":{"transcript_retention_days":0}}]}`, "between 1"},
 		{"unknown policy", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"policies":{"transcript_retention_dayz":30}}]}`, "unknown policy"},
 	}
@@ -92,5 +95,18 @@ func TestParseValidation(t *testing.T) {
 				t.Fatalf("Parse error = %v; want substring %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestValidateLimitsZeroAndMissingUnlimited(t *testing.T) {
+	for _, limits := range []map[string]int64{
+		nil,
+		{},
+		{StoredSecretLimit: 0},
+		{StoredSecretLimit: 100, AgentLimit: 25, RealmLimit: 1},
+	} {
+		if err := ValidateLimits(limits); err != nil {
+			t.Fatalf("ValidateLimits(%v): %v", limits, err)
+		}
 	}
 }

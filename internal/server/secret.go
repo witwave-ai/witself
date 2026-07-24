@@ -33,6 +33,7 @@ var secretResourceIDPattern = regexp.MustCompile(`^(?:avk|sec|fld|dek|enr|vkr)_[
 var (
 	ErrSecretVaultKeyUnavailable = errors.New("agent vault key unavailable")
 	ErrSecretVaultKeyMismatch    = errors.New("agent vault key mismatch")
+	ErrSecretLimitReached        = errors.New("stored secret limit reached")
 )
 
 // VaultKeyBinding is public AVK identity metadata. A private AVK has no server
@@ -79,6 +80,7 @@ type Secret struct {
 	CreatedAt      time.Time     `json:"created_at"`
 	UpdatedAt      time.Time     `json:"updated_at"`
 	ArchivedAt     *time.Time    `json:"archived_at,omitempty"`
+	DeletedAt      *time.Time    `json:"deleted_at,omitempty"`
 	SensitiveCount int           `json:"sensitive_field_count"`
 }
 
@@ -195,6 +197,25 @@ type SecretMutationResult struct {
 	Receipt SecretMutationReceipt `json:"receipt"`
 }
 
+// SecretLimitStatus is the value-free retained-secret capacity for the
+// authenticated owner. Null max/remaining means unlimited.
+type SecretLimitStatus struct {
+	Used      int64  `json:"used"`
+	Max       *int64 `json:"max"`
+	Remaining *int64 `json:"remaining"`
+	Unlimited bool   `json:"unlimited"`
+	OverLimit bool   `json:"over_limit"`
+}
+
+// SecretLimitError carries a safe status snapshot for a non-retryable create
+// refusal.
+type SecretLimitError struct {
+	Status SecretLimitStatus
+}
+
+func (e *SecretLimitError) Error() string { return ErrSecretLimitReached.Error() }
+func (e *SecretLimitError) Unwrap() error { return ErrSecretLimitReached }
+
 // VaultKeyMutationResult returns public key-epoch metadata and its mutation
 // receipt.
 type VaultKeyMutationResult struct {
@@ -297,6 +318,21 @@ func listSecretsHandler(auth PrincipalAuthFunc, list func(context.Context, Domai
 	})
 }
 
+func secretLimitStatusHandler(auth PrincipalAuthFunc, status func(context.Context, DomainPrincipal) (SecretLimitStatus, error)) http.HandlerFunc {
+	return secretAgentHandler(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+		if !secretNoQuery(w, r) {
+			return
+		}
+		value, err := status(r.Context(), p)
+		if writeSecretError(w, err, "read secret limit status") {
+			return
+		}
+		writeSecretJSON(w, http.StatusOK, map[string]any{
+			"schema_version": "witself.v0", "limit": value,
+		})
+	})
+}
+
 func getSecretHandler(auth PrincipalAuthFunc, get func(context.Context, DomainPrincipal, string) (Secret, error)) http.HandlerFunc {
 	return secretAgentHandler(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
 		if !secretNoQuery(w, r) {
@@ -319,6 +355,7 @@ func secretLifecycleHandler(
 	auth PrincipalAuthFunc,
 	archive func(context.Context, DomainPrincipal, string, SecretLifecycleRequest) (SecretMutationResult, error),
 	restore func(context.Context, DomainPrincipal, string, SecretLifecycleRequest) (SecretMutationResult, error),
+	deleteSecret func(context.Context, DomainPrincipal, string, SecretLifecycleRequest) (SecretMutationResult, error),
 ) http.HandlerFunc {
 	return secretAgentHandler(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
 		if !secretNoQuery(w, r) {
@@ -356,6 +393,12 @@ func secretLifecycleHandler(
 				return
 			}
 			result, err = restore(r.Context(), p, secretID, in)
+		case "delete":
+			if deleteSecret == nil {
+				writeJSONError(w, http.StatusNotFound, "secret resource not found")
+				return
+			}
+			result, err = deleteSecret(r.Context(), p, secretID, in)
 		}
 		if writeSecretError(w, err, operation+" secret") {
 			return
@@ -505,7 +548,7 @@ func secretFieldAccessPathID(w http.ResponseWriter, r *http.Request) (string, bo
 
 func secretLifecyclePath(w http.ResponseWriter, r *http.Request) (string, string, bool) {
 	action := strings.TrimSpace(r.PathValue("action"))
-	for _, operation := range []string{"archive", "restore"} {
+	for _, operation := range []string{"archive", "restore", "delete"} {
 		suffix := ":" + operation
 		if !strings.HasSuffix(action, suffix) {
 			continue
@@ -590,6 +633,7 @@ func writeSecretError(w http.ResponseWriter, err error, operation string) bool {
 	if err == nil {
 		return false
 	}
+	var limitErr *SecretLimitError
 	switch {
 	case errors.Is(err, ErrBadInput):
 		writeJSONError(w, http.StatusBadRequest, "invalid secret request")
@@ -603,12 +647,27 @@ func writeSecretError(w http.ResponseWriter, err error, operation string) bool {
 		writeJSONError(w, http.StatusConflict, ErrSecretVaultKeyUnavailable.Error())
 	case errors.Is(err, ErrSecretVaultKeyMismatch):
 		writeSecretCodedError(w, http.StatusConflict, "secret_vault_key_mismatch", ErrSecretVaultKeyMismatch.Error())
+	case errors.As(err, &limitErr):
+		writeSecretLimitError(w, limitErr.Status)
 	case errors.Is(err, ErrConflict):
 		writeJSONError(w, http.StatusConflict, "secret state conflict")
 	default:
 		writeJSONError(w, http.StatusInternalServerError, "could not "+operation)
 	}
 	return true
+}
+
+func writeSecretLimitError(w http.ResponseWriter, status SecretLimitStatus) {
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"schema_version": "witself.v0",
+		"code":           "stored_secret_limit_reached",
+		"error":          ErrSecretLimitReached.Error(),
+		"retryable":      false,
+		"limit":          status,
+	})
 }
 
 func writeSecretCodedError(w http.ResponseWriter, status int, code, message string) {

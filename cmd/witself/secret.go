@@ -60,14 +60,16 @@ type secretPasswordPolicyDocument struct {
 func secretCmd(args []string) int {
 	if len(args) == 0 || commandHelpRequested(args) {
 		printCommandGroupHelp(os.Stderr,
-			"usage: witself secret create|list|search|show|reveal|archive|restore ...",
+			"usage: witself secret create|status|list|search|show|reveal|archive|restore|delete ...",
 			"create   Create a structured secret from strict JSON",
+			"status   Show retained-secret plan capacity",
 			"list     List redacted secret inventory",
 			"search   Search public secret metadata",
 			"show     Show one redacted secret and its field inventory",
 			"reveal   Return exactly one non-TOTP field",
 			"archive  Archive one active secret",
 			"restore  Restore one archived secret",
+			"delete   Tombstone one active or archived secret",
 		)
 		if commandHelpRequested(args) {
 			return 0
@@ -77,18 +79,70 @@ func secretCmd(args []string) int {
 	switch args[0] {
 	case "create":
 		return secretCreate(args[1:])
+	case "status":
+		return secretStatus(args[1:])
 	case "list", "search":
 		return secretList(args[0], args[1:])
 	case "show":
 		return secretShow(args[1:])
 	case "reveal":
 		return secretReveal(args[1:])
-	case "archive", "restore":
+	case "archive", "restore", "delete":
 		return secretLifecycle(args[0], args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "witself: unknown secret command %q\n", args[0])
 		return 2
 	}
+}
+
+func secretStatus(args []string) int {
+	fs := flag.NewFlagSet("secret status", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	configureCommandUsage(fs, "usage: witself secret status [agent connection flags]")
+	account, realm, agent, endpoint, tokenFile := factConnectionFlags(fs)
+	jsonOut := jsonFlag(fs)
+	if parsed, exitCode := parseCommandFlags(fs, args); !parsed {
+		return exitCode
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "witself: secret status accepts no positional arguments")
+		return 2
+	}
+	cli, err := connectSecretCLI(context.Background(), *account, *realm, *agent, *endpoint, *tokenFile)
+	if err != nil {
+		return printSecretCLIError("connect secret vault", err)
+	}
+	status, err := client.GetSecretLimitStatus(context.Background(),
+		cli.connection.Endpoint, cli.connection.Token)
+	if err != nil {
+		return printSecretCLIError("read secret limit status", err)
+	}
+	if *jsonOut {
+		return printJSON(status)
+	}
+	if status.Used < 0 {
+		return printSecretCLIError("read secret limit status", errors.New("server returned an invalid secret limit status"))
+	}
+	if status.Unlimited {
+		if status.Max != nil || status.Remaining != nil || status.OverLimit {
+			return printSecretCLIError("read secret limit status", errors.New("server returned an invalid unlimited secret limit status"))
+		}
+		fmt.Printf("used:\t%d\nmax:\tunlimited\nremaining:\tunlimited\nover limit:\tfalse\n", status.Used)
+		return 0
+	}
+	if status.Max == nil || status.Remaining == nil || *status.Max < 0 {
+		return printSecretCLIError("read secret limit status", errors.New("server returned an invalid capped secret limit status"))
+	}
+	expectedRemaining := *status.Max - status.Used
+	if expectedRemaining < 0 {
+		expectedRemaining = 0
+	}
+	if *status.Remaining != expectedRemaining || status.OverLimit != (status.Used > *status.Max) {
+		return printSecretCLIError("read secret limit status", errors.New("server returned an inconsistent capped secret limit status"))
+	}
+	fmt.Printf("used:\t%d\nmax:\t%d\nremaining:\t%d\nover limit:\t%t\n",
+		status.Used, *status.Max, *status.Remaining, status.OverLimit)
+	return 0
 }
 
 func vaultCmd(args []string) int {
@@ -375,11 +429,16 @@ func secretLifecycle(operation string, args []string) int {
 	account, realm, agent, endpoint, tokenFile := factConnectionFlags(fs)
 	expectedRevision := fs.Int64("expected-row-version", 0, "exact current secret row version (default: resolve current)")
 	idempotencyKey := fs.String("idempotency-key", "", "retry key for this exact lifecycle change")
+	var lifecycleFlag *string
+	if operation == "delete" {
+		lifecycleFlag = fs.String("lifecycle", "active", "active or archived")
+	}
 	jsonOut := jsonFlag(fs)
 	if parsed, exitCode := parseCommandFlags(fs, secretFlagParseOrder(args, 1)); !parsed {
 		return exitCode
 	}
-	if fs.NArg() != 1 || *expectedRevision < 0 {
+	if fs.NArg() != 1 || *expectedRevision < 0 ||
+		(operation == "delete" && *lifecycleFlag != "active" && *lifecycleFlag != "archived") {
 		fmt.Fprintf(os.Stderr, "usage: witself secret %s SECRET [--expected-row-version N] [--idempotency-key KEY] [agent connection flags]\n", operation)
 		return 2
 	}
@@ -388,15 +447,29 @@ func secretLifecycle(operation string, args []string) int {
 		return printSecretCLIError("connect secret vault", err)
 	}
 	lifecycle := "active"
-	if operation == "restore" {
+	switch operation {
+	case "restore":
 		lifecycle = "archived"
+	case "delete":
+		lifecycle = *lifecycleFlag
 	}
-	value, err := resolveSecret(context.Background(), cli.service, fs.Arg(0), lifecycle)
-	if err != nil {
-		return printSecretCLIError(operation+" secret", err)
-	}
-	if *expectedRevision == 0 {
-		*expectedRevision = value.RowVersion
+	selector := strings.TrimSpace(fs.Arg(0))
+	secretID := ""
+	// A committed delete hides its tombstone from ordinary list/show paths.
+	// Exact retries therefore must not pre-resolve an explicit ID and revision:
+	// send the same fenced request so the durable receipt can replay it.
+	if operation == "delete" && *expectedRevision > 0 &&
+		strings.HasPrefix(selector, "sec_") {
+		secretID = selector
+	} else {
+		value, err := resolveSecret(context.Background(), cli.service, selector, lifecycle)
+		if err != nil {
+			return printSecretCLIError(operation+" secret", err)
+		}
+		secretID = value.ID
+		if *expectedRevision == 0 {
+			*expectedRevision = value.RowVersion
+		}
 	}
 	retryKey, err := secretIdempotencyKey(*idempotencyKey)
 	if err != nil {
@@ -404,10 +477,13 @@ func secretLifecycle(operation string, args []string) int {
 	}
 	input := client.SecretLifecycleInput{ExpectedRowVersion: *expectedRevision, IdempotencyKey: retryKey}
 	var result *client.SecretMutationResult
-	if operation == "archive" {
-		result, err = client.ArchiveSecret(context.Background(), cli.connection.Endpoint, cli.connection.Token, value.ID, input)
-	} else {
-		result, err = client.RestoreSecret(context.Background(), cli.connection.Endpoint, cli.connection.Token, value.ID, input)
+	switch operation {
+	case "archive":
+		result, err = client.ArchiveSecret(context.Background(), cli.connection.Endpoint, cli.connection.Token, secretID, input)
+	case "restore":
+		result, err = client.RestoreSecret(context.Background(), cli.connection.Endpoint, cli.connection.Token, secretID, input)
+	default:
+		result, err = client.DeleteSecret(context.Background(), cli.connection.Endpoint, cli.connection.Token, secretID, input)
 	}
 	if err != nil {
 		return printSecretCLIError(operation+" secret", err)
@@ -415,7 +491,11 @@ func secretLifecycle(operation string, args []string) int {
 	if *jsonOut {
 		return printJSON(result)
 	}
-	fmt.Printf("%sd\t%s\t%s\n", operation, result.Secret.ID, safeText(result.Secret.Name))
+	pastTense := operation + "d"
+	if operation == "delete" {
+		pastTense = "deleted"
+	}
+	fmt.Printf("%s\t%s\t%s\n", pastTense, result.Secret.ID, safeText(result.Secret.Name))
 	return 0
 }
 

@@ -170,6 +170,107 @@ func TestImportedSecretGraphRequiresFieldsAndCurrentInitializedVault(t *testing.
 	})
 }
 
+func TestImportedSecretDeleteRequiresExactDeletedValueFreeTarget(t *testing.T) {
+	deletedRows := func(t *testing.T) []sealedArchiveTestRow {
+		t.Helper()
+		rows := testSealedArchiveRows(t)
+		secret := rowByTable(rows, "secrets")
+		secret["name"] = testSecretID
+		secret["description"] = ""
+		secret["template"] = "generic"
+		secret["tags"] = []any{}
+		secret["row_version"] = int64(2)
+		secret["archived_at"] = nil
+		secret["deleted_at"] = testSecretArchiveTime(t).
+			Add(-time.Minute).Format(time.RFC3339Nano)
+		receipt := rowByTable(rows, "secret_mutation_receipts")
+		receipt["operation"] = "secret_delete"
+		receipt["result_revision"] = int64(2)
+		// Deleted tombstones intentionally have no value-bearing children.
+		return []sealedArchiveTestRow{rows[0], rows[1], rows[4]}
+	}
+
+	t.Run("accept exact value-free tombstone", func(t *testing.T) {
+		ic := testSecretImportContext(t)
+		for _, row := range deletedRows(t) {
+			if err := ic.validateAndRecord(row.table, row.value); err != nil {
+				t.Fatalf("validate %s: %v", row.table, err)
+			}
+		}
+		if err := ic.validateImportedSecretGraph(); err != nil {
+			t.Fatalf("validate deleted graph: %v", err)
+		}
+	})
+
+	for _, test := range []struct {
+		name   string
+		mutate func([]sealedArchiveTestRow)
+	}{
+		{
+			name: "live target",
+			mutate: func(rows []sealedArchiveTestRow) {
+				rowByTable(rows, "secrets")["deleted_at"] = nil
+			},
+		},
+		{
+			name: "stale delete revision",
+			mutate: func(rows []sealedArchiveTestRow) {
+				rowByTable(rows, "secret_mutation_receipts")["result_revision"] = int64(1)
+			},
+		},
+		{
+			name: "retained deleted metadata",
+			mutate: func(rows []sealedArchiveTestRow) {
+				rowByTable(rows, "secrets")["description"] = "must not survive"
+			},
+		},
+		{
+			name: "delete receipt value version",
+			mutate: func(rows []sealedArchiveTestRow) {
+				rowByTable(rows, "secret_mutation_receipts")["result_value_version"] = int64(1)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ic := testSecretImportContext(t)
+			rows := deletedRows(t)
+			test.mutate(rows)
+			var got error
+			for _, row := range rows {
+				got = ic.validateAndRecord(row.table, row.value)
+				if got != nil {
+					break
+				}
+			}
+			if got == nil || !errors.Is(got, ErrArchiveContent) {
+				t.Fatalf("delete receipt error = %v, want ErrArchiveContent", got)
+			}
+		})
+	}
+
+	t.Run("deleted target retains a field", func(t *testing.T) {
+		ic := testSecretImportContext(t)
+		rows := testSealedArchiveRows(t)
+		secret := rowByTable(rows, "secrets")
+		secret["name"] = testSecretID
+		secret["description"] = ""
+		secret["template"] = "generic"
+		secret["tags"] = []any{}
+		secret["row_version"] = int64(2)
+		secret["deleted_at"] = testSecretArchiveTime(t).
+			Add(-time.Minute).Format(time.RFC3339Nano)
+		for _, row := range rows[:4] {
+			if err := ic.validateAndRecord(row.table, row.value); err != nil {
+				t.Fatalf("validate %s: %v", row.table, err)
+			}
+		}
+		if err := ic.validateImportedSecretGraph(); err == nil ||
+			!strings.Contains(err.Error(), "retains 1 fields") {
+			t.Fatalf("deleted graph error = %v", err)
+		}
+	})
+}
+
 func TestImportedSecretGraphRequiresCurrentDEKAndCurrentVaultKey(t *testing.T) {
 	t.Run("missing DEK", func(t *testing.T) {
 		ic := testSecretImportContext(t)

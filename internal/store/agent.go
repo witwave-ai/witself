@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/witwave-ai/witself/internal/id"
+	"github.com/witwave-ai/witself/internal/plans"
 )
 
 var (
@@ -66,7 +67,7 @@ func (s *Store) CreateAgent(ctx context.Context, accountID, realmID, name string
 		if err != nil {
 			return Agent{}, err
 		}
-		if err := checkPlanLimit(plan, limits, "agents", n); err != nil {
+		if err := checkPlanLimit(plan, limits, plans.AgentLimit, n); err != nil {
 			return Agent{}, err
 		}
 	}

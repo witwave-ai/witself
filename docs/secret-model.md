@@ -250,19 +250,24 @@ writes return `conflict`.
   ordinary reads, retained and restorable. Distinct from delete.
 - **restore** (`secret:update`). Clear `archived_at` and return the secret to
   active state.
-- **delete** (`secret:delete`). Soft-delete tombstone, then guarded permanent
-  delete. Destructive deletes of secrets with sensitive values require confirmation
-  and an audit `reason`.
+- **delete** (`secret:delete`). The implemented operation is a guarded
+  tombstone delete under an exact row-version fence and durable retry key. It
+  excludes the secret from ordinary reads and releases retained capacity while
+  scrubbing secret metadata and deleting every field and wrapped-DEK row. A
+  minimal value-free tombstone, receipt, and audit event remain for retry and
+  recovery bookkeeping. Irreversible purge of that tombstone is a separate
+  future operation.
 - **grant / revoke** (`secret:grant`). Create or remove an explicit cross-agent or
   group access grant. See [Cross-Agent and Operator Access](#cross-agent-and-operator-access).
 
 Every lifecycle operation emits an audit event
 (`secret.created`/`updated`/`renamed`/`copied`/`archived`/`restored`/`deleted`,
 `secret.reveal`, `secret.grant`/`revoke`). Audit rows never contain sensitive
-values; see [audit-retention.md](audit-retention.md). Destructive and
-copy-with-sensitive operations support `--dry-run`, which validates inputs,
-authorization, conflicts, and quotas without persisting state or emitting
-value-returning audit events.
+values; see [audit-retention.md](audit-retention.md). The current tombstone
+delete does not accept a reason or dry-run flag; its optimistic revision and
+idempotency receipt are the mutation guards. Future irreversible operations and
+copy-with-sensitive may add separately specified confirmation and dry-run
+ceremonies.
 
 ## Reveal Ceremony
 

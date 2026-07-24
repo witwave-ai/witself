@@ -43,6 +43,25 @@ func TestCreateSecretMapsOnlyStableVaultKeyMismatchCode(t *testing.T) {
 	}
 }
 
+func TestCreateSecretMapsStableLimitCodeAndStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","code":"stored_secret_limit_reached","error":"stored secret limit reached","retryable":false,"limit":{"used":3,"max":2,"remaining":0,"unlimited":false,"over_limit":true}}`))
+	}))
+	defer srv.Close()
+	_, err := CreateSecret(context.Background(), srv.URL, "agent-token", CreateSecretInput{})
+	if !errors.Is(err, ErrSecretLimitReached) {
+		t.Fatalf("create error = %v", err)
+	}
+	var limitErr *SecretLimitError
+	if !errors.As(err, &limitErr) || limitErr.Status.Used != 3 ||
+		limitErr.Status.Max == nil || *limitErr.Status.Max != 2 ||
+		!limitErr.Status.OverLimit {
+		t.Fatalf("typed limit error = %#v", err)
+	}
+}
+
 func TestSecretClientVerticalContract(t *testing.T) {
 	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
 	publicValue := "octocat"
@@ -101,6 +120,11 @@ func TestSecretClientVerticalContract(t *testing.T) {
 				t.Fatal("create body exposed idempotency_key")
 			}
 			writeSecretClientJSON(t, w, SecretMutationResult{Secret: secret, Receipt: receipt})
+		case "GET /v1/secrets:status":
+			maximum, remaining := int64(10), int64(9)
+			writeSecretClientJSON(t, w, map[string]any{"schema_version": "witself.v0", "limit": SecretLimitStatus{
+				Used: 1, Max: &maximum, Remaining: &remaining,
+			}})
 		case "GET /v1/secrets":
 			query := r.URL.Query()
 			if query.Get("q") != "git hub" || query.Get("lifecycle") != "active" || query.Get("template") != "login" ||
@@ -138,6 +162,20 @@ func TestSecretClientVerticalContract(t *testing.T) {
 			restoreReceipt.Operation = "secret_restore"
 			restoreReceipt.ResultRevision = 3
 			writeSecretClientJSON(t, w, SecretMutationResult{Secret: restored, Receipt: restoreReceipt})
+		case "POST /v1/secrets/sec_abcdefghijklmnop:delete":
+			assertSecretClientIdempotency(t, r, "delete-1")
+			var body map[string]json.RawMessage
+			decodeSecretClientBody(t, r, &body)
+			if len(body) != 1 || string(body["expected_row_version"]) != "3" {
+				t.Fatalf("delete body = %#v", body)
+			}
+			deleted := secret
+			deleted.Lifecycle = "deleted"
+			deleted.RowVersion = 4
+			deleteReceipt := receipt
+			deleteReceipt.Operation = "secret_delete"
+			deleteReceipt.ResultRevision = 4
+			writeSecretClientJSON(t, w, SecretMutationResult{Secret: deleted, Receipt: deleteReceipt})
 		case "POST /v1/secrets/sec_abcdefghijklmnop/fields/fld_abcdefghijklmnop:access":
 			assertSecretClientIdempotency(t, r, "access-1")
 			body, err := io.ReadAll(r.Body)
@@ -171,6 +209,10 @@ func TestSecretClientVerticalContract(t *testing.T) {
 		t.Fatalf("CreateSecret = %#v, %v", created, err)
 	}
 	assertSecretClientRedaction(t, created.Secret)
+	status, err := GetSecretLimitStatus(ctx, srv.URL, "agent-token")
+	if err != nil || status.Used != 1 || status.Max == nil || *status.Max != 10 {
+		t.Fatalf("GetSecretLimitStatus = %#v, %v", status, err)
+	}
 	page, err := ListSecrets(ctx, srv.URL, "agent-token", SecretListOptions{
 		Query: "git hub", Lifecycle: "active", Template: "login", Tags: []string{"github", "work"},
 		Limit: 25, Cursor: "cursor+1", IncludeFields: true,
@@ -200,6 +242,14 @@ func TestSecretClientVerticalContract(t *testing.T) {
 		t.Fatalf("RestoreSecret = %#v, %v", restored, err)
 	}
 	assertSecretClientRedaction(t, restored.Secret)
+	deleted, err := DeleteSecret(ctx, srv.URL, "agent-token", secret.ID, SecretLifecycleInput{
+		ExpectedRowVersion: 3, IdempotencyKey: "delete-1",
+	})
+	if err != nil || deleted.Secret.Lifecycle != "deleted" ||
+		deleted.Receipt.Operation != "secret_delete" {
+		t.Fatalf("DeleteSecret = %#v, %v", deleted, err)
+	}
+	assertSecretClientRedaction(t, deleted.Secret)
 	gotMaterial, err := AccessSecretField(ctx, srv.URL, "agent-token", secret.ID, material.FieldID, "access-1")
 	if err != nil || !bytes.Equal(gotMaterial.Ciphertext, material.Ciphertext) || !bytes.Equal(gotMaterial.DEK.WrappedDEK, material.DEK.WrappedDEK) {
 		t.Fatalf("AccessSecretField = %#v, %v", gotMaterial, err)
@@ -207,9 +257,11 @@ func TestSecretClientVerticalContract(t *testing.T) {
 
 	for _, route := range []string{
 		"GET /v1/vault/key-epochs/current", "POST /v1/vault/key-epochs", "POST /v1/secrets",
+		"GET /v1/secrets:status",
 		"GET /v1/secrets", "GET /v1/secrets/sec_abcdefghijklmnop",
 		"POST /v1/secrets/sec_abcdefghijklmnop:archive",
 		"POST /v1/secrets/sec_abcdefghijklmnop:restore",
+		"POST /v1/secrets/sec_abcdefghijklmnop:delete",
 		"POST /v1/secrets/sec_abcdefghijklmnop/fields/fld_abcdefghijklmnop:access",
 	} {
 		if calls[route] != 1 {

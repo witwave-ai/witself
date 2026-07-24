@@ -53,6 +53,7 @@ type Secret struct {
 	CreatedAt      time.Time     `json:"created_at"`
 	UpdatedAt      time.Time     `json:"updated_at"`
 	ArchivedAt     *time.Time    `json:"archived_at,omitempty"`
+	DeletedAt      *time.Time    `json:"deleted_at,omitempty"`
 	SensitiveCount int           `json:"sensitive_field_count"`
 }
 
@@ -163,6 +164,16 @@ type SecretMutationResult struct {
 	Receipt SecretMutationReceipt `json:"receipt"`
 }
 
+// SecretLimitStatus is the authenticated owner's retained-secret capacity.
+// Null max/remaining means the applied plan snapshot is unlimited.
+type SecretLimitStatus struct {
+	Used      int64  `json:"used"`
+	Max       *int64 `json:"max"`
+	Remaining *int64 `json:"remaining"`
+	Unlimited bool   `json:"unlimited"`
+	OverLimit bool   `json:"over_limit"`
+}
+
 // VaultKeyMutationResult returns public key-epoch metadata and its mutation
 // receipt.
 type VaultKeyMutationResult struct {
@@ -230,6 +241,17 @@ func CreateSecret(ctx context.Context, endpoint, token string, in CreateSecretIn
 	return &out, nil
 }
 
+// GetSecretLimitStatus returns value-free retained-secret capacity.
+func GetSecretLimitStatus(ctx context.Context, endpoint, token string) (*SecretLimitStatus, error) {
+	var out struct {
+		Limit SecretLimitStatus `json:"limit"`
+	}
+	if err := doJSON(ctx, http.MethodGet, secretsURL(endpoint)+":status", token, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out.Limit, nil
+}
+
 // ListSecrets searches public metadata and explicitly non-sensitive values.
 func ListSecrets(ctx context.Context, endpoint, token string, opts SecretListOptions) (*SecretPage, error) {
 	values := url.Values{}
@@ -293,6 +315,12 @@ func ArchiveSecret(ctx context.Context, endpoint, token, secretID string, in Sec
 // name is still available.
 func RestoreSecret(ctx context.Context, endpoint, token, secretID string, in SecretLifecycleInput) (*SecretMutationResult, error) {
 	return mutateSecretLifecycle(ctx, endpoint, token, secretID, "restore", in)
+}
+
+// DeleteSecret tombstones an active or archived secret and releases retained
+// capacity while preserving the value-free mutation receipt.
+func DeleteSecret(ctx context.Context, endpoint, token, secretID string, in SecretLifecycleInput) (*SecretMutationResult, error) {
+	return mutateSecretLifecycle(ctx, endpoint, token, secretID, "delete", in)
 }
 
 func mutateSecretLifecycle(ctx context.Context, endpoint, token, secretID, operation string, in SecretLifecycleInput) (*SecretMutationResult, error) {

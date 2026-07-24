@@ -25,6 +25,9 @@ const (
 	SecretLifecycleActive = "active"
 	// SecretLifecycleArchived identifies a secret retained but unavailable for use.
 	SecretLifecycleArchived = "archived"
+	// SecretLifecycleDeleted identifies a tombstoned secret returned only by
+	// the guarded delete mutation and its idempotent replay.
+	SecretLifecycleDeleted = "deleted"
 
 	// SecretFieldText identifies an ordinary text field.
 	SecretFieldText = "text"
@@ -167,6 +170,7 @@ type Secret struct {
 	CreatedAt      time.Time     `json:"created_at"`
 	UpdatedAt      time.Time     `json:"updated_at"`
 	ArchivedAt     *time.Time    `json:"archived_at,omitempty"`
+	DeletedAt      *time.Time    `json:"deleted_at,omitempty"`
 	SensitiveCount int           `json:"sensitive_field_count"`
 }
 
@@ -284,6 +288,33 @@ type SecretMutationResult struct {
 	Secret  Secret                `json:"secret"`
 	Receipt SecretMutationReceipt `json:"receipt"`
 }
+
+// SecretLimitStatus is the authenticated, value-free retained-secret capacity
+// for one owner agent. Max and Remaining are null when the plan snapshot omits
+// the stored_secret key, which is the canonical unlimited representation.
+type SecretLimitStatus struct {
+	Used      int64  `json:"used"`
+	Max       *int64 `json:"max"`
+	Remaining *int64 `json:"remaining"`
+	Unlimited bool   `json:"unlimited"`
+	OverLimit bool   `json:"over_limit"`
+}
+
+// SecretLimitError is a machine-classifiable create refusal. Status contains
+// counts only and is safe to expose to the authenticated owner.
+type SecretLimitError struct {
+	Status SecretLimitStatus
+}
+
+func (e *SecretLimitError) Error() string {
+	if e == nil || e.Status.Max == nil {
+		return ErrPlanLimitReached.Error()
+	}
+	return fmt.Sprintf("%s: %s %d/%d", ErrPlanLimitReached,
+		UsageDimensionStoredSecret, e.Status.Used, *e.Status.Max)
+}
+
+func (e *SecretLimitError) Unwrap() error { return ErrPlanLimitReached }
 
 // SecretPage is one bounded metadata/redacted-field page.
 type SecretPage struct {

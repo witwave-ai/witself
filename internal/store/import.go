@@ -1400,10 +1400,16 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			if !ok {
 				return badf("accounts row plan_limits must be an object of integer limits")
 			}
+			limits := make(map[string]int64, len(m))
 			for key, raw := range m {
-				if _, ok := importedInteger(raw); !ok {
+				value, ok := importedInteger(raw)
+				if !ok {
 					return badf("accounts row plan_limits[%q] must be an integer", key)
 				}
+				limits[key] = value
+			}
+			if err := plans.ValidateLimits(limits); err != nil {
+				return badf("accounts row plan_limits is invalid: %v", err)
 			}
 		}
 		if v, present := obj["plan_policies"]; present {

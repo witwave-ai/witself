@@ -106,18 +106,40 @@ type TranscriptRetentionOverride struct {
 	SetAt       time.Time `json:"set_at"`
 }
 
+// AccountLimitOverride is an account-specific hard-cap exception. Max=nil is
+// an explicit unlimited override; absence of the dimension from
+// Record.LimitOverrides means inherit the current plan default.
+type AccountLimitOverride struct {
+	Max         *int64    `json:"max"`
+	ActorID     string    `json:"actor_id"`
+	ActorHandle string    `json:"actor_handle"`
+	Reason      string    `json:"reason"`
+	SetAt       time.Time `json:"set_at"`
+}
+
+// AccountLimitValue preserves the difference between an absent audit field
+// and an explicitly unlimited value (represented by {"max":null}).
+type AccountLimitValue struct {
+	Max *int64 `json:"max"`
+}
+
 // AdminChange is the append-only audit history embedded in the account's
 // compare-and-swap record. Kind determines how nil values are interpreted.
 type AdminChange struct {
-	Kind          string    `json:"kind"`
-	ActorID       string    `json:"actor_id"`
-	ActorHandle   string    `json:"actor_handle"`
-	Reason        string    `json:"reason"`
-	At            time.Time `json:"at"`
-	PlanFrom      string    `json:"plan_from,omitempty"`
-	PlanTo        string    `json:"plan_to,omitempty"`
-	RetentionFrom *int64    `json:"retention_from,omitempty"`
-	RetentionTo   *int64    `json:"retention_to,omitempty"`
+	Kind            string             `json:"kind"`
+	ActorID         string             `json:"actor_id"`
+	ActorHandle     string             `json:"actor_handle"`
+	Reason          string             `json:"reason"`
+	At              time.Time          `json:"at"`
+	PlanFrom        string             `json:"plan_from,omitempty"`
+	PlanTo          string             `json:"plan_to,omitempty"`
+	RetentionFrom   *int64             `json:"retention_from,omitempty"`
+	RetentionTo     *int64             `json:"retention_to,omitempty"`
+	LimitDimension  string             `json:"limit_dimension,omitempty"`
+	LimitFrom       *AccountLimitValue `json:"limit_from,omitempty"`
+	LimitTo         *AccountLimitValue `json:"limit_to,omitempty"`
+	LimitFromSource string             `json:"limit_from_source,omitempty"`
+	LimitToSource   string             `json:"limit_to_source,omitempty"`
 }
 
 // Record is one account's billing state. Plan facts only — identity stays in
@@ -140,11 +162,13 @@ type Record struct {
 	// predates it is stale (redelivered or out of order) and is dropped.
 	EntitledAt time.Time
 	Pending    *Pending
-	// PlanOverride and TranscriptRetentionOverride are administrator-owned
-	// entitlement exceptions. They never create or mutate provider billing
-	// objects. AdminHistory preserves every real transition with attribution.
+	// PlanOverride, TranscriptRetentionOverride, and LimitOverrides are
+	// administrator-owned entitlement exceptions. They never create or mutate
+	// provider billing objects. AdminHistory preserves every real transition
+	// with attribution.
 	PlanOverride                *AccountPlanOverride
 	TranscriptRetentionOverride *TranscriptRetentionOverride
+	LimitOverrides              map[string]AccountLimitOverride
 	AdminHistory                []AdminChange
 	// PastDueSince is set while the provider reports failed renewals. Grace
 	// policy (when to suspend) is a control-plane decision layered on top.
@@ -267,11 +291,13 @@ type Outcome struct {
 	Effective time.Time
 }
 
-// PlanSnapshot is the control plane's resolved account policy. DefaultPolicies
-// are the effective plan's catalog defaults; Policies additionally reflect
-// account-level overrides and are the exact map pushed to the cell.
+// PlanSnapshot is the control plane's resolved account policy. DefaultLimits
+// and DefaultPolicies are the effective plan's catalog defaults; Limits and
+// Policies additionally reflect account-level overrides and are the exact
+// maps pushed to the cell.
 type PlanSnapshot struct {
 	Plan            string
+	DefaultLimits   map[string]int64
 	Limits          map[string]int64
 	DefaultPolicies map[string]int64
 	Policies        map[string]int64
@@ -538,10 +564,14 @@ func (m *Manager) resolveSnapshot(r Record) (PlanSnapshot, error) {
 	}
 	snapshot := PlanSnapshot{
 		Plan:            p.ID,
+		DefaultLimits:   cloneInt64Map(p.Limits),
 		Limits:          cloneInt64Map(p.Limits),
 		DefaultPolicies: cloneInt64Map(p.Policies),
 		Policies:        cloneInt64Map(p.Policies),
 		Features:        append([]string(nil), p.Features...),
+	}
+	if snapshot.DefaultLimits == nil {
+		snapshot.DefaultLimits = map[string]int64{}
 	}
 	if snapshot.Limits == nil {
 		snapshot.Limits = map[string]int64{}
@@ -558,6 +588,23 @@ func (m *Manager) resolveSnapshot(r Record) (PlanSnapshot, error) {
 		} else {
 			snapshot.Policies[plans.TranscriptRetentionDaysPolicy] = *override.Days
 		}
+	}
+	for dimension, override := range r.LimitOverrides {
+		validationValue := int64(0)
+		if override.Max != nil {
+			validationValue = *override.Max
+		}
+		if err := plans.ValidateLimits(map[string]int64{dimension: validationValue}); err != nil {
+			return PlanSnapshot{}, fmt.Errorf("resolve account %s limits: %w", r.AccountID, err)
+		}
+		if override.Max == nil {
+			delete(snapshot.Limits, dimension)
+		} else {
+			snapshot.Limits[dimension] = *override.Max
+		}
+	}
+	if err := plans.ValidateLimits(snapshot.Limits); err != nil {
+		return PlanSnapshot{}, fmt.Errorf("resolve account %s limits: %w", r.AccountID, err)
 	}
 	if err := plans.ValidatePolicies(snapshot.Policies); err != nil {
 		return PlanSnapshot{}, fmt.Errorf("resolve account %s policies: %w", r.AccountID, err)
@@ -608,6 +655,36 @@ func sameOptionalDays(a, b *int64) bool {
 	return (a == nil && b == nil) || (a != nil && b != nil && *a == *b)
 }
 
+func limitValue(limits map[string]int64, dimension string) *int64 {
+	value, ok := limits[dimension]
+	if !ok {
+		return nil
+	}
+	valueCopy := value
+	return &valueCopy
+}
+
+func accountLimitValue(limitMax *int64) *AccountLimitValue {
+	value := &AccountLimitValue{}
+	if limitMax != nil {
+		maxCopy := *limitMax
+		value.Max = &maxCopy
+	}
+	return value
+}
+
+func validateAccountLimit(dimension string, limitMax *int64) (string, error) {
+	dimension = strings.TrimSpace(dimension)
+	value := int64(0)
+	if limitMax != nil {
+		value = *limitMax
+	}
+	if err := plans.ValidateLimits(map[string]int64{dimension: value}); err != nil {
+		return "", fmt.Errorf("%w: %v", ErrAdminInput, err)
+	}
+	return dimension, nil
+}
+
 func validateAdminChange(actor AdminActor, reason string) (AdminActor, string, error) {
 	actor.ID = strings.TrimSpace(actor.ID)
 	actor.Handle = strings.TrimSpace(actor.Handle)
@@ -622,6 +699,123 @@ func validateAdminChange(actor AdminActor, reason string) (AdminActor, string, e
 	default:
 		return actor, reason, nil
 	}
+}
+
+// SetAccountLimitOverride sets one account hard-cap exception independently
+// from its plan and provider billing relationship. max=nil explicitly makes
+// the dimension unlimited; clearing is the only way to resume inheritance.
+func (m *Manager) SetAccountLimitOverride(
+	ctx context.Context,
+	accountID, dimension string,
+	limitMax *int64,
+	actor AdminActor,
+	reason string,
+) (Record, error) {
+	actor, reason, err := validateAdminChange(actor, reason)
+	if err != nil {
+		return Record{}, err
+	}
+	dimension, err = validateAccountLimit(dimension, limitMax)
+	if err != nil {
+		return Record{}, err
+	}
+	now := m.cfg.Now()
+	r, err := m.mutate(ctx, accountID, "", func(r *Record) error {
+		current, overridden := r.LimitOverrides[dimension]
+		if overridden &&
+			sameOptionalDays(current.Max, limitMax) {
+			return errSkipWrite
+		}
+		fromSource := "inherited"
+		if overridden {
+			fromSource = "override"
+		}
+		before, err := m.resolveSnapshot(*r)
+		if err != nil {
+			return err
+		}
+		if r.LimitOverrides == nil {
+			r.LimitOverrides = map[string]AccountLimitOverride{}
+		}
+		stored := AccountLimitOverride{
+			ActorID: actor.ID, ActorHandle: actor.Handle,
+			Reason: reason, SetAt: now,
+		}
+		if limitMax != nil {
+			value := *limitMax
+			stored.Max = &value
+		}
+		r.LimitOverrides[dimension] = stored
+		r.AdminHistory = append(r.AdminHistory, AdminChange{
+			Kind: "limit_override_set", ActorID: actor.ID, ActorHandle: actor.Handle,
+			Reason: reason, At: now, LimitDimension: dimension,
+			LimitFrom:       accountLimitValue(limitValue(before.Limits, dimension)),
+			LimitTo:         accountLimitValue(stored.Max),
+			LimitFromSource: fromSource,
+			LimitToSource:   "override",
+		})
+		return nil
+	})
+	if err != nil {
+		return Record{}, err
+	}
+	// The override is already durable. A failed cell push is intentionally
+	// represented as apply_pending and retried by reconciliation.
+	_ = m.apply(ctx, accountID)
+	return r, nil
+}
+
+// ClearAccountLimitOverride removes one account exception so the dimension
+// inherits the current effective plan default. Clearing an absent override is
+// an idempotent no-op.
+func (m *Manager) ClearAccountLimitOverride(
+	ctx context.Context,
+	accountID, dimension string,
+	actor AdminActor,
+	reason string,
+) (Record, error) {
+	actor, reason, err := validateAdminChange(actor, reason)
+	if err != nil {
+		return Record{}, err
+	}
+	dimension, err = validateAccountLimit(dimension, nil)
+	if err != nil {
+		return Record{}, err
+	}
+	now := m.cfg.Now()
+	r, err := m.mutate(ctx, accountID, "", func(r *Record) error {
+		if _, ok := r.LimitOverrides[dimension]; !ok {
+			return errSkipWrite
+		}
+		before, err := m.resolveSnapshot(*r)
+		if err != nil {
+			return err
+		}
+		delete(r.LimitOverrides, dimension)
+		if len(r.LimitOverrides) == 0 {
+			r.LimitOverrides = nil
+		}
+		after, err := m.resolveSnapshot(*r)
+		if err != nil {
+			return err
+		}
+		r.AdminHistory = append(r.AdminHistory, AdminChange{
+			Kind: "limit_override_cleared", ActorID: actor.ID, ActorHandle: actor.Handle,
+			Reason: reason, At: now, LimitDimension: dimension,
+			LimitFrom:       accountLimitValue(limitValue(before.Limits, dimension)),
+			LimitTo:         accountLimitValue(limitValue(after.Limits, dimension)),
+			LimitFromSource: "override",
+			LimitToSource:   "inherited",
+		})
+		return nil
+	})
+	if err != nil {
+		return Record{}, err
+	}
+	// The override is already durable. A failed cell push is intentionally
+	// represented as apply_pending and retried by reconciliation.
+	_ = m.apply(ctx, accountID)
+	return r, nil
 }
 
 // SetAccountPlanOverride changes the account's effective plan classification

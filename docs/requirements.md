@@ -1148,8 +1148,10 @@ Secrets support a complete, audited lifecycle. Every value-bearing step honors t
 - `copy` — copy within an agent, to another agent, or to group-owned scope when
   allowed. Copying sensitive values requires confirmation and an audit `--reason`.
 - `archive` / `restore` — soft archive and restore.
-- `delete` — permanent delete when allowed; guarded, audited, confirmation
-  required.
+- `delete` — guarded, retry-keyed tombstone delete. It scrubs secret metadata,
+  fields, and wrapped DEKs, releases retained capacity, and preserves only a
+  minimal value-free tombstone plus receipt/audit evidence. Irreversible purge
+  of that tombstone is a separate future operation.
 - `grant` / `revoke` — grant or revoke another agent's or group's access to a
   secret (see [Secret Authorization & Roles](#secret-authorization--roles)).
 - `list` / `scan` — enumerate secrets with metadata and filters; `scan` is the

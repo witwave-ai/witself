@@ -172,13 +172,25 @@ func (s *Store) CreateSecret(ctx context.Context, p Principal, in CreateSecretIn
 		return SecretMutationResult{Secret: secret, Receipt: receipt}, nil
 	}
 
+	// Every create locks the stable owner row after idempotent replay. This is
+	// the cross-replica serialization point for per-owner retained capacity;
+	// different owners continue through independently.
+	if err := lockSecretOwnerAgentTx(ctx, tx, p); err != nil {
+		return SecretMutationResult{}, err
+	}
+	limitStatus, err := secretLimitStatusTx(ctx, tx, p)
+	if err != nil {
+		return SecretMutationResult{}, err
+	}
+	if !limitStatus.Unlimited && limitStatus.Max != nil &&
+		limitStatus.Used >= *limitStatus.Max {
+		return SecretMutationResult{}, &SecretLimitError{Status: limitStatus}
+	}
+
 	if sensitiveCount > 0 {
 		// The stable owner-row lock serializes the last pre-rotation sensitive
 		// create against rotation snapshot creation. Once a run is open, no new
 		// wrapped DEK may appear outside its immutable item set.
-		if err := lockSecretOwnerAgentTx(ctx, tx, p); err != nil {
-			return SecretMutationResult{}, err
-		}
 		if err := ensureNoOpenVaultKeyRotationTx(ctx, tx, p); err != nil {
 			return SecretMutationResult{}, err
 		}
@@ -278,6 +290,14 @@ func (s *Store) RestoreSecret(ctx context.Context, p Principal, secretID string,
 	return s.mutateSecretLifecycle(ctx, p, secretID, "secret_restore", in)
 }
 
+// DeleteSecret removes every value-bearing field and scrubs public metadata
+// from one self-owned active or archived secret. A minimal value-free tombstone
+// remains for durable replay, disaster recovery, and audit correlation; ordinary
+// reads exclude it and retained capacity is released immediately.
+func (s *Store) DeleteSecret(ctx context.Context, p Principal, secretID string, in SecretLifecycleInput) (SecretMutationResult, error) {
+	return s.mutateSecretLifecycle(ctx, p, secretID, "secret_delete", in)
+}
+
 func (s *Store) mutateSecretLifecycle(ctx context.Context, p Principal, secretID, operation string, in SecretLifecycleInput) (SecretMutationResult, error) {
 	if err := requireSelfSecretPrincipal(p); err != nil {
 		return SecretMutationResult{}, err
@@ -290,7 +310,7 @@ func (s *Store) mutateSecretLifecycle(ctx context.Context, p Principal, secretID
 	if err != nil {
 		return SecretMutationResult{}, err
 	}
-	if operation != "secret_archive" && operation != "secret_restore" {
+	if operation != "secret_archive" && operation != "secret_restore" && operation != "secret_delete" {
 		return SecretMutationResult{}, ErrSecretInputInvalid
 	}
 	requestHash, err := secretMutationFingerprint(struct {
@@ -317,13 +337,17 @@ func (s *Store) mutateSecretLifecycle(ctx context.Context, p Principal, secretID
 		operation, keyHash, requestHash); err != nil {
 		return SecretMutationResult{}, err
 	} else if replayed {
-		secret, err := getSecret(ctx, tx, p, receipt.TargetID, true, true)
+		secret, err := getSecretWithDeleted(ctx, tx, p, receipt.TargetID, true, true,
+			operation == "secret_delete")
 		if err != nil {
 			return SecretMutationResult{}, err
 		}
 		wantLifecycle := SecretLifecycleArchived
-		if operation == "secret_restore" {
+		switch operation {
+		case "secret_restore":
 			wantLifecycle = SecretLifecycleActive
+		case "secret_delete":
+			wantLifecycle = SecretLifecycleDeleted
 		}
 		// A mutable secret cannot reconstruct an old lifecycle result after a
 		// later state change. Fail closed instead of presenting current state as
@@ -338,6 +362,18 @@ func (s *Store) mutateSecretLifecycle(ctx context.Context, p Principal, secretID
 		return SecretMutationResult{Secret: secret, Receipt: receipt}, nil
 	}
 
+	// Serialize deletion (capacity release) against creates for this owner.
+	// Archive and restore do not affect retained capacity and remain concurrent.
+	if operation == "secret_delete" {
+		if err := lockSecretOwnerAgentTx(ctx, tx, p); err != nil {
+			return SecretMutationResult{}, err
+		}
+		// Rotation items hold immutable copies of wrapped DEKs. A delete must
+		// not strip the source fields out from under an open rotation.
+		if err := ensureNoOpenVaultKeyRotationTx(ctx, tx, p); err != nil {
+			return SecretMutationResult{}, err
+		}
+	}
 	var currentRevision int64
 	var archivedAt *time.Time
 	err = tx.QueryRow(ctx, `
@@ -360,7 +396,8 @@ func (s *Store) mutateSecretLifecycle(ctx context.Context, p Principal, secretID
 	}
 
 	var resultRevision int64
-	if operation == "secret_archive" {
+	switch operation {
+	case "secret_archive":
 		err = tx.QueryRow(ctx, `
 			UPDATE secrets
 			   SET archived_at=clock_timestamp(), updated_at=clock_timestamp(),
@@ -370,7 +407,7 @@ func (s *Store) mutateSecretLifecycle(ctx context.Context, p Principal, secretID
 			   AND row_version=$5
 			 RETURNING row_version`, p.AccountID, p.RealmID, p.ID, secretID,
 			in.ExpectedRowVersion).Scan(&resultRevision)
-	} else {
+	case "secret_restore":
 		err = tx.QueryRow(ctx, `
 			UPDATE secrets
 			   SET archived_at=NULL, updated_at=clock_timestamp(),
@@ -378,6 +415,16 @@ func (s *Store) mutateSecretLifecycle(ctx context.Context, p Principal, secretID
 			 WHERE account_id=$1 AND realm_id=$2 AND owner_agent_id=$3
 			   AND id=$4 AND deleted_at IS NULL AND archived_at IS NOT NULL
 			   AND row_version=$5
+			 RETURNING row_version`, p.AccountID, p.RealmID, p.ID, secretID,
+			in.ExpectedRowVersion).Scan(&resultRevision)
+	default:
+		err = tx.QueryRow(ctx, `
+			UPDATE secrets
+			   SET name=id, description='', template='generic', tags='[]'::jsonb,
+			       archived_at=NULL, deleted_at=clock_timestamp(),
+			       updated_at=clock_timestamp(), row_version=row_version+1
+			 WHERE account_id=$1 AND realm_id=$2 AND owner_agent_id=$3
+			   AND id=$4 AND deleted_at IS NULL AND row_version=$5
 			 RETURNING row_version`, p.AccountID, p.RealmID, p.ID, secretID,
 			in.ExpectedRowVersion).Scan(&resultRevision)
 	}
@@ -390,14 +437,53 @@ func (s *Store) mutateSecretLifecycle(ctx context.Context, p Principal, secretID
 		}
 		return SecretMutationResult{}, fmt.Errorf("change secret lifecycle: %w", err)
 	}
+	if operation == "secret_delete" {
+		// Once the child rows are gone their field/dek receipts can never
+		// produce a meaningful replay result, and retaining them would leave
+		// unverifiable targets in a portable account archive. Account events
+		// and usage history remain append-only; secret-target receipts remain
+		// available with the minimal tombstone.
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM secret_mutation_receipts r
+			 WHERE r.account_id=$1 AND r.realm_id=$2 AND r.owner_agent_id=$3
+			   AND (
+			     (r.target_kind='field' AND EXISTS (
+			        SELECT 1 FROM secret_fields f
+			         WHERE f.account_id=$1 AND f.realm_id=$2
+			           AND f.owner_agent_id=$3 AND f.secret_id=$4
+			           AND f.id=r.target_id
+			     )) OR
+			     (r.target_kind='dek' AND EXISTS (
+			        SELECT 1 FROM secret_deks d
+			         WHERE d.account_id=$1 AND d.realm_id=$2
+			           AND d.owner_agent_id=$3 AND d.secret_id=$4
+			           AND d.id=r.target_id
+			     ))
+			   )`, p.AccountID, p.RealmID, p.ID, secretID); err != nil {
+			return SecretMutationResult{}, fmt.Errorf(
+				"purge deleted secret child receipts: %w", err)
+		}
+		// secret_deks cascade from secret_fields. This removes ciphertext,
+		// wrapped keys, public values, and field metadata in the same commit as
+		// the value-free tombstone and durable receipt.
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM secret_fields
+			 WHERE account_id=$1 AND realm_id=$2 AND owner_agent_id=$3
+			   AND secret_id=$4`, p.AccountID, p.RealmID, p.ID, secretID); err != nil {
+			return SecretMutationResult{}, fmt.Errorf("purge deleted secret fields: %w", err)
+		}
+	}
 	receipt, err := insertSecretReceiptTx(ctx, tx, p, operation, keyHash,
 		requestHash, "secret", secretID, resultRevision, 0)
 	if err != nil {
 		return SecretMutationResult{}, err
 	}
 	verb := VerbSecretArchived
-	if operation == "secret_restore" {
+	switch operation {
+	case "secret_restore":
 		verb = VerbSecretRestored
+	case "secret_delete":
+		verb = VerbSecretDeleted
 	}
 	if err := logEventTx(ctx, tx, EventInput{
 		AccountID: p.AccountID, ActorKind: ActorAgent, ActorID: p.ID,
@@ -409,7 +495,8 @@ func (s *Store) mutateSecretLifecycle(ctx context.Context, p Principal, secretID
 	}); err != nil {
 		return SecretMutationResult{}, err
 	}
-	secret, err := getSecret(ctx, tx, p, secretID, true, true)
+	secret, err := getSecretWithDeleted(ctx, tx, p, secretID, true, true,
+		operation == "secret_delete")
 	if err != nil {
 		return SecretMutationResult{}, err
 	}

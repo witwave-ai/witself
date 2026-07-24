@@ -71,6 +71,9 @@ func (s *Store) SetAccountPlan(
 	if limits == nil {
 		limits = map[string]int64{}
 	}
+	if err := plans.ValidateLimits(limits); err != nil {
+		return AccountPlanSnapshot{}, fmt.Errorf("%w: %v", ErrPlanSnapshotInvalid, err)
+	}
 	if features == nil {
 		features = []string{}
 	}
@@ -196,7 +199,8 @@ func decodeAccountPlanSnapshot(
 	return nil
 }
 
-// lockAccountForPlanGate is the create-path lock for plan-capped resources.
+// lockAccountForPlanGate is the create-path lock for account-wide plan-capped
+// resources.
 // It reuses lockAccountForMint's status semantics (active only) but takes
 // FOR NO KEY UPDATE instead of FOR SHARE: share locks do not conflict with
 // each other, so two concurrent creates could both count N-1 under the cap

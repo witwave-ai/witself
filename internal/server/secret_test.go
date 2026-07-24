@@ -50,7 +50,7 @@ func TestSecretRoutesCiphertextOnlyAndRedacted(t *testing.T) {
 	var created CreateSecretRequest
 	var listed SecretListOptions
 	var accessed AccessSecretFieldRequest
-	var archivedRequest, restoredRequest SecretLifecycleRequest
+	var archivedRequest, restoredRequest, deletedRequest SecretLifecycleRequest
 	srv := httptest.NewServer(apiMux(Config{
 		AuthenticatePrincipal: secretTestAuth,
 		GetCurrentVaultKey: func(_ context.Context, p DomainPrincipal) (*VaultKeyBinding, error) {
@@ -66,6 +66,11 @@ func TestSecretRoutesCiphertextOnlyAndRedacted(t *testing.T) {
 			assertSecretTestPrincipal(t, p)
 			created = in
 			return SecretMutationResult{Secret: secret, Receipt: receipt}, nil
+		},
+		GetSecretLimitStatus: func(_ context.Context, p DomainPrincipal) (SecretLimitStatus, error) {
+			assertSecretTestPrincipal(t, p)
+			maximum, remaining := int64(10), int64(9)
+			return SecretLimitStatus{Used: 1, Max: &maximum, Remaining: &remaining}, nil
 		},
 		ListSecrets: func(_ context.Context, p DomainPrincipal, opts SecretListOptions) (SecretPage, error) {
 			assertSecretTestPrincipal(t, p)
@@ -106,6 +111,20 @@ func TestSecretRoutesCiphertextOnlyAndRedacted(t *testing.T) {
 			restoreReceipt.ResultRevision = 3
 			return SecretMutationResult{Secret: restored, Receipt: restoreReceipt}, nil
 		},
+		DeleteSecret: func(_ context.Context, p DomainPrincipal, id string, in SecretLifecycleRequest) (SecretMutationResult, error) {
+			assertSecretTestPrincipal(t, p)
+			if id != testSecretID {
+				t.Fatalf("delete secret id = %q", id)
+			}
+			deletedRequest = in
+			deleted := secret
+			deleted.Lifecycle = "deleted"
+			deleted.RowVersion = 4
+			deleteReceipt := receipt
+			deleteReceipt.Operation = "secret_delete"
+			deleteReceipt.ResultRevision = 4
+			return SecretMutationResult{Secret: deleted, Receipt: deleteReceipt}, nil
+		},
 		AccessSecretField: func(_ context.Context, p DomainPrincipal, secretID, fieldID string, in AccessSecretFieldRequest) (SecretMaterial, error) {
 			assertSecretTestPrincipal(t, p)
 			if secretID != testSecretID || fieldID != testFieldID {
@@ -132,6 +151,17 @@ func TestSecretRoutesCiphertextOnlyAndRedacted(t *testing.T) {
 	assertSecretTestResponse(t, resp, http.StatusCreated, true)
 	if created.ID != testSecretID || created.IdempotencyKey != "create-1" || len(created.Fields) != 1 || created.Fields[0].PublicValue == nil || *created.Fields[0].PublicValue != "octocat" {
 		t.Fatalf("create callback input = %#v", created)
+	}
+
+	resp = secretTestRequest(t, srv.URL, http.MethodGet, "/v1/secrets:status", "agent-token", "", "")
+	statusBody := assertSecretTestResponse(t, resp, http.StatusOK, false)
+	var statusEnvelope struct {
+		Limit SecretLimitStatus `json:"limit"`
+	}
+	if err := json.Unmarshal(statusBody, &statusEnvelope); err != nil ||
+		statusEnvelope.Limit.Used != 1 || statusEnvelope.Limit.Max == nil ||
+		*statusEnvelope.Limit.Max != 10 {
+		t.Fatalf("status response = %#v / %v", statusEnvelope, err)
 	}
 
 	resp = secretTestRequest(t, srv.URL, http.MethodGet, "/v1/secrets?q=git&lifecycle=active&template=login&tag=github&limit=20&cursor=cursor_1&include_fields=true", "agent-token", "", "")
@@ -167,6 +197,19 @@ func TestSecretRoutesCiphertextOnlyAndRedacted(t *testing.T) {
 		restoreEnvelope.Secret.Lifecycle != "active" ||
 		restoreEnvelope.Receipt.Operation != "secret_restore" {
 		t.Fatalf("restore response = %#v / %v", restoreEnvelope, err)
+	}
+
+	resp = secretTestRequest(t, srv.URL, http.MethodPost, "/v1/secrets/"+testSecretID+":delete",
+		"agent-token", `{"expected_row_version":3}`, "delete-1")
+	deleteBody := assertSecretTestResponse(t, resp, http.StatusOK, true)
+	if deletedRequest.ExpectedRowVersion != 3 || deletedRequest.IdempotencyKey != "delete-1" {
+		t.Fatalf("delete callback input = %#v", deletedRequest)
+	}
+	var deleteEnvelope SecretMutationResult
+	if err := json.Unmarshal(deleteBody, &deleteEnvelope); err != nil ||
+		deleteEnvelope.Secret.Lifecycle != "deleted" ||
+		deleteEnvelope.Receipt.Operation != "secret_delete" {
+		t.Fatalf("delete response = %#v / %v", deleteEnvelope, err)
 	}
 
 	resp = secretTestRequest(t, srv.URL, http.MethodPost, "/v1/secrets/"+testSecretID+"/fields/"+testFieldID+":access", "agent-token", "", "access-1")
@@ -219,6 +262,10 @@ func TestSecretRoutesAuthorizationStrictnessAndErrors(t *testing.T) {
 			calls++
 			return SecretMutationResult{}, ErrNotFound
 		},
+		DeleteSecret: func(_ context.Context, _ DomainPrincipal, _ string, _ SecretLifecycleRequest) (SecretMutationResult, error) {
+			calls++
+			return SecretMutationResult{}, ErrNotFound
+		},
 		AccessSecretField: func(_ context.Context, _ DomainPrincipal, _, _ string, _ AccessSecretFieldRequest) (SecretMaterial, error) {
 			calls++
 			return SecretMaterial{}, ErrIdempotencyConflict
@@ -245,7 +292,8 @@ func TestSecretRoutesAuthorizationStrictnessAndErrors(t *testing.T) {
 		{name: "lifecycle missing revision", method: http.MethodPost, path: "/v1/secrets/" + testSecretID + ":archive", token: "agent-token", body: `{}`, key: "archive-no-revision", want: http.StatusBadRequest},
 		{name: "lifecycle missing key", method: http.MethodPost, path: "/v1/secrets/" + testSecretID + ":restore", token: "agent-token", body: `{"expected_row_version":1}`, want: http.StatusBadRequest},
 		{name: "lifecycle query", method: http.MethodPost, path: "/v1/secrets/" + testSecretID + ":archive?force=true", token: "agent-token", body: `{"expected_row_version":1}`, key: "archive-query", want: http.StatusBadRequest},
-		{name: "lifecycle invalid action", method: http.MethodPost, path: "/v1/secrets/" + testSecretID + ":delete", token: "agent-token", body: `{"expected_row_version":1}`, key: "delete-1", want: http.StatusNotFound},
+		{name: "delete missing", method: http.MethodPost, path: "/v1/secrets/" + testSecretID + ":delete", token: "agent-token", body: `{"expected_row_version":1}`, key: "delete-1", want: http.StatusNotFound},
+		{name: "lifecycle invalid action", method: http.MethodPost, path: "/v1/secrets/" + testSecretID + ":purge", token: "agent-token", body: `{"expected_row_version":1}`, key: "purge-1", want: http.StatusNotFound},
 		{name: "key body trailing", method: http.MethodPost, path: "/v1/vault/key-epochs", token: "agent-token", body: `{} {}`, key: "key-1", want: http.StatusBadRequest},
 		{name: "access body authority", method: http.MethodPost, path: "/v1/secrets/" + testSecretID + "/fields/" + testFieldID + ":access", token: "agent-token", body: `{"agent_id":"agent_2"}`, key: "access-1", want: http.StatusBadRequest},
 		{name: "create missing vault key", method: http.MethodPost, path: "/v1/secrets", token: "agent-token", body: `{}`, key: "create-2", want: http.StatusConflict},
@@ -266,8 +314,8 @@ func TestSecretRoutesAuthorizationStrictnessAndErrors(t *testing.T) {
 			}
 		})
 	}
-	if calls != 6 {
-		t.Fatalf("callback calls = %d, want 6", calls)
+	if calls != 7 {
+		t.Fatalf("callback calls = %d, want 7", calls)
 	}
 }
 
@@ -293,6 +341,36 @@ func TestSecretVaultKeyMismatchHasStableMachineCode(t *testing.T) {
 	}
 }
 
+func TestSecretLimitRefusalHasStableMachineCode(t *testing.T) {
+	maximum, remaining := int64(2), int64(0)
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: secretTestAuth,
+		CreateSecret: func(context.Context, DomainPrincipal, CreateSecretRequest) (SecretMutationResult, error) {
+			return SecretMutationResult{}, &SecretLimitError{Status: SecretLimitStatus{
+				Used: 2, Max: &maximum, Remaining: &remaining,
+			}}
+		},
+	}))
+	defer srv.Close()
+	resp := secretTestRequest(t, srv.URL, http.MethodPost, "/v1/secrets", "agent-token", `{}`, "create-limit")
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+	var body struct {
+		Code      string            `json:"code"`
+		Retryable bool              `json:"retryable"`
+		Limit     SecretLimitStatus `json:"limit"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Code != "stored_secret_limit_reached" || body.Retryable ||
+		body.Limit.Used != 2 || body.Limit.Max == nil || *body.Limit.Max != 2 {
+		t.Fatalf("error body = %#v", body)
+	}
+}
+
 func TestSecretCapabilityRequiresCompleteVertical(t *testing.T) {
 	auth := secretTestAuth
 	complete := Config{
@@ -304,6 +382,9 @@ func TestSecretCapabilityRequiresCompleteVertical(t *testing.T) {
 		CreateSecret: func(context.Context, DomainPrincipal, CreateSecretRequest) (SecretMutationResult, error) {
 			return SecretMutationResult{}, nil
 		},
+		GetSecretLimitStatus: func(context.Context, DomainPrincipal) (SecretLimitStatus, error) {
+			return SecretLimitStatus{}, nil
+		},
 		ListSecrets: func(context.Context, DomainPrincipal, SecretListOptions) (SecretPage, error) {
 			return SecretPage{}, nil
 		},
@@ -312,6 +393,9 @@ func TestSecretCapabilityRequiresCompleteVertical(t *testing.T) {
 			return SecretMutationResult{}, nil
 		},
 		RestoreSecret: func(context.Context, DomainPrincipal, string, SecretLifecycleRequest) (SecretMutationResult, error) {
+			return SecretMutationResult{}, nil
+		},
+		DeleteSecret: func(context.Context, DomainPrincipal, string, SecretLifecycleRequest) (SecretMutationResult, error) {
 			return SecretMutationResult{}, nil
 		},
 		AccessSecretField: func(context.Context, DomainPrincipal, string, string, AccessSecretFieldRequest) (SecretMaterial, error) {

@@ -179,6 +179,10 @@ func (ic *importCtx) validateImportedSecret(obj map[string]any) (secretImportSco
 	if err != nil || deleted && (deletedAt.Before(*createdAt) || ic.requireTimestampAtOrBeforeExport("deleted_at", *deletedAt) != nil) {
 		return secretImportScope{}, "", fmt.Errorf("deleted_at is invalid")
 	}
+	if deleted && (archived || name != id || description != "" ||
+		template != "generic" || len(tags) != 0) {
+		return secretImportScope{}, "", fmt.Errorf("deleted tombstone metadata is invalid")
+	}
 	return secretImportScope{
 		realmID: realmID, agentID: agentID, archived: archived,
 		deleted: deleted, createdAt: *createdAt, rowVersion: revision,
@@ -400,8 +404,14 @@ func (ic *importCtx) validateImportedSecretGraph() error {
 			return fmt.Errorf("live agent %q has %d current vault keys", agentID, ic.vaultCurrentKeys[agentID])
 		}
 	}
-	for secretID := range ic.secrets {
+	for secretID, secret := range ic.secrets {
 		count := ic.secretFieldCounts[secretID]
+		if secret.deleted {
+			if count != 0 {
+				return fmt.Errorf("deleted secret %q retains %d fields", secretID, count)
+			}
+			continue
+		}
 		if count < 1 || count > maxSecretFields {
 			return fmt.Errorf("secret %q has %d fields", secretID, count)
 		}
@@ -444,6 +454,14 @@ func (ic *importCtx) validateImportedSecretReceiptResult(operation, targetKind, 
 		return fmt.Errorf("result_revision exceeds target revision")
 	}
 	switch operation {
+	case "secret_delete":
+		target := ic.secrets[targetID]
+		if !target.deleted || revision != currentRevision {
+			return fmt.Errorf("secret delete result does not match the deleted target")
+		}
+		if valueVersionPresent {
+			return fmt.Errorf("result_value_version is not valid for operation")
+		}
 	case "secret_update":
 		if valueVersionPresent && (valueVersion < 1 || valueVersion > ic.secretMaxValueVersions[targetID]) {
 			return fmt.Errorf("result_value_version exceeds the secret field versions")
@@ -477,7 +495,7 @@ func importedByteaLength(raw any) (int, bool) {
 func validImportedSecretOperation(operation string) bool {
 	switch operation {
 	case "key_register", "secret_create", "secret_update", "secret_archive",
-		"secret_restore", "dek_rewrap", "field_access":
+		"secret_restore", "secret_delete", "dek_rewrap", "field_access":
 		return true
 	default:
 		return false
@@ -488,7 +506,8 @@ func validImportedSecretOperationTarget(operation, targetKind string) bool {
 	switch operation {
 	case "key_register":
 		return targetKind == "key_epoch"
-	case "secret_create", "secret_update", "secret_archive", "secret_restore":
+	case "secret_create", "secret_update", "secret_archive", "secret_restore",
+		"secret_delete":
 		return targetKind == "secret"
 	case "dek_rewrap":
 		return targetKind == "dek"

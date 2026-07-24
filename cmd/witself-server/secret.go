@@ -94,6 +94,10 @@ func configureSecrets(cfg *server.Config, st *store.Store) {
 			Secret: toServerSecret(result.Secret), Receipt: toServerSecretReceipt(result.Receipt),
 		}, mapSecretError(err)
 	}
+	cfg.GetSecretLimitStatus = func(ctx context.Context, p server.DomainPrincipal) (server.SecretLimitStatus, error) {
+		status, err := st.GetSecretLimitStatus(ctx, toStorePrincipal(p))
+		return toServerSecretLimitStatus(status), mapSecretError(err)
+	}
 	cfg.ListSecrets = func(ctx context.Context, p server.DomainPrincipal, opts server.SecretListOptions) (server.SecretPage, error) {
 		page, err := st.ListSecrets(ctx, toStorePrincipal(p), store.SecretListOptions{
 			Query: opts.Query, Lifecycle: opts.Lifecycle, Template: opts.Template,
@@ -122,6 +126,14 @@ func configureSecrets(cfg *server.Config, st *store.Store) {
 	}
 	cfg.RestoreSecret = func(ctx context.Context, p server.DomainPrincipal, secretID string, in server.SecretLifecycleRequest) (server.SecretMutationResult, error) {
 		result, err := st.RestoreSecret(ctx, toStorePrincipal(p), secretID, store.SecretLifecycleInput{
+			ExpectedRowVersion: in.ExpectedRowVersion, IdempotencyKey: in.IdempotencyKey,
+		})
+		return server.SecretMutationResult{
+			Secret: toServerSecret(result.Secret), Receipt: toServerSecretReceipt(result.Receipt),
+		}, mapSecretError(err)
+	}
+	cfg.DeleteSecret = func(ctx context.Context, p server.DomainPrincipal, secretID string, in server.SecretLifecycleRequest) (server.SecretMutationResult, error) {
+		result, err := st.DeleteSecret(ctx, toStorePrincipal(p), secretID, store.SecretLifecycleInput{
 			ExpectedRowVersion: in.ExpectedRowVersion, IdempotencyKey: in.IdempotencyKey,
 		})
 		return server.SecretMutationResult{
@@ -200,7 +212,15 @@ func toServerSecret(value store.Secret) server.Secret {
 		Template: value.Template, Tags: value.Tags, Fields: fields,
 		Lifecycle: value.Lifecycle, RowVersion: value.RowVersion,
 		CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt, ArchivedAt: value.ArchivedAt,
+		DeletedAt:      value.DeletedAt,
 		SensitiveCount: value.SensitiveCount,
+	}
+}
+
+func toServerSecretLimitStatus(value store.SecretLimitStatus) server.SecretLimitStatus {
+	return server.SecretLimitStatus{
+		Used: value.Used, Max: value.Max, Remaining: value.Remaining,
+		Unlimited: value.Unlimited, OverLimit: value.OverLimit,
 	}
 }
 
@@ -230,6 +250,7 @@ func toServerSecretReceipt(value store.SecretMutationReceipt) server.SecretMutat
 }
 
 func mapSecretError(err error) error {
+	var limitErr *store.SecretLimitError
 	switch {
 	case err == nil:
 		return nil
@@ -247,6 +268,8 @@ func mapSecretError(err error) error {
 		return server.ErrSecretVaultKeyUnavailable
 	case errors.Is(err, store.ErrVaultKeyMismatch):
 		return server.ErrSecretVaultKeyMismatch
+	case errors.As(err, &limitErr):
+		return &server.SecretLimitError{Status: toServerSecretLimitStatus(limitErr.Status)}
 	case errors.Is(err, store.ErrSecretConflict), errors.Is(err, store.ErrVaultKeyConflict),
 		errors.Is(err, store.ErrVaultEnrollmentConflict), errors.Is(err, store.ErrVaultEnrollmentExpired),
 		errors.Is(err, store.ErrVaultEnrollmentLimit), errors.Is(err, store.ErrVaultEnrollmentProof),

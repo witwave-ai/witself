@@ -189,8 +189,13 @@ view of the domain objects in [data-model.md](data-model.md) and
 
 - `secrets` — `sec_…` id, realm, owner (agent or group), template
   (`login`/`api-key`/`ssh-key`/`certificate`/`env`/`generic`), label, state
-  (`active`/`archived`), timestamps. Witpass's `shared` secrets are now
-  group-owned, so `owner_kind ∈ {agent, group}` matches memories and facts.
+  (`active`/`archived`/tombstoned through `deleted_at`), timestamps. The
+  implemented agent-owned retained-capacity gate counts active and archived
+  top-level rows; a guarded tombstone delete releases capacity, scrubs secret
+  metadata, deletes its field and wrapped-DEK rows, and keeps only a minimal
+  value-free tombstone plus receipt/audit evidence. Witpass's `shared` secrets
+  are now group-owned, so `owner_kind ∈ {agent, group}` matches memories and
+  facts.
 - `secret_fields` — `fld_…` id, secret, field name, sensitivity. Non-sensitive
   field values are ordinary columns; sensitive field values are stored only as
   envelope ciphertext (DEK id, AEAD algorithm, nonce, ciphertext) — never as a
@@ -457,6 +462,11 @@ Migration requirements:
 - CI validates migration ordering and the complete vector/archive contract
   against ordinary PostgreSQL. Any future ANN projection adds separate optional
   extension tests without changing that baseline.
+- Migration `0067_add_secret_delete_receipts.sql` widens the sealed mutation
+  receipt checks to include `secret_delete` by adding and validating replacement
+  constraints before the metadata swap. Its down migration refuses to proceed
+  while any delete receipt exists; rollback across that boundary is
+  backup-required because durable retry/audit evidence must not be discarded.
 
 The public customer/operator CLI should not manage database migrations.
 Migration commands belong to the separate `witself-server` binary; see

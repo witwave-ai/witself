@@ -356,7 +356,11 @@ and the enclosing realm; none ever carries a field value (see
 - `secret.copied`
 - `secret.archived`
 - `secret.restored`
-- `secret.deleted` (hard delete; guarded, requires reason)
+- `secret.deleted` (guarded tombstone delete; metadata is exactly `agent_id`,
+  `secret_id`, and `secret_revision`, with no secret value or deletion reason;
+  secret metadata and field/DEK rows are removed, while a minimal value-free
+  tombstone remains; irreversible purge of that tombstone is a separate future
+  action)
 - `secret.reveal` (the explicit, audited reveal ceremony for a single field;
   records the secret id, field id, and result, never the plaintext. Carries the
   `server_side_decrypt` flag — `true` when the server transiently unwrapped the

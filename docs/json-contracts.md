@@ -103,8 +103,8 @@ Rules:
 - `retryable` indicates whether retrying the identical request may later
   succeed. Transient codes (`backend_unavailable`, `rate_limited`) are
   `retryable: true`; hard conditions (`limit_exceeded`, `access_denied`,
-  `auth_failed`, `not_found`, `conflict`, `unsupported_operation`) are
-  `retryable: false`.
+  `stored_secret_limit_reached`, `auth_failed`, `not_found`, `conflict`,
+  `unsupported_operation`) are `retryable: false`.
 - `rate_limited` responses should include `details.retry_after` in seconds when
   a wait is known; the HTTP API should also send a `Retry-After` header.
 - Memory content, fact values, message bodies/payloads, embedding vectors, raw
@@ -126,6 +126,7 @@ JSON error codes should align with CLI exit-code categories.
 | `backend_unavailable` | 7 | Backend or network unavailable. |
 | `rate_limited` | 7 | Transient service-protection or throttle limit; `retryable: true`, honor `retry_after`. |
 | `limit_exceeded` | 7 | Plan, quota, or hard usage cap; `retryable: false`. |
+| `stored_secret_limit_reached` | 1 | Current sealed-plane create refusal at the authenticated owner agent's retained cap; HTTP 403, `retryable: false`, with a value-free `limit` object. |
 | `store_integrity` | 8 | Local store integrity or corruption failure. |
 | `unsupported_operation` | 9 | Current backend does not support the operation. |
 

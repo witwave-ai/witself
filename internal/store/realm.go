@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/witwave-ai/witself/internal/id"
+	"github.com/witwave-ai/witself/internal/plans"
 )
 
 // ErrRealmExists is returned when a realm name already exists in the account.
@@ -47,7 +48,7 @@ func (s *Store) CreateRealm(ctx context.Context, accountID, name string) (Realm,
 		if err != nil {
 			return Realm{}, err
 		}
-		if err := checkPlanLimit(plan, limits, "realms", n); err != nil {
+		if err := checkPlanLimit(plan, limits, plans.RealmLimit, n); err != nil {
 			return Realm{}, err
 		}
 	}

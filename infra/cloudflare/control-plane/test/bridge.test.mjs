@@ -167,6 +167,15 @@ test("bridge path classifiers are exact", () => {
     "/v1/admin/accounts/acct_1/transcript-retention",
   ));
   assert.ok(matchAdminPolicyPath("/v1/admin/accounts/acct_1/plan-override"));
+  assert.ok(matchAdminPolicyPath(
+    "/v1/admin/accounts/acct_1/limit-overrides/stored_secret",
+  ));
+  assert.equal(matchAdminPolicyPath(
+    "/v1/admin/accounts/acct_1/limit-overrides/not_a_limit",
+  ), null);
+  assert.equal(matchAdminPolicyPath(
+    "/v1/admin/accounts/acct_1/limit-overrides/stored_secret/extra",
+  ), null);
   assert.equal(matchAdminPolicyPath(
     "/v1/admin/accounts/acct_1/transcript-retention/extra",
   ), null);
@@ -219,7 +228,7 @@ test("admin proxy rejects archived and unknown accounts before Go", async () => 
 
 test("admin proxy replaces caller credentials and relays Go response", async () => {
   const request = new Request(
-    "https://self.witwave.ai/v1/admin/accounts/acct_1/transcript-retention",
+    "https://self.witwave.ai/v1/admin/accounts/acct_1/limit-overrides/stored_secret",
     {
       method: "PUT",
       headers: {
@@ -229,7 +238,7 @@ test("admin proxy replaces caller credentials and relays Go response", async () 
         "X-Witself-Admin-Handle": "forged",
         "X-Untrusted": "drop-me",
       },
-      body: JSON.stringify({ days: 60, reason: "exception" }),
+      body: JSON.stringify({ max: 0, reason: "exception" }),
     },
   );
   let forwarded;
@@ -258,7 +267,7 @@ test("admin proxy replaces caller credentials and relays Go response", async () 
   );
   assert.equal(forwarded.headers.get(ADMIN_HANDLE_HEADER), "scott");
   assert.equal(forwarded.headers.get("X-Untrusted"), null);
-  assert.equal(await forwarded.json().then((body) => body.days), 60);
+  assert.deepEqual(await forwarded.json(), { max: 0, reason: "exception" });
   assert.equal(response.status, 202);
   assert.equal(response.headers.get("Retry-After"), "2");
   assert.equal(response.headers.get("Set-Cookie"), null);

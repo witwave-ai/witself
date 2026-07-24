@@ -136,6 +136,7 @@ HTTP status codes should align with the structured error:
 | `400` | `usage_error` | Invalid request shape, flags, or query parameters. |
 | `401` | `auth_failed` | Missing, invalid, expired, or revoked token. |
 | `403` | `access_denied` | Authenticated principal lacks permission, or no policy allows the cross-agent access. |
+| `403` | `stored_secret_limit_reached` | Implemented non-retryable refusal when a new top-level secret would exceed the authenticated owner agent's retained cap. |
 | `404` | `not_found` | Resource not found or not visible to the caller. |
 | `409` | `conflict` | Already exists, stale version, or state conflict. |
 | `422` | `usage_error` | Valid JSON with semantically invalid input. |
@@ -154,6 +155,31 @@ alone:
   `details.retry_after` (seconds) and the `Retry-After` header when present.
 - `limit_exceeded` is a plan/quota hard cap. It is `retryable: false`; retrying
   will not succeed until an operator raises the plan or the usage window resets.
+- `stored_secret_limit_reached` is the implemented inventory-cap specialization.
+  It is HTTP 403 with `retryable: false` and a value-free top-level `limit`
+  object containing `used`, `max`, `remaining`, `unlimited`, and `over_limit`.
+  Retrying a new create cannot succeed until a tombstone delete releases
+  capacity or the resolved maximum changes; exact replay of an already-complete
+  idempotent create is resolved before the gate.
+
+  The current sealed-plane handler returns this flat, machine-stable exception
+  to the generic error wrapper:
+
+  ```json
+  {
+    "schema_version": "witself.v0",
+    "code": "stored_secret_limit_reached",
+    "error": "stored secret limit reached",
+    "retryable": false,
+    "limit": {
+      "used": 100,
+      "max": 100,
+      "remaining": 0,
+      "unlimited": false,
+      "over_limit": false
+    }
+  }
+  ```
 
 This matches the overage behaviors in [billing-and-limits.md](billing-and-limits.md):
 `throttle` surfaces as `rate_limited`, `block` surfaces as `limit_exceeded`.
@@ -915,10 +941,14 @@ Notes on specific actions and workflows:
 - `:rotate` (on `/v1/secrets`) writes a new secret version (new per-secret/field
   DEK), keeping prior versions per retention; it requires `secret:update` and is
   audited as `secret.updated`. `:archive` and `:restore` are the soft-delete pair
-  for secrets, mirroring memory `:forget`/`:restore`; archive is reversible within
-  the retention window and `DELETE /v1/secrets/{secret_id}` is the explicit,
-  guarded hard delete (crypto-shred). They require `secret:update`/`secret:delete`
-  and are audited as `secret.archived`/`secret.restored`/`secret.deleted`.
+  for secrets, mirroring memory `:forget`/`:restore`; archive is reversible.
+  The implemented `POST /v1/secrets/{secret_id}:delete` is an exact-row-version,
+  retry-keyed tombstone delete. It scrubs secret metadata, deletes every field
+  and wrapped-DEK row, releases retained capacity, and keeps only a minimal
+  value-free tombstone plus receipt/audit evidence. Irreversible
+  `DELETE /v1/secrets/{secret_id}` purge of that tombstone remains target-only.
+  These lifecycle actions are audited as
+  `secret.archived`/`secret.restored`/`secret.deleted`.
 - `:grant` and `:revoke` (on `/v1/secrets`) manage cross-agent and operator
   access to a sealed-plane secret. Unlike the open plane — where cross-agent
   read/curate/forget is governed by the [access-policy.md](access-policy.md)

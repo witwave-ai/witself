@@ -87,7 +87,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself-admin ticket ...    Read/reply/transition support tickets across the fleet")
 	usageLine(w, "                                (list|watch|show|reply|state|resolve|close|states)")
 	usageLine(w, "  witself-admin account ...   Read/set per-account fleet settings")
-	usageLine(w, "                                (support-policy|transcript-retention|plan-override)")
+	usageLine(w, "                                (support-policy|transcript-retention|plan-override|limit-override)")
 	usageLine(w, "  witself-admin cells ...     Fleet cell registry with account counts (list)")
 	usageLine(w, "  witself-admin events ...    Fleet-wide audit-event tail (list|watch)")
 	usageLine(w, "  witself-admin placement ... Rescue archived accounts blocked by hard pins")
@@ -951,7 +951,7 @@ func accountPolicyJSONMap(res *client.AdminAccountPolicy) map[string]any {
 // off the same tree.
 func accountCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself-admin account (support-policy|transcript-retention|plan-override) ...")
+		fmt.Fprintln(os.Stderr, "usage: witself-admin account (support-policy|transcript-retention|plan-override|limit-override) ...")
 		return 2
 	}
 	switch args[0] {
@@ -961,6 +961,8 @@ func accountCmd(args []string) int {
 		return accountTranscriptRetention(args[1:])
 	case "plan-override":
 		return accountPlanOverride(args[1:])
+	case "limit-override":
+		return accountLimitOverride(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "witself-admin account: unknown subcommand %q\n", args[0])
 		return 2
@@ -1047,6 +1049,18 @@ func printAdminAccountPolicy(res *client.AdminAccountPolicy) int {
 		safeText(res.AccountID), safeText(res.Plan), safeText(res.BillingPlan),
 		retention, res.TranscriptRetention.Overridden, safeText(override),
 		applyState, res.DesiredRevision, res.AppliedRevision)
+	if res.Limit != nil {
+		defaultMax := "unlimited"
+		if res.Limit.DefaultMax != nil {
+			defaultMax = fmt.Sprint(*res.Limit.DefaultMax)
+		}
+		effectiveMax := "unlimited"
+		if res.Limit.EffectiveMax != nil {
+			effectiveMax = fmt.Sprint(*res.Limit.EffectiveMax)
+		}
+		fmt.Printf("limit %s: default=%s effective=%s overridden=%t\n",
+			safeText(res.Limit.Dimension), defaultMax, effectiveMax, res.Limit.Overridden)
+	}
 	return reportAdminAccountPolicyPending(res)
 }
 
@@ -1239,6 +1253,115 @@ func accountPlanOverride(args []string) int {
 		res, err = client.SetAdminPlanOverride(context.Background(), ep, tok, *account, *plan, *reason)
 	case "clear":
 		res, err = client.ClearAdminPlanOverride(context.Background(), ep, tok, *account, *reason)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printAdminAccountPolicyJSON(res)
+	}
+	return printAdminAccountPolicy(res)
+}
+
+// accountLimitOverride manages one inherited, finite, or explicitly unlimited
+// hard-cap exception without changing the provider-backed plan.
+func accountLimitOverride(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: witself-admin account limit-override (get|set|clear) ...")
+		return 2
+	}
+	action := args[0]
+	if action != "get" && action != "set" && action != "clear" {
+		fmt.Fprintf(os.Stderr, "witself-admin account limit-override: unknown action %q\n", action)
+		return 2
+	}
+
+	fs := flag.NewFlagSet("account limit-override "+action, flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	endpoint := fs.String("endpoint", "", "control-plane URL")
+	token := fs.String("token", "", "admin token")
+	tokenFile := fs.String("token-file", "", "file containing the admin token")
+	account := fs.String("account", "", "account id (required)")
+	dimension := fs.String("dimension", "", "limit dimension (required)")
+	maxValue := fs.Int64("max", 0, "finite maximum, including zero")
+	unlimited := fs.Bool("unlimited", false, "make this dimension unlimited")
+	reason := fs.String("reason", "", "required audit reason for set/clear")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args[1:]); err != nil {
+		return 2
+	}
+	maxSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "max" {
+			maxSet = true
+		}
+	})
+	if fs.NArg() != 0 || strings.TrimSpace(*account) == "" ||
+		strings.TrimSpace(*dimension) == "" {
+		fmt.Fprintf(os.Stderr, "usage: witself-admin account limit-override %s --account ACCOUNT_ID --dimension DIMENSION", action)
+		switch action {
+		case "set":
+			fmt.Fprint(os.Stderr, " (--max N|--unlimited) --reason REASON")
+		case "clear":
+			fmt.Fprint(os.Stderr, " --reason REASON")
+		}
+		fmt.Fprintln(os.Stderr)
+		return 2
+	}
+	switch action {
+	case "get":
+		if maxSet || *unlimited || strings.TrimSpace(*reason) != "" {
+			fmt.Fprintln(os.Stderr, "witself-admin: get does not accept --max, --unlimited, or --reason")
+			return 2
+		}
+	case "set":
+		if maxSet == *unlimited {
+			fmt.Fprintln(os.Stderr, "witself-admin: set exactly one of --max N or --unlimited")
+			return 2
+		}
+		if maxSet && (*maxValue < 0 || *maxValue > client.MaxAdminAccountLimit) {
+			fmt.Fprintf(os.Stderr, "witself-admin: --max must be between 0 and %d\n", client.MaxAdminAccountLimit)
+			return 2
+		}
+		if strings.TrimSpace(*reason) == "" {
+			fmt.Fprintln(os.Stderr, "witself-admin: --reason is required for set")
+			return 2
+		}
+	case "clear":
+		if maxSet || *unlimited {
+			fmt.Fprintln(os.Stderr, "witself-admin: clear does not accept --max or --unlimited")
+			return 2
+		}
+		if strings.TrimSpace(*reason) == "" {
+			fmt.Fprintln(os.Stderr, "witself-admin: --reason is required for clear")
+			return 2
+		}
+	}
+
+	ep, tok, err := resolveAdminAccountAction(*endpoint, *token, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
+		return 2
+	}
+	var res *client.AdminAccountPolicy
+	switch action {
+	case "get":
+		res, err = client.GetAdminLimitOverride(
+			context.Background(), ep, tok, *account, *dimension)
+	case "set":
+		var finite *int64
+		if maxSet {
+			finite = maxValue
+		}
+		res, err = client.SetAdminLimitOverride(
+			context.Background(), ep, tok, *account, *dimension,
+			client.AdminAccountLimitInput{
+				Max: finite, Unlimited: *unlimited, Reason: *reason,
+			})
+	case "clear":
+		res, err = client.ClearAdminLimitOverride(
+			context.Background(), ep, tok, *account, *dimension, *reason)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)

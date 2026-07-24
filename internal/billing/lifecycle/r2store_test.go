@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"strings"
@@ -42,6 +43,7 @@ func TestR2StoreContract(t *testing.T) {
 	}
 
 	// Version 0 creates; a second create loses.
+	zero := int64(0)
 	r := Record{
 		AccountID: "acct_1", Email: "s@example.com",
 		Entitled: plans.Free, Applied: plans.Free,
@@ -49,11 +51,31 @@ func TestR2StoreContract(t *testing.T) {
 			Plan: "enterprise", ActorID: "adm_abcdefghijklmnopqrst",
 			ActorHandle: "scott", Reason: "founder account", SetAt: time.Now(),
 		},
-		AdminHistory: []AdminChange{{
-			Kind: "plan_override_set", ActorID: "adm_abcdefghijklmnopqrst",
-			ActorHandle: "scott", Reason: "founder account", At: time.Now(),
-			PlanFrom: plans.Free, PlanTo: "enterprise",
-		}},
+		LimitOverrides: map[string]AccountLimitOverride{
+			plans.StoredSecretLimit: {
+				Max: nil, ActorID: "adm_abcdefghijklmnopqrst",
+				ActorHandle: "scott", Reason: "founder unlimited", SetAt: time.Now(),
+			},
+			plans.AgentLimit: {
+				Max: &zero, ActorID: "adm_abcdefghijklmnopqrst",
+				ActorHandle: "scott", Reason: "paused", SetAt: time.Now(),
+			},
+		},
+		AdminHistory: []AdminChange{
+			{
+				Kind: "plan_override_set", ActorID: "adm_abcdefghijklmnopqrst",
+				ActorHandle: "scott", Reason: "founder account", At: time.Now(),
+				PlanFrom: plans.Free, PlanTo: "enterprise",
+			},
+			{
+				Kind: "limit_override_set", ActorID: "adm_abcdefghijklmnopqrst",
+				ActorHandle: "scott", Reason: "founder unlimited", At: time.Now(),
+				LimitDimension:  plans.StoredSecretLimit,
+				LimitFrom:       &AccountLimitValue{Max: nil},
+				LimitTo:         &AccountLimitValue{Max: nil},
+				LimitFromSource: "inherited", LimitToSource: "override",
+			},
+		},
 	}
 	if err := s.Put(ctx, r); err != nil {
 		t.Fatalf("create Put: %v", err)
@@ -70,9 +92,15 @@ func TestR2StoreContract(t *testing.T) {
 	if got.PlanOverride == nil ||
 		got.PlanOverride.ActorID != "adm_abcdefghijklmnopqrst" ||
 		got.PlanOverride.ActorHandle != "scott" ||
-		len(got.AdminHistory) != 1 ||
+		len(got.AdminHistory) != 2 ||
 		got.AdminHistory[0].ActorID != "adm_abcdefghijklmnopqrst" ||
-		got.AdminHistory[0].ActorHandle != "scott" {
+		got.AdminHistory[0].ActorHandle != "scott" ||
+		got.LimitOverrides[plans.StoredSecretLimit].Max != nil ||
+		got.LimitOverrides[plans.AgentLimit].Max == nil ||
+		*got.LimitOverrides[plans.AgentLimit].Max != 0 ||
+		got.AdminHistory[1].LimitTo == nil ||
+		got.AdminHistory[1].LimitTo.Max != nil ||
+		got.AdminHistory[1].LimitToSource != "override" {
 		t.Fatalf("immutable admin attribution did not round-trip: %+v", got)
 	}
 	got.Provider, got.CustomerID = "fake", "fake_cus_0001"
@@ -100,6 +128,260 @@ func TestR2StoreContract(t *testing.T) {
 	all, err := s.List(ctx)
 	if err != nil || len(all) != 2 {
 		t.Fatalf("List = %d records, %v; want 2", len(all), err)
+	}
+}
+
+func TestLegacyR2RecordJSONWithoutLimitOverridesStillDecodes(t *testing.T) {
+	// R2 records are direct Record JSON. Objects written before the generic
+	// limit-override field existed simply omit it and must retain inherited
+	// semantics without a data migration.
+	var got Record
+	if err := json.Unmarshal([]byte(`{
+		"AccountID":"acct_legacy",
+		"Entitled":"free",
+		"Applied":"free",
+		"Version":7,
+		"AdminHistory":[]
+	}`), &got); err != nil {
+		t.Fatalf("decode legacy R2 JSON: %v", err)
+	}
+	if got.AccountID != "acct_legacy" || got.Version != 7 ||
+		got.LimitOverrides != nil {
+		t.Fatalf("legacy record = %+v; want nil inherited limit overrides", got)
+	}
+}
+
+func TestR2LimitAuditSurvivesExactLegacyRoundTrip(t *testing.T) {
+	// These local types are the pre-Phase-A wire knowledge: unknown
+	// LimitOverrides and limit-specific AdminChange fields are deliberately
+	// absent, while Kind and immutable attribution remain known.
+	type legacyAdminChange struct {
+		Kind          string    `json:"kind"`
+		ActorID       string    `json:"actor_id"`
+		ActorHandle   string    `json:"actor_handle"`
+		Reason        string    `json:"reason"`
+		At            time.Time `json:"at"`
+		PlanFrom      string    `json:"plan_from,omitempty"`
+		PlanTo        string    `json:"plan_to,omitempty"`
+		RetentionFrom *int64    `json:"retention_from,omitempty"`
+		RetentionTo   *int64    `json:"retention_to,omitempty"`
+	}
+	type legacyRecord struct {
+		AccountID                   string
+		Email                       string
+		Provider                    string
+		CustomerID                  string
+		Entitled                    string
+		Applied                     string
+		EntitledAt                  time.Time
+		Pending                     *Pending
+		PlanOverride                *AccountPlanOverride
+		TranscriptRetentionOverride *TranscriptRetentionOverride
+		AdminHistory                []legacyAdminChange
+		PastDueSince                *time.Time
+		DunningAt                   time.Time
+		ApplyBlocked                string
+		DesiredSnapshotHash         string
+		SnapshotRevision            int64
+		AppliedSnapshotRevision     int64
+		AppliedSnapshotHash         string
+		Version                     int64
+	}
+
+	at := time.Date(2026, 7, 23, 18, 0, 0, 0, time.UTC)
+	zero, one, two, twentyFive := int64(0), int64(1), int64(2), int64(25)
+	record := Record{
+		AccountID: "acct_founder", Email: "founder@example.com",
+		Entitled: plans.Free, Applied: plans.Free, Version: 4,
+		LimitOverrides: map[string]AccountLimitOverride{
+			plans.StoredSecretLimit: {
+				Max: nil, ActorID: "adm_founder",
+				ActorHandle: "scott", Reason: "founder is unlimited", SetAt: at,
+			},
+			plans.AgentLimit: {
+				Max: &zero, ActorID: "adm_capacity",
+				ActorHandle: "ops", Reason: "pause agents", SetAt: at.Add(time.Minute),
+			},
+			// This stale current-map entry proves replayed clear history wins.
+			plans.RealmLimit: {
+				Max: &two, ActorID: "adm_capacity",
+				ActorHandle: "ops", Reason: "temporary realms", SetAt: at.Add(2 * time.Minute),
+			},
+		},
+		AdminHistory: []AdminChange{
+			{
+				Kind: "limit_override_set", ActorID: "adm_founder",
+				ActorHandle: "scott", Reason: "founder is unlimited", At: at,
+				LimitDimension:  plans.StoredSecretLimit,
+				LimitFrom:       &AccountLimitValue{Max: nil},
+				LimitTo:         &AccountLimitValue{Max: nil},
+				LimitFromSource: "inherited", LimitToSource: "override",
+			},
+			{
+				Kind: "limit_override_set", ActorID: "adm_capacity",
+				ActorHandle: "ops", Reason: "pause agents", At: at.Add(time.Minute),
+				LimitDimension:  plans.AgentLimit,
+				LimitFrom:       &AccountLimitValue{Max: &twentyFive},
+				LimitTo:         &AccountLimitValue{Max: &zero},
+				LimitFromSource: "inherited", LimitToSource: "override",
+			},
+			{
+				Kind: "limit_override_set", ActorID: "adm_capacity",
+				ActorHandle: "ops", Reason: "temporary realms", At: at.Add(2 * time.Minute),
+				LimitDimension:  plans.RealmLimit,
+				LimitFrom:       &AccountLimitValue{Max: &one},
+				LimitTo:         &AccountLimitValue{Max: &two},
+				LimitFromSource: "inherited", LimitToSource: "override",
+			},
+			{
+				Kind: "limit_override_cleared", ActorID: "adm_founder",
+				ActorHandle: "scott", Reason: "restore realm inheritance", At: at.Add(3 * time.Minute),
+				LimitDimension:  plans.RealmLimit,
+				LimitFrom:       &AccountLimitValue{Max: &two},
+				LimitTo:         &AccountLimitValue{Max: &one},
+				LimitFromSource: "override", LimitToSource: "inherited",
+			},
+		},
+	}
+
+	encoded, err := marshalR2Record(record)
+	if err != nil {
+		t.Fatalf("new encode: %v", err)
+	}
+	for i, change := range record.AdminHistory {
+		if change.Kind != []string{
+			"limit_override_set", "limit_override_set",
+			"limit_override_set", "limit_override_cleared",
+		}[i] {
+			t.Fatalf("marshal mutated in-memory API kind %d: %q", i, change.Kind)
+		}
+	}
+
+	var legacy legacyRecord
+	if err := json.Unmarshal(encoded, &legacy); err != nil {
+		t.Fatalf("legacy unmarshal: %v", err)
+	}
+	if len(legacy.AdminHistory) != 4 {
+		t.Fatalf("legacy history = %+v", legacy.AdminHistory)
+	}
+	for i, change := range legacy.AdminHistory {
+		if !strings.HasPrefix(change.Kind, r2LimitAuditKindPrefix) {
+			t.Fatalf("legacy change %d lost rollback envelope: %q", i, change.Kind)
+		}
+	}
+
+	// Simulate an old binary making and persisting an unrelated record
+	// mutation. Its marshal drops every Phase A field it never knew.
+	legacy.Email = "legacy-mutated@example.com"
+	legacy.Version++
+	legacyEncoded, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("legacy marshal: %v", err)
+	}
+
+	got, err := unmarshalR2Record(legacyEncoded)
+	if err != nil {
+		t.Fatalf("new decode after rollback: %v", err)
+	}
+	if got.Email != "legacy-mutated@example.com" || got.Version != 5 {
+		t.Fatalf("legacy mutation did not survive: %+v", got)
+	}
+	founder, ok := got.LimitOverrides[plans.StoredSecretLimit]
+	if !ok || founder.Max != nil ||
+		founder.ActorID != "adm_founder" ||
+		founder.ActorHandle != "scott" ||
+		founder.Reason != "founder is unlimited" ||
+		!founder.SetAt.Equal(at) {
+		t.Fatalf("founder unlimited was not reconstructed: %+v, present=%v", founder, ok)
+	}
+	agents, ok := got.LimitOverrides[plans.AgentLimit]
+	if !ok || agents.Max == nil || *agents.Max != 0 ||
+		agents.ActorID != "adm_capacity" ||
+		agents.ActorHandle != "ops" ||
+		agents.Reason != "pause agents" ||
+		!agents.SetAt.Equal(at.Add(time.Minute)) {
+		t.Fatalf("finite zero was not reconstructed: %+v, present=%v", agents, ok)
+	}
+	if _, ok := got.LimitOverrides[plans.RealmLimit]; ok {
+		t.Fatalf("replayed clear did not restore inheritance: %+v", got.LimitOverrides)
+	}
+	if len(got.AdminHistory) != 4 {
+		t.Fatalf("restored audit length = %d", len(got.AdminHistory))
+	}
+	for i, wantKind := range []string{
+		"limit_override_set", "limit_override_set",
+		"limit_override_set", "limit_override_cleared",
+	} {
+		change := got.AdminHistory[i]
+		if change.Kind != wantKind ||
+			change.LimitDimension == "" ||
+			change.LimitFrom == nil || change.LimitTo == nil ||
+			change.LimitFromSource == "" || change.LimitToSource == "" {
+			t.Fatalf("restored audit %d = %+v", i, change)
+		}
+	}
+	if got.AdminHistory[0].LimitTo.Max != nil ||
+		got.AdminHistory[1].LimitTo.Max == nil ||
+		*got.AdminHistory[1].LimitTo.Max != 0 ||
+		got.AdminHistory[3].LimitToSource != "inherited" {
+		t.Fatalf("restored audit values = %+v", got.AdminHistory)
+	}
+}
+
+func TestR2LimitAuditMalformedReservedKindFailsClosed(t *testing.T) {
+	for _, kind := range []string{
+		r2LimitAuditKindPrefix,
+		r2LimitAuditKindPrefix + "not-base64!",
+		r2LimitAuditKindPrefix + "e30", // {} lacks every required field.
+	} {
+		raw, err := json.Marshal(Record{
+			AccountID: "acct_bad",
+			AdminHistory: []AdminChange{{
+				Kind: kind, ActorID: "adm_bad", ActorHandle: "bad",
+				Reason: "bad", At: time.Now(),
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := unmarshalR2Record(raw); err == nil ||
+			!strings.Contains(err.Error(), "malformed reserved kind") {
+			t.Fatalf("unmarshal reserved kind %q = %v; want fail closed", kind, err)
+		}
+		if _, err := marshalR2Record(Record{
+			AccountID: "acct_bad",
+			AdminHistory: []AdminChange{{
+				Kind: kind, ActorID: "adm_bad", ActorHandle: "bad",
+				Reason: "bad", At: time.Now(),
+			}},
+		}); err == nil || !strings.Contains(err.Error(), "malformed reserved kind") {
+			t.Fatalf("marshal reserved kind %q = %v; want fail closed", kind, err)
+		}
+	}
+
+	s := newR2Store(t)
+	ctx := t.Context()
+	raw := []byte(`{
+		"AccountID":"acct_bad",
+		"AdminHistory":[{
+			"kind":"witself.limit-override.v1:not-base64!",
+			"actor_id":"adm_bad",
+			"actor_handle":"bad",
+			"reason":"bad",
+			"at":"2026-07-23T18:00:00Z"
+		}]
+	}`)
+	if _, err := s.c.Put(
+		ctx, s.accountKey("acct_bad"), raw,
+		blob.Cond{IfNoneMatchAny: true},
+	); err != nil {
+		t.Fatalf("seed malformed R2 object: %v", err)
+	}
+	if _, _, err := s.Get(ctx, "acct_bad"); err == nil {
+		t.Fatal("R2 Get accepted malformed reserved Kind")
+	}
+	if _, err := s.List(ctx); err == nil {
+		t.Fatal("R2 List accepted malformed reserved Kind")
 	}
 }
 
