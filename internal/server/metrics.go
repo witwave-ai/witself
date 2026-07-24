@@ -32,7 +32,8 @@ type runtimeMetrics struct {
 	vectorSearches     map[vectorSearchMetricLabels]uint64
 	vectorFallbacks    map[vectorFallbackMetricLabels]uint64
 	curationOperations map[operationMetricLabels]uint64
-	secretLimitRejects map[secretLimitMetricLabels]uint64
+	planLimitRejects   map[limitMetricLabels]uint64
+	secretLimitRejects map[limitMetricLabels]uint64
 }
 
 type httpMetricLabels struct {
@@ -67,7 +68,7 @@ type vectorFallbackMetricLabels struct {
 	Reason string
 }
 
-type secretLimitMetricLabels struct {
+type limitMetricLabels struct {
 	LimitDimension, Operation string
 }
 
@@ -91,7 +92,8 @@ func newRuntimeMetrics() *runtimeMetrics {
 		vectorSearches:     make(map[vectorSearchMetricLabels]uint64),
 		vectorFallbacks:    make(map[vectorFallbackMetricLabels]uint64),
 		curationOperations: make(map[operationMetricLabels]uint64),
-		secretLimitRejects: make(map[secretLimitMetricLabels]uint64),
+		planLimitRejects:   make(map[limitMetricLabels]uint64),
+		secretLimitRejects: make(map[limitMetricLabels]uint64),
 	}
 }
 
@@ -134,12 +136,26 @@ func (m *runtimeMetrics) observeHTTP(method, pattern string, status int, elapsed
 }
 
 func (m *runtimeMetrics) instrumentConfig(cfg Config) Config {
+	if operation := cfg.CreateRealm; operation != nil {
+		cfg.CreateRealm = func(ctx context.Context, accountID, name string) (Realm, error) {
+			result, err := operation(ctx, accountID, name)
+			m.observePlanLimitRejection(err, "realms")
+			return result, err
+		}
+	}
+	if operation := cfg.CreateAgent; operation != nil {
+		cfg.CreateAgent = func(ctx context.Context, accountID, realmID, name string) (Agent, error) {
+			result, err := operation(ctx, accountID, realmID, name)
+			m.observePlanLimitRejection(err, "agents_per_realm")
+			return result, err
+		}
+	}
 	if operation := cfg.CreateSecret; operation != nil {
 		cfg.CreateSecret = func(ctx context.Context, p DomainPrincipal, in CreateSecretRequest) (SecretMutationResult, error) {
 			result, err := operation(ctx, p, in)
 			if errors.Is(err, ErrSecretLimitReached) {
 				m.mu.Lock()
-				m.secretLimitRejects[secretLimitMetricLabels{
+				m.secretLimitRejects[limitMetricLabels{
 					LimitDimension: "stored_secret", Operation: "create",
 				}]++
 				m.mu.Unlock()
@@ -284,6 +300,28 @@ func (m *runtimeMetrics) instrumentConfig(cfg Config) Config {
 	return cfg
 }
 
+func (m *runtimeMetrics) observePlanLimitRejection(err error, fallbackDimension string) {
+	if !errors.Is(err, ErrPlanLimit) {
+		return
+	}
+	dimension := fallbackDimension
+	var detail *PlanLimitError
+	if errors.As(err, &detail) {
+		dimension = detail.Dimension
+	}
+	switch dimension {
+	case "realms", "agents", "agents_per_realm":
+	default:
+		dimension = "unknown"
+	}
+	m.mu.Lock()
+	m.planLimitRejects[limitMetricLabels{
+		LimitDimension: dimension,
+		Operation:      "create",
+	}]++
+	m.mu.Unlock()
+}
+
 func (m *runtimeMetrics) observeMemoryOperation(operation, principalKind string, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -362,6 +400,7 @@ func (m *runtimeMetrics) snapshot() *runtimeMetrics {
 		vectorSearches:     maps.Clone(m.vectorSearches),
 		vectorFallbacks:    maps.Clone(m.vectorFallbacks),
 		curationOperations: maps.Clone(m.curationOperations),
+		planLimitRejects:   maps.Clone(m.planLimitRejects),
 		secretLimitRejects: maps.Clone(m.secretLimitRejects),
 	}
 }
@@ -416,7 +455,10 @@ func (m *runtimeMetrics) writePrometheusSnapshot(w io.Writer) {
 	writeCounterMap(w, "witself_memory_curation_operations_total", "Completed memory-curation domain calls by operation and result; idempotent replays are counted as calls.", m.curationOperations, func(k operationMetricLabels) string {
 		return labels("operation", k.Operation, "result", k.Result)
 	})
-	writeCounterMap(w, "witself_secret_limit_rejections_total", "Stored-secret create refusals by bounded limit dimension and operation.", m.secretLimitRejects, func(key secretLimitMetricLabels) string {
+	writeCounterMap(w, "witself_plan_limit_rejections_total", "Realm and agent create refusals by bounded plan-limit dimension and operation.", m.planLimitRejects, func(key limitMetricLabels) string {
+		return labels("limit_dimension", key.LimitDimension, "operation", key.Operation)
+	})
+	writeCounterMap(w, "witself_secret_limit_rejections_total", "Stored-secret create refusals by bounded limit dimension and operation.", m.secretLimitRejects, func(key limitMetricLabels) string {
 		return labels("limit_dimension", key.LimitDimension, "operation", key.Operation)
 	})
 }

@@ -77,6 +77,18 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 			t.Fatalf("enterprise features = %v; missing Team feature %q", enterprise.Features, feature)
 		}
 	}
+	// Phase A rollout guard: cells and the control plane understand the new
+	// dimension before any canonical plan can emit it. Phase B deliberately
+	// replaces this assertion with exact per-plan defaults.
+	for _, plan := range c.Plans {
+		if _, active := plan.Limits[AgentPerRealmLimit]; active {
+			t.Fatalf(
+				"Phase A catalog plan %q activated %q before fleet convergence",
+				plan.ID,
+				AgentPerRealmLimit,
+			)
+		}
+	}
 
 	prices := c.Prices()
 	if len(prices) != 1 || prices["standard"] != 3000 {
@@ -119,7 +131,12 @@ func TestValidateLimitsZeroAndMissingUnlimited(t *testing.T) {
 		nil,
 		{},
 		{StoredSecretLimit: 0},
-		{StoredSecretLimit: 100, AgentLimit: 25, RealmLimit: 1},
+		{
+			StoredSecretLimit:  100,
+			AgentLimit:         25,
+			AgentPerRealmLimit: 10,
+			RealmLimit:         1,
+		},
 	} {
 		if err := ValidateLimits(limits); err != nil {
 			t.Fatalf("ValidateLimits(%v): %v", limits, err)

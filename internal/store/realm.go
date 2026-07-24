@@ -43,7 +43,20 @@ func (s *Store) CreateRealm(ctx context.Context, accountID, name string) (Realm,
 	if err != nil {
 		return Realm{}, err
 	}
-	if _, capped := limits["realms"]; capped {
+	// Resolve a reserved live or tombstoned name before the cap so a retry is
+	// reported as a name conflict rather than a misleading upgrade request.
+	var nameReserved bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+		   SELECT 1 FROM realms WHERE account_id = $1 AND name = $2
+		 )`,
+		accountID, name).Scan(&nameReserved); err != nil {
+		return Realm{}, fmt.Errorf("check realm name: %w", err)
+	}
+	if nameReserved {
+		return Realm{}, ErrRealmExists
+	}
+	if _, capped := limits[plans.RealmLimit]; capped {
 		n, err := countLiveRealms(ctx, tx, accountID)
 		if err != nil {
 			return Realm{}, err

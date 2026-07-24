@@ -190,3 +190,60 @@ func TestRuntimeMetricsObserveSecretLimitRejectionWithBoundedLabels(t *testing.T
 		}
 	}
 }
+
+func TestRuntimeMetricsObservePlanLimitRejectionsWithBoundedLabels(t *testing.T) {
+	metrics := newRuntimeMetrics()
+	cfg := metrics.instrumentConfig(Config{
+		CreateRealm: func(context.Context, string, string) (Realm, error) {
+			return Realm{}, &PlanLimitError{
+				Dimension: "realms", Used: 1, Max: 1, Plan: "free",
+			}
+		},
+		CreateAgent: func(_ context.Context, _, _, name string) (Agent, error) {
+			dimension := "agents_per_realm"
+			if name == "legacy_agent_private_name" {
+				dimension = "agents"
+			}
+			return Agent{}, &PlanLimitError{
+				Dimension: dimension, Used: 10, Max: 10, Plan: "free",
+			}
+		},
+	})
+	_, _ = cfg.CreateRealm(context.Background(), "account_private_identifier", "realm_private_name")
+	_, _ = cfg.CreateAgent(
+		context.Background(),
+		"account_private_identifier",
+		"realm_private_identifier",
+		"agent_private_name",
+	)
+	_, _ = cfg.CreateAgent(
+		context.Background(),
+		"account_private_identifier",
+		"realm_private_identifier",
+		"legacy_agent_private_name",
+	)
+
+	var output bytes.Buffer
+	metrics.writePrometheus(&output)
+	text := output.String()
+	for _, want := range []string{
+		`witself_plan_limit_rejections_total{limit_dimension="realms",operation="create"} 1`,
+		`witself_plan_limit_rejections_total{limit_dimension="agents",operation="create"} 1`,
+		`witself_plan_limit_rejections_total{limit_dimension="agents_per_realm",operation="create"} 1`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("plan-limit counter missing %q:\n%s", want, text)
+		}
+	}
+	for _, forbidden := range []string{
+		"account_private_identifier",
+		"realm_private_identifier",
+		"realm_private_name",
+		"agent_private_name",
+		"legacy_agent_private_name",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("metrics exposed %q:\n%s", forbidden, text)
+		}
+	}
+}

@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/witwave-ai/witself/internal/plans"
 )
 
 func TestAdminTranscriptRetentionOperations(t *testing.T) {
@@ -274,6 +276,50 @@ func TestAdminLimitOverrideOperations(t *testing.T) {
 	}
 	if requests[3].body["reason"] != "restore" {
 		t.Fatalf("clear body = %#v", requests[3].body)
+	}
+}
+
+func TestAdminAgentPerRealmUnlimitedOverridePath(t *testing.T) {
+	var gotMethod, gotPath string
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatal(err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0",
+			"account_id":     "acct_1",
+			"plan":           "free",
+			"billing_plan":   "free",
+			"limit": map[string]any{
+				"dimension":     plans.AgentPerRealmLimit,
+				"default_max":   nil,
+				"effective_max": nil,
+				"overridden":    true,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	if _, err := SetAdminLimitOverride(
+		t.Context(),
+		srv.URL,
+		"witself_adm_test",
+		"acct_1",
+		plans.AgentPerRealmLimit,
+		AdminAccountLimitInput{
+			Unlimited: true,
+			Reason:    "founder agents per realm are unlimited",
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if gotMethod != http.MethodPut ||
+		gotPath != "/v1/admin/accounts/acct_1/limit-overrides/agents_per_realm" ||
+		gotBody["unlimited"] != true ||
+		gotBody["reason"] != "founder agents per realm are unlimited" {
+		t.Fatalf("request = %s %s %#v", gotMethod, gotPath, gotBody)
 	}
 }
 

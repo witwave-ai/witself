@@ -40,12 +40,12 @@ remain deferred.
 
 ## Working Plan Direction
 
-The following table records the current product direction as of 2026-07-23. It
+The following table records the current product direction as of 2026-07-24. It
 is a working packaging decision, not a claim that every entitlement is already
 implemented or enforced. Each row moves into the canonical plan catalog and
 resolved cell policy only through its own implementation and rollout decision;
-existing realm and agent catalog values therefore remain unchanged in this
-stored-secret slice.
+the realm and agent values remain unchanged during the Phase A compatibility
+release described below.
 
 | Capability | Personal — $0 | Professional — $30/month | Team — $250/month | Enterprise — contact us |
 |---|---:|---:|---:|---:|
@@ -74,6 +74,55 @@ technical rate limits. Inbound hostile traffic must not create recipient
 charges. "Included" confirms that outbound agent email is available, but its
 sending allowance and overage treatment remain to be decided. "Contracted"
 means the quantity or policy is negotiated for the Enterprise account.
+
+### Realm and agent limits
+
+`realms` is the maximum live realm count for an account.
+`agents_per_realm` is the maximum live agent count independently within each
+live realm. A missing key means unlimited, while zero is a real cap. Soft-deleted
+realm and agent tombstones do not consume capacity, although their names remain
+reserved. Lowering either maximum never deletes or disables existing resources;
+it blocks only a later create until live usage is below the maximum again.
+Account import remains exempt so migration and disaster recovery can preserve
+an over-limit account exactly.
+
+The previously deployed `agents` key retains its original account-wide meaning
+for old snapshots and archives. It is not reinterpreted. Cells accept and
+enforce both keys during migration; if both are present, both gates apply.
+Ordinary creates serialize on the stable account plan row, so concurrent
+requests reaching different server replicas cannot overshoot either maximum.
+Duplicate or tombstone-reserved names and invalid realms are resolved before
+the capacity gate so callers are not incorrectly told to upgrade.
+
+Catalog activation is two-phase:
+
+1. Deploy cells and the control plane that understand `agents_per_realm`,
+   retain legacy `agents`, expose the audited override through the strict edge
+   allow-list, and leave `web/plans/plans.json` unchanged.
+2. After every cell is converged and founder explicit-unlimited overrides exist
+   for `realms`, `agents`, and `agents_per_realm`, promote the working table's
+   values in a separate catalog release and reconcile every hosted account.
+
+The Phase A implementation does not modify `web/plans/plans.json`.
+After `agents_per_realm` audit data exists, Phase A is the control-plane rollback
+floor: an older control plane rejects the unknown audited dimension. Old cells
+reject a newly pushed snapshot containing the closed key, but rolling an old
+cell binary back onto a snapshot already stored by Phase A can ignore the new
+key and fail open. Pre-Phase-A cell and control-plane rollback is therefore
+prohibited once the founder override or any new snapshot is written.
+
+Phase B keeps a derived legacy `agents` account-wide compatibility ceiling next
+to `agents_per_realm`: 10 for Personal, 100 for Professional, and 2,500 for
+Team. Those totals equal each plan's maximum realms multiplied by agents per
+realm, so a Phase A cell enforces the product matrix while a mistakenly rolled
+back old cell still has a safe cap. Removing the legacy key is a separate future
+migration after old cell artifacts can no longer be selected.
+
+Realm and agent create routes retain their existing non-retryable HTTP 403
+contract in this compatibility slice. The error text uses the customer-facing
+phrase “agents per realm”; the closed `agents_per_realm` key remains available
+as typed internal detail for bounded metrics and administration. A unified
+structured billing-limit status/error surface remains separate work.
 
 The `stored_secret` allowance is stored in the account's resolved plan snapshot
 but enforced independently for each owner agent. One retained top-level secret

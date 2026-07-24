@@ -968,6 +968,16 @@ func TestValidateAndRecordPlanShapes(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			name: "agents per realm snapshot is accepted",
+			row: map[string]any{"id": acc, "plan": "standard",
+				"plan_limits": map[string]any{
+					"agents_per_realm": float64(100),
+					"realms":           float64(1),
+				},
+				"plan_features": []any{"memory", "facts", "secrets"}},
+			wantOK: true,
+		},
+		{
 			name: "matching fenced snapshot is accepted",
 			row: map[string]any{
 				"id": acc, "plan": "standard",

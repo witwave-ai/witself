@@ -29,7 +29,11 @@ func TestAccountPlanSnapshotRevisionFencesStaleWritersPostgres(t *testing.T) {
 		_ = deleteAccountForIntegrationTest(ctx, st, provisioned.AccountID)
 	}()
 
-	limits := map[string]int64{"agents": 25, "realms": 1}
+	limits := map[string]int64{
+		plans.AgentLimit:         25,
+		plans.AgentPerRealmLimit: 10,
+		plans.RealmLimit:         1,
+	}
 	policies60 := map[string]int64{TranscriptRetentionDaysPolicy: 60}
 	features := []string{"facts", "memory"}
 	hash60, err := plans.SnapshotHash("free", limits, policies60, features)
@@ -90,7 +94,8 @@ func TestAccountPlanSnapshotRevisionFencesStaleWritersPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	if current.Revision != 2 || current.Hash != hash60 ||
-		current.Policies[TranscriptRetentionDaysPolicy] != 60 {
+		current.Policies[TranscriptRetentionDaysPolicy] != 60 ||
+		current.Limits[plans.AgentPerRealmLimit] != 10 {
 		t.Fatalf("current = %+v; stale writer changed the cell", current)
 	}
 }

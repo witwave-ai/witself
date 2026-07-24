@@ -354,8 +354,93 @@ func TestAdminLimitOverrideLifecycleAndAttribution(t *testing.T) {
 	}
 }
 
+func TestAdminAgentPerRealmUnlimitedOverrideLifecycle(t *testing.T) {
+	h := newHarness(t)
+	path := "/v1/admin/accounts/acct_1/limit-overrides/agents_per_realm"
+
+	status, doc := h.call(t, "GET", path, "admin-good", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET inherited = %d %v", status, doc)
+	}
+	view := doc["limit"].(map[string]any)
+	if view["dimension"] != plans.AgentPerRealmLimit ||
+		view["default_max"] != nil ||
+		view["effective_max"] != nil ||
+		view["overridden"] != false {
+		t.Fatalf("inherited view = %v", view)
+	}
+
+	status, doc = h.call(t, "PUT", path, "admin-good",
+		`{"unlimited":true,"reason":"founder agents per realm are unlimited"}`)
+	if status != http.StatusOK {
+		t.Fatalf("PUT unlimited = %d %v", status, doc)
+	}
+	if doc["billing_plan"] != plans.Free || doc["plan"] != plans.Free {
+		t.Fatalf("override mutated billing classification: %v", doc)
+	}
+	view = doc["limit"].(map[string]any)
+	override := view["override"].(map[string]any)
+	if view["effective_max"] != nil ||
+		view["overridden"] != true ||
+		override["max"] != nil ||
+		override["actor_id"] != testAdminID ||
+		override["actor_handle"] != "scott" ||
+		override["reason"] != "founder agents per realm are unlimited" {
+		t.Fatalf("unlimited view = %v", view)
+	}
+	history := doc["admin_history"].([]any)
+	if len(history) != 1 {
+		t.Fatalf("history after set = %v", history)
+	}
+
+	status, doc = h.call(t, "GET", path, "admin-good", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET override = %d %v", status, doc)
+	}
+	view = doc["limit"].(map[string]any)
+	if view["overridden"] != true ||
+		view["override"].(map[string]any)["reason"] !=
+			"founder agents per realm are unlimited" {
+		t.Fatalf("persisted override view = %v", view)
+	}
+
+	status, doc = h.call(t, "DELETE", path, "admin-good",
+		`{"reason":"resume plan inheritance"}`)
+	if status != http.StatusOK {
+		t.Fatalf("DELETE override = %d %v", status, doc)
+	}
+	view = doc["limit"].(map[string]any)
+	if view["overridden"] != false ||
+		view["default_max"] != nil ||
+		view["effective_max"] != nil {
+		t.Fatalf("cleared view = %v", view)
+	}
+	history = doc["admin_history"].([]any)
+	if len(history) != 2 {
+		t.Fatalf("history after clear = %v", history)
+	}
+	clearAudit := history[1].(map[string]any)
+	if clearAudit["limit_from_source"] != "override" ||
+		clearAudit["limit_to_source"] != "inherited" {
+		t.Fatalf("clear audit = %v", clearAudit)
+	}
+}
+
 func TestAdminLimitOverrideValidation(t *testing.T) {
 	h := newHarness(t)
+	for _, dimension := range []string{
+		plans.RealmLimit,
+		plans.AgentLimit,
+		plans.AgentPerRealmLimit,
+		plans.StoredSecretLimit,
+	} {
+		path := "/v1/admin/accounts/acct_1/limit-overrides/" + dimension
+		if status, _ := h.call(
+			t, "GET", path, "admin-good", "",
+		); status != http.StatusOK {
+			t.Fatalf("GET valid dimension %q = %d; want 200", dimension, status)
+		}
+	}
 	validPath := "/v1/admin/accounts/acct_1/limit-overrides/stored_secret"
 	if status, _ := h.call(t, "GET", validPath, "", ""); status != http.StatusUnauthorized {
 		t.Fatalf("missing admin bearer = %d; want 401", status)

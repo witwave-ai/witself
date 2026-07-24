@@ -328,6 +328,59 @@ func TestR2LimitAuditSurvivesExactLegacyRoundTrip(t *testing.T) {
 	}
 }
 
+func TestR2AgentPerRealmUnlimitedRoundTrip(t *testing.T) {
+	at := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	inheritedMax := int64(100)
+	record := Record{
+		AccountID: "acct_founder",
+		LimitOverrides: map[string]AccountLimitOverride{
+			plans.AgentPerRealmLimit: {
+				Max: nil, ActorID: "adm_founder",
+				ActorHandle: "scott", Reason: "founder unlimited", SetAt: at,
+			},
+		},
+		AdminHistory: []AdminChange{{
+			Kind: "limit_override_set", ActorID: "adm_founder",
+			ActorHandle: "scott", Reason: "founder unlimited", At: at,
+			LimitDimension:  plans.AgentPerRealmLimit,
+			LimitFrom:       &AccountLimitValue{Max: &inheritedMax},
+			LimitTo:         &AccountLimitValue{Max: nil},
+			LimitFromSource: "inherited", LimitToSource: "override",
+		}},
+	}
+
+	encoded, err := marshalR2Record(record)
+	if err != nil {
+		t.Fatalf("marshal current record: %v", err)
+	}
+	got, err := unmarshalR2Record(encoded)
+	if err != nil {
+		t.Fatalf("unmarshal current record: %v", err)
+	}
+
+	override, ok := got.LimitOverrides[plans.AgentPerRealmLimit]
+	if !ok || override.Max != nil ||
+		override.ActorID != "adm_founder" ||
+		override.ActorHandle != "scott" ||
+		override.Reason != "founder unlimited" ||
+		!override.SetAt.Equal(at) {
+		t.Fatalf("agents-per-realm unlimited override = %+v, present=%v", override, ok)
+	}
+	if len(got.AdminHistory) != 1 {
+		t.Fatalf("admin history length = %d; want 1", len(got.AdminHistory))
+	}
+	change := got.AdminHistory[0]
+	if change.Kind != "limit_override_set" ||
+		change.LimitDimension != plans.AgentPerRealmLimit ||
+		change.LimitFrom == nil || change.LimitFrom.Max == nil ||
+		*change.LimitFrom.Max != inheritedMax ||
+		change.LimitTo == nil || change.LimitTo.Max != nil ||
+		change.LimitFromSource != "inherited" ||
+		change.LimitToSource != "override" {
+		t.Fatalf("agents-per-realm audit did not round-trip: %+v", change)
+	}
+}
+
 func TestR2LimitAuditMalformedReservedKindFailsClosed(t *testing.T) {
 	for _, kind := range []string{
 		r2LimitAuditKindPrefix,

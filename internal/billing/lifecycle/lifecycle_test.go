@@ -345,6 +345,148 @@ func TestAccountLimitOverrideLifecycleAndAttribution(t *testing.T) {
 	}
 }
 
+func TestFounderRealmAndAgentLimitsCanBeExplicitlyUnlimited(t *testing.T) {
+	h := newHarness(t, false)
+	ctx := t.Context()
+	const accountID = "acct_founder_resource_limits"
+
+	for _, dimension := range []string{
+		plans.RealmLimit,
+		plans.AgentLimit,
+		plans.AgentPerRealmLimit,
+	} {
+		if _, err := h.m.SetAccountLimitOverride(
+			ctx,
+			accountID,
+			dimension,
+			nil,
+			testAdminActor(),
+			"founder resource capacity is unlimited",
+		); err != nil {
+			t.Fatalf("set %s unlimited: %v", dimension, err)
+		}
+		record, snapshot, err := h.m.ResolvedStatus(ctx, accountID, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		override, present := record.LimitOverrides[dimension]
+		if !present || override.Max != nil ||
+			override.ActorID != testAdminActor().ID ||
+			override.ActorHandle != testAdminActor().Handle {
+			t.Fatalf("%s override = %+v, present=%t", dimension, override, present)
+		}
+		if _, finite := snapshot.Limits[dimension]; finite {
+			t.Fatalf("%s remained finite in effective limits %v", dimension, snapshot.Limits)
+		}
+		if record.Entitled != plans.Free || record.Provider != "" ||
+			record.CustomerID != "" {
+			t.Fatalf("%s override mutated billing state: %+v", dimension, record)
+		}
+		audit := record.AdminHistory[len(record.AdminHistory)-1]
+		if audit.Kind != "limit_override_set" ||
+			audit.LimitDimension != dimension ||
+			audit.LimitTo == nil ||
+			audit.LimitTo.Max != nil {
+			t.Fatalf("%s audit = %+v", dimension, audit)
+		}
+	}
+
+	record := h.record(t, accountID)
+	if len(record.LimitOverrides) != 3 {
+		t.Fatalf("founder overrides = %v; want all three dimensions", record.LimitOverrides)
+	}
+}
+
+func TestFounderResourceOverridesSurviveAgentsPerRealmCatalogPromotion(t *testing.T) {
+	h := newHarness(t, false)
+	ctx := t.Context()
+	const accountID = "acct_founder_resource_promotion"
+
+	phaseA, err := plans.Parse([]byte(`{
+		"schema_version":"witself.plans.v0",
+		"plans":[{
+			"id":"free","name":"Personal","price_monthly":0,"available":true,
+			"usage_billed":false,
+			"limits":{"agents":25,"realms":1},
+			"features":["memory","facts"]
+		}]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.m.cfg.Catalog = phaseA
+	if created, pending, err := h.m.EnsureAccount(
+		ctx, accountID,
+	); err != nil || !created || pending {
+		t.Fatalf("EnsureAccount = created=%v pending=%v err=%v", created, pending, err)
+	}
+	for _, dimension := range []string{
+		plans.RealmLimit,
+		plans.AgentLimit,
+		plans.AgentPerRealmLimit,
+	} {
+		if _, err := h.m.SetAccountLimitOverride(
+			ctx,
+			accountID,
+			dimension,
+			nil,
+			testAdminActor(),
+			"founder resource capacity is explicitly unlimited",
+		); err != nil {
+			t.Fatalf("set %s unlimited: %v", dimension, err)
+		}
+	}
+	before, beforeSnapshot, err := h.m.ResolvedStatus(ctx, accountID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(beforeSnapshot.Limits) != 0 ||
+		SnapshotApplyPending(before, beforeSnapshot) {
+		t.Fatalf("founder Phase A snapshot = %+v, record=%+v", beforeSnapshot, before)
+	}
+	applyCalls := len(h.applier.calls)
+
+	phaseB, err := plans.Parse([]byte(`{
+		"schema_version":"witself.plans.v0",
+		"plans":[{
+			"id":"free","name":"Personal","price_monthly":0,"available":true,
+			"usage_billed":false,
+			"limits":{"agents":10,"agents_per_realm":10,"realms":1},
+			"features":["memory","facts"]
+		}]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.m.cfg.Catalog = phaseB
+	if err := h.m.ReconcileAccount(ctx, accountID); err != nil {
+		t.Fatal(err)
+	}
+	after, afterSnapshot, err := h.m.ResolvedStatus(ctx, accountID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterSnapshot.DefaultLimits[plans.RealmLimit] != 1 ||
+		afterSnapshot.DefaultLimits[plans.AgentLimit] != 10 ||
+		afterSnapshot.DefaultLimits[plans.AgentPerRealmLimit] != 10 {
+		t.Fatalf("Phase B defaults = %v", afterSnapshot.DefaultLimits)
+	}
+	if len(afterSnapshot.Limits) != 0 ||
+		afterSnapshot.Hash != beforeSnapshot.Hash ||
+		SnapshotApplyPending(after, afterSnapshot) ||
+		len(h.applier.calls) != applyCalls {
+		t.Fatalf(
+			"founder promotion changed effective snapshot: before=%s after=%s limits=%v pending=%v calls=%d->%d",
+			beforeSnapshot.Hash,
+			afterSnapshot.Hash,
+			afterSnapshot.Limits,
+			SnapshotApplyPending(after, afterSnapshot),
+			applyCalls,
+			len(h.applier.calls),
+		)
+	}
+}
+
 func TestFounderUnlimitedOverrideOnAppliedUnlimitedSnapshotDoesNotReapply(t *testing.T) {
 	h := newHarness(t, false)
 	ctx := t.Context()
