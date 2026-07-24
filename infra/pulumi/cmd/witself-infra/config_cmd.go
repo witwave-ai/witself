@@ -84,7 +84,7 @@ func configAddCell(fs *flag.FlagSet, configPath string) error {
 	// Same validations run() applies — add-cell must never record an
 	// entry that its own suggested `preview -cell` command would reject.
 	if !clouds[get("cloud")] {
-		return fmt.Errorf("unknown -cloud %q (want aws|gcp|azure)", get("cloud"))
+		return fmt.Errorf("unknown -cloud %q (want aws|gcp|azure|civo)", get("cloud"))
 	}
 	regionCode, _, ok := resolveRegionCode(get("cloud"), get("region"))
 	if !ok {
@@ -126,6 +126,8 @@ func configAddCell(fs *flag.FlagSet, configPath string) error {
 	str("db-version", &entry.DBVersion)
 	str("domain", &entry.Domain)
 	str("bootstrap-token-file", &entry.BootstrapTokenFile)
+	str("civo-node-size", &entry.CivoNodeSize)
+	str("civo-admin-cidr", &entry.CivoAdminCIDR)
 	// Backend is ALWAYS recorded, explicit or not: it addresses WHICH
 	// stack state operations target, so an entry must be self-contained
 	// — an implicit s3 falling back to some ambient default later could

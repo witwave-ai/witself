@@ -136,3 +136,38 @@ func cloudflareZoneCandidates(parentDomain string) []string {
 func cloudflareDelegationRecordName(cellZoneName, cloudflareZoneName string) string {
 	return strings.TrimSuffix(strings.TrimSuffix(cellZoneName, cloudflareZoneName), ".")
 }
+
+func provisionCivoDNS(ctx *pulumi.Context, c civoCell, address pulumi.StringInput) (string, pulumi.Resource, error) {
+	if !c.cloudflareDNS {
+		return "", nil, fmt.Errorf("Civo control-plane cells require CLOUDFLARE_API_TOKEN for their DNS-only A record")
+	}
+	if c.domain == "" {
+		return "", nil, fmt.Errorf("Civo control-plane cells require witself:domain")
+	}
+	apiHost := "api." + c.name + "." + normalizeZoneName(c.domain)
+	prov, err := newCloudflareProvider(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	zone, err := lookupCloudflareZone(ctx, c.domain, prov)
+	if err != nil {
+		return "", nil, err
+	}
+	recordName := cloudflareDelegationRecordName(apiHost, zone.name)
+	record, err := newCloudflareDNSRecord(ctx, "cell-api-dns", pulumi.Map{
+		"zoneId":  pulumi.String(zone.zoneID),
+		"name":    pulumi.String(recordName),
+		"type":    pulumi.String("A"),
+		"content": address,
+		"proxied": pulumi.Bool(false),
+		"ttl":     pulumi.Float64(cloudflareDelegationTTL),
+		"comment": pulumi.String("Witself Civo development cell " + c.name),
+	}, pulumi.Provider(prov))
+	if err != nil {
+		return "", nil, err
+	}
+	ctx.Export("cloudflareDNSZone", pulumi.String(zone.name))
+	ctx.Export("cloudflareDNSRecord", pulumi.String(apiHost))
+	ctx.Export("cloudflareDNSProxy", pulumi.Bool(false))
+	return apiHost, record, nil
+}

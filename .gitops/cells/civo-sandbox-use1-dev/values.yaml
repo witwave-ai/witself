@@ -1,0 +1,83 @@
+cell:
+  name: civo-sandbox-use1-dev
+  cloud: civo
+  region: nyc1
+  domain: cells.witself.witwave.ai
+  apiHost: api.civo-sandbox-use1-dev.cells.witself.witwave.ai
+
+gitops:
+  repoURL: https://github.com/witwave-ai/witself
+  targetRevision: codex/civo-provider
+  valuesPath: .gitops/cells/civo-sandbox-use1-dev/values.yaml
+
+platform:
+  awsAlbIngress:
+    enabled: false
+  certManager:
+    enabled: true
+    chartVersion: v1.20.3
+    namespace: cert-manager
+    serviceAccountAnnotations: {}
+    podLabels: {}
+  externalDNS:
+    enabled: false
+  externalSecrets:
+    enabled: false
+    serviceAccountAnnotations: {}
+    azureVaultURL: ""
+  keda:
+    enabled: false
+  # Civo's K3s profile supplies metrics-server.
+  metricsServer:
+    enabled: false
+
+apps:
+  civoPostgres:
+    enabled: true
+    namespace: witself
+    chartVersion: 18.8.0
+    authSecretName: witself-postgresql-auth
+    storage: 8Gi
+  witselfServer:
+    enabled: true
+    namespace: witself
+    chartVersion: 0.0.207
+    imageTag: 0.0.207
+    backendKind: managed
+    replicaCount: 1
+    podDisruptionBudget:
+      enabled: false
+    topologySpreadConstraints: []
+    worker:
+      enabled: true
+      replicaCount: 1
+      podDisruptionBudget:
+        enabled: false
+      topologySpreadConstraints: []
+    awsAlbIngress:
+      enabled: false
+    gcpIngress:
+      enabled: false
+    civoIngress:
+      enabled: true
+      className: traefik
+      clusterIssuer: letsencrypt-prod
+      tlsSecretName: witself-api-tls
+      acme:
+        email: ""
+        server: https://acme-v02.api.letsencrypt.org/directory
+        privateKeySecretName: letsencrypt-prod-private-key
+    secrets:
+      bootstrap:
+        enabled: true
+        targetName: witself-bootstrap
+        tokenKey: token
+        ttlKey: ttl
+      database:
+        enabled: true
+        targetName: witself-db
+        urlKey: dsn
+      provision:
+        enabled: true
+        targetName: witself-provision
+        tokenKey: token

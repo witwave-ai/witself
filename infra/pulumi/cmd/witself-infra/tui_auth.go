@@ -58,6 +58,8 @@ func authCommand(ctx context.Context, st cellState) (*exec.Cmd, string) {
 			args = append(args, "--tenant", tenant)
 		}
 		return exec.CommandContext(ctx, "az", args...), "az login"
+	case "civo":
+		return nil, "Civo uses CIVO_TOKEN from the environment; no interactive login flow"
 	}
 	return nil, "unknown cloud: " + cloud
 }

@@ -64,9 +64,39 @@ func waitForPostUpConvergence(ctx context.Context, stack auto.Stack, cloud strin
 		return waitForGCPArgoApplicationsHealthy(ctx, stack, maxWait, pollEvery)
 	case "azure":
 		return waitForAzureArgoApplicationsHealthy(ctx, stack, maxWait, pollEvery)
+	case "civo":
+		return waitForCivoArgoApplicationsHealthy(ctx, stack, maxWait, pollEvery)
 	default:
 		return nil
 	}
+}
+
+func waitForCivoArgoApplicationsHealthy(ctx context.Context, stack auto.Stack, maxWait, pollEvery time.Duration) error {
+	outs, err := stack.Outputs(ctx)
+	if err != nil {
+		return fmt.Errorf("read outputs for GitOps verification: %w", err)
+	}
+	lister, namespace, err := newCivoArgoListerFromOutputs(outs)
+	if err != nil {
+		return err
+	}
+	return waitForArgoApplicationsHealthy(ctx, lister, namespace, maxWait, pollEvery)
+}
+
+func newCivoArgoListerFromOutputs(outs auto.OutputMap) (*tokenArgoLister, string, error) {
+	raw := outputString(outs, "kubeconfig")
+	if raw == "" {
+		return nil, "", fmt.Errorf("stack exports no Civo kubeconfig; cannot verify Argo CD health")
+	}
+	lister, err := newAzureArgoListerFromKubeconfig([]byte(raw))
+	if err != nil {
+		return nil, "", fmt.Errorf("build Civo cluster client: %w", err)
+	}
+	namespace := outputString(outs, "argocdNamespace")
+	if namespace == "" {
+		namespace = "argocd"
+	}
+	return lister, namespace, nil
 }
 
 func waitForGCPArgoApplicationsHealthy(ctx context.Context, stack auto.Stack, maxWait, pollEvery time.Duration) error {

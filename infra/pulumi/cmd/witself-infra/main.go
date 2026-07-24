@@ -22,6 +22,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -44,7 +45,7 @@ import (
 const projectName = "witself-infra"
 
 // clouds are the functional provider selectors (also the name token).
-var clouds = map[string]bool{"aws": true, "gcp": true, "azure": true}
+var clouds = map[string]bool{"aws": true, "gcp": true, "azure": true, "civo": true}
 var placementChannels = map[string]bool{"stable": true, "edge": true, "experimental": true}
 
 // legacyRegionCodes maps real cloud regions outside the three-cloud placement
@@ -94,6 +95,14 @@ var legacyRegionCodes = map[string]string{
 	// possible; the cloud token keeps azure-sandbox-use2-dev distinct.
 	"eastus":  "use1",
 	"eastus2": "use2",
+
+	// Civo regions. Civo has a smaller regional footprint, so these map to
+	// the nearest canonical placement geography.
+	"nyc1": "use1",
+	"phx1": "usw2",
+	"fra1": "euc1",
+	"lon1": "euw2",
+	"mum1": "aps1",
 }
 
 // label is the safe form for the free-text account-alias and role tokens: they
@@ -145,7 +154,7 @@ flags:
                   else ~/.witself/infra.yaml)
   -progress-json  with up/preview/destroy: emit NDJSON phase events on
                   stderr ({"ts","phase","state","cell","note"} lines)
-  -cloud          provider (functional): aws|gcp|azure        (default "aws")
+  -cloud          provider (functional): aws|gcp|azure|civo   (default "aws")
   -account-alias  free-text account label for the name        (default "sandbox")
   -region         real cloud region (functional)              (default "us-west-2")
   -role           role/ordinal label: dev, dev2, prod, ...    (default "1")
@@ -154,6 +163,8 @@ flags:
   -cidr           cell VPC CIDR (a /16)                        (default "10.20.0.0/16")
   -k8s-version    EKS Kubernetes version                       (default "1.36")
   -db-version     PostgreSQL major version                     (default "18")
+  -civo-node-size Civo Kubernetes node size                    (default "g4s.kube.medium")
+  -civo-admin-cidr CIDR allowed to reach Civo's Kubernetes API (required for Civo)
   -argocd         install Argo CD (GitOps control plane)        (default false)
   -gitops-repo     GitOps repo Argo reconciles (with -argocd)   (default witwave-ai/witself)
   -gitops-path     path to the root bootstrap chart             (default ".gitops/charts/bootstrap")
@@ -258,7 +269,7 @@ func run(args []string) error {
 	}
 
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
-	cloud := fs.String("cloud", "aws", "provider (functional): aws|gcp|azure")
+	cloud := fs.String("cloud", "aws", "provider (functional): aws|gcp|azure|civo")
 	accountAlias := fs.String("account-alias", "sandbox", "free-text account label for the cell name")
 	region := fs.String("region", "us-west-2", "real cloud region (functional)")
 	role := fs.String("role", "1", "role/ordinal label for the cell name: dev, dev2, prod")
@@ -277,6 +288,8 @@ func run(args []string) error {
 	awsProfile := fs.String("aws-profile", "", "AWS named profile for credentials (default: ambient AWS chain / OIDC)")
 	gcpProject := fs.String("gcp-project", "", "GCP project ID for GCP cells/state backend")
 	azureSubscription := fs.String("azure-subscription", "", "Azure subscription name or ID for Azure cells/state backend (default: az CLI current subscription)")
+	civoNodeSize := fs.String("civo-node-size", "g4s.kube.medium", "Civo Kubernetes node size (development default: 2 vCPU / 4 GB)")
+	civoAdminCIDR := fs.String("civo-admin-cidr", "", "CIDR allowed to reach the Civo Kubernetes API, normally your public IP /32")
 	backendFlag := fs.String("backend", "s3", "state backend: s3|gcs|azblob|local (local is a dev opt-out)")
 	bootstrap := fs.Bool("bootstrap", false, "with -backend s3/gcs/azblob: create the backend if it is missing")
 	stateDir := fs.String("state-dir", defaultStateDir(), "local Pulumi state backend dir")
@@ -367,7 +380,7 @@ func run(args []string) error {
 
 	// Validate functional + label inputs before composing the name.
 	if !clouds[*cloud] {
-		return fmt.Errorf("unknown -cloud %q (want aws|gcp|azure)", *cloud)
+		return fmt.Errorf("unknown -cloud %q (want aws|gcp|azure|civo)", *cloud)
 	}
 	regionCode, placementRegionCode, ok := resolveRegionCode(*cloud, *region)
 	if !ok {
@@ -392,6 +405,17 @@ func run(args []string) error {
 	}
 	if *cloud == "gcp" && *gcpProject == "" {
 		return fmt.Errorf("-gcp-project is required with -cloud gcp")
+	}
+	if *cloud == "civo" {
+		if *backendFlag != "local" {
+			return fmt.Errorf("-cloud civo currently requires -backend local (development state must be an explicit opt-out)")
+		}
+		if *civoAdminCIDR == "" && cmd != "outputs" && cmd != "cell-health" && cmd != "destroy" && cmd != "refresh" {
+			return fmt.Errorf("-civo-admin-cidr is required with -cloud civo; use your public IP as a /32")
+		}
+		if os.Getenv("CIVO_TOKEN") == "" && cmd != "outputs" {
+			return fmt.Errorf("CIVO_TOKEN is required with -cloud civo")
+		}
 	}
 	// Cross-flag rejects come BEFORE any cloud work — an operator who typed
 	// the wrong combination should learn it in milliseconds, not after
@@ -579,6 +603,9 @@ func run(args []string) error {
 			}
 		}
 	}
+	if *cloud == "civo" {
+		env["CIVO_TOKEN"] = os.Getenv("CIVO_TOKEN")
+	}
 
 	wsOpts = append(wsOpts, auto.EnvVars(env))
 	stack, err := auto.UpsertStackInlineSource(ctx, cellName, projectName, cell.Program, wsOpts...)
@@ -646,6 +673,16 @@ func run(args []string) error {
 				return fmt.Errorf("set config azure-native:subscriptionId: %w", err)
 			}
 		}
+	case "civo":
+		for k, v := range map[string]string{
+			"civo:region":           *region,
+			"witself:civoNodeSize":  *civoNodeSize,
+			"witself:civoAdminCIDR": *civoAdminCIDR,
+		} {
+			if err := stack.SetConfig(ctx, k, auto.ConfigValue{Value: v}); err != nil {
+				return fmt.Errorf("set config %s: %w", k, err)
+			}
+		}
 	}
 	if cmd == "up" || cmd == "preview" {
 		path := *bootstrapTokenFile
@@ -684,6 +721,18 @@ func run(args []string) error {
 		} else {
 			sink.end(cellName, "pulumi.up", "")
 		}
+		if err == nil && *cloud == "civo" {
+			err = waitForPostUpConvergence(ctx, stack, *cloud, *argocd, 20*time.Minute, 20*time.Second)
+			if err == nil && *controlPlane != "" {
+				outs, outputErr := stack.Outputs(ctx)
+				if outputErr != nil {
+					err = fmt.Errorf("read Civo outputs before registration: %w", outputErr)
+				} else {
+					host, _ := outs["apiHost"].Value.(string)
+					err = waitForPublicHTTPS(ctx, host, 20*time.Minute, 15*time.Second)
+				}
+			}
+		}
 		if err == nil && *controlPlane != "" {
 			// Fleet registration is a post-step, deliberately outside the Pulumi
 			// resource graph: membership is not a cloud resource.
@@ -705,7 +754,7 @@ func run(args []string) error {
 				}
 			}
 		}
-		if err == nil {
+		if err == nil && *cloud != "civo" {
 			err = waitForPostUpConvergence(ctx, stack, *cloud, *argocd, 15*time.Minute, 20*time.Second)
 		}
 	case "preview":
@@ -748,6 +797,39 @@ func run(args []string) error {
 		return fmt.Errorf("unknown command %q (see: witself-infra help)", cmd)
 	}
 	return err
+}
+
+func waitForPublicHTTPS(ctx context.Context, host string, maxWait, pollEvery time.Duration) error {
+	if host == "" {
+		return fmt.Errorf("cell exports no apiHost; cannot verify public HTTPS")
+	}
+	url := "https://" + host + "/v1/version"
+	client := &http.Client{Timeout: 20 * time.Second}
+	deadline := time.Now().Add(maxWait)
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return err
+		}
+		resp, probeErr := client.Do(req)
+		if probeErr == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				fmt.Fprintf(os.Stderr, "cell HTTPS ready at %s\n", url)
+				return nil
+			}
+			probeErr = fmt.Errorf("HTTP %d", resp.StatusCode)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("cell HTTPS at %s did not become ready within %s (last: %v)", url, maxWait, probeErr)
+		}
+		fmt.Fprintf(os.Stderr, "  HTTPS not ready: %v\n", probeErr)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollEvery):
+		}
+	}
 }
 
 // registerCell reports the freshly provisioned cell to the control plane. The

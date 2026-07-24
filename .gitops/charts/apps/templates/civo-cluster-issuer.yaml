@@ -1,0 +1,21 @@
+{{- $ingress := .Values.apps.witselfServer.civoIngress -}}
+{{- if and .Values.apps.witselfServer.enabled $ingress.enabled (eq .Values.cell.cloud "civo") }}
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ default "letsencrypt-prod" $ingress.clusterIssuer | quote }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  acme:
+    {{- with $ingress.acme.email }}
+    email: {{ . | quote }}
+    {{- end }}
+    server: {{ default "https://acme-v02.api.letsencrypt.org/directory" $ingress.acme.server | quote }}
+    privateKeySecretRef:
+      name: {{ default "letsencrypt-prod-private-key" $ingress.acme.privateKeySecretName | quote }}
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: {{ default "traefik" $ingress.className | quote }}
+{{- end }}

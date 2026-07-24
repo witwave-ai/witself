@@ -123,6 +123,8 @@ type cellEntry struct {
 	StateDir           *string          `yaml:"state_dir,omitempty"`
 	ControlPlane       *string          `yaml:"control_plane,omitempty"`
 	FleetTokenFile     *string          `yaml:"fleet_token_file,omitempty"`
+	CivoNodeSize       *string          `yaml:"civo_node_size,omitempty"`
+	CivoAdminCIDR      *string          `yaml:"civo_admin_cidr,omitempty"`
 	SecurityContext    *securityContext `yaml:"security_context,omitempty"`
 }
 
@@ -161,6 +163,8 @@ func (e *cellEntry) flagValues() map[string]string {
 	set("state-dir", e.StateDir)
 	set("control-plane", e.ControlPlane)
 	set("fleet-token-file", e.FleetTokenFile)
+	set("civo-node-size", e.CivoNodeSize)
+	set("civo-admin-cidr", e.CivoAdminCIDR)
 	if e.ArgoCD != nil {
 		out["argocd"] = strconv.FormatBool(*e.ArgoCD)
 	}

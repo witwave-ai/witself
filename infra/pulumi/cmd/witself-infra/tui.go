@@ -225,6 +225,10 @@ func effectiveSettings(e cellEntry, d *cellEntry) []settingRow {
 	str("channel", "experimental", e.Channel, func(x *cellEntry) *string { return x.Channel })
 	str("backend", "s3", e.Backend, func(x *cellEntry) *string { return x.Backend })
 	str("domain", "cells.witself.witwave.ai", e.Domain, func(x *cellEntry) *string { return x.Domain })
+	if e.Cloud != nil && *e.Cloud == "civo" {
+		str("node size", "g4s.kube.medium", e.CivoNodeSize, func(x *cellEntry) *string { return x.CivoNodeSize })
+		str("admin cidr", "", e.CivoAdminCIDR, func(x *cellEntry) *string { return x.CivoAdminCIDR })
+	}
 	return out
 }
 

@@ -7,7 +7,19 @@ gitops:
   targetRevision: main
   destinationServer: https://kubernetes.default.svc
 
+platform:
+  externalSecrets:
+    enabled: true
+
 apps:
+  civoPostgres:
+    enabled: false
+    namespace: witself
+    chartRepoURL: registry-1.docker.io/bitnamicharts
+    chartName: postgresql
+    chartVersion: 18.8.0
+    authSecretName: witself-postgresql-auth
+    storage: 8Gi
   witselfServer:
     enabled: true
     namespace: witself
@@ -141,6 +153,15 @@ apps:
           type: HTTP
           requestPath: /readyz
           port: 8081
+    civoIngress:
+      enabled: false
+      className: traefik
+      clusterIssuer: letsencrypt-prod
+      tlsSecretName: witself-api-tls
+      acme:
+        email: ""
+        server: https://acme-v02.api.letsencrypt.org/directory
+        privateKeySecretName: letsencrypt-prod-private-key
     azureGateway:
       enabled: false
       albNamespace: azure-alb-system

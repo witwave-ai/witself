@@ -124,6 +124,8 @@ func printCellHealth(ctx context.Context, stack auto.Stack, cloud, region, awsPr
 		prober, namespace, err = newAzureArgoListerFromOutputs(ctx, outs)
 	case "aws":
 		prober, namespace, err = newAWSArgoListerFromOutputs(ctx, outs, region, awsProfile)
+	case "civo":
+		prober, namespace, err = newCivoArgoListerFromOutputs(outs)
 	default:
 		report.Kubernetes = sh(healthUnknown, "cluster probe not yet wired for "+cloud)
 		return emitHealth(report)
@@ -220,6 +222,8 @@ func probeDatabase(ctx context.Context, cloud, region, awsProfile string, outs a
 			return sh(healthBad, "postgres status query failed: "+err.Error())
 		}
 		return dbLevel(status, azureDBLevel)
+	case "civo":
+		return sh(healthUnknown, "in-cluster PostgreSQL health is reported by the Argo application")
 	}
 	return sh(healthUnknown, "database status not wired for "+cloud)
 }

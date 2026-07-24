@@ -18,6 +18,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
@@ -73,8 +74,44 @@ func whoamiCellCore(ctx context.Context, cellName, configPath string, bgSSO bool
 		return whoamiGCP(ctx, entry)
 	case "azure":
 		return whoamiAzure(ctx, entry)
+	case "civo":
+		return whoamiCivo(ctx, entry)
 	}
 	return identity{}, fmt.Errorf("unknown cloud %q", cloud)
+}
+
+func whoamiCivo(ctx context.Context, entry cellEntry) (identity, error) {
+	token := strings.TrimSpace(os.Getenv("CIVO_TOKEN"))
+	if token == "" {
+		return identity{}, fmt.Errorf("CIVO_TOKEN is not set")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.civo.com/v2/regions", nil)
+	if err != nil {
+		return identity{}, err
+	}
+	req.Header.Set("Authorization", "bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return identity{}, fmt.Errorf("Civo identity probe: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return identity{}, fmt.Errorf("Civo identity probe returned %s — check CIVO_TOKEN", resp.Status)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	region := ""
+	if entry.Region != nil {
+		region = *entry.Region
+	}
+	return identity{
+		Cloud:   "civo",
+		Profile: region,
+		Account: "authenticated",
+		Actor:   "CIVO_TOKEN",
+		OK:      true,
+		Notes:   []string{"API token accepted; Civo does not expose an account identity on this endpoint"},
+	}, nil
 }
 
 func awsProfileFor(entry cellEntry) string {

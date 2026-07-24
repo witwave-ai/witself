@@ -94,6 +94,25 @@ type azureCell struct {
 	bootstrapTokenSet bool
 }
 
+type civoCell struct {
+	name              string
+	region            string
+	profile           string
+	accountAlias      string
+	role              string
+	nodeSize          string
+	adminCIDR         string
+	domain            string
+	cloudflareDNS     bool
+	argocd            bool
+	gitopsRepo        string
+	gitopsPath        string
+	gitopsValuesPath  string
+	gitopsRevision    string
+	bootstrapToken    pulumi.StringOutput
+	bootstrapTokenSet bool
+}
+
 // Program is the inline Pulumi program — the embedded Automation API engine runs
 // this closure, so the cell definition is compiled into the witself-infra binary.
 func Program(ctx *pulumi.Context) error {
@@ -103,6 +122,7 @@ func Program(ctx *pulumi.Context) error {
 	a := config.New(ctx, "aws")
 	g := config.New(ctx, "gcp")
 	az := config.New(ctx, "azure-native")
+	cv := config.New(ctx, "civo")
 
 	cloud := w.Get("cloud")     // aws | gcp | azure
 	profile := w.Get("profile") // minimal | prod
@@ -202,6 +222,29 @@ func Program(ctx *pulumi.Context) error {
 			gitopsRevision:    gitopsRevision,
 			domain:            domain,
 			cloudflareDNS:     cloudflareDNS,
+			bootstrapToken:    w.GetSecret("bootstrapToken"),
+			bootstrapTokenSet: bootstrapTokenSet,
+		})
+	case "civo":
+		nodeSize := w.Get("civoNodeSize")
+		if nodeSize == "" {
+			nodeSize = "g4s.kube.medium"
+		}
+		return provisionCivo(ctx, civoCell{
+			name:              cellName,
+			region:            cv.Get("region"),
+			profile:           profile,
+			accountAlias:      w.Get("accountAlias"),
+			role:              w.Get("role"),
+			nodeSize:          nodeSize,
+			adminCIDR:         w.Get("civoAdminCIDR"),
+			domain:            domain,
+			cloudflareDNS:     cloudflareDNS,
+			argocd:            argocd,
+			gitopsRepo:        gitopsRepo,
+			gitopsPath:        gitopsPath,
+			gitopsValuesPath:  gitopsValuesPath,
+			gitopsRevision:    gitopsRevision,
 			bootstrapToken:    w.GetSecret("bootstrapToken"),
 			bootstrapTokenSet: bootstrapTokenSet,
 		})

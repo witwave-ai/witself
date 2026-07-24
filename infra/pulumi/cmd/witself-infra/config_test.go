@@ -32,6 +32,8 @@ func newTestFlagSet() *flag.FlagSet {
 	fs.String("aws-profile", "", "")
 	fs.String("gcp-project", "", "")
 	fs.String("azure-subscription", "", "")
+	fs.String("civo-node-size", "g4s.kube.medium", "")
+	fs.String("civo-admin-cidr", "", "")
 	fs.String("backend", "s3", "")
 	fs.String("state-dir", "/tmp/state", "")
 	fs.String("control-plane", "", "")
