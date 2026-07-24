@@ -47,6 +47,12 @@ func TestProvisionCivoRegistersOnlyCivoSubstrate(t *testing.T) {
 	if got := cluster["region"]; !got.IsString() || got.StringValue() != "nyc1" {
 		t.Errorf("cluster region = %v, want nyc1", got)
 	}
+	if got := cluster["name"]; !got.IsString() || got.StringValue() != "witself-civo-sandbox-use1-dev" {
+		t.Errorf("cluster name = %v, want witself-civo-sandbox-use1-dev", got)
+	}
+	if got := cluster["applications"]; !got.IsString() || got.StringValue() != "traefik2-nodeport" {
+		t.Errorf("cluster applications = %v, want traefik2-nodeport", got)
+	}
 	pools := cluster["pools"].ObjectValue()
 	if got := pools["nodeCount"]; !got.IsNumber() || got.NumberValue() != 1 {
 		t.Errorf("node count = %v, want 1", got)

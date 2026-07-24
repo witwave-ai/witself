@@ -445,19 +445,42 @@ func newAzureArgoListerFromKubeconfig(raw []byte) (*tokenArgoLister, error) {
 		return nil, fmt.Errorf("AKS certificate authority output did not contain PEM data")
 	}
 	token := ""
+	var clientCertificate tls.Certificate
 	for _, user := range cfg.Users {
 		token = strings.TrimSpace(user.User.Token)
 		if token != "" {
 			break
 		}
+		certData := strings.TrimSpace(user.User.ClientCertificateData)
+		keyData := strings.TrimSpace(user.User.ClientKeyData)
+		if certData == "" || keyData == "" {
+			continue
+		}
+		certPEM, certErr := base64.StdEncoding.DecodeString(certData)
+		if certErr != nil {
+			return nil, fmt.Errorf("decode kubeconfig client certificate: %w", certErr)
+		}
+		keyPEM, keyErr := base64.StdEncoding.DecodeString(keyData)
+		if keyErr != nil {
+			return nil, fmt.Errorf("decode kubeconfig client key: %w", keyErr)
+		}
+		clientCertificate, err = tls.X509KeyPair(certPEM, keyPEM)
+		if err != nil {
+			return nil, fmt.Errorf("parse kubeconfig client certificate: %w", err)
+		}
+		break
 	}
-	if token == "" {
-		return nil, fmt.Errorf("AKS kubeconfig contained no bearer token")
+	if token == "" && len(clientCertificate.Certificate) == 0 {
+		return nil, fmt.Errorf("kubeconfig contained no bearer token or client certificate")
+	}
+	tlsConfig := &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+	if len(clientCertificate.Certificate) > 0 {
+		tlsConfig.Certificates = []tls.Certificate{clientCertificate}
 	}
 	return &tokenArgoLister{
 		baseURL: strings.TrimRight(server, "/"),
 		client: &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
+			TLSClientConfig: tlsConfig,
 		}},
 		token: token,
 	}, nil
@@ -505,7 +528,9 @@ func clusterNodesGet(ctx context.Context, client *http.Client, baseURL, token st
 	if err != nil {
 		return 0, 0, false
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, 0, false
@@ -550,7 +575,9 @@ func clusterReadyzGet(ctx context.Context, client *http.Client, baseURL, token s
 	if err != nil {
 		return false, ""
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return false, ""
@@ -581,7 +608,9 @@ func (l *tokenArgoLister) ListArgoApplications(ctx context.Context, namespace st
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+l.token)
+	if l.token != "" {
+		req.Header.Set("Authorization", "Bearer "+l.token)
+	}
 	resp, err := l.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("query Argo CD applications: %w", err)
@@ -607,7 +636,9 @@ type kubeconfig struct {
 	} `yaml:"clusters"`
 	Users []struct {
 		User struct {
-			Token string `yaml:"token"`
+			Token                 string `yaml:"token"`
+			ClientCertificateData string `yaml:"client-certificate-data"`
+			ClientKeyData         string `yaml:"client-key-data"`
 		} `yaml:"user"`
 	} `yaml:"users"`
 }

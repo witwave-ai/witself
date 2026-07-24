@@ -190,7 +190,7 @@ users:
 	if err == nil {
 		t.Fatal("expected missing token error")
 	}
-	if !strings.Contains(err.Error(), "no bearer token") {
+	if !strings.Contains(err.Error(), "no bearer token or client certificate") {
 		t.Fatalf("error = %v, want missing bearer token", err)
 	}
 }

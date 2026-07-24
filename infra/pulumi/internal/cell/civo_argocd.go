@@ -13,7 +13,7 @@ import (
 
 const civoWorkloadNamespace = "witself"
 
-func provisionCivoArgoCD(ctx *pulumi.Context, c civoCell, cluster *civo.KubernetesCluster, apiHost string, rootDependencies ...pulumi.Resource) error {
+func provisionCivoArgoCD(ctx *pulumi.Context, c civoCell, cluster *civo.KubernetesCluster, cellDomain, apiHost pulumi.StringInput, rootDependencies ...pulumi.Resource) error {
 	k8s, err := kubernetes.NewProvider(ctx, "cell-k8s", &kubernetes.ProviderArgs{
 		Kubeconfig: cluster.Kubeconfig,
 	}, pulumi.DependsOn([]pulumi.Resource{cluster}))
@@ -141,7 +141,7 @@ cell:
 platform:
   externalDNS:
     enabled: false
-`, c.gitopsRepo, c.gitopsRevision, c.gitopsValuesPath, c.domain, apiHost)
+`, c.gitopsRepo, c.gitopsRevision, c.gitopsValuesPath, cellDomain, apiHost)
 
 	rootDependsOn := append([]pulumi.Resource{release, postgresAuth, dbSecret, bootstrapSecret, provisionSecret}, rootDependencies...)
 	_, err = apiextensions.NewCustomResource(ctx, "argocd-root", &apiextensions.CustomResourceArgs{

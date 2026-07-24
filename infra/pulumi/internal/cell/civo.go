@@ -3,6 +3,7 @@ package cell
 import (
 	"fmt"
 	"net"
+	"strings"
 
 	"github.com/pulumi/pulumi-civo/sdk/v2/go/civo"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
@@ -79,13 +80,14 @@ func provisionCivo(ctx *pulumi.Context, c civoCell) error {
 		return err
 	}
 
-	cluster, err := civo.NewKubernetesCluster(ctx, "cluster", &civo.KubernetesClusterArgs{
-		Name:        pulumi.String(c.name),
-		Region:      pulumi.String(c.region),
-		NetworkId:   network.ID().ToStringOutput(),
-		FirewallId:  firewall.ID().ToStringOutput(),
-		ClusterType: pulumi.String("k3s"),
-		Cni:         pulumi.String("cilium"),
+	cluster, err := civo.NewKubernetesCluster(ctx, "civo-cluster", &civo.KubernetesClusterArgs{
+		Name:         pulumi.String(rname(c.name, "")),
+		Region:       pulumi.String(c.region),
+		NetworkId:    network.ID().ToStringOutput(),
+		FirewallId:   firewall.ID().ToStringOutput(),
+		ClusterType:  pulumi.String("k3s"),
+		Cni:          pulumi.String("cilium"),
+		Applications: pulumi.String("traefik2-nodeport"),
 		Pools: civo.KubernetesClusterPoolsArgs{
 			Label:     pulumi.String("development"),
 			NodeCount: pulumi.Int(1),
@@ -107,22 +109,21 @@ func provisionCivo(ctx *pulumi.Context, c civoCell) error {
 	ctx.Export("firewall", firewall.ID())
 	ctx.Export("status", pulumi.String("Civo development substrate provisioned"))
 
-	apiHost := ""
-	var dnsRecord pulumi.Resource
+	apiHost := pulumi.String("").ToStringOutput()
+	cellDomain := pulumi.String("").ToStringOutput()
 	if c.argocd {
-		apiHost, dnsRecord, err = provisionCivoDNS(ctx, c, cluster.MasterIp)
-		if err != nil {
-			return err
-		}
+		cellDomain = cluster.DnsEntry.ApplyT(func(entry string) string {
+			return strings.TrimSuffix(entry, ".")
+		}).(pulumi.StringOutput)
+		apiHost = cellDomain.ApplyT(func(domain string) string {
+			return "api." + domain
+		}).(pulumi.StringOutput)
 	}
-	ctx.Export("apiHost", pulumi.String(apiHost))
+	ctx.Export("apiHost", apiHost)
+	ctx.Export("civoDNSEntry", cellDomain)
 
 	if c.argocd {
-		deps := []pulumi.Resource{cluster}
-		if dnsRecord != nil {
-			deps = append(deps, dnsRecord)
-		}
-		return provisionCivoArgoCD(ctx, c, cluster, apiHost, deps...)
+		return provisionCivoArgoCD(ctx, c, cluster, cellDomain, apiHost, cluster)
 	}
 	return nil
 }
