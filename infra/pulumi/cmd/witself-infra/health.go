@@ -158,6 +158,9 @@ func printCellHealth(ctx context.Context, stack auto.Stack, cloud, region, awsPr
 			}
 		}
 	}
+	if version := outputString(outs, "kubernetesVersion"); version != "" {
+		k8s.Detail += " · " + version
+	}
 	report.Kubernetes = k8s
 
 	// Workloads: Argo application health (only when the cell runs Argo).
@@ -167,10 +170,31 @@ func printCellHealth(ctx context.Context, stack auto.Stack, cloud, region, awsPr
 			report.Argo = sh(healthBad, oneLine(aerr.Error()))
 		} else {
 			report.Argo = argoHealth(apps)
+			if cloud == "civo" {
+				report.Database = civoPostgresArgoHealth(apps)
+			}
 		}
 	}
 
 	return emitHealth(report)
+}
+
+func civoPostgresArgoHealth(apps []argoApplication) subsystemHealth {
+	for _, app := range apps {
+		if app.Metadata.Name != "witself-postgresql" {
+			continue
+		}
+		sync, health := app.Status.Sync.Status, app.Status.Health.Status
+		switch {
+		case sync == "Synced" && health == "Healthy":
+			return sh(healthGood, "in-cluster PostgreSQL Synced/Healthy")
+		case sync == "Synced":
+			return sh(healthDegraded, "in-cluster PostgreSQL Synced/"+health)
+		default:
+			return sh(healthBad, "in-cluster PostgreSQL "+sync+"/"+health)
+		}
+	}
+	return sh(healthBad, "in-cluster PostgreSQL Argo application not found")
 }
 
 // sh is a keyed-literal shorthand for a countless subsystem line.

@@ -28,6 +28,11 @@ func TestLookupProviderRegion(t *testing.T) {
 		{cloud: "aws", providerRegion: "us-west-2", wantCode: "usw2", wantOK: true},
 		{cloud: "gcp", providerRegion: "us-west2", wantCode: "usw2", wantOK: true},
 		{cloud: "azure", providerRegion: "westus2", wantCode: "usw2", wantOK: true},
+		{cloud: "civo", providerRegion: "nyc1", wantCode: "use1", wantOK: true},
+		{cloud: "civo", providerRegion: "phx1", wantCode: "usw2", wantOK: true},
+		{cloud: "civo", providerRegion: "fra1", wantCode: "euc1", wantOK: true},
+		{cloud: "civo", providerRegion: "lon1", wantCode: "euw2", wantOK: true},
+		{cloud: "civo", providerRegion: "mum1", wantCode: "aps1", wantOK: true},
 		{cloud: "azure", providerRegion: "eastus2", wantOK: false},
 	}
 	for _, tt := range tests {

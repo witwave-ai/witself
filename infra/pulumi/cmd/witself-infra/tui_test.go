@@ -195,7 +195,7 @@ func TestTabFocusAndSwitch(t *testing.T) {
 	if km.activeTab != tabKubernetes {
 		t.Fatalf("→ must advance to Kubernetes: tab = %d", km.activeTab)
 	}
-	if !strings.Contains(km.View(), "no Kubernetes details yet") {
+	if !strings.Contains(km.View(), "not probed yet") || !strings.Contains(km.View(), "provider") {
 		t.Error("Kubernetes tab body must render after switching")
 	}
 
@@ -1260,6 +1260,8 @@ func TestLooksLikeAuthFailure(t *testing.T) {
 		// expiry incident — dotted CLI path, remedy text cut off.
 		{"  Argo CD: mint GCP ADC access token: exit status 1: ERROR: (gcloud.auth.application-default.print-access-token) There was a problem refre… (9m14s elapsed)"},
 		{"ERROR: (gcloud.auth.application-default.print-access-token) There was a problem refreshing your current auth tokens: Reauthentication failed."},
+		{"Civo identity probe returned 401 Unauthorized — check CIVO_TOKEN"},
+		{"Civo token file /secure/civo.token is empty"},
 	} {
 		if !looksLikeAuthFailure(tail) {
 			t.Errorf("auth pattern missed: %v", tail)

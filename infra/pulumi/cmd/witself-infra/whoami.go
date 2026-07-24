@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
@@ -31,7 +32,7 @@ import (
 
 // identity is what one cloud identity call returns.
 type identity struct {
-	Cloud   string // aws | gcp | azure
+	Cloud   string // aws | gcp | azure | civo
 	Profile string // aws profile, gcp project, azure subscription id
 	Account string // aws account id, gcp project, azure subscription id
 	Tenant  string // azure only
@@ -80,38 +81,103 @@ func whoamiCellCore(ctx context.Context, cellName, configPath string, bgSSO bool
 	return identity{}, fmt.Errorf("unknown cloud %q", cloud)
 }
 
+var civoAPIBaseURL = "https://api.civo.com"
+var civoHTTPClient = &http.Client{Timeout: 20 * time.Second}
+
 func whoamiCivo(ctx context.Context, entry cellEntry) (identity, error) {
-	token := strings.TrimSpace(os.Getenv("CIVO_TOKEN"))
-	if token == "" {
-		return identity{}, fmt.Errorf("CIVO_TOKEN is not set")
+	tokenFile := ""
+	if sc := entry.SecurityContext; sc != nil && sc.Civo != nil && sc.Civo.TokenFile != nil {
+		tokenFile = *sc.Civo.TokenFile
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.civo.com/v2/regions", nil)
+	token, err := resolveCivoToken(tokenFile)
 	if err != nil {
 		return identity{}, err
 	}
-	req.Header.Set("Authorization", "bearer "+token)
-	resp, err := http.DefaultClient.Do(req)
+	return whoamiCivoWithToken(ctx, entry, token)
+}
+
+func whoamiCivoWithToken(ctx context.Context, entry cellEntry, token string) (identity, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(civoAPIBaseURL, "/")+"/v2/auth/exchange", nil)
 	if err != nil {
-		return identity{}, fmt.Errorf("Civo identity probe: %w", err)
+		return identity{}, err
 	}
-	defer resp.Body.Close()
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := civoHTTPClient.Do(req)
+	if err != nil {
+		return identity{}, fmt.Errorf("civo identity probe: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return identity{}, fmt.Errorf("Civo identity probe returned %s — check CIVO_TOKEN", resp.Status)
+		return identity{}, fmt.Errorf("civo identity probe returned %s — check CIVO_TOKEN", resp.Status)
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
+	var exchange struct {
+		AccountID string `json:"account_id"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&exchange); err != nil {
+		return identity{}, fmt.Errorf("decode Civo identity response: %w", err)
+	}
+	exchange.AccountID = strings.TrimSpace(exchange.AccountID)
+	if exchange.AccountID == "" {
+		return identity{}, fmt.Errorf("civo identity response did not include account_id")
+	}
 	region := ""
 	if entry.Region != nil {
 		region = *entry.Region
 	}
-	return identity{
+	id := identity{
 		Cloud:   "civo",
 		Profile: region,
-		Account: "authenticated",
-		Actor:   "CIVO_TOKEN",
+		Account: exchange.AccountID,
+		Actor:   "Civo API token",
 		OK:      true,
-		Notes:   []string{"API token accepted; Civo does not expose an account identity on this endpoint"},
-	}, nil
+		Notes:   []string{"API token accepted"},
+	}
+	if sc := entry.SecurityContext; sc != nil && sc.Civo != nil && sc.Civo.ExpectedAccountID != nil {
+		want := strings.TrimSpace(*sc.Civo.ExpectedAccountID)
+		if want != id.Account {
+			id.OK = false
+			id.Notes = append(id.Notes, fmt.Sprintf("expected Civo account %s, but the token identifies as %s", want, id.Account))
+		}
+	}
+	return id, nil
+}
+
+// resolveCivoToken keeps credential material out of config: a cell may point
+// at a mode-0600 token file for multi-account operation, or use the ambient
+// CIVO_TOKEN fallback for a single account. The value is returned only to the
+// caller for direct API/provider injection and must never be logged.
+func resolveCivoToken(tokenFile string) (string, error) {
+	tokenFile = strings.TrimSpace(tokenFile)
+	if tokenFile == "" {
+		token := strings.TrimSpace(os.Getenv("CIVO_TOKEN"))
+		if token == "" {
+			return "", fmt.Errorf("CIVO_TOKEN is not set and no -civo-token-file was configured")
+		}
+		return token, nil
+	}
+	info, err := os.Stat(tokenFile)
+	if err != nil {
+		return "", fmt.Errorf("read Civo token file %s: %w", tokenFile, err)
+	}
+	if info.Size() > 4096 {
+		return "", fmt.Errorf("civo token file %s is unexpectedly large", tokenFile)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("civo token file %s is not a regular file", tokenFile)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return "", fmt.Errorf("civo token file %s permissions are too broad (want 0600)", tokenFile)
+	}
+	raw, err := os.ReadFile(tokenFile)
+	if err != nil {
+		return "", fmt.Errorf("read Civo token file %s: %w", tokenFile, err)
+	}
+	token := strings.TrimSpace(string(raw))
+	if token == "" {
+		return "", fmt.Errorf("civo token file %s is empty", tokenFile)
+	}
+	return token, nil
 }
 
 func awsProfileFor(entry cellEntry) string {

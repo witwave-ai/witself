@@ -22,6 +22,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -47,6 +48,15 @@ const projectName = "witself-infra"
 // clouds are the functional provider selectors (also the name token).
 var clouds = map[string]bool{"aws": true, "gcp": true, "azure": true, "civo": true}
 var placementChannels = map[string]bool{"stable": true, "edge": true, "experimental": true}
+
+func defaultK8sVersion(cloud string) string {
+	switch cloud {
+	case "aws", "azure":
+		return "1.36"
+	default:
+		return ""
+	}
+}
 
 // legacyRegionCodes maps real cloud regions outside the three-cloud placement
 // catalog to the short token used in existing cell names and state backends.
@@ -161,7 +171,8 @@ flags:
   -channel        placement channel: stable|edge|experimental (default "experimental")
   -profile        resource sizing (functional): minimal|prod  (default "minimal")
   -cidr           cell VPC CIDR (a /16)                        (default "10.20.0.0/16")
-  -k8s-version    EKS Kubernetes version                       (default "1.36")
+  -k8s-version    Kubernetes version (default: 1.36 on AWS/Azure;
+                  Civo's latest stable when omitted)
   -db-version     PostgreSQL major version                     (default "18")
   -civo-node-size Civo Kubernetes node size                    (default "g4s.kube.medium")
   -civo-admin-cidr CIDR allowed to reach Civo's Kubernetes API (required for Civo)
@@ -177,6 +188,8 @@ flags:
   -aws-profile    AWS named profile for creds (default: ambient AWS chain / OIDC)
   -gcp-project    GCP project ID for GCP cells/state backend
   -azure-subscription Azure subscription name or ID for Azure cells/state backend
+  -civo-token-file Civo API token file (default: CIVO_TOKEN environment)
+  -civo-expected-account-id expected Civo account UUID safety pin
   -backend        state backend: s3|gcs|azblob|local           (default "s3")
   -bootstrap      with -backend s3/gcs/azblob, create backend if missing
   -state-dir      local Pulumi state backend dir (backend=local)
@@ -276,7 +289,10 @@ func run(args []string) error {
 	channel := fs.String("channel", "experimental", "placement channel: stable|edge|experimental")
 	profile := fs.String("profile", "minimal", "resource sizing (functional): minimal|prod")
 	cidr := fs.String("cidr", "10.20.0.0/16", "cell VPC CIDR (a /16)")
-	k8sVersion := fs.String("k8s-version", "1.36", "EKS Kubernetes version")
+	// Empty is an internal sentinel for the provider-aware default. AWS and
+	// Azure are pinned below; Civo deliberately leaves the field absent so
+	// its API selects the latest stable K3s release.
+	k8sVersion := fs.String("k8s-version", "", "Kubernetes version (default: 1.36 on AWS/Azure; Civo latest stable)")
 	dbVersion := fs.String("db-version", "18", "PostgreSQL major version")
 	argocd := fs.Bool("argocd", false, "install Argo CD (GitOps control plane) into the cell cluster")
 	gitopsRepo := fs.String("gitops-repo", cell.DefaultGitopsRepo, "GitOps repo URL Argo reconciles (with -argocd)")
@@ -288,6 +304,8 @@ func run(args []string) error {
 	awsProfile := fs.String("aws-profile", "", "AWS named profile for credentials (default: ambient AWS chain / OIDC)")
 	gcpProject := fs.String("gcp-project", "", "GCP project ID for GCP cells/state backend")
 	azureSubscription := fs.String("azure-subscription", "", "Azure subscription name or ID for Azure cells/state backend (default: az CLI current subscription)")
+	civoTokenFile := fs.String("civo-token-file", "", "Civo API token file (default: CIVO_TOKEN environment)")
+	civoExpectedAccountID := fs.String("civo-expected-account-id", "", "expected Civo account UUID safety pin")
 	civoNodeSize := fs.String("civo-node-size", "g4s.kube.medium", "Civo Kubernetes node size (development default: 2 vCPU / 4 GB)")
 	civoAdminCIDR := fs.String("civo-admin-cidr", "", "CIDR allowed to reach the Civo Kubernetes API, normally your public IP /32")
 	backendFlag := fs.String("backend", "s3", "state backend: s3|gcs|azblob|local (local is a dev opt-out)")
@@ -310,6 +328,8 @@ func run(args []string) error {
 	if err := fs.Parse(fsArgs); err != nil {
 		return err
 	}
+	operatorExplicit := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { operatorExplicit[f.Name] = true })
 
 	if cmd == "config" {
 		return runConfigCmd(configSub, fs, *configPath)
@@ -335,6 +355,11 @@ func run(args []string) error {
 				return err
 			}
 		}
+		for _, pinFlag := range []string{"civo-token-file", "civo-expected-account-id"} {
+			if operatorExplicit[pinFlag] {
+				return fmt.Errorf("-%s cannot override -cell security context; update security_context.civo in infra.yaml", pinFlag)
+			}
+		}
 	}
 
 	if cmd == "whoami" {
@@ -354,8 +379,12 @@ func run(args []string) error {
 	if *cellSelector != "" {
 		switch cmd {
 		case "up", "preview", "destroy", "refresh", "bootstrap":
-			if err := requireIdentityMatch(context.Background(), *cellSelector, *configPath); err != nil {
-				return err
+			// Civo bootstrap initializes only local Pulumi state. It
+			// performs no provider call, so it must not require a token.
+			if cmd != "bootstrap" || *cloud != "civo" {
+				if err := requireIdentityMatch(context.Background(), *cellSelector, *configPath); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -406,15 +435,53 @@ func run(args []string) error {
 	if *cloud == "gcp" && *gcpProject == "" {
 		return fmt.Errorf("-gcp-project is required with -cloud gcp")
 	}
+	if *k8sVersion == "" {
+		*k8sVersion = defaultK8sVersion(*cloud)
+	}
 	if *cloud == "civo" {
 		if *backendFlag != "local" {
 			return fmt.Errorf("-cloud civo currently requires -backend local (development state must be an explicit opt-out)")
 		}
-		if *civoAdminCIDR == "" && cmd != "outputs" && cmd != "cell-health" && cmd != "destroy" && cmd != "refresh" {
-			return fmt.Errorf("-civo-admin-cidr is required with -cloud civo; use your public IP as a /32")
+		if (cmd == "up" || cmd == "preview") && *profile != "minimal" {
+			return fmt.Errorf("-cloud civo currently supports only -profile minimal (the production/HA profile is not implemented)")
 		}
-		if os.Getenv("CIVO_TOKEN") == "" && cmd != "outputs" {
-			return fmt.Errorf("CIVO_TOKEN is required with -cloud civo")
+		if (cmd == "up" || cmd == "preview") && *channel != "experimental" {
+			return fmt.Errorf("-cloud civo currently supports only -channel experimental")
+		}
+		if (cmd == "up" || cmd == "preview") && *controlPlane != "" && !*argocd {
+			return fmt.Errorf("-cloud civo with -control-plane requires -argocd so the cell has a public registrable endpoint")
+		}
+		for _, ignored := range []string{"cidr", "db-version", "domain"} {
+			if operatorExplicit[ignored] {
+				return fmt.Errorf("-%s does not apply to -cloud civo; Civo uses provider networking, native DNS, and in-cluster PostgreSQL", ignored)
+			}
+		}
+		if *civoAdminCIDR == "" && cmd != "outputs" && cmd != "cell-health" && cmd != "destroy" && cmd != "refresh" && cmd != "bootstrap" {
+			return fmt.Errorf("-civo-admin-cidr is required with -cloud civo")
+		}
+		if *civoAdminCIDR != "" {
+			if _, _, err := net.ParseCIDR(*civoAdminCIDR); err != nil {
+				return fmt.Errorf("-civo-admin-cidr %q is not a valid CIDR", *civoAdminCIDR)
+			}
+		}
+		if cmd != "outputs" && cmd != "cell-health" && cmd != "bootstrap" {
+			token, err := resolveCivoToken(*civoTokenFile)
+			if err != nil {
+				return err
+			}
+			if *civoExpectedAccountID != "" && *cellSelector == "" {
+				expected := *civoExpectedAccountID
+				id, err := whoamiCivoWithToken(context.Background(), cellEntry{
+					Region:          region,
+					SecurityContext: &securityContext{Civo: &civoContext{ExpectedAccountID: &expected}},
+				}, token)
+				if err != nil {
+					return err
+				}
+				if !id.OK {
+					return fmt.Errorf("%s", strings.Join(id.Notes, "; "))
+				}
+			}
 		}
 	}
 	// Cross-flag rejects come BEFORE any cloud work — an operator who typed
@@ -441,6 +508,16 @@ func run(args []string) error {
 	// bootstrap initializes the state backend (S3 + KMS) and returns; it is not a
 	// cell op, so it skips the stack/passphrase machinery below.
 	if cmd == "bootstrap" {
+		if *cloud == "civo" {
+			if err := os.MkdirAll(*stateDir, 0o755); err != nil {
+				return fmt.Errorf("create Civo local state dir: %w", err)
+			}
+			if _, err := ensurePassphrase(*stateDir); err != nil {
+				return err
+			}
+			fmt.Printf("Civo local state backend ready at %s (no cloud backend bootstrap required)\n", *stateDir)
+			return nil
+		}
 		return runBootstrap(*cloud, *region, regionCode, *awsProfile, *gcpProject, *azureSubscription)
 	}
 
@@ -604,7 +681,13 @@ func run(args []string) error {
 		}
 	}
 	if *cloud == "civo" {
-		env["CIVO_TOKEN"] = os.Getenv("CIVO_TOKEN")
+		if cmd != "outputs" && cmd != "cell-health" {
+			token, err := resolveCivoToken(*civoTokenFile)
+			if err != nil {
+				return err
+			}
+			env["CIVO_TOKEN"] = token
+		}
 	}
 
 	wsOpts = append(wsOpts, auto.EnvVars(env))
@@ -628,25 +711,35 @@ func run(args []string) error {
 
 	// Behavior config (cloud/profile/cidr) + the real region for the
 	// provider. The name components are encoded in the cell/stack name itself.
-	for k, v := range map[string]string{
+	stackConfig := map[string]string{
 		"witself:cloud":            *cloud,
 		"witself:profile":          *profile,
-		"witself:cidr":             *cidr,
 		"witself:accountAlias":     *accountAlias,
 		"witself:role":             *role,
 		"witself:channel":          *channel,
 		"witself:k8sVersion":       *k8sVersion,
-		"witself:dbVersion":        *dbVersion,
 		"witself:argocd":           fmt.Sprintf("%t", *argocd),
 		"witself:gitopsRepo":       *gitopsRepo,
 		"witself:gitopsPath":       *gitopsPath,
 		"witself:gitopsValuesPath": *gitopsValuesPath,
 		"witself:gitopsRevision":   *gitopsRevision,
-		"witself:domain":           *domain,
-		"witself:cloudflareDNS":    fmt.Sprintf("%t", cloudflareDelegation),
-	} {
+	}
+	if *cloud != "civo" {
+		stackConfig["witself:cidr"] = *cidr
+		stackConfig["witself:dbVersion"] = *dbVersion
+		stackConfig["witself:domain"] = *domain
+		stackConfig["witself:cloudflareDNS"] = fmt.Sprintf("%t", cloudflareDelegation)
+	}
+	for k, v := range stackConfig {
 		if err := stack.SetConfig(ctx, k, auto.ConfigValue{Value: v}); err != nil {
 			return fmt.Errorf("set config %s: %w", k, err)
+		}
+	}
+	if *cloud == "civo" && (cmd == "up" || cmd == "preview") {
+		for _, key := range []string{"witself:cidr", "witself:dbVersion", "witself:domain", "witself:cloudflareDNS"} {
+			if err := stack.RemoveConfig(ctx, key); err != nil {
+				return fmt.Errorf("clear inapplicable Civo config %s: %w", key, err)
+			}
 		}
 	}
 	switch *cloud {

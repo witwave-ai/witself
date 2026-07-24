@@ -98,12 +98,11 @@ type civoCell struct {
 	name              string
 	region            string
 	profile           string
+	k8sVersion        string
 	accountAlias      string
 	role              string
 	nodeSize          string
 	adminCIDR         string
-	domain            string
-	cloudflareDNS     bool
 	argocd            bool
 	gitopsRepo        string
 	gitopsPath        string
@@ -124,14 +123,14 @@ func Program(ctx *pulumi.Context) error {
 	az := config.New(ctx, "azure-native")
 	cv := config.New(ctx, "civo")
 
-	cloud := w.Get("cloud")     // aws | gcp | azure
+	cloud := w.Get("cloud")     // aws | gcp | azure | civo
 	profile := w.Get("profile") // minimal | prod
 	cidr := w.Get("cidr")
 	if cidr == "" {
 		cidr = "10.20.0.0/16"
 	}
 	k8sVersion := w.Get("k8sVersion")
-	if k8sVersion == "" {
+	if k8sVersion == "" && (cloud == "" || cloud == "aws" || cloud == "azure") {
 		k8sVersion = "1.36"
 	}
 	dbVersion := w.Get("dbVersion")
@@ -234,12 +233,11 @@ func Program(ctx *pulumi.Context) error {
 			name:              cellName,
 			region:            cv.Get("region"),
 			profile:           profile,
+			k8sVersion:        k8sVersion,
 			accountAlias:      w.Get("accountAlias"),
 			role:              w.Get("role"),
 			nodeSize:          nodeSize,
 			adminCIDR:         w.Get("civoAdminCIDR"),
-			domain:            domain,
-			cloudflareDNS:     cloudflareDNS,
 			argocd:            argocd,
 			gitopsRepo:        gitopsRepo,
 			gitopsPath:        gitopsPath,

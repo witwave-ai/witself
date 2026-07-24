@@ -174,7 +174,6 @@ platform:
 		return err
 	}
 
-	ctx.Export("kubeconfig", pulumi.ToSecret(cluster.Kubeconfig))
 	ctx.Export("argocdNamespace", pulumi.String(argocdNamespace))
 	ctx.Export("gitops", pulumi.String(c.gitopsRepo+" @ "+c.gitopsRevision+" ("+c.gitopsPath+" + "+c.gitopsValuesPath+")"))
 	ctx.Export("dbInstance", pulumi.String("witself-postgresql"))

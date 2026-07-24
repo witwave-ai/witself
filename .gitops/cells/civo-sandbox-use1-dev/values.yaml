@@ -2,34 +2,17 @@ cell:
   name: civo-sandbox-use1-dev
   cloud: civo
   region: nyc1
+  # These checked-in names are documentation/defaults only. The supported
+  # Civo Pulumi path replaces both values with the cluster's Civo-managed
+  # DNS name before Argo CD applies this file. Do not deploy this values file
+  # directly: externalDNS is intentionally disabled for Civo.
   domain: cells.witself.witwave.ai
   apiHost: api.civo-sandbox-use1-dev.cells.witself.witwave.ai
 
 gitops:
   repoURL: https://github.com/witwave-ai/witself
-  targetRevision: codex/civo-provider
+  targetRevision: main
   valuesPath: .gitops/cells/civo-sandbox-use1-dev/values.yaml
-
-platform:
-  awsAlbIngress:
-    enabled: false
-  certManager:
-    enabled: true
-    chartVersion: v1.20.3
-    namespace: cert-manager
-    serviceAccountAnnotations: {}
-    podLabels: {}
-  externalDNS:
-    enabled: false
-  externalSecrets:
-    enabled: false
-    serviceAccountAnnotations: {}
-    azureVaultURL: ""
-  keda:
-    enabled: false
-  # Civo's K3s profile supplies metrics-server.
-  metricsServer:
-    enabled: false
 
 apps:
   civoPostgres:
@@ -41,8 +24,8 @@ apps:
   witselfServer:
     enabled: true
     namespace: witself
-    chartVersion: 0.0.207
-    imageTag: 0.0.207
+    chartVersion: 0.0.210
+    imageTag: 0.0.210
     backendKind: managed
     replicaCount: 1
     podDisruptionBudget:
@@ -81,3 +64,24 @@ apps:
         enabled: true
         targetName: witself-provision
         tokenKey: token
+
+platform:
+  awsAlbIngress:
+    enabled: false
+  certManager:
+    enabled: true
+    chartVersion: v1.20.3
+    namespace: cert-manager
+    serviceAccountAnnotations: {}
+    podLabels: {}
+  externalDNS:
+    enabled: false
+  externalSecrets:
+    enabled: false
+    serviceAccountAnnotations: {}
+    azureVaultURL: ""
+  keda:
+    enabled: false
+  # Civo's K3s profile supplies metrics-server.
+  metricsServer:
+    enabled: false

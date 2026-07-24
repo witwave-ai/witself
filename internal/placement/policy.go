@@ -26,7 +26,7 @@ type Policy struct {
 var ErrInvalidPolicy = errors.New("invalid placement policy")
 
 var (
-	legalClouds        = []string{"aws", "gcp", "azure"}
+	legalClouds        = []string{"aws", "gcp", "azure", "civo"}
 	legalChannels      = []string{"stable", "edge", "experimental"}
 	legalRebalanceAxes = []string{"cloud", "region", "channel"}
 )

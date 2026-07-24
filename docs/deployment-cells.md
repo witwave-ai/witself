@@ -112,9 +112,9 @@ in the audit-event registry alongside `tenant.migration_started` /
 
 ## Multi-cloud
 
-The fleet spans AWS, GCP, and Azure, across multiple accounts per cloud. Each cell is
+The fleet spans AWS, GCP, Azure, and Civo, across multiple accounts per cloud. Each cell is
 one cloud account/region. An independent second AWS account is not a special case — it
-is simply another cell. The fleet reuses the AWS, GCP, and Azure paths in the
+is simply another cell. The fleet reuses the AWS, GCP, Azure, and Civo paths in the
 Pulumi cell program described by [cloud-targets.md](cloud-targets.md); adding a
 cloud account or project means standing up another stack and registering its
 cell with the control plane.

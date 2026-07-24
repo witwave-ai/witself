@@ -93,6 +93,14 @@ type azureContext struct {
 	Tenant       *string `yaml:"tenant,omitempty"`
 }
 
+// civoContext pins the account UUID returned by Civo's auth exchange. The
+// API token itself remains environment-only; this non-secret identifier keeps
+// a valid token for the wrong Civo account from provisioning a parallel cell.
+type civoContext struct {
+	TokenFile         *string `yaml:"token_file,omitempty"`
+	ExpectedAccountID *string `yaml:"expected_account_id,omitempty"`
+}
+
 // securityContext names WHICH identity a cell's operations run as —
 // references only (profile names, subscription/project IDs, credential
 // file PATHS), never credential material. One shape per cloud.
@@ -100,6 +108,7 @@ type securityContext struct {
 	AWS   *awsContext   `yaml:"aws,omitempty"`
 	GCP   *gcpContext   `yaml:"gcp,omitempty"`
 	Azure *azureContext `yaml:"azure,omitempty"`
+	Civo  *civoContext  `yaml:"civo,omitempty"`
 }
 
 // cellEntry is one cell's configuration — pointer fields so "absent"
@@ -183,6 +192,10 @@ func (e *cellEntry) flagValues() map[string]string {
 		}
 		if sc.Azure != nil {
 			set("azure-subscription", sc.Azure.Subscription)
+		}
+		if sc.Civo != nil {
+			set("civo-token-file", sc.Civo.TokenFile)
+			set("civo-expected-account-id", sc.Civo.ExpectedAccountID)
 		}
 	}
 	return out

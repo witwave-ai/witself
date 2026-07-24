@@ -80,7 +80,7 @@ func provisionCivo(ctx *pulumi.Context, c civoCell) error {
 		return err
 	}
 
-	cluster, err := civo.NewKubernetesCluster(ctx, "civo-cluster", &civo.KubernetesClusterArgs{
+	clusterArgs := &civo.KubernetesClusterArgs{
 		Name:         pulumi.String(rname(c.name, "")),
 		Region:       pulumi.String(c.region),
 		NetworkId:    network.ID().ToStringOutput(),
@@ -94,8 +94,15 @@ func provisionCivo(ctx *pulumi.Context, c civoCell) error {
 			Size:      pulumi.String(c.nodeSize),
 		},
 		Tags:            pulumi.String("witself " + c.name + " development"),
-		WriteKubeconfig: pulumi.Bool(c.argocd),
-	},
+		WriteKubeconfig: pulumi.Bool(true),
+	}
+	// Omission means "latest stable" in Civo's API. An explicit
+	// -k8s-version pins a reproducible K3s version and participates in
+	// Pulumi previews/upgrades like the AWS and Azure versions do.
+	if c.k8sVersion != "" {
+		clusterArgs.KubernetesVersion = pulumi.String(c.k8sVersion)
+	}
+	cluster, err := civo.NewKubernetesCluster(ctx, "civo-cluster", clusterArgs,
 		pulumi.DependsOn([]pulumi.Resource{firewall}),
 		pulumi.IgnoreChanges([]string{"tags"}),
 	)
@@ -106,6 +113,8 @@ func provisionCivo(ctx *pulumi.Context, c civoCell) error {
 	ctx.Export("clusterName", cluster.Name)
 	ctx.Export("clusterEndpoint", cluster.ApiEndpoint)
 	ctx.Export("clusterReady", cluster.Ready)
+	ctx.Export("kubernetesVersion", cluster.KubernetesVersion)
+	ctx.Export("kubeconfig", pulumi.ToSecret(cluster.Kubeconfig))
 	ctx.Export("civoRegion", pulumi.String(c.region))
 	ctx.Export("civoNodeSize", pulumi.String(c.nodeSize))
 	ctx.Export("network", network.ID())

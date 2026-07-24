@@ -85,6 +85,13 @@ verbatim to confirm). Ctrl+c under a running op offers keep/cancel —
 never a silent kill. Operations run as subprocesses of the same
 binary, so the dashboard drives exactly what scripts drive.
 
+Civo is a first-class dashboard provider. Its overview shows the effective
+node size, Kubernetes version policy, API firewall CIDR, native Civo DNS, and
+Traefik NodePort ingress instead of displaying the managed-database, VPC CIDR,
+and delegated-domain settings used by the hyperscalers. Its Health tab probes
+the K3s API, node readiness, Argo applications, public endpoint, control-plane
+registration, and Civo token authentication.
+
 `-progress-json` on `up`/`preview`/`destroy` additionally emits NDJSON
 phase events on stderr (`{"ts","phase","state","cell","note"}`) for
 machine consumers.
@@ -109,6 +116,43 @@ F="-cloud aws -account-alias sandbox -region us-west-2 -role dev -aws-profile wi
 ./bin/witself-infra outputs $F
 ./bin/witself-infra destroy $F
 ```
+
+### Civo development cell
+
+Civo uses one inexpensive K3s worker, native Civo DNS, Traefik NodePort
+ingress, cert-manager, and an in-cluster PostgreSQL volume. The control plane is
+free and no managed load balancer is created. A token is read from a per-cell
+mode-0600 file (recommended for multi-account operation) or from the
+`CIVO_TOKEN` environment fallback. Its value is never written to `infra.yaml`
+or Pulumi config.
+
+```sh
+install -m 600 /dev/null "$HOME/.witself/tokens/civo-sandbox.token"
+# Write the Civo API token into that file using your password manager/editor.
+
+./bin/witself-infra config add-cell \
+  -cloud civo -account-alias sandbox -region nyc1 -role dev \
+  -backend local \
+  -state-dir "$HOME/.witself/infra-state/civo-sandbox-use1-dev" \
+  -civo-token-file "$HOME/.witself/tokens/civo-sandbox.token" \
+  -civo-expected-account-id 00000000-0000-0000-0000-000000000000 \
+  -civo-node-size g4s.kube.medium \
+  -civo-admin-cidr 203.0.113.7/32 \
+  -argocd \
+  -control-plane https://self.witwave.ai
+
+./bin/witself-infra whoami -cell civo-sandbox-use1-dev
+./bin/witself-infra preview -cell civo-sandbox-use1-dev
+./bin/witself-infra up -cell civo-sandbox-use1-dev
+./bin/witself-infra cell-health -cell civo-sandbox-use1-dev
+./bin/witself-infra dashboard
+```
+
+Omit `-k8s-version` to let Civo choose its latest stable K3s release, or
+provide a Civo version such as `1.35.0-k3s1` to pin it. Civo currently uses an
+explicit local Pulumi backend for this development tier; `bootstrap -cell
+civo-sandbox-use1-dev` initializes that directory locally and performs no
+cloud-side backend work.
 
 Inputs split two ways: **functional** (`-cloud`, `-region`, `-profile`) drive
 behavior; **labels** (`-account-alias`, `-role`) are free text used only in the
