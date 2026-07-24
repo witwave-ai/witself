@@ -178,11 +178,21 @@ thread, message, or content value is a metric label.
 2. Legacy applied snapshots without `messaging_entitlement_version` continue to
    allow messaging; this prevents a cell-first rollout from disabling existing
    accounts.
-3. Before fleet reconciliation, set the founder account's explicit indefinite
-   retention override and explicit enabled override.
-4. Reconcile the new catalog. Every new snapshot carries entitlement version
-   1, after which the explicit `messaging` feature is authoritative.
-5. Enable retention in `preview`, review value-free eligible/deferred counts,
+3. Keep `CP_PLAN_LIFECYCLE_ENABLED=false` until the new cell is converged. This
+   gate deliberately removes the lifecycle and admin-policy routes as well as
+   pausing the cron, so an override cannot be pre-seeded while it is false.
+4. Just after a five-minute cron boundary, enable and activate lifecycle, then
+   immediately set the founder account's explicit messaging-enabled override
+   first and its explicit indefinite-retention override second. Verify both
+   responses report the override, the intended effective value, and
+   `apply_pending=false`.
+5. Allow the catalog cron to reconcile every account. Every new snapshot
+   carries entitlement version 1, after which the explicit `messaging` feature
+   is authoritative. A cron racing the founder mutations is safe: the durable
+   Enterprise classification keeps messaging enabled, the later
+   compare-and-swap mutation preserves its override, and cleanup remains
+   disabled throughout this phase.
+6. Enable retention in `preview`, review value-free eligible/deferred counts,
    then switch to `enforce` in a config-only worker rollout.
 
 After a version-1 snapshot is accepted, do not roll that account back to a

@@ -177,6 +177,17 @@ response. The command fails closed unless that response is valid and reports
 logs, or response bodies. Set `WITSELF_CONTROL_PLANE` only when activating a
 non-production HTTPS endpoint.
 
+The lifecycle gate also controls registration of plan-status and admin-policy
+routes inside the Go container. Consequently, an override introduced by the
+same release cannot be written while the gate is false. For a rollout that
+needs such an override, first converge the compatible cell while every
+destructive worker remains disabled. Then activate lifecycle just after a cron
+boundary, write the access-preserving override first, write the retention
+override second, and verify both are applied before enabling cleanup. A
+concurrent cron and admin mutation serialize through the lifecycle record's
+compare-and-swap and per-account apply fence; the disabled worker is the
+data-safety barrier during that short ordering window.
+
 Each Worker maintenance cron loads one opaque directory cursor from
 `DIRECTORY` KV, selects one bounded page (100 active accounts), and sends that
 page to Go through an authenticated, value-free lifecycle tick. The tick stores
