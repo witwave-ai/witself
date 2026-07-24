@@ -1,10 +1,13 @@
 package lifecycle
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/witwave-ai/witself/internal/blob"
@@ -28,6 +31,23 @@ type R2Store struct {
 }
 
 var _ Store = (*R2Store)(nil)
+
+// r2LimitAuditKindPrefix makes account-limit audit metadata survive a rollback
+// to a binary whose Record/AdminChange structs predate LimitOverrides. Such a
+// binary still knows and preserves AdminChange.Kind, ActorID, ActorHandle,
+// Reason, and At while dropping unknown JSON fields. Encoding the new audit
+// fields into Kind therefore lets a later Phase A binary reconstruct the exact
+// override state by replaying history, without a second non-atomic R2 object.
+const r2LimitAuditKindPrefix = "witself.limit-override.v1:"
+
+type r2LimitAuditEnvelope struct {
+	Kind       string             `json:"kind"`
+	Dimension  string             `json:"dimension"`
+	From       *AccountLimitValue `json:"from"`
+	To         *AccountLimitValue `json:"to"`
+	FromSource string             `json:"from_source"`
+	ToSource   string             `json:"to_source"`
+}
 
 // NewR2Store returns an R2Store on c, namespacing every key under prefix
 // (e.g. "registry/"). prefix may be empty.
@@ -60,8 +80,8 @@ func (s *R2Store) get(ctx context.Context, accountID string) (Record, string, bo
 	if err != nil {
 		return Record{}, "", false, err
 	}
-	var r Record
-	if err := json.Unmarshal(data, &r); err != nil {
+	r, err := unmarshalR2Record(data)
+	if err != nil {
 		return Record{}, "", false, fmt.Errorf("r2store: decode record %s: %w", accountID, err)
 	}
 	return r, etag, true, nil
@@ -110,7 +130,7 @@ func (s *R2Store) Put(ctx context.Context, r Record) error {
 	if r.Version == 0 {
 		next := r
 		next.Version = 1
-		data, err := json.Marshal(next)
+		data, err := marshalR2Record(next)
 		if err != nil {
 			return fmt.Errorf("r2store: encode record: %w", err)
 		}
@@ -130,7 +150,7 @@ func (s *R2Store) Put(ctx context.Context, r Record) error {
 	}
 	next := r
 	next.Version = r.Version + 1
-	data, err := json.Marshal(next)
+	data, err := marshalR2Record(next)
 	if err != nil {
 		return fmt.Errorf("r2store: encode record: %w", err)
 	}
@@ -158,11 +178,221 @@ func (s *R2Store) List(ctx context.Context) ([]Record, error) {
 		if err != nil {
 			return nil, err
 		}
-		var r Record
-		if err := json.Unmarshal(data, &r); err != nil {
+		r, err := unmarshalR2Record(data)
+		if err != nil {
 			return nil, fmt.Errorf("r2store: decode record %s: %w", k, err)
 		}
 		out = append(out, r)
 	}
 	return out, nil
+}
+
+func cloneAccountLimitValue(value *AccountLimitValue) *AccountLimitValue {
+	if value == nil {
+		return nil
+	}
+	out := &AccountLimitValue{}
+	if value.Max != nil {
+		maxValue := *value.Max
+		out.Max = &maxValue
+	}
+	return out
+}
+
+func normalizeR2LimitAudit(change AdminChange) (r2LimitAuditEnvelope, error) {
+	if change.Kind != "limit_override_set" &&
+		change.Kind != "limit_override_cleared" {
+		return r2LimitAuditEnvelope{}, fmt.Errorf("unsupported normalized kind %q", change.Kind)
+	}
+	dimension, err := validateAccountLimit(change.LimitDimension, nil)
+	if err != nil {
+		return r2LimitAuditEnvelope{}, fmt.Errorf("invalid dimension: %w", err)
+	}
+	if dimension != change.LimitDimension {
+		return r2LimitAuditEnvelope{}, errors.New("dimension is not normalized")
+	}
+	if change.LimitFrom == nil || change.LimitTo == nil {
+		return r2LimitAuditEnvelope{}, errors.New("from and to value wrappers are required")
+	}
+	if _, err := validateAccountLimit(dimension, change.LimitFrom.Max); err != nil {
+		return r2LimitAuditEnvelope{}, fmt.Errorf("invalid from value: %w", err)
+	}
+	if _, err := validateAccountLimit(dimension, change.LimitTo.Max); err != nil {
+		return r2LimitAuditEnvelope{}, fmt.Errorf("invalid to value: %w", err)
+	}
+	switch change.Kind {
+	case "limit_override_set":
+		if change.LimitToSource != "override" ||
+			(change.LimitFromSource != "inherited" &&
+				change.LimitFromSource != "override") {
+			return r2LimitAuditEnvelope{}, errors.New("invalid set sources")
+		}
+	case "limit_override_cleared":
+		if change.LimitFromSource != "override" ||
+			change.LimitToSource != "inherited" {
+			return r2LimitAuditEnvelope{}, errors.New("invalid clear sources")
+		}
+	}
+	return r2LimitAuditEnvelope{
+		Kind:       change.Kind,
+		Dimension:  dimension,
+		From:       cloneAccountLimitValue(change.LimitFrom),
+		To:         cloneAccountLimitValue(change.LimitTo),
+		FromSource: change.LimitFromSource,
+		ToSource:   change.LimitToSource,
+	}, nil
+}
+
+func encodeR2LimitAuditKind(change AdminChange) (string, error) {
+	envelope, err := normalizeR2LimitAudit(change)
+	if err != nil {
+		return "", err
+	}
+	payload, err := json.Marshal(envelope)
+	if err != nil {
+		return "", err
+	}
+	return r2LimitAuditKindPrefix +
+		base64.RawURLEncoding.EncodeToString(payload), nil
+}
+
+func decodeR2LimitAuditKind(kind string) (r2LimitAuditEnvelope, error) {
+	encoded := strings.TrimPrefix(kind, r2LimitAuditKindPrefix)
+	if encoded == kind || encoded == "" {
+		return r2LimitAuditEnvelope{}, errors.New("missing limit-audit envelope")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return r2LimitAuditEnvelope{}, fmt.Errorf("decode base64url: %w", err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	var envelope r2LimitAuditEnvelope
+	if err := decoder.Decode(&envelope); err != nil {
+		return r2LimitAuditEnvelope{}, fmt.Errorf("decode JSON: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return r2LimitAuditEnvelope{}, errors.New("multiple JSON values")
+		}
+		return r2LimitAuditEnvelope{}, fmt.Errorf("decode trailing JSON: %w", err)
+	}
+	change := AdminChange{
+		Kind:            envelope.Kind,
+		LimitDimension:  envelope.Dimension,
+		LimitFrom:       envelope.From,
+		LimitTo:         envelope.To,
+		LimitFromSource: envelope.FromSource,
+		LimitToSource:   envelope.ToSource,
+	}
+	normalized, err := normalizeR2LimitAudit(change)
+	if err != nil {
+		return r2LimitAuditEnvelope{}, err
+	}
+	return normalized, nil
+}
+
+func restoreR2LimitAudit(change *AdminChange, envelope r2LimitAuditEnvelope) {
+	change.Kind = envelope.Kind
+	change.LimitDimension = envelope.Dimension
+	change.LimitFrom = cloneAccountLimitValue(envelope.From)
+	change.LimitTo = cloneAccountLimitValue(envelope.To)
+	change.LimitFromSource = envelope.FromSource
+	change.LimitToSource = envelope.ToSource
+}
+
+func replayR2LimitOverrides(
+	current map[string]AccountLimitOverride,
+	changes []AdminChange,
+) map[string]AccountLimitOverride {
+	var overrides map[string]AccountLimitOverride
+	if current != nil {
+		overrides = make(map[string]AccountLimitOverride, len(current))
+		for dimension, override := range current {
+			if override.Max != nil {
+				maxValue := *override.Max
+				override.Max = &maxValue
+			}
+			overrides[dimension] = override
+		}
+	}
+	for _, change := range changes {
+		switch change.Kind {
+		case "limit_override_set":
+			if overrides == nil {
+				overrides = map[string]AccountLimitOverride{}
+			}
+			override := AccountLimitOverride{
+				ActorID: change.ActorID, ActorHandle: change.ActorHandle,
+				Reason: change.Reason, SetAt: change.At,
+			}
+			if change.LimitTo.Max != nil {
+				maxValue := *change.LimitTo.Max
+				override.Max = &maxValue
+			}
+			overrides[change.LimitDimension] = override
+		case "limit_override_cleared":
+			delete(overrides, change.LimitDimension)
+		}
+	}
+	if len(overrides) == 0 {
+		return nil
+	}
+	return overrides
+}
+
+func marshalR2Record(r Record) ([]byte, error) {
+	stored := clone(r)
+	for i := range stored.AdminHistory {
+		change := &stored.AdminHistory[i]
+		if strings.HasPrefix(change.Kind, r2LimitAuditKindPrefix) {
+			envelope, err := decodeR2LimitAuditKind(change.Kind)
+			if err != nil {
+				return nil, fmt.Errorf("admin history %d: malformed reserved kind: %w", i, err)
+			}
+			restoreR2LimitAudit(change, envelope)
+		}
+		if change.Kind != "limit_override_set" &&
+			change.Kind != "limit_override_cleared" {
+			continue
+		}
+		kind, err := encodeR2LimitAuditKind(*change)
+		if err != nil {
+			return nil, fmt.Errorf("admin history %d: encode limit audit: %w", i, err)
+		}
+		change.Kind = kind
+	}
+	return json.Marshal(stored)
+}
+
+func unmarshalR2Record(data []byte) (Record, error) {
+	var r Record
+	if err := json.Unmarshal(data, &r); err != nil {
+		return Record{}, err
+	}
+	replay := make([]AdminChange, 0)
+	for i := range r.AdminHistory {
+		change := &r.AdminHistory[i]
+		if strings.HasPrefix(change.Kind, r2LimitAuditKindPrefix) {
+			envelope, err := decodeR2LimitAuditKind(change.Kind)
+			if err != nil {
+				return Record{}, fmt.Errorf(
+					"admin history %d: malformed reserved kind: %w", i, err)
+			}
+			restoreR2LimitAudit(change, envelope)
+			replay = append(replay, *change)
+			continue
+		}
+		// Before this envelope existed, development builds could write the
+		// normal kind plus the new fields directly. Replay those when they are
+		// complete, but leave unrelated/legacy history untouched.
+		if change.Kind == "limit_override_set" ||
+			change.Kind == "limit_override_cleared" {
+			if _, err := normalizeR2LimitAudit(*change); err == nil {
+				replay = append(replay, *change)
+			}
+		}
+	}
+	r.LimitOverrides = replayR2LimitOverrides(r.LimitOverrides, replay)
+	return r, nil
 }

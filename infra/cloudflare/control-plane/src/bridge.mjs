@@ -13,6 +13,7 @@
 //   external proxy:
 //     GET|PUT|DELETE /v1/admin/accounts/{id}/transcript-retention
 //     GET|PUT|DELETE /v1/admin/accounts/{id}/plan-override
+//     GET|PUT|DELETE /v1/admin/accounts/{id}/limit-overrides/{dimension}
 //     Authorization: Bearer $INTERNAL_BRIDGE_TOKEN
 //     X-Witself-Admin-ID: <Worker-verified immutable admin id>
 //     X-Witself-Admin-Handle: <Worker-verified non-secret handle>
@@ -29,8 +30,9 @@
 // the container, or a configuration error could turn a callback into a loop.
 
 const ACCOUNT_ID_PATTERN = "[A-Za-z0-9_-]{1,128}";
+const LIMIT_DIMENSION_PATTERN = "(?:realms|agents|stored_secret)";
 const ADMIN_POLICY_PATH = new RegExp(
-  `^/v1/admin/accounts/(${ACCOUNT_ID_PATTERN})/(transcript-retention|plan-override)$`,
+  `^/v1/admin/accounts/(${ACCOUNT_ID_PATTERN})/(?:transcript-retention|plan-override|limit-overrides/${LIMIT_DIMENSION_PATTERN})$`,
 );
 const INTERNAL_RESOLVE_PATH = new RegExp(
   `^/v1/internal/accounts/(${ACCOUNT_ID_PATTERN}):resolve$`,

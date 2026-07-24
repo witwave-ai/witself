@@ -54,6 +54,7 @@ var upgraders = map[int]Upgrader{
 	60: preserveSchema60Rows,
 	61: preserveSchema61Rows,
 	63: preserveSchema63Rows,
+	66: preserveSchema66Rows,
 }
 
 const (
@@ -61,6 +62,14 @@ const (
 	legacyAvatarRetainedPayloadByteLimit  = 2 * 1024 * 1024
 	legacyAvatarMaximumPayloadBytes       = 128 * 1024
 )
+
+// preserveSchema66Rows acknowledges migration 0067's widening of the sealed
+// mutation-receipt operation and target checks. A schema-66 archive cannot
+// contain secret_delete receipts, so every existing row remains valid without
+// transformation in schema 67.
+func preserveSchema66Rows(_ string, row map[string]any) (map[string]any, error) {
+	return row, nil
+}
 
 // preserveSchema56Rows acknowledges the agent_dashboard_preferences table
 // added by migration 0057. A schema-56 archive carries no dashboard

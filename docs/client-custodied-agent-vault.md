@@ -2,8 +2,8 @@
 
 Status: authoritative implementation and release plan. ADR 0003 is accepted.
 The agent-owned vertical, multi-installation enrollment, offline recovery, and
-crash-resumable AVK rotation are implemented through schema `0056`; only the
-explicitly listed follow-on slices remain planned. Last reviewed 2026-07-19.
+crash-resumable AVK rotation are implemented through schema `0067`; only the
+explicitly listed follow-on slices remain planned. Last reviewed 2026-07-23.
 
 This document turns Witself's agent-secrets product into buildable slices. It is
 the authoritative custody and delivery contract wherever an older sealed-plane
@@ -27,14 +27,15 @@ Google Cloud, and Azure.
 
 The implemented vertical includes:
 
-- migrations `0055` and `0056` with agent vault-key bindings, structured
+- migrations `0055`, `0056`, and `0067` with agent vault-key bindings, structured
   secrets, fields, wrapped DEKs, enrollment and rotation lifecycles, and
-  idempotency receipts;
+  idempotency receipts including guarded tombstone deletion;
 - client-only AVK generation, owner-only local key files, AES-256-GCM field
   envelopes, password generation, TOTP parsing, and TOTP calculation;
-- agent-token HTTP routes for current-key status/registration, create,
+- agent-token HTTP routes for current-key status/registration, create and
+  retained-capacity status,
   redacted list/search/show, one-field encrypted material access, archive, and
-  restore;
+  restore and tombstone delete;
 - short-lived recipient-bound installation enrollment, passphrase-encrypted
   offline recovery artifacts, and client-driven, crash-resumable AVK rotation;
 - CLI access to the complete client-custody path and MCP access to the ordinary
@@ -45,7 +46,7 @@ The implemented vertical includes:
 
 The following are deliberately not claims of this vertical: secret update,
 dedicated TOTP enroll/delete convenience commands, runtime injection,
-cross-agent grants or group ownership, permanent secret deletion,
+cross-agent grants or group ownership, irreversible secret purge or crypto-shred,
 installation proof-of-possession beyond the implemented pairing ceremony, and
 the live four-runtime by three-cloud certification matrix. Those are follow-on
 slices and must not be inferred from older target-contract documents.
@@ -400,13 +401,30 @@ The first slice accepts no caller-supplied owner override.
   retained on the terminal lifecycle row and value-free audit event.
 - `POST /v1/secrets` creates public fields and client-encrypted envelopes in one
   transaction. Clients generate immutable `sec_`, `fld_`, and `dek_` ids before
-  AAD construction.
+  AAD construction. It counts active and archived top-level bundles in the
+  token-bound owner-agent scope. A missing `stored_secret` key is unlimited and
+  zero is a real cap. Same-owner creates and tombstone deletes serialize on a
+  stable owner-agent row across replicas, while different agents remain
+  independent. An exact idempotent replay is resolved before the limit gate.
+- `GET /v1/secrets:status` returns only `used`, `max`, `remaining`,
+  `unlimited`, and `over_limit`. Unlimited status has `null` maximum and
+  remaining values. At the exact boundary, `over_limit` is false even though
+  another create is refused.
 - `GET /v1/secrets` performs bounded public metadata/full-text search.
 - `GET /v1/secrets/{id}` returns redacted detail and permitted public values.
 - **Planned:** `PATCH /v1/secrets/{id}` uses exact row versions and accepts
   complete new envelopes for changed sensitive fields.
 - `POST /v1/secrets/{id}:archive` and `:restore` are idempotent lifecycle
-  operations. Permanent deletion is a separately confirmed follow-on.
+  operations.
+- `POST /v1/secrets/{id}:delete` requires
+  `{"expected_row_version": N}` and an `Idempotency-Key`. It tombstones an
+  active or archived secret, increments the row version, returns a redacted
+  tombstone and value-free receipt, and releases retained capacity. In the same
+  transaction it scrubs the secret's identifying/public metadata and deletes
+  all field and wrapped-DEK rows. Only a minimal value-free tombstone plus
+  receipt/audit evidence remains for replay and recovery bookkeeping; ordinary
+  list/show/access paths exclude tombstones. Irreversible purge of that minimal
+  tombstone is a separately confirmed follow-on.
 - `POST /v1/secrets/{id}/fields/{field_id}:access` authorizes and returns exactly
   one ciphertext plus wrapped-DEK package with `Cache-Control: no-store`. It
   never returns plaintext.
@@ -427,9 +445,25 @@ witself vault key recovery export|inspect|import
 witself vault key rotate (--recovery-out FILE|--accept-unrecoverable-key-loss)
 witself vault key rotation status|cancel
 witself password generate
-witself secret create|list|search|show|reveal|archive|restore
+witself secret create|status|list|search|show|reveal|archive|restore|delete
 witself totp show|code SECRET FIELD
 ```
+
+The implemented capacity and deletion forms are:
+
+```text
+witself secret status [agent connection flags] [--json]
+witself secret delete SECRET [--lifecycle active|archived]
+  [--expected-row-version N] [--idempotency-key KEY]
+  [agent connection flags] [--json]
+```
+
+`secret status` is value-free. `secret delete` resolves the current row version
+and generates a retry key when omitted. The equivalent MCP tools are
+`witself.secret.status` (read-only and idempotent) and
+`witself.secret.delete` (destructive and idempotent, with required
+`secret_id`, `expected_row_version`, and `idempotency_key` inputs); neither
+returns a secret value.
 
 Exact lifecycle forms are:
 
@@ -565,7 +599,7 @@ Codex, Claude Code, Cursor, and Grok Build receive the same rules:
 
 ## Export and Cloud Portability
 
-The schema-56 archive adds public key metadata, terminal enrollment/rotation
+The schema-67 archive adds public key metadata, terminal enrollment/rotation
 history and receipts, secrets, fields, wrapped DEKs, and secret mutation
 receipts in foreign-key order. Export fails while any enrollment is `pending`
 or `approved` or any rotation is `open`; it never freezes or serializes an
@@ -584,6 +618,19 @@ a local `.key`, raw AVK, target private key, pairing secret, recovery
 passphrase, or recovery artifact. The manifest and import allowlist require
 every introduced stream, even when empty. The offline recovery artifact is a
 separate client-owned file and must be transferred independently.
+
+Direct account import is intentionally exempt from the ordinary
+`stored_secret` create gate. A maximum may be lowered below one or more agents'
+retained counts before export; import must still restore every encrypted bundle,
+resume without mutation, and permit existing access/decryption while refusing
+subsequent ordinary creates under the current resolved maximum.
+
+Migration `0067_add_secret_delete_receipts.sql` adds `secret_delete` to the
+closed receipt vocabulary with validated replacement constraints. Its down
+migration refuses to restore the legacy constraints when any delete receipt
+exists. A rollback across this boundary is therefore backup-required and must
+not erase durable retry/audit evidence. The schema-66 archive upgrader is a
+pass-through because an older archive cannot contain delete receipts.
 
 After import into an AWS, GCP, or Azure cell, an installation must separately
 provide the matching AVK by moving its protected local key, importing its
@@ -616,10 +663,10 @@ Exit: one authoritative decrypt owner and no migration collision.
 
 Exit: sensitive bytes round-trip locally and no server component has a key.
 
-### 2. Schema and store — implemented through `0056`
+### 2. Schema and store — implemented through `0067`
 
-- Migrations `0055` and `0056`, constraints, search indexes, lifecycle tables,
-  and migration tests.
+- Migrations `0055`, `0056`, and `0067`, constraints, search indexes, lifecycle
+  tables, retained-capacity enforcement, and migration tests.
 - Agent-scoped key registration plus secret create/query/lifecycle store
   methods.
 - Idempotency, optimistic concurrency, lifecycle, audit, and usage.
@@ -638,8 +685,9 @@ Exit: local clients manage envelopes through one portable API.
 
 ### 4. CLI — implemented
 
-- Key init/status, password generation, create/search/show/reveal, and
-  archive/restore are implemented. Update is a follow-on.
+- Key init/status, password generation, create/status/search/show/reveal,
+  archive/restore, and guarded tombstone delete are implemented. Update and
+  irreversible purge are follow-ons.
 - Enrollment begin/approve/complete/list/status/cancel, offline recovery
   export/inspect/import, and recovery-gated rotation/start-resume/status/cancel
   are implemented with the controlling-TTY credential boundary.
@@ -680,7 +728,7 @@ operations evidence planned
 
 - Short-lived enrollment relay, client-only offline recovery, and crash-resumable
   client-driven rotation.
-- Export/import streams and strict validators for every sealed and schema-56
+- Export/import streams and strict validators for every sealed and schema-67
   lifecycle table, including active-work export blocking.
 - Ciphertext round-trip, wrong/missing-key, cancel/retry, and migration tests.
 - Audit query, usage, metrics, retention, backup, and key-loss runbooks.
@@ -701,8 +749,8 @@ Exit: release evidence covers all 12 runtime/cloud combinations.
 ## Deferred Slices
 
 Secret update/replacement, grants and group/cross-agent sharing, runtime
-reference injection, dedicated TOTP enrollment/removal commands, permanent
-secret deletion, attachments, OS keychain/secure-enclave integration,
+reference injection, dedicated TOTP enrollment/removal commands, irreversible
+secret purge or crypto-shred, attachments, OS keychain/secure-enclave integration,
 additional installation proof-of-possession, and browser-native filling remain
 separate slices. Versioned key epochs and immutable bindings keep them
 additive. Gemini adapter work, Copilot transcript-hook conformance, and the live

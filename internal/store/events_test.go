@@ -92,7 +92,7 @@ func TestVerbRegistryCoverage(t *testing.T) {
 		VerbVaultKeyRotationStarted, VerbVaultKeyRotationStaged,
 		VerbVaultKeyRotationCommitted, VerbVaultKeyRotationCancelled,
 		VerbSecretCreated, VerbSecretUpdated,
-		VerbSecretArchived, VerbSecretRestored,
+		VerbSecretArchived, VerbSecretRestored, VerbSecretDeleted,
 		VerbSecretMaterialDelivered, VerbSecretDEKRewrapped,
 
 		VerbSupportTicketOpened, VerbSupportTicketReplied,
@@ -146,6 +146,7 @@ func TestSecretAuditSchemasAreExactAgentOnlyAndValueFree(t *testing.T) {
 		{VerbSecretUpdated, []string{"agent_id", "secret_id", "secret_revision", "changed_field_count"}},
 		{VerbSecretArchived, []string{"agent_id", "secret_id", "secret_revision"}},
 		{VerbSecretRestored, []string{"agent_id", "secret_id", "secret_revision"}},
+		{VerbSecretDeleted, []string{"agent_id", "secret_id", "secret_revision"}},
 		{VerbSecretMaterialDelivered, []string{
 			"agent_id", "secret_id", "field_id", "value_version", "key_version", "encrypted_bytes",
 		}},

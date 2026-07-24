@@ -1,15 +1,16 @@
 # Witself API Routes
 
-> **Sealed-plane implementation amendment (accepted 2026-07-19):** schema 56
-> adds multi-installation AVK enrollment and crash-resumable AVK rotation to the
-> current agent-owned ciphertext API. The exact implemented routes are listed in
+> **Sealed-plane implementation amendment (accepted 2026-07-23):** schema 67
+> extends the current agent-owned ciphertext API through multi-installation AVK
+> enrollment, crash-resumable AVK rotation, retained-secret status/enforcement,
+> and guarded tombstone deletion. The exact implemented routes are listed in
 > [Implemented sealed-plane routes](#implemented-sealed-plane-routes). They
 > return public metadata, ciphertext, and wrapped DEKs only; the server never
 > receives an AVK, pairing secret, enrollment private key, recovery artifact or
 > passphrase, plaintext secret value, TOTP seed/code, or AI/model inference.
-> Secret update/delete/grants, group ownership, runtime injection, and
-> server-side reveal/TOTP routes described in target sections below remain
-> unregistered and are superseded wherever they conflict with
+> Secret update, irreversible purge, grants, group ownership, runtime
+> injection, and server-side reveal/TOTP routes described in target sections
+> below remain unregistered and are superseded wherever they conflict with
 > [ADR 0003](decisions/0003-client-custodied-agent-vault.md).
 
 Status: draft. Decision: Witself uses resource-oriented `/v1` routes with
@@ -57,10 +58,12 @@ POST /v1/vault/rotations/{rotation}:commit
 POST /v1/vault/rotations/{rotation}:cancel
 
 GET  /v1/secrets
+GET  /v1/secrets:status
 POST /v1/secrets
 GET  /v1/secrets/{secret_id}
 POST /v1/secrets/{secret_id}:archive
 POST /v1/secrets/{secret_id}:restore
+POST /v1/secrets/{secret_id}:delete
 POST /v1/secrets/{secret_id}/fields/{field_id}:access
 ```
 
@@ -342,15 +345,17 @@ POST /v1/groups/{group_id}/facts
 # Implemented sealed plane: agent-owned, ciphertext-only API.
 # See the authoritative route list above for key enrollment and rotation.
 GET  /v1/secrets
+GET  /v1/secrets:status
 POST /v1/secrets
 GET  /v1/secrets/{secret_id}
 POST /v1/secrets/{secret_id}:archive
 POST /v1/secrets/{secret_id}:restore
+POST /v1/secrets/{secret_id}:delete
 POST /v1/secrets/{secret_id}/fields/{field_id}:access
 
-# Target-only sealed routes; not registered in schema 56.
+# Target-only sealed routes; not registered in schema 67.
 PATCH  /v1/secrets/{secret_id}
-DELETE /v1/secrets/{secret_id}
+DELETE /v1/secrets/{secret_id}  # irreversible purge, not tombstone delete
 POST   /v1/secrets/{secret_id}:copy
 POST   /v1/secrets/{secret_id}:grant
 POST   /v1/secrets/{secret_id}:revoke
@@ -782,10 +787,28 @@ audit events; read-only recall does neither:
   ciphertext and wrapped-DEK package with `Cache-Control: no-store`; local CLI
   or MCP code performs the reveal. There is no server-side decrypt or plaintext
   response shape.
+- `GET /v1/secrets:status` returns the authenticated owner agent's value-free
+  retained capacity: `used`, nullable `max`, nullable `remaining`, `unlimited`,
+  and `over_limit`. Active and archived bundles count; tombstones do not.
+  Missing `stored_secret` means unlimited and zero is a real cap.
+- `POST /v1/secrets` returns HTTP 403 with
+  `code: "stored_secret_limit_reached"`, `retryable: false`, and a `limit`
+  object when an ordinary create would exceed the owner-agent cap. Exact
+  idempotent replay is resolved before the gate. Same-owner create/delete
+  capacity changes serialize across replicas.
 - `POST /v1/secrets/{secret_id}:archive` is the reversible soft-retire path and
   `POST /v1/secrets/{secret_id}:restore` reverses it within the retention
-  window. Permanent `DELETE`, `PATCH` update, copy, grants/group ownership, and
-  server-side TOTP routes are target-only and are not registered in schema 56.
+  window.
+- `POST /v1/secrets/{secret_id}:delete` accepts
+  `{"expected_row_version": N}` plus `Idempotency-Key` and performs a guarded
+  tombstone delete of an active or archived secret. It increments the row
+  version, returns a redacted tombstone and value-free receipt, and releases
+  retained capacity. The same transaction scrubs identifying/public secret
+  metadata and deletes all field and wrapped-DEK rows. Ordinary get/list/access
+  routes exclude the remaining minimal value-free tombstone. Permanent
+  `DELETE` purge of that tombstone, `PATCH` update, copy, grants/group
+  ownership, and server-side TOTP routes are target-only and are not registered
+  in schema 67.
 - `/v1/vault/enrollments` implements the five-state, short-lived transfer
   lifecycle. `:receive` is an opaque target read; `:consume` proves durable
   local receipt before terminal capsule purge. Collection/exact lifecycle reads
@@ -1068,7 +1091,7 @@ reference forms `witself://agent/<agent>/secret/<path>/<field>` and
 `--owner-agent` is an operator/admin or policy-granted action; resolving or
 revealing another agent's or a group's secret requires a grant (`secret:grant`
 issued via `:grant`) or a realm role, never the open cross-agent read policy.
-They are not registered in schema 56. `DELETE /v1/agents/{agent_id}` also
+They are not registered in schema 67. `DELETE /v1/agents/{agent_id}` also
 returns conflict while that agent has pending/approved enrollment or an open
 rotation, because deletion would revoke the tokens needed to settle the work.
 
@@ -1090,7 +1113,7 @@ evaluates it.
 
 Identity export and import are first-class Witself resources: the open plane
 (memories and facts) exports as plaintext, the headline durable-state feature.
-The sealed plane participates only as its client-encrypted state: schema-56
+The sealed plane participates only as its client-encrypted state: schema-67
 archives include public AVK bindings, terminal enrollment/rotation history,
 ciphertext, wrapped DEKs, and value-free receipts, never plaintext values, TOTP
 seeds, AVKs, local key files, pairing/passphrase material, or recovery

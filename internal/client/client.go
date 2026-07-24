@@ -27,6 +27,24 @@ var ErrUnauthorized = errors.New("unauthorized")
 // Other 409 responses deliberately remain untyped.
 var ErrSecretVaultKeyMismatch = errors.New("agent vault key mismatch")
 
+// ErrSecretLimitReached identifies a non-retryable create refusal caused by
+// the authenticated owner's retained-secret plan cap.
+var ErrSecretLimitReached = errors.New("stored secret limit reached")
+
+// SecretLimitError preserves the server's value-free capacity snapshot.
+type SecretLimitError struct {
+	Status SecretLimitStatus
+}
+
+func (e *SecretLimitError) Error() string {
+	if e == nil || e.Status.Max == nil {
+		return ErrSecretLimitReached.Error()
+	}
+	return fmt.Sprintf("%s: %d/%d retained", ErrSecretLimitReached,
+		e.Status.Used, *e.Status.Max)
+}
+func (e *SecretLimitError) Unwrap() error { return ErrSecretLimitReached }
+
 // ErrNotFound wraps 404 responses while preserving the server's existing
 // human-readable error text. Callers use it for capability-compatible
 // fallbacks, such as a new client talking to a pre-activity server.
@@ -219,12 +237,16 @@ func doJSONWithHeadersTimeout(ctx context.Context, method, url, token string, he
 
 func responseError(resp *http.Response, fallback string) error {
 	var out struct {
-		Error string `json:"error"`
-		Code  string `json:"code"`
+		Error string            `json:"error"`
+		Code  string            `json:"code"`
+		Limit SecretLimitStatus `json:"limit"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err == nil && out.Error != "" {
 		if resp.StatusCode == http.StatusConflict && out.Code == "secret_vault_key_mismatch" {
 			return fmt.Errorf("%w", ErrSecretVaultKeyMismatch)
+		}
+		if resp.StatusCode == http.StatusForbidden && out.Code == "stored_secret_limit_reached" {
+			return &SecretLimitError{Status: out.Limit}
 		}
 		return fmt.Errorf("%s", out.Error)
 	}

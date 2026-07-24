@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -31,6 +32,7 @@ type runtimeMetrics struct {
 	vectorSearches     map[vectorSearchMetricLabels]uint64
 	vectorFallbacks    map[vectorFallbackMetricLabels]uint64
 	curationOperations map[operationMetricLabels]uint64
+	secretLimitRejects map[secretLimitMetricLabels]uint64
 }
 
 type httpMetricLabels struct {
@@ -65,6 +67,10 @@ type vectorFallbackMetricLabels struct {
 	Reason string
 }
 
+type secretLimitMetricLabels struct {
+	LimitDimension, Operation string
+}
+
 type metricHistogram struct {
 	Buckets []uint64
 	Count   uint64
@@ -85,6 +91,7 @@ func newRuntimeMetrics() *runtimeMetrics {
 		vectorSearches:     make(map[vectorSearchMetricLabels]uint64),
 		vectorFallbacks:    make(map[vectorFallbackMetricLabels]uint64),
 		curationOperations: make(map[operationMetricLabels]uint64),
+		secretLimitRejects: make(map[secretLimitMetricLabels]uint64),
 	}
 }
 
@@ -127,6 +134,19 @@ func (m *runtimeMetrics) observeHTTP(method, pattern string, status int, elapsed
 }
 
 func (m *runtimeMetrics) instrumentConfig(cfg Config) Config {
+	if operation := cfg.CreateSecret; operation != nil {
+		cfg.CreateSecret = func(ctx context.Context, p DomainPrincipal, in CreateSecretRequest) (SecretMutationResult, error) {
+			result, err := operation(ctx, p, in)
+			if errors.Is(err, ErrSecretLimitReached) {
+				m.mu.Lock()
+				m.secretLimitRejects[secretLimitMetricLabels{
+					LimitDimension: "stored_secret", Operation: "create",
+				}]++
+				m.mu.Unlock()
+			}
+			return result, err
+		}
+	}
 	if operation := cfg.CaptureMemory; operation != nil {
 		cfg.CaptureMemory = func(ctx context.Context, p DomainPrincipal, in CaptureMemoryRequest) (MemoryMutationResult, error) {
 			result, err := operation(ctx, p, in)
@@ -342,6 +362,7 @@ func (m *runtimeMetrics) snapshot() *runtimeMetrics {
 		vectorSearches:     maps.Clone(m.vectorSearches),
 		vectorFallbacks:    maps.Clone(m.vectorFallbacks),
 		curationOperations: maps.Clone(m.curationOperations),
+		secretLimitRejects: maps.Clone(m.secretLimitRejects),
 	}
 }
 
@@ -394,6 +415,9 @@ func (m *runtimeMetrics) writePrometheusSnapshot(w io.Writer) {
 	})
 	writeCounterMap(w, "witself_memory_curation_operations_total", "Completed memory-curation domain calls by operation and result; idempotent replays are counted as calls.", m.curationOperations, func(k operationMetricLabels) string {
 		return labels("operation", k.Operation, "result", k.Result)
+	})
+	writeCounterMap(w, "witself_secret_limit_rejections_total", "Stored-secret create refusals by bounded limit dimension and operation.", m.secretLimitRejects, func(key secretLimitMetricLabels) string {
+		return labels("limit_dimension", key.LimitDimension, "operation", key.Operation)
 	})
 }
 

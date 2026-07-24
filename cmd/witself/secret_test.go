@@ -75,12 +75,14 @@ func TestSecretCommandHelpIsSuccessfulAndSideEffectFree(t *testing.T) {
 	commands := [][]string{
 		{"secret", "--help"},
 		{"secret", "create", "--help"},
+		{"secret", "status", "--help"},
 		{"secret", "list", "--help"},
 		{"secret", "search", "--help"},
 		{"secret", "show", "--help"},
 		{"secret", "reveal", "--help"},
 		{"secret", "archive", "--help"},
 		{"secret", "restore", "--help"},
+		{"secret", "delete", "--help"},
 		{"vault", "--help"},
 		{"vault", "key", "--help"},
 		{"vault", "key", "init", "--help"},
@@ -111,6 +113,83 @@ func TestSecretCommandHelpIsSuccessfulAndSideEffectFree(t *testing.T) {
 				t.Fatalf("run(%q) = %d stdout=%q stderr=%q", args, code, stdout, stderr)
 			}
 		})
+	}
+}
+
+func TestSecretDeleteExactRetryBypassesHiddenTombstoneResolution(t *testing.T) {
+	const (
+		accountID = "acc_abcdefghijklmnop"
+		secretID  = "sec_bbbbbbbbbbbbbbbb"
+		retryKey  = "delete-response-loss-retry"
+	)
+	var requests, unexpected int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method != http.MethodPost ||
+			r.URL.Path != "/v1/secrets/"+secretID+":delete" {
+			unexpected++
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer witself_agt_delete_test" {
+			t.Errorf("authorization = %q", got)
+		}
+		if got := r.Header.Get("Idempotency-Key"); got != retryKey {
+			t.Errorf("idempotency key = %q", got)
+		}
+		var input client.SecretLifecycleInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Error(err)
+		}
+		if input.ExpectedRowVersion != 7 {
+			t.Errorf("expected row version = %d", input.ExpectedRowVersion)
+		}
+		if requests == 1 {
+			http.Error(w, "committed response was lost", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(client.SecretMutationResult{
+			Secret: client.Secret{
+				ID: secretID, AccountID: accountID,
+				RealmID: "realm_abcdefghijklmnop", OwnerAgentID: "agent_abcdefghijklmnop",
+				Name: secretID, Template: "generic", Tags: []string{},
+				Lifecycle: "deleted", RowVersion: 8,
+			},
+			Receipt: client.SecretMutationReceipt{
+				Operation: "secret_delete", TargetKind: "secret",
+				TargetID: secretID, ResultRevision: 8, Replayed: true,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	if err := local.Save("default", local.Account{ID: accountID}, "operator-token"); err != nil {
+		t.Fatal(err)
+	}
+	tokenFile := filepath.Join(t.TempDir(), "agent.token")
+	if err := os.WriteFile(tokenFile, []byte("witself_agt_delete_test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{
+		"secret", "delete", secretID,
+		"--expected-row-version", "7", "--idempotency-key", retryKey,
+		"--account", "default", "--realm", "default", "--agent", "scott",
+		"--endpoint", srv.URL, "--token-file", tokenFile, "--json",
+	}
+	stdout, stderr, code := captureFactDeleteCLI(t, func() int { return run(args) })
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "502 Bad Gateway") {
+		t.Fatalf("first delete code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	stdout, stderr, code = captureFactDeleteCLI(t, func() int { return run(args) })
+	if code != 0 || stderr != "" ||
+		!strings.Contains(stdout, `"lifecycle":"deleted"`) ||
+		!strings.Contains(stdout, `"replayed":true`) {
+		t.Fatalf("retry delete code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if requests != 2 || unexpected != 0 {
+		t.Fatalf("delete retry requests=%d unexpected=%d", requests, unexpected)
 	}
 }
 

@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -299,6 +301,66 @@ func TestAccountPolicyCommandsRejectUnsafeMutations(t *testing.T) {
 				return accountPlanOverride([]string{"clear", "--account", "acct_1"})
 			},
 		},
+		{
+			name: "limit get needs dimension",
+			call: func() int {
+				return accountLimitOverride([]string{"get", "--account", "acct_1"})
+			},
+		},
+		{
+			name: "limit set needs selection",
+			call: func() int {
+				return accountLimitOverride([]string{
+					"set", "--account", "acct_1", "--dimension", "stored_secret",
+					"--reason", "bad",
+				})
+			},
+		},
+		{
+			name: "limit set rejects both including explicit zero",
+			call: func() int {
+				return accountLimitOverride([]string{
+					"set", "--account", "acct_1", "--dimension", "stored_secret",
+					"--max", "0", "--unlimited", "--reason", "bad",
+				})
+			},
+		},
+		{
+			name: "limit set rejects negative maximum",
+			call: func() int {
+				return accountLimitOverride([]string{
+					"set", "--account", "acct_1", "--dimension", "stored_secret",
+					"--max", "-1", "--reason", "bad",
+				})
+			},
+		},
+		{
+			name: "limit set needs reason",
+			call: func() int {
+				return accountLimitOverride([]string{
+					"set", "--account", "acct_1", "--dimension", "stored_secret",
+					"--unlimited",
+				})
+			},
+		},
+		{
+			name: "limit get rejects explicit max zero",
+			call: func() int {
+				return accountLimitOverride([]string{
+					"get", "--account", "acct_1", "--dimension", "stored_secret",
+					"--max", "0",
+				})
+			},
+		},
+		{
+			name: "limit clear rejects unlimited",
+			call: func() int {
+				return accountLimitOverride([]string{
+					"clear", "--account", "acct_1", "--dimension", "stored_secret",
+					"--unlimited", "--reason", "bad",
+				})
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -306,6 +368,61 @@ func TestAccountPolicyCommandsRejectUnsafeMutations(t *testing.T) {
 				t.Fatalf("exit code = %d, want 2", got)
 			}
 		})
+	}
+}
+
+func TestAccountLimitOverrideCLITransmitsExplicitZero(t *testing.T) {
+	var gotMethod, gotPath string
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		if r.Header.Get("Authorization") != "Bearer admin-token" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatal(err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version":   "witself.v0",
+			"account_id":       "acct_1",
+			"plan":             "free",
+			"billing_plan":     "free",
+			"applied":          "free",
+			"limits":           map[string]int64{"stored_secret": 0},
+			"limit_defaults":   map[string]int64{},
+			"limit_overrides":  map[string]any{},
+			"admin_history":    []any{},
+			"apply_pending":    false,
+			"desired_revision": 1,
+			"applied_revision": 1,
+			"limit": map[string]any{
+				"dimension": "stored_secret", "default_max": nil,
+				"effective_max": 0, "overridden": true,
+			},
+			"transcript_retention": map[string]any{
+				"default_days": 30, "effective_days": 30, "overridden": false,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	code := accountLimitOverride([]string{
+		"set", "--endpoint", srv.URL, "--token", "admin-token",
+		"--account", "acct_1", "--dimension", "stored_secret",
+		"--max", "0", "--reason", " pause ", "--json",
+	})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if gotMethod != http.MethodPut ||
+		gotPath != "/v1/admin/accounts/acct_1/limit-overrides/stored_secret" ||
+		gotBody["max"] != float64(0) ||
+		gotBody["reason"] != "pause" {
+		t.Fatalf("request = %s %s %#v", gotMethod, gotPath, gotBody)
+	}
+	if _, present := gotBody["unlimited"]; present {
+		t.Fatalf("explicit zero body also selected unlimited: %#v", gotBody)
 	}
 }
 

@@ -239,6 +239,9 @@ func (s *Service) submitJournaledCreate(ctx context.Context, identity client.Sel
 		if errors.Is(err, ErrIdentityMismatch) {
 			return nil, err
 		}
+		if errors.Is(err, client.ErrSecretLimitReached) {
+			return nil, err
+		}
 		if err != nil {
 			return nil, ErrOperation
 		}
@@ -259,6 +262,9 @@ func (s *Service) submitJournaledCreate(ctx context.Context, identity client.Sel
 		return result, nil
 	}
 	if errors.Is(err, ErrIdentityMismatch) {
+		return nil, err
+	}
+	if errors.Is(err, client.ErrSecretLimitReached) {
 		return nil, err
 	}
 	if !errors.Is(err, client.ErrSecretVaultKeyMismatch) {
@@ -315,6 +321,9 @@ func (s *Service) submitJournaledCreate(ctx context.Context, identity client.Sel
 	if errors.Is(err, ErrIdentityMismatch) {
 		return nil, err
 	}
+	if errors.Is(err, client.ErrSecretLimitReached) {
+		return nil, err
+	}
 	if err != nil {
 		return nil, ErrOperation
 	}
@@ -345,6 +354,9 @@ func (s *Service) retryAdvancedCreateJournal(ctx context.Context, identity clien
 	}
 	result, err := s.sendCreateRequest(ctx, identity, idempotencyKey, current)
 	if errors.Is(err, ErrIdentityMismatch) {
+		return nil, true, err
+	}
+	if errors.Is(err, client.ErrSecretLimitReached) {
 		return nil, true, err
 	}
 	if err != nil {

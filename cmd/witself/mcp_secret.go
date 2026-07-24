@@ -40,11 +40,15 @@ const (
 // implements the complete extension after pinning every operation to the
 // installed integration identity.
 type mcpSecretBackend interface {
+	SecretLimitStatus(context.Context) (*client.SecretLimitStatus, error)
 	SearchSecrets(context.Context, client.SecretListOptions) (*client.SecretPage, error)
 	ShowSecret(context.Context, string) (*client.Secret, error)
 	CreateSealedSecret(context.Context, secretclient.CreateInput) (*client.SecretMutationResult, error)
+	DeleteSecret(context.Context, string, client.SecretLifecycleInput) (*client.SecretMutationResult, error)
 	RevealSealedSecretField(context.Context, string, string, string) ([]byte, error)
 }
+
+type mcpSecretStatusInput struct{}
 
 type mcpSecretSearchInput struct {
 	Query         string   `json:"query,omitempty" jsonschema:"public metadata or explicitly non-sensitive value search query; omit to list inventory"`
@@ -95,6 +99,12 @@ type mcpSecretRevealInput struct {
 	IdempotencyKey string `json:"idempotency_key" jsonschema:"required fresh retry key for this exact sensitive-field access"`
 }
 
+type mcpSecretDeleteInput struct {
+	SecretID           string `json:"secret_id" jsonschema:"exact active or archived Witself secret id beginning with sec_"`
+	ExpectedRowVersion int64  `json:"expected_row_version" jsonschema:"exact positive row version last observed"`
+	IdempotencyKey     string `json:"idempotency_key" jsonschema:"required retry key for this exact tombstone operation"`
+}
+
 type mcpPasswordGenerateInput struct {
 	Length           int   `json:"length,omitempty" jsonschema:"password length from 1 to 4096; defaults to 32"`
 	Lowercase        *bool `json:"lowercase,omitempty" jsonschema:"include lowercase letters; defaults true"`
@@ -117,6 +127,10 @@ type mcpSecretSearchOutput struct {
 
 type mcpSecretOutput struct {
 	Secret client.Secret `json:"secret"`
+}
+
+type mcpSecretStatusOutput struct {
+	Limit client.SecretLimitStatus `json:"limit"`
 }
 
 type mcpSecretCreateOutput struct {
@@ -181,6 +195,17 @@ func (b configuredMCPBackend) SearchSecrets(ctx context.Context, options client.
 	return service.List(ctx, options)
 }
 
+func (b configuredMCPBackend) SecretLimitStatus(ctx context.Context) (*client.SecretLimitStatus, error) {
+	conn, _, err := b.connectAndVerify(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(b.cfg.AccountID) == "" {
+		return nil, errors.New("installed MCP binding has no account id; reinstall the integration before using agent secrets")
+	}
+	return client.GetSecretLimitStatus(ctx, conn.Endpoint, conn.Token)
+}
+
 func (b configuredMCPBackend) ShowSecret(ctx context.Context, secretID string) (*client.Secret, error) {
 	service, err := b.configuredSecretService(ctx)
 	if err != nil {
@@ -197,6 +222,17 @@ func (b configuredMCPBackend) CreateSealedSecret(ctx context.Context, input secr
 	return service.Create(ctx, input)
 }
 
+func (b configuredMCPBackend) DeleteSecret(ctx context.Context, secretID string, input client.SecretLifecycleInput) (*client.SecretMutationResult, error) {
+	conn, _, err := b.connectAndVerify(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(b.cfg.AccountID) == "" {
+		return nil, errors.New("installed MCP binding has no account id; reinstall the integration before using agent secrets")
+	}
+	return client.DeleteSecret(ctx, conn.Endpoint, conn.Token, secretID, input)
+}
+
 func (b configuredMCPBackend) RevealSealedSecretField(ctx context.Context, secretID, fieldID, idempotencyKey string) ([]byte, error) {
 	service, err := b.configuredSecretService(ctx)
 	if err != nil {
@@ -208,6 +244,21 @@ func (b configuredMCPBackend) RevealSealedSecretField(ctx context.Context, secre
 func registerSecretMCPTools(server *mcp.Server, runtimeName string, backend mcpSecretBackend) {
 	createTool := mcpToolName(runtimeName, "witself.secret.create")
 	totpCodeTool := mcpToolName(runtimeName, "witself.totp.code")
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        mcpToolName(runtimeName, "witself.secret.status"),
+		Description: "Show this authenticated agent's value-free retained-secret capacity: used, maximum, remaining, unlimited, and over-limit state. It never returns secret metadata or values.",
+		Annotations: mcpReadOnlyClosedWorldAnnotations(),
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ mcpSecretStatusInput) (*mcp.CallToolResult, mcpSecretStatusOutput, error) {
+		status, err := backend.SecretLimitStatus(ctx)
+		if err != nil {
+			return nil, mcpSecretStatusOutput{}, err
+		}
+		if status == nil {
+			return nil, mcpSecretStatusOutput{}, errors.New("secret limit status returned no result")
+		}
+		return nil, mcpSecretStatusOutput{Limit: *status}, nil
+	})
+
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        mcpToolName(runtimeName, "witself.secret.search"),
 		Description: "Search this authenticated agent's secret inventory using public metadata and explicitly non-sensitive field values. This is a redacted inventory operation: it never returns a sensitive value, ciphertext, wrapped key, AVK material, TOTP enrollment URI, or TOTP seed.",
@@ -294,6 +345,31 @@ func registerSecretMCPTools(server *mcp.Server, runtimeName string, backend mcpS
 		}
 		if result == nil {
 			return nil, mcpSecretCreateOutput{}, errors.New("secret create returned no result")
+		}
+		return nil, mcpSecretCreateOutput{
+			Secret: redactMCPSecret(result.Secret), Receipt: result.Receipt,
+		}, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        mcpToolName(runtimeName, "witself.secret.delete"),
+		Description: "Tombstone one exact active or archived secret for this authenticated agent using an optimistic revision fence and durable retry key. The redacted tombstone and value-free receipt are returned; retained capacity is released.",
+		Annotations: mcpWriteClosedWorldAnnotations(true, true),
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpSecretDeleteInput) (*mcp.CallToolResult, mcpSecretCreateOutput, error) {
+		in.SecretID = strings.TrimSpace(in.SecretID)
+		if !validMCPSecretResourceID(in.SecretID, "sec") ||
+			in.ExpectedRowVersion < 1 || !validMCPSecretRetryKey(in.IdempotencyKey) {
+			return nil, mcpSecretCreateOutput{}, errors.New("secret_id, expected_row_version, or idempotency_key is invalid")
+		}
+		result, err := backend.DeleteSecret(ctx, in.SecretID, client.SecretLifecycleInput{
+			ExpectedRowVersion: in.ExpectedRowVersion,
+			IdempotencyKey:     strings.TrimSpace(in.IdempotencyKey),
+		})
+		if err != nil {
+			return nil, mcpSecretCreateOutput{}, err
+		}
+		if result == nil {
+			return nil, mcpSecretCreateOutput{}, errors.New("secret delete returned no result")
 		}
 		return nil, mcpSecretCreateOutput{
 			Secret: redactMCPSecret(result.Secret), Receipt: result.Receipt,

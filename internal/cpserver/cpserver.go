@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -107,6 +108,12 @@ func Register(mux *http.ServeMux, cfg Config) error {
 			withAdmin(cfg, adminPutPlanOverride))
 		mux.HandleFunc("DELETE /v1/admin/accounts/{id}/plan-override",
 			withAdmin(cfg, adminDeletePlanOverride))
+		mux.HandleFunc("GET /v1/admin/accounts/{id}/limit-overrides/{dimension}",
+			withAdmin(cfg, adminGetLimitOverride))
+		mux.HandleFunc("PUT /v1/admin/accounts/{id}/limit-overrides/{dimension}",
+			withAdmin(cfg, adminPutLimitOverride))
+		mux.HandleFunc("DELETE /v1/admin/accounts/{id}/limit-overrides/{dimension}",
+			withAdmin(cfg, adminDeleteLimitOverride))
 	}
 	if cfg.LifecycleObserver != nil {
 		mux.HandleFunc("GET /v1/plan-lifecycle/status", func(w http.ResponseWriter, r *http.Request) {
@@ -267,6 +274,8 @@ func planStatus(cfg Config, w http.ResponseWriter, r *http.Request, accountID st
 		"plan":                 snapshot.Plan,
 		"billing_plan":         rec.Entitled,
 		"applied":              rec.Applied,
+		"limits":               snapshot.Limits,
+		"limit_defaults":       snapshot.DefaultLimits,
 		"policies":             snapshot.Policies,
 		"policy_defaults":      snapshot.DefaultPolicies,
 		"transcript_retention": transcriptRetentionView(rec, snapshot, false),
@@ -368,6 +377,7 @@ func writeAdminAccountPolicy(
 	r *http.Request,
 	accountID string,
 	mutation bool,
+	limitDimension string,
 ) {
 	rec, snapshot, err := cfg.Manager.ResolvedStatus(r.Context(), accountID, "")
 	if err != nil {
@@ -379,19 +389,44 @@ func writeAdminAccountPolicy(
 	if mutation && pending {
 		status = http.StatusAccepted
 	}
-	writeJSON(w, status, map[string]any{
+	out := map[string]any{
 		"schema_version":       "witself.v0",
 		"account_id":           accountID,
 		"plan":                 snapshot.Plan,
 		"billing_plan":         rec.Entitled,
 		"applied":              rec.Applied,
+		"limits":               snapshot.Limits,
+		"limit_defaults":       snapshot.DefaultLimits,
+		"limit_overrides":      rec.LimitOverrides,
 		"plan_override":        rec.PlanOverride,
 		"transcript_retention": transcriptRetentionView(rec, snapshot, true),
 		"admin_history":        rec.AdminHistory,
 		"apply_pending":        pending,
 		"desired_revision":     rec.SnapshotRevision,
 		"applied_revision":     rec.AppliedSnapshotRevision,
-	})
+	}
+	if limitDimension != "" {
+		var defaultMax any
+		if value, ok := snapshot.DefaultLimits[limitDimension]; ok {
+			defaultMax = value
+		}
+		var effectiveMax any
+		if value, ok := snapshot.Limits[limitDimension]; ok {
+			effectiveMax = value
+		}
+		override, overridden := rec.LimitOverrides[limitDimension]
+		limit := map[string]any{
+			"dimension":     limitDimension,
+			"default_max":   defaultMax,
+			"effective_max": effectiveMax,
+			"overridden":    overridden,
+		}
+		if overridden {
+			limit["override"] = override
+		}
+		out["limit"] = limit
+	}
+	writeJSON(w, status, out)
 }
 
 func adminGetTranscriptRetention(
@@ -401,7 +436,7 @@ func adminGetTranscriptRetention(
 	accountID string,
 	_ lifecycle.AdminActor,
 ) {
-	writeAdminAccountPolicy(cfg, w, r, accountID, false)
+	writeAdminAccountPolicy(cfg, w, r, accountID, false, "")
 }
 
 func adminPutTranscriptRetention(
@@ -431,7 +466,7 @@ func adminPutTranscriptRetention(
 		writeManagerError(w, err)
 		return
 	}
-	writeAdminAccountPolicy(cfg, w, r, accountID, true)
+	writeAdminAccountPolicy(cfg, w, r, accountID, true, "")
 }
 
 func adminDeleteTranscriptRetention(
@@ -454,7 +489,7 @@ func adminDeleteTranscriptRetention(
 		writeManagerError(w, err)
 		return
 	}
-	writeAdminAccountPolicy(cfg, w, r, accountID, true)
+	writeAdminAccountPolicy(cfg, w, r, accountID, true, "")
 }
 
 func adminGetPlanOverride(
@@ -464,7 +499,7 @@ func adminGetPlanOverride(
 	accountID string,
 	_ lifecycle.AdminActor,
 ) {
-	writeAdminAccountPolicy(cfg, w, r, accountID, false)
+	writeAdminAccountPolicy(cfg, w, r, accountID, false, "")
 }
 
 func adminPutPlanOverride(
@@ -488,7 +523,7 @@ func adminPutPlanOverride(
 		writeManagerError(w, err)
 		return
 	}
-	writeAdminAccountPolicy(cfg, w, r, accountID, true)
+	writeAdminAccountPolicy(cfg, w, r, accountID, true, "")
 }
 
 func adminDeletePlanOverride(
@@ -511,7 +546,108 @@ func adminDeletePlanOverride(
 		writeManagerError(w, err)
 		return
 	}
-	writeAdminAccountPolicy(cfg, w, r, accountID, true)
+	writeAdminAccountPolicy(cfg, w, r, accountID, true, "")
+}
+
+func adminLimitDimension(r *http.Request) (string, error) {
+	dimension := strings.TrimSpace(r.PathValue("dimension"))
+	if err := plans.ValidateLimits(map[string]int64{dimension: 0}); err != nil {
+		return "", err
+	}
+	return dimension, nil
+}
+
+func decodeStrictJSON(r *http.Request, target any) error {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
+func adminGetLimitOverride(
+	cfg Config,
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	_ lifecycle.AdminActor,
+) {
+	dimension, err := adminLimitDimension(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "unknown limit dimension")
+		return
+	}
+	writeAdminAccountPolicy(cfg, w, r, accountID, false, dimension)
+}
+
+func adminPutLimitOverride(
+	cfg Config,
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	actor lifecycle.AdminActor,
+) {
+	dimension, err := adminLimitDimension(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "unknown limit dimension")
+		return
+	}
+	var req struct {
+		Max       *int64 `json:"max"`
+		Unlimited bool   `json:"unlimited"`
+		Reason    string `json:"reason"`
+	}
+	if err := decodeStrictJSON(r, &req); err != nil ||
+		(req.Max == nil) == !req.Unlimited {
+		writeError(w, http.StatusBadRequest, "set exactly one of max or unlimited=true")
+		return
+	}
+	var limitMax *int64
+	if !req.Unlimited {
+		limitMax = req.Max
+	}
+	if _, err := cfg.Manager.SetAccountLimitOverride(
+		r.Context(), accountID, dimension, limitMax, actor, req.Reason,
+	); err != nil {
+		writeManagerError(w, err)
+		return
+	}
+	writeAdminAccountPolicy(cfg, w, r, accountID, true, dimension)
+}
+
+func adminDeleteLimitOverride(
+	cfg Config,
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	actor lifecycle.AdminActor,
+) {
+	dimension, err := adminLimitDimension(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "unknown limit dimension")
+		return
+	}
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if err := decodeStrictJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "a JSON body with reason is required")
+		return
+	}
+	if _, err := cfg.Manager.ClearAccountLimitOverride(
+		r.Context(), accountID, dimension, actor, req.Reason,
+	); err != nil {
+		writeManagerError(w, err)
+		return
+	}
+	writeAdminAccountPolicy(cfg, w, r, accountID, true, dimension)
 }
 
 // decodePlan reads the {"plan": "..."} body the change verbs share.

@@ -26,6 +26,19 @@ const SchemaVersion = "witself.plans.v0"
 const Free = "free"
 
 const (
+	// RealmLimit caps live realms account-wide.
+	RealmLimit = "realms"
+	// AgentLimit caps live agents account-wide.
+	AgentLimit = "agents"
+	// StoredSecretLimit caps retained top-level secrets independently for
+	// each owner agent. Active and archived secrets count; deleted secrets do
+	// not. A missing key means unlimited.
+	StoredSecretLimit = "stored_secret"
+	// MaxPlanLimit is the largest exact integer shared by Go and JavaScript's
+	// JSON number representation. Unlimited is represented by a missing key,
+	// never by an oversized sentinel.
+	MaxPlanLimit int64 = 9_007_199_254_740_991
+
 	// TranscriptRetentionDaysPolicy is the resolved behavioral-policy key
 	// cells enforce. Its absence means indefinite retention; zero is never a
 	// synonym for indefinite because an accidental zero must fail closed at
@@ -149,6 +162,9 @@ func Parse(raw []byte) (*Catalog, error) {
 		if p.PriceMonthly != nil && p.PriceMonthlyMin != nil {
 			return nil, fmt.Errorf("plan catalog: plan %q sets both price_monthly and price_monthly_min", p.ID)
 		}
+		if err := ValidateLimits(p.Limits); err != nil {
+			return nil, fmt.Errorf("plan catalog: plan %q: %w", p.ID, err)
+		}
 		if err := ValidatePolicies(p.Policies); err != nil {
 			return nil, fmt.Errorf("plan catalog: plan %q: %w", p.ID, err)
 		}
@@ -164,6 +180,25 @@ func Parse(raw []byte) (*Catalog, error) {
 		return nil, fmt.Errorf("plan catalog: the %q plan must be available", Free)
 	}
 	return c, nil
+}
+
+// ValidateLimits validates one resolved hard-cap snapshot. Keys are closed so
+// a misspelling cannot make a paid limit appear applied while every cell
+// silently ignores it. Zero is a real cap; unlimited is represented by an
+// omitted key.
+func ValidateLimits(limits map[string]int64) error {
+	for key, value := range limits {
+		switch key {
+		case RealmLimit, AgentLimit, StoredSecretLimit:
+		default:
+			return fmt.Errorf("unknown limit %q", key)
+		}
+		if value < 0 || value > MaxPlanLimit {
+			return fmt.Errorf("%s must be between 0 and %d (omit it for unlimited)",
+				key, MaxPlanLimit)
+		}
+	}
+	return nil
 }
 
 // ValidatePolicies validates one resolved policy snapshot. Policy keys are

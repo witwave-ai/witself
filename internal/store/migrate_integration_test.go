@@ -1955,9 +1955,13 @@ func migrationTestUpTo(t *testing.T, dsn string, version int64) {
 	t.Helper()
 	db := migrationTestSQLDB(t, dsn)
 	defer func() { _ = db.Close() }()
-	if err := goose.UpTo(db, "migrations", version); err != nil {
+	if err := migrationTestUpToDB(db, version); err != nil {
 		t.Fatalf("migrate test database to schema %d: %v", version, err)
 	}
+}
+
+func migrationTestUpToDB(db *sql.DB, version int64) error {
+	return goose.UpTo(db, "migrations", version)
 }
 
 func migrationTestDown(t *testing.T, dsn string, wantError bool) error {

@@ -150,14 +150,22 @@ func TestVaultKeyRotationStagesAndFlipsAtomically(t *testing.T) {
 		t.Fatalf("sensitive create during rotation error = %v", err)
 	}
 	publicValue := "public"
-	if _, err := st.CreateSecret(ctx, p, CreateSecretInput{
+	publicCreated, err := st.CreateSecret(ctx, p, CreateSecretInput{
 		ID: "sec_cccccccccccccccc", Name: "public during rotation", Template: "generic",
 		IdempotencyKey: "rotation-public-create",
 		Fields: []CreateSecretFieldInput{{ID: "fld_dddddddddddddddd", Name: "username",
 			Kind: SecretFieldUsername, Encoding: SecretEncodingUTF8,
 			ValueVersion: 1, PublicValue: &publicValue}},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("public create during rotation = %v", err)
+	}
+	deleteDuringRotation := SecretLifecycleInput{
+		ExpectedRowVersion: publicCreated.Secret.RowVersion,
+		IdempotencyKey:     "rotation-public-delete",
+	}
+	if _, err := st.DeleteSecret(ctx, p, publicCreated.Secret.ID, deleteDuringRotation); !errors.Is(err, ErrVaultKeyRotationInProgress) {
+		t.Fatalf("delete while rotation open error = %v", err)
 	}
 	materialBefore, err := st.AccessSecretField(ctx, p, secretID, fieldID,
 		AccessSecretFieldInput{IdempotencyKey: "rotation-access-before"})
@@ -259,6 +267,10 @@ func TestVaultKeyRotationStagesAndFlipsAtomically(t *testing.T) {
 	currentAfter, err := st.GetCurrentVaultKey(ctx, p)
 	if err != nil || currentAfter == nil || currentAfter.ID != newMetadata.ID || currentAfter.KeyVersion != 2 {
 		t.Fatalf("current after commit = %#v / %v", currentAfter, err)
+	}
+	deletedAfterCommit, err := st.DeleteSecret(ctx, p, publicCreated.Secret.ID, deleteDuringRotation)
+	if err != nil || deletedAfterCommit.Secret.Lifecycle != SecretLifecycleDeleted {
+		t.Fatalf("delete after rotation commit = %#v / %v", deletedAfterCommit, err)
 	}
 
 	thirdKey, err := sealed.GenerateAgentVaultKey(3)

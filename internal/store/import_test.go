@@ -1017,6 +1017,16 @@ func TestValidateAndRecordPlanShapes(t *testing.T) {
 			wantOK: false, want: `plan_limits["agents"] must be an integer`,
 		},
 		{
+			name:   "plan_limits reject unknown dimensions",
+			row:    map[string]any{"id": acc, "plan_limits": map[string]any{"stored_secrets": float64(1)}},
+			wantOK: false, want: `unknown limit "stored_secrets"`,
+		},
+		{
+			name:   "plan_limits reject negative values",
+			row:    map[string]any{"id": acc, "plan_limits": map[string]any{plans.StoredSecretLimit: float64(-1)}},
+			wantOK: false, want: "must be between 0",
+		},
+		{
 			name:   "plan_features must be an array",
 			row:    map[string]any{"id": acc, "plan_features": map[string]any{"x": true}},
 			wantOK: false, want: "plan_features must be an array",

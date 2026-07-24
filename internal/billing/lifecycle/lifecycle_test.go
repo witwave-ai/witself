@@ -154,6 +154,305 @@ func TestStatusIsReadOnly(t *testing.T) {
 	}
 }
 
+func TestAccountLimitOverrideLifecycleAndAttribution(t *testing.T) {
+	h := newHarness(t, false)
+	ctx := context.Background()
+	const accountID = "acct_limits"
+
+	_, inherited, err := h.m.ResolvedStatus(ctx, accountID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inherited.DefaultLimits[plans.AgentLimit] != 25 ||
+		inherited.Limits[plans.AgentLimit] != 25 {
+		t.Fatalf("inherited agent limit = defaults %v effective %v; want 25",
+			inherited.DefaultLimits, inherited.Limits)
+	}
+	if _, ok := inherited.Limits[plans.StoredSecretLimit]; ok {
+		t.Fatalf("Phase A stored-secret default unexpectedly finite: %v", inherited.Limits)
+	}
+
+	zero := int64(0)
+	if _, err := h.m.SetAccountLimitOverride(
+		ctx, accountID, plans.StoredSecretLimit, &zero,
+		testAdminActor(), "founder account test cap",
+	); err != nil {
+		t.Fatalf("SetAccountLimitOverride zero: %v", err)
+	}
+	r, snapshot, err := h.m.ResolvedStatus(ctx, accountID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	override, ok := r.LimitOverrides[plans.StoredSecretLimit]
+	if !ok || override.Max == nil || *override.Max != 0 ||
+		override.ActorID != testAdminActor().ID ||
+		override.ActorHandle != testAdminActor().Handle ||
+		override.Reason != "founder account test cap" {
+		t.Fatalf("stored-secret override attribution = %+v, present=%v", override, ok)
+	}
+	if r.Entitled != plans.Free || r.Provider != "" || r.CustomerID != "" {
+		t.Fatalf("limit override mutated billing state: %+v", r)
+	}
+	if _, finiteByDefault := snapshot.DefaultLimits[plans.StoredSecretLimit]; finiteByDefault ||
+		snapshot.Limits[plans.StoredSecretLimit] != 0 {
+		t.Fatalf("zero snapshot = defaults %v effective %v",
+			snapshot.DefaultLimits, snapshot.Limits)
+	}
+	if got := h.applier.last(t).limits[plans.StoredSecretLimit]; got != 0 {
+		t.Fatalf("applied stored-secret max = %d; want zero", got)
+	}
+	if len(r.AdminHistory) != 1 ||
+		r.AdminHistory[0].LimitDimension != plans.StoredSecretLimit ||
+		r.AdminHistory[0].LimitFromSource != "inherited" ||
+		r.AdminHistory[0].LimitToSource != "override" ||
+		r.AdminHistory[0].LimitTo == nil ||
+		r.AdminHistory[0].LimitTo.Max == nil ||
+		*r.AdminHistory[0].LimitTo.Max != 0 {
+		t.Fatalf("set audit = %+v", r.AdminHistory)
+	}
+
+	// Returned records must not alias MemStore's nested map or Max pointer.
+	override.Max = new(int64)
+	*override.Max = 99
+	r.LimitOverrides[plans.StoredSecretLimit] = override
+	again := h.record(t, accountID)
+	if got := *again.LimitOverrides[plans.StoredSecretLimit].Max; got != 0 {
+		t.Fatalf("MemStore override aliased caller mutation: got %d", got)
+	}
+
+	version, historyLen, applyCalls := again.Version, len(again.AdminHistory), len(h.applier.calls)
+	if _, err := h.m.SetAccountLimitOverride(
+		ctx, accountID, plans.StoredSecretLimit, &zero,
+		testAdminActor(), "idempotent retry",
+	); err != nil {
+		t.Fatalf("idempotent SetAccountLimitOverride: %v", err)
+	}
+	again = h.record(t, accountID)
+	if again.Version != version || len(again.AdminHistory) != historyLen ||
+		len(h.applier.calls) != applyCalls {
+		t.Fatalf("idempotent set wrote or applied: before version/history/apply=%d/%d/%d after=%d/%d/%d",
+			version, historyLen, applyCalls,
+			again.Version, len(again.AdminHistory), len(h.applier.calls))
+	}
+
+	// A present nil Max is an explicit unlimited override even though the
+	// Phase A catalog currently also omits this dimension.
+	if _, err := h.m.SetAccountLimitOverride(
+		ctx, accountID, plans.StoredSecretLimit, nil,
+		testAdminActor(), "founder account is unlimited",
+	); err != nil {
+		t.Fatalf("SetAccountLimitOverride unlimited: %v", err)
+	}
+	r, snapshot, err = h.m.ResolvedStatus(ctx, accountID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	override, ok = r.LimitOverrides[plans.StoredSecretLimit]
+	if !ok || override.Max != nil {
+		t.Fatalf("explicit unlimited override = %+v, present=%v", override, ok)
+	}
+	if _, finite := snapshot.Limits[plans.StoredSecretLimit]; finite {
+		t.Fatalf("unlimited effective limits = %v", snapshot.Limits)
+	}
+	unlimitedAudit := r.AdminHistory[len(r.AdminHistory)-1]
+	if unlimitedAudit.Kind != "limit_override_set" ||
+		unlimitedAudit.LimitFromSource != "override" ||
+		unlimitedAudit.LimitToSource != "override" ||
+		unlimitedAudit.LimitTo == nil || unlimitedAudit.LimitTo.Max != nil {
+		t.Fatalf("explicit-unlimited audit is ambiguous: %+v", unlimitedAudit)
+	}
+
+	historyLen = len(r.AdminHistory)
+	if _, err := h.m.SetAccountLimitOverride(
+		ctx, accountID, plans.StoredSecretLimit, nil,
+		testAdminActor(), "idempotent unlimited retry",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(h.record(t, accountID).AdminHistory); got != historyLen {
+		t.Fatalf("idempotent unlimited appended audit: %d -> %d", historyLen, got)
+	}
+
+	if _, err := h.m.ClearAccountLimitOverride(
+		ctx, accountID, plans.StoredSecretLimit,
+		testAdminActor(), "resume catalog inheritance",
+	); err != nil {
+		t.Fatalf("ClearAccountLimitOverride: %v", err)
+	}
+	r, snapshot, err = h.m.ResolvedStatus(ctx, accountID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.LimitOverrides[plans.StoredSecretLimit]; ok ||
+		r.LimitOverrides != nil {
+		t.Fatalf("cleared overrides = %v; want absent inheritance", r.LimitOverrides)
+	}
+	if _, finite := snapshot.Limits[plans.StoredSecretLimit]; finite {
+		t.Fatalf("cleared effective limits = %v; want catalog inheritance", snapshot.Limits)
+	}
+	clearAudit := r.AdminHistory[len(r.AdminHistory)-1]
+	if clearAudit.Kind != "limit_override_cleared" ||
+		clearAudit.LimitFromSource != "override" ||
+		clearAudit.LimitToSource != "inherited" {
+		t.Fatalf("clear audit = %+v", clearAudit)
+	}
+
+	// A finite override on a finite catalog dimension restores the current
+	// catalog default on clear.
+	if _, err := h.m.SetAccountLimitOverride(
+		ctx, accountID, plans.AgentLimit, &zero,
+		testAdminActor(), "pause agent creation",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.m.ClearAccountLimitOverride(
+		ctx, accountID, plans.AgentLimit,
+		testAdminActor(), "restore plan capacity",
+	); err != nil {
+		t.Fatal(err)
+	}
+	_, snapshot, err = h.m.ResolvedStatus(ctx, accountID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.DefaultLimits[plans.AgentLimit] != 25 ||
+		snapshot.Limits[plans.AgentLimit] != 25 {
+		t.Fatalf("cleared agent limit = defaults %v effective %v; want 25",
+			snapshot.DefaultLimits, snapshot.Limits)
+	}
+
+	beforeClear := h.record(t, accountID)
+	if _, err := h.m.ClearAccountLimitOverride(
+		ctx, accountID, plans.AgentLimit,
+		testAdminActor(), "idempotent clear",
+	); err != nil {
+		t.Fatal(err)
+	}
+	afterClear := h.record(t, accountID)
+	if afterClear.Version != beforeClear.Version ||
+		len(afterClear.AdminHistory) != len(beforeClear.AdminHistory) {
+		t.Fatalf("idempotent clear wrote: before=%+v after=%+v", beforeClear, afterClear)
+	}
+}
+
+func TestFounderUnlimitedOverrideOnAppliedUnlimitedSnapshotDoesNotReapply(t *testing.T) {
+	h := newHarness(t, false)
+	ctx := t.Context()
+	const accountID = "acct_founder"
+
+	created, pending, err := h.m.EnsureAccount(ctx, accountID)
+	if err != nil || !created || pending {
+		t.Fatalf("EnsureAccount = created=%v pending=%v err=%v", created, pending, err)
+	}
+	before, beforeSnapshot, err := h.m.ResolvedStatus(ctx, accountID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, finite := beforeSnapshot.Limits[plans.StoredSecretLimit]; finite {
+		t.Fatalf("test requires Phase A stored_secret absence, got %v", beforeSnapshot.Limits)
+	}
+	if SnapshotApplyPending(before, beforeSnapshot) || len(h.applier.calls) != 1 {
+		t.Fatalf("baseline not converged: record=%+v calls=%d", before, len(h.applier.calls))
+	}
+
+	if _, err := h.m.SetAccountLimitOverride(
+		ctx, accountID, plans.StoredSecretLimit, nil,
+		testAdminActor(), "founder account is explicitly unlimited",
+	); err != nil {
+		t.Fatal(err)
+	}
+	after, afterSnapshot, err := h.m.ResolvedStatus(ctx, accountID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	override, present := after.LimitOverrides[plans.StoredSecretLimit]
+	if !present || override.Max != nil ||
+		override.ActorID != testAdminActor().ID ||
+		override.ActorHandle != testAdminActor().Handle ||
+		override.Reason != "founder account is explicitly unlimited" {
+		t.Fatalf("founder unlimited attribution = %+v, present=%v", override, present)
+	}
+	if len(after.AdminHistory) != 1 ||
+		after.AdminHistory[0].Kind != "limit_override_set" ||
+		after.AdminHistory[0].LimitDimension != plans.StoredSecretLimit ||
+		after.AdminHistory[0].LimitFromSource != "inherited" ||
+		after.AdminHistory[0].LimitToSource != "override" ||
+		after.AdminHistory[0].LimitTo == nil ||
+		after.AdminHistory[0].LimitTo.Max != nil {
+		t.Fatalf("founder unlimited audit = %+v", after.AdminHistory)
+	}
+	if afterSnapshot.Hash != beforeSnapshot.Hash {
+		t.Fatalf("explicit unlimited changed effective hash: %s -> %s",
+			beforeSnapshot.Hash, afterSnapshot.Hash)
+	}
+	if SnapshotApplyPending(after, afterSnapshot) {
+		t.Fatalf("unchanged founder snapshot became apply-pending: %+v", after)
+	}
+	if len(h.applier.calls) != 1 {
+		t.Fatalf("unchanged founder snapshot made %d cell calls; want baseline call only",
+			len(h.applier.calls))
+	}
+}
+
+func TestAccountLimitOverrideApplyFailureAndCASRetry(t *testing.T) {
+	t.Run("apply failure remains pending", func(t *testing.T) {
+		h := newHarness(t, false)
+		h.applier.fail = true
+		zero := int64(0)
+		if _, err := h.m.SetAccountLimitOverride(
+			t.Context(), "acct_limit_pending", plans.AgentLimit, &zero,
+			testAdminActor(), "emergency cap",
+		); err != nil {
+			t.Fatal(err)
+		}
+		r, snapshot, err := h.m.ResolvedStatus(t.Context(), "acct_limit_pending", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.SnapshotRevision == 0 || r.DesiredSnapshotHash != snapshot.Hash ||
+			!SnapshotApplyPending(r, snapshot) || r.AppliedSnapshotRevision != 0 {
+			t.Fatalf("failed limit apply was not durably pending: record=%+v snapshot=%+v", r, snapshot)
+		}
+	})
+
+	t.Run("CAS retry preserves competing override", func(t *testing.T) {
+		h := newHarness(t, false)
+		ctx := t.Context()
+		const accountID = "acct_limit_race"
+		h.hooked.beforePut = func(Record) {
+			err := h.store.Put(ctx, Record{
+				AccountID: accountID,
+				Entitled:  plans.Free,
+				Applied:   plans.Free,
+				LimitOverrides: map[string]AccountLimitOverride{
+					plans.StoredSecretLimit: {
+						Max: nil, ActorID: "adm_competing",
+						ActorHandle: "other", Reason: "concurrent founder exception",
+						SetAt: h.ck.now(),
+					},
+				},
+			})
+			if err != nil {
+				t.Errorf("competing Put: %v", err)
+			}
+		}
+		seven := int64(7)
+		if _, err := h.m.SetAccountLimitOverride(
+			ctx, accountID, plans.AgentLimit, &seven,
+			testAdminActor(), "requested capacity",
+		); err != nil {
+			t.Fatal(err)
+		}
+		r := h.record(t, accountID)
+		if len(r.LimitOverrides) != 2 ||
+			r.LimitOverrides[plans.StoredSecretLimit].Max != nil ||
+			r.LimitOverrides[plans.AgentLimit].Max == nil ||
+			*r.LimitOverrides[plans.AgentLimit].Max != 7 {
+			t.Fatalf("CAS retry lost a limit override: %+v", r.LimitOverrides)
+		}
+	})
+}
+
 func TestAccountTranscriptRetentionOverrideIsIndependentOfBilling(t *testing.T) {
 	h := newHarness(t, false)
 	ctx := context.Background()

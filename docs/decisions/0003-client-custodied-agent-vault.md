@@ -212,7 +212,10 @@ rather than implying that client custody replaces token security.
 - agent-to-agent or group sharing using recipient-specific key wrappers;
 - encrypted attachments and large-object streaming;
 - browser-specific filling that keeps values out of model context;
-- permanent secret deletion and its recovery/retention policy.
+- irreversible purge of the minimal value-free secret tombstone and its
+  recovery/retention policy. The ordinary guarded delete now scrubs secret
+  metadata, fields, and wrapped DEKs while retaining that tombstone plus
+  receipt/audit evidence.
 
 None of these may introduce a backend-held plaintext or master-key path.
 

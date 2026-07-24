@@ -96,6 +96,17 @@ func clone(r Record) Record {
 		}
 		r.TranscriptRetentionOverride = &override
 	}
+	if r.LimitOverrides != nil {
+		overrides := make(map[string]AccountLimitOverride, len(r.LimitOverrides))
+		for dimension, override := range r.LimitOverrides {
+			if override.Max != nil {
+				maxValue := *override.Max
+				override.Max = &maxValue
+			}
+			overrides[dimension] = override
+		}
+		r.LimitOverrides = overrides
+	}
 	if r.AdminHistory != nil {
 		r.AdminHistory = append([]AdminChange(nil), r.AdminHistory...)
 		for i := range r.AdminHistory {
@@ -106,6 +117,22 @@ func clone(r Record) Record {
 			if r.AdminHistory[i].RetentionTo != nil {
 				value := *r.AdminHistory[i].RetentionTo
 				r.AdminHistory[i].RetentionTo = &value
+			}
+			if r.AdminHistory[i].LimitFrom != nil {
+				value := *r.AdminHistory[i].LimitFrom
+				if value.Max != nil {
+					maxValue := *value.Max
+					value.Max = &maxValue
+				}
+				r.AdminHistory[i].LimitFrom = &value
+			}
+			if r.AdminHistory[i].LimitTo != nil {
+				value := *r.AdminHistory[i].LimitTo
+				if value.Max != nil {
+					maxValue := *value.Max
+					value.Max = &maxValue
+				}
+				r.AdminHistory[i].LimitTo = &value
 			}
 		}
 	}

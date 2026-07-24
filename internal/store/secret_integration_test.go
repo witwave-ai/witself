@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/witwave-ai/witself/internal/id"
+	"github.com/witwave-ai/witself/internal/plans"
 	"github.com/witwave-ai/witself/internal/sealed"
 )
 
@@ -356,8 +357,89 @@ func TestAgentOwnedSecretPostgresAndArchiveRoundTrip(t *testing.T) {
 		t.Fatalf("secret material appeared in %d audit rows", unsafeAuditRows)
 	}
 
+	// Deletion keeps only a value-free tombstone and receipt. Prove the
+	// ciphertext, wrapped DEK, field metadata, and public secret metadata are
+	// gone before the archive is built, then replay the same receipt after the
+	// cell move below.
+	deletedSecretID := mustSecretTestID(t, "sec")
+	deletedFieldID := mustSecretTestID(t, "fld")
+	deletedScope := sealed.FieldScope{
+		Domain: sealed.FieldValueDomain, AccountID: p.AccountID, RealmID: p.RealmID,
+		OwnerAgentID: p.ID, SecretID: deletedSecretID, FieldID: deletedFieldID,
+	}
+	const deletedCanary = "deleted-ciphertext-canary-417"
+	deletedEnvelope, err := sealed.SealSensitiveField(avk, []byte(deletedCanary),
+		sealed.SensitiveFieldOptions{
+			Scope: deletedScope, ValueVersion: 1, DEKGeneration: 1,
+			ValueEncoding: sealed.ValueEncodingUTF8, WrapRevision: 1,
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deletedSealed := secretStoreEnvelope(deletedEnvelope)
+	deletedCreate, err := source.CreateSecret(ctx, p, CreateSecretInput{
+		ID: deletedSecretID, Name: "Delete before export",
+		Description: "must be scrubbed", Template: "login",
+		Tags: []string{"deleted"}, IdempotencyKey: "create-before-export-delete",
+		Fields: []CreateSecretFieldInput{{
+			ID: deletedFieldID, Name: "password", Kind: SecretFieldPassword,
+			Sensitive: true, Encoding: SecretEncodingUTF8, ValueVersion: 1,
+			Sealed: deletedSealed,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.AccessSecretField(ctx, p, deletedSecretID, deletedFieldID,
+		AccessSecretFieldInput{IdempotencyKey: "access-before-export-delete"}); err != nil {
+		t.Fatal(err)
+	}
+	deleteBeforeExport := SecretLifecycleInput{
+		ExpectedRowVersion: deletedCreate.Secret.RowVersion,
+		IdempotencyKey:     "delete-before-export",
+	}
+	deletedBeforeExport, err := source.DeleteSecret(ctx, p, deletedSecretID,
+		deleteBeforeExport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deletedBeforeExport.Secret.Lifecycle != SecretLifecycleDeleted ||
+		deletedBeforeExport.Secret.Name != deletedSecretID ||
+		deletedBeforeExport.Secret.Description != "" ||
+		len(deletedBeforeExport.Secret.Tags) != 0 ||
+		len(deletedBeforeExport.Secret.Fields) != 0 ||
+		deletedBeforeExport.Secret.SensitiveCount != 0 {
+		t.Fatalf("deleted tombstone retained secret metadata: %#v",
+			deletedBeforeExport.Secret)
+	}
+	var deletedFields, deletedDEKs, deletedChildReceipts int
+	if err := source.pool.QueryRow(ctx, `
+		SELECT
+		  (SELECT count(*) FROM secret_fields WHERE secret_id=$1),
+		  (SELECT count(*) FROM secret_deks WHERE secret_id=$1),
+		  (SELECT count(*) FROM secret_mutation_receipts
+		    WHERE target_id IN ($2, $3))`,
+		deletedSecretID, deletedFieldID, deletedSealed.DEK.ID).Scan(
+		&deletedFields, &deletedDEKs, &deletedChildReceipts); err != nil {
+		t.Fatal(err)
+	}
+	if deletedFields != 0 || deletedDEKs != 0 || deletedChildReceipts != 0 {
+		t.Fatalf("deleted child rows fields=%d deks=%d receipts=%d",
+			deletedFields, deletedDEKs, deletedChildReceipts)
+	}
+
 	// Prove archive encoding is independent of the role/session bytea_output
 	// setting, then perform a real move into a separately migrated schema.
+	// Lowering the per-owner cap below this owner's two retained secrets pins
+	// disaster-recovery import as exempt from create-time admission control.
+	if _, err := source.SetAccountPlan(ctx, p.AccountID, 0, "", "founder",
+		map[string]int64{plans.StoredSecretLimit: 1}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if status, err := source.GetSecretLimitStatus(ctx, p); err != nil ||
+		status.Used != 2 || !status.OverLimit {
+		t.Fatalf("pre-export over-limit status = %#v / %v", status, err)
+	}
 	setSecretTestPoolByteaOutput(ctx, t, source.pool, "escape")
 	if err := source.SuspendAccountSystem(ctx, p.AccountID, "evacuation", "sealed vault archive round trip"); err != nil {
 		t.Fatal(err)
@@ -368,6 +450,9 @@ func TestAgentOwnedSecretPostgresAndArchiveRoundTrip(t *testing.T) {
 	}
 	if bytes.Contains(archive.Bytes(), []byte(password)) {
 		t.Fatal("archive contains sensitive plaintext")
+	}
+	if bytes.Contains(archive.Bytes(), []byte(deletedCanary)) {
+		t.Fatal("archive contains deleted sensitive plaintext")
 	}
 	if _, err := destination.ImportAccount(ctx, p.AccountID, bytes.NewReader(archive.Bytes())); err != nil {
 		t.Fatal(err)
@@ -387,6 +472,26 @@ func TestAgentOwnedSecretPostgresAndArchiveRoundTrip(t *testing.T) {
 	if !bytes.Equal(importedMaterial.Ciphertext, material.Ciphertext) ||
 		!bytes.Equal(importedMaterial.DEK.WrappedDEK, material.DEK.WrappedDEK) {
 		t.Fatal("cell move changed ciphertext or wrapped DEK")
+	}
+	if status, err := destination.GetSecretLimitStatus(ctx, p); err != nil ||
+		status.Used != 2 || status.Max == nil || *status.Max != 1 ||
+		!status.OverLimit {
+		t.Fatalf("imported over-limit status = %#v / %v", status, err)
+	}
+	if _, err := destination.CreateSecret(ctx, p,
+		secretLimitCreateInput(t, "blocked after import", "blocked-after-import")); !errors.Is(err, ErrPlanLimitReached) {
+		t.Fatalf("post-import create error = %v", err)
+	}
+	if _, err := destination.GetSecret(ctx, p, deletedSecretID); !errors.Is(err, ErrSecretNotFound) {
+		t.Fatalf("imported deleted secret ordinary get = %v", err)
+	}
+	deleteReplay, err := destination.DeleteSecret(ctx, p, deletedSecretID,
+		deleteBeforeExport)
+	if err != nil || !deleteReplay.Receipt.Replayed ||
+		deleteReplay.Secret.Lifecycle != SecretLifecycleDeleted ||
+		deleteReplay.Secret.Name != deletedSecretID ||
+		len(deleteReplay.Secret.Fields) != 0 {
+		t.Fatalf("imported delete replay = %#v / %v", deleteReplay, err)
 	}
 	cleartext, err = sealed.OpenSensitiveField(avk, scope, secretEnvelopeFromMaterial(importedMaterial))
 	if err != nil || string(cleartext) != password {

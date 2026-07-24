@@ -38,6 +38,155 @@ with the account and power `GET /v1/usage`. No Stripe object is the usage source
 of truth. Realm/account billing aggregation and conversion into plan charges
 remain deferred.
 
+## Working Plan Direction
+
+The following table records the current product direction as of 2026-07-23. It
+is a working packaging decision, not a claim that every entitlement is already
+implemented or enforced. Each row moves into the canonical plan catalog and
+resolved cell policy only through its own implementation and rollout decision;
+existing realm and agent catalog values therefore remain unchanged in this
+stored-secret slice.
+
+| Capability | Personal — $0 | Professional — $30/month | Team — $250/month | Enterprise — contact us |
+|---|---:|---:|---:|---:|
+| Realms | 1 | 1 | 25 | Contracted |
+| Agents per realm | 10 | 100 | 100 | Contracted |
+| Active memories per agent | 1,000 | 10,000 | 50,000 | Contracted; 250,000 default |
+| Transcript retention | 30 days | 90 days | 365 days | Configurable, including indefinite |
+| Secrets per agent | 0 | 100 | 250 | 1,000 |
+| Agent messages | 0 | Unlimited; retained 90 days | Unlimited; retained 365 days | Contracted; configurable retention |
+| Receive agent email | No | Unlimited; retained 90 days | Unlimited; retained 365 days | Contracted; configurable retention |
+| Raw MIME and attachment retention | None stored | 90 days | 365 days | Configurable, including indefinite |
+| Maximum raw email size | Not available | 10 MiB | 25 MiB | Contracted; 25 MiB default |
+| Retained attachment storage per account | 0 | 5 GiB | 100 GiB | Contracted |
+| Send agent email | No | No | Included | Included |
+| Agent email addressing | None | Realm ID on `witmail.ai` | Custom realm designator and custom domain | Custom realm designator and custom domain |
+
+The Witself-provided agent-email address format is
+`agent-name.realm-id@witmail.ai`. Team and Enterprise may replace the realm ID
+with their custom realm designator and use a configured custom domain:
+`agent-name.realm-designator@customer-domain`. A realm designator remains part
+of the address on custom domains.
+
+In this table, "unlimited" means that the plan does not expose a per-message or
+per-email charge. It remains subject to fair-use, abuse-prevention, and
+technical rate limits. Inbound hostile traffic must not create recipient
+charges. "Included" confirms that outbound agent email is available, but its
+sending allowance and overage treatment remain to be decided. "Contracted"
+means the quantity or policy is negotiated for the Enterprise account.
+
+The `stored_secret` allowance is stored in the account's resolved plan snapshot
+but enforced independently for each owner agent. One retained top-level secret
+bundle consumes one slot, regardless of its field count, TOTP fields, revisions,
+or vault-key rotations. Active and archived secrets count; a guarded tombstone
+delete frees its slot. A missing `stored_secret` key means unlimited, while zero
+is a real cap. Resolution is `account override > catalog/plan default >
+missing/unlimited`. An audited account override may set a finite maximum,
+including zero, or explicit unlimited behavior without changing the account's
+plan, price, subscription, or invoice history. An explicit-unlimited override
+wins over a finite catalog default and is represented by omitting
+`stored_secret` from the resolved snapshot.
+
+Lowering the maximum never deletes existing data. An agent already at or above
+its maximum keeps read, list, access, archive, restore, export, and delete
+operations, but creation of another top-level secret is refused until deletion
+brings retained usage below the maximum or an administrator raises the
+allowance. Account import remains exempt so migration and disaster recovery can
+preserve an over-limit account exactly; subsequent ordinary creates use the
+current resolved maximum.
+
+### Implemented stored-secret limit
+
+The Phase A implementation counts `active + archived` top-level bundles with no
+`deleted_at` tombstone in the authenticated owner-agent scope. Status is
+available through `GET /v1/secrets:status`, `witself secret status`, and the
+read-only, idempotent, value-free `witself.secret.status` MCP tool. It reports
+`used`, `max`, `remaining`, `unlimited`, and `over_limit`; unlimited status uses
+`null` for `max` and `remaining`. At `used == max`, `over_limit` is false but a
+new create is still blocked. `over_limit` becomes true only after a maximum is
+lowered below retained usage.
+
+A refused create returns HTTP 403 with
+`code: "stored_secret_limit_reached"`, `retryable: false`, and the same
+value-free `limit` object. This stored-inventory refusal is the implemented
+exception to the generic draft `limit_exceeded`/HTTP 429 block behavior below.
+Idempotent create replay is resolved before the gate, so replaying the exact
+already-completed request still succeeds when the owner is at or over the
+current maximum.
+
+Create and tombstone-delete transactions serialize on the stable owner-agent row
+after the account/plan fence. This prevents concurrent requests on different
+cell replicas from overshooting one agent's maximum while allowing unrelated
+agents to proceed independently. `POST /v1/secrets/{secret_id}:delete`,
+`witself secret delete`, and the destructive, idempotent, value-free
+`witself.secret.delete` MCP tool perform an exact-row-version, retry-keyed
+tombstone delete. The transaction scrubs secret metadata and deletes every
+field and wrapped-DEK row, while append-only usage history, a minimal
+value-free secret tombstone, the `secret.deleted` event, and mutation receipt
+remain for retry and recovery bookkeeping. Ordinary list/show/access paths
+exclude the tombstone and retained capacity is released. Irreversible purge of
+the minimal tombstone is a separate future operation.
+
+Migration `0067_add_secret_delete_receipts.sql` widens the receipt constraints
+for `secret_delete` using add/validate/swap. Its down migration refuses to run
+while any delete receipt exists because the legacy constraint cannot represent
+that durable evidence. The guard runs before any constraint change, so a refusal
+leaves the migration version and schema checks intact. Operational rollback
+therefore requires a backup and a decision about those receipts; it must not
+silently discard them. Schema-66 archives upgrade by pass-through because they
+cannot contain delete receipts, and direct account import remains exempt from
+the create gate so an over-limit encrypted archive round-trips unchanged.
+
+Catalog promotion is intentionally two-phase:
+
+1. Deploy converged control-plane and cell code that understands overrides,
+   resolves `stored_secret`, and enforces the owner-agent gate while leaving
+   the canonical catalog unchanged.
+2. Only after convergence, update and publish the canonical catalog as a
+   separate rollout. Verify that the founder account has an explicit-unlimited
+   override both immediately before and after catalog promotion; do not rely on
+   a plan label or a missing catalog entry to make the founder unlimited.
+
+Phase A does not modify `web/plans/plans.json`.
+
+Memories are durable knowledge and do not expire by age. The allowance counts
+only active memories; revisions, replacements, and superseded versions do not
+consume additional customer-visible slots. At the limit, Witself preserves
+existing memories and continues to allow reads, recall, export, replacement,
+superseding, and consolidation, but does not create another active memory until
+capacity is available. Memory writes and revisions are included rather than
+metered as customer-facing monthly usage. Per-record size, vector, evidence,
+relationship, revision-history, curation-frequency, and API bounds remain
+internal service protections.
+
+Email records, raw MIME, and extracted attachment payloads use age-based
+retention. Attachments are stored separately from the email record so their
+bytes can be managed independently, but deleting an email must cascade to its
+raw MIME and every attachment. All three expire no later than the plan's
+email-retention window. Free stores no raw MIME or attachment payloads; this
+remains true even if a later Free feature exposes limited email metadata.
+
+Per-message and per-attachment byte limits, header and part-count limits,
+nesting-depth limits, and the retained attachment-storage allowance are service
+protections rather than billable overages. Attachment storage is pooled at the
+account level because the account is the billing boundary; it does not multiply
+by the number of agents or realms.
+Inbound traffic must never create a surprise charge. If an agent reaches the
+account's attachment-storage ceiling, Witself retains the email's bounded text
+and metadata while declining to retain new attachment bytes, and marks that
+state explicitly. It must not evict an existing in-window attachment merely
+because a hostile sender delivered another message. The current receive-only
+pilot remains capped at 5 MiB of raw MIME per message until the production
+limits above are implemented and validated.
+
+Still open for packaging decisions:
+
+- Stored facts per agent.
+- Team and Enterprise outbound-email allowances and overages.
+- Audit retention by plan.
+- Internal storage, vector, fan-out, and API service-protection limits.
+- Annual pricing, support boundaries, human seats, and downgrade behavior.
+
 ## Billing Model
 
 V0 billing posture:
@@ -103,7 +252,7 @@ Witself should meter these dimensions internally in v0:
 | `email_received` | Inbound agent-email volume and abuse accounting; never a victim-billed pilot charge. |
 | `email_sent` | Future outbound agent-email volume and sender-reputation enforcement. |
 | `email_address` | Provisioned live agent-email address count. |
-| `email_storage_byte` | Inline raw-MIME storage and backup size, separate from general open-plane storage. |
+| `email_storage_byte` | Internal observation of inline raw-MIME and backup footprint; not a customer quota or overage dimension. |
 | `storage_byte` | General open-plane data-at-rest footprint and backup size. |
 | `stored_secret` | Sealed-plane inventory size and storage footprint. |
 | `secret_read` | Sealed-plane sensitive access risk and service load (reveal + reference resolution). |
@@ -153,9 +302,14 @@ Notes on a few dimensions:
   classification and production pricing are both pinned. `email_sent` remains
   dormant until a send slice exists.
   `email_address` counts live provisioned addresses. `email_storage_byte`
-  measures inline raw MIME independently so a mail attachment cannot silently
-  consume the ordinary `storage_byte` allowance. Production pricing and abuse
-  exclusions must be pinned before either receive or send becomes billable; see
+  observes inline raw-MIME footprint independently so mail does not silently
+  consume the ordinary `storage_byte` allowance, but it is not exposed as a
+  customer quota or overage dimension. Raw MIME and separately stored
+  attachments expire by the plan's age-based email-retention window, and
+  deleting an email cascades to both. Per-message, per-attachment, and pooled
+  per-account attachment-storage bounds remain service protections.
+  Production pricing and abuse exclusions must be pinned before either receive
+  or send becomes billable; see
   [agent-email.md](agent-email.md).
 - `storage_byte` measures ordinary open-plane data-at-rest footprint (memories,
   facts, and the rest of the open plane on RDS/disk), not envelope-encrypted
@@ -245,7 +399,7 @@ Recommended defaults:
 | Agent-email addresses | `block` for the hard address cap, `warn` near cap. |
 | Agent email received | No plan overage action in the limited pilot. A production default is blocked on authoritative spam/abuse classification and source-scoped enforcement; aggregate recipient traffic must never become a victim-billing or mailbox-starvation lever. |
 | Agent email sent | `block` at the hard per-period threshold; sending remains dormant until a send slice exists. |
-| Agent-email raw-MIME storage | No quota enforcement in the limited pilot. Production may `warn` near cap and `block` at hard cap only after abuse-excluded accounting and safe inbound tempfail behavior are pinned. |
+| Agent-email raw-MIME and attachment storage | Store attachments separately; expire all payloads by the plan's age-based retention window; cascade email deletion to raw MIME and attachments. Reject oversized individual payloads. At an internal per-agent attachment ceiling, preserve bounded email text and metadata, explicitly mark unretained attachments, and never create an inbound overage charge. |
 | Stored secrets | `block` for hard cap, `warn` near cap. |
 | Secret reads | `throttle` or `warn`; block only for abuse or hard caps. |
 | TOTP code generation | `throttle` or `warn`; block only for abuse or hard caps. |

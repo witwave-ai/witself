@@ -2,18 +2,21 @@
 
 Status: draft target contract with implemented slices labeled below.
 
-Sealed-plane implementation amendment (accepted 2026-07-19): the current
+Sealed-plane implementation amendment (accepted 2026-07-23): the current
 client-custodied vertical implements `vault key init|status`, `vault key enroll
 begin|approve|complete|list|status|cancel`, `vault key recovery
 export|inspect|import`, `vault key rotate`, `vault key rotation status|cancel`,
-local `password generate`, `secret create|list|search|show|reveal|archive|restore`,
+local `password generate`,
+`secret create|status|list|search|show|reveal|archive|restore|delete`,
 and `totp show|code SECRET FIELD`. Secret and field selectors accept either the exact ID
 or an unambiguous human-readable name. `secret create` consumes a strict JSON
 document from `--file` or `--stdin`; it does not yet implement the convenience flags
 shown in the target sections below, and it requires an explicit
 `--idempotency-key KEY` so a lost-response retry can reuse its durable local
 exact-request journal. The MCP create tool requires the equivalent
-`idempotency_key`. Secret update/rename/copy/delete/grants,
+`idempotency_key`. `secret status` reports value-free retained capacity, and
+`secret delete` is a guarded tombstone operation, not irreversible purge.
+Secret update/rename/copy/grants,
 group/operator ownership, TOTP enroll/delete convenience commands, references,
 and runtime injection remain planned. Encryption, TOTP calculation, AVK
 enrollment/recovery, and rotation are client-side under the separate AVK; every
@@ -261,7 +264,7 @@ witself
   bootstrap-instructions
   fact set|get|list|delete
   password generate
-  secret create|show|list|scan|reveal|update|rename|copy|archive|restore|delete|grant|revoke
+  secret create|status|show|list|scan|reveal|update|rename|copy|archive|restore|delete|grant|revoke
   run
   totp enroll|code|show|delete
   policy create|list|show|delete|test
@@ -2445,6 +2448,27 @@ Flags:
 | `--owner-agent NAME_OR_ID` | Operator/admin only: create the secret for a specific owning agent. |
 | `--group NAME_OR_ID` | Create the secret as group-owned (collective). Operator/admin or `group:manage`. |
 
+The implemented agent-owned create gate counts active and archived top-level
+bundles. A missing `stored_secret` key is unlimited and zero is a real cap. A
+refusal is non-retryable until retained capacity is released or the resolved
+maximum changes; an exact replay of a previously completed create remains
+valid.
+
+### `witself secret status`
+
+Show the current token-bound agent's retained-secret capacity.
+
+```sh
+witself secret status
+witself secret status --json
+```
+
+The output contains `used`, `max`, `remaining`, `unlimited`, and `over_limit`.
+For unlimited accounts, `max` and `remaining` are `null` in JSON. At
+`used == max`, `over_limit` is false but another create is blocked. This command
+accepts agent connection flags and no positional arguments. MCP exposes the
+same value-free read as the read-only, idempotent `witself.secret.status` tool.
+
 ### `witself secret show NAME`
 
 Show non-sensitive fields and redacted sensitive fields for a secret. This never
@@ -2626,19 +2650,26 @@ Flags:
 
 ### `witself secret delete NAME`
 
-Permanently delete a secret when allowed. Prefer `secret archive` for normal
-removal.
+Tombstone one active or archived secret for the current token-bound agent. This
+is a guarded, evidence-preserving delete: it releases retained capacity
+and removes the secret from ordinary reads while scrubbing its metadata and
+deleting all field and wrapped-DEK rows. Only a minimal value-free tombstone,
+durable mutation receipt, and value-free audit evidence remain for retry and
+recovery bookkeeping. It is not an irreversible purge of that tombstone.
 
 Flags:
 
 | Flag | Description |
 |---|---|
-| `--owner-agent NAME_OR_ID` | Operator/admin only: delete a secret owned by a specific agent. |
-| `--group NAME_OR_ID` | Delete a group-owned secret. |
-| `--permanent` | Permanently delete when allowed. |
-| `--dry-run` | Show deletion impact, blockers, and affected grants without deleting the secret. |
-| `--yes` | Skip confirmation. |
-| `--reason TEXT` | Audit reason for deletion. |
+| `--lifecycle active\|archived` | Resolve the selector in the active or archived inventory. Default: `active`. |
+| `--expected-row-version N` | Exact current row version. When omitted, the CLI resolves it first. |
+| `--idempotency-key KEY` | Durable retry key for this exact delete. When omitted, the CLI generates one. |
+| `--json` | Return the redacted tombstone and value-free receipt as JSON. |
+
+The command also accepts the standard agent connection flags. MCP exposes the
+same mutation as destructive, idempotent `witself.secret.delete`; callers must
+supply `secret_id`, `expected_row_version`, and `idempotency_key`. Irreversible
+purge remains a separate future operation.
 
 ### `witself secret grant NAME`
 

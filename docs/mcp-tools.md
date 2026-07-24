@@ -15,7 +15,7 @@ intelligent server-side `memory.consolidate(scope, dry_run)` design and all
 backend embedding inference. See
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
-Client-custodied sealed-plane amendment (accepted 2026-07-18): an installed MCP
+Client-custodied sealed-plane amendment (accepted 2026-07-23): an installed MCP
 runtime binding must contain the account's immutable `account_id`. Before any
 local Agent Vault Key path is accessed, the client authenticates the token and
 requires the returned account id to match that binding. Older integrations that
@@ -23,6 +23,11 @@ lack `account_id` fail closed for agent-secret tools and must be refreshed with
 `witself install <runtime>`. The current custody and tool boundary is
 authoritative in [the implementation plan](client-custodied-agent-vault.md);
 older KMS and server-decrypt target text below is superseded.
+The implemented agent-owned tools are `witself.password.generate`,
+`witself.secret.search`, `witself.secret.status`, `witself.secret.show`,
+`witself.secret.create`, `witself.secret.delete`, `witself.secret.reveal`, and
+`witself.totp.code`. In particular, `secret.status` is a value-free read and
+`secret.delete` is a guarded tombstone operation, not an irreversible purge.
 
 The implemented direct narrative-memory slice currently exposes
 `witself.memory.capture`, `read`, `list`, `history`, `recall`, `adjust`,
@@ -193,7 +198,8 @@ Read-only mode:
   read state but never acknowledges; `message.ack` is the distinct handled
   transition. Curation `get` and `status` remain available because they are
   reads. Future mutating tools such as `witself.remember`, `witself.session.end`,
-  `witself.secret.create/update`, and `witself.totp.enroll` are unavailable.
+  `witself.secret.create/delete`, future `witself.secret.update`, and
+  `witself.totp.enroll` are unavailable.
   The current read-only server retains `self.show`; fact review, candidate/get,
   get/list/upcoming, and subject list; transcript list/get/tail; message list and
   listen; and
@@ -455,17 +461,19 @@ The target cross-realm extension makes `to` realm-qualified as a
 and consent rules described in
 [agent-collaboration.md](agent-collaboration.md).
 
-Sealed-plane tools (secrets + TOTP):
+Implemented agent-owned sealed-plane tools (secrets + TOTP):
 
 - `witself.password.generate`
 - `witself.secret.create`
-- `witself.secret.list`
+- `witself.secret.search`
+- `witself.secret.status`
+- `witself.secret.delete`
 - `witself.secret.show`
 - `witself.secret.reveal`
-- `witself.secret.update`
-- `witself.totp.enroll`
 - `witself.totp.code`
-- `witself.totp.show`
+
+The `witself.secret.list`/`update` and `witself.totp.enroll`/`show` surfaces
+described in target sections below are not current exposure claims.
 
 Sealed-plane secret values and TOTP seeds are never embedded, never returned by
 `witself.memory.recall`, never in `witself.self.show` / `witself.digest.emit`, and
@@ -592,6 +600,8 @@ called out explicitly; other deferred rows are not a claim of current exposure.
 | `witself.reference.resolve` | yes | yes | Open-plane refs resolve under the same authz as a direct read; a sealed `witself://secret/...` ref is reveal-gated (policy) and disabled by `--no-value-tools`. |
 | `witself.password.generate` | yes | yes | Generates a value but does not store it; disabled by `--no-value-tools`. |
 | `witself.secret.create` | yes | no | Requires `secret:create`; sealed-plane mutation. |
+| `witself.secret.status` | yes | yes | Implemented value-free retained-capacity read for the token-bound agent. |
+| `witself.secret.delete` | yes | no | Implemented destructive, idempotent tombstone mutation; scrubs metadata and deletes fields/DEKs while returning no value. |
 | `witself.secret.list` | yes | yes | Sealed summaries only; never returns values. |
 | `witself.secret.show` | yes | yes | Non-sensitive + redacted sensitive fields; never returns values. |
 | `witself.secret.reveal` | policy | policy | Reveal-gated: requires `secret:reveal` and audit; disabled by `--no-value-tools`. |
@@ -2395,6 +2405,34 @@ the stored value). `template` is one of `login|api-key|ssh-key|certificate|env|
 generic`. Field values are sealed at rest under the per-realm KEK / per-field DEK
 envelope (see [key-hierarchy.md](key-hierarchy.md)).
 
+### `witself.secret.status`
+
+Return the token-bound agent's value-free retained-secret capacity. This
+implemented tool is read-only and idempotent.
+
+Input:
+
+```json
+{}
+```
+
+Output data:
+
+```json
+{
+  "limit": {
+    "used": 4,
+    "max": 100,
+    "remaining": 96,
+    "unlimited": false,
+    "over_limit": false
+  }
+}
+```
+
+For unlimited status, `max` and `remaining` are `null`. At `used == max`,
+`over_limit` remains false although another create is blocked.
+
 ### `witself.secret.list`
 
 List secrets visible to the current session. Returns sealed summaries only and
@@ -2451,6 +2489,28 @@ Input:
 
 Output data uses the secret detail shape from
 [json-contracts.md](json-contracts.md).
+
+### `witself.secret.delete`
+
+Tombstone one exact active or archived secret for the token-bound agent. This
+implemented tool is destructive and idempotent, but value-free: the transaction
+scrubs identifying/public secret metadata, deletes all field and wrapped-DEK
+rows, releases retained capacity, and retains only a minimal value-free
+tombstone plus receipt/audit evidence. Irreversible purge of the tombstone is
+separate and deferred.
+
+Input:
+
+```json
+{
+  "secret_id": "sec_abcdefghijklmnop",
+  "expected_row_version": 3,
+  "idempotency_key": "secret-delete-0123456789abcdef"
+}
+```
+
+Output data contains the redacted tombstone and value-free mutation receipt; it
+never contains the original identifying metadata or a field value.
 
 ### `witself.secret.reveal`
 

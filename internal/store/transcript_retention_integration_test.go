@@ -317,12 +317,18 @@ func TestTranscriptRetentionDeletesOnlyExpiredWholeConversationsPostgres(t *test
 	}
 
 	// Once a source identity has been pruned, migration 62 cannot reconstruct
-	// it. The down guard must refuse before dropping any index or constraint.
+	// it. Migration 67 is independent and can be removed, after which the
+	// migration-66 down guard must refuse before dropping any index or
+	// constraint.
+	if err := migrationTestDown(t, schemaDSN, false); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, schemaDSN, 66)
 	if err := migrationTestDown(t, schemaDSN, true); err == nil ||
 		!strings.Contains(err.Error(), "pruned curation inputs exist") {
 		t.Fatalf("migration down with pruned inputs error = %v", err)
 	}
-	assertMigrationTestVersion(t, schemaDSN, int64(SchemaVersion()))
+	assertMigrationTestVersion(t, schemaDSN, 66)
 	assertMigrationTestColumn(t, st, "memory_curation_run_inputs", "transcript_pruned_at", true)
 	assertMigrationTestIndex(t, st, "memory_curation_run_inputs",
 		"memory_curation_run_inputs_by_transcript_cursor", true)
@@ -885,9 +891,11 @@ func TestTranscriptRetentionLaneMigrationHandsOffScheduledCadencePostgres(t *tes
 		 FOR UPDATE`).Scan(&claimedGeneration); err != nil {
 		t.Fatal(err)
 	}
+	migrationDB := migrationTestSQLDB(t, schemaDSN)
+	defer func() { _ = migrationDB.Close() }()
 	migrationDone := make(chan error, 1)
 	go func() {
-		migrationDone <- st.Migrate()
+		migrationDone <- migrationTestUpToDB(migrationDB, 66)
 	}()
 	indexDeadline := time.Now().Add(10 * time.Second)
 	for {

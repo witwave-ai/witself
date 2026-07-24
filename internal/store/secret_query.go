@@ -65,9 +65,15 @@ func (s *Store) GetSecret(ctx context.Context, p Principal, secretID string) (Se
 }
 
 func getSecret(ctx context.Context, q secretQuerier, p Principal, secretID string, includeFields, includeArchived bool) (Secret, error) {
+	return getSecretWithDeleted(ctx, q, p, secretID, includeFields, includeArchived, false)
+}
+
+// getSecretWithDeleted is reserved for guarded delete results and receipt
+// replay. Ordinary Get/List/Access paths always call getSecret and cannot see
+// tombstones.
+func getSecretWithDeleted(ctx context.Context, q secretQuerier, p Principal, secretID string, includeFields, includeArchived, includeDeleted bool) (Secret, error) {
 	var out Secret
 	var tagsJSON []byte
-	var deletedAt *time.Time
 	err := q.QueryRow(ctx, `
 		SELECT id, account_id, realm_id, owner_agent_id, name, description,
 		       template, tags, row_version, created_at, updated_at,
@@ -78,13 +84,13 @@ func getSecret(ctx context.Context, q secretQuerier, p Principal, secretID strin
 		           AND f.sensitive)
 		  FROM secrets s
 		 WHERE account_id=$1 AND realm_id=$2 AND owner_agent_id=$3
-		   AND id=$4 AND deleted_at IS NULL
+		   AND id=$4 AND ($6 OR deleted_at IS NULL)
 		   AND ($5 OR archived_at IS NULL)`, p.AccountID, p.RealmID, p.ID,
-		secretID, includeArchived).Scan(
+		secretID, includeArchived, includeDeleted).Scan(
 		&out.ID, &out.AccountID, &out.RealmID, &out.OwnerAgentID,
 		&out.Name, &out.Description, &out.Template, &tagsJSON,
 		&out.RowVersion, &out.CreatedAt, &out.UpdatedAt,
-		&out.ArchivedAt, &deletedAt, &out.SensitiveCount,
+		&out.ArchivedAt, &out.DeletedAt, &out.SensitiveCount,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Secret{}, ErrSecretNotFound
@@ -99,7 +105,9 @@ func getSecret(ctx context.Context, q secretQuerier, p Principal, secretID strin
 		out.Tags = []string{}
 	}
 	out.Lifecycle = SecretLifecycleActive
-	if out.ArchivedAt != nil {
+	if out.DeletedAt != nil {
+		out.Lifecycle = SecretLifecycleDeleted
+	} else if out.ArchivedAt != nil {
 		out.Lifecycle = SecretLifecycleArchived
 	}
 	if includeFields {

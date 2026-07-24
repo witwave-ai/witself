@@ -511,6 +511,7 @@ func TestReadOnlyMCPRemovesEveryMutatingTool(t *testing.T) {
 		"witself.avatar.reset",
 		"witself.avatar.generation.fail",
 		"witself.secret.create",
+		"witself.secret.delete",
 		"witself.secret.reveal",
 		"witself.password.generate",
 		"witself.totp.code",

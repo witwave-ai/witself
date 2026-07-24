@@ -37,6 +37,8 @@ type fakeSecretMCPBackend struct {
 	lastSearch    client.SecretListOptions
 	lastShowID    string
 	lastCreate    secretclient.CreateInput
+	limitStatus   client.SecretLimitStatus
+	lastDelete    client.SecretLifecycleInput
 	createdValues map[string]string
 	lastReveal    struct {
 		secretID       string
@@ -70,7 +72,13 @@ func newFakeSecretMCPBackend() *fakeSecretMCPBackend {
 			testMCPBinaryField:   {0, 1, 2, 255},
 		},
 		createdValues: map[string]string{},
+		limitStatus:   client.SecretLimitStatus{Used: 1, Unlimited: true},
 	}
+}
+
+func (b *fakeSecretMCPBackend) SecretLimitStatus(context.Context) (*client.SecretLimitStatus, error) {
+	value := b.limitStatus
+	return &value, nil
 }
 
 func (b *fakeSecretMCPBackend) SearchSecrets(_ context.Context, options client.SecretListOptions) (*client.SecretPage, error) {
@@ -114,6 +122,21 @@ func (b *fakeSecretMCPBackend) CreateSealedSecret(_ context.Context, input secre
 	}, nil
 }
 
+func (b *fakeSecretMCPBackend) DeleteSecret(_ context.Context, secretID string, input client.SecretLifecycleInput) (*client.SecretMutationResult, error) {
+	b.lastShowID = secretID
+	b.lastDelete = input
+	secret := b.shownSecret
+	secret.Lifecycle = "deleted"
+	secret.RowVersion = input.ExpectedRowVersion + 1
+	return &client.SecretMutationResult{
+		Secret: secret,
+		Receipt: client.SecretMutationReceipt{
+			Operation: "secret_delete", TargetKind: "secret", TargetID: secretID,
+			RequestHash: "public-delete-request-hash", ResultRevision: secret.RowVersion,
+		},
+	}, nil
+}
+
 func (b *fakeSecretMCPBackend) RevealSealedSecretField(_ context.Context, secretID, fieldID, idempotencyKey string) ([]byte, error) {
 	b.revealCalls++
 	b.lastReveal.secretID = secretID
@@ -126,20 +149,23 @@ func TestMCPSecretToolsRespectProfilesNamesAndAnnotations(t *testing.T) {
 	backend := newFakeSecretMCPBackend()
 	full := listSecretMCPTools(t, newWitselfMCPServerForRuntime(backend, transcriptcapture.RuntimeCursor))
 	wants := map[string]struct {
-		readOnly   bool
-		idempotent bool
-		phrase     string
+		readOnly    bool
+		destructive bool
+		idempotent  bool
+		phrase      string
 	}{
 		"witself.secret.search":     {readOnly: true, idempotent: true, phrase: "redacted inventory"},
+		"witself.secret.status":     {readOnly: true, idempotent: true, phrase: "value-free"},
 		"witself.secret.show":       {readOnly: true, idempotent: true, phrase: "redacted"},
 		"witself.secret.create":     {idempotent: true, phrase: "result is always redacted"},
+		"witself.secret.delete":     {destructive: true, idempotent: true, phrase: "Tombstone"},
 		"witself.secret.reveal":     {idempotent: true, phrase: "Explicit value-returning"},
 		"witself.password.generate": {phrase: "Explicit value-returning local"},
 		"witself.totp.code":         {phrase: "Explicit value-returning"},
 	}
 	for name, want := range wants {
 		tool := full[name]
-		assertMCPToolAnnotations(t, tool, name, want.readOnly, false, want.idempotent)
+		assertMCPToolAnnotations(t, tool, name, want.readOnly, want.destructive, want.idempotent)
 		if !strings.Contains(tool.Description, want.phrase) {
 			t.Errorf("%s description does not contain %q: %q", name, want.phrase, tool.Description)
 		}
@@ -148,13 +174,13 @@ func TestMCPSecretToolsRespectProfilesNamesAndAnnotations(t *testing.T) {
 	readOnly := listSecretMCPTools(t, newWitselfMCPServerForRuntimeOptions(
 		backend, transcriptcapture.RuntimeCursor, mcpServerOptions{Profile: mcpProfileReadOnly},
 	))
-	for _, name := range []string{"witself.secret.search", "witself.secret.show"} {
+	for _, name := range []string{"witself.secret.search", "witself.secret.status", "witself.secret.show"} {
 		if readOnly[name] == nil {
 			t.Errorf("read-only MCP omitted %s", name)
 		}
 	}
 	for _, name := range []string{
-		"witself.secret.create", "witself.secret.reveal", "witself.password.generate", "witself.totp.code",
+		"witself.secret.create", "witself.secret.delete", "witself.secret.reveal", "witself.password.generate", "witself.totp.code",
 	} {
 		if readOnly[name] != nil {
 			t.Errorf("read-only MCP advertised %s", name)
@@ -172,7 +198,7 @@ func TestMCPSecretToolsRespectProfilesNamesAndAnnotations(t *testing.T) {
 		noValue := listSecretMCPTools(t, newWitselfMCPServerForRuntimeOptions(
 			backend, runtimeName, mcpServerOptions{NoValueTools: true},
 		))
-		for _, dotted := range []string{"witself.secret.search", "witself.secret.show", "witself.secret.create"} {
+		for _, dotted := range []string{"witself.secret.search", "witself.secret.status", "witself.secret.show", "witself.secret.create", "witself.secret.delete"} {
 			name := mcpToolName(runtimeName, dotted)
 			if noValue[name] == nil {
 				t.Errorf("%s no-value MCP omitted safe tool %s", runtimeName, name)
@@ -222,6 +248,13 @@ func TestMCPSecretSearchShowAndCreateStayRedacted(t *testing.T) {
 	backend := newFakeSecretMCPBackend()
 	session := connectSecretMCPTest(t, newWitselfMCPServer(backend))
 
+	statusResult := callSecretMCPTool(t, session, "witself.secret.status", map[string]any{})
+	var status mcpSecretStatusOutput
+	decodeMCPSecretStructured(t, statusResult, &status)
+	if status.Limit.Used != 1 || !status.Limit.Unlimited {
+		t.Fatalf("secret status = %#v", status)
+	}
+
 	search := callSecretMCPTool(t, session, "witself.secret.search", map[string]any{
 		"query": "github", "template": "login", "tags": []string{"github"},
 		"limit": 7, "include_fields": true,
@@ -261,6 +294,22 @@ func TestMCPSecretSearchShowAndCreateStayRedacted(t *testing.T) {
 		t.Fatalf("canonical TOTP payload = %#v / %v", payload, err)
 	}
 	assertMCPResultExcludes(t, create, explicitValue, generatedPassword, otpauthURI, testMCPTOTPSeedBase32, "must-never-be-returned", "seed_base32")
+
+	deleted := callSecretMCPTool(t, session, "witself.secret.delete", map[string]any{
+		"secret_id": testMCPSecretID, "expected_row_version": 1,
+		"idempotency_key": "delete-mcp-secret-1",
+	})
+	assertMCPResultExcludes(t, deleted, "must-never-be-returned")
+	if backend.lastShowID != testMCPSecretID || backend.lastDelete.ExpectedRowVersion != 1 ||
+		backend.lastDelete.IdempotencyKey != "delete-mcp-secret-1" {
+		t.Fatalf("captured delete = %q / %#v", backend.lastShowID, backend.lastDelete)
+	}
+	var deleteOutput mcpSecretCreateOutput
+	decodeMCPSecretStructured(t, deleted, &deleteOutput)
+	if deleteOutput.Secret.Lifecycle != "deleted" ||
+		deleteOutput.Receipt.Operation != "secret_delete" {
+		t.Fatalf("delete output = %#v", deleteOutput)
+	}
 }
 
 func TestMCPSecretValueToolsAreExactLocalAndTOTPSafe(t *testing.T) {
