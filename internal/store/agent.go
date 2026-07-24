@@ -40,9 +40,10 @@ func (s *Store) CreateAgent(ctx context.Context, accountID, realmID, name string
 		return Agent{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	// The plan-gate lock subsumes the mint lock's status check and also
-	// serializes concurrent creates, so the count below cannot race past the
-	// account's agent cap (account-wide across realms).
+	// The plan-gate lock subsumes the mint lock's status check and serializes
+	// concurrent creates. During the rollout it protects both the legacy
+	// account-wide cap and the new per-realm cap; once old snapshots have
+	// converged, the latter remains the canonical contract.
 	plan, limits, err := lockAccountForPlanGate(ctx, tx, accountID)
 	if err != nil {
 		return Agent{}, err
@@ -62,7 +63,31 @@ func (s *Store) CreateAgent(ctx context.Context, accountID, realmID, name string
 	if !realmOK {
 		return Agent{}, ErrRealmNotFound
 	}
-	if _, capped := limits["agents"]; capped {
+	// Resolve a reserved live or tombstoned name before either cap so a retry
+	// is reported as a name conflict rather than a misleading upgrade request.
+	var nameReserved bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+		   SELECT 1 FROM agents WHERE realm_id = $1 AND name = $2
+		 )`,
+		realmID, name).Scan(&nameReserved); err != nil {
+		return Agent{}, fmt.Errorf("check agent name: %w", err)
+	}
+	if nameReserved {
+		return Agent{}, ErrAgentExists
+	}
+	if _, capped := limits[plans.AgentPerRealmLimit]; capped {
+		n, err := countLiveAgentsInRealm(ctx, tx, accountID, realmID)
+		if err != nil {
+			return Agent{}, err
+		}
+		if err := checkPlanLimit(
+			plan, limits, plans.AgentPerRealmLimit, n,
+		); err != nil {
+			return Agent{}, err
+		}
+	}
+	if _, capped := limits[plans.AgentLimit]; capped {
 		n, err := countLiveAgents(ctx, tx, accountID)
 		if err != nil {
 			return Agent{}, err

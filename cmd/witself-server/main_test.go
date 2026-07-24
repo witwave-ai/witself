@@ -25,6 +25,34 @@ func TestReadTokenFileRejectsEmpty(t *testing.T) {
 	}
 }
 
+func TestPlanLimitErrorPreservesBoundedDimension(t *testing.T) {
+	for _, dimension := range []string{
+		"realms",
+		"agents",
+		"agents_per_realm",
+	} {
+		t.Run(dimension, func(t *testing.T) {
+			mapped := planLimitError(&store.PlanLimitError{
+				Dimension: dimension,
+				Used:      10,
+				Max:       10,
+				Plan:      "free",
+			})
+			if !errors.Is(mapped, server.ErrPlanLimit) {
+				t.Fatalf("mapped error = %v; want ErrPlanLimit", mapped)
+			}
+			var detail *server.PlanLimitError
+			if !errors.As(mapped, &detail) ||
+				detail.Dimension != dimension ||
+				detail.Used != 10 ||
+				detail.Max != 10 ||
+				detail.Plan != "free" {
+				t.Fatalf("mapped detail = %#v", mapped)
+			}
+		})
+	}
+}
+
 func TestBootstrapTokenTTL(t *testing.T) {
 	t.Setenv("WITSELF_BOOTSTRAP_TOKEN_TTL", "")
 	ttl, err := bootstrapTokenTTL()

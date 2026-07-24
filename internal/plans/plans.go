@@ -28,8 +28,12 @@ const Free = "free"
 const (
 	// RealmLimit caps live realms account-wide.
 	RealmLimit = "realms"
-	// AgentLimit caps live agents account-wide.
+	// AgentLimit is the legacy account-wide live-agent cap. Existing snapshots
+	// keep this meaning during the agents-per-realm rollout; catalogs must move
+	// to AgentPerRealmLimit rather than silently reinterpreting this key.
 	AgentLimit = "agents"
+	// AgentPerRealmLimit caps live agents independently in each live realm.
+	AgentPerRealmLimit = "agents_per_realm"
 	// StoredSecretLimit caps retained top-level secrets independently for
 	// each owner agent. Active and archived secrets count; deleted secrets do
 	// not. A missing key means unlimited.
@@ -189,7 +193,7 @@ func Parse(raw []byte) (*Catalog, error) {
 func ValidateLimits(limits map[string]int64) error {
 	for key, value := range limits {
 		switch key {
-		case RealmLimit, AgentLimit, StoredSecretLimit:
+		case RealmLimit, AgentLimit, AgentPerRealmLimit, StoredSecretLimit:
 		default:
 			return fmt.Errorf("unknown limit %q", key)
 		}

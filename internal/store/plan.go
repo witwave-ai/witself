@@ -15,10 +15,30 @@ import (
 )
 
 // ErrPlanLimitReached is returned when creating a resource would exceed the
-// account's plan-limit snapshot. The message carries the human-readable
-// detail ("plan limit reached: agents 25/25 on the free plan") — the HTTP
-// layer surfaces it verbatim so the refusal explains itself.
+// account's plan-limit snapshot.
 var ErrPlanLimitReached = errors.New("plan limit reached")
+
+// PlanLimitError describes one value-free hard-cap refusal. Dimension is a
+// closed server-owned plan key, so callers can emit bounded metrics without
+// parsing an error string or attaching tenant identifiers.
+type PlanLimitError struct {
+	Dimension string
+	Used      int64
+	Max       int64
+	Plan      string
+}
+
+func (e *PlanLimitError) Error() string {
+	return fmt.Sprintf("%s: %s %d/%d on the %s plan",
+		ErrPlanLimitReached,
+		strings.ReplaceAll(e.Dimension, "_", " "),
+		e.Used,
+		e.Max,
+		e.Plan,
+	)
+}
+
+func (e *PlanLimitError) Unwrap() error { return ErrPlanLimitReached }
 
 // ErrPlanPolicyInvalid means a cell policy snapshot contains an unknown key or
 // a value outside the policy's accepted representation bounds.
@@ -237,7 +257,12 @@ func checkPlanLimit(plan string, limits map[string]int64, resource string, count
 	if !capped || count < limit {
 		return nil
 	}
-	return fmt.Errorf("%w: %s %d/%d on the %s plan", ErrPlanLimitReached, resource, count, limit, plan)
+	return &PlanLimitError{
+		Dimension: resource,
+		Used:      count,
+		Max:       limit,
+		Plan:      plan,
+	}
 }
 
 // countLiveRealms counts the account's live realms inside tx.
@@ -253,7 +278,7 @@ func countLiveRealms(ctx context.Context, tx pgx.Tx, accountID string) (int64, e
 }
 
 // countLiveAgents counts the account's live agents across all live realms
-// inside tx. Plan caps are account-wide ("25 agents"), not per-realm.
+// inside tx. This exists only for legacy AgentLimit snapshots.
 func countLiveAgents(ctx context.Context, tx pgx.Tx, accountID string) (int64, error) {
 	var n int64
 	err := tx.QueryRow(ctx,
@@ -263,6 +288,26 @@ func countLiveAgents(ctx context.Context, tx pgx.Tx, accountID string) (int64, e
 		accountID).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("count agents: %w", err)
+	}
+	return n, nil
+}
+
+// countLiveAgentsInRealm counts one live realm's live agents inside tx. The
+// caller has already verified that the realm is live and belongs to accountID.
+func countLiveAgentsInRealm(
+	ctx context.Context,
+	tx pgx.Tx,
+	accountID, realmID string,
+) (int64, error) {
+	var n int64
+	err := tx.QueryRow(ctx,
+		`SELECT count(*) FROM agents a
+		 JOIN realms r ON r.id = a.realm_id
+		 WHERE r.account_id = $1 AND r.id = $2
+		   AND a.deleted_at IS NULL AND r.deleted_at IS NULL`,
+		accountID, realmID).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count agents in realm: %w", err)
 	}
 	return n, nil
 }

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -85,11 +84,14 @@ func TestSetAccountPlanEndpoint(t *testing.T) {
 	// Happy path: the control plane applies a snapshot.
 	hash := strings.Repeat("a", 64)
 	resp := postPlan(t, srv.URL+"/v1/accounts/acct_1:plan", "witself_prv_test",
-		`{"revision":7,"snapshot_hash":"`+hash+`","plan":"standard","limits":{"agents":250,"realms":10},"policies":{"transcript_retention_days":90},"features":["memory","facts","secrets","collaboration","support"]}`)
+		`{"revision":7,"snapshot_hash":"`+hash+`","plan":"standard","limits":{"agents":250,"agents_per_realm":100,"realms":10},"policies":{"transcript_retention_days":90},"features":["memory","facts","secrets","collaboration","support"]}`)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d; want 200", resp.StatusCode)
 	}
-	if gotAccount != "acct_1" || gotPlan != "standard" || gotLimits["agents"] != 250 || gotLimits["realms"] != 10 {
+	if gotAccount != "acct_1" || gotPlan != "standard" ||
+		gotLimits["agents"] != 250 ||
+		gotLimits["agents_per_realm"] != 100 ||
+		gotLimits["realms"] != 10 {
 		t.Fatalf("callback got (%q, %q, %v); want the applied snapshot", gotAccount, gotPlan, gotLimits)
 	}
 	if gotRevision != 7 || gotHash != hash {
@@ -110,7 +112,9 @@ func TestSetAccountPlanEndpoint(t *testing.T) {
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil ||
 		body.Revision != 7 || body.Hash != hash || body.Plan != "standard" ||
-		body.Limits["agents"] != 250 || body.Policies["transcript_retention_days"] != 90 {
+		body.Limits["agents"] != 250 ||
+		body.Limits["agents_per_realm"] != 100 ||
+		body.Policies["transcript_retention_days"] != 90 {
 		t.Fatalf("response body = %+v, %v; want the snapshot echoed", body, err)
 	}
 
@@ -143,7 +147,9 @@ func TestCreateRealmPlanLimit(t *testing.T) {
 		return "", "", "", false, nil
 	}
 	create := func(context.Context, string, string) (Realm, error) {
-		return Realm{}, fmt.Errorf("%w: realms 1/1 on the free plan", ErrPlanLimit)
+		return Realm{}, &PlanLimitError{
+			Dimension: "realms", Used: 1, Max: 1, Plan: "free",
+		}
 	}
 	srv := httptest.NewServer(apiMux(Config{Authenticate: auth, CreateRealm: create}))
 	t.Cleanup(srv.Close)
@@ -171,7 +177,9 @@ func TestCreateAgentPlanLimit(t *testing.T) {
 		return "opr_x", "acc_y", "active", tok == "good", nil
 	}
 	create := func(context.Context, string, string, string) (Agent, error) {
-		return Agent{}, fmt.Errorf("%w: agents 25/25 on the free plan", ErrPlanLimit)
+		return Agent{}, &PlanLimitError{
+			Dimension: "agents_per_realm", Used: 10, Max: 10, Plan: "free",
+		}
 	}
 	srv := httptest.NewServer(apiMux(Config{Authenticate: auth, CreateAgent: create}))
 	t.Cleanup(srv.Close)
@@ -189,7 +197,8 @@ func TestCreateAgentPlanLimit(t *testing.T) {
 	var body struct {
 		Error string `json:"error"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil || !strings.Contains(body.Error, "agents 25/25") {
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil ||
+		!strings.Contains(body.Error, "agents per realm 10/10") {
 		t.Fatalf("error body = %+v, %v; the refusal must explain itself", body, err)
 	}
 }

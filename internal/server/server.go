@@ -1451,9 +1451,30 @@ var ErrTicketInputInvalid = errors.New("invalid support ticket input")
 
 // ErrPlanLimit signals that creating a resource would exceed the account's
 // plan-limit snapshot (-> 403). The wrapped message carries the detail
-// ("plan limit reached: agents 25/25 on the free plan") and is surfaced
+// ("plan limit reached: agents per realm 10/10 on the free plan") and is surfaced
 // verbatim so the refusal explains itself and names the upgrade path.
 var ErrPlanLimit = errors.New("plan limit reached")
+
+// PlanLimitError preserves the bounded dimension and quantities across the
+// store/server boundary for observability. It contains no tenant identifiers.
+type PlanLimitError struct {
+	Dimension string
+	Used      int64
+	Max       int64
+	Plan      string
+}
+
+func (e *PlanLimitError) Error() string {
+	return fmt.Sprintf("%s: %s %d/%d on the %s plan",
+		ErrPlanLimit,
+		strings.ReplaceAll(e.Dimension, "_", " "),
+		e.Used,
+		e.Max,
+		e.Plan,
+	)
+}
+
+func (e *PlanLimitError) Unwrap() error { return ErrPlanLimit }
 
 // Agent is the API view of an agent.
 type Agent struct {

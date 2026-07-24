@@ -1730,8 +1730,17 @@ func toServerTicket(t store.Ticket) server.SupportTicket {
 // sentinel while keeping the store's human-readable detail ("realms 1/1 on
 // the free plan") — the HTTP layer surfaces the message verbatim.
 func planLimitError(err error) error {
-	detail := strings.TrimPrefix(err.Error(), store.ErrPlanLimitReached.Error()+": ")
-	return fmt.Errorf("%w: %s", server.ErrPlanLimit, detail)
+	var detail *store.PlanLimitError
+	if errors.As(err, &detail) {
+		return &server.PlanLimitError{
+			Dimension: detail.Dimension,
+			Used:      detail.Used,
+			Max:       detail.Max,
+			Plan:      detail.Plan,
+		}
+	}
+	message := strings.TrimPrefix(err.Error(), store.ErrPlanLimitReached.Error()+": ")
+	return fmt.Errorf("%w: %s", server.ErrPlanLimit, message)
 }
 
 func toServerMessage(m store.TicketMessage) server.SupportTicketMessage {
