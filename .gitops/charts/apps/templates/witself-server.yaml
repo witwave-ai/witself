@@ -71,7 +71,9 @@
 {{- $_ := set $serverValues "ingress" (dict
       "enabled" true
       "className" (default "traefik" $civoIngress.className)
-      "annotations" (dict "cert-manager.io/cluster-issuer" (default "letsencrypt-prod" $civoIngress.clusterIssuer))
+      "annotations" (dict
+        "cert-manager.io/cluster-issuer" (default "letsencrypt-prod" $civoIngress.clusterIssuer)
+        "kubernetes.io/ingress.class" (default "traefik" $civoIngress.className))
       "hosts" (list (dict "host" $apiHost "paths" (list (dict "path" "/" "pathType" "Prefix"))))
       "tls" (list (dict "secretName" (default "witself-api-tls" $civoIngress.tlsSecretName) "hosts" (list $apiHost)))
     ) -}}
