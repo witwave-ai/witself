@@ -320,9 +320,7 @@ func TestTranscriptRetentionDeletesOnlyExpiredWholeConversationsPostgres(t *test
 	// it. Migration 67 is independent and can be removed, after which the
 	// migration-66 down guard must refuse before dropping any index or
 	// constraint.
-	if err := migrationTestDown(t, schemaDSN, false); err != nil {
-		t.Fatal(err)
-	}
+	migrationTestDownTo(t, schemaDSN, 68)
 	assertMigrationTestVersion(t, schemaDSN, 68)
 	assertMigrationTestTable(t, st, "agent_email_retention_worker_lanes", false)
 	if err := migrationTestDown(t, schemaDSN, false); err != nil {

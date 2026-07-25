@@ -9,6 +9,7 @@ gcp_profile="$server_chart/ci/gcp-rollout-values.yaml"
 email_pilot_profile="$server_chart/ci/agent-email-pilot-values.yaml"
 apps_email_pilot_profile="$apps_chart/ci/agent-email-pilot-values.yaml"
 gcp_cell="$repo_root/.gitops/cells/gcp-sandbox-use1-dev/values.yaml"
+civo_cell="$repo_root/.gitops/cells/civo-sandbox-usw2-dev/values.yaml"
 
 render_dir="$(mktemp -d)"
 trap 'rm -r "$render_dir"' EXIT
@@ -18,6 +19,7 @@ gcp_render="$render_dir/gcp.yaml"
 portable_worker_render="$render_dir/portable-worker.yaml"
 apps_render="$render_dir/apps.yaml"
 live_apps_render="$render_dir/live-apps.yaml"
+civo_apps_render="$render_dir/civo-apps.yaml"
 phase_b_gcp_render="$render_dir/phase-b-gcp.yaml"
 phase_b_apps_render="$render_dir/phase-b-apps.yaml"
 email_pilot_render="$render_dir/email-pilot.yaml"
@@ -50,6 +52,8 @@ helm template witself-apps "$apps_chart" \
 helm template witself-apps "$apps_chart" \
   --values "$gcp_cell" \
   --values "$apps_profile" >"$live_apps_render"
+helm template witself-apps "$apps_chart" \
+  --values "$civo_cell" >"$civo_apps_render"
 helm template witself-server "$server_chart" --namespace witself \
   --values "$gcp_profile" \
   --set avatar.payloadCompaction.enabled=true >"$phase_b_gcp_render"
@@ -249,6 +253,10 @@ live_nested_render="$render_dir/live-nested-render.yaml"
 live_nested_server_config="$render_dir/live-nested-server-config.yaml"
 live_nested_worker_config="$render_dir/live-nested-worker-config.yaml"
 live_nested_worker_deployment="$render_dir/live-nested-worker-deployment.yaml"
+civo_server_application="$render_dir/civo-server-application.yaml"
+civo_server_nested_values="$render_dir/civo-server-nested-values.yaml"
+civo_server_nested_render="$render_dir/civo-server-nested-render.yaml"
+civo_server_config="$render_dir/civo-server-config.yaml"
 
 extract_document ConfigMap witself-server "$default_render" "$default_server_config"
 extract_document Deployment witself-server "$default_render" "$default_server_deployment"
@@ -273,6 +281,13 @@ helm template witself-server "$server_chart" --namespace witself \
 extract_document ConfigMap witself-server "$live_nested_render" "$live_nested_server_config"
 extract_document ConfigMap witself-worker "$live_nested_render" "$live_nested_worker_config"
 extract_document Deployment witself-worker "$live_nested_render" "$live_nested_worker_deployment"
+extract_document Application witself-server "$civo_apps_render" "$civo_server_application"
+extract_application_helm_values "$civo_server_application" "$civo_server_nested_values"
+helm template witself-server "$server_chart" --namespace witself \
+  --values "$civo_server_nested_values" >"$civo_server_nested_render"
+extract_document ConfigMap witself-server "$civo_server_nested_render" "$civo_server_config"
+
+require_line '  WITSELF_CELL_NAME: "civo-sandbox-usw2-dev"' "$civo_server_config"
 
 # Portable defaults keep the API rollout-safe and fail closed on a worker that
 # has no shared database Secret.
@@ -281,6 +296,7 @@ require_line "    type: RollingUpdate" "$default_server_deployment"
 require_line "      maxSurge: 1" "$default_server_deployment"
 require_line "      maxUnavailable: 0" "$default_server_deployment"
 require_line '  WITSELF_AVATAR_PAYLOAD_COMPACTION_ENABLED: "false"' "$default_server_config"
+require_line '  WITSELF_CELL_NAME: ""' "$default_server_config"
 require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED: "false"' "$default_server_config"
 require_line '  WITSELF_TRANSCRIPT_RETENTION_ENABLED: "false"' "$default_server_config"
 require_line '  WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED: "false"' "$default_server_config"

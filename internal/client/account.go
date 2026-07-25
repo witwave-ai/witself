@@ -3,18 +3,26 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
+	"github.com/witwave-ai/witself/internal/id"
 	"github.com/witwave-ai/witself/internal/placement"
 )
+
+var accountProvisionIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 
 // CreatedAccount is the control plane's signup result: the new account, the
 // cell it was placed on, and the one-shot bootstrap token that claims it.
 type CreatedAccount struct {
+	ProvisionID    string `json:"provision_id"`
+	Replayed       bool   `json:"replayed"`
 	AccountID      string `json:"account_id"`
 	OperatorID     string `json:"operator_id"`
 	Email          string `json:"email"`
@@ -34,7 +42,33 @@ type CreatedAccount struct {
 // invalid invite, duplicate email, no capacity — are surfaced verbatim. The
 // generous timeout covers placement plus the cell round trip.
 func CreateAccount(ctx context.Context, controlPlane, email, invite, displayName string) (*CreatedAccount, error) {
+	provisionID, err := id.New("prv")
+	if err != nil {
+		return nil, fmt.Errorf("create provision id: %w", err)
+	}
+	return CreateAccountExact(ctx, controlPlane, email, invite, displayName, provisionID)
+}
+
+// CreateAccountExact performs one retry-safe signup using the caller's durable
+// provision id. Every transport, 5xx, malformed-success, and incomplete-success
+// retry reuses the exact normalized body and provision id. Callers that need to
+// survive a process restart must persist provisionID before invoking this
+// function.
+func CreateAccountExact(
+	ctx context.Context,
+	controlPlane, email, invite, displayName, provisionID string,
+) (*CreatedAccount, error) {
+	if !accountProvisionIDPattern.MatchString(provisionID) {
+		return nil, fmt.Errorf("invalid provision id")
+	}
+	controlPlane, email, invite, displayName, err := normalizeAccountCreateRequest(
+		controlPlane, email, invite, displayName,
+	)
+	if err != nil {
+		return nil, err
+	}
 	body, err := json.Marshal(map[string]string{
+		"provision_id": provisionID,
 		"email":        email,
 		"invite":       invite,
 		"display_name": displayName,
@@ -43,29 +77,114 @@ func CreateAccount(ctx context.Context, controlPlane, email, invite, displayName
 		return nil, err
 	}
 	url := strings.TrimRight(controlPlane, "/") + "/v1/accounts"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 60 * time.Second}
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		req, err := http.NewRequestWithContext(
+			ctx, http.MethodPost, url, bytes.NewReader(body),
+		)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
 
-	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("connect to %s: %w", controlPlane, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("connect to %s: %w", controlPlane, err)
+			if ctx.Err() != nil {
+				return nil, lastErr
+			}
+			continue
+		}
+		if resp.StatusCode != http.StatusCreated {
+			responseErr := responseError(
+				resp, "account creation failed: "+resp.Status,
+			)
+			_ = resp.Body.Close()
+			if resp.StatusCode < 500 || resp.StatusCode > 599 {
+				return nil, responseErr
+			}
+			lastErr = responseErr
+			continue
+		}
 
-	if resp.StatusCode != http.StatusCreated {
-		return nil, responseError(resp, "account creation failed: "+resp.Status)
+		var out CreatedAccount
+		decodeErr := json.NewDecoder(resp.Body).Decode(&out)
+		_ = resp.Body.Close()
+		switch {
+		case decodeErr != nil:
+			lastErr = fmt.Errorf("decode response: %w", decodeErr)
+		case out.ProvisionID != provisionID:
+			lastErr = fmt.Errorf(
+				"control plane returned a mismatched provision id",
+			)
+		case out.AccountID == "" || out.BootstrapToken == "" ||
+			out.Cell.Endpoint == "":
+			lastErr = fmt.Errorf(
+				"control plane returned an incomplete signup response",
+			)
+		default:
+			return &out, nil
+		}
 	}
-	var out CreatedAccount
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
+	return nil, lastErr
+}
+
+// AccountCreateRequestFingerprint binds a durable local provision id to the
+// exact effective signup request and local destination name without persisting
+// the email, invite, display name, or control-plane endpoint. The length-prefixed
+// encoding avoids delimiter ambiguity.
+func AccountCreateRequestFingerprint(
+	controlPlane, localName, email, invite, displayName string,
+) (string, error) {
+	controlPlane, email, invite, displayName, err := normalizeAccountCreateRequest(
+		controlPlane, email, invite, displayName,
+	)
+	if err != nil {
+		return "", err
 	}
-	if out.AccountID == "" || out.BootstrapToken == "" || out.Cell.Endpoint == "" {
-		return nil, fmt.Errorf("control plane returned an incomplete signup response")
+	localName = strings.TrimSpace(localName)
+	if localName == "" {
+		return "", fmt.Errorf("local account name is required")
 	}
-	return &out, nil
+	hash := sha256.New()
+	for _, value := range []string{
+		"witself.account-create.v1",
+		controlPlane,
+		localName,
+		email,
+		invite,
+		displayName,
+	} {
+		var size [8]byte
+		binary.BigEndian.PutUint64(size[:], uint64(len(value)))
+		_, _ = hash.Write(size[:])
+		_, _ = hash.Write([]byte(value))
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
+}
+
+func normalizeAccountCreateRequest(
+	controlPlane, email, invite, displayName string,
+) (string, string, string, string, error) {
+	controlPlane = strings.TrimRight(strings.TrimSpace(controlPlane), "/")
+	email = strings.ToLower(strings.TrimSpace(email))
+	invite = strings.TrimSpace(invite)
+	displayName = strings.TrimSpace(displayName)
+	if displayName == "" {
+		displayName = email
+	}
+	switch {
+	case controlPlane == "":
+		return "", "", "", "", fmt.Errorf("control plane endpoint is required")
+	case email == "":
+		return "", "", "", "", fmt.Errorf("account email is required")
+	case invite == "":
+		return "", "", "", "", fmt.Errorf("invite code is required")
+	default:
+		return controlPlane, email, invite, displayName, nil
+	}
 }
 
 // AccountRecord is an account's lifecycle record as served by its cell.

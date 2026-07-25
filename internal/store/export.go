@@ -61,6 +61,31 @@ func SchemaVersion() int {
 // inside tables is stable (primary key) so repeated exports are deterministic
 // apart from manifest time metadata.
 func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVersion string, w io.Writer) error {
+	return s.exportAccount(ctx, accountID, "", cellName, serverVersion, w)
+}
+
+// ExportAccountEvacuation streams an account only while the exact durable
+// evacuation epoch owns its database write fence. The transaction-local
+// authority also permits the exporter's bounded reconciliation writes while
+// every unrelated mutation remains blocked by the schema trigger.
+func (s *Store) ExportAccountEvacuation(
+	ctx context.Context,
+	accountID, evacuationID, cellName, serverVersion string,
+	w io.Writer,
+) error {
+	if err := validateEvacuationID(evacuationID); err != nil {
+		return err
+	}
+	return s.exportAccount(
+		ctx, accountID, evacuationID, cellName, serverVersion, w,
+	)
+}
+
+func (s *Store) exportAccount(
+	ctx context.Context,
+	accountID, evacuationID, cellName, serverVersion string,
+	w io.Writer,
+) error {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
 		IsoLevel: pgx.RepeatableRead,
 	})
@@ -76,14 +101,35 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 		return fmt.Errorf("set canonical export bytea encoding: %w", err)
 	}
 
+	if evacuationID != "" {
+		if err := setEvacuationAuthorityTx(ctx, tx, evacuationID); err != nil {
+			return err
+		}
+	}
+
 	var status string
+	var currentEvacuationID, currentEvacuationRole *string
 	err = tx.QueryRow(ctx,
-		`SELECT status FROM accounts WHERE id = $1 FOR UPDATE`, accountID).Scan(&status)
+		`SELECT status, evacuation_id, evacuation_role
+		   FROM accounts
+		  WHERE id = $1
+		  FOR UPDATE`,
+		accountID,
+	).Scan(&status, &currentEvacuationID, &currentEvacuationRole)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrAccountNotFound
 	}
 	if err != nil {
 		return fmt.Errorf("verify export target: %w", err)
+	}
+	if evacuationID == "" && currentEvacuationID != nil {
+		return ErrAccountEvacuationMismatch
+	}
+	if evacuationID != "" &&
+		(currentEvacuationID == nil || *currentEvacuationID != evacuationID ||
+			currentEvacuationRole == nil ||
+			*currentEvacuationRole != "source") {
+		return ErrAccountEvacuationMismatch
 	}
 	if status != "suspended" && status != "closed" {
 		return ErrAccountNotExportable
@@ -189,6 +235,12 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 			  'closed_at', closed_at, 'closed_reason', closed_reason,
 			  'suspended_at', suspended_at, 'suspended_for', suspended_for,
 			  'suspended_reason', suspended_reason,
+			  'evacuation_id', evacuation_id,
+			  'evacuation_started_at', evacuation_started_at,
+			  'evacuation_role', evacuation_role,
+			  'last_evacuation_id', last_evacuation_id,
+			  'last_evacuation_completed_at', last_evacuation_completed_at,
+			  'last_evacuation_outcome', last_evacuation_outcome,
 			  'support_policy', support_policy,
 			  'plan', plan, 'plan_limits', plan_limits,
 			  'plan_policies', plan_policies,
@@ -1164,6 +1216,7 @@ func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVe
 		AccountID:     accountID,
 		Cell:          cellName,
 		Status:        status,
+		EvacuationID:  evacuationID,
 		ExportedAt:    exportedAt.UTC(),
 	}
 	if err := export.Write(ctx, w, m, sources); err != nil {

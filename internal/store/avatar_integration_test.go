@@ -966,9 +966,7 @@ func TestAvatarMigrationsBackfillStateAndAddStyleRolloutsPostgres(t *testing.T) 
 		view.Active.LockedLayersSHA256 == "" {
 		t.Fatalf("backfilled avatar = %#v", view)
 	}
-	if err := migrationTestDown(t, dsn, false); err != nil {
-		t.Fatal(err)
-	}
+	migrationTestDownTo(t, dsn, 68)
 	assertMigrationTestVersion(t, dsn, 68)
 	assertMigrationTestTable(t, st, "agent_email_retention_worker_lanes", false)
 	if err := migrationTestDown(t, dsn, false); err != nil {

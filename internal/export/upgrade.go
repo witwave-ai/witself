@@ -56,6 +56,8 @@ var upgraders = map[int]Upgrader{
 	63: preserveSchema63Rows,
 	66: preserveSchema66Rows,
 	67: preserveSchema67Rows,
+	69: preserveSchema69Rows,
+	70: preserveSchema70Rows,
 }
 
 const (
@@ -77,6 +79,25 @@ func preserveSchema66Rows(_ string, row map[string]any) (map[string]any, error) 
 // activity row and neither rejects nor transforms the archived message row, so
 // every schema-67 archive row remains valid without transformation.
 func preserveSchema67Rows(_ string, row map[string]any) (map[string]any, error) {
+	return row, nil
+}
+
+// preserveSchema69Rows acknowledges migration 0070's account evacuation
+// fence. A schema-69 archive predates the evacuation columns, so its rows
+// remain valid unchanged; the exact-epoch importer supplies the destination
+// account's evacuation marker before any tenant row is inserted. Registering
+// this identity step is still required because migration 0070 adds triggers
+// and checks that actively validate imported rows.
+func preserveSchema69Rows(_ string, row map[string]any) (map[string]any, error) {
+	return row, nil
+}
+
+// preserveSchema70Rows acknowledges migration 0071's source-finalization
+// receipt and evacuation-side role. The receipt is cell-local and therefore
+// absent from archives. Exact import overwrites the archived source role with
+// target before inserting the account row, so schema-70 rows otherwise remain
+// valid unchanged.
+func preserveSchema70Rows(_ string, row map[string]any) (map[string]any, error) {
 	return row, nil
 }
 

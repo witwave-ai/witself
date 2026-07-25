@@ -106,6 +106,27 @@ func (s *Store) SetPlacementPolicy(ctx context.Context, accountID, operatorID st
 // archive. The provision-token caller is the fleet control plane, so this path
 // intentionally works while the imported account is evacuation-suspended.
 func (s *Store) SetPlacementPolicySystem(ctx context.Context, accountID string, next placement.Policy) (placement.Policy, error) {
+	return s.setPlacementPolicySystem(ctx, accountID, "", next)
+}
+
+// SetPlacementPolicySystemEvacuation restores the archived placement policy
+// while the target account is still protected by its exact move epoch.
+func (s *Store) SetPlacementPolicySystemEvacuation(
+	ctx context.Context,
+	accountID, evacuationID string,
+	next placement.Policy,
+) (placement.Policy, error) {
+	if err := validateEvacuationID(evacuationID); err != nil {
+		return placement.Policy{}, err
+	}
+	return s.setPlacementPolicySystem(ctx, accountID, evacuationID, next)
+}
+
+func (s *Store) setPlacementPolicySystem(
+	ctx context.Context,
+	accountID, evacuationID string,
+	next placement.Policy,
+) (placement.Policy, error) {
 	next, err := placement.Normalize(next)
 	if err != nil {
 		return placement.Policy{}, err
@@ -115,16 +136,32 @@ func (s *Store) SetPlacementPolicySystem(ctx context.Context, accountID string, 
 		return placement.Policy{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if evacuationID != "" {
+		if err := setEvacuationAuthorityTx(ctx, tx, evacuationID); err != nil {
+			return placement.Policy{}, err
+		}
+	}
 
 	var raw []byte
+	var currentEvacuationID, currentEvacuationRole *string
 	err = tx.QueryRow(ctx,
-		`SELECT placement_policy FROM accounts WHERE id = $1 FOR UPDATE`,
-		accountID).Scan(&raw)
+		`SELECT placement_policy, evacuation_id, evacuation_role
+		   FROM accounts
+		  WHERE id = $1
+		  FOR UPDATE`,
+		accountID,
+	).Scan(&raw, &currentEvacuationID, &currentEvacuationRole)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return placement.Policy{}, ErrAccountNotFound
 	}
 	if err != nil {
 		return placement.Policy{}, fmt.Errorf("lock placement policy for restore: %w", err)
+	}
+	if evacuationID != "" &&
+		(currentEvacuationID == nil || *currentEvacuationID != evacuationID ||
+			currentEvacuationRole == nil ||
+			*currentEvacuationRole != "target") {
+		return placement.Policy{}, ErrAccountEvacuationMismatch
 	}
 	current, err := placement.FromJSON(raw)
 	if err != nil {

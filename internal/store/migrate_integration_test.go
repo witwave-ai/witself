@@ -1964,6 +1964,15 @@ func migrationTestUpToDB(db *sql.DB, version int64) error {
 	return goose.UpTo(db, "migrations", version)
 }
 
+func migrationTestDownTo(t *testing.T, dsn string, version int64) {
+	t.Helper()
+	db := migrationTestSQLDB(t, dsn)
+	defer func() { _ = db.Close() }()
+	if err := goose.DownTo(db, "migrations", version); err != nil {
+		t.Fatalf("migrate test database down to schema %d: %v", version, err)
+	}
+}
+
 func migrationTestDown(t *testing.T, dsn string, wantError bool) error {
 	t.Helper()
 	db := migrationTestSQLDB(t, dsn)

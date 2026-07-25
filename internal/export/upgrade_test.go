@@ -517,6 +517,28 @@ func TestSchema55VaultKeyLifecycleArchiveUpgradeRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSchema69EvacuationFenceUpgradePreservesRows(t *testing.T) {
+	upgrade := UpgraderFor(69)
+	if upgrade == nil {
+		t.Fatal("schema 69 evacuation-fence upgrader is not registered")
+	}
+	row := map[string]any{
+		"id":            "acc_legacy",
+		"status":        "suspended",
+		"suspended_for": "evacuation",
+	}
+	got, err := upgrade("accounts", row)
+	if err != nil {
+		t.Fatalf("upgrade schema 69 account: %v", err)
+	}
+	if got["id"] != "acc_legacy" || got["status"] != "suspended" {
+		t.Fatalf("legacy account row changed unexpectedly: %#v", got)
+	}
+	if _, exists := got["evacuation_id"]; exists {
+		t.Fatalf("row-local upgrader must not fabricate an evacuation id: %#v", got)
+	}
+}
+
 func TestUpgradeRowPreservesLargeIntegers(t *testing.T) {
 	const exact = "9007199254740993"
 	upgraded, err := upgradeRow("agents", []byte(`{"id":"agent_1","sequence":`+exact+`}`), 25, 26)
