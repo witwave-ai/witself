@@ -22,6 +22,7 @@ const (
 	avatarStyleRolloutJob  = "avatar_style_rollout"
 	transcriptRetentionJob = "transcript_retention"
 	messageRetentionJob    = "message_retention"
+	agentEmailRetentionJob = "agent_email_retention"
 
 	avatarStyleRolloutEnabledEnv      = "WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED"
 	avatarStyleRolloutBatchSizeEnv    = "WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE"
@@ -39,15 +40,23 @@ const (
 	messageRetentionBatchSizeEnv    = "WITSELF_MESSAGE_RETENTION_BATCH_SIZE"
 	messageRetentionIntervalEnv     = "WITSELF_MESSAGE_RETENTION_INTERVAL"
 	messageRetentionBatchTimeoutEnv = "WITSELF_MESSAGE_RETENTION_BATCH_TIMEOUT"
+
+	agentEmailRetentionEnabledEnv      = "WITSELF_AGENT_EMAIL_RETENTION_ENABLED"
+	agentEmailRetentionModeEnv         = "WITSELF_AGENT_EMAIL_RETENTION_MODE"
+	agentEmailRetentionBatchSizeEnv    = "WITSELF_AGENT_EMAIL_RETENTION_BATCH_SIZE"
+	agentEmailRetentionIntervalEnv     = "WITSELF_AGENT_EMAIL_RETENTION_INTERVAL"
+	agentEmailRetentionBatchTimeoutEnv = "WITSELF_AGENT_EMAIL_RETENTION_BATCH_TIMEOUT"
 )
 
 type jobConfig struct {
-	avatarEnabled           bool
-	avatar                  store.AvatarStyleRolloutWorkerConfig
-	retentionEnabled        bool
-	retention               store.TranscriptRetentionWorkerConfig
-	messageRetentionEnabled bool
-	messageRetention        store.MessageRetentionWorkerConfig
+	avatarEnabled              bool
+	avatar                     store.AvatarStyleRolloutWorkerConfig
+	retentionEnabled           bool
+	retention                  store.TranscriptRetentionWorkerConfig
+	messageRetentionEnabled    bool
+	messageRetention           store.MessageRetentionWorkerConfig
+	agentEmailRetentionEnabled bool
+	agentEmailRetention        store.AgentEmailRetentionWorkerConfig
 }
 
 func main() {
@@ -189,6 +198,52 @@ func serve() int {
 			"witself-worker: message retention enabled (mode %s, batch %d, interval %s, timeout %s)\n",
 			cfg.Mode, cfg.BatchSize, cfg.Interval, cfg.BatchTimeout)
 	}
+	if jobs.agentEmailRetentionEnabled {
+		cfg := jobs.agentEmailRetention
+		mode := string(cfg.Mode)
+		if err := registry.Register(worker.Job{
+			Name: agentEmailRetentionJob,
+			Run: func(jobCtx context.Context) error {
+				return st.RunAgentEmailRetentionWorker(
+					jobCtx,
+					cfg,
+					func(result store.AgentEmailRetentionBatchResult) {
+						metrics.ObserveAgentEmailRetentionBatch(
+							mode,
+							agentEmailRetentionMetricResult(result),
+							agentEmailRetentionMetricCounts(result),
+						)
+						logAgentEmailRetentionResult(cfg.Mode, result)
+					},
+					func(err error) {
+						metrics.RecordJobFailure(agentEmailRetentionJob)
+						metrics.ObserveAgentEmailRetentionBatch(
+							mode,
+							worker.RetentionResultError,
+							worker.AgentEmailRetentionCounts{},
+						)
+						fmt.Fprintf(
+							os.Stderr,
+							"witself-worker: agent-email retention: %v\n",
+							err,
+						)
+					},
+				)
+			},
+		}); err != nil {
+			fmt.Fprintf(
+				os.Stderr,
+				"witself-worker: register agent-email retention: %v\n",
+				err,
+			)
+			return 1
+		}
+		fmt.Fprintf(
+			os.Stderr,
+			"witself-worker: agent-email retention enabled (mode %s, batch %d, interval %s, timeout %s)\n",
+			cfg.Mode, cfg.BatchSize, cfg.Interval, cfg.BatchTimeout,
+		)
+	}
 
 	healthAddr := envOr(os.LookupEnv, "WITSELF_HEALTH_ADDR", ":8081")
 	metricsAddr := envOr(os.LookupEnv, "WITSELF_METRICS_ADDR", ":9090")
@@ -319,13 +374,66 @@ func jobConfigFromEnv(lookup func(string) (string, bool)) (jobConfig, error) {
 			err,
 		)
 	}
+	agentEmailRetentionEnabled, err := boolEnv(
+		lookup,
+		agentEmailRetentionEnabledEnv,
+		false,
+	)
+	if err != nil {
+		return jobConfig{}, err
+	}
+	agentEmailRetention := store.DefaultAgentEmailRetentionWorkerConfig()
+	if raw, ok := lookup(agentEmailRetentionModeEnv); ok {
+		agentEmailRetention.Mode = store.AgentEmailRetentionMode(
+			strings.ToLower(strings.TrimSpace(raw)),
+		)
+	}
+	if raw, ok := lookup(agentEmailRetentionBatchSizeEnv); ok {
+		agentEmailRetention.BatchSize, err = parseIntEnv(
+			agentEmailRetentionBatchSizeEnv,
+			raw,
+		)
+		if err != nil {
+			return jobConfig{}, err
+		}
+	}
+	if raw, ok := lookup(agentEmailRetentionIntervalEnv); ok {
+		agentEmailRetention.Interval, err = parseDurationEnv(
+			agentEmailRetentionIntervalEnv,
+			raw,
+		)
+		if err != nil {
+			return jobConfig{}, err
+		}
+	}
+	if raw, ok := lookup(agentEmailRetentionBatchTimeoutEnv); ok {
+		agentEmailRetention.BatchTimeout, err = parseDurationEnv(
+			agentEmailRetentionBatchTimeoutEnv,
+			raw,
+		)
+		if err != nil {
+			return jobConfig{}, err
+		}
+	}
+	if err := agentEmailRetention.Validate(); err != nil {
+		return jobConfig{}, fmt.Errorf(
+			"%s/%s/%s/%s agent-email retention configuration: %w",
+			agentEmailRetentionModeEnv,
+			agentEmailRetentionBatchSizeEnv,
+			agentEmailRetentionIntervalEnv,
+			agentEmailRetentionBatchTimeoutEnv,
+			err,
+		)
+	}
 	return jobConfig{
-		avatarEnabled:           avatarEnabled,
-		avatar:                  avatar,
-		retentionEnabled:        retentionEnabled,
-		retention:               retention,
-		messageRetentionEnabled: messageRetentionEnabled,
-		messageRetention:        messageRetention,
+		avatarEnabled:              avatarEnabled,
+		avatar:                     avatar,
+		retentionEnabled:           retentionEnabled,
+		retention:                  retention,
+		messageRetentionEnabled:    messageRetentionEnabled,
+		messageRetention:           messageRetention,
+		agentEmailRetentionEnabled: agentEmailRetentionEnabled,
+		agentEmailRetention:        agentEmailRetention,
 	}, nil
 }
 
@@ -433,6 +541,43 @@ func messageRetentionMetricCounts(
 	}
 }
 
+func agentEmailRetentionMetricResult(
+	result store.AgentEmailRetentionBatchResult,
+) worker.RetentionResult {
+	if result.Scanned == 0 &&
+		result.Eligible == 0 &&
+		result.Deleted == 0 &&
+		result.DeletedRawBytes == 0 &&
+		result.DeferredActive == 0 &&
+		result.DeferredLocked == 0 &&
+		result.DeferredOversize == 0 &&
+		result.DeferredBudget == 0 &&
+		result.ClearedDuplicateLinks == 0 &&
+		result.DeletedCanaryProofs == 0 {
+		return worker.RetentionResultNoWork
+	}
+	return worker.RetentionResultSuccess
+}
+
+func agentEmailRetentionMetricCounts(
+	result store.AgentEmailRetentionBatchResult,
+) worker.AgentEmailRetentionCounts {
+	return worker.AgentEmailRetentionCounts{
+		Scanned:               result.Scanned,
+		SkippedLocked:         result.SkippedLocked,
+		Eligible:              result.Eligible,
+		Deleted:               result.Deleted,
+		DeletedRawBytes:       result.DeletedRawBytes,
+		DeferredActive:        result.DeferredActive,
+		DeferredLocked:        result.DeferredLocked,
+		DeferredOversize:      result.DeferredOversize,
+		DeferredBudget:        result.DeferredBudget,
+		ClearedDuplicateLinks: result.ClearedDuplicateLinks,
+		DeletedCanaryProofs:   result.DeletedCanaryProofs,
+		ScanCapped:            result.ScanCapped,
+	}
+}
+
 func logRetentionResult(mode store.TranscriptRetentionMode, result store.TranscriptRetentionBatchResult) {
 	if result == (store.TranscriptRetentionBatchResult{}) {
 		return
@@ -467,6 +612,32 @@ func logMessageRetentionResult(
 		result.DeferredOversize,
 		result.DeferredBudget,
 		result.RepairedActivity,
+	)
+}
+
+func logAgentEmailRetentionResult(
+	mode store.AgentEmailRetentionMode,
+	result store.AgentEmailRetentionBatchResult,
+) {
+	if agentEmailRetentionMetricResult(result) == worker.RetentionResultNoWork {
+		return
+	}
+	fmt.Fprintf(
+		os.Stderr,
+		"witself-worker: agent-email retention: mode=%s scanned=%d skipped_locked=%d scan_capped=%t eligible=%d deleted=%d deleted_raw_bytes=%d deferred_active=%d deferred_locked=%d deferred_oversize=%d deferred_budget=%d cleared_duplicate_links=%d deleted_canary_proofs=%d\n",
+		mode,
+		result.Scanned,
+		result.SkippedLocked,
+		result.ScanCapped,
+		result.Eligible,
+		result.Deleted,
+		result.DeletedRawBytes,
+		result.DeferredActive,
+		result.DeferredLocked,
+		result.DeferredOversize,
+		result.DeferredBudget,
+		result.ClearedDuplicateLinks,
+		result.DeletedCanaryProofs,
 	)
 }
 

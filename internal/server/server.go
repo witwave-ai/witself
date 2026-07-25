@@ -453,24 +453,25 @@ type Config struct {
 	// cell-local signed-relay hook; every other callback receives the exact
 	// bearer-token-derived owner agent. List/checkpoint/listen are value-free,
 	// while ReadAgentEmail is the explicit untrusted-content boundary.
-	AgentEmailPilot             AgentEmailPilotConfig
-	IngestAgentEmailPilot       AgentEmailIngestFunc
-	GetAgentEmailAddress        func(ctx context.Context, p DomainPrincipal) (AgentEmailAddress, error)
-	ListAgentEmails             func(ctx context.Context, p DomainPrincipal, opts AgentEmailListOptions) (AgentEmailPage, error)
-	ReadAgentEmail              func(ctx context.Context, p DomainPrincipal, messageID string) (AgentEmailMessage, error)
-	AckAgentEmail               func(ctx context.Context, p DomainPrincipal, messageID string) (AgentEmailMessage, error)
-	MarkAgentEmailCodeConsumed  func(ctx context.Context, p DomainPrincipal, messageID string) (AgentEmailMessage, error)
-	GetSelfAgentEmailCheckpoint func(ctx context.Context, p DomainPrincipal) (AgentEmailCheckpoint, error)
-	ArmAgentEmailRetryCanary    func(ctx context.Context, p DomainPrincipal, challenge string) (AgentEmailRetryCanaryCheckpoint, error)
-	GetAgentEmailRetryCanary    func(ctx context.Context, p DomainPrincipal, challenge string) (AgentEmailRetryCanaryCheckpoint, error)
-	ClaimAgentEmail             func(ctx context.Context, p DomainPrincipal, messageID string, in ClaimAgentEmailRequest) (AgentEmailProcessing, error)
-	RenewAgentEmailClaim        func(ctx context.Context, p DomainPrincipal, messageID string, in RenewAgentEmailClaimRequest) (AgentEmailProcessing, error)
-	ReleaseAgentEmailClaim      func(ctx context.Context, p DomainPrincipal, messageID string, in ReleaseAgentEmailClaimRequest) (AgentEmailProcessing, error)
-	CompleteAgentEmail          func(ctx context.Context, p DomainPrincipal, messageID string, in CompleteAgentEmailRequest) (AgentEmailProcessing, error)
-	GetAgentEmailReceiveControl func(ctx context.Context, accountID, operatorID, agentID string) (AgentEmailReceiveControl, error)
-	SetAgentEmailReceiveControl func(ctx context.Context, accountID, operatorID, agentID, receiveState string) (AgentEmailReceiveControl, error)
-	GetRealmEmailReceiveControl func(ctx context.Context, accountID, operatorID, realmID string) (AgentEmailRealmReceiveControl, error)
-	SetRealmEmailReceiveControl func(ctx context.Context, accountID, operatorID, realmID, receiveState string) (AgentEmailRealmReceiveControl, error)
+	AgentEmailPilot              AgentEmailPilotConfig
+	IngestAgentEmailPilot        AgentEmailIngestFunc
+	RequireAgentEmailEntitlement func(ctx context.Context, p DomainPrincipal) error
+	GetAgentEmailAddress         func(ctx context.Context, p DomainPrincipal) (AgentEmailAddress, error)
+	ListAgentEmails              func(ctx context.Context, p DomainPrincipal, opts AgentEmailListOptions) (AgentEmailPage, error)
+	ReadAgentEmail               func(ctx context.Context, p DomainPrincipal, messageID string) (AgentEmailMessage, error)
+	AckAgentEmail                func(ctx context.Context, p DomainPrincipal, messageID string) (AgentEmailMessage, error)
+	MarkAgentEmailCodeConsumed   func(ctx context.Context, p DomainPrincipal, messageID string) (AgentEmailMessage, error)
+	GetSelfAgentEmailCheckpoint  func(ctx context.Context, p DomainPrincipal) (AgentEmailCheckpoint, error)
+	ArmAgentEmailRetryCanary     func(ctx context.Context, p DomainPrincipal, challenge string) (AgentEmailRetryCanaryCheckpoint, error)
+	GetAgentEmailRetryCanary     func(ctx context.Context, p DomainPrincipal, challenge string) (AgentEmailRetryCanaryCheckpoint, error)
+	ClaimAgentEmail              func(ctx context.Context, p DomainPrincipal, messageID string, in ClaimAgentEmailRequest) (AgentEmailProcessing, error)
+	RenewAgentEmailClaim         func(ctx context.Context, p DomainPrincipal, messageID string, in RenewAgentEmailClaimRequest) (AgentEmailProcessing, error)
+	ReleaseAgentEmailClaim       func(ctx context.Context, p DomainPrincipal, messageID string, in ReleaseAgentEmailClaimRequest) (AgentEmailProcessing, error)
+	CompleteAgentEmail           func(ctx context.Context, p DomainPrincipal, messageID string, in CompleteAgentEmailRequest) (AgentEmailProcessing, error)
+	GetAgentEmailReceiveControl  func(ctx context.Context, accountID, operatorID, agentID string) (AgentEmailReceiveControl, error)
+	SetAgentEmailReceiveControl  func(ctx context.Context, accountID, operatorID, agentID, receiveState string) (AgentEmailReceiveControl, error)
+	GetRealmEmailReceiveControl  func(ctx context.Context, accountID, operatorID, realmID string) (AgentEmailRealmReceiveControl, error)
+	SetRealmEmailReceiveControl  func(ctx context.Context, accountID, operatorID, realmID, receiveState string) (AgentEmailRealmReceiveControl, error)
 
 	// Open message requests are realm-local, message-backed delegations. The
 	// backend persists candidate snapshots, offers, coordinator selections, and
@@ -1846,6 +1847,7 @@ func apiMux(cfg Config) http.Handler {
 			cfg.GetSelfMemoryCheckpoint,
 			cfg.GetSelfMessageCheckpoint,
 			cfg.AgentEmailPilot,
+			cfg.RequireAgentEmailEntitlement,
 			cfg.GetSelfAgentEmailCheckpoint,
 			cfg.GetSelfAvatarCheckpoint,
 		))
@@ -2124,26 +2126,32 @@ func apiMux(cfg Config) http.Handler {
 		if agentEmailPilotSupported {
 			if cfg.GetAgentEmailAddress != nil {
 				mux.HandleFunc("GET /v1/email/address", getAgentEmailAddressHandler(
-					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot, cfg.GetAgentEmailAddress))
+					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot,
+					cfg.RequireAgentEmailEntitlement, cfg.GetAgentEmailAddress))
 			}
 			if cfg.ListAgentEmails != nil {
 				mux.HandleFunc("GET /v1/email", listAgentEmailsHandler(
-					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot, cfg.ListAgentEmails))
+					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot,
+					cfg.RequireAgentEmailEntitlement, cfg.ListAgentEmails))
 				mux.HandleFunc("POST /v1/email:listen", agentEmailListenHandler(
-					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot, cfg.ListAgentEmails))
+					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot,
+					cfg.RequireAgentEmailEntitlement, cfg.ListAgentEmails))
 			}
 			if cfg.GetSelfAgentEmailCheckpoint != nil {
 				mux.HandleFunc("GET /v1/email/checkpoint", getAgentEmailCheckpointHandler(
-					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot, cfg.GetSelfAgentEmailCheckpoint))
+					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot,
+					cfg.RequireAgentEmailEntitlement, cfg.GetSelfAgentEmailCheckpoint))
 			}
 			if cfg.AgentEmailPilot.RetryCanaryAgentID != "" {
 				if cfg.ArmAgentEmailRetryCanary != nil {
 					mux.HandleFunc("POST /v1/email/retry-canary:arm", agentEmailRetryCanaryHandler(
-						cfg.AuthenticatePrincipal, cfg.AgentEmailPilot, cfg.ArmAgentEmailRetryCanary))
+						cfg.AuthenticatePrincipal, cfg.AgentEmailPilot,
+						cfg.RequireAgentEmailEntitlement, cfg.ArmAgentEmailRetryCanary))
 				}
 				if cfg.GetAgentEmailRetryCanary != nil {
 					mux.HandleFunc("POST /v1/email/retry-canary:status", agentEmailRetryCanaryHandler(
-						cfg.AuthenticatePrincipal, cfg.AgentEmailPilot, cfg.GetAgentEmailRetryCanary))
+						cfg.AuthenticatePrincipal, cfg.AgentEmailPilot,
+						cfg.RequireAgentEmailEntitlement, cfg.GetAgentEmailRetryCanary))
 				}
 			}
 			if cfg.ReadAgentEmail != nil || cfg.AckAgentEmail != nil ||
@@ -2152,6 +2160,7 @@ func apiMux(cfg Config) http.Handler {
 				cfg.CompleteAgentEmail != nil {
 				mux.HandleFunc("POST /v1/email/{action}", agentEmailActionHandler(
 					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot,
+					cfg.RequireAgentEmailEntitlement,
 					cfg.ReadAgentEmail, cfg.AckAgentEmail, cfg.MarkAgentEmailCodeConsumed,
 					cfg.ClaimAgentEmail, cfg.RenewAgentEmailClaim,
 					cfg.ReleaseAgentEmailClaim, cfg.CompleteAgentEmail))
@@ -2478,6 +2487,7 @@ func selfHandler(
 	getMemoryCheckpoint func(context.Context, DomainPrincipal) (*SelfMemoryCheckpoint, error),
 	getMessageCheckpoint func(context.Context, DomainPrincipal) (*SelfMessageCheckpoint, error),
 	agentEmailPilot AgentEmailPilotConfig,
+	requireEmailEntitlement func(context.Context, DomainPrincipal) error,
 	getEmailCheckpoint func(context.Context, DomainPrincipal) (AgentEmailCheckpoint, error),
 	getAvatarCheckpoint func(context.Context, DomainPrincipal) (*SelfAvatarCheckpoint, error),
 ) http.HandlerFunc {
@@ -2566,15 +2576,33 @@ func selfHandler(
 			includeEmailCheckpoint, _ = strconv.ParseBool(raw)
 		}
 		var emailCheckpoint *AgentEmailCheckpoint
-		if includeEmailCheckpoint && agentEmailPilot.allows(p) && getEmailCheckpoint != nil {
-			checkpoint, err := getEmailCheckpoint(r.Context(), p)
-			if err != nil {
-				// Email attention state is additive and content-free. Preserve the
-				// authenticated digest while distinguishing an unhealthy projection
-				// from an idle enrolled mailbox.
-				emailCheckpoint = &AgentEmailCheckpoint{Unavailable: true}
-			} else {
-				emailCheckpoint = &checkpoint
+		if includeEmailCheckpoint && getEmailCheckpoint != nil {
+			enrolled := agentEmailPilot.allows(p)
+			entitled := true
+			if requireEmailEntitlement != nil {
+				if err := requireEmailEntitlement(r.Context(), p); err != nil {
+					entitled = false
+					if errors.Is(err, ErrFeatureNotEnabled) {
+						disabled := false
+						emailCheckpoint = &AgentEmailCheckpoint{Enabled: &disabled}
+					} else if enrolled {
+						emailCheckpoint = &AgentEmailCheckpoint{Unavailable: true}
+					}
+				}
+			}
+			if entitled && enrolled {
+				checkpoint, err := getEmailCheckpoint(r.Context(), p)
+				if errors.Is(err, ErrFeatureNotEnabled) {
+					disabled := false
+					emailCheckpoint = &AgentEmailCheckpoint{Enabled: &disabled}
+				} else if err != nil {
+					// Email attention state is additive and content-free. Preserve the
+					// authenticated digest while distinguishing an unhealthy projection
+					// from an idle enrolled mailbox.
+					emailCheckpoint = &AgentEmailCheckpoint{Unavailable: true}
+				} else {
+					emailCheckpoint = &checkpoint
+				}
 			}
 		}
 		includeAvatarCheckpoint := true

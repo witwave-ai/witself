@@ -338,6 +338,40 @@ func TestAccountPolicyCommandsRejectUnsafeMutations(t *testing.T) {
 			},
 		},
 		{
+			name: "email receive set needs selection",
+			call: func() int {
+				return accountAgentEmailReceive([]string{
+					"set", "--account", "acct_1", "--reason", "bad",
+				})
+			},
+		},
+		{
+			name: "email receive set rejects both values",
+			call: func() int {
+				return accountAgentEmailReceive([]string{
+					"set", "--account", "acct_1", "--enabled", "--disabled",
+					"--reason", "bad",
+				})
+			},
+		},
+		{
+			name: "email retention set needs reason",
+			call: func() int {
+				return accountAgentEmailRetention([]string{
+					"set", "--account", "acct_1", "--days", "90",
+				})
+			},
+		},
+		{
+			name: "email retention rejects both values",
+			call: func() int {
+				return accountAgentEmailRetention([]string{
+					"set", "--account", "acct_1", "--days", "90",
+					"--indefinite", "--reason", "bad",
+				})
+			},
+		},
+		{
 			name: "plan set needs plan",
 			call: func() int {
 				return accountPlanOverride([]string{"set", "--account", "acct_1", "--reason", "bad"})
@@ -504,6 +538,12 @@ func TestAccountMessagingCLITransmitsIndependentOverrides(t *testing.T) {
 			"message_retention": map[string]any{
 				"default_days": 30, "effective_days": nil, "overridden": true,
 			},
+			"email_receive": map[string]any{
+				"default_enabled": false, "enabled": true, "overridden": true,
+			},
+			"email_retention": map[string]any{
+				"default_days": 30, "effective_days": nil, "overridden": true,
+			},
 			"transcript_retention": map[string]any{
 				"default_days": 30, "effective_days": 30, "overridden": false,
 			},
@@ -529,8 +569,22 @@ func TestAccountMessagingCLITransmitsIndependentOverrides(t *testing.T) {
 	}); code != 0 {
 		t.Fatalf("message retention exit code = %d, want 0", code)
 	}
+	if code := accountAgentEmailReceive([]string{
+		"set", "--endpoint", srv.URL, "--token", "admin-token",
+		"--account", "acct_1", "--enabled",
+		"--reason", " founder email ", "--json",
+	}); code != 0 {
+		t.Fatalf("email receive exit code = %d, want 0", code)
+	}
+	if code := accountAgentEmailRetention([]string{
+		"set", "--endpoint", srv.URL, "--token", "admin-token",
+		"--account", "acct_1", "--indefinite",
+		"--reason", " founder email retention ", "--json",
+	}); code != 0 {
+		t.Fatalf("email retention exit code = %d, want 0", code)
+	}
 
-	if len(requests) != 2 {
+	if len(requests) != 4 {
 		t.Fatalf("requests = %#v", requests)
 	}
 	if requests[0].method != http.MethodPut ||
@@ -544,6 +598,18 @@ func TestAccountMessagingCLITransmitsIndependentOverrides(t *testing.T) {
 		requests[1].body["indefinite"] != true ||
 		requests[1].body["reason"] != "founder retention" {
 		t.Fatalf("retention request = %#v", requests[1])
+	}
+	if requests[2].method != http.MethodPut ||
+		requests[2].path != "/v1/admin/accounts/acct_1/email-receive" ||
+		requests[2].body["enabled"] != true ||
+		requests[2].body["reason"] != "founder email" {
+		t.Fatalf("email receive request = %#v", requests[2])
+	}
+	if requests[3].method != http.MethodPut ||
+		requests[3].path != "/v1/admin/accounts/acct_1/email-retention" ||
+		requests[3].body["indefinite"] != true ||
+		requests[3].body["reason"] != "founder email retention" {
+		t.Fatalf("email retention request = %#v", requests[3])
 	}
 }
 

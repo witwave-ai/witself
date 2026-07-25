@@ -22,4 +22,9 @@ data:
   WITSELF_MESSAGE_RETENTION_BATCH_SIZE: {{ .Values.worker.messageRetention.batchSize | quote }}
   WITSELF_MESSAGE_RETENTION_INTERVAL: {{ .Values.worker.messageRetention.interval | quote }}
   WITSELF_MESSAGE_RETENTION_BATCH_TIMEOUT: {{ .Values.worker.messageRetention.batchTimeout | quote }}
+  WITSELF_AGENT_EMAIL_RETENTION_ENABLED: {{ .Values.worker.agentEmailRetention.enabled | quote }}
+  WITSELF_AGENT_EMAIL_RETENTION_MODE: {{ .Values.worker.agentEmailRetention.mode | quote }}
+  WITSELF_AGENT_EMAIL_RETENTION_BATCH_SIZE: {{ .Values.worker.agentEmailRetention.batchSize | quote }}
+  WITSELF_AGENT_EMAIL_RETENTION_INTERVAL: {{ .Values.worker.agentEmailRetention.interval | quote }}
+  WITSELF_AGENT_EMAIL_RETENTION_BATCH_TIMEOUT: {{ .Values.worker.agentEmailRetention.batchTimeout | quote }}
 {{- end }}

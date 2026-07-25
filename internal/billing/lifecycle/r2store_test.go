@@ -463,6 +463,89 @@ func TestR2MessagingOverridesSurviveLegacyControlPlaneRoundTrip(t *testing.T) {
 	}
 }
 
+func TestR2AgentEmailOverridesSurviveV00210RoundTrip(t *testing.T) {
+	at := time.Date(2026, 7, 24, 16, 0, 0, 0, time.UTC)
+	inheritedDays := int64(30)
+	record := Record{
+		AccountID: "acct_founder_email",
+		AgentEmailReceiveOverride: &AgentEmailReceiveOverride{
+			Enabled: true, ActorID: "adm_founder", ActorHandle: "scott",
+			Reason: "founder email enabled", SetAt: at,
+		},
+		AgentEmailRetentionOverride: &AgentEmailRetentionOverride{
+			Days: nil, ActorID: "adm_founder", ActorHandle: "scott",
+			Reason: "founder email retained indefinitely", SetAt: at,
+		},
+		AdminHistory: []AdminChange{
+			{
+				Kind:    "agent_email_receive_override_set",
+				ActorID: "adm_founder", ActorHandle: "scott",
+				Reason: "founder email enabled", At: at,
+				AgentEmailReceiveFrom:       boolValue(false),
+				AgentEmailReceiveTo:         boolValue(true),
+				AgentEmailReceiveFromSource: "inherited",
+				AgentEmailReceiveToSource:   "override",
+			},
+			{
+				Kind:    "agent_email_retention_override_set",
+				ActorID: "adm_founder", ActorHandle: "scott",
+				Reason: "founder email retained indefinitely", At: at,
+				AgentEmailRetentionFrom:       &inheritedDays,
+				AgentEmailRetentionTo:         nil,
+				AgentEmailRetentionFromSource: "inherited",
+				AgentEmailRetentionToSource:   "override",
+			},
+		},
+	}
+	encoded, err := marshalR2Record(record)
+	if err != nil {
+		t.Fatalf("marshal current record: %v", err)
+	}
+
+	type v00210Change struct {
+		Kind        string    `json:"kind"`
+		ActorID     string    `json:"actor_id"`
+		ActorHandle string    `json:"actor_handle"`
+		Reason      string    `json:"reason"`
+		At          time.Time `json:"at"`
+	}
+	var legacy struct {
+		AccountID    string         `json:"AccountID"`
+		AdminHistory []v00210Change `json:"AdminHistory"`
+	}
+	if err := json.Unmarshal(encoded, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(
+		legacy.AdminHistory[0].Kind, r2AgentEmailPolicyAuditKindPrefix) {
+		t.Fatalf("new rollback-safe prefix missing: %q",
+			legacy.AdminHistory[0].Kind)
+	}
+	rolledBack, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := unmarshalR2Record(rolledBack)
+	if err != nil {
+		t.Fatalf("restore after v0.0.210 round trip: %v", err)
+	}
+	if got.AgentEmailReceiveOverride == nil ||
+		!got.AgentEmailReceiveOverride.Enabled ||
+		got.AgentEmailRetentionOverride == nil ||
+		got.AgentEmailRetentionOverride.Days != nil {
+		t.Fatalf("replayed email overrides = receive=%+v retention=%+v",
+			got.AgentEmailReceiveOverride, got.AgentEmailRetentionOverride)
+	}
+	if len(got.AdminHistory) != 2 ||
+		got.AdminHistory[0].Kind != "agent_email_receive_override_set" ||
+		got.AdminHistory[1].Kind != "agent_email_retention_override_set" ||
+		got.AdminHistory[1].AgentEmailRetentionFrom == nil ||
+		*got.AdminHistory[1].AgentEmailRetentionFrom != 30 ||
+		got.AdminHistory[1].AgentEmailRetentionTo != nil {
+		t.Fatalf("restored email audit = %+v", got.AdminHistory)
+	}
+}
+
 func TestR2MessagingClearEventsSurviveLegacyControlPlaneRoundTrip(t *testing.T) {
 	at := time.Date(2026, 7, 24, 15, 0, 0, 0, time.UTC)
 	inheritedDays := int64(365)
@@ -602,6 +685,40 @@ func TestR2LimitAuditMalformedReservedKindFailsClosed(t *testing.T) {
 	}
 	if _, err := s.List(ctx); err == nil {
 		t.Fatal("R2 List accepted malformed reserved Kind")
+	}
+}
+
+func TestR2AgentEmailAuditMalformedReservedKindFailsClosed(t *testing.T) {
+	for _, kind := range []string{
+		r2AgentEmailPolicyAuditKindPrefix,
+		r2AgentEmailPolicyAuditKindPrefix + "not-base64!",
+		r2AgentEmailPolicyAuditKindPrefix + "e30",
+	} {
+		raw, err := json.Marshal(Record{
+			AccountID: "acct_bad_email",
+			AdminHistory: []AdminChange{{
+				Kind: kind, ActorID: "adm_bad", ActorHandle: "bad",
+				Reason: "bad", At: time.Now(),
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := unmarshalR2Record(raw); err == nil ||
+			!strings.Contains(err.Error(), "malformed reserved kind") {
+			t.Fatalf("unmarshal reserved kind %q = %v; want fail closed",
+				kind, err)
+		}
+		if _, err := marshalR2Record(Record{
+			AccountID: "acct_bad_email",
+			AdminHistory: []AdminChange{{
+				Kind: kind, ActorID: "adm_bad", ActorHandle: "bad",
+				Reason: "bad", At: time.Now(),
+			}},
+		}); err == nil || !strings.Contains(err.Error(), "malformed reserved kind") {
+			t.Fatalf("marshal reserved kind %q = %v; want fail closed",
+				kind, err)
+		}
 	}
 }
 

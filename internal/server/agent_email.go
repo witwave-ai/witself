@@ -46,6 +46,10 @@ var (
 	ErrAgentEmailUnknownRecipient = errors.New("unknown agent-email recipient")
 	// ErrAgentEmailReceiveDisabled reports a known mailbox whose receive state is disabled.
 	ErrAgentEmailReceiveDisabled = errors.New("agent-email receive is disabled")
+	// ErrAgentEmailFeatureDisabled reports a verified relay for an account
+	// whose plan does not enable inbound email. The edge accepts and drops
+	// this delivery without retrying and without revealing account state.
+	ErrAgentEmailFeatureDisabled = errors.New("agent-email feature is disabled")
 	// ErrAgentEmailPilotUnavailable reports a transient pilot-wide ingestion failure.
 	ErrAgentEmailPilotUnavailable = errors.New("agent-email pilot is unavailable")
 	// ErrAgentEmailRetryCanaryTemporary reports the deliberate first-attempt
@@ -343,6 +347,10 @@ type CompleteAgentEmailRequest struct {
 
 // AgentEmailCheckpoint is a bounded, value-free foreground-work hint.
 type AgentEmailCheckpoint struct {
+	// Enabled is nil when talking to a pre-entitlement server. Explicit false
+	// means the account has inbound email disabled and clients should stop
+	// polling without reinstalling or removing their email tools.
+	Enabled           *bool  `json:"enabled,omitempty"`
 	Pending           bool   `json:"pending"`
 	Unavailable       bool   `json:"unavailable,omitempty"`
 	MailboxPending    bool   `json:"mailbox_pending,omitempty"`
@@ -399,6 +407,8 @@ func agentEmailIngestHandler(cfg AgentEmailPilotConfig, ingest AgentEmailIngestF
 		switch {
 		case err == nil:
 			writeAgentEmailVerdict(w, http.StatusOK, "accepted")
+		case errors.Is(err, ErrAgentEmailFeatureDisabled):
+			writeAgentEmailVerdict(w, http.StatusOK, "feature_disabled")
 		case errors.Is(err, ErrAgentEmailUnknownRecipient), errors.Is(err, ErrNotFound):
 			writeAgentEmailVerdict(w, http.StatusNotFound, "unknown_recipient")
 		case errors.Is(err, ErrAgentEmailReceiveDisabled):
@@ -496,9 +506,10 @@ func writeAgentEmailVerdict(w http.ResponseWriter, status int, verdict string) {
 func getAgentEmailAddressHandler(
 	auth PrincipalAuthFunc,
 	pilot AgentEmailPilotConfig,
+	requireEntitlement func(context.Context, DomainPrincipal) error,
 	get func(context.Context, DomainPrincipal) (AgentEmailAddress, error),
 ) http.HandlerFunc {
-	return agentEmailNoStore(requireAgentEmailReadPrincipal(auth, pilot, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+	return agentEmailNoStore(requireAgentEmailReadPrincipal(auth, pilot, requireEntitlement, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
 		address, err := get(r.Context(), p)
 		if writeAgentEmailOwnerError(w, err, "could not get agent email address") {
 			return
@@ -654,9 +665,10 @@ func allowAgentEmailReceiveControlStatus(w http.ResponseWriter, accountStatus, d
 func listAgentEmailsHandler(
 	auth PrincipalAuthFunc,
 	pilot AgentEmailPilotConfig,
+	requireEntitlement func(context.Context, DomainPrincipal) error,
 	list func(context.Context, DomainPrincipal, AgentEmailListOptions) (AgentEmailPage, error),
 ) http.HandlerFunc {
-	return agentEmailNoStore(requireAgentEmailReadPrincipal(auth, pilot, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+	return agentEmailNoStore(requireAgentEmailReadPrincipal(auth, pilot, requireEntitlement, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
 		q := r.URL.Query()
 		opts := AgentEmailListOptions{Cursor: q.Get("cursor")}
 		for name, destination := range map[string]*bool{
@@ -729,10 +741,11 @@ func (l *agentEmailListenLimiter) release(p DomainPrincipal) {
 func agentEmailListenHandler(
 	auth PrincipalAuthFunc,
 	pilot AgentEmailPilotConfig,
+	requireEntitlement func(context.Context, DomainPrincipal) error,
 	list func(context.Context, DomainPrincipal, AgentEmailListOptions) (AgentEmailPage, error),
 ) http.HandlerFunc {
 	limiter := &agentEmailListenLimiter{byAgent: make(map[string]int)}
-	return agentEmailNoStore(requireAgentEmailReadPrincipal(auth, pilot, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+	return agentEmailNoStore(requireAgentEmailReadPrincipal(auth, pilot, requireEntitlement, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
 		var req AgentEmailListenRequest
 		if err := decodeStrictAgentEmailJSON(w, r, &req, 16*1024); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
@@ -798,9 +811,10 @@ func writeAgentEmailListenResult(w http.ResponseWriter, messages []AgentEmailMes
 func getAgentEmailCheckpointHandler(
 	auth PrincipalAuthFunc,
 	pilot AgentEmailPilotConfig,
+	requireEntitlement func(context.Context, DomainPrincipal) error,
 	get func(context.Context, DomainPrincipal) (AgentEmailCheckpoint, error),
 ) http.HandlerFunc {
-	return agentEmailNoStore(requireAgentEmailReadPrincipal(auth, pilot, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+	return agentEmailNoStore(requireAgentEmailReadPrincipal(auth, pilot, requireEntitlement, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
 		checkpoint, err := get(r.Context(), p)
 		if writeAgentEmailOwnerError(w, err, "could not get agent email checkpoint") {
 			return
@@ -815,9 +829,10 @@ func getAgentEmailCheckpointHandler(
 func agentEmailRetryCanaryHandler(
 	auth PrincipalAuthFunc,
 	pilot AgentEmailPilotConfig,
+	requireEntitlement func(context.Context, DomainPrincipal) error,
 	operation func(context.Context, DomainPrincipal, string) (AgentEmailRetryCanaryCheckpoint, error),
 ) http.HandlerFunc {
-	return agentEmailNoStore(requireAgentEmailReadPrincipal(auth, pilot, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+	return agentEmailNoStore(requireAgentEmailReadPrincipal(auth, pilot, requireEntitlement, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
 		if len(r.URL.Query()) != 0 {
 			writeJSONError(w, http.StatusBadRequest, "retry canary does not accept query parameters")
 			return
@@ -846,6 +861,7 @@ func agentEmailRetryCanaryHandler(
 func agentEmailActionHandler(
 	auth PrincipalAuthFunc,
 	pilot AgentEmailPilotConfig,
+	requireEntitlement func(context.Context, DomainPrincipal) error,
 	read func(context.Context, DomainPrincipal, string) (AgentEmailMessage, error),
 	ack func(context.Context, DomainPrincipal, string) (AgentEmailMessage, error),
 	codeConsumed func(context.Context, DomainPrincipal, string) (AgentEmailMessage, error),
@@ -854,7 +870,7 @@ func agentEmailActionHandler(
 	release func(context.Context, DomainPrincipal, string, ReleaseAgentEmailClaimRequest) (AgentEmailProcessing, error),
 	complete func(context.Context, DomainPrincipal, string, CompleteAgentEmailRequest) (AgentEmailProcessing, error),
 ) http.HandlerFunc {
-	return agentEmailNoStore(requireAgentEmailPrincipal(auth, pilot, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+	return agentEmailNoStore(requireAgentEmailPrincipal(auth, pilot, requireEntitlement, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
 		action := r.PathValue("action")
 		messageID, operation, ok := strings.Cut(action, ":")
 		if !ok || messageID == "" || !agentEmailOperationAllowed(operation) {
@@ -1005,6 +1021,8 @@ func writeAgentEmailProcessingError(w http.ResponseWriter, err error) bool {
 	switch {
 	case err == nil:
 		return false
+	case errors.Is(err, ErrFeatureNotEnabled):
+		writeFeatureNotEnabledError(w, err)
 	case errors.Is(err, ErrBadInput):
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrNotFound), errors.Is(err, ErrForbidden):
@@ -1023,6 +1041,8 @@ func writeAgentEmailOwnerError(w http.ResponseWriter, err error, internalMessage
 	switch {
 	case err == nil:
 		return false
+	case errors.Is(err, ErrFeatureNotEnabled):
+		writeFeatureNotEnabledError(w, err)
 	case errors.Is(err, ErrBadInput):
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrNotFound), errors.Is(err, ErrForbidden):
@@ -1040,24 +1060,33 @@ func writeAgentEmailOwnerError(w http.ResponseWriter, err error, internalMessage
 func requireAgentEmailReadPrincipal(
 	auth PrincipalAuthFunc,
 	pilot AgentEmailPilotConfig,
+	requireEntitlement func(context.Context, DomainPrincipal) error,
 	h func(http.ResponseWriter, *http.Request, DomainPrincipal),
 ) http.HandlerFunc {
 	// The current immutable token model has only full and curator profiles. A
 	// full agent credential carries the read tier; every curator profile remains
 	// denied by requireDomainPrincipal. Processing uses a distinct wrapper below
 	// so a future scoped-token migration can split the tiers without route churn.
-	return requireAgentEmailPrincipal(auth, pilot, h)
+	return requireAgentEmailPrincipal(auth, pilot, requireEntitlement, h)
 }
 
 func requireAgentEmailPrincipal(
 	auth PrincipalAuthFunc,
 	pilot AgentEmailPilotConfig,
+	requireEntitlement func(context.Context, DomainPrincipal) error,
 	h func(http.ResponseWriter, *http.Request, DomainPrincipal),
 ) http.HandlerFunc {
 	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
 		if p.Kind != PrincipalKindAgent {
 			writeJSONError(w, http.StatusForbidden, "only an agent token may access email")
 			return
+		}
+		if requireEntitlement != nil {
+			if err := requireEntitlement(r.Context(), p); writeAgentEmailOwnerError(
+				w, err, "could not check agent-email entitlement",
+			) {
+				return
+			}
 		}
 		if !pilot.allows(p) {
 			writeJSONError(w, http.StatusForbidden, "agent is not enrolled in the email pilot")

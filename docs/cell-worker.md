@@ -40,9 +40,9 @@ Worker jobs must be:
 - coordinated through durable PostgreSQL state;
 - free of tenant identifiers or payload values in metrics and logs.
 
-The registered jobs are transcript retention, message retention, and
-avatar-style rollout. New job types must opt in explicitly; the worker is not
-an arbitrary command runner.
+The registered jobs are transcript retention, message retention, inbound
+agent-email retention, and avatar-style rollout. New job types must opt in
+explicitly; the worker is not an arbitrary command runner.
 
 ## Cooperative Scaling
 
@@ -81,6 +81,22 @@ Per-thread and cumulative batch graph ceilings keep work bounded. Lane
 selection first records a short durable lease, so a timeout or crash backs off
 that exact lane while another replica can claim a different due lane. Message
 and transcript retention never share a lane or cadence.
+
+Inbound agent-email retention has its own 16 preview lanes and 16 enforcement
+lanes. The worker briefly leases one lane, then takes an exclusive account row
+with `SKIP LOCKED`; foreground email ingress and mailbox operations use a
+share lock on that same row. This makes a busy account a deferral instead of a
+queue behind live work and prevents new claims, duplicate links, or retry
+proofs from racing deletion. Account-local age cursors use PostgreSQL
+`received_at`, reset when the retention policy changes, and advance past
+temporarily claimed messages so one hold cannot starve later mail.
+
+One batch selects at most 100 messages and deletes at most 32 MiB of raw MIME.
+A live processing lease defers its message; unread, unacknowledged, completed,
+available, and expired-claim messages are otherwise age eligible. Enforcement
+clears suspected-duplicate backlinks before deleting the message. Delivery
+rows and accepted retry-canary proofs cascade, while address reservations,
+mailboxes, account audit events, and usage data remain.
 
 Scaling is not guaranteed to be perfectly linear. Two replicas can approach
 twice the throughput when at least two lanes have work and PostgreSQL has
@@ -122,6 +138,12 @@ Its item kinds distinguish eligible/deleted threads, deleted messages,
 evidence holds, active-work holds, lock deferrals, oversize quarantine, and
 cumulative-budget deferrals.
 
+Inbound email has separate
+`witself_worker_agent_email_retention_*` batch, item, and last-success
+families. Item kinds cover selected and deleted messages, deleted raw bytes,
+live-claim holds, lock/oversize/budget deferrals, duplicate-link repairs, and
+cascaded retry-canary proofs.
+
 Account, realm, agent, conversation, task, transcript, memory, and secret
 identifiers must never be metric labels. Error text and stored content must
 never enter metrics.
@@ -158,6 +180,10 @@ Message retention has a separate activation sequence:
    preview/enforcement lanes while the job is disabled;
 2. enable `preview` and review only value-free counts;
 3. switch to `enforce` in a config-only worker rollout.
+
+Inbound agent-email retention uses the same sequence with its own schema,
+lanes, and metrics. Changing `worker.agentEmailRetention` alters only the
+worker ConfigMap checksum; API pods are not restarted.
 
 The API process never runs this loop. Multiple worker replicas claim different
 database lanes with `SKIP LOCKED`; replica count is not encoded in the lane

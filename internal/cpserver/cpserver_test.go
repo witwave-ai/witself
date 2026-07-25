@@ -356,6 +356,63 @@ func TestAdminMessagingAndRetentionOverridesAreIndependent(t *testing.T) {
 	}
 }
 
+func TestAdminAgentEmailOverridesAreIndependent(t *testing.T) {
+	h := newHarness(t)
+	receivePath := "/v1/admin/accounts/acct_1/email-receive"
+	retentionPath := "/v1/admin/accounts/acct_1/email-retention"
+
+	status, doc := h.call(t, http.MethodGet, receivePath, "admin-good", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET email policy = %d %v", status, doc)
+	}
+	receive := doc["email_receive"].(map[string]any)
+	retention := doc["email_retention"].(map[string]any)
+	if receive["enabled"] != false ||
+		retention["effective_days"] != float64(30) {
+		t.Fatalf("Personal email policy = receive %v retention %v",
+			receive, retention)
+	}
+	status, doc = h.call(t, http.MethodPut, receivePath, "admin-good",
+		`{"enabled":true,"reason":"founder email enabled"}`)
+	if status != http.StatusOK {
+		t.Fatalf("PUT receive = %d %v", status, doc)
+	}
+	if doc["email_receive"].(map[string]any)["enabled"] != true {
+		t.Fatalf("receive override = %v", doc["email_receive"])
+	}
+	status, doc = h.call(t, http.MethodPut, retentionPath, "admin-good",
+		`{"indefinite":true,"reason":"founder email retained"}`)
+	if status != http.StatusOK {
+		t.Fatalf("PUT retention = %d %v", status, doc)
+	}
+	if doc["email_retention"].(map[string]any)["effective_days"] != nil {
+		t.Fatalf("retention override = %v", doc["email_retention"])
+	}
+	status, owner := h.call(
+		t, http.MethodGet, "/v1/accounts/acct_1/plan", "good", "")
+	if status != http.StatusOK ||
+		owner["email_receive"].(map[string]any)["enabled"] != true ||
+		owner["email_retention"].(map[string]any)["effective_days"] != nil {
+		t.Fatalf("owner effective email policy = %d %v", status, owner)
+	}
+	if _, exposed := owner["email_receive"].(map[string]any)["override"]; exposed {
+		t.Fatalf("owner response exposed receive attribution: %v", owner)
+	}
+	status, doc = h.call(t, http.MethodDelete, receivePath, "admin-good",
+		`{"reason":"inherit receive"}`)
+	if status != http.StatusOK ||
+		doc["email_receive"].(map[string]any)["enabled"] != false ||
+		doc["email_retention"].(map[string]any)["effective_days"] != nil {
+		t.Fatalf("receive clear disturbed retention = %d %v", status, doc)
+	}
+	status, doc = h.call(t, http.MethodDelete, retentionPath, "admin-good",
+		`{"reason":"inherit retention"}`)
+	if status != http.StatusOK ||
+		doc["email_retention"].(map[string]any)["effective_days"] != float64(30) {
+		t.Fatalf("retention clear = %d %v", status, doc)
+	}
+}
+
 func TestAdminLimitOverrideLifecycleAndAttribution(t *testing.T) {
 	h := newHarness(t)
 	path := "/v1/admin/accounts/acct_1/limit-overrides/stored_secret"

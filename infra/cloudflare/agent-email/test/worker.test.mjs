@@ -79,6 +79,7 @@ test("subaddress tags stay in the signed envelope but use the exact enrolled key
 test("only a 2xx body containing exactly accepted is success", async () => {
   const failures = [
     new Response('{"verdict":"accepted"}', { status: 503 }),
+    new Response('{"verdict":"feature_disabled"}', { status: 503 }),
     new Response('{"verdict":"accepted","extra":true}', { status: 200 }),
     new Response('{"verdict":"transient"}', { status: 200 }),
     new Response("not json", { status: 200 }),
@@ -89,6 +90,22 @@ test("only a 2xx body containing exactly accepted is success", async () => {
       { message: "agent email relay temporarily unavailable" },
     );
   }
+});
+
+test("plan-disabled receipt accepts and drops with a value-free metric", async () => {
+  const points = [];
+  const metrics = { writeDataPoint(point) { points.push(point); } };
+  const mail = message();
+  await handleEmail(mail, env(true, true, metrics), {
+    fetch: async () => new Response('{"verdict":"feature_disabled"}', { status: 200 }),
+  });
+  assert.deepEqual(mail.rejected, []);
+  assert.equal(points.length, 1);
+  assert.deepEqual(points[0].blobs, [
+    EDGE_METRICS_SCHEMA, "discarded_feature_disabled", "response",
+  ]);
+  assert.equal(points[0].doubles[3], 200);
+  assert.doesNotMatch(JSON.stringify(points[0]), /@|address|account|realm_|agent_/i);
 });
 
 test("unknown and permanent cell verdicts use one sanitized permanent rejection", async () => {

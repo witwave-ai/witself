@@ -21,6 +21,7 @@
     emailAddress: null,  // display-only receive address projection
     emailMessages: [],   // metadata only; no ids, bodies, MIME, or claim fence
     emailAvailable: null,
+    emailCheckpointEnabled: null,
     emailFilters: { unread: false, unacked: false },
     facts: {},           // fact id -> redacted fact (never a revealed value)
     filters: {},         // section -> list filter text, reapplied on re-render
@@ -208,7 +209,20 @@
   // those three value-free fields from every self checkpoint rather than
   // leaving an open pane stale until navigation/reload.
   function updateEmailAddressFromCheckpoint(checkpoint) {
-    if (!state.emailAddress || !checkpoint || checkpoint.unavailable) { return false; }
+    if (!checkpoint || checkpoint.unavailable) { return false; }
+    if (checkpoint.enabled === false) {
+      state.emailCheckpointEnabled = false;
+      var disabledChanged = state.emailAvailable !== false || state.emailAddress !== null ||
+        (state.emailMessages && state.emailMessages.length !== 0);
+      state.emailAvailable = false;
+      state.emailAddress = null;
+      state.emailMessages = [];
+      return disabledChanged ? "disabled" : false;
+    }
+    var reenabled = checkpoint.enabled === true && state.emailCheckpointEnabled === false;
+    if (checkpoint.enabled === true) { state.emailCheckpointEnabled = true; }
+    if (reenabled) { return "reenabled"; }
+    if (!state.emailAddress) { return false; }
     var changed = false;
     [["receive_state", checkpoint.receive_state],
       ["agent_receive_state", checkpoint.agent_receive_state],
@@ -217,7 +231,7 @@
       state.emailAddress[pair[0]] = pair[1];
       changed = true;
     });
-    return changed;
+    return changed ? "changed" : false;
   }
 
   function setSSEState(up) {
@@ -321,7 +335,15 @@
       renderHeader(self);
       var current = parseHash();
       if (current.section === "overview") { renderOverview(self); }
-      if (emailStateChanged && current.section === "email") { renderEmailList(); }
+      if (emailStateChanged && current.section === "email") {
+        if (emailStateChanged === "disabled") {
+          renderEmailUnavailable("feature_disabled");
+        } else if (emailStateChanged === "reenabled") {
+          probeEmailMailbox();
+        } else {
+          renderEmailList();
+        }
+      }
     });
     source.addEventListener("memories", function (event) {
       if (event.data === state.lastMemoriesData) { return; }
@@ -940,14 +962,18 @@
 
   function emailUnavailableReason(err) {
     var message = String((err && err.message) || err || "").toLowerCase();
+    if (message.indexOf("not enabled on this account") >= 0 ||
+        message.indexOf("feature_not_enabled") >= 0) { return "feature_disabled"; }
     if ((err && err.status === 403) || message.indexOf("not enrolled") >= 0) { return "not_enrolled"; }
     return "unavailable";
   }
 
   function renderEmailUnavailable(reason) {
-    var message = reason === "not_enrolled"
-      ? "this agent is not enrolled in receive-only email."
-      : "receive-only email is not available on this cell right now.";
+    var message = reason === "feature_disabled"
+      ? "inbound email is not enabled on this account."
+      : (reason === "not_enrolled"
+        ? "this agent is not enrolled in receive-only email."
+        : "receive-only email is not available on this cell right now.");
     $("view").innerHTML = '<div class="panel"><h2>email <span class="badge">metadata only</span></h2>' +
       '<div class="empty">' + esc(message) + "</div></div>";
   }
@@ -1023,7 +1049,18 @@
       state.emailAvailable = false;
       state.emailMessages = [];
       openEvents(null);
-      renderEmailUnavailable(emailUnavailableReason(err));
+      var reason = emailUnavailableReason(err);
+      // The plan can change after the address probe but before the list
+      // request. Preserve that disabled edge too, so the first later
+      // enabled=true checkpoint performs a one-shot full reprobe.
+      if (reason === "feature_disabled") {
+        state.emailCheckpointEnabled = false;
+        // A stale disabled response can arrive after an enabled self frame.
+        // Permit the next identical frame to be processed so it can trigger
+        // the one-shot mailbox reprobe.
+        state.lastSelfData = null;
+      }
+      renderEmailUnavailable(reason);
     });
   }
 
@@ -1043,7 +1080,14 @@
     // Keep the self/checkpoint stream active while enrollment is resolved;
     // only start email polling after the read-only address probe succeeds.
     openEvents(null);
-    fetchJSON("/api/email/address").then(function (body) {
+    probeEmailMailbox();
+  }
+
+  // Resolve enrollment after opening the pane and after a live account policy
+  // transition from disabled to enabled. The checkpoint edge invokes this
+  // once; ordinary enabled checkpoints never create a polling loop.
+  function probeEmailMailbox() {
+    return fetchJSON("/api/email/address").then(function (body) {
       state.emailAddress = body.address || null;
       state.emailAvailable = body.available !== false;
       return refreshEmail();
@@ -1051,7 +1095,17 @@
       state.emailAddress = null;
       state.emailMessages = [];
       state.emailAvailable = false;
-      renderEmailUnavailable(emailUnavailableReason(err));
+      var reason = emailUnavailableReason(err);
+      // Preserve a feature-disabled edge even when the address probe loses
+      // the race with the first self frame. A later explicit enabled=true
+      // checkpoint can then trigger the same one-shot reprobe.
+      if (reason === "feature_disabled") {
+        state.emailCheckpointEnabled = false;
+        // Do not let an earlier enabled-frame digest suppress recovery after
+        // this slower feature-disabled response.
+        state.lastSelfData = null;
+      }
+      renderEmailUnavailable(reason);
     });
   }
 
@@ -1188,6 +1242,26 @@
   }
 
   // --- boot -------------------------------------------------------------
+  // Keep a narrow CommonJS seam for the direct transition regression test.
+  // Browsers do not define module, so the production boot path is unchanged.
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      state: state,
+      probeEmailMailbox: probeEmailMailbox,
+      applyEmailCheckpoint: function (checkpoint) {
+        var change = updateEmailAddressFromCheckpoint(checkpoint);
+        if (!change || parseHash().section !== "email") { return null; }
+        if (change === "disabled") {
+          renderEmailUnavailable("feature_disabled");
+          return null;
+        }
+        if (change === "reenabled") { return probeEmailMailbox(); }
+        renderEmailList();
+        return null;
+      },
+    };
+    return;
+  }
   initTheme();
   $("status-addr").textContent = window.location.host;
   $("view").addEventListener("click", onRevealClick);

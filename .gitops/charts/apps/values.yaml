@@ -95,6 +95,18 @@ apps:
         batchSize: 100
         interval: 5m
         batchTimeout: 2m
+      messageRetention:
+        enabled: false
+        mode: preview
+        batchSize: 25
+        interval: 5m
+        batchTimeout: 2m
+      agentEmailRetention:
+        enabled: false
+        mode: preview
+        batchSize: 25
+        interval: 5m
+        batchTimeout: 2m
     awsAlbIngress:
       enabled: false
       className: alb

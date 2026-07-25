@@ -897,6 +897,93 @@ func TestMessageRetentionOverrideValidation(t *testing.T) {
 	}
 }
 
+func TestAgentEmailOverridesAreIndependentOfBilling(t *testing.T) {
+	h := newHarness(t, false)
+	ctx := t.Context()
+	const accountID = "acct_founder_email"
+
+	_, inherited, err := h.m.ResolvedStatus(ctx, accountID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(inherited.Features, plans.AgentEmailReceiveFeature) ||
+		inherited.Policies[plans.AgentEmailRetentionDaysPolicy] != 30 {
+		t.Fatalf("Personal email snapshot = %+v", inherited)
+	}
+	if _, err := h.m.SetAgentEmailReceiveOverride(
+		ctx, accountID, true, testAdminActor(), "founder email enabled",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.m.SetAgentEmailRetentionOverride(
+		ctx, accountID, nil, testAdminActor(), "founder email indefinite",
+	); err != nil {
+		t.Fatal(err)
+	}
+	r, snapshot, err := h.m.ResolvedStatus(ctx, accountID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Entitled != plans.Free || r.Provider != "" || r.CustomerID != "" {
+		t.Fatalf("email overrides fabricated billing: %+v", r)
+	}
+	if r.AgentEmailReceiveOverride == nil ||
+		!r.AgentEmailReceiveOverride.Enabled ||
+		r.AgentEmailRetentionOverride == nil ||
+		r.AgentEmailRetentionOverride.Days != nil ||
+		!slices.Contains(snapshot.Features, plans.AgentEmailReceiveFeature) {
+		t.Fatalf("email overrides = record=%+v snapshot=%+v", r, snapshot)
+	}
+	if _, finite := snapshot.Policies[plans.AgentEmailRetentionDaysPolicy]; finite {
+		t.Fatalf("email retention = %v; want indefinite", snapshot.Policies)
+	}
+	if snapshot.Policies[plans.AgentEmailEntitlementVersionPolicy] !=
+		plans.AgentEmailEntitlementVersion {
+		t.Fatalf("email entitlement marker was removed: %v", snapshot.Policies)
+	}
+	if len(r.AdminHistory) != 2 ||
+		r.AdminHistory[0].Kind != "agent_email_receive_override_set" ||
+		r.AdminHistory[1].Kind != "agent_email_retention_override_set" ||
+		r.AdminHistory[1].AgentEmailRetentionFrom == nil ||
+		*r.AdminHistory[1].AgentEmailRetentionFrom != 30 ||
+		r.AdminHistory[1].AgentEmailRetentionTo != nil {
+		t.Fatalf("email audit history = %+v", r.AdminHistory)
+	}
+	if _, err := h.m.ClearAgentEmailReceiveOverride(
+		ctx, accountID, testAdminActor(), "inherit receive",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.m.ClearAgentEmailRetentionOverride(
+		ctx, accountID, testAdminActor(), "inherit retention",
+	); err != nil {
+		t.Fatal(err)
+	}
+	r, snapshot, err = h.m.ResolvedStatus(ctx, accountID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.AgentEmailReceiveOverride != nil ||
+		r.AgentEmailRetentionOverride != nil ||
+		slices.Contains(snapshot.Features, plans.AgentEmailReceiveFeature) ||
+		snapshot.Policies[plans.AgentEmailRetentionDaysPolicy] != 30 {
+		t.Fatalf("cleared email policy = record=%+v snapshot=%+v", r, snapshot)
+	}
+}
+
+func TestAgentEmailRetentionOverrideValidation(t *testing.T) {
+	h := newHarness(t, false)
+	for _, days := range []int64{0, plans.MaxAgentEmailRetentionDays + 1} {
+		days := days
+		if _, err := h.m.SetAgentEmailRetentionOverride(
+			t.Context(), "acct_bad_email_retention", &days,
+			testAdminActor(), "invalid test",
+		); !errors.Is(err, ErrAdminInput) {
+			t.Fatalf("days=%d error=%v; want ErrAdminInput", days, err)
+		}
+	}
+}
+
 func TestEnterpriseBackfillOverrideDoesNotFabricateBilling(t *testing.T) {
 	h := newHarness(t, false)
 	ctx := context.Background()
@@ -924,6 +1011,7 @@ func TestEnterpriseBackfillOverrideDoesNotFabricateBilling(t *testing.T) {
 	}
 	for _, feature := range []string{
 		"memory", "facts", "secrets", plans.MessagingFeature,
+		plans.AgentEmailReceiveFeature,
 		"collaboration", "support",
 	} {
 		if !slices.Contains(snapshot.Features, feature) {

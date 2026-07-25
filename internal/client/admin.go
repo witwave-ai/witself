@@ -333,6 +333,8 @@ type AdminAccountPolicy struct {
 	PlanOverride        *AdminAccountPlanOverride            `json:"plan_override"`
 	Messaging           AdminMessaging                       `json:"messaging"`
 	MessageRetention    AdminMessageRetention                `json:"message_retention"`
+	EmailReceive        AdminAgentEmailReceive               `json:"email_receive"`
+	EmailRetention      AdminAgentEmailRetention             `json:"email_retention"`
 	TranscriptRetention AdminTranscriptRetention             `json:"transcript_retention"`
 	AdminHistory        []AdminAccountPolicyHistoryChange    `json:"admin_history"`
 	ApplyPending        bool                                 `json:"apply_pending"`
@@ -407,6 +409,43 @@ type AdminMessageRetentionOverride struct {
 	SetAt       time.Time `json:"set_at"`
 }
 
+// AdminAgentEmailReceive describes inherited and effective inbound-email
+// availability.
+type AdminAgentEmailReceive struct {
+	DefaultEnabled bool                            `json:"default_enabled"`
+	Enabled        bool                            `json:"enabled"`
+	Overridden     bool                            `json:"overridden"`
+	Override       *AdminAgentEmailReceiveOverride `json:"override,omitempty"`
+}
+
+// AdminAgentEmailReceiveOverride is the attributed account exception.
+type AdminAgentEmailReceiveOverride struct {
+	Enabled     bool      `json:"enabled"`
+	ActorID     string    `json:"actor_id"`
+	ActorHandle string    `json:"actor_handle"`
+	Reason      string    `json:"reason"`
+	SetAt       time.Time `json:"set_at"`
+}
+
+// AdminAgentEmailRetention describes inherited and effective inbound-email
+// retention. Nil days means indefinite retention.
+type AdminAgentEmailRetention struct {
+	DefaultDays   *int64                            `json:"default_days"`
+	EffectiveDays *int64                            `json:"effective_days"`
+	Overridden    bool                              `json:"overridden"`
+	Override      *AdminAgentEmailRetentionOverride `json:"override,omitempty"`
+}
+
+// AdminAgentEmailRetentionOverride is the attributed finite or explicit
+// indefinite email-retention exception.
+type AdminAgentEmailRetentionOverride struct {
+	Days        *int64    `json:"days"`
+	ActorID     string    `json:"actor_id"`
+	ActorHandle string    `json:"actor_handle"`
+	Reason      string    `json:"reason"`
+	SetAt       time.Time `json:"set_at"`
+}
+
 // AdminAccountLimit is the requested dimension's inherited and effective
 // hard-cap view. Nil maximums mean unlimited.
 type AdminAccountLimit struct {
@@ -435,28 +474,36 @@ type AdminAccountLimitValue struct {
 // AdminAccountPolicyHistoryChange is one append-only administrator policy
 // transition returned by the control plane.
 type AdminAccountPolicyHistoryChange struct {
-	Kind                       string                  `json:"kind"`
-	ActorID                    string                  `json:"actor_id"`
-	ActorHandle                string                  `json:"actor_handle"`
-	Reason                     string                  `json:"reason"`
-	At                         time.Time               `json:"at"`
-	PlanFrom                   string                  `json:"plan_from,omitempty"`
-	PlanTo                     string                  `json:"plan_to,omitempty"`
-	RetentionFrom              *int64                  `json:"retention_from,omitempty"`
-	RetentionTo                *int64                  `json:"retention_to,omitempty"`
-	MessagingFrom              *bool                   `json:"messaging_from,omitempty"`
-	MessagingTo                *bool                   `json:"messaging_to,omitempty"`
-	MessagingFromSource        string                  `json:"messaging_from_source,omitempty"`
-	MessagingToSource          string                  `json:"messaging_to_source,omitempty"`
-	MessageRetentionFrom       *int64                  `json:"message_retention_from,omitempty"`
-	MessageRetentionTo         *int64                  `json:"message_retention_to,omitempty"`
-	MessageRetentionFromSource string                  `json:"message_retention_from_source,omitempty"`
-	MessageRetentionToSource   string                  `json:"message_retention_to_source,omitempty"`
-	LimitDimension             string                  `json:"limit_dimension,omitempty"`
-	LimitFrom                  *AdminAccountLimitValue `json:"limit_from,omitempty"`
-	LimitTo                    *AdminAccountLimitValue `json:"limit_to,omitempty"`
-	LimitFromSource            string                  `json:"limit_from_source,omitempty"`
-	LimitToSource              string                  `json:"limit_to_source,omitempty"`
+	Kind                          string                  `json:"kind"`
+	ActorID                       string                  `json:"actor_id"`
+	ActorHandle                   string                  `json:"actor_handle"`
+	Reason                        string                  `json:"reason"`
+	At                            time.Time               `json:"at"`
+	PlanFrom                      string                  `json:"plan_from,omitempty"`
+	PlanTo                        string                  `json:"plan_to,omitempty"`
+	RetentionFrom                 *int64                  `json:"retention_from,omitempty"`
+	RetentionTo                   *int64                  `json:"retention_to,omitempty"`
+	MessagingFrom                 *bool                   `json:"messaging_from,omitempty"`
+	MessagingTo                   *bool                   `json:"messaging_to,omitempty"`
+	MessagingFromSource           string                  `json:"messaging_from_source,omitempty"`
+	MessagingToSource             string                  `json:"messaging_to_source,omitempty"`
+	MessageRetentionFrom          *int64                  `json:"message_retention_from,omitempty"`
+	MessageRetentionTo            *int64                  `json:"message_retention_to,omitempty"`
+	MessageRetentionFromSource    string                  `json:"message_retention_from_source,omitempty"`
+	MessageRetentionToSource      string                  `json:"message_retention_to_source,omitempty"`
+	AgentEmailReceiveFrom         *bool                   `json:"agent_email_receive_from,omitempty"`
+	AgentEmailReceiveTo           *bool                   `json:"agent_email_receive_to,omitempty"`
+	AgentEmailReceiveFromSource   string                  `json:"agent_email_receive_from_source,omitempty"`
+	AgentEmailReceiveToSource     string                  `json:"agent_email_receive_to_source,omitempty"`
+	AgentEmailRetentionFrom       *int64                  `json:"agent_email_retention_from,omitempty"`
+	AgentEmailRetentionTo         *int64                  `json:"agent_email_retention_to,omitempty"`
+	AgentEmailRetentionFromSource string                  `json:"agent_email_retention_from_source,omitempty"`
+	AgentEmailRetentionToSource   string                  `json:"agent_email_retention_to_source,omitempty"`
+	LimitDimension                string                  `json:"limit_dimension,omitempty"`
+	LimitFrom                     *AdminAccountLimitValue `json:"limit_from,omitempty"`
+	LimitTo                       *AdminAccountLimitValue `json:"limit_to,omitempty"`
+	LimitFromSource               string                  `json:"limit_from_source,omitempty"`
+	LimitToSource                 string                  `json:"limit_to_source,omitempty"`
 }
 
 // AdminTranscriptRetentionInput sets either a finite day window or an
@@ -471,6 +518,14 @@ type AdminTranscriptRetentionInput struct {
 // AdminMessageRetentionInput sets either a finite day window or an explicit
 // indefinite exception. Exactly one mode and a reason are required.
 type AdminMessageRetentionInput struct {
+	Days       *int64
+	Indefinite bool
+	Reason     string
+}
+
+// AdminAgentEmailRetentionInput sets either a finite window or explicit
+// indefinite inbound-email retention.
+type AdminAgentEmailRetentionInput struct {
 	Days       *int64
 	Indefinite bool
 	Reason     string
@@ -491,6 +546,9 @@ const MaxAdminTranscriptRetentionDays int64 = 36500
 // MaxAdminMessageRetentionDays is a defensive representation bound, not a
 // product-tier cap.
 const MaxAdminMessageRetentionDays int64 = plans.MaxMessageRetentionDays
+
+// MaxAdminAgentEmailRetentionDays is the shared finite email-retention bound.
+const MaxAdminAgentEmailRetentionDays int64 = plans.MaxAgentEmailRetentionDays
 
 // MaxAdminAccountLimit is the largest finite hard cap safely represented by
 // both Go and JavaScript JSON numbers.
@@ -695,6 +753,120 @@ func ClearAdminMessageRetention(
 ) (*AdminAccountPolicy, error) {
 	return changeAdminAccountPolicy(ctx, cpEndpoint, adminToken, accountID,
 		"message-retention", http.MethodDelete,
+		map[string]string{"reason": reason})
+}
+
+// GetAdminAgentEmailReceive returns inherited and effective inbound-email
+// availability for one account.
+func GetAdminAgentEmailReceive(
+	ctx context.Context,
+	cpEndpoint, adminToken, accountID string,
+) (*AdminAccountPolicy, error) {
+	return getAdminAccountPolicy(
+		ctx, cpEndpoint, adminToken, accountID, "email-receive")
+}
+
+// SetAdminAgentEmailReceive creates or replaces an account inbound-email
+// exception without changing its billing plan.
+func SetAdminAgentEmailReceive(
+	ctx context.Context,
+	cpEndpoint, adminToken, accountID string,
+	enabled bool,
+	reason string,
+) (*AdminAccountPolicy, error) {
+	reason, err := validateAdminPolicyReason(reason)
+	if err != nil {
+		return nil, err
+	}
+	body, err := json.Marshal(map[string]any{
+		"enabled": enabled,
+		"reason":  reason,
+	})
+	if err != nil {
+		return nil, err
+	}
+	url, err := adminAccountPolicyURL(
+		cpEndpoint, accountID, "email-receive")
+	if err != nil {
+		return nil, err
+	}
+	var out AdminAccountPolicy
+	if err := doJSON(
+		ctx, http.MethodPut, url, adminToken, body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ClearAdminAgentEmailReceive restores the current plan's feature state.
+func ClearAdminAgentEmailReceive(
+	ctx context.Context,
+	cpEndpoint, adminToken, accountID, reason string,
+) (*AdminAccountPolicy, error) {
+	return changeAdminAccountPolicy(ctx, cpEndpoint, adminToken, accountID,
+		"email-receive", http.MethodDelete,
+		map[string]string{"reason": reason})
+}
+
+// GetAdminAgentEmailRetention returns inherited and effective inbound-email
+// retention for one account.
+func GetAdminAgentEmailRetention(
+	ctx context.Context,
+	cpEndpoint, adminToken, accountID string,
+) (*AdminAccountPolicy, error) {
+	return getAdminAccountPolicy(
+		ctx, cpEndpoint, adminToken, accountID, "email-retention")
+}
+
+// SetAdminAgentEmailRetention creates or replaces a finite or explicit
+// indefinite inbound-email retention exception.
+func SetAdminAgentEmailRetention(
+	ctx context.Context,
+	cpEndpoint, adminToken, accountID string,
+	in AdminAgentEmailRetentionInput,
+) (*AdminAccountPolicy, error) {
+	if (in.Days == nil) == !in.Indefinite {
+		return nil, fmt.Errorf("set exactly one of days or indefinite")
+	}
+	reason, err := validateAdminPolicyReason(in.Reason)
+	if err != nil {
+		return nil, err
+	}
+	payload := map[string]any{"reason": reason}
+	if in.Indefinite {
+		payload["indefinite"] = true
+	} else {
+		if *in.Days < 1 || *in.Days > MaxAdminAgentEmailRetentionDays {
+			return nil, fmt.Errorf(
+				"days must be between 1 and %d",
+				MaxAdminAgentEmailRetentionDays)
+		}
+		payload["days"] = *in.Days
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	url, err := adminAccountPolicyURL(
+		cpEndpoint, accountID, "email-retention")
+	if err != nil {
+		return nil, err
+	}
+	var out AdminAccountPolicy
+	if err := doJSON(
+		ctx, http.MethodPut, url, adminToken, body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ClearAdminAgentEmailRetention restores the account's plan default.
+func ClearAdminAgentEmailRetention(
+	ctx context.Context,
+	cpEndpoint, adminToken, accountID, reason string,
+) (*AdminAccountPolicy, error) {
+	return changeAdminAccountPolicy(ctx, cpEndpoint, adminToken, accountID,
+		"email-retention", http.MethodDelete,
 		map[string]string{"reason": reason})
 }
 

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -440,6 +441,7 @@ func TestStaticEmailSurfaceIsMetadataOnlyAndCheckpointLinked(t *testing.T) {
 		`params.push("email_unacked=true")`, "raw MIME", "processing claims never enter this page",
 		`updateEmailAddressFromCheckpoint(self.email_checkpoint)`,
 		`emailStateChanged && current.section === "email"`,
+		`checkpoint.enabled === false`, `inbound email is not enabled on this account`,
 	} {
 		if !strings.Contains(string(app), want) {
 			t.Errorf("app missing %q", want)
@@ -449,6 +451,18 @@ func TestStaticEmailSurfaceIsMetadataOnlyAndCheckpointLinked(t *testing.T) {
 	// active agents through the CLI/MCP surfaces, never this local viewer.
 	if strings.Contains(string(app), `"/api/email:`) || strings.Contains(string(app), `"/api/email/" +`) {
 		t.Fatal("email UI contains a per-message action URL")
+	}
+}
+
+func TestDashboardEmailLiveEnableTransition(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not installed")
+	}
+	cmd := exec.Command(node, "--test", "testdata/email_transition_test.cjs")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dashboard email transition JavaScript test: %v\n%s", err, output)
 	}
 }
 
@@ -876,6 +890,32 @@ func TestAgentEmailProxyRendersAvailabilityStates(t *testing.T) {
 				t.Errorf("%s: got %d, want 403", path, resp.StatusCode)
 			}
 			_ = resp.Body.Close()
+		}
+	})
+
+	t.Run("account feature disabled", func(t *testing.T) {
+		srv, cfg := newDashboard(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version": "witself.v0",
+				"code":           "feature_not_enabled",
+				"feature":        "agent_email_receive",
+				"error":          "Sorry, this feature is not enabled on this account.",
+				"retryable":      false,
+			})
+		}, nil)
+		for _, path := range []string{"/api/email/address", "/api/email"} {
+			resp := authedGet(t, srv, cfg, path)
+			body, err := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != http.StatusForbidden ||
+				!strings.Contains(string(body), "inbound email is not enabled on this account") {
+				t.Errorf("%s: got %d %s", path, resp.StatusCode, body)
+			}
 		}
 	})
 

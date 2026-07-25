@@ -2,6 +2,7 @@ export const EDGE_METRICS_SCHEMA = "witself.agent-email.edge.v1";
 
 const OUTCOMES = new Set([
   "accepted",
+  "discarded_feature_disabled",
   "rejected_invalid_recipient",
   "rejected_unknown_recipient",
   "rejected_over_size",

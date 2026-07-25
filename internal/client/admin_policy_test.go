@@ -238,6 +238,89 @@ func TestAdminMessagingPolicyOperations(t *testing.T) {
 	}
 }
 
+func TestAdminAgentEmailPolicyOperations(t *testing.T) {
+	var requests []struct {
+		method string
+		path   string
+		body   map[string]any
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/admin/accounts/acct_1/email-receive" &&
+			r.URL.Path != "/v1/admin/accounts/acct_1/email-retention" {
+			http.NotFound(w, r)
+			return
+		}
+		var body map[string]any
+		if r.Method != http.MethodGet {
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+		}
+		requests = append(requests, struct {
+			method string
+			path   string
+			body   map[string]any
+		}{r.Method, r.URL.Path, body})
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0", "account_id": "acct_1",
+			"email_receive": map[string]any{
+				"default_enabled": false, "enabled": true, "overridden": true,
+			},
+			"email_retention": map[string]any{
+				"default_days": 30, "effective_days": nil, "overridden": true,
+			},
+		})
+	}))
+	defer srv.Close()
+	ctx := t.Context()
+	got, err := GetAdminAgentEmailReceive(
+		ctx, srv.URL, "witself_adm_test", "acct_1")
+	if err != nil || !got.EmailReceive.Enabled {
+		t.Fatalf("GET receive = %#v, %v", got, err)
+	}
+	if _, err := SetAdminAgentEmailReceive(
+		ctx, srv.URL, "witself_adm_test", "acct_1", true, " founder ",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ClearAdminAgentEmailReceive(
+		ctx, srv.URL, "witself_adm_test", "acct_1", " restore ",
+	); err != nil {
+		t.Fatal(err)
+	}
+	got, err = GetAdminAgentEmailRetention(
+		ctx, srv.URL, "witself_adm_test", "acct_1")
+	if err != nil || got.EmailRetention.EffectiveDays != nil {
+		t.Fatalf("GET retention = %#v, %v", got, err)
+	}
+	days := int64(365)
+	if _, err := SetAdminAgentEmailRetention(
+		ctx, srv.URL, "witself_adm_test", "acct_1",
+		AdminAgentEmailRetentionInput{Days: &days, Reason: " team "},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetAdminAgentEmailRetention(
+		ctx, srv.URL, "witself_adm_test", "acct_1",
+		AdminAgentEmailRetentionInput{Indefinite: true, Reason: "founder"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ClearAdminAgentEmailRetention(
+		ctx, srv.URL, "witself_adm_test", "acct_1", " restore ",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 7 ||
+		requests[1].path != "/v1/admin/accounts/acct_1/email-receive" ||
+		requests[1].body["enabled"] != true ||
+		requests[4].path != "/v1/admin/accounts/acct_1/email-retention" ||
+		requests[4].body["days"] != float64(365) ||
+		requests[5].body["indefinite"] != true {
+		t.Fatalf("requests = %#v", requests)
+	}
+}
+
 func TestAdminPlanOverrideOperations(t *testing.T) {
 	var methods []string
 	var bodies []map[string]string

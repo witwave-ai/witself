@@ -360,6 +360,26 @@ func TestOrdinaryPromptInjectsPendingEmailCheckpointPolicy(t *testing.T) {
 	}
 }
 
+func TestDisabledEmailCheckpointSuppressesForegroundPollingPolicy(t *testing.T) {
+	disabled := false
+	source := &hydrationSourceStub{self: client.SelfDigest{
+		Identity:        exactIdentity(),
+		EmailCheckpoint: &client.SelfEmailCheckpoint{Enabled: &disabled},
+	}}
+	result, err := Execute(context.Background(), Config{}, exactBinding(), Request{
+		Runtime: transcriptcapture.RuntimeCodex, Event: EventUserPromptSubmit, Prompt: "write a parser",
+	}, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Attempted || !result.Injected || source.recallCalls != 0 ||
+		!strings.Contains(result.Context, `"email_checkpoint":{"enabled":false,"pending":false}`) ||
+		strings.Contains(result.Context, foregroundEmailCheckpointPolicy) ||
+		strings.Contains(result.Context, `"unavailable":true`) {
+		t.Fatalf("disabled email checkpoint result/source = %#v / %#v", result, source)
+	}
+}
+
 func TestTinyReadOnlyPromptInjectsAvatarOpportunityWithoutMutatingCheckpoint(t *testing.T) {
 	retryAfter := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
 	for _, runtime := range []string{transcriptcapture.RuntimeCodex, transcriptcapture.RuntimeClaudeCode} {

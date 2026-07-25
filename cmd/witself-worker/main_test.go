@@ -31,6 +31,14 @@ func TestJobConfigFromEnvDefaultsAndOverrides(t *testing.T) {
 			defaults.messageRetention,
 		)
 	}
+	if defaults.agentEmailRetentionEnabled ||
+		defaults.agentEmailRetention != store.DefaultAgentEmailRetentionWorkerConfig() {
+		t.Fatalf(
+			"agent-email retention defaults = enabled %t config %#v",
+			defaults.agentEmailRetentionEnabled,
+			defaults.agentEmailRetention,
+		)
+	}
 
 	configured, err := jobConfigFromEnv(mapLookup(map[string]string{
 		avatarStyleRolloutEnabledEnv:       "false",
@@ -47,6 +55,11 @@ func TestJobConfigFromEnvDefaultsAndOverrides(t *testing.T) {
 		messageRetentionBatchSizeEnv:       "50",
 		messageRetentionIntervalEnv:        "10m",
 		messageRetentionBatchTimeoutEnv:    "75s",
+		agentEmailRetentionEnabledEnv:      "true",
+		agentEmailRetentionModeEnv:         "ENFORCE",
+		agentEmailRetentionBatchSizeEnv:    "40",
+		agentEmailRetentionIntervalEnv:     "12m",
+		agentEmailRetentionBatchTimeoutEnv: "80s",
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -74,6 +87,17 @@ func TestJobConfigFromEnvDefaultsAndOverrides(t *testing.T) {
 			configured.messageRetention,
 		)
 	}
+	if !configured.agentEmailRetentionEnabled ||
+		configured.agentEmailRetention.Mode != store.AgentEmailRetentionModeEnforce ||
+		configured.agentEmailRetention.BatchSize != 40 ||
+		configured.agentEmailRetention.Interval != 12*time.Minute ||
+		configured.agentEmailRetention.BatchTimeout != 80*time.Second {
+		t.Fatalf(
+			"configured agent-email retention = enabled %t config %#v",
+			configured.agentEmailRetentionEnabled,
+			configured.agentEmailRetention,
+		)
+	}
 }
 
 func TestJobConfigFromEnvRejectsNamedInvalidValues(t *testing.T) {
@@ -98,6 +122,13 @@ func TestJobConfigFromEnvRejectsNamedInvalidValues(t *testing.T) {
 		{messageRetentionIntervalEnv, "30s"},
 		{messageRetentionBatchTimeoutEnv, "9s"},
 		{messageRetentionBatchTimeoutEnv, "6m"},
+		{agentEmailRetentionEnabledEnv, "sometimes"},
+		{agentEmailRetentionModeEnv, "destructive"},
+		{agentEmailRetentionBatchSizeEnv, "0"},
+		{agentEmailRetentionBatchSizeEnv, "101"},
+		{agentEmailRetentionIntervalEnv, "30s"},
+		{agentEmailRetentionBatchTimeoutEnv, "9s"},
+		{agentEmailRetentionBatchTimeoutEnv, "6m"},
 	}
 	for _, test := range tests {
 		t.Run(test.key+"="+test.value, func(t *testing.T) {
@@ -183,6 +214,45 @@ func TestMessageRetentionMetricMappingContainsNoIdentifiers(t *testing.T) {
 		counts.DeferredBudget != 5 || counts.RepairedActivity != 6 ||
 		!counts.ScanCapped {
 		t.Fatalf("mapped message counts = %#v", counts)
+	}
+}
+
+func TestAgentEmailRetentionMetricMappingContainsNoIdentifiers(t *testing.T) {
+	result := store.AgentEmailRetentionBatchResult{
+		Scanned:               8,
+		SkippedLocked:         1,
+		Eligible:              6,
+		Deleted:               5,
+		DeletedRawBytes:       8192,
+		DeferredActive:        2,
+		DeferredLocked:        3,
+		DeferredOversize:      4,
+		DeferredBudget:        5,
+		ClearedDuplicateLinks: 6,
+		DeletedCanaryProofs:   1,
+		ScanCapped:            true,
+		LaneAdvanced:          true,
+	}
+	if got := agentEmailRetentionMetricResult(
+		store.AgentEmailRetentionBatchResult{LaneAdvanced: true},
+	); got != worker.RetentionResultNoWork {
+		t.Fatalf("empty agent-email result metric = %q", got)
+	}
+	if got := agentEmailRetentionMetricResult(result); got != worker.RetentionResultSuccess {
+		t.Fatalf("non-empty agent-email result metric = %q", got)
+	}
+	counts := agentEmailRetentionMetricCounts(result)
+	if counts.Scanned != 8 ||
+		counts.Deleted != 5 ||
+		counts.DeletedRawBytes != 8192 ||
+		counts.DeferredActive != 2 ||
+		counts.DeferredLocked != 3 ||
+		counts.DeferredOversize != 4 ||
+		counts.DeferredBudget != 5 ||
+		counts.ClearedDuplicateLinks != 6 ||
+		counts.DeletedCanaryProofs != 1 ||
+		!counts.ScanCapped {
+		t.Fatalf("mapped agent-email counts = %#v", counts)
 	}
 }
 

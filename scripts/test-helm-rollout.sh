@@ -26,6 +26,8 @@ retention_preview_render="$render_dir/retention-preview.yaml"
 retention_enforce_render="$render_dir/retention-enforce.yaml"
 retention_preview_apps_render="$render_dir/retention-preview-apps.yaml"
 retention_enforce_apps_render="$render_dir/retention-enforce-apps.yaml"
+email_retention_preview_render="$render_dir/email-retention-preview.yaml"
+email_retention_enforce_render="$render_dir/email-retention-enforce.yaml"
 style_tuned_render="$render_dir/style-tuned.yaml"
 monitor_render="$render_dir/monitors.yaml"
 long_name_render="$render_dir/long-name.yaml"
@@ -79,6 +81,14 @@ helm template witself-apps "$apps_chart" \
   --values "$apps_profile" \
   --set apps.witselfServer.worker.transcriptRetention.enabled=true \
   --set apps.witselfServer.worker.transcriptRetention.mode=enforce >"$retention_enforce_apps_render"
+helm template witself-server "$server_chart" --namespace witself \
+  --values "$gcp_profile" \
+  --set worker.agentEmailRetention.enabled=true \
+  --set worker.agentEmailRetention.mode=preview >"$email_retention_preview_render"
+helm template witself-server "$server_chart" --namespace witself \
+  --values "$gcp_profile" \
+  --set worker.agentEmailRetention.enabled=true \
+  --set worker.agentEmailRetention.mode=enforce >"$email_retention_enforce_render"
 helm template witself-server "$server_chart" --namespace witself \
   --values "$gcp_profile" \
   --set worker.avatarStyleRollout.batchSize=101 >"$style_tuned_render"
@@ -337,7 +347,12 @@ require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED: "true"' "$gcp_worker_confi
 require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_TIMEOUT: "30s"' "$gcp_worker_config"
 require_line '  WITSELF_TRANSCRIPT_RETENTION_ENABLED: "false"' "$gcp_worker_config"
 require_line '  WITSELF_TRANSCRIPT_RETENTION_BATCH_TIMEOUT: "2m"' "$gcp_worker_config"
-if grep -Eq 'WITSELF_(API_ADDR|BOOTSTRAP|PROVISION|AGENT_EMAIL|BACKEND_KIND|FACT_DELETION|AVATAR_PAYLOAD)' \
+require_line '  WITSELF_AGENT_EMAIL_RETENTION_ENABLED: "false"' "$gcp_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_RETENTION_MODE: "preview"' "$gcp_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_RETENTION_BATCH_SIZE: "25"' "$gcp_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_RETENTION_INTERVAL: "5m"' "$gcp_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_RETENTION_BATCH_TIMEOUT: "2m"' "$gcp_worker_config"
+if grep -Eq 'WITSELF_(API_ADDR|BOOTSTRAP|PROVISION|AGENT_EMAIL_(RECEIVE|PILOT|RETRY|RELAY)|BACKEND_KIND|FACT_DELETION|AVATAR_PAYLOAD)' \
   "$gcp_worker_config" "$gcp_worker_deployment"; then
   echo "worker received API/bootstrap/provision/email-only configuration" >&2
   exit 1
@@ -358,6 +373,8 @@ require_line '  WITSELF_MESSAGE_RETENTION_BATCH_TIMEOUT: "2m"' "$live_nested_wor
 require_line '  WITSELF_TRANSCRIPT_RETENTION_ENABLED: "true"' "$live_nested_worker_config"
 require_line '  WITSELF_TRANSCRIPT_RETENTION_MODE: "enforce"' "$live_nested_worker_config"
 require_line '  WITSELF_TRANSCRIPT_RETENTION_BATCH_TIMEOUT: "2m"' "$live_nested_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_RETENTION_ENABLED: "false"' "$live_nested_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_RETENTION_MODE: "preview"' "$live_nested_worker_config"
 require_line "  replicas: 2" "$live_nested_worker_deployment"
 
 require_sequence "$gcp_worker_metrics_service" \
@@ -416,6 +433,9 @@ expect_server_template_failure \
   "legacy top-level transcript retention values" \
   --set transcriptRetention.enabled=true
 expect_server_template_failure \
+  "legacy top-level agent-email retention values" \
+  --set agentEmailRetention.enabled=true
+expect_server_template_failure \
   "zero worker replicas" \
   --values "$gcp_profile" \
   --set worker.replicaCount=0
@@ -471,6 +491,30 @@ expect_server_template_failure \
   "oversized transcript retention batch timeout" \
   --values "$gcp_profile" \
   --set worker.transcriptRetention.batchTimeout=6m
+expect_server_template_failure \
+  "unknown agent-email retention mode" \
+  --values "$gcp_profile" \
+  --set worker.agentEmailRetention.mode=delete
+expect_server_template_failure \
+  "oversized agent-email retention batch" \
+  --values "$gcp_profile" \
+  --set worker.agentEmailRetention.batchSize=101
+expect_server_template_failure \
+  "undersized agent-email retention interval" \
+  --values "$gcp_profile" \
+  --set worker.agentEmailRetention.interval=59s
+expect_server_template_failure \
+  "oversized agent-email retention interval" \
+  --values "$gcp_profile" \
+  --set worker.agentEmailRetention.interval=25h
+expect_server_template_failure \
+  "undersized agent-email retention batch timeout" \
+  --values "$gcp_profile" \
+  --set worker.agentEmailRetention.batchTimeout=9s
+expect_server_template_failure \
+  "oversized agent-email retention batch timeout" \
+  --values "$gcp_profile" \
+  --set worker.agentEmailRetention.batchTimeout=6m
 expect_server_template_failure \
   "API rolling strategy with no surge or availability" \
   --set strategy.rollingUpdate.maxUnavailable=0 \
@@ -585,6 +629,12 @@ require_sequence "$phase_b_apps_render" \
   "        backend:"
 require_sequence "$apps_render" \
   "        worker:" \
+  "          agentEmailRetention:" \
+  "            batchSize: 25" \
+  "            batchTimeout: 2m" \
+  "            enabled: false" \
+  "            interval: 5m" \
+  "            mode: preview" \
   "          avatarStyleRollout:" \
   "            batchSize: 100" \
   "            batchTimeout: 30s" \
@@ -684,6 +734,26 @@ if [[ "$phase_a_server_checksum" != "$(config_checksum "$render_dir/preview-serv
 fi
 if [[ "$phase_a_server_checksum" != "$(config_checksum "$render_dir/enforce-server-deployment.yaml")" ]]; then
   echo "worker transcript-retention enforcement unexpectedly restarted API pods" >&2
+  exit 1
+fi
+
+extract_document Deployment witself-server "$email_retention_preview_render" "$render_dir/email-preview-server-deployment.yaml"
+extract_document Deployment witself-worker "$email_retention_preview_render" "$render_dir/email-preview-worker-deployment.yaml"
+extract_document Deployment witself-server "$email_retention_enforce_render" "$render_dir/email-enforce-server-deployment.yaml"
+extract_document Deployment witself-worker "$email_retention_enforce_render" "$render_dir/email-enforce-worker-deployment.yaml"
+email_retention_preview_worker_checksum="$(config_checksum "$render_dir/email-preview-worker-deployment.yaml")"
+email_retention_enforce_worker_checksum="$(config_checksum "$render_dir/email-enforce-worker-deployment.yaml")"
+if [[ "$phase_a_worker_checksum" == "$email_retention_preview_worker_checksum" ||
+  "$email_retention_preview_worker_checksum" == "$email_retention_enforce_worker_checksum" ]]; then
+  echo "agent-email-retention phases did not produce distinct worker checksums" >&2
+  exit 1
+fi
+if [[ "$phase_a_server_checksum" != "$(config_checksum "$render_dir/email-preview-server-deployment.yaml")" ]]; then
+  echo "worker agent-email-retention preview unexpectedly restarted API pods" >&2
+  exit 1
+fi
+if [[ "$phase_a_server_checksum" != "$(config_checksum "$render_dir/email-enforce-server-deployment.yaml")" ]]; then
+  echo "worker agent-email-retention enforcement unexpectedly restarted API pods" >&2
   exit 1
 fi
 

@@ -31,6 +31,9 @@ const (
 	// clients install the messaging tools once and do not reinstall when the
 	// account's effective entitlement changes.
 	MessagingFeature = "messaging"
+	// AgentEmailReceiveFeature enables inbound agent email. The integration is
+	// installed once; cells enforce the account's resolved feature snapshot.
+	AgentEmailReceiveFeature = "agent_email_receive"
 
 	// RealmLimit caps live realms account-wide.
 	RealmLimit = "realms"
@@ -68,12 +71,24 @@ const (
 	// MessagingEntitlementVersion is the only marker version understood by
 	// this release.
 	MessagingEntitlementVersion int64 = 1
+	// AgentEmailRetentionDaysPolicy is the maximum age of retained inbound
+	// agent email. It remains meaningful while receipt is disabled so a
+	// downgrade can clean up already-stored mail. Absence means indefinite.
+	AgentEmailRetentionDaysPolicy = "agent_email_retention_days"
+	// AgentEmailEntitlementVersionPolicy makes AgentEmailReceiveFeature
+	// authoritative while preserving legacy snapshots that predate the gate.
+	AgentEmailEntitlementVersionPolicy = "agent_email_entitlement_version"
+	// AgentEmailEntitlementVersion is the only marker version understood by
+	// this release.
+	AgentEmailEntitlementVersion int64 = 1
 	// MaxTranscriptRetentionDays is a defensive representation bound, not a
 	// product-tier cap. Explicit indefinite transcript or message retention is
 	// represented by a missing key.
 	MaxTranscriptRetentionDays int64 = 36500
 	// MaxMessageRetentionDays is the matching defensive bound for messages.
 	MaxMessageRetentionDays int64 = 36500
+	// MaxAgentEmailRetentionDays is the matching defensive bound for email.
+	MaxAgentEmailRetentionDays int64 = 36500
 )
 
 // Plan is one catalog entry.
@@ -248,6 +263,17 @@ func ValidatePolicies(policies map[string]int64) error {
 				return fmt.Errorf("%s must be %d",
 					MessagingEntitlementVersionPolicy,
 					MessagingEntitlementVersion)
+			}
+		case AgentEmailRetentionDaysPolicy:
+			if value < 1 || value > MaxAgentEmailRetentionDays {
+				return fmt.Errorf("%s must be between 1 and %d days (omit it for indefinite retention)",
+					AgentEmailRetentionDaysPolicy, MaxAgentEmailRetentionDays)
+			}
+		case AgentEmailEntitlementVersionPolicy:
+			if value != AgentEmailEntitlementVersion {
+				return fmt.Errorf("%s must be %d",
+					AgentEmailEntitlementVersionPolicy,
+					AgentEmailEntitlementVersion)
 			}
 		default:
 			return fmt.Errorf("unknown policy %q", key)
