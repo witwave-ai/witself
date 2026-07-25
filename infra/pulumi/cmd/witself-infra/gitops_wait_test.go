@@ -69,6 +69,18 @@ func TestArgoApplicationsReady(t *testing.T) {
 	}
 }
 
+func TestArgoApplicationsReadyWithSyncedOnlyRoot(t *testing.T) {
+	apps := []argoApplication{
+		mkArgoApp("bootstrap", "Synced", "Progressing", ""),
+		mkArgoApp("apps", "Synced", "Healthy", ""),
+		mkArgoApp("witself-server", "Synced", "Healthy", ""),
+	}
+	ready, why := argoApplicationsReadyWithSyncedOnly(apps, map[string]bool{"bootstrap": true})
+	if !ready {
+		t.Fatalf("ready = false, want true (why %q)", why)
+	}
+}
+
 func TestWaitForArgoApplicationsHealthy(t *testing.T) {
 	t.Run("waits through progressing parent", func(t *testing.T) {
 		lister := &fakeArgoLister{responses: []argoListResponse{
@@ -190,7 +202,7 @@ users:
 	if err == nil {
 		t.Fatal("expected missing token error")
 	}
-	if !strings.Contains(err.Error(), "no bearer token") {
+	if !strings.Contains(err.Error(), "no bearer token or client certificate") {
 		t.Fatalf("error = %v, want missing bearer token", err)
 	}
 }

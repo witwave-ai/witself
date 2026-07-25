@@ -2,7 +2,8 @@
 
 Status: provider substrate and executable certification gate implemented; live
 certification still in progress. The Pulumi cell program provisions AWS, GCP,
-and Azure. AWS remains the first production-hardening target. The same
+Azure, and a cost-optimized Civo development cell. AWS remains the first
+production-hardening target. The same
 provider-neutral 3-by-3 memory/account-move gate is now runnable against all
 three managed PostgreSQL services, but a cloud is not certified until a
 specific release passes that gate on its real endpoints.
@@ -36,9 +37,12 @@ AWS is first for:
 - The first production-shaped Helm values example.
 - The first CI or smoke environment that exercises cloud-shaped infrastructure.
 
-The executable Pulumi substrate is already implemented for AWS, GCP, and Azure.
-It provisions a provider-specific Kubernetes cluster, private managed
-PostgreSQL, networking, secret delivery, DNS, and the optional GitOps bootstrap.
+The executable Pulumi substrate is already implemented for AWS, GCP, Azure, and
+Civo. AWS, GCP, and Azure provision a provider-specific Kubernetes cluster,
+private managed PostgreSQL, networking, secret delivery, DNS, and the optional
+GitOps bootstrap. Civo is a deliberately inexpensive development profile: K3s,
+Civo networking and native DNS, Traefik NodePort ingress, cert-manager TLS, and
+in-cluster PostgreSQL on a Civo persistent volume.
 That implementation status must not be confused with certification: the same
 released server/schema has not yet passed the complete managed-provider memory
 suite or an actual cross-provider archive move on all three targets.
@@ -62,6 +66,7 @@ The current executable provider paths live under `infra/pulumi`:
 1. AWS: EKS and RDS PostgreSQL.
 2. GCP: GKE and Cloud SQL for PostgreSQL.
 3. Azure: AKS and Azure Database for PostgreSQL Flexible Server.
+4. Civo: managed K3s and in-cluster PostgreSQL for development.
 
 Pulumi unit and compile tests prove that these provider graphs can be built.
 They do not prove that a live managed database accepts every migration or that
@@ -136,16 +141,19 @@ embedding service, provider egress, or provider credential for
 Cloud targets are not a single-cloud choice made once. Witself deploys as a fleet
 of independent cells, where a cell is one complete, isolated Witself stack in a
 single cloud account and region (see [deployment-cells.md](deployment-cells.md)).
-The fleet spans AWS, GCP, and Azure, across multiple accounts per cloud.
+The fleet spans AWS, GCP, Azure, and Civo, across multiple accounts per cloud.
 
 - **A second AWS account is just another cell.** An independent second AWS account
   is not a special case — it is simply another cell. The same applies to a second
   GCP project or Azure subscription. Each cell is one cloud account/region.
 - **AWS-first is a certification order.** The AWS-first ordering above is about
   which live provider path hardens first, not about how many cells exist or
-  whether GCP and Azure provisioning code exists. Each cell is one Pulumi stack;
-  all three provider graphs are implemented, and each must pass the same
+  whether GCP, Azure, and Civo provisioning code exists. Each cell is one Pulumi
+  stack; all four provider graphs are implemented. The three hyperscaler
+  managed-PostgreSQL paths must pass the same
   conformance and cell-move gates before it is described as certified.
+  Civo remains an experimental development channel until its in-cluster
+  PostgreSQL profile has a separately defined production certification bar.
 - **Placement is by region and data-residency.** A thin global control plane picks
   the home cell for a new tenant by region / data-residency requirement, capacity
   across the fleet, and provider/account preference. The cloud target a tenant

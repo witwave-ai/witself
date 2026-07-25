@@ -179,6 +179,10 @@ func (c cellState) statusGlyph() string {
 // operator scan for what was deliberately configured.
 func effectiveSettings(e cellEntry, d *cellEntry) []settingRow {
 	var out []settingRow
+	cloud := "aws"
+	if e.Cloud != nil {
+		cloud = *e.Cloud
+	}
 	str := func(key, builtin string, cell *string, getDef func(*cellEntry) *string) {
 		if cell != nil {
 			out = append(out, settingRow{key: key, value: *cell, fromEntry: true})
@@ -211,10 +215,24 @@ func effectiveSettings(e cellEntry, d *cellEntry) []settingRow {
 	// Order: infra shape first (what an operator checks before `up`),
 	// then plumbing (channel, backend, domain). GitOps rows only when
 	// argocd is on — off means they wouldn't apply.
-	str("sizing", "minimal", e.Profile, func(x *cellEntry) *string { return x.Profile })
-	str("k8s version", "1.36", e.K8sVersion, func(x *cellEntry) *string { return x.K8sVersion })
-	str("db version", "18", e.DBVersion, func(x *cellEntry) *string { return x.DBVersion })
-	str("cidr", "10.20.0.0/16", e.CIDR, func(x *cellEntry) *string { return x.CIDR })
+	//nolint:staticcheck // Independent provider sections keep the rendered row order obvious.
+	if cloud == "civo" {
+		str("profile", "minimal development", e.Profile, func(x *cellEntry) *string { return x.Profile })
+	} else {
+		str("sizing", "minimal", e.Profile, func(x *cellEntry) *string { return x.Profile })
+	}
+	k8sDefault := defaultK8sVersion(cloud)
+	//nolint:staticcheck // These labels are provider-specific display policy, not one switch result.
+	if cloud == "civo" {
+		k8sDefault = "latest stable (Civo default)"
+	} else if cloud == "gcp" {
+		k8sDefault = "provider-managed (GKE Autopilot)"
+	}
+	str("k8s version", k8sDefault, e.K8sVersion, func(x *cellEntry) *string { return x.K8sVersion })
+	if cloud != "civo" {
+		str("db version", "18", e.DBVersion, func(x *cellEntry) *string { return x.DBVersion })
+		str("cidr", "10.20.0.0/16", e.CIDR, func(x *cellEntry) *string { return x.CIDR })
+	}
 	argocdOn := boolean("argocd", false, e.ArgoCD, func(x *cellEntry) *bool { return x.ArgoCD })
 	if argocdOn {
 		str("gitops repo", "https://github.com/witwave-ai/witself",
@@ -224,7 +242,29 @@ func effectiveSettings(e cellEntry, d *cellEntry) []settingRow {
 	}
 	str("channel", "experimental", e.Channel, func(x *cellEntry) *string { return x.Channel })
 	str("backend", "s3", e.Backend, func(x *cellEntry) *string { return x.Backend })
-	str("domain", "cells.witself.witwave.ai", e.Domain, func(x *cellEntry) *string { return x.Domain })
+	if cloud == "civo" {
+		out = append(out, settingRow{key: "ingress", value: "Civo DNS · Traefik NodePort", fromEntry: false})
+		out = append(out, settingRow{key: "database", value: "in-cluster PostgreSQL · persistent volume", fromEntry: false})
+		str("node size", "g4s.kube.medium", e.CivoNodeSize, func(x *cellEntry) *string { return x.CivoNodeSize })
+		str("admin cidr", "required", e.CivoAdminCIDR, func(x *cellEntry) *string { return x.CivoAdminCIDR })
+		if e.SecurityContext != nil && e.SecurityContext.Civo != nil && e.SecurityContext.Civo.TokenFile != nil {
+			out = append(out, settingRow{key: "credential", value: "token file · " + *e.SecurityContext.Civo.TokenFile, fromEntry: true})
+		} else {
+			out = append(out, settingRow{key: "credential", value: "CIVO_TOKEN environment", fromEntry: false})
+		}
+	} else {
+		str("domain", "cells.witself.witwave.ai", e.Domain, func(x *cellEntry) *string { return x.Domain })
+	}
+	backend := "s3"
+	if d != nil && d.Backend != nil {
+		backend = *d.Backend
+	}
+	if e.Backend != nil {
+		backend = *e.Backend
+	}
+	if backend == "local" {
+		str("state dir", defaultStateDir(), e.StateDir, func(x *cellEntry) *string { return x.StateDir })
+	}
 	return out
 }
 
@@ -1127,7 +1167,11 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// a manual `aws sso login` in another window and a
 				// blind guess about what went wrong.
 				if looksLikeAuthFailure(m.op.snapshot(20)) {
-					m.status = "✗ " + m.op.kind.verb() + " on " + msg.cell + " failed on auth — press `a` to log in and try again"
+					if m.cloudForCell(msg.cell) == "civo" {
+						m.status = "✗ " + m.op.kind.verb() + " on " + msg.cell + " failed on auth — update its Civo token file or CIVO_TOKEN, then refresh"
+					} else {
+						m.status = "✗ " + m.op.kind.verb() + " on " + msg.cell + " failed on auth — press `a` to log in and try again"
+					}
 				}
 			} else {
 				// Explicit outcome per verb so the operator sees the
@@ -1170,6 +1214,15 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 	}
 	return m, nil
+}
+
+func (m dashboardModel) cloudForCell(name string) string {
+	for _, st := range m.states {
+		if st.name == name && st.entry.Cloud != nil {
+			return *st.entry.Cloud
+		}
+	}
+	return ""
 }
 
 func (m dashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1620,6 +1673,9 @@ func looksLikeAuthFailure(tail []string) bool {
 		"gcp adc",             // our own whoami/gitops-wait wording
 		"authenticationfailed",
 		"az login",
+		"civo_token",
+		"civo token file",
+		"civo identity probe returned 401",
 	}
 	for _, line := range tail {
 		low := strings.ToLower(line)
@@ -1749,9 +1805,9 @@ func (m dashboardModel) renderContext(w, h int) []string {
 		case tabOverview:
 			lines = append(lines, m.renderOverviewTab(st, w)...)
 		case tabKubernetes:
-			lines = append(lines, styDim.Render("  no Kubernetes details yet"))
+			lines = append(lines, m.renderKubernetesTab(st, w)...)
 		case tabDatabase:
-			lines = append(lines, styDim.Render("  no database details yet"))
+			lines = append(lines, m.renderDatabaseTab(st, w)...)
 		case tabHealth:
 			lines = append(lines, m.renderHealthTab(st, w)...)
 		case tabLogs:
@@ -1761,6 +1817,38 @@ func (m dashboardModel) renderContext(w, h int) []string {
 		return lines
 	}
 	return nil
+}
+
+func (m dashboardModel) renderKubernetesTab(st cellState, w int) []string {
+	h := m.cellSubsystem(st, func(r cellHealthReport) subsystemHealth { return r.Kubernetes })
+	lines := []string{
+		fitLine("  "+h.Level.dot()+" "+h.Level.style().Render(h.Detail), w),
+	}
+	if h.Total > 0 {
+		lines = append(lines, fitLine("  "+styDim.Render("nodes")+"  "+gaugeBar(h.Have, h.Total, 12, h.Level.style()), w))
+	}
+	if st.entry.Cloud != nil {
+		lines = ctxPut(lines, w, "provider", *st.entry.Cloud)
+	}
+	if st.entry.Region != nil {
+		lines = ctxPut(lines, w, "region", *st.entry.Region)
+	}
+	return lines
+}
+
+func (m dashboardModel) renderDatabaseTab(st cellState, w int) []string {
+	h := m.cellSubsystem(st, func(r cellHealthReport) subsystemHealth { return r.Database })
+	lines := []string{
+		fitLine("  "+h.Level.dot()+" "+h.Level.style().Render(h.Detail), w),
+	}
+	if st.entry.Cloud != nil && *st.entry.Cloud == "civo" {
+		lines = ctxPut(lines, w, "deployment", "in-cluster PostgreSQL")
+		lines = ctxPut(lines, w, "storage", "GitOps-managed Civo persistent volume")
+		lines = ctxPut(lines, w, "profile", "development")
+	} else if st.entry.DBVersion != nil {
+		lines = ctxPut(lines, w, "version", *st.entry.DBVersion)
+	}
+	return lines
 }
 
 // cellTabNames lists the cell tab titles in order — the strip renderer
@@ -1966,6 +2054,9 @@ func (m dashboardModel) renderOverviewTab(st cellState, w int) []string {
 		lines = ctxPut(lines, w, "tenant", id.Tenant)
 		lines = ctxPut(lines, w, "actor", id.Actor)
 		ok := styOK.Render("✓ matches config pin")
+		if id.Cloud == "civo" && !civoAccountPinned(st.entry) {
+			ok = styWarn.Render("△ token valid · no account pin configured")
+		}
 		if !id.OK {
 			ok = styErr.Render("✗ pin mismatch")
 		}
@@ -1975,6 +2066,13 @@ func (m dashboardModel) renderOverviewTab(st cellState, w int) []string {
 		}
 	}
 	return lines
+}
+
+func civoAccountPinned(entry cellEntry) bool {
+	return entry.SecurityContext != nil &&
+		entry.SecurityContext.Civo != nil &&
+		entry.SecurityContext.Civo.ExpectedAccountID != nil &&
+		strings.TrimSpace(*entry.SecurityContext.Civo.ExpectedAccountID) != ""
 }
 
 // healthRow pairs a label with its resolved subsystem reading for the
@@ -2173,6 +2271,8 @@ func cellCredentialHealth(st cellState) (healthLevel, string) {
 		return healthUnknown, "— no identity yet"
 	case !st.identity.OK:
 		return healthBad, "✗ account pin mismatch"
+	case st.identity.Cloud == "civo" && !civoAccountPinned(st.entry):
+		return healthWarn, "△ token valid · account unpinned"
 	default:
 		return healthGood, "✓ valid"
 	}

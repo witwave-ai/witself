@@ -310,6 +310,8 @@ github.com/pulumi/pulumi-azure-native-sdk/resources/v3 v3.19.0 h1:gOQnr5npDQn8AA
 github.com/pulumi/pulumi-azure-native-sdk/resources/v3 v3.19.0/go.mod h1:cSHCoJyV/NsjWLO7Gk8Tr2Tr+gvqNbErfo8jVviOWUA=
 github.com/pulumi/pulumi-azure-native-sdk/v3 v3.19.0 h1:Mfl+Z1zZuLXuEn//PRi8mnnA1Bb7R2VOmuc4JWOPyTo=
 github.com/pulumi/pulumi-azure-native-sdk/v3 v3.19.0/go.mod h1:qniEet/A/m6/0IFkzN0IWI0VMl5fkI5r27RPAqA2dtM=
+github.com/pulumi/pulumi-civo/sdk/v2 v2.4.8 h1:zRGPgqNtOS6Ij5tnthDRxS3f8SNxXIyGTOLCwpvrkqU=
+github.com/pulumi/pulumi-civo/sdk/v2 v2.4.8/go.mod h1:DRBr39bxuuFE9OVNURT9o7phB5w/seS6DZ+j5TyCvKU=
 github.com/pulumi/pulumi-gcp/sdk/v9 v9.29.0 h1:Iuge/kZ7CrpQ8IHGa61nelS4/kmhI/kC9Fdao7MpXJU=
 github.com/pulumi/pulumi-gcp/sdk/v9 v9.29.0/go.mod h1:d60JuN+7L+PscwZK++AlFyrfia1s1fWsO1EiSzbrelw=
 github.com/pulumi/pulumi-kubernetes/sdk/v4 v4.32.0 h1:QwJzM3PseaorfASUlDXxsyntVGac7ZSYjqjxa038uoU=

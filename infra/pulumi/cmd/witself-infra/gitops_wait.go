@@ -64,9 +64,41 @@ func waitForPostUpConvergence(ctx context.Context, stack auto.Stack, cloud strin
 		return waitForGCPArgoApplicationsHealthy(ctx, stack, maxWait, pollEvery)
 	case "azure":
 		return waitForAzureArgoApplicationsHealthy(ctx, stack, maxWait, pollEvery)
+	case "civo":
+		return waitForCivoArgoApplicationsHealthy(ctx, stack, maxWait, pollEvery)
 	default:
 		return nil
 	}
+}
+
+func waitForCivoArgoApplicationsHealthy(ctx context.Context, stack auto.Stack, maxWait, pollEvery time.Duration) error {
+	outs, err := stack.Outputs(ctx)
+	if err != nil {
+		return fmt.Errorf("read outputs for GitOps verification: %w", err)
+	}
+	lister, namespace, err := newCivoArgoListerFromOutputs(outs)
+	if err != nil {
+		return err
+	}
+	return waitForArgoApplicationsHealthyWithSyncedOnly(
+		ctx, lister, namespace, maxWait, pollEvery, map[string]bool{"bootstrap": true},
+	)
+}
+
+func newCivoArgoListerFromOutputs(outs auto.OutputMap) (*tokenArgoLister, string, error) {
+	raw := outputString(outs, "kubeconfig")
+	if raw == "" {
+		return nil, "", fmt.Errorf("stack exports no Civo kubeconfig; cannot verify Argo CD health")
+	}
+	lister, err := newAzureArgoListerFromKubeconfig([]byte(raw))
+	if err != nil {
+		return nil, "", fmt.Errorf("build Civo cluster client: %w", err)
+	}
+	namespace := outputString(outs, "argocdNamespace")
+	if namespace == "" {
+		namespace = "argocd"
+	}
+	return lister, namespace, nil
 }
 
 func waitForGCPArgoApplicationsHealthy(ctx context.Context, stack auto.Stack, maxWait, pollEvery time.Duration) error {
@@ -94,6 +126,10 @@ func waitForAzureArgoApplicationsHealthy(ctx context.Context, stack auto.Stack, 
 }
 
 func waitForArgoApplicationsHealthy(ctx context.Context, lister argoApplicationLister, namespace string, maxWait, pollEvery time.Duration) error {
+	return waitForArgoApplicationsHealthyWithSyncedOnly(ctx, lister, namespace, maxWait, pollEvery, nil)
+}
+
+func waitForArgoApplicationsHealthyWithSyncedOnly(ctx context.Context, lister argoApplicationLister, namespace string, maxWait, pollEvery time.Duration, syncedOnly map[string]bool) error {
 	deadline := time.Now().Add(maxWait)
 	started := time.Now()
 
@@ -109,7 +145,7 @@ func waitForArgoApplicationsHealthy(ctx context.Context, lister argoApplicationL
 		}
 		var reason string
 		if err == nil {
-			ready, why := argoApplicationsReady(apps)
+			ready, why := argoApplicationsReadyWithSyncedOnly(apps, syncedOnly)
 			if ready {
 				fmt.Fprintf(os.Stderr, "Argo CD applications Synced/Healthy (took %s)\n", time.Since(started).Round(time.Second))
 				return nil
@@ -133,6 +169,10 @@ func waitForArgoApplicationsHealthy(ctx context.Context, lister argoApplicationL
 }
 
 func argoApplicationsReady(apps []argoApplication) (bool, string) {
+	return argoApplicationsReadyWithSyncedOnly(apps, nil)
+}
+
+func argoApplicationsReadyWithSyncedOnly(apps []argoApplication, syncedOnly map[string]bool) (bool, string) {
 	if len(apps) == 0 {
 		return false, "no Argo CD applications reported yet"
 	}
@@ -144,6 +184,9 @@ func argoApplicationsReady(apps []argoApplication) (bool, string) {
 		}
 		sync := app.Status.Sync.Status
 		health := app.Status.Health.Status
+		if syncedOnly[name] && sync == "Synced" {
+			continue
+		}
 		if sync == "Synced" && health == "Healthy" {
 			continue
 		}
@@ -415,19 +458,42 @@ func newAzureArgoListerFromKubeconfig(raw []byte) (*tokenArgoLister, error) {
 		return nil, fmt.Errorf("AKS certificate authority output did not contain PEM data")
 	}
 	token := ""
+	var clientCertificate tls.Certificate
 	for _, user := range cfg.Users {
 		token = strings.TrimSpace(user.User.Token)
 		if token != "" {
 			break
 		}
+		certData := strings.TrimSpace(user.User.ClientCertificateData)
+		keyData := strings.TrimSpace(user.User.ClientKeyData)
+		if certData == "" || keyData == "" {
+			continue
+		}
+		certPEM, certErr := base64.StdEncoding.DecodeString(certData)
+		if certErr != nil {
+			return nil, fmt.Errorf("decode kubeconfig client certificate: %w", certErr)
+		}
+		keyPEM, keyErr := base64.StdEncoding.DecodeString(keyData)
+		if keyErr != nil {
+			return nil, fmt.Errorf("decode kubeconfig client key: %w", keyErr)
+		}
+		clientCertificate, err = tls.X509KeyPair(certPEM, keyPEM)
+		if err != nil {
+			return nil, fmt.Errorf("parse kubeconfig client certificate: %w", err)
+		}
+		break
 	}
-	if token == "" {
-		return nil, fmt.Errorf("AKS kubeconfig contained no bearer token")
+	if token == "" && len(clientCertificate.Certificate) == 0 {
+		return nil, fmt.Errorf("kubeconfig contained no bearer token or client certificate")
+	}
+	tlsConfig := &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+	if len(clientCertificate.Certificate) > 0 {
+		tlsConfig.Certificates = []tls.Certificate{clientCertificate}
 	}
 	return &tokenArgoLister{
 		baseURL: strings.TrimRight(server, "/"),
 		client: &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
+			TLSClientConfig: tlsConfig,
 		}},
 		token: token,
 	}, nil
@@ -475,7 +541,9 @@ func clusterNodesGet(ctx context.Context, client *http.Client, baseURL, token st
 	if err != nil {
 		return 0, 0, false
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, 0, false
@@ -520,7 +588,9 @@ func clusterReadyzGet(ctx context.Context, client *http.Client, baseURL, token s
 	if err != nil {
 		return false, ""
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return false, ""
@@ -551,7 +621,9 @@ func (l *tokenArgoLister) ListArgoApplications(ctx context.Context, namespace st
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+l.token)
+	if l.token != "" {
+		req.Header.Set("Authorization", "Bearer "+l.token)
+	}
 	resp, err := l.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("query Argo CD applications: %w", err)
@@ -577,7 +649,9 @@ type kubeconfig struct {
 	} `yaml:"clusters"`
 	Users []struct {
 		User struct {
-			Token string `yaml:"token"`
+			Token                 string `yaml:"token"`
+			ClientCertificateData string `yaml:"client-certificate-data"`
+			ClientKeyData         string `yaml:"client-key-data"`
 		} `yaml:"user"`
 	} `yaml:"users"`
 }

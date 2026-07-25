@@ -18,11 +18,16 @@
           "name": "South Carolina",
           "match": "native"
         },
-        "azure": {
-          "region": "eastus",
-          "name": "East US",
-          "match": "native"
-        }
+      "azure": {
+        "region": "eastus",
+        "name": "East US",
+        "match": "native"
+      },
+      "civo": {
+        "region": "nyc1",
+        "name": "New York 1",
+        "match": "nearest"
+      }
       }
     },
     "usw1": {
@@ -68,6 +73,11 @@
           "region": "westus2",
           "name": "West US 2",
           "match": "native"
+        },
+        "civo": {
+          "region": "phx1",
+          "name": "Phoenix 1",
+          "match": "nearest"
         }
       }
     },
@@ -90,6 +100,11 @@
         "azure": {
           "region": "germanywestcentral",
           "name": "Germany West Central",
+          "match": "native"
+        },
+        "civo": {
+          "region": "fra1",
+          "name": "Frankfurt 1",
           "match": "native"
         }
       }
@@ -137,6 +152,22 @@
           "region": "uksouth",
           "name": "UK South",
           "match": "nearest"
+        },
+        "civo": {
+          "region": "lon1",
+          "name": "London 1",
+          "match": "native"
+        }
+      }
+    },
+    "aps1": {
+      "name": "Asia Pacific South 1",
+      "geography": "India",
+      "providers": {
+        "civo": {
+          "region": "mum1",
+          "name": "Mumbai 1",
+          "match": "native"
         }
       }
     }

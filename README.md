@@ -774,7 +774,7 @@ Account owners manage the policy stored with their account:
 ```sh
 witself account placement show
 witself account placement set \
-  --prefer-clouds gcp,aws,azure \
+  --prefer-clouds gcp,aws,azure,civo \
   --prefer-regions usw2,use1 \
   --prefer-channels stable,edge,experimental \
   --rebalance-on cloud,channel

@@ -23,7 +23,7 @@ func TestDefaultPolicy(t *testing.T) {
 
 func TestNormalizePolicy(t *testing.T) {
 	p, err := Normalize(Policy{
-		PreferredClouds:  []string{" GCP ", "aws", "gcp"},
+		PreferredClouds:  []string{" GCP ", "aws", "gcp", "civo"},
 		PreferredRegions: []string{"USW2", "use1"},
 		AllowedClouds:    []string{"gcp", "aws"},
 		RebalanceOn:      []string{"channel", "cloud", "channel"},
@@ -31,7 +31,7 @@ func TestNormalizePolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := p.PreferredClouds; len(got) != 2 || got[0] != "gcp" || got[1] != "aws" {
+	if got := p.PreferredClouds; len(got) != 3 || got[0] != "gcp" || got[1] != "aws" || got[2] != "civo" {
 		t.Fatalf("preferred_clouds = %#v", got)
 	}
 	if got := p.RebalanceOn; len(got) != 2 || got[0] != "channel" || got[1] != "cloud" {

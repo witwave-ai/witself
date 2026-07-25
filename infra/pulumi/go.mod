@@ -26,6 +26,7 @@ require (
 	github.com/pulumi/pulumi-azure-native-sdk/network/v3 v3.19.0
 	github.com/pulumi/pulumi-azure-native-sdk/privatedns/v3 v3.19.0
 	github.com/pulumi/pulumi-azure-native-sdk/resources/v3 v3.19.0
+	github.com/pulumi/pulumi-civo/sdk/v2 v2.4.8
 	github.com/pulumi/pulumi-gcp/sdk/v9 v9.29.0
 	github.com/pulumi/pulumi-kubernetes/sdk/v4 v4.32.0
 	github.com/pulumi/pulumi-random/sdk/v4 v4.21.0

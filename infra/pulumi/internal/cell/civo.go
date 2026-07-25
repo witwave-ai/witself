@@ -1,0 +1,141 @@
+package cell
+
+import (
+	"fmt"
+	"net"
+	"strings"
+
+	"github.com/pulumi/pulumi-civo/sdk/v2/go/civo"
+	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+)
+
+// provisionCivo is the inexpensive development substrate. It is deliberately
+// separate from the AWS/GCP/Azure programs: Civo supplies the network and K3s
+// cluster, while portable application services are reconciled through GitOps.
+func provisionCivo(ctx *pulumi.Context, c civoCell) error {
+	if c.region == "" {
+		return fmt.Errorf("civo:region is required")
+	}
+	if c.adminCIDR == "" {
+		return fmt.Errorf("witself:civoAdminCIDR is required; use the operator's public IP as a /32")
+	}
+	if _, _, err := net.ParseCIDR(c.adminCIDR); err != nil {
+		return fmt.Errorf("witself:civoAdminCIDR %q is not a valid CIDR: %w", c.adminCIDR, err)
+	}
+
+	network, err := civo.NewNetwork(ctx, "cell-network", &civo.NetworkArgs{
+		Label:  pulumi.String(c.name + "-network"),
+		Region: pulumi.String(c.region),
+	})
+	if err != nil {
+		return err
+	}
+
+	firewall, err := civo.NewFirewall(ctx, "cell-firewall", &civo.FirewallArgs{
+		Name:               pulumi.String(c.name + "-firewall"),
+		NetworkId:          network.ID().ToStringOutput(),
+		Region:             pulumi.String(c.region),
+		CreateDefaultRules: pulumi.Bool(false),
+		IngressRules: civo.FirewallIngressRuleArray{
+			civo.FirewallIngressRuleArgs{
+				Action:    pulumi.String("allow"),
+				Cidrs:     pulumi.StringArray{pulumi.String(c.adminCIDR)},
+				Label:     pulumi.String("kubernetes-api"),
+				PortRange: pulumi.String("6443"),
+				Protocol:  pulumi.String("tcp"),
+			},
+			civo.FirewallIngressRuleArgs{
+				Action:    pulumi.String("allow"),
+				Cidrs:     pulumi.StringArray{pulumi.String("0.0.0.0/0")},
+				Label:     pulumi.String("http-acme"),
+				PortRange: pulumi.String("80"),
+				Protocol:  pulumi.String("tcp"),
+			},
+			civo.FirewallIngressRuleArgs{
+				Action:    pulumi.String("allow"),
+				Cidrs:     pulumi.StringArray{pulumi.String("0.0.0.0/0")},
+				Label:     pulumi.String("https-api"),
+				PortRange: pulumi.String("443"),
+				Protocol:  pulumi.String("tcp"),
+			},
+		},
+		EgressRules: civo.FirewallEgressRuleArray{
+			civo.FirewallEgressRuleArgs{
+				Action:    pulumi.String("allow"),
+				Cidrs:     pulumi.StringArray{pulumi.String("0.0.0.0/0")},
+				Label:     pulumi.String("outbound-tcp"),
+				PortRange: pulumi.String("1-65535"),
+				Protocol:  pulumi.String("tcp"),
+			},
+			civo.FirewallEgressRuleArgs{
+				Action:    pulumi.String("allow"),
+				Cidrs:     pulumi.StringArray{pulumi.String("0.0.0.0/0")},
+				Label:     pulumi.String("outbound-udp"),
+				PortRange: pulumi.String("1-65535"),
+				Protocol:  pulumi.String("udp"),
+			},
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	clusterArgs := &civo.KubernetesClusterArgs{
+		Name:         pulumi.String(rname(c.name, "")),
+		Region:       pulumi.String(c.region),
+		NetworkId:    network.ID().ToStringOutput(),
+		FirewallId:   firewall.ID().ToStringOutput(),
+		ClusterType:  pulumi.String("k3s"),
+		Cni:          pulumi.String("cilium"),
+		Applications: pulumi.String("traefik2-nodeport"),
+		Pools: civo.KubernetesClusterPoolsArgs{
+			Label:     pulumi.String("development"),
+			NodeCount: pulumi.Int(1),
+			Size:      pulumi.String(c.nodeSize),
+		},
+		Tags:            pulumi.String("witself " + c.name + " development"),
+		WriteKubeconfig: pulumi.Bool(true),
+	}
+	// Omission means "latest stable" in Civo's API. An explicit
+	// -k8s-version pins a reproducible K3s version and participates in
+	// Pulumi previews/upgrades like the AWS and Azure versions do.
+	if c.k8sVersion != "" {
+		clusterArgs.KubernetesVersion = pulumi.String(c.k8sVersion)
+	}
+	cluster, err := civo.NewKubernetesCluster(ctx, "civo-cluster", clusterArgs,
+		pulumi.DependsOn([]pulumi.Resource{firewall}),
+		pulumi.IgnoreChanges([]string{"tags"}),
+	)
+	if err != nil {
+		return err
+	}
+
+	ctx.Export("clusterName", cluster.Name)
+	ctx.Export("clusterEndpoint", cluster.ApiEndpoint)
+	ctx.Export("clusterReady", cluster.Ready)
+	ctx.Export("kubernetesVersion", cluster.KubernetesVersion)
+	ctx.Export("kubeconfig", pulumi.ToSecret(cluster.Kubeconfig))
+	ctx.Export("civoRegion", pulumi.String(c.region))
+	ctx.Export("civoNodeSize", pulumi.String(c.nodeSize))
+	ctx.Export("network", network.ID())
+	ctx.Export("firewall", firewall.ID())
+	ctx.Export("status", pulumi.String("Civo development substrate provisioned"))
+
+	apiHost := pulumi.String("").ToStringOutput()
+	cellDomain := pulumi.String("").ToStringOutput()
+	if c.argocd {
+		cellDomain = cluster.DnsEntry.ApplyT(func(entry string) string {
+			return strings.TrimSuffix(entry, ".")
+		}).(pulumi.StringOutput)
+		apiHost = cellDomain.ApplyT(func(domain string) string {
+			return "api." + domain
+		}).(pulumi.StringOutput)
+	}
+	ctx.Export("apiHost", apiHost)
+	ctx.Export("civoDNSEntry", cellDomain)
+
+	if c.argocd {
+		return provisionCivoArgoCD(ctx, c, cluster, cellDomain, apiHost, cluster)
+	}
+	return nil
+}

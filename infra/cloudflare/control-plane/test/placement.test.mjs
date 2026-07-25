@@ -14,10 +14,11 @@ const cells = [
   { name: "gcp-use1-exp", cloud: "gcp", region_code: "use1", channel: "experimental" },
   { name: "gcp-usw2-stable", cloud: "gcp", region_code: "usw2", channel: "stable" },
   { name: "aws-usw2-edge", cloud: "aws", region_code: "usw2", channel: "edge" },
+  { name: "civo-use1-exp", cloud: "civo", region_code: "use1", channel: "experimental" },
 ];
 
 const basePolicy = {
-  preferred_clouds: ["gcp", "aws", "azure"],
+  preferred_clouds: ["gcp", "aws", "azure", "civo"],
   preferred_regions: ["usw2", "use1"],
   preferred_channels: ["stable", "edge", "experimental"],
   allowed_clouds: [],
@@ -36,6 +37,31 @@ test("hard pins filter every placement dimension", () => {
   assert.equal(cellMatchesPolicy(cells[0], policy), true);
   assert.equal(cellMatchesPolicy(cells[1], policy), false);
   assert.equal(cellMatchesPolicy(cells[2], policy), false);
+});
+
+test("Civo participates in hard pins and experimental placement", () => {
+  const policy = {
+    ...basePolicy,
+    preferred_clouds: ["civo", "gcp", "aws", "azure"],
+    allowed_clouds: ["civo"],
+    allowed_channels: ["experimental"],
+  };
+  assert.equal(cellMatchesPolicy(cells[3], policy), true);
+  assert.equal(cellMatchesPolicy(cells[1], policy), false);
+  assert.equal(
+    bestPlacementCell(cells, { placement_policy: policy }, new Map(), false)?.name,
+    "civo-use1-exp",
+  );
+});
+
+test("Civo can be a preferred rebalance destination", () => {
+  const policy = {
+    ...basePolicy,
+    preferred_clouds: ["civo", "gcp", "aws", "azure"],
+  };
+  const result = bestRebalanceCell(cells, cells[0], policy, new Map());
+  assert.equal(result?.cell.name, "civo-use1-exp");
+  assert.equal(result?.reason, "preferred placement");
 });
 
 test("legacy archives require their native region unless explicitly overridden", () => {

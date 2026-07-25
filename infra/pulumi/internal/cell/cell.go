@@ -94,6 +94,24 @@ type azureCell struct {
 	bootstrapTokenSet bool
 }
 
+type civoCell struct {
+	name              string
+	region            string
+	profile           string
+	k8sVersion        string
+	accountAlias      string
+	role              string
+	nodeSize          string
+	adminCIDR         string
+	argocd            bool
+	gitopsRepo        string
+	gitopsPath        string
+	gitopsValuesPath  string
+	gitopsRevision    string
+	bootstrapToken    pulumi.StringOutput
+	bootstrapTokenSet bool
+}
+
 // Program is the inline Pulumi program — the embedded Automation API engine runs
 // this closure, so the cell definition is compiled into the witself-infra binary.
 func Program(ctx *pulumi.Context) error {
@@ -103,15 +121,16 @@ func Program(ctx *pulumi.Context) error {
 	a := config.New(ctx, "aws")
 	g := config.New(ctx, "gcp")
 	az := config.New(ctx, "azure-native")
+	cv := config.New(ctx, "civo")
 
-	cloud := w.Get("cloud")     // aws | gcp | azure
+	cloud := w.Get("cloud")     // aws | gcp | azure | civo
 	profile := w.Get("profile") // minimal | prod
 	cidr := w.Get("cidr")
 	if cidr == "" {
 		cidr = "10.20.0.0/16"
 	}
 	k8sVersion := w.Get("k8sVersion")
-	if k8sVersion == "" {
+	if k8sVersion == "" && (cloud == "" || cloud == "aws" || cloud == "azure") {
 		k8sVersion = "1.36"
 	}
 	dbVersion := w.Get("dbVersion")
@@ -202,6 +221,28 @@ func Program(ctx *pulumi.Context) error {
 			gitopsRevision:    gitopsRevision,
 			domain:            domain,
 			cloudflareDNS:     cloudflareDNS,
+			bootstrapToken:    w.GetSecret("bootstrapToken"),
+			bootstrapTokenSet: bootstrapTokenSet,
+		})
+	case "civo":
+		nodeSize := w.Get("civoNodeSize")
+		if nodeSize == "" {
+			nodeSize = "g4s.kube.medium"
+		}
+		return provisionCivo(ctx, civoCell{
+			name:              cellName,
+			region:            cv.Get("region"),
+			profile:           profile,
+			k8sVersion:        k8sVersion,
+			accountAlias:      w.Get("accountAlias"),
+			role:              w.Get("role"),
+			nodeSize:          nodeSize,
+			adminCIDR:         w.Get("civoAdminCIDR"),
+			argocd:            argocd,
+			gitopsRepo:        gitopsRepo,
+			gitopsPath:        gitopsPath,
+			gitopsValuesPath:  gitopsValuesPath,
+			gitopsRevision:    gitopsRevision,
 			bootstrapToken:    w.GetSecret("bootstrapToken"),
 			bootstrapTokenSet: bootstrapTokenSet,
 		})

@@ -58,6 +58,11 @@ func authCommand(ctx context.Context, st cellState) (*exec.Cmd, string) {
 			args = append(args, "--tenant", tenant)
 		}
 		return exec.CommandContext(ctx, "az", args...), "az login"
+	case "civo":
+		if sc != nil && sc.Civo != nil && sc.Civo.TokenFile != nil && *sc.Civo.TokenFile != "" {
+			return nil, "Civo uses the configured token file " + *sc.Civo.TokenFile + "; no interactive login flow"
+		}
+		return nil, "Civo uses CIVO_TOKEN from the environment; no interactive login flow"
 	}
 	return nil, "unknown cloud: " + cloud
 }

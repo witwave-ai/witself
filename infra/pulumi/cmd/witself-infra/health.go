@@ -124,6 +124,8 @@ func printCellHealth(ctx context.Context, stack auto.Stack, cloud, region, awsPr
 		prober, namespace, err = newAzureArgoListerFromOutputs(ctx, outs)
 	case "aws":
 		prober, namespace, err = newAWSArgoListerFromOutputs(ctx, outs, region, awsProfile)
+	case "civo":
+		prober, namespace, err = newCivoArgoListerFromOutputs(outs)
 	default:
 		report.Kubernetes = sh(healthUnknown, "cluster probe not yet wired for "+cloud)
 		return emitHealth(report)
@@ -156,6 +158,9 @@ func printCellHealth(ctx context.Context, stack auto.Stack, cloud, region, awsPr
 			}
 		}
 	}
+	if version := outputString(outs, "kubernetesVersion"); version != "" {
+		k8s.Detail += " · " + version
+	}
 	report.Kubernetes = k8s
 
 	// Workloads: Argo application health (only when the cell runs Argo).
@@ -165,10 +170,31 @@ func printCellHealth(ctx context.Context, stack auto.Stack, cloud, region, awsPr
 			report.Argo = sh(healthBad, oneLine(aerr.Error()))
 		} else {
 			report.Argo = argoHealth(apps)
+			if cloud == "civo" {
+				report.Database = civoPostgresArgoHealth(apps)
+			}
 		}
 	}
 
 	return emitHealth(report)
+}
+
+func civoPostgresArgoHealth(apps []argoApplication) subsystemHealth {
+	for _, app := range apps {
+		if app.Metadata.Name != "witself-postgresql" {
+			continue
+		}
+		sync, health := app.Status.Sync.Status, app.Status.Health.Status
+		switch {
+		case sync == "Synced" && health == "Healthy":
+			return sh(healthGood, "in-cluster PostgreSQL Synced/Healthy")
+		case sync == "Synced":
+			return sh(healthDegraded, "in-cluster PostgreSQL Synced/"+health)
+		default:
+			return sh(healthBad, "in-cluster PostgreSQL "+sync+"/"+health)
+		}
+	}
+	return sh(healthBad, "in-cluster PostgreSQL Argo application not found")
 }
 
 // sh is a keyed-literal shorthand for a countless subsystem line.
@@ -220,6 +246,8 @@ func probeDatabase(ctx context.Context, cloud, region, awsProfile string, outs a
 			return sh(healthBad, "postgres status query failed: "+err.Error())
 		}
 		return dbLevel(status, azureDBLevel)
+	case "civo":
+		return sh(healthUnknown, "in-cluster PostgreSQL health is reported by the Argo application")
 	}
 	return sh(healthUnknown, "database status not wired for "+cloud)
 }

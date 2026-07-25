@@ -8,6 +8,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -40,6 +41,20 @@ cells: {}
   #   security_context:
   #     aws:
   #       profile: witwave-sandbox
+  #
+  # civo-sandbox-use1-dev:
+  #   cloud: civo
+  #   account_alias: sandbox
+  #   region: nyc1
+  #   role: dev
+  #   backend: local
+  #   civo_node_size: g4s.kube.medium
+  #   civo_admin_cidr: 203.0.113.7/32
+  #   argocd: true
+  #   security_context:
+  #     civo:
+  #       token_file: /secure/path/civo.token
+  #       expected_account_id: 00000000-0000-0000-0000-000000000000
 `
 
 func runConfigCmd(sub string, fs *flag.FlagSet, configPath string) error {
@@ -81,10 +96,36 @@ func configInit(configPath string) error {
 // existing file is rewritten.
 func configAddCell(fs *flag.FlagSet, configPath string) error {
 	get := func(name string) string { return fs.Lookup(name).Value.String() }
+	explicit := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+
+	path, err := resolveConfigPath(configPath)
+	if err != nil {
+		return err
+	}
+	cfg := &infraConfig{Version: 1, Cells: map[string]cellEntry{}}
+	existed := false
+	if _, err := os.Stat(path); err == nil {
+		existed = true
+		cfg, _, err = loadInfraConfig(path)
+		if err != nil {
+			return err
+		}
+	}
+	defaultValues := cfg.Defaults.flagValues()
+	effective := func(name string) string {
+		if !explicit[name] {
+			if value, ok := defaultValues[name]; ok {
+				return value
+			}
+		}
+		return get(name)
+	}
+
 	// Same validations run() applies — add-cell must never record an
 	// entry that its own suggested `preview -cell` command would reject.
 	if !clouds[get("cloud")] {
-		return fmt.Errorf("unknown -cloud %q (want aws|gcp|azure)", get("cloud"))
+		return fmt.Errorf("unknown -cloud %q (want aws|gcp|azure|civo)", get("cloud"))
 	}
 	regionCode, _, ok := resolveRegionCode(get("cloud"), get("region"))
 	if !ok {
@@ -96,10 +137,37 @@ func configAddCell(fs *flag.FlagSet, configPath string) error {
 	if !label.MatchString(get("role")) {
 		return fmt.Errorf("-role %q must be lowercase alphanumeric/hyphen", get("role"))
 	}
+	if get("cloud") == "civo" {
+		for _, ignored := range []string{"cidr", "db-version", "domain"} {
+			if explicit[ignored] {
+				return fmt.Errorf("-%s does not apply to -cloud civo", ignored)
+			}
+		}
+		if effective("backend") != "local" {
+			return fmt.Errorf("-cloud civo requires -backend local")
+		}
+		if effective("profile") != "minimal" {
+			return fmt.Errorf("-cloud civo currently supports only -profile minimal")
+		}
+		if effective("channel") != "experimental" {
+			return fmt.Errorf("-cloud civo currently supports only -channel experimental")
+		}
+		if effective("control-plane") != "" && effective("argocd") != "true" {
+			return fmt.Errorf("-cloud civo with -control-plane requires -argocd")
+		}
+		if strings.TrimSpace(effective("civo-admin-cidr")) == "" {
+			return fmt.Errorf("-civo-admin-cidr is required with -cloud civo")
+		}
+		if _, _, err := net.ParseCIDR(effective("civo-admin-cidr")); err != nil {
+			return fmt.Errorf("-civo-admin-cidr %q is not a valid CIDR", effective("civo-admin-cidr"))
+		}
+		if tokenFile := strings.TrimSpace(effective("civo-token-file")); tokenFile != "" {
+			if _, err := resolveCivoToken(tokenFile); err != nil {
+				return err
+			}
+		}
+	}
 	cellName := strings.Join([]string{get("cloud"), get("account-alias"), regionCode, get("role")}, "-")
-
-	explicit := map[string]bool{}
-	fs.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
 
 	entry := cellEntry{}
 	str := func(name string, dst **string) {
@@ -126,11 +194,13 @@ func configAddCell(fs *flag.FlagSet, configPath string) error {
 	str("db-version", &entry.DBVersion)
 	str("domain", &entry.Domain)
 	str("bootstrap-token-file", &entry.BootstrapTokenFile)
+	str("civo-node-size", &entry.CivoNodeSize)
+	str("civo-admin-cidr", &entry.CivoAdminCIDR)
 	// Backend is ALWAYS recorded, explicit or not: it addresses WHICH
 	// stack state operations target, so an entry must be self-contained
 	// — an implicit s3 falling back to some ambient default later could
 	// point destroy at a different (empty) stack than the cell's real one.
-	backendVal := get("backend")
+	backendVal := effective("backend")
 	entry.Backend = &backendVal
 	str("state-dir", &entry.StateDir)
 	str("control-plane", &entry.ControlPlane)
@@ -147,7 +217,7 @@ func configAddCell(fs *flag.FlagSet, configPath string) error {
 		str("gitops-revision", &g.Revision)
 		entry.Gitops = g
 	}
-	if explicit["aws-profile"] || explicit["gcp-project"] || explicit["azure-subscription"] {
+	if explicit["aws-profile"] || explicit["gcp-project"] || explicit["azure-subscription"] || explicit["civo-token-file"] || explicit["civo-expected-account-id"] {
 		sc := &securityContext{}
 		if explicit["aws-profile"] {
 			v := get("aws-profile")
@@ -161,22 +231,20 @@ func configAddCell(fs *flag.FlagSet, configPath string) error {
 			v := get("azure-subscription")
 			sc.Azure = &azureContext{Subscription: &v}
 		}
+		if explicit["civo-token-file"] || explicit["civo-expected-account-id"] {
+			sc.Civo = &civoContext{}
+			if explicit["civo-token-file"] {
+				v := get("civo-token-file")
+				sc.Civo.TokenFile = &v
+			}
+			if explicit["civo-expected-account-id"] {
+				v := get("civo-expected-account-id")
+				sc.Civo.ExpectedAccountID = &v
+			}
+		}
 		entry.SecurityContext = sc
 	}
 
-	path, err := resolveConfigPath(configPath)
-	if err != nil {
-		return err
-	}
-	cfg := &infraConfig{Version: 1, Cells: map[string]cellEntry{}}
-	existed := false
-	if _, err := os.Stat(path); err == nil {
-		existed = true
-		cfg, _, err = loadInfraConfig(path)
-		if err != nil {
-			return err
-		}
-	}
 	if cfg.Cells == nil {
 		cfg.Cells = map[string]cellEntry{}
 	}
@@ -242,6 +310,9 @@ func configShow(fs *flag.FlagSet, configPath string) error {
 	}
 	if err := applyCellConfig(fs, cellName, configPath); err != nil {
 		return err
+	}
+	if fs.Lookup("k8s-version").Value.String() == "" {
+		_ = fs.Set("k8s-version", defaultK8sVersion(fs.Lookup("cloud").Value.String()))
 	}
 	fmt.Println("effective configuration for " + cellName + ":")
 	names := make([]string, 0, 24)

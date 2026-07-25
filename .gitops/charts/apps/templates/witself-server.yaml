@@ -65,6 +65,18 @@
 {{- $_ := set $serverValues "ingress" (dict "enabled" true "annotations" $ingressAnnotations "hosts" $ingressHosts "tls" (list)) -}}
 {{- $_ := set $serverValues "service" (dict "annotations" (dict "cloud.google.com/backend-config" (printf "{\"ports\":{\"80\":\"%s\"}}" (default "witself-server" $gcpIngress.backendConfigName)) "cloud.google.com/neg" "{\"ingress\": true}")) -}}
 {{- end -}}
+{{- if and .Values.apps.witselfServer.civoIngress.enabled (eq .Values.cell.cloud "civo") -}}
+{{- $civoIngress := .Values.apps.witselfServer.civoIngress -}}
+{{- $apiHost := required "cell.apiHost is required for Civo ingress" .Values.cell.apiHost -}}
+{{- $_ := set $serverValues "ingress" (dict
+      "enabled" true
+      "annotations" (dict
+        "cert-manager.io/cluster-issuer" (default "letsencrypt-prod" $civoIngress.clusterIssuer)
+        "kubernetes.io/ingress.class" (default "traefik" $civoIngress.className))
+      "hosts" (list (dict "host" $apiHost "paths" (list (dict "path" "/" "pathType" "Prefix"))))
+      "tls" (list (dict "secretName" (default "witself-api-tls" $civoIngress.tlsSecretName) "hosts" (list $apiHost)))
+    ) -}}
+{{- end -}}
 {{- if $bootstrap.enabled -}}
 {{- $_ := set $serverValues "bootstrap" (dict "tokenFile" $bootstrapMountPath "existingSecret" (dict "name" $bootstrapTargetName "tokenKey" $bootstrap.tokenKey "ttlKey" $bootstrap.ttlKey)) -}}
 {{- end -}}

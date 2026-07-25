@@ -1372,7 +1372,7 @@ func accountPlacementSet(args []string) int {
 	jsonOut := jsonFlag(fs)
 	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
 	tokenFile := fs.String("token-file", "", "file containing the operator token")
-	preferClouds := fs.String("prefer-clouds", "", "ranked cloud preference list (aws,gcp,azure); empty clears it")
+	preferClouds := fs.String("prefer-clouds", "", "ranked cloud preference list (aws,gcp,azure,civo); empty clears it")
 	preferRegions := fs.String("prefer-regions", "", "ranked canonical region list (for example usw2,use1); empty clears it")
 	preferChannels := fs.String("prefer-channels", "", "ranked channel list (stable,edge,experimental); empty clears it")
 	onlyClouds := fs.String("only-clouds", "", "hard cloud pin list; empty allows every cloud")

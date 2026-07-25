@@ -125,3 +125,17 @@ func TestHealthLevelJSONRoundTrip(t *testing.T) {
 		t.Fatalf("round trip changed levels: %+v", back)
 	}
 }
+
+func TestCivoPostgresArgoHealth(t *testing.T) {
+	app := argoApplication{}
+	app.Metadata.Name = "witself-postgresql"
+	app.Status.Sync.Status = "Synced"
+	app.Status.Health.Status = "Healthy"
+	got := civoPostgresArgoHealth([]argoApplication{app})
+	if got.Level != healthGood || !strings.Contains(got.Detail, "Synced/Healthy") {
+		t.Fatalf("health = %#v", got)
+	}
+	if missing := civoPostgresArgoHealth(nil); missing.Level != healthBad {
+		t.Fatalf("missing app health = %#v", missing)
+	}
+}
