@@ -373,7 +373,7 @@ require_line '  WITSELF_MESSAGE_RETENTION_BATCH_TIMEOUT: "2m"' "$live_nested_wor
 require_line '  WITSELF_TRANSCRIPT_RETENTION_ENABLED: "true"' "$live_nested_worker_config"
 require_line '  WITSELF_TRANSCRIPT_RETENTION_MODE: "enforce"' "$live_nested_worker_config"
 require_line '  WITSELF_TRANSCRIPT_RETENTION_BATCH_TIMEOUT: "2m"' "$live_nested_worker_config"
-require_line '  WITSELF_AGENT_EMAIL_RETENTION_ENABLED: "false"' "$live_nested_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_RETENTION_ENABLED: "true"' "$live_nested_worker_config"
 require_line '  WITSELF_AGENT_EMAIL_RETENTION_MODE: "preview"' "$live_nested_worker_config"
 require_line "  replicas: 2" "$live_nested_worker_deployment"
 
@@ -632,7 +632,7 @@ require_sequence "$apps_render" \
   "          agentEmailRetention:" \
   "            batchSize: 25" \
   "            batchTimeout: 2m" \
-  "            enabled: false" \
+  "            enabled: true" \
   "            interval: 5m" \
   "            mode: preview" \
   "          avatarStyleRollout:" \

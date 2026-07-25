@@ -29,6 +29,12 @@ apps:
         batchSize: 25
         interval: 5m
         batchTimeout: 2m
+      agentEmailRetention:
+        enabled: true
+        mode: preview
+        batchSize: 25
+        interval: 5m
+        batchTimeout: 2m
       transcriptRetention:
         enabled: true
         mode: enforce
