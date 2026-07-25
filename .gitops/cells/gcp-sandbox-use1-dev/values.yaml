@@ -13,8 +13,8 @@ apps:
   witselfServer:
     enabled: true
     namespace: witself
-    chartVersion: 0.0.210
-    imageTag: 0.0.210
+    chartVersion: 0.0.211
+    imageTag: 0.0.211
     worker:
       enabled: true
       replicaCount: 2
