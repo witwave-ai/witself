@@ -39,6 +39,41 @@ test("release renderer injects immutable container build identity", async (t) =>
     commit,
     date,
   });
+  assert.match(
+    config,
+    /"limits"\s*:\s*\{\s*"cpu_ms"\s*:\s*300000\s*\}/,
+    "release config must preserve the CPU ceiling required for archive validation",
+  );
+  assert.match(
+    config,
+    /"name"\s*:\s*"ACCOUNT_LIFECYCLE"\s*,\s*"class_name"\s*:\s*"AccountLifecycle"/,
+    "release config must bind the per-account lifecycle Durable Object",
+  );
+  assert.match(
+    config,
+    /"tag"\s*:\s*"v3"\s*,\s*"new_sqlite_classes"\s*:\s*\[\s*"AccountLifecycle"\s*\]/,
+    "release config must preserve the lifecycle Durable Object migration",
+  );
+  assert.match(
+    config,
+    /"name"\s*:\s*"CELL_COORDINATOR"\s*,\s*"class_name"\s*:\s*"TargetCellCoordinator"/,
+    "release config must bind the per-cell lifecycle serialization authority",
+  );
+  assert.match(
+    config,
+    /"tag"\s*:\s*"v4"\s*,\s*"new_sqlite_classes"\s*:\s*\[\s*"TargetCellCoordinator"\s*\]/,
+    "release config must preserve the target cell coordinator migration",
+  );
+  assert.match(
+    config,
+    /"name"\s*:\s*"ACCOUNT_SIGNUP"\s*,\s*"class_name"\s*:\s*"AccountSignup"/,
+    "release config must bind the caller-stable account signup authority",
+  );
+  assert.match(
+    config,
+    /"tag"\s*:\s*"v5"\s*,\s*"new_sqlite_classes"\s*:\s*\[\s*"AccountSignup"\s*\]/,
+    "release config must preserve the account signup Durable Object migration",
+  );
   assert.doesNotMatch(config, /__WITSELF_[A-Z_]+__/);
   assert.equal((await stat(output)).mode & 0o777, 0o600);
 });

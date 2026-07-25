@@ -2445,15 +2445,89 @@ func accountCreate(args []string) int {
 	if localName == "" {
 		localName = "default"
 	}
-	// Claim the local name BEFORE creating anything remote: a taken name must
-	// not strand a freshly provisioned account's only credential.
+	requestFingerprint, err := client.AccountCreateRequestFingerprint(
+		*endpoint, localName, *email, *invite, *displayName,
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 2
+	}
+
+	// A prior successful local save can be followed by a crash before journal
+	// cleanup. Inspect the journal before rejecting a taken name so that exact
+	// state can be reconciled and cleaned up on the next invocation.
+	_, journalErr := local.ReadAccountProvisionJournal(localName)
+	if errors.Is(journalErr, local.ErrAccountProvisionJournalUnavailable) {
+		// Claim the local name BEFORE creating anything remote: a taken name
+		// must not strand a freshly provisioned account's only credential.
+		if err := local.Available(localName); err != nil {
+			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+			return 1
+		}
+	} else if journalErr != nil {
+		fmt.Fprintf(os.Stderr, "witself: resume pending account creation: %v\n", journalErr)
+		return 1
+	}
+	journal, _, err := local.BeginAccountProvisionJournal(
+		localName, requestFingerprint,
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: resume pending account creation: %v\n", err)
+		return 1
+	}
+
+	normalizedEmail := strings.ToLower(strings.TrimSpace(*email))
+	if journal.AccountID != "" || journal.OperatorToken != "" {
+		if journal.AccountID == "" || journal.OperatorToken == "" {
+			fmt.Fprintln(os.Stderr, "witself: pending account creation journal is incomplete")
+			return 1
+		}
+		if err := local.SaveProvisionedAccountDurable(
+			localName,
+			local.Account{ID: journal.AccountID, Email: normalizedEmail},
+			journal.OperatorToken,
+		); err != nil {
+			fmt.Fprintf(os.Stderr, "witself: resume saving local account: %v\n", err)
+			return 1
+		}
+		if err := local.DeleteAccountProvisionJournal(
+			localName, requestFingerprint, journal.ProvisionID,
+			journal.AccountID, journal.OperatorToken,
+		); err != nil {
+			fmt.Fprintf(
+				os.Stderr,
+				"witself: account is saved locally, but pending signup cleanup failed: %v\n",
+				err,
+			)
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "resumed account %s and saved it locally as %q\n", journal.AccountID, localName)
+		if *out != "" {
+			if err := os.WriteFile(*out, []byte(journal.OperatorToken+"\n"), 0o600); err != nil {
+				fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "wrote operator token to %s\n", *out)
+		}
+		accountRef := ""
+		if localName != "default" {
+			accountRef = " --account " + localName
+		}
+		fmt.Fprintf(os.Stderr, "next: witself account status%s\n", accountRef)
+		return 0
+	}
+	// Recheck after journal publication. Another process can have created a
+	// local binding between the initial availability check and the stable
+	// provision-id election; no remote mutation occurs on that conflict.
 	if err := local.Available(localName); err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 1
 	}
 
 	ctx := context.Background()
-	acct, err := client.CreateAccount(ctx, *endpoint, *email, *invite, *displayName)
+	acct, err := client.CreateAccountExact(
+		ctx, *endpoint, *email, *invite, *displayName, journal.ProvisionID,
+	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 1
@@ -2463,24 +2537,45 @@ func accountCreate(args []string) int {
 	// Claim it: the same exchange a self-hosted bootstrap uses.
 	res, err := client.BootstrapLogin(ctx, acct.Cell.Endpoint, acct.BootstrapToken)
 	if err != nil {
-		// Never strand the only credential: the bootstrap token is valid for
-		// about an hour — surface it with the finish-by-hand recipe instead
-		// of abandoning a freshly provisioned account to the reaper.
-		fmt.Fprintf(os.Stderr, "witself: account created but login failed: %v\n"+
-			"    finish by hand: (1) save the token below to a file, then\n"+
-			"    (2) witself auth login --endpoint %s --bootstrap-token-file FILE --out op.token\n"+
-			"    (3) witself account adopt --id %s --token-file op.token --name %s\n"+
-			"    bootstrap token (expires in ~1 hour, shown once):\n",
-			err, acct.Cell.Endpoint, acct.AccountID, localName)
-		fmt.Println(acct.BootstrapToken)
+		// The durable provision id remains pending. Re-running the same command
+		// asks the cell to revoke this unclaimed bootstrap and issue a fresh one.
+		fmt.Fprintf(
+			os.Stderr,
+			"witself: account created but login failed: %v\n    the signup is saved for retry; rerun the same account create command\n",
+			err,
+		)
 		return 1
 	}
 	fmt.Fprintf(os.Stderr, "logged in as operator %s\n", res.OperatorID)
 
-	if err := local.Save(localName, local.Account{ID: acct.AccountID, Email: acct.Email}, res.OperatorToken); err != nil {
-		// Never strand the only credential: surface the token if we can't store it.
-		fmt.Fprintf(os.Stderr, "witself: saving local account: %v\n", err)
+	if err := local.SaveAccountProvisionCredential(
+		localName, requestFingerprint, journal.ProvisionID,
+		acct.AccountID, res.OperatorToken,
+	); err != nil {
+		// The one-shot bootstrap is already consumed. If the private journal
+		// cannot accept the credential, show it once as the last-resort recovery
+		// path instead of silently stranding the account.
+		fmt.Fprintf(os.Stderr, "witself: saving resumable account credential: %v\n", err)
 		fmt.Println(res.OperatorToken)
+		return 1
+	}
+	if err := local.SaveProvisionedAccountDurable(
+		localName,
+		local.Account{ID: acct.AccountID, Email: acct.Email},
+		res.OperatorToken,
+	); err != nil {
+		fmt.Fprintf(os.Stderr, "witself: saving local account: %v\n", err)
+		return 1
+	}
+	if err := local.DeleteAccountProvisionJournal(
+		localName, requestFingerprint, journal.ProvisionID,
+		acct.AccountID, res.OperatorToken,
+	); err != nil {
+		fmt.Fprintf(
+			os.Stderr,
+			"witself: account is saved locally, but pending signup cleanup failed: %v\n",
+			err,
+		)
 		return 1
 	}
 	fmt.Fprintf(os.Stderr, "saved locally as %q\n", localName)

@@ -25,6 +25,23 @@ func TestReadTokenFileRejectsEmpty(t *testing.T) {
 	}
 }
 
+func TestLogAccountExportFailureQuotesSafeContextAndExactError(t *testing.T) {
+	var got strings.Builder
+	logAccountExportFailure(&got,
+		"acc_test\nforged", "civo-test\nforged",
+		errors.New("stream transcript_conversations: database read failed\nDETAIL"))
+
+	want := "witself-server: account export failed " +
+		`account_id="acc_test\nforged" cell="civo-test\nforged" ` +
+		`error="stream transcript_conversations: database read failed\nDETAIL"` + "\n"
+	if got.String() != want {
+		t.Errorf("export failure log = %q, want %q", got.String(), want)
+	}
+	if strings.Count(got.String(), "\n") != 1 {
+		t.Errorf("export failure log contains an injectable newline: %q", got.String())
+	}
+}
+
 func TestPlanLimitErrorPreservesBoundedDimension(t *testing.T) {
 	for _, dimension := range []string{
 		"realms",

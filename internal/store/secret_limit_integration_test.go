@@ -223,9 +223,7 @@ func TestSecretDeleteReceiptMigrationDowngradeWithoutDeleteReceipts(t *testing.T
 		secretLimitCreateInput(t, "retained before down", "retained-before-down")); err != nil {
 		t.Fatal(err)
 	}
-	if err := migrationTestDown(t, dsn, false); err != nil {
-		t.Fatal(err)
-	}
+	migrationTestDownTo(t, dsn, 68)
 	assertMigrationTestVersion(t, dsn, 68)
 	assertMigrationTestTable(t, st, "agent_email_retention_worker_lanes", false)
 	if err := migrationTestDown(t, dsn, false); err != nil {
@@ -270,9 +268,7 @@ func TestSecretDeleteReceiptMigrationDowngradeRefusesCommittedDelete(t *testing.
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := migrationTestDown(t, dsn, false); err != nil {
-		t.Fatal(err)
-	}
+	migrationTestDownTo(t, dsn, 68)
 	assertMigrationTestVersion(t, dsn, 68)
 	assertMigrationTestTable(t, st, "agent_email_retention_worker_lanes", false)
 	if err := migrationTestDown(t, dsn, false); err != nil {

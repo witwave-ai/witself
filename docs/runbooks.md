@@ -276,6 +276,34 @@ verified their email (those die with the cell — incomplete signups are not
 preserved). The loop ends with `<cell>: N accounts evacuated to Cloudflare R2`,
 after which Pulumi tears down the stack.
 
+Evacuation does not make an R2 upload authoritative merely because its HTTP
+body reached EOF. Each attempt uses an isolated object key, then the Worker
+streams the committed object back through gzip, tar, manifest, and trailing
+checksum validation before it writes `archived:` or removes `acct:`. A failed
+validation deletes only that attempt's object and leaves routing intact. The
+control plane then removes the exact source write fence only after the cell
+acknowledges that same evacuation id as aborted. If that acknowledgement is
+ambiguous, the account intentionally remains fenced and routed rather than
+guessing that it is safe; do not tear the cell down. Diagnose the source-cell
+export log and retry evacuation.
+Every close, evacuation, and restore for an account is serialized through that
+account's Durable Object, and an existing `archived:` pointer is revalidated
+before it can retire a still-live source route.
+The SHA-256 checksums and in-memory manifest, scope, and graph checks detect
+truncation and accidental corruption; they are integrity checks, not archive
+authentication. A compromised writer that can forge both an archive and its
+checksums is outside this mechanism's guarantee, so preserve the provision-token
+and R2 access boundaries.
+
+R2 bucket invariant: the archive bucket must have a lifecycle rule that aborts
+stale incomplete multipart uploads for every prefix. The production
+`witself-archives` bucket uses `Default Multipart Abort Rule` with a seven-day
+limit. Do not remove or narrow that rule: a Worker terminated before it can
+record the multipart upload id cannot abort that upload itself. If multipart
+completion is ambiguous before archive authority is committed, the Worker
+first obtains an exact source abort receipt and then best-effort deletes the
+attempt-unique completed object key.
+
 Sandbox override: add `-destroy-accounts` to skip the archive step entirely
 and force-purge the directory entries. This is an explicit acknowledgment
 that every account on the cell dies with it — no restore is possible.
@@ -290,10 +318,10 @@ curl https://self.witwave.ai/v1/directory/<account-id>
 ## Bring archived accounts back onto a new cell
 
 `witself-infra up -restore-archives` closes the loop: after the new cell
-registers, it pulls every archived account whose recorded region matches this
-cell's region back from R2 into the cell's local database and reactivates the
-system-suspension. The user experience is invisible — old credentials still
-work, memories/facts/agents come back byte-identical to the export.
+registers, it asks the control plane to restore each archive eligible for that
+cell under the archive's placement policy (or the legacy same-region rule).
+For a live account, the import preserves its credentials and portable data and
+then removes the system suspension.
 
 ```sh
 witself-infra up -restore-archives \
@@ -305,83 +333,83 @@ witself-infra up -restore-archives \
 ```
 
 One line per account: `restored acc_… onto <cell>`. The loop ends with
-`<cell>: N accounts restored from Cloudflare R2`. If no archives match the
-cell's region you see `no archived accounts awaiting placement in region
-<region>` and the up completes normally — a fresh cell in a region with no
+`<cell>: N accounts restored from Cloudflare R2`. If no archive is eligible
+for that cell, the up completes normally — a fresh cell with no eligible
 archives is not an error.
 
-Placement rule: an archive is only restored into a cell in the SAME region it
-was exported from. A us-west-2 account never silently lands in eu-central-1;
-if you bring up an eu-central-1 cell with us-west-2 archives waiting, they
-stay in R2 until a us-west-2 cell exists.
+A validated archive whose manifest status is `closed` remains the canonical
+recovery artifact. A restore or replay may discover that status while importing
+the archive's tombstone, but it retains both the R2 object and
+`archived:<account>` discovery pointer and never publishes a live `acct:`
+route. Once the pointer records `status: closed`, placement reports it as
+retained rather than pending work. Cell teardown therefore cannot hide the only
+portable copy of a closed account.
 
-If restore fails mid-flight (one account errors, or the cell endpoint isn't
-ready yet), the up command exits with the failure detail. Re-run `up
--restore-archives` after fixing — restoreAccount is idempotent per account,
-so already-restored accounts short-circuit and only the remaining ones
-finish. The Cloudflare Worker's `restore:<cell>` KV entry tracks
-cross-invocation progress if you need to debug.
+Placement-policy `allowed_regions` and `allowed_channels` lists are hard
+eligibility filters (as is `allowed_clouds`); an empty list leaves that axis
+unpinned. The corresponding `preferred_*` lists rank eligible cells in their
+declared order but do not make an unlisted value ineligible. The control plane
+compares cloud preference, then region preference, then channel preference,
+then favors the less-loaded cell and uses cell name as a deterministic tie
+breaker.
 
-## Clean up a ghost restore
+Archives created before placement policies use the legacy same-region guard:
+`region_code` is compared when both archive and cell have one, otherwise their
+provider region strings must match. An explicit `all_regions: true` restore
+(the placement runner's `restore_any_region` option) bypasses only that legacy
+guard. It does not override any policy's hard `allowed_*` filters.
 
-The restore path has a layered defense against two accepting cells in the
-same region racing to import the same archived account: a `restoring:` KV
-claim with a short TTL, and a re-check of `acct:` immediately before the
-Worker writes it. When the re-check catches a race it throws:
+If restore fails mid-flight (one account errors, or the cell endpoint is not
+ready yet), the up command exits with the failure detail. Fix the reported
+condition and re-run `up -restore-archives`. The account lifecycle Durable
+Object resumes the same operation and evacuation id; already acknowledged
+steps short-circuit. The Worker's `restore:<cell>` KV entry is a progress
+projection, not lifecycle authority.
 
-```
-restore race: acc_… routes to <winning-cell> — imported rows on <losing-cell>
-are a ghost; see docs/runbooks.md#clean-up-a-ghost-restore
-```
+A deterministic gzip, tar, manifest, or checksum failure quarantines only that
+exact archive identity. The control plane releases any exact target
+reservation, retains the `archived:<account>` pointer and R2 object as recovery
+evidence, and does not publish a live route. Repeating the same restore fails
+fast without rereading or reserving it, so one corrupt archive cannot wedge the
+placement queue. A transient R2/body-stream failure remains retryable and is
+never quarantine evidence. To recover later, replace the archived projection
+with a newly validated archive identity through a separately reviewed recovery
+workflow; do not delete or rewrite the quarantined object in place.
 
-At this point the winning cell has the account and is serving it correctly.
-The losing cell has a full copy of the account's data but no directory
-pointer at it — a ghost. The ghost is unreachable through the fleet API
-(the directory answers with the winner's endpoint), but its rows are still
-sitting in the losing cell's database, so left in place they will show up
-in the losing cell's next `:evacuate` and re-archive on top of a fresh
-export from the winner. Left long enough, they diverge as mutable state
-(memories, agents, secrets) rotates on the winner but not on the loser.
+## Diagnose an interrupted restore or source finalization
 
-The manual recovery — until a per-account fleet-level evacuate verb exists
-(see [#20](https://github.com/witwave-ai/witself/issues/20)) — is direct
-Postgres cleanup on the losing cell. The account id, the losing cell name,
-and the winning cell name all appear in the error message.
+Successful restore no longer requires normal-path SQL cleanup on a losing
+source cell. After the target import and resume are acknowledged and the target
+route becomes authoritative, the account lifecycle coordinator calls
+`:finalize-evacuation` on the original source with the exact account and
+evacuation id. The source deletes the portable account rows transactionally
+only when that row still has the matching `source` role and evacuation id, and
+then records an idempotent finalization receipt. A retry with that same id
+returns the receipt; a stale id, a different account, or a restored `target`
+row cannot authorize deletion. A same-cell restore promotes the source row to
+the target role without purging it.
 
-Before deleting anything, verify the account really is on both cells and
-`acct:` really names the winner:
+If a restore or finalization reports an ambiguous outcome:
 
-```sh
-curl https://self.witwave.ai/v1/directory/<account-id>
-# should return {cell: {cell: "<winning-cell>", ...}}
-```
+1. Stop cell teardown and retain both source databases and the R2 object.
+2. Record the account id, evacuation id, source and target cell names, and
+   their registration ids from the lifecycle/control-plane logs.
+3. Check the public directory without changing it:
 
-Then connect to the losing cell's database — the DSN is in the cell's
-Kubernetes secret (`witself-server` chart) or the AWS Secrets Manager
-entry `<cell>/db` published by `witself-infra`. In a single transaction,
-delete the ghost rows in FK-reverse order:
+   ```sh
+   curl https://self.witwave.ai/v1/directory/<account-id>
+   ```
 
-```sql
-BEGIN;
-DELETE FROM tokens    WHERE account_id = '<account-id>';
-DELETE FROM agents    WHERE realm_id IN (SELECT id FROM realms WHERE account_id = '<account-id>');
-DELETE FROM realms    WHERE account_id = '<account-id>';
-DELETE FROM operators WHERE account_id = '<account-id>';
-DELETE FROM accounts  WHERE id = '<account-id>';
-COMMIT;
-```
+4. Confirm whether the target cell acknowledges the exact evacuation id and
+   whether the source has an exact finalization receipt. Treat a stale
+   `restoring:` or `restore:<cell>` KV record as a projection to reconcile, not
+   proof that import or deletion committed.
+5. After fixing reachability or version skew, retry the same restore/drain
+   workflow so the Durable Object resumes its recorded phase.
 
-Confirm the account still routes correctly at the winning cell:
-
-```sh
-witself account status --account <local-name>          # should show "active" via the winner
-```
-
-The ghost is now gone; the winning cell continues serving the account
-unchanged.
-
-If the losing cell is small and about to be destroyed anyway, an easier
-route is `witself-infra destroy` on that whole cell — the ghost dies with
-it, and its evacuation loop just skips the account (its `acct:` pointer
-correctly names the winner, so evacuation finds nothing routing to the
-losing cell).
+Rows still visible on the old source after the directory points at the target
+are not, by themselves, permission to delete anything. Do not manually import
+the archive, issue ad hoc SQL deletes, remove `acct:` or `archived:` keys, or
+delete the R2 object while lifecycle state is ambiguous. Escalate with the
+captured ids and logs if exact acknowledgements disagree; direct database work
+requires a separately reviewed recovery plan and backups.

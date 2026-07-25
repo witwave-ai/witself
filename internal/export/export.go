@@ -51,6 +51,7 @@ type Manifest struct {
 	AccountID     string    `json:"account_id"`
 	Cell          string    `json:"cell,omitempty"`
 	Status        string    `json:"status"` // account status at export time (suspended/closed)
+	EvacuationID  string    `json:"evacuation_id,omitempty"`
 	ExportedAt    time.Time `json:"exported_at"`
 	Tables        []string  `json:"tables"`
 }

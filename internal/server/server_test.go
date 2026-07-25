@@ -183,22 +183,28 @@ func TestPlacementPolicyEndpoints(t *testing.T) {
 }
 
 func TestPlacementPolicySystemEndpoint(t *testing.T) {
-	provision := func(_ context.Context, _, _ string) (ProvisionedAccount, error) {
+	const evacuationID = "evac_01J00000000000000000000000"
+	provision := func(_ context.Context, _, _, _ string) (ProvisionedAccount, error) {
 		return ProvisionedAccount{}, errors.New("unused")
 	}
 	var saved placement.Policy
+	var savedEvacuationID string
 	srv := httptest.NewServer(apiMux(Config{
-		ProvisionToken:   "witself_prv_test",
-		ProvisionAccount: provision,
+		ProvisionToken:        "witself_prv_test",
+		ProvisionAccountExact: provision,
 		GetPlacementPolicySystem: func(_ context.Context, accountID string) (placement.Policy, error) {
 			if accountID != "acc_1" {
 				t.Fatalf("accountID = %q, want acc_1", accountID)
 			}
 			return placement.Policy{PreferredClouds: []string{"gcp"}}, nil
 		},
-		SetPlacementPolicySystem: func(_ context.Context, accountID string, policy placement.Policy) (placement.Policy, error) {
+		SetPlacementPolicySystem: func(_ context.Context, accountID, gotEvacuationID string, policy placement.Policy) (placement.Policy, error) {
 			if accountID != "acc_1" {
 				t.Fatalf("accountID = %q, want acc_1", accountID)
+			}
+			savedEvacuationID = gotEvacuationID
+			if gotEvacuationID == "evac_other" {
+				return placement.Policy{}, ErrConflict
 			}
 			saved = policy
 			return policy, nil
@@ -227,18 +233,60 @@ func TestPlacementPolicySystemEndpoint(t *testing.T) {
 		t.Fatalf("response = %#v", out)
 	}
 
-	req, _ = http.NewRequest(http.MethodPatch, srv.URL+"/v1/accounts/acc_1/placement-policy", strings.NewReader(`{"preferred_clouds":[],"preferred_regions":["usw2","use1"],"preferred_channels":["stable","edge","experimental"],"allowed_clouds":[],"allowed_regions":[],"allowed_channels":[],"rebalance_on":["cloud","channel"]}`))
+	policyBody := `{"preferred_clouds":[],"preferred_regions":["usw2","use1"],"preferred_channels":["stable","edge","experimental"],"allowed_clouds":[],"allowed_regions":[],"allowed_channels":[],"rebalance_on":["cloud","channel"]}`
+	req, _ = http.NewRequest(http.MethodPatch, srv.URL+"/v1/accounts/acc_1:restore-placement-policy", strings.NewReader(policyBody))
 	req.Header.Set("Authorization", "Bearer witself_prv_test")
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	closeBody(t, resp)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("PATCH system placement policy without evacuation id = %d, want 400", resp.StatusCode)
+	}
+	if savedEvacuationID != "" {
+		t.Fatalf("placement callback ran without an evacuation id: %q", savedEvacuationID)
+	}
+
+	req, _ = http.NewRequest(http.MethodPatch, srv.URL+"/v1/accounts/acc_1:restore-placement-policy", strings.NewReader(policyBody))
+	req.Header.Set("Authorization", "Bearer witself_prv_test")
+	req.Header.Set(AccountEvacuationIDHeader, evacuationID)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var patchOut struct {
+		AccountID    string `json:"account_id"`
+		EvacuationID string `json:"evacuation_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&patchOut); err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("PATCH system placement policy = %d, want 200", resp.StatusCode)
 	}
+	if patchOut.AccountID != "acc_1" ||
+		patchOut.EvacuationID != evacuationID {
+		t.Fatalf("PATCH system placement acknowledgement = %#v", patchOut)
+	}
+	if savedEvacuationID != evacuationID {
+		t.Fatalf("placement evacuation id = %q, want %q", savedEvacuationID, evacuationID)
+	}
 	if len(saved.AllowedRegions) != 0 || len(saved.PreferredRegions) != 2 || saved.PreferredRegions[0] != "usw2" {
 		t.Fatalf("saved policy = %#v", saved)
+	}
+
+	req, _ = http.NewRequest(http.MethodPatch, srv.URL+"/v1/accounts/acc_1:restore-placement-policy", strings.NewReader(policyBody))
+	req.Header.Set("Authorization", "Bearer witself_prv_test")
+	req.Header.Set(AccountEvacuationIDHeader, "evac_other")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, resp)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("PATCH system placement policy with mismatched evacuation id = %d, want 409", resp.StatusCode)
 	}
 }
 
@@ -890,20 +938,31 @@ func mustRequest(t *testing.T, method, url string) *http.Request {
 }
 
 func TestProvisionAccount(t *testing.T) {
-	provision := func(_ context.Context, email, _ string) (ProvisionedAccount, error) {
-		if email == "taken@x.com" {
+	var gotProvisionID, gotEmail, gotDisplayName string
+	provision := func(
+		_ context.Context,
+		provisionID, email, displayName string,
+	) (ProvisionedAccount, error) {
+		gotProvisionID, gotEmail, gotDisplayName =
+			provisionID, email, displayName
+		if provisionID == "prv_conflict" {
 			return ProvisionedAccount{}, ErrConflict
 		}
 		return ProvisionedAccount{
 			AccountID: "acc_new", OperatorID: "opr_new", Email: email,
 			Status: "active", BootstrapToken: "witself_boot_x",
+			ProvisionID: provisionID, Replayed: provisionID == "prv_replay",
 		}, nil
 	}
 
 	// Route absent entirely when no provision token is configured.
-	bare := httptest.NewServer(apiMux(Config{ProvisionAccount: provision}))
+	bare := httptest.NewServer(apiMux(Config{ProvisionAccountExact: provision}))
 	defer bare.Close()
-	resp, err := http.Post(bare.URL+"/v1/accounts", "application/json", strings.NewReader(`{"email":"a@b.c"}`))
+	resp, err := http.Post(
+		bare.URL+"/v1/accounts:provision-exact",
+		"application/json",
+		strings.NewReader(`{"email":"a@b.c"}`),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -912,10 +971,14 @@ func TestProvisionAccount(t *testing.T) {
 		t.Errorf("unmounted provisioning = %d, want 404", resp.StatusCode)
 	}
 
-	srv := httptest.NewServer(apiMux(Config{ProvisionToken: "witself_prv_good", ProvisionAccount: provision}))
+	srv := httptest.NewServer(apiMux(Config{ProvisionToken: "witself_prv_good", ProvisionAccountExact: provision}))
 	defer srv.Close()
 	post := func(tok, body string) *http.Response {
-		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/accounts", strings.NewReader(body))
+		req, _ := http.NewRequest(
+			http.MethodPost,
+			srv.URL+"/v1/accounts:provision-exact",
+			strings.NewReader(body),
+		)
 		if tok != "" {
 			req.Header.Set("Authorization", "Bearer "+tok)
 		}
@@ -936,29 +999,91 @@ func TestProvisionAccount(t *testing.T) {
 	if r.StatusCode != http.StatusUnauthorized {
 		t.Errorf("bad token = %d, want 401", r.StatusCode)
 	}
-	r = post("witself_prv_good", `{"email":"not-an-email"}`)
+	r = post("witself_prv_good", `{"email":"a@b.c"}`)
+	closeBody(t, r)
+	if r.StatusCode != http.StatusBadRequest {
+		t.Errorf("missing provision id = %d, want 400", r.StatusCode)
+	}
+	r = post("witself_prv_good",
+		`{"provision_id":"not valid","email":"a@b.c"}`)
+	closeBody(t, r)
+	if r.StatusCode != http.StatusBadRequest {
+		t.Errorf("bad provision id = %d, want 400", r.StatusCode)
+	}
+	r = post("witself_prv_good",
+		`{"provision_id":"prv_bad_email","email":"not-an-email"}`)
 	closeBody(t, r)
 	if r.StatusCode != http.StatusBadRequest {
 		t.Errorf("bad email = %d, want 400", r.StatusCode)
 	}
-	r = post("witself_prv_good", `{"email":"taken@x.com"}`)
+	r = post("witself_prv_good",
+		`{"provision_id":"prv_conflict","email":"taken@x.com"}`)
 	closeBody(t, r)
 	if r.StatusCode != http.StatusConflict {
-		t.Errorf("duplicate email = %d, want 409", r.StatusCode)
+		t.Errorf("provision conflict = %d, want 409", r.StatusCode)
 	}
-	r = post("witself_prv_good", `{"email":"Amy@Co.com"}`)
+	r = post("witself_prv_good",
+		`{"provision_id":"prv_replay","email":" Amy@Co.com ","display_name":" Amy "}`)
 	defer closeBody(t, r)
 	if r.StatusCode != http.StatusCreated {
 		t.Fatalf("create = %d, want 201", r.StatusCode)
 	}
 	var out struct {
-		Account ProvisionedAccount `json:"account"`
+		ProvisionID string             `json:"provision_id"`
+		Replayed    bool               `json:"replayed"`
+		Account     ProvisionedAccount `json:"account"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
 	if out.Account.AccountID != "acc_new" || out.Account.Email != "amy@co.com" || out.Account.BootstrapToken == "" {
 		t.Errorf("account = %+v", out.Account)
+	}
+	if out.ProvisionID != "prv_replay" || !out.Replayed {
+		t.Errorf("provision acknowledgement = %+v", out)
+	}
+	if gotProvisionID != "prv_replay" || gotEmail != "amy@co.com" ||
+		gotDisplayName != "Amy" {
+		t.Errorf(
+			"provision callback = id %q email %q display %q",
+			gotProvisionID, gotEmail, gotDisplayName,
+		)
+	}
+}
+
+func TestProvisionAccountExactOldReplicaFailsWithoutMutation(t *testing.T) {
+	mutated := false
+	legacyProvision := func(
+		_ context.Context,
+		_, _ string,
+	) (ProvisionedAccount, error) {
+		mutated = true
+		return ProvisionedAccount{}, nil
+	}
+	srv := httptest.NewServer(apiMux(Config{
+		ProvisionToken:   "witself_prv_good",
+		ProvisionAccount: legacyProvision,
+	}))
+	defer srv.Close()
+	req, _ := http.NewRequest(
+		http.MethodPost,
+		srv.URL+"/v1/accounts:provision-exact",
+		strings.NewReader(
+			`{"provision_id":"prv_mixed_replica","email":"a@b.c"}`,
+		),
+	)
+	req.Header.Set("Authorization", "Bearer witself_prv_good")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, resp)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("old replica exact provision = %d, want 404",
+			resp.StatusCode)
+	}
+	if mutated {
+		t.Fatal("old replica legacy provision callback ran for exact route")
 	}
 }
 
@@ -1075,11 +1200,31 @@ func TestVersionEndpointIsBare(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
 		t.Fatal(err)
 	}
-	// Bare shape: schema_version + version/commit/date at the top level.
-	for _, k := range []string{"schema_version", "version", "commit", "date"} {
+	// Bare shape: schema/version coordinates and additive protocol
+	// capabilities at the top level.
+	for _, k := range []string{
+		"schema_version", "version", "commit", "date",
+		"account_evacuation_protocol", "account_provision_protocol",
+	} {
 		if _, ok := m[k]; !ok {
 			t.Errorf("version missing %q; got %v", k, m)
 		}
+	}
+	if got := m["account_provision_protocol"]; got != float64(
+		AccountProvisionProtocolVersion,
+	) {
+		t.Errorf(
+			"account_provision_protocol = %#v, want %d",
+			got, AccountProvisionProtocolVersion,
+		)
+	}
+	if got := m["account_evacuation_protocol"]; got != float64(
+		AccountEvacuationProtocolVersion,
+	) {
+		t.Errorf(
+			"account_evacuation_protocol = %#v, want %d",
+			got, AccountEvacuationProtocolVersion,
+		)
 	}
 	if _, enveloped := m["data"]; enveloped {
 		t.Errorf("version should be bare, found envelope data field: %v", m)
@@ -1269,13 +1414,13 @@ func TestReapAccount(t *testing.T) {
 			return false, ErrNotFound
 		}
 	}
-	provision := func(_ context.Context, _, _ string) (ProvisionedAccount, error) {
+	provision := func(_ context.Context, _, _, _ string) (ProvisionedAccount, error) {
 		return ProvisionedAccount{}, errors.New("unused")
 	}
 	srv := httptest.NewServer(apiMux(Config{
-		ProvisionToken:   "witself_prv_test",
-		ProvisionAccount: provision,
-		ReapAccount:      reap,
+		ProvisionToken:        "witself_prv_test",
+		ProvisionAccountExact: provision,
+		ReapAccount:           reap,
 	}))
 	defer srv.Close()
 
@@ -1342,14 +1487,14 @@ func TestActivateAccount(t *testing.T) {
 		}
 	}
 	reap := func(_ context.Context, _ string) (bool, error) { return true, nil }
-	provision := func(_ context.Context, _, _ string) (ProvisionedAccount, error) {
+	provision := func(_ context.Context, _, _, _ string) (ProvisionedAccount, error) {
 		return ProvisionedAccount{}, errors.New("unused")
 	}
 	srv := httptest.NewServer(apiMux(Config{
-		ProvisionToken:   "witself_prv_test",
-		ProvisionAccount: provision,
-		ReapAccount:      reap,
-		ActivateAccount:  activate,
+		ProvisionToken:        "witself_prv_test",
+		ProvisionAccountExact: provision,
+		ReapAccount:           reap,
+		ActivateAccount:       activate,
 	}))
 	defer srv.Close()
 
@@ -1414,13 +1559,13 @@ func TestUpdateAccountEmail(t *testing.T) {
 		}
 		return nil
 	}
-	provision := func(_ context.Context, _, _ string) (ProvisionedAccount, error) {
+	provision := func(_ context.Context, _, _, _ string) (ProvisionedAccount, error) {
 		return ProvisionedAccount{}, errors.New("unused")
 	}
 	srv := httptest.NewServer(apiMux(Config{
-		ProvisionToken:     "witself_prv_test",
-		ProvisionAccount:   provision,
-		UpdateAccountEmail: update,
+		ProvisionToken:        "witself_prv_test",
+		ProvisionAccountExact: provision,
+		UpdateAccountEmail:    update,
 	}))
 	defer srv.Close()
 
@@ -1563,12 +1708,100 @@ func TestSuspendedAccountIsGated(t *testing.T) {
 	}
 }
 
+// TestExportAccountArchiveFailureReported pins the observability boundary for
+// errors that arrive after archive bytes. The HTTP response can only end as a
+// truncated stream, but the server still reports the exact internal error with
+// the safe account identifier so operators can diagnose the source cell.
+func TestExportAccountArchiveFailureReported(t *testing.T) {
+	const evacuationID = "evac_01J00000000000000000000000"
+	exportErr := errors.New("stream transcript_conversations: database read failed")
+	type exportFailure struct {
+		accountID string
+		err       error
+	}
+	reported := make(chan exportFailure, 1)
+	var exportedAccountID, exportedEvacuationID string
+	export := func(_ context.Context, accountID, gotEvacuationID string, w io.Writer) error {
+		exportedAccountID = accountID
+		exportedEvacuationID = gotEvacuationID
+		_, _ = io.WriteString(w, "partial-archive")
+		return exportErr
+	}
+	provision := func(_ context.Context, _, _, _ string) (ProvisionedAccount, error) {
+		return ProvisionedAccount{}, errors.New("unused")
+	}
+	srv := httptest.NewServer(apiMux(Config{
+		ProvisionToken:        "witself_prv_test",
+		ProvisionAccountExact: provision,
+		StreamAccountExport:   export,
+		ReportAccountExportFailure: func(_ context.Context, accountID string, err error) {
+			reported <- exportFailure{accountID: accountID, err: err}
+		},
+	}))
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodPost,
+		srv.URL+"/v1/accounts/acc_export:export-evacuation", nil)
+	req.Header.Set("Authorization", "Bearer witself_prv_test")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, resp)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("export without evacuation id = %d, want 400", resp.StatusCode)
+	}
+	if exportedAccountID != "" || exportedEvacuationID != "" {
+		t.Fatalf("export callback ran without evacuation id: account=%q evacuation=%q",
+			exportedAccountID, exportedEvacuationID)
+	}
+
+	req, _ = http.NewRequest(http.MethodPost,
+		srv.URL+"/v1/accounts/acc_export:export-evacuation", nil)
+	req.Header.Set("Authorization", "Bearer witself_prv_test")
+	req.Header.Set(AccountEvacuationIDHeader, evacuationID)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, resp)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("export status = %d, want 200 after streaming began", resp.StatusCode)
+	}
+	if string(body) != "partial-archive" {
+		t.Errorf("export body = %q, want partial archive bytes only", body)
+	}
+	if exportedAccountID != "acc_export" || exportedEvacuationID != evacuationID {
+		t.Errorf("export callback = account %q evacuation %q, want acc_export/%s",
+			exportedAccountID, exportedEvacuationID, evacuationID)
+	}
+	select {
+	case failure := <-reported:
+		if failure.accountID != "acc_export" {
+			t.Errorf("reported account = %q, want acc_export", failure.accountID)
+		}
+		if failure.err != exportErr {
+			t.Errorf("reported error = %v, want exact error %v", failure.err, exportErr)
+		}
+	default:
+		t.Fatal("export failure was not reported")
+	}
+}
+
 // TestImportAccountArchive proves the restore verb's contract: provision
 // token only, the body streams through untouched, and each refusal maps to
 // its own status — 409 exists, 409 too-new, 400 corrupt.
 func TestImportAccountArchive(t *testing.T) {
+	const evacuationID = "evac_01J00000000000000000000000"
 	var gotBody []byte
-	imp := func(_ context.Context, accountID string, body io.Reader) (ImportSummary, error) {
+	var gotEvacuationID string
+	imp := func(_ context.Context, accountID, receivedEvacuationID string, body io.Reader) (ImportSummary, error) {
+		gotEvacuationID = receivedEvacuationID
 		b, _ := io.ReadAll(body)
 		gotBody = b
 		switch accountID {
@@ -1579,23 +1812,38 @@ func TestImportAccountArchive(t *testing.T) {
 		case "acc_garbled":
 			return ImportSummary{}, ErrBadArchive
 		default:
-			return ImportSummary{AccountID: accountID, Status: "suspended", SchemaVersion: 13}, nil
+			status := "suspended"
+			if accountID == "acc_completed" {
+				status = "closed"
+			}
+			return ImportSummary{
+				AccountID:           accountID,
+				Status:              status,
+				SchemaVersion:       13,
+				EvacuationID:        receivedEvacuationID,
+				EvacuationRole:      "target",
+				AlreadyImported:     accountID == "acc_completed",
+				EvacuationCompleted: accountID == "acc_completed",
+			}, nil
 		}
 	}
-	provision := func(_ context.Context, _, _ string) (ProvisionedAccount, error) {
+	provision := func(_ context.Context, _, _, _ string) (ProvisionedAccount, error) {
 		return ProvisionedAccount{}, errors.New("unused")
 	}
 	srv := httptest.NewServer(apiMux(Config{
-		ProvisionToken:       "witself_prv_test",
-		ProvisionAccount:     provision,
-		ImportAccountArchive: imp,
+		ProvisionToken:        "witself_prv_test",
+		ProvisionAccountExact: provision,
+		ImportAccountArchive:  imp,
 	}))
 	defer srv.Close()
 
-	do := func(path, token, body string) *http.Response {
+	do := func(path, token, receivedEvacuationID, body string) *http.Response {
 		req, _ := http.NewRequest(http.MethodPost, srv.URL+path, strings.NewReader(body))
 		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		if receivedEvacuationID != "" {
+			req.Header.Set(AccountEvacuationIDHeader, receivedEvacuationID)
 		}
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -1605,16 +1853,18 @@ func TestImportAccountArchive(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		path, token string
-		want        int
+		path, token, evacuationID string
+		want                      int
 	}{
-		{"/v1/accounts/acc_ok:import", "wrong", http.StatusUnauthorized},
-		{"/v1/accounts/acc_ok:import", "witself_prv_test", http.StatusOK},
-		{"/v1/accounts/acc_exists:import", "witself_prv_test", http.StatusConflict},
-		{"/v1/accounts/acc_future:import", "witself_prv_test", http.StatusConflict},
-		{"/v1/accounts/acc_garbled:import", "witself_prv_test", http.StatusBadRequest},
+		{"/v1/accounts/acc_ok:import-evacuation", "wrong", "", http.StatusUnauthorized},
+		{"/v1/accounts/acc_ok:import-evacuation", "witself_prv_test", "", http.StatusBadRequest},
+		{"/v1/accounts/acc_ok:import-evacuation", "witself_prv_test", "not valid", http.StatusBadRequest},
+		{"/v1/accounts/acc_ok:import-evacuation", "witself_prv_test", evacuationID, http.StatusOK},
+		{"/v1/accounts/acc_exists:import-evacuation", "witself_prv_test", evacuationID, http.StatusConflict},
+		{"/v1/accounts/acc_future:import-evacuation", "witself_prv_test", evacuationID, http.StatusConflict},
+		{"/v1/accounts/acc_garbled:import-evacuation", "witself_prv_test", evacuationID, http.StatusBadRequest},
 	} {
-		resp := do(tc.path, tc.token, "tar-bytes")
+		resp := do(tc.path, tc.token, tc.evacuationID, "tar-bytes")
 		closeBody(t, resp)
 		if resp.StatusCode != tc.want {
 			t.Errorf("POST %s (token %q) = %d, want %d", tc.path, tc.token, resp.StatusCode, tc.want)
@@ -1623,20 +1873,40 @@ func TestImportAccountArchive(t *testing.T) {
 	if string(gotBody) != "tar-bytes" {
 		t.Errorf("body reaching the import func = %q, want the raw stream", gotBody)
 	}
+	if gotEvacuationID != evacuationID {
+		t.Errorf("evacuation id reaching the import func = %q, want %q", gotEvacuationID, evacuationID)
+	}
 
 	// The success body carries the archive's coordinates.
-	resp := do("/v1/accounts/acc_ok:import", "witself_prv_test", "tar-bytes")
+	resp := do("/v1/accounts/acc_ok:import-evacuation", "witself_prv_test", evacuationID, "tar-bytes")
 	var out struct {
-		AccountID     string `json:"account_id"`
-		Status        string `json:"status"`
-		SchemaVersion int    `json:"archive_schema_version"`
+		AccountID           string `json:"account_id"`
+		Status              string `json:"status"`
+		SchemaVersion       int    `json:"archive_schema_version"`
+		EvacuationID        string `json:"evacuation_id"`
+		EvacuationRole      string `json:"evacuation_role"`
+		AlreadyImported     bool   `json:"already_imported"`
+		EvacuationCompleted bool   `json:"evacuation_completed"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
 	closeBody(t, resp)
-	if out.AccountID != "acc_ok" || out.Status != "suspended" || out.SchemaVersion != 13 {
+	if out.AccountID != "acc_ok" || out.Status != "suspended" ||
+		out.SchemaVersion != 13 || out.EvacuationID != evacuationID ||
+		out.EvacuationRole != "target" {
 		t.Errorf("import response = %+v", out)
+	}
+
+	resp = do("/v1/accounts/acc_completed:import-evacuation",
+		"witself_prv_test", evacuationID, "tar-bytes")
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, resp)
+	if out.Status != "closed" ||
+		!out.AlreadyImported || !out.EvacuationCompleted {
+		t.Errorf("completed import retry response = %+v", out)
 	}
 }
 
@@ -1655,13 +1925,13 @@ func TestLogAccountEvent(t *testing.T) {
 			return nil
 		}
 	}
-	provision := func(_ context.Context, _, _ string) (ProvisionedAccount, error) {
+	provision := func(_ context.Context, _, _, _ string) (ProvisionedAccount, error) {
 		return ProvisionedAccount{}, errors.New("unused")
 	}
 	srv := httptest.NewServer(apiMux(Config{
-		ProvisionToken:   "witself_prv_test",
-		ProvisionAccount: provision,
-		LogAccountEvent:  log,
+		ProvisionToken:        "witself_prv_test",
+		ProvisionAccountExact: provision,
+		LogAccountEvent:       log,
 	}))
 	defer srv.Close()
 
@@ -1697,31 +1967,44 @@ func TestLogAccountEvent(t *testing.T) {
 	}
 }
 
-// TestResumeAccountSystem proves the machine-resume verb: provision token
-// only, a category is required, and the authority-scoping refusals map to
-// 409s the control plane can tell apart from success.
-func TestResumeAccountSystem(t *testing.T) {
-	resume := func(_ context.Context, accountID, _ string) error {
-		switch accountID {
-		case "acc_owner_susp":
-			return ErrResumeWrongCategory
-		case "acc_active":
-			return nil // idempotent
-		case "acc_closed":
-			return ErrAccountNotSuspended
-		case "acc_missing":
-			return ErrNotFound
-		default:
-			return nil
-		}
+func TestBeginAccountEvacuationRequiresExactID(t *testing.T) {
+	const evacuationID = "evac_01J00000000000000000000000"
+	type beginCall struct {
+		accountID    string
+		category     string
+		reason       string
+		evacuationID string
 	}
-	provision := func(_ context.Context, _, _ string) (ProvisionedAccount, error) {
+	var got beginCall
+	begin := func(_ context.Context, accountID, category, reason, receivedEvacuationID string) (AccountEvacuationRecord, error) {
+		got = beginCall{
+			accountID:    accountID,
+			category:     category,
+			reason:       reason,
+			evacuationID: receivedEvacuationID,
+		}
+		switch accountID {
+		case "acc_pending":
+			return AccountEvacuationRecord{}, ErrAccountPending
+		case "acc_wrong_epoch":
+			return AccountEvacuationRecord{}, ErrConflict
+		case "acc_missing":
+			return AccountEvacuationRecord{}, ErrNotFound
+		}
+		return AccountEvacuationRecord{
+			AccountID:    accountID,
+			EvacuationID: receivedEvacuationID,
+			Role:         "source",
+			Status:       "suspended",
+		}, nil
+	}
+	provision := func(_ context.Context, _, _, _ string) (ProvisionedAccount, error) {
 		return ProvisionedAccount{}, errors.New("unused")
 	}
 	srv := httptest.NewServer(apiMux(Config{
-		ProvisionToken:      "witself_prv_test",
-		ProvisionAccount:    provision,
-		ResumeAccountSystem: resume,
+		ProvisionToken:         "witself_prv_test",
+		ProvisionAccountExact:  provision,
+		BeginAccountEvacuation: begin,
 	}))
 	defer srv.Close()
 
@@ -1741,20 +2024,339 @@ func TestResumeAccountSystem(t *testing.T) {
 		path, token, body string
 		want              int
 	}{
-		{"/v1/accounts/acc_evac:resume", "wrong", `{"for":"evacuation"}`, http.StatusUnauthorized},
-		{"/v1/accounts/acc_evac:resume", "witself_prv_test", `{"for":"evacuation"}`, http.StatusOK},
-		{"/v1/accounts/acc_evac:resume", "witself_prv_test", `{}`, http.StatusBadRequest},
-		{"/v1/accounts/acc_evac:resume", "witself_prv_test", ``, http.StatusBadRequest},
-		{"/v1/accounts/acc_owner_susp:resume", "witself_prv_test", `{"for":"evacuation"}`, http.StatusConflict},
-		{"/v1/accounts/acc_closed:resume", "witself_prv_test", `{"for":"evacuation"}`, http.StatusConflict},
-		{"/v1/accounts/acc_active:resume", "witself_prv_test", `{"for":"evacuation"}`, http.StatusOK},
-		{"/v1/accounts/acc_missing:resume", "witself_prv_test", `{"for":"evacuation"}`, http.StatusNotFound},
+		{"/v1/accounts/acc_evac:begin-evacuation", "wrong", `{"for":"evacuation","evacuation_id":"` + evacuationID + `"}`, http.StatusUnauthorized},
+		{"/v1/accounts/acc_evac:begin-evacuation", "witself_prv_test", `{"for":"evacuation"}`, http.StatusBadRequest},
+		{"/v1/accounts/acc_evac:begin-evacuation", "witself_prv_test", `{"for":"evacuation","evacuation_id":"not valid"}`, http.StatusBadRequest},
+		{"/v1/accounts/acc_evac:begin-evacuation", "witself_prv_test", `{"for":"owner_request","evacuation_id":"` + evacuationID + `"}`, http.StatusBadRequest},
+		{"/v1/accounts/acc_pending:begin-evacuation", "witself_prv_test", `{"for":"evacuation","evacuation_id":"` + evacuationID + `"}`, http.StatusConflict},
+		{"/v1/accounts/acc_wrong_epoch:begin-evacuation", "witself_prv_test", `{"for":"evacuation","evacuation_id":"` + evacuationID + `"}`, http.StatusConflict},
+		{"/v1/accounts/acc_missing:begin-evacuation", "witself_prv_test", `{"for":"evacuation","evacuation_id":"` + evacuationID + `"}`, http.StatusNotFound},
 	} {
 		resp := do(tc.path, tc.token, tc.body)
 		closeBody(t, resp)
 		if resp.StatusCode != tc.want {
 			t.Errorf("POST %s body %q = %d, want %d", tc.path, tc.body, resp.StatusCode, tc.want)
 		}
+	}
+
+	resp := do("/v1/accounts/acc_evac:begin-evacuation", "witself_prv_test",
+		`{"for":"evacuation","reason":" rolling evacuation ","evacuation_id":"`+evacuationID+`"}`)
+	var ack AccountEvacuationRecord
+	if err := json.NewDecoder(resp.Body).Decode(&ack); err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("begin status = %d, want 200", resp.StatusCode)
+	}
+	if got != (beginCall{
+		accountID:    "acc_evac",
+		category:     "evacuation",
+		reason:       "rolling evacuation",
+		evacuationID: evacuationID,
+	}) {
+		t.Errorf("begin callback = %+v", got)
+	}
+	if ack.AccountID != "acc_evac" || ack.EvacuationID != evacuationID ||
+		ack.Role != "source" || ack.Status != "suspended" {
+		t.Errorf("begin acknowledgement = %+v", ack)
+	}
+}
+
+func TestBeginAccountEvacuationOldReplicaFailsWithoutMutation(t *testing.T) {
+	mutated := false
+	provision := func(_ context.Context, _, _, _ string) (ProvisionedAccount, error) {
+		return ProvisionedAccount{}, errors.New("unused")
+	}
+	legacySuspend := func(
+		_ context.Context, _, _, _ string,
+	) error {
+		mutated = true
+		return nil
+	}
+	srv := httptest.NewServer(apiMux(Config{
+		ProvisionToken:        "witself_prv_test",
+		ProvisionAccountExact: provision,
+		SuspendAccountSystem:  legacySuspend,
+	}))
+	defer srv.Close()
+
+	req, _ := http.NewRequest(
+		http.MethodPost,
+		srv.URL+"/v1/accounts/acc_evac:begin-evacuation",
+		strings.NewReader(
+			`{"for":"evacuation","evacuation_id":"evac_mixed_replica"}`,
+		),
+	)
+	req.Header.Set("Authorization", "Bearer witself_prv_test")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, resp)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("old replica begin = %d, want 404", resp.StatusCode)
+	}
+	if mutated {
+		t.Fatal("old replica legacy suspend callback ran for begin-evacuation")
+	}
+}
+
+func TestExactEvacuationRoutesDoNotMatchLegacyActions(t *testing.T) {
+	tests := []struct {
+		method, path, legacyAction string
+	}{
+		{
+			method:       http.MethodPost,
+			path:         "/v1/accounts/acc_x:export-evacuation",
+			legacyAction: "export",
+		},
+		{
+			method:       http.MethodPost,
+			path:         "/v1/accounts/acc_x:import-evacuation",
+			legacyAction: "import",
+		},
+		{
+			method:       http.MethodPost,
+			path:         "/v1/accounts/acc_x:complete-evacuation",
+			legacyAction: "resume",
+		},
+		{
+			method:       http.MethodPatch,
+			path:         "/v1/accounts/acc_x:restore-placement-policy",
+			legacyAction: "placement-policy",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.legacyAction, func(t *testing.T) {
+			mutated := false
+			legacyReplica := httptest.NewServer(
+				http.HandlerFunc(func(
+					w http.ResponseWriter,
+					r *http.Request,
+				) {
+					if _, ok := pathActionID(
+						r.URL.Path, "/v1/accounts/",
+						test.legacyAction,
+					); ok {
+						mutated = true
+					}
+					http.NotFound(w, r)
+				}),
+			)
+			defer legacyReplica.Close()
+			req, _ := http.NewRequest(
+				test.method, legacyReplica.URL+test.path, nil,
+			)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			closeBody(t, resp)
+			if resp.StatusCode != http.StatusNotFound {
+				t.Fatalf("legacy replica status = %d, want 404",
+					resp.StatusCode)
+			}
+			if mutated {
+				t.Fatalf(
+					"exact path %q matched legacy action %q",
+					test.path, test.legacyAction,
+				)
+			}
+		})
+	}
+}
+
+func TestFinalizeAccountEvacuationSource(t *testing.T) {
+	const evacuationID = "evac_01J00000000000000000000000"
+	finalizedAt := time.Date(2026, 7, 25, 18, 30, 0, 0, time.UTC)
+	var gotAccountID, gotEvacuationID string
+	finalize := func(
+		_ context.Context,
+		accountID, receivedEvacuationID string,
+	) (AccountEvacuationFinalizationRecord, error) {
+		gotAccountID = accountID
+		gotEvacuationID = receivedEvacuationID
+		switch accountID {
+		case "acc_missing":
+			return AccountEvacuationFinalizationRecord{}, ErrNotFound
+		case "acc_default":
+			return AccountEvacuationFinalizationRecord{}, ErrCannotCloseDefault
+		case "acc_target", "acc_wrong_epoch":
+			return AccountEvacuationFinalizationRecord{}, ErrConflict
+		}
+		return AccountEvacuationFinalizationRecord{
+			AccountID:        accountID,
+			EvacuationID:     receivedEvacuationID,
+			SourceStatus:     "suspended",
+			FinalizedAt:      finalizedAt,
+			Finalized:        true,
+			AlreadyFinalized: accountID == "acc_retry",
+		}, nil
+	}
+	provision := func(_ context.Context, _, _, _ string) (ProvisionedAccount, error) {
+		return ProvisionedAccount{}, errors.New("unused")
+	}
+	srv := httptest.NewServer(apiMux(Config{
+		ProvisionToken:            "witself_prv_test",
+		ProvisionAccountExact:     provision,
+		FinalizeAccountEvacuation: finalize,
+	}))
+	defer srv.Close()
+
+	do := func(path, token, body string) *http.Response {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+path, strings.NewReader(body))
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	for _, tc := range []struct {
+		path, token, body string
+		want              int
+	}{
+		{"/v1/accounts/acc_source:finalize-evacuation", "wrong", `{"evacuation_id":"` + evacuationID + `"}`, http.StatusUnauthorized},
+		{"/v1/accounts/acc_source:finalize-evacuation", "witself_prv_test", `{}`, http.StatusBadRequest},
+		{"/v1/accounts/acc_source:finalize-evacuation", "witself_prv_test", `{"evacuation_id":"not valid"}`, http.StatusBadRequest},
+		{"/v1/accounts/acc_missing:finalize-evacuation", "witself_prv_test", `{"evacuation_id":"` + evacuationID + `"}`, http.StatusNotFound},
+		{"/v1/accounts/acc_default:finalize-evacuation", "witself_prv_test", `{"evacuation_id":"` + evacuationID + `"}`, http.StatusForbidden},
+		{"/v1/accounts/acc_target:finalize-evacuation", "witself_prv_test", `{"evacuation_id":"` + evacuationID + `"}`, http.StatusConflict},
+		{"/v1/accounts/acc_wrong_epoch:finalize-evacuation", "witself_prv_test", `{"evacuation_id":"` + evacuationID + `"}`, http.StatusConflict},
+	} {
+		resp := do(tc.path, tc.token, tc.body)
+		closeBody(t, resp)
+		if resp.StatusCode != tc.want {
+			t.Errorf("POST %s = %d, want %d", tc.path, resp.StatusCode, tc.want)
+		}
+	}
+
+	resp := do("/v1/accounts/acc_source:finalize-evacuation", "witself_prv_test",
+		`{"evacuation_id":"`+evacuationID+`"}`)
+	var ack AccountEvacuationFinalizationRecord
+	if err := json.NewDecoder(resp.Body).Decode(&ack); err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("finalize status = %d, want 200", resp.StatusCode)
+	}
+	if gotAccountID != "acc_source" || gotEvacuationID != evacuationID {
+		t.Errorf("finalize callback = account %q evacuation %q",
+			gotAccountID, gotEvacuationID)
+	}
+	if ack.AccountID != "acc_source" || ack.EvacuationID != evacuationID ||
+		ack.SourceStatus != "suspended" || !ack.Finalized ||
+		ack.AlreadyFinalized || !ack.FinalizedAt.Equal(finalizedAt) {
+		t.Errorf("finalize acknowledgement = %+v", ack)
+	}
+
+	resp = do("/v1/accounts/acc_retry:finalize-evacuation", "witself_prv_test",
+		`{"evacuation_id":"`+evacuationID+`"}`)
+	if err := json.NewDecoder(resp.Body).Decode(&ack); err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, resp)
+	if !ack.Finalized || !ack.AlreadyFinalized {
+		t.Errorf("finalize retry acknowledgement = %+v", ack)
+	}
+}
+
+// TestResumeAccountSystem proves the machine-resume verb: provision token
+// only, a category is required, and the authority-scoping refusals map to
+// 409s the control plane can tell apart from success.
+func TestResumeAccountSystem(t *testing.T) {
+	const evacuationID = "evac_01J00000000000000000000000"
+	gotEvacuationIDs := make(map[string]string)
+	resume := func(_ context.Context, accountID, category, receivedEvacuationID string) (AccountEvacuationRecord, error) {
+		if category != "evacuation" {
+			t.Errorf("resume category = %q, want evacuation", category)
+		}
+		gotEvacuationIDs[accountID] = receivedEvacuationID
+		switch accountID {
+		case "acc_owner_susp":
+			return AccountEvacuationRecord{}, ErrResumeWrongCategory
+		case "acc_active":
+			// idempotent
+		case "acc_closed":
+			return AccountEvacuationRecord{}, ErrAccountNotSuspended
+		case "acc_wrong_epoch":
+			return AccountEvacuationRecord{}, ErrConflict
+		case "acc_missing":
+			return AccountEvacuationRecord{}, ErrNotFound
+		}
+		return AccountEvacuationRecord{
+			AccountID:    accountID,
+			EvacuationID: receivedEvacuationID,
+			Role:         "target",
+			Status:       "active",
+			Completed:    true,
+		}, nil
+	}
+	provision := func(_ context.Context, _, _, _ string) (ProvisionedAccount, error) {
+		return ProvisionedAccount{}, errors.New("unused")
+	}
+	srv := httptest.NewServer(apiMux(Config{
+		ProvisionToken:        "witself_prv_test",
+		ProvisionAccountExact: provision,
+		ResumeAccountSystem:   resume,
+	}))
+	defer srv.Close()
+
+	do := func(path, token, body string) *http.Response {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+path, strings.NewReader(body))
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	for _, tc := range []struct {
+		path, token, body string
+		want              int
+	}{
+		{"/v1/accounts/acc_evac:complete-evacuation", "wrong", `{"for":"evacuation","evacuation_id":"` + evacuationID + `"}`, http.StatusUnauthorized},
+		{"/v1/accounts/acc_evac:complete-evacuation", "witself_prv_test", `{"for":"evacuation"}`, http.StatusBadRequest},
+		{"/v1/accounts/acc_evac:complete-evacuation", "witself_prv_test", `{"for":"evacuation","evacuation_id":"not valid"}`, http.StatusBadRequest},
+		{"/v1/accounts/acc_evac:complete-evacuation", "witself_prv_test", `{"for":"owner_request","evacuation_id":"` + evacuationID + `"}`, http.StatusBadRequest},
+		{"/v1/accounts/acc_evac:complete-evacuation", "witself_prv_test", `{"for":"evacuation","evacuation_id":"` + evacuationID + `"}`, http.StatusOK},
+		{"/v1/accounts/acc_evac:complete-evacuation", "witself_prv_test", `{}`, http.StatusBadRequest},
+		{"/v1/accounts/acc_evac:complete-evacuation", "witself_prv_test", ``, http.StatusBadRequest},
+		{"/v1/accounts/acc_owner_susp:complete-evacuation", "witself_prv_test", `{"for":"evacuation","evacuation_id":"` + evacuationID + `"}`, http.StatusConflict},
+		{"/v1/accounts/acc_closed:complete-evacuation", "witself_prv_test", `{"for":"evacuation","evacuation_id":"` + evacuationID + `"}`, http.StatusConflict},
+		{"/v1/accounts/acc_active:complete-evacuation", "witself_prv_test", `{"for":"evacuation","evacuation_id":"` + evacuationID + `"}`, http.StatusOK},
+		{"/v1/accounts/acc_wrong_epoch:complete-evacuation", "witself_prv_test", `{"for":"evacuation","evacuation_id":"` + evacuationID + `"}`, http.StatusConflict},
+		{"/v1/accounts/acc_missing:complete-evacuation", "witself_prv_test", `{"for":"evacuation","evacuation_id":"` + evacuationID + `"}`, http.StatusNotFound},
+	} {
+		resp := do(tc.path, tc.token, tc.body)
+		closeBody(t, resp)
+		if resp.StatusCode != tc.want {
+			t.Errorf("POST %s body %q = %d, want %d", tc.path, tc.body, resp.StatusCode, tc.want)
+		}
+	}
+	if gotEvacuationIDs["acc_evac"] != evacuationID {
+		t.Errorf("resume evacuation id = %q, want %q",
+			gotEvacuationIDs["acc_evac"], evacuationID)
+	}
+
+	resp := do("/v1/accounts/acc_evac:complete-evacuation", "witself_prv_test",
+		`{"for":"evacuation","evacuation_id":"`+evacuationID+`"}`)
+	var ack AccountEvacuationRecord
+	if err := json.NewDecoder(resp.Body).Decode(&ack); err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, resp)
+	if ack.AccountID != "acc_evac" || ack.EvacuationID != evacuationID ||
+		ack.Role != "target" || ack.Status != "active" || !ack.Completed {
+		t.Errorf("resume acknowledgement = %+v", ack)
 	}
 }
 

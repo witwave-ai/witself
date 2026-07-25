@@ -66,8 +66,12 @@ var importColumns = map[string]map[string]bool{
 		"id": true, "is_default": true, "display_name": true, "email": true,
 		"status": true, "created_at": true, "closed_at": true, "closed_reason": true,
 		"suspended_at": true, "suspended_for": true, "suspended_reason": true,
-		"support_policy": true,
-		"plan":           true, "plan_limits": true, "plan_policies": true,
+		"evacuation_id": true, "evacuation_started_at": true,
+		"evacuation_role":    true,
+		"last_evacuation_id": true, "last_evacuation_completed_at": true,
+		"last_evacuation_outcome": true,
+		"support_policy":          true,
+		"plan":                    true, "plan_limits": true, "plan_policies": true,
 		"plan_features": true, "plan_applied_at": true,
 		"plan_snapshot_revision": true, "plan_snapshot_hash": true,
 		"placement_policy": true,
@@ -4991,19 +4995,67 @@ func validateImportedFactCandidateContent(obj map[string]any) error {
 // expectedAccountID pins the archive to the account the caller believes it
 // is restoring; a manifest naming anyone else refuses before rows stream.
 func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r io.Reader) (export.Manifest, error) {
+	m, _, err := s.importAccount(ctx, expectedAccountID, "", r)
+	return m, err
+}
+
+const accountEvacuationArchiveSchema = 70
+
+// AccountImportDisposition tells the control plane which exact retry boundary
+// the destination has already crossed. A matching current marker means the
+// archive is present but placement/resume still need to run. A matching
+// completed receipt means those steps already committed and must not be
+// replayed against an account whose evacuation fence has been retired.
+// CurrentStatus is the destination row's authoritative lifecycle state on
+// either retry path; the older archive manifest may no longer describe it.
+type AccountImportDisposition struct {
+	AlreadyImported     bool
+	EvacuationCompleted bool
+	CurrentStatus       string
+	EvacuationRole      string
+}
+
+// ImportAccountEvacuation restores one archive under an exact move epoch.
+// disposition.AlreadyImported is true only when this cell durably attests that
+// same epoch; a generic existing account is never accepted as proof of a
+// successful retry. disposition.EvacuationCompleted further distinguishes a
+// completed target receipt from an imported target whose fence is still live.
+func (s *Store) ImportAccountEvacuation(
+	ctx context.Context,
+	expectedAccountID, evacuationID string,
+	r io.Reader,
+) (m export.Manifest, disposition AccountImportDisposition, err error) {
+	if err := validateEvacuationID(evacuationID); err != nil {
+		return export.Manifest{}, AccountImportDisposition{}, err
+	}
+	return s.importAccount(ctx, expectedAccountID, evacuationID, r)
+}
+
+func (s *Store) importAccount(
+	ctx context.Context,
+	expectedAccountID, evacuationID string,
+	r io.Reader,
+) (export.Manifest, AccountImportDisposition, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return export.Manifest{}, err
+		return export.Manifest{}, AccountImportDisposition{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if evacuationID != "" {
+		if err := setEvacuationAuthorityTx(ctx, tx, evacuationID); err != nil {
+			return export.Manifest{}, AccountImportDisposition{}, err
+		}
+	}
 
 	ic := newImportCtx(expectedAccountID)
 	var importedAt time.Time
 	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&importedAt); err != nil {
-		return export.Manifest{}, fmt.Errorf("read destination database clock: %w", err)
+		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("read destination database clock: %w", err)
 	}
 	importedAt = importedAt.UTC()
 	ic.importedAt = importedAt
+	disposition := AccountImportDisposition{}
+	promoteSourceToTarget := false
 
 	m, err := export.Read(ctx, r, export.ImportOptions{
 		CurrentSchema: SchemaVersion(),
@@ -5015,6 +5067,21 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 			if m.Status != "suspended" && m.Status != "closed" {
 				return fmt.Errorf("%w: manifest status %q — exports are only taken frozen", ErrArchiveContent, m.Status)
 			}
+			if evacuationID != "" {
+				switch {
+				case m.EvacuationID == "" &&
+					m.SchemaVersion >= accountEvacuationArchiveSchema:
+					return fmt.Errorf(
+						"%w: current archive is missing evacuation id",
+						ErrArchiveContent,
+					)
+				case m.EvacuationID != "" && m.EvacuationID != evacuationID:
+					return fmt.Errorf(
+						"%w: archive evacuation id does not match restore epoch",
+						ErrArchiveContent,
+					)
+				}
+			}
 			if err := validateArchiveManifestTables(m.SchemaVersion, m.Tables); err != nil {
 				return err
 			}
@@ -5023,13 +5090,62 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 				return err
 			}
 			ic.exportedAt = m.ExportedAt.UTC()
-			var exists bool
-			if err := tx.QueryRow(ctx,
-				`SELECT EXISTS(SELECT 1 FROM accounts WHERE id = $1)`,
-				m.AccountID).Scan(&exists); err != nil {
+			var currentStatus string
+			var currentID, currentRole, lastID, lastOutcome *string
+			err := tx.QueryRow(ctx, `
+				SELECT status, evacuation_id, evacuation_role,
+				       last_evacuation_id,
+				       last_evacuation_outcome
+				  FROM accounts
+				 WHERE id = $1
+				 FOR UPDATE`,
+				m.AccountID,
+			).Scan(
+				&currentStatus, &currentID, &currentRole,
+				&lastID, &lastOutcome,
+			)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 				return fmt.Errorf("check import target: %w", err)
 			}
-			if exists {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil
+			}
+			if evacuationID != "" && currentID != nil &&
+				*currentID == evacuationID {
+				if currentRole == nil {
+					return ErrAccountEvacuationMismatch
+				}
+				switch *currentRole {
+				case "source":
+					// Restoring back into the source cell keeps the existing
+					// tenant rows in place. Consume the complete archive,
+					// verify its trailer, and run the portable scope/graph
+					// checks before promoting this exact source marker.
+					promoteSourceToTarget = true
+				case "target":
+				// Lost import acknowledgement; no row replay is needed.
+				default:
+					return ErrAccountEvacuationMismatch
+				}
+				disposition.AlreadyImported = true
+				disposition.CurrentStatus = currentStatus
+				disposition.EvacuationRole = "target"
+				return nil
+			}
+			if evacuationID != "" && currentID == nil &&
+				lastID != nil && *lastID == evacuationID &&
+				lastOutcome != nil && *lastOutcome == "completed" {
+				disposition.AlreadyImported = true
+				disposition.EvacuationCompleted = true
+				disposition.CurrentStatus = currentStatus
+				disposition.EvacuationRole = "target"
+				return nil
+			}
+			if evacuationID != "" && currentID != nil &&
+				*currentID != evacuationID {
+				return ErrAccountEvacuationInProgress
+			}
+			if err == nil {
 				return ErrAccountExists
 			}
 			return nil
@@ -5060,6 +5176,17 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 			if err := ic.validateAndRecord(table, obj); err != nil {
 				return err
 			}
+			if evacuationID != "" && table == "accounts" {
+				obj["evacuation_id"] = evacuationID
+				obj["evacuation_role"] = "target"
+				if _, ok := obj["evacuation_started_at"]; !ok ||
+					obj["evacuation_started_at"] == nil {
+					obj["evacuation_started_at"] = importedAt.Format(time.RFC3339Nano)
+				}
+			}
+			if disposition.AlreadyImported {
+				return nil
+			}
 			normalizedRow, err := json.Marshal(obj)
 			if err != nil {
 				return fmt.Errorf("%w: marshal normalized %s row: %v", ErrArchiveContent, table, err)
@@ -5068,35 +5195,51 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 		},
 	})
 	if err != nil {
-		return export.Manifest{}, err
+		return export.Manifest{}, AccountImportDisposition{}, err
+	}
+	if ic.accounts != 1 {
+		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf(
+			"%w: archive contains %d accounts rows, want exactly one",
+			ErrArchiveContent, ic.accounts,
+		)
+	}
+	if ic.accountStatus != m.Status {
+		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf(
+			"%w: accounts row status %q disagrees with manifest %q",
+			ErrArchiveContent, ic.accountStatus, m.Status,
+		)
 	}
 	if m.SchemaVersion < 50 {
-		if err := synthesizeLegacyImportedAvatars(ctx, tx, ic); err != nil {
-			return export.Manifest{}, fmt.Errorf("synthesize legacy avatar defaults: %w", err)
+		if !disposition.AlreadyImported {
+			if err := synthesizeLegacyImportedAvatars(ctx, tx, ic); err != nil {
+				return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("synthesize legacy avatar defaults: %w", err)
+			}
 		}
 	} else {
 		if err := ic.validateImportedAvatarGraph(); err != nil {
-			return export.Manifest{}, fmt.Errorf("%w: avatar graph: %v", ErrArchiveContent, err)
+			return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("%w: avatar graph: %v", ErrArchiveContent, err)
 		}
 	}
 	if err := ic.validateImportedSecretGraph(); err != nil {
-		return export.Manifest{}, fmt.Errorf("%w: secret graph: %v", ErrArchiveContent, err)
+		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("%w: secret graph: %v", ErrArchiveContent, err)
 	}
 	if err := validateImportedAgentEmailGraph(ic.agentEmailMessages, ic.agentEmailDeliveries); err != nil {
-		return export.Manifest{}, fmt.Errorf("%w: agent email graph: %v", ErrArchiveContent, err)
+		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("%w: agent email graph: %v", ErrArchiveContent, err)
 	}
 	if m.SchemaVersion < 60 {
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO agent_email_realm_receive_controls (account_id,realm_id)
-			SELECT DISTINCT account_id,realm_id FROM agent_email_mailboxes
-			WHERE account_id=$1
-			ON CONFLICT (account_id,realm_id) DO NOTHING`, expectedAccountID); err != nil {
-			return export.Manifest{}, fmt.Errorf("synthesize legacy agent-email realm receive controls: %w", err)
+		if !disposition.AlreadyImported {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO agent_email_realm_receive_controls (account_id,realm_id)
+				SELECT DISTINCT account_id,realm_id FROM agent_email_mailboxes
+				WHERE account_id=$1
+				ON CONFLICT (account_id,realm_id) DO NOTHING`, expectedAccountID); err != nil {
+				return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("synthesize legacy agent-email realm receive controls: %w", err)
+			}
 		}
 	} else {
 		for _, mailbox := range ic.agentEmailMailboxes {
 			if ic.agentEmailRealmReceiveStates[mailbox.realmID] == "" {
-				return export.Manifest{}, fmt.Errorf(
+				return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf(
 					"%w: agent email mailbox realm %q has no receive control",
 					ErrArchiveContent, mailbox.realmID,
 				)
@@ -5104,33 +5247,39 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 		}
 	}
 	if m.SchemaVersion < 35 {
-		if err := normalizeLegacyImportedMessageCausalDepths(ctx, tx, ic.messages, expectedAccountID); err != nil {
-			return export.Manifest{}, fmt.Errorf("%w: normalize legacy message causal depth: %v", ErrArchiveContent, err)
+		if disposition.AlreadyImported {
+			if err := normalizeLegacyImportedMessageCausalDepthsInMemory(ic.messages); err != nil {
+				return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("%w: normalize legacy message causal depth: %v", ErrArchiveContent, err)
+			}
+		} else {
+			if err := normalizeLegacyImportedMessageCausalDepths(ctx, tx, ic.messages, expectedAccountID); err != nil {
+				return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("%w: normalize legacy message causal depth: %v", ErrArchiveContent, err)
+			}
 		}
 	}
 	if err := validateImportedMessageAudienceSnapshots(ic.messages); err != nil {
-		return export.Manifest{}, fmt.Errorf("%w: message audience snapshot: %v", ErrArchiveContent, err)
+		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("%w: message audience snapshot: %v", ErrArchiveContent, err)
 	}
 	if err := validateImportedMessageReplies(ic.messages); err != nil {
-		return export.Manifest{}, fmt.Errorf("%w: message reply graph: %v", ErrArchiveContent, err)
+		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("%w: message reply graph: %v", ErrArchiveContent, err)
 	}
 	if err := validateImportedMessageProcessingLinks(ic.messages, ic.deliveries); err != nil {
-		return export.Manifest{}, fmt.Errorf("%w: message processing graph: %v", ErrArchiveContent, err)
+		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("%w: message processing graph: %v", ErrArchiveContent, err)
 	}
 	if err := validateImportedMessageRequestGraph(ic); err != nil {
-		return export.Manifest{}, fmt.Errorf("%w: message request graph: %v", ErrArchiveContent, err)
+		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("%w: message request graph: %v", ErrArchiveContent, err)
 	}
 	for memoryID, memory := range ic.memories {
 		clock, hasClock := ic.memoryClocks[memory.owner]
 		if !hasClock || clock < memory.maxChangeSeq {
-			return export.Manifest{}, fmt.Errorf(
+			return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf(
 				"%w: memory %q change clock %d is below imported change sequence %d",
 				ErrArchiveContent, memoryID, clock, memory.maxChangeSeq,
 			)
 		}
 		if memory.deleted {
 			if memory.versionCount != 0 {
-				return export.Manifest{}, fmt.Errorf(
+				return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf(
 					"%w: permanently deleted memory %q still has %d versions",
 					ErrArchiveContent, memoryID, memory.versionCount,
 				)
@@ -5138,7 +5287,7 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 			if err := validateImportedMemoryRetryShields(
 				memoryID, memory, ic.memoryDeletedRetryShields[memoryID],
 			); err != nil {
-				return export.Manifest{}, err
+				return export.Manifest{}, AccountImportDisposition{}, err
 			}
 			continue
 		}
@@ -5147,50 +5296,74 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 		}]
 		if !ok || head.owner != memory.owner || memory.currentVersion != memory.maxVersion ||
 			memory.versionCount != memory.maxVersion {
-			return export.Manifest{}, fmt.Errorf(
+			return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf(
 				"%w: memory %q current version %d is not the contiguous latest version %d",
 				ErrArchiveContent, memoryID, memory.currentVersion, memory.maxVersion,
 			)
 		}
 	}
 	if err := validateImportedMemorySupersessionMembership(ic.memories, ic.memoryVersions); err != nil {
-		return export.Manifest{}, fmt.Errorf("%w: memory supersession membership: %v", ErrArchiveContent, err)
+		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("%w: memory supersession membership: %v", ErrArchiveContent, err)
 	}
 	if err := validateImportedMemoryCurationGraph(ic); err != nil {
-		return export.Manifest{}, fmt.Errorf("%w: memory curation graph: %v", ErrArchiveContent, err)
+		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("%w: memory curation graph: %v", ErrArchiveContent, err)
 	}
 	for factID, scope := range ic.facts {
 		if scope.deleted {
 			if scope.resolvedAssertionID != "" {
-				return export.Manifest{}, fmt.Errorf("%w: deleted fact %q has a resolved assertion", ErrArchiveContent, factID)
+				return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("%w: deleted fact %q has a resolved assertion", ErrArchiveContent, factID)
 			}
 			if scope.replacementFactID != "" {
 				replacement, ok := ic.facts[scope.replacementFactID]
 				if !ok || replacement.subjectID != scope.subjectID || replacement.predicate != scope.predicate ||
 					replacement.realmID != scope.realmID || replacement.ownerAgentID != scope.ownerAgentID {
-					return export.Manifest{}, fmt.Errorf("%w: deleted fact %q has invalid replacement %q", ErrArchiveContent, factID, scope.replacementFactID)
+					return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("%w: deleted fact %q has invalid replacement %q", ErrArchiveContent, factID, scope.replacementFactID)
 				}
 				if scope.sensitive && !replacement.sensitive {
-					return export.Manifest{}, fmt.Errorf("%w: sensitive deleted fact %q has non-sensitive replacement %q", ErrArchiveContent, factID, scope.replacementFactID)
+					return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("%w: sensitive deleted fact %q has non-sensitive replacement %q", ErrArchiveContent, factID, scope.replacementFactID)
 				}
 			}
 			continue
 		}
 		if scope.resolvedAssertionID == "" || ic.assertions[scope.resolvedAssertionID] != factID {
-			return export.Manifest{}, fmt.Errorf("%w: fact %q has no valid resolved assertion", ErrArchiveContent, factID)
+			return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("%w: fact %q has no valid resolved assertion", ErrArchiveContent, factID)
 		}
 	}
 	if err := validateImportedFactReplacementTopology(ic.facts); err != nil {
-		return export.Manifest{}, fmt.Errorf("%w: fact replacement topology: %v", ErrArchiveContent, err)
+		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("%w: fact replacement topology: %v", ErrArchiveContent, err)
 	}
 	if err := validateImportedFactMutationTombstoneCompleteness(ic.facts, ic.factMutationTombstoneCounts); err != nil {
-		return export.Manifest{}, fmt.Errorf("%w: fact mutation tombstones: %v", ErrArchiveContent, err)
+		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("%w: fact mutation tombstones: %v", ErrArchiveContent, err)
+	}
+	if disposition.AlreadyImported {
+		if promoteSourceToTarget {
+			tag, err := tx.Exec(ctx, `
+				UPDATE accounts
+				   SET evacuation_role = 'target'
+				 WHERE id = $1
+				   AND evacuation_id = $2
+				   AND evacuation_role = 'source'`,
+				expectedAccountID, evacuationID,
+			)
+			if err != nil {
+				return export.Manifest{}, AccountImportDisposition{},
+					fmt.Errorf("promote same-cell restore target: %w", err)
+			}
+			if tag.RowsAffected() != 1 {
+				return export.Manifest{}, AccountImportDisposition{},
+					ErrAccountEvacuationMismatch
+			}
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return export.Manifest{}, AccountImportDisposition{}, err
+		}
+		return m, disposition, nil
 	}
 	if err := validateImportedFactDecisionAssertions(ctx, tx, m.AccountID); err != nil {
-		return export.Manifest{}, err
+		return export.Manifest{}, AccountImportDisposition{}, err
 	}
 	if err := validateImportedUsageRollups(ctx, tx, m.AccountID); err != nil {
-		return export.Manifest{}, err
+		return export.Manifest{}, AccountImportDisposition{}, err
 	}
 
 	// The archive's own account row must have actually landed, and must not
@@ -5204,16 +5377,16 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 		`SELECT is_default, status FROM accounts WHERE id = $1`,
 		m.AccountID).Scan(&isDefault, &status)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return export.Manifest{}, fmt.Errorf("%w: no accounts row landed for %s", ErrArchiveContent, m.AccountID)
+		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("%w: no accounts row landed for %s", ErrArchiveContent, m.AccountID)
 	}
 	if err != nil {
-		return export.Manifest{}, fmt.Errorf("verify landed account: %w", err)
+		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("verify landed account: %w", err)
 	}
 	if isDefault {
-		return export.Manifest{}, fmt.Errorf("%w: landed row claims the default seat", ErrArchiveContent)
+		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("%w: landed row claims the default seat", ErrArchiveContent)
 	}
 	if status != m.Status {
-		return export.Manifest{}, fmt.Errorf("%w: landed account row status %q disagrees with manifest %q", ErrArchiveContent, status, m.Status)
+		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("%w: landed account row status %q disagrees with manifest %q", ErrArchiveContent, status, m.Status)
 	}
 	// Import may happen long after the source snapshot. Materialize any request
 	// deadlines crossed in transit before the account becomes visible on this
@@ -5221,13 +5394,16 @@ func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r i
 	// system audit share this import transaction and are exactly-once because
 	// only state=open rows can transition.
 	if _, _, err := drainMessageRequestReconciliationTx(ctx, tx, m.AccountID); err != nil {
-		return export.Manifest{}, fmt.Errorf("reconcile imported message requests: %w", err)
+		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("reconcile imported message requests: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return export.Manifest{}, err
+		return export.Manifest{}, AccountImportDisposition{}, err
 	}
-	return m, nil
+	if evacuationID != "" {
+		return m, AccountImportDisposition{EvacuationRole: "target"}, nil
+	}
+	return m, AccountImportDisposition{}, nil
 }
 
 func deriveImportedMessageCausalDepths(messages map[string]messageImportScope) (map[string]int64, error) {
@@ -5341,6 +5517,9 @@ func normalizeLegacyImportedMessageCausalDepths(
 	if err != nil {
 		return err
 	}
+	if err := applyLegacyImportedMessageCausalDepths(messages, depths); err != nil {
+		return err
+	}
 	messageIDs := make([]string, 0, len(depths))
 	for messageID := range depths {
 		messageIDs = append(messageIDs, messageID)
@@ -5353,7 +5532,29 @@ func normalizeLegacyImportedMessageCausalDepths(
 			WHERE id=$2 AND account_id=$3`, depth, messageID, accountID); err != nil {
 			return fmt.Errorf("update message %q causal depth: %w", messageID, err)
 		}
-		scope := messages[messageID]
+	}
+	return nil
+}
+
+func normalizeLegacyImportedMessageCausalDepthsInMemory(
+	messages map[string]messageImportScope,
+) error {
+	depths, err := deriveImportedMessageCausalDepths(messages)
+	if err != nil {
+		return err
+	}
+	return applyLegacyImportedMessageCausalDepths(messages, depths)
+}
+
+func applyLegacyImportedMessageCausalDepths(
+	messages map[string]messageImportScope,
+	depths map[string]int64,
+) error {
+	for messageID, depth := range depths {
+		scope, ok := messages[messageID]
+		if !ok {
+			return fmt.Errorf("message %q is missing from imported graph", messageID)
+		}
 		scope.causalDepth = depth
 		messages[messageID] = scope
 	}

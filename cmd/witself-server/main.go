@@ -1036,7 +1036,18 @@ func serve() int {
 			}
 			return err
 		}
-		cfg.SuspendAccountSystem = func(ctx context.Context, accountID, category, reason string) error {
+		toEvacuationRecord := func(e store.AccountEvacuation) server.AccountEvacuationRecord {
+			return server.AccountEvacuationRecord{
+				AccountID: e.AccountID, EvacuationID: e.EvacuationID,
+				Role: e.Role, Status: e.Status, StartedAt: e.StartedAt,
+				CompletedAt: e.CompletedAt, Completed: e.Completed,
+				Aborted: e.Aborted,
+			}
+		}
+		cfg.SuspendAccountSystem = func(
+			ctx context.Context,
+			accountID, category, reason string,
+		) error {
 			err := st.SuspendAccountSystem(ctx, accountID, category, reason)
 			switch {
 			case errors.Is(err, store.ErrAccountNotFound):
@@ -1048,9 +1059,87 @@ func serve() int {
 			}
 			return err
 		}
-		cfg.StreamAccountExport = func(ctx context.Context, accountID string, w io.Writer) error {
+		cfg.BeginAccountEvacuation = func(
+			ctx context.Context,
+			accountID, category, reason, evacuationID string,
+		) (server.AccountEvacuationRecord, error) {
+			if category != "evacuation" {
+				return server.AccountEvacuationRecord{}, server.ErrBadInput
+			}
+			evacuation, err := st.BeginAccountEvacuation(
+				ctx, accountID, evacuationID, reason,
+			)
+			switch {
+			case errors.Is(err, store.ErrAccountNotFound):
+				return server.AccountEvacuationRecord{}, server.ErrNotFound
+			case errors.Is(err, store.ErrCannotCloseDefault):
+				return server.AccountEvacuationRecord{}, server.ErrCannotCloseDefault
+			case errors.Is(err, store.ErrAccountNotActive):
+				return server.AccountEvacuationRecord{}, server.ErrAccountPending
+			case errors.Is(err, store.ErrAccountEvacuationInProgress),
+				errors.Is(err, store.ErrAccountEvacuationMismatch):
+				return server.AccountEvacuationRecord{}, server.ErrConflict
+			case err != nil:
+				return server.AccountEvacuationRecord{}, err
+			}
+			return toEvacuationRecord(evacuation), nil
+		}
+		cfg.AbortAccountEvacuation = func(
+			ctx context.Context,
+			accountID, evacuationID string,
+		) (server.AccountEvacuationRecord, error) {
+			evacuation, err := st.AbortAccountEvacuation(
+				ctx, accountID, evacuationID,
+			)
+			switch {
+			case errors.Is(err, store.ErrAccountNotFound):
+				return server.AccountEvacuationRecord{}, server.ErrNotFound
+			case errors.Is(err, store.ErrAccountEvacuationMismatch):
+				return server.AccountEvacuationRecord{}, server.ErrConflict
+			case err != nil:
+				return server.AccountEvacuationRecord{}, err
+			}
+			return toEvacuationRecord(evacuation), nil
+		}
+		cfg.FinalizeAccountEvacuation = func(
+			ctx context.Context,
+			accountID, evacuationID string,
+		) (server.AccountEvacuationFinalizationRecord, error) {
+			finalization, err := st.FinalizeAccountEvacuationSource(
+				ctx, accountID, evacuationID,
+			)
+			switch {
+			case errors.Is(err, store.ErrAccountNotFound):
+				return server.AccountEvacuationFinalizationRecord{},
+					server.ErrNotFound
+			case errors.Is(err, store.ErrCannotCloseDefault):
+				return server.AccountEvacuationFinalizationRecord{},
+					server.ErrCannotCloseDefault
+			case errors.Is(err, store.ErrAccountEvacuationMismatch),
+				errors.Is(err, store.ErrAccountNotExportable):
+				return server.AccountEvacuationFinalizationRecord{},
+					server.ErrConflict
+			case err != nil:
+				return server.AccountEvacuationFinalizationRecord{}, err
+			}
+			return server.AccountEvacuationFinalizationRecord{
+				AccountID:        finalization.AccountID,
+				EvacuationID:     finalization.EvacuationID,
+				SourceStatus:     finalization.SourceStatus,
+				FinalizedAt:      finalization.FinalizedAt,
+				Finalized:        finalization.Finalized,
+				AlreadyFinalized: finalization.AlreadyFinalized,
+			}, nil
+		}
+		cfg.StreamAccountExport = func(
+			ctx context.Context,
+			accountID, evacuationID string,
+			w io.Writer,
+		) error {
 			cellName := os.Getenv("WITSELF_CELL_NAME")
-			err := st.ExportAccount(ctx, accountID, cellName, version.Version, w)
+			err := st.ExportAccountEvacuation(
+				ctx, accountID, evacuationID, cellName, version.Version, w,
+			)
 			switch {
 			case errors.Is(err, store.ErrAccountNotFound):
 				return server.ErrNotFound
@@ -1058,8 +1147,14 @@ func serve() int {
 				return server.ErrConflict
 			case errors.Is(err, store.ErrVaultLifecycleInProgress):
 				return server.ErrConflict
+			case errors.Is(err, store.ErrAccountEvacuationMismatch):
+				return server.ErrConflict
 			}
 			return err
+		}
+		cfg.ReportAccountExportFailure = func(_ context.Context, accountID string, err error) {
+			logAccountExportFailure(os.Stderr,
+				accountID, os.Getenv("WITSELF_CELL_NAME"), err)
 		}
 		cfg.ResumeAccountOwner = func(ctx context.Context, accountID, operatorID string) error {
 			err := st.ResumeAccountOwner(ctx, accountID, operatorID)
@@ -1261,10 +1356,19 @@ func serve() int {
 			}
 			return err
 		}
-		cfg.ImportAccountArchive = func(ctx context.Context, accountID string, body io.Reader) (server.ImportSummary, error) {
-			m, err := st.ImportAccount(ctx, accountID, body)
+		cfg.ImportAccountArchive = func(
+			ctx context.Context,
+			accountID, evacuationID string,
+			body io.Reader,
+		) (server.ImportSummary, error) {
+			m, disposition, err := st.ImportAccountEvacuation(
+				ctx, accountID, evacuationID, body,
+			)
 			switch {
 			case errors.Is(err, store.ErrAccountExists):
+				return server.ImportSummary{}, server.ErrConflict
+			case errors.Is(err, store.ErrAccountEvacuationInProgress),
+				errors.Is(err, store.ErrAccountEvacuationMismatch):
 				return server.ImportSummary{}, server.ErrConflict
 			case errors.Is(err, export.ErrArchiveTooNew):
 				return server.ImportSummary{}, server.ErrArchiveTooNew
@@ -1275,23 +1379,39 @@ func serve() int {
 			case err != nil:
 				return server.ImportSummary{}, err
 			}
+			status := m.Status
+			if disposition.AlreadyImported {
+				status = disposition.CurrentStatus
+			}
 			return server.ImportSummary{
-				AccountID:     m.AccountID,
-				Status:        m.Status,
-				SchemaVersion: m.SchemaVersion,
+				AccountID:           m.AccountID,
+				Status:              status,
+				SchemaVersion:       m.SchemaVersion,
+				EvacuationID:        evacuationID,
+				EvacuationRole:      disposition.EvacuationRole,
+				AlreadyImported:     disposition.AlreadyImported,
+				EvacuationCompleted: disposition.EvacuationCompleted,
 			}, nil
 		}
-		cfg.ResumeAccountSystem = func(ctx context.Context, accountID, category string) error {
-			err := st.ResumeAccountSystem(ctx, accountID, category)
+		cfg.ResumeAccountSystem = func(
+			ctx context.Context,
+			accountID, category, evacuationID string,
+		) (server.AccountEvacuationRecord, error) {
+			if category != "evacuation" {
+				return server.AccountEvacuationRecord{}, server.ErrBadInput
+			}
+			evacuation, err := st.CompleteAccountEvacuation(
+				ctx, accountID, evacuationID,
+			)
 			switch {
 			case errors.Is(err, store.ErrAccountNotFound):
-				return server.ErrNotFound
-			case errors.Is(err, store.ErrAccountNotSuspended):
-				return server.ErrAccountNotSuspended
-			case errors.Is(err, store.ErrResumeWrongCategory):
-				return server.ErrResumeWrongCategory
+				return server.AccountEvacuationRecord{}, server.ErrNotFound
+			case errors.Is(err, store.ErrAccountEvacuationMismatch):
+				return server.AccountEvacuationRecord{}, server.ErrConflict
+			case err != nil:
+				return server.AccountEvacuationRecord{}, err
 			}
-			return err
+			return toEvacuationRecord(evacuation), nil
 		}
 		toPlanSnapshot := func(snapshot store.AccountPlanSnapshot) server.PlanSnapshotRecord {
 			return server.PlanSnapshotRecord{
@@ -1351,9 +1471,19 @@ func serve() int {
 			// exchanges them within seconds.
 			const provisionBootstrapTTL = time.Hour
 			cfg.ProvisionToken = pt
-			cfg.ProvisionAccount = func(ctx context.Context, email, displayName string) (server.ProvisionedAccount, error) {
-				p, err := st.ProvisionAccount(ctx, email, displayName, provisionBootstrapTTL)
-				if err != nil {
+			cfg.ProvisionAccountExact = func(
+				ctx context.Context,
+				provisionID, email, displayName string,
+			) (server.ProvisionedAccount, error) {
+				p, err := st.ProvisionAccountExact(
+					ctx, provisionID, email, displayName,
+					provisionBootstrapTTL,
+				)
+				switch {
+				case errors.Is(err, store.ErrProvisionRequestConflict),
+					errors.Is(err, store.ErrProvisionReplayUnsafe):
+					return server.ProvisionedAccount{}, server.ErrConflict
+				case err != nil:
 					return server.ProvisionedAccount{}, err
 				}
 				return server.ProvisionedAccount{
@@ -1362,6 +1492,8 @@ func serve() int {
 					Email:          p.Email,
 					Status:         p.Status,
 					BootstrapToken: p.BootstrapToken,
+					ProvisionID:    p.ProvisionID,
+					Replayed:       p.Replayed,
 				}, nil
 			}
 			cfg.ReapAccount = func(ctx context.Context, accountID string) (bool, error) {
@@ -1404,10 +1536,19 @@ func serve() int {
 				}
 				return a.PlacementPolicy, nil
 			}
-			cfg.SetPlacementPolicySystem = func(ctx context.Context, accountID string, policy placement.Policy) (placement.Policy, error) {
-				policy, err := st.SetPlacementPolicySystem(ctx, accountID, policy)
+			cfg.SetPlacementPolicySystem = func(
+				ctx context.Context,
+				accountID, evacuationID string,
+				policy placement.Policy,
+			) (placement.Policy, error) {
+				policy, err := st.SetPlacementPolicySystemEvacuation(
+					ctx, accountID, evacuationID, policy,
+				)
 				if errors.Is(err, store.ErrAccountNotFound) {
 					return placement.Policy{}, server.ErrNotFound
+				}
+				if errors.Is(err, store.ErrAccountEvacuationMismatch) {
+					return placement.Policy{}, server.ErrConflict
 				}
 				return policy, err
 			}
@@ -1474,6 +1615,15 @@ func serve() int {
 	}
 	fmt.Fprintln(os.Stderr, "witself-server: shut down cleanly")
 	return 0
+}
+
+func logAccountExportFailure(w io.Writer, accountID, cellName string, err error) {
+	// Account and cell identifiers are operational routing context, not
+	// archive content. Quote every dynamic field so even an unexpected newline
+	// remains a single safe log record.
+	_, _ = fmt.Fprintf(w,
+		"witself-server: account export failed account_id=%q cell=%q error=%q\n",
+		accountID, cellName, err)
 }
 
 func avatarPayloadCompactionEnabledFromEnv() (bool, error) {

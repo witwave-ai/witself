@@ -37,6 +37,11 @@ fullnameOverride: ""
 backend:
   kind: self-hosted
 
+# Managed app-of-apps deployments set this to the fleet cell directory name.
+# Portable self-hosted installs may leave it empty.
+cell:
+  name: ""
+
 features:
   factDeletion:
     # Keep off through the mandatory schema-27 compatibility rollout, then

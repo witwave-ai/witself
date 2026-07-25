@@ -14,6 +14,14 @@
   "name": "witself-control-plane",
   "main": "src/index.js",
   "compatibility_date": "2026-06-01",
+  // Evacuation validates each completed R2 archive by streaming the full
+  // gzip/tar payload through native decompression and SHA-256 before routing
+  // changes. Containers require Workers Paid, where authenticated HTTP
+  // maintenance requests can use the 5-minute maximum instead of the
+  // 30-second default; this is a ceiling, not reserved CPU.
+  "limits": {
+    "cpu_ms": 300000
+  },
   "containers": [
     {
       // Explicit application name — wrangler otherwise derives
@@ -36,6 +44,18 @@
       {
         "name": "CONTROL_PLANE",
         "class_name": "Backend"
+      },
+      {
+        "name": "ACCOUNT_LIFECYCLE",
+        "class_name": "AccountLifecycle"
+      },
+      {
+        "name": "CELL_COORDINATOR",
+        "class_name": "TargetCellCoordinator"
+      },
+      {
+        "name": "ACCOUNT_SIGNUP",
+        "class_name": "AccountSignup"
       }
     ]
   },
@@ -53,6 +73,18 @@
     {
       "tag": "v2",
       "renamed_classes": [{ "from": "ControlPlane", "to": "Backend" }]
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["AccountLifecycle"]
+    },
+    {
+      "tag": "v4",
+      "new_sqlite_classes": ["TargetCellCoordinator"]
+    },
+    {
+      "tag": "v5",
+      "new_sqlite_classes": ["AccountSignup"]
     }
   ],
   "routes": [

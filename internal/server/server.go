@@ -104,12 +104,23 @@ type Config struct {
 	GetPlacementPolicy func(ctx context.Context, accountID, operatorID string) (placement.Policy, error)
 	SetPlacementPolicy func(ctx context.Context, accountID, operatorID string, policy placement.Policy) (placement.Policy, error)
 
-	// ProvisionToken + ProvisionAccount, when both set, enable POST /v1/accounts:
-	// the control-plane -> cell trust link that creates a new (non-default)
-	// account with its root operator and a one-shot bootstrap token. Self-hosted
-	// cells never set the token, so the route is not even mounted there.
-	ProvisionToken   string
-	ProvisionAccount func(ctx context.Context, email, displayName string) (ProvisionedAccount, error)
+	// ProvisionToken + ProvisionAccountExact enable the rollout-safe
+	// POST /v1/accounts:provision-exact control-plane -> cell trust link. The
+	// distinct route is intentional: an old replica knows only /v1/accounts
+	// and returns 404 before mutation instead of ignoring a new provision_id.
+	// Self-hosted cells mount neither route.
+	ProvisionToken        string
+	ProvisionAccountExact func(
+		ctx context.Context,
+		provisionID, email, displayName string,
+	) (ProvisionedAccount, error)
+	// ProvisionAccount is the legacy non-idempotent callback retained only to
+	// represent mixed-version routing and old deployments. New server wiring
+	// must leave it nil.
+	ProvisionAccount func(
+		ctx context.Context,
+		email, displayName string,
+	) (ProvisionedAccount, error)
 
 	// ReapAccount, when set (with the provisioning pair), enables POST
 	// /v1/accounts/{id}:reap — the control plane's expiry sweep closing an
@@ -139,7 +150,7 @@ type Config struct {
 	// PATCH /v1/accounts/{id}/placement-policy — the control plane restoring an
 	// operator-rescued policy after importing an archived account. Unlike the
 	// owner route, this is allowed while the account is evacuation-suspended.
-	SetPlacementPolicySystem func(ctx context.Context, accountID string, policy placement.Policy) (placement.Policy, error)
+	SetPlacementPolicySystem func(ctx context.Context, accountID, evacuationID string, policy placement.Policy) (placement.Policy, error)
 
 	// RecoverAccount, when set (with the provisioning pair), enables POST
 	// /v1/accounts/{id}:recover — after the control plane verifies inbox
@@ -165,9 +176,20 @@ type Config struct {
 
 	// SuspendAccountSystem, when set (with the provisioning pair), enables
 	// POST /v1/accounts/{id}:suspend — machine-initiated suspension with a
-	// category ("evacuation"). Idempotent; preserves an existing suspension's
-	// category. ErrConflict for pending accounts.
+	// category. This is the legacy compatibility route and does not install an
+	// exact move epoch. New evacuation orchestration must use the distinct
+	// :begin-evacuation route so an old replica returns 404 without mutating.
 	SuspendAccountSystem func(ctx context.Context, accountID, category, reason string) error
+	// BeginAccountEvacuation installs one exact source-side move epoch.
+	BeginAccountEvacuation func(ctx context.Context, accountID, category, reason, evacuationID string) (AccountEvacuationRecord, error)
+	// AbortAccountEvacuation removes an exact source-side move fence only
+	// before a verified archive becomes authoritative.
+	AbortAccountEvacuation func(ctx context.Context, accountID, evacuationID string) (AccountEvacuationRecord, error)
+	// FinalizeAccountEvacuation removes one exact source copy only after the
+	// control plane has durably routed the account to its restored target.
+	// Its cell-local receipt makes a lost response retryable without exposing
+	// a later incarnation of the same account id to deletion.
+	FinalizeAccountEvacuation func(ctx context.Context, accountID, evacuationID string) (AccountEvacuationFinalizationRecord, error)
 
 	// StreamAccountExport, when set (with the provisioning pair), enables
 	// POST /v1/accounts/{id}:export — streaming the account's complete
@@ -175,7 +197,14 @@ type Config struct {
 	// (ErrConflict): the write freeze is what makes the snapshot consistent.
 	// Errors after the first byte can only be signaled in-stream; the
 	// archive's trailing checksums entry is the truncation detector.
-	StreamAccountExport func(ctx context.Context, accountID string, w io.Writer) error
+	StreamAccountExport func(ctx context.Context, accountID, evacuationID string, w io.Writer) error
+	// ReportAccountExportFailure observes an unexpected stream failure after
+	// the export response has switched to archive delivery. The handler cannot
+	// safely append a JSON error at that point, so this callback is the
+	// server-side diagnostic boundary. Implementations must not write to w or
+	// include archive content; accountID and the exact export error are the
+	// complete input.
+	ReportAccountExportFailure func(ctx context.Context, accountID string, err error)
 
 	// ResumeAccountOwner, when set, enables POST /v1/account:resume — the
 	// owner un-freezing a self-suspended account. Refuses to un-suspend a
@@ -204,14 +233,14 @@ type Config struct {
 	// ErrConflict when the account already exists here, ErrArchiveTooNew when
 	// the archive's schema outruns this cell, ErrBadArchive for anything
 	// structurally wrong (corrupt, truncated, or naming a different account).
-	ImportAccountArchive func(ctx context.Context, accountID string, body io.Reader) (ImportSummary, error)
+	ImportAccountArchive func(ctx context.Context, accountID, evacuationID string, body io.Reader) (ImportSummary, error)
 
 	// ResumeAccountSystem, when set (with the provisioning pair), enables
 	// POST /v1/accounts/{id}:resume — machine-initiated resume scoped by
 	// category, the mirror of SuspendAccountSystem: only the authority that
 	// suspended may resume. ErrResumeWrongCategory when the categories
 	// disagree, ErrAccountNotSuspended when there is nothing to lift.
-	ResumeAccountSystem func(ctx context.Context, accountID, category string) error
+	ResumeAccountSystem func(ctx context.Context, accountID, category, evacuationID string) (AccountEvacuationRecord, error)
 
 	// SetAccountPlan, when set (with the provisioning pair), enables
 	// POST /v1/accounts/{id}:plan — the control plane applying a plan
@@ -591,9 +620,37 @@ type SupportTicketMessage struct {
 
 // ImportSummary is the API view of a completed archive restore.
 type ImportSummary struct {
-	AccountID     string `json:"account_id"`
-	Status        string `json:"status"`
-	SchemaVersion int    `json:"schema_version"` // the ARCHIVE's schema coordinate
+	AccountID           string `json:"account_id"`
+	Status              string `json:"status"`
+	SchemaVersion       int    `json:"schema_version"` // the ARCHIVE's schema coordinate
+	EvacuationID        string `json:"evacuation_id"`
+	EvacuationRole      string `json:"evacuation_role"`
+	AlreadyImported     bool   `json:"already_imported,omitempty"`
+	EvacuationCompleted bool   `json:"evacuation_completed,omitempty"`
+}
+
+// AccountEvacuationRecord is the cell's durable acknowledgement of beginning
+// or completing one exact control-plane move epoch.
+type AccountEvacuationRecord struct {
+	AccountID    string     `json:"account_id"`
+	EvacuationID string     `json:"evacuation_id"`
+	Role         string     `json:"evacuation_role"`
+	Status       string     `json:"status"`
+	StartedAt    *time.Time `json:"started_at,omitempty"`
+	CompletedAt  *time.Time `json:"completed_at,omitempty"`
+	Completed    bool       `json:"completed,omitempty"`
+	Aborted      bool       `json:"aborted,omitempty"`
+}
+
+// AccountEvacuationFinalizationRecord is the source cell's durable
+// acknowledgement that one exact frozen copy was removed.
+type AccountEvacuationFinalizationRecord struct {
+	AccountID        string    `json:"account_id"`
+	EvacuationID     string    `json:"evacuation_id"`
+	SourceStatus     string    `json:"source_status"`
+	FinalizedAt      time.Time `json:"finalized_at"`
+	Finalized        bool      `json:"finalized"`
+	AlreadyFinalized bool      `json:"already_finalized"`
 }
 
 // Event is the server-visible shape of one account_events row. Same
@@ -673,6 +730,8 @@ type ProvisionedAccount struct {
 	Email          string `json:"email"`
 	Status         string `json:"status"`
 	BootstrapToken string `json:"bootstrap_token"`
+	ProvisionID    string `json:"-"`
+	Replayed       bool   `json:"-"`
 }
 
 // LoginFunc exchanges a bootstrap token for an operator token. ok is false when
@@ -691,6 +750,20 @@ type AuthFunc func(ctx context.Context, token string) (operatorID, accountID, ac
 const (
 	PrincipalKindOperator = "operator"
 	PrincipalKindAgent    = "agent"
+
+	// AccountEvacuationProtocolVersion is advertised by /v1/version. A fleet
+	// control plane must see this exact integer before its first evacuation
+	// mutation; older servers otherwise accept extra JSON/header fields while
+	// lacking the database-backed exact-epoch fence.
+	AccountEvacuationProtocolVersion = 1
+
+	// AccountEvacuationIDHeader carries the opaque Durable Object move epoch
+	// on streaming export/import and restore-maintenance requests.
+	AccountEvacuationIDHeader = "X-Witself-Evacuation-ID"
+
+	// AccountProvisionProtocolVersion advertises required caller-stable
+	// provision ids and durable cell-side replay receipts.
+	AccountProvisionProtocolVersion = 1
 
 	// Access profiles are immutable properties of a bearer token. Full is the
 	// existing operator/agent credential behavior. Curator profiles are
@@ -1362,6 +1435,11 @@ type Realm struct {
 // it (e.g. for a duplicate realm name) without coupling the server to the store.
 var ErrConflict = errors.New("conflict")
 
+// ErrAccountPending distinguishes the only reap-eligible suspend refusal from
+// an exact-epoch lifecycle conflict. The Worker must never interpret a
+// mismatched evacuation id as permission to reap.
+var ErrAccountPending = errors.New("account pending")
+
 // ErrInvalidPlanSnapshot is returned by the cell store when a provision-token
 // request's revision/hash envelope does not match its payload.
 var ErrInvalidPlanSnapshot = errors.New("invalid plan snapshot")
@@ -1614,8 +1692,13 @@ func apiMux(cfg Config) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/version", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintf(w, "{\"schema_version\":\"witself.v0\",\"version\":%q,\"commit\":%q,\"date\":%q}\n",
-			version.Version, version.Commit, version.Date)
+		_, _ = fmt.Fprintf(
+			w,
+			"{\"schema_version\":\"witself.v0\",\"version\":%q,\"commit\":%q,\"date\":%q,\"account_evacuation_protocol\":%d,\"account_provision_protocol\":%d}\n",
+			version.Version, version.Commit, version.Date,
+			AccountEvacuationProtocolVersion,
+			AccountProvisionProtocolVersion,
+		)
 	})
 	agentEmailPilotSupported := cfg.AgentEmailPilot.Enabled &&
 		ValidateAgentEmailPilotConfig(cfg.AgentEmailPilot) == nil
@@ -1686,9 +1769,26 @@ func apiMux(cfg Config) http.Handler {
 	if cfg.Login != nil {
 		mux.HandleFunc("POST /v1/auth/bootstrap", bootstrapLoginHandler(cfg.Login))
 	}
-	if cfg.ProvisionToken != "" && cfg.ProvisionAccount != nil {
-		mux.HandleFunc("POST /v1/accounts", provisionAccountHandler(cfg.ProvisionToken, cfg.ProvisionAccount))
-		if cfg.ReapAccount != nil || cfg.ActivateAccount != nil || cfg.AccountContact != nil || cfg.RecoverAccount != nil || cfg.UpdateAccountEmail != nil || cfg.SuspendAccountSystem != nil || cfg.StreamAccountExport != nil || cfg.ImportAccountArchive != nil || cfg.ResumeAccountSystem != nil || cfg.LogAccountEvent != nil || cfg.SetAccountPlan != nil {
+	hasProvisioning := cfg.ProvisionAccountExact != nil ||
+		cfg.ProvisionAccount != nil
+	if cfg.ProvisionToken != "" && hasProvisioning {
+		if cfg.ProvisionAccountExact != nil {
+			mux.HandleFunc(
+				"POST /v1/accounts:provision-exact",
+				provisionAccountHandler(
+					cfg.ProvisionToken, cfg.ProvisionAccountExact,
+				),
+			)
+		}
+		if cfg.ProvisionAccount != nil {
+			mux.HandleFunc(
+				"POST /v1/accounts",
+				legacyProvisionAccountHandler(
+					cfg.ProvisionToken, cfg.ProvisionAccount,
+				),
+			)
+		}
+		if cfg.ReapAccount != nil || cfg.ActivateAccount != nil || cfg.AccountContact != nil || cfg.RecoverAccount != nil || cfg.UpdateAccountEmail != nil || cfg.SuspendAccountSystem != nil || cfg.BeginAccountEvacuation != nil || cfg.AbortAccountEvacuation != nil || cfg.FinalizeAccountEvacuation != nil || cfg.StreamAccountExport != nil || cfg.ImportAccountArchive != nil || cfg.ResumeAccountSystem != nil || cfg.LogAccountEvent != nil || cfg.SetAccountPlan != nil {
 			mux.HandleFunc("POST /v1/accounts/", accountLifecycleHandler(cfg))
 		}
 		if cfg.GetPlacementPolicySystem != nil || cfg.GetAccountPlan != nil {
@@ -3132,10 +3232,18 @@ func bearerToken(r *http.Request) (string, bool) {
 // by the pre-shared provision token (the control plane's credential), never by
 // operator/agent tokens — provisioning is instance-level authority, above any
 // account.
-func provisionAccountHandler(provisionToken string, provision func(ctx context.Context, email, displayName string) (ProvisionedAccount, error)) http.HandlerFunc {
+func legacyProvisionAccountHandler(
+	provisionToken string,
+	provision func(
+		ctx context.Context,
+		email, displayName string,
+	) (ProvisionedAccount, error),
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tok, ok := bearerToken(r)
-		if !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(provisionToken)) != 1 {
+		if !ok || subtle.ConstantTimeCompare(
+			[]byte(tok), []byte(provisionToken),
+		) != 1 {
 			writeJSONError(w, http.StatusUnauthorized, "invalid provision token")
 			return
 		}
@@ -3152,12 +3260,79 @@ func provisionAccountHandler(provisionToken string, provision func(ctx context.C
 			writeJSONError(w, http.StatusBadRequest, "valid email required")
 			return
 		}
+		req.DisplayName = strings.TrimSpace(req.DisplayName)
 		if req.DisplayName == "" {
 			req.DisplayName = req.Email
 		}
 		acct, err := provision(r.Context(), req.Email, req.DisplayName)
 		if errors.Is(err, ErrConflict) {
-			writeJSONError(w, http.StatusConflict, "an account with this email already exists")
+			writeJSONError(
+				w, http.StatusConflict,
+				"an account with this email already exists",
+			)
+			return
+		}
+		if err != nil {
+			writeJSONError(
+				w, http.StatusInternalServerError,
+				"could not provision account",
+			)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0",
+			"account":        acct,
+		})
+	}
+}
+
+func provisionAccountHandler(
+	provisionToken string,
+	provision func(
+		ctx context.Context,
+		provisionID, email, displayName string,
+	) (ProvisionedAccount, error),
+) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tok, ok := bearerToken(r)
+		if !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(provisionToken)) != 1 {
+			writeJSONError(w, http.StatusUnauthorized, "invalid provision token")
+			return
+		}
+		var req struct {
+			ProvisionID string `json:"provision_id"`
+			Email       string `json:"email"`
+			DisplayName string `json:"display_name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		req.ProvisionID = strings.TrimSpace(req.ProvisionID)
+		if !validOperationID(req.ProvisionID) {
+			writeJSONError(w, http.StatusBadRequest, "valid provision_id required")
+			return
+		}
+		req.Email = strings.TrimSpace(strings.ToLower(req.Email))
+		if req.Email == "" || !strings.Contains(req.Email, "@") {
+			writeJSONError(w, http.StatusBadRequest, "valid email required")
+			return
+		}
+		req.DisplayName = strings.TrimSpace(req.DisplayName)
+		if req.DisplayName == "" {
+			req.DisplayName = req.Email
+		}
+		acct, err := provision(
+			r.Context(), req.ProvisionID, req.Email, req.DisplayName,
+		)
+		if errors.Is(err, ErrConflict) {
+			writeJSONError(
+				w,
+				http.StatusConflict,
+				"provision request is no longer safely replayable",
+			)
 			return
 		}
 		if err != nil {
@@ -3168,6 +3343,8 @@ func provisionAccountHandler(provisionToken string, provision func(ctx context.C
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"schema_version": "witself.v0",
+			"provision_id":   req.ProvisionID,
+			"replayed":       acct.Replayed,
 			"account":        acct,
 		})
 	}
@@ -3198,7 +3375,9 @@ func accountSystemGetHandler(
 			_ = json.NewEncoder(w).Encode(snapshot)
 			return
 		}
-		accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "placement-policy")
+		accountID, ok := pathActionID(
+			r.URL.Path, "/v1/accounts/", "placement-policy",
+		)
 		if !ok || getPlacement == nil {
 			writeJSONError(w, http.StatusNotFound, "not found")
 			return
@@ -3221,16 +3400,28 @@ func accountSystemGetHandler(
 	}
 }
 
-func accountPlacementPolicySystemSetHandler(provisionToken string, set func(ctx context.Context, accountID string, policy placement.Policy) (placement.Policy, error)) http.HandlerFunc {
+func accountPlacementPolicySystemSetHandler(
+	provisionToken string,
+	set func(ctx context.Context, accountID, evacuationID string, policy placement.Policy) (placement.Policy, error),
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tok, ok := bearerToken(r)
 		if !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(provisionToken)) != 1 {
 			writeJSONError(w, http.StatusUnauthorized, "invalid provision token")
 			return
 		}
-		accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "placement-policy")
+		accountID, ok := pathActionID(
+			r.URL.Path, "/v1/accounts/", "restore-placement-policy",
+		)
 		if !ok {
 			writeJSONError(w, http.StatusNotFound, "not found")
+			return
+		}
+		evacuationID := strings.TrimSpace(
+			r.Header.Get(AccountEvacuationIDHeader),
+		)
+		if !validEvacuationID(evacuationID) {
+			writeJSONError(w, http.StatusBadRequest, "a valid evacuation id is required")
 			return
 		}
 		var req placement.Policy
@@ -3238,13 +3429,16 @@ func accountPlacementPolicySystemSetHandler(provisionToken string, set func(ctx 
 			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
 			return
 		}
-		policy, err := set(r.Context(), accountID, req)
+		policy, err := set(r.Context(), accountID, evacuationID, req)
 		switch {
 		case errors.Is(err, placement.ErrInvalidPolicy):
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		case errors.Is(err, ErrNotFound):
 			writeJSONError(w, http.StatusNotFound, "account not found")
+			return
+		case errors.Is(err, ErrConflict):
+			writeJSONError(w, http.StatusConflict, "account evacuation id does not match")
 			return
 		case err != nil:
 			writeJSONError(w, http.StatusInternalServerError, "could not restore placement policy")
@@ -3254,6 +3448,7 @@ func accountPlacementPolicySystemSetHandler(provisionToken string, set func(ctx 
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"schema_version":   "witself.v0",
 			"account_id":       accountID,
+			"evacuation_id":    evacuationID,
 			"placement_policy": policy,
 		})
 	}
@@ -3261,7 +3456,9 @@ func accountPlacementPolicySystemSetHandler(provisionToken string, set func(ctx 
 
 // accountLifecycleHandler serves the provision-token-authorized lifecycle
 // verbs on POST /v1/accounts/{id}:reap|:activate|:contact|:update-email|
-// :recover|:suspend|:resume|:export|:import|:events — instance-level authority,
+// :recover|:suspend|:begin-evacuation|:complete-evacuation|
+// :export-evacuation|:import-evacuation|:events —
+// instance-level authority,
 // the same trust link as provisioning, so only the control plane can call
 // them.
 //
@@ -3473,7 +3670,9 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 				writeJSONError(w, http.StatusBadRequest, "a suspension category (for) is required")
 				return
 			}
-			err := cfg.SuspendAccountSystem(r.Context(), accountID, req.For, strings.TrimSpace(req.Reason))
+			err := cfg.SuspendAccountSystem(
+				r.Context(), accountID, req.For, strings.TrimSpace(req.Reason),
+			)
 			switch {
 			case errors.Is(err, ErrNotFound):
 				writeJSONError(w, http.StatusNotFound, "account not found")
@@ -3496,15 +3695,128 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 			})
 			return
 		}
-		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "resume"); ok && cfg.ResumeAccountSystem != nil {
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "begin-evacuation"); ok && cfg.BeginAccountEvacuation != nil {
 			var req struct {
-				For string `json:"for"`
+				For          string `json:"for"`
+				Reason       string `json:"reason"`
+				EvacuationID string `json:"evacuation_id"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.For == "" {
 				writeJSONError(w, http.StatusBadRequest, "a suspension category (for) is required")
 				return
 			}
-			err := cfg.ResumeAccountSystem(r.Context(), accountID, req.For)
+			req.EvacuationID = strings.TrimSpace(req.EvacuationID)
+			if req.For != "evacuation" || !validEvacuationID(req.EvacuationID) {
+				writeJSONError(w, http.StatusBadRequest, "a valid evacuation id is required")
+				return
+			}
+			ack, err := cfg.BeginAccountEvacuation(
+				r.Context(), accountID, req.For,
+				strings.TrimSpace(req.Reason), req.EvacuationID,
+			)
+			switch {
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "account not found")
+				return
+			case errors.Is(err, ErrCannotCloseDefault):
+				writeJSONError(w, http.StatusForbidden, "the deployment's default account cannot be suspended")
+				return
+			case errors.Is(err, ErrAccountPending):
+				writeJSONError(w, http.StatusConflict, "account is pending — not suspendable")
+				return
+			case errors.Is(err, ErrConflict):
+				writeJSONError(w, http.StatusConflict, "account evacuation id does not match")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not begin account evacuation")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(ack)
+			return
+		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "abort-evacuation"); ok && cfg.AbortAccountEvacuation != nil {
+			var req struct {
+				EvacuationID string `json:"evacuation_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "a valid evacuation id is required")
+				return
+			}
+			req.EvacuationID = strings.TrimSpace(req.EvacuationID)
+			if !validEvacuationID(req.EvacuationID) {
+				writeJSONError(w, http.StatusBadRequest, "a valid evacuation id is required")
+				return
+			}
+			ack, err := cfg.AbortAccountEvacuation(
+				r.Context(), accountID, req.EvacuationID,
+			)
+			switch {
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "account not found")
+				return
+			case errors.Is(err, ErrConflict):
+				writeJSONError(w, http.StatusConflict, "account evacuation id does not match")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not abort account evacuation")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(ack)
+			return
+		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "finalize-evacuation"); ok && cfg.FinalizeAccountEvacuation != nil {
+			var req struct {
+				EvacuationID string `json:"evacuation_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "a valid evacuation id is required")
+				return
+			}
+			req.EvacuationID = strings.TrimSpace(req.EvacuationID)
+			if !validEvacuationID(req.EvacuationID) {
+				writeJSONError(w, http.StatusBadRequest, "a valid evacuation id is required")
+				return
+			}
+			ack, err := cfg.FinalizeAccountEvacuation(
+				r.Context(), accountID, req.EvacuationID,
+			)
+			switch {
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "account evacuation source not found")
+				return
+			case errors.Is(err, ErrCannotCloseDefault):
+				writeJSONError(w, http.StatusForbidden, "the deployment's default account cannot be finalized")
+				return
+			case errors.Is(err, ErrConflict):
+				writeJSONError(w, http.StatusConflict, "account is not this evacuation's source")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not finalize account evacuation")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(ack)
+			return
+		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "complete-evacuation"); ok && cfg.ResumeAccountSystem != nil {
+			var req struct {
+				For          string `json:"for"`
+				EvacuationID string `json:"evacuation_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.For == "" {
+				writeJSONError(w, http.StatusBadRequest, "a suspension category (for) is required")
+				return
+			}
+			req.EvacuationID = strings.TrimSpace(req.EvacuationID)
+			if req.For != "evacuation" || !validEvacuationID(req.EvacuationID) {
+				writeJSONError(w, http.StatusBadRequest, "a valid evacuation id is required")
+				return
+			}
+			ack, err := cfg.ResumeAccountSystem(
+				r.Context(), accountID, req.For, req.EvacuationID,
+			)
 			switch {
 			case errors.Is(err, ErrNotFound):
 				writeJSONError(w, http.StatusNotFound, "account not found")
@@ -3515,23 +3827,31 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 			case errors.Is(err, ErrResumeWrongCategory):
 				writeJSONError(w, http.StatusConflict, "suspension category does not match")
 				return
+			case errors.Is(err, ErrConflict):
+				writeJSONError(w, http.StatusConflict, "account evacuation id does not match")
+				return
 			case err != nil:
 				writeJSONError(w, http.StatusInternalServerError, "could not resume account")
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]string{
-				"schema_version": "witself.v0",
-				"account_id":     accountID,
-				"status":         "active",
-			})
+			_ = json.NewEncoder(w).Encode(ack)
 			return
 		}
-		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "import"); ok && cfg.ImportAccountArchive != nil {
-			sum, err := cfg.ImportAccountArchive(r.Context(), accountID, r.Body)
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "import-evacuation"); ok && cfg.ImportAccountArchive != nil {
+			evacuationID := strings.TrimSpace(
+				r.Header.Get(AccountEvacuationIDHeader),
+			)
+			if !validEvacuationID(evacuationID) {
+				writeJSONError(w, http.StatusBadRequest, "a valid evacuation id is required")
+				return
+			}
+			sum, err := cfg.ImportAccountArchive(
+				r.Context(), accountID, evacuationID, r.Body,
+			)
 			switch {
 			case errors.Is(err, ErrConflict):
-				writeJSONError(w, http.StatusConflict, "account already exists on this cell")
+				writeJSONError(w, http.StatusConflict, "account exists under a different evacuation")
 				return
 			case errors.Is(err, ErrArchiveTooNew):
 				writeJSONError(w, http.StatusConflict, "archive schema is newer than this cell — upgrade the cell first")
@@ -3549,6 +3869,10 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 				"account_id":             sum.AccountID,
 				"status":                 sum.Status,
 				"archive_schema_version": sum.SchemaVersion,
+				"evacuation_id":          sum.EvacuationID,
+				"evacuation_role":        sum.EvacuationRole,
+				"already_imported":       sum.AlreadyImported,
+				"evacuation_completed":   sum.EvacuationCompleted,
 			})
 			return
 		}
@@ -3588,22 +3912,36 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 			})
 			return
 		}
-		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "export"); ok && cfg.StreamAccountExport != nil {
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "export-evacuation"); ok && cfg.StreamAccountExport != nil {
+			evacuationID := strings.TrimSpace(
+				r.Header.Get(AccountEvacuationIDHeader),
+			)
+			if !validEvacuationID(evacuationID) {
+				writeJSONError(w, http.StatusBadRequest, "a valid evacuation id is required")
+				return
+			}
 			// Preconditions surface as JSON errors; once streaming begins,
 			// the archive's own trailing checksums are the integrity story.
 			w.Header().Set("Content-Type", "application/octet-stream")
 			w.Header().Set("X-Witself-Export-Format", "1")
-			err := cfg.StreamAccountExport(r.Context(), accountID, w)
+			err := cfg.StreamAccountExport(
+				r.Context(), accountID, evacuationID, w,
+			)
 			switch {
 			case errors.Is(err, ErrNotFound):
 				writeJSONError(w, http.StatusNotFound, "account not found")
 				return
 			case errors.Is(err, ErrConflict):
-				writeJSONError(w, http.StatusConflict, "account must be suspended (or closed) to export")
+				writeJSONError(w, http.StatusConflict, "account is not fenced by this evacuation")
 				return
 			case err != nil:
 				// Headers may already be sent; the truncated stream fails
-				// the trailing-checksum verification downstream.
+				// the trailing-checksum verification downstream. Report the
+				// exact error server-side because no safe response body remains
+				// for diagnostics.
+				if cfg.ReportAccountExportFailure != nil {
+					cfg.ReportAccountExportFailure(r.Context(), accountID, err)
+				}
 				return
 			}
 			return
@@ -4719,6 +5057,26 @@ func pathActionID(path, prefix, action string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func validOperationID(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, ch := range value {
+		if (ch >= 'a' && ch <= 'z') ||
+			(ch >= 'A' && ch <= 'Z') ||
+			(ch >= '0' && ch <= '9') ||
+			ch == '_' || ch == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validEvacuationID(value string) bool {
+	return validOperationID(value)
 }
 
 // Support-ticket handlers. Every one runs behind requireOperator so the

@@ -90,6 +90,11 @@ import {
   cellMatchesPolicy,
   rescuePlacementPolicy,
 } from "./placement.mjs";
+import { DurableAccountLifecycle } from "./account-lifecycle-runtime.mjs";
+import { DurableAccountSignup } from "./account-signup-runtime.mjs";
+import {
+  DurableTargetCellCoordinator,
+} from "./target-cell-coordinator.mjs";
 
 export class Backend extends Container {
   defaultPort = 8080;
@@ -109,6 +114,58 @@ export class Backend extends Container {
   async restartWithEnvironment(freshEnv) {
     await restartContainerWithEnvironment(this, freshEnv);
     return { restarted: true };
+  }
+}
+
+// One Durable Object instance exists per account id. Its SQLite-backed
+// storage is the lifecycle/location authority; KV is only the edge read
+// projection. The runtime resumes the exact persisted operation after a DO
+// restart and never treats a generic existing account as import proof.
+export class AccountLifecycle extends DurableAccountLifecycle {
+  constructor(ctx, env) {
+    super(ctx, env);
+  }
+}
+
+// One Durable Object instance exists per cell name. It is the serialization
+// authority for registration, incoming lifecycle reservations, and safe
+// deletion; DIRECTORY KV is only the fleet read projection.
+export class TargetCellCoordinator extends DurableTargetCellCoordinator {
+  constructor(ctx, env) {
+    super(ctx, env);
+  }
+}
+
+// One Durable Object instance exists per caller-stable provision id. It
+// serializes signup retries and also hosts per-invite exact use authorities.
+export class AccountSignup extends DurableAccountSignup {
+  constructor(ctx, env) {
+    super(ctx, env, {
+      placeAccount: (invite) => placeAccount(env, invite),
+      sendVerification: ({
+        origin,
+        email,
+        account_id: accountID,
+        cell_name: cellName,
+      }) => sendVerificationEmail(
+        env,
+        origin,
+        email,
+        accountID,
+        cellName,
+      ),
+      logVerification: ({
+        cell,
+        account_id: accountID,
+        email,
+      }) => logCellEvent(
+        cell,
+        accountID,
+        "account.email.verify.sent",
+        "control_plane",
+        { to_masked: maskEmail(email) },
+      ),
+    });
   }
 }
 
@@ -338,22 +395,6 @@ async function listCells(env) {
 function publicCell(cell) {
   const { provision_token: _omitted, ...rest } = cell;
   return { ...rest, has_provision_token: Boolean(cell.provision_token) };
-}
-
-// True if any acct: directory entry points at the named cell. O(accounts) —
-// acceptable while the fleet is young; replaced by authoritative DO counters
-// when signup lands.
-async function cellHasAccounts(env, name) {
-  let cursor;
-  do {
-    const page = await env.DIRECTORY.list({ prefix: "acct:", cursor });
-    for (const k of page.keys) {
-      const entry = await env.DIRECTORY.get(k.name, { type: "json" });
-      if (entry && entry.cell === name) return true;
-    }
-    cursor = page.list_complete ? undefined : page.cursor;
-  } while (cursor);
-  return false;
 }
 
 // genInviteCode returns a short, unambiguous code like "k3v9-m2xq-7fjp".
@@ -1334,34 +1375,40 @@ async function handleCells(request, env, url) {
     if (body.provision_token != null && typeof body.provision_token !== "string") {
       return err("provision_token must be a string", 400);
     }
+    if (
+      body.registration_id != null &&
+      (
+        typeof body.registration_id !== "string" ||
+        body.registration_id.length < 1 ||
+        body.registration_id.length > 128
+      )
+    ) {
+      return err("registration_id must be a nonempty opaque identifier", 400);
+    }
     if (body.region_code != null && !REGION_NAME.test(body.region_code)) {
       return err("region_code must be a canonical region code like usw2", 400);
     }
     if (body.channel != null && !PLACEMENT_CHANNELS.has(body.channel)) {
       return err("channel must be stable, edge, or experimental", 400);
     }
-    const key = `cell:${body.name}`;
-    const existing = await env.DIRECTORY.get(key, { type: "json" });
-    const entry = {
-      endpoint: body.endpoint,
-      cloud: body.cloud || "",
-      region: body.region || "",
-      region_code: body.region_code ?? existing?.region_code ?? "",
-      channel: body.channel ?? existing?.channel ?? "experimental",
-      // v0: one fleet token, one owner. With per-party credentials the owner
-      // comes from the credential, never the payload.
-      owner: "witwave",
-      weight: Number.isFinite(body.weight) ? body.weight : 1,
-      accepting: body.accepting !== false,
-      // The cell's account-provisioning credential. Preserved when the payload
-      // omits it (drain re-registers from a stripped read and must not wipe it).
-      provision_token: body.provision_token ?? existing?.provision_token ?? null,
-      registered_at: existing?.registered_at ?? new Date().toISOString(),
-    };
-    await env.DIRECTORY.put(key, JSON.stringify(entry));
-    return json(
-      { schema_version: "witself.v0", cell: publicCell({ name: body.name, ...entry }) },
-      existing ? 200 : 201,
+    return requestCellCoordinator(
+      env,
+      body.name,
+      "/register",
+      {
+        cell: {
+          endpoint: body.endpoint,
+          cloud: body.cloud || "",
+          region: body.region || "",
+          region_code: body.region_code,
+          channel: body.channel,
+          owner: "witwave",
+          weight: Number.isFinite(body.weight) ? body.weight : 1,
+          accepting: body.accepting !== false,
+          provision_token: body.provision_token,
+          registration_id: body.registration_id,
+        },
+      },
     );
   }
 
@@ -1372,77 +1419,24 @@ async function handleCells(request, env, url) {
   // refuses while accounts exist.
   const pm = url.pathname.match(PURGE_PATH);
   if (pm && request.method === "POST") {
-    const name = pm[1];
-    let purged = 0;
-    let cursor;
-    do {
-      const page = await env.DIRECTORY.list({ prefix: "acct:", cursor });
-      for (const k of page.keys) {
-        const entry = await env.DIRECTORY.get(k.name, { type: "json" });
-        if (entry && entry.cell === name) {
-          await env.DIRECTORY.delete(k.name);
-          purged++;
-        }
-      }
-      cursor = page.list_complete ? undefined : page.cursor;
-    } while (cursor);
-    await deletePendingForCell(env, name);
-    const key = `cell:${name}`;
-    const existed = (await env.DIRECTORY.get(key)) !== null;
-    if (existed) await env.DIRECTORY.delete(key);
-    return json({
-      schema_version: "witself.v0",
-      name,
-      purged_accounts: purged,
-      cell_deleted: existed,
-    });
+    return requestCellCoordinator(env, pm[1], "/purge", {});
   }
 
   const m = url.pathname.match(CELL_PATH);
   if (m && request.method === "DELETE") {
-    const name = m[1];
-    const key = `cell:${name}`;
-    const cell = await env.DIRECTORY.get(key, { type: "json" });
-    if (!cell) {
-      return err("unknown cell", 404);
-    }
-    if (cell.accepting !== false) {
-      return err("cell must be drained first (re-register with accepting=false)", 409);
-    }
-    if (await cellHasAccounts(env, name)) {
-      return err("accounts still live on this cell", 409);
-    }
-    await deletePendingForCell(env, name); // no accounts -> candidates are stale
-    await env.DIRECTORY.delete(key);
-    return new Response(null, { status: 204 });
+    return requestCellCoordinator(env, m[1], "/delete", {
+      deletion_id: crypto.randomUUID(),
+    });
   }
 
   return err("method not allowed", 405);
 }
 
-// deletePendingForCell drops every reap candidate naming the cell. Called when
-// a cell leaves the registry (purge/delete): a candidate without a registry
-// entry can never be reaped, and a later re-registration under the same name
-// must not inherit a dead fleet's candidate list.
-async function deletePendingForCell(env, name) {
-  let cursor;
-  do {
-    const page = await env.DIRECTORY.list({ prefix: "pending:", cursor });
-    for (const k of page.keys) {
-      const entry = await env.DIRECTORY.get(k.name, { type: "json" });
-      if (entry?.cell === name) {
-        await env.DIRECTORY.delete(k.name);
-      }
-    }
-    cursor = page.list_complete ? undefined : page.cursor;
-  } while (cursor);
-}
-
 // handleSignup is POST /v1/accounts — the public, invite-gated front door of
-// Witself Cloud. It orchestrates but stores no tenant data: validate the
-// invite, place onto an accepting cell, have the CELL provision the account,
-// record the one routing pointer, and return everything the CLI needs inline
-// (never depending on KV propagation for the first request).
+// Witself Cloud. A provision-id Durable Object persists the request
+// fingerprint and orchestration checkpoints, but never the bootstrap token.
+// Every ambiguous retry stays pinned to the same cell and replays the exact
+// cell-side provision receipt before returning fresh credentials.
 async function handleSignup(request, env) {
   let body;
   try {
@@ -1450,125 +1444,37 @@ async function handleSignup(request, env) {
   } catch {
     return err("invalid JSON body", 400);
   }
-  const email = (body.email ?? "").trim().toLowerCase();
-  if (!email || !email.includes("@")) {
-    return err("valid email required", 400);
-  }
-  const code = body.invite ?? "";
-  if (!INVITE_CODE.test(code)) {
-    return err("invite code required", 403);
-  }
-  const inviteKey = `invite:${code}`;
-  const invite = await env.DIRECTORY.get(inviteKey, { type: "json" });
-  const verdict = validateInvite(invite);
-  if (!verdict.valid) {
-    return err(`invalid invite: ${verdict.reason}`, 403);
-  }
-
-  // Placement: invite pin -> invite region -> fleet strategy -> weighted.
-  const placed = await placeAccount(env, invite);
-  if (placed.fail) {
-    return placed.fail;
-  }
-  const cell = placed.cell;
-
-  // The cell provisions the account (its data, its database).
-  let cellResp;
-  try {
-    cellResp = await fetch(`${cell.endpoint}/v1/accounts`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${cell.provision_token}`,
-      },
-      body: JSON.stringify({ email, display_name: body.display_name ?? "" }),
-      signal: AbortSignal.timeout(15000),
-    });
-  } catch {
-    return err(`cell ${cell.name} unreachable — try again shortly`, 502);
-  }
-  if (cellResp.status === 409) {
-    return err("an account with this email already exists", 409);
-  }
-  if (cellResp.status !== 201) {
-    return err(`cell provisioning failed (${cell.name})`, 502);
-  }
-  let provisioned;
-  try {
-    provisioned = (await cellResp.json()).account;
-  } catch {
-    provisioned = null;
-  }
-  if (!provisioned?.account_id || !provisioned?.bootstrap_token || !ACCOUNT_ID.test(provisioned.account_id)) {
-    return err("cell returned an invalid provisioning response", 502);
-  }
-
-  // Expiry candidate FIRST, routing pointer second: if the second write
-  // fails, a candidate without routing is self-healing (the sweep reaps the
-  // orphaned provision), whereas routing without a candidate would be a
-  // pending account the reaper can never see. Only a candidate — the cell's
-  // only-if-pending :reap guard is the truth at reap time.
-  const pendingEntry = { cell: cell.name, created_at: new Date().toISOString() };
-  await env.DIRECTORY.put(
-    `pending:${provisioned.account_id}`,
-    JSON.stringify(pendingEntry),
-  );
-  // Routing pointer + best-effort invite consumption (exact counting arrives
-  // with the DO authority).
-  await env.DIRECTORY.put(
-    `acct:${provisioned.account_id}`,
-    JSON.stringify({
-      cell: cell.name,
-      endpoint: cell.endpoint,
-      region: cell.region ?? null,
-      region_code: cell.region_code ?? null,
-    }),
-  );
-  const fresh = (await env.DIRECTORY.get(inviteKey, { type: "json" })) ?? invite;
-  fresh.uses = (fresh.uses ?? 0) + 1;
-  await env.DIRECTORY.put(inviteKey, JSON.stringify(fresh));
-
-  // Verification email — best-effort by design: the account exists either
-  // way, and an unverified one is the reaper's problem, not signup's. The
-  // email address is used in flight and never stored here.
-  let emailSent = false;
-  try {
-    emailSent = await sendVerificationEmail(
-      env,
-      new URL(request.url).origin,
-      provisioned.email,
-      provisioned.account_id,
-      cell.name,
+  const provisionID = typeof body?.provision_id === "string"
+    ? body.provision_id.trim()
+    : "";
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(provisionID)) {
+    return err(
+      "provision_id is required and must be a nonempty opaque identifier",
+      400,
     );
-  } catch (e) {
-    console.log(`signup: verification email for ${provisioned.account_id} failed: ${e}`);
   }
-  if (emailSent) {
-    // Stamp the send on the candidate so the resend cooldown starts at
-    // signup, not at the first resend.
-    pendingEntry.emails_sent = 1;
-    pendingEntry.last_email_at = new Date().toISOString();
-    await env.DIRECTORY.put(
-      `pending:${provisioned.account_id}`,
-      JSON.stringify(pendingEntry),
+  if (!env.ACCOUNT_SIGNUP) {
+    return err("account signup Durable Object is unavailable", 503);
+  }
+  const id = env.ACCOUNT_SIGNUP.idFromName(`provision:${provisionID}`);
+  try {
+    return await env.ACCOUNT_SIGNUP.get(id).fetch(
+      new Request("https://account-signup.internal/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...body,
+          provision_id: provisionID,
+          origin: new URL(request.url).origin,
+        }),
+      }),
     );
-    await logCellEvent(cell, provisioned.account_id, "account.email.verify.sent",
-      "control_plane", { to_masked: maskEmail(provisioned.email) });
+  } catch (error) {
+    return err(
+      `account signup outcome is ambiguous: ${String(error?.message ?? error)}`,
+      502,
+    );
   }
-
-  return json(
-    {
-      schema_version: "witself.v0",
-      account_id: provisioned.account_id,
-      operator_id: provisioned.operator_id,
-      email: provisioned.email,
-      status: provisioned.status,
-      verification_email_sent: emailSent,
-      cell: { name: cell.name, endpoint: cell.endpoint },
-      bootstrap_token: provisioned.bootstrap_token,
-    },
-    201,
-  );
 }
 
 // sha256hex hashes a verification token for storage — KV holds only hashes,
@@ -2478,19 +2384,13 @@ async function handleUndoEmail(env, token) {
 }
 
 // handleClose is POST /v1/accounts/{id}:close — the symmetric exit to signup's
-// entrance: born through the front door, closed through the front door. The
-// control plane holds no authority here — it forwards the caller's operator
-// token to the account's cell, which decides (owner-only, tombstone, revoke).
-// Only on the cell's success does the control plane forget its routing pointer.
+// entrance. Close shares the per-account Durable Object with evacuation and
+// restore, so an owner close cannot commit while an older snapshot is being
+// exported and later resurrect that pre-close state.
 async function handleClose(request, env, accountId) {
   const auth = request.headers.get("Authorization");
   if (!auth) {
     return err("operator token required", 401);
-  }
-  const key = `acct:${accountId}`;
-  const entry = await env.DIRECTORY.get(key, { type: "json" });
-  if (!entry) {
-    return err("unknown account", 404);
   }
   let body = "{}";
   try {
@@ -2498,32 +2398,18 @@ async function handleClose(request, env, accountId) {
   } catch {
     // keep the empty default
   }
-  let cellResp;
-  try {
-    cellResp = await fetch(`${entry.endpoint}/v1/account:close`, {
+  return accountLifecycleStub(env, accountId).fetch(
+    new Request("https://account-lifecycle.internal/run", {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: auth },
-      body: body || "{}",
-      signal: AbortSignal.timeout(15000),
-    });
-  } catch {
-    return err(`cell ${entry.cell} unreachable — try again shortly`, 502);
-  }
-  if (!cellResp.ok) {
-    // Pass the cell's refusal (401/403/...) through verbatim.
-    const text = await cellResp.text();
-    return new Response(text, {
-      status: cellResp.status,
       headers: { "Content-Type": "application/json" },
-    });
-  }
-  await env.DIRECTORY.delete(key); // the fleet forgets; the cell remembers
-  await env.DIRECTORY.delete(`pending:${accountId}`); // no longer a reap candidate
-  return json({
-    schema_version: "witself.v0",
-    account_id: accountId,
-    status: "closed",
-  });
+      body: JSON.stringify({
+        action: "close",
+        account_id: accountId,
+        authorization: auth,
+        body: body || "{}",
+      }),
+    }),
+  );
 }
 
 // handleReaper is the fleet-wide pending-account expiry policy: GET returns
@@ -2633,6 +2519,86 @@ async function reapExpiredPendings(env) {
         // account: a stray 200 (LB default page, captive portal, wrong
         // service on the endpoint) must never destroy live routing.
         if (body?.status === "closed" && body?.account_id === accountId) {
+          const registrationID =
+            cell.registration_id ?? cell.registered_at ?? null;
+          const sourceEpoch =
+            Number.isSafeInteger(entry.route_epoch) &&
+                entry.route_epoch >= 0
+              ? entry.route_epoch
+              : 0;
+          const currentRoute = await env.DIRECTORY.get(
+            `acct:${accountId}`,
+            { type: "json" },
+          );
+          const currentRouteEpoch =
+            Number.isSafeInteger(currentRoute?.epoch) &&
+                currentRoute.epoch >= 0
+              ? currentRoute.epoch
+              : 0;
+          if (
+            currentRoute &&
+            (
+              currentRoute.cell !== entry.cell ||
+              currentRouteEpoch !== sourceEpoch ||
+              (
+                currentRoute.cell_registration_id &&
+                registrationID &&
+                currentRoute.cell_registration_id !== registrationID
+              )
+            )
+          ) {
+            await env.DIRECTORY.delete(k.name);
+            console.log(
+              `reaper: ${accountId} has newer route authority; stale candidate dropped`,
+            );
+            continue;
+          }
+          if (registrationID) {
+            const departed = await requestCellCoordinator(
+              env,
+              entry.cell,
+              "/depart",
+              {
+                account_id: accountId,
+                operation_id: crypto.randomUUID(),
+                registration_id: registrationID,
+                source_epoch: sourceEpoch,
+              },
+            );
+            if (!departed.ok) {
+              console.log(
+                `reaper: ${accountId} closed but occupancy handoff failed; retrying next tick`,
+              );
+              continue;
+            }
+          }
+          const routeAfterDeparture = await env.DIRECTORY.get(
+            `acct:${accountId}`,
+            { type: "json" },
+          );
+          const routeAfterEpoch =
+            Number.isSafeInteger(routeAfterDeparture?.epoch) &&
+                routeAfterDeparture.epoch >= 0
+              ? routeAfterDeparture.epoch
+              : 0;
+          if (
+            routeAfterDeparture &&
+            (
+              routeAfterDeparture.cell !== entry.cell ||
+              routeAfterEpoch !== sourceEpoch ||
+              (
+                routeAfterDeparture.cell_registration_id &&
+                registrationID &&
+                routeAfterDeparture.cell_registration_id !== registrationID
+              )
+            )
+          ) {
+            await env.DIRECTORY.delete(k.name);
+            console.log(
+              `reaper: ${accountId} route changed during reap; stale candidate dropped`,
+            );
+            continue;
+          }
           await env.DIRECTORY.delete(`acct:${accountId}`);
           await env.DIRECTORY.delete(k.name);
           console.log(`reaper: closed ${accountId} on ${entry.cell}`);
@@ -2901,126 +2867,109 @@ function maskEmail(addr) {
   return local[0] + "***@" + domainMasked;
 }
 
-// evacuateAccount runs the four-step evacuation for a single account. The
-// R2 object key is DETERMINISTIC per account (not per attempt) — a retry
-// after any failure just overwrites, so no orphaned objects can accrete.
-// Multipart upload atomically finalizes the object only on complete(), so a
-// truncated stream aborts the upload and nothing is committed at the key.
-async function evacuateAccount(env, cellName, cell, accountId, opts = {}) {
-  // Idempotency short-circuit: if an archived: pointer already exists we
-  // just need to ensure acct: is retired (a failure between steps 3 and 4
-  // on a prior call is what leaves that gap). No R2 work — the archive is
-  // already there.
-  const already = await env.DIRECTORY.get(`archived:${accountId}`, {
-    type: "json",
-  });
-  if (already) {
-    await env.DIRECTORY.delete(`acct:${accountId}`);
-    return;
+function accountLifecycleStub(env, accountId) {
+  if (!env.ACCOUNT_LIFECYCLE) {
+    throw new Error("account lifecycle Durable Object is not configured");
   }
+  const id = env.ACCOUNT_LIFECYCLE.idFromName(accountId);
+  return env.ACCOUNT_LIFECYCLE.get(id);
+}
 
-  // (1) System-suspend under the "evacuation" category. Owner-suspended
-  // accounts keep their original category; closed tombstones are idempotent.
-  //
-  // Pending accounts — a signup landed on this cell moments before drain —
-  // refuse suspension with 409 "pending — not suspendable" (the cell's
-  // SuspendAccountSystem allows only active/suspended/closed). Without a
-  // rescue path, one late signup would wedge every teardown. Mirror the
-  // reaper: POST :reap, verify the acknowledged tombstone, retire pending:
-  // and acct:, and skip the archive step (incomplete signups die with the
-  // cell, same policy as the pending-expiry sweep at reapExpiredPendings).
-  const suspendResp = await fetch(
-    `${cell.endpoint}/v1/accounts/${accountId}:suspend`,
-    {
+function cellCoordinatorStub(env, cellName) {
+  if (!env.CELL_COORDINATOR) {
+    throw new Error("target cell coordinator Durable Object is not configured");
+  }
+  const id = env.CELL_COORDINATOR.idFromName(cellName);
+  return env.CELL_COORDINATOR.get(id);
+}
+
+async function requestCellCoordinator(env, cellName, path, payload) {
+  try {
+    return await cellCoordinatorStub(env, cellName).fetch(
+      new Request(`https://target-cell.internal${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          cell_name: cellName,
+          ...payload,
+        }),
+      }),
+    );
+  } catch (error) {
+    return err(
+      `target cell coordinator unavailable: ${String(error?.message ?? error)}`,
+      503,
+    );
+  }
+}
+
+async function runAccountLifecycle(env, accountId, input) {
+  const response = await accountLifecycleStub(env, accountId).fetch(
+    new Request("https://account-lifecycle.internal/run", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${cell.provision_token}`,
-      },
-      body: JSON.stringify({ for: "evacuation", reason: opts.reason ?? "cell decommission" }),
-      signal: AbortSignal.timeout(15000),
-    },
-  );
-  if (!suspendResp.ok) {
-    const suspendBody = await suspendResp.text().catch(() => "");
-    if (suspendResp.status === 409 && suspendBody.includes("pending")) {
-      if (opts.allowPendingReap === false) {
-        throw new Error("account is pending — not eligible for rebalance");
-      }
-      await reapPendingDuringEvacuation(env, cell, accountId);
-      return { reaped: true };
-    }
-    throw new Error(`suspend ${suspendResp.status}: ${suspendBody.slice(0, 200)}`);
-  }
-  await suspendResp.text().catch(() => "");
-
-  const placementPolicy = await fetchPlacementPolicySnapshot(cell, accountId);
-
-  // (2) Stream the archive from the cell into R2 as a MULTIPART upload:
-  // - Streaming exports have no Content-Length; single-shot put() rejects.
-  // - Multipart finalizes atomically only on complete() — a truncated
-  //   stream (cell errors mid-response, connection reset) throws when
-  //   reading the body, we hit the catch and abort() the upload, and
-  //   nothing lands at the key.
-  const exportResp = await fetch(
-    `${cell.endpoint}/v1/accounts/${accountId}:export`,
-    {
-      method: "POST",
-      headers: { Authorization: `Bearer ${cell.provision_token}` },
-      signal: AbortSignal.timeout(300000), // 5 min per-account ceiling
-    },
-  );
-  if (!exportResp.ok || !exportResp.body) {
-    const text = await exportResp.text().catch(() => "");
-    throw new Error(`export ${exportResp.status}: ${text.slice(0, 200)}`);
-  }
-  const objectKey = `archives/${accountId}.tar.gz`;
-  const nowISO = new Date().toISOString();
-  const size = await streamToR2Multipart(env.ARCHIVES, objectKey, exportResp.body, {
-    httpMetadata: {
-      contentType: "application/gzip",
-      contentDisposition: `attachment; filename="${accountId}.tar.gz"`,
-    },
-    customMetadata: {
-      account_id: accountId,
-      cell: cellName,
-      exported_at: nowISO,
-    },
-  });
-
-  // (3) Write the archived: pointer BEFORE removing acct:, so a directory
-  // read never briefly returns 404 for the archived account.
-  await env.DIRECTORY.put(
-    `archived:${accountId}`,
-    JSON.stringify({
-      cell: cellName,
-      region: cell.region ?? null,
-      region_code: cell.region_code ?? null,
-      object: objectKey,
-      exported_at: nowISO,
-      size,
-      format_version: 1,
-      placement_policy: placementPolicy,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account_id: accountId, ...input }),
     }),
   );
+  const body = await response.json().catch(() => null);
+  if (!response.ok || body?.ok !== true) {
+    throw new Error(
+      body?.error ??
+        `account lifecycle coordinator returned HTTP ${response.status}`,
+    );
+  }
+  return body.result ?? {};
+}
 
-  // (3a) Audit the evacuation ONCE per successful attempt. Firing after
-  // archived: is written (step 3) means:
-  // - a retry after a mid-export failure short-circuits at the top of
-  //   the function (archived: exists → return without re-logging)
-  // - the event lands durably on the cell before step 4 retires
-  //   routing, and before the cell is eventually torn down
-  // The event does NOT survive the arc (the archive was streamed to
-  // R2 in step 2 before this row existed) — that's fine, because the
-  // matching account.restored event on the new cell is what carries
-  // the migration signal for owners viewing history post-restore.
-  // actor_kind=system: fleet-level operation, not a principal action.
-  await logCellEvent(cell, accountId, "account.evacuated",
-    "system", { cell: cellName });
+async function evacuateAccount(env, cellName, _cell, accountId, opts = {}) {
+  return runAccountLifecycle(env, accountId, {
+    action: "evacuate",
+    cell_name: cellName,
+    allow_pending_reap: opts.allowPendingReap !== false,
+    reason: opts.reason,
+  });
+}
 
-  // (4) Retire the routing pointer. From this moment the account is
-  // "archived — awaiting placement" fleet-wide.
-  await env.DIRECTORY.delete(`acct:${accountId}`);
+async function restoreAccount(
+  env,
+  cellName,
+  _cell,
+  accountId,
+  archived,
+) {
+  return runAccountLifecycle(env, accountId, {
+    action: "restore",
+    cell_name: cellName,
+    archive_object: archived?.object,
+    archive_id: archived?.archive_id,
+    expected_epoch: archived?.epoch,
+  });
+}
+
+async function moveAccount(
+  env,
+  accountId,
+  sourceCellName,
+  targetCellName,
+  route,
+  opts = {},
+) {
+  return runAccountLifecycle(env, accountId, {
+    action: "move",
+    source_cell: sourceCellName,
+    target_cell: targetCellName,
+    expected_epoch: route?.epoch,
+    allow_pending_reap: false,
+    reason: opts.reason ?? "placement rebalance",
+  });
+}
+
+// A closed archive is durable retention, not placement work. It intentionally
+// remains under archived: so account discovery and later cell teardown cannot
+// hide the only portable artifact, but automated restore loops must not import
+// it repeatedly.
+function isRestorableArchive(archived) {
+  return Boolean(archived) && archived.status !== "closed";
 }
 
 // handleRestore is POST /v1/cells/{name}:restore — the mirror of :evacuate.
@@ -3030,8 +2979,9 @@ async function evacuateAccount(env, cellName, cell, accountId, opts = {}) {
 // legacy guard. For a bounded batch, streams the R2 object into the cell's
 // :import, calls :resume, writes the new acct: pointer, then deletes both the
 // archived: KV entry and the R2 object. Each of the four steps is individually
-// re-safe (ready-check-then-act, deterministic keys), so a partial restore
-// resumes cleanly on the next call. Refuses to restore into a drained cell
+// re-safe (ready-check-then-act, pointer-carried immutable object key), so a
+// partial restore resumes cleanly on the next call. Refuses to restore into a
+// drained cell
 // (accepting=false): dumping accounts onto a cell that will not accept them
 // would just move the "awaiting placement" state to a place harder to see.
 async function handleRestore(request, env, cellName) {
@@ -3078,7 +3028,10 @@ async function handleRestore(request, env, cellName) {
     const page = await env.DIRECTORY.list({ prefix: "archived:", cursor });
     for (const k of page.keys) {
       const entry = await env.DIRECTORY.get(k.name, { type: "json" });
-      if (entry && cellMatchesArchivedPlacement(cell, entry, allRegions)) {
+      if (
+        isRestorableArchive(entry) &&
+        cellMatchesArchivedPlacement(cell, entry, allRegions)
+      ) {
         targets.push({ accountId: k.name.slice("archived:".length), archived: entry });
         if (targets.length >= batch) {
           break;
@@ -3133,7 +3086,10 @@ async function handleRestore(request, env, cellName) {
         continue;
       }
       const entry = await env.DIRECTORY.get(k.name, { type: "json" });
-      if (entry && cellMatchesArchivedPlacement(cell, entry, allRegions)) {
+      if (
+        isRestorableArchive(entry) &&
+        cellMatchesArchivedPlacement(cell, entry, allRegions)
+      ) {
         remaining += 1;
       }
     }
@@ -3195,6 +3151,9 @@ async function handlePlacementRestore(request, env) {
       if (!archived) {
         continue;
       }
+      if (!isRestorableArchive(archived)) {
+        continue;
+      }
       const cell = bestPlacementCell(cells, archived, selectionCounts, allRegions);
       if (!cell) {
         blocked.push({ account_id: accountId, reason: "no eligible accepting cell" });
@@ -3241,6 +3200,9 @@ async function handlePlacementRestore(request, env) {
       }
       const archived = await env.DIRECTORY.get(k.name, { type: "json" });
       if (!archived) {
+        continue;
+      }
+      if (!isRestorableArchive(archived)) {
         continue;
       }
       const cell = bestPlacementCell(cells, archived, counts, allRegions);
@@ -3294,6 +3256,7 @@ async function rebalanceTargetForAccount(env, cellsByName, destinationCells, cou
     current,
     target: target.cell,
     reason: target.reason,
+    route,
   };
 }
 
@@ -3385,43 +3348,15 @@ async function handlePlacementRebalance(request, env) {
       continue;
     }
 
-    const claimKey = `rebalancing:${accountId}`;
-    const existingClaim = await env.DIRECTORY.get(claimKey, { type: "json" });
-    if (existingClaim) {
-      results.push({
-        account_id: accountId,
-        ok: false,
-        from_cell: target.current.name,
-        to_cell: target.target.name,
-        error: `already rebalancing since ${existingClaim.started_at}`,
-      });
-      continue;
-    }
-    await env.DIRECTORY.put(
-      claimKey,
-      JSON.stringify({
-        from_cell: target.current.name,
-        to_cell: target.target.name,
-        started_at: new Date().toISOString(),
-      }),
-      { expirationTtl: 900 },
-    );
     try {
-      await evacuateAccount(
+      await moveAccount(
         env,
-        target.current.name,
-        target.current,
         accountId,
-        {
-          allowPendingReap: false,
-          reason: "placement rebalance",
-        },
+        target.current.name,
+        target.target.name,
+        target.route,
+        { reason: "placement rebalance" },
       );
-      const archived = await env.DIRECTORY.get(`archived:${accountId}`, { type: "json" });
-      if (!archived) {
-        throw new Error("account did not land in archive after evacuation");
-      }
-      await restoreAccount(env, target.target.name, target.target, accountId, archived);
       counts.set(target.current.name, Math.max(0, (counts.get(target.current.name) ?? 0) - 1));
       counts.set(target.target.name, (counts.get(target.target.name) ?? 0) + 1);
       results.push({
@@ -3441,8 +3376,6 @@ async function handlePlacementRebalance(request, env) {
         error: msg,
       });
       console.log(`rebalance ${target.current.name}->${target.target.name}/${accountId} failed: ${msg}`);
-    } finally {
-      await env.DIRECTORY.delete(claimKey);
     }
   }
 
@@ -3663,6 +3596,7 @@ async function handlePlacementStatus(request, env, url) {
   let archivedTotal = 0;
   let archivedPlaceable = 0;
   let archivedUnplaced = 0;
+  let archivedClosedRetained = 0;
   const archivedBlocked = [];
   let cursor;
   do {
@@ -3671,6 +3605,10 @@ async function handlePlacementStatus(request, env, url) {
       const accountId = k.name.slice("archived:".length);
       const archived = await env.DIRECTORY.get(k.name, { type: "json" });
       if (!archived) {
+        continue;
+      }
+      if (!isRestorableArchive(archived)) {
+        archivedClosedRetained += 1;
         continue;
       }
       archivedTotal += 1;
@@ -3751,6 +3689,7 @@ async function handlePlacementStatus(request, env, url) {
       placeable: archivedPlaceable,
       unplaced: archivedUnplaced,
       blocked: archivedBlocked,
+      closed_retained: archivedClosedRetained,
     },
     live: {
       total: liveTotal,
@@ -3786,6 +3725,9 @@ async function handlePlacementRescue(request, env, accountId) {
   if (!archived) {
     return err("archived account not found", 404);
   }
+  if (!isRestorableArchive(archived)) {
+    return err("closed archive is retained and not eligible for placement rescue", 409);
+  }
   const nextPolicy = rescuePlacementPolicy(archived.placement_policy, uniqueAxes);
   const changed = !archived.placement_policy ||
     JSON.stringify(nextPolicy) !== JSON.stringify(archived.placement_policy);
@@ -3804,245 +3746,6 @@ async function handlePlacementRescue(request, env, accountId) {
     cleared_axes: uniqueAxes,
     placement_policy: nextPolicy,
   });
-}
-
-// restoreAccount runs the four-step restore for a single account. Each step
-// is idempotent under retry, and the ordering — import THEN resume THEN
-// route THEN clean — guarantees the account is never simultaneously
-// discoverable at two cells. Terminology mirrors evacuateAccount.
-//
-// Cross-cell race: two accepting cells in the same region CAN be targeted
-// simultaneously by two :restore callers (a driver plus a manual retry, two
-// operators, etc.). Both would list the same archived: pointer, both would
-// see acct: null, both would import into DIFFERENT cells — different
-// databases return no 409 collision — and last-writer-wins on the acct:
-// KV would leave the losing cell holding a ghost copy of the account with
-// no directory pointer. To prevent that, we take a `restoring:<accountId>`
-// claim up front and re-check acct: immediately before writing it. KV has
-// no CAS, so the defense is layered rather than atomic: the claim shrinks
-// the race window from indefinite to milliseconds, and the pre-put
-// re-check catches the residual case (throwing instead of silently
-// overwriting).
-async function restoreAccount(env, cellName, cell, accountId, archived) {
-  // Idempotency short-circuit: if an acct: pointer already names this cell
-  // for this account, a prior restore either finished or died between steps
-  // 3 and 4. Either way, ensure R2 + archived: are gone and stop.
-  const routed = await env.DIRECTORY.get(`acct:${accountId}`, { type: "json" });
-  if (routed?.cell === cellName) {
-    try {
-      await env.ARCHIVES.delete(archived.object);
-    } catch {
-      // ignore — R2 delete of a missing key is a 204
-    }
-    await env.DIRECTORY.delete(`archived:${accountId}`);
-    await env.DIRECTORY.delete(`restoring:${accountId}`);
-    return;
-  }
-  if (routed && routed.cell !== cellName) {
-    throw new Error(
-      `acct:${accountId} already routes to ${routed.cell} — refusing to route to ${cellName}`,
-    );
-  }
-
-  // Cross-cell claim: if another cell has an active restore in flight for
-  // this account, back off. TTL bounds how long a dead Worker can strand
-  // the claim (15 min covers the 5-min :import timeout plus retries).
-  const claimKey = `restoring:${accountId}`;
-  const existingClaim = await env.DIRECTORY.get(claimKey, { type: "json" });
-  if (existingClaim && existingClaim.cell !== cellName) {
-    throw new Error(
-      `${accountId} is already being restored to ${existingClaim.cell} (since ${existingClaim.started_at}) — skipping`,
-    );
-  }
-  await env.DIRECTORY.put(
-    claimKey,
-    JSON.stringify({ cell: cellName, started_at: new Date().toISOString() }),
-    { expirationTtl: 900 },
-  );
-  // Re-read to catch a same-instant twin claim from another cell. KV is
-  // eventually consistent, so this doesn't close the window completely,
-  // but a concurrent claim's write is likely to be visible within a
-  // handful of ms — small enough to make the residual race rare, and the
-  // pre-put acct: re-check below catches whatever slips through.
-  const reclaim = await env.DIRECTORY.get(claimKey, { type: "json" });
-  if (reclaim && reclaim.cell !== cellName) {
-    throw new Error(
-      `${accountId} was claimed by ${reclaim.cell} while we were writing our claim — backing off`,
-    );
-  }
-
-  // (1) Stream the R2 archive into the target cell's :import. The archive
-  // is committed in a single transaction on the cell side (see
-  // internal/store/import.go) — a mid-stream failure leaves the cell
-  // untouched, and the whole import re-runs on the next call.
-  const obj = await env.ARCHIVES.get(archived.object);
-  if (!obj || !obj.body) {
-    throw new Error(`archive ${archived.object} not in R2`);
-  }
-  const importResp = await fetch(
-    `${cell.endpoint}/v1/accounts/${accountId}:import`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${cell.provision_token}`,
-        "Content-Type": "application/octet-stream",
-      },
-      body: obj.body,
-      signal: AbortSignal.timeout(300000), // 5 min per-account ceiling
-    },
-  );
-  if (!importResp.ok) {
-    // 409 with body "account already exists on this cell" means a prior
-    // attempt succeeded but died before step 3 — treat as success and
-    // continue to routing/cleanup. Anything else is a real failure.
-    const text = await importResp.text().catch(() => "");
-    if (importResp.status !== 409 || !text.includes("already exists")) {
-      throw new Error(`import ${importResp.status}: ${text.slice(0, 200)}`);
-    }
-  } else {
-    await importResp.text().catch(() => "");
-  }
-
-  // (1a) The archived pointer is the placement source of truth while an
-  // account is offline. Operator rescue edits that metadata, not the immutable
-  // R2 export, so apply it after import before the account becomes routable.
-  // Retrying is safe: the system endpoint replaces the complete policy.
-  if (archived.placement_policy) {
-    const policyResp = await fetch(
-      `${cell.endpoint}/v1/accounts/${accountId}/placement-policy`,
-      {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${cell.provision_token}`,
-        },
-        body: JSON.stringify(archived.placement_policy),
-        signal: AbortSignal.timeout(15000),
-      },
-    );
-    if (!policyResp.ok) {
-      const text = await policyResp.text().catch(() => "");
-      throw new Error(`placement policy ${policyResp.status}: ${text.slice(0, 200)}`);
-    }
-    await policyResp.text().catch(() => "");
-  }
-
-  // (2) Lift the evacuation suspension. Owner-suspended accounts stay
-  // owner-suspended — ResumeAccountSystem's category scoping guarantees the
-  // authority that suspended is the authority that resumes.
-  const resumeResp = await fetch(
-    `${cell.endpoint}/v1/accounts/${accountId}:resume`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${cell.provision_token}`,
-      },
-      body: JSON.stringify({ for: "evacuation" }),
-      signal: AbortSignal.timeout(15000),
-    },
-  );
-  if (!resumeResp.ok) {
-    // 409 "account is not suspended" means the account came back
-    // suspended for something else (owner_request) — legitimate; the
-    // owner will lift it. 409 "category does not match" is the same
-    // reality with a more specific message. Either way, do not fail.
-    const text = await resumeResp.text().catch(() => "");
-    const benign =
-      resumeResp.status === 409 &&
-      (text.includes("not suspended") || text.includes("category"));
-    if (!benign) {
-      throw new Error(`resume ${resumeResp.status}: ${text.slice(0, 200)}`);
-    }
-  } else {
-    await resumeResp.text().catch(() => "");
-  }
-
-  // (3) Write the acct: pointer BEFORE deleting archived:, so a directory
-  // lookup during the tiny gap between the two KV writes always finds
-  // SOMETHING — never a false 404 for an account we already restored.
-  //
-  // Cross-cell race defense: re-read acct: immediately before writing. If
-  // another cell won the race between our claim and this moment (the
-  // claim's re-read isn't a real mutex), we imported successfully but our
-  // data on this cell is now a ghost copy. Refuse to overwrite the
-  // winner's routing pointer — the account correctly serves from the
-  // winning cell; the ghost rows on this cell need manual removal.
-  // Recovery is documented at docs/runbooks.md#clean-up-a-ghost-restore.
-  const finalCheck = await env.DIRECTORY.get(`acct:${accountId}`, { type: "json" });
-  if (finalCheck && finalCheck.cell !== cellName) {
-    throw new Error(
-      `restore race: ${accountId} routes to ${finalCheck.cell} — imported rows on ${cellName} are a ghost; see docs/runbooks.md#clean-up-a-ghost-restore`,
-    );
-  }
-  await env.DIRECTORY.put(
-    `acct:${accountId}`,
-    JSON.stringify({
-      cell: cellName,
-      endpoint: cell.endpoint,
-      region: cell.region,
-      region_code: cell.region_code ?? null,
-    }),
-  );
-
-  // Audit the arrival on the new cell's ledger. account.evacuated was
-  // preserved through the archive (streamed in during :import), so an
-  // owner reading their trail after restore sees the evacuation and
-  // restore as a matched pair. actor_kind=system: fleet-level operation,
-  // not a principal action. archived.cell names the source cell.
-  await logCellEvent(cell, accountId, "account.restored",
-    "system", { from_cell: archived.cell });
-
-  // (4) Retire the archived: pointer, then delete the R2 object. Order
-  // matters for observability: a directory reader that sees archived: gone
-  // but the R2 key still present would be transiently confusing, but a
-  // reader that sees archived: still present after the R2 key is gone
-  // would follow a dead pointer — much worse.
-  await env.DIRECTORY.delete(`archived:${accountId}`);
-  try {
-    await env.ARCHIVES.delete(archived.object);
-  } catch {
-    // ignore — R2 delete of a missing key is a 204; a genuine R2 outage
-    // just leaves an orphan we can sweep later, doesn't roll back the
-    // restore.
-  }
-  await env.DIRECTORY.delete(claimKey);
-}
-
-// reapPendingDuringEvacuation is the pending-account escape hatch inside an
-// evacuation batch. Mirrors reapExpiredPendings' contract exactly: only a
-// {status:"closed", account_id:<id>} acknowledgement is accepted as proof
-// the cell reaped the account, so a stray 2xx (LB default page, captive
-// portal) can't destroy live routing. Deletes pending: AND acct: on
-// success, then returns; the caller records reaped=true and does not
-// write an archive — incomplete signups die with the cell.
-async function reapPendingDuringEvacuation(env, cell, accountId) {
-  const reapResp = await fetch(
-    `${cell.endpoint}/v1/accounts/${accountId}:reap`,
-    {
-      method: "POST",
-      headers: { Authorization: `Bearer ${cell.provision_token}` },
-      signal: AbortSignal.timeout(15000),
-    },
-  );
-  const bodyText = await reapResp.text().catch(() => "");
-  if (!reapResp.ok) {
-    throw new Error(`reap-pending ${reapResp.status}: ${bodyText.slice(0, 200)}`);
-  }
-  let body = null;
-  try {
-    body = JSON.parse(bodyText);
-  } catch {
-    // ignore
-  }
-  if (body?.status !== "closed" || body?.account_id !== accountId) {
-    throw new Error(
-      `reap-pending returned 2xx without a valid acknowledgement for ${accountId}`,
-    );
-  }
-  await env.DIRECTORY.delete(`pending:${accountId}`);
-  await env.DIRECTORY.delete(`acct:${accountId}`);
-  console.log(`evacuate: reaped pending ${accountId} on ${cell.name || cell.endpoint}`);
 }
 
 // handleProbe is POST /v1/cells/{name}:probe — a fleet-token-authorized
@@ -4114,62 +3817,6 @@ async function handleProbe(request, env, cellName) {
     cell_status: resp.status,
     cell_version: cellVersion,
   });
-}
-
-// streamToR2Multipart pipes an unknown-length ReadableStream into an R2
-// object using multipart uploads. It's the workhorse for the "no
-// Content-Length on cell exports" reality: R2's single-shot put() rejects
-// streams without a length, but createMultipartUpload streams cleanly.
-//
-// Any failure — read error mid-stream (truncation), R2 uploadPart error,
-// complete error — aborts the upload, so no object is committed at the key
-// until we know the whole stream landed. Part size 8 MiB (R2 minimum is 5
-// MiB except last).
-async function streamToR2Multipart(bucket, key, stream, opts) {
-  const upload = await bucket.createMultipartUpload(key, opts);
-  const parts = [];
-  const partSize = 8 * 1024 * 1024;
-  let totalBytes = 0;
-  try {
-    const reader = stream.getReader();
-    let buf = new Uint8Array(0);
-    let partNo = 1;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (value && value.length > 0) {
-        const combined = new Uint8Array(buf.length + value.length);
-        combined.set(buf, 0);
-        combined.set(value, buf.length);
-        buf = combined;
-      }
-      // Emit parts as we cross the threshold. A final under-sized part is
-      // handled after the loop.
-      while (buf.length >= partSize) {
-        const chunk = buf.slice(0, partSize);
-        buf = buf.slice(partSize);
-        parts.push(await upload.uploadPart(partNo, chunk));
-        totalBytes += chunk.length;
-        partNo++;
-      }
-      if (done) break;
-    }
-    if (buf.length > 0) {
-      parts.push(await upload.uploadPart(partNo, buf));
-      totalBytes += buf.length;
-    }
-    if (parts.length === 0) {
-      throw new Error("export stream was empty");
-    }
-    await upload.complete(parts);
-    return totalBytes;
-  } catch (e) {
-    try {
-      await upload.abort();
-    } catch {
-      // ignore — R2 auto-cleans abandoned multipart uploads
-    }
-    throw e;
-  }
 }
 
 export default {

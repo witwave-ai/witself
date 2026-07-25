@@ -110,6 +110,26 @@ func TestCanonicalArchiveTablesMatchMigrationsExporterAndImporter(t *testing.T) 
 	}
 }
 
+func TestEvacuationFenceMigrationExcludesLateCellLocalReceipts(t *testing.T) {
+	raw, err := migrationsFS.ReadFile(
+		"migrations/0070_add_account_evacuation_fence.sql",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{
+		"account_evacuation_finalizations",
+		"account_provision_receipts",
+	} {
+		if !strings.Contains(string(raw), "'"+table+"'") {
+			t.Errorf(
+				"migration 0070 does not explicitly exclude cell-local table %q",
+				table,
+			)
+		}
+	}
+}
+
 func withoutArchiveTable(tables []string, omitted string) []string {
 	out := make([]string, 0, len(tables)-1)
 	for _, table := range tables {
