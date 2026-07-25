@@ -374,7 +374,7 @@ require_line '  WITSELF_TRANSCRIPT_RETENTION_ENABLED: "true"' "$live_nested_work
 require_line '  WITSELF_TRANSCRIPT_RETENTION_MODE: "enforce"' "$live_nested_worker_config"
 require_line '  WITSELF_TRANSCRIPT_RETENTION_BATCH_TIMEOUT: "2m"' "$live_nested_worker_config"
 require_line '  WITSELF_AGENT_EMAIL_RETENTION_ENABLED: "true"' "$live_nested_worker_config"
-require_line '  WITSELF_AGENT_EMAIL_RETENTION_MODE: "preview"' "$live_nested_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_RETENTION_MODE: "enforce"' "$live_nested_worker_config"
 require_line "  replicas: 2" "$live_nested_worker_deployment"
 
 require_sequence "$gcp_worker_metrics_service" \
@@ -634,7 +634,7 @@ require_sequence "$apps_render" \
   "            batchTimeout: 2m" \
   "            enabled: true" \
   "            interval: 5m" \
-  "            mode: preview" \
+  "            mode: enforce" \
   "          avatarStyleRollout:" \
   "            batchSize: 100" \
   "            batchTimeout: 30s" \
