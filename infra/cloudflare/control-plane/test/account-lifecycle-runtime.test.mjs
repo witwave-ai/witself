@@ -365,6 +365,22 @@ function protocolResponse(enabled = true) {
   });
 }
 
+test("default lifecycle fetch preserves the platform receiver", async (t) => {
+  let receiver = null;
+  t.mock.method(globalThis, "fetch", function () {
+    receiver = this;
+    return protocolResponse();
+  });
+  const coordinator = new DurableAccountLifecycle(context(), {});
+
+  await coordinator.requireEvacuationProtocol({
+    name: TARGET,
+    endpoint: "https://target.example",
+  });
+
+  assert.equal(receiver, globalThis);
+});
+
 async function roleAwareFetch(fetchImpl, url, init) {
   const response = await fetchImpl(url, init);
   const role = url.endsWith(":begin-evacuation") ||

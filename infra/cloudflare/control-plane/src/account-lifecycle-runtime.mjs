@@ -432,7 +432,11 @@ export class DurableAccountLifecycle {
     this.env = env;
     this.accountId = ctx.id?.name ?? null;
     this.fence = new AccountLifecycleFence();
-    this.fetchImpl = dependencies.fetch ?? globalThis.fetch;
+    // Cloudflare's native fetch is an illegal-invocation Web API when it is
+    // detached from globalThis and later called as an object method. Keep the
+    // platform receiver explicit while leaving injected test fetches intact.
+    this.fetchImpl =
+      dependencies.fetch ?? ((...args) => globalThis.fetch(...args));
     this.randomUUID =
       dependencies.randomUUID ?? (() => globalThis.crypto.randomUUID());
     this.validateArchive =
