@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/witwave-ai/witself/internal/agentemail"
 	"github.com/witwave-ai/witself/internal/id"
+	"github.com/witwave-ai/witself/internal/plans"
 )
 
 const (
@@ -284,11 +287,108 @@ type AgentEmailIngestInput struct {
 
 // AgentEmailCheckpoint is a bounded value-free foreground-work hint.
 type AgentEmailCheckpoint struct {
+	Enabled           bool   `json:"enabled"`
 	Pending           bool   `json:"pending"`
 	MailboxPending    bool   `json:"mailbox_pending,omitempty"`
 	ReceiveState      string `json:"receive_state,omitempty"`
 	AgentReceiveState string `json:"agent_receive_state,omitempty"`
 	RealmReceiveState string `json:"realm_receive_state,omitempty"`
+}
+
+// lockAccountForAgentEmailReceive is the authoritative plan gate for inbound
+// agent email. The account share lock remains held for the caller's
+// transaction, so receipt and owner operations have one unambiguous order
+// relative to a plan snapshot transition.
+//
+// Accounts without an applied snapshot retain unmanaged/self-hosted behavior.
+// Applied snapshots from before email entitlements also remain allowed: the
+// version marker makes the explicit receive feature authoritative only after
+// the control plane has converged the new catalog revision.
+func lockAccountForAgentEmailReceive(
+	ctx context.Context,
+	tx pgx.Tx,
+	accountID string,
+) (bool, error) {
+	var status string
+	var policiesJSON, featuresJSON []byte
+	var appliedAt *time.Time
+	err := tx.QueryRow(ctx, `
+		SELECT status,plan_policies,plan_features,plan_applied_at
+		FROM accounts
+		WHERE id=$1
+		FOR SHARE`, accountID).
+		Scan(&status, &policiesJSON, &featuresJSON, &appliedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, ErrAccountNotFound
+	}
+	if err != nil {
+		return false, fmt.Errorf("lock account for agent email: %w", err)
+	}
+	if status != "active" {
+		return false, ErrAccountNotActive
+	}
+	if appliedAt == nil {
+		return true, nil
+	}
+	var policies map[string]int64
+	if err := json.Unmarshal(policiesJSON, &policies); err != nil {
+		return false, fmt.Errorf("decode plan policies for agent email: %w", err)
+	}
+	var features []string
+	if err := json.Unmarshal(featuresJSON, &features); err != nil {
+		return false, fmt.Errorf("decode plan features for agent email: %w", err)
+	}
+	return agentEmailReceiveEnabledForSnapshot(appliedAt, policies, features), nil
+}
+
+func agentEmailReceiveEnabledForSnapshot(
+	appliedAt *time.Time,
+	policies map[string]int64,
+	features []string,
+) bool {
+	if appliedAt == nil {
+		return true
+	}
+	version, entitlementSnapshot := policies[plans.AgentEmailEntitlementVersionPolicy]
+	if !entitlementSnapshot {
+		return true
+	}
+	return version == plans.AgentEmailEntitlementVersion &&
+		slices.Contains(features, plans.AgentEmailReceiveFeature)
+}
+
+func requireAgentEmailReceiveEnabled(ctx context.Context, tx pgx.Tx, accountID string) error {
+	enabled, err := lockAccountForAgentEmailReceive(ctx, tx, accountID)
+	if err != nil {
+		return err
+	}
+	if !enabled {
+		return &FeatureNotEnabledError{Feature: plans.AgentEmailReceiveFeature}
+	}
+	return nil
+}
+
+// RequireAgentEmailReceiveEnabled performs a content-free account entitlement
+// precheck before the server applies the narrower process-local pilot
+// enrollment fence. It lets disabled plans receive the stable
+// feature_not_enabled response even when an agent is outside the pilot,
+// without weakening pilot enrollment for enabled accounts.
+func (s *Store) RequireAgentEmailReceiveEnabled(ctx context.Context, p Principal) error {
+	if p.Kind != PrincipalAgent {
+		return ErrAgentEmailForbidden
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := requireAgentEmailReceiveEnabled(ctx, tx, p.AccountID); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit agent-email entitlement check: %w", err)
+	}
+	return nil
 }
 
 // AgentEmailRetryCanaryCheckpoint is the value-free cumulative proof for one
@@ -445,7 +545,7 @@ func (s *Store) GetAgentEmailAddress(
 		return AgentEmailAddress{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
+	if err := requireAgentEmailReceiveEnabled(ctx, tx, p.AccountID); err != nil {
 		return AgentEmailAddress{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
@@ -878,7 +978,7 @@ func (s *Store) IngestAgentEmailPilot(
 	if !scope.RealmIDs[candidate.RealmID] || !scope.AgentIDs[candidate.OwnerAgentID] {
 		return AgentEmailMessage{}, ErrAgentEmailPilotNotEnrolled
 	}
-	if err := lockAccountForMint(ctx, tx, candidate.AccountID, false); err != nil {
+	if err := requireAgentEmailReceiveEnabled(ctx, tx, candidate.AccountID); err != nil {
 		return AgentEmailMessage{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, candidate.AccountID, candidate.RealmID, candidate.OwnerAgentID); err != nil {
@@ -943,10 +1043,11 @@ func (s *Store) IngestAgentEmailPilot(
 	}
 	var possibleDuplicate string
 	err = tx.QueryRow(ctx, `
-		SELECT id FROM agent_email_messages
-		WHERE account_id=$1 AND realm_id=$2 AND mailbox_id=$3
-		  AND duplicate_group_sha256=$4
-		ORDER BY received_at,id LIMIT 1`, address.AccountID, address.RealmID,
+			SELECT id FROM agent_email_messages
+			WHERE account_id=$1 AND realm_id=$2 AND mailbox_id=$3
+			  AND duplicate_group_sha256=$4
+			ORDER BY received_at,id LIMIT 1
+			FOR KEY SHARE`, address.AccountID, address.RealmID,
 		address.MailboxID, duplicateGroup).Scan(&possibleDuplicate)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return AgentEmailMessage{}, fmt.Errorf("locate suspected email duplicate: %w", err)
@@ -1061,7 +1162,7 @@ func (s *Store) ListAgentEmails(
 		return AgentEmailPage{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
+	if err := requireAgentEmailReceiveEnabled(ctx, tx, p.AccountID); err != nil {
 		return AgentEmailPage{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
@@ -1176,12 +1277,30 @@ func (s *Store) GetSelfAgentEmailCheckpoint(
 	if err := requireAgentEmailPilotPrincipal(scope, p); err != nil {
 		return AgentEmailCheckpoint{}, err
 	}
-	address, err := s.GetAgentEmailAddress(ctx, scope, p)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return AgentEmailCheckpoint{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	enabled, err := lockAccountForAgentEmailReceive(ctx, tx, p.AccountID)
+	if err != nil {
+		return AgentEmailCheckpoint{}, err
+	}
+	if !enabled {
+		if err := tx.Commit(ctx); err != nil {
+			return AgentEmailCheckpoint{}, fmt.Errorf("commit disabled agent-email checkpoint: %w", err)
+		}
+		return AgentEmailCheckpoint{Enabled: false}, nil
+	}
+	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
+		return AgentEmailCheckpoint{}, mapAgentEmailPrincipalError(err)
+	}
+	address, err := agentEmailAddressForOwnerTx(ctx, tx, p.AccountID, p.RealmID, p.ID)
 	if err != nil {
 		return AgentEmailCheckpoint{}, err
 	}
 	var pending bool
-	err = s.pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT EXISTS (
 		  SELECT 1 FROM agent_email_deliveries d
 		  JOIN agent_email_mailboxes mb
@@ -1198,8 +1317,11 @@ func (s *Store) GetSelfAgentEmailCheckpoint(
 	if err != nil {
 		return AgentEmailCheckpoint{}, fmt.Errorf("read agent-email checkpoint: %w", err)
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return AgentEmailCheckpoint{}, fmt.Errorf("commit agent-email checkpoint: %w", err)
+	}
 	return AgentEmailCheckpoint{
-		Pending: pending, MailboxPending: pending,
+		Enabled: true, Pending: pending, MailboxPending: pending,
 		ReceiveState:      address.ReceiveState,
 		AgentReceiveState: address.AgentReceiveState,
 		RealmReceiveState: address.RealmReceiveState,
@@ -1235,7 +1357,7 @@ func (s *Store) ClaimAgentEmail(
 		return AgentEmailProcessing{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
+	if err := requireAgentEmailReceiveEnabled(ctx, tx, p.AccountID); err != nil {
 		return AgentEmailProcessing{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
@@ -1495,7 +1617,7 @@ func (s *Store) mutateAgentEmailClaim(
 		return AgentEmailProcessing{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
+	if err := requireAgentEmailReceiveEnabled(ctx, tx, p.AccountID); err != nil {
 		return AgentEmailProcessing{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
@@ -1562,7 +1684,7 @@ func (s *Store) transitionAgentEmail(
 		return AgentEmailMessage{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
+	if err := requireAgentEmailReceiveEnabled(ctx, tx, p.AccountID); err != nil {
 		return AgentEmailMessage{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {
@@ -2316,7 +2438,7 @@ func lockAgentEmailRetryCanaryOwnerTx(
 	tx pgx.Tx,
 	p Principal,
 ) (AgentEmailAddress, error) {
-	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
+	if err := requireAgentEmailReceiveEnabled(ctx, tx, p.AccountID); err != nil {
 		return AgentEmailAddress{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, p.AccountID, p.RealmID, p.ID); err != nil {

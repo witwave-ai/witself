@@ -143,6 +143,9 @@ func configureAgentEmail(ctx context.Context, cfg *server.Config, st *store.Stor
 		_, err := st.IngestAgentEmailPilot(ctx, scope, store.AgentEmailIngestInput{Relay: relay, Raw: raw})
 		return mapAgentEmailIngestError(err)
 	}
+	cfg.RequireAgentEmailEntitlement = func(ctx context.Context, p server.DomainPrincipal) error {
+		return mapAgentEmailError(st.RequireAgentEmailReceiveEnabled(ctx, toStorePrincipal(p)))
+	}
 	cfg.GetAgentEmailAddress = func(ctx context.Context, p server.DomainPrincipal) (server.AgentEmailAddress, error) {
 		address, err := st.GetAgentEmailAddress(ctx, scope, toStorePrincipal(p))
 		if err != nil {
@@ -214,7 +217,9 @@ func configureAgentEmail(ctx context.Context, cfg *server.Config, st *store.Stor
 		if err != nil {
 			return server.AgentEmailCheckpoint{}, mapAgentEmailError(err)
 		}
+		enabled := checkpoint.Enabled
 		return server.AgentEmailCheckpoint{
+			Enabled: &enabled,
 			Pending: checkpoint.Pending, MailboxPending: checkpoint.MailboxPending,
 			ReceiveState:      checkpoint.ReceiveState,
 			AgentReceiveState: checkpoint.AgentReceiveState,
@@ -267,6 +272,8 @@ func mapAgentEmailIngestError(err error) error {
 		return server.ErrAgentEmailUnknownRecipient
 	case errors.Is(err, store.ErrAgentEmailReceiveDisabled):
 		return server.ErrAgentEmailReceiveDisabled
+	case errors.Is(err, store.ErrFeatureNotEnabled):
+		return server.ErrAgentEmailFeatureDisabled
 	case errors.Is(err, store.ErrAgentEmailRetryCanaryTemporary):
 		return server.ErrAgentEmailRetryCanaryTemporary
 	case errors.Is(err, store.ErrAgentEmailRetryCanaryPermanent):
@@ -281,9 +288,12 @@ func mapAgentEmailIngestError(err error) error {
 }
 
 func mapAgentEmailError(err error) error {
+	var featureErr *store.FeatureNotEnabledError
 	switch {
 	case err == nil:
 		return nil
+	case errors.As(err, &featureErr):
+		return &server.FeatureNotEnabledError{Feature: featureErr.Feature}
 	case errors.Is(err, store.ErrAgentEmailInputInvalid), errors.Is(err, store.ErrAgentEmailCursorInvalid):
 		return wrapAsSentinel(server.ErrBadInput, store.ErrAgentEmailInputInvalid, err)
 	case errors.Is(err, store.ErrAgentEmailNotFound), errors.Is(err, store.ErrAgentEmailAddressMissing):

@@ -9,7 +9,43 @@ import (
 	"time"
 
 	"github.com/witwave-ai/witself/internal/agentemail"
+	"github.com/witwave-ai/witself/internal/plans"
 )
+
+func TestAgentEmailReceiveFeatureSnapshotSemantics(t *testing.T) {
+	now := time.Now()
+	if !agentEmailReceiveEnabledForSnapshot(nil, nil, nil) {
+		t.Fatal("unmanaged account without plan_applied_at must retain agent email")
+	}
+	if !agentEmailReceiveEnabledForSnapshot(
+		&now,
+		map[string]int64{plans.AgentEmailRetentionDaysPolicy: 30},
+		[]string{"memory", "facts"},
+	) {
+		t.Fatal("legacy snapshot without entitlement marker must retain agent email")
+	}
+	policies := map[string]int64{
+		plans.AgentEmailEntitlementVersionPolicy: plans.AgentEmailEntitlementVersion,
+	}
+	if agentEmailReceiveEnabledForSnapshot(&now, policies, nil) ||
+		agentEmailReceiveEnabledForSnapshot(&now, policies, []string{"memory", "facts"}) {
+		t.Fatal("marked snapshot without receive feature must disable agent email")
+	}
+	if !agentEmailReceiveEnabledForSnapshot(
+		&now,
+		policies,
+		[]string{"memory", plans.AgentEmailReceiveFeature},
+	) {
+		t.Fatal("marked snapshot with receive feature must enable agent email")
+	}
+	if agentEmailReceiveEnabledForSnapshot(
+		&now,
+		map[string]int64{plans.AgentEmailEntitlementVersionPolicy: 2},
+		[]string{plans.AgentEmailReceiveFeature},
+	) {
+		t.Fatal("unknown entitlement marker version must fail closed")
+	}
+}
 
 func TestAgentEmailRetryCanaryDeliveryFingerprintV1Golden(t *testing.T) {
 	t.Parallel()

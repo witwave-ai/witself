@@ -323,6 +323,11 @@ func TestTranscriptRetentionDeletesOnlyExpiredWholeConversationsPostgres(t *test
 	if err := migrationTestDown(t, schemaDSN, false); err != nil {
 		t.Fatal(err)
 	}
+	assertMigrationTestVersion(t, schemaDSN, 68)
+	assertMigrationTestTable(t, st, "agent_email_retention_worker_lanes", false)
+	if err := migrationTestDown(t, schemaDSN, false); err != nil {
+		t.Fatal(err)
+	}
 	assertMigrationTestVersion(t, schemaDSN, 67)
 	assertMigrationTestTable(t, st, "message_retention_worker_lanes", false)
 	if err := migrationTestDown(t, schemaDSN, false); err != nil {

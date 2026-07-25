@@ -115,6 +115,18 @@ func Register(mux *http.ServeMux, cfg Config) error {
 			withAdmin(cfg, adminPutMessageRetention))
 		mux.HandleFunc("DELETE /v1/admin/accounts/{id}/message-retention",
 			withAdmin(cfg, adminDeleteMessageRetention))
+		mux.HandleFunc("GET /v1/admin/accounts/{id}/email-receive",
+			withAdmin(cfg, adminGetAgentEmailReceive))
+		mux.HandleFunc("PUT /v1/admin/accounts/{id}/email-receive",
+			withAdmin(cfg, adminPutAgentEmailReceive))
+		mux.HandleFunc("DELETE /v1/admin/accounts/{id}/email-receive",
+			withAdmin(cfg, adminDeleteAgentEmailReceive))
+		mux.HandleFunc("GET /v1/admin/accounts/{id}/email-retention",
+			withAdmin(cfg, adminGetAgentEmailRetention))
+		mux.HandleFunc("PUT /v1/admin/accounts/{id}/email-retention",
+			withAdmin(cfg, adminPutAgentEmailRetention))
+		mux.HandleFunc("DELETE /v1/admin/accounts/{id}/email-retention",
+			withAdmin(cfg, adminDeleteAgentEmailRetention))
 		mux.HandleFunc("GET /v1/admin/accounts/{id}/plan-override",
 			withAdmin(cfg, adminGetPlanOverride))
 		mux.HandleFunc("PUT /v1/admin/accounts/{id}/plan-override",
@@ -295,6 +307,8 @@ func planStatus(cfg Config, w http.ResponseWriter, r *http.Request, accountID st
 		"feature_defaults":     snapshot.DefaultFeatures,
 		"messaging":            messagingView(rec, snapshot, false),
 		"message_retention":    messageRetentionView(rec, snapshot, false),
+		"email_receive":        agentEmailReceiveView(rec, snapshot, false),
+		"email_retention":      agentEmailRetentionView(rec, snapshot, false),
 		"transcript_retention": transcriptRetentionView(rec, snapshot, false),
 		"apply_pending":        lifecycle.SnapshotApplyPending(rec, snapshot),
 	}
@@ -354,6 +368,47 @@ func messageRetentionView(
 	}
 	if includeAdminDetail && rec.MessageRetentionOverride != nil {
 		out["override"] = rec.MessageRetentionOverride
+	}
+	return out
+}
+
+func agentEmailReceiveView(
+	rec lifecycle.Record,
+	snapshot lifecycle.PlanSnapshot,
+	includeAdminDetail bool,
+) map[string]any {
+	out := map[string]any{
+		"default_enabled": slices.Contains(
+			snapshot.DefaultFeatures, plans.AgentEmailReceiveFeature),
+		"enabled": slices.Contains(
+			snapshot.Features, plans.AgentEmailReceiveFeature),
+		"overridden": rec.AgentEmailReceiveOverride != nil,
+	}
+	if includeAdminDetail && rec.AgentEmailReceiveOverride != nil {
+		out["override"] = rec.AgentEmailReceiveOverride
+	}
+	return out
+}
+
+func agentEmailRetentionView(
+	rec lifecycle.Record,
+	snapshot lifecycle.PlanSnapshot,
+	includeAdminDetail bool,
+) map[string]any {
+	var defaultDays any
+	if days, ok := snapshot.DefaultPolicies[plans.AgentEmailRetentionDaysPolicy]; ok {
+		defaultDays = days
+	}
+	var effectiveDays any
+	if days, ok := snapshot.Policies[plans.AgentEmailRetentionDaysPolicy]; ok {
+		effectiveDays = days
+	}
+	out := map[string]any{
+		"default_days": defaultDays, "effective_days": effectiveDays,
+		"overridden": rec.AgentEmailRetentionOverride != nil,
+	}
+	if includeAdminDetail && rec.AgentEmailRetentionOverride != nil {
+		out["override"] = rec.AgentEmailRetentionOverride
 	}
 	return out
 }
@@ -461,6 +516,8 @@ func writeAdminAccountPolicy(
 		"plan_override":        rec.PlanOverride,
 		"messaging":            messagingView(rec, snapshot, true),
 		"message_retention":    messageRetentionView(rec, snapshot, true),
+		"email_receive":        agentEmailReceiveView(rec, snapshot, true),
+		"email_retention":      agentEmailRetentionView(rec, snapshot, true),
 		"transcript_retention": transcriptRetentionView(rec, snapshot, true),
 		"admin_history":        rec.AdminHistory,
 		"apply_pending":        pending,
@@ -668,6 +725,130 @@ func adminDeleteMessageRetention(
 		return
 	}
 	if _, err := cfg.Manager.ClearMessageRetentionOverride(
+		r.Context(), accountID, actor, req.Reason,
+	); err != nil {
+		writeManagerError(w, err)
+		return
+	}
+	writeAdminAccountPolicy(cfg, w, r, accountID, true, "")
+}
+
+func adminGetAgentEmailReceive(
+	cfg Config,
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	_ lifecycle.AdminActor,
+) {
+	writeAdminAccountPolicy(cfg, w, r, accountID, false, "")
+}
+
+func adminPutAgentEmailReceive(
+	cfg Config,
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	actor lifecycle.AdminActor,
+) {
+	var req struct {
+		Enabled *bool  `json:"enabled"`
+		Reason  string `json:"reason"`
+	}
+	if err := decodeStrictJSON(r, &req); err != nil || req.Enabled == nil {
+		writeError(w, http.StatusBadRequest,
+			"a JSON body with enabled and reason is required")
+		return
+	}
+	if _, err := cfg.Manager.SetAgentEmailReceiveOverride(
+		r.Context(), accountID, *req.Enabled, actor, req.Reason,
+	); err != nil {
+		writeManagerError(w, err)
+		return
+	}
+	writeAdminAccountPolicy(cfg, w, r, accountID, true, "")
+}
+
+func adminDeleteAgentEmailReceive(
+	cfg Config,
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	actor lifecycle.AdminActor,
+) {
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if err := decodeStrictJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest,
+			"a JSON body with reason is required")
+		return
+	}
+	if _, err := cfg.Manager.ClearAgentEmailReceiveOverride(
+		r.Context(), accountID, actor, req.Reason,
+	); err != nil {
+		writeManagerError(w, err)
+		return
+	}
+	writeAdminAccountPolicy(cfg, w, r, accountID, true, "")
+}
+
+func adminGetAgentEmailRetention(
+	cfg Config,
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	_ lifecycle.AdminActor,
+) {
+	writeAdminAccountPolicy(cfg, w, r, accountID, false, "")
+}
+
+func adminPutAgentEmailRetention(
+	cfg Config,
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	actor lifecycle.AdminActor,
+) {
+	var req struct {
+		Days       *int64 `json:"days"`
+		Indefinite bool   `json:"indefinite"`
+		Reason     string `json:"reason"`
+	}
+	if err := decodeStrictJSON(r, &req); err != nil ||
+		(req.Days == nil) == !req.Indefinite {
+		writeError(w, http.StatusBadRequest,
+			"set exactly one of days or indefinite=true")
+		return
+	}
+	var days *int64
+	if !req.Indefinite {
+		days = req.Days
+	}
+	if _, err := cfg.Manager.SetAgentEmailRetentionOverride(
+		r.Context(), accountID, days, actor, req.Reason,
+	); err != nil {
+		writeManagerError(w, err)
+		return
+	}
+	writeAdminAccountPolicy(cfg, w, r, accountID, true, "")
+}
+
+func adminDeleteAgentEmailRetention(
+	cfg Config,
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	actor lifecycle.AdminActor,
+) {
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if err := decodeStrictJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest,
+			"a JSON body with reason is required")
+		return
+	}
+	if _, err := cfg.Manager.ClearAgentEmailRetentionOverride(
 		r.Context(), accountID, actor, req.Reason,
 	); err != nil {
 		writeManagerError(w, err)

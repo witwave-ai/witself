@@ -166,6 +166,15 @@ worker:
     batchSize: 25
     interval: 5m
     batchTimeout: 2m
+  # Inbound agent-email retention deletes whole stored email rows (including
+  # raw MIME through the row itself) while preserving mailboxes and addresses.
+  # Keep disabled through schema rollout, then observe preview before enforce.
+  agentEmailRetention:
+    enabled: false
+    mode: preview
+    batchSize: 25
+    interval: 5m
+    batchTimeout: 2m
 
 database:
   existingSecret:

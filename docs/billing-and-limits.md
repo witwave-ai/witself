@@ -31,6 +31,11 @@ subscription, or invoice history. Finite windows are subject to explicit
 memory-provenance holds; the worker reports those holds without deleting the
 memory or its source graph.
 
+Inbound agent email follows the same account-policy model. Personal does not
+include receipt and carries a 30-day downgrade-cleanup window. Professional,
+Team, and Enterprise include receipt with 90-, 365-, and 365-day defaults.
+Availability and retention can each be overridden without changing billing.
+
 V0 should meter meaningful usage internally, but charge primarily by plan tier.
 This gives Witself enough data to understand real service load without making
 the first pricing model feel like nickel-and-dime metering.
@@ -66,7 +71,7 @@ the other rows remain subject to their own implementation and rollout gates.
 | Transcript retention | 30 days | 90 days | 365 days | Configurable, including indefinite |
 | Secrets per agent | 0 | 100 | 250 | 1,000 |
 | Agent messages | Disabled; 30-day downgrade cleanup | Unlimited; retained 90 days | Unlimited; retained 365 days | Enabled; retained 365 days by default, contract override |
-| Receive agent email | No | Unlimited; retained 90 days | Unlimited; retained 365 days | Contracted; configurable retention |
+| Receive agent email | No | Unlimited; retained 90 days | Unlimited; retained 365 days | Enabled; retained 365 days by default, contract override |
 | Raw MIME and attachment retention | None stored | 90 days | 365 days | Configurable, including indefinite |
 | Maximum raw email size | Not available | 10 MiB | 25 MiB | Contracted; 25 MiB default |
 | Retained attachment storage per account | 0 | 5 GiB | 100 GiB | Contracted |
@@ -155,6 +160,49 @@ founder snapshot never temporarily inherits Enterprise's 365-day default.
 After any new-policy snapshot is accepted, pre-feature cell or control-plane
 rollback is prohibited: an old cell ignores the entitlement and an old control
 plane can recompute a legacy snapshot without the new policy.
+
+### Agent-email availability and retention
+
+The resolved cell snapshot uses feature `agent_email_receive`, policy
+`agent_email_retention_days`, and rollout marker
+`agent_email_entitlement_version: 1`. A marked snapshot without the feature
+rejects inbound email before storage; an unmarked legacy snapshot preserves
+the pre-entitlement receive behavior. Retention remains independent so mail
+already stored before a downgrade can age out on schedule. An absent retention
+key means explicit indefinite retention.
+
+The integration stays installed across plan and override changes. The
+administrator surface is:
+
+```sh
+witself-admin account email-receive get --account ACCOUNT_ID
+witself-admin account email-receive set --account ACCOUNT_ID --enabled --reason "..."
+witself-admin account email-receive set --account ACCOUNT_ID --disabled --reason "..."
+witself-admin account email-receive clear --account ACCOUNT_ID --reason "..."
+
+witself-admin account email-retention get --account ACCOUNT_ID
+witself-admin account email-retention set --account ACCOUNT_ID --days 365 --reason "..."
+witself-admin account email-retention set --account ACCOUNT_ID --indefinite --reason "..."
+witself-admin account email-retention clear --account ACCOUNT_ID --reason "..."
+```
+
+The matching authenticated resources are
+`/v1/admin/accounts/{id}/email-receive` and
+`/v1/admin/accounts/{id}/email-retention`, each with `GET`, `PUT`, and
+`DELETE`. Owner plan status exposes only inherited and effective values.
+
+Before catalog reconciliation, the founder account receives an explicit
+indefinite email-retention override followed by an explicit enabled
+email-receive override. This keeps its first marked snapshot from temporarily
+inheriting Enterprise's finite default.
+
+Rollout is cell-and-edge first: deploy a cell that understands the marked
+snapshot and an agent-email edge Worker that accepts the cell's
+`feature_disabled` verdict before the control plane publishes or reconciles
+the new catalog. After any marked snapshot is accepted, the cell, control
+plane, and edge Worker share a forward-only compatibility boundary. Rolling
+the edge Worker back to a pre-entitlement version would treat an intentional
+accept-and-drop verdict as a transient relay failure and cause sender retries.
 
 ### Realm and agent limits
 

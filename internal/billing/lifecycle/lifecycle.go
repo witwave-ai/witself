@@ -128,6 +128,27 @@ type MessageRetentionOverride struct {
 	SetAt       time.Time `json:"set_at"`
 }
 
+// AgentEmailReceiveOverride is an account-specific exception to whether
+// inbound agent email is enabled. Absence means inherit the plan feature.
+type AgentEmailReceiveOverride struct {
+	Enabled     bool      `json:"enabled"`
+	ActorID     string    `json:"actor_id"`
+	ActorHandle string    `json:"actor_handle"`
+	Reason      string    `json:"reason"`
+	SetAt       time.Time `json:"set_at"`
+}
+
+// AgentEmailRetentionOverride is an account-specific exception to inbound
+// agent-email retention. Days=nil is explicit indefinite retention; absence
+// means inherit the current plan default.
+type AgentEmailRetentionOverride struct {
+	Days        *int64    `json:"days"`
+	ActorID     string    `json:"actor_id"`
+	ActorHandle string    `json:"actor_handle"`
+	Reason      string    `json:"reason"`
+	SetAt       time.Time `json:"set_at"`
+}
+
 // AccountLimitOverride is an account-specific hard-cap exception. Max=nil is
 // an explicit unlimited override; absence of the dimension from
 // Record.LimitOverrides means inherit the current plan default.
@@ -148,28 +169,36 @@ type AccountLimitValue struct {
 // AdminChange is the append-only audit history embedded in the account's
 // compare-and-swap record. Kind determines how nil values are interpreted.
 type AdminChange struct {
-	Kind                       string             `json:"kind"`
-	ActorID                    string             `json:"actor_id"`
-	ActorHandle                string             `json:"actor_handle"`
-	Reason                     string             `json:"reason"`
-	At                         time.Time          `json:"at"`
-	PlanFrom                   string             `json:"plan_from,omitempty"`
-	PlanTo                     string             `json:"plan_to,omitempty"`
-	RetentionFrom              *int64             `json:"retention_from,omitempty"`
-	RetentionTo                *int64             `json:"retention_to,omitempty"`
-	MessagingFrom              *bool              `json:"messaging_from,omitempty"`
-	MessagingTo                *bool              `json:"messaging_to,omitempty"`
-	MessagingFromSource        string             `json:"messaging_from_source,omitempty"`
-	MessagingToSource          string             `json:"messaging_to_source,omitempty"`
-	MessageRetentionFrom       *int64             `json:"message_retention_from,omitempty"`
-	MessageRetentionTo         *int64             `json:"message_retention_to,omitempty"`
-	MessageRetentionFromSource string             `json:"message_retention_from_source,omitempty"`
-	MessageRetentionToSource   string             `json:"message_retention_to_source,omitempty"`
-	LimitDimension             string             `json:"limit_dimension,omitempty"`
-	LimitFrom                  *AccountLimitValue `json:"limit_from,omitempty"`
-	LimitTo                    *AccountLimitValue `json:"limit_to,omitempty"`
-	LimitFromSource            string             `json:"limit_from_source,omitempty"`
-	LimitToSource              string             `json:"limit_to_source,omitempty"`
+	Kind                          string             `json:"kind"`
+	ActorID                       string             `json:"actor_id"`
+	ActorHandle                   string             `json:"actor_handle"`
+	Reason                        string             `json:"reason"`
+	At                            time.Time          `json:"at"`
+	PlanFrom                      string             `json:"plan_from,omitempty"`
+	PlanTo                        string             `json:"plan_to,omitempty"`
+	RetentionFrom                 *int64             `json:"retention_from,omitempty"`
+	RetentionTo                   *int64             `json:"retention_to,omitempty"`
+	MessagingFrom                 *bool              `json:"messaging_from,omitempty"`
+	MessagingTo                   *bool              `json:"messaging_to,omitempty"`
+	MessagingFromSource           string             `json:"messaging_from_source,omitempty"`
+	MessagingToSource             string             `json:"messaging_to_source,omitempty"`
+	MessageRetentionFrom          *int64             `json:"message_retention_from,omitempty"`
+	MessageRetentionTo            *int64             `json:"message_retention_to,omitempty"`
+	MessageRetentionFromSource    string             `json:"message_retention_from_source,omitempty"`
+	MessageRetentionToSource      string             `json:"message_retention_to_source,omitempty"`
+	AgentEmailReceiveFrom         *bool              `json:"agent_email_receive_from,omitempty"`
+	AgentEmailReceiveTo           *bool              `json:"agent_email_receive_to,omitempty"`
+	AgentEmailReceiveFromSource   string             `json:"agent_email_receive_from_source,omitempty"`
+	AgentEmailReceiveToSource     string             `json:"agent_email_receive_to_source,omitempty"`
+	AgentEmailRetentionFrom       *int64             `json:"agent_email_retention_from,omitempty"`
+	AgentEmailRetentionTo         *int64             `json:"agent_email_retention_to,omitempty"`
+	AgentEmailRetentionFromSource string             `json:"agent_email_retention_from_source,omitempty"`
+	AgentEmailRetentionToSource   string             `json:"agent_email_retention_to_source,omitempty"`
+	LimitDimension                string             `json:"limit_dimension,omitempty"`
+	LimitFrom                     *AccountLimitValue `json:"limit_from,omitempty"`
+	LimitTo                       *AccountLimitValue `json:"limit_to,omitempty"`
+	LimitFromSource               string             `json:"limit_from_source,omitempty"`
+	LimitToSource                 string             `json:"limit_to_source,omitempty"`
 }
 
 // Record is one account's billing state. Plan facts only — identity stays in
@@ -200,6 +229,8 @@ type Record struct {
 	TranscriptRetentionOverride *TranscriptRetentionOverride
 	MessagingOverride           *MessagingOverride
 	MessageRetentionOverride    *MessageRetentionOverride
+	AgentEmailReceiveOverride   *AgentEmailReceiveOverride
+	AgentEmailRetentionOverride *AgentEmailRetentionOverride
 	LimitOverrides              map[string]AccountLimitOverride
 	AdminHistory                []AdminChange
 	// PastDueSince is set while the provider reports failed renewals. Grace
@@ -640,6 +671,17 @@ func (m *Manager) resolveSnapshot(r Record) (PlanSnapshot, error) {
 		snapshot.Features = setFeature(
 			snapshot.Features, plans.MessagingFeature, override.Enabled)
 	}
+	if override := r.AgentEmailRetentionOverride; override != nil {
+		if override.Days == nil {
+			delete(snapshot.Policies, plans.AgentEmailRetentionDaysPolicy)
+		} else {
+			snapshot.Policies[plans.AgentEmailRetentionDaysPolicy] = *override.Days
+		}
+	}
+	if override := r.AgentEmailReceiveOverride; override != nil {
+		snapshot.Features = setFeature(
+			snapshot.Features, plans.AgentEmailReceiveFeature, override.Enabled)
+	}
 	for dimension, override := range r.LimitOverrides {
 		validationValue := int64(0)
 		if override.Max != nil {
@@ -728,6 +770,10 @@ func retentionDays(policies map[string]int64) *int64 {
 
 func messageRetentionDays(policies map[string]int64) *int64 {
 	return policyDays(policies, plans.MessageRetentionDaysPolicy)
+}
+
+func agentEmailRetentionDays(policies map[string]int64) *int64 {
+	return policyDays(policies, plans.AgentEmailRetentionDaysPolicy)
 }
 
 func policyDays(policies map[string]int64, key string) *int64 {
@@ -1284,6 +1330,206 @@ func (m *Manager) ClearMessageRetentionOverride(
 			MessageRetentionTo:         messageRetentionDays(after.Policies),
 			MessageRetentionFromSource: "override",
 			MessageRetentionToSource:   "inherited",
+		})
+		return nil
+	})
+	if err != nil {
+		return Record{}, err
+	}
+	_ = m.apply(ctx, accountID)
+	return r, nil
+}
+
+// SetAgentEmailReceiveOverride enables or disables inbound agent email for one
+// account without changing its plan or requiring a client reinstall.
+func (m *Manager) SetAgentEmailReceiveOverride(
+	ctx context.Context,
+	accountID string,
+	enabled bool,
+	actor AdminActor,
+	reason string,
+) (Record, error) {
+	actor, reason, err := validateAdminChange(actor, reason)
+	if err != nil {
+		return Record{}, err
+	}
+	now := m.cfg.Now()
+	r, err := m.mutate(ctx, accountID, "", func(r *Record) error {
+		if current := r.AgentEmailReceiveOverride; current != nil &&
+			current.Enabled == enabled {
+			return errSkipWrite
+		}
+		before, err := m.resolveSnapshot(*r)
+		if err != nil {
+			return err
+		}
+		fromSource := "inherited"
+		if r.AgentEmailReceiveOverride != nil {
+			fromSource = "override"
+		}
+		r.AgentEmailReceiveOverride = &AgentEmailReceiveOverride{
+			Enabled: enabled, ActorID: actor.ID, ActorHandle: actor.Handle,
+			Reason: reason, SetAt: now,
+		}
+		r.AdminHistory = append(r.AdminHistory, AdminChange{
+			Kind:    "agent_email_receive_override_set",
+			ActorID: actor.ID, ActorHandle: actor.Handle,
+			Reason: reason, At: now,
+			AgentEmailReceiveFrom: boolValue(featureEnabled(
+				before.Features, plans.AgentEmailReceiveFeature)),
+			AgentEmailReceiveTo:         boolValue(enabled),
+			AgentEmailReceiveFromSource: fromSource,
+			AgentEmailReceiveToSource:   "override",
+		})
+		return nil
+	})
+	if err != nil {
+		return Record{}, err
+	}
+	_ = m.apply(ctx, accountID)
+	return r, nil
+}
+
+// ClearAgentEmailReceiveOverride restores the inbound-email feature state
+// inherited from the account's effective plan.
+func (m *Manager) ClearAgentEmailReceiveOverride(
+	ctx context.Context,
+	accountID string,
+	actor AdminActor,
+	reason string,
+) (Record, error) {
+	actor, reason, err := validateAdminChange(actor, reason)
+	if err != nil {
+		return Record{}, err
+	}
+	now := m.cfg.Now()
+	r, err := m.mutate(ctx, accountID, "", func(r *Record) error {
+		if r.AgentEmailReceiveOverride == nil {
+			return errSkipWrite
+		}
+		before, err := m.resolveSnapshot(*r)
+		if err != nil {
+			return err
+		}
+		r.AgentEmailReceiveOverride = nil
+		after, err := m.resolveSnapshot(*r)
+		if err != nil {
+			return err
+		}
+		r.AdminHistory = append(r.AdminHistory, AdminChange{
+			Kind:    "agent_email_receive_override_cleared",
+			ActorID: actor.ID, ActorHandle: actor.Handle,
+			Reason: reason, At: now,
+			AgentEmailReceiveFrom: boolValue(featureEnabled(
+				before.Features, plans.AgentEmailReceiveFeature)),
+			AgentEmailReceiveTo: boolValue(featureEnabled(
+				after.Features, plans.AgentEmailReceiveFeature)),
+			AgentEmailReceiveFromSource: "override",
+			AgentEmailReceiveToSource:   "inherited",
+		})
+		return nil
+	})
+	if err != nil {
+		return Record{}, err
+	}
+	_ = m.apply(ctx, accountID)
+	return r, nil
+}
+
+// SetAgentEmailRetentionOverride sets a finite or explicit indefinite inbound
+// email-retention exception independently of receive availability.
+func (m *Manager) SetAgentEmailRetentionOverride(
+	ctx context.Context,
+	accountID string,
+	days *int64,
+	actor AdminActor,
+	reason string,
+) (Record, error) {
+	actor, reason, err := validateAdminChange(actor, reason)
+	if err != nil {
+		return Record{}, err
+	}
+	if days != nil {
+		if err := plans.ValidatePolicies(map[string]int64{
+			plans.AgentEmailRetentionDaysPolicy: *days,
+		}); err != nil {
+			return Record{}, fmt.Errorf("%w: %v", ErrAdminInput, err)
+		}
+	}
+	now := m.cfg.Now()
+	r, err := m.mutate(ctx, accountID, "", func(r *Record) error {
+		if current := r.AgentEmailRetentionOverride; current != nil &&
+			sameOptionalDays(current.Days, days) {
+			return errSkipWrite
+		}
+		before, err := m.resolveSnapshot(*r)
+		if err != nil {
+			return err
+		}
+		fromSource := "inherited"
+		if r.AgentEmailRetentionOverride != nil {
+			fromSource = "override"
+		}
+		var storedDays *int64
+		if days != nil {
+			value := *days
+			storedDays = &value
+		}
+		r.AgentEmailRetentionOverride = &AgentEmailRetentionOverride{
+			Days: storedDays, ActorID: actor.ID, ActorHandle: actor.Handle,
+			Reason: reason, SetAt: now,
+		}
+		r.AdminHistory = append(r.AdminHistory, AdminChange{
+			Kind:    "agent_email_retention_override_set",
+			ActorID: actor.ID, ActorHandle: actor.Handle,
+			Reason: reason, At: now,
+			AgentEmailRetentionFrom:       agentEmailRetentionDays(before.Policies),
+			AgentEmailRetentionTo:         storedDays,
+			AgentEmailRetentionFromSource: fromSource,
+			AgentEmailRetentionToSource:   "override",
+		})
+		return nil
+	})
+	if err != nil {
+		return Record{}, err
+	}
+	_ = m.apply(ctx, accountID)
+	return r, nil
+}
+
+// ClearAgentEmailRetentionOverride restores the current plan default.
+func (m *Manager) ClearAgentEmailRetentionOverride(
+	ctx context.Context,
+	accountID string,
+	actor AdminActor,
+	reason string,
+) (Record, error) {
+	actor, reason, err := validateAdminChange(actor, reason)
+	if err != nil {
+		return Record{}, err
+	}
+	now := m.cfg.Now()
+	r, err := m.mutate(ctx, accountID, "", func(r *Record) error {
+		if r.AgentEmailRetentionOverride == nil {
+			return errSkipWrite
+		}
+		before, err := m.resolveSnapshot(*r)
+		if err != nil {
+			return err
+		}
+		r.AgentEmailRetentionOverride = nil
+		after, err := m.resolveSnapshot(*r)
+		if err != nil {
+			return err
+		}
+		r.AdminHistory = append(r.AdminHistory, AdminChange{
+			Kind:    "agent_email_retention_override_cleared",
+			ActorID: actor.ID, ActorHandle: actor.Handle,
+			Reason: reason, At: now,
+			AgentEmailRetentionFrom:       agentEmailRetentionDays(before.Policies),
+			AgentEmailRetentionTo:         agentEmailRetentionDays(after.Policies),
+			AgentEmailRetentionFromSource: "override",
+			AgentEmailRetentionToSource:   "inherited",
 		})
 		return nil
 	})

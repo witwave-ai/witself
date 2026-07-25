@@ -113,6 +113,9 @@ func TestAgentEmailErrorMapping(t *testing.T) {
 	if !errors.Is(mapAgentEmailIngestError(store.ErrAgentEmailUnknownRecipient), server.ErrAgentEmailUnknownRecipient) ||
 		!errors.Is(mapAgentEmailIngestError(store.ErrAgentEmailPilotNotEnrolled), server.ErrAgentEmailUnknownRecipient) ||
 		!errors.Is(mapAgentEmailIngestError(store.ErrAgentEmailReceiveDisabled), server.ErrAgentEmailReceiveDisabled) ||
+		!errors.Is(mapAgentEmailIngestError(
+			&store.FeatureNotEnabledError{Feature: "agent_email_receive"},
+		), server.ErrAgentEmailFeatureDisabled) ||
 		!errors.Is(mapAgentEmailIngestError(store.ErrAgentEmailRetryCanaryTemporary), server.ErrAgentEmailRetryCanaryTemporary) ||
 		!errors.Is(mapAgentEmailIngestError(store.ErrAgentEmailRetryCanaryPermanent), server.ErrAgentEmailRetryCanaryPermanent) ||
 		!errors.Is(mapAgentEmailIngestError(store.ErrAgentEmailPilotDisabled), server.ErrAgentEmailPilotUnavailable) {
@@ -125,6 +128,11 @@ func TestAgentEmailErrorMapping(t *testing.T) {
 		!errors.Is(mapAgentEmailError(store.ErrAgentEmailCodeConsumed), server.ErrAgentEmailCodeConsumed) ||
 		!errors.Is(mapAgentEmailError(store.ErrAgentEmailForbidden), server.ErrForbidden) {
 		t.Fatal("owner email errors did not preserve HTTP sentinel classes")
+	}
+	var featureErr *server.FeatureNotEnabledError
+	if err := mapAgentEmailError(&store.FeatureNotEnabledError{Feature: "agent_email_receive"}); !errors.Is(err, server.ErrFeatureNotEnabled) || !errors.As(err, &featureErr) ||
+		featureErr.Feature != "agent_email_receive" {
+		t.Fatalf("agent-email feature refusal mapping = %#v / %v", featureErr, err)
 	}
 }
 

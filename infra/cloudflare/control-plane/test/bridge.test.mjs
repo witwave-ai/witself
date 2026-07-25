@@ -172,6 +172,12 @@ test("bridge path classifiers are exact", () => {
   assert.ok(matchAdminPolicyPath(
     "/v1/admin/accounts/acct_1/message-retention",
   ));
+  assert.ok(matchAdminPolicyPath(
+    "/v1/admin/accounts/acct_1/email-receive",
+  ));
+  assert.ok(matchAdminPolicyPath(
+    "/v1/admin/accounts/acct_1/email-retention",
+  ));
   assert.ok(matchAdminPolicyPath("/v1/admin/accounts/acct_1/plan-override"));
   assert.ok(matchAdminPolicyPath(
     "/v1/admin/accounts/acct_1/limit-overrides/stored_secret",
@@ -190,6 +196,9 @@ test("bridge path classifiers are exact", () => {
   ), null);
   assert.equal(matchAdminPolicyPath(
     "/v1/admin/accounts/acct_1/message-retention/extra",
+  ), null);
+  assert.equal(matchAdminPolicyPath(
+    "/v1/admin/accounts/acct_1/email-receive/extra",
   ), null);
   assert.equal(
     isInternalBridgePath(PLAN_LIFECYCLE_ACTIVATE_PATH),

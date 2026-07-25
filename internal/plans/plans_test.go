@@ -39,6 +39,11 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 		t.Fatalf("free policies = %v; want messaging entitlement marker v%d",
 			free.Policies, MessagingEntitlementVersion)
 	}
+	if free.Policies[AgentEmailRetentionDaysPolicy] != 30 ||
+		free.Policies[AgentEmailEntitlementVersionPolicy] != AgentEmailEntitlementVersion ||
+		free.HasFeature(AgentEmailReceiveFeature) {
+		t.Fatalf("free = %+v; want disabled inbound email with 30-day cleanup", free)
+	}
 	if !free.HasFeature("memory") || !free.HasFeature("facts") ||
 		free.HasFeature("secrets") || free.HasFeature(MessagingFeature) {
 		t.Fatalf("free features = %v; want memory+facts, no secrets or messaging", free.Features)
@@ -58,6 +63,10 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 	if std.Policies[MessageRetentionDaysPolicy] != 90 {
 		t.Fatalf("standard policies = %v; want 90-day message retention", std.Policies)
 	}
+	if std.Policies[AgentEmailRetentionDaysPolicy] != 90 ||
+		!std.HasFeature(AgentEmailReceiveFeature) {
+		t.Fatalf("standard = %+v; want inbound email with 90-day retention", std)
+	}
 
 	team, ok := c.Get("team")
 	if !ok || team.Available || team.Purchasable() || !team.Paid() || !team.UsageBilled {
@@ -70,6 +79,10 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 		!team.HasFeature(MessagingFeature) {
 		t.Fatalf("team = %+v; want messaging with 365-day retention", team)
 	}
+	if team.Policies[AgentEmailRetentionDaysPolicy] != 365 ||
+		!team.HasFeature(AgentEmailReceiveFeature) {
+		t.Fatalf("team = %+v; want inbound email with 365-day retention", team)
+	}
 	enterprise, _ := c.Get("enterprise")
 	if enterprise.Available || enterprise.Purchasable() || enterprise.Paid() || !enterprise.UsageBilled {
 		t.Fatalf("enterprise = %+v; want custom/unpriced + usage-billed but not available", enterprise)
@@ -80,6 +93,10 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 	if enterprise.Policies[MessageRetentionDaysPolicy] != 365 ||
 		!enterprise.HasFeature(MessagingFeature) {
 		t.Fatalf("enterprise = %+v; want messaging with 365-day default retention", enterprise)
+	}
+	if enterprise.Policies[AgentEmailRetentionDaysPolicy] != 365 ||
+		!enterprise.HasFeature(AgentEmailReceiveFeature) {
+		t.Fatalf("enterprise = %+v; want inbound email with 365-day default retention", enterprise)
 	}
 	monthly := func(value int64) *int64 { return &value }
 	type expectedPlan struct {
@@ -104,9 +121,11 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 				StoredSecretLimit:  0,
 			},
 			policies: map[string]int64{
-				MessageRetentionDaysPolicy:        30,
-				MessagingEntitlementVersionPolicy: MessagingEntitlementVersion,
-				TranscriptRetentionDaysPolicy:     30,
+				AgentEmailEntitlementVersionPolicy: AgentEmailEntitlementVersion,
+				AgentEmailRetentionDaysPolicy:      30,
+				MessageRetentionDaysPolicy:         30,
+				MessagingEntitlementVersionPolicy:  MessagingEntitlementVersion,
+				TranscriptRetentionDaysPolicy:      30,
 			},
 			features: []string{"memory", "facts"},
 			summary:  "Limited and capped. Agent memory and facts for up to 10 agents in one realm. No support included.",
@@ -122,11 +141,13 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 				StoredSecretLimit:  100,
 			},
 			policies: map[string]int64{
-				MessageRetentionDaysPolicy:        90,
-				MessagingEntitlementVersionPolicy: MessagingEntitlementVersion,
-				TranscriptRetentionDaysPolicy:     90,
+				AgentEmailEntitlementVersionPolicy: AgentEmailEntitlementVersion,
+				AgentEmailRetentionDaysPolicy:      90,
+				MessageRetentionDaysPolicy:         90,
+				MessagingEntitlementVersionPolicy:  MessagingEntitlementVersion,
+				TranscriptRetentionDaysPolicy:      90,
 			},
-			features: []string{"memory", "facts", "secrets", MessagingFeature, "collaboration", "support"},
+			features: []string{"memory", "facts", "secrets", MessagingFeature, AgentEmailReceiveFeature, "collaboration", "support"},
 			summary:  "Capped. Memory, facts, secrets, and collaboration for up to 100 agents in one realm, support included.",
 		},
 		"team": {
@@ -140,11 +161,13 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 				StoredSecretLimit:  250,
 			},
 			policies: map[string]int64{
-				MessageRetentionDaysPolicy:        365,
-				MessagingEntitlementVersionPolicy: MessagingEntitlementVersion,
-				TranscriptRetentionDaysPolicy:     365,
+				AgentEmailEntitlementVersionPolicy: AgentEmailEntitlementVersion,
+				AgentEmailRetentionDaysPolicy:      365,
+				MessageRetentionDaysPolicy:         365,
+				MessagingEntitlementVersionPolicy:  MessagingEntitlementVersion,
+				TranscriptRetentionDaysPolicy:      365,
 			},
-			features: []string{"memory", "facts", "secrets", MessagingFeature, "collaboration", "support"},
+			features: []string{"memory", "facts", "secrets", MessagingFeature, AgentEmailReceiveFeature, "collaboration", "support"},
 			summary:  "Coming soon. Everything in Professional for up to 100 agents per realm across 25 realms, plus usage-based billing.",
 		},
 		"enterprise": {
@@ -152,10 +175,12 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 			usageBilled: true,
 			limits:      map[string]int64{StoredSecretLimit: 1000},
 			policies: map[string]int64{
-				MessageRetentionDaysPolicy:        365,
-				MessagingEntitlementVersionPolicy: MessagingEntitlementVersion,
+				AgentEmailEntitlementVersionPolicy: AgentEmailEntitlementVersion,
+				AgentEmailRetentionDaysPolicy:      365,
+				MessageRetentionDaysPolicy:         365,
+				MessagingEntitlementVersionPolicy:  MessagingEntitlementVersion,
 			},
-			features: []string{"memory", "facts", "secrets", MessagingFeature, "collaboration", "support"},
+			features: []string{"memory", "facts", "secrets", MessagingFeature, AgentEmailReceiveFeature, "collaboration", "support"},
 			summary:  "Coming soon. Everything in Team with custom pricing and support; details to follow.",
 		},
 	}
@@ -211,6 +236,8 @@ func TestParseValidation(t *testing.T) {
 		{"zero retention", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"policies":{"transcript_retention_days":0}}]}`, "between 1"},
 		{"zero message retention", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"policies":{"message_retention_days":0}}]}`, "between 1"},
 		{"bad messaging entitlement marker", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"policies":{"messaging_entitlement_version":2}}]}`, "must be 1"},
+		{"zero agent email retention", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"policies":{"agent_email_retention_days":0}}]}`, "between 1"},
+		{"bad agent email entitlement marker", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"policies":{"agent_email_entitlement_version":2}}]}`, "must be 1"},
 		{"unknown policy", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"policies":{"transcript_retention_dayz":30}}]}`, "unknown policy"},
 	}
 	for _, tc := range cases {

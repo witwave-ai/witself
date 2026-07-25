@@ -114,6 +114,11 @@ Expected server environment variables may include:
 | `WITSELF_MESSAGE_RETENTION_BATCH_SIZE` | Maximum message threads considered by one batch. Default: `25`; valid range: `1`-`100`. |
 | `WITSELF_MESSAGE_RETENTION_INTERVAL` | Delay between message-retention batches. Default: `5m`; valid range: `1m`-`24h`. |
 | `WITSELF_MESSAGE_RETENTION_BATCH_TIMEOUT` | Deadline for one bounded message-retention attempt. Default: `2m`; valid range: `10s`-`5m`. |
+| `WITSELF_AGENT_EMAIL_RETENTION_ENABLED` | Enable the account-policy inbound-email retention job in `witself-worker`. Default: `false`; enabling alone is non-destructive because mode defaults to `preview`. |
+| `WITSELF_AGENT_EMAIL_RETENTION_MODE` | Inbound-email retention worker mode: `preview` (default) or `enforce`. Deletion requires both this value to be `enforce` and the enabled gate to be true. |
+| `WITSELF_AGENT_EMAIL_RETENTION_BATCH_SIZE` | Maximum email messages considered by one batch. Default: `25`; valid range: `1`-`100`. |
+| `WITSELF_AGENT_EMAIL_RETENTION_INTERVAL` | Delay between inbound-email retention batches. Default: `5m`; valid range: `1m`-`24h`. |
+| `WITSELF_AGENT_EMAIL_RETENTION_BATCH_TIMEOUT` | Deadline for one bounded inbound-email retention attempt. Default: `2m`; valid range: `10s`-`5m`. |
 | `WITSELF_OBJECT_STORE_PROVIDER` | Object/blob store provider when configured (exports, attachments, backups). |
 | `WITSELF_OBJECT_STORE_BUCKET` | Object/blob store bucket/container. |
 | `WITSELF_SEALED_PLANE_ENABLED` | Enable the sealed plane (secrets, TOTP). When true, the KMS variables below are required. An open-plane-only deployment may leave the sealed plane disabled. |

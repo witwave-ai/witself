@@ -87,6 +87,10 @@ type SelfMessageCheckpoint struct {
 // receive-only agent-email mailbox. It carries no sender, subject, body,
 // address, message identifier, or processing fence.
 type SelfEmailCheckpoint struct {
+	// Enabled is nil for a pre-entitlement server. Explicit false means inbound
+	// email is disabled for the account and clients should suppress polling
+	// while keeping the installed email integration intact.
+	Enabled           *bool  `json:"enabled,omitempty"`
 	Pending           bool   `json:"pending"`
 	Unavailable       bool   `json:"unavailable,omitempty"`
 	MailboxPending    bool   `json:"mailbox_pending,omitempty"`

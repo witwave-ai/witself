@@ -142,6 +142,16 @@ only. Contended graph rows are skipped without waiting, and bounded oversize
 graphs are quarantined and surfaced through value-free Prometheus counters so
 one thread cannot monopolize a worker lane.
 
+Inbound agent-email retention follows the same three-stage gate through
+`worker.agentEmailRetention` and the `WITSELF_AGENT_EMAIL_RETENTION_*`
+variables. Its defaults are `enabled: false`, `mode: preview`, 25 messages per
+batch, a five-minute interval, and a two-minute attempt timeout. Each batch is
+also capped at 32 MiB of raw MIME. The worker defers a still-live processing
+claim, but expired claims and unread or unacknowledged messages remain
+eligible. Deleting an email cascades its delivery and accepted retry-canary
+proof, clears suspected-duplicate backlinks, and preserves the mailbox,
+address reservation, audit events, and usage records.
+
 The public chart default keeps `worker.enabled: false` because it has no shared
 database Secret. After PostgreSQL is configured, enabling it starts the
 two-replica default; operators can deliberately override `worker.replicaCount`.
@@ -153,9 +163,9 @@ database concern, so rolling overlap and future manual scale-out do not cause
 two pods to own the same row.
 
 The old top-level `transcriptRetention` and `avatar.styleRollout` value paths,
-and any top-level `messageRetention` path, are rejected by schema validation
-instead of being silently ignored. Move them under `worker` when enabling a
-released chart that contains this workload.
+and any top-level `messageRetention` or `agentEmailRetention` path, are
+rejected by schema validation instead of being silently ignored. Move them
+under `worker` when enabling a released chart that contains this workload.
 
 Keep the separate control-plane plan-lifecycle feature gate disabled during
 the initial rolling cell deployment. Wait for the Deployment rollout to
@@ -187,8 +197,8 @@ ingress + TLS, and topology spread.
 - Health and metrics are on their own ports and never exposed through the API
   Service or public ingress.
 - The worker has no API Service or Ingress and receives no
-  bootstrap/provision/agent-email environment. Its metrics Service and monitors
-  select only `app.kubernetes.io/name: witself-worker` plus
+  bootstrap/provision/agent-email relay or receive-pilot configuration. Its
+  metrics Service and monitors select only `app.kubernetes.io/name: witself-worker` plus
   `app.kubernetes.io/component: worker`; they cannot select API pods.
 - Rolling upgrades default to `maxUnavailable: 0`, `maxSurge: 1`, and
   `minReadySeconds: 10`, so a replacement must remain ready before Kubernetes
@@ -206,7 +216,8 @@ See [values.yaml](values.yaml) for the full set and [values.schema.json](values.
 for validation. Most-used: `image.tag`, `replicaCount`, `backend.kind`,
 `features.factDeletion.enabled`, `avatar.payloadCompaction.enabled`,
 `worker.enabled`, `worker.replicaCount`, `worker.avatarStyleRollout.*`,
-`worker.transcriptRetention.*`, `worker.resources`,
+`worker.transcriptRetention.*`, `worker.messageRetention.*`,
+`worker.agentEmailRetention.*`, `worker.resources`,
 `worker.podDisruptionBudget.*`, `agentEmail.receivePilot.*`,
 `database.existingSecret.*`, `bootstrap.existingSecret.*`, `resources`,
 `metrics.serviceMonitor.enabled`, `autoscaling.*`, `ingress.*`,

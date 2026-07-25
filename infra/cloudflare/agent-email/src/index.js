@@ -94,6 +94,7 @@ function exactVerdict(text) {
     case "unknown_recipient":
     case "permanent":
     case "receive_disabled":
+    case "feature_disabled":
     case "temporary":
     case "invalid_relay":
     case "retry_canary_rejected":
@@ -234,6 +235,12 @@ async function handleEmailTransaction(message, env, runtime = {}) {
   }
   if (response.ok && verdict === "accepted") {
     return { outcome: "accepted", phase: "response", status: response.status };
+  }
+  if (response.ok && verdict === "feature_disabled") {
+    // Account-plan receipt is an intentional accept-and-drop disposition.
+    // Returning normally prevents provider retries and exposes no account
+    // policy detail to the external sender.
+    return { outcome: "discarded_feature_disabled", phase: "response", status: response.status };
   }
   logRelayFailure({
     phase: "response",

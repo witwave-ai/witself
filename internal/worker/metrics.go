@@ -65,6 +65,22 @@ type MessageRetentionCounts struct {
 	ScanCapped       bool
 }
 
+// AgentEmailRetentionCounts contains value-free inbound-email cleanup counts.
+type AgentEmailRetentionCounts struct {
+	Scanned               int64
+	SkippedLocked         int64
+	Eligible              int64
+	Deleted               int64
+	DeletedRawBytes       int64
+	DeferredActive        int64
+	DeferredLocked        int64
+	DeferredOversize      int64
+	DeferredBudget        int64
+	ClearedDuplicateLinks int64
+	DeletedCanaryProofs   int64
+	ScanCapped            bool
+}
+
 type jobMetric struct {
 	Running  bool
 	Failures uint64
@@ -92,6 +108,9 @@ type Metrics struct {
 	messageRetentionBatches     map[retentionBatchLabels]uint64
 	messageRetentionItems       map[retentionItemLabels]uint64
 	messageRetentionLastSuccess map[string]float64
+	emailRetentionBatches       map[retentionBatchLabels]uint64
+	emailRetentionItems         map[retentionItemLabels]uint64
+	emailRetentionLastSuccess   map[string]float64
 	now                         func() time.Time
 }
 
@@ -104,6 +123,9 @@ func newMetrics() *Metrics {
 		messageRetentionBatches:     make(map[retentionBatchLabels]uint64),
 		messageRetentionItems:       make(map[retentionItemLabels]uint64),
 		messageRetentionLastSuccess: make(map[string]float64),
+		emailRetentionBatches:       make(map[retentionBatchLabels]uint64),
+		emailRetentionItems:         make(map[retentionItemLabels]uint64),
+		emailRetentionLastSuccess:   make(map[string]float64),
 		now:                         time.Now,
 	}
 }
@@ -234,6 +256,56 @@ func (m *Metrics) ObserveMessageRetentionBatch(
 	}
 }
 
+// ObserveAgentEmailRetentionBatch records one value-free inbound-email
+// retention attempt. Mode, result, and item kinds are closed process enums.
+func (m *Metrics) ObserveAgentEmailRetentionBatch(
+	mode string,
+	result RetentionResult,
+	counts AgentEmailRetentionCounts,
+) {
+	if mode != "preview" && mode != "enforce" {
+		return
+	}
+	if result != RetentionResultSuccess &&
+		result != RetentionResultNoWork &&
+		result != RetentionResultError {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.emailRetentionBatches[retentionBatchLabels{Mode: mode, Result: result}]++
+	if result == RetentionResultSuccess || result == RetentionResultNoWork {
+		m.emailRetentionLastSuccess[mode] = float64(m.now().Unix())
+	}
+	for kind, value := range map[string]int64{
+		"scanned":                 counts.Scanned,
+		"skipped_locked":          counts.SkippedLocked,
+		"eligible":                counts.Eligible,
+		"deleted":                 counts.Deleted,
+		"deleted_raw_bytes":       counts.DeletedRawBytes,
+		"deferred_active":         counts.DeferredActive,
+		"deferred_locked":         counts.DeferredLocked,
+		"deferred_oversize":       counts.DeferredOversize,
+		"deferred_budget":         counts.DeferredBudget,
+		"cleared_duplicate_links": counts.ClearedDuplicateLinks,
+		"deleted_canary_proofs":   counts.DeletedCanaryProofs,
+	} {
+		if value > 0 {
+			m.emailRetentionItems[retentionItemLabels{
+				Mode: mode,
+				Kind: kind,
+			}] += uint64(value)
+		}
+	}
+	if counts.ScanCapped {
+		m.emailRetentionItems[retentionItemLabels{
+			Mode: mode,
+			Kind: "scan_capped_batches",
+		}]++
+	}
+}
+
 func (m *Metrics) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
@@ -280,6 +352,18 @@ func (m *Metrics) writePrometheus(w io.Writer) {
 	messageLastSuccess := make(map[string]float64, len(m.messageRetentionLastSuccess))
 	for mode, value := range m.messageRetentionLastSuccess {
 		messageLastSuccess[mode] = value
+	}
+	emailBatches := make(map[retentionBatchLabels]uint64, len(m.emailRetentionBatches))
+	for labels, value := range m.emailRetentionBatches {
+		emailBatches[labels] = value
+	}
+	emailItems := make(map[retentionItemLabels]uint64, len(m.emailRetentionItems))
+	for labels, value := range m.emailRetentionItems {
+		emailItems[labels] = value
+	}
+	emailLastSuccess := make(map[string]float64, len(m.emailRetentionLastSuccess))
+	for mode, value := range m.emailRetentionLastSuccess {
+		emailLastSuccess[mode] = value
 	}
 	m.mu.Unlock()
 
@@ -401,6 +485,37 @@ func (m *Metrics) writePrometheus(w io.Writer) {
 		_, _ = fmt.Fprintf(w,
 			"witself_worker_message_retention_last_success_timestamp_seconds{mode=%q} %.0f\n",
 			mode, messageLastSuccess[mode])
+	}
+
+	_, _ = fmt.Fprintln(w, "# HELP witself_worker_agent_email_retention_batches_total Agent-email-retention batches by bounded mode and result.")
+	_, _ = fmt.Fprintln(w, "# TYPE witself_worker_agent_email_retention_batches_total counter")
+	emailBatchLabels := sortedRetentionBatchLabels(emailBatches)
+	for _, labels := range emailBatchLabels {
+		_, _ = fmt.Fprintf(w,
+			"witself_worker_agent_email_retention_batches_total{mode=%q,result=%q} %d\n",
+			labels.Mode, labels.Result, emailBatches[labels])
+	}
+
+	_, _ = fmt.Fprintln(w, "# HELP witself_worker_agent_email_retention_items_total Value-free agent-email-retention counts by bounded kind.")
+	_, _ = fmt.Fprintln(w, "# TYPE witself_worker_agent_email_retention_items_total counter")
+	emailItemLabels := sortedRetentionItemLabels(emailItems)
+	for _, labels := range emailItemLabels {
+		_, _ = fmt.Fprintf(w,
+			"witself_worker_agent_email_retention_items_total{mode=%q,kind=%q} %d\n",
+			labels.Mode, labels.Kind, emailItems[labels])
+	}
+
+	_, _ = fmt.Fprintln(w, "# HELP witself_worker_agent_email_retention_last_success_timestamp_seconds Unix timestamp of the last successful or no-work agent-email-retention batch.")
+	_, _ = fmt.Fprintln(w, "# TYPE witself_worker_agent_email_retention_last_success_timestamp_seconds gauge")
+	emailModes := make([]string, 0, len(emailLastSuccess))
+	for mode := range emailLastSuccess {
+		emailModes = append(emailModes, mode)
+	}
+	sort.Strings(emailModes)
+	for _, mode := range emailModes {
+		_, _ = fmt.Fprintf(w,
+			"witself_worker_agent_email_retention_last_success_timestamp_seconds{mode=%q} %.0f\n",
+			mode, emailLastSuccess[mode])
 	}
 }
 

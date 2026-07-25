@@ -59,6 +59,11 @@ func TestAgentEmailSignedIngestHTTPContract(t *testing.T) {
 	handler.ServeHTTP(response, testAgentEmailIngestRequest(t, raw, metadata, privateKey))
 	assertAgentEmailVerdict(t, response, http.StatusServiceUnavailable, "receive_disabled")
 
+	ingestErr = ErrAgentEmailFeatureDisabled
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, testAgentEmailIngestRequest(t, raw, metadata, privateKey))
+	assertAgentEmailVerdict(t, response, http.StatusOK, "feature_disabled")
+
 	ingestErr = ErrAgentEmailRetryCanaryTemporary
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, testAgentEmailIngestRequest(t, raw, metadata, privateKey))

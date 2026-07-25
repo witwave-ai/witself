@@ -291,6 +291,81 @@ func TestSelfDigestIncludesValueFreeEmailCheckpointOnlyForEnrolledAgent(t *testi
 	}
 }
 
+func TestSelfDigestExposesExplicitlyDisabledAgentEmail(t *testing.T) {
+	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
+		return DomainPrincipal{
+			Kind: PrincipalKindAgent, ID: "agent_zzzzzzzzzzzzzzzz", AgentName: "scott",
+			AccountID: "acc_1", RealmID: "realm_aaaaaaaaaaaaaaaa",
+			RealmName: "default", AccountStatus: "active",
+		}, true, nil
+	}
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: auth,
+		AgentEmailPilot: AgentEmailPilotConfig{
+			Enabled:  true,
+			RealmIDs: map[string]bool{"realm_aaaaaaaaaaaaaaaa": true},
+			AgentIDs: map[string]bool{"agent_aaaaaaaaaaaaaaaa": true},
+		},
+		RequireAgentEmailEntitlement: func(context.Context, DomainPrincipal) error {
+			return &FeatureNotEnabledError{Feature: "agent_email_receive"}
+		},
+		GetSelfAgentEmailCheckpoint: func(context.Context, DomainPrincipal) (AgentEmailCheckpoint, error) {
+			t.Fatal("disabled non-enrolled self must not call mailbox checkpoint")
+			return AgentEmailCheckpoint{}, nil
+		},
+	}))
+	defer srv.Close()
+
+	resp := selfRequest(t, srv.URL+"/v1/self?include_email_checkpoint=true", "agent-token")
+	defer closeBody(t, resp)
+	var digest SelfDigest
+	if err := json.NewDecoder(resp.Body).Decode(&digest); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || digest.EmailCheckpoint == nil ||
+		digest.EmailCheckpoint.Enabled == nil || *digest.EmailCheckpoint.Enabled ||
+		digest.EmailCheckpoint.Pending || digest.EmailCheckpoint.Unavailable {
+		t.Fatalf("disabled self/email checkpoint = %d / %+v", resp.StatusCode, digest.EmailCheckpoint)
+	}
+}
+
+func TestSelfDigestMapsAgentEmailDisableRaceToDisabledCheckpoint(t *testing.T) {
+	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
+		return DomainPrincipal{
+			Kind: PrincipalKindAgent, ID: "agent_aaaaaaaaaaaaaaaa", AgentName: "scott",
+			AccountID: "acc_1", RealmID: "realm_aaaaaaaaaaaaaaaa",
+			RealmName: "default", AccountStatus: "active",
+		}, true, nil
+	}
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: auth,
+		AgentEmailPilot: AgentEmailPilotConfig{
+			Enabled:  true,
+			RealmIDs: map[string]bool{"realm_aaaaaaaaaaaaaaaa": true},
+			AgentIDs: map[string]bool{"agent_aaaaaaaaaaaaaaaa": true},
+		},
+		RequireAgentEmailEntitlement: func(context.Context, DomainPrincipal) error {
+			return nil
+		},
+		GetSelfAgentEmailCheckpoint: func(context.Context, DomainPrincipal) (AgentEmailCheckpoint, error) {
+			return AgentEmailCheckpoint{}, &FeatureNotEnabledError{Feature: "agent_email_receive"}
+		},
+	}))
+	defer srv.Close()
+
+	resp := selfRequest(t, srv.URL+"/v1/self?include_email_checkpoint=true", "agent-token")
+	defer closeBody(t, resp)
+	var digest SelfDigest
+	if err := json.NewDecoder(resp.Body).Decode(&digest); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || digest.EmailCheckpoint == nil ||
+		digest.EmailCheckpoint.Enabled == nil || *digest.EmailCheckpoint.Enabled ||
+		digest.EmailCheckpoint.Pending || digest.EmailCheckpoint.Unavailable {
+		t.Fatalf("disable-race self/email checkpoint = %d / %+v", resp.StatusCode, digest.EmailCheckpoint)
+	}
+}
+
 func TestSelfDigestEmailCheckpointFailsOpen(t *testing.T) {
 	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
 		return DomainPrincipal{

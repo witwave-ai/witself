@@ -87,7 +87,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself-admin ticket ...    Read/reply/transition support tickets across the fleet")
 	usageLine(w, "                                (list|watch|show|reply|state|resolve|close|states)")
 	usageLine(w, "  witself-admin account ...   Read/set per-account fleet settings")
-	usageLine(w, "                                (support-policy|transcript-retention|messaging|message-retention|plan-override|limit-override)")
+	usageLine(w, "                                (support-policy|transcript-retention|messaging|message-retention|email-receive|email-retention|plan-override|limit-override)")
 	usageLine(w, "  witself-admin cells ...     Fleet cell registry with account counts (list)")
 	usageLine(w, "  witself-admin events ...    Fleet-wide audit-event tail (list|watch)")
 	usageLine(w, "  witself-admin placement ... Rescue archived accounts blocked by hard pins")
@@ -951,7 +951,7 @@ func accountPolicyJSONMap(res *client.AdminAccountPolicy) map[string]any {
 // off the same tree.
 func accountCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself-admin account (support-policy|transcript-retention|messaging|message-retention|plan-override|limit-override) ...")
+		fmt.Fprintln(os.Stderr, "usage: witself-admin account (support-policy|transcript-retention|messaging|message-retention|email-receive|email-retention|plan-override|limit-override) ...")
 		return 2
 	}
 	switch args[0] {
@@ -963,6 +963,10 @@ func accountCmd(args []string) int {
 		return accountMessaging(args[1:])
 	case "message-retention":
 		return accountMessageRetention(args[1:])
+	case "email-receive":
+		return accountAgentEmailReceive(args[1:])
+	case "email-retention":
+		return accountAgentEmailRetention(args[1:])
 	case "plan-override":
 		return accountPlanOverride(args[1:])
 	case "limit-override":
@@ -1047,6 +1051,11 @@ func printAdminAccountPolicy(res *client.AdminAccountPolicy) int {
 		messageRetention = fmt.Sprintf(
 			"%d days", *res.MessageRetention.EffectiveDays)
 	}
+	emailRetention := "indefinite"
+	if res.EmailRetention.EffectiveDays != nil {
+		emailRetention = fmt.Sprintf(
+			"%d days", *res.EmailRetention.EffectiveDays)
+	}
 	override := "none"
 	if res.PlanOverride != nil {
 		override = res.PlanOverride.Plan
@@ -1055,10 +1064,12 @@ func printAdminAccountPolicy(res *client.AdminAccountPolicy) int {
 	if res.ApplyPending {
 		applyState = "pending"
 	}
-	fmt.Printf("%s: plan=%s billing_plan=%s messaging=%t messaging_override=%t message_retention=%s message_retention_override=%t transcript_retention=%s transcript_retention_override=%t plan_override=%s apply=%s desired_revision=%d applied_revision=%d\n",
+	fmt.Printf("%s: plan=%s billing_plan=%s messaging=%t messaging_override=%t message_retention=%s message_retention_override=%t email_receive=%t email_receive_override=%t email_retention=%s email_retention_override=%t transcript_retention=%s transcript_retention_override=%t plan_override=%s apply=%s desired_revision=%d applied_revision=%d\n",
 		safeText(res.AccountID), safeText(res.Plan), safeText(res.BillingPlan),
 		res.Messaging.Enabled, res.Messaging.Overridden,
 		messageRetention, res.MessageRetention.Overridden,
+		res.EmailReceive.Enabled, res.EmailReceive.Overridden,
+		emailRetention, res.EmailRetention.Overridden,
 		transcriptRetention, res.TranscriptRetention.Overridden,
 		safeText(override),
 		applyState, res.DesiredRevision, res.AppliedRevision)
@@ -1397,6 +1408,220 @@ func accountMessageRetention(args []string) int {
 			})
 	case "clear":
 		res, err = client.ClearAdminMessageRetention(
+			context.Background(), ep, tok, *account, *reason)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printAdminAccountPolicyJSON(res)
+	}
+	return printAdminAccountPolicy(res)
+}
+
+// accountAgentEmailReceive manages inbound-email availability independently
+// of the installed client integration.
+func accountAgentEmailReceive(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr,
+			"usage: witself-admin account email-receive (get|set|clear) ...")
+		return 2
+	}
+	action := args[0]
+	if action != "get" && action != "set" && action != "clear" {
+		fmt.Fprintf(os.Stderr,
+			"witself-admin account email-receive: unknown action %q\n", action)
+		return 2
+	}
+
+	fs := flag.NewFlagSet("account email-receive "+action, flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	endpoint := fs.String("endpoint", "", "control-plane URL")
+	token := fs.String("token", "", "admin token")
+	tokenFile := fs.String("token-file", "", "file containing the admin token")
+	account := fs.String("account", "", "account id (required)")
+	enabled := fs.Bool("enabled", false, "enable inbound agent email")
+	disabled := fs.Bool("disabled", false, "disable inbound agent email")
+	reason := fs.String("reason", "", "required audit reason for set/clear")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args[1:]); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 || strings.TrimSpace(*account) == "" {
+		fmt.Fprintf(os.Stderr,
+			"usage: witself-admin account email-receive %s --account ACCOUNT_ID",
+			action)
+		switch action {
+		case "set":
+			fmt.Fprint(os.Stderr, " (--enabled|--disabled) --reason REASON")
+		case "clear":
+			fmt.Fprint(os.Stderr, " --reason REASON")
+		}
+		fmt.Fprintln(os.Stderr)
+		return 2
+	}
+	switch action {
+	case "get":
+		if *enabled || *disabled || strings.TrimSpace(*reason) != "" {
+			fmt.Fprintln(os.Stderr,
+				"witself-admin: get does not accept --enabled, --disabled, or --reason")
+			return 2
+		}
+	case "set":
+		if *enabled == *disabled {
+			fmt.Fprintln(os.Stderr,
+				"witself-admin: set exactly one of --enabled or --disabled")
+			return 2
+		}
+		if strings.TrimSpace(*reason) == "" {
+			fmt.Fprintln(os.Stderr,
+				"witself-admin: --reason is required for set")
+			return 2
+		}
+	case "clear":
+		if *enabled || *disabled {
+			fmt.Fprintln(os.Stderr,
+				"witself-admin: clear does not accept --enabled or --disabled")
+			return 2
+		}
+		if strings.TrimSpace(*reason) == "" {
+			fmt.Fprintln(os.Stderr,
+				"witself-admin: --reason is required for clear")
+			return 2
+		}
+	}
+
+	ep, tok, err := resolveAdminAccountAction(
+		*endpoint, *token, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
+		return 2
+	}
+	var res *client.AdminAccountPolicy
+	switch action {
+	case "get":
+		res, err = client.GetAdminAgentEmailReceive(
+			context.Background(), ep, tok, *account)
+	case "set":
+		res, err = client.SetAdminAgentEmailReceive(
+			context.Background(), ep, tok, *account, *enabled, *reason)
+	case "clear":
+		res, err = client.ClearAdminAgentEmailReceive(
+			context.Background(), ep, tok, *account, *reason)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printAdminAccountPolicyJSON(res)
+	}
+	return printAdminAccountPolicy(res)
+}
+
+// accountAgentEmailRetention manages inbound-email cleanup independently of
+// whether receipt is enabled.
+func accountAgentEmailRetention(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr,
+			"usage: witself-admin account email-retention (get|set|clear) ...")
+		return 2
+	}
+	action := args[0]
+	if action != "get" && action != "set" && action != "clear" {
+		fmt.Fprintf(os.Stderr,
+			"witself-admin account email-retention: unknown action %q\n", action)
+		return 2
+	}
+
+	fs := flag.NewFlagSet(
+		"account email-retention "+action, flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	endpoint := fs.String("endpoint", "", "control-plane URL")
+	token := fs.String("token", "", "admin token")
+	tokenFile := fs.String("token-file", "", "file containing the admin token")
+	account := fs.String("account", "", "account id (required)")
+	days := fs.Int64("days", 0, "finite retention window (1-36500)")
+	indefinite := fs.Bool("indefinite", false, "retain inbound email indefinitely")
+	reason := fs.String("reason", "", "required audit reason for set/clear")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args[1:]); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 || strings.TrimSpace(*account) == "" {
+		fmt.Fprintf(os.Stderr,
+			"usage: witself-admin account email-retention %s --account ACCOUNT_ID",
+			action)
+		switch action {
+		case "set":
+			fmt.Fprint(os.Stderr, " (--days N|--indefinite) --reason REASON")
+		case "clear":
+			fmt.Fprint(os.Stderr, " --reason REASON")
+		}
+		fmt.Fprintln(os.Stderr)
+		return 2
+	}
+	switch action {
+	case "get":
+		if *days != 0 || *indefinite || strings.TrimSpace(*reason) != "" {
+			fmt.Fprintln(os.Stderr,
+				"witself-admin: get does not accept --days, --indefinite, or --reason")
+			return 2
+		}
+	case "set":
+		if (*days == 0) == !*indefinite {
+			fmt.Fprintln(os.Stderr,
+				"witself-admin: set exactly one of --days N or --indefinite")
+			return 2
+		}
+		if *days < 0 || *days > client.MaxAdminAgentEmailRetentionDays {
+			fmt.Fprintf(os.Stderr,
+				"witself-admin: --days must be between 1 and %d\n",
+				client.MaxAdminAgentEmailRetentionDays)
+			return 2
+		}
+		if strings.TrimSpace(*reason) == "" {
+			fmt.Fprintln(os.Stderr,
+				"witself-admin: --reason is required for set")
+			return 2
+		}
+	case "clear":
+		if *days != 0 || *indefinite {
+			fmt.Fprintln(os.Stderr,
+				"witself-admin: clear does not accept --days or --indefinite")
+			return 2
+		}
+		if strings.TrimSpace(*reason) == "" {
+			fmt.Fprintln(os.Stderr,
+				"witself-admin: --reason is required for clear")
+			return 2
+		}
+	}
+
+	ep, tok, err := resolveAdminAccountAction(
+		*endpoint, *token, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
+		return 2
+	}
+	var res *client.AdminAccountPolicy
+	switch action {
+	case "get":
+		res, err = client.GetAdminAgentEmailRetention(
+			context.Background(), ep, tok, *account)
+	case "set":
+		var finite *int64
+		if !*indefinite {
+			finite = days
+		}
+		res, err = client.SetAdminAgentEmailRetention(
+			context.Background(), ep, tok, *account,
+			client.AdminAgentEmailRetentionInput{
+				Days: finite, Indefinite: *indefinite, Reason: *reason,
+			})
+	case "clear":
+		res, err = client.ClearAdminAgentEmailRetention(
 			context.Background(), ep, tok, *account, *reason)
 	}
 	if err != nil {

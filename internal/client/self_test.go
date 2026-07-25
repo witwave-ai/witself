@@ -58,6 +58,24 @@ func TestGetSelfDecodesAndRequestsEmailCheckpoint(t *testing.T) {
 	}
 }
 
+func TestGetSelfDecodesDisabledEmailCheckpoint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","identity":{"account_id":"acc_1","agent_id":"agt_1","agent_name":"scott","realm_id":"rlm_1","realm_name":"default"},"primary_facts":[],"salient_memories":[],"email_checkpoint":{"enabled":false,"pending":false},"index":{"kinds":[],"tags":[],"counts":{}},"elided":false}`))
+	}))
+	defer srv.Close()
+
+	got, err := GetSelf(context.Background(), srv.URL, "token", SelfOptions{IncludeEmailCheckpoint: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.EmailCheckpoint == nil || got.EmailCheckpoint.Enabled == nil ||
+		*got.EmailCheckpoint.Enabled || got.EmailCheckpoint.Pending ||
+		got.EmailCheckpoint.Unavailable {
+		t.Fatalf("disabled email checkpoint = %#v", got.EmailCheckpoint)
+	}
+}
+
 func TestGetSelfDecodesAndRequestsMessageCheckpoint(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("include_message_checkpoint") != "true" {

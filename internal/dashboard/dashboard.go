@@ -814,6 +814,10 @@ func sanitizeAgentEmails(messages []client.AgentEmailMessage) []sanitizedAgentEm
 }
 
 func agentEmailUnavailableKind(err error) string {
+	var featureErr *client.FeatureNotEnabledError
+	if errors.As(err, &featureErr) && featureErr.Feature == "agent_email_receive" {
+		return "feature_disabled"
+	}
 	if errors.Is(err, client.ErrNotFound) {
 		return "unavailable"
 	}
@@ -828,6 +832,8 @@ func agentEmailUnavailableKind(err error) string {
 
 func writeAgentEmailUnavailable(w http.ResponseWriter, kind string) {
 	switch kind {
+	case "feature_disabled":
+		writeJSONError(w, http.StatusForbidden, "inbound email is not enabled on this account")
 	case "not_enrolled":
 		writeJSONError(w, http.StatusForbidden, "agent is not enrolled in receive-only email")
 	default:

@@ -108,6 +108,18 @@ func clone(r Record) Record {
 		}
 		r.MessageRetentionOverride = &override
 	}
+	if r.AgentEmailReceiveOverride != nil {
+		override := *r.AgentEmailReceiveOverride
+		r.AgentEmailReceiveOverride = &override
+	}
+	if r.AgentEmailRetentionOverride != nil {
+		override := *r.AgentEmailRetentionOverride
+		if override.Days != nil {
+			days := *override.Days
+			override.Days = &days
+		}
+		r.AgentEmailRetentionOverride = &override
+	}
 	if r.LimitOverrides != nil {
 		overrides := make(map[string]AccountLimitOverride, len(r.LimitOverrides))
 		for dimension, override := range r.LimitOverrides {
@@ -145,6 +157,22 @@ func clone(r Record) Record {
 			if r.AdminHistory[i].MessageRetentionTo != nil {
 				value := *r.AdminHistory[i].MessageRetentionTo
 				r.AdminHistory[i].MessageRetentionTo = &value
+			}
+			if r.AdminHistory[i].AgentEmailReceiveFrom != nil {
+				value := *r.AdminHistory[i].AgentEmailReceiveFrom
+				r.AdminHistory[i].AgentEmailReceiveFrom = &value
+			}
+			if r.AdminHistory[i].AgentEmailReceiveTo != nil {
+				value := *r.AdminHistory[i].AgentEmailReceiveTo
+				r.AdminHistory[i].AgentEmailReceiveTo = &value
+			}
+			if r.AdminHistory[i].AgentEmailRetentionFrom != nil {
+				value := *r.AdminHistory[i].AgentEmailRetentionFrom
+				r.AdminHistory[i].AgentEmailRetentionFrom = &value
+			}
+			if r.AdminHistory[i].AgentEmailRetentionTo != nil {
+				value := *r.AdminHistory[i].AgentEmailRetentionTo
+				r.AdminHistory[i].AgentEmailRetentionTo = &value
 			}
 			if r.AdminHistory[i].LimitFrom != nil {
 				value := *r.AdminHistory[i].LimitFrom

@@ -42,6 +42,11 @@ var _ Store = (*R2Store)(nil)
 const r2LimitAuditKindPrefix = "witself.limit-override.v1:"
 const r2MessagingPolicyAuditKindPrefix = "witself.messaging-policy-override.v1:"
 
+// This deliberately uses a new prefix instead of extending the messaging
+// envelope: v0.0.210 understands and safely preserves an unknown Kind string,
+// so a rollback cannot erase email override state from the audit log.
+const r2AgentEmailPolicyAuditKindPrefix = "witself.agent-email-policy-override.v1:"
+
 type r2LimitAuditEnvelope struct {
 	Kind       string             `json:"kind"`
 	Dimension  string             `json:"dimension"`
@@ -59,6 +64,18 @@ type r2MessagingPolicyAuditEnvelope struct {
 	Kind          string `json:"kind"`
 	MessagingFrom *bool  `json:"messaging_from,omitempty"`
 	MessagingTo   *bool  `json:"messaging_to,omitempty"`
+	RetentionFrom *int64 `json:"retention_from,omitempty"`
+	RetentionTo   *int64 `json:"retention_to,omitempty"`
+	FromSource    string `json:"from_source"`
+	ToSource      string `json:"to_source"`
+}
+
+// r2AgentEmailPolicyAuditEnvelope preserves inbound-email override state
+// across a rollback to a binary whose Record predates these fields.
+type r2AgentEmailPolicyAuditEnvelope struct {
+	Kind          string `json:"kind"`
+	ReceiveFrom   *bool  `json:"receive_from,omitempty"`
+	ReceiveTo     *bool  `json:"receive_to,omitempty"`
 	RetentionFrom *int64 `json:"retention_from,omitempty"`
 	RetentionTo   *int64 `json:"retention_to,omitempty"`
 	FromSource    string `json:"from_source"`
@@ -557,6 +574,226 @@ func replayR2MessagingPolicyOverrides(
 	return messaging, retention
 }
 
+func normalizeR2AgentEmailPolicyAudit(
+	change AdminChange,
+) (r2AgentEmailPolicyAuditEnvelope, error) {
+	switch change.Kind {
+	case "agent_email_receive_override_set":
+		if change.AgentEmailReceiveFrom == nil ||
+			change.AgentEmailReceiveTo == nil ||
+			change.AgentEmailReceiveToSource != "override" ||
+			(change.AgentEmailReceiveFromSource != "inherited" &&
+				change.AgentEmailReceiveFromSource != "override") {
+			return r2AgentEmailPolicyAuditEnvelope{}, errors.New(
+				"invalid agent email receive set audit")
+		}
+		return r2AgentEmailPolicyAuditEnvelope{
+			Kind: change.Kind, ReceiveFrom: change.AgentEmailReceiveFrom,
+			ReceiveTo:  change.AgentEmailReceiveTo,
+			FromSource: change.AgentEmailReceiveFromSource,
+			ToSource:   change.AgentEmailReceiveToSource,
+		}, nil
+	case "agent_email_receive_override_cleared":
+		if change.AgentEmailReceiveFrom == nil ||
+			change.AgentEmailReceiveTo == nil ||
+			change.AgentEmailReceiveFromSource != "override" ||
+			change.AgentEmailReceiveToSource != "inherited" {
+			return r2AgentEmailPolicyAuditEnvelope{}, errors.New(
+				"invalid agent email receive clear audit")
+		}
+		return r2AgentEmailPolicyAuditEnvelope{
+			Kind: change.Kind, ReceiveFrom: change.AgentEmailReceiveFrom,
+			ReceiveTo:  change.AgentEmailReceiveTo,
+			FromSource: change.AgentEmailReceiveFromSource,
+			ToSource:   change.AgentEmailReceiveToSource,
+		}, nil
+	case "agent_email_retention_override_set":
+		if change.AgentEmailRetentionToSource != "override" ||
+			(change.AgentEmailRetentionFromSource != "inherited" &&
+				change.AgentEmailRetentionFromSource != "override") {
+			return r2AgentEmailPolicyAuditEnvelope{}, errors.New(
+				"invalid agent email retention set audit")
+		}
+		if err := validateOptionalAgentEmailRetention(
+			change.AgentEmailRetentionFrom); err != nil {
+			return r2AgentEmailPolicyAuditEnvelope{}, fmt.Errorf(
+				"invalid from retention: %w", err)
+		}
+		if err := validateOptionalAgentEmailRetention(
+			change.AgentEmailRetentionTo); err != nil {
+			return r2AgentEmailPolicyAuditEnvelope{}, fmt.Errorf(
+				"invalid to retention: %w", err)
+		}
+		return r2AgentEmailPolicyAuditEnvelope{
+			Kind:          change.Kind,
+			RetentionFrom: change.AgentEmailRetentionFrom,
+			RetentionTo:   change.AgentEmailRetentionTo,
+			FromSource:    change.AgentEmailRetentionFromSource,
+			ToSource:      change.AgentEmailRetentionToSource,
+		}, nil
+	case "agent_email_retention_override_cleared":
+		if change.AgentEmailRetentionFromSource != "override" ||
+			change.AgentEmailRetentionToSource != "inherited" {
+			return r2AgentEmailPolicyAuditEnvelope{}, errors.New(
+				"invalid agent email retention clear audit")
+		}
+		if err := validateOptionalAgentEmailRetention(
+			change.AgentEmailRetentionFrom); err != nil {
+			return r2AgentEmailPolicyAuditEnvelope{}, fmt.Errorf(
+				"invalid from retention: %w", err)
+		}
+		if err := validateOptionalAgentEmailRetention(
+			change.AgentEmailRetentionTo); err != nil {
+			return r2AgentEmailPolicyAuditEnvelope{}, fmt.Errorf(
+				"invalid to retention: %w", err)
+		}
+		return r2AgentEmailPolicyAuditEnvelope{
+			Kind:          change.Kind,
+			RetentionFrom: change.AgentEmailRetentionFrom,
+			RetentionTo:   change.AgentEmailRetentionTo,
+			FromSource:    change.AgentEmailRetentionFromSource,
+			ToSource:      change.AgentEmailRetentionToSource,
+		}, nil
+	default:
+		return r2AgentEmailPolicyAuditEnvelope{}, fmt.Errorf(
+			"unsupported normalized kind %q", change.Kind)
+	}
+}
+
+func validateOptionalAgentEmailRetention(days *int64) error {
+	if days == nil {
+		return nil
+	}
+	return plans.ValidatePolicies(map[string]int64{
+		plans.AgentEmailRetentionDaysPolicy: *days,
+	})
+}
+
+func encodeR2AgentEmailPolicyAuditKind(change AdminChange) (string, error) {
+	envelope, err := normalizeR2AgentEmailPolicyAudit(change)
+	if err != nil {
+		return "", err
+	}
+	payload, err := json.Marshal(envelope)
+	if err != nil {
+		return "", err
+	}
+	return r2AgentEmailPolicyAuditKindPrefix +
+		base64.RawURLEncoding.EncodeToString(payload), nil
+}
+
+func decodeR2AgentEmailPolicyAuditKind(
+	kind string,
+) (r2AgentEmailPolicyAuditEnvelope, error) {
+	encoded := strings.TrimPrefix(kind, r2AgentEmailPolicyAuditKindPrefix)
+	if encoded == kind || encoded == "" {
+		return r2AgentEmailPolicyAuditEnvelope{}, errors.New(
+			"missing agent-email-policy audit envelope")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return r2AgentEmailPolicyAuditEnvelope{}, fmt.Errorf(
+			"decode base64url: %w", err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	var envelope r2AgentEmailPolicyAuditEnvelope
+	if err := decoder.Decode(&envelope); err != nil {
+		return r2AgentEmailPolicyAuditEnvelope{}, fmt.Errorf(
+			"decode JSON: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return r2AgentEmailPolicyAuditEnvelope{}, errors.New(
+				"multiple JSON values")
+		}
+		return r2AgentEmailPolicyAuditEnvelope{}, fmt.Errorf(
+			"decode trailing JSON: %w", err)
+	}
+	change := AdminChange{Kind: envelope.Kind}
+	switch envelope.Kind {
+	case "agent_email_receive_override_set",
+		"agent_email_receive_override_cleared":
+		change.AgentEmailReceiveFrom = envelope.ReceiveFrom
+		change.AgentEmailReceiveTo = envelope.ReceiveTo
+		change.AgentEmailReceiveFromSource = envelope.FromSource
+		change.AgentEmailReceiveToSource = envelope.ToSource
+	case "agent_email_retention_override_set",
+		"agent_email_retention_override_cleared":
+		change.AgentEmailRetentionFrom = envelope.RetentionFrom
+		change.AgentEmailRetentionTo = envelope.RetentionTo
+		change.AgentEmailRetentionFromSource = envelope.FromSource
+		change.AgentEmailRetentionToSource = envelope.ToSource
+	}
+	return normalizeR2AgentEmailPolicyAudit(change)
+}
+
+func restoreR2AgentEmailPolicyAudit(
+	change *AdminChange,
+	envelope r2AgentEmailPolicyAuditEnvelope,
+) {
+	change.Kind = envelope.Kind
+	switch envelope.Kind {
+	case "agent_email_receive_override_set",
+		"agent_email_receive_override_cleared":
+		change.AgentEmailReceiveFrom = envelope.ReceiveFrom
+		change.AgentEmailReceiveTo = envelope.ReceiveTo
+		change.AgentEmailReceiveFromSource = envelope.FromSource
+		change.AgentEmailReceiveToSource = envelope.ToSource
+	case "agent_email_retention_override_set",
+		"agent_email_retention_override_cleared":
+		change.AgentEmailRetentionFrom = envelope.RetentionFrom
+		change.AgentEmailRetentionTo = envelope.RetentionTo
+		change.AgentEmailRetentionFromSource = envelope.FromSource
+		change.AgentEmailRetentionToSource = envelope.ToSource
+	}
+}
+
+func replayR2AgentEmailPolicyOverrides(
+	currentReceive *AgentEmailReceiveOverride,
+	currentRetention *AgentEmailRetentionOverride,
+	changes []AdminChange,
+) (*AgentEmailReceiveOverride, *AgentEmailRetentionOverride) {
+	var receive *AgentEmailReceiveOverride
+	if currentReceive != nil {
+		value := *currentReceive
+		receive = &value
+	}
+	var retention *AgentEmailRetentionOverride
+	if currentRetention != nil {
+		value := *currentRetention
+		if value.Days != nil {
+			days := *value.Days
+			value.Days = &days
+		}
+		retention = &value
+	}
+	for _, change := range changes {
+		switch change.Kind {
+		case "agent_email_receive_override_set":
+			receive = &AgentEmailReceiveOverride{
+				Enabled: *change.AgentEmailReceiveTo,
+				ActorID: change.ActorID, ActorHandle: change.ActorHandle,
+				Reason: change.Reason, SetAt: change.At,
+			}
+		case "agent_email_receive_override_cleared":
+			receive = nil
+		case "agent_email_retention_override_set":
+			retention = &AgentEmailRetentionOverride{
+				ActorID: change.ActorID, ActorHandle: change.ActorHandle,
+				Reason: change.Reason, SetAt: change.At,
+			}
+			if change.AgentEmailRetentionTo != nil {
+				days := *change.AgentEmailRetentionTo
+				retention.Days = &days
+			}
+		case "agent_email_retention_override_cleared":
+			retention = nil
+		}
+	}
+	return receive, retention
+}
+
 func marshalR2Record(r Record) ([]byte, error) {
 	stored := clone(r)
 	for i := range stored.AdminHistory {
@@ -576,6 +813,14 @@ func marshalR2Record(r Record) ([]byte, error) {
 			}
 			restoreR2MessagingPolicyAudit(change, envelope)
 		}
+		if strings.HasPrefix(change.Kind, r2AgentEmailPolicyAuditKindPrefix) {
+			envelope, err := decodeR2AgentEmailPolicyAuditKind(change.Kind)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"admin history %d: malformed reserved kind: %w", i, err)
+			}
+			restoreR2AgentEmailPolicyAudit(change, envelope)
+		}
 		switch change.Kind {
 		case "messaging_override_set", "messaging_override_cleared",
 			"message_retention_override_set", "message_retention_override_cleared":
@@ -583,6 +828,20 @@ func marshalR2Record(r Record) ([]byte, error) {
 			if err != nil {
 				return nil, fmt.Errorf(
 					"admin history %d: encode messaging policy audit: %w", i, err)
+			}
+			change.Kind = kind
+			continue
+		}
+		switch change.Kind {
+		case "agent_email_receive_override_set",
+			"agent_email_receive_override_cleared",
+			"agent_email_retention_override_set",
+			"agent_email_retention_override_cleared":
+			kind, err := encodeR2AgentEmailPolicyAuditKind(*change)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"admin history %d: encode agent email policy audit: %w",
+					i, err)
 			}
 			change.Kind = kind
 			continue
@@ -607,6 +866,7 @@ func unmarshalR2Record(data []byte) (Record, error) {
 	}
 	replay := make([]AdminChange, 0)
 	policyReplay := make([]AdminChange, 0)
+	emailPolicyReplay := make([]AdminChange, 0)
 	for i := range r.AdminHistory {
 		change := &r.AdminHistory[i]
 		if strings.HasPrefix(change.Kind, r2LimitAuditKindPrefix) {
@@ -629,6 +889,16 @@ func unmarshalR2Record(data []byte) (Record, error) {
 			policyReplay = append(policyReplay, *change)
 			continue
 		}
+		if strings.HasPrefix(change.Kind, r2AgentEmailPolicyAuditKindPrefix) {
+			envelope, err := decodeR2AgentEmailPolicyAuditKind(change.Kind)
+			if err != nil {
+				return Record{}, fmt.Errorf(
+					"admin history %d: malformed reserved kind: %w", i, err)
+			}
+			restoreR2AgentEmailPolicyAudit(change, envelope)
+			emailPolicyReplay = append(emailPolicyReplay, *change)
+			continue
+		}
 		// Before this envelope existed, development builds could write the
 		// normal kind plus the new fields directly. Replay those when they are
 		// complete, but leave unrelated/legacy history untouched.
@@ -645,10 +915,23 @@ func unmarshalR2Record(data []byte) (Record, error) {
 				policyReplay = append(policyReplay, *change)
 			}
 		}
+		switch change.Kind {
+		case "agent_email_receive_override_set",
+			"agent_email_receive_override_cleared",
+			"agent_email_retention_override_set",
+			"agent_email_retention_override_cleared":
+			if _, err := normalizeR2AgentEmailPolicyAudit(*change); err == nil {
+				emailPolicyReplay = append(emailPolicyReplay, *change)
+			}
+		}
 	}
 	r.LimitOverrides = replayR2LimitOverrides(r.LimitOverrides, replay)
 	r.MessagingOverride, r.MessageRetentionOverride =
 		replayR2MessagingPolicyOverrides(
 			r.MessagingOverride, r.MessageRetentionOverride, policyReplay)
+	r.AgentEmailReceiveOverride, r.AgentEmailRetentionOverride =
+		replayR2AgentEmailPolicyOverrides(
+			r.AgentEmailReceiveOverride, r.AgentEmailRetentionOverride,
+			emailPolicyReplay)
 	return r, nil
 }
