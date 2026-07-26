@@ -407,6 +407,7 @@ func TestProvisionReceiptMigrationDowngradePostgres(t *testing.T) {
 		if err := st.Migrate(); err != nil {
 			t.Fatal(err)
 		}
+		migrationTestDownTo(t, dsn, 72)
 		if err := migrationTestDown(t, dsn, false); err != nil {
 			t.Fatal(err)
 		}
@@ -432,6 +433,7 @@ func TestProvisionReceiptMigrationDowngradePostgres(t *testing.T) {
 			t.Fatal(err)
 		}
 
+		migrationTestDownTo(t, dsn, 72)
 		downErr := migrationTestDown(t, dsn, true)
 		if downErr == nil || !strings.Contains(
 			downErr.Error(), "provision receipts exist",

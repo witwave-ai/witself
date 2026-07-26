@@ -470,7 +470,7 @@ func selectAgentEmailRetentionAccount(
 			       (plan_policies ->> $3)::integer
 			  FROM accounts
 			 WHERE plan_policies ? 'agent_email_retention_days'
-			   AND get_byte(decode(md5(id), 'hex'), 0) %% 16 = $1
+			   AND get_byte(sha256(id::bytea), 0) %% 16 = $1
 			   AND id %s $2
 			 ORDER BY id
 			 LIMIT 1`, operator)

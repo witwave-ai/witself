@@ -679,7 +679,7 @@ func TestTranscriptRetentionWorkerCadenceAndModeProgressAreDurablePostgres(t *te
 	}
 	var workerLane int
 	if err := st.pool.QueryRow(ctx, `
-		SELECT get_byte(decode(md5(id), 'hex'), 0) % 16
+		SELECT get_byte(sha256(id::bytea), 0) % 16
 		  FROM accounts
 		 WHERE id=$1`, p.AccountID).Scan(&workerLane); err != nil {
 		t.Fatal(err)
@@ -1366,7 +1366,7 @@ func provisionTranscriptRetentionWorkerPrincipal(
 	}
 	var lane int
 	if err := st.pool.QueryRow(ctx, `
-		SELECT get_byte(decode(md5(id), 'hex'), 0) % 16
+		SELECT get_byte(sha256(id::bytea), 0) % 16
 		  FROM accounts
 		 WHERE id=$1`, account.AccountID).Scan(&lane); err != nil {
 		t.Fatal(err)

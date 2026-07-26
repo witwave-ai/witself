@@ -267,7 +267,7 @@ account_page AS MATERIALIZED (
           FROM accounts a
           CROSS JOIN worker_sweep_state sweep
          WHERE a.plan_policies ? 'transcript_retention_days'
-           AND get_byte(decode(md5(a.id), 'hex'), 0) % 16 =
+           AND get_byte(sha256(a.id::bytea), 0) % 16 =
                sweep.lane_id
            AND a.id > sweep.account_cursor
          ORDER BY a.id
@@ -279,7 +279,7 @@ account_page AS MATERIALIZED (
           FROM accounts a
           CROSS JOIN worker_sweep_state sweep
          WHERE a.plan_policies ? 'transcript_retention_days'
-           AND get_byte(decode(md5(a.id), 'hex'), 0) % 16 =
+           AND get_byte(sha256(a.id::bytea), 0) % 16 =
                sweep.lane_id
            AND a.id <= sweep.account_cursor
          ORDER BY a.id
