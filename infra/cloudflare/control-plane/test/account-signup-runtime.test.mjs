@@ -259,6 +259,28 @@ function signupRequest(fields = {}) {
   });
 }
 
+test("default signup fetch preserves the platform receiver", async (t) => {
+  let receiver = null;
+  t.mock.method(globalThis, "fetch", function () {
+    receiver = this;
+    return Response.json({
+      schema_version: "witself.v0",
+      account_provision_protocol: 1,
+    });
+  });
+  const runtime = new DurableAccountSignup(
+    { id: { name: `provision:${PROVISION}` }, storage: new Storage() },
+    {},
+  );
+
+  await runtime.requireProvisionProtocol({
+    name: "cell-a",
+    endpoint: "https://cell-a.example",
+  });
+
+  assert.equal(receiver, globalThis);
+});
+
 function harness({
   storage = new Storage(),
   directory,

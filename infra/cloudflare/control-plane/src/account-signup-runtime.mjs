@@ -157,7 +157,11 @@ export class DurableAccountSignup {
     this.storage = ctx.storage;
     this.env = env;
     this.objectName = ctx.id?.name ?? "";
-    this.fetchImpl = dependencies.fetch ?? globalThis.fetch;
+    // Cloudflare's native fetch must retain globalThis as its receiver. A
+    // direct assignment followed by this.fetchImpl(...) binds the Durable
+    // Object instance instead and fails with an illegal invocation.
+    this.fetchImpl =
+      dependencies.fetch ?? ((...args) => globalThis.fetch(...args));
     this.placeAccount = dependencies.placeAccount;
     this.sendVerification = dependencies.sendVerification ?? (() => false);
     this.logVerification = dependencies.logVerification ?? (() => {});
