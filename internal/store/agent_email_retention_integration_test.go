@@ -823,7 +823,7 @@ func newAgentEmailRetentionAccountFixture(
 	}
 	var laneID int
 	if err := st.pool.QueryRow(ctx, `
-		SELECT get_byte(decode(md5($1), 'hex'), 0) % 16`,
+		SELECT get_byte(sha256($1::bytea), 0) % 16`,
 		provisioned.AccountID,
 	).Scan(&laneID); err != nil {
 		t.Fatal(err)

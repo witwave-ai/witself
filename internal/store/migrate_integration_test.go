@@ -21,6 +21,132 @@ import (
 
 var migrationTestSchemaSequence atomic.Uint64
 
+func TestMigration73FreshInstallAllowsRetentionPolicyAccountsPostgres(t *testing.T) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	st, _ := newMigrationTestStore(t, baseDSN)
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO accounts
+		  (id, is_default, display_name, plan_policies)
+		VALUES
+		  ('acc_fips_lane_fresh', true, 'FIPS fresh install',
+		   '{"transcript_retention_days":30,
+		     "message_retention_days":30,
+		     "agent_email_retention_days":30}'::jsonb)`); err != nil {
+		t.Fatalf("insert account through fresh SHA-256 lane indexes: %v", err)
+	}
+}
+
+func TestMigration73ReplacesRetentionLaneHashesPostgres(t *testing.T) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	st, dsn := newMigrationTestStore(t, baseDSN)
+	indexes := []string{
+		"accounts_transcript_retention_worker_lane_idx",
+		"accounts_message_retention_worker_lane_idx",
+		"accounts_agent_email_retention_worker_lane_idx",
+	}
+	assertHash := func(want, forbidden string) {
+		t.Helper()
+		for _, index := range indexes {
+			var expression string
+			var valid, ready bool
+			if err := st.pool.QueryRow(ctx, `
+				SELECT pg_get_expr(index_row.indexprs, index_row.indrelid),
+				       index_row.indisvalid,
+				       index_row.indisready
+				  FROM pg_index index_row
+				 WHERE index_row.indrelid = to_regclass('accounts')
+				   AND index_row.indexrelid = to_regclass($1)`,
+				index,
+			).Scan(&expression, &valid, &ready); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(expression, want) ||
+				strings.Contains(expression, forbidden) {
+				t.Fatalf(
+					"index %s expression = %q, want %q without %q",
+					index, expression, want, forbidden,
+				)
+			}
+			if !valid || !ready {
+				t.Fatalf(
+					"index %s valid/ready = %t/%t, want true/true",
+					index, valid, ready,
+				)
+			}
+		}
+	}
+	assertNoTemporaryIndexes := func() {
+		t.Helper()
+		for _, index := range indexes {
+			for _, suffix := range []string{"_sha256_idx", "_md5_idx"} {
+				temporary := strings.TrimSuffix(index, "_idx") + suffix
+				var exists bool
+				if err := st.pool.QueryRow(ctx,
+					`SELECT to_regclass($1) IS NOT NULL`,
+					temporary,
+				).Scan(&exists); err != nil {
+					t.Fatal(err)
+				}
+				if exists {
+					t.Fatalf("temporary index %s still exists", temporary)
+				}
+			}
+		}
+	}
+
+	migrationTestUpTo(t, dsn, 72)
+	assertMigrationTestVersion(t, dsn, 72)
+	assertHash("md5", "sha256")
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO accounts
+		  (id, is_default, display_name, plan_policies)
+		VALUES
+		  ('acc_fips_lane_existing', true, 'FIPS existing account',
+		   '{"transcript_retention_days":30,
+		     "message_retention_days":30,
+		     "agent_email_retention_days":30}'::jsonb)`); err != nil {
+		t.Fatalf("insert account before SHA-256 lane migration: %v", err)
+	}
+
+	migrationTestUpTo(t, dsn, 73)
+	assertMigrationTestVersion(t, dsn, 73)
+	assertHash("sha256", "md5")
+	assertNoTemporaryIndexes()
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO accounts
+		  (id, is_default, display_name, plan_policies)
+		VALUES
+		  ('acc_fips_lane_migration', false, 'FIPS lane migration',
+		   '{"transcript_retention_days":30,
+		     "message_retention_days":30,
+		     "agent_email_retention_days":30}'::jsonb)`); err != nil {
+		t.Fatalf("insert account through SHA-256 lane indexes: %v", err)
+	}
+
+	if err := migrationTestDown(t, dsn, false); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, 72)
+	assertHash("md5", "sha256")
+	assertNoTemporaryIndexes()
+
+	migrationTestUpTo(t, dsn, 73)
+	assertMigrationTestVersion(t, dsn, 73)
+	assertHash("sha256", "md5")
+	assertNoTemporaryIndexes()
+}
+
 func TestMigration59AgentEmailPostgres(t *testing.T) {
 	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
 	if baseDSN == "" {

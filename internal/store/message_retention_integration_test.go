@@ -523,7 +523,7 @@ func TestMessageRetentionReplicasClaimDifferentLanesPostgres(t *testing.T) {
 		}
 		var lane int
 		if err := st.pool.QueryRow(ctx, `
-			SELECT get_byte(decode(md5(id), 'hex'), 0) % 16
+			SELECT get_byte(sha256(id::bytea), 0) % 16
 			  FROM accounts
 			 WHERE id=$1`, account.AccountID).Scan(&lane); err != nil {
 			t.Fatal(err)
@@ -698,7 +698,7 @@ func TestMessageRetentionContentionDefersWithoutBlockingUserReplyPostgres(t *tes
 	}
 	var lane int
 	if err := st.pool.QueryRow(ctx, `
-		SELECT get_byte(decode(md5(id), 'hex'), 0) % 16
+		SELECT get_byte(sha256(id::bytea), 0) % 16
 		  FROM accounts
 		 WHERE id=$1`, account.AccountID).Scan(&lane); err != nil {
 		t.Fatal(err)
@@ -1049,7 +1049,7 @@ func TestMessageRetentionCumulativeGraphBudgetDefersLaterThreadsPostgres(
 	}
 	var lane int
 	if err := st.pool.QueryRow(ctx, `
-		SELECT get_byte(decode(md5(id), 'hex'), 0) % 16
+		SELECT get_byte(sha256(id::bytea), 0) % 16
 		  FROM accounts
 		 WHERE id=$1`, fixture.accountID).Scan(&lane); err != nil {
 		t.Fatal(err)
@@ -1274,7 +1274,7 @@ func TestMessageRetentionTimedOutLaneBacksOffWhileLaterLaneProgressesPostgres(
 		}
 		var lane int
 		if err := st.pool.QueryRow(ctx, `
-			SELECT get_byte(decode(md5(id), 'hex'), 0) % 16
+			SELECT get_byte(sha256(id::bytea), 0) % 16
 			  FROM accounts
 			 WHERE id=$1`, fixture.accountID).Scan(&lane); err != nil {
 			t.Fatal(err)
@@ -1457,7 +1457,7 @@ func TestMessageRetentionStaleLaneGenerationCannotDeletePostgres(t *testing.T) {
 	}
 	var lane int
 	if err := st.pool.QueryRow(ctx, `
-		SELECT get_byte(decode(md5(id), 'hex'), 0) % 16
+		SELECT get_byte(sha256(id::bytea), 0) % 16
 		  FROM accounts
 		 WHERE id=$1`, fixture.accountID).Scan(&lane); err != nil {
 		t.Fatal(err)
