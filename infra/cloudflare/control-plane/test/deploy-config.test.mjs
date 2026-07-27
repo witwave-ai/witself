@@ -74,6 +74,26 @@ test("release renderer injects immutable container build identity", async (t) =>
     /"tag"\s*:\s*"v5"\s*,\s*"new_sqlite_classes"\s*:\s*\[\s*"AccountSignup"\s*\]/,
     "release config must preserve the account signup Durable Object migration",
   );
+  assert.match(
+    config,
+    /"name"\s*:\s*"ACCOUNT_BACKUP"\s*,\s*"class_name"\s*:\s*"AccountBackup"/,
+    "release config must bind the per-account backup authority",
+  );
+  assert.match(
+    config,
+    /"tag"\s*:\s*"v6"\s*,\s*"new_sqlite_classes"\s*:\s*\[\s*"AccountBackup"\s*\]/,
+    "release config must preserve the account backup Durable Object migration",
+  );
+  assert.doesNotMatch(
+    config,
+    /"CP_ACCOUNT_BACKUPS_ENABLED"\s*:/,
+    "ordinary deployments must not reset the operator-controlled activation",
+  );
+  assert.match(
+    config,
+    /"binding"\s*:\s*"BACKUPS"\s*,\s*"bucket_name"\s*:\s*"witself-backups"/,
+    "release config must bind the isolated immutable backup bucket",
+  );
   assert.doesNotMatch(config, /__WITSELF_[A-Z_]+__/);
   assert.equal((await stat(output)).mode & 0o777, 0o600);
 });

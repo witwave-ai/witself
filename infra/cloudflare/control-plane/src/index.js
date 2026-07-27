@@ -50,13 +50,16 @@
 //                           cross-batch progress for a cell-wide evacuation.
 //   cell:<name>          -> {"endpoint","cloud","region","region_code",
 //                             "channel","owner","weight","accepting",
-//                             "registered_at"}
+//                             "backup_validation_target","registered_at"}
 //   invite:<code>        -> {"enabled","not_before","expires_at","max_uses",
 //                             "uses","note","created_at","cell","region"}
 //   config:placement     -> {"strategy":"weighted"|"pinned","pinned_cell"}
 //   config:placement_runner -> {"enabled":bool,"restore_archives":bool,
 //                               "restore_batch":N,"restore_any_region":bool,
 //                               "rebalance":bool,"rebalance_batch":N}
+//   config:account_backup_scan -> {"schema_version","slot","cursor",
+//                                  "complete","updated_at"}
+//                                  opt-in periodic backup directory cursor
 //   config:reaper        -> {"enabled":bool,"ttl_minutes":N}
 //
 // PLACEMENT (which cell gets a new account), precedence top wins:
@@ -83,9 +86,12 @@ import {
   runScheduledPlanLifecycle,
 } from "./bridge.mjs";
 import {
+  accountBackupSchedulingEnabled,
   bestPlacementCell,
   bestPolicyCell,
   bestRebalanceCell,
+  cellHasDestinationCredentials,
+  cellIsEligibleDestination,
   cellMatchesArchivedPlacement,
   cellMatchesPolicy,
   rescuePlacementPolicy,
@@ -95,6 +101,13 @@ import { DurableAccountSignup } from "./account-signup-runtime.mjs";
 import {
   DurableTargetCellCoordinator,
 } from "./target-cell-coordinator.mjs";
+import {
+  accountBackupStatus,
+  DurableAccountBackup,
+  runAccountBackupValidation,
+  runManualAccountBackup,
+  runScheduledAccountBackups,
+} from "./account-backup-runtime.mjs";
 
 export class Backend extends Container {
   defaultPort = 8080;
@@ -169,6 +182,16 @@ export class AccountSignup extends DurableAccountSignup {
   }
 }
 
+// One Durable Object instance exists per account id. It serializes periodic
+// backup attempts and owns a bounded catalog of fully reread-verified immutable
+// objects in the dedicated backup bucket. It never mutates account routing or
+// participates in evacuation.
+export class AccountBackup extends DurableAccountBackup {
+  constructor(ctx, env) {
+    super(ctx, env);
+  }
+}
+
 const json = (obj, status = 200, extra = {}) =>
   new Response(JSON.stringify(obj), {
     status,
@@ -200,6 +223,11 @@ const PLACEMENT_STRATEGIES = ["weighted", "pinned"];
 const PLACEMENT_CHANNELS = new Set(["stable", "edge", "experimental"]);
 const PLACEMENT_RESCUE_PATH = /^\/v1\/placement\/archives\/([A-Za-z0-9_-]{1,128}):rescue$/;
 const PLACEMENT_RESCUE_AXES = new Set(["cloud", "region", "channel"]);
+const ACCOUNT_BACKUP_STATUS_PATH = "/v1/backups/status";
+const ACCOUNT_BACKUP_RUN_PATH = "/v1/backups:run";
+const ACCOUNT_BACKUP_RESTORE_DRILL_PATH =
+  "/v1/backups:restore-drill";
+const ACCOUNT_BACKUP_ID = /^backup_[0-9]{8}T[0-9]{6}Z$/;
 
 // Admin identity: the audit trail only ever records a first-name handle
 // (author_id on support_ticket_messages when author_kind='fleet_admin',
@@ -373,8 +401,8 @@ function publicAdmin(rec) {
   return { ...rest, disabled: Boolean(rec.disabled_at) };
 }
 
-// listCells returns raw registry entries INCLUDING the per-cell provision
-// token. Never serve these to clients — use publicCell() first.
+// listCells returns raw registry entries INCLUDING per-cell credentials.
+// Never serve these to clients — use publicCell() first.
 async function listCells(env) {
   const out = [];
   let cursor;
@@ -390,11 +418,21 @@ async function listCells(env) {
 }
 
 // publicCell strips credentials from a registry entry before it leaves the
-// control plane (the provision token is the control plane's secret for the
-// cell — even fleet-token holders don't need to read it back).
+// control plane (the per-cell credentials are control-plane secrets — even
+// fleet-token holders don't need to read them back).
 function publicCell(cell) {
-  const { provision_token: _omitted, ...rest } = cell;
-  return { ...rest, has_provision_token: Boolean(cell.provision_token) };
+  const {
+    provision_token: _provisionToken,
+    backup_token: _backupToken,
+    ...rest
+  } = cell;
+  return {
+    ...rest,
+    backup_validation_target:
+      cell.backup_validation_target === true,
+    has_provision_token: Boolean(cell.provision_token),
+    has_backup_token: Boolean(cell.backup_token),
+  };
 }
 
 // genInviteCode returns a short, unambiguous code like "k3v9-m2xq-7fjp".
@@ -1310,8 +1348,9 @@ async function handlePlacement(request, env) {
 // invite region (hard), fleet pinned strategy (soft), weighted random.
 // Returns {cell} or {fail: Response}.
 async function placeAccount(env, invite) {
+  const backupsEnabled = accountBackupSchedulingEnabled(env);
   let pool = (await listCells(env)).filter(
-    (c) => c.accepting !== false && c.provision_token,
+    (cell) => cellIsEligibleDestination(cell, { backupsEnabled }),
   );
   if (invite.cell) {
     pool = pool.filter((c) => c.name === invite.cell);
@@ -1375,6 +1414,25 @@ async function handleCells(request, env, url) {
     if (body.provision_token != null && typeof body.provision_token !== "string") {
       return err("provision_token must be a string", 400);
     }
+    if (body.backup_token != null && typeof body.backup_token !== "string") {
+      return err("backup_token must be a string", 400);
+    }
+    if (
+      body.backup_validation_target !== undefined &&
+      typeof body.backup_validation_target !== "boolean"
+    ) {
+      return err("backup_validation_target must be a boolean", 400);
+    }
+    if (
+      body.backup_token &&
+      body.provision_token &&
+      body.backup_token === body.provision_token
+    ) {
+      return err(
+        "backup_token must be distinct from provision_token",
+        400,
+      );
+    }
     if (
       body.registration_id != null &&
       (
@@ -1405,7 +1463,9 @@ async function handleCells(request, env, url) {
           owner: "witwave",
           weight: Number.isFinite(body.weight) ? body.weight : 1,
           accepting: body.accepting !== false,
+          backup_validation_target: body.backup_validation_target,
           provision_token: body.provision_token,
+          backup_token: body.backup_token,
           registration_id: body.registration_id,
         },
       },
@@ -2995,11 +3055,23 @@ async function handleRestore(request, env, cellName) {
   if (!cell) {
     return err("unknown cell", 404);
   }
+  if (cell.backup_validation_target === true) {
+    return err(
+      "cell is reserved for backup validation — cannot restore into it",
+      409,
+    );
+  }
   if (cell.accepting === false) {
     return err("cell is drained (accepting=false) — cannot restore into it", 409);
   }
-  if (!cell.provision_token || !cell.endpoint) {
-    return err(`cell ${cellName} has no provision credential — cannot import`, 502);
+  const backupsEnabled = accountBackupSchedulingEnabled(env);
+  if (!cellHasDestinationCredentials(cell, { backupsEnabled }) || !cell.endpoint) {
+    return err(
+      backupsEnabled
+        ? `cell ${cellName} has no distinct provision and backup credentials — cannot import while account backups are enabled`
+        : `cell ${cellName} has no provision credential — cannot import`,
+      502,
+    );
   }
   if (!cell.region) {
     return err(`cell ${cellName} has no region — cannot match archived accounts`, 502);
@@ -3134,8 +3206,10 @@ async function handlePlacementRestore(request, env) {
   batch = Math.min(Math.floor(batch), 10);
   const allRegions = body.all_regions === true;
 
+  const backupsEnabled = accountBackupSchedulingEnabled(env);
+  const destinationOptions = { backupsEnabled };
   const cells = (await listCells(env)).filter(
-    (cell) => cell.accepting !== false && cell.provision_token && cell.endpoint,
+    (cell) => cellIsEligibleDestination(cell, destinationOptions),
   );
   const counts = await accountCountsByCell(env);
   const selectionCounts = new Map(counts);
@@ -3154,7 +3228,13 @@ async function handlePlacementRestore(request, env) {
       if (!isRestorableArchive(archived)) {
         continue;
       }
-      const cell = bestPlacementCell(cells, archived, selectionCounts, allRegions);
+      const cell = bestPlacementCell(
+        cells,
+        archived,
+        selectionCounts,
+        allRegions,
+        destinationOptions,
+      );
       if (!cell) {
         blocked.push({ account_id: accountId, reason: "no eligible accepting cell" });
         continue;
@@ -3205,7 +3285,13 @@ async function handlePlacementRestore(request, env) {
       if (!isRestorableArchive(archived)) {
         continue;
       }
-      const cell = bestPlacementCell(cells, archived, counts, allRegions);
+      const cell = bestPlacementCell(
+        cells,
+        archived,
+        counts,
+        allRegions,
+        destinationOptions,
+      );
       if (cell) {
         remaining += 1;
       } else {
@@ -3225,7 +3311,15 @@ async function handlePlacementRestore(request, env) {
   });
 }
 
-async function rebalanceTargetForAccount(env, cellsByName, destinationCells, counts, accountId, route) {
+async function rebalanceTargetForAccount(
+  env,
+  cellsByName,
+  destinationCells,
+  counts,
+  accountId,
+  route,
+  destinationOptions,
+) {
   const current = cellsByName.get(route?.cell || "");
   if (!current) {
     return { skip: { account_id: accountId, reason: `current cell ${route?.cell || ""} is not registered` } };
@@ -3244,10 +3338,19 @@ async function rebalanceTargetForAccount(env, cellsByName, destinationCells, cou
   if (!policy) {
     return { skip: { account_id: accountId, cell: current.name, reason: "could not read placement policy" } };
   }
-  if (!cellMatchesPolicy(current, policy) && !bestPolicyCell(destinationCells, policy, counts)) {
+  if (
+    !cellMatchesPolicy(current, policy) &&
+    !bestPolicyCell(destinationCells, policy, counts, destinationOptions)
+  ) {
     return { skip: { account_id: accountId, cell: current.name, reason: "no eligible accepting cell for hard pin" } };
   }
-  const target = bestRebalanceCell(destinationCells, current, policy, counts);
+  const target = bestRebalanceCell(
+    destinationCells,
+    current,
+    policy,
+    counts,
+    destinationOptions,
+  );
   if (!target || target.cell.name === current.name) {
     return {};
   }
@@ -3280,10 +3383,12 @@ async function handlePlacementRebalance(request, env) {
   batch = Math.min(Math.floor(batch), 5);
   const dryRun = body.dry_run === true;
 
+  const backupsEnabled = accountBackupSchedulingEnabled(env);
+  const destinationOptions = { backupsEnabled };
   const cells = await listCells(env);
   const cellsByName = new Map(cells.map((cell) => [cell.name, cell]));
   const destinationCells = cells.filter(
-    (cell) => cell.accepting !== false && cell.provision_token && cell.endpoint,
+    (cell) => cellIsEligibleDestination(cell, destinationOptions),
   );
   const counts = await accountCountsByCell(env);
   const selectionCounts = new Map(counts);
@@ -3306,6 +3411,7 @@ async function handlePlacementRebalance(request, env) {
         selectionCounts,
         accountId,
         route,
+        destinationOptions,
       );
       if (candidate.skip) {
         skipped.push(candidate.skip);
@@ -3396,6 +3502,7 @@ async function handlePlacementRebalance(request, env) {
         counts,
         accountId,
         route,
+        destinationOptions,
       );
       if (candidate.target) {
         remaining += 1;
@@ -3585,10 +3692,12 @@ async function handlePlacementStatus(request, env, url) {
     return err("method not allowed", 405);
   }
   const sampleLimit = clampInt(url.searchParams.get("limit"), 25, 1, 200);
+  const backupsEnabled = accountBackupSchedulingEnabled(env);
+  const destinationOptions = { backupsEnabled };
   const cells = await listCells(env);
   const cellsByName = new Map(cells.map((cell) => [cell.name, cell]));
   const destinationCells = cells.filter(
-    (cell) => cell.accepting !== false && cell.provision_token && cell.endpoint,
+    (cell) => cellIsEligibleDestination(cell, destinationOptions),
   );
   const liveCounts = await accountCountsByCell(env);
   const archivedCounts = await archivedCountsByCell(env);
@@ -3612,7 +3721,13 @@ async function handlePlacementStatus(request, env, url) {
         continue;
       }
       archivedTotal += 1;
-      const target = bestPlacementCell(destinationCells, archived, liveCounts, false);
+      const target = bestPlacementCell(
+        destinationCells,
+        archived,
+        liveCounts,
+        false,
+        destinationOptions,
+      );
       if (target) {
         archivedPlaceable += 1;
         continue;
@@ -3653,6 +3768,7 @@ async function handlePlacementStatus(request, env, url) {
         liveCounts,
         accountId,
         route,
+        destinationOptions,
       );
       if (candidate.skip) {
         skipped += 1;
@@ -3817,6 +3933,74 @@ async function handleProbe(request, env, cellName) {
     cell_status: resp.status,
     cell_version: cellVersion,
   });
+}
+
+// Fleet-only backup operations. Scheduled backups remain independently gated
+// by CP_ACCOUNT_BACKUPS_ENABLED=false, while these explicit calls make the MVP
+// observable and testable before that clock is activated.
+async function handleAccountBackups(request, env, url) {
+  if (!fleetAuthorized(request, env)) {
+    return err("unauthorized", 401);
+  }
+  try {
+    if (url.pathname === ACCOUNT_BACKUP_STATUS_PATH) {
+      if (request.method !== "GET") {
+        return err("method not allowed", 405);
+      }
+      const accountID = url.searchParams.get("account_id") ?? undefined;
+      if (accountID !== undefined && !ACCOUNT_ID.test(accountID)) {
+        return err("invalid account_id", 400);
+      }
+      return json(await accountBackupStatus(env, accountID));
+    }
+
+    if (request.method !== "POST") {
+      return err("method not allowed", 405);
+    }
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return err("invalid backup request", 400);
+    }
+    if (!ACCOUNT_ID.test(body?.account_id ?? "")) {
+      return err("invalid account_id", 400);
+    }
+
+    if (url.pathname === ACCOUNT_BACKUP_RUN_PATH) {
+      const scheduledTime = body.scheduled_at === undefined
+        ? Date.now()
+        : Date.parse(body.scheduled_at);
+      if (!Number.isFinite(scheduledTime)) {
+        return err("scheduled_at must be an RFC3339 timestamp", 400);
+      }
+      return json(await runManualAccountBackup(
+        env,
+        body.account_id,
+        scheduledTime,
+      ));
+    }
+
+    if (
+      !CELL_NAME.test(body?.target_cell ?? "") ||
+      !ACCOUNT_BACKUP_ID.test(body?.backup_id ?? "")
+    ) {
+      return err("backup_id and target_cell are required", 400);
+    }
+    return json(await runAccountBackupValidation(env, {
+      account_id: body.account_id,
+      backup_id: body.backup_id,
+      target_cell: body.target_cell,
+    }));
+  } catch (error) {
+    const message = String(error?.message ?? error).slice(0, 300);
+    const conflict =
+      /backup_validation_target|accepting=false|live cell|live account projections/.test(
+      message,
+    );
+    console.log(`account-backup: fleet operation failed: ${message}`);
+    return err(message, conflict ? 409 : 502);
+  }
 }
 
 export default {
@@ -3998,6 +4182,14 @@ export default {
       return handlePlacementRebalance(request, env);
     }
 
+    if (
+      url.pathname === ACCOUNT_BACKUP_STATUS_PATH ||
+      url.pathname === ACCOUNT_BACKUP_RUN_PATH ||
+      url.pathname === ACCOUNT_BACKUP_RESTORE_DRILL_PATH
+    ) {
+      return handleAccountBackups(request, env, url);
+    }
+
     // Fleet-wide pending-account expiry policy (fleet-token authorized).
     if (url.pathname === "/v1/reaper") {
       return handleReaper(request, env);
@@ -4087,6 +4279,7 @@ export default {
   async scheduled(_event, env, ctx) {
     ctx.waitUntil(reapExpiredPendings(env));
     ctx.waitUntil(runScheduledPlacementRunner(env));
+    ctx.waitUntil(runScheduledAccountBackups(env, _event?.scheduledTime));
     ctx.waitUntil(runScheduledPlanLifecycle(
       env,
       (request) => getContainer(env.CONTROL_PLANE, "singleton").fetch(request),

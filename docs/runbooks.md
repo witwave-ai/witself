@@ -315,6 +315,101 @@ witself account status --account <name>          # says "archived — awaiting p
 curl https://self.witwave.ai/v1/directory/<account-id>
 ```
 
+## Operate periodic account backups
+
+Periodic logical backups use the dedicated `witself-backups` R2 bucket and are
+independent of cell-evacuation archives. Before activation:
+
+1. Roll out the provider secret changes so every cell registration contains a
+   distinct backup credential.
+2. Enable `apps.witselfServer.backup.enabled` for source cells only after their
+   `witself-provision` Secret contains `backup_token`.
+3. Keep `apps.witselfServer.backup.validationEnabled=false` on serving cells.
+   Enable it only on a registered, drained drill cell whose registry entry has
+   `accepting=false` and no live account projections.
+4. Create `witself-backups`, restrict its Worker/API access, and configure the
+   multipart-abort and reviewed generation-retention rules. The initial
+   development policy is 90-day expiration on `accounts/`, alongside the
+   default seven-day incomplete-multipart abort rule. Do not lock the
+   direct-write prefix: invalid completed objects must remain deletable for an
+   exact-generation retry.
+5. Leave the `CP_ACCOUNT_BACKUPS_ENABLED` Worker secret absent (or false) until
+   one manual snapshot and one rollback-only drill have succeeded.
+
+Fleet operations use the ordinary fleet bearer token:
+
+```sh
+CONTROL_PLANE="${WITSELF_CONTROL_PLANE_URL:?set control-plane URL}"
+FLEET_TOKEN_FILE="${WITSELF_FLEET_TOKEN_FILE:?set fleet-token file}"
+ACCOUNT_ID="${WITSELF_ACCOUNT_ID:?set account id}"
+DRILL_CELL="${WITSELF_BACKUP_DRILL_CELL:?set accepting=false drill cell}"
+FLEET_TOKEN="$(tr -d '\r\n' < "$FLEET_TOKEN_FILE")"
+
+# The drill-cell infra profile must set backup_validation_target: true.
+# Registration then atomically records that purpose and accepting=false.
+curl --fail-with-body \
+  -H "Authorization: Bearer ${FLEET_TOKEN}" \
+  "${CONTROL_PLANE}/v1/cells" |
+jq --arg name "$DRILL_CELL" '
+  .cells[] |
+  select(.name == $name) |
+  {
+    name,
+    backup_validation_target,
+    accepting,
+    has_backup_token
+  }'
+
+# Inspect schedule/scan state, then inspect one account's immutable catalog.
+curl --fail-with-body \
+  -H "Authorization: Bearer ${FLEET_TOKEN}" \
+  "${CONTROL_PLANE}/v1/backups/status"
+curl --fail-with-body \
+  -H "Authorization: Bearer ${FLEET_TOKEN}" \
+  "${CONTROL_PLANE}/v1/backups/status?account_id=${ACCOUNT_ID}"
+
+# Create one deterministic manual generation.
+curl --fail-with-body -X POST \
+  -H "Authorization: Bearer ${FLEET_TOKEN}" \
+  -H "Content-Type: application/json" \
+  --data "{\"account_id\":\"${ACCOUNT_ID}\"}" \
+  "${CONTROL_PLANE}/v1/backups:run"
+```
+
+Copy the returned `backup_id`. If the run reports `retrying`, poll the
+account-specific status endpoint until that exact id appears in the committed
+catalog. Then run the isolated rollback-only restore drill:
+
+```sh
+BACKUP_ID="${WITSELF_BACKUP_ID:?set committed backup id}"
+
+curl --fail-with-body -X POST \
+  -H "Authorization: Bearer ${FLEET_TOKEN}" \
+  -H "Content-Type: application/json" \
+  --data "{\"account_id\":\"${ACCOUNT_ID}\",\"backup_id\":\"${BACKUP_ID}\",\"target_cell\":\"${DRILL_CELL}\"}" \
+  "${CONTROL_PLANE}/v1/backups:restore-drill"
+```
+
+Success returns `validated: true` and records `validated_at` plus the drill
+cell in that exact backup's catalog entry. Confirm the account still has no row
+in the drill database and that its live directory route is unchanged. A generic
+2xx from the cell is not accepted as proof.
+
+After the manual path is healthy, activate the operator-controlled Worker
+secret:
+
+```sh
+printf '%s' true |
+  wrangler secret put CP_ACCOUNT_BACKUPS_ENABLED \
+    --name witself-control-plane
+```
+
+Confirm `/v1/backups/status` reports `schedule.enabled=true`, then watch it
+through at least one complete cursor scan. Set the secret to `false` (or delete
+it, since absence is disabled) to stop future periodic scans. Do not
+enable the schedule when the backup bucket, credential rollout, or drill-cell
+is incomplete. Provider PostgreSQL PITR remains required.
+
 ## Bring archived accounts back onto a new cell
 
 `witself-infra up -restore-archives` closes the loop: after the new cell

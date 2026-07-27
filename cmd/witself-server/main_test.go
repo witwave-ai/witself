@@ -207,6 +207,100 @@ func TestAvatarPayloadCompactionEnabledFromEnv(t *testing.T) {
 	}
 }
 
+func TestBackupValidationEnabledFromEnv(t *testing.T) {
+	original, wasSet := os.LookupEnv(backupValidationEnabledEnv)
+	t.Cleanup(func() {
+		if wasSet {
+			_ = os.Setenv(backupValidationEnabledEnv, original)
+			return
+		}
+		_ = os.Unsetenv(backupValidationEnabledEnv)
+	})
+	if err := os.Unsetenv(backupValidationEnabledEnv); err != nil {
+		t.Fatal(err)
+	}
+	if enabled, err := backupValidationEnabledFromEnv(); err != nil ||
+		enabled {
+		t.Fatalf("unset backup validation = (%t, %v), want (false, nil)",
+			enabled, err)
+	}
+	for _, test := range []struct {
+		value string
+		want  bool
+	}{
+		{value: "false", want: false},
+		{value: "true", want: true},
+		{value: " TRUE ", want: true},
+	} {
+		if err := os.Setenv(backupValidationEnabledEnv, test.value); err != nil {
+			t.Fatal(err)
+		}
+		enabled, err := backupValidationEnabledFromEnv()
+		if err != nil || enabled != test.want {
+			t.Fatalf("backup validation %q = (%t, %v), want (%t, nil)",
+				test.value, enabled, err, test.want)
+		}
+	}
+	if err := os.Setenv(backupValidationEnabledEnv, "later"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backupValidationEnabledFromEnv(); err == nil ||
+		!strings.Contains(err.Error(), backupValidationEnabledEnv) {
+		t.Fatalf("invalid backup validation error = %v", err)
+	}
+}
+
+func TestValidateBackupConfiguration(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		provisionToken    string
+		backupToken       string
+		validationEnabled bool
+		wantErrText       string
+	}{
+		{
+			name:        "export token may stand alone",
+			backupToken: "witself_bkp_test",
+			wantErrText: "",
+		},
+		{
+			name:              "validation requires token",
+			validationEnabled: true,
+			wantErrText:       backupTokenEnv,
+		},
+		{
+			name:           "token classes must differ",
+			provisionToken: "same",
+			backupToken:    "same",
+			wantErrText:    provisionTokenEnv,
+		},
+		{
+			name:              "distinct validation credential",
+			provisionToken:    "witself_prv_test",
+			backupToken:       "witself_bkp_test",
+			validationEnabled: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateBackupConfiguration(
+				test.provisionToken,
+				test.backupToken,
+				test.validationEnabled,
+			)
+			if test.wantErrText == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantErrText) {
+				t.Fatalf("error = %v, want text %q",
+					err, test.wantErrText)
+			}
+		})
+	}
+}
+
 func TestConfigureFactMutationsDeletionGate(t *testing.T) {
 	var disabled server.Config
 	configureFactMutations(&disabled, nil, false)

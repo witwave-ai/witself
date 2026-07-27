@@ -50,6 +50,7 @@ cells: {}
   #   backend: local
   #   civo_node_size: g4s.kube.medium
   #   civo_admin_cidr: 203.0.113.7/32
+  #   backup_validation_target: true
   #   argocd: true
   #   security_context:
   #     civo:
@@ -167,6 +168,10 @@ func configAddCell(fs *flag.FlagSet, configPath string) error {
 			}
 		}
 	}
+	if effective("backup-validation-target") == "true" &&
+		strings.TrimSpace(effective("control-plane")) == "" {
+		return fmt.Errorf("-backup-validation-target requires -control-plane so isolation is enforced by the fleet registry")
+	}
 	cellName := strings.Join([]string{get("cloud"), get("account-alias"), regionCode, get("role")}, "-")
 
 	entry := cellEntry{}
@@ -208,6 +213,10 @@ func configAddCell(fs *flag.FlagSet, configPath string) error {
 	if explicit["argocd"] {
 		v := get("argocd") == "true"
 		entry.ArgoCD = &v
+	}
+	if explicit["backup-validation-target"] {
+		v := get("backup-validation-target") == "true"
+		entry.BackupValidationTarget = &v
 	}
 	if explicit["gitops-repo"] || explicit["gitops-path"] || explicit["gitops-values-path"] || explicit["gitops-revision"] {
 		g := &gitopsEntry{}

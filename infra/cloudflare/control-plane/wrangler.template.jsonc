@@ -56,6 +56,10 @@
       {
         "name": "ACCOUNT_SIGNUP",
         "class_name": "AccountSignup"
+      },
+      {
+        "name": "ACCOUNT_BACKUP",
+        "class_name": "AccountBackup"
       }
     ]
   },
@@ -85,6 +89,10 @@
     {
       "tag": "v5",
       "new_sqlite_classes": ["AccountSignup"]
+    },
+    {
+      "tag": "v6",
+      "new_sqlite_classes": ["AccountBackup"]
     }
   ],
   "routes": [
@@ -100,6 +108,13 @@
   "triggers": {
     "crons": ["*/5 * * * *"]
   },
+  // Periodic account backups are an additive opt-in. The binding is
+  // intentionally absent from the committed deployment config, which the
+  // runtime treats as false. After a manual backup and restore drill pass,
+  // activate it as a Worker secret so later code deployments preserve the
+  // operator-controlled state. Further interval/page/concurrency/retry
+  // settings have conservative runtime defaults and may also be supplied as
+  // secrets during a controlled activation.
   // Verification email dispatch (Cloudflare Email Service, public beta).
   // Requires Workers Paid + witwave.ai enabled as a sending domain; the
   // Worker degrades gracefully (signup still succeeds) if sending fails.
@@ -115,6 +130,10 @@
     {
       "binding": "ARCHIVES",
       "bucket_name": "witself-archives"
+    },
+    {
+      "binding": "BACKUPS",
+      "bucket_name": "witself-backups"
     }
   ],
   // Edge rate limiter for the recovery endpoint (issue #23). Enforced at

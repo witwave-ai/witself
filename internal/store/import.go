@@ -4995,7 +4995,9 @@ func validateImportedFactCandidateContent(obj map[string]any) error {
 // expectedAccountID pins the archive to the account the caller believes it
 // is restoring; a manifest naming anyone else refuses before rows stream.
 func (s *Store) ImportAccount(ctx context.Context, expectedAccountID string, r io.Reader) (export.Manifest, error) {
-	m, _, err := s.importAccount(ctx, expectedAccountID, "", r)
+	m, _, err := s.importAccount(
+		ctx, expectedAccountID, accountImportOptions{}, r,
+	)
 	return m, err
 }
 
@@ -5028,12 +5030,47 @@ func (s *Store) ImportAccountEvacuation(
 	if err := validateEvacuationID(evacuationID); err != nil {
 		return export.Manifest{}, AccountImportDisposition{}, err
 	}
-	return s.importAccount(ctx, expectedAccountID, evacuationID, r)
+	return s.importAccount(
+		ctx, expectedAccountID,
+		accountImportOptions{evacuationID: evacuationID},
+		r,
+	)
+}
+
+// ValidateAccountBackup executes the complete semantic import of one exact
+// periodic backup in a transaction that is deliberately never committed. The
+// archived lifecycle state is preserved while every row, graph, checksum,
+// migration, and database constraint is exercised. Deferred rollback makes
+// validation repeatable and leaves no imported account state behind.
+func (s *Store) ValidateAccountBackup(
+	ctx context.Context,
+	expectedAccountID, expectedBackupID string,
+	r io.Reader,
+) (export.Manifest, error) {
+	if err := validateBackupID(expectedBackupID); err != nil {
+		return export.Manifest{}, err
+	}
+	m, _, err := s.importAccount(
+		ctx, expectedAccountID,
+		accountImportOptions{
+			backupValidation: true,
+			backupID:         expectedBackupID,
+		},
+		r,
+	)
+	return m, err
+}
+
+type accountImportOptions struct {
+	evacuationID     string
+	backupID         string
+	backupValidation bool
 }
 
 func (s *Store) importAccount(
 	ctx context.Context,
-	expectedAccountID, evacuationID string,
+	expectedAccountID string,
+	options accountImportOptions,
 	r io.Reader,
 ) (export.Manifest, AccountImportDisposition, error) {
 	tx, err := s.pool.Begin(ctx)
@@ -5041,8 +5078,10 @@ func (s *Store) importAccount(
 		return export.Manifest{}, AccountImportDisposition{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if evacuationID != "" {
-		if err := setEvacuationAuthorityTx(ctx, tx, evacuationID); err != nil {
+	if options.evacuationID != "" {
+		if err := setEvacuationAuthorityTx(
+			ctx, tx, options.evacuationID,
+		); err != nil {
 			return export.Manifest{}, AccountImportDisposition{}, err
 		}
 	}
@@ -5064,10 +5103,35 @@ func (s *Store) importAccount(
 			if m.AccountID == "" || m.AccountID != expectedAccountID {
 				return fmt.Errorf("%w: archive is for %q", ErrArchiveAccountMismatch, m.AccountID)
 			}
-			if m.Status != "suspended" && m.Status != "closed" {
-				return fmt.Errorf("%w: manifest status %q — exports are only taken frozen", ErrArchiveContent, m.Status)
+			if options.backupValidation {
+				if m.Purpose != export.PurposeBackup ||
+					m.BackupID != options.backupID ||
+					m.EvacuationID != "" {
+					return fmt.Errorf(
+						"%w: backup manifest identity does not match validation request",
+						ErrArchiveContent,
+					)
+				}
+				if m.Status != "active" &&
+					m.Status != "suspended" &&
+					m.Status != "closed" {
+					return fmt.Errorf(
+						"%w: backup manifest status %q is not restorable",
+						ErrArchiveContent, m.Status,
+					)
+				}
+			} else {
+				if m.Purpose == export.PurposeBackup {
+					return fmt.Errorf(
+						"%w: backup archive requires the backup validation path",
+						ErrArchiveContent,
+					)
+				}
+				if m.Status != "suspended" && m.Status != "closed" {
+					return fmt.Errorf("%w: manifest status %q — exports are only taken frozen", ErrArchiveContent, m.Status)
+				}
 			}
-			if evacuationID != "" {
+			if options.evacuationID != "" {
 				switch {
 				case m.EvacuationID == "" &&
 					m.SchemaVersion >= accountEvacuationArchiveSchema:
@@ -5075,7 +5139,8 @@ func (s *Store) importAccount(
 						"%w: current archive is missing evacuation id",
 						ErrArchiveContent,
 					)
-				case m.EvacuationID != "" && m.EvacuationID != evacuationID:
+				case m.EvacuationID != "" &&
+					m.EvacuationID != options.evacuationID:
 					return fmt.Errorf(
 						"%w: archive evacuation id does not match restore epoch",
 						ErrArchiveContent,
@@ -5110,8 +5175,8 @@ func (s *Store) importAccount(
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil
 			}
-			if evacuationID != "" && currentID != nil &&
-				*currentID == evacuationID {
+			if options.evacuationID != "" && currentID != nil &&
+				*currentID == options.evacuationID {
 				if currentRole == nil {
 					return ErrAccountEvacuationMismatch
 				}
@@ -5132,8 +5197,8 @@ func (s *Store) importAccount(
 				disposition.EvacuationRole = "target"
 				return nil
 			}
-			if evacuationID != "" && currentID == nil &&
-				lastID != nil && *lastID == evacuationID &&
+			if options.evacuationID != "" && currentID == nil &&
+				lastID != nil && *lastID == options.evacuationID &&
 				lastOutcome != nil && *lastOutcome == "completed" {
 				disposition.AlreadyImported = true
 				disposition.EvacuationCompleted = true
@@ -5141,8 +5206,8 @@ func (s *Store) importAccount(
 				disposition.EvacuationRole = "target"
 				return nil
 			}
-			if evacuationID != "" && currentID != nil &&
-				*currentID != evacuationID {
+			if options.evacuationID != "" && currentID != nil &&
+				*currentID != options.evacuationID {
 				return ErrAccountEvacuationInProgress
 			}
 			if err == nil {
@@ -5176,8 +5241,8 @@ func (s *Store) importAccount(
 			if err := ic.validateAndRecord(table, obj); err != nil {
 				return err
 			}
-			if evacuationID != "" && table == "accounts" {
-				obj["evacuation_id"] = evacuationID
+			if options.evacuationID != "" && table == "accounts" {
+				obj["evacuation_id"] = options.evacuationID
 				obj["evacuation_role"] = "target"
 				if _, ok := obj["evacuation_started_at"]; !ok ||
 					obj["evacuation_started_at"] == nil {
@@ -5343,7 +5408,7 @@ func (s *Store) importAccount(
 				 WHERE id = $1
 				   AND evacuation_id = $2
 				   AND evacuation_role = 'source'`,
-				expectedAccountID, evacuationID,
+				expectedAccountID, options.evacuationID,
 			)
 			if err != nil {
 				return export.Manifest{}, AccountImportDisposition{},
@@ -5397,10 +5462,21 @@ func (s *Store) importAccount(
 		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("reconcile imported message requests: %w", err)
 	}
 
+	if options.backupValidation {
+		// Validation never reaches COMMIT, so force every deferred database
+		// constraint to run now. Otherwise a semantically invalid archive
+		// could appear healthy merely because rollback skipped commit-time
+		// foreign-key and constraint checks.
+		if _, err := tx.Exec(ctx, `SET CONSTRAINTS ALL IMMEDIATE`); err != nil {
+			return export.Manifest{}, AccountImportDisposition{},
+				fmt.Errorf("validate deferred backup constraints: %w", err)
+		}
+		return m, AccountImportDisposition{}, nil
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return export.Manifest{}, AccountImportDisposition{}, err
 	}
-	if evacuationID != "" {
+	if options.evacuationID != "" {
 		return m, AccountImportDisposition{EvacuationRole: "target"}, nil
 	}
 	return m, AccountImportDisposition{}, nil

@@ -24,6 +24,7 @@ type azureSecrets struct {
 	bootstrapSecretID   pulumi.IDOutput
 	provisionSecretID   pulumi.IDOutput
 	provisionToken      pulumi.StringOutput
+	backupToken         pulumi.StringOutput
 	bootstrapTokenTTL   string
 	dbSecretName        string
 	bootstrapSecretName string
@@ -97,11 +98,11 @@ func provisionAzureSecrets(ctx *pulumi.Context, c azureCell, net *azureNetwork, 
 		return nil, err
 	}
 
-	provisionPayload, provisionToken, err := azureProvisionPayload(ctx)
+	credentials, err := newCellCredentials(ctx)
 	if err != nil {
 		return nil, err
 	}
-	provisionSecret, err := provisionAzureSecret(ctx, "witself-provision-token", c, net, vault.Name, azureProvisionSecretName, "provision", provisionPayload, vault)
+	provisionSecret, err := provisionAzureSecret(ctx, "witself-provision-token", c, net, vault.Name, azureProvisionSecretName, "provision", credentials.payload, vault)
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +115,8 @@ func provisionAzureSecrets(ctx *pulumi.Context, c azureCell, net *azureNetwork, 
 		dbSecretID:          dbSecret.ID(),
 		bootstrapSecretID:   bootstrapSecret.ID(),
 		provisionSecretID:   provisionSecret.ID(),
-		provisionToken:      provisionToken,
+		provisionToken:      credentials.provisionToken,
+		backupToken:         credentials.backupToken,
 		bootstrapTokenTTL:   bootstrapTokenTTL,
 		dbSecretName:        azureDBSecretName,
 		bootstrapSecretName: azureBootstrapSecretName,
@@ -176,27 +178,4 @@ func azureBootstrapPayload(ctx *pulumi.Context, c azureCell) (pulumi.StringOutpu
 		})
 		return string(b), err
 	}).(pulumi.StringOutput), nil
-}
-
-func azureProvisionPayload(ctx *pulumi.Context) (pulumi.StringOutput, pulumi.StringOutput, error) {
-	tokenBody, err := random.NewRandomString(ctx, "witself-provision-token", &random.RandomStringArgs{
-		Length:  pulumi.Int(43),
-		Special: pulumi.Bool(false),
-		Upper:   pulumi.Bool(true),
-		Lower:   pulumi.Bool(true),
-		Numeric: pulumi.Bool(true),
-	})
-	if err != nil {
-		return pulumi.StringOutput{}, pulumi.StringOutput{}, err
-	}
-	token := tokenBody.Result.ApplyT(func(body string) string {
-		return "witself_prv_" + body
-	}).(pulumi.StringOutput)
-
-	payload := token.ApplyT(func(tok string) (string, error) {
-		b, err := json.Marshal(map[string]string{"token": tok})
-		return string(b), err
-	}).(pulumi.StringOutput)
-
-	return payload, token, nil
 }

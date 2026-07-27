@@ -206,6 +206,32 @@ type Config struct {
 	// complete input.
 	ReportAccountExportFailure func(ctx context.Context, accountID string, err error)
 
+	// BackupToken is a dedicated control-plane -> cell credential for the
+	// backup protocol. It is intentionally distinct from ProvisionToken so
+	// routine snapshots and validation cannot exercise lifecycle authority.
+	BackupToken string
+
+	// StreamAccountBackup enables the backup-token-authorized
+	// POST /v1/accounts/{id}:export-backup path. It streams a read-only
+	// point-in-time archive and never changes account lifecycle or placement.
+	StreamAccountBackup func(
+		ctx context.Context,
+		accountID, backupID string,
+		w io.Writer,
+	) error
+
+	// BackupValidationEnabled is an explicit safety gate for the
+	// POST /v1/accounts/{id}:validate-backup route. Validation exercises a
+	// complete semantic import in a transaction that is deliberately rolled
+	// back; it never exposes a routine committed restore API.
+	// ValidateAccountBackup must additionally be set for the route to exist.
+	BackupValidationEnabled bool
+	ValidateAccountBackup   func(
+		ctx context.Context,
+		accountID, backupID string,
+		body io.Reader,
+	) (ImportSummary, error)
+
 	// ResumeAccountOwner, when set, enables POST /v1/account:resume — the
 	// owner un-freezing a self-suspended account. Refuses to un-suspend a
 	// fleet-admin/migration/etc. suspension (ErrCannotSelfResume -> 403); a
@@ -623,6 +649,7 @@ type ImportSummary struct {
 	AccountID           string `json:"account_id"`
 	Status              string `json:"status"`
 	SchemaVersion       int    `json:"schema_version"` // the ARCHIVE's schema coordinate
+	BackupID            string `json:"backup_id,omitempty"`
 	EvacuationID        string `json:"evacuation_id"`
 	EvacuationRole      string `json:"evacuation_role"`
 	AlreadyImported     bool   `json:"already_imported,omitempty"`
@@ -760,6 +787,9 @@ const (
 	// AccountEvacuationIDHeader carries the opaque Durable Object move epoch
 	// on streaming export/import and restore-maintenance requests.
 	AccountEvacuationIDHeader = "X-Witself-Evacuation-ID"
+	// AccountBackupIDHeader binds an export/restore request to one exact
+	// periodic backup object without overloading the evacuation epoch.
+	AccountBackupIDHeader = "X-Witself-Backup-ID"
 
 	// AccountProvisionProtocolVersion advertises required caller-stable
 	// provision ids and durable cell-side replay receipts.
@@ -1788,9 +1818,6 @@ func apiMux(cfg Config) http.Handler {
 				),
 			)
 		}
-		if cfg.ReapAccount != nil || cfg.ActivateAccount != nil || cfg.AccountContact != nil || cfg.RecoverAccount != nil || cfg.UpdateAccountEmail != nil || cfg.SuspendAccountSystem != nil || cfg.BeginAccountEvacuation != nil || cfg.AbortAccountEvacuation != nil || cfg.FinalizeAccountEvacuation != nil || cfg.StreamAccountExport != nil || cfg.ImportAccountArchive != nil || cfg.ResumeAccountSystem != nil || cfg.LogAccountEvent != nil || cfg.SetAccountPlan != nil {
-			mux.HandleFunc("POST /v1/accounts/", accountLifecycleHandler(cfg))
-		}
 		if cfg.GetPlacementPolicySystem != nil || cfg.GetAccountPlan != nil {
 			mux.HandleFunc("GET /v1/accounts/", accountSystemGetHandler(
 				cfg.ProvisionToken, cfg.GetPlacementPolicySystem, cfg.GetAccountPlan))
@@ -1798,6 +1825,51 @@ func apiMux(cfg Config) http.Handler {
 		if cfg.SetPlacementPolicySystem != nil {
 			mux.HandleFunc("PATCH /v1/accounts/", accountPlacementPolicySystemSetHandler(cfg.ProvisionToken, cfg.SetPlacementPolicySystem))
 		}
+	}
+	hasAccountLifecycle := cfg.ProvisionToken != "" && hasProvisioning &&
+		(cfg.ReapAccount != nil || cfg.ActivateAccount != nil ||
+			cfg.AccountContact != nil || cfg.RecoverAccount != nil ||
+			cfg.UpdateAccountEmail != nil || cfg.SuspendAccountSystem != nil ||
+			cfg.BeginAccountEvacuation != nil ||
+			cfg.AbortAccountEvacuation != nil ||
+			cfg.FinalizeAccountEvacuation != nil ||
+			cfg.StreamAccountExport != nil ||
+			cfg.ImportAccountArchive != nil ||
+			cfg.ResumeAccountSystem != nil || cfg.LogAccountEvent != nil ||
+			cfg.SetAccountPlan != nil)
+	hasAccountBackup := cfg.BackupToken != "" &&
+		(cfg.StreamAccountBackup != nil ||
+			(cfg.BackupValidationEnabled &&
+				cfg.ValidateAccountBackup != nil))
+	if hasAccountLifecycle || hasAccountBackup {
+		lifecycleHandler := accountLifecycleHandler(cfg)
+		backupHandler := accountBackupHandler(cfg)
+		mux.HandleFunc("POST /v1/accounts/", func(
+			w http.ResponseWriter,
+			r *http.Request,
+		) {
+			_, exportBackup := pathActionID(
+				r.URL.Path, "/v1/accounts/", "export-backup",
+			)
+			_, validateBackup := pathActionID(
+				r.URL.Path, "/v1/accounts/", "validate-backup",
+			)
+			_, restoreBackup := pathActionID(
+				r.URL.Path, "/v1/accounts/", "restore-backup",
+			)
+			if exportBackup || validateBackup || restoreBackup {
+				// Always send backup-shaped paths through the backup handler.
+				// It returns 404 before authentication when a route is gated
+				// off, and never lets ProvisionToken authorize backup work.
+				backupHandler(w, r)
+				return
+			}
+			if !hasAccountLifecycle {
+				http.NotFound(w, r)
+				return
+			}
+			lifecycleHandler(w, r)
+		})
 	}
 	if cfg.Authenticate != nil {
 		whoami := whoamiHandler(cfg.Authenticate)
@@ -4186,6 +4258,115 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 	}
 }
 
+// accountBackupHandler is a separate authority boundary from account
+// lifecycle and provisioning. A provisioning credential is explicitly
+// rejected even if configuration accidentally gives both token classes the
+// same value. Disabled backup actions return 404 before authentication so a
+// routine committed restore endpoint cannot appear by configuration drift.
+func accountBackupHandler(cfg Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		exportAccountID, exportBackup := pathActionID(
+			r.URL.Path, "/v1/accounts/", "export-backup",
+		)
+		validateAccountID, validateBackup := pathActionID(
+			r.URL.Path, "/v1/accounts/", "validate-backup",
+		)
+		exportBackup = exportBackup && cfg.StreamAccountBackup != nil
+		validateBackup = validateBackup &&
+			cfg.BackupValidationEnabled &&
+			cfg.ValidateAccountBackup != nil
+		if !exportBackup && !validateBackup {
+			writeJSONError(w, http.StatusNotFound, "unknown backup action")
+			return
+		}
+
+		tok, ok := bearerToken(r)
+		provisionTokenPresented := ok && cfg.ProvisionToken != "" &&
+			subtle.ConstantTimeCompare(
+				[]byte(tok), []byte(cfg.ProvisionToken),
+			) == 1
+		if !ok || cfg.BackupToken == "" || provisionTokenPresented ||
+			subtle.ConstantTimeCompare(
+				[]byte(tok), []byte(cfg.BackupToken),
+			) != 1 {
+			writeJSONError(w, http.StatusUnauthorized, "invalid backup token")
+			return
+		}
+
+		backupID := strings.TrimSpace(r.Header.Get(AccountBackupIDHeader))
+		if !validBackupID(backupID) {
+			writeJSONError(w, http.StatusBadRequest, "a valid backup id is required")
+			return
+		}
+
+		if exportBackup {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("X-Witself-Export-Format", "1")
+			w.Header().Set("X-Witself-Export-Purpose", "backup")
+			w.Header().Set(AccountBackupIDHeader, backupID)
+			err := cfg.StreamAccountBackup(
+				r.Context(), exportAccountID, backupID, w,
+			)
+			switch {
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "account not found")
+			case errors.Is(err, ErrConflict):
+				writeJSONError(
+					w, http.StatusConflict,
+					"account is temporarily not backup-portable",
+				)
+			case err != nil:
+				if cfg.ReportAccountExportFailure != nil {
+					cfg.ReportAccountExportFailure(
+						r.Context(), exportAccountID, err,
+					)
+				}
+			}
+			return
+		}
+
+		sum, err := cfg.ValidateAccountBackup(
+			r.Context(), validateAccountID, backupID, r.Body,
+		)
+		switch {
+		case errors.Is(err, ErrConflict):
+			writeJSONError(
+				w, http.StatusConflict,
+				"backup validation target already contains the account",
+			)
+			return
+		case errors.Is(err, ErrArchiveTooNew):
+			writeJSONError(
+				w, http.StatusConflict,
+				"backup schema is newer than this cell — upgrade the cell first",
+			)
+			return
+		case errors.Is(err, ErrBadArchive):
+			writeJSONError(
+				w, http.StatusBadRequest,
+				"invalid or mismatched backup archive",
+			)
+			return
+		case err != nil:
+			writeJSONError(
+				w, http.StatusInternalServerError,
+				"could not validate backup",
+			)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version":         "witself.v0",
+			"account_id":             sum.AccountID,
+			"status":                 sum.Status,
+			"archive_schema_version": sum.SchemaVersion,
+			"purpose":                "backup",
+			"backup_id":              sum.BackupID,
+			"validated":              true,
+		})
+	}
+}
+
 // eventsAdminCellHandler serves POST /v1/events/admin:list — the
 // cell-wide audit-event tail the control plane fans out to for the
 // fleet dashboard's events pane. Body carries optional filters
@@ -5076,6 +5257,10 @@ func validOperationID(value string) bool {
 }
 
 func validEvacuationID(value string) bool {
+	return validOperationID(value)
+}
+
+func validBackupID(value string) bool {
 	return validOperationID(value)
 }
 

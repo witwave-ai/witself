@@ -117,6 +117,15 @@ function cell(accepting = true, registration = REGISTRATION) {
   };
 }
 
+function validationCell() {
+  return {
+    ...cell(true),
+    accepting: false,
+    backup_validation_target: true,
+    backup_token: "private-backup-token",
+  };
+}
+
 function reservation({
   operationID = OPERATION,
   evacuationID = EVACUATION,
@@ -214,6 +223,7 @@ function coordinator({
   storage = new Storage(),
   now = () => new Date("2026-07-25T12:00:00.000Z"),
   accountLifecycle,
+  backupsEnabled = false,
 } = {}) {
   return {
     storage,
@@ -222,6 +232,7 @@ function coordinator({
       {
         DIRECTORY: directory,
         ACCOUNT_LIFECYCLE: accountLifecycle,
+        CP_ACCOUNT_BACKUPS_ENABLED: backupsEnabled ? "true" : "false",
       },
       {
         now,
@@ -259,6 +270,310 @@ function livenessNamespace({ reservationActive = true, resident = true }) {
     }),
   };
 }
+
+test("enabled backup scheduling preserves effective credentials across an old-client heartbeat", async () => {
+  const directory = new KV();
+  const { instance } = coordinator({ directory, backupsEnabled: true });
+  const registeredCell = {
+    ...cell(false),
+    backup_token: "private-backup-token",
+  };
+  const created = await instance.fetch(
+    request("/register", { cell: registeredCell }),
+  );
+  assert.equal(created.status, 201);
+  const body = await created.json();
+  assert.equal(body.cell.has_provision_token, true);
+  assert.equal(body.cell.has_backup_token, true);
+  assert.equal(body.cell.backup_validation_target, false);
+  assert.equal("provision_token" in body.cell, false);
+  assert.equal("backup_token" in body.cell, false);
+  assert.equal(
+    directory.value(`cell:${CELL}`).backup_token,
+    "private-backup-token",
+  );
+
+  const heartbeat = { ...registeredCell, accepting: true };
+  delete heartbeat.provision_token;
+  delete heartbeat.backup_token;
+  assert.equal(
+    (await instance.fetch(
+      request("/register", { cell: heartbeat }),
+    )).status,
+    200,
+  );
+  assert.equal(
+    directory.value(`cell:${CELL}`).provision_token,
+    "private-cell-token",
+  );
+  assert.equal(
+    directory.value(`cell:${CELL}`).backup_token,
+    "private-backup-token",
+  );
+});
+
+test("legacy no-backup-token cells remain usable disabled but are excluded enabled", async () => {
+  const disabledDirectory = new KV({ [`cell:${CELL}`]: cell(true) });
+  const disabled = coordinator({ directory: disabledDirectory });
+  assert.equal(
+    (await disabled.instance.fetch(
+      request("/reserve", { reservation: reservation() }),
+    )).status,
+    200,
+  );
+
+  const enabledDirectory = new KV({ [`cell:${CELL}`]: cell(true) });
+  const enabled = coordinator({
+    directory: enabledDirectory,
+    backupsEnabled: true,
+  });
+  const reserve = await enabled.instance.fetch(
+    request("/reserve", { reservation: reservation() }),
+  );
+  assert.equal(reserve.status, 409);
+  assert.match(
+    (await reserve.json()).error,
+    /credentials required for account placement/,
+  );
+  const provision = await enabled.instance.fetch(
+    request("/provision/begin", {
+      provision_id: OPERATION,
+      registration_id: REGISTRATION,
+    }),
+  );
+  assert.equal(provision.status, 409);
+  assert.match(
+    (await provision.json()).error,
+    /cannot accept provisioning/,
+  );
+
+  const registrationDirectory = new KV();
+  const registration = coordinator({
+    directory: registrationDirectory,
+    backupsEnabled: true,
+  });
+  const response = await registration.instance.fetch(
+    request("/register", { cell: cell(true) }),
+  );
+  assert.equal(response.status, 400);
+  assert.match(
+    (await response.json()).error,
+    /distinct nonempty provision_token and backup_token/,
+  );
+  assert.equal(registrationDirectory.value(`cell:${CELL}`), null);
+});
+
+test("validation marker forces drain and survives an older registration", async () => {
+  const directory = new KV();
+  const { instance } = coordinator({ directory });
+  const initial = {
+    ...validationCell(),
+    // Even a caller that asks to open the target is normalized closed.
+    accepting: true,
+  };
+  const created = await instance.fetch(
+    request("/register", { cell: initial }),
+  );
+  assert.equal(created.status, 201);
+  const createdBody = await created.json();
+  assert.equal(createdBody.cell.backup_validation_target, true);
+  assert.equal(createdBody.cell.accepting, false);
+  assert.equal(
+    directory.value(`cell:${CELL}`).backup_validation_target,
+    true,
+  );
+  assert.equal(directory.value(`cell:${CELL}`).accepting, false);
+
+  const oldHeartbeat = { ...cell(true) };
+  delete oldHeartbeat.backup_validation_target;
+  delete oldHeartbeat.provision_token;
+  const heartbeat = await instance.fetch(
+    request("/register", { cell: oldHeartbeat }),
+  );
+  assert.equal(heartbeat.status, 200);
+  assert.equal((await heartbeat.json()).cell.backup_validation_target, true);
+  assert.equal(directory.value(`cell:${CELL}`).accepting, false);
+  assert.equal(
+    directory.value(`cell:${CELL}`).backup_validation_target,
+    true,
+  );
+});
+
+test("validation marker is a typed boolean", async () => {
+  const directory = new KV();
+  const { instance, storage } = coordinator({ directory });
+  const response = await instance.fetch(
+    request("/register", {
+      cell: {
+        ...cell(false),
+        backup_validation_target: "true",
+      },
+    }),
+  );
+  assert.equal(response.status, 400);
+  assert.match(
+    (await response.json()).error,
+    /backup_validation_target must be a boolean/,
+  );
+  assert.equal(directory.value(`cell:${CELL}`), null);
+  assert.equal(storage.values.has("cell-registration"), false);
+});
+
+test("validation marker changes require a completely empty cell", async () => {
+  const blockers = [
+    {
+      name: "reservation",
+      seed: ({ storage }) => storage.values.set(
+        `reservation:${ACCOUNT}`,
+        {
+          ...reservation(),
+          expires_at: "2099-01-01T00:00:00.000Z",
+        },
+      ),
+    },
+    {
+      name: "provision",
+      seed: ({ storage }) => storage.values.set(
+        `provision:${OPERATION}`,
+        {
+          provision_id: OPERATION,
+          registration_id: REGISTRATION,
+          expires_at: "2099-01-01T00:00:00.000Z",
+        },
+      ),
+    },
+    {
+      name: "resident",
+      seed: ({ storage }) => storage.values.set(
+        `resident:${ACCOUNT}`,
+        {
+          account_id: ACCOUNT,
+          cell_name: CELL,
+          registration_id: REGISTRATION,
+          route_epoch: 1,
+        },
+      ),
+    },
+    {
+      name: "route",
+      seed: ({ directory }) => directory.put(
+        `acct:${ACCOUNT}`,
+        JSON.stringify({
+          cell: CELL,
+          cell_registration_id: REGISTRATION,
+          epoch: 1,
+        }),
+      ),
+    },
+    {
+      name: "pending account",
+      seed: ({ directory }) => directory.put(
+        `pending:${ACCOUNT}`,
+        JSON.stringify({
+          cell: CELL,
+          created_at: "2026-07-25T00:00:00.000Z",
+        }),
+      ),
+    },
+  ];
+
+  for (const blocker of blockers) {
+    const directory = new KV({ [`cell:${CELL}`]: validationCell() });
+    const setup = coordinator({ directory });
+    await blocker.seed({ ...setup, directory });
+    const response = await setup.instance.fetch(
+      request("/register", {
+        cell: {
+          ...validationCell(),
+          accepting: true,
+          backup_validation_target: false,
+        },
+      }),
+    );
+    assert.equal(response.status, 409, blocker.name);
+    assert.match(
+      (await response.json()).error,
+      /cannot change while account occupancy, reservations, provisions, or routes remain/,
+      blocker.name,
+    );
+    assert.equal(
+      directory.value(`cell:${CELL}`).backup_validation_target,
+      true,
+      blocker.name,
+    );
+    assert.equal(
+      directory.value(`cell:${CELL}`).accepting,
+      false,
+      blocker.name,
+    );
+  }
+});
+
+test("an empty validation cell can be explicitly unmarked and reopened", async () => {
+  const directory = new KV({ [`cell:${CELL}`]: validationCell() });
+  const { instance } = coordinator({ directory });
+  const response = await instance.fetch(
+    request("/register", {
+      cell: {
+        ...validationCell(),
+        accepting: true,
+        backup_validation_target: false,
+      },
+    }),
+  );
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.cell.backup_validation_target, false);
+  assert.equal(body.cell.accepting, true);
+  assert.equal(
+    directory.value(`cell:${CELL}`).backup_validation_target,
+    false,
+  );
+  assert.equal(directory.value(`cell:${CELL}`).accepting, true);
+});
+
+test("validation cells reject lifecycle and provisioning reservations", async () => {
+  const directory = new KV({ [`cell:${CELL}`]: validationCell() });
+  const { instance } = coordinator({ directory });
+  const lifecycle = await instance.fetch(
+    request("/reserve", { reservation: reservation() }),
+  );
+  assert.equal(lifecycle.status, 409);
+  assert.match(
+    (await lifecycle.json()).error,
+    /reserved for backup validation/,
+  );
+  const provision = await instance.fetch(
+    request("/provision/begin", {
+      provision_id: OPERATION,
+      registration_id: REGISTRATION,
+    }),
+  );
+  assert.equal(provision.status, 409);
+  assert.match(
+    (await provision.json()).error,
+    /cannot accept provisioning/,
+  );
+});
+
+test("registration rejects a backup token that grants provision authority", async () => {
+  const directory = new KV();
+  const { instance, storage } = coordinator({ directory });
+  const sharedToken = {
+    ...cell(false),
+    backup_token: "private-cell-token",
+  };
+  const response = await instance.fetch(
+    request("/register", { cell: sharedToken }),
+  );
+  assert.equal(response.status, 400);
+  assert.match(
+    (await response.json()).error,
+    /must be distinct/,
+  );
+  assert.equal(directory.value(`cell:${CELL}`), null);
+  assert.equal(storage.values.has("cell-registration"), false);
+});
 
 test("reservation and safe deletion are serialized when reserve wins", async () => {
   const directory = new KV({ [`cell:${CELL}`]: cell(true) });

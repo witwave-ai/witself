@@ -1793,6 +1793,254 @@ func TestExportAccountArchiveFailureReported(t *testing.T) {
 	}
 }
 
+func TestExportAccountBackupRequiresDedicatedBackupToken(t *testing.T) {
+	const backupID = "bkp_01J00000000000000000000000"
+	var gotAccountID, gotBackupID string
+	backup := func(
+		_ context.Context,
+		accountID, receivedBackupID string,
+		w io.Writer,
+	) error {
+		gotAccountID = accountID
+		gotBackupID = receivedBackupID
+		_, _ = io.WriteString(w, "backup-archive")
+		return nil
+	}
+	provision := func(_ context.Context, _, _, _ string) (ProvisionedAccount, error) {
+		return ProvisionedAccount{}, errors.New("unused")
+	}
+	srv := httptest.NewServer(apiMux(Config{
+		ProvisionToken:        "witself_prv_test",
+		BackupToken:           "witself_bkp_test",
+		ProvisionAccountExact: provision,
+		StreamAccountBackup:   backup,
+	}))
+	defer srv.Close()
+
+	do := func(token, receivedBackupID string) *http.Response {
+		req, _ := http.NewRequest(http.MethodPost,
+			srv.URL+"/v1/accounts/acc_backup:export-backup", nil)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		if receivedBackupID != "" {
+			req.Header.Set(AccountBackupIDHeader, receivedBackupID)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	for _, tc := range []struct {
+		token, backupID string
+		want            int
+	}{
+		{"", backupID, http.StatusUnauthorized},
+		{"wrong", backupID, http.StatusUnauthorized},
+		{"witself_prv_test", backupID, http.StatusUnauthorized},
+		{"witself_bkp_test", "", http.StatusBadRequest},
+		{"witself_bkp_test", "not valid", http.StatusBadRequest},
+	} {
+		resp := do(tc.token, tc.backupID)
+		closeBody(t, resp)
+		if resp.StatusCode != tc.want {
+			t.Fatalf("backup token=%q id=%q = %d, want %d",
+				tc.token, tc.backupID, resp.StatusCode, tc.want)
+		}
+	}
+	if gotAccountID != "" || gotBackupID != "" {
+		t.Fatalf("backup callback ran before authorization: account=%q id=%q",
+			gotAccountID, gotBackupID)
+	}
+
+	resp := do("witself_bkp_test", backupID)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK ||
+		string(body) != "backup-archive" ||
+		resp.Header.Get("X-Witself-Export-Format") != "1" ||
+		resp.Header.Get("X-Witself-Export-Purpose") != "backup" ||
+		resp.Header.Get(AccountBackupIDHeader) != backupID {
+		t.Fatalf("backup response status=%d headers=%v body=%q",
+			resp.StatusCode, resp.Header, body)
+	}
+	if gotAccountID != "acc_backup" || gotBackupID != backupID {
+		t.Fatalf("backup callback account=%q id=%q", gotAccountID, gotBackupID)
+	}
+
+	misconfigured := httptest.NewServer(apiMux(Config{
+		ProvisionToken:        "shared_token",
+		BackupToken:           "shared_token",
+		ProvisionAccountExact: provision,
+		StreamAccountBackup:   backup,
+	}))
+	defer misconfigured.Close()
+	req, _ := http.NewRequest(
+		http.MethodPost,
+		misconfigured.URL+"/v1/accounts/acc_backup:export-backup",
+		nil,
+	)
+	req.Header.Set("Authorization", "Bearer shared_token")
+	req.Header.Set(AccountBackupIDHeader, backupID)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, resp)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("shared provision/backup token = %d, want 401",
+			resp.StatusCode)
+	}
+}
+
+func TestValidateAccountBackupRequiresExplicitGateAndExactID(t *testing.T) {
+	const backupID = "bkp_01J00000000000000000000000"
+	provision := func(_ context.Context, _, _, _ string) (ProvisionedAccount, error) {
+		return ProvisionedAccount{}, errors.New("unused")
+	}
+	var gotBody []byte
+	var gotBackupID string
+	validate := func(
+		_ context.Context,
+		accountID, receivedBackupID string,
+		body io.Reader,
+	) (ImportSummary, error) {
+		gotBackupID = receivedBackupID
+		gotBody, _ = io.ReadAll(body)
+		switch accountID {
+		case "acc_exists":
+			return ImportSummary{}, ErrConflict
+		case "acc_future":
+			return ImportSummary{}, ErrArchiveTooNew
+		case "acc_bad":
+			return ImportSummary{}, ErrBadArchive
+		default:
+			return ImportSummary{
+				AccountID:     accountID,
+				Status:        "active",
+				SchemaVersion: 73,
+				BackupID:      receivedBackupID,
+			}, nil
+		}
+	}
+	disabled := httptest.NewServer(apiMux(Config{
+		ProvisionToken:        "witself_prv_test",
+		BackupToken:           "witself_bkp_test",
+		ProvisionAccountExact: provision,
+		ValidateAccountBackup: validate,
+	}))
+	defer disabled.Close()
+	req, _ := http.NewRequest(http.MethodPost,
+		disabled.URL+"/v1/accounts/acc_backup:validate-backup",
+		strings.NewReader("archive"))
+	req.Header.Set("Authorization", "Bearer witself_bkp_test")
+	req.Header.Set(AccountBackupIDHeader, backupID)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, resp)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("disabled backup validation = %d, want 404", resp.StatusCode)
+	}
+
+	enabled := httptest.NewServer(apiMux(Config{
+		ProvisionToken:          "witself_prv_test",
+		BackupToken:             "witself_bkp_test",
+		ProvisionAccountExact:   provision,
+		BackupValidationEnabled: true,
+		ValidateAccountBackup:   validate,
+	}))
+	defer enabled.Close()
+	do := func(accountID, token, receivedBackupID string) *http.Response {
+		req, _ := http.NewRequest(http.MethodPost,
+			enabled.URL+"/v1/accounts/"+accountID+":validate-backup",
+			strings.NewReader("archive"))
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		if receivedBackupID != "" {
+			req.Header.Set(AccountBackupIDHeader, receivedBackupID)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+	for _, tc := range []struct {
+		accountID, token, backupID string
+		want                       int
+	}{
+		{"acc_backup", "wrong", backupID, http.StatusUnauthorized},
+		{"acc_backup", "witself_prv_test", backupID, http.StatusUnauthorized},
+		{"acc_backup", "witself_bkp_test", "", http.StatusBadRequest},
+		{"acc_exists", "witself_bkp_test", backupID, http.StatusConflict},
+		{"acc_future", "witself_bkp_test", backupID, http.StatusConflict},
+		{"acc_bad", "witself_bkp_test", backupID, http.StatusBadRequest},
+	} {
+		resp := do(tc.accountID, tc.token, tc.backupID)
+		closeBody(t, resp)
+		if resp.StatusCode != tc.want {
+			t.Fatalf("validation %s token=%q id=%q = %d, want %d",
+				tc.accountID, tc.token, tc.backupID,
+				resp.StatusCode, tc.want)
+		}
+	}
+
+	for _, token := range []string{
+		"witself_bkp_test",
+		"witself_prv_test",
+	} {
+		restoreReq, _ := http.NewRequest(
+			http.MethodPost,
+			enabled.URL+"/v1/accounts/acc_backup:restore-backup",
+			strings.NewReader("archive"),
+		)
+		restoreReq.Header.Set("Authorization", "Bearer "+token)
+		restoreReq.Header.Set(AccountBackupIDHeader, backupID)
+		restoreResp, err := http.DefaultClient.Do(restoreReq)
+		if err != nil {
+			t.Fatal(err)
+		}
+		closeBody(t, restoreResp)
+		if restoreResp.StatusCode != http.StatusNotFound {
+			t.Fatalf("routine backup restore route with %q = %d, want 404",
+				token, restoreResp.StatusCode)
+		}
+	}
+
+	resp = do("acc_backup", "witself_bkp_test", backupID)
+	var out struct {
+		AccountID     string `json:"account_id"`
+		Status        string `json:"status"`
+		SchemaVersion int    `json:"archive_schema_version"`
+		Purpose       string `json:"purpose"`
+		BackupID      string `json:"backup_id"`
+		Validated     bool   `json:"validated"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK ||
+		out.AccountID != "acc_backup" || out.Status != "active" ||
+		out.SchemaVersion != 73 || out.Purpose != "backup" ||
+		out.BackupID != backupID || !out.Validated {
+		t.Fatalf("validation response status=%d body=%+v",
+			resp.StatusCode, out)
+	}
+	if gotBackupID != backupID || string(gotBody) != "archive" {
+		t.Fatalf("validation callback id=%q body=%q",
+			gotBackupID, gotBody)
+	}
+}
+
 // TestImportAccountArchive proves the restore verb's contract: provision
 // token only, the body streams through untouched, and each refusal maps to
 // its own status — 409 exists, 409 too-new, 400 corrupt.

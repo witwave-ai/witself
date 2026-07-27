@@ -14,6 +14,44 @@ const POLICY_LIST_FIELDS = [
   "rebalance_on",
 ];
 
+export function accountBackupSchedulingEnabled(env) {
+  return String(env?.CP_ACCOUNT_BACKUPS_ENABLED ?? "")
+    .trim()
+    .toLowerCase() === "true";
+}
+
+export function cellHasDestinationCredentials(
+  cell,
+  { backupsEnabled = false } = {},
+) {
+  const provisionToken =
+    typeof cell?.provision_token === "string"
+      ? cell.provision_token
+      : "";
+  if (provisionToken.length === 0) {
+    return false;
+  }
+  if (!backupsEnabled) {
+    return true;
+  }
+  const backupToken =
+    typeof cell?.backup_token === "string"
+      ? cell.backup_token
+      : "";
+  return backupToken.length > 0 && backupToken !== provisionToken;
+}
+
+export function cellIsEligibleDestination(
+  cell,
+  { backupsEnabled = false } = {},
+) {
+  return cell?.accepting !== false &&
+    cell?.backup_validation_target !== true &&
+    typeof cell?.endpoint === "string" &&
+    cell.endpoint.length > 0 &&
+    cellHasDestinationCredentials(cell, { backupsEnabled });
+}
+
 export function policyList(policy, field) {
   const values = policy?.[field];
   return Array.isArray(values) ? values.filter((value) => typeof value === "string") : [];
@@ -31,6 +69,11 @@ export function rescuePlacementPolicy(policy, axes) {
 }
 
 export function cellMatchesPolicy(cell, policy) {
+  // Dedicated backup-validation cells are never ordinary placement
+  // destinations, even if a stale projection accidentally says accepting.
+  if (cell?.backup_validation_target === true) {
+    return false;
+  }
   const allowedClouds = policyList(policy, "allowed_clouds");
   if (allowedClouds.length > 0 && !allowedClouds.includes(cell.cloud || "")) {
     return false;
@@ -48,6 +91,9 @@ export function cellMatchesPolicy(cell, policy) {
 }
 
 export function cellMatchesArchivedPlacement(cell, archived, allRegions) {
+  if (cell?.backup_validation_target === true) {
+    return false;
+  }
   const policy = archived?.placement_policy;
   if (policy) {
     return cellMatchesPolicy(cell, policy);
@@ -100,8 +146,15 @@ export function comparePlacementCells(a, b, archived, counts) {
   return a.name.localeCompare(b.name);
 }
 
-export function bestPolicyCell(cells, policy, counts) {
-  const eligible = cells.filter((cell) => cellMatchesPolicy(cell, policy));
+export function bestPolicyCell(
+  cells,
+  policy,
+  counts,
+  options = {},
+) {
+  const eligible = cells.filter((cell) =>
+    cellIsEligibleDestination(cell, options) &&
+    cellMatchesPolicy(cell, policy));
   if (eligible.length === 0) {
     return null;
   }
@@ -114,8 +167,16 @@ export function bestPolicyCell(cells, policy, counts) {
   return eligible[0];
 }
 
-export function bestPlacementCell(cells, archived, counts, allRegions) {
-  const eligible = cells.filter((cell) => cellMatchesArchivedPlacement(cell, archived, allRegions));
+export function bestPlacementCell(
+  cells,
+  archived,
+  counts,
+  allRegions,
+  options = {},
+) {
+  const eligible = cells.filter((cell) =>
+    cellIsEligibleDestination(cell, options) &&
+    cellMatchesArchivedPlacement(cell, archived, allRegions));
   if (eligible.length === 0) {
     return null;
   }
@@ -146,12 +207,18 @@ export function rebalanceImproves(policy, current, target) {
   return false;
 }
 
-export function bestRebalanceCell(cells, current, policy, counts) {
+export function bestRebalanceCell(
+  cells,
+  current,
+  policy,
+  counts,
+  options = {},
+) {
   if (!policy) {
     return null;
   }
   if (!cellMatchesPolicy(current, policy)) {
-    const hardPinned = bestPolicyCell(cells, policy, counts);
+    const hardPinned = bestPolicyCell(cells, policy, counts, options);
     return hardPinned ? { cell: hardPinned, reason: "hard pin" } : null;
   }
   if (policyList(policy, "rebalance_on").length === 0) {
@@ -159,6 +226,7 @@ export function bestRebalanceCell(cells, current, policy, counts) {
   }
   const candidates = cells.filter((cell) =>
     cell.name !== current.name &&
+    cellIsEligibleDestination(cell, options) &&
     cellMatchesPolicy(cell, policy) &&
     rebalanceImproves(policy, current, cell));
   if (candidates.length === 0) {

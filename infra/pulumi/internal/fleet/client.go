@@ -40,9 +40,30 @@ type Cell struct {
 	Channel    string  `json:"channel,omitempty"`
 	Weight     float64 `json:"weight,omitempty"`
 	Accepting  *bool   `json:"accepting,omitempty"`
+	// BackupValidationTarget is a durable, placement-ineligible fleet purpose
+	// marker. A marked cell must always register accepting=false.
+	BackupValidationTarget bool `json:"backup_validation_target"`
+	// Credential presence is returned by registry reads without exposing either
+	// token. Omitempty keeps these response-only flags out of registrations.
+	HasProvisionToken bool `json:"has_provision_token,omitempty"`
+	HasBackupToken    bool `json:"has_backup_token,omitempty"`
 	// ProvisionToken is the cell's account-provisioning credential, sent once at
 	// registration; the control plane stores it and never returns it on reads.
 	ProvisionToken string `json:"provision_token,omitempty"`
+	// BackupToken is the cell's independent backup credential. It shares the
+	// one-time registration and redaction behavior of ProvisionToken but grants
+	// no account-provisioning authority.
+	BackupToken string `json:"backup_token,omitempty"`
+}
+
+type registrationAck struct {
+	SchemaVersion string `json:"schema_version"`
+	Cell          struct {
+		Name                   string `json:"name"`
+		Accepting              *bool  `json:"accepting"`
+		BackupValidationTarget *bool  `json:"backup_validation_target"`
+		HasBackupToken         bool   `json:"has_backup_token"`
+	} `json:"cell"`
 }
 
 // Client talks to one control plane with the fleet token.
@@ -141,12 +162,89 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 
 // Register upserts the cell's registry entry (accepting defaults to true).
 func (c *Client) Register(ctx context.Context, cell Cell) error {
-	code, body, err := c.do(ctx, http.MethodPost, "/v1/cells", cell, nil)
+	if cell.BackupValidationTarget &&
+		(cell.Accepting == nil || *cell.Accepting) {
+		return fmt.Errorf(
+			"backup validation target must register with accepting=false",
+		)
+	}
+	var ack *registrationAck
+	if cell.BackupToken != "" {
+		if err := ValidateRegistrationCredentials(
+			cell.ProvisionToken, cell.BackupToken,
+		); err != nil {
+			return err
+		}
+	}
+	if cell.BackupToken != "" || cell.BackupValidationTarget {
+		ack = &registrationAck{}
+	}
+	code, body, err := c.do(ctx, http.MethodPost, "/v1/cells", cell, ack)
 	if err != nil {
 		return err
 	}
 	if code != http.StatusOK && code != http.StatusCreated {
 		return fmt.Errorf("register cell: HTTP %d: %s", code, strings.TrimSpace(body))
+	}
+	if ack != nil && ack.SchemaVersion != "witself.v0" {
+		return fmt.Errorf(
+			"register cell: control plane returned schema_version %q, want %q",
+			ack.SchemaVersion, "witself.v0",
+		)
+	}
+	if ack != nil && ack.Cell.Name != cell.Name {
+		return fmt.Errorf(
+			"register cell: control plane acknowledged cell %q, want %q",
+			ack.Cell.Name, cell.Name,
+		)
+	}
+	if ack != nil &&
+		(cell.BackupToken != "" || cell.HasBackupToken) &&
+		!ack.Cell.HasBackupToken {
+		return fmt.Errorf(
+			"register cell: control plane did not acknowledge backup_token; upgrade the control plane before registering backup credentials",
+		)
+	}
+	if ack != nil &&
+		(ack.Cell.BackupValidationTarget == nil ||
+			*ack.Cell.BackupValidationTarget != cell.BackupValidationTarget) {
+		return fmt.Errorf(
+			"register cell: control plane did not acknowledge backup_validation_target=%t; upgrade the control plane before registering this cell",
+			cell.BackupValidationTarget,
+		)
+	}
+	if ack != nil && cell.Accepting != nil &&
+		(ack.Cell.Accepting == nil || *ack.Cell.Accepting != *cell.Accepting) {
+		return fmt.Errorf(
+			"register cell: control plane did not acknowledge accepting=%t; refuse ambiguous fleet isolation",
+			*cell.Accepting,
+		)
+	}
+	return nil
+}
+
+// ValidateRegistrationCredentials pins the client-side half of the cell
+// credential boundary. The control plane independently enforces the same
+// distinction, but failing before the request prevents stale or malformed
+// stack outputs from producing a cell that appears registered yet cannot back
+// up.
+func ValidateRegistrationCredentials(provisionToken, backupToken string) error {
+	if backupToken == provisionToken {
+		return fmt.Errorf(
+			"cell backupToken output must be distinct from provisionToken",
+		)
+	}
+	if !strings.HasPrefix(provisionToken, "witself_prv_") ||
+		len(provisionToken) == len("witself_prv_") {
+		return fmt.Errorf(
+			"cell provisionToken output is missing or malformed; run a current cell update before registration",
+		)
+	}
+	if !strings.HasPrefix(backupToken, "witself_bak_") ||
+		len(backupToken) == len("witself_bak_") {
+		return fmt.Errorf(
+			"cell backupToken output is missing or malformed; run a current cell update before registration",
+		)
 	}
 	return nil
 }

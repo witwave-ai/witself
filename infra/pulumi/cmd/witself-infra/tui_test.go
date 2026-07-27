@@ -170,6 +170,76 @@ func TestContextTabBarRenders(t *testing.T) {
 	}
 }
 
+func TestBackupValidationTargetRendersAsIsolatedPurpose(t *testing.T) {
+	accepting := false
+	target := true
+	st := cellState{
+		name: "civo-sandbox-use1-dev",
+		entry: cellEntry{
+			Cloud:                  strPtr("civo"),
+			Region:                 strPtr("nyc1"),
+			BackupValidationTarget: &target,
+		},
+		fleet: &fleet.Cell{
+			Name:                   "civo-sandbox-use1-dev",
+			Accepting:              &accepting,
+			BackupValidationTarget: true,
+			HasBackupToken:         true,
+		},
+	}
+	if got := st.status(); got != "restore test" {
+		t.Fatalf("status = %q, want restore test", got)
+	}
+	if lvl, detail := cellFleetHealth(st); lvl != healthGood ||
+		!strings.Contains(detail, "isolated") {
+		t.Fatalf("fleet health = %d / %q, want healthy isolated restore test", lvl, detail)
+	}
+
+	view := seedModel([]cellState{st}, 120, 30).View()
+	for _, want := range []string{
+		"restore test",
+		"backup restore validation · isolated",
+		"placement",
+		"disabled",
+		"backup auth",
+		"present · redacted",
+	} {
+		if !strings.Contains(view, want) {
+			t.Errorf("View() missing %q", want)
+		}
+	}
+}
+
+func TestBackupValidationTargetHealthFailsOpenOrUncredentialedState(t *testing.T) {
+	target := true
+	accepting := true
+	st := cellState{
+		entry: cellEntry{BackupValidationTarget: &target},
+		fleet: &fleet.Cell{
+			Accepting:              &accepting,
+			BackupValidationTarget: true,
+			HasBackupToken:         true,
+		},
+	}
+	if lvl, detail := cellFleetHealth(st); lvl != healthBad ||
+		!strings.Contains(detail, "accepting placement") {
+		t.Fatalf("accepting target health = %d / %q", lvl, detail)
+	}
+
+	accepting = false
+	st.fleet.HasBackupToken = false
+	if lvl, detail := cellFleetHealth(st); lvl != healthBad ||
+		!strings.Contains(detail, "credential missing") {
+		t.Fatalf("uncredentialed target health = %d / %q", lvl, detail)
+	}
+
+	st.fleet.BackupValidationTarget = false
+	if lvl, detail := cellFleetHealth(st); lvl != healthBad ||
+		!strings.Contains(detail, "missing restore-test marker") {
+		t.Fatalf("marker mismatch health = %d / %q", lvl, detail)
+	}
+}
+
 // TestTabFocusAndSwitch pins the navigation model: tab moves focus to
 // the context pane, ←/→ switch tabs only while focused, and the active
 // tab sticks as the cell cursor moves.
@@ -1622,10 +1692,11 @@ func TestMarkerGlyphWidth(t *testing.T) {
 
 	acc := false
 	for _, st := range []cellState{
-		{fleet: &fleet.Cell{}},                // live
-		{fleet: &fleet.Cell{Accepting: &acc}}, // draining
-		{},                                    // absent
-		{err: errFake("bad creds")},           // error
+		{fleet: &fleet.Cell{}},                                              // live
+		{fleet: &fleet.Cell{Accepting: &acc}},                               // draining
+		{fleet: &fleet.Cell{Accepting: &acc, BackupValidationTarget: true}}, // restore test
+		{},                          // absent
+		{err: errFake("bad creds")}, // error
 	} {
 		if got := lipgloss.Width(st.statusGlyph()); got != 1 {
 			t.Fatalf("status glyph for %q must be 1 cell, got %d", st.status(), got)

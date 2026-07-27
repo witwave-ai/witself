@@ -23,6 +23,7 @@ func newTestFlagSet() *flag.FlagSet {
 	fs.String("k8s-version", "", "")
 	fs.String("db-version", "18", "")
 	fs.Bool("argocd", false, "")
+	fs.Bool("backup-validation-target", false, "")
 	fs.String("gitops-repo", "https://github.com/witwave-ai/witself", "")
 	fs.String("gitops-path", ".gitops/charts/bootstrap", "")
 	fs.String("gitops-values-path", "", "")
@@ -166,6 +167,7 @@ func TestLoadInfraConfigRejectsSecrets(t *testing.T) {
 	for _, secret := range []string{
 		"witself_flt_abc123def",
 		"witself_boot_zzz999",
+		"witself_bak_backup123",
 		"AKIAIOSFODNN7EXAMPLE",
 		"ghp_0123456789abcdefghij",
 		"-----BEGIN RSA PRIVATE KEY-----",
@@ -241,6 +243,9 @@ func TestConfigAddCellRoundTrip(t *testing.T) {
 		t.Fatalf("round trip lost values: argocd=%q profile=%q channel=%q",
 			get("argocd"), get("aws-profile"), get("channel"))
 	}
+	if get("backup-validation-target") != "false" {
+		t.Fatalf("unset backup-validation-target must default false, got %q", get("backup-validation-target"))
+	}
 	// Untyped flags were NOT baked into the file — the entry records
 	// intent, and future default changes flow through.
 	raw, err := os.ReadFile(path)
@@ -285,6 +290,7 @@ func TestDefaultsRejectPerCellOnlyFields(t *testing.T) {
 		"gitops values_path": "version: 1\ndefaults:\n  gitops:\n    values_path: .gitops/cells/aws-sandbox-usw2-dev/values.yaml\n",
 		"backend":            "version: 1\ndefaults:\n  backend: local\n",
 		"state_dir":          "version: 1\ndefaults:\n  state_dir: /tmp/x\n",
+		"restore target":     "version: 1\ndefaults:\n  backup_validation_target: true\n",
 	} {
 		path := writeConfig(t, body)
 		if _, _, err := loadInfraConfig(path); err == nil {
@@ -295,6 +301,76 @@ func TestDefaultsRejectPerCellOnlyFields(t *testing.T) {
 	path := writeConfig(t, "version: 1\ndefaults:\n  gitops:\n    revision: main\n")
 	if _, _, err := loadInfraConfig(path); err != nil {
 		t.Errorf("defaults gitops.revision must stay legal: %v", err)
+	}
+}
+
+func TestBackupValidationTargetConfigRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "infra.yaml")
+	fs := newTestFlagSet()
+	if err := fs.Parse([]string{
+		"-cloud", "aws",
+		"-account-alias", "sandbox",
+		"-region", "us-west-2",
+		"-role", "restore",
+		"-control-plane", "https://self.example.com",
+		"-backup-validation-target",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := configAddCell(fs, path); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "backup_validation_target: true") {
+		t.Fatalf("typed restore-test marker missing from config:\n%s", raw)
+	}
+
+	resolved := newTestFlagSet()
+	if err := resolved.Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyCellConfig(resolved, "aws-sandbox-usw2-restore", path); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolved.Lookup("backup-validation-target").Value.String(); got != "true" {
+		t.Fatalf("backup-validation-target = %q, want true", got)
+	}
+}
+
+func TestBackupValidationTargetConfigRequiresControlPlane(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "infra.yaml")
+	fs := newTestFlagSet()
+	if err := fs.Parse([]string{
+		"-cloud", "aws",
+		"-account-alias", "sandbox",
+		"-region", "us-west-2",
+		"-role", "restore",
+		"-backup-validation-target",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := configAddCell(fs, path)
+	if err == nil || !strings.Contains(err.Error(), "requires -control-plane") {
+		t.Fatalf("error = %v, want control-plane requirement", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("config written despite missing isolation authority: %v", err)
+	}
+}
+
+func TestBackupValidationTargetRejectsArchiveRestore(t *testing.T) {
+	err := run([]string{
+		"up",
+		"-backup-validation-target",
+		"-restore-archives",
+		"-control-plane", "https://self.example.com",
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot be combined with -restore-archives") {
+		t.Fatalf("error = %v, want restore-archives rejection", err)
 	}
 }
 

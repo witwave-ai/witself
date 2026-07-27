@@ -67,6 +67,9 @@ func TestConfigAddCivoCellRoundTrip(t *testing.T) {
 		"-civo-node-size", "g4s.kube.medium",
 		"-civo-token-file", tokenPath,
 		"-civo-expected-account-id", "account-123",
+		"-control-plane", "https://self.example.com",
+		"-argocd",
+		"-backup-validation-target",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -89,6 +92,9 @@ func TestConfigAddCivoCellRoundTrip(t *testing.T) {
 		"civo-node-size":           "g4s.kube.medium",
 		"civo-token-file":          tokenPath,
 		"civo-expected-account-id": "account-123",
+		"control-plane":            "https://self.example.com",
+		"argocd":                   "true",
+		"backup-validation-target": "true",
 	} {
 		if got := resolved.Lookup(name).Value.String(); got != want {
 			t.Errorf("%s = %q, want %q", name, got, want)

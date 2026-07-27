@@ -55,7 +55,7 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "witself-server.fullname" . }}
-          {{- if or .Values.database.existingSecret.name .Values.bootstrap.existingSecret.name .Values.provision.existingSecret.name }}
+          {{- if or .Values.database.existingSecret.name .Values.bootstrap.existingSecret.name .Values.provision.existingSecret.name .Values.backup.existingSecret.name }}
           env:
           {{- if .Values.bootstrap.existingSecret.name }}
             - name: WITSELF_BOOTSTRAP_TOKEN_FILE
@@ -73,6 +73,13 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.provision.existingSecret.name | quote }}
                   key: {{ .Values.provision.existingSecret.tokenKey | quote }}
+          {{- end }}
+          {{- if .Values.backup.existingSecret.name }}
+            - name: WITSELF_BACKUP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.backup.existingSecret.name | quote }}
+                  key: {{ .Values.backup.existingSecret.tokenKey | quote }}
           {{- end }}
           {{- if .Values.database.existingSecret.name }}
             - name: WITSELF_DATABASE_URL

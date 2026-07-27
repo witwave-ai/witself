@@ -27,6 +27,10 @@ import {
   newArchiveObjectKey,
   validateCommittedAccountArchive,
 } from "./archive-integrity.mjs";
+import {
+  accountBackupSchedulingEnabled,
+  cellHasDestinationCredentials,
+} from "./placement.mjs";
 
 const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const CELL_NAME = /^[a-z0-9-]{1,64}$/;
@@ -882,8 +886,30 @@ export class DurableAccountLifecycle {
     if (!cell?.endpoint || !cell?.provision_token) {
       fail(`cell ${name} is unavailable for account lifecycle work`, 502);
     }
-    if (target && cell.accepting === false) {
-      fail(`cell ${name} is drained and cannot accept a restore`, 409);
+    if (
+      target &&
+      (
+        cell.accepting === false ||
+        cell.backup_validation_target === true
+      )
+    ) {
+      fail(
+        `cell ${name} is drained or reserved for backup validation and cannot accept a restore`,
+        409,
+      );
+    }
+    if (
+      target &&
+      !cellHasDestinationCredentials(cell, {
+        backupsEnabled: accountBackupSchedulingEnabled(this.env),
+      })
+    ) {
+      fail(
+        accountBackupSchedulingEnabled(this.env)
+          ? `cell ${name} lacks distinct provision and backup credentials required while account backups are enabled`
+          : `cell ${name} lacks a provision credential`,
+        409,
+      );
     }
     if (
       expectedRegistrationID &&
