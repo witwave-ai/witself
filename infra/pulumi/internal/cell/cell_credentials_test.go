@@ -158,16 +158,36 @@ func TestCivoProvisionSecretContainsIndependentBackupCredential(t *testing.T) {
 	inputs := mocks.resourceInputs(
 		t, "kubernetes:core/v1:Secret", "witself-provision",
 	)
-	stringData := plainProperty(t, inputs["stringData"]).ObjectValue()
+	provisionData := plainProperty(t, inputs["stringData"]).ObjectValue()
+	if len(provisionData) != 1 {
+		t.Fatalf(
+			"Civo provision Secret fields = %#v, want only token",
+			provisionData,
+		)
+	}
+	backupInputs := mocks.resourceInputs(
+		t, "kubernetes:core/v1:Secret", "witself-backup",
+	)
+	backupData := plainProperty(
+		t, backupInputs["stringData"],
+	).ObjectValue()
+	if len(backupData) != 1 {
+		t.Fatalf(
+			"Civo backup Secret fields = %#v, want only backup_token",
+			backupData,
+		)
+	}
 	assertCredentialPair(
 		t,
-		plainString(t, stringData["token"]),
-		plainString(t, stringData["backup_token"]),
+		plainString(t, provisionData["token"]),
+		plainString(t, backupData["backup_token"]),
 	)
 	if !inputs["stringData"].ContainsSecrets() {
 		t.Fatal("Civo provision Secret stringData is not marked secret")
 	}
-	mocks.assertNoProviderBackupSecret(t)
+	if !backupInputs["stringData"].ContainsSecrets() {
+		t.Fatal("Civo backup Secret stringData is not marked secret")
+	}
 }
 
 type credentialTestDependency struct {

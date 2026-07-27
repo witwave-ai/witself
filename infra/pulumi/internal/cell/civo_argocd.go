@@ -103,8 +103,23 @@ func provisionCivoArgoCD(ctx *pulumi.Context, c civoCell, cluster *civo.Kubernet
 			Name:      pulumi.String("witself-provision"),
 			Namespace: pulumi.String(civoWorkloadNamespace),
 		},
+		StringData: pulumi.StringMap{"token": credentials.provisionToken},
+		Type:       pulumi.String("Opaque"),
+	}, secretOpts...)
+	if err != nil {
+		return err
+	}
+	// Civo stores its machine credentials directly in Kubernetes rather than
+	// synchronizing a provider JSON secret through ESO. Keep the existing
+	// provisioning Secret byte-for-byte compatible and add backup authority in
+	// its own Secret so enabling snapshots cannot delete/recreate the live
+	// provisioning credential.
+	backupSecret, err := corev1.NewSecret(ctx, "witself-backup", &corev1.SecretArgs{
+		Metadata: &metav1.ObjectMetaArgs{
+			Name:      pulumi.String("witself-backup"),
+			Namespace: pulumi.String(civoWorkloadNamespace),
+		},
 		StringData: pulumi.StringMap{
-			"token":        credentials.provisionToken,
 			"backup_token": credentials.backupToken,
 		},
 		Type: pulumi.String("Opaque"),
@@ -140,7 +155,14 @@ platform:
     enabled: false
 `, c.gitopsRepo, c.gitopsRevision, c.gitopsValuesPath, cellDomain, apiHost)
 
-	rootDependsOn := append([]pulumi.Resource{release, postgresAuth, dbSecret, bootstrapSecret, provisionSecret}, rootDependencies...)
+	rootDependsOn := append([]pulumi.Resource{
+		release,
+		postgresAuth,
+		dbSecret,
+		bootstrapSecret,
+		provisionSecret,
+		backupSecret,
+	}, rootDependencies...)
 	_, err = apiextensions.NewCustomResource(ctx, "argocd-root", &apiextensions.CustomResourceArgs{
 		ApiVersion: pulumi.String("argoproj.io/v1alpha1"),
 		Kind:       pulumi.String("Application"),
