@@ -80,6 +80,7 @@ if ! grep -Fq \
 fi
 if helm template witself-apps "$apps_chart" \
   --values "$civo_cell" \
+  --set apps.witselfServer.backup.enabled=false \
   --set apps.witselfServer.backup.validationEnabled=true \
   >"$render_dir/invalid-backup-validation-apps.yaml" \
   2>"$render_dir/invalid-backup-validation-apps.err"; then
