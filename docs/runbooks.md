@@ -322,8 +322,10 @@ independent of cell-evacuation archives. Before activation:
 
 1. Roll out the provider secret changes so every cell registration contains a
    distinct backup credential.
-2. Enable `apps.witselfServer.backup.enabled` for source cells only after their
-   `witself-provision` Secret contains `backup_token`.
+2. Enable `apps.witselfServer.backup.enabled` for source cells only after the
+   referenced backup Secret contains `backup_token`. Provider-backed ESO cells
+   use the extracted `witself-provision` Secret; Civo uses the additive
+   `witself-backup` Secret so provisioning authority is never replaced.
 3. Keep `apps.witselfServer.backup.validationEnabled=false` on serving cells.
    Enable it only on a registered, drained drill cell whose registry entry has
    `accepting=false` and no live account projections.

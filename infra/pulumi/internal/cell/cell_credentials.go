@@ -7,11 +7,11 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
 
-// cellCredentials are the two independent machine credentials stored in each
-// provider's existing provision secret. Keeping them in one provider secret
-// preserves the current secret lifecycle and ESO access boundary while giving
-// backup operations a credential that is not accepted as provisioning
-// authority.
+// cellCredentials are two independent machine credentials. ESO-backed clouds
+// store them in one provider JSON secret and extract both keys through the
+// existing access boundary. Civo projects them into separate Kubernetes
+// Secrets so adding backup authority never replaces its live provisioning
+// Secret.
 type cellCredentials struct {
 	provisionToken pulumi.StringOutput
 	backupToken    pulumi.StringOutput
