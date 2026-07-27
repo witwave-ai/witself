@@ -30,6 +30,7 @@ apps:
     backup:
       enabled: true
       validationEnabled: false
+      targetName: witself-backup
     replicaCount: 1
     podDisruptionBudget:
       enabled: false
