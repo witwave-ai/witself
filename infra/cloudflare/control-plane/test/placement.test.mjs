@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  accountBackupSchedulingEnabled,
   bestPlacementCell,
   bestRebalanceCell,
+  cellHasDestinationCredentials,
+  cellIsEligibleDestination,
   cellMatchesArchivedPlacement,
   cellMatchesPolicy,
   rebalanceImproves,
@@ -11,10 +14,38 @@ import {
 } from "../src/placement.mjs";
 
 const cells = [
-  { name: "gcp-use1-exp", cloud: "gcp", region_code: "use1", channel: "experimental" },
-  { name: "gcp-usw2-stable", cloud: "gcp", region_code: "usw2", channel: "stable" },
-  { name: "aws-usw2-edge", cloud: "aws", region_code: "usw2", channel: "edge" },
-  { name: "civo-use1-exp", cloud: "civo", region_code: "use1", channel: "experimental" },
+  {
+    name: "gcp-use1-exp",
+    cloud: "gcp",
+    region_code: "use1",
+    channel: "experimental",
+    endpoint: "https://gcp-use1.example",
+    provision_token: "provision-gcp-use1",
+  },
+  {
+    name: "gcp-usw2-stable",
+    cloud: "gcp",
+    region_code: "usw2",
+    channel: "stable",
+    endpoint: "https://gcp-usw2.example",
+    provision_token: "provision-gcp-usw2",
+  },
+  {
+    name: "aws-usw2-edge",
+    cloud: "aws",
+    region_code: "usw2",
+    channel: "edge",
+    endpoint: "https://aws-usw2.example",
+    provision_token: "provision-aws-usw2",
+  },
+  {
+    name: "civo-use1-exp",
+    cloud: "civo",
+    region_code: "use1",
+    channel: "experimental",
+    endpoint: "https://civo-use1.example",
+    provision_token: "provision-civo-use1",
+  },
 ];
 
 const basePolicy = {
@@ -27,6 +58,75 @@ const basePolicy = {
   rebalance_on: ["cloud", "channel"],
 };
 
+test("backup scheduling gates every direct destination helper on a distinct backup token", () => {
+  const legacy = cells[0];
+  const capable = {
+    ...legacy,
+    name: "gcp-use1-backup-capable",
+    backup_token: "backup-gcp-use1",
+  };
+  const sharedToken = {
+    ...legacy,
+    backup_token: legacy.provision_token,
+  };
+  const archived = { placement_policy: basePolicy };
+
+  assert.equal(accountBackupSchedulingEnabled({}), false);
+  assert.equal(
+    accountBackupSchedulingEnabled({
+      CP_ACCOUNT_BACKUPS_ENABLED: " TRUE ",
+    }),
+    true,
+  );
+  assert.equal(cellHasDestinationCredentials(legacy), true);
+  assert.equal(
+    cellHasDestinationCredentials(legacy, { backupsEnabled: true }),
+    false,
+  );
+  assert.equal(
+    cellHasDestinationCredentials(sharedToken, { backupsEnabled: true }),
+    false,
+  );
+  assert.equal(
+    cellIsEligibleDestination(legacy, { backupsEnabled: false }),
+    true,
+  );
+  assert.equal(
+    cellIsEligibleDestination(legacy, { backupsEnabled: true }),
+    false,
+  );
+  assert.equal(
+    bestPlacementCell(
+      [legacy],
+      archived,
+      new Map(),
+      false,
+      { backupsEnabled: false },
+    )?.name,
+    legacy.name,
+  );
+  assert.equal(
+    bestPlacementCell(
+      [legacy],
+      archived,
+      new Map(),
+      false,
+      { backupsEnabled: true },
+    ),
+    null,
+  );
+  assert.equal(
+    bestPlacementCell(
+      [legacy, capable],
+      archived,
+      new Map(),
+      false,
+      { backupsEnabled: true },
+    )?.name,
+    capable.name,
+  );
+});
+
 test("hard pins filter every placement dimension", () => {
   const policy = {
     ...basePolicy,
@@ -37,6 +137,46 @@ test("hard pins filter every placement dimension", () => {
   assert.equal(cellMatchesPolicy(cells[0], policy), true);
   assert.equal(cellMatchesPolicy(cells[1], policy), false);
   assert.equal(cellMatchesPolicy(cells[2], policy), false);
+});
+
+test("backup validation targets are excluded from placement and rebalance", () => {
+  const validationCell = {
+    ...cells[1],
+    name: "gcp-usw2-validation",
+    backup_validation_target: true,
+  };
+  const gcpOnly = {
+    ...basePolicy,
+    allowed_clouds: ["gcp"],
+    rebalance_on: [],
+  };
+  assert.equal(cellMatchesPolicy(validationCell, gcpOnly), false);
+  assert.equal(
+    cellMatchesArchivedPlacement(
+      validationCell,
+      { region: validationCell.region_code },
+      true,
+    ),
+    false,
+  );
+  assert.equal(
+    bestPlacementCell(
+      [validationCell],
+      { placement_policy: gcpOnly },
+      new Map(),
+      true,
+    ),
+    null,
+  );
+  assert.equal(
+    bestRebalanceCell(
+      [cells[2], validationCell],
+      cells[2],
+      gcpOnly,
+      new Map(),
+    ),
+    null,
+  );
 });
 
 test("Civo participates in hard pins and experimental placement", () => {

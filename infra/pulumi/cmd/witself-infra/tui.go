@@ -146,6 +146,8 @@ func (c cellState) status() string {
 		return "error"
 	case c.fleet == nil:
 		return "absent"
+	case c.fleet.BackupValidationTarget:
+		return "restore test"
 	case c.fleet.Accepting != nil && !*c.fleet.Accepting:
 		return "draining"
 	default:
@@ -162,6 +164,8 @@ func (c cellState) status() string {
 func (c cellState) statusGlyph() string {
 	glyph, style := "●", styOK
 	switch c.status() {
+	case "restore test":
+		glyph, style = "◉", styPlan
 	case "draining":
 		glyph, style = "◐", styWarn
 	case "absent":
@@ -234,6 +238,9 @@ func effectiveSettings(e cellEntry, d *cellEntry) []settingRow {
 		str("cidr", "10.20.0.0/16", e.CIDR, func(x *cellEntry) *string { return x.CIDR })
 	}
 	argocdOn := boolean("argocd", false, e.ArgoCD, func(x *cellEntry) *bool { return x.ArgoCD })
+	boolean("restore target", false, e.BackupValidationTarget, func(x *cellEntry) *bool {
+		return x.BackupValidationTarget
+	})
 	if argocdOn {
 		str("gitops repo", "https://github.com/witwave-ai/witself",
 			gitField(e.Gitops, gitRepo), func(x *cellEntry) *string { return gitField(x.Gitops, gitRepo) })
@@ -2012,6 +2019,10 @@ func (m dashboardModel) renderOverviewTab(st cellState, w int) []string {
 	}
 	lines = ctxPut(lines, w, "control plane", groupLabel(st.controlPlane))
 	lines = ctxPut(lines, w, "status", st.status())
+	if st.fleet != nil && st.fleet.BackupValidationTarget {
+		lines = ctxPut(lines, w, "purpose", "backup restore validation · isolated")
+		lines = ctxPut(lines, w, "placement", "disabled")
+	}
 	// Plan state: what the ◆ in the cells pane means and what to press
 	// next either way. Age shown so the operator can judge how stale the
 	// approved diff is getting. A plan can fail to arm two ways — the
@@ -2032,6 +2043,11 @@ func (m dashboardModel) renderOverviewTab(st cellState, w int) []string {
 	if st.fleet != nil {
 		lines = ctxPut(lines, w, "endpoint", st.fleet.Endpoint)
 		lines = ctxPut(lines, w, "channel", st.fleet.Channel)
+		backupAuth := styWarn.Render("missing")
+		if st.fleet.HasBackupToken {
+			backupAuth = styOK.Render("present · redacted")
+		}
+		lines = ctxPut(lines, w, "backup auth", backupAuth)
 	}
 	if len(st.settings) > 0 {
 		lines = append(lines, "", styTitle.Render("  settings"))
@@ -2285,6 +2301,20 @@ func cellCredentialHealth(st cellState) (healthLevel, string) {
 func cellFleetHealth(st cellState) (healthLevel, string) {
 	if st.fleet == nil {
 		return healthWarn, "not registered"
+	}
+	if st.entry.BackupValidationTarget != nil &&
+		*st.entry.BackupValidationTarget &&
+		!st.fleet.BackupValidationTarget {
+		return healthBad, "registry missing restore-test marker"
+	}
+	if st.fleet.BackupValidationTarget {
+		if st.fleet.Accepting == nil || *st.fleet.Accepting {
+			return healthBad, "restore test is accepting placement"
+		}
+		if !st.fleet.HasBackupToken {
+			return healthBad, "restore test · backup credential missing"
+		}
+		return healthGood, "registered · restore test · isolated"
 	}
 	if st.fleet.Accepting != nil && !*st.fleet.Accepting {
 		return healthWarn, "draining"

@@ -95,35 +95,22 @@ func provisionGCPBootstrapSecret(ctx *pulumi.Context, c gcpCell, prov *gcp.Provi
 	return secret, nil
 }
 
-// provisionGCPProvisionSecret mints the per-cell account-provisioning token and
-// publishes it where ESO can sync it into witself-server as WITSELF_PROVISION_TOKEN.
+// provisionGCPProvisionSecret mints independent per-cell provisioning and
+// backup tokens and publishes them together in the existing provision secret.
 func provisionGCPProvisionSecret(ctx *pulumi.Context, c gcpCell, prov *gcp.Provider, secretManagerAPI pulumi.Resource) (*gcpSecret, error) {
-	tokenBody, err := random.NewRandomString(ctx, "witself-provision-token", &random.RandomStringArgs{
-		Length:  pulumi.Int(43),
-		Special: pulumi.Bool(false),
-		Upper:   pulumi.Bool(true),
-		Lower:   pulumi.Bool(true),
-		Numeric: pulumi.Bool(true),
-	})
+	credentials, err := newCellCredentials(ctx)
 	if err != nil {
 		return nil, err
 	}
-	token := tokenBody.Result.ApplyT(func(body string) string {
-		return "witself_prv_" + body
-	}).(pulumi.StringOutput)
 
-	payload := token.ApplyT(func(tok string) (string, error) {
-		b, err := json.Marshal(map[string]string{"token": tok})
-		return string(b), err
-	}).(pulumi.StringOutput)
-
-	secret, err := provisionGCPJSONSecret(ctx, "witself-provision-token", c, gcpProvisionSecretName(c), "Witself cell account-provisioning token (managed by witself-infra)", payload, prov, secretManagerAPI)
+	secret, err := provisionGCPJSONSecret(ctx, "witself-provision-token", c, gcpProvisionSecretName(c), "Witself cell provisioning and backup tokens (managed by witself-infra)", credentials.payload, prov, secretManagerAPI)
 	if err != nil {
 		return nil, err
 	}
 
 	ctx.Export("provisionSecretName", secret.name)
 	ctx.Export("provisionSecretID", secret.id)
-	ctx.Export("provisionToken", pulumi.ToSecret(token))
+	ctx.Export("provisionToken", pulumi.ToSecret(credentials.provisionToken))
+	ctx.Export("backupToken", pulumi.ToSecret(credentials.backupToken))
 	return secret, nil
 }

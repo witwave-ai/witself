@@ -835,6 +835,7 @@ export async function validateAccountArchive(
   let manifest = null;
   let manifestTables = null;
   let checksumsSeen = false;
+  let trailerSHA256 = null;
   let entries = 0;
   let tableIndex = 0;
   let nextChunk = 0;
@@ -904,6 +905,7 @@ export async function validateAccountArchive(
         const raw = await consumeEntry(reader, entry, null, true);
         const checksums = parseJSONRecord(raw, "checksums.json");
         validateChecksums(checksums, manifest, seen);
+        trailerSHA256 = new SHA256().update(raw).hexDigest();
         checksumsSeen = true;
         continue;
       }
@@ -976,7 +978,12 @@ export async function validateAccountArchive(
         "archive is truncated: checksums.json is missing",
       );
     }
-    return { manifest, entries, chunks: seen.size };
+    return {
+      manifest,
+      entries,
+      chunks: seen.size,
+      trailer_sha256: trailerSHA256,
+    };
   } catch (error) {
     await reader.cancel(error);
     if (

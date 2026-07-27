@@ -185,6 +185,7 @@ func provisionAzure(ctx *pulumi.Context, c azureCell) error {
 	ctx.Export("provisionSecretName", pulumi.String(secrets.provisionSecretName))
 	ctx.Export("provisionSecretID", secrets.provisionSecretID)
 	ctx.Export("provisionToken", pulumi.ToSecret(secrets.provisionToken))
+	ctx.Export("backupToken", pulumi.ToSecret(secrets.backupToken))
 	ctx.Export("aksCluster", aks.name)
 	ctx.Export("aksFQDN", aks.fqdn)
 	ctx.Export("aksKubernetesVersion", aks.kubernetesVersion)

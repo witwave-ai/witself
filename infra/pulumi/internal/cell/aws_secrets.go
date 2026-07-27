@@ -21,8 +21,8 @@ func dbSecretName(c awsCell) string { return c.name + "/db" }
 // Pod Identity role can read it because the IAM policy allows <cell>/*.
 func bootstrapSecretName(c awsCell) string { return c.name + "/bootstrap/operator-token" }
 
-// provisionSecretName is the cell's account-provisioning credential: the token
-// the control plane presents to POST /v1/accounts on this cell.
+// provisionSecretName is the cell's shared machine-credential envelope. Its
+// JSON payload carries independent provisioning and backup tokens.
 func provisionSecretName(c awsCell) string { return c.name + "/provision/token" }
 
 // provisionAWSDBSecret writes the cell's Postgres connection (host, port, user,
@@ -134,30 +134,16 @@ func provisionAWSBootstrapSecret(ctx *pulumi.Context, c awsCell, prov *aws.Provi
 	return nil
 }
 
-// provisionAWSProvisionSecret mints the cell's per-cell account-provisioning
-// token (witself_prv_...), publishes it to Secrets Manager for ESO to sync into
-// the cluster as the server's WITSELF_PROVISION_TOKEN, and exports it (as a
-// secret output) so `up -control-plane` can hand it to the control plane in the
-// registration payload. Machine-to-machine only: humans never see this value.
+// provisionAWSProvisionSecret mints independent per-cell provisioning and
+// backup tokens, publishes them together in the existing provision secret, and
+// exports each as a secret output so `up -control-plane` can hand both to the
+// control plane in the registration payload. Machine-to-machine only: humans
+// never see these values.
 func provisionAWSProvisionSecret(ctx *pulumi.Context, c awsCell, prov *aws.Provider) error {
-	tokenBody, err := random.NewRandomString(ctx, "witself-provision-token", &random.RandomStringArgs{
-		Length:  pulumi.Int(43), // 256-ish bits with base62 chars.
-		Special: pulumi.Bool(false),
-		Upper:   pulumi.Bool(true),
-		Lower:   pulumi.Bool(true),
-		Numeric: pulumi.Bool(true),
-	})
+	credentials, err := newCellCredentials(ctx)
 	if err != nil {
 		return err
 	}
-	token := tokenBody.Result.ApplyT(func(body string) string {
-		return "witself_prv_" + body
-	}).(pulumi.StringOutput)
-
-	payload := token.ApplyT(func(tok string) (string, error) {
-		b, err := json.Marshal(map[string]string{"token": tok})
-		return string(b), err
-	}).(pulumi.StringOutput)
 
 	recovery := 0
 	if c.profile == "prod" {
@@ -166,7 +152,7 @@ func provisionAWSProvisionSecret(ctx *pulumi.Context, c awsCell, prov *aws.Provi
 
 	psecret, err := secretsmanager.NewSecret(ctx, "witself-provision-token", &secretsmanager.SecretArgs{
 		Name:                 pulumi.String(provisionSecretName(c)),
-		Description:          pulumi.String("Witself cell account-provisioning token (managed by witself-infra)"),
+		Description:          pulumi.String("Witself cell provisioning and backup tokens (managed by witself-infra)"),
 		RecoveryWindowInDays: pulumi.Int(recovery),
 		Tags:                 resourceTags(provisionSecretName(c), "provision"),
 	}, pulumi.Provider(prov))
@@ -175,13 +161,14 @@ func provisionAWSProvisionSecret(ctx *pulumi.Context, c awsCell, prov *aws.Provi
 	}
 	if _, err := secretsmanager.NewSecretVersion(ctx, "witself-provision-token", &secretsmanager.SecretVersionArgs{
 		SecretId:     psecret.ID(),
-		SecretString: payload,
+		SecretString: credentials.payload,
 	}, pulumi.Provider(prov)); err != nil {
 		return err
 	}
 
 	ctx.Export("provisionSecretName", pulumi.String(provisionSecretName(c)))
 	ctx.Export("provisionSecretArn", psecret.Arn)
-	ctx.Export("provisionToken", pulumi.ToSecret(token))
+	ctx.Export("provisionToken", pulumi.ToSecret(credentials.provisionToken))
+	ctx.Export("backupToken", pulumi.ToSecret(credentials.backupToken))
 	return nil
 }

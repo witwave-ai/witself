@@ -33,6 +33,18 @@ var ErrVaultLifecycleInProgress = errors.New("vault key enrollment or rotation i
 // key or secret identifiers to handle damaged lifecycle state safely.
 var ErrVaultLifecycleIntegrity = errors.New("vault key lifecycle state is not portable")
 
+// ErrBackupIDInvalid means a backup request did not carry one bounded opaque
+// snapshot identity. Backup IDs are separate from evacuation epochs even
+// though both use the same conservative wire alphabet.
+var ErrBackupIDInvalid = errors.New("invalid backup id")
+
+func validateBackupID(backupID string) error {
+	if !evacuationIDPattern.MatchString(backupID) {
+		return ErrBackupIDInvalid
+	}
+	return nil
+}
+
 // SchemaVersion is the highest embedded migration number — the schema
 // coordinate written into every archive manifest.
 func SchemaVersion() int {
@@ -61,7 +73,10 @@ func SchemaVersion() int {
 // inside tables is stable (primary key) so repeated exports are deterministic
 // apart from manifest time metadata.
 func (s *Store) ExportAccount(ctx context.Context, accountID, cellName, serverVersion string, w io.Writer) error {
-	return s.exportAccount(ctx, accountID, "", cellName, serverVersion, w)
+	return s.exportAccount(
+		ctx, accountID, cellName, serverVersion, w,
+		accountExportOptions{},
+	)
 }
 
 // ExportAccountEvacuation streams an account only while the exact durable
@@ -77,18 +92,51 @@ func (s *Store) ExportAccountEvacuation(
 		return err
 	}
 	return s.exportAccount(
-		ctx, accountID, evacuationID, cellName, serverVersion, w,
+		ctx, accountID, cellName, serverVersion, w,
+		accountExportOptions{evacuationID: evacuationID},
 	)
+}
+
+// ExportAccountBackup streams one point-in-time logical account snapshot
+// without changing account lifecycle or placement state. Unlike evacuation
+// export, a backup may snapshot an active account. PostgreSQL REPEATABLE READ
+// supplies one relational point in time while ReadOnly prevents lazy
+// reconciliation or repair from turning a backup into a production mutation.
+//
+// A backup refuses to overlap an evacuation or non-portable vault lifecycle.
+// Those are retryable scheduling conditions; the backup path never suspends,
+// resumes, aborts, or otherwise resolves them.
+func (s *Store) ExportAccountBackup(
+	ctx context.Context,
+	accountID, backupID, cellName, serverVersion string,
+	w io.Writer,
+) error {
+	if err := validateBackupID(backupID); err != nil {
+		return err
+	}
+	return s.exportAccount(
+		ctx, accountID, cellName, serverVersion, w,
+		accountExportOptions{backup: true, backupID: backupID},
+	)
+}
+
+type accountExportOptions struct {
+	evacuationID string
+	backupID     string
+	backup       bool
 }
 
 func (s *Store) exportAccount(
 	ctx context.Context,
-	accountID, evacuationID, cellName, serverVersion string,
+	accountID, cellName, serverVersion string,
 	w io.Writer,
+	options accountExportOptions,
 ) error {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
-		IsoLevel: pgx.RepeatableRead,
-	})
+	txOptions := pgx.TxOptions{IsoLevel: pgx.RepeatableRead}
+	if options.backup {
+		txOptions.AccessMode = pgx.ReadOnly
+	}
+	tx, err := s.pool.BeginTx(ctx, txOptions)
 	if err != nil {
 		return fmt.Errorf("begin export snapshot: %w", err)
 	}
@@ -101,19 +149,24 @@ func (s *Store) exportAccount(
 		return fmt.Errorf("set canonical export bytea encoding: %w", err)
 	}
 
-	if evacuationID != "" {
-		if err := setEvacuationAuthorityTx(ctx, tx, evacuationID); err != nil {
+	if options.evacuationID != "" {
+		if err := setEvacuationAuthorityTx(
+			ctx, tx, options.evacuationID,
+		); err != nil {
 			return err
 		}
 	}
 
 	var status string
 	var currentEvacuationID, currentEvacuationRole *string
-	err = tx.QueryRow(ctx,
-		`SELECT status, evacuation_id, evacuation_role
+	accountQuery := `SELECT status, evacuation_id, evacuation_role
 		   FROM accounts
-		  WHERE id = $1
-		  FOR UPDATE`,
+		  WHERE id = $1`
+	if !options.backup {
+		accountQuery += ` FOR UPDATE`
+	}
+	err = tx.QueryRow(ctx,
+		accountQuery,
 		accountID,
 	).Scan(&status, &currentEvacuationID, &currentEvacuationRole)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -122,20 +175,29 @@ func (s *Store) exportAccount(
 	if err != nil {
 		return fmt.Errorf("verify export target: %w", err)
 	}
-	if evacuationID == "" && currentEvacuationID != nil {
+	if options.evacuationID == "" && currentEvacuationID != nil {
 		return ErrAccountEvacuationMismatch
 	}
-	if evacuationID != "" &&
-		(currentEvacuationID == nil || *currentEvacuationID != evacuationID ||
+	if options.evacuationID != "" &&
+		(currentEvacuationID == nil ||
+			*currentEvacuationID != options.evacuationID ||
 			currentEvacuationRole == nil ||
 			*currentEvacuationRole != "source") {
 		return ErrAccountEvacuationMismatch
 	}
-	if status != "suspended" && status != "closed" {
+	if options.backup {
+		if status != "active" && status != "suspended" && status != "closed" {
+			return ErrAccountNotExportable
+		}
+	} else if status != "suspended" && status != "closed" {
 		return ErrAccountNotExportable
 	}
-	if err := expireAccountVaultKeyEnrollmentsTx(ctx, tx, accountID); err != nil {
-		return fmt.Errorf("expire vault key enrollments before export: %w", err)
+	if !options.backup {
+		if err := expireAccountVaultKeyEnrollmentsTx(
+			ctx, tx, accountID,
+		); err != nil {
+			return fmt.Errorf("expire vault key enrollments before export: %w", err)
+		}
 	}
 	var activeEnrollments, openRotations, orphanPendingKeys int64
 	if err := tx.QueryRow(ctx, `
@@ -204,15 +266,23 @@ func (s *Store) exportAccount(
 	// write, so repair those nullable application-derived digests in bounded
 	// memory before streaming a current-schema portable archive. A compacted row
 	// without a digest is unrecoverable and fails the export closed.
-	if _, err := backfillAvatarLockedLayerDigestsTx(ctx, tx,
-		avatarLockedLayerDigestBackfillFilter{accountID: accountID}); err != nil {
-		return fmt.Errorf("repair avatar digests before export: %w", err)
+	if !options.backup {
+		if _, err := backfillAvatarLockedLayerDigestsTx(ctx, tx,
+			avatarLockedLayerDigestBackfillFilter{
+				accountID: accountID,
+			}); err != nil {
+			return fmt.Errorf("repair avatar digests before export: %w", err)
+		}
 	}
 	// Export itself is a legitimate lazy-expiry touch. Materialize every due
 	// request and cancel its active fences before the snapshot streams, so an
 	// archive can never carry time-expired authority as state=open.
-	if _, _, err := drainMessageRequestReconciliationTx(ctx, tx, accountID); err != nil {
-		return fmt.Errorf("expire message requests before export: %w", err)
+	if !options.backup {
+		if _, _, err := drainMessageRequestReconciliationTx(
+			ctx, tx, accountID,
+		); err != nil {
+			return fmt.Errorf("expire message requests before export: %w", err)
+		}
 	}
 	// Bind archive time to the same database clock that authored row
 	// timestamps. This guarantees every legitimate profile/vector timestamp is
@@ -1216,8 +1286,12 @@ func (s *Store) exportAccount(
 		AccountID:     accountID,
 		Cell:          cellName,
 		Status:        status,
-		EvacuationID:  evacuationID,
+		EvacuationID:  options.evacuationID,
 		ExportedAt:    exportedAt.UTC(),
+	}
+	if options.backup {
+		m.Purpose = export.PurposeBackup
+		m.BackupID = options.backupID
 	}
 	if err := export.Write(ctx, w, m, sources); err != nil {
 		return err

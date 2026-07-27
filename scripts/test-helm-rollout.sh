@@ -20,6 +20,8 @@ portable_worker_render="$render_dir/portable-worker.yaml"
 apps_render="$render_dir/apps.yaml"
 live_apps_render="$render_dir/live-apps.yaml"
 civo_apps_render="$render_dir/civo-apps.yaml"
+backup_validation_render="$render_dir/backup-validation.yaml"
+backup_validation_apps_render="$render_dir/backup-validation-apps.yaml"
 phase_b_gcp_render="$render_dir/phase-b-gcp.yaml"
 phase_b_apps_render="$render_dir/phase-b-apps.yaml"
 email_pilot_render="$render_dir/email-pilot.yaml"
@@ -54,6 +56,42 @@ helm template witself-apps "$apps_chart" \
   --values "$apps_profile" >"$live_apps_render"
 helm template witself-apps "$apps_chart" \
   --values "$civo_cell" >"$civo_apps_render"
+helm template witself-server "$server_chart" --namespace witself \
+  --set backup.existingSecret.name=witself-backup \
+  --set backup.validation.enabled=true >"$backup_validation_render"
+helm template witself-apps "$apps_chart" \
+  --values "$civo_cell" \
+  --set apps.witselfServer.backup.enabled=true \
+  --set apps.witselfServer.backup.validationEnabled=true \
+  --set apps.witselfServer.backup.targetName=witself-backup \
+  >"$backup_validation_apps_render"
+if helm template witself-server "$server_chart" --namespace witself \
+  --set backup.validation.enabled=true \
+  >"$render_dir/invalid-backup-validation.yaml" \
+  2>"$render_dir/invalid-backup-validation.err"; then
+  echo "backup validation rendered without a backup credential Secret" >&2
+  exit 1
+fi
+if ! grep -Fq \
+  'backup.validation.enabled requires backup.existingSecret.name' \
+  "$render_dir/invalid-backup-validation.err"; then
+  echo "backup validation failure did not explain the missing credential Secret" >&2
+  exit 1
+fi
+if helm template witself-apps "$apps_chart" \
+  --values "$civo_cell" \
+  --set apps.witselfServer.backup.validationEnabled=true \
+  >"$render_dir/invalid-backup-validation-apps.yaml" \
+  2>"$render_dir/invalid-backup-validation-apps.err"; then
+  echo "app-of-apps backup validation rendered with backup export disabled" >&2
+  exit 1
+fi
+if ! grep -Fq \
+  'apps.witselfServer.backup.validationEnabled requires apps.witselfServer.backup.enabled' \
+  "$render_dir/invalid-backup-validation-apps.err"; then
+  echo "app-of-apps validation failure did not explain the disabled export path" >&2
+  exit 1
+fi
 helm template witself-server "$server_chart" --namespace witself \
   --values "$gcp_profile" \
   --set avatar.payloadCompaction.enabled=true >"$phase_b_gcp_render"
@@ -297,6 +335,7 @@ require_line "      maxSurge: 1" "$default_server_deployment"
 require_line "      maxUnavailable: 0" "$default_server_deployment"
 require_line '  WITSELF_AVATAR_PAYLOAD_COMPACTION_ENABLED: "false"' "$default_server_config"
 require_line '  WITSELF_CELL_NAME: ""' "$default_server_config"
+require_line '  WITSELF_BACKUP_VALIDATION_ENABLED: "false"' "$default_server_config"
 require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED: "false"' "$default_server_config"
 require_line '  WITSELF_TRANSCRIPT_RETENTION_ENABLED: "false"' "$default_server_config"
 require_line '  WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED: "false"' "$default_server_config"
@@ -313,6 +352,31 @@ if grep -Fq "name: witself-worker" "$default_render"; then
   echo "public defaults unexpectedly rendered the database-dependent worker" >&2
   exit 1
 fi
+extract_document ConfigMap witself-server "$backup_validation_render" \
+  "$render_dir/backup-validation-server-config.yaml"
+require_line '  WITSELF_BACKUP_VALIDATION_ENABLED: "true"' \
+  "$render_dir/backup-validation-server-config.yaml"
+extract_document Deployment witself-server "$backup_validation_render" \
+  "$render_dir/backup-validation-server-deployment.yaml"
+require_sequence "$render_dir/backup-validation-server-deployment.yaml" \
+  "            - name: WITSELF_BACKUP_TOKEN" \
+  "              valueFrom:" \
+  "                secretKeyRef:" \
+  '                  name: "witself-backup"' \
+  '                  key: "backup_token"'
+extract_document Application witself-server "$backup_validation_apps_render" \
+  "$render_dir/backup-validation-server-application.yaml"
+extract_application_helm_values \
+  "$render_dir/backup-validation-server-application.yaml" \
+  "$render_dir/backup-validation-nested-values.yaml"
+helm template witself-server "$server_chart" --namespace witself \
+  --values "$render_dir/backup-validation-nested-values.yaml" \
+  >"$render_dir/backup-validation-nested.yaml"
+extract_document ConfigMap witself-server \
+  "$render_dir/backup-validation-nested.yaml" \
+  "$render_dir/backup-validation-nested-config.yaml"
+require_line '  WITSELF_BACKUP_VALIDATION_ENABLED: "true"' \
+  "$render_dir/backup-validation-nested-config.yaml"
 require_line "  replicas: 2" "$portable_worker_deployment"
 if grep -Fqx "          lifecycle:" "$default_server_deployment"; then
   echo "default render unexpectedly contains a container lifecycle handler" >&2

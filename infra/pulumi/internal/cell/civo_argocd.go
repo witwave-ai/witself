@@ -35,16 +35,10 @@ func provisionCivoArgoCD(ctx *pulumi.Context, c civoCell, cluster *civo.Kubernet
 	if err != nil {
 		return err
 	}
-	provisionBody, err := random.NewRandomString(ctx, "witself-provision-token", &random.RandomStringArgs{
-		Length: pulumi.Int(43), Special: pulumi.Bool(false),
-		Upper: pulumi.Bool(true), Lower: pulumi.Bool(true), Numeric: pulumi.Bool(true),
-	})
+	credentials, err := newCellCredentials(ctx)
 	if err != nil {
 		return err
 	}
-	provisionToken := provisionBody.Result.ApplyT(func(body string) string {
-		return "witself_prv_" + body
-	}).(pulumi.StringOutput)
 
 	var bootstrapToken pulumi.StringOutput
 	if c.bootstrapTokenSet {
@@ -109,8 +103,11 @@ func provisionCivoArgoCD(ctx *pulumi.Context, c civoCell, cluster *civo.Kubernet
 			Name:      pulumi.String("witself-provision"),
 			Namespace: pulumi.String(civoWorkloadNamespace),
 		},
-		StringData: pulumi.StringMap{"token": provisionToken},
-		Type:       pulumi.String("Opaque"),
+		StringData: pulumi.StringMap{
+			"token":        credentials.provisionToken,
+			"backup_token": credentials.backupToken,
+		},
+		Type: pulumi.String("Opaque"),
 	}, secretOpts...)
 	if err != nil {
 		return err
@@ -177,6 +174,7 @@ platform:
 	ctx.Export("argocdNamespace", pulumi.String(argocdNamespace))
 	ctx.Export("gitops", pulumi.String(c.gitopsRepo+" @ "+c.gitopsRevision+" ("+c.gitopsPath+" + "+c.gitopsValuesPath+")"))
 	ctx.Export("dbInstance", pulumi.String("witself-postgresql"))
-	ctx.Export("provisionToken", pulumi.ToSecret(provisionToken))
+	ctx.Export("provisionToken", pulumi.ToSecret(credentials.provisionToken))
+	ctx.Export("backupToken", pulumi.ToSecret(credentials.backupToken))
 	return nil
 }

@@ -576,6 +576,88 @@ encrypted secret material, and service availability.
   contain plaintext secret values, TOTP seeds/codes, or key material. See
   [audit-retention.md](audit-retention.md).
 
+### Periodic logical account snapshots
+
+The managed control plane can take independent, point-in-time logical snapshots
+of routed accounts into the dedicated Cloudflare R2 bucket
+`witself-backups`. This protocol is separate from cell evacuation:
+
+- a backup reads an active account in one PostgreSQL `REPEATABLE READ`,
+  read-only transaction and does not suspend it, alter placement, or write an
+  evacuation marker;
+- every cell receives a `witself_bak_...` credential distinct from its
+  `witself_prv_...` provisioning credential, and neither credential is accepted
+  as the other authority;
+- every generation has an immutable key of the form
+  `accounts/<account>/<YYYY>/<MM>/<DD>/backup_<UTC-slot>.tar.gz`;
+- the Worker streams the completed R2 object back through gzip, tar, manifest,
+  per-chunk checksum, trailing-checksum, account, purpose, and backup-id
+  validation before adding it to the per-account Durable Object catalog; and
+- the source route and cell registration are pinned before export and checked
+  again before catalog commit, so an account move cannot silently attribute a
+  backup to the wrong source.
+
+The schedule is deliberately disabled by default when
+`CP_ACCOUNT_BACKUPS_ENABLED` is absent or false. The committed Worker
+configuration leaves this operator activation binding absent; set it as a
+Worker secret only after the manual path is healthy so later code deployments
+do not reset it. Enabling the cell export credential and enabling the
+Cloudflare schedule are separate rollout steps. Manual fleet-token operations
+make the path observable before the clock is activated. The
+periodic scan is cursor-based and bounded, and every account/interval pair has
+one deterministic backup id, so retries do not create mutable "latest" objects.
+Runtime defaults are one generation per 1,440 minutes, four accounts per scan
+page, concurrency two, four attempts per generation, and 64 catalog entries per
+account. Their bounded overrides are
+`CP_ACCOUNT_BACKUPS_INTERVAL_MINUTES`, `CP_ACCOUNT_BACKUPS_PAGE_SIZE`,
+`CP_ACCOUNT_BACKUPS_CONCURRENCY`, `CP_ACCOUNT_BACKUPS_MAX_ATTEMPTS`, and
+`CP_ACCOUNT_BACKUPS_CATALOG_LIMIT`.
+
+The Durable Object catalog is a bounded operational index, not the retention
+authority. Cataloged R2 objects are not deleted when old catalog entries age
+out. Configure the `witself-backups` bucket's access policy, multipart-abort
+rule, generation retention, and any expiration policy explicitly before
+activation. Preserve multiple verified generations and do not overwrite an
+existing object. For a stronger 3-2-1 posture, replicate retained generations
+to a second account or provider: R2 snapshots in the same Cloudflare account
+are an independent logical copy, but not an independent administrative failure
+domain.
+
+The initial development policy for the `accounts/` prefix is 90-day lifecycle
+expiration. The bucket also retains Cloudflare's default rule that aborts
+incomplete multipart uploads after seven days. Do not apply a bucket lock to
+the direct-write prefix yet: an upload that completes but fails archive
+validation must remain deletable so the same deterministic generation can be
+retried. Provider-enforced immutability requires a future staging-to-final
+object promotion design; until then the application never overwrites a
+cataloged generation.
+
+These snapshots complement, rather than replace, each provider's PostgreSQL
+PITR/final-backup controls. Provider recovery restores a whole cell quickly;
+logical snapshots recover one portable account and catch archive/import
+compatibility failures that a volume-level backup cannot.
+
+#### Rollback-only restore drills
+
+A restore drill selects one committed catalog generation and a registered cell
+that is both `accepting=false` and free of live account projections. That drill
+cell must explicitly enable `WITSELF_BACKUP_VALIDATION_ENABLED`; ordinary cells
+leave it false.
+
+The control plane re-reads and validates the R2 object, then sends it to the
+cell with the dedicated backup credential. The cell runs the complete semantic
+import with the archived account status, validates every graph and checksum,
+forces all deferred PostgreSQL constraints, and deliberately rolls the
+transaction back. The imported rows remain invisible outside that transaction.
+Only an exact rollback-validation acknowledgement is recorded in the backup
+catalog. The drill never changes `acct:` or `archived:` routing and there is no
+routine HTTP endpoint that commits a backup restore.
+
+A full disaster-recovery exercise that commits data must therefore use a
+disposable database or namespace under an operator-reviewed recovery procedure.
+Destroy that disposable target after verification; do not turn the routine
+drill endpoint into an account-import escape hatch.
+
 ### GCP Cloud SQL pre-migration backup
 
 Before a managed GCP rollout can start a binary that may advance the database

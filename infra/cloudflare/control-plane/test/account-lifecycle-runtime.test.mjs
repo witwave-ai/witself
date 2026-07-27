@@ -483,6 +483,7 @@ function runtime({
   targetCoordinatorRequest =
     (cellName, path, payload) =>
       targetAuthority.request(cellName, path, payload),
+  backupsEnabled = false,
 }) {
   targetAuthorities.set(directory, targetAuthority);
   return new DurableAccountLifecycle(
@@ -490,6 +491,7 @@ function runtime({
     {
       DIRECTORY: directory,
       ARCHIVES: bucket,
+      CP_ACCOUNT_BACKUPS_ENABLED: backupsEnabled ? "true" : "false",
     },
     {
       fetch:
@@ -520,6 +522,40 @@ function runtime({
     },
   );
 }
+
+test("lifecycle targets keep legacy cells usable disabled and exclude them enabled", async () => {
+  const directory = new KV({
+    [`cell:${TARGET}`]: cell(TARGET, "https://target.example"),
+  });
+  const bucket = new Bucket();
+  const disabled = runtime({ directory, bucket });
+  assert.equal(
+    (await disabled.cell(TARGET, { target: true })).name,
+    TARGET,
+  );
+
+  const enabled = runtime({
+    directory,
+    bucket,
+    backupsEnabled: true,
+  });
+  await assert.rejects(
+    () => enabled.cell(TARGET, { target: true }),
+    /lacks distinct provision and backup credentials/,
+  );
+
+  await directory.put(
+    `cell:${TARGET}`,
+    JSON.stringify({
+      ...cell(TARGET, "https://target.example"),
+      backup_token: "backup-target",
+    }),
+  );
+  assert.equal(
+    (await enabled.cell(TARGET, { target: true })).name,
+    TARGET,
+  );
+});
 
 test("one durable move carries the exact cell epoch through every verb", async () => {
   const directory = new KV({
@@ -2461,6 +2497,15 @@ test("move target preflight fails before a claim or source suspension", async (t
     {
       name: "drained",
       target: cell(TARGET, "https://target.example", false),
+      protocol: true,
+      status: 409,
+    },
+    {
+      name: "backup validation target",
+      target: {
+        ...cell(TARGET, "https://target.example"),
+        backup_validation_target: true,
+      },
       protocol: true,
       status: 409,
     },

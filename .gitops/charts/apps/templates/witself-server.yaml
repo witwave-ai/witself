@@ -32,7 +32,14 @@
 {{- end -}}
 {{- end -}}
 {{- $serverEmailPilot := dict "enabled" $emailPilot.enabled "domain" $emailPilot.domain "audience" $emailPilot.audience "realmID" $emailPilot.realmID "agentIDs" $emailPilot.agentIDs "retryCanaryAgentID" $emailPilot.retryCanaryAgentID "relayPublicKeysJSON" $emailPilot.relayPublicKeysJSON "relayReplayWindow" $emailPilot.relayReplayWindow -}}
-{{- $serverValues := dict "backend" (dict "kind" .Values.apps.witselfServer.backendKind) "cell" (dict "name" .Values.cell.name) "features" (dict "factDeletion" (dict "enabled" .Values.apps.witselfServer.factDeletionEnabled)) "agentEmail" (dict "receivePilot" $serverEmailPilot) "avatar" (dict "payloadCompaction" (dict "enabled" .Values.apps.witselfServer.avatarPayloadCompactionEnabled)) "worker" .Values.apps.witselfServer.worker "image" (dict "tag" .Values.apps.witselfServer.imageTag) "database" (dict "existingSecret" (dict "name" $targetName "urlKey" $db.urlKey)) -}}
+{{- $backup := .Values.apps.witselfServer.backup -}}
+{{- if and $backup.validationEnabled (not $backup.enabled) -}}
+{{- fail "apps.witselfServer.backup.validationEnabled requires apps.witselfServer.backup.enabled" -}}
+{{- end -}}
+{{- $serverValues := dict "backend" (dict "kind" .Values.apps.witselfServer.backendKind) "cell" (dict "name" .Values.cell.name) "backup" (dict "validation" (dict "enabled" $backup.validationEnabled)) "features" (dict "factDeletion" (dict "enabled" .Values.apps.witselfServer.factDeletionEnabled)) "agentEmail" (dict "receivePilot" $serverEmailPilot) "avatar" (dict "payloadCompaction" (dict "enabled" .Values.apps.witselfServer.avatarPayloadCompactionEnabled)) "worker" .Values.apps.witselfServer.worker "image" (dict "tag" .Values.apps.witselfServer.imageTag) "database" (dict "existingSecret" (dict "name" $targetName "urlKey" $db.urlKey)) -}}
+{{- if $backup.enabled -}}
+{{- $_ := set $serverValues.backup "existingSecret" (dict "name" (default "witself-provision" $backup.targetName) "tokenKey" (default "backup_token" $backup.tokenKey)) -}}
+{{- end -}}
 {{- $_ := set $serverValues "replicaCount" .Values.apps.witselfServer.replicaCount -}}
 {{- $_ := set $serverValues "minReadySeconds" .Values.apps.witselfServer.minReadySeconds -}}
 {{- $_ := set $serverValues "strategy" .Values.apps.witselfServer.strategy -}}

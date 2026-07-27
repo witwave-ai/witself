@@ -340,7 +340,7 @@ function parseAccountListQuery(url) {
   return { limit, cursor };
 }
 
-async function activeAccountPage(env, limit, cursor) {
+export async function activeAccountPage(env, limit, cursor) {
   const page = await env.DIRECTORY.list({
     prefix: "acct:",
     limit,

@@ -119,22 +119,23 @@ type cellEntry struct {
 	Region       *string `yaml:"region,omitempty"`
 	Role         *string `yaml:"role,omitempty"`
 
-	Channel            *string          `yaml:"channel,omitempty"`
-	Profile            *string          `yaml:"profile,omitempty"`
-	CIDR               *string          `yaml:"cidr,omitempty"`
-	K8sVersion         *string          `yaml:"k8s_version,omitempty"`
-	DBVersion          *string          `yaml:"db_version,omitempty"`
-	ArgoCD             *bool            `yaml:"argocd,omitempty"`
-	Gitops             *gitopsEntry     `yaml:"gitops,omitempty"`
-	Domain             *string          `yaml:"domain,omitempty"`
-	BootstrapTokenFile *string          `yaml:"bootstrap_token_file,omitempty"`
-	Backend            *string          `yaml:"backend,omitempty"`
-	StateDir           *string          `yaml:"state_dir,omitempty"`
-	ControlPlane       *string          `yaml:"control_plane,omitempty"`
-	FleetTokenFile     *string          `yaml:"fleet_token_file,omitempty"`
-	CivoNodeSize       *string          `yaml:"civo_node_size,omitempty"`
-	CivoAdminCIDR      *string          `yaml:"civo_admin_cidr,omitempty"`
-	SecurityContext    *securityContext `yaml:"security_context,omitempty"`
+	Channel                *string          `yaml:"channel,omitempty"`
+	Profile                *string          `yaml:"profile,omitempty"`
+	CIDR                   *string          `yaml:"cidr,omitempty"`
+	K8sVersion             *string          `yaml:"k8s_version,omitempty"`
+	DBVersion              *string          `yaml:"db_version,omitempty"`
+	ArgoCD                 *bool            `yaml:"argocd,omitempty"`
+	Gitops                 *gitopsEntry     `yaml:"gitops,omitempty"`
+	Domain                 *string          `yaml:"domain,omitempty"`
+	BootstrapTokenFile     *string          `yaml:"bootstrap_token_file,omitempty"`
+	Backend                *string          `yaml:"backend,omitempty"`
+	StateDir               *string          `yaml:"state_dir,omitempty"`
+	ControlPlane           *string          `yaml:"control_plane,omitempty"`
+	FleetTokenFile         *string          `yaml:"fleet_token_file,omitempty"`
+	CivoNodeSize           *string          `yaml:"civo_node_size,omitempty"`
+	CivoAdminCIDR          *string          `yaml:"civo_admin_cidr,omitempty"`
+	BackupValidationTarget *bool            `yaml:"backup_validation_target,omitempty"`
+	SecurityContext        *securityContext `yaml:"security_context,omitempty"`
 }
 
 // infraConfig is the whole file.
@@ -177,6 +178,9 @@ func (e *cellEntry) flagValues() map[string]string {
 	if e.ArgoCD != nil {
 		out["argocd"] = strconv.FormatBool(*e.ArgoCD)
 	}
+	if e.BackupValidationTarget != nil {
+		out["backup-validation-target"] = strconv.FormatBool(*e.BackupValidationTarget)
+	}
 	if g := e.Gitops; g != nil {
 		set("gitops-repo", g.Repo)
 		set("gitops-path", g.Path)
@@ -210,7 +214,7 @@ var identityFlags = []string{"cloud", "account-alias", "region", "role"}
 // infra.yaml — the file holds references (names, IDs, paths), and a
 // pasted token would otherwise sit in plaintext on disk forever.
 var secretShapes = regexp.MustCompile(
-	`witself_(boot|opr|agt|flt|prv|adm)_[A-Za-z0-9]` +
+	`witself_(boot|opr|agt|flt|prv|bak|adm)_[A-Za-z0-9]` +
 		`|-----BEGIN( [A-Z]+)? PRIVATE KEY` +
 		`|AKIA[0-9A-Z]{16}` +
 		`|gh[posu]_[A-Za-z0-9]{20}` +
@@ -263,6 +267,9 @@ func loadInfraConfig(path string) (*infraConfig, string, error) {
 		// empty stack (reporting success) while the real cell survives.
 		if d.Backend != nil || d.StateDir != nil {
 			return nil, path, fmt.Errorf("%s: defaults must not set backend/state_dir — stack addressing is per-cell only", path)
+		}
+		if d.BackupValidationTarget != nil {
+			return nil, path, fmt.Errorf("%s: defaults must not set backup_validation_target — restore-test isolation is per-cell only", path)
 		}
 	}
 	return &cfg, path, nil

@@ -22,7 +22,11 @@ import (
 // part of the reader — actually runs.
 func TestReadRoundTrip(t *testing.T) {
 	var buf bytes.Buffer
-	m := Manifest{SchemaVersion: 13, ServerVersion: "0.0.83", AccountID: "acc_rt", Status: "suspended"}
+	m := Manifest{
+		SchemaVersion: 13, ServerVersion: "0.0.83",
+		Purpose: PurposeBackup, BackupID: "bkp_roundtrip",
+		AccountID: "acc_rt", Status: "active",
+	}
 	if err := Write(context.Background(), &buf, m,
 		[]RowSource{newSource("realms", 3), newSource("audit", 300_000)}); err != nil {
 		t.Fatal(err)
@@ -38,7 +42,9 @@ func TestReadRoundTrip(t *testing.T) {
 			if rows["realms"]+rows["audit"] != 0 {
 				t.Error("OnManifest ran after rows were delivered")
 			}
-			if mm.AccountID != "acc_rt" || mm.SchemaVersion != 13 {
+			if mm.AccountID != "acc_rt" || mm.SchemaVersion != 13 ||
+				mm.Purpose != PurposeBackup ||
+				mm.BackupID != "bkp_roundtrip" {
 				t.Errorf("manifest = %+v", mm)
 			}
 			return nil
@@ -67,8 +73,9 @@ func TestReadRoundTrip(t *testing.T) {
 	if len(order) != 2 || order[0] != "realms" || order[1] != "audit" {
 		t.Errorf("table order = %v, want [realms audit]", order)
 	}
-	if got.Status != "suspended" {
-		t.Errorf("manifest status = %q", got.Status)
+	if got.Status != "active" || got.Purpose != PurposeBackup ||
+		got.BackupID != "bkp_roundtrip" {
+		t.Errorf("manifest = %+v", got)
 	}
 }
 

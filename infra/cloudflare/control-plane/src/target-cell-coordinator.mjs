@@ -1,3 +1,8 @@
+import {
+  accountBackupSchedulingEnabled,
+  cellHasDestinationCredentials,
+} from "./placement.mjs";
+
 const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const CELL_NAME = /^[a-z0-9-]{1,64}$/;
 const OPERATION_ID = /^[A-Za-z0-9_-]{1,128}$/;
@@ -41,8 +46,18 @@ function isObject(value) {
 }
 
 function publicCell(cell) {
-  const { provision_token: _omitted, ...rest } = cell;
-  return { ...rest, has_provision_token: Boolean(cell.provision_token) };
+  const {
+    provision_token: _provisionToken,
+    backup_token: _backupToken,
+    ...rest
+  } = cell;
+  return {
+    ...rest,
+    backup_validation_target:
+      cell.backup_validation_target === true,
+    has_provision_token: Boolean(cell.provision_token),
+    has_backup_token: Boolean(cell.backup_token),
+  };
 }
 
 function exactReservation(left, right) {
@@ -185,6 +200,16 @@ export class DurableTargetCellCoordinator {
     ) {
       fail("invalid cell registration", 400);
     }
+    const markerProvided = Object.prototype.hasOwnProperty.call(
+      input.cell,
+      "backup_validation_target",
+    );
+    if (
+      markerProvided &&
+      typeof input.cell.backup_validation_target !== "boolean"
+    ) {
+      fail("backup_validation_target must be a boolean", 400);
+    }
     await this.recoverExpiredDeleteFence();
     const fence = await this.storage.get(DELETE_FENCE_KEY);
     if (fence) {
@@ -209,10 +234,26 @@ export class DurableTargetCellCoordinator {
         : null;
     const existingRegistrationID =
       existing?.registration_id ?? existing?.registered_at ?? null;
+    const existingBackupValidationTarget =
+      existing?.backup_validation_target === true;
+    // An older registration client does not know about this field. Omission
+    // therefore means "preserve" for an existing cell, not "clear". This is
+    // the fail-closed boundary that prevents an old heartbeat from reopening
+    // a dedicated validation cell.
+    const backupValidationTarget = markerProvided
+      ? input.cell.backup_validation_target
+      : existingBackupValidationTarget;
+    const markerChanged =
+      backupValidationTarget !== existingBackupValidationTarget;
     const incomingProvisionToken =
       typeof input.cell.provision_token === "string" &&
           input.cell.provision_token.length > 0
         ? input.cell.provision_token
+        : null;
+    const incomingBackupToken =
+      typeof input.cell.backup_token === "string" &&
+          input.cell.backup_token.length > 0
+        ? input.cell.backup_token
         : null;
     const sameInstance =
       Boolean(existing) &&
@@ -225,23 +266,39 @@ export class DurableTargetCellCoordinator {
               incomingProvisionToken === existing.provision_token
             )
       );
-    if (existing && !sameInstance) {
+    if ((existing && !sameInstance) || markerChanged) {
       await this.reapExpiredReservations();
       await this.reconcileProvisions();
       await this.reconcileResidents();
-      const [reservations, provisions, residents, hasProjectedAccounts] =
+      const [
+        reservations,
+        provisions,
+        residents,
+        hasProjectedAccounts,
+        hasPendingAccounts,
+      ] =
         await Promise.all([
           this.storage.list({ prefix: RESERVATION_PREFIX }),
           this.storage.list({ prefix: PROVISION_PREFIX }),
           this.storage.list({ prefix: RESIDENT_PREFIX }),
           this.cellHasAccounts(),
+          markerChanged
+            ? this.cellHasPendingAccounts()
+            : Promise.resolve(false),
         ]);
       if (
         reservations.size > 0 ||
         provisions.size > 0 ||
         residents.size > 0 ||
-        hasProjectedAccounts
+        hasProjectedAccounts ||
+        hasPendingAccounts
       ) {
+        if (markerChanged) {
+          fail(
+            "backup_validation_target cannot change while account occupancy, reservations, provisions, or routes remain",
+            409,
+          );
+        }
         fail(
           "cell registration cannot be replaced while account occupancy remains",
           409,
@@ -266,14 +323,47 @@ export class DurableTargetCellCoordinator {
       weight: Number.isFinite(input.cell.weight)
         ? input.cell.weight
         : 1,
-      accepting: input.cell.accepting !== false,
+      // Validation cells are permanently outside ordinary placement while
+      // marked. Force the projection closed even when an older client sends
+      // its historical accepting=true default.
+      accepting: backupValidationTarget
+        ? false
+        : input.cell.accepting !== false,
+      backup_validation_target: backupValidationTarget,
       provision_token:
         incomingProvisionToken ??
         existing?.provision_token ??
         null,
+      backup_token:
+        incomingBackupToken ??
+        existing?.backup_token ??
+        null,
       registration_id: registrationID,
       registered_at: registeredAt,
     };
+    if (
+      cell.provision_token &&
+      cell.backup_token &&
+      cell.provision_token === cell.backup_token
+    ) {
+      fail(
+        "backup_token must be distinct from provision_token",
+        400,
+      );
+    }
+    if (
+      cell.accepting !== false &&
+      !cellHasDestinationCredentials(cell, {
+        backupsEnabled: accountBackupSchedulingEnabled(this.env),
+      })
+    ) {
+      fail(
+        accountBackupSchedulingEnabled(this.env)
+          ? "accepting cells require distinct nonempty provision_token and backup_token while account backups are enabled"
+          : "accepting cells require a nonempty provision_token",
+        400,
+      );
+    }
     // The DO copy is authoritative. KV remains the fleet read projection.
     await this.storage.put(CELL_STATE_KEY, cell);
     await this.env.DIRECTORY.put(key, JSON.stringify(cell));
@@ -301,6 +391,22 @@ export class DurableTargetCellCoordinator {
       residentKey(reservation.account_id),
     );
     const cell = await this.authoritativeCell();
+    if (!cell) {
+      fail("target cell is not registered", 409);
+    }
+    if (cell?.backup_validation_target === true) {
+      fail("target cell is reserved for backup validation", 409);
+    }
+    if (
+      !cellHasDestinationCredentials(cell, {
+        backupsEnabled: accountBackupSchedulingEnabled(this.env),
+      })
+    ) {
+      fail(
+        "target cell lacks credentials required for account placement",
+        409,
+      );
+    }
     if (
       !current &&
       resident?.operation_id === reservation.operation_id &&
@@ -505,6 +611,10 @@ export class DurableTargetCellCoordinator {
     if (
       !cell ||
       cell.accepting === false ||
+      cell.backup_validation_target === true ||
+      !cellHasDestinationCredentials(cell, {
+        backupsEnabled: accountBackupSchedulingEnabled(this.env),
+      }) ||
       (cell.registration_id ?? cell.registered_at) !==
         input.registration_id
     ) {
@@ -1174,6 +1284,27 @@ export class DurableTargetCellCoordinator {
     do {
       const page = await this.env.DIRECTORY.list({
         prefix: "acct:",
+        cursor,
+      });
+      for (const key of page.keys) {
+        const entry = await this.env.DIRECTORY.get(
+          key.name,
+          { type: "json" },
+        );
+        if (entry?.cell === this.cellName) {
+          return true;
+        }
+      }
+      cursor = page.list_complete ? undefined : page.cursor;
+    } while (cursor);
+    return false;
+  }
+
+  async cellHasPendingAccounts() {
+    let cursor;
+    do {
+      const page = await this.env.DIRECTORY.list({
+        prefix: "pending:",
         cursor,
       });
       for (const key of page.keys) {

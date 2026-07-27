@@ -36,6 +36,13 @@ import (
 // ride the SchemaVersion + upgrader chain instead.
 const FormatVersion = 1
 
+const (
+	// PurposeBackup marks a periodic point-in-time account snapshot. Backup
+	// archives are independent recovery artifacts: they never carry an
+	// evacuation epoch and must not drive placement or source cleanup.
+	PurposeBackup = "backup"
+)
+
 // chunkSize bounds how many NDJSON bytes are buffered per tar entry. Tar
 // needs each entry's size up front, so rows accumulate to at most ~this many
 // bytes and then flush as one numbered chunk.
@@ -48,9 +55,11 @@ type Manifest struct {
 	SchemaVersion int       `json:"schema_version"`
 	ServerVersion string    `json:"server_version"`
 	Compression   string    `json:"compression"` // of chunk content semantics; outer stream is gzip
+	Purpose       string    `json:"purpose,omitempty"`
+	BackupID      string    `json:"backup_id,omitempty"`
 	AccountID     string    `json:"account_id"`
 	Cell          string    `json:"cell,omitempty"`
-	Status        string    `json:"status"` // account status at export time (suspended/closed)
+	Status        string    `json:"status"` // account status at export time
 	EvacuationID  string    `json:"evacuation_id,omitempty"`
 	ExportedAt    time.Time `json:"exported_at"`
 	Tables        []string  `json:"tables"`

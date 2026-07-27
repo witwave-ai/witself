@@ -177,6 +177,9 @@ flags:
   -civo-node-size Civo Kubernetes node size                    (default "g4s.kube.medium")
   -civo-admin-cidr CIDR allowed to reach Civo's Kubernetes API (required for Civo)
   -argocd         install Argo CD (GitOps control plane)        (default false)
+  -backup-validation-target
+                  isolate this cell for rollback-only backup restore drills;
+                  registers accepting=false and requires -control-plane
   -gitops-repo     GitOps repo Argo reconciles (with -argocd)   (default witwave-ai/witself)
   -gitops-path     path to the root bootstrap chart             (default ".gitops/charts/bootstrap")
   -gitops-values-path path to this cell's bootstrap values       (default ".gitops/cells/<cell>/values.yaml")
@@ -295,6 +298,7 @@ func run(args []string) error {
 	k8sVersion := fs.String("k8s-version", "", "Kubernetes version (default: 1.36 on AWS/Azure; Civo latest stable)")
 	dbVersion := fs.String("db-version", "18", "PostgreSQL major version")
 	argocd := fs.Bool("argocd", false, "install Argo CD (GitOps control plane) into the cell cluster")
+	backupValidationTarget := fs.Bool("backup-validation-target", false, "isolate this cell for rollback-only backup restore validation")
 	gitopsRepo := fs.String("gitops-repo", cell.DefaultGitopsRepo, "GitOps repo URL Argo reconciles (with -argocd)")
 	gitopsPath := fs.String("gitops-path", cell.DefaultGitopsPath, "path to the root bootstrap chart")
 	gitopsValuesPath := fs.String("gitops-values-path", "", "path to this cell's bootstrap values (default: .gitops/cells/<cell>/values.yaml)")
@@ -495,6 +499,12 @@ func run(args []string) error {
 	}
 	if *restoreAnyRegion && !*restoreArchives {
 		return fmt.Errorf("-restore-any-region requires -restore-archives")
+	}
+	if *backupValidationTarget && *controlPlane == "" {
+		return fmt.Errorf("-backup-validation-target requires -control-plane so isolation is enforced by the fleet registry")
+	}
+	if *backupValidationTarget && *restoreArchives {
+		return fmt.Errorf("-backup-validation-target cannot be combined with -restore-archives")
 	}
 
 	// Refresh an expired AWS SSO session up front (interactive only) so the
@@ -829,7 +839,7 @@ func run(args []string) error {
 		if err == nil && *controlPlane != "" {
 			// Fleet registration is a post-step, deliberately outside the Pulumi
 			// resource graph: membership is not a cloud resource.
-			_, err = registerCell(ctx, stack, *controlPlane, *fleetTokenFile, cellName, *cloud, *region, placementRegionCode, *channel)
+			_, err = registerCell(ctx, stack, *controlPlane, *fleetTokenFile, cellName, *cloud, *region, placementRegionCode, *channel, *backupValidationTarget)
 			if err == nil && *restoreArchives {
 				// Pulumi returning success doesn't mean the cell is
 				// reachable — Argo has to reconcile, external-dns has to
@@ -929,7 +939,7 @@ func waitForPublicHTTPS(ctx context.Context, host string, maxWait, pollEvery tim
 // endpoint comes from the cell's apiHost output (api.<cell>.<domain>). The
 // hostname is returned so callers can chain a readiness poll before the
 // next post-provision step (restore-archives).
-func registerCell(ctx context.Context, stack auto.Stack, controlPlane, fleetTokenFile, cellName, cloud, region, regionCode, channel string) (string, error) {
+func registerCell(ctx context.Context, stack auto.Stack, controlPlane, fleetTokenFile, cellName, cloud, region, regionCode, channel string, backupValidationTarget bool) (string, error) {
 	cl, err := fleet.NewClient(controlPlane, fleetTokenFile)
 	if err != nil {
 		return "", err
@@ -942,22 +952,88 @@ func registerCell(ctx context.Context, stack auto.Stack, controlPlane, fleetToke
 	if host == "" {
 		return "", fmt.Errorf("cell exports no apiHost (ingress/domain disabled) — cannot register with the control plane")
 	}
-	// The per-cell provisioning credential rides the registration payload; the
-	// control plane stores it and presents it to this cell on each signup.
-	provisionToken, _ := outs["provisionToken"].Value.(string)
-	if err := cl.Register(ctx, fleet.Cell{
-		Name:           cellName,
-		Endpoint:       "https://" + host,
-		Cloud:          cloud,
-		Region:         region,
-		RegionCode:     regionCode,
-		Channel:        channel,
-		ProvisionToken: provisionToken,
-	}); err != nil {
+	// The independent provisioning and backup credentials ride the one-time,
+	// redacted cell-registration path.
+	provisionToken, backupToken, err := registrationCredentials(outs)
+	if err != nil {
+		return "", err
+	}
+	if err := cl.Register(ctx, fleetRegistration(
+		cellName, host, cloud, region, regionCode, channel,
+		provisionToken, backupToken, backupValidationTarget,
+	)); err != nil {
 		return "", err
 	}
 	fmt.Fprintf(os.Stderr, "cell %s registered with control plane %s\n", cellName, controlPlane)
 	return host, nil
+}
+
+func fleetRegistration(
+	cellName, host, cloud, region, regionCode, channel,
+	provisionToken, backupToken string,
+	backupValidationTarget bool,
+) fleet.Cell {
+	return fleet.Cell{
+		Name:                   cellName,
+		Endpoint:               "https://" + host,
+		Cloud:                  cloud,
+		Region:                 region,
+		RegionCode:             regionCode,
+		Channel:                channel,
+		Accepting:              boolPointer(!backupValidationTarget),
+		BackupValidationTarget: backupValidationTarget,
+		ProvisionToken:         provisionToken,
+		BackupToken:            backupToken,
+	}
+}
+
+func boolPointer(value bool) *bool {
+	return &value
+}
+
+func registrationCredentials(
+	outs auto.OutputMap,
+) (provisionToken, backupToken string, err error) {
+	provisionOutput, ok := outs["provisionToken"]
+	if !ok {
+		return "", "", fmt.Errorf(
+			"cell exports no provisionToken; run a current cell update before registration",
+		)
+	}
+	provisionToken, ok = provisionOutput.Value.(string)
+	if !ok || provisionToken == "" {
+		return "", "", fmt.Errorf(
+			"cell provisionToken output is not a nonempty string; run a current cell update before registration",
+		)
+	}
+	if !provisionOutput.Secret {
+		return "", "", fmt.Errorf(
+			"cell provisionToken output is not marked secret; refuse registration",
+		)
+	}
+	backupOutput, ok := outs["backupToken"]
+	if !ok {
+		return "", "", fmt.Errorf(
+			"cell exports no backupToken; run a current cell update before registration",
+		)
+	}
+	backupToken, ok = backupOutput.Value.(string)
+	if !ok || backupToken == "" {
+		return "", "", fmt.Errorf(
+			"cell backupToken output is not a nonempty string; run a current cell update before registration",
+		)
+	}
+	if !backupOutput.Secret {
+		return "", "", fmt.Errorf(
+			"cell backupToken output is not marked secret; refuse registration",
+		)
+	}
+	if err := fleet.ValidateRegistrationCredentials(
+		provisionToken, backupToken,
+	); err != nil {
+		return "", "", err
+	}
+	return provisionToken, backupToken, nil
 }
 
 func resolveRegionCode(cloud, providerRegion string) (nameRegionCode, placementRegionCode string, ok bool) {

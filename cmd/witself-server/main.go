@@ -28,6 +28,9 @@ const (
 	factDeletionEnv                   = "WITSELF_FACT_DELETION_ENABLED"
 	factDeletionMinimumSchemaVersion  = 28
 	avatarPayloadCompactionEnabledEnv = "WITSELF_AVATAR_PAYLOAD_COMPACTION_ENABLED"
+	provisionTokenEnv                 = "WITSELF_PROVISION_TOKEN"
+	backupTokenEnv                    = "WITSELF_BACKUP_TOKEN"
+	backupValidationEnabledEnv        = "WITSELF_BACKUP_VALIDATION_ENABLED"
 )
 
 func main() {
@@ -70,6 +73,11 @@ func serve() int {
 		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
 		return 1
 	}
+	backupValidationEnabled, err := backupValidationEnabledFromEnv()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
+		return 1
+	}
 	agentEmailPilot, err := agentEmailPilotConfigFromEnv()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
@@ -80,6 +88,15 @@ func serve() int {
 	defer stop()
 
 	cfg := server.ConfigFromEnv()
+	provisionToken := strings.TrimSpace(os.Getenv(provisionTokenEnv))
+	backupToken := strings.TrimSpace(os.Getenv(backupTokenEnv))
+	if err := validateBackupConfiguration(
+		provisionToken, backupToken, backupValidationEnabled,
+	); err != nil {
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
+		return 1
+	}
+	cfg.BackupToken = backupToken
 	if dsn := dbDSN(); dsn != "" {
 		st, err := store.Open(ctx, dsn,
 			store.WithAvatarPayloadCompactionEnabled(avatarPayloadCompactionEnabled))
@@ -1152,6 +1169,26 @@ func serve() int {
 			}
 			return err
 		}
+		cfg.StreamAccountBackup = func(
+			ctx context.Context,
+			accountID, backupID string,
+			w io.Writer,
+		) error {
+			cellName := os.Getenv("WITSELF_CELL_NAME")
+			err := st.ExportAccountBackup(
+				ctx, accountID, backupID, cellName, version.Version, w,
+			)
+			switch {
+			case errors.Is(err, store.ErrAccountNotFound):
+				return server.ErrNotFound
+			case errors.Is(err, store.ErrAccountNotExportable),
+				errors.Is(err, store.ErrVaultLifecycleInProgress),
+				errors.Is(err, store.ErrVaultLifecycleIntegrity),
+				errors.Is(err, store.ErrAccountEvacuationMismatch):
+				return server.ErrConflict
+			}
+			return err
+		}
 		cfg.ReportAccountExportFailure = func(_ context.Context, accountID string, err error) {
 			logAccountExportFailure(os.Stderr,
 				accountID, os.Getenv("WITSELF_CELL_NAME"), err)
@@ -1393,6 +1430,36 @@ func serve() int {
 				EvacuationCompleted: disposition.EvacuationCompleted,
 			}, nil
 		}
+		cfg.BackupValidationEnabled = backupValidationEnabled
+		if backupValidationEnabled {
+			cfg.ValidateAccountBackup = func(
+				ctx context.Context,
+				accountID, backupID string,
+				body io.Reader,
+			) (server.ImportSummary, error) {
+				m, err := st.ValidateAccountBackup(
+					ctx, accountID, backupID, body,
+				)
+				switch {
+				case errors.Is(err, store.ErrAccountExists):
+					return server.ImportSummary{}, server.ErrConflict
+				case errors.Is(err, export.ErrArchiveTooNew):
+					return server.ImportSummary{}, server.ErrArchiveTooNew
+				case errors.Is(err, store.ErrArchiveAccountMismatch),
+					errors.Is(err, store.ErrArchiveContent),
+					errors.Is(err, export.ErrCorrupt):
+					return server.ImportSummary{}, server.ErrBadArchive
+				case err != nil:
+					return server.ImportSummary{}, err
+				}
+				return server.ImportSummary{
+					AccountID:     m.AccountID,
+					Status:        m.Status,
+					SchemaVersion: m.SchemaVersion,
+					BackupID:      m.BackupID,
+				}, nil
+			}
+		}
 		cfg.ResumeAccountSystem = func(
 			ctx context.Context,
 			accountID, category, evacuationID string,
@@ -1465,7 +1532,7 @@ func serve() int {
 				return a.Plan, a.PlanLimits, a.PlanPolicies, a.PlanFeatures, nil
 			}
 		}
-		if pt := strings.TrimSpace(os.Getenv("WITSELF_PROVISION_TOKEN")); pt != "" {
+		if pt := provisionToken; pt != "" {
 			// Account provisioning: the control-plane -> cell trust link. The
 			// bootstrap tokens minted per signup are short-lived — the CLI
 			// exchanges them within seconds.
@@ -1596,6 +1663,20 @@ func serve() int {
 			}
 			fmt.Fprintln(os.Stderr, "witself-server: account provisioning enabled (WITSELF_PROVISION_TOKEN set)")
 		}
+		if cfg.BackupToken != "" {
+			fmt.Fprintf(
+				os.Stderr,
+				"witself-server: account backup export enabled (%s set)\n",
+				backupTokenEnv,
+			)
+			if backupValidationEnabled {
+				fmt.Fprintf(
+					os.Stderr,
+					"witself-server: rollback-only backup validation enabled (%s=true)\n",
+					backupValidationEnabledEnv,
+				)
+			}
+		}
 		cfg.Ready = st.Ping
 		fmt.Fprintf(os.Stderr, "witself-server: avatar payload compaction enabled=%t\n",
 			avatarPayloadCompactionEnabled)
@@ -1637,6 +1718,38 @@ func avatarPayloadCompactionEnabledFromEnv() (bool, error) {
 			avatarPayloadCompactionEnabledEnv, err)
 	}
 	return enabled, nil
+}
+
+func backupValidationEnabledFromEnv() (bool, error) {
+	raw, ok := os.LookupEnv(backupValidationEnabledEnv)
+	if !ok {
+		return false, nil
+	}
+	enabled, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean: %w",
+			backupValidationEnabledEnv, err)
+	}
+	return enabled, nil
+}
+
+func validateBackupConfiguration(
+	provisionToken, backupToken string,
+	validationEnabled bool,
+) error {
+	if backupToken != "" && backupToken == provisionToken {
+		return fmt.Errorf(
+			"%s must be distinct from %s",
+			backupTokenEnv, provisionTokenEnv,
+		)
+	}
+	if validationEnabled && backupToken == "" {
+		return fmt.Errorf(
+			"%s=true requires %s",
+			backupValidationEnabledEnv, backupTokenEnv,
+		)
+	}
+	return nil
 }
 
 func factDeletionEnabledFromEnv() (bool, error) {
@@ -1806,6 +1919,8 @@ func usage(w io.Writer) {
 	usageLine(w, "Bootstrap (optional first-operator setup):")
 	usageLine(w, "  WITSELF_BOOTSTRAP_TOKEN_FILE  token file path (default /.witself/tokens/bootstrap.token)")
 	usageLine(w, "  WITSELF_PROVISION_TOKEN       enables POST /v1/accounts (control-plane account provisioning)")
+	usageLine(w, "  WITSELF_BACKUP_TOKEN          distinct credential for account backup export and validation")
+	usageLine(w, "  WITSELF_BACKUP_VALIDATION_ENABLED enables rollback-only POST /v1/accounts/{id}:validate-backup (default false)")
 	usageLine(w, "  WITSELF_BOOTSTRAP_TOKEN_TTL   token lifetime after adoption (default 24h)")
 }
 

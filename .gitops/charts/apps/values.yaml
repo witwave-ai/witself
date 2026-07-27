@@ -28,6 +28,13 @@ apps:
     chartVersion: 0.0.45
     imageTag: 0.0.45
     backendKind: managed
+    backup:
+      # Activation is staged after every cell's cloud secret contains the
+      # distinct backup-only token. Validation remains test-cell-only.
+      enabled: false
+      validationEnabled: false
+      targetName: witself-provision
+      tokenKey: backup_token
     replicaCount: 1
     minReadySeconds: 10
     strategy:

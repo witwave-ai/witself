@@ -42,6 +42,19 @@ backend:
 cell:
   name: ""
 
+backup:
+  existingSecret:
+    # Name of a Secret containing the cell's backup-only credential. Empty
+    # disables both active-account snapshot export and restore validation.
+    name: ""
+    tokenKey: backup_token
+  validation:
+    # Enables the rollback-only validation endpoint. Keep this false on every
+    # serving cell. A dedicated, non-routing validation cell may opt in; the
+    # importer executes the full restore contract and rolls the transaction
+    # back so repeated drills never leave customer data behind.
+    enabled: false
+
 features:
   factDeletion:
     # Keep off through the mandatory schema-27 compatibility rollout, then
