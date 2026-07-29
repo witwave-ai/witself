@@ -12,7 +12,6 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/witwave-ai/witself/internal/local"
 	"github.com/witwave-ai/witself/internal/transcriptcapture"
 )
 
@@ -323,16 +322,9 @@ func managedHooksOptions(runtimeName, mode, executable, account, realm, agent, l
 	if err != nil {
 		return transcriptcapture.ManagedHooksOptions{}, err
 	}
-	witselfHome, err := local.Home()
-	if err != nil {
-		return transcriptcapture.ManagedHooksOptions{}, fmt.Errorf("resolve WITSELF_HOME: %w", err)
-	}
-	if strings.TrimSpace(witselfHome) != "" {
-		opts.WitselfHome, err = cleanCopilotAbsolutePath("WITSELF_HOME", witselfHome)
-		if err != nil {
-			return transcriptcapture.ManagedHooksOptions{}, err
-		}
-	}
+	// WITSELF_HOME is part of the exact managed-hook ownership identity. Keep
+	// it absent unless the caller explicitly supplies the installed value so
+	// legacy policies that predate the home pin can be reconstructed exactly.
 	root := strings.TrimSpace(os.Getenv(managedHooksTestRootEnv))
 	if root == "" {
 		return opts, nil

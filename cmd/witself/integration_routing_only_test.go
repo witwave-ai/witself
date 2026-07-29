@@ -13,6 +13,7 @@ func TestInstallRoutingOnlyRefreshesCodexAndClaudeWithoutRuntimeAccess(t *testin
 	claudeHome := filepath.Join(root, "claude")
 	t.Setenv("CODEX_HOME", codexHome)
 	t.Setenv("CLAUDE_CONFIG_DIR", claudeHome)
+	t.Setenv("WITSELF_HOME", filepath.Join(root, "witself"))
 	t.Setenv("PATH", t.TempDir())
 
 	if code := installCmd([]string{"codex,claude", "--routing-only"}); code != 0 {
