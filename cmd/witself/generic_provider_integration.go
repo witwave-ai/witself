@@ -616,6 +616,9 @@ func canonicalGenericMCPNonTarget(runtimeName string, root map[string]any) (stri
 	}
 	if container, ok := clone[containerName].(map[string]any); ok {
 		delete(container, "witself")
+		if runtimeName == transcriptcapture.RuntimeCodex {
+			normalizeCodexMCPSerializationDefaults(container)
+		}
 		if len(container) == 0 {
 			delete(clone, containerName)
 		} else {
@@ -627,6 +630,30 @@ func canonicalGenericMCPNonTarget(runtimeName string, root map[string]any) (stri
 		return "", err
 	}
 	return canonical.String(), nil
+}
+
+// Codex rewrites the complete mcp_servers table through its typed serializer
+// even when asked to add or remove one server. The serializer omits these
+// default-valued fields from every sibling entry. Treat only those exact
+// representations as semantic no-ops so native Codex normalization does not
+// look like a foreign edit; non-empty arguments or environment, and disabled
+// servers, remain part of the protected non-target snapshot.
+func normalizeCodexMCPSerializationDefaults(servers map[string]any) {
+	for _, raw := range servers {
+		fields, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if args, ok := fields["args"].([]any); ok && len(args) == 0 {
+			delete(fields, "args")
+		}
+		if environment, ok := fields["env"].(map[string]any); ok && len(environment) == 0 {
+			delete(fields, "env")
+		}
+		if enabled, ok := fields["enabled"].(bool); ok && enabled {
+			delete(fields, "enabled")
+		}
+	}
 }
 
 func prepareGenericMCPInstall(runtimeCLI string, desired transcriptcapture.Config, previous *transcriptcapture.Config) error {

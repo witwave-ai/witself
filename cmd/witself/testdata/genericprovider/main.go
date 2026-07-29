@@ -15,21 +15,22 @@ import (
 )
 
 const (
-	runtimeEnv     = "WITSELF_FAKE_GENERIC_RUNTIME"
-	logEnv         = "WITSELF_FAKE_GENERIC_LOG"
-	stateEnv       = "WITSELF_FAKE_GENERIC_STATE"
-	failAddEnv     = "WITSELF_FAKE_GENERIC_FAIL_NEXT_ADD"
-	failRemoveEnv  = "WITSELF_FAKE_GENERIC_FAIL_AFTER_REMOVE"
-	largeErrorEnv  = "WITSELF_FAKE_GENERIC_LARGE_ERROR_BYTES"
-	largeOutputEnv = "WITSELF_FAKE_GENERIC_LARGE_OUTPUT_BYTES"
-	cwdArtifactEnv = "WITSELF_FAKE_PROVIDER_CWD_ARTIFACT"
-	emptyListEnv   = "WITSELF_FAKE_GENERIC_EMPTY_MCP_LIST"
-	legacyStateEnv = "FAKE_MCP_STATE"
-	legacyFailAdd  = "FAKE_FAIL_ADD_AGENT"
-	legacyFailOnce = "FAKE_FAIL_REMOVE_ONCE"
-	legacyFailLog  = "FAKE_REMOVE_FAILED"
-	blockBegin     = "# BEGIN WITSELF GENERIC PROVIDER TEST DOUBLE"
-	blockEnd       = "# END WITSELF GENERIC PROVIDER TEST DOUBLE"
+	runtimeEnv           = "WITSELF_FAKE_GENERIC_RUNTIME"
+	logEnv               = "WITSELF_FAKE_GENERIC_LOG"
+	stateEnv             = "WITSELF_FAKE_GENERIC_STATE"
+	failAddEnv           = "WITSELF_FAKE_GENERIC_FAIL_NEXT_ADD"
+	failRemoveEnv        = "WITSELF_FAKE_GENERIC_FAIL_AFTER_REMOVE"
+	largeErrorEnv        = "WITSELF_FAKE_GENERIC_LARGE_ERROR_BYTES"
+	largeOutputEnv       = "WITSELF_FAKE_GENERIC_LARGE_OUTPUT_BYTES"
+	cwdArtifactEnv       = "WITSELF_FAKE_PROVIDER_CWD_ARTIFACT"
+	emptyListEnv         = "WITSELF_FAKE_GENERIC_EMPTY_MCP_LIST"
+	codexNormalizeMCPEnv = "WITSELF_FAKE_CODEX_NORMALIZE_MCP_DEFAULTS"
+	legacyStateEnv       = "FAKE_MCP_STATE"
+	legacyFailAdd        = "FAKE_FAIL_ADD_AGENT"
+	legacyFailOnce       = "FAKE_FAIL_REMOVE_ONCE"
+	legacyFailLog        = "FAKE_REMOVE_FAILED"
+	blockBegin           = "# BEGIN WITSELF GENERIC PROVIDER TEST DOUBLE"
+	blockEnd             = "# END WITSELF GENERIC PROVIDER TEST DOUBLE"
 )
 
 type invocation struct {
@@ -335,6 +336,9 @@ func writeBinding(runtimeName string, current binding) error {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	if runtimeName == "codex" && os.Getenv(codexNormalizeMCPEnv) == "1" {
+		raw = normalizeCodexMCPDefaults(raw)
+	}
 	if strings.Contains(string(raw), blockBegin) {
 		return errors.New("fake provider binding already exists")
 	}
@@ -384,6 +388,9 @@ func removeBinding(runtimeName string) error {
 	if err != nil {
 		return err
 	}
+	if runtimeName == "codex" && os.Getenv(codexNormalizeMCPEnv) == "1" {
+		raw = normalizeCodexMCPDefaults(raw)
+	}
 	start := strings.Index(string(raw), blockBegin)
 	end := strings.Index(string(raw), blockEnd)
 	if start < 0 || end < start {
@@ -394,6 +401,21 @@ func removeBinding(runtimeName string) error {
 		end++
 	}
 	return os.WriteFile(path, append(append([]byte(nil), raw[:start]...), raw[end:]...), 0o600)
+}
+
+func normalizeCodexMCPDefaults(raw []byte) []byte {
+	lines := strings.SplitAfter(string(raw), "\n")
+	var normalized strings.Builder
+	normalized.Grow(len(raw))
+	for _, line := range lines {
+		switch strings.TrimSpace(line) {
+		case "args = []", "env = {}", "enabled = true":
+			continue
+		default:
+			normalized.WriteString(line)
+		}
+	}
+	return []byte(normalized.String())
 }
 
 func appendInvocation(args []string) error {

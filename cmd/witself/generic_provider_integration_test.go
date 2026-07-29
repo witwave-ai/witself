@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -28,6 +29,7 @@ const (
 	fakeGenericLargeErrorEnv   = "WITSELF_FAKE_GENERIC_LARGE_ERROR_BYTES"
 	fakeGenericLargeOutputEnv  = "WITSELF_FAKE_GENERIC_LARGE_OUTPUT_BYTES"
 	fakeProviderCWDArtifactEnv = "WITSELF_FAKE_PROVIDER_CWD_ARTIFACT"
+	fakeCodexNormalizeMCPEnv   = "WITSELF_FAKE_CODEX_NORMALIZE_MCP_DEFAULTS"
 )
 
 var genericProviderTestRuntimes = []string{
@@ -416,6 +418,199 @@ func TestGenericProviderExactOwnedLifecycleAndSerialization(t *testing.T) {
 				t.Fatalf("remove exists=%t; foreign configuration was not preserved", exists)
 			}
 		})
+	}
+}
+
+func TestCodexProviderDefaultElisionPreservesOwnedLifecycle(t *testing.T) {
+	fixture := newGenericProviderTestFixture(t, transcriptcapture.RuntimeCodex)
+	raw := []byte(
+		"foreign_setting = \"keep\"\n\n" +
+			"[mcp_servers.defaulted]\n" +
+			"command = \"/foreign/defaulted\"\n" +
+			"args = []\n" +
+			"env = {}\n" +
+			"enabled = true\n\n" +
+			"[mcp_servers.explicit]\n" +
+			"command = \"/foreign/explicit\"\n" +
+			"args = [\"--keep\"]\n" +
+			"env = { KEEP = \"yes\" }\n" +
+			"enabled = false\n",
+	)
+	if err := os.MkdirAll(filepath.Dir(fixture.cfg.RuntimeMCPConfigPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.cfg.RuntimeMCPConfigPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(fakeCodexNormalizeMCPEnv, "1")
+
+	previous := fixture.cfg
+	previous.Agent = "old-provider-bot"
+	previous.AgentName = previous.Agent
+	if err := registerGenericMCP(fixture.cli, previous, nil); err != nil {
+		t.Fatalf("install across Codex default elision: %v", err)
+	}
+	desired := fixture.cfg
+	desired.Agent = "new-provider-bot"
+	desired.AgentName = desired.Agent
+	if err := registerGenericMCP(fixture.cli, desired, &previous); err != nil {
+		t.Fatalf("reinstall across Codex default elision: %v", err)
+	}
+
+	_, root, err := readGenericMCPConfig(desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	servers := root["mcp_servers"].(map[string]any)
+	defaulted := servers["defaulted"].(map[string]any)
+	if _, ok := defaulted["args"]; ok {
+		t.Fatal("Codex test provider did not elide empty sibling args")
+	}
+	if _, ok := defaulted["env"]; ok {
+		t.Fatal("Codex test provider did not elide empty sibling env")
+	}
+	if _, ok := defaulted["enabled"]; ok {
+		t.Fatal("Codex test provider did not elide enabled=true")
+	}
+	explicit := servers["explicit"].(map[string]any)
+	if args, err := stringSliceFromGenericValue(explicit["args"]); err != nil || !slices.Equal(args, []string{"--keep"}) {
+		t.Fatalf("explicit sibling args = %#v, err=%v", args, err)
+	}
+	if environment, err := stringMapFromGenericValue(explicit["env"]); err != nil || environment["KEEP"] != "yes" {
+		t.Fatalf("explicit sibling env = %#v, err=%v", environment, err)
+	}
+	if enabled, ok := explicit["enabled"].(bool); !ok || enabled {
+		t.Fatalf("explicit sibling enabled = %#v", explicit["enabled"])
+	}
+
+	normalized, err := os.ReadFile(desired.RuntimeMCPConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withDefaults := bytes.Replace(
+		normalized,
+		[]byte("command = \"/foreign/defaulted\"\n"),
+		[]byte("command = \"/foreign/defaulted\"\nargs = []\nenv = {}\nenabled = true\n"),
+		1,
+	)
+	if bytes.Equal(withDefaults, normalized) {
+		t.Fatal("could not restore explicit Codex defaults for rollback coverage")
+	}
+	if err := os.WriteFile(desired.RuntimeMCPConfigPath, withDefaults, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	failMarker := filepath.Join(fixture.root, "fail-next-add")
+	if err := os.WriteFile(failMarker, []byte("fail\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(fakeGenericFailAddEnv, failMarker)
+	replacement := desired
+	replacement.Agent = "replacement-provider-bot"
+	replacement.AgentName = replacement.Agent
+	if err := registerGenericMCP(fixture.cli, replacement, &desired); err == nil {
+		t.Fatal("Codex normalized reinstall unexpectedly succeeded after forced add failure")
+	}
+	rolledBack, err := os.ReadFile(desired.RuntimeMCPConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(rolledBack, withDefaults) {
+		t.Fatal("Codex normalization rollback did not restore exact provider bytes")
+	}
+
+	if err := unregisterGenericMCP(fixture.cli, desired); err != nil {
+		t.Fatalf("uninstall across Codex default elision: %v", err)
+	}
+	_, exists, _, err := inspectGenericMCP(desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exists {
+		t.Fatal("Codex target remained after normalized uninstall")
+	}
+}
+
+func TestCodexNonTargetNormalizationRemainsNarrow(t *testing.T) {
+	baseline := map[string]any{
+		"mcp_servers": map[string]any{
+			"foreign": map[string]any{"command": "/foreign/tool"},
+		},
+	}
+	defaulted := map[string]any{
+		"mcp_servers": map[string]any{
+			"foreign": map[string]any{
+				"command": "/foreign/tool",
+				"args":    []any{},
+				"env":     map[string]any{},
+				"enabled": true,
+			},
+		},
+	}
+	want, err := canonicalGenericMCPNonTarget(transcriptcapture.RuntimeCodex, baseline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := canonicalGenericMCPNonTarget(transcriptcapture.RuntimeCodex, defaulted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatal("Codex default-valued sibling fields were not semantically equivalent to omission")
+	}
+
+	for name, changed := range map[string]map[string]any{
+		"non-empty args": {
+			"command": "/foreign/tool",
+			"args":    []any{"--changed"},
+		},
+		"non-empty env": {
+			"command": "/foreign/tool",
+			"env":     map[string]any{"CHANGED": "yes"},
+		},
+		"disabled": {
+			"command": "/foreign/tool",
+			"enabled": false,
+		},
+		"command change": {
+			"command": "/foreign/changed",
+		},
+		"unrelated key": {
+			"command": "/foreign/tool",
+			"cwd":     "/foreign/workspace",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate, err := canonicalGenericMCPNonTarget(
+				transcriptcapture.RuntimeCodex,
+				map[string]any{"mcp_servers": map[string]any{"foreign": changed}},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if candidate == want {
+				t.Fatalf("%s was incorrectly normalized away", name)
+			}
+		})
+	}
+	grok, err := canonicalGenericMCPNonTarget(transcriptcapture.RuntimeGrokBuild, defaulted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grok == want {
+		t.Fatal("Codex-only normalization was applied to Grok")
+	}
+	nonMCP, err := canonicalGenericMCPNonTarget(
+		transcriptcapture.RuntimeCodex,
+		map[string]any{
+			"foreign_setting": "changed",
+			"mcp_servers":     map[string]any{"foreign": map[string]any{"command": "/foreign/tool"}},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nonMCP == want {
+		t.Fatal("non-MCP configuration change was incorrectly normalized away")
 	}
 }
 
