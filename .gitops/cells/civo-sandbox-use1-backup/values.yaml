@@ -24,8 +24,8 @@ apps:
     namespace: witself
     # The apps chart emits worker.agentEmailRetention settings, which require
     # the v0.0.211+ server chart schema.
-    chartVersion: 0.0.219
-    imageTag: 0.0.219
+    chartVersion: 0.0.220
+    imageTag: 0.0.220
     backendKind: managed
     backup:
       enabled: true
