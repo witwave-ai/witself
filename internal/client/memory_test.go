@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,79 @@ import (
 	"testing"
 	"time"
 )
+
+func TestGetMemoryLimitStatusDecodesCapacity(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/memories:status" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer agent-token" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		_, _ = io.WriteString(w, `{"schema_version":"witself.v0","memory_capacity":{"used":900,"max":1000,"remaining":100,"unlimited":false,"near_limit":true,"at_limit":false,"over_limit":false}}`)
+	}))
+	defer srv.Close()
+
+	status, err := GetMemoryLimitStatus(context.Background(), srv.URL+"/", "agent-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Used != 900 || status.Max == nil || *status.Max != 1000 ||
+		status.Remaining == nil || *status.Remaining != 100 ||
+		!status.NearLimit || status.AtLimit || status.OverLimit ||
+		status.Unlimited || status.Unavailable {
+		t.Fatalf("memory capacity = %#v", status)
+	}
+}
+
+func TestMemoryMutationMapsStableLimitCodeAndCapacity(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		status      int
+		code        string
+		wantTyped   bool
+		wantMessage string
+	}{
+		{name: "stable forbidden code", status: http.StatusForbidden, code: "stored_memory_limit_reached", wantTyped: true},
+		{name: "wrong status", status: http.StatusBadRequest, code: "stored_memory_limit_reached", wantMessage: "active memory capacity reached"},
+		{name: "wrong code", status: http.StatusForbidden, code: "another_limit", wantMessage: "active memory capacity reached"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(test.status)
+				_, _ = io.WriteString(w, `{"schema_version":"witself.v0","code":"`+test.code+`","error":"active memory capacity reached","retryable":false,"limit":{"used":1001,"max":1000,"remaining":0,"unlimited":false,"near_limit":true,"at_limit":false,"over_limit":true}}`)
+			}))
+			defer srv.Close()
+
+			_, err := CaptureMemory(context.Background(), srv.URL, "agent-token", CaptureMemoryInput{
+				Content: "one more", Kind: "note", CaptureReason: "explicit",
+				IdempotencyKey: "capture-limit",
+				Evidence: []MemoryEvidenceInput{{
+					State: "unavailable", UnavailableReason: "not_recorded",
+				}},
+			})
+			if got := errors.Is(err, ErrMemoryLimitReached); got != test.wantTyped {
+				t.Fatalf("errors.Is(..., ErrMemoryLimitReached) = %v, want %v; err=%v", got, test.wantTyped, err)
+			}
+			if !test.wantTyped {
+				if err == nil || err.Error() != test.wantMessage {
+					t.Fatalf("generic error = %v, want %q", err, test.wantMessage)
+				}
+				return
+			}
+			var limitErr *MemoryLimitError
+			if !errors.As(err, &limitErr) ||
+				limitErr.Status.Used != 1001 ||
+				limitErr.Status.Max == nil || *limitErr.Status.Max != 1000 ||
+				limitErr.Status.Remaining == nil || *limitErr.Status.Remaining != 0 ||
+				!limitErr.Status.NearLimit || !limitErr.Status.OverLimit ||
+				limitErr.Status.AtLimit || limitErr.Status.Unlimited {
+				t.Fatalf("typed memory limit error = %#v", err)
+			}
+		})
+	}
+}
 
 func TestMemoryClientVerticalSlice(t *testing.T) {
 	now := time.Date(2026, 7, 14, 8, 0, 0, 0, time.UTC)

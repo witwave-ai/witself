@@ -405,7 +405,8 @@ func runNarrativeMemoryArchiveCellMoveWithReporter(
 
 	sourceCounts := memoryArchiveCellMoveCountsForAccount(ctx, t, source, p.AccountID)
 	if sourceCounts.Relations != 2 || sourceCounts.DeletedHeads != 1 ||
-		sourceCounts.RetryShields == 0 || sourceCounts.Evidence < 6 {
+		sourceCounts.RetryShields == 0 || sourceCounts.Evidence < 6 ||
+		sourceCounts.ActiveMemoryCount != sourceCounts.DerivedActiveMemoryCount {
 		t.Fatalf("source portability fixture is incomplete: %#v", sourceCounts)
 	}
 
@@ -786,13 +787,15 @@ type memoryArchiveCellMoveHybridResult struct {
 }
 
 type memoryArchiveCellMoveCounts struct {
-	Memories     int64
-	Versions     int64
-	Evidence     int64
-	Relations    int64
-	DeletedRefs  int64
-	DeletedHeads int64
-	RetryShields int64
+	Memories                 int64
+	Versions                 int64
+	Evidence                 int64
+	Relations                int64
+	DeletedRefs              int64
+	DeletedHeads             int64
+	RetryShields             int64
+	ActiveMemoryCount        int64
+	DerivedActiveMemoryCount int64
 }
 
 func provisionMemoryArchiveCellMoveAccount(
@@ -981,11 +984,19 @@ func memoryArchiveCellMoveCountsForAccount(
 		  (SELECT count(*) FROM memory_deleted_references WHERE account_id=$1),
 		  (SELECT count(*) FROM memories WHERE account_id=$1 AND current_version IS NULL),
 		  (SELECT count(*) FROM memory_deleted_references
-		     WHERE account_id=$1 AND former_reference_kind LIKE 'idempotency.%')`,
+		     WHERE account_id=$1 AND former_reference_kind LIKE 'idempotency.%'),
+		  (SELECT COALESCE(sum(active_memory_count),0)
+		     FROM memory_change_clocks WHERE account_id=$1),
+		  (SELECT count(*)
+		     FROM memories m
+		     JOIN memory_versions v
+		       ON v.memory_id=m.id AND v.version=m.current_version
+		    WHERE m.account_id=$1 AND v.state='active')`,
 		accountID).Scan(
 		&counts.Memories, &counts.Versions, &counts.Evidence,
 		&counts.Relations, &counts.DeletedRefs, &counts.DeletedHeads,
-		&counts.RetryShields,
+		&counts.RetryShields, &counts.ActiveMemoryCount,
+		&counts.DerivedActiveMemoryCount,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1037,6 +1048,16 @@ func inspectMemoryArchiveCellMove(
 			}
 			if table == "memory_vectors" {
 				vectorRows++
+				return nil
+			}
+			if table == "memory_change_clocks" {
+				var object map[string]json.RawMessage
+				if err := json.Unmarshal(row, &object); err != nil {
+					return err
+				}
+				if _, archived := object["active_memory_count"]; archived {
+					return errors.New("derived memory_change_clocks.active_memory_count was archived")
+				}
 				return nil
 			}
 			if table != "memory_versions" {

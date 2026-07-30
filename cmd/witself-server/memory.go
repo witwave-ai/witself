@@ -17,6 +17,13 @@ const selfMemorySnippetRunes = 280
 // PostgreSQL store. Every authority-bearing owner and actor field comes from
 // the authenticated principal; client-supplied provenance remains metadata.
 func configureMemory(cfg *server.Config, st *store.Store) {
+	cfg.GetMemoryLimitStatus = func(ctx context.Context, p server.DomainPrincipal) (server.MemoryLimitStatus, error) {
+		status, err := st.GetMemoryLimitStatus(ctx, toStorePrincipal(p))
+		if err != nil {
+			return server.MemoryLimitStatus{}, mapMemoryError(err)
+		}
+		return toServerMemoryLimitStatus(status), nil
+	}
 	cfg.CaptureMemory = func(ctx context.Context, p server.DomainPrincipal, in server.CaptureMemoryRequest) (server.MemoryMutationResult, error) {
 		result, err := st.CaptureMemory(ctx, toStorePrincipal(p), store.CaptureMemoryInput{
 			Content: in.Content, ContentEncoding: in.ContentEncoding,
@@ -298,9 +305,12 @@ func memoryLifecycleAdapter(mutate storeMemoryLifecycleFunc) func(context.Contex
 
 func mapMemoryError(err error) error {
 	var featureErr *store.FeatureNotEnabledError
+	var limitErr *store.MemoryLimitError
 	switch {
 	case err == nil:
 		return nil
+	case errors.As(err, &limitErr):
+		return &server.MemoryLimitError{Status: toServerMemoryLimitStatus(limitErr.Status)}
 	case errors.As(err, &featureErr):
 		return &server.FeatureNotEnabledError{Feature: featureErr.Feature}
 	case errors.Is(err, store.ErrMemoryInputInvalid):
@@ -319,6 +329,14 @@ func mapMemoryError(err error) error {
 		return server.ErrConflict
 	default:
 		return err
+	}
+}
+
+func toServerMemoryLimitStatus(in store.MemoryLimitStatus) server.MemoryLimitStatus {
+	return server.MemoryLimitStatus{
+		Used: in.Used, Max: in.Max, Remaining: in.Remaining,
+		Unlimited: in.Unlimited, NearLimit: in.NearLimit,
+		AtLimit: in.AtLimit, OverLimit: in.OverLimit,
 	}
 }
 

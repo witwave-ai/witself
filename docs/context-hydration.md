@@ -51,10 +51,11 @@ selection uses stored metadata and never invokes an LLM or embedding provider.
 
 The digest is **open-plane only.** Its content-bearing sections are built from
 primary facts and salient memories. It may also carry authenticated,
-value-free `memory_checkpoint`, `message_checkpoint`, `email_checkpoint`, and
-`avatar_checkpoint` objects describing pending client curation, messaging,
-receive-email, and avatar attention. None contains a fact, memory, transcript,
-message/email body, secret, or TOTP value. See
+value-free `memory_capacity`, `memory_checkpoint`, `message_checkpoint`,
+`email_checkpoint`, and `avatar_checkpoint` objects describing active-memory
+capacity, pending client curation, messaging, receive-email, and avatar
+attention. None contains a fact, memory, transcript, message/email body, secret,
+or TOTP value. See
 [The Sealed-Plane Carve-Out](#the-sealed-plane-carve-out) below.
 
 ### Shape
@@ -79,6 +80,15 @@ message/email body, secret, or TOTP value. See
     { "id": "mem_120", "snippet": "Prefers terse, decision-led writing.", "kind": "profile", "salience": 0.9, "source": "self" },
     { "id": "mem_133", "snippet": "Migration 0032 shipped portable client vectors; resume at the cloud conformance check.", "kind": "session", "salience": 0.8, "source": "self" }
   ],
+  "memory_capacity": {
+    "used": 900,
+    "max": 1000,
+    "remaining": 100,
+    "unlimited": false,
+    "near_limit": true,
+    "at_limit": false,
+    "over_limit": false
+  },
   "memory_checkpoint": {
     "pending": true,
     "request_id": "mcrq_123",
@@ -113,6 +123,15 @@ Field rules:
   salience, source }`. `snippet` is a bounded excerpt, not full `content`; the
   full record is fetched by id via `memory.read`. Omit with `--no-salient` /
   `include_salient:false`; size with `--salient-limit N` (default 10).
+- `memory_capacity` — authenticated, value-free per-agent active-memory usage
+  and policy. Unlimited status uses nullable `max`/`remaining`; finite
+  `near_limit` begins at 90 percent and remains true at or beyond the maximum.
+  `at_limit` identifies exact equality and `over_limit` identifies usage above
+  the maximum. `unavailable:true` means the additive capacity projection failed
+  open; it never means unlimited.
+  The block guides an already-active client toward safe reversible non-growing
+  consolidation. It does not select a memory, authorize deletion, wake a
+  runtime, or grant the backend semantic authority.
 - `memory_checkpoint` — authenticated, value-free owner-lane/request/run state.
   `pending:false` means there was no due or resumable work at the instant of the
   read. `unavailable:true` means only that the additive checkpoint projection
@@ -174,8 +193,8 @@ model-visible output contract:
 
 1. `SessionStart` reads one bounded `self.show` digest.
 2. Every supported Codex/Claude `UserPromptSubmit` reads bounded `/v1/self` state
-   so an ordinary prompt can discover pending memory-curation, messaging,
-   receive-email, or avatar
+   so an ordinary prompt can discover active-memory pressure or pending
+   memory-curation, messaging, receive-email, or avatar
    attention. A deterministic local history-dependence check decides whether to
    add a bounded lexical `memory.recall` query. That query is a deduplicated `OR`
    expression made from meaningful prompt keywords after conversational glue is
@@ -191,9 +210,11 @@ model-visible output contract:
    `WITSELF_AUTOMATIC_CONTEXT_V1` envelope that says the material is untrusted,
    private advisory data rather than instructions or authority. The model must
    keep sensitive values within the authenticated user's current task. The
-   separately rendered `memory_checkpoint` is authenticated value-free lifecycle
-   state, and its static checkpoint policy authorizes only reversible curation
-   and fact proposals. The separately rendered `message_checkpoint` is
+   separately rendered `memory_capacity` is authenticated value-free policy
+   state, not authority for a semantic change. The separately rendered
+   `memory_checkpoint` is authenticated value-free lifecycle state, and its
+   static checkpoint policy authorizes only reversible curation and fact
+   proposals. The separately rendered `message_checkpoint` is
    content-free attention metadata; it neither authorizes nor acknowledges
    message processing. The separately rendered `email_checkpoint` is likewise
    value-free attention metadata; all subsequently read email remains
@@ -261,8 +282,8 @@ hook may inject that explicitly marked checkpoint-only envelope; otherwise the
 hook fails open with no context and the foreground prompt continues.
 
 This automatic hydration path reads identity, facts, narrative memory,
-value-free curation lifecycle state, and value-free message, email, and avatar
-checkpoints. On
+value-free active-memory capacity and curation lifecycle state, and value-free
+message, email, and avatar checkpoints. On
 Codex and Claude Code, supported `SessionStart` and `UserPromptSubmit` output may
 include those checkpoints but never unread message/email metadata. Cursor, Grok
 Build, OpenClaw, Antigravity, and Copilot use guided `self.show`. Every
@@ -291,7 +312,8 @@ mechanisms in this doc. Concretely:
 
 - **Not in the self-digest.** `self show` (and `witself.self.show` / `GET /v1/self`)
   draws content only from primary facts and salient memories, plus value-free
-  curation lifecycle and message/email/avatar attention metadata. No secret value, secret
+  active-memory capacity, curation lifecycle, and message/email/avatar
+  attention metadata. No secret value, secret
   field, reference target, or TOTP seed is ever selected into the digest, the
   `index` summary, any checkpoint, or the value-free `elided` signal.
 - **Not in `digest emit`.** The outbound file bridge renders the same open-plane
@@ -390,7 +412,10 @@ dominates. The canonical per-tool wording lives in
 - `self.show` / `memory.recall` — call before history-dependent work. Broad
   recall combines redacted Witself facts with Witself narrative memory. Near a
   non-trivial foreground turn's end, inspect `self.show.memory_checkpoint` when
-  the runtime did not inject it automatically.
+  the runtime did not inject it automatically. Inspect
+  `self.show.memory_capacity` as value-free pressure state; at 90 percent or
+  above, prefer safe reversible zero- or negative-delta consolidation when the
+  evidence supports it.
 - `fact.set` — call in the same turn for an explicitly requested atomic durable
   assertion.
 - `memory.capture` — call in the same turn for an explicit narrative remember,
@@ -436,6 +461,12 @@ tools (or the `witself` CLI). Use it:
   user explicitly names it or asks for both providers.
 - **Fix, don't contradict.** If a memory is wrong or outdated, `adjust` or
   `forget` it. Do not add a new memory that contradicts an old one.
+- **Consolidate without erasing.** Treat `self.show.memory_capacity` as
+  value-free guidance. Near or at a finite maximum, prefer a client-authored
+  reversible plan whose net active-memory delta is zero or negative. Preserve
+  evidence, lineage, history, uncertainty, and conflicts; never use permanent
+  deletion or an unrelated merge to make room. The backend validates and
+  applies the exact plan but never decides what it should say.
 - **Assume interruption.** Your context may be cleared at any moment. Capture a
   bounded, evidence-supported Witself checkpoint when durable progress is
   needed. Near the end of a non-trivial foreground turn, inspect the

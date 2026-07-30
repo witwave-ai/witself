@@ -477,11 +477,34 @@
   }
 
   // --- views ------------------------------------------------------------
+  function memoryCapacityHTML(capacity) {
+    if (!capacity) { return ""; }
+    if (capacity.unavailable) {
+      return '<div class="panel"><h2>active memory capacity</h2><div class="dim">capacity status temporarily unavailable</div></div>';
+    }
+    var used = Math.max(0, Number(capacity.used) || 0);
+    var level = capacity.over_limit || capacity.at_limit ? "danger" : (capacity.near_limit ? "warning" : "");
+    var stateLabel = capacity.over_limit ? "over limit" : (capacity.at_limit ? "at limit" : (capacity.near_limit ? "near limit" : "available"));
+    if (capacity.unlimited) {
+      return '<div class="panel"><h2>active memory capacity</h2><div class="capacity-line"><a href="#/memories">' +
+        esc(used) + ' active</a><span class="badge">unlimited</span></div></div>';
+    }
+    var maximum = Math.max(0, Number(capacity.max) || 0);
+    var remaining = Math.max(0, Number(capacity.remaining) || 0);
+    return '<div class="panel capacity ' + level + '"><h2>active memory capacity</h2>' +
+      '<div class="capacity-line"><a href="#/memories">' + esc(used) + " of " + esc(maximum) +
+      ' active</a><span class="badge">' + esc(stateLabel) + "</span></div>" +
+      '<progress class="capacity-track" aria-label="active memory capacity" max="' +
+      esc(maximum || 1) + '" value="' + esc(Math.min(used, maximum || 1)) + '"></progress>' +
+      '<div class="dim">' + esc(remaining) + " remaining · safe consolidation and replacement stay available at the limit</div></div>";
+  }
+
   function renderOverview(self) {
     var counts = (self.index && self.index.counts) || {};
     var cards = Object.keys(counts).sort().map(function (key) {
       var card = '<div class="card"><div class="num">' + esc(counts[key]) + '</div><div class="label">' + esc(key) + "</div></div>";
       if (key === "facts") { return '<a class="card-link" href="#/facts">' + card + "</a>"; }
+      if (key === "memories") { return '<a class="card-link" href="#/memories">' + card + "</a>"; }
       if (key === "secrets") { return '<a class="card-link" href="#/secrets">' + card + "</a>"; }
       return card;
     }).join("");
@@ -496,6 +519,7 @@
     if (self.avatar_checkpoint && self.avatar_checkpoint.pending) { checkpoints.push({ label: "avatar lifecycle pending" }); }
     $("view").innerHTML =
       '<div class="panel"><h2>inventory</h2><div class="cards">' + (cards || '<span class="empty">no counts</span>') + "</div></div>" +
+      memoryCapacityHTML(self.memory_capacity) +
       '<div class="panel"><h2>salient memories</h2><div class="list">' + (salient || '<div class="empty">none</div>') + "</div></div>" +
       '<div class="panel"><h2>checkpoints</h2><div class="list">' +
       (checkpoints.length ? checkpoints.map(function (item) {
@@ -1248,6 +1272,7 @@
     module.exports = {
       state: state,
       probeEmailMailbox: probeEmailMailbox,
+      memoryCapacityHTML: memoryCapacityHTML,
       applyEmailCheckpoint: function (checkpoint) {
         var change = updateEmailAddressFromCheckpoint(checkpoint);
         if (!change || parseHash().section !== "email") { return null; }

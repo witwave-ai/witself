@@ -330,7 +330,7 @@ func Execute(ctx context.Context, cfg Config, binding Binding, request Request, 
 	}
 	if !historyDependent {
 		contextText, err := renderRecall(
-			client.MemoryRecallPage{}, digest.MemoryCheckpoint, digest.MessageCheckpoint,
+			client.MemoryRecallPage{}, digest.MemoryCapacity, digest.MemoryCheckpoint, digest.MessageCheckpoint,
 			digest.EmailCheckpoint, digest.AvatarCheckpoint, cfg.MaximumBytes,
 		)
 		if err != nil {
@@ -360,7 +360,7 @@ func Execute(ctx context.Context, cfg Config, binding Binding, request Request, 
 			RetrievalMode:  "unavailable",
 			Degraded:       true,
 			DegradedReason: "recall_unavailable",
-		}, digest.MemoryCheckpoint, digest.MessageCheckpoint, digest.EmailCheckpoint, digest.AvatarCheckpoint, cfg.MaximumBytes)
+		}, digest.MemoryCapacity, digest.MemoryCheckpoint, digest.MessageCheckpoint, digest.EmailCheckpoint, digest.AvatarCheckpoint, cfg.MaximumBytes)
 		if checkpointErr != nil {
 			return Result{Attempted: true, Delivery: feature.Delivery, Query: query}, checkpointErr
 		}
@@ -382,7 +382,7 @@ func Execute(ctx context.Context, cfg Config, binding Binding, request Request, 
 		}
 	}
 	contextText, err := renderRecall(
-		page, digest.MemoryCheckpoint, digest.MessageCheckpoint, digest.EmailCheckpoint, digest.AvatarCheckpoint, cfg.MaximumBytes,
+		page, digest.MemoryCapacity, digest.MemoryCheckpoint, digest.MessageCheckpoint, digest.EmailCheckpoint, digest.AvatarCheckpoint, cfg.MaximumBytes,
 	)
 	if err != nil {
 		return Result{Attempted: true, Delivery: feature.Delivery, Query: query}, err
@@ -455,6 +455,7 @@ type contextEnvelope struct {
 	Identity                *contextIdentity          `json:"identity,omitempty"`
 	CanonicalFacts          []contextFact             `json:"canonical_facts,omitempty"`
 	NarrativeMemories       []contextMemory           `json:"narrative_memories,omitempty"`
+	MemoryCapacity          *contextMemoryCapacity    `json:"memory_capacity,omitempty"`
 	MemoryCheckpoint        *contextMemoryCheckpoint  `json:"memory_checkpoint,omitempty"`
 	CheckpointPolicy        string                    `json:"checkpoint_policy,omitempty"`
 	MessageCheckpoint       *contextMessageCheckpoint `json:"message_checkpoint,omitempty"`
@@ -491,6 +492,17 @@ type contextMemory struct {
 	Score     float64  `json:"score,omitempty"`
 	Sensitive bool     `json:"sensitive"`
 	Source    string   `json:"source,omitempty"`
+}
+
+type contextMemoryCapacity struct {
+	Used        int64  `json:"used"`
+	Max         *int64 `json:"max"`
+	Remaining   *int64 `json:"remaining"`
+	Unlimited   bool   `json:"unlimited"`
+	NearLimit   bool   `json:"near_limit"`
+	AtLimit     bool   `json:"at_limit"`
+	OverLimit   bool   `json:"over_limit"`
+	Unavailable bool   `json:"unavailable,omitempty"`
 }
 
 type contextMemoryCheckpoint struct {
@@ -543,6 +555,7 @@ func renderSelf(digest client.SelfDigest, maximumBytes int) (string, error) {
 		Identity: &contextIdentity{Agent: digest.Identity.AgentName, Realm: digest.Identity.RealmName},
 		Elided:   digest.Elided,
 	}
+	setMemoryCapacity(&envelope, digest.MemoryCapacity, true)
 	setCheckpoint(&envelope, digest.MemoryCheckpoint)
 	setMessageCheckpoint(&envelope, digest.MessageCheckpoint)
 	setEmailCheckpoint(&envelope, digest.EmailCheckpoint)
@@ -572,6 +585,7 @@ func renderSelf(digest client.SelfDigest, maximumBytes int) (string, error) {
 
 func renderRecall(
 	page client.MemoryRecallPage,
+	memoryCapacity *client.MemoryLimitStatus,
 	checkpoint *client.SelfMemoryCheckpoint,
 	messageCheckpoint *client.SelfMessageCheckpoint,
 	emailCheckpoint *client.SelfEmailCheckpoint,
@@ -590,6 +604,7 @@ func renderRecall(
 			envelope.RecallReason = page.DegradedReason
 		}
 	}
+	setMemoryCapacity(&envelope, memoryCapacity, false)
 	setCheckpoint(&envelope, checkpoint)
 	setMessageCheckpoint(&envelope, messageCheckpoint)
 	setEmailCheckpoint(&envelope, emailCheckpoint)
@@ -608,11 +623,27 @@ func renderRecall(
 		})
 	}
 	if len(envelope.NarrativeMemories) == 0 && envelope.MemoryCheckpoint == nil &&
+		envelope.MemoryCapacity == nil &&
 		envelope.MessageCheckpoint == nil && envelope.EmailCheckpoint == nil &&
 		envelope.AvatarCheckpoint == nil && envelope.RecallStatus == "" {
 		return "", nil
 	}
 	return marshalBounded(envelope, maximumBytes)
+}
+
+func setMemoryCapacity(envelope *contextEnvelope, status *client.MemoryLimitStatus, always bool) {
+	if envelope == nil || status == nil {
+		return
+	}
+	if !always && !status.Unavailable && !status.NearLimit && !status.AtLimit && !status.OverLimit {
+		return
+	}
+	envelope.MemoryCapacity = &contextMemoryCapacity{
+		Used: status.Used, Max: status.Max, Remaining: status.Remaining,
+		Unlimited: status.Unlimited, NearLimit: status.NearLimit,
+		AtLimit: status.AtLimit, OverLimit: status.OverLimit,
+		Unavailable: status.Unavailable,
+	}
 }
 
 func setEmailCheckpoint(envelope *contextEnvelope, checkpoint *client.SelfEmailCheckpoint) {

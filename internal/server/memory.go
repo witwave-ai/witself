@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -27,6 +28,38 @@ const (
 	// MiB covers the outer reason, provenance, retry keys, and JSON structure.
 	maxMemorySupersedeRequestBytes int64 = 32*maxMemoryCaptureRequestBytes + (1 << 20)
 )
+
+// ErrMemoryLimitReached identifies a non-retryable refusal of a net-positive
+// active-memory mutation.
+var ErrMemoryLimitReached = errors.New("active memory limit reached")
+
+// MemoryLimitStatus is a value-free capacity view for one authenticated
+// owner agent.
+type MemoryLimitStatus struct {
+	Used        int64  `json:"used"`
+	Max         *int64 `json:"max"`
+	Remaining   *int64 `json:"remaining"`
+	Unlimited   bool   `json:"unlimited"`
+	NearLimit   bool   `json:"near_limit"`
+	AtLimit     bool   `json:"at_limit"`
+	OverLimit   bool   `json:"over_limit"`
+	Unavailable bool   `json:"unavailable,omitempty"`
+}
+
+// MemoryLimitError carries only a value-free capacity snapshot.
+type MemoryLimitError struct {
+	Status MemoryLimitStatus
+}
+
+func (e *MemoryLimitError) Error() string {
+	if e == nil || e.Status.Max == nil {
+		return ErrMemoryLimitReached.Error()
+	}
+	return fmt.Sprintf("%s: %d/%d active", ErrMemoryLimitReached,
+		e.Status.Used, *e.Status.Max)
+}
+
+func (e *MemoryLimitError) Unwrap() error { return ErrMemoryLimitReached }
 
 // MemoryOwner identifies the stable agent that owns a narrative memory.
 type MemoryOwner struct {
@@ -480,6 +513,27 @@ func captureMemoryHandler(auth PrincipalAuthFunc, capture func(context.Context, 
 			return
 		}
 		writeMemoryResult(w, http.StatusCreated, result)
+	})
+}
+
+func memoryLimitStatusHandler(
+	auth PrincipalAuthFunc,
+	status func(context.Context, DomainPrincipal) (MemoryLimitStatus, error),
+) http.HandlerFunc {
+	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+		if p.Kind != PrincipalKindAgent {
+			writeJSONError(w, http.StatusForbidden, "only an agent token may read memory capacity")
+			return
+		}
+		limit, err := status(r.Context(), p)
+		if writeMemoryError(w, err, "read memory capacity") {
+			return
+		}
+		setMemoryResponseHeaders(w)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version":  "witself.v0",
+			"memory_capacity": limit,
+		})
 	})
 }
 
@@ -944,6 +998,8 @@ func writeMemoryError(w http.ResponseWriter, err error, operation string) bool {
 	switch {
 	case errors.Is(err, ErrFeatureNotEnabled):
 		writeFeatureNotEnabledError(w, err)
+	case errors.Is(err, ErrMemoryLimitReached):
+		writeMemoryLimitError(w, err)
 	case errors.Is(err, ErrBadInput):
 		writeJSONError(w, http.StatusBadRequest, "invalid memory request")
 	case errors.Is(err, ErrForbidden):
@@ -960,6 +1016,23 @@ func writeMemoryError(w http.ResponseWriter, err error, operation string) bool {
 		writeJSONError(w, http.StatusInternalServerError, "could not "+operation)
 	}
 	return true
+}
+
+func writeMemoryLimitError(w http.ResponseWriter, err error) {
+	var limitErr *MemoryLimitError
+	if !errors.As(err, &limitErr) || limitErr == nil {
+		writeJSONError(w, http.StatusForbidden, ErrMemoryLimitReached.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"schema_version": "witself.v0",
+		"error":          "Active memory capacity has been reached; existing memories remain available and safe replacement or consolidation is still allowed.",
+		"code":           "stored_memory_limit_reached",
+		"retryable":      false,
+		"limit":          limitErr.Status,
+	})
 }
 
 func writeMemoryResult(w http.ResponseWriter, status int, result MemoryMutationResult) {

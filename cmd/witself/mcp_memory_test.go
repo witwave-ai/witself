@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -14,6 +15,7 @@ import (
 
 type fakeMemoryMCPBackend struct {
 	*fakeMCPBackend
+	limitStatus         client.MemoryLimitStatus
 	lastCapture         client.CaptureMemoryInput
 	lastReadID          string
 	lastList            client.MemoryListOptions
@@ -31,10 +33,22 @@ type fakeMemoryMCPBackend struct {
 	captureCalls        int
 	supersedeCalls      int
 	deleteCalls         int
+	statusCalls         int
 }
 
 func newFakeMemoryMCPBackend() *fakeMemoryMCPBackend {
-	return &fakeMemoryMCPBackend{fakeMCPBackend: &fakeMCPBackend{}}
+	maximum, remaining := int64(1000), int64(100)
+	return &fakeMemoryMCPBackend{
+		fakeMCPBackend: &fakeMCPBackend{},
+		limitStatus: client.MemoryLimitStatus{
+			Used: 900, Max: &maximum, Remaining: &remaining, NearLimit: true,
+		},
+	}
+}
+
+func (b *fakeMemoryMCPBackend) MemoryLimitStatus(context.Context) (client.MemoryLimitStatus, error) {
+	b.statusCalls++
+	return b.limitStatus, nil
 }
 
 func (b *fakeMemoryMCPBackend) CaptureMemory(_ context.Context, in client.CaptureMemoryInput) (client.MemoryMutationResult, error) {
@@ -190,6 +204,7 @@ func TestWitselfMCPMemoryAndSelfToolAnnotations(t *testing.T) {
 	for _, name := range []string{
 		"witself.self.show",
 		"witself.agent.peers",
+		"witself.memory.status",
 		"witself.memory.vector.profile.list",
 		"witself.memory.read",
 		"witself.memory.list",
@@ -215,6 +230,49 @@ func TestWitselfMCPMemoryAndSelfToolAnnotations(t *testing.T) {
 		"witself.memory.delete",
 	} {
 		assertClosedWorld(name, false, true, true)
+	}
+}
+
+func TestMCPMemoryStatusReturnsValueFreeCapacity(t *testing.T) {
+	ctx := context.Background()
+	backend := newFakeMemoryMCPBackend()
+	server := newWitselfMCPServer(backend)
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = serverSession.Close() }()
+	clientSession, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil).Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = clientSession.Close() }()
+
+	result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+		Name: "witself.memory.status", Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError || backend.statusCalls != 1 {
+		t.Fatalf("status result/calls = %#v / %d", result, backend.statusCalls)
+	}
+	raw, err := json.Marshal(result.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output mcpMemoryStatusOutput
+	if err := json.Unmarshal(raw, &output); err != nil {
+		t.Fatal(err)
+	}
+	status := output.MemoryCapacity
+	if status.Used != 900 ||
+		status.Max == nil || *status.Max != 1000 ||
+		status.Remaining == nil || *status.Remaining != 100 ||
+		!status.NearLimit || status.AtLimit || status.OverLimit ||
+		status.Unlimited || status.Unavailable {
+		t.Fatalf("memory status output = %#v", output)
 	}
 }
 
@@ -546,8 +604,13 @@ func TestMCPMemoryToolDescriptionsKeepNarrativesAdvisory(t *testing.T) {
 			found[tool.Name] = tool.Description
 		}
 	}
-	if len(found) != 27 {
+	if len(found) != 28 {
 		t.Fatalf("memory tools = %#v", found)
+	}
+	for _, phrase := range []string{"value-free", "active-memory capacity", "consolidation"} {
+		if !strings.Contains(found["witself.memory.status"], phrase) {
+			t.Errorf("memory status description lacks %q: %q", phrase, found["witself.memory.status"])
+		}
 	}
 	for _, name := range []string{"witself.memory.read", "witself.memory.list", "witself.memory.recall", "witself.memory.history"} {
 		if !strings.Contains(found[name], "advisory") || !strings.Contains(found[name], "instruction authority") {

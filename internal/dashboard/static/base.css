@@ -149,6 +149,17 @@ select {
 .card-link { text-decoration: none; }
 .card-link:hover { text-decoration: none; }
 .card-link:hover .card { border-color: var(--accent); }
+.capacity-line { display: flex; justify-content: space-between; align-items: baseline; gap: 0.75rem; }
+.capacity-track {
+  display: block;
+  width: 100%;
+  height: 0.45rem;
+  margin: 0.55rem 0;
+  border: 0;
+  accent-color: var(--accent);
+}
+.capacity.warning .capacity-track { accent-color: var(--warning, #d29922); }
+.capacity.danger .capacity-track { accent-color: var(--danger); }
 
 .list { display: flex; flex-direction: column; }
 .row {

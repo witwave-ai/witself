@@ -347,7 +347,7 @@ func TestAccountLimitOverrideLifecycleAndAttribution(t *testing.T) {
 	}
 }
 
-func TestFounderRealmAndAgentLimitsCanBeExplicitlyUnlimited(t *testing.T) {
+func TestFounderResourceLimitsCanBeExplicitlyUnlimited(t *testing.T) {
 	h := newHarness(t, false)
 	ctx := t.Context()
 	const accountID = "acct_founder_resource_limits"
@@ -356,6 +356,7 @@ func TestFounderRealmAndAgentLimitsCanBeExplicitlyUnlimited(t *testing.T) {
 		plans.RealmLimit,
 		plans.AgentLimit,
 		plans.AgentPerRealmLimit,
+		plans.StoredMemoryLimit,
 	} {
 		if _, err := h.m.SetAccountLimitOverride(
 			ctx,
@@ -394,12 +395,12 @@ func TestFounderRealmAndAgentLimitsCanBeExplicitlyUnlimited(t *testing.T) {
 	}
 
 	record := h.record(t, accountID)
-	if len(record.LimitOverrides) != 3 {
-		t.Fatalf("founder overrides = %v; want all three dimensions", record.LimitOverrides)
+	if len(record.LimitOverrides) != 4 {
+		t.Fatalf("founder overrides = %v; want all four dimensions", record.LimitOverrides)
 	}
 }
 
-func TestFounderResourceOverridesSurviveAgentsPerRealmCatalogPromotion(t *testing.T) {
+func TestFounderResourceOverridesSurviveCatalogPromotion(t *testing.T) {
 	h := newHarness(t, false)
 	ctx := t.Context()
 	const accountID = "acct_founder_resource_promotion"
@@ -426,6 +427,7 @@ func TestFounderResourceOverridesSurviveAgentsPerRealmCatalogPromotion(t *testin
 		plans.RealmLimit,
 		plans.AgentLimit,
 		plans.AgentPerRealmLimit,
+		plans.StoredMemoryLimit,
 	} {
 		if _, err := h.m.SetAccountLimitOverride(
 			ctx,
@@ -453,7 +455,7 @@ func TestFounderResourceOverridesSurviveAgentsPerRealmCatalogPromotion(t *testin
 		"plans":[{
 			"id":"free","name":"Personal","price_monthly":0,"available":true,
 			"usage_billed":false,
-			"limits":{"agents":10,"agents_per_realm":10,"realms":1},
+			"limits":{"agents":10,"agents_per_realm":10,"realms":1,"stored_memory":1000},
 			"features":["memory","facts"]
 		}]
 	}`))
@@ -470,7 +472,8 @@ func TestFounderResourceOverridesSurviveAgentsPerRealmCatalogPromotion(t *testin
 	}
 	if afterSnapshot.DefaultLimits[plans.RealmLimit] != 1 ||
 		afterSnapshot.DefaultLimits[plans.AgentLimit] != 10 ||
-		afterSnapshot.DefaultLimits[plans.AgentPerRealmLimit] != 10 {
+		afterSnapshot.DefaultLimits[plans.AgentPerRealmLimit] != 10 ||
+		afterSnapshot.DefaultLimits[plans.StoredMemoryLimit] != 1000 {
 		t.Fatalf("Phase B defaults = %v", afterSnapshot.DefaultLimits)
 	}
 	if len(afterSnapshot.Limits) != 0 ||

@@ -162,6 +162,10 @@ isolation contract, so both native paths intentionally report unsupported.
 - Curation submits an explicit, version-checked plan. The backend only
   authorizes, validates, stores, searches, applies, audits, exports, imports,
   and rolls back that plan deterministically.
+- Active-memory capacity is value-free per-agent policy state. A finite maximum
+  warns at 90 percent. Near or at capacity, the active client prefers
+  evidence-supported reversible consolidation; the backend computes and
+  enforces net active-memory delta but never chooses what to merge or summarize.
 - Curator authorization is a server-enforced credential property, not an MCP
   display filter. Every launcher first reads the authenticated effective
   preflight and refuses incompatible protocol, permission, or limit claims.
@@ -419,6 +423,7 @@ modes share one protocol:
 | --- | --- | --- |
 | Immediate | Explicit `remember` | Capture now; optionally queue refinement |
 | Foreground | Active agent sees a pending checkpoint | Curate at most one fenced request; apply an empty plan when appropriate |
+| Capacity pressure | Active agent sees finite `memory_capacity.near_limit` | Prefer safe reversible consolidation in the bounded foreground lane; never launch a model or delete automatically |
 | Legacy scheduled | Explicit `memory curate auto` service | Curate within configured budget |
 | Manual | User asks to refine memories | Run now, normally preview first |
 
@@ -473,13 +478,18 @@ and an exact plan hash:
 5. The client reasons locally and submits a canonical plan. `plan` requires the
    fence and validates shape, authorization, provenance, limits, sensitivity,
    expected versions, and references. It returns the normalized plan revision,
-   exact plan hash, preallocated create ids, and deterministic impact preview.
+   exact plan hash, preallocated create ids, and deterministic impact preview,
+   including `active_memory_delta` and `projected_active_memories`.
 6. `apply` requires an unexpired matching fence, plan revision/hash, and
    idempotency key. In one bounded transaction it locks targets in stable id
-   order, rechecks memory versions, applies all actions, and compare-and-swaps
-   every source cursor from the run's recorded lower bound to its upper bound.
-   Any stale head, non-contiguous cursor, or expired fence returns a conflict
-   with no partial change. When no frozen input merits durable memory, a
+   order, rechecks memory versions, recomputes the active-memory projection,
+   applies all actions, and compare-and-swaps every source cursor from the run's
+   recorded lower bound to its upper bound. Any stale head, non-contiguous
+   cursor, expired fence, or positive delta beyond the finite maximum produces
+   no partial change. Capacity refusal is HTTP 403
+   `stored_memory_limit_reached`; zero- or negative-delta correction and
+   consolidation remain allowed at or above the maximum. When no frozen input
+   merits durable memory, a
    zero-action plan is the correct result and is still applied to advance the
    exact reviewed contiguous intervals without creating memory or facts.
 7. Apply marks the request fulfilled only through the captured generation. If
@@ -581,6 +591,14 @@ Retagging, relinking, salience changes, and ordinary revision compile to
 creates multiple outputs and supersedes the input with that replacement set.
 This keeps semantic intent in the client while giving the backend a small,
 testable, provider-neutral contract.
+
+The accepted-plan preview evaluates the complete plan rather than counting
+operations. Merging `N` active sources into one output has
+`active_memory_delta = 1 - N`; splitting one active source into `N` outputs has
+delta `N - 1`. Replace, relate, and fact proposal do not independently grow
+active inventory. The preview also reports `projected_active_memories`. These
+fields are planning aids only: apply recomputes them from locked live heads so a
+stale lifecycle transition cannot bypass `stored_memory`.
 
 `replace` may change content, kind, tags, salience, links, sensitivity, and
 occurrence range. It cannot change owner, origin, capture reason, or original
@@ -970,6 +988,7 @@ before the first public schema freeze.
 ### Normal user and agent commands
 
 ```text
+witself memory status
 witself memory capture --kind decision --stdin --idempotency-key KEY
 witself memory recall "database decisions" --occurred-from 2026-01-01T00:00:00Z
 witself memory show MEM_ID
@@ -1037,6 +1056,10 @@ request/response fields are required:
   exact/pending/unavailable evidence, capture reason, client provenance, and
   idempotency key. It returns memory id, version, content hash, evidence
   resolution states, and mutation receipt.
+- Status returns `{schema_version,memory_capacity}` with active `used`, nullable
+  `max`/`remaining`, `unlimited`, `near_limit`, `at_limit`, and `over_limit`; it returns no
+  memory content or ids. The same projection appears in `self.show` and
+  authenticated curation preflight.
 - Adjust/forget/restore/reactivate accept memory id, `expected_version`, the
   operation payload/reason, and idempotency key. A stale version is a conflict.
 - Supersede accepts one active memory id/version, an operation idempotency key,
@@ -1075,7 +1098,8 @@ request/response fields are required:
   reason/generation, and idempotency key.
 - Authenticated curation preflight returns the presented token's agent identity,
   immutable access profile and expiry, exact effective permissions, plan schema
-  and primitives, client-inference boundary, and server limits. It is
+  and primitives, client-inference boundary, server limits, and value-free
+  `memory_capacity`. It is
   `private, no-store`; the client must not infer authority from deployment-wide
   capabilities or an MCP tool list.
 - Start accepts request id, scope caps, and idempotency key. It returns run id,
@@ -1085,8 +1109,9 @@ request/response fields are required:
   idempotency key. Get accepts run id, current fence, opaque cursor, and limit.
 - Plan accepts run id/fence, `witself.memory-plan.v1` draft revision, ordered
   actions, and idempotency key. It returns validation errors or the canonical
-  plan revision/hash, normalized actions, preallocated ids, and impact preview.
-  An empty actions list is valid when no frozen input merits memory.
+  plan revision/hash, normalized actions, preallocated ids, and impact preview
+  with `active_memory_delta` and `projected_active_memories`. An empty actions
+  list is valid when no frozen input merits memory.
 - Plan get accepts a live planned run id/fence and read-only-reconstructs the
   exact normalized accepted plan, preallocated ids, and preview without its
   planner mutation receipt. The caller reviews that untrusted content against
@@ -1094,7 +1119,10 @@ request/response fields are required:
 - Apply accepts run id/fence, canonical plan revision/hash, and idempotency key.
   It returns the apply receipt, exact before/after heads, fact-candidate ids,
   advanced cursor intervals, and follow-up generation if work remains. Applying
-  an empty plan advances only the reviewed intervals.
+  an empty plan advances only the reviewed intervals. Apply recomputes active
+  usage atomically and returns non-retryable `stored_memory_limit_reached`
+  without cursor or semantic change when a positive delta would exceed the
+  finite maximum.
 - Cancel accepts run id/fence and idempotency key. Rollback accepts run id,
   apply receipt, every expected apply-produced head, reason, and idempotency key.
 - Status requires ordinary authorization but no active lease. It never returns
@@ -1107,6 +1135,7 @@ limits, error codes, and `409` conflict details use the shared JSON envelope.
 
 MCP and CLI expose schema-equivalent operations:
 
+- `witself.memory.status`
 - `witself.memory.capture`
 - `witself.memory.read`
 - `witself.memory.list`
@@ -1224,6 +1253,11 @@ cross-product recall. It does not need to disable native memory.
 - Human-, operator-, import-, and explicitly captured source material is
   preserved. A curator normally derives a new representation and lineage rather
   than silently rewriting source authorship.
+- `memory_capacity` is value-free guidance, never semantic or deletion
+  authority. Near/at-cap consolidation must preserve evidence, provenance,
+  immutable history, uncertainty, and real conflicts. It must not merge
+  unrelated records, fabricate certainty, or permanently delete content merely
+  to reduce active count.
 - Plan pages, actions, bytes, model time, and apply transaction size are
   bounded. Oversized work is split at snapshot boundaries.
 - Raw content, proposed content, vectors, transcript bodies, and fact values
@@ -1569,7 +1603,12 @@ The current checkout implements:
     applies every migration, freezes and exports an account, imports it to a
     separate destination schema, rebuilds retrieval projections, and verifies
     facts, narrative history, curation fencing, deletion shields, vectors,
-    idempotency, and tenant isolation.
+    idempotency, and tenant isolation; and
+15. per-agent `stored_memory` enforcement over active heads, value-free
+    status/self/preflight capacity projections with a 90-percent warning,
+    structured non-retryable refusal, and atomic curation
+    `active_memory_delta`/`projected_active_memories` enforcement that keeps
+    non-growing reversible consolidation available at capacity.
 
 Model-visible Cursor session/task and Grok session/task injection, live managed
 three-cloud move certification, and production performance/evaluation tuning

@@ -46,6 +46,9 @@ memory. The explicit legacy separate-process/unattended policy is:
 - apply only when the local policy explicitly enables unattended apply;
 - otherwise return the plan hash/count-only preview and requeue the work
   without consuming its failure budget; and
+- when finite active-memory capacity is near, at, or above its maximum, prefer
+  only evidence-justified consolidation and require a zero- or negative-delta
+  plan at or above the maximum; and
 - never curate the curator's own orchestration transcript or apply-produced
   mutations into a feedback loop.
 
@@ -86,16 +89,21 @@ Before claiming work, the driver calls authenticated
 `GET /v1/memory-curation-preflight`. This is an effective authorization document
 for the presented token, not a deployment capability advertisement. It reports
 the agent identity, token profile/expiry, plan schema and primitives,
-client-inference requirement, exact permissions, and server limits with
+client-inference requirement, exact permissions, server limits, and the same
+value-free `memory_capacity` returned by owner status/self hydration, with
 `Cache-Control: private, no-store`. A missing or incompatible permission,
-protocol field, primitive, or bound fails the launch closed.
+protocol field, primitive, bound, or capacity projection fails the launch
+closed. Restricted curator profiles use preflight because they cannot call the
+ordinary memory-status route.
 
 ## Protocol
 
 1. Read authenticated curation preflight and verify the exact agent identity,
-   plan schema/primitives, effective permissions, expiry, and requested limits.
-   A preview needs the bounded read/start/get-plan/plan/abandon set; apply
-   additionally needs effective apply permission.
+   plan schema/primitives, effective permissions, expiry, requested limits, and
+   value-free `memory_capacity`. A preview needs the bounded
+   read/start/get-plan/plan/abandon set; apply additionally needs effective
+   apply permission. `near_limit` begins at 90 percent for a finite maximum and
+   is a planning signal, not authority to merge anything.
 2. Discover due work with `witself.memory.curation.requests`, or use one explicit
    request id. The list's `exclude_sensitive=true` filter omits scopes explicitly
    marked `include_sensitive`; for a full credential it still permits a
@@ -144,11 +152,16 @@ protocol field, primitive, or bound fails the launch closed.
    retrieval and independent review of the exact accepted plan.
 6. For an `open` run, build one `witself.memory-plan.v1` draft. Prefer a
    zero-action plan when no semantic improvement is justified. Never
-   manufacture certainty, dates, provenance, or durable facts.
+   manufacture certainty, dates, provenance, or durable facts. Near capacity,
+   prefer an evidence-supported reversible consolidation over another
+   independent active record. At or above the maximum, do not submit a plan
+   whose expected net active-memory delta is positive. Never merge unrelated or
+   conflicting records merely to reduce a count.
 7. Submit `witself.memory.curation.plan`. The server resolves local create
    references, preallocates ids, checks every provenance reference against the
    frozen input set, canonicalizes the accepted plan, and returns its immutable
-   revision, SHA-256 hash, and count-only impact preview.
+   revision, SHA-256 hash, and count-only impact preview, including
+   `active_memory_delta` and `projected_active_memories`.
 8. For every planned run, including one staged by the current client, call
    `witself.memory.curation.plan.get` with the exact fence. Independently review
    every normalized action, provenance reference, expected version,
@@ -157,7 +170,12 @@ protocol field, primitive, or bound fails the launch closed.
    apply from content-free `run.get` metadata alone. Do not re-plan a resumed
    run. The active foreground checkpoint path applies the exact revision/hash
    returned by `plan.get`, including an empty plan, only when that review is
-   safe. Otherwise abandon for a fresh snapshot. In an explicit legacy/manual
+   safe. At or above the finite maximum, require a zero- or negative-delta
+   preview. The backend recomputes projected usage from locked live heads at
+   apply; a positive delta beyond the maximum returns non-retryable
+   `stored_memory_limit_reached` and no semantic or cursor change. Do not retry
+   that same plan in a loop. Otherwise abandon for a fresh snapshot. In an
+   explicit legacy/manual
    preview run, abandon the accepted planned run with reason
    `preview_complete`. This requeues it after a 24-hour cooldown without
    incrementing its failure-attempt count; a new source generation makes it due
@@ -281,6 +299,13 @@ Merge is one `create` followed by one `supersede` action for each source, all
 pointing to the same created output. Split is multiple `create` actions followed
 by one `supersede` whose replacement set contains every output. A plan may not
 permanently delete anything.
+
+The impact preview evaluates the complete plan, not action count. Merging `N`
+active sources into one created output has active-memory delta `1 - N`;
+splitting one active source into `N` outputs has delta `N - 1`; replace, relate,
+and fact proposal do not by themselves grow active-memory inventory. These are
+planning examples only. Apply recomputes the authoritative delta against locked
+current heads, so stale lifecycle state cannot bypass the capacity gate.
 
 ## Foreground checkpoint and explicit legacy launch
 

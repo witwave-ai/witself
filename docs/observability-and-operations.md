@@ -175,6 +175,7 @@ Initial metric families should include:
 | `witself_token_operations_total` | Token create, rotate, revoke, and verification operations. |
 | `witself_secret_operations_total` | Sealed-plane secret operations by operation (`create`, `show`, `update`, `rename`, `copy`, `archive`, `restore`, `delete`, `grant`, `revoke`), owner kind, and result. The `show` operation returns metadata only and never a value; reveals are counted separately. |
 | `witself_secret_limit_rejections_total` | Implemented non-retryable stored-secret create refusals. Its bounded labels are exactly `limit_dimension="stored_secret"` and `operation="create"`; it never carries an account, realm, agent, secret id, name, value, or error text. |
+| `witself_memory_limit_rejections_total` | Implemented non-retryable active-memory capacity refusals. Its bounded labels are exactly `limit_dimension="stored_memory"` and operation from the closed set `create`, `supersede`, `restore`, `reactivate`, or `curation_apply`; it never carries account, realm, agent, memory, plan, usage, maximum, content, or error-text labels. |
 | `witself_plan_limit_rejections_total` | Implemented non-retryable realm and agent create refusals. Its bounded labels are `limit_dimension="realms"`, legacy `"agents"`, or `"agents_per_realm"`, plus `operation="create"`; it never carries an account, realm, agent, resource name, or error text. |
 | `witself_secret_reveals_total` | Sealed-plane value-returning reveals (`secret reveal` and reference resolution that returns a value) by principal kind, owner kind, `server_side_decrypt` (`true`, `false`), and result. These are the audited reveal-ceremony events; the metric counts events only and never carries the revealed value. |
 | `witself_totp_operations_total` | TOTP operations by operation (`enroll`, `code`, `show`, `delete`), owner kind, `server_side_decrypt` (`true`, `false`), and result. The `code` operation is value-returning and audited; the metric never carries the generated code or the seed. |
@@ -532,6 +533,9 @@ Initial alert candidates:
   values; expands the decrypt trust boundary).
 - Cross-agent access denials above a baseline (possible policy or abuse signal).
 - Cross-agent curate/forget spikes (possible memory-poisoning or write abuse).
+- Sustained active-memory capacity refusals by bounded operation (capacity or
+  consolidation-health signal; investigate through authenticated status rather
+  than adding tenant labels).
 - Message send or delivery failure rate above a baseline.
 - Relay envelope drop or quarantine rate above a baseline (cross-realm routing or
   flood signal).
@@ -560,6 +564,9 @@ Required checks once the server and chart exist:
 - Tests proving `server_side_decrypt` only ever takes `true` or `false`.
 - Tests proving memory content, fact values, message bodies, and embedding
   vectors never appear in metrics, logs, or health responses.
+- Tests proving active-memory refusal labels are restricted to
+  `limit_dimension="stored_memory"` and the five closed operation values, with
+  no tenant ids, usage values, maximums, memory ids, or plan content.
 - Tests proving secret values, secret/field names, TOTP seeds, generated TOTP
   codes, KMS key material, data keys, and private keys never appear in metrics,
   logs, or health responses.

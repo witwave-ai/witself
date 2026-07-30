@@ -56,12 +56,13 @@ remain deferred.
 
 ## Working Plan Direction
 
-The following table records the current product direction as of 2026-07-24. It
+The following table records the current product direction as of 2026-07-29. It
 is a working packaging decision, not a claim that every entitlement is already
 implemented or enforced. Each row moves into the canonical plan catalog and
 resolved cell policy only through its own implementation and rollout decision.
-The realm and agent values are the Phase B canonical defaults described below;
-the other rows remain subject to their own implementation and rollout gates.
+The realm, agent, and active-memory values are the Phase B canonical defaults
+described below; the other rows remain subject to their own implementation and
+rollout gates.
 
 | Capability | Personal — $0 | Professional — $30/month | Team — $250/month | Enterprise — contact us |
 |---|---:|---:|---:|---:|
@@ -331,15 +332,114 @@ Catalog promotion is intentionally two-phase:
 The stored-secret compatibility Phase A did not modify
 `web/plans/plans.json`; its catalog promotion was a separate release.
 
-Memories are durable knowledge and do not expire by age. The allowance counts
-only active memories; revisions, replacements, and superseded versions do not
-consume additional customer-visible slots. At the limit, Witself preserves
-existing memories and continues to allow reads, recall, export, replacement,
-superseding, and consolidation, but does not create another active memory until
-capacity is available. Memory writes and revisions are included rather than
-metered as customer-facing monthly usage. Per-record size, vector, evidence,
-relationship, revision-history, curation-frequency, and API bounds remain
-internal service protections.
+### Implemented active-memory limit
+
+`stored_memory` is an account plan/override dimension enforced independently for
+each owner agent. It counts only current heads in the `active` lifecycle state.
+Forgotten, superseded, and deleted heads, immutable prior versions, evidence,
+relations, vectors, and curation history do not consume another active slot. A
+missing key means unlimited and zero is a real cap. Resolution is
+`account override > catalog/plan default > missing/unlimited`; an audited
+explicit-unlimited override omits the key from the resolved cell snapshot
+without changing the account's plan, price, subscription, or invoice history.
+
+The implemented value-free status surfaces are `GET /v1/memories:status`,
+`witself memory status`, the read-only idempotent
+`witself.memory.status` MCP tool, and `self.show.memory_capacity`. They report
+`used`, `max`, `remaining`, `unlimited`, `near_limit`, `at_limit`, and
+`over_limit`. Unlimited capacity uses `null` for `max` and `remaining`. For a finite maximum,
+`near_limit` becomes true at 90 percent, rounded up to the next whole memory,
+and remains true at or beyond the maximum. At `used == max`, `over_limit` is
+false, `at_limit` is true, and a net-growing write is blocked. `over_limit`
+becomes true only when
+an administrator lowers the maximum below current active usage. The
+authenticated curation preflight carries the same `memory_capacity` projection
+so a restricted curator does not need authority for an ordinary memory route.
+
+Capacity is checked against the complete active-memory effect, not the number of
+API calls. Capture adds one active head. Adjust preserves the count. Forgetting
+an active head releases one slot; restore or reactivate consumes one. Direct
+supersession computes replacements minus the one active source. A curation plan
+reports count-only `active_memory_delta` and `projected_active_memories`, then
+recomputes them from locked live heads during atomic apply. At or above the
+maximum, zero- or negative-delta correction and consolidation remain allowed;
+positive-delta plans are refused. This permits a client-authored merge while
+preventing a concurrent pair of writers on different server replicas from
+overshooting one agent's maximum.
+
+A refused net-growing write returns HTTP 403 with
+`code: "stored_memory_limit_reached"`, `retryable: false`, and the current
+value-free `limit` object. It never includes memory content, ids, evidence,
+plan text, or account/agent labels. The same structured refusal covers capture,
+restore, reactivate, direct supersession, and curation apply. Exact idempotent
+replay is resolved before the capacity gate. A client must not loop on the same
+refused intent; it may read, recall, inspect history, export, correct in place,
+or submit a safe non-growing consolidation plan.
+
+Lowering the maximum never deletes, forgets, merges, or disables existing
+memories. Witself preserves reads and provenance while the agent is at or over
+capacity. Semantic consolidation belongs to the active client agent: it reviews
+evidence and authors a reversible plan. The backend only counts, validates,
+versions, fences, and applies that exact plan; it performs no semantic inference
+and does not wake or launch a model. Permanent deletion is never automatic
+capacity management. Account import remains exempt so migration and disaster
+recovery can reproduce an over-limit account exactly; subsequent ordinary
+net-growing writes use the effective maximum.
+
+Catalog activation is intentionally two-phase:
+
+1. Phase A deploys compatible cells, control-plane override handling, and the
+   strict edge dimension allow-list for `stored_memory`, while leaving
+   `web/plans/plans.json` unchanged.
+   The control-plane binary embeds that file, so merely withholding
+   `npm run deploy:plans` is not sufficient: build and deploy Phase A from a
+   commit/tag that still has the old catalog. Put the catalog edit in a later
+   Phase-B commit/tag. During a rolling Phase-A cell deployment, a pre-Phase-A
+   pod can write after migration 74's initial backfill without maintaining the
+   new derived counter. This is harmless only while `stored_memory` remains
+   missing/unlimited; do not set any finite override or publish a finite
+   default in Phase A.
+2. Before catalog promotion, set and verify the Founder account's explicit
+   unlimited override:
+
+   ```sh
+   witself-admin account limit-override set \
+     --account FOUNDER_ACCOUNT_ID \
+     --dimension stored_memory \
+     --unlimited \
+     --reason "Founder active memories are unlimited"
+
+   witself-admin account limit-override get \
+     --account FOUNDER_ACCOUNT_ID \
+     --dimension stored_memory \
+     --json
+   ```
+
+   The read must report `overridden: true`, `effective_max: null`,
+   `apply_pending: false`, and equal desired/applied snapshot revisions.
+3. Phase B first rolls every target cell onto the release containing migration
+   75. That transactional migration recomputes the derived active-memory
+   counters after every remaining writer is Phase-A counter-aware. Wait for
+   all replacement server and worker pods to become ready and all older
+   ReplicaSets to reach zero before activating any finite cap.
+4. From that same Phase-B tag, promote the canonical defaults: Personal
+   `1,000`, Professional `10,000`, Team `50,000`, and Enterprise `250,000`
+   unless its contract supplies another value. Deploy both the public plan
+   Worker and the control-plane container, whose binary embeds the catalog,
+   then reconcile every hosted account.
+5. Re-read the Founder override after reconciliation and run a finite-account
+   canary covering the 90-percent boundary, exact-at-cap refusal, idempotent
+   replay, non-growing consolidation, and lowered-cap over-limit behavior.
+
+Once a `stored_memory` override or resolved snapshot has been written, Phase A
+is the rollback floor. An older control plane rejects the audited dimension and
+an older cell can ignore a stored key and fail open. Roll forward or restore a
+compatible snapshot; do not roll either component back below Phase A.
+
+Memories are durable knowledge and do not expire by age. Memory writes and
+revisions are included rather than metered as customer-facing monthly usage.
+Per-record size, vector, evidence, relationship, revision-history,
+curation-frequency, and API bounds remain internal service protections.
 
 Email records, raw MIME, and extracted attachment payloads use age-based
 retention. Attachments are stored separately from the email record so their

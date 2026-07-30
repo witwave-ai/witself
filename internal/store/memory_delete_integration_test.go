@@ -281,12 +281,44 @@ func TestMemoryPermanentDeletionPostgres(t *testing.T) {
 		ScrubSetRevision: preview.ScrubSetRevision,
 		IdempotencyKey:   "delete-private-memory-9c78d3", Apply: true,
 	}
+	var activeCountBeforeDelete int64
+	if err := st.pool.QueryRow(ctx, `
+		SELECT active_memory_count FROM memory_change_clocks
+		WHERE account_id=$1 AND realm_id=$2 AND owner_kind='agent' AND owner_id=$3`,
+		p.AccountID, p.RealmID, p.ID,
+	).Scan(&activeCountBeforeDelete); err != nil {
+		t.Fatal(err)
+	}
 	receipt, err := st.DeleteMemory(ctx, p, apply)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !receipt.Applied || receipt.Replayed || receipt.ReceiptID == "" || receipt.DeletedAt == nil {
 		t.Fatalf("delete receipt = %#v", receipt)
+	}
+	var activeCountAfterDelete, derivedActiveCountAfterDelete int64
+	if err := st.pool.QueryRow(ctx, `
+		SELECT clock.active_memory_count,
+		       (SELECT count(*)
+		          FROM memories m
+		          JOIN memory_versions v
+		            ON v.memory_id=m.id AND v.version=m.current_version
+		         WHERE m.account_id=clock.account_id
+		           AND m.realm_id=clock.realm_id
+		           AND m.owner_kind=clock.owner_kind
+		           AND m.owner_id=clock.owner_id
+		           AND v.state='active')
+		  FROM memory_change_clocks clock
+		 WHERE clock.account_id=$1 AND clock.realm_id=$2
+		   AND clock.owner_kind='agent' AND clock.owner_id=$3`,
+		p.AccountID, p.RealmID, p.ID,
+	).Scan(&activeCountAfterDelete, &derivedActiveCountAfterDelete); err != nil {
+		t.Fatal(err)
+	}
+	if activeCountAfterDelete != activeCountBeforeDelete-1 ||
+		activeCountAfterDelete != derivedActiveCountAfterDelete {
+		t.Fatalf("active count after delete=%d before=%d derived=%d",
+			activeCountAfterDelete, activeCountBeforeDelete, derivedActiveCountAfterDelete)
 	}
 	rawReceipt, err := json.Marshal(receipt)
 	if err != nil {
@@ -382,6 +414,18 @@ func TestMemoryPermanentDeletionPostgres(t *testing.T) {
 		replayed.ScrubSetRevision != receipt.ScrubSetRevision ||
 		replayed.RetryShieldDigest != receipt.RetryShieldDigest {
 		t.Fatalf("delete replay = %#v; original = %#v", replayed, receipt)
+	}
+	var activeCountAfterReplay int64
+	if err := st.pool.QueryRow(ctx, `
+		SELECT active_memory_count FROM memory_change_clocks
+		WHERE account_id=$1 AND realm_id=$2 AND owner_kind='agent' AND owner_id=$3`,
+		p.AccountID, p.RealmID, p.ID,
+	).Scan(&activeCountAfterReplay); err != nil {
+		t.Fatal(err)
+	}
+	if activeCountAfterReplay != activeCountAfterDelete {
+		t.Fatalf("delete replay changed active count from %d to %d",
+			activeCountAfterDelete, activeCountAfterReplay)
 	}
 	changedReplay := apply
 	changedReplay.ScrubSetRevision = strings.Repeat("e", 64)

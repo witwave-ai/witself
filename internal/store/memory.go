@@ -396,6 +396,9 @@ func (s *Store) CaptureMemory(ctx context.Context, p Principal, in CaptureMemory
 	if replay, ok, err := memoryMutationReplay(ctx, tx, p, in.IdempotencyKey, requestHash, "added"); err != nil || ok {
 		return replay, err
 	}
+	if _, err := requireActiveMemoryCapacityTx(ctx, tx, p, 1); err != nil {
+		return MemoryMutationResult{}, err
+	}
 	memoryID, err := id.New("mem")
 	if err != nil {
 		return MemoryMutationResult{}, err
@@ -436,6 +439,9 @@ func (s *Store) CaptureMemory(ctx context.Context, p Principal, in CaptureMemory
 	}
 	if _, err := tx.Exec(ctx, `UPDATE memories SET updated_at=$2 WHERE id=$1`, memoryID, createdAt); err != nil {
 		return MemoryMutationResult{}, fmt.Errorf("update memory head timestamp: %w", err)
+	}
+	if err := adjustActiveMemoryCountTx(ctx, tx, p, 1); err != nil {
+		return MemoryMutationResult{}, err
 	}
 	out, err := loadMemoryAtVersion(ctx, tx, p, memoryID, 1, true)
 	if err != nil {
@@ -939,6 +945,10 @@ func (s *Store) mutateMemory(
 	default:
 		return MemoryMutationResult{}, ErrMemoryInputInvalid
 	}
+	activeDelta := memoryActiveStateDelta(current.State, next.State)
+	if _, err := requireActiveMemoryCapacityTx(ctx, tx, p, activeDelta); err != nil {
+		return MemoryMutationResult{}, err
+	}
 	if err := validateMemorySnapshot(next); err != nil {
 		return MemoryMutationResult{}, err
 	}
@@ -958,6 +968,9 @@ func (s *Store) mutateMemory(
 		memoryID, next.Version, createdAt); err != nil {
 		return MemoryMutationResult{}, fmt.Errorf("move memory head: %w", err)
 	}
+	if err := adjustActiveMemoryCountTx(ctx, tx, p, activeDelta); err != nil {
+		return MemoryMutationResult{}, err
+	}
 	out, err := loadMemoryAtVersion(ctx, tx, p, memoryID, next.Version, true)
 	if err != nil {
 		return MemoryMutationResult{}, err
@@ -969,6 +982,17 @@ func (s *Store) mutateMemory(
 		return MemoryMutationResult{}, err
 	}
 	return memoryMutationResult(out), nil
+}
+
+func memoryActiveStateDelta(before, after string) int64 {
+	var delta int64
+	if before == MemoryStateActive {
+		delta--
+	}
+	if after == MemoryStateActive {
+		delta++
+	}
+	return delta
 }
 
 // ResolveMemoryEvidence appends one terminal row; the pending row is immutable.

@@ -260,8 +260,8 @@ the same shape as memory edit history (see [memory-model.md](memory-model.md)).
 
 ## Size and Count Limits
 
-V0 defaults, enforced with deterministic `limit_exceeded` (or `usage_error`)
-responses and surfaced through backend capabilities where practical:
+The current service enforces the following per-record and request-shape
+protections:
 
 - Maximum fact `value` size: 64 KiB before storage overhead. (Facts are
   attribute-sized; large free-form content belongs in a
@@ -270,9 +270,13 @@ responses and surfaced through backend capabilities where practical:
 - Maximum namespace depth: 8 path segments.
 - Maximum `source` length: 1 KiB.
 - Maximum `format` length: 64 characters.
-- Maximum facts per owner (agent or group): 1024.
-- Edit-history versions retained per fact: 256 (oldest pruned beyond the cap,
-  pruning is audited).
+
+The intended plan-level inventory dimension is `stored_fact`, with a prior
+working target of 1,024 current facts per owner. That total-count gate is not
+implemented yet, and fact assertion history is currently durable rather than
+pruned to 256 versions. Those two bounds require their own plan matrix,
+counter, admin-override, migration, and rollout slice; clients must not infer
+them from the implemented per-record validation above.
 
 Stored facts are a metered billing dimension; fact reads and writes roll up into
 the memory/fact operation meters. See [billing-and-limits.md](billing-and-limits.md).

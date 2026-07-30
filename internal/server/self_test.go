@@ -58,6 +58,87 @@ func TestSelfDigestUsesAgentTokenIdentity(t *testing.T) {
 	}
 }
 
+func TestSelfDigestIncludesValueFreeMemoryCapacity(t *testing.T) {
+	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
+		return DomainPrincipal{
+			Kind: PrincipalKindAgent, ID: "agent_1", AgentName: "scott",
+			AccountID: "acc_1", RealmID: "realm_1", RealmName: "default",
+			AccountStatus: "active",
+		}, true, nil
+	}
+	maximum, remaining := int64(1000), int64(100)
+	var callbackPrincipal DomainPrincipal
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: auth,
+		GetMemoryLimitStatus: func(_ context.Context, p DomainPrincipal) (MemoryLimitStatus, error) {
+			callbackPrincipal = p
+			return MemoryLimitStatus{
+				Used: 900, Max: &maximum, Remaining: &remaining, NearLimit: true,
+			}, nil
+		},
+	}))
+	defer srv.Close()
+
+	resp := selfRequest(t, srv.URL+"/v1/self?include_counts=false", "agent-token")
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("self status = %d", resp.StatusCode)
+	}
+	var digest SelfDigest
+	if err := json.NewDecoder(resp.Body).Decode(&digest); err != nil {
+		t.Fatal(err)
+	}
+	if digest.MemoryCapacity == nil ||
+		digest.MemoryCapacity.Used != 900 ||
+		digest.MemoryCapacity.Max == nil || *digest.MemoryCapacity.Max != 1000 ||
+		digest.MemoryCapacity.Remaining == nil || *digest.MemoryCapacity.Remaining != 100 ||
+		!digest.MemoryCapacity.NearLimit || digest.MemoryCapacity.AtLimit ||
+		digest.MemoryCapacity.OverLimit || digest.MemoryCapacity.Unlimited ||
+		digest.MemoryCapacity.Unavailable {
+		t.Fatalf("memory capacity = %#v", digest.MemoryCapacity)
+	}
+	if callbackPrincipal.ID != "agent_1" ||
+		callbackPrincipal.AccountID != "acc_1" ||
+		callbackPrincipal.RealmID != "realm_1" {
+		t.Fatalf("callback principal = %#v", callbackPrincipal)
+	}
+}
+
+func TestSelfDigestFailsOpenWhenMemoryCapacityIsUnavailable(t *testing.T) {
+	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
+		return DomainPrincipal{
+			Kind: PrincipalKindAgent, ID: "agent_1", AgentName: "scott",
+			AccountID: "acc_1", RealmID: "realm_1", RealmName: "default",
+			AccountStatus: "active",
+		}, true, nil
+	}
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: auth,
+		GetMemoryLimitStatus: func(context.Context, DomainPrincipal) (MemoryLimitStatus, error) {
+			return MemoryLimitStatus{}, errors.New("capacity projection unavailable")
+		},
+	}))
+	defer srv.Close()
+
+	resp := selfRequest(t, srv.URL+"/v1/self", "agent-token")
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("self status = %d", resp.StatusCode)
+	}
+	var digest SelfDigest
+	if err := json.NewDecoder(resp.Body).Decode(&digest); err != nil {
+		t.Fatal(err)
+	}
+	if digest.Identity.AgentID != "agent_1" ||
+		digest.MemoryCapacity == nil || !digest.MemoryCapacity.Unavailable ||
+		digest.MemoryCapacity.Used != 0 ||
+		digest.MemoryCapacity.Max != nil || digest.MemoryCapacity.Remaining != nil ||
+		digest.MemoryCapacity.Unlimited || digest.MemoryCapacity.NearLimit ||
+		digest.MemoryCapacity.AtLimit || digest.MemoryCapacity.OverLimit {
+		t.Fatalf("fail-open digest = %#v", digest)
+	}
+}
+
 func TestSelfDigestIncludesValueFreeMemoryCheckpoint(t *testing.T) {
 	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
 		return DomainPrincipal{

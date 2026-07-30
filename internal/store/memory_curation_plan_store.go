@@ -235,6 +235,9 @@ func (s *Store) GetCurationPlan(
 	if err := authorizeMemoryCurationPlanProfile(p, stored.Acceptance.Plan); err != nil {
 		return GetMemoryCurationPlanResult{}, err
 	}
+	if err := populateMemoryCurationProjectedActive(ctx, tx, p, &stored.Acceptance.Preview); err != nil {
+		return GetMemoryCurationPlanResult{}, err
+	}
 	var expired bool
 	if err := tx.QueryRow(ctx, `
 		SELECT lease_expires_at IS NULL OR lease_expires_at <= clock_timestamp()
@@ -316,6 +319,9 @@ func (s *Store) PlanCuration(
 		if err := authorizeMemoryCurationPlanProfile(p, stored.Acceptance.Plan); err != nil {
 			return PlanMemoryCurationResult{}, err
 		}
+		if err := populateMemoryCurationProjectedActive(ctx, tx, p, &stored.Acceptance.Preview); err != nil {
+			return PlanMemoryCurationResult{}, err
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return PlanMemoryCurationResult{}, err
 		}
@@ -390,6 +396,9 @@ func (s *Store) PlanCuration(
 	if err := authorizeMemoryCurationPlanProfile(p, acceptance.Plan); err != nil {
 		return PlanMemoryCurationResult{}, err
 	}
+	if err := populateMemoryCurationProjectedActive(ctx, tx, p, &acceptance.Preview); err != nil {
+		return PlanMemoryCurationResult{}, err
+	}
 	authorization, err := loadMemoryCurationPlanAuthorization(ctx, tx, p, run.ID, request.Scope, acceptance)
 	if err != nil {
 		return PlanMemoryCurationResult{}, err
@@ -450,6 +459,27 @@ func planMemoryCurationResult(
 		PreallocatedMemoryIDs: append([]MemoryCurationPreallocatedMemoryID(nil), acceptance.PreallocatedMemoryIDs...),
 		Preview:               acceptance.Preview, Receipt: receipt,
 	}
+}
+
+func populateMemoryCurationProjectedActive(
+	ctx context.Context,
+	tx pgx.Tx,
+	p Principal,
+	preview *MemoryCurationImpactPreview,
+) error {
+	if preview == nil {
+		return ErrMemoryCurationConflict
+	}
+	used, err := memoryActiveCountTx(ctx, tx, p)
+	if err != nil {
+		return err
+	}
+	projected := used + preview.ActiveMemoryDelta
+	if projected < 0 {
+		return ErrMemoryCurationConflict
+	}
+	preview.ProjectedActiveMemories = projected
+	return nil
 }
 
 func loadMemoryCurationPlanMutation(
@@ -1361,6 +1391,7 @@ func memoryCurationStoredPlanPreview(actions []MemoryCurationPlanAction) MemoryC
 			preview.CreateActions++
 			preview.NewMemories++
 			preview.MemoryVersionWrites++
+			preview.ActiveMemoryDelta++
 			preview.EvidenceRows += len(action.Create.Snapshot.Evidence)
 			preview.RelationRows += len(action.Create.Relations)
 		case MemoryCurationOperationReplace:
@@ -1372,6 +1403,7 @@ func memoryCurationStoredPlanPreview(actions []MemoryCurationPlanAction) MemoryC
 			preview.SupersedeActions++
 			preview.MemoryVersionWrites++
 			preview.ExpectedVersionChecks++
+			preview.ActiveMemoryDelta--
 			preview.RelationRows += len(action.Supersede.Replacements)
 		case MemoryCurationOperationRelate:
 			preview.RelateActions++

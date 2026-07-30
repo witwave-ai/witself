@@ -129,6 +129,12 @@ with a top-level `schema_version` and no `ok`/`data`/`warnings` wrapper. The
 domain/data endpoints (memories, facts, policies, groups, messaging, secrets,
 totp, and the rest) keep the standard envelope above.
 
+The implemented value-free inventory-status routes are a narrow additional
+exception: `GET /v1/memories:status` returns
+`{schema_version,memory_capacity}` and `GET /v1/secrets:status` returns
+`{schema_version,limit}` without an `ok`/`data` wrapper. Their refusal shapes
+below are likewise flat so HTTP, CLI, and MCP clients share one typed status.
+
 HTTP status codes should align with the structured error:
 
 | HTTP | Error code | Meaning |
@@ -136,6 +142,7 @@ HTTP status codes should align with the structured error:
 | `400` | `usage_error` | Invalid request shape, flags, or query parameters. |
 | `401` | `auth_failed` | Missing, invalid, expired, or revoked token. |
 | `403` | `access_denied` | Authenticated principal lacks permission, or no policy allows the cross-agent access. |
+| `403` | `stored_memory_limit_reached` | Implemented non-retryable refusal when a write would exceed the authenticated owner agent's active-memory cap. |
 | `403` | `stored_secret_limit_reached` | Implemented non-retryable refusal when a new top-level secret would exceed the authenticated owner agent's retained cap. |
 | `404` | `not_found` | Resource not found or not visible to the caller. |
 | `409` | `conflict` | Already exists, stale version, or state conflict. |
@@ -155,6 +162,36 @@ alone:
   `details.retry_after` (seconds) and the `Retry-After` header when present.
 - `limit_exceeded` is a plan/quota hard cap. It is `retryable: false`; retrying
   will not succeed until an operator raises the plan or the usage window resets.
+- `stored_memory_limit_reached` is the implemented active-inventory
+  specialization. It is HTTP 403 with `retryable: false` and a value-free
+  top-level `limit` object containing `used`, `max`, `remaining`, `unlimited`,
+  `near_limit`, `at_limit`, and `over_limit`. Retrying the same net-growing
+  intent cannot
+  succeed until active usage falls or the effective maximum changes. Reads and
+  zero- or negative-delta correction/consolidation remain available; exact
+  replay of an already-complete idempotent write is resolved before the gate.
+
+  Memory handlers return this flat, machine-stable exception to the generic
+  error wrapper:
+
+  ```json
+  {
+    "schema_version": "witself.v0",
+    "code": "stored_memory_limit_reached",
+    "error": "Active memory capacity has been reached; existing memories remain available and safe replacement or consolidation is still allowed.",
+    "retryable": false,
+    "limit": {
+      "used": 1000,
+      "max": 1000,
+      "remaining": 0,
+      "unlimited": false,
+      "near_limit": true,
+      "at_limit": true,
+      "over_limit": false
+    }
+  }
+  ```
+
 - `stored_secret_limit_reached` is the implemented inventory-cap specialization.
   It is HTTP 403 with `retryable: false` and a value-free top-level `limit`
   object containing `used`, `max`, `remaining`, `unlimited`, and `over_limit`.
@@ -562,7 +599,7 @@ Initial route groups:
 | `/healthz` | Alias probe. No auth, no sensitive config. |
 | `/v1/whoami` | Current authenticated principal, realm, and identity-anchor summary. |
 | `/v1/capabilities` | Backend feature discovery and limits, including independent direct-memory, lexical-recall, atomic-supersede, permanent-delete, and curation-automation states. |
-| `/v1/self` | Implemented JSON self-digest: primary facts, salient memories, value-free memory and message checkpoints, and a kinds/tags/counts index. `include_facts`, `include_salient`, `include_counts`, `include_checkpoint`, `include_message_checkpoint`, and `include_sensitive` select bounded sections; sensitive open-plane values remain redacted unless the authenticated caller explicitly opts in. Checkpoint projection failure is additive and fails open without hiding identity or recall. The target `?format=` emit renderer is not implemented. |
+| `/v1/self` | Implemented JSON self-digest: primary facts, salient memories, value-free active-memory capacity plus memory/message/email/avatar checkpoints, and a kinds/tags/counts index. `include_facts`, `include_salient`, `include_counts`, `include_checkpoint`, `include_message_checkpoint`, and `include_sensitive` select bounded sections; sensitive open-plane values remain redacted unless the authenticated caller explicitly opts in. Capacity/checkpoint projection failure is additive and fails open without hiding identity or recall. The target `?format=` emit renderer is not implemented. |
 | `/v1/self/peers` | Agent-token-scoped list of every other live agent in the same realm with optional last-observed activity; no caller-controlled realm or agent selector and no availability inference. |
 | `/v1/self/activity` | Agent-token-scoped runtime-hook ingestion for the latest-only activity projection; identity and public observation time are server-derived. |
 | `/v1/self/dashboard-preferences` | Agent-token-only, own-row-only read (`GET`) and last-write-wins upsert (`PUT`) of the local dashboard's UI preferences row: a strictly validated 4 KiB `{"schema":"witself.dashboard-prefs.v1","theme":...}` document with unknown keys refused. Reads record no usage; writes emit no audit event. |
@@ -574,11 +611,11 @@ Initial route groups:
 | `/v1/realms` | Realm lifecycle and membership. |
 | `/v1/agents` | Named agent lifecycle and policy summary. |
 | `/v1/tokens` | Token create, list, revoke, and rotate. |
-| `/v1/memories` | Implemented agent-owned capture, read, list, history, lexical recall, adjust, atomic supersede, forget, restore, reactivate, evidence resolution, and permanent delete. |
+| `/v1/memories` | Implemented agent-owned active-capacity status, capture, read, list, history, lexical recall, adjust, atomic supersede, forget, restore, reactivate, evidence resolution, and permanent delete. |
 | `/v1/memory-curation-requests` | Implemented agent-self curation work queue: create/coalesce, list, inspect, and claim due work. List accepts `exclude_sensitive=true`: full tokens omit explicitly sensitive scopes but retain separately authorized transcript scopes; restricted profiles always omit both. |
 | `/v1/memory-curation-runs` | Implemented fenced runs: inspect frozen inputs, renew, plan, apply, cancel, abandon, and guarded rollback. |
 | `/v1/memory-curation-status` | Implemented value-free owner-lane/request/run status, optionally for one run. |
-| `/v1/memory-curation-preflight` | Authenticated effective credential/profile permissions, protocol schema, inference boundary, and limits for a curator. |
+| `/v1/memory-curation-preflight` | Authenticated effective credential/profile permissions, protocol schema, inference boundary, server limits, and value-free active-memory capacity for a curator. |
 | `/v1/facts` | Fact set, get, list, scan, primary promotion, and delete. |
 | `/v1/policies` | Cross-agent policy create, list, show, delete, and test. |
 | `/v1/groups` | Security group lifecycle and membership. |
@@ -704,6 +741,7 @@ Initial action and curation-workflow routes (curation uses durable slash
 subresources rather than colon verbs):
 
 ```http
+GET  /v1/memories:status
 POST /v1/remember
 POST /v1/memories:recall
 POST /v1/memories/{memory_id}/supersede
@@ -763,6 +801,12 @@ POST /v1/password:generate
 
 Notes on specific actions and workflows:
 
+- `GET /v1/memories:status` returns
+  `{schema_version,memory_capacity:{...}}` for the token-bound owner agent.
+  Capacity contains only `used`, nullable `max` and `remaining`, `unlimited`,
+  `near_limit`, `at_limit`, and `over_limit`. The 90-percent warning threshold is
+  server-derived; this route exposes no memory content or ids and performs no
+  inference.
 - `POST /v1/remember` is deferred. If implemented, calling it explicitly selects
   Witself, so it may route a clear name-to-value assertion to a fact and other
   text to Witself memory with dedup/supersede. It is a `POST` because captured
@@ -786,6 +830,12 @@ Notes on specific actions and workflows:
   exact references plus replacement count and membership digest. The backend
   validates the proposed set but makes no semantic choice. The current HTTP/
   client/CLI/MCP surface is agent-self.
+- Direct memory mutations evaluate the complete active-memory effect under the
+  owner-agent fence. Capture, restore, and reactivate grow by one; adjust does
+  not grow inventory; supersede evaluates replacements against its active
+  source. A write whose positive delta would exceed `stored_memory` fails
+  atomically with `stored_memory_limit_reached`. The idempotency receipt is
+  checked first, so an exact replay can still return its prior success.
 - `:consolidate` is superseded and not implemented. Semantic merge/split
   decisions require an exact caller-authored curation plan; direct one-to-many
   supersede uses the caller-authored route above. The backend may not choose any
@@ -814,9 +864,13 @@ Notes on specific actions and workflows:
   only strict `witself.memory-plan.v1` JSON with the five reversible primitives
   `create`, `replace`, `supersede`, `relate`, and `propose_fact`; the last creates
   a review candidate and never sets a canonical fact. The server normalizes and
-  hashes the plan but performs no synthesis. `apply` binds the fence, accepted
-  revision, and SHA-256 plan hash and either commits the complete plan plus
-  contiguous cursors or makes no semantic change. A zero-action plan is valid:
+  hashes the plan but performs no synthesis. The count-only impact preview
+  reports `active_memory_delta` and `projected_active_memories`. `apply` binds the
+  fence, accepted revision, and SHA-256 plan hash, recomputes that projection
+  from locked live heads, and either commits the complete plan plus contiguous
+  cursors or makes no semantic change. At or above the cap, a zero- or
+  negative-delta plan is allowed and a positive-delta plan receives the same
+  structured HTTP 403 refusal. A zero-action plan is valid:
   applying it advances the exact reviewed cursor intervals without creating a
   memory or fact. `cancel` terminates work;
   `abandon` requeues retryable work. `rollback` requires the original apply

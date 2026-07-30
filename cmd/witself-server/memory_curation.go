@@ -182,6 +182,10 @@ func mapMemoryCurationError(err error) error {
 	if err == nil {
 		return nil
 	}
+	var limitErr *store.MemoryLimitError
+	if errors.As(err, &limitErr) {
+		return &server.MemoryLimitError{Status: toServerMemoryLimitStatus(limitErr.Status)}
+	}
 	var featureErr *store.FeatureNotEnabledError
 	if errors.As(err, &featureErr) {
 		return &server.FeatureNotEnabledError{Feature: featureErr.Feature}

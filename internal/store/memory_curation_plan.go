@@ -240,18 +240,20 @@ type MemoryCurationPreallocatedMemoryID struct {
 // MemoryCurationImpactPreview intentionally contains counts only. It can be
 // logged and returned without leaking content, fact values, locators, or ids.
 type MemoryCurationImpactPreview struct {
-	ActionCount           int `json:"action_count"`
-	CreateActions         int `json:"create_actions"`
-	ReplaceActions        int `json:"replace_actions"`
-	SupersedeActions      int `json:"supersede_actions"`
-	RelateActions         int `json:"relate_actions"`
-	ProposeFactActions    int `json:"propose_fact_actions"`
-	NewMemories           int `json:"new_memories"`
-	MemoryVersionWrites   int `json:"memory_version_writes"`
-	EvidenceRows          int `json:"evidence_rows"`
-	RelationRows          int `json:"relation_rows"`
-	ExpectedVersionChecks int `json:"expected_version_checks"`
-	FactCandidates        int `json:"fact_candidates"`
+	ActionCount             int   `json:"action_count"`
+	CreateActions           int   `json:"create_actions"`
+	ReplaceActions          int   `json:"replace_actions"`
+	SupersedeActions        int   `json:"supersede_actions"`
+	RelateActions           int   `json:"relate_actions"`
+	ProposeFactActions      int   `json:"propose_fact_actions"`
+	NewMemories             int   `json:"new_memories"`
+	MemoryVersionWrites     int   `json:"memory_version_writes"`
+	EvidenceRows            int   `json:"evidence_rows"`
+	RelationRows            int   `json:"relation_rows"`
+	ExpectedVersionChecks   int   `json:"expected_version_checks"`
+	FactCandidates          int   `json:"fact_candidates"`
+	ActiveMemoryDelta       int64 `json:"active_memory_delta"`
+	ProjectedActiveMemories int64 `json:"projected_active_memories"`
 }
 
 // MemoryCurationPlanAcceptance is the pure result consumed by the later plan
@@ -557,6 +559,7 @@ func normalizeMemoryCurationAction(
 		preview.CreateActions++
 		preview.NewMemories++
 		preview.MemoryVersionWrites++
+		preview.ActiveMemoryDelta++
 		return normalizeMemoryCurationNewMemory(action.Create, assigned, budget, preview, seenRelations)
 	case MemoryCurationOperationReplace:
 		preview.ReplaceActions++
@@ -574,6 +577,7 @@ func normalizeMemoryCurationAction(
 		preview.SupersedeActions++
 		preview.ExpectedVersionChecks++
 		preview.MemoryVersionWrites++ // source's superseded version
+		preview.ActiveMemoryDelta--
 		if err := normalizeMemoryCurationTarget(&action.Supersede.Target, assigned); err != nil {
 			return err
 		}

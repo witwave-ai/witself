@@ -53,7 +53,7 @@ func TestR2StoreContract(t *testing.T) {
 			ActorHandle: "scott", Reason: "founder account", SetAt: time.Now(),
 		},
 		LimitOverrides: map[string]AccountLimitOverride{
-			plans.StoredSecretLimit: {
+			plans.StoredMemoryLimit: {
 				Max: nil, ActorID: "adm_abcdefghijklmnopqrst",
 				ActorHandle: "scott", Reason: "founder unlimited", SetAt: time.Now(),
 			},
@@ -71,7 +71,7 @@ func TestR2StoreContract(t *testing.T) {
 			{
 				Kind: "limit_override_set", ActorID: "adm_abcdefghijklmnopqrst",
 				ActorHandle: "scott", Reason: "founder unlimited", At: time.Now(),
-				LimitDimension:  plans.StoredSecretLimit,
+				LimitDimension:  plans.StoredMemoryLimit,
 				LimitFrom:       &AccountLimitValue{Max: nil},
 				LimitTo:         &AccountLimitValue{Max: nil},
 				LimitFromSource: "inherited", LimitToSource: "override",
@@ -96,7 +96,7 @@ func TestR2StoreContract(t *testing.T) {
 		len(got.AdminHistory) != 2 ||
 		got.AdminHistory[0].ActorID != "adm_abcdefghijklmnopqrst" ||
 		got.AdminHistory[0].ActorHandle != "scott" ||
-		got.LimitOverrides[plans.StoredSecretLimit].Max != nil ||
+		got.LimitOverrides[plans.StoredMemoryLimit].Max != nil ||
 		got.LimitOverrides[plans.AgentLimit].Max == nil ||
 		*got.LimitOverrides[plans.AgentLimit].Max != 0 ||
 		got.AdminHistory[1].LimitTo == nil ||

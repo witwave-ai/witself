@@ -589,12 +589,62 @@ func TestAdminAgentPerRealmUnlimitedOverrideLifecycle(t *testing.T) {
 	}
 }
 
+func TestAdminStoredMemoryUnlimitedOverrideLifecycle(t *testing.T) {
+	h := newHarness(t)
+	path := "/v1/admin/accounts/acct_1/limit-overrides/stored_memory"
+
+	status, doc := h.call(t, "GET", path, "admin-good", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET inherited = %d %v", status, doc)
+	}
+	view := doc["limit"].(map[string]any)
+	if view["dimension"] != plans.StoredMemoryLimit ||
+		view["default_max"] != nil ||
+		view["effective_max"] != nil ||
+		view["overridden"] != false {
+		t.Fatalf("inherited view = %v", view)
+	}
+
+	status, doc = h.call(t, "PUT", path, "admin-good",
+		`{"unlimited":true,"reason":"founder active memories are unlimited"}`)
+	if status != http.StatusOK {
+		t.Fatalf("PUT unlimited = %d %v", status, doc)
+	}
+	if doc["billing_plan"] != plans.Free || doc["plan"] != plans.Free {
+		t.Fatalf("override mutated billing classification: %v", doc)
+	}
+	view = doc["limit"].(map[string]any)
+	override := view["override"].(map[string]any)
+	if view["default_max"] != nil ||
+		view["effective_max"] != nil ||
+		view["overridden"] != true ||
+		override["max"] != nil ||
+		override["actor_id"] != testAdminID ||
+		override["actor_handle"] != "scott" ||
+		override["reason"] != "founder active memories are unlimited" {
+		t.Fatalf("unlimited view = %v", view)
+	}
+
+	status, doc = h.call(t, "DELETE", path, "admin-good",
+		`{"reason":"resume plan inheritance"}`)
+	if status != http.StatusOK {
+		t.Fatalf("DELETE override = %d %v", status, doc)
+	}
+	view = doc["limit"].(map[string]any)
+	if view["overridden"] != false ||
+		view["default_max"] != nil ||
+		view["effective_max"] != nil {
+		t.Fatalf("cleared view = %v", view)
+	}
+}
+
 func TestAdminLimitOverrideValidation(t *testing.T) {
 	h := newHarness(t)
 	for _, dimension := range []string{
 		plans.RealmLimit,
 		plans.AgentLimit,
 		plans.AgentPerRealmLimit,
+		plans.StoredMemoryLimit,
 		plans.StoredSecretLimit,
 	} {
 		path := "/v1/admin/accounts/acct_1/limit-overrides/" + dimension

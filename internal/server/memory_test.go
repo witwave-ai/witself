@@ -136,6 +136,93 @@ func TestMemoryRequestBodyCeilingReturnsRequestEntityTooLarge(t *testing.T) {
 	}
 }
 
+func TestMemoryLimitStatusRouteReturnsValueFreeCapacity(t *testing.T) {
+	maximum, remaining := int64(1000), int64(100)
+	var callbackPrincipal DomainPrincipal
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: memoryTestAuth(),
+		GetMemoryLimitStatus: func(_ context.Context, p DomainPrincipal) (MemoryLimitStatus, error) {
+			callbackPrincipal = p
+			return MemoryLimitStatus{
+				Used: 900, Max: &maximum, Remaining: &remaining, NearLimit: true,
+			}, nil
+		},
+	}))
+	defer srv.Close()
+
+	resp := memoryTestRequest(t, srv.URL, http.MethodGet, "/v1/memories:status", "agent-token", "", "")
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Cache-Control"); got != "private, no-store" {
+		t.Fatalf("Cache-Control = %q", got)
+	}
+	var body struct {
+		SchemaVersion  string            `json:"schema_version"`
+		MemoryCapacity MemoryLimitStatus `json:"memory_capacity"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.SchemaVersion != "witself.v0" ||
+		body.MemoryCapacity.Used != 900 ||
+		body.MemoryCapacity.Max == nil || *body.MemoryCapacity.Max != 1000 ||
+		body.MemoryCapacity.Remaining == nil || *body.MemoryCapacity.Remaining != 100 ||
+		!body.MemoryCapacity.NearLimit || body.MemoryCapacity.AtLimit ||
+		body.MemoryCapacity.OverLimit || body.MemoryCapacity.Unlimited {
+		t.Fatalf("status body = %#v", body)
+	}
+	if callbackPrincipal.Kind != PrincipalKindAgent ||
+		callbackPrincipal.ID != "agent_1" ||
+		callbackPrincipal.AccountID != "acc_1" ||
+		callbackPrincipal.RealmID != "realm_1" {
+		t.Fatalf("callback principal = %#v", callbackPrincipal)
+	}
+}
+
+func TestMemoryLimitRefusalHasStableMachineCodeAndCapacity(t *testing.T) {
+	maximum, remaining := int64(1000), int64(0)
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: memoryTestAuth(),
+		CaptureMemory: func(context.Context, DomainPrincipal, CaptureMemoryRequest) (MemoryMutationResult, error) {
+			return MemoryMutationResult{}, &MemoryLimitError{Status: MemoryLimitStatus{
+				Used: 1000, Max: &maximum, Remaining: &remaining,
+				NearLimit: true, AtLimit: true,
+			}}
+		},
+	}))
+	defer srv.Close()
+
+	resp := memoryTestRequest(
+		t, srv.URL, http.MethodPost, "/v1/memories", "agent-token", "capture-limit",
+		`{"content":"one more","kind":"note","capture_reason":"explicit","evidence":[{"state":"unavailable","unavailable_reason":"not_recorded"}]}`,
+	)
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+	var body struct {
+		SchemaVersion string            `json:"schema_version"`
+		Error         string            `json:"error"`
+		Code          string            `json:"code"`
+		Retryable     bool              `json:"retryable"`
+		Limit         MemoryLimitStatus `json:"limit"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.SchemaVersion != "witself.v0" ||
+		body.Code != "stored_memory_limit_reached" || body.Retryable ||
+		!strings.Contains(body.Error, "safe replacement or consolidation") ||
+		body.Limit.Used != 1000 ||
+		body.Limit.Max == nil || *body.Limit.Max != 1000 ||
+		body.Limit.Remaining == nil || *body.Limit.Remaining != 0 ||
+		!body.Limit.NearLimit || !body.Limit.AtLimit || body.Limit.OverLimit {
+		t.Fatalf("error body = %#v", body)
+	}
+}
+
 func TestMemoryCaptureContractAndAgentAuthority(t *testing.T) {
 	auth := memoryTestAuth()
 	now := time.Date(2026, 7, 14, 8, 0, 0, 0, time.UTC)

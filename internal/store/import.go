@@ -5373,6 +5373,17 @@ func (s *Store) importAccount(
 	if err := validateImportedMemoryCurationGraph(ic); err != nil {
 		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("%w: memory curation graph: %v", ErrArchiveContent, err)
 	}
+	// active_memory_count is a local derived projection, not portable account
+	// history. Both legacy and current archives omit it, so rebuild the exact
+	// owner counters only after the complete canonical memory graph validates.
+	// An already-imported evacuation retry has no rows to replay and must leave
+	// the destination's live counters untouched.
+	if !disposition.AlreadyImported {
+		if err := recomputeActiveMemoryCountsTx(ctx, tx, m.AccountID); err != nil {
+			return export.Manifest{}, AccountImportDisposition{},
+				fmt.Errorf("recompute imported active memory count: %w", err)
+		}
+	}
 	for factID, scope := range ic.facts {
 		if scope.deleted {
 			if scope.resolvedAssertionID != "" {
