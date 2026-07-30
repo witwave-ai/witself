@@ -499,6 +499,28 @@
       '<div class="dim">' + esc(remaining) + " remaining · safe consolidation and replacement stay available at the limit</div></div>";
   }
 
+  function factCapacityHTML(capacity) {
+    if (!capacity) { return ""; }
+    if (capacity.unavailable) {
+      return '<div class="panel"><h2>current fact capacity</h2><div class="dim">capacity status temporarily unavailable · fact reads and existing-fact updates remain available</div></div>';
+    }
+    var used = Math.max(0, Number(capacity.used) || 0);
+    var level = capacity.over_limit || capacity.at_limit ? "danger" : (capacity.near_limit ? "warning" : "");
+    var stateLabel = capacity.over_limit ? "over limit" : (capacity.at_limit ? "at limit" : (capacity.near_limit ? "near limit" : "available"));
+    if (capacity.unlimited) {
+      return '<div class="panel"><h2>current fact capacity</h2><div class="capacity-line"><a href="#/facts">' +
+        esc(used) + ' current</a><span class="badge">unlimited</span></div></div>';
+    }
+    var maximum = Math.max(0, Number(capacity.max) || 0);
+    var remaining = Math.max(0, Number(capacity.remaining) || 0);
+    return '<div class="panel capacity ' + level + '"><h2>current fact capacity</h2>' +
+      '<div class="capacity-line"><a href="#/facts">' + esc(used) + " of " + esc(maximum) +
+      ' current</a><span class="badge">' + esc(stateLabel) + "</span></div>" +
+      '<progress class="capacity-track" aria-label="current fact capacity" max="' +
+      esc(maximum || 1) + '" value="' + esc(Math.min(used, maximum || 1)) + '"></progress>' +
+      '<div class="dim">' + esc(remaining) + " remaining · existing-fact updates and separately authorized deletion remain available at the limit</div></div>";
+  }
+
   function renderOverview(self) {
     var counts = (self.index && self.index.counts) || {};
     var cards = Object.keys(counts).sort().map(function (key) {
@@ -519,6 +541,7 @@
     if (self.avatar_checkpoint && self.avatar_checkpoint.pending) { checkpoints.push({ label: "avatar lifecycle pending" }); }
     $("view").innerHTML =
       '<div class="panel"><h2>inventory</h2><div class="cards">' + (cards || '<span class="empty">no counts</span>') + "</div></div>" +
+      factCapacityHTML(self.fact_capacity) +
       memoryCapacityHTML(self.memory_capacity) +
       '<div class="panel"><h2>salient memories</h2><div class="list">' + (salient || '<div class="empty">none</div>') + "</div></div>" +
       '<div class="panel"><h2>checkpoints</h2><div class="list">' +
@@ -1272,6 +1295,7 @@
     module.exports = {
       state: state,
       probeEmailMailbox: probeEmailMailbox,
+      factCapacityHTML: factCapacityHTML,
       memoryCapacityHTML: memoryCapacityHTML,
       applyEmailCheckpoint: function (checkpoint) {
         var change = updateEmailAddressFromCheckpoint(checkpoint);

@@ -182,6 +182,17 @@ there is no requirement to keep them out of the database (unlike Witpass secrets
 Large exports, diagnostic bundles, support attachments, and backup artifacts may
 use an object/blob adapter when needed.
 
+Current-fact capacity is a derived, per-owner-agent storage invariant. Phase A
+stores `agents.active_fact_count`, updates it in the same transaction as
+current-fact creation/recreation, confirmation, and permanent deletion, and
+locks that agent row before admitting a count-growing write. The public status,
+hydration, and dashboard projections are value-free; the finite gate refuses
+only creation/recreation or confirmation into a new current address. Existing
+fact reads, history, export, in-place updates, and separately authorized
+deletion remain available. The canonical plan catalog remains unlimited until
+Phase B's migration-0078 reconciliation has run on every cell and all old
+writers are gone; see [billing-and-limits.md](billing-and-limits.md).
+
 Local development should use a local PostgreSQL instance and the same
 migrations. A local transcript outbox may buffer delivery, but it is not a
 second live memory source. The storage and migration model is tracked in

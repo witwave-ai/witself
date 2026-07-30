@@ -423,7 +423,7 @@ func (s *Store) ConfirmFactCandidateIdempotent(ctx context.Context, p Principal,
 	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
 		return Fact{}, err
 	}
-	if err := lockFactSubjectNamespace(ctx, tx, p, false); err != nil {
+	if err := lockFactSubjectNamespace(ctx, tx, p, true); err != nil {
 		return Fact{}, err
 	}
 	if err := lockFactIdempotencyKey(ctx, tx, p, "decision", idempotencyKey); err != nil {
@@ -520,6 +520,13 @@ func (s *Store) ConfirmFactCandidateIdempotent(ctx context.Context, p Principal,
 	if prior != c.ObservedAssertionID {
 		return Fact{}, ErrFactConflict
 	}
+	activeDelta := int64(0)
+	if prior == "" {
+		activeDelta = 1
+	}
+	if _, err := requireActiveFactCapacityTx(ctx, tx, p, activeDelta); err != nil {
+		return Fact{}, err
+	}
 	assertionID, err := id.New("fas")
 	if err != nil {
 		return Fact{}, err
@@ -536,6 +543,9 @@ func (s *Store) ConfirmFactCandidateIdempotent(ctx context.Context, p Principal,
 		return Fact{}, err
 	}
 	if _, err = tx.Exec(ctx, `UPDATE facts SET resolved_assertion_id=$1,updated_at=clock_timestamp() WHERE id=$2`, assertionID, factID); err != nil {
+		return Fact{}, err
+	}
+	if err := adjustActiveFactCountTx(ctx, tx, p, activeDelta); err != nil {
 		return Fact{}, err
 	}
 	if _, err = tx.Exec(ctx, `UPDATE fact_candidates

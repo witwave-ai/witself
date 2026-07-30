@@ -164,7 +164,10 @@ func (s *Store) SetFact(ctx context.Context, p Principal, in SetFactInput) (Fact
 	if err := lockAccountForMint(ctx, tx, p.AccountID, false); err != nil {
 		return Fact{}, err
 	}
-	if err := lockFactSubjectNamespace(ctx, tx, p, in.RecreateDeleted); err != nil {
+	// Canonical fact writes take exclusive ownership of this agent's fact
+	// namespace. This serializes address classification and capacity across
+	// server replicas without blocking unrelated agents.
+	if err := lockFactSubjectNamespace(ctx, tx, p, true); err != nil {
 		return Fact{}, err
 	}
 	in.IdempotencyKey, err = normalizeFactIdempotencyKey(in.IdempotencyKey)
@@ -211,6 +214,13 @@ func (s *Store) SetFact(ctx context.Context, p Principal, in SetFactInput) (Fact
 	if err != nil {
 		return Fact{}, err
 	}
+	activeDelta := int64(0)
+	if resolvedID == "" {
+		activeDelta = 1
+	}
+	if _, err := requireActiveFactCapacityTx(ctx, tx, p, activeDelta); err != nil {
+		return Fact{}, err
+	}
 
 	assertionID, err := id.New("fas")
 	if err != nil {
@@ -237,6 +247,9 @@ func (s *Store) SetFact(ctx context.Context, p Principal, in SetFactInput) (Fact
 		UPDATE facts SET resolved_assertion_id = $1, updated_at = clock_timestamp()
 		WHERE id = $2`, assertionID, factID); err != nil {
 		return Fact{}, fmt.Errorf("resolve fact assertion: %w", err)
+	}
+	if err := adjustActiveFactCountTx(ctx, tx, p, activeDelta); err != nil {
+		return Fact{}, err
 	}
 
 	out, err := getFactTx(ctx, tx, p, factID, "", "", true)

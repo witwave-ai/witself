@@ -35,6 +35,10 @@ var ErrSecretLimitReached = errors.New("stored secret limit reached")
 // active-memory mutation caused by the authenticated owner's plan cap.
 var ErrMemoryLimitReached = errors.New("active memory limit reached")
 
+// ErrFactLimitReached identifies a non-retryable refusal of a net-positive
+// current-fact mutation caused by the authenticated owner's plan cap.
+var ErrFactLimitReached = errors.New("current fact limit reached")
+
 // ErrFeatureNotEnabled identifies a non-retryable account-plan feature
 // refusal. Installed clients keep their complete tool surface and use this
 // typed error to stop retrying until the account policy changes.
@@ -86,6 +90,22 @@ func (e *MemoryLimitError) Error() string {
 }
 
 func (e *MemoryLimitError) Unwrap() error { return ErrMemoryLimitReached }
+
+// FactLimitError preserves the server's value-free current-fact capacity
+// snapshot so clients can distinguish a blocked create from an allowed update.
+type FactLimitError struct {
+	Status FactLimitStatus
+}
+
+func (e *FactLimitError) Error() string {
+	if e == nil || e.Status.Max == nil {
+		return ErrFactLimitReached.Error()
+	}
+	return fmt.Sprintf("%s: %d/%d current", ErrFactLimitReached,
+		e.Status.Used, *e.Status.Max)
+}
+
+func (e *FactLimitError) Unwrap() error { return ErrFactLimitReached }
 
 // ErrNotFound wraps 404 responses while preserving the server's existing
 // human-readable error text. Callers use it for capability-compatible
@@ -297,6 +317,9 @@ func responseError(resp *http.Response, fallback string) error {
 		}
 		if resp.StatusCode == http.StatusForbidden && out.Code == "stored_memory_limit_reached" {
 			return &MemoryLimitError{Status: out.Limit}
+		}
+		if resp.StatusCode == http.StatusForbidden && out.Code == "stored_fact_limit_reached" {
+			return &FactLimitError{Status: out.Limit}
 		}
 		if resp.StatusCode == http.StatusForbidden && out.Code == "feature_not_enabled" {
 			return &FeatureNotEnabledError{

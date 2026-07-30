@@ -262,7 +262,7 @@ witself
   digest emit                             # target; not implemented
   ingest
   bootstrap-instructions
-  fact set|get|list|delete
+  fact status|set|get|list|delete
   password generate
   secret create|status|show|list|scan|reveal|update|rename|copy|archive|restore|delete|grant|revoke
   run
@@ -2137,6 +2137,29 @@ Fact targeting rules:
   that permits the verb, targets a specific owning agent.
 - `--owner-group NAME_OR_ID`: targets a group-owned fact.
 - `--owner-agent` and `--owner-group` are mutually exclusive.
+
+### `witself fact status`
+
+Show the current token-bound agent's authenticated, value-free current-fact
+capacity.
+
+```sh
+witself fact status
+witself fact status --json
+```
+
+`used` counts resolved, non-deleted facts across all of the agent's subjects;
+assertions, candidates, aliases, history, evidence, and tombstones do not
+consume another slot. The `--json` result is the capacity object itself, with
+`used`, nullable `max` and `remaining`, `unlimited`, `near_limit`, `at_limit`,
+and `over_limit`. For a finite maximum, `near_limit` begins at 90 percent.
+
+At or above the cap, reads, history, export, deletion, and updates to an
+already-current fact remain available. A create, explicit recreation, or
+candidate confirmation into a new subject/predicate address is refused with
+`stored_fact_limit_reached`; do not retry the same count-growing intent in a
+loop. Phase A ships this status/gate contract, while plan-catalog defaults for
+`stored_fact` remain a Phase B activation.
 
 ### `witself fact set NAME VALUE`
 

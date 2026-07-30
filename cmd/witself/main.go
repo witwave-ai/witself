@@ -2942,10 +2942,12 @@ func parseUsageStart(raw string, now time.Time) (time.Time, error) {
 
 func factCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself fact set|get|list|history|delete|propose|review|candidate|confirm|reject|upcoming|subject ...")
+		fmt.Fprintln(os.Stderr, "usage: witself fact status|set|get|list|history|delete|propose|review|candidate|confirm|reject|upcoming|subject ...")
 		return 2
 	}
 	switch args[0] {
+	case "status":
+		return factStatus(args[1:])
 	case "set":
 		return factSet(args[1:])
 	case "get":
@@ -4085,7 +4087,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself token create|revoke  Mint or revoke agent/operator tokens")
 	usageLine(w, "  witself self show|card       Show the self digest or bounded visual identity card")
 	usageLine(w, "  witself usage                Show token-bound agent usage over time")
-	usageLine(w, "  witself fact set|get|list|history|delete  Store, review, and permanently delete durable facts")
+	usageLine(w, "  witself fact status|set|get|list|history|delete  Inspect capacity; store, review, and permanently delete durable facts")
 	usageLine(w, "  witself password generate    Generate a password locally with cryptographic randomness")
 	usageLine(w, "  witself vault key init|status|enroll|recovery|rotate|rotation  Manage client-held key custody")
 	usageLine(w, "  witself secret create|status|list|search|show|reveal|archive|restore|delete  Manage agent-owned structured secrets")

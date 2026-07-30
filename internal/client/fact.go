@@ -11,6 +11,11 @@ import (
 	"time"
 )
 
+// FactLimitStatus is the authenticated agent's value-free current-fact
+// capacity. Only resolved, non-deleted fact addresses count; assertion history
+// and review candidates do not consume another slot.
+type FactLimitStatus = MemoryLimitStatus
+
 // Fact is the client representation of one resolved durable fact.
 type Fact struct {
 	ID                  string          `json:"id"`
@@ -166,6 +171,18 @@ type FactOccurrence struct {
 	Fact     Fact       `json:"fact"`
 	OccursOn string     `json:"occurs_on,omitempty"`
 	OccursAt *time.Time `json:"occurs_at,omitempty"`
+}
+
+// GetFactLimitStatus returns value-free current-fact capacity.
+func GetFactLimitStatus(ctx context.Context, endpoint, token string) (*FactLimitStatus, error) {
+	var out struct {
+		FactCapacity FactLimitStatus `json:"fact_capacity"`
+	}
+	requestURL := strings.TrimRight(endpoint, "/") + "/v1/facts:status"
+	if err := doJSON(ctx, http.MethodGet, requestURL, token, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out.FactCapacity, nil
 }
 
 // SetFact creates or supersedes the resolved assertion for a subject/predicate.

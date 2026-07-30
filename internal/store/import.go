@@ -5411,6 +5411,14 @@ func (s *Store) importAccount(
 	if err := validateImportedFactMutationTombstoneCompleteness(ic.facts, ic.factMutationTombstoneCounts); err != nil {
 		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("%w: fact mutation tombstones: %v", ErrArchiveContent, err)
 	}
+	// active_fact_count is a cell-local derived projection and never portable
+	// archive truth. Rebuild it only after the complete fact graph validates.
+	if !disposition.AlreadyImported {
+		if err := recomputeActiveFactCountsTx(ctx, tx, m.AccountID); err != nil {
+			return export.Manifest{}, AccountImportDisposition{},
+				fmt.Errorf("recompute imported active fact count: %w", err)
+		}
+	}
 	if disposition.AlreadyImported {
 		if promoteSourceToTarget {
 			tag, err := tx.Exec(ctx, `

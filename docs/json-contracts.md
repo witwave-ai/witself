@@ -89,9 +89,11 @@ Error response:
 }
 ```
 
-The HTTP status response uses the wrapper above. `witself memory status --json`
-prints the inner capacity object directly. MCP, self digest, and curation
-preflight carry that object under `memory_capacity`.
+The HTTP status responses use the wrappers defined by their sections below.
+`witself fact status --json` and `witself memory status --json` print the inner
+capacity object directly. MCP and self digest carry those objects under
+`fact_capacity` and `memory_capacity`; curation preflight also carries
+`memory_capacity`.
 
 Rules:
 
@@ -107,8 +109,9 @@ Rules:
 - `retryable` indicates whether retrying the identical request may later
   succeed. Transient codes (`backend_unavailable`, `rate_limited`) are
   `retryable: true`; hard conditions (`limit_exceeded`, `access_denied`,
-  `stored_memory_limit_reached`, `stored_secret_limit_reached`, `auth_failed`,
-  `not_found`, `conflict`, `unsupported_operation`) are `retryable: false`.
+  `stored_fact_limit_reached`, `stored_memory_limit_reached`,
+  `stored_secret_limit_reached`, `auth_failed`, `not_found`, `conflict`,
+  `unsupported_operation`) are `retryable: false`.
 - `rate_limited` responses should include `details.retry_after` in seconds when
   a wait is known; the HTTP API should also send a `Retry-After` header.
 - Memory content, fact values, message bodies/payloads, embedding vectors, raw
@@ -130,6 +133,7 @@ JSON error codes should align with CLI exit-code categories.
 | `backend_unavailable` | 7 | Backend or network unavailable. |
 | `rate_limited` | 7 | Transient service-protection or throttle limit; `retryable: true`, honor `retry_after`. |
 | `limit_exceeded` | 7 | Plan, quota, or hard usage cap; `retryable: false`. |
+| `stored_fact_limit_reached` | 1 | Current open-plane refusal when a write would create or recreate another current fact above the authenticated owner agent's cap; HTTP 403, `retryable: false`, with a value-free `limit` object. |
 | `stored_memory_limit_reached` | 1 | Current open-plane refusal when a write would exceed the authenticated owner agent's active-memory cap; HTTP 403, `retryable: false`, with a value-free `limit` object. |
 | `stored_secret_limit_reached` | 1 | Current sealed-plane create refusal at the authenticated owner agent's retained cap; HTTP 403, `retryable: false`, with a value-free `limit` object. |
 | `store_integrity` | 8 | Local store integrity or corruption failure. |
@@ -778,6 +782,74 @@ Rules:
 - `remember` does not emit its own audit event; it routes to the existing
   `memory.added`, `fact.created`, or `fact.updated` events.
 
+## Current Fact Capacity
+
+`GET /v1/facts:status`, `witself fact status`, the `witself.fact.status` MCP
+tool, and the self digest share one value-free capacity object:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "fact_capacity": {
+    "used": 900,
+    "max": 1000,
+    "remaining": 100,
+    "unlimited": false,
+    "near_limit": true,
+    "at_limit": false,
+    "over_limit": false
+  }
+}
+```
+
+Rules:
+
+- `used` counts the token-bound owner agent's resolved, non-deleted current
+  facts across all subjects. Assertions, candidates, aliases, evidence,
+  history, usage events, tombstones, and deleted facts do not consume another
+  slot.
+- A missing effective `stored_fact` maximum is `unlimited:true`, with `max` and
+  `remaining` null and all pressure flags false. In the additive self-digest
+  projection, `unavailable:true` is a failed-open read, never unlimited.
+- For a finite maximum, `remaining` is clamped at zero; `near_limit` begins at
+  `ceil(max * 0.90)`, `at_limit` means equality, and `over_limit` means usage
+  is above the maximum.
+- At or above the cap, reads, history, export, deletion, and an update to an
+  already-current fact remain available. Creating or recreating a current fact,
+  including candidate confirmation into a new subject/predicate address, is
+  refused.
+- Phase A exposes the counter, gate, status, client surfaces, hydration, and
+  observability. The plan catalog intentionally supplies no default
+  `stored_fact` maxima until Phase B. Finite account overrides are also
+  prohibited until migration 0078 reconciles any mixed-writer drift after
+  every pre-Phase-A writer is gone. The only Phase-A override is the Founder's
+  explicit unlimited record, which keeps `stored_fact` omitted from the
+  effective cell snapshot.
+
+A refused count-growing write uses the same fields under `limit`:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "code": "stored_fact_limit_reached",
+  "error": "Current fact capacity has been reached; existing facts remain available and updates to existing facts are still allowed.",
+  "retryable": false,
+  "limit": {
+    "used": 1000,
+    "max": 1000,
+    "remaining": 0,
+    "unlimited": false,
+    "near_limit": true,
+    "at_limit": true,
+    "over_limit": false
+  }
+}
+```
+
+Exact idempotent replay is resolved before the gate. The refusal is
+non-retryable for the same count-growing intent and never authorizes deletion
+or unrelated fact rewriting to make room.
+
 ## Active Memory Capacity
 
 `GET /v1/memories:status`, `witself memory status`, the
@@ -872,10 +944,10 @@ enforcement.
 
 Used by `self show` and `GET /v1/self`. The bounded, always-loadable digest
 contains primary facts first, then top-N salient memories, authenticated
-value-free active-memory capacity plus memory, message, email, and avatar
-checkpoints, and a one-line index. It is cheap and never requires a vector
-profile or query vector. The digest shape, hard cap, and `elided` behavior are
-defined in
+value-free current-fact and active-memory capacity plus memory, message, email,
+and avatar checkpoints, and a one-line index. It is cheap and never requires a
+vector profile or query vector. The digest shape, hard cap, and `elided`
+behavior are defined in
 [context-hydration.md](context-hydration.md).
 
 ```json
@@ -908,6 +980,15 @@ defined in
       "salience": 0.8
     }
   ],
+  "fact_capacity": {
+    "used": 72,
+    "max": null,
+    "remaining": null,
+    "unlimited": true,
+    "near_limit": false,
+    "at_limit": false,
+    "over_limit": false
+  },
   "memory_capacity": {
     "used": 900,
     "max": 1000,

@@ -387,8 +387,8 @@ func TestGrokMCPUsesPortableToolNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 68 {
-		t.Fatalf("tools = %d, want 68", len(tools.Tools))
+	if len(tools.Tools) != 69 {
+		t.Fatalf("tools = %d, want 69", len(tools.Tools))
 	}
 	foundDelete := false
 	for _, tool := range tools.Tools {
@@ -428,8 +428,8 @@ func TestCursorMCPUsesDottedToolNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 68 {
-		t.Fatalf("tools = %d, want 68", len(tools.Tools))
+	if len(tools.Tools) != 69 {
+		t.Fatalf("tools = %d, want 69", len(tools.Tools))
 	}
 	foundDelete := false
 	for _, tool := range tools.Tools {
@@ -523,6 +523,7 @@ func TestReadOnlyMCPRemovesEveryMutatingTool(t *testing.T) {
 		"witself.fact.candidate.get",
 		"witself.fact.get",
 		"witself.fact.list",
+		"witself.fact.status",
 		"witself.fact.upcoming",
 		"witself.fact.subject.list",
 		"witself.transcript.list",
@@ -1346,8 +1347,8 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 68 {
-		t.Fatalf("tools = %d, want 68", len(tools.Tools))
+	if len(tools.Tools) != 69 {
+		t.Fatalf("tools = %d, want 69", len(tools.Tools))
 	}
 	foundComplete := false
 	foundRelease := false
@@ -1688,7 +1689,7 @@ func TestCodexMCPInstructionsLeadWithCanonicalMemoryRouting(t *testing.T) {
 			t.Errorf("first 512 Codex instruction bytes do not contain %q: %q", want, first)
 		}
 	}
-	if generic := mcpInstructions("", "witself.self.show", "witself.message.list"); generic != witselfMCPInstructions+"\n\n"+foregroundMessagingRoutingInstructions+"\n\n"+genericMemoryCheckpointBranchInstructions+"\n\n"+avatarRoutingInstructions+"\n\n"+secretRoutingInstructions {
+	if generic := mcpInstructions("", "witself.self.show", "witself.message.list"); generic != factCapacityMCPRoutingInstructions+"\n\n"+witselfMCPInstructions+"\n\n"+foregroundMessagingRoutingInstructions+"\n\n"+genericMemoryCheckpointBranchInstructions+"\n\n"+avatarRoutingInstructions+"\n\n"+secretRoutingInstructions {
 		t.Fatal("provider-specific Codex routing leaked into generic MCP instructions")
 	}
 }

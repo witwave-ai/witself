@@ -221,6 +221,39 @@ func TestSessionHydrationAlwaysCarriesValueFreeMemoryCapacity(t *testing.T) {
 	}
 }
 
+func TestSessionHydrationAlwaysCarriesValueFreeFactCapacity(t *testing.T) {
+	source := &hydrationSourceStub{self: client.SelfDigest{
+		Identity: exactIdentity(),
+		FactCapacity: &client.FactLimitStatus{
+			Used: 72, Unlimited: true,
+		},
+	}}
+	result, err := Execute(context.Background(), Config{}, exactBinding(), Request{
+		Runtime: transcriptcapture.RuntimeCodex, Event: EventSessionStart,
+	}, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Injected || !strings.Contains(result.Context, `"fact_capacity"`) {
+		t.Fatalf("session fact capacity result = %#v", result)
+	}
+	var envelope contextEnvelope
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(result.Context, "WITSELF_AUTOMATIC_CONTEXT_V1\n")), &envelope); err != nil {
+		t.Fatalf("decode hydration context: %v", err)
+	}
+	if envelope.FactCapacity == nil ||
+		envelope.FactCapacity.Used != 72 ||
+		!envelope.FactCapacity.Unlimited ||
+		envelope.FactCapacity.Max != nil ||
+		envelope.FactCapacity.Remaining != nil ||
+		envelope.FactCapacity.NearLimit ||
+		envelope.FactCapacity.AtLimit ||
+		envelope.FactCapacity.OverLimit ||
+		envelope.FactCapacity.Unavailable {
+		t.Fatalf("session fact capacity = %#v", envelope.FactCapacity)
+	}
+}
+
 func TestPromptHydrationCarriesOnlyActionableMemoryCapacity(t *testing.T) {
 	maximum := int64(1000)
 	tests := []struct {
@@ -280,6 +313,70 @@ func TestPromptHydrationCarriesOnlyActionableMemoryCapacity(t *testing.T) {
 				envelope.MemoryCapacity.NearLimit != test.status.NearLimit ||
 				envelope.MemoryCapacity.Unavailable != test.status.Unavailable {
 				t.Fatalf("prompt memory capacity = %#v, want %#v", envelope.MemoryCapacity, test.status)
+			}
+		})
+	}
+}
+
+func TestPromptHydrationCarriesOnlyActionableFactCapacity(t *testing.T) {
+	maximum := int64(1000)
+	tests := []struct {
+		name   string
+		status client.FactLimitStatus
+		want   bool
+	}{
+		{
+			name: "ordinary finite capacity stays quiet",
+			status: client.FactLimitStatus{
+				Used: 899, Max: &maximum, Remaining: hydrationInt64(101),
+			},
+		},
+		{
+			name: "near limit is injected",
+			status: client.FactLimitStatus{
+				Used: 900, Max: &maximum, Remaining: hydrationInt64(100), NearLimit: true,
+			},
+			want: true,
+		},
+		{
+			name: "unavailable projection is injected",
+			status: client.FactLimitStatus{
+				Unavailable: true,
+			},
+			want: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source := &hydrationSourceStub{self: client.SelfDigest{
+				Identity: exactIdentity(), FactCapacity: &test.status,
+			}}
+			result, err := Execute(context.Background(), Config{}, exactBinding(), Request{
+				Runtime: transcriptcapture.RuntimeCodex,
+				Event:   EventUserPromptSubmit,
+				Prompt:  "write a parser",
+			}, source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Injected != test.want || source.recallCalls != 0 {
+				t.Fatalf("fact capacity result/source = %#v / %#v", result, source)
+			}
+			if !test.want {
+				if strings.Contains(result.Context, `"fact_capacity"`) {
+					t.Fatalf("quiet fact capacity leaked into prompt hydration: %q", result.Context)
+				}
+				return
+			}
+			var envelope contextEnvelope
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(result.Context, "WITSELF_AUTOMATIC_CONTEXT_V1\n")), &envelope); err != nil {
+				t.Fatalf("decode prompt context: %v", err)
+			}
+			if envelope.FactCapacity == nil ||
+				envelope.FactCapacity.Used != test.status.Used ||
+				envelope.FactCapacity.NearLimit != test.status.NearLimit ||
+				envelope.FactCapacity.Unavailable != test.status.Unavailable {
+				t.Fatalf("prompt fact capacity = %#v, want %#v", envelope.FactCapacity, test.status)
 			}
 		})
 	}

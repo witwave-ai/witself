@@ -332,6 +332,82 @@ Catalog promotion is intentionally two-phase:
 The stored-secret compatibility Phase A did not modify
 `web/plans/plans.json`; its catalog promotion was a separate release.
 
+### Phase-A current-fact limit
+
+`stored_fact` is an account plan/override dimension enforced independently for
+each owner agent. It counts resolved, non-deleted current facts across all of
+the agent's subjects. Assertion versions, candidates, subjects, aliases,
+evidence, usage history, tombstones, and deleted facts do not consume another
+slot. A missing key means unlimited and zero is a real cap. Resolution is
+`account override > catalog/plan default > missing/unlimited`; an audited
+explicit-unlimited override omits the key from the resolved cell snapshot
+without changing the account's plan, price, subscription, or invoice history.
+
+Phase A exposes `GET /v1/facts:status`, `witself fact status`, the read-only
+idempotent `witself.fact.status` MCP tool, `self.show.fact_capacity`, actionable
+hook hydration, and the local dashboard. The shared value-free projection is
+`used`, nullable `max` and `remaining`, `unlimited`, `near_limit`, `at_limit`,
+and `over_limit`. For a finite maximum, `near_limit` starts at 90 percent,
+rounded up. It contains no ids, subjects, predicates, fact values, assertion
+history, or candidate data.
+
+Setting an already-current fact preserves the count and remains available at
+the cap. Creating or explicitly recreating another current address adds one;
+confirming a candidate adds one only when its subject/predicate address is not
+already current. A refused count-growing write returns HTTP 403 with
+`code: "stored_fact_limit_reached"`, `retryable: false`, and the current
+value-free `limit` object. Exact idempotent replay is resolved before the gate.
+Reads, history, export, existing-fact updates, and permanent deletion under its
+separate direct-user authorization rule remain available. Capacity never
+authorizes deleting or rewriting an unrelated fact to make room.
+
+Catalog activation follows the same compatibility discipline as active memory:
+
+1. Phase A deploys the cell counter/gate, client surfaces, control-plane
+   `stored_fact` override handling, and strict edge allow-list while leaving
+   `web/plans/plans.json` unchanged. Migration
+   `0076_add_active_fact_count.sql` performs only the short column DDL so its
+   `ACCESS EXCLUSIVE` lock is not held across a mature fact-table scan.
+   `0077_backfill_active_fact_count.sql` then backfills nonzero canonical
+   counts and validates the range guard with read-compatible locks, leaving
+   agent/auth reads available. A pre-Phase-A pod can still write after that
+   initial backfill without
+   maintaining the derived counter, so every account must remain
+   missing/unlimited and no finite override may be set during the mixed-writer
+   rollout.
+2. Set and verify the Founder account's explicit-unlimited override before any
+   later catalog promotion:
+
+   ```sh
+   witself-admin account limit-override set \
+     --account FOUNDER_ACCOUNT_ID \
+     --dimension stored_fact \
+     --unlimited \
+     --reason "Founder current facts are unlimited"
+
+   witself-admin account limit-override get \
+     --account FOUNDER_ACCOUNT_ID \
+     --dimension stored_fact \
+     --json
+   ```
+
+   The read must report `overridden: true`, `effective_max: null`,
+   `apply_pending: false`, and equal desired/applied snapshot revisions.
+3. Phase B must first ship a reconciliation migration
+   `0078_reconcile_active_fact_count.sql`. After every old writer is gone, it
+   takes `LOCK TABLE agents IN EXCLUSIVE MODE NOWAIT`, recomputes every agent's
+   count from resolved, non-deleted canonical facts (including explicit zeroes),
+   and validates exact equality before commit. Its down migration is data-only
+   and therefore a no-op. Contention fails startup cleanly for retry rather than
+   waiting ahead of live writers.
+4. Activate finite overrides or publish plan-catalog `stored_fact` defaults
+   only after every target cell has migration 0078, all replacement server and
+   worker pods are ready, and every older ReplicaSet is at zero. Re-read the
+   Founder override immediately before and after catalog reconciliation.
+
+Migration 0078 and the plan values are intentionally Phase B work. Their absence
+does not weaken Phase A because missing `stored_fact` remains unlimited.
+
 ### Implemented active-memory limit
 
 `stored_memory` is an account plan/override dimension enforced independently for
@@ -467,7 +543,7 @@ limits above are implemented and validated.
 
 Still open for packaging decisions:
 
-- Stored facts per agent.
+- Phase-B plan-catalog values for stored facts per agent.
 - Team and Enterprise outbound-email allowances and overages.
 - Audit retention by plan.
 - Internal storage, vector, fan-out, and API service-protection limits.

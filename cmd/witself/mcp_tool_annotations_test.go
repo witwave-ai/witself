@@ -28,8 +28,8 @@ func TestMCPFactAndTranscriptToolsAdvertiseAccurateAnnotations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Tools) != 68 {
-		t.Fatalf("full-profile tools = %d, want 68", len(page.Tools))
+	if len(page.Tools) != 69 {
+		t.Fatalf("full-profile tools = %d, want 69", len(page.Tools))
 	}
 	tools := make(map[string]*mcp.Tool, len(page.Tools))
 	for _, tool := range page.Tools {
@@ -57,6 +57,7 @@ func TestMCPFactAndTranscriptToolsAdvertiseAccurateAnnotations(t *testing.T) {
 		"witself.fact.candidate.get",
 		"witself.fact.get",
 		"witself.fact.list",
+		"witself.fact.status",
 		"witself.fact.upcoming",
 		"witself.fact.subject.list",
 		"witself.transcript.list",

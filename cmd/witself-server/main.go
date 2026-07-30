@@ -1787,6 +1787,13 @@ func selfHydrationFactListOptions(limit int) store.FactListOptions {
 }
 
 func configureFactMutations(cfg *server.Config, st *store.Store, deletionEnabled bool) {
+	cfg.GetFactLimitStatus = func(ctx context.Context, p server.DomainPrincipal) (server.FactLimitStatus, error) {
+		status, err := st.GetFactLimitStatus(ctx, toStorePrincipal(p))
+		if err != nil {
+			return server.FactLimitStatus{}, mapFactError(err)
+		}
+		return toServerFactLimitStatus(status), nil
+	}
 	cfg.SetFact = func(ctx context.Context, p server.DomainPrincipal, in server.SetFactRequest) (server.Fact, error) {
 		if in.RecreateDeleted && !deletionEnabled {
 			return server.Fact{}, fmt.Errorf(
@@ -2098,9 +2105,12 @@ func mapMessageRequestError(err error) error {
 }
 
 func mapFactError(err error) error {
+	var limitErr *store.FactLimitError
 	switch {
 	case err == nil:
 		return nil
+	case errors.As(err, &limitErr):
+		return &server.FactLimitError{Status: toServerFactLimitStatus(limitErr.Status)}
 	case errors.Is(err, store.ErrFactInputInvalid):
 		return fmt.Errorf("%w: %v", server.ErrBadInput, err)
 	case errors.Is(err, store.ErrFactNotFound):
@@ -2115,6 +2125,14 @@ func mapFactError(err error) error {
 		return server.ErrForbidden
 	default:
 		return err
+	}
+}
+
+func toServerFactLimitStatus(in store.FactLimitStatus) server.FactLimitStatus {
+	return server.FactLimitStatus{
+		Used: in.Used, Max: in.Max, Remaining: in.Remaining,
+		Unlimited: in.Unlimited, NearLimit: in.NearLimit,
+		AtLimit: in.AtLimit, OverLimit: in.OverLimit,
 	}
 }
 

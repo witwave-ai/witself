@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -238,6 +239,61 @@ func TestRuntimeMetricsObserveMemoryLimitRejectionsWithBoundedLabels(t *testing.
 		"mem_private_identifier",
 		"mrun_private_identifier",
 		"private memory content",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("metrics exposed %q:\n%s", forbidden, text)
+		}
+	}
+}
+
+func TestRuntimeMetricsObserveFactLimitRejectionsWithBoundedLabels(t *testing.T) {
+	maximum, remaining := int64(1000), int64(0)
+	limitErr := func() error {
+		return &FactLimitError{Status: FactLimitStatus{
+			Used: 1000, Max: &maximum, Remaining: &remaining,
+			NearLimit: true, AtLimit: true,
+		}}
+	}
+	if !errors.Is(limitErr(), ErrFactLimitReached) {
+		t.Fatal("fact limit error does not unwrap to ErrFactLimitReached")
+	}
+	metrics := newRuntimeMetrics()
+	cfg := metrics.instrumentConfig(Config{
+		SetFact: func(context.Context, DomainPrincipal, SetFactRequest) (Fact, error) {
+			return Fact{}, limitErr()
+		},
+		ConfirmFactCandidate: func(context.Context, DomainPrincipal, string, string) (Fact, error) {
+			return Fact{}, limitErr()
+		},
+	})
+	principal := DomainPrincipal{Kind: PrincipalKindAgent, ID: "agent_private_identifier"}
+	_, _ = cfg.SetFact(context.Background(), principal, SetFactRequest{
+		Subject: "person_private_subject", Predicate: "identity/private_predicate",
+		Value: json.RawMessage(`"private value"`),
+	})
+	_, _ = cfg.ConfirmFactCandidate(
+		context.Background(), principal, "fcand_private_identifier", "private-retry-key",
+	)
+	if len(metrics.factLimitRejects) != 2 {
+		t.Fatalf("fact-limit metric entries = %#v", metrics.factLimitRejects)
+	}
+
+	var output bytes.Buffer
+	metrics.writePrometheus(&output)
+	text := output.String()
+	for _, operation := range []string{"create", "confirm"} {
+		want := `witself_fact_limit_rejections_total{limit_dimension="stored_fact",operation="` + operation + `"} 1`
+		if !strings.Contains(text, want) {
+			t.Errorf("fact-limit counter missing %q:\n%s", want, text)
+		}
+	}
+	for _, forbidden := range []string{
+		"agent_private_identifier",
+		"person_private_subject",
+		"private_predicate",
+		"private value",
+		"fcand_private_identifier",
+		"private-retry-key",
 	} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("metrics exposed %q:\n%s", forbidden, text)

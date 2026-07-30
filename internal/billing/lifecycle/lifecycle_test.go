@@ -357,6 +357,7 @@ func TestFounderResourceLimitsCanBeExplicitlyUnlimited(t *testing.T) {
 		plans.AgentLimit,
 		plans.AgentPerRealmLimit,
 		plans.StoredMemoryLimit,
+		plans.StoredFactLimit,
 	} {
 		if _, err := h.m.SetAccountLimitOverride(
 			ctx,
@@ -395,8 +396,8 @@ func TestFounderResourceLimitsCanBeExplicitlyUnlimited(t *testing.T) {
 	}
 
 	record := h.record(t, accountID)
-	if len(record.LimitOverrides) != 4 {
-		t.Fatalf("founder overrides = %v; want all four dimensions", record.LimitOverrides)
+	if len(record.LimitOverrides) != 5 {
+		t.Fatalf("founder overrides = %v; want all five dimensions", record.LimitOverrides)
 	}
 }
 
@@ -428,6 +429,7 @@ func TestFounderResourceOverridesSurviveCatalogPromotion(t *testing.T) {
 		plans.AgentLimit,
 		plans.AgentPerRealmLimit,
 		plans.StoredMemoryLimit,
+		plans.StoredFactLimit,
 	} {
 		if _, err := h.m.SetAccountLimitOverride(
 			ctx,
@@ -455,7 +457,7 @@ func TestFounderResourceOverridesSurviveCatalogPromotion(t *testing.T) {
 		"plans":[{
 			"id":"free","name":"Personal","price_monthly":0,"available":true,
 			"usage_billed":false,
-			"limits":{"agents":10,"agents_per_realm":10,"realms":1,"stored_memory":1000},
+			"limits":{"agents":10,"agents_per_realm":10,"realms":1,"stored_memory":1000,"stored_fact":1000},
 			"features":["memory","facts"]
 		}]
 	}`))
@@ -473,7 +475,8 @@ func TestFounderResourceOverridesSurviveCatalogPromotion(t *testing.T) {
 	if afterSnapshot.DefaultLimits[plans.RealmLimit] != 1 ||
 		afterSnapshot.DefaultLimits[plans.AgentLimit] != 10 ||
 		afterSnapshot.DefaultLimits[plans.AgentPerRealmLimit] != 10 ||
-		afterSnapshot.DefaultLimits[plans.StoredMemoryLimit] != 1000 {
+		afterSnapshot.DefaultLimits[plans.StoredMemoryLimit] != 1000 ||
+		afterSnapshot.DefaultLimits[plans.StoredFactLimit] != 1000 {
 		t.Fatalf("Phase B defaults = %v", afterSnapshot.DefaultLimits)
 	}
 	if len(afterSnapshot.Limits) != 0 ||

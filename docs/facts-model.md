@@ -163,10 +163,12 @@ curating, or deleting another owner's fact requires the matching policy verb and
 the cross-agent guardrails (`--reason`, `--dry-run`, confirmation, audit). See
 [access-policy.md](access-policy.md).
 
-The CLI noun is `fact` (`set`/`get`/`list`/`delete`, with `--primary`). The MCP
-tools are `witself.fact.set/get/list/delete`. The API resource is `/v1/facts`
-with the colon action `/v1/facts/{fact_id}:primary` for promotion. Scopes are
-`fact:create`, `fact:read`, `fact:update`, `fact:delete`, and `fact:primary`.
+The CLI noun is `fact` (`status`/`set`/`get`/`list`/`delete`, with
+`--primary`). The MCP tools include
+`witself.fact.status/set/get/list/delete`. The API resource is `/v1/facts`,
+with `GET /v1/facts:status` for value-free current capacity and the colon
+action `/v1/facts/{fact_id}:primary` for promotion. Scopes are `fact:create`,
+`fact:read`, `fact:update`, `fact:delete`, and `fact:primary`.
 
 ## Primary Flag
 
@@ -271,12 +273,28 @@ protections:
 - Maximum `source` length: 1 KiB.
 - Maximum `format` length: 64 characters.
 
-The intended plan-level inventory dimension is `stored_fact`, with a prior
-working target of 1,024 current facts per owner. That total-count gate is not
-implemented yet, and fact assertion history is currently durable rather than
-pruned to 256 versions. Those two bounds require their own plan matrix,
-counter, admin-override, migration, and rollout slice; clients must not infer
-them from the implemented per-record validation above.
+Phase A implements the `stored_fact` inventory dimension's counter and
+enforcement contract. `used` is the token-bound owner agent's resolved,
+non-deleted current fact count across every subject. Assertion versions,
+candidates, aliases, evidence, usage events, tombstones, and deleted facts do
+not consume another slot. An update at an already-current subject/predicate
+address is allowed at the cap; a create, explicit recreation, or candidate
+confirmation into a new address is refused with
+`stored_fact_limit_reached`. Reads, history, export, and separately authorized
+permanent deletion remain available.
+
+The same value-free capacity projection is exposed by
+`GET /v1/facts:status`, `witself fact status`, `witself.fact.status`,
+`self.show.fact_capacity`, hook hydration, and the local dashboard. A finite
+warning starts at 90 percent. Status never exposes ids, subjects, predicates,
+values, or history and never authorizes deletion merely to make room.
+
+Phase A deliberately does **not** add plan-catalog maxima and prohibits finite
+`stored_fact` overrides. Catalog values and finite overrides are Phase B work
+after the fenced migration 0078 reconciliation reaches every cell. Until then,
+every account resolves as unlimited; the only permitted override is the
+Founder's explicit unlimited record. Fact assertion history also remains
+durable rather than being pruned to a fixed version count.
 
 Stored facts are a metered billing dimension; fact reads and writes roll up into
 the memory/fact operation meters. See [billing-and-limits.md](billing-and-limits.md).

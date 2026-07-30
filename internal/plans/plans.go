@@ -52,6 +52,11 @@ const (
 	// deleted memories do not consume active capacity. A missing key means
 	// unlimited.
 	StoredMemoryLimit = "stored_memory"
+	// StoredFactLimit caps current resolved fact addresses independently for
+	// each owner agent. Assertions, candidates, subjects, aliases, deleted
+	// tombstones, and usage history do not consume current-fact capacity. A
+	// missing key means unlimited.
+	StoredFactLimit = "stored_fact"
 	// MaxPlanLimit is the largest exact integer shared by Go and JavaScript's
 	// JSON number representation. Unlimited is represented by a missing key,
 	// never by an oversized sentinel.
@@ -236,7 +241,7 @@ func ValidateLimits(limits map[string]int64) error {
 	for key, value := range limits {
 		switch key {
 		case RealmLimit, AgentLimit, AgentPerRealmLimit, StoredSecretLimit,
-			StoredMemoryLimit:
+			StoredMemoryLimit, StoredFactLimit:
 		default:
 			return fmt.Errorf("unknown limit %q", key)
 		}

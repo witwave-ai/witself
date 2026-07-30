@@ -123,6 +123,7 @@ type SelfDigest struct {
 	Identity          SelfIdentity           `json:"identity"`
 	PrimaryFacts      []SelfFact             `json:"primary_facts"`
 	SalientMemories   []SelfMemory           `json:"salient_memories"`
+	FactCapacity      *FactLimitStatus       `json:"fact_capacity,omitempty"`
 	MemoryCapacity    *MemoryLimitStatus     `json:"memory_capacity,omitempty"`
 	MemoryCheckpoint  *SelfMemoryCheckpoint  `json:"memory_checkpoint,omitempty"`
 	MessageCheckpoint *SelfMessageCheckpoint `json:"message_checkpoint,omitempty"`

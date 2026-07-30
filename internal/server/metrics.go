@@ -35,6 +35,7 @@ type runtimeMetrics struct {
 	planLimitRejects   map[limitMetricLabels]uint64
 	secretLimitRejects map[limitMetricLabels]uint64
 	memoryLimitRejects map[limitMetricLabels]uint64
+	factLimitRejects   map[limitMetricLabels]uint64
 }
 
 type httpMetricLabels struct {
@@ -96,6 +97,7 @@ func newRuntimeMetrics() *runtimeMetrics {
 		planLimitRejects:   make(map[limitMetricLabels]uint64),
 		secretLimitRejects: make(map[limitMetricLabels]uint64),
 		memoryLimitRejects: make(map[limitMetricLabels]uint64),
+		factLimitRejects:   make(map[limitMetricLabels]uint64),
 	}
 }
 
@@ -162,6 +164,20 @@ func (m *runtimeMetrics) instrumentConfig(cfg Config) Config {
 				}]++
 				m.mu.Unlock()
 			}
+			return result, err
+		}
+	}
+	if operation := cfg.SetFact; operation != nil {
+		cfg.SetFact = func(ctx context.Context, p DomainPrincipal, in SetFactRequest) (Fact, error) {
+			result, err := operation(ctx, p, in)
+			m.observeFactLimitRejection(err, "create")
+			return result, err
+		}
+	}
+	if operation := cfg.ConfirmFactCandidate; operation != nil {
+		cfg.ConfirmFactCandidate = func(ctx context.Context, p DomainPrincipal, candidateID, idempotencyKey string) (Fact, error) {
+			result, err := operation(ctx, p, candidateID, idempotencyKey)
+			m.observeFactLimitRejection(err, "confirm")
 			return result, err
 		}
 	}
@@ -346,6 +362,23 @@ func (m *runtimeMetrics) observeMemoryLimitRejection(err error, operation string
 	m.mu.Unlock()
 }
 
+func (m *runtimeMetrics) observeFactLimitRejection(err error, operation string) {
+	if !errors.Is(err, ErrFactLimitReached) {
+		return
+	}
+	switch operation {
+	case "create", "confirm":
+	default:
+		operation = "unknown"
+	}
+	m.mu.Lock()
+	m.factLimitRejects[limitMetricLabels{
+		LimitDimension: "stored_fact",
+		Operation:      operation,
+	}]++
+	m.mu.Unlock()
+}
+
 func (m *runtimeMetrics) observeMemoryOperation(operation, principalKind string, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -427,6 +460,7 @@ func (m *runtimeMetrics) snapshot() *runtimeMetrics {
 		planLimitRejects:   maps.Clone(m.planLimitRejects),
 		secretLimitRejects: maps.Clone(m.secretLimitRejects),
 		memoryLimitRejects: maps.Clone(m.memoryLimitRejects),
+		factLimitRejects:   maps.Clone(m.factLimitRejects),
 	}
 }
 
@@ -487,6 +521,9 @@ func (m *runtimeMetrics) writePrometheusSnapshot(w io.Writer) {
 		return labels("limit_dimension", key.LimitDimension, "operation", key.Operation)
 	})
 	writeCounterMap(w, "witself_memory_limit_rejections_total", "Net-positive active-memory mutation refusals by bounded limit dimension and operation.", m.memoryLimitRejects, func(key limitMetricLabels) string {
+		return labels("limit_dimension", key.LimitDimension, "operation", key.Operation)
+	})
+	writeCounterMap(w, "witself_fact_limit_rejections_total", "Net-positive current-fact mutation refusals by bounded limit dimension and operation.", m.factLimitRejects, func(key limitMetricLabels) string {
 		return labels("limit_dimension", key.LimitDimension, "operation", key.Operation)
 	})
 }

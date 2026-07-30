@@ -614,7 +614,7 @@ func TestAccountMessagingCLITransmitsIndependentOverrides(t *testing.T) {
 }
 
 func TestAccountLimitOverrideCLIUnlimitedDimensions(t *testing.T) {
-	for _, dimension := range []string{"agents_per_realm", "stored_memory"} {
+	for _, dimension := range []string{"agents_per_realm", "stored_memory", "stored_fact"} {
 		t.Run(dimension, func(t *testing.T) {
 			var gotMethod, gotPath string
 			var gotBody map[string]any

@@ -57,6 +57,27 @@ func TestGetSelfDecodesMemoryCapacity(t *testing.T) {
 	}
 }
 
+func TestGetSelfDecodesFactCapacity(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","identity":{"account_id":"acc_1","agent_id":"agt_1","agent_name":"scott","realm_id":"rlm_1","realm_name":"default"},"primary_facts":[],"salient_memories":[],"fact_capacity":{"used":10000,"max":10000,"remaining":0,"unlimited":false,"near_limit":true,"at_limit":true,"over_limit":false},"index":{"kinds":[],"tags":[],"counts":{}},"elided":false}`))
+	}))
+	defer srv.Close()
+
+	got, err := GetSelf(context.Background(), srv.URL, "token", SelfOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.FactCapacity == nil ||
+		got.FactCapacity.Used != 10000 ||
+		got.FactCapacity.Max == nil || *got.FactCapacity.Max != 10000 ||
+		got.FactCapacity.Remaining == nil || *got.FactCapacity.Remaining != 0 ||
+		!got.FactCapacity.NearLimit || !got.FactCapacity.AtLimit ||
+		got.FactCapacity.OverLimit || got.FactCapacity.Unlimited ||
+		got.FactCapacity.Unavailable {
+		t.Fatalf("fact capacity = %#v", got.FactCapacity)
+	}
+}
+
 func TestGetSelfDecodesAndRequestsEmailCheckpoint(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("include_email_checkpoint") != "true" {

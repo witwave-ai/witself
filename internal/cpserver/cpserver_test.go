@@ -645,6 +645,7 @@ func TestAdminLimitOverrideValidation(t *testing.T) {
 		plans.AgentLimit,
 		plans.AgentPerRealmLimit,
 		plans.StoredMemoryLimit,
+		plans.StoredFactLimit,
 		plans.StoredSecretLimit,
 	} {
 		path := "/v1/admin/accounts/acct_1/limit-overrides/" + dimension
