@@ -1,5 +1,5 @@
 export const RELAY_SIGNATURE_VERSION = "witself-email-relay-pilot-v1";
-export const PILOT_MAXIMUM_RAW_BYTES = 5 * 1024 * 1024;
+export const PILOT_MAXIMUM_RAW_BYTES = 25 * 1024 * 1024;
 
 const textEncoder = new TextEncoder();
 const KEY_ID = /^[a-z][a-z0-9_-]{0,63}$/;

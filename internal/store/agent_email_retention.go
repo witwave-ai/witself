@@ -20,9 +20,9 @@ const (
 	maxAgentEmailRetentionBatchTimeout        = 5 * time.Minute
 	defaultAgentEmailRetentionWorkerLaneCount = 16
 
-	// raw_mime is currently bounded to 5 MiB per row. The additional batch
-	// ceiling keeps WAL, cascades, and transaction duration predictable even
-	// when every selected message is at that per-message maximum.
+	// Retained raw_mime is bounded to 25 MiB per row. Capacity-omitted rows
+	// contribute zero here. The additional batch ceiling keeps WAL, cascades,
+	// and transaction duration predictable.
 	maxAgentEmailRetentionBatchRawBytes int64 = 32 * 1024 * 1024
 
 	// A suspected-duplicate root may be referenced by later retained mail.
@@ -593,7 +593,7 @@ func processAgentEmailRetentionAccount(
 		lastMessageID = *state.LastMessageID
 	}
 	rows, err := tx.Query(ctx, `
-		SELECT id,received_at,raw_size_bytes
+		SELECT id,received_at,COALESCE(octet_length(raw_mime),0)::BIGINT
 		  FROM agent_email_messages
 		 WHERE account_id=$1
 		   AND received_at < LEAST(
@@ -754,7 +754,7 @@ func processAgentEmailRetentionAccount(
 		deletedRows, deleteErr := tx.Query(ctx, `
 			DELETE FROM agent_email_messages
 			 WHERE account_id=$1 AND id=ANY($2::text[])
-			RETURNING raw_size_bytes`,
+			RETURNING COALESCE(octet_length(raw_mime),0)::BIGINT`,
 			accountID, eligibleIDs,
 		)
 		if deleteErr != nil {

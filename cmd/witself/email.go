@@ -41,10 +41,12 @@ type agentEmailCodeCandidatesResult struct {
 
 func emailCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself email address|list|listen|read|code-candidates|code-consumed|ack|claim|renew|release|complete|operator ...")
+		fmt.Fprintln(os.Stderr, "usage: witself email status|address|list|listen|read|code-candidates|code-consumed|ack|claim|renew|release|complete|operator ...")
 		return 2
 	}
 	switch args[0] {
+	case "status":
+		return emailStatus(args[1:])
 	case "address":
 		return emailAddressCmd(args[1:])
 	case "list":
@@ -73,6 +75,76 @@ func emailCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself email: unknown subcommand %q\n", args[0])
 		return 2
 	}
+}
+
+func emailStatus(args []string) int {
+	fs := flag.NewFlagSet("email status", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	connFlags := addMessageConnectionFlags(fs)
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "usage: witself email status [--json] [agent connection flags]")
+		return 2
+	}
+	ctx := context.Background()
+	conn, err := connFlags.connect(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: connect email service: %v\n", err)
+		return 1
+	}
+	status, err := client.GetAgentEmailStorageStatus(ctx, conn.Endpoint, conn.Token)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: read email storage status: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(status)
+	}
+	fmt.Printf("maximum raw message:\t%s\n", formatAgentEmailBytes(status.MaximumRawBytes))
+	fmt.Printf("attachment storage used:\t%s\n", formatAgentEmailBytes(status.AttachmentCapacity.Used))
+	if status.AttachmentCapacity.Unlimited {
+		fmt.Println("attachment storage max:\tunlimited")
+		fmt.Println("attachment storage remaining:\tunlimited")
+	} else {
+		fmt.Printf("attachment storage max:\t%s\n", formatAgentEmailBytes(*status.AttachmentCapacity.Max))
+		fmt.Printf("attachment storage remaining:\t%s\n", formatAgentEmailBytes(*status.AttachmentCapacity.Remaining))
+	}
+	fmt.Printf("near limit:\t%t\nat limit:\t%t\nover limit:\t%t\n",
+		status.AttachmentCapacity.NearLimit,
+		status.AttachmentCapacity.AtLimit,
+		status.AttachmentCapacity.OverLimit)
+	return 0
+}
+
+func formatAgentEmailBytes(value int64) string {
+	const (
+		kib = int64(1 << 10)
+		mib = int64(1 << 20)
+		gib = int64(1 << 30)
+	)
+	if value == 0 {
+		return "0 bytes"
+	}
+	for _, unit := range []struct {
+		bytes int64
+		name  string
+	}{
+		{bytes: gib, name: "GiB"},
+		{bytes: mib, name: "MiB"},
+		{bytes: kib, name: "KiB"},
+	} {
+		if value < unit.bytes {
+			continue
+		}
+		if value%unit.bytes == 0 {
+			return fmt.Sprintf("%d %s (%d bytes)", value/unit.bytes, unit.name, value)
+		}
+		return fmt.Sprintf("%.2f %s (%d bytes)", float64(value)/float64(unit.bytes), unit.name, value)
+	}
+	return fmt.Sprintf("%d bytes", value)
 }
 
 func emailOperatorCmd(args []string) int {

@@ -6,6 +6,7 @@ import {
   canonicalSignatureInput,
   importSigningKey,
   normalizeEnvelopeAddress,
+  PILOT_MAXIMUM_RAW_BYTES,
   sha256Hex,
   signRelay,
 } from "../src/relay.mjs";
@@ -61,4 +62,16 @@ test("every canonical metadata field changes the signed bytes", () => {
     const changed = Buffer.from(canonicalSignatureInput({ ...metadata, [field]: value }));
     assert.notDeepEqual(changed, original, field);
   }
+});
+
+test("relay metadata accepts exactly 25 MiB and rejects one byte more", () => {
+  assert.equal(PILOT_MAXIMUM_RAW_BYTES, 25 * 1024 * 1024);
+  assert.doesNotThrow(() => canonicalSignatureInput({
+    ...metadata,
+    rawSize: PILOT_MAXIMUM_RAW_BYTES,
+  }));
+  assert.throws(() => canonicalSignatureInput({
+    ...metadata,
+    rawSize: PILOT_MAXIMUM_RAW_BYTES + 1,
+  }), /invalid relay raw size/);
 });

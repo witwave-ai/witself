@@ -3,13 +3,16 @@ package store
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"maps"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/witwave-ai/witself/internal/agentemail"
+	archiveexport "github.com/witwave-ai/witself/internal/export"
 )
 
 func TestAgentEmailArchiveClaimNormalizationConsumesFence(t *testing.T) {
@@ -111,6 +114,179 @@ func TestAgentEmailArchivePreservesTombstonesAndSuspectedDuplicates(t *testing.T
 	}
 }
 
+func TestAgentEmailArchiveAcceptsOmittedCapacityPayloadAndRejectsInvalidShapes(t *testing.T) {
+	const (
+		accountID = "acc_1"
+		realmID   = "realm_abcdefghijkl2345"
+		agentID   = "agent_1"
+		addressID = "eaddr_aaaaaaaaaaaaaaaa"
+		mailboxID = "emb_aaaaaaaaaaaaaaaa"
+		messageID = "emsg_aaaaaaaaaaaaaaaa"
+	)
+	newContext := func(t *testing.T) *importCtx {
+		t.Helper()
+		ic := newImportCtx(accountID)
+		ic.exportedAt = time.Date(2026, 7, 21, 14, 0, 0, 0, time.UTC)
+		ic.realms[realmID] = true
+		ic.agents[agentID] = true
+		ic.liveAgents[agentID] = true
+		ic.agentRealms[agentID] = realmID
+		feedAgentEmailArchiveRow(t, ic, "agent_email_addresses", agentEmailArchiveAddressRow(
+			accountID, realmID, agentID, addressID, false,
+		))
+		feedAgentEmailArchiveRow(t, ic, "agent_email_mailboxes", agentEmailArchiveMailboxRow(
+			accountID, realmID, agentID, addressID, mailboxID,
+		))
+		return ic
+	}
+	raw := []byte(strings.Join([]string{
+		"Subject: omitted attachment",
+		"Content-Type: multipart/mixed; boundary=mix",
+		"",
+		"--mix",
+		"Content-Type: text/plain",
+		"",
+		"bounded body",
+		"--mix",
+		"Content-Type: application/octet-stream",
+		"Content-Disposition: attachment; filename=payload.bin",
+		"",
+		"attachment bytes",
+		"--mix--",
+		"",
+	}, "\r\n"))
+	newOmittedRow := func() map[string]any {
+		row := agentEmailArchiveMessageRow(
+			accountID, realmID, agentID, addressID, mailboxID, messageID,
+			raw, agentEmailArchiveDuplicateGroup(raw), "",
+		)
+		row["raw_mime"] = nil
+		row["payload_retention_state"] = importedAgentEmailPayloadOmittedCapacity
+		row["retained_attachment_storage_bytes"] = 0
+		return row
+	}
+
+	ic := newContext(t)
+	feedAgentEmailArchiveRow(t, ic, "agent_email_messages", newOmittedRow())
+	if _, ok := ic.agentEmailMessages[messageID]; !ok {
+		t.Fatal("valid omitted-capacity message was not recorded")
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{
+			name: "omitted row carries raw MIME",
+			mutate: func(row map[string]any) {
+				row["raw_mime"] = `\x` + hex.EncodeToString(raw)
+			},
+		},
+		{
+			name: "retained state lacks raw MIME",
+			mutate: func(row map[string]any) {
+				row["payload_retention_state"] = importedAgentEmailPayloadRetained
+			},
+		},
+		{
+			name: "storage is not conservative raw size",
+			mutate: func(row map[string]any) {
+				row["attachment_storage_bytes"] = len(raw) - 1
+			},
+		},
+		{
+			name: "omitted row retains attachment bytes",
+			mutate: func(row map[string]any) {
+				row["retained_attachment_storage_bytes"] = 1
+			},
+		},
+		{
+			name: "body text exceeds bound",
+			mutate: func(row map[string]any) {
+				row["body_text"] = strings.Repeat("x", maximumImportedAgentEmailBodyTextBytes+1)
+			},
+		},
+		{
+			name: "body text kind is invalid",
+			mutate: func(row map[string]any) {
+				row["body_text_kind"] = "application/octet-stream"
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			row := newOmittedRow()
+			test.mutate(row)
+			err := newContext(t).validateAndRecord("agent_email_messages", row)
+			if !errors.Is(err, ErrArchiveContent) {
+				t.Fatalf("invalid omitted payload error = %v", err)
+			}
+		})
+	}
+}
+
+func TestSchema78AgentEmailArchiveUpgradeProducesCurrentImportShape(t *testing.T) {
+	const (
+		accountID = "acc_1"
+		realmID   = "realm_abcdefghijkl2345"
+		agentID   = "agent_1"
+		addressID = "eaddr_aaaaaaaaaaaaaaaa"
+		mailboxID = "emb_aaaaaaaaaaaaaaaa"
+		messageID = "emsg_aaaaaaaaaaaaaaaa"
+	)
+	ic := newImportCtx(accountID)
+	ic.exportedAt = time.Date(2026, 7, 21, 14, 0, 0, 0, time.UTC)
+	ic.realms[realmID] = true
+	ic.agents[agentID] = true
+	ic.liveAgents[agentID] = true
+	ic.agentRealms[agentID] = realmID
+	feedAgentEmailArchiveRow(t, ic, "agent_email_addresses", agentEmailArchiveAddressRow(
+		accountID, realmID, agentID, addressID, false,
+	))
+	feedAgentEmailArchiveRow(t, ic, "agent_email_mailboxes", agentEmailArchiveMailboxRow(
+		accountID, realmID, agentID, addressID, mailboxID,
+	))
+	raw := []byte(strings.Join([]string{
+		"Subject: legacy attachment",
+		"Content-Type: multipart/mixed; boundary=mix",
+		"",
+		"--mix",
+		"Content-Type: text/plain",
+		"",
+		"legacy body",
+		"--mix",
+		"Content-Type: application/octet-stream",
+		"",
+		"legacy attachment",
+		"--mix--",
+		"",
+	}, "\r\n"))
+	legacy := agentEmailArchiveMessageRow(
+		accountID, realmID, agentID, addressID, mailboxID, messageID,
+		raw, agentEmailArchiveDuplicateGroup(raw), "",
+	)
+	for _, field := range []string{
+		"body_text", "body_text_kind", "attachment_storage_bytes",
+		"retained_attachment_storage_bytes", "payload_retention_state",
+	} {
+		delete(legacy, field)
+	}
+	legacy["raw_size_bytes"] = json.Number(strconv.Itoa(len(raw)))
+	legacy["attachment_count"] = json.Number("1")
+	upgraded, err := archiveexport.UpgraderFor(78)("agent_email_messages", legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ic.validateAndRecord("agent_email_messages", upgraded); err != nil {
+		t.Fatalf("validate upgraded schema-78 message: %v", err)
+	}
+	if upgraded["body_text"] != nil || upgraded["body_text_kind"] != nil ||
+		upgraded["attachment_storage_bytes"] != int64(len(raw)) ||
+		upgraded["retained_attachment_storage_bytes"] != int64(len(raw)) ||
+		upgraded["payload_retention_state"] != importedAgentEmailPayloadRetained {
+		t.Fatalf("upgraded schema-78 payload shape = %#v", upgraded)
+	}
+}
+
 func TestAgentEmailArchiveRejectsHostileContentAndCrossScopeLinks(t *testing.T) {
 	const (
 		accountID = "acc_1"
@@ -157,6 +333,31 @@ func TestAgentEmailArchiveRejectsHostileContentAndCrossScopeLinks(t *testing.T) 
 		err := ic.validateAndRecord("agent_email_messages", row)
 		if !errors.Is(err, ErrArchiveContent) || !strings.Contains(err.Error(), "header_subject does not match raw_mime") {
 			t.Fatalf("forged MIME projection error = %v", err)
+		}
+	})
+
+	t.Run("body text projection must match retained raw message", func(t *testing.T) {
+		ic := newContext(t)
+		raw := []byte("Subject: canonical body\r\n\r\nbody")
+		row := agentEmailArchiveMessageRow(accountID, realmID, agentID, addressID, mailboxID,
+			"emsg_aaaaaaaaaaaaaaaa", raw, agentEmailArchiveDuplicateGroup(raw), "")
+		row["body_text"] = "forged body"
+		err := ic.validateAndRecord("agent_email_messages", row)
+		if !errors.Is(err, ErrArchiveContent) || !strings.Contains(err.Error(), "body text projection") {
+			t.Fatalf("forged body projection error = %v", err)
+		}
+	})
+
+	t.Run("retained attachment storage must match conservative accounting", func(t *testing.T) {
+		ic := newContext(t)
+		raw := []byte("Subject: no attachment\r\n\r\nbody")
+		row := agentEmailArchiveMessageRow(accountID, realmID, agentID, addressID, mailboxID,
+			"emsg_aaaaaaaaaaaaaaaa", raw, agentEmailArchiveDuplicateGroup(raw), "")
+		row["attachment_storage_bytes"] = 1
+		row["retained_attachment_storage_bytes"] = 1
+		err := ic.validateAndRecord("agent_email_messages", row)
+		if !errors.Is(err, ErrArchiveContent) || !strings.Contains(err.Error(), "conservative raw-size accounting") {
+			t.Fatalf("forged attachment accounting error = %v", err)
 		}
 	})
 
@@ -359,6 +560,10 @@ func agentEmailArchiveMessageRow(
 	if parsed.MessageDate != nil {
 		messageDate = parsed.MessageDate.Format(time.RFC3339Nano)
 	}
+	attachmentStorageBytes := 0
+	if parsed.AttachmentCount > 0 || parseState == AgentEmailParseError {
+		attachmentStorageBytes = len(raw)
+	}
 	possible := any(nil)
 	if possibleDuplicate != "" {
 		possible = possibleDuplicate
@@ -376,7 +581,12 @@ func agentEmailArchiveMessageRow(
 		"header_from": nullable(parsed.HeaderFrom), "header_to": nullable(parsed.HeaderTo),
 		"header_subject":  nullable(parsed.HeaderSubject),
 		"mime_message_id": nullable(parsed.MIMEMessageID), "message_date": messageDate,
-		"attachment_count": parsed.AttachmentCount, "spf_result": "unknown", "dkim_result": "unknown",
+		"attachment_count": parsed.AttachmentCount,
+		"body_text":        nullable(parsed.Text), "body_text_kind": nullable(parsed.TextKind),
+		"attachment_storage_bytes":          attachmentStorageBytes,
+		"retained_attachment_storage_bytes": attachmentStorageBytes,
+		"payload_retention_state":           importedAgentEmailPayloadRetained,
+		"spf_result":                        "unknown", "dkim_result": "unknown",
 		"dmarc_result": "unknown", "spam_verdict": "unknown",
 		"sender_verification_state":        "unverified",
 		"duplicate_group_sha256":           duplicateGroup,

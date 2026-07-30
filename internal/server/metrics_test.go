@@ -7,8 +7,11 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/witwave-ai/witself/internal/agentemail"
 )
 
 func TestRuntimeMetricsUseBoundedRouteTemplates(t *testing.T) {
@@ -67,6 +70,116 @@ func TestRuntimeMetricsObserveDomainMemoryAndCurationOperations(t *testing.T) {
 	}
 	if strings.Contains(text, "mem_not_a_label") {
 		t.Fatalf("metrics exposed a resource id:\n%s", text)
+	}
+}
+
+func TestRuntimeMetricsObserveBoundedAgentEmailIngestOutcomes(t *testing.T) {
+	metrics := newRuntimeMetrics()
+	outcomes := []error{
+		nil,
+		errors.Join(
+			ErrAgentEmailAttachmentOmitted,
+			errors.New("account_private_identifier attachment_private_identifier"),
+		),
+		errors.Join(
+			ErrAgentEmailRawSizeExceeded,
+			errors.New("account_private_identifier plan_private_name"),
+		),
+		ErrAgentEmailFeatureDisabled,
+		ErrAgentEmailReceiveDisabled,
+		ErrAgentEmailUnknownRecipient,
+		errors.Join(ErrNotFound, errors.New("emsg_private_identifier")),
+		ErrAgentEmailRetryCanaryTemporary,
+		ErrAgentEmailRetryCanaryPermanent,
+		errors.New("database_private_host tenant_private_identifier"),
+	}
+	nextOutcome := 0
+	cfg := metrics.instrumentConfig(Config{
+		IngestAgentEmailPilot: func(
+			context.Context,
+			agentemail.RelayMetadata,
+			[]byte,
+		) error {
+			err := outcomes[nextOutcome]
+			nextOutcome++
+			return err
+		},
+	})
+	metadata := agentemail.RelayMetadata{
+		KeyID:             "key_private_identifier",
+		Audience:          "cell_private_identifier",
+		EnvelopeSender:    "sender-private@example.test",
+		EnvelopeRecipient: "agent-private@example.test",
+	}
+	for range outcomes {
+		_ = cfg.IngestAgentEmailPilot(
+			context.Background(),
+			metadata,
+			[]byte("raw private message content"),
+		)
+	}
+
+	expected := map[string]uint64{
+		"retained":               1,
+		"omitted_capacity":       1,
+		"over_size":              1,
+		"feature_disabled":       1,
+		"receive_disabled":       1,
+		"unknown_recipient":      2,
+		"retry_canary_temporary": 1,
+		"retry_canary_rejected":  1,
+		"error":                  1,
+	}
+	if len(metrics.agentEmailIngests) != len(expected) {
+		t.Fatalf("agent-email metric outcomes = %#v", metrics.agentEmailIngests)
+	}
+	for outcome, count := range expected {
+		if metrics.agentEmailIngests[outcome] != count {
+			t.Errorf("agent-email outcome %q = %d, want %d", outcome, metrics.agentEmailIngests[outcome], count)
+		}
+	}
+
+	var output bytes.Buffer
+	metrics.writePrometheus(&output)
+	text := output.String()
+	metricLines := 0
+	for _, line := range strings.Split(text, "\n") {
+		if !strings.HasPrefix(line, `witself_agent_email_ingests_total{`) {
+			continue
+		}
+		metricLines++
+		matched := false
+		for outcome, count := range expected {
+			want := `witself_agent_email_ingests_total{outcome="` + outcome + `"} ` +
+				strconv.FormatUint(count, 10)
+			if line == want {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			t.Errorf("unexpected agent-email metric series %q", line)
+		}
+	}
+	if metricLines != len(expected) {
+		t.Fatalf("agent-email metric series = %d, want %d:\n%s", metricLines, len(expected), text)
+	}
+	for _, forbidden := range []string{
+		"account_private_identifier",
+		"attachment_private_identifier",
+		"plan_private_name",
+		"emsg_private_identifier",
+		"database_private_host",
+		"tenant_private_identifier",
+		"key_private_identifier",
+		"cell_private_identifier",
+		"sender-private@example.test",
+		"agent-private@example.test",
+		"raw private message content",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("agent-email metrics exposed %q:\n%s", forbidden, text)
+		}
 	}
 }
 

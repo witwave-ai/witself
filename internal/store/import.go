@@ -143,7 +143,11 @@ var importColumns = map[string]map[string]bool{
 		"parse_state": true, "parse_error": true,
 		"header_from": true, "header_to": true, "header_subject": true,
 		"mime_message_id": true, "message_date": true,
-		"attachment_count": true, "spf_result": true, "dkim_result": true,
+		"attachment_count": true, "body_text": true, "body_text_kind": true,
+		"attachment_storage_bytes":          true,
+		"retained_attachment_storage_bytes": true,
+		"payload_retention_state":           true,
+		"spf_result":                        true, "dkim_result": true,
 		"dmarc_result": true, "spam_verdict": true,
 		"sender_verification_state":        true,
 		"duplicate_group_sha256":           true,
@@ -676,6 +680,12 @@ type agentEmailMessageImportScope struct {
 	createdAt              time.Time
 	retryCanaryHash        string
 }
+
+const (
+	maximumImportedAgentEmailBodyTextBytes   = 1024 * 1024
+	importedAgentEmailPayloadRetained        = "retained"
+	importedAgentEmailPayloadOmittedCapacity = "omitted_capacity"
+)
 
 type agentEmailDeliveryImportScope struct {
 	messageID            string
@@ -3973,22 +3983,12 @@ func (ic *importCtx) validateImportedAgentEmailMessage(obj map[string]any) (stri
 		return "", agentEmailMessageImportScope{}, fmt.Errorf("envelope_recipient does not match address and subaddress")
 	}
 	rawSize, ok := importedPositiveInteger(obj["raw_size_bytes"])
-	byteaSize, byteaOK := importedByteaLength(obj["raw_mime"])
-	if !ok || rawSize > 5*1024*1024 || !byteaOK || int64(byteaSize) != rawSize {
+	if !ok || rawSize > int64(agentemail.PilotMaximumRawBytes) {
 		return "", agentEmailMessageImportScope{}, fmt.Errorf("raw MIME size is invalid")
 	}
 	rawSHA, err := requireStringField(obj, "raw_sha256")
 	if err != nil || !isSHA256Hex(rawSHA) {
 		return "", agentEmailMessageImportScope{}, fmt.Errorf("raw_sha256 is invalid")
-	}
-	encodedRaw, _ := obj["raw_mime"].(string)
-	raw, decodeErr := hex.DecodeString(encodedRaw[2:])
-	if decodeErr != nil {
-		return "", agentEmailMessageImportScope{}, fmt.Errorf("raw_mime is invalid")
-	}
-	digest := sha256.Sum256(raw)
-	if hex.EncodeToString(digest[:]) != rawSHA {
-		return "", agentEmailMessageImportScope{}, fmt.Errorf("raw_sha256 does not match raw_mime")
 	}
 	parseState, err := requireStringField(obj, "parse_state")
 	if err != nil || parseState != AgentEmailParseParsed && parseState != AgentEmailParseError {
@@ -3998,52 +3998,134 @@ func (ic *importCtx) validateImportedAgentEmailMessage(obj map[string]any) (stri
 	if err != nil || parseState == AgentEmailParseError != hasParseError || hasParseError && !validImportedAgentEmailCode(parseError) {
 		return "", agentEmailMessageImportScope{}, fmt.Errorf("parse_error lifecycle shape is invalid")
 	}
-	parsed, parseErr := agentemail.ParseMessage(raw, true)
-	expectedParseState := AgentEmailParseParsed
-	expectedParseError := ""
-	if parseErr != nil {
-		expectedParseState = AgentEmailParseError
-		expectedParseError = agentemail.ParseErrorCode(parseErr)
+	attachmentCount, ok := importedNonnegativeInteger(obj["attachment_count"])
+	if !ok || attachmentCount > 10000 {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("attachment_count is invalid")
 	}
-	if parseState != expectedParseState || hasParseError != (expectedParseError != "") ||
-		parseError != expectedParseError {
-		return "", agentEmailMessageImportScope{}, fmt.Errorf("MIME parse projection does not match raw_mime")
+	bodyText, hasBodyText, err := importedNullableBoundedString(
+		obj, "body_text", maximumImportedAgentEmailBodyTextBytes, false,
+	)
+	if err != nil || strings.ContainsRune(bodyText, '\x00') {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("body_text is invalid")
+	}
+	bodyTextKind, hasBodyTextKind, err := importedNullableBoundedString(obj, "body_text_kind", 32, false)
+	if err != nil || hasBodyText != hasBodyTextKind ||
+		hasBodyTextKind && bodyTextKind != "text/plain" && bodyTextKind != "text/html-rendered" {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("body text lifecycle shape is invalid")
+	}
+	attachmentStorageBytes, ok := importedNonnegativeInteger(obj["attachment_storage_bytes"])
+	if !ok {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("attachment_storage_bytes is invalid")
+	}
+	retainedAttachmentStorageBytes, ok := importedNonnegativeInteger(obj["retained_attachment_storage_bytes"])
+	if !ok {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("retained_attachment_storage_bytes is invalid")
+	}
+	expectedAttachmentStorageBytes := int64(0)
+	if attachmentCount > 0 || parseState == AgentEmailParseError {
+		expectedAttachmentStorageBytes = rawSize
+	}
+	if attachmentStorageBytes != expectedAttachmentStorageBytes {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("attachment_storage_bytes does not match conservative raw-size accounting")
+	}
+	payloadRetentionState, err := requireStringField(obj, "payload_retention_state")
+	if err != nil || payloadRetentionState != importedAgentEmailPayloadRetained &&
+		payloadRetentionState != importedAgentEmailPayloadOmittedCapacity {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("payload_retention_state is invalid")
+	}
+	rawValue, hasRawField := obj["raw_mime"]
+	if !hasRawField {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("raw_mime is missing")
 	}
 	retryCanaryHash := ""
 	retryCanaryFingerprint := ""
-	if challenge, present, challengeErr := agentemail.RetryCanaryChallenge(raw); challengeErr == nil && present {
-		retryCanaryHash = agentEmailRetryCanaryChallengeHash(challenge)
-		retryCanaryFingerprint, err = agentEmailRetryCanaryDeliveryFingerprint(
-			raw, envelopeSender, envelopeRecipient, parseState, parseError, parsed,
-		)
-		if err != nil {
-			return "", agentEmailMessageImportScope{}, fmt.Errorf("retry canary fingerprint is invalid")
+	if payloadRetentionState == importedAgentEmailPayloadRetained {
+		byteaSize, byteaOK := importedByteaLength(rawValue)
+		if !byteaOK || int64(byteaSize) != rawSize ||
+			retainedAttachmentStorageBytes != attachmentStorageBytes {
+			return "", agentEmailMessageImportScope{}, fmt.Errorf("retained payload storage shape is invalid")
 		}
-	}
-	for _, field := range []struct {
-		name     string
-		max      int
-		expected string
-	}{
-		{name: "header_from", max: 4096, expected: parsed.HeaderFrom},
-		{name: "header_to", max: 4096, expected: parsed.HeaderTo},
-		{name: "header_subject", max: 4096, expected: parsed.HeaderSubject},
-		{name: "mime_message_id", max: 998, expected: parsed.MIMEMessageID},
-	} {
-		value, present, fieldErr := importedNullableBoundedString(obj, field.name, field.max, true)
-		if fieldErr != nil || strings.ContainsRune(value, '\x00') ||
-			present != (field.expected != "") || value != field.expected {
-			return "", agentEmailMessageImportScope{}, fmt.Errorf("%s does not match raw_mime", field.name)
+		encodedRaw, _ := rawValue.(string)
+		raw, decodeErr := hex.DecodeString(encodedRaw[2:])
+		if decodeErr != nil {
+			return "", agentEmailMessageImportScope{}, fmt.Errorf("raw_mime is invalid")
 		}
-	}
-	messageDate, hasMessageDate, err := importedOptionalTimestamp(obj, "message_date")
-	if err != nil || hasMessageDate != (parsed.MessageDate != nil) ||
-		hasMessageDate && !messageDate.Equal(*parsed.MessageDate) {
-		return "", agentEmailMessageImportScope{}, fmt.Errorf("message_date does not match raw_mime")
-	}
-	attachmentCount, ok := importedNonnegativeInteger(obj["attachment_count"])
-	if !ok || attachmentCount > 10000 || attachmentCount != parsed.AttachmentCount {
-		return "", agentEmailMessageImportScope{}, fmt.Errorf("attachment_count does not match raw_mime")
+		digest := sha256.Sum256(raw)
+		if hex.EncodeToString(digest[:]) != rawSHA {
+			return "", agentEmailMessageImportScope{}, fmt.Errorf("raw_sha256 does not match raw_mime")
+		}
+		parsed, parseErr := agentemail.ParseMessage(raw, true)
+		expectedParseState := AgentEmailParseParsed
+		expectedParseError := ""
+		if parseErr != nil {
+			expectedParseState = AgentEmailParseError
+			expectedParseError = agentemail.ParseErrorCode(parseErr)
+		}
+		if parseState != expectedParseState || hasParseError != (expectedParseError != "") ||
+			parseError != expectedParseError {
+			return "", agentEmailMessageImportScope{}, fmt.Errorf("MIME parse projection does not match raw_mime")
+		}
+		if challenge, present, challengeErr := agentemail.RetryCanaryChallenge(raw); challengeErr == nil && present {
+			retryCanaryHash = agentEmailRetryCanaryChallengeHash(challenge)
+			retryCanaryFingerprint, err = agentEmailRetryCanaryDeliveryFingerprint(
+				raw, envelopeSender, envelopeRecipient, parseState, parseError, parsed,
+			)
+			if err != nil {
+				return "", agentEmailMessageImportScope{}, fmt.Errorf("retry canary fingerprint is invalid")
+			}
+		}
+		for _, field := range []struct {
+			name     string
+			max      int
+			expected string
+		}{
+			{name: "header_from", max: 4096, expected: parsed.HeaderFrom},
+			{name: "header_to", max: 4096, expected: parsed.HeaderTo},
+			{name: "header_subject", max: 4096, expected: parsed.HeaderSubject},
+			{name: "mime_message_id", max: 998, expected: parsed.MIMEMessageID},
+		} {
+			value, present, fieldErr := importedNullableBoundedString(obj, field.name, field.max, true)
+			if fieldErr != nil || strings.ContainsRune(value, '\x00') ||
+				present != (field.expected != "") || value != field.expected {
+				return "", agentEmailMessageImportScope{}, fmt.Errorf("%s does not match raw_mime", field.name)
+			}
+		}
+		messageDate, hasMessageDate, dateErr := importedOptionalTimestamp(obj, "message_date")
+		if dateErr != nil || hasMessageDate != (parsed.MessageDate != nil) ||
+			hasMessageDate && !messageDate.Equal(*parsed.MessageDate) {
+			return "", agentEmailMessageImportScope{}, fmt.Errorf("message_date does not match raw_mime")
+		}
+		if attachmentCount != parsed.AttachmentCount {
+			return "", agentEmailMessageImportScope{}, fmt.Errorf("attachment_count does not match raw_mime")
+		}
+		// The body projection is nullable for rolling-upgrade and legacy
+		// rows. When present it must be the exact bounded parser result; when
+		// absent the retained raw MIME remains the canonical source.
+		if hasBodyText && (bodyText != parsed.Text || bodyTextKind != parsed.TextKind) {
+			return "", agentEmailMessageImportScope{}, fmt.Errorf("body text projection does not match raw_mime")
+		}
+	} else {
+		if rawValue != nil || attachmentStorageBytes != rawSize ||
+			retainedAttachmentStorageBytes != 0 {
+			return "", agentEmailMessageImportScope{}, fmt.Errorf("omitted payload storage shape is invalid")
+		}
+		for _, field := range []struct {
+			name string
+			max  int
+		}{
+			{name: "header_from", max: 4096},
+			{name: "header_to", max: 4096},
+			{name: "header_subject", max: 4096},
+			{name: "mime_message_id", max: 998},
+		} {
+			value, _, fieldErr := importedNullableBoundedString(obj, field.name, field.max, false)
+			if fieldErr != nil || strings.ContainsRune(value, '\x00') {
+				return "", agentEmailMessageImportScope{}, fmt.Errorf("%s is invalid", field.name)
+			}
+		}
+		if _, _, dateErr := importedOptionalTimestamp(obj, "message_date"); dateErr != nil {
+			return "", agentEmailMessageImportScope{}, fmt.Errorf("message_date is invalid")
+		}
 	}
 	if err := validateImportedAgentEmailAdvisoryResults(obj); err != nil {
 		return "", agentEmailMessageImportScope{}, err
@@ -5417,6 +5499,40 @@ func (s *Store) importAccount(
 		if err := recomputeActiveFactCountsTx(ctx, tx, m.AccountID); err != nil {
 			return export.Manifest{}, AccountImportDisposition{},
 				fmt.Errorf("recompute imported active fact count: %w", err)
+		}
+	}
+	// retained_agent_email_attachment_bytes is a cell-local derived
+	// projection and is deliberately absent from every archive. Rebuild it
+	// from the validated retained message rows instead of trusting portable
+	// account state. An already-imported retry must leave live counters alone.
+	if !disposition.AlreadyImported {
+		if _, err := tx.Exec(ctx, `
+			UPDATE agent_email_messages
+			   SET attachment_storage_accounted = true
+			 WHERE account_id = $1
+			   AND NOT attachment_storage_accounted`,
+			m.AccountID,
+		); err != nil {
+			return export.Manifest{}, AccountImportDisposition{},
+				fmt.Errorf("mark imported agent-email storage accounted: %w", err)
+		}
+		tag, err := tx.Exec(ctx, `
+			UPDATE accounts AS account
+			   SET retained_agent_email_attachment_bytes = (
+			     SELECT COALESCE(sum(message.retained_attachment_storage_bytes), 0)::bigint
+			       FROM agent_email_messages AS message
+			      WHERE message.account_id = account.id
+			   )
+			 WHERE account.id = $1`,
+			m.AccountID,
+		)
+		if err != nil {
+			return export.Manifest{}, AccountImportDisposition{},
+				fmt.Errorf("recompute imported retained agent-email attachment bytes: %w", err)
+		}
+		if tag.RowsAffected() != 1 {
+			return export.Manifest{}, AccountImportDisposition{},
+				fmt.Errorf("%w: imported account is missing for agent-email attachment recompute", ErrArchiveContent)
 		}
 	}
 	if disposition.AlreadyImported {

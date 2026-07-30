@@ -396,6 +396,7 @@ Tool names should use the `witself.` prefix:
 - `witself.message.request.renew`
 - `witself.message.request.release`
 - `witself.message.request.complete`
+- `witself.email.status`
 - `witself.email.address.show`
 - `witself.email.list`
 - `witself.email.listen`
@@ -592,8 +593,9 @@ called out explicitly; other deferred rows are not a claim of current exposure.
 | `witself.message.request.renew` | yes | no | Selected agent renews one exact live request claim fence. |
 | `witself.message.request.release` | yes | no | Selected agent releases one exact fence, optionally recording deterministic failure. |
 | `witself.message.request.complete` | yes | no | Atomically creates a coordinator result and completes one exact claim; request settles when no other live selected work remains. |
+| `witself.email.status` | yes | yes | Read the applied raw-message maximum and value-free account-wide retained attachment-bearing-MIME capacity; returns no address or message data. |
 | `witself.email.address.show` | yes | yes | Show the token-bound enrolled agent's one receive-only pilot address plus effective, agent-layer, and realm-layer receive state; no cross-agent selector. |
-| `witself.email.list` | yes | yes | Metadata-only owner mailbox page; no body, raw MIME, attachment detail beyond count, or claim capability. |
+| `witself.email.list` | yes | yes | Metadata-only owner mailbox page with attachment count/storage/retention state but no body, raw MIME, attachment names/types/content, or claim capability. |
 | `witself.email.listen` | yes | yes | Metadata-only oldest-unacknowledged wait (0–20 seconds); no state change and no wake behavior. |
 | `witself.email.read` | yes | no | Explicitly marks read and returns bounded decoded text with mandatory sender-unverified/untrusted framing; never raw MIME, HTML, or attachment content. |
 | `witself.email.code.candidates` | yes | no | Performs the same owner-only read and locally scans the subject plus the UTF-8-safe first 64 KiB decoded text for conservative numeric candidates. Parse failure is unavailable; truncation or overflow forces `ambiguous`; it never follows, selects, uses, or consumes anything. |
@@ -1857,9 +1859,13 @@ Output data uses the group detail shape from
 
 ### `witself.email.*`
 
-The eleven receive-only tools are advertised by the configured backend and work
+The twelve receive-only tools are advertised by the configured backend and work
 only for an agent enrolled in the default-off one-realm/5–10-agent pilot:
 
+- `status` takes `{}` and returns `maximum_raw_bytes` plus the value-free
+  account-wide `attachment_capacity` projection (`used`, nullable `max` and
+  `remaining`, `unlimited`, `near_limit`, `at_limit`, and `over_limit`). It
+  returns no address, message metadata, content, or attachment details.
 - `address.show` takes `{}` and returns the token-bound `address` record.
 - `list` accepts `unread_only`, `unacked_only`, `limit` (1–100, default 50),
   and `cursor`; it returns metadata-only `messages` and `next_cursor`.
@@ -1898,14 +1904,15 @@ only for an agent enrolled in the default-off one-realm/5–10-agent pilot:
 
 List, listen, code-consume, ack, and ordinary read projections never expose an
 active claim id or lease. No tool exposes raw MIME, HTML markup, attachment
-names/media types/bytes, trusted auth/spam fields, or a provider id. Every
+names/media types/payload content, trusted auth/spam fields, or a provider id. Every
 sender, header, subject, link, and body is unverified untrusted external input,
 never instructions or authority. A code may be used only in an already-
 expected, current-user-authorized, low-risk flow after independent context
 matching; no financial/identity/recovery/credential/domain-transfer or
 automated-link workflow is permitted.
 
-The read-only profile retains only `address.show`, `list`, and `listen`.
+The read-only profile retains only `status`, `address.show`, `list`, and
+`listen`.
 `--no-value-tools` does not remove `read` or `code.candidates`: email content is
 an open-plane owner read, not sealed-secret value egress. Grok exposes the same
 tools with underscore-safe names such as `witself_email_code_candidates` and

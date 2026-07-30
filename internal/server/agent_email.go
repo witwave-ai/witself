@@ -50,6 +50,13 @@ var (
 	// whose plan does not enable inbound email. The edge accepts and drops
 	// this delivery without retrying and without revealing account state.
 	ErrAgentEmailFeatureDisabled = errors.New("agent-email feature is disabled")
+	// ErrAgentEmailRawSizeExceeded is a permanent plan-aware per-message size
+	// refusal. The edge converts this exact value-free outcome to SMTP 552.
+	ErrAgentEmailRawSizeExceeded = errors.New("agent-email raw message size exceeded")
+	// ErrAgentEmailAttachmentOmitted is a successful partial-retention
+	// outcome: bounded text and metadata landed, while attachment-bearing raw
+	// MIME was omitted at the account capacity boundary.
+	ErrAgentEmailAttachmentOmitted = errors.New("agent-email attachment payload omitted at capacity")
 	// ErrAgentEmailPilotUnavailable reports a transient pilot-wide ingestion failure.
 	ErrAgentEmailPilotUnavailable = errors.New("agent-email pilot is unavailable")
 	// ErrAgentEmailRetryCanaryTemporary reports the deliberate first-attempt
@@ -259,42 +266,51 @@ type AgentEmailProcessing struct {
 // AgentEmailMessage deliberately has no raw-MIME or attachment-content field.
 // Text is populated only by the explicit owner read operation and is untrusted.
 type AgentEmailMessage struct {
-	ID                         string               `json:"id"`
-	AccountID                  string               `json:"account_id"`
-	RealmID                    string               `json:"realm_id"`
-	MailboxID                  string               `json:"mailbox_id"`
-	OwnerAgentID               string               `json:"owner_agent_id"`
-	AddressID                  string               `json:"address_id"`
-	Provider                   string               `json:"provider"`
-	EnvelopeSender             string               `json:"envelope_sender"`
-	EnvelopeRecipient          string               `json:"envelope_recipient"`
-	AgentSegment               string               `json:"agent_segment"`
-	RealmLabel                 string               `json:"realm_label"`
-	SubaddressTag              string               `json:"subaddress_tag,omitempty"`
-	RawSizeBytes               int64                `json:"raw_size_bytes"`
-	ParseState                 string               `json:"parse_state"`
-	ParseErrorCode             string               `json:"parse_error_code,omitempty"`
-	HeaderFrom                 string               `json:"header_from,omitempty"`
-	HeaderTo                   string               `json:"header_to,omitempty"`
-	Subject                    string               `json:"subject,omitempty"`
-	MIMEMessageID              string               `json:"mime_message_id,omitempty"`
-	MessageDate                *time.Time           `json:"message_date,omitempty"`
-	AttachmentCount            int64                `json:"attachment_count"`
-	SPFResult                  string               `json:"spf_result"`
-	DKIMResult                 string               `json:"dkim_result"`
-	DMARCResult                string               `json:"dmarc_result"`
-	SpamVerdict                string               `json:"spam_verdict"`
-	SenderVerificationState    string               `json:"sender_verification_state"`
-	PossibleDuplicate          bool                 `json:"possible_duplicate"`
-	PossibleDuplicateOfMessage string               `json:"possible_duplicate_of_message_id,omitempty"`
-	ReceivedAt                 time.Time            `json:"received_at"`
-	CreatedAt                  time.Time            `json:"created_at"`
-	Folder                     string               `json:"folder"`
-	DeliveredAt                time.Time            `json:"delivered_at"`
-	ReadState                  AgentEmailReadState  `json:"read_state"`
-	Processing                 AgentEmailProcessing `json:"processing"`
-	Text                       string               `json:"text,omitempty"`
-	TextKind                   string               `json:"text_kind,omitempty"`
+	ID                             string               `json:"id"`
+	AccountID                      string               `json:"account_id"`
+	RealmID                        string               `json:"realm_id"`
+	MailboxID                      string               `json:"mailbox_id"`
+	OwnerAgentID                   string               `json:"owner_agent_id"`
+	AddressID                      string               `json:"address_id"`
+	Provider                       string               `json:"provider"`
+	EnvelopeSender                 string               `json:"envelope_sender"`
+	EnvelopeRecipient              string               `json:"envelope_recipient"`
+	AgentSegment                   string               `json:"agent_segment"`
+	RealmLabel                     string               `json:"realm_label"`
+	SubaddressTag                  string               `json:"subaddress_tag,omitempty"`
+	RawSizeBytes                   int64                `json:"raw_size_bytes"`
+	ParseState                     string               `json:"parse_state"`
+	ParseErrorCode                 string               `json:"parse_error_code,omitempty"`
+	HeaderFrom                     string               `json:"header_from,omitempty"`
+	HeaderTo                       string               `json:"header_to,omitempty"`
+	Subject                        string               `json:"subject,omitempty"`
+	MIMEMessageID                  string               `json:"mime_message_id,omitempty"`
+	MessageDate                    *time.Time           `json:"message_date,omitempty"`
+	AttachmentCount                int64                `json:"attachment_count"`
+	AttachmentStorageBytes         int64                `json:"attachment_storage_bytes"`
+	RetainedAttachmentStorageBytes int64                `json:"retained_attachment_storage_bytes"`
+	PayloadRetentionState          string               `json:"payload_retention_state"`
+	SPFResult                      string               `json:"spf_result"`
+	DKIMResult                     string               `json:"dkim_result"`
+	DMARCResult                    string               `json:"dmarc_result"`
+	SpamVerdict                    string               `json:"spam_verdict"`
+	SenderVerificationState        string               `json:"sender_verification_state"`
+	PossibleDuplicate              bool                 `json:"possible_duplicate"`
+	PossibleDuplicateOfMessage     string               `json:"possible_duplicate_of_message_id,omitempty"`
+	ReceivedAt                     time.Time            `json:"received_at"`
+	CreatedAt                      time.Time            `json:"created_at"`
+	Folder                         string               `json:"folder"`
+	DeliveredAt                    time.Time            `json:"delivered_at"`
+	ReadState                      AgentEmailReadState  `json:"read_state"`
+	Processing                     AgentEmailProcessing `json:"processing"`
+	Text                           string               `json:"text,omitempty"`
+	TextKind                       string               `json:"text_kind,omitempty"`
+}
+
+// AgentEmailStorageStatus is the value-free account-wide storage posture.
+type AgentEmailStorageStatus struct {
+	MaximumRawBytes    int64             `json:"maximum_raw_bytes"`
+	AttachmentCapacity MemoryLimitStatus `json:"attachment_capacity"`
 }
 
 // AgentEmailListOptions contains the bounded owner-mailbox list filters.
@@ -407,6 +423,10 @@ func agentEmailIngestHandler(cfg AgentEmailPilotConfig, ingest AgentEmailIngestF
 		switch {
 		case err == nil:
 			writeAgentEmailVerdict(w, http.StatusOK, "accepted")
+		case errors.Is(err, ErrAgentEmailAttachmentOmitted):
+			writeAgentEmailVerdict(w, http.StatusOK, "accepted")
+		case errors.Is(err, ErrAgentEmailRawSizeExceeded):
+			writeAgentEmailVerdict(w, http.StatusRequestEntityTooLarge, "over_size")
 		case errors.Is(err, ErrAgentEmailFeatureDisabled):
 			writeAgentEmailVerdict(w, http.StatusOK, "feature_disabled")
 		case errors.Is(err, ErrAgentEmailUnknownRecipient), errors.Is(err, ErrNotFound):
@@ -423,6 +443,31 @@ func agentEmailIngestHandler(cfg AgentEmailPilotConfig, ingest AgentEmailIngestF
 			writeAgentEmailVerdict(w, http.StatusServiceUnavailable, "temporary")
 		}
 	}
+}
+
+func agentEmailStorageStatusHandler(
+	auth PrincipalAuthFunc,
+	pilot AgentEmailPilotConfig,
+	requireEntitlement func(context.Context, DomainPrincipal) error,
+	status func(context.Context, DomainPrincipal) (AgentEmailStorageStatus, error),
+) http.HandlerFunc {
+	return agentEmailNoStore(requireAgentEmailReadPrincipal(
+		auth, pilot, requireEntitlement,
+		func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+			value, err := status(r.Context(), p)
+			if writeAgentEmailOwnerError(
+				w, err, "could not read agent-email storage capacity",
+			) {
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version":      "witself.v0",
+				"maximum_raw_bytes":   value.MaximumRawBytes,
+				"attachment_capacity": value.AttachmentCapacity,
+			})
+		},
+	))
 }
 
 func parseAgentEmailRelayHeaders(r *http.Request) (agentemail.RelayMetadata, []byte, bool) {
@@ -1118,6 +1163,7 @@ func agentEmailNoStore(next http.HandlerFunc) http.HandlerFunc {
 func agentEmailNoStoreMux(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/email" || r.URL.Path == "/v1/email:listen" ||
+			r.URL.Path == "/v1/email:status" ||
 			strings.HasPrefix(r.URL.Path, "/v1/email/") ||
 			r.URL.Path == "/v1/internal/agent-email:ingest" {
 			w.Header().Set("Cache-Control", "private, no-store")

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/witwave-ai/witself/internal/plans"
@@ -536,6 +537,77 @@ func TestAdminAgentPerRealmUnlimitedOverridePath(t *testing.T) {
 		gotBody["unlimited"] != true ||
 		gotBody["reason"] != "founder agents per realm are unlimited" {
 		t.Fatalf("request = %s %s %#v", gotMethod, gotPath, gotBody)
+	}
+}
+
+func TestAdminAgentEmailLimitOverridePathsAndBounds(t *testing.T) {
+	type request struct {
+		path string
+		body map[string]any
+	}
+	var requests []request
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		requests = append(requests, request{path: r.URL.Path, body: body})
+		dimension := strings.TrimPrefix(
+			r.URL.Path, "/v1/admin/accounts/acct_1/limit-overrides/")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0",
+			"account_id":     "acct_1",
+			"plan":           "free",
+			"billing_plan":   "free",
+			"limit": map[string]any{
+				"dimension": dimension, "overridden": true,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	rawMaximum := int64(10 * 1024 * 1024)
+	if _, err := SetAdminLimitOverride(
+		t.Context(), srv.URL, "witself_adm_test", "acct_1",
+		plans.AgentEmailMaxRawBytesLimit,
+		AdminAccountLimitInput{
+			Max: &rawMaximum, Reason: "professional raw-message cap",
+		},
+	); err != nil {
+		t.Fatalf("set raw-message maximum: %v", err)
+	}
+	if _, err := SetAdminLimitOverride(
+		t.Context(), srv.URL, "witself_adm_test", "acct_1",
+		plans.AgentEmailAttachmentStorageBytesLimit,
+		AdminAccountLimitInput{
+			Unlimited: true, Reason: "founder attachment storage",
+		},
+	); err != nil {
+		t.Fatalf("set attachment storage unlimited: %v", err)
+	}
+	tooLarge := plans.MaxAgentEmailRawBytes + 1
+	if _, err := SetAdminLimitOverride(
+		t.Context(), srv.URL, "witself_adm_test", "acct_1",
+		plans.AgentEmailMaxRawBytesLimit,
+		AdminAccountLimitInput{Max: &tooLarge, Reason: "too large"},
+	); err == nil || !strings.Contains(err.Error(), "between 0 and 26214400") {
+		t.Fatalf("above-ceiling raw-message override error = %v", err)
+	}
+
+	if len(requests) != 2 {
+		t.Fatalf("requests = %#v; rejected local validation must not call server", requests)
+	}
+	if requests[0].path !=
+		"/v1/admin/accounts/acct_1/limit-overrides/agent_email_max_raw_bytes" ||
+		requests[0].body["max"] != float64(10_485_760) ||
+		requests[0].body["reason"] != "professional raw-message cap" {
+		t.Fatalf("raw-message request = %#v", requests[0])
+	}
+	if requests[1].path !=
+		"/v1/admin/accounts/acct_1/limit-overrides/agent_email_attachment_storage_bytes" ||
+		requests[1].body["unlimited"] != true ||
+		requests[1].body["reason"] != "founder attachment storage" {
+		t.Fatalf("attachment-storage request = %#v", requests[1])
 	}
 }
 

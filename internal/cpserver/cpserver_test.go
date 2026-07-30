@@ -647,6 +647,8 @@ func TestAdminLimitOverrideValidation(t *testing.T) {
 		plans.StoredMemoryLimit,
 		plans.StoredFactLimit,
 		plans.StoredSecretLimit,
+		plans.AgentEmailMaxRawBytesLimit,
+		plans.AgentEmailAttachmentStorageBytesLimit,
 	} {
 		path := "/v1/admin/accounts/acct_1/limit-overrides/" + dimension
 		if status, _ := h.call(
@@ -704,6 +706,58 @@ func TestAdminLimitOverrideValidation(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("extra path segment = %d; want 404", resp.StatusCode)
+	}
+}
+
+func TestAdminAgentEmailLimitOverrideSurfaces(t *testing.T) {
+	h := newHarness(t)
+	rawPath := "/v1/admin/accounts/acct_1/limit-overrides/" +
+		plans.AgentEmailMaxRawBytesLimit
+	attachmentPath := "/v1/admin/accounts/acct_1/limit-overrides/" +
+		plans.AgentEmailAttachmentStorageBytesLimit
+
+	status, doc := h.call(t, http.MethodPut, rawPath, "admin-good",
+		`{"max":10485760,"reason":"professional raw-message cap"}`)
+	if status != http.StatusOK {
+		t.Fatalf("PUT raw-message limit = %d %v", status, doc)
+	}
+	view := doc["limit"].(map[string]any)
+	override := view["override"].(map[string]any)
+	if view["dimension"] != plans.AgentEmailMaxRawBytesLimit ||
+		view["default_max"] != nil ||
+		view["effective_max"] != float64(10_485_760) ||
+		view["overridden"] != true ||
+		override["max"] != float64(10_485_760) {
+		t.Fatalf("raw-message override view = %v", view)
+	}
+
+	status, doc = h.call(t, http.MethodPut, attachmentPath, "admin-good",
+		`{"unlimited":true,"reason":"founder attachment storage"}`)
+	if status != http.StatusOK {
+		t.Fatalf("PUT unlimited attachment storage = %d %v", status, doc)
+	}
+	view = doc["limit"].(map[string]any)
+	override = view["override"].(map[string]any)
+	if view["dimension"] != plans.AgentEmailAttachmentStorageBytesLimit ||
+		view["default_max"] != nil ||
+		view["effective_max"] != nil ||
+		view["overridden"] != true ||
+		override["max"] != nil ||
+		override["reason"] != "founder attachment storage" {
+		t.Fatalf("attachment-storage override view = %v", view)
+	}
+
+	status, doc = h.call(t, http.MethodPut, rawPath, "admin-good",
+		`{"max":26214401,"reason":"too large"}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("PUT above-ceiling raw-message limit = %d %v; want 400",
+			status, doc)
+	}
+	status, doc = h.call(t, http.MethodGet, rawPath, "admin-good", "")
+	if status != http.StatusOK ||
+		doc["limit"].(map[string]any)["effective_max"] != float64(10_485_760) {
+		t.Fatalf("rejected raw-message override changed state = %d %v",
+			status, doc)
 	}
 }
 

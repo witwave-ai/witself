@@ -12,6 +12,7 @@ import (
 
 type fakeAgentEmailMCPBackend struct {
 	*fakeMCPBackend
+	statusCalled   bool
 	lastList       client.AgentEmailListOptions
 	lastListen     client.AgentEmailListenOptions
 	readID         string
@@ -26,6 +27,18 @@ type fakeAgentEmailMCPBackend struct {
 	lastRelease    client.AgentEmailClaimInput
 	completeID     string
 	lastComplete   client.CompleteAgentEmailInput
+}
+
+func (b *fakeAgentEmailMCPBackend) AgentEmailStorageStatus(context.Context) (client.AgentEmailStorageStatus, error) {
+	b.statusCalled = true
+	maximum, remaining := int64(5_368_709_120), int64(4_294_967_296)
+	return client.AgentEmailStorageStatus{
+		SchemaVersion:   "witself.v0",
+		MaximumRawBytes: 10_485_760,
+		AttachmentCapacity: client.MemoryLimitStatus{
+			Used: 1_073_741_824, Max: &maximum, Remaining: &remaining,
+		},
+	}, nil
 }
 
 func (b *fakeAgentEmailMCPBackend) ShowAgentEmailAddress(context.Context) (client.AgentEmailAddress, error) {
@@ -104,7 +117,7 @@ func TestWitselfMCPAgentEmailTools(t *testing.T) {
 	defer func() { _ = clientSession.Close() }()
 
 	wantTools := map[string]bool{
-		"witself.email.address.show": false, "witself.email.list": false,
+		"witself.email.status": false, "witself.email.address.show": false, "witself.email.list": false,
 		"witself.email.listen": false, "witself.email.read": false,
 		"witself.email.code.candidates": false, "witself.email.code.consume": false,
 		"witself.email.ack":   false,
@@ -136,6 +149,7 @@ func TestWitselfMCPAgentEmailTools(t *testing.T) {
 		}
 		return result
 	}
+	status := call("witself.email.status", map[string]any{})
 	call("witself.email.address.show", map[string]any{})
 	call("witself.email.list", map[string]any{"unread_only": true, "unacked_only": true, "limit": 7})
 	wait := 0
@@ -196,7 +210,21 @@ func TestWitselfMCPAgentEmailTools(t *testing.T) {
 	if ackOutput.Message.Text != "" {
 		t.Fatalf("ack exposed email text: %#v", ackOutput)
 	}
-	if backend.lastList.Limit != 7 || !backend.lastList.Unread || !backend.lastList.Unacked ||
+	statusJSON, err := json.Marshal(status.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var statusOutput client.AgentEmailStorageStatus
+	if err := json.Unmarshal(statusJSON, &statusOutput); err != nil {
+		t.Fatal(err)
+	}
+	if statusOutput.MaximumRawBytes != 10_485_760 ||
+		statusOutput.AttachmentCapacity.Max == nil ||
+		*statusOutput.AttachmentCapacity.Max != 5_368_709_120 {
+		t.Fatalf("email status output = %#v", statusOutput)
+	}
+	if !backend.statusCalled ||
+		backend.lastList.Limit != 7 || !backend.lastList.Unread || !backend.lastList.Unacked ||
 		backend.lastListen.WaitSeconds == nil || *backend.lastListen.WaitSeconds != 0 ||
 		backend.readID == "" || backend.readCalls != 2 || backend.ackedID == "" || backend.codeConsumedID == "" ||
 		backend.lastClaim.IdempotencyKey != "claim-1" || backend.lastRenew.LeaseSeconds != 120 ||
@@ -263,10 +291,13 @@ func TestAgentEmailMCPProfileBoundaries(t *testing.T) {
 			got[tool.Name] = true
 		}
 		if opts.ReadOnly {
-			for _, name := range []string{"witself.email.address.show", "witself.email.list", "witself.email.listen"} {
+			for _, name := range []string{"witself.email.status", "witself.email.address.show", "witself.email.list", "witself.email.listen"} {
 				if !got[name] {
 					t.Errorf("read-only profile omitted %s", name)
 				}
+			}
+			if instructions := clientSession.InitializeResult().Instructions; !strings.Contains(instructions, "witself.email.status") {
+				t.Errorf("read-only instructions omitted witself.email.status: %q", instructions)
 			}
 			for _, name := range []string{"witself.email.read", "witself.email.code.candidates", "witself.email.code.consume", "witself.email.ack", "witself.email.claim", "witself.email.renew", "witself.email.release", "witself.email.complete"} {
 				if got[name] {

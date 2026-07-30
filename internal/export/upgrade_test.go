@@ -286,6 +286,94 @@ func TestSchema75ActiveFactCountUpgradePreservesPortableRows(t *testing.T) {
 	}
 }
 
+func TestSchema78AgentEmailAttachmentStorageUpgrade(t *testing.T) {
+	upgrade := UpgraderFor(78)
+	if upgrade == nil {
+		t.Fatal("schema 78 agent-email payload upgrader is not registered")
+	}
+	for _, test := range []struct {
+		name            string
+		parseState      string
+		attachmentCount string
+		wantStorage     int64
+	}{
+		{name: "parsed without attachments", parseState: "parsed", attachmentCount: "0", wantStorage: 0},
+		{name: "parsed with attachment", parseState: "parsed", attachmentCount: "2", wantStorage: 1234},
+		{name: "parse error is conservative", parseState: "error", attachmentCount: "0", wantStorage: 1234},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			row, err := upgrade("agent_email_messages", map[string]any{
+				"id":               "emsg_aaaaaaaaaaaaaaaa",
+				"raw_size_bytes":   json.Number("1234"),
+				"attachment_count": json.Number(test.attachmentCount),
+				"parse_state":      test.parseState,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if row["body_text"] != nil || row["body_text_kind"] != nil {
+				t.Fatalf("legacy body projection was invented: %#v", row)
+			}
+			if row["attachment_storage_bytes"] != test.wantStorage ||
+				row["retained_attachment_storage_bytes"] != test.wantStorage ||
+				row["payload_retention_state"] != "retained" {
+				t.Fatalf("upgraded payload storage = %#v", row)
+			}
+		})
+	}
+
+	account := map[string]any{"id": "acc_1"}
+	got, err := upgrade("accounts", account)
+	if err != nil || !reflect.DeepEqual(got, account) {
+		t.Fatalf("unrelated account row = %#v / %v", got, err)
+	}
+	if _, exists := got["retained_agent_email_attachment_bytes"]; exists {
+		t.Fatalf("upgrader invented derived account counter: %#v", got)
+	}
+}
+
+func TestSchema78AgentEmailAttachmentStorageUpgradeRejectsMalformedLegacyRows(t *testing.T) {
+	upgrade := UpgraderFor(78)
+	for _, test := range []struct {
+		name string
+		row  map[string]any
+	}{
+		{
+			name: "missing raw size",
+			row: map[string]any{
+				"attachment_count": json.Number("0"), "parse_state": "parsed",
+			},
+		},
+		{
+			name: "nonpositive raw size",
+			row: map[string]any{
+				"raw_size_bytes": json.Number("0"), "attachment_count": json.Number("0"),
+				"parse_state": "parsed",
+			},
+		},
+		{
+			name: "negative attachment count",
+			row: map[string]any{
+				"raw_size_bytes": json.Number("1"), "attachment_count": json.Number("-1"),
+				"parse_state": "parsed",
+			},
+		},
+		{
+			name: "invalid parse state",
+			row: map[string]any{
+				"raw_size_bytes": json.Number("1"), "attachment_count": json.Number("0"),
+				"parse_state": "forged",
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := upgrade("agent_email_messages", test.row); err == nil {
+				t.Fatal("malformed legacy row was accepted")
+			}
+		})
+	}
+}
+
 func TestSchema36MessageAudienceUpgradeDefaultsToDirect(t *testing.T) {
 	upgrade := UpgraderFor(36)
 	if upgrade == nil {

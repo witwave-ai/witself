@@ -178,6 +178,7 @@ func Register(mux *http.ServeMux, cfg Config) error {
 	mux.Handle("GET /api/memories/{id}/history", secure(cfg, session, memoryHistoryHandler(cfg)))
 	mux.Handle("GET /api/messages", secure(cfg, session, messagesHandler(cfg)))
 	mux.Handle("GET /api/email/address", secure(cfg, session, agentEmailAddressHandler(cfg)))
+	mux.Handle("GET /api/email/status", secure(cfg, session, agentEmailStatusHandler(cfg)))
 	mux.Handle("GET /api/email", secure(cfg, session, agentEmailsHandler(cfg)))
 	mux.Handle("GET /api/facts", secure(cfg, session, factsHandler(cfg, factReads)))
 	mux.Handle("GET /api/facts/{id}/history", secure(cfg, session, factHistoryHandler(cfg, factReads)))
@@ -716,6 +717,24 @@ type sanitizedAgentEmailAddress struct {
 	RetiredAt         *time.Time `json:"retired_at,omitempty"`
 }
 
+// sanitizedAgentEmailStorageStatus is the complete value-free email capacity
+// shape permitted in the browser. Schema identifiers and any future client
+// fields stay behind this explicit projection.
+type sanitizedAgentEmailStorageStatus struct {
+	MaximumRawBytes    int64                       `json:"maximum_raw_bytes"`
+	AttachmentCapacity sanitizedAgentEmailCapacity `json:"attachment_capacity"`
+}
+
+type sanitizedAgentEmailCapacity struct {
+	Used      int64  `json:"used"`
+	Max       *int64 `json:"max"`
+	Remaining *int64 `json:"remaining"`
+	Unlimited bool   `json:"unlimited"`
+	NearLimit bool   `json:"near_limit"`
+	AtLimit   bool   `json:"at_limit"`
+	OverLimit bool   `json:"over_limit"`
+}
+
 // sanitizedAgentEmailMessage is the only email shape allowed across the
 // local browser boundary. It is rebuilt field-by-field instead of clearing a
 // few current client fields, so future client additions cannot accidentally
@@ -725,24 +744,27 @@ type sanitizedAgentEmailAddress struct {
 // page offers no per-message action and therefore gives browser code no target
 // for :read, :ack, :claim, or another lifecycle call.
 type sanitizedAgentEmailMessage struct {
-	Provider                string                       `json:"provider,omitempty"`
-	EnvelopeSender          string                       `json:"envelope_sender,omitempty"`
-	Subject                 string                       `json:"subject,omitempty"`
-	RawSizeBytes            int64                        `json:"raw_size_bytes"`
-	ParseState              string                       `json:"parse_state,omitempty"`
-	ParseErrorCode          string                       `json:"parse_error_code,omitempty"`
-	AttachmentCount         int64                        `json:"attachment_count"`
-	SPFResult               string                       `json:"spf_result,omitempty"`
-	DKIMResult              string                       `json:"dkim_result,omitempty"`
-	DMARCResult             string                       `json:"dmarc_result,omitempty"`
-	SpamVerdict             string                       `json:"spam_verdict,omitempty"`
-	SenderVerificationState string                       `json:"sender_verification_state"`
-	PossibleDuplicate       bool                         `json:"possible_duplicate"`
-	ReceivedAt              time.Time                    `json:"received_at"`
-	DeliveredAt             time.Time                    `json:"delivered_at"`
-	Folder                  string                       `json:"folder,omitempty"`
-	ReadState               sanitizedAgentEmailReadState `json:"read_state"`
-	Processing              sanitizedAgentEmailProcess   `json:"processing"`
+	Provider                       string                       `json:"provider,omitempty"`
+	EnvelopeSender                 string                       `json:"envelope_sender,omitempty"`
+	Subject                        string                       `json:"subject,omitempty"`
+	RawSizeBytes                   int64                        `json:"raw_size_bytes"`
+	ParseState                     string                       `json:"parse_state,omitempty"`
+	ParseErrorCode                 string                       `json:"parse_error_code,omitempty"`
+	AttachmentCount                int64                        `json:"attachment_count"`
+	AttachmentStorageBytes         int64                        `json:"attachment_storage_bytes"`
+	RetainedAttachmentStorageBytes int64                        `json:"retained_attachment_storage_bytes"`
+	PayloadRetentionState          string                       `json:"payload_retention_state"`
+	SPFResult                      string                       `json:"spf_result,omitempty"`
+	DKIMResult                     string                       `json:"dkim_result,omitempty"`
+	DMARCResult                    string                       `json:"dmarc_result,omitempty"`
+	SpamVerdict                    string                       `json:"spam_verdict,omitempty"`
+	SenderVerificationState        string                       `json:"sender_verification_state"`
+	PossibleDuplicate              bool                         `json:"possible_duplicate"`
+	ReceivedAt                     time.Time                    `json:"received_at"`
+	DeliveredAt                    time.Time                    `json:"delivered_at"`
+	Folder                         string                       `json:"folder,omitempty"`
+	ReadState                      sanitizedAgentEmailReadState `json:"read_state"`
+	Processing                     sanitizedAgentEmailProcess   `json:"processing"`
 }
 
 type sanitizedAgentEmailReadState struct {
@@ -774,6 +796,21 @@ func sanitizeAgentEmailAddress(address client.AgentEmailAddress) sanitizedAgentE
 	}
 }
 
+func sanitizeAgentEmailStorageStatus(status *client.AgentEmailStorageStatus) sanitizedAgentEmailStorageStatus {
+	return sanitizedAgentEmailStorageStatus{
+		MaximumRawBytes: status.MaximumRawBytes,
+		AttachmentCapacity: sanitizedAgentEmailCapacity{
+			Used:      status.AttachmentCapacity.Used,
+			Max:       status.AttachmentCapacity.Max,
+			Remaining: status.AttachmentCapacity.Remaining,
+			Unlimited: status.AttachmentCapacity.Unlimited,
+			NearLimit: status.AttachmentCapacity.NearLimit,
+			AtLimit:   status.AttachmentCapacity.AtLimit,
+			OverLimit: status.AttachmentCapacity.OverLimit,
+		},
+	}
+}
+
 func sanitizeAgentEmails(messages []client.AgentEmailMessage) []sanitizedAgentEmailMessage {
 	if len(messages) > sseEmailPageLimit {
 		messages = messages[:sseEmailPageLimit]
@@ -781,22 +818,25 @@ func sanitizeAgentEmails(messages []client.AgentEmailMessage) []sanitizedAgentEm
 	out := make([]sanitizedAgentEmailMessage, 0, len(messages))
 	for _, message := range messages {
 		out = append(out, sanitizedAgentEmailMessage{
-			Provider:                message.Provider,
-			EnvelopeSender:          message.EnvelopeSender,
-			Subject:                 message.Subject,
-			RawSizeBytes:            message.RawSizeBytes,
-			ParseState:              message.ParseState,
-			ParseErrorCode:          message.ParseErrorCode,
-			AttachmentCount:         message.AttachmentCount,
-			SPFResult:               message.SPFResult,
-			DKIMResult:              message.DKIMResult,
-			DMARCResult:             message.DMARCResult,
-			SpamVerdict:             message.SpamVerdict,
-			SenderVerificationState: message.SenderVerificationState,
-			PossibleDuplicate:       message.PossibleDuplicate,
-			ReceivedAt:              message.ReceivedAt,
-			DeliveredAt:             message.DeliveredAt,
-			Folder:                  message.Folder,
+			Provider:                       message.Provider,
+			EnvelopeSender:                 message.EnvelopeSender,
+			Subject:                        message.Subject,
+			RawSizeBytes:                   message.RawSizeBytes,
+			ParseState:                     message.ParseState,
+			ParseErrorCode:                 message.ParseErrorCode,
+			AttachmentCount:                message.AttachmentCount,
+			AttachmentStorageBytes:         message.AttachmentStorageBytes,
+			RetainedAttachmentStorageBytes: message.RetainedAttachmentStorageBytes,
+			PayloadRetentionState:          message.PayloadRetentionState,
+			SPFResult:                      message.SPFResult,
+			DKIMResult:                     message.DKIMResult,
+			DMARCResult:                    message.DMARCResult,
+			SpamVerdict:                    message.SpamVerdict,
+			SenderVerificationState:        message.SenderVerificationState,
+			PossibleDuplicate:              message.PossibleDuplicate,
+			ReceivedAt:                     message.ReceivedAt,
+			DeliveredAt:                    message.DeliveredAt,
+			Folder:                         message.Folder,
 			ReadState: sanitizedAgentEmailReadState{
 				State:          message.ReadState.State,
 				ReadAt:         message.ReadState.ReadAt,
@@ -858,6 +898,27 @@ func agentEmailAddressHandler(cfg Config) http.Handler {
 			"available": true,
 			"enrolled":  true,
 			"address":   sanitizeAgentEmailAddress(address),
+		})
+	})
+}
+
+// agentEmailStatusHandler proxies exactly GET /v1/email:status and rebuilds
+// the response from value-free capacity fields. It never forwards arbitrary
+// upstream status payloads or calls an email lifecycle route.
+func agentEmailStatusHandler(cfg Config) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		status, err := client.GetAgentEmailStorageStatus(r.Context(), cfg.Endpoint, cfg.BearerToken)
+		if err != nil {
+			if kind := agentEmailUnavailableKind(err); kind != "" {
+				writeAgentEmailUnavailable(w, kind)
+				return
+			}
+			writeAgentEmailUpstreamError(w, err)
+			return
+		}
+		writeJSON(w, map[string]any{
+			"available": true,
+			"status":    sanitizeAgentEmailStorageStatus(status),
 		})
 	})
 }
@@ -1562,9 +1623,12 @@ func emitMessagesEvent(ctx context.Context, cfg Config, w io.Writer, flusher htt
 	return nil
 }
 
-// emitAgentEmailEvent polls only GET /v1/email. It never long-polls :listen,
-// reads content, acknowledges delivery, or acquires a processing lease. The
-// same allow-list projection as the JSON list route is applied before the
+// emitAgentEmailEvent polls the passive GET /v1/email list and the value-free
+// GET /v1/email:status capacity view. It never long-polls :listen, reads
+// content, acknowledges delivery, or acquires a processing lease. Bundling
+// capacity into this existing email tick keeps an open pane current after
+// message ingestion or an admin policy change without adding a browser timer.
+// The same allow-list projections as the JSON routes are applied before the
 // frame crosses into the browser. Feature absence or revoked pilot enrollment
 // is a settled UI state, not a degraded transport.
 func emitAgentEmailEvent(ctx context.Context, cfg Config, opts client.AgentEmailListOptions, w io.Writer, flusher http.Flusher) error {
@@ -1583,10 +1647,24 @@ func emitAgentEmailEvent(ctx context.Context, cfg Config, opts client.AgentEmail
 		}
 		return err
 	}
+	status, err := client.GetAgentEmailStorageStatus(ctx, cfg.Endpoint, cfg.BearerToken)
+	if err != nil {
+		if kind := agentEmailUnavailableKind(err); kind != "" {
+			writeSSE(w, flusher, "email", "", map[string]any{
+				"available": false,
+				"enrolled":  false,
+				"reason":    kind,
+				"messages":  []sanitizedAgentEmailMessage{},
+			})
+			return nil
+		}
+		return err
+	}
 	writeSSE(w, flusher, "email", "", map[string]any{
 		"available": true,
 		"enrolled":  true,
 		"messages":  sanitizeAgentEmails(page.Messages),
+		"status":    sanitizeAgentEmailStorageStatus(status),
 	})
 	return nil
 }

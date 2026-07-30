@@ -514,6 +514,7 @@ type Config struct {
 	IngestAgentEmailPilot        AgentEmailIngestFunc
 	RequireAgentEmailEntitlement func(ctx context.Context, p DomainPrincipal) error
 	GetAgentEmailAddress         func(ctx context.Context, p DomainPrincipal) (AgentEmailAddress, error)
+	GetAgentEmailStorageStatus   func(ctx context.Context, p DomainPrincipal) (AgentEmailStorageStatus, error)
 	ListAgentEmails              func(ctx context.Context, p DomainPrincipal, opts AgentEmailListOptions) (AgentEmailPage, error)
 	ReadAgentEmail               func(ctx context.Context, p DomainPrincipal, messageID string) (AgentEmailMessage, error)
 	AckAgentEmail                func(ctx context.Context, p DomainPrincipal, messageID string) (AgentEmailMessage, error)
@@ -2313,6 +2314,11 @@ func apiMux(cfg Config) http.Handler {
 				mux.HandleFunc("GET /v1/email/address", getAgentEmailAddressHandler(
 					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot,
 					cfg.RequireAgentEmailEntitlement, cfg.GetAgentEmailAddress))
+			}
+			if cfg.GetAgentEmailStorageStatus != nil {
+				mux.HandleFunc("GET /v1/email:status", agentEmailStorageStatusHandler(
+					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot,
+					cfg.RequireAgentEmailEntitlement, cfg.GetAgentEmailStorageStatus))
 			}
 			if cfg.ListAgentEmails != nil {
 				mux.HandleFunc("GET /v1/email", listAgentEmailsHandler(

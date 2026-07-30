@@ -134,6 +134,18 @@ func TestGrokPortableMCPInstructionsRewritesMemoryReadTool(t *testing.T) {
 	}
 }
 
+func TestGrokPortableMCPInstructionsRewritesEmailStatusTool(t *testing.T) {
+	got := grokPortableMCPInstructions(
+		"call witself.email.status before inspecting mailbox metadata",
+		"witself_self_show",
+		"witself_message_list",
+	)
+	if strings.Contains(got, "witself.email.status") ||
+		!strings.Contains(got, "witself_email_status") {
+		t.Fatalf("email status tool was not rewritten for Grok: %q", got)
+	}
+}
+
 func TestGrokPortableMCPInstructionsRewritesEveryCurationTool(t *testing.T) {
 	for _, dotted := range []string{
 		"witself.memory.curation.preflight",

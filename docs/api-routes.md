@@ -152,6 +152,7 @@ POST /v1/messages/{message_id}:renew
 POST /v1/messages/{message_id}:release
 POST /v1/messages/{message_id}:complete
 GET  /v1/email/address
+GET  /v1/email:status
 GET  /v1/email
 POST /v1/email:listen
 GET  /v1/email/checkpoint
@@ -400,6 +401,7 @@ POST /v1/messages/{message_id}:complete
 
 # Default-off, owner-agent-only receive-email pilot.
 GET  /v1/email/address
+GET  /v1/email:status
 GET  /v1/email
 POST /v1/email:listen
 GET  /v1/email/checkpoint
@@ -738,8 +740,14 @@ audit events; read-only recall does neither:
   `limit` 1–100, `cursor`). `POST /v1/email:listen` is a stateless metadata-only
   long poll (`wait_seconds` 0–20, default 20; `limit` 1–100) over oldest
   unacknowledged mail. Neither operation marks read/acknowledged, exposes body
-  text, raw MIME, attachment details beyond the count, or returns an active
-  claim capability. Listen admission is bounded per process and per agent.
+  text, raw MIME, attachment names/media types/content, or returns an active
+  claim capability. The metadata projection includes attachment count,
+  attachment-storage byte counts, and payload-retention state. Listen admission
+  is bounded per process and per agent.
+- `GET /v1/email:status` is value-free and reports the effective per-message
+  raw-MIME maximum plus account-wide attachment-storage capacity (`used`,
+  nullable `max`/`remaining`, `unlimited`, `near_limit`, `at_limit`, and
+  `over_limit`). It never exposes message, sender, or attachment content.
 - `POST /v1/email/{message_id}:read` marks read and returns bounded decoded text
   with the sender explicitly unverified. Raw MIME, HTML markup, attachment
   names/media types/bytes, trusted auth results, and provider identifiers are
@@ -767,9 +775,10 @@ audit events; read-only recall does neither:
 - `POST /v1/internal/agent-email:ingest` accepts only the byte-identical raw body
   with the pilot's Ed25519 relay headers. It verifies key id, signature, body
   digest/size, audience, and a bounded timestamp window before calling the
-  scoped store. The endpoint is capped at 5 MiB and returns only a typed,
-  content-free verdict; successful `accepted` is emitted only after the owning
-  cell commit. It is not a public bearer-token route.
+  scoped store. The endpoint is capped at the 25 MiB transport ceiling; the
+  owning cell enforces any lower resolved account limit and returns the exact
+  content-free `over_size` verdict. Successful `accepted` is emitted only after
+  the owning cell commit. It is not a public bearer-token route.
 - `POST /v1/message-requests` requires an agent token and `Idempotency-Key` and
   creates one realm `kind=open_request` message plus an immutable candidate
   snapshot in the same transaction. `selection_policy` is omitted or

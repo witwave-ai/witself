@@ -64,6 +64,16 @@ func TestAgentEmailSignedIngestHTTPContract(t *testing.T) {
 	handler.ServeHTTP(response, testAgentEmailIngestRequest(t, raw, metadata, privateKey))
 	assertAgentEmailVerdict(t, response, http.StatusOK, "feature_disabled")
 
+	ingestErr = ErrAgentEmailRawSizeExceeded
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, testAgentEmailIngestRequest(t, raw, metadata, privateKey))
+	assertAgentEmailVerdict(t, response, http.StatusRequestEntityTooLarge, "over_size")
+
+	ingestErr = ErrAgentEmailAttachmentOmitted
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, testAgentEmailIngestRequest(t, raw, metadata, privateKey))
+	assertAgentEmailVerdict(t, response, http.StatusOK, "accepted")
+
 	ingestErr = ErrAgentEmailRetryCanaryTemporary
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, testAgentEmailIngestRequest(t, raw, metadata, privateKey))
@@ -125,6 +135,114 @@ func TestAgentEmailSignedIngestHTTPContract(t *testing.T) {
 	})
 	if calls != validCalls {
 		t.Fatalf("invalid relay requests reached ingest: calls %d want %d", calls, validCalls)
+	}
+}
+
+func TestAgentEmailStorageStatusHTTPContractAndFeatureGate(t *testing.T) {
+	pilot, _ := testAgentEmailPilotConfig(t)
+	principal := DomainPrincipal{
+		Kind: PrincipalKindAgent, ID: "agent_aaaaaaaaaaaaaaaa",
+		AccountID: "acc_1", RealmID: "realm_aaaaaaaaaaaaaaaa",
+		AccountStatus: "active", AccessProfile: AccessProfileFull,
+	}
+	maximum, remaining := int64(8192), int64(1024)
+	statusCalls := 0
+	entitlementCalls := 0
+	cfg := Config{
+		AuthenticatePrincipal: func(context.Context, string) (DomainPrincipal, bool, error) {
+			return principal, true, nil
+		},
+		AgentEmailPilot: pilot,
+		RequireAgentEmailEntitlement: func(context.Context, DomainPrincipal) error {
+			entitlementCalls++
+			return nil
+		},
+		GetAgentEmailStorageStatus: func(_ context.Context, got DomainPrincipal) (AgentEmailStorageStatus, error) {
+			statusCalls++
+			if got.ID != principal.ID || got.AccountID != principal.AccountID ||
+				got.RealmID != principal.RealmID {
+				t.Fatalf("storage principal = %+v", got)
+			}
+			return AgentEmailStorageStatus{
+				MaximumRawBytes: 10 * 1024 * 1024,
+				AttachmentCapacity: MemoryLimitStatus{
+					Used: 7168, Max: &maximum, Remaining: &remaining,
+					NearLimit: true,
+				},
+			}, nil
+		},
+	}
+
+	response := performAgentEmailOwnerRequest(
+		apiMux(cfg), http.MethodGet, "/v1/email:status", "token", "", nil,
+	)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status response = %d %s", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Cache-Control"); got != "private, no-store" {
+		t.Fatalf("status Cache-Control = %q", got)
+	}
+	var rawShape map[string]json.RawMessage
+	if err := json.Unmarshal(response.Body.Bytes(), &rawShape); err != nil {
+		t.Fatal(err)
+	}
+	if len(rawShape) != 3 || rawShape["schema_version"] == nil ||
+		rawShape["maximum_raw_bytes"] == nil || rawShape["attachment_capacity"] == nil {
+		t.Fatalf("status top-level shape = %#v", rawShape)
+	}
+	var body struct {
+		SchemaVersion      string            `json:"schema_version"`
+		MaximumRawBytes    int64             `json:"maximum_raw_bytes"`
+		AttachmentCapacity MemoryLimitStatus `json:"attachment_capacity"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.SchemaVersion != "witself.v0" ||
+		body.MaximumRawBytes != 10*1024*1024 ||
+		body.AttachmentCapacity.Used != 7168 ||
+		body.AttachmentCapacity.Max == nil || *body.AttachmentCapacity.Max != maximum ||
+		body.AttachmentCapacity.Remaining == nil || *body.AttachmentCapacity.Remaining != remaining ||
+		!body.AttachmentCapacity.NearLimit ||
+		body.AttachmentCapacity.Unlimited || body.AttachmentCapacity.AtLimit ||
+		body.AttachmentCapacity.OverLimit || body.AttachmentCapacity.Unavailable {
+		t.Fatalf("status body = %+v", body)
+	}
+	var capacityShape map[string]json.RawMessage
+	if err := json.Unmarshal(rawShape["attachment_capacity"], &capacityShape); err != nil {
+		t.Fatal(err)
+	}
+	if len(capacityShape) != 7 || capacityShape["used"] == nil ||
+		capacityShape["max"] == nil || capacityShape["remaining"] == nil ||
+		capacityShape["unlimited"] == nil || capacityShape["near_limit"] == nil ||
+		capacityShape["at_limit"] == nil || capacityShape["over_limit"] == nil {
+		t.Fatalf("attachment capacity shape = %#v", capacityShape)
+	}
+	if statusCalls != 1 || entitlementCalls != 1 {
+		t.Fatalf("status calls = %d entitlement calls = %d", statusCalls, entitlementCalls)
+	}
+
+	cfg.RequireAgentEmailEntitlement = func(context.Context, DomainPrincipal) error {
+		entitlementCalls++
+		return &FeatureNotEnabledError{Feature: "agent_email_receive"}
+	}
+	response = performAgentEmailOwnerRequest(
+		apiMux(cfg), http.MethodGet, "/v1/email:status", "token", "", nil,
+	)
+	if response.Code != http.StatusForbidden ||
+		!containsAll(
+			response.Body.String(),
+			`"code":"feature_not_enabled"`,
+			`"feature":"agent_email_receive"`,
+			`"retryable":false`,
+		) {
+		t.Fatalf("disabled status response = %d %s", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Cache-Control"); got != "private, no-store" {
+		t.Fatalf("disabled status Cache-Control = %q", got)
+	}
+	if statusCalls != 1 || entitlementCalls != 2 {
+		t.Fatalf("disabled gate reached status: status calls = %d entitlement calls = %d", statusCalls, entitlementCalls)
 	}
 }
 

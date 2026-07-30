@@ -4001,6 +4001,8 @@ operator credential and an exact configured pilot agent or realm target. The
 pilot is limited to one realm and 5–10 agents.
 
 ```sh
+witself email status
+witself email status --json
 witself email address show
 witself email list --unread
 witself email listen --timeout 0
@@ -4025,8 +4027,9 @@ Subcommands:
 
 | Command | Behavior |
 |---|---|
+| `status` | Show the applied per-message raw-email maximum and value-free account-wide retained attachment-bearing-MIME capacity. Human output uses IEC byte units plus exact byte counts; `--json` preserves the server projection. |
 | `address show` | Show the token-bound agent's one provisioned pilot address and receive state. |
-| `list` | Metadata-only newest-first page. Accepts `--unread`, `--unacked`, `--limit 1-100`, and `--cursor`; returns no body, raw MIME, attachment detail beyond the count, or claim capability. |
+| `list` | Metadata-only newest-first page. Accepts `--unread`, `--unacked`, `--limit 1-100`, and `--cursor`; returns attachment count/storage/retention state but no body, raw MIME, attachment names/types/content, or claim capability. |
 | `listen` | Metadata-only oldest-unacknowledged wait with `--timeout 0-20` (default 20) and `--limit 1-100`; timeout/dropped polling changes no state and never wakes a client. |
 | `read ID` | Mark one email read and return bounded decoded text. It always prints a sender-unverified/untrusted-content warning; raw MIME, HTML markup, attachment names/media types/bytes, and trusted auth/spam fields are unavailable. |
 | `code-candidates ID` | Perform the same owner-only read, then locally scan the subject plus the UTF-8-safe first 64 KiB decoded text for keyword-associated standalone 4–8 digit ASCII candidates. Parse failure is unavailable; truncation or overflow forces `ambiguous`. It never follows, selects, uses, or consumes anything. |
@@ -4060,7 +4063,10 @@ automation, and automated link following.
 Human `list`/`listen` output labels the displayed From column unverified. JSON
 mirrors [json-contracts.md](json-contracts.md#agent-email-pilot). Read-state,
 code-consumption, processing completion, and acknowledgement are deliberately
-separate transitions. The installed foreground policy handles at most one
+separate transitions. Message projections also carry the value-free
+`attachment_storage_bytes`, `retained_attachment_storage_bytes`, and
+`payload_retention_state` fields; they never expose attachment content. The
+installed foreground policy handles at most one
 pending Witself messaging-or-email lane per turn after user work; there is no
 email runner or wake service.
 

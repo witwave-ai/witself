@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"math"
 	"mime"
 	"mime/multipart"
 	"mime/quotedprintable"
@@ -112,19 +113,20 @@ var (
 )
 
 // ParsedMessage is a bounded deterministic MIME projection. Header values and
-// text remain untrusted external content. Attachment bytes are never returned.
+// text remain untrusted external content. Attachment content is never returned.
 type ParsedMessage struct {
-	HeaderFrom           string
-	HeaderTo             string
-	HeaderSubject        string
-	MIMEMessageID        string
-	MIMEContentType      string
-	MIMETransferEncoding string
-	MIMEVersion          string
-	MessageDate          *time.Time
-	AttachmentCount      int64
-	Text                 string
-	TextKind             string
+	HeaderFrom             string
+	HeaderTo               string
+	HeaderSubject          string
+	MIMEMessageID          string
+	MIMEContentType        string
+	MIMETransferEncoding   string
+	MIMEVersion            string
+	MessageDate            *time.Time
+	AttachmentCount        int64
+	AttachmentPayloadBytes int64
+	Text                   string
+	TextKind               string
 }
 
 // ParseMessage extracts bounded metadata and, when includeText is true, one
@@ -161,11 +163,12 @@ func ParseMessage(raw []byte, includeText bool) (ParsedMessage, error) {
 	}
 
 	walker := mimeWalker{includeText: includeText}
-	if err := walker.walk(textproto.MIMEHeader(message.Header), message.Body, 0); err != nil {
-		parsed.AttachmentCount = int64(walker.attachmentCount)
-		return parsed, err
-	}
+	walkErr := walker.walk(textproto.MIMEHeader(message.Header), message.Body, 0)
 	parsed.AttachmentCount = int64(walker.attachmentCount)
+	parsed.AttachmentPayloadBytes = walker.attachmentPayloadBytes
+	if walkErr != nil {
+		return parsed, walkErr
+	}
 	if includeText {
 		if walker.plainText != "" {
 			parsed.Text = walker.plainText
@@ -224,12 +227,13 @@ func ParseErrorCode(err error) string {
 }
 
 type mimeWalker struct {
-	includeText     bool
-	parts           int
-	attachmentCount int
-	decodedBytes    int
-	plainText       string
-	htmlText        string
+	includeText            bool
+	parts                  int
+	attachmentCount        int
+	attachmentPayloadBytes int64
+	decodedBytes           int
+	plainText              string
+	htmlText               string
 }
 
 func (w *mimeWalker) walk(header textproto.MIMEHeader, body io.Reader, depth int) error {
@@ -261,7 +265,7 @@ func (w *mimeWalker) walk(header textproto.MIMEHeader, body io.Reader, depth int
 	}
 	if strings.EqualFold(disposition, "attachment") || filename != "" {
 		w.attachmentCount++
-		return nil
+		return w.countAttachmentPayload(body)
 	}
 	if strings.HasPrefix(mediaType, "multipart/") {
 		boundary := params["boundary"]
@@ -270,7 +274,7 @@ func (w *mimeWalker) walk(header textproto.MIMEHeader, body io.Reader, depth int
 		}
 		reader := multipart.NewReader(body, boundary)
 		for {
-			part, err := reader.NextPart()
+			part, err := reader.NextRawPart()
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
@@ -288,7 +292,7 @@ func (w *mimeWalker) walk(header textproto.MIMEHeader, body io.Reader, depth int
 	// including inline parts that omit both filename and attachment disposition.
 	if mediaType != "text/plain" && mediaType != "text/html" {
 		w.attachmentCount++
-		return nil
+		return w.countAttachmentPayload(body)
 	}
 	if !w.includeText {
 		return nil
@@ -327,6 +331,18 @@ func (w *mimeWalker) walk(header textproto.MIMEHeader, body io.Reader, depth int
 		w.htmlText = text
 	} else {
 		w.plainText = text
+	}
+	return nil
+}
+
+func (w *mimeWalker) countAttachmentPayload(body io.Reader) error {
+	count, err := io.Copy(io.Discard, body)
+	if count > math.MaxInt64-w.attachmentPayloadBytes {
+		return fmt.Errorf("%w: attachment payload byte count overflow", ErrMIMEInvalid)
+	}
+	w.attachmentPayloadBytes += count
+	if err != nil {
+		return fmt.Errorf("%w: read attachment payload", ErrMIMEInvalid)
 	}
 	return nil
 }

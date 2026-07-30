@@ -3,6 +3,29 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
+function emailStatusResponse() {
+  return {
+    ok: true,
+    async json() {
+      return {
+        available: true,
+        status: {
+          maximum_raw_bytes: 25 * 1024 * 1024,
+          attachment_capacity: {
+            used: 1024,
+            max: 4096,
+            remaining: 3072,
+            unlimited: false,
+            near_limit: false,
+            at_limit: false,
+            over_limit: false,
+          },
+        },
+      };
+    },
+  };
+}
+
 test("disabled then enabled checkpoint reprobes and renders the mailbox", async () => {
   const nodes = {
     "view": { innerHTML: "" },
@@ -39,6 +62,9 @@ test("disabled then enabled checkpoint reprobes and renders the mailbox", async 
         },
       };
     }
+    if (path === "/api/email/status") {
+      return emailStatusResponse();
+    }
     if (path === "/api/email?limit=100") {
       return {
         ok: true,
@@ -49,6 +75,10 @@ test("disabled then enabled checkpoint reprobes and renders the mailbox", async 
               subject: "available again",
               envelope_sender: "sender@example.test",
               received_at: "2026-07-24T12:00:00Z",
+              attachment_count: 1,
+              attachment_storage_bytes: 2048,
+              retained_attachment_storage_bytes: 0,
+              payload_retention_state: "omitted_capacity",
             }],
           };
         },
@@ -67,31 +97,49 @@ test("disabled then enabled checkpoint reprobes and renders the mailbox", async 
 
   const app = require("../static/app.js");
   app.state.emailAddress = { address: "old@example.test" };
+  app.state.emailStatus = {
+    maximum_raw_bytes: 1,
+    attachment_capacity: { used: 1, unlimited: true },
+  };
   app.state.emailMessages = [{ subject: "old" }];
   app.state.emailAvailable = true;
 
   app.applyEmailCheckpoint({ enabled: false, pending: false });
   assert.equal(app.state.emailAvailable, false);
   assert.equal(app.state.emailAddress, null);
+  assert.equal(app.state.emailStatus, null);
   assert.deepEqual(app.state.emailMessages, []);
   assert.match(nodes.view.innerHTML, /not enabled on this account/);
 
   await app.applyEmailCheckpoint({ enabled: true, pending: false });
-  assert.deepEqual(requests, ["/api/email/address", "/api/email?limit=100"]);
+  assert.deepEqual(requests, [
+    "/api/email/address",
+    "/api/email/status",
+    "/api/email?limit=100",
+  ]);
   assert.equal(app.state.emailAvailable, true);
   assert.equal(app.state.emailAddress.address, "agent@example.test");
+  assert.equal(app.state.emailStatus.attachment_capacity.remaining, 3072);
   assert.equal(app.state.emailMessages[0].subject, "available again");
   assert.match(nodes.view.innerHTML, /agent@example\.test/);
+  assert.match(nodes.view.innerHTML, /account-wide attachment capacity/);
   assert.match(nodes.view.innerHTML, /available again/);
+  assert.match(nodes.view.innerHTML, /1 attachment \(details hidden\)/);
+  assert.match(nodes.view.innerHTML, /attachment payload omitted because account-wide capacity is full/);
   assert.equal(eventSources.length, 1);
   assert.match(eventSources[0].path, /^\/api\/events\?email=true/);
 
   await app.applyEmailCheckpoint({ enabled: true, pending: false });
-  assert.deepEqual(requests, ["/api/email/address", "/api/email?limit=100"]);
+  assert.deepEqual(requests, [
+    "/api/email/address",
+    "/api/email/status",
+    "/api/email?limit=100",
+  ]);
 
   requests.length = 0;
   app.state.emailCheckpointEnabled = null;
   app.state.emailAddress = null;
+  app.state.emailStatus = null;
   app.state.emailMessages = [];
   app.state.emailAvailable = null;
   app.state.lastSelfData = '{"email_checkpoint":{"enabled":true,"pending":false}}';
@@ -124,6 +172,9 @@ test("disabled then enabled checkpoint reprobes and renders the mailbox", async 
         },
       };
     }
+    if (path === "/api/email/status") {
+      return emailStatusResponse();
+    }
     if (path === "/api/email?limit=100") {
       return {
         ok: true,
@@ -143,6 +194,7 @@ test("disabled then enabled checkpoint reprobes and renders the mailbox", async 
   assert.deepEqual(requests, [
     "/api/email/address",
     "/api/email/address",
+    "/api/email/status",
     "/api/email?limit=100",
   ]);
   assert.equal(app.state.emailAddress.address, "first-frame@example.test");
@@ -151,6 +203,7 @@ test("disabled then enabled checkpoint reprobes and renders the mailbox", async 
   requests.length = 0;
   app.state.emailCheckpointEnabled = null;
   app.state.emailAddress = null;
+  app.state.emailStatus = null;
   app.state.emailMessages = [];
   app.state.emailAvailable = null;
   app.state.lastSelfData = '{"email_checkpoint":{"enabled":true,"pending":false}}';
@@ -172,6 +225,9 @@ test("disabled then enabled checkpoint reprobes and renders the mailbox", async 
           };
         },
       };
+    }
+    if (path === "/api/email/status") {
+      return emailStatusResponse();
     }
     if (path === "/api/email?limit=100" && disabledListProbe) {
       disabledListProbe = false;
@@ -201,8 +257,10 @@ test("disabled then enabled checkpoint reprobes and renders the mailbox", async 
   await app.applyEmailCheckpoint({ enabled: true, pending: false });
   assert.deepEqual(requests, [
     "/api/email/address",
+    "/api/email/status",
     "/api/email?limit=100",
     "/api/email/address",
+    "/api/email/status",
     "/api/email?limit=100",
   ]);
   assert.equal(app.state.emailAddress.address, "list-race@example.test");

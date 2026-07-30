@@ -28,6 +28,22 @@ type mcpAgentEmailBackend interface {
 	CompleteAgentEmail(context.Context, string, client.CompleteAgentEmailInput) (client.AgentEmailProcessing, error)
 }
 
+type mcpAgentEmailStatusBackend interface {
+	AgentEmailStorageStatus(context.Context) (client.AgentEmailStorageStatus, error)
+}
+
+func (b configuredMCPBackend) AgentEmailStorageStatus(ctx context.Context) (client.AgentEmailStorageStatus, error) {
+	conn, err := b.connect(ctx)
+	if err != nil {
+		return client.AgentEmailStorageStatus{}, err
+	}
+	status, err := client.GetAgentEmailStorageStatus(ctx, conn.Endpoint, conn.Token)
+	if err != nil {
+		return client.AgentEmailStorageStatus{}, err
+	}
+	return *status, nil
+}
+
 func (b configuredMCPBackend) ShowAgentEmailAddress(ctx context.Context) (client.AgentEmailAddress, error) {
 	conn, err := b.connect(ctx)
 	if err != nil {
@@ -180,6 +196,16 @@ type mcpAgentEmailProcessingOutput struct {
 }
 
 func registerAgentEmailMCPTools(server *mcp.Server, runtimeName string, backend mcpAgentEmailBackend) {
+	if statusBackend, ok := backend.(mcpAgentEmailStatusBackend); ok {
+		mcp.AddTool(server, &mcp.Tool{
+			Name:        mcpToolName(runtimeName, "witself.email.status"),
+			Description: "Read the applied per-message raw-email maximum and the value-free account-wide retained attachment-bearing-MIME capacity. It returns only byte counts and limit state, never addresses, message metadata, content, or attachment details.",
+			Annotations: mcpReadOnlyClosedWorldAnnotations(),
+		}, func(ctx context.Context, _ *mcp.CallToolRequest, _ mcpNoInput) (*mcp.CallToolResult, client.AgentEmailStorageStatus, error) {
+			status, err := statusBackend.AgentEmailStorageStatus(ctx)
+			return nil, status, err
+		})
+	}
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        mcpToolName(runtimeName, "witself.email.address.show"),
 		Description: "Show this token-bound agent's one enrolled receive-only email address and its effective, agent-level, and realm-level receive states. The pilot feature and exact realm/agent enrollment must both be enabled.",

@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	neturl "net/url"
 	"strconv"
@@ -77,42 +78,53 @@ type AgentEmailProcessing struct {
 	CompletedAt    *time.Time `json:"completed_at,omitempty"`
 }
 
+// AgentEmailStorageStatus is the authenticated account's value-free inbound
+// email storage policy and current attachment-bearing-MIME capacity.
+type AgentEmailStorageStatus struct {
+	SchemaVersion      string            `json:"schema_version"`
+	MaximumRawBytes    int64             `json:"maximum_raw_bytes"`
+	AttachmentCapacity MemoryLimitStatus `json:"attachment_capacity"`
+}
+
 // AgentEmailMessage contains metadata plus bounded decoded Text only after an
 // explicit read. Sender and content are always unverified, untrusted input.
 type AgentEmailMessage struct {
-	ID                         string               `json:"id"`
-	MailboxID                  string               `json:"mailbox_id"`
-	OwnerAgentID               string               `json:"owner_agent_id"`
-	AddressID                  string               `json:"address_id"`
-	Provider                   string               `json:"provider"`
-	EnvelopeSender             string               `json:"envelope_sender"`
-	EnvelopeRecipient          string               `json:"envelope_recipient"`
-	AgentSegment               string               `json:"agent_segment"`
-	RealmLabel                 string               `json:"realm_label"`
-	SubaddressTag              string               `json:"subaddress_tag,omitempty"`
-	RawSizeBytes               int64                `json:"raw_size_bytes"`
-	ParseState                 string               `json:"parse_state"`
-	ParseErrorCode             string               `json:"parse_error_code,omitempty"`
-	HeaderFrom                 string               `json:"header_from,omitempty"`
-	HeaderTo                   string               `json:"header_to,omitempty"`
-	Subject                    string               `json:"subject,omitempty"`
-	MIMEMessageID              string               `json:"mime_message_id,omitempty"`
-	MessageDate                *time.Time           `json:"message_date,omitempty"`
-	AttachmentCount            int64                `json:"attachment_count"`
-	SPFResult                  string               `json:"spf_result"`
-	DKIMResult                 string               `json:"dkim_result"`
-	DMARCResult                string               `json:"dmarc_result"`
-	SpamVerdict                string               `json:"spam_verdict"`
-	SenderVerificationState    string               `json:"sender_verification_state"`
-	PossibleDuplicate          bool                 `json:"possible_duplicate"`
-	PossibleDuplicateOfMessage string               `json:"possible_duplicate_of_message_id,omitempty"`
-	ReceivedAt                 time.Time            `json:"received_at"`
-	Folder                     string               `json:"folder"`
-	DeliveredAt                time.Time            `json:"delivered_at"`
-	ReadState                  AgentEmailReadState  `json:"read_state"`
-	Processing                 AgentEmailProcessing `json:"processing"`
-	Text                       string               `json:"text,omitempty"`
-	TextKind                   string               `json:"text_kind,omitempty"`
+	ID                             string               `json:"id"`
+	MailboxID                      string               `json:"mailbox_id"`
+	OwnerAgentID                   string               `json:"owner_agent_id"`
+	AddressID                      string               `json:"address_id"`
+	Provider                       string               `json:"provider"`
+	EnvelopeSender                 string               `json:"envelope_sender"`
+	EnvelopeRecipient              string               `json:"envelope_recipient"`
+	AgentSegment                   string               `json:"agent_segment"`
+	RealmLabel                     string               `json:"realm_label"`
+	SubaddressTag                  string               `json:"subaddress_tag,omitempty"`
+	RawSizeBytes                   int64                `json:"raw_size_bytes"`
+	ParseState                     string               `json:"parse_state"`
+	ParseErrorCode                 string               `json:"parse_error_code,omitempty"`
+	HeaderFrom                     string               `json:"header_from,omitempty"`
+	HeaderTo                       string               `json:"header_to,omitempty"`
+	Subject                        string               `json:"subject,omitempty"`
+	MIMEMessageID                  string               `json:"mime_message_id,omitempty"`
+	MessageDate                    *time.Time           `json:"message_date,omitempty"`
+	AttachmentCount                int64                `json:"attachment_count"`
+	AttachmentStorageBytes         int64                `json:"attachment_storage_bytes"`
+	RetainedAttachmentStorageBytes int64                `json:"retained_attachment_storage_bytes"`
+	PayloadRetentionState          string               `json:"payload_retention_state"`
+	SPFResult                      string               `json:"spf_result"`
+	DKIMResult                     string               `json:"dkim_result"`
+	DMARCResult                    string               `json:"dmarc_result"`
+	SpamVerdict                    string               `json:"spam_verdict"`
+	SenderVerificationState        string               `json:"sender_verification_state"`
+	PossibleDuplicate              bool                 `json:"possible_duplicate"`
+	PossibleDuplicateOfMessage     string               `json:"possible_duplicate_of_message_id,omitempty"`
+	ReceivedAt                     time.Time            `json:"received_at"`
+	Folder                         string               `json:"folder"`
+	DeliveredAt                    time.Time            `json:"delivered_at"`
+	ReadState                      AgentEmailReadState  `json:"read_state"`
+	Processing                     AgentEmailProcessing `json:"processing"`
+	Text                           string               `json:"text,omitempty"`
+	TextKind                       string               `json:"text_kind,omitempty"`
 }
 
 // AgentEmailPage is one metadata-only cursor page from the owner mailbox.
@@ -166,6 +178,19 @@ type CompleteAgentEmailInput struct {
 	ClaimID        string
 	Generation     int64
 	IdempotencyKey string
+}
+
+// GetAgentEmailStorageStatus returns the applied raw-message maximum and
+// account-wide retained attachment-bearing-MIME capacity.
+func GetAgentEmailStorageStatus(ctx context.Context, endpoint, token string) (*AgentEmailStorageStatus, error) {
+	var out AgentEmailStorageStatus
+	if err := doJSON(ctx, http.MethodGet, agentEmailURL(endpoint)+":status", token, nil, &out); err != nil {
+		return nil, err
+	}
+	if err := validateAgentEmailStorageStatus(out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // ShowAgentEmailAddress returns the authenticated enrolled agent's one address.
@@ -403,4 +428,44 @@ func agentEmailListenTransportTimeout(opts AgentEmailListenOptions) time.Duratio
 		timeout = candidate
 	}
 	return timeout
+}
+
+func validateAgentEmailStorageStatus(status AgentEmailStorageStatus) error {
+	if status.SchemaVersion != "witself.v0" {
+		return fmt.Errorf("invalid email storage status: schema_version %q, want %q",
+			status.SchemaVersion, "witself.v0")
+	}
+	if status.MaximumRawBytes < 0 {
+		return fmt.Errorf("invalid email storage status: maximum_raw_bytes must not be negative")
+	}
+	capacity := status.AttachmentCapacity
+	if capacity.Unavailable {
+		return fmt.Errorf("invalid email storage status: attachment_capacity must be available")
+	}
+	if capacity.Used < 0 {
+		return fmt.Errorf("invalid email storage status: attachment_capacity.used must not be negative")
+	}
+	if capacity.Unlimited {
+		if capacity.Max != nil || capacity.Remaining != nil ||
+			capacity.NearLimit || capacity.AtLimit || capacity.OverLimit {
+			return fmt.Errorf("invalid email storage status: inconsistent unlimited attachment_capacity")
+		}
+		return nil
+	}
+	if capacity.Max == nil || capacity.Remaining == nil ||
+		*capacity.Max < 0 || *capacity.Remaining < 0 {
+		return fmt.Errorf("invalid email storage status: capped attachment_capacity requires non-negative max and remaining")
+	}
+	expectedRemaining := int64(0)
+	if capacity.Used < *capacity.Max {
+		expectedRemaining = *capacity.Max - capacity.Used
+	}
+	expectedNear := capacity.Used >= *capacity.Max-*capacity.Max/10
+	if *capacity.Remaining != expectedRemaining ||
+		capacity.NearLimit != expectedNear ||
+		capacity.AtLimit != (capacity.Used == *capacity.Max) ||
+		capacity.OverLimit != (capacity.Used > *capacity.Max) {
+		return fmt.Errorf("invalid email storage status: inconsistent capped attachment_capacity")
+	}
+	return nil
 }

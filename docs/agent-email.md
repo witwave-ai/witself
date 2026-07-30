@@ -1,13 +1,13 @@
 # Witself Agent Email
 
-Status: capability-limited receive pilot live in the GCP sandbox as of
-2026-07-22 (`v0.0.197`). One internal realm and seven exact-address routes are
-enabled; durable receipt, provider-managed retry, owner processing,
-disable/re-enable rollback, and the default-off exact-agent synthetic retry
-proof have been exercised without changing the existing Cloudflare catch-all.
-Schema 61 and the receive controls are live. The retry-canary workflow is
-manual-only; add a schedule only when continuous monitoring is intentionally
-enabled. This pilot does not add a sender-trust claim or automatic code use.
+Status: the original GCP capability-limited receive pilot is retired. Its seven
+literal Cloudflare routes and isolated directory entries were disabled and
+removed on 2026-07-30; no pilot address is currently active, and the catch-all
+was not changed. The durable receipt, provider-managed retry, owner processing,
+disable/re-enable rollback, and default-off exact-agent synthetic retry proof
+were exercised before retirement. A new Civo canary must use a fresh,
+explicitly reviewed 5–10-agent manifest and remains manual-only. This
+capability does not add a sender-trust claim or automatic code use.
 
 Kickoff spec, scoped 2026-07-20. A capability-limited Cloudflare receive pilot
 was authorized on 2026-07-21; the stronger production contract remains the
@@ -56,7 +56,9 @@ A second requirements pass later the same day settled more:
   prevention is a first-class requirement, not a slice-3 afterthought.
 - **Attachments stay in Postgres.** V1 stores raw MIME, attachments included,
   directly in the database under hard size caps — no object store or
-  file-management layer in this epic.
+  file-management layer in this epic. The account attachment allowance counts
+  the complete retained raw-MIME size of messages that contain attachments;
+  there are no separately stored attachment blobs in this implementation.
 
 A Cloudflare verification pass later the same day settled the addressing and
 inbound-edge open questions, revising two kickoff assumptions:
@@ -221,11 +223,15 @@ production tier.
 - A default-off `agent_email_receive_pilot` feature flag plus a realm/agent
   allowlist gates provisioning, ingestion, and agent-facing surfaces. Merely
   possessing an address-like local part does not enroll an agent.
-- The pilot cap is **5 MiB raw MIME**, below Cloudflare's 25 MiB provider cap.
-  The Worker rejects an over-pilot-cap message before relay. Raw MIME may still
-  contain attachments and is stored as one message, but neither raw MIME nor
-  attachment content is retrievable through API, CLI, or MCP during the pilot;
-  content reads expose bounded decoded text and an attachment count only.
+- The pilot's technical ceiling is **25 MiB raw MIME**, matching Cloudflare's
+  provider cap. The resolved account plan may lower that ceiling (10 MiB for
+  Professional; email is disabled on Personal), and the Worker maps the cell's
+  exact plan-aware over-size verdict to a permanent SMTP 552 rejection. Raw
+  MIME may still contain attachments and is stored as one message, but neither
+  raw MIME nor attachment content is retrievable through API, CLI, or MCP
+  during the pilot. Metadata surfaces expose only the attachment count,
+  attachment-storage byte counts, and payload-retention state; content reads
+  expose bounded decoded text.
 - Success is returned only after the owning cell durably commits the message.
   On a cell timeout, transport failure, transient verdict, or unexpected
   exception, the Worker throws one deliberate **sanitized** exception and lets
@@ -336,7 +342,7 @@ messages per day until mailbox retention/delete is settled.
 
 **Production receive-only contract:** the Inbound SMTP Transaction Contract
 below remains the target. Promotion beyond the internal pilot, catch-all Worker
-cutover, messages above 5 MiB, billable receive, sender-auth-dependent behavior,
+cutover, billable receive, sender-auth-dependent behavior,
 or consequential OTP/link automation stays blocked until the provider path (or
 a replacement inbound edge) supplies explicit temporary SMTP semantics,
 trusted structured authentication/spam metadata, a stable provider identity,
@@ -531,7 +537,8 @@ The kickoff verification items were resolved on 2026-07-20:
   authentication stage precedes Worker delivery. The Worker event does not
   expose those structured results, so the production relay cannot yet record
   them authoritatively; pilot rows use `unknown`. Subaddress tags are preserved
-  and stored with recipient metadata. The pilot imposes its own 5 MiB cap.
+  and stored with recipient metadata. The pilot uses the same 25 MiB technical
+  ceiling and enforces any lower account plan limit inside the owning cell.
 - **Send is no longer provider-orphaned.** Cloudflare Email Sending entered
   public beta in April 2026 (Workers Paid; 3,000 messages/month included,
   then $0.35 per 1,000; REST, Workers binding, and SMTP submission;
@@ -605,12 +612,13 @@ Pipeline contract:
 - **Idempotent ingestion.** At-least-once webhook delivery deduplicated on the
   provider message id; replays are harmless.
 - **Raw preservation.** The raw MIME message — attachments included — is
-  stored directly in Postgres under a hard size cap aligned with the edge
-  provider's message limit; parsing failures preserve the raw bytes and
-  record a parse-error state rather than dropping mail. No object store or
-  file-management layer is introduced in this epic: retention windows are the
-  pressure valve on table growth, and an object-storage adapter is revisited
-  only if measured volume demands it.
+  stored directly in Postgres under the resolved
+  `agent_email_max_raw_bytes` limit and the edge provider's defensive ceiling;
+  parsing failures preserve the raw bytes and record a parse-error state
+  rather than dropping mail. No object store or file-management layer is
+  introduced in this epic: retention windows are the pressure valve on table
+  growth, and an object-storage adapter is revisited only if measured volume
+  demands it.
 - **Parsed metadata.** From, to, subject, date, provider spam verdict,
   SPF/DKIM/DMARC authentication results, and the parsed recipient components
   (agent segment, realm label, and any subaddress tag) land as structured
@@ -623,11 +631,17 @@ Pipeline contract:
   [post-v0-roadmap.md](post-v0-roadmap.md) — size limits, metering, diagnostic
   redaction, and an explicit injection and memory-poisoning review. V1 stores
   attachment bytes inline with the raw message in Postgres under the same cap
-  but may gate retrieval until that review lands (open question).
+  but may gate retrieval until that review lands (open question). A retained
+  message containing attachments charges its complete raw-MIME size to the
+  account-wide `agent_email_attachment_storage_bytes` allowance. There is no
+  separately stored attachment payload to count. If that pool lacks room, the
+  bounded text and metadata remain available while the raw MIME containing the
+  attachment bytes is explicitly marked unretained.
 
 The pipeline items above describe the production requirements. In the pilot,
 provider-id idempotency is replaced by non-destructive suspected-duplicate
-grouping, raw MIME is capped at 5 MiB, structured auth/spam fields are
+grouping, raw MIME is capped at 25 MiB (or a lower account plan limit),
+structured auth/spam fields are
 `unknown`, quarantine classification is unavailable, and attachment retrieval
 and raw-MIME reads are disabled even though attachment bytes remain inside the
 stored raw MIME.
@@ -748,7 +762,8 @@ The receive-side lifecycle mirrors the proven messaging shape:
   components, and an additive `unavailable` projection state. The shared
   foreground policy handles at most one Witself messaging-or-email lane per
   turn, after user work, with no background service or wake behavior.
-- Retention is plan-scoped: raw MIME and attachments age out by plan window;
+- Retention is plan-scoped: raw MIME, including inline attachment bytes, ages
+  out by plan window;
   quarantined spam ages out faster; metadata and content-free audit events
   follow [audit-retention.md](audit-retention.md). Account archives include
   the mailbox (addresses, messages, state) with the same interrupt-on-import
@@ -760,8 +775,9 @@ The pilot shapes are pinned in [json-contracts.md](json-contracts.md),
 [cli-command-surface.md](cli-command-surface.md), and
 [mcp-tools.md](mcp-tools.md):
 
-- CLI: `witself email address show`, `witself email list`, `witself email
-  read`, `witself email code-candidates`, `witself email code-consumed`,
+- CLI: `witself email status`, `witself email address show`, `witself email
+  list`, `witself email read`, `witself email code-candidates`, `witself email
+  code-consumed`,
   `witself email claim|renew|release|complete`, `witself email ack`,
   a bounded `witself email listen` (wait for new mail — the OTP flow needs a
   sanctioned wait rather than a poll loop, mirroring `message.listen`), and
@@ -769,8 +785,8 @@ The pilot shapes are pinned in [json-contracts.md](json-contracts.md),
   exact enrolled agent or realm.
 - MCP: `witself.email.*` mirroring the CLI, with metadata-only list results
   and untrusted-content framing in every content-bearing tool description.
-- API: owner routes are `GET /v1/email/address`, `GET /v1/email`,
-  `POST /v1/email:listen`, `GET /v1/email/checkpoint`, and the
+- API: owner routes are `GET /v1/email/address`, `GET /v1/email:status`,
+  `GET /v1/email`, `POST /v1/email:listen`, `GET /v1/email/checkpoint`, and the
   `/v1/email/{message_id}:read|code-consumed|ack|claim|renew|release|complete`
   actions. Value-free operator controls are `GET` / `PATCH`
   `/v1/agents/{agent}/email-receive` and
@@ -869,9 +885,11 @@ Receive-only still carries real obligations:
   can be stopped without disabling the whole mailbox; the fallback
   classification when Cloudflare supplies no usable spam verdict is an Open
   Question.
-  The limited pilot resolves this conservatively by excluding every received
-  pilot message from billable usage and quota enforcement; its counters are
-  operational only until authoritative classification exists.
+  The limited pilot resolves billing conservatively by excluding received mail
+  from usage overage charges. It still enforces the non-billable raw-message and
+  account-wide attachment-storage plan caps: a message that cannot fit the
+  attachment pool retains bounded text and metadata but not its raw
+  attachment-bearing MIME.
 - **Billing dimensions (settled 2026-07-21).** Email gets its own
   `billing-and-limits.md` dimensions rather than reusing the messaging keys
   (the separate-surface rule, and to keep abuse signals distinct):
@@ -883,6 +901,12 @@ Receive-only still carries real obligations:
   table before the slice-1 metering deliverable can be built against the
   `/v1/capabilities`, `/v1/billing/usage`, and Prometheus `limit_dimension`
   machinery. Platform notifications are cost of service and not user-metered.
+  The plan caps are separate from those usage observations:
+  `agent_email_max_raw_bytes` limits each inbound raw message, while
+  `agent_email_attachment_storage_bytes` pools retained attachment-bearing
+  MIME bytes across the whole account. The latter counts the complete raw
+  message whenever its MIME tree contains an attachment; it is not a
+  per-agent allowance and does not imply extracted attachment blobs.
 - Email is switchable per agent and per realm: an operator or plan
   enforcement can turn receive — and later send — off independently without
   deprovisioning addresses.
@@ -942,11 +966,13 @@ Receive-only still carries real obligations:
    selects or uses a value, or marks the message code-consumed. Alphanumeric
    formats, localization, the audit shape for a code-consuming read, and
    extraction from quarantined messages remain open.
-3. **Pilot settled 2026-07-21:** only an attachment count is exposed; raw MIME,
-   attachment names, media types, and attachment bytes are unavailable.
-   A future production retrieval surface still requires the injection review.
-4. Retention windows per plan tier, the quarantine window, and the Postgres
-   growth watermarks that would trigger revisiting object storage.
+3. **Pilot settled 2026-07-21:** only value-free attachment metadata is exposed:
+   count, storage byte counts, and payload-retention state. Raw MIME, attachment
+   names, media types, and attachment bytes are unavailable. A future production
+   retrieval surface still requires the injection review.
+4. The quarantine window and the Postgres growth watermarks that would trigger
+   revisiting object storage. Ordinary retention windows and inbound storage
+   caps are plan-scoped in [billing-and-limits.md](billing-and-limits.md).
 5. Platform-notification templating, locale posture, and which events email
    operators at all.
 6. Whether slice 2 reply-only send needs per-thread human approval policy
@@ -993,7 +1019,7 @@ in place; these are the remaining important items):
 12. **Pilot settled 2026-07-21:** `read` returns bounded decoded text, prefers
     plain text, deterministically reduces HTML, never returns raw MIME or
     attachment bytes, and surfaces a value-free parse-error code. Parsing is
-    bounded to 5 MiB raw MIME, 256 KiB headers, 64 MIME parts, depth 8, and
+    bounded to 25 MiB raw MIME, 256 KiB headers, 64 MIME parts, depth 8, and
     1 MiB decoded text; every content surface retains untrusted-input framing.
 13. Retention enforcement mechanics: what runs the aging, and the guard so
     aging never silently expires unread/unclaimed mail (especially the

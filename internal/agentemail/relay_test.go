@@ -115,3 +115,25 @@ func TestCanonicalSignatureInputRejectsNonCanonicalMetadata(t *testing.T) {
 		}
 	}
 }
+
+func TestRelayTechnicalRawSizeBoundaryIsTwentyFiveMiB(t *testing.T) {
+	const want = 25 * 1024 * 1024
+	if PilotMaximumRawBytes != want {
+		t.Fatalf("PilotMaximumRawBytes = %d, want %d", PilotMaximumRawBytes, want)
+	}
+	metadata := RelayMetadata{
+		Timestamp:         1,
+		KeyID:             "pilot",
+		Audience:          "cell",
+		EnvelopeRecipient: "a@b",
+		RawSize:           PilotMaximumRawBytes,
+		RawSHA256:         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+	if _, err := CanonicalSignatureInput(metadata); err != nil {
+		t.Fatalf("maximum raw size rejected: %v", err)
+	}
+	metadata.RawSize++
+	if _, err := CanonicalSignatureInput(metadata); !errors.Is(err, ErrRelayMetadataInvalid) {
+		t.Fatalf("over-maximum raw size error = %v", err)
+	}
+}
