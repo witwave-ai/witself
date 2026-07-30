@@ -58,6 +58,7 @@ var upgraders = map[int]Upgrader{
 	67: preserveSchema67Rows,
 	69: preserveSchema69Rows,
 	70: preserveSchema70Rows,
+	75: preserveSchema75Rows,
 }
 
 const (
@@ -98,6 +99,16 @@ func preserveSchema69Rows(_ string, row map[string]any) (map[string]any, error) 
 // target before inserting the account row, so schema-70 rows otherwise remain
 // valid unchanged.
 func preserveSchema70Rows(_ string, row map[string]any) (map[string]any, error) {
+	return row, nil
+}
+
+// preserveSchema75Rows acknowledges migration 0076's current-fact counter
+// constraint. The counter is a cell-local derived projection: archives omit
+// agents.active_fact_count, the destination supplies its zero default, and
+// import recomputes the exact value from canonical resolved facts before
+// commit. Schema-75 archive rows therefore remain valid without a portable
+// row transformation.
+func preserveSchema75Rows(_ string, row map[string]any) (map[string]any, error) {
 	return row, nil
 }
 

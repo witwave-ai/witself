@@ -478,6 +478,18 @@ func TestDashboardMemoryCapacityRendering(t *testing.T) {
 	}
 }
 
+func TestDashboardFactCapacityRendering(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not installed")
+	}
+	cmd := exec.Command(node, "--test", "testdata/fact_capacity_test.cjs")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dashboard fact capacity JavaScript test: %v\n%s", err, output)
+	}
+}
+
 func TestSelfProxySendsObservationalAndDegradesOn501(t *testing.T) {
 	t.Run("observational round trip", func(t *testing.T) {
 		srv, cfg := newDashboard(t, func(w http.ResponseWriter, r *http.Request) {

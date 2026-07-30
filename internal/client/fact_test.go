@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -12,6 +13,56 @@ import (
 )
 
 const testFactCandidateRevision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+func TestGetFactLimitStatusDecodesCapacity(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/facts:status" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer agent-token" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","fact_capacity":{"used":900,"max":1000,"remaining":100,"unlimited":false,"near_limit":true,"at_limit":false,"over_limit":false}}`))
+	}))
+	defer srv.Close()
+
+	status, err := GetFactLimitStatus(context.Background(), srv.URL+"/", "agent-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Used != 900 || status.Max == nil || *status.Max != 1000 ||
+		status.Remaining == nil || *status.Remaining != 100 ||
+		!status.NearLimit || status.AtLimit || status.OverLimit ||
+		status.Unlimited || status.Unavailable {
+		t.Fatalf("fact capacity = %#v", status)
+	}
+}
+
+func TestFactMutationMapsStableLimitCodeAndCapacity(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","code":"stored_fact_limit_reached","error":"current fact capacity reached","retryable":false,"limit":{"used":1001,"max":1000,"remaining":0,"unlimited":false,"near_limit":true,"at_limit":false,"over_limit":true}}`))
+	}))
+	defer srv.Close()
+
+	_, err := SetFact(context.Background(), srv.URL, "agent-token", SetFactInput{
+		Predicate: "preferences/editor", Value: json.RawMessage(`"vim"`),
+		IdempotencyKey: "fact-limit",
+	})
+	if !errors.Is(err, ErrFactLimitReached) {
+		t.Fatalf("errors.Is(..., ErrFactLimitReached) = false; err=%v", err)
+	}
+	var limitErr *FactLimitError
+	if !errors.As(err, &limitErr) ||
+		limitErr.Status.Used != 1001 ||
+		limitErr.Status.Max == nil || *limitErr.Status.Max != 1000 ||
+		limitErr.Status.Remaining == nil || *limitErr.Status.Remaining != 0 ||
+		!limitErr.Status.NearLimit || !limitErr.Status.OverLimit ||
+		limitErr.Status.AtLimit || limitErr.Status.Unlimited {
+		t.Fatalf("typed fact limit error = %#v", err)
+	}
+}
 
 func TestFactRetrievalClients(t *testing.T) {
 	seen := map[string]int{}

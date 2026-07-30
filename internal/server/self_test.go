@@ -104,6 +104,87 @@ func TestSelfDigestIncludesValueFreeMemoryCapacity(t *testing.T) {
 	}
 }
 
+func TestSelfDigestIncludesValueFreeFactCapacity(t *testing.T) {
+	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
+		return DomainPrincipal{
+			Kind: PrincipalKindAgent, ID: "agent_1", AgentName: "scott",
+			AccountID: "acc_1", RealmID: "realm_1", RealmName: "default",
+			AccountStatus: "active",
+		}, true, nil
+	}
+	maximum, remaining := int64(10000), int64(1000)
+	var callbackPrincipal DomainPrincipal
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: auth,
+		GetFactLimitStatus: func(_ context.Context, p DomainPrincipal) (FactLimitStatus, error) {
+			callbackPrincipal = p
+			return FactLimitStatus{
+				Used: 9000, Max: &maximum, Remaining: &remaining, NearLimit: true,
+			}, nil
+		},
+	}))
+	defer srv.Close()
+
+	resp := selfRequest(t, srv.URL+"/v1/self?include_counts=false", "agent-token")
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("self status = %d", resp.StatusCode)
+	}
+	var digest SelfDigest
+	if err := json.NewDecoder(resp.Body).Decode(&digest); err != nil {
+		t.Fatal(err)
+	}
+	if digest.FactCapacity == nil ||
+		digest.FactCapacity.Used != 9000 ||
+		digest.FactCapacity.Max == nil || *digest.FactCapacity.Max != 10000 ||
+		digest.FactCapacity.Remaining == nil || *digest.FactCapacity.Remaining != 1000 ||
+		!digest.FactCapacity.NearLimit || digest.FactCapacity.AtLimit ||
+		digest.FactCapacity.OverLimit || digest.FactCapacity.Unlimited ||
+		digest.FactCapacity.Unavailable {
+		t.Fatalf("fact capacity = %#v", digest.FactCapacity)
+	}
+	if callbackPrincipal.ID != "agent_1" ||
+		callbackPrincipal.AccountID != "acc_1" ||
+		callbackPrincipal.RealmID != "realm_1" {
+		t.Fatalf("callback principal = %#v", callbackPrincipal)
+	}
+}
+
+func TestSelfDigestFailsOpenWhenFactCapacityIsUnavailable(t *testing.T) {
+	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
+		return DomainPrincipal{
+			Kind: PrincipalKindAgent, ID: "agent_1", AgentName: "scott",
+			AccountID: "acc_1", RealmID: "realm_1", RealmName: "default",
+			AccountStatus: "active",
+		}, true, nil
+	}
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: auth,
+		GetFactLimitStatus: func(context.Context, DomainPrincipal) (FactLimitStatus, error) {
+			return FactLimitStatus{}, errors.New("capacity projection unavailable")
+		},
+	}))
+	defer srv.Close()
+
+	resp := selfRequest(t, srv.URL+"/v1/self", "agent-token")
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("self status = %d", resp.StatusCode)
+	}
+	var digest SelfDigest
+	if err := json.NewDecoder(resp.Body).Decode(&digest); err != nil {
+		t.Fatal(err)
+	}
+	if digest.Identity.AgentID != "agent_1" ||
+		digest.FactCapacity == nil || !digest.FactCapacity.Unavailable ||
+		digest.FactCapacity.Used != 0 ||
+		digest.FactCapacity.Max != nil || digest.FactCapacity.Remaining != nil ||
+		digest.FactCapacity.Unlimited || digest.FactCapacity.NearLimit ||
+		digest.FactCapacity.AtLimit || digest.FactCapacity.OverLimit {
+		t.Fatalf("fail-open digest = %#v", digest)
+	}
+}
+
 func TestSelfDigestFailsOpenWhenMemoryCapacityIsUnavailable(t *testing.T) {
 	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
 		return DomainPrincipal{

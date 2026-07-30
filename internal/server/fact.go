@@ -4,11 +4,35 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// ErrFactLimitReached identifies a non-retryable refusal of a net-positive
+// current-fact mutation.
+var ErrFactLimitReached = errors.New("current fact limit reached")
+
+// FactLimitStatus is the authenticated owner's value-free current-fact
+// capacity. It intentionally shares the retained-resource capacity shape.
+type FactLimitStatus = MemoryLimitStatus
+
+// FactLimitError carries only a value-free current-fact capacity snapshot.
+type FactLimitError struct {
+	Status FactLimitStatus
+}
+
+func (e *FactLimitError) Error() string {
+	if e == nil || e.Status.Max == nil {
+		return ErrFactLimitReached.Error()
+	}
+	return fmt.Sprintf("%s: %d/%d current", ErrFactLimitReached,
+		e.Status.Used, *e.Status.Max)
+}
+
+func (e *FactLimitError) Unwrap() error { return ErrFactLimitReached }
 
 // Fact is the public resolved fact representation.
 type Fact struct {
@@ -210,6 +234,9 @@ func setFactHandler(auth PrincipalAuthFunc, set func(context.Context, DomainPrin
 		req.IdempotencyKey = strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 		fact, err := set(r.Context(), p, req)
 		switch {
+		case errors.Is(err, ErrFactLimitReached):
+			writeFactLimitError(w, err)
+			return
 		case errors.Is(err, ErrBadInput):
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
@@ -230,6 +257,28 @@ func setFactHandler(auth PrincipalAuthFunc, set func(context.Context, DomainPrin
 		w.Header().Set("Cache-Control", "private, no-store")
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "fact": fact})
+	})
+}
+
+func factLimitStatusHandler(
+	auth PrincipalAuthFunc,
+	status func(context.Context, DomainPrincipal) (FactLimitStatus, error),
+) http.HandlerFunc {
+	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
+		if p.Kind != PrincipalKindAgent {
+			writeJSONError(w, http.StatusForbidden, "only an agent token may read fact capacity")
+			return
+		}
+		limit, err := status(r.Context(), p)
+		if writeFactError(w, err) {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "private, no-store")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0",
+			"fact_capacity":  limit,
+		})
 	})
 }
 
@@ -426,6 +475,8 @@ func writeFactError(w http.ResponseWriter, err error) bool {
 	switch {
 	case err == nil:
 		return false
+	case errors.Is(err, ErrFactLimitReached):
+		writeFactLimitError(w, err)
 	case errors.Is(err, ErrBadInput):
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrNotFound):
@@ -440,6 +491,23 @@ func writeFactError(w http.ResponseWriter, err error) bool {
 		writeJSONError(w, http.StatusInternalServerError, "could not read facts")
 	}
 	return true
+}
+
+func writeFactLimitError(w http.ResponseWriter, err error) {
+	var limitErr *FactLimitError
+	if !errors.As(err, &limitErr) || limitErr == nil {
+		writeJSONError(w, http.StatusForbidden, ErrFactLimitReached.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"schema_version": "witself.v0",
+		"error":          "Current fact capacity has been reached; existing facts remain available and updates to existing facts are still allowed.",
+		"code":           "stored_fact_limit_reached",
+		"retryable":      false,
+		"limit":          limitErr.Status,
+	})
 }
 
 func proposeFactHandler(auth PrincipalAuthFunc, propose func(context.Context, DomainPrincipal, ProposeFactRequest) (FactCandidate, error)) http.HandlerFunc {

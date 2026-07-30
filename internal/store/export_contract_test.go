@@ -87,6 +87,9 @@ func TestExportedColumnsCoverSchemaBase(t *testing.T) {
 	// Anything added here needs an explicit call-out — it's a policy
 	// decision, not an oversight.
 	omittedColumns := map[string]map[string]string{
+		"agents": {
+			"active_fact_count": "derived from current resolved non-deleted facts on import",
+		},
 		"memory_change_clocks": {
 			"active_memory_count": "derived from current active memory heads on import",
 		},
@@ -160,6 +163,26 @@ func TestActiveMemoryCountIsDerivedArchiveProjection(t *testing.T) {
 	}
 	if importColumns["memory_change_clocks"]["active_memory_count"] {
 		t.Fatal("import allowlist accepted derived active_memory_count")
+	}
+}
+
+func TestActiveFactCountIsDerivedArchiveProjection(t *testing.T) {
+	schemaColumns, err := parseSchemaColumns()
+	if err != nil {
+		t.Fatalf("parse migrations: %v", err)
+	}
+	if !schemaColumns["agents"]["active_fact_count"] {
+		t.Fatal("schema parser did not find agents.active_fact_count")
+	}
+	exportedByTable, err := parseExportedColumns()
+	if err != nil {
+		t.Fatalf("parse export.go: %v", err)
+	}
+	if exportedByTable["agents"]["active_fact_count"] {
+		t.Fatal("exporter emitted derived active_fact_count")
+	}
+	if importColumns["agents"]["active_fact_count"] {
+		t.Fatal("import allowlist accepted derived active_fact_count")
 	}
 }
 

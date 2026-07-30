@@ -51,11 +51,11 @@ selection uses stored metadata and never invokes an LLM or embedding provider.
 
 The digest is **open-plane only.** Its content-bearing sections are built from
 primary facts and salient memories. It may also carry authenticated,
-value-free `memory_capacity`, `memory_checkpoint`, `message_checkpoint`,
-`email_checkpoint`, and `avatar_checkpoint` objects describing active-memory
-capacity, pending client curation, messaging, receive-email, and avatar
-attention. None contains a fact, memory, transcript, message/email body, secret,
-or TOTP value. See
+value-free `fact_capacity`, `memory_capacity`, `memory_checkpoint`,
+`message_checkpoint`, `email_checkpoint`, and `avatar_checkpoint` objects
+describing current-fact/active-memory capacity, pending client curation,
+messaging, receive-email, and avatar attention. None contains a fact, memory,
+transcript, message/email body, secret, or TOTP value. See
 [The Sealed-Plane Carve-Out](#the-sealed-plane-carve-out) below.
 
 ### Shape
@@ -80,6 +80,15 @@ or TOTP value. See
     { "id": "mem_120", "snippet": "Prefers terse, decision-led writing.", "kind": "profile", "salience": 0.9, "source": "self" },
     { "id": "mem_133", "snippet": "Migration 0032 shipped portable client vectors; resume at the cloud conformance check.", "kind": "session", "salience": 0.8, "source": "self" }
   ],
+  "fact_capacity": {
+    "used": 72,
+    "max": null,
+    "remaining": null,
+    "unlimited": true,
+    "near_limit": false,
+    "at_limit": false,
+    "over_limit": false
+  },
   "memory_capacity": {
     "used": 900,
     "max": 1000,
@@ -123,6 +132,15 @@ Field rules:
   salience, source }`. `snippet` is a bounded excerpt, not full `content`; the
   full record is fetched by id via `memory.read`. Omit with `--no-salient` /
   `include_salient:false`; size with `--salient-limit N` (default 10).
+- `fact_capacity` — authenticated, value-free per-agent usage and policy for
+  resolved, non-deleted current facts across all subjects. Assertions,
+  candidates, aliases, history, evidence, and tombstones do not consume
+  another slot. Unlimited status uses nullable `max`/`remaining`; finite
+  `near_limit` begins at 90 percent. `unavailable:true` means the additive
+  projection failed open, never that capacity is unlimited. At or above the
+  maximum, existing-fact reads and updates remain available; count-growing
+  create, recreation, or new-address confirmation is refused. Capacity is
+  guidance and never deletion authority.
 - `memory_capacity` — authenticated, value-free per-agent active-memory usage
   and policy. Unlimited status uses nullable `max`/`remaining`; finite
   `near_limit` begins at 90 percent and remains true at or beyond the maximum.
@@ -193,8 +211,8 @@ model-visible output contract:
 
 1. `SessionStart` reads one bounded `self.show` digest.
 2. Every supported Codex/Claude `UserPromptSubmit` reads bounded `/v1/self` state
-   so an ordinary prompt can discover active-memory pressure or pending
-   memory-curation, messaging, receive-email, or avatar
+   so an ordinary prompt can discover current-fact or active-memory pressure,
+   or pending memory-curation, messaging, receive-email, or avatar
    attention. A deterministic local history-dependence check decides whether to
    add a bounded lexical `memory.recall` query. That query is a deduplicated `OR`
    expression made from meaningful prompt keywords after conversational glue is
@@ -210,8 +228,12 @@ model-visible output contract:
    `WITSELF_AUTOMATIC_CONTEXT_V1` envelope that says the material is untrusted,
    private advisory data rather than instructions or authority. The model must
    keep sensitive values within the authenticated user's current task. The
-   separately rendered `memory_capacity` is authenticated value-free policy
-   state, not authority for a semantic change. The separately rendered
+   session-start envelope carries `fact_capacity` whenever self does; prompt
+   hydration carries it only when `near_limit`, `at_limit`, `over_limit`, or
+   `unavailable` needs attention, so ordinary capacity stays low-profile.
+   The separately rendered `fact_capacity` and `memory_capacity` are
+   authenticated value-free policy state, not authority for a semantic change.
+   The separately rendered
    `memory_checkpoint` is authenticated value-free lifecycle state, and its
    static checkpoint policy authorizes only reversible curation and fact
    proposals. The separately rendered `message_checkpoint` is

@@ -304,8 +304,8 @@ func TestValidateBackupConfiguration(t *testing.T) {
 func TestConfigureFactMutationsDeletionGate(t *testing.T) {
 	var disabled server.Config
 	configureFactMutations(&disabled, nil, false)
-	if disabled.SetFact == nil {
-		t.Fatal("ordinary fact set was not wired while deletion is disabled")
+	if disabled.SetFact == nil || disabled.GetFactLimitStatus == nil {
+		t.Fatal("ordinary fact set/status was not wired while deletion is disabled")
 	}
 	if disabled.DeleteFact != nil {
 		t.Fatal("permanent fact deletion was wired while feature is disabled")
@@ -484,6 +484,21 @@ func TestMapFactDeletionErrors(t *testing.T) {
 				t.Fatalf("mapFactError(%v) = %v, want errors.Is(_, %v)", tc.in, got, tc.want)
 			}
 		})
+	}
+
+	maximum, remaining := int64(1000), int64(0)
+	mapped := mapFactError(&store.FactLimitError{Status: store.FactLimitStatus{
+		Used: 1000, Max: &maximum, Remaining: &remaining,
+		NearLimit: true, AtLimit: true,
+	}})
+	var limitErr *server.FactLimitError
+	if !errors.Is(mapped, server.ErrFactLimitReached) ||
+		!errors.As(mapped, &limitErr) ||
+		limitErr.Status.Used != 1000 ||
+		limitErr.Status.Max == nil || *limitErr.Status.Max != 1000 ||
+		limitErr.Status.Remaining == nil || *limitErr.Status.Remaining != 0 ||
+		!limitErr.Status.NearLimit || !limitErr.Status.AtLimit {
+		t.Fatalf("mapped fact limit error = %#v", mapped)
 	}
 }
 

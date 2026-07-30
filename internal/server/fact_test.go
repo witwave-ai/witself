@@ -12,6 +12,121 @@ import (
 
 const testFactCandidateRevision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+func TestFactLimitStatusRouteReturnsValueFreeCapacity(t *testing.T) {
+	auth := func(_ context.Context, token string) (DomainPrincipal, bool, error) {
+		return DomainPrincipal{
+			Kind: PrincipalKindAgent, ID: "agent_1",
+			AccountID: "acc_1", RealmID: "realm_1", AccountStatus: "active",
+		}, token == "agent-token", nil
+	}
+	maximum, remaining := int64(1000), int64(100)
+	var callbackPrincipal DomainPrincipal
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: auth,
+		GetFactLimitStatus: func(_ context.Context, p DomainPrincipal) (FactLimitStatus, error) {
+			callbackPrincipal = p
+			return FactLimitStatus{
+				Used: 900, Max: &maximum, Remaining: &remaining, NearLimit: true,
+			}, nil
+		},
+	}))
+	defer srv.Close()
+
+	resp := factRequest(t, srv.URL, http.MethodGet, "/v1/facts:status", "")
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Cache-Control"); got != "private, no-store" {
+		t.Fatalf("Cache-Control = %q", got)
+	}
+	var body struct {
+		SchemaVersion string          `json:"schema_version"`
+		FactCapacity  FactLimitStatus `json:"fact_capacity"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.SchemaVersion != "witself.v0" ||
+		body.FactCapacity.Used != 900 ||
+		body.FactCapacity.Max == nil || *body.FactCapacity.Max != 1000 ||
+		body.FactCapacity.Remaining == nil || *body.FactCapacity.Remaining != 100 ||
+		!body.FactCapacity.NearLimit || body.FactCapacity.AtLimit ||
+		body.FactCapacity.OverLimit || body.FactCapacity.Unlimited {
+		t.Fatalf("status body = %#v", body)
+	}
+	if callbackPrincipal.Kind != PrincipalKindAgent ||
+		callbackPrincipal.ID != "agent_1" ||
+		callbackPrincipal.AccountID != "acc_1" ||
+		callbackPrincipal.RealmID != "realm_1" {
+		t.Fatalf("callback principal = %#v", callbackPrincipal)
+	}
+}
+
+func TestFactLimitRefusalHasStableMachineCodeAndCapacity(t *testing.T) {
+	auth := func(_ context.Context, token string) (DomainPrincipal, bool, error) {
+		return DomainPrincipal{
+			Kind: PrincipalKindAgent, ID: "agent_1",
+			AccountID: "acc_1", RealmID: "realm_1", AccountStatus: "active",
+		}, token == "agent-token", nil
+	}
+	maximum, remaining := int64(1000), int64(0)
+	limitErr := func() error {
+		return &FactLimitError{Status: FactLimitStatus{
+			Used: 1000, Max: &maximum, Remaining: &remaining,
+			NearLimit: true, AtLimit: true,
+		}}
+	}
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: auth,
+		SetFact: func(context.Context, DomainPrincipal, SetFactRequest) (Fact, error) {
+			return Fact{}, limitErr()
+		},
+		ConfirmFactCandidate: func(context.Context, DomainPrincipal, string, string) (Fact, error) {
+			return Fact{}, limitErr()
+		},
+		RejectFactCandidate: func(context.Context, DomainPrincipal, string, string) (FactCandidate, error) {
+			return FactCandidate{}, nil
+		},
+	}))
+	defer srv.Close()
+
+	for _, test := range []struct {
+		name, path, body string
+	}{
+		{name: "direct create", path: "/v1/facts", body: `{"predicate":"preferences/editor","value":"vim"}`},
+		{name: "candidate confirmation", path: "/v1/fact-candidates/fcand_1:confirm"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resp := factRequest(t, srv.URL, http.MethodPost, test.path, test.body)
+			defer closeBody(t, resp)
+			if resp.StatusCode != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403", resp.StatusCode)
+			}
+			var body struct {
+				SchemaVersion string          `json:"schema_version"`
+				Error         string          `json:"error"`
+				Code          string          `json:"code"`
+				Retryable     bool            `json:"retryable"`
+				Limit         FactLimitStatus `json:"limit"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.SchemaVersion != "witself.v0" ||
+				body.Code != "stored_fact_limit_reached" || body.Retryable ||
+				!strings.Contains(body.Error, "updates to existing facts") ||
+				body.Limit.Used != 1000 ||
+				body.Limit.Max == nil || *body.Limit.Max != 1000 ||
+				body.Limit.Remaining == nil || *body.Limit.Remaining != 0 ||
+				!body.Limit.NearLimit || !body.Limit.AtLimit ||
+				body.Limit.OverLimit || body.Limit.Unlimited {
+				t.Fatalf("error body = %#v", body)
+			}
+		})
+	}
+}
+
 func TestFactRoutes(t *testing.T) {
 	auth := func(_ context.Context, token string) (DomainPrincipal, bool, error) {
 		return DomainPrincipal{Kind: PrincipalKindAgent, ID: "agent_1", AccountID: "acc_1", RealmID: "realm_1", AccountStatus: "active"}, token == "agent-token", nil

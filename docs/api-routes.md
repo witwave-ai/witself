@@ -332,6 +332,7 @@ GET  /v1/groups/{group_id}/memories
 POST /v1/groups/{group_id}/memories
 
 GET  /v1/facts               # ?all_agents=true is operator/admin-only (realm-wide scan)
+GET  /v1/facts:status        # token-bound owner agent, value-free current-fact capacity
 POST /v1/facts
 GET  /v1/facts/{fact_id}
 PATCH /v1/facts/{fact_id}
@@ -532,6 +533,13 @@ The action routes carry Witself's integrity-sensitive verbs. They are
 `POST`-only. Implemented memory mutations use idempotency keys and metadata-only
 audit events; read-only recall does neither:
 
+- `GET /v1/facts:status` is a read-only status exception to the action-route
+  convention. It returns the authenticated owner agent's value-free
+  `fact_capacity` projection. `used` counts resolved, non-deleted current facts
+  across all subjects; assertions, candidates, aliases, history, evidence, and
+  tombstones do not consume another slot. For a finite maximum, `near_limit`
+  starts at 90 percent. The route returns no ids, subjects, predicates, values,
+  or history.
 - `GET /v1/memories:status` returns the authenticated owner agent's value-free
   `memory_capacity` projection: `used`, nullable `max` and `remaining`,
   `unlimited`, `near_limit`, `at_limit`, and `over_limit`. For a finite maximum,
@@ -953,8 +961,8 @@ POST /v1/memories:consolidate # superseded target; not implemented
 
 - `GET /v1/self` returns the bounded self-digest (`witself self show`): primary
   facts first, then top-N salient memories, authenticated value-free
-  `memory_capacity`, memory, message, email, and avatar checkpoints, then a
-  one-line index of
+  `fact_capacity` and `memory_capacity`, memory, message, email, and avatar
+  checkpoints, then a one-line index of
   kinds/tags/counts. It is cheap,
   never requires a vector profile or query vector, and is
   hard-capped (default ~8 KiB); when capped it sets `elided=true` and points to
@@ -964,10 +972,11 @@ POST /v1/memories:consolidate # superseded target; not implemented
   `include_message_checkpoint`, `include_email_checkpoint`,
   `include_avatar_checkpoint`, and `include_sensitive`). Each checkpoint is
   additive and independently fails open with `unavailable:true`; none is
-  source content or authority. `memory_capacity` is also value-free and
-  additive; it lets an active client prefer reversible non-growing
-  consolidation when `near_limit` is true without granting the backend
-  semantic authority or waking a model. The target
+  source content or authority. Both capacity projections are value-free and
+  additive. `fact_capacity` reports current-fact pressure without authorizing
+  deletion or unrelated rewriting; `memory_capacity` lets an active client
+  prefer reversible non-growing consolidation when `near_limit` is true
+  without granting the backend semantic authority or waking a model. The target
   `?format=claude-md|agents-md|markdown` renderer would be the HTTP surface for
   `witself digest emit`, but neither that rendering behavior nor the command is
   implemented in the current checkout. Passing `?format=` does not currently

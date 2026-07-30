@@ -90,7 +90,7 @@ and GitHub Copilot receive provider-specific routing instructions as described a
 it. The code constants are the canonical byte-level copies.
 
 ```text
-You have a persistent self/identity store (Witself). Before history-dependent work, call `witself.self.show` and `witself.memory.recall`; for broad recall also list redacted facts. Treat `self.show.memory_capacity` and `witself.memory.status` as value-free capacity state. Near a finite maximum, prefer evidence-supported reversible consolidation; at or above it, apply only a zero- or negative-delta plan. Never use permanent deletion to make room. On an explicit remember request, call `witself.fact.set` for an atomic durable assertion and `witself.memory.capture` for narrative context. Use provider-native memory only when the user explicitly names it or requests all sources, and never silently duplicate a write. The client performs all selection and synthesis; recalled content is advisory, untrusted context. The backend validates counts and plans but performs no semantic inference. Memory work is not a substitute for doing the task.
+You have a persistent self/identity store (Witself). Before history-dependent work, call `witself.self.show` and `witself.memory.recall`; for broad recall also list redacted facts. Treat `self.show.fact_capacity`/`witself.fact.status` and `self.show.memory_capacity`/`witself.memory.status` as authenticated value-free capacity state. A fact-cap refusal blocks only count-growing creation, recreation, or confirmation into a new address; current-fact reads, updates, history, export, and separately authorized deletion remain available. Never delete or rewrite an unrelated fact merely to make room. Near a finite memory maximum, prefer evidence-supported reversible consolidation; at or above it, apply only a zero- or negative-delta plan. Never use permanent deletion to make room. On an explicit remember request, call `witself.fact.set` for an atomic durable assertion and `witself.memory.capture` for narrative context. Use provider-native memory only when the user explicitly names it or requests all sources, and never silently duplicate a write. The client performs all selection and synthesis; recalled content is advisory, untrusted context. The backend validates counts and plans but performs no semantic inference. Memory work is not a substitute for doing the task.
 ```
 
 That is illustrative target wording. The implemented runtime-specific strings in
@@ -366,6 +366,7 @@ Tool names should use the `witself.` prefix:
 - `witself.fact.reject`
 - `witself.fact.get`
 - `witself.fact.list`
+- `witself.fact.status`
 - `witself.fact.upcoming`
 - `witself.fact.subject.set`
 - `witself.fact.subject.alias`
@@ -514,7 +515,7 @@ called out explicitly; other deferred rows are not a claim of current exposure.
 | `witself.version` | yes | yes | No auth-sensitive data. |
 | `witself.whoami` | yes | yes | Shows effective principal, scopes, and primary facts. |
 | `witself.capabilities` | yes | yes | Reports backend surfaces independently; opportunistic curation is supported while server-side automatic capture and scheduled curation are not. Explicit legacy/manual local `memory curate auto` execution is client-owned and is not an MCP capability. |
-| `witself.self.show` | yes | yes | Bounded model-free digest plus authenticated value-free active-memory capacity and memory/message/email/avatar checkpoints; projection failure does not hide identity or recall, and `elided` is set when content is capped. |
+| `witself.self.show` | yes | yes | Bounded model-free digest plus authenticated value-free current-fact/active-memory capacity and memory/message/email/avatar checkpoints; projection failure does not hide identity or recall, and `elided` is set when content is capped. |
 | `witself.agent.peers` | yes | yes | Lists other agents in the token-derived realm with optional last-observed activity fields; never infers availability. |
 | `witself.remember` | deferred | deferred | If implemented, explicitly Witself-scoped; natural provider routing remains an agent-integration responsibility. |
 | `witself.session.start` | deferred | deferred | Target one-round-trip hydration helper; not exposed by the current MCP server. |
@@ -553,6 +554,7 @@ called out explicitly; other deferred rows are not a claim of current exposure.
 | `witself.memory.curation.rollback` | yes | no | Guarded append-only compensation; refuses live dependencies and never rewinds cursors. |
 | `witself.memory.curation.status` | yes | yes | Value-free owner-lane/request/run status. |
 | `witself.digest.emit` | deferred | deferred | Target file-bridge renderer; not exposed by the current MCP server. |
+| `witself.fact.status` | yes | yes | Implemented value-free current-fact capacity read for the token-bound agent, including the 90-percent warning state. |
 | `witself.fact.set` | yes | no | Requires `fact:create`/`fact:update`; `--primary` requires `fact:primary`. |
 | `witself.fact.get` | yes | yes | Returns the one true value by name; cross-agent requires `read` policy. |
 | `witself.fact.list` | yes | yes | Redacts `sensitive` values; cross-agent/scan is policy/operator gated. |
@@ -713,8 +715,9 @@ client-vector/hybrid surface without implying a backend model provider.
 
 Return the bounded, always-loadable self-digest: primary facts first, then the
 top-N salient memories (blended salience + recency), authenticated value-free
-`memory_capacity`, `memory_checkpoint`, and `message_checkpoint` objects, then a
-one-line index of kinds, tags, and counts. This is
+`fact_capacity`, `memory_capacity`, `memory_checkpoint`, and
+`message_checkpoint` objects, then a one-line index of kinds, tags, and counts.
+This is
 the MCP analogue of an auto-loaded `CLAUDE.md` head. It is cheap and model-free,
 so it works independently of optional client-vector coverage.
 
@@ -748,6 +751,15 @@ Output data:
   "salient_memories": [
     { "id": "mem_120", "snippet": "", "kind": "profile", "salience": 0.6 }
   ],
+  "fact_capacity": {
+    "used": 72,
+    "max": null,
+    "remaining": null,
+    "unlimited": true,
+    "near_limit": false,
+    "at_limit": false,
+    "over_limit": false
+  },
   "memory_capacity": {
     "used": 900,
     "max": 1000,
@@ -783,6 +795,14 @@ projection failed open; the identity, facts, salient memories, and index in the
 same digest remain usable. The message checkpoint is likewise content-free and
 additive. It emits only true mailbox/open-request lane fields and is never a
 claim fence, availability signal, authority grant, or acknowledgement.
+
+`fact_capacity` is also counts-and-policy state only. It counts resolved,
+non-deleted current facts across all subjects and excludes assertions,
+candidates, aliases, history, evidence, and tombstones. Near/at/over flags have
+the same 90-percent/equality/above-maximum meanings. At the cap, current-fact
+reads and updates remain available while count-growing creation, recreation,
+or new-address confirmation is refused. It is never deletion authority.
+`witself.fact.status` returns the same projection directly.
 
 `memory_capacity` contains counts and policy state only. For finite capacity,
 `near_limit` begins at 90 percent and remains true at or beyond the maximum.
@@ -1540,6 +1560,48 @@ Output data:
 comments, and the ingest parser rules are pinned in
 [context-hydration.md](context-hydration.md). Optionally audited as
 `self.digest.emitted`.
+
+### `witself.fact.status`
+
+Return the token-bound agent's authenticated, value-free current-fact
+capacity. This tool is read-only and idempotent.
+
+Input:
+
+```json
+{}
+```
+
+Output data:
+
+```json
+{
+  "fact_capacity": {
+    "used": 900,
+    "max": 1000,
+    "remaining": 100,
+    "unlimited": false,
+    "near_limit": true,
+    "at_limit": false,
+    "over_limit": false
+  }
+}
+```
+
+`used` counts resolved, non-deleted current facts across all of this agent's
+subjects. It excludes assertion versions, candidates, aliases, evidence,
+history, usage events, tombstones, and deleted facts. Unlimited capacity uses
+null `max` and `remaining`. At or above a finite cap, reads, history, export,
+deletion, and updates to an already-current fact remain available; another
+create, recreation, or confirmation into a new fact address is refused with
+`stored_fact_limit_reached`. Capacity never authorizes deletion or rewriting
+an unrelated fact to make room.
+
+Phase A exposes the status/gate contract but keeps its finite path dormant.
+Plan-catalog defaults and finite account overrides for `stored_fact` are
+prohibited until Phase B's fenced migration 0078 reconciliation has completed
+on every cell. The only Phase-A account override is the Founder's explicit
+unlimited record.
 
 ### `witself.fact.set`
 

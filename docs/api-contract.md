@@ -131,7 +131,8 @@ totp, and the rest) keep the standard envelope above.
 
 The implemented value-free inventory-status routes are a narrow additional
 exception: `GET /v1/memories:status` returns
-`{schema_version,memory_capacity}` and `GET /v1/secrets:status` returns
+`{schema_version,memory_capacity}`, `GET /v1/facts:status` returns
+`{schema_version,fact_capacity}`, and `GET /v1/secrets:status` returns
 `{schema_version,limit}` without an `ok`/`data` wrapper. Their refusal shapes
 below are likewise flat so HTTP, CLI, and MCP clients share one typed status.
 
@@ -142,6 +143,7 @@ HTTP status codes should align with the structured error:
 | `400` | `usage_error` | Invalid request shape, flags, or query parameters. |
 | `401` | `auth_failed` | Missing, invalid, expired, or revoked token. |
 | `403` | `access_denied` | Authenticated principal lacks permission, or no policy allows the cross-agent access. |
+| `403` | `stored_fact_limit_reached` | Implemented non-retryable refusal when a write would create or recreate another current fact above the authenticated owner agent's cap. |
 | `403` | `stored_memory_limit_reached` | Implemented non-retryable refusal when a write would exceed the authenticated owner agent's active-memory cap. |
 | `403` | `stored_secret_limit_reached` | Implemented non-retryable refusal when a new top-level secret would exceed the authenticated owner agent's retained cap. |
 | `404` | `not_found` | Resource not found or not visible to the caller. |
@@ -162,6 +164,31 @@ alone:
   `details.retry_after` (seconds) and the `Retry-After` header when present.
 - `limit_exceeded` is a plan/quota hard cap. It is `retryable: false`; retrying
   will not succeed until an operator raises the plan or the usage window resets.
+- `stored_fact_limit_reached` is the implemented current-inventory
+  specialization. It is HTTP 403 with `retryable: false` and the same
+  value-free `limit` fields as fact status. Retrying the same count-growing
+  intent cannot succeed until a current fact is permanently deleted under its
+  separate authorization rule or the effective maximum changes. Reads,
+  history, export, deletion, and updates to an already-current fact remain
+  available. Exact idempotent replay is resolved before the gate.
+
+  ```json
+  {
+    "schema_version": "witself.v0",
+    "code": "stored_fact_limit_reached",
+    "error": "Current fact capacity has been reached; existing facts remain available and updates to existing facts are still allowed.",
+    "retryable": false,
+    "limit": {
+      "used": 1000,
+      "max": 1000,
+      "remaining": 0,
+      "unlimited": false,
+      "near_limit": true,
+      "at_limit": true,
+      "over_limit": false
+    }
+  }
+  ```
 - `stored_memory_limit_reached` is the implemented active-inventory
   specialization. It is HTTP 403 with `retryable: false` and a value-free
   top-level `limit` object containing `used`, `max`, `remaining`, `unlimited`,
@@ -741,6 +768,7 @@ Initial action and curation-workflow routes (curation uses durable slash
 subresources rather than colon verbs):
 
 ```http
+GET  /v1/facts:status
 GET  /v1/memories:status
 POST /v1/remember
 POST /v1/memories:recall
@@ -801,6 +829,13 @@ POST /v1/password:generate
 
 Notes on specific actions and workflows:
 
+- `GET /v1/facts:status` returns
+  `{schema_version,fact_capacity:{...}}` for the token-bound owner agent.
+  `used` counts resolved, non-deleted current facts across all of that agent's
+  subjects, not assertions, candidates, aliases, history, or tombstones. The
+  projection contains only `used`, nullable `max` and `remaining`, `unlimited`,
+  `near_limit`, `at_limit`, and `over_limit`; the finite warning starts at
+  90 percent.
 - `GET /v1/memories:status` returns
   `{schema_version,memory_capacity:{...}}` for the token-bound owner agent.
   Capacity contains only `used`, nullable `max` and `remaining`, `unlimited`,

@@ -357,6 +357,7 @@ type Config struct {
 	GetTranscriptPageObservational func(ctx context.Context, p DomainPrincipal, transcriptID string, opts TranscriptPageOptions) (TranscriptPage, error)
 	GetUsage                       func(ctx context.Context, p DomainPrincipal, query UsageQuery) (UsageReport, error)
 	SetFact                        func(ctx context.Context, p DomainPrincipal, in SetFactRequest) (Fact, error)
+	GetFactLimitStatus             func(ctx context.Context, p DomainPrincipal) (FactLimitStatus, error)
 	DeleteFact                     func(ctx context.Context, p DomainPrincipal, in DeleteFactRequest) (FactDeletionReceipt, error)
 	GetFact                        func(ctx context.Context, p DomainPrincipal, subject, predicate string) (Fact, error)
 	GetFactObservational           func(ctx context.Context, p DomainPrincipal, subject, predicate string) (Fact, error)
@@ -831,6 +832,7 @@ type SelfDigest struct {
 	Identity          SelfIdentity           `json:"identity"`
 	PrimaryFacts      []SelfFact             `json:"primary_facts"`
 	SalientMemories   []SelfMemory           `json:"salient_memories"`
+	FactCapacity      *FactLimitStatus       `json:"fact_capacity,omitempty"`
 	MemoryCapacity    *MemoryLimitStatus     `json:"memory_capacity,omitempty"`
 	MemoryCheckpoint  *SelfMemoryCheckpoint  `json:"memory_checkpoint,omitempty"`
 	MessageCheckpoint *SelfMessageCheckpoint `json:"message_checkpoint,omitempty"`
@@ -2016,6 +2018,7 @@ func apiMux(cfg Config) http.Handler {
 			cfg.GetSelfFacts,
 			cfg.GetSelfFactsObservational,
 			cfg.CountSelfFacts,
+			cfg.GetFactLimitStatus,
 			cfg.GetSelfMemories,
 			cfg.CountSelfMemories,
 			cfg.GetMemoryLimitStatus,
@@ -2143,6 +2146,9 @@ func apiMux(cfg Config) http.Handler {
 		}
 		if cfg.GetMemoryLimitStatus != nil {
 			mux.HandleFunc("GET /v1/memories:status", memoryLimitStatusHandler(cfg.AuthenticatePrincipal, cfg.GetMemoryLimitStatus))
+		}
+		if cfg.GetFactLimitStatus != nil {
+			mux.HandleFunc("GET /v1/facts:status", factLimitStatusHandler(cfg.AuthenticatePrincipal, cfg.GetFactLimitStatus))
 		}
 		if cfg.GetMemory != nil {
 			mux.HandleFunc("GET /v1/memories/{memory}", getMemoryHandler(cfg.AuthenticatePrincipal, cfg.GetMemory))
@@ -2661,6 +2667,7 @@ func selfHandler(
 	getFacts func(context.Context, DomainPrincipal, int, bool) ([]SelfFact, int, error),
 	getFactsObservational func(context.Context, DomainPrincipal, int, bool) ([]SelfFact, int, error),
 	countFacts func(context.Context, DomainPrincipal) (int, error),
+	getFactLimitStatus func(context.Context, DomainPrincipal) (FactLimitStatus, error),
 	getMemories func(context.Context, DomainPrincipal, int, bool) ([]SelfMemory, int, error),
 	countMemories func(context.Context, DomainPrincipal) (int, error),
 	getMemoryLimitStatus func(context.Context, DomainPrincipal) (MemoryLimitStatus, error),
@@ -2850,6 +2857,15 @@ func selfHandler(
 			}
 			factCount = total
 		}
+		var factCapacity *FactLimitStatus
+		if getFactLimitStatus != nil {
+			status, err := getFactLimitStatus(r.Context(), p)
+			if err != nil {
+				factCapacity = &FactLimitStatus{Unavailable: true}
+			} else {
+				factCapacity = &status
+			}
+		}
 
 		memories := []SelfMemory{}
 		memoryCount := 0
@@ -2932,6 +2948,7 @@ func selfHandler(
 			},
 			PrimaryFacts:      facts,
 			SalientMemories:   memories,
+			FactCapacity:      factCapacity,
 			MemoryCapacity:    memoryCapacity,
 			MemoryCheckpoint:  memoryCheckpoint,
 			MessageCheckpoint: messageCheckpoint,

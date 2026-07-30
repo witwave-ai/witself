@@ -259,6 +259,33 @@ func TestSchema35MessageFailureCountUpgradeDefaultsToZero(t *testing.T) {
 	}
 }
 
+func TestSchema75ActiveFactCountUpgradePreservesPortableRows(t *testing.T) {
+	upgrade := UpgraderFor(75)
+	if upgrade == nil {
+		t.Fatal("schema 75 identity upgrader is not registered")
+	}
+	input := map[string]any{
+		"id":         "agent_1",
+		"account_id": "acc_1",
+		"name":       "scott",
+	}
+	want := map[string]any{
+		"id":         "agent_1",
+		"account_id": "acc_1",
+		"name":       "scott",
+	}
+	got, err := upgrade("agents", input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("schema 75 identity upgrade changed agent: got %#v, want %#v", got, want)
+	}
+	if _, exists := got["active_fact_count"]; exists {
+		t.Fatalf("schema 75 identity upgrade invented derived active_fact_count: %#v", got)
+	}
+}
+
 func TestSchema36MessageAudienceUpgradeDefaultsToDirect(t *testing.T) {
 	upgrade := UpgraderFor(36)
 	if upgrade == nil {

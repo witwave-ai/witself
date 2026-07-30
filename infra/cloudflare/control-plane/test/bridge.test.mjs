@@ -186,6 +186,9 @@ test("bridge path classifiers are exact", () => {
     "/v1/admin/accounts/acct_1/limit-overrides/stored_memory",
   ));
   assert.ok(matchAdminPolicyPath(
+    "/v1/admin/accounts/acct_1/limit-overrides/stored_fact",
+  ));
+  assert.ok(matchAdminPolicyPath(
     "/v1/admin/accounts/acct_1/limit-overrides/agents_per_realm",
   ));
   assert.equal(matchAdminPolicyPath(

@@ -175,6 +175,7 @@ Initial metric families should include:
 | `witself_token_operations_total` | Token create, rotate, revoke, and verification operations. |
 | `witself_secret_operations_total` | Sealed-plane secret operations by operation (`create`, `show`, `update`, `rename`, `copy`, `archive`, `restore`, `delete`, `grant`, `revoke`), owner kind, and result. The `show` operation returns metadata only and never a value; reveals are counted separately. |
 | `witself_secret_limit_rejections_total` | Implemented non-retryable stored-secret create refusals. Its bounded labels are exactly `limit_dimension="stored_secret"` and `operation="create"`; it never carries an account, realm, agent, secret id, name, value, or error text. |
+| `witself_fact_limit_rejections_total` | Implemented non-retryable current-fact capacity refusals. Its bounded labels are exactly `limit_dimension="stored_fact"` and operation from the closed set `create` or `confirm`; it never carries account, realm, agent, subject, predicate, fact/candidate id, usage, maximum, value, or error text. Phase A keeps this metric at zero by prohibiting finite effective maxima; finite overrides and plan-catalog defaults activate only after Phase B's fenced migration 0078 reconciliation is complete on every cell. |
 | `witself_memory_limit_rejections_total` | Implemented non-retryable active-memory capacity refusals. Its bounded labels are exactly `limit_dimension="stored_memory"` and operation from the closed set `create`, `supersede`, `restore`, `reactivate`, or `curation_apply`; it never carries account, realm, agent, memory, plan, usage, maximum, content, or error-text labels. |
 | `witself_plan_limit_rejections_total` | Implemented non-retryable realm and agent create refusals. Its bounded labels are `limit_dimension="realms"`, legacy `"agents"`, or `"agents_per_realm"`, plus `operation="create"`; it never carries an account, realm, agent, resource name, or error text. |
 | `witself_secret_reveals_total` | Sealed-plane value-returning reveals (`secret reveal` and reference resolution that returns a value) by principal kind, owner kind, `server_side_decrypt` (`true`, `false`), and result. These are the audited reveal-ceremony events; the metric counts events only and never carries the revealed value. |
@@ -567,6 +568,10 @@ Required checks once the server and chart exist:
 - Tests proving active-memory refusal labels are restricted to
   `limit_dimension="stored_memory"` and the five closed operation values, with
   no tenant ids, usage values, maximums, memory ids, or plan content.
+- Tests proving current-fact refusal labels are restricted to
+  `limit_dimension="stored_fact"` and operation `create` or `confirm`, with no
+  tenant ids, subjects, predicates, fact/candidate ids, usage values, maximums,
+  values, or error text.
 - Tests proving secret values, secret/field names, TOTP seeds, generated TOTP
   codes, KMS key material, data keys, and private keys never appear in metrics,
   logs, or health responses.

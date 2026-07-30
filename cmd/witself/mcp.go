@@ -1859,6 +1859,7 @@ func newWitselfMCPServerForRuntimeOptions(backend witselfMCPBackend, runtimeName
 	if email, ok := backend.(mcpAgentEmailBackend); ok {
 		registerAgentEmailMCPTools(server, runtimeName, email)
 	}
+	registerFactStatusMCPTool(server, runtimeName, backend)
 	registerMemoryMCPTools(server, runtimeName, backend)
 	if avatars, ok := backend.(mcpAvatarBackend); ok {
 		registerAvatarMCPTools(server, runtimeName, avatars)
@@ -2349,7 +2350,7 @@ func mcpInstructions(runtimeName, selfTool, messageListTool string) string {
 
 func mcpInstructionsForMode(runtimeName, selfTool, messageListTool string, readOnly bool) string {
 	if readOnly {
-		instructions := readOnlyWitselfMCPInstructions + " " + readOnlyAvatarMCPInstructions + " " + readOnlySecretRoutingInstructions
+		instructions := readOnlyWitselfMCPInstructions + "\n\n" + factCapacityMCPRoutingInstructions + " " + readOnlyAvatarMCPInstructions + " " + readOnlySecretRoutingInstructions
 		if runtimeName == transcriptcapture.RuntimeGrokBuild {
 			return grokPortableMCPInstructions(instructions, selfTool, messageListTool)
 		}
@@ -2361,19 +2362,22 @@ func mcpInstructionsForMode(runtimeName, selfTool, messageListTool string, readO
 		// Codex asks MCP servers to keep their first 512 instruction characters
 		// self-contained while it decides how to use the server. Put the same
 		// canonical policy installed in global AGENTS.md first.
-		instructions = codexMemoryRoutingInstructions + "\n\n" + avatarRoutingInstructions + "\n\n" + instructions
+		instructions = codexMemoryRoutingInstructions + "\n\n" + factCapacityMCPRoutingInstructions + "\n\n" + avatarRoutingInstructions + "\n\n" + instructions
 	case transcriptcapture.RuntimeClaudeCode:
 		// Claude Code truncates each MCP server's instructions at 2 KiB. The
 		// integration installs the complete runtime-neutral policy as a managed
-		// rule; this synopsis repeats the decisions most likely to need salience
-		// at tool-connect time and leaves room for the operational suffix.
+		// rule, including fact-capacity routing. The synopsis repeats the
+		// decisions most likely to need salience at tool-connect time and leaves
+		// room for the operational suffix.
 		instructions = claudeMCPMemoryRoutingSynopsis + "\n\n" + claudeRuntimeMemoryRoutingMCPSuffix
 	case transcriptcapture.RuntimeGrokBuild:
-		instructions = grokMemoryRoutingInstructions + "\n\n" + foregroundMessagingRoutingInstructions + "\n\n" + avatarRoutingInstructions + "\n\n" + secretRoutingInstructions + "\n\n" + runtimeMemoryRoutingMCPSuffix
+		instructions = grokMemoryRoutingInstructions + "\n\n" + factCapacityMCPRoutingInstructions + "\n\n" + foregroundMessagingRoutingInstructions + "\n\n" + avatarRoutingInstructions + "\n\n" + secretRoutingInstructions + "\n\n" + runtimeMemoryRoutingMCPSuffix
 	case transcriptcapture.RuntimeCursor:
-		instructions = cursorMemoryRoutingInstructions + "\n\n" + foregroundMessagingRoutingInstructions + "\n\n" + avatarRoutingInstructions + "\n\n" + secretRoutingInstructions + "\n\n" + runtimeMemoryRoutingMCPSuffix
+		instructions = cursorMemoryRoutingInstructions + "\n\n" + factCapacityMCPRoutingInstructions + "\n\n" + foregroundMessagingRoutingInstructions + "\n\n" + avatarRoutingInstructions + "\n\n" + secretRoutingInstructions + "\n\n" + runtimeMemoryRoutingMCPSuffix
 	case transcriptcapture.RuntimeCopilot:
-		instructions = copilotMemoryRoutingInstructions + "\n\n" + foregroundMessagingRoutingInstructions + "\n\n" + avatarRoutingInstructions + "\n\n" + secretRoutingInstructions + "\n\n" + runtimeMemoryRoutingMCPSuffix
+		instructions = copilotMemoryRoutingInstructions + "\n\n" + factCapacityMCPRoutingInstructions + "\n\n" + foregroundMessagingRoutingInstructions + "\n\n" + avatarRoutingInstructions + "\n\n" + secretRoutingInstructions + "\n\n" + runtimeMemoryRoutingMCPSuffix
+	default:
+		instructions = factCapacityMCPRoutingInstructions + "\n\n" + instructions
 	}
 	if runtimeName != transcriptcapture.RuntimeGrokBuild {
 		return instructions
