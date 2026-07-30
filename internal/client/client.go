@@ -31,6 +31,10 @@ var ErrSecretVaultKeyMismatch = errors.New("agent vault key mismatch")
 // the authenticated owner's retained-secret plan cap.
 var ErrSecretLimitReached = errors.New("stored secret limit reached")
 
+// ErrMemoryLimitReached identifies a non-retryable refusal of a net-positive
+// active-memory mutation caused by the authenticated owner's plan cap.
+var ErrMemoryLimitReached = errors.New("active memory limit reached")
+
 // ErrFeatureNotEnabled identifies a non-retryable account-plan feature
 // refusal. Installed clients keep their complete tool surface and use this
 // typed error to stop retrying until the account policy changes.
@@ -66,6 +70,22 @@ func (e *SecretLimitError) Error() string {
 		e.Status.Used, *e.Status.Max)
 }
 func (e *SecretLimitError) Unwrap() error { return ErrSecretLimitReached }
+
+// MemoryLimitError preserves the server's value-free active-memory capacity
+// snapshot so clients can consolidate before retrying a net-positive write.
+type MemoryLimitError struct {
+	Status MemoryLimitStatus
+}
+
+func (e *MemoryLimitError) Error() string {
+	if e == nil || e.Status.Max == nil {
+		return ErrMemoryLimitReached.Error()
+	}
+	return fmt.Sprintf("%s: %d/%d active", ErrMemoryLimitReached,
+		e.Status.Used, *e.Status.Max)
+}
+
+func (e *MemoryLimitError) Unwrap() error { return ErrMemoryLimitReached }
 
 // ErrNotFound wraps 404 responses while preserving the server's existing
 // human-readable error text. Callers use it for capability-compatible
@@ -263,14 +283,20 @@ func responseError(resp *http.Response, fallback string) error {
 		Code      string            `json:"code"`
 		Feature   string            `json:"feature"`
 		Retryable bool              `json:"retryable"`
-		Limit     SecretLimitStatus `json:"limit"`
+		Limit     MemoryLimitStatus `json:"limit"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err == nil && out.Error != "" {
 		if resp.StatusCode == http.StatusConflict && out.Code == "secret_vault_key_mismatch" {
 			return fmt.Errorf("%w", ErrSecretVaultKeyMismatch)
 		}
 		if resp.StatusCode == http.StatusForbidden && out.Code == "stored_secret_limit_reached" {
-			return &SecretLimitError{Status: out.Limit}
+			return &SecretLimitError{Status: SecretLimitStatus{
+				Used: out.Limit.Used, Max: out.Limit.Max, Remaining: out.Limit.Remaining,
+				Unlimited: out.Limit.Unlimited, OverLimit: out.Limit.OverLimit,
+			}}
+		}
+		if resp.StatusCode == http.StatusForbidden && out.Code == "stored_memory_limit_reached" {
+			return &MemoryLimitError{Status: out.Limit}
 		}
 		if resp.StatusCode == http.StatusForbidden && out.Code == "feature_not_enabled" {
 			return &FeatureNotEnabledError{

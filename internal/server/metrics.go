@@ -34,6 +34,7 @@ type runtimeMetrics struct {
 	curationOperations map[operationMetricLabels]uint64
 	planLimitRejects   map[limitMetricLabels]uint64
 	secretLimitRejects map[limitMetricLabels]uint64
+	memoryLimitRejects map[limitMetricLabels]uint64
 }
 
 type httpMetricLabels struct {
@@ -94,6 +95,7 @@ func newRuntimeMetrics() *runtimeMetrics {
 		curationOperations: make(map[operationMetricLabels]uint64),
 		planLimitRejects:   make(map[limitMetricLabels]uint64),
 		secretLimitRejects: make(map[limitMetricLabels]uint64),
+		memoryLimitRejects: make(map[limitMetricLabels]uint64),
 	}
 }
 
@@ -167,6 +169,7 @@ func (m *runtimeMetrics) instrumentConfig(cfg Config) Config {
 		cfg.CaptureMemory = func(ctx context.Context, p DomainPrincipal, in CaptureMemoryRequest) (MemoryMutationResult, error) {
 			result, err := operation(ctx, p, in)
 			m.observeMemoryOperation("add", p.Kind, err)
+			m.observeMemoryLimitRejection(err, "create")
 			return result, err
 		}
 	}
@@ -202,6 +205,7 @@ func (m *runtimeMetrics) instrumentConfig(cfg Config) Config {
 		cfg.SupersedeMemory = func(ctx context.Context, p DomainPrincipal, memoryID string, in SupersedeMemoryRequest) (SupersedeMemoryResult, error) {
 			result, err := operation(ctx, p, memoryID, in)
 			m.observeMemoryOperation("supersede", p.Kind, err)
+			m.observeMemoryLimitRejection(err, "supersede")
 			return result, err
 		}
 	}
@@ -216,6 +220,7 @@ func (m *runtimeMetrics) instrumentConfig(cfg Config) Config {
 		cfg.RestoreMemory = func(ctx context.Context, p DomainPrincipal, memoryID string, in MemoryLifecycleRequest) (MemoryMutationResult, error) {
 			result, err := operation(ctx, p, memoryID, in)
 			m.observeMemoryOperation("restore", p.Kind, err)
+			m.observeMemoryLimitRejection(err, "restore")
 			return result, err
 		}
 	}
@@ -223,6 +228,7 @@ func (m *runtimeMetrics) instrumentConfig(cfg Config) Config {
 		cfg.ReactivateMemory = func(ctx context.Context, p DomainPrincipal, memoryID string, in MemoryLifecycleRequest) (MemoryMutationResult, error) {
 			result, err := operation(ctx, p, memoryID, in)
 			m.observeMemoryOperation("reactivate", p.Kind, err)
+			m.observeMemoryLimitRejection(err, "reactivate")
 			return result, err
 		}
 	}
@@ -273,6 +279,7 @@ func (m *runtimeMetrics) instrumentConfig(cfg Config) Config {
 		cfg.ApplyMemoryCuration = func(ctx context.Context, p DomainPrincipal, runID string, in ApplyMemoryCurationRequest) (any, error) {
 			result, err := operation(ctx, p, runID, in)
 			m.observeCurationOperation("apply", err)
+			m.observeMemoryLimitRejection(err, "curation_apply")
 			return result, err
 		}
 	}
@@ -318,6 +325,23 @@ func (m *runtimeMetrics) observePlanLimitRejection(err error, fallbackDimension 
 	m.planLimitRejects[limitMetricLabels{
 		LimitDimension: dimension,
 		Operation:      "create",
+	}]++
+	m.mu.Unlock()
+}
+
+func (m *runtimeMetrics) observeMemoryLimitRejection(err error, operation string) {
+	if !errors.Is(err, ErrMemoryLimitReached) {
+		return
+	}
+	switch operation {
+	case "create", "supersede", "restore", "reactivate", "curation_apply":
+	default:
+		operation = "unknown"
+	}
+	m.mu.Lock()
+	m.memoryLimitRejects[limitMetricLabels{
+		LimitDimension: "stored_memory",
+		Operation:      operation,
 	}]++
 	m.mu.Unlock()
 }
@@ -402,6 +426,7 @@ func (m *runtimeMetrics) snapshot() *runtimeMetrics {
 		curationOperations: maps.Clone(m.curationOperations),
 		planLimitRejects:   maps.Clone(m.planLimitRejects),
 		secretLimitRejects: maps.Clone(m.secretLimitRejects),
+		memoryLimitRejects: maps.Clone(m.memoryLimitRejects),
 	}
 }
 
@@ -459,6 +484,9 @@ func (m *runtimeMetrics) writePrometheusSnapshot(w io.Writer) {
 		return labels("limit_dimension", key.LimitDimension, "operation", key.Operation)
 	})
 	writeCounterMap(w, "witself_secret_limit_rejections_total", "Stored-secret create refusals by bounded limit dimension and operation.", m.secretLimitRejects, func(key limitMetricLabels) string {
+		return labels("limit_dimension", key.LimitDimension, "operation", key.Operation)
+	})
+	writeCounterMap(w, "witself_memory_limit_rejections_total", "Net-positive active-memory mutation refusals by bounded limit dimension and operation.", m.memoryLimitRejects, func(key limitMetricLabels) string {
 		return labels("limit_dimension", key.LimitDimension, "operation", key.Operation)
 	})
 }

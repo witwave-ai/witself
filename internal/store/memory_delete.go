@@ -72,6 +72,7 @@ type memoryDeleteSnapshot struct {
 	Result         DeleteMemoryResult
 	RetryShields   []memoryDeleteRetryShield
 	CurationRunIDs []string
+	Active         bool
 }
 
 // DeleteMemory previews or permanently deletes one agent-owned narrative
@@ -187,6 +188,11 @@ func (s *Store) DeleteMemory(ctx context.Context, p Principal, in DeleteMemoryIn
 	if tag.RowsAffected() != 1 {
 		return DeleteMemoryResult{}, ErrMemoryConflict
 	}
+	if snapshot.Active {
+		if err := adjustActiveMemoryCountTx(ctx, tx, p, -1); err != nil {
+			return DeleteMemoryResult{}, err
+		}
+	}
 
 	if err := scrubMemoryDeleteCurationRows(ctx, tx, p, snapshot, deletedAt); err != nil {
 		return DeleteMemoryResult{}, err
@@ -297,8 +303,9 @@ func loadMemoryDeleteSnapshot(ctx context.Context, tx pgx.Tx, p Principal, memor
 	seenShields := map[string]bool{}
 
 	var versionCount int64
+	var currentState string
 	rows, err := tx.Query(ctx, `
-		SELECT version, operation, idempotency_key,
+		SELECT version, state, operation, idempotency_key,
 		       supersession_set_id, supersession_set_revision,
 		       supersession_replacement_count, supersession_replacement_digest
 		FROM memory_versions
@@ -310,14 +317,17 @@ func loadMemoryDeleteSnapshot(ctx context.Context, tx pgx.Tx, p Principal, memor
 	}
 	for rows.Next() {
 		var version int64
-		var operation, key, supersessionSetID, supersessionDigest string
+		var state, operation, key, supersessionSetID, supersessionDigest string
 		var supersessionRevision, supersessionCount int64
-		if err := rows.Scan(&version, &operation, &key, &supersessionSetID,
+		if err := rows.Scan(&version, &state, &operation, &key, &supersessionSetID,
 			&supersessionRevision, &supersessionCount, &supersessionDigest); err != nil {
 			rows.Close()
 			return memoryDeleteSnapshot{}, false, err
 		}
 		versionCount++
+		if version == currentVersion.Int64 {
+			currentState = state
+		}
 		keyHash := memoryIdempotencyKeyHash(key)
 		for _, field := range []string{
 			"version", strconv.FormatInt(version, 10), operation, keyHash,
@@ -338,7 +348,7 @@ func loadMemoryDeleteSnapshot(ctx context.Context, tx pgx.Tx, p Principal, memor
 		return memoryDeleteSnapshot{}, false, err
 	}
 	rows.Close()
-	if versionCount != currentVersion.Int64 {
+	if versionCount != currentVersion.Int64 || currentState == "" {
 		return memoryDeleteSnapshot{}, false, ErrMemoryConflict
 	}
 
@@ -509,6 +519,7 @@ func loadMemoryDeleteSnapshot(ctx context.Context, tx pgx.Tx, p Principal, memor
 	}
 	return memoryDeleteSnapshot{
 		Result: result, RetryShields: shields, CurationRunIDs: curationRunIDs,
+		Active: currentState == MemoryStateActive,
 	}, false, nil
 }
 

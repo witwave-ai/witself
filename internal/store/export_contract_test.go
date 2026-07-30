@@ -87,6 +87,9 @@ func TestExportedColumnsCoverSchemaBase(t *testing.T) {
 	// Anything added here needs an explicit call-out — it's a policy
 	// decision, not an oversight.
 	omittedColumns := map[string]map[string]string{
+		"memory_change_clocks": {
+			"active_memory_count": "derived from current active memory heads on import",
+		},
 		"memory_versions": {
 			"search_document": "generated full-text index is rebuilt from content on import",
 		},
@@ -137,6 +140,26 @@ func TestParseSchemaColumnsCoversMultiColumnAlter(t *testing.T) {
 		if !schemaColumns["memories"][column] {
 			t.Errorf("migration 0030 column memories.%s was not parsed", column)
 		}
+	}
+}
+
+func TestActiveMemoryCountIsDerivedArchiveProjection(t *testing.T) {
+	schemaColumns, err := parseSchemaColumns()
+	if err != nil {
+		t.Fatalf("parse migrations: %v", err)
+	}
+	if !schemaColumns["memory_change_clocks"]["active_memory_count"] {
+		t.Fatal("schema parser did not find memory_change_clocks.active_memory_count")
+	}
+	exportedByTable, err := parseExportedColumns()
+	if err != nil {
+		t.Fatalf("parse export.go: %v", err)
+	}
+	if exportedByTable["memory_change_clocks"]["active_memory_count"] {
+		t.Fatal("exporter emitted derived active_memory_count")
+	}
+	if importColumns["memory_change_clocks"]["active_memory_count"] {
+		t.Fatal("import allowlist accepted derived active_memory_count")
 	}
 }
 

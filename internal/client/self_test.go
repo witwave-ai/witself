@@ -36,6 +36,27 @@ func TestGetSelfDecodesMemoryCheckpoint(t *testing.T) {
 	}
 }
 
+func TestGetSelfDecodesMemoryCapacity(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","identity":{"account_id":"acc_1","agent_id":"agt_1","agent_name":"scott","realm_id":"rlm_1","realm_name":"default"},"primary_facts":[],"salient_memories":[],"memory_capacity":{"used":50000,"max":50000,"remaining":0,"unlimited":false,"near_limit":true,"at_limit":true,"over_limit":false},"index":{"kinds":[],"tags":[],"counts":{}},"elided":false}`))
+	}))
+	defer srv.Close()
+
+	got, err := GetSelf(context.Background(), srv.URL, "token", SelfOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MemoryCapacity == nil ||
+		got.MemoryCapacity.Used != 50000 ||
+		got.MemoryCapacity.Max == nil || *got.MemoryCapacity.Max != 50000 ||
+		got.MemoryCapacity.Remaining == nil || *got.MemoryCapacity.Remaining != 0 ||
+		!got.MemoryCapacity.NearLimit || !got.MemoryCapacity.AtLimit ||
+		got.MemoryCapacity.OverLimit || got.MemoryCapacity.Unlimited ||
+		got.MemoryCapacity.Unavailable {
+		t.Fatalf("memory capacity = %#v", got.MemoryCapacity)
+	}
+}
+
 func TestGetSelfDecodesAndRequestsEmailCheckpoint(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("include_email_checkpoint") != "true" {

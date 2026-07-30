@@ -54,11 +54,12 @@ type MemoryCurationInputCaps struct {
 // assuming that a deployment capability implies that this credential may use
 // it.
 type MemoryCurationPreflight struct {
-	Principal   MemoryCurationPreflightPrincipal   `json:"principal"`
-	Credential  MemoryCurationPreflightCredential  `json:"credential"`
-	Protocol    MemoryCurationPreflightProtocol    `json:"protocol"`
-	Permissions MemoryCurationPreflightPermissions `json:"permissions"`
-	Limits      MemoryCurationPreflightLimits      `json:"limits"`
+	Principal      MemoryCurationPreflightPrincipal   `json:"principal"`
+	Credential     MemoryCurationPreflightCredential  `json:"credential"`
+	Protocol       MemoryCurationPreflightProtocol    `json:"protocol"`
+	Permissions    MemoryCurationPreflightPermissions `json:"permissions"`
+	Limits         MemoryCurationPreflightLimits      `json:"limits"`
+	MemoryCapacity MemoryLimitStatus                  `json:"memory_capacity"`
 }
 
 // MemoryCurationPreflightPrincipal identifies the token-derived curation
@@ -375,18 +376,20 @@ type MemoryCurationPreallocatedMemoryID struct {
 
 // MemoryCurationImpactPreview summarizes an accepted plan using counts only.
 type MemoryCurationImpactPreview struct {
-	ActionCount           int `json:"action_count"`
-	CreateActions         int `json:"create_actions"`
-	ReplaceActions        int `json:"replace_actions"`
-	SupersedeActions      int `json:"supersede_actions"`
-	RelateActions         int `json:"relate_actions"`
-	ProposeFactActions    int `json:"propose_fact_actions"`
-	NewMemories           int `json:"new_memories"`
-	MemoryVersionWrites   int `json:"memory_version_writes"`
-	EvidenceRows          int `json:"evidence_rows"`
-	RelationRows          int `json:"relation_rows"`
-	ExpectedVersionChecks int `json:"expected_version_checks"`
-	FactCandidates        int `json:"fact_candidates"`
+	ActionCount             int   `json:"action_count"`
+	CreateActions           int   `json:"create_actions"`
+	ReplaceActions          int   `json:"replace_actions"`
+	SupersedeActions        int   `json:"supersede_actions"`
+	RelateActions           int   `json:"relate_actions"`
+	ProposeFactActions      int   `json:"propose_fact_actions"`
+	NewMemories             int   `json:"new_memories"`
+	MemoryVersionWrites     int   `json:"memory_version_writes"`
+	EvidenceRows            int   `json:"evidence_rows"`
+	RelationRows            int   `json:"relation_rows"`
+	ExpectedVersionChecks   int   `json:"expected_version_checks"`
+	FactCandidates          int   `json:"fact_candidates"`
+	ActiveMemoryDelta       int64 `json:"active_memory_delta"`
+	ProjectedActiveMemories int64 `json:"projected_active_memories"`
 }
 
 // MemoryCurationPlanReceipt is the immutable, value-free acceptance receipt
@@ -533,6 +536,14 @@ func GetMemoryCurationPreflight(ctx context.Context, endpoint, token string) (*M
 	}
 	if out.Protocol.AllowedPrimitives == nil {
 		out.Protocol.AllowedPrimitives = []string{}
+	}
+	// Servers before active-memory limits did not return memory_capacity.
+	// Treat that absent/invalid zero value as unknown, never as an implied
+	// unlimited or zero-capacity policy during a rolling deployment.
+	if !out.MemoryCapacity.Unavailable &&
+		!out.MemoryCapacity.Unlimited &&
+		out.MemoryCapacity.Max == nil {
+		out.MemoryCapacity = MemoryLimitStatus{Unavailable: true}
 	}
 	return &out, nil
 }

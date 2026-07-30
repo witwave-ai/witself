@@ -148,7 +148,10 @@ func TestMemoryCurationClientHTTPContract(t *testing.T) {
 		preflight.Protocol.PlanSchema != "witself.memory-plan.v1" ||
 		len(preflight.Protocol.AllowedPrimitives) != 1 ||
 		!preflight.Permissions.GetPlan || !preflight.Permissions.Plan || preflight.Permissions.Apply ||
-		preflight.Limits.MaxPlanBytes != 32<<20 {
+		preflight.Limits.MaxPlanBytes != 32<<20 ||
+		!preflight.MemoryCapacity.Unavailable ||
+		preflight.MemoryCapacity.Unlimited ||
+		preflight.MemoryCapacity.Max != nil {
 		t.Fatalf("preflight = %#v", preflight)
 	}
 	if _, err := RequestMemoryCuration(ctx, srv.URL, "token", RequestMemoryCurationInput{

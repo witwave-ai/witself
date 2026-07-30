@@ -141,6 +141,10 @@ func (s *Store) SupersedeMemory(ctx context.Context, p Principal, in SupersedeMe
 	if current.State != MemoryStateActive {
 		return SupersedeMemoryResult{}, ErrMemoryConflict
 	}
+	activeDelta := int64(len(in.Replacements)) - 1
+	if _, err := requireActiveMemoryCapacityTx(ctx, tx, p, activeDelta); err != nil {
+		return SupersedeMemoryResult{}, err
+	}
 	setID, err := id.New("mset")
 	if err != nil {
 		return SupersedeMemoryResult{}, err
@@ -249,6 +253,9 @@ func (s *Store) SupersedeMemory(ctx context.Context, p Principal, in SupersedeMe
 		if err != nil {
 			return SupersedeMemoryResult{}, fmt.Errorf("insert supersession relation: %w", err)
 		}
+	}
+	if err := adjustActiveMemoryCountTx(ctx, tx, p, activeDelta); err != nil {
+		return SupersedeMemoryResult{}, err
 	}
 
 	out, err := loadMemorySupersessionResult(ctx, tx, p, setID, setRevision,

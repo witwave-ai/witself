@@ -89,6 +89,10 @@ Error response:
 }
 ```
 
+The HTTP status response uses the wrapper above. `witself memory status --json`
+prints the inner capacity object directly. MCP, self digest, and curation
+preflight carry that object under `memory_capacity`.
+
 Rules:
 
 - `schema_version` is required and is always `witself.v0` in v0.
@@ -103,8 +107,8 @@ Rules:
 - `retryable` indicates whether retrying the identical request may later
   succeed. Transient codes (`backend_unavailable`, `rate_limited`) are
   `retryable: true`; hard conditions (`limit_exceeded`, `access_denied`,
-  `stored_secret_limit_reached`, `auth_failed`, `not_found`, `conflict`,
-  `unsupported_operation`) are `retryable: false`.
+  `stored_memory_limit_reached`, `stored_secret_limit_reached`, `auth_failed`,
+  `not_found`, `conflict`, `unsupported_operation`) are `retryable: false`.
 - `rate_limited` responses should include `details.retry_after` in seconds when
   a wait is known; the HTTP API should also send a `Retry-After` header.
 - Memory content, fact values, message bodies/payloads, embedding vectors, raw
@@ -126,6 +130,7 @@ JSON error codes should align with CLI exit-code categories.
 | `backend_unavailable` | 7 | Backend or network unavailable. |
 | `rate_limited` | 7 | Transient service-protection or throttle limit; `retryable: true`, honor `retry_after`. |
 | `limit_exceeded` | 7 | Plan, quota, or hard usage cap; `retryable: false`. |
+| `stored_memory_limit_reached` | 1 | Current open-plane refusal when a write would exceed the authenticated owner agent's active-memory cap; HTTP 403, `retryable: false`, with a value-free `limit` object. |
 | `stored_secret_limit_reached` | 1 | Current sealed-plane create refusal at the authenticated owner agent's retained cap; HTTP 403, `retryable: false`, with a value-free `limit` object. |
 | `store_integrity` | 8 | Local store integrity or corruption failure. |
 | `unsupported_operation` | 9 | Current backend does not support the operation. |
@@ -773,13 +778,104 @@ Rules:
 - `remember` does not emit its own audit event; it routes to the existing
   `memory.added`, `fact.created`, or `fact.updated` events.
 
+## Active Memory Capacity
+
+`GET /v1/memories:status`, `witself memory status`, the
+`witself.memory.status` MCP tool, the self digest, and curation preflight share
+one value-free capacity object:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "memory_capacity": {
+    "used": 900,
+    "max": 1000,
+    "remaining": 100,
+    "unlimited": false,
+    "near_limit": true,
+    "at_limit": false,
+    "over_limit": false
+  }
+}
+```
+
+Rules:
+
+- `used` counts only the token-bound owner agent's current active memory heads.
+  It never counts versions, forgotten/superseded heads, evidence, relations,
+  vectors, or curation records.
+- A missing effective `stored_memory` maximum is represented as
+  `unlimited:true`, `max:null`, `remaining:null`, `near_limit:false`, and
+  `at_limit:false`, `over_limit:false`.
+- In additive self-digest or curation-preflight projection,
+  `unavailable:true` means the capacity read failed open. Clients must ignore
+  the accompanying zero/null defaults and must not reinterpret them as
+  unlimited. The direct status route instead returns an error when it cannot
+  read authoritative capacity.
+- For a finite maximum, `remaining` is clamped at zero.
+  `near_limit` becomes true at `ceil(max * 0.90)` and remains true at or beyond
+  the maximum; a finite zero cap is therefore immediately near-limit.
+  `at_limit` is true only when `used == max`; `over_limit` is true only when
+  `used > max`.
+- At `used == max`, `at_limit` is true and `over_limit` is false, but a positive
+  active-memory delta is blocked. Reads and zero- or negative-delta
+  correction/consolidation remain available.
+- The object is safe for authenticated hydration, status responses, structured
+  refusals, and dashboards, but ordinary logs and metric labels should record
+  only the bounded refusal operation/dimension. It must not gain account, realm,
+  agent, memory, or plan-content fields.
+
+A refused write uses the same fields under `limit`:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "code": "stored_memory_limit_reached",
+  "error": "Active memory capacity has been reached; existing memories remain available and safe replacement or consolidation is still allowed.",
+  "retryable": false,
+  "limit": {
+    "used": 1000,
+    "max": 1000,
+    "remaining": 0,
+    "unlimited": false,
+    "near_limit": true,
+    "at_limit": true,
+    "over_limit": false
+  }
+}
+```
+
+This HTTP 403 shape is deliberately flat, matching the implemented
+stored-secret specialization. The error is non-retryable for the same
+net-growing intent. Exact idempotent replay is resolved before the gate and may
+return its prior success.
+
+Curation plan/plan-get responses add two count-only fields to their existing
+impact preview:
+
+```json
+{
+  "preview": {
+    "active_memory_delta": -2,
+    "projected_active_memories": 998
+  }
+}
+```
+
+The fields describe the whole normalized plan, not individual calls.
+`active_memory_delta` may be negative, zero, or positive;
+`projected_active_memories` is non-negative. Apply recomputes both values from
+locked current heads and uses that result for authoritative capacity
+enforcement.
+
 ## Self Digest
 
 Used by `self show` and `GET /v1/self`. The bounded, always-loadable digest
 contains primary facts first, then top-N salient memories, authenticated
-value-free memory, message, email, and avatar checkpoints, and a one-line index.
-It is cheap and never requires a vector profile or query vector. The digest
-shape, hard cap, and `elided` behavior are defined in
+value-free active-memory capacity plus memory, message, email, and avatar
+checkpoints, and a one-line index. It is cheap and never requires a vector
+profile or query vector. The digest shape, hard cap, and `elided` behavior are
+defined in
 [context-hydration.md](context-hydration.md).
 
 ```json
@@ -812,6 +908,15 @@ shape, hard cap, and `elided` behavior are defined in
       "salience": 0.8
     }
   ],
+  "memory_capacity": {
+    "used": 900,
+    "max": 1000,
+    "remaining": 100,
+    "unlimited": false,
+    "near_limit": true,
+    "at_limit": false,
+    "over_limit": false
+  },
   "memory_checkpoint": {
     "pending": true,
     "request_id": "mcrq_123",
@@ -854,6 +959,12 @@ Rules:
   [memory-model.md](memory-model.md). Each entry carries a short `snippet`, its
   `kind`, and its `salience`; `sensitive` content is redacted unless the
   authenticated request explicitly opts in.
+- `memory_capacity` is the authenticated, value-free
+  [Active Memory Capacity](#active-memory-capacity) projection. It is
+  independent of fact/salient inclusion and does not authorize a semantic
+  change. `near_limit:true` tells an active client to prefer safe reversible
+  non-growing consolidation when current evidence justifies it; it does not
+  wake a model or let the backend select what to merge.
 - `memory_checkpoint` is authenticated, value-free curation lifecycle metadata,
   independent of fact and salient-memory inclusion. `pending`, `request_id`, and
   `request_generation` are always present. `pending:true` carries the exact

@@ -48,6 +48,8 @@ func exactIdentity() client.SelfIdentity {
 	return client.SelfIdentity{AccountID: "acc_1", RealmID: "rlm_1", RealmName: "default", AgentID: "agt_1", AgentName: "atlas"}
 }
 
+func hydrationInt64(value int64) *int64 { return &value }
+
 func TestRuntimeCapabilityConformance(t *testing.T) {
 	tests := []struct {
 		runtime                    string
@@ -183,6 +185,103 @@ func TestSessionHydrationIsBoundedOpenPlaneAndEscaped(t *testing.T) {
 	if len(envelope.CanonicalFacts) != 2 || envelope.CanonicalFacts[0].Sensitive || !envelope.CanonicalFacts[1].Sensitive ||
 		len(envelope.NarrativeMemories) != 2 || envelope.NarrativeMemories[0].Sensitive || !envelope.NarrativeMemories[1].Sensitive {
 		t.Fatalf("hydration sensitivity markers = %#v / %#v", envelope.CanonicalFacts, envelope.NarrativeMemories)
+	}
+}
+
+func TestSessionHydrationAlwaysCarriesValueFreeMemoryCapacity(t *testing.T) {
+	source := &hydrationSourceStub{self: client.SelfDigest{
+		Identity: exactIdentity(),
+		MemoryCapacity: &client.MemoryLimitStatus{
+			Used: 314, Unlimited: true,
+		},
+	}}
+	result, err := Execute(context.Background(), Config{}, exactBinding(), Request{
+		Runtime: transcriptcapture.RuntimeCodex, Event: EventSessionStart,
+	}, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Injected || !strings.Contains(result.Context, `"memory_capacity"`) {
+		t.Fatalf("session capacity result = %#v", result)
+	}
+	var envelope contextEnvelope
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(result.Context, "WITSELF_AUTOMATIC_CONTEXT_V1\n")), &envelope); err != nil {
+		t.Fatalf("decode hydration context: %v", err)
+	}
+	if envelope.MemoryCapacity == nil ||
+		envelope.MemoryCapacity.Used != 314 ||
+		!envelope.MemoryCapacity.Unlimited ||
+		envelope.MemoryCapacity.Max != nil ||
+		envelope.MemoryCapacity.Remaining != nil ||
+		envelope.MemoryCapacity.NearLimit ||
+		envelope.MemoryCapacity.AtLimit ||
+		envelope.MemoryCapacity.OverLimit ||
+		envelope.MemoryCapacity.Unavailable {
+		t.Fatalf("session memory capacity = %#v", envelope.MemoryCapacity)
+	}
+}
+
+func TestPromptHydrationCarriesOnlyActionableMemoryCapacity(t *testing.T) {
+	maximum := int64(1000)
+	tests := []struct {
+		name   string
+		status client.MemoryLimitStatus
+		want   bool
+	}{
+		{
+			name: "ordinary finite capacity stays quiet",
+			status: client.MemoryLimitStatus{
+				Used: 899, Max: &maximum, Remaining: hydrationInt64(101),
+			},
+		},
+		{
+			name: "near limit is injected",
+			status: client.MemoryLimitStatus{
+				Used: 900, Max: &maximum, Remaining: hydrationInt64(100), NearLimit: true,
+			},
+			want: true,
+		},
+		{
+			name: "unavailable projection is injected",
+			status: client.MemoryLimitStatus{
+				Unavailable: true,
+			},
+			want: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source := &hydrationSourceStub{self: client.SelfDigest{
+				Identity: exactIdentity(), MemoryCapacity: &test.status,
+			}}
+			result, err := Execute(context.Background(), Config{}, exactBinding(), Request{
+				Runtime: transcriptcapture.RuntimeCodex,
+				Event:   EventUserPromptSubmit,
+				Prompt:  "write a parser",
+			}, source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Injected != test.want || source.recallCalls != 0 {
+				t.Fatalf("capacity result/source = %#v / %#v", result, source)
+			}
+			if !test.want {
+				if strings.Contains(result.Context, `"memory_capacity"`) {
+					t.Fatalf("quiet capacity leaked into prompt hydration: %q", result.Context)
+				}
+				return
+			}
+			var envelope contextEnvelope
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(result.Context, "WITSELF_AUTOMATIC_CONTEXT_V1\n")), &envelope); err != nil {
+				t.Fatalf("decode prompt context: %v", err)
+			}
+			if envelope.MemoryCapacity == nil ||
+				envelope.MemoryCapacity.Used != test.status.Used ||
+				envelope.MemoryCapacity.NearLimit != test.status.NearLimit ||
+				envelope.MemoryCapacity.Unavailable != test.status.Unavailable {
+				t.Fatalf("prompt memory capacity = %#v, want %#v", envelope.MemoryCapacity, test.status)
+			}
+		})
 	}
 }
 

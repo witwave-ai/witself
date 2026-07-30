@@ -35,7 +35,7 @@
 
 const ACCOUNT_ID_PATTERN = "[A-Za-z0-9_-]{1,128}";
 const LIMIT_DIMENSION_PATTERN =
-  "(?:realms|agents|agents_per_realm|stored_secret)";
+  "(?:realms|agents|agents_per_realm|stored_memory|stored_secret)";
 const ADMIN_POLICY_PATH = new RegExp(
   `^/v1/admin/accounts/(${ACCOUNT_ID_PATTERN})/(?:transcript-retention|messaging|message-retention|email-receive|email-retention|plan-override|limit-overrides/${LIMIT_DIMENSION_PATTERN})$`,
 );

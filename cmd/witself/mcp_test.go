@@ -387,8 +387,8 @@ func TestGrokMCPUsesPortableToolNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 67 {
-		t.Fatalf("tools = %d, want 67", len(tools.Tools))
+	if len(tools.Tools) != 68 {
+		t.Fatalf("tools = %d, want 68", len(tools.Tools))
 	}
 	foundDelete := false
 	for _, tool := range tools.Tools {
@@ -428,8 +428,8 @@ func TestCursorMCPUsesDottedToolNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 67 {
-		t.Fatalf("tools = %d, want 67", len(tools.Tools))
+	if len(tools.Tools) != 68 {
+		t.Fatalf("tools = %d, want 68", len(tools.Tools))
 	}
 	foundDelete := false
 	for _, tool := range tools.Tools {
@@ -530,6 +530,7 @@ func TestReadOnlyMCPRemovesEveryMutatingTool(t *testing.T) {
 		"witself.transcript.tail",
 		"witself.message.list",
 		"witself.message.listen",
+		"witself.memory.status",
 		"witself.memory.read",
 		"witself.memory.list",
 		"witself.memory.history",
@@ -1345,8 +1346,8 @@ func TestWitselfMCPTranscriptTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 67 {
-		t.Fatalf("tools = %d, want 67", len(tools.Tools))
+	if len(tools.Tools) != 68 {
+		t.Fatalf("tools = %d, want 68", len(tools.Tools))
 	}
 	foundComplete := false
 	foundRelease := false

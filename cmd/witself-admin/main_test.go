@@ -613,45 +613,49 @@ func TestAccountMessagingCLITransmitsIndependentOverrides(t *testing.T) {
 	}
 }
 
-func TestAccountLimitOverrideCLIAgentsPerRealmUnlimited(t *testing.T) {
-	var gotMethod, gotPath string
-	var gotBody map[string]any
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotMethod, gotPath = r.Method, r.URL.Path
-		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
-			t.Fatal(err)
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"schema_version": "witself.v0",
-			"account_id":     "acct_1",
-			"plan":           "free",
-			"billing_plan":   "free",
-			"limit": map[string]any{
-				"dimension":     "agents_per_realm",
-				"default_max":   nil,
-				"effective_max": nil,
-				"overridden":    true,
-			},
-		})
-	}))
-	defer srv.Close()
+func TestAccountLimitOverrideCLIUnlimitedDimensions(t *testing.T) {
+	for _, dimension := range []string{"agents_per_realm", "stored_memory"} {
+		t.Run(dimension, func(t *testing.T) {
+			var gotMethod, gotPath string
+			var gotBody map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotMethod, gotPath = r.Method, r.URL.Path
+				if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+					t.Fatal(err)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"schema_version": "witself.v0",
+					"account_id":     "acct_1",
+					"plan":           "free",
+					"billing_plan":   "free",
+					"limit": map[string]any{
+						"dimension":     dimension,
+						"default_max":   nil,
+						"effective_max": nil,
+						"overridden":    true,
+					},
+				})
+			}))
+			defer srv.Close()
 
-	code := accountLimitOverride([]string{
-		"set", "--endpoint", srv.URL, "--token", "admin-token",
-		"--account", "acct_1", "--dimension", "agents_per_realm",
-		"--unlimited", "--reason", "founder capacity", "--json",
-	})
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
-	if gotMethod != http.MethodPut ||
-		gotPath != "/v1/admin/accounts/acct_1/limit-overrides/agents_per_realm" ||
-		gotBody["unlimited"] != true ||
-		gotBody["reason"] != "founder capacity" {
-		t.Fatalf("request = %s %s %#v", gotMethod, gotPath, gotBody)
-	}
-	if _, present := gotBody["max"]; present {
-		t.Fatalf("unlimited body also selected a finite max: %#v", gotBody)
+			code := accountLimitOverride([]string{
+				"set", "--endpoint", srv.URL, "--token", "admin-token",
+				"--account", "acct_1", "--dimension", dimension,
+				"--unlimited", "--reason", "founder capacity", "--json",
+			})
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0", code)
+			}
+			if gotMethod != http.MethodPut ||
+				gotPath != "/v1/admin/accounts/acct_1/limit-overrides/"+dimension ||
+				gotBody["unlimited"] != true ||
+				gotBody["reason"] != "founder capacity" {
+				t.Fatalf("request = %s %s %#v", gotMethod, gotPath, gotBody)
+			}
+			if _, present := gotBody["max"]; present {
+				t.Fatalf("unlimited body also selected a finite max: %#v", gotBody)
+			}
+		})
 	}
 }
 

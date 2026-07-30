@@ -33,6 +33,9 @@ type). Cross-agent access to memories is governed entirely by
   no model or embedding provider.
 - Every mutation appends a complete immutable version and requires idempotency;
   adjust and lifecycle transitions also require the exact current version.
+- The account's resolved `stored_memory` policy is enforced per owner agent and
+  counts only active heads. Status is value-free, warns at 90 percent, and
+  blocks only a positive active-memory delta beyond a finite maximum.
 - `forget`, `restore`, and `reactivate` are reversible lifecycle operations.
   Permanent delete is a separate value-free preview/apply protocol that requires
   same-turn direct-current-user authority.
@@ -76,17 +79,20 @@ not retained as a second normative shape.
 The implemented lifecycle is agent-self and version checked:
 
 - `capture` creates version 1 in `active` state from one bounded client-authored
-  capsule with exact, pending, or explicitly unavailable evidence.
+  capsule with exact, pending, or explicitly unavailable evidence. It consumes
+  one active-memory slot unless exact idempotent replay resolves first.
 - `show`, `list`, `history`, and `recall` are read operations. List/recall are
   bounded. HTTP/CLI broad reads redact sensitive content by default; automatic
   owner hydration and MCP recall opt in and retain `sensitive=true`.
 - `adjust` appends a full replacement snapshot at the exact current version.
 - `supersede` atomically marks one active source `superseded` and creates 1-32
   active client-authored replacements with exact membership receipts. It is
-  reversible and does not ask the backend to decide what to merge or split.
+  reversible and does not ask the backend to decide what to merge or split. Its
+  active-memory delta is replacement count minus the one active source.
 - `forget` appends a reversible `forgotten` version; `restore` returns it to its
   valid prior state; `reactivate` explicitly reactivates a reverted or otherwise
-  invalidly-restorable head. Every operation preserves immutable history.
+  invalidly-restorable head. Forgetting an active head releases one slot;
+  restore/reactivate consume one. Every operation preserves immutable history.
 - `evidence resolve` appends one terminal resolution for a pending locator; it
   never edits the original evidence row.
 - Permanent `delete` is distinct from `forget`. Preview accepts only the memory
@@ -139,6 +145,12 @@ memory set** is selected.
 
 The digest is an **open-plane** view. Its optional `memory_checkpoint` contains
 only authenticated request/run/fence lifecycle metadata and no source content.
+Its `memory_capacity` block is also authenticated and value-free: it reports
+active `used`, nullable `max`/`remaining`, `unlimited`, `near_limit`,
+`at_limit`, and `over_limit`. For finite capacity, `near_limit` begins at 90
+percent. It is
+guidance for an already-active client, not source content, authority to change a
+memory, or a wake signal.
 Sealed-plane material is **never in the self-digest**: secrets and TOTP seeds are
 not selected, summarized, or emitted by `digest emit`, and are never ingested
 into it. The digest never carries secret values or references that would resolve
@@ -195,13 +207,17 @@ The plan language has five reversible primitives:
 
 Plan acceptance normalizes client-local references, preallocates new memory ids,
 validates authorization and frozen-input provenance, and returns a canonical
-lowercase SHA-256 plan hash with value-free impact counts. Apply binds the run
-fence, lease, accepted revision, hash, current heads, canonical subject identity,
-and contiguous source cursors in one transaction. Any stale guard prevents the
-entire semantic mutation. New or cap-truncated work is placed in a deterministic
-follow-up request rather than lost. An empty actions plan is valid and must be
-applied when no input merits durable memory; it advances only the exact reviewed
-cursor intervals and creates no memory or fact.
+lowercase SHA-256 plan hash with value-free impact counts, including
+`active_memory_delta` and `projected_active_memories`. Apply binds the run fence,
+lease, accepted revision, hash, current heads, canonical subject identity, and
+contiguous source cursors in one transaction and recomputes the projection under
+the owner-agent capacity fence. Any stale guard or positive delta beyond the
+finite maximum prevents the entire semantic mutation. At or above the maximum,
+zero- or negative-delta correction/consolidation remains valid. New or
+input-cap-truncated work is placed in a deterministic follow-up request rather
+than lost. An empty actions plan is valid and must be applied when no input
+merits durable memory; it advances only the exact reviewed cursor intervals and
+creates no memory or fact.
 
 Rollback is exact append-only compensation, not history deletion. It requires
 the apply receipt and complete exact set of apply-produced current heads,
@@ -277,6 +293,10 @@ V0 defaults (refined before implementation):
 - Implemented usage accounting covers stored/written memory bytes and direct
   operations without requiring a model-provider dimension. See
   [billing-and-limits.md](billing-and-limits.md).
+- Active-memory inventory is a plan capacity, not an age-retention rule.
+  Lowering it never deletes, forgets, or semantically merges data. A refused
+  net-growing write returns value-free `stored_memory_limit_reached`; reads,
+  recall, history, export, and safe non-growing curation remain available.
 - Implemented mutation events are `memory.added`, `memory.adjusted`,
   `memory.superseded`, `memory.forgotten`, `memory.restored`,
   `memory.reactivated`, `memory.evidence.resolved`, and `memory.deleted`.

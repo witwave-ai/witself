@@ -203,6 +203,16 @@ func (s *Store) RollbackCuration(
 	if len(blockers) > 0 {
 		return RollbackMemoryCurationResult{}, &MemoryCurationRollbackBlockedError{Blockers: blockers}
 	}
+	// Rollback is a compensating operation and must remain available even when
+	// restoring prior active heads places an owner above a newly lowered plan
+	// limit. Apply the exact inverse of the stored plan's active-head delta
+	// under the already-held owner clock; the whole transaction rolls it back
+	// if any compensation subsequently fails.
+	if err := adjustActiveMemoryCountTx(
+		ctx, tx, p, -memoryCurationPlanActiveDelta(stored),
+	); err != nil {
+		return RollbackMemoryCurationResult{}, err
+	}
 
 	actionResults, err := compensateMemoryCurationActionsTx(
 		ctx, tx, p, run, stored, applyResults, requestHash,

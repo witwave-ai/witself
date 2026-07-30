@@ -167,11 +167,12 @@ func (e *MemoryCurationRollbackBlockedError) Unwrap() error { return ErrConflict
 // document for a client-side curator. Unlike /v1/capabilities it describes the
 // presented bearer token, not merely which deployment features exist.
 type MemoryCurationPreflight struct {
-	Principal   MemoryCurationPreflightPrincipal   `json:"principal"`
-	Credential  MemoryCurationPreflightCredential  `json:"credential"`
-	Protocol    MemoryCurationPreflightProtocol    `json:"protocol"`
-	Permissions MemoryCurationPreflightPermissions `json:"permissions"`
-	Limits      MemoryCurationPreflightLimits      `json:"limits"`
+	Principal      MemoryCurationPreflightPrincipal   `json:"principal"`
+	Credential     MemoryCurationPreflightCredential  `json:"credential"`
+	Protocol       MemoryCurationPreflightProtocol    `json:"protocol"`
+	Permissions    MemoryCurationPreflightPermissions `json:"permissions"`
+	Limits         MemoryCurationPreflightLimits      `json:"limits"`
+	MemoryCapacity MemoryLimitStatus                  `json:"memory_capacity"`
 }
 
 // MemoryCurationPreflightPrincipal identifies the authenticated curator and its scope.
@@ -231,8 +232,11 @@ type MemoryCurationPreflightLimits struct {
 	MaxPlanBytes         int64 `json:"max_plan_bytes"`
 }
 
-func getMemoryCurationPreflightHandler(auth PrincipalAuthFunc) http.HandlerFunc {
-	protected := requireDomainPrincipalAnyProfile(auth, func(w http.ResponseWriter, _ *http.Request, p DomainPrincipal) {
+func getMemoryCurationPreflightHandler(
+	auth PrincipalAuthFunc,
+	getMemoryLimitStatus func(context.Context, DomainPrincipal) (MemoryLimitStatus, error),
+) http.HandlerFunc {
+	protected := requireDomainPrincipalAnyProfile(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
 		if p.Kind != PrincipalKindAgent {
 			writeJSONError(w, http.StatusForbidden, "only an agent token may preflight memory curation")
 			return
@@ -242,6 +246,12 @@ func getMemoryCurationPreflightHandler(auth PrincipalAuthFunc) http.HandlerFunc 
 			return memoryCurationProfileAllows(profile, permission)
 		}
 		full := profile == AccessProfileFull
+		memoryCapacity := MemoryLimitStatus{Unavailable: true}
+		if getMemoryLimitStatus != nil {
+			if status, err := getMemoryLimitStatus(r.Context(), p); err == nil {
+				memoryCapacity = status
+			}
+		}
 		result := MemoryCurationPreflight{
 			Principal: MemoryCurationPreflightPrincipal{
 				AccountID: p.AccountID, RealmID: p.RealmID, AgentID: p.ID, AgentName: p.AgentName,
@@ -277,6 +287,7 @@ func getMemoryCurationPreflightHandler(auth PrincipalAuthFunc) http.HandlerFunc 
 				MaxLeaseSeconds: 1800, MaxPlanActions: 128,
 				MaxPlanBytes: 32 << 20,
 			},
+			MemoryCapacity: memoryCapacity,
 		}
 		writeMemoryCurationResult(w, http.StatusOK, result)
 	})
@@ -755,6 +766,8 @@ func writeMemoryCurationError(w http.ResponseWriter, err error) bool {
 	switch {
 	case errors.Is(err, ErrFeatureNotEnabled):
 		writeFeatureNotEnabledError(w, err)
+	case errors.Is(err, ErrMemoryLimitReached):
+		writeMemoryLimitError(w, err)
 	case errors.As(err, &blocked):
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)

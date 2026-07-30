@@ -33,6 +33,22 @@ type witselfMCPMemoryVectorBackend interface {
 	PutMemoryVector(context.Context, client.PutMemoryVectorInput) (client.MemoryVectorReceipt, error)
 }
 
+type witselfMCPMemoryStatusBackend interface {
+	MemoryLimitStatus(context.Context) (client.MemoryLimitStatus, error)
+}
+
+func (b configuredMCPBackend) MemoryLimitStatus(ctx context.Context) (client.MemoryLimitStatus, error) {
+	conn, err := b.connect(ctx)
+	if err != nil {
+		return client.MemoryLimitStatus{}, err
+	}
+	status, err := client.GetMemoryLimitStatus(ctx, conn.Endpoint, conn.Token)
+	if err != nil {
+		return client.MemoryLimitStatus{}, err
+	}
+	return *status, nil
+}
+
 func (b configuredMCPBackend) CaptureMemory(ctx context.Context, in client.CaptureMemoryInput) (client.MemoryMutationResult, error) {
 	conn, err := b.connect(ctx)
 	if err != nil {
@@ -419,6 +435,10 @@ type mcpMemoryDeletionOutput struct {
 	Deletion client.MemoryDeletionReceipt `json:"deletion"`
 }
 
+type mcpMemoryStatusOutput struct {
+	MemoryCapacity client.MemoryLimitStatus `json:"memory_capacity"`
+}
+
 func registerMemoryMCPTools(server *mcp.Server, runtimeName string, backend witselfMCPBackend) {
 	memoryBackend := func() (witselfMCPMemoryBackend, error) {
 		out, ok := backend.(witselfMCPMemoryBackend)
@@ -427,6 +447,18 @@ func registerMemoryMCPTools(server *mcp.Server, runtimeName string, backend wits
 		}
 		return out, nil
 	}
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        mcpToolName(runtimeName, "witself.memory.status"),
+		Description: "Read this agent's value-free active-memory capacity. At or above the cap, retrieval and safe replacement or consolidation remain available; only mutations that increase the active-memory count are refused.",
+		Annotations: mcpReadOnlyClosedWorldAnnotations(),
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ mcpNoInput) (*mcp.CallToolResult, mcpMemoryStatusOutput, error) {
+		statusBackend, ok := backend.(witselfMCPMemoryStatusBackend)
+		if !ok {
+			return nil, mcpMemoryStatusOutput{}, fmt.Errorf("memory capacity status is unavailable in this backend")
+		}
+		status, err := statusBackend.MemoryLimitStatus(ctx)
+		return nil, mcpMemoryStatusOutput{MemoryCapacity: status}, err
+	})
 	if vectorBackend, ok := backend.(witselfMCPMemoryVectorBackend); ok {
 		mcp.AddTool(server, &mcp.Tool{
 			Name:        mcpToolName(runtimeName, "witself.memory.vector.profile.create"),

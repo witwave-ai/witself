@@ -258,7 +258,7 @@ witself
   self show|card
   usage
   session start|end                       # target; not implemented
-  memory capture|show|list|recall|history|adjust|supersede|forget|restore|reactivate|delete|evidence
+  memory status|capture|show|list|recall|history|adjust|supersede|forget|restore|reactivate|delete|evidence
   digest emit                             # target; not implemented
   ingest
   bootstrap-instructions
@@ -1533,14 +1533,14 @@ recalled lexically/structurally, and filtered by metadata; they are not name-uni
 memory model and recall ranking are tracked in
 [memory-model.md](memory-model.md).
 
-The implemented agent-owned direct slice uses `memory capture`, `show`, `list`,
-`recall`, `history`, `adjust`, `supersede`, `forget`, `restore`, `reactivate`,
-`memory evidence resolve`, and `memory delete`. Mutations require an explicit
-idempotency key; adjust and lifecycle changes also require the exact current
-version. Permanent-delete preview is the deliberate exception: it accepts only
-the memory id and creates no state. Client curation/automation and vector
-profiles/hybrid recall are also implemented below. Cross-agent/group mutation
-and recall remain target work.
+The implemented agent-owned direct slice uses `memory status`, `capture`,
+`show`, `list`, `recall`, `history`, `adjust`, `supersede`, `forget`, `restore`,
+`reactivate`, `memory evidence resolve`, and `memory delete`. Mutations require
+an explicit idempotency key; adjust and lifecycle changes also require the exact
+current version. Permanent-delete preview is the deliberate exception: it
+accepts only the memory id and creates no state. Client curation/automation and
+vector profiles/hybrid recall are also implemented below. Cross-agent/group
+mutation and recall remain target work.
 
 `witself memory evidence resolve EVIDENCE_ID` terminates one pending evidence
 locator with exactly one of an exact transcript range (`--transcript`,
@@ -1582,12 +1582,39 @@ witself memory adjust mem_01H... --owner-agent archivist --add-tag reviewed --re
 witself memory forget mem_01H... --owner-agent archivist --reason "duplicate" --dry-run
 ```
 
+### `witself memory status`
+
+Show the current token-bound agent's value-free active-memory capacity.
+
+```sh
+witself memory status
+witself memory status --json
+```
+
+The `--json` result is the capacity object itself, with `used`, `max`,
+`remaining`, `unlimited`, `near_limit`, `at_limit`, and `over_limit`. Unlimited
+status uses `null` for `max` and `remaining`. For a finite maximum,
+`near_limit` starts at 90 percent and remains true at or beyond the maximum. At
+`used == max`, `over_limit` remains false, `at_limit` is true, and a
+net-growing write is blocked. This command accepts agent connection flags and
+no positional arguments. It returns no memory ids or content. MCP exposes the
+same read as `witself.memory.status`, and `witself self show` carries it under
+`memory_capacity` for active-client guidance.
+
 ### `witself memory capture`
 
 Capture one client-authored, agent-owned narrative with at least one exact,
 pending, or explicitly unavailable evidence item. The server derives actor,
 account, realm, stable owner, and origin from the agent token; it does not
 summarize or classify the content.
+
+Capture, restore, reactivate, supersede, and curation apply share the
+per-agent `stored_memory` gate. A positive active-memory delta that would exceed
+the finite maximum exits nonzero and, under `--json`, returns the
+HTTP-equivalent `code: "stored_memory_limit_reached"`, `retryable: false`, and
+a value-free `limit` object. Exact idempotent replay is checked before the gate.
+Do not retry the same refused write in a loop; reads and safe zero- or
+negative-delta correction/consolidation remain available.
 
 ```sh
 witself memory capture \

@@ -183,6 +183,9 @@ test("bridge path classifiers are exact", () => {
     "/v1/admin/accounts/acct_1/limit-overrides/stored_secret",
   ));
   assert.ok(matchAdminPolicyPath(
+    "/v1/admin/accounts/acct_1/limit-overrides/stored_memory",
+  ));
+  assert.ok(matchAdminPolicyPath(
     "/v1/admin/accounts/acct_1/limit-overrides/agents_per_realm",
   ));
   assert.equal(matchAdminPolicyPath(
@@ -249,7 +252,7 @@ test("admin proxy rejects archived and unknown accounts before Go", async () => 
 
 test("admin proxy replaces caller credentials and relays Go response", async () => {
   const request = new Request(
-    "https://self.witwave.ai/v1/admin/accounts/acct_1/limit-overrides/agents_per_realm",
+    "https://self.witwave.ai/v1/admin/accounts/acct_1/limit-overrides/stored_memory",
     {
       method: "PUT",
       headers: {

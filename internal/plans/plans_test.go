@@ -257,6 +257,7 @@ func TestValidateLimitsZeroAndMissingUnlimited(t *testing.T) {
 		{StoredSecretLimit: 0},
 		{
 			StoredSecretLimit:  100,
+			StoredMemoryLimit:  1000,
 			AgentLimit:         25,
 			AgentPerRealmLimit: 10,
 			RealmLimit:         1,

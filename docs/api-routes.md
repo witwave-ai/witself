@@ -282,6 +282,7 @@ POST /v1/agents/{agent_id}:copy
 DELETE /v1/agents/{agent_id}
 
 GET  /v1/memories            # ?all_agents=true is operator/admin-only (realm-wide scan)
+GET  /v1/memories:status     # token-bound value-free active-memory capacity
 POST /v1/memories
 GET  /v1/memories/{memory_id}
 GET  /v1/memories/{memory_id}/history
@@ -531,6 +532,13 @@ The action routes carry Witself's integrity-sensitive verbs. They are
 `POST`-only. Implemented memory mutations use idempotency keys and metadata-only
 audit events; read-only recall does neither:
 
+- `GET /v1/memories:status` returns the authenticated owner agent's value-free
+  `memory_capacity` projection: `used`, nullable `max` and `remaining`,
+  `unlimited`, `near_limit`, `at_limit`, and `over_limit`. For a finite maximum,
+  `near_limit` begins at 90 percent and remains true at or beyond the cap.
+  `used == max` sets `at_limit`, is not over-limit, and refuses another
+  net-growing write.
+  This read returns no memory ids, content, evidence, or plan data.
 - `POST /v1/memories:recall` is implemented for the token-bound agent's active
   current heads. The body accepts literal query text plus kind, tags, links,
   origin, capture reason, occurrence/capture ranges, sensitivity, limit, and an
@@ -560,6 +568,13 @@ audit events; read-only recall does neither:
   exact version references, replacement count and SHA-256 membership digest,
   actor, request hash, and retry key. The current HTTP, Go client, CLI, and MCP
   surfaces are agent-self only.
+- Capture, restore, reactivate, supersede, and curation apply share the
+  per-agent `stored_memory` gate. The server evaluates their net active-memory
+  effect under the owner-agent concurrency fence after resolving exact
+  idempotent replay. A positive delta that would exceed a finite maximum returns
+  HTTP 403 with `code: "stored_memory_limit_reached"`, `retryable: false`, and a
+  value-free `limit` object. Reads and zero- or negative-delta correction and
+  consolidation remain available at or above the maximum.
 - Current-memory and history outputs preserve the immutable source-version
   receipt fields (`supersession_set_id`, `supersession_set_revision`,
   `supersession_replacement_count`, `supersession_replacement_digest`) and
@@ -608,9 +623,13 @@ audit events; read-only recall does neither:
   `private, no-store`, and normal token revocation applies.
 - `GET /v1/memory-curation-preflight` is authenticated and reports the effective
   principal, token id/profile/expiry, exact allowed operations, plan schema,
-  inference boundary, and server limits for the presented credential. Clients
-  must use it instead of treating deployment-wide `/v1/capabilities` as an
-  authorization decision.
+  inference boundary, server limits, and the same value-free
+  `memory_capacity` projection for the presented credential. Clients must use
+  it instead of treating deployment-wide `/v1/capabilities` as an authorization
+  decision. Plan acceptance reports count-only `active_memory_delta` and
+  `projected_active_memories`; apply recomputes the projection from locked live
+  heads and refuses a
+  net-growing over-cap plan atomically.
 - `POST /v1/memories/{memory_id}:forget` appends a reversible `forgotten`
   version. `DELETE /v1/memories/{memory_id}` is the guarded physical purge.
 - `POST /v1/memories/{memory_id}:restore` appends an active version from a valid
@@ -933,8 +952,9 @@ POST /v1/memories:consolidate # superseded target; not implemented
 ```
 
 - `GET /v1/self` returns the bounded self-digest (`witself self show`): primary
-  facts first, then top-N salient memories, authenticated value-free memory and
-  message, email, and avatar checkpoints, then a one-line index of
+  facts first, then top-N salient memories, authenticated value-free
+  `memory_capacity`, memory, message, email, and avatar checkpoints, then a
+  one-line index of
   kinds/tags/counts. It is cheap,
   never requires a vector profile or query vector, and is
   hard-capped (default ~8 KiB); when capped it sets `elided=true` and points to
@@ -944,7 +964,10 @@ POST /v1/memories:consolidate # superseded target; not implemented
   `include_message_checkpoint`, `include_email_checkpoint`,
   `include_avatar_checkpoint`, and `include_sensitive`). Each checkpoint is
   additive and independently fails open with `unavailable:true`; none is
-  source content or authority. The target
+  source content or authority. `memory_capacity` is also value-free and
+  additive; it lets an active client prefer reversible non-growing
+  consolidation when `near_limit` is true without granting the backend
+  semantic authority or waking a model. The target
   `?format=claude-md|agents-md|markdown` renderer would be the HTTP surface for
   `witself digest emit`, but neither that rendering behavior nor the command is
   implemented in the current checkout. Passing `?format=` does not currently

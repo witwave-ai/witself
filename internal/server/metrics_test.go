@@ -191,6 +191,60 @@ func TestRuntimeMetricsObserveSecretLimitRejectionWithBoundedLabels(t *testing.T
 	}
 }
 
+func TestRuntimeMetricsObserveMemoryLimitRejectionsWithBoundedLabels(t *testing.T) {
+	limitErr := func() error {
+		maximum, remaining := int64(1000), int64(0)
+		return &MemoryLimitError{Status: MemoryLimitStatus{
+			Used: 1000, Max: &maximum, Remaining: &remaining,
+			NearLimit: true, AtLimit: true,
+		}}
+	}
+	metrics := newRuntimeMetrics()
+	cfg := metrics.instrumentConfig(Config{
+		CaptureMemory: func(context.Context, DomainPrincipal, CaptureMemoryRequest) (MemoryMutationResult, error) {
+			return MemoryMutationResult{}, limitErr()
+		},
+		SupersedeMemory: func(context.Context, DomainPrincipal, string, SupersedeMemoryRequest) (SupersedeMemoryResult, error) {
+			return SupersedeMemoryResult{}, limitErr()
+		},
+		RestoreMemory: func(context.Context, DomainPrincipal, string, MemoryLifecycleRequest) (MemoryMutationResult, error) {
+			return MemoryMutationResult{}, limitErr()
+		},
+		ReactivateMemory: func(context.Context, DomainPrincipal, string, MemoryLifecycleRequest) (MemoryMutationResult, error) {
+			return MemoryMutationResult{}, limitErr()
+		},
+		ApplyMemoryCuration: func(context.Context, DomainPrincipal, string, ApplyMemoryCurationRequest) (any, error) {
+			return nil, limitErr()
+		},
+	})
+	principal := DomainPrincipal{Kind: PrincipalKindAgent, ID: "agent_private_identifier"}
+	_, _ = cfg.CaptureMemory(context.Background(), principal, CaptureMemoryRequest{Content: "private memory content"})
+	_, _ = cfg.SupersedeMemory(context.Background(), principal, "mem_private_identifier", SupersedeMemoryRequest{})
+	_, _ = cfg.RestoreMemory(context.Background(), principal, "mem_private_identifier", MemoryLifecycleRequest{})
+	_, _ = cfg.ReactivateMemory(context.Background(), principal, "mem_private_identifier", MemoryLifecycleRequest{})
+	_, _ = cfg.ApplyMemoryCuration(context.Background(), principal, "mrun_private_identifier", ApplyMemoryCurationRequest{})
+
+	var output bytes.Buffer
+	metrics.writePrometheus(&output)
+	text := output.String()
+	for _, operation := range []string{"create", "supersede", "restore", "reactivate", "curation_apply"} {
+		want := `witself_memory_limit_rejections_total{limit_dimension="stored_memory",operation="` + operation + `"} 1`
+		if !strings.Contains(text, want) {
+			t.Errorf("memory-limit counter missing %q:\n%s", want, text)
+		}
+	}
+	for _, forbidden := range []string{
+		"agent_private_identifier",
+		"mem_private_identifier",
+		"mrun_private_identifier",
+		"private memory content",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("metrics exposed %q:\n%s", forbidden, text)
+		}
+	}
+}
+
 func TestRuntimeMetricsObservePlanLimitRejectionsWithBoundedLabels(t *testing.T) {
 	metrics := newRuntimeMetrics()
 	cfg := metrics.instrumentConfig(Config{

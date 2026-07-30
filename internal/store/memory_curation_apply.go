@@ -462,6 +462,10 @@ func applyMemoryCurationPlanTx(
 		}
 	}
 
+	activeDelta := memoryCurationPlanActiveDelta(stored)
+	if _, err := requireActiveMemoryCapacityTx(ctx, tx, p, activeDelta); err != nil {
+		return nil, nil, err
+	}
 	results := make([]MemoryCurationActionApplyResult, 0, len(stored.Actions))
 	for _, row := range stored.Actions {
 		result, err := applyMemoryCurationActionTx(ctx, tx, p, run, row)
@@ -485,6 +489,9 @@ func applyMemoryCurationPlanTx(
 			return nil, nil, errMemoryCurationApplyStale
 		}
 		results = append(results, result)
+	}
+	if err := adjustActiveMemoryCountTx(ctx, tx, p, activeDelta); err != nil {
+		return nil, nil, err
 	}
 	intervals, err := advanceMemoryCurationCursorsTx(ctx, tx, p, run.ID)
 	if err != nil {

@@ -453,6 +453,7 @@ type Config struct {
 	// authenticates the principal and validates the HTTP contract; callbacks
 	// enforce tenant/owner isolation, optimistic concurrency, and idempotency.
 	CaptureMemory             func(ctx context.Context, p DomainPrincipal, in CaptureMemoryRequest) (MemoryMutationResult, error)
+	GetMemoryLimitStatus      func(ctx context.Context, p DomainPrincipal) (MemoryLimitStatus, error)
 	GetMemory                 func(ctx context.Context, p DomainPrincipal, memoryID string) (Memory, error)
 	ListMemories              func(ctx context.Context, p DomainPrincipal, opts MemoryListOptions) (MemoryPage, error)
 	RecallMemories            func(ctx context.Context, p DomainPrincipal, in MemoryRecallRequest) (MemoryRecallPage, error)
@@ -830,6 +831,7 @@ type SelfDigest struct {
 	Identity          SelfIdentity           `json:"identity"`
 	PrimaryFacts      []SelfFact             `json:"primary_facts"`
 	SalientMemories   []SelfMemory           `json:"salient_memories"`
+	MemoryCapacity    *MemoryLimitStatus     `json:"memory_capacity,omitempty"`
 	MemoryCheckpoint  *SelfMemoryCheckpoint  `json:"memory_checkpoint,omitempty"`
 	MessageCheckpoint *SelfMessageCheckpoint `json:"message_checkpoint,omitempty"`
 	EmailCheckpoint   *AgentEmailCheckpoint  `json:"email_checkpoint,omitempty"`
@@ -2016,6 +2018,7 @@ func apiMux(cfg Config) http.Handler {
 			cfg.CountSelfFacts,
 			cfg.GetSelfMemories,
 			cfg.CountSelfMemories,
+			cfg.GetMemoryLimitStatus,
 			cfg.GetSelfMemoryCheckpoint,
 			cfg.GetSelfMessageCheckpoint,
 			cfg.AgentEmailPilot,
@@ -2126,7 +2129,8 @@ func apiMux(cfg Config) http.Handler {
 			mux.HandleFunc("POST /v1/self/avatar:generation-failed", avatarGenerationFailureHandler(cfg.AuthenticatePrincipal, cfg.ReportSelfAvatarGenerationFailure))
 		}
 		if memoryCurationSupported {
-			mux.HandleFunc("GET /v1/memory-curation-preflight", getMemoryCurationPreflightHandler(cfg.AuthenticatePrincipal))
+			mux.HandleFunc("GET /v1/memory-curation-preflight", getMemoryCurationPreflightHandler(
+				cfg.AuthenticatePrincipal, cfg.GetMemoryLimitStatus))
 		}
 		if cfg.CaptureMemory != nil {
 			mux.HandleFunc("POST /v1/memories", captureMemoryHandler(cfg.AuthenticatePrincipal, cfg.CaptureMemory))
@@ -2136,6 +2140,9 @@ func apiMux(cfg Config) http.Handler {
 		}
 		if cfg.RecallMemories != nil {
 			mux.HandleFunc("POST /v1/memories:recall", recallMemoriesHandler(cfg.AuthenticatePrincipal, cfg.RecallMemories))
+		}
+		if cfg.GetMemoryLimitStatus != nil {
+			mux.HandleFunc("GET /v1/memories:status", memoryLimitStatusHandler(cfg.AuthenticatePrincipal, cfg.GetMemoryLimitStatus))
 		}
 		if cfg.GetMemory != nil {
 			mux.HandleFunc("GET /v1/memories/{memory}", getMemoryHandler(cfg.AuthenticatePrincipal, cfg.GetMemory))
@@ -2656,6 +2663,7 @@ func selfHandler(
 	countFacts func(context.Context, DomainPrincipal) (int, error),
 	getMemories func(context.Context, DomainPrincipal, int, bool) ([]SelfMemory, int, error),
 	countMemories func(context.Context, DomainPrincipal) (int, error),
+	getMemoryLimitStatus func(context.Context, DomainPrincipal) (MemoryLimitStatus, error),
 	getMemoryCheckpoint func(context.Context, DomainPrincipal) (*SelfMemoryCheckpoint, error),
 	getMessageCheckpoint func(context.Context, DomainPrincipal) (*SelfMessageCheckpoint, error),
 	agentEmailPilot AgentEmailPilotConfig,
@@ -2886,6 +2894,15 @@ func selfHandler(
 			}
 			memoryCount = total
 		}
+		var memoryCapacity *MemoryLimitStatus
+		if getMemoryLimitStatus != nil {
+			status, err := getMemoryLimitStatus(r.Context(), p)
+			if err != nil {
+				memoryCapacity = &MemoryLimitStatus{Unavailable: true}
+			} else {
+				memoryCapacity = &status
+			}
+		}
 
 		kindSet := map[string]struct{}{}
 		tagSet := map[string]struct{}{}
@@ -2915,6 +2932,7 @@ func selfHandler(
 			},
 			PrimaryFacts:      facts,
 			SalientMemories:   memories,
+			MemoryCapacity:    memoryCapacity,
 			MemoryCheckpoint:  memoryCheckpoint,
 			MessageCheckpoint: messageCheckpoint,
 			EmailCheckpoint:   emailCheckpoint,

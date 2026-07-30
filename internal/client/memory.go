@@ -17,6 +17,20 @@ type MemoryOwner struct {
 	AgentName string `json:"agent_name,omitempty"`
 }
 
+// MemoryLimitStatus is the authenticated agent's active-memory capacity. Only
+// current active heads count; historical, forgotten, and superseded versions
+// remain available without consuming this capacity.
+type MemoryLimitStatus struct {
+	Used        int64  `json:"used"`
+	Max         *int64 `json:"max"`
+	Remaining   *int64 `json:"remaining"`
+	Unlimited   bool   `json:"unlimited"`
+	NearLimit   bool   `json:"near_limit"`
+	AtLimit     bool   `json:"at_limit"`
+	OverLimit   bool   `json:"over_limit"`
+	Unavailable bool   `json:"unavailable,omitempty"`
+}
+
 // MemoryActor is the token-derived principal responsible for one version.
 type MemoryActor struct {
 	Kind string `json:"kind"`
@@ -431,6 +445,18 @@ func CaptureMemory(ctx context.Context, endpoint, token string, in CaptureMemory
 		return nil, err
 	}
 	return &out, nil
+}
+
+// GetMemoryLimitStatus returns value-free active-memory capacity.
+func GetMemoryLimitStatus(ctx context.Context, endpoint, token string) (*MemoryLimitStatus, error) {
+	var out struct {
+		MemoryCapacity MemoryLimitStatus `json:"memory_capacity"`
+	}
+	requestURL := strings.TrimRight(endpoint, "/") + "/v1/memories:status"
+	if err := doJSON(ctx, http.MethodGet, requestURL, token, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out.MemoryCapacity, nil
 }
 
 // GetMemory reads one current memory head by stable id.

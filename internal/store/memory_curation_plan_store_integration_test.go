@@ -77,6 +77,7 @@ func TestPlanMemoryCurationPostgres(t *testing.T) {
 			RelateActions: 1, ProposeFactActions: 1, NewMemories: 1,
 			MemoryVersionWrites: 3, EvidenceRows: 3, RelationRows: 3,
 			ExpectedVersionChecks: 2, FactCandidates: 1,
+			ProjectedActiveMemories: 2,
 		}); !reflect.DeepEqual(got, want) {
 			t.Fatalf("preview = %#v, want %#v", got, want)
 		}

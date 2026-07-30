@@ -35,6 +35,14 @@ func TestMemoryCommandsUseOptimisticGuardsAndIdempotency(t *testing.T) {
 		seen[key]++
 		mu.Unlock()
 		switch key {
+		case "GET /v1/memories:status":
+			maximum, remaining := int64(1000), int64(100)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version": "witself.v0",
+				"memory_capacity": client.MemoryLimitStatus{
+					Used: 900, Max: &maximum, Remaining: &remaining, NearLimit: true,
+				},
+			})
 		case "POST /v1/memories":
 			if got := r.Header.Get("Idempotency-Key"); got != "capture-1" {
 				t.Errorf("capture idempotency key = %q", got)
@@ -178,6 +186,7 @@ func TestMemoryCommandsUseOptimisticGuardsAndIdempotency(t *testing.T) {
 	defer srv.Close()
 	connection := []string{"--endpoint", srv.URL, "--token-file", tokenFile}
 	commands := [][]string{
+		append([]string{"memory", "status"}, connection...),
 		append([]string{"memory", "capture"}, append(connection,
 			"--content", "we chose PostgreSQL", "--kind", "decision", "--tag", "architecture,database",
 			"--evidence-transcript", "trn_1", "--evidence-from-sequence", "2", "--evidence-until-sequence", "4",
@@ -206,6 +215,13 @@ func TestMemoryCommandsUseOptimisticGuardsAndIdempotency(t *testing.T) {
 		if code != 0 {
 			t.Fatalf("run(%q) = %d", command, code)
 		}
+		if command[1] == "status" &&
+			(!strings.Contains(stdout, "used:\t900") ||
+				!strings.Contains(stdout, "max:\t1000") ||
+				!strings.Contains(stdout, "remaining:\t100") ||
+				!strings.Contains(stdout, "near limit:\ttrue")) {
+			t.Fatalf("status omitted capacity:\n%s", stdout)
+		}
 		if command[1] == "show" && (!strings.Contains(stdout, "supersession set:\tmset_receipt") ||
 			!strings.Contains(stdout, "supersession replacement digest:\t"+strings.Repeat("c", 64)) ||
 			!strings.Contains(stdout, "active supersession set:\tmset_active")) {
@@ -219,7 +235,7 @@ func TestMemoryCommandsUseOptimisticGuardsAndIdempotency(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(seen) != 12 || seen["DELETE /v1/memories/mem_delete"] != 2 {
+	if len(seen) != 13 || seen["DELETE /v1/memories/mem_delete"] != 2 {
 		t.Fatalf("requests = %#v", seen)
 	}
 }
