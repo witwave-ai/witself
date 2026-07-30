@@ -1597,11 +1597,11 @@ create, recreation, or confirmation into a new fact address is refused with
 `stored_fact_limit_reached`. Capacity never authorizes deletion or rewriting
 an unrelated fact to make room.
 
-Phase A exposes the status/gate contract but keeps its finite path dormant.
-Plan-catalog defaults and finite account overrides for `stored_fact` are
-prohibited until Phase B's fenced migration 0078 reconciliation has completed
-on every cell. The only Phase-A account override is the Founder's explicit
-unlimited record.
+The Phase B catalog supplies Personal `1,000`, Professional `10,000`, Team
+`50,000`, and Enterprise `250,000`. Operators promote those defaults or finite
+account overrides only after the fenced migration 0078 reconciliation has
+completed on every target cell. The Founder's explicit-unlimited override
+remains authoritative.
 
 ### `witself.fact.set`
 
