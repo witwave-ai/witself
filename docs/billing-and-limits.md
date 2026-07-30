@@ -56,19 +56,20 @@ remain deferred.
 
 ## Working Plan Direction
 
-The following table records the current product direction as of 2026-07-29. It
+The following table records the current product direction as of 2026-07-30. It
 is a working packaging decision, not a claim that every entitlement is already
 implemented or enforced. Each row moves into the canonical plan catalog and
 resolved cell policy only through its own implementation and rollout decision.
-The realm, agent, and active-memory values are the Phase B canonical defaults
-described below; the other rows remain subject to their own implementation and
-rollout gates.
+The realm, agent, active-memory, and current-fact values are the Phase B
+canonical defaults described below; the other rows remain subject to their own
+implementation and rollout gates.
 
 | Capability | Personal — $0 | Professional — $30/month | Team — $250/month | Enterprise — contact us |
 |---|---:|---:|---:|---:|
 | Realms | 1 | 1 | 25 | Contracted |
 | Agents per realm | 10 | 100 | 100 | Contracted |
 | Active memories per agent | 1,000 | 10,000 | 50,000 | Contracted; 250,000 default |
+| Current facts per agent | 1,000 | 10,000 | 50,000 | Contracted; 250,000 default |
 | Transcript retention | 30 days | 90 days | 365 days | Configurable, including indefinite |
 | Secrets per agent | 0 | 100 | 250 | 1,000 |
 | Agent messages | Disabled; 30-day downgrade cleanup | Unlimited; retained 90 days | Unlimited; retained 365 days | Enabled; retained 365 days by default, contract override |
@@ -332,7 +333,7 @@ Catalog promotion is intentionally two-phase:
 The stored-secret compatibility Phase A did not modify
 `web/plans/plans.json`; its catalog promotion was a separate release.
 
-### Phase-A current-fact limit
+### Implemented current-fact limit
 
 `stored_fact` is an account plan/override dimension enforced independently for
 each owner agent. It counts resolved, non-deleted current facts across all of
@@ -393,20 +394,28 @@ Catalog activation follows the same compatibility discipline as active memory:
 
    The read must report `overridden: true`, `effective_max: null`,
    `apply_pending: false`, and equal desired/applied snapshot revisions.
-3. Phase B must first ship a reconciliation migration
+3. This Phase B release ships
    `0078_reconcile_active_fact_count.sql`. After every old writer is gone, it
-   takes `LOCK TABLE agents IN EXCLUSIVE MODE NOWAIT`, recomputes every agent's
-   count from resolved, non-deleted canonical facts (including explicit zeroes),
-   and validates exact equality before commit. Its down migration is data-only
-   and therefore a no-op. Contention fails startup cleanly for retry rather than
-   waiting ahead of live writers.
-4. Activate finite overrides or publish plan-catalog `stored_fact` defaults
-   only after every target cell has migration 0078, all replacement server and
-   worker pods are ready, and every older ReplicaSet is at zero. Re-read the
-   Founder override immediately before and after catalog reconciliation.
+   takes `LOCK TABLE agents IN EXCLUSIVE MODE NOWAIT` followed by
+   `LOCK TABLE facts IN SHARE MODE NOWAIT`. The first fence blocks supported
+   Phase-A writers that lock the owner row; the second blocks direct/manual or
+   legacy fact-table writes that bypass that row. Ordinary reads continue.
+   The migration recomputes every agent's count from resolved, non-deleted
+   canonical facts (including explicit zeroes), validates exact equality before
+   commit, and has a data-only no-op down migration. Either lock's contention
+   fails startup promptly for retry instead of queueing ahead of a live writer.
+4. The Phase B catalog in `web/plans/plans.json` supplies Personal `1,000`,
+   Professional `10,000`, Team `50,000`, and Enterprise `250,000`. Do not deploy
+   the catalog-serving Worker, deploy the control-plane container that embeds
+   the catalog, reconcile accounts, or set a finite override until every target
+   cell is at migration 0078 and every older ReplicaSet is at zero. Re-read the
+   Founder explicit-unlimited override immediately before and after catalog
+   reconciliation.
 
-Migration 0078 and the plan values are intentionally Phase B work. Their absence
-does not weaken Phase A because missing `stored_fact` remains unlimited.
+Keeping migration and catalog changes in one release tag does not collapse the
+operational fence: cells migrate first, catalog/control-plane promotion comes
+only after cell convergence. The code is safe before promotion because a
+missing `stored_fact` key remains unlimited.
 
 ### Implemented active-memory limit
 
@@ -543,7 +552,6 @@ limits above are implemented and validated.
 
 Still open for packaging decisions:
 
-- Phase-B plan-catalog values for stored facts per agent.
 - Team and Enterprise outbound-email allowances and overages.
 - Audit retention by plan.
 - Internal storage, vector, fan-out, and API service-protection limits.

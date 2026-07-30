@@ -191,7 +191,10 @@ only creation/recreation or confirmation into a new current address. Existing
 fact reads, history, export, in-place updates, and separately authorized
 deletion remain available. The canonical plan catalog remains unlimited until
 Phase B's migration-0078 reconciliation has run on every cell and all old
-writers are gone; see [billing-and-limits.md](billing-and-limits.md).
+writers are gone. Migration 0078 fences both supported owner-row writers and
+direct fact-table writers before validating exact derived counts; only then is
+the Phase B catalog promoted. See
+[billing-and-limits.md](billing-and-limits.md).
 
 Local development should use a local PostgreSQL instance and the same
 migrations. A local transcript outbox may buffer delivery, but it is not a

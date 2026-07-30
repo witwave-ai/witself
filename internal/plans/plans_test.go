@@ -18,8 +18,8 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 	if len(c.Plans) != 4 {
 		t.Fatalf("catalog has %d plans; want 4", len(c.Plans))
 	}
-	if c.Updated != "2026-07-29" {
-		t.Fatalf("catalog updated = %q; want 2026-07-29", c.Updated)
+	if c.Updated != "2026-07-30" {
+		t.Fatalf("catalog updated = %q; want 2026-07-30", c.Updated)
 	}
 	if c.Currency != "USD" {
 		t.Fatalf("catalog currency = %q; want USD", c.Currency)
@@ -118,6 +118,7 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 				AgentLimit:         10,
 				AgentPerRealmLimit: 10,
 				RealmLimit:         1,
+				StoredFactLimit:    1000,
 				StoredMemoryLimit:  1000,
 				StoredSecretLimit:  0,
 			},
@@ -139,6 +140,7 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 				AgentLimit:         100,
 				AgentPerRealmLimit: 100,
 				RealmLimit:         1,
+				StoredFactLimit:    10000,
 				StoredMemoryLimit:  10000,
 				StoredSecretLimit:  100,
 			},
@@ -160,6 +162,7 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 				AgentLimit:         2500,
 				AgentPerRealmLimit: 100,
 				RealmLimit:         25,
+				StoredFactLimit:    50000,
 				StoredMemoryLimit:  50000,
 				StoredSecretLimit:  250,
 			},
@@ -177,6 +180,7 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 			name:        "Enterprise",
 			usageBilled: true,
 			limits: map[string]int64{
+				StoredFactLimit:   250000,
 				StoredMemoryLimit: 250000,
 				StoredSecretLimit: 1000,
 			},
@@ -219,6 +223,28 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 	prices := c.Prices()
 	if len(prices) != 1 || prices["standard"] != 3000 {
 		t.Fatalf("Prices() = %v; want exactly {standard: 3000} while team/enterprise are unavailable", prices)
+	}
+}
+
+func TestCanonicalStoredFactDefaultsPhaseB(t *testing.T) {
+	catalog, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for planID, want := range map[string]int64{
+		Free:         1000,
+		"standard":   10000,
+		"team":       50000,
+		"enterprise": 250000,
+	} {
+		plan, ok := catalog.Get(planID)
+		if !ok {
+			t.Fatalf("catalog missing plan %q", planID)
+		}
+		if got, present := plan.Limits[StoredFactLimit]; !present || got != want {
+			t.Errorf("%s stored_fact = %d, present=%t; want %d",
+				planID, got, present, want)
+		}
 	}
 }
 

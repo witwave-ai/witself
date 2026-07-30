@@ -2158,8 +2158,9 @@ At or above the cap, reads, history, export, deletion, and updates to an
 already-current fact remain available. A create, explicit recreation, or
 candidate confirmation into a new subject/predicate address is refused with
 `stored_fact_limit_reached`; do not retry the same count-growing intent in a
-loop. Phase A ships this status/gate contract, while plan-catalog defaults for
-`stored_fact` remain a Phase B activation.
+loop. The Phase B catalog supplies Personal `1,000`, Professional `10,000`,
+Team `50,000`, and Enterprise `250,000`; promotion follows the migration-0078
+cell-convergence fence in [billing-and-limits.md](billing-and-limits.md).
 
 ### `witself fact set NAME VALUE`
 

@@ -289,12 +289,12 @@ The same value-free capacity projection is exposed by
 warning starts at 90 percent. Status never exposes ids, subjects, predicates,
 values, or history and never authorizes deletion merely to make room.
 
-Phase A deliberately does **not** add plan-catalog maxima and prohibits finite
-`stored_fact` overrides. Catalog values and finite overrides are Phase B work
-after the fenced migration 0078 reconciliation reaches every cell. Until then,
-every account resolves as unlimited; the only permitted override is the
-Founder's explicit unlimited record. Fact assertion history also remains
-durable rather than being pruned to a fixed version count.
+The Phase B catalog supplies Personal `1,000`, Professional `10,000`, Team
+`50,000`, and Enterprise `250,000` current facts per agent. Those finite
+defaults and finite overrides may be promoted only after migration 0078 has
+reconciled every target cell, all old writers are gone, and the Founder's
+explicit-unlimited override is verified. Fact assertion history remains durable
+rather than being pruned to a fixed version count.
 
 Stored facts are a metered billing dimension; fact reads and writes roll up into
 the memory/fact operation meters. See [billing-and-limits.md](billing-and-limits.md).

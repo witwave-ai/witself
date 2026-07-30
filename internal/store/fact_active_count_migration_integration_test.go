@@ -22,7 +22,7 @@ func TestActiveFactCountSchema76And77BackfillDownAndInvariantPostgres(t *testing
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
-	assertMigrationTestVersion(t, dsn, 77)
+	assertMigrationTestVersion(t, dsn, 78)
 
 	account, err := st.ProvisionAccount(
 		ctx,

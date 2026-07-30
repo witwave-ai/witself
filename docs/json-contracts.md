@@ -818,12 +818,11 @@ Rules:
   already-current fact remain available. Creating or recreating a current fact,
   including candidate confirmation into a new subject/predicate address, is
   refused.
-- Phase A exposes the counter, gate, status, client surfaces, hydration, and
-  observability. The plan catalog intentionally supplies no default
-  `stored_fact` maxima until Phase B. Finite account overrides are also
-  prohibited until migration 0078 reconciles any mixed-writer drift after
-  every pre-Phase-A writer is gone. The only Phase-A override is the Founder's
-  explicit unlimited record, which keeps `stored_fact` omitted from the
+- The Phase B catalog supplies `stored_fact` maxima of Personal `1,000`,
+  Professional `10,000`, Team `50,000`, and Enterprise `250,000`. Operators
+  promote those defaults or finite overrides only after migration 0078 has
+  reconciled every target cell and all pre-Phase-A writers are gone. The
+  Founder's explicit-unlimited override keeps `stored_fact` omitted from its
   effective cell snapshot.
 
 A refused count-growing write uses the same fields under `limit`:
