@@ -18,8 +18,8 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 	if len(c.Plans) != 4 {
 		t.Fatalf("catalog has %d plans; want 4", len(c.Plans))
 	}
-	if c.Updated != "2026-07-24" {
-		t.Fatalf("catalog updated = %q; want 2026-07-24", c.Updated)
+	if c.Updated != "2026-07-29" {
+		t.Fatalf("catalog updated = %q; want 2026-07-29", c.Updated)
 	}
 	if c.Currency != "USD" {
 		t.Fatalf("catalog currency = %q; want USD", c.Currency)
@@ -118,6 +118,7 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 				AgentLimit:         10,
 				AgentPerRealmLimit: 10,
 				RealmLimit:         1,
+				StoredMemoryLimit:  1000,
 				StoredSecretLimit:  0,
 			},
 			policies: map[string]int64{
@@ -138,6 +139,7 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 				AgentLimit:         100,
 				AgentPerRealmLimit: 100,
 				RealmLimit:         1,
+				StoredMemoryLimit:  10000,
 				StoredSecretLimit:  100,
 			},
 			policies: map[string]int64{
@@ -158,6 +160,7 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 				AgentLimit:         2500,
 				AgentPerRealmLimit: 100,
 				RealmLimit:         25,
+				StoredMemoryLimit:  50000,
 				StoredSecretLimit:  250,
 			},
 			policies: map[string]int64{
@@ -173,7 +176,10 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 		"enterprise": {
 			name:        "Enterprise",
 			usageBilled: true,
-			limits:      map[string]int64{StoredSecretLimit: 1000},
+			limits: map[string]int64{
+				StoredMemoryLimit: 250000,
+				StoredSecretLimit: 1000,
+			},
 			policies: map[string]int64{
 				AgentEmailEntitlementVersionPolicy: AgentEmailEntitlementVersion,
 				AgentEmailRetentionDaysPolicy:      365,

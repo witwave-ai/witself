@@ -418,9 +418,13 @@ Catalog activation is intentionally two-phase:
    The read must report `overridden: true`, `effective_max: null`,
    `apply_pending: false`, and equal desired/applied snapshot revisions.
 3. Phase B first rolls every target cell onto the release containing migration
-   75. That transactional migration recomputes the derived active-memory
-   counters after every remaining writer is Phase-A counter-aware. Wait for
-   all replacement server and worker pods to become ready and all older
+   75. That transactional migration takes an `EXCLUSIVE ... NOWAIT` fence on
+   the counter table, repairs missing owner clocks, recomputes every derived
+   active-memory count from canonical current heads, and validates exact
+   equality. Ordinary reads remain available. Contention fails the startup
+   attempt cleanly for retry instead of queueing ahead of live writers. Run it
+   only after every remaining writer is Phase-A counter-aware. Wait for all
+   replacement server and worker pods to become ready and all older
    ReplicaSets to reach zero before activating any finite cap.
 4. From that same Phase-B tag, promote the canonical defaults: Personal
    `1,000`, Professional `10,000`, Team `50,000`, and Enterprise `250,000`

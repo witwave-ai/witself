@@ -599,8 +599,8 @@ func TestAdminStoredMemoryUnlimitedOverrideLifecycle(t *testing.T) {
 	}
 	view := doc["limit"].(map[string]any)
 	if view["dimension"] != plans.StoredMemoryLimit ||
-		view["default_max"] != nil ||
-		view["effective_max"] != nil ||
+		view["default_max"] != float64(1000) ||
+		view["effective_max"] != float64(1000) ||
 		view["overridden"] != false {
 		t.Fatalf("inherited view = %v", view)
 	}
@@ -615,7 +615,7 @@ func TestAdminStoredMemoryUnlimitedOverrideLifecycle(t *testing.T) {
 	}
 	view = doc["limit"].(map[string]any)
 	override := view["override"].(map[string]any)
-	if view["default_max"] != nil ||
+	if view["default_max"] != float64(1000) ||
 		view["effective_max"] != nil ||
 		view["overridden"] != true ||
 		override["max"] != nil ||
@@ -632,8 +632,8 @@ func TestAdminStoredMemoryUnlimitedOverrideLifecycle(t *testing.T) {
 	}
 	view = doc["limit"].(map[string]any)
 	if view["overridden"] != false ||
-		view["default_max"] != nil ||
-		view["effective_max"] != nil {
+		view["default_max"] != float64(1000) ||
+		view["effective_max"] != float64(1000) {
 		t.Fatalf("cleared view = %v", view)
 	}
 }
