@@ -857,9 +857,11 @@ Trust boundary and threats:
   and memory-poisoning via message-driven writes. A message granting no policy
   cannot itself authorize a cross-agent write; writes still require policy.
 - The implemented core audits send, delivery, read, acknowledgement, and
-  processing transitions. Granular `message:send`/`message:read` policy gates
-  and plan-backed send/delivery rate limits are follow-on platform integration;
-  the current size, fan-out, and listen-admission bounds do not imply them.
+  processing transitions. Plan-backed send/delivery rate limits are implemented
+  through the shared account snapshot and PostgreSQL admission gate described
+  below. Granular `message:send`/`message:read` policy gates remain follow-on
+  platform integration; size, fan-out, and listen-admission bounds do not imply
+  those finer authorization scopes.
 - Read, acknowledgement, direct-delivery processing claim, and work completion
   are distinct. Open-request claims use the separate migration-0038
   multi-assignee request model rather than overloading delivery processing.
@@ -935,8 +937,16 @@ Surfaces:
   `/v1/message-requests` and request actions `:offer`, `:decline`, `:select`,
   `:cancel`, `:claim`, `:renew`, `:release`, and `:complete`.
 - A stable JSON Message shape shared by all frontends.
-- Messages sent and delivered are target metered billing dimensions; they are
-  not yet wired into plan-backed messaging usage accounting.
+- Messages sent and delivered are implemented metered dimensions and are wired
+  into shared messaging rate accounting. Admission debits the entire resolved
+  fan-out; the usage ledger records one sent unit and only successfully
+  delivered committed targets. Exact idempotent replay records neither again.
+  Phase A leaves finite plan keys absent and uses platform ceilings; finite
+  tier defaults require the separate Phase-B catalog activation. An exhausted
+  but otherwise fitting debit returns retryable HTTP 429 with `Retry-After`.
+  An effective limit of zero or a single fan-out debit larger than its bucket
+  capacity returns non-retryable HTTP 403 `limit_exceeded` with the same
+  value-free rate details and no retry hint.
 
 The implemented listen contract is a stateless query for the oldest
 unacknowledged inbound metadata. It waits 20 seconds by default, accepts a wait

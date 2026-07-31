@@ -68,10 +68,34 @@ const (
 	// it does not model separately stored attachment blobs. A missing key
 	// means unlimited.
 	AgentEmailAttachmentStorageBytesLimit = "agent_email_attachment_storage_bytes"
+	// MessageSentPerAgentMinuteLimit caps messages accepted from each sending
+	// agent under a rolling one-minute rate budget. A missing key means no
+	// commercial plan cap, but the service's defensive platform maximum still
+	// applies.
+	MessageSentPerAgentMinuteLimit = "message_sent_per_agent_minute"
+	// MessageDeliveredPerRealmMinuteLimit caps aggregate recipient deliveries
+	// within each realm under a rolling one-minute rate budget. Fan-out charges
+	// one delivery per recipient. A missing key means no commercial plan cap,
+	// but the service's defensive platform maximum still applies.
+	MessageDeliveredPerRealmMinuteLimit = "message_delivered_per_realm_minute"
+	// MessageDeliveredPerRecipientMinuteLimit caps deliveries to each recipient
+	// under a rolling one-minute rate budget. A missing key means no commercial
+	// plan cap, but the service's defensive platform maximum still applies.
+	MessageDeliveredPerRecipientMinuteLimit = "message_delivered_per_recipient_minute"
 	// MaxAgentEmailRawBytes is the service/provider transport ceiling. Plan
 	// defaults and per-account overrides may lower it but cannot promise a
 	// larger message than the receive path can carry.
 	MaxAgentEmailRawBytes int64 = 25 * 1024 * 1024
+	// MaxMessageSentPerAgentMinute is the always-enforced platform maximum for
+	// one sending agent under a rolling one-minute rate budget.
+	MaxMessageSentPerAgentMinute int64 = 2_000
+	// MaxMessageDeliveredPerRealmMinute is the always-enforced platform maximum
+	// for aggregate recipient deliveries in one realm under a rolling one-minute
+	// rate budget.
+	MaxMessageDeliveredPerRealmMinute int64 = 100_000
+	// MaxMessageDeliveredPerRecipientMinute is the always-enforced platform
+	// maximum for one recipient under a rolling one-minute rate budget.
+	MaxMessageDeliveredPerRecipientMinute int64 = 5_000
 	// MaxPlanLimit is the largest exact integer shared by Go and JavaScript's
 	// JSON number representation. Unlimited is represented by a missing key,
 	// never by an oversized sentinel.
@@ -257,7 +281,10 @@ func ValidateLimits(limits map[string]int64) error {
 		switch key {
 		case RealmLimit, AgentLimit, AgentPerRealmLimit, StoredSecretLimit,
 			StoredMemoryLimit, StoredFactLimit, AgentEmailMaxRawBytesLimit,
-			AgentEmailAttachmentStorageBytesLimit:
+			AgentEmailAttachmentStorageBytesLimit,
+			MessageSentPerAgentMinuteLimit,
+			MessageDeliveredPerRealmMinuteLimit,
+			MessageDeliveredPerRecipientMinuteLimit:
 		default:
 			return fmt.Errorf("unknown limit %q", key)
 		}
@@ -268,6 +295,23 @@ func ValidateLimits(limits map[string]int64) error {
 		if key == AgentEmailMaxRawBytesLimit && value > MaxAgentEmailRawBytes {
 			return fmt.Errorf("%s must be between 0 and %d",
 				key, MaxAgentEmailRawBytes)
+		}
+		switch key {
+		case MessageSentPerAgentMinuteLimit:
+			if value > MaxMessageSentPerAgentMinute {
+				return fmt.Errorf("%s must be between 0 and %d",
+					key, MaxMessageSentPerAgentMinute)
+			}
+		case MessageDeliveredPerRealmMinuteLimit:
+			if value > MaxMessageDeliveredPerRealmMinute {
+				return fmt.Errorf("%s must be between 0 and %d",
+					key, MaxMessageDeliveredPerRealmMinute)
+			}
+		case MessageDeliveredPerRecipientMinuteLimit:
+			if value > MaxMessageDeliveredPerRecipientMinute {
+				return fmt.Errorf("%s must be between 0 and %d",
+					key, MaxMessageDeliveredPerRecipientMinute)
+			}
 		}
 	}
 	return nil

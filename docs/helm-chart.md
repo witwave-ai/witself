@@ -110,6 +110,9 @@ Production chart defaults should assume:
 - A bounded, restart-safe avatar style rollout job on every worker replica,
   tuned with `worker.avatarStyleRollout.enabled`, `batchSize`, `interval`, and
   `batchTimeout`.
+- Enabled-by-default, bounded cleanup of expired message-rate coordination
+  rows through `worker.messageRateBucketCleanup`; replicas cooperate with
+  PostgreSQL `SKIP LOCKED`, and API pods never schedule it.
 - Transcript retention disabled by default, with a separate bounded
   `worker.transcriptRetention.mode: preview` stage before an explicit switch
   to `enforce`.

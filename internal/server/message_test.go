@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -296,6 +297,257 @@ func TestMessageHTTPContract(t *testing.T) {
 	}
 	if f := caps.Features["message_reply"]; !f.Supported || f.Reason != "" {
 		t.Fatalf("message_reply capability = %+v", f)
+	}
+}
+
+func TestMessageProducingRoutesReturnTypedRateLimit(t *testing.T) {
+	principal := DomainPrincipal{
+		Kind: PrincipalKindAgent, ID: "agent_private_identifier", AccountID: "account_private_identifier",
+		RealmID: "realm_private_identifier", AccountStatus: "active",
+	}
+	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
+		return principal, true, nil
+	}
+	rateErr := func() error {
+		return &MessageRateLimitError{
+			Dimension: "message_delivered", Scope: "recipient", Limit: 60,
+			Used: 60, Attempted: 1, WindowSeconds: 60, RetryAfter: 1250 * time.Millisecond,
+			ResetAt: time.Date(2026, 7, 31, 12, 0, 2, 0, time.UTC), Source: "plan", Retryable: true,
+		}
+	}
+	cfg := Config{
+		AuthenticatePrincipal: auth,
+		SendMessage: func(context.Context, DomainPrincipal, SendMessageRequest) (Message, error) {
+			return Message{}, rateErr()
+		},
+		ReplyMessage: func(context.Context, DomainPrincipal, string, ReplyMessageRequest) (Message, error) {
+			return Message{}, rateErr()
+		},
+		CompleteMessage: func(context.Context, DomainPrincipal, string, CompleteMessageRequest) (CompleteMessageResult, error) {
+			return CompleteMessageResult{}, rateErr()
+		},
+		CreateMessageRequest: func(context.Context, DomainPrincipal, CreateMessageRequestRequest) (CreateMessageRequestResult, error) {
+			return CreateMessageRequestResult{}, rateErr()
+		},
+		OfferMessageRequest: func(context.Context, DomainPrincipal, string, OfferMessageRequestRequest) (OfferMessageRequestResult, error) {
+			return OfferMessageRequestResult{}, rateErr()
+		},
+		CompleteMessageRequest: func(context.Context, DomainPrincipal, string, CompleteMessageRequestRequest) (CompleteMessageRequestResult, error) {
+			return CompleteMessageRequestResult{}, rateErr()
+		},
+	}
+	srv := httptest.NewServer(apiMux(cfg))
+	defer srv.Close()
+
+	for _, test := range []struct {
+		name, path, body string
+	}{
+		{"send", "/v1/messages", `{"to":{"kind":"agent","id":"peer"},"body":"private message body"}`},
+		{"reply", "/v1/messages/msg_private:reply", `{"body":"private message body"}`},
+		{"complete", "/v1/messages/msg_private:complete", `{"claim_id":"claim_private","generation":1,"body":"private message body"}`},
+		{"request_open", "/v1/message-requests", `{"subject":"private subject","body":"private message body","max_assignees":1}`},
+		{"request_offer", "/v1/message-requests/mrq_private:offer", `{"body":"private message body"}`},
+		{"request_complete", "/v1/message-requests/mrq_private:complete", `{"claim_id":"claim_private","generation":1,"body":"private message body"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodPost, srv.URL+test.path, strings.NewReader(test.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer token")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusTooManyRequests {
+				t.Fatalf("status = %d, want 429", resp.StatusCode)
+			}
+			if got := resp.Header.Get("Retry-After"); got != "2" {
+				t.Fatalf("Retry-After = %q, want 2", got)
+			}
+			if got := resp.Header.Get("Cache-Control"); got != "private, no-store" {
+				t.Fatalf("Cache-Control = %q", got)
+			}
+			var envelope struct {
+				SchemaVersion string `json:"schema_version"`
+				Code          string `json:"code"`
+				Error         string `json:"error"`
+				Retryable     bool   `json:"retryable"`
+				RetryAfter    int64  `json:"retry_after"`
+				Details       struct {
+					LimitDimension string `json:"limit_dimension"`
+					LimitKey       string `json:"limit_key"`
+					Scope          string `json:"scope"`
+					Limit          int64  `json:"limit"`
+					Used           int64  `json:"used"`
+					Attempted      int64  `json:"attempted"`
+					WindowSeconds  int64  `json:"window_seconds"`
+					RetryAfter     int64  `json:"retry_after"`
+				} `json:"details"`
+			}
+			raw, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(raw, &envelope); err != nil {
+				t.Fatal(err)
+			}
+			if envelope.SchemaVersion != "witself.v0" || envelope.Code != "rate_limited" ||
+				envelope.Error != ErrMessageRateLimited.Error() || !envelope.Retryable || envelope.RetryAfter != 2 {
+				t.Fatalf("envelope = %+v", envelope)
+			}
+			if envelope.Details.LimitDimension != "message_delivered" ||
+				envelope.Details.LimitKey != "message_delivered_per_recipient_minute" ||
+				envelope.Details.Scope != "recipient" || envelope.Details.Limit != 60 ||
+				envelope.Details.Used != 60 || envelope.Details.Attempted != 1 ||
+				envelope.Details.WindowSeconds != 60 || envelope.Details.RetryAfter != 2 {
+				t.Fatalf("details = %+v", envelope.Details)
+			}
+			for _, private := range []string{
+				"agent_private_identifier", "account_private_identifier", "realm_private_identifier",
+				"msg_private", "mrq_private", "claim_private", "private message body", "private subject", "plan",
+			} {
+				if strings.Contains(string(raw), private) {
+					t.Fatalf("response exposed %q: %s", private, raw)
+				}
+			}
+		})
+	}
+}
+
+func TestMessageProducingRoutesReturnHardRateLimit(t *testing.T) {
+	principal := DomainPrincipal{
+		Kind: PrincipalKindAgent, ID: "agent_private_identifier", AccountID: "account_private_identifier",
+		RealmID: "realm_private_identifier", AccountStatus: "active",
+	}
+	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
+		return principal, true, nil
+	}
+	operations := []struct {
+		name, path, body string
+	}{
+		{"send", "/v1/messages", `{"to":{"kind":"agent","id":"peer"},"body":"private message body"}`},
+		{"reply", "/v1/messages/msg_private:reply", `{"body":"private message body"}`},
+		{"complete", "/v1/messages/msg_private:complete", `{"claim_id":"claim_private","generation":1,"body":"private message body"}`},
+		{"request_open", "/v1/message-requests", `{"subject":"private subject","body":"private message body","max_assignees":1}`},
+		{"request_offer", "/v1/message-requests/mrq_private:offer", `{"body":"private message body"}`},
+		{"request_complete", "/v1/message-requests/mrq_private:complete", `{"claim_id":"claim_private","generation":1,"body":"private message body"}`},
+	}
+
+	for _, refusal := range []struct {
+		name                           string
+		dimension, scope               string
+		limit, used, attempted, window int64
+		limitKey                       string
+	}{
+		{
+			name: "zero effective sender limit", dimension: "message_sent", scope: "agent",
+			limit: 0, used: 0, attempted: 1, window: 60, limitKey: "message_sent_per_agent_minute",
+		},
+		{
+			name: "fanout exceeds realm capacity", dimension: "message_delivered", scope: "realm",
+			limit: 1, used: 0, attempted: 2, window: 60, limitKey: "message_delivered_per_realm_minute",
+		},
+	} {
+		t.Run(refusal.name, func(t *testing.T) {
+			rateErr := func() error {
+				return &MessageRateLimitError{
+					Dimension: refusal.dimension, Scope: refusal.scope, Limit: refusal.limit,
+					Used: refusal.used, Attempted: refusal.attempted, WindowSeconds: refusal.window,
+					Source: "private_source", Retryable: false,
+				}
+			}
+			cfg := Config{
+				AuthenticatePrincipal: auth,
+				SendMessage: func(context.Context, DomainPrincipal, SendMessageRequest) (Message, error) {
+					return Message{}, rateErr()
+				},
+				ReplyMessage: func(context.Context, DomainPrincipal, string, ReplyMessageRequest) (Message, error) {
+					return Message{}, rateErr()
+				},
+				CompleteMessage: func(context.Context, DomainPrincipal, string, CompleteMessageRequest) (CompleteMessageResult, error) {
+					return CompleteMessageResult{}, rateErr()
+				},
+				CreateMessageRequest: func(context.Context, DomainPrincipal, CreateMessageRequestRequest) (CreateMessageRequestResult, error) {
+					return CreateMessageRequestResult{}, rateErr()
+				},
+				OfferMessageRequest: func(context.Context, DomainPrincipal, string, OfferMessageRequestRequest) (OfferMessageRequestResult, error) {
+					return OfferMessageRequestResult{}, rateErr()
+				},
+				CompleteMessageRequest: func(context.Context, DomainPrincipal, string, CompleteMessageRequestRequest) (CompleteMessageRequestResult, error) {
+					return CompleteMessageRequestResult{}, rateErr()
+				},
+			}
+			srv := httptest.NewServer(apiMux(cfg))
+			defer srv.Close()
+
+			for _, operation := range operations {
+				t.Run(operation.name, func(t *testing.T) {
+					req, err := http.NewRequest(http.MethodPost, srv.URL+operation.path, strings.NewReader(operation.body))
+					if err != nil {
+						t.Fatal(err)
+					}
+					req.Header.Set("Authorization", "Bearer token")
+					resp, err := http.DefaultClient.Do(req)
+					if err != nil {
+						t.Fatal(err)
+					}
+					raw, readErr := io.ReadAll(resp.Body)
+					_ = resp.Body.Close()
+					if readErr != nil {
+						t.Fatal(readErr)
+					}
+					if resp.StatusCode != http.StatusForbidden {
+						t.Fatalf("status = %d, want 403: %s", resp.StatusCode, raw)
+					}
+					if got := resp.Header.Get("Retry-After"); got != "" {
+						t.Fatalf("Retry-After = %q, want absent", got)
+					}
+					var envelope struct {
+						SchemaVersion string `json:"schema_version"`
+						Code          string `json:"code"`
+						Error         string `json:"error"`
+						Retryable     bool   `json:"retryable"`
+						RetryAfter    *int64 `json:"retry_after"`
+						Details       struct {
+							LimitDimension string `json:"limit_dimension"`
+							LimitKey       string `json:"limit_key"`
+							Scope          string `json:"scope"`
+							Limit          int64  `json:"limit"`
+							Used           int64  `json:"used"`
+							Attempted      int64  `json:"attempted"`
+							WindowSeconds  int64  `json:"window_seconds"`
+							RetryAfter     *int64 `json:"retry_after"`
+						} `json:"details"`
+					}
+					if err := json.Unmarshal(raw, &envelope); err != nil {
+						t.Fatal(err)
+					}
+					if envelope.SchemaVersion != "witself.v0" || envelope.Code != "limit_exceeded" ||
+						envelope.Error != ErrMessageRateLimited.Error() || envelope.Retryable ||
+						envelope.RetryAfter != nil {
+						t.Fatalf("envelope = %+v", envelope)
+					}
+					if envelope.Details.LimitDimension != refusal.dimension ||
+						envelope.Details.LimitKey != refusal.limitKey || envelope.Details.Scope != refusal.scope ||
+						envelope.Details.Limit != refusal.limit || envelope.Details.Used != refusal.used ||
+						envelope.Details.Attempted != refusal.attempted ||
+						envelope.Details.WindowSeconds != refusal.window || envelope.Details.RetryAfter != nil {
+						t.Fatalf("details = %+v", envelope.Details)
+					}
+					for _, private := range []string{
+						"agent_private_identifier", "account_private_identifier", "realm_private_identifier",
+						"msg_private", "mrq_private", "claim_private", "private message body", "private subject",
+						"private_source",
+					} {
+						if strings.Contains(string(raw), private) {
+							t.Fatalf("response exposed %q: %s", private, raw)
+						}
+					}
+				})
+			}
+		})
 	}
 }
 

@@ -87,6 +87,10 @@ the intended canary or wave in one commit, and push that commit to `main`.
 Provisioned cells whose bootstrap application is healthy watch `main`; their
 child applications use automated sync, pruning, and self-healing.
 
+The app-of-apps renderer withholds `worker.messageRateBucketCleanup` from child
+chart pins older than `0.0.224`; those strict schemas reject the new field.
+Advancing a cell to `0.0.224` atomically begins forwarding the cleanup contract.
+
 Do not treat a committed pin as deployment proof. For every provisioned cell,
 verify Argo health/sync, replacement-pod readiness, and the public
 `/v1/version` response before advancing the wave. When the worker is enabled,

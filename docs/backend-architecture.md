@@ -368,9 +368,13 @@ runtime clients handle inference through hooks and MCP guidance. The messaging m
   message can carry data toward a memory or fact write, but it cannot itself
   authorize a cross-agent write — writes still require a matching policy through
   the [Authorization Boundary](#authorization-boundary).
-- Plan-backed send/delivery rate limits and metered dimensions are target
-  platform integration; they are not implied by the current size, fan-out, or
-  listen-admission bounds. See [billing-and-limits.md](billing-and-limits.md).
+- Plan-backed send/delivery rate limits and metered dimensions are implemented
+  as shared PostgreSQL rolling one-minute budgets. They coordinate every API
+  replica and remain separate from size, fan-out, and process-local
+  listen-admission bounds. Phase A deliberately leaves the plan keys absent so
+  only platform ceilings apply; finite plan defaults require the separate
+  Phase-B catalog activation. See
+  [billing-and-limits.md](billing-and-limits.md).
 - Foreground clients are the inference boundary. At active task startup the
   installed policy directs them to inspect `self.show.message_checkpoint`, make
   a zero-wait `message.listen`, and scan open-request roles. It also directs

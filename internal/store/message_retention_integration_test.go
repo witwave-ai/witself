@@ -1678,64 +1678,91 @@ func TestMessageRetentionMigrationBackfillsAndReappliesPostgres(t *testing.T) {
 	assertArtifacts(false)
 
 	fixture := newMessageRetentionTestFixture(ctx, t, st, "migration-68")
-	recipientPrincipal := Principal{
-		Kind:          PrincipalAgent,
-		ID:            fixture.recipientID,
-		AccountID:     fixture.accountID,
-		RealmID:       fixture.realmID,
-		AgentName:     "recipient",
-		AccountStatus: "active",
+	type historicalMessageRow struct {
+		ID        string
+		ThreadID  string
+		CreatedAt time.Time
 	}
-	parent, err := st.SendMessage(ctx, fixture.principal, SendMessageInput{
-		ToAgent: fixture.recipientID, Body: "pre-up parent",
-		IdempotencyKey: "message-retention-migration-parent",
-	})
-	if err != nil {
-		t.Fatal(err)
+	insertHistoricalMessage := func(
+		id, fromAgentID, toAgentID, threadID, parentID, body string,
+		causalDepth int64,
+		createdAt time.Time,
+	) historicalMessageRow {
+		t.Helper()
+		tx, err := st.pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+
+		var storedAt time.Time
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO agent_messages
+			  (id,account_id,realm_id,from_agent_id,to_agent_id,body,thread_id,
+			   reply_to_message_id,causal_depth,created_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),$9,$10)
+			RETURNING created_at`,
+			id,
+			fixture.accountID,
+			fixture.realmID,
+			fromAgentID,
+			toAgentID,
+			body,
+			threadID,
+			parentID,
+			causalDepth,
+			createdAt.UTC().Truncate(time.Microsecond),
+		).Scan(&storedAt); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO agent_message_deliveries
+			  (message_id,account_id,realm_id,recipient_agent_id,state,
+			   delivered_at,created_at)
+			VALUES ($1,$2,$3,$4,'delivered',$5,$5)`,
+			id,
+			fixture.accountID,
+			fixture.realmID,
+			toAgentID,
+			storedAt,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		return historicalMessageRow{ID: id, ThreadID: threadID, CreatedAt: storedAt}
 	}
-	preUpReply, err := st.ReplyMessage(
-		ctx,
-		recipientPrincipal,
-		parent.ID,
-		ReplyMessageInput{
-			Body:           "pre-up reply",
-			IdempotencyKey: "message-retention-migration-pre-up-reply",
-		},
+
+	const migrationThreadID = "thr_message_retention_migration"
+	preUpParentAt := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Microsecond)
+	preUpReplyAt := preUpParentAt.Add(time.Hour)
+	parent := insertHistoricalMessage(
+		"msg_retention_migration_parent",
+		fixture.principal.ID,
+		fixture.recipientID,
+		migrationThreadID,
+		"",
+		"pre-up parent",
+		1,
+		preUpParentAt,
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	preUpReply := insertHistoricalMessage(
+		"msg_retention_migration_pre_up_reply",
+		fixture.recipientID,
+		fixture.principal.ID,
+		migrationThreadID,
+		parent.ID,
+		"pre-up reply",
+		2,
+		preUpReplyAt,
+	)
 	if preUpReply.ThreadID != parent.ThreadID {
 		t.Fatalf(
 			"pre-up reply thread = %q, want %q",
 			preUpReply.ThreadID,
 			parent.ThreadID,
 		)
-	}
-	preUpParentAt := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Microsecond)
-	preUpReplyAt := preUpParentAt.Add(time.Hour)
-	tag, err := st.pool.Exec(ctx, `
-		UPDATE agent_messages
-		   SET created_at=CASE id
-		         WHEN $4 THEN $6::timestamptz
-		         WHEN $5 THEN $7::timestamptz
-		         ELSE created_at
-		       END
-		 WHERE account_id=$1 AND realm_id=$2 AND thread_id=$3
-		   AND id IN ($4,$5)`,
-		fixture.accountID,
-		fixture.realmID,
-		parent.ThreadID,
-		parent.ID,
-		preUpReply.ID,
-		preUpParentAt,
-		preUpReplyAt,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if tag.RowsAffected() != 2 {
-		t.Fatalf("aged pre-up messages = %d, want 2", tag.RowsAffected())
 	}
 	assertMessageThreadCount(
 		ctx, t, st, fixture.accountID, fixture.realmID, parent.ThreadID, 2,
@@ -1803,18 +1830,16 @@ func TestMessageRetentionMigrationBackfillsAndReappliesPostgres(t *testing.T) {
 	assertWorkerLanes()
 	assertThreadActivity(preUpReplyAt, 2)
 
-	postUpReply, err := st.ReplyMessage(
-		ctx,
-		fixture.principal,
+	postUpReply := insertHistoricalMessage(
+		"msg_retention_migration_post_up_reply",
+		fixture.principal.ID,
+		fixture.recipientID,
+		migrationThreadID,
 		preUpReply.ID,
-		ReplyMessageInput{
-			Body:           "post-up trigger reply",
-			IdempotencyKey: "message-retention-migration-post-up-reply",
-		},
+		"post-up trigger reply",
+		3,
+		time.Now().UTC(),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if postUpReply.ThreadID != parent.ThreadID {
 		t.Fatalf(
 			"post-up reply thread = %q, want %q",
@@ -1840,18 +1865,16 @@ func TestMessageRetentionMigrationBackfillsAndReappliesPostgres(t *testing.T) {
 		ctx, t, st, fixture.accountID, fixture.realmID, parent.ThreadID, 3,
 	)
 
-	duringDownReply, err := st.ReplyMessage(
-		ctx,
-		recipientPrincipal,
+	duringDownReply := insertHistoricalMessage(
+		"msg_retention_migration_down_reply",
+		fixture.recipientID,
+		fixture.principal.ID,
+		migrationThreadID,
 		postUpReply.ID,
-		ReplyMessageInput{
-			Body:           "reply while migration 68 is down",
-			IdempotencyKey: "message-retention-migration-down-reply",
-		},
+		"reply while migration 68 is down",
+		4,
+		time.Now().UTC(),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if duringDownReply.ThreadID != parent.ThreadID {
 		t.Fatalf(
 			"during-down reply thread = %q, want %q",
@@ -1861,7 +1884,7 @@ func TestMessageRetentionMigrationBackfillsAndReappliesPostgres(t *testing.T) {
 	}
 	reapplyPostUpAt := time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Microsecond)
 	reapplyDownAt := reapplyPostUpAt.Add(time.Minute)
-	tag, err = st.pool.Exec(ctx, `
+	tag, err := st.pool.Exec(ctx, `
 		UPDATE agent_messages
 		   SET created_at=CASE id
 		         WHEN $4 THEN $6::timestamptz
@@ -1902,18 +1925,16 @@ func TestMessageRetentionMigrationBackfillsAndReappliesPostgres(t *testing.T) {
 	assertWorkerLanes()
 	assertThreadActivity(reapplyDownAt, 4)
 
-	afterReapplyReply, err := st.ReplyMessage(
-		ctx,
-		fixture.principal,
+	afterReapplyReply := insertHistoricalMessage(
+		"msg_retention_migration_reapply_reply",
+		fixture.principal.ID,
+		fixture.recipientID,
+		migrationThreadID,
 		duringDownReply.ID,
-		ReplyMessageInput{
-			Body:           "reply after migration 68 reapply",
-			IdempotencyKey: "message-retention-migration-reapply-reply",
-		},
+		"reply after migration 68 reapply",
+		5,
+		time.Now().UTC(),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if !afterReapplyReply.CreatedAt.After(reapplyDownAt) {
 		t.Fatalf(
 			"post-reapply reply time = %s, want after backfill %s",

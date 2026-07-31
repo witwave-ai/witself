@@ -1749,8 +1749,9 @@ CREATE UNIQUE INDEX ux_usage_counters_dim_window
   ON usage_counters (realm_id, dimension, coalesce(window_start, 'epoch'::timestamptz));
 ```
 
-Enforcement surfaces `rate_limited` (retryable, with `retry_after`) for throttle
-overage and `limit_exceeded` (non-retryable) for block.
+Enforcement surfaces `rate_limited` (HTTP 429, retryable, with `retry_after`)
+for throttle overage and `limit_exceeded` (HTTP 403, non-retryable, with no
+retry hint) for block or a structurally impossible rate debit.
 
 ### `idempotency_keys`
 

@@ -322,6 +322,9 @@ extract_document ConfigMap witself-worker "$live_nested_render" "$live_nested_wo
 extract_document Deployment witself-worker "$live_nested_render" "$live_nested_worker_deployment"
 extract_document Application witself-server "$civo_apps_render" "$civo_server_application"
 extract_application_helm_values "$civo_server_application" "$civo_server_nested_values"
+# The app-of-apps chart is reconciled before each child chart pin advances.
+# Never forward a value that the still-live pre-0.0.224 child schema rejects.
+reject_line "          messageRateBucketCleanup:" "$civo_server_application"
 helm template witself-server "$server_chart" --namespace witself \
   --values "$civo_server_nested_values" >"$civo_server_nested_render"
 extract_document ConfigMap witself-server "$civo_server_nested_render" "$civo_server_config"
@@ -426,6 +429,10 @@ require_line '  WITSELF_HEALTH_ADDR: ":8081"' "$gcp_worker_config"
 require_line '  WITSELF_METRICS_ADDR: ":9090"' "$gcp_worker_config"
 require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED: "true"' "$gcp_worker_config"
 require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_TIMEOUT: "30s"' "$gcp_worker_config"
+require_line '  WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_ENABLED: "true"' "$gcp_worker_config"
+require_line '  WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_BATCH_SIZE: "10000"' "$gcp_worker_config"
+require_line '  WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_INTERVAL: "1m"' "$gcp_worker_config"
+require_line '  WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_BATCH_TIMEOUT: "10s"' "$gcp_worker_config"
 require_line '  WITSELF_TRANSCRIPT_RETENTION_ENABLED: "false"' "$gcp_worker_config"
 require_line '  WITSELF_TRANSCRIPT_RETENTION_BATCH_TIMEOUT: "2m"' "$gcp_worker_config"
 require_line '  WITSELF_AGENT_EMAIL_RETENTION_ENABLED: "false"' "$gcp_worker_config"
@@ -446,6 +453,10 @@ require_line '  WITSELF_TRANSCRIPT_RETENTION_ENABLED: "false"' "$gcp_server_conf
 require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED: "false"' "$live_nested_server_config"
 require_line '  WITSELF_TRANSCRIPT_RETENTION_ENABLED: "false"' "$live_nested_server_config"
 require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED: "true"' "$live_nested_worker_config"
+require_line '  WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_ENABLED: "true"' "$live_nested_worker_config"
+require_line '  WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_BATCH_SIZE: "10000"' "$live_nested_worker_config"
+require_line '  WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_INTERVAL: "1m"' "$live_nested_worker_config"
+require_line '  WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_BATCH_TIMEOUT: "10s"' "$live_nested_worker_config"
 require_line '  WITSELF_MESSAGE_RETENTION_ENABLED: "true"' "$live_nested_worker_config"
 require_line '  WITSELF_MESSAGE_RETENTION_MODE: "enforce"' "$live_nested_worker_config"
 require_line '  WITSELF_MESSAGE_RETENTION_BATCH_SIZE: "25"' "$live_nested_worker_config"
@@ -548,6 +559,30 @@ expect_server_template_failure \
   "oversized avatar style batch timeout" \
   --values "$gcp_profile" \
   --set worker.avatarStyleRollout.batchTimeout=6m
+expect_server_template_failure \
+  "zero message-rate bucket cleanup batch" \
+  --values "$gcp_profile" \
+  --set worker.messageRateBucketCleanup.batchSize=0
+expect_server_template_failure \
+  "oversized message-rate bucket cleanup batch" \
+  --values "$gcp_profile" \
+  --set worker.messageRateBucketCleanup.batchSize=10001
+expect_server_template_failure \
+  "undersized message-rate bucket cleanup interval" \
+  --values "$gcp_profile" \
+  --set worker.messageRateBucketCleanup.interval=59s
+expect_server_template_failure \
+  "oversized message-rate bucket cleanup interval" \
+  --values "$gcp_profile" \
+  --set worker.messageRateBucketCleanup.interval=25h
+expect_server_template_failure \
+  "undersized message-rate bucket cleanup timeout" \
+  --values "$gcp_profile" \
+  --set worker.messageRateBucketCleanup.batchTimeout=999ms
+expect_server_template_failure \
+  "oversized message-rate bucket cleanup timeout" \
+  --values "$gcp_profile" \
+  --set worker.messageRateBucketCleanup.batchTimeout=6m
 expect_server_template_failure \
   "unknown transcript retention mode" \
   --values "$gcp_profile" \
@@ -722,6 +757,11 @@ require_sequence "$apps_render" \
   "            enabled: true" \
   "            interval: 2s" \
   "          enabled: true" \
+  "          messageRateBucketCleanup:" \
+  "            batchSize: 10000" \
+  "            batchTimeout: 10s" \
+  "            enabled: true" \
+  "            interval: 1m" \
   "          messageRetention:" \
   "            batchSize: 25" \
   "            batchTimeout: 2m" \

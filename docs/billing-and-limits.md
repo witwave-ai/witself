@@ -63,6 +63,8 @@ resolved cell policy only through its own implementation and rollout decision.
 The realm, agent, active-memory, current-fact, and inbound-agent-email byte
 values are the Phase B canonical defaults described below; the other rows
 remain subject to their own implementation and rollout gates.
+The three message-rate rows are the accepted Phase-B activation values; the
+Phase-A catalog deliberately leaves those keys absent.
 
 | Capability | Personal — $0 | Professional — $30/month | Team — $250/month | Enterprise — contact us |
 |---|---:|---:|---:|---:|
@@ -72,7 +74,10 @@ remain subject to their own implementation and rollout gates.
 | Current facts per agent | 1,000 | 10,000 | 50,000 | Contracted; 250,000 default |
 | Transcript retention | 30 days | 90 days | 365 days | Configurable, including indefinite |
 | Secrets per agent | 0 | 100 | 250 | 1,000 |
-| Agent messages | Disabled; 30-day downgrade cleanup | Unlimited; retained 90 days | Unlimited; retained 365 days | Enabled; retained 365 days by default, contract override |
+| Agent messaging | Disabled; 30-day downgrade cleanup | Enabled; retained 90 days | Enabled; retained 365 days | Enabled; retained 365 days by default, contract override |
+| Agent message sends per rolling minute | Not applicable | 30 | 120 | 600 |
+| Agent message deliveries per realm per rolling minute | Not applicable | 500 | 5,000 | 25,000 |
+| Agent message deliveries per recipient per rolling minute | Not applicable | 60 | 300 | 1,000 |
 | Receive agent email | No | Unlimited; retained 90 days | Unlimited; retained 365 days | Enabled; retained 365 days by default, contract override |
 | Raw MIME and attachment retention | None stored | 90 days | 365 days | Configurable, including indefinite |
 | Maximum raw email size | 0 (email disabled) | 10 MiB | 25 MiB | Contracted; 25 MiB default |
@@ -86,12 +91,13 @@ with their custom realm designator and use a configured custom domain:
 `agent-name.realm-designator@customer-domain`. A realm designator remains part
 of the address on custom domains.
 
-In this table, "unlimited" means that the plan does not expose a per-message or
-per-email charge. It remains subject to fair-use, abuse-prevention, and
-technical rate limits. Inbound hostile traffic must not create recipient
-charges. "Included" confirms that outbound agent email is available, but its
-sending allowance and overage treatment remain to be decided. "Contracted"
-means the quantity or policy is negotiated for the Enterprise account.
+In this table, an included feature does not imply unbounded throughput or a
+per-message charge. Message rate values are shared rolling one-minute
+GCRA/token-bucket-equivalent budgets, not wall-clock minute buckets. Inbound
+hostile traffic must not create recipient charges. "Included" confirms that
+outbound agent email is available, but its sending allowance and overage
+treatment remain to be decided. "Contracted" means the quantity or policy is
+negotiated for the Enterprise account.
 
 The two agent-email byte allowances are hard limits in the resolved account
 snapshot, not retention policies:
@@ -181,6 +187,73 @@ The matching authenticated control-plane resources are
 `/v1/admin/accounts/{id}/message-retention` with `GET`, `PUT`, and `DELETE`.
 Owner plan status exposes inherited and effective values but never admin
 attribution or audit history.
+
+Messaging throughput is represented by three ordinary integer limit keys in
+the same resolved account snapshot:
+
+- `message_sent_per_agent_minute` charges one unit for each new logical send;
+- `message_delivered_per_realm_minute` charges the resolved fan-out count to
+  the sender's realm; and
+- `message_delivered_per_recipient_minute` charges one unit to each resolved
+  recipient.
+
+Personal omits all three keys because messaging is disabled. The separate
+Phase-B catalog release will activate Professional `30 / 500 / 60`, Team
+`120 / 5,000 / 300`, and Enterprise `600 / 25,000 / 1,000` in the order above.
+The independent platform ceilings are `2,000 / 100,000 / 5,000`. A send
+evaluates all applicable budgets in the same PostgreSQL transaction used to
+insert the message and delivery rows. Exact idempotent replay is resolved
+before charging. Admission debits every resolved target, while the durable
+`message_delivered` usage event counts only targets whose committed delivery
+state is `delivered`. A fan-out either commits the admission debits, one send,
+and the complete delivery set, or stores nothing and consumes nothing.
+
+The existing generic account limit override surface changes these effective
+plan limits without changing plan or price:
+
+```sh
+witself-admin account limit-override get \
+  --account ACCOUNT_ID --dimension message_sent_per_agent_minute --json
+witself-admin account limit-override set \
+  --account ACCOUNT_ID --dimension message_sent_per_agent_minute --max 60 \
+  --reason "Temporary account-specific messaging allowance"
+witself-admin account limit-override set \
+  --account ACCOUNT_ID --dimension message_sent_per_agent_minute --unlimited \
+  --reason "Founder messaging plan allowance is unlimited"
+witself-admin account limit-override clear \
+  --account ACCOUNT_ID --dimension message_sent_per_agent_minute \
+  --reason "Return to the plan default"
+```
+
+The same commands accept the two delivery keys. `--unlimited` removes the plan
+cap from the resolved snapshot; it does not bypass the platform ceiling.
+
+Activation is intentionally two-phase. Phase A ships schema 83, the cell-side
+store/API/client/metrics implementation, and the control-plane/edge allow-list,
+while leaving all three keys absent from `web/plans/plans.json`. During this
+phase, the platform ceilings protect the service and no finite plan default is
+active. Converge both cells and the control plane on Phase A first. Then set and
+verify explicit-unlimited Founder overrides for all three keys, with equal
+desired/applied snapshot revisions. Only a separate Phase-B catalog release may
+activate Professional `30 / 500 / 60`, Team `120 / 5,000 / 300`, and Enterprise
+`600 / 25,000 / 1,000`; reconcile accounts and re-verify the Founder overrides
+afterward. That Phase-B activation must run from a clean `v0.0.225` checkout
+and deploy both catalog surfaces:
+
+```sh
+npm run deploy:plans
+npm run deploy
+```
+
+The control-plane container embeds `web/plans/plans.json`; deploying only the
+public plans Worker does not update account snapshots. Run lifecycle
+reconciliation only after both deployments succeed, then verify the effective
+values and Founder overrides. The platform ceilings remain effective in both
+phases.
+
+Rate-bucket debt is cell-local operational state and is not exported with an
+account. A cell evacuation therefore starts fresh rate buckets on the target,
+while the immutable message usage events and their checked rollups do migrate.
 
 Activation is cell-first. A new cell treats an already-applied snapshot that
 does not contain `messaging_entitlement_version: 1` as a legacy
@@ -332,8 +405,8 @@ lowered below retained usage.
 
 A refused create returns HTTP 403 with
 `code: "stored_secret_limit_reached"`, `retryable: false`, and the same
-value-free `limit` object. This stored-inventory refusal is the implemented
-exception to the generic draft `limit_exceeded`/HTTP 429 block behavior below.
+value-free `limit` object. This stored-inventory code is the feature-specific
+form of the generic HTTP 403, non-retryable hard-cap behavior below.
 Idempotent create replay is resolved before the gate, so replaying the exact
 already-completed request still succeeds when the owner is at or over the
 current maximum.
@@ -798,7 +871,7 @@ Overage behavior should be configurable per plan and dimension:
 - `throttle`: apply service-protection rate limiting. The action may be delayed
   and still succeed; when it must be rejected, return `rate_limited`
   (HTTP 429, `retryable: true`) with a `retry_after` hint.
-- `block`: deny the action with `limit_exceeded` (HTTP 429, `retryable: false`).
+- `block`: deny the action with `limit_exceeded` (HTTP 403, `retryable: false`).
   Retrying does not succeed until the plan is raised or the window resets.
 
 Recommended defaults:

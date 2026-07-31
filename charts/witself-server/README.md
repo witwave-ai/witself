@@ -105,6 +105,14 @@ Every worker replica may process jobs; PostgreSQL job locking provides the
 shared fence. The server ConfigMap always renders this job's enabled gate as
 `false`, including during mixed-version rolling overlap.
 
+Ephemeral message-rate coordination rows are maintained by the same worker.
+`worker.messageRateBucketCleanup` renders the enabled gate, bounded batch size,
+interval, and timeout as `WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_*`. It defaults
+to enabled with a 10,000-row batch, one-minute interval, and ten-second
+deadline. Every replica may run it: PostgreSQL `FOR UPDATE SKIP LOCKED` divides
+stale rows, and the database-clock cutoff preserves a full idle minute before
+deletion. API pods never schedule this cleanup.
+
 Avatar payload compaction is disabled by default.
 `avatar.payloadCompaction.enabled` renders
 `WITSELF_AVATAR_PAYLOAD_COMPACTION_ENABLED`. Keep it false while rolling out a
@@ -216,6 +224,7 @@ See [values.yaml](values.yaml) for the full set and [values.schema.json](values.
 for validation. Most-used: `image.tag`, `replicaCount`, `backend.kind`,
 `features.factDeletion.enabled`, `avatar.payloadCompaction.enabled`,
 `worker.enabled`, `worker.replicaCount`, `worker.avatarStyleRollout.*`,
+`worker.messageRateBucketCleanup.*`,
 `worker.transcriptRetention.*`, `worker.messageRetention.*`,
 `worker.agentEmailRetention.*`, `worker.resources`,
 `worker.podDisruptionBudget.*`, `agentEmail.receivePilot.*`,

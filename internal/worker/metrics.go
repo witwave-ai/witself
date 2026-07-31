@@ -21,15 +21,15 @@ const (
 	JobResultCanceled JobResult = "canceled"
 )
 
-// RetentionResult is the bounded result label for a transcript-retention batch.
+// RetentionResult is the bounded result label for a retention or cleanup batch.
 type RetentionResult string
 
 const (
-	// RetentionResultSuccess means a retention batch found and processed work.
+	// RetentionResultSuccess means a bounded batch found and processed work.
 	RetentionResultSuccess RetentionResult = "success"
-	// RetentionResultNoWork means a retention batch completed with no due work.
+	// RetentionResultNoWork means a bounded batch completed with no due work.
 	RetentionResultNoWork RetentionResult = "no_work"
-	// RetentionResultError means a retention batch returned an error.
+	// RetentionResultError means a bounded batch returned an error.
 	RetentionResultError RetentionResult = "error"
 )
 
@@ -101,17 +101,20 @@ type retentionItemLabels struct {
 type Metrics struct {
 	mu sync.Mutex
 
-	jobs                        map[string]*jobMetric
-	retentionBatches            map[retentionBatchLabels]uint64
-	retentionItems              map[retentionItemLabels]uint64
-	retentionLastSuccess        map[string]float64
-	messageRetentionBatches     map[retentionBatchLabels]uint64
-	messageRetentionItems       map[retentionItemLabels]uint64
-	messageRetentionLastSuccess map[string]float64
-	emailRetentionBatches       map[retentionBatchLabels]uint64
-	emailRetentionItems         map[retentionItemLabels]uint64
-	emailRetentionLastSuccess   map[string]float64
-	now                         func() time.Time
+	jobs                                map[string]*jobMetric
+	retentionBatches                    map[retentionBatchLabels]uint64
+	retentionItems                      map[retentionItemLabels]uint64
+	retentionLastSuccess                map[string]float64
+	messageRetentionBatches             map[retentionBatchLabels]uint64
+	messageRetentionItems               map[retentionItemLabels]uint64
+	messageRetentionLastSuccess         map[string]float64
+	emailRetentionBatches               map[retentionBatchLabels]uint64
+	emailRetentionItems                 map[retentionItemLabels]uint64
+	emailRetentionLastSuccess           map[string]float64
+	messageRateBucketCleanupBatches     map[RetentionResult]uint64
+	messageRateBucketCleanupDeletedRows uint64
+	messageRateBucketCleanupLastSuccess float64
+	now                                 func() time.Time
 }
 
 func newMetrics() *Metrics {
@@ -126,7 +129,12 @@ func newMetrics() *Metrics {
 		emailRetentionBatches:       make(map[retentionBatchLabels]uint64),
 		emailRetentionItems:         make(map[retentionItemLabels]uint64),
 		emailRetentionLastSuccess:   make(map[string]float64),
-		now:                         time.Now,
+		messageRateBucketCleanupBatches: map[RetentionResult]uint64{
+			RetentionResultSuccess: 0,
+			RetentionResultNoWork:  0,
+			RetentionResultError:   0,
+		},
+		now: time.Now,
 	}
 }
 
@@ -306,6 +314,34 @@ func (m *Metrics) ObserveAgentEmailRetentionBatch(
 	}
 }
 
+// ObserveMessageRateBucketCleanupBatch records one value-free rate-bucket
+// cleanup attempt. Result is a closed process enum and deleted is a count only.
+func (m *Metrics) ObserveMessageRateBucketCleanupBatch(
+	result RetentionResult,
+	deleted int64,
+) {
+	if result != RetentionResultSuccess &&
+		result != RetentionResultNoWork &&
+		result != RetentionResultError {
+		return
+	}
+	if deleted < 0 ||
+		(result == RetentionResultSuccess && deleted == 0) ||
+		(result != RetentionResultSuccess && deleted != 0) {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.messageRateBucketCleanupBatches[result]++
+	if result == RetentionResultSuccess || result == RetentionResultNoWork {
+		m.messageRateBucketCleanupLastSuccess = float64(m.now().Unix())
+	}
+	if deleted > 0 {
+		m.messageRateBucketCleanupDeletedRows += uint64(deleted)
+	}
+}
+
 func (m *Metrics) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
@@ -365,6 +401,15 @@ func (m *Metrics) writePrometheus(w io.Writer) {
 	for mode, value := range m.emailRetentionLastSuccess {
 		emailLastSuccess[mode] = value
 	}
+	messageRateBucketCleanupBatches := make(
+		map[RetentionResult]uint64,
+		len(m.messageRateBucketCleanupBatches),
+	)
+	for result, value := range m.messageRateBucketCleanupBatches {
+		messageRateBucketCleanupBatches[result] = value
+	}
+	messageRateBucketCleanupDeletedRows := m.messageRateBucketCleanupDeletedRows
+	messageRateBucketCleanupLastSuccess := m.messageRateBucketCleanupLastSuccess
 	m.mu.Unlock()
 
 	_, _ = fmt.Fprintln(w, "# HELP witself_worker_up 1 if the witself-worker process is up.")
@@ -517,6 +562,38 @@ func (m *Metrics) writePrometheus(w io.Writer) {
 			"witself_worker_agent_email_retention_last_success_timestamp_seconds{mode=%q} %.0f\n",
 			mode, emailLastSuccess[mode])
 	}
+
+	_, _ = fmt.Fprintln(w, "# HELP witself_worker_message_rate_bucket_cleanup_batches_total Message-rate-bucket cleanup batches by bounded result.")
+	_, _ = fmt.Fprintln(w, "# TYPE witself_worker_message_rate_bucket_cleanup_batches_total counter")
+	cleanupResults := make([]string, 0, len(messageRateBucketCleanupBatches))
+	for result := range messageRateBucketCleanupBatches {
+		cleanupResults = append(cleanupResults, string(result))
+	}
+	sort.Strings(cleanupResults)
+	for _, result := range cleanupResults {
+		_, _ = fmt.Fprintf(
+			w,
+			"witself_worker_message_rate_bucket_cleanup_batches_total{result=%q} %d\n",
+			result,
+			messageRateBucketCleanupBatches[RetentionResult(result)],
+		)
+	}
+
+	_, _ = fmt.Fprintln(w, "# HELP witself_worker_message_rate_bucket_cleanup_deleted_rows_total Stale message-rate bucket rows deleted.")
+	_, _ = fmt.Fprintln(w, "# TYPE witself_worker_message_rate_bucket_cleanup_deleted_rows_total counter")
+	_, _ = fmt.Fprintf(
+		w,
+		"witself_worker_message_rate_bucket_cleanup_deleted_rows_total %d\n",
+		messageRateBucketCleanupDeletedRows,
+	)
+
+	_, _ = fmt.Fprintln(w, "# HELP witself_worker_message_rate_bucket_cleanup_last_success_timestamp_seconds Unix timestamp of the last successful or no-work message-rate-bucket cleanup batch.")
+	_, _ = fmt.Fprintln(w, "# TYPE witself_worker_message_rate_bucket_cleanup_last_success_timestamp_seconds gauge")
+	_, _ = fmt.Fprintf(
+		w,
+		"witself_worker_message_rate_bucket_cleanup_last_success_timestamp_seconds %.0f\n",
+		messageRateBucketCleanupLastSuccess,
+	)
 }
 
 func sortedRetentionBatchLabels(values map[retentionBatchLabels]uint64) []retentionBatchLabels {

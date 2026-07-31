@@ -47,6 +47,9 @@ func TestMetricsAreBoundedAndContainRetentionCounts(t *testing.T) {
 	if err := registry.Register(Job{Name: "transcript_retention", Run: blockingJob}); err != nil {
 		t.Fatal(err)
 	}
+	if err := registry.Register(Job{Name: "message_rate_bucket_cleanup", Run: blockingJob}); err != nil {
+		t.Fatal(err)
+	}
 	if err := registry.Register(Job{Name: "tenant/id", Run: blockingJob}); err == nil {
 		t.Fatal("registered an unsafe, unbounded job label")
 	}
@@ -54,7 +57,9 @@ func TestMetricsAreBoundedAndContainRetentionCounts(t *testing.T) {
 	metrics := registry.Metrics()
 	metrics.now = func() time.Time { return time.Unix(1234, 0) }
 	metrics.setJobRunning("transcript_retention", true)
+	metrics.setJobRunning("message_rate_bucket_cleanup", true)
 	metrics.RecordJobFailure("transcript_retention")
+	metrics.RecordJobFailure("message_rate_bucket_cleanup")
 	metrics.RecordJobFailure("tenant_secret")
 	metrics.ObserveRetentionBatch("enforce", RetentionResultSuccess, RetentionCounts{
 		Scanned:                7,
@@ -106,6 +111,11 @@ func TestMetricsAreBoundedAndContainRetentionCounts(t *testing.T) {
 		RetentionResultSuccess,
 		AgentEmailRetentionCounts{Deleted: 99},
 	)
+	metrics.ObserveMessageRateBucketCleanupBatch(RetentionResultSuccess, 7)
+	metrics.ObserveMessageRateBucketCleanupBatch(RetentionResultNoWork, 0)
+	metrics.ObserveMessageRateBucketCleanupBatch(RetentionResultError, 0)
+	metrics.ObserveMessageRateBucketCleanupBatch(RetentionResult("account_private"), 99)
+	metrics.ObserveMessageRateBucketCleanupBatch(RetentionResultSuccess, 0)
 
 	var output strings.Builder
 	metrics.writePrometheus(&output)
@@ -114,6 +124,8 @@ func TestMetricsAreBoundedAndContainRetentionCounts(t *testing.T) {
 		`witself_worker_up 1`,
 		`witself_worker_job_running{job="transcript_retention"} 1`,
 		`witself_worker_job_failures_total{job="transcript_retention"} 1`,
+		`witself_worker_job_running{job="message_rate_bucket_cleanup"} 1`,
+		`witself_worker_job_failures_total{job="message_rate_bucket_cleanup"} 1`,
 		`witself_worker_retention_batches_total{mode="enforce",result="success"} 1`,
 		`witself_worker_retention_items_total{mode="enforce",kind="deleted"} 4`,
 		`witself_worker_retention_items_total{mode="enforce",kind="scan_capped_batches"} 1`,
@@ -135,6 +147,11 @@ func TestMetricsAreBoundedAndContainRetentionCounts(t *testing.T) {
 		`witself_worker_agent_email_retention_items_total{mode="enforce",kind="deleted_canary_proofs"} 1`,
 		`witself_worker_agent_email_retention_items_total{mode="enforce",kind="scan_capped_batches"} 1`,
 		`witself_worker_agent_email_retention_last_success_timestamp_seconds{mode="enforce"} 1234`,
+		`witself_worker_message_rate_bucket_cleanup_batches_total{result="success"} 1`,
+		`witself_worker_message_rate_bucket_cleanup_batches_total{result="no_work"} 1`,
+		`witself_worker_message_rate_bucket_cleanup_batches_total{result="error"} 1`,
+		`witself_worker_message_rate_bucket_cleanup_deleted_rows_total 7`,
+		`witself_worker_message_rate_bucket_cleanup_last_success_timestamp_seconds 1234`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("metrics missing %q:\n%s", want, text)
@@ -152,6 +169,7 @@ func TestRegistryRunsJobsSeparatelyAndStopsGracefully(t *testing.T) {
 	started := make(chan string, 2)
 	for _, name := range []string{
 		"avatar_style_rollout",
+		"message_rate_bucket_cleanup",
 		"transcript_retention",
 		"message_retention",
 		"agent_email_retention",
@@ -179,7 +197,7 @@ func TestRegistryRunsJobsSeparatelyAndStopsGracefully(t *testing.T) {
 		})
 	}()
 	seen := map[string]bool{}
-	for range 4 {
+	for range 5 {
 		select {
 		case name := <-started:
 			seen[name] = true
@@ -188,6 +206,7 @@ func TestRegistryRunsJobsSeparatelyAndStopsGracefully(t *testing.T) {
 		}
 	}
 	if !seen["avatar_style_rollout"] ||
+		!seen["message_rate_bucket_cleanup"] ||
 		!seen["transcript_retention"] ||
 		!seen["message_retention"] ||
 		!seen["agent_email_retention"] {

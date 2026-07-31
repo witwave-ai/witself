@@ -41,8 +41,10 @@ Worker jobs must be:
 - free of tenant identifiers or payload values in metrics and logs.
 
 The registered jobs are transcript retention, message retention, inbound
-agent-email retention, and avatar-style rollout. New job types must opt in
-explicitly; the worker is not an arbitrary command runner.
+agent-email retention, avatar-style rollout, and message-rate bucket cleanup.
+The cleanup job is enabled whenever the worker runs unless an operator
+explicitly disables it. New job types must opt in explicitly; the worker is not
+an arbitrary command runner.
 
 ## Cooperative Scaling
 
@@ -81,6 +83,15 @@ Per-thread and cumulative batch graph ceilings keep work bounded. Lane
 selection first records a short durable lease, so a timeout or crash backs off
 that exact lane while another replica can claim a different due lane. Message
 and transcript retention never share a lane or cadence.
+
+Message-rate bucket cleanup removes only expired GCRA coordination rows. Each
+replica attempts one batch immediately and then at the configured interval.
+One statement orders and locks at most 10,000 stale rows with `FOR UPDATE SKIP
+LOCKED`, clamps the cutoff to a full idle minute on the PostgreSQL clock, and
+deletes only the selected expired rows. Two replicas therefore divide
+available rows without waiting for or deleting the same bucket. A ten-second
+default batch deadline bounds a stuck attempt; recoverable failures are
+reported and retried on the next interval.
 
 Inbound agent-email retention has its own 16 preview lanes and 16 enforcement
 lanes. The worker briefly leases one lane, then takes an exclusive account row
@@ -143,6 +154,11 @@ Inbound email has separate
 families. Item kinds cover selected and deleted messages, deleted raw bytes,
 live-claim holds, lock/oversize/budget deferrals, duplicate-link repairs, and
 cascaded retry-canary proofs.
+
+Message-rate bucket cleanup has separate
+`witself_worker_message_rate_bucket_cleanup_*` batch-result, deleted-row, and
+last-success metrics. Its only result label values are `success`, `no_work`,
+and `error`; it has no tenant-derived labels.
 
 Account, realm, agent, conversation, task, transcript, memory, and secret
 identifiers must never be metric labels. Error text and stored content must

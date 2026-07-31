@@ -23,6 +23,8 @@ const (
 	UsageDimensionTranscriptEntryWrite = "transcript_entry_write"
 	UsageDimensionTranscriptEntryRead  = "transcript_entry_read"
 	UsageDimensionTranscriptStorage    = "transcript_storage_byte"
+	UsageDimensionMessageSent          = "message_sent"
+	UsageDimensionMessageDelivered     = "message_delivered"
 
 	UsageBucketHour = "hour"
 	UsageBucketDay  = "day"
@@ -30,6 +32,8 @@ const (
 	UsageUnitTranscript = "transcript"
 	UsageUnitEntry      = "entry"
 	UsageUnitByte       = "byte"
+	UsageUnitMessage    = "message"
+	UsageUnitDelivery   = "delivery"
 )
 
 var (

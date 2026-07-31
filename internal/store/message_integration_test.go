@@ -76,6 +76,9 @@ func TestMessagePostgresRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Keep the mailbox order deterministic without rewriting created_at after
+	// SendMessage has bound the portable usage event to that timestamp.
+	time.Sleep(time.Millisecond)
 	second, err := st.SendMessage(ctx, senderPrincipal, SendMessageInput{
 		ToAgent: recipient.ID, Kind: "request", Body: "second request",
 		ThreadID: msg.ThreadID, IdempotencyKey: "round-trip-2",
@@ -86,12 +89,8 @@ func TestMessagePostgresRoundTrip(t *testing.T) {
 	if msg.CausalDepth != 1 || second.CausalDepth != 1 {
 		t.Fatalf("direct message depths in reused thread = %d/%d, want 1/1", msg.CausalDepth, second.CausalDepth)
 	}
-	baseTime := time.Now().UTC().Add(-time.Hour)
-	if _, err := st.pool.Exec(ctx, `UPDATE agent_messages SET created_at=$2 WHERE id=$1`, msg.ID, baseTime); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.pool.Exec(ctx, `UPDATE agent_messages SET created_at=$2 WHERE id=$1`, second.ID, baseTime.Add(time.Minute)); err != nil {
-		t.Fatal(err)
+	if !second.CreatedAt.After(msg.CreatedAt) {
+		t.Fatalf("message creation order = %s then %s", msg.CreatedAt, second.CreatedAt)
 	}
 
 	claim, err := st.ClaimMessage(ctx, recipientPrincipal, msg.ID, ClaimMessageInput{

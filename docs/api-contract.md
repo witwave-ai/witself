@@ -150,20 +150,72 @@ HTTP status codes should align with the structured error:
 | `409` | `conflict` | Already exists, stale version, or state conflict. |
 | `422` | `usage_error` | Valid JSON with semantically invalid input. |
 | `429` | `rate_limited` | Transient service-protection or throttle limit; `retryable: true`. |
-| `429` | `limit_exceeded` | Plan, quota, or hard usage cap; `retryable: false`. |
+| `403` | `limit_exceeded` | Plan, quota, or structurally impossible rate debit; `retryable: false`. |
 | `500` | `internal_error` | Unexpected server failure. |
 | `503` | `backend_unavailable` | Backend dependency unavailable. |
 | `501` | `unsupported_operation` | Current backend does not support the operation. |
 
-Because two codes share HTTP `429` (and CLI exit `7`), clients must distinguish
-conditions by `error.code` and the `retryable` flag, not by status or exit code
-alone:
+Clients must distinguish limit conditions by `error.code` and the `retryable`
+flag rather than treating every limit response or CLI exit `7` as retryable:
 
 - `rate_limited` is a transient service-protection throttle. It is
   `retryable: true`; clients should back off and retry, honoring
   `details.retry_after` (seconds) and the `Retry-After` header when present.
-- `limit_exceeded` is a plan/quota hard cap. It is `retryable: false`; retrying
-  will not succeed until an operator raises the plan or the usage window resets.
+  Message-producing routes use the repository's current flat HTTP exception
+  while preserving those semantics. `POST /v1/messages`, message `:reply` and
+  `:complete`, and message-request open, `:offer`, and `:complete` all return
+  this shape when a shared messaging budget refuses the transaction:
+
+  ```json
+  {
+    "schema_version": "witself.v0",
+    "code": "rate_limited",
+    "error": "message rate limit reached",
+    "retryable": true,
+    "retry_after": 2,
+    "details": {
+      "limit_dimension": "message_delivered",
+      "limit_key": "message_delivered_per_recipient_minute",
+      "scope": "recipient",
+      "limit": 60,
+      "used": 60,
+      "attempted": 1,
+      "window_seconds": 60,
+      "retry_after": 2
+    }
+  }
+  ```
+
+  The status is HTTP 429 and `Retry-After: 2` accompanies the body. Dimension
+  is `message_sent` or `message_delivered`; scope is `agent`, `realm`, or
+  `recipient`. Details are value-free and never carry a tenant or message
+  identifier or content. The client should retry with the same idempotency key.
+- `limit_exceeded` is a plan/quota hard cap or a rate debit that cannot fit the
+  effective bucket even when empty. It is HTTP 403 with `retryable: false`.
+  For message-producing routes, an effective limit of zero or an attempted
+  fan-out larger than the applicable limit returns the same value-free rate
+  details shown above, but omits `retry_after` and the `Retry-After` header:
+
+  ```json
+  {
+    "schema_version": "witself.v0",
+    "code": "limit_exceeded",
+    "error": "message rate limit reached",
+    "retryable": false,
+    "details": {
+      "limit_dimension": "message_delivered",
+      "limit_key": "message_delivered_per_realm_minute",
+      "scope": "realm",
+      "limit": 1,
+      "used": 0,
+      "attempted": 2,
+      "window_seconds": 60
+    }
+  }
+  ```
+
+  Retrying the same unchanged debit cannot succeed; the effective limit or
+  attempted fan-out must change.
 - `stored_fact_limit_reached` is the implemented current-inventory
   specialization. It is HTTP 403 with `retryable: false` and the same
   value-free `limit` fields as fact status. Retrying the same count-growing
@@ -980,6 +1032,17 @@ Notes on specific actions and workflows:
   HTTP 201 with
   `processing` plus `message` and deliberately does not ack. Exact completion
   retry returns the same result; a stale fence returns HTTP 409.
+- Every operation above that creates a message uses one shared PostgreSQL
+  rolling one-minute GCRA/token-bucket-equivalent gate across all server pods.
+  Exact idempotent replay is checked before charging. For admission, a new
+  logical write debits one `message_sent` unit and one `message_delivered` unit
+  per resolved recipient; the budget updates and all fan-out rows commit
+  atomically or all roll back. The usage ledger records only committed targets
+  whose delivery state is `delivered`. Phase A leaves all three plan keys
+  absent and therefore runs against platform ceilings. Finite Professional,
+  Team, and Enterprise defaults activate only in the separate Phase-B catalog
+  release after cell/control-plane convergence and verified Founder unlimited
+  overrides.
 - `/v1/message-requests` is agent-only, realm-local coordination. Create
   requires `Idempotency-Key`, persists one realm `open_request` message and its
   immutable candidate snapshot atomically, and accepts only

@@ -652,8 +652,10 @@ Expected behavior:
 - Current send, deliver, read/ack, and processing claim/renew/release/complete
   transitions are audited without content. An active foreground client owns
   the startup listen, open-request offer/ranking/execution, and inference; the
-  backend remains model-free. Group/cross-realm routing, responsibility-aware
-  eligibility, and target rate/scope/meter enforcement remain later slices.
+  backend remains model-free. Shared plan-backed send/delivery rate and meter
+  enforcement is implemented; group/cross-realm routing,
+  responsibility-aware eligibility, and granular policy-scope enforcement
+  remain later slices.
 
 ## 10. Export And Import An Agent's Self
 

@@ -33,6 +33,7 @@ var cellLocalArchiveExclusions = map[string]struct{}{
 	"account_provision_receipts":               {},
 	"agent_email_retention_account_scan_state": {},
 	"agent_email_retention_worker_lanes":       {},
+	"agent_message_rate_buckets":               {},
 	"message_retention_thread_activity":        {},
 	"message_retention_account_scan_state":     {},
 	"message_retention_worker_lanes":           {},

@@ -1565,6 +1565,32 @@ func (e *FeatureNotEnabledError) Error() string {
 
 func (e *FeatureNotEnabledError) Unwrap() error { return ErrFeatureNotEnabled }
 
+// ErrMessageRateLimited signals a refusal from the shared, account-scoped
+// messaging rate budget. MessageRateLimitError.Retryable distinguishes an
+// exhausted-but-fit debit (-> 429) from a structurally impossible debit
+// (-> 403). It is separate from the process-local concurrent-listen guard.
+var ErrMessageRateLimited = errors.New("message rate limit reached")
+
+// MessageRateLimitError preserves the value-free throttle decision across the
+// store/server boundary. Dimension and scope are normalized again at the HTTP
+// and metrics boundaries before they are exposed as wire values or labels.
+type MessageRateLimitError struct {
+	Dimension     string
+	Scope         string
+	Limit         int64
+	Used          int64
+	Attempted     int64
+	WindowSeconds int64
+	RetryAfter    time.Duration
+	ResetAt       time.Time
+	Source        string
+	Retryable     bool
+}
+
+func (e *MessageRateLimitError) Error() string { return ErrMessageRateLimited.Error() }
+
+func (e *MessageRateLimitError) Unwrap() error { return ErrMessageRateLimited }
+
 // ErrCannotCloseDefault signals an attempt to close the deployment's seeded
 // default account (-> 403).
 var ErrCannotCloseDefault = errors.New("the default account cannot be closed")

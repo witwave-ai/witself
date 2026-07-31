@@ -17,6 +17,14 @@ func TestJobConfigFromEnvDefaultsAndOverrides(t *testing.T) {
 	if !defaults.avatarEnabled || defaults.avatar != store.DefaultAvatarStyleRolloutWorkerConfig() {
 		t.Fatalf("avatar defaults = enabled %t config %#v", defaults.avatarEnabled, defaults.avatar)
 	}
+	if !defaults.messageRateBucketCleanupEnabled ||
+		defaults.messageRateBucketCleanup != store.DefaultMessageRateBucketCleanupWorkerConfig() {
+		t.Fatalf(
+			"message rate bucket cleanup defaults = enabled %t config %#v",
+			defaults.messageRateBucketCleanupEnabled,
+			defaults.messageRateBucketCleanup,
+		)
+	}
 	if defaults.retentionEnabled || defaults.retention != store.DefaultTranscriptRetentionWorkerConfig() {
 		t.Fatalf("retention defaults = enabled %t config %#v", defaults.retentionEnabled, defaults.retention)
 	}
@@ -41,25 +49,29 @@ func TestJobConfigFromEnvDefaultsAndOverrides(t *testing.T) {
 	}
 
 	configured, err := jobConfigFromEnv(mapLookup(map[string]string{
-		avatarStyleRolloutEnabledEnv:       "false",
-		avatarStyleRolloutBatchSizeEnv:     "17",
-		avatarStyleRolloutIntervalEnv:      "750ms",
-		avatarStyleRolloutBatchTimeoutEnv:  "3s",
-		transcriptRetentionEnabledEnv:      "true",
-		transcriptRetentionModeEnv:         "ENFORCE",
-		transcriptRetentionBatchSizeEnv:    "250",
-		transcriptRetentionIntervalEnv:     "15m",
-		transcriptRetentionBatchTimeoutEnv: "90s",
-		messageRetentionEnabledEnv:         "true",
-		messageRetentionModeEnv:            "ENFORCE",
-		messageRetentionBatchSizeEnv:       "50",
-		messageRetentionIntervalEnv:        "10m",
-		messageRetentionBatchTimeoutEnv:    "75s",
-		agentEmailRetentionEnabledEnv:      "true",
-		agentEmailRetentionModeEnv:         "ENFORCE",
-		agentEmailRetentionBatchSizeEnv:    "40",
-		agentEmailRetentionIntervalEnv:     "12m",
-		agentEmailRetentionBatchTimeoutEnv: "80s",
+		avatarStyleRolloutEnabledEnv:            "false",
+		avatarStyleRolloutBatchSizeEnv:          "17",
+		avatarStyleRolloutIntervalEnv:           "750ms",
+		avatarStyleRolloutBatchTimeoutEnv:       "3s",
+		messageRateBucketCleanupEnabledEnv:      "false",
+		messageRateBucketCleanupBatchSizeEnv:    "5000",
+		messageRateBucketCleanupIntervalEnv:     "10m",
+		messageRateBucketCleanupBatchTimeoutEnv: "1m",
+		transcriptRetentionEnabledEnv:           "true",
+		transcriptRetentionModeEnv:              "ENFORCE",
+		transcriptRetentionBatchSizeEnv:         "250",
+		transcriptRetentionIntervalEnv:          "15m",
+		transcriptRetentionBatchTimeoutEnv:      "90s",
+		messageRetentionEnabledEnv:              "true",
+		messageRetentionModeEnv:                 "ENFORCE",
+		messageRetentionBatchSizeEnv:            "50",
+		messageRetentionIntervalEnv:             "10m",
+		messageRetentionBatchTimeoutEnv:         "75s",
+		agentEmailRetentionEnabledEnv:           "true",
+		agentEmailRetentionModeEnv:              "ENFORCE",
+		agentEmailRetentionBatchSizeEnv:         "40",
+		agentEmailRetentionIntervalEnv:          "12m",
+		agentEmailRetentionBatchTimeoutEnv:      "80s",
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -68,6 +80,16 @@ func TestJobConfigFromEnvDefaultsAndOverrides(t *testing.T) {
 		configured.avatar.Interval != 750*time.Millisecond ||
 		configured.avatar.BatchTimeout != 3*time.Second {
 		t.Fatalf("configured avatar = enabled %t config %#v", configured.avatarEnabled, configured.avatar)
+	}
+	if configured.messageRateBucketCleanupEnabled ||
+		configured.messageRateBucketCleanup.BatchSize != 5000 ||
+		configured.messageRateBucketCleanup.Interval != 10*time.Minute ||
+		configured.messageRateBucketCleanup.BatchTimeout != time.Minute {
+		t.Fatalf(
+			"configured message rate bucket cleanup = enabled %t config %#v",
+			configured.messageRateBucketCleanupEnabled,
+			configured.messageRateBucketCleanup,
+		)
 	}
 	if !configured.retentionEnabled ||
 		configured.retention.Mode != store.TranscriptRetentionModeEnforce ||
@@ -109,6 +131,13 @@ func TestJobConfigFromEnvRejectsNamedInvalidValues(t *testing.T) {
 		{avatarStyleRolloutBatchSizeEnv, "0"},
 		{avatarStyleRolloutIntervalEnv, "99ms"},
 		{avatarStyleRolloutBatchTimeoutEnv, "6m"},
+		{messageRateBucketCleanupEnabledEnv, "sometimes"},
+		{messageRateBucketCleanupBatchSizeEnv, "0"},
+		{messageRateBucketCleanupBatchSizeEnv, "10001"},
+		{messageRateBucketCleanupIntervalEnv, "59s"},
+		{messageRateBucketCleanupIntervalEnv, "25h"},
+		{messageRateBucketCleanupBatchTimeoutEnv, "999ms"},
+		{messageRateBucketCleanupBatchTimeoutEnv, "6m"},
 		{transcriptRetentionEnabledEnv, "sometimes"},
 		{transcriptRetentionModeEnv, "destructive"},
 		{transcriptRetentionBatchSizeEnv, "0"},
@@ -137,6 +166,15 @@ func TestJobConfigFromEnvRejectsNamedInvalidValues(t *testing.T) {
 				t.Fatalf("error = %v, want validation naming %s", err, test.key)
 			}
 		})
+	}
+}
+
+func TestMessageRateBucketCleanupMetricResult(t *testing.T) {
+	if got := messageRateBucketCleanupMetricResult(0); got != worker.RetentionResultNoWork {
+		t.Fatalf("zero deleted rows metric = %q", got)
+	}
+	if got := messageRateBucketCleanupMetricResult(7); got != worker.RetentionResultSuccess {
+		t.Fatalf("non-zero deleted rows metric = %q", got)
 	}
 }
 

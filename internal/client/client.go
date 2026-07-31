@@ -44,6 +44,11 @@ var ErrFactLimitReached = errors.New("current fact limit reached")
 // typed error to stop retrying until the account policy changes.
 var ErrFeatureNotEnabled = errors.New("feature not enabled")
 
+// ErrMessageRateLimited identifies a refusal from the shared messaging rate
+// budget. Inspect MessageRateLimitError.Retryable before retrying; hard
+// structurally impossible debits retain this sentinel for compatibility.
+var ErrMessageRateLimited = errors.New("message rate limit reached")
+
 // FeatureNotEnabledError preserves the server-owned feature key and friendly
 // response text without carrying account or message data.
 type FeatureNotEnabledError struct {
@@ -60,6 +65,33 @@ func (e *FeatureNotEnabledError) Error() string {
 }
 
 func (e *FeatureNotEnabledError) Unwrap() error { return ErrFeatureNotEnabled }
+
+// MessageRateLimitError preserves only the server's value-free rate-refusal
+// metadata. It never includes account, realm, agent, recipient, or message
+// identifiers. RetryAfter is zero whenever Retryable is false.
+type MessageRateLimitError struct {
+	LimitDimension string
+	LimitKey       string
+	Scope          string
+	Limit          int64
+	Used           int64
+	Attempted      int64
+	WindowSeconds  int64
+	RetryAfter     time.Duration
+	ResetAt        time.Time
+	Source         string
+	Retryable      bool
+	Message        string
+}
+
+func (e *MessageRateLimitError) Error() string {
+	if e != nil && strings.TrimSpace(e.Message) != "" {
+		return e.Message
+	}
+	return ErrMessageRateLimited.Error()
+}
+
+func (e *MessageRateLimitError) Unwrap() error { return ErrMessageRateLimited }
 
 // SecretLimitError preserves the server's value-free capacity snapshot.
 type SecretLimitError struct {
@@ -297,15 +329,124 @@ func doJSONWithHeadersTimeout(ctx context.Context, method, url, token string, he
 	return nil
 }
 
+type responseErrorDetails struct {
+	LimitDimension string `json:"limit_dimension"`
+	LimitKey       string `json:"limit_key"`
+	Scope          string `json:"scope"`
+	Limit          int64  `json:"limit"`
+	Used           int64  `json:"used"`
+	Attempted      int64  `json:"attempted"`
+	WindowSeconds  int64  `json:"window_seconds"`
+	RetryAfter     int64  `json:"retry_after"`
+	ResetAt        string `json:"reset_at"`
+	Source         string `json:"source"`
+}
+
+type nestedResponseError struct {
+	Code       string               `json:"code"`
+	Message    string               `json:"message"`
+	Feature    string               `json:"feature"`
+	Retryable  bool                 `json:"retryable"`
+	RetryAfter int64                `json:"retry_after"`
+	Details    responseErrorDetails `json:"details"`
+}
+
+func isMessageRateErrorDetails(details responseErrorDetails) bool {
+	switch {
+	case details.LimitDimension == "message_sent" &&
+		details.Scope == "agent" &&
+		details.LimitKey == "message_sent_per_agent_minute":
+		return true
+	case details.LimitDimension == "message_delivered" &&
+		details.Scope == "realm" &&
+		details.LimitKey == "message_delivered_per_realm_minute":
+		return true
+	case details.LimitDimension == "message_delivered" &&
+		details.Scope == "recipient" &&
+		details.LimitKey == "message_delivered_per_recipient_minute":
+		return true
+	default:
+		return false
+	}
+}
+
 func responseError(resp *http.Response, fallback string) error {
 	var out struct {
-		Error     string            `json:"error"`
-		Code      string            `json:"code"`
-		Feature   string            `json:"feature"`
-		Retryable bool              `json:"retryable"`
-		Limit     MemoryLimitStatus `json:"limit"`
+		Error      json.RawMessage      `json:"error"`
+		Code       string               `json:"code"`
+		Feature    string               `json:"feature"`
+		Retryable  bool                 `json:"retryable"`
+		RetryAfter int64                `json:"retry_after"`
+		Details    responseErrorDetails `json:"details"`
+		Limit      MemoryLimitStatus    `json:"limit"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err == nil && out.Error != "" {
+	if err := json.NewDecoder(resp.Body).Decode(&out); err == nil {
+		message := ""
+		rawError := bytes.TrimSpace(out.Error)
+		if len(rawError) != 0 {
+			switch rawError[0] {
+			case '"':
+				_ = json.Unmarshal(rawError, &message)
+			case '{':
+				var nested nestedResponseError
+				if json.Unmarshal(rawError, &nested) == nil {
+					message = nested.Message
+					if out.Code == "" {
+						out.Code = nested.Code
+					}
+					if out.Feature == "" {
+						out.Feature = nested.Feature
+					}
+					if !out.Retryable {
+						out.Retryable = nested.Retryable
+					}
+					if out.RetryAfter == 0 {
+						out.RetryAfter = nested.RetryAfter
+					}
+					if out.Details == (responseErrorDetails{}) {
+						out.Details = nested.Details
+					}
+				}
+			}
+		}
+		messageRateDetails := isMessageRateErrorDetails(out.Details)
+		transientRateLimit := messageRateDetails &&
+			resp.StatusCode == http.StatusTooManyRequests && out.Code == "rate_limited"
+		hardRateLimit := messageRateDetails &&
+			resp.StatusCode == http.StatusForbidden && out.Code == "limit_exceeded"
+		if transientRateLimit || hardRateLimit {
+			retryAfter := int64(0)
+			if transientRateLimit {
+				retryAfter = out.RetryAfter
+				if retryAfter <= 0 {
+					retryAfter = out.Details.RetryAfter
+				}
+				if retryAfter <= 0 {
+					retryAfter, _ = strconv.ParseInt(strings.TrimSpace(resp.Header.Get("Retry-After")), 10, 64)
+				}
+			}
+			var resetAt time.Time
+			if out.Details.ResetAt != "" {
+				resetAt, _ = time.Parse(time.RFC3339Nano, out.Details.ResetAt)
+			}
+			return &MessageRateLimitError{
+				LimitDimension: out.Details.LimitDimension,
+				LimitKey:       out.Details.LimitKey,
+				Scope:          out.Details.Scope,
+				Limit:          out.Details.Limit,
+				Used:           out.Details.Used,
+				Attempted:      out.Details.Attempted,
+				WindowSeconds:  out.Details.WindowSeconds,
+				RetryAfter:     durationFromSeconds(retryAfter),
+				ResetAt:        resetAt,
+				Source:         out.Details.Source,
+				Retryable:      transientRateLimit,
+				Message:        message,
+			}
+		}
+		if message == "" {
+			return fmt.Errorf("%s", fallback)
+		}
 		if resp.StatusCode == http.StatusConflict && out.Code == "secret_vault_key_mismatch" {
 			return fmt.Errorf("%w", ErrSecretVaultKeyMismatch)
 		}
@@ -323,12 +464,23 @@ func responseError(resp *http.Response, fallback string) error {
 		}
 		if resp.StatusCode == http.StatusForbidden && out.Code == "feature_not_enabled" {
 			return &FeatureNotEnabledError{
-				Feature: out.Feature, Retryable: out.Retryable, Message: out.Error,
+				Feature: out.Feature, Retryable: out.Retryable, Message: message,
 			}
 		}
-		return fmt.Errorf("%s", out.Error)
+		return fmt.Errorf("%s", message)
 	}
 	return fmt.Errorf("%s", fallback)
+}
+
+func durationFromSeconds(seconds int64) time.Duration {
+	if seconds <= 0 {
+		return 0
+	}
+	const maxDurationSeconds = int64((1<<63 - 1) / int64(time.Second))
+	if seconds > maxDurationSeconds {
+		return time.Duration(1<<63 - 1)
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 // Realm is the API view of a realm.
