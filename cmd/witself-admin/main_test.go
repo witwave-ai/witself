@@ -614,13 +614,16 @@ func TestAccountMessagingCLITransmitsIndependentOverrides(t *testing.T) {
 }
 
 func TestAccountLimitOverrideCLIUnlimitedDimensions(t *testing.T) {
-	for _, dimension := range []string{
-		"agents_per_realm",
-		"stored_memory",
-		"stored_fact",
-		"agent_email_attachment_storage_bytes",
+	for _, test := range []struct {
+		dimension  string
+		defaultMax int64
+	}{
+		{dimension: "agents_per_realm", defaultMax: 10},
+		{dimension: "stored_memory", defaultMax: 1000},
+		{dimension: "stored_fact", defaultMax: 1000},
+		{dimension: "agent_email_attachment_storage_bytes", defaultMax: 0},
 	} {
-		t.Run(dimension, func(t *testing.T) {
+		t.Run(test.dimension, func(t *testing.T) {
 			var gotMethod, gotPath string
 			var gotBody map[string]any
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -634,8 +637,8 @@ func TestAccountLimitOverrideCLIUnlimitedDimensions(t *testing.T) {
 					"plan":           "free",
 					"billing_plan":   "free",
 					"limit": map[string]any{
-						"dimension":     dimension,
-						"default_max":   nil,
+						"dimension":     test.dimension,
+						"default_max":   test.defaultMax,
 						"effective_max": nil,
 						"overridden":    true,
 					},
@@ -645,14 +648,14 @@ func TestAccountLimitOverrideCLIUnlimitedDimensions(t *testing.T) {
 
 			code := accountLimitOverride([]string{
 				"set", "--endpoint", srv.URL, "--token", "admin-token",
-				"--account", "acct_1", "--dimension", dimension,
+				"--account", "acct_1", "--dimension", test.dimension,
 				"--unlimited", "--reason", "founder capacity", "--json",
 			})
 			if code != 0 {
 				t.Fatalf("exit code = %d, want 0", code)
 			}
 			if gotMethod != http.MethodPut ||
-				gotPath != "/v1/admin/accounts/acct_1/limit-overrides/"+dimension ||
+				gotPath != "/v1/admin/accounts/acct_1/limit-overrides/"+test.dimension ||
 				gotBody["unlimited"] != true ||
 				gotBody["reason"] != "founder capacity" {
 				t.Fatalf("request = %s %s %#v", gotMethod, gotPath, gotBody)

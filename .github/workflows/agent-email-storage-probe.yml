@@ -1,0 +1,46 @@
+name: agent-email-storage-probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      expectation:
+        description: Provider disposition required for this probe
+        required: true
+        default: accepted
+        type: choice
+        options:
+          - accepted
+          - permanent_bounce
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-email-storage-probe
+  cancel-in-progress: false
+
+jobs:
+  raw-mime-storage-probe:
+    runs-on: ubuntu-latest
+    environment: agent-email-canary
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: infra/cloudflare/agent-email
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Verify the bounded storage probe
+        run: node --test test/storage-probe.test.mjs
+      - name: Submit the raw-MIME storage probe
+        run: npm run storage-probe
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.AGENT_EMAIL_CANARY_CLOUDFLARE_TOKEN }}
+          AGENT_EMAIL_STORAGE_PROBE_FROM: ${{ secrets.AGENT_EMAIL_CANARY_FROM }}
+          AGENT_EMAIL_STORAGE_PROBE_TO: ${{ secrets.AGENT_EMAIL_STORAGE_CANARY_TO }}
+          AGENT_EMAIL_STORAGE_PROBE_EXPECTATION: ${{ inputs.expectation }}

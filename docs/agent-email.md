@@ -9,6 +9,15 @@ were exercised before retirement. A new Civo canary must use a fresh,
 explicitly reviewed 5–10-agent manifest and remains manual-only. This
 capability does not add a sender-trust claim or automatic code use.
 
+Agent-email byte limits use a two-phase rollout. Phase A shipped the schema-81
+counter/enforcement and administrator surfaces with both catalog keys absent.
+After all Phase-A writers converge, Phase B rolls schema 82 to promote any
+compatibility rows and rebuild exact account counters. The final Phase-B
+catalog then activates Personal `0`/`0`, Professional `10 MiB`/`5 GiB`, and
+Team and Enterprise `25 MiB`/`100 GiB` raw-message/attachment-storage limits.
+The Founder account remains explicitly unlimited for attachment storage; that
+audited override must survive final catalog reconciliation.
+
 Kickoff spec, scoped 2026-07-20. A capability-limited Cloudflare receive pilot
 was authorized on 2026-07-21; the stronger production contract remains the
 promotion target. This document is the go-forward design for **agent email**:

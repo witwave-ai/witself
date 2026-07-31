@@ -188,6 +188,37 @@ would add about 96 retained messages per day until the ordinary mailbox
 retention/delete contract is implemented. Keep the workflow manual-only unless
 that accumulation is explicitly accepted and monitored.
 
+## Raw-MIME storage probe
+
+The separate `agent-email-storage-probe` workflow is manual-dispatch-only and
+uses the same protected `agent-email-canary` GitHub Environment. Pin its one
+exact disposable `@agent-mail.witwave.ai` recipient in the separate
+`AGENT_EMAIL_STORAGE_CANARY_TO` Environment secret; do not reuse or overwrite
+`AGENT_EMAIL_CANARY_TO`. The only dispatch input is an `accepted` or
+`permanent_bounce` expectation. The runner creates one bounded multipart
+message with a fixed synthetic attachment and submits it through Cloudflare's
+raw-MIME API. The sender, recipient, and Email Sending token remain Environment
+secrets; the result contains only a synthetic subject, byte counts, provider
+disposition counts, and booleans proving that no token, address, or MIME was
+returned.
+
+Use `accepted` while verifying retained and capacity-omitted storage. Use
+`permanent_bounce` only after an intentionally lower account raw-message limit
+has converged, and only in this order:
+
+1. Run `accepted` against the pinned target and verify that exact synthetic
+   subject in the live cell mailbox and database.
+2. Lower the account raw-message limit below the probe's reported raw byte
+   count and verify the policy has converged in the cell.
+3. Run `permanent_bounce` against the same pinned target, then verify no new
+   mailbox or database row was created.
+
+The rejection mode passes only when Cloudflare returns explicit permanent
+bounce evidence; a queued submission is not treated as proof. Its result is
+provider submission evidence, not a substitute for the required live no-new-row
+check. The workflow never prepares routes, changes cell policy, or deletes
+mail.
+
 ## Rollback
 
 Disable first; this preserves the exact rules and directory rows for inspection:
