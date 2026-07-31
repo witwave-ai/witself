@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/agentemail"
 )
 
 // runtimeMetrics is deliberately small and dependency-free. Labels are drawn
@@ -36,6 +38,7 @@ type runtimeMetrics struct {
 	secretLimitRejects map[limitMetricLabels]uint64
 	memoryLimitRejects map[limitMetricLabels]uint64
 	factLimitRejects   map[limitMetricLabels]uint64
+	agentEmailIngests  map[string]uint64
 }
 
 type httpMetricLabels struct {
@@ -98,6 +101,7 @@ func newRuntimeMetrics() *runtimeMetrics {
 		secretLimitRejects: make(map[limitMetricLabels]uint64),
 		memoryLimitRejects: make(map[limitMetricLabels]uint64),
 		factLimitRejects:   make(map[limitMetricLabels]uint64),
+		agentEmailIngests:  make(map[string]uint64),
 	}
 }
 
@@ -140,6 +144,19 @@ func (m *runtimeMetrics) observeHTTP(method, pattern string, status int, elapsed
 }
 
 func (m *runtimeMetrics) instrumentConfig(cfg Config) Config {
+	if operation := cfg.IngestAgentEmailPilot; operation != nil {
+		cfg.IngestAgentEmailPilot = func(
+			ctx context.Context,
+			metadata agentemail.RelayMetadata,
+			raw []byte,
+		) error {
+			err := operation(ctx, metadata, raw)
+			m.mu.Lock()
+			m.agentEmailIngests[agentEmailIngestMetricOutcome(err)]++
+			m.mu.Unlock()
+			return err
+		}
+	}
 	if operation := cfg.CreateRealm; operation != nil {
 		cfg.CreateRealm = func(ctx context.Context, accountID, name string) (Realm, error) {
 			result, err := operation(ctx, accountID, name)
@@ -379,6 +396,29 @@ func (m *runtimeMetrics) observeFactLimitRejection(err error, operation string) 
 	m.mu.Unlock()
 }
 
+func agentEmailIngestMetricOutcome(err error) string {
+	switch {
+	case err == nil:
+		return "retained"
+	case errors.Is(err, ErrAgentEmailAttachmentOmitted):
+		return "omitted_capacity"
+	case errors.Is(err, ErrAgentEmailRawSizeExceeded):
+		return "over_size"
+	case errors.Is(err, ErrAgentEmailFeatureDisabled):
+		return "feature_disabled"
+	case errors.Is(err, ErrAgentEmailReceiveDisabled):
+		return "receive_disabled"
+	case errors.Is(err, ErrAgentEmailUnknownRecipient), errors.Is(err, ErrNotFound):
+		return "unknown_recipient"
+	case errors.Is(err, ErrAgentEmailRetryCanaryTemporary):
+		return "retry_canary_temporary"
+	case errors.Is(err, ErrAgentEmailRetryCanaryPermanent):
+		return "retry_canary_rejected"
+	default:
+		return "error"
+	}
+}
+
 func (m *runtimeMetrics) observeMemoryOperation(operation, principalKind string, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -461,6 +501,7 @@ func (m *runtimeMetrics) snapshot() *runtimeMetrics {
 		secretLimitRejects: maps.Clone(m.secretLimitRejects),
 		memoryLimitRejects: maps.Clone(m.memoryLimitRejects),
 		factLimitRejects:   maps.Clone(m.factLimitRejects),
+		agentEmailIngests:  maps.Clone(m.agentEmailIngests),
 	}
 }
 
@@ -525,6 +566,9 @@ func (m *runtimeMetrics) writePrometheusSnapshot(w io.Writer) {
 	})
 	writeCounterMap(w, "witself_fact_limit_rejections_total", "Net-positive current-fact mutation refusals by bounded limit dimension and operation.", m.factLimitRejects, func(key limitMetricLabels) string {
 		return labels("limit_dimension", key.LimitDimension, "operation", key.Operation)
+	})
+	writeCounterMap(w, "witself_agent_email_ingests_total", "Signed inbound agent-email deliveries by bounded storage or refusal outcome.", m.agentEmailIngests, func(outcome string) string {
+		return labels("outcome", outcome)
 	})
 }
 

@@ -401,6 +401,77 @@ func TestFounderResourceLimitsCanBeExplicitlyUnlimited(t *testing.T) {
 	}
 }
 
+func TestAgentEmailLimitOverridesResolveAndValidate(t *testing.T) {
+	h := newHarness(t, false)
+	ctx := t.Context()
+	const accountID = "acct_agent_email_limits"
+
+	rawMaximum := int64(10 * 1024 * 1024)
+	if _, err := h.m.SetAccountLimitOverride(
+		ctx, accountID, plans.AgentEmailMaxRawBytesLimit, &rawMaximum,
+		testAdminActor(), "allow professional-size inbound mail",
+	); err != nil {
+		t.Fatalf("set raw-message maximum: %v", err)
+	}
+	if _, err := h.m.SetAccountLimitOverride(
+		ctx, accountID, plans.AgentEmailAttachmentStorageBytesLimit, nil,
+		testAdminActor(), "founder attachment storage is unlimited",
+	); err != nil {
+		t.Fatalf("set attachment storage unlimited: %v", err)
+	}
+
+	record, snapshot, err := h.m.ResolvedStatus(ctx, accountID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, present := snapshot.DefaultLimits[plans.AgentEmailMaxRawBytesLimit]; present {
+		t.Fatalf("raw-message default activated during phase A: %v",
+			snapshot.DefaultLimits)
+	}
+	if _, present := snapshot.DefaultLimits[plans.AgentEmailAttachmentStorageBytesLimit]; present {
+		t.Fatalf("attachment-storage default activated during phase A: %v",
+			snapshot.DefaultLimits)
+	}
+	if snapshot.Limits[plans.AgentEmailMaxRawBytesLimit] != rawMaximum {
+		t.Fatalf("agent-email snapshot = defaults %v effective %v",
+			snapshot.DefaultLimits, snapshot.Limits)
+	}
+	if _, finite := snapshot.Limits[plans.AgentEmailAttachmentStorageBytesLimit]; finite {
+		t.Fatalf("attachment storage remained finite: %v", snapshot.Limits)
+	}
+	rawOverride := record.LimitOverrides[plans.AgentEmailMaxRawBytesLimit]
+	attachmentOverride := record.LimitOverrides[plans.AgentEmailAttachmentStorageBytesLimit]
+	if rawOverride.Max == nil || *rawOverride.Max != rawMaximum ||
+		attachmentOverride.Max != nil ||
+		attachmentOverride.Reason != "founder attachment storage is unlimited" {
+		t.Fatalf("agent-email overrides = raw %+v attachment %+v",
+			rawOverride, attachmentOverride)
+	}
+	if got := h.applier.last(t).limits; got[plans.AgentEmailMaxRawBytesLimit] != rawMaximum {
+		t.Fatalf("applied agent-email limits = %v", got)
+	} else if _, finite := got[plans.AgentEmailAttachmentStorageBytesLimit]; finite {
+		t.Fatalf("applied attachment storage remained finite: %v", got)
+	}
+
+	beforeVersion := record.Version
+	beforeHistory := len(record.AdminHistory)
+	beforeApplyCalls := len(h.applier.calls)
+	tooLarge := plans.MaxAgentEmailRawBytes + 1
+	if _, err := h.m.SetAccountLimitOverride(
+		ctx, accountID, plans.AgentEmailMaxRawBytesLimit, &tooLarge,
+		testAdminActor(), "invalid oversized mail",
+	); err == nil || !strings.Contains(err.Error(), "between 0 and 26214400") {
+		t.Fatalf("above-ceiling raw override error = %v", err)
+	}
+	after := h.record(t, accountID)
+	if after.Version != beforeVersion ||
+		len(after.AdminHistory) != beforeHistory ||
+		len(h.applier.calls) != beforeApplyCalls {
+		t.Fatalf("rejected raw override mutated lifecycle: before=%+v after=%+v calls=%d->%d",
+			record, after, beforeApplyCalls, len(h.applier.calls))
+	}
+}
+
 func TestFounderResourceOverridesSurviveCatalogPromotion(t *testing.T) {
 	h := newHarness(t, false)
 	ctx := t.Context()

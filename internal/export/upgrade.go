@@ -59,6 +59,7 @@ var upgraders = map[int]Upgrader{
 	69: preserveSchema69Rows,
 	70: preserveSchema70Rows,
 	75: preserveSchema75Rows,
+	78: addAgentEmailAttachmentStorageDefaults,
 }
 
 const (
@@ -109,6 +110,51 @@ func preserveSchema70Rows(_ string, row map[string]any) (map[string]any, error) 
 // commit. Schema-75 archive rows therefore remain valid without a portable
 // row transformation.
 func preserveSchema75Rows(_ string, row map[string]any) (map[string]any, error) {
+	return row, nil
+}
+
+// addAgentEmailAttachmentStorageDefaults lifts schema-78 email rows into the
+// explicit retained-or-omitted payload representation introduced by schema
+// 79. Legacy rows always retained raw MIME but did not persist a bounded body
+// projection or an attachment byte measurement. Charge the complete raw
+// message conservatively whenever the legacy parser found an attachment or
+// failed, so restoring an old archive can never undercount retained storage.
+// The account aggregate remains destination-local and is recomputed by the
+// store importer after every message row has landed.
+func addAgentEmailAttachmentStorageDefaults(table string, row map[string]any) (map[string]any, error) {
+	if table != "agent_email_messages" {
+		return row, nil
+	}
+	rawSizeValue, ok := row["raw_size_bytes"].(json.Number)
+	if !ok {
+		return nil, fmt.Errorf("legacy agent-email raw_size_bytes must be an integer")
+	}
+	rawSize, err := rawSizeValue.Int64()
+	if err != nil || rawSize < 1 {
+		return nil, fmt.Errorf("legacy agent-email raw_size_bytes is invalid")
+	}
+	attachmentCountValue, ok := row["attachment_count"].(json.Number)
+	if !ok {
+		return nil, fmt.Errorf("legacy agent-email attachment_count must be an integer")
+	}
+	attachmentCount, err := attachmentCountValue.Int64()
+	if err != nil || attachmentCount < 0 {
+		return nil, fmt.Errorf("legacy agent-email attachment_count is invalid")
+	}
+	parseState, ok := row["parse_state"].(string)
+	if !ok || parseState != "parsed" && parseState != "error" {
+		return nil, fmt.Errorf("legacy agent-email parse_state is invalid")
+	}
+
+	var storageBytes int64
+	if attachmentCount > 0 || parseState == "error" {
+		storageBytes = rawSize
+	}
+	row["body_text"] = nil
+	row["body_text_kind"] = nil
+	row["attachment_storage_bytes"] = storageBytes
+	row["retained_attachment_storage_bytes"] = storageBytes
+	row["payload_retention_state"] = "retained"
 	return row, nil
 }
 

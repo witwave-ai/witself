@@ -191,8 +191,18 @@ test("bridge path classifiers are exact", () => {
   assert.ok(matchAdminPolicyPath(
     "/v1/admin/accounts/acct_1/limit-overrides/agents_per_realm",
   ));
+  assert.ok(matchAdminPolicyPath(
+    "/v1/admin/accounts/acct_1/limit-overrides/agent_email_max_raw_bytes",
+  ));
+  assert.ok(matchAdminPolicyPath(
+    "/v1/admin/accounts/acct_1/limit-overrides/" +
+      "agent_email_attachment_storage_bytes",
+  ));
   assert.equal(matchAdminPolicyPath(
     "/v1/admin/accounts/acct_1/limit-overrides/not_a_limit",
+  ), null);
+  assert.equal(matchAdminPolicyPath(
+    "/v1/admin/accounts/acct_1/limit-overrides/agent_email_max_raw_byte",
   ), null);
   assert.equal(matchAdminPolicyPath(
     "/v1/admin/accounts/acct_1/limit-overrides/stored_secret/extra",
@@ -299,6 +309,39 @@ test("admin proxy replaces caller credentials and relays Go response", async () 
   assert.equal(response.headers.get("Retry-After"), "2");
   assert.equal(response.headers.get("Set-Cookie"), null);
   assert.deepEqual(await responseJSON(response), { effective_days: 60 });
+});
+
+test("admin proxy routes both agent-email limit dimensions exactly", async () => {
+  for (const dimension of [
+    "agent_email_max_raw_bytes",
+    "agent_email_attachment_storage_bytes",
+  ]) {
+    const path = `/v1/admin/accounts/acct_1/limit-overrides/${dimension}`;
+    let forwarded;
+    const response = await forwardAdminPolicyRequest(
+      new Request(`https://self.witwave.ai${path}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ max: 1234, reason: "test override" }),
+      }),
+      bridgeEnv({ "acct:acct_1": { cell: "cell-a" } }),
+      { admin_id: "adm_abcdefghijklmnopqrst", handle: "scott" },
+      async (next) => {
+        forwarded = next;
+        return new Response('{"schema_version":"witself.v0"}', {
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    );
+
+    assert.equal(response.status, 200);
+    assert.equal(new URL(forwarded.url).pathname, path);
+    assert.equal(forwarded.method, "PUT");
+    assert.deepEqual(await forwarded.json(), {
+      max: 1234,
+      reason: "test override",
+    });
+  }
 });
 
 test("admin proxy enforces verbs and bounded bodies", async () => {

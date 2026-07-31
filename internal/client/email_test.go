@@ -89,6 +89,117 @@ func TestAgentEmailClientRoutes(t *testing.T) {
 	}
 }
 
+func TestGetAgentEmailStorageStatusValidatesContract(t *testing.T) {
+	maximum, remaining := int64(5_368_709_120), int64(4_294_967_296)
+	valid := AgentEmailStorageStatus{
+		SchemaVersion:   "witself.v0",
+		MaximumRawBytes: 10_485_760,
+		AttachmentCapacity: MemoryLimitStatus{
+			Used: 1_073_741_824, Max: &maximum, Remaining: &remaining,
+		},
+	}
+	run := func(t *testing.T, response AgentEmailStorageStatus) (*AgentEmailStorageStatus, error) {
+		t.Helper()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet || r.URL.Path != "/v1/email:status" {
+				t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer agent-token" {
+				t.Fatalf("Authorization = %q", got)
+			}
+			_ = json.NewEncoder(w).Encode(response)
+		}))
+		defer srv.Close()
+		return GetAgentEmailStorageStatus(context.Background(), srv.URL+"/", "agent-token")
+	}
+
+	status, err := run(t, valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.MaximumRawBytes != 10_485_760 ||
+		status.AttachmentCapacity.Used != 1_073_741_824 ||
+		status.AttachmentCapacity.Max == nil ||
+		*status.AttachmentCapacity.Max != maximum ||
+		status.AttachmentCapacity.Remaining == nil ||
+		*status.AttachmentCapacity.Remaining != remaining {
+		t.Fatalf("email storage status = %#v", status)
+	}
+
+	unlimited := AgentEmailStorageStatus{
+		SchemaVersion:   "witself.v0",
+		MaximumRawBytes: 26_214_400,
+		AttachmentCapacity: MemoryLimitStatus{
+			Used: 123, Unlimited: true,
+		},
+	}
+	if _, err := run(t, unlimited); err != nil {
+		t.Fatalf("unlimited status: %v", err)
+	}
+
+	negative := int64(-1)
+	for _, test := range []struct {
+		name   string
+		status AgentEmailStorageStatus
+	}{
+		{name: "schema", status: AgentEmailStorageStatus{
+			SchemaVersion: "witself.v1", AttachmentCapacity: valid.AttachmentCapacity,
+		}},
+		{name: "negative raw maximum", status: AgentEmailStorageStatus{
+			SchemaVersion: "witself.v0", MaximumRawBytes: -1,
+			AttachmentCapacity: valid.AttachmentCapacity,
+		}},
+		{name: "unlimited with maximum", status: AgentEmailStorageStatus{
+			SchemaVersion: "witself.v0", AttachmentCapacity: MemoryLimitStatus{
+				Used: 1, Max: &maximum, Unlimited: true,
+			},
+		}},
+		{name: "capped without maximum", status: AgentEmailStorageStatus{
+			SchemaVersion: "witself.v0", AttachmentCapacity: MemoryLimitStatus{},
+		}},
+		{name: "negative remaining", status: AgentEmailStorageStatus{
+			SchemaVersion: "witself.v0", AttachmentCapacity: MemoryLimitStatus{
+				Max: &maximum, Remaining: &negative,
+			},
+		}},
+		{name: "inconsistent remaining", status: AgentEmailStorageStatus{
+			SchemaVersion: "witself.v0", AttachmentCapacity: MemoryLimitStatus{
+				Used: 1, Max: &maximum, Remaining: &remaining,
+			},
+		}},
+		{name: "inconsistent flags", status: AgentEmailStorageStatus{
+			SchemaVersion: "witself.v0", AttachmentCapacity: MemoryLimitStatus{
+				Used: 1_073_741_824, Max: &maximum, Remaining: &remaining,
+				NearLimit: true, AtLimit: true, OverLimit: true,
+			},
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := run(t, test.status); err == nil ||
+				!strings.Contains(err.Error(), "invalid email storage status") {
+				t.Fatalf("error = %v, want invalid email storage status", err)
+			}
+		})
+	}
+}
+
+func TestAgentEmailMessageDecodesPayloadRetentionProjection(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"messages":[{"id":"emsg_aaaaaaaaaaaaaaaa","attachment_count":2,"attachment_storage_bytes":4096,"retained_attachment_storage_bytes":0,"payload_retention_state":"omitted_capacity"}]}`))
+	}))
+	defer srv.Close()
+	page, err := ListAgentEmails(context.Background(), srv.URL, "agent-token", AgentEmailListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Messages) != 1 ||
+		page.Messages[0].AttachmentStorageBytes != 4096 ||
+		page.Messages[0].RetainedAttachmentStorageBytes != 0 ||
+		page.Messages[0].PayloadRetentionState != "omitted_capacity" {
+		t.Fatalf("message projection = %#v", page.Messages)
+	}
+}
+
 func TestAgentEmailOperatorReceiveControlClientRoutes(t *testing.T) {
 	type request struct {
 		method string

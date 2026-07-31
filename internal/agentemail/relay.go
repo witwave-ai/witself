@@ -21,9 +21,9 @@ const (
 	// RelaySignatureVersion is the first canonical signed-envelope format.
 	RelaySignatureVersion = "witself-email-relay-pilot-v1"
 
-	// PilotMaximumRawBytes is intentionally lower than Cloudflare Email
-	// Routing's provider limit. It is part of the authorized pilot boundary.
-	PilotMaximumRawBytes = 5 * 1024 * 1024
+	// PilotMaximumRawBytes is the transport-level technical ceiling shared by
+	// the edge relay and the cell signature envelope.
+	PilotMaximumRawBytes = 25 * 1024 * 1024
 
 	maxEnvelopeAddressBytes = 320
 	maxAudienceBytes        = 128

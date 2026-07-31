@@ -614,7 +614,12 @@ func TestAccountMessagingCLITransmitsIndependentOverrides(t *testing.T) {
 }
 
 func TestAccountLimitOverrideCLIUnlimitedDimensions(t *testing.T) {
-	for _, dimension := range []string{"agents_per_realm", "stored_memory", "stored_fact"} {
+	for _, dimension := range []string{
+		"agents_per_realm",
+		"stored_memory",
+		"stored_fact",
+		"agent_email_attachment_storage_bytes",
+	} {
 		t.Run(dimension, func(t *testing.T) {
 			var gotMethod, gotPath string
 			var gotBody map[string]any
@@ -656,6 +661,59 @@ func TestAccountLimitOverrideCLIUnlimitedDimensions(t *testing.T) {
 				t.Fatalf("unlimited body also selected a finite max: %#v", gotBody)
 			}
 		})
+	}
+}
+
+func TestAccountLimitOverrideCLIRawEmailMaximum(t *testing.T) {
+	var requests int
+	var gotPath string
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		gotPath = r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatal(err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0",
+			"account_id":     "acct_1",
+			"plan":           "free",
+			"billing_plan":   "free",
+			"limit": map[string]any{
+				"dimension":     "agent_email_max_raw_bytes",
+				"default_max":   0,
+				"effective_max": 10_485_760,
+				"overridden":    true,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	if code := accountLimitOverride([]string{
+		"set", "--endpoint", srv.URL, "--token", "admin-token",
+		"--account", "acct_1", "--dimension", "agent_email_max_raw_bytes",
+		"--max", "10485760", "--reason", "professional raw-message cap",
+		"--json",
+	}); code != 0 {
+		t.Fatalf("valid raw-message override exit code = %d", code)
+	}
+	if requests != 1 ||
+		gotPath != "/v1/admin/accounts/acct_1/limit-overrides/agent_email_max_raw_bytes" ||
+		gotBody["max"] != float64(10_485_760) ||
+		gotBody["reason"] != "professional raw-message cap" {
+		t.Fatalf("raw-message request = count %d path %q body %#v",
+			requests, gotPath, gotBody)
+	}
+
+	if code := accountLimitOverride([]string{
+		"set", "--endpoint", srv.URL, "--token", "admin-token",
+		"--account", "acct_1", "--dimension", "agent_email_max_raw_bytes",
+		"--max", "26214401", "--reason", "too large", "--json",
+	}); code != 1 {
+		t.Fatalf("above-ceiling raw-message override exit code = %d, want 1", code)
+	}
+	if requests != 1 {
+		t.Fatalf("locally rejected override made %d requests, want 1", requests)
 	}
 }
 

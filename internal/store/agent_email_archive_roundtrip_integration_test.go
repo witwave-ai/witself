@@ -94,9 +94,29 @@ func TestAgentEmailArchiveCellMovePostgres(t *testing.T) {
 	const (
 		messageA  = "emsg_aaaaaaaaaaaaaaaa"
 		messageB  = "emsg_bbbbbbbbbbbbbbbb"
+		messageC  = "emsg_cccccccccccccccc"
 		challenge = "11111111-2222-4333-8444-555555555555"
 	)
-	raw := []byte("From: sender@example.com\r\nTo: owner@example.com\r\nX-Witself-Canary-Retry: " + challenge + "\r\nSubject: portable\r\n\r\ncode 123456\r\n")
+	raw := []byte(strings.Join([]string{
+		"From: sender@example.com",
+		"To: owner@example.com",
+		"X-Witself-Canary-Retry: " + challenge,
+		"Subject: portable",
+		"MIME-Version: 1.0",
+		"Content-Type: multipart/mixed; boundary=mix",
+		"",
+		"--mix",
+		"Content-Type: text/plain; charset=utf-8",
+		"",
+		"code 123456",
+		"--mix",
+		"Content-Type: application/octet-stream",
+		"Content-Disposition: attachment; filename=portable.bin",
+		"",
+		"portable attachment",
+		"--mix--",
+		"",
+	}, "\r\n"))
 	digest := sha256.Sum256(raw)
 	rawSHA := hex.EncodeToString(digest[:])
 	duplicateGroup := agentEmailDuplicateGroup(rawSHA, ownerAddress.Address, "sender@example.com")
@@ -119,7 +139,7 @@ func TestAgentEmailArchiveCellMovePostgres(t *testing.T) {
 			VALUES
 			  ($1,$2,$3,$4,$5,$6,'cloudflare_email_routing',NULL,
 			   'sender@example.com',$7,$8,$9,NULL,$10,$11,$12,'parsed',NULL,
-			   'sender@example.com','owner@example.com','portable',NULL,NULL,0,
+			   'sender@example.com','owner@example.com','portable',NULL,NULL,1,
 			   'unknown','unknown','unknown','unknown','unverified',$13,$14,
 			   clock_timestamp())`, id, provisioned.AccountID, realm.ID,
 			ownerAddress.MailboxID, owner.ID, ownerAddress.ID, ownerAddress.Address,
@@ -131,15 +151,42 @@ func TestAgentEmailArchiveCellMovePostgres(t *testing.T) {
 	insertMessage(messageA, "")
 	insertMessage(messageB, messageA)
 	if _, err := source.pool.Exec(ctx, `
+		INSERT INTO agent_email_messages
+		  (id,account_id,realm_id,mailbox_id,owner_agent_id,address_id,
+		   provider,provider_message_id,envelope_sender,envelope_recipient,
+		   agent_segment,realm_label,subaddress_tag,raw_mime,raw_size_bytes,
+		   raw_sha256,parse_state,parse_error,header_from,header_to,
+		   header_subject,mime_message_id,message_date,attachment_count,
+		   body_text,body_text_kind,attachment_storage_bytes,
+		   retained_attachment_storage_bytes,payload_retention_state,
+		   spf_result,dkim_result,dmarc_result,spam_verdict,
+		   sender_verification_state,duplicate_group_sha256,
+		   possible_duplicate_of_message_id,received_at)
+		VALUES
+		  ($1,$2,$3,$4,$5,$6,'cloudflare_email_routing',NULL,
+		   'sender@example.com',$7,$8,$9,NULL,NULL,$10,$11,'parsed',NULL,
+		   'sender@example.com','owner@example.com','portable',NULL,NULL,1,
+		   'code 123456','text/plain',$12,0,'omitted_capacity',
+		   'unknown','unknown','unknown','unknown','unverified',$13,$14,
+		   clock_timestamp())`,
+		messageC, provisioned.AccountID, realm.ID, ownerAddress.MailboxID,
+		owner.ID, ownerAddress.ID, ownerAddress.Address, ownerAddress.AgentSegment,
+		ownerAddress.RealmLabel, len(raw), rawSHA, len(raw), duplicateGroup,
+		messageA,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.pool.Exec(ctx, `
 		INSERT INTO agent_email_deliveries
 		  (message_id,account_id,realm_id,mailbox_id,owner_agent_id,
 		   processing_state,processing_generation,failure_count,
 		   claim_id,claim_key_hash,lease_expires_at)
 		VALUES
-		  ($1,$3,$4,$5,$6,'claimed',4,2,'ecl_aaaaaaaaaaaaaaaa',$7,
+		  ($1,$4,$5,$6,$7,'claimed',4,2,'ecl_aaaaaaaaaaaaaaaa',$8,
 		   clock_timestamp()+interval '10 minutes'),
-		  ($2,$3,$4,$5,$6,'available',0,0,NULL,'',NULL)`,
-		messageA, messageB, provisioned.AccountID, realm.ID,
+		  ($2,$4,$5,$6,$7,'available',0,0,NULL,'',NULL),
+		  ($3,$4,$5,$6,$7,'available',0,0,NULL,'',NULL)`,
+		messageA, messageB, messageC, provisioned.AccountID, realm.ID,
 		ownerAddress.MailboxID, owner.ID, strings.Repeat("a", 64)); err != nil {
 		t.Fatal(err)
 	}
@@ -175,13 +222,36 @@ func TestAgentEmailArchiveCellMovePostgres(t *testing.T) {
 		Row: func(table string, row []byte) error {
 			var object map[string]any
 			switch table {
+			case "accounts":
+				if err := json.Unmarshal(row, &object); err != nil {
+					return err
+				}
+				if _, archived := object["retained_agent_email_attachment_bytes"]; archived {
+					t.Fatal("derived retained_agent_email_attachment_bytes was archived")
+				}
 			case "agent_email_messages":
 				archivedMessages++
 				if err := json.Unmarshal(row, &object); err != nil {
 					return err
 				}
-				if object["raw_mime"] != `\x`+hex.EncodeToString(raw) {
-					t.Fatalf("archived raw_mime = %#v", object["raw_mime"])
+				if object["id"] == messageC {
+					if object["raw_mime"] != nil || object["body_text"] != "code 123456" ||
+						object["body_text_kind"] != "text/plain" ||
+						object["attachment_storage_bytes"] != float64(len(raw)) ||
+						object["retained_attachment_storage_bytes"] != float64(0) ||
+						object["payload_retention_state"] != importedAgentEmailPayloadOmittedCapacity {
+						t.Fatalf("archived omitted payload projection = %#v", object)
+					}
+				} else {
+					if object["raw_mime"] != `\x`+hex.EncodeToString(raw) {
+						t.Fatalf("archived raw_mime = %#v", object["raw_mime"])
+					}
+					if object["body_text"] != nil || object["body_text_kind"] != nil ||
+						object["attachment_storage_bytes"] != float64(len(raw)) ||
+						object["retained_attachment_storage_bytes"] != float64(len(raw)) ||
+						object["payload_retention_state"] != importedAgentEmailPayloadRetained {
+						t.Fatalf("archived retained payload projection = %#v", object)
+					}
 				}
 			case "agent_email_realm_receive_controls":
 				archivedReceiveControls++
@@ -205,8 +275,8 @@ func TestAgentEmailArchiveCellMovePostgres(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if archivedMessages != 2 {
-		t.Fatalf("archived agent-email messages = %d, want 2", archivedMessages)
+	if archivedMessages != 3 {
+		t.Fatalf("archived agent-email messages = %d, want 3", archivedMessages)
 	}
 	if archivedReceiveControls != 1 {
 		t.Fatalf("archived realm receive controls = %d, want 1", archivedReceiveControls)
@@ -237,8 +307,40 @@ func TestAgentEmailArchiveCellMovePostgres(t *testing.T) {
 		provisioned.AccountID, duplicateGroup).Scan(&duplicateCount); err != nil {
 		t.Fatal(err)
 	}
-	if duplicateCount != 2 {
-		t.Fatalf("restored suspected duplicate rows = %d, want 2", duplicateCount)
+	if duplicateCount != 3 {
+		t.Fatalf("restored suspected duplicate rows = %d, want 3", duplicateCount)
+	}
+	var omittedRaw []byte
+	var omittedBody, omittedBodyKind *string
+	var omittedStorage, omittedRetained int64
+	var omittedState string
+	if err := destination.pool.QueryRow(ctx, `
+		SELECT raw_mime,body_text,body_text_kind,attachment_storage_bytes,
+		       retained_attachment_storage_bytes,payload_retention_state
+		FROM agent_email_messages WHERE id=$1 AND account_id=$2`,
+		messageC, provisioned.AccountID,
+	).Scan(&omittedRaw, &omittedBody, &omittedBodyKind, &omittedStorage,
+		&omittedRetained, &omittedState); err != nil {
+		t.Fatal(err)
+	}
+	if omittedRaw != nil || omittedBody == nil || *omittedBody != "code 123456" ||
+		omittedBodyKind == nil || *omittedBodyKind != "text/plain" ||
+		omittedStorage != int64(len(raw)) || omittedRetained != 0 ||
+		omittedState != importedAgentEmailPayloadOmittedCapacity {
+		t.Fatalf("restored omitted payload raw=%v body=%v kind=%v storage=%d retained=%d state=%q",
+			omittedRaw, omittedBody, omittedBodyKind, omittedStorage, omittedRetained, omittedState)
+	}
+	var retainedAttachmentBytes int64
+	if err := destination.pool.QueryRow(ctx, `
+		SELECT retained_agent_email_attachment_bytes
+		FROM accounts WHERE id=$1`,
+		provisioned.AccountID,
+	).Scan(&retainedAttachmentBytes); err != nil {
+		t.Fatal(err)
+	}
+	if retainedAttachmentBytes != int64(2*len(raw)) {
+		t.Fatalf("restored retained attachment bytes = %d, want %d",
+			retainedAttachmentBytes, 2*len(raw))
 	}
 	var state string
 	var generation, failures int64

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/witwave-ai/witself/internal/plans"
 	"github.com/witwave-ai/witself/internal/server"
 	"github.com/witwave-ai/witself/internal/store"
 )
@@ -133,6 +134,63 @@ func TestAgentEmailErrorMapping(t *testing.T) {
 	if err := mapAgentEmailError(&store.FeatureNotEnabledError{Feature: "agent_email_receive"}); !errors.Is(err, server.ErrFeatureNotEnabled) || !errors.As(err, &featureErr) ||
 		featureErr.Feature != "agent_email_receive" {
 		t.Fatalf("agent-email feature refusal mapping = %#v / %v", featureErr, err)
+	}
+}
+
+func TestAgentEmailStorageLimitMappingAndConversions(t *testing.T) {
+	rawLimit := &store.PlanLimitError{
+		Dimension: plans.AgentEmailMaxRawBytesLimit,
+		Used:      10*1024*1024 + 1,
+		Max:       10 * 1024 * 1024,
+		Plan:      "private_plan_name",
+	}
+	if mapped := mapAgentEmailIngestError(rawLimit); !errors.Is(
+		mapped, server.ErrAgentEmailRawSizeExceeded,
+	) {
+		t.Fatalf("raw-size mapping = %v", mapped)
+	}
+	otherLimit := &store.PlanLimitError{
+		Dimension: plans.StoredMemoryLimit,
+		Used:      2,
+		Max:       1,
+		Plan:      "private_plan_name",
+	}
+	if mapped := mapAgentEmailIngestError(otherLimit); mapped != otherLimit ||
+		errors.Is(mapped, server.ErrAgentEmailRawSizeExceeded) {
+		t.Fatalf("unrelated limit mapping = %v", mapped)
+	}
+
+	maximum, remaining := int64(8192), int64(0)
+	status := toServerAgentEmailStorageStatus(store.AgentEmailStorageStatus{
+		MaximumRawBytes: 10 * 1024 * 1024,
+		AttachmentCapacity: store.MemoryLimitStatus{
+			Used: 9000, Max: &maximum, Remaining: &remaining,
+			NearLimit: true, OverLimit: true,
+		},
+	})
+	if status.MaximumRawBytes != 10*1024*1024 ||
+		status.AttachmentCapacity.Used != 9000 ||
+		status.AttachmentCapacity.Max == nil ||
+		*status.AttachmentCapacity.Max != maximum ||
+		status.AttachmentCapacity.Remaining == nil ||
+		*status.AttachmentCapacity.Remaining != remaining ||
+		!status.AttachmentCapacity.NearLimit ||
+		!status.AttachmentCapacity.OverLimit ||
+		status.AttachmentCapacity.Unlimited ||
+		status.AttachmentCapacity.AtLimit ||
+		status.AttachmentCapacity.Unavailable {
+		t.Fatalf("storage status conversion = %+v", status)
+	}
+
+	message := toServerAgentEmailMessage(store.AgentEmailMessage{
+		AttachmentStorageBytes:         4096,
+		RetainedAttachmentStorageBytes: 0,
+		PayloadRetentionState:          store.AgentEmailPayloadOmittedCapacity,
+	})
+	if message.AttachmentStorageBytes != 4096 ||
+		message.RetainedAttachmentStorageBytes != 0 ||
+		message.PayloadRetentionState != "omitted_capacity" {
+		t.Fatalf("message storage conversion = %+v", message)
 	}
 }
 

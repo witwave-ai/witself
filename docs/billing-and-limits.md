@@ -75,8 +75,8 @@ implementation and rollout gates.
 | Agent messages | Disabled; 30-day downgrade cleanup | Unlimited; retained 90 days | Unlimited; retained 365 days | Enabled; retained 365 days by default, contract override |
 | Receive agent email | No | Unlimited; retained 90 days | Unlimited; retained 365 days | Enabled; retained 365 days by default, contract override |
 | Raw MIME and attachment retention | None stored | 90 days | 365 days | Configurable, including indefinite |
-| Maximum raw email size | Not available | 10 MiB | 25 MiB | Contracted; 25 MiB default |
-| Retained attachment storage per account | 0 | 5 GiB | 100 GiB | Contracted |
+| Maximum raw email size | 0 (email disabled) | 10 MiB | 25 MiB | Contracted; 25 MiB default |
+| Retained attachment storage per account | 0 | 5 GiB | 100 GiB | Contracted; 100 GiB default |
 | Send agent email | No | No | Included | Included |
 | Agent email addressing | None | Realm ID on `witmail.ai` | Custom realm designator and custom domain | Custom realm designator and custom domain |
 
@@ -92,6 +92,38 @@ technical rate limits. Inbound hostile traffic must not create recipient
 charges. "Included" confirms that outbound agent email is available, but its
 sending allowance and overage treatment remain to be decided. "Contracted"
 means the quantity or policy is negotiated for the Enterprise account.
+
+The two agent-email byte allowances are hard limits in the resolved account
+snapshot, not retention policies:
+
+- `agent_email_max_raw_bytes` is the maximum raw-MIME size of each inbound
+  message. Personal resolves to `0`, Professional to `10,485,760`, and Team
+  and Enterprise to `26,214,400` bytes.
+- `agent_email_attachment_storage_bytes` is one account-wide pool for retained
+  attachment-bearing MIME. Personal resolves to `0`, Professional to
+  `5,368,709,120`, and Team and Enterprise to `107,374,182,400` bytes.
+
+A missing limit key means unlimited and zero remains a real cap. The ordinary
+audited account limit override can replace either default without changing the
+plan, price, subscription, or invoice history. Explicit unlimited is stored as
+an override and represented by omitting the key from the resolved cell
+snapshot. The Founder account uses that explicit-unlimited override for
+`agent_email_attachment_storage_bytes`; its per-message raw-MIME maximum
+remains 25 MiB.
+
+Capacity activation is intentionally split across two releases. Phase A ships
+the schema-81 projection, cell enforcement, status surfaces, and audited admin
+override support while both catalog keys remain absent (temporarily unlimited).
+Rows accepted by a rolling old replica are normalized but marked unaccounted,
+so its pre-existing shared account lock is never upgraded inside a trigger.
+After every old process is gone, the control plane is upgraded and the Founder
+attachment-storage override is written and verified. Phase B first rolls the
+schema-82 post-convergence migration that promotes any compatibility rows and
+rebuilds exact counters under account-first `NOWAIT` fences. It then adds the
+finite values above to `web/plans/plans.json`, republishes the catalog, and
+reconciles every hosted account. Personal email remains disabled throughout;
+the edge Worker retains its independent 25 MiB technical ceiling during both
+phases.
 
 ### Messaging availability and retention
 
@@ -196,7 +228,11 @@ The matching authenticated resources are
 Before catalog reconciliation, the founder account receives an explicit
 indefinite email-retention override followed by an explicit enabled
 email-receive override. This keeps its first marked snapshot from temporarily
-inheriting Enterprise's finite default.
+inheriting Enterprise's finite default. It also receives and verifies an
+explicit-unlimited `agent_email_attachment_storage_bytes` override before the
+finite catalog default is reconciled. The raw-message limit is intentionally
+left unoverridden: Phase A therefore uses the 25 MiB technical transport
+ceiling, and Phase B later supplies Enterprise's matching 25 MiB plan default.
 
 Rollout is cell-and-edge first: deploy a cell that understands the marked
 snapshot and an agent-email edge Worker that accepts the cell's
@@ -530,25 +566,31 @@ revisions are included rather than metered as customer-facing monthly usage.
 Per-record size, vector, evidence, relationship, revision-history,
 curation-frequency, and API bounds remain internal service protections.
 
-Email records, raw MIME, and extracted attachment payloads use age-based
-retention. Attachments are stored separately from the email record so their
-bytes can be managed independently, but deleting an email must cascade to its
-raw MIME and every attachment. All three expire no later than the plan's
-email-retention window. Free stores no raw MIME or attachment payloads; this
-remains true even if a later Free feature exposes limited email metadata.
+Email records and inline raw MIME use age-based retention. In the current
+implementation, attachments remain inside the stored raw MIME; they are not
+extracted into separately retained blobs. Deleting an email therefore deletes
+its raw MIME and the attachment bytes within it, and that payload expires no
+later than the plan's email-retention window. Personal stores no new raw MIME
+or attachment payloads while receipt is disabled.
 
-Per-message and per-attachment byte limits, header and part-count limits,
-nesting-depth limits, and the retained attachment-storage allowance are service
-protections rather than billable overages. Attachment storage is pooled at the
-account level because the account is the billing boundary; it does not multiply
-by the number of agents or realms.
-Inbound traffic must never create a surprise charge. If an agent reaches the
-account's attachment-storage ceiling, Witself retains the email's bounded text
-and metadata while declining to retain new attachment bytes, and marks that
-state explicitly. It must not evict an existing in-window attachment merely
-because a hostile sender delivered another message. The current receive-only
-pilot remains capped at 5 MiB of raw MIME per message until the production
-limits above are implemented and validated.
+`agent_email_attachment_storage_bytes` is deliberately defined in terms of
+that storage model: a retained message with one or more attachments consumes
+its full raw-MIME byte length from the account pool. An attachment-free
+message consumes no bytes from this particular pool, although its raw MIME
+still contributes to the internal `email_storage_byte` observation. This is a
+conservative retained-attachment-bearing-MIME allowance, not a sum of
+separately extracted attachment blob sizes.
+
+Per-message byte limits, header and part-count limits, nesting-depth limits,
+and the retained attachment-bearing-MIME allowance are service protections
+rather than billable overages. The storage allowance is pooled at the account
+level because the account is the billing boundary; it does not multiply by the
+number of agents or realms. Inbound traffic must never create a surprise
+charge. If a new attachment-bearing message would exceed the account pool,
+Witself retains its bounded text and metadata while declining to retain the
+raw MIME containing those attachment bytes, and marks that state explicitly.
+It must not evict an existing in-window message merely because a hostile sender
+delivered another one.
 
 Still open for packaging decisions:
 
@@ -674,10 +716,13 @@ Notes on a few dimensions:
   `email_address` counts live provisioned addresses. `email_storage_byte`
   observes inline raw-MIME footprint independently so mail does not silently
   consume the ordinary `storage_byte` allowance, but it is not exposed as a
-  customer quota or overage dimension. Raw MIME and separately stored
-  attachments expire by the plan's age-based email-retention window, and
-  deleting an email cascades to both. Per-message, per-attachment, and pooled
-  per-account attachment-storage bounds remain service protections.
+  customer quota or overage dimension. Inline raw MIME, including attachment
+  bytes, expires by the plan's age-based email-retention window. The separate
+  `agent_email_max_raw_bytes` and account-wide
+  `agent_email_attachment_storage_bytes` plan limits remain service
+  protections. The latter counts the complete retained raw MIME of each
+  attachment-bearing message; it does not imply separately stored attachment
+  blobs.
   Production pricing and abuse exclusions must be pinned before either receive
   or send becomes billable; see
   [agent-email.md](agent-email.md).
@@ -769,7 +814,7 @@ Recommended defaults:
 | Agent-email addresses | `block` for the hard address cap, `warn` near cap. |
 | Agent email received | No plan overage action in the limited pilot. A production default is blocked on authoritative spam/abuse classification and source-scoped enforcement; aggregate recipient traffic must never become a victim-billing or mailbox-starvation lever. |
 | Agent email sent | `block` at the hard per-period threshold; sending remains dormant until a send slice exists. |
-| Agent-email raw-MIME and attachment storage | Store attachments separately; expire all payloads by the plan's age-based retention window; cascade email deletion to raw MIME and attachments. Reject oversized individual payloads. At an internal per-agent attachment ceiling, preserve bounded email text and metadata, explicitly mark unretained attachments, and never create an inbound overage charge. |
+| Agent-email raw-MIME and attachment storage | Expire inline raw MIME by the plan's age-based retention window and reject messages over `agent_email_max_raw_bytes`. Charge the full retained raw-MIME size of each attachment-bearing message to the account-wide `agent_email_attachment_storage_bytes` pool. When that pool lacks room, preserve bounded text and metadata, explicitly mark the raw attachment-bearing payload unretained, and never create an inbound overage charge. |
 | Stored secrets | `block` for hard cap, `warn` near cap. |
 | Secret reads | `throttle` or `warn`; block only for abuse or hard caps. |
 | TOTP code generation | `throttle` or `warn`; block only for abuse or hard caps. |

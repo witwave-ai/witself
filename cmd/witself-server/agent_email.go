@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/witwave-ai/witself/internal/agentemail"
+	"github.com/witwave-ai/witself/internal/plans"
 	"github.com/witwave-ai/witself/internal/server"
 	"github.com/witwave-ai/witself/internal/store"
 )
@@ -140,8 +141,16 @@ func configureAgentEmail(ctx context.Context, cfg *server.Config, st *store.Stor
 		return fmt.Errorf("agent-email pilot startup reconciliation: %w", err)
 	}
 	cfg.IngestAgentEmailPilot = func(ctx context.Context, relay agentemail.RelayMetadata, raw []byte) error {
-		_, err := st.IngestAgentEmailPilot(ctx, scope, store.AgentEmailIngestInput{Relay: relay, Raw: raw})
-		return mapAgentEmailIngestError(err)
+		message, err := st.IngestAgentEmailPilot(
+			ctx, scope, store.AgentEmailIngestInput{Relay: relay, Raw: raw},
+		)
+		if err != nil {
+			return mapAgentEmailIngestError(err)
+		}
+		if message.PayloadRetentionState == store.AgentEmailPayloadOmittedCapacity {
+			return server.ErrAgentEmailAttachmentOmitted
+		}
+		return nil
 	}
 	cfg.RequireAgentEmailEntitlement = func(ctx context.Context, p server.DomainPrincipal) error {
 		return mapAgentEmailError(st.RequireAgentEmailReceiveEnabled(ctx, toStorePrincipal(p)))
@@ -152,6 +161,13 @@ func configureAgentEmail(ctx context.Context, cfg *server.Config, st *store.Stor
 			return server.AgentEmailAddress{}, mapAgentEmailError(err)
 		}
 		return toServerAgentEmailAddress(address), nil
+	}
+	cfg.GetAgentEmailStorageStatus = func(ctx context.Context, p server.DomainPrincipal) (server.AgentEmailStorageStatus, error) {
+		status, err := st.GetAgentEmailStorageStatus(ctx, toStorePrincipal(p))
+		if err != nil {
+			return server.AgentEmailStorageStatus{}, mapAgentEmailError(err)
+		}
+		return toServerAgentEmailStorageStatus(status), nil
 	}
 	cfg.ArmAgentEmailRetryCanary = func(ctx context.Context, p server.DomainPrincipal, challenge string) (server.AgentEmailRetryCanaryCheckpoint, error) {
 		checkpoint, err := st.ArmAgentEmailRetryCanary(ctx, scope, toStorePrincipal(p), challenge)
@@ -263,9 +279,13 @@ func cloneAgentEmailBoolMap(source map[string]bool) map[string]bool {
 }
 
 func mapAgentEmailIngestError(err error) error {
+	var limitErr *store.PlanLimitError
 	switch {
 	case err == nil:
 		return nil
+	case errors.As(err, &limitErr) &&
+		limitErr.Dimension == plans.AgentEmailMaxRawBytesLimit:
+		return server.ErrAgentEmailRawSizeExceeded
 	case errors.Is(err, store.ErrAgentEmailUnknownRecipient),
 		errors.Is(err, store.ErrAgentEmailPilotNotEnrolled),
 		errors.Is(err, store.ErrAgentEmailAddressMissing):
@@ -359,7 +379,10 @@ func toServerAgentEmailMessage(message store.AgentEmailMessage) server.AgentEmai
 		ParseErrorCode: message.ParseErrorCode, HeaderFrom: message.HeaderFrom,
 		HeaderTo: message.HeaderTo, Subject: message.Subject, MIMEMessageID: message.MIMEMessageID,
 		MessageDate: message.MessageDate, AttachmentCount: message.AttachmentCount,
-		SPFResult: message.SPFResult, DKIMResult: message.DKIMResult,
+		AttachmentStorageBytes:         message.AttachmentStorageBytes,
+		RetainedAttachmentStorageBytes: message.RetainedAttachmentStorageBytes,
+		PayloadRetentionState:          message.PayloadRetentionState,
+		SPFResult:                      message.SPFResult, DKIMResult: message.DKIMResult,
 		DMARCResult: message.DMARCResult, SpamVerdict: message.SpamVerdict,
 		SenderVerificationState:    message.SenderVerificationState,
 		PossibleDuplicate:          message.PossibleDuplicate,
@@ -372,6 +395,23 @@ func toServerAgentEmailMessage(message store.AgentEmailMessage) server.AgentEmai
 		},
 		Processing: toServerAgentEmailProcessing(message.Processing),
 		Text:       message.Text, TextKind: message.TextKind,
+	}
+}
+
+func toServerAgentEmailStorageStatus(
+	status store.AgentEmailStorageStatus,
+) server.AgentEmailStorageStatus {
+	return server.AgentEmailStorageStatus{
+		MaximumRawBytes: status.MaximumRawBytes,
+		AttachmentCapacity: server.MemoryLimitStatus{
+			Used:      status.AttachmentCapacity.Used,
+			Max:       status.AttachmentCapacity.Max,
+			Remaining: status.AttachmentCapacity.Remaining,
+			Unlimited: status.AttachmentCapacity.Unlimited,
+			NearLimit: status.AttachmentCapacity.NearLimit,
+			AtLimit:   status.AttachmentCapacity.AtLimit,
+			OverLimit: status.AttachmentCapacity.OverLimit,
+		},
 	}
 }
 

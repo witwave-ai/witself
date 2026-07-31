@@ -6,9 +6,12 @@ Worker. It has no HTTP route, no control-plane Container binding, and no access
 to the control-plane `DIRECTORY` KV namespace.
 
 The pilot accepts one realm and exactly 5–10 literal recipient addresses. It
-rejects messages larger than 5 MiB, signs the SMTP envelope plus raw-message
-digest with Ed25519, and relays the raw message to the enrolled cell. Only a 2xx
-response containing exactly `{"verdict":"accepted"}` counts as SMTP success.
+rejects messages larger than the 25 MiB transport ceiling, signs the SMTP
+envelope plus raw-message digest with Ed25519, and relays the raw message to the
+enrolled cell. The cell may return an exact plan-aware `over_size` verdict for
+a lower account limit; the Worker maps it to a sanitized permanent SMTP 552
+rejection. Only a 2xx response containing exactly
+`{"verdict":"accepted"}` counts as SMTP success.
 
 ## Safety boundary
 

@@ -453,6 +453,7 @@ var verbMetadataSchema = map[string]verbSpec{
 		},
 		allowedKeys: []string{
 			"message_id", "mailbox_id", "owner_agent_id", "address_id", "raw_size_bytes",
+			"retained_attachment_storage_bytes", "payload_retention_state",
 			"possible_duplicate",
 		},
 		allowedActors: []string{ActorSystem},

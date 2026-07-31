@@ -120,6 +120,7 @@ func grokPortableMCPInstructions(instructions, selfTool, messageListTool string)
 		"witself.message.request.renew",
 		"witself.message.request.release",
 		"witself.message.request.complete",
+		"witself.email.status",
 		"witself.email.address.show",
 		"witself.email.list",
 		"witself.email.listen",

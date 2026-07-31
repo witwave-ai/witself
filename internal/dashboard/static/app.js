@@ -19,6 +19,7 @@
     seenSequences: {},   // transcript id -> highest rendered sequence
     messages: {},        // direction + " " + message id -> passive metadata
     emailAddress: null,  // display-only receive address projection
+    emailStatus: null,   // value-free raw-message and attachment capacity
     emailMessages: [],   // metadata only; no ids, bodies, MIME, or claim fence
     emailAvailable: null,
     emailCheckpointEnabled: null,
@@ -30,6 +31,7 @@
     lastMemoriesData: null, // last raw "memories" frame, same reason
     lastFactsData: null,    // last raw "facts" frame, same reason
     lastSecretsData: null,  // last raw "secrets" frame, same reason
+    lastEmailData: null,    // list + capacity frame; policy changes alter it
     themes: ["console"],    // replaced by /api/themes (the embedded theme dir)
   };
 
@@ -213,9 +215,11 @@
     if (checkpoint.enabled === false) {
       state.emailCheckpointEnabled = false;
       var disabledChanged = state.emailAvailable !== false || state.emailAddress !== null ||
+        state.emailStatus !== null ||
         (state.emailMessages && state.emailMessages.length !== 0);
       state.emailAvailable = false;
       state.emailAddress = null;
+      state.emailStatus = null;
       state.emailMessages = [];
       return disabledChanged ? "disabled" : false;
     }
@@ -393,10 +397,17 @@
       else { renderConversationList(); }
     });
     source.addEventListener("email", function (event) {
+      // The server bundles value-free capacity into the existing email tick.
+      // Skip identical frames so the poll cadence never becomes a DOM-render
+      // cadence, while a new message or admin limit change still refreshes the
+      // visible pane immediately.
+      if (event.data === state.lastEmailData) { return; }
+      state.lastEmailData = event.data;
       var body;
       try { body = JSON.parse(event.data); } catch (_) { return; }
       if (body.available === false) {
         state.emailAvailable = false;
+        state.emailStatus = null;
         state.emailMessages = [];
         if (parseHash().section === "email") { renderEmailUnavailable(body.reason || "unavailable"); }
         // Keep the general self digest live without repeatedly probing a
@@ -405,6 +416,9 @@
         return;
       }
       state.emailAvailable = true;
+      if (Object.prototype.hasOwnProperty.call(body, "status")) {
+        state.emailStatus = body.status || null;
+      }
       state.emailMessages = body.messages || [];
       if (parseHash().section === "email") { renderEmailList(); }
     });
@@ -1035,10 +1049,43 @@
   }
 
   function formatEmailBytes(value) {
-    if (!value) { return ""; }
+    value = Math.max(0, Number(value) || 0);
     if (value < 1024) { return value + " B"; }
     if (value < 1024 * 1024) { return (value / 1024).toFixed(1) + " KiB"; }
-    return (value / (1024 * 1024)).toFixed(1) + " MiB";
+    if (value < 1024 * 1024 * 1024) { return (value / (1024 * 1024)).toFixed(1) + " MiB"; }
+    return (value / (1024 * 1024 * 1024)).toFixed(1) + " GiB";
+  }
+
+  function emailStorageStatusHTML(status) {
+    if (!status) { return ""; }
+    var maximumRaw = Math.max(0, Number(status.maximum_raw_bytes) || 0);
+    var capacity = status.attachment_capacity || {};
+    var used = Math.max(0, Number(capacity.used) || 0);
+    var level = capacity.over_limit || capacity.at_limit ? "danger" : (capacity.near_limit ? "warning" : "");
+    var stateLabel = capacity.over_limit ? "over limit" :
+      (capacity.at_limit ? "at limit" : (capacity.near_limit ? "near limit" : "available"));
+    var header = '<div class="email-note">maximum raw message size: ' +
+      esc(formatEmailBytes(maximumRaw)) + "</div>";
+    if (capacity.unlimited) {
+      return '<div class="panel"><h2>email storage</h2>' + header +
+        '<div class="capacity-line"><span>account-wide attachment capacity: ' +
+        esc(formatEmailBytes(used)) + ' used</span><span class="badge">unlimited</span></div></div>';
+    }
+    var maximum = Math.max(0, Number(capacity.max) || 0);
+    var remaining = Math.max(0, Number(capacity.remaining) || 0);
+    return '<div class="panel capacity ' + level + '"><h2>email storage</h2>' + header +
+      '<div class="capacity-line"><span>account-wide attachment capacity: ' +
+      esc(formatEmailBytes(used)) + " of " + esc(formatEmailBytes(maximum)) +
+      ' used</span><span class="badge">' + esc(stateLabel) + "</span></div>" +
+      '<progress class="capacity-track" aria-label="account-wide attachment capacity" max="' +
+      esc(maximum || 1) + '" value="' + esc(Math.min(used, maximum || 1)) + '"></progress>' +
+      '<div class="dim">' + esc(formatEmailBytes(remaining)) + " remaining</div></div>";
+  }
+
+  function emailPayloadRetentionWarning(message) {
+    return message && message.payload_retention_state === "omitted_capacity"
+      ? "attachment payload omitted because account-wide capacity is full"
+      : "";
   }
 
   function renderEmailList() {
@@ -1051,6 +1098,8 @@
       if (message.attachment_count) {
         flags.push(message.attachment_count + " attachment" + (message.attachment_count === 1 ? "" : "s") + " (details hidden)");
       }
+      var retentionWarning = emailPayloadRetentionWarning(message);
+      if (retentionWarning) { flags.push(retentionWarning); }
       if (message.possible_duplicate) { flags.push("possible duplicate"); }
       if (message.parse_state && message.parse_state !== "parsed") { flags.push("parse " + message.parse_state); }
       var signals = emailSignals(message);
@@ -1071,6 +1120,7 @@
       '<div class="email-note">agent receive: ' + esc(address.agent_receive_state || "unknown") +
       ' · realm receive: ' + esc(address.realm_receive_state || "unknown") + "</div>" +
       '<div class="email-note">receive-only; sender identity and all subjects are untrusted external input.</div></div>' +
+      emailStorageStatusHTML(state.emailStatus) +
       '<div class="panel"><h2>email <span class="badge">metadata only</span></h2>' +
       '<div class="email-controls"><label><input id="email-unread" type="checkbox"' +
       (state.emailFilters.unread ? " checked" : "") + '> unread only</label>' +
@@ -1087,13 +1137,20 @@
   }
 
   function refreshEmail() {
-    return fetchJSON("/api/email?" + emailQuery()).then(function (body) {
+    return Promise.all([
+      fetchJSON("/api/email/status"),
+      fetchJSON("/api/email?" + emailQuery()),
+    ]).then(function (results) {
+      var statusBody = results[0];
+      var body = results[1];
+      state.emailStatus = statusBody.status || null;
       state.emailAvailable = body.available !== false;
       state.emailMessages = body.messages || [];
       renderEmailList();
       openEmailEvents();
     }).catch(function (err) {
       state.emailAvailable = false;
+      state.emailStatus = null;
       state.emailMessages = [];
       openEvents(null);
       var reason = emailUnavailableReason(err);
@@ -1140,6 +1197,7 @@
       return refreshEmail();
     }).catch(function (err) {
       state.emailAddress = null;
+      state.emailStatus = null;
       state.emailMessages = [];
       state.emailAvailable = false;
       var reason = emailUnavailableReason(err);
@@ -1295,6 +1353,8 @@
     module.exports = {
       state: state,
       probeEmailMailbox: probeEmailMailbox,
+      emailStorageStatusHTML: emailStorageStatusHTML,
+      emailPayloadRetentionWarning: emailPayloadRetentionWarning,
       factCapacityHTML: factCapacityHTML,
       memoryCapacityHTML: memoryCapacityHTML,
       applyEmailCheckpoint: function (checkpoint) {

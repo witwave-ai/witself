@@ -39,6 +39,13 @@ const (
 	// AgentEmailParseError indicates a value-free bounded MIME parser failure.
 	AgentEmailParseError = "error"
 
+	// AgentEmailPayloadRetained means the complete raw MIME remains available
+	// inside the retention window.
+	AgentEmailPayloadRetained = "retained"
+	// AgentEmailPayloadOmittedCapacity means bounded text and metadata were
+	// accepted but attachment-bearing raw MIME exceeded account capacity.
+	AgentEmailPayloadOmittedCapacity = "omitted_capacity"
+
 	// AgentEmailProcessingAvailable indicates claimable mailbox work.
 	AgentEmailProcessingAvailable = "available"
 	// AgentEmailProcessingClaimed indicates work protected by a live claim fence.
@@ -185,44 +192,49 @@ type AgentEmailProcessing struct {
 // state. Text is populated only by ReadAgentEmail and remains untrusted input.
 // Raw MIME and attachment bytes are never surfaced by the pilot API.
 type AgentEmailMessage struct {
-	ID                         string               `json:"id"`
-	AccountID                  string               `json:"account_id"`
-	RealmID                    string               `json:"realm_id"`
-	MailboxID                  string               `json:"mailbox_id"`
-	OwnerAgentID               string               `json:"owner_agent_id"`
-	AddressID                  string               `json:"address_id"`
-	Provider                   string               `json:"provider"`
-	EnvelopeSender             string               `json:"envelope_sender"`
-	EnvelopeRecipient          string               `json:"envelope_recipient"`
-	AgentSegment               string               `json:"agent_segment"`
-	RealmLabel                 string               `json:"realm_label"`
-	SubaddressTag              string               `json:"subaddress_tag,omitempty"`
-	RawSizeBytes               int64                `json:"raw_size_bytes"`
-	ParseState                 string               `json:"parse_state"`
-	ParseErrorCode             string               `json:"parse_error_code,omitempty"`
-	HeaderFrom                 string               `json:"header_from,omitempty"`
-	HeaderTo                   string               `json:"header_to,omitempty"`
-	Subject                    string               `json:"subject,omitempty"`
-	MIMEMessageID              string               `json:"mime_message_id,omitempty"`
-	MessageDate                *time.Time           `json:"message_date,omitempty"`
-	AttachmentCount            int64                `json:"attachment_count"`
-	SPFResult                  string               `json:"spf_result"`
-	DKIMResult                 string               `json:"dkim_result"`
-	DMARCResult                string               `json:"dmarc_result"`
-	SpamVerdict                string               `json:"spam_verdict"`
-	SenderVerificationState    string               `json:"sender_verification_state"`
-	PossibleDuplicate          bool                 `json:"possible_duplicate"`
-	PossibleDuplicateOfMessage string               `json:"possible_duplicate_of_message_id,omitempty"`
-	ReceivedAt                 time.Time            `json:"received_at"`
-	CreatedAt                  time.Time            `json:"created_at"`
-	Folder                     string               `json:"folder"`
-	DeliveredAt                time.Time            `json:"delivered_at"`
-	ReadState                  AgentEmailReadState  `json:"read_state"`
-	Processing                 AgentEmailProcessing `json:"processing"`
-	Text                       string               `json:"text,omitempty"`
-	TextKind                   string               `json:"text_kind,omitempty"`
-	rawMIME                    []byte
-	duplicateGroupSHA256       string
+	ID                             string               `json:"id"`
+	AccountID                      string               `json:"account_id"`
+	RealmID                        string               `json:"realm_id"`
+	MailboxID                      string               `json:"mailbox_id"`
+	OwnerAgentID                   string               `json:"owner_agent_id"`
+	AddressID                      string               `json:"address_id"`
+	Provider                       string               `json:"provider"`
+	EnvelopeSender                 string               `json:"envelope_sender"`
+	EnvelopeRecipient              string               `json:"envelope_recipient"`
+	AgentSegment                   string               `json:"agent_segment"`
+	RealmLabel                     string               `json:"realm_label"`
+	SubaddressTag                  string               `json:"subaddress_tag,omitempty"`
+	RawSizeBytes                   int64                `json:"raw_size_bytes"`
+	ParseState                     string               `json:"parse_state"`
+	ParseErrorCode                 string               `json:"parse_error_code,omitempty"`
+	HeaderFrom                     string               `json:"header_from,omitempty"`
+	HeaderTo                       string               `json:"header_to,omitempty"`
+	Subject                        string               `json:"subject,omitempty"`
+	MIMEMessageID                  string               `json:"mime_message_id,omitempty"`
+	MessageDate                    *time.Time           `json:"message_date,omitempty"`
+	AttachmentCount                int64                `json:"attachment_count"`
+	AttachmentStorageBytes         int64                `json:"attachment_storage_bytes"`
+	RetainedAttachmentStorageBytes int64                `json:"retained_attachment_storage_bytes"`
+	PayloadRetentionState          string               `json:"payload_retention_state"`
+	SPFResult                      string               `json:"spf_result"`
+	DKIMResult                     string               `json:"dkim_result"`
+	DMARCResult                    string               `json:"dmarc_result"`
+	SpamVerdict                    string               `json:"spam_verdict"`
+	SenderVerificationState        string               `json:"sender_verification_state"`
+	PossibleDuplicate              bool                 `json:"possible_duplicate"`
+	PossibleDuplicateOfMessage     string               `json:"possible_duplicate_of_message_id,omitempty"`
+	ReceivedAt                     time.Time            `json:"received_at"`
+	CreatedAt                      time.Time            `json:"created_at"`
+	Folder                         string               `json:"folder"`
+	DeliveredAt                    time.Time            `json:"delivered_at"`
+	ReadState                      AgentEmailReadState  `json:"read_state"`
+	Processing                     AgentEmailProcessing `json:"processing"`
+	Text                           string               `json:"text,omitempty"`
+	TextKind                       string               `json:"text_kind,omitempty"`
+	rawMIME                        []byte
+	bodyText                       string
+	bodyTextKind                   string
+	duplicateGroupSHA256           string
 }
 
 // AgentEmailPage is one metadata-only owner mailbox page.
@@ -978,7 +990,15 @@ func (s *Store) IngestAgentEmailPilot(
 	if !scope.RealmIDs[candidate.RealmID] || !scope.AgentIDs[candidate.OwnerAgentID] {
 		return AgentEmailMessage{}, ErrAgentEmailPilotNotEnrolled
 	}
-	if err := requireAgentEmailReceiveEnabled(ctx, tx, candidate.AccountID); err != nil {
+	accountPolicy, err := lockAgentEmailIngestAccountPolicy(
+		ctx, tx, candidate.AccountID,
+	)
+	if err != nil {
+		return AgentEmailMessage{}, err
+	}
+	if err := requireAgentEmailRawSize(
+		accountPolicy, int64(len(in.Raw)),
+	); err != nil {
 		return AgentEmailMessage{}, err
 	}
 	if err := lockLiveMessageAgentScope(ctx, tx, candidate.AccountID, candidate.RealmID, candidate.OwnerAgentID); err != nil {
@@ -1056,6 +1076,32 @@ func (s *Store) IngestAgentEmailPilot(
 		possibleDuplicate = ""
 	}
 
+	attachmentStorageBytes := int64(0)
+	if parseErr != nil || parsed.AttachmentCount > 0 {
+		// Attachments remain inline in raw MIME. Charge the complete retained
+		// message so the account pool is a hard physical-storage bound.
+		attachmentStorageBytes = int64(len(in.Raw))
+	}
+	retainedAttachmentStorageBytes := attachmentStorageBytes
+	payloadRetentionState := AgentEmailPayloadRetained
+	rawForStorage := in.Raw
+	retainPayload := retainAgentEmailAttachmentPayload(
+		accountPolicy, attachmentStorageBytes,
+	)
+	// An accepted retry-canary proof must remain cryptographically bound to
+	// its retained MIME during hostile archive validation. Normal canaries are
+	// text-only and consume no attachment pool. Reject a malformed or
+	// attachment-bearing synthetic proof that would otherwise lose its raw
+	// payload instead of weakening that invariant.
+	if canaryGate.acceptAfterInsert && !retainPayload {
+		return AgentEmailMessage{}, ErrAgentEmailRetryCanaryPermanent
+	}
+	if !retainPayload {
+		rawForStorage = nil
+		retainedAttachmentStorageBytes = 0
+		payloadRetentionState = AgentEmailPayloadOmittedCapacity
+	}
+
 	var receivedAt, createdAt, deliveredAt time.Time
 	err = tx.QueryRow(ctx, `
 		WITH inserted_message AS (
@@ -1065,13 +1111,17 @@ func (s *Store) IngestAgentEmailPilot(
 		     agent_segment,realm_label,subaddress_tag,raw_mime,raw_size_bytes,
 		     raw_sha256,parse_state,parse_error,header_from,header_to,
 		     header_subject,mime_message_id,message_date,attachment_count,
+		     body_text,body_text_kind,attachment_storage_bytes,
+		     retained_attachment_storage_bytes,payload_retention_state,
+		     attachment_storage_accounted,
 		     spf_result,dkim_result,dmarc_result,spam_verdict,
 		     sender_verification_state,duplicate_group_sha256,
 		     possible_duplicate_of_message_id,received_at)
 		  VALUES
 		    ($1,$2,$3,$4,$5,$6,$7,NULL,$8,$9,$10,$11,$12,$13,$14,$15,
 		     $16,$17,$18,$19,$20,$21,$22,$23,
-		     'unknown','unknown','unknown','unknown','unverified',$24,$25,
+		     $24,$25,$26,$27,$28,true,
+		     'unknown','unknown','unknown','unknown','unverified',$29,$30,
 		     clock_timestamp())
 		  RETURNING received_at,created_at
 		), inserted_delivery AS (
@@ -1086,10 +1136,12 @@ func (s *Store) IngestAgentEmailPilot(
 		messageID, address.AccountID, address.RealmID, address.MailboxID,
 		address.OwnerAgentID, address.ID, agentEmailPilotProvider,
 		relay.EnvelopeSender, parts.Address, parts.AgentSegment, parts.RealmLabel,
-		agentEmailNullableString(parts.SubaddressTag), in.Raw, len(in.Raw), rawSHA,
+		agentEmailNullableString(parts.SubaddressTag), rawForStorage, len(in.Raw), rawSHA,
 		parseState, agentEmailNullableString(parseErrorCode), agentEmailNullableString(parsed.HeaderFrom),
 		agentEmailNullableString(parsed.HeaderTo), agentEmailNullableString(parsed.HeaderSubject),
 		agentEmailNullableString(parsed.MIMEMessageID), parsed.MessageDate, parsed.AttachmentCount,
+		agentEmailNullableString(parsed.Text), agentEmailNullableString(parsed.TextKind),
+		attachmentStorageBytes, retainedAttachmentStorageBytes, payloadRetentionState,
 		duplicateGroup, agentEmailNullableString(possibleDuplicate)).
 		Scan(&receivedAt, &createdAt, &deliveredAt)
 	if err != nil {
@@ -1125,7 +1177,10 @@ func (s *Store) IngestAgentEmailPilot(
 		HeaderFrom: parsed.HeaderFrom, HeaderTo: parsed.HeaderTo,
 		Subject: parsed.HeaderSubject, MIMEMessageID: parsed.MIMEMessageID,
 		MessageDate: parsed.MessageDate, AttachmentCount: parsed.AttachmentCount,
-		SPFResult: "unknown", DKIMResult: "unknown", DMARCResult: "unknown",
+		AttachmentStorageBytes:         attachmentStorageBytes,
+		RetainedAttachmentStorageBytes: retainedAttachmentStorageBytes,
+		PayloadRetentionState:          payloadRetentionState,
+		SPFResult:                      "unknown", DKIMResult: "unknown", DMARCResult: "unknown",
 		SpamVerdict: "unknown", SenderVerificationState: AgentEmailSenderUnverified,
 		PossibleDuplicate:          possibleDuplicate != "",
 		PossibleDuplicateOfMessage: possibleDuplicate,
@@ -1235,12 +1290,26 @@ func (s *Store) ReadAgentEmail(
 	if err != nil {
 		return AgentEmailMessage{}, err
 	}
+	if len(msg.rawMIME) == 0 {
+		msg.Text = msg.bodyText
+		msg.TextKind = msg.bodyTextKind
+		msg.bodyText = ""
+		msg.bodyTextKind = ""
+		return redactAgentEmailFence(msg), nil
+	}
 	parsed, parseErr := agentemail.ParseMessage(msg.rawMIME, true)
 	msg.rawMIME = nil
 	if parseErr == nil {
 		msg.Text = parsed.Text
 		msg.TextKind = parsed.TextKind
+	} else {
+		// Persisted bounded text is the stable fallback if a future parser
+		// version no longer accepts a historically retained MIME shape.
+		msg.Text = msg.bodyText
+		msg.TextKind = msg.bodyTextKind
 	}
+	msg.bodyText = ""
+	msg.bodyTextKind = ""
 	return redactAgentEmailFence(msg), nil
 }
 
@@ -1849,6 +1918,8 @@ func agentEmailSelect(includeRaw bool) string {
 		m.parse_state,COALESCE(m.parse_error,''),COALESCE(m.header_from,''),
 		COALESCE(m.header_to,''),COALESCE(m.header_subject,''),
 		COALESCE(m.mime_message_id,''),m.message_date,m.attachment_count,
+		m.attachment_storage_bytes,m.retained_attachment_storage_bytes,
+		m.payload_retention_state,
 		COALESCE(m.spf_result,'unknown'),COALESCE(m.dkim_result,'unknown'),
 		COALESCE(m.dmarc_result,'unknown'),COALESCE(m.spam_verdict,'unknown'),
 		m.sender_verification_state,COALESCE(m.possible_duplicate_of_message_id,''),
@@ -1856,6 +1927,7 @@ func agentEmailSelect(includeRaw bool) string {
 		d.read_at,d.acked_at,d.code_consumed_at,
 		d.processing_state,d.processing_generation,d.failure_count,
 		COALESCE(d.claim_id,''),d.lease_expires_at,d.completed_at,
+		COALESCE(m.body_text,''),COALESCE(m.body_text_kind,''),
 		%s,m.duplicate_group_sha256
 		FROM agent_email_messages m
 		JOIN agent_email_deliveries d
@@ -1871,13 +1943,16 @@ func scanAgentEmail(row rowScanner) (AgentEmailMessage, error) {
 		&msg.RealmLabel, &msg.SubaddressTag, &msg.RawSizeBytes,
 		&msg.ParseState, &msg.ParseErrorCode, &msg.HeaderFrom, &msg.HeaderTo,
 		&msg.Subject, &msg.MIMEMessageID, &msg.MessageDate, &msg.AttachmentCount,
+		&msg.AttachmentStorageBytes, &msg.RetainedAttachmentStorageBytes,
+		&msg.PayloadRetentionState,
 		&msg.SPFResult, &msg.DKIMResult, &msg.DMARCResult, &msg.SpamVerdict,
 		&msg.SenderVerificationState, &msg.PossibleDuplicateOfMessage,
 		&msg.ReceivedAt, &msg.CreatedAt, &msg.Folder, &msg.DeliveredAt,
 		&msg.ReadState.ReadAt, &msg.ReadState.AckedAt, &msg.ReadState.CodeConsumedAt,
 		&msg.Processing.State, &msg.Processing.Generation, &msg.Processing.FailureCount,
 		&msg.Processing.ClaimID, &msg.Processing.LeaseExpiresAt,
-		&msg.Processing.CompletedAt, &msg.rawMIME, &msg.duplicateGroupSHA256,
+		&msg.Processing.CompletedAt, &msg.bodyText, &msg.bodyTextKind,
+		&msg.rawMIME, &msg.duplicateGroupSHA256,
 	)
 	if err != nil {
 		return AgentEmailMessage{}, err
@@ -2509,6 +2584,8 @@ func redactAgentEmailFence(msg AgentEmailMessage) AgentEmailMessage {
 	msg.Processing.ClaimID = ""
 	msg.Processing.LeaseExpiresAt = nil
 	msg.rawMIME = nil
+	msg.bodyText = ""
+	msg.bodyTextKind = ""
 	msg.duplicateGroupSHA256 = ""
 	return msg
 }
@@ -2540,6 +2617,9 @@ func logAgentEmailEvent(
 	}
 	if verb == VerbAgentEmailReceived {
 		metadata["raw_size_bytes"] = strconv.FormatInt(msg.RawSizeBytes, 10)
+		metadata["retained_attachment_storage_bytes"] =
+			strconv.FormatInt(msg.RetainedAttachmentStorageBytes, 10)
+		metadata["payload_retention_state"] = msg.PayloadRetentionState
 		metadata["possible_duplicate"] = msg.PossibleDuplicate
 	}
 	if processing {

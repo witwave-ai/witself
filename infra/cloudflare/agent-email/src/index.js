@@ -18,6 +18,7 @@ import {
 import { recordEdgeVerdict } from "./metrics.mjs";
 
 const PERMANENT_REJECTION = "recipient unavailable";
+const OVER_SIZE_REJECTION = "message too large";
 const TRANSIENT_ERROR = "agent email relay temporarily unavailable";
 const DEFAULT_TIMEOUT_MS = 20_000;
 const MAX_VERDICT_BYTES = 4_096;
@@ -98,6 +99,7 @@ function exactVerdict(text) {
     case "temporary":
     case "invalid_relay":
     case "retry_canary_rejected":
+    case "over_size":
       return value.verdict;
     default:
       return "";
@@ -167,7 +169,7 @@ async function handleEmailTransaction(message, env, runtime = {}) {
     message.rawSize < 1 ||
     message.rawSize > PILOT_MAXIMUM_RAW_BYTES
   ) {
-    message.setReject(PERMANENT_REJECTION);
+    message.setReject(OVER_SIZE_REJECTION);
     return { outcome: "rejected_over_size", phase: "content", status: 552 };
   }
 
@@ -241,6 +243,10 @@ async function handleEmailTransaction(message, env, runtime = {}) {
     // Returning normally prevents provider retries and exposes no account
     // policy detail to the external sender.
     return { outcome: "discarded_feature_disabled", phase: "response", status: response.status };
+  }
+  if (verdict === "over_size") {
+    message.setReject(OVER_SIZE_REJECTION);
+    return { outcome: "rejected_over_size", phase: "response", status: 552 };
   }
   logRelayFailure({
     phase: "response",

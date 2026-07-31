@@ -57,6 +57,21 @@ const (
 	// tombstones, and usage history do not consume current-fact capacity. A
 	// missing key means unlimited.
 	StoredFactLimit = "stored_fact"
+	// AgentEmailMaxRawBytesLimit caps the raw MIME size of each inbound agent
+	// email. The resolved value applies account-wide to each message; a
+	// missing key means no plan cap, subject to the service's defensive
+	// transport ceiling.
+	AgentEmailMaxRawBytesLimit = "agent_email_max_raw_bytes"
+	// AgentEmailAttachmentStorageBytesLimit caps retained attachment-bearing
+	// MIME bytes across the account. The current inline-MIME implementation
+	// charges the full raw-message size when a message contains attachments;
+	// it does not model separately stored attachment blobs. A missing key
+	// means unlimited.
+	AgentEmailAttachmentStorageBytesLimit = "agent_email_attachment_storage_bytes"
+	// MaxAgentEmailRawBytes is the service/provider transport ceiling. Plan
+	// defaults and per-account overrides may lower it but cannot promise a
+	// larger message than the receive path can carry.
+	MaxAgentEmailRawBytes int64 = 25 * 1024 * 1024
 	// MaxPlanLimit is the largest exact integer shared by Go and JavaScript's
 	// JSON number representation. Unlimited is represented by a missing key,
 	// never by an oversized sentinel.
@@ -241,13 +256,18 @@ func ValidateLimits(limits map[string]int64) error {
 	for key, value := range limits {
 		switch key {
 		case RealmLimit, AgentLimit, AgentPerRealmLimit, StoredSecretLimit,
-			StoredMemoryLimit, StoredFactLimit:
+			StoredMemoryLimit, StoredFactLimit, AgentEmailMaxRawBytesLimit,
+			AgentEmailAttachmentStorageBytesLimit:
 		default:
 			return fmt.Errorf("unknown limit %q", key)
 		}
 		if value < 0 || value > MaxPlanLimit {
 			return fmt.Errorf("%s must be between 0 and %d (omit it for unlimited)",
 				key, MaxPlanLimit)
+		}
+		if key == AgentEmailMaxRawBytesLimit && value > MaxAgentEmailRawBytes {
+			return fmt.Errorf("%s must be between 0 and %d",
+				key, MaxAgentEmailRawBytes)
 		}
 	}
 	return nil

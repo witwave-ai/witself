@@ -3,6 +3,7 @@ package agentemail
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 )
@@ -142,6 +143,184 @@ func TestParseMessageCountsInlineNonTextLeavesAsAttachments(t *testing.T) {
 	}
 	if parsed.AttachmentCount != 2 {
 		t.Fatalf("attachment count = %d; want 2", parsed.AttachmentCount)
+	}
+}
+
+func TestParseMessageCountsRawAttachmentPayloadBytes(t *testing.T) {
+	base64Payload := "YXR0YWNobWVu\r\ndA=="
+	quotedPrintablePayload := "a=3Db=0A"
+
+	tests := []struct {
+		name            string
+		raw             string
+		attachmentCount int64
+		payloadBytes    int64
+	}{
+		{
+			name:            "no attachment",
+			raw:             "Subject: text\r\nContent-Type: text/plain\r\n\r\nbody",
+			attachmentCount: 0,
+			payloadBytes:    0,
+		},
+		{
+			name: "single attachment",
+			raw: strings.Join([]string{
+				"Subject: single",
+				"Content-Type: application/octet-stream",
+				"Content-Disposition: attachment; filename=one.bin",
+				"",
+				"raw-payload",
+			}, "\r\n"),
+			attachmentCount: 1,
+			payloadBytes:    int64(len("raw-payload")),
+		},
+		{
+			name: "multiple attachments",
+			raw: strings.Join([]string{
+				"Subject: multiple",
+				"Content-Type: multipart/mixed; boundary=mix",
+				"",
+				"--mix",
+				"Content-Type: text/plain",
+				"",
+				"body",
+				"--mix",
+				"Content-Type: application/octet-stream",
+				"",
+				"abc",
+				"--mix",
+				"Content-Type: image/png",
+				"Content-Disposition: inline",
+				"",
+				"12345",
+				"--mix--",
+				"",
+			}, "\r\n"),
+			attachmentCount: 2,
+			payloadBytes:    int64(len("abc") + len("12345")),
+		},
+		{
+			name: "nested attachments",
+			raw: strings.Join([]string{
+				"Subject: nested",
+				"Content-Type: multipart/mixed; boundary=outer",
+				"",
+				"--outer",
+				"Content-Type: multipart/related; boundary=inner",
+				"",
+				"--inner",
+				"Content-Type: text/plain",
+				"",
+				"body",
+				"--inner",
+				"Content-Type: image/png",
+				"",
+				"nested-one",
+				"--inner--",
+				"--outer",
+				"Content-Type: application/pdf",
+				"Content-Disposition: attachment; filename=outer.pdf",
+				"",
+				"outer-two",
+				"--outer--",
+				"",
+			}, "\r\n"),
+			attachmentCount: 2,
+			payloadBytes:    int64(len("nested-one") + len("outer-two")),
+		},
+		{
+			name: "base64 counts encoded octets",
+			raw: strings.Join([]string{
+				"Subject: base64",
+				"Content-Type: multipart/mixed; boundary=mix",
+				"",
+				"--mix",
+				"Content-Type: application/octet-stream",
+				"Content-Disposition: attachment; filename=encoded.bin",
+				"Content-Transfer-Encoding: base64",
+				"",
+				base64Payload,
+				"--mix--",
+				"",
+			}, "\r\n"),
+			attachmentCount: 1,
+			payloadBytes:    int64(len(base64Payload)),
+		},
+		{
+			name: "quoted printable counts encoded octets",
+			raw: strings.Join([]string{
+				"Subject: quoted printable",
+				"Content-Type: multipart/mixed; boundary=mix",
+				"",
+				"--mix",
+				"Content-Type: application/octet-stream",
+				"Content-Disposition: attachment; filename=encoded.bin",
+				"Content-Transfer-Encoding: quoted-printable",
+				"",
+				quotedPrintablePayload,
+				"--mix--",
+				"",
+			}, "\r\n"),
+			attachmentCount: 1,
+			payloadBytes:    int64(len(quotedPrintablePayload)),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			parsed, err := ParseMessage([]byte(test.raw), false)
+			if err != nil {
+				t.Fatalf("ParseMessage: %v", err)
+			}
+			if parsed.AttachmentCount != test.attachmentCount {
+				t.Fatalf("attachment count = %d; want %d", parsed.AttachmentCount, test.attachmentCount)
+			}
+			if parsed.AttachmentPayloadBytes != test.payloadBytes {
+				t.Fatalf("attachment payload bytes = %d; want %d", parsed.AttachmentPayloadBytes, test.payloadBytes)
+			}
+		})
+	}
+}
+
+func TestParseMessageReturnsCountedAttachmentBytesOnLaterParserError(t *testing.T) {
+	const payload = "count-me"
+	raw := []byte(strings.Join([]string{
+		"Subject: partial projection",
+		"Content-Type: multipart/mixed; boundary=mix",
+		"",
+		"--mix",
+		"Content-Type: application/octet-stream",
+		"Content-Disposition: attachment; filename=first.bin",
+		"",
+		payload,
+		"--mix",
+		"Content-Type: application/octet-stream; name=\"unterminated",
+		"",
+		"not-counted",
+		"--mix--",
+		"",
+	}, "\r\n"))
+
+	parsed, err := ParseMessage(raw, false)
+	if !errors.Is(err, ErrMIMEInvalid) {
+		t.Fatalf("error = %v; want ErrMIMEInvalid", err)
+	}
+	if parsed.AttachmentCount != 1 {
+		t.Fatalf("attachment count = %d; want 1", parsed.AttachmentCount)
+	}
+	if parsed.AttachmentPayloadBytes != int64(len(payload)) {
+		t.Fatalf("attachment payload bytes = %d; want %d", parsed.AttachmentPayloadBytes, len(payload))
+	}
+}
+
+func TestMIMEWalkerRejectsAttachmentPayloadByteOverflow(t *testing.T) {
+	walker := mimeWalker{attachmentPayloadBytes: math.MaxInt64 - 1}
+	err := walker.countAttachmentPayload(strings.NewReader("xx"))
+	if !errors.Is(err, ErrMIMEInvalid) {
+		t.Fatalf("error = %v; want ErrMIMEInvalid", err)
+	}
+	if walker.attachmentPayloadBytes != math.MaxInt64-1 {
+		t.Fatalf("attachment payload bytes = %d; want unchanged", walker.attachmentPayloadBytes)
 	}
 }
 

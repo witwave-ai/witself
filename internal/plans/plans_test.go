@@ -248,6 +248,28 @@ func TestCanonicalStoredFactDefaultsPhaseB(t *testing.T) {
 	}
 }
 
+func TestCanonicalAgentEmailLimitDefaultsPhaseA(t *testing.T) {
+	catalog, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, planID := range []string{Free, "standard", "team", "enterprise"} {
+		plan, ok := catalog.Get(planID)
+		if !ok {
+			t.Fatalf("catalog missing plan %q", planID)
+		}
+		for _, dimension := range []string{
+			AgentEmailMaxRawBytesLimit,
+			AgentEmailAttachmentStorageBytesLimit,
+		} {
+			if got, present := plan.Limits[dimension]; present {
+				t.Errorf("%s %s = %d, present=true; want absent during phase A",
+					planID, dimension, got)
+			}
+		}
+	}
+}
+
 func TestParseValidation(t *testing.T) {
 	cases := []struct {
 		name string
@@ -265,6 +287,7 @@ func TestParseValidation(t *testing.T) {
 		{"negative limit", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"limits":{"stored_secret":-1}}]}`, "between 0"},
 		{"unknown limit", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"limits":{"stored_secrets":1}}]}`, "unknown limit"},
 		{"unsafe integer limit", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"limits":{"stored_secret":9007199254740992}}]}`, "between 0"},
+		{"raw email above service ceiling", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"limits":{"agent_email_max_raw_bytes":26214401}}]}`, "between 0 and 26214400"},
 		{"zero retention", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"policies":{"transcript_retention_days":0}}]}`, "between 1"},
 		{"zero message retention", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"policies":{"message_retention_days":0}}]}`, "between 1"},
 		{"bad messaging entitlement marker", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"policies":{"messaging_entitlement_version":2}}]}`, "must be 1"},
@@ -282,18 +305,34 @@ func TestParseValidation(t *testing.T) {
 	}
 }
 
+func TestValidateAgentEmailLimitBounds(t *testing.T) {
+	if err := ValidateLimits(map[string]int64{
+		AgentEmailMaxRawBytesLimit:            MaxAgentEmailRawBytes,
+		AgentEmailAttachmentStorageBytesLimit: 107_374_182_400,
+	}); err != nil {
+		t.Fatalf("valid agent-email limits: %v", err)
+	}
+	if err := ValidateLimits(map[string]int64{
+		AgentEmailMaxRawBytesLimit: MaxAgentEmailRawBytes + 1,
+	}); err == nil || !strings.Contains(err.Error(), "between 0 and 26214400") {
+		t.Fatalf("above-ceiling raw limit error = %v", err)
+	}
+}
+
 func TestValidateLimitsZeroAndMissingUnlimited(t *testing.T) {
 	for _, limits := range []map[string]int64{
 		nil,
 		{},
 		{StoredSecretLimit: 0},
 		{
-			StoredSecretLimit:  100,
-			StoredMemoryLimit:  1000,
-			StoredFactLimit:    1000,
-			AgentLimit:         25,
-			AgentPerRealmLimit: 10,
-			RealmLimit:         1,
+			StoredSecretLimit:                     100,
+			StoredMemoryLimit:                     1000,
+			StoredFactLimit:                       1000,
+			AgentLimit:                            25,
+			AgentPerRealmLimit:                    10,
+			RealmLimit:                            1,
+			AgentEmailMaxRawBytesLimit:            10_485_760,
+			AgentEmailAttachmentStorageBytesLimit: 5_368_709_120,
 		},
 	} {
 		if err := ValidateLimits(limits); err != nil {

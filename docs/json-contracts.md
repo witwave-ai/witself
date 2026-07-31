@@ -1124,6 +1124,31 @@ disabled, and `retired` for a retired mailbox. `disabled_at` is the optional
 agent-layer timestamp; `realm_disabled_at` is the optional realm-layer
 timestamp. `row_version` belongs to the agent mailbox layer.
 
+`GET /v1/email:status` returns the effective per-message raw-MIME maximum and
+the value-free account-wide capacity for retained attachment-bearing MIME:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "maximum_raw_bytes": 10485760,
+  "attachment_capacity": {
+    "used": 1073741824,
+    "max": 5368709120,
+    "remaining": 4294967296,
+    "unlimited": false,
+    "near_limit": false,
+    "at_limit": false,
+    "over_limit": false
+  }
+}
+```
+
+`maximum_raw_bytes` is the resolved account-plan limit after the 25 MiB
+technical ceiling. `attachment_capacity` counts complete retained raw-MIME
+bytes for attachment-bearing messages across the account, not extracted
+attachment blobs or a per-agent allowance. For an unlimited account,
+`max` and `remaining` are `null` and `unlimited` is `true`.
+
 Settled operator authentication protects these lifecycle-only controls:
 
 ```text
@@ -1209,7 +1234,10 @@ shape (the list envelope uses `next_cursor`; listen uses `timed_out`):
       "header_to": "browser-agent.aaaaaaaaaaaaaaaa@agent-mail.witwave.ai",
       "subject": "Your verification code",
       "mime_message_id": "<untrusted@example.net>",
-      "attachment_count": 0,
+      "attachment_count": 1,
+      "attachment_storage_bytes": 2471,
+      "retained_attachment_storage_bytes": 2471,
+      "payload_retention_state": "retained",
       "spf_result": "unknown",
       "dkim_result": "unknown",
       "dmarc_result": "unknown",
@@ -1234,6 +1262,15 @@ pilot, `spf_result`, `dkim_result`, `dmarc_result`, and `spam_verdict` are alway
 provider-message-id field is absent. A suspected retry adds
 `possible_duplicate:true` and `possible_duplicate_of_message_id` but is still a
 distinct immutable message.
+
+`attachment_storage_bytes` is the complete raw-MIME size charged when the
+message has an attachment or MIME parsing fails; a successfully parsed message
+without attachments reports zero. `retained_attachment_storage_bytes` equals
+that charge while the raw MIME is retained and is zero when the account pool
+lacks room. `payload_retention_state` is `retained` in the former case and
+`omitted_capacity` in the latter. Capacity omission still durably accepts
+the bounded text and metadata; it never evicts an older message or exceeds
+the account pool.
 
 `POST /v1/email/{message_id}:read` returns `{"schema_version":"witself.v0",
 "message":...}` with the same shape plus bounded `text` and `text_kind`, and
@@ -1329,10 +1366,23 @@ X-Witself-Email-Raw-SHA256: sha256:<lowercase-hex>
 X-Witself-Email-Signature: <standard padded base64 Ed25519 signature>
 ```
 
-The response is deliberately content-free: a success is exactly a 2xx JSON
-object with `{"verdict":"accepted"}`. Other typed verdicts are not success and
-the Worker maps them to a permanent generic rejection or one sanitized
-exception under the authorized pilot contract.
+The response is deliberately content-free and has exactly one string field,
+`verdict`. The current Worker mapping is:
+
+- `accepted` with a 2xx response accepts the SMTP transaction after the
+  durable message write. This also covers a capacity-omitted payload whose
+  bounded text and metadata were committed.
+- `feature_disabled` with a 2xx response deliberately accepts and discards the
+  message so a disabled account neither stores mail nor causes provider
+  retries.
+- `over_size` rejects the SMTP transaction as message-too-large (552).
+- `unknown_recipient` and `permanent` use the same generic permanent-recipient
+  rejection. `retry_canary_rejected` uses that rejection only for the
+  authorized retry canary.
+- `receive_disabled` uses the sanitized transient-exception path.
+  `temporary`, `invalid_relay`, a non-2xx `feature_disabled`, an unknown or
+  malformed verdict, timeout, and transport failure all fail closed through
+  the same sanitized transient-exception path so Cloudflare controls retry.
 
 ## Agent Activity Touch
 

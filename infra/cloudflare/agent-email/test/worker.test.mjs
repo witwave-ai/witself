@@ -134,6 +134,25 @@ test("terminal retry-canary verdict rejects once with no marker leakage", async 
   assert.doesNotMatch(JSON.stringify(points[0]), /challenge|retry_canary_rejected|X-Witself/i);
 });
 
+test("cell over-size verdict maps to a sanitized SMTP 552 outcome", async () => {
+  const points = [];
+  const metrics = { writeDataPoint(point) { points.push(point); } };
+  const mail = message();
+  await handleEmail(mail, env(true, true, metrics), {
+    fetch: async () => new Response('{"verdict":"over_size"}', { status: 413 }),
+  });
+  assert.deepEqual(mail.rejected, ["message too large"]);
+  assert.equal(points.length, 1);
+  assert.deepEqual(points[0].blobs, [
+    EDGE_METRICS_SCHEMA, "rejected_over_size", "response",
+  ]);
+  assert.equal(points[0].doubles[3], 552);
+  assert.doesNotMatch(
+    JSON.stringify(points[0]),
+    /@|address|account|realm_|agent_|subject|digest|signature/i,
+  );
+});
+
 test("disabled pilot and transport failures use one sanitized transient error", async () => {
   await assert.rejects(() => handleEmail(message(), env(false), {}), {
     message: "agent email relay temporarily unavailable",
@@ -155,7 +174,7 @@ test("unenrolled and oversized messages reject before relay", async () => {
     raw: { must_not_be_read: true },
   });
   await handleEmail(oversized, env(), { fetch: async () => { fetched = true; } });
-  assert.deepEqual(oversized.rejected, ["recipient unavailable"]);
+  assert.deepEqual(oversized.rejected, ["message too large"]);
   assert.equal(fetched, false);
 });
 

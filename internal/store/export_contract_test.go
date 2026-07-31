@@ -87,6 +87,9 @@ func TestExportedColumnsCoverSchemaBase(t *testing.T) {
 	// Anything added here needs an explicit call-out — it's a policy
 	// decision, not an oversight.
 	omittedColumns := map[string]map[string]string{
+		"accounts": {
+			"retained_agent_email_attachment_bytes": "derived from retained agent-email message rows on import",
+		},
 		"agents": {
 			"active_fact_count": "derived from current resolved non-deleted facts on import",
 		},
@@ -183,6 +186,26 @@ func TestActiveFactCountIsDerivedArchiveProjection(t *testing.T) {
 	}
 	if importColumns["agents"]["active_fact_count"] {
 		t.Fatal("import allowlist accepted derived active_fact_count")
+	}
+}
+
+func TestAgentEmailAttachmentBytesIsDerivedArchiveProjection(t *testing.T) {
+	schemaColumns, err := parseSchemaColumns()
+	if err != nil {
+		t.Fatalf("parse migrations: %v", err)
+	}
+	if !schemaColumns["accounts"]["retained_agent_email_attachment_bytes"] {
+		t.Fatal("schema parser did not find accounts.retained_agent_email_attachment_bytes")
+	}
+	exportedByTable, err := parseExportedColumns()
+	if err != nil {
+		t.Fatalf("parse export.go: %v", err)
+	}
+	if exportedByTable["accounts"]["retained_agent_email_attachment_bytes"] {
+		t.Fatal("exporter emitted derived retained_agent_email_attachment_bytes")
+	}
+	if importColumns["accounts"]["retained_agent_email_attachment_bytes"] {
+		t.Fatal("import allowlist accepted derived retained_agent_email_attachment_bytes")
 	}
 }
 

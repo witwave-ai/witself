@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/witwave-ai/witself/internal/agentemail"
+	"github.com/witwave-ai/witself/internal/plans"
 )
 
 func TestAgentEmailRetryCanaryPostgresStableRetry(t *testing.T) {
@@ -388,6 +389,68 @@ func TestAgentEmailRetryCanaryPostgresStableRetry(t *testing.T) {
 	}
 	if messages != 4 {
 		t.Fatalf("terminal retry markers created messages = %d, want 4", messages)
+	}
+
+	// A synthetic proof that carries an attachment cannot bypass a full
+	// account storage pool by discarding the raw MIME: archive import must be
+	// able to recompute and verify the accepted proof. Normal text-only
+	// canaries consume zero bytes and are unaffected.
+	const capacityChallenge = "abababab-abab-4bab-8bab-abababababab"
+	if _, err := st.ArmAgentEmailRetryCanary(
+		ctx, scope, canary, capacityChallenge,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE accounts
+		   SET plan_limits=jsonb_build_object($2::text,0)
+		 WHERE id=$1`,
+		provisioned.AccountID, plans.AgentEmailAttachmentStorageBytesLimit,
+	); err != nil {
+		t.Fatal(err)
+	}
+	capacityRaw := []byte(strings.Join([]string{
+		agentemail.RetryCanaryHeader + ": " + capacityChallenge,
+		"Subject: capacity-bound retry",
+		"MIME-Version: 1.0",
+		"Content-Type: multipart/mixed; boundary=capacity",
+		"",
+		"--capacity",
+		"Content-Type: text/plain",
+		"",
+		"body",
+		"--capacity",
+		"Content-Type: application/octet-stream",
+		"Content-Disposition: attachment; filename=proof.bin",
+		"",
+		"proof attachment",
+		"--capacity--",
+		"",
+	}, "\r\n"))
+	if _, err := ingest(capacityRaw); !errors.Is(
+		err, ErrAgentEmailRetryCanaryTemporary,
+	) {
+		t.Fatalf("capacity canary first delivery = %v", err)
+	}
+	if _, err := ingest(capacityRaw); !errors.Is(
+		err, ErrAgentEmailRetryCanaryPermanent,
+	) {
+		t.Fatalf("capacity canary omitted proof = %v", err)
+	}
+	if err := st.pool.QueryRow(ctx, `
+		SELECT count(*) FROM agent_email_messages WHERE account_id=$1`,
+		provisioned.AccountID,
+	).Scan(&messages); err != nil {
+		t.Fatal(err)
+	}
+	if messages != 4 {
+		t.Fatalf("capacity-rejected canary created messages = %d, want 4", messages)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE accounts SET plan_limits='{}'::jsonb WHERE id=$1`,
+		provisioned.AccountID,
+	); err != nil {
+		t.Fatal(err)
 	}
 
 	// Exercise the real arm -> tempfail -> accepted row through account export

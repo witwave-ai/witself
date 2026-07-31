@@ -56,6 +56,70 @@ func TestEmailCLIAddressListAndRead(t *testing.T) {
 	}
 }
 
+func TestEmailCLIStatusValidatesAndFormatsBytes(t *testing.T) {
+	response := `{"schema_version":"witself.v0","maximum_raw_bytes":10485760,"attachment_capacity":{"used":1073741824,"max":5368709120,"remaining":4294967296,"unlimited":false,"near_limit":false,"at_limit":false,"over_limit":false}}`
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/email:status" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(response))
+	}))
+	defer srv.Close()
+	tokenFile := filepath.Join(t.TempDir(), "agent.token")
+	if err := os.WriteFile(tokenFile, []byte("witself_agt_test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base := []string{"email", "status", "--endpoint", srv.URL, "--token-file", tokenFile}
+
+	stdout, stderr, code := captureFactDeleteCLI(t, func() int { return run(base) })
+	if code != 0 || stderr != "" {
+		t.Fatalf("plain status = code %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	for _, want := range []string{
+		"maximum raw message:\t10 MiB (10485760 bytes)",
+		"attachment storage used:\t1 GiB (1073741824 bytes)",
+		"attachment storage max:\t5 GiB (5368709120 bytes)",
+		"attachment storage remaining:\t4 GiB (4294967296 bytes)",
+		"near limit:\tfalse",
+		"at limit:\tfalse",
+		"over limit:\tfalse",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("plain status omitted %q:\n%s", want, stdout)
+		}
+	}
+
+	stdout, stderr, code = captureFactDeleteCLI(t, func() int {
+		return run(append(append([]string{}, base...), "--json"))
+	})
+	if code != 0 || stderr != "" {
+		t.Fatalf("JSON status = code %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	var decoded client.AgentEmailStorageStatus
+	if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+		t.Fatalf("decode JSON status: %v\n%s", err, stdout)
+	}
+	if decoded.SchemaVersion != "witself.v0" ||
+		decoded.MaximumRawBytes != 10_485_760 ||
+		decoded.AttachmentCapacity.Max == nil ||
+		*decoded.AttachmentCapacity.Max != 5_368_709_120 {
+		t.Fatalf("JSON status = %#v", decoded)
+	}
+
+	response = `{"schema_version":"witself.v0","maximum_raw_bytes":10485760,"attachment_capacity":{"used":1073741824,"max":5368709120,"remaining":1,"unlimited":false,"near_limit":false,"at_limit":false,"over_limit":false}}`
+	stdout, stderr, code = captureFactDeleteCLI(t, func() int { return run(base) })
+	if code != 1 || stdout != "" ||
+		!strings.Contains(stderr, "invalid email storage status") {
+		t.Fatalf("invalid status = code %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	if requests != 3 {
+		t.Fatalf("status requests = %d, want 3", requests)
+	}
+}
+
 func TestEmailCLIOperatorReceiveControls(t *testing.T) {
 	var requests []string
 	var states []string

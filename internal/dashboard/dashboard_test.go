@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os/exec"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -437,11 +438,15 @@ func TestStaticEmailSurfaceIsMetadataOnlyAndCheckpointLinked(t *testing.T) {
 	}
 	for _, want := range []string{
 		`self.email_checkpoint`, `href: "#/email"`, `fetchJSON("/api/email/address")`,
-		`fetchJSON("/api/email?"`, `params.push("email=true")`, `params.push("email_unread=true")`,
+		`fetchJSON("/api/email/status")`, `fetchJSON("/api/email?"`,
+		`params.push("email=true")`, `params.push("email_unread=true")`,
 		`params.push("email_unacked=true")`, "raw MIME", "processing claims never enter this page",
+		"account-wide attachment capacity", "attachment payload omitted because account-wide capacity is full",
 		`updateEmailAddressFromCheckpoint(self.email_checkpoint)`,
 		`emailStateChanged && current.section === "email"`,
 		`checkpoint.enabled === false`, `inbound email is not enabled on this account`,
+		`state.emailStatus = body.status || null`,
+		`event.data === state.lastEmailData`,
 	} {
 		if !strings.Contains(string(app), want) {
 			t.Errorf("app missing %q", want)
@@ -463,6 +468,18 @@ func TestDashboardEmailLiveEnableTransition(t *testing.T) {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("dashboard email transition JavaScript test: %v\n%s", err, output)
+	}
+}
+
+func TestDashboardAgentEmailStorageRendering(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not installed")
+	}
+	cmd := exec.Command(node, "--test", "testdata/email_capacity_test.cjs")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dashboard email capacity JavaScript test: %v\n%s", err, output)
 	}
 }
 
@@ -764,7 +781,8 @@ func TestAgentEmailProxyUsesOnlyPassiveGETsAndAllowListsMetadata(t *testing.T) {
 	now := time.Date(2026, 7, 21, 20, 1, 2, 0, time.UTC)
 	lease := now.Add(time.Minute)
 	backend := func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || strings.Contains(r.URL.Path, ":") {
+		if r.Method != http.MethodGet ||
+			(strings.Contains(r.URL.Path, ":") && r.URL.Path != "/v1/email:status") {
 			t.Errorf("email dashboard touched non-passive route %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
 			return
@@ -779,6 +797,21 @@ func TestAgentEmailProxyUsesOnlyPassiveGETsAndAllowListsMetadata(t *testing.T) {
 				AgentReceiveState: "enabled", RealmReceiveState: "disabled",
 				CreatedAt: now, UpdatedAt: now,
 			}})
+		case "/v1/email:status":
+			if r.URL.RawQuery != "" {
+				t.Errorf("unexpected email status query %s", r.URL.RawQuery)
+			}
+			writeTestJSON(t, w, map[string]any{
+				"schema_version":    "witself.v0",
+				"maximum_raw_bytes": 25 * 1024 * 1024,
+				"attachment_capacity": map[string]any{
+					"used": 4096, "max": 8192, "remaining": 4096,
+					"unlimited": false, "near_limit": false,
+					"at_limit": false, "over_limit": false,
+					"private_account_id": "leaked-status-account",
+				},
+				"private_policy_revision": "leaked-policy-revision",
+			})
 		case "/v1/email":
 			query := r.URL.Query()
 			if query.Get("unread") != "true" || query.Get("unacked") != "true" ||
@@ -793,7 +826,10 @@ func TestAgentEmailProxyUsesOnlyPassiveGETsAndAllowListsMetadata(t *testing.T) {
 					RealmLabel: "private-realm-label", SubaddressTag: "private-subaddress",
 					RawSizeBytes: 2048, ParseState: "parsed", HeaderFrom: "leaked-header-from",
 					HeaderTo: "leaked-header-to", Subject: "safe subject", MIMEMessageID: "leaked-mime-id",
-					MessageDate: &now, AttachmentCount: 2, SPFResult: "pass", DKIMResult: "pass",
+					MessageDate: &now, AttachmentCount: 2,
+					AttachmentStorageBytes: 1536, RetainedAttachmentStorageBytes: 0,
+					PayloadRetentionState: "omitted_capacity",
+					SPFResult:             "pass", DKIMResult: "pass",
 					DMARCResult: "pass", SpamVerdict: "none", SenderVerificationState: "unverified",
 					PossibleDuplicate: true, PossibleDuplicateOfMessage: "leaked-duplicate-id",
 					ReceivedAt: now, Folder: "inbox", DeliveredAt: now,
@@ -831,6 +867,33 @@ func TestAgentEmailProxyUsesOnlyPassiveGETsAndAllowListsMetadata(t *testing.T) {
 		}
 	}
 
+	statusResp := authedGet(t, srv, cfg, "/api/email/status")
+	statusRaw, err := io.ReadAll(statusResp.Body)
+	_ = statusResp.Body.Close()
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if statusResp.StatusCode != http.StatusOK {
+		t.Fatalf("status got %d: %s", statusResp.StatusCode, statusRaw)
+	}
+	for _, want := range []string{
+		`"maximum_raw_bytes":26214400`, `"used":4096`, `"max":8192`,
+		`"remaining":4096`, `"unlimited":false`, `"near_limit":false`,
+		`"at_limit":false`, `"over_limit":false`,
+	} {
+		if !strings.Contains(string(statusRaw), want) {
+			t.Errorf("safe status %q missing: %s", want, statusRaw)
+		}
+	}
+	for _, forbidden := range []string{
+		"schema_version", "leaked-status-account", "private_account_id",
+		"leaked-policy-revision", "private_policy_revision",
+	} {
+		if strings.Contains(string(statusRaw), forbidden) {
+			t.Fatalf("email status projection leaked %q: %s", forbidden, statusRaw)
+		}
+	}
+
 	listResp := authedGet(t, srv, cfg, "/api/email?unread=true&unacked=true&limit=7")
 	listRaw, err := io.ReadAll(listResp.Body)
 	_ = listResp.Body.Close()
@@ -840,7 +903,12 @@ func TestAgentEmailProxyUsesOnlyPassiveGETsAndAllowListsMetadata(t *testing.T) {
 	if listResp.StatusCode != http.StatusOK {
 		t.Fatalf("list got %d: %s", listResp.StatusCode, listRaw)
 	}
-	for _, want := range []string{"safe subject", "sender@example.net", `"attachment_count":2`, `"possible_duplicate":true`, `"failure_count":2`} {
+	for _, want := range []string{
+		"safe subject", "sender@example.net", `"attachment_count":2`,
+		`"attachment_storage_bytes":1536`, `"retained_attachment_storage_bytes":0`,
+		`"payload_retention_state":"omitted_capacity"`,
+		`"possible_duplicate":true`, `"failure_count":2`,
+	} {
 		if !strings.Contains(string(listRaw), want) {
 			t.Errorf("safe metadata %q missing: %s", want, listRaw)
 		}
@@ -895,7 +963,7 @@ func TestAgentEmailProxyRendersAvailabilityStates(t *testing.T) {
 		srv, cfg := newDashboard(t, func(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 		}, nil)
-		for _, path := range []string{"/api/email/address", "/api/email"} {
+		for _, path := range []string{"/api/email/address", "/api/email/status", "/api/email"} {
 			resp := authedGet(t, srv, cfg, path)
 			if resp.StatusCode != http.StatusNotImplemented {
 				t.Errorf("%s: got %d, want 501", path, resp.StatusCode)
@@ -908,7 +976,7 @@ func TestAgentEmailProxyRendersAvailabilityStates(t *testing.T) {
 		srv, cfg := newDashboard(t, func(w http.ResponseWriter, _ *http.Request) {
 			writeJSONError(w, http.StatusForbidden, "agent is not enrolled in the email pilot")
 		}, nil)
-		for _, path := range []string{"/api/email/address", "/api/email"} {
+		for _, path := range []string{"/api/email/address", "/api/email/status", "/api/email"} {
 			resp := authedGet(t, srv, cfg, path)
 			if resp.StatusCode != http.StatusForbidden {
 				t.Errorf("%s: got %d, want 403", path, resp.StatusCode)
@@ -929,7 +997,7 @@ func TestAgentEmailProxyRendersAvailabilityStates(t *testing.T) {
 				"retryable":      false,
 			})
 		}, nil)
-		for _, path := range []string{"/api/email/address", "/api/email"} {
+		for _, path := range []string{"/api/email/address", "/api/email/status", "/api/email"} {
 			resp := authedGet(t, srv, cfg, path)
 			body, err := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
@@ -948,7 +1016,7 @@ func TestAgentEmailProxyRendersAvailabilityStates(t *testing.T) {
 		srv, cfg := newDashboard(t, func(w http.ResponseWriter, _ *http.Request) {
 			writeJSONError(w, http.StatusInternalServerError, leaked)
 		}, nil)
-		for _, path := range []string{"/api/email/address", "/api/email"} {
+		for _, path := range []string{"/api/email/address", "/api/email/status", "/api/email"} {
 			resp := authedGet(t, srv, cfg, path)
 			body, err := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
@@ -1119,8 +1187,10 @@ func TestEventsStreamEmitsAgentEmailFromPassiveList(t *testing.T) {
 	lease := now.Add(time.Minute)
 	var mu sync.Mutex
 	emailCalls := 0
+	statusCalls := 0
 	backend := func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, ":") || r.Method != http.MethodGet {
+		if (strings.Contains(r.URL.Path, ":") && r.URL.Path != "/v1/email:status") ||
+			r.Method != http.MethodGet {
 			t.Errorf("email tick touched non-passive route %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
 			return
@@ -1146,6 +1216,19 @@ func TestEventsStreamEmitsAgentEmailFromPassiveList(t *testing.T) {
 				},
 				Text: "leaked live body", MIMEMessageID: "leaked-mime-id",
 			}}})
+		case "/v1/email:status":
+			mu.Lock()
+			statusCalls++
+			mu.Unlock()
+			maximum := int64(8192)
+			remaining := int64(4096)
+			writeTestJSON(t, w, client.AgentEmailStorageStatus{
+				SchemaVersion:   "witself.v0",
+				MaximumRawBytes: 25 * 1024 * 1024,
+				AttachmentCapacity: client.MemoryLimitStatus{
+					Used: 4096, Max: &maximum, Remaining: &remaining,
+				},
+			})
 		default:
 			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
@@ -1165,16 +1248,18 @@ func TestEventsStreamEmitsAgentEmailFromPassiveList(t *testing.T) {
 		t.Fatalf("got %d, want 200", resp.StatusCode)
 	}
 
-	sawEvent, sawMetadata := false, false
+	sawEvent, sawMetadata, sawCapacity := false, false, false
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 1<<20), 1<<20)
-	for scanner.Scan() && (!sawEvent || !sawMetadata) {
+	for scanner.Scan() && (!sawEvent || !sawMetadata || !sawCapacity) {
 		line := scanner.Text()
 		if line == "event: email" {
 			sawEvent = true
 		}
 		if strings.HasPrefix(line, "data: ") && strings.Contains(line, "live subject") {
 			sawMetadata = true
+			sawCapacity = strings.Contains(line, `"status":{"maximum_raw_bytes":26214400`) &&
+				strings.Contains(line, `"attachment_capacity":{"used":4096,"max":8192`)
 			for _, forbidden := range []string{"leaked-message-id", "leaked-claim-id", "leaked live body", "leaked-mime-id", `"generation"`, `"lease_expires_at"`} {
 				if strings.Contains(line, forbidden) {
 					t.Fatalf("email SSE leaked %q: %s", forbidden, line)
@@ -1182,14 +1267,91 @@ func TestEventsStreamEmitsAgentEmailFromPassiveList(t *testing.T) {
 			}
 		}
 	}
-	if !sawEvent || !sawMetadata {
-		t.Fatalf("stream ended early: event=%v metadata=%v (%v)", sawEvent, sawMetadata, scanner.Err())
+	if !sawEvent || !sawMetadata || !sawCapacity {
+		t.Fatalf("stream ended early: event=%v metadata=%v capacity=%v (%v)",
+			sawEvent, sawMetadata, sawCapacity, scanner.Err())
 	}
 	mu.Lock()
 	if emailCalls == 0 {
 		t.Error("email list was never polled")
 	}
+	if statusCalls == 0 {
+		t.Error("email storage status was never polled")
+	}
 	mu.Unlock()
+	cancel()
+}
+
+func TestEventsStreamRefreshesAgentEmailCapacityWhenOnlyPolicyChanges(t *testing.T) {
+	var mu sync.Mutex
+	statusCalls := 0
+	backend := func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/self":
+			writeTestJSON(t, w, testSelfDigest())
+		case "/v1/email":
+			writeTestJSON(t, w, client.AgentEmailPage{Messages: []client.AgentEmailMessage{}})
+		case "/v1/email:status":
+			mu.Lock()
+			statusCalls++
+			call := statusCalls
+			mu.Unlock()
+			maximum := int64(4096)
+			if call > 1 {
+				maximum = 8192
+			}
+			remaining := maximum - 1024
+			writeTestJSON(t, w, client.AgentEmailStorageStatus{
+				SchemaVersion:   "witself.v0",
+				MaximumRawBytes: 25 * 1024 * 1024,
+				AttachmentCapacity: client.MemoryLimitStatus{
+					Used: 1024, Max: &maximum, Remaining: &remaining,
+				},
+			})
+		default:
+			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}
+	srv, cfg := newDashboard(t, backend, nil)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	req := authedRequest(t, srv, cfg, "/api/events?email=true").WithContext(ctx)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("open events stream: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var maxima []int64
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() && len(maxima) < 2 {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") || !strings.Contains(line, `"status"`) {
+			continue
+		}
+		var frame struct {
+			Status struct {
+				AttachmentCapacity struct {
+					Max *int64 `json:"max"`
+				} `json:"attachment_capacity"`
+			} `json:"status"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &frame); err != nil {
+			t.Fatalf("decode email frame: %v", err)
+		}
+		if frame.Status.AttachmentCapacity.Max == nil {
+			t.Fatalf("email frame omitted finite maximum: %s", line)
+		}
+		maxima = append(maxima, *frame.Status.AttachmentCapacity.Max)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan events: %v", err)
+	}
+	if !reflect.DeepEqual(maxima, []int64{4096, 8192}) {
+		t.Fatalf("capacity maxima = %v, want policy update without a message change", maxima)
+	}
 	cancel()
 }
 
