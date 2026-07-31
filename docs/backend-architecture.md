@@ -371,9 +371,9 @@ runtime clients handle inference through hooks and MCP guidance. The messaging m
 - Plan-backed send/delivery rate limits and metered dimensions are implemented
   as shared PostgreSQL rolling one-minute budgets. They coordinate every API
   replica and remain separate from size, fan-out, and process-local
-  listen-admission bounds. Phase A deliberately leaves the plan keys absent so
-  only platform ceilings apply; finite plan defaults require the separate
-  Phase-B catalog activation. See
+  listen-admission bounds. The `v0.0.225` Phase-B catalog supplies finite plan
+  defaults for Professional, Team, and Enterprise, while Personal omits the
+  keys and independent platform ceilings remain effective. See
   [billing-and-limits.md](billing-and-limits.md).
 - Foreground clients are the inference boundary. At active task startup the
   installed policy directs them to inspect `self.show.message_checkpoint`, make

@@ -941,9 +941,10 @@ Surfaces:
   into shared messaging rate accounting. Admission debits the entire resolved
   fan-out; the usage ledger records one sent unit and only successfully
   delivered committed targets. Exact idempotent replay records neither again.
-  Phase A leaves finite plan keys absent and uses platform ceilings; finite
-  tier defaults require the separate Phase-B catalog activation. An exhausted
-  but otherwise fitting debit returns retryable HTTP 429 with `Retry-After`.
+  The `v0.0.225` Phase-B catalog supplies finite defaults for Professional,
+  Team, and Enterprise; Personal omits all three keys, and independent platform
+  ceilings remain effective. An exhausted but otherwise fitting debit returns
+  retryable HTTP 429 with `Retry-After`.
   An effective limit of zero or a single fan-out debit larger than its bucket
   capacity returns non-retryable HTTP 403 `limit_exceeded` with the same
   value-free rate details and no retry hint.

@@ -2,8 +2,8 @@
 
 Status: the agreed same-realm direct, fan-out, open-request, and foreground
 processing feature is operationally complete in release `v0.0.172`. The
-current working tree adds the Phase-A rate-gate/schema/propagation slice; the
-finite tier defaults remain a separate Phase-B catalog activation. Sanitized
+Phase-A rate-gate/schema/propagation slice is complete, and release `v0.0.225`
+activates the finite paid-tier defaults in the canonical catalog. Sanitized
 release, rollout, provider-refresh, and live-smoke evidence is retained in the
 [autonomous messaging completion boundary](autonomous-realm-messaging.md#completion-boundary).
 Last reviewed 2026-07-31. This document is the authority for the durable
@@ -84,9 +84,9 @@ coordination, and fenced foreground processing inside one realm:
 Named-group fan-out, cross-realm delivery, dry-run, operator metadata
 inspection, and finer policy scopes are follow-on platform features rather than
 blockers for the agreed realm-local core. Plan-backed metering and
-send/delivery rate admission are implemented, with finite tier defaults staged
-behind the separate catalog activation. The tagged and deployed activation
-record for that core is separate from the implementation inventory below and
+send/delivery rate admission are implemented, and `v0.0.225` supplies the
+finite paid-tier defaults in the canonical catalog. The tagged and deployed
+activation record is separate from the implementation inventory below and
 makes no claim about dormant cells or narrative-memory production
 certification.
 
@@ -564,7 +564,7 @@ GCRA/token-bucket-equivalent budgets. They are persisted in PostgreSQL and
 therefore coordinate every API replica; they are not process-local counters or
 wall-clock minute buckets.
 
-| Limit key | Usage dimension | Scope | Professional Phase B | Team Phase B | Enterprise Phase B | Platform ceiling |
+| Limit key | Usage dimension | Scope | Professional default | Team default | Enterprise default | Platform ceiling |
 |---|---|---|---:|---:|---:|---:|
 | `message_sent_per_agent_minute` | `message_sent` | sending agent | 30 | 120 | 600 | 2,000 |
 | `message_delivered_per_realm_minute` | `message_delivered` | sender realm | 500 | 5,000 | 25,000 | 100,000 |
@@ -575,17 +575,17 @@ audited per-account limit overrides may set a finite value, clear back to the
 plan, or mark a plan allowance unlimited. An unlimited account override does
 not bypass the independent platform ceiling.
 
-Activation is staged. Phase A ships schema 83, the cross-replica gate, HTTP and
-client propagation, metrics, and the control-plane/edge allow-list while the
-canonical plan catalog deliberately leaves all three keys absent. Platform
-ceilings still apply. After both cells and the control plane converge on Phase
-A, operators must set and verify explicit-unlimited Founder overrides for all
-three keys. A separate Phase-B catalog release then activates the finite values
-in the table, reconciles accounts, and re-verifies those Founder overrides.
-From a clean `v0.0.225` checkout it must run both `npm run deploy:plans` and
-`npm run deploy` before lifecycle reconciliation. The control-plane container
-embeds the catalog, so deploying only the public plans Worker cannot change
-resolved account snapshots.
+Activation uses two releases. Phase A shipped schema 83, the cross-replica
+gate, HTTP and client propagation, metrics, and the control-plane/edge
+allow-list while the canonical plan catalog deliberately left all three keys
+absent; platform ceilings still applied. After both cells and the control plane
+converged, operators set and verified explicit-unlimited Founder overrides for
+all three keys. Release `v0.0.225` is Phase B and activates the finite values in
+the table. From a clean exact `v0.0.225` checkout, run both `npm run
+deploy:plans` and `npm run deploy` before lifecycle reconciliation and then
+re-verify the Founder overrides. The control-plane container embeds the
+catalog, so deploying only the public plans Worker cannot change resolved
+account snapshots.
 
 Exact idempotent replay is resolved before charging. A new direct, explicit
 list, realm, reply, completion, request-open, offer, or request-completion send

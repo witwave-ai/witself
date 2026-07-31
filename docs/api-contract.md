@@ -1038,11 +1038,10 @@ Notes on specific actions and workflows:
   logical write debits one `message_sent` unit and one `message_delivered` unit
   per resolved recipient; the budget updates and all fan-out rows commit
   atomically or all roll back. The usage ledger records only committed targets
-  whose delivery state is `delivered`. Phase A leaves all three plan keys
-  absent and therefore runs against platform ceilings. Finite Professional,
-  Team, and Enterprise defaults activate only in the separate Phase-B catalog
-  release after cell/control-plane convergence and verified Founder unlimited
-  overrides.
+  whose delivery state is `delivered`. The `v0.0.225` Phase-B catalog supplies
+  finite defaults for Professional, Team, and Enterprise after
+  cell/control-plane convergence and verified Founder unlimited overrides;
+  Personal omits all three keys. Independent platform ceilings still apply.
 - `/v1/message-requests` is agent-only, realm-local coordination. Create
   requires `Idempotency-Key`, persists one realm `open_request` message and its
   immutable candidate snapshot atomically, and accepts only
