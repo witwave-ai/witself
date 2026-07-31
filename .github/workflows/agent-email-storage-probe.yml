@@ -2,15 +2,6 @@ name: agent-email-storage-probe
 
 on:
   workflow_dispatch:
-    inputs:
-      expectation:
-        description: Provider disposition required for this probe
-        required: true
-        default: accepted
-        type: choice
-        options:
-          - accepted
-          - permanent_bounce
 
 permissions:
   contents: read
@@ -43,4 +34,3 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.AGENT_EMAIL_CANARY_CLOUDFLARE_TOKEN }}
           AGENT_EMAIL_STORAGE_PROBE_FROM: ${{ secrets.AGENT_EMAIL_CANARY_FROM }}
           AGENT_EMAIL_STORAGE_PROBE_TO: ${{ secrets.AGENT_EMAIL_STORAGE_CANARY_TO }}
-          AGENT_EMAIL_STORAGE_PROBE_EXPECTATION: ${{ inputs.expectation }}

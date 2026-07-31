@@ -14,7 +14,6 @@ const baseEnvironment = {
   AGENT_EMAIL_STORAGE_PROBE_FROM: "canary@witwave.ai",
   AGENT_EMAIL_STORAGE_PROBE_TO:
     "canary-a.abcdefghijklmnop@agent-mail.witwave.ai",
-  AGENT_EMAIL_STORAGE_PROBE_EXPECTATION: "accepted",
 };
 
 function cloudflareResponse(result) {
@@ -29,7 +28,7 @@ function cloudflareResponse(result) {
 test("storage probe configuration is bounded to the pilot domain", () => {
   const config = storageProbeConfiguration(baseEnvironment);
   assert.equal(config.to, baseEnvironment.AGENT_EMAIL_STORAGE_PROBE_TO);
-  assert.equal(config.expectation, "accepted");
+  assert.equal(Object.hasOwn(config, "expectation"), false);
 
   assert.throws(
     () => storageProbeConfiguration({
@@ -52,13 +51,6 @@ test("storage probe configuration is bounded to the pilot domain", () => {
         "canary@agent-mail.witwave.ai\nBcc: attacker@example.com",
     }),
     /invalid/,
-  );
-  assert.throws(
-    () => storageProbeConfiguration({
-      ...baseEnvironment,
-      AGENT_EMAIL_STORAGE_PROBE_EXPECTATION: "queued",
-    }),
-    /accepted or permanent_bounce/,
   );
 });
 
@@ -90,7 +82,7 @@ test("storage probe builds one small deterministic synthetic attachment", () => 
   );
 });
 
-test("accepted storage probe uses send_raw and returns a value-free summary", async () => {
+test("storage probe uses send_raw and returns a value-free submission receipt", async () => {
   const config = storageProbeConfiguration(baseEnvironment);
   const calls = [];
   const result = await runStorageProbe(config, {
@@ -118,38 +110,38 @@ test("accepted storage probe uses send_raw and returns a value-free summary", as
   assert.equal(submission.from, config.from);
   assert.deepEqual(submission.recipients, [config.to]);
   assert.match(submission.mime_message, /storage-probe\.txt/);
-  assert.equal(result.outcome, "passed");
-  assert.equal(result.delivered, 1);
-  assert.equal(result.provider_message_id_returned, true);
+  assert.deepEqual(Object.keys(result).sort(), [
+    "addresses_returned",
+    "attachment_bytes",
+    "mime_returned",
+    "outcome",
+    "provider_disposition_returned",
+    "provider_submission_confirmed",
+    "raw_bytes",
+    "schema",
+    "subject",
+    "token_returned",
+  ]);
+  assert.equal(result.schema, "witself.agent-email.storage-probe.v2");
+  assert.equal(result.outcome, "submitted");
+  assert.equal(result.subject, `Witself storage probe ${correlationNonce}`);
+  assert.ok(result.raw_bytes >= 2 * 1024);
+  assert.ok(result.attachment_bytes > 0);
+  assert.equal(result.provider_submission_confirmed, true);
+  assert.equal(result.provider_disposition_returned, false);
 
   const output = JSON.stringify(result);
   assert.doesNotMatch(output, /sending-token/);
   assert.doesNotMatch(output, /canary@witwave\.ai/);
   assert.doesNotMatch(output, /agent-mail\.witwave\.ai/);
   assert.doesNotMatch(output, /multipart\/mixed/);
+  assert.doesNotMatch(output, /provider-id/);
+  assert.doesNotMatch(output, /delivered|queued|permanent_bounces/);
 });
 
-test("accepted storage probe fails closed on a permanent bounce", async () => {
+test("storage probe does not treat the sending API result as a delivery verdict", async () => {
   const config = storageProbeConfiguration(baseEnvironment);
-  await assert.rejects(
-    runStorageProbe(config, {
-      randomUUID: () => correlationNonce,
-      fetch: async () => cloudflareResponse({
-        delivered: [],
-        queued: [],
-        permanent_bounces: [config.to],
-      }),
-    }),
-    /did not confirm an accepted raw email submission/,
-  );
-});
-
-test("permanent-bounce probe requires exact provider rejection evidence", async () => {
-  const config = storageProbeConfiguration({
-    ...baseEnvironment,
-    AGENT_EMAIL_STORAGE_PROBE_EXPECTATION: "permanent_bounce",
-  });
-  const passed = await runStorageProbe(config, {
+  const result = await runStorageProbe(config, {
     randomUUID: () => correlationNonce,
     fetch: async () => cloudflareResponse({
       delivered: [],
@@ -158,18 +150,29 @@ test("permanent-bounce probe requires exact provider rejection evidence", async 
       message_id: "<provider-id@cloudflare.test>",
     }),
   });
-  assert.equal(passed.outcome, "passed");
-  assert.equal(passed.permanent_bounces, 1);
 
+  assert.equal(result.outcome, "submitted");
+  assert.equal(result.provider_submission_confirmed, true);
+  assert.equal(result.provider_disposition_returned, false);
+  const output = JSON.stringify(result);
+  assert.doesNotMatch(output, /provider-id|permanent_bounces/);
+  assert.equal(output.includes(config.to), false);
+});
+
+test("storage probe still fails closed when Cloudflare rejects the API request", async () => {
+  const config = storageProbeConfiguration(baseEnvironment);
   await assert.rejects(
     runStorageProbe(config, {
       randomUUID: () => correlationNonce,
-      fetch: async () => cloudflareResponse({
-        delivered: [],
-        queued: [config.to],
-        permanent_bounces: [],
+      fetch: async () => Response.json({
+        success: false,
+        errors: [{ code: 1000 }],
+        messages: [],
+        result: null,
+      }, {
+        status: 400,
       }),
     }),
-    /did not confirm a permanent raw email rejection/,
+    /Cloudflare API request failed \(1000\)/,
   );
 });
