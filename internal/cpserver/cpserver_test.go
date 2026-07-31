@@ -125,8 +125,33 @@ func TestCatalogEndpoint(t *testing.T) {
 	if status != 200 || doc["schema_version"] != "witself.plans.v0" {
 		t.Fatalf("catalog = %d %v", status, doc)
 	}
-	if plans := doc["plans"].([]any); len(plans) != 4 {
-		t.Fatalf("catalog has %d plans; want 4", len(plans))
+	catalogPlans := doc["plans"].([]any)
+	if len(catalogPlans) != 4 {
+		t.Fatalf("catalog has %d plans; want 4", len(catalogPlans))
+	}
+	wantEmailLimits := map[string][2]float64{
+		"free":       {0, 0},
+		"standard":   {10_485_760, 5_368_709_120},
+		"team":       {26_214_400, 107_374_182_400},
+		"enterprise": {26_214_400, 107_374_182_400},
+	}
+	for _, rawPlan := range catalogPlans {
+		plan := rawPlan.(map[string]any)
+		planID := plan["id"].(string)
+		want, ok := wantEmailLimits[planID]
+		if !ok {
+			t.Fatalf("unexpected plan %q", planID)
+		}
+		limits := plan["limits"].(map[string]any)
+		if limits[plans.AgentEmailMaxRawBytesLimit] != want[0] ||
+			limits[plans.AgentEmailAttachmentStorageBytesLimit] != want[1] {
+			t.Errorf("%s agent-email limits = %v; want raw=%v attachment=%v",
+				planID, limits, want[0], want[1])
+		}
+		delete(wantEmailLimits, planID)
+	}
+	if len(wantEmailLimits) != 0 {
+		t.Fatalf("catalog omitted plans %v", wantEmailLimits)
 	}
 }
 
@@ -724,7 +749,7 @@ func TestAdminAgentEmailLimitOverrideSurfaces(t *testing.T) {
 	view := doc["limit"].(map[string]any)
 	override := view["override"].(map[string]any)
 	if view["dimension"] != plans.AgentEmailMaxRawBytesLimit ||
-		view["default_max"] != nil ||
+		view["default_max"] != float64(0) ||
 		view["effective_max"] != float64(10_485_760) ||
 		view["overridden"] != true ||
 		override["max"] != float64(10_485_760) {
@@ -739,7 +764,7 @@ func TestAdminAgentEmailLimitOverrideSurfaces(t *testing.T) {
 	view = doc["limit"].(map[string]any)
 	override = view["override"].(map[string]any)
 	if view["dimension"] != plans.AgentEmailAttachmentStorageBytesLimit ||
-		view["default_max"] != nil ||
+		view["default_max"] != float64(0) ||
 		view["effective_max"] != nil ||
 		view["overridden"] != true ||
 		override["max"] != nil ||

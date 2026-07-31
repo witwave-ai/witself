@@ -60,9 +60,9 @@ The following table records the current product direction as of 2026-07-30. It
 is a working packaging decision, not a claim that every entitlement is already
 implemented or enforced. Each row moves into the canonical plan catalog and
 resolved cell policy only through its own implementation and rollout decision.
-The realm, agent, active-memory, and current-fact values are the Phase B
-canonical defaults described below; the other rows remain subject to their own
-implementation and rollout gates.
+The realm, agent, active-memory, current-fact, and inbound-agent-email byte
+values are the Phase B canonical defaults described below; the other rows
+remain subject to their own implementation and rollout gates.
 
 | Capability | Personal — $0 | Professional — $30/month | Team — $250/month | Enterprise — contact us |
 |---|---:|---:|---:|---:|
@@ -111,19 +111,24 @@ snapshot. The Founder account uses that explicit-unlimited override for
 `agent_email_attachment_storage_bytes`; its per-message raw-MIME maximum
 remains 25 MiB.
 
-Capacity activation is intentionally split across two releases. Phase A ships
-the schema-81 projection, cell enforcement, status surfaces, and audited admin
-override support while both catalog keys remain absent (temporarily unlimited).
-Rows accepted by a rolling old replica are normalized but marked unaccounted,
-so its pre-existing shared account lock is never upgraded inside a trigger.
-After every old process is gone, the control plane is upgraded and the Founder
-attachment-storage override is written and verified. Phase B first rolls the
-schema-82 post-convergence migration that promotes any compatibility rows and
-rebuilds exact counters under account-first `NOWAIT` fences. It then adds the
-finite values above to `web/plans/plans.json`, republishes the catalog, and
-reconciles every hosted account. Personal email remains disabled throughout;
-the edge Worker retains its independent 25 MiB technical ceiling during both
-phases.
+Capacity activation is intentionally split across two releases. Phase A
+shipped the schema-81 projection, cell enforcement, status surfaces, and
+audited admin override support while both catalog keys remained absent
+(temporarily unlimited). Rows accepted by a rolling old replica were
+normalized but marked unaccounted, so its pre-existing shared account lock was
+never upgraded inside a trigger. After every old process was gone, the control
+plane was upgraded and the Founder attachment-storage override was written and
+verified.
+
+Phase B first rolls the schema-82 post-convergence migration that promotes any
+compatibility rows and rebuilds exact counters under account-first `NOWAIT`
+fences. Only after every target cell reports schema 82 does the Phase-B catalog
+in `web/plans/plans.json` activate the exact finite values above. Republishing
+that catalog and reconciling every hosted account completes activation. The
+Founder account's explicit-unlimited attachment-storage override must remain
+present before and after reconciliation. Personal email remains disabled
+throughout; the edge Worker retains its independent 25 MiB technical ceiling
+during both phases.
 
 ### Messaging availability and retention
 

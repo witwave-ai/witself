@@ -554,36 +554,58 @@ func TestAdminAgentEmailLimitOverridePathsAndBounds(t *testing.T) {
 		requests = append(requests, request{path: r.URL.Path, body: body})
 		dimension := strings.TrimPrefix(
 			r.URL.Path, "/v1/admin/accounts/acct_1/limit-overrides/")
+		effectiveMax := body["max"]
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"schema_version": "witself.v0",
 			"account_id":     "acct_1",
 			"plan":           "free",
 			"billing_plan":   "free",
 			"limit": map[string]any{
-				"dimension": dimension, "overridden": true,
+				"dimension": dimension, "default_max": 0,
+				"effective_max": effectiveMax, "overridden": true,
+				"override": map[string]any{
+					"max": effectiveMax, "actor_id": "adm_abcdefghijklmnopqrst",
+					"actor_handle": "scott", "reason": body["reason"],
+					"set_at": "2026-07-30T00:00:00Z",
+				},
 			},
 		})
 	}))
 	defer srv.Close()
 
 	rawMaximum := int64(10 * 1024 * 1024)
-	if _, err := SetAdminLimitOverride(
+	rawPolicy, err := SetAdminLimitOverride(
 		t.Context(), srv.URL, "witself_adm_test", "acct_1",
 		plans.AgentEmailMaxRawBytesLimit,
 		AdminAccountLimitInput{
 			Max: &rawMaximum, Reason: "professional raw-message cap",
 		},
-	); err != nil {
+	)
+	if err != nil {
 		t.Fatalf("set raw-message maximum: %v", err)
 	}
-	if _, err := SetAdminLimitOverride(
+	attachmentPolicy, err := SetAdminLimitOverride(
 		t.Context(), srv.URL, "witself_adm_test", "acct_1",
 		plans.AgentEmailAttachmentStorageBytesLimit,
 		AdminAccountLimitInput{
 			Unlimited: true, Reason: "founder attachment storage",
 		},
-	); err != nil {
+	)
+	if err != nil {
 		t.Fatalf("set attachment storage unlimited: %v", err)
+	}
+	if rawPolicy.Limit == nil || rawPolicy.Limit.DefaultMax == nil ||
+		*rawPolicy.Limit.DefaultMax != 0 ||
+		rawPolicy.Limit.EffectiveMax == nil ||
+		*rawPolicy.Limit.EffectiveMax != rawMaximum {
+		t.Fatalf("Phase-B raw-message policy = %#v", rawPolicy.Limit)
+	}
+	if attachmentPolicy.Limit == nil ||
+		attachmentPolicy.Limit.DefaultMax == nil ||
+		*attachmentPolicy.Limit.DefaultMax != 0 ||
+		attachmentPolicy.Limit.EffectiveMax != nil {
+		t.Fatalf("Phase-B attachment-storage policy = %#v",
+			attachmentPolicy.Limit)
 	}
 	tooLarge := plans.MaxAgentEmailRawBytes + 1
 	if _, err := SetAdminLimitOverride(

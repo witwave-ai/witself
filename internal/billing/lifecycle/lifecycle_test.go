@@ -406,6 +406,31 @@ func TestAgentEmailLimitOverridesResolveAndValidate(t *testing.T) {
 	ctx := t.Context()
 	const accountID = "acct_agent_email_limits"
 
+	phaseB := h.m.cfg.Catalog
+	phaseA, err := plans.Parse([]byte(`{
+		"schema_version":"witself.plans.v0",
+		"plans":[{
+			"id":"free","name":"Personal","price_monthly":0,"available":true,
+			"usage_billed":false,
+			"limits":{
+				"agents":10,"agents_per_realm":10,"realms":1,
+				"stored_fact":1000,"stored_memory":1000,"stored_secret":0
+			},
+			"policies":{
+				"agent_email_entitlement_version":1,
+				"agent_email_retention_days":30,
+				"message_retention_days":30,
+				"messaging_entitlement_version":1,
+				"transcript_retention_days":30
+			},
+			"features":["memory","facts"]
+		}]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.m.cfg.Catalog = phaseA
+
 	rawMaximum := int64(10 * 1024 * 1024)
 	if _, err := h.m.SetAccountLimitOverride(
 		ctx, accountID, plans.AgentEmailMaxRawBytesLimit, &rawMaximum,
@@ -420,17 +445,35 @@ func TestAgentEmailLimitOverridesResolveAndValidate(t *testing.T) {
 		t.Fatalf("set attachment storage unlimited: %v", err)
 	}
 
+	beforeRecord, beforeSnapshot, err := h.m.ResolvedStatus(ctx, accountID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, present := beforeSnapshot.DefaultLimits[plans.AgentEmailMaxRawBytesLimit]; present {
+		t.Fatalf("raw-message default activated during phase A: %v",
+			beforeSnapshot.DefaultLimits)
+	}
+	if _, present := beforeSnapshot.DefaultLimits[plans.AgentEmailAttachmentStorageBytesLimit]; present {
+		t.Fatalf("attachment-storage default activated during phase A: %v",
+			beforeSnapshot.DefaultLimits)
+	}
+
+	h.m.cfg.Catalog = phaseB
+	applyCallsBeforePromotion := len(h.applier.calls)
+	if err := h.m.ReconcileAccount(ctx, accountID); err != nil {
+		t.Fatal(err)
+	}
 	record, snapshot, err := h.m.ResolvedStatus(ctx, accountID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, present := snapshot.DefaultLimits[plans.AgentEmailMaxRawBytesLimit]; present {
-		t.Fatalf("raw-message default activated during phase A: %v",
-			snapshot.DefaultLimits)
+	if got, present := snapshot.DefaultLimits[plans.AgentEmailMaxRawBytesLimit]; !present || got != 0 {
+		t.Fatalf("Phase-B raw-message default = %d, present=%t; want 0",
+			got, present)
 	}
-	if _, present := snapshot.DefaultLimits[plans.AgentEmailAttachmentStorageBytesLimit]; present {
-		t.Fatalf("attachment-storage default activated during phase A: %v",
-			snapshot.DefaultLimits)
+	if got, present := snapshot.DefaultLimits[plans.AgentEmailAttachmentStorageBytesLimit]; !present || got != 0 {
+		t.Fatalf("Phase-B attachment-storage default = %d, present=%t; want 0",
+			got, present)
 	}
 	if snapshot.Limits[plans.AgentEmailMaxRawBytesLimit] != rawMaximum {
 		t.Fatalf("agent-email snapshot = defaults %v effective %v",
@@ -446,6 +489,14 @@ func TestAgentEmailLimitOverridesResolveAndValidate(t *testing.T) {
 		attachmentOverride.Reason != "founder attachment storage is unlimited" {
 		t.Fatalf("agent-email overrides = raw %+v attachment %+v",
 			rawOverride, attachmentOverride)
+	}
+	if snapshot.Hash != beforeSnapshot.Hash ||
+		len(h.applier.calls) != applyCallsBeforePromotion ||
+		record.Version != beforeRecord.Version {
+		t.Fatalf(
+			"catalog promotion disturbed effective Founder overrides: before=%+v after=%+v calls=%d->%d",
+			beforeSnapshot, snapshot, applyCallsBeforePromotion, len(h.applier.calls),
+		)
 	}
 	if got := h.applier.last(t).limits; got[plans.AgentEmailMaxRawBytesLimit] != rawMaximum {
 		t.Fatalf("applied agent-email limits = %v", got)

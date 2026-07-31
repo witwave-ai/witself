@@ -478,6 +478,199 @@ func TestSchema81AgentEmailCapacityMixedOldWritersDoNotUpgradeAccountLockPostgre
 	assertAgentEmailCapacityCounter(t, st, 0)
 }
 
+func TestMigration82AgentEmailStorageCapacityFinalizesCompatibilityRowsPostgres(
+	t *testing.T,
+) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	st, dsn := newMigrationTestStore(t, baseDSN)
+	migrationTestUpTo(t, dsn, 81)
+	assertMigrationTestVersion(t, dsn, 81)
+	insertAgentEmailCapacityMigrationFixture(t, st)
+
+	attachmentRaw := []byte("post-convergence old-writer attachment")
+	textRaw := []byte("post-convergence old-writer text")
+	parseErrorRaw := []byte("post-convergence old-writer malformed MIME")
+	insertLegacyAgentEmailCapacityMessage(
+		t, st, "emsg_pppppppppppppppp", attachmentRaw, "parsed", "", 1,
+	)
+	insertLegacyAgentEmailCapacityMessage(
+		t, st, "emsg_qqqqqqqqqqqqqqqq", textRaw, "parsed", "", 0,
+	)
+	insertLegacyAgentEmailCapacityMessage(
+		t, st, "emsg_rrrrrrrrrrrrrrrr", parseErrorRaw, "error",
+		"malformed MIME", 0,
+	)
+
+	var unaccounted, legacy int64
+	if err := st.pool.QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE NOT attachment_storage_accounted),
+		       count(*) FILTER (
+		         WHERE payload_retention_state='legacy_pending'
+		       )
+		  FROM agent_email_messages
+		 WHERE account_id=$1`,
+		agentEmailCapacityAccountID,
+	).Scan(&unaccounted, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if unaccounted != 3 || legacy != 0 {
+		t.Fatalf(
+			"schema-81 compatibility rows = unaccounted %d legacy %d, want 3/0",
+			unaccounted, legacy,
+		)
+	}
+	assertAgentEmailCapacityCounter(t, st, 0)
+
+	// Prove schema 82 does not depend on a drift-free Phase-A aggregate before
+	// it promotes the compatibility rows.
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE accounts
+		   SET retained_agent_email_attachment_bytes=7
+		 WHERE id=$1`,
+		agentEmailCapacityAccountID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	migrationTestUpTo(t, dsn, 82)
+	assertMigrationTestVersion(t, dsn, 82)
+	want := int64(len(attachmentRaw) + len(parseErrorRaw))
+	assertAgentEmailCapacityCounter(t, st, want)
+	assertAgentEmailCapacityFinalized(t, st)
+
+	if _, err := st.pool.Exec(ctx, `
+		DELETE FROM agent_email_messages
+		 WHERE id='emsg_pppppppppppppppp'`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	want = int64(len(parseErrorRaw))
+	assertAgentEmailCapacityCounter(t, st, want)
+
+	// The data-only Down preserves the finalized rows. Reapplying schema 82
+	// repairs a later aggregate drift even when no compatibility rows remain.
+	if err := migrationTestDown(t, dsn, false); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, 81)
+	assertAgentEmailCapacityFinalized(t, st)
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE accounts
+		   SET retained_agent_email_attachment_bytes=3
+		 WHERE id=$1`,
+		agentEmailCapacityAccountID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	migrationTestUpTo(t, dsn, 82)
+	assertMigrationTestVersion(t, dsn, 82)
+	assertAgentEmailCapacityCounter(t, st, want)
+	assertAgentEmailCapacityFinalized(t, st)
+}
+
+func TestMigration82AgentEmailCapacitySupportedWriterFenceRetryPostgres(
+	t *testing.T,
+) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	st, dsn := newMigrationTestStore(t, baseDSN)
+	migrationTestUpTo(t, dsn, 81)
+	insertAgentEmailCapacityMigrationFixture(t, st)
+
+	writer, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = writer.Rollback(ctx) }()
+	var accountID string
+	if err := writer.QueryRow(ctx, `
+		SELECT id
+		  FROM accounts
+		 WHERE id=$1
+		 FOR NO KEY UPDATE`,
+		agentEmailCapacityAccountID,
+	).Scan(&accountID); err != nil {
+		t.Fatal(err)
+	}
+
+	migrationDB := migrationTestSQLDB(t, dsn)
+	err = migrationPromptContentionError(t, migrationDB, 82, func() {
+		_ = writer.Rollback(ctx)
+	})
+	_ = migrationDB.Close()
+	assertAgentEmailCapacityLockUnavailable(
+		t, err, "schema 82 with supported account-first writer",
+	)
+	assertMigrationTestVersion(t, dsn, 81)
+
+	if err := writer.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	migrationTestUpTo(t, dsn, 82)
+	assertMigrationTestVersion(t, dsn, 82)
+	assertAgentEmailCapacityFinalized(t, st)
+}
+
+func TestMigration82AgentEmailCapacityDirectMessageWriterFenceRetryPostgres(
+	t *testing.T,
+) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	st, dsn := newMigrationTestStore(t, baseDSN)
+	migrationTestUpTo(t, dsn, 81)
+	insertAgentEmailCapacityMigrationFixture(t, st)
+	raw := []byte("schema-82 direct message-table writer")
+	const messageID = "emsg_7777777777777777"
+	if err := insertCurrentAgentEmailCapacityMessage(
+		st, messageID, raw, int64(len(raw)), "parsed", nil, 0,
+		nil, nil, 0, 0, "retained",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	writer, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = writer.Rollback(ctx) }()
+	if _, err := writer.Exec(ctx, `
+		UPDATE agent_email_messages
+		   SET header_subject=header_subject
+		 WHERE id=$1`,
+		messageID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	migrationDB := migrationTestSQLDB(t, dsn)
+	err = migrationPromptContentionError(t, migrationDB, 82, func() {
+		_ = writer.Rollback(ctx)
+	})
+	_ = migrationDB.Close()
+	assertAgentEmailCapacityLockUnavailable(
+		t, err, "schema 82 with direct message-table writer",
+	)
+	assertMigrationTestVersion(t, dsn, 81)
+
+	if err := writer.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	migrationTestUpTo(t, dsn, 82)
+	assertMigrationTestVersion(t, dsn, 82)
+	assertAgentEmailCapacityCounter(t, st, 0)
+	assertAgentEmailCapacityFinalized(t, st)
+}
+
 func migrationPromptContentionError(
 	t *testing.T,
 	migrationDB *sql.DB,
@@ -505,6 +698,39 @@ func migrationPromptContentionError(
 			target,
 		)
 		return nil
+	}
+}
+
+func assertAgentEmailCapacityFinalized(t *testing.T, st *Store) {
+	t.Helper()
+	var legacy, unaccounted, mismatched int64
+	if err := st.pool.QueryRow(context.Background(), `
+		SELECT
+		  (SELECT count(*)
+		     FROM agent_email_messages
+		    WHERE payload_retention_state='legacy_pending'),
+		  (SELECT count(*)
+		     FROM agent_email_messages
+		    WHERE NOT attachment_storage_accounted),
+		  (SELECT count(*)
+		     FROM accounts account
+		    WHERE account.retained_agent_email_attachment_bytes
+		          IS DISTINCT FROM (
+		            SELECT COALESCE(
+		              sum(message.retained_attachment_storage_bytes),
+		              0
+		            )::BIGINT
+		              FROM agent_email_messages message
+		             WHERE message.account_id=account.id
+		          ))`,
+	).Scan(&legacy, &unaccounted, &mismatched); err != nil {
+		t.Fatal(err)
+	}
+	if legacy != 0 || unaccounted != 0 || mismatched != 0 {
+		t.Fatalf(
+			"agent-email capacity finalization = legacy %d unaccounted %d mismatched %d",
+			legacy, unaccounted, mismatched,
+		)
 	}
 }
 
