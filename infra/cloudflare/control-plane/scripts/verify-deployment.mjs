@@ -33,7 +33,9 @@ function parseArgs(argv) {
   const out = {
     config: join(root, "wrangler.generated.jsonc"),
     endpoint: process.env.WITSELF_CONTROL_PLANE ?? "https://self.witwave.ai",
-    attempts: 36,
+    // Container-backed Worker revisions can take several minutes to replace
+    // their live instances after the Worker upload has completed.
+    attempts: 120,
     delayMs: 5000,
   };
   for (let i = 0; i < argv.length; i += 1) {
