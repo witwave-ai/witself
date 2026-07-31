@@ -194,30 +194,52 @@ The separate `agent-email-storage-probe` workflow is manual-dispatch-only and
 uses the same protected `agent-email-canary` GitHub Environment. Pin its one
 exact disposable `@agent-mail.witwave.ai` recipient in the separate
 `AGENT_EMAIL_STORAGE_CANARY_TO` Environment secret; do not reuse or overwrite
-`AGENT_EMAIL_CANARY_TO`. The only dispatch input is an `accepted` or
-`permanent_bounce` expectation. The runner creates one bounded multipart
-message with a fixed synthetic attachment and submits it through Cloudflare's
-raw-MIME API. The sender, recipient, and Email Sending token remain Environment
-secrets; the result contains only a synthetic subject, byte counts, provider
-disposition counts, and booleans proving that no token, address, or MIME was
-returned.
+`AGENT_EMAIL_CANARY_TO`. The workflow has no dispatch inputs. The runner creates
+one bounded multipart message with a fixed synthetic attachment and submits it
+through Cloudflare's raw-MIME API. The sender, recipient, and Email Sending
+token remain Environment secrets; the result contains only the exact synthetic
+subject, byte counts, and booleans proving that no token, address, MIME, or
+provider disposition was returned.
 
-Use `accepted` while verifying retained and capacity-omitted storage. Use
-`permanent_bounce` only after an intentionally lower account raw-message limit
-has converged, and only in this order:
+A successful workflow proves only that the Cloudflare Email Sending API
+accepted the submission request. It does not prove eventual delivery,
+retention, capacity omission, or permanent rejection. `send_raw` can return
+before the Email Routing Worker later calls `setReject`, so the probe
+deliberately neither interprets nor returns the API's immediate `delivered`,
+`queued`, `permanent_bounces`, or message-id fields.
 
-1. Run `accepted` against the pinned target and verify that exact synthetic
-   subject in the live cell mailbox and database.
-2. Lower the account raw-message limit below the probe's reported raw byte
-   count and verify the policy has converged in the cell.
-3. Run `permanent_bounce` against the same pinned target, then verify no new
-   mailbox or database row was created.
+Converge the intended account policy before each dispatch. Use sufficient
+attachment capacity for the retained case. For capacity omission, keep the
+raw-message maximum above the probe size but leave less attachment capacity
+than the complete attachment-bearing MIME requires. For raw-message rejection,
+set the effective raw-message maximum below the prior probe's reported
+`raw_bytes`. Do not change policy while a submission is still in flight.
 
-The rejection mode passes only when Cloudflare returns explicit permanent
-bounce evidence; a queued submission is not treated as proof. Its result is
-provider submission evidence, not a substitute for the required live no-new-row
-check. The workflow never prepares routes, changes cell policy, or deletes
-mail.
+Run only one storage probe at a time. Capture its exact synthetic subject from
+the value-free `witself.agent-email.storage-probe.v2` result with
+`outcome='submitted'`, then combine two independent observations:
+
+- Query the live cell by that exact subject. Retained storage requires exactly
+  one parsed row with `payload_retention_state='retained'`, non-null
+  `raw_mime`, and retained bytes equal to the full received raw-message size.
+  Capacity omission requires exactly one parsed row with
+  `payload_retention_state='omitted_capacity'`, null `raw_mime`, and zero
+  retained bytes. A raw-message-limit rejection requires no row for that exact
+  subject.
+- Query a narrow Analytics Engine window with
+  `npm run metrics -- summary [minutes]`. Retained and capacity-omitted
+  submissions require the Worker's final `accepted` outcome. A converged
+  raw-message limit below the probe's reported `raw_bytes` requires
+  `rejected_over_size` in the `response` phase. Edge metrics intentionally
+  contain no subject or other correlation identifier, so serialize probes,
+  compare the narrow-window counts with a baseline, and use the exact-subject
+  database check to distinguish the storage result.
+
+Do not infer the result from the workflow's `submitted` receipt. Analytics
+Engine writes are best-effort; if the expected point is absent, inspect the
+Worker's built-in invocation metrics and repeat only after the first submission
+has been conclusively accounted for. The workflow never prepares routes,
+changes cell policy, or deletes mail.
 
 ## Rollback
 

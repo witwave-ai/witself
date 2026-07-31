@@ -27,23 +27,6 @@ apps:
     chartVersion: 0.0.223
     imageTag: 0.0.223
     backendKind: managed
-    # Temporary receive-only acceptance pilot for the isolated disposable
-    # Personal account. The matching private key remains only in Cloudflare.
-    agentEmail:
-      receivePilot:
-        enabled: true
-        domain: agent-mail.witwave.ai
-        audience: civo-sandbox-usw2-dev
-        realmID: realm_p7o5lmjihbwh26zx
-        agentIDs:
-          - agent_niom6kesnqmdh4wy
-          - agent_qxqb4u63bhcl6cv5
-          - agent_g3nlqv2iy6bo4n4a
-          - agent_rszuicjsewjdwmko
-          - agent_pjezn7cg2upm3g45
-        retryCanaryAgentID: agent_niom6kesnqmdh4wy
-        relayPublicKeysJSON: '{"pilot_20260721_v1":"4YFALyKdS19xyYFyoJkP1kydVKw0xlmhf92Hog5b81s="}'
-        relayReplayWindow: 5m
     backup:
       enabled: true
       validationEnabled: false

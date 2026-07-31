@@ -8,7 +8,6 @@ const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f
 const SIMPLE_LOCAL_PART = /^[a-z0-9][a-z0-9._%+-]*$/;
 const SIMPLE_DOMAIN = /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/;
 const PILOT_DOMAIN = "agent-mail.witwave.ai";
-const EXPECTATIONS = new Set(["accepted", "permanent_bounce"]);
 const MAXIMUM_PROBE_BYTES = 16 * 1024;
 const MINIMUM_PROBE_BYTES = 2 * 1024;
 const SYNTHETIC_ATTACHMENT = Buffer.from(
@@ -59,24 +58,6 @@ function base64Lines(value) {
   return value.toString("base64").match(/.{1,76}/g).join("\r\n");
 }
 
-function providerArray(result, field) {
-  const value = result?.[field];
-  if (value === undefined || value === null) return [];
-  if (!Array.isArray(value)) {
-    throw new Error("Cloudflare returned an invalid raw email submission result");
-  }
-  return value;
-}
-
-function hasMessageID(result) {
-  const value = result?.message_id;
-  return (
-    typeof value === "string" &&
-    value.trim() !== "" &&
-    !/[\r\n\0]/.test(value)
-  );
-}
-
 export function storageProbeConfiguration(env = process.env) {
   const accountID = required(
     env.CLOUDFLARE_ACCOUNT_ID,
@@ -84,15 +65,6 @@ export function storageProbeConfiguration(env = process.env) {
   );
   if (!ACCOUNT_ID.test(accountID)) {
     throw new Error("CLOUDFLARE_ACCOUNT_ID is missing or invalid");
-  }
-  const expectation = required(
-    env.AGENT_EMAIL_STORAGE_PROBE_EXPECTATION,
-    "AGENT_EMAIL_STORAGE_PROBE_EXPECTATION",
-  );
-  if (!EXPECTATIONS.has(expectation)) {
-    throw new Error(
-      "AGENT_EMAIL_STORAGE_PROBE_EXPECTATION must be accepted or permanent_bounce",
-    );
   }
   return {
     accountID,
@@ -105,7 +77,6 @@ export function storageProbeConfiguration(env = process.env) {
       "AGENT_EMAIL_STORAGE_PROBE_FROM",
     ),
     to: pilotRecipient(env.AGENT_EMAIL_STORAGE_PROBE_TO),
-    expectation,
   };
 }
 
@@ -174,48 +145,24 @@ export async function runStorageProbe(config, runtime = {}) {
     apiToken: config.cloudflareToken,
     fetchAPI: runtime.fetch ?? fetch,
   });
-  const result = await api.sendRawEmail({
+  // Email Sending acknowledges submission before the Email Routing Worker has
+  // necessarily produced its final SMTP-facing verdict. Intentionally ignore
+  // the immediate result; the exact subject, live database, and value-free edge
+  // metrics are the acceptance evidence for retained, omitted, or rejected mail.
+  await api.sendRawEmail({
     from: config.from,
     recipients: [config.to],
     mime_message: message.mimeMessage,
   });
-  const delivered = providerArray(result, "delivered").length;
-  const queued = providerArray(result, "queued").length;
-  const permanentBounces = providerArray(
-    result,
-    "permanent_bounces",
-  ).length;
-  const accepted =
-    delivered > 0 || queued > 0 || hasMessageID(result);
-
-  if (
-    config.expectation === "accepted" &&
-    (!accepted || permanentBounces !== 0)
-  ) {
-    throw new Error(
-      "Cloudflare did not confirm an accepted raw email submission",
-    );
-  }
-  if (
-    config.expectation === "permanent_bounce" &&
-    (permanentBounces < 1 || delivered > 0 || queued > 0)
-  ) {
-    throw new Error(
-      "Cloudflare did not confirm a permanent raw email rejection",
-    );
-  }
 
   return {
-    schema: "witself.agent-email.storage-probe.v1",
-    outcome: "passed",
-    expectation: config.expectation,
+    schema: "witself.agent-email.storage-probe.v2",
+    outcome: "submitted",
     subject: message.subject,
     raw_bytes: message.rawBytes,
     attachment_bytes: message.attachmentBytes,
-    delivered,
-    queued,
-    permanent_bounces: permanentBounces,
-    provider_message_id_returned: hasMessageID(result),
+    provider_submission_confirmed: true,
+    provider_disposition_returned: false,
     token_returned: false,
     mime_returned: false,
     addresses_returned: false,

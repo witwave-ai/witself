@@ -15,6 +15,6 @@
     "test": "node --test test/*.test.mjs && go run ./test/golden-go ./test/golden-vector.json"
   },
   "devDependencies": {
-    "wrangler": "^4.106.0"
+    "wrangler": "^4.114.0"
   }
 }
