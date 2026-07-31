@@ -11,6 +11,7 @@
     "metrics": "node scripts/metrics.mjs",
     "routes": "node scripts/routes.mjs",
     "secret:put": "node scripts/render-wrangler.mjs && wrangler secret put RELAY_ED25519_PRIVATE_KEY --config wrangler.generated.jsonc",
+    "storage-probe": "node scripts/storage-probe.mjs",
     "test": "node --test test/*.test.mjs && go run ./test/golden-go ./test/golden-vector.json"
   },
   "devDependencies": {

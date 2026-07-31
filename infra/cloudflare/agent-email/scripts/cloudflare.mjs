@@ -164,6 +164,16 @@ export class CloudflareAPI {
       body: message,
     });
   }
+
+  async sendRawEmail(message) {
+    if (!message || typeof message !== "object" || Array.isArray(message)) {
+      throw new Error("Cloudflare raw email submission is invalid");
+    }
+    return this.request(`/accounts/${this.accountID}/email/sending/send_raw`, {
+      method: "POST",
+      body: message,
+    });
+  }
 }
 
 export async function assertIsolatedEmailDirectory(api) {

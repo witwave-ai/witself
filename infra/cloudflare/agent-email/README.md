@@ -188,6 +188,23 @@ would add about 96 retained messages per day until the ordinary mailbox
 retention/delete contract is implemented. Keep the workflow manual-only unless
 that accumulation is explicitly accepted and monitored.
 
+## Raw-MIME storage probe
+
+The separate `agent-email-storage-probe` workflow is manual-dispatch-only and
+uses the same protected `agent-email-canary` GitHub Environment. It accepts one
+exact disposable `@agent-mail.witwave.ai` recipient and an `accepted` or
+`permanent_bounce` expectation. The runner creates one bounded multipart
+message with a fixed synthetic attachment and submits it through Cloudflare's
+raw-MIME API. The sender and Email Sending token remain Environment secrets;
+the result contains only a synthetic subject, byte counts, provider disposition
+counts, and booleans proving that no token, address, or MIME was returned.
+
+Use `accepted` while verifying retained and capacity-omitted storage. Use
+`permanent_bounce` only after an intentionally lower account raw-message limit
+has converged. That mode passes only when Cloudflare returns explicit permanent
+bounce evidence; a queued submission is not treated as proof of rejection.
+The workflow never prepares routes, changes cell policy, or deletes mail.
+
 ## Rollback
 
 Disable first; this preserves the exact rules and directory rows for inspection:
