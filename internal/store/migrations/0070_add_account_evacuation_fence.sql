@@ -305,7 +305,7 @@ BEGIN
           JOIN information_schema.tables t
             ON t.table_schema = c.table_schema
            AND t.table_name = c.table_name
-         WHERE c.table_schema = 'public'
+         WHERE c.table_schema = current_schema()
            AND c.column_name = 'account_id'
            AND t.table_type = 'BASE TABLE'
            AND c.table_name NOT IN (
@@ -376,7 +376,7 @@ BEGIN
           JOIN information_schema.tables t
             ON t.table_schema = c.table_schema
            AND t.table_name = c.table_name
-         WHERE c.table_schema = 'public'
+         WHERE c.table_schema = current_schema()
            AND c.column_name = 'account_id'
            AND t.table_type = 'BASE TABLE'
          ORDER BY c.table_name

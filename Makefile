@@ -60,8 +60,16 @@ build: ## Build every ./cmd/... binary into ./bin, including the server and work
 test: ## Run the Go tests
 	go test ./...
 
-test-integration: db-up ## Run the PostgreSQL-backed store tests
-	WITSELF_TEST_DATABASE_URL="$(DEV_DSN)" go test ./internal/store -count=1
+test-integration: db-up ## Run the PostgreSQL-backed store tests in a disposable database
+	@set -eu; \
+		integration_db="witself_test_$$(date -u +%Y%m%d%H%M%S)_$$$$"; \
+		cleanup_integration_db() { \
+			docker compose exec -T postgres dropdb --if-exists -U witself "$$integration_db" >/dev/null; \
+		}; \
+		trap cleanup_integration_db EXIT HUP INT TERM; \
+		docker compose exec -T postgres createdb -U witself "$$integration_db"; \
+		WITSELF_TEST_DATABASE_URL="postgres://witself:witself@localhost:5432/$$integration_db?sslmode=disable" \
+			go test ./internal/store -count=1 -timeout=30m
 
 test-memory-cloud-conformance: ## Run the opt-in 3x3 memory/account-move rehearsal or certification
 	WITSELF_MEMORY_CLOUD_CONFORMANCE=1 go test ./internal/store \

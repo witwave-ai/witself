@@ -410,6 +410,36 @@ func TestMessageRateLimitsAndUsagePostgres(t *testing.T) {
 	})
 }
 
+func TestMessageRateMigrationIsolatedFromNewerPublicSchemaPostgres(t *testing.T) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	publicStore, err := Open(ctx, baseDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer publicStore.Close()
+	if err := publicStore.Migrate(); err != nil {
+		t.Fatalf("migrate public schema: %v", err)
+	}
+
+	isolatedStore, _ := newMigrationTestStore(t, baseDSN)
+	if err := isolatedStore.Migrate(); err != nil {
+		t.Fatalf("migrate isolated schema after public schema 83: %v", err)
+	}
+	var tablePresent bool
+	if err := isolatedStore.pool.QueryRow(ctx, `
+		SELECT to_regclass(current_schema() || '.agent_message_rate_buckets') IS NOT NULL`,
+	).Scan(&tablePresent); err != nil {
+		t.Fatal(err)
+	}
+	if !tablePresent {
+		t.Fatal("isolated schema migration omitted agent_message_rate_buckets")
+	}
+}
+
 func exerciseBlockedMessageRateDebit(
 	ctx context.Context,
 	t *testing.T,

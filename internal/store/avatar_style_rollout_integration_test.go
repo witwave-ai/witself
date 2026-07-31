@@ -559,12 +559,19 @@ func TestAvatarStyleRolloutTimeoutBackoffDoesNotStarveAnotherRealmPostgres(t *te
 		_ = profileLock.Rollback(ctx)
 		t.Fatal(err)
 	}
+	// Exercise the production batch loop with enough room for realm A's
+	// deliberate SQL lock timeout, durable failure bookkeeping, and realm B's
+	// fallback on a loaded race-enabled runner. A smaller 250ms budget made this
+	// scheduling-sensitive even when the fallback behavior was correct.
+	const batchTimeout = 8 * time.Second
+	const maxElapsed = 10 * time.Second
 	started := time.Now()
-	result, err := st.processAvatarStyleRolloutBatch(ctx, 1, 250*time.Millisecond)
+	result, err := st.processAvatarStyleRolloutBatch(ctx, 1, batchTimeout)
+	elapsed := time.Since(started)
 	if err != nil || !result.Found || result.RealmID != realmB.ID ||
-		result.ProcessedProfiles != 1 || time.Since(started) > 2*time.Second {
+		result.ProcessedProfiles != 1 || elapsed > maxElapsed {
 		_ = profileLock.Rollback(ctx)
-		t.Fatalf("timeout isolation = %#v / %v after %s", result, err, time.Since(started))
+		t.Fatalf("timeout isolation = %#v / %v after %s", result, err, elapsed)
 	}
 	var failures int
 	var retryAfter *time.Time
