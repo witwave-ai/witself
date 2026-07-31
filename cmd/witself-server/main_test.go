@@ -70,6 +70,73 @@ func TestPlanLimitErrorPreservesBoundedDimension(t *testing.T) {
 	}
 }
 
+func TestMessageRateLimitErrorPreservesValueFreeThrottleDetails(t *testing.T) {
+	resetAt := time.Date(2026, 7, 31, 12, 0, 2, 0, time.UTC)
+	source := &store.MessageRateLimitError{
+		Dimension:     store.MessageRateDimensionDelivered,
+		Scope:         store.MessageRateScopeRecipient,
+		Limit:         60,
+		Used:          60,
+		Attempted:     1,
+		WindowSeconds: 60,
+		RetryAfter:    1250 * time.Millisecond,
+		ResetAt:       resetAt,
+		Source:        store.MessageRateSourcePlan,
+		Retryable:     true,
+	}
+	for _, test := range []struct {
+		name     string
+		mapError func(error) error
+	}{
+		{name: "message", mapError: mapMessageError},
+		{name: "message_request", mapError: mapMessageRequestError},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			mapped := test.mapError(source)
+			if !errors.Is(mapped, server.ErrMessageRateLimited) {
+				t.Fatalf("mapped error = %v; want ErrMessageRateLimited", mapped)
+			}
+			var detail *server.MessageRateLimitError
+			if !errors.As(mapped, &detail) {
+				t.Fatalf("mapped error type = %T; want *server.MessageRateLimitError", mapped)
+			}
+			if detail.Dimension != source.Dimension || detail.Scope != source.Scope ||
+				detail.Limit != source.Limit || detail.Used != source.Used ||
+				detail.Attempted != source.Attempted || detail.WindowSeconds != source.WindowSeconds ||
+				detail.RetryAfter != source.RetryAfter || !detail.ResetAt.Equal(source.ResetAt) ||
+				detail.Source != source.Source || detail.Retryable != source.Retryable {
+				t.Fatalf("mapped detail = %#v; source = %#v", detail, source)
+			}
+		})
+	}
+
+	hardSource := &store.MessageRateLimitError{
+		Dimension: store.MessageRateDimensionSent, Scope: store.MessageRateScopeAgent,
+		Limit: 0, Used: 0, Attempted: 1, WindowSeconds: 60,
+		Source: store.MessageRateSourcePlan, Retryable: false,
+	}
+	for _, test := range []struct {
+		name     string
+		mapError func(error) error
+	}{
+		{name: "message", mapError: mapMessageError},
+		{name: "message_request", mapError: mapMessageRequestError},
+	} {
+		t.Run("hard_"+test.name, func(t *testing.T) {
+			mapped := test.mapError(hardSource)
+			var detail *server.MessageRateLimitError
+			if !errors.Is(mapped, server.ErrMessageRateLimited) || !errors.As(mapped, &detail) {
+				t.Fatalf("mapped error = %T %v; want *server.MessageRateLimitError", mapped, mapped)
+			}
+			if detail.Dimension != hardSource.Dimension || detail.Scope != hardSource.Scope ||
+				detail.Limit != 0 || detail.Attempted != 1 || detail.Retryable ||
+				detail.RetryAfter != 0 || !detail.ResetAt.IsZero() {
+				t.Fatalf("mapped hard detail = %#v; source = %#v", detail, hardSource)
+			}
+		})
+	}
+}
+
 func TestBootstrapTokenTTL(t *testing.T) {
 	t.Setenv("WITSELF_BOOTSTRAP_TOKEN_TTL", "")
 	ttl, err := bootstrapTokenTTL()

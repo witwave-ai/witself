@@ -118,6 +118,62 @@ Rules:
   tokens, secret values, TOTP seeds, TOTP codes, and wrapped key material must
   never appear in `error.message` or `error.details`.
 
+The implemented message-write HTTP boundary retains the repository's flat
+machine-error compatibility shape. Clients accept this form and may also parse
+the canonical nested error envelope:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "code": "rate_limited",
+  "error": "message rate limit reached",
+  "retryable": true,
+  "retry_after": 2,
+  "details": {
+    "limit_dimension": "message_delivered",
+    "limit_key": "message_delivered_per_recipient_minute",
+    "scope": "recipient",
+    "limit": 60,
+    "used": 60,
+    "attempted": 1,
+    "window_seconds": 60,
+    "retry_after": 2
+  }
+}
+```
+
+This response is HTTP 429 with the same whole-second value in `Retry-After`.
+`limit_dimension` is one of `message_sent` or `message_delivered`; `scope` is
+one of `agent`, `realm`, or `recipient`; and `limit_key` is the matching
+`*_per_*_minute` account-policy key. These fields describe a shared rolling
+one-minute budget, not a wall-clock minute bucket. They are value-free: no
+account, realm, agent, recipient, request, or message identifier or content is
+permitted.
+
+When the effective rate limit is zero or one attempted debit is larger than
+the bucket capacity, the unchanged request can never succeed. Message-write
+routes return HTTP 403 with `code: "limit_exceeded"`, `retryable: false`, the
+same value-free dimension/key/scope/limit/used/attempted/window details, and no
+`Retry-After` header or `retry_after` field at either envelope level:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "code": "limit_exceeded",
+  "error": "message rate limit reached",
+  "retryable": false,
+  "details": {
+    "limit_dimension": "message_sent",
+    "limit_key": "message_sent_per_agent_minute",
+    "scope": "agent",
+    "limit": 0,
+    "used": 0,
+    "attempted": 1,
+    "window_seconds": 60
+  }
+}
+```
+
 ## Error Codes
 
 JSON error codes should align with CLI exit-code categories.

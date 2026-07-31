@@ -38,6 +38,7 @@ type runtimeMetrics struct {
 	secretLimitRejects map[limitMetricLabels]uint64
 	memoryLimitRejects map[limitMetricLabels]uint64
 	factLimitRejects   map[limitMetricLabels]uint64
+	messageRateRejects map[messageRateMetricLabels]uint64
 	agentEmailIngests  map[string]uint64
 }
 
@@ -77,6 +78,10 @@ type limitMetricLabels struct {
 	LimitDimension, Operation string
 }
 
+type messageRateMetricLabels struct {
+	LimitDimension, Scope, Operation string
+}
+
 type metricHistogram struct {
 	Buckets []uint64
 	Count   uint64
@@ -101,6 +106,7 @@ func newRuntimeMetrics() *runtimeMetrics {
 		secretLimitRejects: make(map[limitMetricLabels]uint64),
 		memoryLimitRejects: make(map[limitMetricLabels]uint64),
 		factLimitRejects:   make(map[limitMetricLabels]uint64),
+		messageRateRejects: make(map[messageRateMetricLabels]uint64),
 		agentEmailIngests:  make(map[string]uint64),
 	}
 }
@@ -168,6 +174,48 @@ func (m *runtimeMetrics) instrumentConfig(cfg Config) Config {
 		cfg.CreateAgent = func(ctx context.Context, accountID, realmID, name string) (Agent, error) {
 			result, err := operation(ctx, accountID, realmID, name)
 			m.observePlanLimitRejection(err, "agents_per_realm")
+			return result, err
+		}
+	}
+	if operation := cfg.SendMessage; operation != nil {
+		cfg.SendMessage = func(ctx context.Context, p DomainPrincipal, in SendMessageRequest) (Message, error) {
+			result, err := operation(ctx, p, in)
+			m.observeMessageRateRejection(err, "send")
+			return result, err
+		}
+	}
+	if operation := cfg.ReplyMessage; operation != nil {
+		cfg.ReplyMessage = func(ctx context.Context, p DomainPrincipal, messageID string, in ReplyMessageRequest) (Message, error) {
+			result, err := operation(ctx, p, messageID, in)
+			m.observeMessageRateRejection(err, "reply")
+			return result, err
+		}
+	}
+	if operation := cfg.CompleteMessage; operation != nil {
+		cfg.CompleteMessage = func(ctx context.Context, p DomainPrincipal, messageID string, in CompleteMessageRequest) (CompleteMessageResult, error) {
+			result, err := operation(ctx, p, messageID, in)
+			m.observeMessageRateRejection(err, "complete")
+			return result, err
+		}
+	}
+	if operation := cfg.CreateMessageRequest; operation != nil {
+		cfg.CreateMessageRequest = func(ctx context.Context, p DomainPrincipal, in CreateMessageRequestRequest) (CreateMessageRequestResult, error) {
+			result, err := operation(ctx, p, in)
+			m.observeMessageRateRejection(err, "request_open")
+			return result, err
+		}
+	}
+	if operation := cfg.OfferMessageRequest; operation != nil {
+		cfg.OfferMessageRequest = func(ctx context.Context, p DomainPrincipal, requestID string, in OfferMessageRequestRequest) (OfferMessageRequestResult, error) {
+			result, err := operation(ctx, p, requestID, in)
+			m.observeMessageRateRejection(err, "request_offer")
+			return result, err
+		}
+	}
+	if operation := cfg.CompleteMessageRequest; operation != nil {
+		cfg.CompleteMessageRequest = func(ctx context.Context, p DomainPrincipal, requestID string, in CompleteMessageRequestRequest) (CompleteMessageRequestResult, error) {
+			result, err := operation(ctx, p, requestID, in)
+			m.observeMessageRateRejection(err, "request_complete")
 			return result, err
 		}
 	}
@@ -396,6 +444,31 @@ func (m *runtimeMetrics) observeFactLimitRejection(err error, operation string) 
 	m.mu.Unlock()
 }
 
+func (m *runtimeMetrics) observeMessageRateRejection(err error, operation string) {
+	if !errors.Is(err, ErrMessageRateLimited) {
+		return
+	}
+	dimension := "unknown"
+	scope := "unknown"
+	var detail *MessageRateLimitError
+	if errors.As(err, &detail) && detail != nil {
+		dimension = messageRateLimitDimension(detail.Dimension)
+		scope = messageRateLimitScope(detail.Scope)
+	}
+	switch operation {
+	case "send", "reply", "complete", "request_open", "request_offer", "request_complete":
+	default:
+		operation = "unknown"
+	}
+	m.mu.Lock()
+	m.messageRateRejects[messageRateMetricLabels{
+		LimitDimension: dimension,
+		Scope:          scope,
+		Operation:      operation,
+	}]++
+	m.mu.Unlock()
+}
+
 func agentEmailIngestMetricOutcome(err error) string {
 	switch {
 	case err == nil:
@@ -501,6 +574,7 @@ func (m *runtimeMetrics) snapshot() *runtimeMetrics {
 		secretLimitRejects: maps.Clone(m.secretLimitRejects),
 		memoryLimitRejects: maps.Clone(m.memoryLimitRejects),
 		factLimitRejects:   maps.Clone(m.factLimitRejects),
+		messageRateRejects: maps.Clone(m.messageRateRejects),
 		agentEmailIngests:  maps.Clone(m.agentEmailIngests),
 	}
 }
@@ -566,6 +640,9 @@ func (m *runtimeMetrics) writePrometheusSnapshot(w io.Writer) {
 	})
 	writeCounterMap(w, "witself_fact_limit_rejections_total", "Net-positive current-fact mutation refusals by bounded limit dimension and operation.", m.factLimitRejects, func(key limitMetricLabels) string {
 		return labels("limit_dimension", key.LimitDimension, "operation", key.Operation)
+	})
+	writeCounterMap(w, "witself_message_rate_limit_rejections_total", "Messaging write refusals by bounded rate-limit dimension, scope, and operation.", m.messageRateRejects, func(key messageRateMetricLabels) string {
+		return labels("limit_dimension", key.LimitDimension, "scope", key.Scope, "operation", key.Operation)
 	})
 	writeCounterMap(w, "witself_agent_email_ingests_total", "Signed inbound agent-email deliveries by bounded storage or refusal outcome.", m.agentEmailIngests, func(outcome string) string {
 		return labels("outcome", outcome)

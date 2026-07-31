@@ -2052,9 +2052,14 @@ func mapTranscriptError(err error) error {
 
 func mapMessageError(err error) error {
 	var featureErr *store.FeatureNotEnabledError
+	var rateErr *store.MessageRateLimitError
 	switch {
 	case err == nil:
 		return nil
+	case errors.As(err, &rateErr):
+		return toServerMessageRateLimitError(rateErr)
+	case errors.Is(err, store.ErrMessageRateLimited):
+		return server.ErrMessageRateLimited
 	case errors.As(err, &featureErr):
 		return &server.FeatureNotEnabledError{Feature: featureErr.Feature}
 	case errors.Is(err, store.ErrMessageInputInvalid), errors.Is(err, store.ErrMessageCursorInvalid):
@@ -2076,9 +2081,14 @@ func mapMessageError(err error) error {
 
 func mapMessageRequestError(err error) error {
 	var featureErr *store.FeatureNotEnabledError
+	var rateErr *store.MessageRateLimitError
 	switch {
 	case err == nil:
 		return nil
+	case errors.As(err, &rateErr):
+		return toServerMessageRateLimitError(rateErr)
+	case errors.Is(err, store.ErrMessageRateLimited):
+		return server.ErrMessageRateLimited
 	case errors.As(err, &featureErr):
 		return &server.FeatureNotEnabledError{Feature: featureErr.Feature}
 	case errors.Is(err, store.ErrMessageRequestInputInvalid):
@@ -2101,6 +2111,24 @@ func mapMessageRequestError(err error) error {
 		return server.ErrNotFound
 	default:
 		return err
+	}
+}
+
+func toServerMessageRateLimitError(err *store.MessageRateLimitError) error {
+	if err == nil {
+		return server.ErrMessageRateLimited
+	}
+	return &server.MessageRateLimitError{
+		Dimension:     err.Dimension,
+		Scope:         err.Scope,
+		Limit:         err.Limit,
+		Used:          err.Used,
+		Attempted:     err.Attempted,
+		WindowSeconds: err.WindowSeconds,
+		RetryAfter:    err.RetryAfter,
+		ResetAt:       err.ResetAt,
+		Source:        err.Source,
+		Retryable:     err.Retryable,
 	}
 }
 

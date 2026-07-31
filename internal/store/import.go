@@ -5562,6 +5562,9 @@ func (s *Store) importAccount(
 	if err := validateImportedFactDecisionAssertions(ctx, tx, m.AccountID); err != nil {
 		return export.Manifest{}, AccountImportDisposition{}, err
 	}
+	if err := validateImportedMessageUsageEvents(ctx, tx, m.AccountID); err != nil {
+		return export.Manifest{}, AccountImportDisposition{}, err
+	}
 	if err := validateImportedUsageRollups(ctx, tx, m.AccountID); err != nil {
 		return export.Manifest{}, AccountImportDisposition{}, err
 	}
@@ -7245,6 +7248,89 @@ func validateImportedUsageRollups(ctx context.Context, tx pgx.Tx, accountID stri
 	}
 	if mismatch {
 		return fmt.Errorf("%w: usage rollups do not match usage events", ErrArchiveContent)
+	}
+	return nil
+}
+
+// validateImportedMessageUsageEvents checks the canonical, already
+// archive-scoped shape of every portable message billing fact. When its message
+// graph is still retained, the event is also bound to the exact sender, realm,
+// timestamp, and successful-delivery count. Every delivered event must pair
+// with the exact sent event even after retention removes the graph. Older
+// messages may legitimately have no such events, so no historical backfill is
+// required. Conversely,
+// retention may have removed the referenced graph while preserving its
+// immutable, value-free usage facts; those absent subjects can only be checked
+// for the generated id and canonical event shape.
+func validateImportedMessageUsageEvents(ctx context.Context, tx pgx.Tx, accountID string) error {
+	var mismatch bool
+	err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+		  SELECT 1
+		    FROM usage_events usage
+		    LEFT JOIN agent_messages message
+		      ON message.account_id = usage.account_id
+		     AND message.id = usage.subject_id
+		    LEFT JOIN LATERAL (
+		      SELECT count(*) FILTER (WHERE delivery.state = 'delivered')::bigint AS quantity
+		        FROM agent_message_deliveries delivery
+		       WHERE delivery.account_id = message.account_id
+		         AND delivery.message_id = message.id
+		    ) delivered ON true
+		   WHERE usage.account_id = $1
+		     AND usage.dimension IN ('message_sent', 'message_delivered')
+		     AND (
+		       usage.subject_type IS DISTINCT FROM 'message'
+		       OR usage.subject_id !~ '^msg_[a-z2-7]{16}$'
+		       OR usage.metadata IS DISTINCT FROM '{}'::jsonb
+		       OR usage.idempotency_key IS DISTINCT FROM usage.dimension || ':' || usage.subject_id
+		       OR (
+		         usage.dimension = 'message_sent'
+		         AND (usage.unit IS DISTINCT FROM 'message' OR usage.quantity <> 1)
+		       )
+		       OR (
+		         usage.dimension = 'message_delivered'
+		         AND (
+		           usage.unit IS DISTINCT FROM 'delivery'
+		           OR usage.quantity < 1
+		           OR usage.quantity > $2
+		           OR NOT EXISTS (
+		             SELECT 1
+		               FROM usage_events sent
+		              WHERE sent.account_id = usage.account_id
+		                AND sent.dimension = 'message_sent'
+		                AND sent.subject_type = 'message'
+		                AND sent.subject_id = usage.subject_id
+		                AND sent.realm_id = usage.realm_id
+		                AND sent.agent_id = usage.agent_id
+		                AND sent.occurred_at = usage.occurred_at
+		                AND sent.unit = 'message'
+		                AND sent.quantity = 1
+		                AND sent.metadata = '{}'::jsonb
+		                AND sent.idempotency_key =
+		                    'message_sent:' || sent.subject_id
+		           )
+		         )
+		       )
+		       OR (
+		         message.id IS NOT NULL
+		         AND (
+		           usage.realm_id IS DISTINCT FROM message.realm_id
+		           OR usage.agent_id IS DISTINCT FROM message.from_agent_id
+		           OR usage.occurred_at IS DISTINCT FROM message.created_at
+		           OR (
+		             usage.dimension = 'message_delivered'
+		             AND usage.quantity IS DISTINCT FROM delivered.quantity
+		           )
+		         )
+		       )
+		     )
+		)`, accountID, maxMessageAudienceRecipients).Scan(&mismatch)
+	if err != nil {
+		return fmt.Errorf("validate imported message usage events: %w", err)
+	}
+	if mismatch {
+		return fmt.Errorf("%w: message usage event does not match its message delivery graph", ErrArchiveContent)
 	}
 	return nil
 }

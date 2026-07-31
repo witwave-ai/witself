@@ -3,6 +3,8 @@
 # newly published chart is pinned in production.
 apps:
   witselfServer:
+    chartVersion: 0.0.224
+    imageTag: 0.0.224
     replicaCount: 2
     minReadySeconds: 10
     strategy:

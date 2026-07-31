@@ -225,6 +225,35 @@ Rules:
 - AI-assisted account management must use the same commands and credentials as
   human operators; it should not require a separate AI-only backend.
 
+### Operator-only message rate overrides
+
+`witself-admin account limit-override` is the implemented generic operator
+surface for account-specific message throughput. It does not change the
+account's plan, price, subscription, or invoice history. The accepted message
+rate dimensions are:
+
+- `message_sent_per_agent_minute`
+- `message_delivered_per_realm_minute`
+- `message_delivered_per_recipient_minute`
+
+```sh
+witself-admin account limit-override get \
+  --account ACCOUNT_ID --dimension DIMENSION --json
+witself-admin account limit-override set \
+  --account ACCOUNT_ID --dimension DIMENSION --max N --reason "..."
+witself-admin account limit-override set \
+  --account ACCOUNT_ID --dimension DIMENSION --unlimited --reason "..."
+witself-admin account limit-override clear \
+  --account ACCOUNT_ID --dimension DIMENSION --reason "..."
+```
+
+`set --max` replaces the inherited plan value, `clear` restores inheritance,
+and `set --unlimited` explicitly removes the plan cap from the resolved cell
+snapshot. Unlimited does not bypass the independent platform ceiling. These
+are shared rolling one-minute budgets enforced in PostgreSQL across API pods;
+they are not wall-clock minute counters. Every set/clear requires an audit
+reason and advances the normal desired/applied account-policy snapshot fence.
+
 ## Exit Codes
 
 | Code | Meaning |

@@ -12,6 +12,10 @@ data:
   WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE: {{ .Values.worker.avatarStyleRollout.batchSize | quote }}
   WITSELF_AVATAR_STYLE_ROLLOUT_INTERVAL: {{ .Values.worker.avatarStyleRollout.interval | quote }}
   WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_TIMEOUT: {{ .Values.worker.avatarStyleRollout.batchTimeout | quote }}
+  WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_ENABLED: {{ .Values.worker.messageRateBucketCleanup.enabled | quote }}
+  WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_BATCH_SIZE: {{ .Values.worker.messageRateBucketCleanup.batchSize | quote }}
+  WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_INTERVAL: {{ .Values.worker.messageRateBucketCleanup.interval | quote }}
+  WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_BATCH_TIMEOUT: {{ .Values.worker.messageRateBucketCleanup.batchTimeout | quote }}
   WITSELF_TRANSCRIPT_RETENTION_ENABLED: {{ .Values.worker.transcriptRetention.enabled | quote }}
   WITSELF_TRANSCRIPT_RETENTION_MODE: {{ .Values.worker.transcriptRetention.mode | quote }}
   WITSELF_TRANSCRIPT_RETENTION_BATCH_SIZE: {{ .Values.worker.transcriptRetention.batchSize | quote }}

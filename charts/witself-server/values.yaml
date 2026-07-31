@@ -166,6 +166,13 @@ worker:
     batchSize: 100
     interval: 2s
     batchTimeout: 30s
+  # GCRA rate buckets are ephemeral coordination state. Every worker replica
+  # may run this bounded cleanup because PostgreSQL SKIP LOCKED divides rows.
+  messageRateBucketCleanup:
+    enabled: true
+    batchSize: 10000
+    interval: 1m
+    batchTimeout: 10s
   # Transcript retention is an explicit three-stage rollout:
   # disabled -> preview -> enforce. Enabling the job still defaults to preview,
   # so deletion requires both enabled: true and mode: enforce.

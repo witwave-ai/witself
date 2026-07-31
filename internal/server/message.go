@@ -85,6 +85,9 @@ func sendMessageHandler(auth PrincipalAuthFunc, send func(context.Context, Domai
 		case errors.Is(err, ErrFeatureNotEnabled):
 			writeFeatureNotEnabledError(w, err)
 			return
+		case errors.Is(err, ErrMessageRateLimited):
+			writeMessageRateLimitError(w, err)
+			return
 		case errors.Is(err, ErrBadInput):
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
@@ -330,6 +333,9 @@ func messageActionHandler(
 		case errors.Is(err, ErrFeatureNotEnabled):
 			writeFeatureNotEnabledError(w, err)
 			return
+		case errors.Is(err, ErrMessageRateLimited):
+			writeMessageRateLimitError(w, err)
+			return
 		case errors.Is(err, ErrBadInput):
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
@@ -475,6 +481,8 @@ func writeMessageProcessingError(w http.ResponseWriter, err error) bool {
 		return false
 	case errors.Is(err, ErrFeatureNotEnabled):
 		writeFeatureNotEnabledError(w, err)
+	case errors.Is(err, ErrMessageRateLimited):
+		writeMessageRateLimitError(w, err)
 	case errors.Is(err, ErrBadInput):
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrNotFound), errors.Is(err, ErrForbidden):
@@ -505,6 +513,101 @@ func writeFeatureNotEnabledError(w http.ResponseWriter, err error) {
 		"error":          messageFeatureDisabledText,
 		"retryable":      false,
 	})
+}
+
+func writeMessageRateLimitError(w http.ResponseWriter, err error) {
+	detail := &MessageRateLimitError{}
+	retryable := true
+	var typed *MessageRateLimitError
+	if errors.As(err, &typed) && typed != nil {
+		detail = typed
+		retryable = typed.Retryable
+	}
+	dimension := messageRateLimitDimension(detail.Dimension)
+	scope := messageRateLimitScope(detail.Scope)
+	limit := max(detail.Limit, 0)
+	used := max(detail.Used, 0)
+	attempted := max(detail.Attempted, 0)
+
+	details := map[string]any{
+		"limit_dimension": dimension,
+		"scope":           scope,
+		"limit":           limit,
+		"used":            used,
+		"attempted":       attempted,
+		"window_seconds":  int64(60),
+	}
+	if limitKey := messageRateLimitKey(dimension, scope); limitKey != "" {
+		details["limit_key"] = limitKey
+	}
+	status := http.StatusForbidden
+	code := "limit_exceeded"
+	payload := map[string]any{
+		"schema_version": "witself.v0",
+		"code":           code,
+		"error":          ErrMessageRateLimited.Error(),
+		"retryable":      false,
+		"details":        details,
+	}
+	if retryable {
+		retryAfter := messageRateLimitRetryAfterSeconds(detail.RetryAfter)
+		status = http.StatusTooManyRequests
+		code = "rate_limited"
+		details["retry_after"] = retryAfter
+		payload["code"] = code
+		payload["retryable"] = true
+		payload["retry_after"] = retryAfter
+		w.Header().Set("Retry-After", strconv.FormatInt(retryAfter, 10))
+	} else {
+		w.Header().Del("Retry-After")
+	}
+
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func messageRateLimitRetryAfterSeconds(retryAfter time.Duration) int64 {
+	seconds := int64(retryAfter / time.Second)
+	if retryAfter%time.Second != 0 {
+		seconds++
+	}
+	if seconds < 1 {
+		return 1
+	}
+	return seconds
+}
+
+func messageRateLimitDimension(dimension string) string {
+	switch dimension {
+	case "message_sent", "message_delivered":
+		return dimension
+	default:
+		return "unknown"
+	}
+}
+
+func messageRateLimitScope(scope string) string {
+	switch scope {
+	case "agent", "realm", "recipient":
+		return scope
+	default:
+		return "unknown"
+	}
+}
+
+func messageRateLimitKey(dimension, scope string) string {
+	switch {
+	case dimension == "message_sent" && scope == "agent":
+		return "message_sent_per_agent_minute"
+	case dimension == "message_delivered" && scope == "realm":
+		return "message_delivered_per_realm_minute"
+	case dimension == "message_delivered" && scope == "recipient":
+		return "message_delivered_per_recipient_minute"
+	default:
+		return ""
+	}
 }
 
 func messageNoStore(next http.HandlerFunc) http.HandlerFunc {

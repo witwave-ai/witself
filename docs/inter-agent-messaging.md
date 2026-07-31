@@ -1,12 +1,14 @@
 # Witself Inter-Agent Messaging
 
 Status: the agreed same-realm direct, fan-out, open-request, and foreground
-processing feature is operationally complete in release `v0.0.172`. Sanitized
+processing feature is operationally complete in release `v0.0.172`. The
+current working tree adds the Phase-A rate-gate/schema/propagation slice; the
+finite tier defaults remain a separate Phase-B catalog activation. Sanitized
 release, rollout, provider-refresh, and live-smoke evidence is retained in the
 [autonomous messaging completion boundary](autonomous-realm-messaging.md#completion-boundary).
-Last reviewed 2026-07-16. This document is the authority for the durable
+Last reviewed 2026-07-31. This document is the authority for the durable
 messaging model, message shape, delivery and ordering semantics, the
-anti-spoofing trust boundary, target rate limits/scopes, audit, and target
+anti-spoofing trust boundary, implemented rate limits/scopes, audit, and
 metering. It binds the message shapes pinned in
 [json-contracts.md](json-contracts.md) and conforms to the master spec in
 [requirements.md](requirements.md).
@@ -80,11 +82,13 @@ coordination, and fenced foreground processing inside one realm:
   operator metrics. An absent policy means indefinite retention.
 
 Named-group fan-out, cross-realm delivery, dry-run, operator metadata
-inspection, finer policy scopes, plan-backed metering, and send/delivery rate
-limits are follow-on platform features rather than blockers for the agreed
-realm-local core. The tagged and deployed activation record for that core is
-separate from the implementation inventory below and makes no claim about
-dormant cells or narrative-memory production certification.
+inspection, and finer policy scopes are follow-on platform features rather than
+blockers for the agreed realm-local core. Plan-backed metering and
+send/delivery rate admission are implemented, with finite tier defaults staged
+behind the separate catalog activation. The tagged and deployed activation
+record for that core is separate from the implementation inventory below and
+makes no claim about dormant cells or narrative-memory production
+certification.
 
 ## Goal
 
@@ -545,7 +549,7 @@ Route style is pinned in [api-routes.md](api-routes.md) and the contract in
 
 The complete scope list lives in [requirements.md](requirements.md).
 
-## Implemented limits and target rate limits
+## Implemented limits and rate limits
 
 The current core enforces:
 
@@ -555,18 +559,58 @@ The current core enforces:
 - Maximum resolved direct, explicit-list, or realm audience: 64 recipients;
   oversized sends fail atomically rather than truncating.
 
-The following plan-backed rate controls remain target platform integration and
-must not be inferred from the size/fan-out limits above:
+The store also enforces three shared rolling one-minute
+GCRA/token-bucket-equivalent budgets. They are persisted in PostgreSQL and
+therefore coordinate every API replica; they are not process-local counters or
+wall-clock minute buckets.
 
-- Per-agent send rate limit (messages per interval).
-- Per-realm aggregate send rate limit.
-- Per-recipient delivery/inbound rate limit, to protect a single recipient from
-  flooding.
+| Limit key | Usage dimension | Scope | Professional Phase B | Team Phase B | Enterprise Phase B | Platform ceiling |
+|---|---|---|---:|---:|---:|---:|
+| `message_sent_per_agent_minute` | `message_sent` | sending agent | 30 | 120 | 600 | 2,000 |
+| `message_delivered_per_realm_minute` | `message_delivered` | sender realm | 500 | 5,000 | 25,000 | 100,000 |
+| `message_delivered_per_recipient_minute` | `message_delivered` | each recipient | 60 | 300 | 1,000 | 5,000 |
 
-When implemented, overage follows the plan's configured behavior — `warn`,
-`throttle`, or `block` — per the model in
-[billing-and-limits.md](billing-and-limits.md). A blocked or throttled send must
-return a deterministic error, never a silent drop.
+Personal has no rate keys because messaging itself is disabled. Generic,
+audited per-account limit overrides may set a finite value, clear back to the
+plan, or mark a plan allowance unlimited. An unlimited account override does
+not bypass the independent platform ceiling.
+
+Activation is staged. Phase A ships schema 83, the cross-replica gate, HTTP and
+client propagation, metrics, and the control-plane/edge allow-list while the
+canonical plan catalog deliberately leaves all three keys absent. Platform
+ceilings still apply. After both cells and the control plane converge on Phase
+A, operators must set and verify explicit-unlimited Founder overrides for all
+three keys. A separate Phase-B catalog release then activates the finite values
+in the table, reconciles accounts, and re-verifies those Founder overrides.
+From a clean `v0.0.225` checkout it must run both `npm run deploy:plans` and
+`npm run deploy` before lifecycle reconciliation. The control-plane container
+embeds the catalog, so deploying only the public plans Worker cannot change
+resolved account snapshots.
+
+Exact idempotent replay is resolved before charging. A new direct, explicit
+list, realm, reply, completion, request-open, offer, or request-completion send
+charges the rate gate one `message_sent` unit and one `message_delivered` unit
+per resolved recipient. All applicable budgets and all message/delivery inserts are in the
+same transaction: an N-recipient fan-out either commits one send plus N
+admission debits and the complete delivery set, or stores nothing and consumes
+nothing. The usage ledger records one sent unit and counts only targets whose
+committed delivery state is `delivered`; admission still reserves the full
+resolved fan-out to prevent failed or deferred targets from bypassing abuse
+protection.
+
+An exhausted budget whose attempted debit still fits the bucket returns HTTP
+429, `code: "rate_limited"`, `retryable: true`, a whole-second `Retry-After`
+header, a top-level `retry_after`, and value-free `details` containing the
+bounded `limit_dimension`, `limit_key`, `scope`, `limit`, `used`, `attempted`,
+`window_seconds: 60`, and `retry_after`. Clients should wait and retry with the
+same idempotency key.
+
+An effective limit of zero or one attempted debit larger than the bucket
+capacity can never succeed unchanged. It returns HTTP 403,
+`code: "limit_exceeded"`, and `retryable: false`, with the same value-free rate
+details except `retry_after`; neither the top-level field nor the `Retry-After`
+header is present. Neither response includes an account, realm, agent,
+recipient, request, or message identifier or content.
 
 ## Audit
 
@@ -594,19 +638,18 @@ contain `body`, `payload`, raw tokens, or any identity-content values. The same
 redaction rule applies to logs, metrics, and error messages. Retention follows
 [audit-retention.md](audit-retention.md).
 
-## Target metered dimensions
+## Metered dimensions
 
-Messaging is intended to contribute two metered dimensions (see
+Messaging contributes two implemented metered dimensions (see
 [billing-and-limits.md](billing-and-limits.md)):
 
 - **Messages sent** — counted at send (one per send request).
 - **Messages delivered** — counted per recipient delivery (an N-recipient fanout
   counts as N deliveries).
 
-These dimensions are the intended billing/operations contract but are not yet
-wired into plan-backed messaging metering. When implemented, metrics expose
-send/deliver/read counts with low-cardinality, route-template labels and never
-include message content (see
+These dimensions are wired into the plan-backed messaging gate. Metrics expose
+rejections with bounded dimension/scope/operation labels and never include
+message content or tenant identifiers (see
 [observability-and-operations.md](observability-and-operations.md)).
 
 ## Cross-references

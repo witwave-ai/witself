@@ -107,6 +107,10 @@ Expected server environment variables may include:
 | `WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE` | Maximum agents advanced by one style-rollout batch. Default: `100`; valid range: `1`-`1000`. |
 | `WITSELF_AVATAR_STYLE_ROLLOUT_INTERVAL` | Delay between style-rollout worker attempts. Default: `2s`; valid range: `100ms`-`1h`. |
 | `WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_TIMEOUT` | Deadline for one bounded style-rollout batch. Default: `30s`; valid range: `100ms`-`5m`. |
+| `WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_ENABLED` | Enable stale message-rate bucket cleanup in `witself-worker`. Default: `true`; API deployments never run the job. Every worker replica may enable it because the delete batch uses `FOR UPDATE SKIP LOCKED`. |
+| `WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_BATCH_SIZE` | Maximum stale rate-bucket rows deleted by one batch. Default: `10000`; valid range: `1`-`10000`. |
+| `WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_INTERVAL` | Delay between rate-bucket cleanup batches. Default: `1m`; valid range: `1m`-`24h`. |
+| `WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_BATCH_TIMEOUT` | Deadline for one bounded rate-bucket cleanup attempt. Default: `10s`; valid range: `1s`-`5m`. |
 | `WITSELF_TRANSCRIPT_RETENTION_ENABLED` | Enable the account-policy transcript-retention job in `witself-worker`. API deployments set it false. Enabling alone remains non-destructive because the default mode is `preview`. |
 | `WITSELF_TRANSCRIPT_RETENTION_MODE` | Transcript-retention worker mode: `preview` (default) or `enforce`. Deletion requires both this value to be `enforce` and the enabled gate to be true. |
 | `WITSELF_TRANSCRIPT_RETENTION_BATCH_SIZE` | Maximum whole conversations considered by one retention batch. Default: `100`; valid range: `1`-`1000`. |

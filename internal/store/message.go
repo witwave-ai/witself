@@ -977,6 +977,9 @@ func (s *Store) insertMessageTargetsTx(
 	if err != nil {
 		return Message{}, fmt.Errorf("insert message: %w", err)
 	}
+	if err := enforceMessageRateLimitsTx(ctx, tx, p, targets); err != nil {
+		return Message{}, err
+	}
 
 	var delivery MessageDelivery
 	for i, target := range targets {
@@ -1036,7 +1039,38 @@ func (s *Store) insertMessageTargetsTx(
 			return Message{}, err
 		}
 	}
+	if _, err := recordUsageEventTx(ctx, tx, usageEventInput{
+		AccountID: p.AccountID, RealmID: p.RealmID, AgentID: p.ID,
+		Dimension: UsageDimensionMessageSent, Quantity: 1, Unit: UsageUnitMessage,
+		SubjectType: "message", SubjectID: msg.ID,
+		IdempotencyKey: "message_sent:" + msg.ID,
+		Metadata:       json.RawMessage(`{}`), OccurredAt: msg.CreatedAt,
+	}); err != nil {
+		return Message{}, fmt.Errorf("record message sent usage: %w", err)
+	}
+	deliveredQuantity := messageDeliveredUsageQuantity(targets)
+	if deliveredQuantity > 0 {
+		if _, err := recordUsageEventTx(ctx, tx, usageEventInput{
+			AccountID: p.AccountID, RealmID: p.RealmID, AgentID: p.ID,
+			Dimension: UsageDimensionMessageDelivered, Quantity: deliveredQuantity, Unit: UsageUnitDelivery,
+			SubjectType: "message", SubjectID: msg.ID,
+			IdempotencyKey: "message_delivered:" + msg.ID,
+			Metadata:       json.RawMessage(`{}`), OccurredAt: msg.CreatedAt,
+		}); err != nil {
+			return Message{}, fmt.Errorf("record message delivered usage: %w", err)
+		}
+	}
 	return msg, nil
+}
+
+func messageDeliveredUsageQuantity(targets []messageDeliveryTarget) int64 {
+	var quantity int64
+	for _, target := range targets {
+		if target.state == MessageDeliveryDelivered {
+			quantity++
+		}
+	}
+	return quantity
 }
 
 // ListMessages returns metadata-only mailbox rows; listing does not mark read.

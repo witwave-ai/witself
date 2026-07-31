@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/witwave-ai/witself/internal/agentemail"
 )
@@ -464,6 +465,83 @@ func TestRuntimeMetricsObservePlanLimitRejectionsWithBoundedLabels(t *testing.T)
 		"realm_private_name",
 		"agent_private_name",
 		"legacy_agent_private_name",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("metrics exposed %q:\n%s", forbidden, text)
+		}
+	}
+}
+
+func TestRuntimeMetricsObserveMessageRateLimitRejectionsWithBoundedLabels(t *testing.T) {
+	metrics := newRuntimeMetrics()
+	rateErr := func(dimension, scope string, retryable bool) error {
+		retryAfter := time.Duration(0)
+		if retryable {
+			retryAfter = time.Second
+		}
+		return &MessageRateLimitError{
+			Dimension: dimension, Scope: scope, Limit: 999, Used: 998, Attempted: 2,
+			WindowSeconds: 60, RetryAfter: retryAfter, Source: "private_source_value",
+			Retryable: retryable,
+		}
+	}
+	cfg := metrics.instrumentConfig(Config{
+		SendMessage: func(context.Context, DomainPrincipal, SendMessageRequest) (Message, error) {
+			return Message{}, rateErr("message_sent", "agent", true)
+		},
+		ReplyMessage: func(context.Context, DomainPrincipal, string, ReplyMessageRequest) (Message, error) {
+			return Message{}, rateErr("message_delivered", "realm", false)
+		},
+		CompleteMessage: func(context.Context, DomainPrincipal, string, CompleteMessageRequest) (CompleteMessageResult, error) {
+			return CompleteMessageResult{}, rateErr("message_delivered", "recipient", true)
+		},
+		CreateMessageRequest: func(context.Context, DomainPrincipal, CreateMessageRequestRequest) (CreateMessageRequestResult, error) {
+			return CreateMessageRequestResult{}, rateErr("message_sent", "agent", false)
+		},
+		OfferMessageRequest: func(context.Context, DomainPrincipal, string, OfferMessageRequestRequest) (OfferMessageRequestResult, error) {
+			return OfferMessageRequestResult{}, rateErr("message_delivered", "realm", true)
+		},
+		CompleteMessageRequest: func(context.Context, DomainPrincipal, string, CompleteMessageRequestRequest) (CompleteMessageRequestResult, error) {
+			return CompleteMessageRequestResult{}, rateErr("message_delivered", "recipient", false)
+		},
+	})
+
+	principal := DomainPrincipal{
+		Kind: PrincipalKindAgent, ID: "agent_private_identifier", AccountID: "account_private_identifier",
+		RealmID: "realm_private_identifier",
+	}
+	_, _ = cfg.SendMessage(context.Background(), principal, SendMessageRequest{Body: "private message body"})
+	_, _ = cfg.ReplyMessage(context.Background(), principal, "message_private_identifier", ReplyMessageRequest{Body: "private reply body"})
+	_, _ = cfg.CompleteMessage(context.Background(), principal, "message_private_identifier", CompleteMessageRequest{Body: "private result body"})
+	_, _ = cfg.CreateMessageRequest(context.Background(), principal, CreateMessageRequestRequest{Body: "private request body"})
+	_, _ = cfg.OfferMessageRequest(context.Background(), principal, "request_private_identifier", OfferMessageRequestRequest{Body: "private offer body"})
+	_, _ = cfg.CompleteMessageRequest(context.Background(), principal, "request_private_identifier", CompleteMessageRequestRequest{Body: "private completion body"})
+	metrics.observeMessageRateRejection(&MessageRateLimitError{
+		Dimension: "private_dimension", Scope: "private_scope",
+	}, "private_operation")
+
+	var output bytes.Buffer
+	metrics.writePrometheus(&output)
+	text := output.String()
+	for _, want := range []string{
+		`witself_message_rate_limit_rejections_total{limit_dimension="message_sent",scope="agent",operation="send"} 1`,
+		`witself_message_rate_limit_rejections_total{limit_dimension="message_delivered",scope="realm",operation="reply"} 1`,
+		`witself_message_rate_limit_rejections_total{limit_dimension="message_delivered",scope="recipient",operation="complete"} 1`,
+		`witself_message_rate_limit_rejections_total{limit_dimension="message_sent",scope="agent",operation="request_open"} 1`,
+		`witself_message_rate_limit_rejections_total{limit_dimension="message_delivered",scope="realm",operation="request_offer"} 1`,
+		`witself_message_rate_limit_rejections_total{limit_dimension="message_delivered",scope="recipient",operation="request_complete"} 1`,
+		`witself_message_rate_limit_rejections_total{limit_dimension="unknown",scope="unknown",operation="unknown"} 1`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("message-rate counter missing %q:\n%s", want, text)
+		}
+	}
+	for _, forbidden := range []string{
+		"agent_private_identifier", "account_private_identifier", "realm_private_identifier",
+		"message_private_identifier", "request_private_identifier", "private message body",
+		"private reply body", "private result body", "private request body", "private offer body",
+		"private completion body", "private_source_value", "private_dimension", "private_scope",
+		"private_operation", "999", "998",
 	} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("metrics exposed %q:\n%s", forbidden, text)
