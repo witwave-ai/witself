@@ -369,11 +369,12 @@ require_line "          messageRateBucketCleanup:" "$civo_server_application"
 require_line "          messageRateBucketCleanup:" "$civo_backup_server_application"
 reject_line "          messageRateBucketCleanup:" "$civo_use1_server_application"
 # The email-specific cleanup contract first belongs to the v0.0.226 chart.
-# Current v0.0.225 and older cells must not receive the strict-schema field.
+# The backup cell is the first canary; the development and configured-only
+# cells remain compatibility checks for omission until their own wave advances.
 require_line "          agentEmailRateBucketCleanup:" "$agent_email_rate_cleanup_server_application"
 reject_line "          agentEmailRateBucketCleanup:" "$live_server_application"
 reject_line "          agentEmailRateBucketCleanup:" "$civo_server_application"
-reject_line "          agentEmailRateBucketCleanup:" "$civo_backup_server_application"
+require_line "          agentEmailRateBucketCleanup:" "$civo_backup_server_application"
 reject_line "          agentEmailRateBucketCleanup:" "$civo_use1_server_application"
 helm template witself-server "$server_chart" --namespace witself \
   --values "$civo_server_nested_values" >"$civo_server_nested_render"
