@@ -56,15 +56,15 @@ remain deferred.
 
 ## Working Plan Direction
 
-The following table records the current product direction as of 2026-07-30. It
+The following table records the current product direction as of 2026-07-31. It
 is a working packaging decision, not a claim that every entitlement is already
 implemented or enforced. Each row moves into the canonical plan catalog and
 resolved cell policy only through its own implementation and rollout decision.
 The realm, agent, active-memory, current-fact, and inbound-agent-email byte
 values are the Phase B canonical defaults described below; the other rows
 remain subject to their own implementation and rollout gates.
-The three message-rate rows are the accepted Phase-B activation values; the
-Phase-A catalog deliberately leaves those keys absent.
+The three message-rate rows are active paid-tier defaults in the `v0.0.225`
+Phase-B catalog; Personal deliberately omits those keys.
 
 | Capability | Personal — $0 | Professional — $30/month | Team — $250/month | Enterprise — contact us |
 |---|---:|---:|---:|---:|
@@ -197,9 +197,9 @@ the same resolved account snapshot:
 - `message_delivered_per_recipient_minute` charges one unit to each resolved
   recipient.
 
-Personal omits all three keys because messaging is disabled. The separate
-Phase-B catalog release will activate Professional `30 / 500 / 60`, Team
-`120 / 5,000 / 300`, and Enterprise `600 / 25,000 / 1,000` in the order above.
+Personal omits all three keys because messaging is disabled. The `v0.0.225`
+Phase-B catalog activates Professional `30 / 500 / 60`, Team `120 / 5,000 /
+300`, and Enterprise `600 / 25,000 / 1,000` in the order above.
 The independent platform ceilings are `2,000 / 100,000 / 5,000`. A send
 evaluates all applicable budgets in the same PostgreSQL transaction used to
 insert the message and delivery rows. Exact idempotent replay is resolved
@@ -228,17 +228,16 @@ witself-admin account limit-override clear \
 The same commands accept the two delivery keys. `--unlimited` removes the plan
 cap from the resolved snapshot; it does not bypass the platform ceiling.
 
-Activation is intentionally two-phase. Phase A ships schema 83, the cell-side
+Activation uses two phases. Phase A shipped schema 83, the cell-side
 store/API/client/metrics implementation, and the control-plane/edge allow-list,
-while leaving all three keys absent from `web/plans/plans.json`. During this
-phase, the platform ceilings protect the service and no finite plan default is
-active. Converge both cells and the control plane on Phase A first. Then set and
-verify explicit-unlimited Founder overrides for all three keys, with equal
-desired/applied snapshot revisions. Only a separate Phase-B catalog release may
-activate Professional `30 / 500 / 60`, Team `120 / 5,000 / 300`, and Enterprise
-`600 / 25,000 / 1,000`; reconcile accounts and re-verify the Founder overrides
-afterward. That Phase-B activation must run from a clean `v0.0.225` checkout
-and deploy both catalog surfaces:
+while leaving all three keys absent from `web/plans/plans.json`; platform
+ceilings protected the service while no finite plan default was active. After
+both cells and the control plane converged, operators set and verified
+explicit-unlimited Founder overrides for all three keys with equal
+desired/applied snapshot revisions. Release `v0.0.225` is Phase B: its catalog
+activates Professional `30 / 500 / 60`, Team `120 / 5,000 / 300`, and
+Enterprise `600 / 25,000 / 1,000`. Deploy that activation from a clean exact
+`v0.0.225` checkout and update both catalog surfaces:
 
 ```sh
 npm run deploy:plans
@@ -248,8 +247,8 @@ npm run deploy
 The control-plane container embeds `web/plans/plans.json`; deploying only the
 public plans Worker does not update account snapshots. Run lifecycle
 reconciliation only after both deployments succeed, then verify the effective
-values and Founder overrides. The platform ceilings remain effective in both
-phases.
+values and Founder overrides. The independent platform ceilings remain
+effective after activation.
 
 Rate-bucket debt is cell-local operational state and is not exported with an
 account. A cell evacuation therefore starts fresh rate buckets on the target,
