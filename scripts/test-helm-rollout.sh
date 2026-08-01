@@ -10,6 +10,8 @@ email_pilot_profile="$server_chart/ci/agent-email-pilot-values.yaml"
 apps_email_pilot_profile="$apps_chart/ci/agent-email-pilot-values.yaml"
 gcp_cell="$repo_root/.gitops/cells/gcp-sandbox-use1-dev/values.yaml"
 civo_cell="$repo_root/.gitops/cells/civo-sandbox-usw2-dev/values.yaml"
+civo_backup_cell="$repo_root/.gitops/cells/civo-sandbox-use1-backup/values.yaml"
+civo_use1_cell="$repo_root/.gitops/cells/civo-sandbox-use1-dev/values.yaml"
 
 render_dir="$(mktemp -d)"
 trap 'rm -r "$render_dir"' EXIT
@@ -20,6 +22,9 @@ portable_worker_render="$render_dir/portable-worker.yaml"
 apps_render="$render_dir/apps.yaml"
 live_apps_render="$render_dir/live-apps.yaml"
 civo_apps_render="$render_dir/civo-apps.yaml"
+civo_backup_apps_render="$render_dir/civo-backup-apps.yaml"
+civo_use1_apps_render="$render_dir/civo-use1-apps.yaml"
+civo_default_preset_apps_render="$render_dir/civo-default-preset-apps.yaml"
 backup_validation_render="$render_dir/backup-validation.yaml"
 backup_validation_apps_render="$render_dir/backup-validation-apps.yaml"
 phase_b_gcp_render="$render_dir/phase-b-gcp.yaml"
@@ -56,6 +61,13 @@ helm template witself-apps "$apps_chart" \
   --values "$apps_profile" >"$live_apps_render"
 helm template witself-apps "$apps_chart" \
   --values "$civo_cell" >"$civo_apps_render"
+helm template witself-apps "$apps_chart" \
+  --values "$civo_backup_cell" >"$civo_backup_apps_render"
+helm template witself-apps "$apps_chart" \
+  --values "$civo_use1_cell" >"$civo_use1_apps_render"
+helm template witself-apps "$apps_chart" \
+  --values "$civo_cell" \
+  --set-string apps.civoPostgres.resourcesPreset= >"$civo_default_preset_apps_render"
 helm template witself-server "$server_chart" --namespace witself \
   --set backup.existingSecret.name=witself-backup \
   --set backup.validation.enabled=true >"$backup_validation_render"
@@ -293,6 +305,10 @@ live_nested_server_config="$render_dir/live-nested-server-config.yaml"
 live_nested_worker_config="$render_dir/live-nested-worker-config.yaml"
 live_nested_worker_deployment="$render_dir/live-nested-worker-deployment.yaml"
 civo_server_application="$render_dir/civo-server-application.yaml"
+civo_postgres_application="$render_dir/civo-postgres-application.yaml"
+civo_backup_postgres_application="$render_dir/civo-backup-postgres-application.yaml"
+civo_use1_postgres_application="$render_dir/civo-use1-postgres-application.yaml"
+civo_default_preset_postgres_application="$render_dir/civo-default-preset-postgres-application.yaml"
 civo_server_nested_values="$render_dir/civo-server-nested-values.yaml"
 civo_server_nested_render="$render_dir/civo-server-nested-render.yaml"
 civo_server_config="$render_dir/civo-server-config.yaml"
@@ -321,6 +337,17 @@ extract_document ConfigMap witself-server "$live_nested_render" "$live_nested_se
 extract_document ConfigMap witself-worker "$live_nested_render" "$live_nested_worker_config"
 extract_document Deployment witself-worker "$live_nested_render" "$live_nested_worker_deployment"
 extract_document Application witself-server "$civo_apps_render" "$civo_server_application"
+extract_document Application witself-postgresql "$civo_apps_render" "$civo_postgres_application"
+extract_document Application witself-postgresql "$civo_backup_apps_render" "$civo_backup_postgres_application"
+extract_document Application witself-postgresql "$civo_use1_apps_render" "$civo_use1_postgres_application"
+extract_document Application witself-postgresql "$civo_default_preset_apps_render" "$civo_default_preset_postgres_application"
+require_line "          resourcesPreset: micro" "$civo_postgres_application"
+reject_line "          resourcesPreset: nano" "$civo_postgres_application"
+require_line "          resourcesPreset: nano" "$civo_backup_postgres_application"
+reject_line "          resourcesPreset: micro" "$civo_backup_postgres_application"
+require_line "          resourcesPreset: nano" "$civo_use1_postgres_application"
+reject_line "          resourcesPreset: micro" "$civo_use1_postgres_application"
+require_line "          resourcesPreset: nano" "$civo_default_preset_postgres_application"
 extract_application_helm_values "$civo_server_application" "$civo_server_nested_values"
 # The app-of-apps chart is reconciled before each child chart pin advances.
 # Never forward a value that the still-live pre-0.0.224 child schema rejects.
