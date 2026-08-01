@@ -32,7 +32,7 @@ spec:
           persistence:
             enabled: true
             size: {{ $pg.storage | quote }}
-          resourcesPreset: nano
+          resourcesPreset: {{ default "nano" $pg.resourcesPreset }}
         readReplicas:
           replicaCount: 0
         metrics:
