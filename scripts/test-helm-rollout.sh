@@ -21,6 +21,7 @@ gcp_render="$render_dir/gcp.yaml"
 portable_worker_render="$render_dir/portable-worker.yaml"
 apps_render="$render_dir/apps.yaml"
 live_apps_render="$render_dir/live-apps.yaml"
+agent_email_rate_cleanup_apps_render="$render_dir/agent-email-rate-cleanup-apps.yaml"
 civo_apps_render="$render_dir/civo-apps.yaml"
 civo_backup_apps_render="$render_dir/civo-backup-apps.yaml"
 civo_use1_apps_render="$render_dir/civo-use1-apps.yaml"
@@ -59,6 +60,11 @@ helm template witself-apps "$apps_chart" \
 helm template witself-apps "$apps_chart" \
   --values "$gcp_cell" \
   --values "$apps_profile" >"$live_apps_render"
+helm template witself-apps "$apps_chart" \
+  --values "$gcp_cell" \
+  --values "$apps_profile" \
+  --set apps.witselfServer.chartVersion=0.0.226 \
+  --set apps.witselfServer.imageTag=0.0.226 >"$agent_email_rate_cleanup_apps_render"
 helm template witself-apps "$apps_chart" \
   --values "$civo_cell" >"$civo_apps_render"
 helm template witself-apps "$apps_chart" \
@@ -332,6 +338,8 @@ extract_document Deployment "$long_fullname" "$long_name_render" "$render_dir/lo
 extract_document Deployment "$long_worker_fullname" "$long_name_render" "$render_dir/long-name-worker-deployment.yaml"
 extract_document Service "$long_worker_metrics_fullname" "$long_name_render" "$render_dir/long-name-worker-metrics-service.yaml"
 extract_document Application witself-server "$live_apps_render" "$live_server_application"
+agent_email_rate_cleanup_server_application="$render_dir/agent-email-rate-cleanup-server-application.yaml"
+extract_document Application witself-server "$agent_email_rate_cleanup_apps_render" "$agent_email_rate_cleanup_server_application"
 extract_application_helm_values "$live_server_application" "$live_nested_values"
 helm template witself-server "$server_chart" --namespace witself \
   --values "$live_nested_values" >"$live_nested_render"
@@ -360,6 +368,13 @@ extract_application_helm_values "$civo_server_application" "$civo_server_nested_
 require_line "          messageRateBucketCleanup:" "$civo_server_application"
 require_line "          messageRateBucketCleanup:" "$civo_backup_server_application"
 reject_line "          messageRateBucketCleanup:" "$civo_use1_server_application"
+# The email-specific cleanup contract first belongs to the v0.0.226 chart.
+# Current v0.0.225 and older cells must not receive the strict-schema field.
+require_line "          agentEmailRateBucketCleanup:" "$agent_email_rate_cleanup_server_application"
+reject_line "          agentEmailRateBucketCleanup:" "$live_server_application"
+reject_line "          agentEmailRateBucketCleanup:" "$civo_server_application"
+reject_line "          agentEmailRateBucketCleanup:" "$civo_backup_server_application"
+reject_line "          agentEmailRateBucketCleanup:" "$civo_use1_server_application"
 helm template witself-server "$server_chart" --namespace witself \
   --values "$civo_server_nested_values" >"$civo_server_nested_render"
 extract_document ConfigMap witself-server "$civo_server_nested_render" "$civo_server_config"
@@ -468,6 +483,10 @@ require_line '  WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_ENABLED: "true"' "$gcp_worke
 require_line '  WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_BATCH_SIZE: "10000"' "$gcp_worker_config"
 require_line '  WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_INTERVAL: "1m"' "$gcp_worker_config"
 require_line '  WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_BATCH_TIMEOUT: "10s"' "$gcp_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_ENABLED: "true"' "$gcp_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_BATCH_SIZE: "10000"' "$gcp_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_INTERVAL: "1m"' "$gcp_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_BATCH_TIMEOUT: "10s"' "$gcp_worker_config"
 require_line '  WITSELF_TRANSCRIPT_RETENTION_ENABLED: "false"' "$gcp_worker_config"
 require_line '  WITSELF_TRANSCRIPT_RETENTION_BATCH_TIMEOUT: "2m"' "$gcp_worker_config"
 require_line '  WITSELF_AGENT_EMAIL_RETENTION_ENABLED: "false"' "$gcp_worker_config"
@@ -492,6 +511,10 @@ require_line '  WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_ENABLED: "true"' "$live_nest
 require_line '  WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_BATCH_SIZE: "10000"' "$live_nested_worker_config"
 require_line '  WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_INTERVAL: "1m"' "$live_nested_worker_config"
 require_line '  WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_BATCH_TIMEOUT: "10s"' "$live_nested_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_ENABLED: "true"' "$live_nested_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_BATCH_SIZE: "10000"' "$live_nested_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_INTERVAL: "1m"' "$live_nested_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_BATCH_TIMEOUT: "10s"' "$live_nested_worker_config"
 require_line '  WITSELF_MESSAGE_RETENTION_ENABLED: "true"' "$live_nested_worker_config"
 require_line '  WITSELF_MESSAGE_RETENTION_MODE: "enforce"' "$live_nested_worker_config"
 require_line '  WITSELF_MESSAGE_RETENTION_BATCH_SIZE: "25"' "$live_nested_worker_config"
@@ -618,6 +641,30 @@ expect_server_template_failure \
   "oversized message-rate bucket cleanup timeout" \
   --values "$gcp_profile" \
   --set worker.messageRateBucketCleanup.batchTimeout=6m
+expect_server_template_failure \
+  "zero agent-email-rate bucket cleanup batch" \
+  --values "$gcp_profile" \
+  --set worker.agentEmailRateBucketCleanup.batchSize=0
+expect_server_template_failure \
+  "oversized agent-email-rate bucket cleanup batch" \
+  --values "$gcp_profile" \
+  --set worker.agentEmailRateBucketCleanup.batchSize=10001
+expect_server_template_failure \
+  "undersized agent-email-rate bucket cleanup interval" \
+  --values "$gcp_profile" \
+  --set worker.agentEmailRateBucketCleanup.interval=59s
+expect_server_template_failure \
+  "oversized agent-email-rate bucket cleanup interval" \
+  --values "$gcp_profile" \
+  --set worker.agentEmailRateBucketCleanup.interval=25h
+expect_server_template_failure \
+  "undersized agent-email-rate bucket cleanup timeout" \
+  --values "$gcp_profile" \
+  --set worker.agentEmailRateBucketCleanup.batchTimeout=999ms
+expect_server_template_failure \
+  "oversized agent-email-rate bucket cleanup timeout" \
+  --values "$gcp_profile" \
+  --set worker.agentEmailRateBucketCleanup.batchTimeout=6m
 expect_server_template_failure \
   "unknown transcript retention mode" \
   --values "$gcp_profile" \

@@ -80,6 +80,8 @@ test("only a 2xx body containing exactly accepted is success", async () => {
   const failures = [
     new Response('{"verdict":"accepted"}', { status: 503 }),
     new Response('{"verdict":"feature_disabled"}', { status: 503 }),
+    new Response('{"verdict":"rate_limited"}', { status: 503 }),
+    new Response('{"verdict":"rate_limited","scope":"sender"}', { status: 429 }),
     new Response('{"verdict":"accepted","extra":true}', { status: 200 }),
     new Response('{"verdict":"transient"}', { status: 200 }),
     new Response("not json", { status: 200 }),
@@ -109,10 +111,13 @@ test("plan-disabled receipt accepts and drops with a value-free metric", async (
 });
 
 test("unknown and permanent cell verdicts use one sanitized permanent rejection", async () => {
-  for (const verdict of ["unknown_recipient", "permanent"]) {
+  for (const [verdict, status] of [
+    ["unknown_recipient", 404],
+    ["permanent", 410],
+  ]) {
     const mail = message();
     await handleEmail(mail, env(), {
-      fetch: async () => new Response(JSON.stringify({ verdict }), { status: 404 }),
+      fetch: async () => new Response(JSON.stringify({ verdict }), { status }),
     });
     assert.deepEqual(mail.rejected, ["recipient unavailable"]);
   }
@@ -150,6 +155,32 @@ test("cell over-size verdict maps to a sanitized SMTP 552 outcome", async () => 
   assert.doesNotMatch(
     JSON.stringify(points[0]),
     /@|address|account|realm_|agent_|subject|digest|signature/i,
+  );
+});
+
+test("exact cell rate-limit verdict maps to a sanitized temporary outcome", async () => {
+  const points = [];
+  const metrics = { writeDataPoint(point) { points.push(point); } };
+  const mail = message();
+  await assert.rejects(
+    () => handleEmail(mail, env(true, true, metrics), {
+      fetch: async () => new Response('{"verdict":"rate_limited"}', {
+        status: 429,
+        headers: { "Retry-After": "17" },
+      }),
+    }),
+    { message: "agent email relay temporarily unavailable" },
+  );
+  assert.deepEqual(mail.rejected, []);
+  assert.equal(points.length, 1);
+  assert.deepEqual(points[0].indexes, ["tempfail_rate_limited"]);
+  assert.deepEqual(points[0].blobs, [
+    EDGE_METRICS_SCHEMA, "tempfail_rate_limited", "response",
+  ]);
+  assert.equal(points[0].doubles[3], 429);
+  assert.doesNotMatch(
+    JSON.stringify(points[0]),
+    /@|address|account|realm_|agent_|sender|recipient|subject|digest|signature/i,
   );
 });
 

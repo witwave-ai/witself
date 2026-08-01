@@ -173,6 +173,15 @@ worker:
     batchSize: 10000
     interval: 1m
     batchTimeout: 10s
+  # Inbound-email safety buckets are independent from inter-agent messaging.
+  # Every worker replica may run the same cooperatively locked cleanup loop.
+  # A scheduled sweep drains consecutive full batches until caught up or the
+  # batch timeout expires.
+  agentEmailRateBucketCleanup:
+    enabled: true
+    batchSize: 10000
+    interval: 1m
+    batchTimeout: 10s
   # Transcript retention is an explicit three-stage rollout:
   # disabled -> preview -> enforce. Enabling the job still defaults to preview,
   # so deletion requires both enabled: true and mode: enforce.

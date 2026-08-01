@@ -18,6 +18,14 @@ Team and Enterprise `25 MiB`/`100 GiB` raw-message/attachment-storage limits.
 The Founder account remains explicitly unlimited for attachment storage; that
 audited override must survive final catalog reconciliation.
 
+This ingress-protection slice adds schema 84 and six rolling count/byte rate
+keys across unverified sender/recipient, recipient, and realm scopes. Every
+current plan intentionally omits those keys, so independent platform breakers
+apply to all enabled accounts. An audited account override can only lower a
+breaker; explicit unlimited cannot remove it. The owning cell's PostgreSQL
+limiter is the sole authoritative admission point, after the account feature
+check, so disabled accounts continue to accept-and-drop without edge changes.
+
 Kickoff spec, scoped 2026-07-20. A capability-limited Cloudflare receive pilot
 was authorized on 2026-07-21; the stronger production contract remains the
 promotion target. This document is the go-forward design for **agent email**:
@@ -248,6 +256,13 @@ production tier.
   but the pilot neither promises a literal `451` nor depends on a documented
   retry count or schedule. No raw provider error or message content is placed
   in the exception.
+- The cell's exact HTTP 429 `{"verdict":"rate_limited"}` response is a
+  temporary result. The Worker throws the same sanitized exception used for
+  other provider-retry paths, never calls `setReject`, and records only the
+  value-free `tempfail_rate_limited` outcome in phase `response`. A zero cap or
+  message larger than its effective byte bucket is intrinsically impossible;
+  the cell returns the existing permanent verdict so the Worker rejects it
+  once instead of amplifying retries.
 - The signed edge envelope covers only fields the Worker can actually observe:
   timestamp, normalized envelope sender and recipient, destination-cell
   audience, raw size, and body digest. Provider message id, structured
@@ -585,10 +600,13 @@ control or metadata.
      produces the eventual bounce. The 451 is deliberately the same shape as
      a transient failure, so a kill switch never leaks a distinct
      mailbox-state signal to senders;
-   - `over_cap_transient` (per-period inbound cap; will free up) → 451;
-   - `mailbox_full` or other permanent-refusal conditions → 550. `over_cap`
-     must be split at the cell into transient vs permanent so the Worker
-     never maps a recoverable cap to a permanent bounce.
+   - `rate_limited` with HTTP 429 (a rolling inbound breaker that can free up)
+     → the provider's sanitized temporary-retry path;
+   - `permanent` with HTTP 410 (a zero cap or one debit larger than its
+     effective bucket) → 550 permanent, because waiting cannot make it fit;
+   - `mailbox_full` or other permanent-refusal conditions → 550. Recoverable
+     rate pressure stays distinct from permanent capacity refusal so the
+     Worker never maps a temporary breaker to a permanent bounce.
 4. **Transient failure is always tempfail.** Cell unreachable, verdict
    timeout, directory-fallback failure, or any Worker exception maps to an
    explicit 451 — the sender's MTA is the retry mechanism, because
@@ -877,8 +895,19 @@ triggers) rather than agent tools; that design lands with its track.
 
 Receive-only still carries real obligations:
 
-- Per-mailbox inbound rate and size caps enforced at ingestion; overflow is
-  rejected at the provider boundary, not silently dropped after storage.
+- Six rolling one-minute count/byte breakers are enforced transactionally at
+  ingestion: 30 messages and 64 MiB per normalized unverified
+  envelope-sender/enrolled-recipient pair, 300 messages and 512 MiB per
+  receiving agent, and 5,000 messages and 4 GiB per realm. The sender scope is
+  hashed operational state, not authenticated identity; recipient and realm
+  breakers remain necessary against spoofing and sender rotation. A refusal
+  rolls back every earlier debit, stores no message, creates no billable usage
+  event, and takes the temporary provider-retry path rather than being silently
+  dropped after storage.
+- The six account limit keys are intentionally missing from all current plan
+  defaults. Missing or explicit-unlimited means no commercial cap while the
+  independent platform breaker remains. An administrator may set an audited
+  account maximum at or below that breaker, but cannot raise or disable it.
 - **Hostile inbound volume does not bill the victim (settled 2026-07-21).**
   Nobody controls who sends an agent mail, so metering must not hand an
   attacker a lever. Provider-flagged spam, quarantined mail, and traffic
@@ -1017,10 +1046,12 @@ Receive-only still carries real obligations:
     list, the vanity length cap, per-plan gating, and whether release or
     transfer is ever permitted given address permanence (see Addressing And
     Domain Model).
-11. Edge observability and metering: rejected and tempfailed mail never
-    reaches a cell, so Worker-side verdict counters (and their value-free
-    export into the platform metrics plane) are the only visibility into
-    edge drops; decide the mechanism before v1 promotion.
+11. Edge observability baseline is implemented through one best-effort,
+    value-free Analytics Engine point per SMTP-facing outcome. It includes the
+    closed `tempfail_rate_limited` outcome with phase `response` for an
+    authoritative retryable cell refusal.
+    Export from that edge dataset into the wider platform metrics plane remains
+    promotion work.
 
 Raised by the 2026-07-21 whole-spec gap review (blocking items were settled
 in place; these are the remaining important items):

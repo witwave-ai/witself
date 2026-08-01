@@ -111,6 +111,13 @@ func TestAgentEmailPilotConfigFromEnvRejectsUnsafeShapes(t *testing.T) {
 }
 
 func TestAgentEmailErrorMapping(t *testing.T) {
+	rateLimit := &store.AgentEmailRateLimitError{
+		Dimension:  "email_received_bytes",
+		Scope:      "recipient",
+		Source:     "plan",
+		RetryAfter: 3 * time.Second,
+		Retryable:  true,
+	}
 	if !errors.Is(mapAgentEmailIngestError(store.ErrAgentEmailUnknownRecipient), server.ErrAgentEmailUnknownRecipient) ||
 		!errors.Is(mapAgentEmailIngestError(store.ErrAgentEmailPilotNotEnrolled), server.ErrAgentEmailUnknownRecipient) ||
 		!errors.Is(mapAgentEmailIngestError(store.ErrAgentEmailReceiveDisabled), server.ErrAgentEmailReceiveDisabled) ||
@@ -119,8 +126,18 @@ func TestAgentEmailErrorMapping(t *testing.T) {
 		), server.ErrAgentEmailFeatureDisabled) ||
 		!errors.Is(mapAgentEmailIngestError(store.ErrAgentEmailRetryCanaryTemporary), server.ErrAgentEmailRetryCanaryTemporary) ||
 		!errors.Is(mapAgentEmailIngestError(store.ErrAgentEmailRetryCanaryPermanent), server.ErrAgentEmailRetryCanaryPermanent) ||
-		!errors.Is(mapAgentEmailIngestError(store.ErrAgentEmailPilotDisabled), server.ErrAgentEmailPilotUnavailable) {
+		!errors.Is(mapAgentEmailIngestError(store.ErrAgentEmailPilotDisabled), server.ErrAgentEmailPilotUnavailable) ||
+		!errors.Is(mapAgentEmailIngestError(rateLimit), server.ErrAgentEmailRateLimited) {
 		t.Fatal("ingestion errors did not map to typed relay verdict errors")
+	}
+	var mappedRate *server.AgentEmailRateLimitError
+	if err := mapAgentEmailIngestError(rateLimit); !errors.As(err, &mappedRate) ||
+		mappedRate.Dimension != rateLimit.Dimension ||
+		mappedRate.Scope != rateLimit.Scope ||
+		mappedRate.Source != rateLimit.Source ||
+		mappedRate.RetryAfter != rateLimit.RetryAfter ||
+		mappedRate.Retryable != rateLimit.Retryable {
+		t.Fatalf("agent-email rate mapping = %#v / %v", mappedRate, err)
 	}
 	if !errors.Is(mapAgentEmailError(store.ErrAgentEmailInputInvalid), server.ErrBadInput) ||
 		!errors.Is(mapAgentEmailError(store.ErrAgentEmailNotFound), server.ErrNotFound) ||

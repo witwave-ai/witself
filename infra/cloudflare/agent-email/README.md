@@ -10,8 +10,11 @@ rejects messages larger than the 25 MiB transport ceiling, signs the SMTP
 envelope plus raw-message digest with Ed25519, and relays the raw message to the
 enrolled cell. The cell may return an exact plan-aware `over_size` verdict for
 a lower account limit; the Worker maps it to a sanitized permanent SMTP 552
-rejection. Only a 2xx response containing exactly
-`{"verdict":"accepted"}` counts as SMTP success.
+rejection. An exact HTTP 429 `rate_limited` verdict instead becomes a sanitized
+temporary provider result and a value-free `tempfail_rate_limited` metric. Only
+a 2xx response containing exactly `{"verdict":"accepted"}` or the deliberate
+accept-and-drop `{"verdict":"feature_disabled"}` counts as SMTP success. An
+exact permanent cell verdict is rejected once without retry.
 
 ## Safety boundary
 
@@ -28,6 +31,9 @@ rejection. Only a 2xx response containing exactly
   literal routes before activation. The route manager reports the live setting
   and refuses preparation or activation if it cannot be read or is disabled.
 - Do not activate until the destination cell is enabled and healthy.
+- The owning cell's PostgreSQL limiter is the sole authoritative rate decision.
+  Every enrolled delivery reaches the cell feature check first, preserving
+  accept-and-drop behavior for plan-disabled accounts without edge changes.
 - A failed operation attempts to disable the pilot gate and its managed rules;
   inspect Cloudflare state before retrying any reported incomplete rollback.
 

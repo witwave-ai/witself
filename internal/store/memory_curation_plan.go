@@ -753,11 +753,11 @@ func normalizeMemoryCurationSnapshot(
 	}); err != nil {
 		return err
 	}
-	if requireEvidence && len(snapshot.Evidence) == 0 {
-		return memoryCurationInvalidf("new memories require at least one evidence row")
+	if requireEvidence && (len(snapshot.Evidence) < 1 || len(snapshot.Evidence) > 32) {
+		return memoryCurationInvalidf("create.snapshot.evidence must contain 1-32 rows")
 	}
-	if len(snapshot.Evidence) > 32 {
-		return memoryCurationInvalidf("a memory snapshot may contain at most 32 evidence rows")
+	if !requireEvidence && len(snapshot.Evidence) > 32 {
+		return memoryCurationInvalidf("replace.snapshot.evidence may contain at most 32 rows")
 	}
 	for index := range snapshot.Evidence {
 		if err := normalizeMemoryCurationEvidence(&snapshot.Evidence[index], assigned); err != nil {

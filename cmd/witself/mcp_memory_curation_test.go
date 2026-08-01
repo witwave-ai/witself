@@ -610,6 +610,15 @@ func TestMCPMemoryCurationPlanAdvertisesAndMapsCompleteV1Draft(t *testing.T) {
 	if !strings.Contains(planTool.Description, emptyPlan) {
 		t.Fatalf("plan description omitted exact empty plan %s: %q", emptyPlan, planTool.Description)
 	}
+	for _, want := range []string{
+		"create.snapshot.evidence is required and must contain 1-32 rows",
+		"replace.snapshot.evidence is optional additive provenance with at most 32 rows",
+		"derived_from does not replace snapshot evidence",
+	} {
+		if !strings.Contains(planTool.Description, want) {
+			t.Errorf("plan description omitted evidence rule %q: %q", want, planTool.Description)
+		}
+	}
 	for _, want := range []string{"Never place credentials", "private keys", "TOTP seeds", "sensitive=true is not a sealed-secret substitute", "Use an empty plan"} {
 		if !strings.Contains(planTool.Description, want) {
 			t.Errorf("plan description omitted secret-boundary rule %q: %q", want, planTool.Description)
@@ -637,9 +646,26 @@ func TestMCPMemoryCurationPlanAdvertisesAndMapsCompleteV1Draft(t *testing.T) {
 	for _, field := range []string{"content", "evidence"} {
 		requireMCPObjectProperty(t, root, snapshot, field)
 	}
+	createEvidence := requireMCPObjectProperty(t, root, snapshot, "evidence")
+	if description, _ := createEvidence["description"].(string); !strings.Contains(description, "required for create") ||
+		!strings.Contains(description, "1-32") {
+		t.Errorf("create evidence schema description = %q", description)
+	}
+	if !mcpSchemaRequiresProperty(t, root, snapshot, "evidence") {
+		t.Error("create snapshot schema did not require evidence")
+	}
 	replace := requireMCPObjectProperty(t, root, action, "replace")
 	for _, field := range []string{"target", "snapshot"} {
 		requireMCPObjectProperty(t, root, replace, field)
+	}
+	replaceSnapshot := requireMCPObjectProperty(t, root, replace, "snapshot")
+	replaceEvidence := requireMCPObjectProperty(t, root, replaceSnapshot, "evidence")
+	if description, _ := replaceEvidence["description"].(string); !strings.Contains(description, "optional additive") ||
+		!strings.Contains(description, "at most 32") {
+		t.Errorf("replace evidence schema description = %q", description)
+	}
+	if mcpSchemaRequiresProperty(t, root, replaceSnapshot, "evidence") {
+		t.Error("replace snapshot schema incorrectly required evidence")
 	}
 	supersede := requireMCPObjectProperty(t, root, action, "supersede")
 	for _, field := range []string{"target", "replacements"} {
@@ -736,6 +762,103 @@ func TestMCPMemoryCurationPlanAdvertisesAndMapsCompleteV1Draft(t *testing.T) {
 	}
 }
 
+func TestMCPMemoryCurationPlanRejectsInvalidEvidenceWithStableSafeDetail(t *testing.T) {
+	ctx := context.Background()
+	backend := &fakeCurationMCPBackend{}
+	server := newWitselfMCPServer(backend)
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = serverSession.Close() }()
+	clientSession, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil).Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = clientSession.Close() }()
+
+	evidence := make([]map[string]any, 33)
+	for index := range evidence {
+		evidence[index] = map[string]any{
+			"type": "conversation", "resolution_state": "unavailable",
+			"terminal_reason_code": "not_recorded",
+		}
+	}
+	tests := []struct {
+		name      string
+		operation string
+		payload   map[string]any
+		detail    string
+		wantCode  bool
+	}{
+		{
+			name: "create evidence omitted", operation: "create",
+			payload: map[string]any{"local_ref": "new", "snapshot": map[string]any{
+				"content": "private-content-must-not-echo",
+			}},
+			detail: `required: missing properties: ["evidence"]`,
+		},
+		{
+			name: "create evidence over maximum", operation: "create",
+			payload: map[string]any{"local_ref": "new", "snapshot": map[string]any{
+				"content": "private-content-must-not-echo", "evidence": evidence,
+			}},
+			detail:   "actions[0].create.snapshot.evidence must contain 1-32 rows",
+			wantCode: true,
+		},
+		{
+			name: "replace evidence over maximum", operation: "replace",
+			payload: map[string]any{
+				"target": map[string]any{"memory_id": "mem_old", "expected_version": 1},
+				"snapshot": map[string]any{
+					"content": "private-content-must-not-echo", "evidence": evidence,
+				},
+			},
+			detail:   "actions[0].replace.snapshot.evidence may contain at most 32 rows",
+			wantCode: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+				Name: "witself.memory.curation.plan",
+				Arguments: map[string]any{
+					"run_id": "mrun_1", "fencing_generation": 4,
+					"draft": map[string]any{
+						"schema": "witself.memory-plan.v1", "draft_revision": 1,
+						"actions": []map[string]any{{
+							"ordinal": 1, "operation": test.operation, test.operation: test.payload,
+						}},
+					},
+					"idempotency_key": "invalid-evidence-" + strings.ReplaceAll(test.name, " ", "-"),
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !result.IsError || len(result.Content) != 1 {
+				t.Fatalf("result = %#v, want one tool error", result)
+			}
+			message, ok := result.Content[0].(*mcp.TextContent)
+			if !ok {
+				t.Fatalf("error content = %T, want text", result.Content[0])
+			}
+			if !strings.Contains(message.Text, test.detail) ||
+				(test.wantCode && !strings.Contains(message.Text, mcpMemoryCurationPlanInvalidCode)) {
+				t.Errorf("error text = %q, want safe detail %q (stable code=%t)",
+					message.Text, test.detail, test.wantCode)
+			}
+			if strings.Contains(message.Text, "private-content-must-not-echo") {
+				t.Errorf("error leaked client-authored content: %q", message.Text)
+			}
+			if len(backend.plan.Draft) != 0 {
+				t.Fatalf("invalid plan reached backend: %s", backend.plan.Draft)
+			}
+		})
+	}
+}
+
 func TestMCPCuratorProfilesAdvertiseOnlyEffectiveWorkflow(t *testing.T) {
 	base := []string{
 		"witself.memory.curation.preflight",
@@ -829,6 +952,25 @@ func requireMCPObjectProperty(t *testing.T, root, schema map[string]any, field s
 		t.Fatalf("schema omitted property %q: %#v", field, schema)
 	}
 	return resolveMCPObjectSchema(t, root, property)
+}
+
+func mcpSchemaRequiresProperty(
+	t *testing.T,
+	root, schema map[string]any,
+	field string,
+) bool {
+	t.Helper()
+	schema = resolveMCPObjectSchema(t, root, schema)
+	required, ok := schema["required"].([]any)
+	if !ok {
+		return false
+	}
+	for _, candidate := range required {
+		if candidate == field {
+			return true
+		}
+	}
+	return false
 }
 
 func requireMCPArrayItem(t *testing.T, root, schema map[string]any) map[string]any {

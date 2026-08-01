@@ -14,6 +14,7 @@ const OUTCOMES = new Set([
   "tempfail_content",
   "tempfail_signing",
   "tempfail_transport",
+  "tempfail_rate_limited",
   "tempfail_cell_response",
   "tempfail_internal",
 ]);

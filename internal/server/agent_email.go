@@ -34,6 +34,7 @@ const (
 	agentEmailListenPollInterval           = time.Second
 	maxConcurrentAgentEmailListens         = 128
 	maxConcurrentAgentEmailListensPerAgent = 2
+	agentEmailRateRetryMaximumSeconds      = 60
 	minAgentEmailProcessingLeaseSeconds    = 30
 	maxAgentEmailProcessingLeaseSeconds    = 15 * 60
 	minAgentEmailRelayReplayWindow         = time.Second
@@ -65,9 +66,31 @@ var (
 	// ErrAgentEmailRetryCanaryPermanent reports a synthetic retry marker that
 	// no live arm can authorize and that the edge must reject without retrying.
 	ErrAgentEmailRetryCanaryPermanent = errors.New("agent-email retry canary permanent rejection")
+	// ErrAgentEmailRateLimited reports a non-billable safety refusal shared by
+	// every API replica. Retryable refusals become a temporary SMTP result;
+	// impossible debits become a permanent refusal so they cannot amplify
+	// retries forever.
+	ErrAgentEmailRateLimited = errors.New("agent-email rate limited")
 	// ErrAgentEmailCodeConsumed reports a repeated single-use code-consumption attempt.
 	ErrAgentEmailCodeConsumed = errors.New("agent-email code was already consumed")
 )
+
+// AgentEmailRateLimitError preserves only closed labels and a bounded retry
+// hint across the store-to-HTTP adapter. It never carries tenant, mailbox, or
+// external-sender identifiers.
+type AgentEmailRateLimitError struct {
+	Dimension  string
+	Scope      string
+	Source     string
+	RetryAfter time.Duration
+	Retryable  bool
+}
+
+func (e *AgentEmailRateLimitError) Error() string {
+	return ErrAgentEmailRateLimited.Error()
+}
+
+func (e *AgentEmailRateLimitError) Unwrap() error { return ErrAgentEmailRateLimited }
 
 // AgentEmailPilotConfig is a process-lifetime, default-off capability fence.
 // Exactly one realm and 5-10 agents must be enabled. RelayPublicKeys supports
@@ -433,6 +456,27 @@ func agentEmailIngestHandler(cfg AgentEmailPilotConfig, ingest AgentEmailIngestF
 			writeAgentEmailVerdict(w, http.StatusNotFound, "unknown_recipient")
 		case errors.Is(err, ErrAgentEmailReceiveDisabled):
 			writeAgentEmailVerdict(w, http.StatusServiceUnavailable, "receive_disabled")
+		case errors.Is(err, ErrAgentEmailRateLimited):
+			retryAfter := time.Minute
+			var detail *AgentEmailRateLimitError
+			if errors.As(err, &detail) && detail != nil {
+				if !detail.Retryable {
+					writeAgentEmailVerdict(w, http.StatusGone, "permanent")
+					return
+				}
+				if detail.RetryAfter > 0 {
+					retryAfter = detail.RetryAfter
+				}
+			}
+			retrySeconds := int64((retryAfter + time.Second - 1) / time.Second)
+			if retrySeconds < 1 {
+				retrySeconds = 1
+			}
+			if retrySeconds > agentEmailRateRetryMaximumSeconds {
+				retrySeconds = agentEmailRateRetryMaximumSeconds
+			}
+			w.Header().Set("Retry-After", strconv.FormatInt(retrySeconds, 10))
+			writeAgentEmailVerdict(w, http.StatusTooManyRequests, "rate_limited")
 		case errors.Is(err, ErrAgentEmailRetryCanaryTemporary):
 			writeAgentEmailVerdict(w, http.StatusServiceUnavailable, "temporary")
 		case errors.Is(err, ErrAgentEmailRetryCanaryPermanent):

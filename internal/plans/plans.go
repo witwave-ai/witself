@@ -82,6 +82,26 @@ const (
 	// under a rolling one-minute rate budget. A missing key means no commercial
 	// plan cap, but the service's defensive platform maximum still applies.
 	MessageDeliveredPerRecipientMinuteLimit = "message_delivered_per_recipient_minute"
+	// AgentEmailReceivedPerSenderMinuteLimit caps accepted inbound email from
+	// one unverified envelope-sender/recipient pair under a rolling one-minute
+	// rate budget. A missing key means no commercial plan cap, but the service's
+	// defensive platform maximum still applies.
+	AgentEmailReceivedPerSenderMinuteLimit = "agent_email_received_per_sender_minute"
+	// AgentEmailReceivedPerRecipientMinuteLimit caps accepted inbound email for
+	// one receiving agent under a rolling one-minute rate budget.
+	AgentEmailReceivedPerRecipientMinuteLimit = "agent_email_received_per_recipient_minute"
+	// AgentEmailReceivedPerRealmMinuteLimit caps aggregate accepted inbound
+	// email within one realm under a rolling one-minute rate budget.
+	AgentEmailReceivedPerRealmMinuteLimit = "agent_email_received_per_realm_minute"
+	// AgentEmailReceivedBytesPerSenderMinuteLimit is the byte-weighted companion
+	// to AgentEmailReceivedPerSenderMinuteLimit. It meters signed raw-MIME bytes.
+	AgentEmailReceivedBytesPerSenderMinuteLimit = "agent_email_received_bytes_per_sender_minute"
+	// AgentEmailReceivedBytesPerRecipientMinuteLimit caps signed raw-MIME bytes
+	// accepted for one receiving agent under a rolling one-minute rate budget.
+	AgentEmailReceivedBytesPerRecipientMinuteLimit = "agent_email_received_bytes_per_recipient_minute"
+	// AgentEmailReceivedBytesPerRealmMinuteLimit caps aggregate signed raw-MIME
+	// bytes accepted within one realm under a rolling one-minute rate budget.
+	AgentEmailReceivedBytesPerRealmMinuteLimit = "agent_email_received_bytes_per_realm_minute"
 	// MaxAgentEmailRawBytes is the service/provider transport ceiling. Plan
 	// defaults and per-account overrides may lower it but cannot promise a
 	// larger message than the receive path can carry.
@@ -96,6 +116,24 @@ const (
 	// MaxMessageDeliveredPerRecipientMinute is the always-enforced platform
 	// maximum for one recipient under a rolling one-minute rate budget.
 	MaxMessageDeliveredPerRecipientMinute int64 = 5_000
+	// MaxAgentEmailReceivedPerSenderMinute is the always-enforced platform
+	// breaker for one unverified envelope-sender/recipient pair.
+	MaxAgentEmailReceivedPerSenderMinute int64 = 30
+	// MaxAgentEmailReceivedPerRecipientMinute is the always-enforced platform
+	// breaker for one receiving agent.
+	MaxAgentEmailReceivedPerRecipientMinute int64 = 300
+	// MaxAgentEmailReceivedPerRealmMinute is the always-enforced aggregate
+	// platform breaker for one realm.
+	MaxAgentEmailReceivedPerRealmMinute int64 = 5_000
+	// MaxAgentEmailReceivedBytesPerSenderMinute bounds raw-MIME ingress from one
+	// unverified envelope-sender/recipient pair to 64 MiB per rolling minute.
+	MaxAgentEmailReceivedBytesPerSenderMinute int64 = 64 * 1024 * 1024
+	// MaxAgentEmailReceivedBytesPerRecipientMinute bounds raw-MIME ingress for
+	// one receiving agent to 512 MiB per rolling minute.
+	MaxAgentEmailReceivedBytesPerRecipientMinute int64 = 512 * 1024 * 1024
+	// MaxAgentEmailReceivedBytesPerRealmMinute bounds aggregate raw-MIME ingress
+	// for one realm to 4 GiB per rolling minute.
+	MaxAgentEmailReceivedBytesPerRealmMinute int64 = 4 * 1024 * 1024 * 1024
 	// MaxPlanLimit is the largest exact integer shared by Go and JavaScript's
 	// JSON number representation. Unlimited is represented by a missing key,
 	// never by an oversized sentinel.
@@ -284,7 +322,13 @@ func ValidateLimits(limits map[string]int64) error {
 			AgentEmailAttachmentStorageBytesLimit,
 			MessageSentPerAgentMinuteLimit,
 			MessageDeliveredPerRealmMinuteLimit,
-			MessageDeliveredPerRecipientMinuteLimit:
+			MessageDeliveredPerRecipientMinuteLimit,
+			AgentEmailReceivedPerSenderMinuteLimit,
+			AgentEmailReceivedPerRecipientMinuteLimit,
+			AgentEmailReceivedPerRealmMinuteLimit,
+			AgentEmailReceivedBytesPerSenderMinuteLimit,
+			AgentEmailReceivedBytesPerRecipientMinuteLimit,
+			AgentEmailReceivedBytesPerRealmMinuteLimit:
 		default:
 			return fmt.Errorf("unknown limit %q", key)
 		}
@@ -311,6 +355,36 @@ func ValidateLimits(limits map[string]int64) error {
 			if value > MaxMessageDeliveredPerRecipientMinute {
 				return fmt.Errorf("%s must be between 0 and %d",
 					key, MaxMessageDeliveredPerRecipientMinute)
+			}
+		case AgentEmailReceivedPerSenderMinuteLimit:
+			if value > MaxAgentEmailReceivedPerSenderMinute {
+				return fmt.Errorf("%s must be between 0 and %d",
+					key, MaxAgentEmailReceivedPerSenderMinute)
+			}
+		case AgentEmailReceivedPerRecipientMinuteLimit:
+			if value > MaxAgentEmailReceivedPerRecipientMinute {
+				return fmt.Errorf("%s must be between 0 and %d",
+					key, MaxAgentEmailReceivedPerRecipientMinute)
+			}
+		case AgentEmailReceivedPerRealmMinuteLimit:
+			if value > MaxAgentEmailReceivedPerRealmMinute {
+				return fmt.Errorf("%s must be between 0 and %d",
+					key, MaxAgentEmailReceivedPerRealmMinute)
+			}
+		case AgentEmailReceivedBytesPerSenderMinuteLimit:
+			if value > MaxAgentEmailReceivedBytesPerSenderMinute {
+				return fmt.Errorf("%s must be between 0 and %d",
+					key, MaxAgentEmailReceivedBytesPerSenderMinute)
+			}
+		case AgentEmailReceivedBytesPerRecipientMinuteLimit:
+			if value > MaxAgentEmailReceivedBytesPerRecipientMinute {
+				return fmt.Errorf("%s must be between 0 and %d",
+					key, MaxAgentEmailReceivedBytesPerRecipientMinute)
+			}
+		case AgentEmailReceivedBytesPerRealmMinuteLimit:
+			if value > MaxAgentEmailReceivedBytesPerRealmMinute {
+				return fmt.Errorf("%s must be between 0 and %d",
+					key, MaxAgentEmailReceivedBytesPerRealmMinute)
 			}
 		}
 	}

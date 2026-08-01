@@ -363,8 +363,23 @@ func TestMemoryCurationPlanValidatesSnapshotsEvidenceTargetsAndFacts(t *testing.
 	}
 	createWithoutEvidence := validCurationDraft(MemoryCurationPlanAction{Ordinal: 1, Operation: MemoryCurationOperationCreate,
 		Create: &MemoryCurationCreateAction{LocalRef: "new", Snapshot: MemoryCurationMemorySnapshot{Content: "new"}}})
-	if _, err := AcceptMemoryCurationPlan(createWithoutEvidence, MemoryCurationPlanAcceptOptions{PlanRevision: 1, Allocator: fixedCurationAllocator("mem_new")}); !errors.Is(err, ErrMemoryInputInvalid) {
+	if _, err := AcceptMemoryCurationPlan(createWithoutEvidence, MemoryCurationPlanAcceptOptions{PlanRevision: 1, Allocator: fixedCurationAllocator("mem_new")}); !errors.Is(err, ErrMemoryInputInvalid) || !strings.Contains(err.Error(), "create.snapshot.evidence must contain 1-32 rows") {
 		t.Fatalf("missing create evidence error = %v", err)
+	}
+	tooMuchEvidence := make([]MemoryCurationEvidence, 33)
+	for index := range tooMuchEvidence {
+		tooMuchEvidence[index] = unavailableCurationEvidence()
+	}
+	createWithTooMuchEvidence := validCurationDraft(MemoryCurationPlanAction{Ordinal: 1, Operation: MemoryCurationOperationCreate,
+		Create: &MemoryCurationCreateAction{LocalRef: "new", Snapshot: MemoryCurationMemorySnapshot{
+			Content: "new", Evidence: tooMuchEvidence,
+		}}})
+	if _, err := AcceptMemoryCurationPlan(createWithTooMuchEvidence, MemoryCurationPlanAcceptOptions{PlanRevision: 1, Allocator: fixedCurationAllocator("mem_new")}); !errors.Is(err, ErrMemoryInputInvalid) || !strings.Contains(err.Error(), "create.snapshot.evidence must contain 1-32 rows") {
+		t.Fatalf("excess create evidence error = %v", err)
+	}
+	if _, err := AcceptMemoryCurationPlan(replace(MemoryCurationMemorySnapshot{Content: "replacement", Evidence: tooMuchEvidence},
+		MemoryCurationTargetReference{MemoryID: "mem_target", ExpectedVersion: 1}), MemoryCurationPlanAcceptOptions{PlanRevision: 1}); !errors.Is(err, ErrMemoryInputInvalid) || !strings.Contains(err.Error(), "replace.snapshot.evidence may contain at most 32 rows") {
+		t.Fatalf("excess replace evidence error = %v", err)
 	}
 
 	invalidSnapshots := []MemoryCurationMemorySnapshot{

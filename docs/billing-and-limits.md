@@ -65,6 +65,8 @@ values are the Phase B canonical defaults described below; the other rows
 remain subject to their own implementation and rollout gates.
 The three message-rate rows are active paid-tier defaults in the `v0.0.225`
 Phase-B catalog; Personal deliberately omits those keys.
+The six inbound-agent-email rate keys are intentionally absent for every tier;
+the independent platform breakers described below apply instead.
 
 | Capability | Personal — $0 | Professional — $30/month | Team — $250/month | Enterprise — contact us |
 |---|---:|---:|---:|---:|
@@ -78,7 +80,7 @@ Phase-B catalog; Personal deliberately omits those keys.
 | Agent message sends per rolling minute | Not applicable | 30 | 120 | 600 |
 | Agent message deliveries per realm per rolling minute | Not applicable | 500 | 5,000 | 25,000 |
 | Agent message deliveries per recipient per rolling minute | Not applicable | 60 | 300 | 1,000 |
-| Receive agent email | No | Unlimited; retained 90 days | Unlimited; retained 365 days | Enabled; retained 365 days by default, contract override |
+| Receive agent email | No | Included; retained 90 days; safety breakers apply | Included; retained 365 days; safety breakers apply | Enabled; retained 365 days by default, contract override; safety breakers apply |
 | Raw MIME and attachment retention | None stored | 90 days | 365 days | Configurable, including indefinite |
 | Maximum raw email size | 0 (email disabled) | 10 MiB | 25 MiB | Contracted; 25 MiB default |
 | Retained attachment storage per account | 0 | 5 GiB | 100 GiB | Contracted; 100 GiB default |
@@ -92,12 +94,12 @@ with their custom realm designator and use a configured custom domain:
 of the address on custom domains.
 
 In this table, an included feature does not imply unbounded throughput or a
-per-message charge. Message rate values are shared rolling one-minute
-GCRA/token-bucket-equivalent budgets, not wall-clock minute buckets. Inbound
-hostile traffic must not create recipient charges. "Included" confirms that
-outbound agent email is available, but its sending allowance and overage
-treatment remain to be decided. "Contracted" means the quantity or policy is
-negotiated for the Enterprise account.
+per-message charge. Message rate values and agent-email safety breakers are
+shared rolling one-minute GCRA/token-bucket-equivalent budgets, not wall-clock
+minute buckets. Inbound hostile traffic must not create recipient charges.
+"Included" confirms that outbound agent email is available, but its sending
+allowance and overage treatment remain to be decided. "Contracted" means the
+quantity or policy is negotiated for the Enterprise account.
 
 The two agent-email byte allowances are hard limits in the resolved account
 snapshot, not retention policies:
@@ -135,6 +137,50 @@ Founder account's explicit-unlimited attachment-storage override must remain
 present before and after reconciliation. Personal email remains disabled
 throughout; the edge Worker retains its independent 25 MiB technical ceiling
 during both phases.
+
+### Agent-email ingress rate breakers
+
+Inbound agent email has six account-adjustable, rolling one-minute safety
+limits. They are service-protection controls, not customer usage or overage
+dimensions:
+
+| Resolved limit key | Bucket scope | Independent platform maximum |
+|---|---|---:|
+| `agent_email_received_per_sender_minute` | One normalized, unverified envelope-sender and enrolled-recipient pair | 30 messages |
+| `agent_email_received_per_recipient_minute` | One receiving agent | 300 messages |
+| `agent_email_received_per_realm_minute` | One realm | 5,000 messages |
+| `agent_email_received_bytes_per_sender_minute` | The same sender/recipient pair | 64 MiB |
+| `agent_email_received_bytes_per_recipient_minute` | One receiving agent | 512 MiB |
+| `agent_email_received_bytes_per_realm_minute` | One realm | 4 GiB |
+
+All six keys are intentionally absent from every current plan in
+`web/plans/plans.json`: there is no commercial tier default yet. Missing or
+explicit-unlimited removes only a commercial cap; it never disables the
+independent platform maximum. The generic audited account override accepts a
+finite value only at or below that key's platform maximum, so an administrator
+can lower a breaker for one account but cannot raise or bypass it. Clearing the
+override restores plan inheritance; with the current catalog that again means
+the platform maximum. Personal remains protected first by its disabled receive
+entitlement.
+
+The sender label is not an authenticated identity. The cell hashes the
+normalized envelope sender together with the exact enrolled recipient and
+keeps that hash only in operational bucket state. Recipient and realm breakers
+remain necessary because an external sender can spoof or rotate envelope
+addresses. All six debits and the message insert share one PostgreSQL
+transaction, so a refusal rolls back earlier debits and stores no message. It
+returns the exact value-free `rate_limited` verdict with HTTP 429 when waiting
+can make the debit succeed; the edge surfaces only a sanitized temporary
+provider result. A zero cap or a single message larger than its effective byte
+bucket cannot become admissible by waiting, so the cell instead returns the
+existing value-free permanent verdict and the edge rejects it without retry.
+
+Accepted and refused attempts affect only these operational safety buckets.
+They emit no billable `email_received` usage event and create no inbound
+overage. The owning cell's PostgreSQL limiter is the sole authoritative
+admission point across replicas. Keeping admission below the feature check
+also preserves Personal's accept-and-drop behavior without requiring any edge
+reconfiguration when an account changes plans.
 
 ### Messaging availability and retention
 
@@ -782,10 +828,13 @@ Notes on a few dimensions:
   [agent-collaboration.md](agent-collaboration.md)).
 - Agent email uses its own dimensions because external inbound abuse, outbound
   reputation, address allocation, and MIME storage have different controls from
-  the realm-local mailbox. `email_received` is accounting-only for the
-  authorized Cloudflare pilot: pilot provisioning and ingestion emit no
-  billable usage event, have no quota/overage enforcement, and hostile inbound
-  volume can never bill the recipient. The canonical dimension and unit names
+  the realm-local mailbox. The six resolved ingress-rate keys map internally to
+  the closed operational dimensions `email_received` and
+  `email_received_bytes`; they are not six new billable dimensions.
+  `email_received` remains accounting-only for the authorized Cloudflare pilot:
+  pilot provisioning and ingestion emit no billable usage event or overage,
+  and hostile inbound volume can never bill the recipient. The canonical
+  dimension and unit names
   exist in the cell usage contract so later production metering cannot invent
   incompatible keys; emission remains disabled until authoritative abuse
   classification and production pricing are both pinned. `email_sent` remains
@@ -889,7 +938,7 @@ Recommended defaults:
 | Security groups | `block` for hard cap, `warn` near cap. |
 | Messages sent/delivered | `throttle` or `warn`; block only for abuse or hard caps. |
 | Agent-email addresses | `block` for the hard address cap, `warn` near cap. |
-| Agent email received | No plan overage action in the limited pilot. A production default is blocked on authoritative spam/abuse classification and source-scoped enforcement; aggregate recipient traffic must never become a victim-billing or mailbox-starvation lever. |
+| Agent email received | Apply the non-billable temporary platform breakers above, with no plan overage or usage charge in the limited pilot. A production billing default is blocked on authoritative spam/abuse classification; aggregate recipient traffic must never become a victim-billing or mailbox-starvation lever. |
 | Agent email sent | `block` at the hard per-period threshold; sending remains dormant until a send slice exists. |
 | Agent-email raw-MIME and attachment storage | Expire inline raw MIME by the plan's age-based retention window and reject messages over `agent_email_max_raw_bytes`. Charge the full retained raw-MIME size of each attachment-bearing message to the account-wide `agent_email_attachment_storage_bytes` pool. When that pool lacks room, preserve bounded text and metadata, explicitly mark the raw attachment-bearing payload unretained, and never create an inbound overage charge. |
 | Stored secrets | `block` for hard cap, `warn` near cap. |

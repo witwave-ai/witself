@@ -287,9 +287,13 @@ contains server-assigned memory ids.
 
 Supported primitives are deliberately small:
 
-- `create` writes one full derived memory with exact evidence and optional
-  lineage;
-- `replace` appends one complete desired snapshot to an exact current head;
+- `create` writes one full derived memory with optional lineage. Its
+  `snapshot.evidence` field is required and must contain 1-32 exact frozen-input
+  evidence rows; a `derived_from` relation records lineage but does not replace
+  that evidence;
+- `replace` appends one complete desired snapshot to an exact current head. Its
+  `snapshot.evidence` field is optional additive provenance and may contain at
+  most 32 rows;
 - `supersede` marks one exact active head as replaced by one or more exact
   versions;
 - `relate` adds a version-specific non-supersession lineage edge; and

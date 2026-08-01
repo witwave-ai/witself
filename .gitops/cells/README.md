@@ -47,6 +47,9 @@ For DNS, keep the stable names here:
 - `apps.witselfServer.worker` controls the separately scalable cell worker.
   `worker.avatarStyleRollout` pins bounded profile propagation; managed
   defaults use batch size `100`, interval `2s`, and batch timeout `30s`.
+  The message and agent-email rate-bucket cleanup settings are independently
+  version-gated by the app-of-apps renderer so older strict child charts never
+  receive unknown values.
   `worker.transcriptRetention` pins the retention phase, batch size, cadence,
   and timeout. Change these deliberately within the worker/chart bounds rather
   than inheriting downstream defaults accidentally.

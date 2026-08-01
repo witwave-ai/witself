@@ -59,6 +59,44 @@ func TestAgentEmailSignedIngestHTTPContract(t *testing.T) {
 	handler.ServeHTTP(response, testAgentEmailIngestRequest(t, raw, metadata, privateKey))
 	assertAgentEmailVerdict(t, response, http.StatusServiceUnavailable, "receive_disabled")
 
+	ingestErr = &AgentEmailRateLimitError{
+		Dimension:  "email_received_bytes",
+		Scope:      "sender",
+		Source:     "platform",
+		RetryAfter: 1500 * time.Millisecond,
+		Retryable:  true,
+	}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, testAgentEmailIngestRequest(t, raw, metadata, privateKey))
+	assertAgentEmailVerdict(t, response, http.StatusTooManyRequests, "rate_limited")
+	if got := response.Header().Get("Retry-After"); got != "2" {
+		t.Fatalf("rate-limited Retry-After = %q, want 2", got)
+	}
+
+	ingestErr = &AgentEmailRateLimitError{
+		Dimension: "email_received_bytes",
+		Scope:     "recipient",
+		Source:    "plan",
+		Retryable: false,
+	}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, testAgentEmailIngestRequest(t, raw, metadata, privateKey))
+	assertAgentEmailVerdict(t, response, http.StatusGone, "permanent")
+	if got := response.Header().Get("Retry-After"); got != "" {
+		t.Fatalf("permanent rate refusal Retry-After = %q, want empty", got)
+	}
+
+	// A legacy or unexpected adapter that returns only the sentinel must fail
+	// safely as retryable; only an explicit typed non-retryable decision may
+	// permanently reject a delivery.
+	ingestErr = ErrAgentEmailRateLimited
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, testAgentEmailIngestRequest(t, raw, metadata, privateKey))
+	assertAgentEmailVerdict(t, response, http.StatusTooManyRequests, "rate_limited")
+	if got := response.Header().Get("Retry-After"); got != "60" {
+		t.Fatalf("untyped rate refusal Retry-After = %q, want 60", got)
+	}
+
 	ingestErr = ErrAgentEmailFeatureDisabled
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, testAgentEmailIngestRequest(t, raw, metadata, privateKey))

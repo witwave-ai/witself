@@ -41,10 +41,10 @@ Worker jobs must be:
 - free of tenant identifiers or payload values in metrics and logs.
 
 The registered jobs are transcript retention, message retention, inbound
-agent-email retention, avatar-style rollout, and message-rate bucket cleanup.
-The cleanup job is enabled whenever the worker runs unless an operator
-explicitly disables it. New job types must opt in explicitly; the worker is not
-an arbitrary command runner.
+agent-email retention, avatar-style rollout, message-rate bucket cleanup, and
+agent-email-rate bucket cleanup. Both cleanup jobs are enabled whenever the
+worker runs unless an operator explicitly disables one. New job types must opt
+in explicitly; the worker is not an arbitrary command runner.
 
 ## Cooperative Scaling
 
@@ -92,6 +92,11 @@ deletes only the selected expired rows. Two replicas therefore divide
 available rows without waiting for or deleting the same bucket. A ten-second
 default batch deadline bounds a stuck attempt; recoverable failures are
 reported and retried on the next interval.
+
+Agent-email-rate bucket cleanup follows the same bounded loop against its
+independent email safety table. PostgreSQL `SKIP LOCKED` divides stale rows
+across replicas, while the store-level database-clock cutoff is the final
+authority on when accumulated email debt has fully expired.
 
 Inbound agent-email retention has its own 16 preview lanes and 16 enforcement
 lanes. The worker briefly leases one lane, then takes an exclusive account row
@@ -159,6 +164,13 @@ Message-rate bucket cleanup has separate
 `witself_worker_message_rate_bucket_cleanup_*` batch-result, deleted-row, and
 last-success metrics. Its only result label values are `success`, `no_work`,
 and `error`; it has no tenant-derived labels.
+
+Inbound-email rate-bucket cleanup has an independent
+`witself_worker_agent_email_rate_bucket_cleanup_*` batch-result, deleted-row,
+and last-success family with the same closed result labels and no
+tenant-derived labels. One scheduled sweep drains consecutive 10,000-row
+batches until the table is caught up or the configured sweep timeout expires;
+full-batch throughput and timeout failures are therefore directly visible.
 
 Account, realm, agent, conversation, task, transcript, memory, and secret
 identifiers must never be metric labels. Error text and stored content must
