@@ -19,11 +19,12 @@ import (
 )
 
 const (
-	avatarStyleRolloutJob       = "avatar_style_rollout"
-	messageRateBucketCleanupJob = "message_rate_bucket_cleanup"
-	transcriptRetentionJob      = "transcript_retention"
-	messageRetentionJob         = "message_retention"
-	agentEmailRetentionJob      = "agent_email_retention"
+	avatarStyleRolloutJob          = "avatar_style_rollout"
+	messageRateBucketCleanupJob    = "message_rate_bucket_cleanup"
+	agentEmailRateBucketCleanupJob = "agent_email_rate_bucket_cleanup"
+	transcriptRetentionJob         = "transcript_retention"
+	messageRetentionJob            = "message_retention"
+	agentEmailRetentionJob         = "agent_email_retention"
 
 	avatarStyleRolloutEnabledEnv      = "WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED"
 	avatarStyleRolloutBatchSizeEnv    = "WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE"
@@ -34,6 +35,11 @@ const (
 	messageRateBucketCleanupBatchSizeEnv    = "WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_BATCH_SIZE"
 	messageRateBucketCleanupIntervalEnv     = "WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_INTERVAL"
 	messageRateBucketCleanupBatchTimeoutEnv = "WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_BATCH_TIMEOUT"
+
+	agentEmailRateBucketCleanupEnabledEnv      = "WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_ENABLED"
+	agentEmailRateBucketCleanupBatchSizeEnv    = "WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_BATCH_SIZE"
+	agentEmailRateBucketCleanupIntervalEnv     = "WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_INTERVAL"
+	agentEmailRateBucketCleanupBatchTimeoutEnv = "WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_BATCH_TIMEOUT"
 
 	transcriptRetentionEnabledEnv      = "WITSELF_TRANSCRIPT_RETENTION_ENABLED"
 	transcriptRetentionModeEnv         = "WITSELF_TRANSCRIPT_RETENTION_MODE"
@@ -55,16 +61,18 @@ const (
 )
 
 type jobConfig struct {
-	avatarEnabled                   bool
-	avatar                          store.AvatarStyleRolloutWorkerConfig
-	messageRateBucketCleanupEnabled bool
-	messageRateBucketCleanup        store.MessageRateBucketCleanupWorkerConfig
-	retentionEnabled                bool
-	retention                       store.TranscriptRetentionWorkerConfig
-	messageRetentionEnabled         bool
-	messageRetention                store.MessageRetentionWorkerConfig
-	agentEmailRetentionEnabled      bool
-	agentEmailRetention             store.AgentEmailRetentionWorkerConfig
+	avatarEnabled                      bool
+	avatar                             store.AvatarStyleRolloutWorkerConfig
+	messageRateBucketCleanupEnabled    bool
+	messageRateBucketCleanup           store.MessageRateBucketCleanupWorkerConfig
+	agentEmailRateBucketCleanupEnabled bool
+	agentEmailRateBucketCleanup        store.AgentEmailRateBucketCleanupWorkerConfig
+	retentionEnabled                   bool
+	retention                          store.TranscriptRetentionWorkerConfig
+	messageRetentionEnabled            bool
+	messageRetention                   store.MessageRetentionWorkerConfig
+	agentEmailRetentionEnabled         bool
+	agentEmailRetention                store.AgentEmailRetentionWorkerConfig
 }
 
 func main() {
@@ -188,6 +196,57 @@ func serve() int {
 		fmt.Fprintf(
 			os.Stderr,
 			"witself-worker: message rate bucket cleanup enabled (batch %d, interval %s, timeout %s)\n",
+			cfg.BatchSize,
+			cfg.Interval,
+			cfg.BatchTimeout,
+		)
+	}
+	if jobs.agentEmailRateBucketCleanupEnabled {
+		cfg := jobs.agentEmailRateBucketCleanup
+		if err := registry.Register(worker.Job{
+			Name: agentEmailRateBucketCleanupJob,
+			Run: func(jobCtx context.Context) error {
+				return st.RunAgentEmailRateBucketCleanupWorker(
+					jobCtx,
+					cfg,
+					func(deleted int64) {
+						metrics.ObserveAgentEmailRateBucketCleanupBatch(
+							agentEmailRateBucketCleanupMetricResult(deleted),
+							deleted,
+						)
+						if deleted > 0 {
+							fmt.Fprintf(
+								os.Stderr,
+								"witself-worker: agent-email rate bucket cleanup: deleted=%d\n",
+								deleted,
+							)
+						}
+					},
+					func(err error) {
+						metrics.RecordJobFailure(agentEmailRateBucketCleanupJob)
+						metrics.ObserveAgentEmailRateBucketCleanupBatch(
+							worker.RetentionResultError,
+							0,
+						)
+						fmt.Fprintf(
+							os.Stderr,
+							"witself-worker: agent-email rate bucket cleanup: %v\n",
+							err,
+						)
+					},
+				)
+			},
+		}); err != nil {
+			fmt.Fprintf(
+				os.Stderr,
+				"witself-worker: register agent-email rate bucket cleanup: %v\n",
+				err,
+			)
+			return 1
+		}
+		fmt.Fprintf(
+			os.Stderr,
+			"witself-worker: agent-email rate bucket cleanup enabled (batch %d, interval %s, timeout %s)\n",
 			cfg.BatchSize,
 			cfg.Interval,
 			cfg.BatchTimeout,
@@ -401,6 +460,52 @@ func jobConfigFromEnv(lookup func(string) (string, bool)) (jobConfig, error) {
 		)
 	}
 
+	agentEmailRateBucketCleanupEnabled, err := boolEnv(
+		lookup,
+		agentEmailRateBucketCleanupEnabledEnv,
+		true,
+	)
+	if err != nil {
+		return jobConfig{}, err
+	}
+	agentEmailRateBucketCleanup := store.DefaultAgentEmailRateBucketCleanupWorkerConfig()
+	if raw, ok := lookup(agentEmailRateBucketCleanupBatchSizeEnv); ok {
+		agentEmailRateBucketCleanup.BatchSize, err = parseIntEnv(
+			agentEmailRateBucketCleanupBatchSizeEnv,
+			raw,
+		)
+		if err != nil {
+			return jobConfig{}, err
+		}
+	}
+	if raw, ok := lookup(agentEmailRateBucketCleanupIntervalEnv); ok {
+		agentEmailRateBucketCleanup.Interval, err = parseDurationEnv(
+			agentEmailRateBucketCleanupIntervalEnv,
+			raw,
+		)
+		if err != nil {
+			return jobConfig{}, err
+		}
+	}
+	if raw, ok := lookup(agentEmailRateBucketCleanupBatchTimeoutEnv); ok {
+		agentEmailRateBucketCleanup.BatchTimeout, err = parseDurationEnv(
+			agentEmailRateBucketCleanupBatchTimeoutEnv,
+			raw,
+		)
+		if err != nil {
+			return jobConfig{}, err
+		}
+	}
+	if err := agentEmailRateBucketCleanup.Validate(); err != nil {
+		return jobConfig{}, fmt.Errorf(
+			"%s/%s/%s agent-email rate bucket cleanup configuration: %w",
+			agentEmailRateBucketCleanupBatchSizeEnv,
+			agentEmailRateBucketCleanupIntervalEnv,
+			agentEmailRateBucketCleanupBatchTimeoutEnv,
+			err,
+		)
+	}
+
 	retentionEnabled, err := boolEnv(lookup, transcriptRetentionEnabledEnv, false)
 	if err != nil {
 		return jobConfig{}, err
@@ -531,20 +636,29 @@ func jobConfigFromEnv(lookup func(string) (string, bool)) (jobConfig, error) {
 		)
 	}
 	return jobConfig{
-		avatarEnabled:                   avatarEnabled,
-		avatar:                          avatar,
-		messageRateBucketCleanupEnabled: messageRateBucketCleanupEnabled,
-		messageRateBucketCleanup:        messageRateBucketCleanup,
-		retentionEnabled:                retentionEnabled,
-		retention:                       retention,
-		messageRetentionEnabled:         messageRetentionEnabled,
-		messageRetention:                messageRetention,
-		agentEmailRetentionEnabled:      agentEmailRetentionEnabled,
-		agentEmailRetention:             agentEmailRetention,
+		avatarEnabled:                      avatarEnabled,
+		avatar:                             avatar,
+		messageRateBucketCleanupEnabled:    messageRateBucketCleanupEnabled,
+		messageRateBucketCleanup:           messageRateBucketCleanup,
+		agentEmailRateBucketCleanupEnabled: agentEmailRateBucketCleanupEnabled,
+		agentEmailRateBucketCleanup:        agentEmailRateBucketCleanup,
+		retentionEnabled:                   retentionEnabled,
+		retention:                          retention,
+		messageRetentionEnabled:            messageRetentionEnabled,
+		messageRetention:                   messageRetention,
+		agentEmailRetentionEnabled:         agentEmailRetentionEnabled,
+		agentEmailRetention:                agentEmailRetention,
 	}, nil
 }
 
 func messageRateBucketCleanupMetricResult(deleted int64) worker.RetentionResult {
+	if deleted == 0 {
+		return worker.RetentionResultNoWork
+	}
+	return worker.RetentionResultSuccess
+}
+
+func agentEmailRateBucketCleanupMetricResult(deleted int64) worker.RetentionResult {
 	if deleted == 0 {
 		return worker.RetentionResultNoWork
 	}

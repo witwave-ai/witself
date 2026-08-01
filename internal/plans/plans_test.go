@@ -347,6 +347,29 @@ func TestCanonicalMessageRateLimitDefaultsPhaseB(t *testing.T) {
 	}
 }
 
+func TestCanonicalAgentEmailRateLimitsRemainPlatformOnly(t *testing.T) {
+	catalog, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dimensions := []string{
+		AgentEmailReceivedPerSenderMinuteLimit,
+		AgentEmailReceivedPerRecipientMinuteLimit,
+		AgentEmailReceivedPerRealmMinuteLimit,
+		AgentEmailReceivedBytesPerSenderMinuteLimit,
+		AgentEmailReceivedBytesPerRecipientMinuteLimit,
+		AgentEmailReceivedBytesPerRealmMinuteLimit,
+	}
+	for _, plan := range catalog.Plans {
+		for _, dimension := range dimensions {
+			if got, present := plan.Limits[dimension]; present {
+				t.Errorf("%s %s = %d, present=true; want key omitted so the platform breaker applies",
+					plan.ID, dimension, got)
+			}
+		}
+	}
+}
+
 func TestParseValidation(t *testing.T) {
 	cases := []struct {
 		name string
@@ -368,6 +391,7 @@ func TestParseValidation(t *testing.T) {
 		{"agent send rate above platform maximum", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"limits":{"message_sent_per_agent_minute":2001}}]}`, "between 0 and 2000"},
 		{"realm delivery rate above platform maximum", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"limits":{"message_delivered_per_realm_minute":100001}}]}`, "between 0 and 100000"},
 		{"recipient delivery rate above platform maximum", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"limits":{"message_delivered_per_recipient_minute":5001}}]}`, "between 0 and 5000"},
+		{"unknown agent email rate limit", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"limits":{"agent_email_received_per_source_minute":1}}]}`, "unknown limit"},
 		{"zero retention", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"policies":{"transcript_retention_days":0}}]}`, "between 1"},
 		{"zero message retention", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"policies":{"message_retention_days":0}}]}`, "between 1"},
 		{"bad messaging entitlement marker", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"policies":{"messaging_entitlement_version":2}}]}`, "must be 1"},
@@ -426,6 +450,29 @@ func TestValidateMessageRateLimitBounds(t *testing.T) {
 	}
 }
 
+func TestValidateAgentEmailRateLimitBounds(t *testing.T) {
+	limits := map[string]int64{
+		AgentEmailReceivedPerSenderMinuteLimit:         MaxAgentEmailReceivedPerSenderMinute,
+		AgentEmailReceivedPerRecipientMinuteLimit:      MaxAgentEmailReceivedPerRecipientMinute,
+		AgentEmailReceivedPerRealmMinuteLimit:          MaxAgentEmailReceivedPerRealmMinute,
+		AgentEmailReceivedBytesPerSenderMinuteLimit:    MaxAgentEmailReceivedBytesPerSenderMinute,
+		AgentEmailReceivedBytesPerRecipientMinuteLimit: MaxAgentEmailReceivedBytesPerRecipientMinute,
+		AgentEmailReceivedBytesPerRealmMinuteLimit:     MaxAgentEmailReceivedBytesPerRealmMinute,
+	}
+	if err := ValidateLimits(limits); err != nil {
+		t.Fatalf("valid agent-email rate limits: %v", err)
+	}
+	for dimension, maximum := range limits {
+		t.Run(dimension, func(t *testing.T) {
+			err := ValidateLimits(map[string]int64{dimension: maximum + 1})
+			want := fmt.Sprintf("between 0 and %d", maximum)
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("above-maximum rate error = %v; want substring %q", err, want)
+			}
+		})
+	}
+}
+
 func TestValidateLimitsZeroAndMissingUnlimited(t *testing.T) {
 	for _, limits := range []map[string]int64{
 		nil,
@@ -435,6 +482,14 @@ func TestValidateLimitsZeroAndMissingUnlimited(t *testing.T) {
 			MessageSentPerAgentMinuteLimit:          0,
 			MessageDeliveredPerRealmMinuteLimit:     0,
 			MessageDeliveredPerRecipientMinuteLimit: 0,
+		},
+		{
+			AgentEmailReceivedPerSenderMinuteLimit:         0,
+			AgentEmailReceivedPerRecipientMinuteLimit:      0,
+			AgentEmailReceivedPerRealmMinuteLimit:          0,
+			AgentEmailReceivedBytesPerSenderMinuteLimit:    0,
+			AgentEmailReceivedBytesPerRecipientMinuteLimit: 0,
+			AgentEmailReceivedBytesPerRealmMinuteLimit:     0,
 		},
 		{
 			StoredSecretLimit:                       100,

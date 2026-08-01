@@ -113,6 +113,10 @@ Production chart defaults should assume:
 - Enabled-by-default, bounded cleanup of expired message-rate coordination
   rows through `worker.messageRateBucketCleanup`; replicas cooperate with
   PostgreSQL `SKIP LOCKED`, and API pods never schedule it.
+- Independent enabled-by-default cleanup of expired inbound-email rate
+  coordination rows through `worker.agentEmailRateBucketCleanup`, with the
+  same bounded multi-replica contract and separate metrics. A sweep drains
+  consecutive full batches until caught up or its timeout expires.
 - Transcript retention disabled by default, with a separate bounded
   `worker.transcriptRetention.mode: preview` stage before an explicit switch
   to `enforce`.

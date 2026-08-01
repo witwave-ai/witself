@@ -101,20 +101,23 @@ type retentionItemLabels struct {
 type Metrics struct {
 	mu sync.Mutex
 
-	jobs                                map[string]*jobMetric
-	retentionBatches                    map[retentionBatchLabels]uint64
-	retentionItems                      map[retentionItemLabels]uint64
-	retentionLastSuccess                map[string]float64
-	messageRetentionBatches             map[retentionBatchLabels]uint64
-	messageRetentionItems               map[retentionItemLabels]uint64
-	messageRetentionLastSuccess         map[string]float64
-	emailRetentionBatches               map[retentionBatchLabels]uint64
-	emailRetentionItems                 map[retentionItemLabels]uint64
-	emailRetentionLastSuccess           map[string]float64
-	messageRateBucketCleanupBatches     map[RetentionResult]uint64
-	messageRateBucketCleanupDeletedRows uint64
-	messageRateBucketCleanupLastSuccess float64
-	now                                 func() time.Time
+	jobs                                   map[string]*jobMetric
+	retentionBatches                       map[retentionBatchLabels]uint64
+	retentionItems                         map[retentionItemLabels]uint64
+	retentionLastSuccess                   map[string]float64
+	messageRetentionBatches                map[retentionBatchLabels]uint64
+	messageRetentionItems                  map[retentionItemLabels]uint64
+	messageRetentionLastSuccess            map[string]float64
+	emailRetentionBatches                  map[retentionBatchLabels]uint64
+	emailRetentionItems                    map[retentionItemLabels]uint64
+	emailRetentionLastSuccess              map[string]float64
+	messageRateBucketCleanupBatches        map[RetentionResult]uint64
+	messageRateBucketCleanupDeletedRows    uint64
+	messageRateBucketCleanupLastSuccess    float64
+	agentEmailRateBucketCleanupBatches     map[RetentionResult]uint64
+	agentEmailRateBucketCleanupDeletedRows uint64
+	agentEmailRateBucketCleanupLastSuccess float64
+	now                                    func() time.Time
 }
 
 func newMetrics() *Metrics {
@@ -130,6 +133,11 @@ func newMetrics() *Metrics {
 		emailRetentionItems:         make(map[retentionItemLabels]uint64),
 		emailRetentionLastSuccess:   make(map[string]float64),
 		messageRateBucketCleanupBatches: map[RetentionResult]uint64{
+			RetentionResultSuccess: 0,
+			RetentionResultNoWork:  0,
+			RetentionResultError:   0,
+		},
+		agentEmailRateBucketCleanupBatches: map[RetentionResult]uint64{
 			RetentionResultSuccess: 0,
 			RetentionResultNoWork:  0,
 			RetentionResultError:   0,
@@ -342,6 +350,35 @@ func (m *Metrics) ObserveMessageRateBucketCleanupBatch(
 	}
 }
 
+// ObserveAgentEmailRateBucketCleanupBatch records one value-free email
+// rate-bucket cleanup attempt. Result is a closed process enum and deleted is
+// a count only.
+func (m *Metrics) ObserveAgentEmailRateBucketCleanupBatch(
+	result RetentionResult,
+	deleted int64,
+) {
+	if result != RetentionResultSuccess &&
+		result != RetentionResultNoWork &&
+		result != RetentionResultError {
+		return
+	}
+	if deleted < 0 ||
+		(result == RetentionResultSuccess && deleted == 0) ||
+		(result != RetentionResultSuccess && deleted != 0) {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.agentEmailRateBucketCleanupBatches[result]++
+	if result == RetentionResultSuccess || result == RetentionResultNoWork {
+		m.agentEmailRateBucketCleanupLastSuccess = float64(m.now().Unix())
+	}
+	if deleted > 0 {
+		m.agentEmailRateBucketCleanupDeletedRows += uint64(deleted)
+	}
+}
+
 func (m *Metrics) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
@@ -410,6 +447,15 @@ func (m *Metrics) writePrometheus(w io.Writer) {
 	}
 	messageRateBucketCleanupDeletedRows := m.messageRateBucketCleanupDeletedRows
 	messageRateBucketCleanupLastSuccess := m.messageRateBucketCleanupLastSuccess
+	agentEmailRateBucketCleanupBatches := make(
+		map[RetentionResult]uint64,
+		len(m.agentEmailRateBucketCleanupBatches),
+	)
+	for result, value := range m.agentEmailRateBucketCleanupBatches {
+		agentEmailRateBucketCleanupBatches[result] = value
+	}
+	agentEmailRateBucketCleanupDeletedRows := m.agentEmailRateBucketCleanupDeletedRows
+	agentEmailRateBucketCleanupLastSuccess := m.agentEmailRateBucketCleanupLastSuccess
 	m.mu.Unlock()
 
 	_, _ = fmt.Fprintln(w, "# HELP witself_worker_up 1 if the witself-worker process is up.")
@@ -593,6 +639,38 @@ func (m *Metrics) writePrometheus(w io.Writer) {
 		w,
 		"witself_worker_message_rate_bucket_cleanup_last_success_timestamp_seconds %.0f\n",
 		messageRateBucketCleanupLastSuccess,
+	)
+
+	_, _ = fmt.Fprintln(w, "# HELP witself_worker_agent_email_rate_bucket_cleanup_batches_total Agent-email-rate-bucket cleanup batches by bounded result.")
+	_, _ = fmt.Fprintln(w, "# TYPE witself_worker_agent_email_rate_bucket_cleanup_batches_total counter")
+	agentEmailCleanupResults := make([]string, 0, len(agentEmailRateBucketCleanupBatches))
+	for result := range agentEmailRateBucketCleanupBatches {
+		agentEmailCleanupResults = append(agentEmailCleanupResults, string(result))
+	}
+	sort.Strings(agentEmailCleanupResults)
+	for _, result := range agentEmailCleanupResults {
+		_, _ = fmt.Fprintf(
+			w,
+			"witself_worker_agent_email_rate_bucket_cleanup_batches_total{result=%q} %d\n",
+			result,
+			agentEmailRateBucketCleanupBatches[RetentionResult(result)],
+		)
+	}
+
+	_, _ = fmt.Fprintln(w, "# HELP witself_worker_agent_email_rate_bucket_cleanup_deleted_rows_total Stale agent-email rate-bucket rows deleted.")
+	_, _ = fmt.Fprintln(w, "# TYPE witself_worker_agent_email_rate_bucket_cleanup_deleted_rows_total counter")
+	_, _ = fmt.Fprintf(
+		w,
+		"witself_worker_agent_email_rate_bucket_cleanup_deleted_rows_total %d\n",
+		agentEmailRateBucketCleanupDeletedRows,
+	)
+
+	_, _ = fmt.Fprintln(w, "# HELP witself_worker_agent_email_rate_bucket_cleanup_last_success_timestamp_seconds Unix timestamp of the last successful or no-work agent-email-rate-bucket cleanup batch.")
+	_, _ = fmt.Fprintln(w, "# TYPE witself_worker_agent_email_rate_bucket_cleanup_last_success_timestamp_seconds gauge")
+	_, _ = fmt.Fprintf(
+		w,
+		"witself_worker_agent_email_rate_bucket_cleanup_last_success_timestamp_seconds %.0f\n",
+		agentEmailRateBucketCleanupLastSuccess,
 	)
 }
 

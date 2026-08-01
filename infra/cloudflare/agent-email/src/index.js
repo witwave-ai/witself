@@ -100,6 +100,7 @@ function exactVerdict(text) {
     case "invalid_relay":
     case "retry_canary_rejected":
     case "over_size":
+    case "rate_limited":
       return value.verdict;
     default:
       return "";
@@ -247,6 +248,12 @@ async function handleEmailTransaction(message, env, runtime = {}) {
   if (verdict === "over_size") {
     message.setReject(OVER_SIZE_REJECTION);
     return { outcome: "rejected_over_size", phase: "response", status: 552 };
+  }
+  if (verdict === "rate_limited" && response.status === 429) {
+    // The cell is the authoritative cross-replica admission point. Surface a
+    // sanitized temporary SMTP failure so the provider can retry without
+    // revealing which internal bucket refused the signed attempt.
+    throw transient("tempfail_rate_limited", "response", response.status);
   }
   logRelayFailure({
     phase: "response",

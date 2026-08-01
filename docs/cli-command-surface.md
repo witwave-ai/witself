@@ -225,16 +225,25 @@ Rules:
 - AI-assisted account management must use the same commands and credentials as
   human operators; it should not require a separate AI-only backend.
 
-### Operator-only message rate overrides
+### Operator-only throughput overrides
 
 `witself-admin account limit-override` is the implemented generic operator
-surface for account-specific message throughput. It does not change the
-account's plan, price, subscription, or invoice history. The accepted message
-rate dimensions are:
+surface for account-specific message throughput and inbound-email safety
+breakers. It does not change the account's plan, price, subscription, or invoice
+history. The accepted message rate dimensions are:
 
 - `message_sent_per_agent_minute`
 - `message_delivered_per_realm_minute`
 - `message_delivered_per_recipient_minute`
+
+The accepted inbound-agent-email dimensions are:
+
+- `agent_email_received_per_sender_minute`
+- `agent_email_received_per_recipient_minute`
+- `agent_email_received_per_realm_minute`
+- `agent_email_received_bytes_per_sender_minute`
+- `agent_email_received_bytes_per_recipient_minute`
+- `agent_email_received_bytes_per_realm_minute`
 
 ```sh
 witself-admin account limit-override get \
@@ -251,8 +260,12 @@ witself-admin account limit-override clear \
 and `set --unlimited` explicitly removes the plan cap from the resolved cell
 snapshot. Unlimited does not bypass the independent platform ceiling. These
 are shared rolling one-minute budgets enforced in PostgreSQL across API pods;
-they are not wall-clock minute counters. Every set/clear requires an audit
-reason and advances the normal desired/applied account-policy snapshot fence.
+they are not wall-clock minute counters. The current catalog omits all six
+agent-email keys, so their inherited value is the platform breaker and an
+administrator can only lower it. Inbound attempts are non-billable safety
+traffic and never create an `email_received` usage charge. Every set/clear
+requires an audit reason and advances the normal desired/applied account-policy
+snapshot fence.
 
 ## Exit Codes
 

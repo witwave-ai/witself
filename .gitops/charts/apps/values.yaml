@@ -114,6 +114,11 @@ apps:
         batchSize: 10000
         interval: 1m
         batchTimeout: 10s
+      agentEmailRateBucketCleanup:
+        enabled: true
+        batchSize: 10000
+        interval: 1m
+        batchTimeout: 10s
       # Keep retention disabled by default. Activation is explicit per cell,
       # with preview available before enforcement.
       transcriptRetention:

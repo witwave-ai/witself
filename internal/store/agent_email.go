@@ -948,33 +948,6 @@ func (s *Store) IngestAgentEmailPilot(
 	if err != nil {
 		return AgentEmailMessage{}, ErrAgentEmailUnknownRecipient
 	}
-	// Validate the bounded decoded-text projection during ingest as well as on
-	// read. Text remains transient here; only its validated MIME metadata is
-	// persisted by the receive-only pilot.
-	parsed, parseErr := agentemail.ParseMessage(in.Raw, true)
-	parseState := AgentEmailParseParsed
-	parseErrorCode := ""
-	if parseErr != nil {
-		parseState = AgentEmailParseError
-		parseErrorCode = agentemail.ParseErrorCode(parseErr)
-	}
-	retryCanaryChallenge, retryCanaryHeaderPresent, retryCanaryHeaderErr :=
-		agentemail.RetryCanaryChallenge(in.Raw)
-	duplicateGroup := agentEmailDuplicateGroup(rawSHA, parts.Address, relay.EnvelopeSender)
-	retryCanaryDeliveryFingerprint := ""
-	if retryCanaryHeaderPresent && retryCanaryHeaderErr == nil {
-		retryCanaryDeliveryFingerprint, err = agentEmailRetryCanaryDeliveryFingerprint(
-			in.Raw, relay.EnvelopeSender, parts.Address, parseState, parseErrorCode, parsed,
-		)
-		if err != nil {
-			return AgentEmailMessage{}, fmt.Errorf("%w: retry canary body is invalid", ErrAgentEmailInputInvalid)
-		}
-	}
-	messageID, err := id.New("emsg")
-	if err != nil {
-		return AgentEmailMessage{}, err
-	}
-
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return AgentEmailMessage{}, err
@@ -1020,6 +993,51 @@ func (s *Store) IngestAgentEmailPilot(
 	}
 	if address.AgentSegment != parts.AgentSegment || address.RealmLabel != parts.RealmLabel {
 		return AgentEmailMessage{}, ErrAgentEmailUnknownRecipient
+	}
+	if err := enforceAgentEmailRateLimitsTx(
+		ctx,
+		tx,
+		accountPolicy,
+		address,
+		relay,
+		int64(len(in.Raw)),
+	); err != nil {
+		return AgentEmailMessage{}, err
+	}
+
+	// Parse only after the shared cross-replica safety budgets admit this
+	// signed attempt. Text remains transient here; only its validated MIME
+	// metadata is persisted by the receive-only pilot.
+	parsed, parseErr := agentemail.ParseMessage(in.Raw, true)
+	parseState := AgentEmailParseParsed
+	parseErrorCode := ""
+	if parseErr != nil {
+		parseState = AgentEmailParseError
+		parseErrorCode = agentemail.ParseErrorCode(parseErr)
+	}
+	retryCanaryChallenge, retryCanaryHeaderPresent, retryCanaryHeaderErr :=
+		agentemail.RetryCanaryChallenge(in.Raw)
+	duplicateGroup := agentEmailDuplicateGroup(rawSHA, parts.Address, relay.EnvelopeSender)
+	retryCanaryDeliveryFingerprint := ""
+	if retryCanaryHeaderPresent && retryCanaryHeaderErr == nil {
+		retryCanaryDeliveryFingerprint, err = agentEmailRetryCanaryDeliveryFingerprint(
+			in.Raw,
+			relay.EnvelopeSender,
+			parts.Address,
+			parseState,
+			parseErrorCode,
+			parsed,
+		)
+		if err != nil {
+			return AgentEmailMessage{}, fmt.Errorf(
+				"%w: retry canary body is invalid",
+				ErrAgentEmailInputInvalid,
+			)
+		}
+	}
+	messageID, err := id.New("emsg")
+	if err != nil {
+		return AgentEmailMessage{}, err
 	}
 	canaryGate, err := applyAgentEmailRetryCanaryGateTx(
 		ctx, tx, scope, address, retryCanaryChallenge, retryCanaryHeaderPresent,

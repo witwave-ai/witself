@@ -27,19 +27,20 @@ type runtimeMetrics struct {
 	httpRequests map[httpMetricLabels]uint64
 	httpLatency  map[httpDurationLabels]*metricHistogram
 
-	memoryOperations   map[memoryOperationMetricLabels]uint64
-	memoryRecalls      map[recallMetricLabels]uint64
-	memoryRecallTime   map[recallDurationLabels]*metricHistogram
-	memoryRecallHits   map[string]*metricHistogram
-	vectorSearches     map[vectorSearchMetricLabels]uint64
-	vectorFallbacks    map[vectorFallbackMetricLabels]uint64
-	curationOperations map[operationMetricLabels]uint64
-	planLimitRejects   map[limitMetricLabels]uint64
-	secretLimitRejects map[limitMetricLabels]uint64
-	memoryLimitRejects map[limitMetricLabels]uint64
-	factLimitRejects   map[limitMetricLabels]uint64
-	messageRateRejects map[messageRateMetricLabels]uint64
-	agentEmailIngests  map[string]uint64
+	memoryOperations      map[memoryOperationMetricLabels]uint64
+	memoryRecalls         map[recallMetricLabels]uint64
+	memoryRecallTime      map[recallDurationLabels]*metricHistogram
+	memoryRecallHits      map[string]*metricHistogram
+	vectorSearches        map[vectorSearchMetricLabels]uint64
+	vectorFallbacks       map[vectorFallbackMetricLabels]uint64
+	curationOperations    map[operationMetricLabels]uint64
+	planLimitRejects      map[limitMetricLabels]uint64
+	secretLimitRejects    map[limitMetricLabels]uint64
+	memoryLimitRejects    map[limitMetricLabels]uint64
+	factLimitRejects      map[limitMetricLabels]uint64
+	messageRateRejects    map[messageRateMetricLabels]uint64
+	agentEmailIngests     map[string]uint64
+	agentEmailRateRejects map[agentEmailRateMetricLabels]uint64
 }
 
 type httpMetricLabels struct {
@@ -82,6 +83,10 @@ type messageRateMetricLabels struct {
 	LimitDimension, Scope, Operation string
 }
 
+type agentEmailRateMetricLabels struct {
+	LimitDimension, Scope, Source string
+}
+
 type metricHistogram struct {
 	Buckets []uint64
 	Count   uint64
@@ -93,21 +98,22 @@ var hitBuckets = []float64{0, 1, 2, 5, 10, 25, 50, 100}
 
 func newRuntimeMetrics() *runtimeMetrics {
 	return &runtimeMetrics{
-		httpRequests:       make(map[httpMetricLabels]uint64),
-		httpLatency:        make(map[httpDurationLabels]*metricHistogram),
-		memoryOperations:   make(map[memoryOperationMetricLabels]uint64),
-		memoryRecalls:      make(map[recallMetricLabels]uint64),
-		memoryRecallTime:   make(map[recallDurationLabels]*metricHistogram),
-		memoryRecallHits:   make(map[string]*metricHistogram),
-		vectorSearches:     make(map[vectorSearchMetricLabels]uint64),
-		vectorFallbacks:    make(map[vectorFallbackMetricLabels]uint64),
-		curationOperations: make(map[operationMetricLabels]uint64),
-		planLimitRejects:   make(map[limitMetricLabels]uint64),
-		secretLimitRejects: make(map[limitMetricLabels]uint64),
-		memoryLimitRejects: make(map[limitMetricLabels]uint64),
-		factLimitRejects:   make(map[limitMetricLabels]uint64),
-		messageRateRejects: make(map[messageRateMetricLabels]uint64),
-		agentEmailIngests:  make(map[string]uint64),
+		httpRequests:          make(map[httpMetricLabels]uint64),
+		httpLatency:           make(map[httpDurationLabels]*metricHistogram),
+		memoryOperations:      make(map[memoryOperationMetricLabels]uint64),
+		memoryRecalls:         make(map[recallMetricLabels]uint64),
+		memoryRecallTime:      make(map[recallDurationLabels]*metricHistogram),
+		memoryRecallHits:      make(map[string]*metricHistogram),
+		vectorSearches:        make(map[vectorSearchMetricLabels]uint64),
+		vectorFallbacks:       make(map[vectorFallbackMetricLabels]uint64),
+		curationOperations:    make(map[operationMetricLabels]uint64),
+		planLimitRejects:      make(map[limitMetricLabels]uint64),
+		secretLimitRejects:    make(map[limitMetricLabels]uint64),
+		memoryLimitRejects:    make(map[limitMetricLabels]uint64),
+		factLimitRejects:      make(map[limitMetricLabels]uint64),
+		messageRateRejects:    make(map[messageRateMetricLabels]uint64),
+		agentEmailIngests:     make(map[string]uint64),
+		agentEmailRateRejects: make(map[agentEmailRateMetricLabels]uint64),
 	}
 }
 
@@ -160,6 +166,7 @@ func (m *runtimeMetrics) instrumentConfig(cfg Config) Config {
 			m.mu.Lock()
 			m.agentEmailIngests[agentEmailIngestMetricOutcome(err)]++
 			m.mu.Unlock()
+			m.observeAgentEmailRateRejection(err)
 			return err
 		}
 	}
@@ -481,6 +488,8 @@ func agentEmailIngestMetricOutcome(err error) string {
 		return "feature_disabled"
 	case errors.Is(err, ErrAgentEmailReceiveDisabled):
 		return "receive_disabled"
+	case errors.Is(err, ErrAgentEmailRateLimited):
+		return "rate_limited"
 	case errors.Is(err, ErrAgentEmailUnknownRecipient), errors.Is(err, ErrNotFound):
 		return "unknown_recipient"
 	case errors.Is(err, ErrAgentEmailRetryCanaryTemporary):
@@ -490,6 +499,37 @@ func agentEmailIngestMetricOutcome(err error) string {
 	default:
 		return "error"
 	}
+}
+
+func (m *runtimeMetrics) observeAgentEmailRateRejection(err error) {
+	if !errors.Is(err, ErrAgentEmailRateLimited) {
+		return
+	}
+	dimension := "unknown"
+	scope := "unknown"
+	source := "unknown"
+	var detail *AgentEmailRateLimitError
+	if errors.As(err, &detail) && detail != nil {
+		switch detail.Dimension {
+		case "email_received", "email_received_bytes":
+			dimension = detail.Dimension
+		}
+		switch detail.Scope {
+		case "realm", "recipient", "sender":
+			scope = detail.Scope
+		}
+		switch detail.Source {
+		case "plan", "platform":
+			source = detail.Source
+		}
+	}
+	m.mu.Lock()
+	m.agentEmailRateRejects[agentEmailRateMetricLabels{
+		LimitDimension: dimension,
+		Scope:          scope,
+		Source:         source,
+	}]++
+	m.mu.Unlock()
 }
 
 func (m *runtimeMetrics) observeMemoryOperation(operation, principalKind string, err error) {
@@ -560,22 +600,23 @@ func (m *runtimeMetrics) snapshot() *runtimeMetrics {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return &runtimeMetrics{
-		httpInFlight:       m.httpInFlight,
-		httpRequests:       maps.Clone(m.httpRequests),
-		httpLatency:        cloneHistogramMap(m.httpLatency),
-		memoryOperations:   maps.Clone(m.memoryOperations),
-		memoryRecalls:      maps.Clone(m.memoryRecalls),
-		memoryRecallTime:   cloneHistogramMap(m.memoryRecallTime),
-		memoryRecallHits:   cloneHistogramMap(m.memoryRecallHits),
-		vectorSearches:     maps.Clone(m.vectorSearches),
-		vectorFallbacks:    maps.Clone(m.vectorFallbacks),
-		curationOperations: maps.Clone(m.curationOperations),
-		planLimitRejects:   maps.Clone(m.planLimitRejects),
-		secretLimitRejects: maps.Clone(m.secretLimitRejects),
-		memoryLimitRejects: maps.Clone(m.memoryLimitRejects),
-		factLimitRejects:   maps.Clone(m.factLimitRejects),
-		messageRateRejects: maps.Clone(m.messageRateRejects),
-		agentEmailIngests:  maps.Clone(m.agentEmailIngests),
+		httpInFlight:          m.httpInFlight,
+		httpRequests:          maps.Clone(m.httpRequests),
+		httpLatency:           cloneHistogramMap(m.httpLatency),
+		memoryOperations:      maps.Clone(m.memoryOperations),
+		memoryRecalls:         maps.Clone(m.memoryRecalls),
+		memoryRecallTime:      cloneHistogramMap(m.memoryRecallTime),
+		memoryRecallHits:      cloneHistogramMap(m.memoryRecallHits),
+		vectorSearches:        maps.Clone(m.vectorSearches),
+		vectorFallbacks:       maps.Clone(m.vectorFallbacks),
+		curationOperations:    maps.Clone(m.curationOperations),
+		planLimitRejects:      maps.Clone(m.planLimitRejects),
+		secretLimitRejects:    maps.Clone(m.secretLimitRejects),
+		memoryLimitRejects:    maps.Clone(m.memoryLimitRejects),
+		factLimitRejects:      maps.Clone(m.factLimitRejects),
+		messageRateRejects:    maps.Clone(m.messageRateRejects),
+		agentEmailIngests:     maps.Clone(m.agentEmailIngests),
+		agentEmailRateRejects: maps.Clone(m.agentEmailRateRejects),
 	}
 }
 
@@ -646,6 +687,9 @@ func (m *runtimeMetrics) writePrometheusSnapshot(w io.Writer) {
 	})
 	writeCounterMap(w, "witself_agent_email_ingests_total", "Signed inbound agent-email deliveries by bounded storage or refusal outcome.", m.agentEmailIngests, func(outcome string) string {
 		return labels("outcome", outcome)
+	})
+	writeCounterMap(w, "witself_agent_email_rate_limit_rejections_total", "Signed inbound agent-email safety refusals by bounded dimension, scope, and source.", m.agentEmailRateRejects, func(key agentEmailRateMetricLabels) string {
+		return labels("limit_dimension", key.LimitDimension, "scope", key.Scope, "source", key.Source)
 	})
 }
 

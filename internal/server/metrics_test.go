@@ -88,6 +88,15 @@ func TestRuntimeMetricsObserveBoundedAgentEmailIngestOutcomes(t *testing.T) {
 		),
 		ErrAgentEmailFeatureDisabled,
 		ErrAgentEmailReceiveDisabled,
+		errors.Join(
+			&AgentEmailRateLimitError{
+				Dimension:  "email_received_bytes",
+				Scope:      "sender",
+				Source:     "platform",
+				RetryAfter: time.Second,
+			},
+			errors.New("sender_private_identifier mailbox_private_identifier"),
+		),
 		ErrAgentEmailUnknownRecipient,
 		errors.Join(ErrNotFound, errors.New("emsg_private_identifier")),
 		ErrAgentEmailRetryCanaryTemporary,
@@ -126,6 +135,7 @@ func TestRuntimeMetricsObserveBoundedAgentEmailIngestOutcomes(t *testing.T) {
 		"over_size":              1,
 		"feature_disabled":       1,
 		"receive_disabled":       1,
+		"rate_limited":           1,
 		"unknown_recipient":      2,
 		"retry_canary_temporary": 1,
 		"retry_canary_rejected":  1,
@@ -165,6 +175,10 @@ func TestRuntimeMetricsObserveBoundedAgentEmailIngestOutcomes(t *testing.T) {
 	if metricLines != len(expected) {
 		t.Fatalf("agent-email metric series = %d, want %d:\n%s", metricLines, len(expected), text)
 	}
+	wantRate := `witself_agent_email_rate_limit_rejections_total{limit_dimension="email_received_bytes",scope="sender",source="platform"} 1`
+	if !strings.Contains(text, wantRate) {
+		t.Fatalf("missing bounded agent-email rate metric %q:\n%s", wantRate, text)
+	}
 	for _, forbidden := range []string{
 		"account_private_identifier",
 		"attachment_private_identifier",
@@ -173,6 +187,8 @@ func TestRuntimeMetricsObserveBoundedAgentEmailIngestOutcomes(t *testing.T) {
 		"database_private_host",
 		"tenant_private_identifier",
 		"key_private_identifier",
+		"sender_private_identifier",
+		"mailbox_private_identifier",
 		"cell_private_identifier",
 		"sender-private@example.test",
 		"agent-private@example.test",

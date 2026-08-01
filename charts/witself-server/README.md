@@ -113,6 +113,15 @@ deadline. Every replica may run it: PostgreSQL `FOR UPDATE SKIP LOCKED` divides
 stale rows, and the database-clock cutoff preserves a full idle minute before
 deletion. API pods never schedule this cleanup.
 
+Inbound-email rate coordination uses a separate cleanup lane.
+`worker.agentEmailRateBucketCleanup` renders the enabled gate, bounded batch
+size, interval, and timeout as
+`WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_*`. It has the same enabled-by-default
+10,000-row, one-minute, ten-second worker bounds. Each scheduled sweep drains
+consecutive full batches until it catches up or reaches that deadline. Every
+replica may run it because the email-specific delete batch also uses PostgreSQL
+`FOR UPDATE SKIP LOCKED`; API pods never schedule it.
+
 Avatar payload compaction is disabled by default.
 `avatar.payloadCompaction.enabled` renders
 `WITSELF_AVATAR_PAYLOAD_COMPACTION_ENABLED`. Keep it false while rolling out a
@@ -225,6 +234,7 @@ for validation. Most-used: `image.tag`, `replicaCount`, `backend.kind`,
 `features.factDeletion.enabled`, `avatar.payloadCompaction.enabled`,
 `worker.enabled`, `worker.replicaCount`, `worker.avatarStyleRollout.*`,
 `worker.messageRateBucketCleanup.*`,
+`worker.agentEmailRateBucketCleanup.*`,
 `worker.transcriptRetention.*`, `worker.messageRetention.*`,
 `worker.agentEmailRetention.*`, `worker.resources`,
 `worker.podDisruptionBudget.*`, `agentEmail.receivePilot.*`,

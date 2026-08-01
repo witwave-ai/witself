@@ -280,9 +280,18 @@ func cloneAgentEmailBoolMap(source map[string]bool) map[string]bool {
 
 func mapAgentEmailIngestError(err error) error {
 	var limitErr *store.PlanLimitError
+	var rateErr *store.AgentEmailRateLimitError
 	switch {
 	case err == nil:
 		return nil
+	case errors.As(err, &rateErr) && rateErr != nil:
+		return &server.AgentEmailRateLimitError{
+			Dimension:  rateErr.Dimension,
+			Scope:      rateErr.Scope,
+			Source:     rateErr.Source,
+			RetryAfter: rateErr.RetryAfter,
+			Retryable:  rateErr.Retryable,
+		}
 	case errors.As(err, &limitErr) &&
 		limitErr.Dimension == plans.AgentEmailMaxRawBytesLimit:
 		return server.ErrAgentEmailRawSizeExceeded

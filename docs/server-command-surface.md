@@ -111,6 +111,10 @@ Expected server environment variables may include:
 | `WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_BATCH_SIZE` | Maximum stale rate-bucket rows deleted by one batch. Default: `10000`; valid range: `1`-`10000`. |
 | `WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_INTERVAL` | Delay between rate-bucket cleanup batches. Default: `1m`; valid range: `1m`-`24h`. |
 | `WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_BATCH_TIMEOUT` | Deadline for one bounded rate-bucket cleanup attempt. Default: `10s`; valid range: `1s`-`5m`. |
+| `WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_ENABLED` | Enable stale inbound-email rate-bucket cleanup in `witself-worker`. Default: `true`; API deployments never run the job. Every worker replica may enable it because the delete batch uses `FOR UPDATE SKIP LOCKED`. |
+| `WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_BATCH_SIZE` | Maximum stale inbound-email rate-bucket rows deleted by one batch. Default: `10000`; valid range: `1`-`10000`. |
+| `WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_INTERVAL` | Delay between inbound-email rate-bucket cleanup batches. Default: `1m`; valid range: `1m`-`24h`. |
+| `WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_BATCH_TIMEOUT` | Deadline for one bounded inbound-email rate-bucket cleanup attempt. Default: `10s`; valid range: `1s`-`5m`. |
 | `WITSELF_TRANSCRIPT_RETENTION_ENABLED` | Enable the account-policy transcript-retention job in `witself-worker`. API deployments set it false. Enabling alone remains non-destructive because the default mode is `preview`. |
 | `WITSELF_TRANSCRIPT_RETENTION_MODE` | Transcript-retention worker mode: `preview` (default) or `enforce`. Deletion requires both this value to be `enforce` and the enabled gate to be true. |
 | `WITSELF_TRANSCRIPT_RETENTION_BATCH_SIZE` | Maximum whole conversations considered by one retention batch. Default: `100`; valid range: `1`-`1000`. |

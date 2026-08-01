@@ -65,6 +65,15 @@ const bridgeRequest = (path, init = {}) =>
     },
   });
 
+const AGENT_EMAIL_RATE_LIMIT_DIMENSIONS = [
+  "agent_email_received_per_sender_minute",
+  "agent_email_received_per_recipient_minute",
+  "agent_email_received_per_realm_minute",
+  "agent_email_received_bytes_per_sender_minute",
+  "agent_email_received_bytes_per_recipient_minute",
+  "agent_email_received_bytes_per_realm_minute",
+];
+
 async function responseJSON(response) {
   return JSON.parse(await response.text());
 }
@@ -210,6 +219,11 @@ test("bridge path classifiers are exact", () => {
     "/v1/admin/accounts/acct_1/limit-overrides/" +
       "message_delivered_per_recipient_minute",
   ));
+  for (const dimension of AGENT_EMAIL_RATE_LIMIT_DIMENSIONS) {
+    assert.ok(matchAdminPolicyPath(
+      `/v1/admin/accounts/acct_1/limit-overrides/${dimension}`,
+    ));
+  }
   assert.equal(matchAdminPolicyPath(
     "/v1/admin/accounts/acct_1/limit-overrides/not_a_limit",
   ), null);
@@ -219,6 +233,10 @@ test("bridge path classifiers are exact", () => {
   assert.equal(matchAdminPolicyPath(
     "/v1/admin/accounts/acct_1/limit-overrides/" +
       "message_delivered_per_recipient_minutes",
+  ), null);
+  assert.equal(matchAdminPolicyPath(
+    "/v1/admin/accounts/acct_1/limit-overrides/" +
+      "agent_email_received_per_sender_minutes",
   ), null);
   assert.equal(matchAdminPolicyPath(
     "/v1/admin/accounts/acct_1/limit-overrides/stored_secret/extra",
@@ -356,6 +374,36 @@ test("admin proxy routes both agent-email limit dimensions exactly", async () =>
     assert.deepEqual(await forwarded.json(), {
       max: 1234,
       reason: "test override",
+    });
+  }
+});
+
+test("admin proxy routes all six agent-email rate dimensions exactly", async () => {
+  for (const dimension of AGENT_EMAIL_RATE_LIMIT_DIMENSIONS) {
+    const path = `/v1/admin/accounts/acct_1/limit-overrides/${dimension}`;
+    let forwarded;
+    const response = await forwardAdminPolicyRequest(
+      new Request(`https://self.witwave.ai${path}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ max: 12, reason: "test ingress breaker" }),
+      }),
+      bridgeEnv({ "acct:acct_1": { cell: "cell-a" } }),
+      { admin_id: "adm_abcdefghijklmnopqrst", handle: "scott" },
+      async (next) => {
+        forwarded = next;
+        return new Response('{"schema_version":"witself.v0"}', {
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    );
+
+    assert.equal(response.status, 200);
+    assert.equal(new URL(forwarded.url).pathname, path);
+    assert.equal(forwarded.method, "PUT");
+    assert.deepEqual(await forwarded.json(), {
+      max: 12,
+      reason: "test ingress breaker",
     });
   }
 });
