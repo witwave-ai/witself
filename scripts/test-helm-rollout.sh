@@ -305,6 +305,8 @@ live_nested_server_config="$render_dir/live-nested-server-config.yaml"
 live_nested_worker_config="$render_dir/live-nested-worker-config.yaml"
 live_nested_worker_deployment="$render_dir/live-nested-worker-deployment.yaml"
 civo_server_application="$render_dir/civo-server-application.yaml"
+civo_backup_server_application="$render_dir/civo-backup-server-application.yaml"
+civo_use1_server_application="$render_dir/civo-use1-server-application.yaml"
 civo_postgres_application="$render_dir/civo-postgres-application.yaml"
 civo_backup_postgres_application="$render_dir/civo-backup-postgres-application.yaml"
 civo_use1_postgres_application="$render_dir/civo-use1-postgres-application.yaml"
@@ -337,6 +339,8 @@ extract_document ConfigMap witself-server "$live_nested_render" "$live_nested_se
 extract_document ConfigMap witself-worker "$live_nested_render" "$live_nested_worker_config"
 extract_document Deployment witself-worker "$live_nested_render" "$live_nested_worker_deployment"
 extract_document Application witself-server "$civo_apps_render" "$civo_server_application"
+extract_document Application witself-server "$civo_backup_apps_render" "$civo_backup_server_application"
+extract_document Application witself-server "$civo_use1_apps_render" "$civo_use1_server_application"
 extract_document Application witself-postgresql "$civo_apps_render" "$civo_postgres_application"
 extract_document Application witself-postgresql "$civo_backup_apps_render" "$civo_backup_postgres_application"
 extract_document Application witself-postgresql "$civo_use1_apps_render" "$civo_use1_postgres_application"
@@ -350,8 +354,12 @@ reject_line "          resourcesPreset: micro" "$civo_use1_postgres_application"
 require_line "          resourcesPreset: nano" "$civo_default_preset_postgres_application"
 extract_application_helm_values "$civo_server_application" "$civo_server_nested_values"
 # The app-of-apps chart is reconciled before each child chart pin advances.
-# Never forward a value that the still-live pre-0.0.224 child schema rejects.
-reject_line "          messageRateBucketCleanup:" "$civo_server_application"
+# Forward the value only to cells whose child chart accepts it. The two live
+# v0.0.224 cells include it, while the configured-but-unprovisioned v0.0.223
+# cell remains a compatibility check for omission.
+require_line "          messageRateBucketCleanup:" "$civo_server_application"
+require_line "          messageRateBucketCleanup:" "$civo_backup_server_application"
+reject_line "          messageRateBucketCleanup:" "$civo_use1_server_application"
 helm template witself-server "$server_chart" --namespace witself \
   --values "$civo_server_nested_values" >"$civo_server_nested_render"
 extract_document ConfigMap witself-server "$civo_server_nested_render" "$civo_server_config"
