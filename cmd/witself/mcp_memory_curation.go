@@ -333,13 +333,13 @@ type mcpMemoryCurationPlanAction struct {
 
 type mcpMemoryCurationCreateAction struct {
 	LocalRef  string                             `json:"local_ref" jsonschema:"client-local reference used by later actions in this draft"`
-	Snapshot  mcpMemoryCurationMemorySnapshot    `json:"snapshot" jsonschema:"complete new narrative-memory snapshot"`
+	Snapshot  mcpMemoryCurationCreateSnapshot    `json:"snapshot" jsonschema:"complete new narrative-memory snapshot; evidence is required and must contain 1-32 rows"`
 	Relations []mcpMemoryCurationLineageRelation `json:"relations,omitempty" jsonschema:"optional bounded lineage edges from this new memory"`
 }
 
 type mcpMemoryCurationReplaceAction struct {
 	Target   mcpMemoryCurationTargetReference `json:"target" jsonschema:"exact current memory head or new-memory local reference"`
-	Snapshot mcpMemoryCurationMemorySnapshot  `json:"snapshot" jsonschema:"complete replacement snapshot"`
+	Snapshot mcpMemoryCurationReplaceSnapshot `json:"snapshot" jsonschema:"complete replacement snapshot; evidence is optional and additive"`
 	Reason   string                           `json:"reason,omitempty" jsonschema:"bounded replacement reason"`
 }
 
@@ -370,7 +370,7 @@ type mcpMemoryCurationProposeFactAction struct {
 	Evidence    []mcpMemoryCurationEvidence `json:"evidence" jsonschema:"one or more exact frozen-input evidence references; required for fact proposals"`
 }
 
-type mcpMemoryCurationMemorySnapshot struct {
+type mcpMemoryCurationCreateSnapshot struct {
 	Content         string                      `json:"content" jsonschema:"complete client-authored narrative derived only from visible frozen inputs"`
 	ContentEncoding string                      `json:"content_encoding,omitempty" jsonschema:"plain (default) or canonical base64"`
 	Kind            string                      `json:"kind,omitempty" jsonschema:"memory kind such as decision, session, milestone, correction, or lesson"`
@@ -380,7 +380,20 @@ type mcpMemoryCurationMemorySnapshot struct {
 	Sensitive       bool                        `json:"sensitive,omitempty" jsonschema:"redact content from broad retrieval by default"`
 	OccurredFrom    string                      `json:"occurred_from,omitempty" jsonschema:"optional RFC3339 event range start"`
 	OccurredUntil   string                      `json:"occurred_until,omitempty" jsonschema:"optional RFC3339 event range end"`
-	Evidence        []mcpMemoryCurationEvidence `json:"evidence,omitempty" jsonschema:"bounded provenance references to frozen inputs"`
+	Evidence        []mcpMemoryCurationEvidence `json:"evidence" jsonschema:"required for create; must contain 1-32 provenance rows referencing frozen inputs"`
+}
+
+type mcpMemoryCurationReplaceSnapshot struct {
+	Content         string                      `json:"content" jsonschema:"complete client-authored narrative derived only from visible frozen inputs"`
+	ContentEncoding string                      `json:"content_encoding,omitempty" jsonschema:"plain (default) or canonical base64"`
+	Kind            string                      `json:"kind,omitempty" jsonschema:"memory kind such as decision, session, milestone, correction, or lesson"`
+	Tags            []string                    `json:"tags,omitempty" jsonschema:"bounded descriptive tags"`
+	Links           []string                    `json:"links,omitempty" jsonschema:"bounded typed identity links"`
+	Salience        *float64                    `json:"salience,omitempty" jsonschema:"salience from 0 to 1"`
+	Sensitive       bool                        `json:"sensitive,omitempty" jsonschema:"redact content from broad retrieval by default"`
+	OccurredFrom    string                      `json:"occurred_from,omitempty" jsonschema:"optional RFC3339 event range start"`
+	OccurredUntil   string                      `json:"occurred_until,omitempty" jsonschema:"optional RFC3339 event range end"`
+	Evidence        []mcpMemoryCurationEvidence `json:"evidence,omitempty" jsonschema:"optional additive provenance for replace; may contain at most 32 rows referencing frozen inputs"`
 }
 
 type mcpMemoryCurationTargetReference struct {
@@ -424,6 +437,38 @@ type mcpMemoryCurationPlanInput struct {
 	FencingGeneration int64                      `json:"fencing_generation"`
 	Draft             mcpMemoryCurationPlanDraft `json:"draft" jsonschema:"strict discoverable witself.memory-plan.v1 draft; exact empty plan is {\"schema\":\"witself.memory-plan.v1\",\"draft_revision\":1,\"actions\":[]}"`
 	IdempotencyKey    string                     `json:"idempotency_key"`
+}
+
+const mcpMemoryCurationPlanInvalidCode = "memory_curation_plan_invalid"
+
+// validateMCPMemoryCurationPlanEvidence keeps action-dependent evidence counts
+// actionable at the MCP boundary. Separate create/replace schema types expose
+// required versus optional presence; this check adds the exact bounded count.
+// Return only a stable code, an action index, and a field contract; never echo
+// client-authored memory or evidence content.
+func validateMCPMemoryCurationPlanEvidence(draft mcpMemoryCurationPlanDraft) error {
+	for index, action := range draft.Actions {
+		switch action.Operation {
+		case "create":
+			if action.Create == nil {
+				continue
+			}
+			if count := len(action.Create.Snapshot.Evidence); count < 1 || count > 32 {
+				return fmt.Errorf(
+					"%s: actions[%d].create.snapshot.evidence must contain 1-32 rows",
+					mcpMemoryCurationPlanInvalidCode, index,
+				)
+			}
+		case "replace":
+			if action.Replace != nil && len(action.Replace.Snapshot.Evidence) > 32 {
+				return fmt.Errorf(
+					"%s: actions[%d].replace.snapshot.evidence may contain at most 32 rows",
+					mcpMemoryCurationPlanInvalidCode, index,
+				)
+			}
+		}
+	}
+	return nil
 }
 
 type mcpMemoryCurationPlanGetInput struct {
@@ -905,12 +950,15 @@ func registerMemoryCurationMCPTools(server *mcp.Server, runtimeName string, back
 	})
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        mcpToolName(runtimeName, "witself.memory.curation.plan"),
-		Description: "Submit one strict client-authored witself.memory-plan.v1 draft. The backend validates authorization, provenance, bounds, canonical hash, and expected versions but performs no synthesis. Only reversible memory operations and fact proposals are legal. Never place credentials, secret values, private keys, TOTP seeds, or generated codes in an open-plane memory/fact plan; sensitive=true is not a sealed-secret substitute. Use an empty plan for that material. When no input merits durable memory, submit the exact empty plan draft={\"schema\":\"witself.memory-plan.v1\",\"draft_revision\":1,\"actions\":[]}. Retrieve and review the accepted normalized result with curation.plan.get before applying it so reviewed cursors advance." + mcpMemoryCurationUntrustedDataWarning,
+		Description: "Submit one strict client-authored witself.memory-plan.v1 draft. The backend validates authorization, provenance, bounds, canonical hash, and expected versions but performs no synthesis. Only reversible memory operations and fact proposals are legal. Every create.snapshot.evidence is required and must contain 1-32 rows; replace.snapshot.evidence is optional additive provenance with at most 32 rows. A lineage relation such as derived_from does not replace snapshot evidence. Never place credentials, secret values, private keys, TOTP seeds, or generated codes in an open-plane memory/fact plan; sensitive=true is not a sealed-secret substitute. Use an empty plan for that material. When no input merits durable memory, submit the exact empty plan draft={\"schema\":\"witself.memory-plan.v1\",\"draft_revision\":1,\"actions\":[]}. Retrieve and review the accepted normalized result with curation.plan.get before applying it so reviewed cursors advance." + mcpMemoryCurationUntrustedDataWarning,
 		Annotations: mcpWriteClosedWorldAnnotations(true, true),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpMemoryCurationPlanInput) (*mcp.CallToolResult, mcpMemoryCurationPlanOutput, error) {
 		if in.RunID == "" || in.FencingGeneration < 1 || in.IdempotencyKey == "" ||
 			strings.TrimSpace(in.Draft.Schema) == "" || in.Draft.DraftRevision < 1 || in.Draft.Actions == nil {
 			return nil, mcpMemoryCurationPlanOutput{}, fmt.Errorf("run_id, positive fencing_generation, complete draft, and idempotency_key are required")
+		}
+		if err := validateMCPMemoryCurationPlanEvidence(in.Draft); err != nil {
+			return nil, mcpMemoryCurationPlanOutput{}, err
 		}
 		raw, err := json.Marshal(in.Draft)
 		if err != nil {
