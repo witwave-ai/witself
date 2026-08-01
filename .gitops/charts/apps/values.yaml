@@ -20,6 +20,9 @@ apps:
     chartVersion: 18.8.0
     authSecretName: witself-postgresql-auth
     storage: 8Gi
+    # Preserve the existing Bitnami footprint unless a measured cell-specific
+    # working set requires a larger preset.
+    resourcesPreset: nano
   witselfServer:
     enabled: true
     namespace: witself

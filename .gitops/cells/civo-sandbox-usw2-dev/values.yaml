@@ -19,6 +19,9 @@ apps:
     chartVersion: 18.8.0
     authSecretName: witself-postgresql-auth
     storage: 8Gi
+    # Nano's 192Mi limit exhausted this cell's measured PostgreSQL working set.
+    # Micro adds headroom; the other Civo cells inherit nano.
+    resourcesPreset: micro
   witselfServer:
     enabled: true
     namespace: witself
