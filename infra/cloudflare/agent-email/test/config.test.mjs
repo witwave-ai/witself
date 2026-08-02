@@ -54,6 +54,10 @@ test("deployment config is email-only and cannot reuse the control-plane DIRECTO
     config,
     /"REALM_EMAIL_ALIAS_DELIVERY_ENABLED"\s*:\s*"false"/,
   );
+  assert.match(
+    config,
+    /"REALM_EMAIL_CANONICAL_DELIVERY_ENABLED"\s*:\s*"false"/,
+  );
   assert.doesNotMatch(config, /CONTROL_PLANE_EDGE_TOKEN/);
   assert.doesNotMatch(config, /"binding"\s*:\s*"DIRECTORY"/);
   assert.doesNotMatch(config, /"routes"\s*:/);
@@ -76,6 +80,27 @@ test("deployment config accepts only explicit boolean alias gate values", () => 
     assert.match(
       rendered.stderr,
       /REALM_EMAIL_ALIAS_DELIVERY_ENABLED must be true or false/,
+    );
+  }
+});
+
+test("deployment config accepts only explicit boolean canonical gate values", () => {
+  for (const value of ["TRUE", "1", "yes", " false "]) {
+    const rendered = spawnSync(process.execPath, [script.pathname], {
+      cwd: root,
+      env: {
+        ...process.env,
+        EMAIL_DIRECTORY_KV_ID: "a".repeat(32),
+        RELAY_KEY_ID: "pilot-2026-07",
+        CONTROL_PLANE_URL: controlPlaneURL,
+        REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: value,
+      },
+      encoding: "utf8",
+    });
+    assert.notEqual(rendered.status, 0, value);
+    assert.match(
+      rendered.stderr,
+      /REALM_EMAIL_CANONICAL_DELIVERY_ENABLED must be true or false/,
     );
   }
 });

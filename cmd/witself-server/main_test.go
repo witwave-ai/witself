@@ -25,6 +25,29 @@ func TestReadTokenFileRejectsEmpty(t *testing.T) {
 	}
 }
 
+func TestManagedRealmEmailRoutesConfigured(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		provisionToken string
+		backendKind    string
+		want           bool
+	}{
+		{name: "portable default"},
+		{name: "explicit self hosted", backendKind: "self-hosted"},
+		{name: "other portable backend", backendKind: "local"},
+		{name: "managed backend", backendKind: "managed", want: true},
+		{name: "managed backend normalized", backendKind: " MANAGED ", want: true},
+		{name: "provision link", provisionToken: "token", want: true},
+		{name: "provision link with portable backend", provisionToken: " token ", backendKind: "self-hosted", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := managedRealmEmailRoutesConfigured(tc.provisionToken, tc.backendKind); got != tc.want {
+				t.Fatalf("managedRealmEmailRoutesConfigured(%q, %q) = %t, want %t", tc.provisionToken, tc.backendKind, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLogAccountExportFailureQuotesSafeContextAndExactError(t *testing.T) {
 	var got strings.Builder
 	logAccountExportFailure(&got,

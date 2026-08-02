@@ -707,6 +707,14 @@ async function handleEmailTransaction(message, env, runtime = {}) {
       String(env?.REALM_EMAIL_ALIAS_DELIVERY_ENABLED ?? "") !== "true") {
     throw transient("tempfail_alias_gate", "route");
   }
+  // Canonical Realm-ID delivery has its own fleet-wide emergency boundary.
+  // Backfill may safely converge suspended/retired authority while this gate
+  // remains dark; no applied canonical projection can reach a cell unless the
+  // edge deployment also opts in with the exact lowercase value.
+  if (route.route_kind === "canonical" &&
+      String(env?.REALM_EMAIL_CANONICAL_DELIVERY_ENABLED ?? "") !== "true") {
+    throw transient("tempfail_canonical_gate", "route");
+  }
 
   if (
     !Number.isSafeInteger(message.rawSize) ||

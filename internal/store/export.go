@@ -330,7 +330,10 @@ func (s *Store) exportAccount(
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'name', name,
 			  'created_at', created_at, 'updated_at', updated_at,
-			  'deleted_at', deleted_at)
+			  'deleted_at', deleted_at,
+			  'email_route_state', email_route_state,
+			  'email_route_generation', email_route_generation,
+			  'email_route_operation_id', email_route_operation_id)
 			FROM realms WHERE account_id = $1 ORDER BY id`, arg: accountID},
 		&querySource{tx: tx, table: "agent_email_realm_receive_controls", q: `
 			SELECT jsonb_build_object(

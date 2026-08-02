@@ -930,19 +930,27 @@ Flags:
 | `--dry-run` | Show planned rename without applying it. |
 | `--reason TEXT` | Audit reason. |
 
-### `witself realm delete NAME_OR_ID`
+### `witself realm delete REALM_ID`
 
-Archive or delete a realm. Operator/admin only.
+Close an empty realm. The normal named-account path uses the managed control
+plane so the realm's canonical email route is permanently retired before the
+cell soft-deletes the realm. Supplying both `--endpoint` and `--token-file`
+selects the portable self-hosted path, which deletes the empty realm directly.
+Operator/admin only.
 
 Flags:
 
 | Flag | Description |
 |---|---|
-| `--archive` | Archive instead of permanently deleting. Default for managed service. |
-| `--permanent` | Permanently delete when allowed. |
-| `--dry-run` | Show deletion impact, blockers, and affected agents/memories/facts/groups without deleting anything. |
+| `--account NAME` | Managed local account profile. Defaults to the active account. |
+| `--control-plane URL` | Managed control-plane URL. |
+| `--endpoint URL` | Self-hosted cell endpoint; use together with `--token-file`. |
+| `--token-file PATH` | Self-hosted operator-token file; use together with `--endpoint`. |
 | `--yes` | Skip confirmation. |
-| `--reason TEXT` | Audit reason. |
+
+The managed close is a durable idempotent workflow. A successful command can
+report that the close was accepted while the control plane continues the exact
+operation in the background. Repeating the command is safe.
 
 ### `witself realm members NAME_OR_ID`
 

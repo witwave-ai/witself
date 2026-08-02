@@ -1146,6 +1146,62 @@ server's process-lifetime allowlist determine the owner; clients cannot supply
 account, realm, mailbox, or owner selectors. The separate value-free operator
 controls below bind one allowlisted agent or realm target from the route path.
 
+### Canonical Realm-ID email-route lifecycle
+
+The cell's provision-token single-route read
+`GET /v1/accounts/{account_id}:email-realm-route?realm_id={realm_id}` returns:
+
+```json
+{
+  "account_id": "acc_aaaaaaaaaaaaaaaa",
+  "realm_id": "realm_bbbbbbbbbbbbbbbb",
+  "state": "live",
+  "generation": 1
+}
+```
+
+`state` is exactly `live`, `closing`, or `retired`. A live route has no
+`operation_id`. Closing and retired routes include the same 1-128 character
+operation id and a generation of at least 2. The bounded inventory route adds
+`schema_version: "witself.v0"`, `account_id`, a `routes` array, and
+`next_cursor` (string or null). It includes retired tombstones and accepts
+`limit=1..100`; callers must preserve the opaque cursor.
+
+Prepare and commit accept the same strict request shape:
+
+```json
+{
+  "realm_id": "realm_bbbbbbbbbbbbbbbb",
+  "operation_id": "realm-close-2026-08-02-01",
+  "expected_generation": 1
+}
+```
+
+Prepare requires the exact live generation, proves the realm has no live agents
+or applied aliases, and returns `closing` at generation + 1. Commit uses that
+prepared generation, atomically soft-deletes the realm, and returns `retired`
+without incrementing again. Exact retries return the same record. Malformed
+input is 400, a missing route is 404, and a stale generation, conflicting
+operation, or nonempty realm is 409.
+
+The customer and administrator realm-close endpoints return 202 while the
+durable controller is converging:
+
+```json
+{
+  "schema_version": "witself.realm-email-alias.v1",
+  "account_id": "acc_aaaaaaaaaaaaaaaa",
+  "realm_id": "realm_bbbbbbbbbbbbbbbb",
+  "complete": false,
+  "phase": "prepare_cell"
+}
+```
+
+Phases are `scan_aliases`, `prepare_cell`, `publish_retired`, and `commit_cell`.
+The terminal 200 response has `complete: true` and a `canonical_route` whose
+state is `retired`. The same idempotency key resumes the exact operation; a
+different operation cannot take over an in-flight or completed close.
+
 ### Cell realm-alias target preflight
 
 The control plane may use the cell provision token to prove that one exact
@@ -1238,6 +1294,68 @@ clears derived usage state, scans canonical claims, then verifies the rebuilt
 membership and aggregates in bounded 100-claim pages; only the completed
 verification pass may restore `ready`. Later alarm re-arm failures fail the
 alarm invocation so the platform retries it from the durable cursor.
+
+### Realm-email-alias authority journal and empty-target recovery
+
+Every route in this section requires the ordinary platform-admin bearer token
+and the distinct header:
+
+```text
+X-Witself-Realm-Alias-Recovery: <separate recovery credential>
+```
+
+The credential is a Worker secret and is never returned or forwarded to a
+Durable Object. `GET /v1/admin/realm-email-alias-journal` reports only
+value-free journal state: `enabled`, `required`, the exact `head` (or null),
+`pending`, `forked`, and bounded bootstrap/checkpoint progress. A head contains
+`stream_id`, `sequence`, `hash`, `authority_epoch`, `registry_revision`, and
+`audit_sequence`.
+
+Bootstrap and checkpoint accept:
+
+```json
+{
+  "reason": "establish portable authority baseline",
+  "idempotency_key": "journal-bootstrap-2026-08-02"
+}
+```
+
+Each call advances at most one bounded page and returns `kind`, `phase`,
+`complete`, `frozen`, `authority_keys`, `scanned_keys`, `head`, and `pending`.
+Repeat the exact call and idempotency key until `complete` is true. Authority
+writes remain frozen until completion; failure does not silently remove the
+fence. Bootstrap is required for an existing unjournaled registry before the
+exact-true `CP_REALM_EMAIL_ALIAS_AUTHORITY_JOURNAL_ENABLED` gate can safely be
+enabled. A checkpoint appends a full-state digest at an exact journal head.
+
+Starting a recovery accepts:
+
+```json
+{
+  "recovery_id": "rear_aaaaaaaaaaaaaaaa",
+  "source_stream_id": "reaj_bbbbbbbbbbbbbbbb",
+  "expected_head": {
+    "sequence": 42,
+    "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "reason": "quarterly empty-target restore drill",
+  "idempotency_key": "restore-drill-2026-08-02"
+}
+```
+
+The target is always `recovery:<recovery_id>` and must be empty. It may not be
+the fixed active authority object, `global`. Recovery status and
+action results expose only `recovery_id`, source/expected/replayed heads,
+`phase`, authority/derived key counts, state digest, `sealed`, `failed`, a
+value-free failure code, and lifecycle timestamps. Call `:advance` with a fresh
+idempotency key for each bounded journal step until phase `replayed`; call
+`:verify` with a fresh key for each bounded derived rebuild step until
+`sealed=true`. Reusing one key replays that exact step and cannot advance it
+again.
+
+The final target is sealed, not active. No response contains or triggers a
+binding change, registry-object selection, delivery gate change, or automatic
+cutover.
 
 The other administrator pages replace `requests` with exactly one of:
 

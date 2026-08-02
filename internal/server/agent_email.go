@@ -268,6 +268,32 @@ type AgentEmailRealmAliasTarget struct {
 	Exists    bool   `json:"exists"`
 }
 
+// RealmEmailRouteLifecycle is the value-free portable cell fence for one
+// canonical realm-id email route.  Retired records remain discoverable as
+// tombstones so recovery cannot recreate their route.
+type RealmEmailRouteLifecycle struct {
+	AccountID   string `json:"account_id"`
+	RealmID     string `json:"realm_id"`
+	State       string `json:"state"`
+	Generation  int64  `json:"generation"`
+	OperationID string `json:"operation_id,omitempty"`
+}
+
+// RealmEmailRouteLifecyclePage is one bounded control-plane inventory page.
+type RealmEmailRouteLifecyclePage struct {
+	Routes     []RealmEmailRouteLifecycle
+	NextCursor string
+}
+
+// RealmEmailRouteRetirementRequest carries the exact operation-generation
+// fence.  Prepare expects the live generation; commit expects the closing
+// generation returned by prepare.
+type RealmEmailRouteRetirementRequest struct {
+	RealmID            string `json:"realm_id"`
+	OperationID        string `json:"operation_id"`
+	ExpectedGeneration int64  `json:"expected_generation"`
+}
+
 // AgentEmailRealmAliasAddress is one agent-specific address derived from a
 // realm-level claim.
 type AgentEmailRealmAliasAddress struct {

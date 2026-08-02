@@ -4,10 +4,12 @@ import test from "node:test";
 import {
   handleRealmEmailAliasAdminRequest,
   handleRealmEmailAliasCustomerRequest,
+  handleRealmEmailCanonicalCloseRequest,
   handleRealmEmailRouteRequest,
   isRealmEmailRoutePath,
   isRealmEmailAliasAdminPath,
   matchRealmEmailAliasCustomerPath,
+  matchRealmEmailCanonicalClosePath,
   matchRealmEmailRoutePath,
 } from "../src/realm-email-alias-api.mjs";
 import {
@@ -230,6 +232,91 @@ test("route matchers keep customer and platform-admin namespaces distinct", () =
     ),
     false,
   );
+});
+
+test("realm close has an exact account-operator route and a separate admin route", async () => {
+  const { env } = environment();
+  const customerPath =
+    `/v1/accounts/${ACCOUNT}/realms/${REALM}:close`;
+  const match = matchRealmEmailCanonicalClosePath(customerPath);
+  assert.ok(match);
+  assert.equal(matchRealmEmailCanonicalClosePath(`${customerPath}/extra`), null);
+  const forwarded = [];
+  env.REALM_EMAIL_ALIASES = {
+    idFromName: (name) => name,
+    get: () => ({
+      fetch: async (request, init) => {
+        forwarded.push({
+          pathname: new URL(request).pathname,
+          body: JSON.parse(init.body),
+        });
+        return Response.json({
+          schema_version: "witself.realm-email-alias.v1",
+          account_id: ACCOUNT,
+          realm_id: REALM,
+          complete: false,
+          phase: "prepare_cell",
+        }, { status: 202 });
+      },
+    }),
+  };
+  const cellCalls = [];
+  const baseFetch = cellFetch();
+  const response = await handleRealmEmailCanonicalCloseRequest(
+    new Request(`https://cp.example${customerPath}`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer witself_opr_token",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ idempotency_key: "close-realm-once" }),
+    }),
+    env,
+    match,
+    async (url, init) => {
+      cellCalls.push(String(url));
+      return baseFetch(url, init);
+    },
+  );
+  assert.equal(response.status, 202);
+  assert.deepEqual(cellCalls.sort(), [
+    `${ENDPOINT}/v1/account`,
+    `${ENDPOINT}/v1/whoami`,
+  ]);
+  assert.deepEqual(forwarded, [{
+    pathname: "/canonical/realm-close",
+    body: {
+      actor: { kind: "account_operator", id: "opr_api" },
+      account_id: ACCOUNT,
+      realm_id: REALM,
+      domain: DOMAIN,
+      idempotency_key: "close-realm-once",
+    },
+  }]);
+
+  const adminPath = `/v1/admin/accounts/${ACCOUNT}/realms/${REALM}:close`;
+  assert.equal(isRealmEmailAliasAdminPath(adminPath), true);
+  const adminResponse = await handleRealmEmailAliasAdminRequest(
+    new Request(`https://cp.example${adminPath}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ idempotency_key: "admin-close-once" }),
+    }),
+    env,
+    new URL(`https://cp.example${adminPath}`),
+    ADMIN,
+  );
+  assert.equal(adminResponse.status, 202);
+  assert.deepEqual(forwarded.at(-1), {
+    pathname: "/canonical/realm-close",
+    body: {
+      actor: { kind: "platform_admin", id: ADMIN.admin_id },
+      account_id: ACCOUNT,
+      realm_id: REALM,
+      domain: DOMAIN,
+      idempotency_key: "admin-close-once",
+    },
+  });
 });
 
 test("platform-admin counter rebuild endpoint authenticates, bounds input, and replays idempotently", async () => {

@@ -180,6 +180,7 @@ POST /v1/email/retry-canary:status
 # Control-plane customer request surface; account-operator bearer token.
 GET  /v1/accounts/{account_id}/realms/{realm_id}/email-alias-requests
 POST /v1/accounts/{account_id}/realms/{realm_id}/email-alias-requests
+POST /v1/accounts/{account_id}/realms/{realm_id}:close
 
 # Control-plane platform-administrator namespace surface.
 GET  /v1/admin/realm-email-alias-requests
@@ -198,12 +199,24 @@ PATCH /v1/admin/realm-email-reserved-names/{name}
 DELETE /v1/admin/realm-email-reserved-names/{name}
 GET  /v1/admin/realm-email-alias-audit
 POST /v1/admin/realm-email-alias-counters:rebuild
+POST /v1/admin/accounts/{account_id}/realms/{realm_id}:close
+GET  /v1/admin/realm-email-alias-journal
+POST /v1/admin/realm-email-alias-journal:bootstrap
+POST /v1/admin/realm-email-alias-journal:checkpoint
+POST /v1/admin/realm-email-alias-recoveries
+GET  /v1/admin/realm-email-alias-recoveries/{recovery_id}
+POST /v1/admin/realm-email-alias-recoveries/{recovery_id}:advance
+POST /v1/admin/realm-email-alias-recoveries/{recovery_id}:verify
 
 # Edge-to-control-plane authenticated fallback; not a customer route.
 GET  /v1/email/realm-routes/{domain}/{realm_label}
 
 # Control-plane-to-cell preflight; cell provision token, not a customer route.
 GET  /v1/accounts/{account_id}:email-realm-alias-target?realm_id={realm_id}
+GET  /v1/accounts/{account_id}:email-realm-route?realm_id={realm_id}
+GET  /v1/accounts/{account_id}:email-realm-routes?limit={1..100}&cursor={opaque}
+POST /v1/accounts/{account_id}:prepare-email-realm-route-retirement
+POST /v1/accounts/{account_id}:commit-email-realm-route-retirement
 
 GET  /v1/message-requests
 POST /v1/message-requests
@@ -830,6 +843,30 @@ audit events; read-only recall does neither:
   owning cell enforces any lower resolved account limit and returns the exact
   content-free `over_size` verdict. Successful `accepted` is emitted only after
   the owning cell commit. It is not a public bearer-token route.
+- Canonical Realm-ID routes have an independent bounded inventory. The
+  control-plane schedule does nothing unless
+  `CP_REALM_EMAIL_CANONICAL_INVENTORY_ENABLED` is exactly `true`. Its controller
+  writes applied destinations only when
+  `CP_REALM_EMAIL_CANONICAL_DELIVERY_ENABLED` is also exactly `true`; otherwise
+  it can still converge retry-suspended and retired authority. The Email Worker
+  independently requires `REALM_EMAIL_CANONICAL_DELIVERY_ENABLED=true` before
+  relaying a canonical route. All three gates are default-off.
+- `POST /v1/accounts/{account_id}/realms/{realm_id}:close` authenticates the
+  account operator against the current cell. Its platform-admin counterpart is
+  `POST /v1/admin/accounts/{account_id}/realms/{realm_id}:close`. Both accept an
+  `idempotency_key` and drive the same durable operation. The controller rejects
+  any live or pending realm alias, prepares the cell's exact route generation,
+  publishes a retired canonical route, and commits the cell tombstone. It
+  returns 202 with the current phase while converging and 200 when complete;
+  retry the same request and idempotency key. Direct deletion on a managed cell
+  fails closed so it cannot bypass this ordering.
+- The provision-token cell routes expose only portable, value-free lifecycle
+  state. `GET ...:email-realm-route` reads one realm; bounded
+  `GET ...:email-realm-routes` includes live, closing, and retired rows.
+  Prepare requires the live generation and changes it once to `closing`;
+  commit requires that prepared generation and atomically records `retired`
+  with the realm soft-delete. Exact replays are idempotent. A stale generation,
+  different operation id, nonempty realm, or applied alias returns conflict.
 - Realm alias claims are globally authoritative in one control-plane Durable
   Object, while account, realm, and skeleton mutation lanes are independently
   serialized so unrelated work does not share a global head-of-line lock.
@@ -863,6 +900,18 @@ audit events; read-only recall does neither:
   different rebuild while one is active returns 409. A re-arm failure during
   an alarm turn propagates so the platform retries that turn. This maintenance
   route remains available while realm-alias activation is off.
+- Portable alias-authority maintenance uses a second administrative boundary.
+  Every journal and recovery route requires both the normal platform-admin
+  bearer token and `X-Witself-Realm-Alias-Recovery` matching the distinct
+  `CP_REALM_EMAIL_ALIAS_RECOVERY_TOKEN`. Bootstrap/checkpoint requests require
+  a bounded reason and idempotency key, freeze authority writes, and advance one
+  bounded scan step per replayed call. Recovery creation additionally requires
+  a caller-minted `rear_` id, source `reaj_` stream, and exact expected
+  sequence/hash. It can target only the empty named object
+  `recovery:<recovery_id>`. `:advance` replays one journal entry per call;
+  repeated `:verify` calls rebuild derived state in bounded pages and finally
+  seal the verified target. These routes never select the active object or
+  perform cutover.
 - The cell projection endpoint accepts only the account cell's provision token
   and an exact `era_` claim fence, domain, label, state, and monotonically
   increasing controller revision. Equal replay is idempotent; stale or

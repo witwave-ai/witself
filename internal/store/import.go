@@ -83,6 +83,8 @@ var importColumns = map[string]map[string]bool{
 	"realms": {
 		"id": true, "account_id": true, "name": true,
 		"created_at": true, "updated_at": true, "deleted_at": true,
+		"email_route_state": true, "email_route_generation": true,
+		"email_route_operation_id": true,
 	},
 	"avatar_style_packs": {
 		"account_id": true, "realm_id": true, "id": true,
@@ -1544,9 +1546,35 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			ic.operators[id] = true
 		}
 	case "realms":
-		if id, ok := stringField(obj, "id"); ok {
-			ic.realms[id] = true
+		id, idOK := stringField(obj, "id")
+		if ic.schemaVersion < 86 {
+			if idOK {
+				ic.realms[id] = true
+			}
+			break
 		}
+		state, stateOK := stringField(obj, "email_route_state")
+		generation, generationOK := importedInteger(obj["email_route_generation"])
+		operationID, hasOperationID := optionalStringField(obj, "email_route_operation_id")
+		_, deleted, deletedErr := importedOptionalTimestamp(obj, "deleted_at")
+		validOperation := !hasOperationID || realmEmailRouteOperationIDPattern.MatchString(operationID)
+		validShape := idOK && validRealmEmailRouteRealmID(id) && stateOK && generationOK &&
+			generation >= 1 && generation <= maximumRealmEmailRouteGeneration &&
+			validOperation
+		switch state {
+		case RealmEmailRouteLive:
+			validShape = validShape && !deleted && !hasOperationID
+		case RealmEmailRouteClosing:
+			validShape = validShape && !deleted && hasOperationID && generation >= 2
+		case RealmEmailRouteRetired:
+			validShape = validShape && deleted && hasOperationID && generation >= 2
+		default:
+			validShape = false
+		}
+		if deletedErr != nil || !validShape {
+			return badf("realms row has invalid email route lifecycle")
+		}
+		ic.realms[id] = true
 	case "avatar_style_packs":
 		key, scope, err := ic.validateImportedAvatarStyleHead(obj)
 		if err != nil {

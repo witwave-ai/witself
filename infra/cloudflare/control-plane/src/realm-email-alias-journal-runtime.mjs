@@ -1,0 +1,1376 @@
+import {
+  appendRealmEmailAliasJournalEntry,
+  buildRealmEmailAliasJournalEntry,
+  canonicalJSONBytes,
+  canonicalJSONString,
+  classifyRealmEmailAliasStorageKey,
+  REALM_EMAIL_ALIAS_AUTHORITY_JOURNAL_GENESIS_HASH,
+  realmEmailAliasAuthorityStateDigest,
+  realmEmailAliasJournalEntryKey,
+  rebuildRealmEmailAliasDerivedState,
+  RealmEmailAliasJournalError,
+  replayRealmEmailAliasJournalPage,
+  sha256Hex,
+  validateRealmEmailAliasAuthorityAfterImage,
+  validateRealmEmailAliasJournalEntry,
+  validateRealmEmailAliasRecoveredState,
+} from "./realm-email-alias-journal.mjs";
+
+export const REALM_EMAIL_ALIAS_JOURNAL_META_KEY =
+  "realm-email-alias-journal-meta";
+export const REALM_EMAIL_ALIAS_JOURNAL_PENDING_KEY =
+  "realm-email-alias-journal-pending";
+export const REALM_EMAIL_ALIAS_JOURNAL_FORK_KEY =
+  "realm-email-alias-journal-fork";
+export const REALM_EMAIL_ALIAS_JOURNAL_BOOTSTRAP_KEY =
+  "realm-email-alias-journal:bootstrap";
+export const REALM_EMAIL_ALIAS_RECOVERY_KEY = "realm-email-alias-recovery";
+const REALM_EMAIL_ALIAS_JOURNAL_LAST_MAINTENANCE_KEY =
+  "realm-email-alias-journal:last-maintenance";
+
+const LOCAL_SCHEMA = "witself.realm-email-alias-journal-local.v1";
+const MAINTENANCE_SCHEMA = "witself.realm-email-alias-journal-maintenance.v1";
+const CHECKPOINT_SCHEMA = "witself.realm-email-alias-authority-checkpoint.v1";
+const RECOVERY_SCHEMA = "witself.realm-email-alias-recovery-local.v1";
+const STREAM_ID_PATTERN = /^reaj_[a-z2-7]{16,52}$/;
+const RECOVERY_ID_PATTERN = /^rear_[a-z2-7]{16}$/;
+const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+const OBJECT_NAME_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const BASE32 = "abcdefghijklmnopqrstuvwxyz234567";
+const SNAPSHOT_STORAGE_PAGE_LIMIT = 100;
+const MAX_AUTHORITY_KEYS = 10_000;
+const MAX_SCANNED_STORAGE_KEYS = 100_000;
+const DERIVED_REBUILD_PAGE_LIMIT = 100;
+const JOURNAL_ENTRY_MAX_BYTES = 512 * 1_024;
+
+export class RealmEmailAliasJournalRuntimeError extends Error {
+  constructor(message, code = "realm_email_alias_journal_unavailable") {
+    super(message);
+    this.name = "RealmEmailAliasJournalRuntimeError";
+    this.code = code;
+  }
+}
+
+function fail(message, code) {
+  throw new RealmEmailAliasJournalRuntimeError(message, code);
+}
+
+function clone(value) {
+  return value === undefined ? undefined : structuredClone(value);
+}
+
+function randomStreamID() {
+  const bytes = new Uint8Array(26);
+  crypto.getRandomValues(bytes);
+  return `reaj_${[...bytes].map((byte) => BASE32[byte & 31]).join("")}`;
+}
+
+function journalRequired(env) {
+  return String(env?.CP_REALM_EMAIL_ALIAS_AUTHORITY_JOURNAL_ENABLED ?? "") ===
+    "true";
+}
+
+function configuredStreamID(env) {
+  const value = String(
+    env?.CP_REALM_EMAIL_ALIAS_AUTHORITY_STREAM_ID ?? "",
+  ).trim();
+  if (value === "") return null;
+  if (!STREAM_ID_PATTERN.test(value)) {
+    fail("realm email alias authority stream id is invalid",
+      "realm_email_alias_journal_configuration_invalid");
+  }
+  return value;
+}
+
+function validHead(value) {
+  return value?.schema_version === LOCAL_SCHEMA &&
+    STREAM_ID_PATTERN.test(value.stream_id ?? "") &&
+    Number.isSafeInteger(value.sequence) && value.sequence >= 0 &&
+    typeof value.hash === "string" && /^[0-9a-f]{64}$/.test(value.hash) &&
+    Number.isSafeInteger(value.authority_epoch) && value.authority_epoch >= 1;
+}
+
+function journalError(error) {
+  if (error instanceof RealmEmailAliasJournalRuntimeError) return error;
+  if (error instanceof RealmEmailAliasJournalError) {
+    return new RealmEmailAliasJournalRuntimeError(error.message, error.code);
+  }
+  return new RealmEmailAliasJournalRuntimeError(
+    "realm email alias authority journal is unavailable",
+  );
+}
+
+function authorityAfterImage(entries, deletes) {
+  const puts = [];
+  const authorityDeletes = [];
+  for (const [key, value] of entries) {
+    const classification = classifyRealmEmailAliasStorageKey(key);
+    if (classification === "authority") {
+      puts.push({ key, value: clone(value) });
+    } else if (classification === "unknown") {
+      fail(`unclassified realm email alias storage key: ${key}`,
+        "realm_email_alias_journal_unknown_storage_key");
+    }
+  }
+  for (const key of deletes) {
+    const classification = classifyRealmEmailAliasStorageKey(key);
+    if (classification === "authority") {
+      authorityDeletes.push(key);
+    } else if (classification === "unknown") {
+      fail(`unclassified realm email alias storage key: ${key}`,
+        "realm_email_alias_journal_unknown_storage_key");
+    }
+  }
+  return validateRealmEmailAliasAuthorityAfterImage({
+    puts,
+    deletes: authorityDeletes,
+  });
+}
+
+function highestAudit(afterImage) {
+  return afterImage.puts
+    .filter(({ key, value }) => key.startsWith("audit:") && value)
+    .sort((left, right) =>
+      Number(right.key.slice("audit:".length)) -
+      Number(left.key.slice("audit:".length)))[0]?.value ?? null;
+}
+
+function metaPut(afterImage) {
+  return afterImage.puts.find(({ key }) => key === "meta")?.value ?? null;
+}
+
+function cleanOptions(options) {
+  const transition = options?.claimUsageTransition;
+  return transition ? { claimUsageTransition: clone(transition) } : {};
+}
+
+function validActor(actor) {
+  return actor?.kind === "platform_admin" &&
+    typeof actor.id === "string" && actor.id.length >= 1 &&
+    actor.id.length <= 128;
+}
+
+function maintenanceRequest(input) {
+  if (!validActor(input?.actor) ||
+      typeof input?.reason !== "string" || input.reason.trim().length < 3 ||
+      input.reason.trim().length > 1_024 ||
+      !IDEMPOTENCY_KEY_PATTERN.test(input?.idempotency_key ?? "")) {
+    fail("realm email alias journal maintenance request is invalid",
+      "realm_email_alias_journal_maintenance_invalid");
+  }
+  return {
+    actor: { kind: input.actor.kind, id: input.actor.id },
+    reason: input.reason.trim(),
+    idempotency_key: input.idempotency_key,
+  };
+}
+
+function exactExpectedHead(head) {
+  return head && Number.isSafeInteger(head.sequence) && head.sequence >= 1 &&
+    SHA256_PATTERN.test(head.hash ?? "");
+}
+
+function recoveryRequest(input) {
+  if (!validActor(input?.actor) ||
+      !RECOVERY_ID_PATTERN.test(input?.recovery_id ?? "") ||
+      !STREAM_ID_PATTERN.test(input?.source_stream_id ?? "") ||
+      !exactExpectedHead(input?.expected_head) ||
+      !OBJECT_NAME_PATTERN.test(input?.active_object_name ?? "") ||
+      !OBJECT_NAME_PATTERN.test(input?.target_object_name ?? "") ||
+      input.target_object_name !== `recovery:${input.recovery_id}` ||
+      input.target_object_name === input.active_object_name ||
+      typeof input?.reason !== "string" || input.reason.trim().length < 3 ||
+      input.reason.trim().length > 1_024 ||
+      !IDEMPOTENCY_KEY_PATTERN.test(input?.idempotency_key ?? "")) {
+    fail("realm email alias recovery request is invalid",
+      "realm_email_alias_recovery_request_invalid");
+  }
+  return {
+    actor: { kind: input.actor.kind, id: input.actor.id },
+    recovery_id: input.recovery_id,
+    source_stream_id: input.source_stream_id,
+    expected_head: {
+      sequence: input.expected_head.sequence,
+      hash: input.expected_head.hash,
+    },
+    active_object_name: input.active_object_name,
+    target_object_name: input.target_object_name,
+    reason: input.reason.trim(),
+    idempotency_key: input.idempotency_key,
+  };
+}
+
+function mapRows(value) {
+  if (value instanceof Map) return [...value];
+  if (value && typeof value[Symbol.iterator] === "function") return [...value];
+  fail("realm email alias durable storage returned an invalid page",
+    "realm_email_alias_journal_storage_invalid");
+}
+
+async function storagePage(storage, cursor = null, limit = SNAPSHOT_STORAGE_PAGE_LIMIT) {
+  if (typeof storage?.list !== "function") {
+    fail("realm email alias durable storage cannot be enumerated",
+      "realm_email_alias_journal_storage_invalid");
+  }
+  const listed = await storage.list({
+    ...(cursor === null ? {} : { startAfter: cursor }),
+    limit: limit + 1,
+  });
+  const rows = mapRows(listed)
+    .filter(([key]) => cursor === null || key > cursor)
+    .sort(([left], [right]) => left.localeCompare(right));
+  const selected = rows.slice(0, limit);
+  return {
+    rows: selected,
+    complete: rows.length <= limit,
+    next_cursor: selected.length === 0 ? cursor : selected.at(-1)[0],
+  };
+}
+
+async function initialRowsHash() {
+  return sha256Hex(canonicalJSONBytes({
+    schema_version: "witself.realm-email-alias-authority-state.v1",
+    rows: 0,
+  }));
+}
+
+async function appendDigestRow(rowsHash, rowNumber, key, value) {
+  return sha256Hex(canonicalJSONBytes({
+    schema_version: "witself.realm-email-alias-authority-state-row.v1",
+    previous_hash: rowsHash,
+    row_number: rowNumber,
+    key,
+    value,
+  }));
+}
+
+async function finishRowsDigest(rowsHash, rows) {
+  return sha256Hex(canonicalJSONBytes({
+    schema_version: "witself.realm-email-alias-authority-state-final.v1",
+    rows,
+    rows_hash: rowsHash,
+  }));
+}
+
+async function scanSnapshotPage(storage, maintenance) {
+  const page = await storagePage(storage, maintenance.cursor);
+  let authorityKeys = maintenance.authority_keys;
+  let rowsHash = maintenance.rows_hash;
+  let scannedKeys = maintenance.scanned_keys;
+  const puts = [];
+  for (const [key, value] of page.rows) {
+    scannedKeys += 1;
+    if (scannedKeys > MAX_SCANNED_STORAGE_KEYS) {
+      fail("realm email alias registry exceeds the bounded storage scan limit",
+        "realm_email_alias_journal_storage_limit_exceeded");
+    }
+    const classification = classifyRealmEmailAliasStorageKey(key);
+    if (classification === "unknown") {
+      fail(`unclassified realm email alias storage key: ${key}`,
+        "realm_email_alias_journal_unknown_storage_key");
+    }
+    if (classification !== "authority") continue;
+    authorityKeys += 1;
+    if (authorityKeys > MAX_AUTHORITY_KEYS) {
+      fail("realm email alias authority exceeds 10000 keys",
+        "realm_email_alias_journal_authority_limit_exceeded");
+    }
+    rowsHash = await appendDigestRow(
+      rowsHash,
+      authorityKeys,
+      key,
+      value,
+    );
+    puts.push({ key, value: clone(value) });
+  }
+  return {
+    puts,
+    cursor: page.next_cursor,
+    complete: page.complete,
+    authority_keys: authorityKeys,
+    scanned_keys: scannedKeys,
+    rows_hash: rowsHash,
+  };
+}
+
+async function readStorageState(storage) {
+  const authority = new Map();
+  const derived = new Map();
+  const local = new Map();
+  let cursor = null;
+  let scanned = 0;
+  for (;;) {
+    const page = await storagePage(storage, cursor, 500);
+    for (const [key, value] of page.rows) {
+      scanned += 1;
+      if (scanned > MAX_SCANNED_STORAGE_KEYS) {
+        fail("realm email alias registry exceeds the bounded storage scan limit",
+          "realm_email_alias_journal_storage_limit_exceeded");
+      }
+      const classification = classifyRealmEmailAliasStorageKey(key);
+      if (classification === "authority") authority.set(key, clone(value));
+      else if (classification === "derived") derived.set(key, clone(value));
+      else if (classification === "journal_local") local.set(key, clone(value));
+      else {
+        fail(`unclassified realm email alias storage key: ${key}`,
+          "realm_email_alias_journal_unknown_storage_key");
+      }
+    }
+    if (authority.size > MAX_AUTHORITY_KEYS) {
+      fail("realm email alias authority exceeds 10000 keys",
+        "realm_email_alias_journal_authority_limit_exceeded");
+    }
+    if (page.complete) break;
+    cursor = page.next_cursor;
+  }
+  return { authority, derived, local, scanned };
+}
+
+function headFromEntry(entry) {
+  return {
+    schema_version: LOCAL_SCHEMA,
+    stream_id: entry.stream_id,
+    sequence: entry.sequence,
+    hash: entry.entry_hash,
+    authority_epoch: entry.authority_epoch,
+    registry_revision: entry.registry_revision,
+    audit_sequence: entry.audit_sequence,
+    updated_at: entry.occurred_at,
+  };
+}
+
+function recoveryPublic(record) {
+  if (!record || record.schema_version !== RECOVERY_SCHEMA) return null;
+  return {
+    recovery_id: record.recovery_id,
+    source_stream_id: record.source_stream_id,
+    expected_head: clone(record.expected_head),
+    replay_head: clone(record.replay_head),
+    phase: record.phase,
+    authority_keys: record.authority_keys,
+    derived_keys: record.derived_keys ?? 0,
+    state_digest: record.state_digest ?? null,
+    sealed: record.phase === "sealed",
+    failed: record.phase === "failed",
+    failure_code: record.failure_code ?? null,
+    created_at: record.created_at,
+    updated_at: record.updated_at,
+    sealed_at: record.sealed_at ?? null,
+  };
+}
+
+/**
+ * Serial commit helper for the singleton registry. The caller must hold one
+ * global journal lane for resume() and commit(); this class deliberately does
+ * not own request scheduling or call external routing/cell services.
+ */
+export class RealmEmailAliasJournalRuntime {
+  constructor(storage, env, dependencies = {}) {
+    this.storage = storage;
+    this.env = env;
+    this.now = dependencies.now ?? (() => new Date());
+    this.newStreamID = dependencies.newStreamID ?? randomStreamID;
+    this.afterJournalAppend = dependencies.afterJournalAppend ?? (() => {});
+    this.afterMaintenanceFinalize =
+      dependencies.afterMaintenanceFinalize ?? (() => {});
+    this.afterRecoveryAction = dependencies.afterRecoveryAction ?? (() => {});
+  }
+
+  async raw(entries, deletes = []) {
+    const apply = async (storage) => {
+      for (const [key, value] of entries) await storage.put(key, value);
+      for (const key of deletes) await storage.delete(key);
+    };
+    if (typeof this.storage.transaction === "function") {
+      return this.storage.transaction(apply);
+    }
+    return apply(this.storage);
+  }
+
+  bucket() {
+    const bucket = this.env?.REALM_EMAIL_ALIAS_AUTHORITY_JOURNAL;
+    if (!bucket || typeof bucket.put !== "function" ||
+        typeof bucket.get !== "function") {
+      fail("realm email alias authority journal binding is unavailable");
+    }
+    return bucket;
+  }
+
+  async status() {
+    const [head, pending, fork, bootstrap] = await Promise.all([
+      this.storage.get(REALM_EMAIL_ALIAS_JOURNAL_META_KEY),
+      this.storage.get(REALM_EMAIL_ALIAS_JOURNAL_PENDING_KEY),
+      this.storage.get(REALM_EMAIL_ALIAS_JOURNAL_FORK_KEY),
+      this.storage.get(REALM_EMAIL_ALIAS_JOURNAL_BOOTSTRAP_KEY),
+    ]);
+    return {
+      enabled: validHead(head),
+      required: journalRequired(this.env),
+      head: validHead(head) ? head : null,
+      pending: Boolean(pending),
+      forked: Boolean(fork),
+      bootstrap: bootstrap ?? null,
+    };
+  }
+
+  async assertOperationalReady() {
+    const [head, fork, maintenance, recovery, currentMeta] = await Promise.all([
+      this.storage.get(REALM_EMAIL_ALIAS_JOURNAL_META_KEY),
+      this.storage.get(REALM_EMAIL_ALIAS_JOURNAL_FORK_KEY),
+      this.storage.get(REALM_EMAIL_ALIAS_JOURNAL_BOOTSTRAP_KEY),
+      this.storage.get(REALM_EMAIL_ALIAS_RECOVERY_KEY),
+      this.storage.get("meta"),
+    ]);
+    if (recovery) {
+      fail("realm email alias recovery targets are permanently write-fenced",
+        "realm_email_alias_recovery_target_sealed");
+    }
+    if (fork) {
+      fail("realm email alias authority journal is permanently fenced",
+        "realm_email_alias_journal_fork_detected");
+    }
+    if (maintenance) {
+      fail("realm email alias authority work is frozen for journal maintenance",
+        "realm_email_alias_journal_write_frozen");
+    }
+    if (head && !validHead(head)) {
+      fail("realm email alias authority journal head is invalid",
+        "realm_email_alias_journal_fence_mismatch");
+    }
+    // A new object may seed itself and create the genesis head in one R2-first
+    // commit. Any object with existing authority must be bootstrapped before
+    // ordinary work can perform even preliminary external reads or writes.
+    if (journalRequired(this.env) && !head && currentMeta) {
+      fail("existing realm email alias authority is not journaled",
+        "realm_email_alias_journal_bootstrap_required");
+    }
+    return { ready: true };
+  }
+
+  async recordFork(error, pending) {
+    const now = this.now().toISOString();
+    await this.raw([[REALM_EMAIL_ALIAS_JOURNAL_FORK_KEY, {
+      schema_version: LOCAL_SCHEMA,
+      code: error?.code ?? "realm_email_alias_journal_fork_detected",
+      stream_id: pending?.entry?.stream_id ?? null,
+      sequence: pending?.entry?.sequence ?? null,
+      detected_at: now,
+    }]]).catch(() => {});
+  }
+
+  async appendPending(pending) {
+    let built;
+    try {
+      built = await validateRealmEmailAliasJournalEntry(pending.entry, {
+        stream_id: pending.head_before.stream_id,
+        sequence: pending.head_before.sequence + 1,
+        previous_hash: pending.head_before.hash,
+        authority_epoch: pending.head_before.authority_epoch,
+      });
+      await appendRealmEmailAliasJournalEntry(this.bucket(), built);
+      await this.afterJournalAppend(built.entry);
+      return built;
+    } catch (error) {
+      const converted = journalError(error);
+      if (converted.code === "realm_email_alias_journal_fork_detected") {
+        await this.recordFork(converted, pending);
+      }
+      throw converted;
+    }
+  }
+
+  async resume(apply) {
+    const fork = await this.storage.get(REALM_EMAIL_ALIAS_JOURNAL_FORK_KEY);
+    if (fork) {
+      fail("realm email alias authority journal is permanently fenced",
+        "realm_email_alias_journal_fork_detected");
+    }
+    const pending = await this.storage.get(REALM_EMAIL_ALIAS_JOURNAL_PENDING_KEY);
+    if (!pending) return { resumed: false };
+    if (pending.schema_version !== LOCAL_SCHEMA ||
+        !validHead(pending.head_before) || !pending.entry ||
+        !Array.isArray(pending.entries) || !Array.isArray(pending.deletes)) {
+      fail("realm email alias authority journal pending record is invalid",
+        "realm_email_alias_journal_pending_invalid");
+    }
+    const currentHead = await this.storage.get(REALM_EMAIL_ALIAS_JOURNAL_META_KEY);
+    if (!validHead(currentHead) ||
+        currentHead.stream_id !== pending.head_before.stream_id ||
+        currentHead.sequence !== pending.head_before.sequence ||
+        currentHead.hash !== pending.head_before.hash ||
+        currentHead.authority_epoch !== pending.head_before.authority_epoch) {
+      fail("realm email alias authority journal pending head is stale",
+        "realm_email_alias_journal_fence_mismatch");
+    }
+    const built = await this.appendPending(pending);
+    const nextHead = {
+      schema_version: LOCAL_SCHEMA,
+      stream_id: built.entry.stream_id,
+      sequence: built.entry.sequence,
+      hash: built.entry.entry_hash,
+      authority_epoch: built.entry.authority_epoch,
+      registry_revision: built.entry.registry_revision,
+      audit_sequence: built.entry.audit_sequence,
+      updated_at: built.entry.occurred_at,
+    };
+    await apply(
+      [...pending.entries, [REALM_EMAIL_ALIAS_JOURNAL_META_KEY, nextHead]],
+      [...pending.deletes, REALM_EMAIL_ALIAS_JOURNAL_PENDING_KEY],
+      pending.options ?? {},
+    );
+    return { resumed: true, head: nextHead };
+  }
+
+  async commit(entries, deletes, options, apply) {
+    const recovery = await this.storage.get(REALM_EMAIL_ALIAS_RECOVERY_KEY);
+    if (recovery) {
+      fail("realm email alias recovery targets are permanently write-fenced",
+        "realm_email_alias_recovery_target_sealed");
+    }
+    await this.resume(apply);
+    const bootstrap = await this.storage.get(
+      REALM_EMAIL_ALIAS_JOURNAL_BOOTSTRAP_KEY,
+    );
+    if (bootstrap) {
+      fail("realm email alias authority writes are frozen for journal maintenance",
+        "realm_email_alias_journal_write_frozen");
+    }
+    let head = await this.storage.get(REALM_EMAIL_ALIAS_JOURNAL_META_KEY);
+    const currentMeta = await this.storage.get("meta");
+    if (!head) {
+      if (!journalRequired(this.env)) return apply(entries, deletes, options);
+      // A brand-new object can establish its stream with its seed transaction.
+      // An existing authority must be frozen and bootstrapped first so no
+      // pre-journal claims, tombstones, or audit rows are omitted.
+      if (currentMeta) {
+        fail("existing realm email alias authority is not journaled",
+          "realm_email_alias_journal_bootstrap_required");
+      }
+      const streamID = configuredStreamID(this.env) ?? this.newStreamID();
+      if (!STREAM_ID_PATTERN.test(streamID)) {
+        fail("generated realm email alias authority stream id is invalid",
+          "realm_email_alias_journal_configuration_invalid");
+      }
+      head = {
+        schema_version: LOCAL_SCHEMA,
+        stream_id: streamID,
+        sequence: 0,
+        hash: REALM_EMAIL_ALIAS_AUTHORITY_JOURNAL_GENESIS_HASH,
+        authority_epoch: 1,
+        registry_revision: 0,
+        audit_sequence: 0,
+        updated_at: this.now().toISOString(),
+      };
+      await this.raw([[REALM_EMAIL_ALIAS_JOURNAL_META_KEY, head]]);
+    }
+    if (!validHead(head)) {
+      fail("realm email alias authority journal head is invalid",
+        "realm_email_alias_journal_fence_mismatch");
+    }
+    const afterImage = authorityAfterImage(entries, deletes);
+    if (afterImage.puts.length === 0 && afterImage.deletes.length === 0) {
+      return apply(entries, deletes, options);
+    }
+    const desiredMeta = metaPut(afterImage) ?? currentMeta;
+    if (!desiredMeta || !Number.isSafeInteger(desiredMeta.registry_revision) ||
+        !Number.isSafeInteger(desiredMeta.audit_sequence)) {
+      fail("realm email alias authority mutation has no exact meta fence",
+        "realm_email_alias_journal_fence_mismatch");
+    }
+    const audit = highestAudit(afterImage);
+    const occurredAt = audit?.occurred_at ?? this.now().toISOString();
+    const operationFingerprint = await sha256Hex(canonicalJSONBytes(afterImage));
+    const sequence = head.sequence + 1;
+    let built;
+    try {
+      built = await buildRealmEmailAliasJournalEntry({
+        stream_id: head.stream_id,
+        kind: "mutation",
+        authority_epoch: head.authority_epoch,
+        sequence,
+        previous_hash: head.hash,
+        registry_revision: desiredMeta.registry_revision,
+        audit_sequence: desiredMeta.audit_sequence,
+        occurred_at: occurredAt,
+        operation_id: `journal:${sequence}`,
+        operation_fingerprint: operationFingerprint,
+        actor: audit
+          ? { kind: audit.actor_kind, id: audit.actor_id }
+          : { kind: "system", id: "registry" },
+        action: audit?.action ?? "registry.storage_mutation",
+        target: String(audit?.target ?? "registry").slice(0, 512),
+        metadata: { storage_puts: entries.length, storage_deletes: deletes.length },
+        after_image: afterImage,
+      });
+    } catch (error) {
+      throw journalError(error);
+    }
+    const pending = {
+      schema_version: LOCAL_SCHEMA,
+      head_before: head,
+      entry: built.entry,
+      entries: clone(entries),
+      deletes: clone(deletes),
+      options: cleanOptions(options),
+      created_at: this.now().toISOString(),
+    };
+    await this.raw([[REALM_EMAIL_ALIAS_JOURNAL_PENDING_KEY, pending]]);
+    return this.resume(apply);
+  }
+
+  async localApply(entries, deletes = [], apply = null) {
+    if (apply) return apply(entries, deletes, {});
+    return this.raw(entries, deletes);
+  }
+
+  async assertMaintenanceCanStart(apply) {
+    if (await this.storage.get(REALM_EMAIL_ALIAS_RECOVERY_KEY)) {
+      fail("realm email alias recovery targets cannot enter journal maintenance",
+        "realm_email_alias_recovery_target_sealed");
+    }
+    if (await this.storage.get(REALM_EMAIL_ALIAS_JOURNAL_FORK_KEY)) {
+      fail("realm email alias authority journal is permanently fenced",
+        "realm_email_alias_journal_fork_detected");
+    }
+    const pending = await this.storage.get(REALM_EMAIL_ALIAS_JOURNAL_PENDING_KEY);
+    if (pending && typeof apply !== "function") {
+      fail("caller-provided raw apply is required to resume journal authority",
+        "realm_email_alias_journal_apply_required");
+    }
+    if (pending) await this.resume(apply);
+  }
+
+  maintenanceResult(record, complete = false, head = null) {
+    return {
+      kind: record?.kind ?? null,
+      phase: complete ? "complete" : record?.phase ?? null,
+      complete,
+      frozen: !complete,
+      authority_keys: record?.authority_keys ?? 0,
+      scanned_keys: record?.scanned_keys ?? 0,
+      head: head ?? clone(record?.head ?? null),
+      pending: Boolean(record?.pending),
+    };
+  }
+
+  async beginMaintenance(kind, input, apply) {
+    const request = maintenanceRequest(input);
+    const requestFingerprint = await sha256Hex(canonicalJSONBytes({
+      schema_version: MAINTENANCE_SCHEMA,
+      kind,
+      ...request,
+    }));
+    await this.assertMaintenanceCanStart(apply);
+    const prior = await this.storage.get(
+      REALM_EMAIL_ALIAS_JOURNAL_LAST_MAINTENANCE_KEY,
+    );
+    if (prior?.schema_version === MAINTENANCE_SCHEMA &&
+        prior.idempotency_key === request.idempotency_key &&
+        (prior.kind !== kind ||
+          prior.request_fingerprint !== requestFingerprint)) {
+      fail("journal maintenance idempotency key was reused with changed input",
+        "realm_email_alias_journal_idempotency_conflict");
+    }
+    if (prior?.schema_version === MAINTENANCE_SCHEMA &&
+        prior.kind === kind &&
+        prior.idempotency_key === request.idempotency_key &&
+        prior.request_fingerprint === requestFingerprint) {
+      return { ...prior, finalized: true };
+    }
+    const existing = await this.storage.get(
+      REALM_EMAIL_ALIAS_JOURNAL_BOOTSTRAP_KEY,
+    );
+    if (existing) {
+      if (existing.schema_version !== MAINTENANCE_SCHEMA ||
+          existing.kind !== kind ||
+          existing.idempotency_key !== request.idempotency_key ||
+          existing.request_fingerprint !== requestFingerprint) {
+        fail("another realm email alias journal maintenance operation is active",
+          "realm_email_alias_journal_write_frozen");
+      }
+      return existing;
+    }
+
+    const [head, meta] = await Promise.all([
+      this.storage.get(REALM_EMAIL_ALIAS_JOURNAL_META_KEY),
+      this.storage.get("meta"),
+    ]);
+    if (!meta || !Number.isSafeInteger(meta.registry_revision) ||
+        !Number.isSafeInteger(meta.audit_sequence)) {
+      fail("realm email alias authority meta is unavailable for maintenance",
+        "realm_email_alias_journal_fence_mismatch");
+    }
+    if (kind === "bootstrap" && head) {
+      fail("realm email alias authority journal is already bootstrapped",
+        "realm_email_alias_journal_already_bootstrapped");
+    }
+    if (kind === "checkpoint" && !validHead(head)) {
+      fail("realm email alias authority journal is not bootstrapped",
+        "realm_email_alias_journal_bootstrap_required");
+    }
+    const streamID = kind === "checkpoint"
+      ? head.stream_id
+      : configuredStreamID(this.env) ?? this.newStreamID();
+    if (!STREAM_ID_PATTERN.test(streamID)) {
+      fail("realm email alias authority stream id is invalid",
+        "realm_email_alias_journal_configuration_invalid");
+    }
+    const now = this.now().toISOString();
+    const maintenance = {
+      schema_version: MAINTENANCE_SCHEMA,
+      kind,
+      phase: "scan",
+      stream_id: streamID,
+      actor: request.actor,
+      reason: request.reason,
+      idempotency_key: request.idempotency_key,
+      request_fingerprint: requestFingerprint,
+      source_head: kind === "checkpoint" ? clone(head) : null,
+      head: kind === "checkpoint"
+        ? clone(head)
+        : {
+          schema_version: LOCAL_SCHEMA,
+          stream_id: streamID,
+          sequence: 0,
+          hash: REALM_EMAIL_ALIAS_AUTHORITY_JOURNAL_GENESIS_HASH,
+          authority_epoch: 1,
+          registry_revision: meta.registry_revision,
+          audit_sequence: meta.audit_sequence,
+          updated_at: now,
+        },
+      registry_revision: meta.registry_revision,
+      audit_sequence: meta.audit_sequence,
+      cursor: null,
+      authority_keys: 0,
+      scanned_keys: 0,
+      rows_hash: await initialRowsHash(),
+      pending: null,
+      created_at: now,
+      updated_at: now,
+    };
+    // This local record is the global authority-write freeze. The registry's
+    // single journal lane must serialize this write with commit().
+    await this.localApply([
+      [REALM_EMAIL_ALIAS_JOURNAL_BOOTSTRAP_KEY, maintenance],
+    ], [], apply);
+    return maintenance;
+  }
+
+  async stageMaintenanceEntry(record, built, next, apply) {
+    const staged = {
+      ...record,
+      pending: {
+        entry: built.entry,
+        next,
+      },
+      updated_at: this.now().toISOString(),
+    };
+    await this.localApply([
+      [REALM_EMAIL_ALIAS_JOURNAL_BOOTSTRAP_KEY, staged],
+    ], [], apply);
+    return staged;
+  }
+
+  async flushMaintenanceEntry(record, apply) {
+    let built;
+    try {
+      built = await validateRealmEmailAliasJournalEntry(record.pending.entry, {
+        stream_id: record.head.stream_id,
+        sequence: record.head.sequence + 1,
+        previous_hash: record.head.hash,
+        authority_epoch: record.head.authority_epoch,
+      });
+      await appendRealmEmailAliasJournalEntry(this.bucket(), built);
+      // This hook models a process death after the create-only R2 write and
+      // before durable local progress. A retry must append identical bytes.
+      await this.afterJournalAppend(built.entry);
+    } catch (error) {
+      throw journalError(error);
+    }
+    const advanced = {
+      ...record,
+      ...clone(record.pending.next),
+      head: headFromEntry(built.entry),
+      pending: null,
+      updated_at: this.now().toISOString(),
+    };
+    await this.localApply([
+      [REALM_EMAIL_ALIAS_JOURNAL_BOOTSTRAP_KEY, advanced],
+    ], [], apply);
+    return advanced;
+  }
+
+  async buildSnapshotEntry(record, snapshot) {
+    const afterImage = validateRealmEmailAliasAuthorityAfterImage({
+      puts: snapshot.puts,
+      deletes: [],
+    });
+    const sequence = record.head.sequence + 1;
+    return buildRealmEmailAliasJournalEntry({
+      stream_id: record.stream_id,
+      kind: "bootstrap",
+      authority_epoch: record.head.authority_epoch,
+      sequence,
+      previous_hash: record.head.hash,
+      registry_revision: record.registry_revision,
+      audit_sequence: record.audit_sequence,
+      occurred_at: this.now().toISOString(),
+      operation_id: `bootstrap:${sequence}`,
+      operation_fingerprint: await sha256Hex(canonicalJSONBytes(afterImage)),
+      actor: record.actor,
+      action: "registry.authority.bootstrap_page",
+      target: "realm-email-alias-registry",
+      metadata: {
+        schema_version: MAINTENANCE_SCHEMA,
+        page_authority_keys: snapshot.puts.length,
+        authority_keys_after: snapshot.authority_keys,
+      },
+      after_image: afterImage,
+    });
+  }
+
+  async buildCheckpointEntry(record, stateDigest) {
+    const sequence = record.head.sequence + 1;
+    const metadata = {
+      schema_version: CHECKPOINT_SCHEMA,
+      maintenance_kind: record.kind,
+      authority_digest: stateDigest,
+      authority_keys: record.authority_keys,
+      source_head: {
+        sequence: record.head.sequence,
+        hash: record.head.hash,
+        authority_epoch: record.head.authority_epoch,
+      },
+      reason: record.reason,
+    };
+    return buildRealmEmailAliasJournalEntry({
+      stream_id: record.stream_id,
+      kind: "checkpoint",
+      authority_epoch: record.head.authority_epoch,
+      sequence,
+      previous_hash: record.head.hash,
+      registry_revision: record.registry_revision,
+      audit_sequence: record.audit_sequence,
+      occurred_at: this.now().toISOString(),
+      operation_id: `checkpoint:${sequence}`,
+      operation_fingerprint: await sha256Hex(canonicalJSONBytes(metadata)),
+      actor: record.actor,
+      action: "registry.authority.checkpointed",
+      target: "realm-email-alias-registry",
+      metadata,
+      after_image: { puts: [], deletes: [] },
+    });
+  }
+
+  async advanceMaintenance(record, apply) {
+    if (record.finalized === true) {
+      return clone(record.result);
+    }
+    if (record.pending) {
+      record = await this.flushMaintenanceEntry(record, apply);
+      return this.maintenanceResult(record);
+    }
+    if (record.phase === "complete") {
+      const completedHead = clone(record.head);
+      const result = this.maintenanceResult(record, true, completedHead);
+      const completion = {
+        schema_version: MAINTENANCE_SCHEMA,
+        kind: record.kind,
+        actor: record.actor,
+        reason: record.reason,
+        idempotency_key: record.idempotency_key,
+        request_fingerprint: record.request_fingerprint,
+        authority_keys: record.authority_keys,
+        scanned_keys: record.scanned_keys,
+        state_digest: record.state_digest,
+        head: completedHead,
+        result,
+        completed_at: this.now().toISOString(),
+      };
+      await this.localApply([
+        [REALM_EMAIL_ALIAS_JOURNAL_META_KEY, completedHead],
+        [REALM_EMAIL_ALIAS_JOURNAL_LAST_MAINTENANCE_KEY, completion],
+      ], [REALM_EMAIL_ALIAS_JOURNAL_BOOTSTRAP_KEY], apply);
+      await this.afterMaintenanceFinalize(result);
+      return result;
+    }
+    if (record.phase === "scan") {
+      const snapshot = await scanSnapshotPage(this.storage, record);
+      const next = {
+        cursor: snapshot.cursor,
+        authority_keys: snapshot.authority_keys,
+        scanned_keys: snapshot.scanned_keys,
+        rows_hash: snapshot.rows_hash,
+        phase: snapshot.complete ? "checkpoint" : "scan",
+      };
+      if (record.kind === "bootstrap" && snapshot.puts.length > 0) {
+        const built = await this.buildSnapshotEntry(record, snapshot);
+        const staged = await this.stageMaintenanceEntry(
+          record,
+          built,
+          next,
+          apply,
+        );
+        const advanced = await this.flushMaintenanceEntry(staged, apply);
+        return this.maintenanceResult(advanced);
+      }
+      const advanced = {
+        ...record,
+        ...next,
+        updated_at: this.now().toISOString(),
+      };
+      await this.localApply([
+        [REALM_EMAIL_ALIAS_JOURNAL_BOOTSTRAP_KEY, advanced],
+      ], [], apply);
+      return this.maintenanceResult(advanced);
+    }
+    if (record.phase === "checkpoint") {
+      const digest = await finishRowsDigest(
+        record.rows_hash,
+        record.authority_keys,
+      );
+      const exact = (await readStorageState(this.storage)).authority;
+      const validation = validateRealmEmailAliasRecoveredState(exact, {
+        expected_registry_revision: record.registry_revision,
+        expected_audit_sequence: record.audit_sequence,
+      });
+      const exactDigest = await realmEmailAliasAuthorityStateDigest(exact);
+      if (validation.authority_keys !== record.authority_keys ||
+          exactDigest !== digest) {
+        fail("realm email alias authority changed while writes were frozen",
+          "realm_email_alias_journal_fence_mismatch");
+      }
+      const built = await this.buildCheckpointEntry(record, digest);
+      const staged = await this.stageMaintenanceEntry(record, built, {
+        phase: "complete",
+        state_digest: digest,
+      }, apply);
+      const advanced = await this.flushMaintenanceEntry(staged, apply);
+      return this.maintenanceResult(advanced);
+    }
+    fail("realm email alias journal maintenance state is invalid",
+      "realm_email_alias_journal_maintenance_invalid");
+  }
+
+  async bootstrap(input, apply = null) {
+    const record = await this.beginMaintenance("bootstrap", input, apply);
+    return this.advanceMaintenance(record, apply);
+  }
+
+  async checkpoint(input, apply = null) {
+    const record = await this.beginMaintenance("checkpoint", input, apply);
+    return this.advanceMaintenance(record, apply);
+  }
+
+  async startRecovery(input, apply = null) {
+    const request = recoveryRequest(input);
+    const fingerprint = await sha256Hex(canonicalJSONBytes(request));
+    const existing = await this.storage.get(REALM_EMAIL_ALIAS_RECOVERY_KEY);
+    if (existing) {
+      if (existing.schema_version !== RECOVERY_SCHEMA ||
+          existing.idempotency_key !== request.idempotency_key ||
+          existing.fingerprint !== fingerprint) {
+        fail("recovery target is already bound to another recovery",
+          "realm_email_alias_recovery_target_not_empty");
+      }
+      return recoveryPublic(existing);
+    }
+    const first = await this.storage.list({ limit: 1 });
+    if (mapRows(first).length !== 0) {
+      fail("realm email alias recovery target must be empty",
+        "realm_email_alias_recovery_target_not_empty");
+    }
+    const now = this.now().toISOString();
+    const record = {
+      schema_version: RECOVERY_SCHEMA,
+      recovery_id: request.recovery_id,
+      source_stream_id: request.source_stream_id,
+      expected_head: request.expected_head,
+      active_object_name: request.active_object_name,
+      target_object_name: request.target_object_name,
+      actor: request.actor,
+      reason: request.reason,
+      idempotency_key: request.idempotency_key,
+      fingerprint,
+      phase: "replay",
+      replay_head: {
+        sequence: 0,
+        hash: REALM_EMAIL_ALIAS_AUTHORITY_JOURNAL_GENESIS_HASH,
+        authority_epoch: null,
+        registry_revision: 0,
+        audit_sequence: 0,
+      },
+      authority_keys: 0,
+      derived_keys: 0,
+      state_digest: null,
+      checkpoint: null,
+      derived_cursor: null,
+      created_at: now,
+      updated_at: now,
+    };
+    await this.localApply([[REALM_EMAIL_ALIAS_RECOVERY_KEY, record]], [], apply);
+    return recoveryPublic(record);
+  }
+
+  async recoveryStatus(recoveryID = null) {
+    const record = await this.storage.get(REALM_EMAIL_ALIAS_RECOVERY_KEY);
+    if (!record || (recoveryID && record.recovery_id !== recoveryID)) return null;
+    return recoveryPublic(record);
+  }
+
+  validateRecoveryAction(input, record) {
+    if (!record || record.schema_version !== RECOVERY_SCHEMA ||
+        !validActor(input?.actor) ||
+        input?.recovery_id !== record.recovery_id ||
+        !IDEMPOTENCY_KEY_PATTERN.test(input?.idempotency_key ?? "")) {
+      fail("realm email alias recovery action is invalid",
+        "realm_email_alias_recovery_request_invalid");
+    }
+  }
+
+  async recoveryActionContext(action, input, record) {
+    this.validateRecoveryAction(input, record);
+    const fingerprint = await sha256Hex(canonicalJSONBytes({
+      schema_version: RECOVERY_SCHEMA,
+      action,
+      actor: input.actor,
+      recovery_id: input.recovery_id,
+      idempotency_key: input.idempotency_key,
+    }));
+    const prior = record.last_action;
+    if (prior?.idempotency_key === input.idempotency_key) {
+      if (prior.action !== action || prior.fingerprint !== fingerprint) {
+        fail("recovery idempotency key was reused with changed input",
+          "realm_email_alias_recovery_idempotency_conflict");
+      }
+      if (prior.error) {
+        fail(prior.error.message, prior.error.code);
+      }
+      return { replay: clone(prior.result) };
+    }
+    return {
+      action,
+      idempotency_key: input.idempotency_key,
+      fingerprint,
+      before: {
+        phase: record.phase,
+        replay_head: clone(record.replay_head),
+        derived_cursor: record.derived_cursor ?? null,
+      },
+    };
+  }
+
+  withRecoveryReceipt(record, context, result, error = null) {
+    return {
+      ...record,
+      last_action: {
+        action: context.action,
+        idempotency_key: context.idempotency_key,
+        fingerprint: context.fingerprint,
+        before: context.before,
+        after: {
+          phase: record.phase,
+          replay_head: clone(record.replay_head),
+          derived_cursor: record.derived_cursor ?? null,
+        },
+        result: clone(result),
+        error: error
+          ? { code: error.code, message: error.message }
+          : null,
+      },
+    };
+  }
+
+  async failRecovery(record, error, apply, actionContext = null) {
+    let failed = {
+      ...record,
+      phase: "failed",
+      failure_code: error?.code ?? "realm_email_alias_recovery_failed",
+      updated_at: this.now().toISOString(),
+    };
+    if (actionContext) {
+      failed = this.withRecoveryReceipt(
+        failed,
+        actionContext,
+        null,
+        error,
+      );
+    }
+    await this.localApply([[REALM_EMAIL_ALIAS_RECOVERY_KEY, failed]], [], apply);
+    return failed;
+  }
+
+  async readJournalEntry(streamID, sequence) {
+    let object;
+    try {
+      object = await this.bucket().get(
+        realmEmailAliasJournalEntryKey(streamID, sequence),
+      );
+    } catch {
+      fail("realm email alias authority journal is unavailable",
+        "realm_email_alias_journal_unavailable");
+    }
+    if (!object) {
+      fail("realm email alias authority journal has a sequence gap",
+        "realm_email_alias_journal_gap");
+    }
+    let bytes;
+    try {
+      bytes = new Uint8Array(await object.arrayBuffer());
+      if (bytes.byteLength > JOURNAL_ENTRY_MAX_BYTES) {
+        fail("realm email alias authority journal entry is too large",
+          "realm_email_alias_journal_schema_invalid");
+      }
+      return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    } catch (error) {
+      if (error instanceof RealmEmailAliasJournalRuntimeError) throw error;
+      fail("realm email alias authority journal entry is unreadable",
+        "realm_email_alias_journal_schema_invalid");
+    }
+  }
+
+  checkpointMetadata(entry) {
+    const metadata = entry?.metadata;
+    if (entry?.kind !== "checkpoint" ||
+        metadata?.schema_version !== CHECKPOINT_SCHEMA ||
+        !["bootstrap", "checkpoint"].includes(metadata?.maintenance_kind) ||
+        !SHA256_PATTERN.test(metadata?.authority_digest ?? "") ||
+        !Number.isSafeInteger(metadata?.authority_keys) ||
+        metadata.authority_keys < 1 ||
+        metadata.authority_keys > MAX_AUTHORITY_KEYS ||
+        !Number.isSafeInteger(metadata?.source_head?.sequence) ||
+        metadata.source_head.sequence < 0 ||
+        !SHA256_PATTERN.test(metadata?.source_head?.hash ?? "") ||
+        !Number.isSafeInteger(metadata?.source_head?.authority_epoch) ||
+        metadata.source_head.authority_epoch < 1 ||
+        metadata.source_head.sequence !== entry.sequence - 1 ||
+        metadata.source_head.hash !== entry.previous_hash ||
+        metadata.source_head.authority_epoch !== entry.authority_epoch) {
+      fail("recovery expected head is not a complete authority checkpoint",
+        "realm_email_alias_recovery_checkpoint_invalid");
+    }
+    return clone(metadata);
+  }
+
+  async advanceRecovery(input, apply = null) {
+    let record = await this.storage.get(REALM_EMAIL_ALIAS_RECOVERY_KEY);
+    const actionContext = await this.recoveryActionContext(
+      "advance",
+      input,
+      record,
+    );
+    if (actionContext.replay) return actionContext.replay;
+    if (["sealed", "failed"].includes(record.phase)) {
+      return recoveryPublic(record);
+    }
+    if (record.phase !== "replay") {
+      return recoveryPublic(record);
+    }
+    const sequence = record.replay_head.sequence + 1;
+    if (sequence > record.expected_head.sequence) {
+      fail("realm email alias recovery replay advanced past its exact head",
+        "realm_email_alias_journal_fence_mismatch");
+    }
+    let rawEntry;
+    let state;
+    let replayed;
+    try {
+      rawEntry = await this.readJournalEntry(record.source_stream_id, sequence);
+      state = (await readStorageState(this.storage)).authority;
+      replayed = await replayRealmEmailAliasJournalPage([rawEntry], {
+        stream_id: record.source_stream_id,
+        state,
+        head: record.replay_head,
+        max_entries: 1,
+      });
+      if (replayed.state.size > MAX_AUTHORITY_KEYS) {
+        fail("recovered realm email alias authority exceeds 10000 keys",
+          "realm_email_alias_journal_authority_limit_exceeded");
+      }
+      if (sequence === record.expected_head.sequence &&
+          replayed.head.hash !== record.expected_head.hash) {
+        fail("recovery journal head does not match the expected hash",
+          "realm_email_alias_journal_fence_mismatch");
+      }
+    } catch (error) {
+      const converted = journalError(error);
+      if (converted.code !== "realm_email_alias_journal_unavailable") {
+        await this.failRecovery(record, converted, apply, actionContext);
+      }
+      throw converted;
+    }
+
+    const puts = [];
+    const deletes = [];
+    for (const [key, value] of replayed.state) {
+      if (!state.has(key) || canonicalJSONString(state.get(key)) !==
+          canonicalJSONString(value)) {
+        puts.push([key, value]);
+      }
+    }
+    for (const key of state.keys()) {
+      if (!replayed.state.has(key)) deletes.push(key);
+    }
+    const next = {
+      ...record,
+      replay_head: replayed.head,
+      authority_keys: replayed.state.size,
+      updated_at: this.now().toISOString(),
+    };
+    if (sequence === record.expected_head.sequence) {
+      try {
+        const checkpoint = this.checkpointMetadata(rawEntry);
+        const validation = validateRealmEmailAliasRecoveredState(
+          replayed.state,
+          {
+            expected_registry_revision: replayed.head.registry_revision,
+            expected_audit_sequence: replayed.head.audit_sequence,
+          },
+        );
+        const digest = await realmEmailAliasAuthorityStateDigest(replayed.state);
+        if (checkpoint.authority_keys !== validation.authority_keys ||
+            checkpoint.authority_digest !== digest) {
+          fail("recovered authority digest does not match the checkpoint",
+            "realm_email_alias_recovery_digest_mismatch");
+        }
+        next.phase = "replayed";
+        next.checkpoint = checkpoint;
+        next.state_digest = digest;
+      } catch (error) {
+        const converted = journalError(error);
+        await this.failRecovery(record, converted, apply, actionContext);
+        throw converted;
+      }
+    }
+    const result = recoveryPublic(next);
+    const receipted = this.withRecoveryReceipt(next, actionContext, result);
+    puts.push([REALM_EMAIL_ALIAS_RECOVERY_KEY, receipted]);
+    await this.localApply(puts, deletes, apply);
+    await this.afterRecoveryAction(result);
+    return result;
+  }
+
+  async verifyRecovery(input, apply = null) {
+    let record = await this.storage.get(REALM_EMAIL_ALIAS_RECOVERY_KEY);
+    const actionContext = await this.recoveryActionContext(
+      "verify",
+      input,
+      record,
+    );
+    if (actionContext.replay) return actionContext.replay;
+    if (["sealed", "failed"].includes(record.phase)) {
+      return recoveryPublic(record);
+    }
+    if (!["replayed", "rebuild"].includes(record.phase)) {
+      fail("realm email alias recovery replay is incomplete",
+        "realm_email_alias_recovery_incomplete");
+    }
+    let state;
+    let expectedDerived;
+    try {
+      state = await readStorageState(this.storage);
+      const validation = validateRealmEmailAliasRecoveredState(
+        state.authority,
+        {
+          expected_registry_revision: record.replay_head.registry_revision,
+          expected_audit_sequence: record.replay_head.audit_sequence,
+        },
+      );
+      const digest = await realmEmailAliasAuthorityStateDigest(state.authority);
+      if (validation.authority_keys !== record.checkpoint.authority_keys ||
+          digest !== record.checkpoint.authority_digest ||
+          digest !== record.state_digest) {
+        fail("recovered authority changed after replay verification",
+          "realm_email_alias_recovery_digest_mismatch");
+      }
+      expectedDerived = rebuildRealmEmailAliasDerivedState(state.authority, {
+        retry_at_ms: Date.parse(record.created_at),
+        updated_at: record.created_at,
+      });
+      for (const [key, value] of state.derived) {
+        if (!expectedDerived.has(key) ||
+            canonicalJSONString(expectedDerived.get(key)) !==
+              canonicalJSONString(value)) {
+          fail("recovery target contains unexpected derived state",
+            "realm_email_alias_recovery_collision");
+        }
+      }
+      for (const key of state.local.keys()) {
+        if (key !== REALM_EMAIL_ALIAS_RECOVERY_KEY) {
+          fail("recovery target contains unexpected local state",
+            "realm_email_alias_recovery_collision");
+        }
+      }
+    } catch (error) {
+      const converted = journalError(error);
+      await this.failRecovery(record, converted, apply, actionContext);
+      throw converted;
+    }
+
+    const remaining = [...expectedDerived]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .filter(([key]) => record.derived_cursor === null ||
+        key > record.derived_cursor);
+    if (remaining.length > 0) {
+      const page = remaining.slice(0, DERIVED_REBUILD_PAGE_LIMIT);
+      const next = {
+        ...record,
+        phase: "rebuild",
+        derived_cursor: page.at(-1)[0],
+        derived_keys: Math.min(
+          expectedDerived.size,
+          (record.derived_keys ?? 0) + page.length,
+        ),
+        updated_at: this.now().toISOString(),
+      };
+      const result = recoveryPublic(next);
+      const receipted = this.withRecoveryReceipt(next, actionContext, result);
+      await this.localApply([
+        ...page,
+        [REALM_EMAIL_ALIAS_RECOVERY_KEY, receipted],
+      ], [], apply);
+      await this.afterRecoveryAction(result);
+      return result;
+    }
+
+    if (state.derived.size !== expectedDerived.size) {
+      const error = new RealmEmailAliasJournalRuntimeError(
+        "recovery derived-state rebuild is incomplete",
+        "realm_email_alias_recovery_incomplete",
+      );
+      await this.failRecovery(record, error, apply, actionContext);
+      throw error;
+    }
+    const now = this.now().toISOString();
+    const sealed = {
+      ...record,
+      phase: "sealed",
+      derived_keys: expectedDerived.size,
+      sealed_at: now,
+      updated_at: now,
+    };
+    const journalHead = {
+      schema_version: LOCAL_SCHEMA,
+      stream_id: record.source_stream_id,
+      sequence: record.replay_head.sequence,
+      hash: record.replay_head.hash,
+      authority_epoch: record.replay_head.authority_epoch,
+      registry_revision: record.replay_head.registry_revision,
+      audit_sequence: record.replay_head.audit_sequence,
+      updated_at: now,
+    };
+    const result = recoveryPublic(sealed);
+    const receipted = this.withRecoveryReceipt(
+      sealed,
+      actionContext,
+      result,
+    );
+    await this.localApply([
+      [REALM_EMAIL_ALIAS_JOURNAL_META_KEY, journalHead],
+      [REALM_EMAIL_ALIAS_RECOVERY_KEY, receipted],
+    ], [], apply);
+    await this.afterRecoveryAction(result);
+    return result;
+  }
+}

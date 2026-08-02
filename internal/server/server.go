@@ -309,6 +309,25 @@ type Config struct {
 		ctx context.Context,
 		accountID string,
 	) ([]AgentEmailRealmAlias, error)
+	GetRealmEmailRouteLifecycle func(
+		ctx context.Context,
+		accountID, realmID string,
+	) (RealmEmailRouteLifecycle, error)
+	ListRealmEmailRouteLifecycles func(
+		ctx context.Context,
+		accountID, cursor string,
+		limit int,
+	) (RealmEmailRouteLifecyclePage, error)
+	PrepareRealmEmailRouteRetirement func(
+		ctx context.Context,
+		accountID string,
+		in RealmEmailRouteRetirementRequest,
+	) (RealmEmailRouteLifecycle, error)
+	CommitRealmEmailRouteRetirement func(
+		ctx context.Context,
+		accountID string,
+		in RealmEmailRouteRetirementRequest,
+	) (RealmEmailRouteLifecycle, error)
 
 	// PlanInfo, when set, surfaces the deployment account's applied plan in
 	// GET /v1/capabilities: the plan label on the account block, the limits
@@ -1492,6 +1511,11 @@ type Realm struct {
 // it (e.g. for a duplicate realm name) without coupling the server to the store.
 var ErrConflict = errors.New("conflict")
 
+// ErrRealmEmailRouteRetirementRequired means an ordinary operator DELETE hit
+// a managed realm.  The control plane must first remove the external route and
+// commit its exact cell fence.
+var ErrRealmEmailRouteRetirementRequired = errors.New("realm email route retirement is required")
+
 // ErrAccountPending distinguishes the only reap-eligible suspend refusal from
 // an exact-epoch lifecycle conflict. The Worker must never interpret a
 // mismatched evacuation id as permission to reap.
@@ -1873,11 +1897,10 @@ func apiMux(cfg Config) http.Handler {
 		}
 		if cfg.GetPlacementPolicySystem != nil || cfg.GetAccountPlan != nil ||
 			cfg.GetAgentEmailRealmAlias != nil || cfg.GetAgentEmailRealmAliasTarget != nil ||
-			cfg.ListAgentEmailRealmAliases != nil {
-			mux.HandleFunc("GET /v1/accounts/", accountSystemGetHandler(
-				cfg.ProvisionToken, cfg.GetPlacementPolicySystem, cfg.GetAccountPlan,
-				cfg.GetAgentEmailRealmAlias, cfg.GetAgentEmailRealmAliasTarget,
-				cfg.ListAgentEmailRealmAliases))
+			cfg.ListAgentEmailRealmAliases != nil ||
+			cfg.GetRealmEmailRouteLifecycle != nil ||
+			cfg.ListRealmEmailRouteLifecycles != nil {
+			mux.HandleFunc("GET /v1/accounts/", accountSystemGetHandler(cfg))
 		}
 		if cfg.SetPlacementPolicySystem != nil {
 			mux.HandleFunc("PATCH /v1/accounts/", accountPlacementPolicySystemSetHandler(cfg.ProvisionToken, cfg.SetPlacementPolicySystem))
@@ -1893,7 +1916,9 @@ func apiMux(cfg Config) http.Handler {
 			cfg.StreamAccountExport != nil ||
 			cfg.ImportAccountArchive != nil ||
 			cfg.ResumeAccountSystem != nil || cfg.LogAccountEvent != nil ||
-			cfg.SetAccountPlan != nil || cfg.ApplyAgentEmailRealmAlias != nil)
+			cfg.SetAccountPlan != nil || cfg.ApplyAgentEmailRealmAlias != nil ||
+			cfg.PrepareRealmEmailRouteRetirement != nil ||
+			cfg.CommitRealmEmailRouteRetirement != nil)
 	hasAccountBackup := cfg.BackupToken != "" &&
 		(cfg.StreamAccountBackup != nil ||
 			(cfg.BackupValidationEnabled &&
@@ -3515,22 +3540,15 @@ func provisionAccountHandler(
 	}
 }
 
-func accountSystemGetHandler(
-	provisionToken string,
-	getPlacement func(ctx context.Context, accountID string) (placement.Policy, error),
-	getPlan func(ctx context.Context, accountID string) (PlanSnapshotRecord, error),
-	getRealmAlias func(ctx context.Context, accountID, claimID string) (AgentEmailRealmAlias, error),
-	getRealmAliasTarget func(ctx context.Context, accountID, realmID string) (AgentEmailRealmAliasTarget, error),
-	listRealmAliases func(ctx context.Context, accountID string) ([]AgentEmailRealmAlias, error),
-) http.HandlerFunc {
+func accountSystemGetHandler(cfg Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tok, ok := bearerToken(r)
-		if !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(provisionToken)) != 1 {
+		if !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(cfg.ProvisionToken)) != 1 {
 			writeJSONError(w, http.StatusUnauthorized, "invalid provision token")
 			return
 		}
-		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "plan"); ok && getPlan != nil {
-			snapshot, err := getPlan(r.Context(), accountID)
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "plan"); ok && cfg.GetAccountPlan != nil {
+			snapshot, err := cfg.GetAccountPlan(r.Context(), accountID)
 			switch {
 			case errors.Is(err, ErrNotFound):
 				writeJSONError(w, http.StatusNotFound, "account not found")
@@ -3543,13 +3561,13 @@ func accountSystemGetHandler(
 			_ = json.NewEncoder(w).Encode(snapshot)
 			return
 		}
-		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "email-realm-alias"); ok && getRealmAlias != nil {
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "email-realm-alias"); ok && cfg.GetAgentEmailRealmAlias != nil {
 			claimID := strings.TrimSpace(r.URL.Query().Get("claim_id"))
 			if claimID == "" {
 				writeJSONError(w, http.StatusBadRequest, "claim_id is required")
 				return
 			}
-			alias, err := getRealmAlias(r.Context(), accountID, claimID)
+			alias, err := cfg.GetAgentEmailRealmAlias(r.Context(), accountID, claimID)
 			switch {
 			case errors.Is(err, ErrBadInput):
 				writeJSONError(w, http.StatusBadRequest, "invalid realm alias lookup")
@@ -3565,13 +3583,13 @@ func accountSystemGetHandler(
 			_ = json.NewEncoder(w).Encode(alias)
 			return
 		}
-		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "email-realm-alias-target"); ok && getRealmAliasTarget != nil {
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "email-realm-alias-target"); ok && cfg.GetAgentEmailRealmAliasTarget != nil {
 			realmID := strings.TrimSpace(r.URL.Query().Get("realm_id"))
 			if realmID == "" {
 				writeJSONError(w, http.StatusBadRequest, "realm_id is required")
 				return
 			}
-			target, err := getRealmAliasTarget(r.Context(), accountID, realmID)
+			target, err := cfg.GetAgentEmailRealmAliasTarget(r.Context(), accountID, realmID)
 			switch {
 			case errors.Is(err, ErrBadInput):
 				writeJSONError(w, http.StatusBadRequest, "invalid realm alias target")
@@ -3587,8 +3605,8 @@ func accountSystemGetHandler(
 			_ = json.NewEncoder(w).Encode(target)
 			return
 		}
-		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "email-realm-aliases"); ok && listRealmAliases != nil {
-			aliases, err := listRealmAliases(r.Context(), accountID)
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "email-realm-aliases"); ok && cfg.ListAgentEmailRealmAliases != nil {
+			aliases, err := cfg.ListAgentEmailRealmAliases(r.Context(), accountID)
 			switch {
 			case errors.Is(err, ErrBadInput):
 				writeJSONError(w, http.StatusBadRequest, "invalid realm alias account")
@@ -3611,14 +3629,76 @@ func accountSystemGetHandler(
 			})
 			return
 		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "email-realm-route"); ok && cfg.GetRealmEmailRouteLifecycle != nil {
+			realmID := strings.TrimSpace(r.URL.Query().Get("realm_id"))
+			if !validRealmEmailRouteRealmID(realmID) {
+				writeJSONError(w, http.StatusBadRequest, "realm_id is invalid")
+				return
+			}
+			route, err := cfg.GetRealmEmailRouteLifecycle(r.Context(), accountID, realmID)
+			switch {
+			case errors.Is(err, ErrBadInput):
+				writeJSONError(w, http.StatusBadRequest, "invalid realm email route lookup")
+				return
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "realm email route not found")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not read realm email route")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(route)
+			return
+		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "email-realm-routes"); ok && cfg.ListRealmEmailRouteLifecycles != nil {
+			limit := 100
+			if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+				parsed, err := strconv.Atoi(raw)
+				if err != nil || parsed < 1 || parsed > 100 {
+					writeJSONError(w, http.StatusBadRequest, "limit must be between 1 and 100")
+					return
+				}
+				limit = parsed
+			}
+			page, err := cfg.ListRealmEmailRouteLifecycles(
+				r.Context(), accountID, r.URL.Query().Get("cursor"), limit,
+			)
+			switch {
+			case errors.Is(err, ErrBadInput):
+				writeJSONError(w, http.StatusBadRequest, "invalid realm email route inventory request")
+				return
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "account not found")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not list realm email routes")
+				return
+			}
+			if page.Routes == nil {
+				page.Routes = []RealmEmailRouteLifecycle{}
+			}
+			var nextCursor any
+			if page.NextCursor != "" {
+				nextCursor = page.NextCursor
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version": "witself.v0",
+				"account_id":     accountID,
+				"routes":         page.Routes,
+				"next_cursor":    nextCursor,
+			})
+			return
+		}
 		accountID, ok := pathActionID(
 			r.URL.Path, "/v1/accounts/", "placement-policy",
 		)
-		if !ok || getPlacement == nil {
+		if !ok || cfg.GetPlacementPolicySystem == nil {
 			writeJSONError(w, http.StatusNotFound, "not found")
 			return
 		}
-		policy, err := getPlacement(r.Context(), accountID)
+		policy, err := cfg.GetPlacementPolicySystem(r.Context(), accountID)
 		switch {
 		case errors.Is(err, ErrNotFound):
 			writeJSONError(w, http.StatusNotFound, "account not found")
@@ -3716,6 +3796,65 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 		tok, ok := bearerToken(r)
 		if !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(cfg.ProvisionToken)) != 1 {
 			writeJSONError(w, http.StatusUnauthorized, "invalid provision token")
+			return
+		}
+		prepareAccountID, prepareRouteRetirement := pathActionID(
+			r.URL.Path, "/v1/accounts/", "prepare-email-realm-route-retirement",
+		)
+		commitAccountID, commitRouteRetirement := pathActionID(
+			r.URL.Path, "/v1/accounts/", "commit-email-realm-route-retirement",
+		)
+		if (prepareRouteRetirement && cfg.PrepareRealmEmailRouteRetirement != nil) ||
+			(commitRouteRetirement && cfg.CommitRealmEmailRouteRetirement != nil) {
+			accountID := prepareAccountID
+			transition := cfg.PrepareRealmEmailRouteRetirement
+			verb := "prepare"
+			if commitRouteRetirement {
+				accountID = commitAccountID
+				transition = cfg.CommitRealmEmailRouteRetirement
+				verb = "commit"
+			}
+			var req RealmEmailRouteRetirementRequest
+			decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10))
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&req); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+				return
+			}
+			var extra any
+			if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+				writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+				return
+			}
+			req.RealmID = strings.TrimSpace(req.RealmID)
+			req.OperationID = strings.TrimSpace(req.OperationID)
+			validGenerationFence := req.ExpectedGeneration >= 1
+			if commitRouteRetirement {
+				validGenerationFence = req.ExpectedGeneration >= 2
+			}
+			if !validRealmEmailRouteRealmID(req.RealmID) ||
+				!validRealmEmailRouteOperationID(req.OperationID) ||
+				!validGenerationFence {
+				writeJSONError(w, http.StatusBadRequest, "invalid realm email route retirement fence")
+				return
+			}
+			route, err := transition(r.Context(), accountID, req)
+			switch {
+			case errors.Is(err, ErrBadInput):
+				writeJSONError(w, http.StatusBadRequest, "invalid realm email route retirement fence")
+				return
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "realm email route not found")
+				return
+			case errors.Is(err, ErrConflict):
+				writeJSONError(w, http.StatusConflict, "stale, conflicting, or nonempty realm email route retirement")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not "+verb+" realm email route retirement")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(route)
 			return
 		}
 		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "reap"); ok && cfg.ReapAccount != nil {
@@ -5057,6 +5196,9 @@ func deleteRealmHandler(auth AuthFunc, deleteRealm func(ctx context.Context, acc
 		case errors.Is(err, ErrNotFound):
 			writeJSONError(w, http.StatusNotFound, "realm not found")
 			return
+		case errors.Is(err, ErrRealmEmailRouteRetirementRequired):
+			writeJSONError(w, http.StatusConflict, "realm deletion requires managed email route retirement")
+			return
 		case errors.Is(err, ErrConflict):
 			writeJSONError(w, http.StatusConflict, "realm is not empty")
 			return
@@ -5445,6 +5587,35 @@ func validOperationID(value string) bool {
 			(ch >= 'A' && ch <= 'Z') ||
 			(ch >= '0' && ch <= '9') ||
 			ch == '_' || ch == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validRealmEmailRouteOperationID(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, ch := range value {
+		if (ch >= 'a' && ch <= 'z') ||
+			(ch >= 'A' && ch <= 'Z') ||
+			(ch >= '0' && ch <= '9') ||
+			ch == '_' || ch == '-' || ch == '.' || ch == ':' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validRealmEmailRouteRealmID(value string) bool {
+	if len(value) != len("realm_")+16 || !strings.HasPrefix(value, "realm_") {
+		return false
+	}
+	for _, ch := range value[len("realm_"):] {
+		if (ch >= 'a' && ch <= 'z') || (ch >= '2' && ch <= '7') {
 			continue
 		}
 		return false

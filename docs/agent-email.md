@@ -448,9 +448,16 @@ plan grace, and retirement are assignment states rather than request states.
 Restoring entitlement reactivates a plan-suspended alias without reinstalling a client.
 Activated aliases cannot move to another customer or realm. A rename is a new
 request followed by permanent retirement of the old alias. Account lifecycle
-operations suspend and republish alias routes under an exact durable fence;
-realm deletion remains activation-blocked until its canonical route is retired
-before the cell soft-delete. Custom customer domains
+operations suspend and republish alias routes under an exact durable fence.
+Managed realm close now uses a durable control-plane operation: it first proves
+that the realm has no live or pending aliases, prepares the exact cell
+generation (`live` to `closing`), publishes the permanent canonical-route
+tombstone, and only then commits the cell soft-delete (`closing` to `retired`).
+The operation id and generation make each phase replay-safe, and the retired
+cell row remains in inventory so a later backfill cannot resurrect its route.
+Direct managed cell deletion fails closed; portable self-hosted deployments
+retain direct empty-realm deletion and write the same terminal tombstone shape.
+Custom customer domains
 use this same label shape but remain a separate entitlement and verification
 lifecycle.
 
@@ -461,15 +468,24 @@ downgrading migration `0085` fails closed before any mutation whenever such a
 message exists. Alias claims alone do not block downgrade when no message has
 been delivered through them.
 
-The implementation ships behind the control-plane environment gate
+Alias creation ships behind the control-plane environment gate
 `CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED`, which is disabled unless its value is
 exactly `true`. The Email Worker has a second fleet-wide, alias-only gate,
 `REALM_EMAIL_ALIAS_DELIVERY_ENABLED`, which is also exact-`true` and default-off;
-canonical Realm ID delivery does not depend on that alias gate. While disabled,
+both alias gates remain off in release configuration. Canonical Realm ID
+inventory and delivery use three separate exact-`true`, default-off controls:
+`CP_REALM_EMAIL_CANONICAL_INVENTORY_ENABLED` starts the bounded control-plane
+inventory, `CP_REALM_EMAIL_CANONICAL_DELIVERY_ENABLED` permits that controller
+to publish applied routes for email-enabled accounts, and
+`REALM_EMAIL_CANONICAL_DELIVERY_ENABLED` is the independent Email Worker
+emergency gate. Inventory can safely converge suspended and retired records
+while either delivery gate is dark; a canonical route cannot deliver unless
+both canonical delivery gates are true. Canonical delivery never depends on
+either alias gate. While alias activation is disabled,
 customer requests, approval, internal assignment,
 and reactivation fail closed; read-only administration plus suspension,
-retirement, terminal customer/internal-provisioning abort, reserved-name management, and
-audit remain available. Do not enable
+retirement, terminal customer/internal-provisioning abort, reserved-name
+management, and audit remain available. Do not enable
 the gate until every release blocker is closed and acceptance-tested: (1) the
 managed domain has a verified catch-all or equivalent full-coverage SMTP route
 into the Email Worker; (2) account move, restore, archive, close, and realm
@@ -477,15 +493,25 @@ close explicitly reconcile, suspend, and republish canonical plus alias routes
 at the account lifecycle fence, so stale KV cannot route to an old cell; and
 (3) internal provisioning has authoritative realm prevalidation plus a
 deterministic terminal abort/tombstone path for a permanently rejected hidden
-intent. Account lifecycle fencing, authoritative preflight, and durable
-terminal recovery are implemented but not yet accepted for activation. Realm
-deletion still lacks its required control-plane canonical-route retirement.
-The global registry also needs a portable, append-only authority journal and
-tested empty-target recovery ceremony; its SQLite Durable Object point-in-time
-recovery is a short-window first line of defense, not sufficient protection for
-later tombstones and monotonic controller revisions. The request registry now
-has plan-independent technical queue ceilings of eight open requests per realm
-and 64 per account. `pending_review` and durable `provisioning` both consume an
+intent. Account lifecycle fencing, authoritative preflight, durable terminal
+recovery, canonical inventory, and exact realm-close retirement are now
+implemented, but production activation still requires explicit acceptance of
+the catch-all, full inventory convergence, and restore drill. The global
+registry now has a portable append-only authority journal and bounded
+empty-target recovery foundation. Each authority mutation is represented by a
+create-only, hash-chained R2 after-image before external projection success;
+bootstrap and checkpoint freeze authority writes while taking bounded pages.
+Recovery accepts only an exact journal head into a named empty Durable Object,
+replays and validates the chain, rebuilds derived indexes, compares the complete
+authority digest, and permanently seals the target. It never merges into the
+fixed `global` authority object and there is no cutover selector or endpoint.
+It does not change any activation gate automatically. A successful operator
+restore drill remains a hard activation prerequisite. Durable Object
+point-in-time recovery remains
+useful first aid, but is not the portable recovery contract. The request
+registry now has plan-independent technical queue ceilings of eight open
+requests per realm and 64 per account. `pending_review` and durable
+`provisioning` both consume an
 open slot; successful approval, rejection, or terminal abort releases it, while
 customer allocation remains counted until retirement. Exact membership-backed
 counters make create and ordinary approval O(1), including explicit-unlimited
@@ -518,11 +544,11 @@ accounting. Namespace IDs `2201` and `2202` were verified account-unique on
 2026-08-02, when only the control-plane recovery namespace `1001` was deployed;
 operators must repeat that account-wide preflight before first deployment or
 any namespace change.
-Keep both activation gates unset until those items are closed. The current
-exact-address pilot rules do not deliver arbitrary new aliases. Canonical
-routes for realms that never perform an alias operation also still require
-their existing literal route or a separate canonical-route
-provisioning/backfill workflow.
+Keep both alias gates and all three canonical gates unset until their respective
+acceptance steps are complete. The current exact-address pilot rules do not
+deliver arbitrary new aliases. The canonical inventory is the independent
+backfill path for realms that have never performed an alias operation, but it
+does no work while its default-off inventory gate is unset.
 
 **Agent local part (settled).** The agent-name-to-local-part rule must handle
 arbitrary input — the API accepts any non-empty string as an agent name; only

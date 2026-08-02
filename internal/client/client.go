@@ -489,6 +489,18 @@ type Realm struct {
 	Name string `json:"name"`
 }
 
+// RealmCloseResult is the control plane's durable managed-realm retirement
+// status. Complete=false means the exact operation is safely installed and an
+// alarm will continue it; replaying the same key advances or returns the same
+// terminal receipt.
+type RealmCloseResult struct {
+	SchemaVersion string `json:"schema_version"`
+	AccountID     string `json:"account_id"`
+	RealmID       string `json:"realm_id"`
+	Complete      bool   `json:"complete"`
+	Phase         string `json:"phase,omitempty"`
+}
+
 // CreateRealm creates a realm via POST {endpoint}/v1/realms.
 func CreateRealm(ctx context.Context, endpoint, token, name string) (*Realm, error) {
 	body, err := json.Marshal(map[string]string{"name": name})
@@ -518,6 +530,35 @@ func ListRealms(ctx context.Context, endpoint, token string) ([]Realm, error) {
 // DeleteRealm soft-deletes an empty realm via DELETE {endpoint}/v1/realms/{realm}.
 func DeleteRealm(ctx context.Context, endpoint, token, realmID string) error {
 	return doJSON(ctx, http.MethodDelete, realmsURL(endpoint)+"/"+realmID, token, nil, nil)
+}
+
+// CloseManagedRealm retires the canonical email route before the owning cell
+// soft-deletes the realm. Both 202 convergence and 200 completion are valid
+// responses; idempotencyKey must remain stable across retries.
+func CloseManagedRealm(
+	ctx context.Context,
+	controlPlane, token, accountID, realmID, idempotencyKey string,
+) (*RealmCloseResult, error) {
+	if strings.TrimSpace(idempotencyKey) == "" {
+		return nil, fmt.Errorf("realm close idempotency key is required")
+	}
+	body, err := json.Marshal(map[string]string{
+		"idempotency_key": idempotencyKey,
+	})
+	if err != nil {
+		return nil, err
+	}
+	requestURL := strings.TrimRight(controlPlane, "/") + "/v1/accounts/" +
+		neturl.PathEscape(accountID) + "/realms/" +
+		neturl.PathEscape(realmID) + ":close"
+	var out RealmCloseResult
+	if err := doJSON(ctx, http.MethodPost, requestURL, token, body, &out); err != nil {
+		return nil, err
+	}
+	if out.AccountID != accountID || out.RealmID != realmID {
+		return nil, fmt.Errorf("control plane returned a mismatched realm close receipt")
+	}
+	return &out, nil
 }
 
 func realmsURL(endpoint string) string {

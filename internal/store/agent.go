@@ -51,12 +51,15 @@ func (s *Store) CreateAgent(ctx context.Context, accountID, realmID, name string
 	// Resolve the realm BEFORE the plan gate: a bad realm id must stay a 404
 	// even when the account sits at its agent cap — a plan-limit refusal
 	// there would misdiagnose the failure and steer the caller toward an
-	// upgrade that cannot fix the request.
+	// upgrade that cannot fix the request. Reading the lifecycle through JSON
+	// keeps the current binary usable by historical migration tests before
+	// schema 0086; missing state is exactly the legacy live behavior.
 	var realmOK bool
 	if err := tx.QueryRow(ctx,
 		`SELECT EXISTS (
-		   SELECT 1 FROM realms
+		   SELECT 1 FROM realms r
 		   WHERE id = $1 AND account_id = $2 AND deleted_at IS NULL
+		     AND COALESCE(to_jsonb(r)->>'email_route_state', 'live') = 'live'
 		 )`, realmID, accountID).Scan(&realmOK); err != nil {
 		return Agent{}, fmt.Errorf("check realm: %w", err)
 	}
@@ -101,8 +104,9 @@ func (s *Store) CreateAgent(ctx context.Context, accountID, realmID, name string
 		`INSERT INTO agents (id, realm_id, name)
 		 SELECT $1, $2, $3
 		 WHERE EXISTS (
-		   SELECT 1 FROM realms
+		   SELECT 1 FROM realms r
 		   WHERE id = $2 AND account_id = $4 AND deleted_at IS NULL
+		     AND COALESCE(to_jsonb(r)->>'email_route_state', 'live') = 'live'
 		 )
 		 RETURNING id`,
 		agentID, realmID, name, accountID).Scan(&returned)

@@ -756,6 +756,7 @@ func TestDecodeImportRowPreservesInt64Boundary(t *testing.T) {
 // its rows to the validator in that order.
 func TestValidateAndRecordAccumulatesOverAStream(t *testing.T) {
 	const acc = "acc_stream"
+	const realmID = "realm_abcdefghijkl2345"
 	ic := newImportCtx(acc)
 
 	feed := func(table string, row map[string]any) {
@@ -766,9 +767,13 @@ func TestValidateAndRecordAccumulatesOverAStream(t *testing.T) {
 	}
 	feed("accounts", map[string]any{"id": acc, "status": "suspended", "is_default": false})
 	feed("operators", map[string]any{"id": "op_root", "account_id": acc, "role": "account_owner"})
-	feed("realms", map[string]any{"id": "rlm_default", "account_id": acc, "name": "default"})
-	feed("agents", map[string]any{"id": "agt_1", "realm_id": "rlm_default", "name": "archivist"})
-	feed("agents", map[string]any{"id": "agt_2", "realm_id": "rlm_default", "name": "coordinator"})
+	feed("realms", map[string]any{
+		"id": realmID, "account_id": acc, "name": "default",
+		"email_route_state": "live", "email_route_generation": int64(1),
+		"email_route_operation_id": nil,
+	})
+	feed("agents", map[string]any{"id": "agt_1", "realm_id": realmID, "name": "archivist"})
+	feed("agents", map[string]any{"id": "agt_2", "realm_id": realmID, "name": "coordinator"})
 	feed("tokens", map[string]any{
 		"id": "tok_op", "account_id": acc, "operator_id": "op_root", "kind": "operator",
 		"access_profile": AccessProfileFull,
@@ -789,39 +794,39 @@ func TestValidateAndRecordAccumulatesOverAStream(t *testing.T) {
 		"author_kind": "owner", "author_id": "op_root", "body": "please",
 	})
 	feed("transcript_conversations", map[string]any{
-		"id": "trn_1", "account_id": acc, "realm_id": "rlm_default",
+		"id": "trn_1", "account_id": acc, "realm_id": realmID,
 		"owner_agent_id": "agt_1",
 	})
 	feed("transcript_entries", map[string]any{
 		"id": "ent_1", "account_id": acc, "transcript_id": "trn_1",
-		"realm_id": "rlm_default", "recorded_by_agent_id": "agt_1",
+		"realm_id": realmID, "recorded_by_agent_id": "agt_1",
 		"sequence": float64(1), "role": "user", "body": "hello",
 	})
 	feed("transcript_entries", map[string]any{
 		"id": "ent_2", "account_id": acc, "transcript_id": "trn_1",
-		"realm_id": "rlm_default", "recorded_by_agent_id": "agt_1",
+		"realm_id": realmID, "recorded_by_agent_id": "agt_1",
 		"sequence": float64(2), "role": "assistant", "body": "hi",
 		"reply_to_entry_id": "ent_1",
 	})
 	feed("usage_events", map[string]any{
-		"id": "usg_1", "account_id": acc, "realm_id": "rlm_default", "agent_id": "agt_1",
+		"id": "usg_1", "account_id": acc, "realm_id": realmID, "agent_id": "agt_1",
 		"dimension": "transcript_entry_write", "quantity": float64(2), "unit": "entry",
 		"subject_type": "transcript", "subject_id": "trn_1", "idempotency_key": "write:1",
 	})
 	feed("usage_rollups", map[string]any{
-		"account_id": acc, "realm_id": "rlm_default", "agent_id": "agt_1",
+		"account_id": acc, "realm_id": realmID, "agent_id": "agt_1",
 		"dimension": "transcript_entry_write", "unit": "entry", "bucket": "day",
 		"quantity": float64(2), "event_count": float64(1),
 	})
 	feed("agent_messages", map[string]any{
-		"id": "msg_1", "account_id": acc, "realm_id": "rlm_default",
+		"id": "msg_1", "account_id": acc, "realm_id": realmID,
 		"from_agent_id": "agt_1", "to_agent_id": "agt_2",
 		"audience_kind": "agent", "audience_fingerprint": "",
 		"kind": "handoff", "body": "your turn", "thread_id": "thr_1", "causal_depth": 1,
 		"created_at": "2026-07-15T10:00:00Z",
 	})
 	feed("agent_message_deliveries", map[string]any{
-		"message_id": "msg_1", "account_id": acc, "realm_id": "rlm_default",
+		"message_id": "msg_1", "account_id": acc, "realm_id": realmID,
 		"recipient_agent_id": "agt_2", "state": "delivered",
 		"processing_state": "available", "processing_generation": 0,
 		"failure_count": 0,
@@ -832,7 +837,7 @@ func TestValidateAndRecordAccumulatesOverAStream(t *testing.T) {
 	if ic.accounts != 1 {
 		t.Errorf("accounts count = %d, want 1", ic.accounts)
 	}
-	if !ic.operators["op_root"] || !ic.realms["rlm_default"] || !ic.agents["agt_1"] {
+	if !ic.operators["op_root"] || !ic.realms[realmID] || !ic.agents["agt_1"] {
 		t.Error("ids not recorded across a legal stream")
 	}
 	if !ic.tickets["tkt_1"] {
