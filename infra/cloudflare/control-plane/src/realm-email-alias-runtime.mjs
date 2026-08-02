@@ -32,6 +32,24 @@ const LIFECYCLE_RECONCILE_CLAIM_LIMIT = 10;
 const PLAN_RECONCILE_PAGE_RETRY_MS = 1_000;
 const LIFECYCLE_RECONCILE_PAGE_RETRY_MS = 1_000;
 const ROUTE_REFRESH_RETRY_MS = 1_000;
+const PENDING_COUNTER_SCHEMA_VERSION = 1;
+const PENDING_COUNTER_MIGRATION_KEY = "pending-counter-migration";
+const PENDING_COUNTER_MIGRATION_PAGE_LIMIT = 100;
+const PENDING_COUNTER_MIGRATION_RETRY_MS = 5_000;
+const PENDING_COUNTER_DERIVED_PREFIXES = Object.freeze([
+  "claim-usage-member:",
+  "claim-usage-account-member:",
+  "claim-usage-realm-member:",
+  "claim-usage-account:",
+  "claim-usage-realm:",
+]);
+
+// Commercial alias capacity can be explicitly unlimited. Review work cannot:
+// these independent technical ceilings bound both one realm's queue and one
+// account's aggregate footprint on the globally serialized registry. Runtime
+// configuration may lower, but never raise, the compiled safety ceilings.
+export const REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM = 8;
+export const REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT = 64;
 
 // These names are seeded into durable, administrator-managed state. They are
 // not a hardcoded-only policy: platform administrators can version, disable,
@@ -77,8 +95,13 @@ function json(value, status = 200) {
   });
 }
 
-function errorResponse(message, status) {
-  return json({ schema_version: SCHEMA_VERSION, error: message }, status);
+function errorResponse(message, status, code = "", details = {}) {
+  return json({
+    schema_version: SCHEMA_VERSION,
+    error: message,
+    ...(code ? { code } : {}),
+    ...details,
+  }, status);
 }
 
 function isObject(value) {
@@ -87,15 +110,17 @@ function isObject(value) {
 }
 
 class RegistryError extends Error {
-  constructor(message, status = 500) {
+  constructor(message, status = 500, code = "", details = {}) {
     super(message);
     this.name = "RegistryError";
     this.status = status;
+    this.code = code;
+    this.details = details;
   }
 }
 
-function fail(message, status = 500) {
-  throw new RegistryError(message, status);
+function fail(message, status = 500, code = "", details = {}) {
+  throw new RegistryError(message, status, code, details);
 }
 
 export function normalizeRealmEmailAlias(value) {
@@ -158,6 +183,34 @@ export function realmEmailAliasEntitlement(snapshot) {
 
 function validAliasLimit(value) {
   return value === null || (Number.isSafeInteger(value) && value >= 0);
+}
+
+function configuredTechnicalLimit(value, fallback, maximum, name) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > maximum) {
+    fail(`${name} configuration is invalid`, 503);
+  }
+  return parsed;
+}
+
+export function realmEmailAliasPendingRequestLimits(env = {}) {
+  const perRealm = configuredTechnicalLimit(
+    env.CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM,
+    REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM,
+    REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM,
+    "realm email alias per-realm pending limit",
+  );
+  const perAccount = configuredTechnicalLimit(
+    env.CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT,
+    REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT,
+    REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT,
+    "realm email alias per-account pending limit",
+  );
+  if (perAccount < perRealm) {
+    fail("realm email alias pending limit configuration is inconsistent", 503);
+  }
+  return { per_realm: perRealm, per_account: perAccount };
 }
 
 function validPlanFence(revision, snapshotHash) {
@@ -287,6 +340,34 @@ function claimKey(alias) {
 
 function claimSkeletonKey(skeleton) {
   return `claim-skeleton:${skeleton}`;
+}
+
+function claimUsageMemberKey(claimID) {
+  return `claim-usage-member:${claimID}`;
+}
+
+function accountUsageMemberPrefix(accountID) {
+  return `claim-usage-account-member:${accountID}:`;
+}
+
+function accountUsageMemberKey(accountID, claimID) {
+  return `${accountUsageMemberPrefix(accountID)}${claimID}`;
+}
+
+function realmUsageMemberPrefix(accountID, realmID) {
+  return `claim-usage-realm-member:${accountID}:${realmID}:`;
+}
+
+function realmUsageMemberKey(accountID, realmID, claimID) {
+  return `${realmUsageMemberPrefix(accountID, realmID)}${claimID}`;
+}
+
+function accountUsageKey(accountID) {
+  return `claim-usage-account:${accountID}`;
+}
+
+function realmUsageKey(accountID, realmID) {
+  return `claim-usage-realm:${accountID}:${realmID}`;
 }
 
 function reservedKey(alias) {
@@ -511,6 +592,33 @@ function fingerprint(value) {
   return JSON.stringify(value);
 }
 
+function usageRecordIntegrity(record) {
+  return fingerprint({
+    schema_version: record.schema_version,
+    account_id: record.account_id,
+    realm_id: record.realm_id ?? null,
+    open_requests: record.open_requests,
+    pending_review: record.pending_review ?? null,
+    provisioning: record.provisioning ?? null,
+    customer_allocated: record.customer_allocated ?? null,
+  });
+}
+
+function withUsageRecordIntegrity(record) {
+  return { ...record, integrity: usageRecordIntegrity(record) };
+}
+
+function sameClaimUsageContribution(left, right) {
+  if (!left || !right) return left === right;
+  return left.claim_id === right.claim_id &&
+    left.account_id === right.account_id &&
+    left.realm_id === right.realm_id &&
+    left.open_request === right.open_request &&
+    left.pending_review === right.pending_review &&
+    left.provisioning === right.provisioning &&
+    left.customer_allocated === right.customer_allocated;
+}
+
 function listValues(listed) {
   return [...listed.values()];
 }
@@ -671,6 +779,7 @@ export class DurableRealmEmailAliasRegistry {
     this.newRequestID = dependencies.newRequestID ?? requestID;
     this.newClaimID = dependencies.newClaimID ?? claimID;
     this.fetchImpl = dependencies.fetch ?? ((...args) => globalThis.fetch(...args));
+    this.log = dependencies.log ?? ((value) => console.log(value));
     this.lanes = new Map();
   }
 
@@ -761,6 +870,8 @@ export class DurableRealmEmailAliasRegistry {
         return [`account:${input.account_id}`];
       case "/account-lifecycle/reconcile":
         return [`account:${input.account_id}`];
+      case "/counter/rebuild":
+        return ["registry:counter-rebuild"];
       default:
         return [];
     }
@@ -819,6 +930,8 @@ export class DurableRealmEmailAliasRegistry {
           return await this.reconcilePlan(input);
         case "/account-lifecycle/reconcile":
           return await this.reconcileAccountLifecycle(input);
+        case "/counter/rebuild":
+          return await this.rebuildPendingCounters(input);
         default:
           return errorResponse("registry endpoint not found", 404);
         }
@@ -832,14 +945,34 @@ export class DurableRealmEmailAliasRegistry {
       return errorResponse(
         String(error?.message ?? error),
         error instanceof RegistryError ? error.status : 500,
+        error instanceof RegistryError ? error.code : "",
+        error instanceof RegistryError ? error.details : {},
       );
     }
   }
 
-  async atomic(entries, deletes = []) {
+  async atomic(entries, deletes = [], options = {}) {
     const apply = async (storage) => {
+      const transitionMode = options.claimUsageTransition?.mode ?? "ordinary";
+      if (options.claimUsageTransition &&
+          !["migration", "verification"].includes(transitionMode)) {
+        // This check lives inside the same storage transaction as the claim
+        // and derived-counter writes. A recovery request can therefore run
+        // immediately before or after this commit, but can never interleave
+        // and let a stale ready meta record overwrite a rebuilding fence.
+        await this.assertPendingCountersReady(storage);
+      }
       for (const [key, value] of entries) await storage.put(key, value);
       for (const key of deletes) await storage.delete(key);
+      if (options.claimUsageTransition) {
+        await this.applyClaimUsageTransition(
+          storage,
+          options.claimUsageTransition.previousClaim,
+          options.claimUsageTransition.desiredClaim,
+          options.claimUsageTransition.updatedAt,
+          options.claimUsageTransition.mode ?? "ordinary",
+        );
+      }
     };
     if (typeof this.storage.transaction === "function") {
       await this.storage.transaction(apply);
@@ -850,11 +983,15 @@ export class DurableRealmEmailAliasRegistry {
 
   async ensureSeeded() {
     const current = await this.storage.get(META_KEY);
-    if (current?.seeded) return current;
+    if (current?.seeded) {
+      return this.ensurePendingCounterMigration(current);
+    }
     const now = this.now().toISOString();
     const meta = {
       schema_version: SCHEMA_VERSION,
       seeded: true,
+      pending_counter_schema_version: PENDING_COUNTER_SCHEMA_VERSION,
+      pending_counter_state: "ready",
       registry_revision: 1,
       reserved_policy_version: 1,
       audit_sequence: 1,
@@ -898,51 +1035,469 @@ export class DurableRealmEmailAliasRegistry {
     return meta;
   }
 
+  async ensurePendingCounterMigration(meta) {
+    const existing = await this.storage.get(PENDING_COUNTER_MIGRATION_KEY);
+    if (meta.pending_counter_schema_version === PENDING_COUNTER_SCHEMA_VERSION &&
+        (meta.pending_counter_state === undefined ||
+          meta.pending_counter_state === "ready") && !existing) {
+      return meta;
+    }
+    if (meta.pending_counter_schema_version !== undefined &&
+        meta.pending_counter_schema_version !== PENDING_COUNTER_SCHEMA_VERSION) {
+      fail("realm email alias pending counter schema is unsupported", 503);
+    }
+    if (meta.pending_counter_state !== undefined &&
+        !["ready", "rebuilding"].includes(meta.pending_counter_state)) {
+      fail("realm email alias pending counter state is invalid", 503);
+    }
+    if (existing) {
+      if (existing.schema_version !== PENDING_COUNTER_SCHEMA_VERSION ||
+          !Number.isSafeInteger(existing.retry_at_ms)) {
+        fail("realm email alias pending counter migration is invalid", 503);
+      }
+      if (typeof this.storage.setAlarm === "function") {
+        await this.storage.setAlarm(Math.min(
+          existing.retry_at_ms,
+          this.now().getTime() + PENDING_COUNTER_MIGRATION_RETRY_MS,
+        ));
+      }
+      return meta;
+    }
+    if (meta.pending_counter_state === "rebuilding") {
+      fail("realm email alias pending counter rebuild intent is missing", 503);
+    }
+
+    // A freshly deployed dark registry normally has reservations but no
+    // claims. Prove that with one bounded read and upgrade it immediately.
+    // Any pre-existing claim set is rebuilt by the paginated alarm below;
+    // customer creation remains fail-closed until that exact scan completes.
+    const firstClaim = await this.storage.list({ prefix: "claim:", limit: 1 });
+    if (firstClaim.size === 0) {
+      const upgraded = {
+        ...meta,
+        pending_counter_schema_version: PENDING_COUNTER_SCHEMA_VERSION,
+        pending_counter_state: "ready",
+        updated_at: this.now().toISOString(),
+      };
+      await this.storage.put(META_KEY, upgraded);
+      return upgraded;
+    }
+
+    const now = this.now();
+    const migration = {
+      schema_version: PENDING_COUNTER_SCHEMA_VERSION,
+      kind: "upgrade",
+      phase: "scan",
+      cursor: null,
+      scanned: 0,
+      failure_count: 0,
+      retry_at_ms: now.getTime(),
+      created_at: now.toISOString(),
+      updated_at: now.toISOString(),
+    };
+    await this.storage.put(PENDING_COUNTER_MIGRATION_KEY, migration);
+    if (typeof this.storage.setAlarm === "function") {
+      await this.storage.setAlarm(now.getTime());
+    }
+    return meta;
+  }
+
+  async assertPendingCountersReady(storage = this.storage) {
+    const meta = await storage.get(META_KEY);
+    if (meta?.pending_counter_schema_version !==
+        PENDING_COUNTER_SCHEMA_VERSION ||
+        (meta.pending_counter_state !== undefined &&
+          meta.pending_counter_state !== "ready") ||
+        await storage.get(PENDING_COUNTER_MIGRATION_KEY)) {
+      fail("realm email alias pending counters are still rebuilding", 503);
+    }
+  }
+
+  async rebuildPendingCounters(input) {
+    const actor = validateActor(input.actor, "platform_admin");
+    const key = validateIdempotencyKey(input.idempotency_key);
+    const reason = validateReason(input.reason, true);
+    const fp = fingerprint({ action: "rebuild_pending_counters", reason });
+    const scope = "counter-rebuild";
+    const body = {
+      schema_version: SCHEMA_VERSION,
+      accepted: true,
+      pending_counter_state: "rebuilding",
+    };
+    const result = await this.withLane("registry:metadata", async () => {
+      const replay = await this.idempotent(scope, key, fp);
+      if (replay) return { response: replay, installed: false };
+      if (await this.storage.get(PENDING_COUNTER_MIGRATION_KEY)) {
+        fail("realm email alias pending counters are already rebuilding", 409);
+      }
+      const meta = await this.storage.get(META_KEY);
+      if (!meta?.seeded) {
+        fail("realm email alias registry is not initialized", 503);
+      }
+      // Unlike mutations that perform external projection work, installing a
+      // recovery fence has no reason to release the global metadata lane after
+      // reserving its revision. The new meta, migration, idempotency record,
+      // and committed audit event land in one transaction while the lane is
+      // still held, so no concurrent mutation can advance meta and then be
+      // overwritten by a stale recovery snapshot.
+      const mutation = await this.prepareMutation(
+        meta,
+        actor,
+        "alias.pending_counters_rebuild_requested",
+        "pending-counters",
+        { reason },
+      );
+      const now = new Date(mutation.now);
+      const migration = {
+        schema_version: PENDING_COUNTER_SCHEMA_VERSION,
+        kind: "recovery",
+        phase: "clear",
+        clear_prefix_index: 0,
+        cursor: null,
+        scanned: 0,
+        verified: 0,
+        failure_count: 0,
+        retry_at_ms: now.getTime(),
+        created_at: mutation.now,
+        updated_at: mutation.now,
+        requested_by: actor.id,
+        reason,
+      };
+      const rebuildingMeta = {
+        ...mutation.meta,
+        pending_counter_schema_version: PENDING_COUNTER_SCHEMA_VERSION,
+        pending_counter_state: "rebuilding",
+        updated_at: mutation.now,
+      };
+      await this.atomic([
+        [META_KEY, rebuildingMeta],
+        ...mutation.entries,
+        [PENDING_COUNTER_MIGRATION_KEY, migration],
+        [`idem:${scope}:${key}`, { fingerprint: fp, status: 202, body }],
+      ]);
+      return { response: json(body, 202), installed: true };
+    });
+    const migration = await this.storage.get(PENDING_COUNTER_MIGRATION_KEY);
+    if (result.installed || migration) {
+      try {
+        // The durable fence and idempotency response may already exist when a
+        // prior setAlarm acknowledgement was lost. Replaying the same key must
+        // therefore re-arm recovery rather than returning the stored 202 while
+        // leaving the registry permanently fenced.
+        await this.scheduleNextAlarm();
+      } catch {
+        fail("realm email alias pending counter rebuild could not be scheduled", 503);
+      }
+    }
+    return result.response;
+  }
+
+  claimUsageContribution(claim) {
+    if (!claim || claim.retired_at || claim.assignment_kind === "internal") {
+      return null;
+    }
+    if (!ACCOUNT_ID_PATTERN.test(claim.account_id ?? "") ||
+        !REALM_ID_PATTERN.test(claim.realm_id ?? "") ||
+        !CLAIM_ID_PATTERN.test(claim.claim_id ?? "")) {
+      fail("realm email alias claim cannot be counted safely", 503);
+    }
+    if (claim.assignment_kind === "customer") {
+      return {
+        claim_id: claim.claim_id,
+        account_id: claim.account_id,
+        realm_id: claim.realm_id,
+        open_request: claim.customer_activation_intent === true ? 1 : 0,
+        pending_review: 0,
+        provisioning: claim.customer_activation_intent === true ? 1 : 0,
+        customer_allocated: 1,
+      };
+    }
+    if (claim.assignment_kind == null &&
+        REQUEST_ID_PATTERN.test(claim.request_id ?? "")) {
+      return {
+        claim_id: claim.claim_id,
+        account_id: claim.account_id,
+        realm_id: claim.realm_id,
+        open_request: 1,
+        pending_review: 1,
+        provisioning: 0,
+        customer_allocated: 0,
+      };
+    }
+    return null;
+  }
+
+  validateUsageRecord(record, kind, accountID, realmID = null) {
+    if (!record) {
+      return withUsageRecordIntegrity({
+        schema_version: PENDING_COUNTER_SCHEMA_VERSION,
+        account_id: accountID,
+        ...(realmID ? { realm_id: realmID } : {}),
+        open_requests: 0,
+        ...(realmID
+          ? { pending_review: 0, provisioning: 0, customer_allocated: 0 }
+          : {}),
+      });
+    }
+    if (record.schema_version !== PENDING_COUNTER_SCHEMA_VERSION ||
+        record.account_id !== accountID ||
+        (realmID !== null && record.realm_id !== realmID) ||
+        !Number.isSafeInteger(record.open_requests) ||
+        record.open_requests < 0 ||
+        (kind === "realm" &&
+          (!Number.isSafeInteger(record.pending_review) ||
+            record.pending_review < 0 ||
+            !Number.isSafeInteger(record.provisioning) ||
+            record.provisioning < 0 ||
+            record.open_requests !==
+              record.pending_review + record.provisioning ||
+            !Number.isSafeInteger(record.customer_allocated) ||
+            record.customer_allocated < 0)) ||
+        record.integrity !== usageRecordIntegrity(record)) {
+      fail("realm email alias pending counter is invalid", 503);
+    }
+    return record;
+  }
+
+  async usageForRealm(accountID, realmID) {
+    const [accountRaw, realmRaw] = await Promise.all([
+      this.storage.get(accountUsageKey(accountID)),
+      this.storage.get(realmUsageKey(accountID, realmID)),
+    ]);
+    if (!accountRaw) {
+      const members = await this.storage.list({
+        prefix: accountUsageMemberPrefix(accountID),
+        limit: 1,
+      });
+      if (members.size > 0) {
+        fail("realm email alias account pending counter is missing", 503);
+      }
+    }
+    if (!realmRaw) {
+      const members = await this.storage.list({
+        prefix: realmUsageMemberPrefix(accountID, realmID),
+        limit: 1,
+      });
+      if (members.size > 0) {
+        fail("realm email alias realm pending counter is missing", 503);
+      }
+    }
+    return {
+      account: this.validateUsageRecord(accountRaw, "account", accountID),
+      realm: this.validateUsageRecord(realmRaw, "realm", accountID, realmID),
+    };
+  }
+
+  pendingCapacity(usage) {
+    const limits = realmEmailAliasPendingRequestLimits(this.env);
+    return {
+      realm: {
+        used: usage.realm.open_requests,
+        max: limits.per_realm,
+        remaining: Math.max(0, limits.per_realm - usage.realm.open_requests),
+        at_limit: usage.realm.open_requests >= limits.per_realm,
+      },
+      account: {
+        used: usage.account.open_requests,
+        max: limits.per_account,
+        remaining: Math.max(
+          0,
+          limits.per_account - usage.account.open_requests,
+        ),
+        at_limit: usage.account.open_requests >= limits.per_account,
+      },
+    };
+  }
+
+  observePendingLimitRefusal(scope, limit) {
+    // Cloudflare Worker logs are the low-cardinality operational signal for
+    // this admission guard. Never include tenant, realm, alias, request, claim,
+    // actor, usage, or free-form error data, and never grow durable audit state
+    // for a rejected request.
+    this.log(JSON.stringify({
+      event: "realm_email_alias_pending_limit_refused",
+      scope,
+      limit,
+    }));
+  }
+
+  async applyClaimUsageTransition(
+    storage,
+    previousClaim,
+    desiredClaim,
+    updatedAt,
+    mode = "ordinary",
+  ) {
+    const claimID = desiredClaim?.claim_id ?? previousClaim?.claim_id;
+    if (!CLAIM_ID_PATTERN.test(claimID ?? "")) {
+      fail("realm email alias claim cannot be counted safely", 503);
+    }
+    const memberKey = claimUsageMemberKey(claimID);
+    const stored = await storage.get(memberKey);
+    const previous = this.claimUsageContribution(previousClaim);
+    const desired = this.claimUsageContribution(desiredClaim);
+    if (stored && (stored.schema_version !== PENDING_COUNTER_SCHEMA_VERSION ||
+        stored.claim_id !== claimID ||
+        ![0, 1].includes(stored.open_request) ||
+        ![0, 1].includes(stored.pending_review) ||
+        ![0, 1].includes(stored.provisioning) ||
+        stored.open_request !== stored.pending_review + stored.provisioning ||
+        ![0, 1].includes(stored.customer_allocated) ||
+        (stored.open_request === 0 && stored.customer_allocated === 0) ||
+        !ACCOUNT_ID_PATTERN.test(stored.account_id ?? "") ||
+        !REALM_ID_PATTERN.test(stored.realm_id ?? ""))) {
+      fail("realm email alias claim counter membership is invalid", 503);
+    }
+    if (mode === "ordinary" || mode === "verification") {
+      if (!sameClaimUsageContribution(stored ?? null, previous)) {
+        fail("realm email alias claim counter membership drifted", 503);
+      }
+    } else if (mode === "create") {
+      if (previous !== null || stored) {
+        fail("realm email alias claim counter create is inconsistent", 503);
+      }
+    } else if (mode === "migration") {
+      if (previous !== null ||
+          (stored && !sameClaimUsageContribution(stored, desired))) {
+        fail("realm email alias claim counter migration is inconsistent", 503);
+      }
+    } else {
+      fail("realm email alias claim counter transition mode is invalid", 503);
+    }
+    if (stored && desired &&
+        (stored.account_id !== desired.account_id ||
+          stored.realm_id !== desired.realm_id)) {
+      fail("realm email alias claim counter ownership changed", 503);
+    }
+    if (!stored && !desired) return;
+
+    const accountID = desired?.account_id ?? stored.account_id;
+    const realmID = desired?.realm_id ?? stored.realm_id;
+    const accountRaw = await storage.get(accountUsageKey(accountID));
+    const realmRaw = await storage.get(realmUsageKey(accountID, realmID));
+    const account = this.validateUsageRecord(
+      accountRaw,
+      "account",
+      accountID,
+    );
+    const realm = this.validateUsageRecord(
+      realmRaw,
+      "realm",
+      accountID,
+      realmID,
+    );
+    const openDelta = (desired?.open_request ?? 0) -
+      (stored?.open_request ?? 0);
+    const allocatedDelta = (desired?.customer_allocated ?? 0) -
+      (stored?.customer_allocated ?? 0);
+    const pendingReviewDelta = (desired?.pending_review ?? 0) -
+      (stored?.pending_review ?? 0);
+    const provisioningDelta = (desired?.provisioning ?? 0) -
+      (stored?.provisioning ?? 0);
+    const accountOpen = account.open_requests + openDelta;
+    const realmOpen = realm.open_requests + openDelta;
+    const realmAllocated = realm.customer_allocated + allocatedDelta;
+    const realmPendingReview = realm.pending_review + pendingReviewDelta;
+    const realmProvisioning = realm.provisioning + provisioningDelta;
+    if (![accountOpen, realmOpen, realmAllocated, realmPendingReview,
+      realmProvisioning].every((value) =>
+      Number.isSafeInteger(value) && value >= 0
+    ) || realmOpen !== realmPendingReview + realmProvisioning) {
+      fail("realm email alias pending counter transition is invalid", 503);
+    }
+    const nextAccount = withUsageRecordIntegrity({
+      ...account,
+      open_requests: accountOpen,
+      updated_at: updatedAt,
+    });
+    const nextRealm = withUsageRecordIntegrity({
+      ...realm,
+      open_requests: realmOpen,
+      pending_review: realmPendingReview,
+      provisioning: realmProvisioning,
+      customer_allocated: realmAllocated,
+      updated_at: updatedAt,
+    });
+    await storage.put(accountUsageKey(accountID), nextAccount);
+    await storage.put(realmUsageKey(accountID, realmID), nextRealm);
+    if (desired) {
+      await storage.put(memberKey, {
+        schema_version: PENDING_COUNTER_SCHEMA_VERSION,
+        ...desired,
+        updated_at: updatedAt,
+      });
+      await storage.put(accountUsageMemberKey(accountID, claimID), claimID);
+      await storage.put(
+        realmUsageMemberKey(accountID, realmID, claimID),
+        claimID,
+      );
+    } else {
+      await storage.delete(memberKey);
+      await storage.delete(accountUsageMemberKey(accountID, claimID));
+      await storage.delete(realmUsageMemberKey(accountID, realmID, claimID));
+    }
+  }
+
+  async prepareMutation(meta, actor, action, target, metadata = {}, options = {}) {
+    const latest = await this.storage.get(META_KEY) ?? meta;
+    const now = this.now().toISOString();
+    const next = {
+      ...latest,
+      registry_revision: latest.registry_revision + 1,
+      reserved_policy_version: options.reservedPolicyChange
+        ? latest.reserved_policy_version + 1
+        : latest.reserved_policy_version,
+      audit_sequence: latest.audit_sequence + 1,
+      updated_at: now,
+    };
+    const auditKey = `audit:${String(next.audit_sequence).padStart(12, "0")}`;
+    const committedAudit = {
+      sequence: next.audit_sequence,
+      registry_revision: next.registry_revision,
+      occurred_at: now,
+      actor_kind: actor.kind,
+      actor_id: actor.id,
+      action,
+      target,
+      metadata: { ...metadata, phase: "committed" },
+    };
+    const preparedAudit = {
+      ...committedAudit,
+      action: `${action}.intent_recorded`,
+      metadata: {
+        ...metadata,
+        phase: "prepared",
+        requested_action: action,
+      },
+    };
+    return {
+      now,
+      meta: next,
+      entries: [[auditKey, committedAudit]],
+      prepared_entries: [
+        [META_KEY, next],
+        [auditKey, preparedAudit],
+      ],
+    };
+  }
+
   async mutationEntries(meta, actor, action, target, metadata = {}, options = {}) {
     // Only this tiny local section is global. It durably reserves unique
     // registry/audit revisions before any caller performs cell or KV I/O, then
     // releases immediately so a slow cell never head-of-line blocks the DO.
     return this.withLane("registry:metadata", async () => {
-      const latest = await this.storage.get(META_KEY) ?? meta;
-      const now = this.now().toISOString();
-      const next = {
-        ...latest,
-        registry_revision: latest.registry_revision + 1,
-        reserved_policy_version: options.reservedPolicyChange
-          ? latest.reserved_policy_version + 1
-          : latest.reserved_policy_version,
-        audit_sequence: latest.audit_sequence + 1,
-        updated_at: now,
-      };
-      const auditKey = `audit:${String(next.audit_sequence).padStart(12, "0")}`;
-      const committedAudit = {
-        sequence: next.audit_sequence,
-        registry_revision: next.registry_revision,
-        occurred_at: now,
-        actor_kind: actor.kind,
-        actor_id: actor.id,
+      const mutation = await this.prepareMutation(
+        meta,
+        actor,
         action,
         target,
-        metadata: { ...metadata, phase: "committed" },
-      };
-      const preparedAudit = {
-        ...committedAudit,
-        action: `${action}.intent_recorded`,
-        metadata: {
-          ...metadata,
-          phase: "prepared",
-          requested_action: action,
-        },
-      };
+        metadata,
+        options,
+      );
       await this.atomic([
-        [META_KEY, next],
-        [auditKey, preparedAudit],
+        ...mutation.prepared_entries,
       ]);
-      return {
-        now,
-        meta: next,
-        entries: [[auditKey, committedAudit]],
-      };
+      return mutation;
     });
   }
 
@@ -1447,6 +2002,177 @@ export class DurableRealmEmailAliasRegistry {
     };
   }
 
+  async reconcilePendingCounterMigration() {
+    const meta = await this.storage.get(META_KEY);
+    const migration = await this.storage.get(PENDING_COUNTER_MIGRATION_KEY);
+    const ready = meta?.pending_counter_schema_version ===
+        PENDING_COUNTER_SCHEMA_VERSION &&
+      (meta.pending_counter_state === undefined ||
+        meta.pending_counter_state === "ready");
+    if (ready && !migration) {
+      return;
+    }
+    if (!migration || migration.schema_version !==
+        PENDING_COUNTER_SCHEMA_VERSION ||
+        !["upgrade", "recovery"].includes(migration.kind) ||
+        !["clear", "scan", "verify"].includes(migration.phase) ||
+        (migration.phase === "clear" && migration.kind !== "recovery") ||
+        (migration.phase !== "clear" && migration.cursor !== null &&
+          (typeof migration.cursor !== "string" ||
+            !migration.cursor.startsWith("claim:"))) ||
+        !Number.isSafeInteger(migration.retry_at_ms)) {
+      fail("realm email alias pending counter migration is invalid", 503);
+    }
+    if (migration.retry_at_ms > this.now().getTime()) return;
+
+    try {
+      if (migration.phase === "clear") {
+        const index = migration.clear_prefix_index;
+        if (!Number.isSafeInteger(index) || index < 0 ||
+            index >= PENDING_COUNTER_DERIVED_PREFIXES.length) {
+          fail("realm email alias pending counter clear cursor is invalid", 503);
+        }
+        const prefix = PENDING_COUNTER_DERIVED_PREFIXES[index];
+        if (migration.cursor !== null &&
+            (typeof migration.cursor !== "string" ||
+              !migration.cursor.startsWith(prefix))) {
+          fail("realm email alias pending counter clear cursor is invalid", 503);
+        }
+        const listed = await this.storage.list({
+          prefix,
+          limit: PENDING_COUNTER_MIGRATION_PAGE_LIMIT + 1,
+          ...(migration.cursor ? { startAfter: migration.cursor } : {}),
+        });
+        const entries = [...listed.entries()];
+        const page = entries.slice(0, PENDING_COUNTER_MIGRATION_PAGE_LIMIT);
+        await this.atomic([], page.map(([key]) => key));
+        const more = entries.length > PENDING_COUNTER_MIGRATION_PAGE_LIMIT;
+        const lastPrefix = index === PENDING_COUNTER_DERIVED_PREFIXES.length - 1;
+        const continued = {
+          ...migration,
+          phase: more || !lastPrefix ? "clear" : "scan",
+          clear_prefix_index: more ? index : Math.min(index + 1,
+            PENDING_COUNTER_DERIVED_PREFIXES.length - 1),
+          cursor: more ? page.at(-1)[0] : null,
+          failure_count: 0,
+          retry_at_ms: this.now().getTime() +
+            PENDING_COUNTER_MIGRATION_RETRY_MS,
+          updated_at: this.now().toISOString(),
+        };
+        await this.storage.put(PENDING_COUNTER_MIGRATION_KEY, continued);
+        return;
+      }
+
+      const listed = await this.storage.list({
+        prefix: "claim:",
+        limit: PENDING_COUNTER_MIGRATION_PAGE_LIMIT + 1,
+        ...(migration.cursor ? { startAfter: migration.cursor } : {}),
+      });
+      const entries = [...listed.entries()];
+      const page = entries.slice(0, PENDING_COUNTER_MIGRATION_PAGE_LIMIT);
+      for (const [key, listedClaim] of page) {
+        const lanes = [
+          `account:${listedClaim.account_id}`,
+          `realm:${listedClaim.account_id}:${listedClaim.realm_id}`,
+          `skeleton:${listedClaim.skeleton}`,
+        ];
+        await this.withLanes(lanes, async () => {
+          const claim = await this.storage.get(key);
+          if (!claim) return;
+          const contribution = this.claimUsageContribution(claim);
+          if (contribution?.open_request === 1) {
+            const request = await this.storage.get(requestKey(claim.request_id));
+            const expectedStatus = claim.customer_activation_intent === true
+              ? "provisioning"
+              : "pending_review";
+            if (request?.status !== expectedStatus ||
+                request.alias !== claim.alias ||
+                request.account_id !== claim.account_id ||
+                request.realm_id !== claim.realm_id) {
+              fail("realm email alias open request cannot be counted safely", 503);
+            }
+          }
+          if (migration.phase === "scan") {
+            await this.atomic([], [], {
+              claimUsageTransition: {
+                previousClaim: null,
+                desiredClaim: claim,
+                updatedAt: this.now().toISOString(),
+                mode: "migration",
+              },
+            });
+          } else {
+            await this.atomic([], [], {
+              claimUsageTransition: {
+                previousClaim: claim,
+                desiredClaim: claim,
+                updatedAt: this.now().toISOString(),
+                mode: "verification",
+              },
+            });
+          }
+        });
+      }
+
+      if (entries.length <= PENDING_COUNTER_MIGRATION_PAGE_LIMIT) {
+        if (migration.phase === "scan") {
+          await this.storage.put(PENDING_COUNTER_MIGRATION_KEY, {
+            ...migration,
+            phase: "verify",
+            cursor: null,
+            scanned: (migration.scanned ?? 0) + page.length,
+            failure_count: 0,
+            retry_at_ms: this.now().getTime() +
+              PENDING_COUNTER_MIGRATION_RETRY_MS,
+            updated_at: this.now().toISOString(),
+          });
+          return;
+        }
+        await this.withLane("registry:metadata", async () => {
+          const latest = await this.storage.get(META_KEY);
+          const upgraded = {
+            ...latest,
+            pending_counter_schema_version: PENDING_COUNTER_SCHEMA_VERSION,
+            pending_counter_state: "ready",
+            pending_counter_rebuilt_at: this.now().toISOString(),
+            updated_at: this.now().toISOString(),
+          };
+          await this.atomic(
+            [[META_KEY, upgraded]],
+            [PENDING_COUNTER_MIGRATION_KEY],
+          );
+        });
+        return;
+      }
+      const continued = {
+        ...migration,
+        cursor: page.at(-1)[0],
+        ...(migration.phase === "scan"
+          ? { scanned: (migration.scanned ?? 0) + page.length }
+          : { verified: (migration.verified ?? 0) + page.length }),
+        failure_count: 0,
+        retry_at_ms: this.now().getTime() +
+          PENDING_COUNTER_MIGRATION_RETRY_MS,
+        updated_at: this.now().toISOString(),
+      };
+      await this.storage.put(PENDING_COUNTER_MIGRATION_KEY, continued);
+    } catch (error) {
+      const current = await this.storage.get(PENDING_COUNTER_MIGRATION_KEY);
+      if (current) {
+        const failureCount = (current.failure_count ?? 0) + 1;
+        await this.storage.put(PENDING_COUNTER_MIGRATION_KEY, {
+          ...current,
+          failure_count: failureCount,
+          retry_at_ms: this.now().getTime() + retryDelayMs(failureCount),
+          last_failure_at: this.now().toISOString(),
+        });
+      }
+      this.log(
+        "realm-email-alias: pending counter migration failed; writes remain fenced",
+      );
+    }
+  }
+
   async scheduleNextAlarm(fallbackDelay = null) {
     if (typeof this.storage.setAlarm !== "function") return;
     return this.withLane("registry:alarm-schedule", async () => {
@@ -1482,6 +2208,9 @@ export class DurableRealmEmailAliasRegistry {
         prefix: "refresh-due:",
         limit: 1,
       })).keys()][0];
+      const counterMigration = await this.storage.get(
+        PENDING_COUNTER_MIGRATION_KEY,
+      );
       const deadlines = [
         firstGrace ? Number(firstGrace.split(":", 3)[1]) : NaN,
         firstPlan ? Number(firstPlan.split(":", 3)[1]) : NaN,
@@ -1490,6 +2219,7 @@ export class DurableRealmEmailAliasRegistry {
         firstProjection ? Number(firstProjection.split(":", 3)[1]) : NaN,
         firstInternal ? Number(firstInternal.split(":", 3)[1]) : NaN,
         firstRefresh ? Number(firstRefresh.split(":", 3)[1]) : NaN,
+        Number(counterMigration?.retry_at_ms),
       ].filter(Number.isFinite);
       if (deadlines.length > 0) {
         await this.storage.setAlarm(Math.min(...deadlines));
@@ -1502,6 +2232,19 @@ export class DurableRealmEmailAliasRegistry {
   alarm() {
     return (async () => {
       await this.withLane("registry:seed", () => this.ensureSeeded());
+      await this.reconcilePendingCounterMigration();
+      const meta = await this.storage.get(META_KEY);
+      if (meta?.pending_counter_schema_version !==
+          PENDING_COUNTER_SCHEMA_VERSION ||
+          (meta.pending_counter_state !== undefined &&
+            meta.pending_counter_state !== "ready") ||
+          await this.storage.get(PENDING_COUNTER_MIGRATION_KEY)) {
+        // Cursor progress is already durable. Propagate a failed re-arm so the
+        // Durable Object alarm event is retried instead of silently stranding
+        // a rebuilding registry with no future wakeup.
+        await this.scheduleNextAlarm();
+        return;
+      }
       // Each lane owns its own retry fence. A poison account or claim must not
       // prevent later due items, grace expiry, or approval recovery from
       // making progress during the same bounded alarm turn.
@@ -1539,6 +2282,7 @@ export class DurableRealmEmailAliasRegistry {
     canonicalState = "applied",
     allowMissingCellForRetirement = false,
     handoffDeletes = [],
+    claimUsageTransition = null,
   }) {
     const existing = await this.matchingProjectionIntent(
       desiredClaim.alias,
@@ -1565,6 +2309,7 @@ export class DurableRealmEmailAliasRegistry {
       canonical_state: canonicalState,
       allow_missing_cell_for_retirement:
         allowMissingCellForRetirement === true,
+      claim_usage_transition: claimUsageTransition,
       failure_count: 0,
       retry_at_ms: now.getTime(),
       created_at: now.toISOString(),
@@ -1612,6 +2357,9 @@ export class DurableRealmEmailAliasRegistry {
           projectionIntentKey(intent.alias),
           projectionDueKey(intent),
         ],
+        intent.claim_usage_transition
+          ? { claimUsageTransition: intent.claim_usage_transition }
+          : {},
       );
       await this.scheduleNextAlarm().catch(() => {});
       return json(intent.response_body, intent.response_status);
@@ -1959,6 +2707,7 @@ export class DurableRealmEmailAliasRegistry {
     const scope = `request-create:${input.account_id}:${input.realm_id}`;
     const replay = await this.idempotent(scope, key, fp);
     if (replay) return replay;
+    await this.assertPendingCountersReady();
     await this.assertCurrentPlanFence(input.account_id, input);
 
     const skeleton = realmEmailAliasSkeleton(alias);
@@ -1975,16 +2724,28 @@ export class DurableRealmEmailAliasRegistry {
     if (await this.storage.get(claimSkeletonKey(skeleton))) {
       fail("alias is confusable with an existing claim", 409);
     }
-    const realmClaims = (await this.claimsForRealm(
-      input.account_id,
-      input.realm_id,
-    )).filter((claim) => !claim.retired_at);
-    const assigned = realmClaims.filter((claim) =>
-      claim.assignment_kind === "customer"
-    ).length;
-    const pending = realmClaims.filter((claim) =>
-      !claim.assignment_kind && claim.request_id
-    ).length;
+    const usage = await this.usageForRealm(input.account_id, input.realm_id);
+    const technicalCapacity = this.pendingCapacity(usage);
+    if (technicalCapacity.realm.at_limit) {
+      this.observePendingLimitRefusal("realm", technicalCapacity.realm.max);
+      fail(
+        "realm email alias pending request ceiling reached",
+        409,
+        "technical_pending_limit_reached",
+        { scope: "realm", limit: technicalCapacity.realm.max },
+      );
+    }
+    if (technicalCapacity.account.at_limit) {
+      this.observePendingLimitRefusal("account", technicalCapacity.account.max);
+      fail(
+        "account email alias pending request ceiling reached",
+        409,
+        "technical_pending_limit_reached",
+        { scope: "account", limit: technicalCapacity.account.max },
+      );
+    }
+    const assigned = usage.realm.customer_allocated;
+    const pending = usage.realm.pending_review;
     if (aliasLimit !== null &&
         (assigned >= aliasLimit ||
           pending >= Math.max(1, aliasLimit - assigned))) {
@@ -2045,7 +2806,14 @@ export class DurableRealmEmailAliasRegistry {
       [claimSkeletonKey(skeleton), alias],
       [`idem:${scope}:${key}`, { fingerprint: fp, status: 202, body }],
     );
-    await this.atomic(mutation.entries);
+    await this.atomic(mutation.entries, [], {
+      claimUsageTransition: {
+        previousClaim: null,
+        desiredClaim: claim,
+        updatedAt: mutation.now,
+        mode: "create",
+      },
+    });
     return json(body, 202);
   }
 
@@ -2077,11 +2845,31 @@ export class DurableRealmEmailAliasRegistry {
     requests.sort((left, right) =>
       left.requested_at.localeCompare(right.requested_at) || left.id.localeCompare(right.id)
     );
+    const meta = await this.storage.get(META_KEY);
+    const countersReady = meta?.pending_counter_schema_version ===
+        PENDING_COUNTER_SCHEMA_VERSION &&
+      (meta.pending_counter_state === undefined ||
+        meta.pending_counter_state === "ready") &&
+      !await this.storage.get(PENDING_COUNTER_MIGRATION_KEY);
+    let pendingCapacityValue;
+    if (countersReady &&
+        ACCOUNT_ID_PATTERN.test(input.account_id ?? "") &&
+        REALM_ID_PATTERN.test(input.realm_id ?? "")) {
+      pendingCapacityValue = this.pendingCapacity(await this.usageForRealm(
+        input.account_id,
+        input.realm_id,
+      ));
+    }
     return json({
       schema_version: SCHEMA_VERSION,
       requests,
       truncated: listed.truncated,
       next_cursor: listed.next_cursor ?? null,
+      pending_counter_state: countersReady ? "ready" : "rebuilding",
+      technical_pending_limits: realmEmailAliasPendingRequestLimits(this.env),
+      ...(pendingCapacityValue
+        ? { pending_capacity: pendingCapacityValue }
+        : {}),
     });
   }
 
@@ -2108,6 +2896,7 @@ export class DurableRealmEmailAliasRegistry {
     if (replay) return replay;
     let request = await this.storage.get(requestKey(input.request_id));
     if (!request) fail("alias request not found", 404);
+    await this.assertPendingCountersReady();
     const pendingProjection = await this.matchingProjectionIntent(
       request.alias,
       scope,
@@ -2156,20 +2945,18 @@ export class DurableRealmEmailAliasRegistry {
         fail("alias is reserved by Witself policy", 409);
       }
     }
-    const occupied = (await this.claimsForRealm(
+    const usage = await this.usageForRealm(
       request.account_id,
       request.realm_id,
-    )).filter((candidate) =>
-      !candidate.retired_at &&
-      (candidate.assignment_kind === "customer" ||
-        candidate.customer_activation_intent === true)
-    ).length;
+    );
+    const occupied = usage.realm.customer_allocated;
     if (!resuming && input.alias_limit !== null &&
         occupied >= input.alias_limit) {
       fail("realm email alias limit reached", 403);
     }
 
     if (!resuming) {
+      const pendingClaim = claim;
       const meta = await this.storage.get(META_KEY);
       const intentMutation = await this.mutationEntries(
         meta,
@@ -2209,7 +2996,13 @@ export class DurableRealmEmailAliasRegistry {
         [requestKey(request.id), request],
         [claimKey(request.alias), claim],
         [approvalDueKey(claim), request.alias],
-      ]);
+      ], [], {
+        claimUsageTransition: {
+          previousClaim: pendingClaim,
+          desiredClaim: claim,
+          updatedAt: intentMutation.now,
+        },
+      });
       await this.scheduleNextAlarm().catch(() => {});
     }
     return this.completeApprovalProvisioning(request, claim, {
@@ -2236,20 +3029,16 @@ export class DurableRealmEmailAliasRegistry {
       }
       throw error;
     }
-    const realmClaims = (await this.claimsForRealm(
-      claim.account_id,
-      claim.realm_id,
-    )).filter((candidate) =>
-      candidate.assignment_kind === "customer" && !candidate.retired_at
-    ).sort((left, right) =>
-      left.created_at.localeCompare(right.created_at) ||
-      left.alias.localeCompare(right.alias)
-    );
-    const position = realmClaims.findIndex((candidate) =>
-      candidate.claim_id === claim.claim_id
-    );
-    const overPlan = !policy.feature_enabled ||
-      (policy.alias_limit !== null && position >= policy.alias_limit);
+    let overPlan = !policy.feature_enabled;
+    if (!overPlan && policy.alias_limit !== null) {
+      const usage = await this.usageForRealm(claim.account_id, claim.realm_id);
+      // A recovery can observe a lower plan after this approval already
+      // reserved allocation. Conservatively grace this still-provisioning
+      // approval when the O(1) allocated counter is now over capacity. The
+      // paginated plan reconciler later restores deterministic oldest-first
+      // ordering; the approval path never scans an unlimited realm.
+      overPlan = usage.realm.customer_allocated > policy.alias_limit;
+    }
     let planSuspended = claim.plan_suspended === true;
     const operationalGateSuspended = !policy.activation_enabled;
     let planGraceUntil = claim.plan_grace_until ?? null;
@@ -2318,7 +3107,13 @@ export class DurableRealmEmailAliasRegistry {
     await this.atomic(mutation.entries, [
       approvalDueKey(claim),
       ...(oldGraceKey && oldGraceKey !== newGraceKey ? [oldGraceKey] : []),
-    ]);
+    ], {
+      claimUsageTransition: {
+        previousClaim: claim,
+        desiredClaim: updatedClaim,
+        updatedAt: mutation.now,
+      },
+    });
     await this.scheduleNextAlarm().catch(() => {});
     return json(body);
   }
@@ -2382,6 +3177,11 @@ export class DurableRealmEmailAliasRegistry {
       includeCanonical: false,
       allowMissingCellForRetirement: true,
       handoffDeletes: [approvalDueKey(claim)],
+      claimUsageTransition: {
+        previousClaim: claim,
+        desiredClaim: terminal,
+        updatedAt: mutation.now,
+      },
     });
     return this.drainProjectionIntent(projection);
   }
@@ -2402,6 +3202,7 @@ export class DurableRealmEmailAliasRegistry {
     if (request.status !== "pending_review") {
       fail("alias request is no longer pending", 409);
     }
+    await this.assertPendingCountersReady();
     const claim = await this.storage.get(claimKey(request.alias));
     if (!claim || claim.assignment_kind || claim.request_id !== request.id) {
       fail("alias request claim is inconsistent", 409);
@@ -2434,7 +3235,13 @@ export class DurableRealmEmailAliasRegistry {
       claimKey(request.alias),
       claimSkeletonKey(request.skeleton),
       accountClaimIndexKey(claim),
-    ]);
+    ], {
+      claimUsageTransition: {
+        previousClaim: claim,
+        desiredClaim: null,
+        updatedAt: mutation.now,
+      },
+    });
     return json(body);
   }
 
@@ -2496,6 +3303,7 @@ export class DurableRealmEmailAliasRegistry {
     if (claim.internal_intent || claim.customer_activation_intent) {
       fail("alias provisioning is still converging", 409);
     }
+    if (input.action === "retire") await this.assertPendingCountersReady();
     if (claim.retired_at && input.action !== "retire") {
       fail("retired aliases cannot be reactivated", 409);
     }
@@ -2568,6 +3376,15 @@ export class DurableRealmEmailAliasRegistry {
       entries: mutation.entries,
       responseBody: body,
       responseStatus: 200,
+      ...(input.action === "retire"
+        ? {
+          claimUsageTransition: {
+            previousClaim: claim,
+            desiredClaim: updated,
+            updatedAt: mutation.now,
+          },
+        }
+        : {}),
     });
     return this.drainProjectionIntent(intent);
   }
@@ -2810,6 +3627,7 @@ export class DurableRealmEmailAliasRegistry {
     const claim = await this.storage.get(claimKey(alias));
     if (claim?.customer_activation_intent === true &&
         claim.assignment_kind === "customer") {
+      await this.assertPendingCountersReady();
       const request = await this.storage.get(requestKey(claim.request_id));
       if (request?.status !== "provisioning") {
         fail("customer provisioning intent is inconsistent", 409);

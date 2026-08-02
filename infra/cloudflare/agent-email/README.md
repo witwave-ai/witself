@@ -22,6 +22,35 @@ Managed alias delivery also requires
 message body is read or a cell is contacted. Canonical Realm ID and legacy
 literal-pilot delivery are intentionally unaffected.
 
+Dynamic route lookup is protected independently of account policy. A positive
+`EMAIL_DIRECTORY` projection is always checked first and bypasses negative
+state. On a valid cold KV miss, the Worker hashes
+`domain + NUL + realm-label`, coalesces identical in-flight lookups, and keeps
+only a 10-second, 1,024-entry in-isolate SHA-256 miss-marker cache. The marker
+contains no address, domain, or realm label. Only the one admitted live
+control-plane lookup may turn an authoritative 404 with no prior route evidence
+into a permanent unknown-recipient result; coalesced followers and later
+marker hits tempfail so an activation race cannot create additional bounces.
+A shared lookup that finds a valid fresh projection remains usable by all of
+its followers.
+
+Every control-plane fallback also requires one Cloudflare Rate Limiting
+binding. Before that binding, fixed in-isolate windows strictly admit at most
+10 cold and 100 known-or-uncertain leader lookups per 10 seconds; the two fixed
+counters contain no label-derived state. Singleflight followers consume no
+additional local or Cloudflare token. Cold misses use
+`REALM_ROUTE_COLD_MISS_LIMITER`, configured for 10 calls per 10 seconds with the
+fixed runtime key `cold-miss-v1`. Stale known routes, corrupt projections, and
+KV read failures use
+`REALM_ROUTE_KNOWN_MISS_LIMITER`, configured for 100 calls per 10 seconds with
+the fixed key `known-miss-v1`. Missing bindings, binding errors, malformed
+binding results, and denied admission all produce the same sanitized temporary
+SMTP failure before the raw message is read. Labels never become limiter keys,
+so rotating labels cannot create independent budgets. Cloudflare documents
+these per-location counters as permissive and eventually consistent; they add
+a shared protective layer around the strict per-isolate window, not exact
+accounting, a billable quota, or a cross-location hard limit.
+
 The Worker rejects messages larger than the 25 MiB transport ceiling, signs
 the SMTP envelope plus raw-message digest with Ed25519, and relays the raw
 message to the selected cell. The cell may return an exact plan-aware
@@ -54,9 +83,11 @@ permanent cell verdict is rejected once without retry.
   literal routes before activation. The route manager reports the live setting
   and refuses preparation or activation if it cannot be read or is disabled.
 - Do not activate until the destination cell is enabled and healthy.
-- The owning cell's PostgreSQL limiter is the sole authoritative rate decision.
-  Every enrolled delivery reaches the cell feature check first, preserving
-  accept-and-drop behavior for plan-disabled accounts without edge changes.
+- The owning cell's PostgreSQL limiter is the sole authoritative account and
+  delivery-throughput decision. The edge route-lookup limiters protect one
+  shared dependency and never implement plan or billable usage. Every enrolled
+  delivery reaches the cell feature check first, preserving accept-and-drop
+  behavior for plan-disabled accounts without edge changes.
 - A failed operation attempts to disable the pilot gate and its managed rules;
   inspect Cloudflare state before retrying any reported incomplete rollback.
 
@@ -88,8 +119,20 @@ credential-free HTTPS origin `CONTROL_PLANE_URL`. Set
 it defaults to `false` and rejects any value other than literal `true` or
 `false`. The renderer refuses the KV ID bound to
 the adjacent control-plane Worker. The generated file is local operator state
-and must not be committed. `CONTROL_PLANE_EDGE_TOKEN` is deliberately absent
-from both the template and generated file.
+and must not be committed. The generated Worker must expose
+`REALM_ROUTE_COLD_MISS_LIMITER` at 10 calls per 10 seconds and
+`REALM_ROUTE_KNOWN_MISS_LIMITER` at 100 calls per 10 seconds; the committed
+template owns their distinct namespace IDs. `CONTROL_PLANE_EDGE_TOKEN` is
+deliberately absent from both the template and generated file.
+
+Rate-limit `namespace_id` values are account-wide, not repository-local. A
+read-only account preflight on 2026-08-02 found only the control-plane recovery
+limiter at namespace `1001`, so the committed email namespaces `2201` and
+`2202` were unique at that check. Recheck all deployed Workers in the target
+Cloudflare account immediately before every first deploy or namespace change;
+sharing a namespace also shares counters for the same key. If either ID is in
+use, stop and make one reviewed template-and-test change rather than deploying
+a collision.
 
 ## Staged managed rollout
 
@@ -160,13 +203,22 @@ mutation.
    mailbox row through the owner-only API before allowing expected low-risk
    verification-code workflows.
 
-7. Confirm the value-free edge outcome stream. The Worker writes one
-   best-effort Analytics Engine point per final SMTP-facing outcome; metrics
-   failure never changes message disposition. The dataset contains only the
-   fixed schema, outcome, phase, count, latency, raw byte count, and numeric
-   response status — never an address, realm, agent, sender, subject, message
-   id, digest, signature, or content-derived value. Query the last hour with a
-   token carrying `Account Analytics Read`:
+7. Confirm the value-free edge outcome and route-lookup streams. The Worker
+   writes one best-effort Analytics Engine point per final SMTP-facing outcome
+   under `witself.agent-email.edge.v1`. It also writes route observations under
+   `witself.agent-email.route-lookup.v1`, using only `result`, `evidence`, and
+   `route_kind` closed enums plus count, latency, and numeric response status.
+   Route results are `kv_fresh`, `legacy`, `cp_found`, `cp_not_found`,
+   `miss_suppressed`, `cold_limited`, `known_limited`, `kv_error`, or
+   `cp_error`; evidence is `none`, `known`, or `uncertain`; and route kind is
+   `canonical`, `alias`, `pilot`, or `unknown`. Metrics failure never changes
+   message disposition. Each recipient lookup emits exactly one terminal route
+   event; for a failed or corrupt KV read that continues to the control plane,
+   `evidence=uncertain` preserves the context without emitting a second early
+   `kv_error` event. Neither schema contains an address, domain, realm
+   label, account, realm, agent, sender, subject, message id, digest, signature,
+   limiter key, or content-derived value. Query the final-outcome stream for
+   the last hour with a token carrying `Account Analytics Read`:
 
    ```sh
    npm run metrics -- summary 60

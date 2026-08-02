@@ -483,10 +483,41 @@ deletion still lacks its required control-plane canonical-route retirement.
 The global registry also needs a portable, append-only authority journal and
 tested empty-target recovery ceremony; its SQLite Durable Object point-in-time
 recovery is a short-window first line of defense, not sufficient protection for
-later tombstones and monotonic controller revisions. Finally, activation needs
-a bounded technical ceiling/rate guard for pending requests even on unlimited
-plans, plus a load-tested negative-cache or rate shield so random SMTP labels
-cannot turn every miss into traffic on the one authoritative registry object.
+later tombstones and monotonic controller revisions. The request registry now
+has plan-independent technical queue ceilings of eight open requests per realm
+and 64 per account. `pending_review` and durable `provisioning` both consume an
+open slot; successful approval, rejection, or terminal abort releases it, while
+customer allocation remains counted until retirement. Exact membership-backed
+counters make create and ordinary approval O(1), including explicit-unlimited
+plans, and exact membership plus aggregate integrity checks fail closed on
+drift. Existing registry state is rebuilt in bounded 100-claim alarm pages.
+For ready-state corruption, an authenticated administrator can start one
+idempotent, audited recovery that clears only derived state, scans canonical
+claims, and verifies a second full bounded pass. Count-changing writes remain
+fenced throughout and only verified completion restores readiness. Deployments may
+lower, but never raise, the compiled ceilings with
+`CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM` and
+`CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT`. A separate time-window request
+rate guard still remains before activation. The Email Worker now shields the
+authoritative registry from random valid SMTP labels: positive KV projections
+always win; cold misses use SHA-256-keyed 10-second, 1,024-entry in-isolate
+suppression and identical-request singleflight; and all control-plane fallbacks
+require fixed-key Cloudflare Rate Limiting admission before raw content is
+read. Fixed in-isolate windows first enforce 10 cold and 100 known-or-uncertain
+leader lookups per 10 seconds; singleflight followers consume neither local nor
+Cloudflare admission. Cold misses then use
+`REALM_ROUTE_COLD_MISS_LIMITER` at 10 calls per 10 seconds, while stale or
+uncertain known-route recovery uses
+`REALM_ROUTE_KNOWN_MISS_LIMITER` at 100 calls per 10 seconds. An admitted cold
+lookup with no prior evidence may turn an authoritative 404 into one permanent
+bounce; its coalesced followers and later suppressed attempts tempfail. Missing,
+failed, malformed, or denying limiter bindings also tempfail. Cloudflare's
+per-location counters are permissive and eventually consistent, so they add a
+shared shield around strict per-isolate windows rather than exact or billable
+accounting. Namespace IDs `2201` and `2202` were verified account-unique on
+2026-08-02, when only the control-plane recovery namespace `1001` was deployed;
+operators must repeat that account-wide preflight before first deployment or
+any namespace change.
 Keep both activation gates unset until those items are closed. The current
 exact-address pilot rules do not deliver arbitrary new aliases. Canonical
 routes for realms that never perform an alias operation also still require
@@ -1112,10 +1143,16 @@ Receive-only still carries real obligations:
     list, the vanity length cap, per-plan gating, and whether release or
     transfer is ever permitted given address permanence (see Addressing And
     Domain Model).
-11. Edge observability baseline is implemented through one best-effort,
-    value-free Analytics Engine point per SMTP-facing outcome. It includes the
-    closed `tempfail_rate_limited` outcome with phase `response` for an
-    authoritative retryable cell refusal.
+11. Edge observability baseline is implemented through best-effort, value-free
+    Analytics Engine points. `witself.agent-email.edge.v1` records each
+    SMTP-facing outcome, including the closed `tempfail_rate_limited` outcome
+    with phase `response` for an authoritative retryable cell refusal.
+    `witself.agent-email.route-lookup.v1` separately records fixed route result,
+    evidence, and route-kind enums plus count, latency, and numeric status; it
+    emits exactly one terminal event per recipient lookup and never records an
+    address, domain, realm label, limiter key, or tenant identifier. A corrupt
+    or failed KV read that continues to the control plane is represented by
+    `evidence=uncertain`, not a second early `kv_error` event.
     Export from that edge dataset into the wider platform metrics plane remains
     promotion work.
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { handleEmail } from "../src/index.js";
+import { createRouteLookupState, handleEmail } from "../src/index.js";
 import {
   CONFIG_KEY,
   realmRouteKey,
@@ -11,7 +11,7 @@ import {
   runtimeRecipient,
 } from "../src/directory.mjs";
 import { PILOT_MAXIMUM_RAW_BYTES } from "../src/relay.mjs";
-import { EDGE_METRICS_SCHEMA } from "../src/metrics.mjs";
+import { EDGE_METRICS_SCHEMA, ROUTE_LOOKUP_METRICS_SCHEMA } from "../src/metrics.mjs";
 
 const vector = JSON.parse(await readFile(new URL("./golden-vector.json", import.meta.url), "utf8"));
 const example = JSON.parse(await readFile(new URL("../pilot.example.json", import.meta.url), "utf8"));
@@ -20,6 +20,15 @@ const first = example.agents[0];
 const aliasLabel = "acme-west";
 const aliasAddress = `alpha.${aliasLabel}@${example.domain}`;
 const vectorNowMS = vector.metadata.timestamp * 1000;
+const allowLimiter = { async limit() { return { success: true }; } };
+
+function verdictPoints(points) {
+  return points.filter((point) => point.blobs[0] === EDGE_METRICS_SCHEMA);
+}
+
+function routeLookupPoints(points) {
+  return points.filter((point) => point.blobs[0] === ROUTE_LOOKUP_METRICS_SCHEMA);
+}
 
 function routeProjection(realmLabel, overrides = {}) {
   return {
@@ -46,6 +55,8 @@ function dynamicEnv(routes, metrics = null, extra = {}) {
     RELAY_KEY_ID: vector.metadata.key_id,
     RELAY_ED25519_PRIVATE_KEY: vector.pkcs8_base64,
     REALM_EMAIL_ALIAS_DELIVERY_ENABLED: "true",
+    REALM_ROUTE_COLD_MISS_LIMITER: allowLimiter,
+    REALM_ROUTE_KNOWN_MISS_LIMITER: allowLimiter,
     EMAIL_DIRECTORY: {
       async get(key, type) {
         assert.equal(type, "json");
@@ -55,6 +66,14 @@ function dynamicEnv(routes, metrics = null, extra = {}) {
     ...(metrics ? { EMAIL_EDGE_METRICS: metrics } : {}),
     ...extra,
   };
+}
+
+function coldRouteEnv(metrics = null, extra = {}) {
+  return dynamicEnv({}, metrics, {
+    CONTROL_PLANE_URL: "https://control.example/",
+    CONTROL_PLANE_EDGE_TOKEN: "edge-token-1234567890",
+    ...extra,
+  });
 }
 
 function env(enabled = true, includeRecipient = true, metrics = null) {
@@ -146,13 +165,14 @@ test("plan-disabled receipt accepts and drops with a value-free metric", async (
   await handleEmail(mail, env(true, true, metrics), {
     fetch: async () => new Response('{"verdict":"feature_disabled"}', { status: 200 }),
   });
+  const verdicts = verdictPoints(points);
   assert.deepEqual(mail.rejected, []);
-  assert.equal(points.length, 1);
-  assert.deepEqual(points[0].blobs, [
+  assert.equal(verdicts.length, 1);
+  assert.deepEqual(verdicts[0].blobs, [
     EDGE_METRICS_SCHEMA, "discarded_feature_disabled", "response",
   ]);
-  assert.equal(points[0].doubles[3], 200);
-  assert.doesNotMatch(JSON.stringify(points[0]), /@|address|account|realm_|agent_/i);
+  assert.equal(verdicts[0].doubles[3], 200);
+  assert.doesNotMatch(JSON.stringify(points), /@|address|account|realm_|agent_/i);
 });
 
 test("unknown and permanent cell verdicts use one sanitized permanent rejection", async () => {
@@ -175,13 +195,14 @@ test("terminal retry-canary verdict rejects once with no marker leakage", async 
   await handleEmail(mail, env(true, true, metrics), {
     fetch: async () => new Response('{"verdict":"retry_canary_rejected"}', { status: 410 }),
   });
+  const verdicts = verdictPoints(points);
   assert.deepEqual(mail.rejected, ["recipient unavailable"]);
-  assert.equal(points.length, 1);
-  assert.deepEqual(points[0].blobs, [
+  assert.equal(verdicts.length, 1);
+  assert.deepEqual(verdicts[0].blobs, [
     EDGE_METRICS_SCHEMA, "rejected_retry_canary", "response",
   ]);
-  assert.equal(points[0].doubles[3], 410);
-  assert.doesNotMatch(JSON.stringify(points[0]), /challenge|retry_canary_rejected|X-Witself/i);
+  assert.equal(verdicts[0].doubles[3], 410);
+  assert.doesNotMatch(JSON.stringify(points), /challenge|retry_canary_rejected|X-Witself/i);
 });
 
 test("cell over-size verdict maps to a sanitized SMTP 552 outcome", async () => {
@@ -191,14 +212,15 @@ test("cell over-size verdict maps to a sanitized SMTP 552 outcome", async () => 
   await handleEmail(mail, env(true, true, metrics), {
     fetch: async () => new Response('{"verdict":"over_size"}', { status: 413 }),
   });
+  const verdicts = verdictPoints(points);
   assert.deepEqual(mail.rejected, ["message too large"]);
-  assert.equal(points.length, 1);
-  assert.deepEqual(points[0].blobs, [
+  assert.equal(verdicts.length, 1);
+  assert.deepEqual(verdicts[0].blobs, [
     EDGE_METRICS_SCHEMA, "rejected_over_size", "response",
   ]);
-  assert.equal(points[0].doubles[3], 552);
+  assert.equal(verdicts[0].doubles[3], 552);
   assert.doesNotMatch(
-    JSON.stringify(points[0]),
+    JSON.stringify(points),
     /@|address|account|realm_|agent_|subject|digest|signature/i,
   );
 });
@@ -216,23 +238,34 @@ test("exact cell rate-limit verdict maps to a sanitized temporary outcome", asyn
     }),
     { message: "agent email relay temporarily unavailable" },
   );
+  const verdicts = verdictPoints(points);
   assert.deepEqual(mail.rejected, []);
-  assert.equal(points.length, 1);
-  assert.deepEqual(points[0].indexes, ["tempfail_rate_limited"]);
-  assert.deepEqual(points[0].blobs, [
+  assert.equal(verdicts.length, 1);
+  assert.deepEqual(verdicts[0].indexes, ["tempfail_rate_limited"]);
+  assert.deepEqual(verdicts[0].blobs, [
     EDGE_METRICS_SCHEMA, "tempfail_rate_limited", "response",
   ]);
-  assert.equal(points[0].doubles[3], 429);
+  assert.equal(verdicts[0].doubles[3], 429);
   assert.doesNotMatch(
-    JSON.stringify(points[0]),
+    JSON.stringify(points),
     /@|address|account|realm_|agent_|sender|recipient|subject|digest|signature/i,
   );
 });
 
 test("disabled pilot and transport failures use one sanitized transient error", async () => {
-  await assert.rejects(() => handleEmail(message(), env(false), {}), {
+  const points = [];
+  await assert.rejects(() => handleEmail(
+    message(),
+    env(false, true, { writeDataPoint(point) { points.push(point); } }),
+    {},
+  ), {
     message: "agent email relay temporarily unavailable",
   });
+  const lookups = routeLookupPoints(points);
+  assert.equal(lookups.length, 1);
+  assert.deepEqual(lookups[0].blobs, [
+    ROUTE_LOOKUP_METRICS_SCHEMA, "legacy", "known", "pilot",
+  ]);
   await assert.rejects(() => handleEmail(message(), env(), { fetch: async () => { throw new Error("secret upstream"); } }), {
     message: "agent email relay temporarily unavailable",
   });
@@ -296,12 +329,13 @@ test("edge metrics record value-free accepted, rejected, and tempfailed outcomes
     { message: "agent email relay temporarily unavailable" },
   );
 
-  assert.equal(points.length, 4);
-  assert.deepEqual(points.map((point) => point.blobs[1]), [
+  const verdicts = verdictPoints(points);
+  assert.equal(verdicts.length, 4);
+  assert.deepEqual(verdicts.map((point) => point.blobs[1]), [
     "accepted", "rejected_unknown_recipient", "tempfail_disabled", "tempfail_disabled",
   ]);
-  assert.equal(points.at(-1).blobs[2], "response");
-  for (const point of points) {
+  assert.equal(verdicts.at(-1).blobs[2], "response");
+  for (const point of verdicts) {
     assert.deepEqual(point.indexes, [point.blobs[1]]);
     assert.equal(point.blobs[0], EDGE_METRICS_SCHEMA);
     assert.equal(point.doubles[0], 1);
@@ -363,10 +397,11 @@ test("fleet delivery gate is exact-true, alias-only, and default-off", async () 
       ),
       { message: "agent email relay temporarily unavailable" },
     );
+    const verdicts = verdictPoints(points);
     assert.equal(fetched, false);
     assert.deepEqual(mail.rejected, []);
-    assert.equal(points.length, 1);
-    assert.deepEqual(points[0].blobs, [
+    assert.equal(verdicts.length, 1);
+    assert.deepEqual(verdicts[0].blobs, [
       EDGE_METRICS_SCHEMA, "tempfail_alias_gate", "route",
     ]);
   }
@@ -405,7 +440,7 @@ test("dynamic routing keeps account-plan enforcement in the signed cell verdict"
     },
   );
   assert.deepEqual(mail.rejected, []);
-  assert.deepEqual(points[0].blobs, [
+  assert.deepEqual(verdictPoints(points)[0].blobs, [
     EDGE_METRICS_SCHEMA, "discarded_feature_disabled", "response",
   ]);
 });
@@ -432,13 +467,14 @@ test("suspended and retired dynamic routes fail closed without reaching a cell",
     } else {
       await operation;
     }
+    const verdicts = verdictPoints(points);
     assert.equal(fetched, false);
     assert.deepEqual(mail.rejected, rejects);
-    assert.equal(points.length, 1);
-    assert.equal(points[0].blobs[1], expectedOutcome);
-    assert.equal(points[0].blobs[2], "route");
+    assert.equal(verdicts.length, 1);
+    assert.equal(verdicts[0].blobs[1], expectedOutcome);
+    assert.equal(verdicts[0].blobs[2], "route");
     assert.doesNotMatch(
-      JSON.stringify(points[0]),
+      JSON.stringify(points),
       /@|address|account|realm_|agent_|subject|digest|signature/i,
     );
   }
@@ -465,7 +501,7 @@ test("plan-inactive suspended routes reject without an unbounded SMTP retry loop
     },
   );
   assert.deepEqual(mail.rejected, ["recipient unavailable"]);
-  assert.equal(points[0].blobs[1], "rejected_inactive_route");
+  assert.equal(verdictPoints(points)[0].blobs[1], "rejected_inactive_route");
 });
 
 test("malformed dynamic addresses reject before directory lookup or relay", async () => {
@@ -476,15 +512,727 @@ test("malformed dynamic addresses reject before directory lookup or relay", asyn
     `alpha.acme_west@${example.domain}`,
   ]) {
     let reads = 0;
+    let limiterCalls = 0;
     let fetched = false;
-    const currentEnv = dynamicEnv({});
+    const limiter = { async limit() { limiterCalls++; return { success: true }; } };
+    const currentEnv = dynamicEnv({}, null, {
+      REALM_ROUTE_COLD_MISS_LIMITER: limiter,
+      REALM_ROUTE_KNOWN_MISS_LIMITER: limiter,
+    });
     currentEnv.EMAIL_DIRECTORY.get = async () => { reads++; return null; };
     const mail = message({ to: address });
     await handleEmail(mail, currentEnv, { fetch: async () => { fetched = true; } });
     assert.deepEqual(mail.rejected, ["recipient unavailable"]);
     assert.equal(reads, 0);
+    assert.equal(limiterCalls, 0);
     assert.equal(fetched, false);
   }
+});
+
+test("10,000 rotating valid labels share one fixed cold-miss budget", async () => {
+  const state = createRouteLookupState();
+  const limiterKeys = [];
+  let controlPlaneCalls = 0;
+  let rawReads = 0;
+  const currentEnv = coldRouteEnv(null, {
+    REALM_ROUTE_COLD_MISS_LIMITER: {
+      async limit({ key }) {
+        limiterKeys.push(key);
+        return { success: true };
+      },
+    },
+  });
+
+  for (let index = 0; index < 10_000; index++) {
+    const label = `r${index.toString(36).padStart(3, "0")}`;
+    const mail = message({ to: `alpha.${label}@${example.domain}` });
+    Object.defineProperty(mail, "raw", {
+      get() {
+        rawReads++;
+        throw new Error("raw message must not be read during route admission");
+      },
+    });
+    try {
+      await handleEmail(mail, currentEnv, {
+        now: () => vectorNowMS,
+        routeLookupState: state,
+        fetch: async (input) => {
+          assert.equal(input instanceof Request, true);
+          controlPlaneCalls++;
+          return new Response(null, { status: 404 });
+        },
+      });
+    } catch (error) {
+      assert.equal(error.message, "agent email relay temporarily unavailable");
+    }
+  }
+
+  assert.equal(controlPlaneCalls, 10);
+  assert.equal(limiterKeys.length, 10);
+  assert.deepEqual(new Set(limiterKeys), new Set(["cold-miss-v1"]));
+  assert.equal(rawReads, 0);
+  assert.equal(state.suppressed.size, 10);
+  assert.equal(state.inflight.size, 0);
+});
+
+test("strict local cold-miss budget rolls over only after ten seconds", async () => {
+  const state = createRouteLookupState();
+  let nowMS = vectorNowMS;
+  let limiterCalls = 0;
+  let controlPlaneCalls = 0;
+  const currentEnv = coldRouteEnv(null, {
+    REALM_ROUTE_COLD_MISS_LIMITER: {
+      async limit({ key }) {
+        assert.equal(key, "cold-miss-v1");
+        limiterCalls++;
+        return { success: true };
+      },
+    },
+  });
+  const attempt = async (index) => {
+    const label = `w${index.toString(36).padStart(2, "0")}`;
+    const mail = message({ to: `alpha.${label}@${example.domain}` });
+    try {
+      await handleEmail(mail, currentEnv, {
+        now: () => nowMS,
+        routeLookupState: state,
+        fetch: async () => {
+          controlPlaneCalls++;
+          return new Response(null, { status: 404 });
+        },
+      });
+    } catch (error) {
+      assert.equal(error.message, "agent email relay temporarily unavailable");
+    }
+    return mail;
+  };
+
+  for (let index = 0; index < 10; index++) {
+    assert.deepEqual((await attempt(index)).rejected, ["recipient unavailable"]);
+  }
+  assert.deepEqual((await attempt(10)).rejected, []);
+  nowMS += 9_999;
+  assert.deepEqual((await attempt(11)).rejected, []);
+  assert.equal(controlPlaneCalls, 10);
+  assert.equal(limiterCalls, 10);
+
+  nowMS += 1;
+  assert.deepEqual((await attempt(12)).rejected, ["recipient unavailable"]);
+  assert.equal(controlPlaneCalls, 11);
+  assert.equal(limiterCalls, 11);
+});
+
+test("same-label cold misses are suppressed and concurrent lookups singleflight", async () => {
+  const state = createRouteLookupState();
+  const points = [];
+  let limiterCalls = 0;
+  let controlPlaneCalls = 0;
+  let releaseLookup;
+  const lookupReleased = new Promise((resolve) => { releaseLookup = resolve; });
+  let enterLookup;
+  const lookupEntered = new Promise((resolve) => { enterLookup = resolve; });
+  const currentEnv = coldRouteEnv(
+    { writeDataPoint(point) { points.push(point); } },
+    {
+      REALM_ROUTE_COLD_MISS_LIMITER: {
+        async limit({ key }) {
+          assert.equal(key, "cold-miss-v1");
+          limiterCalls++;
+          return { success: true };
+        },
+      },
+    },
+  );
+  const runtime = {
+    now: () => vectorNowMS,
+    routeLookupState: state,
+    fetch: async (input) => {
+      assert.equal(input instanceof Request, true);
+      controlPlaneCalls++;
+      enterLookup();
+      await lookupReleased;
+      return new Response(null, { status: 404 });
+    },
+  };
+
+  const concurrent = Array.from({ length: 32 }, () => {
+    const mail = message({ to: aliasAddress });
+    return handleEmail(mail, currentEnv, runtime).then(
+      () => ({ mail, error: null }),
+      (error) => ({ mail, error }),
+    );
+  });
+  await lookupEntered;
+  assert.equal(controlPlaneCalls, 1);
+  assert.equal(limiterCalls, 1);
+  releaseLookup();
+  const completed = await Promise.all(concurrent);
+  let permanent = 0;
+  let transient = 0;
+  for (const { mail, error } of completed) {
+    if (error) {
+      assert.equal(error.message, "agent email relay temporarily unavailable");
+      assert.deepEqual(mail.rejected, []);
+      transient++;
+    } else {
+      assert.deepEqual(mail.rejected, ["recipient unavailable"]);
+      permanent++;
+    }
+  }
+  assert.equal(permanent, 1);
+  assert.equal(transient, 31);
+  assert.equal(state.suppressed.size, 1);
+  assert.equal(state.inflight.size, 0);
+
+  const retry = message({ to: aliasAddress });
+  await assert.rejects(
+    () => handleEmail(retry, currentEnv, runtime),
+    { message: "agent email relay temporarily unavailable" },
+  );
+  assert.deepEqual(retry.rejected, []);
+  assert.equal(controlPlaneCalls, 1);
+  assert.equal(limiterCalls, 1);
+  const results = routeLookupPoints(points).map((point) => point.blobs[1]);
+  assert.equal(results.filter((result) => result === "cp_not_found").length, 1);
+  assert.equal(results.filter((result) => result === "miss_suppressed").length, 32);
+});
+
+test("singleflight followers share a found projection without extra control-plane calls", async () => {
+  const state = createRouteLookupState();
+  const foundLabel = "found-route";
+  const foundAddress = `alpha.${foundLabel}@${example.domain}`;
+  let limiterCalls = 0;
+  let controlPlaneCalls = 0;
+  let relayCalls = 0;
+  let releaseLookup;
+  const lookupReleased = new Promise((resolve) => { releaseLookup = resolve; });
+  let allJoined;
+  const joined = new Promise((resolve) => { allJoined = resolve; });
+  let followerCount = 0;
+  const currentEnv = coldRouteEnv(
+    {
+      writeDataPoint(point) {
+        if (
+          point.blobs[0] === ROUTE_LOOKUP_METRICS_SCHEMA &&
+          point.blobs[1] === "miss_suppressed" &&
+          ++followerCount === 15
+        ) {
+          allJoined();
+        }
+      },
+    },
+    {
+      REALM_ROUTE_COLD_MISS_LIMITER: {
+        async limit() {
+          limiterCalls++;
+          return { success: true };
+        },
+      },
+    },
+  );
+  const runtime = {
+    now: () => vectorNowMS,
+    routeLookupState: state,
+    fetch: async (input) => {
+      if (input instanceof Request) {
+        controlPlaneCalls++;
+        await lookupReleased;
+        return Response.json(routeProjection(foundLabel));
+      }
+      relayCalls++;
+      return new Response('{"verdict":"accepted"}', { status: 200 });
+    },
+  };
+
+  const mails = Array.from({ length: 16 }, () => message({ to: foundAddress }));
+  const pending = mails.map((mail) => handleEmail(mail, currentEnv, runtime));
+  await joined;
+  assert.equal(controlPlaneCalls, 1);
+  assert.equal(limiterCalls, 1);
+  releaseLookup();
+  await Promise.all(pending);
+  assert.equal(relayCalls, 16);
+  assert.equal(mails.every((mail) => mail.rejected.length === 0), true);
+});
+
+test("cold-miss suppression expires after its fixed ten-second window", async () => {
+  const state = createRouteLookupState();
+  let nowMS = vectorNowMS;
+  let controlPlaneCalls = 0;
+  const currentEnv = coldRouteEnv();
+  const runtime = {
+    now: () => nowMS,
+    routeLookupState: state,
+    fetch: async () => {
+      controlPlaneCalls++;
+      return new Response(null, { status: 404 });
+    },
+  };
+
+  const first = message({ to: aliasAddress });
+  await handleEmail(first, currentEnv, runtime);
+  assert.deepEqual(first.rejected, ["recipient unavailable"]);
+
+  nowMS += 9_999;
+  const suppressed = message({ to: aliasAddress });
+  await assert.rejects(
+    () => handleEmail(suppressed, currentEnv, runtime),
+    { message: "agent email relay temporarily unavailable" },
+  );
+  assert.deepEqual(suppressed.rejected, []);
+  assert.equal(controlPlaneCalls, 1);
+
+  nowMS += 1;
+  const expired = message({ to: aliasAddress });
+  await handleEmail(expired, currentEnv, runtime);
+  assert.deepEqual(expired.rejected, ["recipient unavailable"]);
+  assert.equal(controlPlaneCalls, 2);
+});
+
+test("cold-miss suppression stores only bounded SHA-256 markers", async () => {
+  const state = createRouteLookupState();
+  for (let index = 0; index < 1_024; index++) {
+    state.suppressed.set(index.toString(16).padStart(64, "0"), vectorNowMS + 5_000);
+  }
+  const mail = message({ to: aliasAddress });
+  await handleEmail(mail, coldRouteEnv(), {
+    now: () => vectorNowMS,
+    routeLookupState: state,
+    fetch: async () => new Response(null, { status: 404 }),
+  });
+  assert.deepEqual(mail.rejected, ["recipient unavailable"]);
+  assert.equal(state.suppressed.size, 1_024);
+  assert.equal(state.inflight.size, 0);
+  for (const [key, expiresAt] of state.suppressed) {
+    assert.match(key, /^[0-9a-f]{64}$/);
+    assert.equal(typeof expiresAt, "number");
+    assert.equal(key.includes(aliasLabel), false);
+    assert.equal(key.includes(example.domain), false);
+  }
+});
+
+test("a positive KV projection always beats an existing cold-miss marker", async () => {
+  const state = createRouteLookupState();
+  const routes = new Map();
+  let limiterCalls = 0;
+  let controlPlaneCalls = 0;
+  let relays = 0;
+  const currentEnv = coldRouteEnv(null, {
+    REALM_ROUTE_COLD_MISS_LIMITER: {
+      async limit() {
+        limiterCalls++;
+        return { success: true };
+      },
+    },
+  });
+  currentEnv.EMAIL_DIRECTORY.get = async (key, type) => {
+    assert.equal(type, "json");
+    return routes.get(key) ?? null;
+  };
+  const runtime = {
+    now: () => vectorNowMS,
+    routeLookupState: state,
+    fetch: async (input) => {
+      if (input instanceof Request) {
+        controlPlaneCalls++;
+        return new Response(null, { status: 404 });
+      }
+      relays++;
+      return new Response('{"verdict":"accepted"}', { status: 200 });
+    },
+  };
+
+  const firstMiss = message({ to: aliasAddress });
+  await handleEmail(firstMiss, currentEnv, runtime);
+  assert.deepEqual(firstMiss.rejected, ["recipient unavailable"]);
+  assert.equal(state.suppressed.size, 1);
+
+  routes.set(realmRouteKey(example.domain, aliasLabel), routeProjection(aliasLabel));
+  const projected = message({ to: aliasAddress });
+  await handleEmail(projected, currentEnv, runtime);
+  assert.deepEqual(projected.rejected, []);
+  assert.equal(controlPlaneCalls, 1);
+  assert.equal(limiterCalls, 1);
+  assert.equal(relays, 1);
+});
+
+test("cold and known lookup admission fail safely before reading content", async () => {
+  const missingBindings = [
+    {},
+    { REALM_ROUTE_COLD_MISS_LIMITER: { async limit() { throw new Error("down"); } } },
+    { REALM_ROUTE_COLD_MISS_LIMITER: { async limit() { return { success: false }; } } },
+    { REALM_ROUTE_COLD_MISS_LIMITER: { async limit() { return {}; } } },
+  ];
+  for (const bindings of missingBindings) {
+    let rawReads = 0;
+    let fetches = 0;
+    const mail = message({ to: aliasAddress });
+    Object.defineProperty(mail, "raw", { get() { rawReads++; return null; } });
+    const currentEnv = coldRouteEnv(null, {
+      REALM_ROUTE_COLD_MISS_LIMITER: undefined,
+      ...bindings,
+    });
+    await assert.rejects(
+      () => handleEmail(mail, currentEnv, {
+        routeLookupState: createRouteLookupState(),
+        fetch: async () => { fetches++; return new Response(null, { status: 404 }); },
+      }),
+      { message: "agent email relay temporarily unavailable" },
+    );
+    assert.deepEqual(mail.rejected, []);
+    assert.equal(rawReads, 0);
+    assert.equal(fetches, 0);
+  }
+
+  for (const limiter of [
+    undefined,
+    { async limit() { throw new Error("down"); } },
+    { async limit() { return { success: false }; } },
+  ]) {
+    let rawReads = 0;
+    let fetches = 0;
+    const stale = routeProjection(aliasLabel, {
+      updated_at: new Date(vectorNowMS - 301_000).toISOString(),
+    });
+    const mail = message({ to: aliasAddress });
+    Object.defineProperty(mail, "raw", { get() { rawReads++; return null; } });
+    await assert.rejects(
+      () => handleEmail(
+        mail,
+        dynamicEnv(
+          { [aliasLabel]: stale },
+          null,
+          {
+            CONTROL_PLANE_URL: "https://control.example/",
+            CONTROL_PLANE_EDGE_TOKEN: "edge-token-1234567890",
+            REALM_ROUTE_KNOWN_MISS_LIMITER: limiter,
+          },
+        ),
+        {
+          now: () => vectorNowMS,
+          routeLookupState: createRouteLookupState(),
+          fetch: async () => { fetches++; return Response.json(routeProjection(aliasLabel)); },
+        },
+      ),
+      { message: "agent email relay temporarily unavailable" },
+    );
+    assert.deepEqual(mail.rejected, []);
+    assert.equal(rawReads, 0);
+    assert.equal(fetches, 0);
+  }
+});
+
+test("hash and local singleflight-capacity failures also stop before admission", async () => {
+  const saturatedState = createRouteLookupState();
+  saturatedState.inflight = new Map(
+    Array.from({ length: 1_024 }, (_, index) => [`occupied-${index}`, new Promise(() => {})]),
+  );
+  for (const state of [
+    createRouteLookupState(),
+    saturatedState,
+  ]) {
+    let limiterCalls = 0;
+    let fetches = 0;
+    let rawReads = 0;
+    const mail = message({ to: aliasAddress });
+    Object.defineProperty(mail, "raw", { get() { rawReads++; return null; } });
+    const runtime = {
+      routeLookupState: state,
+      fetch: async () => { fetches++; return new Response(null, { status: 404 }); },
+    };
+    if (state.inflight.size === 0) {
+      runtime.crypto = { subtle: { async digest() { throw new Error("unavailable"); } } };
+    }
+    await assert.rejects(
+      () => handleEmail(
+        mail,
+        coldRouteEnv(null, {
+          REALM_ROUTE_COLD_MISS_LIMITER: {
+            async limit() {
+              limiterCalls++;
+              return { success: true };
+            },
+          },
+        }),
+        runtime,
+      ),
+      { message: "agent email relay temporarily unavailable" },
+    );
+    assert.deepEqual(mail.rejected, []);
+    assert.equal(limiterCalls, 0);
+    assert.equal(fetches, 0);
+    assert.equal(rawReads, 0);
+  }
+});
+
+test("known-route refreshes use one fixed higher-capacity limiter key", async () => {
+  const stale = routeProjection(aliasLabel, {
+    updated_at: new Date(vectorNowMS - 301_000).toISOString(),
+  });
+  const keys = [];
+  let relayed = false;
+  const mail = message({ to: aliasAddress });
+  await handleEmail(
+    mail,
+    dynamicEnv(
+      { [aliasLabel]: stale },
+      null,
+      {
+        CONTROL_PLANE_URL: "https://control.example/",
+        CONTROL_PLANE_EDGE_TOKEN: "edge-token-1234567890",
+        REALM_ROUTE_KNOWN_MISS_LIMITER: {
+          async limit({ key }) {
+            keys.push(key);
+            return { success: true };
+          },
+        },
+      },
+    ),
+    {
+      now: () => vectorNowMS,
+      fetch: async (input) => {
+        if (input instanceof Request) {
+          return Response.json(routeProjection(aliasLabel, { controller_revision: 8 }));
+        }
+        relayed = true;
+        return new Response('{"verdict":"accepted"}', { status: 200 });
+      },
+    },
+  );
+  assert.deepEqual(keys, ["known-miss-v1"]);
+  assert.equal(relayed, true);
+  assert.deepEqual(mail.rejected, []);
+});
+
+test("strict local known-route budget admits 100 lookups per ten-second window", async () => {
+  const state = createRouteLookupState();
+  let nowMS = vectorNowMS;
+  let limiterCalls = 0;
+  let controlPlaneCalls = 0;
+  const routes = {};
+  for (let index = 0; index < 103; index++) {
+    const label = `k${index.toString(36).padStart(2, "0")}`;
+    routes[label] = routeProjection(label, {
+      updated_at: new Date(vectorNowMS - 301_000).toISOString(),
+    });
+  }
+  const currentEnv = dynamicEnv(routes, null, {
+    CONTROL_PLANE_URL: "https://control.example/",
+    CONTROL_PLANE_EDGE_TOKEN: "edge-token-1234567890",
+    REALM_ROUTE_KNOWN_MISS_LIMITER: {
+      async limit({ key }) {
+        assert.equal(key, "known-miss-v1");
+        limiterCalls++;
+        return { success: true };
+      },
+    },
+  });
+  const attempt = async (index) => {
+    const label = `k${index.toString(36).padStart(2, "0")}`;
+    const mail = message({ to: `alpha.${label}@${example.domain}` });
+    await assert.rejects(
+      () => handleEmail(mail, currentEnv, {
+        now: () => nowMS,
+        routeLookupState: state,
+        fetch: async () => {
+          controlPlaneCalls++;
+          return new Response(null, { status: 404 });
+        },
+      }),
+      { message: "agent email relay temporarily unavailable" },
+    );
+    assert.deepEqual(mail.rejected, []);
+  };
+
+  for (let index = 0; index < 101; index++) await attempt(index);
+  assert.equal(controlPlaneCalls, 100);
+  assert.equal(limiterCalls, 100);
+  nowMS += 10_000;
+  await attempt(101);
+  assert.equal(controlPlaneCalls, 101);
+  assert.equal(limiterCalls, 101);
+});
+
+test("exhausting the local cold lane does not consume the known lane", async () => {
+  const state = createRouteLookupState();
+  let coldBindingCalls = 0;
+  let knownBindingCalls = 0;
+  let controlPlaneCalls = 0;
+  const shared = {
+    CONTROL_PLANE_URL: "https://control.example/",
+    CONTROL_PLANE_EDGE_TOKEN: "edge-token-1234567890",
+    REALM_ROUTE_COLD_MISS_LIMITER: {
+      async limit() {
+        coldBindingCalls++;
+        return { success: true };
+      },
+    },
+    REALM_ROUTE_KNOWN_MISS_LIMITER: {
+      async limit() {
+        knownBindingCalls++;
+        return { success: true };
+      },
+    },
+  };
+  const runtime = {
+    now: () => vectorNowMS,
+    routeLookupState: state,
+    fetch: async () => {
+      controlPlaneCalls++;
+      return new Response(null, { status: 404 });
+    },
+  };
+
+  for (let index = 0; index < 11; index++) {
+    const label = `z${index.toString(36).padStart(2, "0")}`;
+    const mail = message({ to: `alpha.${label}@${example.domain}` });
+    try {
+      await handleEmail(mail, coldRouteEnv(null, shared), runtime);
+    } catch (error) {
+      assert.equal(error.message, "agent email relay temporarily unavailable");
+    }
+  }
+  assert.equal(coldBindingCalls, 10);
+  assert.equal(controlPlaneCalls, 10);
+
+  const stale = routeProjection(aliasLabel, {
+    updated_at: new Date(vectorNowMS - 301_000).toISOString(),
+  });
+  const knownMail = message({ to: aliasAddress });
+  await assert.rejects(
+    () => handleEmail(knownMail, dynamicEnv({ [aliasLabel]: stale }, null, shared), runtime),
+    { message: "agent email relay temporarily unavailable" },
+  );
+  assert.equal(knownBindingCalls, 1);
+  assert.equal(controlPlaneCalls, 11);
+});
+
+test("KV uncertainty and corrupt or stale evidence can never turn a 404 into a bounce", async () => {
+  const cases = [
+    {
+      setup(currentEnv) {
+        currentEnv.EMAIL_DIRECTORY.get = async () => { throw new Error("KV unavailable"); };
+      },
+    },
+    {
+      routes: {
+        [aliasLabel]: routeProjection(aliasLabel, {
+          updated_at: new Date(vectorNowMS - 301_000).toISOString(),
+        }),
+      },
+    },
+    {
+      routes: {
+        [aliasLabel]: routeProjection(aliasLabel, { realm_label: "other-realm" }),
+      },
+    },
+  ];
+  for (const currentCase of cases) {
+    const currentEnv = dynamicEnv(currentCase.routes ?? {}, null, {
+      CONTROL_PLANE_URL: "https://control.example/",
+      CONTROL_PLANE_EDGE_TOKEN: "edge-token-1234567890",
+    });
+    currentCase.setup?.(currentEnv);
+    const mail = message({ to: aliasAddress });
+    await assert.rejects(
+      () => handleEmail(mail, currentEnv, {
+        now: () => vectorNowMS,
+        routeLookupState: createRouteLookupState(),
+        fetch: async () => new Response(null, { status: 404 }),
+      }),
+      { message: "agent email relay temporarily unavailable" },
+    );
+    assert.deepEqual(mail.rejected, []);
+  }
+});
+
+test("uncertain KV fallbacks emit exactly one terminal route event", async () => {
+  for (const source of ["read_error", "corrupt_projection"]) {
+    for (const found of [true, false]) {
+      const points = [];
+      const currentEnv = dynamicEnv(
+        source === "corrupt_projection"
+          ? { [aliasLabel]: routeProjection(aliasLabel, { realm_label: "other-realm" }) }
+          : {},
+        { writeDataPoint(point) { points.push(point); } },
+        {
+          CONTROL_PLANE_URL: "https://control.example/",
+          CONTROL_PLANE_EDGE_TOKEN: "edge-token-1234567890",
+        },
+      );
+      if (source === "read_error") {
+        currentEnv.EMAIL_DIRECTORY.get = async () => { throw new Error("KV unavailable"); };
+      }
+      const mail = message({ to: aliasAddress });
+      const operation = handleEmail(mail, currentEnv, {
+        now: () => vectorNowMS,
+        routeLookupState: createRouteLookupState(),
+        fetch: async (input) => {
+          if (input instanceof Request) {
+            return found
+              ? Response.json(routeProjection(aliasLabel))
+              : new Response(null, { status: 404 });
+          }
+          return new Response('{"verdict":"accepted"}', { status: 200 });
+        },
+      });
+      if (found) {
+        await operation;
+        assert.deepEqual(mail.rejected, []);
+      } else {
+        await assert.rejects(operation, {
+          message: "agent email relay temporarily unavailable",
+        });
+        assert.deepEqual(mail.rejected, []);
+      }
+      const lookups = routeLookupPoints(points);
+      assert.equal(lookups.length, 1);
+      assert.equal(lookups[0].blobs[1], found ? "cp_found" : "cp_error");
+      assert.equal(lookups[0].blobs[2], "uncertain");
+      assert.equal(lookups[0].doubles[2], found ? 200 : 404);
+    }
+  }
+});
+
+test("route lookup metrics are low-cardinality, value-free, and best effort", async () => {
+  const points = [];
+  const state = createRouteLookupState();
+  const mail = message({ to: aliasAddress });
+  await handleEmail(
+    mail,
+    coldRouteEnv({ writeDataPoint(point) { points.push(point); } }),
+    {
+      now: () => vectorNowMS,
+      routeLookupState: state,
+      fetch: async () => new Response(null, { status: 404 }),
+    },
+  );
+  const lookup = routeLookupPoints(points);
+  assert.equal(lookup.length, 1);
+  assert.deepEqual(lookup[0], {
+    indexes: ["cp_not_found"],
+    blobs: [ROUTE_LOOKUP_METRICS_SCHEMA, "cp_not_found", "none", "unknown"],
+    doubles: [1, 0, 404],
+  });
+  const serialized = JSON.stringify(lookup);
+  assert.equal(serialized.includes(aliasAddress), false);
+  assert.equal(serialized.includes(aliasLabel), false);
+  assert.equal(serialized.includes(example.domain), false);
+  assert.equal(serialized.includes(example.realm_id), false);
+
+  const projected = message({ to: aliasAddress });
+  await handleEmail(
+    projected,
+    dynamicEnv(
+      { [aliasLabel]: routeProjection(aliasLabel) },
+      { writeDataPoint() { throw new Error("analytics unavailable"); } },
+    ),
+    {
+      now: () => vectorNowMS,
+      fetch: async () => new Response('{"verdict":"accepted"}', { status: 200 }),
+    },
+  );
+  assert.deepEqual(projected.rejected, []);
 });
 
 test("stale KV route refreshes from the control plane before relaying", async () => {
@@ -550,8 +1298,8 @@ test("stale routes never downgrade or turn control-plane failure into a bounce",
       { message: "agent email relay temporarily unavailable" },
     );
     assert.deepEqual(mail.rejected, []);
-    assert.equal(points[0].blobs[1], "tempfail_route_lookup");
-    assert.equal(points[0].blobs[2], "route");
+    assert.equal(verdictPoints(points)[0].blobs[1], "tempfail_route_lookup");
+    assert.equal(verdictPoints(points)[0].blobs[2], "route");
   }
 });
 

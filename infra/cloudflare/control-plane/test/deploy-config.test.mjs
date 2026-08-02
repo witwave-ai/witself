@@ -105,6 +105,16 @@ test("release renderer injects immutable container build identity", async (t) =>
     /"AGENT_EMAIL_DOMAIN"\s*:\s*"agent-mail\.witwave\.ai"/,
     "control plane must derive every managed alias from one configured domain",
   );
+  assert.match(
+    config,
+    /"CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM"\s*:\s*"8"/,
+    "release config must preserve the plan-independent per-realm review ceiling",
+  );
+  assert.match(
+    config,
+    /"CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT"\s*:\s*"64"/,
+    "release config must preserve the plan-independent per-account review ceiling",
+  );
   assert.doesNotMatch(
     config,
     /"CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED"\s*:/,

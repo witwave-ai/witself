@@ -14,6 +14,8 @@ const CUSTOMER_REQUESTS_PATH = new RegExp(
   `^/v1/accounts/(${ACCOUNT_ID_PATTERN})/realms/(${REALM_ID_PATTERN})/email-alias-requests$`,
 );
 const ADMIN_REQUESTS_PATH = "/v1/admin/realm-email-alias-requests";
+const ADMIN_COUNTER_REBUILD_PATH =
+  "/v1/admin/realm-email-alias-counters:rebuild";
 const ADMIN_REQUEST_ACTION_PATH = new RegExp(
   `^/v1/admin/realm-email-alias-requests/(${REQUEST_ID_PATTERN}):(approve|reject)$`,
 );
@@ -277,6 +279,7 @@ export async function handleRealmEmailRouteRequest(request, env, match) {
 
 export function isRealmEmailAliasAdminPath(pathname) {
   return pathname === ADMIN_REQUESTS_PATH ||
+    pathname === ADMIN_COUNTER_REBUILD_PATH ||
     pathname === ADMIN_ALIASES_PATH ||
     pathname === ADMIN_INTERNAL_ASSIGN_PATH ||
     pathname === ADMIN_RESERVED_PATH ||
@@ -353,7 +356,31 @@ export async function handleRealmEmailAliasAdminRequest(
   admin,
   fetchImpl = fetch,
 ) {
+  // The Worker performs token authentication before entering this handler.
+  // Keep a second narrow boundary check so direct invocation can never turn a
+  // missing authenticated principal into an unattributed registry mutation.
+  if (typeof admin?.admin_id !== "string" ||
+      admin.admin_id.trim().length === 0 || admin.admin_id.length > 128) {
+    return errorResponse("unauthorized", 401);
+  }
   const actor = { kind: "platform_admin", id: admin.admin_id };
+
+  if (url.pathname === ADMIN_COUNTER_REBUILD_PATH) {
+    if (request.method !== "POST") {
+      return errorResponse("method not allowed", 405);
+    }
+    let body;
+    try {
+      body = await boundedJSON(request);
+    } catch (error) {
+      return errorResponse(error.message, error.status ?? 400);
+    }
+    return callRegistry(env, "/counter/rebuild", {
+      actor,
+      idempotency_key: body?.idempotency_key,
+      reason: body?.reason,
+    });
+  }
 
   if (url.pathname === ADMIN_REQUESTS_PATH) {
     if (request.method !== "GET") return errorResponse("method not allowed", 405);

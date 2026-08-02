@@ -425,6 +425,25 @@ addresses, and normalized confusable forms. Approved state is projected to the
 owning cell first and then to the edge directory. The edge KV is never used to
 decide ownership.
 
+The commercial per-realm allowance is not a review-queue allowance. A separate
+technical guard permits at most eight open (`pending_review` or
+`provisioning`) requests per realm and 64 per account, even when the resolved
+plan limit is explicitly unlimited. Durable membership-backed counters track
+open requests and allocated customer aliases without scanning an unlimited
+realm. Approval does not release its open slot until cell and edge projection
+finish; rejection, terminal abort, and completed approval release it exactly
+once, and retirement releases the allocated slot exactly once. Runtime
+configuration may lower these two ceilings but cannot raise the compiled
+maxima. A ceiling refusal uses the stable, value-free
+`technical_pending_limit_reached` error with its `realm` or `account` scope and
+effective limit; it does not consume durable audit space. Exact membership and
+aggregate integrity checks make ordinary transitions fail closed on drift. A
+platform administrator can request an idempotent, audited recovery that fences
+count-changing writes, clears only derived counter state in bounded pages,
+rebuilds from canonical claims, and verifies a second bounded pass before
+reopening writes. This recovery is operational maintenance and is not gated by
+the customer alias activation switch.
+
 An activated alias survives loss of entitlement as a reserved assignment: it
 receives during a 30-day downgrade grace period, then becomes suspended. A
 later upgrade reactivates it without reinstalling an integration. Activated,
