@@ -771,13 +771,28 @@ func serve() int {
 			}
 			return out, nil
 		}
+		// A control-plane provisioning link is also a managed-route signal even
+		// if backend.kind was accidentally omitted.  Bias the destructive path
+		// closed; ordinary portable installs have neither setting and retain the
+		// direct empty-realm delete behavior.
+		managedRealmEmailRoutes := managedRealmEmailRoutesConfigured(
+			provisionToken,
+			os.Getenv("WITSELF_BACKEND_KIND"),
+		)
 		cfg.DeleteRealm = func(ctx context.Context, accountID, realmID string) error {
-			err := st.DeleteRealm(ctx, accountID, realmID)
+			var err error
+			if managedRealmEmailRoutes {
+				err = st.RefuseManagedRealmDelete(ctx, accountID, realmID)
+			} else {
+				err = st.DeleteRealm(ctx, accountID, realmID)
+			}
 			switch {
 			case errors.Is(err, store.ErrRealmNotFound):
 				return server.ErrNotFound
 			case errors.Is(err, store.ErrRealmNotEmpty):
 				return server.ErrConflict
+			case errors.Is(err, store.ErrRealmEmailRouteRetirementRequired):
+				return server.ErrRealmEmailRouteRetirementRequired
 			default:
 				return err
 			}
@@ -1696,6 +1711,11 @@ func serve() int {
 	}
 	fmt.Fprintln(os.Stderr, "witself-server: shut down cleanly")
 	return 0
+}
+
+func managedRealmEmailRoutesConfigured(provisionToken, backendKind string) bool {
+	return strings.TrimSpace(provisionToken) != "" ||
+		strings.EqualFold(strings.TrimSpace(backendKind), "managed")
 }
 
 func logAccountExportFailure(w io.Writer, accountID, cellName string, err error) {

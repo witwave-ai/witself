@@ -700,6 +700,45 @@ func TestUpgradeRowRejectsTrailingJSON(t *testing.T) {
 	}
 }
 
+func TestAddRealmEmailRouteLifecycleDefaults(t *testing.T) {
+	tests := []struct {
+		name      string
+		row       string
+		wantState string
+		wantGen   string
+		wantOp    any
+	}{
+		{
+			name: "live", row: `{"id":"realm_aaaaaaaaaaaaaaaa","deleted_at":null}`,
+			wantState: "live", wantGen: "1", wantOp: nil,
+		},
+		{
+			name:      "legacy tombstone",
+			row:       `{"id":"realm_bbbbbbbbbbbbbbbb","deleted_at":"2026-08-01T00:00:00Z"}`,
+			wantState: "retired", wantGen: "2", wantOp: "legacy_delete",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			upgraded, err := upgradeRow("realms", []byte(tc.row), 85, 86)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got map[string]any
+			decoder := json.NewDecoder(bytes.NewReader(upgraded))
+			decoder.UseNumber()
+			if err := decoder.Decode(&got); err != nil {
+				t.Fatal(err)
+			}
+			if got["email_route_state"] != tc.wantState ||
+				got["email_route_generation"] != json.Number(tc.wantGen) ||
+				got["email_route_operation_id"] != tc.wantOp {
+				t.Fatalf("upgraded realm = %#v", got)
+			}
+		})
+	}
+}
+
 func TestUpgradeRowRejectsNull(t *testing.T) {
 	_, err := upgradeRow("fact_assertions", []byte(`null`), 25, 26)
 	if !errors.Is(err, ErrCorrupt) {

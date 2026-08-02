@@ -10,10 +10,16 @@ const rawControlPlaneURL = String(process.env.CONTROL_PLANE_URL ?? "");
 const aliasDeliveryEnabled = String(
   process.env.REALM_EMAIL_ALIAS_DELIVERY_ENABLED ?? "false",
 );
+const canonicalDeliveryEnabled = String(
+  process.env.REALM_EMAIL_CANONICAL_DELIVERY_ENABLED ?? "false",
+);
 if (!/^[0-9a-f]{32}$/.test(namespaceID)) throw new Error("EMAIL_DIRECTORY_KV_ID must be a 32-character lowercase hex id");
 if (!/^[a-z][a-z0-9_-]{0,63}$/.test(keyID)) throw new Error("RELAY_KEY_ID is missing or invalid");
 if (!["true", "false"].includes(aliasDeliveryEnabled)) {
   throw new Error("REALM_EMAIL_ALIAS_DELIVERY_ENABLED must be true or false");
+}
+if (!["true", "false"].includes(canonicalDeliveryEnabled)) {
+  throw new Error("REALM_EMAIL_CANONICAL_DELIVERY_ENABLED must be true or false");
 }
 let controlPlaneURL;
 try {
@@ -46,7 +52,8 @@ const template = await readFile(join(root, "wrangler.template.jsonc"), "utf8");
 if ((template.match(/__EMAIL_DIRECTORY_KV_ID__/g) ?? []).length !== 1 ||
     (template.match(/__RELAY_KEY_ID__/g) ?? []).length !== 1 ||
     (template.match(/__CONTROL_PLANE_URL__/g) ?? []).length !== 1 ||
-    (template.match(/__REALM_EMAIL_ALIAS_DELIVERY_ENABLED__/g) ?? []).length !== 1) {
+    (template.match(/__REALM_EMAIL_ALIAS_DELIVERY_ENABLED__/g) ?? []).length !== 1 ||
+    (template.match(/__REALM_EMAIL_CANONICAL_DELIVERY_ENABLED__/g) ?? []).length !== 1) {
   throw new Error("wrangler template placeholders are invalid");
 }
 const rendered = template
@@ -56,6 +63,10 @@ const rendered = template
   .replace(
     "__REALM_EMAIL_ALIAS_DELIVERY_ENABLED__",
     aliasDeliveryEnabled,
+  )
+  .replace(
+    "__REALM_EMAIL_CANONICAL_DELIVERY_ENABLED__",
+    canonicalDeliveryEnabled,
   );
 await writeFile(join(root, "wrangler.generated.jsonc"), rendered, { mode: 0o600 });
 process.stdout.write("rendered isolated email Worker configuration\n");

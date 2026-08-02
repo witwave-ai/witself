@@ -192,6 +192,59 @@ func configureAgentEmail(ctx context.Context, cfg *server.Config, st *store.Stor
 		}
 		return result, nil
 	}
+	cfg.GetRealmEmailRouteLifecycle = func(
+		ctx context.Context,
+		accountID, realmID string,
+	) (server.RealmEmailRouteLifecycle, error) {
+		route, err := st.GetRealmEmailRouteLifecycle(ctx, accountID, realmID)
+		if err != nil {
+			return server.RealmEmailRouteLifecycle{}, mapRealmEmailRouteLifecycleError(err)
+		}
+		return toServerRealmEmailRouteLifecycle(route), nil
+	}
+	cfg.ListRealmEmailRouteLifecycles = func(
+		ctx context.Context,
+		accountID, cursor string,
+		limit int,
+	) (server.RealmEmailRouteLifecyclePage, error) {
+		page, err := st.ListRealmEmailRouteLifecycles(ctx, accountID, cursor, limit)
+		if err != nil {
+			return server.RealmEmailRouteLifecyclePage{}, mapRealmEmailRouteLifecycleError(err)
+		}
+		routes := make([]server.RealmEmailRouteLifecycle, len(page.Routes))
+		for i, route := range page.Routes {
+			routes[i] = toServerRealmEmailRouteLifecycle(route)
+		}
+		return server.RealmEmailRouteLifecyclePage{
+			Routes: routes, NextCursor: page.NextCursor,
+		}, nil
+	}
+	cfg.PrepareRealmEmailRouteRetirement = func(
+		ctx context.Context,
+		accountID string,
+		in server.RealmEmailRouteRetirementRequest,
+	) (server.RealmEmailRouteLifecycle, error) {
+		route, err := st.PrepareRealmEmailRouteRetirement(
+			ctx, accountID, toStoreRealmEmailRouteRetirementInput(in),
+		)
+		if err != nil {
+			return server.RealmEmailRouteLifecycle{}, mapRealmEmailRouteLifecycleError(err)
+		}
+		return toServerRealmEmailRouteLifecycle(route), nil
+	}
+	cfg.CommitRealmEmailRouteRetirement = func(
+		ctx context.Context,
+		accountID string,
+		in server.RealmEmailRouteRetirementRequest,
+	) (server.RealmEmailRouteLifecycle, error) {
+		route, err := st.CommitRealmEmailRouteRetirement(
+			ctx, accountID, toStoreRealmEmailRouteRetirementInput(in),
+		)
+		if err != nil {
+			return server.RealmEmailRouteLifecycle{}, mapRealmEmailRouteLifecycleError(err)
+		}
+		return toServerRealmEmailRouteLifecycle(route), nil
+	}
 	if !pilot.Enabled {
 		return nil
 	}
@@ -332,6 +385,38 @@ func configureAgentEmail(ctx context.Context, cfg *server.Config, st *store.Stor
 		return toServerAgentEmailProcessing(processing), mapAgentEmailError(err)
 	}
 	return nil
+}
+
+func toServerRealmEmailRouteLifecycle(
+	route store.RealmEmailRouteLifecycle,
+) server.RealmEmailRouteLifecycle {
+	return server.RealmEmailRouteLifecycle{
+		AccountID: route.AccountID, RealmID: route.RealmID,
+		State: route.State, Generation: route.Generation,
+		OperationID: route.OperationID,
+	}
+}
+
+func toStoreRealmEmailRouteRetirementInput(
+	in server.RealmEmailRouteRetirementRequest,
+) store.RealmEmailRouteRetirementInput {
+	return store.RealmEmailRouteRetirementInput{
+		RealmID: in.RealmID, OperationID: in.OperationID,
+		ExpectedGeneration: in.ExpectedGeneration,
+	}
+}
+
+func mapRealmEmailRouteLifecycleError(err error) error {
+	switch {
+	case errors.Is(err, store.ErrRealmEmailRouteInputInvalid):
+		return server.ErrBadInput
+	case errors.Is(err, store.ErrAccountNotFound), errors.Is(err, store.ErrRealmNotFound):
+		return server.ErrNotFound
+	case errors.Is(err, store.ErrRealmEmailRouteConflict):
+		return server.ErrConflict
+	default:
+		return err
+	}
 }
 
 func cloneAgentEmailBoolMap(source map[string]bool) map[string]bool {

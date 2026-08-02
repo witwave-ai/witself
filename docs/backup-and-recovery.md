@@ -673,21 +673,32 @@ a useful first-line rollback facility for a dark deployment, but a raw rollback
 can erase tombstones or regress controller revisions created after the selected
 bookmark. It is therefore not the production recovery contract.
 
-Before either realm-alias activation gate may turn on, implement and drill a
-portable append-only authority journal. Each logical mutation must durably
-append a create-only, hash-chained after-image to a dedicated protected R2
-binding before any external projection becomes successful. Recovery imports an
-unbroken journal into a new empty registry while both gates remain off, rejects
-alias/skeleton/claim collisions and tombstone resurrection, rebuilds every
-derived index, replays pending intents, and compares a complete state digest
-before a separately reviewed binding cutover. The restore path must require
-platform-admin authority plus a distinct recovery credential, reason,
-idempotency key, and expected journal head. Never merge a recovery stream into
-the live authority object.
+The portable authority journal and bounded empty-target recovery foundation are
+implemented. Each logical authority mutation durably appends a create-only,
+hash-chained after-image to the dedicated private
+`REALM_EMAIL_ALIAS_AUTHORITY_JOURNAL` R2 binding before an external projection
+may become successful. An existing registry must first complete a bounded
+bootstrap; later checkpoints use the same bounded scan. Bootstrap and
+checkpoint install a global authority-write freeze for their full duration and
+leave the freeze intact on failure. The journal itself is never stored in the
+mutable account-archive or periodic-backup buckets.
 
-This journal and a successful restore drill are hard activation blockers, but
-not blockers for a default-off release that cannot create claims or deliver
-aliases.
+Recovery requires both authenticated platform-administrator authority and the
+distinct `CP_REALM_EMAIL_ALIAS_RECOVERY_TOKEN`, plus a reason, idempotency key,
+source stream, and exact expected sequence/hash. It always targets the named
+Durable Object `recovery:<rear_id>` and refuses any nonempty or differently
+bound object. Replay validates every create-only object and hash link through
+the exact checkpoint head, validates the full authority digest and monotonic
+registry/audit fences, reconstructs derived indexes in bounded pages, then
+compares the complete derived result. A successful target becomes permanently
+sealed against ordinary writes.
+
+Recovery never merges into the live authority object and never changes the
+fixed `global` authority object, any alias gate, or either canonical delivery
+gate. There is deliberately no cutover endpoint or deployment selector. A
+future incident that genuinely requires cutover needs a separately designed
+and reviewed promotion protocol. Alias activation remains off until a
+successful restore drill and the other acceptance prerequisites complete.
 
 ### Civo PostgreSQL pre-migration backup
 

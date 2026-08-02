@@ -13,6 +13,12 @@ const ALIAS_PATTERN = "[a-z0-9][a-z0-9-]{1,14}[a-z0-9]";
 const CUSTOMER_REQUESTS_PATH = new RegExp(
   `^/v1/accounts/(${ACCOUNT_ID_PATTERN})/realms/(${REALM_ID_PATTERN})/email-alias-requests$`,
 );
+const CUSTOMER_REALM_CLOSE_PATH = new RegExp(
+  `^/v1/accounts/(${ACCOUNT_ID_PATTERN})/realms/(${REALM_ID_PATTERN}):close$`,
+);
+const ADMIN_REALM_CLOSE_PATH = new RegExp(
+  `^/v1/admin/accounts/(${ACCOUNT_ID_PATTERN})/realms/(${REALM_ID_PATTERN}):close$`,
+);
 const ADMIN_REQUESTS_PATH = "/v1/admin/realm-email-alias-requests";
 const ADMIN_COUNTER_REBUILD_PATH =
   "/v1/admin/realm-email-alias-counters:rebuild";
@@ -172,17 +178,19 @@ async function authenticateRealmOperator(
   }
   let whoami;
   let account;
-  let realms;
+  let realms = null;
   try {
     [whoami, account, realms] = await Promise.all([
       fetchCellJSON(fetchImpl, `${cell.endpoint}/v1/whoami`, authorization),
       fetchCellJSON(fetchImpl, `${cell.endpoint}/v1/account`, authorization),
-      fetchCellJSON(fetchImpl, `${cell.endpoint}/v1/realms`, authorization),
+      realmID === null
+        ? null
+        : fetchCellJSON(fetchImpl, `${cell.endpoint}/v1/realms`, authorization),
     ]);
   } catch {
     return { response: errorResponse("account cell is unreachable", 502) };
   }
-  for (const result of [whoami, account, realms]) {
+  for (const result of [whoami, account, realms].filter(Boolean)) {
     if (!result.response.ok) {
       const status = [401, 403].includes(result.response.status)
         ? result.response.status
@@ -202,10 +210,12 @@ async function authenticateRealmOperator(
       account.body?.account?.id !== accountID) {
     return { response: errorResponse("operator account mismatch", 403) };
   }
-  const ownsRealm = Array.isArray(realms.body?.realms) &&
-    realms.body.realms.some((realm) => realm?.id === realmID);
-  if (!ownsRealm) {
-    return { response: errorResponse("realm not found in account", 404) };
+  if (realmID !== null) {
+    const ownsRealm = Array.isArray(realms.body?.realms) &&
+      realms.body.realms.some((realm) => realm?.id === realmID);
+    if (!ownsRealm) {
+      return { response: errorResponse("realm not found in account", 404) };
+    }
   }
   const snapshot = {
     features: account.body.account.plan_features ?? [],
@@ -241,6 +251,10 @@ async function fetchPlanSnapshot(env, accountID, fetchImpl) {
 
 export function matchRealmEmailAliasCustomerPath(pathname) {
   return pathname.match(CUSTOMER_REQUESTS_PATH);
+}
+
+export function matchRealmEmailCanonicalClosePath(pathname) {
+  return pathname.match(CUSTOMER_REALM_CLOSE_PATH);
 }
 
 export function matchRealmEmailRoutePath(pathname) {
@@ -287,7 +301,47 @@ export function isRealmEmailAliasAdminPath(pathname) {
     ADMIN_REQUEST_ACTION_PATH.test(pathname) ||
     ADMIN_ALIAS_ACTION_PATH.test(pathname) ||
     ADMIN_ALIAS_ABORT_PATH.test(pathname) ||
+    ADMIN_REALM_CLOSE_PATH.test(pathname) ||
     ADMIN_RESERVED_ITEM_PATH.test(pathname);
+}
+
+export async function handleRealmEmailCanonicalCloseRequest(
+  request,
+  env,
+  match,
+  fetchImpl = fetch,
+) {
+  if (request.method !== "POST") {
+    return errorResponse("method not allowed", 405);
+  }
+  if (!match) return errorResponse("invalid realm close target", 400);
+  const accountID = match[1];
+  const realmID = match[2];
+  const authenticated = await authenticateRealmOperator(
+    request,
+    env,
+    accountID,
+    null,
+    fetchImpl,
+  );
+  if (authenticated.response) return authenticated.response;
+  let body;
+  try {
+    body = await boundedJSON(request);
+  } catch (error) {
+    return errorResponse(error.message, error.status ?? 400);
+  }
+  const domain = managedRealmEmailDomain(env);
+  if (!domain) {
+    return errorResponse("managed agent email domain is not configured", 503);
+  }
+  return callRegistry(env, "/canonical/realm-close", {
+    actor: authenticated.actor,
+    account_id: accountID,
+    realm_id: realmID,
+    domain,
+    idempotency_key: body?.idempotency_key,
+  });
 }
 
 export async function handleRealmEmailAliasCustomerRequest(
@@ -364,6 +418,30 @@ export async function handleRealmEmailAliasAdminRequest(
     return errorResponse("unauthorized", 401);
   }
   const actor = { kind: "platform_admin", id: admin.admin_id };
+
+  const realmClose = url.pathname.match(ADMIN_REALM_CLOSE_PATH);
+  if (realmClose) {
+    if (request.method !== "POST") {
+      return errorResponse("method not allowed", 405);
+    }
+    let body;
+    try {
+      body = await boundedJSON(request);
+    } catch (error) {
+      return errorResponse(error.message, error.status ?? 400);
+    }
+    const domain = managedRealmEmailDomain(env);
+    if (!domain) {
+      return errorResponse("managed agent email domain is not configured", 503);
+    }
+    return callRegistry(env, "/canonical/realm-close", {
+      actor,
+      account_id: realmClose[1],
+      realm_id: realmClose[2],
+      domain,
+      idempotency_key: body?.idempotency_key,
+    });
+  }
 
   if (url.pathname === ADMIN_COUNTER_REBUILD_PATH) {
     if (request.method !== "POST") {

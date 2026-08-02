@@ -544,6 +544,7 @@ func (s *Store) EnsureAgentEmailMailbox(
 		FROM agents a JOIN realms r ON r.id=a.realm_id
 		WHERE a.id=$1 AND a.realm_id=$2 AND r.account_id=$3
 		  AND a.deleted_at IS NULL AND r.deleted_at IS NULL
+		  AND r.email_route_state='live'
 		FOR NO KEY UPDATE OF a`, agentID, realmID, accountID).Scan(&agentName)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AgentEmailAddress{}, ErrAgentNotFound
@@ -683,10 +684,13 @@ func (s *Store) ApplyAgentEmailRealmAlias(
 	if labelErr != nil && !errors.Is(labelErr, ErrAgentEmailRealmAliasNotFound) {
 		return AgentEmailRealmAlias{}, labelErr
 	}
+	var realmRouteState string
 	var realmDeletedAt *time.Time
 	if realmErr := tx.QueryRow(ctx, `
-		SELECT deleted_at FROM realms WHERE account_id=$1 AND id=$2`,
-		accountID, in.RealmID).Scan(&realmDeletedAt); errors.Is(realmErr, pgx.ErrNoRows) {
+		SELECT email_route_state,deleted_at
+		  FROM realms
+		 WHERE account_id=$1 AND id=$2`,
+		accountID, in.RealmID).Scan(&realmRouteState, &realmDeletedAt); errors.Is(realmErr, pgx.ErrNoRows) {
 		return AgentEmailRealmAlias{}, ErrRealmNotFound
 	} else if realmErr != nil {
 		return AgentEmailRealmAlias{}, fmt.Errorf("resolve realm alias target: %w", realmErr)
@@ -703,7 +707,8 @@ func (s *Store) ApplyAgentEmailRealmAlias(
 		// realm is still live before revision or terminal-state replay handling.
 		// This keeps stale recovery from publishing a deleted realm and returns
 		// the same authoritative result for replay and reactivation attempts.
-		if realmDeletedAt != nil && in.State == AgentEmailRealmAliasApplied {
+		if (realmDeletedAt != nil || realmRouteState != RealmEmailRouteLive) &&
+			in.State == AgentEmailRealmAliasApplied {
 			return AgentEmailRealmAlias{}, ErrRealmNotFound
 		}
 		if in.ControllerRevision < existing.ControllerRevision ||
@@ -733,7 +738,8 @@ func (s *Store) ApplyAgentEmailRealmAlias(
 		// The label was claimed under another immutable controller id.
 		return AgentEmailRealmAlias{}, ErrAgentEmailRealmAliasConflict
 	}
-	if realmDeletedAt != nil && in.State == AgentEmailRealmAliasApplied {
+	if (realmDeletedAt != nil || realmRouteState != RealmEmailRouteLive) &&
+		in.State == AgentEmailRealmAliasApplied {
 		return AgentEmailRealmAlias{}, ErrRealmNotFound
 	}
 	created, err := insertAgentEmailRealmAliasTx(ctx, tx, accountID, in)
@@ -795,6 +801,7 @@ func (s *Store) GetAgentEmailRealmAliasTarget(
 		       EXISTS (
 		         SELECT 1 FROM realms
 		          WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL
+		            AND email_route_state='live'
 		       )`, accountID, realmID).Scan(&accountExists, &realmExists); err != nil {
 		return AgentEmailRealmAliasTarget{}, fmt.Errorf(
 			"resolve agent-email realm alias target: %w", err,

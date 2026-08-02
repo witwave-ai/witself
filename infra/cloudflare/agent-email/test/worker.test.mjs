@@ -55,6 +55,7 @@ function dynamicEnv(routes, metrics = null, extra = {}) {
     RELAY_KEY_ID: vector.metadata.key_id,
     RELAY_ED25519_PRIVATE_KEY: vector.pkcs8_base64,
     REALM_EMAIL_ALIAS_DELIVERY_ENABLED: "true",
+    REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "true",
     REALM_ROUTE_COLD_MISS_LIMITER: allowLimiter,
     REALM_ROUTE_KNOWN_MISS_LIMITER: allowLimiter,
     EMAIL_DIRECTORY: {
@@ -377,7 +378,7 @@ test("canonical and realm-alias projections converge on one cell route", async (
   }
 });
 
-test("fleet delivery gate is exact-true, alias-only, and default-off", async () => {
+test("fleet alias delivery gate is exact-true and default-off", async () => {
   for (const value of [undefined, "false", "TRUE", "1"]) {
     let fetched = false;
     const points = [];
@@ -406,25 +407,54 @@ test("fleet delivery gate is exact-true, alias-only, and default-off", async () 
     ]);
   }
 
-  let canonicalRelayed = false;
-  const canonical = message();
+});
+
+test("fleet canonical delivery gate is exact-true and independent", async () => {
+  for (const value of [undefined, "false", "TRUE", "1"]) {
+    let fetched = false;
+    const points = [];
+    const mail = message();
+    await assert.rejects(
+      () => handleEmail(
+        mail,
+        dynamicEnv(
+          { [example.realm_label]: routeProjection(example.realm_label) },
+          { writeDataPoint(point) { points.push(point); } },
+          { REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: value },
+        ),
+        {
+          now: () => vectorNowMS,
+          fetch: async () => { fetched = true; },
+        },
+      ),
+      { message: "agent email relay temporarily unavailable" },
+    );
+    assert.equal(fetched, false);
+    assert.deepEqual(mail.rejected, []);
+    assert.deepEqual(verdictPoints(points)[0].blobs, [
+      EDGE_METRICS_SCHEMA, "tempfail_canonical_gate", "route",
+    ]);
+  }
+
+  let aliasRelayed = false;
+  const alias = message({ to: aliasAddress });
   await handleEmail(
-    canonical,
+    alias,
     dynamicEnv(
-      { [example.realm_label]: routeProjection(example.realm_label) },
+      { [aliasLabel]: routeProjection(aliasLabel) },
       null,
-      { REALM_EMAIL_ALIAS_DELIVERY_ENABLED: "false" },
+      { REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false" },
     ),
     {
       now: () => vectorNowMS,
       fetch: async () => {
-        canonicalRelayed = true;
+        aliasRelayed = true;
         return new Response('{"verdict":"accepted"}', { status: 200 });
       },
     },
   );
-  assert.equal(canonicalRelayed, true);
-  assert.deepEqual(canonical.rejected, []);
+  assert.equal(aliasRelayed, true);
+  assert.deepEqual(alias.rejected, []);
 });
 
 test("dynamic routing keeps account-plan enforcement in the signed cell verdict", async () => {

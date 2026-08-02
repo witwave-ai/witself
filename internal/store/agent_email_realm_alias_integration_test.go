@@ -401,7 +401,10 @@ func TestAgentEmailRealmAliasAppliedReplayRevalidatesLiveRealmPostgres(t *testin
 	// race. The public realm delete path now prevents this state, but an exact
 	// applied replay must still fail closed rather than authorize publication.
 	if _, err := st.pool.Exec(ctx, `
-		UPDATE realms SET deleted_at=clock_timestamp(),updated_at=clock_timestamp()
+		UPDATE realms
+		   SET deleted_at=clock_timestamp(),updated_at=clock_timestamp(),
+		       email_route_state='retired',email_route_generation=2,
+		       email_route_operation_id='legacy_delete'
 		 WHERE account_id=$1 AND id=$2`, provisioned.AccountID, realm.ID); err != nil {
 		t.Fatal(err)
 	}

@@ -57,6 +57,7 @@ func (s *Store) CreateAgent(ctx context.Context, accountID, realmID, name string
 		`SELECT EXISTS (
 		   SELECT 1 FROM realms
 		   WHERE id = $1 AND account_id = $2 AND deleted_at IS NULL
+		     AND email_route_state = 'live'
 		 )`, realmID, accountID).Scan(&realmOK); err != nil {
 		return Agent{}, fmt.Errorf("check realm: %w", err)
 	}
@@ -103,6 +104,7 @@ func (s *Store) CreateAgent(ctx context.Context, accountID, realmID, name string
 		 WHERE EXISTS (
 		   SELECT 1 FROM realms
 		   WHERE id = $2 AND account_id = $4 AND deleted_at IS NULL
+		     AND email_route_state = 'live'
 		 )
 		 RETURNING id`,
 		agentID, realmID, name, accountID).Scan(&returned)

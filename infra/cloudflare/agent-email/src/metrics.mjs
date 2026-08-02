@@ -14,6 +14,7 @@ const OUTCOMES = new Set([
   "tempfail_disabled",
   "tempfail_directory",
   "tempfail_alias_gate",
+  "tempfail_canonical_gate",
   "tempfail_suspended_route",
   "tempfail_route_lookup",
   "tempfail_content",

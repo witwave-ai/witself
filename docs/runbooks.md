@@ -253,6 +253,27 @@ witself account close --yes
 
 Add `--reason TEXT` to record why.
 
+## Close a realm without resurrecting its email route
+
+Delete every agent and permanently retire every memorable alias in the realm,
+then use the ordinary named-account command:
+
+```sh
+witself realm delete --account default --yes realm_aaaaaaaaaaaaaaaa
+```
+
+For a managed account this calls the control plane, which persists one exact
+close operation, verifies there are no live/pending aliases, prepares the cell
+route generation, publishes the canonical tombstone, and commits the cell
+soft-delete. A response such as `close accepted (publish_retired)` is success:
+the durable alarm continues the same operation until complete. Repeating the
+same CLI command uses the same deterministic idempotency key and is safe.
+
+Do not bypass this path by calling the managed cell's realm-delete endpoint;
+the cell refuses that operation before its canonical retirement fence exists.
+Explicit `--endpoint` plus `--token-file` remains the self-hosted path and
+directly deletes an empty realm while writing the same portable retired shape.
+
 ## Decommission a cell and preserve its accounts
 
 `witself-infra destroy` is the fleet operator's counterpart to signup: it drains
@@ -350,6 +371,206 @@ From inside each artifact directory, verify its ciphertext checksum with
 rollout record. The script never writes to the source database and never leaves
 a plaintext dump; a `pending` manifest or any nonzero exit blocks the rollout.
 Do not run a live restore as part of this procedure.
+
+## Bootstrap, checkpoint, and drill the realm-email-alias authority journal
+
+This is a control-plane procedure. It does not restore a cell database and it
+does not turn on email. Before starting, confirm the release configuration has
+all of these gates absent or set to the exact string `false`:
+
+- `CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED`
+- `REALM_EMAIL_ALIAS_DELIVERY_ENABLED`
+- `CP_REALM_EMAIL_CANONICAL_INVENTORY_ENABLED`
+- `CP_REALM_EMAIL_CANONICAL_DELIVERY_ENABLED`
+- `REALM_EMAIL_CANONICAL_DELIVERY_ENABLED`
+- `CP_REALM_EMAIL_ALIAS_AUTHORITY_JOURNAL_ENABLED` for the initial bootstrap
+
+The control plane must already have the dedicated private
+`witself-realm-email-alias-authority-journal` R2 bucket bound as
+`REALM_EMAIL_ALIAS_AUTHORITY_JOURNAL`. Configure
+`CP_REALM_EMAIL_ALIAS_RECOVERY_TOKEN` as a distinct Worker secret; do not reuse
+the platform-admin token, fleet token, edge token, or a cell provision token.
+The commands below intentionally read both credentials from operator-protected
+files and never print them:
+
+```sh
+CONTROL_PLANE_URL="${CONTROL_PLANE_URL:?set control-plane URL}"
+PLATFORM_ADMIN_TOKEN_FILE="${PLATFORM_ADMIN_TOKEN_FILE:?set admin token file}"
+RECOVERY_TOKEN_FILE="${REALM_ALIAS_RECOVERY_TOKEN_FILE:?set token file}"
+PLATFORM_ADMIN_TOKEN="$(tr -d '\r\n' < "$PLATFORM_ADMIN_TOKEN_FILE")"
+REALM_ALIAS_RECOVERY_TOKEN="$(tr -d '\r\n' < "$RECOVERY_TOKEN_FILE")"
+ADMIN_AUTH="Authorization: Bearer $PLATFORM_ADMIN_TOKEN"
+RECOVERY_AUTH="X-Witself-Realm-Alias-Recovery: $REALM_ALIAS_RECOVERY_TOKEN"
+JOURNAL_API="$CONTROL_PLANE_URL/v1/admin/realm-email-alias-journal"
+RECOVERY_API="$CONTROL_PLANE_URL/v1/admin/realm-email-alias-recoveries"
+```
+
+Do not place either value in command history, a JSON body, a ticket, or a
+rollout record. The normal admin bearer token and the distinct recovery header
+are both required on every journal/recovery request.
+
+### Bootstrap an existing active registry
+
+Choose one durable idempotency key and reason. Repeat the byte-equivalent call
+with the same key until `.complete` is `true`; every incomplete or failed step
+leaves authority writes frozen. Never change the active registry object during
+this loop. A `503` with code
+`realm_email_alias_journal_operational_work_active` is the one pre-freeze
+exception: an ordinary request or alarm was already in flight, no maintenance
+state was installed, and the same call should be retried after that work ends.
+
+```sh
+BOOTSTRAP_KEY="${BOOTSTRAP_KEY:?set one durable bootstrap idempotency key}"
+BOOTSTRAP_REASON="${BOOTSTRAP_REASON:?set reviewed bootstrap reason}"
+
+while :; do
+  RESPONSE="$(jq -nc \
+    --arg reason "$BOOTSTRAP_REASON" --arg key "$BOOTSTRAP_KEY" \
+    '{reason:$reason,idempotency_key:$key}' |
+    curl --fail-with-body --silent --show-error \
+      -H "$ADMIN_AUTH" \
+      -H "$RECOVERY_AUTH" \
+      -H 'Content-Type: application/json' \
+      --data-binary @- \
+      "$JOURNAL_API:bootstrap")" || break
+  jq . <<<"$RESPONSE"
+  jq -e '.complete == true' <<<"$RESPONSE" >/dev/null && break
+done
+```
+
+Then read status and record only the value-free stream id, sequence, hash,
+authority epoch, registry revision, audit sequence, and scan counts:
+
+```sh
+curl --fail-with-body --silent --show-error \
+  -H "$ADMIN_AUTH" \
+  -H "$RECOVERY_AUTH" \
+  "$JOURNAL_API" | jq .
+```
+
+Only after bootstrap reports `complete=true`, status reports `enabled=true`,
+`pending=false`, and `forked=false`, and R2 retention/access controls have been
+reviewed may a separate deployment review consider setting
+`CP_REALM_EMAIL_ALIAS_AUTHORITY_JOURNAL_ENABLED=true`. That journal-only gate
+does not authorize alias creation, canonical inventory, or any delivery gate.
+
+### Append a complete checkpoint
+
+Use one new idempotency key and repeat the same checkpoint request until
+complete. Keep all email gates dark during a drill. The same pre-freeze
+`realm_email_alias_journal_operational_work_active` response is safe to retry
+with the identical key after the active work ends.
+
+```sh
+CHECKPOINT_KEY="${CHECKPOINT_KEY:?set one durable checkpoint idempotency key}"
+CHECKPOINT_REASON="${CHECKPOINT_REASON:?set reviewed checkpoint reason}"
+
+while :; do
+  RESPONSE="$(jq -nc \
+    --arg reason "$CHECKPOINT_REASON" --arg key "$CHECKPOINT_KEY" \
+    '{reason:$reason,idempotency_key:$key}' |
+    curl --fail-with-body --silent --show-error \
+      -H "$ADMIN_AUTH" \
+      -H "$RECOVERY_AUTH" \
+      -H 'Content-Type: application/json' \
+      --data-binary @- \
+      "$JOURNAL_API:checkpoint")" || break
+  jq . <<<"$RESPONSE"
+  jq -e '.complete == true' <<<"$RESPONSE" >/dev/null && break
+done
+```
+
+Use the returned checkpoint head, not a guessed or older journal position, for
+the recovery drill.
+
+### Recover only into a named empty target
+
+Choose a new valid `rear_` id, provide the checkpoint's exact `reaj_` stream,
+sequence, and SHA-256 hash, and create the recovery. The service derives the
+only permitted target name as `recovery:<recovery_id>` and refuses a nonempty
+or differently bound Durable Object.
+
+```sh
+RECOVERY_ID="${RECOVERY_ID:?set a new rear_ id with 16 base32 characters}"
+SOURCE_STREAM_ID="${SOURCE_STREAM_ID:?set exact checkpoint stream id}"
+EXPECTED_SEQUENCE="${EXPECTED_SEQUENCE:?set exact checkpoint sequence}"
+EXPECTED_HASH="${EXPECTED_HASH:?set exact checkpoint SHA-256}"
+RECOVERY_REASON="${RECOVERY_REASON:?set reviewed drill reason}"
+RECOVERY_START_KEY="${RECOVERY_START_KEY:?set one start idempotency key}"
+
+jq -nc \
+  --arg recovery_id "$RECOVERY_ID" \
+  --arg stream "$SOURCE_STREAM_ID" \
+  --argjson sequence "$EXPECTED_SEQUENCE" \
+  --arg hash "$EXPECTED_HASH" \
+  --arg reason "$RECOVERY_REASON" \
+  --arg key "$RECOVERY_START_KEY" \
+  '{recovery_id:$recovery_id,source_stream_id:$stream,
+    expected_head:{sequence:$sequence,hash:$hash},reason:$reason,
+    idempotency_key:$key}' |
+  curl --fail-with-body --silent --show-error \
+    -H "$ADMIN_AUTH" \
+    -H "$RECOVERY_AUTH" \
+    -H 'Content-Type: application/json' \
+    --data-binary @- \
+    "$RECOVERY_API" | jq .
+```
+
+Advance one journal entry at a time. A retry of one failed call must reuse that
+step's key; after a successful incomplete response, use a fresh key for the
+next step.
+
+```sh
+STEP=1
+while :; do
+  STATUS="$(curl --fail-with-body --silent --show-error \
+    -H "$ADMIN_AUTH" \
+    -H "$RECOVERY_AUTH" \
+    "$RECOVERY_API/$RECOVERY_ID")" || break
+  jq . <<<"$STATUS"
+  jq -e '.failed == true' <<<"$STATUS" >/dev/null && break
+  jq -e '.phase != "replay"' <<<"$STATUS" >/dev/null && break
+  ADVANCE_KEY="${RECOVERY_ID}-advance-${STEP}"
+  jq -nc --arg key "$ADVANCE_KEY" '{idempotency_key:$key}' |
+    curl --fail-with-body --silent --show-error \
+      -H "$ADMIN_AUTH" \
+      -H "$RECOVERY_AUTH" \
+      -H 'Content-Type: application/json' \
+      --data-binary @- \
+      "$RECOVERY_API/$RECOVERY_ID:advance" |
+    jq . || break
+  STEP=$((STEP + 1))
+done
+```
+
+Then repeat verification with a fresh key per successful page until
+`sealed=true`. Verification rebuilds derived state in bounded pages and checks
+the complete authority digest and exact checkpoint fences.
+
+```sh
+STEP=1
+while :; do
+  VERIFY_KEY="${RECOVERY_ID}-verify-${STEP}"
+  RESULT="$(jq -nc --arg key "$VERIFY_KEY" '{idempotency_key:$key}' |
+    curl --fail-with-body --silent --show-error \
+      -H "$ADMIN_AUTH" \
+      -H "$RECOVERY_AUTH" \
+      -H 'Content-Type: application/json' \
+      --data-binary @- \
+      "$RECOVERY_API/$RECOVERY_ID:verify")" || break
+  jq . <<<"$RESULT"
+  jq -e '.failed == true' <<<"$RESULT" >/dev/null && break
+  jq -e '.sealed == true' <<<"$RESULT" >/dev/null && break
+  STEP=$((STEP + 1))
+done
+```
+
+Stop on any `failed`, `forked`, digest mismatch, gap, unexpected collision, or
+nonempty-target response. Preserve the active object and all gates. A sealed
+target is evidence for the drill only: there is no automatic cutover, no merge,
+and no active-object selector. Production authority remains fixed to `global`.
+Any future cutover requires a separately designed promotion protocol, incident
+plan, and independent review.
 
 ## Operate periodic account backups
 

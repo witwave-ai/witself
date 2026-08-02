@@ -39,6 +39,26 @@ clear, canonical scan, and verification phases before reopening writes. These
 counters are admission state, not billable usage and not tenant labels in the
 Prometheus plane.
 
+Canonical realm-email and authority-recovery status (2026-08-02): canonical
+inventory, control-plane delivery, and edge delivery are independent
+exact-`true` gates and are all default-off. Inventory responses report only
+bounded progress (`complete`, cycle, accounts/routes scanned, and account-page
+completion); failures use the fixed log messages
+`realm-email-canonical: inventory configuration is incomplete` or
+`realm-email-canonical: inventory tick failed`, with no tenant or route
+identifier. Realm-close status exposes only account/realm ids and one closed
+phase label; durable alarms retry the fenced operation.
+
+The realm-email-alias authority journal status is deliberately value-free:
+enabled/required, exact sequence/hash/epoch fences, pending/fork flags, bounded
+scan counts, recovery phase, authority/derived key counts, and state digest.
+Neither journal entries nor operator errors are copied into Prometheus labels.
+Bootstrap/checkpoint leave an observable write freeze until completion; a hash
+fork leaves a permanent local fence. Empty-target recovery exposes bounded
+`replay`, `replayed`, `rebuild`, `sealed`, or `failed` state. A sealed target is
+not evidence of cutover: no runtime or administrative route automatically
+changes the active Durable Object name.
+
 Narrative-memory contract (accepted 2026-07-14): memory observability covers
 deterministic search, client-supplied vectors, curation queues/leases/conflicts,
 and archive rebuilds. `witself-server` never calls a model, so there are no
@@ -248,7 +268,8 @@ Its fixed schema marker is `witself.agent-email.edge.v1`; `outcome` is one of
 `rejected_unknown_recipient`, `rejected_inactive_route`, `rejected_over_size`,
 `rejected_cell_permanent`, `rejected_retry_canary`,
 `tempfail_configuration`, `tempfail_disabled`, `tempfail_directory`,
-`tempfail_suspended_route`, `tempfail_route_lookup`, `tempfail_content`,
+`tempfail_alias_gate`, `tempfail_canonical_gate`, `tempfail_suspended_route`,
+`tempfail_route_lookup`, `tempfail_content`,
 `tempfail_signing`, `tempfail_transport`, `tempfail_rate_limited`,
 `tempfail_cell_response`, or `tempfail_internal`; and `phase` is one of
 `configuration`, `recipient`, `directory`, `route`, `content`, `signing`,

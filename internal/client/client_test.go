@@ -40,6 +40,50 @@ func TestBootstrapLoginUnauthorized(t *testing.T) {
 	}
 }
 
+func TestCloseManagedRealmAcceptsDurableConvergence(t *testing.T) {
+	const (
+		accountID = "acc_1"
+		realmID   = "realm_aaaaaaaaaaaaaaaa"
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost ||
+			r.URL.Path != "/v1/accounts/"+accountID+"/realms/"+realmID+":close" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer witself_opr_parent" {
+			t.Fatalf("authorization = %q", got)
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["idempotency_key"] != "realm-delete:"+realmID {
+			t.Fatalf("body = %#v", body)
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.realm-email-alias.v1",
+			"account_id":     accountID,
+			"realm_id":       realmID,
+			"complete":       false,
+			"phase":          "commit_cell",
+		})
+	}))
+	defer srv.Close()
+
+	result, err := CloseManagedRealm(
+		context.Background(), srv.URL, "witself_opr_parent",
+		accountID, realmID, "realm-delete:"+realmID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Complete || result.Phase != "commit_cell" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
 func TestCreateOperatorToken(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/operators/self/tokens" {

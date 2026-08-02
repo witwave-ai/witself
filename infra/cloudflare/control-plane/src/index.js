@@ -111,15 +111,22 @@ import {
 import {
   handleRealmEmailAliasAdminRequest,
   handleRealmEmailAliasCustomerRequest,
+  handleRealmEmailCanonicalCloseRequest,
   handleRealmEmailRouteRequest,
   isRealmEmailAliasAdminPath,
   isRealmEmailRoutePath,
   matchRealmEmailAliasCustomerPath,
+  matchRealmEmailCanonicalClosePath,
   matchRealmEmailRoutePath,
 } from "./realm-email-alias-api.mjs";
 import {
   DurableRealmEmailAliasRegistry,
+  runScheduledCanonicalRealmRouteInventory,
 } from "./realm-email-alias-runtime.mjs";
+import {
+  handleRealmEmailAliasRecoveryAdminRequest,
+  isRealmEmailAliasRecoveryAdminPath,
+} from "./realm-email-alias-recovery-api.mjs";
 
 export class Backend extends Container {
   defaultPort = 8080;
@@ -4159,6 +4166,16 @@ export default {
     // requests and platform-admin governance terminate at the Worker-backed
     // registry rather than being forwarded to one tenant cell. Customer
     // operator tokens are still verified against the owning cell first.
+    const realmEmailCanonicalClose = matchRealmEmailCanonicalClosePath(
+      url.pathname,
+    );
+    if (realmEmailCanonicalClose) {
+      return handleRealmEmailCanonicalCloseRequest(
+        request,
+        env,
+        realmEmailCanonicalClose,
+      );
+    }
     const realmEmailAliasCustomer = matchRealmEmailAliasCustomerPath(
       url.pathname,
     );
@@ -4167,6 +4184,16 @@ export default {
         request,
         env,
         realmEmailAliasCustomer,
+      );
+    }
+    if (isRealmEmailAliasRecoveryAdminPath(url.pathname)) {
+      const admin = await adminAuthorized(request, env);
+      if (!admin) return err("unauthorized", 401);
+      return handleRealmEmailAliasRecoveryAdminRequest(
+        request,
+        env,
+        url,
+        admin,
       );
     }
     if (isRealmEmailAliasAdminPath(url.pathname)) {
@@ -4329,6 +4356,7 @@ export default {
     ctx.waitUntil(reapExpiredPendings(env));
     ctx.waitUntil(runScheduledPlacementRunner(env));
     ctx.waitUntil(runScheduledAccountBackups(env, _event?.scheduledTime));
+    ctx.waitUntil(runScheduledCanonicalRealmRouteInventory(env));
     ctx.waitUntil(runScheduledPlanLifecycle(
       env,
       (request) => getContainer(env.CONTROL_PLANE, "singleton").fetch(request),

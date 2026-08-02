@@ -7,7 +7,7 @@ delete/revoke behavior.
 
 | Resource | Create | Delete / revoke | Safety behavior |
 |---|---|---|---|
-| Realm | `POST /v1/realms`, `witself realm create` | `DELETE /v1/realms/{realm}`, `witself realm delete --yes` | Soft-deletes only empty realms. Live agents must be deleted first. |
+| Realm | `POST /v1/realms`, `witself realm create` | Managed: `POST /v1/accounts/{account}/realms/{realm}:close`, `witself realm delete --yes`; self-hosted: `DELETE /v1/realms/{realm}` | Soft-deletes only empty realms. The managed path first publishes a permanent canonical email-route tombstone; the cell refuses a direct managed deletion without that fence. Live agents and aliases must be retired first. |
 | Agent | `POST /v1/realms/{realm}/agents`, `witself agent create` | `DELETE /v1/realms/{realm}/agents/{agent}`, `witself agent delete --yes` | Soft-deletes the agent and immediately revokes live agent tokens. |
 | Agent token | `POST /v1/agents/{agent}/tokens`, `witself token create --agent` | `POST /v1/tokens/{token_id}:revoke`, `witself token revoke --token TOKEN_ID --yes` | Revokes by server-side token ID. Raw token values are never needed for revoke. |
 | Operator | `POST /v1/operators`, `witself operator create --name` | `DELETE /v1/operators/{operator}`, `witself operator delete --yes` | Soft-deletes non-root operators and revokes all live tokens bound to them. Self, root, and last-operator deletes are rejected. |

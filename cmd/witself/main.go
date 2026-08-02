@@ -537,6 +537,7 @@ func realmDelete(args []string) int {
 	account := accountFlag(fs)
 	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
 	tokenFile := fs.String("token-file", "", "file containing the operator token")
+	controlPlane := fs.String("control-plane", defaultControlPlane, "managed control-plane URL")
 	yes := fs.Bool("yes", false, "confirm realm deletion")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -551,6 +552,40 @@ func realmDelete(args []string) int {
 		return 2
 	}
 	ctx := context.Background()
+	// The normal named-account path is managed: the control plane must publish
+	// a permanent canonical-route tombstone before the cell may soft-delete the
+	// realm. Explicit endpoint/token material remains the portable self-hosted
+	// direct-delete path.
+	if *endpoint == "" && *tokenFile == "" {
+		_, acct, tok, err := local.Resolve(*account)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+			return 1
+		}
+		result, err := client.CloseManagedRealm(
+			ctx,
+			*controlPlane,
+			tok,
+			acct.ID,
+			realmID,
+			"realm-delete:"+realmID,
+		)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+			return 1
+		}
+		if result.Complete {
+			fmt.Fprintf(os.Stderr, "deleted realm %s\n", realmID)
+		} else {
+			fmt.Fprintf(
+				os.Stderr,
+				"realm %s close accepted (%s); the control plane will continue it safely\n",
+				realmID,
+				result.Phase,
+			)
+		}
+		return 0
+	}
 	ep, tok, err := connect(ctx, *account, *endpoint, *tokenFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)

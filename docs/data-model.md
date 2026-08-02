@@ -455,6 +455,9 @@ rate limits attach to the account and roll up by realm; the per-realm KEK
 | `signing_public_key` | `text NULL` | the realm signing **public key** / JWKS (or a JWKS ref) published in the realm card and used by peers to verify cross-realm envelopes. Public material only — the **private signing key is sealed-plane / KMS-custodied and is NEVER a column here** |
 | `signing_key_version` | `bigint NULL` | monotonic signing-key generation, bumped on rotation; lets peers select the verifying key during a rotation overlap |
 | `card_expires_at` | `timestamptz NULL` | TTL of the currently published realm card (`ttl` / `expires_at`); cards are re-fetched on expiry |
+| `email_route_state` | `text NOT NULL` | `live`, `closing`, or `retired` |
+| `email_route_generation` | `bigint NOT NULL` | prepare/commit fence |
+| `email_route_operation_id` | `text NULL` | stable close operation |
 | `row_version` | `bigint NOT NULL DEFAULT 1` | |
 | `created_at` / `updated_at` / `deleted_at` | `timestamptz` | |
 
@@ -466,6 +469,18 @@ endpoint + key) is the separate global control plane, not this table (see the
 [control-plane note above](#two-planes-one-schema) and
 [deployment-cells.md](deployment-cells.md)). Cross-realm features are post-v0; in
 a realm-local-only deployment these columns are simply NULL.
+
+Migration `0086` adds the email-route shape and defaults new rows to `live` at
+generation 1. It ties the control-plane route to the portable realm row.
+`live` requires `deleted_at` and `email_route_operation_id` to be null.
+Prepare serializes against agent creation and applied-alias writes, changes an
+empty realm to `closing`, records the operation id, and increments generation.
+Commit requires that exact operation/generation and atomically writes both
+`retired` and `deleted_at`; retired rows remain inventory-visible tombstones.
+Existing deleted realms are backfilled as generation-2 `legacy_delete`
+tombstones. Migration `0086` refuses to downgrade while any route is
+`closing`, because schema `0085` has no safe representation for an in-flight
+external retirement.
 
 Constraints: FK `account_id`; index `(account_id)`. Name uniqueness is a partial
 index; `realm_handle` is globally unique among live, federated realms:
@@ -641,6 +656,19 @@ provenance. Schema `0084` cannot represent all three consistently, so the
 `0085` down migration fails before making any change when an alias-delivered
 message exists. Downgrade remains available when alias claims exist but no
 message was received through one; the projection rows are then dropped.
+
+The globally unique alias authority is not a cell table. Its Durable Object
+stores claims, skeleton ownership, reservations, audit order, idempotency
+fences, canonical-route ownership, permanent realm-close fences, and other
+authority rows. Derived indexes and retry queues are explicitly rebuildable.
+When enabled, a dedicated R2 journal records create-only, SHA-256 hash-chained
+authority after-images before external projection success. Bootstrap and
+checkpoint scan at most 100 storage rows per step, cap authority at 10,000
+keys, and keep a durable global write freeze until complete. Empty-target
+recovery replays that authority into `recovery:<rear_id>`, reconstructs derived
+state in bounded pages, validates the exact checkpoint digest and
+registry/audit fences, then permanently seals the target. Recovery state is
+never merged into or automatically selected as the active registry.
 
 ## Open-Plane Tables
 

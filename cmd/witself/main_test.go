@@ -856,6 +856,57 @@ func TestDestructiveCommandsRequireYes(t *testing.T) {
 	}
 }
 
+func TestManagedRealmDeleteUsesControlPlaneRetirement(t *testing.T) {
+	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
+	if err := local.Save(
+		"managed",
+		local.Account{ID: "acc_1"},
+		"witself_opr_managed",
+	); err != nil {
+		t.Fatal(err)
+	}
+	const realmID = "realm_aaaaaaaaaaaaaaaa"
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method != http.MethodPost ||
+			r.URL.Path != "/v1/accounts/acc_1/realms/"+realmID+":close" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer witself_opr_managed" {
+			t.Errorf("authorization = %q", got)
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if body["idempotency_key"] != "realm-delete:"+realmID {
+			t.Errorf("body = %#v", body)
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.realm-email-alias.v1",
+			"account_id":     "acc_1",
+			"realm_id":       realmID,
+			"complete":       false,
+			"phase":          "publish_retired",
+		})
+	}))
+	defer srv.Close()
+
+	if code := run([]string{
+		"realm", "delete", "--account", "managed",
+		"--control-plane", srv.URL, "--yes", realmID,
+	}); code != 0 {
+		t.Fatalf("realm delete code = %d, want 0", code)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1", requests)
+	}
+}
+
 func TestAccountForget(t *testing.T) {
 	t.Setenv("WITSELF_HOME", filepath.Join(t.TempDir(), ".witself"))
 	if err := local.Save("stale", local.Account{ID: "acc_1"}, "witself_opr_dead"); err != nil {

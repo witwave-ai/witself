@@ -1,6 +1,18 @@
+import {
+  CELL_REALM_ROUTE_PAGE_LIMIT,
+  cellRealmRouteCommitURL,
+  cellRealmRouteGetURL,
+  cellRealmRouteListURL,
+  cellRealmRoutePrepareURL,
+} from "./realm-email-canonical-contract.mjs";
+import {
+  RealmEmailAliasJournalRuntime,
+  RealmEmailAliasJournalRuntimeError,
+} from "./realm-email-alias-journal-runtime.mjs";
+
 const SCHEMA_VERSION = "witself.realm-email-alias.v1";
 const META_KEY = "meta";
-const REGISTRY_OBJECT_NAME = "global";
+const DEFAULT_REGISTRY_OBJECT_NAME = "global";
 const ALIAS_PATTERN = /^[a-z0-9](?:[a-z0-9-]{1,14}[a-z0-9])$/;
 const CANONICAL_REALM_LABEL_PATTERN = /^[a-z2-7]{16}$/;
 const ACCOUNT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
@@ -43,6 +55,12 @@ const PENDING_COUNTER_DERIVED_PREFIXES = Object.freeze([
   "claim-usage-account:",
   "claim-usage-realm:",
 ]);
+const AGENT_EMAIL_RECEIVE_FEATURE = "agent_email_receive";
+const CANONICAL_INVENTORY_SCHEMA = "witself.realm-email-canonical-inventory.v1";
+const CANONICAL_INVENTORY_KEY = "canonical-inventory";
+const CANONICAL_INVENTORY_DIRECTORY_LIMIT = 1;
+const REALM_CLOSE_CLAIM_PAGE_LIMIT = 25;
+const REALM_CLOSE_ALARM_BATCH_LIMIT = 10;
 
 // Commercial alias capacity can be explicitly unlimited. Review work cannot:
 // these independent technical ceilings bound both one realm's queue and one
@@ -50,6 +68,16 @@ const PENDING_COUNTER_DERIVED_PREFIXES = Object.freeze([
 // configuration may lower, but never raise, the compiled safety ceilings.
 export const REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM = 8;
 export const REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT = 64;
+
+export function realmEmailCanonicalInventoryEnabled(env = {}) {
+  return String(env.CP_REALM_EMAIL_CANONICAL_INVENTORY_ENABLED ?? "") ===
+    "true";
+}
+
+export function realmEmailCanonicalDeliveryEnabled(env = {}) {
+  return String(env.CP_REALM_EMAIL_CANONICAL_DELIVERY_ENABLED ?? "") ===
+    "true";
+}
 
 // These names are seeded into durable, administrator-managed state. They are
 // not a hardcoded-only policy: platform administrators can version, disable,
@@ -408,6 +436,32 @@ function accountCanonicalIndexKey(canonical) {
     `${canonical.domain}:${canonical.realm_label}`;
 }
 
+function realmCanonicalIndexPrefix(accountID, realmID) {
+  return `realm-canonical:${accountID}:${realmID}:`;
+}
+
+function realmCanonicalIndexKey(canonical) {
+  return `${realmCanonicalIndexPrefix(canonical.account_id, canonical.realm_id)}` +
+    `${canonical.domain}:${canonical.realm_label}`;
+}
+
+function canonicalRouteAuthorityKey(domain, realmID) {
+  return `canonical:${domain}:${realmID.slice("realm_".length)}`;
+}
+
+function realmCloseIntentKey(accountID, realmID) {
+  return `realm-close-intent:${accountID}:${realmID}`;
+}
+
+function realmCloseFenceKey(accountID, realmID) {
+  return `realm-close-fence:${accountID}:${realmID}`;
+}
+
+function realmCloseDueKey(intent) {
+  return `realm-close-due:${String(intent.retry_at_ms).padStart(16, "0")}:` +
+    `${intent.account_id}:${intent.realm_id}`;
+}
+
 function graceIndexKey(claim) {
   if (!claim?.plan_grace_until) return null;
   const deadline = Number.isSafeInteger(claim.grace_retry_at_ms)
@@ -565,6 +619,57 @@ function validateAccountRealm(input) {
   }
 }
 
+function validateCellCanonicalRoute(value, accountID, realmID = null) {
+  if (!ACCOUNT_ID_PATTERN.test(accountID ?? "") || !isObject(value) ||
+      value.account_id !== accountID ||
+      !REALM_ID_PATTERN.test(value.realm_id ?? "") ||
+      (realmID !== null && value.realm_id !== realmID) ||
+      !["live", "closing", "retired"].includes(value.state) ||
+      !Number.isSafeInteger(value.generation) || value.generation < 1 ||
+      ((value.state === "closing" || value.state === "retired") &&
+        !IDEMPOTENCY_KEY_PATTERN.test(value.operation_id ?? "")) ||
+      (value.state === "live" && value.operation_id != null)) {
+    fail("cell returned an invalid canonical realm route", 502);
+  }
+  return {
+    account_id: value.account_id,
+    realm_id: value.realm_id,
+    state: value.state,
+    generation: value.generation,
+    operation_id: value.operation_id ?? null,
+  };
+}
+
+function canonicalRoutingPolicy(cellRoute, emailEnabled, deliveryEnabled) {
+  if (cellRoute.state === "retired") {
+    return { state: "retired", suspension_disposition: null };
+  }
+  if (cellRoute.state === "closing" || !deliveryEnabled) {
+    return { state: "suspended", suspension_disposition: "retry" };
+  }
+  if (!emailEnabled) {
+    return { state: "suspended", suspension_disposition: "inactive" };
+  }
+  return { state: "applied", suspension_disposition: null };
+}
+
+function publicCanonicalRoute(canonical) {
+  return {
+    account_id: canonical.account_id,
+    realm_id: canonical.realm_id,
+    domain: canonical.domain,
+    realm_label: canonical.realm_label,
+    state: canonical.state,
+    controller_revision: canonical.controller_revision,
+    cell_state: canonical.cell_state,
+    cell_generation: canonical.cell_generation,
+    ...(canonical.cell_operation_id
+      ? { operation_id: canonical.cell_operation_id }
+      : {}),
+    updated_at: canonical.updated_at,
+  };
+}
+
 function validateIdempotencyKey(value) {
   if (!IDEMPOTENCY_KEY_PATTERN.test(value ?? "")) {
     fail("idempotency_key is required", 400);
@@ -654,7 +759,7 @@ function decodeListCursor(value, prefix) {
 export function realmEmailAliasRegistryStub(env) {
   if (!env?.REALM_EMAIL_ALIASES) return null;
   const namespace = env.REALM_EMAIL_ALIASES;
-  return namespace.get(namespace.idFromName(REGISTRY_OBJECT_NAME));
+  return namespace.get(namespace.idFromName(DEFAULT_REGISTRY_OBJECT_NAME));
 }
 
 export async function reconcileRealmEmailAliasesForPlan(
@@ -763,6 +868,35 @@ export async function reconcileRealmEmailAliasesForAccountLifecycle(
   return body;
 }
 
+export async function runScheduledCanonicalRealmRouteInventory(env) {
+  if (!realmEmailCanonicalInventoryEnabled(env)) {
+    return { ran: false, configured: true };
+  }
+  const stub = realmEmailAliasRegistryStub(env);
+  if (!stub || !env?.DIRECTORY || !env?.AGENT_EMAIL_DIRECTORY) {
+    console.log("realm-email-canonical: inventory configuration is incomplete");
+    return { ran: false, configured: false };
+  }
+  try {
+    const response = await stub.fetch(
+      "https://realm-email-alias.internal/canonical/inventory/reconcile",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      },
+    );
+    const body = await response.json().catch(() => null);
+    if (!response.ok || body?.schema_version !== SCHEMA_VERSION) {
+      throw new Error("invalid inventory acknowledgement");
+    }
+    return { ran: true, configured: true, ...body };
+  } catch {
+    console.log("realm-email-canonical: inventory tick failed");
+    return { ran: true, configured: true, succeeded: false };
+  }
+}
+
 /**
  * One globally named Durable Object owns managed realm-email aliases.
  * Durable storage is authoritative for claims, reservations, tombstones, and
@@ -781,6 +915,20 @@ export class DurableRealmEmailAliasRegistry {
     this.fetchImpl = dependencies.fetch ?? ((...args) => globalThis.fetch(...args));
     this.log = dependencies.log ?? ((value) => console.log(value));
     this.lanes = new Map();
+    this.activeOperationalWork = 0;
+    this.authorityJournal = new RealmEmailAliasJournalRuntime(
+      this.storage,
+      this.env,
+      {
+        now: this.now,
+        ...(dependencies.newJournalStreamID
+          ? { newStreamID: dependencies.newJournalStreamID }
+          : {}),
+        ...(dependencies.afterJournalAppend
+          ? { afterJournalAppend: dependencies.afterJournalAppend }
+          : {}),
+      },
+    );
   }
 
   fetch(request) {
@@ -799,6 +947,40 @@ export class DurableRealmEmailAliasRegistry {
       release();
       if (this.lanes.get(key) === tail) this.lanes.delete(key);
     });
+  }
+
+  withAuthorityJournalMaintenance(work) {
+    return this.withLane("registry:authority-journal", async () => {
+      if (this.activeOperationalWork > 0) {
+        throw new RealmEmailAliasJournalRuntimeError(
+          "realm email alias authority work is still active; retry maintenance",
+          "realm_email_alias_journal_operational_work_active",
+        );
+      }
+      return work();
+    });
+  }
+
+  async withAuthorityOperationalWork(work) {
+    const rawApply = this.atomicRaw.bind(this);
+    await this.withLane("registry:authority-journal", async () => {
+      await this.authorityJournal.resume(rawApply);
+      await this.authorityJournal.assertOperationalReady();
+      this.activeOperationalWork++;
+    });
+    try {
+      return await work();
+    } finally {
+      // Durable Object events share one isolate. Maintenance checks this count
+      // while holding the short journal lane, so it can never install a freeze
+      // over external work that is already in flight. A process restart
+      // cancels that work and naturally resets the in-memory admission count.
+      this.activeOperationalWork--;
+      if (this.activeOperationalWork < 0) {
+        this.activeOperationalWork = 0;
+        throw new Error("realm email alias operational-work count underflow");
+      }
+    }
   }
 
   withLanes(keys, work) {
@@ -872,6 +1054,15 @@ export class DurableRealmEmailAliasRegistry {
         return [`account:${input.account_id}`];
       case "/counter/rebuild":
         return ["registry:counter-rebuild"];
+      case "/canonical/inventory/reconcile":
+        return ["registry:canonical-inventory"];
+      case "/canonical/realm-close":
+      case "/canonical/realm-close/get":
+        return [
+          `account:${input.account_id}`,
+          `realm:${input.account_id}:${input.realm_id}`,
+          `canonical:${input.domain}:${String(input.realm_id ?? "")}`,
+        ];
       default:
         return [];
     }
@@ -889,9 +1080,50 @@ export class DurableRealmEmailAliasRegistry {
     }
     try {
       const path = new URL(request.url).pathname;
-      await this.withLane("registry:seed", () => this.ensureSeeded());
-      const execute = async () => {
-        switch (path) {
+      const rawApply = this.atomicRaw.bind(this);
+      if (path === "/journal/status") {
+        return json({
+          schema_version: SCHEMA_VERSION,
+          ...await this.authorityJournal.status(),
+        });
+      }
+      if (path === "/journal/bootstrap" || path === "/journal/checkpoint") {
+        const result = await this.withAuthorityJournalMaintenance(
+          () => path === "/journal/bootstrap"
+            ? this.authorityJournal.bootstrap(input, rawApply)
+            : this.authorityJournal.checkpoint(input, rawApply),
+        );
+        return json({ schema_version: SCHEMA_VERSION, ...result });
+      }
+      if (path === "/recovery/start") {
+        const result = await this.withAuthorityJournalMaintenance(
+          () => this.authorityJournal.startRecovery(input, rawApply),
+        );
+        return json({ schema_version: SCHEMA_VERSION, ...result }, 202);
+      }
+      if (path === "/recovery/status") {
+        const result = await this.authorityJournal.recoveryStatus(
+          input?.recovery_id,
+        );
+        return result
+          ? json({ schema_version: SCHEMA_VERSION, ...result })
+          : errorResponse("realm email alias recovery not found", 404);
+      }
+      if (path === "/recovery/advance" || path === "/recovery/verify") {
+        const result = await this.withAuthorityJournalMaintenance(
+          () => path === "/recovery/advance"
+            ? this.authorityJournal.advanceRecovery(input, rawApply)
+            : this.authorityJournal.verifyRecovery(input, rawApply),
+        );
+        return json(
+          { schema_version: SCHEMA_VERSION, ...result },
+          result.sealed || result.failed ? 200 : 202,
+        );
+      }
+      return await this.withAuthorityOperationalWork(async () => {
+        await this.withLane("registry:seed", () => this.ensureSeeded());
+        const execute = async () => {
+          switch (path) {
         case "/request/create":
           return await this.createRequest(input);
         case "/request/list":
@@ -932,26 +1164,74 @@ export class DurableRealmEmailAliasRegistry {
           return await this.reconcileAccountLifecycle(input);
         case "/counter/rebuild":
           return await this.rebuildPendingCounters(input);
+        case "/canonical/inventory/reconcile":
+          return await this.reconcileCanonicalInventory();
+        case "/canonical/realm-close":
+          return await this.closeRealm(input);
+        case "/canonical/realm-close/get":
+          return await this.getRealmClose(input);
         default:
           return errorResponse("registry endpoint not found", 404);
+          }
+        };
+        const lanes = await this.operationLanes(path, input);
+        if (lanes.length > 0) {
+          return await this.withLanes(lanes, execute);
         }
-      };
-      const lanes = await this.operationLanes(path, input);
-      if (lanes.length > 0) {
-        return await this.withLanes(lanes, execute);
-      }
-      return await execute();
+        return await execute();
+      });
     } catch (error) {
+      const journalError = error instanceof RealmEmailAliasJournalRuntimeError;
+      const journalConflictCodes = new Set([
+        "realm_email_alias_journal_already_bootstrapped",
+        "realm_email_alias_journal_fence_mismatch",
+        "realm_email_alias_journal_fork_detected",
+        "realm_email_alias_journal_idempotency_conflict",
+        "realm_email_alias_recovery_checkpoint_invalid",
+        "realm_email_alias_recovery_collision",
+        "realm_email_alias_recovery_digest_mismatch",
+        "realm_email_alias_recovery_idempotency_conflict",
+        "realm_email_alias_recovery_incomplete",
+        "realm_email_alias_recovery_invariant_failed",
+        "realm_email_alias_recovery_revision_regression",
+        "realm_email_alias_recovery_target_not_empty",
+        "realm_email_alias_recovery_target_sealed",
+        "realm_email_alias_recovery_tombstone_resurrection",
+      ]);
+      const journalBadRequestCodes = new Set([
+        "realm_email_alias_journal_maintenance_invalid",
+        "realm_email_alias_recovery_request_invalid",
+      ]);
       return errorResponse(
         String(error?.message ?? error),
-        error instanceof RegistryError ? error.status : 500,
-        error instanceof RegistryError ? error.code : "",
+        error instanceof RegistryError
+          ? error.status
+          : journalBadRequestCodes.has(error?.code)
+          ? 400
+          : journalConflictCodes.has(error?.code)
+          ? 409
+          : journalError
+          ? 503
+          : 500,
+        error instanceof RegistryError || journalError ? error.code : "",
         error instanceof RegistryError ? error.details : {},
       );
     }
   }
 
   async atomic(entries, deletes = [], options = {}) {
+    return this.withLane(
+      "registry:authority-journal",
+      () => this.authorityJournal.commit(
+        entries,
+        deletes,
+        options,
+        this.atomicRaw.bind(this),
+      ),
+    );
+  }
+
+  async atomicRaw(entries, deletes = [], options = {}) {
     const apply = async (storage) => {
       const transitionMode = options.claimUsageTransition?.mode ?? "ordinary";
       if (options.claimUsageTransition &&
@@ -1079,7 +1359,7 @@ export class DurableRealmEmailAliasRegistry {
         pending_counter_state: "ready",
         updated_at: this.now().toISOString(),
       };
-      await this.storage.put(META_KEY, upgraded);
+      await this.atomic([[META_KEY, upgraded]]);
       return upgraded;
     }
 
@@ -1624,6 +1904,13 @@ export class DurableRealmEmailAliasRegistry {
     }
   }
 
+  async assertRealmAliasWritesAllowed(accountID, realmID) {
+    if (await this.storage.get(realmCloseIntentKey(accountID, realmID)) ||
+        await this.storage.get(realmCloseFenceKey(accountID, realmID))) {
+      fail("realm close is converging or complete; alias writes are fenced", 409);
+    }
+  }
+
   assertCellAcknowledgement(body, claim, state) {
     if (!isObject(body) || body.claim_id !== claim.claim_id ||
         body.account_id !== claim.account_id || body.realm_id !== claim.realm_id ||
@@ -1735,39 +2022,231 @@ export class DurableRealmEmailAliasRegistry {
     return this.publishRoute(value);
   }
 
-  async ensureCanonicalRoute(claim, meta, target, desiredState = "applied") {
-    const realmLabel = claim.realm_id.slice("realm_".length);
-    const key = `canonical:${claim.domain}:${realmLabel}`;
-    const current = await this.storage.get(key);
-    const revision = Math.max(
-      current?.controller_revision ?? 0,
-      meta.registry_revision,
-    );
-    const updatedAt = this.now().toISOString();
-    const canonical = {
-      domain: claim.domain,
-      account_id: claim.account_id,
-      realm_id: claim.realm_id,
-      realm_label: realmLabel,
-      state: desiredState,
-      controller_revision: revision,
-      updated_at: updatedAt,
-    };
-    const value = buildRealmEmailRouteProjection({
+  async fetchCellCanonicalRoute(accountID, realmID, target = null) {
+    const destination = target ?? await this.cellTarget(accountID);
+    let response;
+    try {
+      response = await this.fetchImpl(
+        cellRealmRouteGetURL(destination.endpoint, accountID, realmID),
+        {
+          method: "GET",
+          headers: { Authorization: `Bearer ${destination.provision_token}` },
+          signal: AbortSignal.timeout(15_000),
+        },
+      );
+    } catch {
+      fail("canonical realm route target is unreachable", 502);
+    }
+    const body = await response.json().catch(() => null);
+    if (response.status === 404) fail("canonical realm route not found", 404);
+    if (!response.ok) fail("cell rejected canonical realm route lookup", 502);
+    return validateCellCanonicalRoute(body, accountID, realmID);
+  }
+
+  canonicalProjection(canonical, updatedAt = canonical.updated_at) {
+    return buildRealmEmailRouteProjection({
       ...canonical,
+      updated_at: updatedAt,
       route_kind: "canonical",
-      ...(desiredState === "suspended"
-        ? { suspension_disposition: "retry" }
+      ...(canonical.state === "suspended"
+        ? { suspension_disposition: canonical.suspension_disposition }
         : {}),
-      cell_audience: target?.cell_audience,
-      ingest_url: target?.ingest_url,
+      cell_audience: canonical.cell_audience,
+      ingest_url: canonical.ingest_url,
     });
-    await this.publishRoute(value);
-    await this.atomic([
-      [key, canonical],
-      [accountCanonicalIndexKey(canonical), key],
-    ]);
-    return value;
+  }
+
+  async upsertCanonicalRoute({
+    domain,
+    cellRoute,
+    target = null,
+    emailEnabled = false,
+    deliveryEnabled = realmEmailCanonicalDeliveryEnabled(this.env),
+    forcedPolicy = null,
+    minimumControllerRevision = 1,
+    lifecycleFence = null,
+  }) {
+    const canonicalDomain = validateManagedRealmEmailDomain(domain);
+    const source = validateCellCanonicalRoute(
+      cellRoute,
+      cellRoute?.account_id,
+      cellRoute?.realm_id,
+    );
+    const realmLabel = source.realm_id.slice("realm_".length);
+    const key = canonicalRouteAuthorityKey(canonicalDomain, source.realm_id);
+    const current = await this.storage.get(key);
+    if (current &&
+        (current.domain !== canonicalDomain ||
+          current.account_id !== source.account_id ||
+          current.realm_id !== source.realm_id ||
+          current.realm_label !== realmLabel)) {
+      fail("canonical realm route ownership collision", 409);
+    }
+    const forcedPolicyKeys = isObject(forcedPolicy)
+      ? Object.keys(forcedPolicy).sort()
+      : [];
+    const exactForcedRetiredPolicy =
+      forcedPolicyKeys.length === 2 &&
+      forcedPolicyKeys[0] === "state" &&
+      forcedPolicyKeys[1] === "suspension_disposition" &&
+      forcedPolicy.state === "retired" &&
+      forcedPolicy.suspension_disposition === null;
+    // A lost KV acknowledgement can leave the durable authority tombstoned
+    // while the cell is still at the exact prepared `closing` fence. Replaying
+    // that same forced-retired projection is repair, not resurrection. Keep
+    // every ownership, generation, operation, cell-state, and policy byte
+    // constrained so no other retired -> non-retired source transition passes.
+    const closingTombstoneReplayCandidate = current?.state === "retired" &&
+      current.cell_state === "closing" &&
+      source.state === "closing" &&
+      Number.isSafeInteger(current.cell_generation) &&
+      current.cell_generation === source.generation &&
+      typeof current.cell_operation_id === "string" &&
+      current.cell_operation_id === source.operation_id &&
+      exactForcedRetiredPolicy;
+    const currentGeneration = Number.isSafeInteger(current?.cell_generation)
+      ? current.cell_generation
+      : 0;
+    if (current && source.generation < currentGeneration) {
+      fail("canonical realm route generation is stale", 409);
+    }
+    if (current && currentGeneration > 0 &&
+        source.generation === currentGeneration &&
+        (source.state !== current.cell_state ||
+          source.operation_id !== (current.cell_operation_id ?? null))) {
+      const terminalCommit = current.cell_state === "closing" &&
+        source.state === "retired" &&
+        source.operation_id === current.cell_operation_id;
+      if (!terminalCommit) {
+        fail("canonical realm route generation conflicts", 409);
+      }
+    }
+    if (current?.cell_operation_id && source.operation_id &&
+        current.cell_operation_id !== source.operation_id) {
+      fail("canonical realm route operation conflicts", 409);
+    }
+
+    const policy = forcedPolicy ?? canonicalRoutingPolicy(
+      source,
+      emailEnabled,
+      deliveryEnabled,
+    );
+    if (!isObject(policy) ||
+        !["applied", "suspended", "retired"].includes(policy.state) ||
+        (policy.state === "suspended" &&
+          !["retry", "inactive"].includes(policy.suspension_disposition)) ||
+        (source.state === "retired" && policy.state !== "retired") ||
+        (source.state === "closing" && policy.state === "applied") ||
+        (policy.state === "retired" && source.state === "live")) {
+      fail("canonical realm route policy is invalid", 500);
+    }
+    const appliedTarget = policy.state === "applied"
+      ? target ?? await this.cellTarget(source.account_id)
+      : null;
+    const authority = {
+      domain: canonicalDomain,
+      account_id: source.account_id,
+      realm_id: source.realm_id,
+      realm_label: realmLabel,
+      state: policy.state,
+      ...(policy.state === "suspended"
+        ? { suspension_disposition: policy.suspension_disposition }
+        : {}),
+      cell_state: source.state,
+      cell_generation: source.generation,
+      cell_operation_id: source.operation_id,
+      ...(lifecycleFence
+        ? { lifecycle_fence: lifecycleFence }
+        : current?.lifecycle_fence
+        ? { lifecycle_fence: current.lifecycle_fence }
+        : {}),
+      ...(policy.state === "applied"
+        ? {
+          cell_audience: appliedTarget.cell_audience,
+          ingest_url: appliedTarget.ingest_url,
+        }
+        : {}),
+    };
+    const comparable = (value) => JSON.stringify({
+      domain: value?.domain,
+      account_id: value?.account_id,
+      realm_id: value?.realm_id,
+      realm_label: value?.realm_label,
+      state: value?.state,
+      suspension_disposition: value?.suspension_disposition ?? null,
+      cell_state: value?.cell_state,
+      cell_generation: value?.cell_generation,
+      cell_operation_id: value?.cell_operation_id ?? null,
+      cell_audience: value?.cell_audience ?? null,
+      ingest_url: value?.ingest_url ?? null,
+      lifecycle_fence: value?.lifecycle_fence ?? null,
+    });
+    const exactClosingTombstoneReplay = closingTombstoneReplayCandidate &&
+      comparable(current) === comparable(authority);
+    if (current?.state === "retired" && source.state !== "retired" &&
+        !exactClosingTombstoneReplay) {
+      fail("retired canonical realm routes cannot be resurrected", 409);
+    }
+    const changed = !current || comparable(current) !== comparable(authority);
+    const currentControllerRevision = Number.isSafeInteger(
+        current?.controller_revision,
+      ) && current.controller_revision >= 1
+      ? current.controller_revision
+      : 0;
+    const controllerRevision = current
+      ? changed ? currentControllerRevision + 1 : currentControllerRevision
+      : Math.max(1, minimumControllerRevision);
+    if (!Number.isSafeInteger(controllerRevision) || controllerRevision < 1) {
+      fail("canonical realm route revision is exhausted", 503);
+    }
+    const canonical = changed
+      ? {
+        ...authority,
+        controller_revision: controllerRevision,
+        updated_at: this.now().toISOString(),
+      }
+      : current;
+    // The durable authority after-image must exist before its eventually
+    // consistent routing projection can become externally visible. If the KV
+    // acknowledgement is lost, every owner retries these exact bytes at the
+    // same controller revision; no synthetic revision is minted for repair.
+    await this.atomic(changed
+      ? [
+        [key, canonical],
+        [accountCanonicalIndexKey(canonical), key],
+        [realmCanonicalIndexKey(canonical), key],
+      ]
+      : [
+        [accountCanonicalIndexKey(canonical), key],
+        [realmCanonicalIndexKey(canonical), key],
+      ]);
+    await this.publishRoute(this.canonicalProjection(canonical));
+    return canonical;
+  }
+
+  async ensureCanonicalRoute(claim, meta, target, desiredState = "applied") {
+    const source = await this.fetchCellCanonicalRoute(
+      claim.account_id,
+      claim.realm_id,
+      target,
+    );
+    const emailEnabled = await this.canonicalEmailEntitlement(claim.account_id);
+    const canonical = await this.upsertCanonicalRoute({
+      domain: claim.domain,
+      cellRoute: source,
+      target,
+      emailEnabled,
+      ...(desiredState === "suspended" && source.state !== "retired"
+        ? {
+          forcedPolicy: {
+            state: "suspended",
+            suspension_disposition: "retry",
+          },
+        }
+        : {}),
+      minimumControllerRevision: meta.registry_revision,
+    });
+    return this.canonicalProjection(canonical);
   }
 
   async syncClaimProjection(
@@ -1778,7 +2257,7 @@ export class DurableRealmEmailAliasRegistry {
   ) {
     const target = await this.applyAndVerifyCell(claim);
     const route = await this.publishClaimRoute(claim, meta, target);
-    if (includeCanonical) {
+    if (includeCanonical && realmEmailCanonicalInventoryEnabled(this.env)) {
       await this.ensureCanonicalRoute(claim, meta, target, canonicalState);
     }
     return route;
@@ -1822,22 +2301,7 @@ export class DurableRealmEmailAliasRegistry {
         `canonical:${domain}:${realmLabel}`,
       );
       if (!canonical) fail("realm email route not found", 404);
-      const target = canonical.state === "applied"
-        ? await this.cellTarget(canonical.account_id)
-        : null;
-      const refreshed = {
-        ...canonical,
-        updated_at: this.now().toISOString(),
-      };
-      const value = buildRealmEmailRouteProjection({
-        ...refreshed,
-        route_kind: "canonical",
-        ...(refreshed.state === "suspended"
-          ? { suspension_disposition: "retry" }
-          : {}),
-        cell_audience: target?.cell_audience,
-        ingest_url: target?.ingest_url,
-      });
+      const value = this.canonicalProjection(canonical);
       await this.enqueueRouteRefresh({
         domain,
         realmLabel,
@@ -1881,6 +2345,524 @@ export class DurableRealmEmailAliasRegistry {
       alias: claim.alias,
     });
     return json(value);
+  }
+
+  async fetchCellCanonicalPage(accountID, target, cursor = null) {
+    let response;
+    try {
+      response = await this.fetchImpl(
+        cellRealmRouteListURL(
+          target.endpoint,
+          accountID,
+          cursor,
+          CELL_REALM_ROUTE_PAGE_LIMIT,
+        ),
+        {
+          method: "GET",
+          headers: { Authorization: `Bearer ${target.provision_token}` },
+          signal: AbortSignal.timeout(15_000),
+        },
+      );
+    } catch {
+      fail("canonical realm route inventory is unreachable", 502);
+    }
+    const body = await response.json().catch(() => null);
+    if (!response.ok || body?.schema_version !== "witself.v0" ||
+        body?.account_id !== accountID || !Array.isArray(body?.routes) ||
+        body.routes.length > CELL_REALM_ROUTE_PAGE_LIMIT ||
+        !(body.next_cursor === null ||
+          (typeof body.next_cursor === "string" &&
+            body.next_cursor.length >= 1 && body.next_cursor.length <= 2_048 &&
+            body.next_cursor !== cursor))) {
+      fail("cell returned an invalid canonical realm route page", 502);
+    }
+    const routes = body.routes.map((route) =>
+      validateCellCanonicalRoute(route, accountID)
+    );
+    for (let index = 1; index < routes.length; index += 1) {
+      if (routes[index - 1].realm_id >= routes[index].realm_id) {
+        fail("cell canonical realm route page is not strictly ordered", 502);
+      }
+    }
+    if (body.next_cursor !== null && routes.length === 0) {
+      fail("cell canonical realm route page did not advance", 502);
+    }
+    return { routes, next_cursor: body.next_cursor };
+  }
+
+  async canonicalEmailEntitlement(accountID) {
+    const snapshot = await this.fetchAuthoritativePlan(accountID);
+    return snapshot.features.includes(AGENT_EMAIL_RECEIVE_FEATURE);
+  }
+
+  async reconcileCanonicalInventory() {
+    if (!realmEmailCanonicalInventoryEnabled(this.env)) {
+      fail("canonical realm route inventory is not enabled", 409);
+    }
+    if (!this.env?.DIRECTORY || typeof this.env.DIRECTORY.list !== "function") {
+      fail("canonical realm route inventory directory is unavailable", 503);
+    }
+    let scan = await this.storage.get(CANONICAL_INVENTORY_KEY);
+    if (scan == null) {
+      scan = {
+        schema_version: CANONICAL_INVENTORY_SCHEMA,
+        directory_cursor: null,
+        next_directory_cursor: null,
+        account_id: null,
+        cell_cursor: null,
+        cycle: 0,
+      };
+    } else if (!isObject(scan) ||
+        scan.schema_version !== CANONICAL_INVENTORY_SCHEMA ||
+        !(scan.directory_cursor === null ||
+          (typeof scan.directory_cursor === "string" &&
+            scan.directory_cursor.length <= 2_048)) ||
+        !(scan.account_id === null ||
+          ACCOUNT_ID_PATTERN.test(scan.account_id)) ||
+        !(scan.cell_cursor === null ||
+          (typeof scan.cell_cursor === "string" && scan.cell_cursor.length <= 2_048)) ||
+        !Number.isSafeInteger(scan.cycle) || scan.cycle < 0) {
+      fail("canonical realm route inventory cursor is invalid", 503);
+    }
+
+    if (!scan.account_id) {
+      const page = await this.env.DIRECTORY.list({
+        prefix: "acct:",
+        limit: CANONICAL_INVENTORY_DIRECTORY_LIMIT,
+        ...(scan.directory_cursor ? { cursor: scan.directory_cursor } : {}),
+      });
+      if (!Array.isArray(page?.keys) ||
+          page.keys.length > CANONICAL_INVENTORY_DIRECTORY_LIMIT ||
+          typeof page.list_complete !== "boolean" ||
+          (!page.list_complete &&
+            (typeof page.cursor !== "string" || page.cursor.length < 1 ||
+              page.cursor.length > 2_048 || page.cursor === scan.directory_cursor))) {
+        fail("directory returned an invalid canonical inventory page", 502);
+      }
+      if (page.keys.length === 0) {
+        if (!page.list_complete) {
+          fail("directory canonical inventory page did not advance", 502);
+        }
+        scan = {
+          ...scan,
+          directory_cursor: null,
+          next_directory_cursor: null,
+          account_id: null,
+          cell_cursor: null,
+          cycle: scan.cycle + 1,
+          updated_at: this.now().toISOString(),
+        };
+        await this.storage.put(CANONICAL_INVENTORY_KEY, scan);
+        return json({
+          schema_version: SCHEMA_VERSION,
+          complete: true,
+          cycle: scan.cycle,
+          accounts_scanned: 0,
+          routes_scanned: 0,
+        });
+      }
+      const name = page.keys[0]?.name;
+      const accountID = typeof name === "string" && name.startsWith("acct:")
+        ? name.slice("acct:".length)
+        : "";
+      if (!ACCOUNT_ID_PATTERN.test(accountID)) {
+        fail("directory returned an invalid account route key", 502);
+      }
+      scan = {
+        ...scan,
+        account_id: accountID,
+        cell_cursor: null,
+        next_directory_cursor: page.list_complete ? null : page.cursor,
+      };
+    }
+
+    const accountID = scan.account_id;
+    const [route, pending, archived] = await Promise.all([
+      this.env.DIRECTORY.get(`acct:${accountID}`, { type: "json" }),
+      this.env.DIRECTORY.get(`pending:${accountID}`),
+      this.env.DIRECTORY.get(`archived:${accountID}`),
+    ]);
+    if (!route?.cell || pending || archived) {
+      const complete = scan.next_directory_cursor === null;
+      const continued = {
+        ...scan,
+        directory_cursor: complete ? null : scan.next_directory_cursor,
+        next_directory_cursor: null,
+        account_id: null,
+        cell_cursor: null,
+        cycle: scan.cycle + (complete ? 1 : 0),
+        updated_at: this.now().toISOString(),
+      };
+      await this.storage.put(CANONICAL_INVENTORY_KEY, continued);
+      return json({
+        schema_version: SCHEMA_VERSION,
+        complete,
+        cycle: continued.cycle,
+        accounts_scanned: 1,
+        routes_scanned: 0,
+      });
+    }
+
+    const target = await this.cellTarget(accountID);
+    const [page, emailEnabled] = await Promise.all([
+      this.fetchCellCanonicalPage(accountID, target, scan.cell_cursor),
+      this.canonicalEmailEntitlement(accountID),
+    ]);
+    for (const cellRoute of page.routes) {
+      await this.withLane(
+        `canonical:${this.env.AGENT_EMAIL_DOMAIN}:${cellRoute.realm_id}`,
+        () => this.upsertCanonicalRoute({
+          domain: this.env.AGENT_EMAIL_DOMAIN,
+          cellRoute,
+          target,
+          emailEnabled,
+        }),
+      );
+    }
+    const accountComplete = page.next_cursor === null;
+    const complete = accountComplete && scan.next_directory_cursor === null;
+    const continued = {
+      ...scan,
+      directory_cursor: accountComplete
+        ? complete ? null : scan.next_directory_cursor
+        : scan.directory_cursor,
+      next_directory_cursor: accountComplete ? null : scan.next_directory_cursor,
+      account_id: accountComplete ? null : accountID,
+      cell_cursor: accountComplete ? null : page.next_cursor,
+      cycle: scan.cycle + (complete ? 1 : 0),
+      updated_at: this.now().toISOString(),
+    };
+    await this.storage.put(CANONICAL_INVENTORY_KEY, continued);
+    return json({
+      schema_version: SCHEMA_VERSION,
+      complete,
+      cycle: continued.cycle,
+      accounts_scanned: accountComplete ? 1 : 0,
+      routes_scanned: page.routes.length,
+      account_complete: accountComplete,
+    });
+  }
+
+  async assertRealmHasNoLiveAliases(accountID, realmID, cursor = null) {
+    const prefix = accountClaimIndexPrefix(accountID, realmID);
+    const listed = await this.storage.list({
+      prefix,
+      limit: REALM_CLOSE_CLAIM_PAGE_LIMIT + 1,
+      ...(cursor ? { startAfter: cursor } : {}),
+    });
+    const entries = [...listed.entries()];
+    const page = entries.slice(0, REALM_CLOSE_CLAIM_PAGE_LIMIT);
+    for (const [, alias] of page) {
+      const claim = await this.storage.get(claimKey(alias));
+      if (!claim || claim.account_id !== accountID || claim.realm_id !== realmID) {
+        fail("realm alias index is inconsistent", 503);
+      }
+      if (!claim.retired_at) {
+        fail("realm has a live or pending email alias", 409);
+      }
+    }
+    return entries.length > REALM_CLOSE_CLAIM_PAGE_LIMIT
+      ? page.at(-1)[0]
+      : null;
+  }
+
+  async postCellCanonicalTransition(target, url, payload, accountID, realmID) {
+    let response;
+    try {
+      response = await this.fetchImpl(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${target.provision_token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(15_000),
+      });
+    } catch {
+      fail("canonical realm close target is unreachable", 502);
+    }
+    const body = await response.json().catch(() => null);
+    if (!response.ok) {
+      fail(
+        response.status === 404
+          ? "canonical realm close target not found"
+          : response.status === 409
+          ? "canonical realm close is blocked by live resources or a stale fence"
+          : "cell rejected canonical realm close",
+        response.status === 404 ? 404 : response.status === 409 ? 409 : 502,
+      );
+    }
+    return validateCellCanonicalRoute(body, accountID, realmID);
+  }
+
+  async closeRealm(input) {
+    validateAccountRealm(input);
+    const actor = isObject(input.actor) && input.actor.kind === "platform_admin"
+      ? validateActor(input.actor, "platform_admin")
+      : validateActor(input.actor, "account_operator");
+    const key = validateIdempotencyKey(input.idempotency_key);
+    const domain = validateManagedRealmEmailDomain(input.domain);
+    const scope = `realm-close:${input.account_id}:${input.realm_id}`;
+    const fp = fingerprint({
+      action: "realm_close",
+      account_id: input.account_id,
+      realm_id: input.realm_id,
+      domain,
+    });
+    const replay = await this.idempotent(scope, key, fp);
+    if (replay) return replay;
+    const fence = await this.storage.get(
+      realmCloseFenceKey(input.account_id, input.realm_id),
+    );
+    if (fence) {
+      fail("realm is already permanently closed", 409);
+    }
+    let intent = await this.storage.get(
+      realmCloseIntentKey(input.account_id, input.realm_id),
+    );
+    if (intent &&
+        (intent.idempotency_key !== key || intent.fingerprint !== fp)) {
+      fail("another realm close is already converging", 409);
+    }
+    if (!intent) {
+      const now = this.now();
+      intent = {
+        schema_version: SCHEMA_VERSION,
+        account_id: input.account_id,
+        realm_id: input.realm_id,
+        domain,
+        actor,
+        idempotency_key: key,
+        fingerprint: fp,
+        phase: "scan_aliases",
+        alias_cursor: null,
+        failure_count: 0,
+        retry_at_ms: now.getTime(),
+        created_at: now.toISOString(),
+        updated_at: now.toISOString(),
+      };
+      await this.atomic([
+        [realmCloseIntentKey(intent.account_id, intent.realm_id), intent],
+        [realmCloseDueKey(intent), `${intent.account_id}:${intent.realm_id}`],
+      ]);
+      await this.scheduleNextAlarm().catch(() => {});
+    }
+    return this.drainRealmCloseIntent(intent);
+  }
+
+  async getRealmClose(input) {
+    validateAccountRealm(input);
+    const intent = await this.storage.get(
+      realmCloseIntentKey(input.account_id, input.realm_id),
+    );
+    const fence = await this.storage.get(
+      realmCloseFenceKey(input.account_id, input.realm_id),
+    );
+    if (!intent && !fence) fail("realm close not found", 404);
+    return json({
+      schema_version: SCHEMA_VERSION,
+      account_id: input.account_id,
+      realm_id: input.realm_id,
+      complete: Boolean(fence),
+      phase: fence ? "complete" : intent.phase,
+    }, fence ? 200 : 202);
+  }
+
+  async drainRealmCloseIntent(startingIntent) {
+    let intent = startingIntent;
+    try {
+      if (intent.phase === "scan_aliases") {
+        const nextCursor = await this.assertRealmHasNoLiveAliases(
+          intent.account_id,
+          intent.realm_id,
+          intent.alias_cursor,
+        );
+        if (nextCursor !== null) {
+          const previous = intent;
+          const continued = {
+            ...intent,
+            alias_cursor: nextCursor,
+            retry_at_ms: this.now().getTime() + 1_000,
+            updated_at: this.now().toISOString(),
+          };
+          await this.atomic([
+            [realmCloseIntentKey(intent.account_id, intent.realm_id), continued],
+            [realmCloseDueKey(continued), `${intent.account_id}:${intent.realm_id}`],
+          ], realmCloseDueKey(previous) === realmCloseDueKey(continued)
+            ? []
+            : [realmCloseDueKey(previous)]);
+          await this.scheduleNextAlarm().catch(() => {});
+          return json({
+            schema_version: SCHEMA_VERSION,
+            account_id: intent.account_id,
+            realm_id: intent.realm_id,
+            complete: false,
+            phase: "scan_aliases",
+          }, 202);
+        }
+        const previous = intent;
+        intent = {
+          ...intent,
+          phase: "prepare_cell",
+          alias_cursor: null,
+          retry_at_ms: this.now().getTime(),
+          updated_at: this.now().toISOString(),
+        };
+        await this.atomic([
+          [realmCloseIntentKey(intent.account_id, intent.realm_id), intent],
+          [realmCloseDueKey(intent), `${intent.account_id}:${intent.realm_id}`],
+        ], realmCloseDueKey(previous) === realmCloseDueKey(intent)
+          ? []
+          : [realmCloseDueKey(previous)]);
+      }
+
+      const target = await this.cellTarget(intent.account_id);
+      if (intent.phase === "prepare_cell") {
+        let source = await this.fetchCellCanonicalRoute(
+          intent.account_id,
+          intent.realm_id,
+          target,
+        );
+        if (source.state === "live") {
+          source = await this.postCellCanonicalTransition(
+            target,
+            cellRealmRoutePrepareURL(target.endpoint, intent.account_id),
+            {
+              realm_id: intent.realm_id,
+              operation_id: intent.idempotency_key,
+              expected_generation: source.generation,
+            },
+            intent.account_id,
+            intent.realm_id,
+          );
+        }
+        if (!["closing", "retired"].includes(source.state) ||
+            source.operation_id !== intent.idempotency_key) {
+          fail("cell canonical realm close fence conflicts", 409);
+        }
+        const previous = intent;
+        intent = {
+          ...intent,
+          phase: "publish_retired",
+          cell_route: source,
+          retry_at_ms: this.now().getTime(),
+          failure_count: 0,
+          updated_at: this.now().toISOString(),
+        };
+        await this.atomic([
+          [realmCloseIntentKey(intent.account_id, intent.realm_id), intent],
+          [realmCloseDueKey(intent), `${intent.account_id}:${intent.realm_id}`],
+        ], realmCloseDueKey(previous) === realmCloseDueKey(intent)
+          ? []
+          : [realmCloseDueKey(previous)]);
+      }
+
+      if (intent.phase === "publish_retired") {
+        await this.upsertCanonicalRoute({
+          domain: intent.domain,
+          cellRoute: intent.cell_route,
+          forcedPolicy: { state: "retired", suspension_disposition: null },
+        });
+        const previous = intent;
+        intent = {
+          ...intent,
+          phase: "commit_cell",
+          retry_at_ms: this.now().getTime(),
+          failure_count: 0,
+          updated_at: this.now().toISOString(),
+        };
+        await this.atomic([
+          [realmCloseIntentKey(intent.account_id, intent.realm_id), intent],
+          [realmCloseDueKey(intent), `${intent.account_id}:${intent.realm_id}`],
+        ], realmCloseDueKey(previous) === realmCloseDueKey(intent)
+          ? []
+          : [realmCloseDueKey(previous)]);
+      }
+
+      if (intent.phase !== "commit_cell") {
+        fail("canonical realm close intent is invalid", 503);
+      }
+      const committed = intent.cell_route.state === "retired"
+        ? intent.cell_route
+        : await this.postCellCanonicalTransition(
+          target,
+          cellRealmRouteCommitURL(target.endpoint, intent.account_id),
+          {
+            realm_id: intent.realm_id,
+            operation_id: intent.idempotency_key,
+            expected_generation: intent.cell_route.generation,
+          },
+          intent.account_id,
+          intent.realm_id,
+        );
+      if (committed.state !== "retired" ||
+          committed.operation_id !== intent.idempotency_key) {
+        fail("cell did not commit canonical realm retirement", 502);
+      }
+      const canonical = await this.upsertCanonicalRoute({
+        domain: intent.domain,
+        cellRoute: committed,
+        forcedPolicy: { state: "retired", suspension_disposition: null },
+      });
+      const body = {
+        schema_version: SCHEMA_VERSION,
+        account_id: intent.account_id,
+        realm_id: intent.realm_id,
+        complete: true,
+        canonical_route: publicCanonicalRoute(canonical),
+      };
+      const fence = {
+        account_id: intent.account_id,
+        realm_id: intent.realm_id,
+        operation_id: intent.idempotency_key,
+        cell_generation: committed.generation,
+        controller_revision: canonical.controller_revision,
+        completed_at: this.now().toISOString(),
+      };
+      await this.atomic([
+        [realmCloseFenceKey(intent.account_id, intent.realm_id), fence],
+        [`idem:realm-close:${intent.account_id}:${intent.realm_id}:${intent.idempotency_key}`, {
+          fingerprint: intent.fingerprint,
+          status: 200,
+          body,
+        }],
+      ], [
+        realmCloseIntentKey(intent.account_id, intent.realm_id),
+        realmCloseDueKey(intent),
+      ]);
+      await this.scheduleNextAlarm().catch(() => {});
+      return json(body);
+    } catch (error) {
+      const current = await this.storage.get(
+        realmCloseIntentKey(intent.account_id, intent.realm_id),
+      );
+      if (current) {
+        const failureCount = (current.failure_count ?? 0) + 1;
+        const retry = {
+          ...current,
+          failure_count: failureCount,
+          retry_at_ms: this.now().getTime() + retryDelayMs(failureCount),
+          last_failure_at: this.now().toISOString(),
+        };
+        await this.atomic([
+          [realmCloseIntentKey(intent.account_id, intent.realm_id), retry],
+          [realmCloseDueKey(retry), `${intent.account_id}:${intent.realm_id}`],
+        ], realmCloseDueKey(current) === realmCloseDueKey(retry)
+          ? []
+          : [realmCloseDueKey(current)]);
+        await this.scheduleNextAlarm().catch(() => {});
+        if (error instanceof RegistryError && error.status >= 500) {
+          return json({
+            schema_version: SCHEMA_VERSION,
+            account_id: intent.account_id,
+            realm_id: intent.realm_id,
+            complete: false,
+            phase: retry.phase,
+          }, 202);
+        }
+      }
+      throw error;
+    }
   }
 
   async boundedValues(
@@ -2208,6 +3190,10 @@ export class DurableRealmEmailAliasRegistry {
         prefix: "refresh-due:",
         limit: 1,
       })).keys()][0];
+      const firstRealmClose = [...(await this.storage.list({
+        prefix: "realm-close-due:",
+        limit: 1,
+      })).keys()][0];
       const counterMigration = await this.storage.get(
         PENDING_COUNTER_MIGRATION_KEY,
       );
@@ -2219,6 +3205,7 @@ export class DurableRealmEmailAliasRegistry {
         firstProjection ? Number(firstProjection.split(":", 3)[1]) : NaN,
         firstInternal ? Number(firstInternal.split(":", 3)[1]) : NaN,
         firstRefresh ? Number(firstRefresh.split(":", 3)[1]) : NaN,
+        firstRealmClose ? Number(firstRealmClose.split(":", 3)[1]) : NaN,
         Number(counterMigration?.retry_at_ms),
       ].filter(Number.isFinite);
       if (deadlines.length > 0) {
@@ -2230,7 +3217,7 @@ export class DurableRealmEmailAliasRegistry {
   }
 
   alarm() {
-    return (async () => {
+    return this.withAuthorityOperationalWork(async () => {
       await this.withLane("registry:seed", () => this.ensureSeeded());
       await this.reconcilePendingCounterMigration();
       const meta = await this.storage.get(META_KEY);
@@ -2248,6 +3235,7 @@ export class DurableRealmEmailAliasRegistry {
       // Each lane owns its own retry fence. A poison account or claim must not
       // prevent later due items, grace expiry, or approval recovery from
       // making progress during the same bounded alarm turn.
+      await this.reconcileDueRealmCloses();
       await this.reconcileDuePlanIntents();
       await this.reconcileDueLifecycles();
       await this.reconcileDueProjections();
@@ -2256,7 +3244,7 @@ export class DurableRealmEmailAliasRegistry {
       await this.reconcileDueApprovals();
       await this.reconcileDueGrace();
       await this.scheduleNextAlarm().catch(() => {});
-    })();
+    });
   }
 
   async matchingProjectionIntent(alias, scope, key, expectedFingerprint) {
@@ -2419,6 +3407,47 @@ export class DurableRealmEmailAliasRegistry {
     }
   }
 
+  async reconcileDueRealmCloses() {
+    const now = this.now().getTime();
+    const listed = await this.storage.list({
+      prefix: "realm-close-due:",
+      limit: REALM_CLOSE_ALARM_BATCH_LIMIT,
+    });
+    for (const [dueKey, reference] of listed) {
+      const retryAt = Number(dueKey.split(":", 3)[1]);
+      if (!Number.isFinite(retryAt) || typeof reference !== "string") {
+        await this.storage.delete(dueKey);
+        continue;
+      }
+      if (retryAt > now) break;
+      const separator = reference.indexOf(":");
+      const accountID = separator > 0 ? reference.slice(0, separator) : "";
+      const realmID = separator > 0 ? reference.slice(separator + 1) : "";
+      if (!ACCOUNT_ID_PATTERN.test(accountID) ||
+          !REALM_ID_PATTERN.test(realmID)) {
+        await this.storage.delete(dueKey);
+        continue;
+      }
+      const key = realmCloseIntentKey(accountID, realmID);
+      const intent = await this.storage.get(key);
+      const lanes = intent
+        ? [
+          `account:${accountID}`,
+          `realm:${accountID}:${realmID}`,
+          `canonical:${intent.domain}:${realmID}`,
+        ]
+        : [`realm:${accountID}:${realmID}`];
+      await this.withLanes(lanes, async () => {
+        const current = await this.storage.get(key);
+        if (!current || realmCloseDueKey(current) !== dueKey) {
+          await this.storage.delete(dueKey);
+          return;
+        }
+        await this.drainRealmCloseIntent(current).catch(() => {});
+      });
+    }
+  }
+
   async reconcileDueRouteRefreshes() {
     const now = this.now().getTime();
     const listed = await this.storage.list({
@@ -2464,30 +3493,34 @@ export class DurableRealmEmailAliasRegistry {
                 : null;
               await this.publishClaimRoute(claim, null, target);
             } else if (current.kind === "canonical") {
-              const canonicalKey =
-                `canonical:${current.domain}:${current.realm_label}`;
+              const canonicalKey = canonicalRouteAuthorityKey(
+                current.domain,
+                `realm_${current.realm_label}`,
+              );
               const canonical = await this.storage.get(canonicalKey);
               if (!canonical) {
                 await this.atomic([], [refreshKey, dueKey]);
                 return;
               }
-              const target = canonical.state === "applied"
-                ? await this.cellTarget(canonical.account_id)
-                : null;
-              const refreshed = {
-                ...canonical,
-                updated_at: this.now().toISOString(),
-              };
-              await this.publishRoute(buildRealmEmailRouteProjection({
-                ...refreshed,
-                route_kind: "canonical",
-                ...(refreshed.state === "suspended"
-                  ? { suspension_disposition: "retry" }
-                  : {}),
-                cell_audience: target?.cell_audience,
-                ingest_url: target?.ingest_url,
-              }));
-              await this.storage.put(canonicalKey, refreshed);
+              if (canonical.state === "retired") {
+                await this.publishRoute(this.canonicalProjection(canonical));
+              } else {
+                const target = await this.cellTarget(canonical.account_id);
+                const [source, emailEnabled] = await Promise.all([
+                  this.fetchCellCanonicalRoute(
+                    canonical.account_id,
+                    canonical.realm_id,
+                    target,
+                  ),
+                  this.canonicalEmailEntitlement(canonical.account_id),
+                ]);
+                await this.upsertCanonicalRoute({
+                  domain: canonical.domain,
+                  cellRoute: source,
+                  target,
+                  emailEnabled,
+                });
+              }
             } else {
               await this.atomic([], [refreshKey, dueKey]);
               return;
@@ -2686,6 +3719,7 @@ export class DurableRealmEmailAliasRegistry {
   async createRequest(input) {
     validateAccountRealm(input);
     await this.assertAccountAliasWritesAllowed(input.account_id);
+    await this.assertRealmAliasWritesAllowed(input.account_id, input.realm_id);
     const actor = validateActor(input.actor, "account_operator");
     const key = validateIdempotencyKey(input.idempotency_key);
     const alias = normalizeRealmEmailAlias(input.alias);
@@ -2905,6 +3939,10 @@ export class DurableRealmEmailAliasRegistry {
     );
     if (pendingProjection) return this.drainProjectionIntent(pendingProjection);
     await this.assertAccountAliasWritesAllowed(request.account_id);
+    await this.assertRealmAliasWritesAllowed(
+      request.account_id,
+      request.realm_id,
+    );
     const resuming = request.status === "provisioning";
     if (!resuming && request.status !== "pending_review") {
       fail("alias request is no longer pending", 409);
@@ -3296,6 +4334,12 @@ export class DurableRealmEmailAliasRegistry {
     const claim = await this.storage.get(claimKey(alias));
     if (!claim?.assignment_kind) fail("alias assignment not found", 404);
     await this.assertAccountAliasWritesAllowed(claim.account_id);
+    if (input.action !== "retire") {
+      await this.assertRealmAliasWritesAllowed(
+        claim.account_id,
+        claim.realm_id,
+      );
+    }
     if (input.action === "retire" &&
         await this.storage.get(planIntentKey(claim.account_id))) {
       fail("account alias plan is still converging; retirement is fenced", 409);
@@ -3391,6 +4435,8 @@ export class DurableRealmEmailAliasRegistry {
 
   async assignInternal(input) {
     validateAccountRealm(input);
+    await this.assertAccountAliasWritesAllowed(input.account_id);
+    await this.assertRealmAliasWritesAllowed(input.account_id, input.realm_id);
     const actor = validateActor(input.actor, "platform_admin");
     const key = validateIdempotencyKey(input.idempotency_key);
     const alias = normalizeRealmEmailAlias(input.alias);
@@ -3437,7 +4483,6 @@ export class DurableRealmEmailAliasRegistry {
       }
     } else {
       if (skeletonClaim) fail("alias is already claimed or tombstoned", 409);
-      await this.assertAccountAliasWritesAllowed(input.account_id);
       // The cell is the authority for account/realm existence. Validate it
       // before reserving a global name so a typo cannot create an immortal
       // hidden provisioning claim.
@@ -4128,27 +5173,27 @@ export class DurableRealmEmailAliasRegistry {
       });
       await this.drainProjectionIntent(projection);
     }
-    for (const canonical of canonicalPage.canonicals) {
-      const desired = {
-        ...canonical,
-        state: "suspended",
-        controller_revision: Math.max(
-          canonical.controller_revision ?? 0,
-          mutation.meta.registry_revision,
-        ),
-        updated_at: mutation.now,
-      };
-      await this.publishRoute(buildRealmEmailRouteProjection({
-        ...desired,
-        route_kind: "canonical",
-        suspension_disposition: "retry",
-      }));
-      const canonicalKey =
-        `canonical:${desired.domain}:${desired.realm_label}`;
-      mutation.entries.push(
-        [canonicalKey, desired],
-        [accountCanonicalIndexKey(desired), canonicalKey],
-      );
+    if (canonicalPage.canonicals.length > 0) {
+      const target = await this.cellTarget(accountID);
+      const emailEnabled = await this.canonicalEmailEntitlement(accountID);
+      for (const canonical of canonicalPage.canonicals) {
+        if (canonical.state === "retired") {
+          await this.publishRoute(this.canonicalProjection(canonical));
+          continue;
+        }
+        const source = await this.fetchCellCanonicalRoute(
+          accountID,
+          canonical.realm_id,
+          target,
+        );
+        await this.upsertCanonicalRoute({
+          domain: canonical.domain,
+          cellRoute: source,
+          target,
+          emailEnabled,
+          minimumControllerRevision: mutation.meta.registry_revision,
+        });
+      }
     }
     let continued;
     if (phase === "claims" && claimPage.next_cursor !== null) {
@@ -4503,48 +5548,53 @@ export class DurableRealmEmailAliasRegistry {
         await this.drainProjectionIntent(projection);
         changed += 1;
       } else {
-        await this.storage.put(claimKey(desired.alias), desired);
+        await this.atomic([[claimKey(desired.alias), desired]]);
       }
     }
 
-    for (const canonical of canonicalPage.canonicals) {
-      const desiredState = intent.action === "suspend" ||
-          !intent.activation_enabled
-        ? "suspended"
-        : "applied";
-      const target = desiredState === "applied"
-        ? await this.cellTarget(canonical.account_id)
-        : null;
-      const desired = {
-        ...canonical,
-        state: desiredState,
-        controller_revision: Math.max(
-          canonical.controller_revision ?? 0,
-          mutation.meta.registry_revision,
-        ),
-        updated_at: mutation.now,
-        lifecycle_fence: {
-          operation_id: intent.operation_id,
-          epoch: intent.epoch,
-          action: intent.action,
-        },
-      };
-      await this.publishRoute(buildRealmEmailRouteProjection({
-        ...desired,
-        route_kind: "canonical",
-        ...(desiredState === "suspended"
-          ? { suspension_disposition: "retry" }
-          : {}),
-        cell_audience: target?.cell_audience,
-        ingest_url: target?.ingest_url,
-      }));
-      const canonicalKey =
-        `canonical:${desired.domain}:${desired.realm_label}`;
-      mutation.entries.push(
-        [canonicalKey, desired],
-        [accountCanonicalIndexKey(desired), canonicalKey],
+    if (canonicalPage.canonicals.length > 0) {
+      const activeCanonicals = canonicalPage.canonicals.filter((canonical) =>
+        canonical.state !== "retired"
       );
-      changed += 1;
+      const target = activeCanonicals.length > 0
+        ? await this.cellTarget(intent.account_id)
+        : null;
+      const emailEnabled = intent.action === "republish" &&
+          activeCanonicals.length > 0
+        ? await this.canonicalEmailEntitlement(intent.account_id)
+        : false;
+      for (const canonical of canonicalPage.canonicals) {
+        if (canonical.state === "retired") {
+          await this.publishRoute(this.canonicalProjection(canonical));
+          continue;
+        }
+        const source = await this.fetchCellCanonicalRoute(
+          intent.account_id,
+          canonical.realm_id,
+          target,
+        );
+        await this.upsertCanonicalRoute({
+          domain: canonical.domain,
+          cellRoute: source,
+          target,
+          emailEnabled,
+          ...(intent.action === "suspend"
+            ? {
+              forcedPolicy: {
+                state: "suspended",
+                suspension_disposition: "retry",
+              },
+            }
+            : {}),
+          minimumControllerRevision: mutation.meta.registry_revision,
+          lifecycleFence: {
+            operation_id: intent.operation_id,
+            epoch: intent.epoch,
+            action: intent.action,
+          },
+        });
+        changed += 1;
+      }
     }
 
     const deletes = [lifecycleDueKey(intent)];

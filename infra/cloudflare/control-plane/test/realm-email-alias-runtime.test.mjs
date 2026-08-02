@@ -16,7 +16,11 @@ import {
   reconcileRealmEmailAliasesForPlan,
   realmEmailRouteKey,
   realmEmailAliasPendingRequestLimits,
+  realmEmailAliasRegistryStub,
 } from "../src/realm-email-alias-runtime.mjs";
+import {
+  REALM_EMAIL_ALIAS_JOURNAL_BOOTSTRAP_KEY,
+} from "../src/realm-email-alias-journal-runtime.mjs";
 
 const ACCOUNT = "acct_alias";
 const OTHER_ACCOUNT = "acct_other";
@@ -179,7 +183,31 @@ class KV {
   }
 }
 
-function registry() {
+class JournalBucket {
+  constructor() {
+    this.values = new Map();
+    this.failPuts = 0;
+  }
+
+  async put(key, value) {
+    if (this.failPuts > 0) {
+      this.failPuts--;
+      throw new Error("simulated journal write failure");
+    }
+    if (this.values.has(key)) return null;
+    this.values.set(key, new Uint8Array(value));
+    return { key };
+  }
+
+  async get(key) {
+    const bytes = this.values.get(key);
+    return bytes
+      ? { arrayBuffer: async () => bytes.slice().buffer }
+      : null;
+  }
+}
+
+function registry(options = {}) {
   const storage = new Storage();
   const logs = [];
   const directory = new KV([
@@ -206,7 +234,9 @@ function registry() {
   let projectionBlocker = null;
   const failingClaimIDs = new Set();
   const missingRealmIDs = new Set();
+  let fetchCallCount = 0;
   const fetchImpl = async (url, init = {}) => {
+    fetchCallCount++;
     const parsed = new URL(url);
     assert.equal(init.headers.Authorization, "Bearer witself_prv_cell");
     if (parsed.pathname === `/v1/accounts/${ACCOUNT}:plan` &&
@@ -228,6 +258,24 @@ function registry() {
         account_id: accountID,
         realm_id: realmID,
         exists: true,
+      });
+    }
+    if (parsed.pathname.endsWith(":email-realm-route") &&
+        init.method === "GET") {
+      const accountID = parsed.pathname.includes(OTHER_ACCOUNT)
+        ? OTHER_ACCOUNT
+        : ACCOUNT;
+      const realmID = parsed.searchParams.get("realm_id");
+      if (![REALM, OTHER_REALM].includes(realmID) ||
+          missingRealmIDs.has(realmID)) {
+        return Response.json({ error: "not found" }, { status: 404 });
+      }
+      return Response.json({
+        schema_version: "witself.v0",
+        account_id: accountID,
+        realm_id: realmID,
+        state: "live",
+        generation: 1,
       });
     }
     if (parsed.pathname !== `/v1/accounts/${ACCOUNT}:email-realm-alias` &&
@@ -264,6 +312,15 @@ function registry() {
     DIRECTORY: directory,
     AGENT_EMAIL_DIRECTORY: emailDirectory,
     CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED: "true",
+    ...(options.journalBucket
+      ? {
+        REALM_EMAIL_ALIAS_AUTHORITY_JOURNAL: options.journalBucket,
+        CP_REALM_EMAIL_ALIAS_AUTHORITY_JOURNAL_ENABLED:
+          String(options.journalEnabled ?? false),
+        CP_REALM_EMAIL_ALIAS_AUTHORITY_STREAM_ID:
+          "reaj_aaaaaaaaaaaaaaaa",
+      }
+      : {}),
   };
   const runtime = new DurableRealmEmailAliasRegistry(
     { storage, id: { name: "global" } },
@@ -280,6 +337,9 @@ function registry() {
       },
       fetch: fetchImpl,
       log: (value) => logs.push(String(value)),
+      ...(options.afterJournalAppend
+        ? { afterJournalAppend: options.afterJournalAppend }
+        : {}),
     },
   );
   return {
@@ -290,6 +350,9 @@ function registry() {
     cellClaims,
     logs,
     env,
+    fetchCallCount() {
+      return fetchCallCount;
+    },
     setAuthoritativePlan(snapshot) {
       authoritativePlan = structuredClone(snapshot);
     },
@@ -357,6 +420,157 @@ async function approve(runtime, request, fields = {}) {
     ...fields,
   });
 }
+
+test("integrated journal bootstrap freezes an existing registry and later mutations are R2-first", async () => {
+  const bucket = new JournalBucket();
+  const fixture = registry({ journalBucket: bucket, journalEnabled: false });
+  const legacy = await requestAlias(fixture.runtime, "legacy-alias");
+  assert.equal(legacy.response.status, 202);
+  assert.equal(bucket.values.size, 0);
+
+  fixture.env.CP_REALM_EMAIL_ALIAS_AUTHORITY_JOURNAL_ENABLED = "true";
+  const fetchesBeforeBootstrapFence = fixture.fetchCallCount();
+  const blocked = await requestAlias(fixture.runtime, "before-bootstrap");
+  assert.equal(blocked.response.status, 503);
+  assert.equal(blocked.body.code, "realm_email_alias_journal_bootstrap_required");
+  assert.equal(await fixture.storage.get("claim:before-bootstrap"), undefined);
+  assert.equal(fixture.fetchCallCount(), fetchesBeforeBootstrapFence);
+
+  let bootstrap;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    bootstrap = await call(fixture.runtime, "/journal/bootstrap", {
+      actor: ADMIN,
+      reason: "bootstrap the exact pre-journal registry",
+      idempotency_key: "bootstrap-existing-registry",
+    });
+    assert.ok([200, 202].includes(bootstrap.response.status));
+    if (bootstrap.body.complete) break;
+  }
+  assert.equal(bootstrap.body.complete, true);
+  const changedBootstrap = await call(fixture.runtime, "/journal/bootstrap", {
+    actor: ADMIN,
+    reason: "changed bootstrap reason must conflict",
+    idempotency_key: "bootstrap-existing-registry",
+  });
+  assert.equal(changedBootstrap.response.status, 409);
+  assert.equal(
+    changedBootstrap.body.code,
+    "realm_email_alias_journal_idempotency_conflict",
+  );
+  const objectsAfterBootstrap = bucket.values.size;
+  assert.ok(objectsAfterBootstrap >= 2);
+
+  const journaled = await requestAlias(fixture.runtime, "journaled-alias");
+  assert.equal(journaled.response.status, 202);
+  assert.ok(await fixture.storage.get("claim:journaled-alias"));
+  assert.ok(bucket.values.size > objectsAfterBootstrap);
+  assert.equal(
+    (await fixture.storage.get("realm-email-alias-journal-meta")).sequence,
+    bucket.values.size,
+  );
+
+  bucket.failPuts = 1;
+  const failed = await requestAlias(fixture.runtime, "journal-retry");
+  assert.equal(failed.response.status, 503);
+  assert.equal(await fixture.storage.get("claim:journal-retry"), undefined);
+  const objectsBeforeRetry = bucket.values.size;
+
+  const retried = await requestAlias(fixture.runtime, "journal-retry");
+  assert.equal(retried.response.status, 202);
+  assert.ok(await fixture.storage.get("claim:journal-retry"));
+  assert.ok(bucket.values.size > objectsBeforeRetry);
+  assert.equal(
+    (await fixture.storage.get("realm-email-alias-journal-meta")).sequence,
+    bucket.values.size,
+  );
+  const objectsAfterRetry = bucket.values.size;
+  const replayed = await requestAlias(fixture.runtime, "journal-retry");
+  assert.equal(replayed.response.status, 202);
+  assert.equal(bucket.values.size, objectsAfterRetry);
+});
+
+test("journal maintenance serializes external work and freezes due-work alarms", async () => {
+  const bucket = new JournalBucket();
+  const fixture = registry({ journalBucket: bucket, journalEnabled: false });
+  assert.equal((await requestAlias(fixture.runtime, "legacy-freeze")).response.status, 202);
+  fixture.env.CP_REALM_EMAIL_ALIAS_AUTHORITY_JOURNAL_ENABLED = "true";
+  let bootstrap;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    bootstrap = await call(fixture.runtime, "/journal/bootstrap", {
+      actor: ADMIN,
+      reason: "bootstrap before maintenance concurrency test",
+      idempotency_key: "bootstrap-maintenance-concurrency",
+    });
+    if (bootstrap.body.complete) break;
+  }
+  assert.equal(bootstrap.body.complete, true);
+
+  const created = await requestAlias(fixture.runtime, "maintenance-race");
+  const projection = fixture.blockNextProjection();
+  const approving = approve(fixture.runtime, created.body.request);
+  await projection.started;
+  const checkpointing = call(fixture.runtime, "/journal/checkpoint", {
+    actor: ADMIN,
+    reason: "checkpoint while projection is in flight",
+    idempotency_key: "checkpoint-maintenance-concurrency",
+  });
+  const refusedCheckpoint = await Promise.race([
+    checkpointing,
+    new Promise((_, reject) => setTimeout(
+      () => reject(new Error("journal maintenance was head-of-line blocked")),
+      100,
+    )),
+  ]);
+  assert.equal(refusedCheckpoint.response.status, 503);
+  assert.equal(
+    refusedCheckpoint.body.code,
+    "realm_email_alias_journal_operational_work_active",
+  );
+  projection.release();
+  const approved = await approving;
+  assert.equal(approved.response.status, 200);
+  const checkpoint = await call(fixture.runtime, "/journal/checkpoint", {
+    actor: ADMIN,
+    reason: "checkpoint while projection is in flight",
+    idempotency_key: "checkpoint-maintenance-concurrency",
+  });
+  assert.ok([200, 202].includes(checkpoint.response.status));
+
+  // A maintenance freeze must stop an alarm before it contacts the cell or
+  // mutates edge KV. The alarm rejects so the platform retries it later.
+  await fixture.storage.put(REALM_EMAIL_ALIAS_JOURNAL_BOOTSTRAP_KEY, {
+    kind: "checkpoint",
+    phase: "scan",
+  });
+  fixture.advance(5 * 60 * 1_000 + 1_000);
+  const fetchesBeforeAlarm = fixture.fetchCallCount();
+  const putsBeforeAlarm = fixture.emailDirectory.putCount;
+  await assert.rejects(
+    fixture.runtime.alarm(),
+    (error) => error?.code === "realm_email_alias_journal_write_frozen",
+  );
+  assert.equal(fixture.fetchCallCount(), fetchesBeforeAlarm);
+  assert.equal(fixture.emailDirectory.putCount, putsBeforeAlarm);
+});
+
+test("active alias authority is fixed to global until governed cutover exists", () => {
+  const names = [];
+  const namespace = {
+    idFromName(name) {
+      names.push(name);
+      return { name };
+    },
+    get(id) {
+      return { id };
+    },
+  };
+  const stub = realmEmailAliasRegistryStub({
+    REALM_EMAIL_ALIASES: namespace,
+    CP_REALM_EMAIL_ALIAS_REGISTRY_OBJECT: "globla",
+  });
+  assert.deepEqual(names, ["global"]);
+  assert.equal(stub.id.name, "global");
+});
 
 test("alias grammar and confusable skeleton are deterministic", () => {
   assert.equal(normalizeRealmEmailAlias(" Acme-Team "), "acme-team");
@@ -466,11 +680,12 @@ test("customer request, approval, projection, idempotency, and tombstone are dur
     projection.ingest_url,
     "https://cell.example/v1/internal/agent-email:ingest",
   );
+  // Alias writes do not create canonical authority while the independent
+  // inventory gate is dark.
   const canonical = emailDirectory.value(
     realmEmailRouteKey(DOMAIN, REALM.slice("realm_".length)),
   );
-  assert.equal(canonical.route_kind, "canonical");
-  assert.equal(canonical.state, "applied");
+  assert.equal(canonical, null);
 
   const confusable = await requestAlias(runtime, "ac-me", {
     account_id: OTHER_ACCOUNT,
@@ -1977,6 +2192,7 @@ test("plan reconciliation is bounded and continues from a durable account cursor
 
 test("approval recovery alarm honors a gate flip after an applied edge write", async () => {
   const { runtime, emailDirectory, storage, env, advance } = registry();
+  env.CP_REALM_EMAIL_CANONICAL_INVENTORY_ENABLED = "true";
   const created = await requestAlias(runtime, "gate-recovery");
   // Alias publication succeeds, then canonical publication fails. The durable
   // request must remain provisioning even though an applied alias route exists.

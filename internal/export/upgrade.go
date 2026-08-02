@@ -61,6 +61,7 @@ var upgraders = map[int]Upgrader{
 	75: preserveSchema75Rows,
 	78: addAgentEmailAttachmentStorageDefaults,
 	84: addAgentEmailRealmAliasDefaults,
+	85: addRealmEmailRouteLifecycleDefaults,
 }
 
 const (
@@ -169,6 +170,30 @@ func addAgentEmailRealmAliasDefaults(table string, row map[string]any) (map[stri
 	}
 	row["recipient_route_kind"] = "canonical"
 	row["recipient_realm_alias_claim_id"] = nil
+	return row, nil
+}
+
+// addRealmEmailRouteLifecycleDefaults lifts pre-schema-86 realms into the
+// portable canonical-route state machine.  A legacy live realm begins at
+// generation one.  A legacy realm tombstone must remain terminal after
+// restore, so it receives generation two and a deterministic operation id.
+func addRealmEmailRouteLifecycleDefaults(table string, row map[string]any) (map[string]any, error) {
+	if table != "realms" {
+		return row, nil
+	}
+	realmID, ok := row["id"].(string)
+	if !ok || realmID == "" {
+		return nil, fmt.Errorf("realm id is required for email route lifecycle")
+	}
+	if deleted, present := row["deleted_at"]; present && deleted != nil {
+		row["email_route_state"] = "retired"
+		row["email_route_generation"] = int64(2)
+		row["email_route_operation_id"] = "legacy_delete"
+		return row, nil
+	}
+	row["email_route_state"] = "live"
+	row["email_route_generation"] = int64(1)
+	row["email_route_operation_id"] = nil
 	return row, nil
 }
 
