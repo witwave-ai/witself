@@ -279,6 +279,13 @@ func TestAgentEmailRealmAliasProjectionAndDeliveryPostgres(t *testing.T) {
 	if projectionEvents != 8 {
 		t.Fatalf("projection audit events = %d, want 8 state/revision advances only", projectionEvents)
 	}
+	// Schema 0086 adds the canonical route lifecycle and can safely step back
+	// to 0085 here. The following 0085 -> 0084 downgrade must still refuse to
+	// discard realm-alias delivery provenance.
+	if err := migrationTestDown(t, schemaDSN, false); err != nil {
+		t.Fatalf("downgrade schema 0086 to 0085: %v", err)
+	}
+	assertMigrationTestVersion(t, schemaDSN, 85)
 	downErr := migrationTestDown(t, schemaDSN, true)
 	if downErr == nil || !strings.Contains(
 		downErr.Error(), "realm-alias email messages exist",
