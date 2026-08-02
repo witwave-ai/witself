@@ -1379,6 +1379,67 @@ func TestAccountEvacuationMigrationDowngradePostgres(t *testing.T) {
 		}
 	})
 
+	t.Run("schema 84 down history can finalize source", func(t *testing.T) {
+		ctx := context.Background()
+		st, dsn := newMigrationTestStore(t, baseDSN)
+		migrationTestUpTo(t, dsn, 85)
+		migrationTestDownTo(t, dsn, 84)
+		assertMigrationTestVersion(t, dsn, 84)
+		// Preserve the history shape used by Goose variants that retain an
+		// explicit unapplied record for the migration that was rolled back.
+		// Reading the newest row as the live schema would incorrectly treat the
+		// now-absent schema-85 alias table as present.
+		if _, err := st.pool.Exec(ctx, `
+			INSERT INTO goose_db_version(version_id, is_applied)
+			VALUES (85, false)`); err != nil {
+			t.Fatal(err)
+		}
+
+		var latestVersion int64
+		var latestApplied bool
+		if err := st.pool.QueryRow(ctx, `
+			SELECT version_id, is_applied
+			  FROM goose_db_version
+			 ORDER BY id DESC
+			 LIMIT 1`).Scan(&latestVersion, &latestApplied); err != nil {
+			t.Fatal(err)
+		}
+		if latestVersion != 85 || latestApplied {
+			t.Fatalf(
+				"latest migration history = version %d applied=%t; want version 85 applied=false",
+				latestVersion, latestApplied,
+			)
+		}
+
+		account, err := st.ProvisionAccount(
+			ctx, "down-history-finalize@witwave.ai",
+			"Down History Finalize", time.Hour,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if activated, err := st.ActivateAccount(
+			ctx, account.AccountID,
+		); err != nil || !activated {
+			t.Fatalf("activate = %t / %v", activated, err)
+		}
+		const evacuationID = "evac_down_history_finalize"
+		if _, err := st.BeginAccountEvacuation(
+			ctx, account.AccountID, evacuationID, "down history guard",
+		); err != nil {
+			t.Fatal(err)
+		}
+		finalized, err := st.FinalizeAccountEvacuationSource(
+			ctx, account.AccountID, evacuationID,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !finalized.Finalized || finalized.AlreadyFinalized {
+			t.Fatalf("source finalization = %+v", finalized)
+		}
+	})
+
 	t.Run("schema 70 empty state can downgrade", func(t *testing.T) {
 		st, dsn := newMigrationTestStore(t, baseDSN)
 		migrationTestUpTo(t, dsn, 70)

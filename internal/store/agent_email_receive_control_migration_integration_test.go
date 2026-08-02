@@ -92,11 +92,12 @@ func TestAgentEmailReceiveControlSchema59BackfillPostgres(t *testing.T) {
 			realmRows, realmState, realmVersion, realmDisabledAt)
 	}
 
-	// Current store reads also enforce the account plan snapshot added by
-	// migration 62. Advance through that compatibility boundary before using
-	// the current read path; the rows under test were still backfilled by 60.
-	migrationTestUpTo(t, dsn, 62)
-	assertMigrationTestVersion(t, dsn, 62)
+	// Current store reads enforce the account plan snapshot added by migration
+	// 62 and populate realm aliases from the projection added by migration 85.
+	// Advance to the current schema before using the current read path; the rows
+	// under test were still backfilled and asserted at schema 60 above.
+	migrationTestUpTo(t, dsn, int64(SchemaVersion()))
+	assertMigrationTestVersion(t, dsn, int64(SchemaVersion()))
 
 	scope := AgentEmailPilotScope{
 		Enabled: true, Domain: "agent-mail.witwave.ai", Audience: "cell-schema-59",

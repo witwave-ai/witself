@@ -48,6 +48,14 @@ CREATE INDEX agent_email_realm_aliases_by_realm
     ON agent_email_realm_aliases
        (account_id, realm_id, state, realm_label);
 
+-- Migration 0070 attached the evacuation barrier to every tenant table that
+-- existed at that point in the schema. Additive account-scoped tables must
+-- attach it themselves so a source export/finalization cannot race a later
+-- alias projection.
+CREATE TRIGGER account_evacuation_fence
+BEFORE INSERT OR UPDATE OR DELETE ON agent_email_realm_aliases
+FOR EACH ROW EXECUTE FUNCTION witself_tenant_evacuation_fence();
+
 -- Keep the exact received route on each immutable message. address_id still
 -- points at the canonical mailbox reservation; these fields distinguish a
 -- canonical delivery from a delivery accepted through an additive alias.
