@@ -485,6 +485,10 @@ func TestAgentEmailLimitOverridesResolveAndValidate(t *testing.T) {
 		t.Fatalf("Phase-B attachment-storage default = %d, present=%t; want 0",
 			got, present)
 	}
+	if got, present := snapshot.DefaultLimits[plans.AgentEmailRealmAliasesPerRealmLimit]; !present || got != 0 {
+		t.Fatalf("Phase-B realm-alias default = %d, present=%t; want 0",
+			got, present)
+	}
 	if snapshot.Limits[plans.AgentEmailMaxRawBytesLimit] != rawMaximum {
 		t.Fatalf("agent-email snapshot = defaults %v effective %v",
 			snapshot.DefaultLimits, snapshot.Limits)

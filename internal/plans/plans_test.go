@@ -19,8 +19,8 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 	if len(c.Plans) != 4 {
 		t.Fatalf("catalog has %d plans; want 4", len(c.Plans))
 	}
-	if c.Updated != "2026-07-31" {
-		t.Fatalf("catalog updated = %q; want 2026-07-31", c.Updated)
+	if c.Updated != "2026-08-01" {
+		t.Fatalf("catalog updated = %q; want 2026-08-01", c.Updated)
 	}
 	if c.Currency != "USD" {
 		t.Fatalf("catalog currency = %q; want USD", c.Currency)
@@ -118,6 +118,7 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 			limits: map[string]int64{
 				AgentEmailAttachmentStorageBytesLimit: 0,
 				AgentEmailMaxRawBytesLimit:            0,
+				AgentEmailRealmAliasesPerRealmLimit:   0,
 				AgentLimit:                            10,
 				AgentPerRealmLimit:                    10,
 				RealmLimit:                            1,
@@ -142,6 +143,7 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 			limits: map[string]int64{
 				AgentEmailAttachmentStorageBytesLimit:   5 * 1024 * 1024 * 1024,
 				AgentEmailMaxRawBytesLimit:              10 * 1024 * 1024,
+				AgentEmailRealmAliasesPerRealmLimit:     0,
 				AgentLimit:                              100,
 				AgentPerRealmLimit:                      100,
 				MessageDeliveredPerRealmMinuteLimit:     500,
@@ -169,6 +171,7 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 			limits: map[string]int64{
 				AgentEmailAttachmentStorageBytesLimit:   100 * 1024 * 1024 * 1024,
 				AgentEmailMaxRawBytesLimit:              25 * 1024 * 1024,
+				AgentEmailRealmAliasesPerRealmLimit:     1,
 				AgentLimit:                              2500,
 				AgentPerRealmLimit:                      100,
 				MessageDeliveredPerRealmMinuteLimit:     5000,
@@ -186,7 +189,7 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 				MessagingEntitlementVersionPolicy:  MessagingEntitlementVersion,
 				TranscriptRetentionDaysPolicy:      365,
 			},
-			features: []string{"memory", "facts", "secrets", MessagingFeature, AgentEmailReceiveFeature, "collaboration", "support"},
+			features: []string{"memory", "facts", "secrets", MessagingFeature, AgentEmailReceiveFeature, AgentEmailRealmAliasFeature, "collaboration", "support"},
 			summary:  "Coming soon. Everything in Professional for up to 100 agents per realm across 25 realms, plus usage-based billing.",
 		},
 		"enterprise": {
@@ -195,6 +198,7 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 			limits: map[string]int64{
 				AgentEmailAttachmentStorageBytesLimit:   100 * 1024 * 1024 * 1024,
 				AgentEmailMaxRawBytesLimit:              25 * 1024 * 1024,
+				AgentEmailRealmAliasesPerRealmLimit:     3,
 				MessageDeliveredPerRealmMinuteLimit:     25000,
 				MessageDeliveredPerRecipientMinuteLimit: 1000,
 				MessageSentPerAgentMinuteLimit:          600,
@@ -208,7 +212,7 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 				MessageRetentionDaysPolicy:         365,
 				MessagingEntitlementVersionPolicy:  MessagingEntitlementVersion,
 			},
-			features: []string{"memory", "facts", "secrets", MessagingFeature, AgentEmailReceiveFeature, "collaboration", "support"},
+			features: []string{"memory", "facts", "secrets", MessagingFeature, AgentEmailReceiveFeature, AgentEmailRealmAliasFeature, "collaboration", "support"},
 			summary:  "Coming soon. Everything in Team with custom pricing and support; details to follow.",
 		},
 	}
@@ -274,18 +278,23 @@ func TestCanonicalAgentEmailLimitDefaultsPhaseB(t *testing.T) {
 	for planID, want := range map[string]struct {
 		rawBytes        int64
 		attachmentBytes int64
+		realmAliases    int64
+		aliasFeature    bool
 	}{
 		Free: {
-			rawBytes: 0, attachmentBytes: 0,
+			rawBytes: 0, attachmentBytes: 0, realmAliases: 0,
 		},
 		"standard": {
 			rawBytes: 10 * 1024 * 1024, attachmentBytes: 5 * 1024 * 1024 * 1024,
+			realmAliases: 0,
 		},
 		"team": {
 			rawBytes: 25 * 1024 * 1024, attachmentBytes: 100 * 1024 * 1024 * 1024,
+			realmAliases: 1, aliasFeature: true,
 		},
 		"enterprise": {
 			rawBytes: 25 * 1024 * 1024, attachmentBytes: 100 * 1024 * 1024 * 1024,
+			realmAliases: 3, aliasFeature: true,
 		},
 	} {
 		plan, ok := catalog.Get(planID)
@@ -300,6 +309,15 @@ func TestCanonicalAgentEmailLimitDefaultsPhaseB(t *testing.T) {
 			t.Errorf("%s %s = %d, present=%t; want %d",
 				planID, AgentEmailAttachmentStorageBytesLimit, got, present,
 				want.attachmentBytes)
+		}
+		if got, present := plan.Limits[AgentEmailRealmAliasesPerRealmLimit]; !present || got != want.realmAliases {
+			t.Errorf("%s %s = %d, present=%t; want %d",
+				planID, AgentEmailRealmAliasesPerRealmLimit, got, present,
+				want.realmAliases)
+		}
+		if got := plan.HasFeature(AgentEmailRealmAliasFeature); got != want.aliasFeature {
+			t.Errorf("%s %s feature = %t; want %t",
+				planID, AgentEmailRealmAliasFeature, got, want.aliasFeature)
 		}
 	}
 }
