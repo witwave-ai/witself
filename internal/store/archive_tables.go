@@ -55,6 +55,7 @@ var canonicalArchiveTables = []archiveTableIntroduction{
 	{name: "agents", introducedSchema: 5},
 	{name: "agent_email_addresses", introducedSchema: 59},
 	{name: "agent_email_mailboxes", introducedSchema: 59},
+	{name: "agent_email_realm_aliases", introducedSchema: 85},
 	{name: "agent_email_messages", introducedSchema: 59},
 	{name: "agent_email_deliveries", introducedSchema: 59},
 	{name: "agent_email_retry_canary_arms", introducedSchema: 61},

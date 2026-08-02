@@ -1146,6 +1146,136 @@ server's process-lifetime allowlist determine the owner; clients cannot supply
 account, realm, mailbox, or owner selectors. The separate value-free operator
 controls below bind one allowlisted agent or realm target from the route path.
 
+### Cell realm-alias target preflight
+
+The control plane may use the cell provision token to prove that one exact
+account owns a live realm before creating a global alias claim:
+
+```json
+{
+  "account_id": "acc_123",
+  "realm_id": "realm_bbbbbbbbbbbbbbbb",
+  "exists": true
+}
+```
+
+The endpoint is
+`GET /v1/accounts/{account_id}:email-realm-alias-target?realm_id={realm_id}`.
+An unknown account, an out-of-account realm, or a soft-deleted realm returns
+404. The response intentionally contains no account or realm metadata beyond
+the two path-bound identifiers.
+
+### Control-plane realm email alias list pages
+
+Realm-email-alias list routes return one bounded storage page and an opaque
+continuation cursor. For example, an administrator request page is:
+
+```json
+{
+  "schema_version": "witself.realm-email-alias.v1",
+  "requests": [
+    {
+      "id": "earq_aaaaaaaaaaaaaaaa",
+      "alias": "acme-team",
+      "domain": "agent-mail.witwave.ai",
+      "account_id": "acc_123",
+      "realm_id": "realm_bbbbbbbbbbbbbbbb",
+      "status": "pending_review",
+      "requested_at": "2026-08-01T12:00:00.000Z",
+      "updated_at": "2026-08-01T12:00:00.000Z"
+    }
+  ],
+  "truncated": true,
+  "next_cursor": "opaque-control-plane-cursor"
+}
+```
+
+The customer request route uses the same page shape. The other administrator
+pages replace `requests` with exactly one of:
+
+- `aliases`: realm alias assignment objects, including `claim_id`, `alias`,
+  `domain`, `account_id`, `realm_id`, `status`, `assignment_kind`, and
+  `assignment_revision`. A terminally aborted internal provisioning intent also
+  carries `provisioning_failure` (for example, `admin_aborted`).
+- `reserved_names`: reserved-name policy objects; this envelope also carries
+  `reserved_policy_version`.
+- `events`: value-free audit events with `sequence`, `registry_revision`,
+  `occurred_at`, `actor_kind`, `actor_id`, `action`, `target`, and optional
+  value-free `metadata`.
+
+`truncated` is true exactly when more underlying storage rows remain.
+`next_cursor` is then a non-empty string; on the final HTTP page it is `null`.
+Filters are evaluated within one bounded page, so an empty result array can
+legitimately have `truncated: true` and a continuation cursor. Clients must
+reuse the same filters and follow each cursor until it is absent/null; the
+control plane never performs an unbounded hidden scan to fill a filtered page.
+Audit `limit` selects 1–500 underlying newest-first rows to scan, not the
+post-filter match count.
+
+The Go client exposes explicit request, assignment, reserved-name, and audit
+page values. The matching CLI list commands emit those page fields under
+`--json`; because their local page structs use an empty-string terminal
+cursor, CLI JSON omits `next_cursor` on the final page. Text mode writes
+`next cursor: ...` to stderr whenever continuation is required.
+
+### Realm-route edge projection
+
+The pilot Worker remains backward compatible with its literal-recipient
+directory. Its additive dynamic route cache uses this collision-safe KV key:
+
+```text
+email:realm-route:v1:<canonical-domain>:<canonical-or-alias-realm-label>
+```
+
+An applied managed-alias record has this exact shape:
+
+```json
+{
+  "schema_version": 1,
+  "domain": "agent-mail.witwave.ai",
+  "realm_label": "acme-team",
+  "realm_id": "realm_aaaaaaaaaaaaaaaa",
+  "route_kind": "realm_alias",
+  "state": "applied",
+  "controller_revision": 7,
+  "updated_at": "2026-07-21T12:00:00.000Z",
+  "cache_ttl_seconds": 300,
+  "cell_audience": "gcp-prod-us-central1-core",
+  "ingest_url": "https://api.cell.example/v1/internal/agent-email:ingest"
+}
+```
+
+For a canonical record, `route_kind` is `canonical` and `realm_label` is the
+exact 16-character body of `realm_id`. A realm alias is 3–16 lowercase ASCII
+letters or digits with non-leading, non-trailing single hyphens; consecutive
+hyphens, `xn--`, and labels that collide with the canonical base32 namespace
+are invalid. `state` is exactly `applied`, `suspended`, or `retired`.
+`cell_audience` and `ingest_url` are present only for `applied`; suspended and
+retired records omit both. The record repeats the domain and label, and the
+edge verifies both against the lookup key before using a destination.
+
+The projection intentionally contains no account id, agent id, alias claim id,
+or recipient claim. Global alias ownership and tombstones remain authoritative
+in the control-plane Durable Object, while the cell owns recipient resolution
+and plan enforcement. The control plane publishes an applied route only after
+the cell has acknowledged and reread the same monotonic alias revision. A
+stale, malformed, misbound, or excessively future-dated KV record triggers the bounded
+authenticated fallback:
+
+```text
+GET /v1/email/realm-routes/{domain}/{realm_label}
+Authorization: Bearer <CONTROL_PLANE_EDGE_TOKEN>
+```
+
+That route reads the durable authority rather than the stale KV row. A fresh
+response with an older controller revision, an invalid response, a timeout, or
+a non-404 failure is a temporary SMTP failure; the stale destination is never
+used. An authoritative 404 is an unknown route. The cell still validates the
+signed envelope against its locally applied alias projection, so KV is never
+claim authority. These contracts do not promote a catch-all or change which
+addresses Cloudflare sends to the Worker; receive remains pilot-gated until a
+separate reviewed Email Routing rollout.
+
 `GET /v1/email/address`:
 
 ```json
@@ -1169,7 +1299,18 @@ controls below bind one allowlisted agent or realm target from the route path.
     "row_version": 1,
     "created_at": "2026-07-21T12:00:00Z",
     "updated_at": "2026-07-21T12:00:00Z",
-    "realm_disabled_at": "2026-07-21T12:05:00Z"
+    "realm_disabled_at": "2026-07-21T12:05:00Z",
+    "aliases": [
+      {
+        "claim_id": "era_cccccccccccccccc",
+        "address": "browser-agent.acme-team@agent-mail.witwave.ai",
+        "local_part": "browser-agent.acme-team",
+        "realm_label": "acme-team",
+        "state": "applied",
+        "controller_revision": 7,
+        "updated_at": "2026-07-21T12:00:00Z"
+      }
+    ]
   }
 }
 ```
@@ -1179,6 +1320,13 @@ when both independent layers are enabled, `disabled` when either layer is
 disabled, and `retired` for a retired mailbox. `disabled_at` is the optional
 agent-layer timestamp; `realm_disabled_at` is the optional realm-layer
 timestamp. `row_version` belongs to the agent mailbox layer.
+`aliases` is always present and contains the agent-specific addresses derived
+from the realm's applied, suspended, or retired alias projections. Suspended
+and retired entries remain visible with their lifecycle timestamps so neither
+clients nor operators mistake a tombstone for an available label. The
+top-level `address`, `local_part`, `realm_label`, and `provisioning_kind` remain
+the permanent canonical mailbox identity; aliases are additive and never
+replace it.
 
 `GET /v1/email:status` returns the effective per-message raw-MIME maximum and
 the value-free account-wide capacity for retained attachment-bearing MIME:
@@ -1281,13 +1429,15 @@ shape (the list envelope uses `next_cursor`; listen uses `timed_out`):
       "address_id": "eaddr_aaaaaaaaaaaaaaaa",
       "provider": "cloudflare_email_routing",
       "envelope_sender": "sender@example.net",
-      "envelope_recipient": "browser-agent.aaaaaaaaaaaaaaaa@agent-mail.witwave.ai",
+      "envelope_recipient": "browser-agent.acme-team@agent-mail.witwave.ai",
       "agent_segment": "browser-agent",
-      "realm_label": "aaaaaaaaaaaaaaaa",
+      "realm_label": "acme-team",
+      "recipient_route_kind": "realm_alias",
+      "recipient_realm_alias_claim_id": "era_cccccccccccccccc",
       "raw_size_bytes": 2471,
       "parse_state": "parsed",
       "header_from": "Example Service <sender@example.net>",
-      "header_to": "browser-agent.aaaaaaaaaaaaaaaa@agent-mail.witwave.ai",
+      "header_to": "browser-agent.acme-team@agent-mail.witwave.ai",
       "subject": "Your verification code",
       "mime_message_id": "<untrusted@example.net>",
       "attachment_count": 1,
@@ -1318,6 +1468,13 @@ pilot, `spf_result`, `dkim_result`, `dmarc_result`, and `spam_verdict` are alway
 provider-message-id field is absent. A suspected retry adds
 `possible_duplicate:true` and `possible_duplicate_of_message_id` but is still a
 distinct immutable message.
+
+`recipient_route_kind` is durable receipt provenance: `canonical` means the
+permanent realm-id-body address was used and
+`recipient_realm_alias_claim_id` is omitted; `realm_alias` means the cell
+resolved the delivered domain/realm label through the exact locally applied
+claim and records that claim id. It does not make the untrusted envelope a
+claim or allow the edge to choose an agent.
 
 `attachment_storage_bytes` is the complete raw-MIME size charged when the
 message has an attachment or MIME parsing fails; a successfully parsed message

@@ -129,13 +129,29 @@ func (s *Store) finalizeAccountEvacuationSourceOnce(
 	); err != nil {
 		return AccountEvacuationFinalization{}, err
 	}
+	var schemaVersion int
+	if err := tx.QueryRow(ctx, `
+		SELECT coalesce(max(version_id), 0)
+		  FROM (
+		        SELECT DISTINCT ON (version_id)
+		               version_id, is_applied
+		          FROM goose_db_version
+		         ORDER BY version_id, id DESC
+		       ) AS latest_version
+		 WHERE is_applied`).Scan(&schemaVersion); err != nil {
+		return AccountEvacuationFinalization{},
+			fmt.Errorf("read source schema version: %w", err)
+	}
 	// The archive registry is also the deletion dependency contract: export
 	// order is parent-before-child, so reverse order removes every portable
 	// child before its parent. accounts is retained until the end so every
-	// trigger can authenticate this exact source marker. The two indirectly
-	// scoped tables use their canonical account joins.
-	for i := len(canonicalArchiveTables) - 1; i >= 0; i-- {
-		table := canonicalArchiveTables[i].name
+	// trigger can authenticate this exact source marker. Filter by the live
+	// schema coordinate so migration downgrade rehearsals do not address a
+	// portable table introduced by a later schema. The two indirectly scoped
+	// tables use their canonical account joins.
+	archiveTables := canonicalArchiveTableNamesForSchema(schemaVersion)
+	for i := len(archiveTables) - 1; i >= 0; i-- {
+		table := archiveTables[i]
 		var query string
 		switch table {
 		case "accounts":
@@ -256,8 +272,8 @@ func rejectCrossAccountEvacuationCascadesTx(
 		   AND parent_attribute.attnum = key_column.parent_attribute_number
 		 WHERE constraint_record.contype = 'f'
 		   AND constraint_record.confdeltype IN ('c', 'n', 'd')
-		   AND child_namespace.nspname = 'public'
-		   AND parent_namespace.nspname = 'public'
+		   AND child_namespace.nspname = current_schema()
+		   AND parent_namespace.nspname = current_schema()
 		 GROUP BY constraint_record.oid,
 		          constraint_record.conname,
 		          child.relname,

@@ -39,6 +39,40 @@ func TestComposeAndParseRecipient(t *testing.T) {
 	}
 }
 
+func TestRealmAliasGrammarAndRecipientRoundTrip(t *testing.T) {
+	for _, label := range []string{"abc", "my-realm", "realm01", "abcdefghijklm-01"} {
+		if got, err := ValidateRealmAliasLabel(label); err != nil || got != label {
+			t.Errorf("ValidateRealmAliasLabel(%q) = %q, %v", label, got, err)
+		}
+	}
+	for _, label := range []string{
+		"ab", "abcdefghijklmnopq", "-realm", "realm-", "my--realm",
+		"xn--realm", "my.realm", "MyRealm", "abcdefghijkl2345",
+	} {
+		if _, err := ValidateRealmAliasLabel(label); err == nil {
+			t.Errorf("ValidateRealmAliasLabel(%q) succeeded", label)
+		}
+	}
+
+	parts, err := ComposeAddressWithRealmLabel("scott", "my-realm", "agent-mail.witwave.ai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parts.BaseAddress != "scott.my-realm@agent-mail.witwave.ai" {
+		t.Fatalf("alias address = %q", parts.BaseAddress)
+	}
+	parsed, err := ParseRecipient(
+		"SCOTT.MY-REALM+Signup@AGENT-MAIL.WITWAVE.AI",
+		"agent-mail.witwave.ai",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.BaseAddress != parts.BaseAddress || parsed.SubaddressTag != "signup" {
+		t.Fatalf("parsed alias = %+v", parsed)
+	}
+}
+
 func TestParseRecipientFailsClosed(t *testing.T) {
 	for _, recipient := range []string{
 		"postmaster@agent-mail.witwave.ai",

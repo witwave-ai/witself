@@ -60,6 +60,10 @@
       {
         "name": "ACCOUNT_BACKUP",
         "class_name": "AccountBackup"
+      },
+      {
+        "name": "REALM_EMAIL_ALIASES",
+        "class_name": "RealmEmailAliasRegistry"
       }
     ]
   },
@@ -67,8 +71,17 @@
     {
       "binding": "DIRECTORY",
       "id": "ec620d5131524e138a9fca6207953cd2"
+    },
+    {
+      // Same dedicated namespace consumed by the agent-email Worker. It must
+      // never be replaced with the broad account/cell DIRECTORY binding.
+      "binding": "AGENT_EMAIL_DIRECTORY",
+      "id": "__EMAIL_DIRECTORY_KV_ID__"
     }
   ],
+  "vars": {
+    "AGENT_EMAIL_DOMAIN": "agent-mail.witwave.ai"
+  },
   "migrations": [
     {
       "tag": "v1",
@@ -93,6 +106,10 @@
     {
       "tag": "v6",
       "new_sqlite_classes": ["AccountBackup"]
+    },
+    {
+      "tag": "v7",
+      "new_sqlite_classes": ["RealmEmailAliasRegistry"]
     }
   ],
   "routes": [
@@ -172,7 +189,12 @@
   // Runtime-only Worker secrets used by the Go plan lifecycle are deliberately
   // absent from this file. Render the release config first, then configure them
   // with `npm run secret:put -- NAME`:
-  // INTERNAL_BRIDGE_TOKEN (required), CP_PLAN_LIFECYCLE_ENABLED=true (only
+  // INTERNAL_BRIDGE_TOKEN (required), CONTROL_PLANE_EDGE_TOKEN (must exactly
+  // match the agent-email Worker's secret),
+  // CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED=true (only after catch-all,
+  // canonical backfill/realm retirement, account lifecycle, terminal recovery,
+  // and the Email Worker's independent alias-delivery gate pass acceptance;
+  // see docs/agent-email.md), CP_PLAN_LIFECYCLE_ENABLED=true (only
   // when intentionally activating lifecycle), CP_R2_ENDPOINT, CP_R2_BUCKET,
   // CP_R2_ACCESS_KEY, CP_R2_SECRET_KEY, and optionally CP_R2_PREFIX. To enable
   // Stripe, also set CP_BILLING_PROVIDER=stripe, CP_STRIPE_SECRET_KEY, and

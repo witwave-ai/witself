@@ -5,12 +5,16 @@ const OUTCOMES = new Set([
   "discarded_feature_disabled",
   "rejected_invalid_recipient",
   "rejected_unknown_recipient",
+  "rejected_inactive_route",
   "rejected_over_size",
   "rejected_cell_permanent",
   "rejected_retry_canary",
   "tempfail_configuration",
   "tempfail_disabled",
   "tempfail_directory",
+  "tempfail_alias_gate",
+  "tempfail_suspended_route",
+  "tempfail_route_lookup",
   "tempfail_content",
   "tempfail_signing",
   "tempfail_transport",
@@ -21,7 +25,7 @@ const OUTCOMES = new Set([
 
 const PHASES = new Set([
   "configuration", "recipient", "directory", "content", "signing",
-  "fetch", "response", "internal",
+  "fetch", "response", "route", "internal",
 ]);
 
 function boundedNonNegative(value) {

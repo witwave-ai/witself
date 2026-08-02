@@ -409,23 +409,89 @@ is always exactly 16 characters from `[a-z2-7]` — a valid DNS hostname label
 and local-part atom by construction, deterministic, collision-free by id
 uniqueness, and stable for the life of the realm. The label is opaque, which
 is acceptable: these addresses mostly serve services, not human recall.
-**Vanity realm labels (decided 2026-07-21, deferred past v1).** Realms will
-eventually be able to claim a pretty alias label usable *in addition to* the
-automatic id-body label — `scott.acme@…` alongside
-`scott.drz4xnv73ficcrko@…`. The id-body label remains canonical, permanent,
-and always live; a vanity label is an alias entry in the same routing
-projection pointing at the same cell. Constraints the future design must
-honor: a vanity label lives in a single shared namespace on the base domain
-(first-come reservation with a reserved-word and anti-impersonation policy —
-brand and service names are phishing surface); it must fit the settled
-one-dot parse (same `[a-z0-9-]` grammar, no dots) and must not be a valid
-16-character id-body form, so alias and canonical namespaces cannot collide;
-its length reshapes the per-agent local-part budget (64-octet cap minus
-label minus dot), so vanity length gets a hard cap; and the
-address-permanence rule applies — once mail has been received at a vanity
-address, releasing or transferring that label is constrained by the same
-long deprecation contract as a domain cutover. V1 ships the id-body label
-only.
+**Realm email aliases (settled 2026-08-01).** The automatic id-body label is
+the permanent canonical address identity. A Personal account reserves that
+identity but cannot receive email; the `agent_email_receive` entitlement still
+controls delivery. Once email is enabled, `scott.drz4xnv73ficcrko@…` works
+without replacing or reinstalling any client integration.
+
+Eligible realms may add memorable realm email aliases such as
+`scott.acme@…`. An alias is additive: it points at the same realm, agents, and
+mailboxes as the canonical label and never replaces the ID-body address. The
+control plane owns the globally shared alias namespace, request and approval
+lifecycle, plan eligibility, reserved-name registry, and non-reuse history.
+Cells store the applied routing projection and mail; the edge directory is a
+replaceable projection, never claim authority.
+
+Alias labels are 3-16 lowercase ASCII characters from `[a-z0-9-]`, with no
+dot, leading/trailing hyphen, or consecutive hyphens. `xn--` labels and strings
+matching the canonical 16-character `[a-z2-7]{16}` form are rejected. The
+16-character cap
+preserves the existing 47-character agent-segment budget. Claims also pass a
+normalized anti-impersonation check. Platform and operational names including
+`witself`, `witwave`, `witmail`, `witpass`, `email`, `mail`, `agent`, `admin`,
+`support`, `security`, `billing`, `postmaster`, and `noreply` begin reserved.
+The reserved set is a versioned, audited control-plane resource managed only
+by a Witself platform administrator; customer account and realm administrators
+cannot alter or override it. Adding a new reservation does not silently revoke
+an already-active customer alias, and retiring a reservation does not bypass
+an active claim or tombstone. Witself-owned protected aliases require a
+separate privileged internal assignment path.
+
+A customer request is `pending_review` until a platform administrator begins
+approval or rejects it. Approval first records a durable `provisioning` intent;
+only after the cell fence and edge projection converge does the request become
+`approved`. The request is visible as `provisioning` during recovery while the
+assignment remains non-public, then the assignment becomes `active`;
+administrative suspension, plan suspension, the 30-day
+plan grace, and retirement are assignment states rather than request states.
+Restoring entitlement reactivates a plan-suspended alias without reinstalling a client.
+Activated aliases cannot move to another customer or realm. A rename is a new
+request followed by permanent retirement of the old alias. Account lifecycle
+operations suspend and republish alias routes under an exact durable fence;
+realm deletion remains activation-blocked until its canonical route is retired
+before the cell soft-delete. Custom customer domains
+use this same label shape but remain a separate entitlement and verification
+lifecycle.
+
+Alias-delivered messages preserve both the exact envelope recipient and the
+structured alias claim in cell storage and logical archives. Because schema
+`0084` cannot represent that provenance without changing one of those values,
+downgrading migration `0085` fails closed before any mutation whenever such a
+message exists. Alias claims alone do not block downgrade when no message has
+been delivered through them.
+
+The implementation ships behind the control-plane environment gate
+`CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED`, which is disabled unless its value is
+exactly `true`. The Email Worker has a second fleet-wide, alias-only gate,
+`REALM_EMAIL_ALIAS_DELIVERY_ENABLED`, which is also exact-`true` and default-off;
+canonical Realm ID delivery does not depend on that alias gate. While disabled,
+customer requests, approval, internal assignment,
+and reactivation fail closed; read-only administration plus suspension,
+retirement, terminal customer/internal-provisioning abort, reserved-name management, and
+audit remain available. Do not enable
+the gate until every release blocker is closed and acceptance-tested: (1) the
+managed domain has a verified catch-all or equivalent full-coverage SMTP route
+into the Email Worker; (2) account move, restore, archive, close, and realm
+close explicitly reconcile, suspend, and republish canonical plus alias routes
+at the account lifecycle fence, so stale KV cannot route to an old cell; and
+(3) internal provisioning has authoritative realm prevalidation plus a
+deterministic terminal abort/tombstone path for a permanently rejected hidden
+intent. Account lifecycle fencing, authoritative preflight, and durable
+terminal recovery are implemented but not yet accepted for activation. Realm
+deletion still lacks its required control-plane canonical-route retirement.
+The global registry also needs a portable, append-only authority journal and
+tested empty-target recovery ceremony; its SQLite Durable Object point-in-time
+recovery is a short-window first line of defense, not sufficient protection for
+later tombstones and monotonic controller revisions. Finally, activation needs
+a bounded technical ceiling/rate guard for pending requests even on unlimited
+plans, plus a load-tested negative-cache or rate shield so random SMTP labels
+cannot turn every miss into traffic on the one authoritative registry object.
+Keep both activation gates unset until those items are closed. The current
+exact-address pilot rules do not deliver arbitrary new aliases. Canonical
+routes for realms that never perform an alias operation also still require
+their existing literal route or a separate canonical-route
+provisioning/backfill workflow.
 
 **Agent local part (settled).** The agent-name-to-local-part rule must handle
 arbitrary input — the API accepts any non-empty string as an agent name; only

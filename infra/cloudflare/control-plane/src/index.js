@@ -108,6 +108,18 @@ import {
   runManualAccountBackup,
   runScheduledAccountBackups,
 } from "./account-backup-runtime.mjs";
+import {
+  handleRealmEmailAliasAdminRequest,
+  handleRealmEmailAliasCustomerRequest,
+  handleRealmEmailRouteRequest,
+  isRealmEmailAliasAdminPath,
+  isRealmEmailRoutePath,
+  matchRealmEmailAliasCustomerPath,
+  matchRealmEmailRoutePath,
+} from "./realm-email-alias-api.mjs";
+import {
+  DurableRealmEmailAliasRegistry,
+} from "./realm-email-alias-runtime.mjs";
 
 export class Backend extends Container {
   defaultPort = 8080;
@@ -187,6 +199,16 @@ export class AccountSignup extends DurableAccountSignup {
 // objects in the dedicated backup bucket. It never mutates account routing or
 // participates in evacuation.
 export class AccountBackup extends DurableAccountBackup {
+  constructor(ctx, env) {
+    super(ctx, env);
+  }
+}
+
+// One globally named Durable Object is the strong authority for the shared
+// managed-domain realm-alias namespace. The isolated AGENT_EMAIL_DIRECTORY KV
+// is only its fail-closed routing projection; it never grants ownership or
+// permits address reuse.
+export class RealmEmailAliasRegistry extends DurableRealmEmailAliasRegistry {
   constructor(ctx, env) {
     super(ctx, env);
   }
@@ -4131,6 +4153,33 @@ export default {
         (bridgedRequest) =>
           getContainer(env.CONTROL_PLANE, "singleton").fetch(bridgedRequest),
       );
+    }
+
+    // Managed realm-email aliases live in one global namespace, so customer
+    // requests and platform-admin governance terminate at the Worker-backed
+    // registry rather than being forwarded to one tenant cell. Customer
+    // operator tokens are still verified against the owning cell first.
+    const realmEmailAliasCustomer = matchRealmEmailAliasCustomerPath(
+      url.pathname,
+    );
+    if (realmEmailAliasCustomer) {
+      return handleRealmEmailAliasCustomerRequest(
+        request,
+        env,
+        realmEmailAliasCustomer,
+      );
+    }
+    if (isRealmEmailAliasAdminPath(url.pathname)) {
+      const admin = await adminAuthorized(request, env);
+      if (!admin) return err("unauthorized", 401);
+      return handleRealmEmailAliasAdminRequest(request, env, url, admin);
+    }
+    if (isRealmEmailRoutePath(url.pathname)) {
+      const realmEmailRoute = matchRealmEmailRoutePath(url.pathname);
+      // Edge fallback terminates here and reads the authoritative Durable
+      // Object. It never falls through to the cold Go container or trusts the
+      // same eventually consistent KV entry that triggered the refresh.
+      return handleRealmEmailRouteRequest(request, env, realmEmailRoute);
     }
 
     // Admin-side fan-out routes (admin-token authorized). Fleet-wide

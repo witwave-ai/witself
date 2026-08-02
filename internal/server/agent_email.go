@@ -210,26 +210,76 @@ type AgentEmailIngestFunc func(context.Context, agentemail.RelayMetadata, []byte
 
 // AgentEmailAddress is the owner-visible mailbox address and lifecycle state.
 type AgentEmailAddress struct {
-	ID                string     `json:"id"`
-	MailboxID         string     `json:"mailbox_id"`
-	AccountID         string     `json:"account_id"`
-	RealmID           string     `json:"realm_id"`
-	OwnerAgentID      string     `json:"owner_agent_id"`
-	Address           string     `json:"address"`
-	Domain            string     `json:"domain"`
-	LocalPart         string     `json:"local_part"`
-	AgentSegment      string     `json:"agent_segment"`
-	RealmLabel        string     `json:"realm_label"`
-	ProvisioningKind  string     `json:"provisioning_kind"`
-	ReceiveState      string     `json:"receive_state"`
-	AgentReceiveState string     `json:"agent_receive_state"`
-	RealmReceiveState string     `json:"realm_receive_state"`
-	RowVersion        int64      `json:"row_version"`
-	CreatedAt         time.Time  `json:"created_at"`
-	UpdatedAt         time.Time  `json:"updated_at"`
-	DisabledAt        *time.Time `json:"disabled_at,omitempty"`
-	RealmDisabledAt   *time.Time `json:"realm_disabled_at,omitempty"`
-	RetiredAt         *time.Time `json:"retired_at,omitempty"`
+	ID                string                        `json:"id"`
+	MailboxID         string                        `json:"mailbox_id"`
+	AccountID         string                        `json:"account_id"`
+	RealmID           string                        `json:"realm_id"`
+	OwnerAgentID      string                        `json:"owner_agent_id"`
+	Address           string                        `json:"address"`
+	Domain            string                        `json:"domain"`
+	LocalPart         string                        `json:"local_part"`
+	AgentSegment      string                        `json:"agent_segment"`
+	RealmLabel        string                        `json:"realm_label"`
+	ProvisioningKind  string                        `json:"provisioning_kind"`
+	ReceiveState      string                        `json:"receive_state"`
+	AgentReceiveState string                        `json:"agent_receive_state"`
+	RealmReceiveState string                        `json:"realm_receive_state"`
+	RowVersion        int64                         `json:"row_version"`
+	CreatedAt         time.Time                     `json:"created_at"`
+	UpdatedAt         time.Time                     `json:"updated_at"`
+	DisabledAt        *time.Time                    `json:"disabled_at,omitempty"`
+	RealmDisabledAt   *time.Time                    `json:"realm_disabled_at,omitempty"`
+	RetiredAt         *time.Time                    `json:"retired_at,omitempty"`
+	Aliases           []AgentEmailRealmAliasAddress `json:"aliases"`
+}
+
+// AgentEmailRealmAlias is the control-plane-visible cell acknowledgement for
+// one globally claimed realm designator.
+type AgentEmailRealmAlias struct {
+	ClaimID            string     `json:"claim_id"`
+	AccountID          string     `json:"account_id"`
+	RealmID            string     `json:"realm_id"`
+	Domain             string     `json:"domain"`
+	RealmLabel         string     `json:"realm_label"`
+	State              string     `json:"state"`
+	ControllerRevision int64      `json:"controller_revision"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+	SuspendedAt        *time.Time `json:"suspended_at,omitempty"`
+	RetiredAt          *time.Time `json:"retired_at,omitempty"`
+}
+
+// AgentEmailRealmAliasApplyRequest is one monotonic desired projection. The
+// account target remains path-bound.
+type AgentEmailRealmAliasApplyRequest struct {
+	ClaimID            string `json:"claim_id"`
+	RealmID            string `json:"realm_id"`
+	Domain             string `json:"domain"`
+	RealmLabel         string `json:"realm_label"`
+	State              string `json:"state"`
+	ControllerRevision int64  `json:"controller_revision"`
+}
+
+// AgentEmailRealmAliasTarget is the content-minimal provision-token response
+// proving that an account owns one live realm.
+type AgentEmailRealmAliasTarget struct {
+	AccountID string `json:"account_id"`
+	RealmID   string `json:"realm_id"`
+	Exists    bool   `json:"exists"`
+}
+
+// AgentEmailRealmAliasAddress is one agent-specific address derived from a
+// realm-level claim.
+type AgentEmailRealmAliasAddress struct {
+	ClaimID            string     `json:"claim_id"`
+	Address            string     `json:"address"`
+	LocalPart          string     `json:"local_part"`
+	RealmLabel         string     `json:"realm_label"`
+	State              string     `json:"state"`
+	ControllerRevision int64      `json:"controller_revision"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+	SuspendedAt        *time.Time `json:"suspended_at,omitempty"`
+	RetiredAt          *time.Time `json:"retired_at,omitempty"`
 }
 
 // AgentEmailReceiveControl is the operator-visible value-free lifecycle view
@@ -300,6 +350,8 @@ type AgentEmailMessage struct {
 	EnvelopeRecipient              string               `json:"envelope_recipient"`
 	AgentSegment                   string               `json:"agent_segment"`
 	RealmLabel                     string               `json:"realm_label"`
+	RecipientRouteKind             string               `json:"recipient_route_kind"`
+	RecipientRealmAliasClaimID     string               `json:"recipient_realm_alias_claim_id,omitempty"`
 	SubaddressTag                  string               `json:"subaddress_tag,omitempty"`
 	RawSizeBytes                   int64                `json:"raw_size_bytes"`
 	ParseState                     string               `json:"parse_state"`

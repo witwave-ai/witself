@@ -18,7 +18,9 @@ import {
   bootstrapLiveState,
   claimOperation,
   commitArchived,
+  commitLive,
   markProjectionApplied,
+  nextLifecycleStep,
   validateLifecycleState,
 } from "../src/account-lifecycle-state.mjs";
 
@@ -379,6 +381,153 @@ test("default lifecycle fetch preserves the platform receiver", async (t) => {
   });
 
   assert.equal(receiver, globalThis);
+});
+
+test("route retirement stays in place until alias suspension fence completes", async () => {
+  const object = `archives/${ACCOUNT}/alias-fence.tar.gz`;
+  const pointer = {
+    archive_id: "archive_alias_fence",
+    evacuation_id: OPERATION_ID,
+    object,
+    cell: SOURCE,
+    source_cell: SOURCE,
+    source_registration_id: `reg-${SOURCE}`,
+    status: "suspended",
+  };
+  let state = bootstrapLiveState({
+    account_id: ACCOUNT,
+    route: sourceRoute(),
+  });
+  state = claimOperation(state, {
+    operation_id: OPERATION_ID,
+    evacuation_id: OPERATION_ID,
+    kind: "move",
+    source_cell: SOURCE,
+    target_cell: TARGET,
+    archive: { archive_id: pointer.archive_id, object },
+  });
+  state = validateLifecycleState({
+    ...state,
+    revision: state.revision + 1,
+    operation: {
+      ...state.operation,
+      source_registration_id: `reg-${SOURCE}`,
+      target_registration_id: `reg-${TARGET}`,
+      request_epoch: 0,
+    },
+  });
+  state = acknowledgeStep(state, {
+    operation_id: OPERATION_ID,
+    from_phase: "claimed",
+    to_phase: "target_reserved",
+  });
+  state = acknowledgeStep(state, {
+    operation_id: OPERATION_ID,
+    from_phase: "target_reserved",
+    to_phase: "source_suspended",
+  });
+  state = commitArchived(state, {
+    operation_id: OPERATION_ID,
+    archived: pointer,
+  });
+  state = markProjectionApplied(state, {
+    operation_id: OPERATION_ID,
+    target: "archive",
+    action: "put",
+    archive_id: pointer.archive_id,
+    archive_object: object,
+  });
+  const step = nextLifecycleStep(state);
+  assert.equal(step.target, "route");
+  assert.equal(step.projection.action, "delete");
+
+  const directory = new KV({ [`acct:${ACCOUNT}`]: sourceRoute() });
+  const storage = new Storage();
+  await storage.put("account-lifecycle", state);
+  let attempts = 0;
+  const coordinator = new DurableAccountLifecycle(
+    context(storage),
+    { DIRECTORY: directory, ARCHIVES: new Bucket() },
+    {
+      reconcileRealmEmailAliases: async (_accountID, fence) => {
+        attempts++;
+        assert.equal(fence.action, "suspend");
+        if (attempts === 1) throw new Error("alias suspension still converging");
+      },
+    },
+  );
+  await assert.rejects(
+    () => coordinator.applyProjection(state, step),
+    /still converging/,
+  );
+  assert.equal(directory.value(`acct:${ACCOUNT}`).cell, SOURCE);
+  assert.equal(storage.values.get("account-lifecycle").operation.phase, "archive_projected");
+
+  await coordinator.applyProjection(state, step);
+  assert.equal(directory.value(`acct:${ACCOUNT}`), null);
+  assert.equal(storage.values.get("account-lifecycle").operation.phase, "route_retired");
+});
+
+test("live route projection replays alias republish before advancing", async () => {
+  const object = `archives/${ACCOUNT}/alias-republish.tar.gz`;
+  const pointer = {
+    archive_id: "archive_alias_republish",
+    evacuation_id: OPERATION_ID,
+    object,
+    cell: SOURCE,
+    source_cell: SOURCE,
+    source_registration_id: `reg-${SOURCE}`,
+    status: "suspended",
+  };
+  let state = archivedOperationState("move", pointer, TARGET);
+  state = acknowledgeStep(state, {
+    operation_id: OPERATION_ID,
+    from_phase: "route_retired",
+    to_phase: "target_imported",
+  });
+  state = acknowledgeStep(state, {
+    operation_id: OPERATION_ID,
+    from_phase: "target_imported",
+    to_phase: "target_resumed",
+  });
+  state = commitLive(state, {
+    operation_id: OPERATION_ID,
+    route: {
+      cell: TARGET,
+      endpoint: "https://target.example",
+      region: "us-west",
+      epoch: state.operation.epoch,
+    },
+  });
+  const step = nextLifecycleStep(state);
+  assert.equal(step.target, "route");
+  assert.equal(step.projection.action, "put");
+
+  const directory = new KV();
+  const storage = new Storage();
+  await storage.put("account-lifecycle", state);
+  let attempts = 0;
+  const coordinator = new DurableAccountLifecycle(
+    context(storage),
+    { DIRECTORY: directory, ARCHIVES: new Bucket() },
+    {
+      reconcileRealmEmailAliases: async (_accountID, fence) => {
+        attempts++;
+        assert.equal(fence.action, "republish");
+        if (attempts === 1) throw new Error("alias republish still converging");
+      },
+    },
+  );
+  await assert.rejects(
+    () => coordinator.applyProjection(state, step),
+    /still converging/,
+  );
+  assert.equal(directory.value(`acct:${ACCOUNT}`).cell, TARGET);
+  assert.equal(storage.values.get("account-lifecycle").operation.phase, "live_committed");
+
+  await coordinator.applyProjection(state, step);
+  assert.equal(attempts, 2);
+  assert.equal(storage.values.get("account-lifecycle").operation.phase, "route_projected");
 });
 
 async function roleAwareFetch(fetchImpl, url, init) {

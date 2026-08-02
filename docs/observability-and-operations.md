@@ -223,6 +223,24 @@ Initial metric families should include:
 | `witself_audit_write_failures_total` | Audit sink write failures. |
 | `witself_audit_queue_depth` | Buffered audit events waiting to be written when a queue exists. |
 | `witself_usage_events_total` | Usage metering events by dimension and result. |
+
+The pilot-gated Cloudflare inbound-email Worker also writes one best-effort
+Analytics Engine point per final SMTP-facing disposition to
+`witself_agent_email_edge`. This is an edge dataset, not a Prometheus family.
+Its fixed schema marker is `witself.agent-email.edge.v1`; `outcome` is one of
+`accepted`, `discarded_feature_disabled`, `rejected_invalid_recipient`,
+`rejected_unknown_recipient`, `rejected_inactive_route`, `rejected_over_size`,
+`rejected_cell_permanent`, `rejected_retry_canary`,
+`tempfail_configuration`, `tempfail_disabled`, `tempfail_directory`,
+`tempfail_suspended_route`, `tempfail_route_lookup`, `tempfail_content`,
+`tempfail_signing`, `tempfail_transport`, `tempfail_rate_limited`,
+`tempfail_cell_response`, or `tempfail_internal`; and `phase` is one of
+`configuration`, `recipient`, `directory`, `route`, `content`, `signing`,
+`fetch`, `response`, or `internal`. Numeric fields are limited to count,
+duration milliseconds, raw byte count, and response status. No address,
+account, realm, agent, sender, subject, message identifier, route label,
+digest, signature, token, content, or error text is recorded. Analytics
+failure never changes the SMTP disposition.
 | `witself_limit_decisions_total` | Rate limit, quota, and plan-limit decisions by dimension and action. |
 | `witself_storage_operations_total` | Storage operations by backend, operation, and result. |
 | `witself_storage_operation_duration_seconds` | Storage operation latency histogram. |
@@ -540,6 +558,10 @@ Initial alert candidates:
   consolidation-health signal; investigate through authenticated status rather
   than adding tenant labels).
 - Message send or delivery failure rate above a baseline.
+- Sustained inbound-email edge `tempfail_route_lookup` or
+  `tempfail_suspended_route` outcomes (control-plane/directory convergence or
+  managed-route lifecycle problems). Keep alerts aggregate and do not add a
+  domain, realm label, account, or recipient dimension.
 - Relay envelope drop or quarantine rate above a baseline (cross-realm routing or
   flood signal).
 - Loop-suspension or budget-exhaustion spikes (possible cross-realm loop, flood,

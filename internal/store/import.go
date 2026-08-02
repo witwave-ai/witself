@@ -133,13 +133,21 @@ var importColumns = map[string]map[string]bool{
 		"created_at": true, "updated_at": true,
 		"disabled_at": true, "retired_at": true,
 	},
+	"agent_email_realm_aliases": {
+		"claim_id": true, "account_id": true, "realm_id": true,
+		"domain": true, "realm_label": true, "state": true,
+		"controller_revision": true, "created_at": true,
+		"updated_at": true, "suspended_at": true, "retired_at": true,
+	},
 	"agent_email_messages": {
 		"id": true, "account_id": true, "realm_id": true,
 		"mailbox_id": true, "owner_agent_id": true, "address_id": true,
 		"provider": true, "provider_message_id": true,
 		"envelope_sender": true, "envelope_recipient": true,
-		"agent_segment": true, "realm_label": true, "subaddress_tag": true,
-		"raw_mime": true, "raw_size_bytes": true, "raw_sha256": true,
+		"agent_segment": true, "realm_label": true,
+		"recipient_route_kind": true, "recipient_realm_alias_claim_id": true,
+		"subaddress_tag": true,
+		"raw_mime":       true, "raw_size_bytes": true, "raw_sha256": true,
 		"parse_state": true, "parse_error": true,
 		"header_from": true, "header_to": true, "header_subject": true,
 		"mime_message_id": true, "message_date": true,
@@ -666,6 +674,14 @@ type agentEmailMailboxImportScope struct {
 	createdAt    time.Time
 }
 
+type agentEmailRealmAliasImportScope struct {
+	realmID            string
+	domain             string
+	realmLabel         string
+	state              string
+	controllerRevision int64
+}
+
 type agentEmailMessageImportScope struct {
 	realmID                string
 	mailboxID              string
@@ -954,6 +970,8 @@ type importCtx struct {
 	agentEmailMailboxOwners      map[string]string
 	agentEmailMailboxAddresses   map[string]string
 	agentEmailRealmReceiveStates map[string]string
+	agentEmailRealmAliases       map[string]agentEmailRealmAliasImportScope
+	agentEmailRealmAliasLabels   map[string]string
 	agentEmailMessages           map[string]agentEmailMessageImportScope
 	agentEmailProviderKeys       map[string]string
 	agentEmailDeliveries         map[string]agentEmailDeliveryImportScope
@@ -1052,6 +1070,8 @@ func newImportCtx(accountID string) *importCtx {
 		agentEmailMailboxOwners:      map[string]string{},
 		agentEmailMailboxAddresses:   map[string]string{},
 		agentEmailRealmReceiveStates: map[string]string{},
+		agentEmailRealmAliases:       map[string]agentEmailRealmAliasImportScope{},
+		agentEmailRealmAliasLabels:   map[string]string{},
 		agentEmailMessages:           map[string]agentEmailMessageImportScope{},
 		agentEmailProviderKeys:       map[string]string{},
 		agentEmailDeliveries:         map[string]agentEmailDeliveryImportScope{},
@@ -1349,6 +1369,7 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 	case "operators", "realms", "tokens", "account_events",
 		"agent_email_realm_receive_controls",
 		"agent_email_addresses", "agent_email_mailboxes",
+		"agent_email_realm_aliases",
 		"agent_email_messages", "agent_email_deliveries",
 		"agent_email_retry_canary_arms",
 		"agent_vault_keys", "agent_vault_key_enrollments",
@@ -1634,6 +1655,20 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		ic.agentEmailMailboxes[id] = scope
 		ic.agentEmailMailboxOwners[ownerKey] = id
 		ic.agentEmailMailboxAddresses[addressKey] = id
+	case "agent_email_realm_aliases":
+		claimID, scope, err := ic.validateImportedAgentEmailRealmAlias(obj)
+		if err != nil {
+			return badf("agent_email_realm_aliases row %v", err)
+		}
+		if _, duplicate := ic.agentEmailRealmAliases[claimID]; duplicate {
+			return badf("agent_email_realm_aliases row duplicates claim %q", claimID)
+		}
+		labelKey := scope.domain + "\x00" + scope.realmLabel
+		if previous := ic.agentEmailRealmAliasLabels[labelKey]; previous != "" {
+			return badf("agent_email_realm_aliases row reuses label from %q", previous)
+		}
+		ic.agentEmailRealmAliases[claimID] = scope
+		ic.agentEmailRealmAliasLabels[labelKey] = claimID
 	case "agent_email_messages":
 		id, scope, err := ic.validateImportedAgentEmailMessage(obj)
 		if err != nil {
@@ -3928,6 +3963,64 @@ func (ic *importCtx) validateImportedAgentEmailRealmReceiveControl(obj map[strin
 	return realmID, state, nil
 }
 
+func (ic *importCtx) validateImportedAgentEmailRealmAlias(
+	obj map[string]any,
+) (string, agentEmailRealmAliasImportScope, error) {
+	claimID, err := requireStringField(obj, "claim_id")
+	if err != nil || !validImportedGeneratedID(claimID, "era") {
+		return "", agentEmailRealmAliasImportScope{}, fmt.Errorf("claim_id is invalid")
+	}
+	realmID, err := requireStringField(obj, "realm_id")
+	if err != nil || !ic.realms[realmID] {
+		return "", agentEmailRealmAliasImportScope{}, fmt.Errorf("realm %q is not present in this archive", realmID)
+	}
+	domain, err := requireStringField(obj, "domain")
+	if err != nil || !validImportedAgentEmailDomain(domain) {
+		return "", agentEmailRealmAliasImportScope{}, fmt.Errorf("domain is invalid")
+	}
+	realmLabel, err := requireStringField(obj, "realm_label")
+	if err != nil {
+		return "", agentEmailRealmAliasImportScope{}, fmt.Errorf("realm_label is invalid")
+	}
+	if validated, labelErr := agentemail.ValidateRealmAliasLabel(realmLabel); labelErr != nil || validated != realmLabel {
+		return "", agentEmailRealmAliasImportScope{}, fmt.Errorf("realm_label is invalid")
+	}
+	state, err := requireStringField(obj, "state")
+	if err != nil || !validAgentEmailRealmAliasState(state) {
+		return "", agentEmailRealmAliasImportScope{}, fmt.Errorf("state is invalid")
+	}
+	revision, ok := importedPositiveInteger(obj["controller_revision"])
+	if !ok || revision > maxMessageProcessingGeneration {
+		return "", agentEmailRealmAliasImportScope{}, fmt.Errorf("controller_revision is invalid")
+	}
+	createdAt, err := requireImportedTimestamp(obj, "created_at")
+	updatedAt, updateErr := requireImportedTimestamp(obj, "updated_at")
+	if err != nil || updateErr != nil || updatedAt.Before(*createdAt) ||
+		ic.requireTimestampAtOrBeforeExport("agent_email_realm_aliases created_at", valueOrZero(createdAt)) != nil ||
+		ic.requireTimestampAtOrBeforeExport("agent_email_realm_aliases updated_at", valueOrZero(updatedAt)) != nil {
+		return "", agentEmailRealmAliasImportScope{}, fmt.Errorf("timestamps are invalid")
+	}
+	suspendedAt, suspended, err := importedOptionalTimestamp(obj, "suspended_at")
+	if err != nil || suspended && (suspendedAt.Before(*createdAt) ||
+		ic.requireTimestampAtOrBeforeExport("agent_email_realm_aliases suspended_at", *suspendedAt) != nil) {
+		return "", agentEmailRealmAliasImportScope{}, fmt.Errorf("suspended_at is invalid")
+	}
+	retiredAt, retired, err := importedOptionalTimestamp(obj, "retired_at")
+	if err != nil || retired && (retiredAt.Before(*createdAt) ||
+		ic.requireTimestampAtOrBeforeExport("agent_email_realm_aliases retired_at", *retiredAt) != nil) {
+		return "", agentEmailRealmAliasImportScope{}, fmt.Errorf("retired_at is invalid")
+	}
+	if state == AgentEmailRealmAliasApplied && (suspended || retired) ||
+		state == AgentEmailRealmAliasSuspended && (!suspended || retired) ||
+		state == AgentEmailRealmAliasRetired && !retired {
+		return "", agentEmailRealmAliasImportScope{}, fmt.Errorf("state lifecycle shape is invalid")
+	}
+	return claimID, agentEmailRealmAliasImportScope{
+		realmID: realmID, domain: domain, realmLabel: realmLabel,
+		state: state, controllerRevision: revision,
+	}, nil
+}
+
 func (ic *importCtx) validateImportedAgentEmailMessage(obj map[string]any) (string, agentEmailMessageImportScope, error) {
 	id, err := requireStringField(obj, "id")
 	if err != nil || !validImportedGeneratedID(id, "emsg") {
@@ -3969,16 +4062,48 @@ func (ic *importCtx) validateImportedAgentEmailMessage(obj map[string]any) (stri
 	}
 	agentSegment, err := requireStringField(obj, "agent_segment")
 	realmLabel, realmLabelErr := requireStringField(obj, "realm_label")
-	if err != nil || realmLabelErr != nil || agentSegment != address.agentSegment || realmLabel != address.realmLabel {
+	if err != nil || realmLabelErr != nil || agentSegment != address.agentSegment {
 		return "", agentEmailMessageImportScope{}, fmt.Errorf("recipient components do not match address")
+	}
+	recipientRouteKind := AgentEmailRecipientRouteCanonical
+	realmAliasClaimID := ""
+	if _, hasRouteKind := obj["recipient_route_kind"]; hasRouteKind {
+		recipientRouteKind, err = requireStringField(obj, "recipient_route_kind")
+		if err != nil || recipientRouteKind != AgentEmailRecipientRouteCanonical &&
+			recipientRouteKind != AgentEmailRecipientRouteRealmAlias {
+			return "", agentEmailMessageImportScope{}, fmt.Errorf("recipient_route_kind is invalid")
+		}
+	}
+	var hasRealmAliasClaim bool
+	if _, hasClaimField := obj["recipient_realm_alias_claim_id"]; hasClaimField {
+		realmAliasClaimID, hasRealmAliasClaim, err = importedNullableBoundedString(
+			obj, "recipient_realm_alias_claim_id", len("era_")+16, false,
+		)
+	}
+	if err != nil || recipientRouteKind == AgentEmailRecipientRouteCanonical && hasRealmAliasClaim ||
+		recipientRouteKind == AgentEmailRecipientRouteRealmAlias && !hasRealmAliasClaim {
+		return "", agentEmailMessageImportScope{}, fmt.Errorf("recipient realm-alias claim shape is invalid")
+	}
+	expectedLocalPart := address.localPart
+	if recipientRouteKind == AgentEmailRecipientRouteCanonical {
+		if realmLabel != address.realmLabel {
+			return "", agentEmailMessageImportScope{}, fmt.Errorf("canonical recipient label does not match address")
+		}
+	} else {
+		alias, exists := ic.agentEmailRealmAliases[realmAliasClaimID]
+		if !exists || alias.realmID != realmID || alias.domain != address.domain ||
+			alias.realmLabel != realmLabel {
+			return "", agentEmailMessageImportScope{}, fmt.Errorf("recipient realm-alias claim does not match message scope")
+		}
+		expectedLocalPart = address.agentSegment + "." + alias.realmLabel
 	}
 	subaddressTag, hasTag, err := importedNullableBoundedString(obj, "subaddress_tag", 64, false)
 	if err != nil || hasTag && containsImportedAgentEmailControl(subaddressTag) {
 		return "", agentEmailMessageImportScope{}, fmt.Errorf("subaddress_tag is invalid")
 	}
 	recipient, recipientErr := agentemail.ParseRecipient(envelopeRecipient, address.domain)
-	if recipientErr != nil || recipient.LocalPart != address.localPart ||
-		recipient.AgentSegment != address.agentSegment || recipient.RealmLabel != address.realmLabel ||
+	if recipientErr != nil || recipient.LocalPart != expectedLocalPart ||
+		recipient.AgentSegment != address.agentSegment || recipient.RealmLabel != realmLabel ||
 		recipient.SubaddressTag != subaddressTag || hasTag != (recipient.SubaddressTag != "") {
 		return "", agentEmailMessageImportScope{}, fmt.Errorf("envelope_recipient does not match address and subaddress")
 	}

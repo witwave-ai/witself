@@ -33,10 +33,15 @@
 // The callback paths terminate at the Worker. They must never fall through to
 // the container, or a configuration error could turn a callback into a loop.
 
+import {
+  reconcileRealmEmailAliasesForPlan,
+} from "./realm-email-alias-runtime.mjs";
+
 const ACCOUNT_ID_PATTERN = "[A-Za-z0-9_-]{1,128}";
 const LIMIT_DIMENSION_PATTERN =
   "(?:realms|agents|agents_per_realm|stored_memory|stored_fact|stored_secret|" +
   "agent_email_max_raw_bytes|agent_email_attachment_storage_bytes|" +
+  "agent_email_realm_aliases_per_realm|" +
   "message_sent_per_agent_minute|message_delivered_per_realm_minute|" +
   "message_delivered_per_recipient_minute|" +
   "agent_email_received_per_sender_minute|" +
@@ -550,6 +555,36 @@ async function applyPlanSnapshot(request, env, accountID, fetchImpl) {
     return err("plan snapshot body is required", 400);
   }
 
+  // Alias routing is a global control-plane projection while plan enforcement
+  // is cell-local. The preflight records a durable, non-mutating candidate
+  // fence; ordinary plan restrictions and grace begin only after the cell
+  // accepts that exact snapshot. The activation kill switch is the sole
+  // immediate fail-closed exception inside the registry.
+  let submittedSnapshot = null;
+  if (!readFence && env.REALM_EMAIL_ALIASES) {
+    try {
+      const candidate = JSON.parse(new TextDecoder().decode(bounded.body));
+      if (
+        Number.isSafeInteger(candidate?.revision) && candidate.revision >= 0 &&
+        typeof candidate?.limits === "object" && candidate.limits !== null &&
+        !Array.isArray(candidate.limits) && Array.isArray(candidate?.features)
+      ) {
+        submittedSnapshot = candidate;
+        await reconcileRealmEmailAliasesForPlan(
+          env,
+          accountID,
+          submittedSnapshot,
+          "restrict_only",
+        );
+      }
+    } catch (cause) {
+      return err(
+        `realm email alias plan reconciliation failed: ${String(cause?.message ?? cause)}`,
+        502,
+      );
+    }
+  }
+
   try {
     const headers = {
       Authorization: `Bearer ${cell.provision_token}`,
@@ -589,6 +624,54 @@ async function applyPlanSnapshot(request, env, accountID, fetchImpl) {
         revision: snapshot.revision,
         snapshot_hash: snapshot.snapshot_hash,
       });
+    }
+    if (!readFence && submittedSnapshot) {
+      if (response.ok) {
+        try {
+          await reconcileRealmEmailAliasesForPlan(
+            env,
+            accountID,
+            submittedSnapshot,
+            "complete",
+          );
+        } catch (cause) {
+          return err(
+            `realm email alias plan reconciliation failed: ${String(cause?.message ?? cause)}`,
+            502,
+          );
+        }
+      } else {
+        // Retire only the exact rejected candidate intent by reconciling the
+        // cell's actual current snapshot. The candidate fence is supplied so
+        // a delayed response cannot erase a newer pending plan revision.
+        try {
+          const current = await fetchImpl(
+            `${endpoint.replace(/\/+$/, "")}/v1/accounts/${accountID}:plan`,
+            {
+              method: "GET",
+              headers: { Authorization: `Bearer ${cell.provision_token}` },
+              signal: AbortSignal.timeout(BRIDGE_TIMEOUT_MS),
+            },
+          );
+          if (current.ok) {
+            const snapshot = await current.json();
+            await reconcileRealmEmailAliasesForPlan(
+              env,
+              accountID,
+              snapshot,
+              "complete",
+              {
+                recover_pending_revision: submittedSnapshot.revision,
+                recover_pending_snapshot_hash:
+                  submittedSnapshot.snapshot_hash,
+              },
+            );
+          }
+        } catch {
+          // The registry's durable intent alarm reads the authoritative cell
+          // fence and retries convergence.
+        }
+      }
     }
     return relay(response);
   } catch (cause) {

@@ -29,6 +29,7 @@ test("release renderer injects immutable container build identity", async (t) =>
   ], {
     cwd: root,
     encoding: "utf8",
+    env: { ...process.env, EMAIL_DIRECTORY_KV_ID: "b".repeat(32) },
   });
   assert.equal(rendered.status, 0, rendered.stderr);
 
@@ -84,6 +85,31 @@ test("release renderer injects immutable container build identity", async (t) =>
     /"tag"\s*:\s*"v6"\s*,\s*"new_sqlite_classes"\s*:\s*\[\s*"AccountBackup"\s*\]/,
     "release config must preserve the account backup Durable Object migration",
   );
+  assert.match(
+    config,
+    /"name"\s*:\s*"REALM_EMAIL_ALIASES"\s*,\s*"class_name"\s*:\s*"RealmEmailAliasRegistry"/,
+    "release config must bind the global managed realm-email alias authority",
+  );
+  assert.match(
+    config,
+    /"tag"\s*:\s*"v7"\s*,\s*"new_sqlite_classes"\s*:\s*\[\s*"RealmEmailAliasRegistry"\s*\]/,
+    "release config must preserve the realm-email alias registry migration",
+  );
+  assert.match(
+    config,
+    /"binding"\s*:\s*"AGENT_EMAIL_DIRECTORY"\s*,\s*"id"\s*:\s*"b{32}"/,
+    "control plane must project only into the dedicated agent-email namespace",
+  );
+  assert.match(
+    config,
+    /"AGENT_EMAIL_DOMAIN"\s*:\s*"agent-mail\.witwave\.ai"/,
+    "control plane must derive every managed alias from one configured domain",
+  );
+  assert.doesNotMatch(
+    config,
+    /"CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED"\s*:/,
+    "realm aliases must remain disabled until catch-all, lifecycle reconciliation, and terminal recovery acceptance pass",
+  );
   assert.doesNotMatch(
     config,
     /"CP_ACCOUNT_BACKUPS_ENABLED"\s*:/,
@@ -95,7 +121,27 @@ test("release renderer injects immutable container build identity", async (t) =>
     "release config must bind the isolated immutable backup bucket",
   );
   assert.doesNotMatch(config, /__WITSELF_[A-Z_]+__/);
+  assert.doesNotMatch(config, /__EMAIL_DIRECTORY_KV_ID__/);
   assert.equal((await stat(output)).mode & 0o777, 0o600);
+});
+
+test("release renderer rejects the broad control-plane directory for agent email", () => {
+  const rejected = spawnSync(process.execPath, [
+    renderer.pathname,
+    "--version", version,
+    "--commit", commit,
+    "--date", date,
+    "--output", "ignored.jsonc",
+  ], {
+    cwd: root,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      EMAIL_DIRECTORY_KV_ID: "ec620d5131524e138a9fca6207953cd2",
+    },
+  });
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /must not reuse/);
 });
 
 test("release renderer requires all explicit identity fields", () => {

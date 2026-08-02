@@ -128,6 +128,70 @@ func parseAgentEmailIDSet(value string) (map[string]bool, error) {
 
 func configureAgentEmail(ctx context.Context, cfg *server.Config, st *store.Store, pilot server.AgentEmailPilotConfig) error {
 	cfg.AgentEmailPilot = pilot
+	// Alias projection is a control-plane lifecycle surface, not a process-local
+	// pilot enrollment surface. Keep it wired even while receive is disabled so
+	// a later policy/configuration change needs no client reinstall or schema
+	// rewrite. When this process does have one receive domain, reject a projection
+	// aimed at a different edge domain.
+	cfg.ApplyAgentEmailRealmAlias = func(
+		ctx context.Context,
+		accountID string,
+		in server.AgentEmailRealmAliasApplyRequest,
+	) (server.AgentEmailRealmAlias, error) {
+		if pilot.Enabled {
+			domain, err := agentemail.ValidateDomain(pilot.Domain)
+			if err != nil || in.Domain != domain {
+				return server.AgentEmailRealmAlias{}, server.ErrBadInput
+			}
+		}
+		alias, err := st.ApplyAgentEmailRealmAlias(ctx, accountID, store.ApplyAgentEmailRealmAliasInput{
+			ClaimID: in.ClaimID, RealmID: in.RealmID, Domain: in.Domain,
+			RealmLabel: in.RealmLabel, State: in.State,
+			ControllerRevision: in.ControllerRevision,
+		})
+		if err != nil {
+			return server.AgentEmailRealmAlias{}, mapAgentEmailRealmAliasError(err)
+		}
+		return toServerAgentEmailRealmAlias(alias), nil
+	}
+	cfg.GetAgentEmailRealmAlias = func(
+		ctx context.Context,
+		accountID, claimID string,
+	) (server.AgentEmailRealmAlias, error) {
+		alias, err := st.GetAgentEmailRealmAlias(ctx, accountID, claimID)
+		if err != nil {
+			return server.AgentEmailRealmAlias{}, mapAgentEmailRealmAliasError(err)
+		}
+		return toServerAgentEmailRealmAlias(alias), nil
+	}
+	cfg.GetAgentEmailRealmAliasTarget = func(
+		ctx context.Context,
+		accountID, realmID string,
+	) (server.AgentEmailRealmAliasTarget, error) {
+		target, err := st.GetAgentEmailRealmAliasTarget(ctx, accountID, realmID)
+		if err != nil {
+			return server.AgentEmailRealmAliasTarget{}, mapAgentEmailRealmAliasError(err)
+		}
+		return server.AgentEmailRealmAliasTarget{
+			AccountID: target.AccountID,
+			RealmID:   target.RealmID,
+			Exists:    target.Exists,
+		}, nil
+	}
+	cfg.ListAgentEmailRealmAliases = func(
+		ctx context.Context,
+		accountID string,
+	) ([]server.AgentEmailRealmAlias, error) {
+		aliases, err := st.ListAgentEmailRealmAliases(ctx, accountID)
+		if err != nil {
+			return nil, mapAgentEmailRealmAliasError(err)
+		}
+		result := make([]server.AgentEmailRealmAlias, len(aliases))
+		for i, alias := range aliases {
+			result[i] = toServerAgentEmailRealmAlias(alias)
+		}
+		return result, nil
+	}
 	if !pilot.Enabled {
 		return nil
 	}
@@ -343,7 +407,32 @@ func mapAgentEmailError(err error) error {
 	}
 }
 
+func mapAgentEmailRealmAliasError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, store.ErrAgentEmailInputInvalid):
+		return wrapAsSentinel(server.ErrBadInput, store.ErrAgentEmailInputInvalid, err)
+	case errors.Is(err, store.ErrAccountNotFound), errors.Is(err, store.ErrRealmNotFound),
+		errors.Is(err, store.ErrAgentEmailRealmAliasNotFound):
+		return server.ErrNotFound
+	case errors.Is(err, store.ErrAgentEmailRealmAliasConflict):
+		return server.ErrConflict
+	default:
+		return err
+	}
+}
+
 func toServerAgentEmailAddress(address store.AgentEmailAddress) server.AgentEmailAddress {
+	aliases := make([]server.AgentEmailRealmAliasAddress, len(address.Aliases))
+	for i, alias := range address.Aliases {
+		aliases[i] = server.AgentEmailRealmAliasAddress{
+			ClaimID: alias.ClaimID, Address: alias.Address, LocalPart: alias.LocalPart,
+			RealmLabel: alias.RealmLabel, State: alias.State,
+			ControllerRevision: alias.ControllerRevision, UpdatedAt: alias.UpdatedAt,
+			SuspendedAt: alias.SuspendedAt, RetiredAt: alias.RetiredAt,
+		}
+	}
 	return server.AgentEmailAddress{
 		ID: address.ID, MailboxID: address.MailboxID, AccountID: address.AccountID,
 		RealmID: address.RealmID, OwnerAgentID: address.OwnerAgentID,
@@ -354,7 +443,17 @@ func toServerAgentEmailAddress(address store.AgentEmailAddress) server.AgentEmai
 		RealmReceiveState: address.RealmReceiveState, RowVersion: address.RowVersion,
 		CreatedAt: address.CreatedAt, UpdatedAt: address.UpdatedAt,
 		DisabledAt: address.DisabledAt, RealmDisabledAt: address.RealmDisabledAt,
-		RetiredAt: address.RetiredAt,
+		RetiredAt: address.RetiredAt, Aliases: aliases,
+	}
+}
+
+func toServerAgentEmailRealmAlias(alias store.AgentEmailRealmAlias) server.AgentEmailRealmAlias {
+	return server.AgentEmailRealmAlias{
+		ClaimID: alias.ClaimID, AccountID: alias.AccountID, RealmID: alias.RealmID,
+		Domain: alias.Domain, RealmLabel: alias.RealmLabel, State: alias.State,
+		ControllerRevision: alias.ControllerRevision, CreatedAt: alias.CreatedAt,
+		UpdatedAt: alias.UpdatedAt, SuspendedAt: alias.SuspendedAt,
+		RetiredAt: alias.RetiredAt,
 	}
 }
 
@@ -383,8 +482,10 @@ func toServerAgentEmailMessage(message store.AgentEmailMessage) server.AgentEmai
 		MailboxID: message.MailboxID, OwnerAgentID: message.OwnerAgentID, AddressID: message.AddressID,
 		Provider: message.Provider, EnvelopeSender: message.EnvelopeSender,
 		EnvelopeRecipient: message.EnvelopeRecipient, AgentSegment: message.AgentSegment,
-		RealmLabel: message.RealmLabel, SubaddressTag: message.SubaddressTag,
-		RawSizeBytes: message.RawSizeBytes, ParseState: message.ParseState,
+		RealmLabel: message.RealmLabel, RecipientRouteKind: message.RecipientRouteKind,
+		RecipientRealmAliasClaimID: message.RecipientRealmAliasClaimID,
+		SubaddressTag:              message.SubaddressTag,
+		RawSizeBytes:               message.RawSizeBytes, ParseState: message.ParseState,
 		ParseErrorCode: message.ParseErrorCode, HeaderFrom: message.HeaderFrom,
 		HeaderTo: message.HeaderTo, Subject: message.Subject, MIMEMessageID: message.MIMEMessageID,
 		MessageDate: message.MessageDate, AttachmentCount: message.AttachmentCount,

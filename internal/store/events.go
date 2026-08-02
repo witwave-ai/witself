@@ -109,6 +109,7 @@ const (
 	VerbAgentEmailProcessingCompleted = "agent_email.processing.completed"
 	VerbAgentEmailAgentReceiveChanged = "agent_email.receive.agent_changed"
 	VerbAgentEmailRealmReceiveChanged = "agent_email.receive.realm_changed"
+	VerbAgentEmailRealmAliasProjected = "agent_email.realm_alias.projected"
 
 	// Realm-wide request coordination. These events intentionally carry only
 	// stable ids and decimal counters. Offer/result content, raw idempotency
@@ -478,6 +479,15 @@ var verbMetadataSchema = map[string]verbSpec{
 		requiredKeys:  []string{"realm_id", "receive_state", "mailbox_count", "row_version"},
 		allowedKeys:   []string{"realm_id", "receive_state", "mailbox_count", "row_version"},
 		allowedActors: []string{ActorOperator},
+	},
+	VerbAgentEmailRealmAliasProjected: {
+		requiredKeys: []string{
+			"claim_id", "realm_id", "state", "controller_revision",
+		},
+		allowedKeys: []string{
+			"claim_id", "realm_id", "state", "controller_revision",
+		},
+		allowedActors: []string{ActorControlPlane},
 	},
 	VerbMessageRequestOpened: messageRequestEventSpec(
 		"request_id", "opening_message_id", "coordinator_agent_id", "max_assignees",

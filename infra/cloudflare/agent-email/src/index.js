@@ -11,7 +11,11 @@ import {
 import {
   CONFIG_KEY,
   parsePilotAddress,
+  parseRouteAddress,
+  realmRouteKey,
+  realmRouteProjectionIsFresh,
   recipientKey,
+  validateRealmRouteProjection,
   validateRuntimeConfig,
   validateRuntimeRecipient,
 } from "./directory.mjs";
@@ -21,7 +25,9 @@ const PERMANENT_REJECTION = "recipient unavailable";
 const OVER_SIZE_REJECTION = "message too large";
 const TRANSIENT_ERROR = "agent email relay temporarily unavailable";
 const DEFAULT_TIMEOUT_MS = 20_000;
+const DEFAULT_DIRECTORY_TIMEOUT_MS = 3_000;
 const MAX_VERDICT_BYTES = 4_096;
+const MAX_ROUTE_BYTES = 4_096;
 
 let cachedSecret = "";
 let cachedSigningKey;
@@ -46,6 +52,223 @@ async function directoryJSON(namespace, key) {
   } catch {
     throw transient("tempfail_directory", "directory");
   }
+}
+
+async function optionalDirectoryJSON(namespace, key) {
+  try {
+    return { ok: true, value: await namespace.get(key, "json") };
+  } catch {
+    return { ok: false, value: null };
+  }
+}
+
+function boundedTimeout(value, defaultValue, minimum, maximum) {
+  const number = Number(value ?? defaultValue);
+  return Number.isSafeInteger(number) && number >= minimum && number <= maximum
+    ? number
+    : defaultValue;
+}
+
+function controlPlaneRouteRequest(env, parsed) {
+  const rawURL = String(env?.CONTROL_PLANE_URL ?? "");
+  const token = String(env?.CONTROL_PLANE_EDGE_TOKEN ?? "");
+  if (!rawURL && !token) return null;
+  if (!rawURL || !token || token !== token.trim() || token.length < 16 || token.length > 8_192) {
+    throw transient("tempfail_configuration", "configuration");
+  }
+  let base;
+  try {
+    base = new URL(rawURL);
+  } catch {
+    throw transient("tempfail_configuration", "configuration");
+  }
+  if (
+    base.protocol !== "https:" || base.username || base.password || base.hash || base.search ||
+    !base.hostname || base.hostname === "localhost" || (base.pathname !== "/" && base.pathname !== "")
+  ) {
+    throw transient("tempfail_configuration", "configuration");
+  }
+  const url = new URL(
+    `/v1/email/realm-routes/${encodeURIComponent(parsed.domain)}/${encodeURIComponent(parsed.realmLabel)}`,
+    base,
+  );
+  return new Request(url, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    redirect: "manual",
+  });
+}
+
+async function controlPlaneRealmRoute(
+  env,
+  parsed,
+  fetchAPI,
+  nowMS,
+  minimumRevision = 0,
+  missingIsTransient = false,
+) {
+  const request = controlPlaneRouteRequest(env, parsed);
+  if (!request) throw transient("tempfail_route_lookup", "route");
+  const timeoutMS = boundedTimeout(
+    env?.DIRECTORY_TIMEOUT_MS,
+    DEFAULT_DIRECTORY_TIMEOUT_MS,
+    250,
+    5_000,
+  );
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMS);
+  let response;
+  try {
+    response = await fetchAPI(new Request(request, { signal: controller.signal }));
+  } catch {
+    throw transient("tempfail_route_lookup", "route");
+  } finally {
+    clearTimeout(timer);
+  }
+  if (response.status === 404) {
+    if (minimumRevision > 0 || missingIsTransient) {
+      throw transient("tempfail_route_lookup", "route", response.status);
+    }
+    return { status: "unknown" };
+  }
+  if (response.status !== 200) throw transient("tempfail_route_lookup", "route", response.status);
+
+  let value;
+  try {
+    value = JSON.parse(await boundedResponseText(response, MAX_ROUTE_BYTES));
+  } catch {
+    throw transient("tempfail_route_lookup", "route", response.status);
+  }
+  let route;
+  try {
+    route = validateRealmRouteProjection(value, parsed.domain, parsed.realmLabel);
+  } catch {
+    throw transient("tempfail_route_lookup", "route", response.status);
+  }
+  if (
+    route.controller_revision < minimumRevision ||
+    !realmRouteProjectionIsFresh(route, nowMS)
+  ) {
+    throw transient("tempfail_route_lookup", "route", response.status);
+  }
+  return { status: "projection", route };
+}
+
+function realmRouteDisposition(route) {
+  switch (route.state) {
+    case "applied":
+      return { status: "route", route };
+    case "suspended":
+      if (route.suspension_disposition === "inactive") {
+        return { status: "inactive" };
+      }
+      throw transient("tempfail_suspended_route", "route");
+    case "retired":
+      return { status: "inactive" };
+    default:
+      throw transient("tempfail_route_lookup", "route");
+  }
+}
+
+async function projectedRealmRoute(
+  env,
+  parsed,
+  fetchAPI,
+  nowMS,
+  projectedValue,
+  uncertainDirectory = false,
+) {
+  let route;
+  try {
+    route = validateRealmRouteProjection(projectedValue, parsed.domain, parsed.realmLabel);
+  } catch {
+    const fallback = await controlPlaneRealmRoute(
+      env,
+      parsed,
+      fetchAPI,
+      nowMS,
+      0,
+      uncertainDirectory || projectedValue !== null,
+    );
+    return fallback.status === "projection" ? realmRouteDisposition(fallback.route) : fallback;
+  }
+  if (realmRouteProjectionIsFresh(route, nowMS)) return realmRouteDisposition(route);
+  const fallback = await controlPlaneRealmRoute(
+    env,
+    parsed,
+    fetchAPI,
+    nowMS,
+    route.controller_revision,
+  );
+  return fallback.status === "projection" ? realmRouteDisposition(fallback.route) : fallback;
+}
+
+async function legacyPilotRoute(env, parsed, envelopeTo) {
+  const configValue = await directoryJSON(env.EMAIL_DIRECTORY, CONFIG_KEY);
+  if (configValue == null) return null;
+  // A corrupt legacy row must not poison lookups for unrelated production
+  // realm labels. Only enter the compatibility path when its raw lookup
+  // binding names this exact address domain and realm label.
+  if (configValue?.domain !== parsed.domain || configValue?.realm_label !== parsed.realmLabel) {
+    return null;
+  }
+  let config;
+  try {
+    config = validateRuntimeConfig(configValue);
+  } catch {
+    throw transient("tempfail_configuration", "configuration");
+  }
+  if (!config.enabled) throw transient("tempfail_disabled", "configuration");
+
+  let pilotAddress;
+  try {
+    pilotAddress = parsePilotAddress(envelopeTo, config.domain, config.realm_label, true);
+  } catch {
+    return { status: "invalid" };
+  }
+  const enrolled = config.agents.some((agent) => agent.address === pilotAddress.baseAddress);
+  if (!enrolled) return { status: "unknown" };
+  const recipientValue = await directoryJSON(env.EMAIL_DIRECTORY, recipientKey(pilotAddress.baseAddress));
+  // The address is enrolled in the atomic config projection. A missing or
+  // inconsistent detail row can be KV propagation lag or operator error, so
+  // it must retry rather than permanently bouncing an enrolled mailbox.
+  if (recipientValue == null) throw transient("tempfail_directory", "directory");
+  try {
+    validateRuntimeRecipient(recipientValue, config, pilotAddress.baseAddress);
+  } catch {
+    throw transient("tempfail_directory", "directory");
+  }
+  return {
+    status: "route",
+    route: {
+      route_kind: "pilot",
+      state: "applied",
+      realm_id: recipientValue.realm_id,
+      cell_audience: recipientValue.cell_audience,
+      ingest_url: recipientValue.ingest_url,
+    },
+  };
+}
+
+async function resolveRealmRoute(env, parsed, envelopeTo, fetchAPI, nowMS) {
+  const projected = await optionalDirectoryJSON(
+    env.EMAIL_DIRECTORY,
+    realmRouteKey(parsed.domain, parsed.realmLabel),
+  );
+  if (!projected.ok) {
+    return projectedRealmRoute(env, parsed, fetchAPI, nowMS, null, true);
+  }
+  if (projected.value != null) {
+    return projectedRealmRoute(env, parsed, fetchAPI, nowMS, projected.value);
+  }
+
+  const legacy = await legacyPilotRoute(env, parsed, envelopeTo);
+  if (legacy != null) return legacy;
+  const fallback = await controlPlaneRealmRoute(env, parsed, fetchAPI, nowMS);
+  return fallback.status === "projection" ? realmRouteDisposition(fallback.route) : fallback;
 }
 
 async function signingKey(env, cryptoAPI) {
@@ -130,39 +353,37 @@ async function handleEmailTransaction(message, env, runtime = {}) {
     throw transient("tempfail_configuration", "configuration");
   }
 
-  const configValue = await directoryJSON(env.EMAIL_DIRECTORY, CONFIG_KEY);
-  if (configValue == null) throw transient("tempfail_configuration", "configuration");
-  let config;
-  try {
-    config = validateRuntimeConfig(configValue);
-  } catch {
-    throw transient("tempfail_configuration", "configuration");
-  }
-  if (!config.enabled) throw transient("tempfail_disabled", "configuration");
-
   let envelopeTo;
   let parsed;
   try {
     envelopeTo = normalizeEnvelopeAddress(message.to, false);
-    parsed = parsePilotAddress(envelopeTo, config.domain, config.realm_label, true);
+    parsed = parseRouteAddress(envelopeTo, true);
   } catch {
     message.setReject(PERMANENT_REJECTION);
     return { outcome: "rejected_invalid_recipient", phase: "recipient", status: 550 };
   }
-  const enrolled = config.agents.some((agent) => agent.address === parsed.baseAddress);
-  if (!enrolled) {
+
+  const resolved = await resolveRealmRoute(env, parsed, envelopeTo, fetchAPI, now());
+  if (resolved.status === "invalid") {
+    message.setReject(PERMANENT_REJECTION);
+    return { outcome: "rejected_invalid_recipient", phase: "recipient", status: 550 };
+  }
+  if (resolved.status === "unknown") {
     message.setReject(PERMANENT_REJECTION);
     return { outcome: "rejected_unknown_recipient", phase: "recipient", status: 550 };
   }
-  const recipientValue = await directoryJSON(env.EMAIL_DIRECTORY, recipientKey(parsed.baseAddress));
-  // The address is enrolled in the atomic config projection. A missing or
-  // inconsistent detail row can be KV propagation lag or operator error, so
-  // it must retry rather than permanently bouncing an enrolled mailbox.
-  if (recipientValue == null) throw transient("tempfail_directory", "directory");
-  try {
-    validateRuntimeRecipient(recipientValue, config, parsed.baseAddress);
-  } catch {
-    throw transient("tempfail_directory", "directory");
+  if (resolved.status === "inactive") {
+    message.setReject(PERMANENT_REJECTION);
+    return { outcome: "rejected_inactive_route", phase: "route", status: 550 };
+  }
+  const route = resolved.route;
+  // This fleet-wide edge gate is independent of per-account plan state and
+  // route projection freshness. It is exact-true and default-off so a config
+  // omission or emergency flip immediately tempfails only custom realm aliases
+  // across every account; canonical Realm ID addresses remain available.
+  if (route.route_kind === "realm_alias" &&
+      String(env?.REALM_EMAIL_ALIAS_DELIVERY_ENABLED ?? "") !== "true") {
+    throw transient("tempfail_alias_gate", "route");
   }
 
   if (
@@ -191,7 +412,7 @@ async function handleEmailTransaction(message, env, runtime = {}) {
       keyId: env.RELAY_KEY_ID,
       envelopeFrom: normalizeEnvelopeAddress(message.from ?? "", true),
       envelopeTo,
-      audience: recipientValue.cell_audience,
+      audience: route.cell_audience,
       rawSize: raw.byteLength,
       rawSHA256: await sha256Hex(raw, cryptoAPI),
     });
@@ -216,7 +437,7 @@ async function handleEmailTransaction(message, env, runtime = {}) {
   let response;
   let verdict;
   try {
-    response = await fetchAPI(recipientValue.ingest_url, {
+    response = await fetchAPI(route.ingest_url, {
       method: "POST",
       headers: relayHeaders(metadata, signature),
       body: raw,

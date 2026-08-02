@@ -484,7 +484,7 @@ func joinPolicyListOr(values []string, empty string) string {
 
 func realmCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself realm create|list|delete [--account NAME]")
+		fmt.Fprintln(os.Stderr, "usage: witself realm create|list|delete|email-alias [--account NAME]")
 		return 2
 	}
 	switch args[0] {
@@ -494,6 +494,8 @@ func realmCmd(args []string) int {
 		return realmList(args[1:])
 	case "delete":
 		return realmDelete(args[1:])
+	case "email-alias":
+		return realmEmailAliasCmd(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "witself realm: unknown subcommand %q\n", args[0])
 		return 2
@@ -4081,7 +4083,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself account resend-verification  Email a fresh verification link")
 	usageLine(w, "  witself account close        Permanently close an account (owner only)")
 	usageLine(w, "  witself account forget       Remove a local account binding (server untouched)")
-	usageLine(w, "  witself realm create|list|delete")
+	usageLine(w, "  witself realm create|list|delete|email-alias")
 	usageLine(w, "  witself agent create|list|peers|delete")
 	usageLine(w, "  witself operator list|create|delete")
 	usageLine(w, "  witself token create|revoke  Mint or revoke agent/operator tokens")

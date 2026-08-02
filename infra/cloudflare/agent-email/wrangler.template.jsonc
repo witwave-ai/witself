@@ -1,6 +1,7 @@
 // This is intentionally a separate email-only Worker. It has no HTTP route,
 // no control-plane Container binding, and no binding to the control plane's
-// DIRECTORY namespace. Generate wrangler.generated.jsonc with `npm run config`.
+// DIRECTORY namespace. Its bounded stale-route fallback uses the authenticated
+// public control-plane URL. Generate wrangler.generated.jsonc with `npm run config`.
 {
   "name": "witself-agent-email-pilot",
   "main": "src/index.js",
@@ -21,7 +22,9 @@
     }
   ],
   "vars": {
-    "RELAY_KEY_ID": "__RELAY_KEY_ID__"
+    "RELAY_KEY_ID": "__RELAY_KEY_ID__",
+    "CONTROL_PLANE_URL": "__CONTROL_PLANE_URL__",
+    "REALM_EMAIL_ALIAS_DELIVERY_ENABLED": "__REALM_EMAIL_ALIAS_DELIVERY_ENABLED__"
   },
   "observability": {
     "enabled": true

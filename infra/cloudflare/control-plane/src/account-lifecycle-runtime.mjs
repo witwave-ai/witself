@@ -31,6 +31,9 @@ import {
   accountBackupSchedulingEnabled,
   cellHasDestinationCredentials,
 } from "./placement.mjs";
+import {
+  reconcileRealmEmailAliasesForAccountLifecycle,
+} from "./realm-email-alias-runtime.mjs";
 
 const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const CELL_NAME = /^[a-z0-9-]{1,64}$/;
@@ -454,6 +457,14 @@ export class DurableAccountLifecycle {
       ((cellName, path, payload) =>
         this.requestTargetCoordinator(cellName, path, payload));
     this.now = dependencies.now ?? (() => new Date());
+    this.reconcileRealmEmailAliases =
+      dependencies.reconcileRealmEmailAliases ??
+      ((accountID, fence) =>
+        reconcileRealmEmailAliasesForAccountLifecycle(
+          this.env,
+          accountID,
+          fence,
+        ));
   }
 
   async fetch(request) {
@@ -1073,6 +1084,12 @@ export class DurableAccountLifecycle {
         `archived:${this.accountId}`,
         JSON.stringify(pointer),
       );
+      await this.reconcileRealmEmailAliases(this.accountId, {
+        operation_id:
+          state.last_completed?.operation_id ?? "bootstrap",
+        epoch: state.epoch,
+        action: "suspend",
+      });
       if (route) {
         await this.env.DIRECTORY.delete(`acct:${this.accountId}`);
       }
@@ -1090,6 +1107,12 @@ export class DurableAccountLifecycle {
         `acct:${this.accountId}`,
         JSON.stringify(state.location.route),
       );
+      await this.reconcileRealmEmailAliases(this.accountId, {
+        operation_id:
+          state.last_completed?.operation_id ?? "bootstrap",
+        epoch: state.epoch,
+        action: "republish",
+      });
       const archived = await this.env.DIRECTORY.get(
         `archived:${this.accountId}`,
         { type: "json" },
@@ -1150,11 +1173,25 @@ export class DurableAccountLifecycle {
             409,
           );
         }
+      }
+      await this.reconcileRealmEmailAliases(this.accountId, {
+        operation_id:
+          state.last_completed?.operation_id ?? "bootstrap",
+        epoch: state.epoch,
+        action: "suspend",
+      });
+      if (route) {
         await this.env.DIRECTORY.delete(`acct:${this.accountId}`);
       }
       return { already_archived: true };
     }
     if (input.action === "close" && state.location.kind === "closed") {
+      await this.reconcileRealmEmailAliases(this.accountId, {
+        operation_id:
+          state.last_completed?.operation_id ?? "bootstrap",
+        epoch: state.epoch,
+        action: "suspend",
+      });
       await this.env.DIRECTORY.delete(`acct:${this.accountId}`);
       await this.env.DIRECTORY.delete(`pending:${this.accountId}`);
       return canonicalClosed(this.accountId);
@@ -2277,6 +2314,14 @@ export class DurableAccountLifecycle {
         key,
         JSON.stringify(projection.value),
       );
+      // The target route must be authoritative before alias projections can
+      // resolve and verify the new cell. Staying in live_committed until this
+      // exact fence completes makes a crash replay only this republish.
+      await this.reconcileRealmEmailAliases(this.accountId, {
+        operation_id: operation.operation_id,
+        epoch: operation.epoch,
+        action: "republish",
+      });
     } else {
       const current = await this.env.DIRECTORY.get(key, { type: "json" });
       if (current) {
@@ -2289,7 +2334,25 @@ export class DurableAccountLifecycle {
         ) {
           fail("route projection changed before exact retirement", 409);
         }
+        // Remove destination authority from every canonical/custom realm route
+        // before retiring the account route. The registry owns its own durable
+        // cursor and exact lifecycle fence, so a partial page or crash cannot
+        // let this state machine advance early.
+        await this.reconcileRealmEmailAliases(this.accountId, {
+          operation_id: operation.operation_id,
+          epoch: operation.epoch,
+          action: "suspend",
+        });
         await this.env.DIRECTORY.delete(key);
+      } else {
+        // A lost/stale KV acknowledgement is not proof that aliases were
+        // suspended. Reconcile the exact durable lifecycle fence even when the
+        // route delete itself is already externally visible.
+        await this.reconcileRealmEmailAliases(this.accountId, {
+          operation_id: operation.operation_id,
+          epoch: operation.epoch,
+          action: "suspend",
+        });
       }
       if (operation.outcome === "reaped") {
         await this.env.DIRECTORY.delete(`pending:${this.accountId}`);

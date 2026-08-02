@@ -112,7 +112,9 @@ func ValidateDomain(domain string) (string, error) {
 	return domain, nil
 }
 
-// ComposeAddress creates one enrolled base address from validated components.
+// ComposeAddress creates one canonical enrolled base address from validated
+// components. The realm-id-derived address is permanent; additive realm aliases
+// use ComposeAddressWithRealmLabel instead.
 func ComposeAddress(segment, realmID, domain string) (AddressParts, error) {
 	segment, err := ValidateAgentSegment(segment)
 	if err != nil {
@@ -126,6 +128,28 @@ func ComposeAddress(segment, realmID, domain string) (AddressParts, error) {
 	if err != nil {
 		return AddressParts{}, err
 	}
+	return composeAddressWithValidatedRealmLabel(segment, label, domain)
+}
+
+// ComposeAddressWithRealmLabel creates an address using either a canonical
+// realm-id body or a validated realm alias. It deliberately does not infer
+// which kind the label is; callers retain that route provenance separately.
+func ComposeAddressWithRealmLabel(segment, label, domain string) (AddressParts, error) {
+	segment, err := ValidateAgentSegment(segment)
+	if err != nil {
+		return AddressParts{}, err
+	}
+	if !IsRealmRoutingLabel(label) {
+		return AddressParts{}, fmt.Errorf("%w: realm routing label is invalid", ErrAddressInvalid)
+	}
+	domain, err = ValidateDomain(domain)
+	if err != nil {
+		return AddressParts{}, err
+	}
+	return composeAddressWithValidatedRealmLabel(segment, label, domain)
+}
+
+func composeAddressWithValidatedRealmLabel(segment, label, domain string) (AddressParts, error) {
 	localPart := segment + "." + label
 	if len(localPart) > maximumLocalPartBytes {
 		return AddressParts{}, fmt.Errorf("%w: local part exceeds its 64-byte SMTP limit", ErrAddressInvalid)
@@ -174,7 +198,7 @@ func ParseRecipient(recipient, expectedDomain string) (AddressParts, error) {
 	}
 	segment, label, _ := strings.Cut(local, ".")
 	segment, err = ValidateAgentSegment(segment)
-	if err != nil || !validRealmLabel(label) {
+	if err != nil || !IsRealmRoutingLabel(label) {
 		return AddressParts{}, fmt.Errorf("%w: recipient components are invalid", ErrAddressInvalid)
 	}
 	base := local + "@" + domain
@@ -184,7 +208,9 @@ func ParseRecipient(recipient, expectedDomain string) (AddressParts, error) {
 	}, nil
 }
 
-func validRealmLabel(label string) bool {
+// IsCanonicalRealmLabel reports whether label is the exact 16-character body
+// of a realm id. Alias labels intentionally may not collide with this space.
+func IsCanonicalRealmLabel(label string) bool {
 	if len(label) != 16 {
 		return false
 	}
@@ -194,6 +220,40 @@ func validRealmLabel(label string) bool {
 		}
 	}
 	return true
+}
+
+// ValidateRealmAliasLabel validates the account-selected realm designator.
+// Aliases occupy a disjoint namespace from canonical realm-id bodies, and the
+// xn-- prefix is reserved so no caller can smuggle an IDNA interpretation into
+// this ASCII-only routing layer.
+func ValidateRealmAliasLabel(label string) (string, error) {
+	if len(label) < 3 || len(label) > 16 || strings.TrimSpace(label) != label ||
+		strings.ToLower(label) != label || label[0] == '-' || label[len(label)-1] == '-' ||
+		strings.Contains(label, "--") || strings.HasPrefix(label, "xn--") ||
+		IsCanonicalRealmLabel(label) {
+		return "", fmt.Errorf("%w: realm alias label is invalid", ErrAddressInvalid)
+	}
+	for _, c := range []byte(label) {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
+			return "", fmt.Errorf("%w: realm alias label must use lowercase ASCII letters, digits, and hyphens", ErrAddressInvalid)
+		}
+	}
+	return label, nil
+}
+
+// IsRealmRoutingLabel reports whether a recipient label is canonical or a
+// valid additive alias.
+func IsRealmRoutingLabel(label string) bool {
+	if IsCanonicalRealmLabel(label) {
+		return true
+	}
+	_, err := ValidateRealmAliasLabel(label)
+	return err == nil
+}
+
+// validRealmLabel is retained for the realm-id parser's canonical-only rule.
+func validRealmLabel(label string) bool {
+	return IsCanonicalRealmLabel(label)
 }
 
 func validSubaddressTag(tag string) bool {

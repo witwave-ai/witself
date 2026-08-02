@@ -142,6 +142,21 @@ func (s *Store) DeleteRealm(ctx context.Context, accountID, realmID string) erro
 		return ErrRealmNotEmpty
 	}
 
+	// A live control-plane realm alias is destination authority just like a
+	// live agent. Refuse the soft delete until the globally fenced controller
+	// has projected a terminal retirement; otherwise a realm could disappear
+	// after cell acknowledgement but before the edge route is published.
+	var liveAliasCount int
+	if err := tx.QueryRow(ctx, `
+		SELECT count(*) FROM agent_email_realm_aliases
+		 WHERE account_id=$1 AND realm_id=$2 AND state<>'retired'`,
+		accountID, realmID).Scan(&liveAliasCount); err != nil {
+		return fmt.Errorf("count realm email aliases: %w", err)
+	}
+	if liveAliasCount > 0 {
+		return ErrRealmNotEmpty
+	}
+
 	if _, err := tx.Exec(ctx,
 		`UPDATE realms SET deleted_at = now(), updated_at = now()
 		 WHERE id = $1 AND account_id = $2 AND deleted_at IS NULL`,

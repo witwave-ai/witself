@@ -85,13 +85,16 @@ the independent platform breakers described below apply instead.
 | Maximum raw email size | 0 (email disabled) | 10 MiB | 25 MiB | Contracted; 25 MiB default |
 | Retained attachment storage per account | 0 | 5 GiB | 100 GiB | Contracted; 100 GiB default |
 | Send agent email | No | No | Included | Included |
-| Agent email addressing | None | Realm ID on `witmail.ai` | Custom realm designator and custom domain | Custom realm designator and custom domain |
+| Permanent Realm ID email address | Reserved; delivery disabled | Active on `witmail.ai` | Active on `witmail.ai` | Active on `witmail.ai` |
+| Realm email aliases | 0 | 0 | 1 active alias per realm | Contracted; 3 active aliases per realm by default |
+| Custom inbound email domains | No | No | 1 per account | Contracted |
 
-The Witself-provided agent-email address format is
-`agent-name.realm-id@witmail.ai`. Team and Enterprise may replace the realm ID
-with their custom realm designator and use a configured custom domain:
-`agent-name.realm-designator@customer-domain`. A realm designator remains part
-of the address on custom domains.
+The permanent Witself-provided address format is
+`agent-name.realm-id@witmail.ai`. It is reserved on every plan but Personal
+cannot receive mail. Team and Enterprise can add, rather than replace it with,
+`agent-name.realm-email-alias@witmail.ai`. Custom domains remain a separate
+feature: `agent-name.realm-email-alias@customer-domain`. A realm label remains
+part of the address on custom domains.
 
 In this table, an included feature does not imply unbounded throughput or a
 per-message charge. Message rate values and agent-email safety breakers are
@@ -286,6 +289,7 @@ Enterprise `600 / 25,000 / 1,000`. Deploy that activation from a clean exact
 `v0.0.225` checkout and update both catalog surfaces:
 
 ```sh
+export EMAIL_DIRECTORY_KV_ID="${EMAIL_DIRECTORY_KV_ID:?set the dedicated 32-character agent-email KV namespace id}"
 npm run deploy:plans
 npm run deploy
 ```
@@ -364,6 +368,69 @@ the new catalog. After any marked snapshot is accepted, the cell, control
 plane, and edge Worker share a forward-only compatibility boundary. Rolling
 the edge Worker back to a pre-entitlement version would treat an intentional
 accept-and-drop verdict as a transient relay failure and cause sender retries.
+
+### Realm email aliases
+
+The canonical `agent-name.realm-id@witmail.ai` identity is permanent and is
+reserved even when inbound email is disabled. The resolved feature
+`agent_email_realm_alias` and limit
+`agent_email_realm_aliases_per_realm` govern only additional memorable labels.
+Personal and Professional have a zero alias limit; Team has one per realm;
+Enterprise defaults to three per realm and can be contracted or explicitly
+overridden. As with other numeric plan dimensions, an absent/null resolved
+limit means unlimited only when the feature itself is enabled; zero is a real
+cap. The feature does not bypass `agent_email_receive`: Personal keeps
+its canonical reservation but accepts no mail.
+
+The Founder account is an Enterprise-classified account with an audited
+explicit-unlimited override for this dimension. Set and verify that override
+before the catalog containing the finite Enterprise default is published:
+
+```sh
+witself-admin account limit-override set \
+  --account "$FOUNDER_ACCOUNT_ID" \
+  --dimension agent_email_realm_aliases_per_realm \
+  --unlimited \
+  --reason "Founder realm email aliases are unlimited"
+witself-admin account limit-override get \
+  --account "$FOUNDER_ACCOUNT_ID" \
+  --dimension agent_email_realm_aliases_per_realm
+```
+
+Activation is forward-only and deliberately split across two releases. The
+Phase-A release rolls schema 85 to every target cell and deploys the
+control-plane registry plus Email Worker with the alias feature and limit still
+absent from `web/plans/plans.json`,
+`CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED` absent, and
+`REALM_EMAIL_ALIAS_DELIVERY_ENABLED=false`. After that runtime accepts the new
+dimension, write and verify the Founder override and deploy the edge directory
+binding plus shared fallback credential. A later catalog-only Phase-B release
+adds the Personal 0, Professional 0, Team 1, and Enterprise 3 defaults and
+publishes the public plan catalog. This prevents the enabled plan lifecycle
+from applying Enterprise's finite default to the Founder account before the
+new override can exist. The activation gate remains
+off until full-coverage SMTP delivery, canonical-route backfill, and immediate
+route republishing across account moves have each passed a reviewed live
+canary. Publishing the plan entitlement by itself never enables alias requests
+or delivery; both exact-`true` gates are required, and the edge gate can
+immediately tempfail alias delivery fleet-wide without affecting canonical
+Realm ID addresses.
+
+The globally scarce alias namespace is authoritative in the control plane.
+Customers submit requests, while a Witself platform administrator reviews
+them and manages the versioned reserved-name registry. Customer account and
+realm roles cannot modify or override reserved entries. The initial protected
+set includes Witself and Witwave brands, mail/protocol terms, operational role
+addresses, and normalized confusable forms. Approved state is projected to the
+owning cell first and then to the edge directory. The edge KV is never used to
+decide ownership.
+
+An activated alias survives loss of entitlement as a reserved assignment: it
+receives during a 30-day downgrade grace period, then becomes suspended. A
+later upgrade reactivates it without reinstalling an integration. Activated,
+suspended, retired, and tombstoned aliases are never reassigned to another
+account or realm. Newly reserved words do not automatically revoke existing
+active aliases; they create an explicit platform-admin conflict for review.
 
 ### Realm and agent limits
 
