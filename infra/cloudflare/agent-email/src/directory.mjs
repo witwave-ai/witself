@@ -1,11 +1,15 @@
 export const CONFIG_KEY = "pilot:config:v1";
 export const RECIPIENT_PREFIX = "pilot:recipient:v1:";
 export const DIRECTORY_SCHEMA_VERSION = 1;
+export const REALM_ROUTE_PREFIX = "email:realm-route:v1:";
+export const REALM_ROUTE_SCHEMA_VERSION = 1;
 
 const DOMAIN_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const REALM_ID = /^realm_([a-z2-7]{16})$/;
+const REALM_ID_BODY = /^[a-z2-7]{16}$/;
 const AGENT_ID = /^agent_[a-z2-7]{16}$/;
 const AGENT_SEGMENT = /^[a-z0-9](?:[a-z0-9-]{0,45}[a-z0-9])?$/;
+const REALM_ALIAS = /^[a-z0-9](?:[a-z0-9-]{1,14}[a-z0-9])$/;
 const AUDIENCE = /^[a-z](?:[a-z0-9-]{0,126}[a-z0-9])?$/;
 const WORKER_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
 const RESERVED = new Set([
@@ -22,6 +26,178 @@ export function validateDomain(value) {
     throw new Error("domain must be canonical lowercase ASCII DNS");
   }
   return value;
+}
+
+function validateRealmLabel(value) {
+  if (
+    typeof value !== "string" ||
+    value !== value.trim().toLowerCase() ||
+    !REALM_ALIAS.test(value) ||
+    value.includes("--")
+  ) {
+    throw new Error("realm route label is invalid");
+  }
+  return value;
+}
+
+// parseRouteAddress validates the production one-dot address grammar without
+// deciding whether the realm label is canonical or an alias. That distinction
+// comes from the control-plane projection; the Worker never infers an alias
+// claim from syntax alone.
+export function parseRouteAddress(value, allowTag = false) {
+  if (typeof value !== "string" || value !== value.trim().toLowerCase() || value.length > 320) {
+    throw new Error("route address must be canonical lowercase ASCII");
+  }
+  const parts = value.split("@");
+  if (parts.length !== 2) throw new Error("route address is malformed");
+  let [local, domain] = parts;
+  domain = validateDomain(domain);
+  const originalLocalLength = local.length;
+  let tag = "";
+  const plus = local.indexOf("+");
+  if (plus >= 0) {
+    tag = local.slice(plus + 1);
+    local = local.slice(0, plus);
+    if (!allowTag || tag.length < 1 || tag.length > 64 || !/^[\x21-\x2a\x2c-\x3f\x41-\x7e]+$/.test(tag)) {
+      throw new Error("route subaddress tag is invalid");
+    }
+  }
+  if (originalLocalLength > 64 || local.length > 64) {
+    throw new Error("route address local part is too long");
+  }
+  const components = local.split(".");
+  if (components.length !== 2) throw new Error("route address local part is malformed");
+  const [agentSegment, realmLabel] = components;
+  if (!AGENT_SEGMENT.test(agentSegment) || agentSegment.length > 47 || RESERVED.has(agentSegment)) {
+    throw new Error("route agent segment is invalid");
+  }
+  validateRealmLabel(realmLabel);
+  return {
+    address: value,
+    baseAddress: `${local}@${domain}`,
+    domain,
+    agentSegment,
+    realmLabel,
+    tag,
+  };
+}
+
+// The domain and label grammars exclude ':', making this concatenation
+// injective. The record repeats both values and is checked on read, so a row
+// written under the wrong key can never route another realm by accident.
+export function realmRouteKey(domain, realmLabel) {
+  return `${REALM_ROUTE_PREFIX}${validateDomain(domain)}:${validateRealmLabel(realmLabel)}`;
+}
+
+function validateIngestURL(value) {
+  let ingestURL;
+  try {
+    ingestURL = new URL(String(value ?? ""));
+  } catch {
+    throw new Error("realm route ingestion URL is invalid");
+  }
+  if (
+    ingestURL.protocol !== "https:" ||
+    ingestURL.username || ingestURL.password || ingestURL.hash || ingestURL.search ||
+    !ingestURL.hostname || ingestURL.hostname === "localhost"
+  ) {
+    throw new Error("realm route ingestion URL must be a credential-free HTTPS URL");
+  }
+  return ingestURL.toString();
+}
+
+function exactKeys(value, expected) {
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
+}
+
+export function validateRealmRouteProjection(value, expectedDomain, expectedRealmLabel) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("realm route projection is invalid");
+  }
+  const state = String(value.state ?? "");
+  const commonKeys = [
+    "schema_version", "domain", "realm_label", "realm_id", "route_kind",
+    "state", "controller_revision", "updated_at", "cache_ttl_seconds",
+  ];
+  const expectedKeys = state === "applied"
+    ? [...commonKeys, "cell_audience", "ingest_url"]
+    : state === "suspended"
+    ? [...commonKeys, "suspension_disposition"]
+    : commonKeys;
+  if (!exactKeys(value, expectedKeys) || value.schema_version !== REALM_ROUTE_SCHEMA_VERSION) {
+    throw new Error("realm route projection schema is invalid");
+  }
+
+  const domain = validateDomain(String(value.domain ?? ""));
+  const realmLabel = validateRealmLabel(String(value.realm_label ?? ""));
+  if (domain !== expectedDomain || realmLabel !== expectedRealmLabel) {
+    throw new Error("realm route projection lookup binding is inconsistent");
+  }
+  const realmID = String(value.realm_id ?? "");
+  const realmMatch = REALM_ID.exec(realmID);
+  if (!realmMatch) throw new Error("realm route projection realm id is invalid");
+
+  const routeKind = String(value.route_kind ?? "");
+  if (
+    (routeKind === "canonical" && (realmLabel !== realmMatch[1] || !REALM_ID_BODY.test(realmLabel))) ||
+    (routeKind === "realm_alias" && (realmLabel === realmMatch[1] || REALM_ID_BODY.test(realmLabel))) ||
+    (routeKind !== "canonical" && routeKind !== "realm_alias")
+  ) {
+    throw new Error("realm route projection kind is inconsistent");
+  }
+  if (state !== "applied" && state !== "suspended" && state !== "retired") {
+    throw new Error("realm route projection state is invalid");
+  }
+  if (!Number.isSafeInteger(value.controller_revision) || value.controller_revision < 1) {
+    throw new Error("realm route projection controller revision is invalid");
+  }
+  if (!Number.isSafeInteger(value.cache_ttl_seconds) || value.cache_ttl_seconds < 1 || value.cache_ttl_seconds > 3_600) {
+    throw new Error("realm route projection cache ttl is invalid");
+  }
+  if (typeof value.updated_at !== "string" || !Number.isFinite(Date.parse(value.updated_at))) {
+    throw new Error("realm route projection updated time is invalid");
+  }
+
+  const route = {
+    schema_version: REALM_ROUTE_SCHEMA_VERSION,
+    domain,
+    realm_label: realmLabel,
+    realm_id: realmID,
+    route_kind: routeKind,
+    state,
+    controller_revision: value.controller_revision,
+    updated_at: value.updated_at,
+    cache_ttl_seconds: value.cache_ttl_seconds,
+  };
+  if (state === "suspended") {
+    const disposition = String(value.suspension_disposition ?? "");
+    if (disposition !== "retry" && disposition !== "inactive") {
+      throw new Error("realm route suspension disposition is invalid");
+    }
+    route.suspension_disposition = disposition;
+  }
+  if (state === "applied") {
+    const cellAudience = String(value.cell_audience ?? "");
+    if (!AUDIENCE.test(cellAudience) || cellAudience.length > 128) {
+      throw new Error("realm route projection cell audience is invalid");
+    }
+    route.cell_audience = cellAudience;
+    route.ingest_url = validateIngestURL(value.ingest_url);
+  }
+  return route;
+}
+
+export function realmRouteProjectionIsFresh(route, nowMS = Date.now()) {
+  if (!Number.isFinite(nowMS)) return false;
+  const updatedAt = Date.parse(route?.updated_at ?? "");
+  const ttl = Number(route?.cache_ttl_seconds);
+  if (!Number.isFinite(updatedAt) || !Number.isSafeInteger(ttl)) return false;
+  // Records beyond a bounded clock-skew allowance fail closed rather than
+  // extending their own lifetime.
+  if (updatedAt > nowMS + 300_000) return false;
+  return nowMS <= updatedAt + ttl * 1_000;
 }
 
 export function parsePilotAddress(value, expectedDomain, expectedRealmLabel, allowTag = false) {

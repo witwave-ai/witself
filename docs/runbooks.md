@@ -315,6 +315,42 @@ witself account status --account <name>          # says "archived — awaiting p
 curl https://self.witwave.ai/v1/directory/<account-id>
 ```
 
+## Back up both serving Civo databases before a migration
+
+Before running `scripts/roll-cell.sh` for a release that can advance the
+database schema, run the encrypted logical backup and disposable restore drill
+for **both** serving Civo cells. This is not the account-archive or periodic R2
+backup path.
+
+Use an explicit owner-only kubeconfig/context for each cell, an existing
+mode-0700 output directory outside the checkout, a separate age recipient and
+identity, and a preloaded pgvector image matching the live PostgreSQL major.
+Then follow the two
+exact invocations in
+[Civo PostgreSQL pre-migration backup](backup-and-recovery.md#civo-postgresql-pre-migration-backup).
+
+Do not change either GitOps values file until there are two current manifests,
+one for `civo-sandbox-use1-backup` and one for `civo-sandbox-usw2-dev`, with all
+of these properties:
+
+```sh
+jq -e --arg version "$RELEASE_VERSION" '
+  .schema == "witself.civo-pre-migration-backup.v1" and
+  .target_release == $version and
+  .restore_verification.status == "verified" and
+  .restore_verification.disposable_target_cleaned == true and
+  .restore_verification.pgvector_extension_matches_source == true and
+  .restore_verification.schema_version == .source.schema_version
+' /protected/path/<backup-id>/<backup-id>.json
+```
+
+From inside each artifact directory, verify its ciphertext checksum with
+`sha256sum -c <backup-id>.sha256` (or `shasum -a 256 -c` on a host without
+`sha256sum`). Record the exact two backup IDs and SHA-256 values in the private
+rollout record. The script never writes to the source database and never leaves
+a plaintext dump; a `pending` manifest or any nonzero exit blocks the rollout.
+Do not run a live restore as part of this procedure.
+
 ## Operate periodic account backups
 
 Periodic logical backups use the dedicated `witself-backups` R2 bucket and are

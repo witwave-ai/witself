@@ -267,6 +267,86 @@ traffic and never create an `email_received` usage charge. Every set/clear
 requires an audit reason and advances the normal desired/applied account-policy
 snapshot fence.
 
+### Realm email alias administration
+
+The implemented customer surface submits and lists requests for an additive,
+memorable realm label. It never replaces the permanent realm-ID-body address:
+
+```sh
+witself realm email-alias request \
+  --realm realm_aaaaaaaaaaaaaaaa --alias acme
+witself realm email-alias list \
+  --realm realm_aaaaaaaaaaaaaaaa --json
+witself realm email-alias list \
+  --realm realm_aaaaaaaaaaaaaaaa --cursor OPAQUE_NEXT_CURSOR --json
+```
+
+Only a Witself platform administrator can approve a request, mutate an active
+assignment, manage the global reserved-name registry, or read its value-free
+audit trail:
+
+```sh
+witself-admin email-alias requests list --status pending_review
+witself-admin email-alias requests list \
+  --status pending_review --cursor OPAQUE_NEXT_CURSOR --json
+witself-admin email-alias requests approve \
+  --request earq_aaaaaaaaaaaaaaaa --reason "namespace review passed"
+witself-admin email-alias requests reject \
+  --request earq_aaaaaaaaaaaaaaaa --reason "reserved or confusable"
+
+witself-admin email-alias assignments list --account ACCOUNT_ID
+witself-admin email-alias assignments list \
+  --account ACCOUNT_ID --cursor OPAQUE_NEXT_CURSOR --json
+witself-admin email-alias assignments suspend \
+  --alias acme --reason "safety hold"
+witself-admin email-alias assignments reactivate \
+  --alias acme --reason "hold cleared"
+witself-admin email-alias assignments retire \
+  --alias acme --reason "customer retired alias"
+witself-admin email-alias assignments abort-provisioning \
+  --alias witself --reason "terminally abandon stuck provisioning"
+witself-admin email-alias assignments assign-internal \
+  --account ACCOUNT_ID --realm realm_aaaaaaaaaaaaaaaa --alias witself \
+  --reason "platform-owned route"
+
+witself-admin email-alias reserved list
+witself-admin email-alias reserved list \
+  --category infrastructure --enabled true \
+  --cursor OPAQUE_NEXT_CURSOR --json
+witself-admin email-alias reserved add \
+  --name status --category operational_role \
+  --internal-assignable true --reason "protect service role"
+witself-admin email-alias reserved update \
+  --name status --internal-assignable false --reason "customer-blocked only"
+witself-admin email-alias reserved retire \
+  --name status --reason "reservation retired"
+witself-admin email-alias audit \
+  --action alias.approved --limit 100 \
+  --cursor OPAQUE_NEXT_CURSOR --json
+```
+
+Every administrator mutation requires `--reason`; a retry-safe idempotency key
+is generated when omitted and may be supplied explicitly. Reserved entries are
+customer-blocking by default. `--internal-assignable true` additionally allows
+the privileged internal-assignment path; it never makes the name available to
+customers. Alias-activating operations fail closed until the managed email edge
+is explicitly enabled after full-coverage SMTP routing is verified.
+`assignments abort-provisioning` is the retry-safe terminal recovery path for
+either customer approval or internal assignment provisioning. It
+terminally retires a stuck hidden provisioning intent; it cannot retire an
+ordinary active customer or internal assignment and remains available while
+activation is off.
+
+Every alias list command reads exactly one bounded control-plane page; it does
+not silently scan the global registry. JSON output preserves `truncated` and a
+non-empty `next_cursor`. Text output prints `next cursor: ...` to stderr. Pass
+that opaque value back with the same filters through `--cursor` until no next
+cursor is returned. Request, assignment, reserved-name, and audit filters are
+applied inside each bounded storage page, so a filtered page can contain zero
+matches and still have a next cursor. For audit, `--limit` is the number of
+underlying newest-first rows scanned on that page (1–500), not a promise that
+an action-filtered page contains that many events.
+
 ## Exit Codes
 
 | Code | Meaning |

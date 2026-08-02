@@ -35,6 +35,13 @@ per-recipient delivery snapshots. Direct message actions include `:claim`,
 message-backed open jobs, client-ranked selection, and separate exact claim
 fences. This is not a deployment or release statement.
 
+Realm-email-alias amendment (implemented in the current checkout): customer
+requests and the platform-admin global namespace live in the control plane;
+cells hold fenced routing projections and immutable delivery provenance. The
+edge KV directory is a rebuildable projection, not claim authority. Activation
+is separately default-off until a full-coverage SMTP route reaches the Email
+Worker.
+
 ## Implemented sealed-plane routes
 
 ```text
@@ -170,6 +177,33 @@ PATCH /v1/realms/{realm_id}/email-receive
 POST /v1/email/retry-canary:arm
 POST /v1/email/retry-canary:status
 
+# Control-plane customer request surface; account-operator bearer token.
+GET  /v1/accounts/{account_id}/realms/{realm_id}/email-alias-requests
+POST /v1/accounts/{account_id}/realms/{realm_id}/email-alias-requests
+
+# Control-plane platform-administrator namespace surface.
+GET  /v1/admin/realm-email-alias-requests
+POST /v1/admin/realm-email-alias-requests/{request_id}:approve
+POST /v1/admin/realm-email-alias-requests/{request_id}:reject
+GET  /v1/admin/realm-email-aliases
+POST /v1/admin/realm-email-aliases/{alias}:suspend
+POST /v1/admin/realm-email-aliases/{alias}:reactivate
+POST /v1/admin/realm-email-aliases/{alias}:retire
+POST /v1/admin/realm-email-aliases/{alias}:abort-provisioning
+POST /v1/admin/realm-email-aliases:assign-internal
+GET  /v1/admin/realm-email-reserved-names
+POST /v1/admin/realm-email-reserved-names
+GET  /v1/admin/realm-email-reserved-names/{name}
+PATCH /v1/admin/realm-email-reserved-names/{name}
+DELETE /v1/admin/realm-email-reserved-names/{name}
+GET  /v1/admin/realm-email-alias-audit
+
+# Edge-to-control-plane authenticated fallback; not a customer route.
+GET  /v1/email/realm-routes/{domain}/{realm_label}
+
+# Control-plane-to-cell preflight; cell provision token, not a customer route.
+GET  /v1/accounts/{account_id}:email-realm-alias-target?realm_id={realm_id}
+
 GET  /v1/message-requests
 POST /v1/message-requests
 GET  /v1/message-requests/{request_id}
@@ -183,6 +217,17 @@ POST /v1/message-requests/{request_id}:release
 POST /v1/message-requests/{request_id}:complete
 POST /v1/tokens/{token_id}:rotate
 ```
+
+All five realm-email-alias list surfaces use bounded opaque-cursor pagination.
+The customer request route accepts `cursor`. Administrator request and
+assignment routes accept `status`, `account_id`, `realm_id`, and `cursor`;
+reserved-name list accepts `category`, `enabled=true|false`, and `cursor`; the
+audit route accepts `action`, `limit=1..500`, and `cursor`. Each response
+returns `truncated` plus `next_cursor` (a string when more storage rows remain,
+otherwise `null`). Callers must reuse the same filters and follow every
+non-null cursor, including after an empty filtered result. Filtering is bounded
+to the current storage page; the server does not perform an unbounded hidden
+scan to fill a page with matches.
 
 Sensitive/action routes must use `POST`, never `GET`.
 
@@ -425,6 +470,11 @@ POST /v1/email/retry-canary:status
 
 # Cell-local signed relay endpoint; no agent/operator bearer token.
 POST /v1/internal/agent-email:ingest
+
+# Control-plane-to-cell system projection; provision-token authenticated.
+POST /v1/accounts/{account_id}:email-realm-alias
+GET  /v1/accounts/{account_id}:email-realm-alias?claim_id={claim_id}
+GET  /v1/accounts/{account_id}:email-realm-aliases
 
 GET  /v1/message-requests
 POST /v1/message-requests
@@ -779,6 +829,39 @@ audit events; read-only recall does neither:
   owning cell enforces any lower resolved account limit and returns the exact
   content-free `over_size` verdict. Successful `accepted` is emitted only after
   the owning cell commit. It is not a public bearer-token route.
+- Realm alias claims are globally authoritative in one control-plane Durable
+  Object, while account, realm, and skeleton mutation lanes are independently
+  serialized so unrelated work does not share a global head-of-line lock.
+  Customer creation rechecks the account operator against its live cell
+  and requires both `agent_email_realm_alias` and a positive or explicitly
+  unlimited `agent_email_realm_aliases_per_realm` limit. Platform-admin
+  approval rechecks the current plan, applies and reads back the exact cell projection, then
+  publishes isolated edge-directory rows before exposing the assignment as
+  active. Every mutation is idempotent and audited.
+- The cell projection endpoint accepts only the account cell's provision token
+  and an exact `era_` claim fence, domain, label, state, and monotonically
+  increasing controller revision. Equal replay is idempotent; stale or
+  conflicting projections fail closed. Received messages retain
+  `canonical` versus `realm_alias` route provenance plus the alias claim id.
+- The cell's provision-token
+  `GET /v1/accounts/{account_id}:email-realm-alias-target?realm_id={realm_id}`
+  preflight proves only that the exact account owns that live (not soft-deleted)
+  realm. Its response is content-minimal and exposes no realm name or account
+  metadata.
+- `GET /v1/email/realm-routes/{domain}/{realm_label}` requires the dedicated
+  edge token and returns only the strict routing projection. A cache miss queues
+  a bounded durable refresh; the response path does no cell or KV repair I/O.
+  It never writes the general account/cell directory namespace.
+- `CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED` is an exact-`true`, default-off
+  operational gate. While disabled, create, approve, internal assignment, and
+  reactivation return conflict; listing, audit, reservation management,
+  suspension, retirement, and terminal customer/internal-provisioning abort remain
+  usable. The gate must stay off until the
+  managed domain's catch-all or equivalent full-coverage route is verified.
+- `REALM_EMAIL_ALIAS_DELIVERY_ENABLED` is a second exact-`true`, default-off
+  Email Worker gate checked on every `realm_alias` delivery. Any other value
+  tempfails the alias before content read or cell relay. Canonical Realm ID and
+  legacy literal-pilot routes are unaffected.
 - `POST /v1/message-requests` requires an agent token and `Idempotency-Key` and
   creates one realm `kind=open_request` message plus an immutable candidate
   snapshot in the same transaction. `selection_policy` is omitted or

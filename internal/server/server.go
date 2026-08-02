@@ -287,6 +287,28 @@ type Config struct {
 	// protocol. It proves account existence and returns the cell's exact
 	// persisted revision/hash acknowledgement.
 	GetAccountPlan func(ctx context.Context, accountID string) (PlanSnapshotRecord, error)
+	// ApplyAgentEmailRealmAlias / GetAgentEmailRealmAlias are the
+	// provision-token-authorized cell side of the globally authoritative alias
+	// projection protocol. The control plane owns availability and reserved-name
+	// decisions; the cell enforces immutable claim/label binding, revision
+	// fencing, terminal retirement, and delivery routing.
+	ApplyAgentEmailRealmAlias func(
+		ctx context.Context,
+		accountID string,
+		in AgentEmailRealmAliasApplyRequest,
+	) (AgentEmailRealmAlias, error)
+	GetAgentEmailRealmAlias func(
+		ctx context.Context,
+		accountID, claimID string,
+	) (AgentEmailRealmAlias, error)
+	GetAgentEmailRealmAliasTarget func(
+		ctx context.Context,
+		accountID, realmID string,
+	) (AgentEmailRealmAliasTarget, error)
+	ListAgentEmailRealmAliases func(
+		ctx context.Context,
+		accountID string,
+	) ([]AgentEmailRealmAlias, error)
 
 	// PlanInfo, when set, surfaces the deployment account's applied plan in
 	// GET /v1/capabilities: the plan label on the account block, the limits
@@ -1849,9 +1871,13 @@ func apiMux(cfg Config) http.Handler {
 				),
 			)
 		}
-		if cfg.GetPlacementPolicySystem != nil || cfg.GetAccountPlan != nil {
+		if cfg.GetPlacementPolicySystem != nil || cfg.GetAccountPlan != nil ||
+			cfg.GetAgentEmailRealmAlias != nil || cfg.GetAgentEmailRealmAliasTarget != nil ||
+			cfg.ListAgentEmailRealmAliases != nil {
 			mux.HandleFunc("GET /v1/accounts/", accountSystemGetHandler(
-				cfg.ProvisionToken, cfg.GetPlacementPolicySystem, cfg.GetAccountPlan))
+				cfg.ProvisionToken, cfg.GetPlacementPolicySystem, cfg.GetAccountPlan,
+				cfg.GetAgentEmailRealmAlias, cfg.GetAgentEmailRealmAliasTarget,
+				cfg.ListAgentEmailRealmAliases))
 		}
 		if cfg.SetPlacementPolicySystem != nil {
 			mux.HandleFunc("PATCH /v1/accounts/", accountPlacementPolicySystemSetHandler(cfg.ProvisionToken, cfg.SetPlacementPolicySystem))
@@ -1867,7 +1893,7 @@ func apiMux(cfg Config) http.Handler {
 			cfg.StreamAccountExport != nil ||
 			cfg.ImportAccountArchive != nil ||
 			cfg.ResumeAccountSystem != nil || cfg.LogAccountEvent != nil ||
-			cfg.SetAccountPlan != nil)
+			cfg.SetAccountPlan != nil || cfg.ApplyAgentEmailRealmAlias != nil)
 	hasAccountBackup := cfg.BackupToken != "" &&
 		(cfg.StreamAccountBackup != nil ||
 			(cfg.BackupValidationEnabled &&
@@ -3493,6 +3519,9 @@ func accountSystemGetHandler(
 	provisionToken string,
 	getPlacement func(ctx context.Context, accountID string) (placement.Policy, error),
 	getPlan func(ctx context.Context, accountID string) (PlanSnapshotRecord, error),
+	getRealmAlias func(ctx context.Context, accountID, claimID string) (AgentEmailRealmAlias, error),
+	getRealmAliasTarget func(ctx context.Context, accountID, realmID string) (AgentEmailRealmAliasTarget, error),
+	listRealmAliases func(ctx context.Context, accountID string) ([]AgentEmailRealmAlias, error),
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tok, ok := bearerToken(r)
@@ -3512,6 +3541,74 @@ func accountSystemGetHandler(
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(snapshot)
+			return
+		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "email-realm-alias"); ok && getRealmAlias != nil {
+			claimID := strings.TrimSpace(r.URL.Query().Get("claim_id"))
+			if claimID == "" {
+				writeJSONError(w, http.StatusBadRequest, "claim_id is required")
+				return
+			}
+			alias, err := getRealmAlias(r.Context(), accountID, claimID)
+			switch {
+			case errors.Is(err, ErrBadInput):
+				writeJSONError(w, http.StatusBadRequest, "invalid realm alias lookup")
+				return
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "realm alias not found")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not read realm alias")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(alias)
+			return
+		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "email-realm-alias-target"); ok && getRealmAliasTarget != nil {
+			realmID := strings.TrimSpace(r.URL.Query().Get("realm_id"))
+			if realmID == "" {
+				writeJSONError(w, http.StatusBadRequest, "realm_id is required")
+				return
+			}
+			target, err := getRealmAliasTarget(r.Context(), accountID, realmID)
+			switch {
+			case errors.Is(err, ErrBadInput):
+				writeJSONError(w, http.StatusBadRequest, "invalid realm alias target")
+				return
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "realm alias target not found")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not read realm alias target")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(target)
+			return
+		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "email-realm-aliases"); ok && listRealmAliases != nil {
+			aliases, err := listRealmAliases(r.Context(), accountID)
+			switch {
+			case errors.Is(err, ErrBadInput):
+				writeJSONError(w, http.StatusBadRequest, "invalid realm alias account")
+				return
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "account not found")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not list realm aliases")
+				return
+			}
+			if aliases == nil {
+				aliases = []AgentEmailRealmAlias{}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version": "witself.v0",
+				"account_id":     accountID,
+				"aliases":        aliases,
+			})
 			return
 		}
 		accountID, ok := pathActionID(
@@ -3758,6 +3855,38 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 				"schema_version": "witself.v0",
 				"account":        acct,
 			})
+			return
+		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "email-realm-alias"); ok && cfg.ApplyAgentEmailRealmAlias != nil {
+			var req AgentEmailRealmAliasApplyRequest
+			decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10))
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&req); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+				return
+			}
+			var extra any
+			if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+				writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+				return
+			}
+			alias, err := cfg.ApplyAgentEmailRealmAlias(r.Context(), accountID, req)
+			switch {
+			case errors.Is(err, ErrBadInput):
+				writeJSONError(w, http.StatusBadRequest, "invalid realm alias projection")
+				return
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "realm alias target not found")
+				return
+			case errors.Is(err, ErrConflict):
+				writeJSONError(w, http.StatusConflict, "stale or conflicting realm alias projection")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not apply realm alias")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(alias)
 			return
 		}
 		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "plan"); ok && cfg.SetAccountPlan != nil {

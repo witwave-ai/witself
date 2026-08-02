@@ -63,6 +63,8 @@ func run(args []string) int {
 		return ticketCmd(args[1:])
 	case "account":
 		return accountCmd(args[1:])
+	case "email-alias":
+		return emailAliasAdminCmd(args[1:])
 	case "cells":
 		return cellsCmd(args[1:])
 	case "events":
@@ -88,6 +90,8 @@ func usage(w io.Writer) {
 	usageLine(w, "                                (list|watch|show|reply|state|resolve|close|states)")
 	usageLine(w, "  witself-admin account ...   Read/set per-account fleet settings")
 	usageLine(w, "                                (support-policy|transcript-retention|messaging|message-retention|email-receive|email-retention|plan-override|limit-override)")
+	usageLine(w, "  witself-admin email-alias ...  Review aliases and manage protected names")
+	usageLine(w, "                                (requests|assignments|reserved)")
 	usageLine(w, "  witself-admin cells ...     Fleet cell registry with account counts (list)")
 	usageLine(w, "  witself-admin events ...    Fleet-wide audit-event tail (list|watch)")
 	usageLine(w, "  witself-admin placement ... Rescue archived accounts blocked by hard pins")

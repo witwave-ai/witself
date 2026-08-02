@@ -65,6 +65,7 @@ func TestVerbRegistryCoverage(t *testing.T) {
 		VerbAgentEmailProcessingClaimed, VerbAgentEmailProcessingRenewed,
 		VerbAgentEmailProcessingReleased, VerbAgentEmailProcessingCompleted,
 		VerbAgentEmailAgentReceiveChanged, VerbAgentEmailRealmReceiveChanged,
+		VerbAgentEmailRealmAliasProjected,
 		VerbMessageRequestOpened, VerbMessageRequestOffered,
 		VerbMessageRequestDeclined, VerbMessageRequestSelected,
 		VerbMessageRequestClaimed, VerbMessageRequestRenewed,

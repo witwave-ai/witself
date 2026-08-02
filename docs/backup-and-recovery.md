@@ -658,6 +658,132 @@ disposable database or namespace under an operator-reviewed recovery procedure.
 Destroy that disposable target after verification; do not turn the routine
 drill endpoint into an account-import escape hatch.
 
+### Realm email alias authority recovery
+
+Realm email alias claims, permanent tombstones, reserved-name versions,
+pending reviews, idempotency fences, lifecycle/plan intents, and their audit
+sequence live in the global `RealmEmailAliasRegistry` Durable Object. Cell
+archives preserve only the applied account projection; they cannot safely
+reconstruct global uniqueness, reservations, or claim history.
+
+The registry uses a SQLite-backed Durable Object, so Cloudflare provides a
+[30-day point-in-time recovery API](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/#pitr-point-in-time-recovery-api)
+for both its SQL and key/value state. That is
+a useful first-line rollback facility for a dark deployment, but a raw rollback
+can erase tombstones or regress controller revisions created after the selected
+bookmark. It is therefore not the production recovery contract.
+
+Before either realm-alias activation gate may turn on, implement and drill a
+portable append-only authority journal. Each logical mutation must durably
+append a create-only, hash-chained after-image to a dedicated protected R2
+binding before any external projection becomes successful. Recovery imports an
+unbroken journal into a new empty registry while both gates remain off, rejects
+alias/skeleton/claim collisions and tombstone resurrection, rebuilds every
+derived index, replays pending intents, and compares a complete state digest
+before a separately reviewed binding cutover. The restore path must require
+platform-admin authority plus a distinct recovery credential, reason,
+idempotency key, and expected journal head. Never merge a recovery stream into
+the live authority object.
+
+This journal and a successful restore drill are hard activation blockers, but
+not blockers for a default-off release that cannot create claims or deliver
+aliases.
+
+### Civo PostgreSQL pre-migration backup
+
+The two serving Civo development cells use standalone PostgreSQL on an
+in-cluster persistent volume. Before changing either cell's GitOps image or
+chart to a release that may advance the schema, create a separate logical
+backup with [`scripts/civo-pre-migration-backup.sh`](../scripts/civo-pre-migration-backup.sh).
+This is a hard gate for both `civo-sandbox-use1-backup` and
+`civo-sandbox-usw2-dev`; an account-level R2 snapshot or the existence of the
+persistent volume does not satisfy it.
+
+The script is intentionally narrower than a general database administration
+tool:
+
+- it accepts only the two serving Civo cell names and an explicit kubeconfig
+  plus context, then verifies that context against the cell label on the Argo
+  CD PostgreSQL Application;
+- it selects exactly one Ready PostgreSQL primary and runs only read-only
+  `psql` probes and `pg_dump --format=custom --serializable-deferrable`, with
+  `default_transaction_read_only=on`; it does not create, alter, or delete a
+  database or Kubernetes resource in the source cell;
+- it reads the database password only inside the PostgreSQL container from the
+  chart's mounted password file. The password is never copied to the operator
+  host, placed in an argument, printed, or written to the artifact;
+- dump bytes stream directly through `age`. No plaintext dump is written to
+  disk. The artifact directory, encrypted dump, checksum, and manifest are
+  owner-only, and the script refuses a source-checkout destination, a symlink,
+  or a group/world-accessible destination or key file;
+- it calculates the SHA-256 of the completed ciphertext and writes an exact
+  backup identifier, checksum, source schema version, target release, script
+  checksum, and restore-image ID to a JSON manifest; and
+- it decrypts the artifact directly into `pg_restore` in a network-isolated
+  local PostgreSQL container whose major version exactly matches the source
+  and whose data directory is a tmpfs. The restore image must make pgvector
+  available, while the restored database's installed-extension state must
+  exactly match the source. The restore must match the source schema version
+  and have no invalid indexes or unvalidated constraints.
+  The exact labeled container is removed before the manifest changes from
+  `pending` to `verified`.
+
+The restore image must already be present locally. The script resolves the
+supplied reference to its immutable Docker image ID and runs with
+`--pull=never`; image acquisition and review are a separate operator step.
+Provide a reviewed pgvector image for the source PostgreSQL major, preferably
+by digest (for example, `pgvector/pgvector:pg18` for a PostgreSQL 18 source).
+The script discovers the live source major and verifies that the local image
+matches it, and verifies `vector.control`, before dumping. It then verifies the
+extension is available and that its installed state in the disposable database
+matches the live source. The age
+identity must be held separately from the encrypted backup. A public recipient
+file containing a private key is rejected.
+
+Run the procedure once per cell immediately before changing GitOps. Store the
+output outside the repository on a protected backup volume:
+
+```sh
+VERSION="${RELEASE_VERSION:?set release version without the v prefix}"
+BACKUP_ROOT="${WITSELF_PRE_MIGRATION_BACKUP_DIR:?set an existing mode-0700 directory outside the checkout}"
+AGE_RECIPIENTS="${WITSELF_BACKUP_AGE_RECIPIENTS:?set an owner-only public-recipient file}"
+AGE_IDENTITY="${WITSELF_BACKUP_AGE_IDENTITY:?set the matching owner-only age identity file}"
+RESTORE_IMAGE="${WITSELF_BACKUP_RESTORE_IMAGE:?set a preloaded same-major PostgreSQL image or digest}"
+
+scripts/civo-pre-migration-backup.sh \
+  --cell civo-sandbox-use1-backup \
+  --kubeconfig "${WITSELF_CIVO_USE1_KUBECONFIG:?set the owner-only kubeconfig}" \
+  --context "${WITSELF_CIVO_USE1_CONTEXT:?set the exact context}" \
+  --release "$VERSION" \
+  --output-dir "$BACKUP_ROOT" \
+  --age-recipient-file "$AGE_RECIPIENTS" \
+  --age-identity-file "$AGE_IDENTITY" \
+  --restore-image "$RESTORE_IMAGE"
+
+scripts/civo-pre-migration-backup.sh \
+  --cell civo-sandbox-usw2-dev \
+  --kubeconfig "${WITSELF_CIVO_USW2_KUBECONFIG:?set the owner-only kubeconfig}" \
+  --context "${WITSELF_CIVO_USW2_CONTEXT:?set the exact context}" \
+  --release "$VERSION" \
+  --output-dir "$BACKUP_ROOT" \
+  --age-recipient-file "$AGE_RECIPIENTS" \
+  --age-identity-file "$AGE_IDENTITY" \
+  --restore-image "$RESTORE_IMAGE"
+```
+
+For each cell, preserve the `.dump.age`, `.sha256`, and `.json` files together
+and record the manifest's exact `backup_id` and `ciphertext_sha256` in the
+private rollout record. The gate passes only when both manifests report
+`restore_verification.status = "verified"` for the intended release and each
+sidecar checksum still matches. A failed drill deliberately leaves the
+encrypted artifact marked `pending`; do not roll the cell from that artifact.
+
+The script does not restore into the live cell. Any destructive recovery from
+one of these artifacts still requires explicit approval, a coordinated write
+freeze, a separately reviewed restore plan, and a new destination. After the
+rollout and its rollback window, retain or expire the encrypted bundle under
+the reviewed backup-retention policy; never commit it to Git.
+
 ### GCP Cloud SQL pre-migration backup
 
 Before a managed GCP rollout can start a binary that may advance the database

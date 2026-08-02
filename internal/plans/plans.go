@@ -34,6 +34,12 @@ const (
 	// AgentEmailReceiveFeature enables inbound agent email. The integration is
 	// installed once; cells enforce the account's resolved feature snapshot.
 	AgentEmailReceiveFeature = "agent_email_receive"
+	// AgentEmailRealmAliasFeature allows a realm to activate memorable labels
+	// in addition to its permanent ID-body email address. The global claim and
+	// reserved-name policy, downgrade grace, and count enforcement remain
+	// control-plane concerns. Cells trust the provision-token projection and
+	// enforce its state plus the separate inbound-email entitlement.
+	AgentEmailRealmAliasFeature = "agent_email_realm_alias"
 
 	// RealmLimit caps live realms account-wide.
 	RealmLimit = "realms"
@@ -68,6 +74,12 @@ const (
 	// it does not model separately stored attachment blobs. A missing key
 	// means unlimited.
 	AgentEmailAttachmentStorageBytesLimit = "agent_email_attachment_storage_bytes"
+	// AgentEmailRealmAliasesPerRealmLimit caps active memorable email labels in
+	// each realm at the global control-plane authority. Zero prevents new alias
+	// activation while preserving canonical ID-body address reservations and
+	// alias tombstones; existing aliases follow the control-plane downgrade
+	// grace. A missing key means unlimited, subject to the feature entitlement.
+	AgentEmailRealmAliasesPerRealmLimit = "agent_email_realm_aliases_per_realm"
 	// MessageSentPerAgentMinuteLimit caps messages accepted from each sending
 	// agent under a rolling one-minute rate budget. A missing key means no
 	// commercial plan cap, but the service's defensive platform maximum still
@@ -320,6 +332,7 @@ func ValidateLimits(limits map[string]int64) error {
 		case RealmLimit, AgentLimit, AgentPerRealmLimit, StoredSecretLimit,
 			StoredMemoryLimit, StoredFactLimit, AgentEmailMaxRawBytesLimit,
 			AgentEmailAttachmentStorageBytesLimit,
+			AgentEmailRealmAliasesPerRealmLimit,
 			MessageSentPerAgentMinuteLimit,
 			MessageDeliveredPerRealmMinuteLimit,
 			MessageDeliveredPerRecipientMinuteLimit,

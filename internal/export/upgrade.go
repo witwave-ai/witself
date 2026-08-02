@@ -60,6 +60,7 @@ var upgraders = map[int]Upgrader{
 	70: preserveSchema70Rows,
 	75: preserveSchema75Rows,
 	78: addAgentEmailAttachmentStorageDefaults,
+	84: addAgentEmailRealmAliasDefaults,
 }
 
 const (
@@ -155,6 +156,19 @@ func addAgentEmailAttachmentStorageDefaults(table string, row map[string]any) (m
 	row["attachment_storage_bytes"] = storageBytes
 	row["retained_attachment_storage_bytes"] = storageBytes
 	row["payload_retention_state"] = "retained"
+	return row, nil
+}
+
+// addAgentEmailRealmAliasDefaults lifts pre-alias email messages into the
+// explicit recipient-route representation. Before schema 85 every accepted
+// delivery necessarily used the canonical realm-id-body address, so this
+// transformation is exact rather than inferred.
+func addAgentEmailRealmAliasDefaults(table string, row map[string]any) (map[string]any, error) {
+	if table != "agent_email_messages" {
+		return row, nil
+	}
+	row["recipient_route_kind"] = "canonical"
+	row["recipient_realm_alias_claim_id"] = nil
 	return row, nil
 }
 

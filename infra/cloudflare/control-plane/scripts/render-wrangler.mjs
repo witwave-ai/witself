@@ -79,12 +79,27 @@ function validateMetadata(metadata) {
 const args = parseArgs(process.argv.slice(2));
 const metadata = releaseMetadata(args);
 validateMetadata(metadata);
+const emailDirectoryID = String(process.env.EMAIL_DIRECTORY_KV_ID ?? "");
+if (!/^[0-9a-f]{32}$/.test(emailDirectoryID)) {
+  throw new Error(
+    "EMAIL_DIRECTORY_KV_ID must be the dedicated 32-character lowercase hex agent-email namespace id",
+  );
+}
 
 const template = await readFile(join(root, "wrangler.template.jsonc"), "utf8");
+const controlPlaneDirectory =
+  /"binding"\s*:\s*"DIRECTORY"[\s\S]{0,200}?"id"\s*:\s*"([0-9a-f]{32})"/
+    .exec(template);
+if (!controlPlaneDirectory || emailDirectoryID === controlPlaneDirectory[1]) {
+  throw new Error(
+    "EMAIL_DIRECTORY_KV_ID must not reuse the control-plane DIRECTORY namespace",
+  );
+}
 const replacements = new Map([
   ["__WITSELF_VERSION__", metadata.version],
   ["__WITSELF_COMMIT__", metadata.commit],
   ["__WITSELF_DATE__", metadata.date],
+  ["__EMAIL_DIRECTORY_KV_ID__", emailDirectoryID],
 ]);
 let rendered = template;
 for (const [placeholder, value] of replacements) {
@@ -93,8 +108,8 @@ for (const [placeholder, value] of replacements) {
   }
   rendered = rendered.replace(placeholder, value);
 }
-if (/__WITSELF_[A-Z_]+__/.test(rendered)) {
-  throw new Error("wrangler template contains an unresolved build placeholder");
+if (/__[A-Z][A-Z_]+__/.test(rendered)) {
+  throw new Error("wrangler template contains an unresolved placeholder");
 }
 
 const output = args.output == null

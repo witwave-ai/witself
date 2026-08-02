@@ -1,25 +1,48 @@
-# Cloudflare receive-only agent-email pilot
+# Cloudflare receive-only agent-email edge
 
 This directory contains the isolated Cloudflare Email Worker and route manager
-for the capability-limited Witself pilot. It is not the Witself control-plane
-Worker. It has no HTTP route, no control-plane Container binding, and no access
-to the control-plane `DIRECTORY` KV namespace.
+for Witself inbound agent email. It is not the Witself control-plane Worker. It
+has no HTTP route or control-plane Container binding, and it has no access to
+the control-plane `DIRECTORY` KV namespace. The Worker and control plane instead
+share only the dedicated email-route KV namespace.
 
-The pilot accepts one realm and exactly 5–10 literal recipient addresses. It
-rejects messages larger than the 25 MiB transport ceiling, signs the SMTP
-envelope plus raw-message digest with Ed25519, and relays the raw message to the
-enrolled cell. The cell may return an exact plan-aware `over_size` verdict for
-a lower account limit; the Worker maps it to a sanitized permanent SMTP 552
-rejection. An exact HTTP 429 `rate_limited` verdict instead becomes a sanitized
-temporary provider result and a value-free `tempfail_rate_limited` metric. Only
-a 2xx response containing exactly `{"verdict":"accepted"}` or the deliberate
-accept-and-drop `{"verdict":"feature_disabled"}` counts as SMTP success. An
-exact permanent cell verdict is rejected once without retry.
+The original one-realm, 5–10-recipient literal pilot remains supported. The
+runtime can also resolve a canonical realm label or managed realm alias through
+`email:realm-route:v1:<domain>:<realm-label>`. Both labels select the same realm
+and cell; the cell remains authoritative for the agent segment, alias state,
+and account policy. A malformed, suspended, retired, stale, or conflicting
+projection fails closed. Stale records are refreshed through a bounded,
+authenticated control-plane lookup and are never used when that lookup fails
+or returns an older controller revision. KV is a route cache, never alias-claim
+authority.
+
+Managed alias delivery also requires
+`REALM_EMAIL_ALIAS_DELIVERY_ENABLED=true`. The value is exact and defaults to
+`false`; any other value tempfails `realm_alias` traffic at the edge before a
+message body is read or a cell is contacted. Canonical Realm ID and legacy
+literal-pilot delivery are intentionally unaffected.
+
+The Worker rejects messages larger than the 25 MiB transport ceiling, signs
+the SMTP envelope plus raw-message digest with Ed25519, and relays the raw
+message to the selected cell. The cell may return an exact plan-aware
+`over_size` verdict for a lower account limit; the Worker maps it to a sanitized
+permanent SMTP 552 rejection. An exact HTTP 429 `rate_limited` verdict instead
+becomes a sanitized temporary provider result and a value-free
+`tempfail_rate_limited` metric. Only a 2xx response containing exactly
+`{"verdict":"accepted"}` or the deliberate accept-and-drop
+`{"verdict":"feature_disabled"}` counts as SMTP success. This preserves the
+Personal-plan discard behavior at the signed cell policy boundary. An exact
+permanent cell verdict is rejected once without retry.
 
 ## Safety boundary
 
 - Keep the existing Email Routing catch-all unchanged.
 - Use only the dedicated `witself-agent-email-pilot-directory` KV namespace.
+- Treat `CONTROL_PLANE_URL` as public configuration and
+  `CONTROL_PLANE_EDGE_TOKEN` as a shared Worker secret. The matching
+  control-plane route must validate that bearer token before consulting its
+  durable route authority. Never put the token in Wrangler variables, KV,
+  manifests, Git, logs, or generated configuration.
 - Keep `global_fetch_strictly_public` enabled so the Worker reaches the
   DNS-only cell ingress through its public hostname even though both hostnames
   are in the `witwave.ai` zone. Signed headers are never followed across a
@@ -37,6 +60,13 @@ exact permanent cell verdict is rejected once without retry.
 - A failed operation attempts to disable the pilot gate and its managed rules;
   inspect Cloudflare state before retrying any reported incomplete rollback.
 
+The route-manager scripts in this directory still create and manage only the
+reviewed literal pilot rules. They do not replace, disable, or redirect the
+existing catch-all, and this change does not claim that full managed-domain
+Email Routing has been promoted. Dynamic canonical and alias addresses receive
+traffic only after a separate reviewed routing change directs that address
+surface to this Worker.
+
 The route manager reads and fingerprints the catch-all before and after every
 operation. Its API client contains no catch-all update operation. It also
 refuses to replace an unmanaged rule for an enrolled literal address.
@@ -52,9 +82,14 @@ npm run config
 npx wrangler deploy --dry-run --config wrangler.generated.jsonc
 ```
 
-`npm run config` requires `EMAIL_DIRECTORY_KV_ID` and `RELAY_KEY_ID`. It refuses
-the KV ID bound to the adjacent control-plane Worker. The generated file is
-local operator state and must not be committed.
+`npm run config` requires `EMAIL_DIRECTORY_KV_ID`, `RELAY_KEY_ID`, and the
+credential-free HTTPS origin `CONTROL_PLANE_URL`. Set
+`REALM_EMAIL_ALIAS_DELIVERY_ENABLED=true` only for a reviewed alias activation;
+it defaults to `false` and rejects any value other than literal `true` or
+`false`. The renderer refuses the KV ID bound to
+the adjacent control-plane Worker. The generated file is local operator state
+and must not be committed. `CONTROL_PLANE_EDGE_TOKEN` is deliberately absent
+from both the template and generated file.
 
 ## Staged managed rollout
 
@@ -66,6 +101,7 @@ the operator shell without printing their values:
 - `CLOUDFLARE_ZONE_ID`
 - `EMAIL_DIRECTORY_KV_ID`
 - `RELAY_KEY_ID`
+- `CONTROL_PLANE_URL`
 
 The token needs Workers deployment/secret access, Account Analytics Read,
 Zone Settings Read, Email Routing Rules Write, and KV read/write for the
@@ -81,14 +117,17 @@ mutation.
    ```
 
 2. Render and deploy the unreachable email-only Worker first, then load the
-   operator-provisioned PKCS#8 Ed25519 private key through Wrangler's secret
-   prompt. The Worker has no HTTP or email route at this stage; putting the
-   secret creates and deploys the secret-bearing version:
+   operator-provisioned PKCS#8 Ed25519 private key and the shared control-plane
+   edge token through separate Wrangler secret prompts. Configure the same
+   token value on the control-plane route. The Worker has no HTTP or email route
+   at this stage; putting each secret creates and deploys a secret-bearing
+   version:
 
    ```sh
    npm run config
    npm run deploy
    npm run secret:put
+   npm run secret:put:control-plane
    ```
 
 3. Enable the matching cell configuration with only the public key, deploy the

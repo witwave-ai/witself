@@ -56,6 +56,21 @@ const (
 	// AgentEmailSenderUnverified is the mandatory receive-pilot sender posture.
 	AgentEmailSenderUnverified = "unverified"
 
+	// AgentEmailRecipientRouteCanonical records delivery through the permanent
+	// realm-id-body address.
+	AgentEmailRecipientRouteCanonical = "canonical"
+	// AgentEmailRecipientRouteRealmAlias records delivery through an additive
+	// control-plane-applied realm alias.
+	AgentEmailRecipientRouteRealmAlias = "realm_alias"
+
+	// AgentEmailRealmAliasApplied makes a projected alias routable.
+	AgentEmailRealmAliasApplied = "applied"
+	// AgentEmailRealmAliasSuspended temporarily refuses delivery while retaining
+	// the claim and its globally unique label.
+	AgentEmailRealmAliasSuspended = "suspended"
+	// AgentEmailRealmAliasRetired permanently tombstones the label.
+	AgentEmailRealmAliasRetired = "retired"
+
 	agentEmailPilotProvider           = "cloudflare_email_routing"
 	defaultAgentEmailPageSize         = 50
 	maximumAgentEmailPageSize         = 100
@@ -88,6 +103,11 @@ var (
 	ErrAgentEmailAddressMissing = errors.New("agent-email address not provisioned")
 	// ErrAgentEmailAddressConflict reports an already-reserved address.
 	ErrAgentEmailAddressConflict = errors.New("agent-email address is already reserved")
+	// ErrAgentEmailRealmAliasNotFound reports an unknown controller claim.
+	ErrAgentEmailRealmAliasNotFound = errors.New("agent-email realm alias not found")
+	// ErrAgentEmailRealmAliasConflict reports a stale, mismatched, reused, or
+	// terminal controller projection.
+	ErrAgentEmailRealmAliasConflict = errors.New("agent-email realm alias conflict")
 	// ErrAgentEmailUnknownRecipient reports an unroutable envelope recipient.
 	ErrAgentEmailUnknownRecipient = errors.New("unknown agent-email recipient")
 	// ErrAgentEmailReceiveDisabled reports a known mailbox that refuses delivery.
@@ -118,26 +138,78 @@ var (
 // AgentEmailAddress is the durable reservation and current mailbox state for
 // one agent. Address tombstones intentionally survive permanent agent deletion.
 type AgentEmailAddress struct {
-	ID                string     `json:"id"`
-	MailboxID         string     `json:"mailbox_id"`
-	AccountID         string     `json:"account_id"`
-	RealmID           string     `json:"realm_id"`
-	OwnerAgentID      string     `json:"owner_agent_id"`
-	Address           string     `json:"address"`
-	Domain            string     `json:"domain"`
-	LocalPart         string     `json:"local_part"`
-	AgentSegment      string     `json:"agent_segment"`
-	RealmLabel        string     `json:"realm_label"`
-	ProvisioningKind  string     `json:"provisioning_kind"`
-	ReceiveState      string     `json:"receive_state"`
-	AgentReceiveState string     `json:"agent_receive_state"`
-	RealmReceiveState string     `json:"realm_receive_state"`
-	RowVersion        int64      `json:"row_version"`
-	CreatedAt         time.Time  `json:"created_at"`
-	UpdatedAt         time.Time  `json:"updated_at"`
-	DisabledAt        *time.Time `json:"disabled_at,omitempty"`
-	RealmDisabledAt   *time.Time `json:"realm_disabled_at,omitempty"`
-	RetiredAt         *time.Time `json:"retired_at,omitempty"`
+	ID                string                        `json:"id"`
+	MailboxID         string                        `json:"mailbox_id"`
+	AccountID         string                        `json:"account_id"`
+	RealmID           string                        `json:"realm_id"`
+	OwnerAgentID      string                        `json:"owner_agent_id"`
+	Address           string                        `json:"address"`
+	Domain            string                        `json:"domain"`
+	LocalPart         string                        `json:"local_part"`
+	AgentSegment      string                        `json:"agent_segment"`
+	RealmLabel        string                        `json:"realm_label"`
+	ProvisioningKind  string                        `json:"provisioning_kind"`
+	ReceiveState      string                        `json:"receive_state"`
+	AgentReceiveState string                        `json:"agent_receive_state"`
+	RealmReceiveState string                        `json:"realm_receive_state"`
+	RowVersion        int64                         `json:"row_version"`
+	CreatedAt         time.Time                     `json:"created_at"`
+	UpdatedAt         time.Time                     `json:"updated_at"`
+	DisabledAt        *time.Time                    `json:"disabled_at,omitempty"`
+	RealmDisabledAt   *time.Time                    `json:"realm_disabled_at,omitempty"`
+	RetiredAt         *time.Time                    `json:"retired_at,omitempty"`
+	Aliases           []AgentEmailRealmAliasAddress `json:"aliases"`
+}
+
+// AgentEmailRealmAlias is the cell's exact acknowledgement of one globally
+// authoritative realm-alias claim. A retired row is a permanent tombstone.
+type AgentEmailRealmAlias struct {
+	ClaimID            string     `json:"claim_id"`
+	AccountID          string     `json:"account_id"`
+	RealmID            string     `json:"realm_id"`
+	Domain             string     `json:"domain"`
+	RealmLabel         string     `json:"realm_label"`
+	State              string     `json:"state"`
+	ControllerRevision int64      `json:"controller_revision"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+	SuspendedAt        *time.Time `json:"suspended_at,omitempty"`
+	RetiredAt          *time.Time `json:"retired_at,omitempty"`
+}
+
+// ApplyAgentEmailRealmAliasInput carries one fenced desired projection from
+// the control plane. ClaimID permanently binds RealmLabel to its first scope.
+type ApplyAgentEmailRealmAliasInput struct {
+	ClaimID            string
+	RealmID            string
+	Domain             string
+	RealmLabel         string
+	State              string
+	ControllerRevision int64
+}
+
+// AgentEmailRealmAliasTarget is the content-minimal cell acknowledgement that
+// an account owns one live realm. The control plane uses it before creating a
+// global alias claim; it deliberately carries no realm name or account data.
+type AgentEmailRealmAliasTarget struct {
+	AccountID string `json:"account_id"`
+	RealmID   string `json:"realm_id"`
+	Exists    bool   `json:"exists"`
+}
+
+// AgentEmailRealmAliasAddress is one agent-specific address derived from a
+// realm-level alias claim. Suspended and retired aliases remain visible so a
+// client never mistakes a tombstone for an available label.
+type AgentEmailRealmAliasAddress struct {
+	ClaimID            string     `json:"claim_id"`
+	Address            string     `json:"address"`
+	LocalPart          string     `json:"local_part"`
+	RealmLabel         string     `json:"realm_label"`
+	State              string     `json:"state"`
+	ControllerRevision int64      `json:"controller_revision"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+	SuspendedAt        *time.Time `json:"suspended_at,omitempty"`
+	RetiredAt          *time.Time `json:"retired_at,omitempty"`
 }
 
 // AgentEmailRealmReceiveControl is the value-free operator view of one
@@ -203,6 +275,8 @@ type AgentEmailMessage struct {
 	EnvelopeRecipient              string               `json:"envelope_recipient"`
 	AgentSegment                   string               `json:"agent_segment"`
 	RealmLabel                     string               `json:"realm_label"`
+	RecipientRouteKind             string               `json:"recipient_route_kind"`
+	RecipientRealmAliasClaimID     string               `json:"recipient_realm_alias_claim_id,omitempty"`
 	SubaddressTag                  string               `json:"subaddress_tag,omitempty"`
 	RawSizeBytes                   int64                `json:"raw_size_bytes"`
 	ParseState                     string               `json:"parse_state"`
@@ -453,6 +527,9 @@ func (s *Store) EnsureAgentEmailMailbox(
 		if existing.Domain != domain {
 			return AgentEmailAddress{}, fmt.Errorf("%w: existing mailbox uses another domain", ErrAgentEmailConflict)
 		}
+		if err := populateAgentEmailRealmAliasAddressesTx(ctx, tx, &existing); err != nil {
+			return AgentEmailAddress{}, err
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return AgentEmailAddress{}, err
 		}
@@ -525,10 +602,7 @@ func (s *Store) EnsureAgentEmailMailbox(
 	}); err != nil {
 		return AgentEmailAddress{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return AgentEmailAddress{}, err
-	}
-	return AgentEmailAddress{
+	address := AgentEmailAddress{
 		ID: addressID, MailboxID: mailboxID, AccountID: accountID, RealmID: realmID,
 		OwnerAgentID: agentID, Address: parts.BaseAddress, Domain: parts.Domain,
 		LocalPart: parts.LocalPart, AgentSegment: parts.AgentSegment,
@@ -540,7 +614,241 @@ func (s *Store) EnsureAgentEmailMailbox(
 		RealmReceiveState: realmControl.ReceiveState,
 		RowVersion:        1, CreatedAt: createdAt, UpdatedAt: updatedAt,
 		RealmDisabledAt: realmControl.DisabledAt,
+	}
+	if err := populateAgentEmailRealmAliasAddressesTx(ctx, tx, &address); err != nil {
+		return AgentEmailAddress{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return AgentEmailAddress{}, err
+	}
+	return address, nil
+}
+
+// ApplyAgentEmailRealmAlias applies one exact control-plane projection. A
+// positive controller revision is a monotonic fence: the same revision and
+// state is an idempotent replay while its active target remains live, whereas
+// an older revision or a same-revision mismatch is rejected. Retired claims
+// are terminal and every claimed label remains reserved by its tombstone.
+func (s *Store) ApplyAgentEmailRealmAlias(
+	ctx context.Context,
+	accountID string,
+	in ApplyAgentEmailRealmAliasInput,
+) (AgentEmailRealmAlias, error) {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" || !validAgentEmailRealmAliasClaimID(in.ClaimID) ||
+		!validRealmID(in.RealmID) || in.ControllerRevision < 1 ||
+		in.ControllerRevision > maximumAgentEmailGeneration {
+		return AgentEmailRealmAlias{}, fmt.Errorf("%w: invalid realm alias projection envelope", ErrAgentEmailInputInvalid)
+	}
+	domain, err := agentemail.ValidateDomain(in.Domain)
+	if err != nil || domain != in.Domain {
+		return AgentEmailRealmAlias{}, fmt.Errorf("%w: domain must be canonical lowercase ASCII", ErrAgentEmailInputInvalid)
+	}
+	label, err := agentemail.ValidateRealmAliasLabel(in.RealmLabel)
+	if err != nil {
+		return AgentEmailRealmAlias{}, fmt.Errorf("%w: %v", ErrAgentEmailInputInvalid, err)
+	}
+	if !validAgentEmailRealmAliasState(in.State) {
+		return AgentEmailRealmAlias{}, fmt.Errorf("%w: invalid realm alias state", ErrAgentEmailInputInvalid)
+	}
+	in.ClaimID = strings.TrimSpace(in.ClaimID)
+	in.RealmID = strings.TrimSpace(in.RealmID)
+	in.Domain = domain
+	in.RealmLabel = label
+	in.State = strings.TrimSpace(in.State)
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return AgentEmailRealmAlias{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Serialize all alias projections for one account and prove the account is
+	// locally present. Projection convergence is allowed while an account is
+	// pending or suspended; normal ingestion still requires active + entitled.
+	var lockedAccountID string
+	err = tx.QueryRow(ctx, `SELECT id FROM accounts WHERE id=$1 FOR NO KEY UPDATE`, accountID).
+		Scan(&lockedAccountID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AgentEmailRealmAlias{}, ErrAccountNotFound
+	}
+	if err != nil {
+		return AgentEmailRealmAlias{}, fmt.Errorf("lock realm alias account: %w", err)
+	}
+	existing, err := agentEmailRealmAliasByClaimTx(ctx, tx, in.ClaimID, true)
+	if err != nil && !errors.Is(err, ErrAgentEmailRealmAliasNotFound) {
+		return AgentEmailRealmAlias{}, err
+	}
+	byLabel, labelErr := agentEmailRealmAliasByLabelTx(ctx, tx, domain, label, true)
+	if labelErr != nil && !errors.Is(labelErr, ErrAgentEmailRealmAliasNotFound) {
+		return AgentEmailRealmAlias{}, labelErr
+	}
+	var realmDeletedAt *time.Time
+	if realmErr := tx.QueryRow(ctx, `
+		SELECT deleted_at FROM realms WHERE account_id=$1 AND id=$2`,
+		accountID, in.RealmID).Scan(&realmDeletedAt); errors.Is(realmErr, pgx.ErrNoRows) {
+		return AgentEmailRealmAlias{}, ErrRealmNotFound
+	} else if realmErr != nil {
+		return AgentEmailRealmAlias{}, fmt.Errorf("resolve realm alias target: %w", realmErr)
+	}
+	if err == nil {
+		if existing.AccountID != accountID || existing.RealmID != in.RealmID ||
+			existing.Domain != domain || existing.RealmLabel != label {
+			return AgentEmailRealmAlias{}, ErrAgentEmailRealmAliasConflict
+		}
+		if labelErr == nil && byLabel.ClaimID != existing.ClaimID {
+			return AgentEmailRealmAlias{}, ErrAgentEmailRealmAliasConflict
+		}
+		// Any request that would represent an active route must prove the target
+		// realm is still live before revision or terminal-state replay handling.
+		// This keeps stale recovery from publishing a deleted realm and returns
+		// the same authoritative result for replay and reactivation attempts.
+		if realmDeletedAt != nil && in.State == AgentEmailRealmAliasApplied {
+			return AgentEmailRealmAlias{}, ErrRealmNotFound
+		}
+		if in.ControllerRevision < existing.ControllerRevision ||
+			(in.ControllerRevision == existing.ControllerRevision && in.State != existing.State) ||
+			(existing.State == AgentEmailRealmAliasRetired && in.State != AgentEmailRealmAliasRetired) {
+			return AgentEmailRealmAlias{}, ErrAgentEmailRealmAliasConflict
+		}
+		if in.ControllerRevision == existing.ControllerRevision {
+			if err := tx.Commit(ctx); err != nil {
+				return AgentEmailRealmAlias{}, err
+			}
+			return existing, nil
+		}
+		existing, err = updateAgentEmailRealmAliasTx(ctx, tx, existing, in)
+		if err != nil {
+			return AgentEmailRealmAlias{}, err
+		}
+		if err := logAgentEmailRealmAliasProjectionTx(ctx, tx, existing); err != nil {
+			return AgentEmailRealmAlias{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return AgentEmailRealmAlias{}, err
+		}
+		return existing, nil
+	}
+	if labelErr == nil {
+		// The label was claimed under another immutable controller id.
+		return AgentEmailRealmAlias{}, ErrAgentEmailRealmAliasConflict
+	}
+	if realmDeletedAt != nil && in.State == AgentEmailRealmAliasApplied {
+		return AgentEmailRealmAlias{}, ErrRealmNotFound
+	}
+	created, err := insertAgentEmailRealmAliasTx(ctx, tx, accountID, in)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return AgentEmailRealmAlias{}, ErrAgentEmailRealmAliasConflict
+		}
+		return AgentEmailRealmAlias{}, err
+	}
+	if err := logAgentEmailRealmAliasProjectionTx(ctx, tx, created); err != nil {
+		return AgentEmailRealmAlias{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return AgentEmailRealmAlias{}, err
+	}
+	return created, nil
+}
+
+// GetAgentEmailRealmAlias returns the exact cell-side projection for a
+// controller read-after-write fence.
+func (s *Store) GetAgentEmailRealmAlias(
+	ctx context.Context,
+	accountID, claimID string,
+) (AgentEmailRealmAlias, error) {
+	accountID = strings.TrimSpace(accountID)
+	claimID = strings.TrimSpace(claimID)
+	if accountID == "" || !validAgentEmailRealmAliasClaimID(claimID) {
+		return AgentEmailRealmAlias{}, fmt.Errorf("%w: invalid realm alias lookup", ErrAgentEmailInputInvalid)
+	}
+	alias, err := scanAgentEmailRealmAlias(s.pool.QueryRow(ctx,
+		agentEmailRealmAliasSelect()+` WHERE account_id=$1 AND claim_id=$2`, accountID, claimID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AgentEmailRealmAlias{}, ErrAgentEmailRealmAliasNotFound
+	}
+	if err != nil {
+		return AgentEmailRealmAlias{}, fmt.Errorf("get agent-email realm alias: %w", err)
+	}
+	return alias, nil
+}
+
+// GetAgentEmailRealmAliasTarget proves that realmID is a live realm belonging
+// to accountID. It is a read-only control-plane preflight, not an entitlement
+// check or a claim fence.
+func (s *Store) GetAgentEmailRealmAliasTarget(
+	ctx context.Context,
+	accountID, realmID string,
+) (AgentEmailRealmAliasTarget, error) {
+	accountID = strings.TrimSpace(accountID)
+	realmID = strings.TrimSpace(realmID)
+	if accountID == "" || !validRealmID(realmID) {
+		return AgentEmailRealmAliasTarget{}, fmt.Errorf(
+			"%w: invalid realm alias target", ErrAgentEmailInputInvalid,
+		)
+	}
+	var accountExists, realmExists bool
+	if err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM accounts WHERE id=$1),
+		       EXISTS (
+		         SELECT 1 FROM realms
+		          WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL
+		       )`, accountID, realmID).Scan(&accountExists, &realmExists); err != nil {
+		return AgentEmailRealmAliasTarget{}, fmt.Errorf(
+			"resolve agent-email realm alias target: %w", err,
+		)
+	}
+	if !accountExists {
+		return AgentEmailRealmAliasTarget{}, ErrAccountNotFound
+	}
+	if !realmExists {
+		return AgentEmailRealmAliasTarget{}, ErrRealmNotFound
+	}
+	return AgentEmailRealmAliasTarget{
+		AccountID: accountID,
+		RealmID:   realmID,
+		Exists:    true,
 	}, nil
+}
+
+// ListAgentEmailRealmAliases returns the complete account projection,
+// including suspended rows and permanent retirement tombstones.
+func (s *Store) ListAgentEmailRealmAliases(
+	ctx context.Context,
+	accountID string,
+) ([]AgentEmailRealmAlias, error) {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return nil, fmt.Errorf("%w: invalid realm alias account", ErrAgentEmailInputInvalid)
+	}
+	var exists bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM accounts WHERE id=$1)`, accountID).Scan(&exists); err != nil {
+		return nil, fmt.Errorf("resolve realm alias account: %w", err)
+	}
+	if !exists {
+		return nil, ErrAccountNotFound
+	}
+	rows, err := s.pool.Query(ctx, agentEmailRealmAliasSelect()+`
+		WHERE account_id=$1 ORDER BY domain,realm_label,claim_id`, accountID)
+	if err != nil {
+		return nil, fmt.Errorf("list agent-email realm aliases: %w", err)
+	}
+	defer rows.Close()
+	aliases := []AgentEmailRealmAlias{}
+	for rows.Next() {
+		alias, err := scanAgentEmailRealmAlias(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan agent-email realm alias: %w", err)
+		}
+		aliases = append(aliases, alias)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list agent-email realm aliases: %w", err)
+	}
+	return aliases, nil
 }
 
 // GetAgentEmailAddress returns only the authenticated agent's own address.
@@ -565,6 +873,9 @@ func (s *Store) GetAgentEmailAddress(
 	}
 	address, err := agentEmailAddressForOwnerTx(ctx, tx, p.AccountID, p.RealmID, p.ID)
 	if err != nil {
+		return AgentEmailAddress{}, err
+	}
+	if err := populateAgentEmailRealmAliasAddressesTx(ctx, tx, &address); err != nil {
 		return AgentEmailAddress{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -956,10 +1267,11 @@ func (s *Store) IngestAgentEmailPilot(
 	// Resolve once without taking a mailbox/address lock so the global write
 	// order remains account -> agent -> mailbox/address. Re-read under a share
 	// lock after those parent locks are held to close the resolution race.
-	candidate, err := agentEmailAddressByRecipientTx(ctx, tx, parts.Domain, parts.LocalPart, false)
+	candidateRoute, err := agentEmailRouteByRecipientTx(ctx, tx, parts, false)
 	if err != nil {
 		return AgentEmailMessage{}, err
 	}
+	candidate := candidateRoute.Address
 	if !scope.RealmIDs[candidate.RealmID] || !scope.AgentIDs[candidate.OwnerAgentID] {
 		return AgentEmailMessage{}, ErrAgentEmailPilotNotEnrolled
 	}
@@ -977,12 +1289,15 @@ func (s *Store) IngestAgentEmailPilot(
 	if err := lockLiveMessageAgentScope(ctx, tx, candidate.AccountID, candidate.RealmID, candidate.OwnerAgentID); err != nil {
 		return AgentEmailMessage{}, ErrAgentEmailPilotNotEnrolled
 	}
-	address, err := agentEmailAddressByRecipientTx(ctx, tx, parts.Domain, parts.LocalPart, true)
+	recipientRoute, err := agentEmailRouteByRecipientTx(ctx, tx, parts, true)
 	if err != nil {
 		return AgentEmailMessage{}, err
 	}
+	address := recipientRoute.Address
 	if address.AccountID != candidate.AccountID || address.RealmID != candidate.RealmID ||
-		address.OwnerAgentID != candidate.OwnerAgentID || address.ID != candidate.ID {
+		address.OwnerAgentID != candidate.OwnerAgentID || address.ID != candidate.ID ||
+		recipientRoute.Kind != candidateRoute.Kind ||
+		recipientRoute.RealmAliasClaimID != candidateRoute.RealmAliasClaimID {
 		return AgentEmailMessage{}, ErrAgentEmailUnknownRecipient
 	}
 	if !scope.RealmIDs[address.RealmID] || !scope.AgentIDs[address.OwnerAgentID] {
@@ -991,7 +1306,11 @@ func (s *Store) IngestAgentEmailPilot(
 	if address.ReceiveState != AgentEmailReceiveEnabled {
 		return AgentEmailMessage{}, ErrAgentEmailReceiveDisabled
 	}
-	if address.AgentSegment != parts.AgentSegment || address.RealmLabel != parts.RealmLabel {
+	if recipientRoute.AliasState == AgentEmailRealmAliasSuspended {
+		return AgentEmailMessage{}, ErrAgentEmailReceiveDisabled
+	}
+	if address.AgentSegment != parts.AgentSegment ||
+		(recipientRoute.Kind == AgentEmailRecipientRouteCanonical && address.RealmLabel != parts.RealmLabel) {
 		return AgentEmailMessage{}, ErrAgentEmailUnknownRecipient
 	}
 	if err := enforceAgentEmailRateLimitsTx(
@@ -1126,7 +1445,8 @@ func (s *Store) IngestAgentEmailPilot(
 		  INSERT INTO agent_email_messages
 		    (id,account_id,realm_id,mailbox_id,owner_agent_id,address_id,
 		     provider,provider_message_id,envelope_sender,envelope_recipient,
-		     agent_segment,realm_label,subaddress_tag,raw_mime,raw_size_bytes,
+		     agent_segment,realm_label,recipient_route_kind,
+		     recipient_realm_alias_claim_id,subaddress_tag,raw_mime,raw_size_bytes,
 		     raw_sha256,parse_state,parse_error,header_from,header_to,
 		     header_subject,mime_message_id,message_date,attachment_count,
 		     body_text,body_text_kind,attachment_storage_bytes,
@@ -1136,10 +1456,10 @@ func (s *Store) IngestAgentEmailPilot(
 		     sender_verification_state,duplicate_group_sha256,
 		     possible_duplicate_of_message_id,received_at)
 		  VALUES
-		    ($1,$2,$3,$4,$5,$6,$7,NULL,$8,$9,$10,$11,$12,$13,$14,$15,
-		     $16,$17,$18,$19,$20,$21,$22,$23,
-		     $24,$25,$26,$27,$28,true,
-		     'unknown','unknown','unknown','unknown','unverified',$29,$30,
+		    ($1,$2,$3,$4,$5,$6,$7,NULL,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+		     $18,$19,$20,$21,$22,$23,$24,$25,
+		     $26,$27,$28,$29,$30,true,
+		     'unknown','unknown','unknown','unknown','unverified',$31,$32,
 		     clock_timestamp())
 		  RETURNING received_at,created_at
 		), inserted_delivery AS (
@@ -1154,6 +1474,7 @@ func (s *Store) IngestAgentEmailPilot(
 		messageID, address.AccountID, address.RealmID, address.MailboxID,
 		address.OwnerAgentID, address.ID, agentEmailPilotProvider,
 		relay.EnvelopeSender, parts.Address, parts.AgentSegment, parts.RealmLabel,
+		recipientRoute.Kind, agentEmailNullableString(recipientRoute.RealmAliasClaimID),
 		agentEmailNullableString(parts.SubaddressTag), rawForStorage, len(in.Raw), rawSHA,
 		parseState, agentEmailNullableString(parseErrorCode), agentEmailNullableString(parsed.HeaderFrom),
 		agentEmailNullableString(parsed.HeaderTo), agentEmailNullableString(parsed.HeaderSubject),
@@ -1190,7 +1511,9 @@ func (s *Store) IngestAgentEmailPilot(
 		AddressID: address.ID, Provider: agentEmailPilotProvider,
 		EnvelopeSender: relay.EnvelopeSender, EnvelopeRecipient: parts.Address,
 		AgentSegment: parts.AgentSegment, RealmLabel: parts.RealmLabel,
-		SubaddressTag: parts.SubaddressTag, RawSizeBytes: int64(len(in.Raw)),
+		RecipientRouteKind:         recipientRoute.Kind,
+		RecipientRealmAliasClaimID: recipientRoute.RealmAliasClaimID,
+		SubaddressTag:              parts.SubaddressTag, RawSizeBytes: int64(len(in.Raw)),
 		ParseState: parseState, ParseErrorCode: parseErrorCode,
 		HeaderFrom: parsed.HeaderFrom, HeaderTo: parsed.HeaderTo,
 		Subject: parsed.HeaderSubject, MIMEMessageID: parsed.MIMEMessageID,
@@ -1889,6 +2212,65 @@ func agentEmailAddressByRecipientTx(
 	return address, nil
 }
 
+type agentEmailRecipientRoute struct {
+	Address           AgentEmailAddress
+	Kind              string
+	RealmAliasClaimID string
+	AliasState        string
+}
+
+func agentEmailRouteByRecipientTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	parts agentemail.AddressParts,
+	lock bool,
+) (agentEmailRecipientRoute, error) {
+	if agentemail.IsCanonicalRealmLabel(parts.RealmLabel) {
+		address, err := agentEmailAddressByRecipientTx(
+			ctx, tx, parts.Domain, parts.LocalPart, lock,
+		)
+		if err != nil {
+			return agentEmailRecipientRoute{}, err
+		}
+		return agentEmailRecipientRoute{
+			Address: address,
+			Kind:    AgentEmailRecipientRouteCanonical,
+		}, nil
+	}
+
+	alias, err := agentEmailRealmAliasByLabelTx(
+		ctx, tx, parts.Domain, parts.RealmLabel, lock,
+	)
+	if errors.Is(err, ErrAgentEmailRealmAliasNotFound) {
+		return agentEmailRecipientRoute{}, ErrAgentEmailUnknownRecipient
+	}
+	if err != nil {
+		return agentEmailRecipientRoute{}, err
+	}
+	if alias.State == AgentEmailRealmAliasRetired {
+		return agentEmailRecipientRoute{}, ErrAgentEmailUnknownRecipient
+	}
+	query := agentEmailAddressSelect() + `
+		WHERE addr.account_id=$1 AND addr.realm_id=$2 AND addr.domain=$3
+		  AND addr.agent_segment=$4 AND addr.retired_at IS NULL`
+	if lock {
+		query += ` FOR SHARE OF addr,mb,rc`
+	}
+	address, err := scanAgentEmailAddress(tx.QueryRow(
+		ctx, query, alias.AccountID, alias.RealmID, alias.Domain, parts.AgentSegment,
+	))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return agentEmailRecipientRoute{}, ErrAgentEmailUnknownRecipient
+	}
+	if err != nil {
+		return agentEmailRecipientRoute{}, fmt.Errorf("resolve agent-email alias recipient: %w", err)
+	}
+	return agentEmailRecipientRoute{
+		Address: address, Kind: AgentEmailRecipientRouteRealmAlias,
+		RealmAliasClaimID: alias.ClaimID, AliasState: alias.State,
+	}, nil
+}
+
 func agentEmailAddressSelect() string {
 	return `SELECT addr.id,mb.id,addr.account_id,addr.realm_id,mb.owner_agent_id,
 		       addr.local_part || '@' || addr.domain,addr.domain,addr.local_part,
@@ -1924,6 +2306,204 @@ func scanAgentEmailAddress(row rowScanner) (AgentEmailAddress, error) {
 	return address, err
 }
 
+func agentEmailRealmAliasSelect() string {
+	return `SELECT claim_id,account_id,realm_id,domain,realm_label,state,
+	              controller_revision,created_at,updated_at,suspended_at,retired_at
+	         FROM agent_email_realm_aliases`
+}
+
+func scanAgentEmailRealmAlias(row rowScanner) (AgentEmailRealmAlias, error) {
+	var alias AgentEmailRealmAlias
+	err := row.Scan(
+		&alias.ClaimID, &alias.AccountID, &alias.RealmID, &alias.Domain,
+		&alias.RealmLabel, &alias.State, &alias.ControllerRevision,
+		&alias.CreatedAt, &alias.UpdatedAt, &alias.SuspendedAt, &alias.RetiredAt,
+	)
+	return alias, err
+}
+
+func agentEmailRealmAliasByClaimTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	claimID string,
+	lock bool,
+) (AgentEmailRealmAlias, error) {
+	query := agentEmailRealmAliasSelect() + ` WHERE claim_id=$1`
+	if lock {
+		query += ` FOR UPDATE`
+	}
+	alias, err := scanAgentEmailRealmAlias(tx.QueryRow(ctx, query, claimID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AgentEmailRealmAlias{}, ErrAgentEmailRealmAliasNotFound
+	}
+	if err != nil {
+		return AgentEmailRealmAlias{}, fmt.Errorf("read agent-email realm alias claim: %w", err)
+	}
+	return alias, nil
+}
+
+func agentEmailRealmAliasByLabelTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	domain, realmLabel string,
+	lock bool,
+) (AgentEmailRealmAlias, error) {
+	query := agentEmailRealmAliasSelect() + ` WHERE domain=$1 AND realm_label=$2`
+	if lock {
+		query += ` FOR UPDATE`
+	}
+	alias, err := scanAgentEmailRealmAlias(tx.QueryRow(ctx, query, domain, realmLabel))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AgentEmailRealmAlias{}, ErrAgentEmailRealmAliasNotFound
+	}
+	if err != nil {
+		return AgentEmailRealmAlias{}, fmt.Errorf("read agent-email realm alias label: %w", err)
+	}
+	return alias, nil
+}
+
+func insertAgentEmailRealmAliasTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	accountID string,
+	in ApplyAgentEmailRealmAliasInput,
+) (AgentEmailRealmAlias, error) {
+	alias, err := scanAgentEmailRealmAlias(tx.QueryRow(ctx, `
+		WITH applied_at AS (SELECT clock_timestamp() AS value)
+		INSERT INTO agent_email_realm_aliases
+		  (claim_id,account_id,realm_id,domain,realm_label,state,
+		   controller_revision,created_at,updated_at,suspended_at,retired_at)
+		SELECT $1,$2,$3,$4,$5,$6,$7,value,value,
+		       CASE WHEN $6='suspended' THEN value END,
+		       CASE WHEN $6='retired' THEN value END
+		  FROM applied_at
+		RETURNING claim_id,account_id,realm_id,domain,realm_label,state,
+		          controller_revision,created_at,updated_at,suspended_at,retired_at`,
+		in.ClaimID, accountID, in.RealmID, in.Domain, in.RealmLabel, in.State,
+		in.ControllerRevision))
+	if err != nil {
+		return AgentEmailRealmAlias{}, fmt.Errorf("insert agent-email realm alias: %w", err)
+	}
+	return alias, nil
+}
+
+func updateAgentEmailRealmAliasTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	existing AgentEmailRealmAlias,
+	in ApplyAgentEmailRealmAliasInput,
+) (AgentEmailRealmAlias, error) {
+	alias, err := scanAgentEmailRealmAlias(tx.QueryRow(ctx, `
+		WITH applied_at AS (SELECT clock_timestamp() AS value)
+		UPDATE agent_email_realm_aliases AS alias
+		   SET state=$2,
+		       controller_revision=$3,
+		       updated_at=applied_at.value,
+		       suspended_at=CASE
+		         WHEN $2='applied' THEN NULL
+		         WHEN $2='suspended' THEN COALESCE(alias.suspended_at,applied_at.value)
+		         ELSE alias.suspended_at
+		       END,
+		       retired_at=CASE
+		         WHEN $2='retired' THEN COALESCE(alias.retired_at,applied_at.value)
+		         ELSE NULL
+		       END
+		  FROM applied_at
+		 WHERE alias.claim_id=$1 AND alias.controller_revision<$3
+		RETURNING alias.claim_id,alias.account_id,alias.realm_id,alias.domain,
+		          alias.realm_label,alias.state,alias.controller_revision,
+		          alias.created_at,alias.updated_at,alias.suspended_at,alias.retired_at`,
+		existing.ClaimID, in.State, in.ControllerRevision))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AgentEmailRealmAlias{}, ErrAgentEmailRealmAliasConflict
+	}
+	if err != nil {
+		return AgentEmailRealmAlias{}, fmt.Errorf("update agent-email realm alias: %w", err)
+	}
+	return alias, nil
+}
+
+func logAgentEmailRealmAliasProjectionTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	alias AgentEmailRealmAlias,
+) error {
+	return logEventTx(ctx, tx, EventInput{
+		AccountID: alias.AccountID,
+		ActorKind: ActorControlPlane,
+		Verb:      VerbAgentEmailRealmAliasProjected,
+		Metadata: map[string]any{
+			"claim_id":            alias.ClaimID,
+			"realm_id":            alias.RealmID,
+			"state":               alias.State,
+			"controller_revision": strconv.FormatInt(alias.ControllerRevision, 10),
+		},
+	})
+}
+
+func populateAgentEmailRealmAliasAddressesTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	address *AgentEmailAddress,
+) error {
+	rows, err := tx.Query(ctx, agentEmailRealmAliasSelect()+`
+		WHERE account_id=$1 AND realm_id=$2 AND domain=$3
+		ORDER BY realm_label,claim_id`, address.AccountID, address.RealmID, address.Domain)
+	if err != nil {
+		return fmt.Errorf("list agent-email realm aliases: %w", err)
+	}
+	defer rows.Close()
+	address.Aliases = []AgentEmailRealmAliasAddress{}
+	for rows.Next() {
+		alias, err := scanAgentEmailRealmAlias(rows)
+		if err != nil {
+			return fmt.Errorf("scan agent-email realm alias: %w", err)
+		}
+		parts, err := agentemail.ComposeAddressWithRealmLabel(
+			address.AgentSegment, alias.RealmLabel, alias.Domain,
+		)
+		if err != nil {
+			return fmt.Errorf("compose stored agent-email realm alias: %w", err)
+		}
+		address.Aliases = append(address.Aliases, AgentEmailRealmAliasAddress{
+			ClaimID: alias.ClaimID, Address: parts.BaseAddress,
+			LocalPart: parts.LocalPart, RealmLabel: alias.RealmLabel,
+			State: alias.State, ControllerRevision: alias.ControllerRevision,
+			UpdatedAt: alias.UpdatedAt, SuspendedAt: alias.SuspendedAt,
+			RetiredAt: alias.RetiredAt,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("list agent-email realm aliases: %w", err)
+	}
+	return nil
+}
+
+func validAgentEmailRealmAliasClaimID(value string) bool {
+	if strings.TrimSpace(value) != value {
+		return false
+	}
+	return len(value) == len("era_")+16 && strings.HasPrefix(value, "era_") &&
+		agentemail.IsCanonicalRealmLabel(strings.TrimPrefix(value, "era_"))
+}
+
+func validAgentEmailRealmAliasState(value string) bool {
+	switch value {
+	case AgentEmailRealmAliasApplied, AgentEmailRealmAliasSuspended, AgentEmailRealmAliasRetired:
+		return true
+	default:
+		return false
+	}
+}
+
+func validRealmID(value string) bool {
+	if strings.TrimSpace(value) != value {
+		return false
+	}
+	_, err := agentemail.RealmLabelFromID(value)
+	return err == nil
+}
+
 func agentEmailSelect(includeRaw bool) string {
 	raw := `NULL::bytea`
 	if includeRaw {
@@ -1932,7 +2512,9 @@ func agentEmailSelect(includeRaw bool) string {
 	return fmt.Sprintf(`SELECT
 		m.id,m.account_id,m.realm_id,m.mailbox_id,m.owner_agent_id,m.address_id,
 		m.provider,m.envelope_sender,m.envelope_recipient,m.agent_segment,
-		m.realm_label,COALESCE(m.subaddress_tag,''),m.raw_size_bytes,
+		m.realm_label,m.recipient_route_kind,
+		COALESCE(m.recipient_realm_alias_claim_id,''),
+		COALESCE(m.subaddress_tag,''),m.raw_size_bytes,
 		m.parse_state,COALESCE(m.parse_error,''),COALESCE(m.header_from,''),
 		COALESCE(m.header_to,''),COALESCE(m.header_subject,''),
 		COALESCE(m.mime_message_id,''),m.message_date,m.attachment_count,
@@ -1958,7 +2540,8 @@ func scanAgentEmail(row rowScanner) (AgentEmailMessage, error) {
 		&msg.ID, &msg.AccountID, &msg.RealmID, &msg.MailboxID,
 		&msg.OwnerAgentID, &msg.AddressID, &msg.Provider,
 		&msg.EnvelopeSender, &msg.EnvelopeRecipient, &msg.AgentSegment,
-		&msg.RealmLabel, &msg.SubaddressTag, &msg.RawSizeBytes,
+		&msg.RealmLabel, &msg.RecipientRouteKind,
+		&msg.RecipientRealmAliasClaimID, &msg.SubaddressTag, &msg.RawSizeBytes,
 		&msg.ParseState, &msg.ParseErrorCode, &msg.HeaderFrom, &msg.HeaderTo,
 		&msg.Subject, &msg.MIMEMessageID, &msg.MessageDate, &msg.AttachmentCount,
 		&msg.AttachmentStorageBytes, &msg.RetainedAttachmentStorageBytes,

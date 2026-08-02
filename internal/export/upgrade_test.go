@@ -374,6 +374,28 @@ func TestSchema78AgentEmailAttachmentStorageUpgradeRejectsMalformedLegacyRows(t 
 	}
 }
 
+func TestSchema84AgentEmailRealmAliasUpgradeMarksLegacyDeliveryCanonical(t *testing.T) {
+	upgrade := UpgraderFor(84)
+	if upgrade == nil {
+		t.Fatal("schema 84 agent-email route upgrader is not registered")
+	}
+	message, err := upgrade("agent_email_messages", map[string]any{
+		"id": "emsg_aaaaaaaaaaaaaaaa",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message["recipient_route_kind"] != "canonical" ||
+		message["recipient_realm_alias_claim_id"] != nil {
+		t.Fatalf("legacy route defaults = %#v", message)
+	}
+	other := map[string]any{"id": "agent_1"}
+	got, err := upgrade("agents", other)
+	if err != nil || !reflect.DeepEqual(got, other) {
+		t.Fatalf("unrelated row = %#v / %v", got, err)
+	}
+}
+
 func TestSchema36MessageAudienceUpgradeDefaultsToDirect(t *testing.T) {
 	upgrade := UpgraderFor(36)
 	if upgrade == nil {

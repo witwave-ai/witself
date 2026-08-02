@@ -444,6 +444,12 @@ func TestAgentEmailLimitOverridesResolveAndValidate(t *testing.T) {
 	); err != nil {
 		t.Fatalf("set attachment storage unlimited: %v", err)
 	}
+	if _, err := h.m.SetAccountLimitOverride(
+		ctx, accountID, plans.AgentEmailRealmAliasesPerRealmLimit, nil,
+		testAdminActor(), "founder realm email aliases are unlimited",
+	); err != nil {
+		t.Fatalf("set realm email aliases unlimited: %v", err)
+	}
 
 	beforeRecord, beforeSnapshot, err := h.m.ResolvedStatus(ctx, accountID, "")
 	if err != nil {
@@ -455,6 +461,10 @@ func TestAgentEmailLimitOverridesResolveAndValidate(t *testing.T) {
 	}
 	if _, present := beforeSnapshot.DefaultLimits[plans.AgentEmailAttachmentStorageBytesLimit]; present {
 		t.Fatalf("attachment-storage default activated during phase A: %v",
+			beforeSnapshot.DefaultLimits)
+	}
+	if _, present := beforeSnapshot.DefaultLimits[plans.AgentEmailRealmAliasesPerRealmLimit]; present {
+		t.Fatalf("realm-alias default activated during phase A: %v",
 			beforeSnapshot.DefaultLimits)
 	}
 
@@ -482,13 +492,19 @@ func TestAgentEmailLimitOverridesResolveAndValidate(t *testing.T) {
 	if _, finite := snapshot.Limits[plans.AgentEmailAttachmentStorageBytesLimit]; finite {
 		t.Fatalf("attachment storage remained finite: %v", snapshot.Limits)
 	}
+	if _, finite := snapshot.Limits[plans.AgentEmailRealmAliasesPerRealmLimit]; finite {
+		t.Fatalf("realm email aliases remained finite: %v", snapshot.Limits)
+	}
 	rawOverride := record.LimitOverrides[plans.AgentEmailMaxRawBytesLimit]
 	attachmentOverride := record.LimitOverrides[plans.AgentEmailAttachmentStorageBytesLimit]
+	aliasOverride := record.LimitOverrides[plans.AgentEmailRealmAliasesPerRealmLimit]
 	if rawOverride.Max == nil || *rawOverride.Max != rawMaximum ||
 		attachmentOverride.Max != nil ||
-		attachmentOverride.Reason != "founder attachment storage is unlimited" {
-		t.Fatalf("agent-email overrides = raw %+v attachment %+v",
-			rawOverride, attachmentOverride)
+		attachmentOverride.Reason != "founder attachment storage is unlimited" ||
+		aliasOverride.Max != nil ||
+		aliasOverride.Reason != "founder realm email aliases are unlimited" {
+		t.Fatalf("agent-email overrides = raw %+v attachment %+v aliases %+v",
+			rawOverride, attachmentOverride, aliasOverride)
 	}
 	if snapshot.Hash != beforeSnapshot.Hash ||
 		len(h.applier.calls) != applyCallsBeforePromotion ||

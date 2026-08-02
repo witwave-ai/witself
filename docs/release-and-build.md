@@ -56,6 +56,7 @@ checkout only after its release workflow succeeds:
 ```sh
 cd infra/cloudflare/control-plane
 npm ci
+export EMAIL_DIRECTORY_KV_ID="${EMAIL_DIRECTORY_KV_ID:?set the dedicated 32-character agent-email KV namespace id}"
 npm run deploy:plans
 npm run deploy
 ```

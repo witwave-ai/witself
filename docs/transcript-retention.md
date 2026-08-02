@@ -120,6 +120,7 @@ the release workflow:
 ```sh
 cd infra/cloudflare/control-plane
 npm ci
+export EMAIL_DIRECTORY_KV_ID="${EMAIL_DIRECTORY_KV_ID:?set the dedicated 32-character agent-email KV namespace id}"
 
 # Public catalog deployment uses this package's committed Wrangler lock too.
 npm run deploy:plans

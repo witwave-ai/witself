@@ -413,6 +413,7 @@ func TestValidateAgentEmailLimitBounds(t *testing.T) {
 	if err := ValidateLimits(map[string]int64{
 		AgentEmailMaxRawBytesLimit:            MaxAgentEmailRawBytes,
 		AgentEmailAttachmentStorageBytesLimit: 107_374_182_400,
+		AgentEmailRealmAliasesPerRealmLimit:   1,
 	}); err != nil {
 		t.Fatalf("valid agent-email limits: %v", err)
 	}

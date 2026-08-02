@@ -242,6 +242,8 @@ generate stable local ids.
 | `acct_` | customer account | spine | `accounts` |
 | `opr_` | human operator principal | spine | `operators` |
 | `realm_` | realm (was Witpass vault) | spine | `realms` |
+| `earq_` | realm-email-alias customer request | control plane | global alias registry Durable Object |
+| `era_` | permanent realm-email-alias claim | control/cell projection | global alias registry / `agent_email_realm_aliases` |
 | `rmb_` | realm membership (was vault membership) | spine | `realm_members` |
 | `agent_` | named agent | spine | `agents` |
 | `tok_` | token (DB id; raw token text uses `witself_at_`) | spine | `agent_tokens` |
@@ -605,6 +607,40 @@ Token mutations (create / rotate / revoke) use `revoked_at` and rotation
 semantics rather than the `If-Match` / `row_version` optimistic-lock contract, so
 `agent_tokens` carries no `row_version` column and is intentionally excluded from
 the [Optimistic Concurrency](#optimistic-concurrency-and-history) table list.
+
+### `agent_email_realm_aliases` (migration `0085`)
+
+Purpose: cell-local, control-plane-authored routing projection for additive
+realm email labels. The globally unique claim, request review, reserved-name
+policy, audit history, and non-reuse authority remain in the control plane. A
+cell row is not sufficient to claim or transfer a label.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `claim_id` | `text` PK | stable `era_` claim; never reassigned |
+| `account_id`, `realm_id` | `text` FK | owning cell account and realm |
+| `domain`, `realm_label` | `text` | globally unique routed label within the managed domain |
+| `state` | `text` | `applied`, `suspended`, or `retired` |
+| `controller_revision` | `bigint` | monotonic control-plane fence; stale updates fail |
+| `created_at`, `updated_at` | `timestamptz` | projection lifecycle |
+| `suspended_at`, `retired_at` | `timestamptz NULL` | state-shaped lifecycle timestamps |
+
+The table retains suspended and retired rows as tombstones. The label grammar
+is 3-16 lowercase ASCII letters/digits with single internal hyphens; leading,
+trailing, consecutive, `xn--`, and canonical 16-character base32 labels are
+rejected. An `applied` projection cannot target a soft-deleted realm, while
+`suspended` and `retired` updates may still converge during cleanup.
+
+Migration `0085` also adds `recipient_route_kind` and
+`recipient_realm_alias_claim_id` to `agent_email_messages`. Canonical delivery
+keeps a null claim id and the realm-ID-body label. Alias delivery stores
+`route_kind=realm_alias`, the exact `era_` claim, and the memorable label while
+continuing to reference the existing canonical agent mailbox. Archive export
+and import preserve message ownership, the exact received envelope, and alias
+provenance. Schema `0084` cannot represent all three consistently, so the
+`0085` down migration fails before making any change when an alias-delivered
+message exists. Downgrade remains available when alias claims exist but no
+message was received through one; the projection rows are then dropped.
 
 ## Open-Plane Tables
 
