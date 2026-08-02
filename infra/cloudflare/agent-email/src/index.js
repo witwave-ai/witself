@@ -19,7 +19,7 @@ import {
   validateRuntimeConfig,
   validateRuntimeRecipient,
 } from "./directory.mjs";
-import { recordEdgeVerdict } from "./metrics.mjs";
+import { recordEdgeVerdict, recordRouteLookup } from "./metrics.mjs";
 
 const PERMANENT_REJECTION = "recipient unavailable";
 const OVER_SIZE_REJECTION = "message too large";
@@ -28,9 +28,29 @@ const DEFAULT_TIMEOUT_MS = 20_000;
 const DEFAULT_DIRECTORY_TIMEOUT_MS = 3_000;
 const MAX_VERDICT_BYTES = 4_096;
 const MAX_ROUTE_BYTES = 4_096;
+const ROUTE_MISS_SUPPRESSION_TTL_MS = 10_000;
+const MAX_ROUTE_MISS_STATE_ENTRIES = 1_024;
+const COLD_MISS_LIMITER_KEY = "cold-miss-v1";
+const KNOWN_MISS_LIMITER_KEY = "known-miss-v1";
+const ROUTE_LOOKUP_BUDGET_WINDOW_MS = 10_000;
+const COLD_MISS_LOCAL_LIMIT = 10;
+const KNOWN_MISS_LOCAL_LIMIT = 100;
 
 let cachedSecret = "";
 let cachedSigningKey;
+
+export function createRouteLookupState() {
+  return {
+    suppressed: new Map(),
+    inflight: new Map(),
+    budgets: {
+      cold: { windowStartedAt: null, used: 0 },
+      known: { windowStartedAt: null, used: 0 },
+    },
+  };
+}
+
+const defaultRouteLookupState = createRouteLookupState();
 
 const EDGE_METRIC = Symbol("agent-email-edge-metric");
 
@@ -44,6 +64,126 @@ function logRelayFailure(fields) {
   // Keep relay diagnostics value-free: never log envelope addresses, raw
   // message content, digests, signatures, or directory values.
   console.warn(JSON.stringify({ event: "agent_email_relay_failure", ...fields }));
+}
+
+function routeMetricKind(route) {
+  switch (route?.route_kind) {
+    case "canonical":
+      return "canonical";
+    case "realm_alias":
+      return "alias";
+    case "pilot":
+      return "pilot";
+    default:
+      return "unknown";
+  }
+}
+
+function emitRouteLookupMetric(env, lookup, result, status = 0, route = null) {
+  recordRouteLookup(env, {
+    result,
+    evidence: lookup.evidence,
+    routeKind: route ? routeMetricKind(route) : lookup.routeKind,
+    durationMS: Math.max(0, lookup.now() - lookup.startedAt),
+    status,
+  });
+}
+
+function consumeLocalLookupBudget(state, lookup) {
+  const cold = lookup.evidence === "none";
+  const lane = cold ? state.budgets.cold : state.budgets.known;
+  const limit = cold ? COLD_MISS_LOCAL_LIMIT : KNOWN_MISS_LOCAL_LIMIT;
+  const nowMS = lookup.now();
+  if (!Number.isFinite(nowMS)) return false;
+  if (lane.windowStartedAt === null || nowMS >= lane.windowStartedAt + ROUTE_LOOKUP_BUDGET_WINDOW_MS) {
+    lane.windowStartedAt = nowMS;
+    lane.used = 0;
+  } else if (nowMS < lane.windowStartedAt) {
+    // A backwards clock jump must not create a fresh allowance.
+    return false;
+  }
+  if (lane.used >= limit) return false;
+  lane.used++;
+  return true;
+}
+
+async function admitControlPlaneLookup(env, lookup, state) {
+  const cold = lookup.evidence === "none";
+  const binding = cold
+    ? env?.REALM_ROUTE_COLD_MISS_LIMITER
+    : env?.REALM_ROUTE_KNOWN_MISS_LIMITER;
+  const result = cold ? "cold_limited" : "known_limited";
+  if (!consumeLocalLookupBudget(state, lookup)) {
+    emitRouteLookupMetric(env, lookup, result);
+    throw transient("tempfail_route_lookup", "route");
+  }
+  if (!binding || typeof binding.limit !== "function") {
+    emitRouteLookupMetric(env, lookup, result);
+    throw transient("tempfail_route_lookup", "route");
+  }
+  let admission;
+  try {
+    admission = await binding.limit({
+      key: cold ? COLD_MISS_LIMITER_KEY : KNOWN_MISS_LIMITER_KEY,
+    });
+  } catch {
+    emitRouteLookupMetric(env, lookup, result);
+    throw transient("tempfail_route_lookup", "route");
+  }
+  if (!admission || admission.success !== true) {
+    emitRouteLookupMetric(env, lookup, result);
+    throw transient("tempfail_route_lookup", "route");
+  }
+}
+
+function routeLookupState(value) {
+  const validLane = (lane) => lane && typeof lane === "object" &&
+    (lane.windowStartedAt === null || Number.isFinite(lane.windowStartedAt)) &&
+    Number.isSafeInteger(lane.used) && lane.used >= 0;
+  if (
+    !value ||
+    !(value.suppressed instanceof Map) ||
+    !(value.inflight instanceof Map) ||
+    !value.budgets ||
+    !validLane(value.budgets.cold) ||
+    !validLane(value.budgets.known)
+  ) {
+    throw transient("tempfail_route_lookup", "route");
+  }
+  return value;
+}
+
+function pruneSuppressedMisses(state, nowMS) {
+  for (const [key, expiresAt] of state.suppressed) {
+    if (expiresAt > nowMS) continue;
+    state.suppressed.delete(key);
+  }
+}
+
+function suppressedMissIsActive(state, key, nowMS) {
+  const expiresAt = state.suppressed.get(key);
+  if (!Number.isFinite(expiresAt) || expiresAt <= nowMS) {
+    state.suppressed.delete(key);
+    return false;
+  }
+  // Refresh insertion order without extending the fixed suppression deadline.
+  state.suppressed.delete(key);
+  state.suppressed.set(key, expiresAt);
+  return true;
+}
+
+function rememberSuppressedMiss(state, key, nowMS) {
+  pruneSuppressedMisses(state, nowMS);
+  state.suppressed.delete(key);
+  while (state.suppressed.size >= MAX_ROUTE_MISS_STATE_ENTRIES) {
+    state.suppressed.delete(state.suppressed.keys().next().value);
+  }
+  state.suppressed.set(key, nowMS + ROUTE_MISS_SUPPRESSION_TTL_MS);
+}
+
+async function routeMissKey(parsed, cryptoAPI) {
+  const input = new TextEncoder().encode(`${parsed.domain}\0${parsed.realmLabel}`);
+  return sha256Hex(input, cryptoAPI);
 }
 
 async function directoryJSON(namespace, key) {
@@ -109,9 +249,19 @@ async function controlPlaneRealmRoute(
   nowMS,
   minimumRevision = 0,
   missingIsTransient = false,
+  lookup,
 ) {
-  const request = controlPlaneRouteRequest(env, parsed);
-  if (!request) throw transient("tempfail_route_lookup", "route");
+  let request;
+  try {
+    request = controlPlaneRouteRequest(env, parsed);
+  } catch (error) {
+    emitRouteLookupMetric(env, lookup, "cp_error", error?.[EDGE_METRIC]?.status ?? 0);
+    throw error;
+  }
+  if (!request) {
+    emitRouteLookupMetric(env, lookup, "cp_error");
+    throw transient("tempfail_route_lookup", "route");
+  }
   const timeoutMS = boundedTimeout(
     env?.DIRECTORY_TIMEOUT_MS,
     DEFAULT_DIRECTORY_TIMEOUT_MS,
@@ -124,37 +274,127 @@ async function controlPlaneRealmRoute(
   try {
     response = await fetchAPI(new Request(request, { signal: controller.signal }));
   } catch {
+    emitRouteLookupMetric(env, lookup, "cp_error");
     throw transient("tempfail_route_lookup", "route");
   } finally {
     clearTimeout(timer);
   }
   if (response.status === 404) {
     if (minimumRevision > 0 || missingIsTransient) {
+      emitRouteLookupMetric(env, lookup, "cp_error", response.status);
       throw transient("tempfail_route_lookup", "route", response.status);
     }
+    emitRouteLookupMetric(env, lookup, "cp_not_found", response.status);
     return { status: "unknown" };
   }
-  if (response.status !== 200) throw transient("tempfail_route_lookup", "route", response.status);
+  if (response.status !== 200) {
+    emitRouteLookupMetric(env, lookup, "cp_error", response.status);
+    throw transient("tempfail_route_lookup", "route", response.status);
+  }
 
   let value;
   try {
     value = JSON.parse(await boundedResponseText(response, MAX_ROUTE_BYTES));
   } catch {
+    emitRouteLookupMetric(env, lookup, "cp_error", response.status);
     throw transient("tempfail_route_lookup", "route", response.status);
   }
   let route;
   try {
     route = validateRealmRouteProjection(value, parsed.domain, parsed.realmLabel);
   } catch {
+    emitRouteLookupMetric(env, lookup, "cp_error", response.status);
     throw transient("tempfail_route_lookup", "route", response.status);
   }
   if (
     route.controller_revision < minimumRevision ||
     !realmRouteProjectionIsFresh(route, nowMS)
   ) {
+    emitRouteLookupMetric(env, lookup, "cp_error", response.status);
     throw transient("tempfail_route_lookup", "route", response.status);
   }
+  emitRouteLookupMetric(env, lookup, "cp_found", response.status, route);
   return { status: "projection", route };
+}
+
+async function knownControlPlaneRealmRoute(
+  env,
+  parsed,
+  fetchAPI,
+  nowMS,
+  lookup,
+  state,
+  minimumRevision = 0,
+  missingIsTransient = true,
+) {
+  await admitControlPlaneLookup(env, lookup, state);
+  return controlPlaneRealmRoute(
+    env,
+    parsed,
+    fetchAPI,
+    nowMS,
+    minimumRevision,
+    missingIsTransient,
+    lookup,
+  );
+}
+
+async function coldControlPlaneRealmRoute(
+  env,
+  parsed,
+  fetchAPI,
+  cryptoAPI,
+  nowMS,
+  state,
+  lookup,
+) {
+  let key;
+  try {
+    key = await routeMissKey(parsed, cryptoAPI);
+  } catch {
+    emitRouteLookupMetric(env, lookup, "cp_error");
+    throw transient("tempfail_route_lookup", "route");
+  }
+  pruneSuppressedMisses(state, nowMS);
+  if (suppressedMissIsActive(state, key, nowMS)) {
+    emitRouteLookupMetric(env, lookup, "miss_suppressed");
+    throw transient("tempfail_route_lookup", "route");
+  }
+
+  const existing = state.inflight.get(key);
+  if (existing) {
+    emitRouteLookupMetric(env, lookup, "miss_suppressed");
+    const result = await existing;
+    if (result.status === "unknown") {
+      throw transient("tempfail_route_lookup", "route");
+    }
+    return result;
+  }
+  if (state.inflight.size >= MAX_ROUTE_MISS_STATE_ENTRIES) {
+    emitRouteLookupMetric(env, lookup, "cold_limited");
+    throw transient("tempfail_route_lookup", "route");
+  }
+
+  const operation = (async () => {
+    await admitControlPlaneLookup(env, lookup, state);
+    const result = await controlPlaneRealmRoute(
+      env,
+      parsed,
+      fetchAPI,
+      nowMS,
+      0,
+      false,
+      lookup,
+    );
+    if (result.status === "unknown") rememberSuppressedMiss(state, key, lookup.now());
+    return result;
+  })();
+  state.inflight.set(key, operation);
+  try {
+    return await operation;
+  } finally {
+    if (state.inflight.get(key) === operation) state.inflight.delete(key);
+  }
 }
 
 function realmRouteDisposition(route) {
@@ -180,27 +420,36 @@ async function projectedRealmRoute(
   nowMS,
   projectedValue,
   uncertainDirectory = false,
+  lookupContext,
 ) {
   let route;
   try {
     route = validateRealmRouteProjection(projectedValue, parsed.domain, parsed.realmLabel);
   } catch {
-    const fallback = await controlPlaneRealmRoute(
+    const fallback = await knownControlPlaneRealmRoute(
       env,
       parsed,
       fetchAPI,
       nowMS,
+      lookupContext.uncertain,
+      lookupContext.state,
       0,
       uncertainDirectory || projectedValue !== null,
     );
     return fallback.status === "projection" ? realmRouteDisposition(fallback.route) : fallback;
   }
-  if (realmRouteProjectionIsFresh(route, nowMS)) return realmRouteDisposition(route);
-  const fallback = await controlPlaneRealmRoute(
+  if (realmRouteProjectionIsFresh(route, nowMS)) {
+    emitRouteLookupMetric(env, lookupContext.known, "kv_fresh", 0, route);
+    return realmRouteDisposition(route);
+  }
+  const knownLookup = { ...lookupContext.known, routeKind: routeMetricKind(route) };
+  const fallback = await knownControlPlaneRealmRoute(
     env,
     parsed,
     fetchAPI,
     nowMS,
+    knownLookup,
+    lookupContext.state,
     route.controller_revision,
   );
   return fallback.status === "projection" ? realmRouteDisposition(fallback.route) : fallback;
@@ -253,21 +502,84 @@ async function legacyPilotRoute(env, parsed, envelopeTo) {
   };
 }
 
-async function resolveRealmRoute(env, parsed, envelopeTo, fetchAPI, nowMS) {
+async function resolveRealmRoute(
+  env,
+  parsed,
+  envelopeTo,
+  fetchAPI,
+  cryptoAPI,
+  nowMS,
+  now,
+  state,
+) {
+  const startedAt = nowMS;
+  const lookupContext = {
+    known: { evidence: "known", routeKind: "unknown", startedAt, now },
+    uncertain: { evidence: "uncertain", routeKind: "unknown", startedAt, now },
+    cold: { evidence: "none", routeKind: "unknown", startedAt, now },
+    state,
+  };
   const projected = await optionalDirectoryJSON(
     env.EMAIL_DIRECTORY,
     realmRouteKey(parsed.domain, parsed.realmLabel),
   );
   if (!projected.ok) {
-    return projectedRealmRoute(env, parsed, fetchAPI, nowMS, null, true);
+    const fallback = await knownControlPlaneRealmRoute(
+      env,
+      parsed,
+      fetchAPI,
+      nowMS,
+      lookupContext.uncertain,
+      state,
+      0,
+      true,
+    );
+    return fallback.status === "projection" ? realmRouteDisposition(fallback.route) : fallback;
   }
   if (projected.value != null) {
-    return projectedRealmRoute(env, parsed, fetchAPI, nowMS, projected.value);
+    return projectedRealmRoute(
+      env,
+      parsed,
+      fetchAPI,
+      nowMS,
+      projected.value,
+      false,
+      lookupContext,
+    );
   }
 
-  const legacy = await legacyPilotRoute(env, parsed, envelopeTo);
-  if (legacy != null) return legacy;
-  const fallback = await controlPlaneRealmRoute(env, parsed, fetchAPI, nowMS);
+  let legacy;
+  try {
+    legacy = await legacyPilotRoute(env, parsed, envelopeTo);
+  } catch (error) {
+    if (error?.[EDGE_METRIC]?.outcome === "tempfail_disabled") {
+      emitRouteLookupMetric(
+        env,
+        { ...lookupContext.known, routeKind: "pilot" },
+        "legacy",
+      );
+    } else {
+      emitRouteLookupMetric(env, lookupContext.uncertain, "kv_error");
+    }
+    throw error;
+  }
+  if (legacy != null) {
+    emitRouteLookupMetric(
+      env,
+      { ...lookupContext.known, routeKind: "pilot" },
+      "legacy",
+    );
+    return legacy;
+  }
+  const fallback = await coldControlPlaneRealmRoute(
+    env,
+    parsed,
+    fetchAPI,
+    cryptoAPI,
+    nowMS,
+    state,
+    lookupContext.cold,
+  );
   return fallback.status === "projection" ? realmRouteDisposition(fallback.route) : fallback;
 }
 
@@ -349,6 +661,7 @@ async function handleEmailTransaction(message, env, runtime = {}) {
   const fetchAPI = runtime.fetch ?? fetch;
   const cryptoAPI = runtime.crypto ?? crypto;
   const now = runtime.now ?? (() => Date.now());
+  const lookupState = routeLookupState(runtime.routeLookupState ?? defaultRouteLookupState);
   if (!env?.EMAIL_DIRECTORY || typeof env.EMAIL_DIRECTORY.get !== "function") {
     throw transient("tempfail_configuration", "configuration");
   }
@@ -363,7 +676,16 @@ async function handleEmailTransaction(message, env, runtime = {}) {
     return { outcome: "rejected_invalid_recipient", phase: "recipient", status: 550 };
   }
 
-  const resolved = await resolveRealmRoute(env, parsed, envelopeTo, fetchAPI, now());
+  const resolved = await resolveRealmRoute(
+    env,
+    parsed,
+    envelopeTo,
+    fetchAPI,
+    cryptoAPI,
+    now(),
+    now,
+    lookupState,
+  );
   if (resolved.status === "invalid") {
     message.setReject(PERMANENT_REJECTION);
     return { outcome: "rejected_invalid_recipient", phase: "recipient", status: 550 };

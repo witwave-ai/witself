@@ -1,4 +1,5 @@
 export const EDGE_METRICS_SCHEMA = "witself.agent-email.edge.v1";
+export const ROUTE_LOOKUP_METRICS_SCHEMA = "witself.agent-email.route-lookup.v1";
 
 const OUTCOMES = new Set([
   "accepted",
@@ -27,6 +28,21 @@ const PHASES = new Set([
   "configuration", "recipient", "directory", "content", "signing",
   "fetch", "response", "route", "internal",
 ]);
+
+const ROUTE_LOOKUP_RESULTS = new Set([
+  "kv_fresh",
+  "legacy",
+  "cp_found",
+  "cp_not_found",
+  "miss_suppressed",
+  "cold_limited",
+  "known_limited",
+  "kv_error",
+  "cp_error",
+]);
+
+const ROUTE_LOOKUP_EVIDENCE = new Set(["none", "known", "uncertain"]);
+const ROUTE_LOOKUP_KINDS = new Set(["canonical", "alias", "pilot", "unknown"]);
 
 function boundedNonNegative(value) {
   const number = Number(value);
@@ -61,6 +77,42 @@ export function recordEdgeVerdict(env, fields) {
         1,
         boundedNonNegative(fields?.durationMS),
         boundedNonNegative(fields?.rawSize),
+        boundedNonNegative(fields?.status),
+      ],
+    });
+  } catch {
+    // Metrics are not part of the SMTP transaction contract.
+  }
+}
+
+// Route lookup telemetry deliberately shares the edge Analytics Engine
+// dataset under a distinct schema. It contains only fixed enums and bounded
+// numbers: never an address, domain, realm label, route digest, account, or
+// tenant identifier. The separate schema keeps existing verdict queries
+// stable while making cold-miss pressure and dependency failures visible.
+export function recordRouteLookup(env, fields) {
+  const dataset = env?.EMAIL_EDGE_METRICS;
+  if (!dataset || typeof dataset.writeDataPoint !== "function") return;
+  const requestedResult = String(fields?.result ?? "");
+  const result = ROUTE_LOOKUP_RESULTS.has(requestedResult) ? requestedResult : "cp_error";
+  const requestedEvidence = String(fields?.evidence ?? "");
+  const evidence = ROUTE_LOOKUP_EVIDENCE.has(requestedEvidence)
+    ? requestedEvidence
+    : "uncertain";
+  const requestedKind = String(fields?.routeKind ?? "");
+  const routeKind = ROUTE_LOOKUP_KINDS.has(requestedKind) ? requestedKind : "unknown";
+  try {
+    dataset.writeDataPoint({
+      indexes: [result],
+      blobs: [
+        ROUTE_LOOKUP_METRICS_SCHEMA,
+        result,
+        evidence,
+        routeKind,
+      ],
+      doubles: [
+        1,
+        boundedNonNegative(fields?.durationMS),
         boundedNonNegative(fields?.status),
       ],
     });

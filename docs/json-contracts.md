@@ -1186,12 +1186,60 @@ continuation cursor. For example, an administrator request page is:
     }
   ],
   "truncated": true,
-  "next_cursor": "opaque-control-plane-cursor"
+  "next_cursor": "opaque-control-plane-cursor",
+  "pending_counter_state": "ready",
+  "technical_pending_limits": {
+    "per_realm": 8,
+    "per_account": 64
+  }
 }
 ```
 
-The customer request route uses the same page shape. The other administrator
-pages replace `requests` with exactly one of:
+The customer request route uses the same page shape and additionally includes
+`pending_capacity` for the authenticated realm and account. An administrator
+request list includes the same capacity only when both `account_id` and
+`realm_id` filters are present. `pending_capacity` uses `used`, `max`,
+`remaining`, and `at_limit` for each scope. `pending_counter_state=rebuilding`
+omits capacity and makes count-changing mutations fail closed until the bounded
+upgrade or administrative recovery finishes. A technical admission refusal is
+stable and value-free:
+
+```json
+{
+  "schema_version": "witself.realm-email-alias.v1",
+  "error": "realm email alias pending request ceiling reached",
+  "code": "technical_pending_limit_reached",
+  "scope": "realm",
+  "limit": 8
+}
+```
+
+`scope` is exactly `realm` or `account`; `limit` is the effective configured
+ceiling. The refusal does not append a durable audit row.
+
+The platform-admin recovery route
+`POST /v1/admin/realm-email-alias-counters:rebuild` accepts:
+
+```json
+{
+  "idempotency_key": "repair-2026-08-02-01",
+  "reason": "repair operator-detected derived counter drift"
+}
+```
+
+After durably installing the recovery fence and successfully arming its alarm,
+it returns 202 with
+`{"schema_version":"witself.realm-email-alias.v1","accepted":true,"pending_counter_state":"rebuilding"}`.
+If the first alarm write fails after the durable install, the request returns
+retryable 503. The same key and body then re-attempt alarm installation and
+returns the stored 202 without a second audit event. A changed body for the same
+key, or a different request while recovery is active, returns 409. Recovery
+clears derived usage state, scans canonical claims, then verifies the rebuilt
+membership and aggregates in bounded 100-claim pages; only the completed
+verification pass may restore `ready`. Later alarm re-arm failures fail the
+alarm invocation so the platform retries it from the durable cursor.
+
+The other administrator pages replace `requests` with exactly one of:
 
 - `aliases`: realm alias assignment objects, including `claim_id`, `alias`,
   `domain`, `account_id`, `realm_id`, `status`, `assignment_kind`, and

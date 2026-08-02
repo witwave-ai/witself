@@ -219,10 +219,136 @@ test("route matchers keep customer and platform-admin namespaces distinct", () =
     "/v1/admin/realm-email-aliases",
     "/v1/admin/realm-email-aliases/acme:suspend",
     "/v1/admin/realm-email-aliases:assign-internal",
+    "/v1/admin/realm-email-alias-counters:rebuild",
     "/v1/admin/realm-email-reserved-names",
     "/v1/admin/realm-email-reserved-names/witself",
     "/v1/admin/realm-email-alias-audit",
   ]) assert.equal(isRealmEmailAliasAdminPath(path), true, path);
+  assert.equal(
+    isRealmEmailAliasAdminPath(
+      "/v1/admin/realm-email-alias-counters:rebuild/extra",
+    ),
+    false,
+  );
+});
+
+test("platform-admin counter rebuild endpoint authenticates, bounds input, and replays idempotently", async () => {
+  const { env } = environment();
+  delete env.CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED;
+  const url = new URL(
+    "https://self.example/v1/admin/realm-email-alias-counters:rebuild",
+  );
+  const request = (body) => new Request(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  const unauthenticated = await handleRealmEmailAliasAdminRequest(
+    request({
+      idempotency_key: "counter-api-unauthenticated",
+      reason: "must not reach the registry",
+    }),
+    env,
+    url,
+    null,
+  );
+  assert.equal(unauthenticated.status, 401);
+
+  const wrongVerb = await handleRealmEmailAliasAdminRequest(
+    new Request(url),
+    env,
+    url,
+    ADMIN,
+  );
+  assert.equal(wrongVerb.status, 405);
+
+  const invalidJSON = await handleRealmEmailAliasAdminRequest(
+    new Request(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{",
+    }),
+    env,
+    url,
+    ADMIN,
+  );
+  assert.equal(invalidJSON.status, 400);
+
+  const oversized = await handleRealmEmailAliasAdminRequest(
+    new Request(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ padding: "x".repeat(16 * 1024) }),
+    }),
+    env,
+    url,
+    ADMIN,
+  );
+  assert.equal(oversized.status, 413);
+
+  const body = {
+    actor: { kind: "platform_admin", id: "spoofed-admin" },
+    idempotency_key: "counter-api-rebuild",
+    reason: "repair operator-detected derived counter drift",
+  };
+  const accepted = await handleRealmEmailAliasAdminRequest(
+    request(body),
+    env,
+    url,
+    ADMIN,
+  );
+  assert.equal(accepted.status, 202);
+  const acceptedBody = await accepted.json();
+  assert.equal(acceptedBody.pending_counter_state, "rebuilding");
+
+  const replay = await handleRealmEmailAliasAdminRequest(
+    request(body),
+    env,
+    url,
+    ADMIN,
+  );
+  assert.equal(replay.status, 202);
+  assert.deepEqual(await replay.json(), acceptedBody);
+
+  const changedReplay = await handleRealmEmailAliasAdminRequest(
+    request({
+      ...body,
+      reason: "same key must not authorize a changed rebuild request",
+    }),
+    env,
+    url,
+    ADMIN,
+  );
+  assert.equal(changedReplay.status, 409);
+
+  const concurrent = await handleRealmEmailAliasAdminRequest(
+    request({
+      idempotency_key: "counter-api-rebuild-concurrent",
+      reason: "must not replace an active recovery fence",
+    }),
+    env,
+    url,
+    ADMIN,
+  );
+  assert.equal(concurrent.status, 409);
+
+  const auditURL = new URL(
+    "https://self.example/v1/admin/realm-email-alias-audit?limit=100",
+  );
+  const audit = await handleRealmEmailAliasAdminRequest(
+    new Request(auditURL),
+    env,
+    auditURL,
+    ADMIN,
+  );
+  assert.equal(audit.status, 200);
+  const rebuildEvents = (await audit.json()).events.filter((event) =>
+    event.action === "alias.pending_counters_rebuild_requested"
+  );
+  assert.equal(rebuildEvents.length, 1);
+  assert.equal(rebuildEvents[0].actor_id, ADMIN.admin_id);
+  assert.notEqual(rebuildEvents[0].actor_id, body.actor.id);
 });
 
 test("customer request verifies operator, realm, and current plan before claiming", async () => {

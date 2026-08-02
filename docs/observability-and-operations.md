@@ -23,6 +23,22 @@ with its own metrics Service and optional ServiceMonitor or PodMonitor. Worker
 labels are limited to process-defined job names, retention mode, and bounded
 result/count classes; tenant identifiers and stored content are never labels.
 
+Control-plane realm-alias guard status (2026-08-02): the authoritative Durable
+Object maintains exact value-free open-request counters per realm and account,
+plus per-realm allocated-customer counts. Authenticated request-list responses
+surface only readiness, configured maxima, used, remaining, and at-limit state
+for the caller's scoped realm/account. A bounded legacy rebuild failure emits
+one fixed Cloudflare log message with no account, realm, alias, request, or claim
+identifier and no error text; count-changing requests remain fail-closed while
+rebuilding. Technical-ceiling refusal emits exactly the low-cardinality
+Cloudflare JSON event `realm_email_alias_pending_limit_refused` with only
+`scope=realm|account` and numeric `limit`; it includes no tenant identifier and
+does not append per-refusal durable audit history. Administrative counter
+recovery does append one value-free request audit event, then uses bounded
+clear, canonical scan, and verification phases before reopening writes. These
+counters are admission state, not billable usage and not tenant labels in the
+Prometheus plane.
+
 Narrative-memory contract (accepted 2026-07-14): memory observability covers
 deterministic search, client-supplied vectors, curation queues/leases/conflicts,
 and archive rebuilds. `witself-server` never calls a model, so there are no
@@ -241,6 +257,24 @@ duration milliseconds, raw byte count, and response status. No address,
 account, realm, agent, sender, subject, message identifier, route label,
 digest, signature, token, content, or error text is recorded. Analytics
 failure never changes the SMTP disposition.
+
+The same dataset carries a second fixed schema marker,
+`witself.agent-email.route-lookup.v1`, for dependency shielding and route-cache
+convergence. Its `result` is one of `kv_fresh`, `legacy`, `cp_found`,
+`cp_not_found`, `miss_suppressed`, `cold_limited`, `known_limited`, `kv_error`,
+or `cp_error`; `evidence` is `none`, `known`, or `uncertain`; and `route_kind`
+is `canonical`, `alias`, `pilot`, or `unknown`. Numeric fields are limited to
+count, duration milliseconds, and response status. The event never contains an
+address, domain, realm label, account, realm, agent, route digest, limiter key,
+or error text. Each recipient lookup emits exactly one terminal route event. If
+a failed or corrupt KV read continues to the control plane,
+`evidence=uncertain` carries that context on the terminal control-plane result;
+there is no second early `kv_error` event. Strict fixed in-isolate windows admit
+at most 10 cold and 100 known-or-uncertain leader lookups per 10 seconds before
+the fixed-key, per-location Cloudflare shield. Singleflight followers consume
+no additional admission. Cloudflare's shared rate counters are permissive and
+eventually consistent, so neither layer is exact account-level accounting or a
+customer quota.
 | `witself_limit_decisions_total` | Rate limit, quota, and plan-limit decisions by dimension and action. |
 | `witself_storage_operations_total` | Storage operations by backend, operation, and result. |
 | `witself_storage_operation_duration_seconds` | Storage operation latency histogram. |
@@ -562,6 +596,11 @@ Initial alert candidates:
   `tempfail_suspended_route` outcomes (control-plane/directory convergence or
   managed-route lifecycle problems). Keep alerts aggregate and do not add a
   domain, realm label, account, or recipient dimension.
+- Sustained inbound-email route-lookup `cold_limited`, `known_limited`,
+  `miss_suppressed`, `kv_error`, or `cp_error` results. These distinguish
+  probing pressure from directory/control-plane convergence without exposing
+  the probed domain or label; alerts remain aggregate because the protective
+  limiter is approximate and per location.
 - Relay envelope drop or quarantine rate above a baseline (cross-realm routing or
   flood signal).
 - Loop-suspension or budget-exhaustion spikes (possible cross-realm loop, flood,

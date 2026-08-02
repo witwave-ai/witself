@@ -21,6 +21,24 @@
       "dataset": "witself_agent_email_edge"
     }
   ],
+  "ratelimits": [
+    {
+      "name": "REALM_ROUTE_COLD_MISS_LIMITER",
+      "namespace_id": "2201",
+      "simple": {
+        "limit": 10,
+        "period": 10
+      }
+    },
+    {
+      "name": "REALM_ROUTE_KNOWN_MISS_LIMITER",
+      "namespace_id": "2202",
+      "simple": {
+        "limit": 100,
+        "period": 10
+      }
+    }
+  ],
   "vars": {
     "RELAY_KEY_ID": "__RELAY_KEY_ID__",
     "CONTROL_PLANE_URL": "__CONTROL_PLANE_URL__",

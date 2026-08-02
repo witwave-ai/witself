@@ -9,10 +9,13 @@ import {
   realmEmailAliasSkeleton,
   REALM_EMAIL_ALIAS_FEATURE,
   REALM_EMAIL_ALIAS_LIMIT,
+  REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT,
+  REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM,
   buildRealmEmailRouteProjection,
   reconcileRealmEmailAliasesForAccountLifecycle,
   reconcileRealmEmailAliasesForPlan,
   realmEmailRouteKey,
+  realmEmailAliasPendingRequestLimits,
 } from "../src/realm-email-alias-runtime.mjs";
 
 const ACCOUNT = "acct_alias";
@@ -22,6 +25,15 @@ const OTHER_REALM = "realm_bbbbbbbbbbbbbbbb";
 const DOMAIN = "agent-mail.witwave.ai";
 const OPERATOR = { kind: "account_operator", id: "opr_alias" };
 const ADMIN = { kind: "platform_admin", id: "adm_alias" };
+
+function testBase32(value, pad = "a") {
+  const alphabet = "abcdefghijklmnopqrstuvwxyz234567";
+  let encoded = "";
+  for (let current = value; current > 0; current = Math.floor(current / 32)) {
+    encoded = alphabet[current % 32] + encoded;
+  }
+  return (encoded || "a").padStart(16, pad);
+}
 
 class Storage {
   constructor() {
@@ -62,7 +74,15 @@ class Storage {
     );
     const transaction = {
       get: async (key) => structuredClone(staged.get(key)),
-      put: async (key, value) => staged.set(key, structuredClone(value)),
+      put: async (key, value) => {
+        const blocker = this.transactionPutBlocker;
+        if (blocker && blocker.key === key && blocker.matches(value)) {
+          this.transactionPutBlocker = null;
+          blocker.startedResolve();
+          await blocker.wait;
+        }
+        staged.set(key, structuredClone(value));
+      },
       delete: async (key) => staged.delete(key),
     };
     const result = await callback(transaction);
@@ -70,7 +90,33 @@ class Storage {
     return result;
   }
 
+  blockNextTransactionPut(key, matches = () => true) {
+    let startedResolve;
+    let release;
+    const started = new Promise((resolve) => {
+      startedResolve = resolve;
+    });
+    const wait = new Promise((resolve) => {
+      release = resolve;
+    });
+    this.transactionPutBlocker = {
+      key,
+      matches,
+      startedResolve,
+      wait,
+    };
+    return { started, release };
+  }
+
   async setAlarm(value) {
+    this.setAlarmCallCount = (this.setAlarmCallCount ?? 0) + 1;
+    if (this.failAtSetAlarm === this.setAlarmCallCount) {
+      throw new Error("simulated setAlarm failure");
+    }
+    if ((this.failSetAlarms ?? 0) > 0) {
+      this.failSetAlarms--;
+      throw new Error("simulated setAlarm failure");
+    }
     this.alarmAt = value;
   }
 
@@ -135,6 +181,7 @@ class KV {
 
 function registry() {
   const storage = new Storage();
+  const logs = [];
   const directory = new KV([
     [`acct:${ACCOUNT}`, { cell: "cell-one" }],
     [`acct:${OTHER_ACCOUNT}`, { cell: "cell-one" }],
@@ -225,13 +272,14 @@ function registry() {
       now: () => new Date(currentTime++),
       newRequestID: () => {
         requestSequence++;
-        return `earq_${"a".repeat(15)}${String.fromCharCode(96 + requestSequence)}`;
+        return `earq_${testBase32(requestSequence, "a")}`;
       },
       newClaimID: () => {
         claimSequence++;
-        return `era_${"b".repeat(15)}${String.fromCharCode(96 + claimSequence)}`;
+        return `era_${testBase32(claimSequence, "a")}`;
       },
       fetch: fetchImpl,
+      log: (value) => logs.push(String(value)),
     },
   );
   return {
@@ -240,6 +288,7 @@ function registry() {
     directory,
     emailDirectory,
     cellClaims,
+    logs,
     env,
     setAuthoritativePlan(snapshot) {
       authoritativePlan = structuredClone(snapshot);
@@ -342,6 +391,24 @@ test("plan entitlement treats a missing or null enabled limit as unlimited", () 
   }), { enabled: false, limit: 0 });
 });
 
+test("pending request safety ceilings are plan-independent and only configurable downward", () => {
+  assert.deepEqual(realmEmailAliasPendingRequestLimits({}), {
+    per_realm: REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM,
+    per_account: REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT,
+  });
+  assert.deepEqual(realmEmailAliasPendingRequestLimits({
+    CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM: "2",
+    CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT: "7",
+  }), { per_realm: 2, per_account: 7 });
+  assert.throws(() => realmEmailAliasPendingRequestLimits({
+    CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM: "9",
+  }), /configuration is invalid/);
+  assert.throws(() => realmEmailAliasPendingRequestLimits({
+    CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM: "8",
+    CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT: "7",
+  }), /configuration is inconsistent/);
+});
+
 test("seed policy blocks exact and confusable Witself names", async () => {
   const { runtime } = registry();
   for (const [name] of INITIAL_RESERVED_REALM_EMAIL_ALIASES) {
@@ -366,7 +433,7 @@ test("seed policy blocks exact and confusable Witself names", async () => {
 });
 
 test("customer request, approval, projection, idempotency, and tombstone are durable", async () => {
-  const { runtime, emailDirectory } = registry();
+  const { runtime, emailDirectory, storage } = registry();
   const created = await requestAlias(runtime, "acme");
   assert.equal(created.response.status, 202);
   assert.equal(created.body.request.status, "pending_review");
@@ -429,6 +496,11 @@ test("customer request, approval, projection, idempotency, and tombstone are dur
   assert.equal(retiredProjection.claim_id, undefined);
   assert.equal(retiredProjection.cell_audience, undefined);
   assert.equal(retiredProjection.ingest_url, undefined);
+  assert.equal(
+    (await storage.get(`claim-usage-realm:${ACCOUNT}:${REALM}`))
+      .customer_allocated,
+    0,
+  );
 
   const reused = await requestAlias(runtime, "acme", {
     account_id: OTHER_ACCOUNT,
@@ -437,6 +509,549 @@ test("customer request, approval, projection, idempotency, and tombstone are dur
   });
   assert.equal(reused.response.status, 409);
   assert.match(reused.body.error, /claimed or tombstoned/);
+});
+
+test("realm and account pending ceilings bound unlimited plans with replay-safe capacity", async () => {
+  const { runtime, storage, env, logs } = registry();
+  env.CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM = "2";
+  env.CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT = "2";
+
+  const first = await requestAlias(runtime, "queue-one", { alias_limit: null });
+  const second = await requestAlias(runtime, "queue-two", {
+    alias_limit: null,
+    realm_id: OTHER_REALM,
+  });
+  assert.equal(first.response.status, 202);
+  assert.equal(second.response.status, 202);
+
+  const auditSequenceBeforeRefusal = (await storage.get("meta")).audit_sequence;
+  const accountBlocked = await requestAlias(runtime, "queue-three", {
+    alias_limit: null,
+    realm_id: OTHER_REALM,
+  });
+  assert.equal(accountBlocked.response.status, 409);
+  assert.match(accountBlocked.body.error, /account.*ceiling/);
+  assert.equal(accountBlocked.body.code, "technical_pending_limit_reached");
+  assert.equal(accountBlocked.body.scope, "account");
+  assert.equal(accountBlocked.body.limit, 2);
+  assert.equal(
+    (await storage.get("meta")).audit_sequence,
+    auditSequenceBeforeRefusal,
+    "technical admission refusals must not grow durable audit history",
+  );
+  assert.deepEqual(JSON.parse(logs.at(-1)), {
+    event: "realm_email_alias_pending_limit_refused",
+    scope: "account",
+    limit: 2,
+  });
+  assert.equal(logs.at(-1).includes(ACCOUNT), false);
+  assert.equal(logs.at(-1).includes(OTHER_REALM), false);
+  assert.equal(logs.at(-1).includes("queue-three"), false);
+
+  const replay = await requestAlias(runtime, "queue-one", { alias_limit: null });
+  assert.equal(replay.response.status, 202);
+  assert.deepEqual(replay.body, first.body);
+  assert.equal(
+    (await storage.get(`claim-usage-account:${ACCOUNT}`)).open_requests,
+    2,
+  );
+  const visibleCapacity = await call(runtime, "/request/list", {
+    actor: OPERATOR,
+    account_id: ACCOUNT,
+    realm_id: REALM,
+  });
+  assert.equal(visibleCapacity.body.pending_counter_state, "ready");
+  assert.deepEqual(visibleCapacity.body.technical_pending_limits, {
+    per_realm: 2,
+    per_account: 2,
+  });
+  assert.deepEqual(visibleCapacity.body.pending_capacity.realm, {
+    used: 1,
+    max: 2,
+    remaining: 1,
+    at_limit: false,
+  });
+
+  await call(runtime, "/request/reject", {
+    actor: ADMIN,
+    request_id: second.body.request.id,
+    reason: "clear one technical slot",
+    idempotency_key: "reject-queue-two",
+  });
+  const replacement = await requestAlias(runtime, "queue-three", {
+    alias_limit: null,
+    realm_id: OTHER_REALM,
+  });
+  assert.equal(replacement.response.status, 202);
+});
+
+test("compiled pending ceilings reject the exact ninth realm and sixty-fifth account requests", async () => {
+  {
+    const { runtime, storage } = registry();
+    for (let index = 0; index < REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM; index++) {
+      assert.equal((await requestAlias(runtime, `realmcap${index}`, {
+        alias_limit: null,
+      })).response.status, 202);
+    }
+    const ninth = await requestAlias(runtime, "realmcap8", {
+      alias_limit: null,
+    });
+    assert.equal(ninth.response.status, 409);
+    assert.match(ninth.body.error, /realm.*ceiling/);
+    assert.equal(ninth.body.code, "technical_pending_limit_reached");
+    assert.equal(ninth.body.scope, "realm");
+    assert.equal(ninth.body.limit, REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM);
+    assert.equal(
+      (await storage.get(`claim-usage-realm:${ACCOUNT}:${REALM}`)).open_requests,
+      REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM,
+    );
+  }
+
+  {
+    const { runtime, storage } = registry();
+    const realmCount = REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT /
+      REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM;
+    for (let realmIndex = 0; realmIndex < realmCount; realmIndex++) {
+      const realmID = `realm_${testBase32(realmIndex + 10)}`;
+      for (let slot = 0; slot < REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM; slot++) {
+        const ordinal = realmIndex * REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM + slot;
+        const created = await requestAlias(runtime, `accountcap${ordinal}`, {
+          alias_limit: null,
+          realm_id: realmID,
+        });
+        assert.equal(
+          created.response.status,
+          202,
+          `ordinal=${ordinal} ${JSON.stringify(created.body)}`,
+        );
+      }
+    }
+    const sixtyFifth = await requestAlias(runtime, "accountcap64", {
+      alias_limit: null,
+      realm_id: `realm_${testBase32(99)}`,
+    });
+    assert.equal(sixtyFifth.response.status, 409);
+    assert.match(sixtyFifth.body.error, /account.*ceiling/);
+    assert.equal(sixtyFifth.body.code, "technical_pending_limit_reached");
+    assert.equal(sixtyFifth.body.scope, "account");
+    assert.equal(
+      sixtyFifth.body.limit,
+      REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT,
+    );
+    assert.equal(
+      (await storage.get(`claim-usage-account:${ACCOUNT}`)).open_requests,
+      REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT,
+    );
+  }
+});
+
+test("concurrent creates cannot overshoot the serialized realm ceiling", async () => {
+  const { runtime, storage, env } = registry();
+  env.CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM = "2";
+  env.CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT = "64";
+  const results = await Promise.all([
+    requestAlias(runtime, "race-one", { alias_limit: null }),
+    requestAlias(runtime, "race-two", { alias_limit: null }),
+    requestAlias(runtime, "race-three", { alias_limit: null }),
+  ]);
+  assert.deepEqual(
+    results.map((result) => result.response.status).sort(),
+    [202, 202, 409],
+  );
+  assert.equal(
+    (await storage.get(`claim-usage-realm:${ACCOUNT}:${REALM}`)).open_requests,
+    2,
+  );
+});
+
+test("failed provisioning holds open capacity and alarm completion applies an exact delta", async () => {
+  const { runtime, storage, env, emailDirectory, advance } = registry();
+  env.CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM = "2";
+  env.CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT = "64";
+
+  const first = await requestAlias(runtime, "slow-open", { alias_limit: null });
+  emailDirectory.failPuts = 1;
+  const failed = await approve(runtime, first.body.request, { alias_limit: null });
+  assert.equal(failed.response.status, 502);
+  let usage = await storage.get(`claim-usage-realm:${ACCOUNT}:${REALM}`);
+  assert.deepEqual({
+    open: usage.open_requests,
+    pending: usage.pending_review,
+    provisioning: usage.provisioning,
+    allocated: usage.customer_allocated,
+  }, { open: 1, pending: 0, provisioning: 1, allocated: 1 });
+
+  const intervening = await requestAlias(runtime, "other-open", {
+    alias_limit: null,
+  });
+  assert.equal(intervening.response.status, 202);
+  const blocked = await requestAlias(runtime, "blocked-open", {
+    alias_limit: null,
+  });
+  assert.equal(blocked.response.status, 409);
+  assert.match(blocked.body.error, /realm.*ceiling/);
+
+  advance(5 * 60 * 1_000 + 1_000);
+  await runtime.alarm();
+  usage = await storage.get(`claim-usage-realm:${ACCOUNT}:${REALM}`);
+  assert.deepEqual({
+    open: usage.open_requests,
+    pending: usage.pending_review,
+    provisioning: usage.provisioning,
+    allocated: usage.customer_allocated,
+  }, { open: 1, pending: 1, provisioning: 0, allocated: 1 });
+
+  const healedReplay = await approve(runtime, first.body.request, {
+    alias_limit: null,
+  });
+  assert.equal(healedReplay.response.status, 200);
+  assert.equal(
+    (await storage.get(`claim-usage-realm:${ACCOUNT}:${REALM}`)).open_requests,
+    1,
+  );
+  assert.equal((await requestAlias(runtime, "blocked-open", {
+    alias_limit: null,
+  })).response.status, 202);
+});
+
+test("legacy counter rebuild is bounded and customer creation fails closed until ready", async () => {
+  const { runtime, storage, advance } = registry();
+  const legacy = await requestAlias(runtime, "legacy-open", {
+    alias_limit: null,
+  });
+  const claim = await storage.get("claim:legacy-open");
+  const meta = await storage.get("meta");
+  delete meta.pending_counter_schema_version;
+  await storage.put("meta", meta);
+  for (const key of [
+    `claim-usage-member:${claim.claim_id}`,
+    `claim-usage-account-member:${ACCOUNT}:${claim.claim_id}`,
+    `claim-usage-realm-member:${ACCOUNT}:${REALM}:${claim.claim_id}`,
+    `claim-usage-account:${ACCOUNT}`,
+    `claim-usage-realm:${ACCOUNT}:${REALM}`,
+  ]) {
+    await storage.delete(key);
+  }
+  for (let index = 0; index < 100; index++) {
+    const alias = `legacy${index}`;
+    await storage.put(`claim:${alias}`, {
+      claim_id: `era_${testBase32(1_000 + index)}`,
+      alias,
+      account_id: ACCOUNT,
+      realm_id: REALM,
+      assignment_kind: "customer",
+      assignment_revision: 1,
+      customer_activation_intent: false,
+      created_at: "2026-07-31T00:00:00.000Z",
+      updated_at: "2026-07-31T00:00:00.000Z",
+      retired_at: null,
+    });
+  }
+
+  storage.listCalls.length = 0;
+  const fenced = await requestAlias(runtime, "during-rebuild", {
+    alias_limit: null,
+  });
+  assert.equal(fenced.response.status, 503);
+  assert.match(fenced.body.error, /counters are still rebuilding/);
+  await runtime.alarm();
+  assert.equal(
+    (await storage.get("meta")).pending_counter_schema_version,
+    undefined,
+    "one alarm may advance only one bounded migration page",
+  );
+  for (let page = 0; page < 3; page++) {
+    advance(5_001);
+    await runtime.alarm();
+    if (page < 2) {
+      assert.notEqual(
+        (await storage.get("meta")).pending_counter_schema_version,
+        1,
+        "the write fence stays closed through the full verification pass",
+      );
+    }
+  }
+  assert.equal(
+    (await storage.get("meta")).pending_counter_schema_version,
+    1,
+  );
+  assert.equal(
+    (await storage.get(`claim-usage-realm:${ACCOUNT}:${REALM}`)).open_requests,
+    1,
+  );
+  assert.equal(
+    (await storage.get(`claim-usage-realm:${ACCOUNT}:${REALM}`))
+      .customer_allocated,
+    100,
+  );
+  const migrationRead = storage.listCalls.find((entry) =>
+    entry.prefix === "claim:" && entry.limit === 101
+  );
+  assert.ok(migrationRead, "migration did not use its bounded claim page");
+  assert.equal((await requestAlias(runtime, "during-rebuild", {
+    alias_limit: null,
+  })).response.status, 202);
+  assert.equal(legacy.response.status, 202);
+});
+
+test("missing or corrupt durable usage state fails closed", async () => {
+  const { runtime, storage } = registry();
+  await requestAlias(runtime, "counter-guard", { alias_limit: null });
+  await storage.delete(`claim-usage-realm:${ACCOUNT}:${REALM}`);
+  const missing = await requestAlias(runtime, "counter-missing", {
+    alias_limit: null,
+  });
+  assert.equal(missing.response.status, 503);
+  assert.match(missing.body.error, /counter is missing/);
+
+  await storage.put(`claim-usage-realm:${ACCOUNT}:${REALM}`, {
+    schema_version: 1,
+    account_id: ACCOUNT,
+    realm_id: REALM,
+    open_requests: -1,
+    pending_review: 0,
+    provisioning: 0,
+    customer_allocated: 0,
+  });
+  const corrupt = await requestAlias(runtime, "counter-corrupt", {
+    alias_limit: null,
+  });
+  assert.equal(corrupt.response.status, 503);
+  assert.match(corrupt.body.error, /counter is invalid/);
+});
+
+test("ordinary transitions require exact membership and an audited rebuild repairs ready-state drift", async () => {
+  const { runtime, storage, advance } = registry();
+  const created = await requestAlias(runtime, "counter-repair", {
+    alias_limit: null,
+  });
+  assert.equal(created.response.status, 202);
+  const claim = await storage.get("claim:counter-repair");
+  const memberKey = `claim-usage-member:${claim.claim_id}`;
+  const member = await storage.get(memberKey);
+
+  await storage.delete(memberKey);
+  const missingMember = await call(runtime, "/request/reject", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+    reason: "exercise the exact membership guard",
+    idempotency_key: "reject-missing-membership",
+  });
+  assert.equal(missingMember.response.status, 503);
+  assert.match(missingMember.body.error, /membership drifted/);
+  assert.equal(
+    (await storage.get(`request:${created.body.request.id}`)).status,
+    "pending_review",
+  );
+
+  // Restore the exact member, then introduce a structurally plausible count
+  // change without its deterministic integrity projection. The next ordinary
+  // transition must fail closed instead of normalizing around the drift.
+  await storage.put(memberKey, member);
+  const realmUsageKey = `claim-usage-realm:${ACCOUNT}:${REALM}`;
+  const driftedUsage = await storage.get(realmUsageKey);
+  driftedUsage.open_requests = 2;
+  driftedUsage.pending_review = 2;
+  await storage.put(realmUsageKey, driftedUsage);
+  const aggregateDrift = await call(runtime, "/request/reject", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+    reason: "exercise the aggregate integrity guard",
+    idempotency_key: "reject-aggregate-drift",
+  });
+  assert.equal(aggregateDrift.response.status, 503);
+  assert.match(aggregateDrift.body.error, /counter is invalid/);
+
+  const wrongActor = await call(runtime, "/counter/rebuild", {
+    actor: OPERATOR,
+    reason: "must require a platform administrator",
+    idempotency_key: "counter-rebuild-wrong-actor",
+  });
+  assert.equal(wrongActor.response.status, 400);
+
+  const rebuildInput = {
+    actor: ADMIN,
+    reason: "repair detected pending-counter drift",
+    idempotency_key: "counter-rebuild-repair",
+  };
+  const accepted = await call(runtime, "/counter/rebuild", rebuildInput);
+  assert.equal(accepted.response.status, 202);
+  assert.deepEqual(accepted.body, {
+    schema_version: "witself.realm-email-alias.v1",
+    accepted: true,
+    pending_counter_state: "rebuilding",
+  });
+  const replay = await call(runtime, "/counter/rebuild", rebuildInput);
+  assert.equal(replay.response.status, 202);
+  assert.deepEqual(replay.body, accepted.body);
+  const collision = await call(runtime, "/counter/rebuild", {
+    actor: ADMIN,
+    reason: "a second recovery must not replace the active fence",
+    idempotency_key: "counter-rebuild-collision",
+  });
+  assert.equal(collision.response.status, 409);
+
+  assert.equal((await requestAlias(runtime, "rebuild-fenced", {
+    alias_limit: null,
+  })).response.status, 503);
+  assert.equal((await call(runtime, "/request/reject", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+    reason: "writes stay fenced for the entire rebuild",
+    idempotency_key: "reject-while-rebuilding",
+  })).response.status, 503);
+
+  let rebuilt = false;
+  for (let page = 0; page < 12; page++) {
+    await runtime.alarm();
+    const meta = await storage.get("meta");
+    if (meta.pending_counter_state === "ready" &&
+        !await storage.get("pending-counter-migration")) {
+      rebuilt = true;
+      break;
+    }
+    advance(5_001);
+  }
+  assert.equal(rebuilt, true, "bounded clear, scan, and verify did not finish");
+  const repairedUsage = await storage.get(realmUsageKey);
+  assert.equal(repairedUsage.open_requests, 1);
+  assert.equal(repairedUsage.pending_review, 1);
+  assert.equal(repairedUsage.provisioning, 0);
+  assert.equal(repairedUsage.customer_allocated, 0);
+
+  const events = (await call(runtime, "/audit/list", {
+    actor: ADMIN,
+    limit: 500,
+  })).body.events;
+  assert.equal(events.filter((event) =>
+    event.action === "alias.pending_counters_rebuild_requested"
+  ).length, 1);
+  const replayAfterCompletion = await call(
+    runtime,
+    "/counter/rebuild",
+    rebuildInput,
+  );
+  assert.equal(replayAfterCompletion.response.status, 202);
+  assert.equal(await storage.get("pending-counter-migration"), undefined);
+
+  const rejected = await call(runtime, "/request/reject", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+    reason: "repaired state permits the original transition",
+    idempotency_key: "reject-after-counter-repair",
+  });
+  assert.equal(rejected.response.status, 200);
+  assert.equal((await storage.get(realmUsageKey)).open_requests, 0);
+  assert.equal((await requestAlias(runtime, "rebuild-fenced", {
+    alias_limit: null,
+  })).response.status, 202);
+});
+
+test("counter recovery alarm cannot run approval work between rebuild pages", async () => {
+  const { runtime, storage, emailDirectory, advance } = registry();
+  const created = await requestAlias(runtime, "alarm-fenced", {
+    alias_limit: null,
+  });
+  emailDirectory.failPuts = 1;
+  const failed = await approve(runtime, created.body.request, {
+    alias_limit: null,
+  });
+  assert.equal(failed.response.status, 502);
+  assert.equal(
+    (await storage.get(`request:${created.body.request.id}`)).status,
+    "provisioning",
+  );
+
+  const rebuild = await call(runtime, "/counter/rebuild", {
+    actor: ADMIN,
+    reason: "verify alarm work remains fenced between recovery pages",
+    idempotency_key: "counter-rebuild-alarm-fence",
+  });
+  assert.equal(rebuild.response.status, 202);
+  advance(5 * 60 * 1_000 + 1_000);
+  await runtime.alarm();
+
+  assert.ok(await storage.get("pending-counter-migration"));
+  assert.equal(
+    (await storage.get(`request:${created.body.request.id}`)).status,
+    "provisioning",
+  );
+  assert.equal(
+    emailDirectory.value(realmEmailRouteKey(DOMAIN, "alarm-fenced")),
+    null,
+  );
+});
+
+test("failed initial rebuild scheduling is retryable with the same durable key", async () => {
+  const { runtime, storage, advance } = registry();
+  storage.failSetAlarms = 1;
+  const input = {
+    actor: ADMIN,
+    reason: "prove a lost initial alarm can be re-armed idempotently",
+    idempotency_key: "counter-rebuild-initial-alarm-retry",
+  };
+  const failed = await call(runtime, "/counter/rebuild", input);
+  assert.equal(failed.response.status, 503);
+  assert.match(failed.body.error, /could not be scheduled/);
+  assert.equal((await storage.get("meta")).pending_counter_state, "rebuilding");
+  assert.ok(await storage.get("pending-counter-migration"));
+  assert.ok(await storage.get(
+    `idem:counter-rebuild:${input.idempotency_key}`,
+  ));
+  const auditSequence = (await storage.get("meta")).audit_sequence;
+
+  const retried = await call(runtime, "/counter/rebuild", input);
+  assert.equal(retried.response.status, 202);
+  assert.equal(retried.body.pending_counter_state, "rebuilding");
+  assert.ok(Number.isFinite(storage.alarmAt));
+  assert.equal(
+    (await storage.get("meta")).audit_sequence,
+    auditSequence,
+    "re-arming an idempotent rebuild must not reserve another audit slot",
+  );
+
+  let complete = false;
+  for (let attempt = 0; attempt < 12; attempt++) {
+    await runtime.alarm();
+    if (!await storage.get("pending-counter-migration")) {
+      complete = true;
+      break;
+    }
+    advance(5_001);
+  }
+  assert.equal(complete, true, "re-armed rebuild did not complete autonomously");
+  assert.equal((await storage.get("meta")).pending_counter_state, "ready");
+});
+
+test("mid-rebuild re-arm failure propagates and an alarm retry completes recovery", async () => {
+  const { runtime, storage, advance } = registry();
+  const accepted = await call(runtime, "/counter/rebuild", {
+    actor: ADMIN,
+    reason: "prove alarm retry resumes after a durable cursor advance",
+    idempotency_key: "counter-rebuild-mid-alarm-retry",
+  });
+  assert.equal(accepted.response.status, 202);
+  const before = await storage.get("pending-counter-migration");
+  // alarm() first refreshes the already-present alarm during seed validation;
+  // fail the second setAlarm, after reconcile has advanced and persisted one
+  // clear page, to exercise the rebuilding branch rather than the entry path.
+  storage.failAtSetAlarm = (storage.setAlarmCallCount ?? 0) + 2;
+  await assert.rejects(runtime.alarm(), /simulated setAlarm failure/);
+  const advanced = await storage.get("pending-counter-migration");
+  assert.notDeepEqual(advanced, before);
+  assert.equal(advanced.clear_prefix_index, 1);
+
+  let complete = false;
+  for (let attempt = 0; attempt < 12; attempt++) {
+    advance(5_001);
+    await runtime.alarm();
+    if (!await storage.get("pending-counter-migration")) {
+      complete = true;
+      break;
+    }
+  }
+  assert.equal(complete, true, "retried alarm did not complete recovery");
+  assert.equal((await storage.get("meta")).pending_counter_state, "ready");
 });
 
 test("failed edge publication leaves a fenced provisioning intent and same-key retry heals", async () => {
@@ -791,6 +1406,12 @@ test("admin can terminally abort customer provisioning so lifecycle work cannot 
     (await storage.get(`request:${created.body.request.id}`)).status,
     "rejected",
   );
+  const usage = await storage.get(`claim-usage-realm:${ACCOUNT}:${REALM}`);
+  assert.deepEqual({
+    open: usage.open_requests,
+    provisioning: usage.provisioning,
+    allocated: usage.customer_allocated,
+  }, { open: 0, provisioning: 0, allocated: 0 });
 });
 
 test("customer terminal outbox survives missing realm and edge failure without resurrection", async () => {
@@ -1383,7 +2004,70 @@ test("approval recovery alarm honors a gate flip after an applied edge write", a
   assert.equal(claim.operational_gate_suspended, true);
 });
 
-test("approval reason is required and routine mutations use account indexes", async () => {
+test("over-limit approval recovery uses O(1) allocation state and graces the recovering claim", async () => {
+  const {
+    runtime,
+    emailDirectory,
+    storage,
+    setAuthoritativePlan,
+    advance,
+  } = registry();
+  const first = await requestAlias(runtime, "recovery-oldest", {
+    alias_limit: null,
+  });
+  assert.equal((await approve(runtime, first.body.request, {
+    alias_limit: null,
+  })).response.status, 200);
+
+  const recovering = await requestAlias(runtime, "recovery-newest", {
+    alias_limit: null,
+  });
+  emailDirectory.failPuts = 1;
+  assert.equal((await approve(runtime, recovering.body.request, {
+    alias_limit: null,
+  })).response.status, 502);
+  assert.equal(
+    (await storage.get(`claim-usage-realm:${ACCOUNT}:${REALM}`))
+      .customer_allocated,
+    2,
+  );
+  setAuthoritativePlan({
+    account_id: ACCOUNT,
+    revision: 8,
+    snapshot_hash: "8".repeat(64),
+    features: [REALM_EMAIL_ALIAS_FEATURE],
+    limits: { [REALM_EMAIL_ALIAS_LIMIT]: 1 },
+  });
+
+  storage.listCalls.length = 0;
+  advance(5 * 60 * 1_000 + 1_000);
+  await runtime.alarm();
+  assert.equal(storage.listCalls.some((call) =>
+    call.prefix === `account-claim:${ACCOUNT}:${REALM}:`
+  ), false, "approval recovery must not scan the realm claim index");
+  assert.equal(storage.listCalls.some((call) =>
+    call.prefix === `account-claim:${ACCOUNT}:`
+  ), false, "approval recovery must not scan the account claim index");
+
+  const claim = await storage.get("claim:recovery-newest");
+  assert.equal(claim.customer_activation_intent, false);
+  assert.equal(claim.plan_suspended, false);
+  assert.ok(claim.plan_grace_until);
+  assert.ok(Date.parse(claim.plan_grace_until) > Date.parse(claim.updated_at));
+  const request = await storage.get(`request:${recovering.body.request.id}`);
+  assert.equal(request.status, "approved");
+  const listed = await call(runtime, "/alias/list", {
+    actor: ADMIN,
+    account_id: ACCOUNT,
+  });
+  assert.equal(
+    listed.body.aliases.find((alias) => alias.alias === "recovery-newest")
+      .status,
+    "active_grace",
+  );
+});
+
+test("approval reason is required and routine mutations use O(1) counters", async () => {
   const { runtime, storage } = registry();
   const missing = await requestAlias(runtime, "reasonless");
   for (const [reason, key] of [[undefined, "missing-reason"], ["   ", "blank-reason"]]) {
@@ -1398,9 +2082,21 @@ test("approval reason is required and routine mutations use account indexes", as
   const approved = await approve(runtime, missing.body.request);
   assert.equal(approved.response.status, 200);
   assert.equal(storage.listCalls.some((call) => call.prefix === "claim:"), false);
-  assert.ok(storage.listCalls.some((call) =>
+  assert.equal(storage.listCalls.some((call) =>
     call.prefix === `account-claim:${ACCOUNT}:${REALM}:`
-  ));
+  ), false);
+  const usage = await storage.get(`claim-usage-realm:${ACCOUNT}:${REALM}`);
+  assert.deepEqual({
+    open_requests: usage.open_requests,
+    pending_review: usage.pending_review,
+    provisioning: usage.provisioning,
+    customer_allocated: usage.customer_allocated,
+  }, {
+    open_requests: 0,
+    pending_review: 0,
+    provisioning: 0,
+    customer_allocated: 1,
+  });
 });
 
 test("global administrator scans are hard capped", async () => {
@@ -1535,6 +2231,71 @@ test("concurrent scoped mutations reserve unique global audit revisions", async 
   assert.equal(meta.registry_revision, Math.max(
     ...audits.map((event) => event.registry_revision),
   ));
+});
+
+test("counter rebuild installs its fence without regressing concurrent metadata", async () => {
+  const { runtime, storage } = registry();
+  await call(runtime, "/reserved/list", { actor: ADMIN });
+  const blocker = storage.blockNextTransactionPut(
+    "meta",
+    (value) => value?.pending_counter_state === "rebuilding",
+  );
+  const rebuilding = call(runtime, "/counter/rebuild", {
+    actor: ADMIN,
+    reason: "force a metadata interleaving at rebuild installation",
+    idempotency_key: "counter-rebuild-metadata-race",
+  });
+  await blocker.started;
+
+  let parallelSettled = false;
+  const parallel = call(runtime, "/reserved/create", {
+    actor: ADMIN,
+    name: "parallel-rebuild",
+    category: "platform_brand",
+    reason: "must wait behind the rebuild metadata reservation",
+    internal_assignable: false,
+    idempotency_key: "parallel-rebuild-reservation",
+  }).then((result) => {
+    parallelSettled = true;
+    return result;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    parallelSettled,
+    false,
+    "a normal mutation entered between rebuild reservation and installation",
+  );
+
+  blocker.release();
+  assert.equal((await rebuilding).response.status, 202);
+  assert.equal((await parallel).response.status, 201);
+  const later = await call(runtime, "/reserved/create", {
+    actor: ADMIN,
+    name: "after-rebuild",
+    category: "platform_brand",
+    reason: "prove the next revision cannot reuse the parallel audit slot",
+    internal_assignable: false,
+    idempotency_key: "after-rebuild-reservation",
+  });
+  assert.equal(later.response.status, 201);
+
+  const meta = await storage.get("meta");
+  const audits = [...(await storage.list({ prefix: "audit:" })).values()]
+    .sort((left, right) => left.sequence - right.sequence);
+  assert.deepEqual(audits.map((event) => event.sequence), [1, 2, 3, 4]);
+  assert.deepEqual(
+    audits.map((event) => event.registry_revision),
+    [1, 2, 3, 4],
+  );
+  assert.equal(audits[1].action, "alias.pending_counters_rebuild_requested");
+  assert.equal(audits[2].action, "reserved.created");
+  assert.equal(audits[2].target, "parallel-rebuild");
+  assert.equal(audits[3].action, "reserved.created");
+  assert.equal(audits[3].target, "after-rebuild");
+  assert.equal(meta.audit_sequence, 4);
+  assert.equal(meta.registry_revision, 4);
+  assert.equal(meta.pending_counter_state, "rebuilding");
+  assert.ok(await storage.get("pending-counter-migration"));
 });
 
 test("alarm scheduling cannot erase a concurrently committed due row", async () => {

@@ -197,6 +197,7 @@ GET  /v1/admin/realm-email-reserved-names/{name}
 PATCH /v1/admin/realm-email-reserved-names/{name}
 DELETE /v1/admin/realm-email-reserved-names/{name}
 GET  /v1/admin/realm-email-alias-audit
+POST /v1/admin/realm-email-alias-counters:rebuild
 
 # Edge-to-control-plane authenticated fallback; not a customer route.
 GET  /v1/email/realm-routes/{domain}/{realm_label}
@@ -838,6 +839,30 @@ audit events; read-only recall does neither:
   approval rechecks the current plan, applies and reads back the exact cell projection, then
   publishes isolated edge-directory rows before exposing the assignment as
   active. Every mutation is idempotent and audited.
+- Realm alias request lists also report `pending_counter_state`, the configured
+  `technical_pending_limits`, and realm/account `pending_capacity` when the
+  request is scoped to one realm. The technical maxima are eight open requests
+  per realm and 64 per account, independent of plan capacity. Open means both
+  `pending_review` and `provisioning`; a failed projection therefore keeps its
+  slot. Counter rebuild is paginated and customer creation returns 503 until it
+  is ready or whenever durable counter state is corrupt. A technical-ceiling
+  refusal is a stable 409 with
+  `code=technical_pending_limit_reached`, `scope=realm|account`, and the
+  effective numeric `limit`.
+- An authenticated platform administrator can recover operator-detected
+  derived-counter corruption with
+  `POST /v1/admin/realm-email-alias-counters:rebuild`. The bounded JSON body
+  requires `reason` and `idempotency_key`. The request durably audits one
+  recovery intent, fences all count-changing writes, clears only the derived
+  usage keyspaces in bounded pages, rebuilds them from canonical claims, and
+  performs a second bounded verification pass before reporting `ready`.
+  The accepted response is returned only after the recovery alarm is armed. If
+  that initial alarm write fails, the durable fence and idempotency record stay
+  intact but the request returns retryable 503; replaying the same key attempts
+  to re-arm and then returns the original 202 without another audit event. A
+  different rebuild while one is active returns 409. A re-arm failure during
+  an alarm turn propagates so the platform retries that turn. This maintenance
+  route remains available while realm-alias activation is off.
 - The cell projection endpoint accepts only the account cell's provision token
   and an exact `era_` claim fence, domain, label, state, and monotonically
   increasing controller revision. Equal replay is idempotent; stale or

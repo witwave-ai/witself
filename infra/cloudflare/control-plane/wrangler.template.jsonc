@@ -80,7 +80,12 @@
     }
   ],
   "vars": {
-    "AGENT_EMAIL_DOMAIN": "agent-mail.witwave.ai"
+    "AGENT_EMAIL_DOMAIN": "agent-mail.witwave.ai",
+    // Independent technical queue ceilings. Plans, including explicit
+    // unlimited overrides, cannot raise these values; a deployment may only
+    // lower them below the compiled 8-per-realm / 64-per-account maxima.
+    "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM": "8",
+    "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT": "64"
   },
   "migrations": [
     {

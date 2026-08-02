@@ -43,6 +43,12 @@ test("deployment config is email-only and cannot reuse the control-plane DIRECTO
   assert.match(config, /"binding"\s*:\s*"EMAIL_DIRECTORY"/);
   assert.match(config, /"binding"\s*:\s*"EMAIL_EDGE_METRICS"/);
   assert.match(config, /"dataset"\s*:\s*"witself_agent_email_edge"/);
+  assert.match(config, /"name"\s*:\s*"REALM_ROUTE_COLD_MISS_LIMITER"/);
+  assert.match(config, /"namespace_id"\s*:\s*"2201"/);
+  assert.match(config, /"limit"\s*:\s*10[\s\S]{0,60}"period"\s*:\s*10/);
+  assert.match(config, /"name"\s*:\s*"REALM_ROUTE_KNOWN_MISS_LIMITER"/);
+  assert.match(config, /"namespace_id"\s*:\s*"2202"/);
+  assert.match(config, /"limit"\s*:\s*100[\s\S]{0,60}"period"\s*:\s*10/);
   assert.match(config, /"CONTROL_PLANE_URL"\s*:\s*"https:\/\/self\.witwave\.ai\/"/);
   assert.match(
     config,
