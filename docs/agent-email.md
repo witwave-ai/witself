@@ -576,8 +576,8 @@ remains `agent-name.realm-email-alias@customer-domain`; retaining the realm
 label avoids making one account-owned apex an ambiguous cross-realm namespace.
 
 The resolved plan feature is `agent_email_custom_domain` and its account-wide
-limit is `agent_email_custom_domains_per_account`. The Phase-B product target
-sets Personal and Professional to disabled with zero, Team to one, and
+limit is `agent_email_custom_domains_per_account`. The Phase-B canonical
+catalog sets Personal and Professional to disabled with zero, Team to one, and
 Enterprise to feature-present but zero until an administrator applies the
 contracted account limit. A missing effective limit is explicit unlimited. The
 independent inbound `agent_email_receive` entitlement still controls whether

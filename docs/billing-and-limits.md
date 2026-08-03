@@ -56,13 +56,14 @@ remain deferred.
 
 ## Working Plan Direction
 
-The following table records the current product direction as of 2026-07-31. It
+The following table records the current product direction as of 2026-08-03. It
 is a working packaging decision, not a claim that every entitlement is already
 implemented or enforced. Each row moves into the canonical plan catalog and
 resolved cell policy only through its own implementation and rollout decision.
-The realm, agent, active-memory, current-fact, and inbound-agent-email byte
-values are the Phase B canonical defaults described below; the other rows
-remain subject to their own implementation and rollout gates.
+The realm, agent, active-memory, current-fact, inbound-agent-email byte, and
+custom-inbound-domain values are the Phase B canonical defaults described
+below; the other rows remain subject to their own implementation and rollout
+gates.
 The three message-rate rows are active paid-tier defaults in the `v0.0.225`
 Phase-B catalog; Personal deliberately omits those keys.
 The six inbound-agent-email rate keys are intentionally absent for every tier;
@@ -462,13 +463,12 @@ active aliases; they create an explicit platform-admin conflict for review.
 
 Organization-owned inbound domains are a separate account-level entitlement,
 not another realm alias. The feature key is `agent_email_custom_domain`; the
-hard-cap key is `agent_email_custom_domains_per_account`. The Phase-B product
-target gives Personal and Professional a zero cap and no feature, Team the
+hard-cap key is `agent_email_custom_domains_per_account`. The Phase-B canonical
+catalog gives Personal and Professional a zero cap and no feature, Team the
 feature with one domain per account, and Enterprise the feature with an
-explicit zero default. Its negotiated quantity must be installed as an
-audited account limit override before a request is accepted. A missing
-effective limit means unlimited only while the feature is enabled; zero
-remains a real cap.
+explicit zero default. Its negotiated quantity must be installed as an audited
+account limit override before a request is accepted. A missing effective limit
+means unlimited only while the feature is enabled; zero remains a real cap.
 
 The first implementation is deliberately dark. The exact-`true`, runtime-only
 `CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUESTS_ENABLED` gate is absent from release
@@ -482,16 +482,16 @@ closed feature/limit vocabulary, control-plane Durable Object, APIs, and admin
 client while intentionally leaving both keys absent from
 `web/plans/plans.json`. Roll Phase A to every cell and the control plane first,
 then write and verify the Founder account's explicit-unlimited limit override.
-Only Phase B adds the Personal 0, Professional 0, Team 1, and Enterprise 0
-catalog values plus the Team/Enterprise feature. This keeps an old cell from
-receiving an unknown key and prevents the Founder snapshot from briefly
-inheriting Enterprise's zero default. The request gate stays off in both
-phases. For that catalog-only promotion, deploy the Phase-B control-plane
+This Phase-B catalog release adds the Personal 0, Professional 0, Team 1, and
+Enterprise 0 values plus the Team/Enterprise feature. The split keeps an old
+cell from receiving an unknown key and prevents the Founder snapshot from
+briefly inheriting Enterprise's zero default. The request gate stays off in
+both phases. For this catalog-only promotion, deploy the Phase-B control-plane
 container first, wait for a complete plan-lifecycle pass, and verify the
 Founder explicit-unlimited snapshot before publishing the public plans Worker.
 Phase-A cells already understand the new dimension, so they do not need a
-Phase-B image rollout when the second release changes only catalog bytes and
-catalog tests.
+Phase-B image rollout when the second release changes only catalog bytes,
+catalog tests, and rollout documentation.
 
 The commercial allowance is conservatively consumed by pending requests until
 an active-domain lifecycle exists. A separate technical ceiling allows at most
