@@ -372,6 +372,96 @@ rollout record. The script never writes to the source database and never leaves
 a plaintext dump; a `pending` manifest or any nonzero exit blocks the rollout.
 Do not run a live restore as part of this procedure.
 
+## Move and stage the `witmail.net` managed-email domain
+
+This is a registrar and edge-foundation procedure, not an email activation.
+`witmail.net` was registered with Cloudflare Registrar on 2026-08-03 in a
+source Cloudflare account so the name could be secured. The source-account zone
+is intentionally dormant: it contains restrictive SPF/DKIM/DMARC
+anti-spoofing records but no MX records, Email Routing configuration, Worker
+route, catch-all, or DNSSEC delegation. Do not add any of those delivery paths
+while the registration remains in the source account.
+
+Cloudflare's
+[Registrar inter-account move](https://developers.cloudflare.com/registrar/account-options/inter-account-transfer/)
+is different from a transfer to another registrar. At the time of this
+decision, Cloudflare requires the registration to be **more than 10 days old**
+before an inter-account move. The strict threshold passes partway through
+2026-08-13 for this registration, so use **2026-08-14** as the earliest
+practical move date and let the dashboard's live eligibility result be
+authoritative. A successful move applies a 30-day
+registration transfer lock. Do not change registrant contact information while
+waiting: a contact change can create a separate 60-day lock that also blocks an
+inter-account move.
+
+Before requesting the move:
+
+1. Confirm the exact production Cloudflare account ID and record it in the
+   private operator change record, not in this repository.
+2. Add `witmail.net` to that target account as a DNS zone (the Cloudflare UI may
+   call this a website), select its plan, add no web records, and wait until
+   Cloudflare reports the target zone ready for the move.
+3. Verify the registrant email. Keep DNSSEC off and release any source-zone
+   lock as Cloudflare requires.
+4. Export the source DNS zone and separately record the reviewed restrictive
+   sender-auth records. Cloudflare moves WHOIS registration data but **no zone
+   configuration or settings**.
+5. Submit the move from the source account. An administrator of the target
+   account must accept it within Cloudflare's five-day window; otherwise the
+   request is canceled.
+
+After acceptance, verify the registration, renewal responsibility, nameservers,
+and target-zone ownership before writing DNS. Recreate the restrictive
+SPF/DKIM/DMARC posture from the reviewed record, compare it with the source
+export, and only then enable DNSSEC in the target account. Do not copy an MX
+record, Email Routing rule, catch-all, Worker association, KV projection, or
+secret from the source account; none should exist there, and all production
+edge state must be created from reviewed infrastructure in the target account.
+
+Before changing the configured primary managed domain, prove that
+`agent-mail.witwave.ai` has no realm-alias request, assignment, or cell
+projection. If a future cutover finds one, resolve and retire it under the old
+primary-domain configuration first. The compatibility path deliberately keeps
+only previously issued canonical local parts; it cannot converge a legacy
+realm alias after `.net` becomes primary.
+
+Keep the rollout dark in this order:
+
+1. Deploy code and configuration that name `witmail.net` as the primary managed
+   domain while all five gates below are absent or exactly `false`. If an
+   account was suspended during this cutover, resume it first and then
+   explicitly restart or run normal startup reconciliation; resume alone does
+   not add the missing primary route. Verify that reconciliation preserves the
+   existing address and mailbox IDs.
+2. Prove the authority journal and registry are healthy, inventory current
+   canonical local parts, and verify that no new alias can target the retired
+   `agent-mail.witwave.ai` domain.
+3. Build a bounded compatibility manifest containing only canonical local
+   parts that were actually issued on `agent-mail.witwave.ai`. Never add a new
+   legacy canonical identity or alias, and never attach a broad catch-all to
+   the legacy domain.
+4. Recreate the `witmail.net` Email Routing foundation only after the Worker,
+   target-cell validation, role-address destinations, and rollback path have
+   all passed review. Until the production provider-contract gaps are closed,
+   use only a fresh manual 5–10-agent exact-address canary; do not enable a
+   public apex catch-all.
+5. Treat canonical inventory, canonical delivery, alias activation, and alias
+   delivery as separate later reviews. Personal remains receive-disabled even
+   after the managed domain is live, and a plan-table address promise never
+   enables delivery by itself.
+
+The required dark gates are:
+
+- `CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED`
+- `REALM_EMAIL_ALIAS_DELIVERY_ENABLED`
+- `CP_REALM_EMAIL_CANONICAL_INVENTORY_ENABLED`
+- `CP_REALM_EMAIL_CANONICAL_DELIVERY_ENABLED`
+- `REALM_EMAIL_CANONICAL_DELIVERY_ENABLED`
+
+Before any routing review, choose and verify operator-controlled destinations
+for `postmaster@witmail.net` and `abuse@witmail.net`. That is a human governance
+decision; do not silently route either role address to a personal mailbox.
+
 ## Bootstrap, checkpoint, and drill the realm-email-alias authority journal
 
 This is a control-plane procedure. It does not restore a cell database and it

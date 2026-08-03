@@ -17,8 +17,10 @@ const vector = JSON.parse(await readFile(new URL("./golden-vector.json", import.
 const example = JSON.parse(await readFile(new URL("../pilot.example.json", import.meta.url), "utf8"));
 const raw = Buffer.from(vector.raw_base64, "base64");
 const first = example.agents[0];
+const primaryDomain = "witmail.net";
 const aliasLabel = "acme-west";
-const aliasAddress = `alpha.${aliasLabel}@${example.domain}`;
+const canonicalAddress = `alpha.${example.realm_label}@${primaryDomain}`;
+const aliasAddress = `alpha.${aliasLabel}@${primaryDomain}`;
 const vectorNowMS = vector.metadata.timestamp * 1000;
 const allowLimiter = { async limit() { return { success: true }; } };
 
@@ -33,7 +35,7 @@ function routeLookupPoints(points) {
 function routeProjection(realmLabel, overrides = {}) {
   return {
     schema_version: 1,
-    domain: example.domain,
+    domain: primaryDomain,
     realm_label: realmLabel,
     realm_id: example.realm_id,
     route_kind: realmLabel === example.realm_label ? "canonical" : "realm_alias",
@@ -49,9 +51,11 @@ function routeProjection(realmLabel, overrides = {}) {
 
 function dynamicEnv(routes, metrics = null, extra = {}) {
   const values = new Map(
-    Object.entries(routes).map(([realmLabel, value]) => [realmRouteKey(example.domain, realmLabel), value]),
+    Object.entries(routes).map(([realmLabel, value]) => [realmRouteKey(primaryDomain, realmLabel), value]),
   );
   return {
+    AGENT_EMAIL_DOMAIN: primaryDomain,
+    AGENT_EMAIL_LEGACY_DOMAINS: example.domain,
     RELAY_KEY_ID: vector.metadata.key_id,
     RELAY_ED25519_PRIVATE_KEY: vector.pkcs8_base64,
     REALM_EMAIL_ALIAS_DELIVERY_ENABLED: "true",
@@ -81,6 +85,8 @@ function env(enabled = true, includeRecipient = true, metrics = null) {
   const values = new Map([[CONFIG_KEY, runtimeConfig(example, enabled)]]);
   if (includeRecipient) values.set(recipientKey(first.address), runtimeRecipient(example, first));
   return {
+    AGENT_EMAIL_DOMAIN: primaryDomain,
+    AGENT_EMAIL_LEGACY_DOMAINS: example.domain,
     RELAY_KEY_ID: vector.metadata.key_id,
     RELAY_ED25519_PRIVATE_KEY: vector.pkcs8_base64,
     EMAIL_DIRECTORY: {
@@ -356,7 +362,7 @@ test("edge metrics failures never alter the SMTP disposition", async () => {
 
 test("canonical and realm-alias projections converge on one cell route", async () => {
   for (const [realmLabel, address] of [
-    [example.realm_label, first.address],
+    [example.realm_label, canonicalAddress],
     [aliasLabel, aliasAddress],
   ]) {
     let relayed;
@@ -413,7 +419,7 @@ test("fleet canonical delivery gate is exact-true and independent", async () => 
   for (const value of [undefined, "false", "TRUE", "1"]) {
     let fetched = false;
     const points = [];
-    const mail = message();
+    const mail = message({ to: canonicalAddress });
     await assert.rejects(
       () => handleEmail(
         mail,
@@ -460,7 +466,7 @@ test("fleet canonical delivery gate is exact-true and independent", async () => 
 test("dynamic routing keeps account-plan enforcement in the signed cell verdict", async () => {
   const points = [];
   const metrics = { writeDataPoint(point) { points.push(point); } };
-  const mail = message();
+  const mail = message({ to: canonicalAddress });
   await handleEmail(
     mail,
     dynamicEnv({ [example.realm_label]: routeProjection(example.realm_label) }, metrics),
@@ -536,10 +542,10 @@ test("plan-inactive suspended routes reject without an unbounded SMTP retry loop
 
 test("malformed dynamic addresses reject before directory lookup or relay", async () => {
   for (const address of [
-    `alpha.bad--alias@${example.domain}`,
-    `alpha.xn--acme@${example.domain}`,
-    `alpha.one.two@${example.domain}`,
-    `alpha.acme_west@${example.domain}`,
+    `alpha.bad--alias@${primaryDomain}`,
+    `alpha.xn--acme@${primaryDomain}`,
+    `alpha.one.two@${primaryDomain}`,
+    `alpha.acme_west@${primaryDomain}`,
   ]) {
     let reads = 0;
     let limiterCalls = 0;
@@ -559,6 +565,98 @@ test("malformed dynamic addresses reject before directory lookup or relay", asyn
   }
 });
 
+test("edge rejects an unconfigured domain before any route lookup", async () => {
+  let reads = 0;
+  let limiterCalls = 0;
+  let fetched = false;
+  const limiter = { async limit() { limiterCalls++; return { success: true }; } };
+  const currentEnv = dynamicEnv({}, null, {
+    REALM_ROUTE_COLD_MISS_LIMITER: limiter,
+    REALM_ROUTE_KNOWN_MISS_LIMITER: limiter,
+  });
+  currentEnv.EMAIL_DIRECTORY.get = async () => { reads++; return null; };
+  const mail = message({
+    to: `alpha.${example.realm_label}@unmanaged.example`,
+  });
+  await handleEmail(mail, currentEnv, {
+    fetch: async () => { fetched = true; },
+  });
+  assert.deepEqual(mail.rejected, ["recipient unavailable"]);
+  assert.equal(reads, 0);
+  assert.equal(limiterCalls, 0);
+  assert.equal(fetched, false);
+});
+
+test("permanent and exact legacy routes preserve the signed envelope domain", async () => {
+  for (const { domain, address, currentEnv } of [
+    {
+      domain: primaryDomain,
+      address: canonicalAddress,
+      currentEnv: (() => {
+        const value = dynamicEnv({});
+        const route = routeProjection(example.realm_label, {
+          domain: primaryDomain,
+        });
+        value.EMAIL_DIRECTORY.get = async (key, type) => {
+          assert.equal(type, "json");
+          return key === realmRouteKey(primaryDomain, example.realm_label)
+            ? route
+            : null;
+        };
+        return value;
+      })(),
+    },
+    {
+      domain: example.domain,
+      address: first.address,
+      currentEnv: env(),
+    },
+  ]) {
+    let relayed;
+    const mail = message({ to: address });
+    await handleEmail(mail, currentEnv, {
+      now: () => vectorNowMS,
+      fetch: async (url, init) => {
+        relayed = { url, init };
+        return new Response('{"verdict":"accepted"}', { status: 200 });
+      },
+    });
+    assert.deepEqual(mail.rejected, []);
+    assert.equal(relayed.url, example.ingest_url);
+    assert.equal(
+      Buffer.from(
+        relayed.init.headers.get("X-Witself-Email-Envelope-To"),
+        "base64url",
+      ).toString(),
+      address,
+    );
+    assert.equal(address.endsWith(`@${domain}`), true);
+  }
+});
+
+test("legacy domain rejects an unlisted address without dynamic KV or control-plane lookup", async () => {
+  const currentEnv = env();
+  currentEnv.CONTROL_PLANE_URL = "https://control.example/";
+  currentEnv.CONTROL_PLANE_EDGE_TOKEN = "edge-token-1234567890";
+  const originalGet = currentEnv.EMAIL_DIRECTORY.get;
+  const keys = [];
+  currentEnv.EMAIL_DIRECTORY.get = async (key, type) => {
+    keys.push(key);
+    return originalGet(key, type);
+  };
+  let fetched = false;
+  const mail = message({
+    to: `unlisted.${example.realm_label}@${example.domain}`,
+  });
+  await handleEmail(mail, currentEnv, {
+    now: () => vectorNowMS,
+    fetch: async () => { fetched = true; },
+  });
+  assert.deepEqual(mail.rejected, ["recipient unavailable"]);
+  assert.deepEqual(keys, [CONFIG_KEY]);
+  assert.equal(fetched, false);
+});
+
 test("10,000 rotating valid labels share one fixed cold-miss budget", async () => {
   const state = createRouteLookupState();
   const limiterKeys = [];
@@ -575,7 +673,7 @@ test("10,000 rotating valid labels share one fixed cold-miss budget", async () =
 
   for (let index = 0; index < 10_000; index++) {
     const label = `r${index.toString(36).padStart(3, "0")}`;
-    const mail = message({ to: `alpha.${label}@${example.domain}` });
+    const mail = message({ to: `alpha.${label}@${primaryDomain}` });
     Object.defineProperty(mail, "raw", {
       get() {
         rawReads++;
@@ -621,7 +719,7 @@ test("strict local cold-miss budget rolls over only after ten seconds", async ()
   });
   const attempt = async (index) => {
     const label = `w${index.toString(36).padStart(2, "0")}`;
-    const mail = message({ to: `alpha.${label}@${example.domain}` });
+    const mail = message({ to: `alpha.${label}@${primaryDomain}` });
     try {
       await handleEmail(mail, currentEnv, {
         now: () => nowMS,
@@ -730,7 +828,7 @@ test("same-label cold misses are suppressed and concurrent lookups singleflight"
 test("singleflight followers share a found projection without extra control-plane calls", async () => {
   const state = createRouteLookupState();
   const foundLabel = "found-route";
-  const foundAddress = `alpha.${foundLabel}@${example.domain}`;
+  const foundAddress = `alpha.${foundLabel}@${primaryDomain}`;
   let limiterCalls = 0;
   let controlPlaneCalls = 0;
   let relayCalls = 0;
@@ -837,7 +935,7 @@ test("cold-miss suppression stores only bounded SHA-256 markers", async () => {
     assert.match(key, /^[0-9a-f]{64}$/);
     assert.equal(typeof expiresAt, "number");
     assert.equal(key.includes(aliasLabel), false);
-    assert.equal(key.includes(example.domain), false);
+    assert.equal(key.includes(primaryDomain), false);
   }
 });
 
@@ -877,7 +975,7 @@ test("a positive KV projection always beats an existing cold-miss marker", async
   assert.deepEqual(firstMiss.rejected, ["recipient unavailable"]);
   assert.equal(state.suppressed.size, 1);
 
-  routes.set(realmRouteKey(example.domain, aliasLabel), routeProjection(aliasLabel));
+  routes.set(realmRouteKey(primaryDomain, aliasLabel), routeProjection(aliasLabel));
   const projected = message({ to: aliasAddress });
   await handleEmail(projected, currentEnv, runtime);
   assert.deepEqual(projected.rejected, []);
@@ -1059,7 +1157,7 @@ test("strict local known-route budget admits 100 lookups per ten-second window",
   });
   const attempt = async (index) => {
     const label = `k${index.toString(36).padStart(2, "0")}`;
-    const mail = message({ to: `alpha.${label}@${example.domain}` });
+    const mail = message({ to: `alpha.${label}@${primaryDomain}` });
     await assert.rejects(
       () => handleEmail(mail, currentEnv, {
         now: () => nowMS,
@@ -1115,7 +1213,7 @@ test("exhausting the local cold lane does not consume the known lane", async () 
 
   for (let index = 0; index < 11; index++) {
     const label = `z${index.toString(36).padStart(2, "0")}`;
-    const mail = message({ to: `alpha.${label}@${example.domain}` });
+    const mail = message({ to: `alpha.${label}@${primaryDomain}` });
     try {
       await handleEmail(mail, coldRouteEnv(null, shared), runtime);
     } catch (error) {
@@ -1247,7 +1345,7 @@ test("route lookup metrics are low-cardinality, value-free, and best effort", as
   const serialized = JSON.stringify(lookup);
   assert.equal(serialized.includes(aliasAddress), false);
   assert.equal(serialized.includes(aliasLabel), false);
-  assert.equal(serialized.includes(example.domain), false);
+  assert.equal(serialized.includes(primaryDomain), false);
   assert.equal(serialized.includes(example.realm_id), false);
 
   const projected = message({ to: aliasAddress });
@@ -1294,7 +1392,7 @@ test("stale KV route refreshes from the control plane before relaying", async ()
   assert.equal(calls.length, 2);
   assert.equal(
     calls[0].input.url,
-    `https://control.example/v1/email/realm-routes/${example.domain}/${aliasLabel}`,
+    `https://control.example/v1/email/realm-routes/${primaryDomain}/${aliasLabel}`,
   );
   assert.equal(calls[0].input.headers.get("Authorization"), "Bearer edge-token-1234567890");
   assert.equal(calls[1].input, example.ingest_url);

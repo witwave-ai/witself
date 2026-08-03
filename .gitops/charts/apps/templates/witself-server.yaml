@@ -15,6 +15,19 @@
 {{- $_ := required "apps.witselfServer.agentEmail.receivePilot.realmID is required when enabled" $emailPilot.realmID -}}
 {{- $_ := required "apps.witselfServer.agentEmail.receivePilot.relayPublicKeysJSON is required when enabled" $emailPilot.relayPublicKeysJSON -}}
 {{- $_ := required "apps.witselfServer.agentEmail.receivePilot.relayReplayWindow is required when enabled" $emailPilot.relayReplayWindow -}}
+{{- if gt (len $emailPilot.acceptedLegacyDomains) 1 -}}
+{{- fail "apps.witselfServer.agentEmail.receivePilot.acceptedLegacyDomains may contain at most 1 domain" -}}
+{{- end -}}
+{{- $seenEmailDomains := dict $emailPilot.domain true -}}
+{{- range $legacyDomain := $emailPilot.acceptedLegacyDomains -}}
+{{- if not (regexMatch "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$" $legacyDomain) -}}
+{{- fail (printf "apps.witselfServer.agentEmail.receivePilot.acceptedLegacyDomains contains invalid domain %q" $legacyDomain) -}}
+{{- end -}}
+{{- if hasKey $seenEmailDomains $legacyDomain -}}
+{{- fail (printf "apps.witselfServer.agentEmail.receivePilot.acceptedLegacyDomains contains primary or duplicate domain %q" $legacyDomain) -}}
+{{- end -}}
+{{- $_ := set $seenEmailDomains $legacyDomain true -}}
+{{- end -}}
 {{- $seenAgentIDs := dict -}}
 {{- range $agentID := $emailPilot.agentIDs -}}
 {{- if not (regexMatch "^agent_[a-z2-7]{16}$" $agentID) -}}
@@ -32,6 +45,16 @@
 {{- end -}}
 {{- end -}}
 {{- $serverEmailPilot := dict "enabled" $emailPilot.enabled "domain" $emailPilot.domain "audience" $emailPilot.audience "realmID" $emailPilot.realmID "agentIDs" $emailPilot.agentIDs "retryCanaryAgentID" $emailPilot.retryCanaryAgentID "relayPublicKeysJSON" $emailPilot.relayPublicKeysJSON "relayReplayWindow" $emailPilot.relayReplayWindow -}}
+{{- $emailDomainCutoverReady := and
+      (semverCompare ">=0.0.232-0" .Values.apps.witselfServer.chartVersion)
+      (semverCompare ">=0.0.232-0" .Values.apps.witselfServer.imageTag) -}}
+{{- if $emailDomainCutoverReady -}}
+{{- $_ := set $serverEmailPilot "acceptedLegacyDomains" $emailPilot.acceptedLegacyDomains -}}
+{{- else -}}
+{{- if and $emailPilot.enabled (gt (len $emailPilot.acceptedLegacyDomains) 0) -}}
+{{- $_ := set $serverEmailPilot "domain" (first $emailPilot.acceptedLegacyDomains) -}}
+{{- end -}}
+{{- end -}}
 {{- $workerValues := deepCopy .Values.apps.witselfServer.worker -}}
 {{- if not (semverCompare ">=0.0.224-0" .Values.apps.witselfServer.chartVersion) -}}
 {{- $_ := unset $workerValues "messageRateBucketCleanup" -}}

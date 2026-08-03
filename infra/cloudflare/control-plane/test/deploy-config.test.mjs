@@ -102,8 +102,13 @@ test("release renderer injects immutable container build identity", async (t) =>
   );
   assert.match(
     config,
-    /"AGENT_EMAIL_DOMAIN"\s*:\s*"agent-mail\.witwave\.ai"/,
-    "control plane must derive every managed alias from one configured domain",
+    /"AGENT_EMAIL_DOMAIN"\s*:\s*"witmail\.net"/,
+    "control plane must assign new managed aliases on the permanent domain",
+  );
+  assert.match(
+    config,
+    /"AGENT_EMAIL_LEGACY_DOMAINS"\s*:\s*"agent-mail\.witwave\.ai"/,
+    "control plane must keep the bounded canonical pilot domain explicit",
   );
   assert.match(
     config,
@@ -119,6 +124,16 @@ test("release renderer injects immutable container build identity", async (t) =>
     config,
     /"CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED"\s*:/,
     "realm aliases must remain disabled until catch-all, lifecycle reconciliation, and terminal recovery acceptance pass",
+  );
+  assert.doesNotMatch(
+    config,
+    /"CP_REALM_EMAIL_CANONICAL_INVENTORY_ENABLED"\s*:/,
+    "canonical inventory must remain dark until the dual-domain release is accepted",
+  );
+  assert.doesNotMatch(
+    config,
+    /"CP_REALM_EMAIL_CANONICAL_DELIVERY_ENABLED"\s*:/,
+    "canonical delivery must remain dark until the dual-domain release is accepted",
   );
   assert.doesNotMatch(
     config,

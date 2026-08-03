@@ -12,6 +12,7 @@ import {
   REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT,
   REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM,
   buildRealmEmailRouteProjection,
+  managedRealmEmailDomains,
   reconcileRealmEmailAliasesForAccountLifecycle,
   reconcileRealmEmailAliasesForPlan,
   realmEmailRouteKey,
@@ -28,8 +29,28 @@ const OTHER_ACCOUNT = "acct_other";
 const REALM = "realm_aaaaaaaaaaaaaaaa";
 const OTHER_REALM = "realm_bbbbbbbbbbbbbbbb";
 const DOMAIN = "agent-mail.witwave.ai";
+const PRIMARY_DOMAIN = "witmail.net";
 const OPERATOR = { kind: "account_operator", id: "opr_alias" };
 const ADMIN = { kind: "platform_admin", id: "adm_alias" };
+
+test("managed email domains are bounded, ordered, canonical, and unique", () => {
+  assert.deepEqual(managedRealmEmailDomains({
+    AGENT_EMAIL_DOMAIN: PRIMARY_DOMAIN,
+    AGENT_EMAIL_LEGACY_DOMAINS: DOMAIN,
+  }), [PRIMARY_DOMAIN, DOMAIN]);
+  assert.throws(() => managedRealmEmailDomains({
+    AGENT_EMAIL_DOMAIN: PRIMARY_DOMAIN,
+    AGENT_EMAIL_LEGACY_DOMAINS: PRIMARY_DOMAIN,
+  }), /unique/);
+  assert.throws(() => managedRealmEmailDomains({
+    AGENT_EMAIL_DOMAIN: PRIMARY_DOMAIN,
+    AGENT_EMAIL_LEGACY_DOMAINS: "one.example,two.example",
+  }), /invalid/);
+  assert.throws(() => managedRealmEmailDomains({
+    AGENT_EMAIL_DOMAIN: PRIMARY_DOMAIN,
+    AGENT_EMAIL_LEGACY_DOMAINS: ` ${DOMAIN}`,
+  }), /invalid/);
+});
 
 function testBase32(value, pad = "a") {
   const alphabet = "abcdefghijklmnopqrstuvwxyz234567";
@@ -233,6 +254,11 @@ function registry(options = {}) {
   let claimSequence = 0;
   let currentTime = Date.UTC(2026, 7, 1, 0, 0, 0);
   let projectionBlocker = null;
+  let canonicalCellRoute = {
+    state: "live",
+    generation: 1,
+    operation_id: null,
+  };
   const failingClaimIDs = new Set();
   const missingRealmIDs = new Set();
   let fetchCallCount = 0;
@@ -275,8 +301,7 @@ function registry(options = {}) {
         schema_version: "witself.v0",
         account_id: accountID,
         realm_id: realmID,
-        state: "live",
-        generation: 1,
+        ...canonicalCellRoute,
       });
     }
     if (parsed.pathname !== `/v1/accounts/${ACCOUNT}:email-realm-alias` &&
@@ -312,6 +337,7 @@ function registry(options = {}) {
   const env = {
     DIRECTORY: directory,
     AGENT_EMAIL_DIRECTORY: emailDirectory,
+    AGENT_EMAIL_DOMAIN: DOMAIN,
     CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED: "true",
     ...(options.journalBucket
       ? {
@@ -380,6 +406,9 @@ function registry(options = {}) {
     },
     removeRealm(realmID) {
       missingRealmIDs.add(realmID);
+    },
+    setCanonicalCellRoute(value) {
+      canonicalCellRoute = structuredClone(value);
     },
     advance(milliseconds) {
       currentTime += milliseconds;
@@ -1542,6 +1571,258 @@ test("idempotent replay is side-effect free behind an account lifecycle fence", 
   assert.deepEqual(replay.body, approved.body);
   assert.equal(
     emailDirectory.value(realmEmailRouteKey(DOMAIN, "replay-safe")).state,
+    "suspended",
+  );
+});
+
+test("account close remains fenced until a pending-review claim is explicitly resolved", async () => {
+  const { runtime, storage } = registry();
+  const created = await requestAlias(runtime, "close-pending");
+  assert.equal(created.response.status, 202);
+  const closeFence = {
+    account_id: ACCOUNT,
+    operation_id: "account-close-pending-alias",
+    epoch: 2,
+    action: "retire",
+    activation_enabled: true,
+  };
+  const claimBefore = await storage.get("claim:close-pending");
+  const accountUsageBefore = await storage.get(
+    `claim-usage-account:${ACCOUNT}`,
+  );
+  const realmUsageBefore = await storage.get(
+    `claim-usage-realm:${ACCOUNT}:${REALM}`,
+  );
+
+  const blocked = await call(
+    runtime,
+    "/account-lifecycle/reconcile",
+    closeFence,
+  );
+  assert.equal(blocked.response.status, 409);
+  assert.equal(
+    blocked.body.code,
+    "realm_email_alias_pending_request_blocks_account_close",
+  );
+  assert.deepEqual(await storage.get("claim:close-pending"), claimBefore);
+  assert.deepEqual(
+    await storage.get(`claim-usage-account:${ACCOUNT}`),
+    accountUsageBefore,
+  );
+  assert.deepEqual(
+    await storage.get(`claim-usage-realm:${ACCOUNT}:${REALM}`),
+    realmUsageBefore,
+  );
+  assert.equal(await storage.get(`lifecycle-fence:${ACCOUNT}`), undefined);
+  assert.deepEqual(
+    {
+      operation_id: (await storage.get(`lifecycle-intent:${ACCOUNT}`))
+        .operation_id,
+      epoch: (await storage.get(`lifecycle-intent:${ACCOUNT}`)).epoch,
+      action: (await storage.get(`lifecycle-intent:${ACCOUNT}`)).action,
+    },
+    {
+      operation_id: closeFence.operation_id,
+      epoch: closeFence.epoch,
+      action: closeFence.action,
+    },
+  );
+
+  // The alarm retries the same durable fence and must not complete or discard
+  // it merely because the administrative review is still pending.
+  await runtime.alarm();
+  const retriedIntent = await storage.get(`lifecycle-intent:${ACCOUNT}`);
+  assert.equal(retriedIntent.operation_id, closeFence.operation_id);
+  assert.equal(retriedIntent.epoch, closeFence.epoch);
+  assert.equal(retriedIntent.action, closeFence.action);
+  assert.equal(retriedIntent.failure_count, 1);
+  assert.equal(await storage.get(`lifecycle-fence:${ACCOUNT}`), undefined);
+
+  const stillBlocked = await call(
+    runtime,
+    "/account-lifecycle/reconcile",
+    closeFence,
+  );
+  assert.equal(stillBlocked.response.status, 409);
+  assert.equal(
+    stillBlocked.body.code,
+    "realm_email_alias_pending_request_blocks_account_close",
+  );
+  assert.equal(
+    (await storage.get(`lifecycle-intent:${ACCOUNT}`)).failure_count,
+    1,
+  );
+
+  const overtaking = await call(runtime, "/account-lifecycle/reconcile", {
+    ...closeFence,
+    operation_id: "different-close-operation",
+  });
+  assert.equal(overtaking.response.status, 409);
+  assert.match(overtaking.body.error, /epoch conflicts/);
+  assert.equal(
+    (await storage.get(`lifecycle-intent:${ACCOUNT}`)).operation_id,
+    closeFence.operation_id,
+  );
+
+  const rejected = await call(runtime, "/request/reject", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+    reason: "resolve before closing the account",
+    idempotency_key: "reject-before-account-close",
+  });
+  assert.equal(rejected.response.status, 200);
+  assert.equal(await storage.get("claim:close-pending"), undefined);
+  assert.equal(
+    (await storage.get(`claim-usage-account:${ACCOUNT}`)).open_requests,
+    0,
+  );
+  assert.equal(
+    (await storage.get(`claim-usage-realm:${ACCOUNT}:${REALM}`)).open_requests,
+    0,
+  );
+
+  const completed = await call(
+    runtime,
+    "/account-lifecycle/reconcile",
+    closeFence,
+  );
+  assert.equal(completed.response.status, 200);
+  assert.equal(completed.body.complete, true);
+  assert.equal(await storage.get(`lifecycle-intent:${ACCOUNT}`), undefined);
+  assert.deepEqual(
+    {
+      operation_id: (await storage.get(`lifecycle-fence:${ACCOUNT}`))
+        .operation_id,
+      epoch: (await storage.get(`lifecycle-fence:${ACCOUNT}`)).epoch,
+      action: (await storage.get(`lifecycle-fence:${ACCOUNT}`)).action,
+    },
+    {
+      operation_id: closeFence.operation_id,
+      epoch: closeFence.epoch,
+      action: closeFence.action,
+    },
+  );
+  const replay = await call(
+    runtime,
+    "/account-lifecycle/reconcile",
+    closeFence,
+  );
+  assert.equal(replay.response.status, 200);
+  assert.equal(replay.body.complete, true);
+  assert.equal(replay.body.replayed, true);
+});
+
+test("account move suspension preserves an unassigned pending-review claim", async () => {
+  const { runtime, storage } = registry();
+  const created = await requestAlias(runtime, "move-pending");
+  assert.equal(created.response.status, 202);
+  const claimBefore = await storage.get("claim:move-pending");
+  const accountUsageBefore = await storage.get(
+    `claim-usage-account:${ACCOUNT}`,
+  );
+  const moveFence = {
+    account_id: ACCOUNT,
+    operation_id: "account-move-pending-alias",
+    epoch: 2,
+    action: "suspend",
+    activation_enabled: true,
+  };
+
+  const claimsPage = await call(
+    runtime,
+    "/account-lifecycle/reconcile",
+    moveFence,
+  );
+  assert.equal(claimsPage.response.status, 200);
+  assert.equal(claimsPage.body.complete, false);
+  const completed = await call(
+    runtime,
+    "/account-lifecycle/reconcile",
+    moveFence,
+  );
+  assert.equal(completed.response.status, 200);
+  assert.equal(completed.body.complete, true);
+  assert.deepEqual(await storage.get("claim:move-pending"), claimBefore);
+  assert.deepEqual(
+    await storage.get(`claim-usage-account:${ACCOUNT}`),
+    accountUsageBefore,
+  );
+  assert.equal(
+    (await storage.get(`lifecycle-fence:${ACCOUNT}`)).action,
+    "suspend",
+  );
+});
+
+test("terminal account lifecycle retires aliases and canonicals while moves only suspend", async () => {
+  const closed = registry();
+  closed.env.CP_REALM_EMAIL_CANONICAL_INVENTORY_ENABLED = "true";
+  closed.env.CP_REALM_EMAIL_CANONICAL_DELIVERY_ENABLED = "true";
+  const created = await requestAlias(closed.runtime, "close-account");
+  await approve(closed.runtime, created.body.request);
+  closed.setCanonicalCellRoute({
+    state: "retired",
+    generation: 2,
+    operation_id: "account-close-aliases",
+  });
+  const closeFence = {
+    account_id: ACCOUNT,
+    operation_id: "account-close-aliases",
+    epoch: 2,
+    action: "retire",
+    activation_enabled: true,
+  };
+  const retiredClaims = await call(
+    closed.runtime,
+    "/account-lifecycle/reconcile",
+    closeFence,
+  );
+  assert.equal(retiredClaims.response.status, 200);
+  assert.equal(retiredClaims.body.complete, false);
+  assert.ok((await closed.storage.get("claim:close-account")).retired_at);
+  assert.equal(
+    closed.emailDirectory.value(realmEmailRouteKey(DOMAIN, "close-account")).state,
+    "retired",
+  );
+  const retiredCanonicals = await call(
+    closed.runtime,
+    "/account-lifecycle/reconcile",
+    closeFence,
+  );
+  assert.equal(retiredCanonicals.body.complete, true);
+  assert.equal(
+    (await closed.storage.get(`canonical:${DOMAIN}:aaaaaaaaaaaaaaaa`)).state,
+    "retired",
+  );
+
+  const moved = registry();
+  moved.env.CP_REALM_EMAIL_CANONICAL_INVENTORY_ENABLED = "true";
+  moved.env.CP_REALM_EMAIL_CANONICAL_DELIVERY_ENABLED = "true";
+  const moving = await requestAlias(moved.runtime, "move-account");
+  await approve(moved.runtime, moving.body.request);
+  const moveFence = {
+    account_id: ACCOUNT,
+    operation_id: "account-move-aliases",
+    epoch: 2,
+    action: "suspend",
+    activation_enabled: true,
+  };
+  assert.equal((await call(
+    moved.runtime,
+    "/account-lifecycle/reconcile",
+    moveFence,
+  )).body.complete, false);
+  assert.equal((await moved.storage.get("claim:move-account")).retired_at, null);
+  assert.equal(
+    moved.emailDirectory.value(realmEmailRouteKey(DOMAIN, "move-account")).state,
+    "suspended",
+  );
+  assert.equal((await call(
+    moved.runtime,
+    "/account-lifecycle/reconcile",
+    moveFence,
+  )).body.complete, true);
+  assert.equal(
+    (await moved.storage.get(`canonical:${DOMAIN}:aaaaaaaaaaaaaaaa`)).state,
     "suspended",
   );
 });

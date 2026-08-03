@@ -3,6 +3,7 @@ export const RECIPIENT_PREFIX = "pilot:recipient:v1:";
 export const DIRECTORY_SCHEMA_VERSION = 1;
 export const REALM_ROUTE_PREFIX = "email:realm-route:v1:";
 export const REALM_ROUTE_SCHEMA_VERSION = 1;
+export const MAX_MANAGED_AGENT_EMAIL_DOMAINS = 2;
 
 const DOMAIN_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const REALM_ID = /^realm_([a-z2-7]{16})$/;
@@ -26,6 +27,25 @@ export function validateDomain(value) {
     throw new Error("domain must be canonical lowercase ASCII DNS");
   }
   return value;
+}
+
+export function configuredAgentEmailDomains(env = {}) {
+  const primary = validateDomain(String(env.AGENT_EMAIL_DOMAIN ?? ""));
+  const rawLegacy = String(env.AGENT_EMAIL_LEGACY_DOMAINS ?? "");
+  if (rawLegacy === "") return Object.freeze([primary]);
+  if (rawLegacy !== rawLegacy.trim()) {
+    throw new Error("legacy agent email domains are invalid");
+  }
+  const legacy = rawLegacy.split(",");
+  if (legacy.some((domain) => domain.length === 0) ||
+      legacy.length >= MAX_MANAGED_AGENT_EMAIL_DOMAINS) {
+    throw new Error("legacy agent email domains are invalid");
+  }
+  const domains = [primary, ...legacy.map(validateDomain)];
+  if (new Set(domains).size !== domains.length) {
+    throw new Error("agent email domains must be unique");
+  }
+  return Object.freeze(domains);
 }
 
 function validateRealmLabel(value) {

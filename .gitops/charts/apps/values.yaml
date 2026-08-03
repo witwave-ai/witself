@@ -63,6 +63,10 @@ apps:
       receivePilot:
         enabled: false
         domain: ""
+        # At most one receive-only compatibility domain. The app-of-apps
+        # withholds this field from pre-0.0.232 child charts and preserves the
+        # first legacy domain as their single-domain value during cutover.
+        acceptedLegacyDomains: []
         audience: ""
         realmID: ""
         agentIDs: []

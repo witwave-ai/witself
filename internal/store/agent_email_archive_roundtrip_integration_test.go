@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -70,10 +71,24 @@ func TestAgentEmailArchiveCellMovePostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	legacyOwnerAddress := ownerAddress.Address
 	formerAddress, err := source.EnsureAgentEmailMailbox(ctx, scope, provisioned.AccountID,
 		realm.ID, former.ID, "")
 	if err != nil {
 		t.Fatal(err)
+	}
+	legacyFormerAddress := formerAddress.Address
+	scope.Domain = "witmail.net"
+	scope.LegacyDomains = []string{"agent-mail.witwave.ai"}
+	ownerAddress, err = source.EnsureAgentEmailMailbox(ctx, scope, provisioned.AccountID,
+		realm.ID, owner.ID, "")
+	if err != nil || ownerAddress.Address == legacyOwnerAddress || len(ownerAddress.Addresses) != 2 {
+		t.Fatalf("transition owner address = %+v / %v", ownerAddress, err)
+	}
+	formerAddress, err = source.EnsureAgentEmailMailbox(ctx, scope, provisioned.AccountID,
+		realm.ID, former.ID, "")
+	if err != nil || formerAddress.Address == legacyFormerAddress || len(formerAddress.Addresses) != 2 {
+		t.Fatalf("transition former address = %+v / %v", formerAddress, err)
 	}
 	realmControl, err := source.SetRealmAgentEmailReceiveControl(ctx, scope,
 		provisioned.AccountID, provisioned.OperatorID, realm.ID, AgentEmailReceiveDisabled)
@@ -119,8 +134,9 @@ func TestAgentEmailArchiveCellMovePostgres(t *testing.T) {
 	}, "\r\n"))
 	digest := sha256.Sum256(raw)
 	rawSHA := hex.EncodeToString(digest[:])
-	duplicateGroup := agentEmailDuplicateGroup(rawSHA, ownerAddress.Address, "sender@example.com")
-	insertMessage := func(id, possibleDuplicate string) {
+	legacyDuplicateGroup := agentEmailDuplicateGroup(rawSHA, legacyOwnerAddress, "sender@example.com")
+	primaryDuplicateGroup := agentEmailDuplicateGroup(rawSHA, ownerAddress.Address, "sender@example.com")
+	insertMessage := func(id, recipient, duplicateGroup, possibleDuplicate string) {
 		t.Helper()
 		var duplicate any
 		if possibleDuplicate != "" {
@@ -142,14 +158,14 @@ func TestAgentEmailArchiveCellMovePostgres(t *testing.T) {
 			   'sender@example.com','owner@example.com','portable',NULL,NULL,1,
 			   'unknown','unknown','unknown','unknown','unverified',$13,$14,
 			   clock_timestamp())`, id, provisioned.AccountID, realm.ID,
-			ownerAddress.MailboxID, owner.ID, ownerAddress.ID, ownerAddress.Address,
+			ownerAddress.MailboxID, owner.ID, ownerAddress.ID, recipient,
 			ownerAddress.AgentSegment, ownerAddress.RealmLabel, raw, len(raw), rawSHA,
 			duplicateGroup, duplicate); err != nil {
 			t.Fatal(err)
 		}
 	}
-	insertMessage(messageA, "")
-	insertMessage(messageB, messageA)
+	insertMessage(messageA, legacyOwnerAddress, legacyDuplicateGroup, "")
+	insertMessage(messageB, legacyOwnerAddress, legacyDuplicateGroup, messageA)
 	if _, err := source.pool.Exec(ctx, `
 		INSERT INTO agent_email_messages
 		  (id,account_id,realm_id,mailbox_id,owner_agent_id,address_id,
@@ -171,8 +187,8 @@ func TestAgentEmailArchiveCellMovePostgres(t *testing.T) {
 		   clock_timestamp())`,
 		messageC, provisioned.AccountID, realm.ID, ownerAddress.MailboxID,
 		owner.ID, ownerAddress.ID, ownerAddress.Address, ownerAddress.AgentSegment,
-		ownerAddress.RealmLabel, len(raw), rawSHA, len(raw), duplicateGroup,
-		messageA,
+		ownerAddress.RealmLabel, len(raw), rawSHA, len(raw), primaryDuplicateGroup,
+		nil,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +219,7 @@ func TestAgentEmailArchiveCellMovePostgres(t *testing.T) {
 		       at-interval '1 second'
 		FROM anchor`,
 		provisioned.AccountID, realm.ID, ownerAddress.MailboxID, owner.ID,
-		hex.EncodeToString(challengeDigest[:]), duplicateGroup, messageA); err != nil {
+		hex.EncodeToString(challengeDigest[:]), legacyDuplicateGroup, messageA); err != nil {
 		t.Fatal(err)
 	}
 
@@ -217,6 +233,8 @@ func TestAgentEmailArchiveCellMovePostgres(t *testing.T) {
 	}
 	archiveBytes := archive.Bytes()
 	var archivedMessages, archivedReceiveControls, archivedCanaryProofs int
+	var archivedAddressDomains int
+	archivedEnvelopeDomains := map[string]int{}
 	if _, err := archiveexport.Read(ctx, bytes.NewReader(archiveBytes), archiveexport.ImportOptions{
 		CurrentSchema: SchemaVersion(),
 		Row: func(table string, row []byte) error {
@@ -233,6 +251,10 @@ func TestAgentEmailArchiveCellMovePostgres(t *testing.T) {
 				archivedMessages++
 				if err := json.Unmarshal(row, &object); err != nil {
 					return err
+				}
+				recipient, _ := object["envelope_recipient"].(string)
+				if at := strings.LastIndexByte(recipient, '@'); at >= 0 {
+					archivedEnvelopeDomains[recipient[at+1:]]++
 				}
 				if object["id"] == messageC {
 					if object["raw_mime"] != nil || object["body_text"] != "code 123456" ||
@@ -269,6 +291,8 @@ func TestAgentEmailArchiveCellMovePostgres(t *testing.T) {
 				if object["state"] != agentEmailRetryCanaryAccepted || object["accepted_message_id"] != messageA {
 					t.Fatalf("archived retry canary proof = %#v", object)
 				}
+			case "agent_email_address_domains":
+				archivedAddressDomains++
 			}
 			return nil
 		},
@@ -283,6 +307,13 @@ func TestAgentEmailArchiveCellMovePostgres(t *testing.T) {
 	}
 	if archivedCanaryProofs != 1 {
 		t.Fatalf("archived retry canary proofs = %d, want 1", archivedCanaryProofs)
+	}
+	if archivedAddressDomains != 4 {
+		t.Fatalf("archived agent-email address domains = %d, want 4", archivedAddressDomains)
+	}
+	if archivedEnvelopeDomains["agent-mail.witwave.ai"] != 2 ||
+		archivedEnvelopeDomains["witmail.net"] != 1 {
+		t.Fatalf("archived envelope domains = %#v", archivedEnvelopeDomains)
 	}
 
 	if _, err := destination.ImportAccount(ctx, provisioned.AccountID,
@@ -304,11 +335,24 @@ func TestAgentEmailArchiveCellMovePostgres(t *testing.T) {
 	if err := destination.pool.QueryRow(ctx, `
 		SELECT count(*) FROM agent_email_messages
 		WHERE account_id=$1 AND duplicate_group_sha256=$2`,
-		provisioned.AccountID, duplicateGroup).Scan(&duplicateCount); err != nil {
+		provisioned.AccountID, legacyDuplicateGroup).Scan(&duplicateCount); err != nil {
 		t.Fatal(err)
 	}
-	if duplicateCount != 3 {
-		t.Fatalf("restored suspected duplicate rows = %d, want 3", duplicateCount)
+	if duplicateCount != 2 {
+		t.Fatalf("restored suspected duplicate rows = %d, want 2", duplicateCount)
+	}
+	var restoredPrimaryEnvelopes, restoredLegacyEnvelopes int
+	if err := destination.pool.QueryRow(ctx, `
+		SELECT
+		  count(*) FILTER (WHERE envelope_recipient LIKE '%@witmail.net'),
+		  count(*) FILTER (WHERE envelope_recipient LIKE '%@agent-mail.witwave.ai')
+		FROM agent_email_messages WHERE account_id=$1`, provisioned.AccountID).
+		Scan(&restoredPrimaryEnvelopes, &restoredLegacyEnvelopes); err != nil {
+		t.Fatal(err)
+	}
+	if restoredPrimaryEnvelopes != 1 || restoredLegacyEnvelopes != 2 {
+		t.Fatalf("restored envelope domains primary=%d legacy=%d",
+			restoredPrimaryEnvelopes, restoredLegacyEnvelopes)
 	}
 	var omittedRaw []byte
 	var omittedBody, omittedBodyKind *string
@@ -375,6 +419,19 @@ func TestAgentEmailArchiveCellMovePostgres(t *testing.T) {
 	if tombstones != 1 || formerAgents != 0 {
 		t.Fatalf("restored tombstone rows=%d former agents=%d", tombstones, formerAgents)
 	}
+	var ownerRoutes, formerRoutes int
+	if err := destination.pool.QueryRow(ctx, `
+		SELECT
+		  count(*) FILTER (WHERE address_id=$1),
+		  count(*) FILTER (WHERE address_id=$2)
+		FROM agent_email_address_domains WHERE account_id=$3`,
+		ownerAddress.ID, formerAddress.ID, provisioned.AccountID).
+		Scan(&ownerRoutes, &formerRoutes); err != nil {
+		t.Fatal(err)
+	}
+	if ownerRoutes != 2 || formerRoutes != 2 {
+		t.Fatalf("restored address routes owner=%d former=%d", ownerRoutes, formerRoutes)
+	}
 	var restoredAgentReceiveState, restoredRealmReceiveState string
 	var restoredRealmRowVersion int64
 	var restoredRealmDisabledAt *time.Time
@@ -406,6 +463,42 @@ func TestAgentEmailArchiveCellMovePostgres(t *testing.T) {
 	}
 	if restoredCanaryState != agentEmailRetryCanaryAccepted || restoredCanaryMessage != messageA {
 		t.Fatalf("restored retry canary = %q/%q", restoredCanaryState, restoredCanaryMessage)
+	}
+
+	// A retired route remains a global domain/local-part tombstone after a
+	// cell move. Recreating the former segment on the primary domain must fail
+	// atomically even though the original address row was on the legacy domain.
+	if err := destination.ResumeAccountSystem(ctx, provisioned.AccountID, "evacuation"); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := destination.CreateAgent(
+		ctx, provisioned.AccountID, realm.ID, "former",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementScope := scope
+	replacementScope.AgentIDs = make(map[string]bool, len(enrolled))
+	for agentID := range enrolled {
+		if agentID != former.ID {
+			replacementScope.AgentIDs[agentID] = true
+		}
+	}
+	replacementScope.AgentIDs[replacement.ID] = true
+	if _, err := destination.EnsureAgentEmailMailbox(
+		ctx, replacementScope, provisioned.AccountID, realm.ID, replacement.ID, "former",
+	); !errors.Is(err, ErrAgentEmailAddressConflict) {
+		t.Fatalf("retired cross-domain address reuse error = %v", err)
+	}
+	var replacementAddresses int
+	if err := destination.pool.QueryRow(ctx, `
+		SELECT count(*) FROM agent_email_addresses
+		WHERE account_id=$1 AND realm_id=$2 AND provisioned_agent_id=$3`,
+		provisioned.AccountID, realm.ID, replacement.ID).Scan(&replacementAddresses); err != nil {
+		t.Fatal(err)
+	}
+	if replacementAddresses != 0 {
+		t.Fatalf("conflicted replacement left %d address rows", replacementAddresses)
 	}
 }
 
@@ -516,5 +609,18 @@ func TestLegacyAgentEmailArchiveImportScopesReceiveControlSynthesisPostgres(t *t
 	}
 	if unrelatedControls != 0 {
 		t.Fatalf("unrelated account receive controls after import = %d, want 0", unrelatedControls)
+	}
+	var importedRoutes int
+	var importedRouteDomain string
+	if err := destination.pool.QueryRow(ctx, `
+		SELECT count(*),COALESCE(min(domain),'')
+		FROM agent_email_address_domains
+		WHERE account_id=$1`, importedAccountID).
+		Scan(&importedRoutes, &importedRouteDomain); err != nil {
+		t.Fatal(err)
+	}
+	if importedRoutes != 1 || importedRouteDomain != "agent-mail.witwave.ai" {
+		t.Fatalf("schema-59 synthesized routes=%d domain=%q",
+			importedRoutes, importedRouteDomain)
 	}
 }

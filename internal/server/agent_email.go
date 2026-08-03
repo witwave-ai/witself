@@ -98,6 +98,7 @@ func (e *AgentEmailRateLimitError) Unwrap() error { return ErrAgentEmailRateLimi
 type AgentEmailPilotConfig struct {
 	Enabled            bool
 	Domain             string
+	LegacyDomains      []string
 	Audience           string
 	RealmIDs           map[string]bool
 	AgentIDs           map[string]bool
@@ -116,6 +117,17 @@ func ValidateAgentEmailPilotConfig(cfg AgentEmailPilotConfig) error {
 	domain, err := agentemail.ValidateDomain(cfg.Domain)
 	if err != nil || domain != cfg.Domain {
 		return errors.New("agent-email pilot domain is invalid")
+	}
+	if len(cfg.LegacyDomains) > 1 {
+		return errors.New("agent-email pilot accepts at most 1 legacy domain")
+	}
+	seenDomains := map[string]bool{domain: true}
+	for _, legacy := range cfg.LegacyDomains {
+		normalized, legacyErr := agentemail.ValidateDomain(legacy)
+		if legacyErr != nil || normalized != legacy || seenDomains[normalized] {
+			return errors.New("agent-email pilot legacy domain entry is invalid or duplicated")
+		}
+		seenDomains[normalized] = true
 	}
 	audience := strings.TrimSpace(cfg.Audience)
 	if !validAgentEmailAudience(audience) || audience != strings.ToLower(audience) {
@@ -230,7 +242,16 @@ type AgentEmailAddress struct {
 	DisabledAt        *time.Time                    `json:"disabled_at,omitempty"`
 	RealmDisabledAt   *time.Time                    `json:"realm_disabled_at,omitempty"`
 	RetiredAt         *time.Time                    `json:"retired_at,omitempty"`
+	Addresses         []AgentEmailCanonicalAddress  `json:"addresses"`
 	Aliases           []AgentEmailRealmAliasAddress `json:"aliases"`
+}
+
+// AgentEmailCanonicalAddress is one primary, legacy, or historical managed
+// domain address that remains permanently bound to this mailbox reservation.
+type AgentEmailCanonicalAddress struct {
+	Address string `json:"address"`
+	Domain  string `json:"domain"`
+	Role    string `json:"role"`
 }
 
 // AgentEmailRealmAlias is the control-plane-visible cell acknowledgement for

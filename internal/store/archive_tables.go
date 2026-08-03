@@ -54,6 +54,7 @@ var canonicalArchiveTables = []archiveTableIntroduction{
 	{name: "avatar_style_rollout_jobs", introducedSchema: avatarStyleRolloutArchiveSchema},
 	{name: "agents", introducedSchema: 5},
 	{name: "agent_email_addresses", introducedSchema: 59},
+	{name: "agent_email_address_domains", introducedSchema: 87},
 	{name: "agent_email_mailboxes", introducedSchema: 59},
 	{name: "agent_email_realm_aliases", introducedSchema: 85},
 	{name: "agent_email_messages", introducedSchema: 59},

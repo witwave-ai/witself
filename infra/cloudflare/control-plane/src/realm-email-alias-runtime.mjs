@@ -61,6 +61,7 @@ const CANONICAL_INVENTORY_KEY = "canonical-inventory";
 const CANONICAL_INVENTORY_DIRECTORY_LIMIT = 1;
 const REALM_CLOSE_CLAIM_PAGE_LIMIT = 25;
 const REALM_CLOSE_ALARM_BATCH_LIMIT = 10;
+export const REALM_EMAIL_MAX_MANAGED_DOMAINS = 2;
 
 // Commercial alias capacity can be explicitly unlimited. Review work cannot:
 // these independent technical ceilings bound both one realm's queue and one
@@ -276,6 +277,38 @@ export function validateManagedRealmEmailDomain(value) {
     fail("managed email domain is invalid", 400);
   }
   return value;
+}
+
+// The first domain is the permanent agent-email domain. One explicit
+// compatibility domain may retain already-issued canonical addresses during
+// a migration, but can never grow into a broad or unbounded mail surface.
+// Realm aliases are still assigned only on the primary domain.
+export function managedRealmEmailDomains(env = {}) {
+  const primary = validateManagedRealmEmailDomain(
+    String(env.AGENT_EMAIL_DOMAIN ?? ""),
+  );
+  const rawLegacy = String(env.AGENT_EMAIL_LEGACY_DOMAINS ?? "");
+  if (rawLegacy === "") return Object.freeze([primary]);
+  if (rawLegacy !== rawLegacy.trim()) {
+    fail("managed legacy email domains are invalid", 400);
+  }
+  const legacy = rawLegacy.split(",");
+  if (legacy.some((domain) => domain.length === 0) ||
+      legacy.length >= REALM_EMAIL_MAX_MANAGED_DOMAINS) {
+    fail("managed legacy email domains are invalid", 400);
+  }
+  const domains = [
+    primary,
+    ...legacy.map((domain) => validateManagedRealmEmailDomain(domain)),
+  ];
+  if (new Set(domains).size !== domains.length) {
+    fail("managed email domains must be unique", 400);
+  }
+  return Object.freeze(domains);
+}
+
+export function managedRealmEmailPrimaryDomain(env = {}) {
+  return managedRealmEmailDomains(env)[0];
 }
 
 export function realmEmailRouteKey(domain, realmLabel) {
@@ -830,7 +863,7 @@ export async function reconcileRealmEmailAliasesForAccountLifecycle(
   if (!ACCOUNT_ID_PATTERN.test(accountID ?? "") ||
       !IDEMPOTENCY_KEY_PATTERN.test(operationID ?? "") ||
       !Number.isSafeInteger(epoch) || epoch < 0 ||
-      !["suspend", "republish"].includes(action)) {
+      !["suspend", "republish", "retire"].includes(action)) {
     throw new Error("invalid account lifecycle fence for alias reconciliation");
   }
   // One registry call advances at most one bounded account-index page. The
@@ -1063,12 +1096,23 @@ export class DurableRealmEmailAliasRegistry {
       case "/canonical/inventory/reconcile":
         return ["registry:canonical-inventory"];
       case "/canonical/realm-close":
-      case "/canonical/realm-close/get":
+      case "/canonical/realm-close/get": {
+        let domains = managedRealmEmailDomains(this.env);
+        if (ACCOUNT_ID_PATTERN.test(input?.account_id ?? "") &&
+            REALM_ID_PATTERN.test(input?.realm_id ?? "")) {
+          const persisted = await this.storage.get(
+            realmCloseIntentKey(input.account_id, input.realm_id),
+          );
+          if (persisted) domains = this.realmCloseIntentDomains(persisted);
+        }
         return [
           `account:${input.account_id}`,
           `realm:${input.account_id}:${input.realm_id}`,
-          `canonical:${input.domain}:${String(input.realm_id ?? "")}`,
+          ...domains.map((domain) =>
+            `canonical:${domain}:${String(input.realm_id ?? "")}`
+          ),
         ];
+      }
       default:
         return [];
     }
@@ -2301,6 +2345,9 @@ export class DurableRealmEmailAliasRegistry {
 
   async getRoute(input) {
     const domain = validateManagedRealmEmailDomain(input?.domain);
+    if (!managedRealmEmailDomains(this.env).includes(domain)) {
+      fail("realm email route not found", 404);
+    }
     const realmLabel = typeof input?.realm_label === "string"
       ? input.realm_label
       : "";
@@ -2517,16 +2564,19 @@ export class DurableRealmEmailAliasRegistry {
       this.fetchCellCanonicalPage(accountID, target, scan.cell_cursor),
       this.canonicalEmailEntitlement(accountID),
     ]);
+    const managedDomains = managedRealmEmailDomains(this.env);
     for (const cellRoute of page.routes) {
-      await this.withLane(
-        `canonical:${this.env.AGENT_EMAIL_DOMAIN}:${cellRoute.realm_id}`,
-        () => this.upsertCanonicalRoute({
-          domain: this.env.AGENT_EMAIL_DOMAIN,
-          cellRoute,
-          target,
-          emailEnabled,
-        }),
-      );
+      for (const domain of managedDomains) {
+        await this.withLane(
+          `canonical:${domain}:${cellRoute.realm_id}`,
+          () => this.upsertCanonicalRoute({
+            domain,
+            cellRoute,
+            target,
+            emailEnabled,
+          }),
+        );
+      }
     }
     const accountComplete = page.next_cursor === null;
     const complete = accountComplete && scan.next_directory_cursor === null;
@@ -2548,6 +2598,7 @@ export class DurableRealmEmailAliasRegistry {
       cycle: continued.cycle,
       accounts_scanned: accountComplete ? 1 : 0,
       routes_scanned: page.routes.length,
+      projections_published: page.routes.length * managedDomains.length,
       account_complete: accountComplete,
     });
   }
@@ -2610,7 +2661,11 @@ export class DurableRealmEmailAliasRegistry {
       ? validateActor(input.actor, "platform_admin")
       : validateActor(input.actor, "account_operator");
     const key = validateIdempotencyKey(input.idempotency_key);
+    const domains = managedRealmEmailDomains(this.env);
     const domain = validateManagedRealmEmailDomain(input.domain);
+    if (domain !== domains[0]) {
+      fail("realm close must target the primary managed email domain", 400);
+    }
     const scope = `realm-close:${input.account_id}:${input.realm_id}`;
     const fp = fingerprint({
       action: "realm_close",
@@ -2640,6 +2695,7 @@ export class DurableRealmEmailAliasRegistry {
         account_id: input.account_id,
         realm_id: input.realm_id,
         domain,
+        domains,
         actor,
         idempotency_key: key,
         fingerprint: fp,
@@ -2677,9 +2733,54 @@ export class DurableRealmEmailAliasRegistry {
     }, fence ? 200 : 202);
   }
 
+  realmCloseIntentDomains(intent) {
+    const originalDomain = validateManagedRealmEmailDomain(intent?.domain);
+    if (Array.isArray(intent?.domains)) {
+      const persisted = intent.domains.map((domain) =>
+        validateManagedRealmEmailDomain(domain)
+      );
+      if (persisted.length < 1 ||
+          persisted.length > REALM_EMAIL_MAX_MANAGED_DOMAINS ||
+          new Set(persisted).size !== persisted.length ||
+          persisted[0] !== originalDomain) {
+        fail("canonical realm close domain set is invalid", 503);
+      }
+      return persisted;
+    }
+
+    // Old intents stored only their original primary domain. Use the current
+    // bounded configured set once, with that original domain first, so both
+    // lane acquisition and the durable upgrade cover exactly the domains that
+    // drainRealmCloseIntent is allowed to mutate.
+    const configured = managedRealmEmailDomains(this.env);
+    if (!configured.includes(originalDomain)) {
+      fail("legacy canonical realm close domain is no longer managed", 503);
+    }
+    return [
+      originalDomain,
+      ...configured.filter((domain) => domain !== originalDomain),
+    ];
+  }
+
   async drainRealmCloseIntent(startingIntent) {
     let intent = startingIntent;
     try {
+      const domains = this.realmCloseIntentDomains(intent);
+      if (!Array.isArray(intent.domains)) {
+        // Legacy single-domain intents predate the bounded compatibility set.
+        // Freeze the currently configured set into the durable intent before
+        // doing more external work so every retry and journal replay sees the
+        // same finite retirement target.
+        intent = {
+          ...intent,
+          domains,
+          updated_at: this.now().toISOString(),
+        };
+        await this.atomic([[
+          realmCloseIntentKey(intent.account_id, intent.realm_id),
+          intent,
+        ]]);
+      }
       if (intent.phase === "scan_aliases") {
         const nextCursor = await this.assertRealmHasNoLiveAliases(
           intent.account_id,
@@ -2767,15 +2868,39 @@ export class DurableRealmEmailAliasRegistry {
       }
 
       if (intent.phase === "publish_retired") {
-        await this.upsertCanonicalRoute({
-          domain: intent.domain,
-          cellRoute: intent.cell_route,
-          forcedPolicy: { state: "retired", suspension_disposition: null },
-        });
+        const startIndex = Number.isSafeInteger(intent.publish_domain_index)
+          ? intent.publish_domain_index
+          : 0;
+        if (startIndex < 0 || startIndex > domains.length) {
+          fail("canonical realm close domain cursor is invalid", 503);
+        }
+        for (let index = startIndex; index < domains.length; index += 1) {
+          const canonical = await this.upsertCanonicalRoute({
+            domain: domains[index],
+            cellRoute: intent.cell_route,
+            forcedPolicy: { state: "retired", suspension_disposition: null },
+          });
+          intent = {
+            ...intent,
+            publish_domain_index: index + 1,
+            canonical_routes: {
+              ...(isObject(intent.canonical_routes)
+                ? intent.canonical_routes
+                : {}),
+              [domains[index]]: publicCanonicalRoute(canonical),
+            },
+            updated_at: this.now().toISOString(),
+          };
+          await this.atomic([[
+            realmCloseIntentKey(intent.account_id, intent.realm_id),
+            intent,
+          ]]);
+        }
         const previous = intent;
         intent = {
           ...intent,
           phase: "commit_cell",
+          publish_domain_index: domains.length,
           retry_at_ms: this.now().getTime(),
           failure_count: 0,
           updated_at: this.now().toISOString(),
@@ -2808,17 +2933,22 @@ export class DurableRealmEmailAliasRegistry {
           committed.operation_id !== intent.idempotency_key) {
         fail("cell did not commit canonical realm retirement", 502);
       }
-      const canonical = await this.upsertCanonicalRoute({
-        domain: intent.domain,
-        cellRoute: committed,
-        forcedPolicy: { state: "retired", suspension_disposition: null },
-      });
+      const canonicals = [];
+      for (const domain of domains) {
+        canonicals.push(await this.upsertCanonicalRoute({
+          domain,
+          cellRoute: committed,
+          forcedPolicy: { state: "retired", suspension_disposition: null },
+        }));
+      }
+      const canonical = canonicals[0];
       const body = {
         schema_version: SCHEMA_VERSION,
         account_id: intent.account_id,
         realm_id: intent.realm_id,
         complete: true,
         canonical_route: publicCanonicalRoute(canonical),
+        canonical_routes: canonicals.map(publicCanonicalRoute),
       };
       const fence = {
         account_id: intent.account_id,
@@ -2826,6 +2956,10 @@ export class DurableRealmEmailAliasRegistry {
         operation_id: intent.idempotency_key,
         cell_generation: committed.generation,
         controller_revision: canonical.controller_revision,
+        canonical_revisions: canonicals.map((route) => ({
+          domain: route.domain,
+          controller_revision: route.controller_revision,
+        })),
         completed_at: this.now().toISOString(),
       };
       await this.atomic([
@@ -3439,11 +3573,22 @@ export class DurableRealmEmailAliasRegistry {
       }
       const key = realmCloseIntentKey(accountID, realmID);
       const intent = await this.storage.get(key);
+      let domains = [];
+      if (intent) {
+        try {
+          domains = this.realmCloseIntentDomains(intent);
+        } catch {
+          // Invalid intent/configuration state cannot mutate a canonical row:
+          // acquire the account/realm lanes and let drainRealmCloseIntent
+          // record its bounded retry without poisoning unrelated alarm work.
+          domains = [];
+        }
+      }
       const lanes = intent
         ? [
           `account:${accountID}`,
           `realm:${accountID}:${realmID}`,
-          `canonical:${intent.domain}:${realmID}`,
+          ...domains.map((domain) => `canonical:${domain}:${realmID}`),
         ]
         : [`realm:${accountID}:${realmID}`];
       await this.withLanes(lanes, async () => {
@@ -5430,14 +5575,20 @@ export class DurableRealmEmailAliasRegistry {
   }
 
   lifecycleOrder(action) {
-    return action === "suspend" ? 1 : action === "republish" ? 2 : 0;
+    return action === "suspend"
+      ? 1
+      : action === "republish"
+      ? 2
+      : action === "retire"
+      ? 3
+      : 0;
   }
 
   validateLifecycleReconciliation(input) {
     if (!ACCOUNT_ID_PATTERN.test(input?.account_id ?? "") ||
         !IDEMPOTENCY_KEY_PATTERN.test(input?.operation_id ?? "") ||
         !Number.isSafeInteger(input?.epoch) || input.epoch < 0 ||
-        !["suspend", "republish"].includes(input?.action) ||
+        !["suspend", "republish", "retire"].includes(input?.action) ||
         typeof input?.activation_enabled !== "boolean") {
       fail("invalid account lifecycle alias reconciliation", 400);
     }
@@ -5500,24 +5651,46 @@ export class DurableRealmEmailAliasRegistry {
           : canonicalPage.next_cursor === null,
       },
     );
+    if (intent.action === "retire" && claimPage.claims.length > 0) {
+      await this.assertPendingCountersReady();
+    }
     let changed = 0;
     for (const claim of claimPage.claims) {
       if (!claim?.assignment_kind) {
+        if (intent.action === "retire") {
+          // Pending-review claims have no route to retire, but they still own
+          // their request, claim/skeleton indexes, and bounded usage-counter
+          // membership. Silently skipping one would let an account-close
+          // fence complete while leaving permanent unreachable authority.
+          // Keep the close intent retryable until an administrator explicitly
+          // rejects (or otherwise terminally resolves) the request. Ordinary
+          // archive/move suspension remains safe because an unassigned claim
+          // is not deliverable and must survive the move for later review.
+          fail(
+            "account close is blocked by a pending email alias request",
+            409,
+            "realm_email_alias_pending_request_blocks_account_close",
+          );
+        }
         continue;
       }
       if (claim.customer_activation_intent === true ||
           claim.internal_intent === true) {
         fail("account has an alias provisioning intent still converging", 409);
       }
-      const lifecycleSuspended = intent.action === "suspend" && !claim.retired_at;
+      const lifecycleSuspended = intent.action === "retire"
+        ? true
+        : intent.action === "suspend" && !claim.retired_at;
       const operationalGateSuspended = !intent.activation_enabled &&
           !claim.retired_at
         ? true
         : false;
+      const retiring = intent.action === "retire" && !claim.retired_at;
       const stateChanged =
         lifecycleSuspended !== (claim.lifecycle_suspended === true) ||
         operationalGateSuspended !==
-          (claim.operational_gate_suspended === true);
+          (claim.operational_gate_suspended === true) ||
+        retiring;
       const desired = {
         ...claim,
         lifecycle_suspended: lifecycleSuspended,
@@ -5530,6 +5703,12 @@ export class DurableRealmEmailAliasRegistry {
         assignment_revision: (claim.assignment_revision ?? 0) +
           (stateChanged ? 1 : 0),
         updated_at: mutation.now,
+        ...(retiring
+          ? {
+            retired_at: mutation.now,
+            retirement_reason: "account closed",
+          }
+          : {}),
       };
       // Suspend only writes claims whose effective lifecycle state changes.
       // Republish always verifies every exact claim/tombstone at the new cell,
@@ -5551,8 +5730,20 @@ export class DurableRealmEmailAliasRegistry {
           key: `lifecycle:${intent.epoch}:${intent.action}:${desired.alias}`,
           fingerprint: projectionFingerprint,
           entries: [[claimKey(desired.alias), desired]],
+          deletes: retiring && graceIndexKey(claim)
+            ? [graceIndexKey(claim)]
+            : [],
           responseBody: { schema_version: SCHEMA_VERSION, converged: true },
           includeCanonical: false,
+          ...(retiring
+            ? {
+              claimUsageTransition: {
+                previousClaim: claim,
+                desiredClaim: desired,
+                updatedAt: mutation.now,
+              },
+            }
+            : {}),
         });
         await this.drainProjectionIntent(projection);
         changed += 1;
@@ -5592,6 +5783,13 @@ export class DurableRealmEmailAliasRegistry {
               forcedPolicy: {
                 state: "suspended",
                 suspension_disposition: "retry",
+              },
+            }
+            : intent.action === "retire"
+            ? {
+              forcedPolicy: {
+                state: "retired",
+                suspension_disposition: null,
               },
             }
             : {}),

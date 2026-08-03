@@ -21,6 +21,7 @@ import (
 const (
 	agentEmailPilotEnabledEnv       = "WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED"
 	agentEmailPilotDomainEnv        = "WITSELF_AGENT_EMAIL_PILOT_DOMAIN"
+	agentEmailLegacyDomainsEnv      = "WITSELF_AGENT_EMAIL_ACCEPTED_LEGACY_DOMAINS"
 	agentEmailPilotAudienceEnv      = "WITSELF_AGENT_EMAIL_PILOT_AUDIENCE"
 	agentEmailPilotRealmIDEnv       = "WITSELF_AGENT_EMAIL_PILOT_REALM_ID"
 	agentEmailPilotAgentIDsEnv      = "WITSELF_AGENT_EMAIL_PILOT_AGENT_IDS"
@@ -54,6 +55,10 @@ func agentEmailPilotConfigFromEnv() (server.AgentEmailPilotConfig, error) {
 	domain, err := require(agentEmailPilotDomainEnv)
 	if err != nil {
 		return server.AgentEmailPilotConfig{}, err
+	}
+	legacyDomains, err := parseAgentEmailLegacyDomains(os.Getenv(agentEmailLegacyDomainsEnv))
+	if err != nil {
+		return server.AgentEmailPilotConfig{}, fmt.Errorf("%s: %w", agentEmailLegacyDomainsEnv, err)
 	}
 	audience, err := require(agentEmailPilotAudienceEnv)
 	if err != nil {
@@ -100,7 +105,7 @@ func agentEmailPilotConfigFromEnv() (server.AgentEmailPilotConfig, error) {
 		}
 	}
 	pilot := server.AgentEmailPilotConfig{
-		Enabled: true, Domain: domain, Audience: audience,
+		Enabled: true, Domain: domain, LegacyDomains: legacyDomains, Audience: audience,
 		RealmIDs: map[string]bool{realmID: true}, AgentIDs: agentIDs,
 		RetryCanaryAgentID: strings.TrimSpace(os.Getenv(agentEmailRetryCanaryAgentIDEnv)),
 		RelayPublicKeys:    publicKeys, RelayReplayWindow: replayWindow,
@@ -109,6 +114,31 @@ func agentEmailPilotConfigFromEnv() (server.AgentEmailPilotConfig, error) {
 		return server.AgentEmailPilotConfig{}, err
 	}
 	return pilot, nil
+}
+
+func parseAgentEmailLegacyDomains(value string) ([]string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	parts := strings.Split(value, ",")
+	if len(parts) > 1 {
+		return nil, errors.New("at most 1 legacy domain may be configured")
+	}
+	result := make([]string, 0, len(parts))
+	seen := make(map[string]bool, len(parts))
+	for _, raw := range parts {
+		domain := strings.TrimSpace(raw)
+		if domain == "" {
+			return nil, errors.New("legacy domains must be a comma-separated non-empty set")
+		}
+		if seen[domain] {
+			return nil, fmt.Errorf("legacy domain %q is duplicated", domain)
+		}
+		seen[domain] = true
+		result = append(result, domain)
+	}
+	return result, nil
 }
 
 func parseAgentEmailIDSet(value string) (map[string]bool, error) {
@@ -131,18 +161,17 @@ func configureAgentEmail(ctx context.Context, cfg *server.Config, st *store.Stor
 	// Alias projection is a control-plane lifecycle surface, not a process-local
 	// pilot enrollment surface. Keep it wired even while receive is disabled so
 	// a later policy/configuration change needs no client reinstall or schema
-	// rewrite. When this process does have one receive domain, reject a projection
-	// aimed at a different edge domain.
+	// rewrite. When this process does have one receive domain, only the primary
+	// domain may gain or retain reversible alias authority. A configured legacy
+	// domain may converge only to a terminal tombstone, so cleanup cannot mint a
+	// new suspended legacy claim.
 	cfg.ApplyAgentEmailRealmAlias = func(
 		ctx context.Context,
 		accountID string,
 		in server.AgentEmailRealmAliasApplyRequest,
 	) (server.AgentEmailRealmAlias, error) {
-		if pilot.Enabled {
-			domain, err := agentemail.ValidateDomain(pilot.Domain)
-			if err != nil || in.Domain != domain {
-				return server.AgentEmailRealmAlias{}, server.ErrBadInput
-			}
+		if pilot.Enabled && !agentEmailRealmAliasProjectionDomainAllowed(pilot, in) {
+			return server.AgentEmailRealmAlias{}, server.ErrBadInput
 		}
 		alias, err := st.ApplyAgentEmailRealmAlias(ctx, accountID, store.ApplyAgentEmailRealmAliasInput{
 			ClaimID: in.ClaimID, RealmID: in.RealmID, Domain: in.Domain,
@@ -249,7 +278,9 @@ func configureAgentEmail(ctx context.Context, cfg *server.Config, st *store.Stor
 		return nil
 	}
 	scope := store.AgentEmailPilotScope{
-		Enabled: true, Domain: pilot.Domain, Audience: pilot.Audience,
+		Enabled: true, Domain: pilot.Domain,
+		LegacyDomains:      append([]string(nil), pilot.LegacyDomains...),
+		Audience:           pilot.Audience,
 		RealmIDs:           cloneAgentEmailBoolMap(pilot.RealmIDs),
 		AgentIDs:           cloneAgentEmailBoolMap(pilot.AgentIDs),
 		RetryCanaryAgentID: pilot.RetryCanaryAgentID,
@@ -387,6 +418,32 @@ func configureAgentEmail(ctx context.Context, cfg *server.Config, st *store.Stor
 	return nil
 }
 
+func agentEmailRealmAliasProjectionDomainAllowed(
+	pilot server.AgentEmailPilotConfig,
+	in server.AgentEmailRealmAliasApplyRequest,
+) bool {
+	primary, err := agentemail.ValidateDomain(pilot.Domain)
+	if err != nil || primary != pilot.Domain {
+		return false
+	}
+	domain, err := agentemail.ValidateDomain(in.Domain)
+	if err != nil || domain != in.Domain {
+		return false
+	}
+	if domain == primary {
+		return true
+	}
+	if in.State != store.AgentEmailRealmAliasRetired {
+		return false
+	}
+	for _, legacy := range pilot.LegacyDomains {
+		if domain == legacy {
+			return true
+		}
+	}
+	return false
+}
+
 func toServerRealmEmailRouteLifecycle(
 	route store.RealmEmailRouteLifecycle,
 ) server.RealmEmailRouteLifecycle {
@@ -509,6 +566,12 @@ func mapAgentEmailRealmAliasError(err error) error {
 }
 
 func toServerAgentEmailAddress(address store.AgentEmailAddress) server.AgentEmailAddress {
+	addresses := make([]server.AgentEmailCanonicalAddress, len(address.Addresses))
+	for i, canonical := range address.Addresses {
+		addresses[i] = server.AgentEmailCanonicalAddress{
+			Address: canonical.Address, Domain: canonical.Domain, Role: canonical.Role,
+		}
+	}
 	aliases := make([]server.AgentEmailRealmAliasAddress, len(address.Aliases))
 	for i, alias := range address.Aliases {
 		aliases[i] = server.AgentEmailRealmAliasAddress{
@@ -528,7 +591,7 @@ func toServerAgentEmailAddress(address store.AgentEmailAddress) server.AgentEmai
 		RealmReceiveState: address.RealmReceiveState, RowVersion: address.RowVersion,
 		CreatedAt: address.CreatedAt, UpdatedAt: address.UpdatedAt,
 		DisabledAt: address.DisabledAt, RealmDisabledAt: address.RealmDisabledAt,
-		RetiredAt: address.RetiredAt, Aliases: aliases,
+		RetiredAt: address.RetiredAt, Addresses: addresses, Aliases: aliases,
 	}
 }
 

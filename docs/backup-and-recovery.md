@@ -116,6 +116,25 @@ delivery/read/ack state, audience snapshots, and request/claim graphs are all
 included in account export/import. Offline and terminal deliveries remain
 unacknowledged until an active destination client handles them, so there is no
 host-local notification ledger or provider-credential file to move.
+
+Migration `0087` adds `agent_email_address_domains` to the whole-account
+logical archive immediately after `agent_email_addresses` and before
+`agent_email_mailboxes`. These rows are canonical permanent route reservations,
+not a rebuildable cache. Schema-87 archives require the stream even when it is
+empty. Import validates tenant/realm/agent/address/local-part scope, canonical
+domain syntax, global address non-reuse, chronology, and that every address
+retains its original-domain route. Archives from schema 86 or earlier have no
+route stream; after importing their address rows, the destination synthesizes
+exactly the original `agent_email_addresses.domain` route. Startup may then add
+the new configured primary route under the ordinary reconciliation contract.
+It never infers or issues a legacy route for a mailbox created after cutover.
+
+Schema `0087` intentionally refuses downgrade once any additive route differs
+from its parent address's original domain. After cutover, rollback means running
+the prior application behavior/configuration posture while leaving the database
+at schema 87 and preserving all route reservations. Use a forward fix; never
+delete a route reservation merely to make the down migration pass.
+
 Later instructions to reconnect a backend embedding provider or run server-side
 re-embedding are superseded.
 
@@ -482,6 +501,12 @@ Import rules:
   A source-cell `reserved` or `claimed` request slot imports as cancelled
   history with its generation advanced, so no old worker can renew or complete
   it in the destination.
+- Whole-account archives preserve every `agent_email_address_domains` route
+  reservation. Schema-87 import rejects a missing original route, a route whose
+  tenant/realm/agent/local-part does not exactly match its parent address, or a
+  `(domain, local_part)` collision. Pre-87 imports synthesize only the original
+  address domain; accepted legacy configuration is never treated as proof that
+  a new mailbox was issued on that domain.
 
 The implemented whole-account exporter requires the account to be suspended or
 closed. It streams all tables from one PostgreSQL `REPEATABLE READ` transaction
@@ -920,6 +945,12 @@ Migration is dual-plane, matching the two postures above:
   destination CMK. See [key-hierarchy.md](key-hierarchy.md) and
   [storage.md](storage.md).
 
+Agent-email mailboxes, messages, aliases, and permanent domain-route
+reservations are account spine state. They move in the implemented
+whole-account logical archive, not the per-agent plaintext identity export.
+Freeze export/import and cell movement during a schema-87 mixed-version rollout
+so no pre-87 archive path can omit an additive domain reservation.
+
 After both planes land in cell B, the control-plane realm/account -> home-cell
 mapping is repointed and clients re-resolve to cell B. Migration emits
 `tenant.migration_started`, `tenant.migration_completed`, and
@@ -959,7 +990,10 @@ A managed or self-hosted restore should proceed in this order:
    request/run/action/receipt ownership and attribution, inactive imported
    leases with reserved fences, message delivery/read/ack state, completed
    processing/result links, preserved deterministic failure counts, and
-   interrupted active message claims with advanced generations.
+   interrupted active message claims with advanced generations. For schema 87,
+   also verify every agent-email address has its original domain route, every
+   additive `(domain, local_part)` remains globally reserved, and no restored
+   legacy route was synthesized for a post-cutover mailbox.
 9. Confirm lexical recall works. Confirm restored hybrid recall and reported
    coverage when compatible vector rows exist; zero coverage remains a supported
    lexical fallback, not an unsupported memory service.

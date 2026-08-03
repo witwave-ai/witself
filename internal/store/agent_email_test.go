@@ -354,6 +354,22 @@ func TestNormalizeAgentEmailPilotScope(t *testing.T) {
 	if got, err := normalizeAgentEmailPilotScope(scope); err != nil || got != "agent-mail.witwave.ai" {
 		t.Fatalf("normalized scope = %q / %v", got, err)
 	}
+	dualDomain := scope
+	dualDomain.Domain = "witmail.net"
+	dualDomain.LegacyDomains = []string{"agent-mail.witwave.ai"}
+	if got, err := normalizeAgentEmailPilotScope(dualDomain); err != nil || got != "witmail.net" {
+		t.Fatalf("dual-domain scope = %q / %v", got, err)
+	}
+	if domains, err := normalizedAgentEmailPilotDomains(dualDomain); err != nil ||
+		len(domains) != 2 || domains[0] != "witmail.net" ||
+		domains[1] != "agent-mail.witwave.ai" {
+		t.Fatalf("normalized domains = %#v / %v", domains, err)
+	}
+	duplicateDomain := dualDomain
+	duplicateDomain.LegacyDomains = []string{"WITMAIL.NET."}
+	if _, err := normalizeAgentEmailPilotScope(duplicateDomain); !errors.Is(err, ErrAgentEmailInputInvalid) {
+		t.Fatalf("duplicate primary domain error = %v", err)
+	}
 	tooFew := scope
 	tooFew.AgentIDs = map[string]bool{"agent_aaaaaaaaaaaaaaaa": true}
 	if _, err := normalizeAgentEmailPilotScope(tooFew); !errors.Is(err, ErrAgentEmailInputInvalid) {

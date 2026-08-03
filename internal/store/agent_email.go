@@ -158,7 +158,26 @@ type AgentEmailAddress struct {
 	DisabledAt        *time.Time                    `json:"disabled_at,omitempty"`
 	RealmDisabledAt   *time.Time                    `json:"realm_disabled_at,omitempty"`
 	RetiredAt         *time.Time                    `json:"retired_at,omitempty"`
+	Addresses         []AgentEmailCanonicalAddress  `json:"addresses"`
 	Aliases           []AgentEmailRealmAliasAddress `json:"aliases"`
+}
+
+const (
+	// AgentEmailAddressRolePrimary identifies the current configured domain.
+	AgentEmailAddressRolePrimary = "primary"
+	// AgentEmailAddressRoleLegacy identifies a currently accepted compatibility domain.
+	AgentEmailAddressRoleLegacy = "legacy"
+	// AgentEmailAddressRoleHistorical identifies a reserved but no longer accepted domain.
+	AgentEmailAddressRoleHistorical = "historical"
+)
+
+// AgentEmailCanonicalAddress is one permanently reserved managed-domain route
+// to the mailbox. Role distinguishes the configured primary, an accepted
+// compatibility domain, and retained history that is no longer accepted.
+type AgentEmailCanonicalAddress struct {
+	Address string `json:"address"`
+	Domain  string `json:"domain"`
+	Role    string `json:"role"`
 }
 
 // AgentEmailRealmAlias is the cell's exact acknowledgement of one globally
@@ -358,6 +377,7 @@ type CompleteAgentEmailInput struct {
 type AgentEmailPilotScope struct {
 	Enabled            bool
 	Domain             string
+	LegacyDomains      []string
 	Audience           string
 	RealmIDs           map[string]bool
 	AgentIDs           map[string]bool
@@ -524,8 +544,11 @@ func (s *Store) EnsureAgentEmailMailbox(
 		if existing.ReceiveState == AgentEmailReceiveRetired || existing.RetiredAt != nil {
 			return AgentEmailAddress{}, ErrAgentNotFound
 		}
-		if existing.Domain != domain {
-			return AgentEmailAddress{}, fmt.Errorf("%w: existing mailbox uses another domain", ErrAgentEmailConflict)
+		if err := ensureAgentEmailAddressDomainsTx(ctx, tx, existing, scope); err != nil {
+			return AgentEmailAddress{}, err
+		}
+		if err := populateAgentEmailCanonicalAddressesTx(ctx, tx, scope, &existing); err != nil {
+			return AgentEmailAddress{}, err
 		}
 		if err := populateAgentEmailRealmAliasAddressesTx(ctx, tx, &existing); err != nil {
 			return AgentEmailAddress{}, err
@@ -615,6 +638,12 @@ func (s *Store) EnsureAgentEmailMailbox(
 		RealmReceiveState: realmControl.ReceiveState,
 		RowVersion:        1, CreatedAt: createdAt, UpdatedAt: updatedAt,
 		RealmDisabledAt: realmControl.DisabledAt,
+	}
+	if err := ensureAgentEmailAddressDomainsTx(ctx, tx, address, scope); err != nil {
+		return AgentEmailAddress{}, err
+	}
+	if err := populateAgentEmailCanonicalAddressesTx(ctx, tx, scope, &address); err != nil {
+		return AgentEmailAddress{}, err
 	}
 	if err := populateAgentEmailRealmAliasAddressesTx(ctx, tx, &address); err != nil {
 		return AgentEmailAddress{}, err
@@ -880,6 +909,9 @@ func (s *Store) GetAgentEmailAddress(
 	}
 	address, err := agentEmailAddressForOwnerTx(ctx, tx, p.AccountID, p.RealmID, p.ID)
 	if err != nil {
+		return AgentEmailAddress{}, err
+	}
+	if err := populateAgentEmailCanonicalAddressesTx(ctx, tx, scope, &address); err != nil {
 		return AgentEmailAddress{}, err
 	}
 	if err := populateAgentEmailRealmAliasAddressesTx(ctx, tx, &address); err != nil {
@@ -1246,7 +1278,7 @@ func (s *Store) IngestAgentEmailPilot(
 	if !scope.Enabled {
 		return AgentEmailMessage{}, ErrAgentEmailPilotDisabled
 	}
-	domain, err := normalizeAgentEmailPilotScope(scope)
+	primaryDomain, err := normalizeAgentEmailPilotScope(scope)
 	if err != nil {
 		return AgentEmailMessage{}, err
 	}
@@ -1262,8 +1294,15 @@ func (s *Store) IngestAgentEmailPilot(
 	if relay.Audience != strings.ToLower(strings.TrimSpace(scope.Audience)) {
 		return AgentEmailMessage{}, fmt.Errorf("%w: relay audience does not match this cell", ErrAgentEmailInputInvalid)
 	}
-	parts, err := agentemail.ParseRecipient(relay.EnvelopeRecipient, domain)
+	parts, err := parseAgentEmailRecipient(relay.EnvelopeRecipient, scope)
 	if err != nil {
+		return AgentEmailMessage{}, ErrAgentEmailUnknownRecipient
+	}
+	// Domain compatibility is deliberately limited to canonical local parts
+	// that were actually issued before cutover. Realm-alias claims are explicit
+	// domain-scoped authority and never inherit onto a legacy domain, even if a
+	// stale/imported alias and address route happen to coexist there.
+	if !agentemail.IsCanonicalRealmLabel(parts.RealmLabel) && parts.Domain != primaryDomain {
 		return AgentEmailMessage{}, ErrAgentEmailUnknownRecipient
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -2204,9 +2243,14 @@ func agentEmailAddressByRecipientTx(
 	lock bool,
 ) (AgentEmailAddress, error) {
 	query := agentEmailAddressSelect() + `
-		WHERE addr.domain=$1 AND addr.local_part=$2 AND addr.retired_at IS NULL`
+		JOIN agent_email_address_domains adr
+		  ON adr.address_id=addr.id AND adr.account_id=addr.account_id
+		 AND adr.realm_id=addr.realm_id
+		 AND adr.provisioned_agent_id=addr.provisioned_agent_id
+		 AND adr.local_part=addr.local_part
+		WHERE adr.domain=$1 AND adr.local_part=$2 AND addr.retired_at IS NULL`
 	if lock {
-		query += ` FOR SHARE OF addr,mb,rc`
+		query += ` FOR SHARE OF adr,addr,mb,rc`
 	}
 	row := tx.QueryRow(ctx, query, domain, localPart)
 	address, err := scanAgentEmailAddress(row)
@@ -2258,10 +2302,15 @@ func agentEmailRouteByRecipientTx(
 		return agentEmailRecipientRoute{}, ErrAgentEmailUnknownRecipient
 	}
 	query := agentEmailAddressSelect() + `
-		WHERE addr.account_id=$1 AND addr.realm_id=$2 AND addr.domain=$3
+		JOIN agent_email_address_domains adr
+		  ON adr.address_id=addr.id AND adr.account_id=addr.account_id
+		 AND adr.realm_id=addr.realm_id
+		 AND adr.provisioned_agent_id=addr.provisioned_agent_id
+		 AND adr.local_part=addr.local_part
+		WHERE addr.account_id=$1 AND addr.realm_id=$2 AND adr.domain=$3
 		  AND addr.agent_segment=$4 AND addr.retired_at IS NULL`
 	if lock {
-		query += ` FOR SHARE OF addr,mb,rc`
+		query += ` FOR SHARE OF adr,addr,mb,rc`
 	}
 	address, err := scanAgentEmailAddress(tx.QueryRow(
 		ctx, query, alias.AccountID, alias.RealmID, alias.Domain, parts.AgentSegment,
@@ -2484,6 +2533,169 @@ func populateAgentEmailRealmAliasAddressesTx(
 		return fmt.Errorf("list agent-email realm aliases: %w", err)
 	}
 	return nil
+}
+
+func ensureAgentEmailAddressDomainsTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	address AgentEmailAddress,
+	scope AgentEmailPilotScope,
+) error {
+	domains, err := normalizedAgentEmailPilotDomains(scope)
+	if err != nil {
+		return err
+	}
+	// The primary route is guaranteed for every mailbox. The immutable domain
+	// on the original address row is also retained, but merely configuring a
+	// legacy domain never issues that domain to a newly created mailbox. This
+	// preserves addresses that were actually advertised without expanding the
+	// old namespace after cutover.
+	domainsToEnsure := []string{domains[0]}
+	originalDomain, originalErr := agentemail.ValidateDomain(address.Domain)
+	if originalErr != nil {
+		return fmt.Errorf("%w: stored agent-email domain is invalid", ErrAgentEmailConflict)
+	}
+	if originalDomain != domains[0] {
+		domainsToEnsure = append(domainsToEnsure, originalDomain)
+	}
+	for _, domain := range domainsToEnsure {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO agent_email_address_domains
+			  (account_id,realm_id,provisioned_agent_id,address_id,domain,local_part,created_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7)
+			ON CONFLICT (address_id,domain) DO NOTHING`,
+			address.AccountID, address.RealmID, address.OwnerAgentID,
+			address.ID, domain, address.LocalPart, address.CreatedAt)
+		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+				return ErrAgentEmailAddressConflict
+			}
+			return fmt.Errorf("reserve agent-email domain route: %w", err)
+		}
+	}
+	return nil
+}
+
+func populateAgentEmailCanonicalAddressesTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	scope AgentEmailPilotScope,
+	address *AgentEmailAddress,
+) error {
+	return populateAgentEmailCanonicalAddressesWithFallbackTx(
+		ctx, tx, scope, address, false,
+	)
+}
+
+// populateSuspendedAgentEmailCanonicalAddressesTx is the read-only startup
+// projection for a suspended account. A cutover may have changed the configured
+// primary while the account was frozen, so the immutable original route may be
+// returned only when that exact domain is still configured as legacy. It never
+// inserts or repairs the missing primary route.
+func populateSuspendedAgentEmailCanonicalAddressesTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	scope AgentEmailPilotScope,
+	address *AgentEmailAddress,
+) error {
+	return populateAgentEmailCanonicalAddressesWithFallbackTx(
+		ctx, tx, scope, address, true,
+	)
+}
+
+func populateAgentEmailCanonicalAddressesWithFallbackTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	scope AgentEmailPilotScope,
+	address *AgentEmailAddress,
+	allowOriginalLegacyFallback bool,
+) error {
+	domains, err := normalizedAgentEmailPilotDomains(scope)
+	if err != nil {
+		return err
+	}
+	originalDomain, err := agentemail.ValidateDomain(address.Domain)
+	if err != nil {
+		return fmt.Errorf("%w: stored agent-email domain is invalid", ErrAgentEmailConflict)
+	}
+	roles := make(map[string]string, len(domains))
+	roles[domains[0]] = AgentEmailAddressRolePrimary
+	for _, domain := range domains[1:] {
+		roles[domain] = AgentEmailAddressRoleLegacy
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT domain,local_part
+		  FROM agent_email_address_domains
+		 WHERE account_id=$1 AND realm_id=$2 AND provisioned_agent_id=$3
+		   AND address_id=$4
+		 ORDER BY CASE WHEN domain=$5 THEN 0 ELSE 1 END,domain`,
+		address.AccountID, address.RealmID, address.OwnerAgentID, address.ID, domains[0])
+	if err != nil {
+		return fmt.Errorf("list agent-email domain routes: %w", err)
+	}
+	defer rows.Close()
+	address.Addresses = []AgentEmailCanonicalAddress{}
+	primaryFound := false
+	var originalLegacyFallback *AgentEmailCanonicalAddress
+	var originalLegacyLocalPart string
+	for rows.Next() {
+		var domain, localPart string
+		if err := rows.Scan(&domain, &localPart); err != nil {
+			return fmt.Errorf("scan agent-email domain route: %w", err)
+		}
+		role := roles[domain]
+		if role == "" {
+			role = AgentEmailAddressRoleHistorical
+		}
+		canonical := AgentEmailCanonicalAddress{
+			Address: localPart + "@" + domain,
+			Domain:  domain,
+			Role:    role,
+		}
+		address.Addresses = append(address.Addresses, canonical)
+		if role == AgentEmailAddressRolePrimary {
+			primaryFound = true
+			address.Address = canonical.Address
+			address.Domain = canonical.Domain
+			address.LocalPart = localPart
+		} else if allowOriginalLegacyFallback &&
+			domain == originalDomain && role == AgentEmailAddressRoleLegacy {
+			candidate := canonical
+			originalLegacyFallback = &candidate
+			originalLegacyLocalPart = localPart
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("list agent-email domain routes: %w", err)
+	}
+	if !primaryFound {
+		if originalLegacyFallback != nil {
+			address.Address = originalLegacyFallback.Address
+			address.Domain = originalLegacyFallback.Domain
+			address.LocalPart = originalLegacyLocalPart
+			return nil
+		}
+		return fmt.Errorf("%w: configured primary domain route is missing", ErrAgentEmailConflict)
+	}
+	return nil
+}
+
+func parseAgentEmailRecipient(
+	recipient string,
+	scope AgentEmailPilotScope,
+) (agentemail.AddressParts, error) {
+	domains, err := normalizedAgentEmailPilotDomains(scope)
+	if err != nil {
+		return agentemail.AddressParts{}, err
+	}
+	for _, domain := range domains {
+		parts, parseErr := agentemail.ParseRecipient(recipient, domain)
+		if parseErr == nil {
+			return parts, nil
+		}
+	}
+	return agentemail.AddressParts{}, ErrAgentEmailUnknownRecipient
 }
 
 func validAgentEmailRealmAliasClaimID(value string) bool {
@@ -2834,10 +3046,12 @@ func agentEmailRealmReceiveControlTx(
 }
 
 func normalizeAgentEmailPilotScope(scope AgentEmailPilotScope) (string, error) {
-	domain, err := agentemail.ValidateDomain(scope.Domain)
+	domains, err := normalizedAgentEmailPilotDomains(scope)
 	if err != nil {
-		return "", fmt.Errorf("%w: pilot domain is invalid", ErrAgentEmailInputInvalid)
+		return "", err
 	}
+	domain := domains[0]
+
 	audience := strings.ToLower(strings.TrimSpace(scope.Audience))
 	if audience == "" || len(audience) > 128 || audience[0] < 'a' || audience[0] > 'z' {
 		return "", fmt.Errorf("%w: pilot audience is invalid", ErrAgentEmailInputInvalid)
@@ -2884,6 +3098,28 @@ func normalizeAgentEmailPilotScope(scope AgentEmailPilotScope) (string, error) {
 		}
 	}
 	return domain, nil
+}
+
+func normalizedAgentEmailPilotDomains(scope AgentEmailPilotScope) ([]string, error) {
+	domain, err := agentemail.ValidateDomain(scope.Domain)
+	if err != nil {
+		return nil, fmt.Errorf("%w: pilot domain is invalid", ErrAgentEmailInputInvalid)
+	}
+	if len(scope.LegacyDomains) > 1 {
+		return nil, fmt.Errorf("%w: pilot accepts at most 1 legacy domain", ErrAgentEmailInputInvalid)
+	}
+	domains := make([]string, 1, len(scope.LegacyDomains)+1)
+	domains[0] = domain
+	seen := map[string]bool{domain: true}
+	for _, legacy := range scope.LegacyDomains {
+		normalized, legacyErr := agentemail.ValidateDomain(legacy)
+		if legacyErr != nil || seen[normalized] {
+			return nil, fmt.Errorf("%w: pilot legacy domain is invalid or duplicated", ErrAgentEmailInputInvalid)
+		}
+		seen[normalized] = true
+		domains = append(domains, normalized)
+	}
+	return domains, nil
 }
 
 func requireAgentEmailPilotEnrollment(

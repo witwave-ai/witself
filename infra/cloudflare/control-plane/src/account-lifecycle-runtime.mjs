@@ -1088,7 +1088,7 @@ export class DurableAccountLifecycle {
         operation_id:
           state.last_completed?.operation_id ?? "bootstrap",
         epoch: state.epoch,
-        action: "suspend",
+        action: "retire",
       });
       if (route) {
         await this.env.DIRECTORY.delete(`acct:${this.accountId}`);
@@ -1190,7 +1190,7 @@ export class DurableAccountLifecycle {
         operation_id:
           state.last_completed?.operation_id ?? "bootstrap",
         epoch: state.epoch,
-        action: "suspend",
+        action: "retire",
       });
       await this.env.DIRECTORY.delete(`acct:${this.accountId}`);
       await this.env.DIRECTORY.delete(`pending:${this.accountId}`);
@@ -2341,7 +2341,7 @@ export class DurableAccountLifecycle {
         await this.reconcileRealmEmailAliases(this.accountId, {
           operation_id: operation.operation_id,
           epoch: operation.epoch,
-          action: "suspend",
+          action: operation.kind === "close" ? "retire" : "suspend",
         });
         await this.env.DIRECTORY.delete(key);
       } else {
@@ -2351,7 +2351,7 @@ export class DurableAccountLifecycle {
         await this.reconcileRealmEmailAliases(this.accountId, {
           operation_id: operation.operation_id,
           epoch: operation.epoch,
-          action: "suspend",
+          action: operation.kind === "close" ? "retire" : "suspend",
         });
       }
       if (operation.outcome === "reaped") {

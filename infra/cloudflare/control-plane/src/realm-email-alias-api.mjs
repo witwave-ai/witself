@@ -1,7 +1,8 @@
 import {
+  managedRealmEmailDomains,
+  managedRealmEmailPrimaryDomain,
   realmEmailAliasEntitlement,
   realmEmailAliasRegistryStub,
-  validateManagedRealmEmailDomain,
 } from "./realm-email-alias-runtime.mjs";
 
 const SCHEMA_VERSION = "witself.realm-email-alias.v1";
@@ -87,11 +88,17 @@ async function callRegistry(env, path, body) {
   }
 }
 
+function configuredManagedRealmEmailDomains(env) {
+  try {
+    return managedRealmEmailDomains(env);
+  } catch {
+    return null;
+  }
+}
+
 function managedRealmEmailDomain(env) {
   try {
-    return validateManagedRealmEmailDomain(
-      String(env?.AGENT_EMAIL_DOMAIN ?? ""),
-    );
+    return managedRealmEmailPrimaryDomain(env);
   } catch {
     return null;
   }
@@ -284,6 +291,13 @@ export async function handleRealmEmailRouteRequest(request, env, match) {
     realmLabel = decodeURIComponent(match[2]);
   } catch {
     return errorResponse("invalid realm email route", 400);
+  }
+  const domains = configuredManagedRealmEmailDomains(env);
+  if (!domains) {
+    return errorResponse("managed agent email domains are not configured", 503);
+  }
+  if (!domains.includes(domain)) {
+    return errorResponse("realm email route not found", 404);
   }
   return callRegistry(env, "/route/get", {
     domain,

@@ -10,6 +10,7 @@ import {
 } from "./relay.mjs";
 import {
   CONFIG_KEY,
+  configuredAgentEmailDomains,
   parsePilotAddress,
   parseRouteAddress,
   realmRouteKey,
@@ -511,6 +512,7 @@ async function resolveRealmRoute(
   nowMS,
   now,
   state,
+  legacyOnly = false,
 ) {
   const startedAt = nowMS;
   const lookupContext = {
@@ -519,6 +521,29 @@ async function resolveRealmRoute(
     cold: { evidence: "none", routeKind: "unknown", startedAt, now },
     state,
   };
+  if (legacyOnly) {
+    let legacy;
+    try {
+      legacy = await legacyPilotRoute(env, parsed, envelopeTo);
+    } catch (error) {
+      if (error?.[EDGE_METRIC]?.outcome === "tempfail_disabled") {
+        emitRouteLookupMetric(
+          env,
+          { ...lookupContext.known, routeKind: "pilot" },
+          "legacy",
+        );
+      } else {
+        emitRouteLookupMetric(env, lookupContext.uncertain, "kv_error");
+      }
+      throw error;
+    }
+    emitRouteLookupMetric(
+      env,
+      { ...lookupContext.known, routeKind: "pilot" },
+      "legacy",
+    );
+    return legacy ?? { status: "unknown" };
+  }
   const projected = await optionalDirectoryJSON(
     env.EMAIL_DIRECTORY,
     realmRouteKey(parsed.domain, parsed.realmLabel),
@@ -675,6 +700,20 @@ async function handleEmailTransaction(message, env, runtime = {}) {
     message.setReject(PERMANENT_REJECTION);
     return { outcome: "rejected_invalid_recipient", phase: "recipient", status: 550 };
   }
+  let managedDomains;
+  try {
+    managedDomains = configuredAgentEmailDomains(env);
+  } catch {
+    throw transient("tempfail_configuration", "configuration");
+  }
+  // Reject an unconfigured domain before touching KV, the control plane, the
+  // raw message stream, or either lookup limiter. The exact envelope domain is
+  // otherwise preserved through the domain-qualified route key, fallback URL,
+  // and signed relay metadata.
+  if (!managedDomains.includes(parsed.domain)) {
+    message.setReject(PERMANENT_REJECTION);
+    return { outcome: "rejected_invalid_recipient", phase: "recipient", status: 550 };
+  }
 
   const resolved = await resolveRealmRoute(
     env,
@@ -685,6 +724,7 @@ async function handleEmailTransaction(message, env, runtime = {}) {
     now(),
     now,
     lookupState,
+    parsed.domain !== managedDomains[0],
   );
   if (resolved.status === "invalid") {
     message.setReject(PERMANENT_REJECTION);

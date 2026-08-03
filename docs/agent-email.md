@@ -9,6 +9,24 @@ were exercised before retirement. A new Civo canary must use a fresh,
 explicitly reviewed 5–10-agent manifest and remains manual-only. This
 capability does not add a sender-trust claim or automatic code use.
 
+Permanent-domain decision (2026-08-03): `witmail.net` is the managed email
+apex dedicated solely to agent email. It is not a website, human or employee
+mail domain, marketing domain, or generic Witself/Witwave notification sender;
+required `postmaster@` and `abuse@` routes are narrow operator-controlled
+exceptions. It replaces the unacquired `witmail.ai` target; there is no
+`witmail.ai` compatibility surface. The new zone remains deliberately dormant
+while its Cloudflare Registrar registration waits for an inter-account move:
+restrictive SPF/DKIM/DMARC anti-spoofing records are present, but there is no
+MX, Email Routing, catch-all, Worker route, or DNSSEC activation. Cloudflare
+does not move zone configuration with the registration, so the reviewed
+records and routing must be recreated and verified in the production account
+after the move. Keep
+every canonical-inventory, canonical-delivery, alias-activation, and
+alias-delivery gate dark throughout that work. New canonical addresses and all
+new aliases use `witmail.net` only. The retired `agent-mail.witwave.ai` domain
+is bounded compatibility for previously issued canonical local parts only: it
+must never mint a new alias or receive a broad catch-all.
+
 Agent-email byte limits use a two-phase rollout. Phase A shipped the schema-81
 counter/enforcement and administrator surfaces with both catalog keys absent.
 After all Phase-A writers converge, Phase B rolls schema 82 to promote any
@@ -61,9 +79,10 @@ A second requirements pass later the same day settled more:
   message to the owning cell's signature-verified ingestion endpoint. The
   current focus is receiving mail addressed to a specific agent.
 - **Domain plan.** Interim: `witmail.witwave.ai`, a subdomain of the existing
-  estate. Target: acquire and provision `witmail.ai`. Each realm gets its own
+  estate. Target: acquire and provision `witmail.net`. Each realm gets its own
   subdomain derived from the realm's unique identifier, and the local part is
-  the agent name: `scott@<realm-label>.witmail.ai`.
+  the agent name: `scott@<realm-label>.witmail.net`. This historical shape was
+  later replaced by the apex/local-part design below.
 - **Send is confirmed but later.** Agents will eventually send — verification
   flows may force it sooner than correspondence does — and the design
   documents it now, but receive ships first and nothing in v1 depends on send.
@@ -89,7 +108,7 @@ inbound-edge open questions, revising two kickoff assumptions:
 - **Domain plan revised: dedicated apex zone, no `witmail.witwave.ai`
   interim.** Whether catch-all works on a configured subdomain (vs only the
   zone apex) is undocumented, so v1 launches on a dedicated apex zone —
-  accelerating the `witmail.ai` acquisition instead of passing through a
+  accelerating the managed-apex acquisition instead of passing through a
   subdomain of the `witwave.ai` estate.
 - **Realm label settled**: the realm id body verbatim — strip `realm_`; the
   16-character lowercase-base32 body is a valid DNS label by construction.
@@ -128,7 +147,7 @@ An operator decision on 2026-07-21 set the launch receive domain:
 
 - **Receive starts on `agent-mail.witwave.ai`.** V1 receives on
   `agent-mail.witwave.ai` — configured for Email Routing inside the existing
-  `witwave.ai` zone — until `witmail.ai` is acquired and provisioned, then
+  `witwave.ai` zone — until `witmail.net` is acquired and provisioned, then
   cuts over with a dual-domain receive window. The address shape is identical
   on both domains. Because Cloudflare documents catch-all at the zone apex
   only, verifying catch-all (or an equivalent full-coverage route) on a
@@ -212,9 +231,10 @@ The standing platform invariants carry over unchanged:
   per-realm send limits, and operator governance controls.
 - **Parallel track — platform notifications.** Witself-authored operator email
   (billing, alerts, digests). Outbound-only, no agent mailbox involvement, and
-  no model inference; it shares the outbound provider adapter and domain
-  authentication work but none of the agent-mailbox semantics. It may ship in
-  any order relative to the slices above.
+  no model inference; it may reuse provider-adapter implementation patterns,
+  but must use a separately isolated sending domain and reputation. It never
+  sends from `witmail.net` and may ship in any order relative to the slices
+  above.
 
 Deliverability reality drives this order: receiving mail requires no sender
 reputation, while sending is the largest abuse surface in the feature. V1
@@ -375,7 +395,7 @@ and the size/latency feasibility evidence required by that contract.
 ## Addressing And Domain Model
 
 Agents receive addresses shaped `<agent-local-part>.<realm-label>@<base-domain>`
-— for example `scott.drz4xnv73ficcrko@witmail.ai` — so the realm still anchors
+— for example `scott.drz4xnv73ficcrko@witmail.net` — so the realm still anchors
 the address the way it anchors identity, avatars, and published signing keys,
 but as a local-part segment rather than a subdomain. The subdomain shape from
 kickoff was dropped after verification: Cloudflare Email Routing caps a zone
@@ -383,24 +403,23 @@ at 30 configured domains (apex plus routing/sending subdomains combined) and
 has no wildcard subdomain receive, so per-realm subdomains cannot scale (see
 Inbound Pipeline for the full findings). The launch receive domain is
 `agent-mail.witwave.ai`, configured for Email Routing inside the existing
-`witwave.ai` zone (operator decision, 2026-07-21), with `witmail.ai` — a
-dedicated Cloudflare-fronted apex zone — as the durable home once acquired
-and provisioned. The address shape is identical on both:
-`<agent-local-part>.<realm-label>@agent-mail.witwave.ai` at launch, the same
-local part at `witmail.ai` after cutover.
+`witwave.ai` zone (operator decision, 2026-07-21), with `witmail.net` — the
+dedicated Cloudflare-fronted apex registered on 2026-08-03 — as the durable
+home. The address shape is identical on both:
+`<agent-local-part>.<realm-label>@agent-mail.witwave.ai` for a previously
+issued launch identity, the same local part at `witmail.net` after cutover.
 
 One engineering caveat gates production use of the launch domain: Cloudflare
 documents catch-all at the zone apex only. The launch spike established that
 the zone-global catch-all covers the configured subdomain, but routing that
 catch-all to the Worker would also move existing apex traffic. The limited
 pilot therefore uses exact-address rules and leaves the catch-all unchanged.
-Before production cutover, the fallback ladder remains:
-run `agent-mail.witwave.ai` as its own Cloudflare zone if the account plan
-permits subdomain zones; otherwise accelerate the `witmail.ai` acquisition
-and launch on the apex directly. Per-address routing rules are not a
-fallback beyond a small pilot fleet — Email Routing custom-address rules are
-capped per zone (the spike should confirm the current cap) and the address
-population grows with every agent.
+The permanent path is now the `witmail.net` apex. Exact-address routing on
+`agent-mail.witwave.ai` is permitted only for previously issued canonical
+local parts during compatibility; it is not a fallback for new addresses.
+Email Routing custom-address rules are capped per zone, and the address
+population grows with every agent, so production coverage on `witmail.net`
+still requires the reviewed apex route rather than per-address expansion.
 
 **Realm label (settled).** `<realm-label>` is the realm id body verbatim:
 strip the `realm_` prefix and use the remainder. Realm ids are minted as 80
@@ -578,7 +597,7 @@ Requirements regardless of format:
   level: the RFC 2142 role set (`postmaster`, `abuse`, `hostmaster`,
   `webmaster`, `noc`, `security`), `mailer-daemon`, `admin`, `root`,
   `noreply`/`no-reply`, and kin. RFC-required roles at the apex
-  (`postmaster@witmail.ai`, `abuse@witmail.ai`) route to the operator, never
+  (`postmaster@witmail.net`, `abuse@witmail.net`) route to the operator, never
   to agents; the catch-all Worker matches these before applying the
   structural parse.
 - An address, once provisioned, is stable for the life of the agent; renames
@@ -596,12 +615,13 @@ Requirements regardless of format:
   enforced by the backend hard caps and per-agent/per-realm kill switches
   settled at kickoff, not by DNS separation; per-realm sending subdomains
   would hit the same 30-domain zone cap and are not the isolation mechanism.
-- The `agent-mail.witwave.ai` to `witmail.ai` cutover is a real migration:
-  external services will hold launch-domain addresses on file, so
-  `agent-mail.witwave.ai` must keep receiving (dual-domain routing) for a
-  long deprecation window after `witmail.ai` activates. Every address a
-  third party ever saw must keep working until its agent is done with the
-  accounts behind it.
+- The `agent-mail.witwave.ai` to `witmail.net` cutover is a real migration for
+  previously issued canonical local parts. External services may hold those
+  launch-domain addresses on file, so each reviewed legacy address must keep
+  receiving through exact-address compatibility after `witmail.net` activates.
+  The legacy domain must not mint new canonical addresses or aliases, and it
+  must not gain a broad catch-all. Every address a third party ever saw must
+  keep working until its agent is done with the accounts behind it.
 
 ## Inbound Pipeline
 
@@ -626,7 +646,7 @@ The kickoff verification items were resolved on 2026-07-20:
   therefore cannot scale, which is what moved the realm label into the local
   part (see Addressing And Domain Model).
 - **Production topology: a full-coverage catch-all into an Email Worker.** On
-  the `witmail.ai` apex this is the documented zone-apex catch-all; on the
+  the `witmail.net` apex this is the documented zone-apex catch-all; on the
   `agent-mail.witwave.ai` launch domain, the spike confirmed that the
   zone-global catch-all covers the configured subdomain but cannot be moved
   without also moving existing apex traffic (see Addressing And Domain Model).
@@ -1146,9 +1166,11 @@ Receive-only still carries real obligations:
    shared apex (any realm's compromise can send as any address unless
    sending is scoped), and how sending domains consume the 30-domain zone
    cap.
-8. Domain cutover mechanics for `agent-mail.witwave.ai` to `witmail.ai`:
-   the dual-domain receive window, address rewriting policy, and how long
-   launch-domain addresses must survive after `witmail.ai` activates.
+8. Legacy canonical compatibility duration after `witmail.net` activates.
+   New canonical addresses and aliases are `.net`-only; the compatibility
+   manifest may contain only previously issued canonical local parts on
+   `agent-mail.witwave.ai`. The exact retirement evidence and minimum support
+   window for each such address still need to be settled.
 9. Launch-gating spike: verify catch-all (or an equivalent full-coverage
    route) on `agent-mail.witwave.ai` as a configured Email Routing subdomain
    of the `witwave.ai` zone, and confirm the current custom-address rule
@@ -1218,7 +1240,7 @@ in place; these are the remaining important items):
     publication — a self-hoster's own edge and key-publication path, or an
     explicit narrowing of the parity claim.
 18. Restrictive sender-auth DNS on the receive domains: publish `SPF -all`
-    and `DMARC p=reject` on `agent-mail.witwave.ai` / `witmail.ai` (they
+    and `DMARC p=reject` on `agent-mail.witwave.ai` / `witmail.net` (they
     send no mail in v1) so the domains cannot be spoofed outbound; confirm
     this composes with a future send slice.
 19. Edge-key freshness bound: the delist/rotation propagation to cells needs

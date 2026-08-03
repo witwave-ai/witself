@@ -11,26 +11,36 @@ import (
 	"time"
 )
 
-// AgentEmailAddress is the authenticated agent's one pilot receive address.
+// AgentEmailAddress is the authenticated agent's mailbox address set. Address
+// and Domain remain the primary route for backward-compatible clients.
 type AgentEmailAddress struct {
-	ID                string     `json:"id"`
-	MailboxID         string     `json:"mailbox_id"`
-	OwnerAgentID      string     `json:"owner_agent_id"`
-	Address           string     `json:"address"`
-	Domain            string     `json:"domain"`
-	LocalPart         string     `json:"local_part"`
-	AgentSegment      string     `json:"agent_segment"`
-	RealmLabel        string     `json:"realm_label"`
-	ProvisioningKind  string     `json:"provisioning_kind"`
-	ReceiveState      string     `json:"receive_state"`
-	AgentReceiveState string     `json:"agent_receive_state"`
-	RealmReceiveState string     `json:"realm_receive_state"`
-	RowVersion        int64      `json:"row_version"`
-	CreatedAt         time.Time  `json:"created_at"`
-	UpdatedAt         time.Time  `json:"updated_at"`
-	DisabledAt        *time.Time `json:"disabled_at,omitempty"`
-	RealmDisabledAt   *time.Time `json:"realm_disabled_at,omitempty"`
-	RetiredAt         *time.Time `json:"retired_at,omitempty"`
+	ID                string                       `json:"id"`
+	MailboxID         string                       `json:"mailbox_id"`
+	OwnerAgentID      string                       `json:"owner_agent_id"`
+	Address           string                       `json:"address"`
+	Domain            string                       `json:"domain"`
+	LocalPart         string                       `json:"local_part"`
+	AgentSegment      string                       `json:"agent_segment"`
+	RealmLabel        string                       `json:"realm_label"`
+	ProvisioningKind  string                       `json:"provisioning_kind"`
+	ReceiveState      string                       `json:"receive_state"`
+	AgentReceiveState string                       `json:"agent_receive_state"`
+	RealmReceiveState string                       `json:"realm_receive_state"`
+	RowVersion        int64                        `json:"row_version"`
+	CreatedAt         time.Time                    `json:"created_at"`
+	UpdatedAt         time.Time                    `json:"updated_at"`
+	DisabledAt        *time.Time                   `json:"disabled_at,omitempty"`
+	RealmDisabledAt   *time.Time                   `json:"realm_disabled_at,omitempty"`
+	RetiredAt         *time.Time                   `json:"retired_at,omitempty"`
+	Addresses         []AgentEmailCanonicalAddress `json:"addresses"`
+}
+
+// AgentEmailCanonicalAddress identifies the primary, accepted legacy, or
+// historical managed-domain route for one mailbox.
+type AgentEmailCanonicalAddress struct {
+	Address string `json:"address"`
+	Domain  string `json:"domain"`
+	Role    string `json:"role"`
 }
 
 // AgentEmailReceiveControl is an operator-visible value-free mailbox switch.
@@ -193,7 +203,8 @@ func GetAgentEmailStorageStatus(ctx context.Context, endpoint, token string) (*A
 	return &out, nil
 }
 
-// ShowAgentEmailAddress returns the authenticated enrolled agent's one address.
+// ShowAgentEmailAddress returns the authenticated enrolled agent's mailbox and
+// managed-domain address set.
 func ShowAgentEmailAddress(ctx context.Context, endpoint, token string) (AgentEmailAddress, error) {
 	var out struct {
 		Address AgentEmailAddress `json:"address"`

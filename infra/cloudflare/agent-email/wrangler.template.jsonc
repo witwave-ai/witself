@@ -40,6 +40,8 @@
     }
   ],
   "vars": {
+    "AGENT_EMAIL_DOMAIN": "witmail.net",
+    "AGENT_EMAIL_LEGACY_DOMAINS": "agent-mail.witwave.ai",
     "RELAY_KEY_ID": "__RELAY_KEY_ID__",
     "CONTROL_PLANE_URL": "__CONTROL_PLANE_URL__",
     "REALM_EMAIL_ALIAS_DELIVERY_ENABLED": "__REALM_EMAIL_ALIAS_DELIVERY_ENABLED__",

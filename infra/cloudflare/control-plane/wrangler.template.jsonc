@@ -80,7 +80,11 @@
     }
   ],
   "vars": {
-    "AGENT_EMAIL_DOMAIN": "agent-mail.witwave.ai",
+    // New aliases are assigned only on the permanent primary domain. The
+    // bounded legacy set keeps already-issued canonical pilot addresses
+    // routable while their domain-qualified authority is retired naturally.
+    "AGENT_EMAIL_DOMAIN": "witmail.net",
+    "AGENT_EMAIL_LEGACY_DOMAINS": "agent-mail.witwave.ai",
     // Independent technical queue ceilings. Plans, including explicit
     // unlimited overrides, cannot raise these values; a deployment may only
     // lower them below the compiled 8-per-realm / 64-per-account maxima.
@@ -206,7 +210,9 @@
   // CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED=true (only after catch-all,
   // canonical backfill/realm retirement, account lifecycle, terminal recovery,
   // and the Email Worker's independent alias-delivery gate pass acceptance;
-  // see docs/agent-email.md), CP_REALM_EMAIL_ALIAS_RECOVERY_TOKEN (distinct
+  // see docs/agent-email.md), CP_REALM_EMAIL_CANONICAL_INVENTORY_ENABLED=true
+  // and CP_REALM_EMAIL_CANONICAL_DELIVERY_ENABLED=true (only during their
+  // separately reviewed staged activation), CP_REALM_EMAIL_ALIAS_RECOVERY_TOKEN (distinct
   // second credential for empty-target recovery only),
   // CP_PLAN_LIFECYCLE_ENABLED=true (only
   // when intentionally activating lifecycle), CP_R2_ENDPOINT, CP_R2_BUCKET,

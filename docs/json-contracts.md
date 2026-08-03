@@ -1146,6 +1146,13 @@ server's process-lifetime allowlist determine the owner; clients cannot supply
 account, realm, mailbox, or owner selectors. The separate value-free operator
 controls below bind one allowlisted agent or realm target from the route path.
 
+`witmail.net` is exclusively an agent-email service domain. These contracts do
+not define a website, human/staff mailboxes, marketing mail, or a generic
+platform-notification sender. Required `postmaster@witmail.net` and
+`abuse@witmail.net` destinations are operator-routed operational exceptions.
+Any future outbound-agent contract must use separately isolated sending
+infrastructure and remain agent-email-only.
+
 ### Canonical Realm-ID email-route lifecycle
 
 The cell's provision-token single-route read
@@ -1233,7 +1240,7 @@ continuation cursor. For example, an administrator request page is:
     {
       "id": "earq_aaaaaaaaaaaaaaaa",
       "alias": "acme-team",
-      "domain": "agent-mail.witwave.ai",
+      "domain": "witmail.net",
       "account_id": "acc_123",
       "realm_id": "realm_bbbbbbbbbbbbbbbb",
       "status": "pending_review",
@@ -1422,7 +1429,7 @@ An applied managed-alias record has this exact shape:
 ```json
 {
   "schema_version": 1,
-  "domain": "agent-mail.witwave.ai",
+  "domain": "witmail.net",
   "realm_label": "acme-team",
   "realm_id": "realm_aaaaaaaaaaaaaaaa",
   "route_kind": "realm_alias",
@@ -1477,8 +1484,8 @@ separate reviewed Email Routing rollout.
     "account_id": "acc_123",
     "realm_id": "realm_aaaaaaaaaaaaaaaa",
     "owner_agent_id": "agent_bbbbbbbbbbbbbbbb",
-    "address": "browser-agent.aaaaaaaaaaaaaaaa@agent-mail.witwave.ai",
-    "domain": "agent-mail.witwave.ai",
+    "address": "browser-agent.aaaaaaaaaaaaaaaa@witmail.net",
+    "domain": "witmail.net",
     "local_part": "browser-agent.aaaaaaaaaaaaaaaa",
     "agent_segment": "browser-agent",
     "realm_label": "aaaaaaaaaaaaaaaa",
@@ -1490,10 +1497,22 @@ separate reviewed Email Routing rollout.
     "created_at": "2026-07-21T12:00:00Z",
     "updated_at": "2026-07-21T12:00:00Z",
     "realm_disabled_at": "2026-07-21T12:05:00Z",
+    "addresses": [
+      {
+        "address": "browser-agent.aaaaaaaaaaaaaaaa@witmail.net",
+        "domain": "witmail.net",
+        "role": "primary"
+      },
+      {
+        "address": "browser-agent.aaaaaaaaaaaaaaaa@agent-mail.witwave.ai",
+        "domain": "agent-mail.witwave.ai",
+        "role": "legacy"
+      }
+    ],
     "aliases": [
       {
         "claim_id": "era_cccccccccccccccc",
-        "address": "browser-agent.acme-team@agent-mail.witwave.ai",
+        "address": "browser-agent.acme-team@witmail.net",
         "local_part": "browser-agent.acme-team",
         "realm_label": "acme-team",
         "state": "applied",
@@ -1510,13 +1529,24 @@ when both independent layers are enabled, `disabled` when either layer is
 disabled, and `retired` for a retired mailbox. `disabled_at` is the optional
 agent-layer timestamp; `realm_disabled_at` is the optional realm-layer
 timestamp. `row_version` belongs to the agent mailbox layer.
+`addresses` is always present and lists the mailbox's permanent managed-domain
+routes. The current primary route is first; remaining routes are ordered by
+domain. `role` is exactly `primary`, `legacy`, or `historical`. Primary and
+legacy routes are accepted by the current cell configuration. Historical
+routes stay reserved so the address can never be rebound, but are no longer
+accepted for ingress. The top-level `address` and `domain` repeat the primary
+entry for backward-compatible clients; `local_part`, `agent_segment`,
+`realm_label`, and `provisioning_kind` remain the immutable mailbox identity.
+Configuring a legacy domain does not issue a legacy address to a mailbox
+created after cutover. It preserves that route only when the mailbox's original
+reservation used the legacy domain.
+
 `aliases` is always present and contains the agent-specific addresses derived
 from the realm's applied, suspended, or retired alias projections. Suspended
 and retired entries remain visible with their lifecycle timestamps so neither
-clients nor operators mistake a tombstone for an available label. The
-top-level `address`, `local_part`, `realm_label`, and `provisioning_kind` remain
-the permanent canonical mailbox identity; aliases are additive and never
-replace it.
+clients nor operators mistake a tombstone for an available label. Aliases are
+additive, remain bound to their explicit primary managed domain, and are never
+implicitly duplicated onto a legacy domain.
 
 `GET /v1/email:status` returns the effective per-message raw-MIME maximum and
 the value-free account-wide capacity for retained attachment-bearing MIME:
@@ -1619,7 +1649,7 @@ shape (the list envelope uses `next_cursor`; listen uses `timed_out`):
       "address_id": "eaddr_aaaaaaaaaaaaaaaa",
       "provider": "cloudflare_email_routing",
       "envelope_sender": "sender@example.net",
-      "envelope_recipient": "browser-agent.acme-team@agent-mail.witwave.ai",
+      "envelope_recipient": "browser-agent.acme-team@witmail.net",
       "agent_segment": "browser-agent",
       "realm_label": "acme-team",
       "recipient_route_kind": "realm_alias",
@@ -1627,7 +1657,7 @@ shape (the list envelope uses `next_cursor`; listen uses `timed_out`):
       "raw_size_bytes": 2471,
       "parse_state": "parsed",
       "header_from": "Example Service <sender@example.net>",
-      "header_to": "browser-agent.acme-team@agent-mail.witwave.ai",
+      "header_to": "browser-agent.acme-team@witmail.net",
       "subject": "Your verification code",
       "mime_message_id": "<untrusted@example.net>",
       "attachment_count": 1,

@@ -75,7 +75,8 @@ func TestAgentEmailRealmAliasProjectionAndDeliveryPostgres(t *testing.T) {
 		RealmID: realm.ID, AgentName: agents[0].Name, AccountStatus: "active",
 	}
 	scope := AgentEmailPilotScope{
-		Enabled: true, Domain: "agent-mail.witwave.ai", Audience: "cell-alias-test",
+		Enabled: true, Domain: "witmail.net",
+		LegacyDomains: []string{"agent-mail.witwave.ai"}, Audience: "cell-alias-test",
 		RealmIDs: map[string]bool{realm.ID: true}, AgentIDs: enrolled,
 	}
 	canonical, err := st.EnsureAgentEmailMailbox(
@@ -83,6 +84,10 @@ func TestAgentEmailRealmAliasProjectionAndDeliveryPostgres(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(canonical.Addresses) != 1 ||
+		canonical.Addresses[0].Role != AgentEmailAddressRolePrimary {
+		t.Fatalf("new primary-domain mailbox inherited legacy route = %+v", canonical.Addresses)
 	}
 
 	firstInput := ApplyAgentEmailRealmAliasInput{
@@ -161,6 +166,45 @@ func TestAgentEmailRealmAliasProjectionAndDeliveryPostgres(t *testing.T) {
 			},
 			Raw: raw,
 		})
+	}
+	legacyDomain := scope.LegacyDomains[0]
+	legacyCanonicalRecipient := canonical.LocalPart + "@" + legacyDomain
+	if _, err := ingest(legacyCanonicalRecipient); !errors.Is(err, ErrAgentEmailUnknownRecipient) {
+		t.Fatalf("unissued legacy canonical delivery error = %v", err)
+	}
+	// Simulate a stale or imported projection where both a compatibility route
+	// and an alias claim exist on the old domain. Ingress must still reject the
+	// alias before consulting either row: only old-issued canonical locals gain
+	// legacy-domain compatibility.
+	legacyClaimID := "era_eeeeeeeeeeeeeeee"
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO agent_email_address_domains
+		  (account_id,realm_id,provisioned_agent_id,address_id,domain,local_part,created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+		canonical.AccountID, canonical.RealmID, canonical.OwnerAgentID,
+		canonical.ID, legacyDomain, canonical.LocalPart, canonical.CreatedAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO agent_email_realm_aliases
+		  (claim_id,account_id,realm_id,domain,realm_label,state,controller_revision)
+		VALUES ($1,$2,$3,$4,$5,$6,1)`,
+		legacyClaimID, canonical.AccountID, canonical.RealmID, legacyDomain,
+		"legacyalias", AgentEmailRealmAliasApplied,
+	); err != nil {
+		t.Fatal(err)
+	}
+	persistedLegacyAliasRecipient := "owner.legacyalias+signup@" + legacyDomain
+	if _, err := ingest(persistedLegacyAliasRecipient); !errors.Is(err, ErrAgentEmailUnknownRecipient) {
+		t.Fatalf("persisted legacy-domain alias delivery error = %v", err)
+	}
+	// Legacy-domain compatibility preserves only issued canonical local parts.
+	// Realm-alias claims stay bound to their explicit primary domain and are not
+	// implicitly duplicated onto the compatibility domain.
+	legacyAliasRecipient := "owner.founder+signup@" + legacyDomain
+	if _, err := ingest(legacyAliasRecipient); !errors.Is(err, ErrAgentEmailUnknownRecipient) {
+		t.Fatalf("legacy-domain alias delivery error = %v", err)
 	}
 	delivered, err := ingest(aliasRecipient)
 	if err != nil {
@@ -279,9 +323,27 @@ func TestAgentEmailRealmAliasProjectionAndDeliveryPostgres(t *testing.T) {
 	if projectionEvents != 8 {
 		t.Fatalf("projection audit events = %d, want 8 state/revision advances only", projectionEvents)
 	}
-	// Schema 0086 adds the canonical route lifecycle and can safely step back
-	// to 0085 here. The following 0085 -> 0084 downgrade must still refuse to
-	// discard realm-alias delivery provenance.
+	// Remove the direct SQL corruption fixture before testing the safe 0087
+	// downgrade. Product paths never delete either tombstone; this fixture exists
+	// solely to prove ingress ignores even persisted legacy alias authority.
+	if _, err := st.pool.Exec(ctx, `
+		DELETE FROM agent_email_realm_aliases WHERE claim_id=$1`, legacyClaimID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		DELETE FROM agent_email_address_domains WHERE address_id=$1 AND domain=$2`,
+		canonical.ID, legacyDomain,
+	); err != nil {
+		t.Fatal(err)
+	}
+	// Schema 0087 can safely discard its sole original-domain route here, and
+	// schema 0086 can then step back to 0085. The following 0085 -> 0084
+	// downgrade must still refuse to discard realm-alias delivery provenance.
+	if err := migrationTestDown(t, schemaDSN, false); err != nil {
+		t.Fatalf("downgrade schema 0087 to 0086: %v", err)
+	}
+	assertMigrationTestVersion(t, schemaDSN, 86)
 	if err := migrationTestDown(t, schemaDSN, false); err != nil {
 		t.Fatalf("downgrade schema 0086 to 0085: %v", err)
 	}

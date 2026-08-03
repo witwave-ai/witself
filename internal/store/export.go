@@ -425,6 +425,14 @@ func (s *Store) exportAccount(
 			  'retirement_reason_code', retirement_reason_code)
 			FROM agent_email_addresses WHERE account_id = $1
 			ORDER BY realm_id, created_at, id`, arg: accountID},
+		&querySource{tx: tx, table: "agent_email_address_domains", q: `
+			SELECT jsonb_build_object(
+			  'account_id', account_id, 'realm_id', realm_id,
+			  'provisioned_agent_id', provisioned_agent_id,
+			  'address_id', address_id, 'domain', domain,
+			  'local_part', local_part, 'created_at', created_at)
+			FROM agent_email_address_domains WHERE account_id = $1
+			ORDER BY realm_id, address_id, domain`, arg: accountID},
 		&querySource{tx: tx, table: "agent_email_mailboxes", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,

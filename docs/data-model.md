@@ -623,6 +623,52 @@ semantics rather than the `If-Match` / `row_version` optimistic-lock contract, s
 `agent_tokens` carries no `row_version` column and is intentionally excluded from
 the [Optimistic Concurrency](#optimistic-concurrency-and-history) table list.
 
+### `agent_email_address_domains` (migration `0087`)
+
+Purpose: permanent managed-domain route reservations for one canonical agent
+mailbox identity. `agent_email_addresses` remains the immutable original
+reservation for backward compatibility; this additive table lets the same
+`local_part` reach that mailbox on the configured primary domain and, only when
+it was actually issued before cutover, the accepted legacy domain.
+The managed domain is exclusively for agent email; these reservations never
+represent a website, employee/human mailbox, marketing address, or generic
+platform-notification sender. Required operator-routed `postmaster` and `abuse`
+addresses are operational exceptions outside agent mailbox ownership.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `account_id`, `realm_id` | `text NOT NULL` FK scope | owning tenant and realm |
+| `provisioned_agent_id` | `text NOT NULL` | agent for which the permanent address was provisioned |
+| `address_id` | `text NOT NULL` | parent `agent_email_addresses.id` |
+| `domain` | `text NOT NULL` | canonical lowercase managed domain |
+| `local_part` | `text NOT NULL` | exact immutable local part copied from the parent address |
+| `created_at` | `timestamptz NOT NULL` | route reservation time; migration/startup backfill uses the parent address time |
+
+The primary key is `(address_id, domain)`. `UNIQUE (domain, local_part)` keeps
+every issued managed address globally non-reusable. The composite foreign key
+to `(account_id, realm_id, provisioned_agent_id, address_id, local_part)` on
+`agent_email_addresses` prevents a route from being rebound to another tenant,
+realm, agent, reservation, or local part. Parent deletion cascades, but the
+tenant-evacuation fence protects the rows during account movement. There is no
+route-level retirement column: the parent address tombstone owns lifecycle,
+and a removed compatibility domain remains reserved here.
+
+Migration `0087` backfills every existing address's original domain. Startup
+reconciliation then guarantees the configured primary route for each enrolled
+mailbox and preserves a different original domain. Merely configuring a legacy
+domain does **not** issue that route to a mailbox created after cutover. The
+API derives, rather than stores, each route role: `primary` for the configured
+primary domain, `legacy` for the currently accepted compatibility domain, and
+`historical` for a permanently reserved route that is no longer accepted for
+ingress. Realm-email aliases remain independent claims on the primary domain
+and are never duplicated onto the legacy domain.
+
+The down migration refuses to discard data when any route domain differs from
+its parent address's original domain. Once startup has added a new primary
+route for an old mailbox, rollback must restore prior application behavior and
+configuration while leaving schema `0087` and every route reservation intact.
+Use a forward fix; never delete routes merely to make a down migration pass.
+
 ### `agent_email_realm_aliases` (migration `0085`)
 
 Purpose: cell-local, control-plane-authored routing projection for additive

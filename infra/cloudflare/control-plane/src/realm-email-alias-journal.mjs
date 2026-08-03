@@ -653,6 +653,7 @@ function assertAuthorityTransition(state, key, desired) {
   if (key.startsWith("realm-close-fence:")) {
     if (immutableFieldsChanged(previous, desired, [
       "account_id", "realm_id", "operation_id", "cell_generation",
+      "canonical_revisions",
     ]) || !Number.isSafeInteger(desired.controller_revision) ||
         desired.controller_revision < (previous.controller_revision ?? 0)) {
       journalFail("realm-close controller revision regressed",
@@ -834,6 +835,23 @@ function validDomain(domain) {
     domain.split(".").every((label) => DOMAIN_LABEL_PATTERN.test(label));
 }
 
+function validRealmCloseDomains(domains, primary) {
+  return Array.isArray(domains) && domains.length >= 1 && domains.length <= 2 &&
+    domains[0] === primary && new Set(domains).size === domains.length &&
+    domains.every(validDomain);
+}
+
+function validCanonicalRevisions(revisions, controllerRevision) {
+  return Array.isArray(revisions) && revisions.length >= 1 &&
+    revisions.length <= 2 &&
+    new Set(revisions.map((item) => item?.domain)).size === revisions.length &&
+    revisions.every((item) =>
+      isPlainObject(item) && validDomain(item.domain) &&
+      Number.isSafeInteger(item.controller_revision) &&
+      item.controller_revision >= 1
+    ) && revisions[0].controller_revision === controllerRevision;
+}
+
 function assertObject(value, message) {
   if (!isPlainObject(value)) {
     journalFail(message, "realm_email_alias_recovery_invariant_failed");
@@ -873,6 +891,7 @@ export function validateRealmEmailAliasRecoveredState(state, options = {}) {
   const reservationHistories = new Map();
   const audits = new Map();
   const canonicals = new Map();
+  const realmCloseFences = new Map();
   for (const [key, value] of source) {
     assertObject(value, `recovered authority value is invalid: ${key}`);
     if (key.startsWith("claim:")) {
@@ -984,14 +1003,72 @@ export function validateRealmEmailAliasRecoveredState(state, options = {}) {
           !REALM_ID_PATTERN.test(parts[1]) || value.account_id !== parts[0] ||
           value.realm_id !== parts[1] ||
           (prefix === "realm-close-intent:" &&
-            !["scan_aliases", "prepare_cell", "publish_retired", "commit_cell"]
-              .includes(value.phase)) ||
+            (!["scan_aliases", "prepare_cell", "publish_retired", "commit_cell"]
+              .includes(value.phase) || !validDomain(value.domain) ||
+              (value.domains !== undefined &&
+                !validRealmCloseDomains(value.domains, value.domain)) ||
+              (value.publish_domain_index !== undefined &&
+                (!Number.isSafeInteger(value.publish_domain_index) ||
+                  value.publish_domain_index < 0 ||
+                  value.publish_domain_index > (value.domains?.length ?? 1))))) ||
           (prefix === "realm-close-fence:" &&
             (!Number.isSafeInteger(value.controller_revision) ||
-              value.controller_revision < 1))) {
+              value.controller_revision < 1 ||
+              (value.canonical_revisions !== undefined &&
+                !validCanonicalRevisions(
+                  value.canonical_revisions,
+                  value.controller_revision,
+                ))))) {
         journalFail(`recovered realm-close authority is invalid: ${key}`,
           "realm_email_alias_recovery_invariant_failed");
       }
+      if (prefix === "realm-close-fence:") {
+        realmCloseFences.set(`${parts[0]}:${parts[1]}`, value);
+      }
+    }
+  }
+
+  for (const fence of realmCloseFences.values()) {
+    const realmCanonicals = [...canonicals.values()].filter((canonical) =>
+      canonical.account_id === fence.account_id &&
+      canonical.realm_id === fence.realm_id
+    );
+    if (realmCanonicals.length === 0) {
+      journalFail("recovered realm-close fence has no canonical route",
+        "realm_email_alias_recovery_invariant_failed");
+    }
+    if (realmCanonicals.some((canonical) => canonical.state !== "retired")) {
+      journalFail("recovered fenced realm has a nonretired canonical route",
+        "realm_email_alias_recovery_invariant_failed");
+    }
+    if (Array.isArray(fence.canonical_revisions)) {
+      const realmLabel = fence.realm_id.slice("realm_".length);
+      for (const expected of fence.canonical_revisions) {
+        const canonical = canonicals.get(
+          `canonical:${expected.domain}:${realmLabel}`,
+        );
+        if (!canonical) {
+          journalFail("recovered realm-close canonical route is missing",
+            "realm_email_alias_recovery_invariant_failed");
+        }
+        if (canonical.account_id !== fence.account_id ||
+            canonical.realm_id !== fence.realm_id) {
+          journalFail("recovered realm-close canonical ownership is inconsistent",
+            "realm_email_alias_recovery_invariant_failed");
+        }
+        if (canonical.state !== "retired" ||
+            canonical.controller_revision !== expected.controller_revision) {
+          journalFail("recovered realm-close canonical revision is inconsistent",
+            "realm_email_alias_recovery_invariant_failed");
+        }
+      }
+    } else if (!realmCanonicals.some((canonical) =>
+      canonical.controller_revision === fence.controller_revision
+    )) {
+      // Legacy fences predate the per-domain revision list. Their one scalar
+      // still has to name an exact retired row in the same account and realm.
+      journalFail("recovered legacy realm-close revision is inconsistent",
+        "realm_email_alias_recovery_invariant_failed");
     }
   }
 

@@ -546,6 +546,93 @@ test("recovery validates graph, collisions, history, audit gaps, and exact fence
   }), (error) => error.code === "realm_email_alias_journal_fence_mismatch");
 });
 
+test("recovery preserves a bounded dual-domain realm-close fence exactly", () => {
+  const state = fixtureState();
+  const domains = ["witmail.net", DOMAIN];
+  for (const [index, domain] of domains.entries()) {
+    state.set(`canonical:${domain}:aaaaaaaaaaaaaaaa`, {
+      domain,
+      account_id: ACCOUNT,
+      realm_id: REALM,
+      realm_label: "aaaaaaaaaaaaaaaa",
+      state: "retired",
+      controller_revision: index + 3,
+      updated_at: NOW,
+    });
+  }
+  state.set(`realm-close-fence:${ACCOUNT}:${REALM}`, {
+    account_id: ACCOUNT,
+    realm_id: REALM,
+    operation_id: "close-dual-domain",
+    cell_generation: 2,
+    controller_revision: 3,
+    canonical_revisions: [
+      { domain: domains[0], controller_revision: 3 },
+      { domain: domains[1], controller_revision: 4 },
+    ],
+    completed_at: NOW,
+  });
+  assert.equal(
+    validateRealmEmailAliasRecoveredState(state).canonical_routes,
+    2,
+  );
+
+  const malformed = new Map(state);
+  malformed.set(`realm-close-fence:${ACCOUNT}:${REALM}`, {
+    ...state.get(`realm-close-fence:${ACCOUNT}:${REALM}`),
+    canonical_revisions: [
+      { domain: domains[0], controller_revision: 4 },
+      { domain: domains[1], controller_revision: 4 },
+    ],
+  });
+  assert.throws(
+    () => validateRealmEmailAliasRecoveredState(malformed),
+    /realm-close authority is invalid/,
+  );
+
+  const missing = new Map(state);
+  missing.delete(`canonical:${domains[1]}:aaaaaaaaaaaaaaaa`);
+  assert.throws(
+    () => validateRealmEmailAliasRecoveredState(missing),
+    /canonical route is missing/,
+  );
+
+  const unrelated = new Map(state);
+  unrelated.set(`canonical:${domains[1]}:aaaaaaaaaaaaaaaa`, {
+    ...state.get(`canonical:${domains[1]}:aaaaaaaaaaaaaaaa`),
+    account_id: "acct_unrelated",
+  });
+  assert.throws(
+    () => validateRealmEmailAliasRecoveredState(unrelated),
+    /canonical ownership is inconsistent/,
+  );
+
+  const revisionMismatch = new Map(state);
+  revisionMismatch.set(`canonical:${domains[1]}:aaaaaaaaaaaaaaaa`, {
+    ...state.get(`canonical:${domains[1]}:aaaaaaaaaaaaaaaa`),
+    controller_revision: 5,
+  });
+  assert.throws(
+    () => validateRealmEmailAliasRecoveredState(revisionMismatch),
+    /canonical revision is inconsistent/,
+  );
+
+  const extraLive = new Map(state);
+  extraLive.set("canonical:mail-archive.example:aaaaaaaaaaaaaaaa", {
+    domain: "mail-archive.example",
+    account_id: ACCOUNT,
+    realm_id: REALM,
+    realm_label: "aaaaaaaaaaaaaaaa",
+    state: "suspended",
+    controller_revision: 1,
+    updated_at: NOW,
+  });
+  assert.throws(
+    () => validateRealmEmailAliasRecoveredState(extraLive),
+    /nonretired canonical route/,
+  );
+});
+
 test("after-image replay prevents tombstone resurrection and revision regression", () => {
   const state = fixtureState();
   const retired = {
