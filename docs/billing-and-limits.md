@@ -87,7 +87,7 @@ the independent platform breakers described below apply instead.
 | Send agent email | No | No | Included | Included |
 | Permanent Realm ID email address | Reserved; delivery disabled | Active on `witmail.net` | Active on `witmail.net` | Active on `witmail.net` |
 | Realm email aliases | 0 | 0 | 1 active alias per realm | Contracted; 3 active aliases per realm by default |
-| Custom inbound email domains | No | No | 1 per account | Contracted |
+| Custom inbound email domains | No | No | 1 per account | Contracted; disabled until an explicit account limit is set |
 
 The permanent Witself-provided address format is
 `agent-name.realm-id@witmail.net`. It is reserved on every plan but Personal
@@ -457,6 +457,77 @@ later upgrade reactivates it without reinstalling an integration. Activated,
 suspended, retired, and tombstoned aliases are never reassigned to another
 account or realm. Newly reserved words do not automatically revoke existing
 active aliases; they create an explicit platform-admin conflict for review.
+
+### Custom inbound email domains
+
+Organization-owned inbound domains are a separate account-level entitlement,
+not another realm alias. The feature key is `agent_email_custom_domain`; the
+hard-cap key is `agent_email_custom_domains_per_account`. The Phase-B product
+target gives Personal and Professional a zero cap and no feature, Team the
+feature with one domain per account, and Enterprise the feature with an
+explicit zero default. Its negotiated quantity must be installed as an
+audited account limit override before a request is accepted. A missing
+effective limit means unlimited only while the feature is enabled; zero
+remains a real cap.
+
+The first implementation is deliberately dark. The exact-`true`, runtime-only
+`CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUESTS_ENABLED` gate is absent from release
+configuration. Even when a test supplies that gate, this slice only creates a
+globally unique request and a stable TXT ownership challenge. It does not query
+DNS, mark ownership verified, publish MX or Email Routing configuration, write
+a cell/edge route, or accept mail for the domain.
+
+Activation follows the established two-phase limit rollout. Phase A adds the
+closed feature/limit vocabulary, control-plane Durable Object, APIs, and admin
+client while intentionally leaving both keys absent from
+`web/plans/plans.json`. Roll Phase A to every cell and the control plane first,
+then write and verify the Founder account's explicit-unlimited limit override.
+Only Phase B adds the Personal 0, Professional 0, Team 1, and Enterprise 0
+catalog values plus the Team/Enterprise feature. This keeps an old cell from
+receiving an unknown key and prevents the Founder snapshot from briefly
+inheriting Enterprise's zero default. The request gate stays off in both
+phases. For that catalog-only promotion, deploy the Phase-B control-plane
+container first, wait for a complete plan-lifecycle pass, and verify the
+Founder explicit-unlimited snapshot before publishing the public plans Worker.
+Phase-A cells already understand the new dimension, so they do not need a
+Phase-B image rollout when the second release changes only catalog bytes and
+catalog tests.
+
+The commercial allowance is conservatively consumed by pending requests until
+an active-domain lifecycle exists. A separate technical ceiling allows at most
+eight open requests per account, including explicitly unlimited accounts.
+Terminal requests remain durable tombstones and cannot be reassigned until a
+later, explicit ownership-transfer lifecycle is designed. This prevents a
+domain that once appeared in an agent address from silently changing tenants.
+
+An Enterprise contract can be installed without changing the account's plan:
+
+```sh
+witself-admin account limit-override set \
+  --account "$ACCOUNT_ID" \
+  --dimension agent_email_custom_domains_per_account \
+  --max 3 \
+  --reason "Contract includes three custom inbound domains"
+witself-admin account limit-override get \
+  --account "$ACCOUNT_ID" \
+  --dimension agent_email_custom_domains_per_account
+```
+
+That override changes only the account allowance. It does not enable the dark
+request gate and cannot activate DNS or mail delivery.
+
+Before Phase B, preserve the Founder exception explicitly:
+
+```sh
+witself-admin account limit-override set \
+  --account "$FOUNDER_ACCOUNT_ID" \
+  --dimension agent_email_custom_domains_per_account \
+  --unlimited \
+  --reason "Founder custom inbound domains are unlimited"
+witself-admin account limit-override get \
+  --account "$FOUNDER_ACCOUNT_ID" \
+  --dimension agent_email_custom_domains_per_account
+```
 
 ### Realm and agent limits
 

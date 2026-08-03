@@ -124,6 +124,15 @@ import {
   runScheduledCanonicalRealmRouteInventory,
 } from "./realm-email-alias-runtime.mjs";
 import {
+  handleAgentEmailDomainAdminRequest,
+  handleAgentEmailDomainCustomerRequest,
+  isAgentEmailDomainAdminPath,
+  matchAgentEmailDomainCustomerPath,
+} from "./agent-email-domain-api.mjs";
+import {
+  DurableAgentEmailDomainRegistry,
+} from "./agent-email-domain-runtime.mjs";
+import {
   handleRealmEmailAliasRecoveryAdminRequest,
   isRealmEmailAliasRecoveryAdminPath,
 } from "./realm-email-alias-recovery-api.mjs";
@@ -216,6 +225,15 @@ export class AccountBackup extends DurableAccountBackup {
 // is only its fail-closed routing projection; it never grants ownership or
 // permits address reuse.
 export class RealmEmailAliasRegistry extends DurableRealmEmailAliasRegistry {
+  constructor(ctx, env) {
+    super(ctx, env);
+  }
+}
+
+// One globally named Durable Object is the dark authority for organization-
+// owned inbound agent-email domain requests. It does not publish DNS, routes,
+// or cell projections; those require a later, independently gated lifecycle.
+export class AgentEmailDomainRegistry extends DurableAgentEmailDomainRegistry {
   constructor(ctx, env) {
     super(ctx, env);
   }
@@ -4185,6 +4203,21 @@ export default {
         env,
         realmEmailAliasCustomer,
       );
+    }
+    const agentEmailDomainCustomer = matchAgentEmailDomainCustomerPath(
+      url.pathname,
+    );
+    if (agentEmailDomainCustomer) {
+      return handleAgentEmailDomainCustomerRequest(
+        request,
+        env,
+        agentEmailDomainCustomer,
+      );
+    }
+    if (isAgentEmailDomainAdminPath(url.pathname)) {
+      const admin = await adminAuthorized(request, env);
+      if (!admin) return err("unauthorized", 401);
+      return handleAgentEmailDomainAdminRequest(request, env, url, admin);
     }
     if (isRealmEmailAliasRecoveryAdminPath(url.pathname)) {
       const admin = await adminAuthorized(request, env);

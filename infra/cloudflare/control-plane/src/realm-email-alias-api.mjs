@@ -54,7 +54,7 @@ const json = (value, status = 200) =>
 const errorResponse = (message, status) =>
   json({ schema_version: SCHEMA_VERSION, error: message }, status);
 
-async function boundedJSON(request) {
+export async function boundedJSON(request) {
   const declared = Number(request.headers.get("Content-Length"));
   if (Number.isFinite(declared) && declared > BODY_MAX_BYTES) {
     throw Object.assign(new Error("request body too large"), { status: 413 });
@@ -158,16 +158,20 @@ async function fetchCellJSON(fetchImpl, url, authorization) {
   return { response, body, text };
 }
 
-async function authenticateRealmOperator(
+export async function authenticateRealmOperator(
   request,
   env,
   accountID,
   realmID,
   fetchImpl,
+  resource = "email aliases",
+  schemaVersion = SCHEMA_VERSION,
 ) {
+  const operatorError = (message, status) =>
+    json({ schema_version: schemaVersion, error: message }, status);
   const authorization = request.headers.get("Authorization") ?? "";
   if (!authorization.startsWith("Bearer ")) {
-    return { response: errorResponse("operator token required", 401) };
+    return { response: operatorError("operator token required", 401) };
   }
   const cell = await liveCellForAccount(env, accountID);
   if (!cell) {
@@ -175,9 +179,9 @@ async function authenticateRealmOperator(
       type: "json",
     });
     return {
-      response: errorResponse(
+      response: operatorError(
         archived
-          ? "account is archived — restore before managing email aliases"
+          ? `account is archived — restore before managing ${resource}`
           : "unknown account",
         archived ? 409 : 404,
       ),
@@ -195,7 +199,7 @@ async function authenticateRealmOperator(
         : fetchCellJSON(fetchImpl, `${cell.endpoint}/v1/realms`, authorization),
     ]);
   } catch {
-    return { response: errorResponse("account cell is unreachable", 502) };
+    return { response: operatorError("account cell is unreachable", 502) };
   }
   for (const result of [whoami, account, realms].filter(Boolean)) {
     if (!result.response.ok) {
@@ -203,10 +207,10 @@ async function authenticateRealmOperator(
         ? result.response.status
         : 502;
       return {
-        response: errorResponse(
+        response: operatorError(
           status === 401 ? "unauthorized" :
           status === 403 ? "account is not active" :
-          "account cell rejected alias authorization",
+          `account cell rejected ${resource} authorization`,
           status,
         ),
       };
@@ -215,13 +219,13 @@ async function authenticateRealmOperator(
   if (whoami.body?.principal?.account_id !== accountID ||
       typeof whoami.body?.principal?.operator_id !== "string" ||
       account.body?.account?.id !== accountID) {
-    return { response: errorResponse("operator account mismatch", 403) };
+    return { response: operatorError("operator account mismatch", 403) };
   }
   if (realmID !== null) {
     const ownsRealm = Array.isArray(realms.body?.realms) &&
       realms.body.realms.some((realm) => realm?.id === realmID);
     if (!ownsRealm) {
-      return { response: errorResponse("realm not found in account", 404) };
+      return { response: operatorError("realm not found in account", 404) };
     }
   }
   const snapshot = {

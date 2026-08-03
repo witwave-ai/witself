@@ -42,6 +42,13 @@ edge KV directory is a rebuildable projection, not claim authority. Activation
 is separately default-off until a full-coverage SMTP route reaches the Email
 Worker.
 
+Custom inbound-domain amendment (dark foundation, implemented in the current
+checkout): account operators may eventually request an organization-owned
+domain through a separate control-plane authority. The current implementation
+stops after issuing a stable TXT ownership challenge. Its exact-`true` request
+gate is absent from release configuration, and there is no DNS lookup, domain
+verification, routing projection, cell mutation, or mail-delivery path.
+
 ## Implemented sealed-plane routes
 
 ```text
@@ -180,6 +187,8 @@ POST /v1/email/retry-canary:status
 # Control-plane customer request surface; account-operator bearer token.
 GET  /v1/accounts/{account_id}/realms/{realm_id}/email-alias-requests
 POST /v1/accounts/{account_id}/realms/{realm_id}/email-alias-requests
+GET  /v1/accounts/{account_id}/email-domain-requests
+POST /v1/accounts/{account_id}/email-domain-requests
 POST /v1/accounts/{account_id}/realms/{realm_id}:close
 
 # Control-plane platform-administrator namespace surface.
@@ -207,6 +216,11 @@ POST /v1/admin/realm-email-alias-recoveries
 GET  /v1/admin/realm-email-alias-recoveries/{recovery_id}
 POST /v1/admin/realm-email-alias-recoveries/{recovery_id}:advance
 POST /v1/admin/realm-email-alias-recoveries/{recovery_id}:verify
+GET  /v1/admin/agent-email-domain-requests
+GET  /v1/admin/agent-email-domain-requests/{request_id}
+POST /v1/admin/agent-email-domain-requests/{request_id}:reject
+POST /v1/admin/agent-email-domain-requests/{request_id}:retire
+GET  /v1/admin/agent-email-domain-audit
 
 # Edge-to-control-plane authenticated fallback; not a customer route.
 GET  /v1/email/realm-routes/{domain}/{realm_label}
@@ -242,6 +256,12 @@ otherwise `null`). Callers must reuse the same filters and follow every
 non-null cursor, including after an empty filtered result. Filtering is bounded
 to the current storage page; the server does not perform an unbounded hidden
 scan to fill a page with matches.
+
+Custom-domain customer/admin request lists and the custom-domain audit list
+also use bounded opaque cursors. Their filters are `state`, `account_id`, and
+`domain` for administrator requests and `action`, `account_id`, `domain`, and
+`limit` for audit. The request registry is deliberately not a DNS or mail
+control surface.
 
 Sensitive/action routes must use `POST`, never `GET`.
 

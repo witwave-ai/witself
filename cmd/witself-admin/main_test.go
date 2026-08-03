@@ -622,6 +622,7 @@ func TestAccountLimitOverrideCLIUnlimitedDimensions(t *testing.T) {
 		{dimension: "stored_memory", defaultMax: 1000},
 		{dimension: "stored_fact", defaultMax: 1000},
 		{dimension: "agent_email_attachment_storage_bytes", defaultMax: 0},
+		{dimension: "agent_email_custom_domains_per_account", defaultMax: 0},
 	} {
 		t.Run(test.dimension, func(t *testing.T) {
 			var gotMethod, gotPath string

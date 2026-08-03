@@ -164,6 +164,8 @@ func run(args []string) int {
 		return messageCmd(args[1:])
 	case "email":
 		return emailCmd(args[1:])
+	case "email-domain":
+		return emailDomainCmd(args[1:])
 	case "integrations":
 		return integrationsCmd(args[1:])
 	case "install":
@@ -4135,6 +4137,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself transcript create|append|list|show|tail  Record and retrieve AI interactions")
 	usageLine(w, "  witself message send|reply|list|listen|read|ack|claim|renew|release|complete|request  Exchange and process durable realm-local agent messages")
 	usageLine(w, "  witself integrations [--json]  Show supported AI runtimes and installation status")
+	usageLine(w, "  witself email-domain request|list  Request and inspect organization-owned inbound email domains")
 	usageLine(w, "  witself install RUNTIME[,RUNTIME...]|all  Install runtime memory and MCP integration")
 	usageLine(w, "  witself uninstall RUNTIME[,RUNTIME...]|all  Remove runtime integration (preserves data)")
 	usageLine(w, "  witself mcp serve             Serve Witself tools over local stdio MCP")
