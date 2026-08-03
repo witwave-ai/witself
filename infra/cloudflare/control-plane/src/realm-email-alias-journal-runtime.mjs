@@ -31,7 +31,8 @@ const REALM_EMAIL_ALIAS_JOURNAL_LAST_MAINTENANCE_KEY =
 const LOCAL_SCHEMA = "witself.realm-email-alias-journal-local.v1";
 const MAINTENANCE_SCHEMA = "witself.realm-email-alias-journal-maintenance.v1";
 const CHECKPOINT_SCHEMA = "witself.realm-email-alias-authority-checkpoint.v1";
-const RECOVERY_SCHEMA = "witself.realm-email-alias-recovery-local.v1";
+const LEGACY_RECOVERY_SCHEMA = "witself.realm-email-alias-recovery-local.v1";
+const RECOVERY_SCHEMA = "witself.realm-email-alias-recovery-local.v2";
 const STREAM_ID_PATTERN = /^reaj_[a-z2-7]{16,52}$/;
 const RECOVERY_ID_PATTERN = /^rear_[a-z2-7]{16}$/;
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -43,6 +44,7 @@ const MAX_AUTHORITY_KEYS = 10_000;
 const MAX_SCANNED_STORAGE_KEYS = 100_000;
 const DERIVED_REBUILD_PAGE_LIMIT = 100;
 const JOURNAL_ENTRY_MAX_BYTES = 512 * 1_024;
+const RECOVERY_ACTION_FENCE_GENERATION_ATTEMPTS = 4;
 
 export class RealmEmailAliasJournalRuntimeError extends Error {
   constructor(message, code = "realm_email_alias_journal_unavailable") {
@@ -64,6 +66,12 @@ function randomStreamID() {
   const bytes = new Uint8Array(26);
   crypto.getRandomValues(bytes);
   return `reaj_${[...bytes].map((byte) => BASE32[byte & 31]).join("")}`;
+}
+
+function randomRecoveryActionFence() {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function journalRequired(env) {
@@ -340,8 +348,23 @@ function headFromEntry(entry) {
   };
 }
 
+function publicHead(value) {
+  if (!validHead(value)) return null;
+  return {
+    schema_version: value.schema_version,
+    stream_id: value.stream_id,
+    sequence: value.sequence,
+    hash: value.hash,
+    authority_epoch: value.authority_epoch,
+    registry_revision: value.registry_revision,
+    audit_sequence: value.audit_sequence,
+    updated_at: value.updated_at,
+  };
+}
+
 function recoveryPublic(record) {
-  if (!record || record.schema_version !== RECOVERY_SCHEMA) return null;
+  if (!record || ![LEGACY_RECOVERY_SCHEMA, RECOVERY_SCHEMA]
+    .includes(record.schema_version)) return null;
   return {
     recovery_id: record.recovery_id,
     source_stream_id: record.source_stream_id,
@@ -351,6 +374,10 @@ function recoveryPublic(record) {
     authority_keys: record.authority_keys,
     derived_keys: record.derived_keys ?? 0,
     state_digest: record.state_digest ?? null,
+    action_fence: record.schema_version === RECOVERY_SCHEMA &&
+        SHA256_PATTERN.test(record.action_fence ?? "")
+      ? record.action_fence
+      : null,
     sealed: record.phase === "sealed",
     failed: record.phase === "failed",
     failure_code: record.failure_code ?? null,
@@ -362,8 +389,9 @@ function recoveryPublic(record) {
 
 /**
  * Serial commit helper for the singleton registry. The caller must hold one
- * global journal lane for resume() and commit(); this class deliberately does
- * not own request scheduling or call external routing/cell services.
+ * global journal lane for every mutating journal or recovery action; this class
+ * deliberately does not own request scheduling or call external routing/cell
+ * services.
  */
 export class RealmEmailAliasJournalRuntime {
   constructor(storage, env, dependencies = {}) {
@@ -371,10 +399,25 @@ export class RealmEmailAliasJournalRuntime {
     this.env = env;
     this.now = dependencies.now ?? (() => new Date());
     this.newStreamID = dependencies.newStreamID ?? randomStreamID;
+    this.newRecoveryActionFence = dependencies.newRecoveryActionFence ??
+      randomRecoveryActionFence;
     this.afterJournalAppend = dependencies.afterJournalAppend ?? (() => {});
     this.afterMaintenanceFinalize =
       dependencies.afterMaintenanceFinalize ?? (() => {});
     this.afterRecoveryAction = dependencies.afterRecoveryAction ?? (() => {});
+  }
+
+  async nextRecoveryActionFence(currentFence = null) {
+    for (let attempt = 0;
+      attempt < RECOVERY_ACTION_FENCE_GENERATION_ATTEMPTS;
+      attempt += 1) {
+      const candidate = await this.newRecoveryActionFence();
+      if (SHA256_PATTERN.test(candidate ?? "") && candidate !== currentFence) {
+        return candidate;
+      }
+    }
+    fail("realm email alias recovery action fence is unavailable",
+      "realm_email_alias_recovery_action_fence_unavailable");
   }
 
   async raw(entries, deletes = []) {
@@ -407,10 +450,10 @@ export class RealmEmailAliasJournalRuntime {
     return {
       enabled: validHead(head),
       required: journalRequired(this.env),
-      head: validHead(head) ? head : null,
+      head: publicHead(head),
       pending: Boolean(pending),
       forked: Boolean(fork),
-      bootstrap: bootstrap ?? null,
+      bootstrap: bootstrap ? this.maintenanceResult(bootstrap) : null,
     };
   }
 
@@ -649,7 +692,7 @@ export class RealmEmailAliasJournalRuntime {
       frozen: !complete,
       authority_keys: record?.authority_keys ?? 0,
       scanned_keys: record?.scanned_keys ?? 0,
-      head: head ?? clone(record?.head ?? null),
+      head: publicHead(head ?? record?.head ?? null),
       pending: Boolean(record?.pending),
     };
   }
@@ -982,6 +1025,7 @@ export class RealmEmailAliasJournalRuntime {
         "realm_email_alias_recovery_target_not_empty");
     }
     const now = this.now().toISOString();
+    const actionFence = await this.nextRecoveryActionFence();
     const record = {
       schema_version: RECOVERY_SCHEMA,
       recovery_id: request.recovery_id,
@@ -1006,6 +1050,7 @@ export class RealmEmailAliasJournalRuntime {
       state_digest: null,
       checkpoint: null,
       derived_cursor: null,
+      action_fence: actionFence,
       created_at: now,
       updated_at: now,
     };
@@ -1020,12 +1065,21 @@ export class RealmEmailAliasJournalRuntime {
   }
 
   validateRecoveryAction(input, record) {
-    if (!record || record.schema_version !== RECOVERY_SCHEMA ||
-        !validActor(input?.actor) ||
+    if (!record || !validActor(input?.actor) ||
         input?.recovery_id !== record.recovery_id ||
-        !IDEMPOTENCY_KEY_PATTERN.test(input?.idempotency_key ?? "")) {
+        !IDEMPOTENCY_KEY_PATTERN.test(input?.idempotency_key ?? "") ||
+        !SHA256_PATTERN.test(input?.expected_action_fence ?? "")) {
       fail("realm email alias recovery action is invalid",
         "realm_email_alias_recovery_request_invalid");
+    }
+    if (record.schema_version === LEGACY_RECOVERY_SCHEMA) {
+      fail("legacy realm email alias recovery requires a new empty target",
+        "realm_email_alias_recovery_upgrade_required");
+    }
+    if (record.schema_version !== RECOVERY_SCHEMA ||
+        !SHA256_PATTERN.test(record.action_fence ?? "")) {
+      fail("realm email alias recovery action fence invariant failed",
+        "realm_email_alias_recovery_invariant_failed");
     }
   }
 
@@ -1037,9 +1091,11 @@ export class RealmEmailAliasJournalRuntime {
       actor: input.actor,
       recovery_id: input.recovery_id,
       idempotency_key: input.idempotency_key,
+      expected_action_fence: input.expected_action_fence,
     }));
     const prior = record.last_action;
-    if (prior?.idempotency_key === input.idempotency_key) {
+    if (prior?.idempotency_key === input.idempotency_key &&
+        prior?.request_fence === input.expected_action_fence) {
       if (prior.action !== action || prior.fingerprint !== fingerprint) {
         fail("recovery idempotency key was reused with changed input",
           "realm_email_alias_recovery_idempotency_conflict");
@@ -1049,14 +1105,20 @@ export class RealmEmailAliasJournalRuntime {
       }
       return { replay: clone(prior.result) };
     }
+    if (input.expected_action_fence !== record.action_fence) {
+      fail("recovery action fence does not match the current recovery state",
+        "realm_email_alias_recovery_action_fence_mismatch");
+    }
     return {
       action,
       idempotency_key: input.idempotency_key,
       fingerprint,
+      request_fence: input.expected_action_fence,
       before: {
         phase: record.phase,
         replay_head: clone(record.replay_head),
         derived_cursor: record.derived_cursor ?? null,
+        action_fence: record.action_fence,
       },
     };
   }
@@ -1068,11 +1130,13 @@ export class RealmEmailAliasJournalRuntime {
         action: context.action,
         idempotency_key: context.idempotency_key,
         fingerprint: context.fingerprint,
+        request_fence: context.request_fence,
         before: context.before,
         after: {
           phase: record.phase,
           replay_head: clone(record.replay_head),
           derived_cursor: record.derived_cursor ?? null,
+          action_fence: record.action_fence,
         },
         result: clone(result),
         error: error
@@ -1087,13 +1151,15 @@ export class RealmEmailAliasJournalRuntime {
       ...record,
       phase: "failed",
       failure_code: error?.code ?? "realm_email_alias_recovery_failed",
+      action_fence: await this.nextRecoveryActionFence(record.action_fence),
       updated_at: this.now().toISOString(),
     };
     if (actionContext) {
+      const result = recoveryPublic(failed);
       failed = this.withRecoveryReceipt(
         failed,
         actionContext,
-        null,
+        result,
         error,
       );
     }
@@ -1115,9 +1181,15 @@ export class RealmEmailAliasJournalRuntime {
       fail("realm email alias authority journal has a sequence gap",
         "realm_email_alias_journal_gap");
     }
-    let bytes;
+    let body;
     try {
-      bytes = new Uint8Array(await object.arrayBuffer());
+      body = await object.arrayBuffer();
+    } catch {
+      fail("realm email alias authority journal is unavailable",
+        "realm_email_alias_journal_unavailable");
+    }
+    try {
+      const bytes = new Uint8Array(body);
       if (bytes.byteLength > JOURNAL_ENTRY_MAX_BYTES) {
         fail("realm email alias authority journal entry is too large",
           "realm_email_alias_journal_schema_invalid");
@@ -1161,11 +1233,13 @@ export class RealmEmailAliasJournalRuntime {
       record,
     );
     if (actionContext.replay) return actionContext.replay;
-    if (["sealed", "failed"].includes(record.phase)) {
-      return recoveryPublic(record);
+    if (record.phase === "sealed") {
+      fail("realm email alias recovery target is permanently sealed",
+        "realm_email_alias_recovery_target_sealed");
     }
     if (record.phase !== "replay") {
-      return recoveryPublic(record);
+      fail("realm email alias recovery advance is not allowed in this phase",
+        "realm_email_alias_recovery_action_not_allowed");
     }
     const sequence = record.replay_head.sequence + 1;
     if (sequence > record.expected_head.sequence) {
@@ -1243,8 +1317,16 @@ export class RealmEmailAliasJournalRuntime {
         throw converted;
       }
     }
-    const result = recoveryPublic(next);
-    const receipted = this.withRecoveryReceipt(next, actionContext, result);
+    const advanced = {
+      ...next,
+      action_fence: await this.nextRecoveryActionFence(record.action_fence),
+    };
+    const result = recoveryPublic(advanced);
+    const receipted = this.withRecoveryReceipt(
+      advanced,
+      actionContext,
+      result,
+    );
     puts.push([REALM_EMAIL_ALIAS_RECOVERY_KEY, receipted]);
     await this.localApply(puts, deletes, apply);
     await this.afterRecoveryAction(result);
@@ -1259,8 +1341,13 @@ export class RealmEmailAliasJournalRuntime {
       record,
     );
     if (actionContext.replay) return actionContext.replay;
-    if (["sealed", "failed"].includes(record.phase)) {
-      return recoveryPublic(record);
+    if (record.phase === "sealed") {
+      fail("realm email alias recovery target is permanently sealed",
+        "realm_email_alias_recovery_target_sealed");
+    }
+    if (record.phase === "failed") {
+      fail("realm email alias recovery verify is not allowed in this phase",
+        "realm_email_alias_recovery_action_not_allowed");
     }
     if (!["replayed", "rebuild"].includes(record.phase)) {
       fail("realm email alias recovery replay is incomplete",
@@ -1304,7 +1391,9 @@ export class RealmEmailAliasJournalRuntime {
       }
     } catch (error) {
       const converted = journalError(error);
-      await this.failRecovery(record, converted, apply, actionContext);
+      if (converted.code !== "realm_email_alias_journal_unavailable") {
+        await this.failRecovery(record, converted, apply, actionContext);
+      }
       throw converted;
     }
 
@@ -1324,8 +1413,16 @@ export class RealmEmailAliasJournalRuntime {
         ),
         updated_at: this.now().toISOString(),
       };
-      const result = recoveryPublic(next);
-      const receipted = this.withRecoveryReceipt(next, actionContext, result);
+      const advanced = {
+        ...next,
+        action_fence: await this.nextRecoveryActionFence(record.action_fence),
+      };
+      const result = recoveryPublic(advanced);
+      const receipted = this.withRecoveryReceipt(
+        advanced,
+        actionContext,
+        result,
+      );
       await this.localApply([
         ...page,
         [REALM_EMAIL_ALIAS_RECOVERY_KEY, receipted],
@@ -1347,6 +1444,7 @@ export class RealmEmailAliasJournalRuntime {
       ...record,
       phase: "sealed",
       derived_keys: expectedDerived.size,
+      action_fence: await this.nextRecoveryActionFence(record.action_fence),
       sealed_at: now,
       updated_at: now,
     };

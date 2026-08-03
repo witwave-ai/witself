@@ -927,6 +927,12 @@ export class DurableRealmEmailAliasRegistry {
         ...(dependencies.afterJournalAppend
           ? { afterJournalAppend: dependencies.afterJournalAppend }
           : {}),
+        ...(dependencies.newRecoveryActionFence
+          ? { newRecoveryActionFence: dependencies.newRecoveryActionFence }
+          : {}),
+        ...(dependencies.afterRecoveryAction
+          ? { afterRecoveryAction: dependencies.afterRecoveryAction }
+          : {}),
       },
     );
   }
@@ -1190,6 +1196,8 @@ export class DurableRealmEmailAliasRegistry {
         "realm_email_alias_recovery_checkpoint_invalid",
         "realm_email_alias_recovery_collision",
         "realm_email_alias_recovery_digest_mismatch",
+        "realm_email_alias_recovery_action_fence_mismatch",
+        "realm_email_alias_recovery_action_not_allowed",
         "realm_email_alias_recovery_idempotency_conflict",
         "realm_email_alias_recovery_incomplete",
         "realm_email_alias_recovery_invariant_failed",
@@ -1197,6 +1205,7 @@ export class DurableRealmEmailAliasRegistry {
         "realm_email_alias_recovery_target_not_empty",
         "realm_email_alias_recovery_target_sealed",
         "realm_email_alias_recovery_tombstone_resurrection",
+        "realm_email_alias_recovery_upgrade_required",
       ]);
       const journalBadRequestCodes = new Set([
         "realm_email_alias_journal_maintenance_invalid",

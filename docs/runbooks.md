@@ -516,9 +516,18 @@ jq -nc \
     "$RECOVERY_API" | jq .
 ```
 
-Advance one journal entry at a time. A retry of one failed call must reuse that
-step's key; after a successful incomplete response, use a fresh key for the
-next step.
+The start response and every later status response expose the current opaque
+`action_fence` as 64 lowercase hexadecimal characters. Drive the recovery from
+one operator and issue only one action at a time. Each request must carry the
+current fence; every successfully persisted action returns a different fence.
+A 409 fence mismatch means the supplied fence is stale and nothing changed.
+
+Advance one journal entry at a time. Preserve each generated request body
+until its response is known. If the connection drops or the acknowledgement is
+otherwise ambiguous, retry that byte-equivalent body before reading a newer
+status or issuing another action. Only the immediately preceding identical
+action can replay its durable result. The idempotency-key label is part of that
+fenced request rather than a forever-reserved global key.
 
 ```sh
 STEP=1
@@ -530,40 +539,76 @@ while :; do
   jq . <<<"$STATUS"
   jq -e '.failed == true' <<<"$STATUS" >/dev/null && break
   jq -e '.phase != "replay"' <<<"$STATUS" >/dev/null && break
+  ACTION_FENCE="$(jq -er \
+    '.action_fence | select(type == "string" and test("^[0-9a-f]{64}$"))' \
+    <<<"$STATUS")" || break
   ADVANCE_KEY="${RECOVERY_ID}-advance-${STEP}"
-  jq -nc --arg key "$ADVANCE_KEY" '{idempotency_key:$key}' |
-    curl --fail-with-body --silent --show-error \
+  ADVANCE_BODY="$(jq -nc \
+    --arg key "$ADVANCE_KEY" --arg fence "$ACTION_FENCE" \
+    '{idempotency_key:$key,expected_action_fence:$fence}')"
+  RESULT="$(curl --fail-with-body --silent --show-error \
       -H "$ADMIN_AUTH" \
       -H "$RECOVERY_AUTH" \
       -H 'Content-Type: application/json' \
-      --data-binary @- \
-      "$RECOVERY_API/$RECOVERY_ID:advance" |
-    jq . || break
+      --data-binary "$ADVANCE_BODY" \
+      "$RECOVERY_API/$RECOVERY_ID:advance")" || break
+  jq . <<<"$RESULT"
+  NEXT_ACTION_FENCE="$(jq -er \
+    '.action_fence | select(type == "string" and test("^[0-9a-f]{64}$"))' \
+    <<<"$RESULT")" || break
+  test "$NEXT_ACTION_FENCE" != "$ACTION_FENCE" || break
   STEP=$((STEP + 1))
 done
 ```
 
-Then repeat verification with a fresh key per successful page until
-`sealed=true`. Verification rebuilds derived state in bounded pages and checks
-the complete authority digest and exact checkpoint fences.
+If `curl` exits without an authoritative HTTP response, do not regenerate
+`ADVANCE_BODY`; retry exactly that saved body. A stored success returns its
+already-rotated fence. A persisted deterministic failure likewise occupies the
+immediate replay slot; its identical retry returns the same failure. An R2
+unavailable error before local persistence leaves the fence unchanged.
+
+Then repeat verification one page at a time until `sealed=true`. Verification
+rebuilds derived state in bounded pages and checks the complete authority
+digest and exact checkpoint fences. Apply the same lost-ack rule to
+`VERIFY_BODY`.
 
 ```sh
 STEP=1
 while :; do
+  STATUS="$(curl --fail-with-body --silent --show-error \
+    -H "$ADMIN_AUTH" \
+    -H "$RECOVERY_AUTH" \
+    "$RECOVERY_API/$RECOVERY_ID")" || break
+  jq . <<<"$STATUS"
+  jq -e '.failed == true' <<<"$STATUS" >/dev/null && break
+  jq -e '.sealed == true' <<<"$STATUS" >/dev/null && break
+  ACTION_FENCE="$(jq -er \
+    '.action_fence | select(type == "string" and test("^[0-9a-f]{64}$"))' \
+    <<<"$STATUS")" || break
   VERIFY_KEY="${RECOVERY_ID}-verify-${STEP}"
-  RESULT="$(jq -nc --arg key "$VERIFY_KEY" '{idempotency_key:$key}' |
-    curl --fail-with-body --silent --show-error \
+  VERIFY_BODY="$(jq -nc \
+    --arg key "$VERIFY_KEY" --arg fence "$ACTION_FENCE" \
+    '{idempotency_key:$key,expected_action_fence:$fence}')"
+  RESULT="$(curl --fail-with-body --silent --show-error \
       -H "$ADMIN_AUTH" \
       -H "$RECOVERY_AUTH" \
       -H 'Content-Type: application/json' \
-      --data-binary @- \
+      --data-binary "$VERIFY_BODY" \
       "$RECOVERY_API/$RECOVERY_ID:verify")" || break
   jq . <<<"$RESULT"
   jq -e '.failed == true' <<<"$RESULT" >/dev/null && break
+  NEXT_ACTION_FENCE="$(jq -er \
+    '.action_fence | select(type == "string" and test("^[0-9a-f]{64}$"))' \
+    <<<"$RESULT")" || break
+  test "$NEXT_ACTION_FENCE" != "$ACTION_FENCE" || break
   jq -e '.sealed == true' <<<"$RESULT" >/dev/null && break
   STEP=$((STEP + 1))
 done
 ```
+
+A legacy recovery whose status reports `action_fence: null` is readable for
+diagnosis but cannot be advanced or verified; the action routes return 409.
+Start a new recovery id rather than trying to upgrade that target in place.
 
 Stop on any `failed`, `forked`, digest mismatch, gap, unexpected collision, or
 nonempty-target response. Preserve the active object and all gates. A sealed

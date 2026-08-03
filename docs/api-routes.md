@@ -910,7 +910,14 @@ audit events; read-only recall does neither:
   sequence/hash. It can target only the empty named object
   `recovery:<recovery_id>`. `:advance` replays one journal entry per call;
   repeated `:verify` calls rebuild derived state in bounded pages and finally
-  seal the verified target. These routes never select the active object or
+  seal the verified target. Recovery status exposes an opaque 64-lowercase-hex
+  `action_fence`; every action body requires that value as
+  `expected_action_fence` with an idempotency key. Persisted actions rotate the
+  fence. Calls must be serial, and only a byte-equivalent retry of the immediate
+  last action replays after a lost acknowledgement. Stale fences return 409
+  without mutation; an idempotency-key label is fence-scoped rather than
+  globally reserved forever. Legacy v1 targets remain status-readable with a
+  null fence but refuse actions. These routes never select the active object or
   perform cutover.
 - The cell projection endpoint accepts only the account cell's provision token
   and an exact `era_` claim fence, domain, label, state, and monotonically

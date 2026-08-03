@@ -1347,11 +1347,35 @@ The target is always `recovery:<recovery_id>` and must be empty. It may not be
 the fixed active authority object, `global`. Recovery status and
 action results expose only `recovery_id`, source/expected/replayed heads,
 `phase`, authority/derived key counts, state digest, `sealed`, `failed`, a
-value-free failure code, and lifecycle timestamps. Call `:advance` with a fresh
-idempotency key for each bounded journal step until phase `replayed`; call
-`:verify` with a fresh key for each bounded derived rebuild step until
-`sealed=true`. Reusing one key replays that exact step and cannot advance it
-again.
+value-free failure code, lifecycle timestamps, and `action_fence`. The fence is
+an opaque 256-bit value encoded as exactly 64 lowercase hexadecimal characters.
+Use the current value in every action request:
+
+```json
+{
+  "idempotency_key": "rear_aaaaaaaaaaaaaaaa-advance-1",
+  "expected_action_fence": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+}
+```
+
+Drive one action at a time. Call `:advance` for each bounded journal step until
+phase `replayed`; then call `:verify` for each bounded derived rebuild step
+until `sealed=true`. Every successfully persisted action, including the final
+seal, atomically stores and returns a fresh `action_fence`. A stale or
+nonmatching fence returns 409 without mutation.
+
+For an ambiguous or lost response, retry the byte-equivalent request: same
+route, actor, recovery id, idempotency key, and expected fence. Only the
+immediately preceding identical `last_action` may replay its stored result or
+error. After any newer action persists, the old request is stale and returns
+409. The idempotency-key text is scoped by the fenced request, not reserved
+forever; using that text with a later current fence is a new request rather than
+a replay. Keep calls strictly serial so two operators cannot race one fence.
+
+Legacy `witself.realm-email-alias-recovery-local.v1` records remain readable by
+the status route and report `action_fence: null`, but `:advance` and `:verify`
+refuse them with 409. Start a new recovery rather than attempting an in-place
+legacy continuation.
 
 The final target is sealed, not active. No response contains or triggers a
 binding change, registry-object selection, delivery gate change, or automatic

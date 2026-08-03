@@ -221,8 +221,12 @@ export async function handleRealmEmailAliasRecoveryAdminRequest(
     } catch (error) {
       return errorResponse(error.message, error.status ?? 400);
     }
-    if (!IDEMPOTENCY_KEY_PATTERN.test(body?.idempotency_key ?? "")) {
-      return errorResponse("idempotency_key is required", 400);
+    if (!IDEMPOTENCY_KEY_PATTERN.test(body?.idempotency_key ?? "") ||
+        !SHA256_PATTERN.test(body?.expected_action_fence ?? "")) {
+      return errorResponse(
+        "idempotency_key and expected_action_fence are required",
+        400,
+      );
     }
     return callRegistry(
       env,
@@ -232,6 +236,7 @@ export async function handleRealmEmailAliasRecoveryAdminRequest(
         actor,
         recovery_id: action[1],
         idempotency_key: body.idempotency_key,
+        expected_action_fence: body.expected_action_fence,
       },
     );
   }

@@ -21,6 +21,8 @@ class Storage {
   constructor(entries = []) {
     this.values = new Map(entries.map(([key, value]) =>
       [key, structuredClone(value)]));
+    this.failLists = 0;
+    this.lists = 0;
   }
   async get(key) {
     const value = this.values.get(key);
@@ -29,6 +31,11 @@ class Storage {
   async put(key, value) { this.values.set(key, structuredClone(value)); }
   async delete(key) { this.values.delete(key); }
   async list(options = {}) {
+    this.lists++;
+    if (this.failLists > 0) {
+      this.failLists--;
+      throw new Error("durable storage unavailable");
+    }
     let rows = [...this.values]
       .filter(([key]) => options.prefix === undefined ||
         key.startsWith(options.prefix))
@@ -55,6 +62,9 @@ class Bucket {
   constructor() {
     this.values = new Map();
     this.fail = false;
+    this.failBodies = 0;
+    this.failGets = 0;
+    this.gets = 0;
     this.puts = 0;
   }
   async put(key, value) {
@@ -65,9 +75,22 @@ class Bucket {
     return { key };
   }
   async get(key) {
+    this.gets++;
+    if (this.failGets > 0) {
+      this.failGets--;
+      throw new Error("R2 unavailable");
+    }
     const bytes = this.values.get(key);
     if (!bytes) return null;
-    return { arrayBuffer: async () => bytes.slice().buffer };
+    return {
+      arrayBuffer: async () => {
+        if (this.failBodies > 0) {
+          this.failBodies--;
+          throw new Error("R2 body stream unavailable");
+        }
+        return bytes.slice().buffer;
+      },
+    };
   }
 }
 
@@ -121,6 +144,16 @@ function recoveryInput(expectedHead, idempotencyKey = "recovery-start") {
   };
 }
 
+function recoveryAction(status, idempotencyKey, fields = {}) {
+  return {
+    actor: { kind: "platform_admin", id: "adm_test" },
+    recovery_id: RECOVERY,
+    idempotency_key: idempotencyKey,
+    expected_action_fence: status.action_fence,
+    ...fields,
+  };
+}
+
 function fixture({
   required = true,
   entries = [],
@@ -137,8 +170,11 @@ function fixture({
     ...external,
   };
   let tick = 0;
+  let recoveryFence = 0;
   const runtime = new RealmEmailAliasJournalRuntime(storage, env, {
     now: () => new Date(Date.UTC(2026, 7, 2, 0, 0, tick++)),
+    newRecoveryActionFence: () =>
+      (++recoveryFence).toString(16).padStart(64, "0"),
     ...dependencies,
   });
   const apply = async (puts, deletes) => storage.transaction(async (tx) => {
@@ -256,6 +292,133 @@ test("bootstrap freezes an existing authority and survives the R2 crash window e
   assert.equal(head.sequence, 2);
   assert.equal(bucket.values.size, 2);
   assert.deepEqual(bucket.values.values().next().value, pendingBytes);
+});
+
+test("journal status exposes only bounded value-free maintenance progress", async () => {
+  let crash = true;
+  const privateMarker = "private-authority-value-must-not-escape";
+  const { storage, runtime, apply } = fixture({
+    entries: authorityFixture([["plan-fence:acct_private", {
+      account_id: "acct_private",
+      marker: privateMarker,
+    }]]),
+    dependencies: {
+      afterJournalAppend: () => {
+        if (crash) {
+          crash = false;
+          throw new Error("simulated process death after R2 append");
+        }
+      },
+    },
+  });
+  const input = maintenanceInput("bootstrap-status-sanitized");
+  await assert.rejects(
+    runtime.bootstrap(input, apply),
+    (error) => error.code === "realm_email_alias_journal_unavailable",
+  );
+
+  const stored = await storage.get(REALM_EMAIL_ALIAS_JOURNAL_BOOTSTRAP_KEY);
+  assert.ok(stored.pending?.entry?.after_image);
+  assert.equal(stored.actor.id, input.actor.id);
+  assert.equal(stored.reason, input.reason);
+  assert.equal(stored.idempotency_key, input.idempotency_key);
+  assert.notEqual(stored.cursor, undefined);
+
+  const status = await runtime.status();
+  assert.deepEqual(Object.keys(status.bootstrap).sort(), [
+    "authority_keys",
+    "complete",
+    "frozen",
+    "head",
+    "kind",
+    "pending",
+    "phase",
+    "scanned_keys",
+  ]);
+  assert.deepEqual(Object.keys(status.bootstrap.head).sort(), [
+    "audit_sequence",
+    "authority_epoch",
+    "hash",
+    "registry_revision",
+    "schema_version",
+    "sequence",
+    "stream_id",
+    "updated_at",
+  ]);
+  assert.equal(status.bootstrap.kind, "bootstrap");
+  assert.equal(status.bootstrap.complete, false);
+  assert.equal(status.bootstrap.frozen, true);
+  assert.equal(status.bootstrap.pending, true);
+
+  const rendered = JSON.stringify(status);
+  for (const forbidden of [
+    "actor",
+    "reason",
+    "idempotency_key",
+    "request_fingerprint",
+    "cursor",
+    "rows_hash",
+    "after_image",
+    privateMarker,
+  ]) {
+    assert.equal(rendered.includes(forbidden), false, forbidden);
+  }
+});
+
+test("journal status sanitizes checkpoint cursors and clears completed progress", async () => {
+  const accountFences = Array.from({ length: 110 }, (_, index) => {
+    const accountID = `acct_status_${String(index).padStart(3, "0")}`;
+    return [`plan-fence:${accountID}`, { account_id: accountID }];
+  });
+  const { storage, runtime, apply } = fixture({
+    entries: authorityFixture(accountFences),
+  });
+  await finishMaintenance(
+    runtime,
+    maintenanceInput("bootstrap-before-checkpoint-status"),
+    apply,
+  );
+
+  const input = maintenanceInput("checkpoint-status-sanitized");
+  const first = await runtime.checkpoint(input, apply);
+  assert.equal(first.complete, false);
+  const stored = await storage.get(REALM_EMAIL_ALIAS_JOURNAL_BOOTSTRAP_KEY);
+  assert.equal(stored.kind, "checkpoint");
+  assert.equal(typeof stored.cursor, "string");
+  assert.ok(stored.source_head);
+
+  const active = await runtime.status();
+  assert.deepEqual(Object.keys(active.bootstrap).sort(), [
+    "authority_keys",
+    "complete",
+    "frozen",
+    "head",
+    "kind",
+    "pending",
+    "phase",
+    "scanned_keys",
+  ]);
+  assert.equal(active.bootstrap.kind, "checkpoint");
+  assert.equal(active.bootstrap.complete, false);
+  assert.equal(active.bootstrap.frozen, true);
+  const rendered = JSON.stringify(active);
+  for (const forbidden of [
+    "actor",
+    "reason",
+    "idempotency_key",
+    "request_fingerprint",
+    "source_head",
+    "cursor",
+    "rows_hash",
+    stored.cursor,
+  ]) {
+    assert.equal(rendered.includes(forbidden), false, forbidden);
+  }
+
+  const completed = await finishMaintenance(runtime, input, apply, "checkpoint");
+  const final = await runtime.status();
+  assert.equal(final.bootstrap, null);
+  assert.deepEqual(final.head, completed.head);
 });
 
 test("checkpoint freezes the exact active head and records a complete digest", async () => {
@@ -386,8 +549,8 @@ test("recovery rejects a nonempty or active target before reading R2", async () 
   assert.equal(bucket.puts, 0);
 });
 
-async function bootstrapSource() {
-  const source = fixture({ entries: authorityFixture() });
+async function bootstrapSource(extra = []) {
+  const source = fixture({ entries: authorityFixture(extra) });
   const complete = await finishMaintenance(
     source.runtime,
     maintenanceInput("source-bootstrap"),
@@ -406,29 +569,30 @@ test("bounded recovery replays, rebuilds, and permanently seals without external
     },
   };
   const target = fixture({ bucket: source.bucket, external });
-  await target.runtime.startRecovery(recoveryInput({
+  let status = await target.runtime.startRecovery(recoveryInput({
     sequence: source.head.sequence,
     hash: source.head.hash,
   }), target.apply);
-  let status;
+  const fences = [status.action_fence];
   for (let attempt = 0; attempt < 20; attempt += 1) {
-    status = await target.runtime.advanceRecovery({
-      actor: { kind: "platform_admin", id: "adm_test" },
-      recovery_id: RECOVERY,
-      idempotency_key: `advance-${attempt}`,
-    }, target.apply);
+    status = await target.runtime.advanceRecovery(
+      recoveryAction(status, `advance-${attempt}`),
+      target.apply,
+    );
+    fences.push(status.action_fence);
     if (status.phase === "replayed") break;
   }
   assert.equal(status.phase, "replayed");
   for (let attempt = 0; attempt < 20; attempt += 1) {
-    status = await target.runtime.verifyRecovery({
-      actor: { kind: "platform_admin", id: "adm_test" },
-      recovery_id: RECOVERY,
-      idempotency_key: `verify-${attempt}`,
-    }, target.apply);
+    status = await target.runtime.verifyRecovery(
+      recoveryAction(status, `verify-${attempt}`),
+      target.apply,
+    );
+    fences.push(status.action_fence);
     if (status.sealed) break;
   }
   assert.equal(status.sealed, true);
+  assert.equal(new Set(fences).size, fences.length);
   assert.equal(status.state_digest, (await target.runtime.recoveryStatus()).state_digest);
   assert.equal(externalCalls, 0);
   assert.ok(await target.storage.get(REALM_EMAIL_ALIAS_RECOVERY_KEY));
@@ -438,7 +602,7 @@ test("bounded recovery replays, rebuilds, and permanently seals without external
   );
 });
 
-test("lost recovery action acknowledgements replay exactly and changed reuse conflicts", async () => {
+test("lost recovery action acknowledgements replay exactly within one action fence", async () => {
   const source = await bootstrapSource();
   let crashAction = "advance";
   const target = fixture({
@@ -456,21 +620,18 @@ test("lost recovery action acknowledgements replay exactly and changed reuse con
       },
     },
   });
-  await target.runtime.startRecovery(recoveryInput({
+  const started = await target.runtime.startRecovery(recoveryInput({
     sequence: source.head.sequence,
     hash: source.head.hash,
   }), target.apply);
-  const advance = {
-    actor: { kind: "platform_admin", id: "adm_test" },
-    recovery_id: RECOVERY,
-    idempotency_key: "lost-advance",
-  };
+  const advance = recoveryAction(started, "lost-advance");
   await assert.rejects(
     target.runtime.advanceRecovery(advance, target.apply),
     /lost advance acknowledgement/,
   );
   const afterLostAdvance = await target.runtime.recoveryStatus();
   assert.equal(afterLostAdvance.replay_head.sequence, 1);
+  assert.notEqual(afterLostAdvance.action_fence, started.action_fence);
   assert.deepEqual(
     await target.runtime.advanceRecovery(advance, target.apply),
     afterLostAdvance,
@@ -482,24 +643,44 @@ test("lost recovery action acknowledgements replay exactly and changed reuse con
     }, target.apply),
     (error) => error.code === "realm_email_alias_recovery_idempotency_conflict",
   );
+  await assert.rejects(
+    target.runtime.verifyRecovery(advance, target.apply),
+    (error) => error.code === "realm_email_alias_recovery_idempotency_conflict",
+  );
 
-  const replayed = await target.runtime.advanceRecovery({
-    ...advance,
-    idempotency_key: "finish-replay",
-  }, target.apply);
+  const replayed = await target.runtime.advanceRecovery(
+    recoveryAction(afterLostAdvance, "lost-advance"),
+    target.apply,
+  );
   assert.equal(replayed.phase, "replayed");
+  assert.notEqual(replayed.action_fence, afterLostAdvance.action_fence);
+  const beforeStale = await target.runtime.recoveryStatus();
+  const readsBeforeStale = target.bucket.gets;
+  await assert.rejects(
+    target.runtime.advanceRecovery(advance, target.apply),
+    (error) =>
+      error.code === "realm_email_alias_recovery_action_fence_mismatch",
+  );
+  assert.deepEqual(await target.runtime.recoveryStatus(), beforeStale);
+  assert.equal(target.bucket.gets, readsBeforeStale);
+  await assert.rejects(
+    target.runtime.advanceRecovery(
+      recoveryAction(replayed, "advance-after-replay"),
+      target.apply,
+    ),
+    (error) => error.code === "realm_email_alias_recovery_action_not_allowed",
+  );
+  assert.deepEqual(await target.runtime.recoveryStatus(), beforeStale);
+
   crashAction = "verify";
-  const verify = {
-    actor: { kind: "platform_admin", id: "adm_test" },
-    recovery_id: RECOVERY,
-    idempotency_key: "lost-verify",
-  };
+  const verify = recoveryAction(replayed, "lost-verify");
   await assert.rejects(
     target.runtime.verifyRecovery(verify, target.apply),
     /lost verify acknowledgement/,
   );
   const afterLostVerify = await target.runtime.recoveryStatus();
   assert.equal(afterLostVerify.sealed, true);
+  assert.notEqual(afterLostVerify.action_fence, replayed.action_fence);
   assert.deepEqual(
     await target.runtime.verifyRecovery(verify, target.apply),
     afterLostVerify,
@@ -512,11 +693,282 @@ test("lost recovery action acknowledgements replay exactly and changed reuse con
     (error) => error.code === "realm_email_alias_recovery_idempotency_conflict",
   );
 
-  const receipt = (await target.storage.get(REALM_EMAIL_ALIAS_RECOVERY_KEY))
-    .last_action;
+  await assert.rejects(
+    target.runtime.verifyRecovery(
+      recoveryAction(afterLostVerify, "lost-verify"),
+      target.apply,
+    ),
+    (error) => error.code === "realm_email_alias_recovery_target_sealed",
+  );
+  assert.deepEqual(await target.runtime.recoveryStatus(), afterLostVerify);
+
+  const stored = await target.storage.get(REALM_EMAIL_ALIAS_RECOVERY_KEY);
+  const receipt = stored.last_action;
   assert.equal(receipt.action, "verify");
+  assert.equal(receipt.request_fence, replayed.action_fence);
   assert.equal(receipt.before.phase, "replayed");
+  assert.equal(receipt.before.action_fence, replayed.action_fence);
   assert.equal(receipt.after.phase, "sealed");
+  assert.equal(receipt.after.action_fence, afterLostVerify.action_fence);
+  assert.equal(receipt.result.action_fence, afterLostVerify.action_fence);
+  assert.equal(stored.action_fence, afterLostVerify.action_fence);
+});
+
+test("stale recovery fences cannot replay non-adjacent actions across bounded pages", async () => {
+  const intents = Array.from({ length: 205 }, (_, index) => {
+    const accountID = `acct_page_${String(index).padStart(3, "0")}`;
+    return [`plan-intent:${accountID}`, {
+      account_id: accountID,
+      retry_at_ms: Date.UTC(2026, 7, 2),
+    }];
+  });
+  const source = await bootstrapSource(intents);
+  assert.ok(source.head.sequence >= 4);
+  let issuedFences = 0;
+  const target = fixture({
+    bucket: source.bucket,
+    dependencies: {
+      newRecoveryActionFence: () =>
+        (++issuedFences).toString(16).padStart(64, "0"),
+    },
+  });
+  let status = await target.runtime.startRecovery(recoveryInput({
+    sequence: source.head.sequence,
+    hash: source.head.hash,
+  }), target.apply);
+  let successfulActions = 0;
+
+  const firstAdvance = recoveryAction(status, "advance-a");
+  status = await target.runtime.advanceRecovery(firstAdvance, target.apply);
+  successfulActions++;
+  status = await target.runtime.advanceRecovery(
+    recoveryAction(status, "advance-b"),
+    target.apply,
+  );
+  successfulActions++;
+  const beforeStaleAdvance = structuredClone(target.storage.values);
+  const readsBeforeStaleAdvance = target.bucket.gets;
+  await assert.rejects(
+    target.runtime.advanceRecovery(firstAdvance, target.apply),
+    (error) =>
+      error.code === "realm_email_alias_recovery_action_fence_mismatch",
+  );
+  assert.deepEqual(target.storage.values, beforeStaleAdvance);
+  assert.equal(target.bucket.gets, readsBeforeStaleAdvance);
+
+  while (status.phase === "replay") {
+    status = await target.runtime.advanceRecovery(
+      recoveryAction(status, `advance-${successfulActions}`),
+      target.apply,
+    );
+    successfulActions++;
+  }
+  assert.equal(status.phase, "replayed");
+
+  const firstVerify = recoveryAction(status, "verify-a");
+  status = await target.runtime.verifyRecovery(firstVerify, target.apply);
+  successfulActions++;
+  assert.equal(status.phase, "rebuild");
+  assert.equal(status.derived_keys, 100);
+  status = await target.runtime.verifyRecovery(
+    recoveryAction(status, "verify-b"),
+    target.apply,
+  );
+  successfulActions++;
+  assert.equal(status.derived_keys, 200);
+  const beforeStaleVerify = structuredClone(target.storage.values);
+  const listsBeforeStaleVerify = target.storage.lists;
+  await assert.rejects(
+    target.runtime.verifyRecovery(firstVerify, target.apply),
+    (error) =>
+      error.code === "realm_email_alias_recovery_action_fence_mismatch",
+  );
+  assert.deepEqual(target.storage.values, beforeStaleVerify);
+  assert.equal(target.storage.lists, listsBeforeStaleVerify);
+
+  while (!status.sealed) {
+    status = await target.runtime.verifyRecovery(
+      recoveryAction(status, `verify-${successfulActions}`),
+      target.apply,
+    );
+    successfulActions++;
+  }
+  assert.equal(status.derived_keys, 205);
+  assert.equal(issuedFences, successfulActions + 1);
+  const stored = await target.storage.get(REALM_EMAIL_ALIAS_RECOVERY_KEY);
+  assert.equal(stored.action_fence, status.action_fence);
+  assert.equal(stored.last_action.result.action_fence, status.action_fence);
+});
+
+test("transient R2 recovery failure preserves the fence and remains retryable", async () => {
+  const source = await bootstrapSource();
+  const target = fixture({ bucket: source.bucket });
+  const started = await target.runtime.startRecovery(recoveryInput({
+    sequence: source.head.sequence,
+    hash: source.head.hash,
+  }), target.apply);
+  const advance = recoveryAction(started, "transient-r2");
+  const before = await target.storage.get(REALM_EMAIL_ALIAS_RECOVERY_KEY);
+  target.bucket.failGets = 1;
+  await assert.rejects(
+    target.runtime.advanceRecovery(advance, target.apply),
+    (error) => error.code === "realm_email_alias_journal_unavailable",
+  );
+  assert.deepEqual(
+    await target.storage.get(REALM_EMAIL_ALIAS_RECOVERY_KEY),
+    before,
+  );
+  const retried = await target.runtime.advanceRecovery(advance, target.apply);
+  assert.equal(retried.replay_head.sequence, 1);
+  assert.notEqual(retried.action_fence, started.action_fence);
+});
+
+test("transient R2 body read preserves the recovery fence and receipt", async () => {
+  const source = await bootstrapSource();
+  const target = fixture({ bucket: source.bucket });
+  const started = await target.runtime.startRecovery(recoveryInput({
+    sequence: source.head.sequence,
+    hash: source.head.hash,
+  }), target.apply);
+  const advance = recoveryAction(started, "transient-r2-body");
+  const before = await target.storage.get(REALM_EMAIL_ALIAS_RECOVERY_KEY);
+  target.bucket.failBodies = 1;
+  await assert.rejects(
+    target.runtime.advanceRecovery(advance, target.apply),
+    (error) => error.code === "realm_email_alias_journal_unavailable",
+  );
+  assert.deepEqual(
+    await target.storage.get(REALM_EMAIL_ALIAS_RECOVERY_KEY),
+    before,
+  );
+  const retried = await target.runtime.advanceRecovery(advance, target.apply);
+  assert.equal(retried.replay_head.sequence, 1);
+  assert.notEqual(retried.action_fence, started.action_fence);
+});
+
+test("transient recovery storage read preserves the verify fence and receipt", async () => {
+  const source = await bootstrapSource();
+  const target = fixture({ bucket: source.bucket });
+  let status = await target.runtime.startRecovery(recoveryInput({
+    sequence: source.head.sequence,
+    hash: source.head.hash,
+  }), target.apply);
+  while (status.phase === "replay") {
+    status = await target.runtime.advanceRecovery(
+      recoveryAction(status, `storage-replay-${status.replay_head.sequence}`),
+      target.apply,
+    );
+  }
+  const verify = recoveryAction(status, "transient-storage-verify");
+  const before = await target.storage.get(REALM_EMAIL_ALIAS_RECOVERY_KEY);
+  target.storage.failLists = 1;
+  await assert.rejects(
+    target.runtime.verifyRecovery(verify, target.apply),
+    (error) => error.code === "realm_email_alias_journal_unavailable",
+  );
+  assert.deepEqual(
+    await target.storage.get(REALM_EMAIL_ALIAS_RECOVERY_KEY),
+    before,
+  );
+  const retried = await target.runtime.verifyRecovery(verify, target.apply);
+  assert.equal(retried.sealed, true);
+  assert.notEqual(retried.action_fence, status.action_fence);
+});
+
+test("legacy recovery state is readable but action-refused before R2 access", async () => {
+  const source = await bootstrapSource();
+  const target = fixture({ bucket: source.bucket });
+  await target.runtime.startRecovery(recoveryInput({
+    sequence: source.head.sequence,
+    hash: source.head.hash,
+  }), target.apply);
+  const legacy = await target.storage.get(REALM_EMAIL_ALIAS_RECOVERY_KEY);
+  legacy.schema_version = "witself.realm-email-alias-recovery-local.v1";
+  delete legacy.action_fence;
+  delete legacy.last_action;
+  target.storage.values.set(REALM_EMAIL_ALIAS_RECOVERY_KEY, legacy);
+
+  const status = await target.runtime.recoveryStatus();
+  assert.equal(status.recovery_id, RECOVERY);
+  assert.equal(status.action_fence, null);
+  const before = structuredClone(target.storage.values);
+  const readsBefore = target.bucket.gets;
+  await assert.rejects(
+    target.runtime.advanceRecovery({
+      actor: { kind: "platform_admin", id: "adm_test" },
+      recovery_id: RECOVERY,
+      idempotency_key: "legacy-refused",
+      expected_action_fence: "e".repeat(64),
+    }, target.apply),
+    (error) => error.code === "realm_email_alias_recovery_upgrade_required",
+  );
+  await assert.rejects(
+    target.runtime.verifyRecovery({
+      actor: { kind: "platform_admin", id: "adm_test" },
+      recovery_id: RECOVERY,
+      idempotency_key: "legacy-verify-refused",
+      expected_action_fence: "e".repeat(64),
+    }, target.apply),
+    (error) => error.code === "realm_email_alias_recovery_upgrade_required",
+  );
+  assert.deepEqual(target.storage.values, before);
+  assert.equal(target.bucket.gets, readsBefore);
+});
+
+test("malformed v2 recovery fence fails its invariant before R2 access", async () => {
+  const source = await bootstrapSource();
+  const target = fixture({ bucket: source.bucket });
+  await target.runtime.startRecovery(recoveryInput({
+    sequence: source.head.sequence,
+    hash: source.head.hash,
+  }), target.apply);
+  const malformed = await target.storage.get(REALM_EMAIL_ALIAS_RECOVERY_KEY);
+  delete malformed.action_fence;
+  target.storage.values.set(REALM_EMAIL_ALIAS_RECOVERY_KEY, malformed);
+  assert.equal((await target.runtime.recoveryStatus()).action_fence, null);
+
+  const before = structuredClone(target.storage.values);
+  const readsBefore = target.bucket.gets;
+  await assert.rejects(
+    target.runtime.advanceRecovery({
+      actor: { kind: "platform_admin", id: "adm_test" },
+      recovery_id: RECOVERY,
+      idempotency_key: "malformed-v2-refused",
+      expected_action_fence: "e".repeat(64),
+    }, target.apply),
+    (error) => error.code === "realm_email_alias_recovery_invariant_failed",
+  );
+  assert.deepEqual(target.storage.values, before);
+  assert.equal(target.bucket.gets, readsBefore);
+});
+
+test("action fence generation collision is bounded and cannot mutate recovery", async () => {
+  const source = await bootstrapSource();
+  let calls = 0;
+  const target = fixture({
+    bucket: source.bucket,
+    dependencies: {
+      newRecoveryActionFence: () => {
+        calls++;
+        return "a".repeat(64);
+      },
+    },
+  });
+  const started = await target.runtime.startRecovery(recoveryInput({
+    sequence: source.head.sequence,
+    hash: source.head.hash,
+  }), target.apply);
+  const before = structuredClone(target.storage.values);
+  await assert.rejects(
+    target.runtime.advanceRecovery(
+      recoveryAction(started, "fence-collision"),
+      target.apply,
+    ),
+    (error) =>
+      error.code === "realm_email_alias_recovery_action_fence_unavailable",
+  );
+  assert.equal(calls, 5);
+  assert.deepEqual(target.storage.values, before);
 });
 
 test("recovery permanently fences R2 sequence gaps and hash corruption", async () => {
@@ -533,22 +985,32 @@ test("recovery permanently fences R2 sequence gaps and hash corruption", async (
       source.bucket.values.set(firstKey, new TextEncoder().encode(JSON.stringify(entry)));
     }
     const target = fixture({ bucket: source.bucket });
-    await target.runtime.startRecovery(recoveryInput({
+    const started = await target.runtime.startRecovery(recoveryInput({
       sequence: source.head.sequence,
       hash: source.head.hash,
     }), target.apply);
+    const advance = recoveryAction(started, `advance-${mode}`);
+    const expectedCode = mode === "gap"
+      ? "realm_email_alias_journal_gap"
+      : "realm_email_alias_journal_hash_mismatch";
     await assert.rejects(
-      target.runtime.advanceRecovery({
-        actor: { kind: "platform_admin", id: "adm_test" },
-        recovery_id: RECOVERY,
-        idempotency_key: `advance-${mode}`,
-      }, target.apply),
-      (error) => mode === "gap"
-        ? error.code === "realm_email_alias_journal_gap"
-        : error.code === "realm_email_alias_journal_hash_mismatch",
+      target.runtime.advanceRecovery(advance, target.apply),
+      (error) => error.code === expectedCode,
     );
     const failed = await target.runtime.recoveryStatus();
     assert.equal(failed.failed, true);
+    assert.equal(failed.failure_code, expectedCode);
+    assert.notEqual(failed.action_fence, started.action_fence);
+    await assert.rejects(
+      target.runtime.advanceRecovery(advance, target.apply),
+      (error) => error.code === expectedCode,
+    );
+    assert.deepEqual(await target.runtime.recoveryStatus(), failed);
+    const stored = await target.storage.get(REALM_EMAIL_ALIAS_RECOVERY_KEY);
+    assert.equal(stored.last_action.request_fence, started.action_fence);
+    assert.equal(stored.last_action.after.action_fence, failed.action_fence);
+    assert.equal(stored.last_action.result.action_fence, failed.action_fence);
+    assert.equal(stored.last_action.error.code, expectedCode);
   }
 });
 
@@ -572,22 +1034,25 @@ test("recovery detects a validly hashed checkpoint with the wrong authority dige
   source.bucket.values.set(checkpointKey, conflicting.bytes);
 
   const target = fixture({ bucket: source.bucket });
-  await target.runtime.startRecovery(recoveryInput({
+  let status = await target.runtime.startRecovery(recoveryInput({
     sequence: conflicting.entry.sequence,
     hash: conflicting.entry.entry_hash,
   }), target.apply);
-  await target.runtime.advanceRecovery({
-    actor: { kind: "platform_admin", id: "adm_test" },
-    recovery_id: RECOVERY,
-    idempotency_key: "advance-digest-1",
-  }, target.apply);
+  status = await target.runtime.advanceRecovery(
+    recoveryAction(status, "advance-digest-1"),
+    target.apply,
+  );
+  const failing = recoveryAction(status, "advance-digest-2");
   await assert.rejects(
-    target.runtime.advanceRecovery({
-      actor: { kind: "platform_admin", id: "adm_test" },
-      recovery_id: RECOVERY,
-      idempotency_key: "advance-digest-2",
-    }, target.apply),
+    target.runtime.advanceRecovery(failing, target.apply),
     (error) => error.code === "realm_email_alias_recovery_digest_mismatch",
   );
-  assert.equal((await target.runtime.recoveryStatus()).failed, true);
+  const failed = await target.runtime.recoveryStatus();
+  assert.equal(failed.failed, true);
+  assert.notEqual(failed.action_fence, status.action_fence);
+  await assert.rejects(
+    target.runtime.advanceRecovery(failing, target.apply),
+    (error) => error.code === "realm_email_alias_recovery_digest_mismatch",
+  );
+  assert.deepEqual(await target.runtime.recoveryStatus(), failed);
 });
