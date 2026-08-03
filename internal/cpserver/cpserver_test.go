@@ -674,6 +674,7 @@ func TestAdminLimitOverrideValidation(t *testing.T) {
 		plans.StoredSecretLimit,
 		plans.AgentEmailMaxRawBytesLimit,
 		plans.AgentEmailAttachmentStorageBytesLimit,
+		plans.AgentEmailCustomDomainsPerAccountLimit,
 	} {
 		path := "/v1/admin/accounts/acct_1/limit-overrides/" + dimension
 		if status, _ := h.call(

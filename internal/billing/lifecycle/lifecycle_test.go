@@ -358,6 +358,7 @@ func TestFounderResourceLimitsCanBeExplicitlyUnlimited(t *testing.T) {
 		plans.AgentPerRealmLimit,
 		plans.StoredMemoryLimit,
 		plans.StoredFactLimit,
+		plans.AgentEmailCustomDomainsPerAccountLimit,
 	} {
 		if _, err := h.m.SetAccountLimitOverride(
 			ctx,
@@ -396,8 +397,8 @@ func TestFounderResourceLimitsCanBeExplicitlyUnlimited(t *testing.T) {
 	}
 
 	record := h.record(t, accountID)
-	if len(record.LimitOverrides) != 5 {
-		t.Fatalf("founder overrides = %v; want all five dimensions", record.LimitOverrides)
+	if len(record.LimitOverrides) != 6 {
+		t.Fatalf("founder overrides = %v; want all six dimensions", record.LimitOverrides)
 	}
 }
 

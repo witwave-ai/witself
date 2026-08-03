@@ -209,6 +209,10 @@ test("bridge path classifiers are exact", () => {
   ));
   assert.ok(matchAdminPolicyPath(
     "/v1/admin/accounts/acct_1/limit-overrides/" +
+      "agent_email_custom_domains_per_account",
+  ));
+  assert.ok(matchAdminPolicyPath(
+    "/v1/admin/accounts/acct_1/limit-overrides/" +
       "message_sent_per_agent_minute",
   ));
   assert.ok(matchAdminPolicyPath(
@@ -345,10 +349,11 @@ test("admin proxy replaces caller credentials and relays Go response", async () 
   assert.deepEqual(await responseJSON(response), { effective_days: 60 });
 });
 
-test("admin proxy routes both agent-email limit dimensions exactly", async () => {
+test("admin proxy routes agent-email storage and domain limits exactly", async () => {
   for (const dimension of [
     "agent_email_max_raw_bytes",
     "agent_email_attachment_storage_bytes",
+    "agent_email_custom_domains_per_account",
   ]) {
     const path = `/v1/admin/accounts/acct_1/limit-overrides/${dimension}`;
     let forwarded;

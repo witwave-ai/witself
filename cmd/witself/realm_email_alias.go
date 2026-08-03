@@ -30,7 +30,7 @@ func realmEmailAliasCmd(args []string) int {
 	}
 }
 
-func resolveRealmEmailAliasOperator(
+func resolveControlPlaneAccountOperator(
 	accountName, accountID, tokenFile string,
 ) (string, string, error) {
 	if strings.TrimSpace(tokenFile) != "" {
@@ -79,7 +79,7 @@ func realmEmailAliasRequest(args []string) int {
 			"usage: witself realm email-alias request --realm REALM_ID --alias ALIAS [--account NAME]")
 		return 2
 	}
-	resolvedAccountID, token, err := resolveRealmEmailAliasOperator(
+	resolvedAccountID, token, err := resolveControlPlaneAccountOperator(
 		*account, *accountID, *tokenFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
@@ -119,7 +119,7 @@ func realmEmailAliasList(args []string) int {
 			"usage: witself realm email-alias list --realm REALM_ID [--cursor CURSOR] [--account NAME]")
 		return 2
 	}
-	resolvedAccountID, token, err := resolveRealmEmailAliasOperator(
+	resolvedAccountID, token, err := resolveControlPlaneAccountOperator(
 		*account, *accountID, *tokenFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)

@@ -569,6 +569,80 @@ deliver arbitrary new aliases. The canonical inventory is the independent
 backfill path for realms that have never performed an alias operation, but it
 does no work while its default-off inventory gate is unset.
 
+**Organization-owned inbound domains (dark foundation, 2026-08-03).** A
+customer-owned domain is an account-level resource and never replaces either a
+permanent Realm ID address or a managed realm alias. Its future address shape
+remains `agent-name.realm-email-alias@customer-domain`; retaining the realm
+label avoids making one account-owned apex an ambiguous cross-realm namespace.
+
+The resolved plan feature is `agent_email_custom_domain` and its account-wide
+limit is `agent_email_custom_domains_per_account`. The Phase-B product target
+sets Personal and Professional to disabled with zero, Team to one, and
+Enterprise to feature-present but zero until an administrator applies the
+contracted account limit. A missing effective limit is explicit unlimited. The
+independent inbound `agent_email_receive` entitlement still controls whether
+any eventual route may deliver.
+
+The current control-plane implementation intentionally stops before ownership
+verification or provisioning. An authenticated account operator can submit and
+list requests only when the runtime-only
+`CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUESTS_ENABLED` value is exactly `true`. That
+gate is absent from committed release configuration and is independent from
+all five managed-domain canonical/alias gates. Request creation canonicalizes
+strict lowercase ASCII DNS names, rejects IDN/punycode, wildcards, IP/single-
+label/malformed input, and protects Witself/Witwave-operated roots plus every
+child domain. One global Durable Object owns the request and domain tombstone,
+so concurrent accounts cannot claim the same name.
+
+Creation returns one stable public DNS challenge:
+
+```text
+TXT _witself-verification.<customer-domain>
+    witself-domain-verification=aedv_<32-lowercase-base32-characters>
+```
+
+The challenge is generated once and remains byte-identical across exact
+idempotent replay, list, and administrator show. The only implemented states
+are `pending_verification`, `rejected`, and `retired`; there is deliberately no
+`verified`, `active`, or delivery state. Platform administrators can list,
+show, reject, retire, and audit requests. A pending request conservatively
+consumes the commercial domain allowance, and a separate plan-independent cap
+allows at most eight open requests per account. Rejected and retired records
+remain non-reusable tombstones until an explicit, proof-backed domain transfer
+and quarantine policy is implemented.
+
+Do not enable the request gate for customers in this phase. An unverified
+request deliberately takes a permanent tombstone; without proof and transfer
+governance, exposing creation would let one account squat on another
+organization's domain even though it could not receive mail there.
+
+The CLI surface ships with the dark foundation, so a later entitlement or gate
+change never requires reinstalling a client. While the request gate is absent,
+the request command returns the service's disabled response and list remains
+read-only:
+
+```sh
+witself email-domain request --domain agents.example.com
+witself email-domain list
+
+witself-admin email-domain requests list
+witself-admin email-domain requests show --request "$REQUEST_ID"
+witself-admin email-domain requests reject \
+  --request "$REQUEST_ID" --reason "Domain is not eligible"
+witself-admin email-domain requests retire \
+  --request "$REQUEST_ID" --reason "Customer withdrew the request"
+witself-admin email-domain audit
+```
+
+This dark slice performs no DNS lookup or write, Cloudflare zone or Email
+Routing mutation, MX activation, edge-directory publication, cell projection,
+mail acceptance, or outbound-domain configuration. Before the request gate can
+be enabled, follow-on work must add portable authority recovery, account
+move/archive/close reconciliation, verified ownership and re-verification,
+downgrade behavior, exact realm-label binding, cell/edge domain projections,
+and a separately reviewed receive canary. Managed-domain activation never
+implicitly enables this lifecycle.
+
 **Agent local part (settled).** The agent-name-to-local-part rule must handle
 arbitrary input — the API accepts any non-empty string as an agent name; only
 CLI local selectors enforce a charset. Sanitization is deterministic:

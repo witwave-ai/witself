@@ -42,6 +42,7 @@ const LIMIT_DIMENSION_PATTERN =
   "(?:realms|agents|agents_per_realm|stored_memory|stored_fact|stored_secret|" +
   "agent_email_max_raw_bytes|agent_email_attachment_storage_bytes|" +
   "agent_email_realm_aliases_per_realm|" +
+  "agent_email_custom_domains_per_account|" +
   "message_sent_per_agent_minute|message_delivered_per_realm_minute|" +
   "message_delivered_per_recipient_minute|" +
   "agent_email_received_per_sender_minute|" +

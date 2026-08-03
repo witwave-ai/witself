@@ -40,6 +40,12 @@ const (
 	// control-plane concerns. Cells trust the provision-token projection and
 	// enforce its state plus the separate inbound-email entitlement.
 	AgentEmailRealmAliasFeature = "agent_email_realm_alias"
+	// AgentEmailCustomDomainFeature allows an account to activate inbound agent
+	// email on organization-owned domains. The global claim, ownership proof,
+	// routing lifecycle, and count enforcement remain control-plane concerns.
+	// Cells trust only the applied route projection and continue to enforce the
+	// separate inbound-email entitlement.
+	AgentEmailCustomDomainFeature = "agent_email_custom_domain"
 
 	// RealmLimit caps live realms account-wide.
 	RealmLimit = "realms"
@@ -80,6 +86,12 @@ const (
 	// alias tombstones; existing aliases follow the control-plane downgrade
 	// grace. A missing key means unlimited, subject to the feature entitlement.
 	AgentEmailRealmAliasesPerRealmLimit = "agent_email_realm_aliases_per_realm"
+	// AgentEmailCustomDomainsPerAccountLimit caps active organization-owned
+	// inbound email domains account-wide at the global control-plane authority.
+	// Zero prevents activation; a missing key means unlimited, subject to the
+	// feature entitlement. Enterprise therefore carries an explicit zero until
+	// a contracted per-account override is applied.
+	AgentEmailCustomDomainsPerAccountLimit = "agent_email_custom_domains_per_account"
 	// MessageSentPerAgentMinuteLimit caps messages accepted from each sending
 	// agent under a rolling one-minute rate budget. A missing key means no
 	// commercial plan cap, but the service's defensive platform maximum still
@@ -333,6 +345,7 @@ func ValidateLimits(limits map[string]int64) error {
 			StoredMemoryLimit, StoredFactLimit, AgentEmailMaxRawBytesLimit,
 			AgentEmailAttachmentStorageBytesLimit,
 			AgentEmailRealmAliasesPerRealmLimit,
+			AgentEmailCustomDomainsPerAccountLimit,
 			MessageSentPerAgentMinuteLimit,
 			MessageDeliveredPerRealmMinuteLimit,
 			MessageDeliveredPerRecipientMinuteLimit,

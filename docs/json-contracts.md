@@ -1302,6 +1302,73 @@ membership and aggregates in bounded 100-claim pages; only the completed
 verification pass may restore `ready`. Later alarm re-arm failures fail the
 alarm invocation so the platform retries it from the durable cursor.
 
+### Dark custom inbound-domain requests
+
+The separate account-level custom-domain authority uses schema
+`witself.agent-email-domain.v1`. Customer and administrator list responses are
+bounded pages:
+
+```json
+{
+  "schema_version": "witself.agent-email-domain.v1",
+  "requests": [
+    {
+      "id": "aedr_aaaaaaaaaaaaaaaa",
+      "account_id": "acc_123",
+      "domain": "agents.example.com",
+      "state": "pending_verification",
+      "ownership_challenge": {
+        "record_type": "TXT",
+        "record_name": "_witself-verification.agents.example.com",
+        "record_value": "witself-domain-verification=aedv_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "issued_at": "2026-08-03T12:00:00.000Z"
+      },
+      "requested_by": "opr_123",
+      "requested_at": "2026-08-03T12:00:00.000Z",
+      "updated_at": "2026-08-03T12:00:00.000Z",
+      "domain_limit_at_request": 1,
+      "plan_revision": 9,
+      "plan_snapshot_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
+  "truncated": false,
+  "next_cursor": null,
+  "technical_open_request_limit": 8,
+  "open_requests": 1
+}
+```
+
+`open_requests` is included only for an account-scoped page. A null
+`domain_limit_at_request` records an explicitly unlimited effective allowance.
+The challenge is public proof material, not a secret, and is stable for the
+life of the request. Exact request replay returns the original object and does
+not rotate it.
+
+Only `pending_verification`, `rejected`, and `retired` are accepted in this
+dark contract. A rejected request gains `decision`; a retired request gains
+`retirement`, each with the bounded reason, acting administrator id, and
+timestamp. There is no verified/active state and no response can publish DNS,
+an edge route, a cell projection, or mail delivery. Terminal domains remain
+tombstoned and unavailable for another request until a future explicit
+ownership-transfer contract exists.
+
+Customer creation requires the account-operator bearer token, exact-true dark
+request gate, enabled `agent_email_custom_domain` feature, and a positive or
+explicitly unlimited `agent_email_custom_domains_per_account` limit. Stable
+refusal codes include `custom_domain_requests_disabled`,
+`feature_not_enabled`, `protected_domain`, `domain_unavailable`,
+`account_limit_reached`, and `technical_open_request_limit_reached`. The last
+two include a value-free numeric `limit`.
+
+Administrator audit pages contain `events`, `truncated`, and `next_cursor`.
+Each administrator-visible event has `sequence`, `registry_revision`,
+`occurred_at`, `actor_kind`, `actor_id`, `action`, `target`, and bounded
+`metadata`, which can include the administrator-supplied reason. Customer
+and administrator request lists accept the opaque cursor; administrator lists
+add `state`, `account_id`, and `domain`. Audit adds `action`, `account_id`,
+`domain`, and `limit=1..100`. Filtering examines only the bounded underlying
+page, so an empty filtered page may still have a continuation cursor.
+
 ### Realm-email-alias authority journal and empty-target recovery
 
 Every route in this section requires the ordinary platform-admin bearer token

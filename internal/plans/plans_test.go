@@ -248,6 +248,27 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 	}
 }
 
+// Phase A teaches every binary the custom-domain vocabulary before the plan
+// catalog can project it into account snapshots. Keeping both keys absent here
+// is an intentional rollout fence: Phase B may replace this test only after
+// Phase A is running everywhere and the Founder unlimited override is durable.
+func TestAgentEmailCustomDomainPhaseARemainsDarkInCanonicalCatalog(t *testing.T) {
+	catalog, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	for _, plan := range catalog.Plans {
+		if plan.HasFeature(AgentEmailCustomDomainFeature) {
+			t.Fatalf("plan %q unexpectedly enables %q during Phase A",
+				plan.ID, AgentEmailCustomDomainFeature)
+		}
+		if _, ok := plan.Limits[AgentEmailCustomDomainsPerAccountLimit]; ok {
+			t.Fatalf("plan %q unexpectedly publishes %q during Phase A",
+				plan.ID, AgentEmailCustomDomainsPerAccountLimit)
+		}
+	}
+}
+
 func TestCanonicalStoredFactDefaultsPhaseB(t *testing.T) {
 	catalog, err := Load()
 	if err != nil {
@@ -429,9 +450,10 @@ func TestParseValidation(t *testing.T) {
 
 func TestValidateAgentEmailLimitBounds(t *testing.T) {
 	if err := ValidateLimits(map[string]int64{
-		AgentEmailMaxRawBytesLimit:            MaxAgentEmailRawBytes,
-		AgentEmailAttachmentStorageBytesLimit: 107_374_182_400,
-		AgentEmailRealmAliasesPerRealmLimit:   1,
+		AgentEmailMaxRawBytesLimit:             MaxAgentEmailRawBytes,
+		AgentEmailAttachmentStorageBytesLimit:  107_374_182_400,
+		AgentEmailRealmAliasesPerRealmLimit:    1,
+		AgentEmailCustomDomainsPerAccountLimit: 1,
 	}); err != nil {
 		t.Fatalf("valid agent-email limits: %v", err)
 	}
@@ -497,6 +519,7 @@ func TestValidateLimitsZeroAndMissingUnlimited(t *testing.T) {
 		nil,
 		{},
 		{StoredSecretLimit: 0},
+		{AgentEmailCustomDomainsPerAccountLimit: 0},
 		{
 			MessageSentPerAgentMinuteLimit:          0,
 			MessageDeliveredPerRealmMinuteLimit:     0,

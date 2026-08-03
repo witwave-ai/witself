@@ -97,6 +97,16 @@ test("release renderer injects immutable container build identity", async (t) =>
   );
   assert.match(
     config,
+    /"name"\s*:\s*"AGENT_EMAIL_DOMAINS"\s*,\s*"class_name"\s*:\s*"AgentEmailDomainRegistry"/,
+    "release config must bind the dark customer-domain authority",
+  );
+  assert.match(
+    config,
+    /"tag"\s*:\s*"v8"\s*,\s*"new_sqlite_classes"\s*:\s*\[\s*"AgentEmailDomainRegistry"\s*\]/,
+    "release config must preserve the customer-domain registry migration",
+  );
+  assert.match(
+    config,
     /"binding"\s*:\s*"AGENT_EMAIL_DIRECTORY"\s*,\s*"id"\s*:\s*"b{32}"/,
     "control plane must project only into the dedicated agent-email namespace",
   );
@@ -120,6 +130,11 @@ test("release renderer injects immutable container build identity", async (t) =>
     /"CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT"\s*:\s*"64"/,
     "release config must preserve the plan-independent per-account review ceiling",
   );
+  assert.match(
+    config,
+    /"CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT"\s*:\s*"8"/,
+    "release config must preserve the plan-independent custom-domain queue ceiling",
+  );
   assert.doesNotMatch(
     config,
     /"CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED"\s*:/,
@@ -134,6 +149,11 @@ test("release renderer injects immutable container build identity", async (t) =>
     config,
     /"CP_REALM_EMAIL_CANONICAL_DELIVERY_ENABLED"\s*:/,
     "canonical delivery must remain dark until the dual-domain release is accepted",
+  );
+  assert.doesNotMatch(
+    config,
+    /"CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUESTS_ENABLED"\s*:/,
+    "ordinary deployments must leave customer-domain requests dark",
   );
   assert.doesNotMatch(
     config,
