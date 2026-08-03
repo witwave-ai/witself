@@ -131,3 +131,93 @@ test("journal bootstrap always targets fixed global authority", async () => {
     id: "adm_recovery",
   });
 });
+
+test("recovery actions forward the exact current action fence", async () => {
+  const { env, calls } = harness();
+  const recoveryID = "rear_aaaaaaaaaaaaaaaa";
+  const expectedActionFence = "d".repeat(64);
+
+  for (const action of ["advance", "verify"]) {
+    const path =
+      `/v1/admin/realm-email-alias-recoveries/${recoveryID}:${action}`;
+    const url = new URL(`https://self.example${path}`);
+    const response = await handleRealmEmailAliasRecoveryAdminRequest(
+      request(path, "POST", {
+        idempotency_key: `restore-${action}-1`,
+        expected_action_fence: expectedActionFence,
+      }),
+      env,
+      url,
+      ADMIN,
+    );
+    assert.equal(response.status, 200);
+  }
+
+  assert.equal(calls.length, 2);
+  assert.deepEqual(
+    calls.map(({ object, url, body }) => ({
+      object,
+      path: new URL(url).pathname,
+      body,
+    })),
+    [
+      {
+        object: `recovery:${recoveryID}`,
+        path: "/recovery/advance",
+        body: {
+          actor: { kind: "platform_admin", id: "adm_recovery" },
+          recovery_id: recoveryID,
+          idempotency_key: "restore-advance-1",
+          expected_action_fence: expectedActionFence,
+        },
+      },
+      {
+        object: `recovery:${recoveryID}`,
+        path: "/recovery/verify",
+        body: {
+          actor: { kind: "platform_admin", id: "adm_recovery" },
+          recovery_id: recoveryID,
+          idempotency_key: "restore-verify-1",
+          expected_action_fence: expectedActionFence,
+        },
+      },
+    ],
+  );
+});
+
+test("recovery actions reject missing or noncanonical action fences before dispatch", async () => {
+  const { env, calls } = harness();
+  const recoveryID = "rear_aaaaaaaaaaaaaaaa";
+  const invalidBodies = [
+    { idempotency_key: "restore-step-missing" },
+    {
+      idempotency_key: "restore-step-short",
+      expected_action_fence: "a".repeat(63),
+    },
+    {
+      idempotency_key: "restore-step-uppercase",
+      expected_action_fence: "A".repeat(64),
+    },
+  ];
+
+  for (const action of ["advance", "verify"]) {
+    const path =
+      `/v1/admin/realm-email-alias-recoveries/${recoveryID}:${action}`;
+    const url = new URL(`https://self.example${path}`);
+    for (const body of invalidBodies) {
+      const response = await handleRealmEmailAliasRecoveryAdminRequest(
+        request(path, "POST", body),
+        env,
+        url,
+        ADMIN,
+      );
+      assert.equal(response.status, 400);
+      assert.deepEqual(await response.json(), {
+        schema_version: "witself.realm-email-alias-recovery.v1",
+        error: "idempotency_key and expected_action_fence are required",
+      });
+    }
+  }
+
+  assert.equal(calls.length, 0);
+});

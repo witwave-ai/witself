@@ -20,6 +20,7 @@ import {
 } from "../src/realm-email-alias-runtime.mjs";
 import {
   REALM_EMAIL_ALIAS_JOURNAL_BOOTSTRAP_KEY,
+  REALM_EMAIL_ALIAS_RECOVERY_KEY,
 } from "../src/realm-email-alias-journal-runtime.mjs";
 
 const ACCOUNT = "acct_alias";
@@ -340,6 +341,12 @@ function registry(options = {}) {
       ...(options.afterJournalAppend
         ? { afterJournalAppend: options.afterJournalAppend }
         : {}),
+      ...(options.newRecoveryActionFence
+        ? { newRecoveryActionFence: options.newRecoveryActionFence }
+        : {}),
+      ...(options.afterRecoveryAction
+        ? { afterRecoveryAction: options.afterRecoveryAction }
+        : {}),
     },
   );
   return {
@@ -551,6 +558,166 @@ test("journal maintenance serializes external work and freezes due-work alarms",
   );
   assert.equal(fixture.fetchCallCount(), fetchesBeforeAlarm);
   assert.equal(fixture.emailDirectory.putCount, putsBeforeAlarm);
+});
+
+test("recovery journal lane admits only one concurrent request for an action fence", async () => {
+  const bucket = new JournalBucket();
+  const source = registry({ journalBucket: bucket, journalEnabled: false });
+  assert.equal((await call(source.runtime, "/reserved/list", {
+    actor: ADMIN,
+  })).response.status, 200);
+  source.env.CP_REALM_EMAIL_ALIAS_AUTHORITY_JOURNAL_ENABLED = "true";
+  let checkpoint;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    checkpoint = await call(source.runtime, "/journal/bootstrap", {
+      actor: ADMIN,
+      reason: "bootstrap a source for recovery action concurrency",
+      idempotency_key: "bootstrap-recovery-concurrency",
+    });
+    if (checkpoint.body.complete) break;
+  }
+  assert.equal(checkpoint.body.complete, true);
+
+  let issuedFences = 0;
+  const target = registry({
+    journalBucket: bucket,
+    journalEnabled: true,
+    newRecoveryActionFence: () =>
+      (++issuedFences).toString(16).padStart(64, "0"),
+  });
+  const recoveryID = "rear_aaaaaaaaaaaaaaaa";
+  const started = await call(target.runtime, "/recovery/start", {
+    actor: ADMIN,
+    recovery_id: recoveryID,
+    source_stream_id: checkpoint.body.head.stream_id,
+    expected_head: {
+      sequence: checkpoint.body.head.sequence,
+      hash: checkpoint.body.head.hash,
+    },
+    active_object_name: "global",
+    target_object_name: `recovery:${recoveryID}`,
+    reason: "prove concurrent action-fence requests serialize",
+    idempotency_key: "start-recovery-concurrency",
+  });
+  assert.equal(started.response.status, 202);
+  const action = (idempotencyKey) => ({
+    actor: ADMIN,
+    recovery_id: recoveryID,
+    idempotency_key: idempotencyKey,
+    expected_action_fence: started.body.action_fence,
+  });
+
+  const results = await Promise.all([
+    call(target.runtime, "/recovery/advance", action("advance-concurrent-a")),
+    call(target.runtime, "/recovery/advance", action("advance-concurrent-b")),
+  ]);
+  const accepted = results.filter(({ response }) => response.status === 202);
+  const refused = results.filter(({ response }) => response.status === 409);
+  assert.equal(accepted.length, 1);
+  assert.equal(refused.length, 1);
+  assert.equal(
+    refused[0].body.code,
+    "realm_email_alias_recovery_action_fence_mismatch",
+  );
+  assert.equal(accepted[0].body.replay_head.sequence, 1);
+  assert.notEqual(accepted[0].body.action_fence, started.body.action_fence);
+  assert.equal(issuedFences, 2);
+
+  const stored = await target.storage.get(REALM_EMAIL_ALIAS_RECOVERY_KEY);
+  assert.equal(stored.replay_head.sequence, 1);
+  assert.equal(stored.action_fence, accepted[0].body.action_fence);
+  assert.equal(stored.last_action.result.action_fence, stored.action_fence);
+  assert.equal(stored.last_action.idempotency_key,
+    accepted[0] === results[0] ? "advance-concurrent-a" : "advance-concurrent-b");
+
+  const identicalAction = {
+    actor: ADMIN,
+    recovery_id: recoveryID,
+    idempotency_key: "advance-concurrent-identical",
+    expected_action_fence: accepted[0].body.action_fence,
+  };
+  const fencesBeforeIdentical = issuedFences;
+  const identical = await Promise.all([
+    call(target.runtime, "/recovery/advance", identicalAction),
+    call(target.runtime, "/recovery/advance", identicalAction),
+  ]);
+  assert.deepEqual(identical.map(({ response }) => response.status), [202, 202]);
+  assert.deepEqual(identical[0].body, identical[1].body);
+  assert.equal(identical[0].body.replay_head.sequence, 2);
+  assert.equal(issuedFences, fencesBeforeIdentical + 1);
+  const afterIdentical = await target.storage.get(
+    REALM_EMAIL_ALIAS_RECOVERY_KEY,
+  );
+  assert.equal(afterIdentical.replay_head.sequence, 2);
+  assert.equal(afterIdentical.action_fence, identical[0].body.action_fence);
+  assert.equal(
+    afterIdentical.last_action.result.action_fence,
+    afterIdentical.action_fence,
+  );
+});
+
+test("recovery terminal and legacy action refusals map to HTTP 409", async () => {
+  const recoveryID = "rear_aaaaaaaaaaaaaaaa";
+  for (const testCase of [
+    {
+      name: "sealed",
+      path: "/recovery/verify",
+      code: "realm_email_alias_recovery_target_sealed",
+      mutate(record) {
+        record.phase = "sealed";
+        record.sealed_at = "2026-08-02T00:00:00.000Z";
+      },
+    },
+    {
+      name: "failed",
+      path: "/recovery/advance",
+      code: "realm_email_alias_recovery_action_not_allowed",
+      mutate(record) {
+        record.phase = "failed";
+        record.failure_code = "realm_email_alias_journal_gap";
+      },
+    },
+    {
+      name: "legacy",
+      path: "/recovery/advance",
+      code: "realm_email_alias_recovery_upgrade_required",
+      mutate(record) {
+        record.schema_version = "witself.realm-email-alias-recovery-local.v1";
+        delete record.action_fence;
+      },
+    },
+  ]) {
+    const target = registry({
+      journalBucket: new JournalBucket(),
+      journalEnabled: true,
+      newRecoveryActionFence: () => "c".repeat(64),
+    });
+    const started = await call(target.runtime, "/recovery/start", {
+      actor: ADMIN,
+      recovery_id: recoveryID,
+      source_stream_id: "reaj_aaaaaaaaaaaaaaaa",
+      expected_head: { sequence: 1, hash: "a".repeat(64) },
+      active_object_name: "global",
+      target_object_name: `recovery:${recoveryID}`,
+      reason: `prepare ${testCase.name} HTTP mapping test`,
+      idempotency_key: `start-${testCase.name}-mapping`,
+    });
+    assert.equal(started.response.status, 202);
+    const record = await target.storage.get(REALM_EMAIL_ALIAS_RECOVERY_KEY);
+    testCase.mutate(record);
+    await target.storage.put(REALM_EMAIL_ALIAS_RECOVERY_KEY, record);
+    const before = structuredClone(target.storage.values);
+
+    const refused = await call(target.runtime, testCase.path, {
+      actor: ADMIN,
+      recovery_id: recoveryID,
+      idempotency_key: `refuse-${testCase.name}-mapping`,
+      expected_action_fence: started.body.action_fence,
+    });
+    assert.equal(refused.response.status, 409, testCase.name);
+    assert.equal(refused.body.code, testCase.code, testCase.name);
+    assert.deepEqual(target.storage.values, before, testCase.name);
+  }
 });
 
 test("active alias authority is fixed to global until governed cutover exists", () => {
