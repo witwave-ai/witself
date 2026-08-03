@@ -32,6 +32,9 @@ phase_b_gcp_render="$render_dir/phase-b-gcp.yaml"
 phase_b_apps_render="$render_dir/phase-b-apps.yaml"
 email_pilot_render="$render_dir/email-pilot.yaml"
 email_pilot_apps_render="$render_dir/email-pilot-apps.yaml"
+email_pilot_legacy_apps_render="$render_dir/email-pilot-legacy-apps.yaml"
+email_pilot_new_chart_old_image_render="$render_dir/email-pilot-new-chart-old-image.yaml"
+email_pilot_old_chart_new_image_render="$render_dir/email-pilot-old-chart-new-image.yaml"
 retention_preview_render="$render_dir/retention-preview.yaml"
 retention_enforce_render="$render_dir/retention-enforce.yaml"
 retention_preview_apps_render="$render_dir/retention-preview-apps.yaml"
@@ -123,7 +126,25 @@ helm template witself-server "$server_chart" --namespace witself \
 helm template witself-apps "$apps_chart" \
   --values "$gcp_cell" \
   --values "$apps_profile" \
-  --values "$apps_email_pilot_profile" >"$email_pilot_apps_render"
+  --values "$apps_email_pilot_profile" >"$email_pilot_legacy_apps_render"
+helm template witself-apps "$apps_chart" \
+  --values "$gcp_cell" \
+  --values "$apps_profile" \
+  --values "$apps_email_pilot_profile" \
+  --set apps.witselfServer.chartVersion=0.0.232 \
+  --set apps.witselfServer.imageTag=0.0.232 >"$email_pilot_apps_render"
+helm template witself-apps "$apps_chart" \
+  --values "$gcp_cell" \
+  --values "$apps_profile" \
+  --values "$apps_email_pilot_profile" \
+  --set apps.witselfServer.chartVersion=0.0.232 \
+  --set apps.witselfServer.imageTag=0.0.231 >"$email_pilot_new_chart_old_image_render"
+helm template witself-apps "$apps_chart" \
+  --values "$gcp_cell" \
+  --values "$apps_profile" \
+  --values "$apps_email_pilot_profile" \
+  --set apps.witselfServer.chartVersion=0.0.231 \
+  --set apps.witselfServer.imageTag=0.0.232 >"$email_pilot_old_chart_new_image_render"
 helm template witself-server "$server_chart" --namespace witself \
   --values "$gcp_profile" \
   --set worker.transcriptRetention.enabled=true \
@@ -729,19 +750,20 @@ expect_server_template_failure \
 extract_document ConfigMap witself-server "$email_pilot_render" "$render_dir/email-server-config.yaml"
 email_server_config="$render_dir/email-server-config.yaml"
 require_line '  WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED: "true"' "$email_server_config"
-require_line '  WITSELF_AGENT_EMAIL_PILOT_DOMAIN: "agent-mail.witwave.ai"' "$email_server_config"
+require_line '  WITSELF_AGENT_EMAIL_PILOT_DOMAIN: "witmail.net"' "$email_server_config"
+require_line '  WITSELF_AGENT_EMAIL_ACCEPTED_LEGACY_DOMAINS: "agent-mail.witwave.ai"' "$email_server_config"
 require_line '  WITSELF_AGENT_EMAIL_PILOT_AUDIENCE: "gcp-sandbox-use1-dev"' "$email_server_config"
 require_line '  WITSELF_AGENT_EMAIL_PILOT_REALM_ID: "realm_aaaaaaaaaaaaaaaa"' "$email_server_config"
 require_line '  WITSELF_AGENT_EMAIL_PILOT_AGENT_IDS: "agent_aaaaaaaaaaaaaaaa,agent_bbbbbbbbbbbbbbbb,agent_cccccccccccccccc,agent_dddddddddddddddd,agent_eeeeeeeeeeeeeeee"' "$email_server_config"
 require_line '  WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID: "agent_aaaaaaaaaaaaaaaa"' "$email_server_config"
 require_line '  WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON: "{\"pilot-2026-07\":\"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\"}"' "$email_server_config"
 require_line '  WITSELF_AGENT_EMAIL_RELAY_REPLAY_WINDOW: "5m"' "$email_server_config"
-if [[ "$(grep -c '^  WITSELF_AGENT_EMAIL_' "$email_server_config")" -ne 8 ]]; then
-  echo "enabled pilot with a retry canary did not render exactly eight agent-email variables" >&2
+if [[ "$(grep -c '^  WITSELF_AGENT_EMAIL_' "$email_server_config")" -ne 9 ]]; then
+  echo "enabled pilot with legacy compatibility and a retry canary did not render exactly nine agent-email variables" >&2
   exit 1
 fi
 if grep -Eq 'WITSELF_AGENT_EMAIL_.*PRIVATE|RELAY_ED25519_PRIVATE_KEY|relayPrivateKey' \
-  "$email_pilot_render" "$email_pilot_apps_render"; then
+  "$email_pilot_render" "$email_pilot_apps_render" "$email_pilot_legacy_apps_render"; then
   echo "relay private-key configuration leaked into the cell render" >&2
   exit 1
 fi
@@ -766,6 +788,20 @@ if helm template witself-server "$server_chart" --namespace witself \
   echo "enabled pilot accepted a retry canary outside its enrolled agents" >&2
   exit 1
 fi
+if helm template witself-server "$server_chart" --namespace witself \
+  --values "$email_pilot_profile" \
+  --set-json 'agentEmail.receivePilot.acceptedLegacyDomains=["one.example","two.example"]' \
+  >/dev/null 2>&1; then
+  echo "enabled pilot accepted more than one legacy domain" >&2
+  exit 1
+fi
+if helm template witself-server "$server_chart" --namespace witself \
+  --values "$email_pilot_profile" \
+  --set-json 'agentEmail.receivePilot.acceptedLegacyDomains=["witmail.net"]' \
+  >/dev/null 2>&1; then
+  echo "enabled pilot accepted its primary domain as a legacy domain" >&2
+  exit 1
+fi
 if helm template witself-apps "$apps_chart" \
   --values "$gcp_cell" \
   --values "$apps_email_pilot_profile" \
@@ -782,7 +818,41 @@ if helm template witself-apps "$apps_chart" \
   echo "app-of-apps accepted a retry canary outside its enrolled agents" >&2
   exit 1
 fi
+if helm template witself-apps "$apps_chart" \
+  --values "$gcp_cell" \
+  --values "$apps_email_pilot_profile" \
+  --set-json 'apps.witselfServer.agentEmail.receivePilot.acceptedLegacyDomains=["one.example","two.example"]' \
+  >/dev/null 2>&1; then
+  echo "app-of-apps accepted more than one legacy domain" >&2
+  exit 1
+fi
+if helm template witself-apps "$apps_chart" \
+  --values "$gcp_cell" \
+  --values "$apps_email_pilot_profile" \
+  --set-json 'apps.witselfServer.agentEmail.receivePilot.acceptedLegacyDomains=["witmail.net"]' \
+  >/dev/null 2>&1; then
+  echo "app-of-apps accepted its primary domain as a legacy domain" >&2
+  exit 1
+fi
 require_sequence "$email_pilot_apps_render" \
+  "        agentEmail:" \
+  "          receivePilot:" \
+  "            acceptedLegacyDomains:" \
+  "            - agent-mail.witwave.ai" \
+  "            agentIDs:" \
+  "            - agent_aaaaaaaaaaaaaaaa" \
+  "            - agent_bbbbbbbbbbbbbbbb" \
+  "            - agent_cccccccccccccccc" \
+  "            - agent_dddddddddddddddd" \
+  "            - agent_eeeeeeeeeeeeeeee" \
+  "            audience: gcp-sandbox-use1-dev" \
+  "            domain: witmail.net" \
+  "            enabled: true" \
+  "            realmID: realm_aaaaaaaaaaaaaaaa" \
+  "            relayPublicKeysJSON: '{\"pilot-2026-07\":\"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\"}'" \
+  "            relayReplayWindow: 5m" \
+  "            retryCanaryAgentID: agent_aaaaaaaaaaaaaaaa"
+require_sequence "$email_pilot_legacy_apps_render" \
   "        agentEmail:" \
   "          receivePilot:" \
   "            agentIDs:" \
@@ -794,10 +864,20 @@ require_sequence "$email_pilot_apps_render" \
   "            audience: gcp-sandbox-use1-dev" \
   "            domain: agent-mail.witwave.ai" \
   "            enabled: true" \
-  "            realmID: realm_aaaaaaaaaaaaaaaa" \
-  "            relayPublicKeysJSON: '{\"pilot-2026-07\":\"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\"}'" \
-  "            relayReplayWindow: 5m" \
-  "            retryCanaryAgentID: agent_aaaaaaaaaaaaaaaa"
+  "            realmID: realm_aaaaaaaaaaaaaaaa"
+if grep -Fq 'acceptedLegacyDomains:' "$email_pilot_legacy_apps_render"; then
+  echo "pre-0.0.232 child chart received the unsupported legacy-domain list" >&2
+  exit 1
+fi
+for mixed_email_render in \
+  "$email_pilot_new_chart_old_image_render" \
+  "$email_pilot_old_chart_new_image_render"; do
+  require_line "            domain: agent-mail.witwave.ai" "$mixed_email_render"
+  if grep -Fq 'acceptedLegacyDomains:' "$mixed_email_render"; then
+    echo "mixed pre/post-0.0.232 chart and image pins activated the domain cutover" >&2
+    exit 1
+  fi
+done
 
 # The chart/image pin and the app-of-apps value-shape migration are atomic.
 # Prove the API remains API-only while the nested worker contract carries both

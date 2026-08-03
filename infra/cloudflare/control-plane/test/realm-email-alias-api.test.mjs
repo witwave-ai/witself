@@ -87,7 +87,11 @@ function environment() {
   const projectionFetch = cellFetch();
   const runtime = new DurableRealmEmailAliasRegistry(
     { storage: new Storage(), id: { name: "global" } },
-    { DIRECTORY: directory, AGENT_EMAIL_DIRECTORY: emailDirectory },
+    {
+      DIRECTORY: directory,
+      AGENT_EMAIL_DIRECTORY: emailDirectory,
+      AGENT_EMAIL_DOMAIN: DOMAIN,
+    },
     {
       now: (() => {
         let tick = 0;

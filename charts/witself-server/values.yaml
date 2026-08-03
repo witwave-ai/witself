@@ -70,6 +70,10 @@ agentEmail:
   receivePilot:
     enabled: false
     domain: ""
+    # One receive-only compatibility domain. New canonical identities and
+    # aliases are always minted on domain; legacy domains accept only canonical
+    # local parts that were actually issued before cutover.
+    acceptedLegacyDomains: []
     audience: ""
     realmID: ""
     agentIDs: []

@@ -62,6 +62,16 @@ var upgraders = map[int]Upgrader{
 	78: addAgentEmailAttachmentStorageDefaults,
 	84: addAgentEmailRealmAliasDefaults,
 	85: addRealmEmailRouteLifecycleDefaults,
+	86: preserveSchema86Rows,
+}
+
+// preserveSchema86Rows acknowledges schema 0087's additive permanent domain
+// route reservations and their tenant evacuation trigger. A schema-86 archive
+// carries only agent_email_addresses.domain; the account importer synthesizes
+// that exact original route after all legacy rows land. Existing rows need no
+// wire transformation.
+func preserveSchema86Rows(_ string, row map[string]any) (map[string]any, error) {
+	return row, nil
 }
 
 const (

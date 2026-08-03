@@ -85,16 +85,23 @@ the independent platform breakers described below apply instead.
 | Maximum raw email size | 0 (email disabled) | 10 MiB | 25 MiB | Contracted; 25 MiB default |
 | Retained attachment storage per account | 0 | 5 GiB | 100 GiB | Contracted; 100 GiB default |
 | Send agent email | No | No | Included | Included |
-| Permanent Realm ID email address | Reserved; delivery disabled | Active on `witmail.ai` | Active on `witmail.ai` | Active on `witmail.ai` |
+| Permanent Realm ID email address | Reserved; delivery disabled | Active on `witmail.net` | Active on `witmail.net` | Active on `witmail.net` |
 | Realm email aliases | 0 | 0 | 1 active alias per realm | Contracted; 3 active aliases per realm by default |
 | Custom inbound email domains | No | No | 1 per account | Contracted |
 
 The permanent Witself-provided address format is
-`agent-name.realm-id@witmail.ai`. It is reserved on every plan but Personal
+`agent-name.realm-id@witmail.net`. It is reserved on every plan but Personal
 cannot receive mail. Team and Enterprise can add, rather than replace it with,
-`agent-name.realm-email-alias@witmail.ai`. Custom domains remain a separate
+`agent-name.realm-email-alias@witmail.net`. Custom domains remain a separate
 feature: `agent-name.realm-email-alias@customer-domain`. A realm label remains
 part of the address on custom domains.
+
+The retired `agent-mail.witwave.ai` pilot domain is not another plan benefit.
+Compatibility there is limited to canonical local parts that were actually
+issued before retirement. No plan may request a new legacy-domain canonical
+address or alias; all new Witself-managed addresses use `witmail.net`.
+This matrix describes the plan entitlement, not the current rollout state:
+canonical inventory and delivery remain behind independent default-off gates.
 
 In this table, an included feature does not imply unbounded throughput or a
 per-message charge. Message rate values and agent-email safety breakers are
@@ -371,7 +378,7 @@ accept-and-drop verdict as a transient relay failure and cause sender retries.
 
 ### Realm email aliases
 
-The canonical `agent-name.realm-id@witmail.ai` identity is permanent and is
+The canonical `agent-name.realm-id@witmail.net` identity is permanent and is
 reserved even when inbound email is disabled. The resolved feature
 `agent_email_realm_alias` and limit
 `agent_email_realm_aliases_per_realm` govern only additional memorable labels.

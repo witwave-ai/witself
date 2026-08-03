@@ -13,6 +13,7 @@ const ACCOUNT = "acct_canonical";
 const OTHER_ACCOUNT = "acct_canonical_other";
 const REALM = "realm_aaaaaaaaaaaaaaaa";
 const DOMAIN = "agent-mail.witwave.ai";
+const PRIMARY_DOMAIN = "witmail.net";
 
 class Storage {
   constructor() {
@@ -122,7 +123,12 @@ class EmailDirectory {
   }
 }
 
-function fixture({ inventory = true, delivery = true } = {}) {
+function fixture({
+  inventory = true,
+  delivery = true,
+  domain = DOMAIN,
+  legacyDomain = null,
+} = {}) {
   const storage = new Storage();
   const directory = new Directory([
     [`acct:${ACCOUNT}`, { cell: "cell-one" }],
@@ -215,7 +221,8 @@ function fixture({ inventory = true, delivery = true } = {}) {
   const env = {
     DIRECTORY: directory,
     AGENT_EMAIL_DIRECTORY: emailDirectory,
-    AGENT_EMAIL_DOMAIN: DOMAIN,
+    AGENT_EMAIL_DOMAIN: domain,
+    ...(legacyDomain ? { AGENT_EMAIL_LEGACY_DOMAINS: legacyDomain } : {}),
     CP_REALM_EMAIL_CANONICAL_INVENTORY_ENABLED: inventory ? "true" : "false",
     CP_REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: delivery ? "true" : "false",
     CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED: "true",
@@ -290,6 +297,29 @@ test("bounded inventory commits canonical authority before KV and retries lost a
   assert.deepEqual(await storage.get(authorityKey), firstAuthority);
   assert.equal(emailDirectory.values.get(routeKey), firstProjection);
   assert.equal(emailDirectory.value(routeKey).state, "applied");
+});
+
+test("one bounded inventory page publishes primary and legacy canonical routes", async () => {
+  const { runtime, storage, emailDirectory } = fixture({
+    domain: PRIMARY_DOMAIN,
+    legacyDomain: DOMAIN,
+  });
+  const result = await call(runtime, "/canonical/inventory/reconcile");
+  assert.equal(result.response.status, 200);
+  assert.equal(result.body.routes_scanned, 1);
+  assert.equal(result.body.projections_published, 2);
+  for (const domain of [PRIMARY_DOMAIN, DOMAIN]) {
+    const authority = await storage.get(
+      `canonical:${domain}:aaaaaaaaaaaaaaaa`,
+    );
+    assert.equal(authority.domain, domain);
+    assert.equal(authority.state, "applied");
+    const projection = emailDirectory.value(
+      realmEmailRouteKey(domain, "aaaaaaaaaaaaaaaa"),
+    );
+    assert.equal(projection.domain, domain);
+    assert.equal(projection.state, "applied");
+  }
 });
 
 test("canonical ownership is immutable and equal-generation conflicts cannot overwrite authority", async () => {
@@ -501,4 +531,167 @@ test("realm close replays the exact closing tombstone after a lost KV acknowledg
     .filter(({ state }) => state === "retired");
   assert.equal(retiredWrites.length, 3);
   assert.deepEqual(retiredWrites[0], retiredWrites[1]);
+});
+
+test("realm close retires both configured canonical domains with one cell fence", async () => {
+  const {
+    runtime,
+    storage,
+    emailDirectory,
+    transitionBodies,
+  } = fixture({ domain: PRIMARY_DOMAIN, legacyDomain: DOMAIN });
+  assert.equal(
+    (await call(runtime, "/canonical/inventory/reconcile")).response.status,
+    200,
+  );
+  const closed = await call(runtime, "/canonical/realm-close", {
+    actor: { kind: "account_operator", id: "opr_close_dual" },
+    account_id: ACCOUNT,
+    realm_id: REALM,
+    domain: PRIMARY_DOMAIN,
+    idempotency_key: "close-canonical-dual-domain",
+  });
+  assert.equal(closed.response.status, 200);
+  assert.deepEqual(
+    closed.body.canonical_routes.map((route) => route.domain),
+    [PRIMARY_DOMAIN, DOMAIN],
+  );
+  for (const domain of [PRIMARY_DOMAIN, DOMAIN]) {
+    assert.equal(
+      (await storage.get(`canonical:${domain}:aaaaaaaaaaaaaaaa`)).state,
+      "retired",
+    );
+    assert.equal(
+      emailDirectory.value(
+        realmEmailRouteKey(domain, "aaaaaaaaaaaaaaaa"),
+      ).state,
+      "retired",
+    );
+  }
+  const fence = await storage.get(`realm-close-fence:${ACCOUNT}:${REALM}`);
+  assert.deepEqual(
+    fence.canonical_revisions.map(({ domain }) => domain),
+    [PRIMARY_DOMAIN, DOMAIN],
+  );
+  assert.deepEqual(transitionBodies.map(({ phase }) => phase), [
+    "prepare",
+    "commit",
+  ]);
+});
+
+test("a persisted single-domain realm close freezes and retires the new bounded set", async () => {
+  const {
+    runtime,
+    env,
+    storage,
+    emailDirectory,
+  } = fixture({ domain: DOMAIN });
+  const drain = runtime.drainRealmCloseIntent.bind(runtime);
+  runtime.drainRealmCloseIntent = async () => Response.json({
+    schema_version: "witself.realm-email-alias.v1",
+    complete: false,
+    phase: "scan_aliases",
+  }, { status: 202 });
+  const request = {
+    actor: { kind: "account_operator", id: "opr_close_legacy" },
+    account_id: ACCOUNT,
+    realm_id: REALM,
+    domain: DOMAIN,
+    idempotency_key: "close-before-domain-cutover",
+  };
+  assert.equal(
+    (await call(runtime, "/canonical/realm-close", request)).response.status,
+    202,
+  );
+  const legacyIntent = await storage.get(
+    `realm-close-intent:${ACCOUNT}:${REALM}`,
+  );
+  delete legacyIntent.domains;
+  await storage.put(`realm-close-intent:${ACCOUNT}:${REALM}`, legacyIntent);
+  assert.equal(
+    (await storage.get(`realm-close-intent:${ACCOUNT}:${REALM}`)).domains,
+    undefined,
+  );
+
+  runtime.drainRealmCloseIntent = drain;
+  env.AGENT_EMAIL_DOMAIN = PRIMARY_DOMAIN;
+  env.AGENT_EMAIL_LEGACY_DOMAINS = DOMAIN;
+  await runtime.alarm();
+
+  assert.ok(await storage.get(`realm-close-fence:${ACCOUNT}:${REALM}`));
+  for (const domain of [DOMAIN, PRIMARY_DOMAIN]) {
+    assert.equal(
+      (await storage.get(`canonical:${domain}:aaaaaaaaaaaaaaaa`)).state,
+      "retired",
+    );
+    assert.equal(
+      emailDirectory.value(
+        realmEmailRouteKey(domain, "aaaaaaaaaaaaaaaa"),
+      ).state,
+      "retired",
+    );
+  }
+});
+
+test("realm-close alarm retry locks every persisted canonical domain lane", async () => {
+  const { runtime, env, storage } = fixture({
+    domain: PRIMARY_DOMAIN,
+    legacyDomain: DOMAIN,
+  });
+  runtime.drainRealmCloseIntent = async () => Response.json({
+    schema_version: "witself.realm-email-alias.v1",
+    complete: false,
+    phase: "scan_aliases",
+  }, { status: 202 });
+  const request = {
+    actor: { kind: "account_operator", id: "opr_close_lanes" },
+    account_id: ACCOUNT,
+    realm_id: REALM,
+    domain: PRIMARY_DOMAIN,
+    idempotency_key: "close-with-persisted-domain-lanes",
+  };
+  assert.equal(
+    (await call(runtime, "/canonical/realm-close", request)).response.status,
+    202,
+  );
+  assert.deepEqual(
+    (await storage.get(`realm-close-intent:${ACCOUNT}:${REALM}`)).domains,
+    [PRIMARY_DOMAIN, DOMAIN],
+  );
+
+  // Configuration may advance after an intent starts. Alarm recovery must
+  // continue locking the exact persisted domain set, not only today's set.
+  delete env.AGENT_EMAIL_LEGACY_DOMAINS;
+  let releaseDrain;
+  let markDrainStarted;
+  const drainStarted = new Promise((resolve) => {
+    markDrainStarted = resolve;
+  });
+  const drainReleased = new Promise((resolve) => {
+    releaseDrain = resolve;
+  });
+  runtime.drainRealmCloseIntent = async () => {
+    markDrainStarted();
+    await drainReleased;
+  };
+  const alarm = runtime.alarm();
+  await drainStarted;
+
+  let legacyLaneEntered = false;
+  const competing = runtime.withLane(
+    `canonical:${DOMAIN}:${REALM}`,
+    async () => {
+      legacyLaneEntered = true;
+    },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    legacyLaneEntered,
+    false,
+    "the alarm must hold the persisted legacy canonical lane while draining",
+  );
+
+  releaseDrain();
+  await Promise.all([alarm, competing]);
+  assert.equal(legacyLaneEntered, true);
 });

@@ -85,19 +85,34 @@ func TestReconcileAgentEmailPilotPostgres(t *testing.T) {
 			t.Fatalf("reconciliation changed identity: prior %#v next %#v", prior, address)
 		}
 	}
+	cutoverScope := scope
+	cutoverScope.Domain = "witmail.net"
+	cutoverScope.LegacyDomains = []string{scope.Domain}
 	if err := st.SuspendAccountSystem(ctx, provisioned.AccountID, "evacuation", "email restart test"); err != nil {
 		t.Fatal(err)
 	}
-	suspended, err := st.ReconcileAgentEmailPilot(ctx, scope)
+	suspended, err := st.ReconcileAgentEmailPilot(ctx, cutoverScope)
 	if err != nil || len(suspended) != len(second) {
 		t.Fatalf("suspended read-only reconciliation = %#v / %v", suspended, err)
 	}
 	for _, address := range suspended {
 		prior := byOwner[address.OwnerAgentID]
 		if prior.ID != address.ID || prior.MailboxID != address.MailboxID ||
-			prior.RowVersion != address.RowVersion {
+			prior.RowVersion != address.RowVersion || address.Domain != scope.Domain ||
+			address.Address != prior.Address {
 			t.Fatalf("suspended reconciliation mutated identity: prior %#v next %#v", prior, address)
 		}
+	}
+	var primaryRoutes int
+	if err := st.pool.QueryRow(ctx, `
+		SELECT count(*) FROM agent_email_address_domains
+		WHERE account_id=$1 AND realm_id=$2 AND domain=$3`,
+		provisioned.AccountID, realm.ID, cutoverScope.Domain,
+	).Scan(&primaryRoutes); err != nil {
+		t.Fatal(err)
+	}
+	if primaryRoutes != 0 {
+		t.Fatalf("suspended cutover added %d primary routes", primaryRoutes)
 	}
 	// A frozen account may be verified but never repaired or provisioned. A
 	// missing configured address therefore keeps startup fail-closed.
@@ -107,7 +122,7 @@ func TestReconcileAgentEmailPilotPostgres(t *testing.T) {
 		WHERE id=$1`, driftedAddressID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.ReconcileAgentEmailPilot(ctx, scope); !errors.Is(err, ErrAgentEmailNotFound) {
+	if _, err := st.ReconcileAgentEmailPilot(ctx, cutoverScope); !errors.Is(err, ErrAgentEmailNotFound) {
 		t.Fatalf("suspended drift reconciliation error = %v", err)
 	}
 	if _, err := st.pool.Exec(ctx, `
@@ -118,6 +133,35 @@ func TestReconcileAgentEmailPilotPostgres(t *testing.T) {
 	if err := st.ResumeAccountSystem(ctx, provisioned.AccountID, "evacuation"); err != nil {
 		t.Fatal(err)
 	}
+	// Resume itself only changes account lifecycle state. The next explicit
+	// startup reconciliation is the safe repair point that adds the new primary
+	// route without changing the pre-cutover address or mailbox identities.
+	resumed, err := st.ReconcileAgentEmailPilot(ctx, cutoverScope)
+	if err != nil || len(resumed) != len(second) {
+		t.Fatalf("resumed cutover reconciliation = %#v / %v", resumed, err)
+	}
+	for _, address := range resumed {
+		prior := byOwner[address.OwnerAgentID]
+		if address.ID != prior.ID || address.MailboxID != prior.MailboxID ||
+			address.Domain != cutoverScope.Domain ||
+			address.Address != address.LocalPart+"@"+cutoverScope.Domain ||
+			len(address.Addresses) != 2 ||
+			address.Addresses[0].Role != AgentEmailAddressRolePrimary ||
+			address.Addresses[1].Role != AgentEmailAddressRoleLegacy {
+			t.Fatalf("resumed cutover address = prior %#v next %#v", prior, address)
+		}
+	}
+	if err := st.pool.QueryRow(ctx, `
+		SELECT count(*) FROM agent_email_address_domains
+		WHERE account_id=$1 AND realm_id=$2 AND domain=$3`,
+		provisioned.AccountID, realm.ID, cutoverScope.Domain,
+	).Scan(&primaryRoutes); err != nil {
+		t.Fatal(err)
+	}
+	if primaryRoutes != len(second) {
+		t.Fatalf("resumed cutover primary routes = %d, want %d", primaryRoutes, len(second))
+	}
+	scope = cutoverScope
 	var total, unenrolled int
 	if err := st.pool.QueryRow(ctx, `
 		SELECT count(*),count(*) FILTER (WHERE owner_agent_id=$1)

@@ -47,7 +47,9 @@ apps:
     agentEmail:
       receivePilot:
         enabled: true
-        domain: agent-mail.witwave.ai
+        domain: witmail.net
+        acceptedLegacyDomains:
+          - agent-mail.witwave.ai
         audience: gcp-sandbox-use1-dev
         realmID: realm_drz4xnv73ficcrko
         agentIDs:

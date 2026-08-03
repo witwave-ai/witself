@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  configuredAgentEmailDomains,
   parseRouteAddress,
   realmRouteKey,
   realmRouteProjectionIsFresh,
@@ -13,6 +14,21 @@ const realmID = "realm_abcdefghijkl2345";
 const canonicalLabel = "abcdefghijkl2345";
 const aliasLabel = "acme-west";
 const nowMS = Date.parse("2026-08-01T12:00:00.000Z");
+
+test("configured edge domains are bounded, ordered, canonical, and unique", () => {
+  assert.deepEqual(configuredAgentEmailDomains({
+    AGENT_EMAIL_DOMAIN: "witmail.net",
+    AGENT_EMAIL_LEGACY_DOMAINS: domain,
+  }), ["witmail.net", domain]);
+  assert.throws(() => configuredAgentEmailDomains({
+    AGENT_EMAIL_DOMAIN: "witmail.net",
+    AGENT_EMAIL_LEGACY_DOMAINS: "witmail.net",
+  }), /unique/);
+  assert.throws(() => configuredAgentEmailDomains({
+    AGENT_EMAIL_DOMAIN: "witmail.net",
+    AGENT_EMAIL_LEGACY_DOMAINS: "one.example,two.example",
+  }), /invalid/);
+});
 
 function projection(realmLabel, overrides = {}) {
   return {

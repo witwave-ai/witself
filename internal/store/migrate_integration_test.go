@@ -1886,6 +1886,127 @@ func TestTranscriptRetentionCheckUsesStagedValidationPostgres(t *testing.T) {
 	assertConstraint(stagedConstraint, false, false)
 }
 
+func TestMigration87AgentEmailAddressDomainsPostgres(t *testing.T) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	st, dsn := newMigrationTestStore(t, baseDSN)
+	migrationTestUpTo(t, dsn, 86)
+	provisioned, err := st.ProvisionAccount(
+		ctx, "agent-email-domain-migration@witwave.ai",
+		"agent email domain migration", time.Hour,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activated, err := st.ActivateAccount(ctx, provisioned.AccountID); err != nil || !activated {
+		t.Fatalf("activate = %t / %v", activated, err)
+	}
+	realm, err := st.CreateRealm(ctx, provisioned.AccountID, "email domain migration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := st.CreateAgent(ctx, provisioned.AccountID, realm.ID, "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	realmLabel := strings.TrimPrefix(realm.ID, "realm_")
+	const addressID = "eaddr_aaaaaaaaaaaaaaaa"
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO agent_email_addresses
+		  (id,account_id,realm_id,provisioned_agent_id,domain,agent_segment,
+		   realm_label,local_part,provisioning_kind)
+		VALUES ($1,$2,$3,$4,'agent-mail.witwave.ai','owner',$5,
+		        'owner.' || $5,'derived')`,
+		addressID, provisioned.AccountID, realm.ID, agent.ID, realmLabel); err != nil {
+		t.Fatal(err)
+	}
+
+	migrationTestUpTo(t, dsn, 87)
+	assertMigrationTestVersion(t, dsn, 87)
+	assertMigrationTestTable(t, st, "agent_email_address_domains", true)
+	assertMigrationTestTableConstraint(t, st, "agent_email_addresses",
+		"agent_email_addresses_domain_route_scope_unique", true)
+	var backfilled int
+	if err := st.pool.QueryRow(ctx, `
+		SELECT count(*) FROM agent_email_address_domains
+		WHERE address_id=$1 AND domain='agent-mail.witwave.ai'`, addressID).
+		Scan(&backfilled); err != nil {
+		t.Fatal(err)
+	}
+	if backfilled != 1 {
+		t.Fatalf("backfilled original domain routes = %d, want 1", backfilled)
+	}
+	raceCtx, cancelRace := context.WithTimeout(ctx, 30*time.Second)
+	defer cancelRace()
+	writer, err := st.pool.Begin(raceCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Exec(raceCtx, `
+		INSERT INTO agent_email_address_domains
+		  (account_id,realm_id,provisioned_agent_id,address_id,domain,local_part)
+		SELECT account_id,realm_id,provisioned_agent_id,id,'witmail.net',local_part
+		FROM agent_email_addresses WHERE id=$1`, addressID); err != nil {
+		_ = writer.Rollback(raceCtx)
+		t.Fatal(err)
+	}
+	db := migrationTestSQLDB(t, dsn)
+	defer func() { _ = db.Close() }()
+	downDone := make(chan error, 1)
+	go func() { downDone <- goose.Down(db, "migrations") }()
+	waiting := false
+	for !waiting {
+		if err := st.pool.QueryRow(raceCtx, `
+			SELECT EXISTS (
+			  SELECT 1 FROM pg_locks
+			   WHERE relation='agent_email_addresses'::regclass
+			     AND mode='AccessExclusiveLock' AND NOT granted
+			)`).Scan(&waiting); err != nil {
+			_ = writer.Rollback(raceCtx)
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case earlyErr := <-downDone:
+			_ = writer.Rollback(raceCtx)
+			t.Fatalf("schema-87 down finished before waiting for the parent-held domain-route writer: %v", earlyErr)
+		case <-raceCtx.Done():
+			_ = writer.Rollback(context.Background())
+			t.Fatal("schema-87 down never waited for the parent-held domain-route writer")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if err := writer.Commit(raceCtx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err = <-downDone:
+		if err == nil || !strings.Contains(err.Error(), "additive agent-email domains") {
+			t.Fatalf("schema 87 down after racing domain-route writer = %v", err)
+		}
+	case <-raceCtx.Done():
+		t.Fatal("schema-87 down did not finish after the domain-route writer committed")
+	}
+	assertMigrationTestVersion(t, dsn, 87)
+	if _, err := st.pool.Exec(ctx, `
+		DELETE FROM agent_email_address_domains
+		WHERE address_id=$1 AND domain='witmail.net'`, addressID); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrationTestDown(t, dsn, false); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationTestVersion(t, dsn, 86)
+	assertMigrationTestTable(t, st, "agent_email_address_domains", false)
+	assertMigrationTestTableConstraint(t, st, "agent_email_addresses",
+		"agent_email_addresses_domain_route_scope_unique", false)
+}
+
 func insertMigrationTestMemoryPrincipals(t *testing.T, st *Store) {
 	t.Helper()
 	ctx := context.Background()

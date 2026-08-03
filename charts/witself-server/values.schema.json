@@ -115,10 +115,19 @@
         "receivePilot": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["enabled", "domain", "audience", "realmID", "agentIDs", "retryCanaryAgentID", "relayPublicKeysJSON", "relayReplayWindow"],
+          "required": ["enabled", "domain", "acceptedLegacyDomains", "audience", "realmID", "agentIDs", "retryCanaryAgentID", "relayPublicKeysJSON", "relayReplayWindow"],
           "properties": {
             "enabled": { "type": "boolean" },
             "domain": { "type": "string" },
+            "acceptedLegacyDomains": {
+              "type": "array",
+              "maxItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"
+              }
+            },
             "audience": { "type": "string" },
             "realmID": { "type": "string" },
             "agentIDs": {

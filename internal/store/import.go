@@ -128,6 +128,11 @@ var importColumns = map[string]map[string]bool{
 		"provisioning_kind": true, "created_at": true,
 		"retired_at": true, "retirement_reason_code": true,
 	},
+	"agent_email_address_domains": {
+		"account_id": true, "realm_id": true,
+		"provisioned_agent_id": true, "address_id": true,
+		"domain": true, "local_part": true, "created_at": true,
+	},
 	"agent_email_mailboxes": {
 		"id": true, "account_id": true, "realm_id": true,
 		"owner_agent_id": true, "address_id": true,
@@ -668,6 +673,11 @@ type agentEmailAddressImportScope struct {
 	createdAt    time.Time
 }
 
+type agentEmailAddressDomainImportScope struct {
+	addressID string
+	domain    string
+}
+
 type agentEmailMailboxImportScope struct {
 	realmID      string
 	ownerAgentID string
@@ -967,6 +977,7 @@ type importCtx struct {
 	dashboardPreferences         map[string]bool
 	agentEmailAddresses          map[string]agentEmailAddressImportScope
 	agentEmailAddressKeys        map[string]string
+	agentEmailAddressDomains     map[string]map[string]bool
 	agentEmailLiveAddresses      map[string]string
 	agentEmailMailboxes          map[string]agentEmailMailboxImportScope
 	agentEmailMailboxOwners      map[string]string
@@ -1067,6 +1078,7 @@ func newImportCtx(accountID string) *importCtx {
 		dashboardPreferences:         map[string]bool{},
 		agentEmailAddresses:          map[string]agentEmailAddressImportScope{},
 		agentEmailAddressKeys:        map[string]string{},
+		agentEmailAddressDomains:     map[string]map[string]bool{},
 		agentEmailLiveAddresses:      map[string]string{},
 		agentEmailMailboxes:          map[string]agentEmailMailboxImportScope{},
 		agentEmailMailboxOwners:      map[string]string{},
@@ -1370,7 +1382,7 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 	switch table {
 	case "operators", "realms", "tokens", "account_events",
 		"agent_email_realm_receive_controls",
-		"agent_email_addresses", "agent_email_mailboxes",
+		"agent_email_addresses", "agent_email_address_domains", "agent_email_mailboxes",
 		"agent_email_realm_aliases",
 		"agent_email_messages", "agent_email_deliveries",
 		"agent_email_retry_canary_arms",
@@ -1664,6 +1676,24 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		}
 		ic.agentEmailAddresses[id] = scope
 		ic.agentEmailAddressKeys[addressKey] = id
+	case "agent_email_address_domains":
+		scope, err := ic.validateImportedAgentEmailAddressDomain(obj)
+		if err != nil {
+			return badf("agent_email_address_domains row %v", err)
+		}
+		if ic.agentEmailAddressDomains[scope.addressID] == nil {
+			ic.agentEmailAddressDomains[scope.addressID] = map[string]bool{}
+		}
+		if ic.agentEmailAddressDomains[scope.addressID][scope.domain] {
+			return badf("agent_email_address_domains row duplicates address %q domain %q", scope.addressID, scope.domain)
+		}
+		address := ic.agentEmailAddresses[scope.addressID]
+		addressKey := scope.domain + "\x00" + address.localPart
+		if previous := ic.agentEmailAddressKeys[addressKey]; previous != "" && previous != scope.addressID {
+			return badf("agent_email_address_domains row reuses reserved address from %q", previous)
+		}
+		ic.agentEmailAddressDomains[scope.addressID][scope.domain] = true
+		ic.agentEmailAddressKeys[addressKey] = scope.addressID
 	case "agent_email_mailboxes":
 		id, scope, err := ic.validateImportedAgentEmailMailbox(obj)
 		if err != nil {
@@ -3898,6 +3928,35 @@ func (ic *importCtx) validateImportedAgentEmailAddress(obj map[string]any) (stri
 	}, nil
 }
 
+func (ic *importCtx) validateImportedAgentEmailAddressDomain(
+	obj map[string]any,
+) (agentEmailAddressDomainImportScope, error) {
+	addressID, err := requireStringField(obj, "address_id")
+	address, exists := ic.agentEmailAddresses[addressID]
+	if err != nil || !exists {
+		return agentEmailAddressDomainImportScope{}, fmt.Errorf("address %q is not present in this archive", addressID)
+	}
+	realmID, err := requireStringField(obj, "realm_id")
+	agentID, agentErr := requireStringField(obj, "provisioned_agent_id")
+	if err != nil || agentErr != nil || realmID != address.realmID || agentID != address.agentID {
+		return agentEmailAddressDomainImportScope{}, fmt.Errorf("address route scope does not match its address")
+	}
+	domain, err := requireStringField(obj, "domain")
+	if err != nil || !validImportedAgentEmailDomain(domain) {
+		return agentEmailAddressDomainImportScope{}, fmt.Errorf("domain is invalid")
+	}
+	localPart, err := requireStringField(obj, "local_part")
+	if err != nil || localPart != address.localPart {
+		return agentEmailAddressDomainImportScope{}, fmt.Errorf("local_part does not match its address")
+	}
+	createdAt, err := requireImportedTimestamp(obj, "created_at")
+	if err != nil || createdAt.Before(address.createdAt) ||
+		ic.requireTimestampAtOrBeforeExport("agent_email_address_domains created_at", valueOrZero(createdAt)) != nil {
+		return agentEmailAddressDomainImportScope{}, fmt.Errorf("created_at is invalid")
+	}
+	return agentEmailAddressDomainImportScope{addressID: addressID, domain: domain}, nil
+}
+
 func (ic *importCtx) validateImportedAgentEmailMailbox(obj map[string]any) (string, agentEmailMailboxImportScope, error) {
 	id, err := requireStringField(obj, "id")
 	if err != nil || !validImportedGeneratedID(id, "emb") {
@@ -4119,7 +4178,8 @@ func (ic *importCtx) validateImportedAgentEmailMessage(obj map[string]any) (stri
 		}
 	} else {
 		alias, exists := ic.agentEmailRealmAliases[realmAliasClaimID]
-		if !exists || alias.realmID != realmID || alias.domain != address.domain ||
+		if !exists || alias.realmID != realmID ||
+			!ic.importedAgentEmailAddressAcceptsDomain(addressID, address, alias.domain) ||
 			alias.realmLabel != realmLabel {
 			return "", agentEmailMessageImportScope{}, fmt.Errorf("recipient realm-alias claim does not match message scope")
 		}
@@ -4129,7 +4189,9 @@ func (ic *importCtx) validateImportedAgentEmailMessage(obj map[string]any) (stri
 	if err != nil || hasTag && containsImportedAgentEmailControl(subaddressTag) {
 		return "", agentEmailMessageImportScope{}, fmt.Errorf("subaddress_tag is invalid")
 	}
-	recipient, recipientErr := agentemail.ParseRecipient(envelopeRecipient, address.domain)
+	recipient, recipientErr := ic.parseImportedAgentEmailRecipient(
+		envelopeRecipient, addressID, address,
+	)
 	if recipientErr != nil || recipient.LocalPart != expectedLocalPart ||
 		recipient.AgentSegment != address.agentSegment || recipient.RealmLabel != realmLabel ||
 		recipient.SubaddressTag != subaddressTag || hasTag != (recipient.SubaddressTag != "") {
@@ -4326,6 +4388,40 @@ func (ic *importCtx) validateImportedAgentEmailMessage(obj map[string]any) (stri
 		receivedAt:             *receivedAt, createdAt: *createdAt,
 		retryCanaryHash: retryCanaryHash,
 	}, nil
+}
+
+func (ic *importCtx) importedAgentEmailAddressAcceptsDomain(
+	addressID string,
+	address agentEmailAddressImportScope,
+	domain string,
+) bool {
+	if domains := ic.agentEmailAddressDomains[addressID]; len(domains) > 0 {
+		return domains[domain]
+	}
+	// Archives before schema 0087 had exactly the domain stored on the address.
+	return ic.schemaVersion < 87 && domain == address.domain
+}
+
+func (ic *importCtx) parseImportedAgentEmailRecipient(
+	recipient string,
+	addressID string,
+	address agentEmailAddressImportScope,
+) (agentemail.AddressParts, error) {
+	if domains := ic.agentEmailAddressDomains[addressID]; len(domains) > 0 {
+		ordered := make([]string, 0, len(domains))
+		for domain := range domains {
+			ordered = append(ordered, domain)
+		}
+		sort.Strings(ordered)
+		for _, domain := range ordered {
+			parts, err := agentemail.ParseRecipient(recipient, domain)
+			if err == nil {
+				return parts, nil
+			}
+		}
+		return agentemail.AddressParts{}, errors.New("recipient domain is not reserved by its address")
+	}
+	return agentemail.ParseRecipient(recipient, address.domain)
 }
 
 func (ic *importCtx) validateImportedAgentEmailDelivery(obj map[string]any) (agentEmailDeliveryImportScope, error) {
@@ -5522,6 +5618,29 @@ func (s *Store) importAccount(
 	}
 	if err := ic.validateImportedSecretGraph(); err != nil {
 		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("%w: secret graph: %v", ErrArchiveContent, err)
+	}
+	if m.SchemaVersion < 87 {
+		if !disposition.AlreadyImported {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO agent_email_address_domains
+				  (account_id,realm_id,provisioned_agent_id,address_id,domain,local_part,created_at)
+				SELECT account_id,realm_id,provisioned_agent_id,id,domain,local_part,created_at
+				  FROM agent_email_addresses
+				 WHERE account_id=$1
+				ON CONFLICT (address_id,domain) DO NOTHING`, expectedAccountID); err != nil {
+				return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("synthesize legacy agent-email domain routes: %w", err)
+			}
+		}
+	} else {
+		for addressID, address := range ic.agentEmailAddresses {
+			domains := ic.agentEmailAddressDomains[addressID]
+			if len(domains) == 0 || !domains[address.domain] {
+				return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf(
+					"%w: agent email address %q lacks its original domain route",
+					ErrArchiveContent, addressID,
+				)
+			}
+		}
 	}
 	if err := validateImportedAgentEmailGraph(ic.agentEmailMessages, ic.agentEmailDeliveries); err != nil {
 		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("%w: agent email graph: %v", ErrArchiveContent, err)

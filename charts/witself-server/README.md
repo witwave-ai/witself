@@ -61,10 +61,13 @@ renders `WITSELF_FACT_DELETION_ENABLED`; a server compiled against store schema
 28 or newer.
 
 The receive-only agent-email pilot is disabled by default. Enabling
-`agentEmail.receivePilot.enabled` requires one canonical domain, audience and
+`agentEmail.receivePilot.enabled` requires one primary domain, audience and
 realm ID, exactly 5-10 unique canonical agent IDs, one or more relay public keys
-encoded in `relayPublicKeysJSON`, and a replay window. The chart then renders
-these seven base server variables:
+encoded in `relayPublicKeysJSON`, and a replay window. One
+`acceptedLegacyDomains` entry may be configured for previously issued canonical
+local parts; the primary domain cannot appear in that list. New addresses and
+aliases are never minted on a legacy domain. The chart then renders these seven
+base server variables:
 
 - `WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED`
 - `WITSELF_AGENT_EMAIL_PILOT_DOMAIN`
@@ -73,6 +76,13 @@ these seven base server variables:
 - `WITSELF_AGENT_EMAIL_PILOT_AGENT_IDS`
 - `WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON`
 - `WITSELF_AGENT_EMAIL_RELAY_REPLAY_WINDOW`
+
+A non-empty `agentEmail.receivePilot.acceptedLegacyDomains` list renders the
+comma-separated `WITSELF_AGENT_EMAIL_ACCEPTED_LEGACY_DOMAINS` variable. The
+managed app-of-apps withholds that value from charts older than `0.0.232`; for
+the cutover configuration it preserves the first legacy domain as the old
+single-domain runtime's domain until the child chart and image advance
+together.
 
 An optional `agentEmail.receivePilot.retryCanaryAgentID` must equal one of the
 enrolled agent IDs and renders `WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID`.

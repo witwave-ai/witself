@@ -71,10 +71,24 @@ func TestAgentEmailPilotPostgresLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	legacyAddress := address.Address
+	legacyDomain := address.Domain
+	transitionScope := scope
+	transitionScope.Domain = "witmail.net"
+	transitionScope.LegacyDomains = []string{legacyDomain}
+	scope = transitionScope
 	retryAddress, err := st.EnsureAgentEmailMailbox(ctx, scope, provisioned.AccountID,
 		realm.ID, owner.ID, "")
 	if err != nil || retryAddress.ID != address.ID || retryAddress.MailboxID != address.MailboxID {
 		t.Fatalf("idempotent address = %#v / %v", retryAddress, err)
+	}
+	address = retryAddress
+	if address.Address != address.LocalPart+"@witmail.net" || len(address.Addresses) != 2 ||
+		address.Addresses[0].Role != AgentEmailAddressRolePrimary ||
+		address.Addresses[0].Address != address.Address ||
+		address.Addresses[1].Role != AgentEmailAddressRoleLegacy ||
+		address.Addresses[1].Address != legacyAddress {
+		t.Fatalf("transitioned address set = %#v", address)
 	}
 	if shown, err := st.GetAgentEmailAddress(ctx, scope, owner); err != nil || shown.Address != address.Address {
 		t.Fatalf("shown address = %#v / %v", shown, err)
@@ -156,7 +170,9 @@ func TestAgentEmailPilotPostgresLifecycle(t *testing.T) {
 		"",
 		"body",
 	}, "\r\n"))
-	parseFailure, err := ingest(address.Address, unsupportedTransfer)
+	// The issued pilot address remains a canonical route to the exact same
+	// mailbox, while new realm aliases intentionally remain primary-domain-only.
+	parseFailure, err := ingest(legacyAddress, unsupportedTransfer)
 	if err != nil || parseFailure.ParseState != AgentEmailParseError ||
 		parseFailure.ParseErrorCode != "transfer_encoding" {
 		t.Fatalf("bounded-text ingest validation = %#v / %v", parseFailure, err)
@@ -170,6 +186,9 @@ func TestAgentEmailPilotPostgresLifecycle(t *testing.T) {
 		}, Raw: raw,
 	}); !errors.Is(err, ErrAgentEmailPilotDisabled) {
 		t.Fatalf("disabled pilot error = %v", err)
+	}
+	if _, err := ingest(address.LocalPart+"@unconfigured.example", raw); !errors.Is(err, ErrAgentEmailUnknownRecipient) {
+		t.Fatalf("unconfigured domain error = %v", err)
 	}
 
 	if _, err := st.ListAgentEmails(ctx, disabledScope, owner, AgentEmailFilter{Limit: 10}); !errors.Is(err, ErrAgentEmailPilotDisabled) {

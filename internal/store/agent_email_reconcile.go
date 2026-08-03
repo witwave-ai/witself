@@ -95,7 +95,9 @@ func (s *Store) ReconcileAgentEmailPilot(
 	// but it must not make a routine server restart fail. While suspended, only
 	// verify the exact pre-existing enrollment and return it read-only. Never
 	// provision or repair mailboxes for a frozen account: any missing or drifted
-	// row remains a startup failure until an operator resumes the account.
+	// row remains a startup failure until an operator resumes the account. After
+	// resume, the next explicit startup reconciliation adds any missing primary
+	// domain routes through the normal active Ensure path.
 	if accountStatus == "suspended" {
 		addresses := make([]AgentEmailAddress, 0, len(agentIDs))
 		for _, agentID := range agentIDs {
@@ -108,9 +110,17 @@ func (s *Store) ReconcileAgentEmailPilot(
 					agentID, err,
 				)
 			}
-			if address.RealmID != realmID || address.Domain != domain {
+			if err := populateSuspendedAgentEmailCanonicalAddressesTx(
+				ctx, tx, scope, &address,
+			); err != nil {
 				return nil, fmt.Errorf(
-					"%w: suspended agent-email mailbox for %s drifted from configured realm or domain",
+					"verify suspended agent-email domain routes for %s: %w",
+					agentID, err,
+				)
+			}
+			if address.RealmID != realmID {
+				return nil, fmt.Errorf(
+					"%w: suspended agent-email mailbox for %s drifted from configured realm",
 					ErrAgentEmailPilotNotEnrolled, agentID,
 				)
 			}

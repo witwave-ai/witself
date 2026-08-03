@@ -41,6 +41,12 @@ func TestAgentEmailPilotConfigFromEnvDefaultOffAndValid(t *testing.T) {
 		pilot.RelayReplayWindow != defaultAgentEmailReplayWindow {
 		t.Fatalf("valid pilot = %+v", pilot)
 	}
+	t.Setenv(agentEmailLegacyDomainsEnv, "legacy-one.example")
+	pilot, err = agentEmailPilotConfigFromEnv()
+	if err != nil || len(pilot.LegacyDomains) != 1 ||
+		pilot.LegacyDomains[0] != "legacy-one.example" {
+		t.Fatalf("legacy domains = %+v / %v", pilot.LegacyDomains, err)
+	}
 	t.Setenv(agentEmailRetryCanaryAgentIDEnv, "agent_aaaaaaaaaaaaaaaa")
 	pilot, err = agentEmailPilotConfigFromEnv()
 	if err != nil || pilot.RetryCanaryAgentID != "agent_aaaaaaaaaaaaaaaa" {
@@ -67,6 +73,18 @@ func TestAgentEmailPilotConfigFromEnvRejectsUnsafeShapes(t *testing.T) {
 		{
 			name: "missing required domain", want: agentEmailPilotDomainEnv,
 			mutate: func(t *testing.T) { t.Setenv(agentEmailPilotDomainEnv, "") },
+		},
+		{
+			name: "too many legacy domains", want: "at most 1",
+			mutate: func(t *testing.T) {
+				t.Setenv(agentEmailLegacyDomainsEnv, "legacy-one.example,legacy-two.example")
+			},
+		},
+		{
+			name: "primary repeated as legacy", want: "legacy domain",
+			mutate: func(t *testing.T) {
+				t.Setenv(agentEmailLegacyDomainsEnv, "agent-mail.witwave.ai")
+			},
 		},
 		{
 			name: "too few agents", want: "5-10",
@@ -105,6 +123,34 @@ func TestAgentEmailPilotConfigFromEnvRejectsUnsafeShapes(t *testing.T) {
 			_, err := agentEmailPilotConfigFromEnv()
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("error = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestAgentEmailRealmAliasProjectionDomainAllowed(t *testing.T) {
+	pilot := server.AgentEmailPilotConfig{
+		Enabled: true, Domain: "witmail.net",
+		LegacyDomains: []string{"agent-mail.witwave.ai"},
+	}
+	for _, tc := range []struct {
+		name   string
+		domain string
+		state  string
+		want   bool
+	}{
+		{name: "primary applied", domain: "witmail.net", state: store.AgentEmailRealmAliasApplied, want: true},
+		{name: "primary suspended", domain: "witmail.net", state: store.AgentEmailRealmAliasSuspended, want: true},
+		{name: "legacy applied refused", domain: "agent-mail.witwave.ai", state: store.AgentEmailRealmAliasApplied},
+		{name: "legacy suspended refused", domain: "agent-mail.witwave.ai", state: store.AgentEmailRealmAliasSuspended},
+		{name: "legacy retired cleanup", domain: "agent-mail.witwave.ai", state: store.AgentEmailRealmAliasRetired, want: true},
+		{name: "unknown retired refused", domain: "other.example", state: store.AgentEmailRealmAliasRetired},
+		{name: "noncanonical refused", domain: "WITMAIL.NET", state: store.AgentEmailRealmAliasRetired},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := server.AgentEmailRealmAliasApplyRequest{Domain: tc.domain, State: tc.state}
+			if got := agentEmailRealmAliasProjectionDomainAllowed(pilot, in); got != tc.want {
+				t.Fatalf("allowed = %t, want %t", got, tc.want)
 			}
 		})
 	}
@@ -239,6 +285,7 @@ func clearAgentEmailPilotEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
 		agentEmailPilotEnabledEnv, agentEmailPilotDomainEnv, agentEmailPilotAudienceEnv,
+		agentEmailLegacyDomainsEnv,
 		agentEmailPilotRealmIDEnv, agentEmailPilotAgentIDsEnv,
 		agentEmailRelayPublicKeysEnv, agentEmailRelayReplayWindowEnv,
 		agentEmailRetryCanaryAgentIDEnv,

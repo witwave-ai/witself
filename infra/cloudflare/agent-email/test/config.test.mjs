@@ -50,6 +50,11 @@ test("deployment config is email-only and cannot reuse the control-plane DIRECTO
   assert.match(config, /"namespace_id"\s*:\s*"2202"/);
   assert.match(config, /"limit"\s*:\s*100[\s\S]{0,60}"period"\s*:\s*10/);
   assert.match(config, /"CONTROL_PLANE_URL"\s*:\s*"https:\/\/self\.witwave\.ai\/"/);
+  assert.match(config, /"AGENT_EMAIL_DOMAIN"\s*:\s*"witmail\.net"/);
+  assert.match(
+    config,
+    /"AGENT_EMAIL_LEGACY_DOMAINS"\s*:\s*"agent-mail\.witwave\.ai"/,
+  );
   assert.match(
     config,
     /"REALM_EMAIL_ALIAS_DELIVERY_ENABLED"\s*:\s*"false"/,

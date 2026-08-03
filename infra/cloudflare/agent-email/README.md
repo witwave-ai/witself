@@ -6,15 +6,24 @@ has no HTTP route or control-plane Container binding, and it has no access to
 the control-plane `DIRECTORY` KV namespace. The Worker and control plane instead
 share only the dedicated email-route KV namespace.
 
-The original one-realm, 5–10-recipient literal pilot remains supported. The
-runtime can also resolve a canonical realm label or managed realm alias through
-`email:realm-route:v1:<domain>:<realm-label>`. Both labels select the same realm
-and cell; the cell remains authoritative for the agent segment, alias state,
-and account policy. A malformed, suspended, retired, stale, or conflicting
-projection fails closed. Stale records are refreshed through a bounded,
-authenticated control-plane lookup and are never used when that lookup fails
-or returns an older controller revision. KV is a route cache, never alias-claim
-authority.
+`witmail.net` is reserved exclusively for agent email; it is not a general
+mailbox or website domain. `AGENT_EMAIL_DOMAIN` names that primary domain and
+`AGENT_EMAIL_LEGACY_DOMAINS` may name at most one compatibility domain. The
+runtime can resolve a canonical realm label or managed realm alias on the
+primary domain through `email:realm-route:v1:<domain>:<realm-label>`. Both
+labels select the same realm and cell; the cell remains authoritative for the
+agent segment, alias state, and account policy. A malformed, suspended,
+retired, stale, or conflicting projection fails closed. Stale records are
+refreshed through a bounded, authenticated control-plane lookup and are never
+used when that lookup fails or returns an older controller revision. KV is a
+route cache, never alias-claim authority.
+
+The original one-realm, 5–10-recipient literal pilot remains supported only on
+the one configured legacy domain. A legacy envelope must match the exact
+enabled pilot manifest and recipient row before it can relay. Legacy traffic
+never consults a dynamic realm-route projection or the control plane, so
+adding `agent-mail.witwave.ai` to the compatibility set cannot make newly
+invented addresses reachable there.
 
 Managed alias delivery also requires
 `REALM_EMAIL_ALIAS_DELIVERY_ENABLED=true`. The value is exact and defaults to
@@ -22,9 +31,9 @@ Managed alias delivery also requires
 message body is read or a cell is contacted. Canonical Realm ID and legacy
 literal-pilot delivery are intentionally unaffected.
 
-Dynamic route lookup is protected independently of account policy. A positive
-`EMAIL_DIRECTORY` projection is always checked first and bypasses negative
-state. On a valid cold KV miss, the Worker hashes
+Primary-domain dynamic route lookup is protected independently of account
+policy. A positive `EMAIL_DIRECTORY` projection is always checked first and
+bypasses negative state. On a valid cold KV miss, the Worker hashes
 `domain + NUL + realm-label`, coalesces identical in-flight lookups, and keeps
 only a 10-second, 1,024-entry in-isolate SHA-256 miss-marker cache. The marker
 contains no address, domain, or realm label. Only the one admitted live
@@ -117,7 +126,9 @@ npx wrangler deploy --dry-run --config wrangler.generated.jsonc
 credential-free HTTPS origin `CONTROL_PLANE_URL`. Set
 `REALM_EMAIL_ALIAS_DELIVERY_ENABLED=true` only for a reviewed alias activation;
 it defaults to `false` and rejects any value other than literal `true` or
-`false`. The renderer refuses the KV ID bound to
+`false`. Set `REALM_EMAIL_CANONICAL_DELIVERY_ENABLED=true` only for a separately
+reviewed canonical-route activation; it has the same exact-boolean,
+default-`false` contract. The renderer refuses the KV ID bound to
 the adjacent control-plane Worker. The generated file is local operator state
 and must not be committed. The generated Worker must expose
 `REALM_ROUTE_COLD_MISS_LIMITER` at 10 calls per 10 seconds and

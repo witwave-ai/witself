@@ -701,6 +701,17 @@ func TestAgentEmailPilotDefaultOffAndValidation(t *testing.T) {
 	if err := ValidateAgentEmailPilotConfig(pilot); err != nil {
 		t.Fatalf("valid pilot config: %v", err)
 	}
+	legacy := pilot
+	legacy.Domain = "witmail.net"
+	legacy.LegacyDomains = []string{"agent-mail.witwave.ai"}
+	if err := ValidateAgentEmailPilotConfig(legacy); err != nil {
+		t.Fatalf("valid legacy-domain config: %v", err)
+	}
+	duplicateDomain := legacy
+	duplicateDomain.LegacyDomains = []string{"witmail.net"}
+	if err := ValidateAgentEmailPilotConfig(duplicateDomain); err == nil {
+		t.Fatal("primary domain was accepted as its own legacy domain")
+	}
 	tooFew := pilot
 	tooFew.AgentIDs = map[string]bool{"agent_aaaaaaaaaaaaaaaa": true}
 	if err := ValidateAgentEmailPilotConfig(tooFew); err == nil {

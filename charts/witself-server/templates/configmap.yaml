@@ -12,6 +12,19 @@
 {{- $_ := required "agentEmail.receivePilot.realmID is required when enabled" $emailPilot.realmID -}}
 {{- $_ := required "agentEmail.receivePilot.relayPublicKeysJSON is required when enabled" $emailPilot.relayPublicKeysJSON -}}
 {{- $_ := required "agentEmail.receivePilot.relayReplayWindow is required when enabled" $emailPilot.relayReplayWindow -}}
+{{- if gt (len $emailPilot.acceptedLegacyDomains) 1 -}}
+{{- fail "agentEmail.receivePilot.acceptedLegacyDomains may contain at most 1 domain" -}}
+{{- end -}}
+{{- $seenEmailDomains := dict $emailPilot.domain true -}}
+{{- range $legacyDomain := $emailPilot.acceptedLegacyDomains -}}
+{{- if not (regexMatch "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$" $legacyDomain) -}}
+{{- fail (printf "agentEmail.receivePilot.acceptedLegacyDomains contains invalid domain %q" $legacyDomain) -}}
+{{- end -}}
+{{- if hasKey $seenEmailDomains $legacyDomain -}}
+{{- fail (printf "agentEmail.receivePilot.acceptedLegacyDomains contains primary or duplicate domain %q" $legacyDomain) -}}
+{{- end -}}
+{{- $_ := set $seenEmailDomains $legacyDomain true -}}
+{{- end -}}
 {{- $seenAgentIDs := dict -}}
 {{- range $agentID := $emailPilot.agentIDs -}}
 {{- if not (regexMatch "^agent_[a-z2-7]{16}$" $agentID) -}}
@@ -49,6 +62,9 @@ data:
   WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED: {{ $emailPilot.enabled | quote }}
 {{ if $emailPilot.enabled }}
   WITSELF_AGENT_EMAIL_PILOT_DOMAIN: {{ $emailPilot.domain | quote }}
+{{ if $emailPilot.acceptedLegacyDomains }}
+  WITSELF_AGENT_EMAIL_ACCEPTED_LEGACY_DOMAINS: {{ join "," $emailPilot.acceptedLegacyDomains | quote }}
+{{ end }}
   WITSELF_AGENT_EMAIL_PILOT_AUDIENCE: {{ $emailPilot.audience | quote }}
   WITSELF_AGENT_EMAIL_PILOT_REALM_ID: {{ $emailPilot.realmID | quote }}
   WITSELF_AGENT_EMAIL_PILOT_AGENT_IDS: {{ join "," $emailPilot.agentIDs | quote }}

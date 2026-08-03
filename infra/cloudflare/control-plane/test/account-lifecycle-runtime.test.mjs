@@ -633,6 +633,7 @@ function runtime({
     (cellName, path, payload) =>
       targetAuthority.request(cellName, path, payload),
   backupsEnabled = false,
+  reconcileRealmEmailAliases,
 }) {
   targetAuthorities.set(directory, targetAuthority);
   return new DurableAccountLifecycle(
@@ -668,6 +669,9 @@ function runtime({
         return 3;
       },
       targetCoordinatorRequest,
+      ...(reconcileRealmEmailAliases
+        ? { reconcileRealmEmailAliases }
+        : {}),
     },
   );
 }
@@ -2538,9 +2542,14 @@ test("closed authority removes a stale route on replay", async () => {
   });
   const bucket = new Bucket();
   let closeCalls = 0;
+  const aliasActions = [];
   const coordinator = runtime({
     directory,
     bucket,
+    reconcileRealmEmailAliases: async (_accountID, fence) => {
+      aliasActions.push(fence.action);
+      return { complete: true };
+    },
     fetch: async (url) => {
       if (url.endsWith("/v1/account:close")) {
         closeCalls++;
@@ -2572,6 +2581,7 @@ test("closed authority removes a stale route on replay", async () => {
   assert.equal(replay.status, 200);
   assert.equal(closeCalls, 1);
   assert.equal(directory.value(`acct:${ACCOUNT}`), null);
+  assert.deepEqual(aliasActions, ["retire", "retire"]);
 });
 
 test("unsupported cell protocol prevents account mutation", async () => {

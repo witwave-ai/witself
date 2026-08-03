@@ -10,7 +10,7 @@ import {
   validateRealmRouteProjection,
 } from "../src/directory.mjs";
 
-const domain = "witmail.ai";
+const domain = "witmail.net";
 const realmID = "realm_abcdefghijkl2345";
 const updatedAt = "2026-08-01T12:00:00.000Z";
 

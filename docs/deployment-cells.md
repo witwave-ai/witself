@@ -139,7 +139,11 @@ The Cloudflare receive pilot is a managed, capability-limited cell feature. It
 is disabled unless every one of these server settings is present and valid:
 
 - `WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED=true`
-- `WITSELF_AGENT_EMAIL_PILOT_DOMAIN` — the one canonical lowercase pilot domain
+- `WITSELF_AGENT_EMAIL_PILOT_DOMAIN` — the primary lowercase managed domain
+- `WITSELF_AGENT_EMAIL_ACCEPTED_LEGACY_DOMAINS` — optional compatibility domain
+  (the runtime accepts comma-separated syntax, but managed deployments cap the
+  list at one); it accepts only canonical local parts issued before cutover and
+  can never mint a new address or alias
 - `WITSELF_AGENT_EMAIL_PILOT_AUDIENCE` — the exact destination-cell audience
 - `WITSELF_AGENT_EMAIL_PILOT_REALM_ID` — the one enrolled realm
 - `WITSELF_AGENT_EMAIL_PILOT_AGENT_IDS` — a comma-separated set of 5–10 enrolled
@@ -149,12 +153,38 @@ is disabled unless every one of these server settings is present and valid:
 - `WITSELF_AGENT_EMAIL_RELAY_REPLAY_WINDOW` — optional; defaults to `5m` and may
   not exceed `15m`
 
+When `WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED` is absent or parses as false,
+the process leaves the pilot disabled and ignores the other pilot variables.
+When it is true, the primary domain and every other required pilot value must be
+present. `WITSELF_AGENT_EMAIL_ACCEPTED_LEGACY_DOMAINS` may be absent/blank or
+contain exactly one canonical lowercase ASCII domain. Although its wire syntax
+is comma-separated, a second entry is rejected. Surrounding whitespace is
+trimmed, but the resulting primary and legacy values must already be canonical
+lowercase ASCII without a DNS root dot, and the legacy domain cannot equal the
+primary. Any invalid enabled configuration fails startup before serving.
+
 The private Ed25519 relay key is a secret of the isolated Cloudflare Email
 Worker and must never be placed in cell configuration. On startup, an enabled
 cell reconciles the one realm and exact agent allowlist into durable mailboxes
-and addresses. Startup fails before serving when the realm or an agent is
-missing or inactive, an agent belongs to another realm, an address collides, or
-an existing mailbox/address has inconsistent ownership.
+and their configured primary route. For an existing mailbox, it also preserves
+a different original route only when that legacy address was already issued.
+Configuring the legacy domain alone never issues it to a mailbox created after
+cutover.
+Ingress must match both a currently configured primary/legacy domain and a
+permanent `agent_email_address_domains` reservation. A historical reservation
+remains non-reusable but is not accepted after its domain leaves the runtime
+configuration. Startup fails before serving when the realm or an agent is
+missing or inactive, an agent belongs to another realm, a route collides, or an
+existing mailbox/address has inconsistent ownership. Realm-email aliases stay
+on their explicit primary domain and are never fanned out to the legacy domain.
+
+`witmail.net` is a dedicated agent-email service domain. Do not place a website,
+`A`, `AAAA`, or application `CNAME` on it; do not use it for marketing,
+employee mailboxes, or platform-notification sending. The required
+`postmaster@witmail.net` and `abuse@witmail.net` operator routes are the narrow
+operational exception. A future agent-outbound slice may use separately
+isolated sending infrastructure, but it must remain agent-email-only and must
+not turn this domain into a general company-mail surface.
 
 The edge implementation lives in `infra/cloudflare/agent-email/`. It uses its
 own `witself-agent-email-pilot` Worker and an isolated
@@ -244,6 +274,37 @@ the canary setting or deploying pre-60/61 code, disable the process-level
 receive pilot and the exact edge routes; never rely on a realm-disabled row to
 protect traffic from an older binary, and never run a pre-60 export after that
 row has become authoritative.
+
+For the schema-87 managed-domain cutover, create the required pre-migration
+backup, keep every canonical/alias inventory and delivery gate dark, and freeze
+mailbox provisioning, realm-alias projection, account export/import, and cell
+movement during mixed-version convergence. Before changing the primary domain,
+prove that the legacy domain has no realm-alias request, assignment, or cell
+projection. If one exists in a future rollout, resolve and retire it while the
+legacy domain is still primary; legacy aliases are intentionally unsupported
+after cutover. Migration `0087` backfills each
+existing address's original domain into `agent_email_address_domains`. The new
+startup reconciler then adds `witmail.net` as primary for an existing pilot
+mailbox and preserves its issued `agent-mail.witwave.ai` route; a mailbox first
+created after cutover receives only `witmail.net`. Until both the child chart
+and image tag are at least `0.0.232`, the app-of-apps withholds the new
+legacy-domain field and passes the issued legacy domain through the old
+single-domain contract. Advance both pins before relying on dual-domain
+behavior.
+
+A suspended account is verified read-only during startup: reconciliation does
+not add its missing primary route while the account is frozen. Resuming the
+account changes lifecycle state only. After resume, explicitly restart or run
+the normal startup reconciliation on the active account, then verify that the
+new primary route was added without changing its address or mailbox IDs.
+
+After every new pod is Ready, verify schema 87, the exact route set and roles,
+and that no new legacy-domain alias or post-cutover canonical route was issued
+before resuming archive movement. Once any additive route exists, schema 87
+intentionally refuses downgrade. Roll back application behavior/configuration
+while leaving schema 87 and all permanent route reservations intact; never
+delete a route merely to make the down migration pass. Delivery activation is
+a later, separately reviewed edge rollout.
 
 For avatar creative-payload compaction, this release pin is Phase A: leave
 `apps.witselfServer.avatarPayloadCompactionEnabled: false`, freeze avatar
