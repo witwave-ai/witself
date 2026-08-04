@@ -19,8 +19,8 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 	if len(c.Plans) != 4 {
 		t.Fatalf("catalog has %d plans; want 4", len(c.Plans))
 	}
-	if c.Updated != "2026-08-01" {
-		t.Fatalf("catalog updated = %q; want 2026-08-01", c.Updated)
+	if c.Updated != "2026-08-03" {
+		t.Fatalf("catalog updated = %q; want 2026-08-03", c.Updated)
 	}
 	if c.Currency != "USD" {
 		t.Fatalf("catalog currency = %q; want USD", c.Currency)
@@ -116,15 +116,16 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 			priceMonthly: monthly(0),
 			available:    true,
 			limits: map[string]int64{
-				AgentEmailAttachmentStorageBytesLimit: 0,
-				AgentEmailMaxRawBytesLimit:            0,
-				AgentEmailRealmAliasesPerRealmLimit:   0,
-				AgentLimit:                            10,
-				AgentPerRealmLimit:                    10,
-				RealmLimit:                            1,
-				StoredFactLimit:                       1000,
-				StoredMemoryLimit:                     1000,
-				StoredSecretLimit:                     0,
+				AgentEmailAttachmentStorageBytesLimit:  0,
+				AgentEmailCustomDomainsPerAccountLimit: 0,
+				AgentEmailMaxRawBytesLimit:             0,
+				AgentEmailRealmAliasesPerRealmLimit:    0,
+				AgentLimit:                             10,
+				AgentPerRealmLimit:                     10,
+				RealmLimit:                             1,
+				StoredFactLimit:                        1000,
+				StoredMemoryLimit:                      1000,
+				StoredSecretLimit:                      0,
 			},
 			policies: map[string]int64{
 				AgentEmailEntitlementVersionPolicy: AgentEmailEntitlementVersion,
@@ -142,6 +143,7 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 			available:    true,
 			limits: map[string]int64{
 				AgentEmailAttachmentStorageBytesLimit:   5 * 1024 * 1024 * 1024,
+				AgentEmailCustomDomainsPerAccountLimit:  0,
 				AgentEmailMaxRawBytesLimit:              10 * 1024 * 1024,
 				AgentEmailRealmAliasesPerRealmLimit:     0,
 				AgentLimit:                              100,
@@ -170,6 +172,7 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 			usageBilled:  true,
 			limits: map[string]int64{
 				AgentEmailAttachmentStorageBytesLimit:   100 * 1024 * 1024 * 1024,
+				AgentEmailCustomDomainsPerAccountLimit:  1,
 				AgentEmailMaxRawBytesLimit:              25 * 1024 * 1024,
 				AgentEmailRealmAliasesPerRealmLimit:     1,
 				AgentLimit:                              2500,
@@ -189,7 +192,7 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 				MessagingEntitlementVersionPolicy:  MessagingEntitlementVersion,
 				TranscriptRetentionDaysPolicy:      365,
 			},
-			features: []string{"memory", "facts", "secrets", MessagingFeature, AgentEmailReceiveFeature, AgentEmailRealmAliasFeature, "collaboration", "support"},
+			features: []string{"memory", "facts", "secrets", MessagingFeature, AgentEmailReceiveFeature, AgentEmailRealmAliasFeature, AgentEmailCustomDomainFeature, "collaboration", "support"},
 			summary:  "Coming soon. Everything in Professional for up to 100 agents per realm across 25 realms, plus usage-based billing.",
 		},
 		"enterprise": {
@@ -197,6 +200,7 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 			usageBilled: true,
 			limits: map[string]int64{
 				AgentEmailAttachmentStorageBytesLimit:   100 * 1024 * 1024 * 1024,
+				AgentEmailCustomDomainsPerAccountLimit:  0,
 				AgentEmailMaxRawBytesLimit:              25 * 1024 * 1024,
 				AgentEmailRealmAliasesPerRealmLimit:     3,
 				MessageDeliveredPerRealmMinuteLimit:     25000,
@@ -212,7 +216,7 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 				MessageRetentionDaysPolicy:         365,
 				MessagingEntitlementVersionPolicy:  MessagingEntitlementVersion,
 			},
-			features: []string{"memory", "facts", "secrets", MessagingFeature, AgentEmailReceiveFeature, AgentEmailRealmAliasFeature, "collaboration", "support"},
+			features: []string{"memory", "facts", "secrets", MessagingFeature, AgentEmailReceiveFeature, AgentEmailRealmAliasFeature, AgentEmailCustomDomainFeature, "collaboration", "support"},
 			summary:  "Coming soon. Everything in Team with custom pricing and support; details to follow.",
 		},
 	}
@@ -248,23 +252,36 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 	}
 }
 
-// Phase A teaches every binary the custom-domain vocabulary before the plan
-// catalog can project it into account snapshots. Keeping both keys absent here
-// is an intentional rollout fence: Phase B may replace this test only after
-// Phase A is running everywhere and the Founder unlimited override is durable.
-func TestAgentEmailCustomDomainPhaseARemainsDarkInCanonicalCatalog(t *testing.T) {
+// Phase B publishes the commercial defaults only after Phase A binaries and
+// the Founder explicit-unlimited override have converged. Enterprise keeps the
+// feature but defaults to zero so every non-Founder allowance is contracted.
+func TestCanonicalAgentEmailCustomDomainDefaultsPhaseB(t *testing.T) {
 	catalog, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	for _, plan := range catalog.Plans {
-		if plan.HasFeature(AgentEmailCustomDomainFeature) {
-			t.Fatalf("plan %q unexpectedly enables %q during Phase A",
-				plan.ID, AgentEmailCustomDomainFeature)
+	wants := map[string]struct {
+		limit   int64
+		feature bool
+	}{
+		Free:         {limit: 0},
+		"standard":   {limit: 0},
+		"team":       {limit: 1, feature: true},
+		"enterprise": {limit: 0, feature: true},
+	}
+	for planID, want := range wants {
+		plan, ok := catalog.Get(planID)
+		if !ok {
+			t.Fatalf("catalog missing plan %q", planID)
 		}
-		if _, ok := plan.Limits[AgentEmailCustomDomainsPerAccountLimit]; ok {
-			t.Fatalf("plan %q unexpectedly publishes %q during Phase A",
-				plan.ID, AgentEmailCustomDomainsPerAccountLimit)
+		if got, present := plan.Limits[AgentEmailCustomDomainsPerAccountLimit]; !present || got != want.limit {
+			t.Errorf("%s %s = %d, present=%t; want %d",
+				planID, AgentEmailCustomDomainsPerAccountLimit,
+				got, present, want.limit)
+		}
+		if got := plan.HasFeature(AgentEmailCustomDomainFeature); got != want.feature {
+			t.Errorf("%s %s feature = %t; want %t",
+				planID, AgentEmailCustomDomainFeature, got, want.feature)
 		}
 	}
 }

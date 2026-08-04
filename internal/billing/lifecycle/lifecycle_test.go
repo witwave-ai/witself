@@ -451,6 +451,12 @@ func TestAgentEmailLimitOverridesResolveAndValidate(t *testing.T) {
 	); err != nil {
 		t.Fatalf("set realm email aliases unlimited: %v", err)
 	}
+	if _, err := h.m.SetAccountLimitOverride(
+		ctx, accountID, plans.AgentEmailCustomDomainsPerAccountLimit, nil,
+		testAdminActor(), "founder custom inbound domains are unlimited",
+	); err != nil {
+		t.Fatalf("set custom inbound domains unlimited: %v", err)
+	}
 
 	beforeRecord, beforeSnapshot, err := h.m.ResolvedStatus(ctx, accountID, "")
 	if err != nil {
@@ -466,6 +472,10 @@ func TestAgentEmailLimitOverridesResolveAndValidate(t *testing.T) {
 	}
 	if _, present := beforeSnapshot.DefaultLimits[plans.AgentEmailRealmAliasesPerRealmLimit]; present {
 		t.Fatalf("realm-alias default activated during phase A: %v",
+			beforeSnapshot.DefaultLimits)
+	}
+	if _, present := beforeSnapshot.DefaultLimits[plans.AgentEmailCustomDomainsPerAccountLimit]; present {
+		t.Fatalf("custom-domain default activated during phase A: %v",
 			beforeSnapshot.DefaultLimits)
 	}
 
@@ -490,6 +500,10 @@ func TestAgentEmailLimitOverridesResolveAndValidate(t *testing.T) {
 		t.Fatalf("Phase-B realm-alias default = %d, present=%t; want 0",
 			got, present)
 	}
+	if got, present := snapshot.DefaultLimits[plans.AgentEmailCustomDomainsPerAccountLimit]; !present || got != 0 {
+		t.Fatalf("Phase-B custom-domain default = %d, present=%t; want 0",
+			got, present)
+	}
 	if snapshot.Limits[plans.AgentEmailMaxRawBytesLimit] != rawMaximum {
 		t.Fatalf("agent-email snapshot = defaults %v effective %v",
 			snapshot.DefaultLimits, snapshot.Limits)
@@ -500,16 +514,22 @@ func TestAgentEmailLimitOverridesResolveAndValidate(t *testing.T) {
 	if _, finite := snapshot.Limits[plans.AgentEmailRealmAliasesPerRealmLimit]; finite {
 		t.Fatalf("realm email aliases remained finite: %v", snapshot.Limits)
 	}
+	if _, finite := snapshot.Limits[plans.AgentEmailCustomDomainsPerAccountLimit]; finite {
+		t.Fatalf("custom inbound domains remained finite: %v", snapshot.Limits)
+	}
 	rawOverride := record.LimitOverrides[plans.AgentEmailMaxRawBytesLimit]
 	attachmentOverride := record.LimitOverrides[plans.AgentEmailAttachmentStorageBytesLimit]
 	aliasOverride := record.LimitOverrides[plans.AgentEmailRealmAliasesPerRealmLimit]
+	customDomainOverride := record.LimitOverrides[plans.AgentEmailCustomDomainsPerAccountLimit]
 	if rawOverride.Max == nil || *rawOverride.Max != rawMaximum ||
 		attachmentOverride.Max != nil ||
 		attachmentOverride.Reason != "founder attachment storage is unlimited" ||
 		aliasOverride.Max != nil ||
-		aliasOverride.Reason != "founder realm email aliases are unlimited" {
-		t.Fatalf("agent-email overrides = raw %+v attachment %+v aliases %+v",
-			rawOverride, attachmentOverride, aliasOverride)
+		aliasOverride.Reason != "founder realm email aliases are unlimited" ||
+		customDomainOverride.Max != nil ||
+		customDomainOverride.Reason != "founder custom inbound domains are unlimited" {
+		t.Fatalf("agent-email overrides = raw %+v attachment %+v aliases %+v custom domains %+v",
+			rawOverride, attachmentOverride, aliasOverride, customDomainOverride)
 	}
 	if snapshot.Hash != beforeSnapshot.Hash ||
 		len(h.applier.calls) != applyCallsBeforePromotion ||
@@ -523,6 +543,8 @@ func TestAgentEmailLimitOverridesResolveAndValidate(t *testing.T) {
 		t.Fatalf("applied agent-email limits = %v", got)
 	} else if _, finite := got[plans.AgentEmailAttachmentStorageBytesLimit]; finite {
 		t.Fatalf("applied attachment storage remained finite: %v", got)
+	} else if _, finite := got[plans.AgentEmailCustomDomainsPerAccountLimit]; finite {
+		t.Fatalf("applied custom-domain allowance remained finite: %v", got)
 	}
 
 	beforeVersion := record.Version
@@ -573,6 +595,7 @@ func TestFounderResourceOverridesSurviveCatalogPromotion(t *testing.T) {
 		plans.AgentPerRealmLimit,
 		plans.StoredMemoryLimit,
 		plans.StoredFactLimit,
+		plans.AgentEmailCustomDomainsPerAccountLimit,
 	} {
 		if _, err := h.m.SetAccountLimitOverride(
 			ctx,
@@ -600,7 +623,7 @@ func TestFounderResourceOverridesSurviveCatalogPromotion(t *testing.T) {
 		"plans":[{
 			"id":"free","name":"Personal","price_monthly":0,"available":true,
 			"usage_billed":false,
-			"limits":{"agents":10,"agents_per_realm":10,"realms":1,"stored_memory":1000,"stored_fact":1000},
+			"limits":{"agent_email_custom_domains_per_account":0,"agents":10,"agents_per_realm":10,"realms":1,"stored_memory":1000,"stored_fact":1000},
 			"features":["memory","facts"]
 		}]
 	}`))
@@ -619,7 +642,8 @@ func TestFounderResourceOverridesSurviveCatalogPromotion(t *testing.T) {
 		afterSnapshot.DefaultLimits[plans.AgentLimit] != 10 ||
 		afterSnapshot.DefaultLimits[plans.AgentPerRealmLimit] != 10 ||
 		afterSnapshot.DefaultLimits[plans.StoredMemoryLimit] != 1000 ||
-		afterSnapshot.DefaultLimits[plans.StoredFactLimit] != 1000 {
+		afterSnapshot.DefaultLimits[plans.StoredFactLimit] != 1000 ||
+		afterSnapshot.DefaultLimits[plans.AgentEmailCustomDomainsPerAccountLimit] != 0 {
 		t.Fatalf("Phase B defaults = %v", afterSnapshot.DefaultLimits)
 	}
 	if len(afterSnapshot.Limits) != 0 ||
@@ -635,6 +659,123 @@ func TestFounderResourceOverridesSurviveCatalogPromotion(t *testing.T) {
 			applyCalls,
 			len(h.applier.calls),
 		)
+	}
+}
+
+func TestEnterpriseCustomDomainPromotionPreservesFounderUnlimitedOverride(t *testing.T) {
+	h := newHarness(t, false)
+	ctx := t.Context()
+	const accountID = "acct_founder_custom_domain_promotion"
+
+	phaseA, err := plans.Parse([]byte(`{
+		"schema_version":"witself.plans.v0",
+		"plans":[
+			{
+				"id":"free","name":"Personal","price_monthly":0,
+				"available":true,"features":["memory"]
+			},
+			{
+				"id":"enterprise","name":"Enterprise","usage_billed":true,
+				"features":["memory"]
+			}
+		]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.m.cfg.Catalog = phaseA
+	if _, err := h.m.SetAccountPlanOverride(
+		ctx, accountID, "enterprise", testAdminActor(),
+		"founder account classification",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.m.SetAccountLimitOverride(
+		ctx, accountID, plans.AgentEmailCustomDomainsPerAccountLimit, nil,
+		testAdminActor(), "founder custom inbound domains are unlimited",
+	); err != nil {
+		t.Fatal(err)
+	}
+	beforeRecord, beforeSnapshot, err := h.m.ResolvedStatus(ctx, accountID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beforeSnapshot.Plan != "enterprise" ||
+		slices.Contains(beforeSnapshot.Features, plans.AgentEmailCustomDomainFeature) {
+		t.Fatalf("Phase A founder snapshot = %+v", beforeSnapshot)
+	}
+	if _, present := beforeSnapshot.DefaultLimits[plans.AgentEmailCustomDomainsPerAccountLimit]; present {
+		t.Fatalf("Phase A custom-domain default = %v; want absent",
+			beforeSnapshot.DefaultLimits)
+	}
+	if _, finite := beforeSnapshot.Limits[plans.AgentEmailCustomDomainsPerAccountLimit]; finite {
+		t.Fatalf("Phase A founder custom-domain limit = %v; want unlimited",
+			beforeSnapshot.Limits)
+	}
+	override := beforeRecord.LimitOverrides[plans.AgentEmailCustomDomainsPerAccountLimit]
+	if override.Max != nil ||
+		override.Reason != "founder custom inbound domains are unlimited" {
+		t.Fatalf("Phase A founder override = %+v", override)
+	}
+	applyCalls := len(h.applier.calls)
+
+	phaseB, err := plans.Parse([]byte(`{
+		"schema_version":"witself.plans.v0",
+		"plans":[
+			{
+				"id":"free","name":"Personal","price_monthly":0,
+				"available":true,
+				"limits":{"agent_email_custom_domains_per_account":0},
+				"features":["memory"]
+			},
+			{
+				"id":"enterprise","name":"Enterprise","usage_billed":true,
+				"limits":{"agent_email_custom_domains_per_account":0},
+				"features":["memory","agent_email_custom_domain"]
+			}
+		]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.m.cfg.Catalog = phaseB
+	if err := h.m.ReconcileAccount(ctx, accountID); err != nil {
+		t.Fatal(err)
+	}
+	afterRecord, afterSnapshot, err := h.m.ResolvedStatus(ctx, accountID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, present := afterSnapshot.DefaultLimits[plans.AgentEmailCustomDomainsPerAccountLimit]; !present || got != 0 {
+		t.Fatalf("Phase B Enterprise custom-domain default = %d, present=%t; want zero",
+			got, present)
+	}
+	if _, finite := afterSnapshot.Limits[plans.AgentEmailCustomDomainsPerAccountLimit]; finite {
+		t.Fatalf("Phase B founder custom-domain limit = %v; want explicit unlimited",
+			afterSnapshot.Limits)
+	}
+	if !slices.Contains(afterSnapshot.DefaultFeatures, plans.AgentEmailCustomDomainFeature) ||
+		!slices.Contains(afterSnapshot.Features, plans.AgentEmailCustomDomainFeature) {
+		t.Fatalf("Phase B founder features = defaults %v effective %v",
+			afterSnapshot.DefaultFeatures, afterSnapshot.Features)
+	}
+	afterOverride := afterRecord.LimitOverrides[plans.AgentEmailCustomDomainsPerAccountLimit]
+	if afterOverride.Max != nil || afterOverride.Reason != override.Reason ||
+		afterOverride.ActorID != override.ActorID ||
+		afterOverride.ActorHandle != override.ActorHandle {
+		t.Fatalf("Founder override changed during promotion: before=%+v after=%+v",
+			override, afterOverride)
+	}
+	if SnapshotApplyPending(afterRecord, afterSnapshot) ||
+		len(h.applier.calls) != applyCalls+1 {
+		t.Fatalf("Phase B founder apply = pending=%t calls=%d; want converged calls=%d",
+			SnapshotApplyPending(afterRecord, afterSnapshot),
+			len(h.applier.calls), applyCalls+1)
+	}
+	last := h.applier.last(t)
+	if _, finite := last.limits[plans.AgentEmailCustomDomainsPerAccountLimit]; finite ||
+		!slices.Contains(last.features, plans.AgentEmailCustomDomainFeature) {
+		t.Fatalf("Phase B founder cell projection = %+v", last)
 	}
 }
 
