@@ -470,21 +470,48 @@ explicit zero default. Its negotiated quantity must be installed as an audited
 account limit override before a request is accepted. A missing effective limit
 means unlimited only while the feature is enabled; zero remains a real cap.
 
-The first implementation is deliberately dark. The exact-`true`, runtime-only
-`CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUESTS_ENABLED` gate is absent from release
-configuration. Even when a test supplies that gate, this slice only creates a
-globally unique request and a stable TXT ownership challenge. It does not query
-DNS, mark ownership verified, publish MX or Email Routing configuration, write
-a cell/edge route, or accept mail for the domain.
+The implementation remains deliberately dark. Customer request creation needs
+the exact-`true` runtime-only
+`CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUESTS_ENABLED` gate, the requesting account in
+`CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUEST_ACCOUNT_ALLOWLIST`, and exact-`true`
+`CP_AGENT_EMAIL_CUSTOM_DOMAIN_AUTHORITY_READY` after journal and recovery
+acceptance. DNS observation has the separate exact-`true`
+`CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED` gate. All four controls are
+absent from committed release configuration.
+
+Each request receives a stable TXT challenge that expires after seven days.
+Several accounts may hold pending challenges for the same domain: an
+unverified request temporarily consumes one account allowance and one of the
+eight technical open-request slots, but does not create the global domain
+allocation or a permanent tombstone. Rejection, pre-proof retirement, and
+expiry release that reservation. The first exact TXT proof wins the atomic,
+permanent allocation; only then does retirement retain a non-reusable domain
+tombstone.
+
+When verification is enabled, a new pending challenge is due immediately;
+verified ownership is rechecked every 24 hours. Authoritative absence suspends
+availability and retries hourly; a temporary resolver failure preserves the
+last authoritative result and retries after 15 minutes. A plan downgrade
+suspends excess pending requests immediately, gives excess verified domains a
+30-day grace period, then suspends them. Restoring entitlement removes plan
+suspension without a client reinstall. Account lifecycle fences suspend during
+move/archive work, republish on resume, and permanently retire on account
+close.
+
+None of these states publishes MX or Email Routing configuration, writes a
+cell or edge route, or accepts mail for the domain. Request creation,
+verification, routing/projection, and delivery remain separate activation
+decisions.
 
 The control-plane authority is protected by a separate create-only R2 journal.
 After the existing registry has been bootstrapped and a sealed empty-target
 restore drill succeeds, operators enable only
 `CP_AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_ENABLED=true`; this does not enable
 the customer request feature. Journal maintenance and recovery currently fail
-closed above 10,000 authority keys. Because requests and permanent tombstones
-grow that global authority over time, the bound is an explicit request-gate
-activation blocker rather than a plan limit.
+closed above 10,000 authority keys. Requests, observations, plan/lifecycle
+fences, audit history, and permanent verified-domain tombstones grow that
+global authority over time, so the bound is an explicit request-gate activation
+blocker rather than a plan limit.
 
 Activation follows the established two-phase limit rollout. Phase A adds the
 closed feature/limit vocabulary, control-plane Durable Object, APIs, and admin
@@ -502,12 +529,13 @@ Phase-A cells already understand the new dimension, so they do not need a
 Phase-B image rollout when the second release changes only catalog bytes,
 catalog tests, and rollout documentation.
 
-The commercial allowance is conservatively consumed by pending requests until
-an active-domain lifecycle exists. A separate technical ceiling allows at most
-eight open requests per account, including explicitly unlimited accounts.
-Terminal requests remain durable tombstones and cannot be reassigned until a
-later, explicit ownership-transfer lifecycle is designed. This prevents a
-domain that once appeared in an agent address from silently changing tenants.
+The commercial allowance is reserved by pending requests and becomes an
+allocation only after exact ownership proof. A separate technical ceiling
+allows at most eight open requests per account, including explicitly unlimited
+accounts. Terminal request records remain durable for audit, but an unverified
+terminal request does not reserve the name. Only a verified allocation becomes
+a permanent, non-reassignable tombstone on retirement; a later transfer policy
+must explicitly preserve that tenant boundary.
 
 An Enterprise contract can be installed without changing the account's plan:
 

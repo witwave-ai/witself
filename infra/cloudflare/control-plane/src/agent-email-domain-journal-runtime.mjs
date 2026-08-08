@@ -96,7 +96,19 @@ function validHead(value) {
     STREAM_ID_PATTERN.test(value.stream_id ?? "") &&
     Number.isSafeInteger(value.sequence) && value.sequence >= 0 &&
     typeof value.hash === "string" && /^[0-9a-f]{64}$/.test(value.hash) &&
-    Number.isSafeInteger(value.authority_epoch) && value.authority_epoch >= 1;
+    Number.isSafeInteger(value.authority_epoch) && value.authority_epoch >= 1 &&
+    Number.isSafeInteger(value.registry_revision) &&
+    value.registry_revision >= 0 &&
+    Number.isSafeInteger(value.audit_sequence) && value.audit_sequence >= 0;
+}
+
+function bytesEqual(left, right) {
+  if (left.byteLength !== right.byteLength) return false;
+  let different = 0;
+  for (let index = 0; index < left.byteLength; index += 1) {
+    different |= left[index] ^ right[index];
+  }
+  return different === 0;
 }
 
 function journalError(error) {
@@ -462,18 +474,39 @@ export class AgentEmailDomainJournalRuntime {
   }
 
   async status() {
-    const [head, pending, fork, bootstrap] = await Promise.all([
+    let [head, pending, fork, bootstrap] = await Promise.all([
       this.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY),
       this.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_PENDING_KEY),
       this.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_FORK_KEY),
       this.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_BOOTSTRAP_KEY),
     ]);
+    let remoteHeadChecked = false;
+    let remoteHeadHealthy = null;
+    let remoteHeadError = null;
+    if (!fork && validHead(head) && head.sequence > 0) {
+      remoteHeadChecked = true;
+      try {
+        await this.assertRemoteHeadContinuity(head);
+        remoteHeadHealthy = true;
+      } catch (error) {
+        remoteHeadHealthy = false;
+        remoteHeadError = error?.code ??
+          "agent_email_domain_journal_unavailable";
+        fork = await this.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_FORK_KEY);
+      }
+    }
+    const healthy = validHead(head) && !pending && !fork &&
+      remoteHeadHealthy !== false;
     return {
       enabled: validHead(head),
       required: journalRequired(this.env),
       head: publicHead(head),
       pending: Boolean(pending),
       forked: Boolean(fork),
+      healthy,
+      remote_head_checked: remoteHeadChecked,
+      remote_head_healthy: remoteHeadHealthy,
+      degradation_code: fork?.code ?? remoteHeadError,
       bootstrap: bootstrap ? this.maintenanceResult(bootstrap) : null,
     };
   }
@@ -513,6 +546,8 @@ export class AgentEmailDomainJournalRuntime {
   }
 
   async recordFork(error, pending) {
+    if (await this.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_FORK_KEY)
+      .catch(() => null)) return;
     const now = this.now().toISOString();
     await this.raw([[AGENT_EMAIL_DOMAIN_JOURNAL_FORK_KEY, {
       schema_version: LOCAL_SCHEMA,
@@ -523,9 +558,104 @@ export class AgentEmailDomainJournalRuntime {
     }]]).catch(() => {});
   }
 
+  async recordHeadContinuityFailure(error, head) {
+    if (await this.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_FORK_KEY)
+      .catch(() => null)) return;
+    const now = this.now().toISOString();
+    await this.raw([[AGENT_EMAIL_DOMAIN_JOURNAL_FORK_KEY, {
+      schema_version: LOCAL_SCHEMA,
+      code: error?.code ?? "agent_email_domain_journal_fork_detected",
+      stream_id: head?.stream_id ?? null,
+      sequence: head?.sequence ?? null,
+      detected_at: now,
+    }]]).catch(() => {});
+  }
+
+  async assertRemoteHeadContinuity(head) {
+    if (!validHead(head)) {
+      fail("agent email domain authority journal head is invalid",
+        "agent_email_domain_journal_fence_mismatch");
+    }
+    if (head.sequence === 0) return { checked: false };
+
+    let object;
+    try {
+      object = await this.bucket().get(
+        agentEmailDomainJournalEntryKey(head.stream_id, head.sequence),
+      );
+    } catch {
+      fail("agent email domain authority journal is unavailable",
+        "agent_email_domain_journal_unavailable");
+    }
+    if (!object) {
+      const error = new AgentEmailDomainJournalRuntimeError(
+        "agent email domain authority journal current head is missing",
+        "agent_email_domain_journal_gap",
+      );
+      await this.recordHeadContinuityFailure(error, head);
+      throw error;
+    }
+
+    let bytes;
+    try {
+      bytes = new Uint8Array(await object.arrayBuffer());
+    } catch {
+      fail("agent email domain authority journal is unavailable",
+        "agent_email_domain_journal_unavailable");
+    }
+    if (bytes.byteLength > JOURNAL_ENTRY_MAX_BYTES) {
+      const error = new AgentEmailDomainJournalRuntimeError(
+        "agent email domain authority journal current head is too large",
+        "agent_email_domain_journal_schema_invalid",
+      );
+      await this.recordHeadContinuityFailure(error, head);
+      throw error;
+    }
+
+    let raw;
+    try {
+      raw = JSON.parse(
+        new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+      );
+    } catch {
+      const error = new AgentEmailDomainJournalRuntimeError(
+        "agent email domain authority journal current head is unreadable",
+        "agent_email_domain_journal_schema_invalid",
+      );
+      await this.recordHeadContinuityFailure(error, head);
+      throw error;
+    }
+
+    let built;
+    try {
+      built = await validateAgentEmailDomainJournalEntry(raw, {
+        stream_id: head.stream_id,
+        sequence: head.sequence,
+        authority_epoch: head.authority_epoch,
+      });
+    } catch (cause) {
+      const converted = journalError(cause);
+      await this.recordHeadContinuityFailure(converted, head);
+      throw converted;
+    }
+    if (!bytesEqual(bytes, built.bytes) || built.entry.entry_hash !== head.hash ||
+        built.entry.registry_revision !== head.registry_revision ||
+        built.entry.audit_sequence !== head.audit_sequence) {
+      const error = new AgentEmailDomainJournalRuntimeError(
+        "agent email domain authority journal current head does not match " +
+          "local authority",
+        "agent_email_domain_journal_fork_detected",
+      );
+      await this.recordHeadContinuityFailure(error, head);
+      throw error;
+    }
+    return { checked: true, entry: built.entry };
+  }
+
   async appendPending(pending) {
     let built;
     try {
+      await this.assertRemoteHeadContinuity(pending.head_before);
       built = await validateAgentEmailDomainJournalEntry(pending.entry, {
         stream_id: pending.head_before.stream_id,
         sequence: pending.head_before.sequence + 1,
@@ -755,10 +885,31 @@ export class AgentEmailDomainJournalRuntime {
       return existing;
     }
 
-    const [head, meta] = await Promise.all([
+    let [head, meta] = await Promise.all([
       this.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY),
       this.storage.get("meta"),
     ]);
+    if (!meta && !head && kind === "bootstrap") {
+      const [first, alarm] = await Promise.all([
+        this.storage.list({ limit: 1 }),
+        typeof this.storage.getAlarm === "function"
+          ? this.storage.getAlarm()
+          : null,
+      ]);
+      if (mapRows(first).length !== 0 || alarm != null) {
+        fail("empty custom domain authority initialization target is not empty",
+          "agent_email_domain_journal_fence_mismatch");
+      }
+      const initializedAt = this.now().toISOString();
+      meta = {
+        schema_version: "witself.agent-email-domain.v1",
+        registry_revision: 0,
+        audit_sequence: 0,
+        created_at: initializedAt,
+        updated_at: initializedAt,
+      };
+      await this.localApply([["meta", meta]], [], apply);
+    }
     if (!meta || !Number.isSafeInteger(meta.registry_revision) ||
         !Number.isSafeInteger(meta.audit_sequence)) {
       fail("agent email domain authority meta is unavailable for maintenance",
@@ -838,6 +989,7 @@ export class AgentEmailDomainJournalRuntime {
   async flushMaintenanceEntry(record, apply) {
     let built;
     try {
+      await this.assertRemoteHeadContinuity(record.head);
       built = await validateAgentEmailDomainJournalEntry(record.pending.entry, {
         stream_id: record.head.stream_id,
         sequence: record.head.sequence + 1,

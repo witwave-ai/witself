@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -20,7 +21,8 @@ func TestEmailDomainAdminCLIDispatchAndLifecycle(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatal(err)
 			}
-			if body["idempotency_key"] == nil || body["reason"] == nil {
+			if body["idempotency_key"] == nil ||
+				(!strings.HasSuffix(r.URL.Path, ":verify") && body["reason"] == nil) {
 				t.Fatalf("mutation body = %#v", body)
 			}
 		}
@@ -52,6 +54,14 @@ func TestEmailDomainAdminCLIDispatchAndLifecycle(t *testing.T) {
 				"request": map[string]any{
 					"id": "aedr_aaaaaaaaaaaaaaaa", "account_id": "acc_1",
 					"domain": "agents.example.com", "state": "rejected",
+				},
+			})
+		case "/v1/admin/agent-email-domain-requests/aedr_aaaaaaaaaaaaaaaa:verify":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version": "witself.agent-email-domain.v1",
+				"request": map[string]any{
+					"id": "aedr_aaaaaaaaaaaaaaaa", "account_id": "acc_1",
+					"domain": "agents.example.com", "state": "verified",
 				},
 			})
 		case "/v1/admin/agent-email-domain-requests/aedr_bbbbbbbbbbbbbbbb:retire":
@@ -92,6 +102,12 @@ func TestEmailDomainAdminCLIDispatchAndLifecycle(t *testing.T) {
 		t.Fatalf("show exit code = %d", code)
 	}
 	if code := run(append([]string{
+		"email-domain", "requests", "verify", "--request", "aedr_aaaaaaaaaaaaaaaa",
+		"--idempotency-key", "verify-1",
+	}, common...)); code != 0 {
+		t.Fatalf("verify exit code = %d", code)
+	}
+	if code := run(append([]string{
 		"email-domain", "requests", "reject", "--request", "aedr_aaaaaaaaaaaaaaaa",
 		"--reason", "policy", "--idempotency-key", "reject-1",
 	}, common...)); code != 0 {
@@ -114,6 +130,7 @@ func TestEmailDomainAdminCLIDispatchAndLifecycle(t *testing.T) {
 	want := []string{
 		"GET /v1/admin/agent-email-domain-requests?account_id=acc_1&cursor=request-page-2&domain=agents.example.com&state=pending_verification",
 		"GET /v1/admin/agent-email-domain-requests/aedr_aaaaaaaaaaaaaaaa",
+		"POST /v1/admin/agent-email-domain-requests/aedr_aaaaaaaaaaaaaaaa:verify",
 		"POST /v1/admin/agent-email-domain-requests/aedr_aaaaaaaaaaaaaaaa:reject",
 		"POST /v1/admin/agent-email-domain-requests/aedr_bbbbbbbbbbbbbbbb:retire",
 		"GET /v1/admin/agent-email-domain-audit?account_id=acc_1&action=custom_domain.rejected&cursor=audit-page-2&domain=agents.example.com&limit=100",
@@ -134,6 +151,11 @@ func TestEmailDomainAdminCLIRejectsUnsafeArguments(t *testing.T) {
 	}
 	if code := emailDomainAdminRequests([]string{"show"}); code != 2 {
 		t.Fatalf("missing request exit code = %d", code)
+	}
+	if code := emailDomainAdminRequests([]string{
+		"verify", "--request", "aedr_aaaaaaaaaaaaaaaa",
+	}); code != 2 {
+		t.Fatalf("missing verification idempotency key exit code = %d", code)
 	}
 	if code := emailDomainAdminAudit([]string{"--limit", "101"}); code != 2 {
 		t.Fatalf("invalid audit limit exit code = %d", code)

@@ -569,7 +569,7 @@ deliver arbitrary new aliases. The canonical inventory is the independent
 backfill path for realms that have never performed an alias operation, but it
 does no work while its default-off inventory gate is unset.
 
-**Organization-owned inbound domains (dark foundation, 2026-08-03).** A
+**Organization-owned inbound domains (dark lifecycle, 2026-08-08).** A
 customer-owned domain is an account-level resource and never replaces either a
 permanent Realm ID address or a managed realm alias. Its future address shape
 remains `agent-name.realm-email-alias@customer-domain`; retaining the realm
@@ -583,16 +583,29 @@ contracted account limit. A missing effective limit is explicit unlimited. The
 independent inbound `agent_email_receive` entitlement still controls whether
 any eventual route may deliver.
 
-The current control-plane implementation intentionally stops before ownership
-verification or provisioning. An authenticated account operator can submit and
-list requests only when the runtime-only
-`CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUESTS_ENABLED` value is exactly `true`. That
-gate is absent from committed release configuration and is independent from
-all five managed-domain canonical/alias gates. Request creation canonicalizes
-strict lowercase ASCII DNS names, rejects IDN/punycode, wildcards, IP/single-
-label/malformed input, and protects Witself/Witwave-operated roots plus every
-child domain. One global Durable Object owns the request and domain tombstone,
-so concurrent accounts cannot claim the same name.
+The control plane now implements the request, ownership-verification, plan,
+and account-lifecycle authority, but the entire feature remains deliberately
+dark. Customer creation requires all three independent controls below:
+
+- `CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUESTS_ENABLED` must be exactly `true`;
+- `CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUEST_ACCOUNT_ALLOWLIST` must be a valid,
+  comma-separated list containing the exact account id, with no wildcard or
+  surrounding whitespace; and
+- `CP_AGENT_EMAIL_CUSTOM_DOMAIN_AUTHORITY_READY` must be exactly `true` after
+  the required authority journal is healthy and a named empty-target recovery
+  has been sealed and reviewed.
+
+Request activation also fails closed unless the existing durable
+`CP_PLAN_LIFECYCLE_ENABLED` plan scanner is exactly `true`; it is the recovery
+path for an `awaiting_cell` intent if the bridge loses the completion response.
+
+All three are absent from committed release configuration. The separate
+`CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED` exact-`true` gate controls
+administrator and scheduled DNS observations; it is absent too. These controls
+are independent from all five managed-domain canonical/alias gates. Request
+creation canonicalizes strict lowercase ASCII DNS names, rejects IDN/punycode,
+wildcards, IP/single-label/malformed input, and protects
+Witself/Witwave-operated roots plus every child domain.
 
 Creation returns one stable public DNS challenge:
 
@@ -601,15 +614,61 @@ TXT _witself-verification.<customer-domain>
     witself-domain-verification=aedv_<32-lowercase-base32-characters>
 ```
 
-The challenge is generated once and remains byte-identical across exact
-idempotent replay, list, and administrator show. The only implemented states
-are `pending_verification`, `rejected`, and `retired`; there is deliberately no
-`verified`, `active`, or delivery state. Platform administrators can list,
-show, reject, retire, and audit requests. A pending request conservatively
-consumes the commercial domain allowance, and a separate plan-independent cap
-allows at most eight open requests per account. Rejected and retired records
-remain non-reusable tombstones until an explicit, proof-backed domain transfer
-and quarantine policy is implemented.
+Each request receives its own challenge, which remains byte-identical across
+exact idempotent replay, list, and administrator show and expires seven days
+after issue. More than one account may hold an unverified challenge for the
+same canonical domain. A pending request consumes one temporary commercial
+allowance reservation and one of the plan-independent maximum eight open
+requests for that account, but it creates neither the globally unique domain
+allocation nor a permanent domain tombstone. Rejection, retirement before
+proof, or expiry releases the reservation and leaves the name available for a
+new request.
+
+When verification is enabled, every new pending challenge is immediately due
+for the bounded scheduled verifier; a platform administrator may also request
+one retry-safe exact TXT lookup. The resolver uses one fixed HTTPS DNS endpoint,
+accepts only an exact TXT owner and byte-equal challenge value, bounds the
+response, follows no redirect, performs no DNS write, and records the observed
+RRset digest, minimum TTL, and DNSSEC-authenticated-data bit. DNSSEC is
+evidence, not currently a requirement. The first request whose exact TXT value
+is observed atomically changes to `verified` and creates the permanent global
+allocation. If a competing pending request later reaches proof, it records
+`ownership_verification.state="conflict"`,
+`last_result="domain_unavailable"`, and
+`availability="unavailable_domain"`. It waits until its original seven-day
+challenge deadline and then expires instead of polling DNS indefinitely. This
+is the ownership boundary: only verified ownership allocates or permanently
+tombstones the name.
+That losing observation is recorded as audit action
+`custom_domain.verification_conflict`; policy convergence uses the existing
+`custom_domain.verification_deferred` action with reason
+`account_policy_converging`.
+
+Verified requests are rechecked every 24 hours. An authoritative missing value
+marks the ownership observation `stale`, changes availability to
+`suspended_verification`, and schedules an hourly retry; a resolver outage is
+recorded as a deferred observation and retried after 15 minutes without
+revoking the last authoritative result. A matching recheck restores verified
+availability. Verification records authority only: it does not publish MX,
+Cloudflare Email Routing, an edge route, a cell projection, or mail delivery.
+If plan or lifecycle work is between durable pages, verification records
+`last_result="policy_converging"` and retries after 15 minutes rather than
+observing DNS against a mixed account policy.
+
+Plan application is fenced around the cell commit. Pending requests outside a
+new allowance are suspended immediately. Verified allocations outside the new
+allowance enter a 30-day `active_grace` window and then become
+`suspended_plan`; an upgrade clears plan suspension and resumes ordinary
+verification without reinstalling a client. Account move/archive work first
+sets `suspended_lifecycle`, then exact-fence republish clears it. Account close
+retires every request; a verified allocation becomes a permanent retired
+tombstone, while an unverified request never acquires one. The request state is
+one of `pending_verification`, `verified`, `rejected`, `expired`, or `retired`;
+the independent `availability` field distinguishes plan, lifecycle, and
+verification suspension from that durable ownership state.
+Rejection, retirement, or expiry of an in-limit request durably queues a
+bounded same-plan rebalance so the next eligible suspended request is
+promoted; a released capacity slot cannot remain stranded.
 
 The global custom-domain request registry now has a portable, append-only
 authority journal and bounded empty-target recovery foundation. Each authority
@@ -626,11 +685,18 @@ The journal and recovery implementation has a hard 10,000-authority-key
 ceiling. That is an activation blocker, not a customer-facing plan limit: keep
 the request gate dark until current usage and worst-case request growth fit
 comfortably below the ceiling, or replace the bounded recovery design.
+The present global authority also serializes DNS resolution with registry
+traffic, and repeated observations permanently grow audit history. Before any
+request or verification activation, move external DNS waits outside the global
+authority lane behind durable observation fences, add capacity/admission
+metrics and a bounded audit/checkpoint strategy, and prove recovery of an
+`awaiting_cell` plan intent through the durable plan workflow. Provider route,
+projection, and delivery topology remains a separate activation prerequisite.
 
-Do not enable the request gate for customers in this phase. An unverified
-request deliberately takes a permanent tombstone; without proof and transfer
-governance, exposing creation would let one account squat on another
-organization's domain even though it could not receive mail there.
+Do not enable customer requests or DNS verification in this phase. Parallel,
+expiring challenges avoid unverified squatting, but activation still requires
+a reviewed account canary, capacity evidence, transfer/quarantine governance,
+and operational acceptance of the ownership and lifecycle state machine.
 
 The CLI surface ships with the dark foundation, so a later entitlement or gate
 change never requires reinstalling a client. While the request gate is absent,
@@ -643,6 +709,8 @@ witself email-domain list
 
 witself-admin email-domain requests list
 witself-admin email-domain requests show --request "$REQUEST_ID"
+witself-admin email-domain requests verify \
+  --request "$REQUEST_ID" --idempotency-key "$VERIFY_KEY"
 witself-admin email-domain requests reject \
   --request "$REQUEST_ID" --reason "Domain is not eligible"
 witself-admin email-domain requests retire \
@@ -650,14 +718,13 @@ witself-admin email-domain requests retire \
 witself-admin email-domain audit
 ```
 
-This dark slice performs no DNS lookup or write, Cloudflare zone or Email
-Routing mutation, MX activation, edge-directory publication, cell projection,
-mail acceptance, or outbound-domain configuration. Before the request gate can
-be enabled, operators must provision the private journal bucket, bootstrap the
-existing registry, run and preserve a successful sealed empty-target restore
-drill, and separately close account move/archive/close reconciliation, verified
-ownership and re-verification, downgrade behavior, exact realm-label binding,
-cell/edge domain projections, and a reviewed receive canary. Managed-domain
+With the request and verification gates absent, the scheduled verifier is a
+bounded no-op and this dark slice performs no DNS lookup or write. Even with
+verification deliberately enabled for a future allowlisted canary, it still
+performs no Cloudflare zone or Email Routing mutation, MX activation,
+edge-directory publication, cell projection, mail acceptance, or
+outbound-domain configuration. Routing, customer request creation, ownership
+verification, and delivery require separate activation reviews; managed-domain
 activation never implicitly enables this lifecycle.
 
 **Agent local part (settled).** The agent-name-to-local-part rule must handle

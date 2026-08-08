@@ -9,6 +9,10 @@ import {
   deploymentMatches,
   expectedBuildMetadata,
 } from "../scripts/verify-deployment.mjs";
+import {
+  assertCustomDomainSecretsDark,
+  CUSTOM_DOMAIN_DARK_SECRET_NAMES,
+} from "../scripts/assert-custom-domain-dark.mjs";
 
 const root = new URL("..", import.meta.url);
 const renderer = new URL("../scripts/render-wrangler.mjs", import.meta.url);
@@ -155,6 +159,17 @@ test("release renderer injects immutable container build identity", async (t) =>
     /"CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUESTS_ENABLED"\s*:/,
     "ordinary deployments must leave customer-domain requests dark",
   );
+  for (const gate of [
+    "CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUEST_ACCOUNT_ALLOWLIST",
+    "CP_AGENT_EMAIL_CUSTOM_DOMAIN_AUTHORITY_READY",
+    "CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED",
+  ]) {
+    assert.doesNotMatch(
+      config,
+      new RegExp(`"${gate}"\\s*:`),
+      `${gate} must remain absent from ordinary deployments`,
+    );
+  }
   assert.doesNotMatch(
     config,
     /"CP_ACCOUNT_BACKUPS_ENABLED"\s*:/,
@@ -237,4 +252,25 @@ test("deployment verification compares every identity field", () => {
   assert.equal(deploymentMatches({ ...expected, commit: "b".repeat(40) }, expected), false);
   assert.equal(deploymentMatches({ ...expected, version: "1.2.4" }, expected), false);
   assert.equal(deploymentMatches({ ...expected, date: "2026-07-23T01:02:04Z" }, expected), false);
+});
+
+test("dark deployment refuses every persistent custom-domain activation secret", async () => {
+  assert.doesNotThrow(() => assertCustomDomainSecretsDark([
+    { name: "CP_AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_ENABLED", type: "secret_text" },
+  ]));
+  for (const name of CUSTOM_DOMAIN_DARK_SECRET_NAMES) {
+    assert.throws(
+      () => assertCustomDomainSecretsDark([{ name, type: "secret_text" }]),
+      new RegExp(name),
+    );
+  }
+  for (const malformed of [null, {}, [{ type: "secret_text" }], [{ name: " bad" }]]) {
+    assert.throws(() => assertCustomDomainSecretsDark(malformed));
+  }
+  const packageJSON = JSON.parse(await readFile(new URL("../package.json", import.meta.url)));
+  assert.equal(
+    packageJSON.scripts.deploy.match(/npm run assert:custom-domain-dark/g)?.length,
+    2,
+    "deployment must check persistent activation secrets before and after upload",
+  );
 });

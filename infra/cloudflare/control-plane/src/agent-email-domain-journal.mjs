@@ -11,6 +11,7 @@ const STORAGE_KEY_MAX_LENGTH = 1_024;
 const ENTRY_MAX_BYTES = 512 * 1_024;
 const CANONICAL_MAX_DEPTH = 32;
 const CANONICAL_MAX_ITEMS = 10_000;
+const PENDING_CHALLENGE_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 
 export const AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_SCHEMA_VERSION =
   "witself.agent-email-domain-authority-journal.v1";
@@ -28,11 +29,26 @@ const AUTHORITY_PREFIXES = Object.freeze([
   "audit:",
   "domain:",
   "idem:",
+  "lifecycle-fence:",
+  "lifecycle-intent:",
+  "plan-fence:",
+  "plan-intent:",
   "request:",
 ]);
+const DELETABLE_AUTHORITY_PREFIXES = Object.freeze([
+  "lifecycle-intent:",
+  "plan-intent:",
+]);
 const DERIVED_PREFIXES = Object.freeze([
+  "account-domain:",
   "account-request:",
   "account-usage:",
+  "challenge-expiry-due:",
+  "domain-pending:",
+  "lifecycle-due:",
+  "plan-due:",
+  "plan-grace-due:",
+  "verification-due:",
 ]);
 const JOURNAL_LOCAL_EXACT_KEYS = new Set([
   "agent-email-domain-journal-meta",
@@ -214,20 +230,31 @@ function normalizedAfterImage(afterImage, options = {}) {
     }
     if (seen.has(put.key)) journalFail("after_image contains a duplicate key");
     seen.add(put.key);
+    const value = JSON.parse(canonicalJSONString(put.value));
+    if (put.key.startsWith("request:")) validRequestRecord(value);
+    else if (put.key.startsWith("domain:")) validAllocationRecord(value);
+    else if (put.key.startsWith("plan-fence:") ||
+        put.key.startsWith("plan-intent:") ||
+        put.key.startsWith("lifecycle-fence:") ||
+        put.key.startsWith("lifecycle-intent:")) {
+      validPolicyRecord(put.key, value);
+    }
     return {
       key: put.key,
-      value: JSON.parse(canonicalJSONString(put.value)),
+      value,
     };
   }).sort((left, right) => left.key.localeCompare(right.key));
   for (const key of afterImage.deletes) {
     if (!isAgentEmailDomainAuthorityKey(key)) {
       journalFail(`after_image key is not canonical authority: ${String(key)}`);
     }
-    // Every current authority row is permanent. Requests and domains are
-    // tombstones, while audits and idempotency receipts are append-only.
-    journalFail(`after_image cannot delete canonical authority key: ${key}`);
+    if (!DELETABLE_AUTHORITY_PREFIXES.some((prefix) => key.startsWith(prefix))) {
+      journalFail(`after_image cannot delete canonical authority key: ${key}`);
+    }
+    if (seen.has(key)) journalFail("after_image contains a duplicate key");
+    seen.add(key);
   }
-  return { puts, deletes: [] };
+  return { puts, deletes: [...afterImage.deletes].sort() };
 }
 
 export function validateAgentEmailDomainAuthorityAfterImage(
@@ -487,20 +514,33 @@ function assertRequestTransition(previous, desired) {
       "agent_email_domain_recovery_invariant_failed");
   }
   const allowed = {
-    pending_verification: new Set(["pending_verification", "rejected", "retired"]),
+    pending_verification: new Set([
+      "pending_verification", "verified", "rejected", "expired", "retired",
+    ]),
+    verified: new Set(["verified", "retired"]),
     rejected: new Set(["rejected", "retired"]),
+    expired: new Set(["expired", "retired"]),
     retired: new Set(["retired"]),
   };
   if (!allowed[previous.state]?.has(desired.state)) {
     journalFail("custom domain tombstone was resurrected",
       "agent_email_domain_recovery_tombstone_resurrection");
   }
-  if (previous.state === desired.state) {
-    if (canonicalJSONString(previous) !== canonicalJSONString(desired)) {
-      journalFail("same-state custom domain authority cannot be overwritten",
-        "agent_email_domain_recovery_invariant_failed");
-    }
-    return;
+  const previousRevision = previous.state_revision ?? 1;
+  const desiredRevision = desired.state_revision ?? 1;
+  if (canonicalJSONString(previous) === canonicalJSONString(desired)) return;
+  const legacyTransition = previous.state_revision === undefined &&
+    desired.state_revision === undefined && previous.state !== desired.state;
+  if (previous.state === desired.state &&
+      previous.state_revision === undefined && desired.state_revision === undefined) {
+    journalFail("same-state custom domain authority cannot be overwritten",
+      "agent_email_domain_recovery_invariant_failed");
+  }
+  if (!legacyTransition &&
+      (!Number.isSafeInteger(previousRevision) || previousRevision < 1 ||
+        desiredRevision !== previousRevision + 1)) {
+    journalFail("custom domain request revisions are not contiguous",
+      "agent_email_domain_recovery_revision_regression");
   }
   if (Date.parse(desired.updated_at) < Date.parse(previous.updated_at)) {
     journalFail("custom domain request update time regressed",
@@ -515,8 +555,70 @@ function assertRequestTransition(previous, desired) {
       canonicalJSONString(previous.retirement) !==
         canonicalJSONString(desired.retirement)) {
     journalFail("custom domain retirement changed during replay",
+        "agent_email_domain_recovery_invariant_failed");
+  }
+  if (previous.expiration != null &&
+      canonicalJSONString(previous.expiration) !==
+        canonicalJSONString(desired.expiration)) {
+    journalFail("custom domain expiration changed during replay",
       "agent_email_domain_recovery_invariant_failed");
   }
+  if (previous.ownership_verification?.first_verified_at &&
+      previous.ownership_verification.first_verified_at !==
+        desired.ownership_verification?.first_verified_at) {
+    journalFail("custom domain first verification changed during replay",
+      "agent_email_domain_recovery_invariant_failed");
+  }
+}
+
+function assertAllocationTransition(previous, desired) {
+  if (previous?.schema_version === "witself.agent-email-domain.v1") {
+    if (desired?.schema_version === "witself.agent-email-domain.v1") {
+      assertRequestTransition(previous, desired);
+      return;
+    }
+    if (desired?.schema_version !==
+          "witself.agent-email-domain-allocation.v1" ||
+        previous.domain !== desired.domain ||
+        previous.account_id !== desired.account_id ||
+        previous.id !== desired.source_request_id ||
+        desired.state !== "allocated" || desired.generation !== 1 ||
+        desired.allocation_revision !== 1 ||
+        !Number.isFinite(Date.parse(desired.allocated_at)) ||
+        Date.parse(desired.allocated_at) < Date.parse(previous.updated_at)) {
+      journalFail("legacy custom domain mirror conversion is invalid",
+        "agent_email_domain_recovery_invariant_failed");
+    }
+    return;
+  }
+  if (immutableFieldsChanged(previous, desired, [
+    "schema_version", "domain", "account_id", "source_request_id",
+    "generation", "allocated_at",
+  ])) {
+    journalFail("custom domain allocation identity changed during replay",
+      "agent_email_domain_recovery_invariant_failed");
+  }
+  if (canonicalJSONString(previous) === canonicalJSONString(desired)) return;
+  if (!Number.isSafeInteger(previous.allocation_revision) ||
+      desired.allocation_revision !== previous.allocation_revision + 1) {
+    journalFail("custom domain allocation revisions are not contiguous",
+      "agent_email_domain_recovery_revision_regression");
+  }
+  if (previous.state === "retired" ||
+      (previous.state !== "allocated" ||
+        !["allocated", "retired"].includes(desired.state))) {
+    journalFail("custom domain allocation tombstone was resurrected",
+      "agent_email_domain_recovery_tombstone_resurrection");
+  }
+  if (Date.parse(desired.updated_at) < Date.parse(previous.updated_at)) {
+    journalFail("custom domain allocation update time regressed",
+      "agent_email_domain_recovery_revision_regression");
+  }
+}
+
+function lifecycleActionOrder(action) {
+  return action === "suspend" ? 1 : action === "republish" ? 2 :
+    action === "retire" ? 3 : 0;
 }
 
 function assertAuthorityTransition(state, key, desired) {
@@ -549,16 +651,118 @@ function assertAuthorityTransition(state, key, desired) {
     }
     return;
   }
-  if (key.startsWith("request:") || key.startsWith("domain:")) {
+  if (key.startsWith("request:")) {
     assertRequestTransition(previous, desired);
+    return;
+  }
+  if (key.startsWith("domain:")) {
+    assertAllocationTransition(previous, desired);
+    return;
+  }
+  if (key.startsWith("plan-intent:")) {
+    if (previous.account_id !== desired.account_id ||
+        desired.plan_revision < previous.plan_revision ||
+        Date.parse(desired.updated_at) < Date.parse(previous.updated_at)) {
+      journalFail("custom domain plan intent regressed",
+        "agent_email_domain_recovery_revision_regression");
+    }
+    if (previous.plan_revision === desired.plan_revision) {
+      const previousState = previous.state === "awaiting_cell" ? 1 : 2;
+      const desiredState = desired.state === "awaiting_cell" ? 1 : 2;
+      if (previous.plan_snapshot_hash !== desired.plan_snapshot_hash ||
+          previous.feature_enabled !== desired.feature_enabled ||
+          previous.domain_limit !== desired.domain_limit ||
+          previous.created_at !== desired.created_at ||
+          desiredState < previousState ||
+          desired.position < previous.position ||
+          (previous.cursor !== null &&
+            (desired.cursor === null || desired.cursor < previous.cursor)) ||
+          desired.retry_at_ms < previous.retry_at_ms ||
+          (previous.state === desired.state &&
+            previous.cursor === desired.cursor &&
+            desired.failure_count < previous.failure_count)) {
+        journalFail("custom domain plan intent identity changed",
+          "agent_email_domain_recovery_invariant_failed");
+      }
+    }
+    return;
+  }
+  if (key.startsWith("plan-fence:")) {
+    if (previous.account_id !== desired.account_id ||
+        desired.committed_revision < previous.committed_revision ||
+        (desired.committed_revision === previous.committed_revision &&
+          canonicalJSONString(previous) !== canonicalJSONString(desired))) {
+      journalFail("custom domain plan fence regressed",
+        "agent_email_domain_recovery_revision_regression");
+    }
+    return;
+  }
+  if (key.startsWith("lifecycle-intent:")) {
+    if (previous.account_id !== desired.account_id ||
+        previous.operation_id !== desired.operation_id ||
+        previous.epoch !== desired.epoch || previous.action !== desired.action ||
+        previous.created_at !== desired.created_at ||
+        (previous.cursor !== null &&
+          (desired.cursor === null || desired.cursor < previous.cursor)) ||
+        desired.retry_at_ms < previous.retry_at_ms ||
+        (previous.cursor === desired.cursor &&
+          desired.failure_count < previous.failure_count) ||
+        Date.parse(desired.updated_at) < Date.parse(previous.updated_at)) {
+      journalFail("custom domain lifecycle intent changed identity",
+        "agent_email_domain_recovery_revision_regression");
+    }
+    return;
+  }
+  if (key.startsWith("lifecycle-fence:")) {
+    if (previous.account_id !== desired.account_id ||
+        desired.epoch < previous.epoch ||
+        (desired.epoch === previous.epoch &&
+          (previous.operation_id !== desired.operation_id ||
+            lifecycleActionOrder(desired.action) <
+              lifecycleActionOrder(previous.action) ||
+            (desired.action === previous.action &&
+              canonicalJSONString(previous) !==
+                canonicalJSONString(desired))))) {
+      journalFail("custom domain lifecycle fence regressed",
+        "agent_email_domain_recovery_revision_regression");
+    }
+    return;
   }
 }
 
 function applyNormalizedAfterImage(state, normalized) {
+  const puts = new Map(normalized.puts.map(({ key, value }) => [key, value]));
+  for (const key of normalized.deletes) {
+    const intent = state.get(key);
+    if (key.startsWith("plan-intent:")) {
+      const accountID = key.slice("plan-intent:".length);
+      const fence = puts.get(`plan-fence:${accountID}`);
+      if (!intent || !fence || fence.account_id !== intent.account_id ||
+          fence.committed_revision !== intent.plan_revision ||
+          fence.committed_snapshot_hash !== intent.plan_snapshot_hash ||
+          fence.feature_enabled !== intent.feature_enabled ||
+          fence.domain_limit !== intent.domain_limit ||
+          Date.parse(fence.updated_at) < Date.parse(intent.updated_at)) {
+        journalFail("custom domain plan intent deletion lost convergence",
+          "agent_email_domain_recovery_invariant_failed");
+      }
+    } else if (key.startsWith("lifecycle-intent:")) {
+      const accountID = key.slice("lifecycle-intent:".length);
+      const fence = puts.get(`lifecycle-fence:${accountID}`);
+      if (!intent || !fence || fence.account_id !== intent.account_id ||
+          fence.operation_id !== intent.operation_id ||
+          fence.epoch !== intent.epoch || fence.action !== intent.action ||
+          Date.parse(fence.completed_at) < Date.parse(intent.updated_at)) {
+        journalFail("custom domain lifecycle intent deletion lost convergence",
+          "agent_email_domain_recovery_invariant_failed");
+      }
+    }
+  }
   for (const { key, value } of normalized.puts) {
     assertAuthorityTransition(state, key, value);
     state.set(key, JSON.parse(canonicalJSONString(value)));
   }
+  for (const key of normalized.deletes) state.delete(key);
 }
 
 export function applyAgentEmailDomainAuthorityAfterImage(state, afterImage) {
@@ -698,10 +902,16 @@ function validRequestRecord(value, options = {}) {
       !REQUEST_ID_PATTERN.test(value.id ?? "") ||
       !ACCOUNT_ID_PATTERN.test(value.account_id ?? "") ||
       !validDomain(value.domain) ||
-      !["pending_verification", "rejected", "retired"].includes(value.state) ||
+      !["pending_verification", "verified", "rejected", "expired", "retired"]
+        .includes(value.state) ||
       !ACTOR_ID_PATTERN.test(value.requested_by ?? "") ||
       !Number.isSafeInteger(value.plan_revision) || value.plan_revision < 0 ||
-      !SHA256_PATTERN.test(value.plan_snapshot_hash ?? "") ||
+      !(value.plan_revision === 0
+        ? value.plan_snapshot_hash === ""
+        : SHA256_PATTERN.test(value.plan_snapshot_hash ?? "")) ||
+      !(value.state_revision === undefined ||
+        (Number.isSafeInteger(value.state_revision) &&
+          value.state_revision >= 1)) ||
       !(value.domain_limit_at_request === null ||
         (Number.isSafeInteger(value.domain_limit_at_request) &&
           value.domain_limit_at_request >= 0))) {
@@ -720,7 +930,11 @@ function validRequestRecord(value, options = {}) {
       !challenge.record_value.startsWith("witself-domain-verification=") ||
       !CHALLENGE_TOKEN_PATTERN.test(
         challenge.record_value.slice("witself-domain-verification=".length),
-      ) || challenge.issued_at !== value.requested_at) {
+      ) || challenge.issued_at !== value.requested_at ||
+      (challenge.expires_at !== undefined &&
+        (!Number.isFinite(Date.parse(challenge.expires_at)) ||
+          Date.parse(challenge.expires_at) !==
+            Date.parse(challenge.issued_at) + PENDING_CHALLENGE_TTL_MS))) {
     recoveryFail("recovered custom domain ownership challenge is invalid");
   }
   const decision = value.decision;
@@ -751,12 +965,265 @@ function validRequestRecord(value, options = {}) {
       recoveryFail("recovered custom domain retirement time is invalid");
     }
   }
+  const expiration = value.expiration;
+  if (expiration !== null && expiration !== undefined) {
+    if (!isPlainObject(expiration) ||
+        expiration.reason !== "ownership challenge expired") {
+      recoveryFail("recovered custom domain expiration is invalid");
+    }
+    validateISODate(expiration.expired_at, "expiration expired_at");
+    const challengeDeadline = challenge.expires_at ?? new Date(
+      Date.parse(value.requested_at) + PENDING_CHALLENGE_TTL_MS,
+    ).toISOString();
+    if (Date.parse(expiration.expired_at) < Date.parse(challengeDeadline)) {
+      recoveryFail("recovered custom domain expiration preceded its challenge");
+    }
+  }
+  if (value.plan_suspended !== undefined &&
+      typeof value.plan_suspended !== "boolean") {
+    recoveryFail("recovered custom domain plan suspension is invalid");
+  }
+  if (value.lifecycle_suspended !== undefined &&
+      typeof value.lifecycle_suspended !== "boolean") {
+    recoveryFail("recovered custom domain lifecycle suspension is invalid");
+  }
+  const lifecycleFence = value.lifecycle_fence;
+  if (lifecycleFence !== null && lifecycleFence !== undefined) {
+    if (!isPlainObject(lifecycleFence)) {
+      recoveryFail("recovered custom domain lifecycle fence is invalid");
+    }
+    exactKeys(lifecycleFence, new Set(["operation_id", "epoch", "action"]),
+      "request lifecycle fence");
+    if (!OPERATION_ID_PATTERN.test(lifecycleFence.operation_id ?? "") ||
+        !Number.isSafeInteger(lifecycleFence.epoch) ||
+        lifecycleFence.epoch < 0 ||
+        !["suspend", "republish", "retire"].includes(lifecycleFence.action) ||
+        (value.lifecycle_suspended === true &&
+          !["suspend", "retire"].includes(lifecycleFence.action)) ||
+        (value.lifecycle_suspended !== true &&
+          lifecycleFence.action !== "republish")) {
+      recoveryFail("recovered custom domain lifecycle fence is invalid");
+    }
+  } else if (value.lifecycle_suspended === true) {
+    recoveryFail("recovered custom domain lifecycle fence is missing");
+  }
+  if (value.plan_grace_until != null) {
+    validateISODate(value.plan_grace_until, "plan grace until");
+    if (value.state !== "verified" || value.plan_suspended === true) {
+      recoveryFail("recovered custom domain plan grace is invalid");
+    }
+  }
+  const verification = value.ownership_verification;
+  if (verification !== null && verification !== undefined) {
+    if (!isPlainObject(verification) ||
+        !["unverified", "missing", "verified", "stale", "conflict"].includes(
+          verification.state,
+        ) ||
+        ![
+          "resolver_error", "present", "absent", "domain_unavailable",
+          "policy_converging",
+        ].includes(
+          verification.last_result,
+        ) ||
+        !Number.isSafeInteger(verification.consecutive_failures) ||
+        verification.consecutive_failures < 0) {
+      recoveryFail("recovered custom domain ownership verification is invalid");
+    }
+    validateISODate(verification.last_checked_at, "verification last_checked_at");
+    validateISODate(verification.next_check_at, "verification next_check_at");
+    for (const field of ["first_verified_at", "last_verified_at"]) {
+      if (verification[field] != null) {
+        validateISODate(verification[field], `verification ${field}`);
+      }
+    }
+    if (verification.rrset_sha256 != null &&
+        !SHA256_PATTERN.test(verification.rrset_sha256) ||
+        typeof verification.dnssec_authenticated !== "boolean" ||
+        !(verification.minimum_ttl_seconds === null ||
+          (Number.isSafeInteger(verification.minimum_ttl_seconds) &&
+            verification.minimum_ttl_seconds >= 0))) {
+      recoveryFail("recovered custom domain ownership evidence is invalid");
+    }
+    const firstVerified = verification.first_verified_at;
+    const lastVerified = verification.last_verified_at;
+    const hasVerifiedHistory = firstVerified != null || lastVerified != null;
+    if ((firstVerified == null) !== (lastVerified == null) ||
+        Date.parse(verification.last_checked_at) <
+          Date.parse(value.requested_at) ||
+        Date.parse(verification.last_checked_at) >
+          Date.parse(value.updated_at) ||
+        Date.parse(verification.next_check_at) <=
+          Date.parse(verification.last_checked_at) ||
+        (hasVerifiedHistory &&
+          (Date.parse(firstVerified) < Date.parse(value.requested_at) ||
+            Date.parse(firstVerified) > Date.parse(lastVerified) ||
+            Date.parse(lastVerified) > Date.parse(value.updated_at))) ||
+        (hasVerifiedHistory &&
+          !["verified", "stale"].includes(verification.state)) ||
+        (!hasVerifiedHistory &&
+          ["verified", "stale"].includes(verification.state)) ||
+        (["pending_verification", "rejected", "expired"].includes(
+          value.state,
+        ) && hasVerifiedHistory) ||
+        (value.state === "retired" && value.decision &&
+          hasVerifiedHistory)) {
+      recoveryFail("recovered custom domain verification history is invalid");
+    }
+    if (retirement &&
+        (Date.parse(retirement.retired_at) <
+            Date.parse(verification.last_checked_at) ||
+          (lastVerified && Date.parse(retirement.retired_at) <
+            Date.parse(lastVerified)))) {
+      recoveryFail("recovered custom domain retirement time is invalid");
+    }
+  }
+  if (retirement && decision &&
+      Date.parse(retirement.retired_at) < Date.parse(decision.decided_at)) {
+    recoveryFail("recovered custom domain retirement time is invalid");
+  }
   if ((value.state === "pending_verification" &&
-        (decision != null || retirement != null)) ||
+        (decision != null || retirement != null || expiration != null)) ||
+      (value.state === "verified" &&
+        (decision != null || retirement != null || expiration != null ||
+          verification?.first_verified_at == null)) ||
       (value.state === "rejected" &&
-        (decision == null || retirement != null)) ||
+        (decision == null || retirement != null || expiration != null)) ||
+      (value.state === "expired" &&
+        (expiration == null || decision != null || retirement != null)) ||
       (value.state === "retired" && retirement == null)) {
     recoveryFail("recovered custom domain lifecycle evidence is inconsistent");
+  }
+  return value;
+}
+
+function validAllocationRecord(value) {
+  assertObject(value, "recovered custom domain allocation is invalid");
+  // Compatibility for authority written by v0.0.235 before verified-only
+  // allocations were separated from unverified request history.
+  if (value.schema_version === "witself.agent-email-domain.v1" && value.id) {
+    validRequestRecord(value);
+    return value;
+  }
+  if (value.schema_version !== "witself.agent-email-domain-allocation.v1" ||
+      !validDomain(value.domain) ||
+      !ACCOUNT_ID_PATTERN.test(value.account_id ?? "") ||
+      !REQUEST_ID_PATTERN.test(value.source_request_id ?? "") ||
+      !Number.isSafeInteger(value.generation) || value.generation < 1 ||
+      !Number.isSafeInteger(value.allocation_revision) ||
+      value.allocation_revision < 1 ||
+      !["allocated", "retired"].includes(value.state)) {
+    recoveryFail("recovered custom domain allocation is invalid");
+  }
+  validateISODate(value.allocated_at, "allocation allocated_at");
+  validateISODate(value.updated_at, "allocation updated_at");
+  if (Date.parse(value.updated_at) < Date.parse(value.allocated_at) ||
+      !isPlainObject(value.ownership_proof) ||
+      !SHA256_PATTERN.test(value.ownership_proof.rrset_sha256 ?? "") ||
+      typeof value.ownership_proof.dnssec_authenticated !== "boolean") {
+    recoveryFail("recovered custom domain allocation evidence is invalid");
+  }
+  validateISODate(value.ownership_proof.verified_at,
+    "allocation proof verified_at");
+  if ((value.state === "allocated" && value.retirement != null) ||
+      (value.state === "retired" && !isPlainObject(value.retirement))) {
+    recoveryFail("recovered custom domain allocation lifecycle is invalid");
+  }
+  if (value.retirement) {
+    validateISODate(value.retirement.retired_at,
+      "allocation retirement retired_at");
+  }
+  return value;
+}
+
+function validPolicyRecord(key, value) {
+  assertObject(value, `recovered custom domain policy record is invalid: ${key}`);
+  const accountID = key.slice(key.indexOf(":") + 1);
+  if (!ACCOUNT_ID_PATTERN.test(accountID) || value.account_id !== accountID) {
+    recoveryFail(`recovered custom domain policy key is invalid: ${key}`);
+  }
+  if (key.startsWith("plan-fence:")) {
+    exactKeys(value, new Set([
+      "account_id", "committed_revision", "committed_snapshot_hash",
+      "feature_enabled", "domain_limit", "updated_at",
+    ]), "custom domain plan fence");
+    if (!Number.isSafeInteger(value.committed_revision) ||
+        value.committed_revision < 0 ||
+        !(value.committed_revision === 0
+          ? value.committed_snapshot_hash === ""
+          : SHA256_PATTERN.test(value.committed_snapshot_hash ?? "")) ||
+        typeof value.feature_enabled !== "boolean" ||
+        !(value.domain_limit === null ||
+          (Number.isSafeInteger(value.domain_limit) && value.domain_limit >= 0))) {
+      recoveryFail(`recovered custom domain plan fence is invalid: ${key}`);
+    }
+    validateISODate(value.updated_at, "plan fence updated_at");
+  } else if (key.startsWith("plan-intent:")) {
+    exactKeys(value, new Set([
+      "account_id", "plan_revision", "plan_snapshot_hash",
+      "feature_enabled", "domain_limit", "state", "cursor", "position",
+      "failure_count", "retry_at_ms", "created_at", "updated_at",
+    ]), "custom domain plan intent");
+    if (!Number.isSafeInteger(value.plan_revision) || value.plan_revision < 0 ||
+        !(value.plan_revision === 0
+          ? value.plan_snapshot_hash === ""
+          : SHA256_PATTERN.test(value.plan_snapshot_hash ?? "")) ||
+        !["awaiting_cell", "cell_committed"].includes(value.state) ||
+        typeof value.feature_enabled !== "boolean" ||
+        !(value.domain_limit === null ||
+          (Number.isSafeInteger(value.domain_limit) && value.domain_limit >= 0)) ||
+        !Number.isSafeInteger(value.position) || value.position < 0 ||
+        !Number.isSafeInteger(value.failure_count) || value.failure_count < 0 ||
+        !(value.cursor === null ||
+          (typeof value.cursor === "string" &&
+            value.cursor.startsWith(`account-domain:${accountID}:`))) ||
+        !(value.state === "awaiting_cell"
+          ? value.retry_at_ms === null && value.cursor === null &&
+            value.position === 0
+          : Number.isSafeInteger(value.retry_at_ms) &&
+            value.retry_at_ms >= 0)) {
+      recoveryFail(`recovered custom domain plan intent is invalid: ${key}`);
+    }
+    validateISODate(value.created_at, "plan intent created_at");
+    validateISODate(value.updated_at, "plan intent updated_at");
+    if (Date.parse(value.updated_at) < Date.parse(value.created_at)) {
+      recoveryFail(`recovered custom domain plan intent time regressed: ${key}`,
+        "agent_email_domain_recovery_revision_regression");
+    }
+  } else if (key.startsWith("lifecycle-fence:") ||
+      key.startsWith("lifecycle-intent:")) {
+    const intent = key.startsWith("lifecycle-intent:");
+    exactKeys(value, new Set(intent
+      ? [
+        "account_id", "operation_id", "epoch", "action", "cursor",
+        "failure_count", "retry_at_ms", "created_at", "updated_at",
+      ]
+      : [
+        "account_id", "operation_id", "epoch", "action", "completed_at",
+      ]), intent
+      ? "custom domain lifecycle intent"
+      : "custom domain lifecycle fence");
+    if (!OPERATION_ID_PATTERN.test(value.operation_id ?? "") ||
+        !Number.isSafeInteger(value.epoch) || value.epoch < 0 ||
+        !["suspend", "republish", "retire"].includes(value.action)) {
+      recoveryFail(`recovered custom domain lifecycle record is invalid: ${key}`);
+    }
+    if (intent) {
+      if (!(value.cursor === null ||
+            (typeof value.cursor === "string" &&
+              value.cursor.startsWith(`account-domain:${accountID}:`))) ||
+          !Number.isSafeInteger(value.failure_count) || value.failure_count < 0 ||
+          !Number.isSafeInteger(value.retry_at_ms) || value.retry_at_ms < 0) {
+        recoveryFail(`recovered custom domain lifecycle intent is invalid: ${key}`);
+      }
+      validateISODate(value.created_at, "lifecycle intent created_at");
+      validateISODate(value.updated_at, "lifecycle intent updated_at");
+      if (Date.parse(value.updated_at) < Date.parse(value.created_at)) {
+        recoveryFail(`recovered custom domain lifecycle intent time regressed: ${key}`,
+          "agent_email_domain_recovery_revision_regression");
+      }
+    } else {
+      validateISODate(value.completed_at, "lifecycle fence completed_at");
+    }
   }
   return value;
 }
@@ -770,23 +1237,179 @@ function validateAudit(key, value, meta) {
       value.registry_revision > meta.registry_revision ||
       !ACTOR_KINDS.has(value.actor_kind) ||
       !ACTOR_ID_PATTERN.test(value.actor_id ?? "") ||
-      !["custom_domain.requested", "custom_domain.rejected", "custom_domain.retired"]
-        .includes(value.action) || !validDomain(value.target) ||
+      ![
+        "custom_domain.requested", "custom_domain.rejected",
+        "custom_domain.retired", "custom_domain.verified",
+        "custom_domain.reverified", "custom_domain.verification_missing",
+        "custom_domain.verification_deferred",
+        "custom_domain.verification_conflict", "custom_domain.expired",
+        "custom_domain.plan_reconciled",
+        "custom_domain.plan_grace_expired",
+        "custom_domain.lifecycle_suspend",
+        "custom_domain.lifecycle_republish",
+        "custom_domain.lifecycle_retire",
+      ].includes(value.action) ||
       !isPlainObject(value.metadata) ||
       !ACCOUNT_ID_PATTERN.test(value.metadata.account_id ?? "")) {
     recoveryFail(`recovered custom domain audit event is invalid: ${key}`,
       "agent_email_domain_recovery_revision_regression");
   }
+  const accountTarget = value.action === "custom_domain.plan_reconciled" ||
+    value.action.startsWith("custom_domain.lifecycle_");
+  if (accountTarget
+    ? value.target !== value.metadata.account_id
+    : !validDomain(value.target)) {
+    recoveryFail(`recovered custom domain audit target is invalid: ${key}`,
+      "agent_email_domain_recovery_revision_regression");
+  }
   validateISODate(value.occurred_at, "audit occurred_at");
+  if (Date.parse(value.occurred_at) < Date.parse(meta.created_at) ||
+      Date.parse(value.occurred_at) > Date.parse(meta.updated_at)) {
+    recoveryFail(`recovered custom domain audit time is invalid: ${key}`,
+      "agent_email_domain_recovery_revision_regression");
+  }
+  if (value.action === "custom_domain.plan_reconciled") {
+    if (value.actor_kind !== "system" || value.actor_id !== "plan-lifecycle" ||
+        !Number.isSafeInteger(value.metadata.changed) ||
+        value.metadata.changed < 1 ||
+        !Number.isSafeInteger(value.metadata.page_size) ||
+        value.metadata.page_size < value.metadata.changed ||
+        value.metadata.page_size > 40 ||
+        !Number.isSafeInteger(value.metadata.plan_revision) ||
+        value.metadata.plan_revision < 0 ||
+        !(value.metadata.plan_revision === 0
+          ? value.metadata.plan_snapshot_hash === ""
+          : SHA256_PATTERN.test(value.metadata.plan_snapshot_hash ?? "")) ||
+        !(value.metadata.domain_limit === null ||
+          (Number.isSafeInteger(value.metadata.domain_limit) &&
+            value.metadata.domain_limit >= 0))) {
+      recoveryFail(`recovered custom domain plan audit is invalid: ${key}`);
+    }
+  }
+  if (value.action.startsWith("custom_domain.lifecycle_")) {
+    if (value.actor_kind !== "system" ||
+        value.actor_id !== "account-lifecycle" ||
+        !OPERATION_ID_PATTERN.test(value.metadata.operation_id ?? "") ||
+        !Number.isSafeInteger(value.metadata.epoch) ||
+        value.metadata.epoch < 0 ||
+        !Number.isSafeInteger(value.metadata.changed) ||
+        value.metadata.changed < 1 ||
+        !Number.isSafeInteger(value.metadata.page_size) ||
+        value.metadata.page_size < value.metadata.changed ||
+        value.metadata.page_size > 40) {
+      recoveryFail(`recovered custom domain lifecycle audit is invalid: ${key}`);
+    }
+  }
   return value;
+}
+
+function requestAuditFail() {
+  recoveryFail("recovered custom domain audit evidence is inconsistent",
+    "agent_email_domain_recovery_invariant_failed");
+}
+
+function validateRequestAuditEvidence(audit, request) {
+  if (audit.metadata.account_id !== request.account_id ||
+      audit.target !== request.domain ||
+      Date.parse(audit.occurred_at) < Date.parse(request.requested_at) ||
+      Date.parse(audit.occurred_at) > Date.parse(request.updated_at)) {
+    requestAuditFail();
+  }
+  switch (audit.action) {
+    case "custom_domain.requested":
+      if (audit.occurred_at !== request.requested_at ||
+          audit.actor_kind !== "account_operator" ||
+          audit.actor_id !== request.requested_by ||
+          audit.metadata.state !== "pending_verification") {
+        requestAuditFail();
+      }
+      break;
+    case "custom_domain.rejected":
+      if (!request.decision ||
+          audit.occurred_at !== request.decision.decided_at ||
+          audit.actor_kind !== "platform_admin" ||
+          audit.actor_id !== request.decision.decided_by ||
+          audit.metadata.from_state !== "pending_verification" ||
+          audit.metadata.reason !== request.decision.reason) {
+        requestAuditFail();
+      }
+      break;
+    case "custom_domain.retired": {
+      const expectedFromState = request.decision
+        ? "rejected"
+        : request.ownership_verification?.first_verified_at
+        ? "verified"
+        : "pending_verification";
+      if (!request.retirement ||
+          request.retirement.retired_by === "account-lifecycle" ||
+          audit.occurred_at !== request.retirement.retired_at ||
+          audit.actor_kind !== "platform_admin" ||
+          audit.actor_id !== request.retirement.retired_by ||
+          audit.metadata.reason !== request.retirement.reason ||
+          audit.metadata.from_state !== expectedFromState) {
+        requestAuditFail();
+      }
+      break;
+    }
+    case "custom_domain.expired":
+      if (!request.expiration ||
+          audit.occurred_at !== request.expiration.expired_at ||
+          audit.actor_kind !== "system" ||
+          audit.actor_id !== "challenge-expiry") {
+        requestAuditFail();
+      }
+      break;
+    case "custom_domain.verified":
+      if (!request.ownership_verification?.first_verified_at ||
+          audit.occurred_at !==
+            request.ownership_verification.first_verified_at ||
+          audit.metadata.state !== "verified" ||
+          !((audit.actor_kind === "system" &&
+              audit.actor_id === "ownership-verifier") ||
+            audit.actor_kind === "platform_admin")) {
+        requestAuditFail();
+      }
+      break;
+    case "custom_domain.reverified":
+    case "custom_domain.verification_missing":
+    case "custom_domain.verification_deferred": {
+      const reverified = audit.action === "custom_domain.reverified";
+      if ((reverified &&
+            !request.ownership_verification?.first_verified_at) ||
+          (reverified && audit.metadata.state !== "verified") ||
+          !((audit.actor_kind === "system" &&
+              audit.actor_id === "ownership-verifier") ||
+            audit.actor_kind === "platform_admin")) {
+        requestAuditFail();
+      }
+      break;
+    }
+    case "custom_domain.verification_conflict":
+      if (!((audit.actor_kind === "system" &&
+              audit.actor_id === "ownership-verifier") ||
+            audit.actor_kind === "platform_admin") ||
+          audit.metadata.state !== "conflict") {
+        requestAuditFail();
+      }
+      break;
+    case "custom_domain.plan_grace_expired":
+      if (audit.actor_kind !== "system" ||
+          audit.actor_id !== "plan-lifecycle") {
+        requestAuditFail();
+      }
+      break;
+    default:
+      requestAuditFail();
+  }
 }
 
 function validateIdempotency(key, value) {
   assertObject(value, `recovered idempotency receipt is invalid: ${key}`);
   if (typeof value.fingerprint !== "string" || value.fingerprint.length < 2 ||
       value.fingerprint.length > 2_048 ||
-      !Number.isSafeInteger(value.status) || value.status < 200 ||
-      value.status > 299 || !isPlainObject(value.body) ||
+      !Number.isSafeInteger(value.status) ||
+      !((value.status >= 200 && value.status <= 299) ||
+        value.status === 409) || !isPlainObject(value.body) ||
       value.body.schema_version !== "witself.agent-email-domain.v1" ||
       !isPlainObject(value.body.request)) {
     recoveryFail(`recovered idempotency receipt is invalid: ${key}`);
@@ -797,6 +1420,9 @@ function validateIdempotency(key, value) {
   );
   const transition = key.match(
     /^idem:request-(rejected|retired):(aedr_[a-z2-7]{16}):([A-Za-z0-9._:-]{1,128})$/,
+  );
+  const verification = key.match(
+    /^idem:request-verify:(aedr_[a-z2-7]{16}):([A-Za-z0-9._:-]{1,128})$/,
   );
   if (create) {
     if (request.account_id !== create[1] ||
@@ -819,6 +1445,39 @@ function validateIdempotency(key, value) {
       recoveryFail(`recovered transition idempotency receipt is inconsistent: ${key}`);
     }
     return { action, request };
+  }
+  if (verification) {
+    const verified = value.status === 200 &&
+      request.state === "verified" && value.body.matched === true;
+    const missing = value.status === 409 &&
+      ["pending_verification", "verified"].includes(request.state) &&
+      request.ownership_verification?.last_result === "absent" &&
+      value.body.code === "ownership_challenge_not_found" &&
+      value.body.error ===
+        "custom domain ownership challenge was not found" &&
+      value.body.matched === undefined;
+    const expired = value.status === 409 && request.state === "expired" &&
+      request.expiration?.reason === "ownership challenge expired" &&
+      value.body.code === "ownership_challenge_expired" &&
+      value.body.error ===
+        "custom inbound domain ownership challenge has expired";
+    const conflict = value.status === 409 &&
+      request.state === "pending_verification" &&
+      request.ownership_verification?.state === "conflict" &&
+      request.ownership_verification?.last_result === "domain_unavailable" &&
+      value.body.code === "domain_unavailable" &&
+      value.body.error ===
+        "domain was allocated by another verified request";
+    if (request.id !== verification[1] ||
+        (!verified && !missing && !expired && !conflict) ||
+        value.fingerprint !== JSON.stringify(["request.verify", request.id])) {
+      recoveryFail(`recovered verification receipt is inconsistent: ${key}`);
+    }
+    return {
+      action: verified ? "verified" : expired ? "expired" : conflict ?
+        "verification_conflict" : "verification_missing",
+      request,
+    };
   }
   recoveryFail(`recovered idempotency receipt key is invalid: ${key}`);
 }
@@ -865,7 +1524,7 @@ export function validateAgentEmailDomainRecoveredState(state, options = {}) {
       requests.set(id, value);
     } else if (key.startsWith("domain:")) {
       const domain = key.slice("domain:".length);
-      validRequestRecord(value);
+      validAllocationRecord(value);
       if (value.domain !== domain || domains.has(domain)) {
         recoveryFail(`recovered custom domain tombstone key is invalid: ${key}`,
           "agent_email_domain_recovery_collision");
@@ -876,16 +1535,64 @@ export function validateAgentEmailDomainRecoveredState(state, options = {}) {
       audits.set(audit.sequence, audit);
     } else if (key.startsWith("idem:")) {
       receipts.push(validateIdempotency(key, value));
+    } else if (key.startsWith("plan-fence:") ||
+        key.startsWith("plan-intent:") ||
+        key.startsWith("lifecycle-fence:") ||
+        key.startsWith("lifecycle-intent:")) {
+      validPolicyRecord(key, value);
     }
   }
 
-  if (requests.size !== domains.size) {
-    recoveryFail("recovered request and domain tombstone counts differ");
+  for (const allocation of domains.values()) {
+    if (allocation.schema_version === "witself.agent-email-domain.v1") {
+      const legacy = requests.get(allocation.id);
+      if (!legacy || canonicalJSONString(legacy) !==
+          canonicalJSONString(allocation)) {
+        recoveryFail("recovered legacy domain tombstone graph is inconsistent",
+          "agent_email_domain_recovery_collision");
+      }
+      continue;
+    }
+    const request = requests.get(allocation.source_request_id);
+    if (!request || request.domain !== allocation.domain ||
+        request.account_id !== allocation.account_id ||
+        (allocation.state === "allocated" && request.state !== "verified") ||
+        (allocation.state === "retired" && request.state !== "retired") ||
+        allocation.allocated_at !==
+          request.ownership_verification?.first_verified_at ||
+        allocation.ownership_proof.verified_at !==
+          request.ownership_verification?.last_verified_at ||
+        Date.parse(allocation.ownership_proof.verified_at) <
+          Date.parse(allocation.allocated_at) ||
+        Date.parse(allocation.ownership_proof.verified_at) >
+          Date.parse(allocation.updated_at) ||
+        (request.ownership_verification?.last_result === "present" &&
+          (allocation.ownership_proof.rrset_sha256 !==
+              request.ownership_verification.rrset_sha256 ||
+            allocation.ownership_proof.dnssec_authenticated !==
+              request.ownership_verification.dnssec_authenticated)) ||
+        (allocation.state === "retired" &&
+          canonicalJSONString(allocation.retirement) !==
+            canonicalJSONString(request.retirement))) {
+      recoveryFail("recovered request and allocation graph is inconsistent",
+        "agent_email_domain_recovery_collision");
+    }
   }
   for (const request of requests.values()) {
-    const tombstone = domains.get(request.domain);
-    if (!tombstone || canonicalJSONString(tombstone) !== canonicalJSONString(request)) {
-      recoveryFail("recovered request and domain tombstone graph is inconsistent",
+    const allocation = domains.get(request.domain);
+    if (allocation?.schema_version === "witself.agent-email-domain.v1") {
+      continue;
+    }
+    const wasVerified = request.ownership_verification?.first_verified_at != null;
+    if ((request.state === "verified" &&
+          (!allocation || allocation.source_request_id !== request.id ||
+            allocation.state !== "allocated")) ||
+        (request.state === "retired" && wasVerified &&
+          (!allocation || allocation.source_request_id !== request.id ||
+            allocation.state !== "retired")) ||
+        (["pending_verification", "rejected", "expired"].includes(request.state) &&
+          allocation?.source_request_id === request.id)) {
+      recoveryFail("recovered custom domain ownership graph is inconsistent",
         "agent_email_domain_recovery_collision");
     }
   }
@@ -900,86 +1607,122 @@ export function validateAgentEmailDomainRecoveredState(state, options = {}) {
     }
   }
 
-  const auditByDomain = new Map();
+  const auditByRequest = new Map();
+  const lastAuditTimeByRequest = new Map();
+  const lifecycleRetireAudits = [];
   for (const audit of [...audits.values()].sort((left, right) =>
     left.sequence - right.sequence)) {
-    const request = domains.get(audit.target);
-    if (!request || request.account_id !== audit.metadata.account_id) {
+    if (audit.action === "custom_domain.lifecycle_retire") {
+      lifecycleRetireAudits.push(audit);
+    }
+    const accountTarget = audit.action === "custom_domain.plan_reconciled" ||
+      audit.action.startsWith("custom_domain.lifecycle_");
+    if (accountTarget) {
+      const accountRequests = [...requests.values()].filter((request) =>
+        request.account_id === audit.metadata.account_id);
+      if (accountRequests.length < audit.metadata.changed ||
+          (audit.action === "custom_domain.lifecycle_retire" &&
+            accountRequests.filter((request) =>
+              request.state === "retired" &&
+              request.lifecycle_fence?.operation_id ===
+                audit.metadata.operation_id &&
+              request.lifecycle_fence?.epoch === audit.metadata.epoch &&
+              request.lifecycle_fence?.action === "retire"
+            ).length < audit.metadata.changed)) {
+        recoveryFail("recovered custom domain account audit is orphaned");
+      }
+      continue;
+    }
+    let requestID = audit.metadata.request_id;
+    if (requestID === undefined) {
+      const legacyMatches = [...requests.values()].filter((request) =>
+        request.account_id === audit.metadata.account_id &&
+        request.domain === audit.target);
+      if (legacyMatches.length !== 1) {
+        recoveryFail("recovered custom domain audit graph is inconsistent");
+      }
+      requestID = legacyMatches[0].id;
+    }
+    const request = requests.get(requestID);
+    if (!request || request.account_id !== audit.metadata.account_id ||
+        request.domain !== audit.target) {
       recoveryFail("recovered custom domain audit graph is inconsistent");
     }
-    const evidence = audit.action === "custom_domain.requested"
-      ? {
-        time: request.requested_at,
-        actor_kind: "account_operator",
-        actor_id: request.requested_by,
-        state: "pending_verification",
-      }
-      : audit.action === "custom_domain.rejected"
-      ? {
-        time: request.decision?.decided_at,
-        actor_kind: "platform_admin",
-        actor_id: request.decision?.decided_by,
-        reason: request.decision?.reason,
-      }
-      : {
-        time: request.retirement?.retired_at,
-        actor_kind: "platform_admin",
-        actor_id: request.retirement?.retired_by,
-        reason: request.retirement?.reason,
-      };
-    if (audit.occurred_at !== evidence.time ||
-        audit.actor_kind !== evidence.actor_kind ||
-        audit.actor_id !== evidence.actor_id ||
-        (evidence.state !== undefined &&
-          audit.metadata.state !== evidence.state) ||
-        (evidence.reason !== undefined &&
-          audit.metadata.reason !== evidence.reason)) {
-      recoveryFail("recovered custom domain audit evidence is inconsistent");
+    validateRequestAuditEvidence(audit, request);
+    const previousAuditTime = lastAuditTimeByRequest.get(requestID);
+    if (previousAuditTime &&
+        Date.parse(audit.occurred_at) < Date.parse(previousAuditTime)) {
+      recoveryFail("recovered custom domain audit chronology regressed",
+        "agent_email_domain_recovery_revision_regression");
     }
-    if (audit.action === "custom_domain.rejected" &&
-        audit.metadata.from_state !== "pending_verification") {
-      recoveryFail("recovered custom domain rejection origin is inconsistent");
-    }
-    if (audit.action === "custom_domain.retired") {
-      const expectedOrigin = request.decision == null
-        ? "pending_verification"
-        : "rejected";
-      if (audit.metadata.from_state !== expectedOrigin) {
-        recoveryFail("recovered custom domain retirement origin is inconsistent");
-      }
-    }
-    const actions = auditByDomain.get(audit.target) ?? [];
+    lastAuditTimeByRequest.set(requestID, audit.occurred_at);
+    const actions = auditByRequest.get(requestID) ?? [];
     actions.push(audit.action);
-    auditByDomain.set(audit.target, actions);
+    auditByRequest.set(requestID, actions);
   }
   for (const request of requests.values()) {
-    const actions = auditByDomain.get(request.domain) ?? [];
-    const expected = request.state === "pending_verification"
-      ? ["custom_domain.requested"]
-      : request.state === "rejected"
-      ? ["custom_domain.requested", "custom_domain.rejected"]
-      : request.decision == null
-      ? ["custom_domain.requested", "custom_domain.retired"]
-      : [
-        "custom_domain.requested",
-        "custom_domain.rejected",
-        "custom_domain.retired",
-      ];
-    if (canonicalJSONString(actions) !== canonicalJSONString(expected)) {
+    let actions = auditByRequest.get(request.id) ?? [];
+    if (actions[0] !== "custom_domain.requested") {
+      recoveryFail("recovered custom domain audit lifecycle is inconsistent");
+    }
+    const expiredIndex = actions.indexOf("custom_domain.expired");
+    const retiredIndex = actions.indexOf("custom_domain.retired");
+    const rejectedIndex = actions.indexOf("custom_domain.rejected");
+    if ((expiredIndex >= 0 && expiredIndex !== actions.length - 1) ||
+        (retiredIndex >= 0 && retiredIndex !== actions.length - 1) ||
+        (rejectedIndex >= 0 && rejectedIndex !== actions.length - 1 &&
+          !(rejectedIndex === actions.length - 2 && retiredIndex ===
+            actions.length - 1))) {
+      recoveryFail("recovered custom domain audit lifecycle is inconsistent");
+    }
+    const lifecycleRetireRecorded = request.state === "retired" &&
+      request.retirement?.retired_by === "account-lifecycle" &&
+      request.lifecycle_fence?.action === "retire" &&
+      lifecycleRetireAudits.some((audit) =>
+        audit.target === request.account_id &&
+        audit.metadata.account_id === request.account_id &&
+        audit.metadata.operation_id === request.lifecycle_fence.operation_id &&
+        audit.metadata.epoch === request.lifecycle_fence.epoch
+      );
+    const lifecycleFenceRecorded = !request.lifecycle_fence ||
+      [...audits.values()].some((audit) =>
+        audit.action ===
+          `custom_domain.lifecycle_${request.lifecycle_fence.action}` &&
+        audit.target === request.account_id &&
+        audit.metadata.account_id === request.account_id &&
+        audit.metadata.operation_id === request.lifecycle_fence.operation_id &&
+        audit.metadata.epoch === request.lifecycle_fence.epoch);
+    if (!lifecycleFenceRecorded) {
+      recoveryFail("recovered custom domain lifecycle fence is unaudited");
+    }
+    const wasVerified =
+      request.ownership_verification?.first_verified_at != null;
+    const manualRetirement = request.retirement &&
+      request.retirement.retired_by !== "account-lifecycle";
+    if (!actions.includes("custom_domain.requested") ||
+        (wasVerified && !actions.includes("custom_domain.verified")) ||
+        (request.decision &&
+          !actions.includes("custom_domain.rejected")) ||
+        (manualRetirement &&
+          !actions.includes("custom_domain.retired")) ||
+        (request.state === "verified" &&
+          !actions.includes("custom_domain.verified")) ||
+        (request.state === "rejected" &&
+          !actions.includes("custom_domain.rejected")) ||
+        (request.state === "expired" &&
+          !actions.includes("custom_domain.expired")) ||
+        (request.state === "retired" && !lifecycleRetireRecorded &&
+          !actions.some((action) => [
+            "custom_domain.retired", "custom_domain.lifecycle_retire",
+          ].includes(action)))) {
       recoveryFail("recovered custom domain audit lifecycle is inconsistent");
     }
     const requestReceipts = receipts.filter(({ request: receipt }) =>
       receipt.id === request.id);
     const receiptActions = requestReceipts.map(({ action }) => action).sort();
-    const expectedReceipts = request.state === "pending_verification"
-      ? ["requested"]
-      : request.state === "rejected"
-      ? ["rejected", "requested"]
-      : request.decision == null
-      ? ["requested", "retired"]
-      : ["rejected", "requested", "retired"];
-    if (canonicalJSONString(receiptActions) !==
-        canonicalJSONString(expectedReceipts.sort())) {
+    if (!receiptActions.includes("requested") ||
+        (request.decision && !receiptActions.includes("rejected")) ||
+        (manualRetirement && !receiptActions.includes("retired"))) {
       recoveryFail("recovered custom domain idempotency graph is inconsistent");
     }
     for (const { action, request: receipt } of requestReceipts) {
@@ -1011,6 +1754,11 @@ export function validateAgentEmailDomainRecoveredState(state, options = {}) {
             receipt.updated_at !== request.retirement?.retired_at)) {
         recoveryFail("recovered retirement receipt lifecycle is inconsistent");
       }
+      if (action === "verified" &&
+          (receipt.state !== "verified" ||
+            receipt.ownership_verification?.first_verified_at == null)) {
+        recoveryFail("recovered verification receipt lifecycle is inconsistent");
+      }
     }
   }
   if (receipts.some(({ request }) => !requests.has(request.id))) {
@@ -1035,44 +1783,108 @@ export function rebuildAgentEmailDomainDerivedState(state) {
     .sort(([left], [right]) => left.localeCompare(right))) {
     void key;
     derived.set(`account-request:${request.account_id}:${request.id}`, request.id);
+    const active = ["pending_verification", "verified"].includes(request.state);
+    if (active) {
+      derived.set(
+        `account-domain:${request.account_id}:${request.requested_at}:${request.id}`,
+        request.id,
+      );
+    }
+    if (request.state === "pending_verification") {
+      derived.set(
+        `domain-pending:${request.domain}:${request.requested_at}:${request.id}`,
+        request.id,
+      );
+      const challengeExpiresAt = request.ownership_challenge.expires_at ??
+        new Date(
+          Date.parse(request.requested_at) + PENDING_CHALLENGE_TTL_MS,
+        ).toISOString();
+      if (challengeExpiresAt) {
+        derived.set(
+          `challenge-expiry-due:${String(
+            Date.parse(challengeExpiresAt),
+          ).padStart(16, "0")}:${request.id}`,
+          request.id,
+        );
+      }
+    }
+    const verificationDueAt =
+      request.ownership_verification?.next_check_at ??
+      (request.state === "pending_verification" ? request.requested_at : null);
+    if (active && verificationDueAt &&
+        request.plan_suspended !== true &&
+        request.lifecycle_suspended !== true) {
+      derived.set(
+        `verification-due:${String(
+          Date.parse(verificationDueAt),
+        ).padStart(16, "0")}:${request.id}`,
+        request.id,
+      );
+    }
+    if (request.state === "verified" && request.plan_grace_until) {
+      derived.set(
+        `plan-grace-due:${String(
+          Date.parse(request.plan_grace_until),
+        ).padStart(16, "0")}:${request.id}`,
+        request.id,
+      );
+    }
+    const usageChangedAt = request.state === "pending_verification"
+      ? request.requested_at
+      : request.state === "verified"
+      ? request.ownership_verification?.first_verified_at ?? request.requested_at
+      : request.state === "rejected"
+      ? request.decision?.decided_at
+      : request.state === "expired"
+      ? request.expiration?.expired_at
+      : request.state === "retired" && request.decision?.decided_at
+      ? request.decision.decided_at
+      : request.state === "retired"
+      ? request.retirement?.retired_at
+      : request.updated_at;
     const count = usage.get(request.account_id) ?? {
-      count: 0,
-      updated_at: null,
+      open_requests: 0,
+      allocated_domains: 0,
+      updated_at: usageChangedAt,
     };
     usage.set(
       request.account_id,
       {
-        count: count.count +
+        open_requests: count.open_requests +
           (request.state === "pending_verification" ? 1 : 0),
-        updated_at: count.updated_at,
+        allocated_domains: count.allocated_domains + (active ? 1 : 0),
+        updated_at: Date.parse(count.updated_at) >= Date.parse(usageChangedAt)
+          ? count.updated_at
+          : usageChangedAt,
       },
     );
   }
-  for (const audit of [...source]
-    .filter(([key]) => key.startsWith("audit:"))
-    .map(([, value]) => value)
-    .sort((left, right) => left.sequence - right.sequence)) {
-    const changesPending = audit.action === "custom_domain.requested" ||
-      (["custom_domain.rejected", "custom_domain.retired"].includes(audit.action) &&
-        audit.metadata.from_state === "pending_verification");
-    if (changesPending) {
-      const account = usage.get(audit.metadata.account_id);
-      if (!account) {
-        recoveryFail("recovered custom domain usage audit is orphaned");
-      }
-      account.updated_at = audit.occurred_at;
-    }
-  }
   for (const [accountID, account] of usage) {
-    if (!account.updated_at) {
-      recoveryFail("recovered custom domain usage timestamp is missing");
-    }
     derived.set(`account-usage:${accountID}`, {
       schema_version: 1,
       account_id: accountID,
-      open_requests: account.count,
+      open_requests: account.open_requests,
+      allocated_domains: account.allocated_domains,
       updated_at: account.updated_at,
     });
+  }
+  for (const [key, intent] of source) {
+    if (key.startsWith("plan-intent:") &&
+        Number.isSafeInteger(intent.retry_at_ms)) {
+      derived.set(
+        `plan-due:${String(intent.retry_at_ms).padStart(16, "0")}:` +
+          intent.account_id,
+        intent.account_id,
+      );
+    }
+    if (key.startsWith("lifecycle-intent:") &&
+        Number.isSafeInteger(intent.retry_at_ms)) {
+      derived.set(
+        `lifecycle-due:${String(intent.retry_at_ms).padStart(16, "0")}:` +
+          intent.account_id,
+        intent.account_id,
+      );
+    }
   }
   return derived;
 }

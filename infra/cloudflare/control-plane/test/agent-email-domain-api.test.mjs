@@ -108,6 +108,7 @@ test("customer and admin custom-domain routes stay exact and distinct", () => {
     `/v1/admin/agent-email-domain-requests/${REQUEST_ID}`,
     `/v1/admin/agent-email-domain-requests/${REQUEST_ID}:reject`,
     `/v1/admin/agent-email-domain-requests/${REQUEST_ID}:retire`,
+    `/v1/admin/agent-email-domain-requests/${REQUEST_ID}:verify`,
     "/v1/admin/agent-email-domain-audit",
   ]) assert.equal(isAgentEmailDomainAdminPath(path), true, path);
   assert.equal(isAgentEmailDomainAdminPath(
@@ -144,6 +145,13 @@ test("customer request gate is independent, exact-true, and default-off", async 
   assert.equal(forwarded.length, 0);
 
   env.CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUESTS_ENABLED = "true";
+  const notAllowlisted = await handleAgentEmailDomainCustomerRequest(
+    customerRequest("POST", body), env, match, cellFetch(),
+  );
+  assert.equal(notAllowlisted.status, 409);
+  assert.equal(forwarded.length, 0);
+
+  env.CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUEST_ACCOUNT_ALLOWLIST = ACCOUNT;
   const enabled = await handleAgentEmailDomainCustomerRequest(
     customerRequest("POST", body), env, match, cellFetch(),
   );
@@ -285,4 +293,39 @@ test("admin custom-domain review routes bind immutable actor and URL target", as
     new Request(listURL), env, listURL, null,
   );
   assert.equal(unauthenticated.status, 401);
+});
+
+test("admin ownership verification is separately exact-true gated", async () => {
+  const { env, forwarded } = environment();
+  const verifyURL = new URL(
+    `https://self.example/v1/admin/agent-email-domain-requests/${REQUEST_ID}:verify`,
+  );
+  const request = (fields = {}) => new Request(verifyURL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ idempotency_key: "verify-once", ...fields }),
+  });
+  const dark = await handleAgentEmailDomainAdminRequest(
+    request({ verification_enabled: true }), env, verifyURL, ADMIN,
+  );
+  assert.equal(dark.status, 200);
+  assert.equal(forwarded.at(-1).body.verification_enabled, false);
+
+  env.CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED = "TRUE";
+  await handleAgentEmailDomainAdminRequest(request(), env, verifyURL, ADMIN);
+  assert.equal(forwarded.at(-1).body.verification_enabled, false);
+
+  env.CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED = "true";
+  await handleAgentEmailDomainAdminRequest(
+    request({ verification_enabled: false }), env, verifyURL, ADMIN,
+  );
+  assert.deepEqual(forwarded.at(-1), {
+    path: "/request/verify",
+    body: {
+      actor: { kind: "platform_admin", id: ADMIN.admin_id },
+      request_id: REQUEST_ID,
+      idempotency_key: "verify-once",
+      verification_enabled: true,
+    },
+  });
 });

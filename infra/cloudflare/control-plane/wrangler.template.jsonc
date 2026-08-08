@@ -234,9 +234,15 @@
   // separately reviewed staged activation), CP_REALM_EMAIL_ALIAS_RECOVERY_TOKEN (distinct
   // second credential for empty-target recovery only),
   // CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUESTS_ENABLED=true (must remain absent
-  // until proof-backed ownership verification, transfer/quarantine, lifecycle
-  // reconciliation, and a staged request canary are implemented and accepted;
-  // this gate can never authorize DNS mutation, routing, or mail delivery),
+  // until the external-DNS lane, capacity/admission, bounded-audit, durable
+  // plan-recovery, routing/projection, and delivery blockers are accepted),
+  // CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUEST_ACCOUNT_ALLOWLIST=acct_... (required
+  // with the request gate; there is intentionally no wildcard),
+  // CP_AGENT_EMAIL_CUSTOM_DOMAIN_AUTHORITY_READY=true (required only after the
+  // exact journal head and a named sealed recovery drill are independently
+  // verified), CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED=true (a
+  // separate admin/worker DNS-observation gate; it never authorizes routing or
+  // mail delivery),
   // CP_AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_ENABLED=true (only after the
   // existing registry completes a bounded bootstrap and an empty-target
   // recovery drill), CP_AGENT_EMAIL_DOMAIN_RECOVERY_TOKEN (a distinct second

@@ -9,6 +9,10 @@ import {
   AGENT_EMAIL_DOMAIN_JOURNAL_PENDING_KEY,
   AGENT_EMAIL_DOMAIN_RECOVERY_KEY,
 } from "../src/agent-email-domain-journal-runtime.mjs";
+import {
+  agentEmailDomainJournalEntryKey,
+  buildAgentEmailDomainJournalEntry,
+} from "../src/agent-email-domain-journal.mjs";
 
 const STREAM = "aedj_aaaaaaaaaaaaaaaa";
 const RECOVERY = "aedrec_aaaaaaaaaaaaaaaa";
@@ -319,6 +323,191 @@ test("a persisted head keeps journaling after the exact-true gate is removed", a
   assert.deepEqual(await target.storage.get(`domain:${DOMAIN}`), pendingRequest());
 });
 
+test("a swapped R2 bucket permanently fences before local authority advances", async () => {
+  const target = fixture();
+  await target.runtime.commit([["meta", meta()]], [], {}, target.apply);
+  const before = await target.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY);
+  const replacement = new Bucket();
+  target.env.AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL = replacement;
+
+  await assert.rejects(
+    target.runtime.commit(pendingMutation(), [], {}, target.apply),
+    (error) => error.code === "agent_email_domain_journal_gap",
+  );
+
+  assert.deepEqual(
+    await target.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY),
+    before,
+  );
+  assert.deepEqual(await target.storage.get("meta"), meta());
+  assert.equal(await target.storage.get(`domain:${DOMAIN}`), undefined);
+  assert.ok(await target.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_PENDING_KEY));
+  assert.equal(replacement.puts, 0);
+  const fence = await target.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_FORK_KEY);
+  assert.equal(fence.code, "agent_email_domain_journal_gap");
+  assert.equal(fence.stream_id, before.stream_id);
+  assert.equal(fence.sequence, before.sequence);
+  const status = await target.runtime.status();
+  assert.equal(status.enabled, true);
+  assert.equal(status.healthy, false);
+  assert.equal(status.forked, true);
+  assert.equal(status.degradation_code, "agent_email_domain_journal_gap");
+});
+
+test("journal status probes remote continuity without fencing a transient outage", async () => {
+  const target = fixture();
+  await target.runtime.commit([["meta", meta()]], [], {}, target.apply);
+  target.bucket.failGets = 1;
+
+  const unavailable = await target.runtime.status();
+  assert.equal(unavailable.enabled, true);
+  assert.equal(unavailable.healthy, false);
+  assert.equal(unavailable.forked, false);
+  assert.equal(unavailable.remote_head_checked, true);
+  assert.equal(unavailable.remote_head_healthy, false);
+  assert.equal(
+    unavailable.degradation_code,
+    "agent_email_domain_journal_unavailable",
+  );
+  assert.equal(
+    await target.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_FORK_KEY),
+    undefined,
+  );
+
+  const recovered = await target.runtime.status();
+  assert.equal(recovered.healthy, true);
+  assert.equal(recovered.forked, false);
+  assert.equal(recovered.remote_head_healthy, true);
+  assert.equal(recovered.degradation_code, null);
+});
+
+test("a transient continuity read leaves the exact pending append retryable", async () => {
+  const target = fixture();
+  await target.runtime.commit([["meta", meta()]], [], {}, target.apply);
+  const before = await target.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY);
+  target.bucket.failGets = 1;
+
+  await assert.rejects(
+    target.runtime.commit(pendingMutation(), [], {}, target.apply),
+    (error) => error.code === "agent_email_domain_journal_unavailable",
+  );
+  assert.deepEqual(
+    await target.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY),
+    before,
+  );
+  assert.equal(await target.storage.get(`domain:${DOMAIN}`), undefined);
+  assert.ok(await target.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_PENDING_KEY));
+  assert.equal(
+    await target.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_FORK_KEY),
+    undefined,
+  );
+
+  const resumed = await target.runtime.resume(target.apply);
+  assert.equal(resumed.resumed, true);
+  assert.equal(resumed.head.sequence, before.sequence + 1);
+  assert.deepEqual(await target.storage.get(`domain:${DOMAIN}`), pendingRequest());
+  assert.equal(
+    await target.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_PENDING_KEY),
+    undefined,
+  );
+});
+
+test("a deleted remote head permanently fences before the next append", async () => {
+  const target = fixture();
+  await target.runtime.commit([["meta", meta()]], [], {}, target.apply);
+  const before = await target.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY);
+  target.bucket.values.delete(agentEmailDomainJournalEntryKey(
+    before.stream_id,
+    before.sequence,
+  ));
+
+  await assert.rejects(
+    target.runtime.commit(pendingMutation(), [], {}, target.apply),
+    (error) => error.code === "agent_email_domain_journal_gap",
+  );
+
+  assert.deepEqual(
+    await target.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY),
+    before,
+  );
+  assert.deepEqual(await target.storage.get("meta"), meta());
+  assert.equal(await target.storage.get(`request:${REQUEST_ID}`), undefined);
+  assert.equal(target.bucket.puts, 1);
+  assert.equal(
+    (await target.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_FORK_KEY)).code,
+    "agent_email_domain_journal_gap",
+  );
+});
+
+test("a canonical remote head mismatch installs a durable fork fence", async () => {
+  const target = fixture();
+  await target.runtime.commit([["meta", meta()]], [], {}, target.apply);
+  const before = await target.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY);
+  const key = agentEmailDomainJournalEntryKey(
+    before.stream_id,
+    before.sequence,
+  );
+  const original = JSON.parse(
+    new TextDecoder().decode(target.bucket.values.get(key)),
+  );
+  const { entry_hash: _entryHash, ...unsigned } = original;
+  void _entryHash;
+  const conflicting = await buildAgentEmailDomainJournalEntry({
+    ...unsigned,
+    actor: { kind: "system", id: "conflicting-authority" },
+  });
+  target.bucket.values.set(key, conflicting.bytes);
+
+  await assert.rejects(
+    target.runtime.commit(pendingMutation(), [], {}, target.apply),
+    (error) => error.code === "agent_email_domain_journal_fork_detected",
+  );
+
+  assert.deepEqual(
+    await target.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY),
+    before,
+  );
+  assert.deepEqual(await target.storage.get("meta"), meta());
+  assert.equal(await target.storage.get(`domain:${DOMAIN}`), undefined);
+  const fence = await target.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_FORK_KEY);
+  assert.equal(fence.code, "agent_email_domain_journal_fork_detected");
+  assert.equal(fence.sequence, before.sequence);
+});
+
+test("checkpoint verifies its non-genesis source head before appending", async () => {
+  const target = fixture({ entries: [["meta", meta()]] });
+  await finishMaintenance(
+    target.runtime,
+    maintenanceInput("checkpoint-source-bootstrap"),
+    target.apply,
+  );
+  const before = await target.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY);
+  const replacement = new Bucket();
+  target.env.AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL = replacement;
+
+  await assert.rejects(
+    finishMaintenance(
+      target.runtime,
+      maintenanceInput("checkpoint-after-bucket-swap"),
+      target.apply,
+      "checkpoint",
+    ),
+    (error) => error.code === "agent_email_domain_journal_gap",
+  );
+
+  assert.deepEqual(
+    await target.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY),
+    before,
+  );
+  assert.deepEqual(await target.storage.get("meta"), meta());
+  assert.equal(replacement.puts, 0);
+  assert.ok(await target.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_BOOTSTRAP_KEY));
+  assert.equal(
+    (await target.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_FORK_KEY)).code,
+    "agent_email_domain_journal_gap",
+  );
+});
+
 test("required mode rejects existing unbootstrapped authority", async () => {
   const target = fixture({ entries: [["meta", meta()]] });
   await assert.rejects(
@@ -327,6 +516,29 @@ test("required mode rejects existing unbootstrapped authority", async () => {
       "agent_email_domain_journal_bootstrap_required",
   );
   assert.equal(target.bucket.puts, 0);
+});
+
+test("bootstrap atomically initializes a truly empty registry", async () => {
+  const target = fixture();
+  const complete = await finishMaintenance(
+    target.runtime,
+    maintenanceInput("initialize-empty-registry"),
+    target.apply,
+  );
+  assert.equal(complete.complete, true);
+  assert.ok(complete.head.sequence >= 2);
+  assert.deepEqual(await target.storage.get("meta"), {
+    schema_version: "witself.agent-email-domain.v1",
+    registry_revision: 0,
+    audit_sequence: 0,
+    created_at: "2026-08-07T01:00:00.000Z",
+    updated_at: "2026-08-07T01:00:00.000Z",
+  });
+  const status = await target.runtime.status();
+  assert.equal(status.enabled, true);
+  assert.equal(status.required, true);
+  assert.equal(status.healthy, true);
+  await target.runtime.assertOperationalReady();
 });
 
 test("bootstrap freeze survives an R2 crash and exact retry completes", async () => {

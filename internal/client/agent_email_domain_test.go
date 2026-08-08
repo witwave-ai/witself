@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -86,7 +87,8 @@ func TestAdminAgentEmailDomainRequestLifecycleAndAudit(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatal(err)
 			}
-			if body["idempotency_key"] == nil || body["reason"] == nil {
+			if body["idempotency_key"] == nil ||
+				(!strings.HasSuffix(r.URL.Path, ":verify") && body["reason"] == nil) {
 				t.Fatalf("mutation body = %#v", body)
 			}
 		}
@@ -115,6 +117,21 @@ func TestAdminAgentEmailDomainRequestLifecycleAndAudit(t *testing.T) {
 					"id": "aedr_aaaaaaaaaaaaaaaa", "account_id": "acc_1",
 					"domain": "agents.example.com", "state": "rejected",
 					"decision": map[string]any{"action": "rejected", "reason": "policy"},
+				},
+			})
+		case "/v1/admin/agent-email-domain-requests/aedr_aaaaaaaaaaaaaaaa:verify":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version": AgentEmailDomainSchemaVersion,
+				"request": map[string]any{
+					"id": "aedr_aaaaaaaaaaaaaaaa", "account_id": "acc_1",
+					"domain": "agents.example.com", "state": "verified",
+					"ownership_verification": map[string]any{
+						"state":             "verified",
+						"first_verified_at": "2026-08-08T12:00:00Z",
+						"last_checked_at":   "2026-08-08T12:00:00Z",
+						"last_verified_at":  "2026-08-08T12:00:00Z",
+						"next_check_at":     "2026-08-09T12:00:00Z",
+					},
 				},
 			})
 		case "/v1/admin/agent-email-domain-requests/aedr_bbbbbbbbbbbbbbbb:retire":
@@ -156,6 +173,13 @@ func TestAdminAgentEmailDomainRequestLifecycleAndAudit(t *testing.T) {
 	if err != nil || shown.Domain != "agents.example.com" {
 		t.Fatalf("shown = %#v, %v", shown, err)
 	}
+	verified, err := VerifyAdminAgentEmailDomainRequest(context.Background(),
+		srv.URL, "admin-token", "aedr_aaaaaaaaaaaaaaaa", "verify-1")
+	if err != nil || verified.State != "verified" ||
+		verified.OwnershipVerification == nil ||
+		verified.OwnershipVerification.State != "verified" {
+		t.Fatalf("verified = %#v, %v", verified, err)
+	}
 	rejected, err := RejectAdminAgentEmailDomainRequest(context.Background(),
 		srv.URL, "admin-token", "aedr_aaaaaaaaaaaaaaaa", "reject-1", "policy")
 	if err != nil || rejected.State != "rejected" || rejected.Decision == nil ||
@@ -181,6 +205,7 @@ func TestAdminAgentEmailDomainRequestLifecycleAndAudit(t *testing.T) {
 	want := []string{
 		"GET /v1/admin/agent-email-domain-requests?account_id=acc_1&cursor=request-page-2&domain=agents.example.com&state=pending_verification",
 		"GET /v1/admin/agent-email-domain-requests/aedr_aaaaaaaaaaaaaaaa",
+		"POST /v1/admin/agent-email-domain-requests/aedr_aaaaaaaaaaaaaaaa:verify",
 		"POST /v1/admin/agent-email-domain-requests/aedr_aaaaaaaaaaaaaaaa:reject",
 		"POST /v1/admin/agent-email-domain-requests/aedr_bbbbbbbbbbbbbbbb:retire",
 		"GET /v1/admin/agent-email-domain-audit?account_id=acc_1&action=custom_domain.rejected&cursor=audit-page-2&domain=agents.example.com&limit=100",
@@ -203,6 +228,11 @@ func TestAgentEmailDomainClientRejectsUnsafeIdentifiersAndEmptyMutations(t *test
 		"https://example.invalid", "admin-token", "aedr_aaaaaaaaaaaaaaaa",
 		"", "reason"); err == nil {
 		t.Fatal("empty idempotency key accepted")
+	}
+	if _, err := VerifyAdminAgentEmailDomainRequest(context.Background(),
+		"https://example.invalid", "admin-token", "aedr_aaaaaaaaaaaaaaaa",
+		""); err == nil {
+		t.Fatal("empty verification idempotency key accepted")
 	}
 	for _, limit := range []int{-1, 101} {
 		if _, err := ListAdminAgentEmailDomainAuditPage(

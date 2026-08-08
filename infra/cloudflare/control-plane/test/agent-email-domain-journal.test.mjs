@@ -66,7 +66,10 @@ function requestedAudit() {
     actor_id: "operator_1",
     action: "custom_domain.requested",
     target: domain,
-    metadata: { account_id: "acc_1", state: "pending_verification" },
+    metadata: {
+      account_id: "acc_1", request_id: requestID,
+      state: "pending_verification",
+    },
   };
 }
 
@@ -110,6 +113,93 @@ function pendingState() {
   ]);
 }
 
+function verifiedState() {
+  const pending = {
+    ...pendingRequest(),
+    state_revision: 1,
+    plan_suspended: false,
+    plan_grace_until: null,
+    lifecycle_suspended: false,
+    lifecycle_fence: null,
+    ownership_verification: null,
+    expiration: null,
+  };
+  const verifiedAt = rejectedAt;
+  const verified = {
+    ...pending,
+    state: "verified",
+    state_revision: 2,
+    updated_at: verifiedAt,
+    ownership_verification: {
+      state: "verified",
+      last_result: "present",
+      first_verified_at: verifiedAt,
+      last_checked_at: verifiedAt,
+      last_verified_at: verifiedAt,
+      next_check_at: retiredAt,
+      rrset_sha256: "e".repeat(64),
+      dnssec_authenticated: true,
+      minimum_ttl_seconds: 60,
+      consecutive_failures: 0,
+    },
+  };
+  const create = receipt("requested", pending);
+  delete create[1].operation;
+  return new Map([
+    ["meta", {
+      schema_version: "witself.agent-email-domain.v1",
+      registry_revision: 2,
+      audit_sequence: 2,
+      created_at: requestedAt,
+      updated_at: verifiedAt,
+    }],
+    ["audit:000000000001", requestedAudit()],
+    ["audit:000000000002", {
+      sequence: 2,
+      registry_revision: 2,
+      occurred_at: verifiedAt,
+      actor_kind: "platform_admin",
+      actor_id: "admin_1",
+      action: "custom_domain.verified",
+      target: domain,
+      metadata: {
+        account_id: "acc_1",
+        request_id: requestID,
+        state: "verified",
+        rrset_sha256: "e".repeat(64),
+      },
+    }],
+    [`request:${requestID}`, verified],
+    [`domain:${domain}`, {
+      schema_version: "witself.agent-email-domain-allocation.v1",
+      domain,
+      account_id: "acc_1",
+      source_request_id: requestID,
+      generation: 1,
+      allocation_revision: 1,
+      state: "allocated",
+      allocated_at: verifiedAt,
+      updated_at: verifiedAt,
+      ownership_proof: {
+        verified_at: verifiedAt,
+        rrset_sha256: "e".repeat(64),
+        dnssec_authenticated: true,
+      },
+      retirement: null,
+    }],
+    create,
+    [`idem:request-verify:${requestID}:verify-1`, {
+      fingerprint: JSON.stringify(["request.verify", requestID]),
+      status: 200,
+      body: {
+        schema_version: "witself.agent-email-domain.v1",
+        request: publicRequest(verified),
+        matched: true,
+      },
+    }],
+  ]);
+}
+
 function rejectedState() {
   const request = {
     ...pendingRequest(),
@@ -139,6 +229,7 @@ function rejectedState() {
       target: domain,
       metadata: {
         account_id: "acc_1",
+        request_id: requestID,
         from_state: "pending_verification",
         reason: "policy",
       },
@@ -187,6 +278,7 @@ function retiredState() {
     target: domain,
     metadata: {
       account_id: "acc_1",
+      request_id: requestID,
       from_state: "rejected",
       reason: "closed",
     },
@@ -235,11 +327,20 @@ test("storage classification keeps both uniqueness rows canonical", () => {
   for (const key of [
     "meta", "audit:000000000001", `request:${requestID}`,
     `domain:${domain}`, "idem:request-create:acc_1:create-1",
+    "plan-fence:acc_1", "plan-intent:acc_1",
+    "lifecycle-fence:acc_1", "lifecycle-intent:acc_1",
   ]) {
     assert.equal(classifyAgentEmailDomainStorageKey(key), "authority", key);
   }
   for (const key of [
     `account-request:acc_1:${requestID}`, "account-usage:acc_1",
+    `account-domain:acc_1:${requestedAt}:${requestID}`,
+    `domain-pending:${domain}:${requestedAt}:${requestID}`,
+    `challenge-expiry-due:0000000000000001:${requestID}`,
+    "plan-due:0000000000000001:acc_1",
+    "lifecycle-due:0000000000000001:acc_1",
+    `plan-grace-due:0000000000000001:${requestID}`,
+    `verification-due:0000000000000001:${requestID}`,
   ]) {
     assert.equal(classifyAgentEmailDomainStorageKey(key), "derived", key);
   }
@@ -252,7 +353,7 @@ test("storage classification keeps both uniqueness rows canonical", () => {
   assert.equal(classifyAgentEmailDomainStorageKey("future-key"), "unknown");
 });
 
-test("after-images are bounded, sorted, authority-only, and never delete", () => {
+test("after-images are bounded and delete only transient authority intents", () => {
   const normalized = validateAgentEmailDomainAuthorityAfterImage({
     puts: [
       { key: `request:${requestID}`, value: pendingRequest() },
@@ -269,6 +370,9 @@ test("after-images are bounded, sorted, authority-only, and never delete", () =>
   assert.throws(() => validateAgentEmailDomainAuthorityAfterImage({
     puts: [], deletes: [`domain:${domain}`],
   }), /cannot delete canonical authority/);
+  assert.deepEqual(validateAgentEmailDomainAuthorityAfterImage({
+    puts: [], deletes: ["plan-intent:acc_1", "lifecycle-intent:acc_1"],
+  }).deletes, ["lifecycle-intent:acc_1", "plan-intent:acc_1"]);
   assert.throws(() => validateAgentEmailDomainAuthorityAfterImage({
     puts: Array.from({ length: 101 }, (_, index) => ({
       key: `audit:${String(index + 1).padStart(12, "0")}`,
@@ -422,6 +526,146 @@ test("recovered authority verifies mirrored tombstones, ordered audit, and idem 
   wrongReceipt.get(idemKey).fingerprint = "[]";
   assert.throws(() => validateAgentEmailDomainRecoveredState(wrongReceipt),
     /idempotency receipt is inconsistent/);
+
+  for (const mutate of [
+    (audit) => { audit.occurred_at = "2099-01-01T00:00:00.000Z"; },
+    (audit) => {
+      audit.actor_kind = "platform_admin";
+      audit.actor_id = "wrong_actor";
+    },
+    (audit) => { audit.metadata.state = "retired"; },
+  ]) {
+    const falseAudit = new Map([...pendingState()].map(([key, value]) =>
+      [key, structuredClone(value)]));
+    mutate(falseAudit.get("audit:000000000001"));
+    assert.throws(
+      () => validateAgentEmailDomainRecoveredState(falseAudit),
+      /audit (?:evidence|time) is inconsistent|audit time is invalid/,
+    );
+  }
+
+  const ghost = new Map([
+    ["meta", pendingState().get("meta")],
+    ["audit:000000000001", {
+      ...requestedAudit(),
+      target: "ghost.example",
+      metadata: { account_id: "acc_1", state: "pending_verification" },
+    }],
+  ]);
+  assert.throws(() => validateAgentEmailDomainRecoveredState(ghost),
+    /audit graph is inconsistent/);
+
+  const wrongOrigin = new Map([...retiredState()].map(([key, value]) =>
+    [key, structuredClone(value)]));
+  wrongOrigin.get("audit:000000000003").metadata.from_state =
+    "pending_verification";
+  assert.throws(() => validateAgentEmailDomainRecoveredState(wrongOrigin),
+    /audit evidence is inconsistent/);
+
+  const missingRetireReceipt = retiredState();
+  missingRetireReceipt.delete(`idem:request-retired:${requestID}:retired-1`);
+  assert.throws(
+    () => validateAgentEmailDomainRecoveredState(missingRetireReceipt),
+    /idempotency graph is inconsistent/,
+  );
+
+  const earlyExpiry = pendingState();
+  const expiredRequest = {
+    ...pendingRequest(),
+    state: "expired",
+    updated_at: rejectedAt,
+    expiration: {
+      expired_at: rejectedAt,
+      reason: "ownership challenge expired",
+    },
+  };
+  earlyExpiry.set("meta", {
+    ...earlyExpiry.get("meta"),
+    registry_revision: 2,
+    audit_sequence: 2,
+    updated_at: rejectedAt,
+  });
+  earlyExpiry.set("audit:000000000002", {
+    sequence: 2,
+    registry_revision: 2,
+    occurred_at: rejectedAt,
+    actor_kind: "system",
+    actor_id: "challenge-expiry",
+    action: "custom_domain.expired",
+    target: domain,
+    metadata: { account_id: "acc_1", request_id: requestID },
+  });
+  earlyExpiry.set(`request:${requestID}`, expiredRequest);
+  earlyExpiry.set(`domain:${domain}`, expiredRequest);
+  assert.throws(() => validateAgentEmailDomainRecoveredState(earlyExpiry),
+    /expiration preceded its challenge/);
+
+  const impossiblePending = pendingState();
+  const impossible = impossiblePending.get(`request:${requestID}`);
+  impossible.ownership_verification = {
+    state: "verified",
+    last_result: "present",
+    first_verified_at: requestedAt,
+    last_checked_at: requestedAt,
+    last_verified_at: requestedAt,
+    next_check_at: rejectedAt,
+    rrset_sha256: "e".repeat(64),
+    dnssec_authenticated: true,
+    minimum_ttl_seconds: 60,
+    consecutive_failures: 0,
+  };
+  impossiblePending.set(`domain:${domain}`, structuredClone(impossible));
+  assert.throws(() => validateAgentEmailDomainRecoveredState(impossiblePending),
+    /verification history is invalid/);
+
+  const missingLifecycleFence = pendingState();
+  const lifecycleRequest = missingLifecycleFence.get(`request:${requestID}`);
+  lifecycleRequest.lifecycle_suspended = true;
+  lifecycleRequest.lifecycle_fence = null;
+  missingLifecycleFence.set(
+    `domain:${domain}`,
+    structuredClone(lifecycleRequest),
+  );
+  assert.throws(
+    () => validateAgentEmailDomainRecoveredState(missingLifecycleFence),
+    /lifecycle fence is missing/,
+  );
+});
+
+test("recovery validates verified allocations separately from requests", () => {
+  const state = verifiedState();
+  const validated = validateAgentEmailDomainRecoveredState(state);
+  assert.equal(validated.requests, 1);
+  assert.equal(validated.domains, 1);
+  const derived = rebuildAgentEmailDomainDerivedState(state);
+  assert.deepEqual(derived.get("account-usage:acc_1"), {
+    schema_version: 1,
+    account_id: "acc_1",
+    open_requests: 0,
+    allocated_domains: 1,
+    updated_at: rejectedAt,
+  });
+  assert.equal(
+    derived.get(`verification-due:${String(Date.parse(retiredAt)).padStart(
+      16,
+      "0",
+    )}:${requestID}`),
+    requestID,
+  );
+
+  for (const mutate of [
+    (allocation) => { allocation.allocated_at = requestedAt; },
+    (allocation) => { allocation.ownership_proof.rrset_sha256 = "f".repeat(64); },
+    (allocation) => { allocation.ownership_proof.verified_at = retiredAt; },
+  ]) {
+    const mismatched = new Map([...verifiedState()].map(([key, value]) =>
+      [key, structuredClone(value)]));
+    mutate(mismatched.get(`domain:${domain}`));
+    assert.throws(
+      () => validateAgentEmailDomainRecoveredState(mismatched),
+      /request and allocation graph is inconsistent/,
+    );
+  }
 });
 
 test("after-image replay allows only real lifecycle edges and contiguous revisions", () => {
@@ -442,6 +686,22 @@ test("after-image replay allows only real lifecycle edges and contiguous revisio
     deletes: [],
   });
   assert.equal(advanced.get(requestKey).state, "rejected");
+
+  const legacyState = new Map([
+    [requestKey, pending],
+    [`domain:${domain}`, pending],
+  ]);
+  const legacyAdvanced = applyAgentEmailDomainAuthorityAfterImage(legacyState, {
+    puts: [
+      { key: requestKey, value: rejected },
+      { key: `domain:${domain}`, value: rejected },
+    ],
+    deletes: [],
+  });
+  assert.deepEqual(
+    legacyAdvanced.get(`domain:${domain}`),
+    legacyAdvanced.get(requestKey),
+  );
   assert.throws(() => applyAgentEmailDomainAuthorityAfterImage(advanced, {
     puts: [{ key: requestKey, value: pending }], deletes: [],
   }), (error) =>
@@ -456,26 +716,163 @@ test("after-image replay allows only real lifecycle edges and contiguous revisio
     "agent_email_domain_recovery_revision_regression");
 });
 
-test("derived rebuild recreates only account indexes and exact usage history", () => {
+test("plan intent replay rejects revision and progress regression", () => {
+  const key = "plan-intent:acc_1";
+  const awaiting = {
+    account_id: "acc_1",
+    plan_revision: 7,
+    plan_snapshot_hash: "d".repeat(64),
+    feature_enabled: true,
+    domain_limit: 1,
+    state: "awaiting_cell",
+    cursor: null,
+    position: 0,
+    failure_count: 0,
+    retry_at_ms: null,
+    created_at: requestedAt,
+    updated_at: requestedAt,
+  };
+  const committed = {
+    ...awaiting,
+    state: "cell_committed",
+    retry_at_ms: Date.parse(rejectedAt),
+    updated_at: rejectedAt,
+  };
+  const advanced = applyAgentEmailDomainAuthorityAfterImage(
+    new Map([[key, awaiting]]),
+    { puts: [{ key, value: committed }], deletes: [] },
+  );
+  assert.equal(advanced.get(key).state, "cell_committed");
+
+  assert.throws(() => applyAgentEmailDomainAuthorityAfterImage(advanced, {
+    puts: [{ key, value: {
+      ...committed,
+      plan_revision: 6,
+      plan_snapshot_hash: "e".repeat(64),
+      updated_at: retiredAt,
+    } }],
+    deletes: [],
+  }), (error) => error.code ===
+    "agent_email_domain_recovery_revision_regression");
+
+  assert.throws(() => applyAgentEmailDomainAuthorityAfterImage(
+    new Map([[key, awaiting]]),
+    { puts: [{ key, value: {
+      ...committed,
+      created_at: rejectedAt,
+    } }], deletes: [] },
+  ), /plan intent identity changed/);
+
+  assert.throws(() => applyAgentEmailDomainAuthorityAfterImage(
+    new Map([[key, committed]]),
+    { puts: [], deletes: [key] },
+  ), /intent deletion lost convergence/);
+  const completed = applyAgentEmailDomainAuthorityAfterImage(
+    new Map([[key, committed]]),
+    {
+      puts: [{
+        key: "plan-fence:acc_1",
+        value: {
+          account_id: "acc_1",
+          committed_revision: 7,
+          committed_snapshot_hash: "d".repeat(64),
+          feature_enabled: true,
+          domain_limit: 1,
+          updated_at: retiredAt,
+        },
+      }],
+      deletes: [key],
+    },
+  );
+  assert.equal(completed.has(key), false);
+  assert.ok(completed.has("plan-fence:acc_1"));
+});
+
+test("account policy audits bind the system actor and lifecycle fence", () => {
+  const planAudit = {
+    sequence: 2,
+    registry_revision: 2,
+    occurred_at: rejectedAt,
+    actor_kind: "system",
+    actor_id: "plan-lifecycle",
+    action: "custom_domain.plan_reconciled",
+    target: "acc_1",
+    metadata: {
+      account_id: "acc_1",
+      changed: 1,
+      page_size: 1,
+      plan_revision: 7,
+      plan_snapshot_hash: "d".repeat(64),
+      domain_limit: 1,
+      downgrade_grace_days: 30,
+    },
+  };
+  const state = pendingState();
+  state.set("meta", {
+    ...state.get("meta"),
+    registry_revision: 2,
+    audit_sequence: 2,
+    updated_at: rejectedAt,
+  });
+  state.set("audit:000000000002", planAudit);
+  assert.equal(validateAgentEmailDomainRecoveredState(state).requests, 1);
+
+  const forgedPlan = new Map([...state].map(([key, value]) =>
+    [key, structuredClone(value)]));
+  forgedPlan.get("audit:000000000002").actor_kind = "platform_admin";
+  forgedPlan.get("audit:000000000002").actor_id = "wrong_actor";
+  assert.throws(() => validateAgentEmailDomainRecoveredState(forgedPlan),
+    /plan audit is invalid/);
+
+  const lifecycle = new Map([...state].map(([key, value]) =>
+    [key, structuredClone(value)]));
+  lifecycle.set("audit:000000000002", {
+    ...planAudit,
+    actor_id: "account-lifecycle",
+    action: "custom_domain.lifecycle_suspend",
+    metadata: {
+      account_id: "acc_1",
+      operation_id: "close-one",
+      epoch: 1,
+      changed: 1,
+      page_size: 1,
+    },
+  });
+  assert.equal(validateAgentEmailDomainRecoveredState(lifecycle).requests, 1);
+  lifecycle.get("audit:000000000002").metadata.operation_id = "bad operation";
+  assert.throws(() => validateAgentEmailDomainRecoveredState(lifecycle),
+    /lifecycle audit is invalid/);
+});
+
+test("derived rebuild recreates chronological indexes and split usage", () => {
   const pending = rebuildAgentEmailDomainDerivedState(pendingState());
   assert.deepEqual([...pending.keys()].sort(), [
+    `account-domain:acc_1:${requestedAt}:${requestID}`,
     `account-request:acc_1:${requestID}`,
     "account-usage:acc_1",
+    `challenge-expiry-due:${String(
+      Date.parse(requestedAt) + 7 * 24 * 60 * 60 * 1_000,
+    ).padStart(16, "0")}:${requestID}`,
+    `domain-pending:${domain}:${requestedAt}:${requestID}`,
+    `verification-due:${String(Date.parse(requestedAt)).padStart(
+      16, "0")}:${requestID}`,
   ]);
   assert.deepEqual(pending.get("account-usage:acc_1"), {
     schema_version: 1,
     account_id: "acc_1",
     open_requests: 1,
+    allocated_domains: 1,
     updated_at: requestedAt,
   });
 
   const rejected = rebuildAgentEmailDomainDerivedState(rejectedState());
   assert.equal(rejected.get("account-usage:acc_1").open_requests, 0);
+  assert.equal(rejected.get("account-usage:acc_1").allocated_domains, 0);
   assert.equal(rejected.get("account-usage:acc_1").updated_at, rejectedAt);
 
-  // Rejected -> retired does not change pending usage, so the exact historical
-  // counter timestamp remains the rejection audit time.
   const retired = rebuildAgentEmailDomainDerivedState(retiredState());
   assert.equal(retired.get("account-usage:acc_1").open_requests, 0);
+  assert.equal(retired.get("account-usage:acc_1").allocated_domains, 0);
+  // Retiring an already-rejected request does not change either counter.
   assert.equal(retired.get("account-usage:acc_1").updated_at, rejectedAt);
 });

@@ -2,16 +2,29 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  AGENT_EMAIL_CUSTOM_DOMAIN_DOWNGRADE_GRACE_DAYS,
   AGENT_EMAIL_CUSTOM_DOMAIN_FEATURE,
   AGENT_EMAIL_CUSTOM_DOMAIN_LIMIT,
   AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_REQUESTS_PER_ACCOUNT,
+  AGENT_EMAIL_CUSTOM_DOMAIN_PENDING_CHALLENGE_DAYS,
+  AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_INTERVAL_HOURS,
   DurableAgentEmailDomainRegistry,
   agentEmailCustomDomainEntitlement,
   agentEmailCustomDomainOpenRequestLimit,
   agentEmailDomainRegistryStub,
   isProtectedAgentEmailDomain,
   normalizeAgentEmailCustomDomain,
+  runScheduledAgentEmailDomainVerification,
 } from "../src/agent-email-domain-runtime.mjs";
+import {
+  AgentEmailDomainVerificationError,
+} from "../src/agent-email-domain-verification.mjs";
+import {
+  isAgentEmailDomainAuthorityKey,
+  isAgentEmailDomainDerivedKey,
+  rebuildAgentEmailDomainDerivedState,
+  validateAgentEmailDomainRecoveredState,
+} from "../src/agent-email-domain-journal.mjs";
 
 const ACCOUNT = "acct_domain";
 const OTHER_ACCOUNT = "acct_other";
@@ -73,6 +86,37 @@ class Storage {
     this.values = staged;
     return result;
   }
+
+  async setAlarm(value) {
+    this.alarm = value;
+  }
+
+  async deleteAlarm() {
+    this.alarm = undefined;
+  }
+
+  async getAlarm() {
+    return this.alarm;
+  }
+}
+
+class Bucket {
+  constructor() {
+    this.values = new Map();
+  }
+
+  async put(key, value) {
+    if (this.values.has(key)) return null;
+    this.values.set(key, new Uint8Array(value));
+    return { key };
+  }
+
+  async get(key) {
+    const value = this.values.get(key);
+    return value
+      ? { arrayBuffer: async () => value.slice().buffer }
+      : null;
+  }
 }
 
 function base32(value, length) {
@@ -94,6 +138,9 @@ function registry(env = {}, dependencyOverrides = {}) {
     {
       AGENT_EMAIL_DOMAIN: "witmail.net",
       AGENT_EMAIL_LEGACY_DOMAINS: "agent-mail.witwave.ai",
+      CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUESTS_ENABLED: "true",
+      CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUEST_ACCOUNT_ALLOWLIST:
+        `${ACCOUNT},${OTHER_ACCOUNT}`,
       ...env,
     },
     {
@@ -109,6 +156,7 @@ function registry(env = {}, dependencyOverrides = {}) {
         challengeSequence++;
         return `aedv_${base32(challengeSequence, 32)}`;
       },
+      assertRequestActivationReady: async () => {},
       ...dependencyOverrides,
     },
   );
@@ -117,6 +165,9 @@ function registry(env = {}, dependencyOverrides = {}) {
     storage,
     requestCount: () => requestSequence,
     challengeCount: () => challengeSequence,
+    advanceTime: (milliseconds) => {
+      currentTime += milliseconds;
+    },
   };
 }
 
@@ -145,6 +196,18 @@ function create(runtime, domain, fields = {}) {
     idempotency_key: `create-${domain.toLowerCase()}`,
     ...fields,
   });
+}
+
+function assertDerivedParity(storage) {
+  const authority = new Map(
+    [...storage.values].filter(([key]) => isAgentEmailDomainAuthorityKey(key)),
+  );
+  const actual = [...storage.values]
+    .filter(([key]) => isAgentEmailDomainDerivedKey(key))
+    .sort(([left], [right]) => left.localeCompare(right));
+  const expected = [...rebuildAgentEmailDomainDerivedState(authority)]
+    .sort(([left], [right]) => left.localeCompare(right));
+  assert.deepEqual(actual, expected);
 }
 
 test("domain normalization is lowercase ASCII DNS only", () => {
@@ -275,12 +338,81 @@ test("journal control routes do not initialize an empty registry", async () => {
   assert.equal(fixture.storage.values.size, 0);
 });
 
-test("journal enforcement freezes an existing unjournaled registry", async () => {
+test("empty journal bootstrap accepts its first request and plan completion", async () => {
+  const bucket = new Bucket();
+  const fixture = registry({
+    CP_AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_ENABLED: "true",
+    CP_AGENT_EMAIL_DOMAIN_AUTHORITY_STREAM_ID:
+      `aedj_${"a".repeat(24)}`,
+    AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL: bucket,
+  });
+  const maintenance = {
+    actor: ADMIN,
+    reason: "initialize empty registry integration test",
+    idempotency_key: "initialize-empty-registry-integration",
+  };
+  let bootstrapped;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    bootstrapped = await call(
+      fixture.runtime,
+      "/journal/bootstrap",
+      maintenance,
+    );
+    assert.equal(bootstrapped.response.status, 200);
+    if (bootstrapped.body.complete) break;
+  }
+  assert.equal(bootstrapped.body.complete, true);
+
+  const created = await create(fixture.runtime, "first-journal.example", {
+    domain_limit: 1,
+  });
+  assert.equal(created.response.status, 202);
+  const plan = {
+    account_id: ACCOUNT,
+    activation_enabled: true,
+    feature_enabled: true,
+    domain_limit: 1,
+    plan_revision: 8,
+    plan_snapshot_hash: "8".repeat(64),
+  };
+  assert.equal((await call(fixture.runtime, "/plan/reconcile", {
+    ...plan,
+    mode: "restrict_only",
+  })).response.status, 200);
+  assert.equal((await call(fixture.runtime, "/plan/reconcile", {
+    ...plan,
+    mode: "complete",
+  })).response.status, 200);
+  assert.equal(fixture.storage.values.has(`plan-intent:${ACCOUNT}`), false);
+  assert.ok(fixture.storage.values.has(`plan-fence:${ACCOUNT}`));
+
+  let checkpoint;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    checkpoint = await call(fixture.runtime, "/journal/checkpoint", {
+      ...maintenance,
+      idempotency_key: "checkpoint-after-first-request",
+    });
+    assert.equal(checkpoint.response.status, 200);
+    if (checkpoint.body.complete) break;
+  }
+  assert.equal(checkpoint.body.complete, true);
+  const status = await call(fixture.runtime, "/journal/status", {});
+  assert.equal(status.body.healthy, true);
+  assert.ok(status.body.head.sequence >= 1);
+});
+
+test("ordinary reads are empty and journal enforcement freezes old mutations", async () => {
   const fixture = registry();
   const seeded = await call(fixture.runtime, "/request/admin-list", {
     actor: ADMIN,
   });
   assert.equal(seeded.response.status, 200);
+  assert.equal(fixture.storage.values.has("meta"), false);
+
+  const oldMutation = await create(fixture.runtime, "old.example", {
+    domain_limit: null,
+  });
+  assert.equal(oldMutation.response.status, 202);
   assert.ok(fixture.storage.values.has("meta"));
 
   fixture.runtime.env.CP_AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_ENABLED =
@@ -328,6 +460,18 @@ test("creation is dark by default and requires an explicit entitlement fence", a
   assert.equal(badHash.response.status, 400);
 });
 
+test("authority rechecks a removed request gate before first mutation", async () => {
+  const fixture = registry();
+  fixture.runtime.env.CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUEST_ACCOUNT_ALLOWLIST =
+    OTHER_ACCOUNT;
+  const removed = await create(fixture.runtime, "removed-gate.example", {
+    domain_limit: null,
+  });
+  assert.equal(removed.response.status, 409);
+  assert.equal(removed.body.code, "custom_domain_requests_disabled");
+  assert.equal(fixture.storage.values.size, 0);
+});
+
 test("request creation, challenge, ownership, and idempotency are durable", async () => {
   const fixture = registry();
   const created = await create(fixture.runtime, "Customer.Example", {
@@ -347,6 +491,9 @@ test("request creation, challenge, ownership, and idempotency are durable", asyn
     record_value:
       `witself-domain-verification=aedv_${base32(1, 32)}`,
     issued_at: created.body.request.requested_at,
+    expires_at: new Date(
+      Date.parse(created.body.request.requested_at) + 7 * 24 * 60 * 60 * 1_000,
+    ).toISOString(),
   });
 
   const replay = await create(fixture.runtime, "customer.example", {
@@ -366,14 +513,13 @@ test("request creation, challenge, ownership, and idempotency are durable", asyn
   assert.equal(conflict.response.status, 409);
   assert.equal(conflict.body.code, "idempotency_conflict");
 
-  const claimed = await create(fixture.runtime, "CUSTOMER.EXAMPLE", {
+  const competing = await create(fixture.runtime, "CUSTOMER.EXAMPLE", {
     actor: OTHER_OPERATOR,
     account_id: OTHER_ACCOUNT,
     domain_limit: null,
     idempotency_key: "other-claim",
   });
-  assert.equal(claimed.response.status, 409);
-  assert.equal(claimed.body.code, "domain_unavailable");
+  assert.equal(competing.response.status, 202);
 
   const customerList = await call(fixture.runtime, "/request/list", {
     actor: OPERATOR,
@@ -387,7 +533,10 @@ test("request creation, challenge, ownership, and idempotency are durable", asyn
     actor: ADMIN,
   });
   assert.equal(adminList.response.status, 200);
-  assert.deepEqual(adminList.body.requests, [created.body.request]);
+  assert.deepEqual(
+    adminList.body.requests.map((request) => request.id),
+    [created.body.request.id, competing.body.request.id],
+  );
 
   const shown = await call(fixture.runtime, "/request/get", {
     actor: ADMIN,
@@ -402,7 +551,7 @@ test("request creation, challenge, ownership, and idempotency are durable", asyn
   assert.equal(customerShow.response.status, 400);
 });
 
-test("global serialization permits exactly one owner for a concurrent domain", async () => {
+test("concurrent unverified challenges do not permanently squat a domain", async () => {
   const { runtime } = registry();
   const [first, second] = await Promise.all([
     create(runtime, "race.example", {
@@ -418,7 +567,7 @@ test("global serialization permits exactly one owner for a concurrent domain", a
   ]);
   assert.deepEqual(
     [first.response.status, second.response.status].sort(),
-    [202, 409],
+    [202, 202],
   );
 });
 
@@ -458,7 +607,7 @@ test("request id collisions regenerate without overwriting authority", async () 
   );
 });
 
-test("reject and retire release quota but preserve a permanent tombstone", async () => {
+test("reject and retire release quota without tombstoning an unverified name", async () => {
   const { runtime } = registry();
   const first = await create(runtime, "one.example", {
     domain_limit: 2,
@@ -535,18 +684,17 @@ test("reject and retire release quota but preserve a permanent tombstone", async
   assert.equal(retiredPending.body.request.state, "retired");
 
   const replacement = await create(runtime, "replacement.example", {
-    domain_limit: 1,
+    domain_limit: 2,
   });
   assert.equal(replacement.response.status, 202);
 
-  const tombstoned = await create(runtime, "one.example", {
+  const reusable = await create(runtime, "one.example", {
     actor: OTHER_OPERATOR,
     account_id: OTHER_ACCOUNT,
     domain_limit: null,
     idempotency_key: "reuse-tombstone",
   });
-  assert.equal(tombstoned.response.status, 409);
-  assert.equal(tombstoned.body.code, "domain_unavailable");
+  assert.equal(reusable.response.status, 202);
 
   const list = await call(runtime, "/request/list", {
     actor: OPERATOR,
@@ -694,6 +842,1578 @@ test("customer, admin, and newest-first audit pagination stay bounded", async ()
     action: "custom_domain.activated",
   });
   assert.equal(badAuditFilter.response.status, 400);
+});
+
+test("customer request activation fails closed before any authority mutation", async () => {
+  const fixture = registry({}, { assertRequestActivationReady: undefined });
+  const response = await create(fixture.runtime, "not-ready.example", {
+    domain_limit: null,
+  });
+  assert.equal(response.response.status, 503);
+  assert.equal(response.body.code, "custom_domain_activation_not_ready");
+  assert.equal(fixture.storage.values.has("meta"), false);
+  assert.equal(fixture.storage.values.has("request:aedr_aaaaaaaaaaaaaaab"), false);
+});
+
+test("request activation requires durable plan-lifecycle recovery", async () => {
+  const fixture = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_AUTHORITY_READY: "true",
+    CP_PLAN_LIFECYCLE_ENABLED: "false",
+  }, { assertRequestActivationReady: undefined });
+  fixture.runtime.authorityJournal.status = async () => ({
+    required: true,
+    enabled: true,
+    healthy: true,
+    pending: false,
+    forked: false,
+    head: { sequence: 1 },
+  });
+  const disabled = await create(
+    fixture.runtime,
+    "plan-recovery-disabled.example",
+    { domain_limit: null },
+  );
+  assert.equal(disabled.response.status, 503);
+  assert.equal(disabled.body.code, "custom_domain_activation_not_ready");
+  assert.equal(fixture.storage.values.size, 0);
+
+  fixture.runtime.env.CP_PLAN_LIFECYCLE_ENABLED = "true";
+  const enabled = await create(
+    fixture.runtime,
+    "plan-recovery-enabled.example",
+    { domain_limit: null },
+  );
+  assert.equal(enabled.response.status, 202);
+});
+
+test("exact TXT proof atomically wins the verified allocation", async () => {
+  let answers = [];
+  let lookups = 0;
+  const fixture = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+  }, {
+    resolveTXT: async () => {
+      lookups += 1;
+      return {
+        answers,
+        authoritative_absence: answers.length === 0,
+        dnssec_authenticated: true,
+        minimum_ttl_seconds: 60,
+        rrset_sha256: "e".repeat(64),
+      };
+    },
+  });
+  const first = await create(fixture.runtime, "proof.example", {
+    domain_limit: null,
+    idempotency_key: "proof-first",
+  });
+  const second = await create(fixture.runtime, "PROOF.EXAMPLE", {
+    actor: OTHER_OPERATOR,
+    account_id: OTHER_ACCOUNT,
+    domain_limit: null,
+    idempotency_key: "proof-second",
+  });
+  assert.equal(first.response.status, 202);
+  assert.equal(second.response.status, 202);
+
+  answers = [first.body.request.ownership_challenge.record_value];
+  const verified = await call(fixture.runtime, "/request/verify", {
+    actor: ADMIN,
+    request_id: first.body.request.id,
+    idempotency_key: "verify-first",
+    verification_enabled: true,
+  });
+  assert.equal(verified.response.status, 200);
+  assert.equal(verified.body.request.state, "verified");
+  assert.equal(verified.body.request.availability, "verified");
+  assert.equal(verified.body.request.ownership_verification.state, "verified");
+  assert.equal(
+    fixture.storage.values.get("domain:proof.example").source_request_id,
+    first.body.request.id,
+  );
+
+  fixture.runtime.env[
+    "CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED"
+  ] = "false";
+  const replay = await call(fixture.runtime, "/request/verify", {
+    actor: ADMIN,
+    request_id: first.body.request.id,
+    idempotency_key: "verify-first",
+    verification_enabled: true,
+  });
+  assert.equal(replay.response.status, 200);
+  assert.equal(lookups, 1);
+
+  fixture.runtime.env[
+    "CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED"
+  ] = "true";
+  answers = [second.body.request.ownership_challenge.record_value];
+  const loser = await call(fixture.runtime, "/request/verify", {
+    actor: ADMIN,
+    request_id: second.body.request.id,
+    idempotency_key: "verify-second",
+    verification_enabled: true,
+  });
+  assert.equal(loser.response.status, 409);
+  assert.equal(loser.body.code, "domain_unavailable");
+  assert.equal(fixture.storage.values.get(
+    `request:${second.body.request.id}`,
+  ).state, "pending_verification");
+  assert.equal(fixture.storage.values.get(
+    `request:${second.body.request.id}`,
+  ).ownership_verification.state, "conflict");
+  assert.equal(lookups, 2);
+
+  fixture.runtime.env[
+    "CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED"
+  ] = "false";
+  const loserReplay = await call(fixture.runtime, "/request/verify", {
+    actor: ADMIN,
+    request_id: second.body.request.id,
+    idempotency_key: "verify-second",
+    verification_enabled: true,
+  });
+  assert.equal(loserReplay.response.status, 409);
+  assert.deepEqual(loserReplay.body, loser.body);
+  assert.equal(lookups, 2);
+  assert.doesNotThrow(() => validateAgentEmailDomainRecoveredState(new Map(
+    [...fixture.storage.values].filter(([key]) =>
+      isAgentEmailDomainAuthorityKey(key)),
+  )));
+});
+
+test("manual authoritative absence is durably idempotent", async () => {
+  let answers = [];
+  let lookups = 0;
+  const fixture = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+  }, {
+    resolveTXT: async () => {
+      lookups += 1;
+      return {
+        answers,
+        authoritative_absence: answers.length === 0,
+        dnssec_authenticated: true,
+        minimum_ttl_seconds: 60,
+        rrset_sha256: "f".repeat(64),
+      };
+    },
+  });
+  const created = await create(fixture.runtime, "missing-proof.example", {
+    domain_limit: null,
+  });
+  const input = {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+    idempotency_key: "verify-missing-proof",
+    verification_enabled: true,
+  };
+  const missing = await call(fixture.runtime, "/request/verify", input);
+  assert.equal(missing.response.status, 409);
+  assert.equal(missing.body.code, "ownership_challenge_not_found");
+  const afterMissing = structuredClone([...fixture.storage.values.entries()]);
+
+  answers = [created.body.request.ownership_challenge.record_value];
+  const replay = await call(fixture.runtime, "/request/verify", input);
+  assert.equal(replay.response.status, 409);
+  assert.deepEqual(replay.body, missing.body);
+  assert.equal(lookups, 1);
+  assert.deepEqual([...fixture.storage.values.entries()], afterMissing);
+
+  const verified = await call(fixture.runtime, "/request/verify", {
+    ...input,
+    idempotency_key: "verify-missing-proof-again",
+  });
+  assert.equal(verified.response.status, 200);
+  assert.equal(lookups, 2);
+  assert.doesNotThrow(() => validateAgentEmailDomainRecoveredState(new Map(
+    [...fixture.storage.values].filter(([key]) =>
+      isAgentEmailDomainAuthorityKey(key)),
+  )));
+});
+
+test("new pending challenges enter scheduled verification without a manual kick", async () => {
+  let expectedValue = null;
+  const fixture = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+  }, {
+    resolveTXT: async () => ({
+      answers: [expectedValue],
+      authoritative_absence: false,
+      dnssec_authenticated: false,
+      minimum_ttl_seconds: 60,
+      rrset_sha256: "d".repeat(64),
+    }),
+  });
+  const created = await create(fixture.runtime, "automatic-proof.example", {
+    domain_limit: 1,
+  });
+  expectedValue = created.body.request.ownership_challenge.record_value;
+  assert.ok(fixture.storage.alarm);
+
+  const reconciled = await call(fixture.runtime, "/verification/reconcile", {
+    verification_enabled: true,
+  });
+  assert.equal(reconciled.response.status, 200);
+  assert.deepEqual(
+    { checked: reconciled.body.checked, matched: reconciled.body.matched },
+    { checked: 1, matched: 1 },
+  );
+  assert.equal(
+    fixture.storage.values.get(`request:${created.body.request.id}`).state,
+    "verified",
+  );
+});
+
+test("a losing domain contender cannot block later scheduled verification", async () => {
+  const answersByOwner = new Map();
+  const fixture = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+  }, {
+    resolveTXT: async (owner) => ({
+      answers: answersByOwner.get(owner) ?? [],
+      authoritative_absence: !answersByOwner.has(owner),
+      dnssec_authenticated: false,
+      minimum_ttl_seconds: 60,
+      rrset_sha256: "9".repeat(64),
+    }),
+  });
+  const winner = await create(fixture.runtime, "contended.example", {
+    account_id: ACCOUNT,
+    domain_limit: null,
+    idempotency_key: "contender-winner",
+  });
+  const loser = await create(fixture.runtime, "contended.example", {
+    actor: OTHER_OPERATOR,
+    account_id: OTHER_ACCOUNT,
+    domain_limit: null,
+    idempotency_key: "contender-loser",
+  });
+  const later = await create(fixture.runtime, "later-proof.example", {
+    domain_limit: null,
+    idempotency_key: "contender-later",
+  });
+  answersByOwner.set(
+    winner.body.request.ownership_challenge.record_name,
+    [
+      winner.body.request.ownership_challenge.record_value,
+      loser.body.request.ownership_challenge.record_value,
+    ],
+  );
+  answersByOwner.set(
+    later.body.request.ownership_challenge.record_name,
+    [later.body.request.ownership_challenge.record_value],
+  );
+  const won = await call(fixture.runtime, "/request/verify", {
+    actor: ADMIN,
+    request_id: winner.body.request.id,
+    idempotency_key: "verify-contender-winner",
+    verification_enabled: true,
+  });
+  assert.equal(won.response.status, 200);
+
+  const reconciled = await call(fixture.runtime, "/verification/reconcile", {
+    verification_enabled: true,
+  });
+  assert.equal(reconciled.response.status, 200);
+  assert.deepEqual(
+    { checked: reconciled.body.checked, matched: reconciled.body.matched },
+    { checked: 2, matched: 1 },
+  );
+  assert.equal(
+    fixture.storage.values.get(`request:${loser.body.request.id}`).state,
+    "pending_verification",
+  );
+  assert.equal(
+    fixture.storage.values.get(`request:${loser.body.request.id}`)
+      .ownership_verification.state,
+    "conflict",
+  );
+  assert.equal(
+    fixture.storage.values.get(`request:${later.body.request.id}`).state,
+    "verified",
+  );
+  assert.equal(
+    [...fixture.storage.values.keys()].some((key) =>
+      key.startsWith("verification-due:") && key.endsWith(loser.body.request.id)
+    ),
+    true,
+  );
+  assertDerivedParity(fixture.storage);
+});
+
+test("legacy pending mirrors convert to allocations on verification", async () => {
+  let expectedValue = null;
+  const fixture = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+  }, {
+    resolveTXT: async () => ({
+      answers: [expectedValue],
+      authoritative_absence: false,
+      dnssec_authenticated: true,
+      minimum_ttl_seconds: 300,
+      rrset_sha256: "f".repeat(64),
+    }),
+  });
+  const created = await create(fixture.runtime, "legacy-proof.example", {
+    domain_limit: 1,
+  });
+  const storedRequest = fixture.storage.values.get(
+    `request:${created.body.request.id}`,
+  );
+  delete storedRequest.ownership_challenge.expires_at;
+  for (const field of [
+    "state_revision", "plan_suspended", "plan_grace_until",
+    "lifecycle_suspended", "lifecycle_fence", "ownership_verification",
+    "expiration",
+  ]) delete storedRequest[field];
+  fixture.storage.values.set(
+    `request:${created.body.request.id}`,
+    structuredClone(storedRequest),
+  );
+  fixture.storage.values.set(
+    "domain:legacy-proof.example",
+    structuredClone(storedRequest),
+  );
+  expectedValue = created.body.request.ownership_challenge.record_value;
+
+  const legacyShown = await call(fixture.runtime, "/request/get", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+  });
+  assert.ok(legacyShown.body.request.ownership_challenge.expires_at);
+
+  const verified = await call(fixture.runtime, "/request/verify", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+    idempotency_key: "verify-legacy-pending",
+    verification_enabled: true,
+  });
+  assert.equal(verified.response.status, 200);
+  assert.equal(verified.body.request.state, "verified");
+  const allocation = fixture.storage.values.get(
+    "domain:legacy-proof.example",
+  );
+  assert.equal(
+    allocation.schema_version,
+    "witself.agent-email-domain-allocation.v1",
+  );
+  assert.equal(allocation.source_request_id, created.body.request.id);
+  assert.equal(allocation.state, "allocated");
+  assert.equal(allocation.ownership_proof.rrset_sha256, "f".repeat(64));
+});
+
+test("legacy pending mirrors remain coherent on rejection", async () => {
+  const fixture = registry();
+  const created = await create(fixture.runtime, "legacy-reject.example", {
+    domain_limit: 1,
+  });
+  const storedRequest = fixture.storage.values.get(
+    `request:${created.body.request.id}`,
+  );
+  delete storedRequest.ownership_challenge.expires_at;
+  for (const field of [
+    "state_revision", "plan_suspended", "plan_grace_until",
+    "lifecycle_suspended", "lifecycle_fence", "ownership_verification",
+    "expiration",
+  ]) delete storedRequest[field];
+  fixture.storage.values.set(
+    `request:${created.body.request.id}`,
+    structuredClone(storedRequest),
+  );
+  fixture.storage.values.set(
+    "domain:legacy-reject.example",
+    structuredClone(storedRequest),
+  );
+
+  const rejected = await call(fixture.runtime, "/request/reject", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+    idempotency_key: "reject-legacy-pending",
+    reason: "legacy request rejected",
+  });
+  assert.equal(rejected.response.status, 200);
+  assert.equal(rejected.body.request.state, "rejected");
+  assert.deepEqual(
+    fixture.storage.values.get("domain:legacy-reject.example"),
+    fixture.storage.values.get(`request:${created.body.request.id}`),
+  );
+  const usage = await call(fixture.runtime, "/request/list", {
+    actor: OPERATOR,
+    account_id: ACCOUNT,
+  });
+  assert.equal(usage.body.open_requests, 0);
+  assert.equal(usage.body.allocated_domains, 0);
+
+  const blockedReuse = await create(fixture.runtime, "legacy-reject.example", {
+    actor: OTHER_OPERATOR,
+    account_id: OTHER_ACCOUNT,
+    domain_limit: null,
+    idempotency_key: "reuse-legacy-reject",
+  });
+  assert.equal(blockedReuse.response.status, 409);
+  assert.equal(blockedReuse.body.code, "domain_unavailable");
+});
+
+test("verification gate off performs no lookup or authority mutation", async () => {
+  let lookups = 0;
+  const fixture = registry({}, {
+    resolveTXT: async () => {
+      lookups += 1;
+      throw new Error("disabled verification must not resolve DNS");
+    },
+  });
+  const created = await create(fixture.runtime, "dark-proof.example", {
+    domain_limit: null,
+  });
+  assert.equal(created.response.status, 202);
+  const before = structuredClone([...fixture.storage.values.entries()]);
+
+  const manual = await call(fixture.runtime, "/request/verify", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+    idempotency_key: "verify-dark",
+    verification_enabled: true,
+  });
+  assert.equal(manual.response.status, 409);
+  assert.equal(manual.body.code, "custom_domain_verification_disabled");
+
+  const scheduled = await call(fixture.runtime, "/verification/reconcile", {
+    verification_enabled: true,
+  });
+  assert.equal(scheduled.response.status, 409);
+  assert.equal(scheduled.body.code, "custom_domain_verification_disabled");
+  assert.equal(lookups, 0);
+  assert.deepEqual([...fixture.storage.values.entries()], before);
+
+  let registryLookups = 0;
+  const topLevel = await runScheduledAgentEmailDomainVerification({
+    AGENT_EMAIL_DOMAINS: {
+      idFromName() {
+        registryLookups += 1;
+        throw new Error("dark scheduler must not resolve the registry");
+      },
+    },
+  });
+  assert.deepEqual(topLevel, { ran: false, configured: true });
+  assert.equal(registryLookups, 0);
+});
+
+test("temporary resolver failures preserve a verified allocation", async () => {
+  let mode = "present";
+  let expectedValue = null;
+  let lookups = 0;
+  const fixture = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+  }, {
+    resolveTXT: async () => {
+      lookups += 1;
+      if (mode === "temporary") {
+        throw new AgentEmailDomainVerificationError(
+          "DNS resolver is temporarily unavailable",
+          "dns_resolver_unavailable",
+          true,
+        );
+      }
+      return {
+        answers: [expectedValue],
+        authoritative_absence: false,
+        dnssec_authenticated: true,
+        minimum_ttl_seconds: 300,
+        rrset_sha256: "a".repeat(64),
+      };
+    },
+  });
+  const created = await create(fixture.runtime, "resolver-outage.example", {
+    domain_limit: 1,
+  });
+  expectedValue = created.body.request.ownership_challenge.record_value;
+  const verified = await call(fixture.runtime, "/request/verify", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+    idempotency_key: "verify-before-outage",
+    verification_enabled: true,
+  });
+  assert.equal(verified.response.status, 200);
+  const allocationBefore = structuredClone(
+    fixture.storage.values.get("domain:resolver-outage.example"),
+  );
+
+  mode = "temporary";
+  const authorityBeforeManualRetry = structuredClone(
+    [...fixture.storage.values.entries()],
+  );
+  const manualRetry = await call(fixture.runtime, "/request/verify", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+    idempotency_key: "verify-during-outage",
+    verification_enabled: true,
+  });
+  assert.equal(manualRetry.response.status, 503);
+  assert.equal(manualRetry.body.code, "dns_resolver_unavailable");
+  assert.deepEqual(
+    [...fixture.storage.values.entries()],
+    authorityBeforeManualRetry,
+  );
+
+  fixture.advanceTime(
+    (AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_INTERVAL_HOURS + 1) *
+      60 * 60 * 1_000,
+  );
+  const reconciled = await call(
+    fixture.runtime,
+    "/verification/reconcile",
+    { verification_enabled: true },
+  );
+  assert.equal(reconciled.response.status, 200);
+  assert.deepEqual(
+    { checked: reconciled.body.checked, matched: reconciled.body.matched },
+    { checked: 1, matched: 0 },
+  );
+
+  const shown = await call(fixture.runtime, "/request/get", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+  });
+  assert.equal(shown.body.request.state, "verified");
+  assert.equal(shown.body.request.availability, "verified");
+  assert.equal(shown.body.request.ownership_verification.state, "verified");
+  assert.equal(
+    shown.body.request.ownership_verification.last_result,
+    "resolver_error",
+  );
+  assert.deepEqual(
+    fixture.storage.values.get("domain:resolver-outage.example"),
+    allocationBefore,
+  );
+  const usage = await call(fixture.runtime, "/request/list", {
+    actor: OPERATOR,
+    account_id: ACCOUNT,
+  });
+  assert.equal(usage.body.open_requests, 0);
+  assert.equal(usage.body.allocated_domains, 1);
+  assert.equal(lookups, 3);
+  assertDerivedParity(fixture.storage);
+});
+
+test("authoritative TXT loss suspends and later proof restores availability", async () => {
+  let mode = "present";
+  let expectedValue = null;
+  const fixture = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+  }, {
+    resolveTXT: async () => ({
+      answers: mode === "present" ? [expectedValue] : [],
+      authoritative_absence: mode !== "present",
+      dnssec_authenticated: mode === "present",
+      minimum_ttl_seconds: mode === "present" ? 300 : null,
+      rrset_sha256: (mode === "present" ? "b" : "c").repeat(64),
+    }),
+  });
+  const created = await create(fixture.runtime, "txt-loss.example", {
+    domain_limit: 1,
+  });
+  expectedValue = created.body.request.ownership_challenge.record_value;
+  const verified = await call(fixture.runtime, "/request/verify", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+    idempotency_key: "verify-txt-loss",
+    verification_enabled: true,
+  });
+  assert.equal(verified.response.status, 200);
+  const allocationBefore = structuredClone(
+    fixture.storage.values.get("domain:txt-loss.example"),
+  );
+
+  mode = "absent";
+  fixture.advanceTime(
+    (AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_INTERVAL_HOURS + 1) *
+      60 * 60 * 1_000,
+  );
+  const missing = await call(fixture.runtime, "/verification/reconcile", {
+    verification_enabled: true,
+  });
+  assert.equal(missing.response.status, 200);
+  assert.equal(missing.body.checked, 1);
+  assert.equal(missing.body.matched, 0);
+
+  const stale = await call(fixture.runtime, "/request/get", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+  });
+  assert.equal(stale.body.request.state, "verified");
+  assert.equal(stale.body.request.availability, "suspended_verification");
+  assert.equal(stale.body.request.ownership_verification.state, "stale");
+  assert.equal(stale.body.request.ownership_verification.last_result, "absent");
+  assert.equal(
+    fixture.storage.values.get("domain:txt-loss.example").state,
+    "allocated",
+  );
+  assert.deepEqual(
+    fixture.storage.values.get("domain:txt-loss.example").ownership_proof,
+    allocationBefore.ownership_proof,
+  );
+
+  mode = "present";
+  fixture.advanceTime(61 * 60 * 1_000);
+  const restored = await call(fixture.runtime, "/verification/reconcile", {
+    verification_enabled: true,
+  });
+  assert.equal(restored.body.checked, 1);
+  assert.equal(restored.body.matched, 1);
+  const active = await call(fixture.runtime, "/request/get", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+  });
+  assert.equal(active.body.request.availability, "verified");
+  assert.equal(active.body.request.ownership_verification.state, "verified");
+  assert.equal(active.body.request.ownership_verification.consecutive_failures, 0);
+  assertDerivedParity(fixture.storage);
+});
+
+test("verified allocations receive downgrade grace before suspension", async () => {
+  let expectedValue = null;
+  let lookups = 0;
+  const fixture = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+  }, {
+    resolveTXT: async () => {
+      lookups += 1;
+      return {
+        answers: [expectedValue],
+        authoritative_absence: false,
+        dnssec_authenticated: true,
+        minimum_ttl_seconds: 300,
+        rrset_sha256: "d".repeat(64),
+      };
+    },
+  });
+  const created = await create(fixture.runtime, "downgrade-grace.example", {
+    domain_limit: 1,
+  });
+  expectedValue = created.body.request.ownership_challenge.record_value;
+  const verified = await call(fixture.runtime, "/request/verify", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+    idempotency_key: "verify-downgrade",
+    verification_enabled: true,
+  });
+  assert.equal(verified.response.status, 200);
+
+  const plan = {
+    account_id: ACCOUNT,
+    feature_enabled: false,
+    domain_limit: 0,
+    plan_revision: 8,
+    plan_snapshot_hash: "8".repeat(64),
+  };
+  assert.equal((await call(fixture.runtime, "/plan/reconcile", {
+    ...plan,
+    mode: "restrict_only",
+  })).response.status, 200);
+  const downgraded = await call(fixture.runtime, "/plan/reconcile", {
+    ...plan,
+    mode: "complete",
+  });
+  assert.equal(downgraded.response.status, 200);
+  assert.equal(downgraded.body.complete, true);
+
+  const inGrace = await call(fixture.runtime, "/request/get", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+  });
+  assert.equal(inGrace.body.request.state, "verified");
+  assert.equal(inGrace.body.request.plan_suspended, false);
+  assert.equal(inGrace.body.request.availability, "active_grace");
+  const graceLength = Date.parse(inGrace.body.request.plan_grace_until) -
+    Date.parse(inGrace.body.request.updated_at);
+  const expectedGrace = AGENT_EMAIL_CUSTOM_DOMAIN_DOWNGRADE_GRACE_DAYS *
+    24 * 60 * 60 * 1_000;
+  assert.ok(graceLength <= expectedGrace);
+  assert.ok(graceLength >= expectedGrace - 5_000);
+
+  fixture.advanceTime(
+    (AGENT_EMAIL_CUSTOM_DOMAIN_DOWNGRADE_GRACE_DAYS + 1) *
+      24 * 60 * 60 * 1_000,
+  );
+  await fixture.runtime.alarm();
+  const suspended = await call(fixture.runtime, "/request/get", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+  });
+  assert.equal(suspended.body.request.state, "verified");
+  assert.equal(suspended.body.request.plan_suspended, true);
+  assert.equal(suspended.body.request.availability, "suspended_plan");
+  assert.equal("plan_grace_until" in suspended.body.request, false);
+  assert.equal(
+    fixture.storage.values.get("domain:downgrade-grace.example").state,
+    "allocated",
+  );
+  const usage = await call(fixture.runtime, "/request/list", {
+    actor: OPERATOR,
+    account_id: ACCOUNT,
+  });
+  assert.equal(usage.body.open_requests, 0);
+  assert.equal(usage.body.allocated_domains, 1);
+  assert.equal(lookups, 1);
+  assertDerivedParity(fixture.storage);
+});
+
+test("completed plan reconciliation replays without authority mutation", async () => {
+  const fixture = registry();
+  const created = await create(fixture.runtime, "plan-replay.example", {
+    domain_limit: 1,
+  });
+  assert.equal(created.response.status, 202);
+  const plan = {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    domain_limit: 1,
+    mode: "complete",
+    plan_revision: 8,
+    plan_snapshot_hash: "8".repeat(64),
+  };
+  const first = await call(fixture.runtime, "/plan/reconcile", plan);
+  assert.equal(first.response.status, 200);
+  assert.equal(first.body.complete, true);
+  const completedState = structuredClone([...fixture.storage.values.entries()]);
+
+  const replay = await call(fixture.runtime, "/plan/reconcile", plan);
+  assert.equal(replay.response.status, 200);
+  assert.equal(replay.body.complete, true);
+  assert.equal(replay.body.stale, false);
+  assert.equal(replay.body.changed, 0);
+  assert.equal(replay.body.registry_revision, first.body.registry_revision);
+  assert.deepEqual([...fixture.storage.values.entries()], completedState);
+
+  const conflictingEntitlement = await call(
+    fixture.runtime,
+    "/plan/reconcile",
+    { ...plan, domain_limit: 0 },
+  );
+  assert.equal(conflictingEntitlement.response.status, 409);
+  const conflictingHash = await call(fixture.runtime, "/plan/reconcile", {
+    ...plan,
+    plan_snapshot_hash: "9".repeat(64),
+  });
+  assert.equal(conflictingHash.response.status, 409);
+  assert.deepEqual([...fixture.storage.values.entries()], completedState);
+});
+
+test("accounts without domain history keep plan and lifecycle truly dark", async () => {
+  const fixture = registry();
+  const before = structuredClone([...fixture.storage.values.entries()]);
+  for (const mode of ["restrict_only", "complete"]) {
+    const plan = await call(fixture.runtime, "/plan/reconcile", {
+      account_id: ACCOUNT,
+      feature_enabled: true,
+      domain_limit: 1,
+      mode,
+      plan_revision: 8,
+      plan_snapshot_hash: "8".repeat(64),
+    });
+    assert.equal(plan.response.status, 200);
+    assert.equal(plan.body.complete, true);
+    assert.equal(plan.body.no_op, true);
+  }
+  for (const action of ["suspend", "republish", "retire"]) {
+    const lifecycle = await call(
+      fixture.runtime,
+      "/account-lifecycle/reconcile",
+      {
+        account_id: ACCOUNT,
+        operation_id: "empty-account-lifecycle",
+        epoch: 1,
+        action,
+      },
+    );
+    assert.equal(lifecycle.response.status, 200);
+    assert.equal(lifecycle.body.complete, true);
+    assert.equal(lifecycle.body.no_op, true);
+  }
+  assert.deepEqual([...fixture.storage.values.entries()], before);
+  assert.equal(fixture.storage.alarm, undefined);
+});
+
+test("terminal-only history does not amplify dark policy writes", async () => {
+  const fixture = registry();
+  const created = await create(fixture.runtime, "terminal-history.example", {
+    domain_limit: null,
+  });
+  await call(fixture.runtime, "/request/reject", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+    reason: "finish terminal history",
+    idempotency_key: "terminal-history-reject",
+  });
+  const before = structuredClone([...fixture.storage.values.entries()]);
+  const plan = await call(fixture.runtime, "/plan/reconcile", {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    domain_limit: 1,
+    mode: "complete",
+    plan_revision: 8,
+    plan_snapshot_hash: "8".repeat(64),
+  });
+  assert.equal(plan.body.no_op, true);
+  const lifecycle = await call(
+    fixture.runtime,
+    "/account-lifecycle/reconcile",
+    {
+      account_id: ACCOUNT,
+      operation_id: "terminal-history-suspend",
+      epoch: 1,
+      action: "suspend",
+    },
+  );
+  assert.equal(lifecycle.body.no_op, true);
+  assert.deepEqual([...fixture.storage.values.entries()], before);
+});
+
+test("activated empty accounts persist policy fences before creation", async () => {
+  const planFixture = registry();
+  const plan = {
+    account_id: ACCOUNT,
+    activation_enabled: true,
+    feature_enabled: true,
+    domain_limit: 1,
+    plan_revision: 8,
+    plan_snapshot_hash: "8".repeat(64),
+  };
+  const restricted = await call(planFixture.runtime, "/plan/reconcile", {
+    ...plan,
+    mode: "restrict_only",
+  });
+  assert.equal(restricted.response.status, 200);
+  assert.equal(restricted.body.pending, true);
+  assert.ok(planFixture.storage.values.has(`plan-intent:${ACCOUNT}`));
+  const completed = await call(planFixture.runtime, "/plan/reconcile", {
+    ...plan,
+    mode: "complete",
+  });
+  assert.equal(completed.response.status, 200);
+  assert.equal(completed.body.complete, true);
+  assert.ok(planFixture.storage.values.has(`plan-fence:${ACCOUNT}`));
+  const stalePlan = await create(planFixture.runtime, "stale-plan.example", {
+    domain_limit: 1,
+  });
+  assert.equal(stalePlan.response.status, 409);
+  assert.equal(stalePlan.body.code, "stale_plan_fence");
+
+  const lifecycleFixture = registry();
+  const retired = await call(
+    lifecycleFixture.runtime,
+    "/account-lifecycle/reconcile",
+    {
+      account_id: ACCOUNT,
+      activation_enabled: true,
+      operation_id: "activated-empty-retire",
+      epoch: 1,
+      action: "retire",
+    },
+  );
+  assert.equal(retired.response.status, 200);
+  assert.equal(retired.body.complete, true);
+  assert.ok(lifecycleFixture.storage.values.has(`lifecycle-fence:${ACCOUNT}`));
+  const staleLifecycle = await create(
+    lifecycleFixture.runtime,
+    "stale-lifecycle.example",
+    { domain_limit: null },
+  );
+  assert.equal(staleLifecycle.response.status, 409);
+  assert.equal(staleLifecycle.body.code, "account_lifecycle_suspended");
+});
+
+test("plan and lifecycle suspension keep verification indexes in exact parity", async () => {
+  const fixture = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+  });
+  const created = await create(fixture.runtime, "cross-suspension.example", {
+    domain_limit: 1,
+  });
+  const requestID = created.body.request.id;
+  const hasVerificationDue = () =>
+    [...fixture.storage.values.keys()].some((key) =>
+      key.startsWith("verification-due:") && key.endsWith(requestID)
+    );
+  assert.equal(hasVerificationDue(), true);
+
+  const downgrade = {
+    account_id: ACCOUNT,
+    feature_enabled: false,
+    domain_limit: 0,
+    plan_revision: 8,
+    plan_snapshot_hash: "8".repeat(64),
+  };
+  await call(fixture.runtime, "/plan/reconcile", {
+    ...downgrade,
+    mode: "restrict_only",
+  });
+  await call(fixture.runtime, "/plan/reconcile", {
+    ...downgrade,
+    mode: "complete",
+  });
+  assert.equal(hasVerificationDue(), false);
+  assertDerivedParity(fixture.storage);
+
+  await call(fixture.runtime, "/account-lifecycle/reconcile", {
+    account_id: ACCOUNT,
+    operation_id: "cross-suspension-move",
+    epoch: 1,
+    action: "suspend",
+  });
+  const upgrade = {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    domain_limit: 1,
+    plan_revision: 9,
+    plan_snapshot_hash: "9".repeat(64),
+  };
+  await call(fixture.runtime, "/plan/reconcile", {
+    ...upgrade,
+    mode: "restrict_only",
+  });
+  await call(fixture.runtime, "/plan/reconcile", {
+    ...upgrade,
+    mode: "complete",
+  });
+  assert.equal(hasVerificationDue(), false);
+  assertDerivedParity(fixture.storage);
+
+  await call(fixture.runtime, "/account-lifecycle/reconcile", {
+    account_id: ACCOUNT,
+    operation_id: "cross-suspension-move",
+    epoch: 1,
+    action: "republish",
+  });
+  assert.equal(hasVerificationDue(), true);
+  assertDerivedParity(fixture.storage);
+});
+
+test("verification defers while account policy is between durable pages", async () => {
+  let expectedValue = null;
+  let lookups = 0;
+  const fixture = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+  }, {
+    resolveTXT: async () => {
+      lookups += 1;
+      return {
+        answers: [expectedValue],
+        authoritative_absence: false,
+        dnssec_authenticated: false,
+        minimum_ttl_seconds: 60,
+        rrset_sha256: "6".repeat(64),
+      };
+    },
+  });
+  const created = await create(fixture.runtime, "policy-race.example", {
+    domain_limit: 1,
+  });
+  expectedValue = created.body.request.ownership_challenge.record_value;
+  const plan = {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    domain_limit: 1,
+    plan_revision: 8,
+    plan_snapshot_hash: "8".repeat(64),
+  };
+  await call(fixture.runtime, "/plan/reconcile", {
+    ...plan,
+    mode: "restrict_only",
+  });
+  const manual = await call(fixture.runtime, "/request/verify", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+    idempotency_key: "verify-policy-race",
+    verification_enabled: true,
+  });
+  assert.equal(manual.response.status, 409);
+  assert.equal(manual.body.code, "account_policy_converging");
+
+  const scheduled = await call(fixture.runtime, "/verification/reconcile", {
+    verification_enabled: true,
+  });
+  assert.equal(scheduled.response.status, 200);
+  assert.equal(scheduled.body.checked, 1);
+  assert.equal(lookups, 0);
+  assert.equal(
+    fixture.storage.values.get(`request:${created.body.request.id}`)
+      .ownership_verification.last_result,
+    "policy_converging",
+  );
+  assertDerivedParity(fixture.storage);
+
+  await call(fixture.runtime, "/plan/reconcile", {
+    ...plan,
+    mode: "complete",
+  });
+  fixture.advanceTime(16 * 60 * 1_000);
+  const completed = await call(fixture.runtime, "/verification/reconcile", {
+    verification_enabled: true,
+  });
+  assert.equal(completed.body.matched, 1);
+  assert.equal(lookups, 1);
+  assert.equal(
+    fixture.storage.values.get(`request:${created.body.request.id}`).state,
+    "verified",
+  );
+  assertDerivedParity(fixture.storage);
+});
+
+test("plan downgrade fences creation and deterministically suspends overflow", async () => {
+  const fixture = registry();
+  const created = [];
+  for (const domain of ["oldest.example", "middle.example", "newest.example"]) {
+    const result = await create(fixture.runtime, domain, {
+      domain_limit: null,
+      idempotency_key: `create-${domain}`,
+    });
+    assert.equal(result.response.status, 202);
+    created.push(result.body.request);
+  }
+  const nextHash = "8".repeat(64);
+  const restricted = await call(fixture.runtime, "/plan/reconcile", {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    domain_limit: 1,
+    mode: "restrict_only",
+    plan_revision: 8,
+    plan_snapshot_hash: nextHash,
+  });
+  assert.equal(restricted.response.status, 200);
+  const crossing = await create(fixture.runtime, "crossing.example", {
+    domain_limit: null,
+  });
+  assert.equal(crossing.response.status, 409);
+  assert.equal(crossing.body.code, "account_policy_converging");
+
+  const completed = await call(fixture.runtime, "/plan/reconcile", {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    domain_limit: 1,
+    mode: "complete",
+    plan_revision: 8,
+    plan_snapshot_hash: nextHash,
+  });
+  assert.equal(completed.response.status, 200);
+  assert.equal(completed.body.complete, true);
+  const page = await call(fixture.runtime, "/request/list", {
+    actor: OPERATOR,
+    account_id: ACCOUNT,
+  });
+  assert.deepEqual(
+    page.body.requests.map((request) => request.plan_suspended),
+    [false, true, true],
+  );
+  assert.deepEqual(
+    page.body.requests.map((request) => request.id),
+    created.map((request) => request.id),
+  );
+
+  const upgraded = await call(fixture.runtime, "/plan/reconcile", {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    domain_limit: null,
+    mode: "complete",
+    plan_revision: 9,
+    plan_snapshot_hash: "9".repeat(64),
+  });
+  assert.equal(upgraded.response.status, 200);
+  const afterUpgrade = await call(fixture.runtime, "/request/list", {
+    actor: OPERATOR,
+    account_id: ACCOUNT,
+  });
+  assert.equal(afterUpgrade.body.requests.every((request) =>
+    request.plan_suspended === false), true);
+});
+
+test("capacity release durably promotes the next in-plan domain", async () => {
+  const pendingFixture = registry();
+  const pendingFirst = await create(
+    pendingFixture.runtime,
+    "pending-first.example",
+    { domain_limit: null },
+  );
+  const pendingSecond = await create(
+    pendingFixture.runtime,
+    "pending-second.example",
+    { domain_limit: null },
+  );
+  const downgrade = {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    domain_limit: 1,
+    plan_revision: 8,
+    plan_snapshot_hash: "8".repeat(64),
+  };
+  await call(pendingFixture.runtime, "/plan/reconcile", {
+    ...downgrade,
+    mode: "restrict_only",
+  });
+  await call(pendingFixture.runtime, "/plan/reconcile", {
+    ...downgrade,
+    mode: "complete",
+  });
+  assert.equal((await call(pendingFixture.runtime, "/request/get", {
+    actor: ADMIN,
+    request_id: pendingSecond.body.request.id,
+  })).body.request.plan_suspended, true);
+  await call(pendingFixture.runtime, "/request/reject", {
+    actor: ADMIN,
+    request_id: pendingFirst.body.request.id,
+    reason: "release the in-plan slot",
+    idempotency_key: "release-pending-slot",
+  });
+  assert.ok(pendingFixture.storage.values.has(`plan-intent:${ACCOUNT}`));
+  pendingFixture.advanceTime(2_000);
+  await pendingFixture.runtime.alarm();
+  assert.equal((await call(pendingFixture.runtime, "/request/get", {
+    actor: ADMIN,
+    request_id: pendingSecond.body.request.id,
+  })).body.request.plan_suspended, false);
+  assertDerivedParity(pendingFixture.storage);
+
+  const expectedValues = new Map();
+  const verifiedFixture = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+  }, {
+    resolveTXT: async (recordName) => ({
+      answers: [expectedValues.get(recordName)],
+      authoritative_absence: false,
+      dnssec_authenticated: true,
+      minimum_ttl_seconds: 60,
+      rrset_sha256: "c".repeat(64),
+    }),
+  });
+  const verified = [];
+  for (const domain of ["verified-first.example", "verified-second.example"]) {
+    const created = await create(verifiedFixture.runtime, domain, {
+      domain_limit: null,
+    });
+    expectedValues.set(
+      created.body.request.ownership_challenge.record_name,
+      created.body.request.ownership_challenge.record_value,
+    );
+    const result = await call(verifiedFixture.runtime, "/request/verify", {
+      actor: ADMIN,
+      request_id: created.body.request.id,
+      idempotency_key: `verify-${domain}`,
+      verification_enabled: true,
+    });
+    assert.equal(result.response.status, 200);
+    verified.push(result.body.request);
+  }
+  await call(verifiedFixture.runtime, "/plan/reconcile", {
+    ...downgrade,
+    mode: "restrict_only",
+  });
+  await call(verifiedFixture.runtime, "/plan/reconcile", {
+    ...downgrade,
+    mode: "complete",
+  });
+  verifiedFixture.runtime.env[
+    "CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED"
+  ] = "false";
+  verifiedFixture.advanceTime(
+    (AGENT_EMAIL_CUSTOM_DOMAIN_DOWNGRADE_GRACE_DAYS + 1) *
+      24 * 60 * 60 * 1_000,
+  );
+  await verifiedFixture.runtime.alarm();
+  assert.equal((await call(verifiedFixture.runtime, "/request/get", {
+    actor: ADMIN,
+    request_id: verified[1].id,
+  })).body.request.plan_suspended, true);
+  await call(verifiedFixture.runtime, "/request/retire", {
+    actor: ADMIN,
+    request_id: verified[0].id,
+    reason: "release verified slot",
+    idempotency_key: "release-verified-slot",
+  });
+  verifiedFixture.advanceTime(2_000);
+  await verifiedFixture.runtime.alarm();
+  const promoted = await call(verifiedFixture.runtime, "/request/get", {
+    actor: ADMIN,
+    request_id: verified[1].id,
+  });
+  assert.equal(promoted.body.request.plan_suspended, false);
+  assert.equal(promoted.body.request.plan_grace_until, undefined);
+  assertDerivedParity(verifiedFixture.storage);
+});
+
+test("account lifecycle suspension, republish, and close are fenced and retry-safe", async () => {
+  const fixture = registry();
+  const created = await create(fixture.runtime, "lifecycle.example", {
+    domain_limit: null,
+  });
+  assert.equal(created.response.status, 202);
+  const suspended = await call(fixture.runtime,
+    "/account-lifecycle/reconcile", {
+      account_id: ACCOUNT,
+      operation_id: "move-one",
+      epoch: 1,
+      action: "suspend",
+    });
+  assert.equal(suspended.body.complete, true);
+  const blocked = await create(fixture.runtime, "during-move.example", {
+    domain_limit: null,
+  });
+  assert.equal(blocked.response.status, 409);
+  assert.equal(blocked.body.code, "account_lifecycle_suspended");
+
+  const republished = await call(fixture.runtime,
+    "/account-lifecycle/reconcile", {
+      account_id: ACCOUNT,
+      operation_id: "move-one",
+      epoch: 1,
+      action: "republish",
+    });
+  assert.equal(republished.body.complete, true);
+  const active = await call(fixture.runtime, "/request/get", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+  });
+  assert.equal(active.body.request.lifecycle_suspended, false);
+
+  const retired = await call(fixture.runtime,
+    "/account-lifecycle/reconcile", {
+      account_id: ACCOUNT,
+      operation_id: "close-two",
+      epoch: 2,
+      action: "retire",
+    });
+  assert.equal(retired.body.complete, true);
+  const replay = await call(fixture.runtime,
+    "/account-lifecycle/reconcile", {
+      account_id: ACCOUNT,
+      operation_id: "close-two",
+      epoch: 2,
+      action: "retire",
+    });
+  assert.equal(replay.body.replayed, true);
+  const closed = await call(fixture.runtime, "/request/get", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+  });
+  assert.equal(closed.body.request.state, "retired");
+});
+
+test("verified lifecycle retirement completes across the 40-item page boundary", async () => {
+  const expectedValues = new Map();
+  const fixture = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+  }, {
+    resolveTXT: async (recordName) => ({
+      answers: [expectedValues.get(recordName)],
+      authoritative_absence: false,
+      dnssec_authenticated: true,
+      minimum_ttl_seconds: 300,
+      rrset_sha256: "1".repeat(64),
+    }),
+  });
+  const created = [];
+  for (let index = 0; index < 41; index++) {
+    const pending = await create(
+      fixture.runtime,
+      `lifecycle-page-${String(index).padStart(2, "0")}.example`,
+      {
+        domain_limit: null,
+        idempotency_key: `create-lifecycle-page-${index}`,
+      },
+    );
+    assert.equal(pending.response.status, 202, `create ${index}`);
+    expectedValues.set(
+      pending.body.request.ownership_challenge.record_name,
+      pending.body.request.ownership_challenge.record_value,
+    );
+    const verified = await call(fixture.runtime, "/request/verify", {
+      actor: ADMIN,
+      request_id: pending.body.request.id,
+      idempotency_key: `verify-lifecycle-page-${index}`,
+      verification_enabled: true,
+    });
+    assert.equal(verified.response.status, 200, `verify ${index}`);
+    created.push(verified.body.request);
+  }
+
+  const retirement = {
+    account_id: ACCOUNT,
+    operation_id: "retire-paginated-verified",
+    epoch: 1,
+    action: "retire",
+  };
+  const firstPage = await call(
+    fixture.runtime,
+    "/account-lifecycle/reconcile",
+    retirement,
+  );
+  assert.equal(firstPage.response.status, 200);
+  assert.equal(firstPage.body.complete, false);
+  assert.equal(firstPage.body.changed, 40);
+  const betweenPages = await call(fixture.runtime, "/request/list", {
+    actor: OPERATOR,
+    account_id: ACCOUNT,
+    limit: 100,
+  });
+  assert.equal(betweenPages.body.allocated_domains, 1);
+  assert.equal(
+    betweenPages.body.requests.filter((request) =>
+      request.state === "retired").length,
+    40,
+  );
+
+  const secondPage = await call(
+    fixture.runtime,
+    "/account-lifecycle/reconcile",
+    retirement,
+  );
+  assert.equal(secondPage.response.status, 200);
+  assert.equal(secondPage.body.complete, true);
+  assert.equal(secondPage.body.changed, 1);
+  const completed = await call(fixture.runtime, "/request/list", {
+    actor: OPERATOR,
+    account_id: ACCOUNT,
+    limit: 100,
+  });
+  assert.equal(completed.body.open_requests, 0);
+  assert.equal(completed.body.allocated_domains, 0);
+  assert.equal(completed.body.requests.length, 41);
+  assert.equal(completed.body.requests.every((request) =>
+    request.state === "retired"), true);
+  for (const request of created) {
+    assert.equal(
+      fixture.storage.values.get(`domain:${request.domain}`).state,
+      "retired",
+    );
+  }
+  const recoveredAuthority = new Map(
+    [...fixture.storage.values].filter(([key]) =>
+      isAgentEmailDomainAuthorityKey(key)
+    ),
+  );
+  assert.doesNotThrow(() =>
+    validateAgentEmailDomainRecoveredState(recoveredAuthority)
+  );
+  assertDerivedParity(fixture.storage);
+  const replay = await call(
+    fixture.runtime,
+    "/account-lifecycle/reconcile",
+    retirement,
+  );
+  assert.equal(replay.body.replayed, true);
+});
+
+test("unverified ownership challenges expire and release capacity", async () => {
+  const fixture = registry();
+  const created = await create(fixture.runtime, "expires.example", {
+    domain_limit: 1,
+  });
+  assert.equal(created.response.status, 202);
+  const blocked = await create(fixture.runtime, "blocked-by-pending.example", {
+    domain_limit: 1,
+  });
+  assert.equal(blocked.response.status, 403);
+  assert.equal(blocked.body.code, "account_limit_reached");
+  const beforeExpiry = await call(fixture.runtime, "/request/list", {
+    actor: OPERATOR,
+    account_id: ACCOUNT,
+  });
+  assert.equal(beforeExpiry.body.open_requests, 1);
+  assert.equal(beforeExpiry.body.allocated_domains, 1);
+
+  fixture.advanceTime(
+    (AGENT_EMAIL_CUSTOM_DOMAIN_PENDING_CHALLENGE_DAYS + 1) *
+      24 * 60 * 60 * 1_000,
+  );
+  await fixture.runtime.alarm();
+  const expired = await call(fixture.runtime, "/request/get", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+  });
+  assert.equal(expired.body.request.state, "expired");
+  assert.equal(expired.body.request.availability, "expired");
+  const afterExpiry = await call(fixture.runtime, "/request/list", {
+    actor: OPERATOR,
+    account_id: ACCOUNT,
+  });
+  assert.equal(afterExpiry.body.open_requests, 0);
+  assert.equal(afterExpiry.body.allocated_domains, 0);
+  const replacement = await create(fixture.runtime, "expires.example", {
+    domain_limit: 1,
+    idempotency_key: "replacement-expired",
+  });
+  assert.equal(replacement.response.status, 202);
+  assert.notEqual(replacement.body.request.id, created.body.request.id);
+  assert.notEqual(
+    replacement.body.request.ownership_challenge.record_value,
+    created.body.request.ownership_challenge.record_value,
+  );
+});
+
+test("an overdue verification attempt releases capacity without DNS", async () => {
+  let lookups = 0;
+  const fixture = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+  }, {
+    resolveTXT: async () => {
+      lookups += 1;
+      throw new Error("an expired challenge must not resolve DNS");
+    },
+  });
+  const created = await create(fixture.runtime, "late-expiry.example", {
+    domain_limit: 1,
+  });
+  fixture.advanceTime(
+    (AGENT_EMAIL_CUSTOM_DOMAIN_PENDING_CHALLENGE_DAYS + 1) *
+      24 * 60 * 60 * 1_000,
+  );
+  const expired = await call(fixture.runtime, "/request/verify", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+    idempotency_key: "verify-after-expiry",
+    verification_enabled: true,
+  });
+  assert.equal(expired.response.status, 409);
+  assert.equal(expired.body.code, "ownership_challenge_expired");
+  assert.equal(lookups, 0);
+  const afterExpired = structuredClone([...fixture.storage.values.entries()]);
+  const replay = await call(fixture.runtime, "/request/verify", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+    idempotency_key: "verify-after-expiry",
+    verification_enabled: true,
+  });
+  assert.equal(replay.response.status, 409);
+  assert.deepEqual(replay.body, expired.body);
+  assert.deepEqual([...fixture.storage.values.entries()], afterExpired);
+  assert.doesNotThrow(() => validateAgentEmailDomainRecoveredState(new Map(
+    [...fixture.storage.values].filter(([key]) =>
+      isAgentEmailDomainAuthorityKey(key)),
+  )));
+
+  const usage = await call(fixture.runtime, "/request/list", {
+    actor: OPERATOR,
+    account_id: ACCOUNT,
+  });
+  assert.equal(usage.body.open_requests, 0);
+  assert.equal(usage.body.allocated_domains, 0);
+  const replacement = await create(fixture.runtime, "replacement-after-gap.example", {
+    domain_limit: 1,
+  });
+  assert.equal(replacement.response.status, 202);
+});
+
+test("scheduled verification cannot accept proof after challenge expiry", async () => {
+  let lookups = 0;
+  const fixture = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+  }, {
+    resolveTXT: async () => {
+      lookups += 1;
+      throw new Error("expired scheduled challenge must not resolve DNS");
+    },
+  });
+  const created = await create(fixture.runtime, "scheduled-expiry.example", {
+    domain_limit: 1,
+  });
+  fixture.advanceTime(
+    (AGENT_EMAIL_CUSTOM_DOMAIN_PENDING_CHALLENGE_DAYS + 1) *
+      24 * 60 * 60 * 1_000,
+  );
+  const reconciled = await call(fixture.runtime, "/verification/reconcile", {
+    verification_enabled: true,
+  });
+  assert.equal(reconciled.response.status, 200);
+  assert.equal(reconciled.body.checked, 0);
+  assert.equal(lookups, 0);
+  assert.equal(
+    fixture.storage.values.get(`request:${created.body.request.id}`).state,
+    "expired",
+  );
+  assert.equal(
+    fixture.storage.values.get("account-usage:acct_domain").allocated_domains,
+    0,
+  );
+});
+
+test("proof cannot win while DNS resolution crosses challenge expiry", async () => {
+  let manualFixture;
+  let manualValue = null;
+  manualFixture = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+  }, {
+    resolveTXT: async () => {
+      manualFixture.advanceTime(
+        (AGENT_EMAIL_CUSTOM_DOMAIN_PENDING_CHALLENGE_DAYS + 1) *
+          24 * 60 * 60 * 1_000,
+      );
+      return {
+        answers: [manualValue],
+        authoritative_absence: false,
+        dnssec_authenticated: true,
+        minimum_ttl_seconds: 60,
+        rrset_sha256: "a".repeat(64),
+      };
+    },
+  });
+  const manualCreated = await create(
+    manualFixture.runtime,
+    "manual-cross-expiry.example",
+    { domain_limit: 1 },
+  );
+  manualValue = manualCreated.body.request.ownership_challenge.record_value;
+  const manual = await call(manualFixture.runtime, "/request/verify", {
+    actor: ADMIN,
+    request_id: manualCreated.body.request.id,
+    idempotency_key: "manual-cross-expiry",
+    verification_enabled: true,
+  });
+  assert.equal(manual.response.status, 409);
+  assert.equal(manual.body.code, "ownership_challenge_expired");
+  assert.equal(manualFixture.storage.values.has(
+    "domain:manual-cross-expiry.example"), false);
+
+  let scheduledFixture;
+  let scheduledValue = null;
+  scheduledFixture = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+  }, {
+    resolveTXT: async () => {
+      scheduledFixture.advanceTime(
+        (AGENT_EMAIL_CUSTOM_DOMAIN_PENDING_CHALLENGE_DAYS + 1) *
+          24 * 60 * 60 * 1_000,
+      );
+      return {
+        answers: [scheduledValue],
+        authoritative_absence: false,
+        dnssec_authenticated: true,
+        minimum_ttl_seconds: 60,
+        rrset_sha256: "b".repeat(64),
+      };
+    },
+  });
+  const scheduledCreated = await create(
+    scheduledFixture.runtime,
+    "scheduled-cross-expiry.example",
+    { domain_limit: 1 },
+  );
+  scheduledValue =
+    scheduledCreated.body.request.ownership_challenge.record_value;
+  const reconciled = await call(
+    scheduledFixture.runtime,
+    "/verification/reconcile",
+    { verification_enabled: true },
+  );
+  assert.equal(reconciled.response.status, 200);
+  assert.equal(reconciled.body.matched, 0);
+  assert.equal(
+    scheduledFixture.storage.values.get(
+      `request:${scheduledCreated.body.request.id}`,
+    ).state,
+    "expired",
+  );
+  assert.equal(scheduledFixture.storage.values.has(
+    "domain:scheduled-cross-expiry.example"), false);
 });
 
 test("only internal POST routes are accepted", async () => {

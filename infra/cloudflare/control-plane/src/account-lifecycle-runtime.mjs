@@ -34,6 +34,9 @@ import {
 import {
   reconcileRealmEmailAliasesForAccountLifecycle,
 } from "./realm-email-alias-runtime.mjs";
+import {
+  reconcileAgentEmailDomainsForAccountLifecycle,
+} from "./agent-email-domain-runtime.mjs";
 
 const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const CELL_NAME = /^[a-z0-9-]{1,64}$/;
@@ -465,6 +468,24 @@ export class DurableAccountLifecycle {
           accountID,
           fence,
         ));
+    this.reconcileAgentEmailDomains =
+      dependencies.reconcileAgentEmailDomains ??
+      ((accountID, fence) =>
+        reconcileAgentEmailDomainsForAccountLifecycle(
+          this.env,
+          accountID,
+          fence,
+        ));
+  }
+
+  async reconcileAgentEmailPolicies(accountID, fence) {
+    if (fence.action === "republish") {
+      await this.reconcileRealmEmailAliases(accountID, fence);
+      await this.reconcileAgentEmailDomains(accountID, fence);
+      return;
+    }
+    await this.reconcileAgentEmailDomains(accountID, fence);
+    await this.reconcileRealmEmailAliases(accountID, fence);
   }
 
   async fetch(request) {
@@ -1084,7 +1105,7 @@ export class DurableAccountLifecycle {
         `archived:${this.accountId}`,
         JSON.stringify(pointer),
       );
-      await this.reconcileRealmEmailAliases(this.accountId, {
+      await this.reconcileAgentEmailPolicies(this.accountId, {
         operation_id:
           state.last_completed?.operation_id ?? "bootstrap",
         epoch: state.epoch,
@@ -1107,7 +1128,7 @@ export class DurableAccountLifecycle {
         `acct:${this.accountId}`,
         JSON.stringify(state.location.route),
       );
-      await this.reconcileRealmEmailAliases(this.accountId, {
+      await this.reconcileAgentEmailPolicies(this.accountId, {
         operation_id:
           state.last_completed?.operation_id ?? "bootstrap",
         epoch: state.epoch,
@@ -1174,7 +1195,7 @@ export class DurableAccountLifecycle {
           );
         }
       }
-      await this.reconcileRealmEmailAliases(this.accountId, {
+      await this.reconcileAgentEmailPolicies(this.accountId, {
         operation_id:
           state.last_completed?.operation_id ?? "bootstrap",
         epoch: state.epoch,
@@ -1186,7 +1207,7 @@ export class DurableAccountLifecycle {
       return { already_archived: true };
     }
     if (input.action === "close" && state.location.kind === "closed") {
-      await this.reconcileRealmEmailAliases(this.accountId, {
+      await this.reconcileAgentEmailPolicies(this.accountId, {
         operation_id:
           state.last_completed?.operation_id ?? "bootstrap",
         epoch: state.epoch,
@@ -2317,7 +2338,7 @@ export class DurableAccountLifecycle {
       // The target route must be authoritative before alias projections can
       // resolve and verify the new cell. Staying in live_committed until this
       // exact fence completes makes a crash replay only this republish.
-      await this.reconcileRealmEmailAliases(this.accountId, {
+      await this.reconcileAgentEmailPolicies(this.accountId, {
         operation_id: operation.operation_id,
         epoch: operation.epoch,
         action: "republish",
@@ -2338,7 +2359,7 @@ export class DurableAccountLifecycle {
         // before retiring the account route. The registry owns its own durable
         // cursor and exact lifecycle fence, so a partial page or crash cannot
         // let this state machine advance early.
-        await this.reconcileRealmEmailAliases(this.accountId, {
+        await this.reconcileAgentEmailPolicies(this.accountId, {
           operation_id: operation.operation_id,
           epoch: operation.epoch,
           action: operation.kind === "close" ? "retire" : "suspend",
@@ -2348,7 +2369,7 @@ export class DurableAccountLifecycle {
         // A lost/stale KV acknowledgement is not proof that aliases were
         // suspended. Reconcile the exact durable lifecycle fence even when the
         // route delete itself is already externally visible.
-        await this.reconcileRealmEmailAliases(this.accountId, {
+        await this.reconcileAgentEmailPolicies(this.accountId, {
           operation_id: operation.operation_id,
           epoch: operation.epoch,
           action: operation.kind === "close" ? "retire" : "suspend",

@@ -163,7 +163,7 @@ func (c emailDomainAdminCommon) mutation() (string, string, error) {
 func emailDomainAdminRequests(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr,
-			"usage: witself-admin email-domain requests (list|show|reject|retire) ...")
+			"usage: witself-admin email-domain requests (list|show|verify|reject|retire) ...")
 		return 2
 	}
 	action := args[0]
@@ -195,14 +195,19 @@ func emailDomainAdminRequests(args []string) int {
 		if *common.json {
 			return printJSON(page)
 		}
-		w, flush := tableWriter("id\taccount\tdomain\tstate\tupdated")
+		w, flush := tableWriter(
+			"id\taccount\tdomain\tstate\tavailability\tverification\tlast_result\tupdated")
 		for i := range page.Requests {
 			request := &page.Requests[i]
-			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+			verification, lastResult := emailDomainAdminVerificationColumns(request)
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 				emailDomainAdminColumn(request.RequestID),
 				emailDomainAdminColumn(request.AccountID),
 				emailDomainAdminColumn(request.Domain),
 				emailDomainAdminColumn(request.State),
+				emailDomainAdminColumn(request.Availability),
+				emailDomainAdminColumn(verification),
+				emailDomainAdminColumn(lastResult),
 				emailDomainAdminOptionalTime(request.UpdatedAt))
 		}
 		flush()
@@ -224,6 +229,30 @@ func emailDomainAdminRequests(args []string) int {
 		}
 		request, err := client.GetAdminAgentEmailDomainRequest(
 			context.Background(), endpoint, token, *requestID)
+		if err != nil {
+			return printEmailDomainAdminError(err, 1)
+		}
+		return printEmailDomainAdminRequest(request, *common.json, true)
+
+	case "verify":
+		common := newEmailDomainAdminCommon("email-domain requests verify", false)
+		requestID := common.flagSet.String("request", "", "request id (required)")
+		idempotencyKey := common.flagSet.String("idempotency-key", "",
+			"required exact retry key")
+		if err := common.flagSet.Parse(args[1:]); err != nil ||
+			common.flagSet.NArg() != 0 || strings.TrimSpace(*requestID) == "" ||
+			strings.TrimSpace(*idempotencyKey) == "" {
+			fmt.Fprintln(os.Stderr,
+				"usage: witself-admin email-domain requests verify --request REQUEST_ID --idempotency-key KEY")
+			return 2
+		}
+		key := strings.TrimSpace(*idempotencyKey)
+		endpoint, token, err := common.credentials()
+		if err != nil {
+			return printEmailDomainAdminError(err, 2)
+		}
+		request, err := client.VerifyAdminAgentEmailDomainRequest(
+			context.Background(), endpoint, token, *requestID, key)
 		if err != nil {
 			return printEmailDomainAdminError(err, 1)
 		}
@@ -412,6 +441,14 @@ func emailDomainAdminRecovery(args []string) int {
 
 func printEmailDomainJournalStatus(status *client.AgentEmailDomainJournalStatus) {
 	stream, hash := "-", "-"
+	remoteHealthy := "-"
+	if status.RemoteHeadHealthy != nil {
+		remoteHealthy = fmt.Sprintf("%t", *status.RemoteHeadHealthy)
+	}
+	degradation := status.DegradationCode
+	if degradation == "" {
+		degradation = "-"
+	}
 	var sequence, registryRevision, auditSequence int64
 	if status.Head != nil {
 		stream, hash = status.Head.StreamID, status.Head.Hash
@@ -420,9 +457,12 @@ func printEmailDomainJournalStatus(status *client.AgentEmailDomainJournalStatus)
 		auditSequence = status.Head.AuditSequence
 	}
 	w, flush := tableWriter(
-		"enabled\trequired\tpending\tforked\tstream\tsequence\thash\tregistry_revision\taudit_sequence")
-	_, _ = fmt.Fprintf(w, "%t\t%t\t%t\t%t\t%s\t%d\t%s\t%d\t%d\n",
-		status.Enabled, status.Required, status.Pending, status.Forked,
+		"enabled\trequired\thealthy\tpending\tforked\tremote_checked\tremote_healthy\tdegradation\tstream\tsequence\thash\tregistry_revision\taudit_sequence")
+	_, _ = fmt.Fprintf(w, "%t\t%t\t%t\t%t\t%t\t%t\t%s\t%s\t%s\t%d\t%s\t%d\t%d\n",
+		status.Enabled, status.Required, status.Healthy, status.Pending,
+		status.Forked, status.RemoteHeadChecked,
+		emailDomainAdminColumn(remoteHealthy),
+		emailDomainAdminColumn(degradation),
 		emailDomainAdminColumn(stream), sequence, emailDomainAdminColumn(hash),
 		registryRevision, auditSequence)
 	flush()
@@ -539,18 +579,22 @@ func printEmailDomainAdminRequest(
 	}
 	if includeChallenge {
 		var recordName, recordType, recordValue string
+		verification, lastResult := emailDomainAdminVerificationColumns(request)
 		if request.OwnershipChallenge != nil {
 			recordName = request.OwnershipChallenge.RecordName
 			recordType = request.OwnershipChallenge.RecordType
 			recordValue = request.OwnershipChallenge.RecordValue
 		}
 		w, flush := tableWriter(
-			"id\taccount\tdomain\tstate\trecord_name\trecord_type\trecord_value\tupdated")
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			"id\taccount\tdomain\tstate\tavailability\tverification\tlast_result\trecord_name\trecord_type\trecord_value\tupdated")
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			emailDomainAdminColumn(request.RequestID),
 			emailDomainAdminColumn(request.AccountID),
 			emailDomainAdminColumn(request.Domain),
 			emailDomainAdminColumn(request.State),
+			emailDomainAdminColumn(request.Availability),
+			emailDomainAdminColumn(verification),
+			emailDomainAdminColumn(lastResult),
 			emailDomainAdminColumn(recordName),
 			emailDomainAdminColumn(recordType),
 			emailDomainAdminColumn(recordValue),
@@ -558,12 +602,29 @@ func printEmailDomainAdminRequest(
 		flush()
 		return 0
 	}
-	fmt.Printf("%s\t%s\t%s\t%s\n",
+	verification, lastResult := emailDomainAdminVerificationColumns(request)
+	w, flush := tableWriter(
+		"id\taccount\tdomain\tstate\tavailability\tverification\tlast_result")
+	_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 		emailDomainAdminColumn(request.RequestID),
 		emailDomainAdminColumn(request.AccountID),
 		emailDomainAdminColumn(request.Domain),
-		emailDomainAdminColumn(request.State))
+		emailDomainAdminColumn(request.State),
+		emailDomainAdminColumn(request.Availability),
+		emailDomainAdminColumn(verification),
+		emailDomainAdminColumn(lastResult))
+	flush()
 	return 0
+}
+
+func emailDomainAdminVerificationColumns(
+	request *client.AgentEmailDomainRequest,
+) (string, string) {
+	if request.OwnershipVerification == nil {
+		return "", ""
+	}
+	return request.OwnershipVerification.State,
+		request.OwnershipVerification.LastResult
 }
 
 func emailDomainAdminColumn(value string) string {

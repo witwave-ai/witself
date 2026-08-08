@@ -2,6 +2,12 @@ import {
   AgentEmailDomainJournalRuntime,
   AgentEmailDomainJournalRuntimeError,
 } from "./agent-email-domain-journal-runtime.mjs";
+import {
+  AgentEmailDomainVerificationError,
+  agentEmailDomainTXTMatches,
+  resolveAgentEmailDomainTXT,
+} from "./agent-email-domain-verification.mjs";
+import { canonicalJSONString } from "./agent-email-domain-journal.mjs";
 
 const SCHEMA_VERSION = "witself.agent-email-domain.v1";
 const RECOVERY_SCHEMA_VERSION = "witself.agent-email-domain-recovery.v1";
@@ -17,6 +23,26 @@ const MAX_REASON_LENGTH = 500;
 const DEFAULT_LIST_LIMIT = 50;
 const MAX_CHALLENGE_DOMAIN_LENGTH = 231;
 const MAX_REQUEST_ID_MINT_ATTEMPTS = 8;
+// A lifecycle page can update both a request and its verified allocation.
+// Forty leaves journal room for meta, audit, fences, intents, and usage under
+// the hard 100-authority-change entry limit.
+const RECONCILE_PAGE_LIMIT = 40;
+const VERIFICATION_RECONCILE_LIMIT = 5;
+const VERIFICATION_INTERVAL_MS = 24 * 60 * 60 * 1_000;
+const VERIFICATION_RETRY_MS = 60 * 60 * 1_000;
+const VERIFICATION_RESOLVER_RETRY_MS = 15 * 60 * 1_000;
+const DOWNGRADE_GRACE_MS = 30 * 24 * 60 * 60 * 1_000;
+const PENDING_CHALLENGE_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
+const RECONCILE_RETRY_MS = 1_000;
+const RECONCILE_MAX_RETRY_MS = 15 * 60 * 1_000;
+const ALARM_BATCH_LIMIT = 5;
+
+function reconcileRetryDelay(failureCount) {
+  return Math.min(
+    RECONCILE_RETRY_MS * 2 ** Math.min(Math.max(failureCount - 1, 0), 10),
+    RECONCILE_MAX_RETRY_MS,
+  );
+}
 
 export const AGENT_EMAIL_CUSTOM_DOMAIN_FEATURE =
   "agent_email_custom_domain";
@@ -24,6 +50,9 @@ export const AGENT_EMAIL_CUSTOM_DOMAIN_LIMIT =
   "agent_email_custom_domains_per_account";
 export const AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_REQUESTS_PER_ACCOUNT = 8;
 export const AGENT_EMAIL_CUSTOM_DOMAIN_MAX_LIST_LIMIT = 100;
+export const AGENT_EMAIL_CUSTOM_DOMAIN_DOWNGRADE_GRACE_DAYS = 30;
+export const AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_INTERVAL_HOURS = 24;
+export const AGENT_EMAIL_CUSTOM_DOMAIN_PENDING_CHALLENGE_DAYS = 7;
 
 // These roots are part of Witself's own product and operating surface. A
 // customer can never request one of them, or a child of one of them, as a
@@ -173,6 +202,17 @@ function validDomainLimit(value) {
   return value === null || (Number.isSafeInteger(value) && value >= 0);
 }
 
+function validPlanRevisionFence(revision, snapshotHash) {
+  return Number.isSafeInteger(revision) && revision >= 0 &&
+    (revision === 0
+      ? snapshotHash === ""
+      : typeof snapshotHash === "string" && /^[0-9a-f]{64}$/.test(snapshotHash));
+}
+
+function comparePlanRevision(left, right) {
+  return left === right ? 0 : left < right ? -1 : 1;
+}
+
 export function agentEmailCustomDomainOpenRequestLimit(env = {}) {
   const raw = env.CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT;
   if (raw === undefined || raw === null || raw === "") {
@@ -187,10 +227,10 @@ export function agentEmailCustomDomainOpenRequestLimit(env = {}) {
 }
 
 function validatePlanFence(input) {
-  if (!Number.isSafeInteger(input?.plan_revision) ||
-      input.plan_revision < 0 ||
-      typeof input?.plan_snapshot_hash !== "string" ||
-      !/^[0-9a-f]{64}$/.test(input.plan_snapshot_hash)) {
+  if (!validPlanRevisionFence(
+    input?.plan_revision,
+    input?.plan_snapshot_hash,
+  )) {
     fail("custom inbound domain plan fence is invalid", 400);
   }
   return {
@@ -257,6 +297,25 @@ function domainStorageKey(domain) {
   return `domain:${domain}`;
 }
 
+function isLegacyDomainMirror(value) {
+  return value?.schema_version === SCHEMA_VERSION &&
+    REQUEST_ID_PATTERN.test(value?.id ?? "");
+}
+
+function assertLegacyDomainMirror(value, request) {
+  if (!isLegacyDomainMirror(value)) return false;
+  if (canonicalJSONString(value) !== canonicalJSONString(request)) {
+    fail("legacy custom domain authority mirror is inconsistent", 503);
+  }
+  return true;
+}
+
+function domainPendingKey(request) {
+  if (!request?.domain || !REQUEST_ID_PATTERN.test(request?.id ?? "") ||
+      typeof request?.requested_at !== "string") return null;
+  return `domain-pending:${request.domain}:${request.requested_at}:${request.id}`;
+}
+
 function accountRequestPrefix(accountID) {
   return `account-request:${accountID}:`;
 }
@@ -265,8 +324,95 @@ function accountRequestKey(accountID, requestID) {
   return `${accountRequestPrefix(accountID)}${requestID}`;
 }
 
+function accountDomainPrefix(accountID) {
+  return `account-domain:${accountID}:`;
+}
+
+function accountDomainKey(request) {
+  if (!ACCOUNT_ID_PATTERN.test(request?.account_id ?? "") ||
+      !REQUEST_ID_PATTERN.test(request?.id ?? "") ||
+      typeof request?.requested_at !== "string" ||
+      !Number.isFinite(Date.parse(request.requested_at))) {
+    return null;
+  }
+  return `${accountDomainPrefix(request.account_id)}` +
+    `${request.requested_at}:${request.id}`;
+}
+
 function usageKey(accountID) {
   return `account-usage:${accountID}`;
+}
+
+function planFenceKey(accountID) {
+  return `plan-fence:${accountID}`;
+}
+
+function planIntentKey(accountID) {
+  return `plan-intent:${accountID}`;
+}
+
+function lifecycleFenceKey(accountID) {
+  return `lifecycle-fence:${accountID}`;
+}
+
+function lifecycleIntentKey(accountID) {
+  return `lifecycle-intent:${accountID}`;
+}
+
+function dueKey(prefix, retryAtMS, accountID) {
+  if (!Number.isSafeInteger(retryAtMS) || retryAtMS < 0 ||
+      !ACCOUNT_ID_PATTERN.test(accountID ?? "")) {
+    return null;
+  }
+  return `${prefix}:${String(retryAtMS).padStart(16, "0")}:${accountID}`;
+}
+
+function planDueKey(intent) {
+  return dueKey("plan-due", intent?.retry_at_ms, intent?.account_id);
+}
+
+function lifecycleDueKey(intent) {
+  return dueKey("lifecycle-due", intent?.retry_at_ms, intent?.account_id);
+}
+
+function verificationDueKey(request) {
+  const value = request?.ownership_verification?.next_check_at ??
+    (request?.state === "pending_verification" ? request?.requested_at : null);
+  const timestamp = typeof value === "string" ? Date.parse(value) : NaN;
+  if (!Number.isFinite(timestamp) || !REQUEST_ID_PATTERN.test(request?.id ?? "")) {
+    return null;
+  }
+  return `verification-due:${String(timestamp).padStart(16, "0")}:${request.id}`;
+}
+
+function graceDueKey(request) {
+  const timestamp = typeof request?.plan_grace_until === "string"
+    ? Date.parse(request.plan_grace_until)
+    : NaN;
+  if (!Number.isFinite(timestamp) || !REQUEST_ID_PATTERN.test(request?.id ?? "")) {
+    return null;
+  }
+  return `plan-grace-due:${String(timestamp).padStart(16, "0")}:${request.id}`;
+}
+
+function challengeExpiresAt(request) {
+  const explicit = request?.ownership_challenge?.expires_at;
+  if (typeof explicit === "string" && Number.isFinite(Date.parse(explicit))) {
+    return explicit;
+  }
+  const requestedAt = Date.parse(request?.requested_at ?? "");
+  return Number.isFinite(requestedAt)
+    ? new Date(requestedAt + PENDING_CHALLENGE_TTL_MS).toISOString()
+    : null;
+}
+
+function challengeExpiryDueKey(request) {
+  const timestamp = Date.parse(challengeExpiresAt(request) ?? "");
+  if (!Number.isFinite(timestamp) || !REQUEST_ID_PATTERN.test(request?.id ?? "")) {
+    return null;
+  }
+  return `challenge-expiry-due:${String(timestamp).padStart(16, "0")}:` +
+    request.id;
 }
 
 function idempotencyStorageKey(scope, key) {
@@ -307,16 +453,48 @@ function publicRequest(request) {
     account_id: request.account_id,
     domain: request.domain,
     state: request.state,
-    ownership_challenge: { ...request.ownership_challenge },
+    ownership_challenge: {
+      ...request.ownership_challenge,
+      ...(challengeExpiresAt(request)
+        ? { expires_at: challengeExpiresAt(request) }
+        : {}),
+    },
     requested_by: request.requested_by,
     requested_at: request.requested_at,
     updated_at: request.updated_at,
     domain_limit_at_request: request.domain_limit_at_request,
     plan_revision: request.plan_revision,
     plan_snapshot_hash: request.plan_snapshot_hash,
+    state_revision: request.state_revision ?? 1,
+    availability: requestAvailability(request),
+    plan_suspended: request.plan_suspended === true,
+    lifecycle_suspended: request.lifecycle_suspended === true,
+    ...(request.plan_grace_until
+      ? { plan_grace_until: request.plan_grace_until }
+      : {}),
+    ...(request.ownership_verification
+      ? { ownership_verification: { ...request.ownership_verification } }
+      : {}),
+    ...(request.expiration ? { expiration: { ...request.expiration } } : {}),
     ...(request.decision ? { decision: { ...request.decision } } : {}),
     ...(request.retirement ? { retirement: { ...request.retirement } } : {}),
   };
+}
+
+function requestAvailability(request) {
+  if (request?.state === "retired") return "retired";
+  if (request?.state === "rejected") return "rejected";
+  if (request?.state === "expired") return "expired";
+  if (request?.lifecycle_suspended === true) return "suspended_lifecycle";
+  if (request?.plan_suspended === true) return "suspended_plan";
+  if (request?.ownership_verification?.state === "stale") {
+    return "suspended_verification";
+  }
+  if (request?.ownership_verification?.state === "conflict") {
+    return "unavailable_domain";
+  }
+  if (request?.plan_grace_until) return "active_grace";
+  return request?.state === "verified" ? "verified" : "pending_verification";
 }
 
 function publicAudit(event) {
@@ -338,12 +516,151 @@ export function agentEmailDomainRegistryStub(env = {}) {
   return namespace.get(namespace.idFromName(DEFAULT_REGISTRY_OBJECT_NAME));
 }
 
+export function agentEmailCustomDomainVerificationEnabled(env = {}) {
+  return String(
+    env.CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED ?? "",
+  ) === "true";
+}
+
+export function agentEmailCustomDomainRequestsEnabledForAccount(
+  env = {},
+  accountID,
+) {
+  if (String(env.CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUESTS_ENABLED ?? "") !==
+      "true" || !ACCOUNT_ID_PATTERN.test(accountID ?? "")) return false;
+  const raw = String(
+    env.CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUEST_ACCOUNT_ALLOWLIST ?? "",
+  );
+  if (!raw || raw !== raw.trim()) return false;
+  const accounts = raw.split(",");
+  if (accounts.some((value) => !ACCOUNT_ID_PATTERN.test(value))) return false;
+  return new Set(accounts).has(accountID);
+}
+
+export async function reconcileAgentEmailDomainsForPlan(
+  env,
+  accountID,
+  snapshot,
+  mode,
+  options = {},
+) {
+  const stub = agentEmailDomainRegistryStub(env);
+  if (!stub) return { skipped: true, complete: true };
+  if (!ACCOUNT_ID_PATTERN.test(accountID ?? "") ||
+      !validPlanRevisionFence(snapshot?.revision, snapshot?.snapshot_hash) ||
+      !Array.isArray(snapshot?.features) || !isObject(snapshot?.limits) ||
+      !["restrict_only", "complete"].includes(mode)) {
+    throw new Error("invalid account plan snapshot for domain reconciliation");
+  }
+  const entitlement = agentEmailCustomDomainEntitlement(snapshot);
+  const response = await stub.fetch(
+    "https://agent-email-domain.internal/plan/reconcile",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        account_id: accountID,
+        activation_enabled:
+          agentEmailCustomDomainRequestsEnabledForAccount(env, accountID),
+        feature_enabled: entitlement.enabled,
+        domain_limit: entitlement.limit,
+        mode,
+        plan_revision: snapshot.revision,
+        plan_snapshot_hash: snapshot.snapshot_hash,
+        ...(options.recover_pending_revision === undefined
+          ? {}
+          : {
+            recover_pending_revision: options.recover_pending_revision,
+            recover_pending_snapshot_hash:
+              options.recover_pending_snapshot_hash,
+          }),
+      }),
+    },
+  );
+  const body = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(
+      body?.error ??
+        "custom domain plan reconciliation failed",
+    );
+  }
+  return body;
+}
+
+export async function reconcileAgentEmailDomainsForAccountLifecycle(
+  env,
+  accountID,
+  { operation_id: operationID, epoch, action },
+) {
+  const stub = agentEmailDomainRegistryStub(env);
+  if (!stub) return { skipped: true, complete: true };
+  if (!ACCOUNT_ID_PATTERN.test(accountID ?? "") ||
+      !IDEMPOTENCY_KEY_PATTERN.test(operationID ?? "") ||
+      !Number.isSafeInteger(epoch) || epoch < 0 ||
+      !["suspend", "republish", "retire"].includes(action)) {
+    throw new Error("invalid account lifecycle fence for domain reconciliation");
+  }
+  const response = await stub.fetch(
+    "https://agent-email-domain.internal/account-lifecycle/reconcile",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        account_id: accountID,
+        activation_enabled:
+          agentEmailCustomDomainRequestsEnabledForAccount(env, accountID),
+        operation_id: operationID,
+        epoch,
+        action,
+      }),
+    },
+  );
+  const body = await response.json().catch(() => null);
+  if (!response.ok || body?.complete !== true) {
+    throw new Error(
+      body?.error ??
+        (body?.complete === false
+          ? "custom domain account lifecycle is still converging"
+          : "custom domain account lifecycle reconciliation failed"),
+    );
+  }
+  return body;
+}
+
+export async function runScheduledAgentEmailDomainVerification(env) {
+  if (!agentEmailCustomDomainVerificationEnabled(env)) {
+    return { ran: false, configured: true };
+  }
+  const stub = agentEmailDomainRegistryStub(env);
+  if (!stub) {
+    console.log("agent-email-domain: verification registry is unavailable");
+    return { ran: false, configured: false };
+  }
+  try {
+    const response = await stub.fetch(
+      "https://agent-email-domain.internal/verification/reconcile",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ verification_enabled: true }),
+      },
+    );
+    if (!response.ok) {
+      console.log("agent-email-domain: scheduled verification failed");
+      return { ran: true, succeeded: false };
+    }
+    return { ran: true, succeeded: true, ...await response.json() };
+  } catch {
+    console.log("agent-email-domain: scheduled verification unavailable");
+    return { ran: true, succeeded: false };
+  }
+}
+
 /**
- * One globally named Durable Object owns every customer-domain tombstone.
- * This initial runtime deliberately stops at an ownership challenge: it does
- * not query DNS, activate mail, publish edge routes, or project state to a
- * cell. Later lifecycle work can build on the durable request without
- * changing the uniqueness boundary.
+ * One globally named Durable Object owns pending requests and permanently
+ * allocated customer domains. Ownership verification is authority-only: this
+ * runtime still does not activate mail, publish edge routes, or project state
+ * to a cell.
  */
 export class DurableAgentEmailDomainRegistry {
   constructor(ctx, env, dependencies = {}) {
@@ -354,6 +671,11 @@ export class DurableAgentEmailDomainRegistry {
     this.newRequestID = dependencies.newRequestID ?? newRequestID;
     this.newChallengeToken =
       dependencies.newChallengeToken ?? newChallengeToken;
+    this.resolveTXT = dependencies.resolveTXT ??
+      ((recordName) => resolveAgentEmailDomainTXT(recordName));
+    this.assertRequestActivationReady =
+      dependencies.assertRequestActivationReady ??
+      (() => this.defaultAssertRequestActivationReady());
     this.authorityJournal = new AgentEmailDomainJournalRuntime(
       this.storage,
       this.env,
@@ -378,6 +700,22 @@ export class DurableAgentEmailDomainRegistry {
 
   fetch(request) {
     return this.serial(() => this.handleFetch(request));
+  }
+
+  alarm() {
+    return this.serial(async () => {
+      const rawApply = this.atomicRaw.bind(this);
+      await this.authorityJournal.resume(rawApply);
+      await this.authorityJournal.assertOperationalReady();
+      await this.reconcileDueLifecycles();
+      await this.reconcileDuePlanIntents();
+      await this.reconcileDueGrace();
+      await this.reconcileDueChallengeExpiries();
+      if (agentEmailCustomDomainVerificationEnabled(this.env)) {
+        await this.reconcileDueVerifications(VERIFICATION_RECONCILE_LIMIT);
+      }
+      await this.scheduleNextAlarm();
+    });
   }
 
   serial(work) {
@@ -451,7 +789,6 @@ export class DurableAgentEmailDomainRegistry {
 
       await this.authorityJournal.resume(rawApply);
       await this.authorityJournal.assertOperationalReady();
-      await this.ensureMeta();
       switch (path) {
         case "/request/create":
           return await this.createRequest(input);
@@ -465,8 +802,16 @@ export class DurableAgentEmailDomainRegistry {
           return await this.rejectRequest(input);
         case "/request/retire":
           return await this.retireRequest(input);
+        case "/request/verify":
+          return await this.verifyRequest(input);
         case "/audit/list":
           return await this.listAudit(input);
+        case "/plan/reconcile":
+          return await this.reconcilePlan(input);
+        case "/account-lifecycle/reconcile":
+          return await this.reconcileAccountLifecycle(input);
+        case "/verification/reconcile":
+          return await this.reconcileVerification(input);
         default:
           return errorResponse("domain registry endpoint not found", 404);
       }
@@ -539,6 +884,24 @@ export class DurableAgentEmailDomainRegistry {
     return meta;
   }
 
+  async defaultAssertRequestActivationReady() {
+    const status = await this.authorityJournal.status();
+    if (String(
+      this.env?.CP_AGENT_EMAIL_CUSTOM_DOMAIN_AUTHORITY_READY ?? "",
+    ) !== "true" ||
+        String(this.env?.CP_PLAN_LIFECYCLE_ENABLED ?? "") !== "true" ||
+        status.required !== true || status.enabled !== true ||
+        status.healthy !== true || status.pending === true ||
+        status.forked === true || !Number.isSafeInteger(status.head?.sequence) ||
+        status.head.sequence < 1) {
+      fail(
+        "custom inbound domain requests are not operationally ready",
+        503,
+        "custom_domain_activation_not_ready",
+      );
+    }
+  }
+
   async atomic(entries, deletes = [], options = {}) {
     return this.authorityJournal.commit(
       entries,
@@ -560,9 +923,34 @@ export class DurableAgentEmailDomainRegistry {
     }
   }
 
-  async mutation(actor, action, target, metadata) {
+  async scheduleNextAlarm() {
+    if (typeof this.storage.setAlarm !== "function") return;
+    const prefixes = [
+      "lifecycle-due:",
+      "plan-due:",
+      "plan-grace-due:",
+      "challenge-expiry-due:",
+      ...(agentEmailCustomDomainVerificationEnabled(this.env)
+        ? ["verification-due:"]
+        : []),
+    ];
+    const deadlines = [];
+    for (const prefix of prefixes) {
+      const first = [...(await this.storage.list({ prefix, limit: 1 })).keys()][0];
+      if (!first) continue;
+      const timestamp = Number(first.split(":", 3)[1]);
+      if (Number.isFinite(timestamp)) deadlines.push(timestamp);
+    }
+    if (deadlines.length > 0) {
+      await this.storage.setAlarm(Math.min(...deadlines));
+    } else if (typeof this.storage.deleteAlarm === "function") {
+      await this.storage.deleteAlarm().catch(() => {});
+    }
+  }
+
+  async mutation(actor, action, target, metadata, occurredAt = null) {
     const current = await this.ensureMeta();
-    const now = this.now().toISOString();
+    const now = occurredAt ?? this.now().toISOString();
     const meta = {
       ...current,
       registry_revision: current.registry_revision + 1,
@@ -604,6 +992,7 @@ export class DurableAgentEmailDomainRegistry {
         schema_version: 1,
         account_id: accountID,
         open_requests: 0,
+        allocated_domains: 0,
         updated_at: null,
       };
     }
@@ -611,10 +1000,15 @@ export class DurableAgentEmailDomainRegistry {
         !Number.isSafeInteger(usage.open_requests) ||
         usage.open_requests < 0 ||
         usage.open_requests >
-          AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_REQUESTS_PER_ACCOUNT) {
+          AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_REQUESTS_PER_ACCOUNT ||
+        !Number.isSafeInteger(usage.allocated_domains ?? usage.open_requests) ||
+        (usage.allocated_domains ?? usage.open_requests) < usage.open_requests) {
       fail("custom inbound domain account usage is invalid", 503);
     }
-    return usage;
+    return {
+      ...usage,
+      allocated_domains: usage.allocated_domains ?? usage.open_requests,
+    };
   }
 
   async mintUniqueRequestID() {
@@ -629,6 +1023,40 @@ export class DurableAgentEmailDomainRegistry {
       "request_id_unavailable");
   }
 
+  async assertRequestPolicyFence(accountID, input, planFence) {
+    const [committed, planIntent, lifecycleIntent, lifecycleFence] =
+      await Promise.all([
+        this.storage.get(planFenceKey(accountID)),
+        this.storage.get(planIntentKey(accountID)),
+        this.storage.get(lifecycleIntentKey(accountID)),
+        this.storage.get(lifecycleFenceKey(accountID)),
+      ]);
+    if (planIntent || lifecycleIntent) {
+      fail("account policy is still converging", 409,
+        "account_policy_converging");
+    }
+    if (committed &&
+        (committed.committed_revision !== planFence.revision ||
+          committed.committed_snapshot_hash !== planFence.snapshot_hash ||
+          committed.feature_enabled !== input.feature_enabled ||
+          committed.domain_limit !== input.domain_limit)) {
+      fail("custom inbound domain plan fence is stale", 409,
+        "stale_plan_fence");
+    }
+    if (lifecycleFence && lifecycleFence.action !== "republish") {
+      fail("account lifecycle does not allow custom domain requests", 409,
+        "account_lifecycle_suspended");
+    }
+    return committed ? null : {
+      account_id: accountID,
+      committed_revision: planFence.revision,
+      committed_snapshot_hash: planFence.snapshot_hash,
+      feature_enabled: input.feature_enabled,
+      domain_limit: input.domain_limit,
+      updated_at: this.now().toISOString(),
+    };
+  }
+
   async createRequest(input) {
     const actor = validateActor(input?.actor, "account_operator");
     const accountID = validateAccountID(input?.account_id);
@@ -640,10 +1068,15 @@ export class DurableAgentEmailDomainRegistry {
     const replay = await this.idempotentReplay(idempotencyScope, key, fp);
     if (replay) return replay;
 
-    if (input?.requests_enabled !== true) {
+    // Re-check the gate inside the globally serialized authority. The Worker
+    // hint can become stale while a request is in flight during a gate or
+    // allowlist removal.
+    if (input?.requests_enabled !== true ||
+        !agentEmailCustomDomainRequestsEnabledForAccount(this.env, accountID)) {
       fail("custom inbound domain requests are not enabled", 409,
         "custom_domain_requests_disabled");
     }
+    await this.assertRequestActivationReady();
     if (typeof input?.feature_enabled !== "boolean") {
       fail("feature_enabled must be provided", 400);
     }
@@ -655,6 +1088,11 @@ export class DurableAgentEmailDomainRegistry {
       fail("custom inbound domains are not enabled for this account", 403,
         "feature_not_enabled");
     }
+    const seedPlanFence = await this.assertRequestPolicyFence(
+      accountID,
+      input,
+      planFence,
+    );
     if (isProtectedAgentEmailDomain(domain, this.env)) {
       fail("domain is protected by Witself policy", 409,
         "protected_domain");
@@ -672,11 +1110,10 @@ export class DurableAgentEmailDomainRegistry {
           limit: technicalLimit,
         });
     }
-    // Pending verification requests reserve both commercial quota and the
-    // independent technical ceiling. Rejection or retirement releases that
-    // account capacity but keeps the global domain tombstone fail-closed.
+    // Pending verification requests reserve commercial account quota and the
+    // independent technical ceiling, but do not claim the domain globally.
     if (input.domain_limit !== null &&
-        usage.open_requests >= input.domain_limit) {
+        usage.allocated_domains >= input.domain_limit) {
       fail("custom inbound domain account limit reached", 403,
         "account_limit_reached", { limit: input.domain_limit });
     }
@@ -690,7 +1127,7 @@ export class DurableAgentEmailDomainRegistry {
       actor,
       "custom_domain.requested",
       domain,
-      { account_id: accountID, state: "pending_verification" },
+      { account_id: accountID, request_id: id, state: "pending_verification" },
     );
     const created = {
       schema_version: SCHEMA_VERSION,
@@ -698,11 +1135,15 @@ export class DurableAgentEmailDomainRegistry {
       account_id: accountID,
       domain,
       state: "pending_verification",
+      state_revision: 1,
       ownership_challenge: {
         record_type: "TXT",
         record_name: `_witself-verification.${domain}`,
         record_value: `witself-domain-verification=${challengeToken}`,
         issued_at: mutation.now,
+        expires_at: new Date(
+          Date.parse(mutation.now) + PENDING_CHALLENGE_TTL_MS,
+        ).toISOString(),
       },
       requested_by: actor.id,
       requested_at: mutation.now,
@@ -710,12 +1151,19 @@ export class DurableAgentEmailDomainRegistry {
       domain_limit_at_request: input.domain_limit,
       plan_revision: planFence.revision,
       plan_snapshot_hash: planFence.snapshot_hash,
+      plan_suspended: false,
+      plan_grace_until: null,
+      lifecycle_suspended: false,
+      lifecycle_fence: null,
+      ownership_verification: null,
+      expiration: null,
       decision: null,
       retirement: null,
     };
     const nextUsage = {
       ...usage,
       open_requests: usage.open_requests + 1,
+      allocated_domains: usage.allocated_domains + 1,
       updated_at: mutation.now,
     };
     const body = {
@@ -726,15 +1174,20 @@ export class DurableAgentEmailDomainRegistry {
       [META_KEY, mutation.meta],
       [mutation.audit_key, mutation.audit],
       [requestStorageKey(id), created],
-      [domainStorageKey(domain), created],
       [accountRequestKey(accountID, id), id],
+      [accountDomainKey(created), id],
+      [domainPendingKey(created), id],
+      [challengeExpiryDueKey(created), id],
+      [verificationDueKey(created), id],
       [usageKey(accountID), nextUsage],
       [idempotencyStorageKey(idempotencyScope, key), {
         fingerprint: fp,
         status: 202,
         body,
       }],
+      ...(seedPlanFence ? [[planFenceKey(accountID), seedPlanFence]] : []),
     ]);
+    await this.scheduleNextAlarm().catch(() => {});
     return json(body, 202);
   }
 
@@ -783,7 +1236,7 @@ export class DurableAgentEmailDomainRegistry {
       }))
       : listed.entries.map(([, request]) => publicRequest(request));
     if (input?.state != null) {
-      if (!["pending_verification", "rejected", "retired"].includes(
+      if (!["pending_verification", "verified", "rejected", "expired", "retired"].includes(
         input.state,
       )) {
         fail("request state filter is invalid", 400);
@@ -803,6 +1256,7 @@ export class DurableAgentEmailDomainRegistry {
       technical_open_request_limit:
         agentEmailCustomDomainOpenRequestLimit(this.env),
       ...(usage ? { open_requests: usage.open_requests } : {}),
+      ...(usage ? { allocated_domains: usage.allocated_domains } : {}),
     });
   }
 
@@ -843,7 +1297,7 @@ export class DurableAgentEmailDomainRegistry {
     if (nextState === "retired" && current.state === "retired") {
       fail("custom inbound domain request is already retired", 409);
     }
-    if (!["pending_verification", "rejected"].includes(current.state)) {
+    if (!["pending_verification", "verified", "rejected"].includes(current.state)) {
       fail("custom inbound domain request state is invalid", 503);
     }
 
@@ -851,11 +1305,17 @@ export class DurableAgentEmailDomainRegistry {
       actor,
       `custom_domain.${nextState}`,
       current.domain,
-      { account_id: current.account_id, from_state: current.state, reason },
+      {
+        account_id: current.account_id,
+        request_id: current.id,
+        from_state: current.state,
+        reason,
+      },
     );
     const updated = {
       ...current,
       state: nextState,
+      state_revision: (current.state_revision ?? 1) + 1,
       updated_at: mutation.now,
       ...(nextState === "rejected"
         ? {
@@ -873,23 +1333,63 @@ export class DurableAgentEmailDomainRegistry {
             retired_at: mutation.now,
           },
         }),
+      ...(nextState === "retired" ? { plan_grace_until: null } : {}),
     };
     const entries = [
       [META_KEY, mutation.meta],
       [mutation.audit_key, mutation.audit],
       [requestStorageKey(id), updated],
-      [domainStorageKey(current.domain), updated],
     ];
-    if (current.state === "pending_verification") {
+    const deletes = [];
+    const allocation = await this.storage.get(domainStorageKey(current.domain));
+    if (assertLegacyDomainMirror(allocation, current)) {
+      // v0.0.235 mirrored every request at domain:<domain>. Preserve that
+      // already-durable non-reuse decision while the historical request moves.
+      entries.push([domainStorageKey(current.domain), updated]);
+    } else if (current.state === "verified") {
+      if (!allocation || allocation.source_request_id !== current.id ||
+          allocation.state !== "allocated") {
+        fail("custom inbound domain allocation is invalid", 503);
+      }
+      entries.push([domainStorageKey(current.domain), {
+        ...allocation,
+        state: "retired",
+        allocation_revision: (allocation.allocation_revision ?? 1) + 1,
+        updated_at: mutation.now,
+        retirement: {
+          reason,
+          retired_by: actor.id,
+          retired_at: mutation.now,
+        },
+      }]);
+    }
+    if (["pending_verification", "verified"].includes(current.state)) {
       const usage = await this.accountUsage(current.account_id);
-      if (usage.open_requests < 1) {
+      if (usage.allocated_domains < 1 ||
+          (current.state === "pending_verification" && usage.open_requests < 1)) {
         fail("custom inbound domain account usage is invalid", 503);
       }
       entries.push([usageKey(current.account_id), {
         ...usage,
-        open_requests: usage.open_requests - 1,
+        open_requests: usage.open_requests -
+          (current.state === "pending_verification" ? 1 : 0),
+        allocated_domains: usage.allocated_domains - 1,
         updated_at: mutation.now,
       }]);
+      entries.push(...await this.capacityReleaseRebalanceEntries(
+        current,
+        usage,
+      ));
+      const activeKey = accountDomainKey(current);
+      if (activeKey) deletes.push(activeKey);
+      const pendingKey = domainPendingKey(current);
+      if (pendingKey) deletes.push(pendingKey);
+      const expiryKey = challengeExpiryDueKey(current);
+      if (expiryKey) deletes.push(expiryKey);
+      const verificationKey = verificationDueKey(current);
+      if (verificationKey) deletes.push(verificationKey);
+      const graceKey = graceDueKey(current);
+      if (graceKey) deletes.push(graceKey);
     }
     const body = {
       schema_version: SCHEMA_VERSION,
@@ -900,8 +1400,1320 @@ export class DurableAgentEmailDomainRegistry {
       status: 200,
       body,
     }]);
-    await this.atomic(entries);
+    await this.atomic(entries, deletes);
+    await this.scheduleNextAlarm().catch(() => {});
     return json(body);
+  }
+
+  async activeRequestPage(accountID, cursor = null) {
+    const prefix = accountDomainPrefix(accountID);
+    const listed = await this.storage.list({
+      prefix,
+      limit: RECONCILE_PAGE_LIMIT + 1,
+      ...(cursor ? { startAfter: cursor } : {}),
+    });
+    const rows = [...listed.entries()];
+    const page = rows.slice(0, RECONCILE_PAGE_LIMIT);
+    const requests = [];
+    for (const [indexKey, requestID] of page) {
+      const request = await this.storage.get(requestStorageKey(requestID));
+      if (!request || request.account_id !== accountID) {
+        fail("custom inbound domain account index is invalid", 503);
+      }
+      requests.push({ index_key: indexKey, request });
+    }
+    return {
+      requests,
+      next_cursor: rows.length > RECONCILE_PAGE_LIMIT && page.length > 0
+        ? page.at(-1)[0]
+        : null,
+    };
+  }
+
+  async accountHasActiveRequest(accountID) {
+    const listed = await this.storage.list({
+      prefix: accountDomainPrefix(accountID),
+      limit: 1,
+    });
+    return listed.size > 0;
+  }
+
+  async accountPolicyConverging(accountID) {
+    const [planIntent, lifecycleIntent] = await Promise.all([
+      this.storage.get(planIntentKey(accountID)),
+      this.storage.get(lifecycleIntentKey(accountID)),
+    ]);
+    return Boolean(planIntent || lifecycleIntent);
+  }
+
+  planIntent(input, state) {
+    const now = this.now();
+    return {
+      account_id: input.account_id,
+      plan_revision: input.plan_revision,
+      plan_snapshot_hash: input.plan_snapshot_hash,
+      feature_enabled: input.feature_enabled,
+      domain_limit: input.domain_limit,
+      state,
+      cursor: null,
+      position: 0,
+      failure_count: 0,
+      retry_at_ms: state === "cell_committed"
+        ? now.getTime() + RECONCILE_RETRY_MS
+        : null,
+      created_at: now.toISOString(),
+      updated_at: now.toISOString(),
+    };
+  }
+
+  async capacityReleaseRebalanceEntries(current, usage) {
+    if (current.plan_suspended === true || usage.allocated_domains < 1) {
+      return [];
+    }
+    const [committed, pending, lifecycleIntent, lifecycleFence] =
+      await Promise.all([
+        this.storage.get(planFenceKey(current.account_id)),
+        this.storage.get(planIntentKey(current.account_id)),
+        this.storage.get(lifecycleIntentKey(current.account_id)),
+        this.storage.get(lifecycleFenceKey(current.account_id)),
+      ]);
+    const allowed = committed?.feature_enabled === true
+      ? committed.domain_limit
+      : 0;
+    if (!committed || pending || lifecycleIntent || allowed === null ||
+        allowed < 1 || usage.allocated_domains - 1 < allowed ||
+        (lifecycleFence && lifecycleFence.action !== "republish")) {
+      return [];
+    }
+    const intent = this.planIntent({
+      account_id: current.account_id,
+      plan_revision: committed.committed_revision,
+      plan_snapshot_hash: committed.committed_snapshot_hash,
+      feature_enabled: committed.feature_enabled,
+      domain_limit: committed.domain_limit,
+    }, "cell_committed");
+    return [
+      [planIntentKey(current.account_id), intent],
+      [planDueKey(intent), current.account_id],
+    ];
+  }
+
+  async persistPlanIntent(intent, previous = null) {
+    await this.ensureMeta();
+    const entries = [[planIntentKey(intent.account_id), intent]];
+    if (planDueKey(intent)) {
+      entries.push([planDueKey(intent), intent.account_id]);
+    }
+    const deletes = previous && planDueKey(previous) !== planDueKey(intent)
+      ? [planDueKey(previous)].filter(Boolean)
+      : [];
+    await this.atomic(entries, deletes);
+    await this.scheduleNextAlarm().catch(() => {});
+    return intent;
+  }
+
+  desiredPlanRequest(request, intent, position) {
+    const allowed = intent.feature_enabled
+      ? intent.domain_limit
+      : 0;
+    const shouldRestrict = allowed !== null && position >= allowed;
+    let planSuspended = request.plan_suspended === true;
+    let graceUntil = request.plan_grace_until ?? null;
+    if (!shouldRestrict) {
+      planSuspended = false;
+      graceUntil = null;
+    } else if (request.state === "pending_verification") {
+      planSuspended = true;
+      graceUntil = null;
+    } else if (request.state === "verified") {
+      if (!planSuspended && graceUntil &&
+          Date.parse(graceUntil) <= this.now().getTime()) {
+        planSuspended = true;
+        graceUntil = null;
+      } else if (!planSuspended && !graceUntil) {
+        graceUntil = new Date(
+          this.now().getTime() + DOWNGRADE_GRACE_MS,
+        ).toISOString();
+      }
+    }
+    if (planSuspended === (request.plan_suspended === true) &&
+        graceUntil === (request.plan_grace_until ?? null)) {
+      return request;
+    }
+    return {
+      ...request,
+      plan_suspended: planSuspended,
+      plan_grace_until: graceUntil,
+      state_revision: (request.state_revision ?? 1) + 1,
+      updated_at: this.now().toISOString(),
+    };
+  }
+
+  async applyPlanIntent(intent) {
+    const page = await this.activeRequestPage(intent.account_id, intent.cursor);
+    const changed = [];
+    const derivedDeletes = [];
+    const derivedEntries = [];
+    let position = intent.position ?? 0;
+    for (const { index_key: indexKey, request } of page.requests) {
+      if (!["pending_verification", "verified"].includes(request.state)) {
+        derivedDeletes.push(indexKey);
+        continue;
+      }
+      const desired = this.desiredPlanRequest(request, intent, position);
+      position += 1;
+      if (desired !== request) {
+        changed.push({ previous: request, next: desired });
+        const oldGrace = graceDueKey(request);
+        const nextGrace = graceDueKey(desired);
+        if (oldGrace && oldGrace !== nextGrace) derivedDeletes.push(oldGrace);
+        if (nextGrace) derivedEntries.push([nextGrace, desired.id]);
+        const verificationDue = verificationDueKey(desired);
+        if (desired.plan_suspended === true ||
+            desired.lifecycle_suspended === true) {
+          if (verificationDue) derivedDeletes.push(verificationDue);
+        } else if (verificationDue) {
+          derivedEntries.push([verificationDue, desired.id]);
+        }
+      }
+    }
+    const finalPage = page.next_cursor === null;
+    const deletes = [...derivedDeletes, planDueKey(intent)];
+    const entries = [...derivedEntries];
+    if (changed.length > 0) {
+      const mutation = await this.mutation(
+        { kind: "system", id: "plan-lifecycle" },
+        "custom_domain.plan_reconciled",
+        intent.account_id,
+        {
+          account_id: intent.account_id,
+          changed: changed.length,
+          page_size: page.requests.length,
+          plan_revision: intent.plan_revision,
+          plan_snapshot_hash: intent.plan_snapshot_hash,
+          domain_limit: intent.feature_enabled ? intent.domain_limit : 0,
+          downgrade_grace_days:
+            AGENT_EMAIL_CUSTOM_DOMAIN_DOWNGRADE_GRACE_DAYS,
+        },
+      );
+      entries.push([META_KEY, mutation.meta], [mutation.audit_key, mutation.audit]);
+      for (const item of changed) {
+        entries.push([requestStorageKey(item.next.id), item.next]);
+        const allocation = await this.storage.get(
+          domainStorageKey(item.previous.domain),
+        );
+        if (assertLegacyDomainMirror(allocation, item.previous)) {
+          entries.push([domainStorageKey(item.previous.domain), item.next]);
+        }
+      }
+    }
+    if (finalPage) {
+      deletes.push(planIntentKey(intent.account_id));
+      entries.push([planFenceKey(intent.account_id), {
+        account_id: intent.account_id,
+        committed_revision: intent.plan_revision,
+        committed_snapshot_hash: intent.plan_snapshot_hash,
+        feature_enabled: intent.feature_enabled,
+        domain_limit: intent.domain_limit,
+        updated_at: this.now().toISOString(),
+      }]);
+    } else {
+      const continued = {
+        ...intent,
+        cursor: page.next_cursor,
+        position,
+        failure_count: 0,
+        retry_at_ms: this.now().getTime() + RECONCILE_RETRY_MS,
+        updated_at: this.now().toISOString(),
+      };
+      entries.push(
+        [planIntentKey(intent.account_id), continued],
+        [planDueKey(continued), intent.account_id],
+      );
+    }
+    await this.atomic(entries, deletes.filter(Boolean));
+    await this.scheduleNextAlarm().catch(() => {});
+    return {
+      changed: changed.length,
+      complete: finalPage,
+      registry_revision: (await this.ensureMeta()).registry_revision,
+    };
+  }
+
+  async reconcilePlan(input) {
+    const accountID = validateAccountID(input?.account_id);
+    if (!["restrict_only", "complete"].includes(input?.mode) ||
+        typeof input?.feature_enabled !== "boolean" ||
+        !Object.hasOwn(input ?? {}, "domain_limit") ||
+        !validDomainLimit(input.domain_limit)) {
+      fail("invalid custom domain plan reconciliation", 400);
+    }
+    const planFence = validatePlanFence(input);
+    const recoveryProvided = input.recover_pending_revision !== undefined ||
+      input.recover_pending_snapshot_hash !== undefined;
+    if (recoveryProvided && !validPlanRevisionFence(
+      input.recover_pending_revision,
+      input.recover_pending_snapshot_hash,
+    )) {
+      fail("invalid recovery plan fence", 400);
+    }
+    const [committed, pending] = await Promise.all([
+      this.storage.get(planFenceKey(accountID)),
+      this.storage.get(planIntentKey(accountID)),
+    ]);
+    const committedRelation = committed
+      ? comparePlanRevision(planFence.revision, committed.committed_revision)
+      : 1;
+    if (committedRelation === 0 &&
+        planFence.snapshot_hash !== committed.committed_snapshot_hash) {
+      fail("plan revision conflicts with custom domain policy fence", 409);
+    }
+    if (committedRelation === 0 &&
+        (input.feature_enabled !== committed.feature_enabled ||
+          input.domain_limit !== committed.domain_limit)) {
+      fail("plan entitlement conflicts with custom domain policy fence", 409);
+    }
+    if (input.activation_enabled !== true && !pending &&
+        committedRelation !== 0 &&
+        !await this.accountHasActiveRequest(accountID)) {
+      return json({
+        schema_version: SCHEMA_VERSION,
+        account_id: accountID,
+        mode: input.mode,
+        pending: false,
+        stale: false,
+        complete: true,
+        changed: 0,
+        no_op: true,
+      });
+    }
+    const recoversPending = recoveryProvided && pending &&
+      pending.plan_revision === input.recover_pending_revision &&
+      pending.plan_snapshot_hash === input.recover_pending_snapshot_hash;
+
+    if (input.mode === "restrict_only") {
+      if (committedRelation <= 0) {
+        return json({
+          schema_version: SCHEMA_VERSION,
+          account_id: accountID,
+          mode: input.mode,
+          pending: false,
+          stale: true,
+          complete: true,
+        });
+      }
+      if (pending) {
+        const relation = comparePlanRevision(planFence.revision, pending.plan_revision);
+        if (relation === 0 &&
+            planFence.snapshot_hash !== pending.plan_snapshot_hash) {
+          fail("plan revision conflicts with pending custom domain policy", 409);
+        }
+        if (relation === 0 &&
+            (input.feature_enabled !== pending.feature_enabled ||
+              input.domain_limit !== pending.domain_limit)) {
+          fail("plan entitlement conflicts with pending custom domain policy", 409);
+        }
+        if (relation <= 0) {
+          return json({
+            schema_version: SCHEMA_VERSION,
+            account_id: accountID,
+            mode: input.mode,
+            pending: false,
+            stale: true,
+            complete: true,
+          });
+        }
+      }
+      const intent = this.planIntent({
+        ...input,
+        plan_revision: planFence.revision,
+        plan_snapshot_hash: planFence.snapshot_hash,
+      }, "awaiting_cell");
+      await this.persistPlanIntent(intent, pending);
+      return json({
+        schema_version: SCHEMA_VERSION,
+        account_id: accountID,
+        mode: input.mode,
+        pending: true,
+        stale: false,
+        complete: true,
+      });
+    }
+
+    if (committedRelation < 0 && !recoversPending) {
+      return json({
+        schema_version: SCHEMA_VERSION,
+        account_id: accountID,
+        mode: input.mode,
+        stale: true,
+        complete: true,
+        changed: 0,
+      });
+    }
+    if (pending && !recoversPending) {
+      const relation = comparePlanRevision(planFence.revision, pending.plan_revision);
+      if (relation === 0 &&
+          planFence.snapshot_hash !== pending.plan_snapshot_hash) {
+        fail("plan revision conflicts with pending custom domain policy", 409);
+      }
+      if (relation === 0 &&
+          (input.feature_enabled !== pending.feature_enabled ||
+            input.domain_limit !== pending.domain_limit)) {
+        fail("plan entitlement conflicts with pending custom domain policy", 409);
+      }
+      if (relation < 0) {
+        return json({
+          schema_version: SCHEMA_VERSION,
+          account_id: accountID,
+          mode: input.mode,
+          stale: true,
+          complete: true,
+          changed: 0,
+        });
+      }
+      if (relation === 0 && pending.state === "cell_committed") {
+        const result = await this.applyPlanIntent(pending);
+        return json({
+          schema_version: SCHEMA_VERSION,
+          account_id: accountID,
+          mode: input.mode,
+          stale: false,
+          ...result,
+        });
+      }
+    }
+    if (committedRelation === 0 && !pending && !recoversPending) {
+      return json({
+        schema_version: SCHEMA_VERSION,
+        account_id: accountID,
+        mode: input.mode,
+        stale: false,
+        complete: true,
+        changed: 0,
+        registry_revision: (await this.ensureMeta()).registry_revision,
+      });
+    }
+    const intent = this.planIntent({
+      ...input,
+      plan_revision: planFence.revision,
+      plan_snapshot_hash: planFence.snapshot_hash,
+    }, "cell_committed");
+    // Completing the exact restrict-only fence advances one durable intent;
+    // it does not create a second intent with a different identity. Keeping
+    // created_at stable also makes the journal stream self-recoverable.
+    if (pending && pending.plan_revision === intent.plan_revision &&
+        pending.plan_snapshot_hash === intent.plan_snapshot_hash) {
+      intent.created_at = pending.created_at;
+    }
+    await this.persistPlanIntent(intent, pending);
+    const result = await this.applyPlanIntent(intent);
+    return json({
+      schema_version: SCHEMA_VERSION,
+      account_id: accountID,
+      mode: input.mode,
+      stale: false,
+      ...result,
+    });
+  }
+
+  async reconcileDuePlanIntents() {
+    const now = this.now().getTime();
+    const listed = await this.storage.list({
+      prefix: "plan-due:",
+      limit: ALARM_BATCH_LIMIT,
+    });
+    for (const [due, accountID] of listed) {
+      const retryAt = Number(due.split(":", 3)[1]);
+      if (!Number.isFinite(retryAt) || retryAt > now) break;
+      const intent = await this.storage.get(planIntentKey(accountID));
+      if (!intent || planDueKey(intent) !== due) {
+        await this.storage.delete(due);
+        continue;
+      }
+      if (intent.state !== "cell_committed") continue;
+      try {
+        await this.applyPlanIntent(intent);
+      } catch {
+        const failureCount = (intent.failure_count ?? 0) + 1;
+        const retry = {
+          ...intent,
+          failure_count: failureCount,
+          retry_at_ms: this.now().getTime() +
+            reconcileRetryDelay(failureCount),
+          updated_at: this.now().toISOString(),
+        };
+        await this.atomic(
+          [[planIntentKey(accountID), retry], [planDueKey(retry), accountID]],
+          [due],
+        );
+      }
+    }
+  }
+
+  lifecycleOrder(action) {
+    return action === "suspend" ? 1 : action === "republish" ? 2 :
+      action === "retire" ? 3 : 0;
+  }
+
+  lifecycleRelation(left, right) {
+    if (!right) return 1;
+    if (left.epoch !== right.epoch) return left.epoch < right.epoch ? -1 : 1;
+    if (left.operation_id !== right.operation_id) {
+      fail("account lifecycle epoch conflicts with custom domain fence", 409);
+    }
+    const leftOrder = this.lifecycleOrder(left.action);
+    const rightOrder = this.lifecycleOrder(right.action);
+    return leftOrder === rightOrder ? 0 : leftOrder < rightOrder ? -1 : 1;
+  }
+
+  async persistLifecycleIntent(intent, previous = null) {
+    await this.ensureMeta();
+    await this.atomic(
+      [
+        [lifecycleIntentKey(intent.account_id), intent],
+        [lifecycleDueKey(intent), intent.account_id],
+      ],
+      previous && lifecycleDueKey(previous) !== lifecycleDueKey(intent)
+        ? [lifecycleDueKey(previous)].filter(Boolean)
+        : [],
+    );
+    await this.scheduleNextAlarm().catch(() => {});
+    return intent;
+  }
+
+  async applyLifecycleIntent(intent) {
+    const page = await this.activeRequestPage(intent.account_id, intent.cursor);
+    const changedAt = this.now().toISOString();
+    const entries = [];
+    const deletes = [lifecycleDueKey(intent)].filter(Boolean);
+    const changed = [];
+    let pendingRetired = 0;
+    let allocatedRetired = 0;
+    for (const { index_key: indexKey, request } of page.requests) {
+      if (!["pending_verification", "verified"].includes(request.state)) {
+        deletes.push(indexKey);
+        continue;
+      }
+      const nextFence = {
+        operation_id: intent.operation_id,
+        epoch: intent.epoch,
+        action: intent.action,
+      };
+      let desired;
+      if (intent.action === "retire") {
+        desired = {
+          ...request,
+          state: "retired",
+          state_revision: (request.state_revision ?? 1) + 1,
+          lifecycle_suspended: true,
+          lifecycle_fence: nextFence,
+          plan_grace_until: null,
+          updated_at: changedAt,
+          retirement: {
+            reason: "account closed",
+            retired_by: "account-lifecycle",
+            retired_at: changedAt,
+          },
+        };
+        allocatedRetired += 1;
+        if (request.state === "pending_verification") pendingRetired += 1;
+        deletes.push(indexKey);
+        for (const key of [
+          domainPendingKey(request),
+          challengeExpiryDueKey(request),
+          verificationDueKey(request),
+          graceDueKey(request),
+        ]) if (key) deletes.push(key);
+        if (request.state === "verified") {
+          const allocation = await this.storage.get(
+            domainStorageKey(request.domain),
+          );
+          if (!allocation || allocation.source_request_id !== request.id ||
+              allocation.state !== "allocated") {
+            fail("custom inbound domain allocation is invalid", 503);
+          }
+          entries.push([domainStorageKey(request.domain), {
+            ...allocation,
+            state: "retired",
+            allocation_revision: (allocation.allocation_revision ?? 1) + 1,
+            updated_at: desired.updated_at,
+            retirement: { ...desired.retirement },
+          }]);
+        }
+      } else {
+        const lifecycleSuspended = intent.action === "suspend";
+        const sameFence = fingerprint(request.lifecycle_fence ?? null) ===
+          fingerprint(nextFence);
+        if (lifecycleSuspended === (request.lifecycle_suspended === true) &&
+            sameFence) {
+          continue;
+        }
+        desired = {
+          ...request,
+          lifecycle_suspended: lifecycleSuspended,
+          lifecycle_fence: nextFence,
+          state_revision: (request.state_revision ?? 1) + 1,
+          updated_at: changedAt,
+        };
+        const verificationDue = verificationDueKey(desired);
+        if (lifecycleSuspended || desired.plan_suspended === true) {
+          if (verificationDue) deletes.push(verificationDue);
+        } else if (verificationDue) {
+          entries.push([verificationDue, desired.id]);
+        }
+      }
+      changed.push({ previous: request, next: desired });
+      entries.push([requestStorageKey(request.id), desired]);
+      const legacyMirror = await this.storage.get(
+        domainStorageKey(request.domain),
+      );
+      if (assertLegacyDomainMirror(legacyMirror, request)) {
+        entries.push([domainStorageKey(request.domain), desired]);
+      }
+    }
+    if (intent.action === "retire" && allocatedRetired > 0) {
+      const usage = await this.accountUsage(intent.account_id);
+      if (usage.allocated_domains < allocatedRetired ||
+          usage.open_requests < pendingRetired) {
+        fail("custom inbound domain account usage is invalid", 503);
+      }
+      entries.push([usageKey(intent.account_id), {
+        ...usage,
+        allocated_domains: usage.allocated_domains - allocatedRetired,
+        open_requests: usage.open_requests - pendingRetired,
+        updated_at: changedAt,
+      }]);
+    }
+    if (changed.length > 0) {
+      const mutation = await this.mutation(
+        { kind: "system", id: "account-lifecycle" },
+        `custom_domain.lifecycle_${intent.action}`,
+        intent.account_id,
+        {
+          account_id: intent.account_id,
+          operation_id: intent.operation_id,
+          epoch: intent.epoch,
+          changed: changed.length,
+          page_size: page.requests.length,
+        },
+      );
+      entries.push([META_KEY, mutation.meta], [mutation.audit_key, mutation.audit]);
+    }
+    const complete = page.next_cursor === null;
+    if (complete) {
+      deletes.push(lifecycleIntentKey(intent.account_id));
+      entries.push([lifecycleFenceKey(intent.account_id), {
+        account_id: intent.account_id,
+        operation_id: intent.operation_id,
+        epoch: intent.epoch,
+        action: intent.action,
+        completed_at: this.now().toISOString(),
+      }]);
+    } else {
+      const continued = {
+        ...intent,
+        cursor: page.next_cursor,
+        failure_count: 0,
+        retry_at_ms: this.now().getTime() + RECONCILE_RETRY_MS,
+        updated_at: this.now().toISOString(),
+      };
+      entries.push(
+        [lifecycleIntentKey(intent.account_id), continued],
+        [lifecycleDueKey(continued), intent.account_id],
+      );
+    }
+    await this.atomic(entries, deletes);
+    await this.scheduleNextAlarm().catch(() => {});
+    return {
+      schema_version: SCHEMA_VERSION,
+      account_id: intent.account_id,
+      operation_id: intent.operation_id,
+      epoch: intent.epoch,
+      action: intent.action,
+      changed: changed.length,
+      complete,
+    };
+  }
+
+  async reconcileAccountLifecycle(input) {
+    const accountID = validateAccountID(input?.account_id);
+    if (!IDEMPOTENCY_KEY_PATTERN.test(input?.operation_id ?? "") ||
+        !Number.isSafeInteger(input?.epoch) || input.epoch < 0 ||
+        !["suspend", "republish", "retire"].includes(input?.action)) {
+      fail("invalid custom domain account lifecycle reconciliation", 400);
+    }
+    const requested = {
+      account_id: accountID,
+      operation_id: input.operation_id,
+      epoch: input.epoch,
+      action: input.action,
+    };
+    const [fence, existingIntent] = await Promise.all([
+      this.storage.get(lifecycleFenceKey(accountID)),
+      this.storage.get(lifecycleIntentKey(accountID)),
+    ]);
+    const fenceRelation = this.lifecycleRelation(requested, fence);
+    if (fenceRelation < 0) {
+      fail("custom domain account lifecycle fence is stale", 409);
+    }
+    if (fenceRelation === 0) {
+      return json({
+        schema_version: SCHEMA_VERSION,
+        ...requested,
+        changed: 0,
+        complete: true,
+        replayed: true,
+      });
+    }
+    if (input.activation_enabled !== true && !existingIntent &&
+        !await this.accountHasActiveRequest(accountID)) {
+      return json({
+        schema_version: SCHEMA_VERSION,
+        ...requested,
+        changed: 0,
+        complete: true,
+        no_op: true,
+      });
+    }
+    let intent = existingIntent;
+    if (intent) {
+      const relation = this.lifecycleRelation(requested, intent);
+      if (relation < 0) {
+        fail("custom domain account lifecycle intent is stale", 409);
+      }
+      if (relation > 0) {
+        fail("earlier custom domain lifecycle work is still converging", 409);
+      }
+    } else {
+      const now = this.now();
+      intent = {
+        ...requested,
+        cursor: null,
+        failure_count: 0,
+        retry_at_ms: now.getTime(),
+        created_at: now.toISOString(),
+        updated_at: now.toISOString(),
+      };
+      await this.persistLifecycleIntent(intent);
+    }
+    return json(await this.applyLifecycleIntent(intent));
+  }
+
+  async reconcileDueLifecycles() {
+    const now = this.now().getTime();
+    const listed = await this.storage.list({
+      prefix: "lifecycle-due:",
+      limit: ALARM_BATCH_LIMIT,
+    });
+    for (const [due, accountID] of listed) {
+      const retryAt = Number(due.split(":", 3)[1]);
+      if (!Number.isFinite(retryAt) || retryAt > now) break;
+      const intent = await this.storage.get(lifecycleIntentKey(accountID));
+      if (!intent || lifecycleDueKey(intent) !== due) {
+        await this.storage.delete(due);
+        continue;
+      }
+      try {
+        await this.applyLifecycleIntent(intent);
+      } catch {
+        const failureCount = (intent.failure_count ?? 0) + 1;
+        const retry = {
+          ...intent,
+          failure_count: failureCount,
+          retry_at_ms: this.now().getTime() +
+            reconcileRetryDelay(failureCount),
+          updated_at: this.now().toISOString(),
+        };
+        await this.atomic(
+          [
+            [lifecycleIntentKey(accountID), retry],
+            [lifecycleDueKey(retry), accountID],
+          ],
+          [due],
+        );
+      }
+    }
+  }
+
+  async applyVerificationObservation(current, result, options = {}) {
+    const checkedAt = this.now().toISOString();
+    if (current.state === "pending_verification" &&
+        Date.parse(challengeExpiresAt(current) ?? "") <=
+          Date.parse(checkedAt)) {
+      const expired = await this.expirePendingRequest(current, options);
+      return { ...expired, matched: false, expired: true };
+    }
+    const matched = options.temporary !== true &&
+      agentEmailDomainTXTMatches(
+        result,
+        current.ownership_challenge.record_value,
+      );
+    let verificationState;
+    if (options.temporary === true) {
+      verificationState = current.state === "verified"
+        ? current.ownership_verification?.state ?? "verified"
+        : "unverified";
+    } else {
+      verificationState = matched
+        ? "verified"
+        : current.state === "verified" ? "stale" : "missing";
+    }
+    const previousVerification = current.ownership_verification;
+    const consecutiveFailures = matched
+      ? 0
+      : (previousVerification?.consecutive_failures ?? 0) + 1;
+    const nextCheckAt = new Date(
+      Date.parse(checkedAt) + (options.temporary === true
+        ? VERIFICATION_RESOLVER_RETRY_MS
+        : matched ? VERIFICATION_INTERVAL_MS : VERIFICATION_RETRY_MS),
+    ).toISOString();
+    const verification = {
+      state: verificationState,
+      last_result: options.temporary === true
+        ? "resolver_error"
+        : matched ? "present" : "absent",
+      first_verified_at: matched
+        ? previousVerification?.first_verified_at ?? checkedAt
+        : previousVerification?.first_verified_at ?? null,
+      last_checked_at: checkedAt,
+      last_verified_at: matched
+        ? checkedAt
+        : previousVerification?.last_verified_at ?? null,
+      next_check_at: nextCheckAt,
+      rrset_sha256: options.temporary === true
+        ? previousVerification?.rrset_sha256 ?? null
+        : result.rrset_sha256,
+      dnssec_authenticated: options.temporary === true
+        ? previousVerification?.dnssec_authenticated ?? false
+        : result.dnssec_authenticated === true,
+      minimum_ttl_seconds: options.temporary === true
+        ? previousVerification?.minimum_ttl_seconds ?? null
+        : result.minimum_ttl_seconds,
+      consecutive_failures: consecutiveFailures,
+    };
+    const newlyVerified = matched && current.state === "pending_verification";
+    const desired = {
+      ...current,
+      state: newlyVerified ? "verified" : current.state,
+      state_revision: (current.state_revision ?? 1) + 1,
+      ownership_verification: verification,
+      updated_at: checkedAt,
+    };
+    const entries = [];
+    const deletes = [];
+    const previousDue = verificationDueKey(current);
+    if (previousDue) deletes.push(previousDue);
+    entries.push([verificationDueKey(desired), desired.id]);
+    if (newlyVerified) {
+      const existing = await this.storage.get(domainStorageKey(current.domain));
+      const legacyMirror = assertLegacyDomainMirror(existing, current);
+      if (existing && !legacyMirror &&
+          existing.source_request_id !== current.id) {
+        fail("domain was allocated by another verified request", 409,
+          "domain_unavailable");
+      }
+      const allocation = !existing || legacyMirror ? {
+        schema_version: "witself.agent-email-domain-allocation.v1",
+        domain: current.domain,
+        account_id: current.account_id,
+        source_request_id: current.id,
+        generation: 1,
+        allocation_revision: 1,
+        state: "allocated",
+        allocated_at: checkedAt,
+        updated_at: checkedAt,
+        ownership_proof: null,
+        retirement: null,
+      } : existing;
+      entries.push([domainStorageKey(current.domain), {
+        ...allocation,
+        allocation_revision: existing && !legacyMirror
+          ? (existing.allocation_revision ?? 1) + 1
+          : allocation.allocation_revision,
+        updated_at: checkedAt,
+        ownership_proof: {
+          verified_at: checkedAt,
+          rrset_sha256: result.rrset_sha256,
+          dnssec_authenticated: result.dnssec_authenticated === true,
+        },
+      }]);
+      const usage = await this.accountUsage(current.account_id);
+      if (usage.open_requests < 1) {
+        fail("custom inbound domain account usage is invalid", 503);
+      }
+      entries.push([usageKey(current.account_id), {
+        ...usage,
+        open_requests: usage.open_requests - 1,
+        updated_at: checkedAt,
+      }]);
+      for (const key of [
+        domainPendingKey(current),
+        challengeExpiryDueKey(current),
+      ]) if (key) deletes.push(key);
+    } else if (current.state === "pending_verification") {
+      const legacyMirror = await this.storage.get(
+        domainStorageKey(current.domain),
+      );
+      if (assertLegacyDomainMirror(legacyMirror, current)) {
+        entries.push([domainStorageKey(current.domain), desired]);
+      }
+    } else if (matched && current.state === "verified") {
+      const allocation = await this.storage.get(domainStorageKey(current.domain));
+      if (!allocation || allocation.source_request_id !== current.id ||
+          allocation.state !== "allocated") {
+        fail("custom inbound domain allocation is invalid", 503);
+      }
+      entries.push([domainStorageKey(current.domain), {
+        ...allocation,
+        allocation_revision: (allocation.allocation_revision ?? 1) + 1,
+        updated_at: checkedAt,
+        ownership_proof: {
+          verified_at: checkedAt,
+          rrset_sha256: result.rrset_sha256,
+          dnssec_authenticated: result.dnssec_authenticated === true,
+        },
+      }]);
+    }
+    const action = options.temporary === true
+      ? "custom_domain.verification_deferred"
+      : matched
+      ? newlyVerified
+        ? "custom_domain.verified"
+        : "custom_domain.reverified"
+      : "custom_domain.verification_missing";
+    const mutation = await this.mutation(
+      options.actor ?? { kind: "system", id: "ownership-verifier" },
+      action,
+      current.domain,
+      {
+        account_id: current.account_id,
+        request_id: current.id,
+        state: verification.state,
+        rrset_sha256: verification.rrset_sha256,
+      },
+      checkedAt,
+    );
+    entries.push(
+      [META_KEY, mutation.meta],
+      [mutation.audit_key, mutation.audit],
+      [requestStorageKey(current.id), desired],
+    );
+    const body = matched ? {
+      schema_version: SCHEMA_VERSION,
+      request: publicRequest(desired),
+      matched: true,
+    } : {
+      schema_version: SCHEMA_VERSION,
+      error: "custom domain ownership challenge was not found",
+      code: "ownership_challenge_not_found",
+      request: publicRequest(desired),
+    };
+    const status = matched ? 200 : 409;
+    if (options.idempotency_scope && options.idempotency_key) {
+      entries.push([idempotencyStorageKey(
+        options.idempotency_scope,
+        options.idempotency_key,
+      ), {
+        fingerprint: options.fingerprint,
+        status,
+        body,
+      }]);
+    }
+    await this.atomic(entries, deletes);
+    await this.scheduleNextAlarm().catch(() => {});
+    return { body, matched, status };
+  }
+
+  async deferContendedVerification(current, previousDue, options = {}) {
+    const checkedAt = this.now().toISOString();
+    const expiresAt = challengeExpiresAt(current);
+    if (!expiresAt) {
+      fail("custom inbound domain ownership challenge is invalid", 503);
+    }
+    const previous = current.ownership_verification;
+    const desired = {
+      ...current,
+      state_revision: (current.state_revision ?? 1) + 1,
+      updated_at: checkedAt,
+      ownership_verification: {
+        state: "conflict",
+        last_result: "domain_unavailable",
+        first_verified_at: previous?.first_verified_at ?? null,
+        last_checked_at: checkedAt,
+        last_verified_at: previous?.last_verified_at ?? null,
+        next_check_at: expiresAt,
+        rrset_sha256: previous?.rrset_sha256 ?? null,
+        dnssec_authenticated:
+          previous?.dnssec_authenticated === true,
+        minimum_ttl_seconds: previous?.minimum_ttl_seconds ?? null,
+        consecutive_failures: (previous?.consecutive_failures ?? 0) + 1,
+      },
+    };
+    const mutation = await this.mutation(
+      options.actor ?? { kind: "system", id: "ownership-verifier" },
+      "custom_domain.verification_conflict",
+      current.domain,
+      {
+        account_id: current.account_id,
+        request_id: current.id,
+        state: "conflict",
+      },
+      checkedAt,
+    );
+    const body = {
+      schema_version: SCHEMA_VERSION,
+      error: "domain was allocated by another verified request",
+      code: "domain_unavailable",
+      request: publicRequest(desired),
+    };
+    const entries = [
+      [META_KEY, mutation.meta],
+      [mutation.audit_key, mutation.audit],
+      [requestStorageKey(current.id), desired],
+      [verificationDueKey(desired), desired.id],
+    ];
+    if (options.idempotency_scope && options.idempotency_key) {
+      entries.push([idempotencyStorageKey(
+        options.idempotency_scope,
+        options.idempotency_key,
+      ), {
+        fingerprint: options.fingerprint,
+        status: 409,
+        body,
+      }]);
+    }
+    await this.atomic(entries, [previousDue].filter(Boolean));
+    await this.scheduleNextAlarm().catch(() => {});
+    return { body, matched: false, status: 409, conflict: true };
+  }
+
+  async deferVerificationForPolicy(current, previousDue) {
+    const checkedAt = this.now().toISOString();
+    const previous = current.ownership_verification;
+    const desired = {
+      ...current,
+      state_revision: (current.state_revision ?? 1) + 1,
+      updated_at: checkedAt,
+      ownership_verification: {
+        state: previous?.state ?? "unverified",
+        last_result: "policy_converging",
+        first_verified_at: previous?.first_verified_at ?? null,
+        last_checked_at: checkedAt,
+        last_verified_at: previous?.last_verified_at ?? null,
+        next_check_at: new Date(
+          Date.parse(checkedAt) + VERIFICATION_RESOLVER_RETRY_MS,
+        ).toISOString(),
+        rrset_sha256: previous?.rrset_sha256 ?? null,
+        dnssec_authenticated:
+          previous?.dnssec_authenticated === true,
+        minimum_ttl_seconds: previous?.minimum_ttl_seconds ?? null,
+        consecutive_failures: previous?.consecutive_failures ?? 0,
+      },
+    };
+    const mutation = await this.mutation(
+      { kind: "system", id: "ownership-verifier" },
+      "custom_domain.verification_deferred",
+      current.domain,
+      {
+        account_id: current.account_id,
+        request_id: current.id,
+        state: desired.ownership_verification.state,
+        reason: "account_policy_converging",
+      },
+      checkedAt,
+    );
+    const entries = [
+      [META_KEY, mutation.meta],
+      [mutation.audit_key, mutation.audit],
+      [requestStorageKey(current.id), desired],
+      [verificationDueKey(desired), desired.id],
+    ];
+    const legacyMirror = await this.storage.get(
+      domainStorageKey(current.domain),
+    );
+    if (assertLegacyDomainMirror(legacyMirror, current)) {
+      entries.push([domainStorageKey(current.domain), desired]);
+    }
+    await this.atomic(entries, [previousDue].filter(Boolean));
+    await this.scheduleNextAlarm().catch(() => {});
+  }
+
+  async verifyRequest(input) {
+    const actor = validateActor(input?.actor, "platform_admin");
+    const id = validateRequestID(input?.request_id);
+    const key = validateIdempotencyKey(input?.idempotency_key);
+    const scope = `request-verify:${id}`;
+    const fp = fingerprint(["request.verify", id]);
+    const replay = await this.idempotentReplay(scope, key, fp);
+    if (replay) return replay;
+    if (input?.verification_enabled !== true ||
+        !agentEmailCustomDomainVerificationEnabled(this.env)) {
+      fail("custom domain ownership verification is not enabled", 409,
+        "custom_domain_verification_disabled");
+    }
+    const current = await this.storage.get(requestStorageKey(id));
+    if (!current) fail("custom inbound domain request not found", 404);
+    if (!["pending_verification", "verified"].includes(current.state)) {
+      fail("custom inbound domain request cannot be verified", 409);
+    }
+    if (current.plan_suspended === true ||
+        current.lifecycle_suspended === true) {
+      fail("custom inbound domain verification is suspended by account policy", 409,
+        "domain_verification_suspended");
+    }
+    if (current.state === "pending_verification" &&
+        Date.parse(challengeExpiresAt(current) ?? "") <=
+          this.now().getTime()) {
+      const expired = await this.expirePendingRequest(current, {
+        idempotency_scope: scope,
+        idempotency_key: key,
+        fingerprint: fp,
+      });
+      return json(expired.body, expired.status);
+    }
+    if (await this.accountPolicyConverging(current.account_id)) {
+      fail("custom inbound domain account policy is still converging", 409,
+        "account_policy_converging");
+    }
+    let result;
+    try {
+      result = await this.resolveTXT(current.ownership_challenge.record_name);
+    } catch (error) {
+      if (error instanceof AgentEmailDomainVerificationError && error.temporary) {
+        if (current.state === "pending_verification" &&
+            Date.parse(challengeExpiresAt(current) ?? "") <=
+              this.now().getTime()) {
+          const expired = await this.expirePendingRequest(current, {
+            idempotency_scope: scope,
+            idempotency_key: key,
+            fingerprint: fp,
+          });
+          return json(expired.body, expired.status);
+        }
+        fail(error.message, 503, error.code);
+      }
+      throw error;
+    }
+    let observed;
+    try {
+      observed = await this.applyVerificationObservation(current, result, {
+        actor,
+        idempotency_scope: scope,
+        idempotency_key: key,
+        fingerprint: fp,
+      });
+    } catch (error) {
+      if (!(error instanceof DomainRegistryError) ||
+          error.code !== "domain_unavailable") throw error;
+      observed = await this.deferContendedVerification(
+        current,
+        verificationDueKey(current),
+        {
+          actor,
+          idempotency_scope: scope,
+          idempotency_key: key,
+          fingerprint: fp,
+        },
+      );
+    }
+    return json(observed.body, observed.status);
+  }
+
+  async reconcileVerification(input) {
+    if (input?.verification_enabled !== true ||
+        !agentEmailCustomDomainVerificationEnabled(this.env)) {
+      fail("custom domain ownership verification is not enabled", 409,
+        "custom_domain_verification_disabled");
+    }
+    return json({
+      schema_version: SCHEMA_VERSION,
+      ...await this.reconcileDueVerifications(VERIFICATION_RECONCILE_LIMIT),
+    });
+  }
+
+  async reconcileDueVerifications(limit) {
+    const now = this.now().getTime();
+    const listed = await this.storage.list({
+      prefix: "verification-due:",
+      limit,
+    });
+    let checked = 0;
+    let matched = 0;
+    for (const [due, requestID] of listed) {
+      const dueAt = Number(due.split(":", 3)[1]);
+      if (!Number.isFinite(dueAt) || dueAt > now) break;
+      const current = await this.storage.get(requestStorageKey(requestID));
+      if (!current || verificationDueKey(current) !== due ||
+          !["pending_verification", "verified"].includes(current.state)) {
+        await this.storage.delete(due);
+        continue;
+      }
+      if (current.state === "pending_verification" &&
+          Date.parse(challengeExpiresAt(current) ?? "") <= now) {
+        await this.expirePendingRequest(current);
+        continue;
+      }
+      if (current.plan_suspended === true ||
+          current.lifecycle_suspended === true) {
+        await this.storage.delete(due);
+        continue;
+      }
+      if (await this.accountPolicyConverging(current.account_id)) {
+        await this.deferVerificationForPolicy(current, due);
+        checked += 1;
+        continue;
+      }
+      try {
+        const result = await this.resolveTXT(
+          current.ownership_challenge.record_name,
+        );
+        const observed = await this.applyVerificationObservation(current, result);
+        matched += observed.matched ? 1 : 0;
+      } catch (error) {
+        if (error instanceof DomainRegistryError &&
+            error.code === "domain_unavailable") {
+          // Another contender already proved the same name. The permanent
+          // allocation cannot change hands, so retain one durable conflict
+          // observation until the bounded challenge expiry releases capacity.
+          if (current.state === "pending_verification" &&
+              Date.parse(challengeExpiresAt(current) ?? "") <=
+                this.now().getTime()) {
+            await this.expirePendingRequest(current);
+          } else {
+            await this.deferContendedVerification(current, due);
+          }
+          checked += 1;
+          continue;
+        }
+        if (!(error instanceof AgentEmailDomainVerificationError) ||
+            !error.temporary) throw error;
+        await this.applyVerificationObservation(current, {}, { temporary: true });
+      }
+      checked += 1;
+    }
+    return { checked, matched };
+  }
+
+  async reconcileDueGrace() {
+    const now = this.now().getTime();
+    const listed = await this.storage.list({
+      prefix: "plan-grace-due:",
+      limit: ALARM_BATCH_LIMIT,
+    });
+    for (const [due, requestID] of listed) {
+      const dueAt = Number(due.split(":", 3)[1]);
+      if (!Number.isFinite(dueAt) || dueAt > now) break;
+      const current = await this.storage.get(requestStorageKey(requestID));
+      if (!current || graceDueKey(current) !== due ||
+          current.state !== "verified") {
+        await this.storage.delete(due);
+        continue;
+      }
+      const mutation = await this.mutation(
+        { kind: "system", id: "plan-lifecycle" },
+        "custom_domain.plan_grace_expired",
+        current.domain,
+        { account_id: current.account_id, request_id: current.id },
+      );
+      const updated = {
+        ...current,
+        plan_suspended: true,
+        plan_grace_until: null,
+        state_revision: (current.state_revision ?? 1) + 1,
+        updated_at: mutation.now,
+      };
+      await this.atomic([
+        [META_KEY, mutation.meta],
+        [mutation.audit_key, mutation.audit],
+        [requestStorageKey(current.id), updated],
+      ], [due, verificationDueKey(current)].filter(Boolean));
+    }
+  }
+
+  async expirePendingRequest(current, options = {}) {
+    if (current.state !== "pending_verification") return false;
+    const mutation = await this.mutation(
+      { kind: "system", id: "challenge-expiry" },
+      "custom_domain.expired",
+      current.domain,
+      { account_id: current.account_id, request_id: current.id },
+    );
+    const updated = {
+      ...current,
+      state: "expired",
+      state_revision: (current.state_revision ?? 1) + 1,
+      updated_at: mutation.now,
+      expiration: {
+        expired_at: mutation.now,
+        reason: "ownership challenge expired",
+      },
+    };
+    const usage = await this.accountUsage(current.account_id);
+    if (usage.open_requests < 1 || usage.allocated_domains < 1) {
+      fail("custom inbound domain account usage is invalid", 503);
+    }
+    const entries = [
+      [META_KEY, mutation.meta],
+      [mutation.audit_key, mutation.audit],
+      [requestStorageKey(current.id), updated],
+      [usageKey(current.account_id), {
+        ...usage,
+        open_requests: usage.open_requests - 1,
+        allocated_domains: usage.allocated_domains - 1,
+        updated_at: mutation.now,
+      }],
+    ];
+    entries.push(...await this.capacityReleaseRebalanceEntries(current, usage));
+    const legacyMirror = await this.storage.get(
+      domainStorageKey(current.domain),
+    );
+    if (assertLegacyDomainMirror(legacyMirror, current)) {
+      entries.push([domainStorageKey(current.domain), updated]);
+    }
+    const body = {
+      schema_version: SCHEMA_VERSION,
+      error: "custom inbound domain ownership challenge has expired",
+      code: "ownership_challenge_expired",
+      request: publicRequest(updated),
+    };
+    if (options.idempotency_scope && options.idempotency_key) {
+      entries.push([idempotencyStorageKey(
+        options.idempotency_scope,
+        options.idempotency_key,
+      ), {
+        fingerprint: options.fingerprint,
+        status: 409,
+        body,
+      }]);
+    }
+    await this.atomic(entries, [
+      accountDomainKey(current),
+      domainPendingKey(current),
+      challengeExpiryDueKey(current),
+      verificationDueKey(current),
+      graceDueKey(current),
+    ].filter(Boolean));
+    await this.scheduleNextAlarm().catch(() => {});
+    return { body, status: 409, expired: true };
+  }
+
+  async reconcileDueChallengeExpiries() {
+    const now = this.now().getTime();
+    const listed = await this.storage.list({
+      prefix: "challenge-expiry-due:",
+      limit: ALARM_BATCH_LIMIT,
+    });
+    for (const [due, requestID] of listed) {
+      const dueAt = Number(due.split(":", 3)[1]);
+      if (!Number.isFinite(dueAt) || dueAt > now) break;
+      const current = await this.storage.get(requestStorageKey(requestID));
+      if (!current || challengeExpiryDueKey(current) !== due ||
+          current.state !== "pending_verification") {
+        await this.storage.delete(due);
+        continue;
+      }
+      await this.expirePendingRequest(current);
+    }
   }
 
   async listAudit(input) {
@@ -916,8 +2728,18 @@ export class DurableAgentEmailDomainRegistry {
       domain = normalizeAgentEmailCustomDomain(input.domain);
     }
     if (input?.action != null) {
-      if (typeof input.action !== "string" ||
-          !/^custom_domain\.(?:requested|rejected|retired)$/.test(input.action)) {
+      if (typeof input.action !== "string" || !new Set([
+        "custom_domain.requested", "custom_domain.rejected",
+        "custom_domain.retired", "custom_domain.verified",
+        "custom_domain.reverified", "custom_domain.verification_missing",
+        "custom_domain.verification_deferred",
+        "custom_domain.verification_conflict", "custom_domain.expired",
+        "custom_domain.plan_reconciled",
+        "custom_domain.plan_grace_expired",
+        "custom_domain.lifecycle_suspend",
+        "custom_domain.lifecycle_republish",
+        "custom_domain.lifecycle_retire",
+      ]).has(input.action)) {
         fail("audit action filter is invalid", 400);
       }
       action = input.action;
