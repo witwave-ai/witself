@@ -22,6 +22,29 @@ type AgentEmailDomainOwnershipChallenge struct {
 	RecordType  string     `json:"record_type"`
 	RecordValue string     `json:"record_value"`
 	IssuedAt    *time.Time `json:"issued_at"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+}
+
+// AgentEmailDomainOwnershipVerification records bounded DNS observations. A
+// verified request still remains non-deliverable until the independent route
+// projection and delivery gates are introduced.
+type AgentEmailDomainOwnershipVerification struct {
+	State               string     `json:"state"`
+	LastResult          string     `json:"last_result"`
+	FirstVerifiedAt     *time.Time `json:"first_verified_at,omitempty"`
+	LastCheckedAt       *time.Time `json:"last_checked_at,omitempty"`
+	LastVerifiedAt      *time.Time `json:"last_verified_at,omitempty"`
+	NextCheckAt         *time.Time `json:"next_check_at,omitempty"`
+	RRSetSHA256         string     `json:"rrset_sha256,omitempty"`
+	DNSSECAuthenticated bool       `json:"dnssec_authenticated"`
+	MinimumTTLSeconds   *int64     `json:"minimum_ttl_seconds,omitempty"`
+	ConsecutiveFailures int64      `json:"consecutive_failures"`
+}
+
+// AgentEmailDomainExpiration records an unverified challenge that aged out.
+type AgentEmailDomainExpiration struct {
+	ExpiredAt *time.Time `json:"expired_at,omitempty"`
+	Reason    string     `json:"reason,omitempty"`
 }
 
 // AgentEmailDomainDecision records a terminal administrator rejection.
@@ -42,19 +65,26 @@ type AgentEmailDomainRetirement struct {
 // AgentEmailDomainRequest is one account-level custom inbound-domain request
 // in the exact v1 control-plane contract.
 type AgentEmailDomainRequest struct {
-	RequestID            string                              `json:"id"`
-	AccountID            string                              `json:"account_id"`
-	Domain               string                              `json:"domain"`
-	State                string                              `json:"state"`
-	OwnershipChallenge   *AgentEmailDomainOwnershipChallenge `json:"ownership_challenge"`
-	RequestedBy          string                              `json:"requested_by"`
-	RequestedAt          *time.Time                          `json:"requested_at"`
-	UpdatedAt            *time.Time                          `json:"updated_at"`
-	DomainLimitAtRequest *int64                              `json:"domain_limit_at_request"`
-	PlanRevision         int64                               `json:"plan_revision"`
-	PlanSnapshotHash     string                              `json:"plan_snapshot_hash"`
-	Decision             *AgentEmailDomainDecision           `json:"decision,omitempty"`
-	Retirement           *AgentEmailDomainRetirement         `json:"retirement,omitempty"`
+	RequestID             string                                 `json:"id"`
+	AccountID             string                                 `json:"account_id"`
+	Domain                string                                 `json:"domain"`
+	State                 string                                 `json:"state"`
+	OwnershipChallenge    *AgentEmailDomainOwnershipChallenge    `json:"ownership_challenge"`
+	RequestedBy           string                                 `json:"requested_by"`
+	RequestedAt           *time.Time                             `json:"requested_at"`
+	UpdatedAt             *time.Time                             `json:"updated_at"`
+	DomainLimitAtRequest  *int64                                 `json:"domain_limit_at_request"`
+	PlanRevision          int64                                  `json:"plan_revision"`
+	PlanSnapshotHash      string                                 `json:"plan_snapshot_hash"`
+	StateRevision         int64                                  `json:"state_revision"`
+	Availability          string                                 `json:"availability"`
+	PlanSuspended         bool                                   `json:"plan_suspended"`
+	LifecycleSuspended    bool                                   `json:"lifecycle_suspended"`
+	PlanGraceUntil        *time.Time                             `json:"plan_grace_until,omitempty"`
+	OwnershipVerification *AgentEmailDomainOwnershipVerification `json:"ownership_verification,omitempty"`
+	Expiration            *AgentEmailDomainExpiration            `json:"expiration,omitempty"`
+	Decision              *AgentEmailDomainDecision              `json:"decision,omitempty"`
+	Retirement            *AgentEmailDomainRetirement            `json:"retirement,omitempty"`
 }
 
 // AgentEmailDomainRequestPage is one bounded customer or administrator page.
@@ -64,6 +94,7 @@ type AgentEmailDomainRequestPage struct {
 	NextCursor                string                    `json:"next_cursor,omitempty"`
 	TechnicalOpenRequestLimit int                       `json:"technical_open_request_limit,omitempty"`
 	OpenRequests              *int                      `json:"open_requests,omitempty"`
+	AllocatedDomains          *int                      `json:"allocated_domains,omitempty"`
 }
 
 // AgentEmailDomainAuditEvent is one administrator-visible registry lifecycle
@@ -304,6 +335,36 @@ func RetireAdminAgentEmailDomainRequest(
 ) (*AgentEmailDomainRequest, error) {
 	return mutateAdminAgentEmailDomainRequest(ctx, controlPlane, adminToken,
 		requestID, "retire", idempotencyKey, reason)
+}
+
+// VerifyAdminAgentEmailDomainRequest performs one retry-safe exact TXT
+// ownership check. Verification records authority only; it does not activate
+// mail routing or delivery.
+func VerifyAdminAgentEmailDomainRequest(
+	ctx context.Context,
+	controlPlane, adminToken, requestID, idempotencyKey string,
+) (*AgentEmailDomainRequest, error) {
+	requestID, err := agentEmailDomainRequestID(requestID)
+	if err != nil {
+		return nil, err
+	}
+	idempotencyKey = strings.TrimSpace(idempotencyKey)
+	if idempotencyKey == "" {
+		return nil, fmt.Errorf("idempotency key is required")
+	}
+	body, err := json.Marshal(map[string]string{
+		"idempotency_key": idempotencyKey,
+	})
+	if err != nil {
+		return nil, err
+	}
+	url := fmt.Sprintf("%s/%s:verify", agentEmailDomainAdminURL(controlPlane),
+		neturl.PathEscape(requestID))
+	var out agentEmailDomainRequestEnvelope
+	if err := doJSON(ctx, http.MethodPost, url, adminToken, body, &out); err != nil {
+		return nil, err
+	}
+	return &out.Request, nil
 }
 
 // ListAdminAgentEmailDomainAuditPage returns one bounded, newest-first audit

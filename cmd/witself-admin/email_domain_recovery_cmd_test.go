@@ -30,7 +30,8 @@ func TestEmailDomainRecoveryCLIExactRoutesAndCredential(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"schema_version": "witself.agent-email-domain-recovery.v1",
 				"enabled":        true, "required": false, "pending": false,
-				"forked": false,
+				"forked": false, "healthy": true,
+				"remote_head_checked": true, "remote_head_healthy": true,
 			})
 		case "/v1/admin/agent-email-domain-journal:bootstrap",
 			"/v1/admin/agent-email-domain-journal:checkpoint":

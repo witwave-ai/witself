@@ -181,6 +181,38 @@ class ErroringBodyBucket extends Bucket {
   }
 }
 
+test("account lifecycle orders custom domains around alias identity", async () => {
+  const events = [];
+  const runtime = new DurableAccountLifecycle(
+    { storage: new Storage(), id: { name: ACCOUNT } },
+    {},
+    {
+      reconcileAgentEmailDomains: async (_accountID, fence) => {
+        events.push(`custom:${fence.action}`);
+        return { complete: true };
+      },
+      reconcileRealmEmailAliases: async (_accountID, fence) => {
+        events.push(`alias:${fence.action}`);
+        return { complete: true };
+      },
+    },
+  );
+  await runtime.reconcileAgentEmailPolicies(ACCOUNT, {
+    operation_id: OPERATION_ID,
+    epoch: 1,
+    action: "suspend",
+  });
+  await runtime.reconcileAgentEmailPolicies(ACCOUNT, {
+    operation_id: OPERATION_ID,
+    epoch: 1,
+    action: "republish",
+  });
+  assert.deepEqual(events, [
+    "custom:suspend", "alias:suspend",
+    "alias:republish", "custom:republish",
+  ]);
+});
+
 function sourceRoute(epoch) {
   return {
     cell: SOURCE,

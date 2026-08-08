@@ -36,6 +36,9 @@
 import {
   reconcileRealmEmailAliasesForPlan,
 } from "./realm-email-alias-runtime.mjs";
+import {
+  reconcileAgentEmailDomainsForPlan,
+} from "./agent-email-domain-runtime.mjs";
 
 const ACCOUNT_ID_PATTERN = "[A-Za-z0-9_-]{1,128}";
 const LIMIT_DIMENSION_PATTERN =
@@ -562,7 +565,7 @@ async function applyPlanSnapshot(request, env, accountID, fetchImpl) {
   // accepts that exact snapshot. The activation kill switch is the sole
   // immediate fail-closed exception inside the registry.
   let submittedSnapshot = null;
-  if (!readFence && env.REALM_EMAIL_ALIASES) {
+  if (!readFence && (env.REALM_EMAIL_ALIASES || env.AGENT_EMAIL_DOMAINS)) {
     try {
       const candidate = JSON.parse(new TextDecoder().decode(bounded.body));
       if (
@@ -571,6 +574,12 @@ async function applyPlanSnapshot(request, env, accountID, fetchImpl) {
         !Array.isArray(candidate.limits) && Array.isArray(candidate?.features)
       ) {
         submittedSnapshot = candidate;
+        await reconcileAgentEmailDomainsForPlan(
+          env,
+          accountID,
+          submittedSnapshot,
+          "restrict_only",
+        );
         await reconcileRealmEmailAliasesForPlan(
           env,
           accountID,
@@ -580,7 +589,7 @@ async function applyPlanSnapshot(request, env, accountID, fetchImpl) {
       }
     } catch (cause) {
       return err(
-        `realm email alias plan reconciliation failed: ${String(cause?.message ?? cause)}`,
+        `agent email policy reconciliation failed: ${String(cause?.message ?? cause)}`,
         502,
       );
     }
@@ -635,9 +644,15 @@ async function applyPlanSnapshot(request, env, accountID, fetchImpl) {
             submittedSnapshot,
             "complete",
           );
+          await reconcileAgentEmailDomainsForPlan(
+            env,
+            accountID,
+            submittedSnapshot,
+            "complete",
+          );
         } catch (cause) {
           return err(
-            `realm email alias plan reconciliation failed: ${String(cause?.message ?? cause)}`,
+            `agent email policy reconciliation failed: ${String(cause?.message ?? cause)}`,
             502,
           );
         }
@@ -667,10 +682,23 @@ async function applyPlanSnapshot(request, env, accountID, fetchImpl) {
                   submittedSnapshot.snapshot_hash,
               },
             );
+            await reconcileAgentEmailDomainsForPlan(
+              env,
+              accountID,
+              snapshot,
+              "complete",
+              {
+                recover_pending_revision: submittedSnapshot.revision,
+                recover_pending_snapshot_hash:
+                  submittedSnapshot.snapshot_hash,
+              },
+            );
           }
         } catch {
-          // The registry's durable intent alarm reads the authoritative cell
-          // fence and retries convergence.
+          // Realm-alias authority can recover from its alarm. Custom-domain
+          // awaiting-cell intent remains fail closed until the durable plan
+          // workflow or an operator repeats this exact completion fence; its
+          // alarm processes only cell-committed work.
         }
       }
     }

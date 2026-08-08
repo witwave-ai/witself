@@ -462,9 +462,11 @@ Before any routing review, choose and verify operator-controlled destinations
 for `postmaster@witmail.net` and `abuse@witmail.net`. That is a human governance
 decision; do not silently route either role address to a personal mailbox.
 
-## Provision, bootstrap, checkpoint, and drill the custom-domain authority journal
+## Deploy, checkpoint, and drill the dark custom-domain authority
 
-This is a control-plane-only dark-foundation rollout. It reuses the existing
+This is a control-plane-only rollout. It covers both a fresh authority-journal
+bootstrap and later dark deployments of the request, ownership-verification,
+plan, and account-lifecycle state machine. It reuses the existing
 `AgentEmailDomainRegistry` Durable Object class and fixed active object name
 `global`; there is no new Durable Object migration, cell database migration,
 cell selection, plan deployment, DNS operation, Email Routing change, or mail
@@ -477,24 +479,40 @@ binding. Verify those surfaces in:
 - `infra/cloudflare/control-plane/src/agent-email-domain-journal.mjs`
 - `infra/cloudflare/control-plane/src/agent-email-domain-journal-runtime.mjs`
 - `infra/cloudflare/control-plane/src/agent-email-domain-runtime.mjs`
+- `infra/cloudflare/control-plane/src/agent-email-domain-verification.mjs`
+- `infra/cloudflare/control-plane/src/agent-email-domain-api.mjs`
 - `infra/cloudflare/control-plane/src/agent-email-domain-recovery-api.mjs`
+- `infra/cloudflare/control-plane/src/account-lifecycle-runtime.mjs`
+- `infra/cloudflare/control-plane/src/bridge.mjs`
 - `infra/cloudflare/control-plane/src/index.js`
 - `infra/cloudflare/control-plane/wrangler.template.jsonc`
 - `internal/client/agent_email_domain_recovery.go`
 - `cmd/witself-admin/email_domain_cmd.go`
 
-Keep both runtime-only controls absent during the initial deployment and
-bootstrap:
+Keep all customer and DNS-observation controls absent during every dark
+deployment:
 
 - `CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUESTS_ENABLED`
-- `CP_AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_ENABLED`
+- `CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUEST_ACCOUNT_ALLOWLIST`
+- `CP_AGENT_EMAIL_CUSTOM_DOMAIN_AUTHORITY_READY`
+- `CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED`
 
-The customer-request gate remains absent for the entire rollout. The journal
-gate is enabled only after bootstrap establishes a valid head. Also keep every
-managed-domain canonical/alias activation and delivery gate
-absent or exactly `false`. Installing the distinct recovery secret does not
-enable either control. Freeze administrator `email-domain requests reject` and
-`retire` operations for the short bootstrap/checkpoint/drill window so the
+There is intentionally no wildcard account allowlist. Request creation must
+fail unless the request gate, exact account membership, and authority-ready
+gate all pass. It also requires the existing
+`CP_PLAN_LIFECYCLE_ENABLED=true` durable scanner so an `awaiting_cell` intent
+can recover after a lost bridge completion. Administrator and scheduled
+verification must fail/no-op unless
+the separate verification gate passes. Also keep every managed-domain
+canonical/alias activation and delivery gate absent or exactly `false`.
+Installing the distinct recovery secret enables none of these controls.
+
+For a fresh unjournaled registry, also keep
+`CP_AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_ENABLED` absent until bootstrap
+establishes a valid head. For an already bootstrapped production registry,
+leave that journal-required secret exactly `true`; removing it would permit
+journal-unaware authority writes. Do not run bootstrap again. Freeze
+administrator request mutations for the short checkpoint/drill window so the
 active head can be compared exactly before and after the drill.
 
 The journal/recovery implementation supports at most 10,000 authority keys.
@@ -503,6 +521,92 @@ customer-request activation blocker. If bootstrap or checkpoint reports
 `agent_email_domain_journal_authority_limit_exceeded`, keep the request gate
 dark and redesign or raise the reviewed recovery bound before accepting any
 customer request.
+
+Do not treat that static ceiling as sufficient capacity evidence. Observation
+audits are permanent, ordinary writes do not currently admit against a
+worst-case replay budget, and the single global Durable Object presently holds
+its serialized authority lane during bounded external DNS calls. Keep both
+request and verification gates dark until external resolution uses durable
+claim/observe/commit fences outside that lane, capacity and admission metrics
+exist, retry/audit growth is bounded, and exact `awaiting_cell` plan recovery
+has been exercised through the durable plan workflow. Custom-domain provider
+routing, cell projection, and mail delivery must be accepted separately.
+
+### Dark lifecycle and ownership-verification deployment
+
+Use this path when the active registry is already bootstrapped and journal
+enforcement is required. Before deployment, capture the exact control-plane
+release identity, complete journal head, request/audit counts, and Worker
+binding/secret names. For an exact v0.0.235 source, confirm journal status is
+`enabled=true`, `required=true`, `pending=false`, and `forked=false`, with a
+nonnull head whose sequence is positive. That source predates the `healthy`
+and `remote_head_*` response fields; false or null values filled in by a newer
+client from absent JSON are not evidence of degradation. Instead, independently
+download and validate the complete create-only R2 chain through the captured
+head, require its replayed head to match every captured head field exactly, and
+require the replayed authority to match the zero-inventory preflight. Freeze
+administrator mutations between that replay and deployment. This one-time
+legacy-source check is not a waiver of the strict v0.0.236 postdeploy health
+contract.
+
+Confirm all four dark controls above are absent from the persistent Worker
+secret-name list, not only from rendered configuration. The pre-v0.0.236
+authority has no migration
+for the new account/domain and verification-due indexes: require exactly zero
+existing request rows and exactly zero audit rows. Any nonzero request or audit
+count is a hard deployment abort until an explicit migration is implemented
+and reviewed. Do not attempt to infer a secret value by issuing a customer
+request or verification mutation.
+
+Capture and validate the secret names without printing their values:
+
+```sh
+DARK_CUSTOM_DOMAIN_NAMES='CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUESTS_ENABLED|CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUEST_ACCOUNT_ALLOWLIST|CP_AGENT_EMAIL_CUSTOM_DOMAIN_AUTHORITY_READY|CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED'
+SECRET_INVENTORY="$(npm exec -- wrangler secret list --name witself-control-plane --format json)" || exit 1
+jq -e 'type == "array" and all(.[]; type == "object" and (.name | type == "string"))' \
+  <<<"$SECRET_INVENTORY" >/dev/null || exit 1
+SECRET_NAMES="$(jq -r '.[].name' <<<"$SECRET_INVENTORY")" || exit 1
+if grep -Eq "^(${DARK_CUSTOM_DOMAIN_NAMES})$" <<<"$SECRET_NAMES"; then
+  echo "custom-domain activation secret is present; aborting dark deploy" >&2
+  exit 1
+fi
+```
+
+Deploy only a clean tagged control-plane release. Do not run
+`npm run deploy:plans`, deploy the agent-email Worker, upgrade a cell, change
+MX/TXT records, or alter Cloudflare Email Routing. The existing scheduled
+handler may run, but with the verification gate absent it must return before a
+DNS lookup. Plan and account-lifecycle reconciliation may be called by their
+ordinary fenced workflows. While an account is not request-allowlisted, an
+account with no active custom-domain request (including one with terminal
+history only) must complete without creating new registry or journal state;
+an already-pending intent still converges fail closed.
+
+For this already-bootstrapped path, inspect rather than recreate the bucket and
+recovery credential, perform deployment step 3, skip bootstrap and journal
+enablement steps 4-5, then continue with checkpoint and recovery steps 6-8.
+
+After deployment, require all of the following before appending a checkpoint:
+
+- `/v1/version` is the exact new tagged release;
+- the four dark controls remain absent and the journal-required secret remains
+  present;
+- raw journal-status JSON contains `healthy`, `remote_head_checked`, and
+  `remote_head_healthy`; all three are exactly true, `degradation_code` is null
+  or absent, and its positive complete head is byte-for-byte unchanged;
+- customer creation remains `custom_domain_requests_disabled`, administrator
+  verification remains `custom_domain_verification_disabled`, exactly zero
+  request and audit rows remain exactly zero, and the persistent Worker secret
+  list again contains none of the four dark control names; and
+- there was no DNS lookup, route publication, cell projection, Email Routing
+  change, or mail delivery change.
+
+Then append one complete checkpoint and seal one newly named empty recovery
+target using the procedures below. Preserve the exact `aedrec_` id, source
+head, action fences, sealed result, and post-drill active head in the private
+rollout record. The active head must remain unchanged during the recovery
+drill. Leave request, allowlist, authority-ready, and verification controls
+absent after acceptance; this completes only the dark deployment.
 
 ### 1. Provision and inspect the private R2 bucket
 
@@ -586,8 +690,11 @@ EMAIL_DIRECTORY_KV_ID="${EMAIL_DIRECTORY_KV_ID:?set dedicated agent-email KV id}
 existing Durable Object class set, and runs deployment verification. Do not run
 `npm run deploy:plans`; this slice changes no plan matrix. Do not deploy or
 migrate any cell. Confirm the deployed configuration contains the
-`AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL` binding and does not contain either
-runtime-only gate above.
+`AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL` binding and does not contain any of the
+four customer/verification controls above. Immediately repeat the persistent
+`wrangler secret list` name-only check from the preflight and abort acceptance
+if any dark-control name appears. For a fresh bootstrap, also confirm that the
+journal-required gate is absent.
 
 If deployment or verification fails before bootstrap starts, redeploy the
 previous clean tagged control-plane release. Keep the new bucket and recovery
@@ -606,16 +713,22 @@ BOOTSTRAP_KEY="${BOOTSTRAP_KEY:?set one durable bootstrap idempotency key}"
 BOOTSTRAP_REASON="${BOOTSTRAP_REASON:?set reviewed bootstrap reason}"
 
 while :; do
-  RESPONSE="$(witself-admin email-domain journal bootstrap \
-    --endpoint "$CONTROL_PLANE_URL" \
-    --token-file "$PLATFORM_ADMIN_TOKEN_FILE" \
-    --recovery-token-file "$RECOVERY_TOKEN_FILE" \
-    --reason "$BOOTSTRAP_REASON" \
-    --idempotency-key "$BOOTSTRAP_KEY" \
-    --json)" || break
-  jq . <<<"$RESPONSE"
-  jq -e '.complete == true' <<<"$RESPONSE" >/dev/null && break
+  if ! RESPONSE="$(witself-admin email-domain journal bootstrap \
+      --endpoint "$CONTROL_PLANE_URL" \
+      --token-file "$PLATFORM_ADMIN_TOKEN_FILE" \
+      --recovery-token-file "$RECOVERY_TOKEN_FILE" \
+      --reason "$BOOTSTRAP_REASON" \
+      --idempotency-key "$BOOTSTRAP_KEY" \
+      --json)"; then
+    echo "custom-domain journal bootstrap failed" >&2
+    exit 1
+  fi
+  jq . <<<"$RESPONSE" || exit 1
+  if jq -e '.complete == true' <<<"$RESPONSE" >/dev/null; then
+    break
+  fi
 done
+jq -e '.complete == true' <<<"$RESPONSE" >/dev/null || exit 1
 
 witself-admin email-domain journal status \
   --endpoint "$CONTROL_PLANE_URL" \
@@ -668,16 +781,22 @@ CHECKPOINT_KEY="${CHECKPOINT_KEY:?set one durable checkpoint idempotency key}"
 CHECKPOINT_REASON="${CHECKPOINT_REASON:?set reviewed checkpoint reason}"
 
 while :; do
-  RESPONSE="$(witself-admin email-domain journal checkpoint \
-    --endpoint "$CONTROL_PLANE_URL" \
-    --token-file "$PLATFORM_ADMIN_TOKEN_FILE" \
-    --recovery-token-file "$RECOVERY_TOKEN_FILE" \
-    --reason "$CHECKPOINT_REASON" \
-    --idempotency-key "$CHECKPOINT_KEY" \
-    --json)" || break
-  jq . <<<"$RESPONSE"
-  jq -e '.complete == true' <<<"$RESPONSE" >/dev/null && break
+  if ! RESPONSE="$(witself-admin email-domain journal checkpoint \
+      --endpoint "$CONTROL_PLANE_URL" \
+      --token-file "$PLATFORM_ADMIN_TOKEN_FILE" \
+      --recovery-token-file "$RECOVERY_TOKEN_FILE" \
+      --reason "$CHECKPOINT_REASON" \
+      --idempotency-key "$CHECKPOINT_KEY" \
+      --json)"; then
+    echo "custom-domain journal checkpoint failed" >&2
+    exit 1
+  fi
+  jq . <<<"$RESPONSE" || exit 1
+  if jq -e '.complete == true' <<<"$RESPONSE" >/dev/null; then
+    break
+  fi
 done
+jq -e '.complete == true' <<<"$RESPONSE" >/dev/null || exit 1
 
 ACTIVE_BEFORE="$(witself-admin email-domain journal status \
   --endpoint "$CONTROL_PLANE_URL" \
@@ -787,20 +906,29 @@ selector, or cutover endpoint.
 Read active status again and compare the complete `.head` with
 `ACTIVE_BEFORE`. With administrator mutations frozen, they must be identical.
 Confirm the sealed recovery status is still readable, r2.dev remains disabled,
-the customer request gate remains absent, the journal-required status remains
-exactly true, and no DNS, Email Routing, edge directory, cell, plan, or delivery
-configuration changed.
+all four request/allowlist/authority-ready/verification controls remain absent,
+the journal-required status remains exactly true, and no DNS, Email Routing,
+edge directory, cell, plan, or delivery configuration changed.
 The customer request endpoint must continue returning
-`custom_domain_requests_disabled` for an authenticated account operator.
+`custom_domain_requests_disabled` for an authenticated account operator, and
+the administrator verification endpoint must continue returning
+`custom_domain_verification_disabled`.
 
 Leave `CP_AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_ENABLED` enabled after the drill;
 once the journal head exists, journal-unaware writers are unsafe. Do not enable
-`CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUESTS_ENABLED` until the 10,000-key capacity
-blocker and every ownership, lifecycle, projection, and receive-canary blocker
-in [agent-email.md](agent-email.md) is closed.
+the request gate, account allowlist, authority-ready gate, or verification gate
+until the 10,000-key capacity blocker and every ownership, lifecycle,
+projection, and receive-canary blocker in [agent-email.md](agent-email.md) is
+closed through a separately reviewed canary.
 
 ### Stop and rollback rules
 
+- A dark lifecycle/verification deployment whose journal head and registry
+  state remain unchanged may roll back to the immediately previous
+  journal-aware release. Once a new request state, ownership observation,
+  allocation, plan/lifecycle fence, due index, or related audit event is
+  written, do not roll back to code that cannot classify and recover those
+  keys. Block mutations and roll forward to compatible code.
 - Before bootstrap begins, a code rollback to the previous clean release tag is
   safe. Keep the bucket and secret; they are inert without the new code.
 - After bootstrap, the previous code is journal-unaware. It is an emergency
@@ -871,18 +999,24 @@ BOOTSTRAP_KEY="${BOOTSTRAP_KEY:?set one durable bootstrap idempotency key}"
 BOOTSTRAP_REASON="${BOOTSTRAP_REASON:?set reviewed bootstrap reason}"
 
 while :; do
-  RESPONSE="$(jq -nc \
+  REQUEST_BODY="$(jq -nc \
     --arg reason "$BOOTSTRAP_REASON" --arg key "$BOOTSTRAP_KEY" \
-    '{reason:$reason,idempotency_key:$key}' |
-    curl --fail-with-body --silent --show-error \
+    '{reason:$reason,idempotency_key:$key}')" || exit 1
+  if ! RESPONSE="$(curl --fail-with-body --silent --show-error \
       -H "$ADMIN_AUTH" \
       -H "$RECOVERY_AUTH" \
       -H 'Content-Type: application/json' \
-      --data-binary @- \
-      "$JOURNAL_API:bootstrap")" || break
-  jq . <<<"$RESPONSE"
-  jq -e '.complete == true' <<<"$RESPONSE" >/dev/null && break
+      --data-binary "$REQUEST_BODY" \
+      "$JOURNAL_API:bootstrap")"; then
+    echo "realm-alias journal bootstrap failed" >&2
+    exit 1
+  fi
+  jq . <<<"$RESPONSE" || exit 1
+  if jq -e '.complete == true' <<<"$RESPONSE" >/dev/null; then
+    break
+  fi
 done
+jq -e '.complete == true' <<<"$RESPONSE" >/dev/null || exit 1
 ```
 
 Then read status and record only the value-free stream id, sequence, hash,
@@ -913,18 +1047,24 @@ CHECKPOINT_KEY="${CHECKPOINT_KEY:?set one durable checkpoint idempotency key}"
 CHECKPOINT_REASON="${CHECKPOINT_REASON:?set reviewed checkpoint reason}"
 
 while :; do
-  RESPONSE="$(jq -nc \
+  REQUEST_BODY="$(jq -nc \
     --arg reason "$CHECKPOINT_REASON" --arg key "$CHECKPOINT_KEY" \
-    '{reason:$reason,idempotency_key:$key}' |
-    curl --fail-with-body --silent --show-error \
+    '{reason:$reason,idempotency_key:$key}')" || exit 1
+  if ! RESPONSE="$(curl --fail-with-body --silent --show-error \
       -H "$ADMIN_AUTH" \
       -H "$RECOVERY_AUTH" \
       -H 'Content-Type: application/json' \
-      --data-binary @- \
-      "$JOURNAL_API:checkpoint")" || break
-  jq . <<<"$RESPONSE"
-  jq -e '.complete == true' <<<"$RESPONSE" >/dev/null && break
+      --data-binary "$REQUEST_BODY" \
+      "$JOURNAL_API:checkpoint")"; then
+    echo "realm-alias journal checkpoint failed" >&2
+    exit 1
+  fi
+  jq . <<<"$RESPONSE" || exit 1
+  if jq -e '.complete == true' <<<"$RESPONSE" >/dev/null; then
+    break
+  fi
 done
+jq -e '.complete == true' <<<"$RESPONSE" >/dev/null || exit 1
 ```
 
 Use the returned checkpoint head, not a guessed or older journal position, for

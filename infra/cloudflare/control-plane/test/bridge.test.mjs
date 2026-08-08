@@ -935,6 +935,60 @@ test("internal apply forwards exact snapshot with only the cell provision token"
   assert.deepEqual(await responseJSON(response), { applied: true });
 });
 
+test("plan apply preserves custom-domain and alias dependency ordering", async () => {
+  const events = [];
+  const namespace = (label) => ({
+    idFromName: () => "global",
+    get: () => ({
+      fetch: async (_url, init) => {
+        const body = JSON.parse(init.body);
+        events.push(`${label}:${body.mode}`);
+        return Response.json({
+          complete: true,
+          operational_gate_complete: true,
+        });
+      },
+    }),
+  });
+  const env = bridgeEnv({
+    "acct:acct_1": { cell: "cell-a" },
+    "cell:cell-a": {
+      endpoint: "https://cell.example/",
+      provision_token: "witself_prv_cell-secret",
+    },
+  });
+  env.AGENT_EMAIL_DOMAINS = namespace("custom");
+  env.REALM_EMAIL_ALIASES = namespace("alias");
+  const snapshot = {
+    revision: 2,
+    snapshot_hash: "c".repeat(64),
+    plan: "team",
+    limits: { agent_email_custom_domains_per_account: 1 },
+    policies: {},
+    features: ["agent_email_custom_domain"],
+  };
+  const response = await handleInternalBridgeRequest(
+    bridgeRequest("/v1/internal/accounts/acct_1:apply-plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(snapshot),
+    }),
+    env,
+    async () => {
+      events.push("cell");
+      return Response.json({ applied: true });
+    },
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(events, [
+    "custom:restrict_only",
+    "alias:restrict_only",
+    "cell",
+    "alias:complete",
+    "custom:complete",
+  ]);
+});
+
 test("internal plan fence read uses only the cell provision token", async () => {
   const env = bridgeEnv({
     "acct:acct_1": { cell: "cell-a" },

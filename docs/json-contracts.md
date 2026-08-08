@@ -1302,7 +1302,7 @@ membership and aggregates in bounded 100-claim pages; only the completed
 verification pass may restore `ready`. Later alarm re-arm failures fail the
 alarm invocation so the platform retries it from the durable cursor.
 
-### Dark custom inbound-domain requests
+### Dark custom inbound-domain ownership lifecycle
 
 The separate account-level custom-domain authority uses schema
 `witself.agent-email-domain.v1`. Customer and administrator list responses are
@@ -1321,50 +1321,123 @@ bounded pages:
         "record_type": "TXT",
         "record_name": "_witself-verification.agents.example.com",
         "record_value": "witself-domain-verification=aedv_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "issued_at": "2026-08-03T12:00:00.000Z"
+        "issued_at": "2026-08-03T12:00:00.000Z",
+        "expires_at": "2026-08-10T12:00:00.000Z"
       },
       "requested_by": "opr_123",
       "requested_at": "2026-08-03T12:00:00.000Z",
       "updated_at": "2026-08-03T12:00:00.000Z",
       "domain_limit_at_request": 1,
       "plan_revision": 9,
-      "plan_snapshot_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      "plan_snapshot_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "state_revision": 1,
+      "availability": "pending_verification",
+      "plan_suspended": false,
+      "lifecycle_suspended": false
     }
   ],
   "truncated": false,
   "next_cursor": null,
   "technical_open_request_limit": 8,
-  "open_requests": 1
+  "open_requests": 1,
+  "allocated_domains": 1
 }
 ```
 
 `open_requests` is included only for an account-scoped page. A null
 `domain_limit_at_request` records an explicitly unlimited effective allowance.
-The challenge is public proof material, not a secret, and is stable for the
-life of the request. Exact request replay returns the original object and does
-not rotate it.
+`allocated_domains` is the account allowance in use by pending reservations
+plus verified allocations; it is not proof of global domain ownership. The
+challenge is public proof material, not a secret, and is stable for the life
+of the request. Exact request replay returns the original object and does not
+rotate it. A challenge expires seven days after `issued_at`.
 
-Only `pending_verification`, `rejected`, and `retired` are accepted in this
-dark contract. A rejected request gains `decision`; a retired request gains
-`retirement`, each with the bounded reason, acting administrator id, and
-timestamp. There is no verified/active state and no response can publish DNS,
-an edge route, a cell projection, or mail delivery. Terminal domains remain
-tombstoned and unavailable for another request until a future explicit
-ownership-transfer contract exists.
+More than one `pending_verification` request may exist for the same canonical
+domain. Pending requests have separate challenge values and consume account
+allowance plus the technical open-request ceiling, but create neither the
+global `domain:<name>` allocation nor a permanent tombstone. A rejected
+request gains `decision`; an expired request gains `expiration`; a retired
+request gains `retirement`. Rejection, expiry, or retirement before proof
+releases the name for a later request.
 
-Customer creation requires the account-operator bearer token, exact-true dark
-request gate, enabled `agent_email_custom_domain` feature, and a positive or
+The first request for which the exact TXT value is observed atomically becomes
+`verified` and creates the unique permanent allocation. Its response adds:
+
+```json
+{
+  "state": "verified",
+  "availability": "verified",
+  "ownership_verification": {
+    "state": "verified",
+    "last_result": "present",
+    "first_verified_at": "2026-08-03T12:05:00.000Z",
+    "last_checked_at": "2026-08-03T12:05:00.000Z",
+    "last_verified_at": "2026-08-03T12:05:00.000Z",
+    "next_check_at": "2026-08-04T12:05:00.000Z",
+    "rrset_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "dnssec_authenticated": true,
+    "minimum_ttl_seconds": 300,
+    "consecutive_failures": 0
+  }
+}
+```
+
+The durable request `state` is one of `pending_verification`, `verified`,
+`rejected`, `expired`, or `retired`. The derived `availability` is one of
+`pending_verification`, `verified`, `active_grace`, `suspended_plan`,
+`suspended_lifecycle`, `suspended_verification`, `unavailable_domain`,
+`rejected`, `expired`, or `retired`. `plan_grace_until` is present during the
+30-day downgrade grace.
+`plan_suspended` and `lifecycle_suspended` are independent; a stale ownership
+observation appears as `ownership_verification.state="stale"`. A matching
+recheck restores `verified`; it does not create a new request or allocation.
+Only a previously verified allocation remains permanently unavailable after
+retirement.
+If another request already allocated the same domain, the losing pending
+request records `ownership_verification.state="conflict"`,
+`last_result="domain_unavailable"`, and waits until its original challenge
+expires. During a multi-page plan or lifecycle transition, a scheduled check
+records `last_result="policy_converging"` and retries after 15 minutes.
+
+Customer creation requires the account-operator bearer token, exact-true
+`CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUESTS_ENABLED`, exact membership in the
+comma-separated `CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUEST_ACCOUNT_ALLOWLIST`,
+exact-true `CP_AGENT_EMAIL_CUSTOM_DOMAIN_AUTHORITY_READY`, a healthy required
+authority journal, exact-true `CP_PLAN_LIFECYCLE_ENABLED`, enabled
+`agent_email_custom_domain`, and a positive or
 explicitly unlimited `agent_email_custom_domains_per_account` limit. Stable
 refusal codes include `custom_domain_requests_disabled`,
-`feature_not_enabled`, `protected_domain`, `domain_unavailable`,
-`account_limit_reached`, and `technical_open_request_limit_reached`. The last
-two include a value-free numeric `limit`.
+`custom_domain_activation_not_ready`, `feature_not_enabled`,
+`protected_domain`, `domain_unavailable`, `account_limit_reached`, and
+`technical_open_request_limit_reached`. The last two include a value-free
+numeric `limit`.
+
+`POST /v1/admin/agent-email-domain-requests/{request_id}:verify` accepts an
+`idempotency_key` and requires exact-true
+`CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED`. It resolves only the fixed
+TXT owner, follows no redirect, and performs no DNS write. Stable verification
+refusals include `custom_domain_verification_disabled`,
+`domain_verification_suspended`, `ownership_challenge_expired`,
+`ownership_challenge_not_found`, `domain_unavailable`,
+`account_policy_converging`, and bounded temporary resolver errors. A verified
+request is due after 24 hours; authoritative
+absence retries after one hour and a temporary resolver failure after 15
+minutes. A new pending request is immediately due to the same bounded
+scheduler when the verification gate is enabled; the administrator route is
+an independent retry-safe manual trigger. Successful proof, authoritative
+absence, and challenge-expiry responses are all durably idempotent; replaying
+the same key cannot reinterpret later DNS. Truncated DNS responses are
+temporary and inconclusive and can never suspend ownership. No request or verification response
+can publish DNS, an edge route, a cell projection, or mail delivery.
 
 Administrator audit pages contain `events`, `truncated`, and `next_cursor`.
 Each administrator-visible event has `sequence`, `registry_revision`,
 `occurred_at`, `actor_kind`, `actor_id`, `action`, `target`, and bounded
-`metadata`, which can include the administrator-supplied reason. Customer
-and administrator request lists accept the opaque cursor; administrator lists
+`metadata`, which can include the administrator-supplied reason. Contention
+uses action `custom_domain.verification_conflict`; a plan/lifecycle
+deferral uses `custom_domain.verification_deferred` with metadata reason
+`account_policy_converging`. Customer and administrator request lists accept
+the opaque cursor; administrator lists
 add `state`, `account_id`, and `domain`. Audit adds `action`, `account_id`,
 `domain`, and `limit=1..100`. Filtering examines only the bounded underlying
 page, so an empty filtered page may still have a continuation cursor.
@@ -1381,8 +1454,11 @@ X-Witself-Agent-Email-Domain-Recovery: <separate recovery credential>
 The credential is a Worker secret and is never returned or forwarded to a
 Durable Object. `GET /v1/admin/agent-email-domain-journal` reports only
 value-free journal state: `enabled`, `required`, the exact `head` (or null),
-`pending`, `forked`, and bounded bootstrap progress. A head contains
-`stream_id`, `sequence`, `hash`, `authority_epoch`, `registry_revision`, and
+`pending`, `forked`, `healthy`, `remote_head_checked`, nullable
+`remote_head_healthy`, nullable `degradation_code`, and bounded bootstrap
+progress. `healthy` requires a valid local head, no pending write or fork, and
+no failed remote-head continuity check. A head contains `stream_id`,
+`sequence`, `hash`, `authority_epoch`, `registry_revision`, and
 `audit_sequence`. Custom-domain journal stream ids use `aedj_` followed by
 16–52 lowercase base32 characters.
 
@@ -1405,8 +1481,14 @@ enabled. A checkpoint appends a full-state digest at an exact journal head.
 Journal maintenance and recovery are deliberately bounded to 10,000 authority
 keys. Exceeding that ceiling fails closed with
 `agent_email_domain_journal_authority_limit_exceeded`; the customer request
-gate must remain disabled until capacity below this ceiling is demonstrated or
-the recovery design is revised.
+gate and its account allowlist/authority-ready companion must remain disabled
+until request, observation, audit, plan/lifecycle-fence, and permanent
+allocation growth fit below this ceiling or the recovery design is revised.
+This ceiling alone is not activation evidence: observation audits grow
+permanently, and the current globally serialized authority lane includes the
+bounded external DNS wait. Requests and verification stay dark until those
+operations use durable observation fences outside the lane, capacity and
+admission are observable, and replay/checkpoint growth is bounded.
 
 Starting a recovery accepts:
 
@@ -1454,9 +1536,10 @@ with no complete checkpoint fails closed.
 
 The final target is sealed evidence for a restore drill, not active authority.
 No journal or recovery response publishes DNS, changes mail delivery, enables
-`CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUESTS_ENABLED`, selects a registry object, or
-cuts over from the fixed `global` object. Such promotion requires a separately
-designed and reviewed protocol.
+`CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUESTS_ENABLED`, installs its account
+allowlist/authority-ready companions, enables ownership verification, selects a
+registry object, or cuts over from the fixed `global` object. Such promotion
+requires a separately designed and reviewed protocol.
 
 ### Realm-email-alias authority journal and empty-target recovery
 

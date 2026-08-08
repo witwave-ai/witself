@@ -27,7 +27,8 @@ func TestAgentEmailDomainRecoveryClientRoutesAndHeaders(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"schema_version": "witself.agent-email-domain-recovery.v1",
 				"enabled":        true, "required": true, "pending": false,
-				"forked": false,
+				"forked": false, "healthy": true,
+				"remote_head_checked": true, "remote_head_healthy": true,
 				"head": map[string]any{
 					"stream_id": "aedj_aaaaaaaaaaaaaaaa", "sequence": 2,
 					"hash": strings.Repeat("a", 64),
@@ -57,9 +58,15 @@ func TestAgentEmailDomainRecoveryClientRoutesAndHeaders(t *testing.T) {
 	defer server.Close()
 
 	ctx := context.Background()
-	if _, err := GetAdminAgentEmailDomainJournal(ctx, server.URL,
-		"admin-token", "recovery-token"); err != nil {
+	journal, err := GetAdminAgentEmailDomainJournal(ctx, server.URL,
+		"admin-token", "recovery-token")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !journal.Healthy || !journal.RemoteHeadChecked ||
+		journal.RemoteHeadHealthy == nil || !*journal.RemoteHeadHealthy ||
+		journal.DegradationCode != "" {
+		t.Fatalf("journal health = %#v", journal)
 	}
 	if _, err := BootstrapAdminAgentEmailDomainJournal(ctx, server.URL,
 		"admin-token", "recovery-token", "bootstrap reason", "bootstrap-1"); err != nil {

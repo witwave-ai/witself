@@ -131,6 +131,7 @@ import {
 } from "./agent-email-domain-api.mjs";
 import {
   DurableAgentEmailDomainRegistry,
+  runScheduledAgentEmailDomainVerification,
 } from "./agent-email-domain-runtime.mjs";
 import {
   handleAgentEmailDomainRecoveryAdminRequest,
@@ -4404,6 +4405,7 @@ export default {
     ctx.waitUntil(runScheduledPlacementRunner(env));
     ctx.waitUntil(runScheduledAccountBackups(env, _event?.scheduledTime));
     ctx.waitUntil(runScheduledCanonicalRealmRouteInventory(env));
+    ctx.waitUntil(runScheduledAgentEmailDomainVerification(env));
     ctx.waitUntil(runScheduledPlanLifecycle(
       env,
       (request) => getContainer(env.CONTROL_PLANE, "singleton").fetch(request),

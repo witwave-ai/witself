@@ -1,5 +1,7 @@
 import {
   agentEmailCustomDomainEntitlement,
+  agentEmailCustomDomainRequestsEnabledForAccount,
+  agentEmailCustomDomainVerificationEnabled,
   agentEmailDomainRegistryStub,
 } from "./agent-email-domain-runtime.mjs";
 import {
@@ -19,7 +21,7 @@ const ADMIN_REQUEST_PATH = new RegExp(
   `^/v1/admin/agent-email-domain-requests/(${REQUEST_ID_PATTERN})$`,
 );
 const ADMIN_REQUEST_ACTION_PATH = new RegExp(
-  `^/v1/admin/agent-email-domain-requests/(${REQUEST_ID_PATTERN}):(reject|retire)$`,
+  `^/v1/admin/agent-email-domain-requests/(${REQUEST_ID_PATTERN}):(reject|retire|verify)$`,
 );
 const ADMIN_AUDIT_PATH = "/v1/admin/agent-email-domain-audit";
 
@@ -35,11 +37,6 @@ const errorResponse = (message, status, code = "") =>
     error: message,
     ...(code ? { code } : {}),
   }, status);
-
-function requestsEnabled(env) {
-  return String(env?.CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUESTS_ENABLED ?? "") ===
-    "true";
-}
 
 function registryUnavailable() {
   return errorResponse("agent email domain registry is unavailable", 503);
@@ -105,7 +102,7 @@ export async function handleAgentEmailDomainCustomerRequest(
   // canonical-delivery gate. Turning on witmail.net cannot accidentally open
   // customer-owned domains, and ordinary code deployments cannot turn this
   // gate on because it is a runtime-only secret.
-  if (!requestsEnabled(env)) {
+  if (!agentEmailCustomDomainRequestsEnabledForAccount(env, accountID)) {
     return errorResponse(
       "custom agent email domain requests are not enabled",
       409,
@@ -205,5 +202,8 @@ export async function handleAgentEmailDomainAdminRequest(
     request_id: action[1],
     idempotency_key: body?.idempotency_key,
     reason: body?.reason,
+    ...(action[2] === "verify"
+      ? { verification_enabled: agentEmailCustomDomainVerificationEnabled(env) }
+      : {}),
   });
 }

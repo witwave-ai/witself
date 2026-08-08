@@ -52,13 +52,17 @@ type AgentEmailDomainJournalProgress struct {
 // AgentEmailDomainJournalStatus is the value-free active-registry health
 // response. It never includes a domain, ownership challenge, or request body.
 type AgentEmailDomainJournalStatus struct {
-	SchemaVersion string                           `json:"schema_version"`
-	Enabled       bool                             `json:"enabled"`
-	Required      bool                             `json:"required"`
-	Head          *AgentEmailDomainJournalHead     `json:"head"`
-	Pending       bool                             `json:"pending"`
-	Forked        bool                             `json:"forked"`
-	Bootstrap     *AgentEmailDomainJournalProgress `json:"bootstrap"`
+	SchemaVersion     string                           `json:"schema_version"`
+	Enabled           bool                             `json:"enabled"`
+	Required          bool                             `json:"required"`
+	Head              *AgentEmailDomainJournalHead     `json:"head"`
+	Pending           bool                             `json:"pending"`
+	Forked            bool                             `json:"forked"`
+	Healthy           bool                             `json:"healthy"`
+	RemoteHeadChecked bool                             `json:"remote_head_checked"`
+	RemoteHeadHealthy *bool                            `json:"remote_head_healthy"`
+	DegradationCode   string                           `json:"degradation_code,omitempty"`
+	Bootstrap         *AgentEmailDomainJournalProgress `json:"bootstrap"`
 }
 
 // AgentEmailDomainRecoveryStatus is one named empty-target recovery fence.
