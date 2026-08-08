@@ -179,6 +179,13 @@
       // mutable account archives and periodic cell backups.
       "binding": "REALM_EMAIL_ALIAS_AUTHORITY_JOURNAL",
       "bucket_name": "witself-realm-email-alias-authority-journal"
+    },
+    {
+      // Independent create-only, hash-chained portability boundary for the
+      // global customer-owned agent-email domain authority. It is deliberately
+      // not shared with managed aliases, account archives, or cell backups.
+      "binding": "AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL",
+      "bucket_name": "witself-agent-email-domain-authority-journal"
     }
   ],
   // Edge rate limiter for the recovery endpoint (issue #23). Enforced at
@@ -230,6 +237,10 @@
   // until proof-backed ownership verification, transfer/quarantine, lifecycle
   // reconciliation, and a staged request canary are implemented and accepted;
   // this gate can never authorize DNS mutation, routing, or mail delivery),
+  // CP_AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_ENABLED=true (only after the
+  // existing registry completes a bounded bootstrap and an empty-target
+  // recovery drill), CP_AGENT_EMAIL_DOMAIN_RECOVERY_TOKEN (a distinct second
+  // credential used only by journal and empty-target recovery administration),
   // CP_PLAN_LIFECYCLE_ENABLED=true (only
   // when intentionally activating lifecycle), CP_R2_ENDPOINT, CP_R2_BUCKET,
   // CP_R2_ACCESS_KEY, CP_R2_SECRET_KEY, and optionally CP_R2_PREFIX. To enable

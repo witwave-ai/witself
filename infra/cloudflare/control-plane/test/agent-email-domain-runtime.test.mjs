@@ -263,6 +263,38 @@ test("registry stub targets the single global authority", () => {
   assert.deepEqual(calls, [["id", "global"], ["get", "id:global"]]);
 });
 
+test("journal control routes do not initialize an empty registry", async () => {
+  const fixture = registry();
+  const status = await call(fixture.runtime, "/journal/status", {});
+  assert.equal(status.response.status, 200);
+  assert.equal(status.body.schema_version,
+    "witself.agent-email-domain-recovery.v1");
+  assert.equal(status.body.enabled, false);
+  assert.equal(status.body.pending, false);
+  assert.equal(status.body.forked, false);
+  assert.equal(fixture.storage.values.size, 0);
+});
+
+test("journal enforcement freezes an existing unjournaled registry", async () => {
+  const fixture = registry();
+  const seeded = await call(fixture.runtime, "/request/admin-list", {
+    actor: ADMIN,
+  });
+  assert.equal(seeded.response.status, 200);
+  assert.ok(fixture.storage.values.has("meta"));
+
+  fixture.runtime.env.CP_AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_ENABLED =
+    "true";
+  const frozen = await call(fixture.runtime, "/request/admin-list", {
+    actor: ADMIN,
+  });
+  assert.equal(frozen.response.status, 503);
+  assert.equal(frozen.body.schema_version,
+    "witself.agent-email-domain.v1");
+  assert.equal(frozen.body.code,
+    "agent_email_domain_journal_bootstrap_required");
+});
+
 test("creation is dark by default and requires an explicit entitlement fence", async () => {
   const { runtime } = registry();
   const disabled = await create(runtime, "disabled.example", {

@@ -462,6 +462,363 @@ Before any routing review, choose and verify operator-controlled destinations
 for `postmaster@witmail.net` and `abuse@witmail.net`. That is a human governance
 decision; do not silently route either role address to a personal mailbox.
 
+## Provision, bootstrap, checkpoint, and drill the custom-domain authority journal
+
+This is a control-plane-only dark-foundation rollout. It reuses the existing
+`AgentEmailDomainRegistry` Durable Object class and fixed active object name
+`global`; there is no new Durable Object migration, cell database migration,
+cell selection, plan deployment, DNS operation, Email Routing change, or mail
+delivery activation.
+
+The release must contain the custom-domain journal/recovery runtime, external
+administrator routes, Go client and `witself-admin` commands, and the private R2
+binding. Verify those surfaces in:
+
+- `infra/cloudflare/control-plane/src/agent-email-domain-journal.mjs`
+- `infra/cloudflare/control-plane/src/agent-email-domain-journal-runtime.mjs`
+- `infra/cloudflare/control-plane/src/agent-email-domain-runtime.mjs`
+- `infra/cloudflare/control-plane/src/agent-email-domain-recovery-api.mjs`
+- `infra/cloudflare/control-plane/src/index.js`
+- `infra/cloudflare/control-plane/wrangler.template.jsonc`
+- `internal/client/agent_email_domain_recovery.go`
+- `cmd/witself-admin/email_domain_cmd.go`
+
+Keep both runtime-only controls absent during the initial deployment and
+bootstrap:
+
+- `CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUESTS_ENABLED`
+- `CP_AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_ENABLED`
+
+The customer-request gate remains absent for the entire rollout. The journal
+gate is enabled only after bootstrap establishes a valid head. Also keep every
+managed-domain canonical/alias activation and delivery gate
+absent or exactly `false`. Installing the distinct recovery secret does not
+enable either control. Freeze administrator `email-domain requests reject` and
+`retire` operations for the short bootstrap/checkpoint/drill window so the
+active head can be compared exactly before and after the drill.
+
+The journal/recovery implementation supports at most 10,000 authority keys.
+This is not a plan allowance. It is a hard recovery bound and therefore a
+customer-request activation blocker. If bootstrap or checkpoint reports
+`agent_email_domain_journal_authority_limit_exceeded`, keep the request gate
+dark and redesign or raise the reviewed recovery bound before accepting any
+customer request.
+
+### 1. Provision and inspect the private R2 bucket
+
+Use an authenticated Cloudflare operator in the production account. Install
+the repository-pinned Wrangler version before issuing bucket commands:
+
+```sh
+REPO="${WITSELF_RELEASE_CHECKOUT:?set clean release checkout}"
+CONTROL_PLANE_DIR="$REPO/infra/cloudflare/control-plane"
+JOURNAL_BUCKET="witself-agent-email-domain-authority-journal"
+
+cd "$CONTROL_PLANE_DIR"
+npm ci
+
+# Inspect first. Create only when Cloudflare confirms that it does not exist.
+npm exec -- wrangler r2 bucket info "$JOURNAL_BUCKET"
+npm exec -- wrangler r2 bucket create "$JOURNAL_BUCKET"
+
+# The second info call is mandatory after creation.
+npm exec -- wrangler r2 bucket info "$JOURNAL_BUCKET"
+npm exec -- wrangler r2 bucket lifecycle list "$JOURNAL_BUCKET"
+npm exec -- wrangler r2 bucket lock list "$JOURNAL_BUCKET"
+npm exec -- wrangler r2 bucket dev-url get "$JOURNAL_BUCKET"
+```
+
+Do not run `bucket create` when the first `info` succeeds, and never delete or
+recreate an existing bucket to make this step pass. The accepted initial
+policy matches the established realm-alias journal: private access, r2.dev
+disabled, no object-expiration rule, the default incomplete-multipart abort
+rule, and no bucket-lock rule. If r2.dev is enabled, disable it and re-read the
+status:
+
+```sh
+npm exec -- wrangler r2 bucket dev-url disable "$JOURNAL_BUCKET"
+npm exec -- wrangler r2 bucket dev-url get "$JOURNAL_BUCKET"
+```
+
+Treat stronger object-lock/retention policy as a separate reviewed governance
+change. Never add an expiration rule to the journal prefixes.
+
+### 2. Install the independent recovery credential
+
+The recovery credential must be distinct from the platform-admin, fleet,
+edge, provisioning, and realm-alias recovery credentials. Keep the same bytes
+in Cloudflare and in one operator-protected file. The CLI rejects symlinks,
+non-regular files, and, on non-Windows systems, any group/world-readable mode.
+
+```sh
+RECOVERY_TOKEN_FILE="${AGENT_EMAIL_DOMAIN_RECOVERY_TOKEN_FILE:?set a new token-file path}"
+umask 077
+openssl rand -base64 48 | tr -d '\r\n' > "$RECOVERY_TOKEN_FILE"
+chmod 600 "$RECOVERY_TOKEN_FILE"
+
+cd "$CONTROL_PLANE_DIR"
+npm exec -- wrangler secret put CP_AGENT_EMAIL_DOMAIN_RECOVERY_TOKEN \
+  --name witself-control-plane < "$RECOVERY_TOKEN_FILE"
+```
+
+Do not print the file, place its value in an environment variable, or include
+it in a ticket or rollout log. `wrangler secret list --name
+witself-control-plane` may be used to confirm only the secret name.
+
+### 3. Deploy exactly one tagged control-plane release
+
+Use a clean checkout whose `HEAD` has exactly one semantic release tag. The
+renderer enforces both conditions and embeds the immutable version, commit, and
+date. Supply the existing dedicated agent-email KV namespace id; it must not be
+the broad control-plane directory namespace.
+
+```sh
+cd "$REPO"
+test -z "$(git status --porcelain)"
+test "$(git tag --points-at HEAD --list 'v*' | wc -l | tr -d ' ')" = 1
+
+cd "$CONTROL_PLANE_DIR"
+EMAIL_DIRECTORY_KV_ID="${EMAIL_DIRECTORY_KV_ID:?set dedicated agent-email KV id}" \
+  npm run deploy
+```
+
+`npm run deploy` renders `wrangler.generated.jsonc`, deploys the Worker and its
+existing Durable Object class set, and runs deployment verification. Do not run
+`npm run deploy:plans`; this slice changes no plan matrix. Do not deploy or
+migrate any cell. Confirm the deployed configuration contains the
+`AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL` binding and does not contain either
+runtime-only gate above.
+
+If deployment or verification fails before bootstrap starts, redeploy the
+previous clean tagged control-plane release. Keep the new bucket and recovery
+secret; neither changes authority by itself.
+
+### 4. Bootstrap the existing fixed active registry
+
+Use the released `witself-admin`. The ordinary admin token and distinct
+recovery token are both required. The default admin-token file is allowed, but
+the recovery file must remain owner-only.
+
+```sh
+CONTROL_PLANE_URL="${CONTROL_PLANE_URL:-https://self.witwave.ai}"
+PLATFORM_ADMIN_TOKEN_FILE="${PLATFORM_ADMIN_TOKEN_FILE:?set admin token file}"
+BOOTSTRAP_KEY="${BOOTSTRAP_KEY:?set one durable bootstrap idempotency key}"
+BOOTSTRAP_REASON="${BOOTSTRAP_REASON:?set reviewed bootstrap reason}"
+
+while :; do
+  RESPONSE="$(witself-admin email-domain journal bootstrap \
+    --endpoint "$CONTROL_PLANE_URL" \
+    --token-file "$PLATFORM_ADMIN_TOKEN_FILE" \
+    --recovery-token-file "$RECOVERY_TOKEN_FILE" \
+    --reason "$BOOTSTRAP_REASON" \
+    --idempotency-key "$BOOTSTRAP_KEY" \
+    --json)" || break
+  jq . <<<"$RESPONSE"
+  jq -e '.complete == true' <<<"$RESPONSE" >/dev/null && break
+done
+
+witself-admin email-domain journal status \
+  --endpoint "$CONTROL_PLANE_URL" \
+  --token-file "$PLATFORM_ADMIN_TOKEN_FILE" \
+  --recovery-token-file "$RECOVERY_TOKEN_FILE" \
+  --json | jq .
+```
+
+Repeat the byte-equivalent bootstrap call with the same reason and idempotency
+key until `complete=true`. An incomplete operation deliberately leaves
+authority writes frozen. When complete, require `enabled=true`, `pending=false`,
+`forked=false`, and `authority_keys <= 10000`. Stop on an unknown storage key,
+storage/authority limit, R2 failure, fork, fence mismatch, or any other failed
+state; do not remove the bucket, reset the Durable Object, or enable a gate to
+work around it.
+
+Bootstrap creates the journal head even though the journal-required gate stays
+absent. Once a valid head exists, this release writes every later authority
+mutation R2-first. The absent gate merely avoids forcing an unjournaled
+pre-existing registry before this deliberate bootstrap.
+
+### 5. Enable journal enforcement only
+
+After bootstrap reports a valid head with `pending=false` and `forked=false`,
+install the exact-true enforcement secret:
+
+```sh
+cd "$CONTROL_PLANE_DIR"
+printf '%s' 'true' | npm exec -- wrangler secret put \
+  CP_AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_ENABLED \
+  --name witself-control-plane
+
+witself-admin email-domain journal status \
+  --endpoint "$CONTROL_PLANE_URL" \
+  --token-file "$PLATFORM_ADMIN_TOKEN_FILE" \
+  --recovery-token-file "$RECOVERY_TOKEN_FILE" \
+  --json | jq -e \
+    '.enabled == true and .required == true and .pending == false and .forked == false'
+```
+
+This enables only fail-closed journal enforcement. It does not enable customer
+requests, DNS verification, routing, projection, or delivery. Recheck the
+control-plane release identity after the secret deployment. Stop if the
+journal status is not exact or the release identity changes unexpectedly.
+
+### 6. Append a complete checkpoint and capture an exact head
+
+```sh
+CHECKPOINT_KEY="${CHECKPOINT_KEY:?set one durable checkpoint idempotency key}"
+CHECKPOINT_REASON="${CHECKPOINT_REASON:?set reviewed checkpoint reason}"
+
+while :; do
+  RESPONSE="$(witself-admin email-domain journal checkpoint \
+    --endpoint "$CONTROL_PLANE_URL" \
+    --token-file "$PLATFORM_ADMIN_TOKEN_FILE" \
+    --recovery-token-file "$RECOVERY_TOKEN_FILE" \
+    --reason "$CHECKPOINT_REASON" \
+    --idempotency-key "$CHECKPOINT_KEY" \
+    --json)" || break
+  jq . <<<"$RESPONSE"
+  jq -e '.complete == true' <<<"$RESPONSE" >/dev/null && break
+done
+
+ACTIVE_BEFORE="$(witself-admin email-domain journal status \
+  --endpoint "$CONTROL_PLANE_URL" \
+  --token-file "$PLATFORM_ADMIN_TOKEN_FILE" \
+  --recovery-token-file "$RECOVERY_TOKEN_FILE" \
+  --json)"
+SOURCE_STREAM_ID="$(jq -er '.head.stream_id' <<<"$ACTIVE_BEFORE")"
+EXPECTED_SEQUENCE="$(jq -er '.head.sequence' <<<"$ACTIVE_BEFORE")"
+EXPECTED_HASH="$(jq -er '.head.hash' <<<"$ACTIVE_BEFORE")"
+```
+
+The recovery target is an exact journal head, not necessarily the checkpoint
+entry itself. A later mutation head is valid if its replay chain contains the
+complete checkpoint. This maintenance window freezes admin mutations, so the
+captured status head should normally equal the checkpoint head. Never label a
+guessed sequence or hash as the expected head.
+
+### 7. Replay and seal one named empty recovery target
+
+Generate one fresh id using the required `aedrec_` prefix and 16 lowercase
+base32 characters, then start against the captured exact head:
+
+```sh
+RECOVERY_ID="aedrec_$(python3 -c \
+  'import secrets; print("".join(secrets.choice("abcdefghijklmnopqrstuvwxyz234567") for _ in range(16)))')"
+RECOVERY_REASON="${RECOVERY_REASON:?set reviewed drill reason}"
+RECOVERY_START_KEY="${RECOVERY_START_KEY:?set one start idempotency key}"
+
+witself-admin email-domain recovery start \
+  --endpoint "$CONTROL_PLANE_URL" \
+  --token-file "$PLATFORM_ADMIN_TOKEN_FILE" \
+  --recovery-token-file "$RECOVERY_TOKEN_FILE" \
+  --recovery "$RECOVERY_ID" \
+  --source-stream "$SOURCE_STREAM_ID" \
+  --expected-sequence "$EXPECTED_SEQUENCE" \
+  --expected-hash "$EXPECTED_HASH" \
+  --reason "$RECOVERY_REASON" \
+  --idempotency-key "$RECOVERY_START_KEY" \
+  --json | jq .
+```
+
+The only permitted target is `recovery:<recovery_id>` and it must be empty and
+alarm-free. The start response supplies an opaque 64-lowercase-hex
+`action_fence`. Use one operator and one serial action at a time.
+
+For each replay page, read status, preserve the fence and idempotency key, then
+advance once:
+
+```sh
+STEP=1
+STATUS="$(witself-admin email-domain recovery status \
+  --endpoint "$CONTROL_PLANE_URL" \
+  --token-file "$PLATFORM_ADMIN_TOKEN_FILE" \
+  --recovery-token-file "$RECOVERY_TOKEN_FILE" \
+  --recovery "$RECOVERY_ID" --json)"
+ACTION_FENCE="$(jq -er '.action_fence | select(test("^[0-9a-f]{64}$"))' \
+  <<<"$STATUS")"
+ADVANCE_KEY="$RECOVERY_ID-advance-$STEP"
+
+witself-admin email-domain recovery advance \
+  --endpoint "$CONTROL_PLANE_URL" \
+  --token-file "$PLATFORM_ADMIN_TOKEN_FILE" \
+  --recovery-token-file "$RECOVERY_TOKEN_FILE" \
+  --recovery "$RECOVERY_ID" \
+  --expected-action-fence "$ACTION_FENCE" \
+  --idempotency-key "$ADVANCE_KEY" \
+  --json | jq .
+```
+
+Repeat status plus one `advance` with a newly numbered key and the newly
+returned fence until `phase` is `replayed`. If an acknowledgement is lost, do
+not read a newer status and do not invent a new key: retry the exact command
+with the saved key and fence. A persisted action rotates the fence; a stale
+fence returns 409 without mutation.
+
+Then use the same serial pattern with `verify` until `sealed=true`:
+
+```sh
+STEP=1
+STATUS="$(witself-admin email-domain recovery status \
+  --endpoint "$CONTROL_PLANE_URL" \
+  --token-file "$PLATFORM_ADMIN_TOKEN_FILE" \
+  --recovery-token-file "$RECOVERY_TOKEN_FILE" \
+  --recovery "$RECOVERY_ID" --json)"
+ACTION_FENCE="$(jq -er '.action_fence | select(test("^[0-9a-f]{64}$"))' \
+  <<<"$STATUS")"
+VERIFY_KEY="$RECOVERY_ID-verify-$STEP"
+
+witself-admin email-domain recovery verify \
+  --endpoint "$CONTROL_PLANE_URL" \
+  --token-file "$PLATFORM_ADMIN_TOKEN_FILE" \
+  --recovery-token-file "$RECOVERY_TOKEN_FILE" \
+  --recovery "$RECOVERY_ID" \
+  --expected-action-fence "$ACTION_FENCE" \
+  --idempotency-key "$VERIFY_KEY" \
+  --json | jq .
+```
+
+Stop immediately on `failed=true`, a missing complete checkpoint, sequence gap,
+fork, digest mismatch, authority limit, nonempty target, invalid fence, or an
+unexpected collision. Never delete or reuse that target. The sealed object is
+restore-drill evidence only; there is no merge, promotion, active-object
+selector, or cutover endpoint.
+
+### 8. Prove non-activation and close the rollout
+
+Read active status again and compare the complete `.head` with
+`ACTIVE_BEFORE`. With administrator mutations frozen, they must be identical.
+Confirm the sealed recovery status is still readable, r2.dev remains disabled,
+the customer request gate remains absent, the journal-required status remains
+exactly true, and no DNS, Email Routing, edge directory, cell, plan, or delivery
+configuration changed.
+The customer request endpoint must continue returning
+`custom_domain_requests_disabled` for an authenticated account operator.
+
+Leave `CP_AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_ENABLED` enabled after the drill;
+once the journal head exists, journal-unaware writers are unsafe. Do not enable
+`CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUESTS_ENABLED` until the 10,000-key capacity
+blocker and every ownership, lifecycle, projection, and receive-canary blocker
+in [agent-email.md](agent-email.md) is closed.
+
+### Stop and rollback rules
+
+- Before bootstrap begins, a code rollback to the previous clean release tag is
+  safe. Keep the bucket and secret; they are inert without the new code.
+- After bootstrap, the previous code is journal-unaware. It is an emergency
+  rollback only while the customer request gate remains absent, all
+  custom-domain administrator mutations are operationally blocked, and the
+  active authority is proven unchanged. Restore service, then roll forward to
+  journal-aware code before allowing any authority mutation.
+- After any post-bootstrap authority mutation, or after this rollout enables
+  the journal-required gate, do not deploy journal-unaware code. Roll
+  forward. Otherwise a successful old-code write could exist without its R2
+  after-image.
+- Never delete or truncate the journal bucket, clear a pending/fork fence,
+  mutate the fixed `global` object, delete a sealed recovery target, or treat a
+  recovery object as active authority during rollback.
+- Rotating a suspected recovery credential is independent of code rollback:
+  replace the Worker secret and the owner-only operator file together, then
+  verify dual authentication again.
+
 ## Bootstrap, checkpoint, and drill the realm-email-alias authority journal
 
 This is a control-plane procedure. It does not restore a cell database and it

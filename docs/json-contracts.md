@@ -1369,6 +1369,95 @@ add `state`, `account_id`, and `domain`. Audit adds `action`, `account_id`,
 `domain`, and `limit=1..100`. Filtering examines only the bounded underlying
 page, so an empty filtered page may still have a continuation cursor.
 
+### Agent-email custom-domain authority journal and empty-target recovery
+
+Every route in this section requires the ordinary platform-admin bearer token
+and the distinct header:
+
+```text
+X-Witself-Agent-Email-Domain-Recovery: <separate recovery credential>
+```
+
+The credential is a Worker secret and is never returned or forwarded to a
+Durable Object. `GET /v1/admin/agent-email-domain-journal` reports only
+value-free journal state: `enabled`, `required`, the exact `head` (or null),
+`pending`, `forked`, and bounded bootstrap progress. A head contains
+`stream_id`, `sequence`, `hash`, `authority_epoch`, `registry_revision`, and
+`audit_sequence`. Custom-domain journal stream ids use `aedj_` followed by
+16–52 lowercase base32 characters.
+
+Bootstrap and checkpoint accept:
+
+```json
+{
+  "reason": "establish portable custom-domain authority baseline",
+  "idempotency_key": "custom-domain-journal-bootstrap-2026-08-07"
+}
+```
+
+Each call advances at most one bounded page and returns `kind`, `phase`,
+`complete`, `frozen`, `authority_keys`, `scanned_keys`, `head`, and `pending`.
+Repeat the exact call and idempotency key until `complete` is true. Authority
+writes remain frozen until completion; failure does not silently remove the
+fence. Bootstrap is required for an existing unjournaled registry before the
+exact-true `CP_AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_ENABLED` gate can safely be
+enabled. A checkpoint appends a full-state digest at an exact journal head.
+Journal maintenance and recovery are deliberately bounded to 10,000 authority
+keys. Exceeding that ceiling fails closed with
+`agent_email_domain_journal_authority_limit_exceeded`; the customer request
+gate must remain disabled until capacity below this ceiling is demonstrated or
+the recovery design is revised.
+
+Starting a recovery accepts:
+
+```json
+{
+  "recovery_id": "aedrec_aaaaaaaaaaaaaaaa",
+  "source_stream_id": "aedj_bbbbbbbbbbbbbbbb",
+  "expected_head": {
+    "sequence": 42,
+    "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "reason": "quarterly custom-domain empty-target restore drill",
+  "idempotency_key": "custom-domain-restore-drill-2026-08-07"
+}
+```
+
+The target is always `recovery:<recovery_id>` and must be empty. It may not be
+the fixed active authority object, `global`. Recovery status and action results
+use schema `witself.agent-email-domain-recovery.v1` and expose only the recovery
+id, source/expected/replayed heads, phase, authority and derived key counts,
+state digest, `sealed`, `failed`, a value-free failure code, lifecycle
+timestamps, and `action_fence`. The fence is an opaque 256-bit value encoded as
+exactly 64 lowercase hexadecimal characters. Use the current value in every
+action request:
+
+```json
+{
+  "idempotency_key": "aedrec_aaaaaaaaaaaaaaaa-advance-1",
+  "expected_action_fence": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+}
+```
+
+Drive one action at a time. Call `:advance` for each bounded journal step until
+phase `replayed`; then call `:verify` for each bounded derived rebuild step
+until `sealed=true`. Every successfully persisted action, including the final
+seal, atomically stores and returns a fresh fence. For an ambiguous response,
+retry the byte-equivalent request with the same route, actor, recovery id,
+idempotency key, and expected fence. A stale or mismatched fence returns 409
+without mutation.
+
+The expected head is an exact journal head, not necessarily the checkpoint
+entry itself. It may identify a later mutation, provided replaying the chain to
+that head crosses a complete, valid bootstrap or checkpoint entry. A chain
+with no complete checkpoint fails closed.
+
+The final target is sealed evidence for a restore drill, not active authority.
+No journal or recovery response publishes DNS, changes mail delivery, enables
+`CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUESTS_ENABLED`, selects a registry object, or
+cuts over from the fixed `global` object. Such promotion requires a separately
+designed and reviewed protocol.
+
 ### Realm-email-alias authority journal and empty-target recovery
 
 Every route in this section requires the ordinary platform-admin bearer token

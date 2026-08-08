@@ -1,4 +1,10 @@
+import {
+  AgentEmailDomainJournalRuntime,
+  AgentEmailDomainJournalRuntimeError,
+} from "./agent-email-domain-journal-runtime.mjs";
+
 const SCHEMA_VERSION = "witself.agent-email-domain.v1";
+const RECOVERY_SCHEMA_VERSION = "witself.agent-email-domain-recovery.v1";
 const META_KEY = "meta";
 const DEFAULT_REGISTRY_OBJECT_NAME = "global";
 const ACCOUNT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
@@ -40,9 +46,15 @@ function json(value, status = 200) {
   });
 }
 
-function errorResponse(message, status, code = "", details = {}) {
+function errorResponse(
+  message,
+  status,
+  code = "",
+  details = {},
+  schemaVersion = SCHEMA_VERSION,
+) {
   return json({
-    schema_version: SCHEMA_VERSION,
+    schema_version: schemaVersion,
     error: message,
     ...(code ? { code } : {}),
     ...details,
@@ -342,6 +354,25 @@ export class DurableAgentEmailDomainRegistry {
     this.newRequestID = dependencies.newRequestID ?? newRequestID;
     this.newChallengeToken =
       dependencies.newChallengeToken ?? newChallengeToken;
+    this.authorityJournal = new AgentEmailDomainJournalRuntime(
+      this.storage,
+      this.env,
+      {
+        now: this.now,
+        ...(dependencies.newJournalStreamID
+          ? { newStreamID: dependencies.newJournalStreamID }
+          : {}),
+        ...(dependencies.afterJournalAppend
+          ? { afterJournalAppend: dependencies.afterJournalAppend }
+          : {}),
+        ...(dependencies.newRecoveryActionFence
+          ? { newRecoveryActionFence: dependencies.newRecoveryActionFence }
+          : {}),
+        ...(dependencies.afterRecoveryAction
+          ? { afterRecoveryAction: dependencies.afterRecoveryAction }
+          : {}),
+      },
+    );
     this.queue = Promise.resolve();
   }
 
@@ -359,15 +390,69 @@ export class DurableAgentEmailDomainRegistry {
     if (request.method !== "POST") {
       return errorResponse("domain registry endpoint not found", 404);
     }
+    const path = new URL(request.url).pathname;
+    const recoveryControlPath = path.startsWith("/journal/") ||
+      path.startsWith("/recovery/");
     let input;
     try {
       input = await request.json();
     } catch {
-      return errorResponse("invalid JSON body", 400);
+      return errorResponse(
+        "invalid JSON body",
+        400,
+        "",
+        {},
+        recoveryControlPath ? RECOVERY_SCHEMA_VERSION : SCHEMA_VERSION,
+      );
     }
     try {
+      const rawApply = this.atomicRaw.bind(this);
+      // Recovery targets must still be literally empty when recovery starts.
+      // Journal and recovery control routes therefore run before ensureMeta().
+      if (path === "/journal/status") {
+        return json({
+          schema_version: RECOVERY_SCHEMA_VERSION,
+          ...await this.authorityJournal.status(),
+        });
+      }
+      if (path === "/journal/bootstrap" || path === "/journal/checkpoint") {
+        const result = path === "/journal/bootstrap"
+          ? await this.authorityJournal.bootstrap(input, rawApply)
+          : await this.authorityJournal.checkpoint(input, rawApply);
+        return json({ schema_version: RECOVERY_SCHEMA_VERSION, ...result });
+      }
+      if (path === "/recovery/start") {
+        const result = await this.authorityJournal.startRecovery(input, rawApply);
+        return json({ schema_version: RECOVERY_SCHEMA_VERSION, ...result }, 202);
+      }
+      if (path === "/recovery/status") {
+        const result = await this.authorityJournal.recoveryStatus(
+          input?.recovery_id,
+        );
+        return result
+          ? json({ schema_version: RECOVERY_SCHEMA_VERSION, ...result })
+          : errorResponse(
+            "custom inbound domain recovery not found",
+            404,
+            "",
+            {},
+            RECOVERY_SCHEMA_VERSION,
+          );
+      }
+      if (path === "/recovery/advance" || path === "/recovery/verify") {
+        const result = path === "/recovery/advance"
+          ? await this.authorityJournal.advanceRecovery(input, rawApply)
+          : await this.authorityJournal.verifyRecovery(input, rawApply);
+        return json(
+          { schema_version: RECOVERY_SCHEMA_VERSION, ...result },
+          result.sealed || result.failed ? 200 : 202,
+        );
+      }
+
+      await this.authorityJournal.resume(rawApply);
+      await this.authorityJournal.assertOperationalReady();
       await this.ensureMeta();
-      switch (new URL(request.url).pathname) {
+      switch (path) {
         case "/request/create":
           return await this.createRequest(input);
         case "/request/list":
@@ -386,9 +471,47 @@ export class DurableAgentEmailDomainRegistry {
           return errorResponse("domain registry endpoint not found", 404);
       }
     } catch (error) {
-      return error instanceof DomainRegistryError
-        ? errorResponse(error.message, error.status, error.code, error.details)
-        : errorResponse("custom inbound domain registry failed", 500);
+      const journalError = error instanceof AgentEmailDomainJournalRuntimeError;
+      const journalConflictCodes = new Set([
+        "agent_email_domain_journal_already_bootstrapped",
+        "agent_email_domain_journal_fence_mismatch",
+        "agent_email_domain_journal_fork_detected",
+        "agent_email_domain_journal_idempotency_conflict",
+        "agent_email_domain_recovery_checkpoint_invalid",
+        "agent_email_domain_recovery_collision",
+        "agent_email_domain_recovery_digest_mismatch",
+        "agent_email_domain_recovery_action_fence_mismatch",
+        "agent_email_domain_recovery_action_not_allowed",
+        "agent_email_domain_recovery_idempotency_conflict",
+        "agent_email_domain_recovery_incomplete",
+        "agent_email_domain_recovery_invariant_failed",
+        "agent_email_domain_recovery_revision_regression",
+        "agent_email_domain_recovery_target_not_empty",
+        "agent_email_domain_recovery_target_sealed",
+        "agent_email_domain_recovery_tombstone_resurrection",
+        "agent_email_domain_recovery_upgrade_required",
+      ]);
+      const journalBadRequestCodes = new Set([
+        "agent_email_domain_journal_maintenance_invalid",
+        "agent_email_domain_recovery_request_invalid",
+      ]);
+      return errorResponse(
+        error instanceof DomainRegistryError || journalError
+          ? String(error.message)
+          : "custom inbound domain registry failed",
+        error instanceof DomainRegistryError
+          ? error.status
+          : journalBadRequestCodes.has(error?.code)
+          ? 400
+          : journalConflictCodes.has(error?.code)
+          ? 409
+          : journalError
+          ? 503
+          : 500,
+        error instanceof DomainRegistryError || journalError ? error.code : "",
+        error instanceof DomainRegistryError ? error.details : {},
+        recoveryControlPath ? RECOVERY_SCHEMA_VERSION : SCHEMA_VERSION,
+      );
     }
   }
 
@@ -412,11 +535,20 @@ export class DurableAgentEmailDomainRegistry {
       created_at: now,
       updated_at: now,
     };
-    await this.storage.put(META_KEY, meta);
+    await this.atomic([[META_KEY, meta]]);
     return meta;
   }
 
-  async atomic(entries, deletes = []) {
+  async atomic(entries, deletes = [], options = {}) {
+    return this.authorityJournal.commit(
+      entries,
+      deletes,
+      options,
+      this.atomicRaw.bind(this),
+    );
+  }
+
+  async atomicRaw(entries, deletes = []) {
     const apply = async (storage) => {
       for (const [key, value] of entries) await storage.put(key, value);
       for (const key of deletes) await storage.delete(key);

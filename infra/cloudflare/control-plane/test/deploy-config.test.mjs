@@ -170,10 +170,25 @@ test("release renderer injects immutable container build identity", async (t) =>
     /"binding"\s*:\s*"REALM_EMAIL_ALIAS_AUTHORITY_JOURNAL"\s*,\s*"bucket_name"\s*:\s*"witself-realm-email-alias-authority-journal"/,
     "release config must bind a dedicated realm-email alias authority journal",
   );
+  assert.match(
+    config,
+    /"binding"\s*:\s*"AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL"\s*,\s*"bucket_name"\s*:\s*"witself-agent-email-domain-authority-journal"/,
+    "release config must bind a dedicated customer-domain authority journal",
+  );
   assert.doesNotMatch(
     config,
     /"CP_REALM_EMAIL_ALIAS_RECOVERY_TOKEN"\s*:/,
     "the distinct recovery credential must remain a Worker secret",
+  );
+  assert.doesNotMatch(
+    config,
+    /"CP_AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_ENABLED"\s*:/,
+    "ordinary deployments must not reset the customer-domain journal gate",
+  );
+  assert.doesNotMatch(
+    config,
+    /"CP_AGENT_EMAIL_DOMAIN_RECOVERY_TOKEN"\s*:/,
+    "the customer-domain recovery credential must remain a Worker secret",
   );
   assert.doesNotMatch(config, /__WITSELF_[A-Z_]+__/);
   assert.doesNotMatch(config, /__EMAIL_DIRECTORY_KV_ID__/);
