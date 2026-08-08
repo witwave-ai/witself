@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -16,7 +17,7 @@ import (
 func emailDomainAdminCmd(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr,
-			"usage: witself-admin email-domain (requests|audit) ...")
+			"usage: witself-admin email-domain (requests|audit|journal|recovery) ...")
 		return 2
 	}
 	switch args[0] {
@@ -24,11 +25,87 @@ func emailDomainAdminCmd(args []string) int {
 		return emailDomainAdminRequests(args[1:])
 	case "audit":
 		return emailDomainAdminAudit(args[1:])
+	case "journal":
+		return emailDomainAdminJournal(args[1:])
+	case "recovery":
+		return emailDomainAdminRecovery(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr,
 			"witself-admin email-domain: unknown subcommand %q\n", args[0])
 		return 2
 	}
+}
+
+type emailDomainRecoveryCommon struct {
+	emailDomainAdminCommon
+	recoveryTokenFile *string
+}
+
+func newEmailDomainRecoveryCommon(name string, mutation bool) emailDomainRecoveryCommon {
+	common := newEmailDomainAdminCommon(name, mutation)
+	if mutation {
+		common.flagSet.Lookup("idempotency-key").Usage =
+			"required exact retry key"
+	}
+	return emailDomainRecoveryCommon{
+		emailDomainAdminCommon: common,
+		recoveryTokenFile: common.flagSet.String("recovery-token-file", "",
+			"file containing the distinct custom-domain recovery token"),
+	}
+}
+
+func resolveAgentEmailDomainRecoveryToken(flagValue string) (string, error) {
+	if path := strings.TrimSpace(flagValue); path != "" {
+		return readAgentEmailDomainRecoveryTokenFile(path)
+	}
+	if path := strings.TrimSpace(os.Getenv(
+		"WITSELF_AGENT_EMAIL_DOMAIN_RECOVERY_TOKEN_FILE")); path != "" {
+		return readAgentEmailDomainRecoveryTokenFile(path)
+	}
+	if path, err := managedTokenPath("agent-email-domain-recovery.token"); err == nil {
+		if token, readErr := readAgentEmailDomainRecoveryTokenFile(path); readErr == nil {
+			return token, nil
+		}
+	}
+	return "", fmt.Errorf("no custom-domain recovery token file — use --recovery-token-file, WITSELF_AGENT_EMAIL_DOMAIN_RECOVERY_TOKEN_FILE, or ~/.witself/tokens/agent-email-domain-recovery.token")
+}
+
+func readAgentEmailDomainRecoveryTokenFile(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", fmt.Errorf("inspect custom-domain recovery token file %q: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return "", fmt.Errorf("custom-domain recovery token file %q must be a regular file, not a symlink", path)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		return "", fmt.Errorf("custom-domain recovery token file %q must be owner-only (mode 0600 or stricter)", path)
+	}
+	return readTokenFile(path)
+}
+
+func (c emailDomainRecoveryCommon) recoveryCredentials() (string, string, string, error) {
+	endpoint, adminToken, err := c.credentials()
+	if err != nil {
+		return "", "", "", err
+	}
+	recoveryToken, err := resolveAgentEmailDomainRecoveryToken(*c.recoveryTokenFile)
+	if err != nil {
+		return "", "", "", err
+	}
+	return endpoint, adminToken, recoveryToken, nil
+}
+
+func (c emailDomainRecoveryCommon) exactMutation() (string, string, error) {
+	reason := strings.TrimSpace(*c.reason)
+	key := strings.TrimSpace(*c.idempotency)
+	if reason == "" {
+		return "", "", fmt.Errorf("--reason is required")
+	}
+	if key == "" {
+		return "", "", fmt.Errorf("--idempotency-key is required for retry-safe journal/recovery work")
+	}
+	return key, reason, nil
 }
 
 type emailDomainAdminCommon struct {
@@ -188,6 +265,197 @@ func emailDomainAdminRequests(args []string) int {
 			"witself-admin email-domain requests: unknown action %q\n", action)
 		return 2
 	}
+}
+
+func emailDomainAdminJournal(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr,
+			"usage: witself-admin email-domain journal (status|bootstrap|checkpoint) ...")
+		return 2
+	}
+	action := args[0]
+	if action != "status" && action != "bootstrap" && action != "checkpoint" {
+		fmt.Fprintf(os.Stderr,
+			"witself-admin email-domain journal: unknown action %q\n", action)
+		return 2
+	}
+	common := newEmailDomainRecoveryCommon("email-domain journal "+action,
+		action != "status")
+	if err := common.flagSet.Parse(args[1:]); err != nil || common.flagSet.NArg() != 0 {
+		return 2
+	}
+	endpoint, adminToken, recoveryToken, err := common.recoveryCredentials()
+	if err != nil {
+		return printEmailDomainAdminError(err, 2)
+	}
+	if action == "status" {
+		status, getErr := client.GetAdminAgentEmailDomainJournal(
+			context.Background(), endpoint, adminToken, recoveryToken)
+		if getErr != nil {
+			return printEmailDomainAdminError(getErr, 1)
+		}
+		if *common.json {
+			return printJSON(status)
+		}
+		printEmailDomainJournalStatus(status)
+		return 0
+	}
+	key, reason, err := common.exactMutation()
+	if err != nil {
+		return printEmailDomainAdminError(err, 2)
+	}
+	var progress *client.AgentEmailDomainJournalProgress
+	if action == "bootstrap" {
+		progress, err = client.BootstrapAdminAgentEmailDomainJournal(
+			context.Background(), endpoint, adminToken, recoveryToken, reason, key)
+	} else {
+		progress, err = client.CheckpointAdminAgentEmailDomainJournal(
+			context.Background(), endpoint, adminToken, recoveryToken, reason, key)
+	}
+	if err != nil {
+		return printEmailDomainAdminError(err, 1)
+	}
+	if *common.json {
+		return printJSON(progress)
+	}
+	printEmailDomainJournalProgress(progress)
+	return 0
+}
+
+func emailDomainAdminRecovery(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr,
+			"usage: witself-admin email-domain recovery (start|status|advance|verify) ...")
+		return 2
+	}
+	action := args[0]
+	if action != "start" && action != "status" && action != "advance" &&
+		action != "verify" {
+		fmt.Fprintf(os.Stderr,
+			"witself-admin email-domain recovery: unknown action %q\n", action)
+		return 2
+	}
+	common := newEmailDomainRecoveryCommon("email-domain recovery "+action,
+		action == "start")
+	recoveryID := common.flagSet.String("recovery", "", "aedrec_ recovery id (required)")
+	sourceStream := common.flagSet.String("source-stream", "", "exact aedj_ source stream (start only)")
+	expectedSequence := common.flagSet.Int64("expected-sequence", 0, "exact journal-head sequence (start only)")
+	expectedHash := common.flagSet.String("expected-hash", "", "exact journal-head SHA-256 (start only)")
+	expectedActionFence := common.flagSet.String("expected-action-fence", "", "exact current action fence (advance/verify only)")
+	actionKey := common.idempotency
+	if action != "start" {
+		actionKey = common.flagSet.String("idempotency-key", "",
+			"exact retry key (advance/verify only)")
+	}
+	if err := common.flagSet.Parse(args[1:]); err != nil || common.flagSet.NArg() != 0 ||
+		strings.TrimSpace(*recoveryID) == "" {
+		return 2
+	}
+	endpoint, adminToken, recoveryToken, err := common.recoveryCredentials()
+	if err != nil {
+		return printEmailDomainAdminError(err, 2)
+	}
+	var status *client.AgentEmailDomainRecoveryStatus
+	switch action {
+	case "status":
+		if strings.TrimSpace(*sourceStream) != "" || *expectedSequence != 0 ||
+			strings.TrimSpace(*expectedHash) != "" ||
+			strings.TrimSpace(*expectedActionFence) != "" ||
+			strings.TrimSpace(*actionKey) != "" {
+			return printEmailDomainAdminError(
+				fmt.Errorf("start/action flags are not valid for recovery status"), 2)
+		}
+		status, err = client.GetAdminAgentEmailDomainRecovery(
+			context.Background(), endpoint, adminToken, recoveryToken, *recoveryID)
+	case "start":
+		if strings.TrimSpace(*sourceStream) == "" || *expectedSequence < 1 ||
+			strings.TrimSpace(*expectedHash) == "" ||
+			strings.TrimSpace(*expectedActionFence) != "" {
+			return printEmailDomainAdminError(
+				fmt.Errorf("recovery start requires --source-stream, --expected-sequence, and --expected-hash"), 2)
+		}
+		key, reason, mutationErr := common.exactMutation()
+		if mutationErr != nil {
+			return printEmailDomainAdminError(mutationErr, 2)
+		}
+		status, err = client.StartAdminAgentEmailDomainRecovery(
+			context.Background(), endpoint, adminToken, recoveryToken,
+			*recoveryID, *sourceStream, *expectedSequence, *expectedHash,
+			reason, key)
+	case "advance", "verify":
+		if strings.TrimSpace(*sourceStream) != "" || *expectedSequence != 0 ||
+			strings.TrimSpace(*expectedHash) != "" ||
+			strings.TrimSpace(*expectedActionFence) == "" ||
+			strings.TrimSpace(*actionKey) == "" {
+			return printEmailDomainAdminError(
+				fmt.Errorf("recovery %s requires --expected-action-fence and --idempotency-key", action), 2)
+		}
+		if action == "advance" {
+			status, err = client.AdvanceAdminAgentEmailDomainRecovery(
+				context.Background(), endpoint, adminToken, recoveryToken,
+				*recoveryID, *actionKey, *expectedActionFence)
+		} else {
+			status, err = client.VerifyAdminAgentEmailDomainRecovery(
+				context.Background(), endpoint, adminToken, recoveryToken,
+				*recoveryID, *actionKey, *expectedActionFence)
+		}
+	}
+	if err != nil {
+		return printEmailDomainAdminError(err, 1)
+	}
+	if *common.json {
+		return printJSON(status)
+	}
+	printEmailDomainRecoveryStatus(status)
+	return 0
+}
+
+func printEmailDomainJournalStatus(status *client.AgentEmailDomainJournalStatus) {
+	stream, hash := "-", "-"
+	var sequence, registryRevision, auditSequence int64
+	if status.Head != nil {
+		stream, hash = status.Head.StreamID, status.Head.Hash
+		sequence = status.Head.Sequence
+		registryRevision = status.Head.RegistryRevision
+		auditSequence = status.Head.AuditSequence
+	}
+	w, flush := tableWriter(
+		"enabled\trequired\tpending\tforked\tstream\tsequence\thash\tregistry_revision\taudit_sequence")
+	_, _ = fmt.Fprintf(w, "%t\t%t\t%t\t%t\t%s\t%d\t%s\t%d\t%d\n",
+		status.Enabled, status.Required, status.Pending, status.Forked,
+		emailDomainAdminColumn(stream), sequence, emailDomainAdminColumn(hash),
+		registryRevision, auditSequence)
+	flush()
+}
+
+func printEmailDomainJournalProgress(progress *client.AgentEmailDomainJournalProgress) {
+	stream, hash := "-", "-"
+	var sequence int64
+	if progress.Head != nil {
+		stream, hash, sequence = progress.Head.StreamID, progress.Head.Hash,
+			progress.Head.Sequence
+	}
+	w, flush := tableWriter(
+		"kind\tphase\tcomplete\tfrozen\tauthority_keys\tscanned_keys\tstream\tsequence\thash")
+	_, _ = fmt.Fprintf(w, "%s\t%s\t%t\t%t\t%d\t%d\t%s\t%d\t%s\n",
+		emailDomainAdminColumn(progress.Kind), emailDomainAdminColumn(progress.Phase),
+		progress.Complete, progress.Frozen, progress.AuthorityKeys,
+		progress.ScannedKeys, emailDomainAdminColumn(stream), sequence,
+		emailDomainAdminColumn(hash))
+	flush()
+}
+
+func printEmailDomainRecoveryStatus(status *client.AgentEmailDomainRecoveryStatus) {
+	w, flush := tableWriter(
+		"recovery\tstream\tphase\tauthority_keys\tderived_keys\tsealed\tfailed\tfailure_code\taction_fence")
+	_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%t\t%t\t%s\t%s\n",
+		emailDomainAdminColumn(status.RecoveryID),
+		emailDomainAdminColumn(status.SourceStream),
+		emailDomainAdminColumn(status.Phase), status.AuthorityKeys,
+		status.DerivedKeys, status.Sealed, status.Failed,
+		emailDomainAdminColumn(status.FailureCode),
+		emailDomainAdminColumn(status.ActionFence))
+	flush()
 }
 
 func emailDomainAdminAudit(args []string) int {

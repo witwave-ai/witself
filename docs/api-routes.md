@@ -221,6 +221,13 @@ GET  /v1/admin/agent-email-domain-requests/{request_id}
 POST /v1/admin/agent-email-domain-requests/{request_id}:reject
 POST /v1/admin/agent-email-domain-requests/{request_id}:retire
 GET  /v1/admin/agent-email-domain-audit
+GET  /v1/admin/agent-email-domain-journal
+POST /v1/admin/agent-email-domain-journal:bootstrap
+POST /v1/admin/agent-email-domain-journal:checkpoint
+POST /v1/admin/agent-email-domain-recoveries
+GET  /v1/admin/agent-email-domain-recoveries/{recovery_id}
+POST /v1/admin/agent-email-domain-recoveries/{recovery_id}:advance
+POST /v1/admin/agent-email-domain-recoveries/{recovery_id}:verify
 
 # Edge-to-control-plane authenticated fallback; not a customer route.
 GET  /v1/email/realm-routes/{domain}/{realm_label}
@@ -262,6 +269,18 @@ also use bounded opaque cursors. Their filters are `state`, `account_id`, and
 `domain` for administrator requests and `action`, `account_id`, `domain`, and
 `limit` for audit. The request registry is deliberately not a DNS or mail
 control surface.
+
+Custom-domain journal and recovery administration requires both the ordinary
+platform-admin bearer token and the distinct
+`X-Witself-Agent-Email-Domain-Recovery` credential. Bootstrap and checkpoint
+freeze authority writes and advance one bounded page per byte-equivalent
+retry. Recovery creation requires an `aedrec_` id, an `aedj_` stream, and the
+exact journal-head sequence/hash; replay to that head must cross a complete
+checkpoint. It can target only the derived empty Durable Object
+`recovery:<recovery_id>`. Advance and verify require the exact current
+64-lowercase-hex action fence and an idempotency key. A verified target is
+permanently sealed. These routes have no active-object selector, DNS mutation,
+route publication, delivery action, or gate activation.
 
 Sensitive/action routes must use `POST`, never `GET`.
 

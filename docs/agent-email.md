@@ -611,6 +611,22 @@ allows at most eight open requests per account. Rejected and retired records
 remain non-reusable tombstones until an explicit, proof-backed domain transfer
 and quarantine policy is implemented.
 
+The global custom-domain request registry now has a portable, append-only
+authority journal and bounded empty-target recovery foundation. Each authority
+mutation writes a create-only, hash-chained R2 after-image before the mutation
+can report success. Bootstrap and checkpoint freeze authority writes while
+they scan bounded pages. Recovery accepts only an exact `aedj_` journal head
+and replays into the named empty Durable Object
+`recovery:<aedrec_...>`. It rebuilds derived indexes, compares the complete
+authority digest, and permanently seals the drill target. The active authority
+object remains fixed at `global`: there is no merge, promotion, or cutover
+selector. Journal maintenance never changes DNS, Cloudflare Email Routing,
+cell projection, delivery, plan policy, or the customer request gate.
+The journal and recovery implementation has a hard 10,000-authority-key
+ceiling. That is an activation blocker, not a customer-facing plan limit: keep
+the request gate dark until current usage and worst-case request growth fit
+comfortably below the ceiling, or replace the bounded recovery design.
+
 Do not enable the request gate for customers in this phase. An unverified
 request deliberately takes a permanent tombstone; without proof and transfer
 governance, exposing creation would let one account squat on another
@@ -637,11 +653,12 @@ witself-admin email-domain audit
 This dark slice performs no DNS lookup or write, Cloudflare zone or Email
 Routing mutation, MX activation, edge-directory publication, cell projection,
 mail acceptance, or outbound-domain configuration. Before the request gate can
-be enabled, follow-on work must add portable authority recovery, account
-move/archive/close reconciliation, verified ownership and re-verification,
-downgrade behavior, exact realm-label binding, cell/edge domain projections,
-and a separately reviewed receive canary. Managed-domain activation never
-implicitly enables this lifecycle.
+be enabled, operators must provision the private journal bucket, bootstrap the
+existing registry, run and preserve a successful sealed empty-target restore
+drill, and separately close account move/archive/close reconciliation, verified
+ownership and re-verification, downgrade behavior, exact realm-label binding,
+cell/edge domain projections, and a reviewed receive canary. Managed-domain
+activation never implicitly enables this lifecycle.
 
 **Agent local part (settled).** The agent-name-to-local-part rule must handle
 arbitrary input — the API accepts any non-empty string as an agent name; only

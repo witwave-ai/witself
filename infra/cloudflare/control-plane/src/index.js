@@ -133,6 +133,10 @@ import {
   DurableAgentEmailDomainRegistry,
 } from "./agent-email-domain-runtime.mjs";
 import {
+  handleAgentEmailDomainRecoveryAdminRequest,
+  isAgentEmailDomainRecoveryAdminPath,
+} from "./agent-email-domain-recovery-api.mjs";
+import {
   handleRealmEmailAliasRecoveryAdminRequest,
   isRealmEmailAliasRecoveryAdminPath,
 } from "./realm-email-alias-recovery-api.mjs";
@@ -4212,6 +4216,16 @@ export default {
         request,
         env,
         agentEmailDomainCustomer,
+      );
+    }
+    if (isAgentEmailDomainRecoveryAdminPath(url.pathname)) {
+      const admin = await adminAuthorized(request, env);
+      if (!admin) return err("unauthorized", 401);
+      return handleAgentEmailDomainRecoveryAdminRequest(
+        request,
+        env,
+        url,
+        admin,
       );
     }
     if (isAgentEmailDomainAdminPath(url.pathname)) {

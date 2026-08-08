@@ -477,6 +477,15 @@ globally unique request and a stable TXT ownership challenge. It does not query
 DNS, mark ownership verified, publish MX or Email Routing configuration, write
 a cell/edge route, or accept mail for the domain.
 
+The control-plane authority is protected by a separate create-only R2 journal.
+After the existing registry has been bootstrapped and a sealed empty-target
+restore drill succeeds, operators enable only
+`CP_AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_ENABLED=true`; this does not enable
+the customer request feature. Journal maintenance and recovery currently fail
+closed above 10,000 authority keys. Because requests and permanent tombstones
+grow that global authority over time, the bound is an explicit request-gate
+activation blocker rather than a plan limit.
+
 Activation follows the established two-phase limit rollout. Phase A adds the
 closed feature/limit vocabulary, control-plane Durable Object, APIs, and admin
 client while intentionally leaving both keys absent from
