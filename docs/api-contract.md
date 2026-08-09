@@ -732,12 +732,14 @@ That boundary is tracked in [deployment-cells.md](deployment-cells.md).
 
 The control plane also owns the dark organization-domain request surface:
 account-operator `GET|POST /v1/accounts/{account_id}/email-domain-requests` and platform-administrator
-list/show/reject/retire/audit routes under
+list/show/verify/reject/retire/audit, journal, and sealed recovery routes under
 `/v1/admin/agent-email-domain-*`. The current
-`witself.agent-email-domain.v1` contract stops at a stable TXT ownership
-challenge. It has no verified/active transition, DNS/provider mutation, edge
-projection, cell mutation, or mail-delivery path; its independent exact-`true`
-request gate is absent from release configuration.
+`witself.agent-email-domain.v1` contract includes a stable TXT ownership
+challenge, separately gated manual and scheduled DNS observation,
+ownership/lifecycle transitions, append-only authority journaling, and sealed
+empty-target recovery. Its independent exact-`true` request and verification
+gates are absent from release configuration. It performs no DNS/provider
+mutation and has no edge projection, cell mutation, or mail-delivery path.
 
 Operational endpoints such as `GET /metrics` are server operations endpoints,
 not versioned product API routes. `/metrics` should be served from the dedicated

@@ -498,6 +498,16 @@ suspension without a client reinstall. Account lifecycle fences suspend during
 move/archive work, republish on resume, and permanently retire on account
 close.
 
+Repeated scheduled checks do not create unbounded storage when their durable
+evidence outcome is unchanged. Each request has at most one overwrite-only,
+journal-local verification refresh plus one derived due entry. The refresh
+advances the effective clocks, retry counter, recursive TTL, and schedule shown
+by request list/show without mutating the authority request/allocation, audit
+history, journal head, capacity count, or R2 stream. A first or changed outcome
+and every newly executed manual check remain audited authority commits.
+Recovery discards the local refresh and conservatively resumes from the last
+journaled request.
+
 None of these states publishes MX or Email Routing configuration, writes a
 cell or edge route, or accepts mail for the domain. Request creation,
 verification, routing/projection, and delivery remain separate activation
@@ -508,10 +518,10 @@ After the existing registry has been bootstrapped and a sealed empty-target
 restore drill succeeds, operators enable only
 `CP_AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_ENABLED=true`; this does not enable
 the customer request feature. Journal maintenance and recovery currently fail
-closed above 10,000 authority keys. Requests, observations, plan/lifecycle
-fences, audit history, and permanent verified-domain tombstones grow that
-global authority over time, so the bound is an explicit request-gate activation
-blocker rather than a plan limit.
+closed above 10,000 authority keys. Requests, first or changed observations,
+manual checks, plan/lifecycle fences, audit history, and permanent
+verified-domain tombstones grow that global authority over time, so the bound
+is an explicit request-gate activation blocker rather than a plan limit.
 
 Activation follows the established two-phase limit rollout. Phase A adds the
 closed feature/limit vocabulary, control-plane Durable Object, APIs, and admin

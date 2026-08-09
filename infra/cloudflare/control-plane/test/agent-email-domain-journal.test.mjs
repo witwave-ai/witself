@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_GENESIS_HASH,
   AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_SCHEMA_VERSION,
+  AGENT_EMAIL_DOMAIN_VERIFICATION_REFRESH_SCHEMA_VERSION,
   AgentEmailDomainJournalError,
   agentEmailDomainAuthorityStateDigest,
   agentEmailDomainJournalEntryKey,
@@ -13,6 +14,7 @@ import {
   buildAgentEmailDomainJournalEntry,
   canonicalJSONString,
   classifyAgentEmailDomainStorageKey,
+  isAgentEmailDomainVerificationRefresh,
   rebuildAgentEmailDomainDerivedState,
   replayAgentEmailDomainJournalPage,
   sha256Hex,
@@ -348,10 +350,57 @@ test("storage classification keeps both uniqueness rows canonical", () => {
     "agent-email-domain-journal-meta", "agent-email-domain-journal:bootstrap",
     "agent-email-domain-recovery", "agent-email-domain-recovery:aedrec_test",
     `verification-work:${requestID}`,
+    `verification-refresh:${requestID}`,
   ]) {
     assert.equal(classifyAgentEmailDomainStorageKey(key), "journal_local", key);
   }
   assert.equal(classifyAgentEmailDomainStorageKey("future-key"), "unknown");
+});
+
+test("verification refresh validation binds operational clocks to authority", () => {
+  const authority = verifiedState().get(`request:${requestID}`);
+  const checkedAt = "2026-08-03T15:00:00.000Z";
+  const nextCheckAt = "2026-08-04T15:00:00.000Z";
+  const refresh = {
+    schema_version: AGENT_EMAIL_DOMAIN_VERIFICATION_REFRESH_SCHEMA_VERSION,
+    request_id: requestID,
+    generation: 1,
+    request_state_revision: authority.state_revision,
+    request_updated_at: authority.updated_at,
+    verification_due_key:
+      `verification-due:${String(Date.parse(nextCheckAt)).padStart(16, "0")}:` +
+      requestID,
+    ownership_challenge: {
+      ...authority.ownership_challenge,
+      expires_at: new Date(
+        Date.parse(authority.requested_at) + 7 * 24 * 60 * 60 * 1_000,
+      ).toISOString(),
+    },
+    ownership_verification: {
+      ...authority.ownership_verification,
+      last_checked_at: checkedAt,
+      last_verified_at: checkedAt,
+      next_check_at: nextCheckAt,
+      minimum_ttl_seconds: 30,
+    },
+    updated_at: checkedAt,
+  };
+  const key = `verification-refresh:${requestID}`;
+  assert.equal(
+    isAgentEmailDomainVerificationRefresh(authority, refresh, key),
+    true,
+  );
+  assert.equal(isAgentEmailDomainVerificationRefresh(authority, {
+    ...refresh,
+    request_state_revision: authority.state_revision + 1,
+  }, key), false);
+  assert.equal(isAgentEmailDomainVerificationRefresh(authority, {
+    ...refresh,
+    ownership_verification: {
+      ...refresh.ownership_verification,
+      rrset_sha256: "f".repeat(64),
+    },
+  }, key), false);
 });
 
 test("after-images are bounded and delete only transient authority intents", () => {

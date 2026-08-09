@@ -708,20 +708,41 @@ write-fenced until a normal checkpoint installs the exact capacity record.
 
 External DNS waits now use the durable claim/observe/commit flow above, and the
 plan lifecycle scanner replays an exact already-accepted desired revision/hash
-instead of minting a new revision after a lost bridge completion. A scheduled
-verification whose durable evidence outcome is unchanged still refreshes the
-request, allocation, due index, counters, timestamps, TTL, and journal head,
-but does not add another authority audit key. The comparison excludes clocks,
-retry counts, and recursive-resolver TTL drift. First observations, evidence or
-state changes, restorations, conflicts, expiry, and every manual verification
-remain audited. This bounds stable-retry authority growth, but the immutable R2
-journal stream still grows with every committed refresh and adversarially
-changing DNS can consume audit capacity until admission closes. Keep the
-request and verification gates dark until that stream has an operational
-growth/retention strategy, the capacity counter has been checkpointed and
-monitored in the live object, and exact plan replay has passed a controlled
-canary. Provider route, projection, and delivery topology remains a separate
-activation prerequisite.
+instead of minting a new revision after a lost bridge completion. When a
+scheduled verification has the same durable evidence outcome, it replaces one
+journal-local `verification-refresh:<request_id>` record and moves the one
+derived due entry. That bounded refresh carries the newest check clocks, retry
+counter, recursive-resolver TTL, and next schedule. List and show responses
+overlay those operational values onto the public `ownership_verification`
+projection, while the authority request and allocation, audit/meta state,
+head-bound capacity, journal head, and immutable R2 object count remain
+unchanged. The refresh is bound to the exact request revision and challenge;
+its generation is part of the claim fence, so an older scheduled result cannot
+overwrite a newer refresh.
+
+Writing the first refresh is a forward-only activation boundary for releases
+that predate the `verification-refresh:` key class, including v0.0.237. A dark
+deployment remains rollback-safe while verification is disabled and no refresh
+exists. Once enabled, do not deploy a pre-refresh release: it cannot classify
+the local record or preserve its effective due entry. Supporting that downgrade
+would require a bounded, tested drain that stops claims, removes every refresh
+and work record, restores authority-derived due entries, checkpoints the exact
+head, and proves zero refresh keys plus exact derived parity. No such production
+drain is exposed in this release, so later live activation is forward-only.
+
+First observations, evidence or ownership-state changes, restorations,
+conflicts, expiry, and every newly executed manual verification remain
+authority mutations and are audited and journaled. Recovery deliberately drops
+local refresh and work records, rebuilds the due queue from the last journaled
+request, and may perform one conservative repeat check; that repeat recreates
+the bounded refresh when the outcome is still unchanged. Stable scheduled
+checks therefore no longer grow the R2 stream, although genuinely changing DNS
+and manual checks can still consume audit capacity until admission closes.
+Keep the request and verification gates dark until the refresh and claim
+fences have passed a controlled canary, the capacity counter has been
+checkpointed and monitored in the live object, and exact plan replay has passed
+its canary. Provider route, projection, and delivery topology remains a
+separate activation prerequisite.
 
 Do not enable customer requests or DNS verification in this phase. Parallel,
 expiring challenges avoid unverified squatting, but activation still requires

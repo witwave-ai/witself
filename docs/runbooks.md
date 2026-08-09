@@ -525,21 +525,40 @@ record or writing R2. If bootstrap or checkpoint reports
 dark and redesign or raise the reviewed recovery bound before accepting any
 customer request.
 
-Do not treat that static ceiling or successful admission as evidence that
-long-term journal growth is operationally sustainable. The admin status exposes
-only value-free head-bound counts and a fixed category breakdown; an over-limit
-refusal emits one value-free structured event. The durable
-claim/observe/commit flow resolves DNS outside the global authority lane.
-Scheduled observations whose durable evidence outcome is unchanged do not add
-audit/meta authority keys, even when clocks, counters, or recursive TTLs move;
-first observations, evidence/state changes, and manual checks remain audited.
-Every committed refresh still appends an immutable R2 journal object, however,
-and changing DNS outcomes can consume audit capacity until admission closes.
-Keep both request and verification gates dark until the R2 stream has an
-operational growth/retention strategy, the new claim fences have passed a
-controlled canary, and exact `awaiting_cell` plan recovery has been exercised
-through the durable plan workflow. Custom-domain provider routing, cell
-projection, and mail delivery must be accepted separately.
+Do not treat that static ceiling or successful admission as the whole
+activation case. The admin status exposes only value-free head-bound counts and
+a fixed category breakdown; an over-limit refusal emits one value-free
+structured event. The durable claim/observe/commit flow resolves DNS outside
+the global authority lane. A scheduled observation whose durable evidence
+outcome is unchanged replaces one journal-local
+`verification-refresh:<request_id>` record and its derived due entry. That
+record carries the newest clocks, retry counter, recursive TTL, and schedule,
+and list/show responses expose those effective values. It does not modify the
+authority request or allocation, audit/meta keys, head-bound capacity, journal
+head, or immutable R2 object count. The refresh generation is part of the
+scheduled claim fence.
+
+The first persisted refresh is also a forward-only activation boundary for
+code versions that predate this key class, including v0.0.237. Those versions
+cannot classify `verification-refresh:` and cannot preserve its effective due
+entry. A dark deployment is rollback-safe while the verification gate remains
+absent and no refresh exists. After verification is enabled, do not roll back
+to a pre-refresh release. A supported downgrade would first need a bounded,
+drilled drain that blocks new claims, removes every refresh and work record,
+restores each request's authority-derived due entry, checkpoints the exact
+head, and proves zero refresh keys plus exact derived parity. This release does
+not expose that drain, so live activation must be treated as forward-only.
+
+First observations, evidence/state changes, and every newly executed manual
+check remain audited authority commits, so genuinely changing DNS can still
+consume audit capacity until admission closes. Recovery intentionally drops
+refresh and work records and reconstructs scheduling from journaled request
+authority; an unchanged conservative repeat check recreates the single local
+refresh. Keep both request and verification gates dark until these
+refresh/claim fences have passed a controlled canary and exact `awaiting_cell`
+plan recovery has been exercised through the durable plan workflow.
+Custom-domain provider routing, cell projection, and mail delivery must be
+accepted separately.
 
 ### Dark lifecycle and ownership-verification deployment
 
@@ -959,6 +978,12 @@ closed through a separately reviewed canary.
 
 ### Stop and rollback rules
 
+- A release that understands `verification-refresh:` may roll back to a
+  pre-refresh release only while the verification gate has remained absent and
+  an exact scan proves that no refresh record exists. After the first refresh
+  write, block verification and roll forward; there is no supported in-place
+  downgrade until the bounded drain described above exists and has been
+  drilled.
 - A dark lifecycle/verification deployment whose journal head and registry
   state remain unchanged may roll back to the immediately previous
   journal-aware release. Once a new request state, ownership observation,

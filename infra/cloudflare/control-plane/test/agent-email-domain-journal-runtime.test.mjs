@@ -488,14 +488,22 @@ test("head-bound capacity tracks authority inserts, overwrites, and deletes", as
   assert.equal(await target.storage.get(intentKey), undefined);
 });
 
-test("authority commit atomically consumes only verification work local state", async () => {
+test("authority commit atomically consumes exact verification local state", async () => {
   const target = fixture();
   await target.runtime.commit([["meta", meta()]], [], {}, target.apply);
   const workKey = `verification-work:${REQUEST_ID}`;
+  const refreshKey = `verification-refresh:${REQUEST_ID}`;
   await target.storage.put(workKey, { opaque: "operational" });
+  await target.storage.put(refreshKey, { opaque: "operational" });
 
-  await target.runtime.commit(pendingMutation(), [workKey], {}, target.apply);
+  await target.runtime.commit(
+    pendingMutation(),
+    [workKey, refreshKey],
+    {},
+    target.apply,
+  );
   assert.equal(await target.storage.get(workKey), undefined);
+  assert.equal(await target.storage.get(refreshKey), undefined);
   assert.deepEqual(
     await target.storage.get(`request:${REQUEST_ID}`),
     pendingRequest(),
@@ -509,6 +517,12 @@ test("authority commit atomically consumes only verification work local state", 
   );
   await assert.rejects(
     target.runtime.commit([[workKey, { opaque: "replacement" }]], [], {},
+      target.apply),
+    (error) => error.code ===
+      "agent_email_domain_journal_local_storage_key",
+  );
+  await assert.rejects(
+    target.runtime.commit([[refreshKey, { opaque: "replacement" }]], [], {},
       target.apply),
     (error) => error.code ===
       "agent_email_domain_journal_local_storage_key",

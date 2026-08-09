@@ -15,6 +15,8 @@ const PENDING_CHALLENGE_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 
 export const AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_SCHEMA_VERSION =
   "witself.agent-email-domain-authority-journal.v1";
+export const AGENT_EMAIL_DOMAIN_VERIFICATION_REFRESH_SCHEMA_VERSION =
+  "witself.agent-email-domain-verification-refresh.v1";
 export const AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_PREFIX =
   "agent-email-domain-authority/v1";
 export const AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_GENESIS_HASH = "0".repeat(64);
@@ -63,6 +65,9 @@ const JOURNAL_LOCAL_PREFIXES = Object.freeze([
   // coordination state, not customer-domain authority. Recovery deliberately
   // drops them and rebuilds the due queue from the journaled request records.
   "verification-work:",
+  // Repeated scheduled outcomes replace one operational refresh per request.
+  // Recovery drops it and conservatively resumes from request authority.
+  "verification-refresh:",
 ]);
 
 export class AgentEmailDomainJournalError extends Error {
@@ -147,6 +152,108 @@ export function canonicalJSONString(value) {
 
 export function canonicalJSONBytes(value) {
   return new TextEncoder().encode(canonicalJSONString(value));
+}
+
+function verificationOutcome(value) {
+  return {
+    state: value?.state,
+    last_result: value?.last_result,
+    first_verified_at: value?.first_verified_at ?? null,
+    rrset_sha256: value?.rrset_sha256 ?? null,
+    dnssec_authenticated: value?.dnssec_authenticated === true,
+  };
+}
+
+export function isAgentEmailDomainVerificationRefresh(
+  request,
+  value,
+  key = null,
+) {
+  try {
+    if (!isPlainObject(request) || !isPlainObject(value) ||
+        value.schema_version !==
+          AGENT_EMAIL_DOMAIN_VERIFICATION_REFRESH_SCHEMA_VERSION ||
+        Object.keys(value).length !== 9 ||
+        !REQUEST_ID_PATTERN.test(request.id ?? "") ||
+        value.request_id !== request.id ||
+        (key !== null && key !== `verification-refresh:${request.id}`) ||
+        !Number.isSafeInteger(value.generation) || value.generation < 1 ||
+        value.request_state_revision !== (request.state_revision ?? 1) ||
+        value.request_updated_at !== request.updated_at ||
+        !["pending_verification", "verified"].includes(request.state) ||
+        request.plan_suspended === true ||
+        request.lifecycle_suspended === true ||
+        !isPlainObject(value.ownership_challenge) ||
+        !isPlainObject(value.ownership_verification) ||
+        canonicalJSONString(value.ownership_challenge) !==
+          canonicalJSONString({
+            ...request.ownership_challenge,
+            expires_at: request.ownership_challenge.expires_at ?? new Date(
+              Date.parse(request.requested_at) + PENDING_CHALLENGE_TTL_MS,
+            ).toISOString(),
+          }) ||
+        canonicalJSONString(verificationOutcome(value.ownership_verification)) !==
+          canonicalJSONString(verificationOutcome(
+            request.ownership_verification,
+          ))) {
+      return false;
+    }
+    const verification = value.ownership_verification;
+    if (Object.keys(verification).length !== 10 ||
+        !["unverified", "missing", "verified", "stale", "conflict"].includes(
+          verification.state,
+        ) ||
+        ![
+          "resolver_error", "present", "absent", "domain_unavailable",
+          "policy_converging",
+        ].includes(verification.last_result)) {
+      return false;
+    }
+    const first = verification.first_verified_at;
+    const last = verification.last_verified_at;
+    const checkedAt = Date.parse(verification.last_checked_at ?? "");
+    const nextAt = Date.parse(verification.next_check_at ?? "");
+    const authorityCheckedAt = Date.parse(
+      request.ownership_verification?.last_checked_at ?? "",
+    );
+    if (!Number.isFinite(checkedAt) || !Number.isFinite(nextAt) ||
+        nextAt <= checkedAt || !Number.isFinite(authorityCheckedAt) ||
+        checkedAt < authorityCheckedAt ||
+        (first === null) !== (last === null) ||
+        (first !== null &&
+          (!Number.isFinite(Date.parse(first)) ||
+            !Number.isFinite(Date.parse(last)) ||
+            Date.parse(first) > Date.parse(last) ||
+            Date.parse(last) > checkedAt)) ||
+        (verification.rrset_sha256 !== null &&
+          !SHA256_PATTERN.test(verification.rrset_sha256 ?? "")) ||
+        typeof verification.dnssec_authenticated !== "boolean" ||
+        !(verification.minimum_ttl_seconds === null ||
+          (Number.isSafeInteger(verification.minimum_ttl_seconds) &&
+            verification.minimum_ttl_seconds >= 0)) ||
+        !Number.isSafeInteger(verification.consecutive_failures) ||
+        verification.consecutive_failures < 0 ||
+        value.updated_at !== verification.last_checked_at ||
+        value.verification_due_key !==
+          `verification-due:${String(nextAt).padStart(16, "0")}:${request.id}`) {
+      return false;
+    }
+    if (verification.last_result === "present") {
+      return verification.state === "verified" && first !== null &&
+        last === verification.last_checked_at &&
+        verification.consecutive_failures === 0;
+    }
+    if (verification.last_result === "absent") {
+      return ["missing", "stale"].includes(verification.state) &&
+        (verification.state === "stale") === (first !== null);
+    }
+    if (verification.last_result === "domain_unavailable") {
+      return verification.state === "conflict";
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function asBytes(value) {

@@ -45,9 +45,12 @@ Worker.
 Custom inbound-domain amendment (dark foundation, implemented in the current
 checkout): account operators may eventually request an organization-owned
 domain through a separate control-plane authority. The current implementation
-stops after issuing a stable TXT ownership challenge. Its exact-`true` request
-gate is absent from release configuration, and there is no DNS lookup, domain
-verification, routing projection, cell mutation, or mail-delivery path.
+issues a stable TXT ownership challenge and contains separately gated manual
+and scheduled DNS observation, ownership/lifecycle state, an append-only
+authority journal, and sealed empty-target recovery. Its exact-`true` request
+and verification gates are absent from release configuration. DNS is read only
+after the verification gate passes; there is no DNS/provider mutation, routing
+projection, cell mutation, or mail-delivery path.
 
 ## Implemented sealed-plane routes
 
@@ -218,6 +221,7 @@ POST /v1/admin/realm-email-alias-recoveries/{recovery_id}:advance
 POST /v1/admin/realm-email-alias-recoveries/{recovery_id}:verify
 GET  /v1/admin/agent-email-domain-requests
 GET  /v1/admin/agent-email-domain-requests/{request_id}
+POST /v1/admin/agent-email-domain-requests/{request_id}:verify
 POST /v1/admin/agent-email-domain-requests/{request_id}:reject
 POST /v1/admin/agent-email-domain-requests/{request_id}:retire
 GET  /v1/admin/agent-email-domain-audit
@@ -267,8 +271,8 @@ scan to fill a page with matches.
 Custom-domain customer/admin request lists and the custom-domain audit list
 also use bounded opaque cursors. Their filters are `state`, `account_id`, and
 `domain` for administrator requests and `action`, `account_id`, `domain`, and
-`limit` for audit. The request registry is deliberately not a DNS or mail
-control surface.
+`limit` for audit. The request registry is deliberately not a DNS/provider
+mutation or mail-delivery control surface.
 
 Custom-domain journal and recovery administration requires both the ordinary
 platform-admin bearer token and the distinct
