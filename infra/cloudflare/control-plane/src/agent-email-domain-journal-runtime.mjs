@@ -7,6 +7,7 @@ import {
   AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_GENESIS_HASH,
   agentEmailDomainAuthorityStateDigest,
   agentEmailDomainJournalEntryKey,
+  isAgentEmailDomainVerificationRefresh,
   rebuildAgentEmailDomainDerivedState,
   AgentEmailDomainJournalError,
   replayAgentEmailDomainJournalPage,
@@ -44,6 +45,8 @@ const OBJECT_NAME_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const VERIFICATION_WORK_KEY_PATTERN =
   /^verification-work:aedr_[a-z2-7]{16}$/;
+const VERIFICATION_REFRESH_KEY_PATTERN =
+  /^verification-refresh:aedr_[a-z2-7]{16}$/;
 const BASE32 = "abcdefghijklmnopqrstuvwxyz234567";
 const SNAPSHOT_STORAGE_PAGE_LIMIT = 100;
 export const AGENT_EMAIL_DOMAIN_MAX_AUTHORITY_KEYS = 10_000;
@@ -269,10 +272,11 @@ function authorityAfterImage(entries, deletes) {
     if (classification === "authority") {
       authorityDeletes.push(key);
     } else if (classification === "journal_local" &&
-        VERIFICATION_WORK_KEY_PATTERN.test(key)) {
-      // A verification observation is consumed by the authority transition
-      // it fences. Keep that cleanup in the same Durable Object transaction,
-      // but never place the operational work record in the R2 after-image.
+        (VERIFICATION_WORK_KEY_PATTERN.test(key) ||
+          VERIFICATION_REFRESH_KEY_PATTERN.test(key))) {
+      // Verification work and a prior operational refresh are consumed by the
+      // authority transition they fence. Keep cleanup in the same Durable
+      // Object transaction, but never place either local record in R2.
       continue;
     } else if (classification === "journal_local") {
       fail(`journal-local agent email domain storage key cannot be committed: ${key}`,
@@ -500,6 +504,30 @@ async function readStorageState(storage) {
     cursor = page.next_cursor;
   }
   return { authority, derived, local, scanned };
+}
+
+function derivedStateWithVerificationRefreshes(authority, local) {
+  const derived = rebuildAgentEmailDomainDerivedState(authority);
+  for (const [key, value] of local) {
+    if (!key.startsWith("verification-refresh:")) continue;
+    const requestID = key.slice("verification-refresh:".length);
+    const request = authority.get(`request:${requestID}`);
+    if (!request ||
+        !isAgentEmailDomainVerificationRefresh(request, value, key)) {
+      fail("agent email domain verification refresh is invalid",
+        "agent_email_domain_journal_derived_state_mismatch");
+    }
+    const canonicalDueAt = request.ownership_verification?.next_check_at ??
+      (request.state === "pending_verification" ? request.requested_at : null);
+    if (canonicalDueAt) {
+      derived.delete(
+        `verification-due:${String(Date.parse(canonicalDueAt)).padStart(16, "0")}:` +
+          request.id,
+      );
+    }
+    derived.set(value.verification_due_key, request.id);
+  }
+  return derived;
 }
 
 function assertExactDerivedState(actual, expected, message, code) {
@@ -1425,8 +1453,9 @@ export class AgentEmailDomainJournalRuntime {
         expected_registry_revision: record.registry_revision,
         expected_audit_sequence: record.audit_sequence,
       });
-      const expectedDerived = rebuildAgentEmailDomainDerivedState(
+      const expectedDerived = derivedStateWithVerificationRefreshes(
         exact.authority,
+        exact.local,
       );
       assertExactDerivedState(
         exact.derived,

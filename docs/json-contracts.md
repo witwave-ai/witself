@@ -1502,16 +1502,28 @@ without an atomic capacity fence. An existing head from such a release reports
 `degradation_code=agent_email_domain_journal_capacity_unavailable` until one
 complete postdeploy checkpoint materializes the exact count. The checkpoint
 control route remains available in that state. This ceiling and admission
-guard alone are not activation evidence. Scheduled checks with an unchanged
-durable evidence outcome coalesce their authority audit/meta writes, while
-still committing current request/allocation/due state and the next journal
-head. Resolver TTL drift, clocks, and retry counters are not evidence
-transitions; first observations, changed evidence/state, and manual checks are.
-This bounds stable-retry authority-key growth, but the immutable R2 journal
-stream still grows per committed refresh and changing outcomes can consume
-audit capacity until admission closes. Requests and verification stay dark
-until the claim fences pass a controlled canary and journal-stream growth has
-an operational bound or retention strategy.
+guard alone are not activation evidence. A scheduled check with an unchanged
+durable evidence outcome replaces the single journal-local
+`verification-refresh:<request_id>` record and moves its derived
+`verification-due:` entry. The refresh contains a local replacement generation
+plus the exact request-revision/challenge binding and the newest
+`ownership_verification` clocks, retry count, recursive TTL, and next check.
+Customer and administrator list/show responses overlay that effective
+verification object while leaving the public request's authority
+`state_revision` and `updated_at` unchanged. The authority request and
+allocation, audit/meta keys, head-bound capacity, journal head, and immutable
+R2 object count do not change. The refresh generation participates in the
+scheduled claim fence, so a stale observation cannot commit through a newer
+refresh.
+
+First observations, changed evidence/state, and newly executed manual checks
+remain audited and journaled authority mutations. Recovery omits journal-local
+refresh and work records, rebuilds the due queue from journaled request
+authority, and may therefore perform one conservative repeat check before
+recreating the bounded refresh. Stable scheduled outcomes do not grow
+authority or R2; changing outcomes can still consume audit capacity until
+admission closes. Requests and verification stay dark until the refresh/claim
+fences pass a controlled canary.
 
 Starting a recovery accepts:
 

@@ -7,7 +7,11 @@ import {
   agentEmailDomainTemporaryObservation,
   resolveAgentEmailDomainTXT,
 } from "./agent-email-domain-verification.mjs";
-import { canonicalJSONString } from "./agent-email-domain-journal.mjs";
+import {
+  AGENT_EMAIL_DOMAIN_VERIFICATION_REFRESH_SCHEMA_VERSION,
+  canonicalJSONString,
+  isAgentEmailDomainVerificationRefresh,
+} from "./agent-email-domain-journal.mjs";
 
 const SCHEMA_VERSION = "witself.agent-email-domain.v1";
 const RECOVERY_SCHEMA_VERSION = "witself.agent-email-domain-recovery.v1";
@@ -303,8 +307,8 @@ function fingerprint(value) {
 function sameVerificationAuditOutcome(previous, desired) {
   if (!previous || !desired) return false;
   // Check clocks, retry counts, and recursive-resolver TTLs naturally move
-  // while the authoritative outcome remains identical. Keep their newest
-  // values on the request, but do not turn that operational drift into audit.
+  // while the authoritative outcome remains identical. Repeated scheduled
+  // drift belongs in bounded journal-local refresh state, not authority.
   const evidence = (value) => ({
     state: value.state,
     last_result: value.last_result,
@@ -350,6 +354,9 @@ function validVerificationWork(value, requestID = null) {
       !Number.isFinite(Date.parse(value.request_updated_at)) ||
       typeof value.verification_due_key !== "string" ||
       !value.verification_due_key.startsWith("verification-due:") ||
+      (value.verification_refresh_generation !== undefined &&
+        (!Number.isSafeInteger(value.verification_refresh_generation) ||
+          value.verification_refresh_generation < 0)) ||
       !isObject(value.ownership_challenge) ||
       value.ownership_challenge.record_type !== "TXT" ||
       typeof value.ownership_challenge.record_name !== "string" ||
@@ -412,6 +419,10 @@ function requestStorageKey(requestID) {
 
 function verificationWorkKey(requestID) {
   return `verification-work:${requestID}`;
+}
+
+function verificationRefreshKey(requestID) {
+  return `verification-refresh:${requestID}`;
 }
 
 function domainStorageKey(domain) {
@@ -506,6 +517,28 @@ function verificationDueKey(request) {
   return `verification-due:${String(timestamp).padStart(16, "0")}:${request.id}`;
 }
 
+function storedVerificationRefreshDue(value, requestID) {
+  if (!isObject(value) || value.schema_version !==
+        AGENT_EMAIL_DOMAIN_VERIFICATION_REFRESH_SCHEMA_VERSION ||
+      value.request_id !== requestID ||
+      typeof value.verification_due_key !== "string" ||
+      !/^verification-due:\d{16}:aedr_[a-z2-7]{16}$/.test(
+        value.verification_due_key,
+      ) || !value.verification_due_key.endsWith(`:${requestID}`)) {
+    return null;
+  }
+  return value.verification_due_key;
+}
+
+function effectiveVerificationRefresh(request, value) {
+  return isAgentEmailDomainVerificationRefresh(request, value) ? value : null;
+}
+
+function effectiveVerificationDueKey(request, refresh = null) {
+  return effectiveVerificationRefresh(request, refresh)?.verification_due_key ??
+    verificationDueKey(request);
+}
+
 function graceDueKey(request) {
   const timestamp = typeof request?.plan_grace_until === "string"
     ? Date.parse(request.plan_grace_until)
@@ -568,7 +601,8 @@ function decodeListCursor(value, prefix) {
   }
 }
 
-function publicRequest(request) {
+function publicRequest(request, refresh = null) {
+  const effectiveRefresh = effectiveVerificationRefresh(request, refresh);
   return {
     id: request.id,
     account_id: request.account_id,
@@ -594,7 +628,12 @@ function publicRequest(request) {
       ? { plan_grace_until: request.plan_grace_until }
       : {}),
     ...(request.ownership_verification
-      ? { ownership_verification: { ...request.ownership_verification } }
+      ? {
+        ownership_verification: {
+          ...(effectiveRefresh?.ownership_verification ??
+            request.ownership_verification),
+        },
+      }
       : {}),
     ...(request.expiration ? { expiration: { ...request.expiration } } : {}),
     ...(request.decision ? { decision: { ...request.decision } } : {}),
@@ -1196,6 +1235,84 @@ export class DurableAgentEmailDomainRegistry {
     }
   }
 
+  async verificationRefresh(request) {
+    const value = await this.storage.get(verificationRefreshKey(request.id));
+    return effectiveVerificationRefresh(request, value);
+  }
+
+  async publicRequest(request) {
+    return publicRequest(request, await this.verificationRefresh(request));
+  }
+
+  async repairVerificationSchedule(request, encounteredDue = null) {
+    const refreshKey = verificationRefreshKey(request.id);
+    const raw = await this.storage.get(refreshKey);
+    const refreshDue = storedVerificationRefreshDue(raw, request.id);
+    const canonicalDue = verificationDueKey(request);
+    const active = ["pending_verification", "verified"].includes(request.state) &&
+      request.plan_suspended !== true &&
+      request.lifecycle_suspended !== true;
+    const entries = active && canonicalDue
+      ? [[canonicalDue, request.id]]
+      : [];
+    const deletes = new Set([
+      refreshKey,
+      verificationWorkKey(request.id),
+      encounteredDue,
+      refreshDue,
+    ].filter(Boolean));
+    if (canonicalDue) deletes.delete(canonicalDue);
+    await this.atomicRaw(entries, [...deletes]);
+    return canonicalDue;
+  }
+
+  async commitVerificationRefresh(current, verification, options = {}) {
+    const key = verificationRefreshKey(current.id);
+    const raw = await this.storage.get(key);
+    const previous = effectiveVerificationRefresh(current, raw);
+    const previousGeneration = previous?.generation ?? 0;
+    const previousDue = effectiveVerificationDueKey(current, previous);
+    if ((options.expected_generation !== undefined &&
+          options.expected_generation !== previousGeneration) ||
+        (options.previous_due !== undefined &&
+          options.previous_due !== previousDue)) {
+      fail("custom domain verification claim is stale", 409,
+        "verification_claim_stale");
+    }
+    const refresh = {
+      schema_version: AGENT_EMAIL_DOMAIN_VERIFICATION_REFRESH_SCHEMA_VERSION,
+      request_id: current.id,
+      generation: previousGeneration + 1,
+      request_state_revision: current.state_revision ?? 1,
+      request_updated_at: current.updated_at,
+      verification_due_key: verificationDueKey({
+        ...current,
+        ownership_verification: verification,
+      }),
+      ownership_challenge: {
+        ...current.ownership_challenge,
+        expires_at: challengeExpiresAt(current),
+      },
+      ownership_verification: structuredClone(verification),
+      updated_at: verification.last_checked_at,
+    };
+    if (!effectiveVerificationRefresh(current, refresh)) {
+      fail("custom domain verification refresh is invalid", 503,
+        "verification_refresh_invalid");
+    }
+    const deletes = new Set([
+      previousDue,
+      ...(Array.isArray(options.extra_deletes) ? options.extra_deletes : []),
+    ].filter(Boolean));
+    deletes.delete(refresh.verification_due_key);
+    await this.atomicRaw([
+      [key, refresh],
+      [refresh.verification_due_key, current.id],
+    ], [...deletes]);
+    await this.scheduleNextAlarm().catch(() => {});
+    return refresh;
+  }
+
   async scheduleNextAlarm() {
     if (typeof this.storage.setAlarm !== "function") return;
     const prefixes = [
@@ -1502,9 +1619,10 @@ export class DurableAgentEmailDomainRegistry {
         if (!request || request.account_id !== accountID) {
           fail("custom inbound domain request index is invalid", 503);
         }
-        return publicRequest(request);
+        return this.publicRequest(request);
       }))
-      : listed.entries.map(([, request]) => publicRequest(request));
+      : await Promise.all(listed.entries.map(([, request]) =>
+        this.publicRequest(request)));
     if (input?.state != null) {
       if (!["pending_verification", "verified", "rejected", "expired", "retired"].includes(
         input.state,
@@ -1537,7 +1655,7 @@ export class DurableAgentEmailDomainRegistry {
     if (!request) fail("custom inbound domain request not found", 404);
     return json({
       schema_version: SCHEMA_VERSION,
-      request: publicRequest(request),
+      request: await this.publicRequest(request),
     });
   }
 
@@ -1561,6 +1679,8 @@ export class DurableAgentEmailDomainRegistry {
 
     const current = await this.storage.get(requestStorageKey(id));
     if (!current) fail("custom inbound domain request not found", 404);
+    const rawRefresh = await this.storage.get(verificationRefreshKey(id));
+    const refresh = effectiveVerificationRefresh(current, rawRefresh);
     if (nextState === "rejected" && current.state !== "pending_verification") {
       fail("only a pending custom inbound domain request can be rejected", 409);
     }
@@ -1610,7 +1730,7 @@ export class DurableAgentEmailDomainRegistry {
       [mutation.audit_key, mutation.audit],
       [requestStorageKey(id), updated],
     ];
-    const deletes = [verificationWorkKey(id)];
+    const deletes = [verificationWorkKey(id), verificationRefreshKey(id)];
     const allocation = await this.storage.get(domainStorageKey(current.domain));
     if (assertLegacyDomainMirror(allocation, current)) {
       // v0.0.235 mirrored every request at domain:<domain>. Preserve that
@@ -1656,8 +1776,11 @@ export class DurableAgentEmailDomainRegistry {
       if (pendingKey) deletes.push(pendingKey);
       const expiryKey = challengeExpiryDueKey(current);
       if (expiryKey) deletes.push(expiryKey);
-      const verificationKey = verificationDueKey(current);
-      if (verificationKey) deletes.push(verificationKey);
+      for (const verificationKey of new Set([
+        verificationDueKey(current),
+        effectiveVerificationDueKey(current, refresh),
+        storedVerificationRefreshDue(rawRefresh, id),
+      ])) if (verificationKey) deletes.push(verificationKey);
       const graceKey = graceDueKey(current);
       if (graceKey) deletes.push(graceKey);
     }
@@ -1834,11 +1957,25 @@ export class DurableAgentEmailDomainRegistry {
       position += 1;
       if (desired !== request) {
         changed.push({ previous: request, next: desired });
+        const rawRefresh = await this.storage.get(
+          verificationRefreshKey(request.id),
+        );
+        const refresh = effectiveVerificationRefresh(request, rawRefresh);
         const oldGrace = graceDueKey(request);
         const nextGrace = graceDueKey(desired);
         if (oldGrace && oldGrace !== nextGrace) derivedDeletes.push(oldGrace);
         if (nextGrace) derivedEntries.push([nextGrace, desired.id]);
         const verificationDue = verificationDueKey(desired);
+        for (const previousVerificationDue of new Set([
+          verificationDueKey(request),
+          effectiveVerificationDueKey(request, refresh),
+          storedVerificationRefreshDue(rawRefresh, request.id),
+        ])) {
+          if (previousVerificationDue &&
+              previousVerificationDue !== verificationDue) {
+            derivedDeletes.push(previousVerificationDue);
+          }
+        }
         if (desired.plan_suspended === true ||
             desired.lifecycle_suspended === true) {
           if (verificationDue) derivedDeletes.push(verificationDue);
@@ -1870,6 +2007,7 @@ export class DurableAgentEmailDomainRegistry {
       for (const item of changed) {
         entries.push([requestStorageKey(item.next.id), item.next]);
         deletes.push(verificationWorkKey(item.next.id));
+        deletes.push(verificationRefreshKey(item.next.id));
         const allocation = await this.storage.get(
           domainStorageKey(item.previous.domain),
         );
@@ -2165,6 +2303,15 @@ export class DurableAgentEmailDomainRegistry {
         deletes.push(indexKey);
         continue;
       }
+      const rawRefresh = await this.storage.get(
+        verificationRefreshKey(request.id),
+      );
+      const refresh = effectiveVerificationRefresh(request, rawRefresh);
+      const previousVerificationDues = new Set([
+        verificationDueKey(request),
+        effectiveVerificationDueKey(request, refresh),
+        storedVerificationRefreshDue(rawRefresh, request.id),
+      ]);
       const nextFence = {
         operation_id: intent.operation_id,
         epoch: intent.epoch,
@@ -2192,7 +2339,7 @@ export class DurableAgentEmailDomainRegistry {
         for (const key of [
           domainPendingKey(request),
           challengeExpiryDueKey(request),
-          verificationDueKey(request),
+          ...previousVerificationDues,
           graceDueKey(request),
         ]) if (key) deletes.push(key);
         if (request.state === "verified") {
@@ -2227,6 +2374,12 @@ export class DurableAgentEmailDomainRegistry {
           updated_at: changedAt,
         };
         const verificationDue = verificationDueKey(desired);
+        for (const previousVerificationDue of previousVerificationDues) {
+          if (previousVerificationDue &&
+              previousVerificationDue !== verificationDue) {
+            deletes.push(previousVerificationDue);
+          }
+        }
         if (lifecycleSuspended || desired.plan_suspended === true) {
           if (verificationDue) deletes.push(verificationDue);
         } else if (verificationDue) {
@@ -2236,6 +2389,7 @@ export class DurableAgentEmailDomainRegistry {
       changed.push({ previous: request, next: desired });
       entries.push([requestStorageKey(request.id), desired]);
       deletes.push(verificationWorkKey(request.id));
+      deletes.push(verificationRefreshKey(request.id));
       const legacyMirror = await this.storage.get(
         domainStorageKey(request.domain),
       );
@@ -2443,6 +2597,20 @@ export class DurableAgentEmailDomainRegistry {
 
   async persistVerificationClaim(current, mode, options = {}) {
     const key = verificationWorkKey(current.id);
+    const rawRefresh = await this.storage.get(verificationRefreshKey(current.id));
+    let refresh = effectiveVerificationRefresh(current, rawRefresh);
+    if (rawRefresh && !refresh) {
+      await this.repairVerificationSchedule(
+        current,
+        options.verification_due_key ?? null,
+      );
+      refresh = null;
+    }
+    const effectiveDue = effectiveVerificationDueKey(current, refresh);
+    if (options.verification_due_key !== undefined &&
+        options.verification_due_key !== effectiveDue) {
+      return { claimed: false };
+    }
     const existing = await this.storage.get(key);
     if (existing && !validVerificationWork(existing, current.id)) {
       fail("custom domain verification claim is invalid", 503,
@@ -2458,7 +2626,9 @@ export class DurableAgentEmailDomainRegistry {
     const exactRequestFence = existing &&
       existing.request_state_revision === (current.state_revision ?? 1) &&
       existing.request_updated_at === current.updated_at &&
-      existing.verification_due_key === verificationDueKey(current) &&
+      existing.verification_due_key === effectiveDue &&
+      (existing.verification_refresh_generation ?? 0) ===
+        (refresh?.generation ?? 0) &&
       canonicalJSONString(existing.ownership_challenge) ===
         canonicalJSONString({
           ...current.ownership_challenge,
@@ -2492,7 +2662,8 @@ export class DurableAgentEmailDomainRegistry {
       generation: (existing?.generation ?? 0) + 1,
       request_state_revision: current.state_revision ?? 1,
       request_updated_at: current.updated_at,
-      verification_due_key: verificationDueKey(current),
+      verification_due_key: effectiveDue,
+      verification_refresh_generation: refresh?.generation ?? 0,
       ownership_challenge: {
         ...current.ownership_challenge,
         expires_at: challengeExpiresAt(current),
@@ -2590,9 +2761,26 @@ export class DurableAgentEmailDomainRegistry {
       const dueAt = Number(due.split(":", 3)[1]);
       if (!Number.isFinite(dueAt) || dueAt > now) break;
       const current = await this.storage.get(requestStorageKey(requestID));
-      if (!current || verificationDueKey(current) !== due ||
+      if (!current ||
           !["pending_verification", "verified"].includes(current.state)) {
-        await this.storage.delete(due);
+        await this.atomicRaw([], [
+          due,
+          verificationRefreshKey(requestID),
+          verificationWorkKey(requestID),
+        ]);
+        continue;
+      }
+      const rawRefresh = await this.storage.get(
+        verificationRefreshKey(current.id),
+      );
+      let refresh = effectiveVerificationRefresh(current, rawRefresh);
+      if (rawRefresh && !refresh) {
+        const repairedDue = await this.repairVerificationSchedule(current, due);
+        if (repairedDue !== due) continue;
+      }
+      refresh = refresh ?? await this.verificationRefresh(current);
+      if (effectiveVerificationDueKey(current, refresh) !== due) {
+        await this.atomicRaw([], [due]);
         continue;
       }
       if (current.state === "pending_verification" &&
@@ -2604,7 +2792,11 @@ export class DurableAgentEmailDomainRegistry {
       }
       if (current.plan_suspended === true ||
           current.lifecycle_suspended === true) {
-        await this.storage.delete(due);
+        await this.atomicRaw([], [
+          due,
+          verificationRefreshKey(current.id),
+          verificationWorkKey(current.id),
+        ]);
         continue;
       }
       if (await this.accountPolicyConverging(current.account_id)) {
@@ -2614,7 +2806,9 @@ export class DurableAgentEmailDomainRegistry {
         });
         return { kind: "processed", checked: true, matched: false };
       }
-      const claimed = await this.persistVerificationClaim(current, "scheduled");
+      const claimed = await this.persistVerificationClaim(current, "scheduled", {
+        verification_due_key: due,
+      });
       if (!claimed.claimed) continue;
       return { kind: "claim", claim: publicVerificationClaim(claimed.work) };
     }
@@ -2700,10 +2894,20 @@ export class DurableAgentEmailDomainRegistry {
         "verification_observation_stale");
     }
     const current = await this.storage.get(requestStorageKey(id));
+    const rawRefresh = current
+      ? await this.storage.get(verificationRefreshKey(id))
+      : null;
+    const refresh = current
+      ? effectiveVerificationRefresh(current, rawRefresh)
+      : null;
     const exactRequestFence = current &&
+      (!rawRefresh || refresh) &&
       (current.state_revision ?? 1) === work.request_state_revision &&
       current.updated_at === work.request_updated_at &&
-      verificationDueKey(current) === work.verification_due_key &&
+      effectiveVerificationDueKey(current, refresh) ===
+        work.verification_due_key &&
+      (refresh?.generation ?? 0) ===
+        (work.verification_refresh_generation ?? 0) &&
       canonicalJSONString({
         ...current.ownership_challenge,
         expires_at: challengeExpiresAt(current),
@@ -2748,8 +2952,13 @@ export class DurableAgentEmailDomainRegistry {
       if (work.mode === "scheduled") {
         await this.deferVerificationForPolicy(
           current,
-          verificationDueKey(current),
-          { scheduled: true, extra_deletes: [workKey] },
+          work.verification_due_key,
+          {
+            scheduled: true,
+            expected_refresh_generation:
+              work.verification_refresh_generation ?? 0,
+            extra_deletes: [workKey],
+          },
         );
         return {
           kind: "result",
@@ -2776,6 +2985,8 @@ export class DurableAgentEmailDomainRegistry {
         ? work.observation.matched
         : false,
       extra_deletes: [workKey],
+      previous_due: work.verification_due_key,
+      expected_refresh_generation: work.verification_refresh_generation ?? 0,
       ...(work.mode === "manual" ? {
         idempotency_scope: `request-verify:${id}`,
         idempotency_key: work.idempotency_key,
@@ -2797,7 +3008,7 @@ export class DurableAgentEmailDomainRegistry {
           error.code !== "domain_unavailable") throw error;
       committed = await this.deferContendedVerification(
         current,
-        verificationDueKey(current),
+        work.verification_due_key,
         options,
       );
     }
@@ -2817,18 +3028,20 @@ export class DurableAgentEmailDomainRegistry {
       const expired = await this.expirePendingRequest(current, options);
       return { ...expired, matched: false, expired: true };
     }
+    const previousRefresh = await this.verificationRefresh(current);
+    const previousVerification = previousRefresh?.ownership_verification ??
+      current.ownership_verification;
     const matched = options.temporary !== true && options.matched === true;
     let verificationState;
     if (options.temporary === true) {
       verificationState = current.state === "verified"
-        ? current.ownership_verification?.state ?? "verified"
+        ? previousVerification?.state ?? "verified"
         : "unverified";
     } else {
       verificationState = matched
         ? "verified"
         : current.state === "verified" ? "stale" : "missing";
     }
-    const previousVerification = current.ownership_verification;
     const consecutiveFailures = matched
       ? 0
       : (previousVerification?.consecutive_failures ?? 0) + 1;
@@ -2869,10 +3082,37 @@ export class DurableAgentEmailDomainRegistry {
       ownership_verification: verification,
       updated_at: checkedAt,
     };
+    const unchangedScheduled = options.scheduled === true &&
+      !newlyVerified &&
+      sameVerificationAuditOutcome(previousVerification, verification);
+    if (unchangedScheduled) {
+      const refresh = await this.commitVerificationRefresh(
+        current,
+        verification,
+        {
+          previous_due: options.previous_due,
+          expected_generation: options.expected_refresh_generation,
+          extra_deletes: options.extra_deletes,
+        },
+      );
+      const body = matched ? {
+        schema_version: SCHEMA_VERSION,
+        request: publicRequest(current, refresh),
+        matched: true,
+      } : {
+        schema_version: SCHEMA_VERSION,
+        error: "custom domain ownership challenge was not found",
+        code: "ownership_challenge_not_found",
+        request: publicRequest(current, refresh),
+      };
+      return { body, matched, status: matched ? 200 : 409 };
+    }
     const entries = [];
     const deletes = [];
-    const previousDue = verificationDueKey(current);
+    const previousDue = options.previous_due ??
+      effectiveVerificationDueKey(current, previousRefresh);
     if (previousDue) deletes.push(previousDue);
+    deletes.push(verificationRefreshKey(current.id));
     entries.push([verificationDueKey(desired), desired.id]);
     if (newlyVerified) {
       const existing = await this.storage.get(domainStorageKey(current.domain));
@@ -3007,7 +3247,9 @@ export class DurableAgentEmailDomainRegistry {
     if (!expiresAt) {
       fail("custom inbound domain ownership challenge is invalid", 503);
     }
-    const previous = current.ownership_verification;
+    const previousRefresh = await this.verificationRefresh(current);
+    const previous = previousRefresh?.ownership_verification ??
+      current.ownership_verification;
     const desired = {
       ...current,
       state_revision: (current.state_revision ?? 1) + 1,
@@ -3061,6 +3303,7 @@ export class DurableAgentEmailDomainRegistry {
     }
     await this.atomic(entries, [
       ...[previousDue].filter(Boolean),
+      verificationRefreshKey(current.id),
       ...(Array.isArray(options.extra_deletes) ? options.extra_deletes : []),
     ]);
     await this.scheduleNextAlarm().catch(() => {});
@@ -3069,7 +3312,9 @@ export class DurableAgentEmailDomainRegistry {
 
   async deferVerificationForPolicy(current, previousDue, options = {}) {
     const checkedAt = this.now().toISOString();
-    const previous = current.ownership_verification;
+    const previousRefresh = await this.verificationRefresh(current);
+    const previous = previousRefresh?.ownership_verification ??
+      current.ownership_verification;
     const desired = {
       ...current,
       state_revision: (current.state_revision ?? 1) + 1,
@@ -3090,6 +3335,22 @@ export class DurableAgentEmailDomainRegistry {
         consecutive_failures: previous?.consecutive_failures ?? 0,
       },
     };
+    if (options.scheduled === true &&
+        sameVerificationAuditOutcome(
+          previous,
+          desired.ownership_verification,
+        )) {
+      await this.commitVerificationRefresh(
+        current,
+        desired.ownership_verification,
+        {
+          previous_due: previousDue,
+          expected_generation: options.expected_refresh_generation,
+          extra_deletes: options.extra_deletes,
+        },
+      );
+      return;
+    }
     const entries = [
       [requestStorageKey(current.id), desired],
       [verificationDueKey(desired), desired.id],
@@ -3124,6 +3385,7 @@ export class DurableAgentEmailDomainRegistry {
     }
     await this.atomic(entries, [
       ...[previousDue].filter(Boolean),
+      verificationRefreshKey(current.id),
       ...(Array.isArray(options.extra_deletes) ? options.extra_deletes : []),
     ]);
     await this.scheduleNextAlarm().catch(() => {});
@@ -3157,6 +3419,10 @@ export class DurableAgentEmailDomainRegistry {
         state_revision: (current.state_revision ?? 1) + 1,
         updated_at: mutation.now,
       };
+      const rawRefresh = await this.storage.get(
+        verificationRefreshKey(current.id),
+      );
+      const refresh = effectiveVerificationRefresh(current, rawRefresh);
       await this.atomic([
         [META_KEY, mutation.meta],
         [mutation.audit_key, mutation.audit],
@@ -3164,7 +3430,10 @@ export class DurableAgentEmailDomainRegistry {
       ], [
         due,
         verificationDueKey(current),
+        effectiveVerificationDueKey(current, refresh),
+        storedVerificationRefreshDue(rawRefresh, current.id),
         verificationWorkKey(current.id),
+        verificationRefreshKey(current.id),
       ].filter(Boolean));
     }
   }
@@ -3225,13 +3494,20 @@ export class DurableAgentEmailDomainRegistry {
         body,
       }]);
     }
+    const rawRefresh = await this.storage.get(
+      verificationRefreshKey(current.id),
+    );
+    const refresh = effectiveVerificationRefresh(current, rawRefresh);
     await this.atomic(entries, [...new Set([
       accountDomainKey(current),
       domainPendingKey(current),
       challengeExpiryDueKey(current),
       verificationDueKey(current),
+      effectiveVerificationDueKey(current, refresh),
+      storedVerificationRefreshDue(rawRefresh, current.id),
       graceDueKey(current),
       verificationWorkKey(current.id),
+      verificationRefreshKey(current.id),
       ...(Array.isArray(options.extra_deletes) ? options.extra_deletes : []),
     ].filter(Boolean))]);
     await this.scheduleNextAlarm().catch(() => {});

@@ -310,7 +310,30 @@ function assertDerivedParity(storage) {
     .sort(([left], [right]) => left.localeCompare(right));
   const expected = [...rebuildAgentEmailDomainDerivedState(authority)]
     .sort(([left], [right]) => left.localeCompare(right));
-  assert.deepEqual(actual, expected);
+  assert.deepEqual(
+    actual.filter(([key]) => !key.startsWith("verification-due:")),
+    expected.filter(([key]) => !key.startsWith("verification-due:")),
+  );
+  const actualVerification = actual.filter(([key]) =>
+    key.startsWith("verification-due:"));
+  const expectedVerification = [];
+  for (const [, request] of authority) {
+    if (request?.schema_version !== "witself.agent-email-domain.v1" ||
+        !["pending_verification", "verified"].includes(request.state) ||
+        request.plan_suspended === true ||
+        request.lifecycle_suspended === true) continue;
+    const refresh = storage.values.get(`verification-refresh:${request.id}`);
+    const canonical = expected.find(([key]) =>
+      key.startsWith("verification-due:") && key.endsWith(`:${request.id}`));
+    expectedVerification.push(refresh
+      ? [refresh.verification_due_key, request.id]
+      : canonical);
+  }
+  assert.deepEqual(
+    actualVerification,
+    expectedVerification.filter(Boolean)
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
 }
 
 test("domain normalization is lowercase ASCII DNS only", () => {
@@ -1345,7 +1368,7 @@ test("overlapping scheduled runners resolve each due request exactly once", asyn
   }
 });
 
-test("identical scheduled proof refreshes are journaled without growing audit authority", async () => {
+test("identical scheduled proofs stay in one bounded local refresh", async () => {
   const streamID = `aedj_${"b".repeat(24)}`;
   const bucket = new Bucket();
   let expectedValue;
@@ -1397,43 +1420,105 @@ test("identical scheduled proof refreshes are journaled without growing audit au
     fixture.storage.values.get(AGENT_EMAIL_DOMAIN_JOURNAL_CAPACITY_KEY),
   );
   const beforeAuditCount = auditRows(fixture.storage).length;
+  const beforeBucketSize = bucket.values.size;
 
-  minimumTTL = 240;
-  fixture.advanceTime(
-    (AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_INTERVAL_HOURS + 1) *
-      60 * 60 * 1_000,
-  );
-  const scheduled = await call(fixture.runtime, "/verification/reconcile", {
-    verification_enabled: true,
-  });
-  assert.equal(scheduled.response.status, 200);
-  assert.equal(scheduled.body.matched, 1);
+  for (let index = 0; index < 100; index += 1) {
+    minimumTTL = 200 + index;
+    fixture.advanceTime(
+      (AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_INTERVAL_HOURS + 1) *
+        60 * 60 * 1_000,
+    );
+    const scheduled = await call(fixture.runtime, "/verification/reconcile", {
+      verification_enabled: true,
+    });
+    assert.equal(scheduled.response.status, 200);
+    assert.equal(scheduled.body.matched, 1);
+    assert.equal(scheduled.body.failures, 0, JSON.stringify(scheduled.body));
+  }
 
   const refreshed = fixture.storage.values.get(requestKey);
   const refreshedAllocation = fixture.storage.values.get(domainKey);
+  const refreshKey = `verification-refresh:${created.body.request.id}`;
+  const refresh = fixture.storage.values.get(refreshKey);
+  const shown = await call(fixture.runtime, "/request/get", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+  });
+  const listed = await call(fixture.runtime, "/request/admin-list", {
+    actor: ADMIN,
+    account_id: ACCOUNT,
+  });
   const afterHead = fixture.storage.values.get(
     AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY,
   );
   const afterCapacity = fixture.storage.values.get(
     AGENT_EMAIL_DOMAIN_JOURNAL_CAPACITY_KEY,
   );
-  assert.ok(Date.parse(refreshed.ownership_verification.last_checked_at) >
+  assert.deepEqual(refreshed, beforeRequest);
+  assert.deepEqual(refreshedAllocation, beforeAllocation);
+  assert.equal(refresh.generation, 100);
+  assert.equal(refresh.ownership_verification.minimum_ttl_seconds, 299);
+  assert.ok(Date.parse(
+    shown.body.request.ownership_verification.last_checked_at,
+  ) >
     Date.parse(beforeRequest.ownership_verification.last_checked_at));
-  assert.ok(Date.parse(refreshed.ownership_verification.last_verified_at) >
+  assert.ok(Date.parse(
+    shown.body.request.ownership_verification.last_verified_at,
+  ) >
     Date.parse(beforeRequest.ownership_verification.last_verified_at));
-  assert.equal(refreshed.state_revision, beforeRequest.state_revision + 1);
-  assert.equal(refreshed.ownership_verification.minimum_ttl_seconds, 240);
+  assert.equal(shown.body.request.state_revision, beforeRequest.state_revision);
+  assert.equal(shown.body.request.updated_at, beforeRequest.updated_at);
   assert.equal(
-    refreshedAllocation.allocation_revision,
-    beforeAllocation.allocation_revision + 1,
+    shown.body.request.ownership_verification.minimum_ttl_seconds,
+    299,
+  );
+  assert.deepEqual(
+    listed.body.requests[0].ownership_verification,
+    shown.body.request.ownership_verification,
+  );
+  assert.deepEqual(
+    [...fixture.storage.values.keys()].filter((key) =>
+      key.startsWith("verification-refresh:")),
+    [refreshKey],
+  );
+  assert.deepEqual(
+    [...fixture.storage.values.entries()].filter(([key]) =>
+      key.startsWith("verification-due:")),
+    [[refresh.verification_due_key, created.body.request.id]],
   );
   assert.deepEqual(fixture.storage.values.get("meta"), beforeMeta);
   assert.equal(auditRows(fixture.storage).length, beforeAuditCount);
-  assert.equal(afterHead.sequence, beforeHead.sequence + 1);
-  assert.equal(afterHead.registry_revision, beforeHead.registry_revision);
-  assert.equal(afterHead.audit_sequence, beforeHead.audit_sequence);
-  assert.equal(afterCapacity.authority_keys, beforeCapacity.authority_keys);
-  assert.deepEqual(afterCapacity.breakdown, beforeCapacity.breakdown);
+  assert.deepEqual(afterHead, beforeHead);
+  assert.deepEqual(afterCapacity, beforeCapacity);
+  assert.equal(bucket.values.size, beforeBucketSize);
+  assertDerivedParity(fixture.storage);
+  const stableReplay = await replayBucketJournal(bucket, streamID);
+  assert.deepEqual(stableReplay.state.get(requestKey), beforeRequest);
+  assert.deepEqual(stableReplay.state.get(domainKey), beforeAllocation);
+  assert.equal(stableReplay.head.sequence, beforeHead.sequence);
+  const rebuiltAfterRefresh = rebuildAgentEmailDomainDerivedState(
+    stableReplay.state,
+  );
+  assert.equal(rebuiltAfterRefresh.has(refresh.verification_due_key), false);
+  assert.equal(
+    [...rebuiltAfterRefresh.keys()].some((key) =>
+      key.startsWith("verification-due:") &&
+      key.endsWith(`:${created.body.request.id}`)),
+    true,
+  );
+
+  let checkpoint;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    checkpoint = await call(fixture.runtime, "/journal/checkpoint", {
+      actor: ADMIN,
+      reason: "prove refresh-aware checkpoint parity",
+      idempotency_key: "refresh-aware-checkpoint",
+    });
+    assert.equal(checkpoint.response.status, 200);
+    if (checkpoint.body.complete) break;
+  }
+  assert.equal(checkpoint.body.complete, true);
+  assert.equal(fixture.storage.values.has(refreshKey), true);
 
   const beforeManualAuditCount = auditRows(fixture.storage).length;
   const manual = await call(fixture.runtime, "/request/verify", {
@@ -1448,6 +1533,7 @@ test("identical scheduled proof refreshes are journaled without growing audit au
     auditRows(fixture.storage).at(-1)[1].action,
     "custom_domain.reverified",
   );
+  assert.equal(fixture.storage.values.has(refreshKey), false);
   const beforeReplayHead = structuredClone(
     fixture.storage.values.get(AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY),
   );
@@ -1472,7 +1558,7 @@ test("identical scheduled proof refreshes are journaled without growing audit au
     beforeReplayCapacity,
   );
   assert.equal(bucket.values.size, beforeReplayBucketSize);
-  assert.equal(lookups, 3);
+  assert.equal(lookups, 102);
 
   const recovered = await replayBucketJournal(bucket, streamID);
   assert.deepEqual(
@@ -1494,6 +1580,194 @@ test("identical scheduled proof refreshes are journaled without growing audit au
       expected_audit_sequence: recovered.head.audit_sequence,
     },
   ));
+});
+
+test("empty-target recovery drops a refresh and conservatively recreates it", async () => {
+  const streamID = `aedj_${"c".repeat(24)}`;
+  const recoveryID = `aedrec_${"d".repeat(16)}`;
+  const bucket = new Bucket();
+  let expectedValue;
+  let lookups = 0;
+  const resolver = async () => {
+    lookups += 1;
+    return {
+      answers: [expectedValue],
+      authoritative_absence: false,
+      dnssec_authenticated: true,
+      minimum_ttl_seconds: 120,
+      rrset_sha256: "6".repeat(64),
+    };
+  };
+  const env = {
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+    CP_AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_ENABLED: "true",
+    CP_AGENT_EMAIL_DOMAIN_AUTHORITY_STREAM_ID: streamID,
+    AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL: bucket,
+  };
+  const source = registry(env, { resolveTXT: resolver });
+  const created = await create(
+    source.runtime,
+    "recovered-refresh.example",
+    { domain_limit: 1 },
+  );
+  assert.equal(created.response.status, 202);
+  const requestID = created.body.request.id;
+  const requestKey = `request:${requestID}`;
+  const refreshKey = `verification-refresh:${requestID}`;
+  expectedValue = created.body.request.ownership_challenge.record_value;
+  const verified = await call(source.runtime, "/request/verify", {
+    actor: ADMIN,
+    request_id: requestID,
+    idempotency_key: "recovered-refresh-initial",
+    verification_enabled: true,
+  });
+  assert.equal(verified.response.status, 200);
+  const authorityRequest = structuredClone(source.storage.values.get(requestKey));
+
+  source.advanceTime(
+    (AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_INTERVAL_HOURS + 1) *
+      60 * 60 * 1_000,
+  );
+  const refreshed = await call(source.runtime, "/verification/reconcile", {
+    verification_enabled: true,
+  });
+  assert.equal(refreshed.response.status, 200);
+  assert.equal(refreshed.body.matched, 1);
+  assert.equal(refreshed.body.failures, 0, JSON.stringify(refreshed.body));
+  const localRefresh = structuredClone(source.storage.values.get(refreshKey));
+  assert.ok(localRefresh);
+  assert.deepEqual(source.storage.values.get(requestKey), authorityRequest);
+
+  let checkpoint;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    checkpoint = await call(source.runtime, "/journal/checkpoint", {
+      actor: ADMIN,
+      reason: "select a refresh-aware recovery head",
+      idempotency_key: "recovered-refresh-checkpoint",
+    });
+    assert.equal(checkpoint.response.status, 200);
+    if (checkpoint.body.complete) break;
+  }
+  assert.equal(checkpoint.body.complete, true);
+  const selectedHead = structuredClone(
+    source.storage.values.get(AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY),
+  );
+  const selectedBucketSize = bucket.values.size;
+  assert.equal(source.storage.values.has(refreshKey), true);
+
+  const target = registry(env, { resolveTXT: resolver });
+  target.storage.alarm = null;
+  let recovery = await call(target.runtime, "/recovery/start", {
+    actor: ADMIN,
+    recovery_id: recoveryID,
+    source_stream_id: streamID,
+    expected_head: {
+      sequence: selectedHead.sequence,
+      hash: selectedHead.hash,
+    },
+    reason: "recover the exact refresh-aware checkpoint",
+    idempotency_key: "recovered-refresh-start",
+    active_object_name: "global",
+    target_object_name: `recovery:${recoveryID}`,
+  });
+  assert.equal(recovery.response.status, 202, JSON.stringify(recovery.body));
+  let status = recovery.body;
+  for (let attempt = 0;
+    attempt < 100 && status.phase === "replay";
+    attempt += 1) {
+    recovery = await call(target.runtime, "/recovery/advance", {
+      actor: ADMIN,
+      recovery_id: recoveryID,
+      idempotency_key: `recovered-refresh-advance-${attempt}`,
+      expected_action_fence: status.action_fence,
+    });
+    assert.ok([200, 202].includes(recovery.response.status));
+    status = recovery.body;
+  }
+  assert.equal(status.phase, "replayed");
+  for (let attempt = 0; attempt < 100 && status.sealed !== true; attempt += 1) {
+    recovery = await call(target.runtime, "/recovery/verify", {
+      actor: ADMIN,
+      recovery_id: recoveryID,
+      idempotency_key: `recovered-refresh-verify-${attempt}`,
+      expected_action_fence: status.action_fence,
+    });
+    assert.ok([200, 202].includes(recovery.response.status));
+    status = recovery.body;
+  }
+  assert.equal(status.sealed, true);
+  assert.equal(status.replay_head.sequence, selectedHead.sequence);
+  assert.equal(status.replay_head.hash, selectedHead.hash);
+
+  const recoveredAuthority = target.storage.values.get(requestKey);
+  assert.deepEqual(recoveredAuthority, authorityRequest);
+  assert.equal(
+    [...target.storage.values.keys()].some((key) =>
+      key.startsWith("verification-refresh:") ||
+      key.startsWith("verification-work:")),
+    false,
+  );
+  const canonicalDue =
+    `verification-due:${String(Date.parse(
+      authorityRequest.ownership_verification.next_check_at,
+    )).padStart(16, "0")}:${requestID}`;
+  assert.deepEqual(
+    [...target.storage.values.entries()].filter(([key]) =>
+      key.startsWith("verification-due:")),
+    [[canonicalDue, requestID]],
+  );
+  assertDerivedParity(target.storage);
+  const recoveredProjection = await target.runtime.publicRequest(
+    recoveredAuthority,
+  );
+  assert.deepEqual(
+    recoveredProjection.ownership_verification,
+    authorityRequest.ownership_verification,
+  );
+  assert.equal(recoveredProjection.updated_at, authorityRequest.updated_at);
+  assert.equal(
+    recoveredProjection.state_revision,
+    authorityRequest.state_revision,
+  );
+
+  // A sealed drill target cannot become active. Rebuild the same local state
+  // on the still-active source to prove the conservative post-recovery check.
+  await source.storage.transaction(async (tx) => {
+    await tx.delete(refreshKey);
+    await tx.delete(localRefresh.verification_due_key);
+    await tx.delete(`verification-work:${requestID}`);
+    await tx.put(canonicalDue, requestID);
+  });
+  const fallback = await call(source.runtime, "/request/get", {
+    actor: ADMIN,
+    request_id: requestID,
+  });
+  assert.equal(fallback.response.status, 200);
+  assert.deepEqual(
+    fallback.body.request.ownership_verification,
+    authorityRequest.ownership_verification,
+  );
+  assertDerivedParity(source.storage);
+  const beforeRecreateHead = structuredClone(
+    source.storage.values.get(AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY),
+  );
+  const beforeRecreateBucketSize = bucket.values.size;
+  const recreated = await call(source.runtime, "/verification/reconcile", {
+    verification_enabled: true,
+  });
+  assert.equal(recreated.response.status, 200);
+  assert.equal(recreated.body.matched, 1);
+  assert.equal(recreated.body.failures, 0, JSON.stringify(recreated.body));
+  assert.equal(source.storage.values.get(refreshKey).generation, 1);
+  assert.deepEqual(source.storage.values.get(requestKey), authorityRequest);
+  assert.deepEqual(
+    source.storage.values.get(AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY),
+    beforeRecreateHead,
+  );
+  assert.equal(bucket.values.size, beforeRecreateBucketSize);
+  assert.equal(bucket.values.size, selectedBucketSize);
+  assert.equal(lookups, 3);
+  assertDerivedParity(source.storage);
 });
 
 test("only scheduled verification evidence transitions append audit rows", async () => {
@@ -1553,11 +1827,18 @@ test("only scheduled verification evidence transitions append audit rows", async
     verification_enabled: true,
   });
   const secondTemporary = structuredClone(fixture.storage.values.get(requestKey));
+  const temporaryShown = await call(fixture.runtime, "/request/get", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+  });
   assert.equal(auditRows(fixture.storage).length, firstTemporaryAuditCount);
-  assert.ok(Date.parse(secondTemporary.ownership_verification.last_checked_at) >
+  assert.deepEqual(secondTemporary, firstTemporary);
+  assert.ok(Date.parse(
+    temporaryShown.body.request.ownership_verification.last_checked_at,
+  ) >
     Date.parse(firstTemporary.ownership_verification.last_checked_at));
   assert.equal(
-    secondTemporary.ownership_verification.consecutive_failures,
+    temporaryShown.body.request.ownership_verification.consecutive_failures,
     firstTemporary.ownership_verification.consecutive_failures + 1,
   );
 
@@ -1580,11 +1861,18 @@ test("only scheduled verification evidence transitions append audit rows", async
     verification_enabled: true,
   });
   const secondMissing = structuredClone(fixture.storage.values.get(requestKey));
+  const missingShown = await call(fixture.runtime, "/request/get", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+  });
   assert.equal(auditRows(fixture.storage).length, firstMissingAuditCount);
-  assert.ok(Date.parse(secondMissing.ownership_verification.last_checked_at) >
+  assert.deepEqual(secondMissing, firstMissing);
+  assert.ok(Date.parse(
+    missingShown.body.request.ownership_verification.last_checked_at,
+  ) >
     Date.parse(firstMissing.ownership_verification.last_checked_at));
   assert.equal(
-    secondMissing.ownership_verification.consecutive_failures,
+    missingShown.body.request.ownership_verification.consecutive_failures,
     firstMissing.ownership_verification.consecutive_failures + 1,
   );
 
@@ -1601,6 +1889,12 @@ test("only scheduled verification evidence transitions append audit rows", async
   );
   assert.equal(restored.ownership_verification.state, "verified");
   assert.equal(restored.ownership_verification.consecutive_failures, 0);
+  assert.equal(
+    fixture.storage.values.has(
+      `verification-refresh:${created.body.request.id}`,
+    ),
+    false,
+  );
   assert.doesNotThrow(() => validateAgentEmailDomainRecoveredState(new Map(
     [...fixture.storage.values].filter(([key]) =>
       isAgentEmailDomainAuthorityKey(key)),
@@ -1649,6 +1943,83 @@ test("an expired claim fence cannot alter a newer verification claim", async () 
       `verification-work:${created.body.request.id}`,
     ).claim_id,
     second.body.claim.claim_id,
+  );
+});
+
+test("a refresh generation change fences an older scheduled claim", async () => {
+  let expectedValue;
+  const fixture = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+  }, {
+    resolveTXT: async () => ({
+      answers: [expectedValue],
+      authoritative_absence: false,
+      dnssec_authenticated: true,
+      minimum_ttl_seconds: 60,
+      rrset_sha256: "8".repeat(64),
+    }),
+  });
+  const created = await create(fixture.runtime, "refresh-fence.example", {
+    domain_limit: 1,
+  });
+  expectedValue = created.body.request.ownership_challenge.record_value;
+  assert.equal((await call(fixture.runtime, "/request/verify", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+    idempotency_key: "refresh-fence-initial",
+    verification_enabled: true,
+  })).response.status, 200);
+  fixture.advanceTime(
+    (AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_INTERVAL_HOURS + 1) *
+      60 * 60 * 1_000,
+  );
+  assert.equal((await call(fixture.runtime, "/verification/reconcile", {
+    verification_enabled: true,
+  })).body.matched, 1);
+
+  fixture.advanceTime(
+    (AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_INTERVAL_HOURS + 1) *
+      60 * 60 * 1_000,
+  );
+  const claimed = await call(fixture.runtime, "/verification/claim", {
+    mode: "scheduled",
+    verification_enabled: true,
+  });
+  assert.equal(claimed.body.kind, "claim");
+  const refreshKey = `verification-refresh:${created.body.request.id}`;
+  const newerRefresh = {
+    ...fixture.storage.values.get(refreshKey),
+    generation: fixture.storage.values.get(refreshKey).generation + 1,
+  };
+  fixture.storage.values.set(refreshKey, newerRefresh);
+
+  const observed = await call(fixture.runtime, "/verification/observe", {
+    request_id: created.body.request.id,
+    claim_id: claimed.body.claim.claim_id,
+    generation: claimed.body.claim.generation,
+    verification_enabled: true,
+    observation: {
+      kind: "resolved",
+      matched: true,
+      authoritative_absence: false,
+      dnssec_authenticated: true,
+      minimum_ttl_seconds: 60,
+      rrset_sha256: "8".repeat(64),
+    },
+  });
+  assert.equal(observed.response.status, 200);
+  const stale = await call(fixture.runtime, "/verification/commit", {
+    request_id: created.body.request.id,
+    claim_id: claimed.body.claim.claim_id,
+    generation: claimed.body.claim.generation,
+    verification_enabled: true,
+  });
+  assert.equal(stale.response.status, 409);
+  assert.equal(stale.body.code, "verification_claim_stale");
+  assert.deepEqual(fixture.storage.values.get(refreshKey), newerRefresh);
+  assert.equal(
+    fixture.storage.values.has(`verification-work:${created.body.request.id}`),
+    false,
   );
 });
 
@@ -2497,6 +2868,111 @@ test("plan and lifecycle suspension keep verification indexes in exact parity", 
   assertDerivedParity(fixture.storage);
 });
 
+test("plan and lifecycle transitions clear local verification refreshes", async () => {
+  let expectedValue;
+  const fixture = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+  }, {
+    resolveTXT: async () => ({
+      answers: [expectedValue],
+      authoritative_absence: false,
+      dnssec_authenticated: false,
+      minimum_ttl_seconds: 60,
+      rrset_sha256: "9".repeat(64),
+    }),
+  });
+  const created = await create(fixture.runtime, "refresh-cleanup.example", {
+    domain_limit: 1,
+  });
+  const requestID = created.body.request.id;
+  const refreshKey = `verification-refresh:${requestID}`;
+  const hasDue = () => [...fixture.storage.values.keys()].some((key) =>
+    key.startsWith("verification-due:") && key.endsWith(`:${requestID}`));
+  expectedValue = created.body.request.ownership_challenge.record_value;
+  assert.equal((await call(fixture.runtime, "/request/verify", {
+    actor: ADMIN,
+    request_id: requestID,
+    idempotency_key: "refresh-cleanup-initial",
+    verification_enabled: true,
+  })).response.status, 200);
+  fixture.advanceTime(
+    (AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_INTERVAL_HOURS + 1) *
+      60 * 60 * 1_000,
+  );
+  assert.equal((await call(fixture.runtime, "/verification/reconcile", {
+    verification_enabled: true,
+  })).body.matched, 1);
+  assert.equal(fixture.storage.values.has(refreshKey), true);
+
+  const downgrade = {
+    account_id: ACCOUNT,
+    feature_enabled: false,
+    domain_limit: 0,
+    plan_revision: 8,
+    plan_snapshot_hash: "8".repeat(64),
+  };
+  await call(fixture.runtime, "/plan/reconcile", {
+    ...downgrade,
+    mode: "restrict_only",
+  });
+  await call(fixture.runtime, "/plan/reconcile", {
+    ...downgrade,
+    mode: "complete",
+  });
+  assert.equal(fixture.storage.values.has(refreshKey), false);
+  assert.equal(hasDue(), true);
+  assertDerivedParity(fixture.storage);
+
+  const upgrade = {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    domain_limit: 1,
+    plan_revision: 9,
+    plan_snapshot_hash: "a".repeat(64),
+  };
+  await call(fixture.runtime, "/plan/reconcile", {
+    ...upgrade,
+    mode: "restrict_only",
+  });
+  await call(fixture.runtime, "/plan/reconcile", {
+    ...upgrade,
+    mode: "complete",
+  });
+  assert.equal(hasDue(), true);
+  assert.equal((await call(fixture.runtime, "/verification/reconcile", {
+    verification_enabled: true,
+  })).body.matched, 1);
+  assert.equal(fixture.storage.values.has(refreshKey), true);
+
+  const lifecycle = {
+    account_id: ACCOUNT,
+    operation_id: "refresh-cleanup-lifecycle",
+    epoch: 1,
+  };
+  await call(fixture.runtime, "/account-lifecycle/reconcile", {
+    ...lifecycle,
+    action: "suspend",
+  });
+  assert.equal(fixture.storage.values.has(refreshKey), false);
+  assert.equal(hasDue(), false);
+  await call(fixture.runtime, "/account-lifecycle/reconcile", {
+    ...lifecycle,
+    action: "republish",
+  });
+  assert.equal(hasDue(), true);
+  assert.equal((await call(fixture.runtime, "/verification/reconcile", {
+    verification_enabled: true,
+  })).body.matched, 1);
+  assert.equal(fixture.storage.values.has(refreshKey), true);
+  await call(fixture.runtime, "/account-lifecycle/reconcile", {
+    ...lifecycle,
+    action: "retire",
+  });
+  assert.equal(fixture.storage.values.has(refreshKey), false);
+  assert.equal(hasDue(), false);
+  assertDerivedParity(fixture.storage);
+});
+
 test("verification defers while account policy is between durable pages", async () => {
   let expectedValue = null;
   let lookups = 0;
@@ -2571,16 +3047,21 @@ test("verification defers while account policy is between durable pages", async 
   const refreshedPolicyDeferral = fixture.storage.values.get(
     `request:${created.body.request.id}`,
   );
+  const shownPolicyDeferral = await call(fixture.runtime, "/request/get", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+  });
   assert.equal(auditRows(fixture.storage).length, firstPolicyAuditCount);
   assert.deepEqual(fixture.storage.values.get("meta"), firstPolicyMeta);
+  assert.deepEqual(refreshedPolicyDeferral, firstPolicyDeferral);
   assert.ok(Date.parse(
-    refreshedPolicyDeferral.ownership_verification.last_checked_at,
+    shownPolicyDeferral.body.request.ownership_verification.last_checked_at,
   ) > Date.parse(
     firstPolicyDeferral.ownership_verification.last_checked_at,
   ));
   assert.equal(
-    refreshedPolicyDeferral.state_revision,
-    firstPolicyDeferral.state_revision + 1,
+    shownPolicyDeferral.body.request.state_revision,
+    firstPolicyDeferral.state_revision,
   );
   assertDerivedParity(fixture.storage);
 
