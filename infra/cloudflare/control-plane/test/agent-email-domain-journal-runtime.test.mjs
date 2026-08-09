@@ -4,9 +4,11 @@ import test from "node:test";
 import {
   AgentEmailDomainJournalRuntime,
   AGENT_EMAIL_DOMAIN_JOURNAL_BOOTSTRAP_KEY,
+  AGENT_EMAIL_DOMAIN_JOURNAL_CAPACITY_KEY,
   AGENT_EMAIL_DOMAIN_JOURNAL_FORK_KEY,
   AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY,
   AGENT_EMAIL_DOMAIN_JOURNAL_PENDING_KEY,
+  AGENT_EMAIL_DOMAIN_MAX_AUTHORITY_KEYS,
   AGENT_EMAIL_DOMAIN_RECOVERY_KEY,
 } from "../src/agent-email-domain-journal-runtime.mjs";
 import {
@@ -190,6 +192,20 @@ function pendingMutation() {
   ];
 }
 
+function lifecycleIntent() {
+  return {
+    account_id: ACCOUNT,
+    operation_id: "capacity-test-suspend",
+    epoch: 1,
+    action: "suspend",
+    cursor: null,
+    failure_count: 0,
+    retry_at_ms: 0,
+    created_at: T1,
+    updated_at: T1,
+  };
+}
+
 function maintenanceInput(key = "bootstrap-test") {
   return {
     actor: { kind: "platform_admin", id: "adm_test" },
@@ -297,7 +313,16 @@ test("required journal writes R2 before local authority and resumes an exact pen
     (error) => error.code === "agent_email_domain_journal_unavailable",
   );
   assert.equal(await target.storage.get("meta"), undefined);
-  assert.ok(await target.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_PENDING_KEY));
+  const pending = await target.storage.get(
+    AGENT_EMAIL_DOMAIN_JOURNAL_PENDING_KEY,
+  );
+  assert.ok(pending);
+  assert.equal(pending.capacity_after.authority_keys, 1);
+  const genesisCapacity = await target.storage.get(
+    AGENT_EMAIL_DOMAIN_JOURNAL_CAPACITY_KEY,
+  );
+  assert.equal(genesisCapacity.sequence, 0);
+  assert.equal(genesisCapacity.authority_keys, 0);
   assert.equal(target.bucket.values.size, 1);
 
   const resumed = await target.runtime.resume(target.apply);
@@ -307,7 +332,96 @@ test("required journal writes R2 before local authority and resumes an exact pen
     await target.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_PENDING_KEY),
     undefined,
   );
+  const capacity = await target.storage.get(
+    AGENT_EMAIL_DOMAIN_JOURNAL_CAPACITY_KEY,
+  );
+  assert.equal(capacity.sequence, resumed.head.sequence);
+  assert.equal(capacity.hash, resumed.head.hash);
+  assert.equal(capacity.authority_keys, 1);
+  assert.deepEqual(capacity.breakdown, {
+    meta: 1,
+    audit: 0,
+    domain: 0,
+    idempotency: 0,
+    lifecycle_fence: 0,
+    lifecycle_intent: 0,
+    plan_fence: 0,
+    plan_intent: 0,
+    request: 0,
+  });
   assert.equal(target.bucket.values.size, 1);
+});
+
+test("genesis head and zero capacity survive failure before pending staging", async () => {
+  const target = fixture();
+  const transaction = target.storage.transaction.bind(target.storage);
+  let transactions = 0;
+  target.storage.transaction = async (callback) => {
+    transactions += 1;
+    if (transactions === 2) {
+      throw new Error("pending staging unavailable");
+    }
+    return transaction(callback);
+  };
+
+  await assert.rejects(
+    target.runtime.commit([["meta", meta()]], [], {}, target.apply),
+    /pending staging unavailable/,
+  );
+  const head = await target.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY);
+  const capacity = await target.storage.get(
+    AGENT_EMAIL_DOMAIN_JOURNAL_CAPACITY_KEY,
+  );
+  assert.equal(head.sequence, 0);
+  assert.equal(capacity.sequence, 0);
+  assert.equal(capacity.hash, head.hash);
+  assert.equal(capacity.authority_keys, 0);
+  assert.equal(
+    await target.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_PENDING_KEY),
+    undefined,
+  );
+  assert.equal(target.bucket.puts, 0);
+  await target.runtime.assertOperationalReady();
+
+  await target.runtime.commit([["meta", meta()]], [], {}, target.apply);
+  const healed = await target.runtime.status();
+  assert.equal(healed.healthy, true);
+  assert.equal(healed.head.sequence, 1);
+  assert.equal(healed.capacity.ready, true);
+  assert.equal(healed.capacity.used, 1);
+  assert.deepEqual(await target.storage.get("meta"), meta());
+});
+
+test("a legacy pending record without capacity cannot append or resume", async () => {
+  const target = fixture({
+    dependencies: {
+      afterJournalAppend: () => {
+        throw new Error("lost append acknowledgement");
+      },
+    },
+  });
+  await assert.rejects(
+    target.runtime.commit([["meta", meta()]], [], {}, target.apply),
+    (error) => error.code === "agent_email_domain_journal_unavailable",
+  );
+  const pending = await target.storage.get(
+    AGENT_EMAIL_DOMAIN_JOURNAL_PENDING_KEY,
+  );
+  delete pending.capacity_after;
+  await target.storage.put(AGENT_EMAIL_DOMAIN_JOURNAL_PENDING_KEY, pending);
+  const putsBefore = target.bucket.puts;
+
+  await assert.rejects(
+    target.runtime.resume(target.apply),
+    (error) => error.code === "agent_email_domain_journal_pending_invalid",
+  );
+  assert.equal(target.bucket.puts, putsBefore);
+  assert.equal(await target.storage.get("meta"), undefined);
+  const genesisCapacity = await target.storage.get(
+    AGENT_EMAIL_DOMAIN_JOURNAL_CAPACITY_KEY,
+  );
+  assert.equal(genesisCapacity.sequence, 0);
+  assert.equal(genesisCapacity.authority_keys, 0);
 });
 
 test("a persisted head keeps journaling after the exact-true gate is removed", async () => {
@@ -321,6 +435,166 @@ test("a persisted head keeps journaling after the exact-true gate is removed", a
   assert.equal(after.sequence, before.sequence + 1);
   assert.equal(target.bucket.values.size, 2);
   assert.deepEqual(await target.storage.get(`domain:${DOMAIN}`), pendingRequest());
+});
+
+test("head-bound capacity tracks authority inserts, overwrites, and deletes", async () => {
+  const target = fixture();
+  await target.runtime.commit([["meta", meta()]], [], {}, target.apply);
+  await target.runtime.commit(pendingMutation(), [], {}, target.apply);
+
+  let status = await target.runtime.status();
+  assert.deepEqual(status.capacity, {
+    ready: true,
+    used: 5,
+    max: AGENT_EMAIL_DOMAIN_MAX_AUTHORITY_KEYS,
+    remaining: AGENT_EMAIL_DOMAIN_MAX_AUTHORITY_KEYS - 5,
+    near_limit: false,
+    at_limit: false,
+    breakdown: {
+      meta: 1,
+      audit: 1,
+      domain: 1,
+      idempotency: 1,
+      lifecycle_fence: 0,
+      lifecycle_intent: 0,
+      plan_fence: 0,
+      plan_intent: 0,
+      request: 1,
+    },
+  });
+
+  const intentKey = `lifecycle-intent:${ACCOUNT}`;
+  await target.runtime.commit(
+    [[intentKey, lifecycleIntent()]],
+    [],
+    {},
+    target.apply,
+  );
+  assert.equal((await target.runtime.status()).capacity.used, 6);
+  await target.runtime.commit(
+    [[intentKey, lifecycleIntent()]],
+    [],
+    {},
+    target.apply,
+  );
+  status = await target.runtime.status();
+  assert.equal(status.capacity.used, 6);
+  assert.equal(status.capacity.breakdown.lifecycle_intent, 1);
+
+  await target.runtime.commit([], [intentKey], {}, target.apply);
+  status = await target.runtime.status();
+  assert.equal(status.capacity.used, 5);
+  assert.equal(status.capacity.breakdown.lifecycle_intent, 0);
+  assert.equal(await target.storage.get(intentKey), undefined);
+});
+
+test("authority commit atomically consumes only verification work local state", async () => {
+  const target = fixture();
+  await target.runtime.commit([["meta", meta()]], [], {}, target.apply);
+  const workKey = `verification-work:${REQUEST_ID}`;
+  await target.storage.put(workKey, { opaque: "operational" });
+
+  await target.runtime.commit(pendingMutation(), [workKey], {}, target.apply);
+  assert.equal(await target.storage.get(workKey), undefined);
+  assert.deepEqual(
+    await target.storage.get(`request:${REQUEST_ID}`),
+    pendingRequest(),
+  );
+
+  await assert.rejects(
+    target.runtime.commit([], [AGENT_EMAIL_DOMAIN_JOURNAL_CAPACITY_KEY], {},
+      target.apply),
+    (error) => error.code ===
+      "agent_email_domain_journal_local_storage_key",
+  );
+  await assert.rejects(
+    target.runtime.commit([[workKey, { opaque: "replacement" }]], [], {},
+      target.apply),
+    (error) => error.code ===
+      "agent_email_domain_journal_local_storage_key",
+  );
+});
+
+test("stale capacity fails operational readiness and exposes unknown status fields", async () => {
+  const target = fixture();
+  await target.runtime.commit([["meta", meta()]], [], {}, target.apply);
+  const capacity = await target.storage.get(
+    AGENT_EMAIL_DOMAIN_JOURNAL_CAPACITY_KEY,
+  );
+  await target.storage.put(AGENT_EMAIL_DOMAIN_JOURNAL_CAPACITY_KEY, {
+    ...capacity,
+    hash: "f".repeat(64),
+  });
+
+  const status = await target.runtime.status();
+  assert.equal(status.healthy, false);
+  assert.equal(
+    status.degradation_code,
+    "agent_email_domain_journal_capacity_unavailable",
+  );
+  assert.deepEqual(status.capacity, {
+    ready: false,
+    used: null,
+    max: AGENT_EMAIL_DOMAIN_MAX_AUTHORITY_KEYS,
+    remaining: null,
+    near_limit: null,
+    at_limit: null,
+    breakdown: null,
+  });
+  await assert.rejects(
+    target.runtime.assertOperationalReady(),
+    (error) => error.code ===
+      "agent_email_domain_journal_capacity_unavailable",
+  );
+});
+
+test("authority admission rejects the hard limit before pending or R2 work", async () => {
+  const logs = [];
+  const target = fixture({
+    dependencies: {
+      log: (line) => logs.push(JSON.parse(line)),
+    },
+  });
+  await target.runtime.commit([["meta", meta()]], [], {}, target.apply);
+  const capacity = await target.storage.get(
+    AGENT_EMAIL_DOMAIN_JOURNAL_CAPACITY_KEY,
+  );
+  await target.storage.put(AGENT_EMAIL_DOMAIN_JOURNAL_CAPACITY_KEY, {
+    ...capacity,
+    authority_keys: AGENT_EMAIL_DOMAIN_MAX_AUTHORITY_KEYS,
+    breakdown: {
+      ...capacity.breakdown,
+      audit: AGENT_EMAIL_DOMAIN_MAX_AUTHORITY_KEYS - 1,
+    },
+  });
+  const atLimit = await target.runtime.status();
+  assert.equal(atLimit.capacity.ready, true);
+  assert.equal(atLimit.capacity.remaining, 0);
+  assert.equal(atLimit.capacity.near_limit, true);
+  assert.equal(atLimit.capacity.at_limit, true);
+  const putsBefore = target.bucket.puts;
+  const getsBefore = target.bucket.gets;
+
+  await assert.rejects(
+    target.runtime.commit(pendingMutation(), [], {}, target.apply),
+    (error) => error.code ===
+      "agent_email_domain_journal_authority_limit_exceeded",
+  );
+
+  assert.equal(target.bucket.puts, putsBefore);
+  assert.equal(target.bucket.gets, getsBefore);
+  assert.equal(
+    await target.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_PENDING_KEY),
+    undefined,
+  );
+  assert.equal(await target.storage.get(`domain:${DOMAIN}`), undefined);
+  assert.deepEqual(logs, [{
+    event: "agent_email_domain_authority_capacity_refused",
+    code: "agent_email_domain_journal_authority_limit_exceeded",
+    used: AGENT_EMAIL_DOMAIN_MAX_AUTHORITY_KEYS,
+    attempted: AGENT_EMAIL_DOMAIN_MAX_AUTHORITY_KEYS + 4,
+    max: AGENT_EMAIL_DOMAIN_MAX_AUTHORITY_KEYS,
+  }]);
 });
 
 test("a swapped R2 bucket permanently fences before local authority advances", async () => {
@@ -508,6 +782,40 @@ test("checkpoint verifies its non-genesis source head before appending", async (
   );
 });
 
+test("a checkpoint upgrades a legacy head with no capacity record", async () => {
+  const target = fixture({ entries: [["meta", meta()]] });
+  const bootstrapped = await finishMaintenance(
+    target.runtime,
+    maintenanceInput("legacy-capacity-bootstrap"),
+    target.apply,
+  );
+  await target.storage.delete(AGENT_EMAIL_DOMAIN_JOURNAL_CAPACITY_KEY);
+
+  const legacy = await target.runtime.status();
+  assert.equal(legacy.head.sequence, bootstrapped.head.sequence);
+  assert.equal(legacy.healthy, false);
+  assert.equal(legacy.capacity.ready, false);
+  await assert.rejects(
+    target.runtime.assertOperationalReady(),
+    (error) => error.code ===
+      "agent_email_domain_journal_capacity_unavailable",
+  );
+
+  const checkpoint = await finishMaintenance(
+    target.runtime,
+    maintenanceInput("legacy-capacity-checkpoint"),
+    target.apply,
+    "checkpoint",
+  );
+  const upgraded = await target.runtime.status();
+  assert.equal(checkpoint.head.sequence, bootstrapped.head.sequence + 1);
+  assert.equal(upgraded.head.sequence, checkpoint.head.sequence);
+  assert.equal(upgraded.healthy, true);
+  assert.equal(upgraded.capacity.ready, true);
+  assert.equal(upgraded.capacity.used, 1);
+  assert.equal(upgraded.capacity.breakdown.meta, 1);
+});
+
 test("required mode rejects existing unbootstrapped authority", async () => {
   const target = fixture({ entries: [["meta", meta()]] });
   await assert.rejects(
@@ -538,6 +846,10 @@ test("bootstrap atomically initializes a truly empty registry", async () => {
   assert.equal(status.enabled, true);
   assert.equal(status.required, true);
   assert.equal(status.healthy, true);
+  assert.equal(status.capacity.ready, true);
+  assert.equal(status.capacity.used, 1);
+  assert.equal(status.capacity.max, AGENT_EMAIL_DOMAIN_MAX_AUTHORITY_KEYS);
+  assert.equal(status.capacity.breakdown.meta, 1);
   await target.runtime.assertOperationalReady();
 });
 
@@ -581,6 +893,50 @@ test("bootstrap freeze survives an R2 crash and exact retry completes", async ()
     undefined,
   );
   assert.equal((await target.runtime.status()).pending, false);
+});
+
+test("legacy in-progress maintenance cannot advance before capacity validation", async () => {
+  for (const missing of ["record", "pending_next"]) {
+    const target = fixture({
+      entries: [["meta", meta()]],
+      dependencies: {
+        afterJournalAppend: () => {
+          throw new Error("process died after R2 append");
+        },
+      },
+    });
+    const input = maintenanceInput(`legacy-maintenance-${missing}`);
+    await assert.rejects(
+      target.runtime.bootstrap(input, target.apply),
+      (error) => error.code === "agent_email_domain_journal_unavailable",
+    );
+    const legacy = await target.storage.get(
+      AGENT_EMAIL_DOMAIN_JOURNAL_BOOTSTRAP_KEY,
+    );
+    assert.ok(legacy.pending);
+    if (missing === "record") delete legacy.authority_breakdown;
+    else delete legacy.pending.next.authority_breakdown;
+    await target.storage.put(AGENT_EMAIL_DOMAIN_JOURNAL_BOOTSTRAP_KEY, legacy);
+    const putsBefore = target.bucket.puts;
+    const headBefore = await target.storage.get(
+      AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY,
+    );
+
+    await assert.rejects(
+      target.runtime.bootstrap(input, target.apply),
+      (error) => error.code ===
+        "agent_email_domain_journal_maintenance_invalid",
+    );
+    assert.equal(target.bucket.puts, putsBefore);
+    assert.deepEqual(
+      await target.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY),
+      headBefore,
+    );
+    assert.deepEqual(
+      await target.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_BOOTSTRAP_KEY),
+      legacy,
+    );
+  }
 });
 
 test("completed maintenance idempotency survives intervening checkpoints", async () => {
@@ -761,6 +1117,20 @@ test("recovery crosses a complete checkpoint through a later mutation and seals 
     (await target.storage.get(`account-usage:${ACCOUNT}`)).open_requests,
     1,
   );
+  const journalStatus = await target.runtime.status();
+  assert.equal(journalStatus.capacity.ready, true);
+  assert.equal(journalStatus.capacity.used, 5);
+  assert.deepEqual(journalStatus.capacity.breakdown, {
+    meta: 1,
+    audit: 1,
+    domain: 1,
+    idempotency: 1,
+    lifecycle_fence: 0,
+    lifecycle_intent: 0,
+    plan_fence: 0,
+    plan_intent: 0,
+    request: 1,
+  });
   await assert.rejects(
     target.runtime.commit(pendingMutation(), [], {}, target.apply),
     (error) => error.code ===

@@ -3,8 +3,8 @@ import {
   AgentEmailDomainJournalRuntimeError,
 } from "./agent-email-domain-journal-runtime.mjs";
 import {
-  AgentEmailDomainVerificationError,
-  agentEmailDomainTXTMatches,
+  agentEmailDomainResolvedObservation,
+  agentEmailDomainTemporaryObservation,
   resolveAgentEmailDomainTXT,
 } from "./agent-email-domain-verification.mjs";
 import { canonicalJSONString } from "./agent-email-domain-journal.mjs";
@@ -28,6 +28,13 @@ const MAX_REQUEST_ID_MINT_ATTEMPTS = 8;
 // the hard 100-authority-change entry limit.
 const RECONCILE_PAGE_LIMIT = 40;
 const VERIFICATION_RECONCILE_LIMIT = 5;
+const VERIFICATION_WORK_SCHEMA =
+  "witself.agent-email-domain-verification-work.v1";
+const VERIFICATION_CLAIM_PATTERN = /^aedvc_[a-z2-7]{32}$/;
+const VERIFICATION_CLAIM_LEASE_MS = 60 * 1_000;
+const VERIFICATION_OBSERVATION_MAX_AGE_MS = 10 * 60 * 1_000;
+const VERIFICATION_CLAIM_SCAN_LIMIT = 32;
+const VERIFICATION_WORKER_CONCURRENCY = 2;
 const VERIFICATION_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 const VERIFICATION_RETRY_MS = 60 * 60 * 1_000;
 const VERIFICATION_RESOLVER_RETRY_MS = 15 * 60 * 1_000;
@@ -122,6 +129,10 @@ function newRequestID() {
 
 function newChallengeToken() {
   return `aedv_${randomBase32(32)}`;
+}
+
+function newVerificationClaimID() {
+  return `aedvc_${randomBase32(32)}`;
 }
 
 /**
@@ -289,8 +300,118 @@ function fingerprint(value) {
   return JSON.stringify(value);
 }
 
+function sameVerificationAuditOutcome(previous, desired) {
+  if (!previous || !desired) return false;
+  // Check clocks, retry counts, and recursive-resolver TTLs naturally move
+  // while the authoritative outcome remains identical. Keep their newest
+  // values on the request, but do not turn that operational drift into audit.
+  const evidence = (value) => ({
+    state: value.state,
+    last_result: value.last_result,
+    first_verified_at: value.first_verified_at ?? null,
+    rrset_sha256: value.rrset_sha256 ?? null,
+    dnssec_authenticated: value.dnssec_authenticated === true,
+  });
+  return canonicalJSONString(evidence(previous)) ===
+    canonicalJSONString(evidence(desired));
+}
+
+function validVerificationObservation(value) {
+  if (!isObject(value)) return false;
+  if (value.kind === "temporary_error") {
+    return [
+      "dns_lookup_inconclusive",
+      "dns_response_too_large",
+      "dns_resolver_unavailable",
+    ].includes(value.code) && Object.keys(value).length === 2;
+  }
+  return value.kind === "resolved" &&
+    typeof value.matched === "boolean" &&
+    typeof value.authoritative_absence === "boolean" &&
+    !(value.authoritative_absence && value.matched) &&
+    typeof value.dnssec_authenticated === "boolean" &&
+    (value.minimum_ttl_seconds === null ||
+      (Number.isSafeInteger(value.minimum_ttl_seconds) &&
+        value.minimum_ttl_seconds >= 0)) &&
+    /^[0-9a-f]{64}$/.test(value.rrset_sha256 ?? "") &&
+    Object.keys(value).length === 6;
+}
+
+function validVerificationWork(value, requestID = null) {
+  if (!isObject(value) || value.schema_version !== VERIFICATION_WORK_SCHEMA ||
+      !REQUEST_ID_PATTERN.test(value.request_id ?? "") ||
+      (requestID !== null && value.request_id !== requestID) ||
+      !["manual", "scheduled"].includes(value.mode) ||
+      !VERIFICATION_CLAIM_PATTERN.test(value.claim_id ?? "") ||
+      !Number.isSafeInteger(value.generation) || value.generation < 1 ||
+      !Number.isSafeInteger(value.request_state_revision) ||
+      value.request_state_revision < 1 ||
+      typeof value.request_updated_at !== "string" ||
+      !Number.isFinite(Date.parse(value.request_updated_at)) ||
+      typeof value.verification_due_key !== "string" ||
+      !value.verification_due_key.startsWith("verification-due:") ||
+      !isObject(value.ownership_challenge) ||
+      value.ownership_challenge.record_type !== "TXT" ||
+      typeof value.ownership_challenge.record_name !== "string" ||
+      typeof value.ownership_challenge.record_value !== "string" ||
+      typeof value.ownership_challenge.expires_at !== "string" ||
+      !Number.isFinite(Date.parse(value.ownership_challenge.expires_at)) ||
+      !["claimed", "observed"].includes(value.phase) ||
+      typeof value.claimed_at !== "string" ||
+      !Number.isFinite(Date.parse(value.claimed_at)) ||
+      typeof value.lease_expires_at !== "string" ||
+      !Number.isFinite(Date.parse(value.lease_expires_at)) ||
+      (value.phase === "claimed" && value.observation !== null) ||
+      (value.phase === "observed" &&
+        (!validVerificationObservation(value.observation) ||
+          typeof value.observed_at !== "string" ||
+          !Number.isFinite(Date.parse(value.observed_at))))) {
+    return false;
+  }
+  if (value.mode === "manual") {
+    return isObject(value.actor) && value.actor.kind === "platform_admin" &&
+      ACTOR_ID_PATTERN.test(value.actor.id ?? "") &&
+      IDEMPOTENCY_KEY_PATTERN.test(value.idempotency_key ?? "") &&
+      value.idempotency_fingerprint ===
+        fingerprint(["request.verify", value.request_id]);
+  }
+  return value.actor?.kind === "system" &&
+    value.actor?.id === "ownership-verifier" &&
+    value.idempotency_key === null &&
+    value.idempotency_fingerprint === null;
+}
+
+function publicVerificationClaim(work) {
+  return {
+    request_id: work.request_id,
+    claim_id: work.claim_id,
+    generation: work.generation,
+    phase: work.phase,
+    record_name: work.ownership_challenge.record_name,
+    record_value: work.ownership_challenge.record_value,
+    lease_expires_at: work.lease_expires_at,
+    ...(work.phase === "observed"
+      ? { observation: structuredClone(work.observation) }
+      : {}),
+  };
+}
+
+function resolverErrorMessage(code) {
+  if (code === "dns_response_too_large") {
+    return "DNS ownership resolver response is too large";
+  }
+  if (code === "dns_lookup_inconclusive") {
+    return "DNS ownership lookup did not complete authoritatively";
+  }
+  return "DNS ownership resolver is temporarily unavailable";
+}
+
 function requestStorageKey(requestID) {
   return `request:${requestID}`;
+}
+
+function verificationWorkKey(requestID) {
+  return `verification-work:${requestID}`;
 }
 
 function domainStorageKey(domain) {
@@ -627,7 +748,123 @@ export async function reconcileAgentEmailDomainsForAccountLifecycle(
   return body;
 }
 
-export async function runScheduledAgentEmailDomainVerification(env) {
+async function callVerificationRegistry(stub, path, body) {
+  try {
+    const response = await stub.fetch(
+      `https://agent-email-domain.internal${path}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+    return {
+      status: response.status,
+      ok: response.ok,
+      body: await response.json().catch(() => null),
+    };
+  } catch {
+    return { status: 503, ok: false, body: null };
+  }
+}
+
+function verificationRegistryResponse(result) {
+  if (result?.body) return json(result.body, result.status);
+  return errorResponse("agent email domain registry is unavailable", 503);
+}
+
+async function resolveClaimOutsideAuthority(
+  stub,
+  claim,
+  resolveTXT = resolveAgentEmailDomainTXT,
+) {
+  let observation = claim.observation;
+  if (claim.phase !== "observed") {
+    try {
+      const result = await resolveTXT(claim.record_name);
+      observation = agentEmailDomainResolvedObservation(
+        result,
+        claim.record_value,
+      );
+    } catch (error) {
+      try {
+        observation = agentEmailDomainTemporaryObservation(error);
+      } catch {
+        return {
+          status: 503,
+          ok: false,
+          body: {
+            schema_version: SCHEMA_VERSION,
+            error: "custom domain ownership resolver failed",
+          },
+        };
+      }
+    }
+    const observed = await callVerificationRegistry(
+      stub,
+      "/verification/observe",
+      {
+        request_id: claim.request_id,
+        claim_id: claim.claim_id,
+        generation: claim.generation,
+        observation,
+        verification_enabled: true,
+      },
+    );
+    if (!observed.ok) return observed;
+  }
+  return callVerificationRegistry(stub, "/verification/commit", {
+    request_id: claim.request_id,
+    claim_id: claim.claim_id,
+    generation: claim.generation,
+    verification_enabled: true,
+  });
+}
+
+/**
+ * Manual verification is orchestrated by the stateless Worker. The singleton
+ * authority owns only the short claim, observation, and journaled commit
+ * sections; the external DNS wait happens between Durable Object calls.
+ */
+export async function runAgentEmailDomainManualVerification(
+  env,
+  input,
+  dependencies = {},
+) {
+  const stub = agentEmailDomainRegistryStub(env);
+  if (!stub) {
+    return errorResponse("agent email domain registry is unavailable", 503);
+  }
+  const claimed = await callVerificationRegistry(stub, "/verification/claim", {
+    mode: "manual",
+    actor: input?.actor,
+    request_id: input?.request_id,
+    idempotency_key: input?.idempotency_key,
+    verification_enabled: agentEmailCustomDomainVerificationEnabled(env),
+  });
+  if (!claimed.ok) return verificationRegistryResponse(claimed);
+  if (claimed.body?.kind === "result") {
+    return json(claimed.body.body, claimed.body.status);
+  }
+  if (claimed.body?.kind !== "claim") {
+    return errorResponse("custom domain verification claim is invalid", 503);
+  }
+  const committed = await resolveClaimOutsideAuthority(
+    stub,
+    claimed.body.claim,
+    dependencies.resolveTXT,
+  );
+  if (!committed.ok) return verificationRegistryResponse(committed);
+  if (committed.body?.kind !== "result") {
+    return errorResponse("custom domain verification commit is invalid", 503);
+  }
+  return json(committed.body.body, committed.body.status);
+}
+
+export async function runScheduledAgentEmailDomainVerification(
+  env,
+  dependencies = {},
+) {
   if (!agentEmailCustomDomainVerificationEnabled(env)) {
     return { ran: false, configured: true };
   }
@@ -636,24 +873,61 @@ export async function runScheduledAgentEmailDomainVerification(env) {
     console.log("agent-email-domain: verification registry is unavailable");
     return { ran: false, configured: false };
   }
-  try {
-    const response = await stub.fetch(
-      "https://agent-email-domain.internal/verification/reconcile",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ verification_enabled: true }),
-      },
-    );
-    if (!response.ok) {
-      console.log("agent-email-domain: scheduled verification failed");
-      return { ran: true, succeeded: false };
+  let next = 0;
+  let exhausted = false;
+  const totals = { claimed: 0, checked: 0, matched: 0, failures: 0 };
+  const lane = async () => {
+    for (;;) {
+      const ordinal = next++;
+      if (ordinal >= VERIFICATION_RECONCILE_LIMIT || exhausted) return;
+      const claimed = await callVerificationRegistry(
+        stub,
+        "/verification/claim",
+        { mode: "scheduled", verification_enabled: true },
+      );
+      if (!claimed.ok) {
+        totals.failures += 1;
+        return;
+      }
+      if (claimed.body?.kind === "empty") {
+        exhausted = true;
+        return;
+      }
+      if (claimed.body?.kind === "processed") {
+        totals.checked += claimed.body.checked === true ? 1 : 0;
+        totals.matched += claimed.body.matched === true ? 1 : 0;
+        continue;
+      }
+      if (claimed.body?.kind !== "claim") {
+        totals.failures += 1;
+        return;
+      }
+      totals.claimed += 1;
+      const committed = await resolveClaimOutsideAuthority(
+        stub,
+        claimed.body.claim,
+        dependencies.resolveTXT,
+      );
+      if (!committed.ok || committed.body?.kind !== "result") {
+        totals.failures += 1;
+        continue;
+      }
+      totals.checked += 1;
+      totals.matched += committed.body.matched === true ? 1 : 0;
     }
-    return { ran: true, succeeded: true, ...await response.json() };
-  } catch {
-    console.log("agent-email-domain: scheduled verification unavailable");
-    return { ran: true, succeeded: false };
+  };
+  await Promise.all(Array.from(
+    { length: VERIFICATION_WORKER_CONCURRENCY },
+    () => lane(),
+  ));
+  if (totals.failures > 0) {
+    console.log("agent-email-domain: scheduled verification had failures");
   }
+  return {
+    ran: true,
+    succeeded: totals.failures === 0,
+    ...totals,
+  };
 }
 
 /**
@@ -671,8 +945,8 @@ export class DurableAgentEmailDomainRegistry {
     this.newRequestID = dependencies.newRequestID ?? newRequestID;
     this.newChallengeToken =
       dependencies.newChallengeToken ?? newChallengeToken;
-    this.resolveTXT = dependencies.resolveTXT ??
-      ((recordName) => resolveAgentEmailDomainTXT(recordName));
+    this.newVerificationClaimID =
+      dependencies.newVerificationClaimID ?? newVerificationClaimID;
     this.assertRequestActivationReady =
       dependencies.assertRequestActivationReady ??
       (() => this.defaultAssertRequestActivationReady());
@@ -711,9 +985,6 @@ export class DurableAgentEmailDomainRegistry {
       await this.reconcileDuePlanIntents();
       await this.reconcileDueGrace();
       await this.reconcileDueChallengeExpiries();
-      if (agentEmailCustomDomainVerificationEnabled(this.env)) {
-        await this.reconcileDueVerifications(VERIFICATION_RECONCILE_LIMIT);
-      }
       await this.scheduleNextAlarm();
     });
   }
@@ -802,16 +1073,18 @@ export class DurableAgentEmailDomainRegistry {
           return await this.rejectRequest(input);
         case "/request/retire":
           return await this.retireRequest(input);
-        case "/request/verify":
-          return await this.verifyRequest(input);
+        case "/verification/claim":
+          return json(await this.claimVerification(input));
+        case "/verification/observe":
+          return json(await this.observeVerification(input));
+        case "/verification/commit":
+          return json(await this.commitVerification(input));
         case "/audit/list":
           return await this.listAudit(input);
         case "/plan/reconcile":
           return await this.reconcilePlan(input);
         case "/account-lifecycle/reconcile":
           return await this.reconcileAccountLifecycle(input);
-        case "/verification/reconcile":
-          return await this.reconcileVerification(input);
         default:
           return errorResponse("domain registry endpoint not found", 404);
       }
@@ -930,9 +1203,6 @@ export class DurableAgentEmailDomainRegistry {
       "plan-due:",
       "plan-grace-due:",
       "challenge-expiry-due:",
-      ...(agentEmailCustomDomainVerificationEnabled(this.env)
-        ? ["verification-due:"]
-        : []),
     ];
     const deadlines = [];
     for (const prefix of prefixes) {
@@ -1340,7 +1610,7 @@ export class DurableAgentEmailDomainRegistry {
       [mutation.audit_key, mutation.audit],
       [requestStorageKey(id), updated],
     ];
-    const deletes = [];
+    const deletes = [verificationWorkKey(id)];
     const allocation = await this.storage.get(domainStorageKey(current.domain));
     if (assertLegacyDomainMirror(allocation, current)) {
       // v0.0.235 mirrored every request at domain:<domain>. Preserve that
@@ -1599,6 +1869,7 @@ export class DurableAgentEmailDomainRegistry {
       entries.push([META_KEY, mutation.meta], [mutation.audit_key, mutation.audit]);
       for (const item of changed) {
         entries.push([requestStorageKey(item.next.id), item.next]);
+        deletes.push(verificationWorkKey(item.next.id));
         const allocation = await this.storage.get(
           domainStorageKey(item.previous.domain),
         );
@@ -1964,6 +2235,7 @@ export class DurableAgentEmailDomainRegistry {
       }
       changed.push({ previous: request, next: desired });
       entries.push([requestStorageKey(request.id), desired]);
+      deletes.push(verificationWorkKey(request.id));
       const legacyMirror = await this.storage.get(
         domainStorageKey(request.domain),
       );
@@ -2135,6 +2407,408 @@ export class DurableAgentEmailDomainRegistry {
     }
   }
 
+  assertVerificationEnabled(input) {
+    if (!this.verificationEnabled(input)) {
+      fail("custom domain ownership verification is not enabled", 409,
+        "custom_domain_verification_disabled");
+    }
+  }
+
+  verificationEnabled(input) {
+    return input?.verification_enabled === true &&
+      agentEmailCustomDomainVerificationEnabled(this.env);
+  }
+
+  async discardExactVerificationWork(requestID, claimID, generation) {
+    const key = verificationWorkKey(requestID);
+    const work = await this.storage.get(key);
+    if (validVerificationWork(work, requestID) &&
+        work.claim_id === claimID && work.generation === generation) {
+      await this.atomicRaw([], [key]);
+      return true;
+    }
+    return false;
+  }
+
+  async nextVerificationClaimID(previous = null) {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const value = await this.newVerificationClaimID();
+      if (VERIFICATION_CLAIM_PATTERN.test(value ?? "") && value !== previous) {
+        return value;
+      }
+    }
+    fail("custom domain verification claim is unavailable", 503,
+      "verification_claim_unavailable");
+  }
+
+  async persistVerificationClaim(current, mode, options = {}) {
+    const key = verificationWorkKey(current.id);
+    const existing = await this.storage.get(key);
+    if (existing && !validVerificationWork(existing, current.id)) {
+      fail("custom domain verification claim is invalid", 503,
+        "verification_claim_invalid");
+    }
+    const now = this.now();
+    const active = existing && Date.parse(existing.lease_expires_at) >
+      now.getTime();
+    const sameManual = mode === "manual" && existing?.mode === "manual" &&
+      existing.actor?.id === options.actor?.id &&
+      existing.idempotency_key === options.idempotency_key &&
+      existing.idempotency_fingerprint === options.idempotency_fingerprint;
+    const exactRequestFence = existing &&
+      existing.request_state_revision === (current.state_revision ?? 1) &&
+      existing.request_updated_at === current.updated_at &&
+      existing.verification_due_key === verificationDueKey(current) &&
+      canonicalJSONString(existing.ownership_challenge) ===
+        canonicalJSONString({
+          ...current.ownership_challenge,
+          expires_at: challengeExpiresAt(current),
+        });
+    if (active) {
+      // Only an already-observed exact manual claim may be resumed. Returning
+      // an active claimed fence to two callers would let both perform the
+      // external lookup and race different observations under one generation.
+      if (sameManual && exactRequestFence && existing.phase === "observed") {
+        return { claimed: true, work: existing, replayed: true };
+      }
+      if (mode === "manual") {
+        fail("custom domain verification is already in progress", 409,
+          "verification_in_progress");
+      }
+      return { claimed: false };
+    }
+
+    const preserveObservation = existing?.phase === "observed" &&
+      exactRequestFence && existing.mode === mode &&
+      (mode === "scheduled" || sameManual) &&
+      now.getTime() - Date.parse(existing.observed_at) <=
+        VERIFICATION_OBSERVATION_MAX_AGE_MS;
+    const claimedAt = now.toISOString();
+    const work = {
+      schema_version: VERIFICATION_WORK_SCHEMA,
+      request_id: current.id,
+      mode,
+      claim_id: await this.nextVerificationClaimID(existing?.claim_id),
+      generation: (existing?.generation ?? 0) + 1,
+      request_state_revision: current.state_revision ?? 1,
+      request_updated_at: current.updated_at,
+      verification_due_key: verificationDueKey(current),
+      ownership_challenge: {
+        ...current.ownership_challenge,
+        expires_at: challengeExpiresAt(current),
+      },
+      actor: mode === "manual"
+        ? { ...options.actor }
+        : { kind: "system", id: "ownership-verifier" },
+      idempotency_key: mode === "manual" ? options.idempotency_key : null,
+      idempotency_fingerprint: mode === "manual"
+        ? options.idempotency_fingerprint
+        : null,
+      phase: preserveObservation ? "observed" : "claimed",
+      claimed_at: claimedAt,
+      lease_expires_at: new Date(
+        now.getTime() + VERIFICATION_CLAIM_LEASE_MS,
+      ).toISOString(),
+      observation: preserveObservation
+        ? structuredClone(existing.observation)
+        : null,
+      ...(preserveObservation ? { observed_at: existing.observed_at } : {}),
+    };
+    if (!validVerificationWork(work, current.id)) {
+      fail("custom domain verification claim is invalid", 503,
+        "verification_claim_invalid");
+    }
+    await this.atomicRaw([[key, work]]);
+    return { claimed: true, work, replayed: false };
+  }
+
+  async claimVerification(input) {
+    if (input?.mode === "manual") {
+      const actor = validateActor(input?.actor, "platform_admin");
+      const id = validateRequestID(input?.request_id);
+      const idempotencyKey = validateIdempotencyKey(input?.idempotency_key);
+      const scope = `request-verify:${id}`;
+      const fp = fingerprint(["request.verify", id]);
+      const replay = await this.idempotentReplay(scope, idempotencyKey, fp);
+      if (replay) {
+        return {
+          kind: "result",
+          status: replay.status,
+          body: await replay.json(),
+          matched: replay.status === 200,
+        };
+      }
+      this.assertVerificationEnabled(input);
+      const current = await this.storage.get(requestStorageKey(id));
+      if (!current) fail("custom inbound domain request not found", 404);
+      if (!["pending_verification", "verified"].includes(current.state)) {
+        fail("custom inbound domain request cannot be verified", 409);
+      }
+      if (current.plan_suspended === true ||
+          current.lifecycle_suspended === true) {
+        fail("custom inbound domain verification is suspended by account policy",
+          409, "domain_verification_suspended");
+      }
+      if (current.state === "pending_verification" &&
+          Date.parse(challengeExpiresAt(current) ?? "") <=
+            this.now().getTime()) {
+        const expired = await this.expirePendingRequest(current, {
+          idempotency_scope: scope,
+          idempotency_key: idempotencyKey,
+          fingerprint: fp,
+          extra_deletes: [verificationWorkKey(id)],
+        });
+        return {
+          kind: "result",
+          status: expired.status,
+          body: expired.body,
+          matched: false,
+        };
+      }
+      if (await this.accountPolicyConverging(current.account_id)) {
+        fail("custom inbound domain account policy is still converging", 409,
+          "account_policy_converging");
+      }
+      const claimed = await this.persistVerificationClaim(current, "manual", {
+        actor,
+        idempotency_key: idempotencyKey,
+        idempotency_fingerprint: fp,
+      });
+      return { kind: "claim", claim: publicVerificationClaim(claimed.work) };
+    }
+
+    if (input?.mode !== "scheduled") {
+      fail("custom domain verification claim mode is invalid", 400);
+    }
+    this.assertVerificationEnabled(input);
+    const now = this.now().getTime();
+    const listed = await this.storage.list({
+      prefix: "verification-due:",
+      limit: VERIFICATION_CLAIM_SCAN_LIMIT,
+    });
+    for (const [due, requestID] of listed) {
+      const dueAt = Number(due.split(":", 3)[1]);
+      if (!Number.isFinite(dueAt) || dueAt > now) break;
+      const current = await this.storage.get(requestStorageKey(requestID));
+      if (!current || verificationDueKey(current) !== due ||
+          !["pending_verification", "verified"].includes(current.state)) {
+        await this.storage.delete(due);
+        continue;
+      }
+      if (current.state === "pending_verification" &&
+          Date.parse(challengeExpiresAt(current) ?? "") <= now) {
+        await this.expirePendingRequest(current, {
+          extra_deletes: [verificationWorkKey(current.id)],
+        });
+        return { kind: "processed", checked: false, matched: false };
+      }
+      if (current.plan_suspended === true ||
+          current.lifecycle_suspended === true) {
+        await this.storage.delete(due);
+        continue;
+      }
+      if (await this.accountPolicyConverging(current.account_id)) {
+        await this.deferVerificationForPolicy(current, due, {
+          scheduled: true,
+          extra_deletes: [verificationWorkKey(current.id)],
+        });
+        return { kind: "processed", checked: true, matched: false };
+      }
+      const claimed = await this.persistVerificationClaim(current, "scheduled");
+      if (!claimed.claimed) continue;
+      return { kind: "claim", claim: publicVerificationClaim(claimed.work) };
+    }
+    return { kind: "empty" };
+  }
+
+  async observeVerification(input) {
+    const id = validateRequestID(input?.request_id);
+    if (!VERIFICATION_CLAIM_PATTERN.test(input?.claim_id ?? "") ||
+        !Number.isSafeInteger(input?.generation) || input.generation < 1 ||
+        !validVerificationObservation(input?.observation)) {
+      fail("custom domain verification observation is invalid", 400);
+    }
+    if (!this.verificationEnabled(input)) {
+      await this.discardExactVerificationWork(
+        id,
+        input.claim_id,
+        input.generation,
+      );
+      this.assertVerificationEnabled(input);
+    }
+    const key = verificationWorkKey(id);
+    const work = await this.storage.get(key);
+    if (!validVerificationWork(work, id)) {
+      fail("custom domain verification claim is stale", 409,
+        "verification_claim_stale");
+    }
+    if (work.claim_id !== input.claim_id ||
+        work.generation !== input.generation) {
+      fail("custom domain verification claim is stale", 409,
+        "verification_claim_stale");
+    }
+    if (work.phase === "observed") {
+      if (canonicalJSONString(work.observation) !==
+          canonicalJSONString(input.observation)) {
+        fail("custom domain verification observation conflicts", 409,
+          "verification_observation_conflict");
+      }
+      return { kind: "observed", claim: publicVerificationClaim(work) };
+    }
+    const now = this.now();
+    const observed = {
+      ...work,
+      phase: "observed",
+      observation: structuredClone(input.observation),
+      observed_at: now.toISOString(),
+      lease_expires_at: new Date(
+        now.getTime() + VERIFICATION_CLAIM_LEASE_MS,
+      ).toISOString(),
+    };
+    if (!validVerificationWork(observed, id)) {
+      fail("custom domain verification observation is invalid", 400);
+    }
+    await this.atomicRaw([[key, observed]]);
+    return { kind: "observed", claim: publicVerificationClaim(observed) };
+  }
+
+  async commitVerification(input) {
+    const id = validateRequestID(input?.request_id);
+    if (!VERIFICATION_CLAIM_PATTERN.test(input?.claim_id ?? "") ||
+        !Number.isSafeInteger(input?.generation) || input.generation < 1) {
+      fail("custom domain verification commit is invalid", 400);
+    }
+    if (!this.verificationEnabled(input)) {
+      await this.discardExactVerificationWork(
+        id,
+        input.claim_id,
+        input.generation,
+      );
+      this.assertVerificationEnabled(input);
+    }
+    const workKey = verificationWorkKey(id);
+    const work = await this.storage.get(workKey);
+    if (!validVerificationWork(work, id) ||
+        work.claim_id !== input.claim_id ||
+        work.generation !== input.generation) {
+      fail("custom domain verification claim is stale", 409,
+        "verification_claim_stale");
+    }
+    if (work.phase !== "observed") {
+      await this.atomicRaw([], [workKey]);
+      fail("custom domain verification observation is stale", 409,
+        "verification_observation_stale");
+    }
+    const current = await this.storage.get(requestStorageKey(id));
+    const exactRequestFence = current &&
+      (current.state_revision ?? 1) === work.request_state_revision &&
+      current.updated_at === work.request_updated_at &&
+      verificationDueKey(current) === work.verification_due_key &&
+      canonicalJSONString({
+        ...current.ownership_challenge,
+        expires_at: challengeExpiresAt(current),
+      }) === canonicalJSONString(work.ownership_challenge);
+    if (!exactRequestFence ||
+        !["pending_verification", "verified"].includes(current.state)) {
+      await this.atomicRaw([], [workKey]);
+      fail("custom domain verification claim is stale", 409,
+        "verification_claim_stale");
+    }
+    if (current.plan_suspended === true ||
+        current.lifecycle_suspended === true) {
+      await this.atomicRaw([], [workKey]);
+      fail("custom inbound domain verification is suspended by account policy",
+        409, "domain_verification_suspended");
+    }
+    if (current.state === "pending_verification" &&
+        Date.parse(challengeExpiresAt(current) ?? "") <=
+          this.now().getTime()) {
+      const expired = await this.expirePendingRequest(current, {
+        ...(work.mode === "manual" ? {
+          idempotency_scope: `request-verify:${id}`,
+          idempotency_key: work.idempotency_key,
+          fingerprint: work.idempotency_fingerprint,
+        } : {}),
+        extra_deletes: [workKey],
+      });
+      return {
+        kind: "result",
+        status: expired.status,
+        body: expired.body,
+        matched: false,
+      };
+    }
+    if (this.now().getTime() - Date.parse(work.observed_at) >
+        VERIFICATION_OBSERVATION_MAX_AGE_MS) {
+      await this.atomicRaw([], [workKey]);
+      fail("custom domain verification observation is stale", 409,
+        "verification_observation_stale");
+    }
+    if (await this.accountPolicyConverging(current.account_id)) {
+      if (work.mode === "scheduled") {
+        await this.deferVerificationForPolicy(
+          current,
+          verificationDueKey(current),
+          { scheduled: true, extra_deletes: [workKey] },
+        );
+        return {
+          kind: "result",
+          status: 200,
+          body: { schema_version: SCHEMA_VERSION, deferred: true },
+          matched: false,
+        };
+      }
+      await this.atomicRaw([], [workKey]);
+      fail("custom inbound domain account policy is still converging", 409,
+        "account_policy_converging");
+    }
+    if (work.observation.kind === "temporary_error" &&
+        work.mode === "manual") {
+      await this.atomicRaw([], [workKey]);
+      fail(resolverErrorMessage(work.observation.code), 503,
+        work.observation.code);
+    }
+    const options = {
+      actor: work.actor,
+      scheduled: work.mode === "scheduled",
+      temporary: work.observation.kind === "temporary_error",
+      matched: work.observation.kind === "resolved"
+        ? work.observation.matched
+        : false,
+      extra_deletes: [workKey],
+      ...(work.mode === "manual" ? {
+        idempotency_scope: `request-verify:${id}`,
+        idempotency_key: work.idempotency_key,
+        fingerprint: work.idempotency_fingerprint,
+      } : {}),
+    };
+    const result = work.observation.kind === "resolved"
+      ? work.observation
+      : {};
+    let committed;
+    try {
+      committed = await this.applyVerificationObservation(
+        current,
+        result,
+        options,
+      );
+    } catch (error) {
+      if (!(error instanceof DomainRegistryError) ||
+          error.code !== "domain_unavailable") throw error;
+      committed = await this.deferContendedVerification(
+        current,
+        verificationDueKey(current),
+        options,
+      );
+    }
+    return {
+      kind: "result",
+      status: committed.status,
+      body: committed.body,
+      matched: committed.matched,
+    };
+  }
+
   async applyVerificationObservation(current, result, options = {}) {
     const checkedAt = this.now().toISOString();
     if (current.state === "pending_verification" &&
@@ -2143,11 +2817,7 @@ export class DurableAgentEmailDomainRegistry {
       const expired = await this.expirePendingRequest(current, options);
       return { ...expired, matched: false, expired: true };
     }
-    const matched = options.temporary !== true &&
-      agentEmailDomainTXTMatches(
-        result,
-        current.ownership_challenge.record_value,
-      );
+    const matched = options.temporary !== true && options.matched === true;
     let verificationState;
     if (options.temporary === true) {
       verificationState = current.state === "verified"
@@ -2274,30 +2944,34 @@ export class DurableAgentEmailDomainRegistry {
         },
       }]);
     }
-    const action = options.temporary === true
-      ? "custom_domain.verification_deferred"
-      : matched
-      ? newlyVerified
-        ? "custom_domain.verified"
-        : "custom_domain.reverified"
-      : "custom_domain.verification_missing";
-    const mutation = await this.mutation(
-      options.actor ?? { kind: "system", id: "ownership-verifier" },
-      action,
-      current.domain,
-      {
-        account_id: current.account_id,
-        request_id: current.id,
-        state: verification.state,
-        rrset_sha256: verification.rrset_sha256,
-      },
-      checkedAt,
-    );
-    entries.push(
-      [META_KEY, mutation.meta],
-      [mutation.audit_key, mutation.audit],
-      [requestStorageKey(current.id), desired],
-    );
+    const auditRequired = options.scheduled !== true ||
+      !sameVerificationAuditOutcome(previousVerification, verification);
+    if (auditRequired) {
+      const action = options.temporary === true
+        ? "custom_domain.verification_deferred"
+        : matched
+        ? newlyVerified
+          ? "custom_domain.verified"
+          : "custom_domain.reverified"
+        : "custom_domain.verification_missing";
+      const mutation = await this.mutation(
+        options.actor ?? { kind: "system", id: "ownership-verifier" },
+        action,
+        current.domain,
+        {
+          account_id: current.account_id,
+          request_id: current.id,
+          state: verification.state,
+          rrset_sha256: verification.rrset_sha256,
+        },
+        checkedAt,
+      );
+      entries.push(
+        [META_KEY, mutation.meta],
+        [mutation.audit_key, mutation.audit],
+      );
+    }
+    entries.push([requestStorageKey(current.id), desired]);
     const body = matched ? {
       schema_version: SCHEMA_VERSION,
       request: publicRequest(desired),
@@ -2319,7 +2993,10 @@ export class DurableAgentEmailDomainRegistry {
         body,
       }]);
     }
-    await this.atomic(entries, deletes);
+    await this.atomic(entries, [
+      ...deletes,
+      ...(Array.isArray(options.extra_deletes) ? options.extra_deletes : []),
+    ]);
     await this.scheduleNextAlarm().catch(() => {});
     return { body, matched, status };
   }
@@ -2382,12 +3059,15 @@ export class DurableAgentEmailDomainRegistry {
         body,
       }]);
     }
-    await this.atomic(entries, [previousDue].filter(Boolean));
+    await this.atomic(entries, [
+      ...[previousDue].filter(Boolean),
+      ...(Array.isArray(options.extra_deletes) ? options.extra_deletes : []),
+    ]);
     await this.scheduleNextAlarm().catch(() => {});
     return { body, matched: false, status: 409, conflict: true };
   }
 
-  async deferVerificationForPolicy(current, previousDue) {
+  async deferVerificationForPolicy(current, previousDue, options = {}) {
     const checkedAt = this.now().toISOString();
     const previous = current.ownership_verification;
     const desired = {
@@ -2410,188 +3090,43 @@ export class DurableAgentEmailDomainRegistry {
         consecutive_failures: previous?.consecutive_failures ?? 0,
       },
     };
-    const mutation = await this.mutation(
-      { kind: "system", id: "ownership-verifier" },
-      "custom_domain.verification_deferred",
-      current.domain,
-      {
-        account_id: current.account_id,
-        request_id: current.id,
-        state: desired.ownership_verification.state,
-        reason: "account_policy_converging",
-      },
-      checkedAt,
-    );
     const entries = [
-      [META_KEY, mutation.meta],
-      [mutation.audit_key, mutation.audit],
       [requestStorageKey(current.id), desired],
       [verificationDueKey(desired), desired.id],
     ];
+    if (options.scheduled !== true ||
+        !sameVerificationAuditOutcome(
+          previous,
+          desired.ownership_verification,
+        )) {
+      const mutation = await this.mutation(
+        { kind: "system", id: "ownership-verifier" },
+        "custom_domain.verification_deferred",
+        current.domain,
+        {
+          account_id: current.account_id,
+          request_id: current.id,
+          state: desired.ownership_verification.state,
+          reason: "account_policy_converging",
+        },
+        checkedAt,
+      );
+      entries.unshift(
+        [META_KEY, mutation.meta],
+        [mutation.audit_key, mutation.audit],
+      );
+    }
     const legacyMirror = await this.storage.get(
       domainStorageKey(current.domain),
     );
     if (assertLegacyDomainMirror(legacyMirror, current)) {
       entries.push([domainStorageKey(current.domain), desired]);
     }
-    await this.atomic(entries, [previousDue].filter(Boolean));
+    await this.atomic(entries, [
+      ...[previousDue].filter(Boolean),
+      ...(Array.isArray(options.extra_deletes) ? options.extra_deletes : []),
+    ]);
     await this.scheduleNextAlarm().catch(() => {});
-  }
-
-  async verifyRequest(input) {
-    const actor = validateActor(input?.actor, "platform_admin");
-    const id = validateRequestID(input?.request_id);
-    const key = validateIdempotencyKey(input?.idempotency_key);
-    const scope = `request-verify:${id}`;
-    const fp = fingerprint(["request.verify", id]);
-    const replay = await this.idempotentReplay(scope, key, fp);
-    if (replay) return replay;
-    if (input?.verification_enabled !== true ||
-        !agentEmailCustomDomainVerificationEnabled(this.env)) {
-      fail("custom domain ownership verification is not enabled", 409,
-        "custom_domain_verification_disabled");
-    }
-    const current = await this.storage.get(requestStorageKey(id));
-    if (!current) fail("custom inbound domain request not found", 404);
-    if (!["pending_verification", "verified"].includes(current.state)) {
-      fail("custom inbound domain request cannot be verified", 409);
-    }
-    if (current.plan_suspended === true ||
-        current.lifecycle_suspended === true) {
-      fail("custom inbound domain verification is suspended by account policy", 409,
-        "domain_verification_suspended");
-    }
-    if (current.state === "pending_verification" &&
-        Date.parse(challengeExpiresAt(current) ?? "") <=
-          this.now().getTime()) {
-      const expired = await this.expirePendingRequest(current, {
-        idempotency_scope: scope,
-        idempotency_key: key,
-        fingerprint: fp,
-      });
-      return json(expired.body, expired.status);
-    }
-    if (await this.accountPolicyConverging(current.account_id)) {
-      fail("custom inbound domain account policy is still converging", 409,
-        "account_policy_converging");
-    }
-    let result;
-    try {
-      result = await this.resolveTXT(current.ownership_challenge.record_name);
-    } catch (error) {
-      if (error instanceof AgentEmailDomainVerificationError && error.temporary) {
-        if (current.state === "pending_verification" &&
-            Date.parse(challengeExpiresAt(current) ?? "") <=
-              this.now().getTime()) {
-          const expired = await this.expirePendingRequest(current, {
-            idempotency_scope: scope,
-            idempotency_key: key,
-            fingerprint: fp,
-          });
-          return json(expired.body, expired.status);
-        }
-        fail(error.message, 503, error.code);
-      }
-      throw error;
-    }
-    let observed;
-    try {
-      observed = await this.applyVerificationObservation(current, result, {
-        actor,
-        idempotency_scope: scope,
-        idempotency_key: key,
-        fingerprint: fp,
-      });
-    } catch (error) {
-      if (!(error instanceof DomainRegistryError) ||
-          error.code !== "domain_unavailable") throw error;
-      observed = await this.deferContendedVerification(
-        current,
-        verificationDueKey(current),
-        {
-          actor,
-          idempotency_scope: scope,
-          idempotency_key: key,
-          fingerprint: fp,
-        },
-      );
-    }
-    return json(observed.body, observed.status);
-  }
-
-  async reconcileVerification(input) {
-    if (input?.verification_enabled !== true ||
-        !agentEmailCustomDomainVerificationEnabled(this.env)) {
-      fail("custom domain ownership verification is not enabled", 409,
-        "custom_domain_verification_disabled");
-    }
-    return json({
-      schema_version: SCHEMA_VERSION,
-      ...await this.reconcileDueVerifications(VERIFICATION_RECONCILE_LIMIT),
-    });
-  }
-
-  async reconcileDueVerifications(limit) {
-    const now = this.now().getTime();
-    const listed = await this.storage.list({
-      prefix: "verification-due:",
-      limit,
-    });
-    let checked = 0;
-    let matched = 0;
-    for (const [due, requestID] of listed) {
-      const dueAt = Number(due.split(":", 3)[1]);
-      if (!Number.isFinite(dueAt) || dueAt > now) break;
-      const current = await this.storage.get(requestStorageKey(requestID));
-      if (!current || verificationDueKey(current) !== due ||
-          !["pending_verification", "verified"].includes(current.state)) {
-        await this.storage.delete(due);
-        continue;
-      }
-      if (current.state === "pending_verification" &&
-          Date.parse(challengeExpiresAt(current) ?? "") <= now) {
-        await this.expirePendingRequest(current);
-        continue;
-      }
-      if (current.plan_suspended === true ||
-          current.lifecycle_suspended === true) {
-        await this.storage.delete(due);
-        continue;
-      }
-      if (await this.accountPolicyConverging(current.account_id)) {
-        await this.deferVerificationForPolicy(current, due);
-        checked += 1;
-        continue;
-      }
-      try {
-        const result = await this.resolveTXT(
-          current.ownership_challenge.record_name,
-        );
-        const observed = await this.applyVerificationObservation(current, result);
-        matched += observed.matched ? 1 : 0;
-      } catch (error) {
-        if (error instanceof DomainRegistryError &&
-            error.code === "domain_unavailable") {
-          // Another contender already proved the same name. The permanent
-          // allocation cannot change hands, so retain one durable conflict
-          // observation until the bounded challenge expiry releases capacity.
-          if (current.state === "pending_verification" &&
-              Date.parse(challengeExpiresAt(current) ?? "") <=
-                this.now().getTime()) {
-            await this.expirePendingRequest(current);
-          } else {
-            await this.deferContendedVerification(current, due);
-          }
-          checked += 1;
-          continue;
-        }
-        if (!(error instanceof AgentEmailDomainVerificationError) ||
-            !error.temporary) throw error;
-        await this.applyVerificationObservation(current, {}, { temporary: true });
-      }
-      checked += 1;
-    }
-    return { checked, matched };
   }
 
   async reconcileDueGrace() {
@@ -2626,7 +3161,11 @@ export class DurableAgentEmailDomainRegistry {
         [META_KEY, mutation.meta],
         [mutation.audit_key, mutation.audit],
         [requestStorageKey(current.id), updated],
-      ], [due, verificationDueKey(current)].filter(Boolean));
+      ], [
+        due,
+        verificationDueKey(current),
+        verificationWorkKey(current.id),
+      ].filter(Boolean));
     }
   }
 
@@ -2686,13 +3225,15 @@ export class DurableAgentEmailDomainRegistry {
         body,
       }]);
     }
-    await this.atomic(entries, [
+    await this.atomic(entries, [...new Set([
       accountDomainKey(current),
       domainPendingKey(current),
       challengeExpiryDueKey(current),
       verificationDueKey(current),
       graceDueKey(current),
-    ].filter(Boolean));
+      verificationWorkKey(current.id),
+      ...(Array.isArray(options.extra_deletes) ? options.extra_deletes : []),
+    ].filter(Boolean))]);
     await this.scheduleNextAlarm().catch(() => {});
     return { body, status: 409, expired: true };
   }

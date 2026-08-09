@@ -63,10 +63,49 @@ function environment() {
         idFromName: (name) => name,
         get: () => ({
           fetch: async (url, init) => {
+            const path = new URL(url).pathname;
+            const body = JSON.parse(init.body);
             forwarded.push({
-              path: new URL(url).pathname,
-              body: JSON.parse(init.body),
+              path,
+              body,
             });
+            if (path === "/verification/claim") {
+              if (body.verification_enabled !== true) {
+                return Response.json({
+                  schema_version: "witself.agent-email-domain.v1",
+                  error: "custom domain ownership verification is not enabled",
+                  code: "custom_domain_verification_disabled",
+                }, { status: 409 });
+              }
+              return Response.json({
+                kind: "claim",
+                claim: {
+                  request_id: REQUEST_ID,
+                  claim_id: `aedvc_${"c".repeat(32)}`,
+                  generation: 1,
+                  phase: "claimed",
+                  record_name: "_witself-verification.customer.example",
+                  record_value:
+                    `witself-domain-verification=aedv_${"d".repeat(32)}`,
+                  lease_expires_at: "2026-08-08T12:01:00Z",
+                },
+              });
+            }
+            if (path === "/verification/observe") {
+              return Response.json({ kind: "observed" });
+            }
+            if (path === "/verification/commit") {
+              return Response.json({
+                kind: "result",
+                status: 200,
+                matched: true,
+                body: {
+                  schema_version: "witself.agent-email-domain.v1",
+                  request: { id: REQUEST_ID, state: "verified" },
+                  matched: true,
+                },
+              });
+            }
             return Response.json({
               schema_version: "witself.agent-email-domain.v1",
               requests: [],
@@ -308,20 +347,40 @@ test("admin ownership verification is separately exact-true gated", async () => 
   const dark = await handleAgentEmailDomainAdminRequest(
     request({ verification_enabled: true }), env, verifyURL, ADMIN,
   );
-  assert.equal(dark.status, 200);
+  assert.equal(dark.status, 409);
   assert.equal(forwarded.at(-1).body.verification_enabled, false);
 
   env.CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED = "TRUE";
-  await handleAgentEmailDomainAdminRequest(request(), env, verifyURL, ADMIN);
+  const wrongCase = await handleAgentEmailDomainAdminRequest(
+    request(), env, verifyURL, ADMIN,
+  );
+  assert.equal(wrongCase.status, 409);
   assert.equal(forwarded.at(-1).body.verification_enabled, false);
 
   env.CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED = "true";
   await handleAgentEmailDomainAdminRequest(
     request({ verification_enabled: false }), env, verifyURL, ADMIN,
+    {
+      resolveTXT: async () => ({
+        answers: [
+          `witself-domain-verification=aedv_${"d".repeat(32)}`,
+        ],
+        authoritative_absence: false,
+        dnssec_authenticated: true,
+        minimum_ttl_seconds: 60,
+        rrset_sha256: "e".repeat(64),
+      }),
+    },
   );
-  assert.deepEqual(forwarded.at(-1), {
-    path: "/request/verify",
+  assert.deepEqual(forwarded.slice(-3).map(({ path }) => path), [
+    "/verification/claim",
+    "/verification/observe",
+    "/verification/commit",
+  ]);
+  assert.deepEqual(forwarded.at(-3), {
+    path: "/verification/claim",
     body: {
+      mode: "manual",
       actor: { kind: "platform_admin", id: ADMIN.admin_id },
       request_id: REQUEST_ID,
       idempotency_key: "verify-once",

@@ -989,6 +989,71 @@ test("plan apply preserves custom-domain and alias dependency ordering", async (
   ]);
 });
 
+test("plan apply replays the exact cell fence after custom-domain completion is lost", async () => {
+  const cellSnapshots = [];
+  const customModes = [];
+  let customCompletions = 0;
+  const namespace = (label) => ({
+    idFromName: () => "global",
+    get: () => ({
+      fetch: async (_url, init) => {
+        const body = JSON.parse(init.body);
+        if (label === "custom") {
+          customModes.push(body.mode);
+          if (body.mode === "complete" && customCompletions++ === 0) {
+            return Response.json({ error: "completion response was lost" }, {
+              status: 503,
+            });
+          }
+        }
+        return Response.json({
+          complete: true,
+          operational_gate_complete: true,
+        });
+      },
+    }),
+  });
+  const env = bridgeEnv({
+    "acct:acct_1": { cell: "cell-a" },
+    "cell:cell-a": {
+      endpoint: "https://cell.example/",
+      provision_token: "witself_prv_cell-secret",
+    },
+  });
+  env.AGENT_EMAIL_DOMAINS = namespace("custom");
+  env.REALM_EMAIL_ALIASES = namespace("alias");
+  const snapshot = {
+    revision: 7,
+    snapshot_hash: "d".repeat(64),
+    plan: "team",
+    limits: { agent_email_custom_domains_per_account: 1 },
+    policies: {},
+    features: ["agent_email_custom_domain"],
+  };
+  const apply = () => handleInternalBridgeRequest(
+    bridgeRequest("/v1/internal/accounts/acct_1:apply-plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(snapshot),
+    }),
+    env,
+    async (_url, init) => {
+      cellSnapshots.push(JSON.parse(new TextDecoder().decode(init.body)));
+      return Response.json({ applied: true });
+    },
+  );
+
+  assert.equal((await apply()).status, 502);
+  assert.equal((await apply()).status, 200);
+  assert.deepEqual(cellSnapshots, [snapshot, snapshot]);
+  assert.deepEqual(customModes, [
+    "restrict_only",
+    "complete",
+    "restrict_only",
+    "complete",
+  ]);
+});
+
 test("internal plan fence read uses only the cell provision token", async () => {
   const env = bridgeEnv({
     "acct:acct_1": { cell: "cell-a" },

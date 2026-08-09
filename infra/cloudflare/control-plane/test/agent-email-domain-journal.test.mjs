@@ -347,6 +347,7 @@ test("storage classification keeps both uniqueness rows canonical", () => {
   for (const key of [
     "agent-email-domain-journal-meta", "agent-email-domain-journal:bootstrap",
     "agent-email-domain-recovery", "agent-email-domain-recovery:aedrec_test",
+    `verification-work:${requestID}`,
   ]) {
     assert.equal(classifyAgentEmailDomainStorageKey(key), "journal_local", key);
   }

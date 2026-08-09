@@ -59,6 +59,10 @@ const JOURNAL_LOCAL_EXACT_KEYS = new Set([
 const JOURNAL_LOCAL_PREFIXES = Object.freeze([
   "agent-email-domain-journal:",
   "agent-email-domain-recovery:",
+  // Short-lived verification claims and reduced DNS observations are durable
+  // coordination state, not customer-domain authority. Recovery deliberately
+  // drops them and rebuilds the due queue from the journaled request records.
+  "verification-work:",
 ]);
 
 export class AgentEmailDomainJournalError extends Error {

@@ -1419,8 +1419,9 @@ TXT owner, follows no redirect, and performs no DNS write. Stable verification
 refusals include `custom_domain_verification_disabled`,
 `domain_verification_suspended`, `ownership_challenge_expired`,
 `ownership_challenge_not_found`, `domain_unavailable`,
-`account_policy_converging`, and bounded temporary resolver errors. A verified
-request is due after 24 hours; authoritative
+`account_policy_converging`, transient `verification_in_progress` while another
+manual caller owns the live DNS claim, and bounded temporary resolver errors. A
+verified request is due after 24 hours; authoritative
 absence retries after one hour and a temporary resolver failure after 15
 minutes. A new pending request is immediately due to the same bounded
 scheduler when the verification gate is enabled; the administrator route is
@@ -1457,10 +1458,10 @@ value-free journal state: `enabled`, `required`, the exact `head` (or null),
 `pending`, `forked`, `healthy`, `remote_head_checked`, nullable
 `remote_head_healthy`, nullable `degradation_code`, and bounded bootstrap
 progress. `healthy` requires a valid local head, no pending write or fork, and
-no failed remote-head continuity check. A head contains `stream_id`,
-`sequence`, `hash`, `authority_epoch`, `registry_revision`, and
-`audit_sequence`. Custom-domain journal stream ids use `aedj_` followed by
-16–52 lowercase base32 characters.
+an exact head-bound `capacity.ready=true` counter, and no failed remote-head
+continuity check. A head contains `stream_id`, `sequence`, `hash`,
+`authority_epoch`, `registry_revision`, and `audit_sequence`. Custom-domain
+journal stream ids use `aedj_` followed by 16–52 lowercase base32 characters.
 
 Bootstrap and checkpoint accept:
 
@@ -1482,13 +1483,35 @@ Journal maintenance and recovery are deliberately bounded to 10,000 authority
 keys. Exceeding that ceiling fails closed with
 `agent_email_domain_journal_authority_limit_exceeded`; the customer request
 gate and its account allowlist/authority-ready companion must remain disabled
-until request, observation, audit, plan/lifecycle-fence, and permanent
-allocation growth fit below this ceiling or the recovery design is revised.
-This ceiling alone is not activation evidence: observation audits grow
-permanently, and the current globally serialized authority lane includes the
-bounded external DNS wait. Requests and verification stay dark until those
-operations use durable observation fences outside the lane, capacity and
-admission are observable, and replay/checkpoint growth is bounded.
+when no exact count is available. Journal status always includes a value-free
+`capacity` object with `ready`, nullable `used`, fixed `max`, nullable
+`remaining`, nullable `near_limit`/`at_limit`, and a nullable fixed-category
+`breakdown`. A count is ready only when its stream, sequence, hash, authority
+epoch, registry revision, and audit sequence match the current head. Ordinary
+authority commits calculate the normalized insert/delete delta against that
+count and reject an over-limit result before staging a pending record or
+writing R2. The pending record carries `capacity_after`, which is installed in
+the same Durable Object transaction as the authority after-image and next
+head. Bootstrap, checkpoint completion, and recovery sealing materialize the
+same exact record.
+
+A release predating `capacity_after` must have `pending=false` before upgrade;
+new code deliberately refuses an old pending record rather than resume it
+without an atomic capacity fence. An existing head from such a release reports
+`capacity.ready=false`, unknown nullable values, `healthy=false`, and
+`degradation_code=agent_email_domain_journal_capacity_unavailable` until one
+complete postdeploy checkpoint materializes the exact count. The checkpoint
+control route remains available in that state. This ceiling and admission
+guard alone are not activation evidence. Scheduled checks with an unchanged
+durable evidence outcome coalesce their authority audit/meta writes, while
+still committing current request/allocation/due state and the next journal
+head. Resolver TTL drift, clocks, and retry counters are not evidence
+transitions; first observations, changed evidence/state, and manual checks are.
+This bounds stable-retry authority-key growth, but the immutable R2 journal
+stream still grows per committed refresh and changing outcomes can consume
+audit capacity until admission closes. Requests and verification stay dark
+until the claim fences pass a controlled canary and journal-stream growth has
+an operational bound or retention strategy.
 
 Starting a recovery accepts:
 

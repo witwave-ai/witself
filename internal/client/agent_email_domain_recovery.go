@@ -49,20 +49,48 @@ type AgentEmailDomainJournalProgress struct {
 	Pending       bool                         `json:"pending"`
 }
 
+// AgentEmailDomainAuthorityCapacityBreakdown is the fixed, value-free count of
+// canonical authority keys by storage class.
+type AgentEmailDomainAuthorityCapacityBreakdown struct {
+	Meta            int64 `json:"meta"`
+	Audit           int64 `json:"audit"`
+	Domain          int64 `json:"domain"`
+	Idempotency     int64 `json:"idempotency"`
+	LifecycleFence  int64 `json:"lifecycle_fence"`
+	LifecycleIntent int64 `json:"lifecycle_intent"`
+	PlanFence       int64 `json:"plan_fence"`
+	PlanIntent      int64 `json:"plan_intent"`
+	Request         int64 `json:"request"`
+}
+
+// AgentEmailDomainAuthorityCapacity is bound to the exact journal head. A
+// false Ready value deliberately leaves all observed fields nullable except
+// Max so callers cannot mistake an unknown count for zero.
+type AgentEmailDomainAuthorityCapacity struct {
+	Ready     bool                                        `json:"ready"`
+	Used      *int64                                      `json:"used"`
+	Max       int64                                       `json:"max"`
+	Remaining *int64                                      `json:"remaining"`
+	NearLimit *bool                                       `json:"near_limit"`
+	AtLimit   *bool                                       `json:"at_limit"`
+	Breakdown *AgentEmailDomainAuthorityCapacityBreakdown `json:"breakdown"`
+}
+
 // AgentEmailDomainJournalStatus is the value-free active-registry health
 // response. It never includes a domain, ownership challenge, or request body.
 type AgentEmailDomainJournalStatus struct {
-	SchemaVersion     string                           `json:"schema_version"`
-	Enabled           bool                             `json:"enabled"`
-	Required          bool                             `json:"required"`
-	Head              *AgentEmailDomainJournalHead     `json:"head"`
-	Pending           bool                             `json:"pending"`
-	Forked            bool                             `json:"forked"`
-	Healthy           bool                             `json:"healthy"`
-	RemoteHeadChecked bool                             `json:"remote_head_checked"`
-	RemoteHeadHealthy *bool                            `json:"remote_head_healthy"`
-	DegradationCode   string                           `json:"degradation_code,omitempty"`
-	Bootstrap         *AgentEmailDomainJournalProgress `json:"bootstrap"`
+	SchemaVersion     string                            `json:"schema_version"`
+	Enabled           bool                              `json:"enabled"`
+	Required          bool                              `json:"required"`
+	Head              *AgentEmailDomainJournalHead      `json:"head"`
+	Pending           bool                              `json:"pending"`
+	Forked            bool                              `json:"forked"`
+	Healthy           bool                              `json:"healthy"`
+	RemoteHeadChecked bool                              `json:"remote_head_checked"`
+	RemoteHeadHealthy *bool                             `json:"remote_head_healthy"`
+	DegradationCode   string                            `json:"degradation_code,omitempty"`
+	Bootstrap         *AgentEmailDomainJournalProgress  `json:"bootstrap"`
+	Capacity          AgentEmailDomainAuthorityCapacity `json:"capacity"`
 }
 
 // AgentEmailDomainRecoveryStatus is one named empty-target recovery fence.

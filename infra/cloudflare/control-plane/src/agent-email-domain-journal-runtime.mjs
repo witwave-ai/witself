@@ -24,11 +24,15 @@ export const AGENT_EMAIL_DOMAIN_JOURNAL_FORK_KEY =
   "agent-email-domain-journal-fork";
 export const AGENT_EMAIL_DOMAIN_JOURNAL_BOOTSTRAP_KEY =
   "agent-email-domain-journal:bootstrap";
+export const AGENT_EMAIL_DOMAIN_JOURNAL_CAPACITY_KEY =
+  "agent-email-domain-journal:capacity";
 export const AGENT_EMAIL_DOMAIN_RECOVERY_KEY = "agent-email-domain-recovery";
 const AGENT_EMAIL_DOMAIN_JOURNAL_MAINTENANCE_RECEIPT_PREFIX =
   "agent-email-domain-journal:maintenance-receipt:";
 
 const LOCAL_SCHEMA = "witself.agent-email-domain-journal-local.v1";
+const CAPACITY_SCHEMA =
+  "witself.agent-email-domain-authority-capacity-local.v1";
 const MAINTENANCE_SCHEMA = "witself.agent-email-domain-journal-maintenance.v1";
 const CHECKPOINT_SCHEMA = "witself.agent-email-domain-authority-checkpoint.v1";
 const LEGACY_RECOVERY_SCHEMA = "witself.agent-email-domain-recovery-local.v1";
@@ -38,13 +42,33 @@ const RECOVERY_ID_PATTERN = /^aedrec_[a-z2-7]{16}$/;
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 const OBJECT_NAME_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const VERIFICATION_WORK_KEY_PATTERN =
+  /^verification-work:aedr_[a-z2-7]{16}$/;
 const BASE32 = "abcdefghijklmnopqrstuvwxyz234567";
 const SNAPSHOT_STORAGE_PAGE_LIMIT = 100;
-const MAX_AUTHORITY_KEYS = 10_000;
+export const AGENT_EMAIL_DOMAIN_MAX_AUTHORITY_KEYS = 10_000;
+const MAX_AUTHORITY_KEYS = AGENT_EMAIL_DOMAIN_MAX_AUTHORITY_KEYS;
+const NEAR_AUTHORITY_KEYS = MAX_AUTHORITY_KEYS -
+  Math.floor(MAX_AUTHORITY_KEYS / 10);
 const MAX_SCANNED_STORAGE_KEYS = 100_000;
 const DERIVED_REBUILD_PAGE_LIMIT = 100;
 const JOURNAL_ENTRY_MAX_BYTES = 512 * 1_024;
 const RECOVERY_ACTION_FENCE_GENERATION_ATTEMPTS = 4;
+
+const AUTHORITY_CAPACITY_PREFIXES = Object.freeze([
+  ["audit:", "audit"],
+  ["domain:", "domain"],
+  ["idem:", "idempotency"],
+  ["lifecycle-fence:", "lifecycle_fence"],
+  ["lifecycle-intent:", "lifecycle_intent"],
+  ["plan-fence:", "plan_fence"],
+  ["plan-intent:", "plan_intent"],
+  ["request:", "request"],
+]);
+const AUTHORITY_CAPACITY_CATEGORIES = Object.freeze([
+  "meta",
+  ...AUTHORITY_CAPACITY_PREFIXES.map(([, category]) => category),
+]);
 
 export class AgentEmailDomainJournalRuntimeError extends Error {
   constructor(message, code = "agent_email_domain_journal_unavailable") {
@@ -102,6 +126,110 @@ function validHead(value) {
     Number.isSafeInteger(value.audit_sequence) && value.audit_sequence >= 0;
 }
 
+function emptyAuthorityBreakdown() {
+  return Object.fromEntries(
+    AUTHORITY_CAPACITY_CATEGORIES.map((category) => [category, 0]),
+  );
+}
+
+function authorityCategory(key) {
+  if (key === "meta") return "meta";
+  const match = AUTHORITY_CAPACITY_PREFIXES.find(([prefix]) =>
+    key.startsWith(prefix));
+  if (match) return match[1];
+  fail(`unclassified agent email domain authority key: ${key}`,
+    "agent_email_domain_journal_unknown_storage_key");
+}
+
+function validAuthorityBreakdown(value, authorityKeys) {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      Object.keys(value).length !== AUTHORITY_CAPACITY_CATEGORIES.length) {
+    return false;
+  }
+  let total = 0;
+  for (const category of AUTHORITY_CAPACITY_CATEGORIES) {
+    const count = value[category];
+    if (!Number.isSafeInteger(count) || count < 0) return false;
+    total += count;
+  }
+  return Number.isSafeInteger(total) && total === authorityKeys;
+}
+
+function assertMaintenanceCapacity(maintenance) {
+  if (!Number.isSafeInteger(maintenance?.authority_keys) ||
+      maintenance.authority_keys < 0 ||
+      !validAuthorityBreakdown(
+        maintenance.authority_breakdown,
+        maintenance.authority_keys,
+      )) {
+    fail("agent email domain journal maintenance capacity is invalid",
+      "agent_email_domain_journal_maintenance_invalid");
+  }
+}
+
+function capacityMatchesHead(value, head) {
+  return validHead(head) && value?.schema_version === CAPACITY_SCHEMA &&
+    value.stream_id === head.stream_id &&
+    value.sequence === head.sequence && value.hash === head.hash &&
+    value.authority_epoch === head.authority_epoch &&
+    value.registry_revision === head.registry_revision &&
+    value.audit_sequence === head.audit_sequence &&
+    value.max_authority_keys === MAX_AUTHORITY_KEYS &&
+    Number.isSafeInteger(value.authority_keys) &&
+    value.authority_keys >= 0 && value.authority_keys <= MAX_AUTHORITY_KEYS &&
+    validAuthorityBreakdown(value.breakdown, value.authority_keys);
+}
+
+function capacityForHead(head, authorityKeys, breakdown, updatedAt) {
+  if (!validHead(head) || !Number.isSafeInteger(authorityKeys) ||
+      authorityKeys < 0 || authorityKeys > MAX_AUTHORITY_KEYS ||
+      !validAuthorityBreakdown(breakdown, authorityKeys)) {
+    fail("agent email domain authority capacity invariant failed",
+      "agent_email_domain_journal_capacity_invalid");
+  }
+  return {
+    schema_version: CAPACITY_SCHEMA,
+    stream_id: head.stream_id,
+    sequence: head.sequence,
+    hash: head.hash,
+    authority_epoch: head.authority_epoch,
+    registry_revision: head.registry_revision,
+    audit_sequence: head.audit_sequence,
+    authority_keys: authorityKeys,
+    max_authority_keys: MAX_AUTHORITY_KEYS,
+    breakdown: clone(breakdown),
+    updated_at: updatedAt,
+  };
+}
+
+function publicCapacity(value, head) {
+  const ready = capacityMatchesHead(value, head);
+  const used = ready ? value.authority_keys : null;
+  return {
+    ready,
+    used,
+    max: MAX_AUTHORITY_KEYS,
+    remaining: ready ? MAX_AUTHORITY_KEYS - used : null,
+    near_limit: ready ? used >= NEAR_AUTHORITY_KEYS : null,
+    at_limit: ready ? used === MAX_AUTHORITY_KEYS : null,
+    breakdown: ready ? clone(value.breakdown) : null,
+  };
+}
+
+function authorityCapacityFromState(state) {
+  const breakdown = emptyAuthorityBreakdown();
+  let authorityKeys = 0;
+  for (const key of state.keys()) {
+    breakdown[authorityCategory(key)] += 1;
+    authorityKeys += 1;
+  }
+  if (authorityKeys > MAX_AUTHORITY_KEYS) {
+    fail("agent email domain authority exceeds 10000 keys",
+      "agent_email_domain_journal_authority_limit_exceeded");
+  }
+  return { authority_keys: authorityKeys, breakdown };
+}
+
 function bytesEqual(left, right) {
   if (left.byteLength !== right.byteLength) return false;
   let different = 0;
@@ -128,6 +256,9 @@ function authorityAfterImage(entries, deletes) {
     const classification = classifyAgentEmailDomainStorageKey(key);
     if (classification === "authority") {
       puts.push({ key, value: clone(value) });
+    } else if (classification === "journal_local") {
+      fail(`journal-local agent email domain storage key cannot be committed: ${key}`,
+        "agent_email_domain_journal_local_storage_key");
     } else if (classification === "unknown") {
       fail(`unclassified agent email domain storage key: ${key}`,
         "agent_email_domain_journal_unknown_storage_key");
@@ -137,6 +268,15 @@ function authorityAfterImage(entries, deletes) {
     const classification = classifyAgentEmailDomainStorageKey(key);
     if (classification === "authority") {
       authorityDeletes.push(key);
+    } else if (classification === "journal_local" &&
+        VERIFICATION_WORK_KEY_PATTERN.test(key)) {
+      // A verification observation is consumed by the authority transition
+      // it fences. Keep that cleanup in the same Durable Object transaction,
+      // but never place the operational work record in the R2 after-image.
+      continue;
+    } else if (classification === "journal_local") {
+      fail(`journal-local agent email domain storage key cannot be committed: ${key}`,
+        "agent_email_domain_journal_local_storage_key");
     } else if (classification === "unknown") {
       fail(`unclassified agent email domain storage key: ${key}`,
         "agent_email_domain_journal_unknown_storage_key");
@@ -287,6 +427,8 @@ async function finishRowsDigest(rowsHash, rows) {
 async function scanSnapshotPage(storage, maintenance) {
   const page = await storagePage(storage, maintenance.cursor);
   let authorityKeys = maintenance.authority_keys;
+  const breakdown = clone(maintenance.authority_breakdown);
+  assertMaintenanceCapacity(maintenance);
   let rowsHash = maintenance.rows_hash;
   let scannedKeys = maintenance.scanned_keys;
   const puts = [];
@@ -303,6 +445,7 @@ async function scanSnapshotPage(storage, maintenance) {
     }
     if (classification !== "authority") continue;
     authorityKeys += 1;
+    breakdown[authorityCategory(key)] += 1;
     if (authorityKeys > MAX_AUTHORITY_KEYS) {
       fail("agent email domain authority exceeds 10000 keys",
         "agent_email_domain_journal_authority_limit_exceeded");
@@ -320,6 +463,7 @@ async function scanSnapshotPage(storage, maintenance) {
     cursor: page.next_cursor,
     complete: page.complete,
     authority_keys: authorityKeys,
+    authority_breakdown: breakdown,
     scanned_keys: scannedKeys,
     rows_hash: rowsHash,
   };
@@ -438,6 +582,65 @@ export class AgentEmailDomainJournalRuntime {
     this.afterMaintenanceFinalize =
       dependencies.afterMaintenanceFinalize ?? (() => {});
     this.afterRecoveryAction = dependencies.afterRecoveryAction ?? (() => {});
+    this.log = dependencies.log ?? ((line) => console.log(line));
+  }
+
+  async logCapacityRefusal(used, attempted) {
+    try {
+      await this.log(JSON.stringify({
+        event: "agent_email_domain_authority_capacity_refused",
+        code: "agent_email_domain_journal_authority_limit_exceeded",
+        used,
+        attempted,
+        max: MAX_AUTHORITY_KEYS,
+      }));
+    } catch {
+      // Admission must remain fail-closed even when diagnostic output fails.
+    }
+  }
+
+  async capacityAfterImage(head, afterImage) {
+    const current = await this.storage.get(
+      AGENT_EMAIL_DOMAIN_JOURNAL_CAPACITY_KEY,
+    );
+    if (!capacityMatchesHead(current, head)) {
+      fail("agent email domain authority capacity is not bound to the current head",
+        "agent_email_domain_journal_capacity_unavailable");
+    }
+    let authorityKeys = current.authority_keys;
+    let breakdown = clone(current.breakdown);
+    const usedBefore = authorityKeys;
+
+    const currentValues = new Map();
+    for (const { key } of afterImage.puts) {
+      currentValues.set(key, await this.storage.get(key));
+    }
+    for (const key of afterImage.deletes) {
+      currentValues.set(key, await this.storage.get(key));
+    }
+    for (const { key } of afterImage.puts) {
+      if (currentValues.get(key) === undefined) {
+        authorityKeys += 1;
+        breakdown[authorityCategory(key)] += 1;
+      }
+    }
+    for (const key of afterImage.deletes) {
+      if (currentValues.get(key) !== undefined) {
+        authorityKeys -= 1;
+        breakdown[authorityCategory(key)] -= 1;
+      }
+    }
+    if (authorityKeys > MAX_AUTHORITY_KEYS) {
+      await this.logCapacityRefusal(usedBefore, authorityKeys);
+      fail("agent email domain authority exceeds 10000 keys",
+        "agent_email_domain_journal_authority_limit_exceeded");
+    }
+    if (authorityKeys < 0 ||
+        !validAuthorityBreakdown(breakdown, authorityKeys)) {
+      fail("agent email domain authority capacity invariant failed",
+        "agent_email_domain_journal_capacity_invalid");
+    }
+    return { authority_keys: authorityKeys, breakdown };
   }
 
   async nextRecoveryActionFence(currentFence = null) {
@@ -474,11 +677,12 @@ export class AgentEmailDomainJournalRuntime {
   }
 
   async status() {
-    let [head, pending, fork, bootstrap] = await Promise.all([
+    let [head, pending, fork, bootstrap, capacity] = await Promise.all([
       this.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY),
       this.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_PENDING_KEY),
       this.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_FORK_KEY),
       this.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_BOOTSTRAP_KEY),
+      this.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_CAPACITY_KEY),
     ]);
     let remoteHeadChecked = false;
     let remoteHeadHealthy = null;
@@ -495,8 +699,9 @@ export class AgentEmailDomainJournalRuntime {
         fork = await this.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_FORK_KEY);
       }
     }
-    const healthy = validHead(head) && !pending && !fork &&
-      remoteHeadHealthy !== false;
+    const capacityStatus = publicCapacity(capacity, head);
+    const healthy = validHead(head) && capacityStatus.ready && !pending &&
+      !fork && remoteHeadHealthy !== false;
     return {
       enabled: validHead(head),
       required: journalRequired(this.env),
@@ -506,18 +711,24 @@ export class AgentEmailDomainJournalRuntime {
       healthy,
       remote_head_checked: remoteHeadChecked,
       remote_head_healthy: remoteHeadHealthy,
-      degradation_code: fork?.code ?? remoteHeadError,
+      degradation_code: fork?.code ?? remoteHeadError ??
+        (validHead(head) && !capacityStatus.ready
+          ? "agent_email_domain_journal_capacity_unavailable"
+          : null),
       bootstrap: bootstrap ? this.maintenanceResult(bootstrap) : null,
+      capacity: capacityStatus,
     };
   }
 
   async assertOperationalReady() {
-    const [head, fork, maintenance, recovery, currentMeta] = await Promise.all([
+    const [head, fork, maintenance, recovery, currentMeta, capacity] =
+      await Promise.all([
       this.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY),
       this.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_FORK_KEY),
       this.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_BOOTSTRAP_KEY),
       this.storage.get(AGENT_EMAIL_DOMAIN_RECOVERY_KEY),
       this.storage.get("meta"),
+      this.storage.get(AGENT_EMAIL_DOMAIN_JOURNAL_CAPACITY_KEY),
     ]);
     if (recovery) {
       fail("agent email domain recovery targets are permanently write-fenced",
@@ -534,6 +745,10 @@ export class AgentEmailDomainJournalRuntime {
     if (head && !validHead(head)) {
       fail("agent email domain authority journal head is invalid",
         "agent_email_domain_journal_fence_mismatch");
+    }
+    if (head && !capacityMatchesHead(capacity, head)) {
+      fail("agent email domain authority capacity is not bound to the current head",
+        "agent_email_domain_journal_capacity_unavailable");
     }
     // A new object may seed itself and create the genesis head in one R2-first
     // commit. Any object with existing authority must be bootstrapped before
@@ -684,7 +899,11 @@ export class AgentEmailDomainJournalRuntime {
     if (!pending) return { resumed: false };
     if (pending.schema_version !== LOCAL_SCHEMA ||
         !validHead(pending.head_before) || !pending.entry ||
-        !Array.isArray(pending.entries) || !Array.isArray(pending.deletes)) {
+        !Array.isArray(pending.entries) || !Array.isArray(pending.deletes) ||
+        !capacityMatchesHead(
+          pending.capacity_after,
+          headFromEntry(pending.entry),
+        )) {
       fail("agent email domain authority journal pending record is invalid",
         "agent_email_domain_journal_pending_invalid");
     }
@@ -708,8 +927,16 @@ export class AgentEmailDomainJournalRuntime {
       audit_sequence: built.entry.audit_sequence,
       updated_at: built.entry.occurred_at,
     };
+    if (!capacityMatchesHead(pending.capacity_after, nextHead)) {
+      fail("agent email domain authority journal pending capacity is invalid",
+        "agent_email_domain_journal_pending_invalid");
+    }
     await apply(
-      [...pending.entries, [AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY, nextHead]],
+      [
+        ...pending.entries,
+        [AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY, nextHead],
+        [AGENT_EMAIL_DOMAIN_JOURNAL_CAPACITY_KEY, pending.capacity_after],
+      ],
       [...pending.deletes, AGENT_EMAIL_DOMAIN_JOURNAL_PENDING_KEY],
       pending.options ?? {},
     );
@@ -741,6 +968,17 @@ export class AgentEmailDomainJournalRuntime {
         fail("existing agent email domain authority is not journaled",
           "agent_email_domain_journal_bootstrap_required");
       }
+      let first;
+      try {
+        first = await this.storage.list({ limit: 1 });
+      } catch {
+        fail("agent email domain journal genesis target cannot be enumerated",
+          "agent_email_domain_journal_unavailable");
+      }
+      if (mapRows(first).length !== 0) {
+        fail("agent email domain journal genesis target is not empty",
+          "agent_email_domain_journal_fence_mismatch");
+      }
       const streamID = configuredStreamID(this.env) ?? this.newStreamID();
       if (!STREAM_ID_PATTERN.test(streamID)) {
         fail("generated agent email domain authority stream id is invalid",
@@ -756,7 +994,18 @@ export class AgentEmailDomainJournalRuntime {
         audit_sequence: 0,
         updated_at: this.now().toISOString(),
       };
-      await this.raw([[AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY, head]]);
+      // Seed the empty-head capacity in the same local transaction as the
+      // genesis head. If staging the first pending mutation then fails, a
+      // retry still has a complete head/capacity fence from which to proceed.
+      await this.raw([
+        [AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY, head],
+        [AGENT_EMAIL_DOMAIN_JOURNAL_CAPACITY_KEY, capacityForHead(
+          head,
+          0,
+          emptyAuthorityBreakdown(),
+          head.updated_at,
+        )],
+      ]);
     }
     if (!validHead(head)) {
       fail("agent email domain authority journal head is invalid",
@@ -766,6 +1015,7 @@ export class AgentEmailDomainJournalRuntime {
     if (afterImage.puts.length === 0 && afterImage.deletes.length === 0) {
       return apply(entries, deletes, options);
     }
+    const nextCapacity = await this.capacityAfterImage(head, afterImage);
     const desiredMeta = metaPut(afterImage) ?? currentMeta;
     if (!desiredMeta || !Number.isSafeInteger(desiredMeta.registry_revision) ||
         !Number.isSafeInteger(desiredMeta.audit_sequence)) {
@@ -800,12 +1050,19 @@ export class AgentEmailDomainJournalRuntime {
     } catch (error) {
       throw journalError(error);
     }
+    const capacityAfter = capacityForHead(
+      headFromEntry(built.entry),
+      nextCapacity.authority_keys,
+      nextCapacity.breakdown,
+      built.entry.occurred_at,
+    );
     const pending = {
       schema_version: LOCAL_SCHEMA,
       head_before: head,
       entry: built.entry,
       entries: clone(entries),
       deletes: clone(deletes),
+      capacity_after: capacityAfter,
       options: cleanOptions(options),
       created_at: this.now().toISOString(),
     };
@@ -957,6 +1214,7 @@ export class AgentEmailDomainJournalRuntime {
       audit_sequence: meta.audit_sequence,
       cursor: null,
       authority_keys: 0,
+      authority_breakdown: emptyAuthorityBreakdown(),
       scanned_keys: 0,
       rows_hash: await initialRowsHash(),
       pending: null,
@@ -1082,12 +1340,27 @@ export class AgentEmailDomainJournalRuntime {
     if (record.finalized === true) {
       return clone(record.result);
     }
+    // Releases predating the exact capacity counter did not persist the
+    // category breakdown. Reject such in-progress maintenance before flushing
+    // a staged journal object or advancing any local fence; the operator must
+    // finish it on the source release before upgrading.
+    assertMaintenanceCapacity(record);
     if (record.pending) {
+      assertMaintenanceCapacity({
+        ...record,
+        ...record.pending.next,
+      });
       record = await this.flushMaintenanceEntry(record, apply);
       return this.maintenanceResult(record);
     }
     if (record.phase === "complete") {
       const completedHead = clone(record.head);
+      const capacity = capacityForHead(
+        completedHead,
+        record.authority_keys,
+        record.authority_breakdown,
+        this.now().toISOString(),
+      );
       const result = this.maintenanceResult(record, true, completedHead);
       const completion = {
         schema_version: MAINTENANCE_SCHEMA,
@@ -1105,6 +1378,7 @@ export class AgentEmailDomainJournalRuntime {
       };
       await this.localApply([
         [AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY, completedHead],
+        [AGENT_EMAIL_DOMAIN_JOURNAL_CAPACITY_KEY, capacity],
         [maintenanceReceiptKey(record.idempotency_key), completion],
       ], [AGENT_EMAIL_DOMAIN_JOURNAL_BOOTSTRAP_KEY], apply);
       await this.afterMaintenanceFinalize(result);
@@ -1115,6 +1389,7 @@ export class AgentEmailDomainJournalRuntime {
       const next = {
         cursor: snapshot.cursor,
         authority_keys: snapshot.authority_keys,
+        authority_breakdown: snapshot.authority_breakdown,
         scanned_keys: snapshot.scanned_keys,
         rows_hash: snapshot.rows_hash,
         phase: snapshot.complete ? "checkpoint" : "scan",
@@ -1165,6 +1440,15 @@ export class AgentEmailDomainJournalRuntime {
       if (validation.authority_keys !== record.authority_keys ||
           exactDigest !== digest) {
         fail("agent email domain authority changed while writes were frozen",
+          "agent_email_domain_journal_fence_mismatch");
+      }
+      const exactCapacity = authorityCapacityFromState(exact.authority);
+      if (!validAuthorityBreakdown(
+        record.authority_breakdown,
+        record.authority_keys,
+      ) || canonicalJSONString(exactCapacity.breakdown) !==
+          canonicalJSONString(record.authority_breakdown)) {
+        fail("agent email domain authority capacity changed while writes were frozen",
           "agent_email_domain_journal_fence_mismatch");
       }
       const built = await this.buildCheckpointEntry(record, digest);
@@ -1711,6 +1995,17 @@ export class AgentEmailDomainJournalRuntime {
       audit_sequence: record.replay_head.audit_sequence,
       updated_at: now,
     };
+    const recoveredCapacity = authorityCapacityFromState(state.authority);
+    if (recoveredCapacity.authority_keys !== record.authority_keys) {
+      fail("recovered authority capacity does not match the replay fence",
+        "agent_email_domain_recovery_digest_mismatch");
+    }
+    const capacity = capacityForHead(
+      journalHead,
+      recoveredCapacity.authority_keys,
+      recoveredCapacity.breakdown,
+      now,
+    );
     const result = recoveryPublic(sealed);
     const receipted = this.withRecoveryReceipt(
       sealed,
@@ -1719,6 +2014,7 @@ export class AgentEmailDomainJournalRuntime {
     );
     await this.localApply([
       [AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY, journalHead],
+      [AGENT_EMAIL_DOMAIN_JOURNAL_CAPACITY_KEY, capacity],
       [AGENT_EMAIL_DOMAIN_RECOVERY_KEY, receipted],
     ], [], apply);
     await this.afterRecoveryAction(result);

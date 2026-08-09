@@ -135,6 +135,24 @@ func recoveryFixture() map[string]any {
 	}
 }
 
+func TestEmailDomainAdminCapacityBreakdownIsValueFree(t *testing.T) {
+	got := emailDomainAdminCapacityBreakdown(
+		&client.AgentEmailDomainAuthorityCapacityBreakdown{
+			Meta: 1, Audit: 2, Domain: 3, Idempotency: 4,
+			LifecycleFence: 5, LifecycleIntent: 6,
+			PlanFence: 7, PlanIntent: 8, Request: 9,
+		},
+	)
+	want := "meta=1,audit=2,domain=3,idempotency=4,lifecycle_fence=5," +
+		"lifecycle_intent=6,plan_fence=7,plan_intent=8,request=9"
+	if got != want {
+		t.Fatalf("capacity breakdown = %q; want %q", got, want)
+	}
+	if got := emailDomainAdminCapacityBreakdown(nil); got != "-" {
+		t.Fatalf("unavailable capacity breakdown = %q", got)
+	}
+}
+
 func TestEmailDomainRecoveryCLIRejectsUnsafeInputs(t *testing.T) {
 	t.Setenv("WITSELF_HOME", t.TempDir())
 	t.Setenv("WITSELF_AGENT_EMAIL_DOMAIN_RECOVERY_TOKEN_FILE", "")

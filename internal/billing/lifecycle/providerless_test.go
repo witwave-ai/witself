@@ -53,6 +53,48 @@ func (a *recoveryApplier) Apply(
 	return ApplyAck{Revision: request.Revision, Hash: request.Hash}, nil
 }
 
+var errLostApplyAcknowledgement = errors.New("lost apply acknowledgement")
+
+// lostAcknowledgementApplier models the real cell fence: a newer request is
+// accepted, and the exact same revision/hash is an idempotent replay. loseNext
+// fails only after the fence advances, reproducing a lost bridge completion or
+// response after the cell has durably committed the request.
+type lostAcknowledgementApplier struct {
+	fence    ApplyFence
+	requests []ApplyRequest
+	loseNext bool
+}
+
+func (a *lostAcknowledgementApplier) ReadApplyFence(
+	context.Context,
+	string,
+) (ApplyFence, error) {
+	return a.fence, nil
+}
+
+func (a *lostAcknowledgementApplier) Apply(
+	_ context.Context,
+	_ string,
+	request ApplyRequest,
+) (ApplyAck, error) {
+	if request.Revision < a.fence.Revision ||
+		(request.Revision == a.fence.Revision && request.Hash != a.fence.Hash) {
+		return ApplyAck{}, fmt.Errorf(
+			"stale or conflicting revision %d/%s behind %d/%s",
+			request.Revision, request.Hash, a.fence.Revision, a.fence.Hash,
+		)
+	}
+	a.requests = append(a.requests, request)
+	if request.Revision > a.fence.Revision {
+		a.fence = ApplyFence{Revision: request.Revision, Hash: request.Hash}
+	}
+	if a.loseNext {
+		a.loseNext = false
+		return ApplyAck{}, errLostApplyAcknowledgement
+	}
+	return ApplyAck{Revision: request.Revision, Hash: request.Hash}, nil
+}
+
 func TestProviderlessManagerSeedsAndAppliesPersonalWithoutBilling(t *testing.T) {
 	catalog, err := plans.Load()
 	if err != nil {
@@ -169,6 +211,121 @@ func TestMissingLifecycleRecordAdvancesAboveCellFenceAndReappliesAuthority(t *te
 	if rec.AppliedSnapshotRevision != 42 ||
 		rec.AppliedSnapshotHash != request.Hash {
 		t.Fatalf("stored acknowledgement = %+v", rec)
+	}
+}
+
+func TestLostApplyAcknowledgementReplaysExactAcceptedFence(t *testing.T) {
+	catalog, err := plans.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemStore()
+	const accountID = "acct_lost_downgrade_ack"
+	if err := store.Put(context.Background(), Record{
+		AccountID: accountID,
+		Entitled:  plans.Free,
+		Applied:   "team",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	applier := &lostAcknowledgementApplier{loseNext: true}
+	fit := &fitStub{}
+	manager, err := NewManager(Config{
+		Catalog: catalog,
+		Store:   store,
+		Applier: applier,
+		Fit:     fit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.ReconcileAccount(context.Background(), accountID); !errors.Is(err, errLostApplyAcknowledgement) {
+		t.Fatalf("first reconcile error = %v; want lost acknowledgement", err)
+	}
+	if len(applier.requests) != 1 {
+		t.Fatalf("first reconcile requests = %d; want one", len(applier.requests))
+	}
+	first := applier.requests[0]
+	if applier.fence.Revision != first.Revision || applier.fence.Hash != first.Hash {
+		t.Fatalf("cell fence = %+v; want accepted request %d/%s",
+			applier.fence, first.Revision, first.Hash)
+	}
+
+	// The cell already enforced the downgrade. A new violation must not block
+	// the exact replay that finishes bridge-side policy convergence.
+	fit.set([]string{"account grew after the cell accepted the downgrade"})
+	if err := manager.ReconcileAccount(context.Background(), accountID); err != nil {
+		t.Fatalf("exact accepted-fence replay: %v", err)
+	}
+	if len(applier.requests) != 2 {
+		t.Fatalf("reconcile requests = %d; want exact retry", len(applier.requests))
+	}
+	second := applier.requests[1]
+	if second.Revision != first.Revision || second.Hash != first.Hash {
+		t.Fatalf("replayed fence = %d/%s; want exact %d/%s",
+			second.Revision, second.Hash, first.Revision, first.Hash)
+	}
+	record, snapshot, err := manager.ResolvedStatus(
+		context.Background(), accountID, "",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Applied != plans.Free ||
+		record.AppliedSnapshotRevision != first.Revision ||
+		record.AppliedSnapshotHash != first.Hash ||
+		SnapshotApplyPending(record, snapshot) || record.ApplyBlocked != "" {
+		t.Fatalf("recovered lifecycle record = %+v snapshot=%+v", record, snapshot)
+	}
+}
+
+func TestLostApplyAcknowledgementDoesNotReplayConflictingObservedHash(t *testing.T) {
+	catalog, err := plans.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemStore()
+	const accountID = "acct_conflicting_observed_hash"
+	if err := store.Put(context.Background(), Record{
+		AccountID: accountID,
+		Entitled:  plans.Free,
+		Applied:   plans.Free,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	applier := &lostAcknowledgementApplier{loseNext: true}
+	manager, err := NewManager(Config{
+		Catalog: catalog,
+		Store:   store,
+		Applier: applier,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.ReconcileAccount(context.Background(), accountID); !errors.Is(err, errLostApplyAcknowledgement) {
+		t.Fatalf("first reconcile error = %v; want lost acknowledgement", err)
+	}
+	if len(applier.requests) != 1 {
+		t.Fatalf("first reconcile requests = %d; want one", len(applier.requests))
+	}
+	first := applier.requests[0]
+	applier.fence = ApplyFence{
+		Revision: first.Revision,
+		Hash:     strings.Repeat("f", 64),
+	}
+
+	if err := manager.ReconcileAccount(context.Background(), accountID); err != nil {
+		t.Fatalf("conflicting-fence recovery: %v", err)
+	}
+	if len(applier.requests) != 2 {
+		t.Fatalf("reconcile requests = %d; want authoritative reapply", len(applier.requests))
+	}
+	second := applier.requests[1]
+	if second.Revision != first.Revision+1 || second.Hash != first.Hash {
+		t.Fatalf("authoritative recovery fence = %d/%s; want %d/%s",
+			second.Revision, second.Hash, first.Revision+1, first.Hash)
 	}
 }
 

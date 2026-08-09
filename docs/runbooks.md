@@ -517,20 +517,29 @@ active head can be compared exactly before and after the drill.
 
 The journal/recovery implementation supports at most 10,000 authority keys.
 This is not a plan allowance. It is a hard recovery bound and therefore a
-customer-request activation blocker. If bootstrap or checkpoint reports
+customer-request activation boundary. Each ordinary authority commit now uses
+an exact count bound to the current journal head, applies only the normalized
+after-image delta, and rejects an over-limit result before creating a pending
+record or writing R2. If bootstrap or checkpoint reports
 `agent_email_domain_journal_authority_limit_exceeded`, keep the request gate
 dark and redesign or raise the reviewed recovery bound before accepting any
 customer request.
 
-Do not treat that static ceiling as sufficient capacity evidence. Observation
-audits are permanent, ordinary writes do not currently admit against a
-worst-case replay budget, and the single global Durable Object presently holds
-its serialized authority lane during bounded external DNS calls. Keep both
-request and verification gates dark until external resolution uses durable
-claim/observe/commit fences outside that lane, capacity and admission metrics
-exist, retry/audit growth is bounded, and exact `awaiting_cell` plan recovery
-has been exercised through the durable plan workflow. Custom-domain provider
-routing, cell projection, and mail delivery must be accepted separately.
+Do not treat that static ceiling or successful admission as evidence that
+long-term journal growth is operationally sustainable. The admin status exposes
+only value-free head-bound counts and a fixed category breakdown; an over-limit
+refusal emits one value-free structured event. The durable
+claim/observe/commit flow resolves DNS outside the global authority lane.
+Scheduled observations whose durable evidence outcome is unchanged do not add
+audit/meta authority keys, even when clocks, counters, or recursive TTLs move;
+first observations, evidence/state changes, and manual checks remain audited.
+Every committed refresh still appends an immutable R2 journal object, however,
+and changing DNS outcomes can consume audit capacity until admission closes.
+Keep both request and verification gates dark until the R2 stream has an
+operational growth/retention strategy, the new claim fences have passed a
+controlled canary, and exact `awaiting_cell` plan recovery has been exercised
+through the durable plan workflow. Custom-domain provider routing, cell
+projection, and mail delivery must be accepted separately.
 
 ### Dark lifecycle and ownership-verification deployment
 
@@ -546,8 +555,15 @@ download and validate the complete create-only R2 chain through the captured
 head, require its replayed head to match every captured head field exactly, and
 require the replayed authority to match the zero-inventory preflight. Freeze
 administrator mutations between that replay and deployment. This one-time
-legacy-source check is not a waiver of the strict v0.0.236 postdeploy health
-contract.
+legacy-source check is not a waiver of the strict postdeploy health contract.
+
+For every journal-aware source release, `pending=false` and `bootstrap=null`
+are hard predeploy requirements, not only health observations. Pending records
+written before the head-bound capacity release do not contain `capacity_after`,
+and in-progress maintenance records do not contain the category breakdown;
+new code refuses either incomplete old record rather than invent an atomic
+capacity fence. Finish the old pending write or maintenance operation on the
+old release before deploying. Never delete or rewrite either record.
 
 Confirm all four dark controls above are absent from the persistent Worker
 secret-name list, not only from rendered configuration. The pre-v0.0.236
@@ -586,14 +602,19 @@ For this already-bootstrapped path, inspect rather than recreate the bucket and
 recovery credential, perform deployment step 3, skip bootstrap and journal
 enablement steps 4-5, then continue with checkpoint and recovery steps 6-8.
 
-After deployment, require all of the following before appending a checkpoint:
+After deployment from a release that predates head-bound capacity, require all
+of the following before appending the mandatory checkpoint:
 
 - `/v1/version` is the exact new tagged release;
 - the four dark controls remain absent and the journal-required secret remains
   present;
-- raw journal-status JSON contains `healthy`, `remote_head_checked`, and
-  `remote_head_healthy`; all three are exactly true, `degradation_code` is null
-  or absent, and its positive complete head is byte-for-byte unchanged;
+- raw journal-status JSON reports `remote_head_checked=true` and
+  `remote_head_healthy=true`, while `.capacity.ready=false`,
+  `.capacity.used=null`, `.capacity.remaining=null`, and
+  `.capacity.max=10000`; `healthy=false` with
+  `degradation_code=agent_email_domain_journal_capacity_unavailable` is the
+  only accepted degradation, and the positive complete head is byte-for-byte
+  unchanged;
 - customer creation remains `custom_domain_requests_disabled`, administrator
   verification remains `custom_domain_verification_disabled`, exactly zero
   request and audit rows remain exactly zero, and the persistent Worker secret
@@ -601,12 +622,14 @@ After deployment, require all of the following before appending a checkpoint:
 - there was no DNS lookup, route publication, cell projection, Email Routing
   change, or mail delivery change.
 
-Then append one complete checkpoint and seal one newly named empty recovery
-target using the procedures below. Preserve the exact `aedrec_` id, source
-head, action fences, sealed result, and post-drill active head in the private
-rollout record. The active head must remain unchanged during the recovery
-drill. Leave request, allowlist, authority-ready, and verification controls
-absent after acceptance; this completes only the dark deployment.
+Then append one complete checkpoint. Require it to materialize capacity bound
+to the new exact head and return the journal to `healthy=true` before sealing
+one newly named empty recovery target using the procedures below. Preserve the
+exact `aedrec_` id, source head, action fences, sealed result, and post-drill
+active head in the private rollout record. The active head must remain
+unchanged during the recovery drill. Leave request, allowlist, authority-ready,
+and verification controls absent after acceptance; this completes only the
+dark deployment.
 
 ### 1. Provision and inspect the private R2 bucket
 
@@ -740,10 +763,13 @@ witself-admin email-domain journal status \
 Repeat the byte-equivalent bootstrap call with the same reason and idempotency
 key until `complete=true`. An incomplete operation deliberately leaves
 authority writes frozen. When complete, require `enabled=true`, `pending=false`,
-`forked=false`, and `authority_keys <= 10000`. Stop on an unknown storage key,
-storage/authority limit, R2 failure, fork, fence mismatch, or any other failed
-state; do not remove the bucket, reset the Durable Object, or enable a gate to
-work around it.
+`forked=false`, `healthy=true`, `.capacity.ready=true`,
+status `.capacity.used` equal to the completed bootstrap response's
+`authority_keys`, `.capacity.max == 10000`, and a fixed breakdown whose values
+sum exactly to `.capacity.used`. Stop on an unknown
+storage key, storage/authority limit, R2 failure, fork, fence mismatch, missing
+capacity, or any other failed state; do not remove the bucket, reset the
+Durable Object, or enable a gate to work around it.
 
 Bootstrap creates the journal head even though the journal-required gate stays
 absent. Once a valid head exists, this release writes every later authority
@@ -766,7 +792,9 @@ witself-admin email-domain journal status \
   --token-file "$PLATFORM_ADMIN_TOKEN_FILE" \
   --recovery-token-file "$RECOVERY_TOKEN_FILE" \
   --json | jq -e \
-    '.enabled == true and .required == true and .pending == false and .forked == false'
+    '.enabled == true and .required == true and .healthy == true and
+     .pending == false and .forked == false and .capacity.ready == true and
+     .capacity.max == 10000'
 ```
 
 This enables only fail-closed journal enforcement. It does not enable customer
@@ -803,6 +831,14 @@ ACTIVE_BEFORE="$(witself-admin email-domain journal status \
   --token-file "$PLATFORM_ADMIN_TOKEN_FILE" \
   --recovery-token-file "$RECOVERY_TOKEN_FILE" \
   --json)"
+jq -e '
+  .enabled == true and .required == true and .healthy == true and
+  .pending == false and .forked == false and
+  .capacity.ready == true and .capacity.max == 10000 and
+  (.capacity.used | type == "number") and
+  (.capacity.remaining == (10000 - .capacity.used)) and
+  ([.capacity.breakdown[]] | add) == .capacity.used
+' <<<"$ACTIVE_BEFORE" >/dev/null || exit 1
 SOURCE_STREAM_ID="$(jq -er '.head.stream_id' <<<"$ACTIVE_BEFORE")"
 EXPECTED_SEQUENCE="$(jq -er '.head.sequence' <<<"$ACTIVE_BEFORE")"
 EXPECTED_HASH="$(jq -er '.head.hash' <<<"$ACTIVE_BEFORE")"
@@ -917,7 +953,7 @@ the administrator verification endpoint must continue returning
 Leave `CP_AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_ENABLED` enabled after the drill;
 once the journal head exists, journal-unaware writers are unsafe. Do not enable
 the request gate, account allowlist, authority-ready gate, or verification gate
-until the 10,000-key capacity blocker and every ownership, lifecycle,
+until head-bound capacity is ready and every remaining ownership, lifecycle,
 projection, and receive-canary blocker in [agent-email.md](agent-email.md) is
 closed through a separately reviewed canary.
 

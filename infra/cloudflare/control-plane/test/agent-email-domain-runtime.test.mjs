@@ -14,6 +14,7 @@ import {
   agentEmailDomainRegistryStub,
   isProtectedAgentEmailDomain,
   normalizeAgentEmailCustomDomain,
+  runAgentEmailDomainManualVerification,
   runScheduledAgentEmailDomainVerification,
 } from "../src/agent-email-domain-runtime.mjs";
 import {
@@ -22,9 +23,14 @@ import {
 import {
   isAgentEmailDomainAuthorityKey,
   isAgentEmailDomainDerivedKey,
+  replayAgentEmailDomainJournalPage,
   rebuildAgentEmailDomainDerivedState,
   validateAgentEmailDomainRecoveredState,
 } from "../src/agent-email-domain-journal.mjs";
+import {
+  AGENT_EMAIL_DOMAIN_JOURNAL_CAPACITY_KEY,
+  AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY,
+} from "../src/agent-email-domain-journal-runtime.mjs";
 
 const ACCOUNT = "acct_domain";
 const OTHER_ACCOUNT = "acct_other";
@@ -32,6 +38,8 @@ const OPERATOR = { kind: "account_operator", id: "opr_domain" };
 const OTHER_OPERATOR = { kind: "account_operator", id: "opr_other" };
 const ADMIN = { kind: "platform_admin", id: "adm_domain" };
 const PLAN_HASH = "7".repeat(64);
+const VERIFICATION_CLAIM_LEASE_TEST_MS = 61 * 1_000;
+const verificationResolvers = new WeakMap();
 
 class Storage {
   constructor() {
@@ -160,6 +168,12 @@ function registry(env = {}, dependencyOverrides = {}) {
       ...dependencyOverrides,
     },
   );
+  verificationResolvers.set(
+    runtime,
+    dependencyOverrides.resolveTXT ?? (async () => {
+      throw new Error("verification test resolver is not configured");
+    }),
+  );
   return {
     runtime,
     storage,
@@ -171,7 +185,51 @@ function registry(env = {}, dependencyOverrides = {}) {
   };
 }
 
+function runtimeEnvironment(runtime) {
+  return {
+    ...runtime.env,
+    AGENT_EMAIL_DOMAINS: {
+      idFromName: (name) => name,
+      get: () => ({ fetch: (request, init) => runtime.fetch(
+        new Request(request, init),
+      ) }),
+    },
+  };
+}
+
 async function call(runtime, path, body, method = "POST") {
+  const resolver = verificationResolvers.get(runtime);
+  const env = runtimeEnvironment(runtime);
+  if (method === "POST" && path === "/request/verify") {
+    const response = await runAgentEmailDomainManualVerification(
+      env,
+      body,
+      { resolveTXT: resolver },
+    );
+    return { response, body: await response.json() };
+  }
+  if (method === "POST" && path === "/verification/reconcile") {
+    if (env.CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED !== "true") {
+      const response = await runtime.fetch(new Request(
+        "https://agent-email-domain.internal/verification/claim",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            mode: "scheduled",
+            verification_enabled: body?.verification_enabled === true,
+          }),
+        },
+      ));
+      return { response, body: await response.json() };
+    }
+    const result = await runScheduledAgentEmailDomainVerification(
+      env,
+      { resolveTXT: resolver },
+    );
+    const response = Response.json({ schema_version: "witself.agent-email-domain.v1", ...result });
+    return { response, body: await response.json() };
+  }
   const response = await runtime.fetch(new Request(
     `https://agent-email-domain.internal${path}`,
     {
@@ -196,6 +254,51 @@ function create(runtime, domain, fields = {}) {
     idempotency_key: `create-${domain.toLowerCase()}`,
     ...fields,
   });
+}
+
+function auditRows(storage) {
+  return [...storage.values].filter(([key]) => key.startsWith("audit:"));
+}
+
+async function replayBucketJournal(bucket, streamID) {
+  const decoder = new TextDecoder();
+  const entries = [...bucket.values.values()]
+    .map((bytes) => JSON.parse(decoder.decode(bytes)))
+    .sort((left, right) => left.sequence - right.sequence);
+  return replayAgentEmailDomainJournalPage(entries, {
+    stream_id: streamID,
+    state: new Map(),
+  });
+}
+
+async function claimAndObserve(runtime, request, idempotencyKey, fields = {}) {
+  const claimed = await call(runtime, "/verification/claim", {
+    mode: "manual",
+    actor: ADMIN,
+    request_id: request.id,
+    idempotency_key: idempotencyKey,
+    verification_enabled: true,
+  });
+  assert.equal(claimed.response.status, 200);
+  assert.equal(claimed.body.kind, "claim");
+  const observation = {
+    kind: "resolved",
+    matched: true,
+    authoritative_absence: false,
+    dnssec_authenticated: true,
+    minimum_ttl_seconds: 60,
+    rrset_sha256: "4".repeat(64),
+    ...fields,
+  };
+  const observed = await call(runtime, "/verification/observe", {
+    request_id: request.id,
+    claim_id: claimed.body.claim.claim_id,
+    generation: claimed.body.claim.generation,
+    observation,
+    verification_enabled: true,
+  });
+  assert.equal(observed.response.status, 200);
+  return claimed.body.claim;
 }
 
 function assertDerivedParity(storage) {
@@ -1065,6 +1168,610 @@ test("new pending challenges enter scheduled verification without a manual kick"
   );
 });
 
+test("an unresolved DNS lookup does not hold the serialized authority lane", async () => {
+  let releaseDNS;
+  let markDNSStarted;
+  const dnsStarted = new Promise((resolve) => {
+    markDNSStarted = resolve;
+  });
+  const dnsReleased = new Promise((resolve) => {
+    releaseDNS = resolve;
+  });
+  let expectedValue;
+  const fixture = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+  }, {
+    resolveTXT: async () => {
+      markDNSStarted();
+      await dnsReleased;
+      return {
+        answers: [expectedValue],
+        authoritative_absence: false,
+        dnssec_authenticated: true,
+        minimum_ttl_seconds: 60,
+        rrset_sha256: "1".repeat(64),
+      };
+    },
+  });
+  const created = await create(fixture.runtime, "nonblocking-dns.example", {
+    domain_limit: null,
+  });
+  expectedValue = created.body.request.ownership_challenge.record_value;
+  const verification = call(fixture.runtime, "/request/verify", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+    idempotency_key: "nonblocking-dns",
+    verification_enabled: true,
+  });
+  await dnsStarted;
+
+  const shown = await Promise.race([
+    call(fixture.runtime, "/request/get", {
+      actor: ADMIN,
+      request_id: created.body.request.id,
+    }),
+    new Promise((_, reject) => setTimeout(
+      () => reject(new Error("registry read was blocked by DNS")),
+      100,
+    )),
+  ]);
+  assert.equal(shown.response.status, 200);
+  assert.equal(shown.body.request.state, "pending_verification");
+
+  releaseDNS();
+  const verified = await verification;
+  assert.equal(verified.response.status, 200);
+  assert.equal(verified.body.request.state, "verified");
+});
+
+test("concurrent manual replay performs only one DNS lookup", async () => {
+  let releaseDNS;
+  let markDNSStarted;
+  let lookups = 0;
+  let expectedValue;
+  const dnsStarted = new Promise((resolve) => {
+    markDNSStarted = resolve;
+  });
+  const dnsReleased = new Promise((resolve) => {
+    releaseDNS = resolve;
+  });
+  const fixture = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+  }, {
+    resolveTXT: async () => {
+      lookups += 1;
+      markDNSStarted();
+      await dnsReleased;
+      return {
+        answers: [expectedValue],
+        authoritative_absence: false,
+        dnssec_authenticated: true,
+        minimum_ttl_seconds: 60,
+        rrset_sha256: "9".repeat(64),
+      };
+    },
+  });
+  const created = await create(fixture.runtime, "manual-collision.example", {
+    domain_limit: null,
+  });
+  expectedValue = created.body.request.ownership_challenge.record_value;
+  const input = {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+    idempotency_key: "manual-collision",
+    verification_enabled: true,
+  };
+  const first = call(fixture.runtime, "/request/verify", input);
+  await dnsStarted;
+
+  const concurrent = await call(fixture.runtime, "/request/verify", input);
+  assert.equal(concurrent.response.status, 409);
+  assert.equal(concurrent.body.code, "verification_in_progress");
+  assert.equal(lookups, 1);
+
+  releaseDNS();
+  const completed = await first;
+  assert.equal(completed.response.status, 200);
+  assert.equal(lookups, 1);
+  const replay = await call(fixture.runtime, "/request/verify", input);
+  assert.equal(replay.response.status, 200);
+  assert.deepEqual(replay.body, completed.body);
+  assert.equal(lookups, 1);
+});
+
+test("overlapping scheduled runners resolve each due request exactly once", async () => {
+  const expected = new Map();
+  const calls = [];
+  let releaseDNS;
+  let markAllStarted;
+  const allStarted = new Promise((resolve) => {
+    markAllStarted = resolve;
+  });
+  const dnsReleased = new Promise((resolve) => {
+    releaseDNS = resolve;
+  });
+  const resolver = async (owner) => {
+    calls.push(owner);
+    if (new Set(calls).size === 3) markAllStarted();
+    await dnsReleased;
+    return {
+      answers: [expected.get(owner)],
+      authoritative_absence: false,
+      dnssec_authenticated: false,
+      minimum_ttl_seconds: 60,
+      rrset_sha256: "2".repeat(64),
+    };
+  };
+  const fixture = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+  }, { resolveTXT: resolver });
+  const created = [];
+  for (const domain of [
+    "parallel-one.example",
+    "parallel-two.example",
+    "parallel-three.example",
+  ]) {
+    const result = await create(fixture.runtime, domain, {
+      domain_limit: null,
+      idempotency_key: `create-${domain}`,
+    });
+    created.push(result.body.request);
+    expected.set(
+      result.body.request.ownership_challenge.record_name,
+      result.body.request.ownership_challenge.record_value,
+    );
+  }
+  const env = runtimeEnvironment(fixture.runtime);
+  const first = runScheduledAgentEmailDomainVerification(
+    env,
+    { resolveTXT: resolver },
+  );
+  const second = runScheduledAgentEmailDomainVerification(
+    env,
+    { resolveTXT: resolver },
+  );
+  await allStarted;
+  assert.equal(calls.length, 3);
+  assert.equal(new Set(calls).size, 3);
+  releaseDNS();
+  const results = await Promise.all([first, second]);
+  assert.equal(results.reduce((sum, item) => sum + item.matched, 0), 3);
+  assert.equal(results.reduce((sum, item) => sum + item.failures, 0), 0);
+  for (const request of created) {
+    assert.equal(
+      fixture.storage.values.get(`request:${request.id}`).state,
+      "verified",
+    );
+  }
+});
+
+test("identical scheduled proof refreshes are journaled without growing audit authority", async () => {
+  const streamID = `aedj_${"b".repeat(24)}`;
+  const bucket = new Bucket();
+  let expectedValue;
+  let minimumTTL = 300;
+  let lookups = 0;
+  const fixture = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+    CP_AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_ENABLED: "true",
+    CP_AGENT_EMAIL_DOMAIN_AUTHORITY_STREAM_ID: streamID,
+    AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL: bucket,
+  }, {
+    resolveTXT: async () => {
+      lookups += 1;
+      return {
+        answers: [expectedValue],
+        authoritative_absence: false,
+        dnssec_authenticated: true,
+        minimum_ttl_seconds: minimumTTL,
+        rrset_sha256: "5".repeat(64),
+      };
+    },
+  });
+  const created = await create(
+    fixture.runtime,
+    "coalesced-proof.example",
+    { domain_limit: 1 },
+  );
+  assert.equal(created.response.status, 202);
+  expectedValue = created.body.request.ownership_challenge.record_value;
+  const verified = await call(fixture.runtime, "/request/verify", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+    idempotency_key: "coalesced-proof-initial",
+    verification_enabled: true,
+  });
+  assert.equal(verified.response.status, 200);
+
+  const requestKey = `request:${created.body.request.id}`;
+  const domainKey = "domain:coalesced-proof.example";
+  const beforeRequest = structuredClone(fixture.storage.values.get(requestKey));
+  const beforeAllocation = structuredClone(
+    fixture.storage.values.get(domainKey),
+  );
+  const beforeMeta = structuredClone(fixture.storage.values.get("meta"));
+  const beforeHead = structuredClone(
+    fixture.storage.values.get(AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY),
+  );
+  const beforeCapacity = structuredClone(
+    fixture.storage.values.get(AGENT_EMAIL_DOMAIN_JOURNAL_CAPACITY_KEY),
+  );
+  const beforeAuditCount = auditRows(fixture.storage).length;
+
+  minimumTTL = 240;
+  fixture.advanceTime(
+    (AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_INTERVAL_HOURS + 1) *
+      60 * 60 * 1_000,
+  );
+  const scheduled = await call(fixture.runtime, "/verification/reconcile", {
+    verification_enabled: true,
+  });
+  assert.equal(scheduled.response.status, 200);
+  assert.equal(scheduled.body.matched, 1);
+
+  const refreshed = fixture.storage.values.get(requestKey);
+  const refreshedAllocation = fixture.storage.values.get(domainKey);
+  const afterHead = fixture.storage.values.get(
+    AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY,
+  );
+  const afterCapacity = fixture.storage.values.get(
+    AGENT_EMAIL_DOMAIN_JOURNAL_CAPACITY_KEY,
+  );
+  assert.ok(Date.parse(refreshed.ownership_verification.last_checked_at) >
+    Date.parse(beforeRequest.ownership_verification.last_checked_at));
+  assert.ok(Date.parse(refreshed.ownership_verification.last_verified_at) >
+    Date.parse(beforeRequest.ownership_verification.last_verified_at));
+  assert.equal(refreshed.state_revision, beforeRequest.state_revision + 1);
+  assert.equal(refreshed.ownership_verification.minimum_ttl_seconds, 240);
+  assert.equal(
+    refreshedAllocation.allocation_revision,
+    beforeAllocation.allocation_revision + 1,
+  );
+  assert.deepEqual(fixture.storage.values.get("meta"), beforeMeta);
+  assert.equal(auditRows(fixture.storage).length, beforeAuditCount);
+  assert.equal(afterHead.sequence, beforeHead.sequence + 1);
+  assert.equal(afterHead.registry_revision, beforeHead.registry_revision);
+  assert.equal(afterHead.audit_sequence, beforeHead.audit_sequence);
+  assert.equal(afterCapacity.authority_keys, beforeCapacity.authority_keys);
+  assert.deepEqual(afterCapacity.breakdown, beforeCapacity.breakdown);
+
+  const beforeManualAuditCount = auditRows(fixture.storage).length;
+  const manual = await call(fixture.runtime, "/request/verify", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+    idempotency_key: "coalesced-proof-manual-refresh",
+    verification_enabled: true,
+  });
+  assert.equal(manual.response.status, 200);
+  assert.equal(auditRows(fixture.storage).length, beforeManualAuditCount + 1);
+  assert.equal(
+    auditRows(fixture.storage).at(-1)[1].action,
+    "custom_domain.reverified",
+  );
+  const beforeReplayHead = structuredClone(
+    fixture.storage.values.get(AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY),
+  );
+  const beforeReplayCapacity = structuredClone(
+    fixture.storage.values.get(AGENT_EMAIL_DOMAIN_JOURNAL_CAPACITY_KEY),
+  );
+  const beforeReplayBucketSize = bucket.values.size;
+  const replay = await call(fixture.runtime, "/request/verify", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+    idempotency_key: "coalesced-proof-manual-refresh",
+    verification_enabled: true,
+  });
+  assert.equal(replay.response.status, 200);
+  assert.deepEqual(replay.body, manual.body);
+  assert.deepEqual(
+    fixture.storage.values.get(AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY),
+    beforeReplayHead,
+  );
+  assert.deepEqual(
+    fixture.storage.values.get(AGENT_EMAIL_DOMAIN_JOURNAL_CAPACITY_KEY),
+    beforeReplayCapacity,
+  );
+  assert.equal(bucket.values.size, beforeReplayBucketSize);
+  assert.equal(lookups, 3);
+
+  const recovered = await replayBucketJournal(bucket, streamID);
+  assert.deepEqual(
+    recovered.state.get(requestKey),
+    fixture.storage.values.get(requestKey),
+  );
+  assert.deepEqual(
+    recovered.state.get(domainKey),
+    fixture.storage.values.get(domainKey),
+  );
+  assert.equal(
+    recovered.head.sequence,
+    fixture.storage.values.get(AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY).sequence,
+  );
+  assert.doesNotThrow(() => validateAgentEmailDomainRecoveredState(
+    recovered.state,
+    {
+      expected_registry_revision: recovered.head.registry_revision,
+      expected_audit_sequence: recovered.head.audit_sequence,
+    },
+  ));
+});
+
+test("only scheduled verification evidence transitions append audit rows", async () => {
+  let mode = "present";
+  let expectedValue;
+  const fixture = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+  }, {
+    resolveTXT: async () => {
+      if (mode === "temporary") {
+        throw new AgentEmailDomainVerificationError(
+          "DNS resolver is temporarily unavailable",
+          "dns_resolver_unavailable",
+          true,
+        );
+      }
+      return {
+        answers: mode === "present" ? [expectedValue] : [],
+        authoritative_absence: mode === "absent",
+        dnssec_authenticated: mode === "present",
+        minimum_ttl_seconds: mode === "present" ? 300 : null,
+        rrset_sha256: (mode === "present" ? "6" : "7").repeat(64),
+      };
+    },
+  });
+  const created = await create(
+    fixture.runtime,
+    "coalesced-transitions.example",
+    { domain_limit: 1 },
+  );
+  expectedValue = created.body.request.ownership_challenge.record_value;
+  assert.equal((await call(fixture.runtime, "/request/verify", {
+    actor: ADMIN,
+    request_id: created.body.request.id,
+    idempotency_key: "coalesced-transitions-initial",
+    verification_enabled: true,
+  })).response.status, 200);
+  const requestKey = `request:${created.body.request.id}`;
+
+  mode = "temporary";
+  fixture.advanceTime(
+    (AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_INTERVAL_HOURS + 1) *
+      60 * 60 * 1_000,
+  );
+  await call(fixture.runtime, "/verification/reconcile", {
+    verification_enabled: true,
+  });
+  const firstTemporaryAuditCount = auditRows(fixture.storage).length;
+  const firstTemporary = structuredClone(fixture.storage.values.get(requestKey));
+  assert.equal(
+    auditRows(fixture.storage).at(-1)[1].action,
+    "custom_domain.verification_deferred",
+  );
+
+  fixture.advanceTime(16 * 60 * 1_000);
+  await call(fixture.runtime, "/verification/reconcile", {
+    verification_enabled: true,
+  });
+  const secondTemporary = structuredClone(fixture.storage.values.get(requestKey));
+  assert.equal(auditRows(fixture.storage).length, firstTemporaryAuditCount);
+  assert.ok(Date.parse(secondTemporary.ownership_verification.last_checked_at) >
+    Date.parse(firstTemporary.ownership_verification.last_checked_at));
+  assert.equal(
+    secondTemporary.ownership_verification.consecutive_failures,
+    firstTemporary.ownership_verification.consecutive_failures + 1,
+  );
+
+  mode = "absent";
+  fixture.advanceTime(16 * 60 * 1_000);
+  await call(fixture.runtime, "/verification/reconcile", {
+    verification_enabled: true,
+  });
+  const firstMissingAuditCount = auditRows(fixture.storage).length;
+  const firstMissing = structuredClone(fixture.storage.values.get(requestKey));
+  assert.equal(firstMissingAuditCount, firstTemporaryAuditCount + 1);
+  assert.equal(
+    auditRows(fixture.storage).at(-1)[1].action,
+    "custom_domain.verification_missing",
+  );
+  assert.equal(firstMissing.ownership_verification.state, "stale");
+
+  fixture.advanceTime(61 * 60 * 1_000);
+  await call(fixture.runtime, "/verification/reconcile", {
+    verification_enabled: true,
+  });
+  const secondMissing = structuredClone(fixture.storage.values.get(requestKey));
+  assert.equal(auditRows(fixture.storage).length, firstMissingAuditCount);
+  assert.ok(Date.parse(secondMissing.ownership_verification.last_checked_at) >
+    Date.parse(firstMissing.ownership_verification.last_checked_at));
+  assert.equal(
+    secondMissing.ownership_verification.consecutive_failures,
+    firstMissing.ownership_verification.consecutive_failures + 1,
+  );
+
+  mode = "present";
+  fixture.advanceTime(61 * 60 * 1_000);
+  await call(fixture.runtime, "/verification/reconcile", {
+    verification_enabled: true,
+  });
+  const restored = fixture.storage.values.get(requestKey);
+  assert.equal(auditRows(fixture.storage).length, firstMissingAuditCount + 1);
+  assert.equal(
+    auditRows(fixture.storage).at(-1)[1].action,
+    "custom_domain.reverified",
+  );
+  assert.equal(restored.ownership_verification.state, "verified");
+  assert.equal(restored.ownership_verification.consecutive_failures, 0);
+  assert.doesNotThrow(() => validateAgentEmailDomainRecoveredState(new Map(
+    [...fixture.storage.values].filter(([key]) =>
+      isAgentEmailDomainAuthorityKey(key)),
+  )));
+});
+
+test("an expired claim fence cannot alter a newer verification claim", async () => {
+  const fixture = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+  });
+  const created = await create(fixture.runtime, "fenced-worker.example", {
+    domain_limit: null,
+  });
+  const first = await call(fixture.runtime, "/verification/claim", {
+    mode: "scheduled",
+    verification_enabled: true,
+  });
+  assert.equal(first.body.kind, "claim");
+  fixture.advanceTime(VERIFICATION_CLAIM_LEASE_TEST_MS);
+  const second = await call(fixture.runtime, "/verification/claim", {
+    mode: "scheduled",
+    verification_enabled: true,
+  });
+  assert.equal(second.body.kind, "claim");
+  assert.ok(second.body.claim.generation > first.body.claim.generation);
+  assert.notEqual(second.body.claim.claim_id, first.body.claim.claim_id);
+
+  const stale = await call(fixture.runtime, "/verification/observe", {
+    request_id: created.body.request.id,
+    claim_id: first.body.claim.claim_id,
+    generation: first.body.claim.generation,
+    verification_enabled: true,
+    observation: {
+      kind: "resolved",
+      matched: false,
+      authoritative_absence: true,
+      dnssec_authenticated: false,
+      minimum_ttl_seconds: null,
+      rrset_sha256: "3".repeat(64),
+    },
+  });
+  assert.equal(stale.response.status, 409);
+  assert.equal(stale.body.code, "verification_claim_stale");
+  assert.equal(
+    fixture.storage.values.get(
+      `verification-work:${created.body.request.id}`,
+    ).claim_id,
+    second.body.claim.claim_id,
+  );
+});
+
+test("verification commit rechecks gate, request revision, and challenge expiry", async () => {
+  let gatedValue;
+  let gatedLookups = 0;
+  const gated = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+  }, {
+    resolveTXT: async () => {
+      gatedLookups += 1;
+      return {
+        answers: [gatedValue],
+        authoritative_absence: false,
+        dnssec_authenticated: true,
+        minimum_ttl_seconds: 60,
+        rrset_sha256: "8".repeat(64),
+      };
+    },
+  });
+  const gatedRequest = await create(
+    gated.runtime,
+    "commit-gate.example",
+    { domain_limit: null },
+  );
+  gatedValue = gatedRequest.body.request.ownership_challenge.record_value;
+  const gatedClaim = await claimAndObserve(
+    gated.runtime,
+    gatedRequest.body.request,
+    "commit-gate",
+  );
+  delete gated.runtime.env.CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED;
+  const gateCommit = await call(gated.runtime, "/verification/commit", {
+    request_id: gatedRequest.body.request.id,
+    claim_id: gatedClaim.claim_id,
+    generation: gatedClaim.generation,
+    verification_enabled: true,
+  });
+  assert.equal(gateCommit.response.status, 409);
+  assert.equal(gateCommit.body.code, "custom_domain_verification_disabled");
+  assert.equal(gated.storage.values.has("domain:commit-gate.example"), false);
+  assert.equal(gated.storage.values.has(
+    `verification-work:${gatedRequest.body.request.id}`,
+  ), false);
+  gated.runtime.env.CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED = "true";
+  const freshAfterEnable = await call(gated.runtime, "/request/verify", {
+    actor: ADMIN,
+    request_id: gatedRequest.body.request.id,
+    idempotency_key: "commit-gate",
+    verification_enabled: true,
+  });
+  assert.equal(freshAfterEnable.response.status, 200);
+  assert.equal(gatedLookups, 1, "re-enabled verification must resolve afresh");
+
+  const revised = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+  });
+  const revisedRequest = await create(
+    revised.runtime,
+    "commit-revision.example",
+    { domain_limit: null },
+  );
+  const revisedClaim = await claimAndObserve(
+    revised.runtime,
+    revisedRequest.body.request,
+    "commit-revision",
+  );
+  const rejected = await call(revised.runtime, "/request/reject", {
+    actor: ADMIN,
+    request_id: revisedRequest.body.request.id,
+    idempotency_key: "reject-during-verification",
+    reason: "request changed while DNS was being observed",
+  });
+  assert.equal(rejected.response.status, 200);
+  const revisionCommit = await call(revised.runtime, "/verification/commit", {
+    request_id: revisedRequest.body.request.id,
+    claim_id: revisedClaim.claim_id,
+    generation: revisedClaim.generation,
+    verification_enabled: true,
+  });
+  assert.equal(revisionCommit.response.status, 409);
+  assert.equal(revisionCommit.body.code, "verification_claim_stale");
+  assert.equal(
+    revised.storage.values.has("domain:commit-revision.example"),
+    false,
+  );
+
+  const expired = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+  });
+  const expiredRequest = await create(
+    expired.runtime,
+    "commit-expiry.example",
+    { domain_limit: null },
+  );
+  const expiredClaim = await claimAndObserve(
+    expired.runtime,
+    expiredRequest.body.request,
+    "commit-expiry",
+  );
+  expired.advanceTime(
+    (AGENT_EMAIL_CUSTOM_DOMAIN_PENDING_CHALLENGE_DAYS + 1) *
+      24 * 60 * 60 * 1_000,
+  );
+  const expiryCommit = await call(expired.runtime, "/verification/commit", {
+    request_id: expiredRequest.body.request.id,
+    claim_id: expiredClaim.claim_id,
+    generation: expiredClaim.generation,
+    verification_enabled: true,
+  });
+  assert.equal(expiryCommit.response.status, 200);
+  assert.equal(expiryCommit.body.kind, "result");
+  assert.equal(expiryCommit.body.status, 409);
+  assert.equal(expiryCommit.body.body.code, "ownership_challenge_expired");
+  assert.equal(expired.storage.values.has("domain:commit-expiry.example"), false);
+  assert.equal(
+    expired.storage.values.get(
+      `request:${expiredRequest.body.request.id}`,
+    ).state,
+    "expired",
+  );
+});
+
 test("a losing domain contender cannot block later scheduled verification", async () => {
   const answersByOwner = new Map();
   const fixture = registry({
@@ -1842,6 +2549,39 @@ test("verification defers while account policy is between durable pages", async 
       .ownership_verification.last_result,
     "policy_converging",
   );
+  const firstPolicyDeferral = structuredClone(fixture.storage.values.get(
+    `request:${created.body.request.id}`,
+  ));
+  const firstPolicyAuditCount = auditRows(fixture.storage).length;
+  const firstPolicyMeta = structuredClone(fixture.storage.values.get("meta"));
+  assert.equal(
+    auditRows(fixture.storage).at(-1)[1].action,
+    "custom_domain.verification_deferred",
+  );
+
+  fixture.advanceTime(16 * 60 * 1_000);
+  const repeatedDeferral = await call(
+    fixture.runtime,
+    "/verification/reconcile",
+    { verification_enabled: true },
+  );
+  assert.equal(repeatedDeferral.response.status, 200);
+  assert.equal(repeatedDeferral.body.checked, 1);
+  assert.equal(lookups, 0);
+  const refreshedPolicyDeferral = fixture.storage.values.get(
+    `request:${created.body.request.id}`,
+  );
+  assert.equal(auditRows(fixture.storage).length, firstPolicyAuditCount);
+  assert.deepEqual(fixture.storage.values.get("meta"), firstPolicyMeta);
+  assert.ok(Date.parse(
+    refreshedPolicyDeferral.ownership_verification.last_checked_at,
+  ) > Date.parse(
+    firstPolicyDeferral.ownership_verification.last_checked_at,
+  ));
+  assert.equal(
+    refreshedPolicyDeferral.state_revision,
+    firstPolicyDeferral.state_revision + 1,
+  );
   assertDerivedParity(fixture.storage);
 
   await call(fixture.runtime, "/plan/reconcile", {
@@ -1857,6 +2597,11 @@ test("verification defers while account policy is between durable pages", async 
   assert.equal(
     fixture.storage.values.get(`request:${created.body.request.id}`).state,
     "verified",
+  );
+  assert.equal(auditRows(fixture.storage).length, firstPolicyAuditCount + 1);
+  assert.equal(
+    auditRows(fixture.storage).at(-1)[1].action,
+    "custom_domain.verified",
   );
   assertDerivedParity(fixture.storage);
 });
@@ -2204,7 +2949,9 @@ test("verified lifecycle retirement completes across the 40-item page boundary",
 });
 
 test("unverified ownership challenges expire and release capacity", async () => {
-  const fixture = registry();
+  const fixture = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED: "true",
+  });
   const created = await create(fixture.runtime, "expires.example", {
     domain_limit: 1,
   });
@@ -2220,6 +2967,16 @@ test("unverified ownership challenges expire and release capacity", async () => 
   });
   assert.equal(beforeExpiry.body.open_requests, 1);
   assert.equal(beforeExpiry.body.allocated_domains, 1);
+  const claimed = await call(fixture.runtime, "/verification/claim", {
+    mode: "manual",
+    actor: ADMIN,
+    request_id: created.body.request.id,
+    idempotency_key: "expiry-orphan-claim",
+    verification_enabled: true,
+  });
+  assert.equal(claimed.body.kind, "claim");
+  const workKey = `verification-work:${created.body.request.id}`;
+  assert.equal(fixture.storage.values.has(workKey), true);
 
   fixture.advanceTime(
     (AGENT_EMAIL_CUSTOM_DOMAIN_PENDING_CHALLENGE_DAYS + 1) *
@@ -2232,6 +2989,7 @@ test("unverified ownership challenges expire and release capacity", async () => 
   });
   assert.equal(expired.body.request.state, "expired");
   assert.equal(expired.body.request.availability, "expired");
+  assert.equal(fixture.storage.values.has(workKey), false);
   const afterExpiry = await call(fixture.runtime, "/request/list", {
     actor: OPERATOR,
     account_id: ACCOUNT,
