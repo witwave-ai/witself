@@ -1988,10 +1988,18 @@ func (m *Manager) apply(ctx context.Context, accountID string) error {
 			return errSkipWrite
 		}
 		// A previously minted desired revision that is already above the
-		// observed cell fence remains safe to retry verbatim. Do not burn a
-		// new R2 version/revision on every transient apply failure.
+		// observed cell fence remains safe to retry verbatim. An exact observed
+		// desired fence is also replayed verbatim: the cell may have accepted the
+		// write while the bridge lost its post-cell policy completion or response.
+		// Replaying the cell's idempotent revision/hash finishes those hooks
+		// without burning a new R2 version/revision.
+		cellAcceptedDesiredFence :=
+			r.DesiredSnapshotHash == current.Hash &&
+				r.SnapshotRevision == observed.Revision &&
+				observed.Hash == current.Hash
 		if r.DesiredSnapshotHash == current.Hash &&
-			r.SnapshotRevision > observed.Revision {
+			(r.SnapshotRevision > observed.Revision ||
+				cellAcceptedDesiredFence) {
 			return errSkipWrite
 		}
 		maxRevision := r.SnapshotRevision
@@ -2026,7 +2034,14 @@ func (m *Manager) apply(ctx context.Context, accountID string) error {
 	if !targetRankOK || !appliedRankOK {
 		return fmt.Errorf("cannot order applied plan %q and target plan %q", r.Applied, target.ID)
 	}
-	if targetRank < appliedRank {
+	cellAcceptedDesiredFence :=
+		r.DesiredSnapshotHash == snapshot.Hash &&
+			r.SnapshotRevision == observed.Revision &&
+			observed.Hash == snapshot.Hash
+	// Do not let a fresh fit violation wedge completion after the cell already
+	// accepted this exact downgrade. The exact replay changes no cell policy; it
+	// only gives the bridge another chance to finish its fenced projections.
+	if targetRank < appliedRank && !cellAcceptedDesiredFence {
 		violations, err := m.cfg.Fit.Fit(ctx, accountID, target)
 		if err != nil {
 			return err

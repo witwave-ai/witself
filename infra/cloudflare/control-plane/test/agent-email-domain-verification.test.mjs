@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   AgentEmailDomainVerificationError,
+  agentEmailDomainResolvedObservation,
+  agentEmailDomainTemporaryObservation,
   agentEmailDomainTXTMatches,
   parseAgentEmailDomainTXT,
   resolveAgentEmailDomainTXT,
@@ -157,4 +159,43 @@ test("an NXDOMAIN response cannot smuggle a matching TXT answer", async () => {
     authoritative_absence: true,
     answers: [expected],
   }, expected), false);
+});
+
+test("durable observations retain only bounded ownership evidence", () => {
+  const expected = "witself-domain-verification=aedv_expected";
+  assert.deepEqual(agentEmailDomainResolvedObservation({
+    answers: [expected, "unrelated-public-txt"],
+    authoritative_absence: false,
+    dnssec_authenticated: true,
+    minimum_ttl_seconds: 300,
+    rrset_sha256: "a".repeat(64),
+  }, expected), {
+    kind: "resolved",
+    matched: true,
+    authoritative_absence: false,
+    dnssec_authenticated: true,
+    minimum_ttl_seconds: 300,
+    rrset_sha256: "a".repeat(64),
+  });
+  assert.deepEqual(agentEmailDomainTemporaryObservation(
+    new AgentEmailDomainVerificationError(
+      "temporary",
+      "dns_resolver_unavailable",
+      true,
+    ),
+  ), { kind: "temporary_error", code: "dns_resolver_unavailable" });
+  assert.throws(() => agentEmailDomainTemporaryObservation(
+    new AgentEmailDomainVerificationError(
+      "invalid",
+      "dns_request_invalid",
+      false,
+    ),
+  ), /invalid/);
+  assert.throws(() => agentEmailDomainResolvedObservation({
+    answers: [expected],
+    authoritative_absence: false,
+    dnssec_authenticated: true,
+    minimum_ttl_seconds: 300,
+    rrset_sha256: "not-a-digest",
+  }, expected), /observation is invalid/);
 });

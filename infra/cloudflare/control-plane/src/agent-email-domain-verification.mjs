@@ -4,6 +4,13 @@ const DNS_NAME_PATTERN =
 const MAX_DNS_JSON_BYTES = 64 * 1024;
 const DNS_TIMEOUT_MS = 5_000;
 const TXT_RECORD_TYPE = 16;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+
+const TEMPORARY_OBSERVATION_CODES = new Set([
+  "dns_lookup_inconclusive",
+  "dns_response_too_large",
+  "dns_resolver_unavailable",
+]);
 
 export class AgentEmailDomainVerificationError extends Error {
   constructor(message, code, temporary = false) {
@@ -217,4 +224,40 @@ export function agentEmailDomainTXTMatches(result, expectedValue) {
     Array.isArray(result?.answers) &&
     typeof expectedValue === "string" &&
     result.answers.includes(expectedValue);
+}
+
+/**
+ * Reduce an untrusted DNS response to the bounded evidence the authority needs.
+ * Raw TXT values never cross the durable observation boundary.
+ */
+export function agentEmailDomainResolvedObservation(result, expectedValue) {
+  if (!result || !Array.isArray(result.answers) ||
+      typeof result.authoritative_absence !== "boolean" ||
+      typeof result.dnssec_authenticated !== "boolean" ||
+      !SHA256_PATTERN.test(result.rrset_sha256 ?? "") ||
+      !(result.minimum_ttl_seconds === null ||
+        (Number.isSafeInteger(result.minimum_ttl_seconds) &&
+          result.minimum_ttl_seconds >= 0))) {
+    verificationFail(
+      "DNS ownership observation is invalid",
+      "dns_observation_invalid",
+    );
+  }
+  return {
+    kind: "resolved",
+    matched: agentEmailDomainTXTMatches(result, expectedValue),
+    authoritative_absence: result.authoritative_absence,
+    dnssec_authenticated: result.dnssec_authenticated,
+    minimum_ttl_seconds: result.minimum_ttl_seconds,
+    rrset_sha256: result.rrset_sha256,
+  };
+}
+
+export function agentEmailDomainTemporaryObservation(error) {
+  if (!(error instanceof AgentEmailDomainVerificationError) ||
+      error.temporary !== true ||
+      !TEMPORARY_OBSERVATION_CODES.has(error.code)) {
+    throw error;
+  }
+  return { kind: "temporary_error", code: error.code };
 }

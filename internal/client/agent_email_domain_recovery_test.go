@@ -29,6 +29,15 @@ func TestAgentEmailDomainRecoveryClientRoutesAndHeaders(t *testing.T) {
 				"enabled":        true, "required": true, "pending": false,
 				"forked": false, "healthy": true,
 				"remote_head_checked": true, "remote_head_healthy": true,
+				"capacity": map[string]any{
+					"ready": true, "used": 5, "max": 10000,
+					"remaining": 9995, "near_limit": false, "at_limit": false,
+					"breakdown": map[string]any{
+						"meta": 1, "audit": 1, "domain": 1, "idempotency": 1,
+						"lifecycle_fence": 0, "lifecycle_intent": 0,
+						"plan_fence": 0, "plan_intent": 0, "request": 1,
+					},
+				},
 				"head": map[string]any{
 					"stream_id": "aedj_aaaaaaaaaaaaaaaa", "sequence": 2,
 					"hash": strings.Repeat("a", 64),
@@ -67,6 +76,15 @@ func TestAgentEmailDomainRecoveryClientRoutesAndHeaders(t *testing.T) {
 		journal.RemoteHeadHealthy == nil || !*journal.RemoteHeadHealthy ||
 		journal.DegradationCode != "" {
 		t.Fatalf("journal health = %#v", journal)
+	}
+	if !journal.Capacity.Ready || journal.Capacity.Used == nil ||
+		*journal.Capacity.Used != 5 || journal.Capacity.Max != 10000 ||
+		journal.Capacity.Remaining == nil || *journal.Capacity.Remaining != 9995 ||
+		journal.Capacity.NearLimit == nil || *journal.Capacity.NearLimit ||
+		journal.Capacity.AtLimit == nil || *journal.Capacity.AtLimit ||
+		journal.Capacity.Breakdown == nil ||
+		journal.Capacity.Breakdown.Idempotency != 1 {
+		t.Fatalf("journal capacity = %#v", journal.Capacity)
 	}
 	if _, err := BootstrapAdminAgentEmailDomainJournal(ctx, server.URL,
 		"admin-token", "recovery-token", "bootstrap reason", "bootstrap-1"); err != nil {

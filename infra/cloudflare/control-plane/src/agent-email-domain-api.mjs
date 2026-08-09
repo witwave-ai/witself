@@ -1,8 +1,8 @@
 import {
   agentEmailCustomDomainEntitlement,
   agentEmailCustomDomainRequestsEnabledForAccount,
-  agentEmailCustomDomainVerificationEnabled,
   agentEmailDomainRegistryStub,
+  runAgentEmailDomainManualVerification,
 } from "./agent-email-domain-runtime.mjs";
 import {
   authenticateRealmOperator,
@@ -135,6 +135,7 @@ export async function handleAgentEmailDomainAdminRequest(
   env,
   url,
   admin,
+  verificationDependencies = {},
 ) {
   if (typeof admin?.admin_id !== "string" ||
       admin.admin_id.trim().length === 0 || admin.admin_id.length > 128) {
@@ -197,13 +198,18 @@ export async function handleAgentEmailDomainAdminRequest(
   } catch (error) {
     return errorResponse(error.message, error.status ?? 400);
   }
-  return callRegistry(env, `/request/${action[2]}`, {
+  const mutation = {
     actor,
     request_id: action[1],
     idempotency_key: body?.idempotency_key,
     reason: body?.reason,
-    ...(action[2] === "verify"
-      ? { verification_enabled: agentEmailCustomDomainVerificationEnabled(env) }
-      : {}),
-  });
+  };
+  if (action[2] === "verify") {
+    return runAgentEmailDomainManualVerification(
+      env,
+      mutation,
+      verificationDependencies,
+    );
+  }
+  return callRegistry(env, `/request/${action[2]}`, mutation);
 }

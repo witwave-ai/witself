@@ -456,16 +456,60 @@ func printEmailDomainJournalStatus(status *client.AgentEmailDomainJournalStatus)
 		registryRevision = status.Head.RegistryRevision
 		auditSequence = status.Head.AuditSequence
 	}
+	capacityUsed := emailDomainAdminInt64Pointer(status.Capacity.Used)
+	capacityRemaining := emailDomainAdminInt64Pointer(status.Capacity.Remaining)
+	capacityNear := emailDomainAdminBoolPointer(status.Capacity.NearLimit)
+	capacityAt := emailDomainAdminBoolPointer(status.Capacity.AtLimit)
+	capacityMax := "-"
+	if status.Capacity.Max > 0 {
+		capacityMax = fmt.Sprintf("%d", status.Capacity.Max)
+	}
 	w, flush := tableWriter(
-		"enabled\trequired\thealthy\tpending\tforked\tremote_checked\tremote_healthy\tdegradation\tstream\tsequence\thash\tregistry_revision\taudit_sequence")
-	_, _ = fmt.Fprintf(w, "%t\t%t\t%t\t%t\t%t\t%t\t%s\t%s\t%s\t%d\t%s\t%d\t%d\n",
+		"enabled\trequired\thealthy\tpending\tforked\tremote_checked\tremote_healthy\tdegradation\tstream\tsequence\thash\tregistry_revision\taudit_sequence\tcapacity_ready\tcapacity_used\tcapacity_max\tcapacity_remaining\tcapacity_near_limit\tcapacity_at_limit\tcapacity_breakdown")
+	_, _ = fmt.Fprintf(w, "%t\t%t\t%t\t%t\t%t\t%t\t%s\t%s\t%s\t%d\t%s\t%d\t%d\t%t\t%s\t%s\t%s\t%s\t%s\t%s\n",
 		status.Enabled, status.Required, status.Healthy, status.Pending,
 		status.Forked, status.RemoteHeadChecked,
 		emailDomainAdminColumn(remoteHealthy),
 		emailDomainAdminColumn(degradation),
 		emailDomainAdminColumn(stream), sequence, emailDomainAdminColumn(hash),
-		registryRevision, auditSequence)
+		registryRevision, auditSequence, status.Capacity.Ready,
+		emailDomainAdminColumn(capacityUsed),
+		emailDomainAdminColumn(capacityMax),
+		emailDomainAdminColumn(capacityRemaining),
+		emailDomainAdminColumn(capacityNear),
+		emailDomainAdminColumn(capacityAt),
+		emailDomainAdminColumn(emailDomainAdminCapacityBreakdown(
+			status.Capacity.Breakdown)))
 	flush()
+}
+
+func emailDomainAdminInt64Pointer(value *int64) string {
+	if value == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%d", *value)
+}
+
+func emailDomainAdminBoolPointer(value *bool) string {
+	if value == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%t", *value)
+}
+
+func emailDomainAdminCapacityBreakdown(
+	value *client.AgentEmailDomainAuthorityCapacityBreakdown,
+) string {
+	if value == nil {
+		return "-"
+	}
+	return fmt.Sprintf(
+		"meta=%d,audit=%d,domain=%d,idempotency=%d,lifecycle_fence=%d,"+
+			"lifecycle_intent=%d,plan_fence=%d,plan_intent=%d,request=%d",
+		value.Meta, value.Audit, value.Domain, value.Idempotency,
+		value.LifecycleFence, value.LifecycleIntent, value.PlanFence,
+		value.PlanIntent, value.Request,
+	)
 }
 
 func printEmailDomainJournalProgress(progress *client.AgentEmailDomainJournalProgress) {

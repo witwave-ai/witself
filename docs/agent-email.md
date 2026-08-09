@@ -644,6 +644,20 @@ That losing observation is recorded as audit action
 `custom_domain.verification_deferred` action with reason
 `account_policy_converging`.
 
+External resolution does not run while the global Durable Object holds its
+authority lane. The stateless Worker first obtains a short, durable
+`claim_id`/generation fence bound to the exact request revision and ownership
+challenge, resolves DNS outside the authority object, stores one reduced
+observation under that fence, and then asks the authority to commit it. Raw TXT
+answers are not stored in the work record. Commit rechecks the runtime gate,
+claim generation, request revision, challenge identity and expiry, account
+policy convergence, and plan/lifecycle suspension before changing authority.
+A late result cannot remove or commit through a newer claim. Scheduled work is
+bounded to five claims per tick with two concurrent resolver lanes; overlapping
+ticks cooperate through the durable fences rather than duplicating a lookup.
+The Durable Object alarm continues to reconcile local lifecycle/expiry work,
+while the top-level scheduled Worker owns external DNS I/O.
+
 Verified requests are rechecked every 24 hours. An authoritative missing value
 marks the ownership observation `stale`, changes availability to
 `suspended_verification`, and schedules an hourly retry; a resolver outage is
@@ -682,16 +696,32 @@ object remains fixed at `global`: there is no merge, promotion, or cutover
 selector. Journal maintenance never changes DNS, Cloudflare Email Routing,
 cell projection, delivery, plan policy, or the customer request gate.
 The journal and recovery implementation has a hard 10,000-authority-key
-ceiling. That is an activation blocker, not a customer-facing plan limit: keep
-the request gate dark until current usage and worst-case request growth fit
-comfortably below the ceiling, or replace the bounded recovery design.
-The present global authority also serializes DNS resolution with registry
-traffic, and repeated observations permanently grow audit history. Before any
-request or verification activation, move external DNS waits outside the global
-authority lane behind durable observation fences, add capacity/admission
-metrics and a bounded audit/checkpoint strategy, and prove recovery of an
-`awaiting_cell` plan intent through the durable plan workflow. Provider route,
-projection, and delivery topology remains a separate activation prerequisite.
+ceiling. It is not a customer-facing plan limit. A journal-local capacity record
+is bound to the exact stream head and tracks the total plus a fixed prefix
+breakdown. Bootstrap, checkpoint, and sealed recovery materialize it; every
+later authority mutation computes its insert/delete delta and refuses before
+staging a pending record or writing R2 if it would cross the ceiling. Journal
+status exposes only value-free `used`, `max`, `remaining`, `near_limit`,
+`at_limit`, and prefix counts, and a refusal emits one tenant-free structured
+operational event. An existing journal head created before this counter remains
+write-fenced until a normal checkpoint installs the exact capacity record.
+
+External DNS waits now use the durable claim/observe/commit flow above, and the
+plan lifecycle scanner replays an exact already-accepted desired revision/hash
+instead of minting a new revision after a lost bridge completion. A scheduled
+verification whose durable evidence outcome is unchanged still refreshes the
+request, allocation, due index, counters, timestamps, TTL, and journal head,
+but does not add another authority audit key. The comparison excludes clocks,
+retry counts, and recursive-resolver TTL drift. First observations, evidence or
+state changes, restorations, conflicts, expiry, and every manual verification
+remain audited. This bounds stable-retry authority growth, but the immutable R2
+journal stream still grows with every committed refresh and adversarially
+changing DNS can consume audit capacity until admission closes. Keep the
+request and verification gates dark until that stream has an operational
+growth/retention strategy, the capacity counter has been checkpointed and
+monitored in the live object, and exact plan replay has passed a controlled
+canary. Provider route, projection, and delivery topology remains a separate
+activation prerequisite.
 
 Do not enable customer requests or DNS verification in this phase. Parallel,
 expiring challenges avoid unverified squatting, but activation still requires
