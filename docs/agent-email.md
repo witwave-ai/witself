@@ -843,11 +843,18 @@ or operational alias convergence uses `retry` (temporary failure), and `retry`
 wins when both dispositions are present. The independent account, realm, agent,
 and `agent_email_receive` checks still run inside the cell before storage.
 
-The edge reuses the existing schema-v1 route union and key
+The edge reuses the existing schema-v1 route shape and key
 `email:realm-route:v1:<domain>:<realm-label>`, adding
 `route_kind="custom_domain"` plus the exact domain request/allocation and realm
 alias claim/revision fences. The existing authenticated fallback is reused;
-there is no second lookup namespace. The edge adds no signed relay header. The
+there is no second lookup namespace. Before a control-plane response or KV row
+leaves its authority, the control plane signs the complete scalar projection
+as schema version 2 with a dedicated Ed25519 route-authority key. The edge
+accepts one to four public keys for bounded rotation and verifies the exact key
+id and signature before trusting `ingest_url` or reading raw MIME. Schema-v1
+unsigned rows, unknown keys, malformed keyrings, and any mutation fail closed.
+This is independent of the later signed relay envelope: the edge adds no new
+relay header. The
 cell derives `custom_domain` receipt provenance from the signed envelope
 recipient and its local route/alias rows, then stores both
 `recipient_custom_domain_request_id` and

@@ -10,6 +10,9 @@ import {
 const root = new URL("..", import.meta.url);
 const script = new URL("../scripts/render-wrangler.mjs", import.meta.url);
 const controlPlaneURL = "https://self.witwave.ai/";
+const routePublicKeys = JSON.stringify({
+  "route-2026-08": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+});
 
 test("dark deployment refuses a persistent custom-domain delivery secret", () => {
   assert.doesNotThrow(() => assertCustomDomainDeliveryDark([
@@ -40,6 +43,9 @@ test("deployment config is email-only and cannot reuse the control-plane DIRECTO
       EMAIL_DIRECTORY_KV_ID: directoryID,
       RELAY_KEY_ID: "pilot-2026-07",
       CONTROL_PLANE_URL: controlPlaneURL,
+      AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS: routePublicKeys,
+      REALM_EMAIL_ALIAS_DELIVERY_ENABLED: "false",
+      REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false",
     },
     encoding: "utf8",
   });
@@ -54,6 +60,9 @@ test("deployment config is email-only and cannot reuse the control-plane DIRECTO
       EMAIL_DIRECTORY_KV_ID: isolatedID,
       RELAY_KEY_ID: "pilot-2026-07",
       CONTROL_PLANE_URL: controlPlaneURL,
+      AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS: routePublicKeys,
+      REALM_EMAIL_ALIAS_DELIVERY_ENABLED: "false",
+      REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false",
     },
     encoding: "utf8",
   });
@@ -72,6 +81,19 @@ test("deployment config is email-only and cannot reuse the control-plane DIRECTO
   assert.match(config, /"namespace_id"\s*:\s*"2202"/);
   assert.match(config, /"limit"\s*:\s*100[\s\S]{0,60}"period"\s*:\s*10/);
   assert.match(config, /"CONTROL_PLANE_URL"\s*:\s*"https:\/\/self\.witwave\.ai\/"/);
+  assert.match(
+    config,
+    /"AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS"\s*:\s*"\{\\"route-2026-08\\":\\"A{43}=\\"\}"/,
+  );
+  assert.match(
+    config,
+    /"WITSELF_EDGE_RELEASE_VERSION"\s*:\s*"(?:0\.0\.239|development-[0-9a-f]{12}(?:-dirty)?)"/,
+  );
+  assert.match(config, /"WITSELF_EDGE_RELEASE_COMMIT"\s*:\s*"[0-9a-f]{40}"/);
+  assert.match(
+    config,
+    /"WITSELF_EDGE_RELEASE_DATE"\s*:\s*"\d{4}-\d{2}-\d{2}T[^"\r\n]+"/,
+  );
   assert.match(config, /"AGENT_EMAIL_DOMAIN"\s*:\s*"witmail\.net"/);
   assert.match(
     config,
@@ -85,7 +107,13 @@ test("deployment config is email-only and cannot reuse the control-plane DIRECTO
     config,
     /"REALM_EMAIL_CANONICAL_DELIVERY_ENABLED"\s*:\s*"false"/,
   );
-  assert.doesNotMatch(config, /CONTROL_PLANE_EDGE_TOKEN/);
+  assert.match(
+    config,
+    /"secrets"\s*:\s*\{[\s\S]*?"CONTROL_PLANE_EDGE_TOKEN"[\s\S]*?"RELAY_ED25519_PRIVATE_KEY"[\s\S]*?\}/,
+  );
+  assert.doesNotMatch(config, /"CONTROL_PLANE_EDGE_TOKEN"\s*:/);
+  assert.doesNotMatch(config, /"RELAY_ED25519_PRIVATE_KEY"\s*:/);
+  assert.doesNotMatch(config, /LEGACY_PILOT_TRUSTED_(?:INGEST_URL|CELL_AUDIENCE)/);
   assert.doesNotMatch(config, /AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED/);
   assert.doesNotMatch(config, /"binding"\s*:\s*"DIRECTORY"/);
   assert.doesNotMatch(config, /"routes"\s*:/);
@@ -100,6 +128,8 @@ test("deployment config accepts only explicit boolean alias gate values", () => 
         EMAIL_DIRECTORY_KV_ID: "a".repeat(32),
         RELAY_KEY_ID: "pilot-2026-07",
         CONTROL_PLANE_URL: controlPlaneURL,
+        AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS: routePublicKeys,
+        REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false",
         REALM_EMAIL_ALIAS_DELIVERY_ENABLED: value,
       },
       encoding: "utf8",
@@ -121,6 +151,8 @@ test("deployment config accepts only explicit boolean canonical gate values", ()
         EMAIL_DIRECTORY_KV_ID: "a".repeat(32),
         RELAY_KEY_ID: "pilot-2026-07",
         CONTROL_PLANE_URL: controlPlaneURL,
+        AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS: routePublicKeys,
+        REALM_EMAIL_ALIAS_DELIVERY_ENABLED: "false",
         REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: value,
       },
       encoding: "utf8",
@@ -149,6 +181,9 @@ test("deployment config requires one credential-free public HTTPS control-plane 
         EMAIL_DIRECTORY_KV_ID: "a".repeat(32),
         RELAY_KEY_ID: "pilot-2026-07",
         CONTROL_PLANE_URL: value,
+        AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS: routePublicKeys,
+        REALM_EMAIL_ALIAS_DELIVERY_ENABLED: "false",
+        REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false",
       },
       encoding: "utf8",
     });

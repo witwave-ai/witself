@@ -245,6 +245,12 @@ function fixture({
     {
       now: () => new Date(currentTime++),
       fetch: fetchImpl,
+      signRouteProjection: async (projection) => ({
+        ...structuredClone(projection),
+        schema_version: 2,
+        route_signing_key_id: "route-test",
+        route_signature: `${"A".repeat(86)}==`,
+      }),
     },
   );
   return {

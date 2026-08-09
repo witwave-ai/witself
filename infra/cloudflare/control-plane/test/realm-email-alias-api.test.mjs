@@ -106,6 +106,12 @@ function environment() {
         return `era_${"b".repeat(15)}${String.fromCharCode(96 + claimSequence)}`;
       },
       fetch: projectionFetch,
+      signRouteProjection: async (projection) => ({
+        ...structuredClone(projection),
+        schema_version: 2,
+        route_signing_key_id: "route-test",
+        route_signature: `${"A".repeat(86)}==`,
+      }),
     },
   );
   const namespace = {

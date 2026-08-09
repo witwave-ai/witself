@@ -107,7 +107,10 @@ jobs:
           golangci-lint run ./...
 
       - name: Cloudflare agent-email Worker gates
-        run: npm --prefix infra/cloudflare/agent-email test
+        run: |
+          npm --prefix infra/cloudflare/agent-email ci
+          npm --prefix infra/cloudflare/agent-email test
+          npm --prefix infra/cloudflare/agent-email run bundle:check
 
       - name: Cloudflare control-plane Worker gates
         run: |

@@ -45,6 +45,15 @@ const PLAN_HASH = "7".repeat(64);
 const VERIFICATION_CLAIM_LEASE_TEST_MS = 61 * 1_000;
 const verificationResolvers = new WeakMap();
 
+function signTestRouteProjection(projection) {
+  return {
+    ...structuredClone(projection),
+    schema_version: 2,
+    route_signing_key_id: "route-test",
+    route_signature: `${"A".repeat(86)}==`,
+  };
+}
+
 class Storage {
   constructor() {
     this.values = new Map();
@@ -169,6 +178,8 @@ function registry(env = {}, dependencyOverrides = {}) {
         return `aedv_${base32(challengeSequence, 32)}`;
       },
       assertRequestActivationReady: async () => {},
+      signRouteProjection: async (projection) =>
+        signTestRouteProjection(projection),
       ...dependencyOverrides,
     },
   );
@@ -360,7 +371,10 @@ function customDomainRoutingFixture(options = {}) {
       get: () => aliasStub,
     },
     ...options.env,
-  }, { fetch: fetchImpl });
+  }, {
+    fetch: fetchImpl,
+    ...(options.dependencies ?? {}),
+  });
   const request = {
     schema_version: "witself.agent-email-domain.v1",
     id: requestID,
@@ -760,6 +774,29 @@ test("custom-domain route outbox applies, reads back, then publishes exact KV", 
   assert.equal("domain_state_revision" in result.body, false);
 });
 
+test("custom-domain route signing failure never publishes unsigned KV", async () => {
+  const fixture = customDomainRoutingFixture({
+    dependencies: {
+      signRouteProjection: async () => {
+        throw new Error("signer unavailable");
+      },
+    },
+  });
+  const result = await call(fixture.runtime, "/route/get", {
+    domain: fixture.domain,
+    realm_label: fixture.realmLabel,
+    routing_enabled: true,
+  });
+  assert.equal(result.response.status, 503);
+  assert.equal(result.body.code, "agent_email_route_signing_unavailable");
+  assert.equal(fixture.emailDirectory.value(fixture.routeKey), null);
+  const pending = await fixture.storage.get(
+    `route-projection-intent:${fixture.requestID}:${fixture.realmLabel}`,
+  );
+  assert.equal(pending.phase, "pending");
+  assert.equal(pending.failure_count, 1);
+});
+
 test("lost cell and KV acknowledgements replay one exact durable route intent", async () => {
   for (const failure of ["cell", "kv"]) {
     const fixture = customDomainRoutingFixture();
@@ -798,7 +835,7 @@ test("lost cell and KV acknowledgements replay one exact durable route intent", 
     assert.equal(JSON.stringify(completed.edge_projection), exactEdge);
     assert.equal(
       JSON.stringify(fixture.emailDirectory.value(fixture.routeKey)),
-      exactEdge,
+      JSON.stringify(signTestRouteProjection(JSON.parse(exactEdge))),
     );
     assert.equal(fixture.postCalls(), 2);
     assert.equal(fixture.getCalls(), failure === "cell" ? 1 : 2);

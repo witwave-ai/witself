@@ -1856,7 +1856,14 @@ directory. Its additive dynamic route cache uses this collision-safe KV key:
 email:realm-route:v1:<canonical-domain>:<canonical-or-alias-realm-label>
 ```
 
-An applied managed-alias record has this exact shape:
+The `v1` in that collision-stable KV namespace is the key-layout version; it
+does not select the value's payload schema.
+
+The route-projection contract has two layers. Schema v1 is the strict,
+flat, scalar, **unsigned inner projection** used while the control plane builds
+and validates the `canonical | realm_alias | custom_domain` union. It is never
+returned by the control-plane route endpoint or written to KV. An applied
+managed-alias inner projection has this exact shape:
 
 ```json
 {
@@ -1874,8 +1881,8 @@ An applied managed-alias record has this exact shape:
 }
 ```
 
-An applied customer-domain record is an additive variant of that same schema
-and keyspace:
+An applied customer-domain inner projection is an additive variant of that
+same schema and keyspace:
 
 ```json
 {
@@ -1897,6 +1904,43 @@ and keyspace:
 }
 ```
 
+Every successful
+`GET /v1/email/realm-routes/{domain}/{realm_label}` response and every value in
+that dynamic-route KV keyspace is instead the signed, flat schema-v2
+projection. It contains the exact inner union fields, changes `schema_version`
+to `2`, and adds only the two signature fields. For the managed-alias example
+above, the external record is:
+
+```json
+{
+  "schema_version": 2,
+  "domain": "witmail.net",
+  "realm_label": "acme-team",
+  "realm_id": "realm_aaaaaaaaaaaaaaaa",
+  "route_kind": "realm_alias",
+  "state": "applied",
+  "controller_revision": 7,
+  "updated_at": "2026-07-21T12:00:00.000Z",
+  "cache_ttl_seconds": 300,
+  "cell_audience": "gcp-prod-us-central1-core",
+  "ingest_url": "https://api.cell.example/v1/internal/agent-email:ingest",
+  "route_signing_key_id": "route-2026-08",
+  "route_signature": "FcN+yhmJVmhRxdldn6LYK1mKfyLRUjcDvqkEotqeNBGxD4gqJ24dLd+yVWLv3QoPQlXHyVJpacBEG7bimu/gDA=="
+}
+```
+
+The same transformation applies without otherwise changing any fields in the
+canonical or custom-domain variants. `route_signing_key_id` is 1-64 lowercase
+ASCII letters, digits, underscore, or hyphen, beginning with a letter.
+`route_signature` is the canonical standard-base64 encoding of a 64-byte
+Ed25519 signature. The signed input is the context string
+`witself-agent-email-route-projection-v1`, a newline, the lexically key-sorted
+scalar schema-v2 object without `route_signature`, and a final newline. Every
+field other than `route_signature` is therefore covered, including the key id,
+destination, union discriminator, lifecycle state, revisions, timestamps, and
+custom-domain fences. Arrays, nested objects, nulls, unsafe integers, extra
+fields, and non-canonical signature encoding are invalid.
+
 For a canonical record, `route_kind` is `canonical` and `realm_label` is the
 exact 16-character body of `realm_id`. A realm alias is 3–16 lowercase ASCII
 letters or digits with non-leading, non-trailing single hyphens; consecutive
@@ -1917,9 +1961,12 @@ fences. Global domain and alias ownership and tombstones remain authoritative
 in their control-plane Durable Objects, while the cell owns recipient
 resolution and plan enforcement. The control plane publishes an applied route
 only after the cell has acknowledged and reread the same monotonic source
-revisions. A
-stale, malformed, misbound, or excessively future-dated KV record triggers the bounded
-authenticated fallback:
+revisions. Signing is mandatory after that readback: missing or invalid signer
+configuration, private-key import failure, or signing failure returns retryable
+HTTP 503 with code `agent_email_route_signing_unavailable`, retains retryable
+derived work where applicable, and never writes an unsigned KV record. A stale,
+unsigned, malformed, misbound, unknown-key, signature-invalid, or excessively
+future-dated KV record triggers the bounded authenticated fallback:
 
 ```text
 GET /v1/email/realm-routes/{domain}/{realm_label}
@@ -1931,19 +1978,24 @@ stale KV row. For any other domain it returns 404 before touching custom-domain
 authority unless `CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ENABLED` is exactly true;
 the custom registry independently requires exact account membership in
 `CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ACCOUNT_ALLOWLIST`. A fresh response with
-an older controller revision, the wrong route-kind variant, an invalid response,
-a timeout, or a non-404 failure is a temporary SMTP failure; the stale
-destination is never used. An authoritative 404 is an unknown route.
+an older controller revision, the wrong route-kind variant, an unsigned or
+invalid signature, an invalid response, a timeout, or a non-404 failure is a
+temporary SMTP failure; the stale destination is never used. An authoritative
+404 is an unknown route. The edge verifies the schema-v2 signature, reconstructs
+and strictly validates the schema-v1 union, and checks the lookup domain and
+label before it trusts `cell_audience` or `ingest_url`. All route resolution and
+signature checks complete before the Worker reads the raw MIME stream.
 
 Before even that lookup, a customer-domain SMTP transaction requires the
 independent exact-true edge gate
 `AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED`. With it absent, the Worker
 tempfails before KV, fallback, limiter, or raw-MIME access. The cell still
 validates the signed envelope against its local alias and custom-domain rows, so
-KV is never claim authority. This slice adds no signed header and does not
-promote a catch-all or change which domains Cloudflare sends to the Worker. All
-three gates are absent from release configuration, and acceptance remains
-fake/offline only pending a separate DNS/MX/Email Routing rollout.
+KV is never claim authority. This slice adds no route-provenance relay header;
+the route-projection signature is verified at the edge and is not forwarded.
+It does not promote a catch-all or change which domains Cloudflare sends to the
+Worker. All three gates are absent from release configuration, and acceptance
+remains fake/offline only pending a separate DNS/MX/Email Routing rollout.
 
 `GET /v1/email/address`:
 
@@ -2278,10 +2330,11 @@ X-Witself-Email-Raw-SHA256: sha256:<lowercase-hex>
 X-Witself-Email-Signature: <standard padded base64 Ed25519 signature>
 ```
 
-Schema 88 adds no relay header. In particular, route kind, domain request id,
-and realm-alias claim id are not sent as unsigned metadata or added to the
-signature contract. The existing signed envelope recipient plus cell-local
-authority is the only source of those receipt fields.
+Schema 88 adds no route-provenance relay header. The route-projection signature
+is verified at the edge and is not forwarded. In particular, route kind, domain
+request id, and realm-alias claim id are not sent as unsigned metadata or added
+to the relay-signature contract. The existing signed envelope recipient plus
+cell-local authority is the only source of those receipt fields.
 
 The response is deliberately content-free and has exactly one string field,
 `verdict`. The current Worker mapping is:

@@ -1,25 +1,333 @@
 #!/usr/bin/env node
+import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+import {
+  validateBuildMetadata,
+  workerVersionMessage,
+  workerVersionTag,
+} from "./source-identity.mjs";
 
-function imageVar(config, name) {
-  const match = new RegExp(
-    `"${name}"\\s*:\\s*"([^"]+)"`,
-  ).exec(config);
-  if (!match) throw new Error(`generated config is missing image var ${name}`);
-  return match[1];
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const generatedConfigPath = join(root, "wrangler.generated.jsonc");
+const DIRECTORY_NAMESPACE_ID = "ec620d5131524e138a9fca6207953cd2";
+const COMPATIBILITY_DATE = "2026-06-01";
+const MIGRATION_TAG = "v8";
+const CPU_LIMIT_MS = 300000;
+const NAMED_HANDLER_CLASSES = Object.freeze([
+  "AccountBackup",
+  "AccountLifecycle",
+  "AccountSignup",
+  "AgentEmailDomainRegistry",
+  "Backend",
+  "RealmEmailAliasRegistry",
+  "TargetCellCoordinator",
+]);
+const DURABLE_OBJECT_BINDINGS = Object.freeze({
+  ACCOUNT_BACKUP: "AccountBackup",
+  ACCOUNT_LIFECYCLE: "AccountLifecycle",
+  ACCOUNT_SIGNUP: "AccountSignup",
+  AGENT_EMAIL_DOMAINS: "AgentEmailDomainRegistry",
+  CELL_COORDINATOR: "TargetCellCoordinator",
+  CONTROL_PLANE: "Backend",
+  REALM_EMAIL_ALIASES: "RealmEmailAliasRegistry",
+});
+const R2_BINDINGS = Object.freeze({
+  AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL:
+    "witself-agent-email-domain-authority-journal",
+  ARCHIVES: "witself-archives",
+  BACKUPS: "witself-backups",
+  REALM_EMAIL_ALIAS_AUTHORITY_JOURNAL:
+    "witself-realm-email-alias-authority-journal",
+});
+const REQUIRED_SECRET_BINDINGS = Object.freeze([
+  "AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY",
+  "CONTROL_PLANE_EDGE_TOKEN",
+]);
+
+function isRecord(value) {
+  return value != null && typeof value === "object" && !Array.isArray(value);
+}
+
+function sameJSON(actual, expected) {
+  return JSON.stringify(actual) === JSON.stringify(expected);
+}
+
+function stripJSONComments(input) {
+  let output = "";
+  let quoted = false;
+  let escaped = false;
+  let lineComment = false;
+  let blockComment = false;
+  for (let index = 0; index < input.length; index += 1) {
+    const character = input[index];
+    const next = input[index + 1];
+    if (lineComment) {
+      if (character === "\n") {
+        lineComment = false;
+        output += character;
+      }
+      continue;
+    }
+    if (blockComment) {
+      if (character === "*" && next === "/") {
+        blockComment = false;
+        index += 1;
+      } else if (character === "\n") {
+        output += character;
+      }
+      continue;
+    }
+    if (quoted) {
+      output += character;
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === "\"") quoted = false;
+      continue;
+    }
+    if (character === "\"") {
+      quoted = true;
+      output += character;
+    } else if (character === "/" && next === "/") {
+      lineComment = true;
+      index += 1;
+    } else if (character === "/" && next === "*") {
+      blockComment = true;
+      index += 1;
+    } else {
+      output += character;
+    }
+  }
+  if (quoted || blockComment) {
+    throw new Error("generated control-plane config was malformed JSONC");
+  }
+  return output;
+}
+
+function parseGeneratedConfig(source) {
+  try {
+    const parsed = JSON.parse(stripJSONComments(source));
+    if (!isRecord(parsed)) throw new Error("not an object");
+    return parsed;
+  } catch (error) {
+    if (String(error?.message ?? "").includes("malformed JSONC")) throw error;
+    throw new Error("generated control-plane config was not valid JSONC");
+  }
+}
+
+function namedConfigBindings(bindings, property, description) {
+  if (!Array.isArray(bindings)) {
+    throw new Error(`generated config had an invalid ${description} inventory`);
+  }
+  const result = new Map();
+  for (const binding of bindings) {
+    const name = binding?.[property];
+    if (!isRecord(binding) || typeof name !== "string" || !name ||
+        result.has(name)) {
+      throw new Error(`generated config had an invalid ${description} inventory`);
+    }
+    result.set(name, binding);
+  }
+  return result;
+}
+
+function exactConfigNames(actual, expected, description) {
+  if (!sameJSON([...actual.keys()].sort(), [...expected].sort())) {
+    throw new Error(`generated config ${description} did not match the reviewed contract`);
+  }
+}
+
+function assertGeneratedConfigContract(config) {
+  const topLevelKeys = [
+    "compatibility_date",
+    "containers",
+    "durable_objects",
+    "kv_namespaces",
+    "limits",
+    "main",
+    "migrations",
+    "name",
+    "observability",
+    "r2_buckets",
+    "routes",
+    "secrets",
+    "send_email",
+    "triggers",
+    "unsafe",
+    "vars",
+  ];
+  if (!sameJSON(Object.keys(config).sort(), topLevelKeys.sort())) {
+    throw new Error("generated config top-level contract did not match");
+  }
+  if (config.name !== "witself-control-plane" || config.main !== "src/index.js") {
+    throw new Error("generated config main Worker entrypoint did not match");
+  }
+  if (config.compatibility_date !== COMPATIBILITY_DATE ||
+      !sameJSON(config.limits, { cpu_ms: CPU_LIMIT_MS })) {
+    throw new Error("generated config Worker runtime did not match");
+  }
+  if (!sameJSON(config.secrets, { required: REQUIRED_SECRET_BINDINGS })) {
+    throw new Error("generated config required secret contract did not match");
+  }
+
+  if (!Array.isArray(config.containers) || config.containers.length !== 1) {
+    throw new Error("generated config Backend container contract did not match");
+  }
+  const [container] = config.containers;
+  if (!isRecord(container) || container.name !== "witself-control-plane" ||
+      !sameJSON(Object.keys(container).sort(), [
+        "class_name",
+        "image",
+        "image_build_context",
+        "image_vars",
+        "instance_type",
+        "max_instances",
+        "name",
+      ].sort()) ||
+      container.class_name !== "Backend" ||
+      container.image !== "../../../images/witself-control-plane/Dockerfile" ||
+      container.image_build_context !== "../../.." ||
+      container.instance_type !== "lite" || container.max_instances !== 2 ||
+      !isRecord(container.image_vars) ||
+      !sameJSON(Object.keys(container.image_vars).sort(), [
+        "COMMIT",
+        "DATE",
+        "VERSION",
+      ])) {
+    throw new Error("generated config Backend container contract did not match");
+  }
+
+  if (!isRecord(config.durable_objects) ||
+      !sameJSON(Object.keys(config.durable_objects), ["bindings"])) {
+    throw new Error("generated config Durable Object contract did not match");
+  }
+
+  const durableObjects = namedConfigBindings(
+    config.durable_objects?.bindings,
+    "name",
+    "Durable Object binding",
+  );
+  exactConfigNames(
+    durableObjects,
+    Object.keys(DURABLE_OBJECT_BINDINGS),
+    "Durable Object bindings",
+  );
+  for (const [name, className] of Object.entries(DURABLE_OBJECT_BINDINGS)) {
+    if (!sameJSON(durableObjects.get(name), { name, class_name: className })) {
+      throw new Error(`generated config Durable Object binding ${name} did not match`);
+    }
+  }
+
+  const kv = namedConfigBindings(config.kv_namespaces, "binding", "KV binding");
+  exactConfigNames(kv, ["AGENT_EMAIL_DIRECTORY", "DIRECTORY"], "KV bindings");
+  if (!sameJSON(kv.get("DIRECTORY"), {
+    binding: "DIRECTORY",
+    id: DIRECTORY_NAMESPACE_ID,
+  })) {
+    throw new Error("generated config DIRECTORY KV binding did not match");
+  }
+  const agentEmailDirectoryID = kv.get("AGENT_EMAIL_DIRECTORY")?.id;
+  if (!/^[0-9a-f]{32}$/.test(String(agentEmailDirectoryID ?? "")) ||
+      !sameJSON(kv.get("AGENT_EMAIL_DIRECTORY"), {
+        binding: "AGENT_EMAIL_DIRECTORY",
+        id: agentEmailDirectoryID,
+      })) {
+    throw new Error("generated config AGENT_EMAIL_DIRECTORY KV binding did not match");
+  }
+
+  const expectedVarNames = [
+    "AGENT_EMAIL_DOMAIN",
+    "AGENT_EMAIL_LEGACY_DOMAINS",
+    "AGENT_EMAIL_ROUTE_SIGNING_KEY_ID",
+    "CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT",
+    "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT",
+    "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM",
+    "WITSELF_EDGE_RELEASE_COMMIT",
+    "WITSELF_EDGE_RELEASE_DATE",
+    "WITSELF_EDGE_RELEASE_VERSION",
+  ];
+  if (!isRecord(config.vars) ||
+      !sameJSON(Object.keys(config.vars).sort(), [...expectedVarNames].sort()) ||
+      config.vars.AGENT_EMAIL_DOMAIN !== "witmail.net" ||
+      config.vars.AGENT_EMAIL_LEGACY_DOMAINS !== "agent-mail.witwave.ai" ||
+      !/^[a-z][a-z0-9_-]{0,63}$/.test(
+        String(config.vars.AGENT_EMAIL_ROUTE_SIGNING_KEY_ID ?? ""),
+      ) ||
+      config.vars.CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM !== "8" ||
+      config.vars.CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT !== "64" ||
+      config.vars.CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT !== "8") {
+    throw new Error("generated config Worker vars did not match the reviewed contract");
+  }
+
+  const migrations = [
+    { tag: "v1", new_sqlite_classes: ["ControlPlane"] },
+    { tag: "v2", renamed_classes: [{ from: "ControlPlane", to: "Backend" }] },
+    { tag: "v3", new_sqlite_classes: ["AccountLifecycle"] },
+    { tag: "v4", new_sqlite_classes: ["TargetCellCoordinator"] },
+    { tag: "v5", new_sqlite_classes: ["AccountSignup"] },
+    { tag: "v6", new_sqlite_classes: ["AccountBackup"] },
+    { tag: "v7", new_sqlite_classes: ["RealmEmailAliasRegistry"] },
+    { tag: MIGRATION_TAG, new_sqlite_classes: ["AgentEmailDomainRegistry"] },
+  ];
+  if (!sameJSON(config.migrations, migrations)) {
+    throw new Error("generated config migration contract did not match");
+  }
+  if (!sameJSON(config.routes, [{
+    pattern: "self.witwave.ai",
+    custom_domain: true,
+  }]) || !sameJSON(config.triggers, { crons: ["*/5 * * * *"] })) {
+    throw new Error("generated config route and schedule contract did not match");
+  }
+  if (!sameJSON(config.send_email, [{ name: "EMAIL" }])) {
+    throw new Error("generated config EMAIL binding did not match");
+  }
+
+  const r2 = namedConfigBindings(config.r2_buckets, "binding", "R2 binding");
+  exactConfigNames(r2, Object.keys(R2_BINDINGS), "R2 bindings");
+  for (const [binding, bucketName] of Object.entries(R2_BINDINGS)) {
+    if (!sameJSON(r2.get(binding), { binding, bucket_name: bucketName })) {
+      throw new Error(`generated config R2 binding ${binding} did not match`);
+    }
+  }
+  if (!sameJSON(config.unsafe, {
+    bindings: [{
+      name: "RECOVER_LIMITER",
+      type: "ratelimit",
+      namespace_id: "1001",
+      simple: { limit: 1, period: 10 },
+    }],
+  }) || !sameJSON(config.observability, { enabled: true })) {
+    throw new Error("generated config operational binding contract did not match");
+  }
+  return { container, agentEmailDirectoryID };
 }
 
 export function expectedBuildMetadata(config) {
-  return {
+  const parsed = parseGeneratedConfig(config);
+  const { container: parsedContainer, agentEmailDirectoryID } =
+    assertGeneratedConfigContract(parsed);
+  const container = validateBuildMetadata({
+    version: parsedContainer.image_vars.VERSION,
+    commit: parsedContainer.image_vars.COMMIT,
+    date: parsedContainer.image_vars.DATE,
+  });
+  const edge = validateBuildMetadata({
+    version: parsed.vars.WITSELF_EDGE_RELEASE_VERSION,
+    commit: parsed.vars.WITSELF_EDGE_RELEASE_COMMIT,
+    date: parsed.vars.WITSELF_EDGE_RELEASE_DATE,
+  });
+  if (container.version !== edge.version || container.commit !== edge.commit ||
+      container.date !== edge.date) {
+    throw new Error("container and outer Worker release identities differ");
+  }
+  return Object.freeze({
     service: "witself-control-plane",
-    version: imageVar(config, "VERSION"),
-    commit: imageVar(config, "COMMIT"),
-    date: imageVar(config, "DATE"),
-  };
+    ...edge,
+    route_signing_key_id: parsed.vars.AGENT_EMAIL_ROUTE_SIGNING_KEY_ID,
+    agent_email_directory_id: agentEmailDirectoryID,
+  });
 }
 
 export function deploymentMatches(actual, expected) {
@@ -29,9 +337,271 @@ export function deploymentMatches(actual, expected) {
     actual?.date === expected.date;
 }
 
+function validVersionID(value) {
+  return typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
+}
+
+export function currentProductionVersionID(deployment) {
+  if (deployment == null || typeof deployment !== "object" ||
+      !Array.isArray(deployment.versions) || deployment.versions.length !== 1) {
+    throw new Error("production must route to exactly one control-plane Worker version");
+  }
+  const [version] = deployment.versions;
+  if (!validVersionID(version?.version_id) || version.percentage !== 100) {
+    throw new Error("production must route 100 percent to one valid Worker version");
+  }
+  return version.version_id;
+}
+
+function bindingsByName(bindings) {
+  if (!Array.isArray(bindings)) {
+    throw new Error("deployed Worker version is missing its binding inventory");
+  }
+  const result = new Map();
+  for (const binding of bindings) {
+    if (!isRecord(binding) || typeof binding.name !== "string" ||
+        !binding.name || result.has(binding.name)) {
+      throw new Error("deployed Worker version has duplicate or invalid bindings");
+    }
+    if (binding.type === "secret_text" && Object.hasOwn(binding, "text")) {
+      throw new Error(`deployed Worker secret binding ${binding.name} was invalid`);
+    }
+    result.set(binding.name, binding);
+  }
+  return result;
+}
+
+function exactSecretBinding(bindings, name) {
+  const binding = bindings.get(name);
+  if (binding?.type !== "secret_text" || Object.hasOwn(binding, "text")) {
+    throw new Error(`deployed Worker version is missing exact ${name} secret binding`);
+  }
+}
+
+function exactPlainBinding(bindings, name, expected) {
+  const binding = bindings.get(name);
+  if (binding?.type !== "plain_text" || binding.text !== expected) {
+    throw new Error(`deployed Worker version has the wrong ${name} binding`);
+  }
+}
+
+function exactDurableObjectBinding(bindings, name, className) {
+  const binding = bindings.get(name);
+  if (binding?.type !== "durable_object_namespace" ||
+      binding.class_name !== className ||
+      !/^[0-9a-f]{32}$/.test(String(binding.namespace_id ?? ""))) {
+    throw new Error(`deployed Worker version has the wrong ${name} Durable Object binding`);
+  }
+}
+
+function exactKVBinding(bindings, name, namespaceID) {
+  const binding = bindings.get(name);
+  if (binding?.type !== "kv_namespace" ||
+      binding.namespace_id !== namespaceID) {
+    throw new Error(`deployed Worker version has the wrong ${name} KV binding`);
+  }
+}
+
+function exactR2Binding(bindings, name, bucketName) {
+  const binding = bindings.get(name);
+  if (binding?.type !== "r2_bucket" || binding.bucket_name !== bucketName) {
+    throw new Error(`deployed Worker version has the wrong ${name} R2 binding`);
+  }
+}
+
+function exactNamedHandlers(namedHandlers) {
+  if (!Array.isArray(namedHandlers)) {
+    throw new Error("deployed Worker version is missing its named handlers");
+  }
+  const actual = new Map();
+  for (const handler of namedHandlers) {
+    if (!isRecord(handler) || typeof handler.name !== "string" ||
+        actual.has(handler.name) || !sameJSON(handler.handlers, ["class"])) {
+      throw new Error("deployed Worker version has invalid named handlers");
+    }
+    actual.set(handler.name, handler);
+  }
+  if (!sameJSON([...actual.keys()].sort(), [...NAMED_HANDLER_CLASSES].sort())) {
+    throw new Error("deployed Worker version named handler classes did not match");
+  }
+}
+
+export function verifyWorkerVersion(version, expected, expectedVersionID) {
+  if (version == null || typeof version !== "object" ||
+      version.id !== expectedVersionID || !validVersionID(version.id)) {
+    throw new Error("Wrangler returned the wrong control-plane Worker version");
+  }
+  if (version.metadata?.source !== "wrangler" ||
+      version.annotations?.["workers/triggered_by"] !== "upload" ||
+      version.annotations?.["workers/tag"] !== workerVersionTag(expected) ||
+      version.annotations?.["workers/message"] !== workerVersionMessage(expected)) {
+    throw new Error("deployed Worker version has the wrong release annotations");
+  }
+  const script = version.resources?.script;
+  if (!isRecord(script) ||
+      !/^[0-9a-f]{64}$/.test(String(script.etag ?? ""))) {
+    throw new Error("deployed Worker version is missing its immutable script etag");
+  }
+  if (!sameJSON(script.handlers, ["fetch", "scheduled"])) {
+    throw new Error("deployed Worker version handlers did not match fetch and scheduled");
+  }
+  exactNamedHandlers(script.named_handlers);
+
+  const runtime = version.resources?.script_runtime;
+  const runtimeKeys = isRecord(runtime) ? Object.keys(runtime).sort() : [];
+  const allowedRuntimeKeys = [
+    "compatibility_date",
+    "containers",
+    "limits",
+    "migration_tag",
+    "usage_model",
+  ];
+  if (Object.hasOwn(runtime ?? {}, "compatibility_flags")) {
+    allowedRuntimeKeys.push("compatibility_flags");
+  }
+  if (!isRecord(runtime) ||
+      !sameJSON(runtimeKeys, allowedRuntimeKeys.sort()) ||
+      runtime.compatibility_date !== COMPATIBILITY_DATE ||
+      runtime.migration_tag !== MIGRATION_TAG ||
+      runtime.usage_model !== "standard" ||
+      !sameJSON(runtime.limits, { cpu_ms: CPU_LIMIT_MS }) ||
+      !sameJSON(runtime.containers, [{ class_name: "Backend" }]) ||
+      (Object.hasOwn(runtime, "compatibility_flags") &&
+       !sameJSON(runtime.compatibility_flags, []))) {
+    throw new Error("deployed Worker version runtime contract did not match");
+  }
+
+  const bindings = bindingsByName(version.resources?.bindings);
+  const nonSecretNames = new Set([
+    ...Object.keys(DURABLE_OBJECT_BINDINGS),
+    ...Object.keys(R2_BINDINGS),
+    "AGENT_EMAIL_DIRECTORY",
+    "AGENT_EMAIL_DOMAIN",
+    "AGENT_EMAIL_LEGACY_DOMAINS",
+    "AGENT_EMAIL_ROUTE_SIGNING_KEY_ID",
+    "CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT",
+    "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT",
+    "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM",
+    "DIRECTORY",
+    "EMAIL",
+    "RECOVER_LIMITER",
+    "WITSELF_EDGE_RELEASE_COMMIT",
+    "WITSELF_EDGE_RELEASE_DATE",
+    "WITSELF_EDGE_RELEASE_VERSION",
+  ]);
+  for (const binding of bindings.values()) {
+    if (binding.type !== "secret_text" && !nonSecretNames.has(binding.name)) {
+      throw new Error(
+        `deployed Worker version has unexpected non-secret binding ${binding.name}`,
+      );
+    }
+  }
+
+  const actual = {
+    service: "witself-control-plane",
+    version: bindings.get("WITSELF_EDGE_RELEASE_VERSION")?.text,
+    commit: bindings.get("WITSELF_EDGE_RELEASE_COMMIT")?.text,
+    date: bindings.get("WITSELF_EDGE_RELEASE_DATE")?.text,
+  };
+  exactPlainBinding(bindings, "WITSELF_EDGE_RELEASE_VERSION", expected.version);
+  exactPlainBinding(bindings, "WITSELF_EDGE_RELEASE_COMMIT", expected.commit);
+  exactPlainBinding(bindings, "WITSELF_EDGE_RELEASE_DATE", expected.date);
+  if (!deploymentMatches(actual, expected)) {
+    throw new Error("deployed Worker version has the wrong release identity");
+  }
+  if (!/^[a-z][a-z0-9_-]{0,63}$/.test(expected.route_signing_key_id) ||
+      bindings.get("AGENT_EMAIL_ROUTE_SIGNING_KEY_ID")?.text !==
+        expected.route_signing_key_id) {
+    throw new Error("deployed Worker version has the wrong route signing key id");
+  }
+  exactPlainBinding(
+    bindings,
+    "AGENT_EMAIL_ROUTE_SIGNING_KEY_ID",
+    expected.route_signing_key_id,
+  );
+  exactSecretBinding(bindings, "AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY");
+  exactSecretBinding(bindings, "CONTROL_PLANE_EDGE_TOKEN");
+
+  for (const [name, className] of Object.entries(DURABLE_OBJECT_BINDINGS)) {
+    exactDurableObjectBinding(bindings, name, className);
+  }
+  if (!/^[0-9a-f]{32}$/.test(String(expected.agent_email_directory_id ?? ""))) {
+    throw new Error("expected agent email directory id was invalid");
+  }
+  exactKVBinding(bindings, "DIRECTORY", DIRECTORY_NAMESPACE_ID);
+  exactKVBinding(
+    bindings,
+    "AGENT_EMAIL_DIRECTORY",
+    expected.agent_email_directory_id,
+  );
+  for (const [name, value] of [
+    ["AGENT_EMAIL_DOMAIN", "witmail.net"],
+    ["AGENT_EMAIL_LEGACY_DOMAINS", "agent-mail.witwave.ai"],
+    ["CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM", "8"],
+    ["CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT", "64"],
+    ["CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT", "8"],
+  ]) {
+    exactPlainBinding(bindings, name, value);
+  }
+  for (const [name, bucketName] of Object.entries(R2_BINDINGS)) {
+    exactR2Binding(bindings, name, bucketName);
+  }
+  if (bindings.get("EMAIL")?.type !== "send_email") {
+    throw new Error("deployed Worker version has the wrong EMAIL send binding");
+  }
+  const limiter = bindings.get("RECOVER_LIMITER");
+  if (limiter?.type !== "ratelimit" || limiter.namespace_id !== "1001" ||
+      !sameJSON(limiter.simple, { limit: 1, period: 10 })) {
+    throw new Error("deployed Worker version has the wrong RECOVER_LIMITER binding");
+  }
+  return Object.freeze({
+    version_id: version.id,
+    script_etag: script.etag,
+  });
+}
+
+function wranglerJSON(args, operation) {
+  const result = spawnSync("wrangler", args, {
+    cwd: root,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 5 * 1024 * 1024,
+  });
+  if (result.error || result.status !== 0) {
+    throw new Error(`could not ${operation} with Wrangler`);
+  }
+  try {
+    return JSON.parse(result.stdout);
+  } catch {
+    throw new Error(`Wrangler ${operation} output was not valid JSON`);
+  }
+}
+
+export function verifyCurrentWorkerDeployment(
+  expected,
+  config,
+  inspect = wranglerJSON,
+) {
+  const deployment = inspect([
+    "deployments", "status",
+    "--config", config,
+    "--name", expected.service,
+    "--json",
+  ], "inspect the current control-plane deployment");
+  const versionID = currentProductionVersionID(deployment);
+  const version = inspect([
+    "versions", "view", versionID,
+    "--config", config,
+    "--name", expected.service,
+    "--json",
+  ], "inspect the current control-plane Worker version");
+  return verifyWorkerVersion(version, expected, versionID);
+}
+
 function parseArgs(argv) {
   const out = {
-    config: join(root, "wrangler.generated.jsonc"),
+    config: generatedConfigPath,
     endpoint: process.env.WITSELF_CONTROL_PLANE ?? "https://self.witwave.ai",
     // Container-backed Worker revisions can take several minutes to replace
     // their live instances after the Worker upload has completed.
@@ -47,7 +617,12 @@ function parseArgs(argv) {
     if (!value) throw new Error(`${name} requires a value`);
     switch (name) {
     case "--config":
-      out.config = isAbsolute(value) ? value : resolve(root, value);
+      out.config = resolve(root, value);
+      if (out.config !== generatedConfigPath) {
+        throw new Error(
+          "deployment verification requires the exact generated control-plane config",
+        );
+      }
       break;
     case "--endpoint":
       out.endpoint = value;
@@ -77,6 +652,10 @@ async function sleep(delayMs) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const expected = expectedBuildMetadata(await readFile(args.config, "utf8"));
+  const attestation = verifyCurrentWorkerDeployment(expected, args.config);
+  process.stdout.write(
+    `verified outer Worker ${attestation.version_id} (${attestation.script_etag})\n`,
+  );
   const url = `${args.endpoint.replace(/\/+$/, "")}/v1/version`;
   let last = "no response";
   for (let attempt = 1; attempt <= args.attempts; attempt += 1) {

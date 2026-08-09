@@ -18,8 +18,14 @@ refreshed through a bounded, authenticated control-plane lookup and are never
 used when that lookup fails or returns an older controller revision. KV is a
 route cache, never alias-claim authority.
 
-Customer-owned domains use the same schema-version-1 route key and projection
-only as a strict `route_kind: "custom_domain"` union variant. That variant
+Customer-owned domains use the same route key and unsigned schema-version-1
+route shape only as a strict `route_kind: "custom_domain"` union variant. The
+control plane wraps every canonical, managed-alias, and custom-domain route in
+signed schema version 2 before returning it or writing KV. The edge verifies
+that Ed25519 signature and the configured key id before it trusts the supplied
+cell ingestion URL, and always does so before reading raw MIME. Unsigned,
+unknown-key, malformed, or modified projections fail closed; corrupt KV is only
+uncertain evidence and cannot redirect content. That variant
 also requires the exact `domain_request_id`, `domain_allocation_revision`,
 `realm_alias_claim_id`, and `realm_alias_revision` fences; canonical and
 managed-alias projections continue to reject those fields. A valid address on
@@ -33,18 +39,29 @@ renderer. `npm run deploy` also refuses a persistent Worker secret with that
 name both before and after deployment, so this contract remains dark and cannot
 change live Email Routing or delivery configuration in this phase.
 
-The original one-realm, 5–10-recipient literal pilot remains supported only on
-the one configured legacy domain. A legacy envelope must match the exact
-enabled pilot manifest and recipient row before it can relay. Legacy traffic
-never consults a dynamic realm-route projection or the control plane, so
-adding `agent-mail.witwave.ai` to the compatibility set cannot make newly
-invented addresses reachable there.
+The original one-realm, 5–10-recipient literal-pilot code path is retained only
+for bounded compatibility on the one configured legacy domain. Because its KV
+rows predate signed route projections, the row may only narrow a destination
+already fixed by two immutable Worker bindings:
+`LEGACY_PILOT_TRUSTED_INGEST_URL` and
+`LEGACY_PILOT_TRUSTED_CELL_AUDIENCE`. The committed production template omits
+both bindings, so this release treats the legacy lane as retired and tempfails
+before reading KV or raw MIME. Re-enabling it requires a separately reviewed
+version that binds both anchors and exact literal Email Routing rules. Even
+then, a legacy envelope must match the enabled pilot manifest and recipient
+row, the KV destination must equal both anchors, and traffic never falls
+through to a dynamic realm-route lookup. Merely listing
+`agent-mail.witwave.ai` as the compatibility domain cannot make an address
+reachable.
 
 Managed alias delivery also requires
 `REALM_EMAIL_ALIAS_DELIVERY_ENABLED=true`. The value is exact and defaults to
-`false`; any other value tempfails `realm_alias` traffic at the edge before a
-message body is read or a cell is contacted. Canonical Realm ID and legacy
-literal-pilot delivery are intentionally unaffected.
+`false` at runtime; deployment rendering requires the operator to supply the
+reviewed literal `true` or `false` so an omitted variable cannot silently
+change live behavior. Any other runtime value tempfails `realm_alias` traffic
+at the edge before a message body is read or a cell is contacted. The alias
+gate does not control canonical Realm ID traffic or the independently retired
+legacy literal-pilot lane.
 
 Dynamic route lookup is protected independently of account policy. A positive
 `EMAIL_DIRECTORY` projection is always checked first and
@@ -133,17 +150,20 @@ From this directory:
 ```sh
 npm ci
 npm test
-npm run config
-npx wrangler deploy --dry-run --config wrangler.generated.jsonc
+npm run bundle:check
 ```
 
 `npm run config` requires `EMAIL_DIRECTORY_KV_ID`, `RELAY_KEY_ID`, and the
-credential-free HTTPS origin `CONTROL_PLANE_URL`. Set
+credential-free HTTPS origin `CONTROL_PLANE_URL`. It also requires
+`AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS`, a canonical JSON object containing one
+to four public Ed25519 keys indexed by key id, plus explicit literal values for
+both managed delivery gates. Set
 `REALM_EMAIL_ALIAS_DELIVERY_ENABLED=true` only for a reviewed alias activation;
-it defaults to `false` and rejects any value other than literal `true` or
-`false`. Set `REALM_EMAIL_CANONICAL_DELIVERY_ENABLED=true` only for a separately
-reviewed canonical-route activation; it has the same exact-boolean,
-default-`false` contract. The renderer refuses the KV ID bound to
+the renderer rejects any value other than literal `true` or `false`. Set
+`REALM_EMAIL_CANONICAL_DELIVERY_ENABLED=true` only for a separately reviewed
+canonical-route activation; it has the same exact-boolean contract. The
+runtime remains default-off if either binding is ever absent. The renderer
+refuses the KV ID bound to
 the adjacent control-plane Worker. The generated file is local operator state
 and must not be committed. The generated Worker must expose
 `REALM_ROUTE_COLD_MISS_LIMITER` at 10 calls per 10 seconds and
@@ -160,6 +180,46 @@ sharing a namespace also shares counters for the same key. If either ID is in
 use, stop and make one reviewed template-and-test change rather than deploying
 a collision.
 
+## Signed projection and release attestation
+
+The control plane owns one active `AGENT_EMAIL_ROUTE_SIGNING_KEY_ID` and keeps
+the matching PKCS#8 private key only in the
+`AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY` Worker secret. The email edge receives
+only the raw 32-byte public key through
+`AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS`. During rotation, publish an edge
+keyring containing both old and new keys before changing the control-plane
+signer. Keep the old public key until all routes have been republished and the
+formal 600-second stale window has passed. Never reuse the relay signing key;
+route authority and cell-relay identity are separate trust boundaries.
+
+`npm run deploy` is release-only. It refuses a dirty checkout or a commit that
+does not have exactly one `vMAJOR.MINOR.PATCH` tag, uses Wrangler strict mode,
+adds deterministic version tag/message annotations, and stamps the full Git
+commit and commit date into the Worker bindings. It then follows the current
+Cloudflare deployment to its exact version and verifies one 100-percent
+email-only version, the runtime and complete binding contract, both explicit
+managed flags, the route-verification keyring, rate limiters, and the absence of
+the custom-domain activation secret. `npm run verify:deployment` repeats the
+same value-free inspection. `npm run bundle:check` performs a hermetic Wrangler
+dry run and emits only source metadata and bundle/metafile SHA-256 digests.
+
+After both tagged Workers are deployed, run
+`npm run verify:route-signing-readiness`. This read-only check follows each
+production deployment to its one exact 100-percent version and refuses unless
+the control plane and email edge have the same immutable release identity,
+both canonical controls and every custom-domain delivery control remain dark,
+both edge managed-delivery flags are false, the control-plane signer id
+is present in the edge's canonical public-key keyring, and all route-signing,
+authenticated-fallback, and relay secret bindings exist. Its JSON attestation
+contains key ids and binding-presence booleans, never public-key bytes or secret
+values. It requires the release tag/message annotations from `npm run deploy`;
+a later secret-only successor must be followed by a tagged redeploy before this
+coordinated readiness check can pass again. Binding presence alone cannot prove
+that the two fallback secrets contain the same value. The value-free receipt
+from the coordinated provisioning command below is the evidence that one exact
+validated token was uploaded to both Workers; preserve that receipt with the
+release record.
+
 ## Staged managed rollout
 
 Use a narrowly scoped Cloudflare token and set these environment variables in
@@ -171,6 +231,9 @@ the operator shell without printing their values:
 - `EMAIL_DIRECTORY_KV_ID`
 - `RELAY_KEY_ID`
 - `CONTROL_PLANE_URL`
+- `AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS`
+- `REALM_EMAIL_ALIAS_DELIVERY_ENABLED`
+- `REALM_EMAIL_CANONICAL_DELIVERY_ENABLED`
 
 The token needs Workers deployment/secret access, Account Analytics Read,
 Zone Settings Read, Email Routing Rules Write, and KV read/write for the
@@ -185,19 +248,68 @@ mutation.
    npm run directory -- show
    ```
 
-2. Render and deploy the unreachable email-only Worker first, then load the
-   operator-provisioned PKCS#8 Ed25519 private key and the shared control-plane
-   edge token through separate Wrangler secret prompts. Configure the same
-   token value on the control-plane route. The Worker has no HTTP or email route
-   at this stage; putting each secret creates and deploys a secret-bearing
-   version:
+2. At one clean exact release tag, render both Workers with the same release
+   identity. The control plane must contain the active
+   `AGENT_EMAIL_ROUTE_SIGNING_KEY_ID`; the edge keyring must contain the
+   corresponding public Ed25519 key; and both edge managed-delivery values must
+   be exactly `false`. Keep all canonical and custom-domain controls absent.
+   The existing alias-claim authority workflow may remain enabled because it is
+   not a delivery gate.
 
    ```sh
+   (
+     cd ../control-plane
+     npm run config
+   )
    npm run config
-   npm run deploy
-   npm run secret:put
-   npm run secret:put:control-plane
    ```
+
+   Use the coordinated ceremony once. Select the Witself secret and fields by
+   their public ids or unambiguous names, and write the value-free receipt to a
+   private, previously nonexistent path:
+
+   ```sh
+   npm run provision:route-signing-secrets -- \
+     --agent AGENT \
+     --route-secret ROUTE_SECRET \
+     --route-private-field PRIVATE_FIELD \
+     --route-public-field PUBLIC_FIELD \
+     --fallback-secret FALLBACK_SECRET \
+     --fallback-field TOKEN_FIELD \
+     --receipt /absolute/private/path/agent-email-secret-receipt.json
+   ```
+
+   The command preflights both exact existing Workers and every dark boundary,
+   validates both complete Witself reveal envelopes, proves that the PKCS#8
+   Ed25519 private key derives the configured public key, validates the shared
+   token, and feeds values only through Wrangler stdin with logs and metrics
+   disabled. It uploads the route private key to the control plane and one
+   exact fallback token to both Workers, then re-inspects both active versions
+   and secret-name inventories before creating a mode-`0600` receipt. It never
+   prints a secret value. A failure during the sequential token updates is safe
+   while all delivery gates remain dark; correct the cause and rerun the same
+   ceremony.
+
+   Secret updates create successor Worker versions without the reviewed release
+   annotations. Therefore deploy both Workers from the same unchanged tag only
+   after the ceremony, edge first and then control plane, and run coordinated
+   readiness last:
+
+   ```sh
+   npm run deploy
+   (
+     cd ../control-plane
+     npm run deploy
+   )
+   npm run verify:route-signing-readiness
+   ```
+
+   Do not use the older independent `secret:put` commands for this coordinated
+   setup. They cannot prove that the two fallback values match. The ceremony
+   also requires an existing email-edge Worker with its relay secret already
+   bound. A first-ever Worker bootstrap must instead use a separately reviewed
+   one-shot `--secrets-file` deployment; never create a partial Worker and
+   never place that file in the repository.
 
 3. Enable the matching cell configuration with only the public key, deploy the
    cell, and confirm its startup reconciliation and health checks.
@@ -243,16 +355,24 @@ mutation.
    control plane, `evidence=uncertain` preserves the context without emitting
    a second early `kv_error` event. Neither schema contains an address, domain, realm
    label, account, realm, agent, sender, subject, message id, digest, signature,
-   limiter key, or content-derived value. Query the final-outcome stream for
-   the last hour with a token carrying `Account Analytics Read`:
+   limiter key, or content-derived value. A complete renderer-validated release
+   version, commit, and commit-date triple is appended only as metadata blobs,
+   never as the low-cardinality sampling index or a summary group dimension;
+   malformed or incomplete attribution is omitted. Query both the final-outcome
+   and route-lookup streams for the last hour with a token carrying
+   `Account Analytics Read`:
 
    ```sh
    npm run metrics -- summary 60
    ```
 
-   `accepted`, permanent-rejection, and tempfail outcomes must all be visible
-   during acceptance and rollback drills. Built-in Worker invocation metrics
-   remain the independent signal for runtime exceptions and resource failures.
+   The additive v2 output keeps final outcomes in `result` and adds
+   `route_lookup_result`, grouped only by the three fixed route enums. This
+   exposes combinations such as `result=cp_error` and
+   `route_kind=custom_domain` without exposing the domain. `accepted`,
+   permanent-rejection, and tempfail outcomes must all be visible during
+   acceptance and rollback drills. Built-in Worker invocation metrics remain
+   the independent signal for runtime exceptions and resource failures.
 
 ## Continuous canary
 
@@ -366,7 +486,46 @@ changes cell policy, or deletes mail.
 
 ## Rollback
 
-Disable first; this preserves the exact rules and directory rows for inspection:
+The email-edge Worker has a separate, guarded code-version rollback. First
+create a new plan for one exact older Cloudflare Worker version in a private,
+previously nonexistent file:
+
+```sh
+npm run rollback -- \
+  --candidate-version 01234567-89ab-4cde-8f01-23456789abcd \
+  --output /absolute/private/path/agent-email-rollback.json
+```
+
+The planner requires the candidate to have the same email-only handlers,
+runtime, complete binding inventory, shared KV, metrics dataset, rate
+limiters, managed-delivery flags, route-verification keyring, and secret
+binding names as the active version. It creates the file with mode `0600` and
+refuses to overwrite an existing path. Review the whole plan, its exact active
+and candidate version ids, and its invariant-contract digest. Then copy the
+plan's `apply_fence.sha256` into the explicit apply command:
+
+```sh
+npm run rollback -- \
+  --apply \
+  --plan /absolute/private/path/agent-email-rollback.json \
+  --plan-sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+```
+
+Apply requires an interactive terminal. Cloudflare Worker versions include
+secret state, and Wrangler may warn that the selected version restores older
+secret values. Stop and investigate unexpected differences; the tool never
+auto-accepts that warning. It rechecks the complete plan fence immediately
+before mutation and verifies the chosen version at 100 percent afterward.
+
+The first signed-route release has no compatible rollback candidate: the
+current pre-signing version lacks the signature/keyring contract and is
+deliberately rejected by the planner. Keep every delivery gate dark and use a
+forward fix until a later older signed release with the exact same operational
+contract exists.
+
+Literal-pilot route rollback is independent of Worker code rollback. Disable
+the reviewed rules first; this preserves the exact rules and directory rows
+for inspection:
 
 ```sh
 npm run routes -- disable /absolute/path/to/pilot.json

@@ -1,11 +1,14 @@
 #!/usr/bin/env node
-import { execFileSync } from "node:child_process";
 import { chmod, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  sourceIdentity,
+  validateBuildMetadata,
+} from "./source-identity.mjs";
+
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const repoRoot = resolve(root, "../../..");
 
 function parseArgs(argv) {
   const out = {};
@@ -25,64 +28,31 @@ function parseArgs(argv) {
   return out;
 }
 
-function git(...args) {
-  return execFileSync("git", ["-C", repoRoot, ...args], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  }).trim();
-}
-
 function releaseMetadata(args) {
   if (args.version != null) {
-    return {
+    return validateBuildMetadata({
       version: args.version,
       commit: args.commit,
       date: args.date,
-    };
+    });
   }
-
-  const dirty = git("status", "--porcelain");
-  if (dirty !== "") {
-    throw new Error("control-plane deployment requires a clean checkout");
-  }
-  const releaseTags = git("tag", "--points-at", "HEAD", "--list", "v*")
-    .split("\n")
-    .filter((tag) => /^v[0-9]+\.[0-9]+\.[0-9]+$/.test(tag));
-  if (releaseTags.length !== 1) {
-    throw new Error(
-      "control-plane deployment requires HEAD to have exactly one vMAJOR.MINOR.PATCH release tag",
-    );
-  }
-  return {
-    version: releaseTags[0].slice(1),
-    commit: git("rev-parse", "HEAD"),
-    date: git("show", "--no-show-signature", "-s", "--format=%cI", "HEAD"),
-  };
-}
-
-function validateMetadata(metadata) {
-  if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(metadata.version)) {
-    throw new Error("version must be MAJOR.MINOR.PATCH without a v prefix");
-  }
-  if (!/^[0-9a-f]{40}$/.test(metadata.commit)) {
-    throw new Error("commit must be a full lowercase Git SHA");
-  }
-  if (
-    !/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:Z|[+-][0-9]{2}:[0-9]{2})$/
-      .test(metadata.date) ||
-    Number.isNaN(Date.parse(metadata.date))
-  ) {
-    throw new Error("date must be an RFC3339 timestamp");
-  }
+  return sourceIdentity();
 }
 
 const args = parseArgs(process.argv.slice(2));
 const metadata = releaseMetadata(args);
-validateMetadata(metadata);
 const emailDirectoryID = String(process.env.EMAIL_DIRECTORY_KV_ID ?? "");
 if (!/^[0-9a-f]{32}$/.test(emailDirectoryID)) {
   throw new Error(
     "EMAIL_DIRECTORY_KV_ID must be the dedicated 32-character lowercase hex agent-email namespace id",
+  );
+}
+const routeSigningKeyID = String(
+  process.env.AGENT_EMAIL_ROUTE_SIGNING_KEY_ID ?? "",
+);
+if (!/^[a-z][a-z0-9_-]{0,63}$/.test(routeSigningKeyID)) {
+  throw new Error(
+    "AGENT_EMAIL_ROUTE_SIGNING_KEY_ID must identify the active route signing key",
   );
 }
 
@@ -99,7 +69,11 @@ const replacements = new Map([
   ["__WITSELF_VERSION__", metadata.version],
   ["__WITSELF_COMMIT__", metadata.commit],
   ["__WITSELF_DATE__", metadata.date],
+  ["__WITSELF_EDGE_RELEASE_VERSION__", metadata.version],
+  ["__WITSELF_EDGE_RELEASE_COMMIT__", metadata.commit],
+  ["__WITSELF_EDGE_RELEASE_DATE__", metadata.date],
   ["__EMAIL_DIRECTORY_KV_ID__", emailDirectoryID],
+  ["__AGENT_EMAIL_ROUTE_SIGNING_KEY_ID__", routeSigningKeyID],
 ]);
 let rendered = template;
 for (const [placeholder, value] of replacements) {

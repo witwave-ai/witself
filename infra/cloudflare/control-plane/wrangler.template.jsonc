@@ -13,6 +13,12 @@
 {
   "name": "witself-control-plane",
   "main": "src/index.js",
+  "secrets": {
+    "required": [
+      "AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY",
+      "CONTROL_PLANE_EDGE_TOKEN"
+    ]
+  },
   "compatibility_date": "2026-06-01",
   // Evacuation validates each completed R2 archive by streaming the full
   // gzip/tar payload through native decompression and SHA-256 before routing
@@ -84,6 +90,14 @@
     }
   ],
   "vars": {
+    // Immutable outer-Worker release identity. Cloudflare versions expose
+    // these plain-text bindings, allowing an authenticated verifier to prove
+    // the exact Worker version serving production traffic without relying on
+    // the separately rolled container's public version response.
+    "WITSELF_EDGE_RELEASE_VERSION": "__WITSELF_EDGE_RELEASE_VERSION__",
+    "WITSELF_EDGE_RELEASE_COMMIT": "__WITSELF_EDGE_RELEASE_COMMIT__",
+    "WITSELF_EDGE_RELEASE_DATE": "__WITSELF_EDGE_RELEASE_DATE__",
+    "AGENT_EMAIL_ROUTE_SIGNING_KEY_ID": "__AGENT_EMAIL_ROUTE_SIGNING_KEY_ID__",
     // New aliases are assigned only on the permanent primary domain. The
     // bounded legacy set keeps already-issued canonical pilot addresses
     // routable while their domain-qualified authority is retired naturally.

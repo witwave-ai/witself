@@ -33,6 +33,15 @@ const PRIMARY_DOMAIN = "witmail.net";
 const OPERATOR = { kind: "account_operator", id: "opr_alias" };
 const ADMIN = { kind: "platform_admin", id: "adm_alias" };
 
+function signTestRouteProjection(projection) {
+  return {
+    ...structuredClone(projection),
+    schema_version: 2,
+    route_signing_key_id: "route-test",
+    route_signature: `${"A".repeat(86)}==`,
+  };
+}
+
 test("managed email domains are bounded, ordered, canonical, and unique", () => {
   assert.deepEqual(managedRealmEmailDomains({
     AGENT_EMAIL_DOMAIN: PRIMARY_DOMAIN,
@@ -391,6 +400,8 @@ function registry(options = {}) {
       },
       fetch: fetchImpl,
       log: (value) => logs.push(String(value)),
+      signRouteProjection: options.signRouteProjection ??
+        (async (projection) => signTestRouteProjection(projection)),
       ...(options.afterJournalAppend
         ? { afterJournalAppend: options.afterJournalAppend }
         : {}),
@@ -919,10 +930,13 @@ test("customer request, approval, projection, idempotency, and tombstone are dur
     [
       "cache_ttl_seconds", "cell_audience", "controller_revision", "domain",
       "ingest_url", "realm_id", "realm_label", "route_kind",
-      "schema_version", "state", "updated_at",
+      "route_signature", "route_signing_key_id", "schema_version", "state",
+      "updated_at",
     ].sort(),
   );
-  assert.equal(projection.schema_version, 1);
+  assert.equal(projection.schema_version, 2);
+  assert.equal(projection.route_signing_key_id, "route-test");
+  assert.match(projection.route_signature, /^[A-Za-z0-9+/]{86}==$/);
   assert.equal(projection.domain, DOMAIN);
   assert.equal(projection.realm_label, "acme");
   assert.equal(projection.realm_id, REALM);
@@ -978,6 +992,23 @@ test("customer request, approval, projection, idempotency, and tombstone are dur
   });
   assert.equal(reused.response.status, 409);
   assert.match(reused.body.error, /claimed or tombstoned/);
+});
+
+test("managed route signing failure never publishes unsigned KV", async () => {
+  const fixture = registry({
+    signRouteProjection: async () => {
+      throw new Error("signer unavailable");
+    },
+  });
+  const created = await requestAlias(fixture.runtime, "signed-only");
+  assert.equal(created.response.status, 202);
+  const result = await approve(fixture.runtime, created.body.request);
+  assert.equal(result.response.status, 503);
+  assert.equal(result.body.code, "agent_email_route_signing_unavailable");
+  assert.equal(
+    fixture.emailDirectory.value(realmEmailRouteKey(DOMAIN, "signed-only")),
+    null,
+  );
 });
 
 test("custom-domain controller gets one exact read-only alias claim proof", async () => {

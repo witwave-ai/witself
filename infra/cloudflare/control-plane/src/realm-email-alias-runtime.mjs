@@ -14,6 +14,9 @@ import {
   realmEmailAliasClaimRouteFingerprint,
   validateRealmEmailAliasClaimProof,
 } from "./agent-email-custom-domain-route-contract.mjs";
+import {
+  signAgentEmailRouteProjection,
+} from "./agent-email-route-signature.mjs";
 
 const SCHEMA_VERSION = "witself.realm-email-alias.v1";
 const META_KEY = "meta";
@@ -1000,6 +1003,8 @@ export class DurableRealmEmailAliasRegistry {
     this.newClaimID = dependencies.newClaimID ?? claimID;
     this.fetchImpl = dependencies.fetch ?? ((...args) => globalThis.fetch(...args));
     this.log = dependencies.log ?? ((value) => console.log(value));
+    this.signRouteProjection = dependencies.signRouteProjection ??
+      ((projection) => signAgentEmailRouteProjection(projection, this.env));
     this.lanes = new Map();
     this.activeOperationalWork = 0;
     this.authorityJournal = new RealmEmailAliasJournalRuntime(
@@ -2490,17 +2495,32 @@ export class DurableRealmEmailAliasRegistry {
     return this.env.AGENT_EMAIL_DIRECTORY;
   }
 
-  async publishRoute(value) {
+  async signedRouteProjection(value) {
     try {
+      return await this.signRouteProjection(value);
+    } catch (error) {
+      if (error instanceof RegistryError) throw error;
+      fail(
+        "agent email route signing is unavailable",
+        503,
+        "agent_email_route_signing_unavailable",
+      );
+    }
+  }
+
+  async publishRoute(value) {
+    let signed;
+    try {
+      signed = await this.signedRouteProjection(value);
       await this.routingDirectory().put(
         realmEmailRouteKey(value.domain, value.realm_label),
-        JSON.stringify(value),
+        JSON.stringify(signed),
       );
     } catch (error) {
       if (error instanceof RegistryError) throw error;
       fail("agent email routing projection failed", 502);
     }
-    return value;
+    return signed;
   }
 
   async publishClaimRoute(claim, _meta, target, updatedAt = this.now().toISOString()) {
@@ -2812,7 +2832,7 @@ export class DurableRealmEmailAliasRegistry {
         accountID: canonical.account_id,
         kind: "canonical",
       });
-      return json(value);
+      return json(await this.signedRouteProjection(value));
     }
 
     const claim = await this.storage.get(claimKey(realmLabel));
@@ -2848,7 +2868,7 @@ export class DurableRealmEmailAliasRegistry {
       kind: "realm_alias",
       alias: claim.alias,
     });
-    return json(value);
+    return json(await this.signedRouteProjection(value));
   }
 
   async fetchCellCanonicalPage(accountID, target, cursor = null) {

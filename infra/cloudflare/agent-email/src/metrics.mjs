@@ -48,6 +48,30 @@ const ROUTE_LOOKUP_KINDS = new Set([
   "canonical", "alias", "custom_domain", "pilot", "unknown",
 ]);
 
+const RELEASE_VERSION = /^(?:(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)|development-[0-9a-f]{12}(?:-dirty)?)$/;
+const RELEASE_COMMIT = /^[0-9a-f]{40}$/;
+
+function validReleaseDate(value) {
+  return typeof value === "string" && value.length <= 64 &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) &&
+    !Number.isNaN(Date.parse(value));
+}
+
+// Release attribution is deployment metadata, not a sampling dimension. Keep
+// it out of indexes and only append the complete renderer-issued triple. A
+// missing or malformed binding therefore cannot leak an arbitrary runtime
+// value into Analytics Engine or create a partly attributable point.
+function releaseAttribution(env) {
+  const version = String(env?.WITSELF_EDGE_RELEASE_VERSION ?? "");
+  const commit = String(env?.WITSELF_EDGE_RELEASE_COMMIT ?? "");
+  const date = String(env?.WITSELF_EDGE_RELEASE_DATE ?? "");
+  if (!RELEASE_VERSION.test(version) || !RELEASE_COMMIT.test(commit) ||
+      !validReleaseDate(date)) {
+    return [];
+  }
+  return [version, commit, date];
+}
+
 function boundedNonNegative(value) {
   const number = Number(value);
   if (!Number.isFinite(number) || number < 0) return 0;
@@ -76,6 +100,7 @@ export function recordEdgeVerdict(env, fields) {
         EDGE_METRICS_SCHEMA,
         outcome,
         phase,
+        ...releaseAttribution(env),
       ],
       doubles: [
         1,
@@ -113,6 +138,7 @@ export function recordRouteLookup(env, fields) {
         result,
         evidence,
         routeKind,
+        ...releaseAttribution(env),
       ],
       doubles: [
         1,

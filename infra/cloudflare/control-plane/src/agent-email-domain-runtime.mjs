@@ -22,6 +22,9 @@ import {
   validateAgentEmailCustomDomainCellProjection,
   validateRealmEmailAliasClaimProof,
 } from "./agent-email-custom-domain-route-contract.mjs";
+import {
+  signAgentEmailRouteProjection,
+} from "./agent-email-route-signature.mjs";
 
 const SCHEMA_VERSION = "witself.agent-email-domain.v1";
 const RECOVERY_SCHEMA_VERSION = "witself.agent-email-domain-recovery.v1";
@@ -1114,6 +1117,8 @@ export class DurableAgentEmailDomainRegistry {
       dependencies.newVerificationClaimID ?? newVerificationClaimID;
     this.fetchImpl = dependencies.fetch ??
       ((...args) => globalThis.fetch(...args));
+    this.signRouteProjection = dependencies.signRouteProjection ??
+      ((projection) => signAgentEmailRouteProjection(projection, this.env));
     this.assertRequestActivationReady =
       dependencies.assertRequestActivationReady ??
       (() => this.defaultAssertRequestActivationReady());
@@ -4506,15 +4511,31 @@ export class DurableAgentEmailDomainRegistry {
       fail("isolated agent email routing directory is unavailable", 503);
     }
     try {
+      const signed = await this.signedRouteProjection(projection);
       await this.env.AGENT_EMAIL_DIRECTORY.put(
         agentEmailCustomDomainRouteKey(
           projection.domain,
           projection.realm_label,
         ),
-        JSON.stringify(projection),
+        JSON.stringify(signed),
       );
-    } catch {
+      return signed;
+    } catch (error) {
+      if (error instanceof DomainRegistryError) throw error;
       fail("custom domain routing projection failed", 502);
+    }
+  }
+
+  async signedRouteProjection(projection) {
+    try {
+      return await this.signRouteProjection(projection);
+    } catch (error) {
+      if (error instanceof DomainRegistryError) throw error;
+      fail(
+        "agent email route signing is unavailable",
+        503,
+        "agent_email_route_signing_unavailable",
+      );
     }
   }
 
@@ -4571,7 +4592,9 @@ export class DurableAgentEmailDomainRegistry {
         fail("custom domain route authority changed during projection", 409,
           "custom_domain_route_stale");
       }
-      await this.publishCustomDomainRoute(intent.edge_projection);
+      const signedProjection = await this.publishCustomDomainRoute(
+        intent.edge_projection,
+      );
       const completedAt = this.now().toISOString();
       const completed = {
         ...intent,
@@ -4583,7 +4606,7 @@ export class DurableAgentEmailDomainRegistry {
       };
       await this.atomicRaw([[key, completed]], [routeProjectionDueKey(intent)]);
       await this.scheduleNextAlarm().catch(() => {});
-      return json(intent.edge_projection);
+      return json(signedProjection);
     } catch (error) {
       const current = await this.storage.get(key);
       if (error instanceof DomainRegistryError &&

@@ -16,7 +16,7 @@ import {
   realmRouteKey,
   realmRouteProjectionIsFresh,
   recipientKey,
-  validateRealmRouteProjection,
+  verifyRealmRouteProjection,
   validateRuntimeConfig,
   validateRuntimeRecipient,
 } from "./directory.mjs";
@@ -249,6 +249,7 @@ async function controlPlaneRealmRoute(
   env,
   parsed,
   fetchAPI,
+  cryptoAPI,
   nowMS,
   minimumRevision = 0,
   missingIsTransient = false,
@@ -305,7 +306,13 @@ async function controlPlaneRealmRoute(
   }
   let route;
   try {
-    route = validateRealmRouteProjection(value, parsed.domain, parsed.realmLabel);
+    route = await verifyRealmRouteProjection(
+      value,
+      parsed.domain,
+      parsed.realmLabel,
+      env,
+      cryptoAPI,
+    );
     if (expectedRouteKind && route.route_kind !== expectedRouteKind) {
       throw new Error("realm route projection kind is inconsistent");
     }
@@ -328,6 +335,7 @@ async function knownControlPlaneRealmRoute(
   env,
   parsed,
   fetchAPI,
+  cryptoAPI,
   nowMS,
   lookup,
   state,
@@ -340,6 +348,7 @@ async function knownControlPlaneRealmRoute(
     env,
     parsed,
     fetchAPI,
+    cryptoAPI,
     nowMS,
     minimumRevision,
     missingIsTransient,
@@ -391,6 +400,7 @@ async function coldControlPlaneRealmRoute(
       env,
       parsed,
       fetchAPI,
+      cryptoAPI,
       nowMS,
       0,
       false,
@@ -424,10 +434,21 @@ function realmRouteDisposition(route) {
   }
 }
 
+function legacyPilotTrustAnchor(env) {
+  const ingestURL = String(env?.LEGACY_PILOT_TRUSTED_INGEST_URL ?? "");
+  const cellAudience = String(env?.LEGACY_PILOT_TRUSTED_CELL_AUDIENCE ?? "");
+  if (ingestURL === "" && cellAudience === "") return null;
+  if (ingestURL === "" || cellAudience === "") {
+    throw transient("tempfail_configuration", "configuration");
+  }
+  return { ingestURL, cellAudience };
+}
+
 async function projectedRealmRoute(
   env,
   parsed,
   fetchAPI,
+  cryptoAPI,
   nowMS,
   projectedValue,
   uncertainDirectory = false,
@@ -436,7 +457,13 @@ async function projectedRealmRoute(
 ) {
   let route;
   try {
-    route = validateRealmRouteProjection(projectedValue, parsed.domain, parsed.realmLabel);
+    route = await verifyRealmRouteProjection(
+      projectedValue,
+      parsed.domain,
+      parsed.realmLabel,
+      env,
+      cryptoAPI,
+    );
     if (expectedRouteKind && route.route_kind !== expectedRouteKind) {
       throw new Error("realm route projection kind is inconsistent");
     }
@@ -445,6 +472,7 @@ async function projectedRealmRoute(
       env,
       parsed,
       fetchAPI,
+      cryptoAPI,
       nowMS,
       lookupContext.uncertain,
       lookupContext.state,
@@ -463,6 +491,7 @@ async function projectedRealmRoute(
     env,
     parsed,
     fetchAPI,
+    cryptoAPI,
     nowMS,
     knownLookup,
     lookupContext.state,
@@ -474,6 +503,12 @@ async function projectedRealmRoute(
 }
 
 async function legacyPilotRoute(env, parsed, envelopeTo) {
+  // The retired literal-pilot directory is unsigned legacy data. It may only
+  // narrow an immutable version-bound destination, never supply one. The
+  // production Worker intentionally omits both anchors, so this lane tempfails
+  // before KV or MIME until a separately reviewed build binds both values.
+  const trustAnchor = legacyPilotTrustAnchor(env);
+  if (!trustAnchor) throw transient("tempfail_disabled", "configuration");
   const configValue = await directoryJSON(env.EMAIL_DIRECTORY, CONFIG_KEY);
   if (configValue == null) return null;
   // A corrupt legacy row must not poison lookups for unrelated production
@@ -486,6 +521,10 @@ async function legacyPilotRoute(env, parsed, envelopeTo) {
   try {
     config = validateRuntimeConfig(configValue);
   } catch {
+    throw transient("tempfail_configuration", "configuration");
+  }
+  if (config.ingest_url !== trustAnchor.ingestURL ||
+      config.cell_audience !== trustAnchor.cellAudience) {
     throw transient("tempfail_configuration", "configuration");
   }
   if (!config.enabled) throw transient("tempfail_disabled", "configuration");
@@ -514,8 +553,8 @@ async function legacyPilotRoute(env, parsed, envelopeTo) {
       route_kind: "pilot",
       state: "applied",
       realm_id: recipientValue.realm_id,
-      cell_audience: recipientValue.cell_audience,
-      ingest_url: recipientValue.ingest_url,
+      cell_audience: trustAnchor.cellAudience,
+      ingest_url: trustAnchor.ingestURL,
     },
   };
 }
@@ -581,6 +620,7 @@ async function resolveRealmRoute(
       env,
       parsed,
       fetchAPI,
+      cryptoAPI,
       nowMS,
       lookupContext.uncertain,
       state,
@@ -595,6 +635,7 @@ async function resolveRealmRoute(
       env,
       parsed,
       fetchAPI,
+      cryptoAPI,
       nowMS,
       projected.value,
       false,
@@ -603,31 +644,6 @@ async function resolveRealmRoute(
     );
   }
 
-  if (routeMode === "primary") {
-    let legacy;
-    try {
-      legacy = await legacyPilotRoute(env, parsed, envelopeTo);
-    } catch (error) {
-      if (error?.[EDGE_METRIC]?.outcome === "tempfail_disabled") {
-        emitRouteLookupMetric(
-          env,
-          { ...lookupContext.known, routeKind: "pilot" },
-          "legacy",
-        );
-      } else {
-        emitRouteLookupMetric(env, lookupContext.uncertain, "kv_error");
-      }
-      throw error;
-    }
-    if (legacy != null) {
-      emitRouteLookupMetric(
-        env,
-        { ...lookupContext.known, routeKind: "pilot" },
-        "legacy",
-      );
-      return legacy;
-    }
-  }
   const fallback = await coldControlPlaneRealmRoute(
     env,
     parsed,

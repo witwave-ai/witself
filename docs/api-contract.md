@@ -746,11 +746,25 @@ The schema-88 dark routing slice adds a provision-token cell projection and
 the derived control-plane-to-edge routing path for
 `agent.realm-alias@customer-domain`. The binding is exact across verified
 domain allocation, realm-alias claim, realm, and account. It reuses
-`GET /v1/email/realm-routes/{domain}/{realm_label}`, the schema-v1 KV route
-union, and the existing signed ingestion envelope; it adds no signed header.
-Both control-plane routing controls and the independent Email Worker delivery
-gate are absent, so the slice is fake/offline acceptance only and still makes
-no DNS, MX, provider, Email Routing, live route, or delivery change.
+`GET /v1/email/realm-routes/{domain}/{realm_label}` and the existing signed
+ingestion envelope; it adds no route-provenance relay header, because the route
+signature is a directory field verified at the edge. The route-kind union is a
+strict, flat, scalar, unsigned schema-v1 inner projection. The control plane
+never returns or publishes that inner value directly: every successful
+response from that route and every dynamic-route KV value is its signed
+schema-v2 form, with
+`route_signing_key_id` and `route_signature` added to the same flat object.
+The Email Worker verifies that Ed25519 signature and the exact domain/label and
+route-kind binding before it trusts `cell_audience` or `ingest_url`, and before
+it reads raw MIME. Unsigned v1, malformed v2, an unknown key id, or any mutated
+signed field fails closed through authenticated control-plane fallback and, if
+that does not yield a valid signed route, a temporary SMTP failure. A missing,
+invalid, or failed control-plane signer is a retryable HTTP 503
+`agent_email_route_signing_unavailable` condition and never publishes an
+unsigned KV value. Both custom-domain control-plane routing controls and the
+independent custom-domain Email Worker delivery gate are absent, so the slice
+is fake/offline acceptance only and still makes no DNS, MX, provider, Email
+Routing, live route, or delivery change.
 
 Operational endpoints such as `GET /metrics` are server operations endpoints,
 not versioned product API routes. `/metrics` should be served from the dedicated
