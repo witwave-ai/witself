@@ -4,9 +4,10 @@
   "type": "module",
   "description": "Isolated Cloudflare Email Worker for the capability-limited Witself receive pilot",
   "scripts": {
+    "assert:custom-domain-dark": "node scripts/assert-custom-domain-dark.mjs",
     "canary": "node scripts/canary.mjs",
     "config": "node scripts/render-wrangler.mjs",
-    "deploy": "node scripts/render-wrangler.mjs && wrangler deploy --config wrangler.generated.jsonc",
+    "deploy": "node scripts/render-wrangler.mjs && npm run assert:custom-domain-dark && wrangler deploy --config wrangler.generated.jsonc && npm run assert:custom-domain-dark",
     "directory": "node scripts/directory.mjs",
     "metrics": "node scripts/metrics.mjs",
     "routes": "node scripts/routes.mjs",

@@ -12,6 +12,16 @@ import {
   canonicalJSONString,
   isAgentEmailDomainVerificationRefresh,
 } from "./agent-email-domain-journal.mjs";
+import {
+  AGENT_EMAIL_CUSTOM_DOMAIN_ROUTE_INTENT_SCHEMA_VERSION,
+  agentEmailCustomDomainRouteKey,
+  buildAgentEmailCustomDomainCellProjection,
+  buildAgentEmailCustomDomainRouteProjection,
+  cellAgentEmailCustomDomainRouteURL,
+  realmEmailAliasClaimRouteFingerprint,
+  validateAgentEmailCustomDomainCellProjection,
+  validateRealmEmailAliasClaimProof,
+} from "./agent-email-custom-domain-route-contract.mjs";
 
 const SCHEMA_VERSION = "witself.agent-email-domain.v1";
 const RECOVERY_SCHEMA_VERSION = "witself.agent-email-domain-recovery.v1";
@@ -27,10 +37,11 @@ const MAX_REASON_LENGTH = 500;
 const DEFAULT_LIST_LIMIT = 50;
 const MAX_CHALLENGE_DOMAIN_LENGTH = 231;
 const MAX_REQUEST_ID_MINT_ATTEMPTS = 8;
-// A lifecycle page can update both a request and its verified allocation.
-// Forty leaves journal room for meta, audit, fences, intents, and usage under
-// the hard 100-authority-change entry limit.
+// Keep the established dark/no-binding page size. Once sparse custom-route
+// bindings exist, a smaller page leaves journal room for each request's
+// durable convergence obligation under the hard 100-authority-change limit.
 const RECONCILE_PAGE_LIMIT = 40;
+const ROUTE_AWARE_RECONCILE_PAGE_LIMIT = 30;
 const VERIFICATION_RECONCILE_LIMIT = 5;
 const VERIFICATION_WORK_SCHEMA =
   "witself.agent-email-domain-verification-work.v1";
@@ -47,11 +58,40 @@ const PENDING_CHALLENGE_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const RECONCILE_RETRY_MS = 1_000;
 const RECONCILE_MAX_RETRY_MS = 15 * 60 * 1_000;
 const ALARM_BATCH_LIMIT = 5;
+const ROUTE_PROJECTION_RETRY_MS = 5 * 60 * 1_000;
+const ROUTE_PROJECTION_MAX_RETRY_MS = 60 * 60 * 1_000;
+const ROUTE_CONVERGENCE_PAGE_LIMIT = 4;
+const ROUTE_CONVERGENCE_RETRY_MS = 1_000;
+const ROUTE_CONVERGENCE_MAX_RETRY_MS = 60 * 60 * 1_000;
+const ROUTE_SOURCE_INTENT_SCHEMA =
+  "witself.agent-email-custom-domain-route-source-intent.v1";
+const ROUTE_ALIAS_TASK_SCHEMA =
+  "witself.agent-email-custom-domain-route-alias-task.v1";
+const ROUTE_BINDING_SCHEMA =
+  "witself.agent-email-custom-domain-route-binding.v1";
+const REALM_ALIAS_CLAIM_PAGE_SCHEMA =
+  "witself.realm-email-alias-claim-page.v1";
 
 function reconcileRetryDelay(failureCount) {
   return Math.min(
     RECONCILE_RETRY_MS * 2 ** Math.min(Math.max(failureCount - 1, 0), 10),
     RECONCILE_MAX_RETRY_MS,
+  );
+}
+
+function routeProjectionRetryDelay(failureCount) {
+  return Math.min(
+    ROUTE_PROJECTION_RETRY_MS *
+      2 ** Math.min(Math.max(failureCount - 1, 0), 8),
+    ROUTE_PROJECTION_MAX_RETRY_MS,
+  );
+}
+
+function routeConvergenceRetryDelay(failureCount) {
+  return Math.min(
+    ROUTE_CONVERGENCE_RETRY_MS *
+      2 ** Math.min(Math.max(failureCount - 1, 0), 12),
+    ROUTE_CONVERGENCE_MAX_RETRY_MS,
   );
 }
 
@@ -425,6 +465,70 @@ function verificationRefreshKey(requestID) {
   return `verification-refresh:${requestID}`;
 }
 
+function routeProjectionIntentKey(requestID, realmLabel) {
+  return `route-projection-intent:${requestID}:${realmLabel}`;
+}
+
+function routeBindingKey(requestID, claimID) {
+  return `route-binding:${requestID}:${claimID}`;
+}
+
+function routeBindingPrefix(requestID) {
+  return `route-binding:${requestID}:`;
+}
+
+function routeBindingAliasPrefix(accountID, realmID, claimID) {
+  return `route-binding-alias:${accountID}:${realmID}:${claimID}:`;
+}
+
+function routeBindingAliasKey(binding) {
+  return `${routeBindingAliasPrefix(
+    binding.account_id,
+    binding.realm_id,
+    binding.realm_alias_claim_id,
+  )}${binding.domain_request_id}`;
+}
+
+function routeProjectionDueKey(intent) {
+  if (!Number.isSafeInteger(intent?.retry_at_ms) || intent.retry_at_ms < 0 ||
+      !REQUEST_ID_PATTERN.test(intent?.domain_request_id ?? "") ||
+      typeof intent?.realm_label !== "string") return null;
+  return `route-projection-due:${String(intent.retry_at_ms).padStart(16, "0")}:` +
+    `${intent.domain_request_id}:${intent.realm_label}`;
+}
+
+function routeSourceIntentKey(requestID) {
+  return `route-source-intent:${requestID}`;
+}
+
+function routeSourceAccountPrefix(accountID) {
+  return `route-source-account:${accountID}:`;
+}
+
+function routeSourceAccountKey(intent) {
+  return `${routeSourceAccountPrefix(intent.account_id)}` +
+    intent.domain_request_id;
+}
+
+function routeSourceDueKey(intent) {
+  if (!Number.isSafeInteger(intent?.retry_at_ms) || intent.retry_at_ms < 0 ||
+      !REQUEST_ID_PATTERN.test(intent?.domain_request_id ?? "")) return null;
+  return `route-source-due:${String(intent.retry_at_ms).padStart(16, "0")}:` +
+    intent.domain_request_id;
+}
+
+function routeAliasTaskKey(accountID, realmLabel) {
+  return `route-alias-task:${accountID}:${realmLabel}`;
+}
+
+function routeAliasDueKey(task) {
+  if (!Number.isSafeInteger(task?.retry_at_ms) || task.retry_at_ms < 0 ||
+      !ACCOUNT_ID_PATTERN.test(task?.account_id ?? "") ||
+      typeof task?.realm_label !== "string") return null;
+  return `route-alias-due:${String(task.retry_at_ms).padStart(16, "0")}:` +
+    `${task.account_id}:${task.realm_label}`;
+}
+
 function domainStorageKey(domain) {
   return `domain:${domain}`;
 }
@@ -680,6 +784,27 @@ export function agentEmailCustomDomainVerificationEnabled(env = {}) {
   return String(
     env.CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED ?? "",
   ) === "true";
+}
+
+export function agentEmailCustomDomainRoutingEnabled(env = {}) {
+  return String(
+    env.CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ENABLED ?? "",
+  ) === "true";
+}
+
+export function agentEmailCustomDomainRoutingEnabledForAccount(
+  env = {},
+  accountID,
+) {
+  if (!agentEmailCustomDomainRoutingEnabled(env) ||
+      !ACCOUNT_ID_PATTERN.test(accountID ?? "")) return false;
+  const raw = String(
+    env.CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ACCOUNT_ALLOWLIST ?? "",
+  );
+  if (!raw || raw !== raw.trim()) return false;
+  const accounts = raw.split(",");
+  if (accounts.some((value) => !ACCOUNT_ID_PATTERN.test(value))) return false;
+  return new Set(accounts).has(accountID);
 }
 
 export function agentEmailCustomDomainRequestsEnabledForAccount(
@@ -971,9 +1096,10 @@ export async function runScheduledAgentEmailDomainVerification(
 
 /**
  * One globally named Durable Object owns pending requests and permanently
- * allocated customer domains. Ownership verification is authority-only: this
- * runtime still does not activate mail, publish edge routes, or project state
- * to a cell.
+ * allocated customer domains. Ownership and verification remain the only
+ * canonical authority here. The optional dark routing lane derives a fenced,
+ * rebuildable cell/KV projection from that authority plus one exact alias
+ * claim proof; it never turns projection state into ownership authority.
  */
 export class DurableAgentEmailDomainRegistry {
   constructor(ctx, env, dependencies = {}) {
@@ -986,6 +1112,8 @@ export class DurableAgentEmailDomainRegistry {
       dependencies.newChallengeToken ?? newChallengeToken;
     this.newVerificationClaimID =
       dependencies.newVerificationClaimID ?? newVerificationClaimID;
+    this.fetchImpl = dependencies.fetch ??
+      ((...args) => globalThis.fetch(...args));
     this.assertRequestActivationReady =
       dependencies.assertRequestActivationReady ??
       (() => this.defaultAssertRequestActivationReady());
@@ -1024,6 +1152,9 @@ export class DurableAgentEmailDomainRegistry {
       await this.reconcileDuePlanIntents();
       await this.reconcileDueGrace();
       await this.reconcileDueChallengeExpiries();
+      await this.reconcileDueRouteSources();
+      await this.reconcileDueRouteAliases();
+      await this.reconcileDueRouteProjections();
       await this.scheduleNextAlarm();
     });
   }
@@ -1124,6 +1255,12 @@ export class DurableAgentEmailDomainRegistry {
           return await this.reconcilePlan(input);
         case "/account-lifecycle/reconcile":
           return await this.reconcileAccountLifecycle(input);
+        case "/route/get":
+          return await this.getCustomDomainRoute(input);
+        case "/route/alias-convergence/enqueue":
+          return await this.enqueueCustomDomainAliasConvergence(input);
+        case "/route/alias-convergence/status":
+          return await this.customDomainAliasConvergenceStatus(input);
         default:
           return errorResponse("domain registry endpoint not found", 404);
       }
@@ -1320,6 +1457,9 @@ export class DurableAgentEmailDomainRegistry {
       "plan-due:",
       "plan-grace-due:",
       "challenge-expiry-due:",
+      "route-source-due:",
+      "route-alias-due:",
+      "route-projection-due:",
     ];
     const deadlines = [];
     for (const prefix of prefixes) {
@@ -1732,6 +1872,7 @@ export class DurableAgentEmailDomainRegistry {
     ];
     const deletes = [verificationWorkKey(id), verificationRefreshKey(id)];
     const allocation = await this.storage.get(domainStorageKey(current.domain));
+    let routeAllocation = null;
     if (assertLegacyDomainMirror(allocation, current)) {
       // v0.0.235 mirrored every request at domain:<domain>. Preserve that
       // already-durable non-reuse decision while the historical request moves.
@@ -1741,7 +1882,7 @@ export class DurableAgentEmailDomainRegistry {
           allocation.state !== "allocated") {
         fail("custom inbound domain allocation is invalid", 503);
       }
-      entries.push([domainStorageKey(current.domain), {
+      routeAllocation = {
         ...allocation,
         state: "retired",
         allocation_revision: (allocation.allocation_revision ?? 1) + 1,
@@ -1751,7 +1892,8 @@ export class DurableAgentEmailDomainRegistry {
           retired_by: actor.id,
           retired_at: mutation.now,
         },
-      }]);
+      };
+      entries.push([domainStorageKey(current.domain), routeAllocation]);
     }
     if (["pending_verification", "verified"].includes(current.state)) {
       const usage = await this.accountUsage(current.account_id);
@@ -1788,6 +1930,14 @@ export class DurableAgentEmailDomainRegistry {
       schema_version: SCHEMA_VERSION,
       request: publicRequest(updated),
     };
+    if (routeAllocation) {
+      await this.appendCustomDomainRouteSourceIntent(
+        entries,
+        deletes,
+        updated,
+        routeAllocation,
+      );
+    }
     entries.push([idempotencyStorageKey(idempotencyScope, key), {
       fingerprint: fp,
       status: 200,
@@ -1806,7 +1956,19 @@ export class DurableAgentEmailDomainRegistry {
       ...(cursor ? { startAfter: cursor } : {}),
     });
     const rows = [...listed.entries()];
-    const page = rows.slice(0, RECONCILE_PAGE_LIMIT);
+    const candidates = rows.slice(0, RECONCILE_PAGE_LIMIT);
+    let pageLimit = RECONCILE_PAGE_LIMIT;
+    for (const [, requestID] of candidates) {
+      const bindings = await this.storage.list({
+        prefix: routeBindingPrefix(requestID),
+        limit: 1,
+      });
+      if (bindings.size > 0) {
+        pageLimit = ROUTE_AWARE_RECONCILE_PAGE_LIMIT;
+        break;
+      }
+    }
+    const page = rows.slice(0, pageLimit);
     const requests = [];
     for (const [indexKey, requestID] of page) {
       const request = await this.storage.get(requestStorageKey(requestID));
@@ -1817,7 +1979,7 @@ export class DurableAgentEmailDomainRegistry {
     }
     return {
       requests,
-      next_cursor: rows.length > RECONCILE_PAGE_LIMIT && page.length > 0
+      next_cursor: rows.length > pageLimit && page.length > 0
         ? page.at(-1)[0]
         : null,
     };
@@ -1942,12 +2104,78 @@ export class DurableAgentEmailDomainRegistry {
     };
   }
 
+  async drainOneAccountRouteSource(accountID) {
+    const listed = await this.storage.list({
+      prefix: routeSourceAccountPrefix(accountID),
+      limit: 1,
+    });
+    const first = [...listed.entries()][0];
+    if (!first) return { complete: true, changed: 0 };
+    const [indexKey, intentKey] = first;
+    const intent = typeof intentKey === "string"
+      ? await this.storage.get(intentKey)
+      : null;
+    if (!intent || routeSourceAccountKey(intent) !== indexKey) {
+      fail("custom domain route source account index is invalid", 503);
+    }
+    const result = await this.drainCustomDomainRouteSourceIntent(intent);
+    const remaining = await this.storage.list({
+      prefix: routeSourceAccountPrefix(accountID),
+      limit: 1,
+    });
+    return {
+      complete: remaining.size === 0,
+      changed: result.changed ?? 0,
+    };
+  }
+
+  async finishPlanRouteConvergence(intent) {
+    const routes = await this.drainOneAccountRouteSource(intent.account_id);
+    if (!routes.complete) {
+      const continued = {
+        ...intent,
+        state: "route_converging",
+        failure_count: 0,
+        retry_at_ms: this.now().getTime() + ROUTE_CONVERGENCE_RETRY_MS,
+        updated_at: this.now().toISOString(),
+      };
+      await this.atomic([
+        [planIntentKey(intent.account_id), continued],
+        [planDueKey(continued), intent.account_id],
+      ], [planDueKey(intent)].filter(Boolean));
+      await this.scheduleNextAlarm().catch(() => {});
+      return {
+        changed: routes.changed,
+        complete: false,
+        registry_revision: (await this.ensureMeta()).registry_revision,
+      };
+    }
+    await this.atomic([[planFenceKey(intent.account_id), {
+      account_id: intent.account_id,
+      committed_revision: intent.plan_revision,
+      committed_snapshot_hash: intent.plan_snapshot_hash,
+      feature_enabled: intent.feature_enabled,
+      domain_limit: intent.domain_limit,
+      updated_at: this.now().toISOString(),
+    }]], [planIntentKey(intent.account_id), planDueKey(intent)].filter(Boolean));
+    await this.scheduleNextAlarm().catch(() => {});
+    return {
+      changed: routes.changed,
+      complete: true,
+      registry_revision: (await this.ensureMeta()).registry_revision,
+    };
+  }
+
   async applyPlanIntent(intent) {
+    if (intent.state === "route_converging") {
+      return this.finishPlanRouteConvergence(intent);
+    }
     const page = await this.activeRequestPage(intent.account_id, intent.cursor);
     const changed = [];
     const derivedDeletes = [];
     const derivedEntries = [];
     let position = intent.position ?? 0;
+    let routeWork = false;
     for (const { index_key: indexKey, request } of page.requests) {
       if (!["pending_verification", "verified"].includes(request.state)) {
         derivedDeletes.push(indexKey);
@@ -2013,10 +2241,41 @@ export class DurableAgentEmailDomainRegistry {
         );
         if (assertLegacyDomainMirror(allocation, item.previous)) {
           entries.push([domainStorageKey(item.previous.domain), item.next]);
+        } else if (item.next.state === "verified") {
+          if (!allocation || allocation.source_request_id !== item.next.id ||
+              allocation.state !== "allocated") {
+            fail("custom inbound domain allocation is invalid", 503);
+          }
+          const source = await this.appendCustomDomainRouteSourceIntent(
+            entries,
+            deletes,
+            item.next,
+            allocation,
+          );
+          routeWork ||= Boolean(source);
         }
       }
     }
-    if (finalPage) {
+    const pendingRouteWork = routeWork || (finalPage &&
+      (await this.storage.list({
+        prefix: routeSourceAccountPrefix(intent.account_id),
+        limit: 1,
+      })).size > 0);
+    if (finalPage && pendingRouteWork) {
+      const continued = {
+        ...intent,
+        state: "route_converging",
+        cursor: null,
+        position,
+        failure_count: 0,
+        retry_at_ms: this.now().getTime() + ROUTE_CONVERGENCE_RETRY_MS,
+        updated_at: this.now().toISOString(),
+      };
+      entries.push(
+        [planIntentKey(intent.account_id), continued],
+        [planDueKey(continued), intent.account_id],
+      );
+    } else if (finalPage) {
       deletes.push(planIntentKey(intent.account_id));
       entries.push([planFenceKey(intent.account_id), {
         account_id: intent.account_id,
@@ -2044,7 +2303,7 @@ export class DurableAgentEmailDomainRegistry {
     await this.scheduleNextAlarm().catch(() => {});
     return {
       changed: changed.length,
-      complete: finalPage,
+      complete: finalPage && !pendingRouteWork,
       registry_revision: (await this.ensureMeta()).registry_revision,
     };
   }
@@ -2180,7 +2439,8 @@ export class DurableAgentEmailDomainRegistry {
           changed: 0,
         });
       }
-      if (relation === 0 && pending.state === "cell_committed") {
+      if (relation === 0 &&
+          ["cell_committed", "route_converging"].includes(pending.state)) {
         const result = await this.applyPlanIntent(pending);
         return json({
           schema_version: SCHEMA_VERSION,
@@ -2239,7 +2499,9 @@ export class DurableAgentEmailDomainRegistry {
         await this.storage.delete(due);
         continue;
       }
-      if (intent.state !== "cell_committed") continue;
+      if (!["cell_committed", "route_converging"].includes(intent.state)) {
+        continue;
+      }
       try {
         await this.applyPlanIntent(intent);
       } catch {
@@ -2291,11 +2553,58 @@ export class DurableAgentEmailDomainRegistry {
   }
 
   async applyLifecycleIntent(intent) {
+    if (intent.phase === "route_converging") {
+      const routes = await this.drainOneAccountRouteSource(intent.account_id);
+      if (!routes.complete) {
+        const continued = {
+          ...intent,
+          phase: "route_converging",
+          failure_count: 0,
+          retry_at_ms: this.now().getTime() + ROUTE_CONVERGENCE_RETRY_MS,
+          updated_at: this.now().toISOString(),
+        };
+        await this.atomic([
+          [lifecycleIntentKey(intent.account_id), continued],
+          [lifecycleDueKey(continued), intent.account_id],
+        ], [lifecycleDueKey(intent)].filter(Boolean));
+        await this.scheduleNextAlarm().catch(() => {});
+        return {
+          schema_version: SCHEMA_VERSION,
+          account_id: intent.account_id,
+          operation_id: intent.operation_id,
+          epoch: intent.epoch,
+          action: intent.action,
+          changed: routes.changed,
+          complete: false,
+        };
+      }
+      await this.atomic([[lifecycleFenceKey(intent.account_id), {
+        account_id: intent.account_id,
+        operation_id: intent.operation_id,
+        epoch: intent.epoch,
+        action: intent.action,
+        completed_at: this.now().toISOString(),
+      }]], [
+        lifecycleIntentKey(intent.account_id),
+        lifecycleDueKey(intent),
+      ].filter(Boolean));
+      await this.scheduleNextAlarm().catch(() => {});
+      return {
+        schema_version: SCHEMA_VERSION,
+        account_id: intent.account_id,
+        operation_id: intent.operation_id,
+        epoch: intent.epoch,
+        action: intent.action,
+        changed: routes.changed,
+        complete: true,
+      };
+    }
     const page = await this.activeRequestPage(intent.account_id, intent.cursor);
     const changedAt = this.now().toISOString();
     const entries = [];
     const deletes = [lifecycleDueKey(intent)].filter(Boolean);
     const changed = [];
+    let routeWork = false;
     let pendingRetired = 0;
     let allocatedRetired = 0;
     for (const { index_key: indexKey, request } of page.requests) {
@@ -2318,6 +2627,7 @@ export class DurableAgentEmailDomainRegistry {
         action: intent.action,
       };
       let desired;
+      let routeAllocation = null;
       if (intent.action === "retire") {
         desired = {
           ...request,
@@ -2350,13 +2660,14 @@ export class DurableAgentEmailDomainRegistry {
               allocation.state !== "allocated") {
             fail("custom inbound domain allocation is invalid", 503);
           }
-          entries.push([domainStorageKey(request.domain), {
+          routeAllocation = {
             ...allocation,
             state: "retired",
             allocation_revision: (allocation.allocation_revision ?? 1) + 1,
             updated_at: desired.updated_at,
             retirement: { ...desired.retirement },
-          }]);
+          };
+          entries.push([domainStorageKey(request.domain), routeAllocation]);
         }
       } else {
         const lifecycleSuspended = intent.action === "suspend";
@@ -2395,6 +2706,19 @@ export class DurableAgentEmailDomainRegistry {
       );
       if (assertLegacyDomainMirror(legacyMirror, request)) {
         entries.push([domainStorageKey(request.domain), desired]);
+      } else if (request.state === "verified") {
+        routeAllocation ??= legacyMirror;
+        if (!routeAllocation ||
+            routeAllocation.source_request_id !== request.id) {
+          fail("custom inbound domain allocation is invalid", 503);
+        }
+        const source = await this.appendCustomDomainRouteSourceIntent(
+          entries,
+          deletes,
+          desired,
+          routeAllocation,
+        );
+        routeWork ||= Boolean(source);
       }
     }
     if (intent.action === "retire" && allocatedRetired > 0) {
@@ -2425,8 +2749,27 @@ export class DurableAgentEmailDomainRegistry {
       );
       entries.push([META_KEY, mutation.meta], [mutation.audit_key, mutation.audit]);
     }
-    const complete = page.next_cursor === null;
-    if (complete) {
+    const finalPage = page.next_cursor === null;
+    const pendingRouteWork = finalPage && (routeWork ||
+      (await this.storage.list({
+        prefix: routeSourceAccountPrefix(intent.account_id),
+        limit: 1,
+      })).size > 0);
+    const complete = finalPage && !pendingRouteWork;
+    if (finalPage && pendingRouteWork) {
+      const continued = {
+        ...intent,
+        phase: "route_converging",
+        cursor: null,
+        failure_count: 0,
+        retry_at_ms: this.now().getTime() + ROUTE_CONVERGENCE_RETRY_MS,
+        updated_at: this.now().toISOString(),
+      };
+      entries.push(
+        [lifecycleIntentKey(intent.account_id), continued],
+        [lifecycleDueKey(continued), intent.account_id],
+      );
+    } else if (complete) {
       deletes.push(lifecycleIntentKey(intent.account_id));
       entries.push([lifecycleFenceKey(intent.account_id), {
         account_id: intent.account_id,
@@ -2514,6 +2857,7 @@ export class DurableAgentEmailDomainRegistry {
       const now = this.now();
       intent = {
         ...requested,
+        phase: "requests",
         cursor: null,
         failure_count: 0,
         retry_at_ms: now.getTime(),
@@ -3109,6 +3453,7 @@ export class DurableAgentEmailDomainRegistry {
     }
     const entries = [];
     const deletes = [];
+    let routeAllocation = null;
     const previousDue = options.previous_due ??
       effectiveVerificationDueKey(current, previousRefresh);
     if (previousDue) deletes.push(previousDue);
@@ -3135,7 +3480,7 @@ export class DurableAgentEmailDomainRegistry {
         ownership_proof: null,
         retirement: null,
       } : existing;
-      entries.push([domainStorageKey(current.domain), {
+      routeAllocation = {
         ...allocation,
         allocation_revision: existing && !legacyMirror
           ? (existing.allocation_revision ?? 1) + 1
@@ -3146,7 +3491,8 @@ export class DurableAgentEmailDomainRegistry {
           rrset_sha256: result.rrset_sha256,
           dnssec_authenticated: result.dnssec_authenticated === true,
         },
-      }]);
+      };
+      entries.push([domainStorageKey(current.domain), routeAllocation]);
       const usage = await this.accountUsage(current.account_id);
       if (usage.open_requests < 1) {
         fail("custom inbound domain account usage is invalid", 503);
@@ -3173,7 +3519,7 @@ export class DurableAgentEmailDomainRegistry {
           allocation.state !== "allocated") {
         fail("custom inbound domain allocation is invalid", 503);
       }
-      entries.push([domainStorageKey(current.domain), {
+      routeAllocation = {
         ...allocation,
         allocation_revision: (allocation.allocation_revision ?? 1) + 1,
         updated_at: checkedAt,
@@ -3182,7 +3528,8 @@ export class DurableAgentEmailDomainRegistry {
           rrset_sha256: result.rrset_sha256,
           dnssec_authenticated: result.dnssec_authenticated === true,
         },
-      }]);
+      };
+      entries.push([domainStorageKey(current.domain), routeAllocation]);
     }
     const auditRequired = options.scheduled !== true ||
       !sameVerificationAuditOutcome(previousVerification, verification);
@@ -3232,6 +3579,22 @@ export class DurableAgentEmailDomainRegistry {
         status,
         body,
       }]);
+    }
+    if (desired.state === "verified") {
+      routeAllocation ??= await this.storage.get(
+        domainStorageKey(current.domain),
+      );
+      if (!routeAllocation ||
+          routeAllocation.source_request_id !== current.id ||
+          routeAllocation.state !== "allocated") {
+        fail("custom inbound domain allocation is invalid", 503);
+      }
+      await this.appendCustomDomainRouteSourceIntent(
+        entries,
+        deletes,
+        desired,
+        routeAllocation,
+      );
     }
     await this.atomic(entries, [
       ...deletes,
@@ -3355,6 +3718,11 @@ export class DurableAgentEmailDomainRegistry {
       [requestStorageKey(current.id), desired],
       [verificationDueKey(desired), desired.id],
     ];
+    const deletes = [
+      ...[previousDue].filter(Boolean),
+      verificationRefreshKey(current.id),
+      ...(Array.isArray(options.extra_deletes) ? options.extra_deletes : []),
+    ];
     if (options.scheduled !== true ||
         !sameVerificationAuditOutcome(
           previous,
@@ -3382,12 +3750,19 @@ export class DurableAgentEmailDomainRegistry {
     );
     if (assertLegacyDomainMirror(legacyMirror, current)) {
       entries.push([domainStorageKey(current.domain), desired]);
+    } else if (desired.state === "verified") {
+      if (!legacyMirror || legacyMirror.source_request_id !== current.id ||
+          legacyMirror.state !== "allocated") {
+        fail("custom inbound domain allocation is invalid", 503);
+      }
+      await this.appendCustomDomainRouteSourceIntent(
+        entries,
+        deletes,
+        desired,
+        legacyMirror,
+      );
     }
-    await this.atomic(entries, [
-      ...[previousDue].filter(Boolean),
-      verificationRefreshKey(current.id),
-      ...(Array.isArray(options.extra_deletes) ? options.extra_deletes : []),
-    ]);
+    await this.atomic(entries, deletes);
     await this.scheduleNextAlarm().catch(() => {});
   }
 
@@ -3423,18 +3798,33 @@ export class DurableAgentEmailDomainRegistry {
         verificationRefreshKey(current.id),
       );
       const refresh = effectiveVerificationRefresh(current, rawRefresh);
-      await this.atomic([
+      const entries = [
         [META_KEY, mutation.meta],
         [mutation.audit_key, mutation.audit],
         [requestStorageKey(current.id), updated],
-      ], [
+      ];
+      const deletes = [
         due,
         verificationDueKey(current),
         effectiveVerificationDueKey(current, refresh),
         storedVerificationRefreshDue(rawRefresh, current.id),
         verificationWorkKey(current.id),
         verificationRefreshKey(current.id),
-      ].filter(Boolean));
+      ].filter(Boolean);
+      const allocation = await this.storage.get(
+        domainStorageKey(current.domain),
+      );
+      if (!allocation || allocation.source_request_id !== current.id ||
+          allocation.state !== "allocated") {
+        fail("custom inbound domain allocation is invalid", 503);
+      }
+      await this.appendCustomDomainRouteSourceIntent(
+        entries,
+        deletes,
+        updated,
+        allocation,
+      );
+      await this.atomic(entries, deletes);
     }
   }
 
@@ -3530,6 +3920,1185 @@ export class DurableAgentEmailDomainRegistry {
         continue;
       }
       await this.expirePendingRequest(current);
+    }
+  }
+
+  assertCustomDomainRoutingEnabled(input = {}) {
+    if (input.routing_enabled !== true ||
+        !agentEmailCustomDomainRoutingEnabled(this.env)) {
+      fail("custom domain routing is not enabled", 409,
+        "custom_domain_routing_disabled");
+    }
+  }
+
+  async customDomainRouteCellTarget(accountID) {
+    const route = await this.env?.DIRECTORY?.get(`acct:${accountID}`, {
+      type: "json",
+    });
+    if (!route?.cell) fail("custom domain target account is not routed", 409);
+    const cell = await this.env.DIRECTORY.get(`cell:${route.cell}`, {
+      type: "json",
+    });
+    if (!cell?.endpoint || !cell?.provision_token) {
+      fail("custom domain target cell is not configured", 502);
+    }
+    let endpoint;
+    try {
+      endpoint = new URL(cell.endpoint);
+    } catch {
+      fail("custom domain target cell endpoint is invalid", 502);
+    }
+    if (endpoint.protocol !== "https:" || endpoint.username ||
+        endpoint.password || endpoint.search || endpoint.hash ||
+        !endpoint.hostname) {
+      fail("custom domain target cell endpoint is invalid", 502);
+    }
+    const audience = typeof cell.agent_email_audience === "string" &&
+        /^[a-z](?:[a-z0-9-]{0,126}[a-z0-9])?$/.test(
+          cell.agent_email_audience,
+        )
+      ? cell.agent_email_audience
+      : route.cell;
+    if (!/^[a-z](?:[a-z0-9-]{0,126}[a-z0-9])?$/.test(audience ?? "")) {
+      fail("custom domain target cell audience is invalid", 502);
+    }
+    const normalizedEndpoint = endpoint.toString().replace(/\/+$/, "");
+    return {
+      endpoint: normalizedEndpoint,
+      provision_token: cell.provision_token,
+      cell_audience: audience,
+      ingest_url: `${normalizedEndpoint}/v1/internal/agent-email:ingest`,
+    };
+  }
+
+  async realmAliasClaimProof(accountID, realmLabel) {
+    const namespace = this.env?.REALM_EMAIL_ALIASES;
+    if (!namespace || typeof namespace.idFromName !== "function" ||
+        typeof namespace.get !== "function") {
+      fail("realm email alias claim authority is unavailable", 503);
+    }
+    let response;
+    try {
+      const stub = namespace.get(namespace.idFromName(DEFAULT_REGISTRY_OBJECT_NAME));
+      response = await stub.fetch(
+        "https://realm-email-alias.internal/alias/claim-proof",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            account_id: accountID,
+            realm_label: realmLabel,
+          }),
+        },
+      );
+    } catch {
+      fail("realm email alias claim proof is unreachable", 502);
+    }
+    const body = await response.json().catch(() => null);
+    if (response.status === 404) {
+      fail("custom domain realm alias route not found", 404,
+        "custom_domain_route_not_found");
+    }
+    if (!response.ok) {
+      fail("realm email alias claim proof failed", 502);
+    }
+    try {
+      return validateRealmEmailAliasClaimProof(body, accountID, realmLabel);
+    } catch {
+      fail("realm email alias claim proof is inconsistent", 502);
+    }
+  }
+
+  async ensureCustomDomainRouteSubscriber(desired) {
+    const namespace = this.env?.REALM_EMAIL_ALIASES;
+    if (!namespace || typeof namespace.idFromName !== "function" ||
+        typeof namespace.get !== "function") {
+      fail("realm email alias claim authority is unavailable", 503);
+    }
+    let response;
+    try {
+      const stub = namespace.get(namespace.idFromName(DEFAULT_REGISTRY_OBJECT_NAME));
+      response = await stub.fetch(
+        "https://realm-email-alias.internal/alias/custom-domain-route-subscribe",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ claim_proof: desired.alias_proof }),
+        },
+      );
+    } catch {
+      fail("custom-domain alias subscription is unreachable", 502);
+    }
+    const body = await response.json().catch(() => null);
+    if (response.status === 409 &&
+        body?.code === "custom_domain_subscription_realm_closed" &&
+        desired.edge_projection.state === "retired") {
+      // A binding may have been journaled immediately before its first
+      // subscription attempt while the realm concurrently closed. Since the
+      // subscriber acknowledgement precedes every cell/KV write, this exact
+      // never-subscribed retired binding has no external route to tombstone.
+      return false;
+    }
+    if (!response.ok || body?.subscribed !== true ||
+        body.account_id !== desired.account_id ||
+        body.realm_id !== desired.alias_proof.realm_id ||
+        body.realm_label !== desired.realm_label ||
+        body.realm_alias_claim_id !==
+          desired.alias_proof.realm_alias_claim_id) {
+      fail("custom-domain alias subscription failed", 502);
+    }
+    return true;
+  }
+
+  customDomainRequestRoutePolicy(request, allocation) {
+    if (allocation.state === "retired" || request.state === "retired") {
+      if (allocation.state !== "retired" || request.state !== "retired") {
+        fail("custom inbound domain retirement authority is inconsistent", 503);
+      }
+      return { state: "retired", suspension_disposition: null };
+    }
+    if (allocation.state !== "allocated" || request.state !== "verified") {
+      fail("custom inbound domain allocation is invalid", 503);
+    }
+    if (request.lifecycle_suspended === true) {
+      return { state: "suspended", suspension_disposition: "retry" };
+    }
+    if (request.plan_suspended === true) {
+      return { state: "suspended", suspension_disposition: "inactive" };
+    }
+    if (request.ownership_verification?.state !== "verified") {
+      return { state: "suspended", suspension_disposition: "retry" };
+    }
+    return { state: "applied", suspension_disposition: null };
+  }
+
+  combinedCustomDomainRoutePolicy(domainPolicy, aliasProof) {
+    if (domainPolicy.state === "retired" || aliasProof.state === "retired") {
+      return { state: "retired", suspension_disposition: null };
+    }
+    const dispositions = [
+      domainPolicy.state === "suspended"
+        ? domainPolicy.suspension_disposition
+        : null,
+      aliasProof.state === "suspended"
+        ? aliasProof.suspension_disposition
+        : null,
+    ].filter(Boolean);
+    if (dispositions.length > 0) {
+      // An operational or lifecycle suspension always wins over a plan-only
+      // inactive disposition so mail tempfails during convergence.
+      return {
+        state: "suspended",
+        suspension_disposition: dispositions.includes("retry")
+          ? "retry"
+          : "inactive",
+      };
+    }
+    return { state: "applied", suspension_disposition: null };
+  }
+
+  async desiredCustomDomainRoute(
+    domain,
+    realmLabel,
+    updatedAt = this.now().toISOString(),
+    options = {},
+  ) {
+    const allocation = await this.storage.get(domainStorageKey(domain));
+    if (!allocation ||
+        allocation.schema_version !==
+          "witself.agent-email-domain-allocation.v1" ||
+        allocation.domain !== domain ||
+        !ACCOUNT_ID_PATTERN.test(allocation.account_id ?? "") ||
+        !REQUEST_ID_PATTERN.test(allocation.source_request_id ?? "") ||
+        !Number.isSafeInteger(allocation.allocation_revision) ||
+        allocation.allocation_revision < 1 ||
+        !["allocated", "retired"].includes(allocation.state)) {
+      fail("custom domain realm alias route not found", 404,
+        "custom_domain_route_not_found");
+    }
+    const request = await this.storage.get(
+      requestStorageKey(allocation.source_request_id),
+    );
+    if (!request || request.schema_version !== SCHEMA_VERSION ||
+        request.id !== allocation.source_request_id ||
+        request.account_id !== allocation.account_id ||
+        request.domain !== allocation.domain ||
+        !Number.isSafeInteger(request.state_revision) ||
+        request.state_revision < 1) {
+      fail("custom inbound domain route authority is invalid", 503);
+    }
+    const routingEnabled = agentEmailCustomDomainRoutingEnabledForAccount(
+      this.env,
+      allocation.account_id,
+    );
+    if (!routingEnabled && options.allow_restrictive_when_disabled !== true) {
+      fail("custom domain routing is not enabled for this account", 409,
+        "custom_domain_routing_disabled");
+    }
+    const aliasProof = await this.realmAliasClaimProof(
+      allocation.account_id,
+      realmLabel,
+    );
+    const domainPolicy = this.customDomainRequestRoutePolicy(
+      request,
+      allocation,
+    );
+    const policy = this.combinedCustomDomainRoutePolicy(
+      domainPolicy,
+      aliasProof,
+    );
+    if (!routingEnabled && policy.state === "applied") {
+      fail("custom domain routing is not enabled for this account", 409,
+        "custom_domain_routing_disabled");
+    }
+    const controllerRevision = request.state_revision +
+      allocation.allocation_revision + aliasProof.realm_alias_revision;
+    if (!Number.isSafeInteger(controllerRevision) || controllerRevision < 1) {
+      fail("custom domain route controller revision is exhausted", 503);
+    }
+    const target = await this.customDomainRouteCellTarget(
+      allocation.account_id,
+    );
+    let cellProjection;
+    let edgeProjection;
+    try {
+      cellProjection = buildAgentEmailCustomDomainCellProjection({
+        account_id: allocation.account_id,
+        domain: allocation.domain,
+        realm_label: aliasProof.realm_label,
+        realm_id: aliasProof.realm_id,
+        domain_request_id: request.id,
+        domain_allocation_revision: allocation.allocation_revision,
+        domain_state_revision: request.state_revision,
+        realm_alias_claim_id: aliasProof.realm_alias_claim_id,
+        realm_alias_revision: aliasProof.realm_alias_revision,
+        controller_revision: controllerRevision,
+        state: policy.state,
+        ...(policy.state === "suspended"
+          ? { suspension_disposition: policy.suspension_disposition }
+          : {}),
+      });
+      edgeProjection = buildAgentEmailCustomDomainRouteProjection({
+        ...cellProjection,
+        updated_at: updatedAt,
+        ...(policy.state === "applied"
+          ? {
+            cell_audience: target.cell_audience,
+            ingest_url: target.ingest_url,
+          }
+          : {}),
+      });
+    } catch {
+      fail("custom inbound domain route projection is invalid", 503);
+    }
+    // Freshness is payload metadata, not authority. Keeping it out of the
+    // source fence lets an explicit edge retry replay the exact pending bytes
+    // after a lost acknowledgement instead of replacing a valid intent merely
+    // because wall-clock time advanced.
+    const edgeProjectionFence = { ...edgeProjection };
+    delete edgeProjectionFence.updated_at;
+    const sourceFingerprint = canonicalJSONString({
+      cell_endpoint: target.endpoint,
+      cell_projection: cellProjection,
+      edge_projection: edgeProjectionFence,
+    });
+    return {
+      account_id: allocation.account_id,
+      domain_request_id: request.id,
+      realm_label: realmLabel,
+      cell_endpoint: target.endpoint,
+      cell_projection: cellProjection,
+      edge_projection: edgeProjection,
+      alias_proof: aliasProof,
+      source_fingerprint: sourceFingerprint,
+      target,
+    };
+  }
+
+  routeSourceFingerprint(request, allocation) {
+    return canonicalJSONString({
+      account_id: request.account_id,
+      domain_request_id: request.id,
+      domain: request.domain,
+      domain_state_revision: request.state_revision,
+      request_state: request.state,
+      domain_allocation_revision: allocation.allocation_revision,
+      allocation_state: allocation.state,
+    });
+  }
+
+  async appendCustomDomainRouteSourceIntent(
+    entries,
+    deletes,
+    request,
+    allocation,
+    options = {},
+  ) {
+    if (!request || !allocation ||
+        request.account_id !== allocation.account_id ||
+        request.id !== allocation.source_request_id ||
+        request.domain !== allocation.domain ||
+        !["verified", "retired"].includes(request.state) ||
+        !["allocated", "retired"].includes(allocation.state)) return null;
+    const bindings = await this.storage.list({
+      prefix: routeBindingPrefix(request.id),
+      limit: 1,
+    });
+    if (bindings.size === 0 && options.force_binding !== true) return null;
+    const sourcePolicy = this.customDomainRequestRoutePolicy(request, allocation);
+    const routingEnabled = agentEmailCustomDomainRoutingEnabledForAccount(
+      this.env,
+      request.account_id,
+    );
+    const now = this.now();
+    const key = routeSourceIntentKey(request.id);
+    const previous = await this.storage.get(key);
+    if (!routingEnabled && sourcePolicy.state === "applied") {
+      if (previous) {
+        deletes.push(key);
+        deletes.push(routeSourceAccountKey(previous));
+        const previousDue = routeSourceDueKey(previous);
+        if (previousDue) deletes.push(previousDue);
+      }
+      return null;
+    }
+    const sourceFingerprint = this.routeSourceFingerprint(request, allocation);
+    if (previous?.source_fingerprint === sourceFingerprint &&
+        options.force_binding !== true) return previous;
+    const intent = {
+      schema_version: ROUTE_SOURCE_INTENT_SCHEMA,
+      account_id: request.account_id,
+      domain_request_id: request.id,
+      domain: request.domain,
+      domain_state_revision: request.state_revision,
+      request_state: request.state,
+      domain_allocation_revision: allocation.allocation_revision,
+      allocation_state: allocation.state,
+      source_fingerprint: sourceFingerprint,
+      binding_cursor: null,
+      allow_restrictive_when_disabled: sourcePolicy.state !== "applied",
+      failure_count: 0,
+      retry_at_ms: now.getTime(),
+      created_at: previous?.created_at ?? now.toISOString(),
+      updated_at: now.toISOString(),
+    };
+    entries.push(
+      [key, intent],
+      [routeSourceAccountKey(intent), key],
+      [routeSourceDueKey(intent), request.id],
+    );
+    const previousDue = routeSourceDueKey(previous);
+    if (previousDue && previousDue !== routeSourceDueKey(intent)) {
+      deletes.push(previousDue);
+    }
+    return intent;
+  }
+
+  async ensureCustomDomainRouteBinding(desired) {
+    const binding = {
+      schema_version: ROUTE_BINDING_SCHEMA,
+      account_id: desired.account_id,
+      domain_request_id: desired.domain_request_id,
+      domain: desired.edge_projection.domain,
+      realm_id: desired.edge_projection.realm_id,
+      realm_label: desired.edge_projection.realm_label,
+      realm_alias_claim_id: desired.edge_projection.realm_alias_claim_id,
+      created_at: this.now().toISOString(),
+    };
+    const key = routeBindingKey(
+      binding.domain_request_id,
+      binding.realm_alias_claim_id,
+    );
+    const existing = await this.storage.get(key);
+    if (existing) {
+      const comparable = (value) => canonicalJSONString({
+        schema_version: value?.schema_version,
+        account_id: value?.account_id,
+        domain_request_id: value?.domain_request_id,
+        domain: value?.domain,
+        realm_id: value?.realm_id,
+        realm_label: value?.realm_label,
+        realm_alias_claim_id: value?.realm_alias_claim_id,
+      });
+      if (comparable(existing) !== comparable(binding)) {
+        fail("custom domain route binding conflicts", 409,
+          "custom_domain_route_binding_conflict");
+      }
+      // Repairable indexes remain derived and may be absent after recovery.
+      await this.atomicRaw([
+        [routeBindingAliasKey(existing), key],
+      ]);
+      return existing;
+    }
+    if (desired.edge_projection.state === "retired") {
+      fail("custom domain realm alias route not found", 404,
+        "custom_domain_route_not_found");
+    }
+    // This sparse membership row is the durable fact that a cell route may
+    // exist. It is journaled before the first cell/KV write; recovery can then
+    // rebuild both bounded discovery indexes without inventing the full
+    // domain-by-alias cross-product.
+    const request = await this.storage.get(
+      requestStorageKey(binding.domain_request_id),
+    );
+    const allocation = await this.storage.get(domainStorageKey(binding.domain));
+    if (!request || !allocation ||
+        request.state_revision !== desired.cell_projection.domain_state_revision ||
+        allocation.allocation_revision !==
+          desired.cell_projection.domain_allocation_revision) {
+      fail("custom domain route binding authority changed", 409,
+        "custom_domain_route_stale");
+    }
+    const entries = [
+      [key, binding],
+      [routeBindingAliasKey(binding), key],
+    ];
+    const deletes = [];
+    await this.appendCustomDomainRouteSourceIntent(
+      entries,
+      deletes,
+      request,
+      allocation,
+      { force_binding: true },
+    );
+    await this.atomic(entries, deletes);
+    await this.scheduleNextAlarm().catch(() => {});
+    return binding;
+  }
+
+  async persistCustomDomainRouteIntent(desired, previous = null) {
+    const now = this.now();
+    const intent = {
+      schema_version: AGENT_EMAIL_CUSTOM_DOMAIN_ROUTE_INTENT_SCHEMA_VERSION,
+      phase: "pending",
+      account_id: desired.account_id,
+      domain_request_id: desired.domain_request_id,
+      domain: desired.edge_projection.domain,
+      realm_label: desired.realm_label,
+      cell_endpoint: desired.cell_endpoint,
+      cell_projection: structuredClone(desired.cell_projection),
+      edge_projection: structuredClone(desired.edge_projection),
+      source_fingerprint: desired.source_fingerprint,
+      failure_count: 0,
+      retry_at_ms: now.getTime(),
+      created_at: previous?.created_at ?? now.toISOString(),
+      updated_at: now.toISOString(),
+      completed_at: null,
+    };
+    const key = routeProjectionIntentKey(
+      intent.domain_request_id,
+      intent.realm_label,
+    );
+    const due = routeProjectionDueKey(intent);
+    await this.atomicRaw([
+      [key, intent],
+      [due, key],
+    ], [routeProjectionDueKey(previous)].filter((value) => value && value !== due));
+    await this.scheduleNextAlarm().catch(() => {});
+    return intent;
+  }
+
+  async stageCustomDomainRouteIntent(domain, realmLabel, options = {}) {
+    const desired = await this.desiredCustomDomainRoute(
+      domain,
+      realmLabel,
+      this.now().toISOString(),
+      options,
+    );
+    await this.ensureCustomDomainRouteBinding(desired);
+    // The permanent sparse subscriber marker closes the cross-authority
+    // discovery gap. It is acknowledged before any cell or edge route write,
+    // so later alias mutations can enqueue only claims with real bindings.
+    const subscribed = await this.ensureCustomDomainRouteSubscriber(desired);
+    if (!subscribed) {
+      fail("custom-domain alias binding retired before subscription", 409,
+        "custom_domain_route_never_subscribed");
+    }
+    const key = routeProjectionIntentKey(
+      desired.domain_request_id,
+      realmLabel,
+    );
+    const existing = await this.storage.get(key);
+    if (existing?.phase === "pending" &&
+        existing.source_fingerprint === desired.source_fingerprint) {
+      return existing;
+    }
+    return this.persistCustomDomainRouteIntent(desired, existing);
+  }
+
+  async applyAndReadBackCustomDomainRoute(intent, target) {
+    const url = cellAgentEmailCustomDomainRouteURL(
+      target.endpoint,
+      intent.account_id,
+    );
+    let response;
+    try {
+      response = await this.fetchImpl(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${target.provision_token}`,
+        },
+        body: JSON.stringify(intent.cell_projection),
+        signal: AbortSignal.timeout(15_000),
+      });
+    } catch {
+      fail("custom domain target cell is unreachable", 502);
+    }
+    const acknowledgement = await response.json().catch(() => null);
+    if (!response.ok) {
+      fail(
+        response.status === 409
+          ? "cell rejected a stale or conflicting custom domain route"
+          : response.status === 404
+          ? "cell custom domain route target no longer exists"
+          : "cell rejected custom domain route projection",
+        response.status === 409 ? 409 : 502,
+      );
+    }
+    try {
+      validateAgentEmailCustomDomainCellProjection(
+        acknowledgement,
+        intent.cell_projection,
+      );
+    } catch {
+      fail("cell returned an inconsistent custom domain route acknowledgement",
+        502);
+    }
+
+    let readback;
+    try {
+      const verified = await this.fetchImpl(
+        cellAgentEmailCustomDomainRouteURL(
+          target.endpoint,
+          intent.account_id,
+          intent.cell_projection.domain_request_id,
+          intent.cell_projection.realm_alias_claim_id,
+        ),
+        {
+          method: "GET",
+          headers: { Authorization: `Bearer ${target.provision_token}` },
+          signal: AbortSignal.timeout(15_000),
+        },
+      );
+      readback = await verified.json().catch(() => null);
+      if (!verified.ok) {
+        fail("cell custom domain route fence verification failed", 502);
+      }
+    } catch (error) {
+      if (error instanceof DomainRegistryError) throw error;
+      fail("cell custom domain route fence verification failed", 502);
+    }
+    try {
+      validateAgentEmailCustomDomainCellProjection(
+        readback,
+        intent.cell_projection,
+      );
+    } catch {
+      fail("cell custom domain route readback is inconsistent", 502);
+    }
+    return target;
+  }
+
+  async publishCustomDomainRoute(projection) {
+    if (!this.env?.AGENT_EMAIL_DIRECTORY ||
+        typeof this.env.AGENT_EMAIL_DIRECTORY.put !== "function") {
+      fail("isolated agent email routing directory is unavailable", 503);
+    }
+    try {
+      await this.env.AGENT_EMAIL_DIRECTORY.put(
+        agentEmailCustomDomainRouteKey(
+          projection.domain,
+          projection.realm_label,
+        ),
+        JSON.stringify(projection),
+      );
+    } catch {
+      fail("custom domain routing projection failed", 502);
+    }
+  }
+
+  async drainCustomDomainRouteIntent(startingIntent) {
+    let intent = startingIntent;
+    const key = routeProjectionIntentKey(
+      intent.domain_request_id,
+      intent.realm_label,
+    );
+    try {
+      const convergenceOptions = {
+        allow_restrictive_when_disabled:
+          intent.edge_projection?.state !== "applied",
+      };
+      if (!convergenceOptions.allow_restrictive_when_disabled) {
+        this.assertCustomDomainRoutingEnabled({ routing_enabled: true });
+      }
+      // A retry may wake after either authority changed. Replace the derived
+      // intent before touching the cell; it is never allowed to outvote the
+      // domain allocation or alias claim that produced it.
+      const before = await this.desiredCustomDomainRoute(
+        intent.domain,
+        intent.realm_label,
+        intent.edge_projection.updated_at,
+        convergenceOptions,
+      );
+      if (before.source_fingerprint !== intent.source_fingerprint) {
+        intent = await this.persistCustomDomainRouteIntent(before, intent);
+      }
+      let target = await this.customDomainRouteCellTarget(intent.account_id);
+      if (target.endpoint !== intent.cell_endpoint) {
+        const moved = await this.desiredCustomDomainRoute(
+          intent.domain,
+          intent.realm_label,
+          this.now().toISOString(),
+          convergenceOptions,
+        );
+        intent = await this.persistCustomDomainRouteIntent(moved, intent);
+        target = moved.target;
+      }
+      await this.applyAndReadBackCustomDomainRoute(intent, target);
+
+      // Re-prove the one external authority after exact cell readback. A stale
+      // alias revision or any changed domain/lifecycle fence blocks KV
+      // publication even when the cell accepted an earlier valid projection.
+      const after = await this.desiredCustomDomainRoute(
+        intent.domain,
+        intent.realm_label,
+        intent.edge_projection.updated_at,
+        convergenceOptions,
+      );
+      if (after.source_fingerprint !== intent.source_fingerprint) {
+        await this.persistCustomDomainRouteIntent(after, intent);
+        fail("custom domain route authority changed during projection", 409,
+          "custom_domain_route_stale");
+      }
+      await this.publishCustomDomainRoute(intent.edge_projection);
+      const completedAt = this.now().toISOString();
+      const completed = {
+        ...intent,
+        phase: "complete",
+        failure_count: 0,
+        retry_at_ms: null,
+        updated_at: completedAt,
+        completed_at: completedAt,
+      };
+      await this.atomicRaw([[key, completed]], [routeProjectionDueKey(intent)]);
+      await this.scheduleNextAlarm().catch(() => {});
+      return json(intent.edge_projection);
+    } catch (error) {
+      const current = await this.storage.get(key);
+      if (error instanceof DomainRegistryError &&
+          error.code === "custom_domain_routing_disabled" &&
+          !agentEmailCustomDomainRoutingEnabledForAccount(
+            this.env,
+            intent.account_id,
+          )) {
+        await this.atomicRaw([], [routeProjectionDueKey(current)].filter(Boolean));
+        throw error;
+      }
+      if (current?.phase === "pending" &&
+          current.source_fingerprint === intent.source_fingerprint) {
+        const failureCount = (current.failure_count ?? 0) + 1;
+        const retry = {
+          ...current,
+          failure_count: failureCount,
+          retry_at_ms: this.now().getTime() +
+            routeProjectionRetryDelay(failureCount),
+          updated_at: this.now().toISOString(),
+          completed_at: null,
+        };
+        await this.atomicRaw([
+          [key, retry],
+          [routeProjectionDueKey(retry), key],
+        ], [routeProjectionDueKey(current)].filter(Boolean));
+        await this.scheduleNextAlarm().catch(() => {});
+      }
+      throw error;
+    }
+  }
+
+  async getCustomDomainRoute(input) {
+    this.assertCustomDomainRoutingEnabled(input);
+    const domain = normalizeAgentEmailCustomDomain(input?.domain);
+    const realmLabel = typeof input?.realm_label === "string"
+      ? input.realm_label
+      : "";
+    try {
+      agentEmailCustomDomainRouteKey(domain, realmLabel);
+    } catch {
+      fail("custom domain realm alias route not found", 404,
+        "custom_domain_route_not_found");
+    }
+    try {
+      const intent = await this.stageCustomDomainRouteIntent(domain, realmLabel);
+      return this.drainCustomDomainRouteIntent(intent);
+    } catch (error) {
+      if (error instanceof DomainRegistryError &&
+          error.code === "custom_domain_route_never_subscribed") {
+        fail("custom domain realm alias route not found", 404,
+          "custom_domain_route_not_found");
+      }
+      throw error;
+    }
+  }
+
+  async reconcileDueRouteProjections() {
+    const listed = await this.storage.list({
+      prefix: "route-projection-due:",
+      limit: ALARM_BATCH_LIMIT,
+    });
+    const now = this.now().getTime();
+    for (const [due, intentKey] of listed) {
+      const retryAt = Number(due.split(":", 3)[1]);
+      if (!Number.isFinite(retryAt)) {
+        await this.storage.delete(due);
+        continue;
+      }
+      if (retryAt > now) break;
+      const intent = typeof intentKey === "string"
+        ? await this.storage.get(intentKey)
+        : null;
+      if (!intent || routeProjectionDueKey(intent) !== due) {
+        await this.storage.delete(due);
+        continue;
+      }
+      if (!agentEmailCustomDomainRoutingEnabledForAccount(
+        this.env,
+        intent.account_id,
+      ) && intent.edge_projection?.state === "applied") {
+        // Removing the runtime gate stops all external I/O immediately. The
+        // bounded applied intent remains available for an explicit future
+        // route miss. Restrictive/tombstone intents below must still drain for
+        // already-materialized bindings so lifecycle cannot strand a cell.
+        await this.atomicRaw([], [due]);
+        continue;
+      }
+      await this.drainCustomDomainRouteIntent(intent).catch(() => {});
+    }
+  }
+
+  async customDomainRouteBindingPage(prefix, cursor = null) {
+    const listed = await this.storage.list({
+      prefix,
+      limit: ROUTE_CONVERGENCE_PAGE_LIMIT + 1,
+      ...(cursor ? { startAfter: cursor } : {}),
+    });
+    const rows = [...listed.entries()];
+    const page = rows.slice(0, ROUTE_CONVERGENCE_PAGE_LIMIT);
+    const bindings = [];
+    for (const [indexKey, indexedValue] of page) {
+      const bindingKey = typeof indexedValue === "string"
+        ? indexedValue
+        : indexKey;
+      const binding = typeof indexedValue === "string"
+        ? await this.storage.get(bindingKey)
+        : indexedValue;
+      if (!binding || binding.schema_version !== ROUTE_BINDING_SCHEMA ||
+          routeBindingKey(
+            binding.domain_request_id,
+            binding.realm_alias_claim_id,
+          ) !== bindingKey) {
+        fail("custom domain route binding index is invalid", 503);
+      }
+      bindings.push({ index_key: indexKey, binding });
+    }
+    return {
+      bindings,
+      next_cursor: rows.length > ROUTE_CONVERGENCE_PAGE_LIMIT && page.length > 0
+        ? page.at(-1)[0]
+        : null,
+    };
+  }
+
+  async drainCustomDomainRouteSourceIntent(startingIntent) {
+    let intent = startingIntent;
+    const key = routeSourceIntentKey(intent.domain_request_id);
+    try {
+      const request = await this.storage.get(
+        requestStorageKey(intent.domain_request_id),
+      );
+      const allocation = request
+        ? await this.storage.get(domainStorageKey(request.domain))
+        : null;
+      if (!request || !allocation ||
+          allocation.source_request_id !== request.id) {
+        fail("custom domain route source authority is invalid", 503);
+      }
+      const currentFingerprint = this.routeSourceFingerprint(request, allocation);
+      if (currentFingerprint !== intent.source_fingerprint) {
+        const entries = [];
+        const deletes = [];
+        const replaced = await this.appendCustomDomainRouteSourceIntent(
+          entries,
+          deletes,
+          request,
+          allocation,
+        );
+        if (!replaced) {
+          // The source became applied while routing was disabled. The helper
+          // deliberately staged deletion of the obsolete restrictive
+          // obligation; commit that cleanup instead of resurrecting it in the
+          // retry path.
+          await this.atomic(entries, [
+            routeSourceDueKey(intent),
+            ...deletes,
+          ].filter(Boolean));
+          await this.scheduleNextAlarm().catch(() => {});
+          return { complete: true, changed: 0, gated: true };
+        }
+        if (replaced.source_fingerprint === intent.source_fingerprint) {
+          fail("custom domain route source convergence is stale", 409,
+            "custom_domain_route_stale");
+        }
+        await this.atomic(entries, [routeSourceDueKey(intent), ...deletes].filter(Boolean));
+        intent = replaced;
+      }
+      const routingEnabled = agentEmailCustomDomainRoutingEnabledForAccount(
+        this.env,
+        intent.account_id,
+      );
+      if (!routingEnabled && intent.allow_restrictive_when_disabled !== true) {
+        // Applied work must not keep a parent plan/lifecycle fence open after
+        // the runtime gate is removed. No binding is made less restrictive by
+        // dropping this obligation, and no external write is attempted.
+        await this.atomic([], [
+          key,
+          routeSourceAccountKey(intent),
+          routeSourceDueKey(intent),
+        ].filter(Boolean));
+        await this.scheduleNextAlarm().catch(() => {});
+        return { complete: true, changed: 0, gated: true };
+      }
+      const page = await this.customDomainRouteBindingPage(
+        routeBindingPrefix(intent.domain_request_id),
+        intent.binding_cursor,
+      );
+      for (const { binding } of page.bindings) {
+        if (binding.account_id !== intent.account_id ||
+            binding.domain_request_id !== intent.domain_request_id ||
+            binding.domain !== intent.domain) {
+          fail("custom domain route source binding is inconsistent", 503);
+        }
+        try {
+          const leaf = await this.stageCustomDomainRouteIntent(
+            binding.domain,
+            binding.realm_label,
+            {
+              allow_restrictive_when_disabled:
+                intent.allow_restrictive_when_disabled === true,
+            },
+          );
+          await this.drainCustomDomainRouteIntent(leaf);
+        } catch (error) {
+          if (!(error instanceof DomainRegistryError) ||
+              error.code !== "custom_domain_route_never_subscribed") {
+            throw error;
+          }
+          // Subscription acknowledgement is ordered before the first cell/KV
+          // write. A realm-closed binding that never crossed that boundary has
+          // no external projection and is already terminal without I/O.
+        }
+      }
+      if (page.next_cursor === null) {
+        await this.atomic([], [
+          key,
+          routeSourceAccountKey(intent),
+          routeSourceDueKey(intent),
+        ].filter(Boolean));
+        await this.scheduleNextAlarm().catch(() => {});
+        return { complete: true, changed: page.bindings.length };
+      }
+      const continued = {
+        ...intent,
+        binding_cursor: page.next_cursor,
+        failure_count: 0,
+        retry_at_ms: this.now().getTime() + ROUTE_CONVERGENCE_RETRY_MS,
+        updated_at: this.now().toISOString(),
+      };
+      await this.atomic([
+        [key, continued],
+        [routeSourceDueKey(continued), intent.domain_request_id],
+      ], [routeSourceDueKey(intent)].filter((value) =>
+        value && value !== routeSourceDueKey(continued)
+      ));
+      await this.scheduleNextAlarm().catch(() => {});
+      return { complete: false, changed: page.bindings.length };
+    } catch (error) {
+      const current = await this.storage.get(key);
+      if (current?.source_fingerprint === intent.source_fingerprint) {
+        const failureCount = (current.failure_count ?? 0) + 1;
+        const retry = {
+          ...current,
+          failure_count: failureCount,
+          retry_at_ms: this.now().getTime() +
+            routeConvergenceRetryDelay(failureCount),
+          updated_at: this.now().toISOString(),
+        };
+        await this.atomic([
+          [key, retry],
+          [routeSourceDueKey(retry), retry.domain_request_id],
+        ], [routeSourceDueKey(current)].filter(Boolean));
+        await this.scheduleNextAlarm().catch(() => {});
+      }
+      throw error;
+    }
+  }
+
+  async reconcileDueRouteSources() {
+    const listed = await this.storage.list({
+      prefix: "route-source-due:",
+      limit: ALARM_BATCH_LIMIT,
+    });
+    const now = this.now().getTime();
+    for (const [due, requestID] of listed) {
+      const retryAt = Number(due.split(":", 3)[1]);
+      if (!Number.isFinite(retryAt) || retryAt > now) break;
+      const intent = typeof requestID === "string"
+        ? await this.storage.get(routeSourceIntentKey(requestID))
+        : null;
+      if (!intent || routeSourceDueKey(intent) !== due) {
+        await this.storage.delete(due);
+        continue;
+      }
+      await this.drainCustomDomainRouteSourceIntent(intent).catch(() => {});
+    }
+  }
+
+  customDomainAliasConvergenceInput(input) {
+    let proof;
+    try {
+      proof = validateRealmEmailAliasClaimProof(
+        input?.claim_proof,
+        input?.claim_proof?.account_id,
+        input?.claim_proof?.realm_label,
+      );
+    } catch {
+      fail("custom-domain alias convergence proof is invalid", 400);
+    }
+    const sourceFingerprint = realmEmailAliasClaimRouteFingerprint(proof);
+    if (input?.source_fingerprint !== sourceFingerprint) {
+      fail("custom-domain alias convergence fingerprint is invalid", 400);
+    }
+    return { proof, source_fingerprint: sourceFingerprint };
+  }
+
+  async enqueueCustomDomainAliasConvergence(input) {
+    const { proof, source_fingerprint: sourceFingerprint } =
+      this.customDomainAliasConvergenceInput(input);
+    const bindingPrefix = routeBindingAliasPrefix(
+      proof.account_id,
+      proof.realm_id,
+      proof.realm_alias_claim_id,
+    );
+    const bindings = await this.storage.list({ prefix: bindingPrefix, limit: 1 });
+    if (bindings.size === 0) {
+      return json({
+        schema_version: SCHEMA_VERSION,
+        complete: true,
+        source_fingerprint: sourceFingerprint,
+      });
+    }
+    const key = routeAliasTaskKey(proof.account_id, proof.realm_label);
+    const previous = await this.storage.get(key);
+    if (previous?.source_fingerprint === sourceFingerprint) {
+      return json({
+        schema_version: SCHEMA_VERSION,
+        complete: previous.phase === "complete",
+        source_fingerprint: sourceFingerprint,
+      }, previous.phase === "complete" ? 200 : 202);
+    }
+    if (previous &&
+        (previous.claim_proof?.realm_alias_claim_id !==
+            proof.realm_alias_claim_id ||
+          previous.claim_proof?.realm_alias_revision >
+            proof.realm_alias_revision)) {
+      fail("custom-domain alias convergence request is stale", 409,
+        "custom_domain_route_stale");
+    }
+    const now = this.now();
+    const task = {
+      schema_version: ROUTE_ALIAS_TASK_SCHEMA,
+      phase: "pending",
+      account_id: proof.account_id,
+      realm_id: proof.realm_id,
+      realm_label: proof.realm_label,
+      claim_proof: proof,
+      source_fingerprint: sourceFingerprint,
+      binding_cursor: null,
+      failure_count: 0,
+      retry_at_ms: now.getTime(),
+      created_at: previous?.created_at ?? now.toISOString(),
+      updated_at: now.toISOString(),
+      completed_at: null,
+    };
+    await this.atomicRaw([
+      [key, task],
+      [routeAliasDueKey(task), key],
+    ], [routeAliasDueKey(previous)].filter(Boolean));
+    await this.scheduleNextAlarm().catch(() => {});
+    return json({
+      schema_version: SCHEMA_VERSION,
+      complete: false,
+      source_fingerprint: sourceFingerprint,
+    }, 202);
+  }
+
+  async customDomainAliasConvergenceStatus(input) {
+    const { proof, source_fingerprint: sourceFingerprint } =
+      this.customDomainAliasConvergenceInput(input);
+    const task = await this.storage.get(
+      routeAliasTaskKey(proof.account_id, proof.realm_label),
+    );
+    if (!task) {
+      fail("custom-domain alias convergence task not found", 404,
+        "custom_domain_route_convergence_not_found");
+    }
+    if (task.source_fingerprint !== sourceFingerprint) {
+      fail("custom-domain alias convergence request is stale", 409,
+        "custom_domain_route_stale");
+    }
+    return json({
+      schema_version: SCHEMA_VERSION,
+      complete: task.phase === "complete",
+      source_fingerprint: sourceFingerprint,
+    }, task.phase === "complete" ? 200 : 202);
+  }
+
+  async drainCustomDomainRouteAliasTask(startingTask) {
+    let task = startingTask;
+    const key = routeAliasTaskKey(task.account_id, task.realm_label);
+    try {
+      const currentProof = await this.realmAliasClaimProof(
+        task.account_id,
+        task.realm_label,
+      );
+      const currentFingerprint = realmEmailAliasClaimRouteFingerprint(
+        currentProof,
+      );
+      if (currentFingerprint !== task.source_fingerprint) {
+        const now = this.now();
+        task = {
+          ...task,
+          phase: "pending",
+          realm_id: currentProof.realm_id,
+          claim_proof: currentProof,
+          source_fingerprint: currentFingerprint,
+          binding_cursor: null,
+          failure_count: 0,
+          retry_at_ms: now.getTime(),
+          updated_at: now.toISOString(),
+          completed_at: null,
+        };
+        await this.atomicRaw([
+          [key, task],
+          [routeAliasDueKey(task), key],
+        ], [routeAliasDueKey(startingTask)].filter(Boolean));
+      }
+      const prefix = routeBindingAliasPrefix(
+        task.account_id,
+        task.realm_id,
+        task.claim_proof.realm_alias_claim_id,
+      );
+      const page = await this.customDomainRouteBindingPage(
+        prefix,
+        task.binding_cursor,
+      );
+      for (const { binding } of page.bindings) {
+        if (binding.account_id !== task.account_id ||
+            binding.realm_id !== task.realm_id ||
+            binding.realm_label !== task.realm_label ||
+            binding.realm_alias_claim_id !==
+              task.claim_proof.realm_alias_claim_id) {
+          fail("custom-domain alias route binding is inconsistent", 503);
+        }
+        try {
+          const leaf = await this.stageCustomDomainRouteIntent(
+            binding.domain,
+            binding.realm_label,
+            { allow_restrictive_when_disabled: true },
+          );
+          await this.drainCustomDomainRouteIntent(leaf);
+        } catch (error) {
+          if (!(error instanceof DomainRegistryError) ||
+              error.code !== "custom_domain_routing_disabled" ||
+              agentEmailCustomDomainRoutingEnabledForAccount(
+                this.env,
+                task.account_id,
+              )) {
+            throw error;
+          }
+          // With activation removed, an applied leaf requires no external
+          // write. Restrictive/retired siblings are still accepted by desired
+          // route derivation above and must converge before this task closes.
+        }
+      }
+      if (page.next_cursor !== null) {
+        const continued = {
+          ...task,
+          binding_cursor: page.next_cursor,
+          failure_count: 0,
+          retry_at_ms: this.now().getTime() + ROUTE_CONVERGENCE_RETRY_MS,
+          updated_at: this.now().toISOString(),
+        };
+        await this.atomicRaw([
+          [key, continued],
+          [routeAliasDueKey(continued), key],
+        ], [routeAliasDueKey(task)].filter(Boolean));
+        await this.scheduleNextAlarm().catch(() => {});
+        return { complete: false, changed: page.bindings.length };
+      }
+      const completedAt = this.now().toISOString();
+      const completed = {
+        ...task,
+        phase: "complete",
+        binding_cursor: null,
+        failure_count: 0,
+        retry_at_ms: null,
+        updated_at: completedAt,
+        completed_at: completedAt,
+      };
+      await this.atomicRaw([[key, completed]], [routeAliasDueKey(task)]
+        .filter(Boolean));
+      await this.scheduleNextAlarm().catch(() => {});
+      return { complete: true, changed: page.bindings.length };
+    } catch (error) {
+      const current = await this.storage.get(key);
+      if (current?.phase === "pending") {
+        const failureCount = (current.failure_count ?? 0) + 1;
+        const retry = {
+          ...current,
+          failure_count: failureCount,
+          retry_at_ms: this.now().getTime() +
+            routeConvergenceRetryDelay(failureCount),
+          updated_at: this.now().toISOString(),
+          completed_at: null,
+        };
+        await this.atomicRaw([
+          [key, retry],
+          [routeAliasDueKey(retry), key],
+        ], [routeAliasDueKey(current)].filter(Boolean));
+        await this.scheduleNextAlarm().catch(() => {});
+      }
+      throw error;
+    }
+  }
+
+  async reconcileDueRouteAliases() {
+    const listed = await this.storage.list({
+      prefix: "route-alias-due:",
+      limit: ALARM_BATCH_LIMIT,
+    });
+    const now = this.now().getTime();
+    for (const [due, taskKey] of listed) {
+      const retryAt = Number(due.split(":", 3)[1]);
+      if (!Number.isFinite(retryAt) || retryAt > now) break;
+      const task = typeof taskKey === "string"
+        ? await this.storage.get(taskKey)
+        : null;
+      if (!task || routeAliasDueKey(task) !== due) {
+        await this.storage.delete(due);
+        continue;
+      }
+      await this.drainCustomDomainRouteAliasTask(task).catch(() => {});
     }
   }
 

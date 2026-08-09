@@ -2,6 +2,10 @@ const DOMAIN_LABEL_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const ACCOUNT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const ACTOR_ID_PATTERN = /^[A-Za-z0-9._:@-]{1,128}$/;
 const REQUEST_ID_PATTERN = /^aedr_[a-z2-7]{16}$/;
+const CLAIM_ID_PATTERN = /^era_[a-z2-7]{16}$/;
+const REALM_ID_PATTERN = /^realm_[a-z2-7]{16}$/;
+const REALM_ALIAS_PATTERN = /^[a-z0-9](?:[a-z0-9-]{1,14}[a-z0-9])$/;
+const CANONICAL_REALM_LABEL_PATTERN = /^[a-z2-7]{16}$/;
 const CHALLENGE_TOKEN_PATTERN = /^aedv_[a-z2-7]{32}$/;
 const STREAM_ID_PATTERN = /^aedj_[a-z2-7]{16,52}$/;
 const OPERATION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -35,11 +39,14 @@ const AUTHORITY_PREFIXES = Object.freeze([
   "lifecycle-intent:",
   "plan-fence:",
   "plan-intent:",
+  "route-binding:",
+  "route-source-intent:",
   "request:",
 ]);
 const DELETABLE_AUTHORITY_PREFIXES = Object.freeze([
   "lifecycle-intent:",
   "plan-intent:",
+  "route-source-intent:",
 ]);
 const DERIVED_PREFIXES = Object.freeze([
   "account-domain:",
@@ -50,6 +57,9 @@ const DERIVED_PREFIXES = Object.freeze([
   "lifecycle-due:",
   "plan-due:",
   "plan-grace-due:",
+  "route-binding-alias:",
+  "route-source-account:",
+  "route-source-due:",
   "verification-due:",
 ]);
 const JOURNAL_LOCAL_EXACT_KEYS = new Set([
@@ -68,6 +78,15 @@ const JOURNAL_LOCAL_PREFIXES = Object.freeze([
   // Repeated scheduled outcomes replace one operational refresh per request.
   // Recovery drops it and conservatively resumes from request authority.
   "verification-refresh:",
+  // Custom-domain leaf projections and alias-triggered fan-out tasks are
+  // bounded, overwrite-only operational state. Recovery drops them and
+  // rediscovers the exact sparse route set from journaled route-binding rows.
+  "route-projection-intent:",
+  "route-projection-due:",
+  // Alias-triggered fan-out is reconstructible from the alias authority's
+  // journaled delivery obligation and the canonical account-domain index.
+  "route-alias-task:",
+  "route-alias-due:",
 ]);
 
 export class AgentEmailDomainJournalError extends Error {
@@ -344,6 +363,11 @@ function normalizedAfterImage(afterImage, options = {}) {
     const value = JSON.parse(canonicalJSONString(put.value));
     if (put.key.startsWith("request:")) validRequestRecord(value);
     else if (put.key.startsWith("domain:")) validAllocationRecord(value);
+    else if (put.key.startsWith("route-binding:")) {
+      validRouteBindingRecord(put.key, value);
+    } else if (put.key.startsWith("route-source-intent:")) {
+      validRouteSourceIntentRecord(put.key, value);
+    }
     else if (put.key.startsWith("plan-fence:") ||
         put.key.startsWith("plan-intent:") ||
         put.key.startsWith("lifecycle-fence:") ||
@@ -770,6 +794,27 @@ function assertAuthorityTransition(state, key, desired) {
     assertAllocationTransition(previous, desired);
     return;
   }
+  if (key.startsWith("route-binding:")) {
+    if (canonicalJSONString(previous) !== canonicalJSONString(desired)) {
+      journalFail("custom domain route binding is immutable",
+        "agent_email_domain_recovery_invariant_failed");
+    }
+    return;
+  }
+  if (key.startsWith("route-source-intent:")) {
+    if (previous.account_id !== desired.account_id ||
+        previous.domain_request_id !== desired.domain_request_id ||
+        previous.domain !== desired.domain ||
+        previous.created_at !== desired.created_at ||
+        desired.domain_state_revision < previous.domain_state_revision ||
+        desired.domain_allocation_revision <
+          previous.domain_allocation_revision ||
+        Date.parse(desired.updated_at) < Date.parse(previous.updated_at)) {
+      journalFail("custom domain route source intent regressed",
+        "agent_email_domain_recovery_revision_regression");
+    }
+    return;
+  }
   if (key.startsWith("plan-intent:")) {
     if (previous.account_id !== desired.account_id ||
         desired.plan_revision < previous.plan_revision ||
@@ -778,20 +823,22 @@ function assertAuthorityTransition(state, key, desired) {
         "agent_email_domain_recovery_revision_regression");
     }
     if (previous.plan_revision === desired.plan_revision) {
-      const previousState = previous.state === "awaiting_cell" ? 1 : 2;
-      const desiredState = desired.state === "awaiting_cell" ? 1 : 2;
+      const stateOrder = {
+        awaiting_cell: 1,
+        cell_committed: 2,
+        route_converging: 3,
+      };
+      const previousState = stateOrder[previous.state] ?? 0;
+      const desiredState = stateOrder[desired.state] ?? 0;
+      const advancesPhase = desiredState > previousState;
       if (previous.plan_snapshot_hash !== desired.plan_snapshot_hash ||
           previous.feature_enabled !== desired.feature_enabled ||
           previous.domain_limit !== desired.domain_limit ||
           previous.created_at !== desired.created_at ||
           desiredState < previousState ||
           desired.position < previous.position ||
-          (previous.cursor !== null &&
-            (desired.cursor === null || desired.cursor < previous.cursor)) ||
-          desired.retry_at_ms < previous.retry_at_ms ||
-          (previous.state === desired.state &&
-            previous.cursor === desired.cursor &&
-            desired.failure_count < previous.failure_count)) {
+          (!advancesPhase && previous.cursor !== null &&
+            (desired.cursor === null || desired.cursor < previous.cursor))) {
         journalFail("custom domain plan intent identity changed",
           "agent_email_domain_recovery_invariant_failed");
       }
@@ -809,15 +856,17 @@ function assertAuthorityTransition(state, key, desired) {
     return;
   }
   if (key.startsWith("lifecycle-intent:")) {
+    const phaseOrder = { requests: 1, route_converging: 2 };
+    const previousPhase = phaseOrder[previous.phase ?? "requests"] ?? 0;
+    const desiredPhase = phaseOrder[desired.phase ?? "requests"] ?? 0;
+    const advancesPhase = desiredPhase > previousPhase;
     if (previous.account_id !== desired.account_id ||
         previous.operation_id !== desired.operation_id ||
         previous.epoch !== desired.epoch || previous.action !== desired.action ||
         previous.created_at !== desired.created_at ||
-        (previous.cursor !== null &&
+        desiredPhase < previousPhase ||
+        (!advancesPhase && previous.cursor !== null &&
           (desired.cursor === null || desired.cursor < previous.cursor)) ||
-        desired.retry_at_ms < previous.retry_at_ms ||
-        (previous.cursor === desired.cursor &&
-          desired.failure_count < previous.failure_count) ||
         Date.parse(desired.updated_at) < Date.parse(previous.updated_at)) {
       journalFail("custom domain lifecycle intent changed identity",
         "agent_email_domain_recovery_revision_regression");
@@ -1246,6 +1295,82 @@ function validAllocationRecord(value) {
   return value;
 }
 
+function validRouteBindingRecord(key, value) {
+  assertObject(value, "recovered custom domain route binding is invalid");
+  exactKeys(value, new Set([
+    "schema_version", "account_id", "domain_request_id", "domain",
+    "realm_id", "realm_label", "realm_alias_claim_id", "created_at",
+  ]), "custom domain route binding");
+  const expectedKey = `route-binding:${value.domain_request_id}:` +
+    value.realm_alias_claim_id;
+  if (value.schema_version !==
+        "witself.agent-email-custom-domain-route-binding.v1" ||
+      key !== expectedKey ||
+      !ACCOUNT_ID_PATTERN.test(value.account_id ?? "") ||
+      !REQUEST_ID_PATTERN.test(value.domain_request_id ?? "") ||
+      !validDomain(value.domain) ||
+      !REALM_ID_PATTERN.test(value.realm_id ?? "") ||
+      !REALM_ALIAS_PATTERN.test(value.realm_label ?? "") ||
+      value.realm_label.includes("--") ||
+      CANONICAL_REALM_LABEL_PATTERN.test(value.realm_label) ||
+      !CLAIM_ID_PATTERN.test(value.realm_alias_claim_id ?? "")) {
+    recoveryFail("recovered custom domain route binding is invalid");
+  }
+  validateISODate(value.created_at, "route binding created_at");
+  return value;
+}
+
+function validRouteSourceIntentRecord(key, value) {
+  assertObject(value, "recovered custom domain route source intent is invalid");
+  exactKeys(value, new Set([
+    "schema_version", "account_id", "domain_request_id", "domain",
+    "domain_state_revision", "request_state",
+    "domain_allocation_revision", "allocation_state", "source_fingerprint",
+    "binding_cursor", "allow_restrictive_when_disabled", "failure_count",
+    "retry_at_ms", "created_at", "updated_at",
+  ]), "custom domain route source intent");
+  const expectedFingerprint = canonicalJSONString({
+    account_id: value.account_id,
+    domain_request_id: value.domain_request_id,
+    domain: value.domain,
+    domain_state_revision: value.domain_state_revision,
+    request_state: value.request_state,
+    domain_allocation_revision: value.domain_allocation_revision,
+    allocation_state: value.allocation_state,
+  });
+  if (value.schema_version !==
+        "witself.agent-email-custom-domain-route-source-intent.v1" ||
+      key !== `route-source-intent:${value.domain_request_id}` ||
+      !ACCOUNT_ID_PATTERN.test(value.account_id ?? "") ||
+      !REQUEST_ID_PATTERN.test(value.domain_request_id ?? "") ||
+      !validDomain(value.domain) ||
+      !Number.isSafeInteger(value.domain_state_revision) ||
+      value.domain_state_revision < 1 ||
+      !["verified", "retired"].includes(value.request_state) ||
+      !Number.isSafeInteger(value.domain_allocation_revision) ||
+      value.domain_allocation_revision < 1 ||
+      !["allocated", "retired"].includes(value.allocation_state) ||
+      (value.request_state === "retired") !==
+        (value.allocation_state === "retired") ||
+      value.source_fingerprint !== expectedFingerprint ||
+      !(value.binding_cursor === null ||
+        (typeof value.binding_cursor === "string" &&
+          value.binding_cursor.startsWith(
+            `route-binding:${value.domain_request_id}:`,
+          ))) ||
+      typeof value.allow_restrictive_when_disabled !== "boolean" ||
+      !Number.isSafeInteger(value.failure_count) || value.failure_count < 0 ||
+      !Number.isSafeInteger(value.retry_at_ms) || value.retry_at_ms < 0) {
+    recoveryFail("recovered custom domain route source intent is invalid");
+  }
+  validateISODate(value.created_at, "route source intent created_at");
+  validateISODate(value.updated_at, "route source intent updated_at");
+  if (Date.parse(value.updated_at) < Date.parse(value.created_at)) {
+    recoveryFail("recovered custom domain route source intent time regressed");
+  }
+  return value;
+}
+
 function validPolicyRecord(key, value) {
   assertObject(value, `recovered custom domain policy record is invalid: ${key}`);
   const accountID = key.slice(key.indexOf(":") + 1);
@@ -1278,7 +1403,8 @@ function validPolicyRecord(key, value) {
         !(value.plan_revision === 0
           ? value.plan_snapshot_hash === ""
           : SHA256_PATTERN.test(value.plan_snapshot_hash ?? "")) ||
-        !["awaiting_cell", "cell_committed"].includes(value.state) ||
+        !["awaiting_cell", "cell_committed", "route_converging"]
+          .includes(value.state) ||
         typeof value.feature_enabled !== "boolean" ||
         !(value.domain_limit === null ||
           (Number.isSafeInteger(value.domain_limit) && value.domain_limit >= 0)) ||
@@ -1291,7 +1417,8 @@ function validPolicyRecord(key, value) {
           ? value.retry_at_ms === null && value.cursor === null &&
             value.position === 0
           : Number.isSafeInteger(value.retry_at_ms) &&
-            value.retry_at_ms >= 0)) {
+            value.retry_at_ms >= 0) ||
+        (value.state === "route_converging" && value.cursor !== null)) {
       recoveryFail(`recovered custom domain plan intent is invalid: ${key}`);
     }
     validateISODate(value.created_at, "plan intent created_at");
@@ -1303,10 +1430,12 @@ function validPolicyRecord(key, value) {
   } else if (key.startsWith("lifecycle-fence:") ||
       key.startsWith("lifecycle-intent:")) {
     const intent = key.startsWith("lifecycle-intent:");
+    const legacyIntent = intent && value.phase === undefined;
     exactKeys(value, new Set(intent
       ? [
-        "account_id", "operation_id", "epoch", "action", "cursor",
-        "failure_count", "retry_at_ms", "created_at", "updated_at",
+        "account_id", "operation_id", "epoch", "action",
+        ...(legacyIntent ? [] : ["phase"]), "cursor", "failure_count",
+        "retry_at_ms", "created_at", "updated_at",
       ]
       : [
         "account_id", "operation_id", "epoch", "action", "completed_at",
@@ -1319,9 +1448,12 @@ function validPolicyRecord(key, value) {
       recoveryFail(`recovered custom domain lifecycle record is invalid: ${key}`);
     }
     if (intent) {
-      if (!(value.cursor === null ||
+      if ((!legacyIntent &&
+            !["requests", "route_converging"].includes(value.phase)) ||
+          !(value.cursor === null ||
             (typeof value.cursor === "string" &&
               value.cursor.startsWith(`account-domain:${accountID}:`))) ||
+          (value.phase === "route_converging" && value.cursor !== null) ||
           !Number.isSafeInteger(value.failure_count) || value.failure_count < 0 ||
           !Number.isSafeInteger(value.retry_at_ms) || value.retry_at_ms < 0) {
         recoveryFail(`recovered custom domain lifecycle intent is invalid: ${key}`);
@@ -1622,6 +1754,8 @@ export function validateAgentEmailDomainRecoveredState(state, options = {}) {
 
   const requests = new Map();
   const domains = new Map();
+  const routeBindings = [];
+  const routeSourceIntents = [];
   const audits = new Map();
   const receipts = [];
   for (const [key, value] of source) {
@@ -1646,6 +1780,10 @@ export function validateAgentEmailDomainRecoveredState(state, options = {}) {
       audits.set(audit.sequence, audit);
     } else if (key.startsWith("idem:")) {
       receipts.push(validateIdempotency(key, value));
+    } else if (key.startsWith("route-binding:")) {
+      routeBindings.push(validRouteBindingRecord(key, value));
+    } else if (key.startsWith("route-source-intent:")) {
+      routeSourceIntents.push(validRouteSourceIntentRecord(key, value));
     } else if (key.startsWith("plan-fence:") ||
         key.startsWith("plan-intent:") ||
         key.startsWith("lifecycle-fence:") ||
@@ -1686,6 +1824,64 @@ export function validateAgentEmailDomainRecoveredState(state, options = {}) {
           canonicalJSONString(allocation.retirement) !==
             canonicalJSONString(request.retirement))) {
       recoveryFail("recovered request and allocation graph is inconsistent",
+        "agent_email_domain_recovery_collision");
+    }
+  }
+  const routeAddresses = new Set();
+  const aliasIdentities = new Map();
+  const bindingRequests = new Set();
+  for (const binding of routeBindings) {
+    const request = requests.get(binding.domain_request_id);
+    const allocation = domains.get(binding.domain);
+    if (!request || request.account_id !== binding.account_id ||
+        request.domain !== binding.domain ||
+        !allocation || allocation.schema_version !==
+          "witself.agent-email-domain-allocation.v1" ||
+        allocation.account_id !== binding.account_id ||
+        allocation.source_request_id !== binding.domain_request_id) {
+      recoveryFail("recovered custom domain route binding is orphaned",
+        "agent_email_domain_recovery_collision");
+    }
+    const address = `${binding.domain}:${binding.realm_label}`;
+    if (routeAddresses.has(address)) {
+      recoveryFail("recovered custom domain route address is ambiguous",
+        "agent_email_domain_recovery_collision");
+    }
+    routeAddresses.add(address);
+    const aliasIdentity = canonicalJSONString({
+      account_id: binding.account_id,
+      realm_id: binding.realm_id,
+      realm_label: binding.realm_label,
+    });
+    const previousAliasIdentity = aliasIdentities.get(
+      binding.realm_alias_claim_id,
+    );
+    if (previousAliasIdentity && previousAliasIdentity !== aliasIdentity) {
+      recoveryFail("recovered realm alias claim binding is ambiguous",
+        "agent_email_domain_recovery_collision");
+    }
+    aliasIdentities.set(binding.realm_alias_claim_id, aliasIdentity);
+    bindingRequests.add(binding.domain_request_id);
+  }
+  for (const intent of routeSourceIntents) {
+    const request = requests.get(intent.domain_request_id);
+    const allocation = domains.get(intent.domain);
+    if (!request || !allocation ||
+        request.account_id !== intent.account_id ||
+        request.domain !== intent.domain ||
+        request.state !== intent.request_state ||
+        request.state_revision !== intent.domain_state_revision ||
+        allocation.schema_version !==
+          "witself.agent-email-domain-allocation.v1" ||
+        allocation.account_id !== intent.account_id ||
+        allocation.source_request_id !== intent.domain_request_id ||
+        allocation.state !== intent.allocation_state ||
+        allocation.allocation_revision !==
+          intent.domain_allocation_revision ||
+        !bindingRequests.has(intent.domain_request_id) ||
+        (intent.binding_cursor !== null &&
+          !source.has(intent.binding_cursor))) {
+      recoveryFail("recovered custom domain route source intent is orphaned",
         "agent_email_domain_recovery_collision");
     }
   }
@@ -1889,6 +2085,15 @@ export function rebuildAgentEmailDomainDerivedState(state) {
   validateAgentEmailDomainRecoveredState(source);
   const derived = new Map();
   const usage = new Map();
+  for (const [key, binding] of source) {
+    if (!key.startsWith("route-binding:")) continue;
+    validRouteBindingRecord(key, binding);
+    derived.set(
+      `route-binding-alias:${binding.account_id}:${binding.realm_id}:` +
+        `${binding.realm_alias_claim_id}:${binding.domain_request_id}`,
+      key,
+    );
+  }
   for (const [key, request] of [...source]
     .filter(([key]) => key.startsWith("request:"))
     .sort(([left], [right]) => left.localeCompare(right))) {
@@ -1994,6 +2199,19 @@ export function rebuildAgentEmailDomainDerivedState(state) {
         `lifecycle-due:${String(intent.retry_at_ms).padStart(16, "0")}:` +
           intent.account_id,
         intent.account_id,
+      );
+    }
+    if (key.startsWith("route-source-intent:") &&
+        Number.isSafeInteger(intent.retry_at_ms)) {
+      derived.set(
+        `route-source-account:${intent.account_id}:` +
+          intent.domain_request_id,
+        key,
+      );
+      derived.set(
+        `route-source-due:${String(intent.retry_at_ms).padStart(16, "0")}:` +
+          intent.domain_request_id,
+        intent.domain_request_id,
       );
     }
   }

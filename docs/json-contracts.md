@@ -1519,11 +1519,13 @@ refresh.
 First observations, changed evidence/state, and newly executed manual checks
 remain audited and journaled authority mutations. Recovery omits journal-local
 refresh and work records, rebuilds the due queue from journaled request
-authority, and may therefore perform one conservative repeat check before
-recreating the bounded refresh. Stable scheduled outcomes do not grow
-authority or R2; changing outcomes can still consume audit capacity until
-admission closes. Requests and verification stay dark until the refresh/claim
-fences pass a controlled canary.
+authority for derived-state parity. A sealed drill object has no alarm and does
+not execute that queue. If a future separately reviewed activation protocol
+ever made restored state live, its first scheduled check would conservatively
+recreate the bounded refresh; no such promotion path exists today. Stable
+scheduled outcomes do not grow authority or R2; changing outcomes can still
+consume audit capacity until admission closes. Requests and verification stay
+dark until the refresh/claim fences pass a controlled canary.
 
 Starting a recovery accepts:
 
@@ -1689,6 +1691,162 @@ page values. The matching CLI list commands emit those page fields under
 cursor, CLI JSON omits `next_cursor` on the final page. Text mode writes
 `next cursor: ...` to stderr whenever continuation is required.
 
+### Custom-domain route intent and cell projection (schema 88, dark)
+
+The dark routing foundation joins two independently authoritative records. One
+verified `witself.agent-email-domain-allocation.v1` allocation identifies the
+customer domain, request, account, allocation revision, and request state
+revision. One read-only `witself.realm-email-alias-claim-proof.v1` response
+identifies the realm-alias claim, claim revision, realm, label, state, and the
+same account. A mismatch in account, label, realm, request, or any revision
+fails closed. The resulting address namespace is:
+
+```text
+<agent-segment>.<realm-alias>@<verified-customer-domain>
+```
+
+Before the first cell or KV write, the two registries persist this exact sparse
+membership:
+
+```text
+agent-email-domain authority
+  route-binding:<domain-request-id>:<realm-alias-claim-id>
+
+realm-email-alias authority
+  custom-domain-subscription:<realm-alias-claim-id>
+```
+
+The immutable `witself.agent-email-custom-domain-route-binding.v1` value fixes
+the account, customer domain, domain request, realm, alias label, alias claim,
+and creation time. The immutable
+`witself.realm-email-alias-custom-domain-subscription.v1` value repeats the
+account, realm, alias label, claim id, and creation time. Subscription is an
+idempotent cross-registry handshake: the alias registry independently proves
+the exact current claim before accepting it. A newly created binding may not
+reach a cell until the matching subscription is acknowledged. Both records are
+permanent even after retirement. They record only routes that were actually
+requested, so neither registry enumerates a domain-by-alias cross product or
+uses a cell table as global discovery authority.
+
+Realm close fences creation of a first subscription. If a crash leaves only
+the earlier domain binding and the realm becomes closed before retry, the
+retired, never-subscribed binding completes without external I/O. That is safe
+because subscription acknowledgement is a prerequisite for every cell or KV
+write; an existing subscription is never removed and must follow the normal
+retirement barrier.
+
+Source changes use two journaled, overwriteable outboxes:
+
+```text
+agent-email-domain authority
+  route-source-intent:<domain-request-id>
+
+realm-email-alias authority
+  custom-domain-sync:<realm-alias-claim-id>
+```
+
+`witself.agent-email-custom-domain-route-source-intent.v1` carries the exact
+request/allocation revisions and states, their source fingerprint, a bounded
+binding cursor, retry state, and whether restrictive convergence may continue
+with the routing gate disabled. `witself.realm-email-alias-custom-domain-sync.v1`
+carries the exact `witself.realm-email-alias-claim-proof.v1`, its fingerprint,
+the `enqueue` or `poll` phase, and retry state. An alias sync is created only
+for a subscribed claim. Enqueue acknowledgement is not completion: the alias
+registry retains and polls its outbox until the custom-domain registry reports
+that the exact fingerprint's bounded task is complete.
+
+The rebuildable indexes are
+`route-binding-alias:<account-id>:<realm-id>:<claim-id>:<request-id>`,
+`route-source-account:<account-id>:<request-id>`, `route-source-due:...`,
+`custom-domain-subscription-realm:<account-id>:<realm-id>:<claim-id>`,
+`custom-domain-sync-account:<account-id>:<claim-id>`, and
+`custom-domain-sync-due:...`. Each fan-out reads a bounded page from one of
+those exact prefixes. A final plan or account-lifecycle fence requires its
+account outbox prefix to be empty, including work created on earlier pages.
+Realm close inserts a custom-domain convergence phase after proving that every
+alias is terminal and before `prepare_cell`; it cannot advance until every
+subscribed binding in the realm has completed a retired leaf projection.
+
+Leaf application uses one overwriteable journal-local
+`witself.agent-email-custom-domain-route-intent.v1` record at
+`route-projection-intent:<domain-request-id>:<realm-label>`. It contains the
+complete cell and edge projections plus a canonical source fingerprint. A
+`pending` intent has a bounded retry counter and due time; a completed intent
+retains the exact after-image with no due entry. The controller applies the
+cell projection, performs an exact readback, re-proves the domain allocation
+and alias claim, and only then writes KV. Lost enqueue, cell, readback, or KV
+acknowledgements replay the same bytes. Changed authority replaces the local
+intent. An applied leaf does no external work while its routing gate is dark;
+already-bound suspended and retired leaves remain eligible to converge so a
+kill switch cannot strand lifecycle cleanup.
+
+Direct source mutations have eventual child convergence: 300 seconds is the
+normal freshness window. The edge accepts a route timestamp up to 300 seconds
+in the future, so the formal maximum is 600 seconds when the full accepted
+clock skew combines with the 300-second cache TTL. Exact parent barriers do not
+use that allowance: plan, account lifecycle, and realm close wait for positive
+cell readback plus edge publication before fencing complete.
+
+Empty-target recovery journals the binding, subscription, and both source
+outboxes as authority. It rebuilds every reverse/account/realm index and only
+the due entries implied by source or alias-sync outboxes that were pending at
+the replayed journal head. `route-projection-intent`, its due entry, and the
+bounded local alias task are operational state and are dropped. A completed
+permanent binding contributes its sparse reverse indexes but no recovery-due
+key, new convergence obligation, or alarm. The sealed drill target does not
+drain even a recovered pending outbox, scan cell inventory, create an
+unobserved route combination, perform external projection, accept route
+traffic, or promote itself to the fixed live registry. Activating restored
+state would require a new, explicit, separately reviewed operations protocol;
+no such promotion contract exists here.
+
+The provision-token-only cell endpoint is:
+
+```text
+POST /v1/accounts/{account_id}:email-custom-domain-route
+GET  /v1/accounts/{account_id}:email-custom-domain-route?domain_request_id={aedr_id}&realm_alias_claim_id={era_id}
+```
+
+Controllers send and both methods return this strict value-free shape. POST
+requires `schema_version` to be exactly `witself.v0`, and every response
+includes it:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "account_id": "acc_123",
+  "domain_request_id": "aedr_aaaaaaaaaaaaaaaa",
+  "domain_allocation_revision": 3,
+  "domain_state_revision": 7,
+  "realm_alias_claim_id": "era_bbbbbbbbbbbbbbbb",
+  "realm_alias_revision": 5,
+  "realm_id": "realm_cccccccccccccccc",
+  "domain": "agents.example.com",
+  "realm_label": "acme-team",
+  "state": "applied",
+  "controller_revision": 15
+}
+```
+
+`state` is `applied`, `suspended`, or `retired`. A suspended value also has
+`suspension_disposition`, exactly `retry` or `inactive`; other states omit it.
+The account in the body must equal the path. An applied projection requires the
+referenced local realm-alias row at the exact account, realm, label, and
+`realm_alias_revision`, plus a live realm route. Equal-revision exact replay is
+idempotent. A lower controller or source revision, same-revision mismatch,
+binding collision, or attempted resurrection of a retired row returns conflict.
+
+The cell table `agent_email_custom_domain_routes` is keyed by
+`(domain_request_id, realm_alias_claim_id)` and uniquely reserves
+`(domain, realm_label)`. It retains all fields above plus lifecycle timestamps;
+retired rows are permanent identity tombstones. It is account-scoped,
+evacuation-fenced authority, not a cache. Account archives at schema 88 include
+this table before messages, and custom-domain messages preserve both source ids.
+A schema-87 archive upgrades with an empty route stream and null
+`recipient_custom_domain_request_id`; import never infers either from an address.
+The schema-88 down migration refuses before mutation if any route row (including
+a retired row) or any custom-domain receipt exists.
+
 ### Realm-route edge projection
 
 The pilot Worker remains backward compatible with its literal-recipient
@@ -1716,20 +1874,50 @@ An applied managed-alias record has this exact shape:
 }
 ```
 
+An applied customer-domain record is an additive variant of that same schema
+and keyspace:
+
+```json
+{
+  "schema_version": 1,
+  "domain": "agents.example.com",
+  "realm_label": "acme-team",
+  "realm_id": "realm_cccccccccccccccc",
+  "route_kind": "custom_domain",
+  "state": "applied",
+  "controller_revision": 15,
+  "updated_at": "2026-08-09T12:00:00.000Z",
+  "cache_ttl_seconds": 300,
+  "domain_request_id": "aedr_aaaaaaaaaaaaaaaa",
+  "domain_allocation_revision": 3,
+  "realm_alias_claim_id": "era_bbbbbbbbbbbbbbbb",
+  "realm_alias_revision": 5,
+  "cell_audience": "gcp-prod-us-central1-core",
+  "ingest_url": "https://api.cell.example/v1/internal/agent-email:ingest"
+}
+```
+
 For a canonical record, `route_kind` is `canonical` and `realm_label` is the
 exact 16-character body of `realm_id`. A realm alias is 3–16 lowercase ASCII
 letters or digits with non-leading, non-trailing single hyphens; consecutive
 hyphens, `xn--`, and labels that collide with the canonical base32 namespace
-are invalid. `state` is exactly `applied`, `suspended`, or `retired`.
+are invalid. A custom-domain label follows the same alias grammar and may not
+be the canonical realm-id body. Its four additional exact edge fences are
+`domain_request_id`, `domain_allocation_revision`,
+`realm_alias_claim_id`, and `realm_alias_revision`; managed canonical and alias
+variants must omit all four. `state` is exactly `applied`, `suspended`, or `retired`.
 `cell_audience` and `ingest_url` are present only for `applied`; suspended and
 retired records omit both. The record repeats the domain and label, and the
 edge verifies both against the lookup key before using a destination.
 
-The projection intentionally contains no account id, agent id, alias claim id,
-or recipient claim. Global alias ownership and tombstones remain authoritative
-in the control-plane Durable Object, while the cell owns recipient resolution
-and plan enforcement. The control plane publishes an applied route only after
-the cell has acknowledged and reread the same monotonic alias revision. A
+No edge variant contains an account id, agent id, or recipient claim. Managed
+alias projections intentionally omit their claim id; a custom-domain projection
+contains the two source identities and revisions above only as consistency
+fences. Global domain and alias ownership and tombstones remain authoritative
+in their control-plane Durable Objects, while the cell owns recipient
+resolution and plan enforcement. The control plane publishes an applied route
+only after the cell has acknowledged and reread the same monotonic source
+revisions. A
 stale, malformed, misbound, or excessively future-dated KV record triggers the bounded
 authenticated fallback:
 
@@ -1738,14 +1926,24 @@ GET /v1/email/realm-routes/{domain}/{realm_label}
 Authorization: Bearer <CONTROL_PLANE_EDGE_TOKEN>
 ```
 
-That route reads the durable authority rather than the stale KV row. A fresh
-response with an older controller revision, an invalid response, a timeout, or
-a non-404 failure is a temporary SMTP failure; the stale destination is never
-used. An authoritative 404 is an unknown route. The cell still validates the
-signed envelope against its locally applied alias projection, so KV is never
-claim authority. These contracts do not promote a catch-all or change which
-addresses Cloudflare sends to the Worker; receive remains pilot-gated until a
-separate reviewed Email Routing rollout.
+For a managed domain that route reads alias/canonical authority rather than the
+stale KV row. For any other domain it returns 404 before touching custom-domain
+authority unless `CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ENABLED` is exactly true;
+the custom registry independently requires exact account membership in
+`CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ACCOUNT_ALLOWLIST`. A fresh response with
+an older controller revision, the wrong route-kind variant, an invalid response,
+a timeout, or a non-404 failure is a temporary SMTP failure; the stale
+destination is never used. An authoritative 404 is an unknown route.
+
+Before even that lookup, a customer-domain SMTP transaction requires the
+independent exact-true edge gate
+`AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED`. With it absent, the Worker
+tempfails before KV, fallback, limiter, or raw-MIME access. The cell still
+validates the signed envelope against its local alias and custom-domain rows, so
+KV is never claim authority. This slice adds no signed header and does not
+promote a catch-all or change which domains Cloudflare sends to the Worker. All
+three gates are absent from release configuration, and acceptance remains
+fake/offline only pending a separate DNS/MX/Email Routing rollout.
 
 `GET /v1/email/address`:
 
@@ -1964,11 +2162,18 @@ provider-message-id field is absent. A suspected retry adds
 distinct immutable message.
 
 `recipient_route_kind` is durable receipt provenance: `canonical` means the
-permanent realm-id-body address was used and
-`recipient_realm_alias_claim_id` is omitted; `realm_alias` means the cell
-resolved the delivered domain/realm label through the exact locally applied
-claim and records that claim id. It does not make the untrusted envelope a
-claim or allow the edge to choose an agent.
+permanent realm-id-body address was used and both source-id fields are omitted;
+`realm_alias` means the cell resolved the delivered managed domain/realm label
+through the exact locally applied claim, records
+`recipient_realm_alias_claim_id`, and omits
+`recipient_custom_domain_request_id`. A schema-88 `custom_domain` receipt
+records both `recipient_realm_alias_claim_id` and
+`recipient_custom_domain_request_id`; its envelope recipient has the form
+`browser-agent.acme-team@agents.example.com`. The cell derives that variant and
+both identifiers by resolving the signed envelope against its local route
+tables. It does not trust an unsigned edge route-kind hint, make the untrusted
+envelope itself a claim, or allow the edge to choose an account, realm, or
+agent.
 
 `attachment_storage_bytes` is the complete raw-MIME size charged when the
 message has an attachment or MIME parsing fails; a successfully parsed message
@@ -2072,6 +2277,11 @@ X-Witself-Email-Raw-Size: <canonical decimal>
 X-Witself-Email-Raw-SHA256: sha256:<lowercase-hex>
 X-Witself-Email-Signature: <standard padded base64 Ed25519 signature>
 ```
+
+Schema 88 adds no relay header. In particular, route kind, domain request id,
+and realm-alias claim id are not sent as unsigned metadata or added to the
+signature contract. The existing signed envelope recipient plus cell-local
+authority is the only source of those receipt fields.
 
 The response is deliberately content-free and has exactly one string field,
 `verdict`. The current Worker mapping is:

@@ -170,10 +170,16 @@ and their configured primary route. For an existing mailbox, it also preserves
 a different original route only when that legacy address was already issued.
 Configuring the legacy domain alone never issues it to a mailbox created after
 cutover.
-Ingress must match both a currently configured primary/legacy domain and a
-permanent `agent_email_address_domains` reservation. A historical reservation
-remains non-reusable but is not accepted after its domain leaves the runtime
-configuration. Startup fails before serving when the realm or an agent is
+Managed canonical and realm-alias ingress must match both a currently
+configured primary/legacy domain and a permanent
+`agent_email_address_domains` reservation. A historical reservation remains
+non-reusable but is not accepted after its domain leaves the runtime
+configuration. The schema-88 custom-domain path never adds a
+customer domain to that configuration: the signed envelope recipient must
+instead resolve through an exact local `agent_email_custom_domain_routes` row
+bound to an existing realm-alias claim. With all custom routing and delivery
+gates absent, no such live ingress is reachable. Startup fails before serving
+when the realm or an agent is
 missing or inactive, an agent belongs to another realm, a route collides, or an
 existing mailbox/address has inconsistent ownership. Realm-email aliases stay
 on their explicit primary domain and are never fanned out to the legacy domain.
@@ -189,9 +195,11 @@ not turn this domain into a general company-mail surface.
 The edge implementation lives in `infra/cloudflare/agent-email/`. It uses its
 own `witself-agent-email-pilot` Worker and an isolated
 `witself-agent-email-pilot-directory` KV namespace. It must never bind the
-control-plane `DIRECTORY` namespace. Route management is limited to literal
-rules for the 5–10 enrolled addresses; it reads and fingerprints the existing
-catch-all but has no operation that can update it.
+control-plane `DIRECTORY` namespace. Provider-side route management is limited
+to literal rules for the 5–10 enrolled addresses; the Worker can read isolated
+KV recipient projections after a provider route has delivered mail to it, but
+that directory cannot create provider coverage. Infrastructure reads and
+fingerprints the existing catch-all but has no operation that can update it.
 
 An operator activates the edge only after the cell release and configuration
 are healthy, the disabled exact-route set has been reviewed, and KV propagation
@@ -305,6 +313,86 @@ intentionally refuses downgrade. Roll back application behavior/configuration
 while leaving schema 87 and all permanent route reservations intact; never
 delete a route merely to make the down migration pass. Delivery activation is
 a later, separately reviewed edge rollout.
+
+The custom-domain routing foundation advances compatible cells to schema 88 but
+is not part of the active-cell production rollout. Until it is separately approved,
+exercise it only against fake Cloudflare bindings, a synthetic SMTP transaction,
+and a disposable PostgreSQL database. Do not flip either control-plane routing
+gate or `AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED`, add a customer domain to
+the pilot configuration, change MX/Email Routing, or send a live canary.
+
+For the eventual dark schema-88 cell wave, create and verify the normal
+pre-migration backup, then freeze custom-domain projection, realm-alias
+projection, realm close, account export/import, and cell movement for the
+mixed-version window. Migration `0088` adds the account-scoped,
+evacuation-fenced `agent_email_custom_domain_routes` table and nullable
+`agent_email_messages.recipient_custom_domain_request_id`. Deploy the canary
+cell and then every intended destination before the control plane is allowed to
+project. Verify the provision-token POST plus exact GET readback, same-revision
+idempotency, stale/misbound rejection, account archive round trip, and signed
+envelope/local-route provenance. No provider operation belongs in this wave.
+
+The control plane does not discover these rows by scanning cells. Before its
+first cell or KV write it journals one permanent sparse
+`route-binding:<domain-request-id>:<realm-alias-claim-id>` and receives an
+idempotent acknowledgement for the alias registry's permanent
+`custom-domain-subscription:<realm-alias-claim-id>`. Domain changes then use a
+journaled `route-source-intent`; subscribed alias changes use a journaled
+`custom-domain-sync`. Their account, realm, reverse-binding, and due indexes are
+derived and rebuilt after recovery, and every fan-out page is bounded. This is
+why a cell move must preserve the control-plane registries and their journals:
+the cell custom-route table is enforcement authority for that account, but it
+is not the global membership catalog.
+
+If a crash occurs after the domain binding is journaled but before the first
+alias subscription is acknowledged, realm close fences that late subscription.
+The retired, never-subscribed binding then completes without a cell or KV
+write; the missing acknowledgement proves that no earlier leaf write was
+permitted. An already acknowledged subscription remains permanent and must
+pass the ordinary positive retirement barrier.
+
+Ordinary direct domain or alias changes may finish their source commit while
+the durable child outbox is still converging. Operators should expect the
+normal 300-second cache window; because the edge accepts a timestamp up to 300
+seconds ahead of its clock, acceptance tests must use 600 seconds as the formal
+worst-case stale window when full clock skew is present. Do not apply that
+eventual allowance to a parent transition. Plan completion and account
+movement/close wait until every exact account outbox is complete. Realm close
+waits for every subscribed custom-domain route to be retired in the cell and
+edge directory before it prepares the cell realm. A queued or accepted child
+task is not completion, and an empty elapsed TTL is not a substitute for the
+positive barrier acknowledgement.
+
+Removing a routing/activation gate must stop new applied projection while
+still allowing already-bound suspended and retired work to drain. An account
+with no permanent subscription remains a true dark no-op: alias mutation does
+not call the custom-domain registry or arm a custom-domain alarm. During a
+mixed-version rollback, do not deploy code that cannot classify the permanent
+binding/subscription or journaled source outboxes once any of those authority
+keys exists. Roll forward with the gates dark and let restrictive convergence
+finish before resuming lifecycle work.
+
+Empty-target recovery rebuilds sparse indexes from journaled bindings,
+subscriptions, and pending source outboxes. It deliberately drops local leaf
+projection intents and domain-side alias tasks. Only an outbox that was pending
+at the replayed journal head regains a due entry; a completed permanent binding
+does not create a recovery-due key, convergence obligation, or alarm. The
+sealed drill target does not drain recovered work, perform cell/KV writes,
+accept routing traffic, or become a cutover target. Recovery must fail if a
+binding is orphaned from its domain allocation or if a subscription is orphaned
+from its claim; never repair either condition by inventing the cross product or
+copying cell inventory into global authority. Any future active restore would
+require a separately reviewed explicit activation protocol that is not
+implemented by this drill.
+
+A schema-87 archive remains importable: it creates no custom-domain route and
+uses the new provenance column's null default. Schema-88 archives preserve route
+rows before their messages and validate the exact account, realm, domain, and
+alias identities. Once any custom-domain route exists, including a retired
+tombstone, or a custom-domain receipt exists, migration `0088` refuses downgrade
+before mutation. Roll application behavior or configuration back while leaving
+schema 88 intact and roll forward to repair; never delete authority or mail to
+force schema 87.
 
 For avatar creative-payload compaction, this release pin is Phase A: leave
 `apps.witselfServer.avatarPayloadCompactionEnabled: false`, freeze avatar

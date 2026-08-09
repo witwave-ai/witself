@@ -15,6 +15,7 @@ const OUTCOMES = new Set([
   "tempfail_directory",
   "tempfail_alias_gate",
   "tempfail_canonical_gate",
+  "tempfail_custom_domain_gate",
   "tempfail_suspended_route",
   "tempfail_route_lookup",
   "tempfail_content",
@@ -43,7 +44,9 @@ const ROUTE_LOOKUP_RESULTS = new Set([
 ]);
 
 const ROUTE_LOOKUP_EVIDENCE = new Set(["none", "known", "uncertain"]);
-const ROUTE_LOOKUP_KINDS = new Set(["canonical", "alias", "pilot", "unknown"]);
+const ROUTE_LOOKUP_KINDS = new Set([
+  "canonical", "alias", "custom_domain", "pilot", "unknown",
+]);
 
 function boundedNonNegative(value) {
   const number = Number(value);

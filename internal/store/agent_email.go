@@ -296,6 +296,7 @@ type AgentEmailMessage struct {
 	RealmLabel                     string               `json:"realm_label"`
 	RecipientRouteKind             string               `json:"recipient_route_kind"`
 	RecipientRealmAliasClaimID     string               `json:"recipient_realm_alias_claim_id,omitempty"`
+	RecipientCustomDomainRequestID string               `json:"recipient_custom_domain_request_id,omitempty"`
 	SubaddressTag                  string               `json:"subaddress_tag,omitempty"`
 	RawSizeBytes                   int64                `json:"raw_size_bytes"`
 	ParseState                     string               `json:"parse_state"`
@@ -704,6 +705,20 @@ func (s *Store) ApplyAgentEmailRealmAlias(
 	}
 	if err != nil {
 		return AgentEmailRealmAlias{}, fmt.Errorf("lock realm alias account: %w", err)
+	}
+	if err := lockAgentEmailRouteNamespaceTx(ctx, tx, domain, label); err != nil {
+		return AgentEmailRealmAlias{}, err
+	}
+	_, customRouteErr := agentEmailCustomDomainRouteByLabelTx(
+		ctx, tx, domain, label, true,
+	)
+	if customRouteErr != nil && !errors.Is(
+		customRouteErr, ErrAgentEmailCustomDomainRouteNotFound,
+	) {
+		return AgentEmailRealmAlias{}, customRouteErr
+	}
+	if customRouteErr == nil {
+		return AgentEmailRealmAlias{}, ErrAgentEmailRealmAliasConflict
 	}
 	existing, err := agentEmailRealmAliasByClaimTx(ctx, tx, in.ClaimID, true)
 	if err != nil && !errors.Is(err, ErrAgentEmailRealmAliasNotFound) {
@@ -1294,15 +1309,8 @@ func (s *Store) IngestAgentEmailPilot(
 	if relay.Audience != strings.ToLower(strings.TrimSpace(scope.Audience)) {
 		return AgentEmailMessage{}, fmt.Errorf("%w: relay audience does not match this cell", ErrAgentEmailInputInvalid)
 	}
-	parts, err := parseAgentEmailRecipient(relay.EnvelopeRecipient, scope)
+	parts, err := parseAgentEmailRecipient(relay.EnvelopeRecipient)
 	if err != nil {
-		return AgentEmailMessage{}, ErrAgentEmailUnknownRecipient
-	}
-	// Domain compatibility is deliberately limited to canonical local parts
-	// that were actually issued before cutover. Realm-alias claims are explicit
-	// domain-scoped authority and never inherit onto a legacy domain, even if a
-	// stale/imported alias and address route happen to coexist there.
-	if !agentemail.IsCanonicalRealmLabel(parts.RealmLabel) && parts.Domain != primaryDomain {
 		return AgentEmailMessage{}, ErrAgentEmailUnknownRecipient
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -1343,7 +1351,14 @@ func (s *Store) IngestAgentEmailPilot(
 	if address.AccountID != candidate.AccountID || address.RealmID != candidate.RealmID ||
 		address.OwnerAgentID != candidate.OwnerAgentID || address.ID != candidate.ID ||
 		recipientRoute.Kind != candidateRoute.Kind ||
-		recipientRoute.RealmAliasClaimID != candidateRoute.RealmAliasClaimID {
+		recipientRoute.RealmAliasClaimID != candidateRoute.RealmAliasClaimID ||
+		recipientRoute.CustomDomainRequestID != candidateRoute.CustomDomainRequestID {
+		return AgentEmailMessage{}, ErrAgentEmailUnknownRecipient
+	}
+	// Managed realm aliases never inherit onto compatibility domains. Custom
+	// domains instead require their own exact local projection and provenance.
+	if recipientRoute.Kind == AgentEmailRecipientRouteRealmAlias &&
+		parts.Domain != primaryDomain {
 		return AgentEmailMessage{}, ErrAgentEmailUnknownRecipient
 	}
 	if !scope.RealmIDs[address.RealmID] || !scope.AgentIDs[address.OwnerAgentID] {
@@ -1352,7 +1367,19 @@ func (s *Store) IngestAgentEmailPilot(
 	if address.ReceiveState != AgentEmailReceiveEnabled {
 		return AgentEmailMessage{}, ErrAgentEmailReceiveDisabled
 	}
+	// A plan-driven inactive route is permanent only after the exact source
+	// alias revision has reached this cell. Stale source authority and ordinary
+	// operational suspensions remain retryable.
+	if recipientRoute.CustomState == AgentEmailCustomDomainRouteSuspended &&
+		recipientRoute.CustomSuspensionDisposition ==
+			AgentEmailCustomDomainSuspensionInactive &&
+		recipientRoute.AliasRevisionMatches {
+		return AgentEmailMessage{}, ErrAgentEmailUnknownRecipient
+	}
 	if recipientRoute.AliasState == AgentEmailRealmAliasSuspended {
+		return AgentEmailMessage{}, ErrAgentEmailReceiveDisabled
+	}
+	if recipientRoute.CustomState == AgentEmailCustomDomainRouteSuspended {
 		return AgentEmailMessage{}, ErrAgentEmailReceiveDisabled
 	}
 	if address.AgentSegment != parts.AgentSegment ||
@@ -1492,7 +1519,8 @@ func (s *Store) IngestAgentEmailPilot(
 		    (id,account_id,realm_id,mailbox_id,owner_agent_id,address_id,
 		     provider,provider_message_id,envelope_sender,envelope_recipient,
 		     agent_segment,realm_label,recipient_route_kind,
-		     recipient_realm_alias_claim_id,subaddress_tag,raw_mime,raw_size_bytes,
+		     recipient_realm_alias_claim_id,recipient_custom_domain_request_id,
+		     subaddress_tag,raw_mime,raw_size_bytes,
 		     raw_sha256,parse_state,parse_error,header_from,header_to,
 		     header_subject,mime_message_id,message_date,attachment_count,
 		     body_text,body_text_kind,attachment_storage_bytes,
@@ -1502,10 +1530,10 @@ func (s *Store) IngestAgentEmailPilot(
 		     sender_verification_state,duplicate_group_sha256,
 		     possible_duplicate_of_message_id,received_at)
 		  VALUES
-		    ($1,$2,$3,$4,$5,$6,$7,NULL,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-		     $18,$19,$20,$21,$22,$23,$24,$25,
-		     $26,$27,$28,$29,$30,true,
-		     'unknown','unknown','unknown','unknown','unverified',$31,$32,
+		    ($1,$2,$3,$4,$5,$6,$7,NULL,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
+		     $19,$20,$21,$22,$23,$24,$25,$26,
+		     $27,$28,$29,$30,$31,true,
+		     'unknown','unknown','unknown','unknown','unverified',$32,$33,
 		     clock_timestamp())
 		  RETURNING received_at,created_at
 		), inserted_delivery AS (
@@ -1521,6 +1549,7 @@ func (s *Store) IngestAgentEmailPilot(
 		address.OwnerAgentID, address.ID, agentEmailPilotProvider,
 		relay.EnvelopeSender, parts.Address, parts.AgentSegment, parts.RealmLabel,
 		recipientRoute.Kind, agentEmailNullableString(recipientRoute.RealmAliasClaimID),
+		agentEmailNullableString(recipientRoute.CustomDomainRequestID),
 		agentEmailNullableString(parts.SubaddressTag), rawForStorage, len(in.Raw), rawSHA,
 		parseState, agentEmailNullableString(parseErrorCode), agentEmailNullableString(parsed.HeaderFrom),
 		agentEmailNullableString(parsed.HeaderTo), agentEmailNullableString(parsed.HeaderSubject),
@@ -1557,9 +1586,10 @@ func (s *Store) IngestAgentEmailPilot(
 		AddressID: address.ID, Provider: agentEmailPilotProvider,
 		EnvelopeSender: relay.EnvelopeSender, EnvelopeRecipient: parts.Address,
 		AgentSegment: parts.AgentSegment, RealmLabel: parts.RealmLabel,
-		RecipientRouteKind:         recipientRoute.Kind,
-		RecipientRealmAliasClaimID: recipientRoute.RealmAliasClaimID,
-		SubaddressTag:              parts.SubaddressTag, RawSizeBytes: int64(len(in.Raw)),
+		RecipientRouteKind:             recipientRoute.Kind,
+		RecipientRealmAliasClaimID:     recipientRoute.RealmAliasClaimID,
+		RecipientCustomDomainRequestID: recipientRoute.CustomDomainRequestID,
+		SubaddressTag:                  parts.SubaddressTag, RawSizeBytes: int64(len(in.Raw)),
 		ParseState: parseState, ParseErrorCode: parseErrorCode,
 		HeaderFrom: parsed.HeaderFrom, HeaderTo: parsed.HeaderTo,
 		Subject: parsed.HeaderSubject, MIMEMessageID: parsed.MIMEMessageID,
@@ -2264,10 +2294,14 @@ func agentEmailAddressByRecipientTx(
 }
 
 type agentEmailRecipientRoute struct {
-	Address           AgentEmailAddress
-	Kind              string
-	RealmAliasClaimID string
-	AliasState        string
+	Address                     AgentEmailAddress
+	Kind                        string
+	RealmAliasClaimID           string
+	AliasState                  string
+	AliasRevisionMatches        bool
+	CustomDomainRequestID       string
+	CustomState                 string
+	CustomSuspensionDisposition string
 }
 
 func agentEmailRouteByRecipientTx(
@@ -2292,38 +2326,103 @@ func agentEmailRouteByRecipientTx(
 	alias, err := agentEmailRealmAliasByLabelTx(
 		ctx, tx, parts.Domain, parts.RealmLabel, lock,
 	)
+	if err != nil && !errors.Is(err, ErrAgentEmailRealmAliasNotFound) {
+		return agentEmailRecipientRoute{}, err
+	}
+	if err == nil {
+		if alias.State == AgentEmailRealmAliasRetired {
+			return agentEmailRecipientRoute{}, ErrAgentEmailUnknownRecipient
+		}
+		query := agentEmailAddressSelect() + `
+			JOIN agent_email_address_domains adr
+			  ON adr.address_id=addr.id AND adr.account_id=addr.account_id
+			 AND adr.realm_id=addr.realm_id
+			 AND adr.provisioned_agent_id=addr.provisioned_agent_id
+			 AND adr.local_part=addr.local_part
+			WHERE addr.account_id=$1 AND addr.realm_id=$2 AND adr.domain=$3
+			  AND addr.agent_segment=$4 AND addr.retired_at IS NULL`
+		if lock {
+			query += ` FOR SHARE OF adr,addr,mb,rc`
+		}
+		address, err := scanAgentEmailAddress(tx.QueryRow(
+			ctx, query, alias.AccountID, alias.RealmID, alias.Domain, parts.AgentSegment,
+		))
+		if errors.Is(err, pgx.ErrNoRows) {
+			return agentEmailRecipientRoute{}, ErrAgentEmailUnknownRecipient
+		}
+		if err != nil {
+			return agentEmailRecipientRoute{}, fmt.Errorf("resolve agent-email alias recipient: %w", err)
+		}
+		return agentEmailRecipientRoute{
+			Address: address, Kind: AgentEmailRecipientRouteRealmAlias,
+			RealmAliasClaimID: alias.ClaimID, AliasState: alias.State,
+		}, nil
+	}
+
+	// A custom-domain route is intentionally discovered from the signed
+	// envelope plus local authority, not from unsigned edge metadata. For the
+	// locking pass, acquire the alias before the route to match projection
+	// writers and avoid cross-path deadlocks.
+	custom, err := agentEmailCustomDomainRouteByLabelTx(
+		ctx, tx, parts.Domain, parts.RealmLabel, false,
+	)
+	if errors.Is(err, ErrAgentEmailCustomDomainRouteNotFound) {
+		return agentEmailRecipientRoute{}, ErrAgentEmailUnknownRecipient
+	}
+	if err != nil {
+		return agentEmailRecipientRoute{}, err
+	}
+	alias, err = agentEmailRealmAliasByClaimTx(
+		ctx, tx, custom.RealmAliasClaimID, lock,
+	)
 	if errors.Is(err, ErrAgentEmailRealmAliasNotFound) {
 		return agentEmailRecipientRoute{}, ErrAgentEmailUnknownRecipient
 	}
 	if err != nil {
 		return agentEmailRecipientRoute{}, err
 	}
-	if alias.State == AgentEmailRealmAliasRetired {
+	if lock {
+		locked, lockErr := agentEmailCustomDomainRouteByIdentityTx(
+			ctx, tx, custom.DomainRequestID, custom.RealmAliasClaimID, true,
+		)
+		if lockErr != nil || locked.Domain != parts.Domain ||
+			locked.RealmLabel != parts.RealmLabel {
+			return agentEmailRecipientRoute{}, ErrAgentEmailUnknownRecipient
+		}
+		custom = locked
+	}
+	if custom.State == AgentEmailCustomDomainRouteRetired ||
+		alias.State == AgentEmailRealmAliasRetired {
 		return agentEmailRecipientRoute{}, ErrAgentEmailUnknownRecipient
 	}
+	aliasRevisionMatches := alias.ControllerRevision == custom.RealmAliasRevision
+	aliasState := alias.State
+	if !aliasRevisionMatches {
+		// The custom route is fenced to a different alias generation. Keep the
+		// recipient retryable until the control plane converges or retires it.
+		aliasState = AgentEmailRealmAliasSuspended
+	}
 	query := agentEmailAddressSelect() + `
-		JOIN agent_email_address_domains adr
-		  ON adr.address_id=addr.id AND adr.account_id=addr.account_id
-		 AND adr.realm_id=addr.realm_id
-		 AND adr.provisioned_agent_id=addr.provisioned_agent_id
-		 AND adr.local_part=addr.local_part
-		WHERE addr.account_id=$1 AND addr.realm_id=$2 AND adr.domain=$3
-		  AND addr.agent_segment=$4 AND addr.retired_at IS NULL`
+		WHERE addr.account_id=$1 AND addr.realm_id=$2
+		  AND addr.agent_segment=$3 AND addr.retired_at IS NULL`
 	if lock {
-		query += ` FOR SHARE OF adr,addr,mb,rc`
+		query += ` FOR SHARE OF addr,mb,rc`
 	}
 	address, err := scanAgentEmailAddress(tx.QueryRow(
-		ctx, query, alias.AccountID, alias.RealmID, alias.Domain, parts.AgentSegment,
+		ctx, query, custom.AccountID, custom.RealmID, parts.AgentSegment,
 	))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return agentEmailRecipientRoute{}, ErrAgentEmailUnknownRecipient
 	}
 	if err != nil {
-		return agentEmailRecipientRoute{}, fmt.Errorf("resolve agent-email alias recipient: %w", err)
+		return agentEmailRecipientRoute{}, fmt.Errorf("resolve agent-email custom-domain recipient: %w", err)
 	}
 	return agentEmailRecipientRoute{
-		Address: address, Kind: AgentEmailRecipientRouteRealmAlias,
-		RealmAliasClaimID: alias.ClaimID, AliasState: alias.State,
+		Address: address, Kind: AgentEmailRecipientRouteCustomDomain,
+		RealmAliasClaimID: custom.RealmAliasClaimID, AliasState: aliasState,
+		AliasRevisionMatches:  aliasRevisionMatches,
+		CustomDomainRequestID: custom.DomainRequestID, CustomState: custom.State,
+		CustomSuspensionDisposition: custom.SuspensionDisposition,
 	}, nil
 }
 
@@ -2681,21 +2780,12 @@ func populateAgentEmailCanonicalAddressesWithFallbackTx(
 	return nil
 }
 
-func parseAgentEmailRecipient(
-	recipient string,
-	scope AgentEmailPilotScope,
-) (agentemail.AddressParts, error) {
-	domains, err := normalizedAgentEmailPilotDomains(scope)
+func parseAgentEmailRecipient(recipient string) (agentemail.AddressParts, error) {
+	parts, err := agentemail.ParseRecipient(recipient, "")
 	if err != nil {
-		return agentemail.AddressParts{}, err
+		return agentemail.AddressParts{}, ErrAgentEmailUnknownRecipient
 	}
-	for _, domain := range domains {
-		parts, parseErr := agentemail.ParseRecipient(recipient, domain)
-		if parseErr == nil {
-			return parts, nil
-		}
-	}
-	return agentemail.AddressParts{}, ErrAgentEmailUnknownRecipient
+	return parts, nil
 }
 
 func validAgentEmailRealmAliasClaimID(value string) bool {
@@ -2733,6 +2823,7 @@ func agentEmailSelect(includeRaw bool) string {
 		m.provider,m.envelope_sender,m.envelope_recipient,m.agent_segment,
 		m.realm_label,m.recipient_route_kind,
 		COALESCE(m.recipient_realm_alias_claim_id,''),
+		COALESCE(m.recipient_custom_domain_request_id,''),
 		COALESCE(m.subaddress_tag,''),m.raw_size_bytes,
 		m.parse_state,COALESCE(m.parse_error,''),COALESCE(m.header_from,''),
 		COALESCE(m.header_to,''),COALESCE(m.header_subject,''),
@@ -2760,7 +2851,8 @@ func scanAgentEmail(row rowScanner) (AgentEmailMessage, error) {
 		&msg.OwnerAgentID, &msg.AddressID, &msg.Provider,
 		&msg.EnvelopeSender, &msg.EnvelopeRecipient, &msg.AgentSegment,
 		&msg.RealmLabel, &msg.RecipientRouteKind,
-		&msg.RecipientRealmAliasClaimID, &msg.SubaddressTag, &msg.RawSizeBytes,
+		&msg.RecipientRealmAliasClaimID, &msg.RecipientCustomDomainRequestID,
+		&msg.SubaddressTag, &msg.RawSizeBytes,
 		&msg.ParseState, &msg.ParseErrorCode, &msg.HeaderFrom, &msg.HeaderTo,
 		&msg.Subject, &msg.MIMEMessageID, &msg.MessageDate, &msg.AttachmentCount,
 		&msg.AttachmentStorageBytes, &msg.RetainedAttachmentStorageBytes,

@@ -281,6 +281,29 @@ type AgentEmailRealmAliasApplyRequest struct {
 	ControllerRevision int64  `json:"controller_revision"`
 }
 
+// AgentEmailCustomDomainRoute is the exact provision-token readback for one
+// custom inbound-domain route projection. It intentionally contains no
+// provider configuration or message content.
+type AgentEmailCustomDomainRoute struct {
+	SchemaVersion            string `json:"schema_version"`
+	AccountID                string `json:"account_id"`
+	DomainRequestID          string `json:"domain_request_id"`
+	DomainAllocationRevision int64  `json:"domain_allocation_revision"`
+	DomainStateRevision      int64  `json:"domain_state_revision"`
+	RealmAliasClaimID        string `json:"realm_alias_claim_id"`
+	RealmAliasRevision       int64  `json:"realm_alias_revision"`
+	RealmID                  string `json:"realm_id"`
+	Domain                   string `json:"domain"`
+	RealmLabel               string `json:"realm_label"`
+	State                    string `json:"state"`
+	SuspensionDisposition    string `json:"suspension_disposition,omitempty"`
+	ControllerRevision       int64  `json:"controller_revision"`
+}
+
+// AgentEmailCustomDomainRouteApplyRequest uses the same exact contract as the
+// readback. AccountID must match the path and SchemaVersion must be witself.v0.
+type AgentEmailCustomDomainRouteApplyRequest = AgentEmailCustomDomainRoute
+
 // AgentEmailRealmAliasTarget is the content-minimal provision-token response
 // proving that an account owns one live realm.
 type AgentEmailRealmAliasTarget struct {
@@ -399,6 +422,7 @@ type AgentEmailMessage struct {
 	RealmLabel                     string               `json:"realm_label"`
 	RecipientRouteKind             string               `json:"recipient_route_kind"`
 	RecipientRealmAliasClaimID     string               `json:"recipient_realm_alias_claim_id,omitempty"`
+	RecipientCustomDomainRequestID string               `json:"recipient_custom_domain_request_id,omitempty"`
 	SubaddressTag                  string               `json:"subaddress_tag,omitempty"`
 	RawSizeBytes                   int64                `json:"raw_size_bytes"`
 	ParseState                     string               `json:"parse_state"`

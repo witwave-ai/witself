@@ -13,6 +13,7 @@ const domain = "agent-mail.witwave.ai";
 const realmID = "realm_abcdefghijkl2345";
 const canonicalLabel = "abcdefghijkl2345";
 const aliasLabel = "acme-west";
+const customDomain = "agents.example.com";
 const nowMS = Date.parse("2026-08-01T12:00:00.000Z");
 
 test("configured edge domains are bounded, ordered, canonical, and unique", () => {
@@ -47,6 +48,27 @@ function projection(realmLabel, overrides = {}) {
   };
 }
 
+function customProjection(state = "applied", overrides = {}) {
+  const value = projection(aliasLabel, {
+    domain: customDomain,
+    route_kind: "custom_domain",
+    state,
+    domain_request_id: "aedr_aaaaaaaaaaaaaaaa",
+    domain_allocation_revision: 11,
+    realm_alias_claim_id: "era_bbbbbbbbbbbbbbbb",
+    realm_alias_revision: 19,
+    ...(state === "suspended"
+      ? { suspension_disposition: "retry" }
+      : {}),
+    ...overrides,
+  });
+  if (state !== "applied") {
+    delete value.cell_audience;
+    delete value.ingest_url;
+  }
+  return value;
+}
+
 test("canonical and realm-alias addresses share one strict route shape", () => {
   const canonical = parseRouteAddress(`alpha.${canonicalLabel}@${domain}`, true);
   const alias = parseRouteAddress(`alpha.${aliasLabel}+signup@${domain}`, true);
@@ -66,6 +88,76 @@ test("canonical and realm-alias addresses share one strict route shape", () => {
   assert.equal(canonicalRoute.ingest_url, aliasRoute.ingest_url);
   assert.equal(canonicalRoute.route_kind, "canonical");
   assert.equal(aliasRoute.route_kind, "realm_alias");
+});
+
+test("custom-domain projections are an exact schema-v1 union variant", () => {
+  for (const state of ["applied", "suspended", "retired"]) {
+    const value = customProjection(state);
+    assert.deepEqual(
+      validateRealmRouteProjection(value, customDomain, aliasLabel),
+      value,
+    );
+  }
+
+  for (const [changed, pattern] of [
+    [{ domain_request_id: "aedr_aaaaaaaaaaaaaaa0" }, /domain request id/],
+    [{ domain_allocation_revision: 0 }, /domain allocation revision/],
+    [{ realm_alias_claim_id: "era_bbbbbbbbbbbbbbb0" }, /realm alias claim id/],
+    [{ realm_alias_revision: 0 }, /realm alias revision/],
+  ]) {
+    assert.throws(
+      () => validateRealmRouteProjection(
+        customProjection("applied", changed),
+        customDomain,
+        aliasLabel,
+      ),
+      pattern,
+    );
+  }
+
+  for (const field of [
+    "domain_request_id",
+    "domain_allocation_revision",
+    "realm_alias_claim_id",
+    "realm_alias_revision",
+  ]) {
+    const missing = customProjection();
+    delete missing[field];
+    assert.throws(
+      () => validateRealmRouteProjection(missing, customDomain, aliasLabel),
+      /schema is invalid/,
+    );
+  }
+
+  assert.throws(
+    () => validateRealmRouteProjection(
+      customProjection("applied", { account_id: "account_aaaaaaaaaaaaaaaa" }),
+      customDomain,
+      aliasLabel,
+    ),
+    /schema is invalid/,
+  );
+  assert.throws(
+    () => validateRealmRouteProjection(
+      customProjection("applied", { realm_label: canonicalLabel }),
+      customDomain,
+      canonicalLabel,
+    ),
+    /kind is inconsistent/,
+  );
+});
+
+test("canonical and realm-alias variants reject custom-domain authority fields", () => {
+  for (const realmLabel of [canonicalLabel, aliasLabel]) {
+    assert.throws(
+      () => validateRealmRouteProjection(
+        projection(realmLabel, { domain_request_id: "aedr_aaaaaaaaaaaaaaaa" }),
+        domain,
+        realmLabel,
+      ),
+      /schema is invalid/,
+    );
+  }
 });
 
 test("suspended and retired routes carry no destination authority", () => {

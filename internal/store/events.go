@@ -98,18 +98,19 @@ const (
 	// Receive-only agent email. Raw MIME, decoded content, header values,
 	// envelope addresses, claim capabilities, and retry keys never enter the
 	// account ledger.
-	VerbAgentEmailAddressProvisioned  = "agent_email.address.provisioned"
-	VerbAgentEmailReceived            = "agent_email.received"
-	VerbAgentEmailRead                = "agent_email.read"
-	VerbAgentEmailAcked               = "agent_email.acked"
-	VerbAgentEmailCodeConsumed        = "agent_email.code_consumed"
-	VerbAgentEmailProcessingClaimed   = "agent_email.processing.claimed"
-	VerbAgentEmailProcessingRenewed   = "agent_email.processing.renewed"
-	VerbAgentEmailProcessingReleased  = "agent_email.processing.released"
-	VerbAgentEmailProcessingCompleted = "agent_email.processing.completed"
-	VerbAgentEmailAgentReceiveChanged = "agent_email.receive.agent_changed"
-	VerbAgentEmailRealmReceiveChanged = "agent_email.receive.realm_changed"
-	VerbAgentEmailRealmAliasProjected = "agent_email.realm_alias.projected"
+	VerbAgentEmailAddressProvisioned         = "agent_email.address.provisioned"
+	VerbAgentEmailReceived                   = "agent_email.received"
+	VerbAgentEmailRead                       = "agent_email.read"
+	VerbAgentEmailAcked                      = "agent_email.acked"
+	VerbAgentEmailCodeConsumed               = "agent_email.code_consumed"
+	VerbAgentEmailProcessingClaimed          = "agent_email.processing.claimed"
+	VerbAgentEmailProcessingRenewed          = "agent_email.processing.renewed"
+	VerbAgentEmailProcessingReleased         = "agent_email.processing.released"
+	VerbAgentEmailProcessingCompleted        = "agent_email.processing.completed"
+	VerbAgentEmailAgentReceiveChanged        = "agent_email.receive.agent_changed"
+	VerbAgentEmailRealmReceiveChanged        = "agent_email.receive.realm_changed"
+	VerbAgentEmailRealmAliasProjected        = "agent_email.realm_alias.projected"
+	VerbAgentEmailCustomDomainRouteProjected = "agent_email.custom_domain_route.projected"
 
 	// Realm-wide request coordination. These events intentionally carry only
 	// stable ids and decimal counters. Offer/result content, raw idempotency
@@ -486,6 +487,17 @@ var verbMetadataSchema = map[string]verbSpec{
 		},
 		allowedKeys: []string{
 			"claim_id", "realm_id", "state", "controller_revision",
+		},
+		allowedActors: []string{ActorControlPlane},
+	},
+	VerbAgentEmailCustomDomainRouteProjected: {
+		requiredKeys: []string{
+			"domain_request_id", "realm_alias_claim_id", "realm_id", "state",
+			"controller_revision",
+		},
+		allowedKeys: []string{
+			"domain_request_id", "realm_alias_claim_id", "realm_id", "state",
+			"controller_revision",
 		},
 		allowedActors: []string{ActorControlPlane},
 	},

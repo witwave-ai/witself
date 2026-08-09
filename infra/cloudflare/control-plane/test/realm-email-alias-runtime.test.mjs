@@ -69,7 +69,26 @@ class Storage {
 
   async get(key) {
     const value = this.values.get(key);
+    const blocker = this.getBlocker;
+    if (blocker && blocker.key === key) {
+      this.getBlocker = null;
+      blocker.startedResolve();
+      await blocker.wait;
+    }
     return value === undefined ? undefined : structuredClone(value);
+  }
+
+  blockNextGet(key) {
+    let startedResolve;
+    let release;
+    const started = new Promise((resolve) => {
+      startedResolve = resolve;
+    });
+    const wait = new Promise((resolve) => {
+      release = resolve;
+    });
+    this.getBlocker = { key, startedResolve, wait };
+    return { started, release };
   }
 
   async put(key, value) {
@@ -339,6 +358,14 @@ function registry(options = {}) {
     AGENT_EMAIL_DIRECTORY: emailDirectory,
     AGENT_EMAIL_DOMAIN: DOMAIN,
     CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED: "true",
+    ...(options.customDomainStub
+      ? {
+        AGENT_EMAIL_DOMAINS: {
+          idFromName: (name) => name,
+          get: () => options.customDomainStub,
+        },
+      }
+      : {}),
     ...(options.journalBucket
       ? {
         REALM_EMAIL_ALIAS_AUTHORITY_JOURNAL: options.journalBucket,
@@ -423,6 +450,37 @@ async function call(runtime, path, body) {
     body: JSON.stringify(body),
   }));
   return { response, body: await response.json() };
+}
+
+function completingCustomDomainStub(calls) {
+  return {
+    async fetch(request, init) {
+      const path = new URL(request.url ?? request).pathname;
+      const input = JSON.parse(init.body);
+      calls.push({ path, input: structuredClone(input) });
+      assert.equal(path, "/route/alias-convergence/enqueue");
+      return Response.json({
+        schema_version: "witself.agent-email-domain.v1",
+        complete: true,
+        source_fingerprint: input.source_fingerprint,
+      });
+    },
+  };
+}
+
+async function subscribeCustomDomainClaim(runtime, alias) {
+  const proof = await call(runtime, "/alias/claim-proof", {
+    account_id: ACCOUNT,
+    realm_label: alias,
+  });
+  assert.equal(proof.response.status, 200);
+  const subscribed = await call(
+    runtime,
+    "/alias/custom-domain-route-subscribe",
+    { claim_proof: proof.body },
+  );
+  assert.equal(subscribed.response.status, 200);
+  return proof.body;
 }
 
 async function requestAlias(runtime, alias, fields = {}) {
@@ -920,6 +978,446 @@ test("customer request, approval, projection, idempotency, and tombstone are dur
   });
   assert.equal(reused.response.status, 409);
   assert.match(reused.body.error, /claimed or tombstoned/);
+});
+
+test("custom-domain controller gets one exact read-only alias claim proof", async () => {
+  const { runtime, storage } = registry();
+  const pending = await requestAlias(runtime, "proof-alias");
+  assert.equal(pending.response.status, 202);
+
+  const hidden = await call(runtime, "/alias/claim-proof", {
+    account_id: ACCOUNT,
+    realm_label: "proof-alias",
+  });
+  assert.equal(hidden.response.status, 404);
+
+  const approved = await approve(runtime, pending.body.request);
+  assert.equal(approved.response.status, 200);
+  const metaBefore = await storage.get("meta");
+  const auditBefore = [...storage.values].filter(([key]) =>
+    key.startsWith("audit:"));
+
+  const proof = await call(runtime, "/alias/claim-proof", {
+    account_id: ACCOUNT,
+    realm_label: "proof-alias",
+  });
+  assert.equal(proof.response.status, 200);
+  assert.deepEqual(Object.keys(proof.body).sort(), [
+    "account_id", "realm_alias_claim_id", "realm_alias_revision", "realm_id",
+    "realm_label", "schema_version", "state", "updated_at",
+  ].sort());
+  assert.equal(proof.body.schema_version,
+    "witself.realm-email-alias-claim-proof.v1");
+  assert.equal(proof.body.account_id, ACCOUNT);
+  assert.equal(proof.body.realm_id, REALM);
+  assert.equal(proof.body.realm_label, "proof-alias");
+  assert.match(proof.body.realm_alias_claim_id, /^era_[a-z2-7]{16}$/);
+  assert.equal(proof.body.realm_alias_revision, 1);
+  assert.equal(proof.body.state, "applied");
+  assert.deepEqual(await storage.get("meta"), metaBefore);
+  assert.deepEqual(
+    [...storage.values].filter(([key]) => key.startsWith("audit:")),
+    auditBefore,
+  );
+
+  const crossAccount = await call(runtime, "/alias/claim-proof", {
+    account_id: OTHER_ACCOUNT,
+    realm_label: "proof-alias",
+  });
+  assert.equal(crossAccount.response.status, 404);
+
+  const suspended = await call(runtime, "/alias/mutate", {
+    actor: ADMIN,
+    alias: "proof-alias",
+    action: "suspend",
+    reason: "proof lifecycle test",
+    idempotency_key: "suspend-proof-alias",
+  });
+  assert.equal(suspended.response.status, 200);
+  const suspendedProof = await call(runtime, "/alias/claim-proof", {
+    account_id: ACCOUNT,
+    realm_label: "proof-alias",
+  });
+  assert.equal(suspendedProof.response.status, 200);
+  assert.equal(suspendedProof.body.state, "suspended");
+  assert.equal(suspendedProof.body.suspension_disposition, "retry");
+  assert.equal(suspendedProof.body.realm_alias_revision, 2);
+
+  const retired = await call(runtime, "/alias/mutate", {
+    actor: ADMIN,
+    alias: "proof-alias",
+    action: "retire",
+    reason: "proof retirement test",
+    idempotency_key: "retire-proof-alias",
+  });
+  assert.equal(retired.response.status, 200);
+  const retiredProof = await call(runtime, "/alias/claim-proof", {
+    account_id: ACCOUNT,
+    realm_label: "proof-alias",
+  });
+  assert.equal(retiredProof.response.status, 200);
+  assert.equal(retiredProof.body.state, "retired");
+  assert.equal(retiredProof.body.realm_alias_revision, 3);
+  assert.equal("suspension_disposition" in retiredProof.body, false);
+});
+
+test("subscribed alias mutations use one durable custom-domain sync outbox", async () => {
+  const fixture = registry();
+  const requested = await requestAlias(fixture.runtime, "domain-sync");
+  const approved = await approve(fixture.runtime, requested.body.request);
+  const proof = await call(fixture.runtime, "/alias/claim-proof", {
+    account_id: ACCOUNT,
+    realm_label: "domain-sync",
+  });
+  const subscribed = await call(
+    fixture.runtime,
+    "/alias/custom-domain-route-subscribe",
+    { claim_proof: proof.body },
+  );
+  assert.equal(subscribed.response.status, 200);
+  assert.ok(await fixture.storage.get(
+    `custom-domain-subscription:${approved.body.assignment.claim_id}`,
+  ));
+
+  let domainComplete = false;
+  const domainCalls = [];
+  fixture.env.AGENT_EMAIL_DOMAINS = {
+    idFromName: (name) => name,
+    get: () => ({
+      fetch: async (request, init) => {
+        const path = new URL(request.url ?? request).pathname;
+        const input = JSON.parse(init.body);
+        domainCalls.push(path);
+        return Response.json({
+          schema_version: "witself.agent-email-domain.v1",
+          complete: domainComplete,
+          source_fingerprint: input.source_fingerprint,
+        }, { status: domainComplete ? 200 : 202 });
+      },
+    }),
+  };
+  const suspended = await call(fixture.runtime, "/alias/mutate", {
+    actor: ADMIN,
+    alias: "domain-sync",
+    action: "suspend",
+    reason: "custom-domain sync test",
+    idempotency_key: "suspend-domain-sync",
+  });
+  assert.equal(suspended.response.status, 200);
+  const syncKey =
+    `custom-domain-sync:${approved.body.assignment.claim_id}`;
+  assert.equal((await fixture.storage.get(syncKey)).phase, "enqueue");
+  assert.equal(domainCalls.length, 0);
+
+  await fixture.runtime.alarm();
+  assert.equal((await fixture.storage.get(syncKey)).phase, "poll");
+  assert.deepEqual(domainCalls, ["/route/alias-convergence/enqueue"]);
+  domainComplete = true;
+  fixture.advance(1_001);
+  await fixture.runtime.alarm();
+  assert.equal(await fixture.storage.get(syncKey), undefined);
+  assert.deepEqual(domainCalls, [
+    "/route/alias-convergence/enqueue",
+    "/route/alias-convergence/status",
+  ]);
+});
+
+test("subscription serializes its close-fence check and marker commit with realm close", async () => {
+  const domainCalls = [];
+  const fixture = registry({
+    customDomainStub: {
+      async fetch(request, init) {
+        const path = new URL(request.url ?? request).pathname;
+        const input = JSON.parse(init.body);
+        domainCalls.push(path);
+        assert.equal(path, "/route/alias-convergence/enqueue");
+        return Response.json({
+          schema_version: "witself.agent-email-domain.v1",
+          complete: false,
+          source_fingerprint: input.source_fingerprint,
+        }, { status: 202 });
+      },
+    },
+  });
+  const requested = await requestAlias(fixture.runtime, "close-race");
+  const approved = await approve(fixture.runtime, requested.body.request);
+  const retired = await call(fixture.runtime, "/alias/mutate", {
+    actor: ADMIN,
+    alias: "close-race",
+    action: "retire",
+    reason: "exercise the subscription and realm-close ordering boundary",
+    idempotency_key: "retire-close-race",
+  });
+  assert.equal(retired.response.status, 200);
+  const proof = await call(fixture.runtime, "/alias/claim-proof", {
+    account_id: ACCOUNT,
+    realm_label: "close-race",
+  });
+  assert.equal(proof.body.state, "retired");
+
+  // Pause after the subscriber has observed no close fence but before its
+  // journaled marker commit. Realm close must wait on the shared account/realm
+  // lanes instead of committing and scanning an empty subscription prefix.
+  const read = fixture.storage.blockNextGet(
+    `realm-close-fence:${ACCOUNT}:${REALM}`,
+  );
+  const subscribing = call(
+    fixture.runtime,
+    "/alias/custom-domain-route-subscribe",
+    { claim_proof: proof.body },
+  );
+  await read.started;
+  assert.equal(fixture.runtime.lanes.has(`account:${ACCOUNT}`), true);
+  assert.equal(
+    fixture.runtime.lanes.has(`realm:${ACCOUNT}:${REALM}`),
+    true,
+  );
+
+  let closeSettled = false;
+  const cellCallsBeforeClose = fixture.fetchCallCount();
+  const closing = call(fixture.runtime, "/canonical/realm-close", {
+    actor: OPERATOR,
+    account_id: ACCOUNT,
+    realm_id: REALM,
+    domain: DOMAIN,
+    idempotency_key: "close-race-realm",
+  }).then((result) => {
+    closeSettled = true;
+    return result;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const settledWhileSubscriberPaused = closeSettled;
+  const closeIntentWhileSubscriberPaused = await fixture.storage.get(
+    `realm-close-intent:${ACCOUNT}:${REALM}`,
+  );
+  read.release();
+
+  const subscribed = await subscribing;
+  const close = await closing;
+  assert.equal(settledWhileSubscriberPaused, false);
+  assert.equal(closeIntentWhileSubscriberPaused, undefined);
+  assert.equal(subscribed.response.status, 200);
+  assert.ok(await fixture.storage.get(
+    `custom-domain-subscription:${approved.body.assignment.claim_id}`,
+  ));
+  assert.equal(close.response.status, 202);
+  assert.equal(close.body.phase, "custom_domain_converging");
+  assert.deepEqual(domainCalls, ["/route/alias-convergence/enqueue"]);
+  assert.equal(fixture.fetchCallCount(), cellCallsBeforeClose);
+});
+
+test("plan and realm-close fences wait for first subscribed custom-domain sync", async () => {
+  const fixture = registry();
+  const requested = await requestAlias(fixture.runtime, "domain-barrier");
+  const approved = await approve(fixture.runtime, requested.body.request);
+  const proof = await call(fixture.runtime, "/alias/claim-proof", {
+    account_id: ACCOUNT,
+    realm_label: "domain-barrier",
+  });
+  await call(fixture.runtime, "/alias/custom-domain-route-subscribe", {
+    claim_proof: proof.body,
+  });
+  let complete = false;
+  fixture.env.AGENT_EMAIL_DOMAINS = {
+    idFromName: (name) => name,
+    get: () => ({
+      fetch: async (request, init) => {
+        const input = JSON.parse(init.body);
+        return Response.json({
+          schema_version: "witself.agent-email-domain.v1",
+          complete,
+          source_fingerprint: input.source_fingerprint,
+        }, { status: complete ? 200 : 202 });
+      },
+    }),
+  };
+  const plan = {
+    account_id: ACCOUNT,
+    feature_enabled: false,
+    activation_enabled: true,
+    alias_limit: 0,
+    mode: "complete",
+    plan_revision: 8,
+    plan_snapshot_hash: "8".repeat(64),
+  };
+  const first = await call(fixture.runtime, "/plan/reconcile", plan);
+  assert.equal(first.response.status, 200);
+  assert.equal(first.body.complete, false);
+  assert.equal(
+    (await fixture.storage.get(`plan-intent:${ACCOUNT}`)).state,
+    "custom_domain_converging",
+  );
+  assert.equal(await fixture.storage.get(`plan-fence:${ACCOUNT}`), undefined);
+  const queued = await call(fixture.runtime, "/plan/reconcile", plan);
+  assert.equal(queued.body.complete, false);
+  assert.equal(await fixture.storage.get(`plan-fence:${ACCOUNT}`), undefined);
+  complete = true;
+  const converged = await call(fixture.runtime, "/plan/reconcile", plan);
+  assert.equal(converged.body.complete, true);
+  assert.equal(
+    (await fixture.storage.get(`plan-fence:${ACCOUNT}`)).committed_revision,
+    8,
+  );
+
+  const retired = await call(fixture.runtime, "/alias/mutate", {
+    actor: ADMIN,
+    alias: "domain-barrier",
+    action: "retire",
+    reason: "realm close barrier test",
+    idempotency_key: "retire-domain-barrier",
+  });
+  assert.equal(retired.response.status, 200);
+  complete = false;
+  const cellCallsBeforeClose = fixture.fetchCallCount();
+  const closing = await call(fixture.runtime, "/canonical/realm-close", {
+    actor: OPERATOR,
+    account_id: ACCOUNT,
+    realm_id: REALM,
+    domain: DOMAIN,
+    idempotency_key: "close-domain-barrier-realm",
+  });
+  assert.equal(closing.response.status, 202);
+  assert.equal(closing.body.phase, "custom_domain_converging");
+  assert.equal(fixture.fetchCallCount(), cellCallsBeforeClose);
+  assert.equal(
+    await fixture.storage.get(`realm-close-fence:${ACCOUNT}:${REALM}`),
+    undefined,
+  );
+  assert.ok(await fixture.storage.get(
+    `custom-domain-sync:${approved.body.assignment.claim_id}`,
+  ));
+});
+
+test("account lifecycle completion waits for subscribed custom-domain sync", async () => {
+  const fixture = registry();
+  const requested = await requestAlias(fixture.runtime, "domain-lifecycle");
+  await approve(fixture.runtime, requested.body.request);
+  const proof = await call(fixture.runtime, "/alias/claim-proof", {
+    account_id: ACCOUNT,
+    realm_label: "domain-lifecycle",
+  });
+  await call(fixture.runtime, "/alias/custom-domain-route-subscribe", {
+    claim_proof: proof.body,
+  });
+  let complete = false;
+  fixture.env.AGENT_EMAIL_DOMAINS = {
+    idFromName: (name) => name,
+    get: () => ({
+      fetch: async (_request, init) => {
+        const input = JSON.parse(init.body);
+        return Response.json({
+          schema_version: "witself.agent-email-domain.v1",
+          complete,
+          source_fingerprint: input.source_fingerprint,
+        }, { status: complete ? 200 : 202 });
+      },
+    }),
+  };
+  const lifecycle = {
+    account_id: ACCOUNT,
+    operation_id: "domain-lifecycle-suspend",
+    epoch: 1,
+    action: "suspend",
+    activation_enabled: true,
+  };
+  const claims = await call(
+    fixture.runtime,
+    "/account-lifecycle/reconcile",
+    lifecycle,
+  );
+  assert.equal(claims.body.complete, false);
+  const canonical = await call(
+    fixture.runtime,
+    "/account-lifecycle/reconcile",
+    lifecycle,
+  );
+  assert.equal(canonical.body.complete, false);
+  assert.equal(
+    (await fixture.storage.get(`lifecycle-intent:${ACCOUNT}`)).phase,
+    "custom_domain_converging",
+  );
+  assert.equal(await fixture.storage.get(`lifecycle-fence:${ACCOUNT}`), undefined);
+  const queued = await call(
+    fixture.runtime,
+    "/account-lifecycle/reconcile",
+    lifecycle,
+  );
+  assert.equal(queued.body.complete, false);
+  complete = true;
+  const converged = await call(
+    fixture.runtime,
+    "/account-lifecycle/reconcile",
+    lifecycle,
+  );
+  assert.equal(converged.body.complete, true);
+  assert.equal(
+    (await fixture.storage.get(`lifecycle-fence:${ACCOUNT}`)).operation_id,
+    lifecycle.operation_id,
+  );
+});
+
+test("claim proof hides customer and internal provisioning through lost edge recovery", async () => {
+  const { runtime, emailDirectory, storage } = registry();
+
+  const requested = await requestAlias(runtime, "proof-lost");
+  emailDirectory.failPuts = 1;
+  const failedApproval = await approve(runtime, requested.body.request);
+  assert.equal(failedApproval.response.status, 502);
+  assert.equal((await storage.get("claim:proof-lost")).customer_activation_intent,
+    true);
+  const hiddenCustomer = await call(runtime, "/alias/claim-proof", {
+    account_id: ACCOUNT,
+    realm_label: "proof-lost",
+  });
+  assert.equal(hiddenCustomer.response.status, 404);
+
+  const completedApproval = await approve(runtime, requested.body.request);
+  assert.equal(completedApproval.response.status, 200);
+  const visibleCustomer = await call(runtime, "/alias/claim-proof", {
+    account_id: ACCOUNT,
+    realm_label: "proof-lost",
+  });
+  assert.equal(visibleCustomer.response.status, 200);
+  assert.equal(visibleCustomer.body.state, "applied");
+  assert.equal(visibleCustomer.body.realm_alias_revision, 1);
+
+  const internalInput = {
+    actor: ADMIN,
+    account_id: ACCOUNT,
+    realm_id: REALM,
+    alias: "witself",
+    domain: DOMAIN,
+    activation_enabled: true,
+    reason: "custom-domain proof recovery test",
+    idempotency_key: "internal-proof-recovery",
+  };
+  emailDirectory.failPuts = 1;
+  const failedInternal = await call(
+    runtime,
+    "/alias/assign-internal",
+    internalInput,
+  );
+  assert.equal(failedInternal.response.status, 502);
+  assert.equal((await storage.get("claim:witself")).internal_intent, true);
+  const hiddenInternal = await call(runtime, "/alias/claim-proof", {
+    account_id: ACCOUNT,
+    realm_label: "witself",
+  });
+  assert.equal(hiddenInternal.response.status, 404);
+
+  const completedInternal = await call(
+    runtime,
+    "/alias/assign-internal",
+    internalInput,
+  );
+  assert.equal(completedInternal.response.status, 201);
+  const visibleInternal = await call(runtime, "/alias/claim-proof", {
+    account_id: ACCOUNT,
+    realm_label: "witself",
+  });
+  assert.equal(visibleInternal.response.status, 200);
+  assert.equal(visibleInternal.body.state, "applied");
+  assert.equal(visibleInternal.body.realm_alias_revision, 1);
 });
 
 test("realm and account pending ceilings bound unlimited plans with replay-safe capacity", async () => {
@@ -2867,6 +3365,113 @@ test("one poison approval is backed off without starving later due work", async 
     (await storage.get(`request:${healthy.body.request.id}`)).status,
     "approved",
   );
+});
+
+test("plan and lifecycle final pages discover custom-domain sync created on that page", async () => {
+  const planCalls = [];
+  const planned = registry({
+    customDomainStub: completingCustomDomainStub(planCalls),
+  });
+  const plannedRequest = await requestAlias(planned.runtime, "plan-custom");
+  await approve(planned.runtime, plannedRequest.body.request);
+  const planProof = await subscribeCustomDomainClaim(
+    planned.runtime,
+    "plan-custom",
+  );
+  assert.equal(
+    await planned.storage.get(`custom-domain-sync:${planProof.realm_alias_claim_id}`),
+    undefined,
+  );
+  const planInput = {
+    account_id: ACCOUNT,
+    feature_enabled: false,
+    activation_enabled: true,
+    alias_limit: 0,
+    mode: "complete",
+    plan_revision: 10,
+    plan_snapshot_hash: "a".repeat(64),
+  };
+  const planPage = await call(planned.runtime, "/plan/reconcile", planInput);
+  assert.equal(planPage.response.status, 200);
+  assert.equal(planPage.body.complete, false);
+  assert.equal(
+    (await planned.storage.get(`plan-intent:${ACCOUNT}`)).state,
+    "custom_domain_converging",
+  );
+  assert.ok(await planned.storage.get(
+    `custom-domain-sync:${planProof.realm_alias_claim_id}`,
+  ));
+  assert.equal(await planned.storage.get(`plan-fence:${ACCOUNT}`), undefined);
+  assert.equal(planCalls.length, 0);
+  const planComplete = await call(planned.runtime, "/plan/reconcile", planInput);
+  assert.equal(planComplete.body.complete, true);
+  assert.equal(planCalls.length, 1);
+  assert.equal(await planned.storage.get(`plan-intent:${ACCOUNT}`), undefined);
+  assert.ok(await planned.storage.get(`plan-fence:${ACCOUNT}`));
+
+  const lifecycleCalls = [];
+  const lifecycle = registry({
+    customDomainStub: completingCustomDomainStub(lifecycleCalls),
+  });
+  const lifecycleRequest = await requestAlias(
+    lifecycle.runtime,
+    "lifecycle-custom",
+  );
+  await approve(lifecycle.runtime, lifecycleRequest.body.request);
+  const lifecycleProof = await subscribeCustomDomainClaim(
+    lifecycle.runtime,
+    "lifecycle-custom",
+  );
+  assert.equal(
+    await lifecycle.storage.get(
+      `custom-domain-sync:${lifecycleProof.realm_alias_claim_id}`,
+    ),
+    undefined,
+  );
+  const lifecycleInput = {
+    account_id: ACCOUNT,
+    operation_id: "suspend-custom-domain-account",
+    epoch: 1,
+    action: "suspend",
+    activation_enabled: true,
+  };
+  const claimsPage = await call(
+    lifecycle.runtime,
+    "/account-lifecycle/reconcile",
+    lifecycleInput,
+  );
+  assert.equal(claimsPage.body.complete, false);
+  assert.ok(await lifecycle.storage.get(
+    `custom-domain-sync:${lifecycleProof.realm_alias_claim_id}`,
+  ));
+  assert.equal(
+    await lifecycle.storage.get(`lifecycle-fence:${ACCOUNT}`),
+    undefined,
+  );
+  assert.equal(lifecycleCalls.length, 0);
+  const canonicalPage = await call(
+    lifecycle.runtime,
+    "/account-lifecycle/reconcile",
+    lifecycleInput,
+  );
+  assert.equal(canonicalPage.body.complete, false);
+  assert.equal(
+    (await lifecycle.storage.get(`lifecycle-intent:${ACCOUNT}`)).phase,
+    "custom_domain_converging",
+  );
+  assert.equal(lifecycleCalls.length, 0);
+  const lifecycleComplete = await call(
+    lifecycle.runtime,
+    "/account-lifecycle/reconcile",
+    lifecycleInput,
+  );
+  assert.equal(lifecycleComplete.body.complete, true);
+  assert.equal(lifecycleCalls.length, 1);
+  assert.equal(
+    await lifecycle.storage.get(`lifecycle-intent:${ACCOUNT}`),
+    undefined,
+  );
+  assert.ok(await lifecycle.storage.get(`lifecycle-fence:${ACCOUNT}`));
 });
 
 test("concurrent scoped mutations reserve unique global audit revisions", async () => {

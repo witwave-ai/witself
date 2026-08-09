@@ -6,6 +6,10 @@ import {
   realmEmailRouteKey as controlPlaneRouteKey,
 } from "../../control-plane/src/realm-email-alias-runtime.mjs";
 import {
+  agentEmailCustomDomainRouteKey,
+  buildAgentEmailCustomDomainRouteProjection,
+} from "../../control-plane/src/agent-email-custom-domain-route-contract.mjs";
+import {
   realmRouteKey as edgeRouteKey,
   validateRealmRouteProjection,
 } from "../src/directory.mjs";
@@ -56,4 +60,31 @@ test("control-plane suspension and retirement omit cell destinations accepted by
       published,
     );
   }
+});
+
+test("control-plane and edge share the exact custom-domain union variant", () => {
+  const customDomain = "agents.example.com";
+  const published = buildAgentEmailCustomDomainRouteProjection({
+    domain: customDomain,
+    realm_id: realmID,
+    realm_label: "acme-west",
+    domain_request_id: "aedr_aaaaaaaaaaaaaaaa",
+    domain_allocation_revision: 11,
+    realm_alias_claim_id: "era_bbbbbbbbbbbbbbbb",
+    realm_alias_revision: 19,
+    state: "applied",
+    controller_revision: 23,
+    updated_at: updatedAt,
+    cache_ttl_seconds: 300,
+    cell_audience: "gcp-prod-us-central1-core",
+    ingest_url: "https://api.cell.example/v1/internal/agent-email:ingest",
+  });
+  assert.equal(
+    agentEmailCustomDomainRouteKey(customDomain, "acme-west"),
+    edgeRouteKey(customDomain, "acme-west"),
+  );
+  assert.deepEqual(
+    validateRealmRouteProjection(published, customDomain, "acme-west"),
+    published,
+  );
 });

@@ -47,10 +47,12 @@ checkout): account operators may eventually request an organization-owned
 domain through a separate control-plane authority. The current implementation
 issues a stable TXT ownership challenge and contains separately gated manual
 and scheduled DNS observation, ownership/lifecycle state, an append-only
-authority journal, and sealed empty-target recovery. Its exact-`true` request
-and verification gates are absent from release configuration. DNS is read only
-after the verification gate passes; there is no DNS/provider mutation, routing
-projection, cell mutation, or mail-delivery path.
+authority journal, sealed empty-target recovery, and the schema-88 derived
+cell/KV routing foundation. Request, verification, control-plane routing, and
+Email Worker delivery each have independent exact-`true` gates; every one is
+absent from release configuration. DNS is read only after the verification
+gate passes. This slice performs no DNS/provider mutation, MX or Email Routing
+change, or live mail delivery.
 
 ## Implemented sealed-plane routes
 
@@ -242,6 +244,8 @@ GET  /v1/accounts/{account_id}:email-realm-route?realm_id={realm_id}
 GET  /v1/accounts/{account_id}:email-realm-routes?limit={1..100}&cursor={opaque}
 POST /v1/accounts/{account_id}:prepare-email-realm-route-retirement
 POST /v1/accounts/{account_id}:commit-email-realm-route-retirement
+GET  /v1/accounts/{account_id}:email-custom-domain-route?domain_request_id={request_id}&realm_alias_claim_id={claim_id}
+POST /v1/accounts/{account_id}:email-custom-domain-route
 
 GET  /v1/message-requests
 POST /v1/message-requests
@@ -272,7 +276,12 @@ Custom-domain customer/admin request lists and the custom-domain audit list
 also use bounded opaque cursors. Their filters are `state`, `account_id`, and
 `domain` for administrator requests and `action`, `account_id`, `domain`, and
 `limit` for audit. The request registry is deliberately not a DNS/provider
-mutation or mail-delivery control surface.
+mutation or mail-delivery control surface. The v0.0.238 request registry has no
+routing side effect. The schema-88 dark route foundation is a
+separate derived path behind the absent
+`CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ENABLED` gate and exact
+`CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ACCOUNT_ALLOWLIST`; it does not change the
+request or verification contract.
 
 Custom-domain journal and recovery administration requires both the ordinary
 platform-admin bearer token and the distinct
@@ -885,7 +894,10 @@ audit events; read-only recall does neither:
   scoped store. The endpoint is capped at the 25 MiB transport ceiling; the
   owning cell enforces any lower resolved account limit and returns the exact
   content-free `over_size` verdict. Successful `accepted` is emitted only after
-  the owning cell commit. It is not a public bearer-token route.
+  the owning cell commit. It is not a public bearer-token route. Schema 88 adds
+  no signed header: the cell derives canonical, managed-alias, or custom-domain
+  receipt provenance from the existing signed envelope recipient and its local
+  route rows.
 - Canonical Realm-ID routes have an independent bounded inventory. The
   control-plane schedule does nothing unless
   `CP_REALM_EMAIL_CANONICAL_INVENTORY_ENABLED` is exactly `true`. Its controller
@@ -898,8 +910,9 @@ audit events; read-only recall does neither:
   account operator against the current cell. Its platform-admin counterpart is
   `POST /v1/admin/accounts/{account_id}/realms/{realm_id}:close`. Both accept an
   `idempotency_key` and drive the same durable operation. The controller rejects
-  any live or pending realm alias, prepares the cell's exact route generation,
-  publishes a retired canonical route, and commits the cell tombstone. It
+  any live or pending realm alias or non-retired custom-domain route, prepares
+  the cell's exact route generation, publishes a retired canonical route, and
+  commits the cell tombstone. It
   returns 202 with the current phase while converging and 200 when complete;
   retry the same request and idempotency key. Direct deletion on a managed cell
   fails closed so it cannot bypass this ordering.
@@ -962,19 +975,37 @@ audit events; read-only recall does neither:
   globally reserved forever. Legacy v1 targets remain status-readable with a
   null fence but refuse actions. These routes never select the active object or
   perform cutover.
-- The cell projection endpoint accepts only the account cell's provision token
-  and an exact `era_` claim fence, domain, label, state, and monotonically
-  increasing controller revision. Equal replay is idempotent; stale or
-  conflicting projections fail closed. Received messages retain
-  `canonical` versus `realm_alias` route provenance plus the alias claim id.
+- The managed-alias cell projection endpoint accepts only the account cell's
+  provision token and an exact `era_` claim fence, domain, label, state, and
+  monotonically increasing controller revision. Equal replay is idempotent;
+  stale or conflicting projections fail closed.
+- The schema-88 provision-token-only
+  `POST /v1/accounts/{account_id}:email-custom-domain-route` applies one exact
+  join of verified domain request/allocation, realm-alias claim, realm, and
+  account. Its `GET` form requires both `domain_request_id` and
+  `realm_alias_claim_id` and provides the controller's exact readback fence.
+  The cell stores domain-allocation, domain-state, alias, and controller
+  revisions; equal-revision exact replay is idempotent, while lower revisions,
+  a same-revision mismatch, a wrong binding, or retired-row resurrection fail
+  closed. An applied row additionally requires the local alias at the advertised
+  revision and a live realm-email route. Received messages preserve
+  `canonical`, `realm_alias`, or `custom_domain` provenance; the custom variant
+  stores both source ids.
 - The cell's provision-token
   `GET /v1/accounts/{account_id}:email-realm-alias-target?realm_id={realm_id}`
   preflight proves only that the exact account owns that live (not soft-deleted)
   realm. Its response is content-minimal and exposes no realm name or account
   metadata.
 - `GET /v1/email/realm-routes/{domain}/{realm_label}` requires the dedicated
-  edge token and returns only the strict routing projection. A cache miss queues
-  a bounded durable refresh; the response path does no cell or KV repair I/O.
+  edge token and returns only the strict schema-v1 routing union. Managed-domain
+  cache misses keep the existing bounded durable refresh behavior; their
+  response path does no cell or KV repair I/O. A non-managed domain returns 404
+  without touching custom authority unless
+  `CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ENABLED=true`. The custom registry then
+  independently requires the owning account in
+  `CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ACCOUNT_ALLOWLIST`, stages a durable
+  derived intent, applies and reads back the exact cell projection, re-proves
+  both authorities, and publishes the same KV key only after all fences match.
   It never writes the general account/cell directory namespace.
 - `CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED` is an exact-`true`, default-off
   operational gate. While disabled, create, approve, internal assignment, and
@@ -986,6 +1017,17 @@ audit events; read-only recall does neither:
   Email Worker gate checked on every `realm_alias` delivery. Any other value
   tempfails the alias before content read or cell relay. Canonical Realm ID and
   legacy literal-pilot routes are unaffected.
+- `AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED` is an independent exact-`true`,
+  default-off Email Worker gate for any domain outside the configured managed
+  primary/legacy set. Any other value tempfails before KV, control-plane
+  fallback, either lookup limiter, or raw-MIME access. It does not affect
+  managed canonical, alias, or legacy routes. The edge projection uses
+  `route_kind=custom_domain` and the existing
+  `email:realm-route:v1:<domain>:<realm_label>` key, with exact domain
+  request/allocation and alias claim/revision fences. This gate and both
+  control-plane routing controls are absent; this slice authorizes only fake,
+  offline acceptance and performs no provider, DNS, MX, Email Routing, or live
+  delivery change.
 - `POST /v1/message-requests` requires an agent token and `Idempotency-Key` and
   creates one realm `kind=open_request` message plus an immutable candidate
   snapshot in the same transaction. `selection_policy` is omitted or

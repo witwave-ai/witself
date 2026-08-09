@@ -309,6 +309,15 @@ type Config struct {
 		ctx context.Context,
 		accountID string,
 	) ([]AgentEmailRealmAlias, error)
+	ApplyAgentEmailCustomDomainRoute func(
+		ctx context.Context,
+		accountID string,
+		in AgentEmailCustomDomainRouteApplyRequest,
+	) (AgentEmailCustomDomainRoute, error)
+	GetAgentEmailCustomDomainRoute func(
+		ctx context.Context,
+		accountID, domainRequestID, realmAliasClaimID string,
+	) (AgentEmailCustomDomainRoute, error)
 	GetRealmEmailRouteLifecycle func(
 		ctx context.Context,
 		accountID, realmID string,
@@ -1898,6 +1907,7 @@ func apiMux(cfg Config) http.Handler {
 		if cfg.GetPlacementPolicySystem != nil || cfg.GetAccountPlan != nil ||
 			cfg.GetAgentEmailRealmAlias != nil || cfg.GetAgentEmailRealmAliasTarget != nil ||
 			cfg.ListAgentEmailRealmAliases != nil ||
+			cfg.GetAgentEmailCustomDomainRoute != nil ||
 			cfg.GetRealmEmailRouteLifecycle != nil ||
 			cfg.ListRealmEmailRouteLifecycles != nil {
 			mux.HandleFunc("GET /v1/accounts/", accountSystemGetHandler(cfg))
@@ -1917,6 +1927,7 @@ func apiMux(cfg Config) http.Handler {
 			cfg.ImportAccountArchive != nil ||
 			cfg.ResumeAccountSystem != nil || cfg.LogAccountEvent != nil ||
 			cfg.SetAccountPlan != nil || cfg.ApplyAgentEmailRealmAlias != nil ||
+			cfg.ApplyAgentEmailCustomDomainRoute != nil ||
 			cfg.PrepareRealmEmailRouteRetirement != nil ||
 			cfg.CommitRealmEmailRouteRetirement != nil)
 	hasAccountBackup := cfg.BackupToken != "" &&
@@ -3561,6 +3572,33 @@ func accountSystemGetHandler(cfg Config) http.HandlerFunc {
 			_ = json.NewEncoder(w).Encode(snapshot)
 			return
 		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "email-custom-domain-route"); ok &&
+			strings.HasSuffix(r.URL.Path, ":email-custom-domain-route") &&
+			cfg.GetAgentEmailCustomDomainRoute != nil {
+			domainRequestID := strings.TrimSpace(r.URL.Query().Get("domain_request_id"))
+			realmAliasClaimID := strings.TrimSpace(r.URL.Query().Get("realm_alias_claim_id"))
+			if domainRequestID == "" || realmAliasClaimID == "" {
+				writeJSONError(w, http.StatusBadRequest, "domain_request_id and realm_alias_claim_id are required")
+				return
+			}
+			route, err := cfg.GetAgentEmailCustomDomainRoute(
+				r.Context(), accountID, domainRequestID, realmAliasClaimID,
+			)
+			switch {
+			case errors.Is(err, ErrBadInput):
+				writeJSONError(w, http.StatusBadRequest, "invalid custom-domain route lookup")
+				return
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "custom-domain route not found")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not read custom-domain route")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(route)
+			return
+		}
 		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "email-realm-alias"); ok && cfg.GetAgentEmailRealmAlias != nil {
 			claimID := strings.TrimSpace(r.URL.Query().Get("claim_id"))
 			if claimID == "" {
@@ -4026,6 +4064,44 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(alias)
+			return
+		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "email-custom-domain-route"); ok &&
+			strings.HasSuffix(r.URL.Path, ":email-custom-domain-route") &&
+			cfg.ApplyAgentEmailCustomDomainRoute != nil {
+			var req AgentEmailCustomDomainRouteApplyRequest
+			decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10))
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&req); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+				return
+			}
+			var extra any
+			if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+				writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+				return
+			}
+			if req.SchemaVersion != "witself.v0" || req.AccountID != accountID {
+				writeJSONError(w, http.StatusBadRequest, "custom-domain route envelope does not match target")
+				return
+			}
+			route, err := cfg.ApplyAgentEmailCustomDomainRoute(r.Context(), accountID, req)
+			switch {
+			case errors.Is(err, ErrBadInput):
+				writeJSONError(w, http.StatusBadRequest, "invalid custom-domain route projection")
+				return
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "custom-domain route target not found")
+				return
+			case errors.Is(err, ErrConflict):
+				writeJSONError(w, http.StatusConflict, "stale or conflicting custom-domain route projection")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not apply custom-domain route")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(route)
 			return
 		}
 		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "plan"); ok && cfg.SetAccountPlan != nil {

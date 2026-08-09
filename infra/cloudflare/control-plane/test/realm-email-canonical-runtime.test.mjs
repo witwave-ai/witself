@@ -8,6 +8,9 @@ import {
   realmEmailRouteKey,
   runScheduledCanonicalRealmRouteInventory,
 } from "../src/realm-email-alias-runtime.mjs";
+import {
+  buildRealmEmailAliasClaimProof,
+} from "../src/agent-email-custom-domain-route-contract.mjs";
 
 const ACCOUNT = "acct_canonical";
 const OTHER_ACCOUNT = "acct_canonical_other";
@@ -128,6 +131,7 @@ function fixture({
   delivery = true,
   domain = DOMAIN,
   legacyDomain = null,
+  customDomainStub = null,
 } = {}) {
   const storage = new Storage();
   const directory = new Directory([
@@ -226,6 +230,14 @@ function fixture({
     CP_REALM_EMAIL_CANONICAL_INVENTORY_ENABLED: inventory ? "true" : "false",
     CP_REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: delivery ? "true" : "false",
     CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED: "true",
+    ...(customDomainStub
+      ? {
+        AGENT_EMAIL_DOMAINS: {
+          idFromName: (name) => name,
+          get: () => customDomainStub,
+        },
+      }
+      : {}),
   };
   const runtime = new DurableRealmEmailAliasRegistry(
     { storage, id: { name: "global" } },
@@ -453,6 +465,130 @@ test("realm close publishes the durable tombstone before cell commit and resumes
   });
   assert.equal(blocked.response.status, 409);
   assert.match(blocked.body.error, /realm close/);
+});
+
+test("realm close waits for exact custom-domain completion before cell prepare", async () => {
+  const convergenceCalls = [];
+  const customDomainStub = {
+    async fetch(request, init) {
+      const path = new URL(request.url ?? request).pathname;
+      const input = JSON.parse(init.body);
+      convergenceCalls.push(path);
+      if (path === "/route/alias-convergence/enqueue") {
+        return Response.json({
+          schema_version: "witself.agent-email-domain.v1",
+          complete: false,
+          source_fingerprint: input.source_fingerprint,
+        }, { status: 202 });
+      }
+      assert.equal(path, "/route/alias-convergence/status");
+      return Response.json({
+        schema_version: "witself.agent-email-domain.v1",
+        complete: true,
+        source_fingerprint: input.source_fingerprint,
+      });
+    },
+  };
+  const {
+    runtime,
+    storage,
+    transitionBodies,
+  } = fixture({ customDomainStub });
+  assert.equal(
+    (await call(runtime, "/canonical/inventory/reconcile")).response.status,
+    200,
+  );
+
+  const alias = "custom-route";
+  const claimID = "era_aaaaaaaaaaaaaaaa";
+  const createdAt = "2026-08-02T11:00:00.000Z";
+  const claim = {
+    claim_id: claimID,
+    alias,
+    domain: DOMAIN,
+    skeleton: alias,
+    account_id: ACCOUNT,
+    realm_id: REALM,
+    request_id: null,
+    assignment_kind: "customer",
+    assignment_revision: 2,
+    admin_suspended: false,
+    plan_suspended: false,
+    operational_gate_suspended: false,
+    lifecycle_suspended: false,
+    plan_grace_until: null,
+    created_at: createdAt,
+    updated_at: createdAt,
+    retired_at: createdAt,
+    retirement_reason: "test setup",
+  };
+  await storage.put(`claim:${alias}`, claim);
+  await storage.put(
+    `account-claim:${ACCOUNT}:${REALM}:${createdAt}:${alias}`,
+    alias,
+  );
+  await storage.put(`custom-domain-subscription:${claimID}`, {
+    schema_version: "witself.realm-email-alias-custom-domain-subscription.v1",
+    account_id: ACCOUNT,
+    realm_id: REALM,
+    realm_label: alias,
+    realm_alias_claim_id: claimID,
+    created_at: createdAt,
+  });
+  await storage.put(
+    `custom-domain-subscription-realm:${ACCOUNT}:${REALM}:${claimID}`,
+    alias,
+  );
+
+  const request = {
+    actor: { kind: "account_operator", id: "opr_close_custom" },
+    account_id: ACCOUNT,
+    realm_id: REALM,
+    domain: DOMAIN,
+    idempotency_key: "close-after-custom-convergence",
+  };
+  const waiting = await call(runtime, "/canonical/realm-close", request);
+  assert.equal(waiting.response.status, 202);
+  assert.equal(waiting.body.phase, "custom_domain_converging");
+  assert.deepEqual(convergenceCalls, ["/route/alias-convergence/enqueue"]);
+  assert.deepEqual(transitionBodies, []);
+  assert.ok(await storage.get(`custom-domain-sync:${claimID}`));
+
+  const lateAlias = "late-route";
+  const lateClaimID = "era_bbbbbbbbbbbbbbbb";
+  const lateClaim = {
+    ...claim,
+    claim_id: lateClaimID,
+    alias: lateAlias,
+    skeleton: lateAlias,
+  };
+  await storage.put(`claim:${lateAlias}`, lateClaim);
+  const fenced = await call(runtime, "/alias/custom-domain-route-subscribe", {
+    claim_proof: buildRealmEmailAliasClaimProof({
+      account_id: ACCOUNT,
+      realm_id: REALM,
+      realm_label: lateAlias,
+      realm_alias_claim_id: lateClaimID,
+      realm_alias_revision: lateClaim.assignment_revision,
+      state: "retired",
+      updated_at: lateClaim.updated_at,
+    }),
+  });
+  assert.equal(fenced.response.status, 409);
+  assert.equal(fenced.body.code, "custom_domain_subscription_realm_closed");
+
+  const completed = await call(runtime, "/canonical/realm-close", request);
+  assert.equal(completed.response.status, 200);
+  assert.equal(completed.body.complete, true);
+  assert.deepEqual(convergenceCalls, [
+    "/route/alias-convergence/enqueue",
+    "/route/alias-convergence/status",
+  ]);
+  assert.deepEqual(transitionBodies.map(({ phase }) => phase), [
+    "prepare",
+    "commit",
+  ]);
+  assert.equal(await storage.get(`custom-domain-sync:${claimID}`), undefined);
 });
 
 test("realm close replays the exact closing tombstone after a lost KV acknowledgement", async () => {

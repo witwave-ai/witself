@@ -737,9 +737,20 @@ list/show/verify/reject/retire/audit, journal, and sealed recovery routes under
 `witself.agent-email-domain.v1` contract includes a stable TXT ownership
 challenge, separately gated manual and scheduled DNS observation,
 ownership/lifecycle transitions, append-only authority journaling, and sealed
-empty-target recovery. Its independent exact-`true` request and verification
-gates are absent from release configuration. It performs no DNS/provider
-mutation and has no edge projection, cell mutation, or mail-delivery path.
+empty-target recovery. The v0.0.238 ownership-verification release stops there: its
+independent exact-`true` request and verification gates are absent from release
+configuration, and it performs no DNS/provider mutation, edge projection, cell
+mutation, or mail delivery.
+
+The schema-88 dark routing slice adds a provision-token cell projection and
+the derived control-plane-to-edge routing path for
+`agent.realm-alias@customer-domain`. The binding is exact across verified
+domain allocation, realm-alias claim, realm, and account. It reuses
+`GET /v1/email/realm-routes/{domain}/{realm_label}`, the schema-v1 KV route
+union, and the existing signed ingestion envelope; it adds no signed header.
+Both control-plane routing controls and the independent Email Worker delivery
+gate are absent, so the slice is fake/offline acceptance only and still makes
+no DNS, MX, provider, Email Routing, live route, or delivery change.
 
 Operational endpoints such as `GET /metrics` are server operations endpoints,
 not versioned product API routes. `/metrics` should be served from the dedicated
@@ -782,6 +793,14 @@ also require the latest-only `agent_activity` projection so last-observed peer
 metadata survives a cross-cell move. Its local runtime-hook outbox is host retry
 state and is not part of the account archive; restored activity remains
 observational and never establishes availability.
+Schema-88 archives additionally carry `agent_email_custom_domain_routes` before
+agent-email messages and retain both the domain-request id and realm-alias claim
+id on a `custom_domain` receipt. Import validates the exact
+account/realm/domain/alias binding and never infers it from an address. A
+schema-87 archive upgrades with an empty route stream and null custom-domain
+message provenance. The schema-88 down migration refuses before mutation when
+any custom-domain route, including a retired tombstone, or custom-domain receipt
+exists.
 Export/import is tracked in
 [backup-and-recovery.md](backup-and-recovery.md).
 

@@ -739,6 +739,33 @@ func TestAddRealmEmailRouteLifecycleDefaults(t *testing.T) {
 	}
 }
 
+func TestSchema87CustomDomainUpgradePreservesRows(t *testing.T) {
+	upgrade := UpgraderFor(87)
+	if upgrade == nil {
+		t.Fatal("schema 87 custom-domain identity upgrader is not registered")
+	}
+	input := map[string]any{
+		"id":                             "aem_aaaaaaaaaaaaaaaa",
+		"recipient_route_kind":           "realm_alias",
+		"recipient_realm_alias_claim_id": "era_bbbbbbbbbbbbbbbb",
+	}
+	want := map[string]any{
+		"id":                             "aem_aaaaaaaaaaaaaaaa",
+		"recipient_route_kind":           "realm_alias",
+		"recipient_realm_alias_claim_id": "era_bbbbbbbbbbbbbbbb",
+	}
+	got, err := upgrade("agent_email_messages", input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("schema 87 identity upgrade changed message: got %#v, want %#v", got, want)
+	}
+	if _, exists := got["recipient_custom_domain_request_id"]; exists {
+		t.Fatalf("schema 87 identity upgrade fabricated route authority: %#v", got)
+	}
+}
+
 func TestUpgradeRowRejectsNull(t *testing.T) {
 	_, err := upgradeRow("fact_assertions", []byte(`null`), 25, 26)
 	if !errors.Is(err, ErrCorrupt) {

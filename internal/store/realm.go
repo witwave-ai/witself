@@ -218,6 +218,16 @@ func (s *Store) DeleteRealm(ctx context.Context, accountID, realmID string) erro
 	if liveAliasCount > 0 {
 		return ErrRealmNotEmpty
 	}
+	var liveCustomDomainRouteCount int
+	if err := tx.QueryRow(ctx, `
+		SELECT count(*) FROM agent_email_custom_domain_routes
+		 WHERE account_id=$1 AND realm_id=$2 AND state<>'retired'`,
+		accountID, realmID).Scan(&liveCustomDomainRouteCount); err != nil {
+		return fmt.Errorf("count realm custom-domain routes: %w", err)
+	}
+	if liveCustomDomainRouteCount > 0 {
+		return ErrRealmNotEmpty
+	}
 
 	if _, err := tx.Exec(ctx,
 		`UPDATE realms
@@ -549,7 +559,7 @@ func requireRealmEmailRouteEmptyTx(
 	tx pgx.Tx,
 	accountID, realmID string,
 ) error {
-	var liveAgents, liveAliases int64
+	var liveAgents, liveAliases, liveCustomDomainRoutes int64
 	if err := tx.QueryRow(ctx, `
 		SELECT count(*) FROM agents
 		 WHERE realm_id=$1 AND deleted_at IS NULL`, realmID).Scan(&liveAgents); err != nil {
@@ -561,7 +571,13 @@ func requireRealmEmailRouteEmptyTx(
 		accountID, realmID).Scan(&liveAliases); err != nil {
 		return fmt.Errorf("count realm aliases for route retirement: %w", err)
 	}
-	if liveAgents > 0 || liveAliases > 0 {
+	if err := tx.QueryRow(ctx, `
+		SELECT count(*) FROM agent_email_custom_domain_routes
+		 WHERE account_id=$1 AND realm_id=$2 AND state<>'retired'`,
+		accountID, realmID).Scan(&liveCustomDomainRoutes); err != nil {
+		return fmt.Errorf("count realm custom-domain routes for route retirement: %w", err)
+	}
+	if liveAgents > 0 || liveAliases > 0 || liveCustomDomainRoutes > 0 {
 		return ErrRealmEmailRouteConflict
 	}
 	return nil

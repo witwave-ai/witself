@@ -23,6 +23,10 @@ import {
   validateRealmEmailAliasJournalEntry,
   validateRealmEmailAliasRecoveredState,
 } from "../src/realm-email-alias-journal.mjs";
+import {
+  buildRealmEmailAliasClaimProof,
+  realmEmailAliasClaimRouteFingerprint,
+} from "../src/agent-email-custom-domain-route-contract.mjs";
 
 const STREAM = "reaj_aaaaaaaaaaaaaaaa";
 const ACCOUNT = "acct_alias";
@@ -670,6 +674,100 @@ test("after-image replay prevents tombstone resurrection and revision regression
   }), /append-only authority key/);
 });
 
+test("custom-domain sync replay allows only fenced source and phase transitions", () => {
+  const proof = buildRealmEmailAliasClaimProof({
+    account_id: ACCOUNT,
+    realm_id: REALM,
+    realm_label: "acme",
+    realm_alias_claim_id: CLAIM,
+    realm_alias_revision: 1,
+    state: "applied",
+    updated_at: NOW,
+  });
+  const key = `custom-domain-sync:${CLAIM}`;
+  const enqueue = {
+    schema_version: "witself.realm-email-alias-custom-domain-sync.v1",
+    phase: "enqueue",
+    claim_proof: proof,
+    source_fingerprint: realmEmailAliasClaimRouteFingerprint(proof),
+    failure_count: 0,
+    retry_at_ms: 100,
+    created_at: NOW,
+    updated_at: NOW,
+  };
+  const state = new Map([[key, enqueue]]);
+  const poll = {
+    ...enqueue,
+    phase: "poll",
+    retry_at_ms: 101,
+    updated_at: "2026-08-02T20:00:01.000Z",
+  };
+  const polling = applyRealmEmailAliasAuthorityAfterImage(state, {
+    puts: [{ key, value: poll }],
+    deletes: [],
+  });
+  assert.equal(polling.get(key).phase, "poll");
+
+  const reenqueued = applyRealmEmailAliasAuthorityAfterImage(polling, {
+    puts: [{
+      key,
+      value: {
+        ...poll,
+        phase: "enqueue",
+        retry_at_ms: 102,
+        updated_at: "2026-08-02T20:00:02.000Z",
+      },
+    }],
+    deletes: [],
+  });
+  assert.equal(reenqueued.get(key).phase, "enqueue");
+
+  const newerProof = buildRealmEmailAliasClaimProof({
+    ...proof,
+    realm_alias_revision: 2,
+    state: "retired",
+    updated_at: "2026-08-02T20:00:03.000Z",
+  });
+  const newer = {
+    ...enqueue,
+    claim_proof: newerProof,
+    source_fingerprint: realmEmailAliasClaimRouteFingerprint(newerProof),
+    retry_at_ms: 103,
+    updated_at: "2026-08-02T20:00:03.000Z",
+  };
+  assert.doesNotThrow(() => applyRealmEmailAliasAuthorityAfterImage(
+    reenqueued,
+    { puts: [{ key, value: newer }], deletes: [] },
+  ));
+
+  for (const invalid of [
+    {
+      ...poll,
+      claim_proof: { ...poll.claim_proof, updated_at: poll.updated_at },
+      updated_at: "2026-08-02T20:00:02.000Z",
+    },
+    {
+      ...poll,
+      retry_at_ms: 99,
+      updated_at: "2026-08-02T20:00:02.000Z",
+    },
+    {
+      ...newer,
+      phase: "poll",
+    },
+    {
+      ...newer,
+      failure_count: 1,
+    },
+  ]) {
+    assert.throws(() => applyRealmEmailAliasAuthorityAfterImage(state, {
+      puts: [{ key, value: invalid }],
+      deletes: [],
+    }), (error) => error.code ===
+      "realm_email_alias_recovery_revision_regression");
+  }
+});
+
 test("only the exact prepared-to-committed audit overwrite is replayable", () => {
   const state = fixtureState();
   const committed = state.get("audit:000000000002");
@@ -717,11 +815,35 @@ test("derived-state rebuild recreates indexes, counters, and due work only", () 
   });
   state.set(`plan-intent:${ACCOUNT}`, {
     account_id: ACCOUNT,
+    plan_revision: 1,
+    plan_snapshot_hash: "a".repeat(64),
+    feature_enabled: true,
+    alias_limit: 1,
+    activation_enabled: true,
+    state: "cell_committed",
+    claim_cursor: null,
+    realm_positions: {},
+    gate_phase: "claims",
+    gate_claim_cursor: null,
+    gate_canonical_cursor: null,
+    operational_gate_complete: true,
     retry_at_ms: 44,
+    created_at: NOW,
+    updated_at: NOW,
   });
   state.set(`lifecycle-intent:${ACCOUNT}`, {
     account_id: ACCOUNT,
+    operation_id: "archive-account",
+    epoch: 1,
+    action: "suspend",
+    activation_enabled: true,
+    phase: "claims",
+    claim_cursor: null,
+    canonical_cursor: null,
+    failure_count: 0,
     retry_at_ms: 45,
+    created_at: NOW,
+    updated_at: NOW,
   });
   state.set(`route-refresh:${DOMAIN}:aaaaaaaaaaaaaaaa`, {
     domain: DOMAIN,

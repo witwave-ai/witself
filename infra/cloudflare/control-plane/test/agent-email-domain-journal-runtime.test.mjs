@@ -527,6 +527,23 @@ test("authority commit atomically consumes exact verification local state", asyn
     (error) => error.code ===
       "agent_email_domain_journal_local_storage_key",
   );
+
+  for (const key of [
+    `route-projection-intent:${REQUEST_ID}:customer`,
+    `route-projection-due:0000000000000042:${REQUEST_ID}:customer`,
+  ]) {
+    await assert.rejects(
+      target.runtime.commit([[key, { opaque: "derived outbox" }]], [], {},
+        target.apply),
+      (error) => error.code ===
+        "agent_email_domain_journal_local_storage_key",
+    );
+    await assert.rejects(
+      target.runtime.commit([], [key], {}, target.apply),
+      (error) => error.code ===
+        "agent_email_domain_journal_local_storage_key",
+    );
+  }
 });
 
 test("stale capacity fails operational readiness and exposes unknown status fields", async () => {

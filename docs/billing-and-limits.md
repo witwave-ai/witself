@@ -102,7 +102,9 @@ Compatibility there is limited to canonical local parts that were actually
 issued before retirement. No plan may request a new legacy-domain canonical
 address or alias; all new Witself-managed addresses use `witmail.net`.
 This matrix describes the plan entitlement, not the current rollout state:
-canonical inventory and delivery remain behind independent default-off gates.
+canonical inventory and delivery remain behind independent default-off gates,
+and custom-domain request, verification, routing, provider onboarding, and
+delivery are all still dark.
 
 In this table, an included feature does not imply unbounded throughput or a
 per-message charge. Message rate values and agent-email safety breakers are
@@ -498,20 +500,35 @@ suspension without a client reinstall. Account lifecycle fences suspend during
 move/archive work, republish on resume, and permanently retire on account
 close.
 
-Repeated scheduled checks do not create unbounded storage when their durable
-evidence outcome is unchanged. Each request has at most one overwrite-only,
-journal-local verification refresh plus one derived due entry. The refresh
-advances the effective clocks, retry counter, recursive TTL, and schedule shown
-by request list/show without mutating the authority request/allocation, audit
-history, journal head, capacity count, or R2 stream. A first or changed outcome
-and every newly executed manual check remain audited authority commits.
-Recovery discards the local refresh and conservatively resumes from the last
-journaled request.
+The deployed v0.0.238 verifier does not create unbounded storage when a
+scheduled check's durable evidence outcome is unchanged. Each request has at
+most one overwrite-only, journal-local verification refresh plus one derived
+due entry. The refresh advances the effective clocks, retry counter, recursive
+TTL, and schedule shown by request list/show without mutating the authority
+request/allocation, audit history, journal head, capacity count, or R2 stream.
+A first or changed outcome and every newly executed manual check remain audited
+authority commits. Recovery discards the local refresh and conservatively
+resumes from the last journaled request. Through that deployed release, none of
+these states writes a cell or edge route.
 
-None of these states publishes MX or Email Routing configuration, writes a
-cell or edge route, or accepts mail for the domain. Request creation,
-verification, routing/projection, and delivery remain separate activation
-decisions.
+The schema-88 dark foundation adds routing with no new commercial
+dimension. A custom route always reuses one existing realm-alias claim and has
+the form `agent.realm-alias@customer-domain`; it does not create another alias
+or consume extra domain allowance. The cell projection is an exact join of the
+verified domain request/allocation, realm-alias claim, realm, and account, with
+all source revisions preserved. One verified domain may therefore support
+several already-authorized realm aliases while `(domain, realm_label)` remains
+globally unambiguous.
+
+Routing is independently disabled unless
+`CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ENABLED=true` and the account appears
+exactly in `CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ACCOUNT_ALLOWLIST`. Delivery
+has the separate exact-true `AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED` edge
+gate. All three are absent from committed configuration. They do not alter the
+domain entitlement or limit, and request creation, verification, routing,
+provider onboarding, and delivery remain separate activation decisions. This
+slice performs no DNS, MX, Email Routing, provider, customer-zone, or live-mail
+mutation; only fake/offline acceptance is authorized.
 
 The control-plane authority is protected by a separate create-only R2 journal.
 After the existing registry has been bootstrapped and a sealed empty-target

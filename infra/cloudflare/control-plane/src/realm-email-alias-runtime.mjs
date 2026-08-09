@@ -9,6 +9,11 @@ import {
   RealmEmailAliasJournalRuntime,
   RealmEmailAliasJournalRuntimeError,
 } from "./realm-email-alias-journal-runtime.mjs";
+import {
+  buildRealmEmailAliasClaimProof,
+  realmEmailAliasClaimRouteFingerprint,
+  validateRealmEmailAliasClaimProof,
+} from "./agent-email-custom-domain-route-contract.mjs";
 
 const SCHEMA_VERSION = "witself.realm-email-alias.v1";
 const META_KEY = "meta";
@@ -61,6 +66,11 @@ const CANONICAL_INVENTORY_KEY = "canonical-inventory";
 const CANONICAL_INVENTORY_DIRECTORY_LIMIT = 1;
 const REALM_CLOSE_CLAIM_PAGE_LIMIT = 25;
 const REALM_CLOSE_ALARM_BATCH_LIMIT = 10;
+const CUSTOM_DOMAIN_SYNC_SCHEMA =
+  "witself.realm-email-alias-custom-domain-sync.v1";
+const CUSTOM_DOMAIN_SUBSCRIPTION_SCHEMA =
+  "witself.realm-email-alias-custom-domain-subscription.v1";
+const CUSTOM_DOMAIN_SYNC_RETRY_MS = 1_000;
 export const REALM_EMAIL_MAX_MANAGED_DOMAINS = 2;
 
 // Commercial alias capacity can be explicitly unlimited. Review work cannot:
@@ -495,6 +505,43 @@ function realmCloseDueKey(intent) {
     `${intent.account_id}:${intent.realm_id}`;
 }
 
+function customDomainSubscriptionKey(claimID) {
+  return `custom-domain-subscription:${claimID}`;
+}
+
+function customDomainSyncKey(claimID) {
+  return `custom-domain-sync:${claimID}`;
+}
+
+function customDomainSyncAccountPrefix(accountID) {
+  return `custom-domain-sync-account:${accountID}:`;
+}
+
+function customDomainSyncAccountKey(intent) {
+  return `${customDomainSyncAccountPrefix(intent.claim_proof.account_id)}` +
+    intent.claim_proof.realm_alias_claim_id;
+}
+
+function customDomainSubscriptionRealmPrefix(accountID, realmID) {
+  return `custom-domain-subscription-realm:${accountID}:${realmID}:`;
+}
+
+function customDomainSubscriptionRealmKey(subscription) {
+  return `${customDomainSubscriptionRealmPrefix(
+    subscription.account_id,
+    subscription.realm_id,
+  )}${subscription.realm_alias_claim_id}`;
+}
+
+function customDomainSyncDueKey(intent) {
+  if (!Number.isSafeInteger(intent?.retry_at_ms) || intent.retry_at_ms < 0 ||
+      !CLAIM_ID_PATTERN.test(intent?.claim_proof?.realm_alias_claim_id ?? "")) {
+    return null;
+  }
+  return `custom-domain-sync-due:${String(intent.retry_at_ms)
+    .padStart(16, "0")}:${intent.claim_proof.realm_alias_claim_id}`;
+}
+
 function graceIndexKey(claim) {
   if (!claim?.plan_grace_until) return null;
   const deadline = Number.isSafeInteger(claim.grace_retry_at_ms)
@@ -792,6 +839,12 @@ function decodeListCursor(value, prefix) {
 export function realmEmailAliasRegistryStub(env) {
   if (!env?.REALM_EMAIL_ALIASES) return null;
   const namespace = env.REALM_EMAIL_ALIASES;
+  return namespace.get(namespace.idFromName(DEFAULT_REGISTRY_OBJECT_NAME));
+}
+
+function agentEmailDomainRegistryStub(env) {
+  if (!env?.AGENT_EMAIL_DOMAINS) return null;
+  const namespace = env.AGENT_EMAIL_DOMAINS;
   return namespace.get(namespace.idFromName(DEFAULT_REGISTRY_OBJECT_NAME));
 }
 
@@ -1170,6 +1223,33 @@ export class DurableRealmEmailAliasRegistry {
           result.sealed || result.failed ? 200 : 202,
         );
       }
+      // Custom-domain routing begins with an exact claim proof and a permanent
+      // sparse subscription handshake. Later subscribed-claim changes use a
+      // bounded journaled notification back to the customer-domain registry;
+      // claims without that marker remain completely dark.
+      if (path === "/alias/claim-proof") {
+        return await this.withAuthorityOperationalWork(async () => {
+          const alias = normalizeRealmEmailAlias(input?.realm_label);
+          return this.withLane(
+            `skeleton:${realmEmailAliasSkeleton(alias)}`,
+            () => this.getAliasClaimProof(input, alias),
+          );
+        });
+      }
+      if (path === "/alias/custom-domain-route-subscribe") {
+        return await this.withAuthorityOperationalWork(async () => {
+          const proof = this.customDomainSubscriptionProof(input);
+          // Realm close owns the account and realm lanes. Holding that exact
+          // pair through the live-claim proof, close-fence check, and marker
+          // commit makes "subscription acknowledged before any route write"
+          // a real ordering boundary rather than a check-then-write race.
+          return this.withLanes([
+            `account:${proof.account_id}`,
+            `realm:${proof.account_id}:${proof.realm_id}`,
+            `skeleton:${realmEmailAliasSkeleton(proof.realm_label)}`,
+          ], () => this.registerCustomDomainSubscription(input, proof));
+        });
+      }
       return await this.withAuthorityOperationalWork(async () => {
         await this.withLane("registry:seed", () => this.ensureSeeded());
         const execute = async () => {
@@ -1273,15 +1353,101 @@ export class DurableRealmEmailAliasRegistry {
   }
 
   async atomic(entries, deletes = [], options = {}) {
+    const augmented = await this.withCustomDomainSyncOutboxes(entries, deletes);
     return this.withLane(
       "registry:authority-journal",
       () => this.authorityJournal.commit(
-        entries,
-        deletes,
+        augmented.entries,
+        augmented.deletes,
         options,
         this.atomicRaw.bind(this),
       ),
     );
+  }
+
+  customDomainClaimProof(claim) {
+    if (!claim?.assignment_kind || claim.customer_activation_intent === true ||
+        claim.internal_intent === true) return null;
+    try {
+      const state = cellAliasState(claim);
+      return buildRealmEmailAliasClaimProof({
+        account_id: claim.account_id,
+        realm_id: claim.realm_id,
+        realm_label: claim.alias,
+        realm_alias_claim_id: claim.claim_id,
+        realm_alias_revision: claim.assignment_revision,
+        state,
+        ...(state === "suspended"
+          ? { suspension_disposition: routeSuspensionDisposition(claim) }
+          : {}),
+        updated_at: claim.updated_at,
+      });
+    } catch {
+      fail("realm email alias claim is invalid", 503);
+    }
+  }
+
+  async withCustomDomainSyncOutboxes(entries, deletes) {
+    const finalClaims = new Map();
+    for (const [key, value] of entries) {
+      if (typeof key === "string" && key.startsWith("claim:")) {
+        finalClaims.set(key, value);
+      }
+    }
+    if (finalClaims.size === 0) {
+      return { entries, deletes };
+    }
+    const augmentedEntries = [...entries];
+    const augmentedDeletes = [...deletes];
+    for (const claim of finalClaims.values()) {
+      const subscription = await this.storage.get(
+        customDomainSubscriptionKey(claim?.claim_id ?? ""),
+      );
+      if (!subscription) continue;
+      const proof = this.customDomainClaimProof(claim);
+      if (!proof) {
+        fail("custom-domain alias subscription claim is not projectable", 503);
+      }
+      if (subscription.account_id !== proof.account_id ||
+          subscription.realm_id !== proof.realm_id ||
+          subscription.realm_label !== proof.realm_label ||
+          subscription.realm_alias_claim_id !==
+            proof.realm_alias_claim_id) {
+        fail("custom-domain alias subscription is inconsistent", 503);
+      }
+      const key = customDomainSyncKey(proof.realm_alias_claim_id);
+      const existing = await this.storage.get(key);
+      const sourceFingerprint = realmEmailAliasClaimRouteFingerprint(proof);
+      if (existing?.source_fingerprint === sourceFingerprint) {
+        const due = customDomainSyncDueKey(existing);
+        if (due) augmentedEntries.push([due, proof.realm_alias_claim_id]);
+        continue;
+      }
+      const now = this.now();
+      const intent = {
+        schema_version: CUSTOM_DOMAIN_SYNC_SCHEMA,
+        phase: "enqueue",
+        claim_proof: proof,
+        source_fingerprint: sourceFingerprint,
+        failure_count: 0,
+        retry_at_ms: now.getTime(),
+        created_at: existing?.created_at ?? now.toISOString(),
+        updated_at: now.toISOString(),
+      };
+      augmentedEntries.push(
+        [key, intent],
+        [customDomainSyncAccountKey(intent), key],
+        [customDomainSyncDueKey(intent), proof.realm_alias_claim_id],
+      );
+      const oldDue = customDomainSyncDueKey(existing);
+      if (oldDue && oldDue !== customDomainSyncDueKey(intent)) {
+        augmentedDeletes.push(oldDue);
+      }
+    }
+    return {
+      entries: augmentedEntries,
+      deletes: [...new Set(augmentedDeletes.filter(Boolean))],
+    };
   }
 
   async atomicRaw(entries, deletes = [], options = {}) {
@@ -1961,6 +2127,288 @@ export class DurableRealmEmailAliasRegistry {
     if (await this.storage.get(realmCloseIntentKey(accountID, realmID)) ||
         await this.storage.get(realmCloseFenceKey(accountID, realmID))) {
       fail("realm close is converging or complete; alias writes are fenced", 409);
+    }
+  }
+
+  async getAliasClaimProof(input, normalizedAlias = null) {
+    const accountID = typeof input?.account_id === "string"
+      ? input.account_id
+      : "";
+    if (!ACCOUNT_ID_PATTERN.test(accountID)) fail("invalid account_id", 400);
+    const alias = normalizedAlias ?? normalizeRealmEmailAlias(
+      input?.realm_label,
+    );
+    const claim = await this.storage.get(claimKey(alias));
+    if (!claim?.assignment_kind || claim.account_id !== accountID ||
+        claim.customer_activation_intent === true ||
+        claim.internal_intent === true) {
+      fail("realm email alias claim not found", 404);
+    }
+    return json(this.customDomainClaimProof(claim));
+  }
+
+  customDomainSubscriptionProof(input) {
+    try {
+      return validateRealmEmailAliasClaimProof(
+        input?.claim_proof,
+        input?.claim_proof?.account_id,
+        input?.claim_proof?.realm_label,
+      );
+    } catch {
+      fail("custom-domain alias subscription proof is invalid", 400);
+    }
+  }
+
+  async registerCustomDomainSubscription(input, validatedProof = null) {
+    const proof = validatedProof ?? this.customDomainSubscriptionProof(input);
+    const claim = await this.storage.get(claimKey(proof.realm_label));
+    const currentProof = this.customDomainClaimProof(claim);
+    if (!currentProof ||
+        fingerprint(currentProof) !== fingerprint(proof)) {
+      fail("custom-domain alias subscription proof is stale", 409);
+    }
+    const key = customDomainSubscriptionKey(proof.realm_alias_claim_id);
+    const existing = await this.storage.get(key);
+    const subscription = {
+      schema_version: CUSTOM_DOMAIN_SUBSCRIPTION_SCHEMA,
+      account_id: proof.account_id,
+      realm_id: proof.realm_id,
+      realm_label: proof.realm_label,
+      realm_alias_claim_id: proof.realm_alias_claim_id,
+      created_at: existing?.created_at ?? this.now().toISOString(),
+    };
+    if (existing && fingerprint(existing) !== fingerprint(subscription)) {
+      fail("custom-domain alias subscription conflicts", 409);
+    }
+    if (!existing &&
+        (await this.storage.get(realmCloseIntentKey(
+          proof.account_id,
+          proof.realm_id,
+        )) || await this.storage.get(realmCloseFenceKey(
+          proof.account_id,
+          proof.realm_id,
+        )))) {
+      fail(
+        "realm close is converging or complete; subscription is fenced",
+        409,
+        "custom_domain_subscription_realm_closed",
+      );
+    }
+    if (!existing) {
+      await this.atomic([
+        [key, subscription],
+        [customDomainSubscriptionRealmKey(subscription), proof.realm_label],
+      ]);
+    } else {
+      // Repairable discovery indexes are rebuilt from the permanent marker.
+      await this.atomicRaw([
+        [customDomainSubscriptionRealmKey(existing), proof.realm_label],
+      ]);
+    }
+    return json({
+      schema_version: SCHEMA_VERSION,
+      subscribed: true,
+      account_id: proof.account_id,
+      realm_id: proof.realm_id,
+      realm_label: proof.realm_label,
+      realm_alias_claim_id: proof.realm_alias_claim_id,
+    });
+  }
+
+  async stageCustomDomainSyncForClaim(claim) {
+    const proof = this.customDomainClaimProof(claim);
+    if (!proof) return null;
+    const subscription = await this.storage.get(
+      customDomainSubscriptionKey(proof.realm_alias_claim_id),
+    );
+    if (!subscription) return null;
+    if (subscription.account_id !== proof.account_id ||
+        subscription.realm_id !== proof.realm_id ||
+        subscription.realm_label !== proof.realm_label) {
+      fail("custom-domain alias subscription is inconsistent", 503);
+    }
+    const key = customDomainSyncKey(proof.realm_alias_claim_id);
+    const existing = await this.storage.get(key);
+    const sourceFingerprint = realmEmailAliasClaimRouteFingerprint(proof);
+    if (existing?.source_fingerprint === sourceFingerprint) return existing;
+    const now = this.now();
+    const intent = {
+      schema_version: CUSTOM_DOMAIN_SYNC_SCHEMA,
+      phase: "enqueue",
+      claim_proof: proof,
+      source_fingerprint: sourceFingerprint,
+      failure_count: 0,
+      retry_at_ms: now.getTime(),
+      created_at: existing?.created_at ?? now.toISOString(),
+      updated_at: now.toISOString(),
+    };
+    await this.atomic([
+      [key, intent],
+      [customDomainSyncAccountKey(intent), key],
+      [customDomainSyncDueKey(intent), proof.realm_alias_claim_id],
+    ], [customDomainSyncDueKey(existing)].filter(Boolean));
+    await this.scheduleNextAlarm().catch(() => {});
+    return intent;
+  }
+
+  async completeCustomDomainSync(intent) {
+    await this.atomic([], [
+      customDomainSyncKey(intent.claim_proof.realm_alias_claim_id),
+      customDomainSyncAccountKey(intent),
+      customDomainSyncDueKey(intent),
+    ].filter(Boolean));
+    await this.scheduleNextAlarm().catch(() => {});
+    return { complete: true };
+  }
+
+  async callCustomDomainConvergence(path, intent) {
+    const stub = agentEmailDomainRegistryStub(this.env);
+    if (!stub) fail("custom-domain registry is unavailable", 503);
+    let response;
+    try {
+      response = await stub.fetch(
+        `https://agent-email-domain.internal${path}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            claim_proof: intent.claim_proof,
+            source_fingerprint: intent.source_fingerprint,
+          }),
+        },
+      );
+    } catch {
+      fail("custom-domain alias convergence is unreachable", 502);
+    }
+    return {
+      response,
+      body: await response.json().catch(() => null),
+    };
+  }
+
+  async drainCustomDomainSyncIntent(startingIntent) {
+    let intent = startingIntent;
+    const key = customDomainSyncKey(
+      intent.claim_proof.realm_alias_claim_id,
+    );
+    try {
+      let result;
+      if (intent.phase === "enqueue") {
+        result = await this.callCustomDomainConvergence(
+          "/route/alias-convergence/enqueue",
+          intent,
+        );
+        if (result.response.ok && result.body?.complete === true &&
+            result.body?.source_fingerprint === intent.source_fingerprint) {
+          return this.completeCustomDomainSync(intent);
+        }
+        if (result.response.status !== 202 ||
+            result.body?.complete !== false ||
+            result.body?.source_fingerprint !== intent.source_fingerprint) {
+          fail("custom-domain alias convergence enqueue failed", 502);
+        }
+        const continued = {
+          ...intent,
+          phase: "poll",
+          failure_count: 0,
+          retry_at_ms: this.now().getTime() + CUSTOM_DOMAIN_SYNC_RETRY_MS,
+          updated_at: this.now().toISOString(),
+        };
+        await this.atomic([
+          [key, continued],
+          [customDomainSyncDueKey(continued),
+            continued.claim_proof.realm_alias_claim_id],
+        ], [customDomainSyncDueKey(intent)].filter(Boolean));
+        await this.scheduleNextAlarm().catch(() => {});
+        return { complete: false };
+      }
+      if (intent.phase !== "poll") {
+        fail("custom-domain alias convergence intent is invalid", 503);
+      }
+      result = await this.callCustomDomainConvergence(
+        "/route/alias-convergence/status",
+        intent,
+      );
+      if (result.response.ok && result.body?.complete === true &&
+          result.body?.source_fingerprint === intent.source_fingerprint) {
+        return this.completeCustomDomainSync(intent);
+      }
+      if (result.response.status === 404) {
+        const continued = {
+          ...intent,
+          phase: "enqueue",
+          failure_count: 0,
+          retry_at_ms: this.now().getTime() + CUSTOM_DOMAIN_SYNC_RETRY_MS,
+          updated_at: this.now().toISOString(),
+        };
+        await this.atomic([
+          [key, continued],
+          [customDomainSyncDueKey(continued),
+            continued.claim_proof.realm_alias_claim_id],
+        ], [customDomainSyncDueKey(intent)].filter(Boolean));
+        await this.scheduleNextAlarm().catch(() => {});
+        return { complete: false };
+      }
+      if (result.response.status !== 202 || result.body?.complete !== false ||
+          result.body?.source_fingerprint !== intent.source_fingerprint) {
+        fail("custom-domain alias convergence status failed", 502);
+      }
+      const continued = {
+        ...intent,
+        failure_count: 0,
+        retry_at_ms: this.now().getTime() + CUSTOM_DOMAIN_SYNC_RETRY_MS,
+        updated_at: this.now().toISOString(),
+      };
+      await this.atomic([
+        [key, continued],
+        [customDomainSyncDueKey(continued),
+          continued.claim_proof.realm_alias_claim_id],
+      ], [customDomainSyncDueKey(intent)].filter(Boolean));
+      await this.scheduleNextAlarm().catch(() => {});
+      return { complete: false };
+    } catch (error) {
+      const current = await this.storage.get(key);
+      if (current?.source_fingerprint === intent.source_fingerprint) {
+        const failureCount = (current.failure_count ?? 0) + 1;
+        const retry = {
+          ...current,
+          failure_count: failureCount,
+          retry_at_ms: this.now().getTime() + retryDelayMs(failureCount),
+          updated_at: this.now().toISOString(),
+        };
+        await this.atomic([
+          [key, retry],
+          [customDomainSyncDueKey(retry),
+            retry.claim_proof.realm_alias_claim_id],
+        ], [customDomainSyncDueKey(current)].filter(Boolean));
+        await this.scheduleNextAlarm().catch(() => {});
+      }
+      throw error;
+    }
+  }
+
+  async reconcileDueCustomDomainSyncs() {
+    const now = this.now().getTime();
+    const listed = await this.storage.list({
+      prefix: "custom-domain-sync-due:",
+      limit: REALM_CLOSE_ALARM_BATCH_LIMIT,
+    });
+    for (const [due, claimID] of listed) {
+      const retryAt = Number(due.split(":", 3)[1]);
+      if (!Number.isFinite(retryAt) || retryAt > now) break;
+      const intent = CLAIM_ID_PATTERN.test(claimID ?? "")
+        ? await this.storage.get(customDomainSyncKey(claimID))
+        : null;
+      if (!intent || customDomainSyncDueKey(intent) !== due) {
+        await this.storage.delete(due);
+        continue;
+      }
+      const proof = intent.claim_proof;
+      await this.withLanes([
+        `account:${proof.account_id}`,
+        `realm:${proof.account_id}:${proof.realm_id}`,
+        `skeleton:${realmEmailAliasSkeleton(proof.realm_label)}`,
+      ], () => this.drainCustomDomainSyncIntent(intent).catch(() => {}));
     }
   }
 
@@ -2701,6 +3149,7 @@ export class DurableRealmEmailAliasRegistry {
         fingerprint: fp,
         phase: "scan_aliases",
         alias_cursor: null,
+        custom_domain_cursor: null,
         failure_count: 0,
         retry_at_ms: now.getTime(),
         created_at: now.toISOString(),
@@ -2813,8 +3262,108 @@ export class DurableRealmEmailAliasRegistry {
         const previous = intent;
         intent = {
           ...intent,
-          phase: "prepare_cell",
+          phase: "custom_domain_converging",
           alias_cursor: null,
+          custom_domain_cursor: null,
+          retry_at_ms: this.now().getTime(),
+          updated_at: this.now().toISOString(),
+        };
+        await this.atomic([
+          [realmCloseIntentKey(intent.account_id, intent.realm_id), intent],
+          [realmCloseDueKey(intent), `${intent.account_id}:${intent.realm_id}`],
+        ], realmCloseDueKey(previous) === realmCloseDueKey(intent)
+          ? []
+          : [realmCloseDueKey(previous)]);
+      }
+
+      if (intent.phase === "custom_domain_converging") {
+        const prefix = customDomainSubscriptionRealmPrefix(
+          intent.account_id,
+          intent.realm_id,
+        );
+        const listed = await this.storage.list({
+          prefix,
+          limit: 2,
+          ...(intent.custom_domain_cursor
+            ? { startAfter: intent.custom_domain_cursor }
+            : {}),
+        });
+        const rows = [...listed.entries()];
+        const current = rows[0];
+        if (current) {
+          const [indexKey, alias] = current;
+          const claimID = indexKey.slice(prefix.length);
+          const [subscription, claim] = await Promise.all([
+            this.storage.get(customDomainSubscriptionKey(claimID)),
+            typeof alias === "string"
+              ? this.storage.get(claimKey(alias))
+              : null,
+          ]);
+          if (!subscription || !claim || claim.claim_id !== claimID ||
+              claim.account_id !== intent.account_id ||
+              claim.realm_id !== intent.realm_id || !claim.retired_at) {
+            fail("realm custom-domain subscription index is invalid", 503);
+          }
+          const sync = await this.stageCustomDomainSyncForClaim(claim);
+          const result = sync
+            ? await this.drainCustomDomainSyncIntent(sync)
+            : { complete: true };
+          if (!result.complete) {
+            const previous = intent;
+            intent = {
+              ...intent,
+              failure_count: 0,
+              retry_at_ms: this.now().getTime() + CUSTOM_DOMAIN_SYNC_RETRY_MS,
+              updated_at: this.now().toISOString(),
+            };
+            await this.atomic([
+              [realmCloseIntentKey(intent.account_id, intent.realm_id), intent],
+              [realmCloseDueKey(intent),
+                `${intent.account_id}:${intent.realm_id}`],
+            ], realmCloseDueKey(previous) === realmCloseDueKey(intent)
+              ? []
+              : [realmCloseDueKey(previous)]);
+            await this.scheduleNextAlarm().catch(() => {});
+            return json({
+              schema_version: SCHEMA_VERSION,
+              account_id: intent.account_id,
+              realm_id: intent.realm_id,
+              complete: false,
+              phase: "custom_domain_converging",
+            }, 202);
+          }
+          if (rows.length > 1) {
+            const previous = intent;
+            intent = {
+              ...intent,
+              custom_domain_cursor: indexKey,
+              failure_count: 0,
+              retry_at_ms: this.now().getTime() + CUSTOM_DOMAIN_SYNC_RETRY_MS,
+              updated_at: this.now().toISOString(),
+            };
+            await this.atomic([
+              [realmCloseIntentKey(intent.account_id, intent.realm_id), intent],
+              [realmCloseDueKey(intent),
+                `${intent.account_id}:${intent.realm_id}`],
+            ], realmCloseDueKey(previous) === realmCloseDueKey(intent)
+              ? []
+              : [realmCloseDueKey(previous)]);
+            await this.scheduleNextAlarm().catch(() => {});
+            return json({
+              schema_version: SCHEMA_VERSION,
+              account_id: intent.account_id,
+              realm_id: intent.realm_id,
+              complete: false,
+              phase: "custom_domain_converging",
+            }, 202);
+          }
+        }
+        const previous = intent;
+        intent = {
+          ...intent,
+          phase: "prepare_cell",
+          custom_domain_cursor: null,
+          failure_count: 0,
           retry_at_ms: this.now().getTime(),
           updated_at: this.now().toISOString(),
         };
@@ -3337,6 +3886,10 @@ export class DurableRealmEmailAliasRegistry {
         prefix: "realm-close-due:",
         limit: 1,
       })).keys()][0];
+      const firstCustomDomainSync = [...(await this.storage.list({
+        prefix: "custom-domain-sync-due:",
+        limit: 1,
+      })).keys()][0];
       const counterMigration = await this.storage.get(
         PENDING_COUNTER_MIGRATION_KEY,
       );
@@ -3349,6 +3902,9 @@ export class DurableRealmEmailAliasRegistry {
         firstInternal ? Number(firstInternal.split(":", 3)[1]) : NaN,
         firstRefresh ? Number(firstRefresh.split(":", 3)[1]) : NaN,
         firstRealmClose ? Number(firstRealmClose.split(":", 3)[1]) : NaN,
+        firstCustomDomainSync
+          ? Number(firstCustomDomainSync.split(":", 3)[1])
+          : NaN,
         Number(counterMigration?.retry_at_ms),
       ].filter(Number.isFinite);
       if (deadlines.length > 0) {
@@ -3378,6 +3934,7 @@ export class DurableRealmEmailAliasRegistry {
       // Each lane owns its own retry fence. A poison account or claim must not
       // prevent later due items, grace expiry, or approval recovery from
       // making progress during the same bounded alarm turn.
+      await this.reconcileDueCustomDomainSyncs();
       await this.reconcileDueRealmCloses();
       await this.reconcileDuePlanIntents();
       await this.reconcileDueLifecycles();
@@ -5399,6 +5956,9 @@ export class DurableRealmEmailAliasRegistry {
   }
 
   async applyPlanIntent(intent) {
+    if (intent.state === "custom_domain_converging") {
+      return this.finishPlanCustomDomainConvergence(intent);
+    }
     const page = await this.claimPageForAccount(
       intent.account_id,
       intent.claim_cursor,
@@ -5457,7 +6017,27 @@ export class DurableRealmEmailAliasRegistry {
       });
       await this.drainProjectionIntent(projection);
     }
-    if (page.next_cursor === null) {
+    const finalPage = page.next_cursor === null;
+    const pendingCustomDomains = finalPage &&
+      (await this.storage.list({
+        prefix: customDomainSyncAccountPrefix(intent.account_id),
+        limit: 1,
+      })).size > 0;
+    if (finalPage && pendingCustomDomains) {
+      const continued = {
+        ...intent,
+        state: "custom_domain_converging",
+        claim_cursor: null,
+        realm_positions: positions,
+        failure_count: 0,
+        retry_at_ms: this.now().getTime() + CUSTOM_DOMAIN_SYNC_RETRY_MS,
+        updated_at: mutation.now,
+      };
+      mutation.entries.push(
+        [planIntentKey(intent.account_id), continued],
+        [planDueKey(continued), intent.account_id],
+      );
+    } else if (finalPage) {
       deletes.push(planIntentKey(intent.account_id));
       const fence = {
         account_id: intent.account_id,
@@ -5491,9 +6071,73 @@ export class DurableRealmEmailAliasRegistry {
     await this.scheduleNextAlarm().catch(() => {});
     return {
       changed: changed.length,
-      complete: page.next_cursor === null,
+      complete: finalPage && !pendingCustomDomains,
       registry_revision: mutation.meta.registry_revision,
       assignments: changed.map(({ next }) => publicClaim(next)),
+    };
+  }
+
+  async drainOneAccountCustomDomainSync(accountID) {
+    const listed = await this.storage.list({
+      prefix: customDomainSyncAccountPrefix(accountID),
+      limit: 1,
+    });
+    const first = [...listed.entries()][0];
+    if (!first) return { complete: true };
+    const [indexKey, intentKey] = first;
+    const intent = typeof intentKey === "string"
+      ? await this.storage.get(intentKey)
+      : null;
+    if (!intent || customDomainSyncAccountKey(intent) !== indexKey) {
+      fail("custom-domain alias sync account index is invalid", 503);
+    }
+    await this.drainCustomDomainSyncIntent(intent);
+    const remaining = await this.storage.list({
+      prefix: customDomainSyncAccountPrefix(accountID),
+      limit: 1,
+    });
+    return { complete: remaining.size === 0 };
+  }
+
+  async finishPlanCustomDomainConvergence(intent) {
+    const routes = await this.drainOneAccountCustomDomainSync(
+      intent.account_id,
+    );
+    if (!routes.complete) {
+      const continued = {
+        ...intent,
+        state: "custom_domain_converging",
+        failure_count: 0,
+        retry_at_ms: this.now().getTime() + CUSTOM_DOMAIN_SYNC_RETRY_MS,
+        updated_at: this.now().toISOString(),
+      };
+      await this.atomic([
+        [planIntentKey(intent.account_id), continued],
+        [planDueKey(continued), intent.account_id],
+      ], [planDueKey(intent)]);
+      await this.scheduleNextAlarm().catch(() => {});
+      return {
+        changed: 0,
+        complete: false,
+        registry_revision: (await this.storage.get(META_KEY)).registry_revision,
+        assignments: [],
+      };
+    }
+    await this.atomic([[planFenceKey(intent.account_id), {
+      account_id: intent.account_id,
+      committed_revision: intent.plan_revision,
+      committed_snapshot_hash: intent.plan_snapshot_hash,
+      feature_enabled: intent.feature_enabled,
+      alias_limit: intent.alias_limit,
+      activation_enabled: intent.activation_enabled,
+      updated_at: this.now().toISOString(),
+    }]], [planIntentKey(intent.account_id), planDueKey(intent)]);
+    await this.scheduleNextAlarm().catch(() => {});
+    return {
+      changed: 0,
+      complete: true,
+      registry_revision: (await this.storage.get(META_KEY)).registry_revision,
+      assignments: [],
     };
   }
 
@@ -5517,6 +6161,10 @@ export class DurableRealmEmailAliasRegistry {
           return;
         }
         try {
+          if (current.state === "custom_domain_converging") {
+            await this.applyPlanIntent(current);
+            return;
+          }
           if (current.state === "awaiting_cell" &&
               current.activation_enabled !== true &&
               current.operational_gate_complete !== true) {
@@ -5607,6 +6255,9 @@ export class DurableRealmEmailAliasRegistry {
 
   async applyLifecycleIntent(intent) {
     const phase = intent.phase ?? "claims";
+    if (phase === "custom_domain_converging") {
+      return this.finishLifecycleCustomDomainConvergence(intent);
+    }
     const claimPage = phase === "claims"
       ? await this.claimPageForAccount(
         intent.account_id,
@@ -5825,6 +6476,16 @@ export class DurableRealmEmailAliasRegistry {
         phase: "canonical",
         canonical_cursor: canonicalPage.next_cursor,
       };
+    } else if ((await this.storage.list({
+      prefix: customDomainSyncAccountPrefix(intent.account_id),
+      limit: 1,
+    })).size > 0) {
+      continued = {
+        ...intent,
+        phase: "custom_domain_converging",
+        claim_cursor: null,
+        canonical_cursor: null,
+      };
     } else {
       complete = true;
       deletes.push(lifecycleIntentKey(intent.account_id));
@@ -5860,6 +6521,54 @@ export class DurableRealmEmailAliasRegistry {
       changed,
       complete,
       registry_revision: mutation.meta.registry_revision,
+    };
+  }
+
+  async finishLifecycleCustomDomainConvergence(intent) {
+    const routes = await this.drainOneAccountCustomDomainSync(
+      intent.account_id,
+    );
+    if (!routes.complete) {
+      const continued = {
+        ...intent,
+        phase: "custom_domain_converging",
+        failure_count: 0,
+        retry_at_ms: this.now().getTime() + CUSTOM_DOMAIN_SYNC_RETRY_MS,
+        updated_at: this.now().toISOString(),
+      };
+      await this.atomic([
+        [lifecycleIntentKey(intent.account_id), continued],
+        [lifecycleDueKey(continued), intent.account_id],
+      ], [lifecycleDueKey(intent)]);
+      await this.scheduleNextAlarm().catch(() => {});
+      return {
+        schema_version: SCHEMA_VERSION,
+        account_id: intent.account_id,
+        operation_id: intent.operation_id,
+        epoch: intent.epoch,
+        action: intent.action,
+        changed: 0,
+        complete: false,
+        registry_revision: (await this.storage.get(META_KEY)).registry_revision,
+      };
+    }
+    await this.atomic([[lifecycleFenceKey(intent.account_id), {
+      account_id: intent.account_id,
+      operation_id: intent.operation_id,
+      epoch: intent.epoch,
+      action: intent.action,
+      completed_at: this.now().toISOString(),
+    }]], [lifecycleIntentKey(intent.account_id), lifecycleDueKey(intent)]);
+    await this.scheduleNextAlarm().catch(() => {});
+    return {
+      schema_version: SCHEMA_VERSION,
+      account_id: intent.account_id,
+      operation_id: intent.operation_id,
+      epoch: intent.epoch,
+      action: intent.action,
+      changed: 0,
+      complete: true,
+      registry_revision: (await this.storage.get(META_KEY)).registry_revision,
     };
   }
 
@@ -6085,6 +6794,17 @@ export class DurableRealmEmailAliasRegistry {
           changed: 0,
           stale: true,
           registry_revision: meta.registry_revision,
+        });
+      }
+      if (pendingRelation === 0 &&
+          pending.state === "custom_domain_converging") {
+        const result = await this.applyPlanIntent(pending);
+        return json({
+          schema_version: SCHEMA_VERSION,
+          account_id: input.account_id,
+          mode: input.mode,
+          stale: false,
+          ...result,
         });
       }
     }

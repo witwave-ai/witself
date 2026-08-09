@@ -4,6 +4,10 @@ import {
   realmEmailAliasEntitlement,
   realmEmailAliasRegistryStub,
 } from "./realm-email-alias-runtime.mjs";
+import {
+  agentEmailCustomDomainRoutingEnabled,
+  agentEmailDomainRegistryStub,
+} from "./agent-email-domain-runtime.mjs";
 
 const SCHEMA_VERSION = "witself.realm-email-alias.v1";
 const ACCOUNT_ID_PATTERN = "[A-Za-z0-9_-]{1,128}";
@@ -85,6 +89,20 @@ async function callRegistry(env, path, body) {
     });
   } catch {
     return registryUnavailable();
+  }
+}
+
+async function callCustomDomainRegistry(env, path, body) {
+  const stub = agentEmailDomainRegistryStub(env);
+  if (!stub) return errorResponse("agent email domain registry is unavailable", 503);
+  try {
+    return await stub.fetch(`https://agent-email-domain.internal${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    return errorResponse("agent email domain registry is unavailable", 503);
   }
 }
 
@@ -301,7 +319,17 @@ export async function handleRealmEmailRouteRequest(request, env, match) {
     return errorResponse("managed agent email domains are not configured", 503);
   }
   if (!domains.includes(domain)) {
-    return errorResponse("realm email route not found", 404);
+    // Customer-domain routing shares the same edge fallback and KV keyspace,
+    // but it has an independent exact-true gate. With the gate absent the
+    // request never reaches either authority object or a cell.
+    if (!agentEmailCustomDomainRoutingEnabled(env)) {
+      return errorResponse("realm email route not found", 404);
+    }
+    return callCustomDomainRegistry(env, "/route/get", {
+      domain,
+      realm_label: realmLabel,
+      routing_enabled: true,
+    });
   }
   return callRegistry(env, "/route/get", {
     domain,

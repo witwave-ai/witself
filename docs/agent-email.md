@@ -469,7 +469,8 @@ Activated aliases cannot move to another customer or realm. A rename is a new
 request followed by permanent retirement of the old alias. Account lifecycle
 operations suspend and republish alias routes under an exact durable fence.
 Managed realm close now uses a durable control-plane operation: it first proves
-that the realm has no live or pending aliases, prepares the exact cell
+that the realm has no live or pending aliases and no non-retired custom-domain
+route, then prepares the exact cell
 generation (`live` to `closing`), publishes the permanent canonical-route
 tombstone, and only then commits the cell soft-delete (`closing` to `retired`).
 The operation id and generation make each phase replay-safe, and the retired
@@ -569,11 +570,14 @@ deliver arbitrary new aliases. The canonical inventory is the independent
 backfill path for realms that have never performed an alias operation, but it
 does no work while its default-off inventory gate is unset.
 
-**Organization-owned inbound domains (dark lifecycle, 2026-08-08).** A
-customer-owned domain is an account-level resource and never replaces either a
-permanent Realm ID address or a managed realm alias. Its future address shape
-remains `agent-name.realm-email-alias@customer-domain`; retaining the realm
-label avoids making one account-owned apex an ambiguous cross-realm namespace.
+**Organization-owned inbound domains (dark lifecycle, 2026-08-08; dark routing
+foundation).** A customer-owned domain is an account-level resource
+and never replaces either a permanent Realm ID address or a managed realm alias.
+Its address shape is `agent-name.realm-email-alias@customer-domain`; retaining
+the already claimed realm alias avoids making one account-owned apex an
+ambiguous cross-realm namespace. A customer-domain route does not create,
+rename, or consume another realm-alias claim: it binds one verified domain
+allocation to one existing claim, its exact realm, and their shared account.
 
 The resolved plan feature is `agent_email_custom_domain` and its account-wide
 limit is `agent_email_custom_domains_per_account`. The Phase-B canonical
@@ -663,8 +667,9 @@ marks the ownership observation `stale`, changes availability to
 `suspended_verification`, and schedules an hourly retry; a resolver outage is
 recorded as a deferred observation and retried after 15 minutes without
 revoking the last authoritative result. A matching recheck restores verified
-availability. Verification records authority only: it does not publish MX,
-Cloudflare Email Routing, an edge route, a cell projection, or mail delivery.
+availability. The v0.0.238 ownership-verification release records authority
+only: it does not publish MX, Cloudflare Email Routing, an edge route, a cell
+projection, or mail delivery.
 If plan or lifecycle work is between durable pages, verification records
 `last_result="policy_converging"` and retries after 15 minutes rather than
 observing DNS against a mixed account policy.
@@ -734,15 +739,134 @@ First observations, evidence or ownership-state changes, restorations,
 conflicts, expiry, and every newly executed manual verification remain
 authority mutations and are audited and journaled. Recovery deliberately drops
 local refresh and work records, rebuilds the due queue from the last journaled
-request, and may perform one conservative repeat check; that repeat recreates
-the bounded refresh when the outcome is still unchanged. Stable scheduled
-checks therefore no longer grow the R2 stream, although genuinely changing DNS
-and manual checks can still consume audit capacity until admission closes.
+request for derived-state parity. The sealed drill object has no alarm and does
+not execute that queue. If a future separately reviewed activation protocol
+ever made restored state live, its first scheduled check would conservatively
+recreate the bounded refresh when the outcome was still unchanged; no such
+promotion path exists today. Stable scheduled checks therefore no longer grow
+the R2 stream, although genuinely changing DNS and manual checks can still
+consume audit capacity until admission closes.
 Keep the request and verification gates dark until the refresh and claim
 fences have passed a controlled canary, the capacity counter has been
 checkpointed and monitored in the live object, and exact plan replay has passed
 its canary. Provider route, projection, and delivery topology remains a
 separate activation prerequisite.
+
+The schema-88 slice adds only that dark routing foundation. It
+does not activate a provider route. Control-plane routing requires both
+`CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ENABLED=true` and exact account membership
+in `CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ACCOUNT_ALLOWLIST`; neither name is in
+committed release configuration. A non-managed-domain edge transaction has a
+third independent exact-`true` gate,
+`AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED`, which is also absent. The request,
+verification, routing, and delivery controls do not imply one another.
+
+After those two control-plane gates pass in a future reviewed canary, one route
+lookup proves all of the following before it can publish anything: the domain
+has one permanent verified allocation; the allocation and request are a
+consistent verified-or-retired authority under plan, lifecycle, and ownership
+policy; the realm-alias registry returns the exact claim for the same account
+and label; and the claim identifies one exact realm.
+
+The controller records the sparse relationship before its first external
+write. The custom-domain registry journals one permanent
+`route-binding:<domain-request-id>:<realm-alias-claim-id>` authority row, then
+the alias registry journals the corresponding permanent
+`custom-domain-subscription:<realm-alias-claim-id>` marker. Only after both
+registries acknowledge that handshake may the controller persist and apply a
+leaf route intent. These records describe only combinations that were actually
+materialized; the controller never constructs the potentially unbounded
+verified-domain by alias-claim cross product, and it never treats cell inventory
+as global membership authority. Neither record is removed when the route is
+suspended or retired, so later lifecycle work can still find and preserve the
+terminal tombstone.
+
+The cross-registry acknowledgement also closes the only crash window in that
+ordering. Once realm close starts, the alias registry refuses a first
+subscription for that realm. If the domain binding was journaled immediately
+before that fence, the controller can complete the now-retired,
+never-subscribed binding without I/O: absence of the subscription proves that
+no cell or KV write was allowed to begin.
+
+A domain request or allocation change journals one overwriteable
+`route-source-intent:<domain-request-id>` outbox. An alias claim change journals
+one overwriteable `custom-domain-sync:<realm-alias-claim-id>` outbox, but only
+when that claim has the permanent subscription marker. Derived account, realm,
+due, and reverse-binding indexes make both fan-outs bounded and rebuildable.
+The custom-domain registry pages the exact bindings, re-proves both source
+authorities for every leaf, applies the projection to the account's current
+cell, reads it back byte-for-byte, and only then publishes the edge projection.
+A lost enqueue, cell, readback, or KV acknowledgement is replayed. A newer
+source revision resets the bounded work instead of letting stale desired state
+win. Turning the activation gate off creates no subscription or alias outbox for
+an account that has never materialized a custom route; existing subscribed
+claims still drive suspension and retirement while the gate is dark.
+
+Direct domain and alias administration commits its source authority and durable
+outbox before returning, then converges the already-known leaves eventually.
+The normal freshness window is 300 seconds. Because the edge accepts an
+`updated_at` value up to 300 seconds ahead of its own clock, the formal stale
+route window is 600 seconds when that full accepted clock skew is present.
+Parent operations use a stronger contract: plan application and account
+lifecycle cannot install their final fences until their exact account outbox
+indexes are empty, and realm close cannot prepare the cell until every
+subscribed route in that realm is proven retired in both the cell and edge
+directory. Those barriers wait for positive completion; they do not infer
+completion from elapsed cache time or from merely accepting a child task.
+
+The sparse bindings, subscriptions, and source outboxes are journaled authority.
+Their reverse, account, realm, and due indexes are derived and rebuilt during
+empty-target recovery. Leaf `route-projection-intent` records and the bounded
+alias fan-out tasks are journal-local coordination state and recovery drops
+them. Only a source or alias-sync outbox that was genuinely pending at the
+replayed journal head regains its corresponding derived due entry. A completed
+permanent binding is rebuilt as authority plus its sparse reverse indexes; it
+does not create a recovery-due key, convergence obligation, or alarm merely
+because it exists. The sealed target does not drain recovered outboxes, perform
+cell or KV projection, serve routing traffic, or become eligible for automatic
+promotion. A future active-restore protocol would need a separately reviewed,
+explicit activation step; it is not part of this recovery contract.
+
+The cell stores the exact tuple of domain request, domain-allocation revision,
+domain-request state revision, realm-alias claim and revision, realm, account,
+domain, label, lifecycle state, and monotonic controller revision. Applied,
+retry-suspended, inactive-suspended, and retired rows are explicit; retired rows
+are permanent identity tombstones. An applied row requires the referenced
+realm-alias projection at the advertised revision and a live realm-email route.
+Realm close and account movement therefore treat any non-retired custom-domain
+route as live cell authority rather than an ignorable cache.
+
+Combined route policy is applied only while both authorities are applied. If
+either source is retired, the custom route is retired. Plan-only loss uses an
+`inactive` suspension (generic unknown recipient); lifecycle, stale ownership,
+or operational alias convergence uses `retry` (temporary failure), and `retry`
+wins when both dispositions are present. The independent account, realm, agent,
+and `agent_email_receive` checks still run inside the cell before storage.
+
+The edge reuses the existing schema-v1 route union and key
+`email:realm-route:v1:<domain>:<realm-label>`, adding
+`route_kind="custom_domain"` plus the exact domain request/allocation and realm
+alias claim/revision fences. The existing authenticated fallback is reused;
+there is no second lookup namespace. The edge adds no signed relay header. The
+cell derives `custom_domain` receipt provenance from the signed envelope
+recipient and its local route/alias rows, then stores both
+`recipient_custom_domain_request_id` and
+`recipient_realm_alias_claim_id`. Unsigned edge metadata can neither choose an
+account, realm, nor agent nor manufacture that provenance.
+
+Schema-88 account archives include the custom-domain route table before
+messages and retain both identifiers on every custom-domain receipt. Import
+validates the complete account/realm/alias/domain binding and never infers a
+route from an address. A schema-87 archive upgrades with an empty route stream
+and null custom-domain provenance. Downgrade to schema 87 is refused before
+mutation if any custom-domain route exists, including a retired tombstone, or
+if any custom-domain message exists. Roll application behavior forward or back
+while leaving schema 88 intact; never delete authority to force a downgrade.
+
+This foundation may be exercised only with the repository's fake Cloudflare
+bindings, synthetic SMTP transaction, and disposable database tests. It makes
+no DNS, MX, Cloudflare Email Routing, catch-all, Worker-route, or customer-zone
+mutation, and no live route or delivery gate may be enabled in this slice.
 
 Do not enable customer requests or DNS verification in this phase. Parallel,
 expiring challenges avoid unverified squatting, but activation still requires
@@ -772,11 +896,13 @@ witself-admin email-domain audit
 With the request and verification gates absent, the scheduled verifier is a
 bounded no-op and this dark slice performs no DNS lookup or write. Even with
 verification deliberately enabled for a future allowlisted canary, it still
-performs no Cloudflare zone or Email Routing mutation, MX activation,
-edge-directory publication, cell projection, mail acceptance, or
-outbound-domain configuration. Routing, customer request creation, ownership
-verification, and delivery require separate activation reviews; managed-domain
-activation never implicitly enables this lifecycle.
+performs no Cloudflare zone or Email Routing mutation, MX activation, or
+outbound-domain configuration. The dark routing code can create cell and
+edge projections only behind its two absent control-plane gates, and the Email
+Worker still tempfails every customer-owned domain before lookup while its
+separate delivery gate is absent. Routing, customer request creation, ownership
+verification, provider onboarding, and delivery require separate activation
+reviews; managed-domain activation never implicitly enables this lifecycle.
 
 **Agent local part (settled).** The agent-name-to-local-part rule must handle
 arbitrary input — the API accepts any non-empty string as an agent name; only

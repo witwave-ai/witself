@@ -1,3 +1,9 @@
+import {
+  buildRealmEmailAliasClaimProof,
+  realmEmailAliasClaimRouteFingerprint,
+  validateRealmEmailAliasClaimProof,
+} from "./agent-email-custom-domain-route-contract.mjs";
+
 const ALIAS_PATTERN = /^[a-z0-9](?:[a-z0-9-]{1,14}[a-z0-9])$/;
 const ACCOUNT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const REALM_ID_PATTERN = /^realm_[a-z2-7]{16}$/;
@@ -40,6 +46,8 @@ const AUTHORITY_PREFIXES = Object.freeze([
   "audit:",
   "canonical:",
   "claim:",
+  "custom-domain-subscription:",
+  "custom-domain-sync:",
   "idem:",
   "lifecycle-fence:",
   "lifecycle-intent:",
@@ -55,6 +63,7 @@ const AUTHORITY_PREFIXES = Object.freeze([
 ]);
 
 const DELETABLE_AUTHORITY_PREFIXES = Object.freeze([
+  "custom-domain-sync:",
   "lifecycle-intent:",
   "plan-intent:",
   "projection-intent:",
@@ -77,6 +86,9 @@ const DERIVED_PREFIXES = Object.freeze([
   "claim-usage-member:",
   "claim-usage-realm-member:",
   "claim-usage-realm:",
+  "custom-domain-subscription-realm:",
+  "custom-domain-sync-account:",
+  "custom-domain-sync-due:",
   "grace:",
   "internal-due:",
   "lifecycle-due:",
@@ -613,6 +625,81 @@ function assertAuthorityTransition(state, key, desired) {
     }
     return;
   }
+  if (key.startsWith("custom-domain-subscription:")) {
+    if (canonicalJSONString(previous) !== canonicalJSONString(desired)) {
+      journalFail("custom-domain alias subscription is immutable",
+        "realm_email_alias_recovery_invariant_failed");
+    }
+    return;
+  }
+  if (key.startsWith("custom-domain-sync:")) {
+    const previousProof = previous.claim_proof;
+    const desiredProof = desired.claim_proof;
+    const sameRevision = desiredProof?.realm_alias_revision ===
+      previousProof?.realm_alias_revision;
+    const newerRevision = desiredProof?.realm_alias_revision >
+      previousProof?.realm_alias_revision;
+    if (previous.created_at !== desired.created_at ||
+        previous.claim_proof?.realm_alias_claim_id !==
+          desired.claim_proof?.realm_alias_claim_id ||
+        previousProof?.account_id !== desiredProof?.account_id ||
+        previousProof?.realm_id !== desiredProof?.realm_id ||
+        previousProof?.realm_label !== desiredProof?.realm_label ||
+        desired.claim_proof?.realm_alias_revision <
+          previous.claim_proof?.realm_alias_revision ||
+        (sameRevision &&
+          (canonicalJSONString(previousProof) !==
+              canonicalJSONString(desiredProof) ||
+            previous.source_fingerprint !== desired.source_fingerprint ||
+            desired.retry_at_ms < previous.retry_at_ms)) ||
+        (newerRevision &&
+          (desired.phase !== "enqueue" || desired.failure_count !== 0)) ||
+        Date.parse(desired.updated_at) < Date.parse(previous.updated_at)) {
+      journalFail("custom-domain alias sync regressed",
+        "realm_email_alias_recovery_revision_regression");
+    }
+    return;
+  }
+  if (key.startsWith("plan-intent:")) {
+    const order = {
+      awaiting_cell: 1,
+      cell_committed: 2,
+      custom_domain_converging: 3,
+    };
+    const previousOrder = order[previous.state] ?? 0;
+    const desiredOrder = order[desired.state] ?? 0;
+    const sameRevision = previous.plan_revision === desired.plan_revision;
+    if (previous.account_id !== desired.account_id ||
+        desired.plan_revision < previous.plan_revision ||
+        previous.created_at !== desired.created_at ||
+        (sameRevision &&
+          (previous.plan_snapshot_hash !== desired.plan_snapshot_hash ||
+            previous.feature_enabled !== desired.feature_enabled ||
+            previous.alias_limit !== desired.alias_limit ||
+            previous.activation_enabled !== desired.activation_enabled ||
+            desiredOrder < previousOrder)) ||
+        Date.parse(desired.updated_at) < Date.parse(previous.updated_at)) {
+      journalFail("realm email alias plan intent regressed",
+        "realm_email_alias_recovery_revision_regression");
+    }
+    return;
+  }
+  if (key.startsWith("lifecycle-intent:")) {
+    const order = { claims: 1, canonical: 2, custom_domain_converging: 3 };
+    const previousOrder = order[previous.phase ?? "claims"] ?? 0;
+    const desiredOrder = order[desired.phase ?? "claims"] ?? 0;
+    if (previous.account_id !== desired.account_id ||
+        previous.operation_id !== desired.operation_id ||
+        previous.epoch !== desired.epoch ||
+        previous.action !== desired.action ||
+        previous.created_at !== desired.created_at ||
+        desiredOrder < previousOrder ||
+        Date.parse(desired.updated_at) < Date.parse(previous.updated_at)) {
+      journalFail("realm email alias lifecycle intent regressed",
+        "realm_email_alias_recovery_revision_regression");
+    }
+    return;
+  }
   if (key.startsWith("claim:")) {
     if (immutableFieldsChanged(previous, desired, [
       "claim_id", "alias", "domain", "skeleton", "account_id", "realm_id",
@@ -647,6 +734,26 @@ function assertAuthorityTransition(state, key, desired) {
     if (previous.state === "retired" && desired.state !== "retired") {
       journalFail("retired canonical route was resurrected",
         "realm_email_alias_recovery_tombstone_resurrection");
+    }
+    return;
+  }
+  if (key.startsWith("realm-close-intent:")) {
+    const order = {
+      scan_aliases: 1,
+      custom_domain_converging: 2,
+      prepare_cell: 3,
+      publish_retired: 4,
+      commit_cell: 5,
+    };
+    if (previous.account_id !== desired.account_id ||
+        previous.realm_id !== desired.realm_id ||
+        previous.idempotency_key !== desired.idempotency_key ||
+        previous.fingerprint !== desired.fingerprint ||
+        previous.created_at !== desired.created_at ||
+        (order[desired.phase] ?? 0) < (order[previous.phase] ?? 0) ||
+        Date.parse(desired.updated_at) < Date.parse(previous.updated_at)) {
+      journalFail("realm-close intent regressed",
+        "realm_email_alias_recovery_revision_regression");
     }
     return;
   }
@@ -858,6 +965,37 @@ function assertObject(value, message) {
   }
 }
 
+function recoveredClaimProof(claim) {
+  if (!claim?.assignment_kind || claim.customer_activation_intent === true ||
+      claim.internal_intent === true) return null;
+  const state = claim.retired_at
+    ? "retired"
+    : claim.lifecycle_suspended === true ||
+        claim.operational_gate_suspended === true ||
+        claim.admin_suspended === true || claim.plan_suspended === true
+    ? "suspended"
+    : "applied";
+  return buildRealmEmailAliasClaimProof({
+    account_id: claim.account_id,
+    realm_id: claim.realm_id,
+    realm_label: claim.alias,
+    realm_alias_claim_id: claim.claim_id,
+    realm_alias_revision: claim.assignment_revision,
+    state,
+    ...(state === "suspended"
+      ? {
+        suspension_disposition:
+          claim.plan_suspended === true &&
+              !claim.lifecycle_suspended &&
+              !claim.operational_gate_suspended && !claim.admin_suspended
+            ? "inactive"
+            : "retry",
+      }
+      : {}),
+    updated_at: claim.updated_at,
+  });
+}
+
 export function validateRealmEmailAliasRecoveredState(state, options = {}) {
   const source = toAuthorityStateMap(state);
   const meta = source.get("meta");
@@ -892,9 +1030,69 @@ export function validateRealmEmailAliasRecoveredState(state, options = {}) {
   const audits = new Map();
   const canonicals = new Map();
   const realmCloseFences = new Map();
+  const customDomainSubscriptions = new Map();
+  const customDomainSyncs = new Map();
   for (const [key, value] of source) {
     assertObject(value, `recovered authority value is invalid: ${key}`);
-    if (key.startsWith("claim:")) {
+    if (key.startsWith("custom-domain-subscription:")) {
+      const claimID = key.slice("custom-domain-subscription:".length);
+      exactKeys(value, new Set([
+        "schema_version", "account_id", "realm_id", "realm_label",
+        "realm_alias_claim_id", "created_at",
+      ]), "custom-domain alias subscription");
+      if (value.schema_version !==
+            "witself.realm-email-alias-custom-domain-subscription.v1" ||
+          !CLAIM_ID_PATTERN.test(claimID) ||
+          value.realm_alias_claim_id !== claimID ||
+          !ACCOUNT_ID_PATTERN.test(value.account_id ?? "") ||
+          !REALM_ID_PATTERN.test(value.realm_id ?? "") ||
+          !ALIAS_PATTERN.test(value.realm_label ?? "") ||
+          value.realm_label.includes("--") ||
+          CANONICAL_REALM_LABEL_PATTERN.test(value.realm_label)) {
+        journalFail("recovered custom-domain alias subscription is invalid",
+          "realm_email_alias_recovery_invariant_failed");
+      }
+      validateISODate(value.created_at,
+        "custom-domain alias subscription created_at");
+      customDomainSubscriptions.set(claimID, value);
+    } else if (key.startsWith("custom-domain-sync:")) {
+      const claimID = key.slice("custom-domain-sync:".length);
+      exactKeys(value, new Set([
+        "schema_version", "phase", "claim_proof", "source_fingerprint",
+        "failure_count", "retry_at_ms", "created_at", "updated_at",
+      ]), "custom-domain alias sync");
+      let proof;
+      try {
+        proof = validateRealmEmailAliasClaimProof(
+          value.claim_proof,
+          value.claim_proof?.account_id,
+          value.claim_proof?.realm_label,
+        );
+      } catch {
+        journalFail("recovered custom-domain alias sync proof is invalid",
+          "realm_email_alias_recovery_invariant_failed");
+      }
+      if (value.schema_version !==
+            "witself.realm-email-alias-custom-domain-sync.v1" ||
+          !CLAIM_ID_PATTERN.test(claimID) ||
+          proof.realm_alias_claim_id !== claimID ||
+          !["enqueue", "poll"].includes(value.phase) ||
+          value.source_fingerprint !==
+            realmEmailAliasClaimRouteFingerprint(proof) ||
+          !Number.isSafeInteger(value.failure_count) ||
+          value.failure_count < 0 ||
+          !Number.isSafeInteger(value.retry_at_ms) || value.retry_at_ms < 0) {
+        journalFail("recovered custom-domain alias sync is invalid",
+          "realm_email_alias_recovery_invariant_failed");
+      }
+      validateISODate(value.created_at, "custom-domain alias sync created_at");
+      validateISODate(value.updated_at, "custom-domain alias sync updated_at");
+      if (Date.parse(value.updated_at) < Date.parse(value.created_at)) {
+        journalFail("recovered custom-domain alias sync time regressed",
+          "realm_email_alias_recovery_revision_regression");
+      }
+      customDomainSyncs.set(claimID, value);
+    } else if (key.startsWith("claim:")) {
       const alias = key.slice("claim:".length);
       if (!ALIAS_PATTERN.test(alias) || alias.includes("--") ||
           CANONICAL_REALM_LABEL_PATTERN.test(alias) ||
@@ -993,6 +1191,63 @@ export function validateRealmEmailAliasRecoveredState(state, options = {}) {
           "realm_email_alias_recovery_invariant_failed");
       }
       canonicals.set(key, value);
+    } else if (key.startsWith("plan-intent:")) {
+      const accountID = key.slice("plan-intent:".length);
+      if (!ACCOUNT_ID_PATTERN.test(accountID) || value.account_id !== accountID ||
+          !Number.isSafeInteger(value.plan_revision) ||
+          value.plan_revision < 0 ||
+          !(value.plan_revision === 0
+            ? value.plan_snapshot_hash === ""
+            : SHA256_PATTERN.test(value.plan_snapshot_hash ?? "")) ||
+          typeof value.feature_enabled !== "boolean" ||
+          !(value.alias_limit === null ||
+            (Number.isSafeInteger(value.alias_limit) &&
+              value.alias_limit >= 0)) ||
+          typeof value.activation_enabled !== "boolean" ||
+          !["awaiting_cell", "cell_committed",
+            "custom_domain_converging"].includes(value.state) ||
+          !(value.claim_cursor === null ||
+            (typeof value.claim_cursor === "string" &&
+              value.claim_cursor.startsWith(`account-claim:${accountID}:`))) ||
+          (value.state === "custom_domain_converging" &&
+            value.claim_cursor !== null) ||
+          !Number.isSafeInteger(value.retry_at_ms) || value.retry_at_ms < 0 ||
+          (value.failure_count !== undefined &&
+            (!Number.isSafeInteger(value.failure_count) ||
+              value.failure_count < 0))) {
+        journalFail("recovered realm email alias plan intent is invalid",
+          "realm_email_alias_recovery_invariant_failed");
+      }
+      validateISODate(value.created_at, "alias plan intent created_at");
+      validateISODate(value.updated_at, "alias plan intent updated_at");
+    } else if (key.startsWith("lifecycle-intent:")) {
+      const accountID = key.slice("lifecycle-intent:".length);
+      const phase = value.phase ?? "claims";
+      if (!ACCOUNT_ID_PATTERN.test(accountID) || value.account_id !== accountID ||
+          !OPERATION_ID_PATTERN.test(value.operation_id ?? "") ||
+          !Number.isSafeInteger(value.epoch) || value.epoch < 0 ||
+          !["suspend", "republish", "retire"].includes(value.action) ||
+          typeof value.activation_enabled !== "boolean" ||
+          !["claims", "canonical", "custom_domain_converging"]
+            .includes(phase) ||
+          !(value.claim_cursor === null ||
+            (typeof value.claim_cursor === "string" &&
+              value.claim_cursor.startsWith(`account-claim:${accountID}:`))) ||
+          !(value.canonical_cursor === null ||
+            (typeof value.canonical_cursor === "string" &&
+              value.canonical_cursor.startsWith(
+                `account-canonical:${accountID}:`,
+              ))) ||
+          (phase === "custom_domain_converging" &&
+            (value.claim_cursor !== null || value.canonical_cursor !== null)) ||
+          !Number.isSafeInteger(value.retry_at_ms) || value.retry_at_ms < 0 ||
+          !Number.isSafeInteger(value.failure_count) ||
+          value.failure_count < 0) {
+        journalFail("recovered realm email alias lifecycle intent is invalid",
+          "realm_email_alias_recovery_invariant_failed");
+      }
+      validateISODate(value.created_at, "alias lifecycle intent created_at");
+      validateISODate(value.updated_at, "alias lifecycle intent updated_at");
     } else if (key.startsWith("realm-close-intent:") ||
         key.startsWith("realm-close-fence:")) {
       const prefix = key.startsWith("realm-close-intent:")
@@ -1003,8 +1258,15 @@ export function validateRealmEmailAliasRecoveredState(state, options = {}) {
           !REALM_ID_PATTERN.test(parts[1]) || value.account_id !== parts[0] ||
           value.realm_id !== parts[1] ||
           (prefix === "realm-close-intent:" &&
-            (!["scan_aliases", "prepare_cell", "publish_retired", "commit_cell"]
+            (!["scan_aliases", "custom_domain_converging", "prepare_cell",
+              "publish_retired", "commit_cell"]
               .includes(value.phase) || !validDomain(value.domain) ||
+              (value.custom_domain_cursor !== undefined &&
+                value.custom_domain_cursor !== null &&
+                (typeof value.custom_domain_cursor !== "string" ||
+                  !value.custom_domain_cursor.startsWith(
+                    `custom-domain-subscription-realm:${parts[0]}:${parts[1]}:`,
+                  ))) ||
               (value.domains !== undefined &&
                 !validRealmCloseDomains(value.domains, value.domain)) ||
               (value.publish_domain_index !== undefined &&
@@ -1025,6 +1287,38 @@ export function validateRealmEmailAliasRecoveredState(state, options = {}) {
       if (prefix === "realm-close-fence:") {
         realmCloseFences.set(`${parts[0]}:${parts[1]}`, value);
       }
+    }
+  }
+
+  for (const [claimID, subscription] of customDomainSubscriptions) {
+    const claim = claimsByID.get(claimID);
+    if (!claim || claim.account_id !== subscription.account_id ||
+        claim.realm_id !== subscription.realm_id ||
+        claim.alias !== subscription.realm_label || !claim.assignment_kind) {
+      journalFail("recovered custom-domain alias subscription is orphaned",
+        "realm_email_alias_recovery_collision");
+    }
+  }
+  for (const [claimID, sync] of customDomainSyncs) {
+    const subscription = customDomainSubscriptions.get(claimID);
+    const claim = claimsByID.get(claimID);
+    let proof = null;
+    try {
+      proof = recoveredClaimProof(claim);
+    } catch {
+      // The graph-level failure below is intentionally uniform and does not
+      // expose claim data through recovery diagnostics.
+    }
+    if (!subscription || !proof ||
+        proof.account_id !== sync.claim_proof.account_id ||
+        proof.realm_id !== sync.claim_proof.realm_id ||
+        proof.realm_label !== sync.claim_proof.realm_label ||
+        proof.realm_alias_claim_id !==
+          sync.claim_proof.realm_alias_claim_id ||
+        realmEmailAliasClaimRouteFingerprint(proof) !==
+          sync.source_fingerprint) {
+      journalFail("recovered custom-domain alias sync is orphaned",
+        "realm_email_alias_recovery_collision");
     }
   }
 
@@ -1211,7 +1505,24 @@ export function rebuildRealmEmailAliasDerivedState(state, options = {}) {
 
   for (const [key, value] of [...source].sort(([left], [right]) =>
     left.localeCompare(right))) {
-    if (key.startsWith("claim:")) {
+    if (key.startsWith("custom-domain-subscription:")) {
+      derived.set(
+        `custom-domain-subscription-realm:${value.account_id}:` +
+          `${value.realm_id}:${value.realm_alias_claim_id}`,
+        value.realm_label,
+      );
+    } else if (key.startsWith("custom-domain-sync:")) {
+      derived.set(
+        `custom-domain-sync-account:${value.claim_proof.account_id}:` +
+          value.claim_proof.realm_alias_claim_id,
+        key,
+      );
+      derived.set(
+        `custom-domain-sync-due:${dueSegment(value.retry_at_ms, retryAt)}:` +
+          value.claim_proof.realm_alias_claim_id,
+        value.claim_proof.realm_alias_claim_id,
+      );
+    } else if (key.startsWith("claim:")) {
       derived.set(`claim-skeleton:${value.skeleton}`, value.alias);
       derived.set(
         `account-claim:${value.account_id}:${value.realm_id}:` +
