@@ -12,6 +12,10 @@ import {
 } from "../src/directory.mjs";
 import { PILOT_MAXIMUM_RAW_BYTES } from "../src/relay.mjs";
 import { EDGE_METRICS_SCHEMA, ROUTE_LOOKUP_METRICS_SCHEMA } from "../src/metrics.mjs";
+import {
+  ROUTE_PUBLIC_KEY_ENV,
+  signTestRouteProjection,
+} from "./route-signature-fixture.mjs";
 
 const vector = JSON.parse(await readFile(new URL("./golden-vector.json", import.meta.url), "utf8"));
 const example = JSON.parse(await readFile(new URL("../pilot.example.json", import.meta.url), "utf8"));
@@ -35,7 +39,7 @@ function routeLookupPoints(points) {
 }
 
 function routeProjection(realmLabel, overrides = {}) {
-  return {
+  const projection = {
     schema_version: 1,
     domain: primaryDomain,
     realm_label: realmLabel,
@@ -49,6 +53,11 @@ function routeProjection(realmLabel, overrides = {}) {
     ingest_url: example.ingest_url,
     ...overrides,
   };
+  if (projection.state !== "applied") {
+    delete projection.cell_audience;
+    delete projection.ingest_url;
+  }
+  return signTestRouteProjection(projection);
 }
 
 function customRouteProjection(overrides = {}) {
@@ -75,6 +84,7 @@ function dynamicEnv(routes, metrics = null, extra = {}) {
     AGENT_EMAIL_LEGACY_DOMAINS: example.domain,
     RELAY_KEY_ID: vector.metadata.key_id,
     RELAY_ED25519_PRIVATE_KEY: vector.pkcs8_base64,
+    AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS: ROUTE_PUBLIC_KEY_ENV,
     REALM_EMAIL_ALIAS_DELIVERY_ENABLED: "true",
     REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "true",
     REALM_ROUTE_COLD_MISS_LIMITER: allowLimiter,
@@ -104,6 +114,8 @@ function env(enabled = true, includeRecipient = true, metrics = null) {
   return {
     AGENT_EMAIL_DOMAIN: primaryDomain,
     AGENT_EMAIL_LEGACY_DOMAINS: example.domain,
+    LEGACY_PILOT_TRUSTED_INGEST_URL: example.ingest_url,
+    LEGACY_PILOT_TRUSTED_CELL_AUDIENCE: example.cell_audience,
     RELAY_KEY_ID: vector.metadata.key_id,
     RELAY_ED25519_PRIVATE_KEY: vector.pkcs8_base64,
     EMAIL_DIRECTORY: {
@@ -293,6 +305,60 @@ test("disabled pilot and transport failures use one sanitized transient error", 
   await assert.rejects(() => handleEmail(message(), env(), { fetch: async () => { throw new Error("secret upstream"); } }), {
     message: "agent email relay temporarily unavailable",
   });
+});
+
+test("legacy pilot directory cannot supply or change its relay destination", async () => {
+  for (const mode of ["anchors_absent", "directory_poisoned"]) {
+    const current = env();
+    const originalGet = current.EMAIL_DIRECTORY.get;
+    let directoryReads = 0;
+    let rawReads = 0;
+    let fetchCalls = 0;
+    if (mode === "anchors_absent") {
+      delete current.LEGACY_PILOT_TRUSTED_INGEST_URL;
+      delete current.LEGACY_PILOT_TRUSTED_CELL_AUDIENCE;
+    } else {
+      current.EMAIL_DIRECTORY.get = async (key, type) => {
+        directoryReads++;
+        if (key === CONFIG_KEY) {
+          return {
+            ...runtimeConfig(example, true),
+            ingest_url: "https://attacker.example/v1/collect",
+          };
+        }
+        return originalGet(key, type);
+      };
+    }
+    if (mode === "anchors_absent") {
+      current.EMAIL_DIRECTORY.get = async (...args) => {
+        directoryReads++;
+        return originalGet(...args);
+      };
+    }
+    const mail = message();
+    Object.defineProperty(mail, "raw", {
+      get() {
+        rawReads++;
+        throw new Error("retired unsigned pilot route must not reach raw MIME");
+      },
+    });
+
+    await assert.rejects(
+      () => handleEmail(mail, current, {
+        fetch: async () => {
+          fetchCalls++;
+          throw new Error("retired unsigned pilot route must not relay");
+        },
+      }),
+      { message: "agent email relay temporarily unavailable" },
+      mode,
+    );
+
+    assert.equal(directoryReads, mode === "anchors_absent" ? 0 : 1, mode);
+    assert.equal(rawReads, 0, mode);
+    assert.equal(fetchCalls, 0, mode);
+    assert.deepEqual(mail.rejected, [], mode);
+  }
 });
 
 test("unenrolled and oversized messages reject before relay", async () => {
@@ -540,6 +606,60 @@ test("custom-domain delivery gate is exact-true before lookup, limiters, and raw
   }
 });
 
+test("tampered KV and control-plane routes cannot read raw MIME or redirect delivery", async () => {
+  const poisonedURL = "https://attacker.example/v1/collect";
+  const signed = routeProjection(aliasLabel);
+  const tampered = { ...signed, ingest_url: poisonedURL };
+
+  for (const source of ["kv", "control_plane"]) {
+    let rawReads = 0;
+    let controlPlaneCalls = 0;
+    let relayCalls = 0;
+    const mail = message({ to: aliasAddress });
+    Object.defineProperty(mail, "raw", {
+      get() {
+        rawReads++;
+        throw new Error("untrusted route authority must not reach raw MIME");
+      },
+    });
+    const currentEnv = source === "kv"
+      ? dynamicEnv(
+        { [aliasLabel]: tampered },
+        null,
+        {
+          CONTROL_PLANE_URL: "https://control.example/",
+          CONTROL_PLANE_EDGE_TOKEN: "edge-token-1234567890",
+        },
+      )
+      : coldRouteEnv();
+
+    await assert.rejects(
+      () => handleEmail(mail, currentEnv, {
+        now: () => vectorNowMS,
+        routeLookupState: createRouteLookupState(),
+        fetch: async (input) => {
+          if (input instanceof Request) {
+            controlPlaneCalls++;
+            return source === "kv"
+              ? new Response(null, { status: 404 })
+              : Response.json(tampered);
+          }
+          relayCalls++;
+          assert.notEqual(input, poisonedURL);
+          return new Response('{"verdict":"accepted"}', { status: 200 });
+        },
+      }),
+      { message: "agent email relay temporarily unavailable" },
+      source,
+    );
+
+    assert.equal(controlPlaneCalls, 1, source);
+    assert.equal(relayCalls, 0, source);
+    assert.equal(rawReads, 0, source);
+    assert.deepEqual(mail.rejected, [], source);
+  }
+});
+
 test("exact custom-domain gate routes only a fresh custom-domain projection", async () => {
   const points = [];
   const keys = [];
@@ -664,6 +784,16 @@ test("custom-domain lookup revalidates control-plane route kind", async () => {
 test("malformed, stale, suspended, and retired custom-domain projections fail closed", async () => {
   const cases = [
     {
+      name: "tampered destination",
+      route: (() => {
+        const value = customRouteProjection();
+        value.ingest_url = "https://attacker.example/ingest";
+        return value;
+      })(),
+      transient: true,
+      outcome: "tempfail_route_lookup",
+    },
+    {
       name: "malformed",
       route: (() => {
         const value = customRouteProjection();
@@ -689,26 +819,16 @@ test("malformed, stale, suspended, and retired custom-domain projections fail cl
     },
     {
       name: "suspended",
-      route: (() => {
-        const value = customRouteProjection({
-          state: "suspended",
-          suspension_disposition: "retry",
-        });
-        delete value.cell_audience;
-        delete value.ingest_url;
-        return value;
-      })(),
+      route: customRouteProjection({
+        state: "suspended",
+        suspension_disposition: "retry",
+      }),
       transient: true,
       outcome: "tempfail_suspended_route",
     },
     {
       name: "retired",
-      route: (() => {
-        const value = customRouteProjection({ state: "retired" });
-        delete value.cell_audience;
-        delete value.ingest_url;
-        return value;
-      })(),
+      route: customRouteProjection({ state: "retired" }),
       transient: false,
       outcome: "rejected_inactive_route",
     },
@@ -830,10 +950,10 @@ test("suspended and retired dynamic routes fail closed without reaching a cell",
     ["suspended", "tempfail_suspended_route", []],
     ["retired", "rejected_inactive_route", ["recipient unavailable"]],
   ]) {
-    const value = routeProjection(aliasLabel, { state });
-    if (state === "suspended") value.suspension_disposition = "retry";
-    delete value.cell_audience;
-    delete value.ingest_url;
+    const value = routeProjection(aliasLabel, {
+      state,
+      ...(state === "suspended" ? { suspension_disposition: "retry" } : {}),
+    });
     const points = [];
     let fetched = false;
     const mail = message({ to: aliasAddress });
@@ -865,8 +985,6 @@ test("plan-inactive suspended routes reject without an unbounded SMTP retry loop
     state: "suspended",
     suspension_disposition: "inactive",
   });
-  delete value.cell_audience;
-  delete value.ingest_url;
   const points = [];
   const mail = message({ to: aliasAddress });
   await handleEmail(

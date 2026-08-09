@@ -5,6 +5,12 @@
 {
   "name": "witself-agent-email-pilot",
   "main": "src/index.js",
+  "secrets": {
+    "required": [
+      "CONTROL_PLANE_EDGE_TOKEN",
+      "RELAY_ED25519_PRIVATE_KEY"
+    ]
+  },
   "compatibility_date": "2026-07-21",
   "compatibility_flags": ["global_fetch_strictly_public"],
   "workers_dev": false,
@@ -44,6 +50,10 @@
     "AGENT_EMAIL_LEGACY_DOMAINS": "agent-mail.witwave.ai",
     "RELAY_KEY_ID": "__RELAY_KEY_ID__",
     "CONTROL_PLANE_URL": "__CONTROL_PLANE_URL__",
+    "AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS": __AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS__,
+    "WITSELF_EDGE_RELEASE_VERSION": "__WITSELF_EDGE_RELEASE_VERSION__",
+    "WITSELF_EDGE_RELEASE_COMMIT": "__WITSELF_EDGE_RELEASE_COMMIT__",
+    "WITSELF_EDGE_RELEASE_DATE": "__WITSELF_EDGE_RELEASE_DATE__",
     "REALM_EMAIL_ALIAS_DELIVERY_ENABLED": "__REALM_EMAIL_ALIAS_DELIVERY_ENABLED__",
     "REALM_EMAIL_CANONICAL_DELIVERY_ENABLED": "__REALM_EMAIL_CANONICAL_DELIVERY_ENABLED__"
   },

@@ -509,6 +509,14 @@ the separate verification gate passes. Also keep every managed-domain
 canonical/alias activation and delivery gate absent or exactly `false`.
 Installing the distinct recovery secret enables none of these controls.
 
+That managed-domain requirement records the original v0.0.238 journal-only
+acceptance snapshot; it is not an instruction to remove an established alias
+authority workflow during later signed-route releases. The current coordinated
+readiness contract permits
+`CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED` to remain present while both edge
+managed-delivery flags are exactly `false` and both canonical controls remain
+absent.
+
 For a fresh unjournaled registry, also keep
 `CP_AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_ENABLED` absent until bootstrap
 establishes a valid head. For an already bootstrapped production registry,
@@ -566,7 +574,8 @@ accepted separately.
 
 This engineering slice is not a production activation. It adds the cell
 table/API, permanent sparse authority, durable source outboxes, a journal-local
-leaf route intent, the schema-v1 edge union variant, and receipt provenance for
+leaf route intent, the schema-v1 unsigned inner route union carried by the
+signed schema-v2 projection, and receipt provenance for
 `agent.realm-alias@customer-domain`. The control-plane and edge code may be
 deployed dark, but do not deploy schema 88 to a serving cell, enable a live
 route, send a real canary, or change DNS, MX, Cloudflare Email Routing, a
@@ -586,7 +595,9 @@ surrounding whitespace; the edge control must be the exact lowercase string
 receive-entitlement state.
 
 The control-plane deployment guard now rejects any of its six custom-domain
-secret names. Verify only secret names, never values:
+secret names plus both canonical inventory/delivery controls. It intentionally
+permits the existing alias-activation authority secret. Verify only secret
+names, never values:
 
 ```sh
 CP_DIR="${WITSELF_RELEASE_CHECKOUT:?set clean release checkout}/infra/cloudflare/control-plane"
@@ -622,10 +633,14 @@ Use repository fakes and a disposable test database to prove this exact order:
 5. It re-proves both source authorities, then publishes
    `email:realm-route:v1:<domain>:<realm-label>` with
    `route_kind=custom_domain` and the four request/allocation and
-   claim/revision fences.
-6. The fake edge accepts only that fresh variant when its test-only gate is
-   exact true. The fake cell derives both receipt ids from the existing signed
-   envelope and local route rows; no new relay header is present.
+   claim/revision fences. Before either the control-plane response or KV write,
+   it signs the complete scalar projection as schema version 2 with the active
+   route-authority key.
+6. The fake edge accepts only a fresh, trusted schema-version-2 signature and
+   then the exact custom-domain variant when its test-only gate is exact true.
+   Signature verification must finish before raw MIME is read. The fake cell
+   derives both receipt ids from the existing signed envelope and local route
+   rows; no new relay header is present.
 7. Lost subscription/cell/KV acknowledgements replay durable work, stale authority
    prevents KV publication, and suspended/retired rows fail closed.
 
@@ -655,6 +670,106 @@ Passing these tests makes the branch reviewable; it does not authorize a cell,
 control-plane, or edge rollout. Provider onboarding, DNS/MX/Email Routing,
 live route publication, live delivery, routing-account selection, and a real
 canary remain separate human-assisted work.
+
+For any dark deployment containing signed route projections, require the
+control-plane plain variable `AGENT_EMAIL_ROUTE_SIGNING_KEY_ID`, its separately
+stored `AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY` secret, and an email-edge
+`AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS` keyring containing that exact id. Inspect
+secret names only; never print the private key. Keep canonical, alias, and
+custom-domain delivery dark across the mixed-version interval. The control
+plane must never publish an unsigned fallback: key configuration, import, or
+signing failure is retryable `503 agent_email_route_signing_unavailable`, while
+KV failure remains 502. The edge treats unsigned, unknown-key, malformed, and
+modified projections as unusable and tempfails when no authenticated fallback
+can replace them.
+
+Provision the signer and shared fallback token only with the coordinated
+ceremony. From one clean exact release tag, render both generated configs first
+with edge alias/canonical delivery exactly `false`, canonical controls absent,
+and all custom-domain controls absent. The existing
+`CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED` authority workflow may remain active;
+it is not a mail-delivery gate. Then run from
+`infra/cloudflare/agent-email`:
+
+```sh
+npm run provision:route-signing-secrets -- \
+  --agent AGENT \
+  --route-secret ROUTE_SECRET \
+  --route-private-field PRIVATE_FIELD \
+  --route-public-field PUBLIC_FIELD \
+  --fallback-secret FALLBACK_SECRET \
+  --fallback-field TOKEN_FIELD \
+  --receipt /absolute/private/path/agent-email-secret-receipt.json
+```
+
+This command requires two existing Workers and the existing edge relay secret.
+It preflights both live deployments and secret-name inventories, validates the
+Witself reveal envelopes, proves the private/public Ed25519 keypair, and sends
+values to Wrangler only over stdin with logs and metrics disabled. It installs
+the route private key on the control plane and one exact fallback token on both
+Workers, re-inspects the resulting secret bindings, and creates a value-free
+mode-`0600` receipt without overwriting a prior path. If a sequential token put
+fails, keep every delivery gate dark, correct the cause, and rerun. Do not use
+independent manual secret puts for this setup; binding presence cannot prove
+that separately entered token values match. A first-ever Worker bootstrap is a
+different, explicitly reviewed `--secrets-file` procedure.
+
+Every secret update creates a successor without the reviewed release
+annotations. After the ceremony, deploy the unchanged exact tag to the edge
+and then the control plane. Only then run readiness. Preserve the ceremony
+receipt and both final deployment attestations together; the receipt proves
+same-value upload while readiness proves final binding presence and release
+identity.
+
+After both exact tagged Workers are deployed, but before any delivery gate or
+provider route is changed, run the coordinated value-free attestation from the
+agent-email directory:
+
+```sh
+npm run verify:route-signing-readiness
+```
+
+It follows the control-plane and agent-email production deployments through
+Wrangler JSON to one exact 100-percent version each. Require `outcome=verified`,
+one shared immutable release identity, every `dark` field true, the active
+signer id among `trusted_key_ids`, and every secret-binding presence field
+true. The output intentionally omits key bytes and secret values. A secret-only
+version does not retain the reviewed release annotations and therefore does not
+pass this coordinated check; redeploy the same exact tagged release after any
+such secret update. This attests matching configuration and binding presence,
+not secret values. The coordinated ceremony receipt proves that the uploaded
+private key derives the configured public key and that one exact fallback token
+was sent to both Workers. Neither receipt proves live provider execution; prove
+that only with the separately authorized signed-route canary while all live
+delivery gates remain dark.
+
+For an email-edge code rollback, create and review a two-phase fenced plan;
+never deploy an arbitrary historical version directly:
+
+```sh
+cd infra/cloudflare/agent-email
+npm run rollback -- \
+  --candidate-version 01234567-89ab-4cde-8f01-23456789abcd \
+  --output /absolute/private/path/agent-email-rollback.json
+npm run rollback -- \
+  --apply \
+  --plan /absolute/private/path/agent-email-rollback.json \
+  --plan-sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+```
+
+The first command creates a new mode-`0600` file and refuses overwrite. Review
+the exact current/candidate versions, invariant checks, contract digest, and
+`apply_fence.sha256`; the second command must repeat that exact fence. Apply is
+interactive because Cloudflare versions carry secret state. Wrangler may ask
+whether an older secret value should be restored; never accept an unexpected
+secret difference. The tool rechecks the current deployment and candidate
+contract before mutation, does not pass an automatic-confirmation flag, and
+verifies the selected version at 100 percent afterward.
+
+The first signed-route release cannot roll back to the preceding unsigned
+email-edge version: its binding and signature contract is incompatible, so the
+planner rejects it. Leave every delivery gate dark and forward-fix until an
+older signed release with the exact same operational contract exists.
 
 ### Dark lifecycle and ownership-verification deployment
 

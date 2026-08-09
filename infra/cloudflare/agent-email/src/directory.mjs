@@ -1,3 +1,7 @@
+import {
+  verifyAgentEmailRouteProjectionSignature,
+} from "./route-signature.mjs";
+
 export const CONFIG_KEY = "pilot:config:v1";
 export const RECIPIENT_PREFIX = "pilot:recipient:v1:";
 export const DIRECTORY_SCHEMA_VERSION = 1;
@@ -242,6 +246,28 @@ export function validateRealmRouteProjection(value, expectedDomain, expectedReal
     route.ingest_url = validateIngestURL(value.ingest_url);
   }
   return route;
+}
+
+// A route supplies the HTTPS destination that receives raw message content.
+// Verify control-plane authority before any caller may use that destination;
+// schema and cache freshness checks alone cannot make a KV row trustworthy.
+export async function verifyRealmRouteProjection(
+  value,
+  expectedDomain,
+  expectedRealmLabel,
+  env = {},
+  cryptoAPI = crypto,
+) {
+  const unsigned = await verifyAgentEmailRouteProjectionSignature(
+    value,
+    env,
+    cryptoAPI,
+  );
+  return validateRealmRouteProjection(
+    unsigned,
+    expectedDomain,
+    expectedRealmLabel,
+  );
 }
 
 export function realmRouteProjectionIsFresh(route, nowMS = Date.now()) {

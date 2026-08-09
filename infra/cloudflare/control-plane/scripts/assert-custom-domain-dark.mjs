@@ -14,6 +14,16 @@ export const CUSTOM_DOMAIN_DARK_SECRET_NAMES = Object.freeze([
   "CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ACCOUNT_ALLOWLIST",
 ]);
 
+export const CANONICAL_EMAIL_DARK_SECRET_NAMES = Object.freeze([
+  "CP_REALM_EMAIL_CANONICAL_INVENTORY_ENABLED",
+  "CP_REALM_EMAIL_CANONICAL_DELIVERY_ENABLED",
+]);
+
+export const EMAIL_DARK_SECRET_NAMES = Object.freeze([
+  ...CANONICAL_EMAIL_DARK_SECRET_NAMES,
+  ...CUSTOM_DOMAIN_DARK_SECRET_NAMES,
+]);
+
 export function assertCustomDomainSecretsDark(secrets) {
   if (!Array.isArray(secrets)) {
     throw new Error("Worker secret inventory must be a JSON array");
@@ -27,10 +37,10 @@ export function assertCustomDomainSecretsDark(secrets) {
     }
     names.add(secret.name);
   }
-  const present = CUSTOM_DOMAIN_DARK_SECRET_NAMES.filter((name) => names.has(name));
+  const present = EMAIL_DARK_SECRET_NAMES.filter((name) => names.has(name));
   if (present.length !== 0) {
     throw new Error(
-      `dark custom-domain deployment refused: activation secret present (${present.join(", ")})`,
+      `dark agent-email deployment refused: activation secret present (${present.join(", ")})`,
     );
   }
 }
@@ -66,7 +76,9 @@ function main() {
     throw new Error("Worker secret inventory was not valid JSON");
   }
   assertCustomDomainSecretsDark(secrets);
-  process.stdout.write("verified custom-domain activation secrets are absent\n");
+  process.stdout.write(
+    "verified canonical and custom-domain activation secrets are absent\n",
+  );
 }
 
 if (process.argv[1] != null &&

@@ -6,7 +6,7 @@
     "activate:plan-lifecycle": "node scripts/activate-plan-lifecycle.mjs",
     "assert:custom-domain-dark": "node scripts/assert-custom-domain-dark.mjs",
     "config": "node scripts/render-wrangler.mjs",
-    "deploy": "npm run config && npm run assert:custom-domain-dark && wrangler deploy --config wrangler.generated.jsonc && npm run assert:custom-domain-dark && npm run verify",
+    "deploy": "npm run config && npm run assert:custom-domain-dark && node scripts/deploy-release.mjs && npm run assert:custom-domain-dark && npm run verify",
     "deploy:plans": "npm run config && wrangler deploy --config ../../../web/plans/wrangler.toml",
     "dev": "wrangler dev --config wrangler.template.jsonc",
     "secret:put": "npm run config && wrangler secret put --config wrangler.generated.jsonc",
@@ -17,6 +17,6 @@
     "@cloudflare/containers": "^0.0.28"
   },
   "devDependencies": {
-    "wrangler": "4.114.0"
+    "wrangler": "4.120.0"
   }
 }

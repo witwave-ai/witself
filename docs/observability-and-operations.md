@@ -277,18 +277,23 @@ Its fixed schema marker is `witself.agent-email.edge.v1`; `outcome` is one of
 duration milliseconds, raw byte count, and response status. No address,
 account, realm, agent, sender, subject, message identifier, route label,
 digest, signature, token, content, or error text is recorded. Analytics
-failure never changes the SMTP disposition.
+failure never changes the SMTP disposition. When the renderer-issued release
+version, full commit, and commit date are all valid, they are appended as
+deployment-attribution blobs. They are never sampling indexes or summary group
+dimensions, and a missing or malformed triple is omitted in full.
 
 The same dataset carries a second fixed schema marker,
 `witself.agent-email.route-lookup.v1`, for dependency shielding and route-cache
 convergence. Its `result` is one of `kv_fresh`, `legacy`, `cp_found`,
 `cp_not_found`, `miss_suppressed`, `cold_limited`, `known_limited`, `kv_error`,
 or `cp_error`; `evidence` is `none`, `known`, or `uncertain`; and `route_kind`
-is `canonical`, `alias`, `pilot`, or `unknown`. Numeric fields are limited to
-count, duration milliseconds, and response status. The event never contains an
-address, domain, realm label, account, realm, agent, route digest, limiter key,
-or error text. Each recipient lookup emits exactly one terminal route event. If
-a failed or corrupt KV read continues to the control plane,
+is `canonical`, `alias`, `custom_domain`, `pilot`, or `unknown`. Numeric fields
+are limited to count, duration milliseconds, and response status. The same
+optional release-attribution triple is appended only as metadata, after the
+fixed route fields. The event never contains an address, domain, realm label,
+account, realm, agent, route digest, limiter key, or error text. Each recipient
+lookup emits exactly one terminal route event. If a failed or corrupt KV read
+continues to the control plane,
 `evidence=uncertain` carries that context on the terminal control-plane result;
 there is no second early `kv_error` event. Strict fixed in-isolate windows admit
 at most 10 cold and 100 known-or-uncertain leader lookups per 10 seconds before
@@ -296,6 +301,13 @@ the fixed-key, per-location Cloudflare shield. Singleflight followers consume
 no additional admission. Cloudflare's shared rate counters are permissive and
 eventually consistent, so neither layer is exact account-level accounting or a
 customer quota.
+
+From `infra/cloudflare/agent-email`, `npm run metrics -- summary [minutes]`
+queries both schemas for the same bounded window. The additive v2 CLI envelope
+keeps the final-verdict response in `result` and returns the value-free route
+breakdown in `route_lookup_result`, grouped only by `result`, `evidence`, and
+`route_kind`. This makes `cp_error` on `custom_domain` routes directly visible
+without exposing a customer domain or tenant identifier.
 | `witself_limit_decisions_total` | Rate limit, quota, and plan-limit decisions by dimension and action. |
 | `witself_storage_operations_total` | Storage operations by backend, operation, and result. |
 | `witself_storage_operation_duration_seconds` | Storage operation latency histogram. |

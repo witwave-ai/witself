@@ -1,13 +1,21 @@
 #!/usr/bin/env node
 import { CloudflareAPI, cloudflareEnvironment } from "./cloudflare.mjs";
-import { EDGE_METRICS_SCHEMA } from "../src/metrics.mjs";
+import {
+  EDGE_METRICS_SCHEMA,
+  ROUTE_LOOKUP_METRICS_SCHEMA,
+} from "../src/metrics.mjs";
 
 export const EDGE_METRICS_DATASET = "witself_agent_email_edge";
 
-export function summaryQuery(minutes) {
+function validatedMinutes(minutes) {
   if (!Number.isSafeInteger(minutes) || minutes < 1 || minutes > 10_080) {
     throw new Error("minutes must be an integer from 1 through 10080");
   }
+  return minutes;
+}
+
+export function summaryQuery(minutes) {
+  validatedMinutes(minutes);
   return `SELECT
   blob2 AS outcome,
   blob3 AS phase,
@@ -23,6 +31,23 @@ ORDER BY outcome, phase
 FORMAT JSON`;
 }
 
+export function routeLookupSummaryQuery(minutes) {
+  validatedMinutes(minutes);
+  return `SELECT
+  blob2 AS result,
+  blob3 AS evidence,
+  blob4 AS route_kind,
+  SUM(_sample_interval * double1) AS events,
+  SUM(_sample_interval * double2) / SUM(_sample_interval * double1) AS average_latency_ms,
+  MAX(double2) AS maximum_latency_ms
+FROM ${EDGE_METRICS_DATASET}
+WHERE timestamp >= NOW() - INTERVAL '${minutes}' MINUTE
+  AND blob1 = '${ROUTE_LOOKUP_METRICS_SCHEMA}'
+GROUP BY result, evidence, route_kind
+ORDER BY result, evidence, route_kind
+FORMAT JSON`;
+}
+
 export async function runMetrics(argv = process.argv.slice(2), env = process.env, fetchAPI = fetch) {
   const [command = "summary", rawMinutes = "60", ...rest] = argv;
   if (command !== "summary" || rest.length !== 0 || !/^\d+$/.test(rawMinutes)) {
@@ -31,8 +56,16 @@ export async function runMetrics(argv = process.argv.slice(2), env = process.env
   const minutes = Number(rawMinutes);
   const config = cloudflareEnvironment(env);
   const api = new CloudflareAPI({ ...config, fetchAPI });
-  const result = await api.queryAnalytics(summaryQuery(minutes));
-  return { schema: "witself.agent-email.edge-summary.v1", window_minutes: minutes, result };
+  const [result, routeLookupResult] = await Promise.all([
+    api.queryAnalytics(summaryQuery(minutes)),
+    api.queryAnalytics(routeLookupSummaryQuery(minutes)),
+  ]);
+  return {
+    schema: "witself.agent-email.edge-summary.v2",
+    window_minutes: minutes,
+    result,
+    route_lookup_result: routeLookupResult,
+  };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

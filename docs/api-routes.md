@@ -895,9 +895,10 @@ audit events; read-only recall does neither:
   owning cell enforces any lower resolved account limit and returns the exact
   content-free `over_size` verdict. Successful `accepted` is emitted only after
   the owning cell commit. It is not a public bearer-token route. Schema 88 adds
-  no signed header: the cell derives canonical, managed-alias, or custom-domain
-  receipt provenance from the existing signed envelope recipient and its local
-  route rows.
+  no route-provenance relay header: the route-projection signature is verified
+  at the edge and is not forwarded. The cell derives canonical, managed-alias,
+  or custom-domain receipt provenance from the existing signed envelope
+  recipient and its local route rows.
 - Canonical Realm-ID routes have an independent bounded inventory. The
   control-plane schedule does nothing unless
   `CP_REALM_EMAIL_CANONICAL_INVENTORY_ENABLED` is exactly `true`. Its controller
@@ -997,16 +998,33 @@ audit events; read-only recall does neither:
   realm. Its response is content-minimal and exposes no realm name or account
   metadata.
 - `GET /v1/email/realm-routes/{domain}/{realm_label}` requires the dedicated
-  edge token and returns only the strict schema-v1 routing union. Managed-domain
-  cache misses keep the existing bounded durable refresh behavior; their
-  response path does no cell or KV repair I/O. A non-managed domain returns 404
-  without touching custom authority unless
+  edge token. The route-kind `canonical | realm_alias | custom_domain` union is
+  a strict unsigned schema-v1 scalar inner route, but neither this response nor
+  the dynamic-route KV value exposes that inner value directly. The control
+  plane signs the exact projection and returns or publishes a flat schema-v2
+  object containing the same union fields plus `route_signing_key_id` and
+  `route_signature`. A
+  missing or unusable signer, invalid key configuration, import failure, or
+  signature failure returns retryable HTTP 503 with code
+  `agent_email_route_signing_unavailable`; it never emits or publishes an
+  unsigned fallback. Managed-domain cache misses keep the existing bounded
+  durable refresh behavior; their response path does no cell or KV repair I/O.
+  A non-managed domain returns 404 without touching custom authority unless
   `CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ENABLED=true`. The custom registry then
   independently requires the owning account in
   `CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ACCOUNT_ALLOWLIST`, stages a durable
   derived intent, applies and reads back the exact cell projection, re-proves
   both authorities, and publishes the same KV key only after all fences match.
   It never writes the general account/cell directory namespace.
+- The Email Worker accepts a schema-v2 route only after verifying its Ed25519
+  signature with the configured key id, reconstructing and strictly validating
+  the schema-v1 union, and matching the requested domain, label, and expected
+  route-kind variant. It performs those checks before trusting
+  `cell_audience` or `ingest_url` and before reading `message.raw`. Unsigned v1,
+  malformed v2, an unknown signing key, or a mutation of any signed scalar is
+  not route authority: bad KV evidence triggers the authenticated bounded
+  control-plane fallback, while a bad control-plane response or failed fallback
+  is a temporary SMTP failure.
 - `CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED` is an exact-`true`, default-off
   operational gate. While disabled, create, approve, internal assignment, and
   reactivation return conflict; listing, audit, reservation management,
