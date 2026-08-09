@@ -73,6 +73,8 @@ function routeMetricKind(route) {
       return "canonical";
     case "realm_alias":
       return "alias";
+    case "custom_domain":
+      return "custom_domain";
     case "pilot":
       return "pilot";
     default:
@@ -251,6 +253,7 @@ async function controlPlaneRealmRoute(
   minimumRevision = 0,
   missingIsTransient = false,
   lookup,
+  expectedRouteKind = "",
 ) {
   let request;
   try {
@@ -303,6 +306,9 @@ async function controlPlaneRealmRoute(
   let route;
   try {
     route = validateRealmRouteProjection(value, parsed.domain, parsed.realmLabel);
+    if (expectedRouteKind && route.route_kind !== expectedRouteKind) {
+      throw new Error("realm route projection kind is inconsistent");
+    }
   } catch {
     emitRouteLookupMetric(env, lookup, "cp_error", response.status);
     throw transient("tempfail_route_lookup", "route", response.status);
@@ -327,6 +333,7 @@ async function knownControlPlaneRealmRoute(
   state,
   minimumRevision = 0,
   missingIsTransient = true,
+  expectedRouteKind = "",
 ) {
   await admitControlPlaneLookup(env, lookup, state);
   return controlPlaneRealmRoute(
@@ -337,6 +344,7 @@ async function knownControlPlaneRealmRoute(
     minimumRevision,
     missingIsTransient,
     lookup,
+    expectedRouteKind,
   );
 }
 
@@ -348,6 +356,7 @@ async function coldControlPlaneRealmRoute(
   nowMS,
   state,
   lookup,
+  expectedRouteKind = "",
 ) {
   let key;
   try {
@@ -386,6 +395,7 @@ async function coldControlPlaneRealmRoute(
       0,
       false,
       lookup,
+      expectedRouteKind,
     );
     if (result.status === "unknown") rememberSuppressedMiss(state, key, lookup.now());
     return result;
@@ -422,10 +432,14 @@ async function projectedRealmRoute(
   projectedValue,
   uncertainDirectory = false,
   lookupContext,
+  expectedRouteKind = "",
 ) {
   let route;
   try {
     route = validateRealmRouteProjection(projectedValue, parsed.domain, parsed.realmLabel);
+    if (expectedRouteKind && route.route_kind !== expectedRouteKind) {
+      throw new Error("realm route projection kind is inconsistent");
+    }
   } catch {
     const fallback = await knownControlPlaneRealmRoute(
       env,
@@ -436,6 +450,7 @@ async function projectedRealmRoute(
       lookupContext.state,
       0,
       uncertainDirectory || projectedValue !== null,
+      expectedRouteKind,
     );
     return fallback.status === "projection" ? realmRouteDisposition(fallback.route) : fallback;
   }
@@ -452,6 +467,8 @@ async function projectedRealmRoute(
     knownLookup,
     lookupContext.state,
     route.controller_revision,
+    true,
+    expectedRouteKind,
   );
   return fallback.status === "projection" ? realmRouteDisposition(fallback.route) : fallback;
 }
@@ -512,16 +529,27 @@ async function resolveRealmRoute(
   nowMS,
   now,
   state,
-  legacyOnly = false,
+  routeMode = "primary",
 ) {
   const startedAt = nowMS;
+  const expectedRouteKind = routeMode === "custom"
+    ? "custom_domain"
+    : routeMode === "primary" && /^[a-z2-7]{16}$/.test(parsed.realmLabel)
+    ? "canonical"
+    : routeMode === "primary"
+    ? "realm_alias"
+    : "";
+  // Preserve the established managed-route miss telemetry. Only the gated
+  // customer-domain lane is known before a projection exists, so only it can
+  // safely label miss/error observations with a concrete route kind.
+  const metricRouteKind = routeMode === "custom" ? "custom_domain" : "unknown";
   const lookupContext = {
-    known: { evidence: "known", routeKind: "unknown", startedAt, now },
-    uncertain: { evidence: "uncertain", routeKind: "unknown", startedAt, now },
-    cold: { evidence: "none", routeKind: "unknown", startedAt, now },
+    known: { evidence: "known", routeKind: metricRouteKind, startedAt, now },
+    uncertain: { evidence: "uncertain", routeKind: metricRouteKind, startedAt, now },
+    cold: { evidence: "none", routeKind: metricRouteKind, startedAt, now },
     state,
   };
-  if (legacyOnly) {
+  if (routeMode === "legacy") {
     let legacy;
     try {
       legacy = await legacyPilotRoute(env, parsed, envelopeTo);
@@ -558,6 +586,7 @@ async function resolveRealmRoute(
       state,
       0,
       true,
+      expectedRouteKind,
     );
     return fallback.status === "projection" ? realmRouteDisposition(fallback.route) : fallback;
   }
@@ -570,31 +599,34 @@ async function resolveRealmRoute(
       projected.value,
       false,
       lookupContext,
+      expectedRouteKind,
     );
   }
 
-  let legacy;
-  try {
-    legacy = await legacyPilotRoute(env, parsed, envelopeTo);
-  } catch (error) {
-    if (error?.[EDGE_METRIC]?.outcome === "tempfail_disabled") {
+  if (routeMode === "primary") {
+    let legacy;
+    try {
+      legacy = await legacyPilotRoute(env, parsed, envelopeTo);
+    } catch (error) {
+      if (error?.[EDGE_METRIC]?.outcome === "tempfail_disabled") {
+        emitRouteLookupMetric(
+          env,
+          { ...lookupContext.known, routeKind: "pilot" },
+          "legacy",
+        );
+      } else {
+        emitRouteLookupMetric(env, lookupContext.uncertain, "kv_error");
+      }
+      throw error;
+    }
+    if (legacy != null) {
       emitRouteLookupMetric(
         env,
         { ...lookupContext.known, routeKind: "pilot" },
         "legacy",
       );
-    } else {
-      emitRouteLookupMetric(env, lookupContext.uncertain, "kv_error");
+      return legacy;
     }
-    throw error;
-  }
-  if (legacy != null) {
-    emitRouteLookupMetric(
-      env,
-      { ...lookupContext.known, routeKind: "pilot" },
-      "legacy",
-    );
-    return legacy;
   }
   const fallback = await coldControlPlaneRealmRoute(
     env,
@@ -604,6 +636,7 @@ async function resolveRealmRoute(
     nowMS,
     state,
     lookupContext.cold,
+    expectedRouteKind,
   );
   return fallback.status === "projection" ? realmRouteDisposition(fallback.route) : fallback;
 }
@@ -706,13 +739,19 @@ async function handleEmailTransaction(message, env, runtime = {}) {
   } catch {
     throw transient("tempfail_configuration", "configuration");
   }
-  // Reject an unconfigured domain before touching KV, the control plane, the
-  // raw message stream, or either lookup limiter. The exact envelope domain is
-  // otherwise preserved through the domain-qualified route key, fallback URL,
-  // and signed relay metadata.
-  if (!managedDomains.includes(parsed.domain)) {
-    message.setReject(PERMANENT_REJECTION);
-    return { outcome: "rejected_invalid_recipient", phase: "recipient", status: 550 };
+  const routeMode = parsed.domain === managedDomains[0]
+    ? "primary"
+    : managedDomains.includes(parsed.domain)
+    ? "legacy"
+    : "custom";
+  // Customer-owned domains are never inferred from a valid address. The
+  // independent fleet gate must be the exact lowercase value before this
+  // transaction can touch KV, the control plane, either lookup limiter, or the
+  // raw MIME stream. Managed canonical, alias, and legacy routes do not depend
+  // on this gate.
+  if (routeMode === "custom" &&
+      String(env?.AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED ?? "") !== "true") {
+    throw transient("tempfail_custom_domain_gate", "route");
   }
 
   const resolved = await resolveRealmRoute(
@@ -724,7 +763,7 @@ async function handleEmailTransaction(message, env, runtime = {}) {
     now(),
     now,
     lookupState,
-    parsed.domain !== managedDomains[0],
+    routeMode,
   );
   if (resolved.status === "invalid") {
     message.setReject(PERMANENT_REJECTION);
@@ -739,9 +778,12 @@ async function handleEmailTransaction(message, env, runtime = {}) {
     return { outcome: "rejected_inactive_route", phase: "route", status: 550 };
   }
   const route = resolved.route;
+  if (routeMode === "custom" && route.route_kind !== "custom_domain") {
+    throw transient("tempfail_route_lookup", "route");
+  }
   // This fleet-wide edge gate is independent of per-account plan state and
   // route projection freshness. It is exact-true and default-off so a config
-  // omission or emergency flip immediately tempfails only custom realm aliases
+  // omission or emergency flip immediately tempfails only managed realm aliases
   // across every account; canonical Realm ID addresses remain available.
   if (route.route_kind === "realm_alias" &&
       String(env?.REALM_EMAIL_ALIAS_DELIVERY_ENABLED ?? "") !== "true") {

@@ -18,6 +18,21 @@ refreshed through a bounded, authenticated control-plane lookup and are never
 used when that lookup fails or returns an older controller revision. KV is a
 route cache, never alias-claim authority.
 
+Customer-owned domains use the same schema-version-1 route key and projection
+only as a strict `route_kind: "custom_domain"` union variant. That variant
+also requires the exact `domain_request_id`, `domain_allocation_revision`,
+`realm_alias_claim_id`, and `realm_alias_revision` fences; canonical and
+managed-alias projections continue to reject those fields. A valid address on
+a non-managed domain is eligible for lookup only when
+`AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED` is exactly `true`, and the
+resolved projection is rechecked as `custom_domain`. Any other or missing gate
+value tempfails before KV, the control plane, lookup limiters, or raw MIME are
+read and emits only the fixed `tempfail_custom_domain_gate` edge outcome. The
+gate is intentionally absent from the committed Wrangler template and
+renderer. `npm run deploy` also refuses a persistent Worker secret with that
+name both before and after deployment, so this contract remains dark and cannot
+change live Email Routing or delivery configuration in this phase.
+
 The original one-realm, 5–10-recipient literal pilot remains supported only on
 the one configured legacy domain. A legacy envelope must match the exact
 enabled pilot manifest and recipient row before it can relay. Legacy traffic
@@ -31,8 +46,8 @@ Managed alias delivery also requires
 message body is read or a cell is contacted. Canonical Realm ID and legacy
 literal-pilot delivery are intentionally unaffected.
 
-Primary-domain dynamic route lookup is protected independently of account
-policy. A positive `EMAIL_DIRECTORY` projection is always checked first and
+Dynamic route lookup is protected independently of account policy. A positive
+`EMAIL_DIRECTORY` projection is always checked first and
 bypasses negative state. On a valid cold KV miss, the Worker hashes
 `domain + NUL + realm-label`, coalesces identical in-flight lookups, and keeps
 only a 10-second, 1,024-entry in-isolate SHA-256 miss-marker cache. The marker
@@ -222,11 +237,11 @@ mutation.
    Route results are `kv_fresh`, `legacy`, `cp_found`, `cp_not_found`,
    `miss_suppressed`, `cold_limited`, `known_limited`, `kv_error`, or
    `cp_error`; evidence is `none`, `known`, or `uncertain`; and route kind is
-   `canonical`, `alias`, `pilot`, or `unknown`. Metrics failure never changes
-   message disposition. Each recipient lookup emits exactly one terminal route
-   event; for a failed or corrupt KV read that continues to the control plane,
-   `evidence=uncertain` preserves the context without emitting a second early
-   `kv_error` event. Neither schema contains an address, domain, realm
+   `canonical`, `alias`, `custom_domain`, `pilot`, or `unknown`. Metrics failure
+   never changes message disposition. Each recipient lookup emits exactly one
+   terminal route event; for a failed or corrupt KV read that continues to the
+   control plane, `evidence=uncertain` preserves the context without emitting
+   a second early `kv_error` event. Neither schema contains an address, domain, realm
    label, account, realm, agent, sender, subject, message id, digest, signature,
    limiter key, or content-derived value. Query the final-outcome stream for
    the last hour with a token carrying `Account Analytics Read`:

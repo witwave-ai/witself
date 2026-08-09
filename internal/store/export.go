@@ -452,6 +452,23 @@ func (s *Store) exportAccount(
 			  'suspended_at', suspended_at, 'retired_at', retired_at)
 			FROM agent_email_realm_aliases WHERE account_id = $1
 			ORDER BY realm_id, domain, realm_label, claim_id`, arg: accountID},
+		&querySource{tx: tx, table: "agent_email_custom_domain_routes", q: `
+			SELECT jsonb_build_object(
+			  'domain_request_id', domain_request_id,
+			  'realm_alias_claim_id', realm_alias_claim_id,
+			  'account_id', account_id, 'realm_id', realm_id,
+			  'domain', domain, 'realm_label', realm_label,
+			  'domain_allocation_revision', domain_allocation_revision,
+			  'domain_state_revision', domain_state_revision,
+			  'realm_alias_revision', realm_alias_revision,
+			  'state', state,
+			  'suspension_disposition', suspension_disposition,
+			  'controller_revision', controller_revision,
+			  'created_at', created_at, 'updated_at', updated_at,
+			  'suspended_at', suspended_at, 'retired_at', retired_at)
+			FROM agent_email_custom_domain_routes WHERE account_id = $1
+			ORDER BY realm_id, domain, realm_label,
+			         domain_request_id, realm_alias_claim_id`, arg: accountID},
 		&querySource{tx: tx, table: "agent_email_messages", q: `
 			SELECT jsonb_build_object(
 			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
@@ -463,6 +480,7 @@ func (s *Store) exportAccount(
 			  'agent_segment', agent_segment, 'realm_label', realm_label,
 			  'recipient_route_kind', recipient_route_kind,
 			  'recipient_realm_alias_claim_id', recipient_realm_alias_claim_id,
+			  'recipient_custom_domain_request_id', recipient_custom_domain_request_id,
 			  'subaddress_tag', subaddress_tag,
 			  'raw_mime', CASE WHEN raw_mime IS NULL THEN NULL
 			                   ELSE E'\\x' || encode(raw_mime, 'hex') END,

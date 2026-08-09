@@ -3,12 +3,34 @@ import { readFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
+import {
+  assertCustomDomainDeliveryDark,
+} from "../scripts/assert-custom-domain-dark.mjs";
+
 const root = new URL("..", import.meta.url);
 const script = new URL("../scripts/render-wrangler.mjs", import.meta.url);
 const controlPlaneURL = "https://self.witwave.ai/";
 
+test("dark deployment refuses a persistent custom-domain delivery secret", () => {
+  assert.doesNotThrow(() => assertCustomDomainDeliveryDark([
+    { name: "CONTROL_PLANE_EDGE_TOKEN", type: "secret_text" },
+  ]));
+  assert.throws(
+    () => assertCustomDomainDeliveryDark([
+      { name: "AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED", type: "secret_text" },
+    ]),
+    /activation secret present/,
+  );
+  assert.throws(
+    () => assertCustomDomainDeliveryDark([{ name: " delivery " }]),
+    /invalid entry/,
+  );
+});
+
 test("deployment config is email-only and cannot reuse the control-plane DIRECTORY id", async () => {
   const controlPlane = await readFile(new URL("../../control-plane/wrangler.template.jsonc", import.meta.url), "utf8");
+  const template = await readFile(new URL("../wrangler.template.jsonc", import.meta.url), "utf8");
+  assert.doesNotMatch(template, /AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED/);
   const directoryID = /"binding"\s*:\s*"DIRECTORY"[\s\S]{0,200}?"id"\s*:\s*"([0-9a-f]{32})"/.exec(controlPlane)?.[1];
   assert.match(directoryID, /^[0-9a-f]{32}$/);
   const rejected = spawnSync(process.execPath, [script.pathname], {
@@ -64,6 +86,7 @@ test("deployment config is email-only and cannot reuse the control-plane DIRECTO
     /"REALM_EMAIL_CANONICAL_DELIVERY_ENABLED"\s*:\s*"false"/,
   );
   assert.doesNotMatch(config, /CONTROL_PLANE_EDGE_TOKEN/);
+  assert.doesNotMatch(config, /AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED/);
   assert.doesNotMatch(config, /"binding"\s*:\s*"DIRECTORY"/);
   assert.doesNotMatch(config, /"routes"\s*:/);
 });

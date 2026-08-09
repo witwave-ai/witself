@@ -697,6 +697,77 @@ test("edge-token fallback is authoritative and response-only", async () => {
   assert.equal(emailDirectory.values.has(key), false);
 });
 
+test("custom-domain route fallback is dark by default and forwards only behind exact true", async () => {
+  const { env } = environment();
+  const domain = "mail.customer.example";
+  const realmLabel = "healing";
+  const routeURL = new URL(
+    `https://self.example/v1/email/realm-routes/${domain}/${realmLabel}`,
+  );
+  const match = matchRealmEmailRoutePath(routeURL.pathname);
+  const calls = [];
+  env.AGENT_EMAIL_DOMAINS = {
+    idFromName: (name) => name,
+    get: (name) => ({
+      fetch: async (request, init) => {
+        calls.push({
+          name,
+          url: String(request),
+          method: init.method,
+          body: JSON.parse(init.body),
+        });
+        return Response.json({
+          schema_version: "witself.realm-email-route.v1",
+          kind: "custom_domain",
+          domain,
+          realm_label: realmLabel,
+          realm_id: REALM,
+          domain_request_id: "aedr_aaaaaaaaaaaaaaaa",
+          domain_allocation_revision: 3,
+          realm_alias_claim_id: "era_bbbbbbbbbbbbbbbb",
+          realm_alias_revision: 2,
+          controller_revision: 9,
+          state: "suspended",
+          suspension_disposition: "retry",
+          updated_at: "2026-08-01T00:00:00.000Z",
+        });
+      },
+    }),
+  };
+  const request = () => new Request(routeURL, {
+    headers: { Authorization: `Bearer ${EDGE_TOKEN}` },
+  });
+
+  for (const disabled of [undefined, "TRUE", " true", "true "]) {
+    if (disabled === undefined) {
+      delete env.CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ENABLED;
+    } else {
+      env.CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ENABLED = disabled;
+    }
+    const response = await handleRealmEmailRouteRequest(
+      request(),
+      env,
+      match,
+    );
+    assert.equal(response.status, 404, String(disabled));
+  }
+  assert.deepEqual(calls, []);
+
+  env.CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ENABLED = "true";
+  const forwarded = await handleRealmEmailRouteRequest(request(), env, match);
+  assert.equal(forwarded.status, 200);
+  assert.deepEqual(calls, [{
+    name: "global",
+    url: "https://agent-email-domain.internal/route/get",
+    method: "POST",
+    body: {
+      domain,
+      realm_label: realmLabel,
+      routing_enabled: true,
+    },
+  }]);
+});
+
 test("gate-off admin can suspend or retire but cannot reactivate", async () => {
   const { env } = environment();
   const requested = customerRequest("POST", {

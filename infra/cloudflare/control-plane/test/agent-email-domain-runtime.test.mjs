@@ -31,6 +31,10 @@ import {
   AGENT_EMAIL_DOMAIN_JOURNAL_CAPACITY_KEY,
   AGENT_EMAIL_DOMAIN_JOURNAL_META_KEY,
 } from "../src/agent-email-domain-journal-runtime.mjs";
+import {
+  agentEmailCustomDomainRouteKey,
+  buildRealmEmailAliasClaimProof,
+} from "../src/agent-email-custom-domain-route-contract.mjs";
 
 const ACCOUNT = "acct_domain";
 const OTHER_ACCOUNT = "acct_other";
@@ -181,6 +185,256 @@ function registry(env = {}, dependencyOverrides = {}) {
     challengeCount: () => challengeSequence,
     advanceTime: (milliseconds) => {
       currentTime += milliseconds;
+    },
+  };
+}
+
+class RouteKV {
+  constructor(entries = [], events = []) {
+    this.values = new Map(entries);
+    this.events = events;
+    this.failPutsAfterWrite = 0;
+  }
+
+  async get(key, options = {}) {
+    const value = this.values.get(key);
+    if (value === undefined) return null;
+    if (options?.type === "json") {
+      return typeof value === "string" ? JSON.parse(value) : structuredClone(value);
+    }
+    return typeof value === "string" ? value : structuredClone(value);
+  }
+
+  async put(key, value) {
+    this.events.push(["kv-put", key, value]);
+    this.values.set(key, value);
+    if (this.failPutsAfterWrite > 0) {
+      this.failPutsAfterWrite--;
+      throw new Error("simulated lost KV acknowledgement");
+    }
+  }
+
+  value(key) {
+    const value = this.values.get(key);
+    return value === undefined ? null : JSON.parse(value);
+  }
+}
+
+function customDomainRoutingFixture(options = {}) {
+  const domain = "agents.customer.example";
+  const realmLabel = "customer-team";
+  const realmID = "realm_aaaaaaaaaaaaaaaa";
+  const requestID = "aedr_aaaaaaaaaaaaaaaa";
+  const aliasClaimID = "era_aaaaaaaaaaaaaaaa";
+  const events = [];
+  const directory = new RouteKV([
+    [`acct:${ACCOUNT}`, { cell: "cell-one" }],
+    ["cell:cell-one", {
+      endpoint: "https://cell.example",
+      provision_token: "witself_prv_cell",
+      agent_email_audience: "cell-one",
+    }],
+  ], events);
+  const emailDirectory = new RouteKV([], events);
+  let aliasProof = buildRealmEmailAliasClaimProof({
+    account_id: ACCOUNT,
+    realm_id: realmID,
+    realm_label: realmLabel,
+    realm_alias_claim_id: aliasClaimID,
+    realm_alias_revision: 5,
+    state: "applied",
+    updated_at: "2026-08-09T11:59:00.000Z",
+  });
+  let cellProjection = null;
+  let postCalls = 0;
+  let getCalls = 0;
+  let failPostAfterApply = 0;
+  let rejectPostStatus = null;
+  let wrongAcknowledgement = null;
+  let mutateAliasAfterReadback = null;
+  let failSubscribe = 0;
+  let subscriptionRealmClosed = false;
+  let subscribeCalls = 0;
+  // Match encoding/json's declaration order in the real Go response. JSON
+  // member order is not semantic, and both the POST acknowledgement and exact
+  // GET readback must validate independently of the JS builder's key order.
+  const goOrderedCellRoute = (value) => ({
+    schema_version: value.schema_version,
+    account_id: value.account_id,
+    domain_request_id: value.domain_request_id,
+    domain_allocation_revision: value.domain_allocation_revision,
+    domain_state_revision: value.domain_state_revision,
+    realm_alias_claim_id: value.realm_alias_claim_id,
+    realm_alias_revision: value.realm_alias_revision,
+    realm_id: value.realm_id,
+    domain: value.domain,
+    realm_label: value.realm_label,
+    state: value.state,
+    ...(value.suspension_disposition
+      ? { suspension_disposition: value.suspension_disposition }
+      : {}),
+    controller_revision: value.controller_revision,
+  });
+  const aliasStub = {
+    async fetch(request, init) {
+      const path = new URL(request.url ?? request).pathname;
+      if (path === "/alias/custom-domain-route-subscribe") {
+        const input = JSON.parse(init.body);
+        subscribeCalls++;
+        events.push(["alias-subscribe", input]);
+        if (failSubscribe > 0) {
+          failSubscribe--;
+          throw new Error("simulated lost subscription acknowledgement");
+        }
+        if (subscriptionRealmClosed) {
+          return Response.json({
+            error: "realm close is converging or complete; subscription is fenced",
+            code: "custom_domain_subscription_realm_closed",
+          }, { status: 409 });
+        }
+        return Response.json({
+          schema_version: "witself.realm-email-alias.v1",
+          subscribed: true,
+          account_id: aliasProof.account_id,
+          realm_id: aliasProof.realm_id,
+          realm_label: aliasProof.realm_label,
+          realm_alias_claim_id: aliasProof.realm_alias_claim_id,
+        });
+      }
+      events.push(["alias-proof", JSON.parse(init.body)]);
+      return Response.json(aliasProof);
+    },
+  };
+  const fetchImpl = async (rawURL, init = {}) => {
+    const url = new URL(rawURL);
+    assert.equal(
+      url.pathname,
+      `/v1/accounts/${ACCOUNT}:email-custom-domain-route`,
+    );
+    assert.equal(init.headers.Authorization, "Bearer witself_prv_cell");
+    if (init.method === "POST") {
+      postCalls++;
+      const payload = JSON.parse(init.body);
+      events.push(["cell-post", structuredClone(payload)]);
+      if (rejectPostStatus !== null) {
+        const status = rejectPostStatus;
+        rejectPostStatus = null;
+        return Response.json({ error: "simulated cell refusal" }, { status });
+      }
+      cellProjection = structuredClone(payload);
+      if (failPostAfterApply > 0) {
+        failPostAfterApply--;
+        throw new Error("simulated lost cell acknowledgement");
+      }
+      if (wrongAcknowledgement) {
+        const mutation = wrongAcknowledgement;
+        wrongAcknowledgement = null;
+        return Response.json({ ...goOrderedCellRoute(payload), ...mutation });
+      }
+      return Response.json(goOrderedCellRoute(payload));
+    }
+    assert.equal(init.method, "GET");
+    getCalls++;
+    events.push(["cell-get", url.search]);
+    assert.equal(url.searchParams.get("domain_request_id"), requestID);
+    assert.equal(url.searchParams.get("realm_alias_claim_id"), aliasClaimID);
+    const body = structuredClone(cellProjection);
+    if (mutateAliasAfterReadback) {
+      aliasProof = buildRealmEmailAliasClaimProof({
+        ...aliasProof,
+        ...mutateAliasAfterReadback,
+      });
+      mutateAliasAfterReadback = null;
+    }
+    return body
+      ? Response.json(goOrderedCellRoute(body))
+      : Response.json({ error: "not found" }, { status: 404 });
+  };
+  const fixture = registry({
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ENABLED: "true",
+    CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ACCOUNT_ALLOWLIST: ACCOUNT,
+    DIRECTORY: directory,
+    AGENT_EMAIL_DIRECTORY: emailDirectory,
+    REALM_EMAIL_ALIASES: {
+      idFromName: (name) => name,
+      get: () => aliasStub,
+    },
+    ...options.env,
+  }, { fetch: fetchImpl });
+  const request = {
+    schema_version: "witself.agent-email-domain.v1",
+    id: requestID,
+    account_id: ACCOUNT,
+    domain,
+    state: "verified",
+    state_revision: 7,
+    updated_at: "2026-08-09T12:00:00.000Z",
+    plan_suspended: false,
+    lifecycle_suspended: false,
+    ownership_verification: { state: "verified" },
+  };
+  const allocation = {
+    schema_version: "witself.agent-email-domain-allocation.v1",
+    domain,
+    account_id: ACCOUNT,
+    source_request_id: requestID,
+    generation: 1,
+    allocation_revision: 3,
+    state: "allocated",
+    allocated_at: "2026-08-09T12:00:00.000Z",
+    updated_at: "2026-08-09T12:00:00.000Z",
+    ownership_proof: {
+      verified_at: "2026-08-09T12:00:00.000Z",
+      rrset_sha256: "4".repeat(64),
+      dnssec_authenticated: true,
+    },
+    retirement: null,
+  };
+  fixture.storage.values.set(`request:${requestID}`, structuredClone(request));
+  fixture.storage.values.set(`domain:${domain}`, structuredClone(allocation));
+  return {
+    ...fixture,
+    domain,
+    realmLabel,
+    realmID,
+    requestID,
+    aliasClaimID,
+    events,
+    directory,
+    emailDirectory,
+    routeKey: agentEmailCustomDomainRouteKey(domain, realmLabel),
+    postCalls: () => postCalls,
+    getCalls: () => getCalls,
+    subscribeCalls: () => subscribeCalls,
+    failNextSubscribe() {
+      failSubscribe++;
+    },
+    closeSubscriptionRealm() {
+      subscriptionRealmClosed = true;
+    },
+    failNextPostAfterApply() {
+      failPostAfterApply++;
+    },
+    rejectNextPost(status) {
+      rejectPostStatus = status;
+    },
+    failNextKVAfterWrite() {
+      emailDirectory.failPutsAfterWrite++;
+    },
+    setWrongAcknowledgement(value) {
+      wrongAcknowledgement = structuredClone(value);
+    },
+    mutateAliasOnNextReadback(value) {
+      mutateAliasAfterReadback = structuredClone(value);
+    },
+    setAliasProof(value) {
+      aliasProof = buildRealmEmailAliasClaimProof({ ...aliasProof, ...value });
+    },
+    request() {
+      return fixture.storage.values.get(`request:${requestID}`);
+    },
+    allocation() {
+      return fixture.storage.values.get(`domain:${domain}`);
     },
   };
 }
@@ -427,6 +681,434 @@ test("custom-domain entitlement follows shared zero and null semantics", () => {
     features: [AGENT_EMAIL_CUSTOM_DOMAIN_FEATURE],
     limits: { [AGENT_EMAIL_CUSTOM_DOMAIN_LIMIT]: -1 },
   }), { enabled: false, limit: 0 });
+});
+
+test("custom-domain routing stays dark unless both exact CP fences pass", async () => {
+  for (const env of [
+    { CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ENABLED: "" },
+    { CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ENABLED: "TRUE" },
+    { CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ACCOUNT_ALLOWLIST: "" },
+    { CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ACCOUNT_ALLOWLIST: OTHER_ACCOUNT },
+    { CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ACCOUNT_ALLOWLIST: ` ${ACCOUNT}` },
+    { CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ACCOUNT_ALLOWLIST: `${ACCOUNT},*` },
+  ]) {
+    const fixture = customDomainRoutingFixture({ env });
+    const result = await call(fixture.runtime, "/route/get", {
+      domain: fixture.domain,
+      realm_label: fixture.realmLabel,
+      routing_enabled: true,
+    });
+    assert.equal(result.response.status, 409, JSON.stringify(env));
+    assert.equal(result.body.code, "custom_domain_routing_disabled");
+    assert.equal(fixture.postCalls(), 0);
+    assert.equal(fixture.emailDirectory.values.size, 0);
+    assert.equal(
+      [...fixture.storage.values.keys()].some((key) =>
+        key.startsWith("route-projection-intent:")),
+      false,
+    );
+  }
+  const fixture = customDomainRoutingFixture();
+  const missingCallerFence = await call(fixture.runtime, "/route/get", {
+    domain: fixture.domain,
+    realm_label: fixture.realmLabel,
+  });
+  assert.equal(missingCallerFence.response.status, 409);
+  assert.equal(fixture.postCalls(), 0);
+});
+
+test("custom-domain route outbox applies, reads back, then publishes exact KV", async () => {
+  const fixture = customDomainRoutingFixture();
+  const result = await call(fixture.runtime, "/route/get", {
+    domain: fixture.domain,
+    realm_label: fixture.realmLabel,
+    routing_enabled: true,
+  });
+  assert.equal(result.response.status, 200);
+  assert.equal(result.body.route_kind, "custom_domain");
+  assert.equal(result.body.state, "applied");
+  assert.equal(result.body.domain_request_id, fixture.requestID);
+  assert.equal(result.body.domain_allocation_revision, 3);
+  assert.equal(result.body.realm_alias_claim_id, fixture.aliasClaimID);
+  assert.equal(result.body.realm_alias_revision, 5);
+  assert.equal(result.body.controller_revision, 15);
+  assert.equal(result.body.cell_audience, "cell-one");
+  assert.equal(
+    result.body.ingest_url,
+    "https://cell.example/v1/internal/agent-email:ingest",
+  );
+  assert.deepEqual(fixture.emailDirectory.value(fixture.routeKey), result.body);
+  const externalOrder = fixture.events
+    .filter(([kind]) => [
+      "alias-subscribe", "cell-post", "cell-get", "kv-put",
+    ].includes(kind))
+    .map(([kind]) => kind);
+  assert.deepEqual(externalOrder, [
+    "alias-subscribe", "cell-post", "cell-get", "kv-put",
+  ]);
+  const intent = await fixture.storage.get(
+    `route-projection-intent:${fixture.requestID}:${fixture.realmLabel}`,
+  );
+  assert.equal(intent.phase, "complete");
+  assert.equal(intent.retry_at_ms, null);
+  assert.equal(
+    [...fixture.storage.values.keys()].some((key) =>
+      key.startsWith("route-projection-due:")),
+    false,
+  );
+  assert.equal("account_id" in result.body, false);
+  assert.equal("domain_state_revision" in result.body, false);
+});
+
+test("lost cell and KV acknowledgements replay one exact durable route intent", async () => {
+  for (const failure of ["cell", "kv"]) {
+    const fixture = customDomainRoutingFixture();
+    if (failure === "cell") fixture.failNextPostAfterApply();
+    else fixture.failNextKVAfterWrite();
+    const first = await call(fixture.runtime, "/route/get", {
+      domain: fixture.domain,
+      realm_label: fixture.realmLabel,
+      routing_enabled: true,
+    });
+    assert.equal(first.response.status, 502, failure);
+    const pending = await fixture.storage.get(
+      `route-projection-intent:${fixture.requestID}:${fixture.realmLabel}`,
+    );
+    assert.equal(pending.phase, "pending");
+    assert.equal(pending.failure_count, 1);
+    const exactCell = JSON.stringify(pending.cell_projection);
+    const exactEdge = JSON.stringify(pending.edge_projection);
+
+    fixture.advanceTime(6 * 60 * 1_000);
+    if (failure === "cell") {
+      const explicitRetry = await call(fixture.runtime, "/route/get", {
+        domain: fixture.domain,
+        realm_label: fixture.realmLabel,
+        routing_enabled: true,
+      });
+      assert.equal(explicitRetry.response.status, 200);
+    } else {
+      await fixture.runtime.alarm();
+    }
+    const completed = await fixture.storage.get(
+      `route-projection-intent:${fixture.requestID}:${fixture.realmLabel}`,
+    );
+    assert.equal(completed.phase, "complete");
+    assert.equal(JSON.stringify(completed.cell_projection), exactCell);
+    assert.equal(JSON.stringify(completed.edge_projection), exactEdge);
+    assert.equal(
+      JSON.stringify(fixture.emailDirectory.value(fixture.routeKey)),
+      exactEdge,
+    );
+    assert.equal(fixture.postCalls(), 2);
+    assert.equal(fixture.getCalls(), failure === "cell" ? 1 : 2);
+  }
+});
+
+test("a crash between the first binding and subscriber acknowledgement heals from the source outbox", async () => {
+  const fixture = customDomainRoutingFixture();
+  fixture.failNextSubscribe();
+  const first = await call(fixture.runtime, "/route/get", {
+    domain: fixture.domain,
+    realm_label: fixture.realmLabel,
+    routing_enabled: true,
+  });
+  assert.equal(first.response.status, 502);
+  assert.ok(await fixture.storage.get(
+    `route-binding:${fixture.requestID}:${fixture.aliasClaimID}`,
+  ));
+  assert.ok(await fixture.storage.get(`route-source-intent:${fixture.requestID}`));
+  assert.equal(fixture.postCalls(), 0);
+  assert.equal(fixture.emailDirectory.values.size, 0);
+
+  fixture.advanceTime(1_000);
+  await fixture.runtime.alarm();
+  assert.equal(fixture.subscribeCalls(), 2);
+  assert.equal(fixture.postCalls(), 1);
+  assert.equal(fixture.getCalls(), 1);
+  assert.ok(fixture.emailDirectory.value(fixture.routeKey));
+  assert.equal(
+    await fixture.storage.get(`route-source-intent:${fixture.requestID}`),
+    undefined,
+  );
+});
+
+test("a new binding rewinds an existing same-source cursor that already passed it", async () => {
+  const fixture = customDomainRoutingFixture();
+  const olderClaimID = "era_zzzzzzzzzzzzzzzz";
+  const olderBindingKey = `route-binding:${fixture.requestID}:${olderClaimID}`;
+  await fixture.storage.put(olderBindingKey, {
+    schema_version: "witself.agent-email-custom-domain-route-binding.v1",
+    account_id: ACCOUNT,
+    domain_request_id: fixture.requestID,
+    domain: fixture.domain,
+    realm_id: fixture.realmID,
+    realm_label: "z-route",
+    realm_alias_claim_id: olderClaimID,
+    created_at: "2026-08-09T12:00:00.000Z",
+  });
+  const sourceFingerprint = fixture.runtime.routeSourceFingerprint(
+    fixture.request(),
+    fixture.allocation(),
+  );
+  await fixture.storage.put(`route-source-intent:${fixture.requestID}`, {
+    schema_version: "witself.agent-email-custom-domain-route-source-intent.v1",
+    account_id: ACCOUNT,
+    domain_request_id: fixture.requestID,
+    domain: fixture.domain,
+    domain_state_revision: fixture.request().state_revision,
+    request_state: fixture.request().state,
+    domain_allocation_revision: fixture.allocation().allocation_revision,
+    allocation_state: fixture.allocation().state,
+    source_fingerprint: sourceFingerprint,
+    binding_cursor: olderBindingKey,
+    allow_restrictive_when_disabled: false,
+    failure_count: 0,
+    retry_at_ms: Date.UTC(2026, 7, 9, 13, 0, 0),
+    created_at: "2026-08-09T12:00:00.000Z",
+    updated_at: "2026-08-09T12:00:00.000Z",
+  });
+  fixture.failNextSubscribe();
+  const first = await call(fixture.runtime, "/route/get", {
+    domain: fixture.domain,
+    realm_label: fixture.realmLabel,
+    routing_enabled: true,
+  });
+  assert.equal(first.response.status, 502);
+  const rewound = await fixture.storage.get(
+    `route-source-intent:${fixture.requestID}`,
+  );
+  assert.equal(rewound.source_fingerprint, sourceFingerprint);
+  assert.equal(rewound.binding_cursor, null);
+  assert.ok(await fixture.storage.get(
+    `route-binding:${fixture.requestID}:${fixture.aliasClaimID}`,
+  ));
+});
+
+test("a first binding that loses the realm-close race settles without external route writes", async () => {
+  const fixture = customDomainRoutingFixture();
+  fixture.failNextSubscribe();
+  const first = await call(fixture.runtime, "/route/get", {
+    domain: fixture.domain,
+    realm_label: fixture.realmLabel,
+    routing_enabled: true,
+  });
+  assert.equal(first.response.status, 502);
+  assert.ok(await fixture.storage.get(
+    `route-binding:${fixture.requestID}:${fixture.aliasClaimID}`,
+  ));
+
+  const request = fixture.request();
+  request.state = "retired";
+  request.state_revision += 1;
+  request.updated_at = "2026-08-09T12:01:00.000Z";
+  const allocation = fixture.allocation();
+  allocation.state = "retired";
+  allocation.allocation_revision += 1;
+  allocation.updated_at = request.updated_at;
+  fixture.setAliasProof({
+    realm_alias_revision: 6,
+    state: "retired",
+    updated_at: request.updated_at,
+  });
+  fixture.closeSubscriptionRealm();
+  const terminalLookup = await call(fixture.runtime, "/route/get", {
+    domain: fixture.domain,
+    realm_label: fixture.realmLabel,
+    routing_enabled: true,
+  });
+  assert.equal(terminalLookup.response.status, 404);
+  assert.equal(terminalLookup.body.code, "custom_domain_route_not_found");
+  fixture.advanceTime(1_000);
+  await fixture.runtime.alarm();
+
+  assert.equal(fixture.subscribeCalls(), 3);
+  assert.equal(fixture.postCalls(), 0);
+  assert.equal(fixture.getCalls(), 0);
+  assert.equal(fixture.emailDirectory.values.size, 0);
+  assert.equal(
+    await fixture.storage.get(`route-source-intent:${fixture.requestID}`),
+    undefined,
+  );
+  assert.ok(await fixture.storage.get(
+    `route-binding:${fixture.requestID}:${fixture.aliasClaimID}`,
+  ));
+});
+
+test("removing the fleet routing gate stops alarm I/O and keeps explicit recovery possible", async () => {
+  const fixture = customDomainRoutingFixture();
+  fixture.failNextPostAfterApply();
+  const first = await call(fixture.runtime, "/route/get", {
+    domain: fixture.domain,
+    realm_label: fixture.realmLabel,
+    routing_enabled: true,
+  });
+  assert.equal(first.response.status, 502);
+  const key =
+    `route-projection-intent:${fixture.requestID}:${fixture.realmLabel}`;
+  const pending = await fixture.storage.get(key);
+  const exactCell = JSON.stringify(pending.cell_projection);
+  const exactEdge = JSON.stringify(pending.edge_projection);
+  const proofCalls = fixture.events.filter(([kind]) =>
+    kind === "alias-proof").length;
+
+  delete fixture.runtime.env.CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ENABLED;
+  fixture.advanceTime(6 * 60 * 1_000);
+  await fixture.runtime.alarm();
+  assert.equal(fixture.postCalls(), 1);
+  assert.equal(fixture.events.filter(([kind]) =>
+    kind === "alias-proof").length, proofCalls);
+  assert.equal(fixture.emailDirectory.values.size, 0);
+  assert.equal((await fixture.storage.get(key)).phase, "pending");
+  assert.equal(
+    [...fixture.storage.values.keys()].some((candidate) =>
+      candidate.startsWith("route-projection-due:")),
+    false,
+  );
+
+  fixture.runtime.env.CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ENABLED = "true";
+  const recovered = await call(fixture.runtime, "/route/get", {
+    domain: fixture.domain,
+    realm_label: fixture.realmLabel,
+    routing_enabled: true,
+  });
+  assert.equal(recovered.response.status, 200);
+  const completed = await fixture.storage.get(key);
+  assert.equal(completed.phase, "complete");
+  assert.equal(JSON.stringify(completed.cell_projection), exactCell);
+  assert.equal(JSON.stringify(completed.edge_projection), exactEdge);
+});
+
+test("missing or wrong cell bindings and stale alias revisions block KV publication", async () => {
+  const missingTarget = customDomainRoutingFixture();
+  missingTarget.rejectNextPost(404);
+  const missing = await call(missingTarget.runtime, "/route/get", {
+    domain: missingTarget.domain,
+    realm_label: missingTarget.realmLabel,
+    routing_enabled: true,
+  });
+  assert.equal(missing.response.status, 502);
+  assert.equal(missingTarget.emailDirectory.values.size, 0);
+  assert.equal((await missingTarget.storage.get(
+    `route-projection-intent:${missingTarget.requestID}:` +
+      missingTarget.realmLabel,
+  )).phase, "pending");
+
+  const wrong = customDomainRoutingFixture();
+  wrong.setWrongAcknowledgement({ realm_alias_revision: 4 });
+  const inconsistent = await call(wrong.runtime, "/route/get", {
+    domain: wrong.domain,
+    realm_label: wrong.realmLabel,
+    routing_enabled: true,
+  });
+  assert.equal(inconsistent.response.status, 502);
+  assert.match(inconsistent.body.error, /inconsistent/);
+  assert.equal(wrong.emailDirectory.values.size, 0);
+  assert.equal(wrong.getCalls(), 0);
+
+  wrong.advanceTime(6 * 60 * 1_000);
+  await wrong.runtime.alarm();
+  assert.equal(wrong.emailDirectory.value(wrong.routeKey).realm_alias_revision, 5);
+
+  const stale = customDomainRoutingFixture();
+  stale.mutateAliasOnNextReadback({
+    realm_alias_revision: 6,
+    state: "suspended",
+    suspension_disposition: "retry",
+    updated_at: "2026-08-09T12:01:00.000Z",
+  });
+  const changed = await call(stale.runtime, "/route/get", {
+    domain: stale.domain,
+    realm_label: stale.realmLabel,
+    routing_enabled: true,
+  });
+  assert.equal(changed.response.status, 409);
+  assert.equal(changed.body.code, "custom_domain_route_stale");
+  assert.equal(stale.emailDirectory.values.size, 0);
+  const replacement = await stale.storage.get(
+    `route-projection-intent:${stale.requestID}:${stale.realmLabel}`,
+  );
+  assert.equal(replacement.cell_projection.realm_alias_revision, 6);
+  assert.equal(replacement.cell_projection.state, "suspended");
+
+  await stale.runtime.alarm();
+  const published = stale.emailDirectory.value(stale.routeKey);
+  assert.equal(published.realm_alias_revision, 6);
+  assert.equal(published.state, "suspended");
+  assert.equal(published.suspension_disposition, "retry");
+});
+
+test("domain and alias suspension plus retirement converge without live destinations", async () => {
+  const fixture = customDomainRoutingFixture();
+  assert.equal((await call(fixture.runtime, "/route/get", {
+    domain: fixture.domain,
+    realm_label: fixture.realmLabel,
+    routing_enabled: true,
+  })).response.status, 200);
+
+  const request = fixture.request();
+  fixture.storage.values.set(`request:${fixture.requestID}`, {
+    ...request,
+    state_revision: request.state_revision + 1,
+    plan_suspended: true,
+    updated_at: "2026-08-09T12:02:00.000Z",
+  });
+  const planSuspended = await call(fixture.runtime, "/route/get", {
+    domain: fixture.domain,
+    realm_label: fixture.realmLabel,
+    routing_enabled: true,
+  });
+  assert.equal(planSuspended.response.status, 200);
+  assert.equal(planSuspended.body.state, "suspended");
+  assert.equal(planSuspended.body.suspension_disposition, "inactive");
+  assert.equal("cell_audience" in planSuspended.body, false);
+
+  const restored = fixture.request();
+  fixture.storage.values.set(`request:${fixture.requestID}`, {
+    ...restored,
+    state_revision: restored.state_revision + 1,
+    plan_suspended: false,
+    updated_at: "2026-08-09T12:03:00.000Z",
+  });
+  fixture.setAliasProof({
+    realm_alias_revision: 6,
+    state: "suspended",
+    suspension_disposition: "retry",
+    updated_at: "2026-08-09T12:03:00.000Z",
+  });
+  const aliasSuspended = await call(fixture.runtime, "/route/get", {
+    domain: fixture.domain,
+    realm_label: fixture.realmLabel,
+    routing_enabled: true,
+  });
+  assert.equal(aliasSuspended.response.status, 200);
+  assert.equal(aliasSuspended.body.state, "suspended");
+  assert.equal(aliasSuspended.body.suspension_disposition, "retry");
+
+  const beforeRetirement = fixture.request();
+  const allocation = fixture.allocation();
+  fixture.storage.values.set(`request:${fixture.requestID}`, {
+    ...beforeRetirement,
+    state: "retired",
+    state_revision: beforeRetirement.state_revision + 1,
+    updated_at: "2026-08-09T12:04:00.000Z",
+  });
+  fixture.storage.values.set(`domain:${fixture.domain}`, {
+    ...allocation,
+    state: "retired",
+    allocation_revision: allocation.allocation_revision + 1,
+    updated_at: "2026-08-09T12:04:00.000Z",
+  });
+  const retired = await call(fixture.runtime, "/route/get", {
+    domain: fixture.domain,
+    realm_label: fixture.realmLabel,
+    routing_enabled: true,
+  });
+  assert.equal(retired.response.status, 200);
+  assert.equal(retired.body.state, "retired");
+  assert.equal("suspension_disposition" in retired.body, false);
+  assert.equal("cell_audience" in retired.body, false);
+  assert.equal("ingest_url" in retired.body, false);
 });
 
 test("registry stub targets the single global authority", () => {

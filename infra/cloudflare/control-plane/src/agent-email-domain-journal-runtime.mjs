@@ -137,6 +137,11 @@ function emptyAuthorityBreakdown() {
 
 function authorityCategory(key) {
   if (key === "meta") return "meta";
+  // Sparse route membership and its source-delivery obligation are charged to
+  // the existing request bucket. Keeping the historical category schema exact
+  // preserves live capacity rows and R2 checkpoints across the dark upgrade.
+  if (key.startsWith("route-binding:") ||
+      key.startsWith("route-source-intent:")) return "request";
   const match = AUTHORITY_CAPACITY_PREFIXES.find(([prefix]) =>
     key.startsWith(prefix));
   if (match) return match[1];

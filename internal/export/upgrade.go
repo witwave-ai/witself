@@ -63,6 +63,17 @@ var upgraders = map[int]Upgrader{
 	84: addAgentEmailRealmAliasDefaults,
 	85: addRealmEmailRouteLifecycleDefaults,
 	86: preserveSchema86Rows,
+	87: preserveSchema87Rows,
+}
+
+// preserveSchema87Rows acknowledges schema 0088's additive custom-domain
+// route authority and nullable immutable message provenance. A schema-87
+// archive cannot contain either shape, so its rows remain byte-for-byte valid:
+// the new route stream is empty and recipient_custom_domain_request_id takes
+// its destination NULL default. No route or identity may be inferred during
+// restore.
+func preserveSchema87Rows(_ string, row map[string]any) (map[string]any, error) {
+	return row, nil
 }
 
 // preserveSchema86Rows acknowledges schema 0087's additive permanent domain

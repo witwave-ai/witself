@@ -221,6 +221,41 @@ func configureAgentEmail(ctx context.Context, cfg *server.Config, st *store.Stor
 		}
 		return result, nil
 	}
+	cfg.ApplyAgentEmailCustomDomainRoute = func(
+		ctx context.Context,
+		accountID string,
+		in server.AgentEmailCustomDomainRouteApplyRequest,
+	) (server.AgentEmailCustomDomainRoute, error) {
+		route, err := st.ApplyAgentEmailCustomDomainRoute(
+			ctx, accountID, store.ApplyAgentEmailCustomDomainRouteInput{
+				DomainRequestID:          in.DomainRequestID,
+				DomainAllocationRevision: in.DomainAllocationRevision,
+				DomainStateRevision:      in.DomainStateRevision,
+				RealmAliasClaimID:        in.RealmAliasClaimID,
+				RealmAliasRevision:       in.RealmAliasRevision,
+				RealmID:                  in.RealmID, Domain: in.Domain,
+				RealmLabel: in.RealmLabel, State: in.State,
+				SuspensionDisposition: in.SuspensionDisposition,
+				ControllerRevision:    in.ControllerRevision,
+			},
+		)
+		if err != nil {
+			return server.AgentEmailCustomDomainRoute{}, mapAgentEmailCustomDomainRouteError(err)
+		}
+		return toServerAgentEmailCustomDomainRoute(route), nil
+	}
+	cfg.GetAgentEmailCustomDomainRoute = func(
+		ctx context.Context,
+		accountID, domainRequestID, realmAliasClaimID string,
+	) (server.AgentEmailCustomDomainRoute, error) {
+		route, err := st.GetAgentEmailCustomDomainRoute(
+			ctx, accountID, domainRequestID, realmAliasClaimID,
+		)
+		if err != nil {
+			return server.AgentEmailCustomDomainRoute{}, mapAgentEmailCustomDomainRouteError(err)
+		}
+		return toServerAgentEmailCustomDomainRoute(route), nil
+	}
 	cfg.GetRealmEmailRouteLifecycle = func(
 		ctx context.Context,
 		accountID, realmID string,
@@ -565,6 +600,22 @@ func mapAgentEmailRealmAliasError(err error) error {
 	}
 }
 
+func mapAgentEmailCustomDomainRouteError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, store.ErrAgentEmailInputInvalid):
+		return wrapAsSentinel(server.ErrBadInput, store.ErrAgentEmailInputInvalid, err)
+	case errors.Is(err, store.ErrAccountNotFound), errors.Is(err, store.ErrRealmNotFound),
+		errors.Is(err, store.ErrAgentEmailCustomDomainRouteNotFound):
+		return server.ErrNotFound
+	case errors.Is(err, store.ErrAgentEmailCustomDomainRouteConflict):
+		return server.ErrConflict
+	default:
+		return err
+	}
+}
+
 func toServerAgentEmailAddress(address store.AgentEmailAddress) server.AgentEmailAddress {
 	addresses := make([]server.AgentEmailCanonicalAddress, len(address.Addresses))
 	for i, canonical := range address.Addresses {
@@ -605,6 +656,23 @@ func toServerAgentEmailRealmAlias(alias store.AgentEmailRealmAlias) server.Agent
 	}
 }
 
+func toServerAgentEmailCustomDomainRoute(
+	route store.AgentEmailCustomDomainRoute,
+) server.AgentEmailCustomDomainRoute {
+	return server.AgentEmailCustomDomainRoute{
+		SchemaVersion: "witself.v0", AccountID: route.AccountID,
+		DomainRequestID:          route.DomainRequestID,
+		DomainAllocationRevision: route.DomainAllocationRevision,
+		DomainStateRevision:      route.DomainStateRevision,
+		RealmAliasClaimID:        route.RealmAliasClaimID,
+		RealmAliasRevision:       route.RealmAliasRevision,
+		RealmID:                  route.RealmID, Domain: route.Domain,
+		RealmLabel: route.RealmLabel, State: route.State,
+		SuspensionDisposition: route.SuspensionDisposition,
+		ControllerRevision:    route.ControllerRevision,
+	}
+}
+
 func toServerAgentEmailReceiveControl(control store.AgentEmailReceiveControl) server.AgentEmailReceiveControl {
 	return server.AgentEmailReceiveControl{
 		AccountID: control.AccountID, RealmID: control.RealmID, AgentID: control.AgentID,
@@ -631,9 +699,10 @@ func toServerAgentEmailMessage(message store.AgentEmailMessage) server.AgentEmai
 		Provider: message.Provider, EnvelopeSender: message.EnvelopeSender,
 		EnvelopeRecipient: message.EnvelopeRecipient, AgentSegment: message.AgentSegment,
 		RealmLabel: message.RealmLabel, RecipientRouteKind: message.RecipientRouteKind,
-		RecipientRealmAliasClaimID: message.RecipientRealmAliasClaimID,
-		SubaddressTag:              message.SubaddressTag,
-		RawSizeBytes:               message.RawSizeBytes, ParseState: message.ParseState,
+		RecipientRealmAliasClaimID:     message.RecipientRealmAliasClaimID,
+		RecipientCustomDomainRequestID: message.RecipientCustomDomainRequestID,
+		SubaddressTag:                  message.SubaddressTag,
+		RawSizeBytes:                   message.RawSizeBytes, ParseState: message.ParseState,
 		ParseErrorCode: message.ParseErrorCode, HeaderFrom: message.HeaderFrom,
 		HeaderTo: message.HeaderTo, Subject: message.Subject, MIMEMessageID: message.MIMEMessageID,
 		MessageDate: message.MessageDate, AttachmentCount: message.AttachmentCount,

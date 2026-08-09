@@ -19,8 +19,10 @@ const raw = Buffer.from(vector.raw_base64, "base64");
 const first = example.agents[0];
 const primaryDomain = "witmail.net";
 const aliasLabel = "acme-west";
+const customDomain = "agents.example.com";
 const canonicalAddress = `alpha.${example.realm_label}@${primaryDomain}`;
 const aliasAddress = `alpha.${aliasLabel}@${primaryDomain}`;
+const customAddress = `alpha.${aliasLabel}@${customDomain}`;
 const vectorNowMS = vector.metadata.timestamp * 1000;
 const allowLimiter = { async limit() { return { success: true }; } };
 
@@ -49,9 +51,24 @@ function routeProjection(realmLabel, overrides = {}) {
   };
 }
 
+function customRouteProjection(overrides = {}) {
+  return routeProjection(aliasLabel, {
+    domain: customDomain,
+    route_kind: "custom_domain",
+    domain_request_id: "aedr_aaaaaaaaaaaaaaaa",
+    domain_allocation_revision: 11,
+    realm_alias_claim_id: "era_bbbbbbbbbbbbbbbb",
+    realm_alias_revision: 19,
+    ...overrides,
+  });
+}
+
 function dynamicEnv(routes, metrics = null, extra = {}) {
   const values = new Map(
-    Object.entries(routes).map(([realmLabel, value]) => [realmRouteKey(primaryDomain, realmLabel), value]),
+    Object.entries(routes).map(([realmLabel, value]) => [
+      realmRouteKey(value?.domain ?? primaryDomain, realmLabel),
+      value,
+    ]),
   );
   return {
     AGENT_EMAIL_DOMAIN: primaryDomain,
@@ -463,6 +480,333 @@ test("fleet canonical delivery gate is exact-true and independent", async () => 
   assert.deepEqual(alias.rejected, []);
 });
 
+test("custom-domain delivery gate is exact-true before lookup, limiters, and raw MIME", async () => {
+  for (const value of [undefined, "false", "TRUE", "1"]) {
+    const points = [];
+    let directoryReads = 0;
+    let limiterCalls = 0;
+    let fetchCalls = 0;
+    let rawReads = 0;
+    const limiter = {
+      async limit() {
+        limiterCalls++;
+        return { success: true };
+      },
+    };
+    const currentEnv = dynamicEnv(
+      { [aliasLabel]: customRouteProjection() },
+      { writeDataPoint(point) { points.push(point); } },
+      {
+        AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED: value,
+        REALM_ROUTE_COLD_MISS_LIMITER: limiter,
+        REALM_ROUTE_KNOWN_MISS_LIMITER: limiter,
+        CONTROL_PLANE_URL: "https://control.example/",
+        CONTROL_PLANE_EDGE_TOKEN: "edge-token-1234567890",
+      },
+    );
+    const get = currentEnv.EMAIL_DIRECTORY.get;
+    currentEnv.EMAIL_DIRECTORY.get = async (...args) => {
+      directoryReads++;
+      return get(...args);
+    };
+    const mail = message({ to: customAddress });
+    Object.defineProperty(mail, "raw", {
+      get() {
+        rawReads++;
+        throw new Error("raw MIME must stay unread while the custom-domain gate is dark");
+      },
+    });
+
+    await assert.rejects(
+      () => handleEmail(mail, currentEnv, {
+        now: () => vectorNowMS,
+        fetch: async () => {
+          fetchCalls++;
+          throw new Error("no lookup or relay is allowed while the gate is dark");
+        },
+      }),
+      { message: "agent email relay temporarily unavailable" },
+    );
+
+    assert.deepEqual(mail.rejected, []);
+    assert.equal(directoryReads, 0);
+    assert.equal(limiterCalls, 0);
+    assert.equal(fetchCalls, 0);
+    assert.equal(rawReads, 0);
+    assert.equal(routeLookupPoints(points).length, 0);
+    assert.deepEqual(verdictPoints(points)[0].blobs, [
+      EDGE_METRICS_SCHEMA, "tempfail_custom_domain_gate", "route",
+    ]);
+  }
+});
+
+test("exact custom-domain gate routes only a fresh custom-domain projection", async () => {
+  const points = [];
+  const keys = [];
+  let relayed;
+  const mail = message({ to: customAddress });
+  const currentEnv = dynamicEnv(
+    { [aliasLabel]: customRouteProjection() },
+    { writeDataPoint(point) { points.push(point); } },
+    { AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED: "true" },
+  );
+  const get = currentEnv.EMAIL_DIRECTORY.get;
+  currentEnv.EMAIL_DIRECTORY.get = async (key, type) => {
+    keys.push(key);
+    return get(key, type);
+  };
+  await handleEmail(
+    mail,
+    currentEnv,
+    {
+      now: () => vectorNowMS,
+      fetch: async (url, init) => {
+        relayed = { url, init };
+        return new Response('{"verdict":"accepted"}', { status: 200 });
+      },
+    },
+  );
+
+  assert.deepEqual(mail.rejected, []);
+  assert.deepEqual(keys, [realmRouteKey(customDomain, aliasLabel)]);
+  assert.equal(relayed.url, example.ingest_url);
+  assert.deepEqual(Buffer.from(relayed.init.body), raw);
+  assert.equal(
+    Buffer.from(
+      relayed.init.headers.get("X-Witself-Email-Envelope-To"),
+      "base64url",
+    ).toString(),
+    customAddress,
+  );
+  assert.deepEqual(routeLookupPoints(points)[0].blobs, [
+    ROUTE_LOOKUP_METRICS_SCHEMA, "kv_fresh", "known", "custom_domain",
+  ]);
+  assert.equal(verdictPoints(points)[0].blobs[1], "accepted");
+  assert.equal(JSON.stringify(points).includes(customDomain), false);
+  assert.equal(JSON.stringify(points).includes(aliasLabel), false);
+});
+
+test("custom-domain cold miss accepts one fresh control-plane projection", async () => {
+  const points = [];
+  let controlPlaneCalls = 0;
+  let relayCalls = 0;
+  const mail = message({ to: customAddress });
+  await handleEmail(
+    mail,
+    coldRouteEnv(
+      { writeDataPoint(point) { points.push(point); } },
+      { AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED: "true" },
+    ),
+    {
+      now: () => vectorNowMS,
+      fetch: async (input) => {
+        if (input instanceof Request) {
+          controlPlaneCalls++;
+          return Response.json(customRouteProjection());
+        }
+        relayCalls++;
+        return new Response('{"verdict":"accepted"}', { status: 200 });
+      },
+    },
+  );
+  assert.deepEqual(mail.rejected, []);
+  assert.equal(controlPlaneCalls, 1);
+  assert.equal(relayCalls, 1);
+  assert.deepEqual(routeLookupPoints(points)[0].blobs, [
+    ROUTE_LOOKUP_METRICS_SCHEMA, "cp_found", "none", "custom_domain",
+  ]);
+});
+
+test("custom-domain lookup revalidates control-plane route kind", async () => {
+  const points = [];
+  let controlPlaneCalls = 0;
+  let rawReads = 0;
+  const mail = message({ to: customAddress });
+  Object.defineProperty(mail, "raw", {
+    get() {
+      rawReads++;
+      throw new Error("wrong route kind must not read raw MIME");
+    },
+  });
+  await assert.rejects(
+    () => handleEmail(
+      mail,
+      coldRouteEnv(
+        { writeDataPoint(point) { points.push(point); } },
+        { AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED: "true" },
+      ),
+      {
+        now: () => vectorNowMS,
+        fetch: async (input) => {
+          assert.equal(input instanceof Request, true);
+          assert.equal(
+            input.url,
+            `https://control.example/v1/email/realm-routes/${customDomain}/${aliasLabel}`,
+          );
+          controlPlaneCalls++;
+          return Response.json(routeProjection(aliasLabel, {
+            domain: customDomain,
+            route_kind: "realm_alias",
+          }));
+        },
+      },
+    ),
+    { message: "agent email relay temporarily unavailable" },
+  );
+  assert.deepEqual(mail.rejected, []);
+  assert.equal(controlPlaneCalls, 1);
+  assert.equal(rawReads, 0);
+  assert.deepEqual(routeLookupPoints(points)[0].blobs, [
+    ROUTE_LOOKUP_METRICS_SCHEMA, "cp_error", "none", "custom_domain",
+  ]);
+});
+
+test("malformed, stale, suspended, and retired custom-domain projections fail closed", async () => {
+  const cases = [
+    {
+      name: "malformed",
+      route: (() => {
+        const value = customRouteProjection();
+        delete value.domain_request_id;
+        return value;
+      })(),
+      transient: true,
+      outcome: "tempfail_route_lookup",
+    },
+    {
+      name: "wrong kind",
+      route: routeProjection(aliasLabel, { domain: customDomain }),
+      transient: true,
+      outcome: "tempfail_route_lookup",
+    },
+    {
+      name: "stale",
+      route: customRouteProjection({
+        updated_at: new Date(vectorNowMS - 300_001).toISOString(),
+      }),
+      transient: true,
+      outcome: "tempfail_route_lookup",
+    },
+    {
+      name: "suspended",
+      route: (() => {
+        const value = customRouteProjection({
+          state: "suspended",
+          suspension_disposition: "retry",
+        });
+        delete value.cell_audience;
+        delete value.ingest_url;
+        return value;
+      })(),
+      transient: true,
+      outcome: "tempfail_suspended_route",
+    },
+    {
+      name: "retired",
+      route: (() => {
+        const value = customRouteProjection({ state: "retired" });
+        delete value.cell_audience;
+        delete value.ingest_url;
+        return value;
+      })(),
+      transient: false,
+      outcome: "rejected_inactive_route",
+    },
+  ];
+
+  for (const current of cases) {
+    const points = [];
+    let rawReads = 0;
+    let fetchCalls = 0;
+    const mail = message({ to: customAddress });
+    Object.defineProperty(mail, "raw", {
+      get() {
+        rawReads++;
+        throw new Error(`${current.name} projection must not read raw MIME`);
+      },
+    });
+    const operation = handleEmail(
+      mail,
+      dynamicEnv(
+        { [aliasLabel]: current.route },
+        { writeDataPoint(point) { points.push(point); } },
+        { AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED: "true" },
+      ),
+      {
+        now: () => vectorNowMS,
+        fetch: async () => {
+          fetchCalls++;
+          throw new Error("cell must not be reached");
+        },
+      },
+    );
+    if (current.transient) {
+      await assert.rejects(
+        () => operation,
+        { message: "agent email relay temporarily unavailable" },
+        current.name,
+      );
+      assert.deepEqual(mail.rejected, [], current.name);
+    } else {
+      await operation;
+      assert.deepEqual(mail.rejected, ["recipient unavailable"], current.name);
+    }
+    assert.equal(fetchCalls, 0, current.name);
+    assert.equal(rawReads, 0, current.name);
+    assert.equal(verdictPoints(points)[0].blobs[1], current.outcome, current.name);
+  }
+});
+
+test("custom-domain feature-disabled cell receipt accepts and drops", async () => {
+  const points = [];
+  const mail = message({ to: customAddress });
+  await handleEmail(
+    mail,
+    dynamicEnv(
+      { [aliasLabel]: customRouteProjection() },
+      { writeDataPoint(point) { points.push(point); } },
+      { AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED: "true" },
+    ),
+    {
+      now: () => vectorNowMS,
+      fetch: async () => new Response('{"verdict":"feature_disabled"}', { status: 200 }),
+    },
+  );
+  assert.deepEqual(mail.rejected, []);
+  assert.deepEqual(verdictPoints(points)[0].blobs, [
+    EDGE_METRICS_SCHEMA, "discarded_feature_disabled", "response",
+  ]);
+});
+
+test("custom-domain gate does not alter managed canonical or alias delivery", async () => {
+  for (const customGate of [undefined, "false", "TRUE", "true"]) {
+    for (const [realmLabel, address] of [
+      [example.realm_label, canonicalAddress],
+      [aliasLabel, aliasAddress],
+    ]) {
+      let relays = 0;
+      const mail = message({ to: address });
+      await handleEmail(
+        mail,
+        dynamicEnv(
+          { [realmLabel]: routeProjection(realmLabel) },
+          null,
+          { AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED: customGate },
+        ),
+        {
+          now: () => vectorNowMS,
+          fetch: async () => {
+            relays++;
+            return new Response('{"verdict":"accepted"}', { status: 200 });
+          },
+        },
+      );
+      assert.deepEqual(mail.rejected, []);
+      assert.equal(relays, 1);
+    }
+  }
+});
+
 test("dynamic routing keeps account-plan enforcement in the signed cell verdict", async () => {
   const points = [];
   const metrics = { writeDataPoint(point) { points.push(point); } };
@@ -565,7 +909,7 @@ test("malformed dynamic addresses reject before directory lookup or relay", asyn
   }
 });
 
-test("edge rejects an unconfigured domain before any route lookup", async () => {
+test("unmanaged domain tempfails behind the absent custom gate before lookup", async () => {
   let reads = 0;
   let limiterCalls = 0;
   let fetched = false;
@@ -578,10 +922,13 @@ test("edge rejects an unconfigured domain before any route lookup", async () => 
   const mail = message({
     to: `alpha.${example.realm_label}@unmanaged.example`,
   });
-  await handleEmail(mail, currentEnv, {
-    fetch: async () => { fetched = true; },
-  });
-  assert.deepEqual(mail.rejected, ["recipient unavailable"]);
+  await assert.rejects(
+    () => handleEmail(mail, currentEnv, {
+      fetch: async () => { fetched = true; },
+    }),
+    { message: "agent email relay temporarily unavailable" },
+  );
+  assert.deepEqual(mail.rejected, []);
   assert.equal(reads, 0);
   assert.equal(limiterCalls, 0);
   assert.equal(fetched, false);

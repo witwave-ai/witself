@@ -11,6 +11,8 @@ const REALM_ID_BODY = /^[a-z2-7]{16}$/;
 const AGENT_ID = /^agent_[a-z2-7]{16}$/;
 const AGENT_SEGMENT = /^[a-z0-9](?:[a-z0-9-]{0,45}[a-z0-9])?$/;
 const REALM_ALIAS = /^[a-z0-9](?:[a-z0-9-]{1,14}[a-z0-9])$/;
+const DOMAIN_REQUEST_ID = /^aedr_[a-z2-7]{16}$/;
+const REALM_ALIAS_CLAIM_ID = /^era_[a-z2-7]{16}$/;
 const AUDIENCE = /^[a-z](?:[a-z0-9-]{0,126}[a-z0-9])?$/;
 const WORKER_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
 const RESERVED = new Set([
@@ -141,11 +143,21 @@ export function validateRealmRouteProjection(value, expectedDomain, expectedReal
     "schema_version", "domain", "realm_label", "realm_id", "route_kind",
     "state", "controller_revision", "updated_at", "cache_ttl_seconds",
   ];
+  // The schema version stays stable because route_kind is already the exact
+  // union discriminator. Customer-domain routes carry both source-authority
+  // fences; managed canonical and alias records must remain byte-for-byte on
+  // their existing shape.
+  const customDomainKeys = value.route_kind === "custom_domain"
+    ? [
+        "domain_request_id", "domain_allocation_revision",
+        "realm_alias_claim_id", "realm_alias_revision",
+      ]
+    : [];
   const expectedKeys = state === "applied"
-    ? [...commonKeys, "cell_audience", "ingest_url"]
+    ? [...commonKeys, ...customDomainKeys, "cell_audience", "ingest_url"]
     : state === "suspended"
-    ? [...commonKeys, "suspension_disposition"]
-    : commonKeys;
+    ? [...commonKeys, ...customDomainKeys, "suspension_disposition"]
+    : [...commonKeys, ...customDomainKeys];
   if (!exactKeys(value, expectedKeys) || value.schema_version !== REALM_ROUTE_SCHEMA_VERSION) {
     throw new Error("realm route projection schema is invalid");
   }
@@ -163,7 +175,8 @@ export function validateRealmRouteProjection(value, expectedDomain, expectedReal
   if (
     (routeKind === "canonical" && (realmLabel !== realmMatch[1] || !REALM_ID_BODY.test(realmLabel))) ||
     (routeKind === "realm_alias" && (realmLabel === realmMatch[1] || REALM_ID_BODY.test(realmLabel))) ||
-    (routeKind !== "canonical" && routeKind !== "realm_alias")
+    (routeKind === "custom_domain" && (realmLabel === realmMatch[1] || REALM_ID_BODY.test(realmLabel))) ||
+    !["canonical", "realm_alias", "custom_domain"].includes(routeKind)
   ) {
     throw new Error("realm route projection kind is inconsistent");
   }
@@ -191,6 +204,28 @@ export function validateRealmRouteProjection(value, expectedDomain, expectedReal
     updated_at: value.updated_at,
     cache_ttl_seconds: value.cache_ttl_seconds,
   };
+  if (routeKind === "custom_domain") {
+    const domainRequestID = String(value.domain_request_id ?? "");
+    const realmAliasClaimID = String(value.realm_alias_claim_id ?? "");
+    if (!DOMAIN_REQUEST_ID.test(domainRequestID)) {
+      throw new Error("realm route projection domain request id is invalid");
+    }
+    if (!Number.isSafeInteger(value.domain_allocation_revision) ||
+        value.domain_allocation_revision < 1) {
+      throw new Error("realm route projection domain allocation revision is invalid");
+    }
+    if (!REALM_ALIAS_CLAIM_ID.test(realmAliasClaimID)) {
+      throw new Error("realm route projection realm alias claim id is invalid");
+    }
+    if (!Number.isSafeInteger(value.realm_alias_revision) ||
+        value.realm_alias_revision < 1) {
+      throw new Error("realm route projection realm alias revision is invalid");
+    }
+    route.domain_request_id = domainRequestID;
+    route.domain_allocation_revision = value.domain_allocation_revision;
+    route.realm_alias_claim_id = realmAliasClaimID;
+    route.realm_alias_revision = value.realm_alias_revision;
+  }
   if (state === "suspended") {
     const disposition = String(value.suspension_disposition ?? "");
     if (disposition !== "retry" && disposition !== "inactive") {

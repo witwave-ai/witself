@@ -719,7 +719,17 @@ test("stale recovery fences cannot replay non-adjacent actions across bounded pa
     const accountID = `acct_page_${String(index).padStart(3, "0")}`;
     return [`plan-intent:${accountID}`, {
       account_id: accountID,
+      plan_revision: 1,
+      plan_snapshot_hash: "a".repeat(64),
+      feature_enabled: true,
+      alias_limit: 1,
+      activation_enabled: true,
+      state: "awaiting_cell",
+      claim_cursor: null,
+      failure_count: 0,
       retry_at_ms: Date.UTC(2026, 7, 2),
+      created_at: "2026-08-02T00:00:00.000Z",
+      updated_at: "2026-08-02T00:00:00.000Z",
     }];
   });
   const source = await bootstrapSource(intents);

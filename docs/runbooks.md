@@ -464,13 +464,15 @@ decision; do not silently route either role address to a personal mailbox.
 
 ## Deploy, checkpoint, and drill the dark custom-domain authority
 
-This is a control-plane-only rollout. It covers both a fresh authority-journal
-bootstrap and later dark deployments of the request, ownership-verification,
-plan, and account-lifecycle state machine. It reuses the existing
+The deployed v0.0.238 procedure in this section is a control-plane-only rollout.
+It covers both a fresh authority-journal bootstrap and later dark deployments
+of the request, ownership-verification, plan, and account-lifecycle state
+machine. It reuses the existing
 `AgentEmailDomainRegistry` Durable Object class and fixed active object name
 `global`; there is no new Durable Object migration, cell database migration,
 cell selection, plan deployment, DNS operation, Email Routing change, or mail
-delivery activation.
+delivery activation. The later schema-88 dark routing foundation is documented
+separately below and is not part of this completed v0.0.238 procedure.
 
 The release must contain the custom-domain journal/recovery runtime, external
 administrator routes, Go client and `witself-admin` commands, and the private R2
@@ -489,8 +491,8 @@ binding. Verify those surfaces in:
 - `internal/client/agent_email_domain_recovery.go`
 - `cmd/witself-admin/email_domain_cmd.go`
 
-Keep all customer and DNS-observation controls absent during every dark
-deployment:
+Keep the four v0.0.238 customer and DNS-observation controls absent during every
+dark authority deployment:
 
 - `CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUESTS_ENABLED`
 - `CP_AGENT_EMAIL_CUSTOM_DOMAIN_REQUEST_ACCOUNT_ALLOWLIST`
@@ -559,6 +561,100 @@ refresh/claim fences have passed a controlled canary and exact `awaiting_cell`
 plan recovery has been exercised through the durable plan workflow.
 Custom-domain provider routing, cell projection, and mail delivery must be
 accepted separately.
+
+### Schema-88 dark routing acceptance: live controls remain off
+
+This engineering slice is not a production activation. It adds the cell
+table/API, permanent sparse authority, durable source outboxes, a journal-local
+leaf route intent, the schema-v1 edge union variant, and receipt provenance for
+`agent.realm-alias@customer-domain`. The control-plane and edge code may be
+deployed dark, but do not deploy schema 88 to a serving cell, enable a live
+route, send a real canary, or change DNS, MX, Cloudflare Email Routing, a
+catch-all, Worker association, or a customer zone during this acceptance pass.
+
+In addition to the four v0.0.238 authority controls above, the new control-plane
+release must prove that both routing controls are absent:
+
+- `CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ENABLED`
+- `CP_AGENT_EMAIL_CUSTOM_DOMAIN_ROUTING_ACCOUNT_ALLOWLIST`
+
+The agent-email Worker must independently prove that
+`AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED` is absent. The first two controls
+must later be exact-true plus exact account membership, with no wildcard or
+surrounding whitespace; the edge control must be the exact lowercase string
+`true`. None is implied by request, verification, managed alias, canonical, or
+receive-entitlement state.
+
+The control-plane deployment guard now rejects any of its six custom-domain
+secret names. Verify only secret names, never values:
+
+```sh
+CP_DIR="${WITSELF_RELEASE_CHECKOUT:?set clean release checkout}/infra/cloudflare/control-plane"
+EDGE_DIR="${WITSELF_RELEASE_CHECKOUT}/infra/cloudflare/agent-email"
+(
+  cd "$CP_DIR"
+  npm run assert:custom-domain-dark
+)
+
+EDGE_SECRET_NAMES="$(
+  cd "$EDGE_DIR" &&
+  npm exec -- wrangler secret list \
+    --name witself-agent-email-pilot --format json | jq -r '.[].name'
+)" || exit 1
+if grep -Fxq 'AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED' \
+    <<<"$EDGE_SECRET_NAMES"; then
+  echo "custom-domain edge delivery secret is present; aborting" >&2
+  exit 1
+fi
+```
+
+Use repository fakes and a disposable test database to prove this exact order:
+
+1. The control plane resolves one verified domain allocation and one existing
+   realm-alias claim with the same account, exact realm, and exact label.
+2. The domain registry journals the permanent sparse binding and its source
+   outbox; the alias registry independently proves the claim and journals its
+   permanent subscription marker.
+3. Only after both acknowledgements does the domain registry durably stage the
+   journal-local leaf intent keyed by domain request and realm label.
+4. It POSTs the complete schema-88 projection to the account's cell and GETs the
+   same request/claim identity back under the provision token.
+5. It re-proves both source authorities, then publishes
+   `email:realm-route:v1:<domain>:<realm-label>` with
+   `route_kind=custom_domain` and the four request/allocation and
+   claim/revision fences.
+6. The fake edge accepts only that fresh variant when its test-only gate is
+   exact true. The fake cell derives both receipt ids from the existing signed
+   envelope and local route rows; no new relay header is present.
+7. Lost subscription/cell/KV acknowledgements replay durable work, stale authority
+   prevents KV publication, and suspended/retired rows fail closed.
+
+Run the complete suites rather than enabling any live control:
+
+```sh
+make check
+(
+  cd infra/cloudflare/control-plane
+  npm test
+)
+(
+  cd infra/cloudflare/agent-email
+  npm test
+)
+```
+
+Run the PostgreSQL custom-domain integration/archive/downgrade tests only with
+`WITSELF_TEST_DATABASE_URL` pointing at a disposable database. Require schema
+88, exact POST/readback replay, `custom_domain` message provenance with both
+source ids, schema-88 archive round trip, schema-87 archive compatibility, and
+fail-closed downgrade with any route or receipt. Delete only the disposable
+test database when finished; never delete a retired route or message from a
+serving cell to make a rollback pass.
+
+Passing these tests makes the branch reviewable; it does not authorize a cell,
+control-plane, or edge rollout. Provider onboarding, DNS/MX/Email Routing,
+live route publication, live delivery, routing-account selection, and a real
+canary remain separate human-assisted work.
 
 ### Dark lifecycle and ownership-verification deployment
 
@@ -978,6 +1074,13 @@ closed through a separately reviewed canary.
 
 ### Stop and rollback rules
 
+- The schema-88 route foundation has no active-cell production rollout or live
+  rollback procedure. On a disposable test cell, an empty route table and zero
+  custom-domain receipts permit the migration's normal down path. Once any
+  route exists, including a retired tombstone, or any `custom_domain` receipt
+  exists, schema 88 refuses downgrade before mutation. Leave schema 88 intact
+  and roll application behavior forward; never delete authority or mail to
+  force schema 87.
 - A release that understands `verification-refresh:` may roll back to a
   pre-refresh release only while the verification gate has remained absent and
   an exact scan proves that no refresh record exists. After the first refresh
