@@ -15,7 +15,9 @@ import {
 import {
   exactGeneratedConfigPath,
   GENERATED_CONFIG_PATH,
+  preflightManagedCohortProtocolUpgrade,
   releaseDeploymentArguments,
+  verifyManagedCohortProtocolUpgrade,
 } from "../scripts/deploy-release.mjs";
 import {
   sourceIdentity,
@@ -36,6 +38,94 @@ const date = "2026-07-23T01:02:03Z";
 const versionID = "01234567-89ab-cdef-0123-456789abcdef";
 const routeSigningKeyID = "route-2026-08";
 const agentEmailDirectoryID = "b".repeat(32);
+const emailEdgeDeploymentID = "11111111-1111-4111-8111-111111111111";
+const emailEdgeVersionID = "22222222-2222-4222-8222-222222222222";
+
+function emailEdgeDeployment() {
+  return {
+    id: emailEdgeDeploymentID,
+    strategy: "percentage",
+    versions: [{ version_id: emailEdgeVersionID, percentage: 100 }],
+  };
+}
+
+function emailEdgeVersion({
+  release = "0.0.240",
+  alias = "false",
+  canonical = "false",
+} = {}) {
+  return {
+    id: emailEdgeVersionID,
+    resources: {
+      script: { handlers: ["email"] },
+      bindings: [
+        { name: "WITSELF_EDGE_RELEASE_VERSION", type: "plain_text", text: release },
+        { name: "REALM_EMAIL_ALIAS_DELIVERY_ENABLED", type: "plain_text", text: alias },
+        { name: "REALM_EMAIL_CANONICAL_DELIVERY_ENABLED", type: "plain_text", text: canonical },
+      ],
+    },
+  };
+}
+
+test("v0.0.241 CP-first deployment requires the active v0.0.240 edge to be dark", () => {
+  assert.deepEqual(
+    verifyManagedCohortProtocolUpgrade(
+      "0.0.241",
+      emailEdgeDeployment(),
+      emailEdgeVersion(),
+    ),
+    { required: true, edge_release: "0.0.240", already_current: false },
+  );
+  for (const overrides of [
+    { alias: "true" },
+    { canonical: "true" },
+  ]) {
+    assert.throws(
+      () => verifyManagedCohortProtocolUpgrade(
+        "0.0.241",
+        emailEdgeDeployment(),
+        emailEdgeVersion(overrides),
+      ),
+      /managed delivery gates to be false/,
+    );
+  }
+  assert.throws(
+    () => verifyManagedCohortProtocolUpgrade(
+      "0.0.241",
+      emailEdgeDeployment(),
+      emailEdgeVersion({ release: "0.0.239" }),
+    ),
+    /requires a v0\.0\.240 or v0\.0\.241 email edge/,
+  );
+});
+
+test("managed cohort protocol preflight inspects the exact active email edge before CP mutation", () => {
+  const calls = [];
+  const result = preflightManagedCohortProtocolUpgrade("0.0.241", (args) => {
+    calls.push(args);
+    return calls.length === 1 ? emailEdgeDeployment() : emailEdgeVersion();
+  });
+  assert.deepEqual(result, {
+    required: true,
+    edge_release: "0.0.240",
+    already_current: false,
+  });
+  assert.deepEqual(calls, [
+    ["deployments", "status", "--name", "witself-agent-email-pilot", "--json"],
+    [
+      "versions", "view", emailEdgeVersionID,
+      "--name", "witself-agent-email-pilot", "--json",
+    ],
+  ]);
+  let inspected = false;
+  assert.deepEqual(
+    preflightManagedCohortProtocolUpgrade("0.0.242", () => {
+      inspected = true;
+    }),
+    { required: false },
+  );
+  assert.equal(inspected, false);
+});
 
 test("release renderer injects matching immutable container and Worker identity", async (t) => {
   const temp = await mkdtemp(join(tmpdir(), "witself-cp-config-"));

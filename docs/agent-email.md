@@ -543,17 +543,22 @@ both deployed Workers to contain those exact bytes while retaining every dark
 delivery-gate check, and emits only count and digest. Operators must run that
 single comparison before provider activation.
 
-The v241 protocol rollout is safe in either code-deployment order but mixed
-versions are intentionally unavailable for managed mail. A new edge reading a
-v240 managed row forces refresh and tempfails if the old control plane returns
-v1 again. A v240 edge rejects a new signed-v3 managed row, retries through the
-control plane, and tempfails when it receives v3 again. Neither order reads MIME,
-contacts a cell, or bounces the known address. Complete both Worker upgrades
-with the delivery gates false before installing a nonempty cohort. Install the
-control-plane cohort first and the edge cohort second, run the explicit expected
-cohort readiness check, then perform the separately reviewed provider and gate
-activation. To remove an account, remove it from the edge cohort first so even
-fresh cached v2 rows stop immediately, then remove it from the control plane.
+The v241 protocol rollout is safe in either code-deployment order only after the
+active v240 edge's canonical and alias delivery gates are both verified false.
+A new edge reading a v240 managed row forces refresh and tempfails if the old
+control plane returns v1 again. A v240 edge rejects a new signed-v3 managed row,
+but it can still deliver from a fresh legacy signed-v2 KV row without consulting
+the new control plane when its old route-kind gate is true. The v0.0.241
+control-plane release command therefore follows the exact active email-edge
+version before mutation and refuses a CP-first upgrade unless a v0.0.240 edge
+has both gates false; an already-current v0.0.241 edge is compatible. Under that
+mandatory dark precondition, neither mixed order reads MIME, contacts a cell, or
+bounces the known address. Complete both Worker upgrades before installing a
+nonempty cohort. Install the control-plane cohort first and the edge cohort
+second, run the explicit expected-cohort readiness check, then perform the
+separately reviewed provider and gate activation. To remove an account, remove
+it from the edge cohort first so even fresh cached v2 rows stop immediately,
+then remove it from the control plane.
 
 The guarded edge rollback tool may treat v0.0.240's missing cohort binding as
 the empty value only when both the current and candidate alias/canonical gates
