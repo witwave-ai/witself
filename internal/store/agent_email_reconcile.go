@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/witwave-ai/witself/internal/agentemail"
 )
 
 // ReconcileAgentEmailPilot preflights the complete process allowlist and then
@@ -88,8 +90,8 @@ func (s *Store) ReconcileAgentEmailPilot(
 	for _, agentID := range agentIDs {
 		if !found[agentID] {
 			return nil, fmt.Errorf(
-				"%w: enrolled pilot agent %s is not live in realm %s",
-				ErrAgentEmailPilotNotEnrolled, agentID, realmID,
+				"%w: an enrolled pilot agent is not live in the configured realm",
+				ErrAgentEmailPilotNotEnrolled,
 			)
 		}
 	}
@@ -108,22 +110,20 @@ func (s *Store) ReconcileAgentEmailPilot(
 			)
 			if err != nil {
 				return nil, fmt.Errorf(
-					"verify suspended agent-email mailbox for %s: %w",
-					agentID, err,
+					"verify suspended agent-email mailbox: %w", err,
 				)
 			}
 			if err := populateSuspendedAgentEmailCanonicalAddressesTx(
 				ctx, tx, scope, &address,
 			); err != nil {
 				return nil, fmt.Errorf(
-					"verify suspended agent-email domain routes for %s: %w",
-					agentID, err,
+					"verify suspended agent-email domain routes: %w", err,
 				)
 			}
 			if address.RealmID != realmID {
 				return nil, fmt.Errorf(
-					"%w: suspended agent-email mailbox for %s drifted from configured realm",
-					ErrAgentEmailPilotNotEnrolled, agentID,
+					"%w: suspended agent-email mailbox drifted from its configured realm",
+					ErrAgentEmailPilotNotEnrolled,
 				)
 			}
 			addresses = append(addresses, address)
@@ -153,7 +153,7 @@ func (s *Store) ReconcileAgentEmailPilot(
 			}
 		}
 		if err != nil {
-			return nil, fmt.Errorf("reconcile agent-email mailbox for %s: %w", agentID, err)
+			return nil, fmt.Errorf("reconcile agent-email mailbox: %w", err)
 		}
 		addresses = append(addresses, address)
 	}
@@ -170,6 +170,25 @@ type AgentEmailProductionPreflight struct {
 	ReadyMailboxCount   int64
 	MissingMailboxCount int64
 	RetryCanaryReady    bool
+}
+
+// AgentEmailProductionBackfillError identifies one mailbox that needs private
+// operator review without putting its identity in Error() or process logs.
+// The explicit backfill command may serialize these fields only into its
+// operator-selected mode-0600 exception artifact.
+type AgentEmailProductionBackfillError struct {
+	AgentID    string
+	RealmID    string
+	ReasonCode string
+	Err        error
+}
+
+func (e *AgentEmailProductionBackfillError) Error() string {
+	return "production agent-email backfill requires private operator review"
+}
+
+func (e *AgentEmailProductionBackfillError) Unwrap() error {
+	return e.Err
 }
 
 // AgentEmailProductionCanaryAgent is one actual, currently enabled canonical
@@ -418,9 +437,27 @@ func (s *Store) ReconcileAgentEmailProductionCohort(
 	ctx context.Context,
 	scope AgentEmailReceiveScope,
 ) (int64, error) {
+	return s.ReconcileAgentEmailProductionCohortWithOverrides(ctx, scope, nil)
+}
+
+// ReconcileAgentEmailProductionCohortWithOverrides performs the production
+// backfill with an explicit operator-authored segment for exceptional existing
+// agents. Every override is preflighted against the exact live cohort before
+// the first write; an already-provisioned matching override is an idempotent
+// replay, while a typo or a different existing segment fails closed.
+func (s *Store) ReconcileAgentEmailProductionCohortWithOverrides(
+	ctx context.Context,
+	scope AgentEmailReceiveScope,
+	overrides map[string]string,
+) (int64, error) {
 	domain, accountIDs, accountStatuses, _, err :=
 		s.preflightAgentEmailProductionCohort(ctx, scope)
 	if err != nil {
+		return 0, err
+	}
+	if err := s.preflightAgentEmailProductionOverrides(
+		ctx, domain, accountIDs, overrides,
+	); err != nil {
 		return 0, err
 	}
 
@@ -458,8 +495,20 @@ func (s *Store) ReconcileAgentEmailProductionCohort(
 			for _, identity := range page {
 				if err := s.reconcileProductionAgentEmailMailbox(
 					ctx, scope, domain, accountID, accountStatuses[accountID],
-					identity[0], identity[1],
+					identity[0], identity[1], overrides[identity[1]],
 				); err != nil {
+					reason := ""
+					if errors.Is(err, ErrAgentEmailInputInvalid) {
+						reason = "agent_segment_requires_override"
+					} else if errors.Is(err, ErrAgentEmailAddressConflict) {
+						reason = "address_collision_requires_override"
+					}
+					if reason != "" {
+						return reconciled, &AgentEmailProductionBackfillError{
+							AgentID: identity[1], RealmID: identity[0],
+							ReasonCode: reason, Err: err,
+						}
+					}
 					return reconciled, err
 				}
 				reconciled++
@@ -472,6 +521,135 @@ func (s *Store) ReconcileAgentEmailProductionCohort(
 		}
 	}
 	return reconciled, nil
+}
+
+func (s *Store) preflightAgentEmailProductionOverrides(
+	ctx context.Context,
+	domain string,
+	accountIDs []string,
+	overrides map[string]string,
+) error {
+	if len(overrides) == 0 {
+		return nil
+	}
+	agentIDs := make([]string, 0, len(overrides))
+	for agentID, segment := range overrides {
+		if !validAgentEmailGeneratedID(agentID, "agent") {
+			return fmt.Errorf("%w: production mailbox override agent id is invalid", ErrAgentEmailInputInvalid)
+		}
+		if normalized, err := agentemail.ValidateAgentSegment(segment); err != nil ||
+			normalized != segment {
+			return fmt.Errorf("%w: production mailbox override segment is invalid",
+				ErrAgentEmailInputInvalid)
+		}
+		agentIDs = append(agentIDs, agentID)
+	}
+	sort.Strings(agentIDs)
+	rows, err := s.pool.Query(ctx, `
+		SELECT a.id,r.id,address.agent_segment
+		FROM realms r
+		JOIN agents a ON a.realm_id=r.id
+		LEFT JOIN agent_email_addresses address
+		  ON address.account_id=r.account_id AND address.realm_id=r.id
+		 AND address.provisioned_agent_id=a.id AND address.retired_at IS NULL
+		WHERE r.account_id=ANY($1::text[]) AND a.id=ANY($2::text[])
+		  AND r.deleted_at IS NULL AND r.email_route_state='live'
+		  AND a.deleted_at IS NULL
+		ORDER BY a.id`, accountIDs, agentIDs)
+	if err != nil {
+		return fmt.Errorf("preflight production mailbox overrides: %w", err)
+	}
+	defer rows.Close()
+	found := make(map[string]bool, len(overrides))
+	realms := make(map[string]string, len(overrides))
+	for rows.Next() {
+		var agentID string
+		var realmID string
+		var existingSegment *string
+		if err := rows.Scan(&agentID, &realmID, &existingSegment); err != nil {
+			return fmt.Errorf("scan production mailbox override: %w", err)
+		}
+		if found[agentID] {
+			return fmt.Errorf("%w: production mailbox override owner is ambiguous",
+				ErrAgentEmailConflict)
+		}
+		found[agentID] = true
+		realms[agentID] = realmID
+		if existingSegment != nil && *existingSegment != overrides[agentID] {
+			return fmt.Errorf("%w: production mailbox override does not match its existing address",
+				ErrAgentEmailConflict)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("scan production mailbox overrides: %w", err)
+	}
+	for _, agentID := range agentIDs {
+		if !found[agentID] {
+			return fmt.Errorf("%w: production mailbox override agent is outside the live cohort",
+				ErrAgentEmailPilotNotEnrolled)
+		}
+	}
+
+	// Validate the complete override namespace before the first mailbox write.
+	// Permanent route reservations fence addresses already issued on the target
+	// domain. Live address rows additionally fence the same local part before an
+	// older mailbox has received its additive target-domain route.
+	targetOwners := make(map[string]string, len(overrides))
+	localParts := make([]string, 0, len(overrides))
+	for _, agentID := range agentIDs {
+		parts, err := agentemail.ComposeAddress(
+			overrides[agentID], realms[agentID], domain,
+		)
+		if err != nil {
+			return fmt.Errorf("%w: production mailbox override address is invalid",
+				ErrAgentEmailInputInvalid)
+		}
+		if _, duplicated := targetOwners[parts.LocalPart]; duplicated {
+			return fmt.Errorf("%w: production mailbox overrides claim one address more than once",
+				ErrAgentEmailConflict)
+		}
+		targetOwners[parts.LocalPart] = agentID
+		localParts = append(localParts, parts.LocalPart)
+	}
+	sort.Strings(localParts)
+	reserved, err := s.pool.Query(ctx, `
+		SELECT local_part,provisioned_agent_id,agent_segment,live
+		FROM (
+		  SELECT address.local_part,address.provisioned_agent_id,
+		         address.agent_segment,true AS live
+		  FROM agent_email_addresses address
+		  WHERE address.local_part=ANY($2::text[]) AND address.retired_at IS NULL
+		  UNION ALL
+		  SELECT route.local_part,address.provisioned_agent_id,
+		         address.agent_segment,address.retired_at IS NULL AS live
+		  FROM agent_email_address_domains route
+		  JOIN agent_email_addresses address ON address.id=route.address_id
+		  WHERE route.domain=$1 AND route.local_part=ANY($2::text[])
+		) reservations
+		ORDER BY local_part,provisioned_agent_id`, domain, localParts)
+	if err != nil {
+		return fmt.Errorf("preflight production mailbox override reservations: %w", err)
+	}
+	defer reserved.Close()
+	for reserved.Next() {
+		var localPart, ownerAgentID, existingSegment string
+		var live bool
+		if err := reserved.Scan(
+			&localPart, &ownerAgentID, &existingSegment, &live,
+		); err != nil {
+			return fmt.Errorf("scan production mailbox override reservation: %w", err)
+		}
+		targetOwner := targetOwners[localPart]
+		if targetOwner == "" || ownerAgentID != targetOwner || !live ||
+			existingSegment != overrides[targetOwner] {
+			return fmt.Errorf("%w: production mailbox override address is permanently reserved",
+				ErrAgentEmailConflict)
+		}
+	}
+	if err := reserved.Err(); err != nil {
+		return fmt.Errorf("scan production mailbox override reservations: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) preflightAgentEmailProductionCohort(
@@ -512,8 +690,8 @@ func preflightAgentEmailProductionCohortQuery(
 			Scan(&status)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", nil, nil, AgentEmailProductionPreflight{}, fmt.Errorf(
-				"%w: production receive account %s is not present in this cell",
-				ErrAgentEmailPilotNotEnrolled, accountID,
+				"%w: a production receive account is not present in this cell",
+				ErrAgentEmailPilotNotEnrolled,
 			)
 		}
 		if err != nil {
@@ -555,7 +733,7 @@ func preflightAgentEmailProductionCohortQuery(
 func (s *Store) reconcileProductionAgentEmailMailbox(
 	ctx context.Context,
 	scope AgentEmailReceiveScope,
-	domain, accountID, accountStatus, realmID, agentID string,
+	domain, accountID, accountStatus, realmID, agentID, explicitSegment string,
 ) error {
 	if accountStatus == "suspended" {
 		tx, err := s.pool.Begin(ctx)
@@ -581,7 +759,9 @@ func (s *Store) reconcileProductionAgentEmailMailbox(
 		return tx.Commit(ctx)
 	}
 
-	address, err := s.EnsureAgentEmailMailbox(ctx, scope, accountID, realmID, agentID, "")
+	address, err := s.EnsureAgentEmailMailbox(
+		ctx, scope, accountID, realmID, agentID, explicitSegment,
+	)
 	if errors.Is(err, ErrAgentEmailAddressConflict) {
 		existing, lookupErr := s.GetAgentEmailAddress(ctx, scope, Principal{
 			Kind: PrincipalAgent, ID: agentID, AccessProfile: AccessProfileFull,
@@ -593,6 +773,12 @@ func (s *Store) reconcileProductionAgentEmailMailbox(
 	}
 	if err != nil {
 		return fmt.Errorf("reconcile production agent-email mailbox: %w", err)
+	}
+	if explicitSegment != "" && address.AgentSegment != explicitSegment {
+		return fmt.Errorf(
+			"%w: production mailbox override did not converge",
+			ErrAgentEmailConflict,
+		)
 	}
 	if !agentEmailAddressHasPrimaryDomain(address, domain) {
 		return fmt.Errorf("%w: production mailbox primary domain did not converge", ErrAgentEmailConflict)

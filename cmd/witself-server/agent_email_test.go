@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -173,6 +174,96 @@ func TestAgentEmailProductionConfigFromEnvRejectsUnsafeShapes(t *testing.T) {
 				t.Fatalf("error = %v, want substring %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestAgentEmailIdentifierParseErrorsAreValueFree(t *testing.T) {
+	privateAccountID := "acc_aaaaaaaaaaaaaaaa"
+	privateAgentID := "agent_bbbbbbbbbbbbbbbb"
+	for _, tc := range []struct {
+		name       string
+		privateID  string
+		parse      func() error
+		wantDetail string
+	}{
+		{
+			name: "invalid account", privateID: "acc_customer-private",
+			parse: func() error {
+				_, err := parseAgentEmailProductionAccountIDs("acc_customer-private")
+				return err
+			},
+			wantDetail: "position 1 is not canonical",
+		},
+		{
+			name: "duplicate account", privateID: privateAccountID,
+			parse: func() error {
+				_, err := parseAgentEmailProductionAccountIDs(
+					privateAccountID + "," + privateAccountID,
+				)
+				return err
+			},
+			wantDetail: "position 2 is duplicated",
+		},
+		{
+			name: "duplicate agent", privateID: privateAgentID,
+			parse: func() error {
+				_, err := parseAgentEmailIDSet(privateAgentID + "," + privateAgentID)
+				return err
+			},
+			wantDetail: "position 2 is duplicated",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.parse()
+			if err == nil || !strings.Contains(err.Error(), tc.wantDetail) {
+				t.Fatalf("error = %v, want bounded detail %q", err, tc.wantDetail)
+			}
+			if strings.Contains(err.Error(), tc.privateID) {
+				t.Fatalf("identifier leaked in parser error: %v", err)
+			}
+		})
+	}
+}
+
+func TestAgentEmailLogSafeErrorRedactsIdentifiersAndPreservesReason(t *testing.T) {
+	identifiers := []string{
+		"acc_aaaaaaaaaaaaaaaa",
+		"realm_bbbbbbbbbbbbbbbb",
+		"agent_cccccccccccccccc",
+	}
+	cause := fmt.Errorf(
+		"account %s realm %s agent %s: %w",
+		identifiers[0], identifiers[1], identifiers[2],
+		store.ErrAgentEmailPilotNotEnrolled,
+	)
+	err := newAgentEmailLogSafeError(
+		"agent-email production startup preflight", "preflight_failed", cause,
+	)
+	if got, want := err.Error(),
+		"agent-email production startup preflight failed (reason=cohort_not_ready)"; got != want {
+		t.Fatalf("safe error = %q, want %q", got, want)
+	}
+	if !errors.Is(err, store.ErrAgentEmailPilotNotEnrolled) {
+		t.Fatalf("safe error lost its internal sentinel: %v", err)
+	}
+	for _, identifier := range identifiers {
+		if strings.Contains(err.Error(), identifier) {
+			t.Fatalf("identifier %q leaked in safe error: %v", identifier, err)
+		}
+	}
+
+	unknown := newAgentEmailLogSafeError(
+		"agent-email production backfill reconciliation", "reconciliation_failed",
+		errors.New(strings.Join(identifiers, " ")),
+	)
+	if got, want := unknown.Error(),
+		"agent-email production backfill reconciliation failed (reason=reconciliation_failed)"; got != want {
+		t.Fatalf("safe fallback error = %q, want %q", got, want)
+	}
+	for _, identifier := range identifiers {
+		if strings.Contains(unknown.Error(), identifier) {
+			t.Fatalf("identifier %q leaked in fallback error: %v", identifier, unknown)
+		}
 	}
 }
 
@@ -376,8 +467,9 @@ func TestAgentEmailStorageLimitMappingAndConversions(t *testing.T) {
 func TestWriteNewPrivateAgentEmailJSONIsExclusiveAndPrivate(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "primary-canary.json")
 	value := agentEmailPrimaryCanaryManifest{
-		SchemaVersion: 1, Domain: "witmail.net",
+		SchemaVersion: 2, Domain: "witmail.net",
 		WorkerName: "witself-agent-email-pilot",
+		AccountIDs: []string{"acc_aaaaaaaaaaaaaaaa"},
 		Agents: []agentEmailPrimaryCanaryManifestAgent{{
 			AgentID: "agent_aaaaaaaaaaaaaaaa",
 			RealmID: "realm_bbbbbbbbbbbbbbbb",
@@ -402,10 +494,15 @@ func TestWriteNewPrivateAgentEmailJSONIsExclusiveAndPrivate(t *testing.T) {
 	if err := json.Unmarshal(payload, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if len(decoded) != 4 || decoded["schema_version"] != float64(1) ||
+	if len(decoded) != 5 || decoded["schema_version"] != float64(2) ||
 		decoded["domain"] != "witmail.net" ||
 		decoded["worker_name"] != "witself-agent-email-pilot" {
 		t.Fatalf("private manifest envelope = %#v", decoded)
+	}
+	decodedAccounts, ok := decoded["account_ids"].([]any)
+	if !ok || len(decodedAccounts) != 1 ||
+		decodedAccounts[0] != "acc_aaaaaaaaaaaaaaaa" {
+		t.Fatalf("private manifest accounts = %#v", decoded["account_ids"])
 	}
 	decodedAgents, ok := decoded["agents"].([]any)
 	if !ok || len(decodedAgents) != 1 {
@@ -427,6 +524,191 @@ func TestWriteNewPrivateAgentEmailJSONIsExclusiveAndPrivate(t *testing.T) {
 	}
 	if string(payloadAfter) != string(payload) {
 		t.Fatal("failed exclusive manifest rewrite changed the original file")
+	}
+}
+
+func TestReadAgentEmailBackfillOverridesRequiresCanonicalPrivateManifest(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "overrides.json")
+	payload := []byte(`{"schema_version":1,"overrides":[` +
+		`{"agent_id":"agent_aaaaaaaaaaaaaaaa","agent_segment":"support-agent"},` +
+		`{"agent_id":"agent_bbbbbbbbbbbbbbbb","agent_segment":"mail-bot"}]}`)
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	overrides, err := readAgentEmailBackfillOverrides(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(overrides) != 2 || overrides["agent_aaaaaaaaaaaaaaaa"] != "support-agent" ||
+		overrides["agent_bbbbbbbbbbbbbbbb"] != "mail-bot" {
+		t.Fatalf("overrides = %#v", overrides)
+	}
+	if _, err := readAgentEmailBackfillOverrides("relative.json"); err == nil {
+		t.Fatal("relative override manifest unexpectedly succeeded")
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readAgentEmailBackfillOverrides(path); err == nil {
+		t.Fatal("non-private override manifest unexpectedly succeeded")
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(
+		`{"schema_version":1,"overrides":[`+
+			`{"agent_id":"agent_bbbbbbbbbbbbbbbb","agent_segment":"mail-bot"},`+
+			`{"agent_id":"agent_aaaaaaaaaaaaaaaa","agent_segment":"support-agent"}]}`,
+	), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readAgentEmailBackfillOverrides(path); err == nil {
+		t.Fatal("unsorted override manifest unexpectedly succeeded")
+	}
+}
+
+func TestReadAgentEmailBackfillOverridesRejectsMalformedBoundaryFiles(t *testing.T) {
+	directory := t.TempDir()
+	missing := filepath.Join(directory, "private-customer-identity.json")
+	if _, err := readAgentEmailBackfillOverrides(missing); err == nil ||
+		strings.Contains(err.Error(), missing) {
+		t.Fatalf("missing private override error leaked its path: %v", err)
+	}
+	tests := map[string]string{
+		"wrong-schema": `{"schema_version":2,"overrides":[` +
+			`{"agent_id":"agent_aaaaaaaaaaaaaaaa","agent_segment":"support"}]}`,
+		"empty": `{"schema_version":1,"overrides":[]}`,
+		"unknown-field": `{"schema_version":1,"unexpected":true,"overrides":[` +
+			`{"agent_id":"agent_aaaaaaaaaaaaaaaa","agent_segment":"support"}]}`,
+		"trailing-json": `{"schema_version":1,"overrides":[` +
+			`{"agent_id":"agent_aaaaaaaaaaaaaaaa","agent_segment":"support"}]} {}`,
+		"duplicate-agent": `{"schema_version":1,"overrides":[` +
+			`{"agent_id":"agent_aaaaaaaaaaaaaaaa","agent_segment":"support"},` +
+			`{"agent_id":"agent_aaaaaaaaaaaaaaaa","agent_segment":"support-two"}]}`,
+		"noncanonical-segment": `{"schema_version":1,"overrides":[` +
+			`{"agent_id":"agent_aaaaaaaaaaaaaaaa","agent_segment":"Support"}]}`,
+	}
+	for name, payload := range tests {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(directory, name+".json")
+			if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readAgentEmailBackfillOverrides(path); err == nil {
+				t.Fatal("malformed override manifest unexpectedly succeeded")
+			}
+		})
+	}
+
+	oversize := filepath.Join(directory, "oversize.json")
+	if err := os.WriteFile(oversize, []byte(strings.Repeat("x", 64*1024+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readAgentEmailBackfillOverrides(oversize); err == nil {
+		t.Fatal("oversize override manifest unexpectedly succeeded")
+	}
+
+	nonregular := filepath.Join(directory, "directory.json")
+	if err := os.Mkdir(nonregular, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readAgentEmailBackfillOverrides(nonregular); err == nil {
+		t.Fatal("directory override manifest unexpectedly succeeded")
+	}
+
+	target := filepath.Join(directory, "target.json")
+	if err := os.WriteFile(target, []byte(
+		`{"schema_version":1,"overrides":[`+
+			`{"agent_id":"agent_aaaaaaaaaaaaaaaa","agent_segment":"support"}]}`,
+	), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(directory, "link.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := readAgentEmailBackfillOverrides(link); err == nil {
+		t.Fatal("symlink override manifest unexpectedly succeeded")
+	}
+}
+
+func TestAgentEmailBackfillCommandRequiresOnePrivateExceptionOutput(t *testing.T) {
+	overrides := "/private/overrides.json"
+	report := "/private/backfill-exception.json"
+	gotOverrides, gotReport, ok := parseAgentEmailBackfillCommandArgs([]string{
+		"--exception-output", report, "--overrides", overrides,
+	})
+	if !ok || gotOverrides != overrides || gotReport != report {
+		t.Fatalf("parsed backfill args = %q / %q / %v", gotOverrides, gotReport, ok)
+	}
+	gotOverrides, gotReport, ok = parseAgentEmailBackfillCommandArgs([]string{
+		"--exception-output", report,
+	})
+	if !ok || gotOverrides != "" || gotReport != report {
+		t.Fatalf("parsed no-override backfill args = %q / %q / %v",
+			gotOverrides, gotReport, ok)
+	}
+	for _, args := range [][]string{
+		{},
+		{"--overrides", overrides},
+		{"--exception-output", report, "--exception-output", report},
+		{"--exception-output", ""},
+		{"--unknown", report},
+	} {
+		if _, _, ok := parseAgentEmailBackfillCommandArgs(args); ok {
+			t.Fatalf("invalid backfill args unexpectedly parsed: %#v", args)
+		}
+	}
+}
+
+func TestAgentEmailBackfillExceptionReportIsPrivateAndExclusive(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "backfill-exception.json")
+	if err := validateNewPrivateAgentEmailJSONPath(path); err != nil {
+		t.Fatal(err)
+	}
+	privateErr := &store.AgentEmailProductionBackfillError{
+		AgentID: "agent_aaaaaaaaaaaaaaaa", RealmID: "realm_bbbbbbbbbbbbbbbb",
+		ReasonCode: "agent_segment_requires_override", Err: store.ErrAgentEmailInputInvalid,
+	}
+	if strings.Contains(privateErr.Error(), privateErr.AgentID) ||
+		strings.Contains(privateErr.Error(), privateErr.RealmID) ||
+		!errors.Is(privateErr, store.ErrAgentEmailInputInvalid) {
+		t.Fatalf("backfill exception error exposed identity or lost its sentinel: %v", privateErr)
+	}
+	report := agentEmailBackfillExceptionReport{
+		SchemaVersion: 1, State: "requires_operator_override",
+		ProcessedAgentCount: 3,
+		AgentID:             privateErr.AgentID,
+		RealmID:             privateErr.RealmID,
+		ReasonCode:          privateErr.ReasonCode,
+	}
+	if err := writeNewPrivateAgentEmailJSON(path, report); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("exception report permissions = %o", info.Mode().Perm())
+	}
+	var decoded agentEmailBackfillExceptionReport
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded != report {
+		t.Fatalf("exception report = %#v", decoded)
+	}
+	if err := validateNewPrivateAgentEmailJSONPath(path); err == nil {
+		t.Fatal("existing exception report path unexpectedly validated")
+	}
+	if err := writeNewPrivateAgentEmailJSON(path, report); err == nil {
+		t.Fatal("exception report overwrite unexpectedly succeeded")
 	}
 }
 

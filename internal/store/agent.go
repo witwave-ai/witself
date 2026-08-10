@@ -56,7 +56,7 @@ func (s *Store) CreateAgent(ctx context.Context, accountID, realmID, name string
 func (s *Store) CreateAgentWithEmailMailbox(
 	ctx context.Context,
 	scope AgentEmailReceiveScope,
-	accountID, realmID, name string,
+	accountID, realmID, name, explicitSegment string,
 ) (Agent, AgentEmailAddress, error) {
 	if !scope.Enabled {
 		return Agent{}, AgentEmailAddress{}, ErrAgentEmailPilotDisabled
@@ -87,7 +87,7 @@ func (s *Store) CreateAgentWithEmailMailbox(
 		return Agent{}, AgentEmailAddress{}, err
 	}
 	address, err := ensureAgentEmailMailboxTx(
-		ctx, tx, scope, accountID, realmID, agent.ID, "",
+		ctx, tx, scope, accountID, realmID, agent.ID, explicitSegment,
 	)
 	if err != nil {
 		return Agent{}, AgentEmailAddress{}, err

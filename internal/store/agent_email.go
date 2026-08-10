@@ -375,8 +375,12 @@ type CompleteAgentEmailInput struct {
 }
 
 const (
+	// AgentEmailReceiveModeLegacyPilot requires one exact realm and 5-10
+	// explicitly enrolled agents.
 	AgentEmailReceiveModeLegacyPilot = "legacy_pilot"
-	AgentEmailReceiveModeProduction  = "production"
+	// AgentEmailReceiveModeProduction replaces the fixed pilot enrollment with
+	// an exact account cohort while preserving every durable receive gate.
+	AgentEmailReceiveModeProduction = "production"
 )
 
 // AgentEmailReceiveScope is the process-lifetime default-off receive fence.
@@ -617,11 +621,16 @@ func ensureAgentEmailMailboxTx(
 	}
 	provisioningKind := "derived"
 	segment := explicitSegment
-	if strings.TrimSpace(segment) == "" {
+	if segment == "" {
 		segment, err = agentemail.DeriveAgentSegment(agentName)
 	} else {
 		provisioningKind = "operator_override"
-		segment, err = agentemail.ValidateAgentSegment(segment)
+		var normalized string
+		normalized, err = agentemail.ValidateAgentSegment(segment)
+		if err == nil && normalized != segment {
+			err = agentemail.ErrAddressInvalid
+		}
+		segment = normalized
 	}
 	if err != nil {
 		return AgentEmailAddress{}, fmt.Errorf("%w: %v", ErrAgentEmailInputInvalid, err)

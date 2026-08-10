@@ -4385,6 +4385,7 @@ Flags:
 
 | Flag | Description |
 |---|---|
+| `--email-agent-segment SEGMENT` | Use the v0.0.241+ strict atomic-create route with one byte-for-byte canonical lowercase agent-email segment. Empty, normalized, reserved, or colliding values fail without creating the agent. |
 | `--display-name TEXT` | Human-readable display name. |
 | `--description TEXT` | Description of the agent's purpose. |
 | `--tag TAG` | Add a tag. Repeatable. |

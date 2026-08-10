@@ -235,12 +235,47 @@ func TestAgentEmailFeatureGateCoversOwnerAndIngressOperationsPostgres(t *testing
 	// Production receive replaces only the fixed realm/agent allowlist. The
 	// exact account cohort is independent, and the same local route, plan,
 	// mailbox, realm, and agent checks remain authoritative.
+	legacyReserved, err := st.CreateAgent(
+		ctx, provisioned.AccountID, realm.ID, "postmaster",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents = append(agents, legacyReserved)
+	var collisionAgents []Agent
+	for _, name := range []string{"collision-one", "collision-two"} {
+		agent, err := st.CreateAgent(ctx, provisioned.AccountID, realm.ID, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		collisionAgents = append(collisionAgents, agent)
+		agents = append(agents, agent)
+	}
 	productionScope := AgentEmailReceiveScope{
 		Enabled: true, Mode: AgentEmailReceiveModeProduction,
 		Domain: scope.Domain, Audience: scope.Audience,
 		AccountIDs:         map[string]bool{provisioned.AccountID: true},
 		RetryCanaryAgentID: owner.ID,
 	}
+	retiredAgent, retiredAddress, err := st.CreateAgentWithEmailMailbox(
+		ctx, productionScope, provisioned.AccountID, realm.ID,
+		"retired-reservation", "retired-segment",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeleteAgent(
+		ctx, provisioned.AccountID, realm.ID, retiredAgent.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := st.CreateAgent(
+		ctx, provisioned.AccountID, realm.ID, "reservation-replacement",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents = append(agents, replacement)
 	preflight, err := st.PreflightAgentEmailProductionCohort(ctx, productionScope)
 	if err != nil || preflight.AccountCount != 1 ||
 		preflight.LiveAgentCount != int64(len(agents)) ||
@@ -254,7 +289,49 @@ func TestAgentEmailFeatureGateCoversOwnerAndIngressOperationsPostgres(t *testing
 	); !errors.Is(err, ErrAgentEmailPilotNotEnrolled) {
 		t.Fatalf("production canary with missing mailboxes error = %v", err)
 	}
-	reconciled, err := st.ReconcileAgentEmailProductionCohort(ctx, productionScope)
+	if reconciled, err := st.ReconcileAgentEmailProductionCohortWithOverrides(
+		ctx, productionScope,
+		map[string]string{
+			collisionAgents[0].ID: "shared-segment",
+			collisionAgents[1].ID: "shared-segment",
+		},
+	); reconciled != 0 || !errors.Is(err, ErrAgentEmailConflict) {
+		t.Fatalf("duplicate production override preflight = %d / %v", reconciled, err)
+	}
+	if reconciled, err := st.ReconcileAgentEmailProductionCohortWithOverrides(
+		ctx, productionScope,
+		map[string]string{legacyReserved.ID: address.AgentSegment},
+	); reconciled != 0 || !errors.Is(err, ErrAgentEmailConflict) {
+		t.Fatalf("reserved production override preflight = %d / %v", reconciled, err)
+	}
+	if reconciled, err := st.ReconcileAgentEmailProductionCohortWithOverrides(
+		ctx, productionScope,
+		map[string]string{replacement.ID: retiredAddress.AgentSegment},
+	); reconciled != 0 || !errors.Is(err, ErrAgentEmailConflict) {
+		t.Fatalf("tombstoned production override preflight = %d / %v", reconciled, err)
+	}
+	unchanged, err := st.PreflightAgentEmailProductionCohort(ctx, productionScope)
+	if err != nil || unchanged.ReadyMailboxCount != 1 ||
+		unchanged.MissingMailboxCount != int64(len(agents)-1) {
+		t.Fatalf("override preflight wrote before rejection = %+v / %v", unchanged, err)
+	}
+	if _, err := st.ReconcileAgentEmailProductionCohort(
+		ctx, productionScope,
+	); !errors.Is(err, ErrAgentEmailInputInvalid) {
+		t.Fatalf("production backfill without required override error = %v", err)
+	} else {
+		var exception *AgentEmailProductionBackfillError
+		if !errors.As(err, &exception) || exception.AgentID != legacyReserved.ID ||
+			exception.RealmID != realm.ID ||
+			exception.ReasonCode != "agent_segment_requires_override" ||
+			strings.Contains(err.Error(), legacyReserved.ID) {
+			t.Fatalf("private production backfill exception = %#v / %v", exception, err)
+		}
+	}
+	reconciled, err := st.ReconcileAgentEmailProductionCohortWithOverrides(
+		ctx, productionScope,
+		map[string]string{legacyReserved.ID: "legacy-postmaster"},
+	)
 	if err != nil || reconciled != int64(len(agents)) {
 		t.Fatalf("production cohort reconciliation = %d / %v", reconciled, err)
 	}
@@ -270,6 +347,19 @@ func TestAgentEmailFeatureGateCoversOwnerAndIngressOperationsPostgres(t *testing
 		}); err != nil {
 			t.Fatalf("production mailbox for %s: %v", agent.ID, err)
 		}
+	}
+	reconciled, err = st.ReconcileAgentEmailProductionCohortWithOverrides(
+		ctx, productionScope,
+		map[string]string{legacyReserved.ID: "legacy-postmaster"},
+	)
+	if err != nil || reconciled != int64(len(agents)) {
+		t.Fatalf("idempotent production override replay = %d / %v", reconciled, err)
+	}
+	if err := st.reconcileProductionAgentEmailMailbox(
+		ctx, productionScope, scope.Domain, provisioned.AccountID, "active",
+		realm.ID, legacyReserved.ID, "different-postmaster",
+	); !errors.Is(err, ErrAgentEmailConflict) {
+		t.Fatalf("mismatched production override convergence error = %v", err)
 	}
 	canaryAgents, err := st.ListAgentEmailProductionCanaryAgents(ctx, productionScope)
 	if err != nil || len(canaryAgents) != len(agents) {
@@ -293,7 +383,7 @@ func TestAgentEmailFeatureGateCoversOwnerAndIngressOperationsPostgres(t *testing
 		t.Fatalf("production canary omitted configured retry agent %s", owner.ID)
 	}
 	created, createdAddress, err := st.CreateAgentWithEmailMailbox(
-		ctx, productionScope, provisioned.AccountID, realm.ID, "production-new",
+		ctx, productionScope, provisioned.AccountID, realm.ID, "production-new", "",
 	)
 	if err != nil || created.ID == "" || createdAddress.OwnerAgentID != created.ID ||
 		createdAddress.AccountID != provisioned.AccountID ||
@@ -308,13 +398,39 @@ func TestAgentEmailFeatureGateCoversOwnerAndIngressOperationsPostgres(t *testing
 		t.Fatalf("atomic mailbox preflight = %+v / %v", preflight, err)
 	}
 	if _, _, err := st.CreateAgentWithEmailMailbox(
-		ctx, productionScope, provisioned.AccountID, realm.ID, "postmaster",
+		ctx, productionScope, provisioned.AccountID, realm.ID, "abuse", "",
 	); !errors.Is(err, ErrAgentEmailInputInvalid) {
 		t.Fatalf("reserved production agent segment error = %v", err)
+	}
+	for _, testCase := range []struct {
+		name    string
+		segment string
+	}{
+		{name: "noncanonical-upper", segment: "Mail-Bot"},
+		{name: "noncanonical-space", segment: " mail-bot "},
+		{name: "noncanonical-blank", segment: "   "},
+	} {
+		if _, _, err := st.CreateAgentWithEmailMailbox(
+			ctx, productionScope, provisioned.AccountID, realm.ID,
+			testCase.name, testCase.segment,
+		); !errors.Is(err, ErrAgentEmailInputInvalid) {
+			t.Fatalf("noncanonical production agent segment %q error = %v",
+				testCase.segment, err)
+		}
 	}
 	currentAgents, err := st.ListAgents(ctx, provisioned.AccountID, realm.ID)
 	if err != nil || len(currentAgents) != len(agents)+1 {
 		t.Fatalf("failed atomic mailbox create leaked an agent = %d / %v", len(currentAgents), err)
+	}
+	overridden, overriddenAddress, err := st.CreateAgentWithEmailMailbox(
+		ctx, productionScope, provisioned.AccountID, realm.ID,
+		"abuse", "support-agent",
+	)
+	if err != nil || overridden.ID == "" ||
+		overriddenAddress.ProvisioningKind != "operator_override" ||
+		overriddenAddress.AgentSegment != "support-agent" {
+		t.Fatalf("operator override production agent/mailbox = %+v / %+v / %v",
+			overridden, overriddenAddress, err)
 	}
 	outOfCohort := productionScope
 	outOfCohort.AccountIDs = map[string]bool{"acc_aaaaaaaaaaaaaaaa": true}

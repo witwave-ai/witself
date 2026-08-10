@@ -59,7 +59,7 @@ type Config struct {
 	DeleteRealm func(ctx context.Context, accountID, realmID string) error
 
 	// CreateAgent / ListAgents, when set, enable POST/GET /v1/realms/{realm}/agents.
-	CreateAgent func(ctx context.Context, accountID, realmID, name string) (Agent, error)
+	CreateAgent func(ctx context.Context, accountID, realmID string, in CreateAgentRequest) (Agent, error)
 	ListAgents  func(ctx context.Context, accountID, realmID string) ([]Agent, error)
 	DeleteAgent func(ctx context.Context, accountID, realmID, agentID string) error
 
@@ -1524,6 +1524,11 @@ type Realm struct {
 // it (e.g. for a duplicate realm name) without coupling the server to the store.
 var ErrConflict = errors.New("conflict")
 
+// ErrAgentEmailAddressConflict distinguishes a canonical mailbox-address
+// reservation from an agent-name conflict. Handlers return a stable,
+// value-free 409 that tells the operator to choose another explicit segment.
+var ErrAgentEmailAddressConflict = errors.New("agent email address conflict")
+
 // ErrRealmEmailRouteRetirementRequired means an ordinary operator DELETE hit
 // a managed realm.  The control plane must first remove the external route and
 // commit its exact cell fence.
@@ -1701,6 +1706,23 @@ func (e *PlanLimitError) Unwrap() error { return ErrPlanLimit }
 type Agent struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+}
+
+// CreateAgentRequest is the internal dispatch shape shared by the legacy
+// ordinary-create route and the v0.0.241 explicit-email-segment route. Only the
+// latter may populate EmailAgentSegment.
+type CreateAgentRequest struct {
+	Name              string `json:"name"`
+	EmailAgentSegment string `json:"email_agent_segment,omitempty"`
+}
+
+type createAgentBody struct {
+	Name string `json:"name"`
+}
+
+type createAgentWithEmailSegmentBody struct {
+	Name              string  `json:"name"`
+	EmailAgentSegment *string `json:"email_agent_segment"`
 }
 
 // OperatorToken is safe token metadata shown in operator listings.
@@ -1987,6 +2009,10 @@ func apiMux(cfg Config) http.Handler {
 		}
 		if cfg.CreateAgent != nil {
 			mux.HandleFunc("POST /v1/realms/{realm}/agents", createAgentHandler(cfg.Authenticate, cfg.CreateAgent))
+			mux.HandleFunc(
+				"POST /v1/realms/{realm}/agents:with-email-segment",
+				createAgentWithEmailSegmentHandler(cfg.Authenticate, cfg.CreateAgent),
+			)
 		}
 		if cfg.ListAgents != nil {
 			mux.HandleFunc("GET /v1/realms/{realm}/agents", listAgentsHandler(cfg.Authenticate, cfg.ListAgents))
@@ -5294,19 +5320,57 @@ func deleteRealmHandler(auth AuthFunc, deleteRealm func(ctx context.Context, acc
 	})
 }
 
-func createAgentHandler(auth AuthFunc, create func(ctx context.Context, accountID, realmID, name string) (Agent, error)) http.HandlerFunc {
+func createAgentHandler(
+	auth AuthFunc,
+	create func(ctx context.Context, accountID, realmID string, in CreateAgentRequest) (Agent, error),
+) http.HandlerFunc {
+	return createAgentRequestHandler(auth, create, false)
+}
+
+func createAgentWithEmailSegmentHandler(
+	auth AuthFunc,
+	create func(ctx context.Context, accountID, realmID string, in CreateAgentRequest) (Agent, error),
+) http.HandlerFunc {
+	return createAgentRequestHandler(auth, create, true)
+}
+
+func createAgentRequestHandler(
+	auth AuthFunc,
+	create func(ctx context.Context, accountID, realmID string, in CreateAgentRequest) (Agent, error),
+	requireEmailSegment bool,
+) http.HandlerFunc {
 	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
-		var req struct {
-			Name string `json:"name"`
+		var req CreateAgentRequest
+		if requireEmailSegment {
+			var body createAgentWithEmailSegmentBody
+			if err := decodeStrictAgentEmailJSON(w, r, &body, 8*1024); err != nil ||
+				body.Name == "" || body.EmailAgentSegment == nil ||
+				!validCanonicalAgentEmailSegment(*body.EmailAgentSegment) {
+				writeJSONError(w, http.StatusBadRequest, "invalid agent email segment request")
+				return
+			}
+			req = CreateAgentRequest{
+				Name: body.Name, EmailAgentSegment: *body.EmailAgentSegment,
+			}
+		} else {
+			var body createAgentBody
+			if err := decodeStrictAgentEmailJSON(w, r, &body, 8*1024); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "invalid agent create request")
+				return
+			}
+			req.Name = body.Name
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		if req.Name == "" {
 			writeJSONError(w, http.StatusBadRequest, "missing name")
 			return
 		}
-		agent, err := create(r.Context(), p.accountID, r.PathValue("realm"), req.Name)
+		agent, err := create(r.Context(), p.accountID, r.PathValue("realm"), req)
 		switch {
 		case errors.Is(err, ErrNotFound):
 			writeJSONError(w, http.StatusNotFound, "realm not found")
+			return
+		case errors.Is(err, ErrAgentEmailAddressConflict):
+			writeAgentEmailAddressConflictError(w)
 			return
 		case errors.Is(err, ErrConflict):
 			writeJSONError(w, http.StatusConflict, "agent already exists")
@@ -5316,6 +5380,9 @@ func createAgentHandler(auth AuthFunc, create func(ctx context.Context, accountI
 			// refusal explains itself.
 			writeJSONError(w, http.StatusForbidden, err.Error())
 			return
+		case errors.Is(err, ErrBadInput):
+			writeJSONError(w, http.StatusBadRequest, "invalid agent email segment")
+			return
 		case err != nil:
 			writeJSONError(w, http.StatusInternalServerError, "could not create agent")
 			return
@@ -5323,6 +5390,17 @@ func createAgentHandler(auth AuthFunc, create func(ctx context.Context, accountI
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "agent": agent})
+	})
+}
+
+func writeAgentEmailAddressConflictError(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"schema_version": "witself.v0",
+		"code":           "agent_email_address_conflict",
+		"error":          "agent email address is already reserved; retry with a different --email-agent-segment",
+		"retryable":      false,
 	})
 }
 

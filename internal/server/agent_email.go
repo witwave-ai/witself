@@ -211,6 +211,11 @@ func ValidateAgentEmailPilotConfig(cfg AgentEmailPilotConfig) error {
 	return ValidateAgentEmailReceiveConfig(cfg)
 }
 
+func validCanonicalAgentEmailSegment(value string) bool {
+	normalized, err := agentemail.ValidateAgentSegment(value)
+	return err == nil && normalized == value
+}
+
 func countEnabledAgentEmailIDs(values map[string]bool, prefix string) int {
 	count := 0
 	for value, enabled := range values {

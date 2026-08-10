@@ -1,5 +1,6 @@
 {{- $emailPilot := .Values.agentEmail.receivePilot -}}
 {{- $emailProduction := .Values.agentEmail.receiveProduction -}}
+{{- $imageTag := .Values.image.tag | default .Chart.AppVersion -}}
 {{- if and .Values.backup.validation.enabled (not .Values.backup.existingSecret.name) -}}
 {{- fail "backup.validation.enabled requires backup.existingSecret.name" -}}
 {{- end -}}
@@ -46,6 +47,9 @@
 {{- end -}}
 {{- end -}}
 {{- if $emailProduction.enabled -}}
+{{- if not (semverCompare ">=0.0.241-0" $imageTag) -}}
+{{- fail "agentEmail.receiveProduction requires image v0.0.241 or newer" -}}
+{{- end -}}
 {{- $_ := required "agentEmail.receiveProduction.domain is required when enabled" $emailProduction.domain -}}
 {{- $_ := required "agentEmail.receiveProduction.audience is required when enabled" $emailProduction.audience -}}
 {{- $_ := required "agentEmail.receiveProduction.relayPublicKeysJSON is required when enabled" $emailProduction.relayPublicKeysJSON -}}

@@ -213,7 +213,7 @@ func TestCreateAgentPlanLimit(t *testing.T) {
 	auth := func(_ context.Context, tok string) (string, string, string, bool, error) {
 		return "opr_x", "acc_y", "active", tok == "good", nil
 	}
-	create := func(context.Context, string, string, string) (Agent, error) {
+	create := func(context.Context, string, string, CreateAgentRequest) (Agent, error) {
 		return Agent{}, &PlanLimitError{
 			Dimension: "agents_per_realm", Used: 10, Max: 10, Plan: "free",
 		}

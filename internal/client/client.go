@@ -44,6 +44,12 @@ var ErrFactLimitReached = errors.New("current fact limit reached")
 // typed error to stop retrying until the account policy changes.
 var ErrFeatureNotEnabled = errors.New("feature not enabled")
 
+// ErrAgentEmailAddressConflict is the stable, non-retryable refusal returned
+// when an agent's requested canonical email address is permanently reserved.
+var ErrAgentEmailAddressConflict = errors.New(
+	"agent email address is already reserved; retry with a different --email-agent-segment",
+)
+
 // ErrMessageRateLimited identifies a refusal from the shared messaging rate
 // budget. Inspect MessageRateLimitError.Retryable before retrying; hard
 // structurally impossible debits retain this sentinel for compatibility.
@@ -444,6 +450,10 @@ func responseError(resp *http.Response, fallback string) error {
 				Message:        message,
 			}
 		}
+		if resp.StatusCode == http.StatusConflict &&
+			out.Code == "agent_email_address_conflict" {
+			return fmt.Errorf("%w", ErrAgentEmailAddressConflict)
+		}
 		if message == "" {
 			return fmt.Errorf("%s", fallback)
 		}
@@ -636,10 +646,36 @@ func CreateAgent(ctx context.Context, endpoint, token, realmID, name string) (*A
 	if err != nil {
 		return nil, err
 	}
+	return createAgentRequest(ctx, agentsURL(endpoint, realmID), token, body)
+}
+
+// CreateAgentWithEmailSegment uses the v0.0.241-only mutation route to supply
+// an explicit canonical email agent segment. Older servers return 404 before
+// mutation instead of silently ignoring the new field.
+func CreateAgentWithEmailSegment(
+	ctx context.Context,
+	endpoint, token, realmID, name, emailAgentSegment string,
+) (*Agent, error) {
+	body, err := json.Marshal(map[string]string{
+		"name": name, "email_agent_segment": emailAgentSegment,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return createAgentRequest(
+		ctx, agentsWithEmailSegmentURL(endpoint, realmID), token, body,
+	)
+}
+
+func createAgentRequest(
+	ctx context.Context,
+	url, token string,
+	body []byte,
+) (*Agent, error) {
 	var out struct {
 		Agent Agent `json:"agent"`
 	}
-	if err := doJSON(ctx, http.MethodPost, agentsURL(endpoint, realmID), token, body, &out); err != nil {
+	if err := doJSON(ctx, http.MethodPost, url, token, body, &out); err != nil {
 		return nil, err
 	}
 	return &out.Agent, nil
@@ -658,6 +694,10 @@ func ListAgents(ctx context.Context, endpoint, token, realmID string) ([]Agent, 
 
 func agentsURL(endpoint, realmID string) string {
 	return strings.TrimRight(endpoint, "/") + "/v1/realms/" + realmID + "/agents"
+}
+
+func agentsWithEmailSegmentURL(endpoint, realmID string) string {
+	return agentsURL(endpoint, realmID) + ":with-email-segment"
 }
 
 // CreateAgentToken mints an agent token via POST {endpoint}/v1/agents/{agent}/tokens.

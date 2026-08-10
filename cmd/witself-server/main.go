@@ -52,15 +52,18 @@ func run(args []string) int {
 	case "serve":
 		return serve()
 	case "agent-email":
-		if len(args) == 2 && args[1] == "backfill" {
-			return runAgentEmailProductionBackfill()
+		if len(args) >= 2 && args[1] == "backfill" {
+			overrides, exceptionOutput, ok := parseAgentEmailBackfillCommandArgs(args[2:])
+			if ok {
+				return runAgentEmailProductionBackfill(overrides, exceptionOutput)
+			}
 		}
 		if len(args) == 4 && args[1] == "canary-manifest" &&
 			args[2] == "--output" && args[3] != "" {
 			return runAgentEmailProductionCanaryManifest(args[3])
 		}
 		fmt.Fprintln(os.Stderr,
-			"witself-server: agent-email requires backfill or canary-manifest --output ABSOLUTE_PATH")
+			"witself-server: agent-email requires backfill --exception-output ABSOLUTE_PATH [--overrides ABSOLUTE_PATH] or canary-manifest --output ABSOLUTE_PATH")
 		usage(os.Stderr)
 		return 2
 	default:
@@ -68,6 +71,31 @@ func run(args []string) int {
 		usage(os.Stderr)
 		return 2
 	}
+}
+
+func parseAgentEmailBackfillCommandArgs(args []string) (string, string, bool) {
+	if len(args) != 2 && len(args) != 4 {
+		return "", "", false
+	}
+	values := make(map[string]string, 2)
+	for index := 0; index < len(args); index += 2 {
+		name := args[index]
+		if name != "--overrides" && name != "--exception-output" {
+			return "", "", false
+		}
+		if args[index+1] == "" {
+			return "", "", false
+		}
+		if _, duplicated := values[name]; duplicated {
+			return "", "", false
+		}
+		values[name] = args[index+1]
+	}
+	exceptionOutput, present := values["--exception-output"]
+	if !present {
+		return "", "", false
+	}
+	return values["--overrides"], exceptionOutput, true
 }
 
 func serve() int {
@@ -92,7 +120,9 @@ func serve() int {
 	}
 	agentEmailReceive, err := agentEmailReceiveConfigFromEnv()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", newAgentEmailLogSafeError(
+			"agent-email receive configuration", "invalid_configuration", err,
+		))
 		return 1
 	}
 
@@ -809,7 +839,7 @@ func serve() int {
 				return err
 			}
 		}
-		cfg.CreateAgent = func(ctx context.Context, accountID, realmID, name string) (server.Agent, error) {
+		cfg.CreateAgent = func(ctx context.Context, accountID, realmID string, in server.CreateAgentRequest) (server.Agent, error) {
 			var a store.Agent
 			var err error
 			if agentEmailReceive.Enabled &&
@@ -817,10 +847,13 @@ func serve() int {
 				agentEmailReceive.AccountIDs[accountID] {
 				a, _, err = st.CreateAgentWithEmailMailbox(
 					ctx, toStoreAgentEmailReceiveScope(agentEmailReceive),
-					accountID, realmID, name,
+					accountID, realmID, in.Name, in.EmailAgentSegment,
 				)
 			} else {
-				a, err = st.CreateAgent(ctx, accountID, realmID, name)
+				if in.EmailAgentSegment != "" {
+					return server.Agent{}, server.ErrBadInput
+				}
+				a, err = st.CreateAgent(ctx, accountID, realmID, in.Name)
 			}
 			switch {
 			case errors.Is(err, store.ErrRealmNotFound):
@@ -828,7 +861,7 @@ func serve() int {
 			case errors.Is(err, store.ErrAgentExists):
 				return server.Agent{}, server.ErrConflict
 			case errors.Is(err, store.ErrAgentEmailAddressConflict):
-				return server.Agent{}, server.ErrConflict
+				return server.Agent{}, server.ErrAgentEmailAddressConflict
 			case errors.Is(err, store.ErrAgentEmailInputInvalid):
 				return server.Agent{}, server.ErrBadInput
 			case errors.Is(err, store.ErrPlanLimitReached):
@@ -1961,7 +1994,7 @@ func usage(w io.Writer) {
 	usageLine(w, "Usage:")
 	usageLine(w, "  witself-server version    Print version information")
 	usageLine(w, "  witself-server serve      Run the API, health, and metrics listeners")
-	usageLine(w, "  witself-server agent-email backfill")
+	usageLine(w, "  witself-server agent-email backfill --exception-output ABSOLUTE_PATH [--overrides ABSOLUTE_PATH]")
 	usageLine(w, "                           Reconcile the exact production receive cohort")
 	usageLine(w, "  witself-server agent-email canary-manifest --output ABSOLUTE_PATH")
 	usageLine(w, "                           Write a new mode-0600 primary canary manifest")

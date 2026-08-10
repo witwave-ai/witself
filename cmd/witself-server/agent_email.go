@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -51,7 +52,75 @@ type agentEmailPrimaryCanaryManifest struct {
 	SchemaVersion int                                    `json:"schema_version"`
 	Domain        string                                 `json:"domain"`
 	WorkerName    string                                 `json:"worker_name"`
+	AccountIDs    []string                               `json:"account_ids"`
 	Agents        []agentEmailPrimaryCanaryManifestAgent `json:"agents"`
+}
+
+type agentEmailBackfillOverride struct {
+	AgentID      string `json:"agent_id"`
+	AgentSegment string `json:"agent_segment"`
+}
+
+type agentEmailBackfillOverrideManifest struct {
+	SchemaVersion int                          `json:"schema_version"`
+	Overrides     []agentEmailBackfillOverride `json:"overrides"`
+}
+
+type agentEmailBackfillExceptionReport struct {
+	SchemaVersion       int    `json:"schema_version"`
+	State               string `json:"state"`
+	ProcessedAgentCount int64  `json:"processed_agent_count"`
+	AgentID             string `json:"agent_id"`
+	RealmID             string `json:"realm_id"`
+	ReasonCode          string `json:"reason_code"`
+}
+
+// agentEmailLogSafeError keeps an internal cause available to errors.Is/As
+// without allowing its potentially identifying text to cross a pod-log
+// boundary. Operation and reason are fixed, bounded server vocabulary.
+type agentEmailLogSafeError struct {
+	operation string
+	reason    string
+	cause     error
+}
+
+func (e *agentEmailLogSafeError) Error() string {
+	return fmt.Sprintf("%s failed (reason=%s)", e.operation, e.reason)
+}
+
+func (e *agentEmailLogSafeError) Unwrap() error {
+	return e.cause
+}
+
+func newAgentEmailLogSafeError(operation, fallbackReason string, cause error) error {
+	reason := fallbackReason
+	switch {
+	case errors.Is(cause, context.Canceled):
+		reason = "canceled"
+	case errors.Is(cause, context.DeadlineExceeded):
+		reason = "deadline_exceeded"
+	case errors.Is(cause, store.ErrAgentEmailPilotDisabled),
+		errors.Is(cause, store.ErrAgentEmailReceiveDisabled):
+		reason = "receive_disabled"
+	case errors.Is(cause, store.ErrAgentEmailInputInvalid):
+		reason = "invalid_configuration"
+	case errors.Is(cause, store.ErrAgentEmailPilotNotEnrolled):
+		reason = "cohort_not_ready"
+	case errors.Is(cause, store.ErrAccountNotFound):
+		reason = "account_not_found"
+	case errors.Is(cause, store.ErrAccountNotActive):
+		reason = "account_not_active"
+	case errors.Is(cause, store.ErrAgentEmailAddressMissing):
+		reason = "mailbox_missing"
+	case errors.Is(cause, store.ErrAgentEmailAddressConflict),
+		errors.Is(cause, store.ErrAgentEmailConflict):
+		reason = "conflict"
+	}
+	return &agentEmailLogSafeError{
+		operation: operation,
+		reason:    reason,
+		cause:     cause,
+	}
 }
 
 // agentEmailReceiveConfigFromEnv parses all relay trust and exactly one receive
@@ -182,15 +251,31 @@ func agentEmailPilotConfigFromEnv() (server.AgentEmailPilotConfig, error) {
 // runAgentEmailProductionBackfill is an explicit one-shot operator action.
 // Serving replicas never call it: they perform only read-only production
 // preflight, while this command owns the bounded, idempotent mailbox backfill.
-func runAgentEmailProductionBackfill() int {
+func runAgentEmailProductionBackfill(overridesPath, exceptionOutputPath string) int {
 	receive, err := agentEmailReceiveConfigFromEnv()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself-server: agent-email backfill: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", newAgentEmailLogSafeError(
+			"agent-email production backfill configuration", "invalid_configuration", err,
+		))
 		return 1
 	}
 	if !receive.Enabled || receive.Mode != server.AgentEmailReceiveModeProduction {
 		fmt.Fprintf(os.Stderr,
 			"witself-server: agent-email backfill requires production receive to be enabled\n")
+		return 1
+	}
+	overrides, err := readAgentEmailBackfillOverrides(overridesPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", newAgentEmailLogSafeError(
+			"agent-email production backfill override validation", "invalid_override_manifest", err,
+		))
+		return 1
+	}
+	if err := validateNewPrivateAgentEmailJSONPath(exceptionOutputPath); err != nil {
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", newAgentEmailLogSafeError(
+			"agent-email production backfill exception output validation",
+			"invalid_exception_output", err,
+		))
 		return 1
 	}
 	dsn := dbDSN()
@@ -204,28 +289,59 @@ func runAgentEmailProductionBackfill() int {
 	defer stop()
 	st, err := store.Open(ctx, dsn)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself-server: agent-email backfill database: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", newAgentEmailLogSafeError(
+			"agent-email production backfill database open", "database_unavailable", err,
+		))
 		return 1
 	}
 	defer st.Close()
 	if err := st.Migrate(); err != nil {
-		fmt.Fprintf(os.Stderr, "witself-server: agent-email backfill: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", newAgentEmailLogSafeError(
+			"agent-email production backfill migration", "migration_failed", err,
+		))
 		return 1
 	}
 	scope := toStoreAgentEmailReceiveScope(receive)
 	before, err := st.PreflightAgentEmailProductionCohort(ctx, scope)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself-server: agent-email backfill preflight: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", newAgentEmailLogSafeError(
+			"agent-email production backfill preflight", "preflight_failed", err,
+		))
 		return 1
 	}
-	processed, err := st.ReconcileAgentEmailProductionCohort(ctx, scope)
+	processed, err := st.ReconcileAgentEmailProductionCohortWithOverrides(
+		ctx, scope, overrides,
+	)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself-server: agent-email backfill: %v\n", err)
+		var exception *store.AgentEmailProductionBackfillError
+		if errors.As(err, &exception) {
+			report := agentEmailBackfillExceptionReport{
+				SchemaVersion: 1, State: "requires_operator_override",
+				ProcessedAgentCount: processed,
+				AgentID:             exception.AgentID, RealmID: exception.RealmID,
+				ReasonCode: exception.ReasonCode,
+			}
+			if reportErr := writeNewPrivateAgentEmailJSON(
+				exceptionOutputPath, report,
+			); reportErr != nil {
+				fmt.Fprintln(os.Stderr,
+					"witself-server: agent-email backfill could not write its private exception report")
+				return 1
+			}
+			fmt.Fprintln(os.Stderr,
+				"witself-server: agent-email backfill requires review of its private exception report")
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", newAgentEmailLogSafeError(
+			"agent-email production backfill reconciliation", "reconciliation_failed", err,
+		))
 		return 1
 	}
 	after, err := st.PreflightAgentEmailProductionCohort(ctx, scope)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself-server: agent-email backfill verification: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", newAgentEmailLogSafeError(
+			"agent-email production backfill verification", "verification_failed", err,
+		))
 		return 1
 	}
 	if after.MissingMailboxCount != 0 {
@@ -242,17 +358,99 @@ func runAgentEmailProductionBackfill() int {
 		ReadyMailboxCount   int64 `json:"ready_mailbox_count"`
 		MissingAfter        int64 `json:"missing_mailbox_count_after"`
 		RetryCanaryReady    bool  `json:"retry_canary_ready"`
+		OverrideCount       int   `json:"override_count"`
 	}{
 		AccountCount: before.AccountCount, LiveAgentCount: after.LiveAgentCount,
 		MissingBefore: before.MissingMailboxCount, ProcessedAgentCount: processed,
 		ReadyMailboxCount: after.ReadyMailboxCount,
 		MissingAfter:      after.MissingMailboxCount, RetryCanaryReady: after.RetryCanaryReady,
+		OverrideCount: len(overrides),
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
-		fmt.Fprintf(os.Stderr, "witself-server: agent-email backfill result: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", newAgentEmailLogSafeError(
+			"agent-email production backfill result encoding", "result_encoding_failed", err,
+		))
 		return 1
 	}
 	return 0
+}
+
+func validateNewPrivateAgentEmailJSONPath(path string) error {
+	if path == "" || path != strings.TrimSpace(path) || !filepath.IsAbs(path) ||
+		filepath.Clean(path) != path {
+		return errors.New("path must be one canonical absolute path")
+	}
+	if _, err := os.Lstat(path); err == nil {
+		return errors.New("path already exists")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return errors.New("path could not be inspected")
+	}
+	parent, err := os.Stat(filepath.Dir(path))
+	if err != nil || !parent.IsDir() {
+		return errors.New("parent directory is missing or invalid")
+	}
+	return nil
+}
+
+func readAgentEmailBackfillOverrides(path string) (map[string]string, error) {
+	if path == "" {
+		return nil, nil
+	}
+	if path != strings.TrimSpace(path) || !filepath.IsAbs(path) ||
+		filepath.Clean(path) != path {
+		return nil, errors.New("override manifest path must be one canonical absolute path")
+	}
+	pathInfo, err := os.Lstat(path)
+	if err != nil {
+		return nil, errors.New("override manifest could not be inspected")
+	}
+	if !pathInfo.Mode().IsRegular() || pathInfo.Mode().Perm() != 0o600 ||
+		pathInfo.Size() < 2 || pathInfo.Size() > 64*1024 {
+		return nil, errors.New("override manifest must be a 2-65536 byte regular mode-0600 file")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, errors.New("override manifest could not be opened")
+	}
+	defer func() { _ = file.Close() }()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return nil, errors.New("override manifest could not be verified")
+	}
+	if !os.SameFile(pathInfo, openedInfo) {
+		return nil, errors.New("override manifest changed while opening")
+	}
+	decoder := json.NewDecoder(io.LimitReader(file, 64*1024+1))
+	decoder.DisallowUnknownFields()
+	var manifest agentEmailBackfillOverrideManifest
+	if err := decoder.Decode(&manifest); err != nil {
+		return nil, errors.New("override manifest was invalid JSON")
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, errors.New("override manifest must contain one JSON value")
+	}
+	if manifest.SchemaVersion != 1 || len(manifest.Overrides) < 1 ||
+		len(manifest.Overrides) > 1000 {
+		return nil, errors.New("override manifest must contain 1-1000 schema-v1 overrides")
+	}
+	result := make(map[string]string, len(manifest.Overrides))
+	previousAgentID := ""
+	for index, override := range manifest.Overrides {
+		if !validAgentEmailConfigGeneratedID(override.AgentID, "agent") ||
+			override.AgentID <= previousAgentID {
+			return nil, errors.New("override agent ids must be unique and in canonical sorted order")
+		}
+		segment, err := agentemail.ValidateAgentSegment(override.AgentSegment)
+		if err != nil || segment != override.AgentSegment {
+			return nil, fmt.Errorf(
+				"override entry %d has an invalid canonical agent segment", index+1,
+			)
+		}
+		result[override.AgentID] = segment
+		previousAgentID = override.AgentID
+	}
+	return result, nil
 }
 
 // runAgentEmailProductionCanaryManifest emits the edge tool's exact private
@@ -261,7 +459,9 @@ func runAgentEmailProductionBackfill() int {
 func runAgentEmailProductionCanaryManifest(outputPath string) int {
 	receive, err := agentEmailReceiveConfigFromEnv()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself-server: agent-email canary manifest: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", newAgentEmailLogSafeError(
+			"agent-email production canary configuration", "invalid_configuration", err,
+		))
 		return 1
 	}
 	if !receive.Enabled || receive.Mode != server.AgentEmailReceiveModeProduction {
@@ -292,25 +492,39 @@ func runAgentEmailProductionCanaryManifest(outputPath string) int {
 	defer stop()
 	st, err := store.Open(ctx, dsn)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself-server: agent-email canary manifest database: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", newAgentEmailLogSafeError(
+			"agent-email production canary database open", "database_unavailable", err,
+		))
 		return 1
 	}
 	defer st.Close()
 	if err := st.Ping(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "witself-server: agent-email canary manifest database: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", newAgentEmailLogSafeError(
+			"agent-email production canary database ping", "database_unavailable", err,
+		))
 		return 1
 	}
 	agents, err := st.ListAgentEmailProductionCanaryAgents(
 		ctx, toStoreAgentEmailReceiveScope(receive),
 	)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself-server: agent-email canary manifest: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", newAgentEmailLogSafeError(
+			"agent-email production canary snapshot", "canary_snapshot_failed", err,
+		))
 		return 1
 	}
+	accountIDs := make([]string, 0, len(receive.AccountIDs))
+	for accountID, enabled := range receive.AccountIDs {
+		if enabled {
+			accountIDs = append(accountIDs, accountID)
+		}
+	}
+	sort.Strings(accountIDs)
 	manifest := agentEmailPrimaryCanaryManifest{
-		SchemaVersion: 1,
+		SchemaVersion: 2,
 		Domain:        agentEmailPrimaryCanaryDomain,
 		WorkerName:    agentEmailPrimaryCanaryWorker,
+		AccountIDs:    accountIDs,
 		Agents:        make([]agentEmailPrimaryCanaryManifestAgent, len(agents)),
 	}
 	for i, agent := range agents {
@@ -319,12 +533,17 @@ func runAgentEmailProductionCanaryManifest(outputPath string) int {
 		}
 	}
 	if err := writeNewPrivateAgentEmailJSON(outputPath, manifest); err != nil {
-		fmt.Fprintf(os.Stderr, "witself-server: agent-email canary manifest output: %v\n", err)
+		fmt.Fprintln(os.Stderr,
+			"witself-server: agent-email canary manifest could not create its private output")
 		return 1
 	}
-	fmt.Fprintf(os.Stdout,
+	if _, err := fmt.Fprintf(os.Stdout,
 		"witself-server: wrote private agent-email canary manifest with %d agents\n",
-		len(agents))
+		len(agents)); err != nil {
+		fmt.Fprintln(os.Stderr,
+			"witself-server: agent-email canary manifest could not report completion")
+		return 1
+	}
 	return 0
 }
 
@@ -402,13 +621,13 @@ func parseAgentEmailIDSet(value string) (map[string]bool, error) {
 
 func parseAgentEmailGeneratedIDSet(value, plural, singular string) (map[string]bool, error) {
 	result := make(map[string]bool)
-	for _, raw := range strings.Split(value, ",") {
+	for index, raw := range strings.Split(value, ",") {
 		id := strings.TrimSpace(raw)
 		if id == "" {
 			return nil, fmt.Errorf("%s must be a comma-separated non-empty set", plural)
 		}
 		if result[id] {
-			return nil, fmt.Errorf("%s %q is duplicated", singular, id)
+			return nil, fmt.Errorf("%s at position %d is duplicated", singular, index+1)
 		}
 		result[id] = true
 	}
@@ -425,13 +644,13 @@ func parseAgentEmailProductionAccountIDs(value string) (map[string]bool, error) 
 	}
 	result := make(map[string]bool, len(parts))
 	previous := ""
-	for _, accountID := range parts {
+	for index, accountID := range parts {
 		if accountID != strings.TrimSpace(accountID) ||
 			!validAgentEmailConfigGeneratedID(accountID, "acc") {
-			return nil, fmt.Errorf("account id %q is not canonical", accountID)
+			return nil, fmt.Errorf("account id at position %d is not canonical", index+1)
 		}
 		if result[accountID] {
-			return nil, fmt.Errorf("account id %q is duplicated", accountID)
+			return nil, fmt.Errorf("account id at position %d is duplicated", index+1)
 		}
 		if previous != "" && accountID < previous {
 			return nil, errors.New("account ids must be in canonical sorted order")
@@ -614,10 +833,14 @@ func configureAgentEmail(ctx context.Context, cfg *server.Config, st *store.Stor
 	scope := toStoreAgentEmailReceiveScope(receive)
 	if receive.Mode == server.AgentEmailReceiveModeProduction {
 		if err := st.ValidateAgentEmailProductionCohort(ctx, scope); err != nil {
-			return fmt.Errorf("agent-email production startup preflight: %w", err)
+			return newAgentEmailLogSafeError(
+				"agent-email production startup preflight", "preflight_failed", err,
+			)
 		}
 	} else if _, err := st.ReconcileAgentEmailPilot(ctx, scope); err != nil {
-		return fmt.Errorf("agent-email pilot startup reconciliation: %w", err)
+		return newAgentEmailLogSafeError(
+			"agent-email pilot startup reconciliation", "reconciliation_failed", err,
+		)
 	}
 	cfg.IngestAgentEmailPilot = func(ctx context.Context, relay agentemail.RelayMetadata, raw []byte) error {
 		message, err := st.IngestAgentEmailPilot(

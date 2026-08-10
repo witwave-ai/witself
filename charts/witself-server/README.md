@@ -115,18 +115,29 @@ gate renders `WITSELF_AGENT_EMAIL_RECEIVE_PRODUCTION_ENABLED=true`,
 `WITSELF_AGENT_EMAIL_RECEIVE_DOMAIN`, `WITSELF_AGENT_EMAIL_RECEIVE_AUDIENCE`,
 and the comma-separated `WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS` in API pods
 only. The app-of-apps refuses to forward this shape unless both child chart and
-image are `0.0.241` or newer.
+image are `0.0.241` or newer. Direct use of this chart independently refuses
+production receive when the effective server image tag is older than
+`0.0.241`; an enabled value can never be silently ignored by an older binary.
 
 API startup performs only bounded account/canary validation. It neither scans
 all agents nor provisions mailboxes, so scaling API replicas cannot multiply a
 Founder-account backfill. After the production gate is healthy and before any
 edge delivery activation, an operator runs exactly one idempotent
-`witself-server agent-email backfill` process. New agents in the configured
+`witself-server agent-email backfill --exception-output ABSOLUTE_PATH` process.
+The required private path is created only when a legacy agent needs an explicit
+override; it is never written to pod logs. New agents in the configured
 cohort are thereafter created atomically with their canonical mailbox. Generate
 the edge canary only with
 `witself-server agent-email canary-manifest --output /absolute/new/path.json`;
 the command requires zero missing mailboxes and creates the exact 5-10-entry
 manifest as a new mode-0600 file. Never commit that private mapping.
+
+Exceptional existing agent names are never auto-suffixed. If derivation is
+reserved, empty, over budget, or colliding, rerun the one-shot command with a
+reviewed mode-`0600` override manifest via `backfill --exception-output
+NEW_ABSOLUTE_PATH --overrides ABSOLUTE_PATH`; the command validates every
+explicit segment, duplicate target, live-cohort owner, live address, and
+permanent reservation before its first write.
 
 Large-realm avatar style propagation belongs only to the general-purpose
 worker. The `worker.avatarStyleRollout` values render

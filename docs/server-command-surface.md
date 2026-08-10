@@ -72,7 +72,7 @@ and [key-hierarchy.md](key-hierarchy.md).
 witself-server
   version
   serve
-  agent-email backfill
+  agent-email backfill --exception-output ABSOLUTE_PATH [--overrides ABSOLUTE_PATH]
   agent-email canary-manifest --output ABSOLUTE_PATH
   migrate up|down|status
   config check|print
@@ -247,7 +247,11 @@ These are bounded operator actions for an enabled production receive cohort;
 they are not public account-management commands.
 
 ```sh
-witself-server agent-email backfill
+witself-server agent-email backfill \
+  --exception-output /absolute/private/backfill-exception.json
+witself-server agent-email backfill \
+  --exception-output /absolute/private/backfill-exception-rerun.json \
+  --overrides /absolute/private/overrides.json
 witself-server agent-email canary-manifest \
   --output /absolute/private/new/primary-canary.json
 ```
@@ -257,7 +261,16 @@ applies forward migrations, validates the exact 1-100-account cohort, pages all
 live agents in batches of 100, idempotently provisions existing mailboxes, and
 then verifies that none are missing. It emits only counts. API `serve` startup
 never calls this path; it performs bounded account/canary validation only. New
-production-cohort agents are created atomically with their mailbox.
+production-cohort agents are created atomically with their mailbox. The
+optional mode-`0600` JSON override manifest supplies an explicit canonical
+agent segment for exceptional existing names; all entries are validated
+against the exact live cohort, each other, live addresses, and permanent route
+reservations before the first write. `--exception-output` must be a canonical
+absolute path that does not exist. It is created mode `0600` only when one
+specific existing agent needs operator intervention and contains that private
+agent/realm identity, a bounded reason code, and the number already processed;
+stderr remains value-free. Review it locally, add an override, and use a new
+exception-output path for the idempotent rerun.
 
 `canary-manifest` performs no database writes and refuses to run until the
 cohort has zero missing mailboxes. It selects 5-10 actual `witmail.net`

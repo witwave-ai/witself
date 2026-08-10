@@ -150,7 +150,8 @@ helm template witself-apps "$apps_chart" \
   --set apps.witselfServer.chartVersion=0.0.231 \
   --set apps.witselfServer.imageTag=0.0.232 >"$email_pilot_old_chart_new_image_render"
 helm template witself-server "$server_chart" --namespace witself \
-  --values "$email_production_profile" >"$email_production_render"
+  --values "$email_production_profile" \
+  --set image.tag=0.0.241 >"$email_production_render"
 helm template witself-apps "$apps_chart" \
   --values "$civo_cell" \
   --values "$apps_email_production_profile" >"$email_production_apps_render"
@@ -947,30 +948,41 @@ require_sequence "$email_production_server_application" \
 expect_server_template_failure \
   "simultaneous pilot and production receive" \
   --values "$email_production_profile" \
+  --set image.tag=0.0.241 \
   --set agentEmail.receivePilot.enabled=true
+expect_server_template_failure \
+  "production receive with pre-0.0.241 image" \
+  --values "$email_production_profile" \
+  --set image.tag=0.0.240
 expect_server_template_failure \
   "empty production receive cohort" \
   --values "$email_production_profile" \
+  --set image.tag=0.0.241 \
   --set-json 'agentEmail.receiveProduction.accountIDs=[]'
 expect_server_template_failure \
   "duplicate production receive account" \
   --values "$email_production_profile" \
+  --set image.tag=0.0.241 \
   --set-json 'agentEmail.receiveProduction.accountIDs=["acc_aaaaaaaaaaaaaaaa","acc_aaaaaaaaaaaaaaaa"]'
 expect_server_template_failure \
   "unsorted production receive cohort" \
   --values "$email_production_profile" \
+  --set image.tag=0.0.241 \
   --set-json 'agentEmail.receiveProduction.accountIDs=["acc_bbbbbbbbbbbbbbbb","acc_aaaaaaaaaaaaaaaa"]'
 expect_server_template_failure \
   "wildcard production receive account" \
   --values "$email_production_profile" \
+  --set image.tag=0.0.241 \
   --set-json 'agentEmail.receiveProduction.accountIDs=["*"]'
 expect_server_template_failure \
   "overlarge production receive cohort" \
   --values "$email_production_profile" \
+  --set image.tag=0.0.241 \
   --set agentEmail.receiveProduction.accountIDs[100]=acc_aaaaaaaaaaaaaaaa
 expect_server_template_failure \
   "invalid production retry canary" \
   --values "$email_production_profile" \
+  --set image.tag=0.0.241 \
   --set agentEmail.receiveProduction.retryCanaryAgentID=agent_invalid
 
 for unsafe_pin in chartVersion imageTag; do

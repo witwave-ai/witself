@@ -233,8 +233,8 @@ release itself.
 Serving replicas do only a bounded read-only check that each configured account
 exists in the cell and is active or suspended, plus one optional canary
 membership check. They do not scan agents and never provision mailboxes during
-startup. This makes 20 API replicas equivalent to one for receive setup. An
-A Personal account accidentally present in the cohort does not prevent
+startup. This makes 20 API replicas equivalent to one for receive setup. A
+Personal account accidentally present in the cohort does not prevent
 startup: the local plan entitlement remains authoritative, and an attempted
 delivery is accepted and discarded without persisting message content. A plan
 transition takes effect from the cell snapshot without reinstalling any client.
@@ -242,7 +242,8 @@ transition takes effect from the cell snapshot without reinstalling any client.
 Existing mailbox provisioning is an explicit one-shot operator action:
 
 ```sh
-/usr/local/bin/witself-server agent-email backfill
+/usr/local/bin/witself-server agent-email backfill \
+  --exception-output /absolute/private/backfill-exception.json
 ```
 
 Run it once from the released cell image with that cell's normal database and
@@ -254,6 +255,49 @@ Founder remains bounded in memory even with unlimited agents. Suspended accounts
 are checked read-only. Once production mode is active, creating a new cohort
 agent and its canonical mailbox is one database transaction, so a successful
 agent create needs no restart or later repair.
+
+If a preexisting unrestricted agent name is reserved, becomes empty after
+normalization, exceeds the address budget, or collides, the backfill refuses
+instead of inventing an address. Supply a reviewed private override manifest:
+
+```json
+{
+  "schema_version": 1,
+  "overrides": [
+    {
+      "agent_id": "agent_aaaaaaaaaaaaaaaa",
+      "agent_segment": "support-agent"
+    }
+  ]
+}
+```
+
+The file must be canonical absolute, regular, mode `0600`, at most 64 KiB,
+contain 1-1000 strictly sorted unique live-cohort agents, and use canonical
+lowercase segments. Run
+`witself-server agent-email backfill --exception-output
+/absolute/private/backfill-exception-rerun.json --overrides
+/absolute/private/overrides.json`. The mandatory exception output must be a
+new canonical absolute path. It is created mode `0600` only when a particular
+agent needs intervention and contains the private agent/realm identity, a
+bounded reason code, and the number already processed; process logs remain
+value-free. Every override is preflighted against the cohort, the complete
+override set, live addresses, and permanent route reservations before the first
+write. Matching replays are idempotent and typos or a different existing
+address fail closed. For a newly created agent, the account operator can pass
+`witself agent create --email-agent-segment support-agent ...`; the agent and
+explicitly marked operator-override mailbox are committed atomically. The flag
+uses the strict v0.0.241-only
+`POST /v1/realms/{realm}/agents:with-email-segment` route. A pre-v0.0.241
+server returns 404 before mutation, while ordinary no-segment creates continue
+to use `POST /v1/realms/{realm}/agents`. Supplied explicit segments are never
+trimmed or lowercased: empty, whitespace-only, noncanonical, or reserved values
+fail before agent creation. A reserved address returns the stable
+`agent_email_address_conflict` 409 and directs the operator to choose a
+different `--email-agent-segment` without exposing tenant values.
+If ordinary derivation discovers an exceptional name partway through a page,
+mailboxes already committed remain valid; add the explicit override and rerun
+the idempotent command to converge the remainder.
 
 Do not hand-author the edge canary. After a successful backfill, use one selected
 cell process to generate it from actual currently receive-enabled mailbox rows:
