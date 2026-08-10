@@ -303,10 +303,14 @@ if ! {
       export PGPASSWORD
       db_user="${POSTGRES_USER:-${POSTGRESQL_USERNAME:-witself}}"
       db_name="${POSTGRES_DATABASE:-${POSTGRESQL_DATABASE:-witself}}"
+      # Keep the encrypted kubectl stream comfortably below control-plane
+      # transport timeouts for transcript-heavy cells. Compression is inside
+      # the PostgreSQL custom archive, before age encryption; pg_restore verifies
+      # the exact archive through the same network-isolated drill below.
       exec pg_dump --no-password --host=127.0.0.1 \
         --port="${POSTGRESQL_PORT_NUMBER:-5432}" \
         --username="$db_user" --dbname="$db_name" \
-        --format=custom --compress=0 --serializable-deferrable \
+        --format=custom --compress=gzip:1 --serializable-deferrable \
         --lock-wait-timeout=30000
     ' 2>"$DUMP_LOG" |
     age -R "$AGE_RECIPIENT_FILE" -o "$ARTIFACT_PART"
