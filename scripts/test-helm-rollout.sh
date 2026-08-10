@@ -978,7 +978,7 @@ expect_server_template_failure \
   "overlarge production receive cohort" \
   --values "$email_production_profile" \
   --set image.tag=0.0.241 \
-  --set agentEmail.receiveProduction.accountIDs[100]=acc_aaaaaaaaaaaaaaaa
+  --set 'agentEmail.receiveProduction.accountIDs[100]=acc_aaaaaaaaaaaaaaaa'
 expect_server_template_failure \
   "invalid production retry canary" \
   --values "$email_production_profile" \
