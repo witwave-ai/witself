@@ -12,10 +12,39 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   createPrivateDeploymentConfig,
 } from "../scripts/private-deployment-config.mjs";
+
+const repoRoot = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../..",
+);
+
+test("root Docker context excludes every private Wrangler snapshot", async () => {
+  const lines = (await readFile(join(repoRoot, ".dockerignore"), "utf8"))
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"));
+  const prefixes = [
+    "witself-control-plane-deploy-*/",
+    "witself-agent-email-deploy-*/",
+    "witself-relay-control-plane-*/",
+    "witself-relay-email-edge-*/",
+  ];
+  for (const prefix of prefixes) {
+    assert.ok(
+      lines.includes(`infra/cloudflare/${prefix}`),
+      `missing repo-relative Docker ignore for ${prefix}`,
+    );
+    assert.ok(
+      !lines.includes(`/${prefix}`),
+      `root-only Docker ignore cannot match infra/cloudflare/${prefix}`,
+    );
+  }
+});
 
 test("concurrent deployment configurations are private immutable snapshots", async () => {
   const first = await createPrivateDeploymentConfig({

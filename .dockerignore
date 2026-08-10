@@ -13,3 +13,11 @@ coverage
 node_modules
 infra/cloudflare/control-plane/node_modules
 infra/pulumi/bin
+
+# Private Wrangler snapshots are siblings of the two Worker source trees.
+# Exclude their actual repo-relative paths so their unpredictable directory
+# names cannot invalidate the control-plane container's COPY/build cache.
+infra/cloudflare/witself-control-plane-deploy-*/
+infra/cloudflare/witself-agent-email-deploy-*/
+infra/cloudflare/witself-relay-control-plane-*/
+infra/cloudflare/witself-relay-email-edge-*/
