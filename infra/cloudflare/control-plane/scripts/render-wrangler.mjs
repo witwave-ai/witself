@@ -7,6 +7,9 @@ import {
   sourceIdentity,
   validateBuildMetadata,
 } from "./source-identity.mjs";
+import {
+  parseManagedDeliveryAccountAllowlist,
+} from "../src/agent-email-managed-delivery-cohort.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -55,6 +58,10 @@ if (!/^[a-z][a-z0-9_-]{0,63}$/.test(routeSigningKeyID)) {
     "AGENT_EMAIL_ROUTE_SIGNING_KEY_ID must identify the active route signing key",
   );
 }
+const managedDeliveryAccountAllowlist = String(
+  process.env.CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST ?? "",
+);
+parseManagedDeliveryAccountAllowlist(managedDeliveryAccountAllowlist);
 
 const template = await readFile(join(root, "wrangler.template.jsonc"), "utf8");
 const controlPlaneDirectory =
@@ -74,6 +81,10 @@ const replacements = new Map([
   ["__WITSELF_EDGE_RELEASE_DATE__", metadata.date],
   ["__EMAIL_DIRECTORY_KV_ID__", emailDirectoryID],
   ["__AGENT_EMAIL_ROUTE_SIGNING_KEY_ID__", routeSigningKeyID],
+  [
+    "__CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST__",
+    managedDeliveryAccountAllowlist,
+  ],
 ]);
 let rendered = template;
 for (const [placeholder, value] of replacements) {

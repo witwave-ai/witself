@@ -1,9 +1,13 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { sourceIdentity } from "./source-identity.mjs";
+import {
+  parseManagedDeliveryAccountAllowlist,
+} from "../src/managed-delivery-cohort.mjs";
 
 const WORKER_NAME = "witself-agent-email-pilot";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -88,6 +92,12 @@ export function expectedDeployment(env, release) {
     throw new Error("AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS is missing or invalid");
   }
   const rawControlPlaneURL = String(env.CONTROL_PLANE_URL ?? "");
+  const managedDeliveryAccountAllowlist = String(
+    env.AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST ?? "",
+  );
+  const managedDeliveryAccounts = parseManagedDeliveryAccountAllowlist(
+    managedDeliveryAccountAllowlist,
+  );
   let controlPlaneURL;
   try {
     controlPlaneURL = new URL(rawControlPlaneURL);
@@ -108,6 +118,11 @@ export function expectedDeployment(env, release) {
     controlPlaneURL: controlPlaneURL.toString(),
     routePublicKeys: JSON.stringify(Object.fromEntries(routePublicKeyEntries)),
     routeSigningKeyIDs: routePublicKeyEntries.map(([keyID]) => keyID),
+    managedDeliveryAccountAllowlist,
+    managedDeliveryAccountCount: managedDeliveryAccounts.length,
+    managedDeliveryAllowlistSHA256: createHash("sha256")
+      .update(managedDeliveryAccountAllowlist)
+      .digest("hex"),
     aliasDeliveryEnabled: requiredBoolean(
       env.REALM_EMAIL_ALIAS_DELIVERY_ENABLED,
       "REALM_EMAIL_ALIAS_DELIVERY_ENABLED",
@@ -157,6 +172,7 @@ export function verifyDeployment(status, version, expected, {
   const names = new Set([
     "AGENT_EMAIL_DOMAIN",
     "AGENT_EMAIL_LEGACY_DOMAINS",
+    "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
     "AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS",
     "CONTROL_PLANE_EDGE_TOKEN",
     "CONTROL_PLANE_URL",
@@ -175,6 +191,11 @@ export function verifyDeployment(status, version, expected, {
   exactNames(bindings, names);
   plain(bindings, "AGENT_EMAIL_DOMAIN", "witmail.net");
   plain(bindings, "AGENT_EMAIL_LEGACY_DOMAINS", "agent-mail.witwave.ai");
+  plain(
+    bindings,
+    "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
+    expected.managedDeliveryAccountAllowlist,
+  );
   plain(bindings, "AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS", expected.routePublicKeys);
   plain(bindings, "CONTROL_PLANE_URL", expected.controlPlaneURL);
   plain(bindings, "RELAY_KEY_ID", expected.relayKeyID);
@@ -230,6 +251,10 @@ export function verifyDeployment(status, version, expected, {
       metrics_dataset: metrics.dataset,
       alias_delivery_enabled: expected.aliasDeliveryEnabled === "true",
       canonical_delivery_enabled: expected.canonicalDeliveryEnabled === "true",
+      managed_delivery_cohort: {
+        account_count: expected.managedDeliveryAccountCount,
+        allowlist_sha256: expected.managedDeliveryAllowlistSHA256,
+      },
       custom_domain_delivery_enabled: false,
       route_signing_key_ids: expected.routeSigningKeyIDs,
     },

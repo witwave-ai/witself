@@ -15,6 +15,7 @@ const canonicalLabel = "abcdefghijkl2345";
 const aliasLabel = "acme-west";
 const customDomain = "agents.example.com";
 const nowMS = Date.parse("2026-08-01T12:00:00.000Z");
+const accountID = "acct_email_canary";
 
 test("configured edge domains are bounded, ordered, canonical, and unique", () => {
   assert.deepEqual(configuredAgentEmailDomains({
@@ -34,6 +35,7 @@ test("configured edge domains are bounded, ordered, canonical, and unique", () =
 function projection(realmLabel, overrides = {}) {
   return {
     schema_version: 1,
+    account_id: accountID,
     domain,
     realm_label: realmLabel,
     realm_id: realmID,
@@ -62,6 +64,7 @@ function customProjection(state = "applied", overrides = {}) {
       : {}),
     ...overrides,
   });
+  if (!Object.hasOwn(overrides, "account_id")) delete value.account_id;
   if (state !== "applied") {
     delete value.cell_audience;
     delete value.ingest_url;
@@ -182,12 +185,12 @@ test("suspended and retired routes carry no destination authority", () => {
   );
 });
 
-test("projection rejects malformed, misbound, or identity-bearing rows", () => {
+test("projection rejects malformed, misbound, or extraneous identity rows", () => {
   for (const [changed, pattern] of [
     [{ route_kind: "canonical" }, /kind is inconsistent/],
     [{ realm_id: "realm_0000000000000000" }, /realm id is invalid/],
     [{ state: "active" }, /schema is invalid|state is invalid/],
-    [{ account_id: "account_aaaaaaaaaaaaaaaa" }, /schema is invalid/],
+    [{ account_id: "bad account" }, /account id is invalid/],
     [{ agent_id: "agent_aaaaaaaaaaaaaaa2" }, /schema is invalid/],
     [{ domain: "other.example" }, /lookup binding is inconsistent/],
     [{ realm_label: "other-realm" }, /lookup binding is inconsistent/],

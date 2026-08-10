@@ -53,7 +53,10 @@ function configs(publicKey) {
         "AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY",
         "CONTROL_PLANE_EDGE_TOKEN",
       ]},
-      "vars": {"AGENT_EMAIL_ROUTE_SIGNING_KEY_ID": "route-2026-08"},
+      "vars": {
+        "AGENT_EMAIL_ROUTE_SIGNING_KEY_ID": "route-2026-08",
+        "CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST": ""
+      },
     }`,
     [EDGE_CONFIG]: JSON.stringify({
       name: EMAIL_EDGE_WORKER,
@@ -64,6 +67,7 @@ function configs(publicKey) {
         AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS: JSON.stringify({
           "route-2026-08": publicKey,
         }),
+        AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: "",
         REALM_EMAIL_ALIAS_DELIVERY_ENABLED: "false",
         REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false",
       },
@@ -178,10 +182,12 @@ function runtimeFixture({
       if (args[0] === "versions") {
         return worker === CONTROL_PLANE_WORKER
           ? version(cpVersionID, puts.length >= 3 ? [
+            plain("CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", ""),
             secret("AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY"),
             secret("CONTROL_PLANE_EDGE_TOKEN"),
-          ] : [])
+          ] : [plain("CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", "")])
           : version(edgeVersionID, [
+            plain("AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", ""),
             plain("REALM_EMAIL_ALIAS_DELIVERY_ENABLED", "false"),
             plain("REALM_EMAIL_CANONICAL_DELIVERY_ENABLED", "false"),
             secret("RELAY_ED25519_PRIVATE_KEY"),

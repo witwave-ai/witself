@@ -81,6 +81,7 @@ function fixtures() {
       label: "control-plane",
       bindings: [
         plain("AGENT_EMAIL_ROUTE_SIGNING_KEY_ID", keyID),
+        plain("CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", ""),
         kv("AGENT_EMAIL_DIRECTORY"),
         secret("AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY"),
         secret("CONTROL_PLANE_EDGE_TOKEN"),
@@ -94,6 +95,7 @@ function fixtures() {
       label: "email-edge",
       bindings: [
         plain("AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS", keyring),
+        plain("AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", ""),
         kv("EMAIL_DIRECTORY"),
         secret("CONTROL_PLANE_EDGE_TOKEN"),
         secret("RELAY_ED25519_PRIVATE_KEY"),
@@ -121,9 +123,59 @@ test("readiness attests one shared dark release without returning key material",
     namespace_id: directoryID,
     shared_binding_verified: true,
   });
+  assert.deepEqual(result.managed_delivery_cohort, {
+    account_count: 0,
+    allowlist_sha256:
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    bindings_match: true,
+  });
   const serialized = JSON.stringify(result);
   assert.equal(serialized.includes(publicKey), false);
   assert.equal(serialized.includes("secret-bound-value"), false);
+});
+
+test("readiness requires identical canonical empty managed cohorts", () => {
+  for (const [worker, name, value, pattern] of [
+    [
+      "controlPlaneVersion",
+      "CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
+      "acct_canary",
+      /cohorts did not match/,
+    ],
+    [
+      "emailEdgeVersion",
+      "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
+      "acct_canary",
+      /cohorts did not match/,
+    ],
+    [
+      "controlPlaneVersion",
+      "CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
+      "*",
+      /allowlist is invalid/,
+    ],
+  ]) {
+    const candidate = fixtures();
+    candidate[worker].resources.bindings.find(
+      (binding) => binding.name === name,
+    ).text = value;
+    assert.throws(
+      () => verifyRouteSigningReadiness(candidate),
+      pattern,
+    );
+  }
+
+  const active = fixtures();
+  active.controlPlaneVersion.resources.bindings.find((binding) =>
+    binding.name === "CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST").text =
+      "acct_canary";
+  active.emailEdgeVersion.resources.bindings.find((binding) =>
+    binding.name === "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST").text =
+      "acct_canary";
+  assert.throws(
+    () => verifyRouteSigningReadiness(active),
+    /cohort was not dark/,
+  );
 });
 
 test("readiness rejects split or indeterminate production traffic", () => {

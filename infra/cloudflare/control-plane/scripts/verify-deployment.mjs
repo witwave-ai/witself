@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +10,9 @@ import {
   workerVersionMessage,
   workerVersionTag,
 } from "./source-identity.mjs";
+import {
+  parseManagedDeliveryAccountAllowlist,
+} from "../src/agent-email-managed-delivery-cohort.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const generatedConfigPath = join(root, "wrangler.generated.jsonc");
@@ -242,6 +246,7 @@ function assertGeneratedConfigContract(config) {
     "AGENT_EMAIL_LEGACY_DOMAINS",
     "AGENT_EMAIL_ROUTE_SIGNING_KEY_ID",
     "CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT",
+    "CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
     "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT",
     "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM",
     "WITSELF_EDGE_RELEASE_COMMIT",
@@ -260,6 +265,9 @@ function assertGeneratedConfigContract(config) {
       config.vars.CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT !== "8") {
     throw new Error("generated config Worker vars did not match the reviewed contract");
   }
+  parseManagedDeliveryAccountAllowlist(
+    config.vars.CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST,
+  );
 
   const migrations = [
     { tag: "v1", new_sqlite_classes: ["ControlPlane"] },
@@ -327,6 +335,8 @@ export function expectedBuildMetadata(config) {
     ...edge,
     route_signing_key_id: parsed.vars.AGENT_EMAIL_ROUTE_SIGNING_KEY_ID,
     agent_email_directory_id: agentEmailDirectoryID,
+    managed_delivery_account_allowlist:
+      parsed.vars.CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST,
   });
 }
 
@@ -481,6 +491,7 @@ export function verifyWorkerVersion(version, expected, expectedVersionID) {
     "AGENT_EMAIL_LEGACY_DOMAINS",
     "AGENT_EMAIL_ROUTE_SIGNING_KEY_ID",
     "CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT",
+    "CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
     "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT",
     "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM",
     "DIRECTORY",
@@ -541,6 +552,10 @@ export function verifyWorkerVersion(version, expected, expectedVersionID) {
     ["CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM", "8"],
     ["CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT", "64"],
     ["CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT", "8"],
+    [
+      "CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
+      expected.managed_delivery_account_allowlist,
+    ],
   ]) {
     exactPlainBinding(bindings, name, value);
   }
@@ -558,6 +573,14 @@ export function verifyWorkerVersion(version, expected, expectedVersionID) {
   return Object.freeze({
     version_id: version.id,
     script_etag: script.etag,
+    managed_delivery_cohort: {
+      account_count: parseManagedDeliveryAccountAllowlist(
+        expected.managed_delivery_account_allowlist,
+      ).length,
+      allowlist_sha256: createHash("sha256")
+        .update(expected.managed_delivery_account_allowlist)
+        .digest("hex"),
+    },
   });
 }
 

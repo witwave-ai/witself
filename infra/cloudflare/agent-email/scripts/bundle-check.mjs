@@ -148,6 +148,7 @@ export async function main() {
       CONTROL_PLANE_URL: "https://self.witwave.ai/",
       AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS:
         JSON.stringify({ "bundle-check": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" }),
+      AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: "",
       REALM_EMAIL_ALIAS_DELIVERY_ENABLED: "false",
       REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false",
     };

@@ -505,7 +505,35 @@ either alias gate. While alias activation is disabled,
 customer requests, approval, internal assignment,
 and reactivation fail closed; read-only administration plus suspension,
 retirement, terminal customer/internal-provisioning abort, reserved-name
-management, and audit remain available. Do not enable
+management, and audit remain available.
+
+Canonical and managed-alias delivery also share one additive, account-scoped
+rollout fence. The control plane reads the canonical sorted CSV
+`CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST`; the Email Worker reads the
+byte-identical `AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST`. Empty or
+missing means no account is admitted. Each list accepts at most 100 exact
+account IDs and rejects whitespace, duplicates, noncanonical ordering, and
+every wildcard-like value. Managed signed route projections carry the exact
+`account_id`, allowing the edge to enforce the cohort even on a fresh KV hit.
+The value is route authority only: it is never logged or emitted to Analytics
+Engine. A known route outside the cohort tempfails before an inactive-route
+bounce, raw MIME read, or cell request; the control-plane fallback likewise
+returns a retryable `409 managed_email_delivery_cohort_held_back`, never a 404.
+Invalid cohort configuration fails closed with 503/configuration tempfail.
+The two existing route-kind fleet gates remain required, so activation is the
+intersection of the exact account cohort and the applicable canonical or alias
+gate. Customer-owned-domain routes do not contain this managed-route field and
+remain governed only by their independent custom-domain fences.
+
+The edge-token-authenticated read-only endpoint
+`GET /v1/email/managed-delivery/readiness` reports only cohort count, the
+SHA-256 of the canonical CSV, and the three control-plane gate booleans; it
+never returns account IDs. Deployment attestation reports the same value-free
+count/digest for the edge, and coordinated dark readiness refuses mismatched,
+invalid, or nonempty cohorts. Operators must compare those attestations before
+activation and deploy the same canonical CSV to both Workers.
+
+Do not enable
 the gate until every release blocker is closed and acceptance-tested: (1) the
 managed domain has a verified catch-all or equivalent full-coverage SMTP route
 into the Email Worker; (2) account move, restore, archive, close, and realm

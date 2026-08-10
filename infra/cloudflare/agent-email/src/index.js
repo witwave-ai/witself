@@ -21,6 +21,9 @@ import {
   validateRuntimeRecipient,
 } from "./directory.mjs";
 import { recordEdgeVerdict, recordRouteLookup } from "./metrics.mjs";
+import {
+  managedDeliveryAccountIsAdmitted,
+} from "./managed-delivery-cohort.mjs";
 
 const PERMANENT_REJECTION = "recipient unavailable";
 const OVER_SIZE_REJECTION = "message too large";
@@ -424,11 +427,11 @@ function realmRouteDisposition(route) {
       return { status: "route", route };
     case "suspended":
       if (route.suspension_disposition === "inactive") {
-        return { status: "inactive" };
+        return { status: "inactive", route };
       }
       throw transient("tempfail_suspended_route", "route");
     case "retired":
-      return { status: "inactive" };
+      return { status: "inactive", route };
     default:
       throw transient("tempfail_route_lookup", "route");
   }
@@ -788,6 +791,25 @@ async function handleEmailTransaction(message, env, runtime = {}) {
   if (resolved.status === "unknown") {
     message.setReject(PERMANENT_REJECTION);
     return { outcome: "rejected_unknown_recipient", phase: "recipient", status: 550 };
+  }
+  // The per-account rollout fence is additive to the route-kind fleet gates.
+  // It is evaluated from signed route authority before any permanent inactive
+  // disposition, MIME read, or cell fetch. Thus a known account held back from
+  // the cohort always retries instead of becoming an accidental bounce.
+  if (resolved.route?.route_kind === "canonical" ||
+      resolved.route?.route_kind === "realm_alias") {
+    let admitted;
+    try {
+      admitted = managedDeliveryAccountIsAdmitted(
+        env,
+        resolved.route.account_id,
+      );
+    } catch {
+      throw transient("tempfail_configuration", "configuration");
+    }
+    if (!admitted) {
+      throw transient("tempfail_account_cohort", "route");
+    }
   }
   if (resolved.status === "inactive") {
     message.setReject(PERMANENT_REJECTION);

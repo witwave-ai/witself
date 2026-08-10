@@ -4,6 +4,9 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 
 import { sourceIdentity } from "./source-identity.mjs";
+import {
+  parseManagedDeliveryAccountAllowlist,
+} from "../src/managed-delivery-cohort.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const namespaceID = String(process.env.EMAIL_DIRECTORY_KV_ID ?? "");
@@ -18,6 +21,10 @@ const canonicalDeliveryEnabled = String(
 const rawRoutePublicKeys = String(
   process.env.AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS ?? "",
 );
+const managedDeliveryAccountAllowlist = String(
+  process.env.AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST ?? "",
+);
+parseManagedDeliveryAccountAllowlist(managedDeliveryAccountAllowlist);
 const release = sourceIdentity();
 
 function outputPath(argv) {
@@ -94,6 +101,7 @@ if ((template.match(/__EMAIL_DIRECTORY_KV_ID__/g) ?? []).length !== 1 ||
     (template.match(/__RELAY_KEY_ID__/g) ?? []).length !== 1 ||
     (template.match(/__CONTROL_PLANE_URL__/g) ?? []).length !== 1 ||
     (template.match(/__AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS__/g) ?? []).length !== 1 ||
+    (template.match(/__AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST__/g) ?? []).length !== 1 ||
     (template.match(/__WITSELF_EDGE_RELEASE_VERSION__/g) ?? []).length !== 1 ||
     (template.match(/__WITSELF_EDGE_RELEASE_COMMIT__/g) ?? []).length !== 1 ||
     (template.match(/__WITSELF_EDGE_RELEASE_DATE__/g) ?? []).length !== 1 ||
@@ -108,6 +116,10 @@ const rendered = template
   .replace(
     "__AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS__",
     JSON.stringify(canonicalRoutePublicKeys),
+  )
+  .replace(
+    "__AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST__",
+    managedDeliveryAccountAllowlist,
   )
   .replace("__WITSELF_EDGE_RELEASE_VERSION__", release.version)
   .replace("__WITSELF_EDGE_RELEASE_COMMIT__", release.commit)

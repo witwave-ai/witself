@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -7,6 +8,12 @@ import { CUSTOM_DOMAIN_DELIVERY_SECRET } from
   "./assert-custom-domain-dark.mjs";
 import { EMAIL_DARK_SECRET_NAMES } from
   "../../control-plane/scripts/assert-custom-domain-dark.mjs";
+import {
+  parseManagedDeliveryAccountAllowlist as parseEdgeManagedDeliveryAccountAllowlist,
+} from "../src/managed-delivery-cohort.mjs";
+import {
+  parseManagedDeliveryAccountAllowlist as parseControlPlaneManagedDeliveryAccountAllowlist,
+} from "../../control-plane/src/agent-email-managed-delivery-cohort.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CONTROL_PLANE_WORKER = "witself-control-plane";
@@ -192,6 +199,28 @@ export function verifyRouteSigningReadiness({
       throw new Error("email edge active Worker managed delivery was not dark");
     }
   }
+  const controlPlaneCohort = plain(
+    controlPlaneBindings,
+    "CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
+    "control plane",
+  );
+  const emailEdgeCohort = plain(
+    emailEdgeBindings,
+    "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
+    "email edge",
+  );
+  const controlPlaneAccounts = parseControlPlaneManagedDeliveryAccountAllowlist(
+    controlPlaneCohort,
+  );
+  const emailEdgeAccounts = parseEdgeManagedDeliveryAccountAllowlist(
+    emailEdgeCohort,
+  );
+  if (controlPlaneCohort !== emailEdgeCohort) {
+    throw new Error("control plane and email edge managed delivery cohorts did not match");
+  }
+  if (controlPlaneAccounts.length !== 0 || emailEdgeAccounts.length !== 0) {
+    throw new Error("managed delivery cohort was not dark");
+  }
 
   const routeSigningKeyID = plain(
     controlPlaneBindings,
@@ -269,6 +298,13 @@ export function verifyRouteSigningReadiness({
     route_directory: {
       namespace_id: controlPlaneDirectoryID,
       shared_binding_verified: true,
+    },
+    managed_delivery_cohort: {
+      account_count: controlPlaneAccounts.length,
+      allowlist_sha256: createHash("sha256")
+        .update(controlPlaneCohort)
+        .digest("hex"),
+      bindings_match: true,
     },
   });
 }

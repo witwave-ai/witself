@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  EDGE_MANAGED_DELIVERY_READINESS_PATH,
+  handleManagedDeliveryReadinessRequest,
   handleRealmEmailAliasAdminRequest,
   handleRealmEmailAliasCustomerRequest,
   handleRealmEmailCanonicalCloseRequest,
@@ -91,6 +93,7 @@ function environment() {
       DIRECTORY: directory,
       AGENT_EMAIL_DIRECTORY: emailDirectory,
       AGENT_EMAIL_DOMAIN: DOMAIN,
+      CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: ACCOUNT,
     },
     {
       now: (() => {
@@ -126,6 +129,7 @@ function environment() {
       AGENT_EMAIL_DIRECTORY: emailDirectory,
       REALM_EMAIL_ALIASES: namespace,
       AGENT_EMAIL_DOMAIN: DOMAIN,
+      CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: ACCOUNT,
       CONTROL_PLANE_EDGE_TOKEN: EDGE_TOKEN,
       CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED: "true",
     },
@@ -701,6 +705,54 @@ test("edge-token fallback is authoritative and response-only", async () => {
   const projection = await refreshed.json();
   assert.equal(projection.state, "applied");
   assert.equal(emailDirectory.values.has(key), false);
+});
+
+test("edge-token readiness exposes only value-free managed cohort state", async () => {
+  const { env } = environment();
+  env.CP_REALM_EMAIL_CANONICAL_INVENTORY_ENABLED = "true";
+  env.CP_REALM_EMAIL_CANONICAL_DELIVERY_ENABLED = "true";
+
+  const request = (method = "GET", token = EDGE_TOKEN) => new Request(
+    `https://self.example${EDGE_MANAGED_DELIVERY_READINESS_PATH}`,
+    {
+      method,
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
+  assert.equal(
+    (await handleManagedDeliveryReadinessRequest(
+      request("GET", "wrong-but-long-enough-token"),
+      env,
+    )).status,
+    401,
+  );
+  assert.equal(
+    (await handleManagedDeliveryReadinessRequest(request("POST"), env)).status,
+    405,
+  );
+
+  const response = await handleManagedDeliveryReadinessRequest(
+    request(),
+    env,
+  );
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.managed_delivery.cohort.account_count, 1);
+  assert.equal(body.managed_delivery.cohort.empty, false);
+  assert.match(
+    body.managed_delivery.cohort.allowlist_sha256,
+    /^[0-9a-f]{64}$/,
+  );
+  assert.equal(body.managed_delivery.canonical_inventory_enabled, true);
+  assert.equal(body.managed_delivery.canonical_delivery_enabled, true);
+  assert.equal(body.managed_delivery.alias_authority_activation_enabled, true);
+  assert.doesNotMatch(JSON.stringify(body), new RegExp(ACCOUNT));
+
+  env.CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST = "*";
+  assert.equal(
+    (await handleManagedDeliveryReadinessRequest(request(), env)).status,
+    503,
+  );
 });
 
 test("custom-domain route fallback is dark by default and forwards only behind exact true", async () => {

@@ -13,6 +13,7 @@ const DOMAIN_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const REALM_ID = /^realm_([a-z2-7]{16})$/;
 const REALM_ID_BODY = /^[a-z2-7]{16}$/;
 const AGENT_ID = /^agent_[a-z2-7]{16}$/;
+const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const AGENT_SEGMENT = /^[a-z0-9](?:[a-z0-9-]{0,45}[a-z0-9])?$/;
 const REALM_ALIAS = /^[a-z0-9](?:[a-z0-9-]{1,14}[a-z0-9])$/;
 const DOMAIN_REQUEST_ID = /^aedr_[a-z2-7]{16}$/;
@@ -157,11 +158,14 @@ export function validateRealmRouteProjection(value, expectedDomain, expectedReal
         "realm_alias_claim_id", "realm_alias_revision",
       ]
     : [];
+  const managedRouteKeys = value.route_kind === "custom_domain"
+    ? []
+    : ["account_id"];
   const expectedKeys = state === "applied"
-    ? [...commonKeys, ...customDomainKeys, "cell_audience", "ingest_url"]
+    ? [...commonKeys, ...managedRouteKeys, ...customDomainKeys, "cell_audience", "ingest_url"]
     : state === "suspended"
-    ? [...commonKeys, ...customDomainKeys, "suspension_disposition"]
-    : [...commonKeys, ...customDomainKeys];
+    ? [...commonKeys, ...managedRouteKeys, ...customDomainKeys, "suspension_disposition"]
+    : [...commonKeys, ...managedRouteKeys, ...customDomainKeys];
   if (!exactKeys(value, expectedKeys) || value.schema_version !== REALM_ROUTE_SCHEMA_VERSION) {
     throw new Error("realm route projection schema is invalid");
   }
@@ -208,6 +212,13 @@ export function validateRealmRouteProjection(value, expectedDomain, expectedReal
     updated_at: value.updated_at,
     cache_ttl_seconds: value.cache_ttl_seconds,
   };
+  if (routeKind !== "custom_domain") {
+    const accountID = String(value.account_id ?? "");
+    if (!ACCOUNT_ID.test(accountID)) {
+      throw new Error("realm route projection account id is invalid");
+    }
+    route.account_id = accountID;
+  }
   if (routeKind === "custom_domain") {
     const domainRequestID = String(value.domain_request_id ?? "");
     const realmAliasClaimID = String(value.realm_alias_claim_id ?? "");

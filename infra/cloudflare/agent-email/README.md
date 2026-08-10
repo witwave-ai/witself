@@ -63,6 +63,18 @@ at the edge before a message body is read or a cell is contacted. The alias
 gate does not control canonical Realm ID traffic or the independently retired
 legacy literal-pilot lane.
 
+All canonical and managed-alias traffic has a second, account-scoped fence:
+`AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST`. It is an exact sorted CSV of
+at most 100 account IDs; the empty committed value admits nobody, and
+whitespace, duplicates, unsorted input, and wildcard-like values are rejected.
+The control plane must use the byte-identical
+`CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST`. Its signed managed route
+projection carries `account_id`; the edge checks that authority before an
+inactive-route bounce, content read, or cell request. A held-back known route
+therefore produces only `tempfail_account_cohort`. The metric is a fixed enum
+and contains no account, realm, address, or message value. Custom-domain routes
+remain independent of this managed-domain cohort.
+
 Dynamic route lookup is protected independently of account policy. A positive
 `EMAIL_DIRECTORY` projection is always checked first and
 bypasses negative state. On a valid cold KV miss, the Worker hashes
@@ -162,7 +174,10 @@ both managed delivery gates. Set
 the renderer rejects any value other than literal `true` or `false`. Set
 `REALM_EMAIL_CANONICAL_DELIVERY_ENABLED=true` only for a separately reviewed
 canonical-route activation; it has the same exact-boolean contract. The
-runtime remains default-off if either binding is ever absent. The renderer
+renderer also requires a valid
+`AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST`; omission renders the safe
+empty cohort. The control-plane renderer uses its `CP_`-prefixed counterpart.
+The runtime remains default-off if either binding is ever absent. The renderer
 refuses the KV ID bound to
 the adjacent control-plane Worker. The generated file is local operator state
 and must not be committed. The generated Worker must expose
@@ -212,8 +227,10 @@ both edge managed-delivery flags are false, the control-plane signer id
 is present in the edge's canonical public-key keyring, and all route-signing,
 authenticated-fallback, and relay secret bindings exist. Its JSON attestation
 contains key ids and binding-presence booleans, never public-key bytes or secret
-values. It requires the release tag/message annotations from `npm run deploy`;
-a later secret-only successor must be followed by a tagged redeploy before this
+values. It requires the release tag/message annotations from `npm run deploy`.
+A dark readiness check also requires both canonical cohort strings to match
+and be empty, and emits only their zero count and SHA-256 digest. A later
+secret-only successor must be followed by a tagged redeploy before this
 coordinated readiness check can pass again. Binding presence alone cannot prove
 that the two fallback secrets contain the same value. The value-free receipt
 from the coordinated provisioning command below is the evidence that one exact
@@ -232,6 +249,9 @@ the operator shell without printing their values:
 - `RELAY_KEY_ID`
 - `CONTROL_PLANE_URL`
 - `AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS`
+- `CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST` (when rendering the
+  control plane)
+- `AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST`
 - `REALM_EMAIL_ALIAS_DELIVERY_ENABLED`
 - `REALM_EMAIL_CANONICAL_DELIVERY_ENABLED`
 

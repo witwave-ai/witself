@@ -366,6 +366,8 @@ function registry(options = {}) {
     DIRECTORY: directory,
     AGENT_EMAIL_DIRECTORY: emailDirectory,
     AGENT_EMAIL_DOMAIN: DOMAIN,
+    CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST:
+      [ACCOUNT, OTHER_ACCOUNT].sort().join(","),
     CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED: "true",
     ...(options.customDomainStub
       ? {
@@ -928,7 +930,7 @@ test("customer request, approval, projection, idempotency, and tombstone are dur
   assert.deepEqual(
     Object.keys(projection).sort(),
     [
-      "cache_ttl_seconds", "cell_audience", "controller_revision", "domain",
+      "account_id", "cache_ttl_seconds", "cell_audience", "controller_revision", "domain",
       "ingest_url", "realm_id", "realm_label", "route_kind",
       "route_signature", "route_signing_key_id", "schema_version", "state",
       "updated_at",
@@ -975,7 +977,7 @@ test("customer request, approval, projection, idempotency, and tombstone are dur
     realmEmailRouteKey(DOMAIN, "acme"),
   );
   assert.equal(retiredProjection.state, "retired");
-  assert.equal(retiredProjection.account_id, undefined);
+  assert.equal(retiredProjection.account_id, ACCOUNT);
   assert.equal(retiredProjection.claim_id, undefined);
   assert.equal(retiredProjection.cell_audience, undefined);
   assert.equal(retiredProjection.ingest_url, undefined);
@@ -2074,6 +2076,41 @@ test("authoritative route fallback queues bounded asynchronous edge KV repair", 
   assert.equal(await storage.get(`route-refresh:${DOMAIN}:healing`), undefined);
 });
 
+test("known managed-alias routes are held back retryably by the exact account cohort", async () => {
+  const { runtime, env } = registry();
+  const created = await requestAlias(runtime, "cohort-alias", {
+    idempotency_key: "request-cohort-alias",
+  });
+  await approve(runtime, created.body.request, {
+    idempotency_key: "approve-cohort-alias",
+  });
+
+  env.CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST = "";
+  const heldBack = await call(runtime, "/route/get", {
+    domain: DOMAIN,
+    realm_label: "cohort-alias",
+  });
+  assert.equal(heldBack.response.status, 409);
+  assert.equal(
+    heldBack.body.code,
+    "managed_email_delivery_cohort_held_back",
+  );
+
+  env.CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST = "*";
+  const invalid = await call(runtime, "/route/get", {
+    domain: DOMAIN,
+    realm_label: "cohort-alias",
+  });
+  assert.equal(invalid.response.status, 503);
+  assert.equal(invalid.body.code, "managed_email_delivery_cohort_invalid");
+
+  const unknown = await call(runtime, "/route/get", {
+    domain: DOMAIN,
+    realm_label: "never-assigned",
+  });
+  assert.equal(unknown.response.status, 404);
+});
+
 test("idempotent replay is side-effect free behind an account lifecycle fence", async () => {
   const { runtime, emailDirectory, directory } = registry();
   const created = await requestAlias(runtime, "replay-safe");
@@ -2460,6 +2497,7 @@ test("empty registry fast-completes gate-off plan and account lifecycle adapters
 
 test("shared route builder rejects target details on non-applied rows", () => {
   const route = buildRealmEmailRouteProjection({
+    account_id: ACCOUNT,
     domain: DOMAIN,
     realm_id: REALM,
     realm_label: "acme",

@@ -17,6 +17,9 @@ import {
 import {
   signAgentEmailRouteProjection,
 } from "./agent-email-route-signature.mjs";
+import {
+  managedDeliveryAccountIsAdmitted,
+} from "./agent-email-managed-delivery-cohort.mjs";
 
 const SCHEMA_VERSION = "witself.realm-email-alias.v1";
 const META_KEY = "meta";
@@ -335,6 +338,7 @@ export function realmEmailRouteKey(domain, realmLabel) {
 }
 
 export function buildRealmEmailRouteProjection({
+  account_id: accountID,
   domain,
   realm_id: realmID,
   realm_label: realmLabel,
@@ -348,6 +352,9 @@ export function buildRealmEmailRouteProjection({
   cache_ttl_seconds: cacheTTLSeconds = REALM_EMAIL_ROUTE_CACHE_TTL_SECONDS,
 }) {
   const canonicalDomain = validateManagedRealmEmailDomain(domain);
+  if (!ACCOUNT_ID_PATTERN.test(accountID ?? "")) {
+    fail("realm route account_id is invalid", 400);
+  }
   if (!REALM_ID_PATTERN.test(realmID ?? "")) fail("realm route realm_id is invalid", 400);
   realmEmailRouteKey(canonicalDomain, realmLabel);
   const canonicalLabel = realmID.slice("realm_".length);
@@ -370,6 +377,7 @@ export function buildRealmEmailRouteProjection({
   }
   const projection = {
     schema_version: 1,
+    account_id: accountID,
     domain: canonicalDomain,
     realm_label: realmLabel,
     realm_id: realmID,
@@ -2527,6 +2535,7 @@ export class DurableRealmEmailAliasRegistry {
     if (!claim?.assignment_kind) return null;
     const state = cellAliasState(claim);
     const value = buildRealmEmailRouteProjection({
+      account_id: claim.account_id,
       domain: claim.domain,
       realm_id: claim.realm_id,
       realm_label: claim.alias,
@@ -2825,6 +2834,26 @@ export class DurableRealmEmailAliasRegistry {
         `canonical:${domain}:${realmLabel}`,
       );
       if (!canonical) fail("realm email route not found", 404);
+      let admitted;
+      try {
+        admitted = managedDeliveryAccountIsAdmitted(
+          this.env,
+          canonical.account_id,
+        );
+      } catch {
+        fail(
+          "managed email delivery cohort is unavailable",
+          503,
+          "managed_email_delivery_cohort_invalid",
+        );
+      }
+      if (!admitted) {
+        fail(
+          "managed email route is held back",
+          409,
+          "managed_email_delivery_cohort_held_back",
+        );
+      }
       const value = this.canonicalProjection(canonical);
       await this.enqueueRouteRefresh({
         domain,
@@ -2839,6 +2868,23 @@ export class DurableRealmEmailAliasRegistry {
     if (!claim?.assignment_kind || claim.domain !== domain) {
       fail("realm email route not found", 404);
     }
+    let admitted;
+    try {
+      admitted = managedDeliveryAccountIsAdmitted(this.env, claim.account_id);
+    } catch {
+      fail(
+        "managed email delivery cohort is unavailable",
+        503,
+        "managed_email_delivery_cohort_invalid",
+      );
+    }
+    if (!admitted) {
+      fail(
+        "managed email route is held back",
+        409,
+        "managed_email_delivery_cohort_held_back",
+      );
+    }
     // The durable claim fence is authoritative; DIRECTORY supplies only the
     // account's current target. A tiny durable refresh intent is queued before
     // returning so expired/missing KV repairs asynchronously without making
@@ -2848,6 +2894,7 @@ export class DurableRealmEmailAliasRegistry {
       : null;
     const state = cellAliasState(claim);
     const value = buildRealmEmailRouteProjection({
+      account_id: claim.account_id,
       domain: claim.domain,
       realm_id: claim.realm_id,
       realm_label: claim.alias,

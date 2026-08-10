@@ -45,6 +45,7 @@ function version({
       bindings: [
         plain("AGENT_EMAIL_DOMAIN", "witmail.net"),
         plain("AGENT_EMAIL_LEGACY_DOMAINS", "agent-mail.witwave.ai"),
+        plain("AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", ""),
         plain("AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS", keyring),
         { name: "CONTROL_PLANE_EDGE_TOKEN", type: "secret_text" },
         plain("CONTROL_PLANE_URL", "https://self.witwave.ai/"),

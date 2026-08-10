@@ -4,6 +4,9 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import {
+  parseManagedDeliveryAccountAllowlist,
+} from "../src/managed-delivery-cohort.mjs";
 
 const WORKER_NAME = "witself-agent-email-pilot";
 const PLAN_SCHEMA = "witself.agent-email-edge-rollback-plan.v1";
@@ -21,6 +24,7 @@ const EXPECTED_COMPATIBILITY_FLAGS = Object.freeze(["global_fetch_strictly_publi
 const REQUIRED_BINDINGS = Object.freeze([
   "AGENT_EMAIL_DOMAIN",
   "AGENT_EMAIL_LEGACY_DOMAINS",
+  "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
   "AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS",
   "CONTROL_PLANE_EDGE_TOKEN",
   "CONTROL_PLANE_URL",
@@ -40,6 +44,7 @@ const REQUIRED_BINDINGS = Object.freeze([
 const CONTRACT_PLAIN_BINDINGS = Object.freeze([
   "AGENT_EMAIL_DOMAIN",
   "AGENT_EMAIL_LEGACY_DOMAINS",
+  "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
   "CONTROL_PLANE_URL",
   "RELAY_KEY_ID",
 ]);
@@ -217,6 +222,9 @@ function inspectVersion(version, label) {
   if (!/^[a-z][a-z0-9_-]{0,63}$/.test(plain(bindings, "RELAY_KEY_ID", label))) {
     throw new Error(`${label} relay key identifier was invalid`);
   }
+  parseManagedDeliveryAccountAllowlist(
+    plain(bindings, "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", label),
+  );
   const directory = bindings.get("EMAIL_DIRECTORY");
   if (directory?.type !== "kv_namespace" ||
       !/^[0-9a-f]{32}$/.test(String(directory.namespace_id ?? ""))) {

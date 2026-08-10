@@ -66,6 +66,7 @@ test("release renderer injects matching immutable container and Worker identity"
     date,
     route_signing_key_id: routeSigningKeyID,
     agent_email_directory_id: agentEmailDirectoryID,
+    managed_delivery_account_allowlist: "",
   });
   assert.throws(
     () => expectedBuildMetadata(config.replace(
@@ -230,6 +231,11 @@ test("release renderer injects matching immutable container and Worker identity"
     /"CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT"\s*:\s*"8"/,
     "release config must preserve the plan-independent custom-domain queue ceiling",
   );
+  assert.match(
+    config,
+    /"CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST"\s*:\s*""/,
+    "release config must keep the managed account cohort dark by default",
+  );
   assert.doesNotMatch(
     config,
     /"CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED"\s*:/,
@@ -301,6 +307,34 @@ test("release renderer injects matching immutable container and Worker identity"
   assert.doesNotMatch(config, /__WITSELF_[A-Z_]+__/);
   assert.doesNotMatch(config, /__EMAIL_DIRECTORY_KV_ID__/);
   assert.equal((await stat(output)).mode & 0o777, 0o600);
+});
+
+test("release renderer accepts only an exact canonical managed account cohort", async (t) => {
+  const temp = await mkdtemp(join(tmpdir(), "witself-cp-cohort-config-"));
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  for (const [index, value] of [
+    "*", "acct_*", " acct_alpha", "acct_alpha ",
+    "acct_beta,acct_alpha", "acct_alpha,acct_alpha",
+  ].entries()) {
+    const rendered = spawnSync(process.execPath, [
+      renderer.pathname,
+      "--version", version,
+      "--commit", commit,
+      "--date", date,
+      "--output", join(temp, `wrangler-${index}.jsonc`),
+    ], {
+      cwd: root,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        EMAIL_DIRECTORY_KV_ID: agentEmailDirectoryID,
+        AGENT_EMAIL_ROUTE_SIGNING_KEY_ID: routeSigningKeyID,
+        CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: value,
+      },
+    });
+    assert.notEqual(rendered.status, 0, value);
+    assert.match(rendered.stderr, /allowlist is invalid/);
+  }
 });
 
 test("release renderer rejects the broad control-plane directory for agent email", () => {
@@ -407,6 +441,7 @@ function expectedIdentity() {
     date,
     route_signing_key_id: routeSigningKeyID,
     agent_email_directory_id: agentEmailDirectoryID,
+    managed_delivery_account_allowlist: "",
   };
 }
 
@@ -482,6 +517,7 @@ function deployedVersion(overrides = {}) {
           ["CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM", "8"],
           ["CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT", "64"],
           ["CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT", "8"],
+          ["CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", ""],
         ].map(([name, text]) => ({ name, type: "plain_text", text })),
         {
           name: "AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY",
@@ -557,6 +593,11 @@ test("Worker version verification checks annotations, bindings, and script etag"
   assert.deepEqual(verifyWorkerVersion(deployedVersion(), expected, versionID), {
     version_id: versionID,
     script_etag: "b".repeat(64),
+    managed_delivery_cohort: {
+      account_count: 0,
+      allowlist_sha256:
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    },
   });
 
   const wrongAnnotation = deployedVersion();
@@ -747,6 +788,11 @@ test("Worker verifier follows the one production version through Wrangler JSON",
   assert.deepEqual(inspected, {
     version_id: versionID,
     script_etag: "b".repeat(64),
+    managed_delivery_cohort: {
+      account_count: 0,
+      allowlist_sha256:
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    },
   });
   assert.deepEqual(calls, [
     {

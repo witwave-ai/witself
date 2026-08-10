@@ -319,6 +319,10 @@ export function validateProvisioningConfigs(controlPlaneRaw, emailEdgeRaw) {
       emailEdge.vars?.REALM_EMAIL_CANONICAL_DELIVERY_ENABLED !== "false") {
     fail("email-edge generated configuration must keep managed delivery dark");
   }
+  if (controlPlane.vars?.CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST !== "" ||
+      emailEdge.vars?.AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST !== "") {
+    fail("generated managed delivery cohorts must be empty before provisioning");
+  }
   return Object.freeze({
     keyID,
     publicKey: keyring[keyID],
@@ -406,6 +410,16 @@ function assertRemoteDark({ controlPlane, emailEdge }) {
     if (binding?.type !== "plain_text" || binding.text !== "false") {
       fail("email-edge managed delivery must be dark before provisioning");
     }
+  }
+  const cpCohort = cpBindings.get(
+    "CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
+  );
+  const edgeCohort = edgeBindings.get(
+    "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
+  );
+  if (cpCohort?.type !== "plain_text" || cpCohort.text !== "" ||
+      edgeCohort?.type !== "plain_text" || edgeCohort.text !== "") {
+    fail("active managed delivery cohorts must be empty before provisioning");
   }
   // A pre-existing email Worker is mandatory. This avoids Wrangler's first-
   // deploy secret bootstrap path, which needs a complete --secrets-file.
