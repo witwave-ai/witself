@@ -178,6 +178,8 @@ export async function main() {
   );
   const config = await createPrivateDeploymentConfig({
     prefix: "witself-agent-email-deploy-",
+    parentDirectory: resolve(root, ".."),
+    entrypointTarget: join(root, "src", "index.js"),
     render: (path) => run(process.execPath, [
       join(root, "scripts", "render-wrangler.mjs"),
       "--output", path,

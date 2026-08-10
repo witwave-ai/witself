@@ -593,9 +593,11 @@ function relayWitselfEnvironment(environment) {
   return output;
 }
 
-async function freezeRelayConfig(runtime, source, prefix) {
+async function freezeRelayConfig(runtime, source, prefix, deploymentRoot) {
   return createPrivateDeploymentConfig({
     prefix,
+    parentDirectory: dirname(deploymentRoot),
+    entrypointTarget: join(deploymentRoot, "src", "index.js"),
     async render(path) {
       const value = await runtime.readText(source);
       if (typeof value !== "string" || value.length < 1) {
@@ -614,11 +616,13 @@ async function createRelayConfigSnapshots(runtime, options) {
       runtime,
       options.controlPlaneConfig,
       "witself-relay-control-plane-",
+      CONTROL_PLANE_ROOT,
     );
     emailEdge = await freezeRelayConfig(
       runtime,
       options.emailEdgeConfig,
       "witself-relay-email-edge-",
+      root,
     );
     if (controlPlane.path === emailEdge.path ||
         controlPlane.path === options.controlPlaneConfig ||

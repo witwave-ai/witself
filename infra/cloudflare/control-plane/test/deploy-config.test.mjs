@@ -1,14 +1,24 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   currentProductionVersionID,
   deploymentMatches,
   expectedBuildMetadata,
+  privateDeploymentConfigMain,
   verifyCurrentWorkerDeployment,
   verifyWorkerVersion,
 } from "../scripts/verify-deployment.mjs";
@@ -17,6 +27,7 @@ import {
   exactGeneratedConfigPath,
   GENERATED_CONFIG_PATH,
   isFirstManagedCohortProtocolBootstrap,
+  isLeaseBootstrapTargetRelease,
   preflightManagedCohortProtocolBootstrapPredecessor,
   preflightManagedCohortProtocolUpgrade,
   releaseDeploymentArguments,
@@ -36,6 +47,9 @@ import {
   CANONICAL_EMAIL_DARK_SECRET_NAMES,
   CUSTOM_DOMAIN_DARK_SECRET_NAMES,
 } from "../scripts/assert-custom-domain-dark.mjs";
+import {
+  createPrivateDeploymentConfig,
+} from "../scripts/private-deployment-config.mjs";
 
 const root = new URL("..", import.meta.url);
 const renderer = new URL("../scripts/render-wrangler.mjs", import.meta.url);
@@ -53,6 +67,88 @@ const bootstrapTargetVersionID = "55555555-5555-4555-8555-555555555555";
 const bootstrapConvergedVersionID = "66666666-6666-4666-8666-666666666666";
 const cohortAccount = "acc_abcdefghijkl2345";
 const secondCohortAccount = "acc_bcdefghijklm2345";
+
+test("legacy lease bootstrap is pinned to the exact recovery release", () => {
+  assert.equal(isLeaseBootstrapTargetRelease("0.0.241"), false);
+  assert.equal(isLeaseBootstrapTargetRelease("0.0.242"), true);
+  assert.equal(isLeaseBootstrapTargetRelease("0.0.243"), false);
+});
+
+test("private deployment verification pins path depth, prefix, modes, and file type", async () => {
+  const cloudflareRoot = resolve(fileURLToPath(new URL("../../", import.meta.url)));
+  const entrypoint = resolve(fileURLToPath(new URL("../src/index.js", import.meta.url)));
+  const config = await createPrivateDeploymentConfig({
+    prefix: "witself-control-plane-deploy-",
+    parentDirectory: cloudflareRoot,
+    entrypointTarget: entrypoint,
+    render: (path) => writeFile(
+      path,
+      '{"main": "src/index.js"}\n',
+      { mode: 0o600 },
+    ),
+  });
+  let symlinkDirectory = "";
+  try {
+    assert.equal(
+      privateDeploymentConfigMain(config.path),
+      "../control-plane/src/index.js",
+    );
+    assert.throws(
+      () => privateDeploymentConfigMain(join(
+        cloudflareRoot,
+        "witself-control-plane-deploy-too-long",
+        "wrangler.generated.jsonc",
+      )),
+      /exact private control-plane configuration path/,
+    );
+    assert.throws(
+      () => privateDeploymentConfigMain(join(
+        cloudflareRoot,
+        "nested",
+        "witself-control-plane-deploy-ABC123",
+        "wrangler.generated.jsonc",
+      )),
+      /exact private control-plane configuration path/,
+    );
+
+    await chmod(config.path, 0o600);
+    assert.throws(
+      () => privateDeploymentConfigMain(config.path),
+      /immutable private configuration metadata/,
+    );
+    await chmod(config.path, 0o400);
+    await chmod(dirname(config.path), 0o755);
+    assert.throws(
+      () => privateDeploymentConfigMain(config.path),
+      /immutable private configuration metadata/,
+    );
+    await chmod(dirname(config.path), 0o700);
+
+    symlinkDirectory = await mkdtemp(join(
+      cloudflareRoot,
+      "witself-control-plane-deploy-",
+    ));
+    await chmod(symlinkDirectory, 0o700);
+    const target = join(symlinkDirectory, "target.jsonc");
+    await writeFile(target, "{}\n", { mode: 0o400 });
+    await symlink("target.jsonc", join(
+      symlinkDirectory,
+      "wrangler.generated.jsonc",
+    ));
+    assert.throws(
+      () => privateDeploymentConfigMain(join(
+        symlinkDirectory,
+        "wrangler.generated.jsonc",
+      )),
+      /immutable private configuration metadata/,
+    );
+  } finally {
+    await config.cleanup();
+    if (symlinkDirectory !== "") {
+      await rm(symlinkDirectory, { recursive: true, force: true });
+    }
+  }
+});
 
 test("generic control-plane secret mutation is explicitly break-glass", async () => {
   const packageJSON = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
@@ -92,7 +188,7 @@ function emailEdgeVersion({
   };
 }
 
-test("v0.0.241 CP-first deployment requires the active v0.0.240 edge to be dark", () => {
+test("CP-first managed-cohort protocol upgrade requires the active v0.0.240 edge to be dark", () => {
   assert.deepEqual(
     verifyManagedCohortProtocolUpgrade(
       "0.0.241",
@@ -136,7 +232,7 @@ test("v0.0.241 CP-first deployment requires the active v0.0.240 edge to be dark"
       emailEdgeDeployment(),
       emailEdgeVersion({ release: "0.0.239" }),
     ),
-    /requires a v0\.0\.240 or v0\.0\.241 email edge/,
+    /requires a v0\.0\.240 or newer email edge/,
   );
 });
 
@@ -239,9 +335,9 @@ test("managed cohort protocol preflight rejects origin substitution and active-v
   );
 });
 
-test("only the exact dark v0.0.241 transition may bootstrap the operations lease", () => {
+test("only the exact dark v0.0.242 recovery may bootstrap the operations lease", () => {
   const dark = verifyManagedCohortProtocolUpgrade(
-    "0.0.241",
+    "0.0.242",
     emailEdgeDeployment(),
     emailEdgeVersion(),
   );
@@ -250,22 +346,23 @@ test("only the exact dark v0.0.241 transition may bootstrap the operations lease
     release: { version: "0.0.240" },
   };
   assert.equal(
-    isFirstManagedCohortProtocolBootstrap("0.0.241", dark, predecessor),
+    isFirstManagedCohortProtocolBootstrap("0.0.242", dark, predecessor),
     true,
   );
   for (const [release, candidate] of [
-    ["0.0.242", dark],
-    ["0.0.241", { ...dark, already_current: true }],
-    ["0.0.241", { ...dark, target_account_count: 1 }],
-    ["0.0.241", { ...dark, active_edge_account_count: 1 }],
-    ["0.0.241", { ...dark, edge_release: "0.0.241" }],
+    ["0.0.241", dark],
+    ["0.0.243", dark],
+    ["0.0.242", { ...dark, already_current: true }],
+    ["0.0.242", { ...dark, target_account_count: 1 }],
+    ["0.0.242", { ...dark, active_edge_account_count: 1 }],
+    ["0.0.242", { ...dark, edge_release: "0.0.241" }],
   ]) {
     assert.equal(
       isFirstManagedCohortProtocolBootstrap(release, candidate, predecessor),
       false,
     );
   }
-  assert.equal(isFirstManagedCohortProtocolBootstrap("0.0.241", dark, null), false);
+  assert.equal(isFirstManagedCohortProtocolBootstrap("0.0.242", dark, null), false);
 });
 
 test("release renderer injects matching immutable container and Worker identity", async (t) => {
@@ -299,6 +396,23 @@ test("release renderer injects matching immutable container and Worker identity"
     agent_email_directory_id: agentEmailDirectoryID,
     managed_delivery_account_allowlist: "",
   });
+  const relocatedMain = "../control-plane/src/index.js";
+  const relocatedConfig = config.replace(
+    '"main": "src/index.js"',
+    `"main": "${relocatedMain}"`,
+  );
+  assert.deepEqual(
+    expectedBuildMetadata(relocatedConfig, relocatedMain),
+    expectedBuildMetadata(config),
+  );
+  assert.throws(
+    () => expectedBuildMetadata(relocatedConfig),
+    /main Worker entrypoint/,
+  );
+  assert.throws(
+    () => expectedBuildMetadata(relocatedConfig, "../attacker/src/index.js"),
+    /main Worker entrypoint/,
+  );
   assert.throws(
     () => expectedBuildMetadata(config.replace(
       '"main": "src/index.js"',
@@ -873,7 +987,7 @@ function controlPlaneReleaseVersion(identity, {
 
 test("lease bootstrap proves only the exact dark v0.0.240 predecessor", () => {
   const target = controlPlaneReleaseIdentity(
-    "0.0.241",
+    "0.0.242",
     "a".repeat(40),
     "2026-08-09T01:02:03Z",
   );
@@ -981,7 +1095,7 @@ test("lease bootstrap proves only the exact dark v0.0.240 predecessor", () => {
 
 test("lease bootstrap rechecks a stable provider predecessor and preserves every Durable Object namespace", () => {
   const target = controlPlaneReleaseIdentity(
-    "0.0.241",
+    "0.0.242",
     "a".repeat(40),
     "2026-08-09T01:02:03Z",
   );

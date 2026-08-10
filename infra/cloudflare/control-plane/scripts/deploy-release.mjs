@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import {
   deploymentMatches,
   expectedBuildMetadata,
+  privateDeploymentConfigMain,
   verifyWorkerVersion,
 } from "./verify-deployment.mjs";
 import {
@@ -34,6 +35,11 @@ const CONTROL_PLANE_WORKER = "witself-control-plane";
 const EMAIL_EDGE_WORKER = "witself-agent-email-pilot";
 const MANAGED_COHORT_PROTOCOL_RELEASE = "0.0.241";
 const MANAGED_COHORT_PREDECESSOR_RELEASE = "0.0.240";
+// v0.0.241 introduced the protocol, but its private Wrangler snapshot was
+// outside the package and Wrangler rejected its relative paths before any
+// control-plane provider mutation. Only this exact recovery release may use
+// the still-dark v0.0.240 legacy-404 bootstrap. Future releases fail closed.
+const LEASE_BOOTSTRAP_TARGET_RELEASE = "0.0.242";
 const CANONICAL_CONTROL_PLANE_ORIGIN = "https://self.witwave.ai";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -41,6 +47,10 @@ const CONTROL_PLANE_DARK_BINDINGS = Object.freeze([
   "CP_REALM_EMAIL_CANONICAL_DELIVERY_ENABLED",
   "CP_REALM_EMAIL_CANONICAL_INVENTORY_ENABLED",
 ]);
+
+export function isLeaseBootstrapTargetRelease(release) {
+  return release === LEASE_BOOTSTRAP_TARGET_RELEASE;
+}
 
 function releaseAtLeast(release, minimum) {
   const parse = (value) => {
@@ -167,12 +177,12 @@ export function verifyManagedCohortProtocolUpgrade(
   }
   if (edgeRelease !== MANAGED_COHORT_PREDECESSOR_RELEASE) {
     throw new Error(
-      "v0.0.241 control-plane deployment requires a v0.0.240 or v0.0.241 email edge",
+      "v0.0.241-or-newer managed-cohort protocol upgrade requires a v0.0.240 or newer email edge",
     );
   }
   if (targetAccounts.length !== 0) {
     throw new Error(
-      "v0.0.241 CP-first deployment over a v0.0.240 email edge requires an empty managed cohort",
+      "CP-first managed-cohort protocol upgrade over a v0.0.240 email edge requires an empty managed cohort",
     );
   }
   for (const name of [
@@ -181,7 +191,7 @@ export function verifyManagedCohortProtocolUpgrade(
   ]) {
     if (plain(bindings, name) !== "false") {
       throw new Error(
-        "v0.0.241 CP-first deployment requires the active v0.0.240 email edge managed delivery gates to be false",
+        "CP-first managed-cohort protocol upgrade requires the active v0.0.240 email edge managed delivery gates to be false",
       );
     }
   }
@@ -300,7 +310,7 @@ export function verifyManagedCohortProtocolBootstrapPredecessor(
   deployment,
   version,
 ) {
-  if (target?.version !== MANAGED_COHORT_PROTOCOL_RELEASE ||
+  if (!isLeaseBootstrapTargetRelease(target?.version) ||
       target.managed_delivery_account_allowlist !== "" ||
       predecessor?.version !== MANAGED_COHORT_PREDECESSOR_RELEASE ||
       predecessor.tag !== `v${MANAGED_COHORT_PREDECESSOR_RELEASE}`) {
@@ -331,7 +341,7 @@ export function verifyManagedCohortProtocolBootstrapPredecessor(
   if (bindings.has("CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST") ||
       CONTROL_PLANE_DARK_BINDINGS.some((name) => bindings.has(name))) {
     throw new Error(
-      "v0.0.241 lease bootstrap requires the exact active v0.0.240 control plane with canonical delivery dark and no managed cohort binding",
+      "v0.0.242 recovery lease bootstrap requires the exact active v0.0.240 control plane with canonical delivery dark and no managed cohort binding",
     );
   }
   return attestation;
@@ -375,7 +385,7 @@ export function verifyManagedCohortProtocolBootstrapTarget(
   deployment,
   version,
 ) {
-  if (target?.version !== MANAGED_COHORT_PROTOCOL_RELEASE ||
+  if (!isLeaseBootstrapTargetRelease(target?.version) ||
       predecessorAttestation?.schema !==
         "witself.agent-email-control-plane-bootstrap-predecessor.v1") {
     throw new Error("control-plane lease bootstrap target proof was invalid");
@@ -455,7 +465,7 @@ export function isFirstManagedCohortProtocolBootstrap(
   preflight,
   predecessor,
 ) {
-  return targetRelease === MANAGED_COHORT_PROTOCOL_RELEASE &&
+  return isLeaseBootstrapTargetRelease(targetRelease) &&
     preflight?.required === true &&
     preflight.edge_release === MANAGED_COHORT_PREDECESSOR_RELEASE &&
     preflight.already_current === false &&
@@ -534,7 +544,10 @@ function exactLeaseOrigin(preflight, expectedOrigin) {
 
 async function deployPrivateReleaseConfig(config) {
   const configSource = await config.readText();
-  const expected = expectedBuildMetadata(configSource);
+  const expected = expectedBuildMetadata(
+    configSource,
+    privateDeploymentConfigMain(config.path),
+  );
   const source = sourceIdentity();
   const actual = { service: "witself-control-plane", ...source };
   if (!deploymentMatches(actual, expected)) {
@@ -599,9 +612,9 @@ async function deployPrivateReleaseConfig(config) {
     {
       endpoint: leaseOrigin,
       // Only this caller may distinguish an old release's missing endpoint.
-      // The exception is accepted below solely for the exact v0.0.241 dark
-      // bootstrap; every later deployment fails closed without the lease.
-      allowLegacyNotFound: expected.version === MANAGED_COHORT_PROTOCOL_RELEASE,
+      // The v0.0.241 attempt could not reach a provider mutation. Only the
+      // exact v0.0.242 recovery release may enter the dark v0.0.240 proof.
+      allowLegacyNotFound: isLeaseBootstrapTargetRelease(expected.version),
     },
   );
   try {
@@ -624,7 +637,7 @@ async function deployPrivateReleaseConfig(config) {
       predecessor,
     )) {
       throw new Error(
-        "control-plane deployment cannot bypass the shared operations lease outside the exact dark v0.0.241 bootstrap",
+        "control-plane deployment cannot bypass the shared operations lease outside the exact dark v0.0.242 recovery bootstrap",
       );
     }
 
@@ -654,7 +667,7 @@ async function deployPrivateReleaseConfig(config) {
       );
     }
     // This is the sole unleased provider write. It installs only the exact
-    // outer v0.0.241 Worker and explicitly suppresses every Container build or
+    // outer v0.0.242 Worker and explicitly suppresses every Container build or
     // rollout. Concurrent supported bootstraps have identical clean tagged
     // source, generated config, annotations, and arguments, so this step is
     // idempotent; the full deploy remains below the newly installed lease.
@@ -691,6 +704,8 @@ export async function main(argv = process.argv.slice(2)) {
   }
   const config = await createPrivateDeploymentConfig({
     prefix: "witself-control-plane-deploy-",
+    parentDirectory: resolve(root, ".."),
+    entrypointTarget: join(root, "src", "index.js"),
     render: (path) => runLeaseGuardedCommand(
       process.execPath,
       [join(root, "scripts", "render-wrangler.mjs"), "--output", path],

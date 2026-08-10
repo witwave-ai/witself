@@ -1,8 +1,16 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { lstatSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import {
+  basename,
+  dirname,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -143,7 +151,7 @@ function exactConfigNames(actual, expected, description) {
   }
 }
 
-function assertGeneratedConfigContract(config) {
+function assertGeneratedConfigContract(config, expectedMain) {
   const topLevelKeys = [
     "compatibility_date",
     "containers",
@@ -165,7 +173,7 @@ function assertGeneratedConfigContract(config) {
   if (!sameJSON(Object.keys(config).sort(), topLevelKeys.sort())) {
     throw new Error("generated config top-level contract did not match");
   }
-  if (config.name !== "witself-control-plane" || config.main !== "src/index.js") {
+  if (config.name !== "witself-control-plane" || config.main !== expectedMain) {
     throw new Error("generated config main Worker entrypoint did not match");
   }
   if (config.compatibility_date !== COMPATIBILITY_DATE ||
@@ -312,10 +320,15 @@ function assertGeneratedConfigContract(config) {
   return { container, agentEmailDirectoryID };
 }
 
-export function expectedBuildMetadata(config) {
+export function expectedBuildMetadata(config, expectedMain = "src/index.js") {
+  if (typeof expectedMain !== "string" || expectedMain.length < 1 ||
+      expectedMain !== expectedMain.trim() ||
+      /[\\\x00-\x1f\x7f]/.test(expectedMain)) {
+    throw new Error("expected generated config main Worker entrypoint was invalid");
+  }
   const parsed = parseGeneratedConfig(config);
   const { container: parsedContainer, agentEmailDirectoryID } =
-    assertGeneratedConfigContract(parsed);
+    assertGeneratedConfigContract(parsed, expectedMain);
   const container = validateBuildMetadata({
     version: parsedContainer.image_vars.VERSION,
     commit: parsedContainer.image_vars.COMMIT,
@@ -338,6 +351,44 @@ export function expectedBuildMetadata(config) {
     managed_delivery_account_allowlist:
       parsed.vars.CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST,
   });
+}
+
+export function privateDeploymentConfigMain(configPath) {
+  const path = resolve(configPath);
+  const cloudflareRoot = resolve(root, "..");
+  const directory = dirname(path);
+  const entrypoint = join(root, "src", "index.js");
+  if (basename(path) !== "wrangler.generated.jsonc" ||
+      dirname(directory) !== cloudflareRoot ||
+      !/^witself-control-plane-deploy-[A-Za-z0-9]{6}$/.test(
+        basename(directory),
+      )) {
+    throw new Error(
+      "deployment verification requires an exact private control-plane configuration path",
+    );
+  }
+  const [directoryMetadata, configMetadata, entrypointMetadata] = [
+    lstatSync(directory),
+    lstatSync(path),
+    lstatSync(entrypoint),
+  ];
+  if (!directoryMetadata.isDirectory() || directoryMetadata.isSymbolicLink() ||
+      (directoryMetadata.mode & 0o777) !== 0o700 ||
+      !configMetadata.isFile() || configMetadata.isSymbolicLink() ||
+      (configMetadata.mode & 0o777) !== 0o400 ||
+      !entrypointMetadata.isFile() || entrypointMetadata.isSymbolicLink()) {
+    throw new Error(
+      "deployment verification requires immutable private configuration metadata",
+    );
+  }
+  const expectedMain = relative(directory, entrypoint).split(sep).join("/");
+  if (expectedMain !== "../control-plane/src/index.js" ||
+      resolve(directory, expectedMain) !== entrypoint) {
+    throw new Error(
+      "deployment verification could not resolve the private control-plane entrypoint",
+    );
+  }
+  return expectedMain;
 }
 
 export function deploymentMatches(actual, expected) {
@@ -635,6 +686,7 @@ export function verifyCurrentWorkerDeployment(
 function parseArgs(argv) {
   const out = {
     config: generatedConfigPath,
+    expectedMain: "src/index.js",
     endpoint: process.env.WITSELF_CONTROL_PLANE ?? "https://self.witwave.ai",
     // Container-backed Worker revisions can take several minutes to replace
     // their live instances after the Worker upload has completed.
@@ -652,9 +704,7 @@ function parseArgs(argv) {
     case "--config":
       out.config = resolve(root, value);
       if (out.config !== generatedConfigPath) {
-        throw new Error(
-          "deployment verification requires the exact generated control-plane config",
-        );
+        out.expectedMain = privateDeploymentConfigMain(out.config);
       }
       break;
     case "--endpoint":
@@ -684,7 +734,10 @@ async function sleep(delayMs) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const expected = expectedBuildMetadata(await readFile(args.config, "utf8"));
+  const expected = expectedBuildMetadata(
+    await readFile(args.config, "utf8"),
+    args.expectedMain,
+  );
   const attestation = verifyCurrentWorkerDeployment(expected, args.config);
   process.stdout.write(
     `verified outer Worker ${attestation.version_id} (${attestation.script_etag})\n`,

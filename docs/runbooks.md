@@ -1019,8 +1019,12 @@ never with an ad hoc Wrangler command. Create or select a Witself secret with
 three distinct UTF-8 fields: a nonsensitive `text` key id, a nonsensitive
 `text` canonical base64 raw 32-byte Ed25519 public key, and a
 sensitive/redacted `private_key` containing the matching base64 PKCS#8 private
-key. Deploy the exact v0.0.241-or-newer control plane dark first, then deploy the
-same release of the edge dark while it still has the old relay id/private key.
+key. If the live control plane is still v0.0.240, only the exact v0.0.242
+recovery deploy may use the bounded legacy-404 lease bootstrap; v0.0.241 never
+reached a control-plane provider mutation, and v0.0.243 or later fails closed
+on that legacy state. Deploy the exact v0.0.241-or-newer control plane dark
+first, then deploy the same release of the edge dark while it still has the old
+relay id/private key.
 From the unchanged tag, re-render both target configs with empty managed
 cohorts, both delivery flags false, and the desired new public `RELAY_KEY_ID`,
 but do not deploy that edge config yet. Keep direct Cloudflare dashboard/API
