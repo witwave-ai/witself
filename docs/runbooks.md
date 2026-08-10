@@ -475,26 +475,40 @@ their own reviewed stage.
    image `v0.0.241` with both `receivePilot.enabled` and
    `receiveProduction.enabled` false. Wait for every old writer to drain and
    verify schema 88 plus API health before changing receive configuration.
-2. Build one canonical, byte-sorted list of 1-100 exact account IDs resident in
-   this cell. Deploy the identical CSV to the cell production receive value and
-   the separately guarded control-plane/edge cohort settings, but keep every
-   delivery gate false. There is no wildcard. A missing, duplicated, malformed,
-   whitespace-padded, unsorted, or cross-cell account must stop the rollout.
+2. Build one canonical, byte-sorted CSV of 1-100 exact account IDs resident in
+   this cell, with no whitespace or trailing newline. Store it outside Git and
+   provision it as one immutable, versioned Kubernetes Secret data value in the
+   server namespace. Set only `accountIDsExistingSecret.name` and `.key` in
+   managed cell values; leave the literal `accountIDs` array and
+   `retryCanaryAgentID` empty. Deploy the identical CSV to the
+   separately guarded control-plane/edge cohort settings, but keep every
+   delivery gate false. There is no wildcard. A missing Secret/key, duplicated,
+   malformed, whitespace-padded, unsorted, or cross-cell account must stop the
+   rollout. Never mutate the referenced Secret in place: create the next
+   immutable Secret and update its versioned reference name, which rolls every
+   API pod. Verify the new cohort before changing edge state.
 3. Enable only `agentEmail.receiveProduction` in the cell. Its startup is
    read-only and O(cohort): each API pod verifies account presence/status and
-   optional retry-canary membership, but never scans or mutates all agents.
+   optional retry-canary membership in literal/private mode, but never scans or
+   mutates all agents.
    Missing existing mailboxes therefore do not block readiness. From this point,
    every successful new-agent create in the cohort includes its mailbox in the
    same transaction.
-4. Run exactly one explicit backfill process from the released cell image with
-   that cell's ordinary database and production-receive environment:
+4. Run exactly one isolated backfill Job from the released cell image. Never
+   exec the command in an API pod:
 
    ```sh
-   /usr/local/bin/witself-server agent-email backfill \
-     --exception-output /absolute/private/backfill-exception.json
+   scripts/run-agent-email-cell-operation.sh \
+     --cell CELL --kubeconfig KUBECONFIG --context CONTEXT \
+     --operation backfill \
+     --artifact-output /absolute/private/backfill-exception.json
    ```
 
-   Record only its value-free JSON counts. The exception path must be new,
+   The fixed Job name prevents concurrent runs. The script snapshots only the
+   non-secret ConfigMap, inherits the exact database/cohort Secret references
+   without reading their values, and exports from a memory-backed volume without
+   putting identities or Secret references in its output. Record only its
+   value-free JSON counts. The exception path must be new,
    canonical, absolute, and outside Git. It is created mode `0600` only if one
    agent needs a private operator override; review it locally and use a new
    path on the rerun. The command pages at 100 agents, is idempotent,
@@ -502,6 +516,62 @@ their own reviewed stage.
    one copy per replica. A successful result must report
    `missing_mailbox_count_after: 0`. Suspended accounts are verified read-only;
    resume and rerun explicitly if repair is required.
+
+   A killed operator process can leave the fixed concurrency lock behind. Do
+   not delete it merely because a later invocation reports a collision. Inspect
+   only the exact operation Job and its exact job-name pod set first:
+
+   ```sh
+   KUBE=(kubectl --request-timeout=30s --kubeconfig KUBECONFIG \
+     --context CONTEXT -n witself)
+   "${KUBE[@]}" get job witself-agent-email-operation \
+     --ignore-not-found=true \
+     -o 'jsonpath={.metadata.name}{"\t"}{.status.active}{"\t"}{.status.succeeded}{"\t"}{.status.failed}{"\n"}'
+   "${KUBE[@]}" get pods \
+     -l 'batch.kubernetes.io/job-name=witself-agent-email-operation' \
+     -o 'jsonpath={range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\n"}{end}'
+   ```
+
+   A failed read is unknown and therefore active. Treat a Job active count as
+   active, and treat every pod phase other than the terminal `Succeeded` and
+   `Failed` phases as active, including `Unknown`. Stop and resolve operator
+   ownership before touching the fixed resources if any result is active or
+   ambiguous. Once no operator owns the run and every observed exact pod is
+   terminal, foreground-delete the exact Job and then separately prove that its
+   exact pod set is empty. Only after that proof may the override Secret and
+   fixed lock be removed:
+
+   ```sh
+   if ! "${KUBE[@]}" delete job witself-agent-email-operation \
+     --ignore-not-found=true --cascade=foreground --wait=true --timeout=30s; then
+     echo 'could not foreground-delete the exact operation Job; leave the lock in place' >&2
+     exit 1
+   fi
+
+   REMAINING_PODS="$("${KUBE[@]}" get pods \
+     -l 'batch.kubernetes.io/job-name=witself-agent-email-operation' \
+     -o name)" || {
+       echo 'could not prove the exact operation pods absent; leave the lock in place' >&2
+       exit 1
+     }
+   [ -z "$REMAINING_PODS" ] || {
+     echo 'exact operation pods remain; leave the lock and override Secret in place' >&2
+     exit 1
+   }
+
+   if ! "${KUBE[@]}" delete secret witself-agent-email-operation-overrides \
+     --ignore-not-found=true --wait=true --timeout=30s; then
+     echo 'could not delete the exact override Secret; leave the lock in place' >&2
+     exit 1
+   fi
+   "${KUBE[@]}" delete configmap witself-agent-email-operation-lock \
+     --ignore-not-found=true --wait=true --timeout=30s
+   ```
+
+   If foreground deletion times out or the pod absence read fails, stop and
+   deliberately leave the lock and override Secret stale. Never delete by a
+   broad application label. A lost private artifact is recovered by rerunning
+   the idempotent operation with a new absent local output path.
 5. Verify a receive-disabled Personal account in the cohort still reaches the
    deterministic accept-and-discard path with no message or delivery row, while
    an entitled test account persists one signed synthetic delivery. Keep this
@@ -530,15 +600,18 @@ backfill reports zero missing mailboxes, run the cell-native read-only exporter
 once with that cell's exact production receive environment:
 
 ```sh
-/usr/local/bin/witself-server agent-email canary-manifest \
-  --output /absolute/private/primary-canary.json
+scripts/run-agent-email-cell-operation.sh \
+  --cell CELL --kubeconfig KUBECONFIG --context CONTEXT \
+  --operation canary-manifest \
+  --artifact-output /absolute/private/primary-canary.json
 ```
 
 The output path must be new and outside the repository. The command derives
-5–10 sorted entries from actual `witmail.net` primary mailbox rows with active
-entitlement and enabled account/realm/agent receive state, includes the
-configured retry canary, and creates the exact edge manifest using exclusive
-mode `0600`. It prints no identities or addresses. Move the private artifact to
+5-10 sorted entries from actual `witmail.net` primary mailbox rows with active
+entitlement and enabled account/realm/agent receive state, and creates the exact
+edge manifest using exclusive mode `0600`. A configured retry canary is included
+only for literal/private mode; managed Secret-backed v0.0.241 keeps it empty.
+The command prints no identities or addresses. Move the private artifact to
 operator-controlled storage without relaxing its mode.
 
 Before preparing rules, deploy the byte-identical sorted canary-account CSV in
@@ -940,6 +1013,83 @@ commands are not exposed and their old names are unknown to npm; binding
 presence cannot prove that separately entered token values match. A first-ever
 Worker bootstrap is a different, explicitly reviewed `--secrets-file`
 procedure.
+
+Rotate an existing cell-relay signing key with the dedicated edge-only ceremony,
+never with an ad hoc Wrangler command. Create or select a Witself secret with
+three distinct UTF-8 fields: a nonsensitive `text` key id, a nonsensitive
+`text` canonical base64 raw 32-byte Ed25519 public key, and a
+sensitive/redacted `private_key` containing the matching base64 PKCS#8 private
+key. Deploy the exact v0.0.241-or-newer control plane dark first, then deploy the
+same release of the edge dark while it still has the old relay id/private key.
+From the unchanged tag, re-render both target configs with empty managed
+cohorts, both delivery flags false, and the desired new public `RELAY_KEY_ID`,
+but do not deploy that edge config yet. Keep direct Cloudflare dashboard/API
+routing and Worker mutation globally frozen, provide
+`CONTROL_PLANE_EDGE_TOKEN` securely in the operator environment, and run from
+`infra/cloudflare/agent-email`:
+
+```sh
+npm run provision:relay-signing-key -- \
+  --agent AGENT \
+  --relay-secret RELAY_SECRET \
+  --relay-key-id-field KEY_ID_FIELD \
+  --relay-public-field PUBLIC_KEY_FIELD \
+  --relay-private-field PRIVATE_KEY_FIELD \
+  --provider-zone-name witmail.net \
+  --receipt /absolute/private/path/relay-signing-key-receipt.json
+```
+
+The command requires both exact live Workers and an already bound relay secret.
+It proves the exact target version/commit/tag on the control plane and edge,
+while requiring the live edge's old relay id to differ from the desired id.
+`--provider-zone-name` defaults to `witmail.net`; Cloudflare must return that
+exact active zone in the exact Worker account. An explicit `witwave.ai` target
+is only legacy compatibility evidence and cannot satisfy primary-zone staging.
+Because `witmail.net` is still awaiting its inter-account move, the Founder
+primary-zone ceremony is externally blocked until that zone is active in the
+target Worker account.
+
+The command freezes the two rendered target configs before validation in
+separate unpredictable mode-`0700` directories with mode-`0400` files. All
+Worker inspection and the secret write use only those private snapshots, which
+are rechecked under the lease and removed on success or failure. It also strips
+the deprecated `CF_ACCOUNT_ID` and `CF_API_TOKEN` aliases from every Wrangler
+child; canonical `CLOUDFLARE_*` credentials remain the sole provider account
+authority.
+
+It refuses nonempty control-plane or edge cohorts, either enabled edge delivery
+flag, a custom-domain delivery control, an enabled catch-all, any enabled owned
+route, or any enabled Worker action targeting `witself-agent-email-pilot`.
+Unrelated enabled Worker routes are permitted but included in the stable
+provider-inventory fingerprint. It validates public field policy, reveals only
+the private field, proves the private key derives the selected public key, then
+acquires `relay_signing_key_provision` and reacquires every live/provider fence.
+It reserves the receipt with a complete mode-`0600` value-free pending marker
+before writing only `RELAY_ED25519_PRIVATE_KEY` over stdin. It changes no plain
+variable. Success requires a new edge deployment and version, unchanged control
+plane, unchanged non-secret edge resources, exact binding/inventory, unchanged
+provider state, and a final lease fence. The atomically committed receipt binds
+the prior/desired key ids, public-key digest, target release/config digests,
+provider-zone/account digests, and successor ids, but contains no key value,
+Witself secret id, field id, or source-secret reference.
+
+The secret write creates an unannotated Worker successor. Immediately redeploy
+the email edge from the same unchanged exact tag, then run coordinated
+readiness and deploy the matching public key to the selected cell before any
+cohort, delivery gate, or provider route is enabled. This command rotates an
+existing binding only; use the separately reviewed complete `--secrets-file`
+path for first-ever Worker bootstrap.
+
+If a failure occurs after reservation, the pending marker remains and every
+rerun refuses it. Keep the rollout dark and use the marker's predecessor ids and
+non-secret digests to reconcile bindings, provider state, and any successor. If
+no successor exists, preserve the marker in the private incident/change record
+and rerun identical desired inputs at an empty receipt path. If a secret-only
+successor exists, first redeploy the unchanged tag with the recorded prior
+`RELAY_KEY_ID` to restore the tagged dark precondition, verify it, preserve the
+marker, and then rerun the identical desired-key ceremony. Never delete or
+overwrite a pending marker simply to unblock the command, and never treat it as
+proof of the private value.
 
 The desired fallback token must already match the live control-plane lease
 credential. This ceremony therefore cannot rotate `CONTROL_PLANE_EDGE_TOKEN`:

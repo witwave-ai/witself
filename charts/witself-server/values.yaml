@@ -91,8 +91,21 @@ agentEmail:
     acceptedLegacyDomains: []
     audience: ""
     # Canonical, strictly sorted acc_* IDs. The chart and server cap this at
-    # 100 accounts; no wildcard or all-accounts value exists.
+    # 100 accounts; no wildcard or all-accounts value exists. Portable/private
+    # installs may set this literal list. Managed cells should instead use the
+    # existing Secret reference below so account IDs never enter Git or the
+    # rendered ConfigMap. Exactly one source is required when enabled.
     accountIDs: []
+    accountIDsExistingSecret:
+      name: ""
+      # Exact, comma-separated, byte-sorted acc_* IDs with no whitespace or
+      # trailing newline. Use an immutable, versioned Secret; replace this name
+      # to roll the pods because in-place Secret data mutation is unsupported.
+      # API startup applies the same 1-100 cohort validation.
+      key: account_ids
+    # Keep empty with accountIDsExistingSecret. Secret-backed retry-canary
+    # identity is not part of v0.0.241; literal/private installs may set it
+    # only when they also use literal accountIDs.
     retryCanaryAgentID: ""
     relayPublicKeysJSON: ""
     relayReplayWindow: 5m

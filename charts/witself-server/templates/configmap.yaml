@@ -1,11 +1,28 @@
 {{- $emailPilot := .Values.agentEmail.receivePilot -}}
 {{- $emailProduction := .Values.agentEmail.receiveProduction -}}
+{{- $emailProductionAccountSecret := $emailProduction.accountIDsExistingSecret -}}
+{{- $emailProductionHasLiteralAccounts := gt (len $emailProduction.accountIDs) 0 -}}
+{{- $emailProductionHasSecretAccounts := ne $emailProductionAccountSecret.name "" -}}
 {{- $imageTag := .Values.image.tag | default .Chart.AppVersion -}}
 {{- if and .Values.backup.validation.enabled (not .Values.backup.existingSecret.name) -}}
 {{- fail "backup.validation.enabled requires backup.existingSecret.name" -}}
 {{- end -}}
 {{- if and $emailPilot.enabled $emailProduction.enabled -}}
 {{- fail "agentEmail.receivePilot.enabled and agentEmail.receiveProduction.enabled cannot both be true" -}}
+{{- end -}}
+{{- if and $emailProductionHasLiteralAccounts $emailProductionHasSecretAccounts -}}
+{{- fail "agentEmail.receiveProduction must use exactly one of accountIDs or accountIDsExistingSecret.name" -}}
+{{- end -}}
+{{- if $emailProductionHasSecretAccounts -}}
+{{- if or (gt (len $emailProductionAccountSecret.name) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $emailProductionAccountSecret.name)) -}}
+{{- fail "agentEmail.receiveProduction.accountIDsExistingSecret.name must be a valid Kubernetes Secret name" -}}
+{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9._-]+$" $emailProductionAccountSecret.key) -}}
+{{- fail "agentEmail.receiveProduction.accountIDsExistingSecret.key must be a valid Kubernetes Secret data key" -}}
+{{- end -}}
+{{- if $emailProduction.retryCanaryAgentID -}}
+{{- fail "agentEmail.receiveProduction.retryCanaryAgentID must be empty with accountIDsExistingSecret" -}}
+{{- end -}}
 {{- end -}}
 {{- if $emailPilot.enabled -}}
 {{- $agentCount := len $emailPilot.agentIDs -}}
@@ -54,12 +71,17 @@
 {{- $_ := required "agentEmail.receiveProduction.audience is required when enabled" $emailProduction.audience -}}
 {{- $_ := required "agentEmail.receiveProduction.relayPublicKeysJSON is required when enabled" $emailProduction.relayPublicKeysJSON -}}
 {{- $_ := required "agentEmail.receiveProduction.relayReplayWindow is required when enabled" $emailProduction.relayReplayWindow -}}
+{{- if not (or $emailProductionHasLiteralAccounts $emailProductionHasSecretAccounts) -}}
+{{- fail "agentEmail.receiveProduction requires exactly one of accountIDs or accountIDsExistingSecret.name when enabled" -}}
+{{- end -}}
+{{- if $emailProductionHasLiteralAccounts -}}
 {{- $accountCount := len $emailProduction.accountIDs -}}
-{{- if or (lt $accountCount 1) (gt $accountCount 100) -}}
-{{- fail "agentEmail.receiveProduction.accountIDs must contain 1-100 account IDs when enabled" -}}
+{{- if gt $accountCount 100 -}}
+{{- fail "agentEmail.receiveProduction.accountIDs must contain 1-100 account IDs when used" -}}
 {{- end -}}
 {{- if ne (join "," $emailProduction.accountIDs) (join "," (sortAlpha $emailProduction.accountIDs)) -}}
 {{- fail "agentEmail.receiveProduction.accountIDs must be in canonical sorted order" -}}
+{{- end -}}
 {{- end -}}
 {{- if gt (len $emailProduction.acceptedLegacyDomains) 1 -}}
 {{- fail "agentEmail.receiveProduction.acceptedLegacyDomains may contain at most 1 domain" -}}
@@ -92,6 +114,8 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ include "witself-server.fullname" . }}
+  annotations:
+    witself.io/server-config-checksum: {{ include "witself-server.serverConfigChecksum" . | quote }}
   labels:
     {{- include "witself-server.labels" . | nindent 4 }}
 data:
@@ -128,7 +152,9 @@ data:
   WITSELF_AGENT_EMAIL_ACCEPTED_LEGACY_DOMAINS: {{ join "," $emailProduction.acceptedLegacyDomains | quote }}
 {{ end }}
   WITSELF_AGENT_EMAIL_RECEIVE_AUDIENCE: {{ $emailProduction.audience | quote }}
+{{ if $emailProductionHasLiteralAccounts }}
   WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS: {{ join "," $emailProduction.accountIDs | quote }}
+{{ end }}
   WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON: {{ $emailProduction.relayPublicKeysJSON | quote }}
   WITSELF_AGENT_EMAIL_RELAY_REPLAY_WINDOW: {{ $emailProduction.relayReplayWindow | quote }}
 {{ if $emailProduction.retryCanaryAgentID }}

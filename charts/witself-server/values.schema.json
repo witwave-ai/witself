@@ -171,7 +171,7 @@
         "receiveProduction": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["enabled", "domain", "acceptedLegacyDomains", "audience", "accountIDs", "retryCanaryAgentID", "relayPublicKeysJSON", "relayReplayWindow"],
+          "required": ["enabled", "domain", "acceptedLegacyDomains", "audience", "accountIDs", "accountIDsExistingSecret", "retryCanaryAgentID", "relayPublicKeysJSON", "relayReplayWindow"],
           "properties": {
             "enabled": { "type": "boolean" },
             "domain": { "type": "string" },
@@ -190,6 +190,23 @@
               "maxItems": 100,
               "uniqueItems": true,
               "items": { "type": "string", "pattern": "^acc_[a-z2-7]{16}$" }
+            },
+            "accountIDsExistingSecret": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "key"],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "maxLength": 253,
+                  "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+                },
+                "key": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9._-]+$"
+                }
+              }
             },
             "retryCanaryAgentID": {
               "type": "string",
@@ -216,7 +233,7 @@
                     "maxLength": 128,
                     "pattern": "^[a-z]([a-z0-9-]*[a-z0-9])?$"
                   },
-                  "accountIDs": { "minItems": 1, "maxItems": 100 },
+                  "accountIDs": { "maxItems": 100 },
                   "relayPublicKeysJSON": { "minLength": 2 }
                 }
               }

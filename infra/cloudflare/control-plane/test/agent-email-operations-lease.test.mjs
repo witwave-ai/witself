@@ -134,6 +134,7 @@ test("operations lease API is exact, edge-token authenticated, and no-store", as
     "email_edge_deploy",
     "email_edge_rollback",
     "primary_routing_apply",
+    "relay_signing_key_provision",
     "route_signing_secret_provision",
   ]);
   const harness = leaseEnvironment();

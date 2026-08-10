@@ -101,7 +101,7 @@ check: ## Run CI's go gates locally (gofmt, vet, build, test -race, golangci-lin
 	fi
 	go vet ./...
 	go build ./...
-	go test ./... -race -timeout=20m
+	go test ./... -race -timeout=30m
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
 	$(MAKE) check-infra
 	@echo "check: all gates green"
@@ -113,5 +113,6 @@ check-infra: ## Gates for nested Pulumi plus the isolated Cloudflare agent-email
 	cd infra/pulumi && go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
 	npm --prefix infra/cloudflare/agent-email test
 	npm --prefix infra/cloudflare/agent-email run bundle:check
+	bash scripts/test-agent-email-cell-operation.sh
 	npm --prefix infra/cloudflare/control-plane test
 	@echo "check-infra: infra gates green"

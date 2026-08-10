@@ -379,11 +379,12 @@ catch-all routing apply workflows share one global, expiring operations lease in
 the control plane's existing `REALM_EMAIL_ALIASES` Durable Object. Their exact
 operation identifiers are `control_plane_deploy`, `email_edge_deploy`,
 `email_edge_rollback`, `route_signing_secret_provision`,
-`primary_routing_apply`, and `catch_all_routing_apply`. Each workflow renews the
-lease while its subprocess is running, performs a final renewal before success,
-and releases it afterward. A live conflicting operation fails closed; a crashed
-holder can be replaced only after the bounded expiry. Never bypass a lease
-conflict or run these operations concurrently. Each supported Worker deploy
+`relay_signing_key_provision`, `primary_routing_apply`, and
+`catch_all_routing_apply`. Each workflow renews the lease while its subprocess
+is running, performs a final renewal before success, and releases it afterward.
+A live conflicting operation fails closed; a crashed holder can be replaced
+only after the bounded expiry. Never bypass a lease conflict or run these
+operations concurrently. Each supported Worker deploy
 renders into its own unpredictable mode-`0700` temporary directory, freezes the
 config mode `0400`, verifies its SHA-256 while holding the lease, and removes it
 afterward. A concurrent `npm run config` or second deploy therefore cannot swap
@@ -554,6 +555,93 @@ mutation.
    its own live fence. Token rotation uses only the control-plane package's
    explicit `secret:put:break-glass` path under a documented global
    provider-mutation freeze, followed by exact convergence and verification.
+
+   Rotate an existing cell-relay signer only with the separate relay ceremony.
+   In Witself, the selected source secret must have three distinct UTF-8 fields:
+   a nonsensitive `text` key id, a nonsensitive `text` canonical base64 raw
+   32-byte Ed25519 public key, and a sensitive/redacted `private_key` containing
+   its base64 PKCS#8 private key. First deploy the exact v0.0.241-or-newer
+   control plane dark, then deploy the exact same release of the email edge
+   dark with its old relay key id and private key still bound. From that same
+   unchanged tag, re-render both target configs with the desired new public
+   `RELAY_KEY_ID`; do not deploy the re-rendered edge config yet. Supply the
+   live `CONTROL_PLANE_EDGE_TOKEN` in the operator environment without printing
+   it, then run:
+
+   ```sh
+   npm run provision:relay-signing-key -- \
+     --agent AGENT \
+     --relay-secret RELAY_SECRET \
+     --relay-key-id-field KEY_ID_FIELD \
+     --relay-public-field PUBLIC_KEY_FIELD \
+     --relay-private-field PRIVATE_KEY_FIELD \
+     --provider-zone-name witmail.net \
+     --receipt /absolute/private/path/relay-signing-key-receipt.json
+   ```
+
+   Freeze direct Cloudflare dashboard/API routing and Worker mutations for the
+   whole command. `--provider-zone-name` defaults to the primary `witmail.net`
+   contract. The command asks Cloudflare for the selected zone and refuses
+   unless its returned id, active name, and owning account match the same exact
+   account used for the Worker inspections. `witwave.ai` is accepted only when
+   explicitly selected for a reviewed legacy compatibility operation; that
+   receipt is marked `legacy` and cannot stand in for primary-zone staging or
+   launch evidence. The current Founder primary-zone ceremony therefore remains
+   externally blocked until `witmail.net` is active in the target Worker
+   account after the registrar move.
+
+   Before parsing or validating either supplied Worker config, the command
+   copies both into separate unpredictable mode-`0700` directories, freezes
+   each snapshot mode-`0400`, and thereafter gives Wrangler only those frozen
+   paths. Their digests and metadata are rechecked around inspection, under the
+   global lease, around the secret write, and immediately before success; both
+   private snapshots are removed on every success or failure path. Deprecated
+   `CF_ACCOUNT_ID` and `CF_API_TOKEN` aliases are removed from every Wrangler
+   child so only the canonical `CLOUDFLARE_*` provider credentials can select
+   the account.
+
+   The command requires both live Workers to have the exact target release
+   version, commit, and tag, while the live edge deliberately retains an old
+   relay id distinct from the desired id. It also requires empty live cohorts,
+   both edge delivery gates false, custom-domain delivery dark, the selected
+   catch-all disabled, every Witself-owned routing rule disabled, and no enabled
+   rule targeting `witself-agent-email-pilot`. Unrelated enabled Worker rules
+   may remain, but their complete inventory is fingerprinted and must not
+   change. After validating the public metadata, the command reveals only the
+   private field, derives and verifies its Ed25519 public key, acquires
+   `relay_signing_key_provision`, and reacquires every live and provider fence.
+   It durably reserves the previously nonexistent receipt path with a complete
+   mode-`0600` value-free pending marker before writing only
+   `RELAY_ED25519_PRIVATE_KEY` to the exact edge Worker over stdin. It never
+   changes a plain variable. Success requires a new edge deployment id and
+   version id, an unchanged control plane, unchanged non-secret edge resources,
+   the secret binding/inventory, unchanged dark provider state, and a final
+   lease renewal. Only then does an atomic replacement commit the final receipt.
+   The receipt binds the old and desired key ids, desired raw-public-key SHA-256,
+   exact target release and config digests, provider-zone/account digests, and
+   successor ids. It contains no key value, Witself secret id, field id, or
+   source-secret reference.
+
+   Wrangler's secret write creates an unannotated successor. Immediately
+   redeploy the email edge from the same unchanged exact tag so its public
+   `RELAY_KEY_ID`, reviewed code, and annotations converge, then run coordinated
+   readiness. Install the matching public key in the selected cell through its
+   separately reviewed cell configuration. Do not enable a cohort, delivery
+   gate, or provider route until those attestations pass. This ceremony rotates
+   an already bound relay secret; first-ever Worker bootstrap still requires the
+   separately reviewed complete one-shot `--secrets-file` deployment.
+
+   A failure after receipt reservation intentionally leaves the complete
+   pending marker in place, and every rerun refuses to overwrite it. Keep all
+   routes, cohorts, and gates dark. Use its recorded predecessor ids and
+   non-secret digests to determine whether a successor appeared. If none did,
+   preserve the marker in the private incident/change record and rerun the same
+   desired inputs at an empty receipt path. If a secret-only successor exists,
+   first redeploy the unchanged tag with the recorded prior `RELAY_KEY_ID` to
+   restore the exact tagged precondition while remaining dark; verify that
+   state, preserve the pending marker, then rerun the identical desired-key
+   ceremony. Never delete or overwrite the marker merely to make the command
+   pass, and never treat a pending marker as proof of the private value.
 
 3. Enable the matching cell configuration with only the public key, deploy the
    cell, and confirm its startup reconciliation and health checks.

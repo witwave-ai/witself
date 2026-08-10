@@ -12,6 +12,7 @@
     "deploy": "node scripts/deploy.mjs",
     "directory": "node scripts/directory.mjs",
     "metrics": "node scripts/metrics.mjs",
+    "provision:relay-signing-key": "node scripts/provision-relay-signing-key.mjs",
     "provision:route-signing-secrets": "node scripts/provision-route-signing-secrets.mjs",
     "rollback": "node scripts/rollback.mjs",
     "routes": "node scripts/routes.mjs",

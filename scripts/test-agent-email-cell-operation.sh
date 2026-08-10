@@ -1,0 +1,449 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+work_dir="$(mktemp -d "${TMPDIR:-/tmp}/witself-agent-email-operation-test.XXXXXX")"
+cleanup() {
+  find "$work_dir" -depth -mindepth 1 -delete 2>/dev/null || true
+  rmdir "$work_dir" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+chmod 700 "$work_dir"
+work_dir="$(cd "$work_dir" && pwd -P)"
+mkdir -m 700 "$work_dir/bin" "$work_dir/output" "$work_dir/state"
+
+file_mode() {
+  local path="$1"
+  local mode
+  mode="$(stat -f '%Lp' "$path" 2>/dev/null || true)"
+  if [[ ! "$mode" =~ ^[0-7]{3,4}$ ]]; then
+    mode="$(stat -c '%a' "$path" 2>/dev/null || true)"
+  fi
+  printf '%s\n' "$mode"
+}
+
+cat >"$work_dir/bin/kubectl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --request-timeout=*) shift ;;
+    --kubeconfig|--context|-n) shift 2 ;;
+    *) break ;;
+  esac
+done
+case "${1:-} ${2:-}" in
+  "get deployment")
+    deployment_count_file="$FAKE_KUBE_STATE/deployment-get-count"
+    deployment_count=$(($(cat "$deployment_count_file" 2>/dev/null || printf 0) + 1))
+    printf '%s\n' "$deployment_count" >"$deployment_count_file"
+    filter='.'
+    if [ "${FAKE_STALE_READINESS:-false}" = true ]; then
+      filter+=' | .status.readyReplicas = 1 | .status.unavailableReplicas = 1'
+    fi
+    if [ "${FAKE_SOURCE_DRIFT:-}" = deployment ] && [ "$deployment_count" -ge 2 ]; then
+      filter+=' | .metadata.resourceVersion = "deployment-rv-drift" | .spec.template.spec.containers[0].image = "ghcr.io/witwave-ai/images/witself-server:0.0.242"'
+    fi
+    jq "$filter" "$FAKE_KUBE_STATE/deployment.json"
+    ;;
+  "get configmap")
+    config_count_file="$FAKE_KUBE_STATE/config-get-count"
+    config_count=$(($(cat "$config_count_file" 2>/dev/null || printf 0) + 1))
+    printf '%s\n' "$config_count" >"$config_count_file"
+    if [ "${FAKE_SOURCE_DRIFT:-}" = config ] && [ "$config_count" -ge 2 ]; then
+      jq '.metadata.resourceVersion = "config-rv-drift"' "$FAKE_KUBE_STATE/config.json"
+    else
+      cat "$FAKE_KUBE_STATE/config.json"
+    fi
+    ;;
+  "get secret")
+    case "${3:-}" in
+      receive-cohort-v1) printf 'cohort-uid\ncohort-rv\n%s\n' "${FAKE_COHORT_IMMUTABLE:-true}" ;;
+      witself-db) printf 'database-uid\ndatabase-rv\n' ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  "get pods")
+    if [ -f "$FAKE_KUBE_STATE/job-deleted" ]; then
+      printf '%s\n' pods-absent >>"$FAKE_KUBE_STATE/cleanup-actions.log"
+      printf '%s\n' '{"items":[]}'
+    else
+      jq --argjson runner_exit "${FAKE_RUNNER_EXIT:-0}" \
+        '(.items[0].status.containerStatuses[] | select(.name == "runner") |
+         .state.terminated.exitCode) = $runner_exit' "$FAKE_KUBE_STATE/pods.json"
+    fi
+    ;;
+  "get pod")
+    jq --argjson runner_exit "${FAKE_RUNNER_EXIT:-0}" \
+      '(.items[0].status.containerStatuses[] | select(.name == "runner") |
+       .state.terminated.exitCode) = $runner_exit | .items[0]' "$FAKE_KUBE_STATE/pods.json"
+    ;;
+  "create -f")
+    payload="$(cat)"
+    kind="$(jq -r '.kind' <<<"$payload")"
+    case "$kind" in
+      ConfigMap)
+        printf '%s\n' "$payload" >"$FAKE_KUBE_STATE/lock-created.json"
+        printf '%s\n' "$payload" >"$FAKE_KUBE_STATE/lock.json"
+        ;;
+      Job)
+        printf '%s\n' "$payload" >"$FAKE_KUBE_STATE/job-created.json"
+        printf '%s\n' "$payload" >"$FAKE_KUBE_STATE/job.json"
+        ;;
+      Secret)
+        printf '%s\n' "$payload" >"$FAKE_KUBE_STATE/secret-created.json"
+        printf '%s\n' "$payload" >"$FAKE_KUBE_STATE/secret.json"
+        ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  "create secret")
+    [ "${3:-}" = generic ] || exit 1
+    printf '%s\n' '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"witself-agent-email-operation-overrides"},"data":{"overrides.json":"cmVkYWN0ZWQ="}}'
+    ;;
+  "exec witself-agent-email-operation-pod")
+    printf '%s\n' "$*" >>"$FAKE_KUBE_STATE/exec-actions.log"
+    if [[ " $* " == *" artifact-helper ready "* ]]; then
+      [ "${FAKE_EXEC_READY_FAILURE:-false}" != true ]
+      exit
+    fi
+    if [[ " $* " == *" artifact-helper complete "* ]]; then
+      [ "${FAKE_COMPLETE_ERROR:-false}" != true ]
+      exit
+    fi
+    if [[ " $* " == *" artifact-helper exists --name "* ]]; then
+      if [ "${FAKE_ARTIFACT_INSPECTION_ERROR:-false}" = true ]; then
+        exit 1
+      fi
+      [[ " $* " == *" --name ${FAKE_PRIVATE_ARTIFACT_KEY:-primary-canary} "* ]] && exit 0
+      exit 3
+    fi
+    if [[ " $* " == *" artifact-helper export --name ${FAKE_PRIVATE_ARTIFACT_KEY:-primary-canary} "* ]]; then
+      cat "$FAKE_PRIVATE_ARTIFACT"
+      exit 0
+    fi
+    exit 1
+    ;;
+  "delete job")
+    printf '%s\n' "$*" >>"$FAKE_KUBE_STATE/deletes.log"
+    printf '%s\n' delete-job >>"$FAKE_KUBE_STATE/cleanup-actions.log"
+    if [ "${FAKE_BACKGROUND_DELETE:-false}" != true ]; then
+      rm -f "$FAKE_KUBE_STATE/job.json"
+      : >"$FAKE_KUBE_STATE/job-deleted"
+    fi
+    ;;
+  "delete secret")
+    printf '%s\n' "$*" >>"$FAKE_KUBE_STATE/deletes.log"
+    printf '%s\n' delete-secret >>"$FAKE_KUBE_STATE/cleanup-actions.log"
+    rm -f "$FAKE_KUBE_STATE/secret.json"
+    ;;
+  "delete configmap")
+    printf '%s\n' "$*" >>"$FAKE_KUBE_STATE/deletes.log"
+    printf '%s\n' delete-configmap >>"$FAKE_KUBE_STATE/cleanup-actions.log"
+    rm -f "$FAKE_KUBE_STATE/lock.json"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+chmod 700 "$work_dir/bin/kubectl"
+
+cat >"$work_dir/state/deployment.json" <<'EOF'
+{
+  "apiVersion":"apps/v1","kind":"Deployment",
+  "metadata":{"name":"witself-server","uid":"deployment-uid","resourceVersion":"deployment-rv","generation":4},
+  "status":{"observedGeneration":4,"replicas":2,"readyReplicas":2,"updatedReplicas":2,"availableReplicas":2,"unavailableReplicas":0},
+  "spec":{"replicas":2,"template":{
+    "metadata":{"annotations":{"checksum/config":"legacy-checksum","witself.io/server-config-checksum":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},
+    "spec":{
+    "serviceAccountName":"witself-server","automountServiceAccountToken":false,
+    "containers":[{"name":"witself-server",
+      "image":"ghcr.io/witwave-ai/images/witself-server:0.0.241",
+      "imagePullPolicy":"IfNotPresent",
+      "envFrom":[{"configMapRef":{"name":"witself-server"}}],
+      "env":[
+        {"name":"WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS","valueFrom":{"secretKeyRef":{"name":"receive-cohort-v1","key":"account_ids"}}},
+        {"name":"WITSELF_DATABASE_URL","valueFrom":{"secretKeyRef":{"name":"witself-db","key":"dsn"}}},
+        {"name":"WITSELF_PROVISION_TOKEN","valueFrom":{"secretKeyRef":{"name":"not-for-job","key":"token"}}}
+      ],
+      "resources":{"requests":{"cpu":"50m","memory":"64Mi"},"limits":{"memory":"256Mi"}}
+    }]
+  }}}
+}
+EOF
+
+cat >"$work_dir/state/config.json" <<'EOF'
+{
+  "apiVersion":"v1","kind":"ConfigMap","metadata":{
+    "name":"witself-server","uid":"config-uid","resourceVersion":"config-rv",
+    "annotations":{"witself.io/server-config-checksum":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+  },
+  "data":{
+    "WITSELF_BACKEND_KIND":"managed",
+    "WITSELF_CELL_NAME":"civo-sandbox-usw2-dev",
+    "WITSELF_AGENT_EMAIL_RECEIVE_PRODUCTION_ENABLED":"true",
+    "WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED":"false",
+    "WITSELF_AGENT_EMAIL_RECEIVE_DOMAIN":"witmail.net",
+    "WITSELF_AGENT_EMAIL_RECEIVE_AUDIENCE":"civo-sandbox-usw2-dev",
+    "WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON":"{\"key-1\":\"public\"}"
+  }
+}
+EOF
+
+cat >"$work_dir/state/pods.json" <<'EOF'
+{
+  "items":[{"metadata":{"name":"witself-agent-email-operation-pod"},
+    "status":{"containerStatuses":[
+      {"name":"runner","state":{"terminated":{"exitCode":0}}},
+      {"name":"artifact-export","state":{"running":{"startedAt":"2026-08-10T00:00:00Z"}}}
+    ]}}
+  ]
+}
+EOF
+
+cat >"$work_dir/canary.json" <<'EOF'
+{
+  "schema_version":2,"domain":"witmail.net","worker_name":"witself-agent-email-pilot",
+  "account_ids":["acc_aaaaaaaaaaaaaaaa"],
+  "agents":[
+    {"agent_id":"agent_aaaaaaaaaaaaaaaa","realm_id":"realm_aaaaaaaaaaaaaaaa","address":"a@witmail.net"},
+    {"agent_id":"agent_bbbbbbbbbbbbbbbb","realm_id":"realm_aaaaaaaaaaaaaaaa","address":"b@witmail.net"},
+    {"agent_id":"agent_cccccccccccccccc","realm_id":"realm_aaaaaaaaaaaaaaaa","address":"c@witmail.net"},
+    {"agent_id":"agent_dddddddddddddddd","realm_id":"realm_aaaaaaaaaaaaaaaa","address":"d@witmail.net"},
+    {"agent_id":"agent_eeeeeeeeeeeeeeee","realm_id":"realm_aaaaaaaaaaaaaaaa","address":"e@witmail.net"}
+  ]
+}
+EOF
+
+printf '%s\n' 'test-kubeconfig' >"$work_dir/kubeconfig"
+chmod 600 "$work_dir/kubeconfig"
+export FAKE_KUBE_STATE="$work_dir/state"
+export FAKE_PRIVATE_ARTIFACT="$work_dir/canary.json"
+export FAKE_PRIVATE_ARTIFACT_KEY=primary-canary
+export FAKE_RUNNER_EXIT=0
+export WITSELF_AGENT_EMAIL_OPERATION_CLEANUP_TIMEOUT_SECONDS=1
+export PATH="$work_dir/bin:$PATH"
+
+reset_fake_run() {
+  unset FAKE_SOURCE_DRIFT FAKE_STALE_READINESS FAKE_COMPLETE_ERROR
+  unset FAKE_ARTIFACT_INSPECTION_ERROR FAKE_EXEC_READY_FAILURE FAKE_COHORT_IMMUTABLE
+  unset FAKE_BACKGROUND_DELETE
+  rm -f "$work_dir/state/deployment-get-count" "$work_dir/state/config-get-count"
+  rm -f "$work_dir/state/job.json" "$work_dir/state/lock.json" "$work_dir/state/secret.json"
+  rm -f "$work_dir/state/job-created.json" "$work_dir/state/lock-created.json"
+  rm -f "$work_dir/state/secret-created.json" "$work_dir/state/job-deleted"
+  rm -f "$work_dir/state/deletes.log" "$work_dir/state/cleanup-actions.log"
+  rm -f "$work_dir/state/exec-actions.log"
+}
+
+reset_fake_run
+output_path="$work_dir/output/primary-canary.json"
+operation_output="$work_dir/operation-output"
+if ! "$repo_root/scripts/run-agent-email-cell-operation.sh" \
+    --cell civo-sandbox-usw2-dev \
+    --kubeconfig "$work_dir/kubeconfig" \
+    --context civo-test \
+    --operation canary-manifest \
+    --artifact-output "$output_path" \
+    --timeout-seconds 60 >"$operation_output" 2>&1; then
+  printf 'agent-email cell operation fixture failed:\n' >&2
+  sed -n '1,80p' "$operation_output" >&2
+  exit 1
+fi
+
+test -f "$output_path"
+[ "$(file_mode "$output_path")" = 600 ]
+jq -e '.schema_version == 2 and (.agents | length == 5)' "$output_path" >/dev/null
+grep -Fqx '{"status":"completed","private_artifact_exported":true}' "$operation_output"
+if grep -Eq 'acc_[a-z2-7]{16}|agent_[a-z2-7]{16}|realm_[a-z2-7]{16}|@witmail\.net|receive-cohort-v1|witself-db' "$operation_output"; then
+  echo "operation output exposed a private identity or Secret reference" >&2
+  exit 1
+fi
+
+jq -e '
+  .kind == "Job" and .metadata.name == "witself-agent-email-operation" and
+  .spec.backoffLimit == 0 and .spec.template.spec.automountServiceAccountToken == false and
+  (.spec.template.spec.containers | map(.name) == ["runner","artifact-export"]) and
+  (.spec.template.spec.containers[0].env | map(.name) ==
+    ["WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS","WITSELF_DATABASE_URL"]) and
+  (.spec.template.spec.containers[0].env | all(.valueFrom.secretKeyRef != null)) and
+  (.spec.template.spec.containers | all(.image == "ghcr.io/witwave-ai/images/witself-server:0.0.241")) and
+  (.spec.template.spec.volumes[] | select(.name == "private") | .emptyDir.medium == "Memory")
+' "$work_dir/state/job-created.json" >/dev/null
+jq -e '.immutable == true and (.data.WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS == null)' \
+  "$work_dir/state/lock-created.json" >/dev/null
+grep -Fq 'delete job witself-agent-email-operation --ignore-not-found=true --cascade=foreground --wait=true --timeout=1s' \
+  "$work_dir/state/deletes.log"
+grep -Fq 'delete configmap witself-agent-email-operation-lock' "$work_dir/state/deletes.log"
+test ! -e "$work_dir/state/lock.json"
+awk '
+  $0 == "delete-job" { job = NR }
+  $0 == "pods-absent" { pods = NR }
+  $0 == "delete-configmap" { lock = NR }
+  END { exit !(job > 0 && pods > job && lock > pods) }
+' "$work_dir/state/cleanup-actions.log"
+
+cat >"$work_dir/overrides.json" <<'EOF'
+{"schema_version":1,"overrides":[{"agent_id":"agent_aaaaaaaaaaaaaaaa","agent_segment":"support-agent"}]}
+EOF
+chmod 600 "$work_dir/overrides.json"
+
+reset_fake_run
+export FAKE_BACKGROUND_DELETE=true
+lingering_output="$work_dir/lingering-output"
+if ! "$repo_root/scripts/run-agent-email-cell-operation.sh" \
+    --cell civo-sandbox-usw2-dev \
+    --kubeconfig "$work_dir/kubeconfig" \
+    --context civo-test \
+    --operation backfill \
+    --overrides "$work_dir/overrides.json" \
+    --artifact-output "$work_dir/output/lingering-must-stay-absent.json" \
+    --timeout-seconds 60 >"$lingering_output" 2>&1; then
+  printf 'lingering operation fixture unexpectedly failed:\n' >&2
+  sed -n '1,80p' "$lingering_output" >&2
+  exit 1
+fi
+grep -Fqx \
+  'warning: operation cleanup could not prove the runner absent; the fixed lock was retained' \
+  "$lingering_output"
+test -e "$work_dir/state/lock.json"
+test -e "$work_dir/state/secret.json"
+test ! -e "$work_dir/output/lingering-must-stay-absent.json"
+grep -Fq 'delete job witself-agent-email-operation --ignore-not-found=true --cascade=foreground --wait=true --timeout=1s' \
+  "$work_dir/state/deletes.log"
+if grep -Eq '^delete (secret|configmap) ' "$work_dir/state/deletes.log"; then
+  echo "cleanup removed a lock resource while the exact Job pod lingered" >&2
+  exit 1
+fi
+
+reset_fake_run
+export FAKE_STALE_READINESS=true
+stale_output="$work_dir/stale-output"
+if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
+    --cell civo-sandbox-usw2-dev --kubeconfig "$work_dir/kubeconfig" --context civo-test \
+    --operation canary-manifest \
+    --artifact-output "$work_dir/output/stale-must-stay-absent.json" \
+    --timeout-seconds 60 >"$stale_output" 2>&1; then
+  echo "stale Deployment fixture unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -Fqx 'error: managed server Deployment is absent, ambiguous, or not fully converged' "$stale_output"
+test ! -e "$work_dir/output/stale-must-stay-absent.json"
+test ! -e "$work_dir/state/job.json"
+
+reset_fake_run
+export FAKE_COHORT_IMMUTABLE=false
+mutable_cohort_output="$work_dir/mutable-cohort-output"
+if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
+    --cell civo-sandbox-usw2-dev --kubeconfig "$work_dir/kubeconfig" --context civo-test \
+    --operation canary-manifest \
+    --artifact-output "$work_dir/output/mutable-cohort-must-stay-absent.json" \
+    --timeout-seconds 60 >"$mutable_cohort_output" 2>&1; then
+  echo "mutable cohort Secret fixture unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -Fqx 'error: receive-cohort Secret must be live and immutable' "$mutable_cohort_output"
+test ! -e "$work_dir/output/mutable-cohort-must-stay-absent.json"
+test ! -e "$work_dir/state/job.json"
+
+reset_fake_run
+export FAKE_SOURCE_DRIFT=config
+drift_output="$work_dir/drift-output"
+if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
+    --cell civo-sandbox-usw2-dev --kubeconfig "$work_dir/kubeconfig" --context civo-test \
+    --operation canary-manifest \
+    --artifact-output "$work_dir/output/drift-must-stay-absent.json" \
+    --timeout-seconds 60 >"$drift_output" 2>&1; then
+  echo "source drift fixture unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -Fqx 'error: managed server source drifted before Job creation' "$drift_output"
+test ! -e "$work_dir/output/drift-must-stay-absent.json"
+test ! -e "$work_dir/state/job.json"
+
+reset_fake_run
+export FAKE_PRIVATE_ARTIFACT="$work_dir/canary.json"
+export FAKE_PRIVATE_ARTIFACT_KEY=primary-canary
+export FAKE_RUNNER_EXIT=0
+export FAKE_COMPLETE_ERROR=true
+completion_output="$work_dir/completion-output"
+if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
+    --cell civo-sandbox-usw2-dev --kubeconfig "$work_dir/kubeconfig" --context civo-test \
+    --operation canary-manifest \
+    --artifact-output "$work_dir/output/completion-must-stay-absent.json" \
+    --timeout-seconds 60 >"$completion_output" 2>&1; then
+  echo "holder completion failure fixture unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -Fqx 'error: could not complete the private artifact holder' "$completion_output"
+test ! -e "$work_dir/output/completion-must-stay-absent.json"
+
+reset_fake_run
+export FAKE_PRIVATE_ARTIFACT="$work_dir/canary.json"
+export FAKE_PRIVATE_ARTIFACT_KEY=primary-canary
+export FAKE_RUNNER_EXIT=1
+canary_failure_output="$work_dir/canary-failure-output"
+if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
+    --cell civo-sandbox-usw2-dev --kubeconfig "$work_dir/kubeconfig" --context civo-test \
+    --operation canary-manifest \
+    --artifact-output "$work_dir/output/failed-canary-must-stay-absent.json" \
+    --timeout-seconds 60 >"$canary_failure_output" 2>&1; then
+  echo "failed canary runner fixture unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -Fqx 'error: agent-email operation failed without an exportable private artifact' "$canary_failure_output"
+test ! -e "$work_dir/output/failed-canary-must-stay-absent.json"
+
+cat >"$work_dir/exception.json" <<'EOF'
+{
+  "schema_version":1,"state":"requires_operator_override","processed_agent_count":3,
+  "agent_id":"agent_aaaaaaaaaaaaaaaa","realm_id":"realm_aaaaaaaaaaaaaaaa",
+  "reason_code":"agent_segment_requires_override"
+}
+EOF
+reset_fake_run
+export FAKE_PRIVATE_ARTIFACT="$work_dir/exception.json"
+export FAKE_PRIVATE_ARTIFACT_KEY=backfill-exception
+export FAKE_RUNNER_EXIT=1
+exception_output="$work_dir/output/backfill-exception.json"
+failure_output="$work_dir/failure-output"
+if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
+    --cell civo-sandbox-usw2-dev \
+    --kubeconfig "$work_dir/kubeconfig" \
+    --context civo-test \
+    --operation backfill \
+    --artifact-output "$exception_output" \
+    --timeout-seconds 60 >"$failure_output" 2>&1; then
+  echo "backfill exception fixture unexpectedly succeeded" >&2
+  exit 1
+fi
+test -f "$exception_output"
+[ "$(file_mode "$exception_output")" = 600 ]
+jq -e '.state == "requires_operator_override"' "$exception_output" >/dev/null
+grep -Fqx 'error: backfill status requires_operator_override; the private exception artifact was exported' "$failure_output"
+if grep -Eq 'acc_[a-z2-7]{16}|agent_[a-z2-7]{16}|realm_[a-z2-7]{16}|@witmail\.net|receive-cohort-v1|witself-db' "$failure_output"; then
+  echo "failure output exposed a private identity or Secret reference" >&2
+  exit 1
+fi
+
+export FAKE_PRIVATE_ARTIFACT="$work_dir/canary.json"
+export FAKE_PRIVATE_ARTIFACT_KEY=primary-canary
+export FAKE_RUNNER_EXIT=0
+reset_fake_run
+export FAKE_ARTIFACT_INSPECTION_ERROR=true
+inspection_output="$work_dir/inspection-output"
+if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
+    --cell civo-sandbox-usw2-dev \
+    --kubeconfig "$work_dir/kubeconfig" \
+    --context civo-test \
+    --operation canary-manifest \
+    --artifact-output "$work_dir/output/inspection-must-stay-absent.json" \
+    --timeout-seconds 60 >"$inspection_output" 2>&1; then
+  echo "artifact inspection error fixture unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -Fqx 'error: private artifact inspection failed' "$inspection_output"
+test ! -e "$work_dir/output/inspection-must-stay-absent.json"
+
+printf 'agent-email cell operation isolation/export tests passed\n'

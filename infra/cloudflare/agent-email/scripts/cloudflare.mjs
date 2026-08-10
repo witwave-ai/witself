@@ -251,6 +251,11 @@ export class CloudflareAPI {
     return this.request(`/zones/${this.zoneID}/email/routing`);
   }
 
+  async getZone() {
+    if (!this.zoneID) throw new Error("CLOUDFLARE_ZONE_ID is required");
+    return this.request(`/zones/${this.zoneID}`);
+  }
+
   async getCatchAll() {
     if (!this.zoneID) throw new Error("CLOUDFLARE_ZONE_ID is required");
     return this.request(`/zones/${this.zoneID}/email/routing/rules/catch_all`);

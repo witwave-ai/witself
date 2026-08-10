@@ -105,6 +105,17 @@ reviewed cell after the matching release has converged. API startup performs
 bounded read-only cohort validation; run the explicit cell-local mailbox
 backfill once, never as a per-replica startup action.
 
+Managed cells set `accountIDsExistingSecret.name` and `.key`; they never commit
+the literal `accountIDs` array. Provision an immutable, versioned Kubernetes
+Secret in the server namespace through the cell's secret manager/External
+Secrets path before enabling receive. Its value is one canonical, byte-sorted
+CSV with no spaces or trailing newline. The app-of-apps forwards only the
+Secret reference, and the child ConfigMap contains no account IDs. A missing or
+malformed value fails closed at pod creation or API startup. In-place Secret
+mutation is unsupported: create a new versioned Secret and update the reference
+name so the Deployment rolls. Keep `retryCanaryAgentID` empty in this mode;
+v0.0.241 has no Secret-backed retry-canary field.
+
 Do not treat a committed pin as deployment proof. For every provisioned cell,
 verify Argo health/sync, replacement-pod readiness, and the public
 `/v1/version` response before advancing the wave. When the worker is enabled,

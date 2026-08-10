@@ -49,6 +49,8 @@ const PUBLIC_KEY = /^[A-Za-z0-9+/]{43}=$/;
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 const MAX_JSON_OUTPUT = 5 * 1024 * 1024;
 const WRANGLER_UNSAFE_ENVIRONMENT = Object.freeze([
+  "CF_ACCOUNT_ID",
+  "CF_API_TOKEN",
   "CONTROL_PLANE_EDGE_TOKEN",
   "CONTROL_PLANE_URL",
   "CLOUDFLARE_API_BASE_URL",
@@ -343,7 +345,7 @@ export function validateProvisioningConfigs(controlPlaneRaw, emailEdgeRaw) {
   });
 }
 
-function activeVersionID(deployment, label) {
+export function activeVersionID(deployment, label) {
   if (!deployment || typeof deployment !== "object" ||
       Array.isArray(deployment) || !UUID.test(String(deployment.id ?? "")) ||
       deployment.strategy !== "percentage" ||
@@ -355,7 +357,7 @@ function activeVersionID(deployment, label) {
   return deployment.versions[0].version_id;
 }
 
-function activeBindings(version, expectedID, label) {
+export function activeBindings(version, expectedID, label) {
   if (!version || typeof version !== "object" || Array.isArray(version) ||
       version.id !== expectedID || !Array.isArray(version.resources?.bindings)) {
     fail(`${label} active Worker version inventory is invalid`);
@@ -372,7 +374,7 @@ function activeBindings(version, expectedID, label) {
   return bindings;
 }
 
-function secretInventory(raw, label) {
+export function secretInventory(raw, label) {
   if (!Array.isArray(raw)) fail(`${label} secret inventory is invalid`);
   const names = new Set();
   for (const item of raw) {
@@ -386,14 +388,14 @@ function secretInventory(raw, label) {
   return names;
 }
 
-function assertSecretBinding(bindings, name, label) {
+export function assertSecretBinding(bindings, name, label) {
   const binding = bindings.get(name);
   if (binding?.type !== "secret_text" || Object.hasOwn(binding, "text")) {
     fail(`${label} is missing required ${name} secret binding`);
   }
 }
 
-function assertRemoteDark({ controlPlane, emailEdge }) {
+export function assertRemoteDark({ controlPlane, emailEdge }) {
   const cpBindings = activeBindings(
     controlPlane.version,
     activeVersionID(controlPlane.deployment, "control plane"),
@@ -776,7 +778,7 @@ function wranglerJSON(runtime, args, config, operation, env) {
   });
 }
 
-function inspectWorker(runtime, worker, config, label, env) {
+export function inspectWorker(runtime, worker, config, label, env) {
   const deployment = wranglerJSON(runtime, [
     "deployments", "status", "--name", worker, "--json",
   ], config, `inspect the ${label} deployment`, env);
@@ -808,7 +810,7 @@ function witselfIdentityArgs(options) {
   return args;
 }
 
-function showSecret(runtime, secret, options, env) {
+export function showSecret(runtime, secret, options, env) {
   return runtime.json("witself", [
     "secret", "show", secret, "--json", ...witselfIdentityArgs(options),
   ], {
@@ -818,7 +820,7 @@ function showSecret(runtime, secret, options, env) {
   });
 }
 
-function revealSecret(runtime, secret, field, options, env) {
+export function revealSecret(runtime, secret, field, options, env) {
   return runtime.json("witself", [
     "secret", "reveal", secret, field, "--json",
     ...witselfIdentityArgs(options),
@@ -829,7 +831,7 @@ function revealSecret(runtime, secret, field, options, env) {
   });
 }
 
-async function putWorkerSecret(
+export async function putWorkerSecret(
   runtime,
   leaseGuard,
   worker,

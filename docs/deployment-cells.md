@@ -219,16 +219,25 @@ realm/agent pilot:
 - `WITSELF_AGENT_EMAIL_RECEIVE_PRODUCTION_ENABLED=true`
 - `WITSELF_AGENT_EMAIL_RECEIVE_DOMAIN=witmail.net`
 - `WITSELF_AGENT_EMAIL_RECEIVE_AUDIENCE` set to the exact destination cell
-- `WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS` set to a canonical, byte-sorted CSV
-  of 1-100 unique generated `acc_*` IDs
-- the existing relay public-key, replay-window, optional legacy-domain, and
-  optional retry-canary settings
+- `WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS` sourced in managed cells from the
+  referenced Kubernetes Secret as a canonical, byte-sorted CSV of 1-100 unique
+  generated `acc_*` IDs (portable/private chart users may use the literal list)
+- the existing relay public-key, replay-window, and optional legacy-domain
+  settings; Secret-backed managed mode keeps the retry canary empty
 
 Whitespace, duplicates, wildcard-like values, unsorted input, invalid generated
 IDs, or more than 100 accounts fail before the API listens. The app-of-apps
 passes this shape only when the server chart and image are both `0.0.241` or
 newer. Fleet and portable defaults remain false; no live cell is enabled by the
 release itself.
+
+The managed app-of-apps commits only
+`accountIDsExistingSecret.name`/`.key`, never the IDs. The referenced Secret
+must be immutable, versioned, and present in the server namespace before
+activation. Its key is non-optional; missing data prevents pod startup, while
+malformed CSV prevents API readiness. In-place mutation is unsupported: create
+the next Secret and update the reference name so the Deployment rolls. Keep
+`retryCanaryAgentID` empty until a Secret-backed form is available.
 
 Serving replicas do only a bounded read-only check that each configured account
 exists in the cell and is active or suspended, plus one optional canary
@@ -242,12 +251,28 @@ transition takes effect from the cell snapshot without reinstalling any client.
 Existing mailbox provisioning is an explicit one-shot operator action:
 
 ```sh
-/usr/local/bin/witself-server agent-email backfill \
-  --exception-output /absolute/private/backfill-exception.json
+scripts/run-agent-email-cell-operation.sh \
+  --cell CELL --kubeconfig KUBECONFIG --context CONTEXT \
+  --operation backfill \
+  --artifact-output /absolute/private/backfill-exception.json
 ```
 
-Run it once from the released cell image with that cell's normal database and
-production-receive environment. The operation first validates the exact cohort,
+The supported script copies no values: it snapshots the active non-secret
+ConfigMap, reuses only the exact database/cohort Secret references, and runs the
+released image in a fixed-name, non-API Kubernetes Job. The fixed name is the
+concurrency lock. Its memory-backed private volume is exported through the same
+distroless binary directly to a new mode-`0600` local file outside Git; neither
+identities nor Secret references are printed. On a successful backfill the
+requested exception path remains absent.
+
+If an ungraceful operator-client exit leaves the fixed lock, follow the exact
+Job/pod inspection and fixed-resource recovery sequence in
+[runbooks.md](runbooks.md#roll-out-the-v00241-cell-receive-foundation). Never
+delete the lock while the exact Job is active or one of its pods is Pending or
+Running—or in any other nonterminal phase, including `Unknown`—and never use a
+broad application selector for cleanup.
+
+The operation first validates the exact cohort,
 then processes agents in fixed 100-row keyset pages and verifies zero missing
 mailboxes. It is idempotent and safe to rerun after interruption, but it must not
 be placed in an API-pod startup command or run concurrently from every replica.
@@ -274,10 +299,9 @@ instead of inventing an address. Supply a reviewed private override manifest:
 
 The file must be canonical absolute, regular, mode `0600`, at most 64 KiB,
 contain 1-1000 strictly sorted unique live-cohort agents, and use canonical
-lowercase segments. Run
-`witself-server agent-email backfill --exception-output
-/absolute/private/backfill-exception-rerun.json --overrides
-/absolute/private/overrides.json`. The mandatory exception output must be a
+lowercase segments. Rerun the supported script with `--operation backfill`, a
+new `--artifact-output`, and `--overrides /absolute/private/overrides.json`.
+The mandatory exception output must be a
 new canonical absolute path. It is created mode `0600` only when a particular
 agent needs intervention and contains the private agent/realm identity, a
 bounded reason code, and the number already processed; process logs remain
@@ -303,8 +327,10 @@ Do not hand-author the edge canary. After a successful backfill, use one selecte
 cell process to generate it from actual currently receive-enabled mailbox rows:
 
 ```sh
-/usr/local/bin/witself-server agent-email canary-manifest \
-  --output /absolute/private/new/primary-canary.json
+scripts/run-agent-email-cell-operation.sh \
+  --cell CELL --kubeconfig KUBECONFIG --context CONTEXT \
+  --operation canary-manifest \
+  --artifact-output /absolute/private/new/primary-canary.json
 ```
 
 The output path must be canonical, absolute, and absent. The command performs no

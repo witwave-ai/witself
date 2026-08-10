@@ -582,8 +582,9 @@ coordinated route-signing secret ceremony, primary-routing apply, and
 catch-all-routing apply is serialized by one global operations lease in the
 existing `REALM_EMAIL_ALIASES` Durable Object. The exact operation identifiers
 are `control_plane_deploy`, `email_edge_deploy`, `email_edge_rollback`,
-`route_signing_secret_provision`, `primary_routing_apply`, and
-`catch_all_routing_apply`. The operator must provide the existing
+`route_signing_secret_provision`, `relay_signing_key_provision`,
+`primary_routing_apply`, and `catch_all_routing_apply`. The operator must
+provide the existing
 `CONTROL_PLANE_EDGE_TOKEN` to these local commands without printing or
 persisting it. The command acquires the lease through the authenticated control
 plane API, renews it while work is in progress, proves one final renewal before
@@ -602,6 +603,33 @@ control-plane credential. Rotating `CONTROL_PLANE_EDGE_TOKEN` cannot safely hold
 a lease authenticated by the credential it is replacing; that is an explicit
 break-glass operation requiring the global provider-mutation freeze documented
 in the control-plane deployment runbook.
+
+Relay-signing-key rotation is a distinct edge-only ceremony. Its Witself source
+contains public key-id and canonical raw-Ed25519-public-key fields plus one
+sensitive PKCS#8 private-key field. The live control plane and edge must already
+be the exact same target release; the live edge retains the old relay id while
+the re-rendered, not-yet-deployed target config names the distinct desired id.
+The default provider contract is the exact active `witmail.net` zone in the
+same Worker account, proved through the Cloudflare zone API. An explicitly
+selected `witwave.ai` contract is legacy evidence only. With empty live managed
+cohorts, both delivery flags false, all custom-domain controls dark, the selected
+catch-all disabled, owned rules disabled, and no enabled Worker action targeting
+the email edge, the command validates the source envelopes and derives the
+public key before acquiring `relay_signing_key_provision`.
+
+Under that lease it durably reserves a value-free pending receipt, writes only
+`RELAY_ED25519_PRIVATE_KEY` over stdin, and changes no plain variable. Success
+requires a new edge deployment/version successor, unchanged control plane and
+non-secret resources, unchanged provider state, and final lease evidence before
+the receipt is atomically committed. The mode-`0600` receipt binds old/desired
+key ids, public-key and target-config digests, target release, provider-scope
+digests, and successor ids, never key values or source-secret references. A
+failed run retains its pending marker for explicit dark-state reconciliation.
+Direct provider and Worker mutations remain globally frozen throughout. The
+secret-only successor must be replaced immediately by a deployment from the
+same unchanged exact tag; only that tagged deploy installs the reviewed public
+`RELAY_KEY_ID`. This ceremony requires an existing relay-secret binding and is
+not a first Worker bootstrap path.
 
 The lease coordinates Witself's supported deployment and routing tools; it
 cannot fence a person or unrelated automation that writes Email Routing through

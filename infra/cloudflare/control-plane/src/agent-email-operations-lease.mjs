@@ -23,6 +23,7 @@ export const AGENT_EMAIL_OPERATIONS = Object.freeze([
   "email_edge_deploy",
   "email_edge_rollback",
   "primary_routing_apply",
+  "relay_signing_key_provision",
   "route_signing_secret_provision",
 ]);
 
