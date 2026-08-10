@@ -1,14 +1,6 @@
 #!/usr/bin/env node
-import {
-  closeSync,
-  fsyncSync,
-  ftruncateSync,
-  openSync,
-  readFileSync,
-  writeSync,
-  writeFileSync,
-} from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, writeFileSync } from "node:fs";
+import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { CloudflareAPI, cloudflareEnvironment } from "./cloudflare.mjs";
@@ -19,6 +11,7 @@ import {
   verifyCatchAllPlan,
 } from "./catch-all-routing-lib.mjs";
 import { primaryRoutingRuntime } from "./primary-routes.mjs";
+import { reserveJSONReceipt } from "./receipt-journal.mjs";
 
 function usage() {
   return `usage:
@@ -54,45 +47,20 @@ function writeNewJSON(path, value) {
   });
 }
 
-function writeExact(descriptor, value) {
-  if (writeSync(descriptor, value, 0, "utf8") !== Buffer.byteLength(value)) {
-    throw new Error("catch-all receipt journal write was incomplete");
+function exactPrivatePath(path, label) {
+  if (typeof path !== "string" || !isAbsolute(path) || resolve(path) !== path) {
+    throw new Error(`${label} must be one canonical absolute path`);
   }
+  return path;
 }
 
 function reserveReceipt(path, plan) {
-  const absolute = resolve(path);
-  const descriptor = openSync(absolute, "wx", 0o600);
-  let open = true;
-  try {
-    writeExact(descriptor, `${JSON.stringify({
-      schema: "witself.agent-email-catch-all-apply-pending.v1",
-      action: plan.action,
-      plan_sha256: plan.apply_fence?.sha256 ?? "",
-      state: "apply_started_receipt_not_committed",
-    }, null, 2)}\n`);
-    fsyncSync(descriptor);
-  } catch (error) {
-    closeSync(descriptor);
-    open = false;
-    throw error;
-  }
-  return {
-    commit(receipt) {
-      try {
-        ftruncateSync(descriptor, 0);
-        writeExact(descriptor, `${JSON.stringify(receipt, null, 2)}\n`);
-        fsyncSync(descriptor);
-      } finally {
-        if (open) closeSync(descriptor);
-        open = false;
-      }
-    },
-    close() {
-      if (open) closeSync(descriptor);
-      open = false;
-    },
-  };
+  return reserveJSONReceipt(path, {
+    schema: "witself.agent-email-catch-all-apply-pending.v1",
+    action: plan.action,
+    plan_sha256: plan.apply_fence?.sha256 ?? "",
+    state: "apply_started_receipt_not_committed",
+  });
 }
 
 export class CatchAllCloudflareAPI extends CloudflareAPI {
@@ -143,7 +111,7 @@ export function parseCatchAllArgs(argv) {
         mode: "plan",
         action: "enable",
         manifest: argv[1],
-        output: values.get("--output"),
+        output: exactPrivatePath(values.get("--output"), "catch-all plan output"),
         review: {
           change_id: values.get("--change-id"),
           provider_contract_review_sha256: values.get("--provider-review-sha256"),
@@ -155,7 +123,7 @@ export function parseCatchAllArgs(argv) {
         mode: "plan",
         action: "disable",
         manifest: argv[1],
-        output: values.get("--output"),
+        output: exactPrivatePath(values.get("--output"), "catch-all plan output"),
       };
     }
     if (argv[0] === "rollback" && exactOptions(values, flags, ["--receipt", "--output"])) {
@@ -163,8 +131,8 @@ export function parseCatchAllArgs(argv) {
         mode: "plan",
         action: "rollback",
         manifest: argv[1],
-        receipt: values.get("--receipt"),
-        output: values.get("--output"),
+        receipt: exactPrivatePath(values.get("--receipt"), "catch-all receipt"),
+        output: exactPrivatePath(values.get("--output"), "catch-all plan output"),
       };
     }
   }
@@ -177,9 +145,11 @@ export function parseCatchAllArgs(argv) {
         ["--confirm-enable-witmail-net"]))) {
       return {
         mode: "apply",
-        plan: values.get("--plan"),
+        plan: exactPrivatePath(values.get("--plan"), "catch-all plan"),
         planSHA256: values.get("--plan-sha256"),
-        receiptOutput: values.get("--receipt-output"),
+        receiptOutput: exactPrivatePath(
+          values.get("--receipt-output"), "catch-all receipt output",
+        ),
         confirmEnable: flags.has("--confirm-enable-witmail-net"),
       };
     }

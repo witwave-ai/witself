@@ -7,8 +7,15 @@ import { fileURLToPath } from "node:url";
 import {
   parseManagedDeliveryAccountAllowlist,
 } from "../src/managed-delivery-cohort.mjs";
+import {
+  withAgentEmailOperationsLease,
+} from "../../control-plane/scripts/agent-email-operations-lease-client.mjs";
+import {
+  runLeaseGuardedCommand,
+} from "../../control-plane/scripts/agent-email-lease-guarded-command.mjs";
 
 const WORKER_NAME = "witself-agent-email-pilot";
+const OPERATIONS_LEASE_ENDPOINT = "https://self.witwave.ai";
 const PLAN_SCHEMA = "witself.agent-email-edge-rollback-plan.v1";
 const RECEIPT_SCHEMA = "witself.agent-email-edge-rollback-receipt.v1";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -439,49 +446,70 @@ function exactPlan(actual, expected) {
 export async function applyRollbackPlan(plan, suppliedSHA256, runtime) {
   const fence = verifyPlan(plan, suppliedSHA256);
   if (!runtime || typeof runtime.loadStatus !== "function" ||
-      typeof runtime.loadVersion !== "function" || typeof runtime.deploy !== "function") {
+      typeof runtime.loadVersion !== "function" || typeof runtime.deploy !== "function" ||
+      !runtime.operationsLease || typeof runtime.operationsLease.run !== "function") {
     throw new Error("rollback apply runtime was invalid");
   }
-  const status = await runtime.loadStatus();
-  const current = await runtime.loadVersion(plan.current.version_id);
-  const candidate = await runtime.loadVersion(plan.candidate.version_id);
-  const reviewed = createRollbackPlan(status, current, candidate, {
-    now: () => new Date(plan.created_at),
-  });
-  exactPlan(reviewed, plan);
+  return runtime.operationsLease.run(
+    "email_edge_rollback",
+    async (leaseGuard) => {
+      if (!leaseGuard || typeof leaseGuard.renew !== "function" ||
+          !leaseGuard.signal || typeof leaseGuard.signal.addEventListener !== "function") {
+        throw new Error("rollback operations lease guard was invalid");
+      }
 
-  await runtime.deploy(plan.candidate.version_id);
+      // Reconstruct the complete reviewed plan only after acquiring the global
+      // lease. No supported deployment or provider-routing mutation can now
+      // move the final precondition between this read and the provider write.
+      const status = await runtime.loadStatus();
+      const current = await runtime.loadVersion(plan.current.version_id);
+      const candidate = await runtime.loadVersion(plan.candidate.version_id);
+      const reviewed = createRollbackPlan(status, current, candidate, {
+        now: () => new Date(plan.created_at),
+      });
+      exactPlan(reviewed, plan);
 
-  const postStatus = await runtime.loadStatus();
-  const postVersionID = currentVersionID(postStatus);
-  if (postVersionID !== plan.candidate.version_id) {
-    throw new Error("rollback mutation completed without the candidate at 100 percent");
-  }
-  const postVersion = inspectVersion(
-    await runtime.loadVersion(plan.candidate.version_id),
-    "post-rollback",
-    { allowLegacyManagedDeliveryCohort: true },
+      await leaseGuard.renew();
+      await runtime.deploy(plan.candidate.version_id, {
+        signal: leaseGuard.signal,
+      });
+      await leaseGuard.renew();
+
+      const postStatus = await runtime.loadStatus();
+      const postVersionID = currentVersionID(postStatus);
+      if (postVersionID !== plan.candidate.version_id) {
+        throw new Error("rollback mutation completed without the candidate at 100 percent");
+      }
+      const postVersion = inspectVersion(
+        await runtime.loadVersion(plan.candidate.version_id),
+        "post-rollback",
+        { allowLegacyManagedDeliveryCohort: true },
+      );
+      const reviewedCandidate = inspectVersion(candidate, "candidate", {
+        allowLegacyManagedDeliveryCohort: true,
+      });
+      if (canonicalJSON(postVersion) !== canonicalJSON(reviewedCandidate)) {
+        throw new Error("post-rollback Worker version did not match the reviewed candidate");
+      }
+      // Prove the exact fence once more after provider readback. The shared
+      // client performs its own final renewal and exact release after return.
+      await leaseGuard.renew();
+      return Object.freeze({
+        schema: RECEIPT_SCHEMA,
+        outcome: "verified",
+        worker: WORKER_NAME,
+        plan_sha256: fence,
+        prior: {
+          deployment_id: plan.current.deployment_id,
+          version_id: plan.current.version_id,
+        },
+        active: {
+          deployment_id: postStatus.id,
+          version_id: postVersionID,
+        },
+      });
+    },
   );
-  const reviewedCandidate = inspectVersion(candidate, "candidate", {
-    allowLegacyManagedDeliveryCohort: true,
-  });
-  if (canonicalJSON(postVersion) !== canonicalJSON(reviewedCandidate)) {
-    throw new Error("post-rollback Worker version did not match the reviewed candidate");
-  }
-  return Object.freeze({
-    schema: RECEIPT_SCHEMA,
-    outcome: "verified",
-    worker: WORKER_NAME,
-    plan_sha256: fence,
-    prior: {
-      deployment_id: plan.current.deployment_id,
-      version_id: plan.current.version_id,
-    },
-    active: {
-      deployment_id: postStatus.id,
-      version_id: postVersionID,
-    },
-  });
 }
 
 function wranglerJSON(args) {
@@ -509,6 +537,30 @@ export function rollbackDeploymentArguments(versionID) {
   ];
 }
 
+export function rollbackOperationsLeaseRuntime(
+  environment = process.env,
+  {
+    fetchImpl = globalThis.fetch,
+    randomUUIDImpl,
+  } = {},
+) {
+  // Rollback is intrinsically scoped to the production witmail.net Worker.
+  // Copy only its authentication input and pin the matching production
+  // control-plane authority; inherited endpoint selectors cannot redirect the
+  // fencing request to an attacker-controlled lease service.
+  const leaseEnvironment = Object.freeze({
+    CONTROL_PLANE_EDGE_TOKEN: environment.CONTROL_PLANE_EDGE_TOKEN,
+  });
+  return Object.freeze({
+    run: (operation, work) => withAgentEmailOperationsLease(operation, work, {
+      env: leaseEnvironment,
+      endpoint: OPERATIONS_LEASE_ENDPOINT,
+      fetchImpl,
+      ...(randomUUIDImpl ? { randomUUIDImpl } : {}),
+    }),
+  });
+}
+
 function liveRuntime() {
   return {
     loadStatus: async () => wranglerJSON([
@@ -517,7 +569,7 @@ function liveRuntime() {
     loadVersion: async (versionID) => wranglerJSON([
       "versions", "view", versionID, "--name", WORKER_NAME, "--json",
     ]),
-    deploy: async (versionID) => {
+    deploy: async (versionID, { signal } = {}) => {
       // Worker versions capture encrypted secret values. Wrangler deliberately
       // asks for an extra confirmation when a candidate would restore an older
       // secret. Never auto-accept that warning: a non-interactive rollback
@@ -527,15 +579,13 @@ function liveRuntime() {
           "rollback apply requires an interactive terminal for Cloudflare secret continuity review",
         );
       }
-      const result = spawnSync(
+      await runLeaseGuardedCommand(
         "wrangler",
         rollbackDeploymentArguments(versionID),
-        { stdio: "inherit" },
+        { signal, timeoutMs: 20 * 60_000 },
       );
-      if (result.error || result.status !== 0) {
-        throw new Error("Cloudflare Worker rollback mutation failed");
-      }
     },
+    operationsLease: rollbackOperationsLeaseRuntime(),
   };
 }
 

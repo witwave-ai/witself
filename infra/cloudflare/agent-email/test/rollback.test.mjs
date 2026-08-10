@@ -7,6 +7,7 @@ import {
   createRollbackPlan,
   parseArgs,
   rollbackDeploymentArguments,
+  rollbackOperationsLeaseRuntime,
   sha256,
   verifyPlan,
 } from "../scripts/rollback.mjs";
@@ -113,6 +114,22 @@ function removeBinding(candidate, name) {
   candidate.resources.bindings = candidate.resources.bindings.filter(
     (item) => item.name !== name,
   );
+}
+
+function operationsLease(events = []) {
+  const controller = new AbortController();
+  return {
+    run: async (operation, work) => {
+      events.push(`lease:${operation}`);
+      assert.equal(operation, "email_edge_rollback");
+      return work({
+        signal: controller.signal,
+        renew: async () => {
+          events.push("lease:renew");
+        },
+      });
+    },
+  };
 }
 
 test("rollback planning produces a value-free exact-ID plan and SHA-256 fence", () => {
@@ -310,22 +327,42 @@ test("apply requires the exact reviewed plan and reverifies the final deployment
   const plan = createPlan(fixture);
   let deployed = false;
   const deployCalls = [];
+  const events = [];
   const receipt = await applyRollbackPlan(plan, plan.apply_fence.sha256, {
-    loadStatus: async () => deployed ? {
-      id: postDeploymentID,
-      strategy: "percentage",
-      versions: [{ version_id: candidateID, percentage: 100 }],
-    } : structuredClone(fixture.status),
-    loadVersion: async (id) => structuredClone(
-      id === currentID ? fixture.current : fixture.candidate,
-    ),
-    deploy: async (id) => {
+    loadStatus: async () => {
+      events.push(deployed ? "status:after" : "status:before");
+      return deployed ? {
+        id: postDeploymentID,
+        strategy: "percentage",
+        versions: [{ version_id: candidateID, percentage: 100 }],
+      } : structuredClone(fixture.status);
+    },
+    loadVersion: async (id) => {
+      events.push(`version:${id}`);
+      return structuredClone(id === currentID ? fixture.current : fixture.candidate);
+    },
+    deploy: async (id, { signal }) => {
+      events.push(`deploy:${id}`);
+      assert.equal(signal.aborted, false);
       deployCalls.push(id);
       deployed = true;
     },
+    operationsLease: operationsLease(events),
   });
 
   assert.deepEqual(deployCalls, [candidateID]);
+  assert.deepEqual(events, [
+    "lease:email_edge_rollback",
+    "status:before",
+    `version:${currentID}`,
+    `version:${candidateID}`,
+    "lease:renew",
+    `deploy:${candidateID}`,
+    "lease:renew",
+    "status:after",
+    `version:${candidateID}`,
+    "lease:renew",
+  ]);
   assert.equal(receipt.outcome, "verified");
   assert.equal(receipt.plan_sha256, plan.apply_fence.sha256);
   assert.deepEqual(receipt.prior, {
@@ -349,6 +386,7 @@ test("apply refuses a stale plan before mutation and detects failed post-verific
       loadStatus: async () => stale,
       loadVersion: async (id) => id === currentID ? fixture.current : fixture.candidate,
       deploy: async () => { deployCalls += 1; },
+      operationsLease: operationsLease(),
     }), /preconditions changed/);
     assert.equal(deployCalls, 0);
   }
@@ -367,8 +405,109 @@ test("apply refuses a stale plan before mutation and detects failed post-verific
       },
       loadVersion: async (id) => id === currentID ? fixture.current : fixture.candidate,
       deploy: async () => {},
+      operationsLease: operationsLease(),
     }), /without the candidate at 100 percent/);
   }
+});
+
+test("rollback lease collision refuses every provider read and mutation", async () => {
+  const fixture = fixtures();
+  const plan = createPlan(fixture);
+  let reads = 0;
+  let mutations = 0;
+  const collision = new Error("another agent email operation already holds the lease");
+
+  await assert.rejects(
+    applyRollbackPlan(plan, plan.apply_fence.sha256, {
+      loadStatus: async () => { reads += 1; },
+      loadVersion: async () => { reads += 1; },
+      deploy: async () => { mutations += 1; },
+      operationsLease: {
+        run: async (operation) => {
+          assert.equal(operation, "email_edge_rollback");
+          throw collision;
+        },
+      },
+    }),
+    (error) => error === collision,
+  );
+  assert.equal(reads, 0);
+  assert.equal(mutations, 0);
+});
+
+test("rollback propagates lease loss to the active provider deployment", async () => {
+  const fixture = fixtures();
+  const plan = createPlan(fixture);
+  const controller = new AbortController();
+  let deploymentEntered;
+  const entered = new Promise((resolve) => {
+    deploymentEntered = resolve;
+  });
+  let statusReads = 0;
+
+  await assert.rejects(
+    applyRollbackPlan(plan, plan.apply_fence.sha256, {
+      loadStatus: async () => {
+        statusReads += 1;
+        return structuredClone(fixture.status);
+      },
+      loadVersion: async (id) => structuredClone(
+        id === currentID ? fixture.current : fixture.candidate,
+      ),
+      deploy: async (id, { signal }) => {
+        assert.equal(id, candidateID);
+        assert.equal(signal, controller.signal);
+        deploymentEntered();
+        await new Promise((resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            reject(new Error("rollback deployment stopped after lease loss"));
+          }, { once: true });
+        });
+      },
+      operationsLease: {
+        run: async (operation, work) => {
+          assert.equal(operation, "email_edge_rollback");
+          const pending = work({
+            signal: controller.signal,
+            renew: async () => {},
+          });
+          await entered;
+          controller.abort(new Error("agent email operations lease renewal failed"));
+          return pending;
+        },
+      },
+    }),
+    /stopped after lease loss/,
+  );
+  assert.equal(statusReads, 1);
+});
+
+test("production rollback lease acquisition ignores hostile endpoint environment", async () => {
+  const requests = [];
+  const hostileEnvironment = {
+    CONTROL_PLANE_EDGE_TOKEN: "edge-token-at-least-16-characters",
+    CONTROL_PLANE_URL: "https://attacker-control.invalid",
+    WITSELF_CONTROL_PLANE: "https://attacker-witself.invalid",
+  };
+  const runtime = rollbackOperationsLeaseRuntime(hostileEnvironment, {
+    fetchImpl: async (url, init) => {
+      requests.push({ url, init });
+      throw new Error("stop after observing the acquire request");
+    },
+    randomUUIDImpl: () => "11111111-1111-4111-8111-111111111111",
+  });
+
+  await assert.rejects(
+    runtime.run("email_edge_rollback", async () => {}),
+    /lease authority is unreachable/,
+  );
+  assert.equal(requests.length, 1);
+  assert.equal(
+    requests[0].url,
+    "https://self.witwave.ai/v1/email/operations-lease:acquire",
+  );
+  assert.equal(requests[0].init.redirect, "error");
+  assert.doesNotMatch(requests[0].url, /attacker/);
 });
 
 test("plan hashing and CLI parsing fail closed", () => {

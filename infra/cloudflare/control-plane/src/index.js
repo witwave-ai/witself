@@ -112,6 +112,7 @@ import {
   handleRealmEmailAliasAdminRequest,
   handleRealmEmailAliasCustomerRequest,
   handleRealmEmailCanonicalCloseRequest,
+  handleAgentEmailOperationsLeaseRequest,
   handleManagedDeliveryReadinessRequest,
   handleRealmEmailRouteRequest,
   EDGE_MANAGED_DELIVERY_READINESS_PATH,
@@ -121,6 +122,9 @@ import {
   matchRealmEmailCanonicalClosePath,
   matchRealmEmailRoutePath,
 } from "./realm-email-alias-api.mjs";
+import {
+  isAgentEmailOperationsLeasePath,
+} from "./agent-email-operations-lease.mjs";
 import {
   DurableRealmEmailAliasRegistry,
   runScheduledCanonicalRealmRouteInventory,
@@ -4250,6 +4254,9 @@ export default {
       const admin = await adminAuthorized(request, env);
       if (!admin) return err("unauthorized", 401);
       return handleRealmEmailAliasAdminRequest(request, env, url, admin);
+    }
+    if (isAgentEmailOperationsLeasePath(url.pathname)) {
+      return handleAgentEmailOperationsLeaseRequest(request, env, url);
     }
     if (url.pathname === EDGE_MANAGED_DELIVERY_READINESS_PATH) {
       return handleManagedDeliveryReadinessRequest(request, env);

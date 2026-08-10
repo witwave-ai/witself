@@ -6,10 +6,14 @@ import {
   PRIMARY_CANARY_DOMAIN,
   PRIMARY_CANARY_WORKER,
   sha256,
+  summarizePrimaryReadiness,
 } from "./primary-routing-lib.mjs";
+import {
+  validateAgentEmailOperationsLeaseEvidence,
+} from "../../control-plane/src/agent-email-operations-lease.mjs";
 
-export const CATCH_ALL_PLAN_SCHEMA = "witself.agent-email-catch-all-plan.v1";
-export const CATCH_ALL_RECEIPT_SCHEMA = "witself.agent-email-catch-all-receipt.v1";
+export const CATCH_ALL_PLAN_SCHEMA = "witself.agent-email-catch-all-plan.v2";
+export const CATCH_ALL_RECEIPT_SCHEMA = "witself.agent-email-catch-all-receipt.v2";
 export const CATCH_ALL_STATUS_SCHEMA = "witself.agent-email-catch-all-status.v1";
 
 const PLAN_LIFETIME_MS = 15 * 60 * 1_000;
@@ -90,6 +94,9 @@ function normalizeReview(review) {
 }
 
 function catchAllSnapshot(routing) {
+  if (routing.catchAll?.source !== "api") {
+    throw new Error("Cloudflare catch-all is not API-owned and cannot be mutated");
+  }
   const contract = normalizeCatchAllContract(routing.catchAll);
   return Object.freeze({
     contract,
@@ -150,6 +157,7 @@ function planBody(api, action, manifest, snapshot, desired, review, readiness, c
     desired_catch_all: desired,
     checks: [
       "target_ids_exact",
+      "shared_durable_operations_lease",
       "catch_all_provider_fingerprint_exact",
       "operator_role_fingerprint_preserved",
       "primary_canary_fingerprint_preserved",
@@ -229,7 +237,7 @@ export async function createCatchAllPlan(api, runtime, manifestInput, action, {
     snapshot,
     desired,
     normalizedReview,
-    readiness,
+    readiness ? summarizePrimaryReadiness(readiness) : null,
     creation,
     rollbackOf,
   ));
@@ -287,7 +295,7 @@ function exactPlan(actual, expected) {
   }
 }
 
-function receiptBody(plan, fence, before, after) {
+function receiptBody(plan, fence, before, after, operationsLease) {
   return {
     schema: CATCH_ALL_RECEIPT_SCHEMA,
     outcome: "verified",
@@ -296,6 +304,7 @@ function receiptBody(plan, fence, before, after) {
     worker: plan.worker,
     plan_sha256: fence,
     target: plan.target,
+    operations_lease: operationsLease,
     before_contract: before.contract,
     after_contract: after.contract,
     guards: {
@@ -318,11 +327,16 @@ function withReceiptFence(body) {
 export function verifyCatchAllReceipt(receipt) {
   exactKeys(receipt, [
     "schema", "outcome", "action", "domain", "worker", "plan_sha256",
-    "target", "before_contract", "after_contract", "guards", "receipt_fence",
+    "target", "operations_lease", "before_contract", "after_contract",
+    "guards", "receipt_fence",
   ], "catch-all receipt");
   exactKeys(receipt.target, ["account_id", "zone_id", "route_directory_id"], "catch-all receipt target");
   exactKeys(receipt.guards, ["role_routes_sha256", "managed_rules_sha256"], "catch-all receipt guards");
   exactKeys(receipt.receipt_fence, ["algorithm", "sha256"], "catch-all receipt fence");
+  validateAgentEmailOperationsLeaseEvidence(
+    receipt.operations_lease,
+    "catch_all_routing_apply",
+  );
   const before = normalizeCatchAllContract(receipt.before_contract);
   const after = normalizeCatchAllContract(receipt.after_contract);
   const { receipt_fence: ignored, ...body } = receipt;
@@ -383,57 +397,81 @@ export async function applyCatchAllPlan(plan, suppliedSHA256, api, runtime, {
       api.namespaceID !== plan.target.route_directory_id) {
     throw new Error("catch-all plan targeted another Cloudflare resource");
   }
-  const reviewed = await reconstructPlan(plan, api, runtime, now);
-  exactPlan(reviewed, plan);
-  const manifest = normalizePrimaryCanaryManifest(plan.manifest);
-  const beforeRouting = await capturePrimaryRoutingState(api, manifest);
-  const before = catchAllSnapshot(beforeRouting);
-  if (canonicalJSON(before) !== canonicalJSON(plan.precondition.catch_all)) {
-    throw new Error("catch-all state changed immediately before mutation; create and review a new plan");
+  if (!runtime?.operationsLease ||
+      typeof runtime.operationsLease.run !== "function") {
+    throw new Error("catch-all durable operations lease was unavailable");
   }
-  let mutationError;
-  try {
-    await api.replaceCatchAll(plan.desired_catch_all);
-  } catch (error) {
-    mutationError = error;
-  }
-  let after;
-  let verificationError;
-  try {
-    after = catchAllSnapshot(await capturePrimaryRoutingState(api, manifest));
-    if (canonicalJSON(after.contract) !== canonicalJSON(plan.desired_catch_all) ||
-        after.role_routes_sha256 !== before.role_routes_sha256 ||
-        after.managed_rules_sha256 !== before.managed_rules_sha256) {
-      throw new Error("catch-all post-mutation verification failed");
-    }
-  } catch (error) {
-    verificationError = error;
-  }
-
-  let recoveryError;
-  if (mutationError || verificationError) {
-    try {
-      // Enabling failure restores the exact reviewed disabled predecessor.
-      // Disable and rollback failures never auto-enable a route.
-      const recovery = plan.action === "enable"
-        ? before.contract
-        : disabledContract(plan.desired_catch_all);
-      await api.replaceCatchAll(recovery);
-      const recovered = catchAllSnapshot(await capturePrimaryRoutingState(api, manifest));
-      if (recovered.contract.enabled !== false ||
-          canonicalJSON(recovered.contract) !== canonicalJSON(recovery)) {
-        throw new Error("catch-all recovery readback failed");
+  return runtime.operationsLease.run(
+    "catch_all_routing_apply",
+    async (leaseGuard) => {
+      const reviewed = await reconstructPlan(plan, api, runtime, now);
+      exactPlan(reviewed, plan);
+      const manifest = normalizePrimaryCanaryManifest(plan.manifest);
+      const beforeRouting = await capturePrimaryRoutingState(api, manifest);
+      const before = catchAllSnapshot(beforeRouting);
+      if (canonicalJSON(before) !== canonicalJSON(plan.precondition.catch_all)) {
+        throw new Error("catch-all state changed immediately before mutation; create and review a new plan");
       }
-    } catch (error) {
-      recoveryError = error;
-    }
-  }
-  const errors = [mutationError, verificationError, recoveryError].filter(Boolean);
-  if (errors.length > 1) {
-    throw new AggregateError(errors, "catch-all mutation failed and recovery was incomplete");
-  }
-  if (errors.length === 1) throw errors[0];
-  return withReceiptFence(receiptBody(plan, fence, before, after));
+      let mutationError;
+      try {
+        await leaseGuard.renew();
+        await api.replaceCatchAll(plan.desired_catch_all);
+        await leaseGuard.renew();
+      } catch (error) {
+        mutationError = error;
+      }
+      let after;
+      let verificationError;
+      try {
+        after = catchAllSnapshot(await capturePrimaryRoutingState(api, manifest));
+        await leaseGuard.renew();
+        if (canonicalJSON(after.contract) !== canonicalJSON(plan.desired_catch_all) ||
+            after.role_routes_sha256 !== before.role_routes_sha256 ||
+            after.managed_rules_sha256 !== before.managed_rules_sha256) {
+          throw new Error("catch-all post-mutation verification failed");
+        }
+      } catch (error) {
+        verificationError = error;
+      }
+
+      let recoveryError;
+      if (mutationError || verificationError) {
+        try {
+          // Enabling failure restores the exact reviewed disabled predecessor.
+          // Disable and rollback failures never auto-enable a route.
+          const recovery = plan.action === "enable"
+            ? before.contract
+            : disabledContract(plan.desired_catch_all);
+          await leaseGuard.renew();
+          await api.replaceCatchAll(recovery);
+          await leaseGuard.renew();
+          const recovered = catchAllSnapshot(
+            await capturePrimaryRoutingState(api, manifest),
+          );
+          await leaseGuard.renew();
+          if (recovered.contract.enabled !== false ||
+              canonicalJSON(recovered.contract) !== canonicalJSON(recovery)) {
+            throw new Error("catch-all recovery readback failed");
+          }
+        } catch (error) {
+          recoveryError = error;
+        }
+      }
+      const errors = [mutationError, verificationError, recoveryError].filter(Boolean);
+      if (errors.length > 1) {
+        throw new AggregateError(errors, "catch-all mutation failed and recovery was incomplete");
+      }
+      if (errors.length === 1) throw errors[0];
+      const leaseEvidence = leaseGuard.evidence();
+      validateAgentEmailOperationsLeaseEvidence(
+        leaseEvidence,
+        "catch_all_routing_apply",
+      );
+      return withReceiptFence(
+        receiptBody(plan, fence, before, after, leaseEvidence),
+      );
+    },
+  );
 }
 
 export async function inspectCatchAll(api, runtime, manifestInput, {
@@ -459,7 +497,7 @@ export async function inspectCatchAll(api, runtime, manifestInput, {
       sha256: snapshot.role_routes_sha256,
     },
     primary_canary: snapshot.managed_rules,
-    readiness,
+    readiness: summarizePrimaryReadiness(readiness),
     ready_to_plan_enable:
       !contract.enabled && snapshot.role_routes_ready &&
       canaryIsActive(snapshot, manifest.agents.length) && readiness.activation_ready,

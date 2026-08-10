@@ -1,5 +1,27 @@
 const API_ROOT = "https://api.cloudflare.com/client/v4";
+const ROUTING_RULE_ID = /^[0-9a-f]{1,32}(?![\s\S])/;
+const ROUTING_INVENTORY_SNAPSHOT_ATTEMPTS = 4;
 export const EMAIL_DIRECTORY_TITLE = "witself-agent-email-pilot-directory";
+
+class RoutingInventoryDriftError extends Error {}
+
+function canonicalJSON(value) {
+  const canonicalize = (item) => {
+    if (Array.isArray(item)) return item.map(canonicalize);
+    if (item && typeof item === "object") {
+      return Object.fromEntries(
+        Object.keys(item).sort().map((key) => [key, canonicalize(item[key])]),
+      );
+    }
+    return item;
+  };
+  return JSON.stringify(canonicalize(value));
+}
+
+function canonicalRuleInventory(rules) {
+  return canonicalJSON([...rules].sort((left, right) =>
+    String(left.id).localeCompare(String(right.id))));
+}
 
 function required(value, name, pattern = /^[A-Za-z0-9_-]+(?![\s\S])/) {
   if (!value || !pattern.test(value)) throw new Error(`${name} is missing or invalid`);
@@ -28,7 +50,7 @@ export class CloudflareAPI {
     this.fetchAPI = fetchAPI;
   }
 
-  async request(path, { method = "GET", body, raw = false } = {}) {
+  async request(path, { method = "GET", body, raw = false, envelope = false } = {}) {
     const headers = { Authorization: `Bearer ${this.apiToken}` };
     if (body !== undefined) headers["Content-Type"] = "application/json";
     let response;
@@ -38,6 +60,7 @@ export class CloudflareAPI {
         headers,
         body: body === undefined ? undefined : typeof body === "string" ? body : JSON.stringify(body),
         redirect: "error",
+        signal: AbortSignal.timeout(15_000),
       });
     } catch {
       throw new Error("Cloudflare API request failed");
@@ -58,7 +81,7 @@ export class CloudflareAPI {
         : "";
       throw new Error(`Cloudflare API request failed${code}`);
     }
-    return result.result;
+    return envelope ? result : result.result;
   }
 
   async queryAnalytics(query) {
@@ -144,9 +167,83 @@ export class CloudflareAPI {
     );
   }
 
+  async readRuleInventorySnapshot() {
+    const perPage = 50;
+    const maximumPages = 200;
+    const rules = [];
+    const ruleIDs = new Set();
+    let expectedTotalPages;
+    let expectedTotalCount;
+    for (let page = 1; page <= maximumPages; page += 1) {
+      const response = await this.request(
+        `/zones/${this.zoneID}/email/routing/rules?page=${page}&per_page=${perPage}`,
+        { envelope: true },
+      );
+      const info = response?.result_info;
+      const pageRules = response?.result;
+      if (!Array.isArray(pageRules) || !info || typeof info !== "object" ||
+          !Number.isSafeInteger(info.page) || info.page !== page ||
+          !Number.isSafeInteger(info.per_page) || info.per_page !== perPage ||
+          !Number.isSafeInteger(info.count) || info.count !== pageRules.length ||
+          !Number.isSafeInteger(info.total_pages) || info.total_pages < page ||
+          !Number.isSafeInteger(info.total_count) || info.total_count < 0) {
+        throw new Error("Cloudflare Email Routing pagination was malformed");
+      }
+      if (info.total_pages > maximumPages) {
+        throw new Error("Cloudflare Email Routing rule inventory exceeded the safe pagination limit");
+      }
+      if (expectedTotalPages === undefined) {
+        expectedTotalPages = info.total_pages;
+        expectedTotalCount = info.total_count;
+      } else if (info.total_pages !== expectedTotalPages || info.total_count !== expectedTotalCount) {
+        throw new RoutingInventoryDriftError(
+          "Cloudflare Email Routing rule inventory changed during pagination",
+        );
+      }
+      for (const rule of pageRules) {
+        const ruleID = String(rule?.id ?? "");
+        if (!ROUTING_RULE_ID.test(ruleID)) {
+          throw new Error("Cloudflare Email Routing rule inventory contained an invalid id");
+        }
+        if (ruleIDs.has(ruleID)) {
+          throw new RoutingInventoryDriftError(
+            "Cloudflare Email Routing rule inventory shifted during pagination",
+          );
+        }
+        ruleIDs.add(ruleID);
+      }
+      rules.push(...pageRules);
+      if (page === expectedTotalPages) {
+        if (rules.length !== expectedTotalCount) {
+          throw new RoutingInventoryDriftError(
+            "Cloudflare Email Routing pagination was incomplete",
+          );
+        }
+        return rules;
+      }
+    }
+    throw new Error("Cloudflare Email Routing rule inventory exceeded the safe pagination limit");
+  }
+
   async listRules() {
     if (!this.zoneID) throw new Error("CLOUDFLARE_ZONE_ID is required");
-    return this.request(`/zones/${this.zoneID}/email/routing/rules?per_page=200`);
+    let previousCanonical;
+    for (let attempt = 0; attempt < ROUTING_INVENTORY_SNAPSHOT_ATTEMPTS; attempt += 1) {
+      let rules;
+      try {
+        rules = await this.readRuleInventorySnapshot();
+      } catch (error) {
+        if (!(error instanceof RoutingInventoryDriftError)) throw error;
+        previousCanonical = undefined;
+        continue;
+      }
+      const canonical = canonicalRuleInventory(rules);
+      if (previousCanonical === canonical) return rules;
+      previousCanonical = canonical;
+    }
+    throw new Error(
+      "Cloudflare Email Routing rule inventory did not stabilize after bounded retries",
+    );
   }
 
   async getEmailRoutingSettings() {
@@ -164,7 +261,7 @@ export class CloudflareAPI {
   }
 
   async updateRule(ruleID, rule) {
-    if (!/^[0-9a-f]{1,32}(?![\s\S])/.test(ruleID)) throw new Error("Cloudflare routing rule id is invalid");
+    if (!ROUTING_RULE_ID.test(ruleID)) throw new Error("Cloudflare routing rule id is invalid");
     return this.request(`/zones/${this.zoneID}/email/routing/rules/${ruleID}`, {
       method: "PUT",
       body: rule,
@@ -172,7 +269,7 @@ export class CloudflareAPI {
   }
 
   async deleteRule(ruleID) {
-    if (!/^[0-9a-f]{1,32}(?![\s\S])/.test(ruleID)) throw new Error("Cloudflare routing rule id is invalid");
+    if (!ROUTING_RULE_ID.test(ruleID)) throw new Error("Cloudflare routing rule id is invalid");
     return this.request(`/zones/${this.zoneID}/email/routing/rules/${ruleID}`, { method: "DELETE" });
   }
 

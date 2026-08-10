@@ -109,6 +109,36 @@ export function sourceIdentity({ repositoryRoot = defaultRepositoryRoot } = {}) 
   });
 }
 
+// Resolve a historical release through its exact annotated/lightweight tag.
+// Deployment bootstrap uses this to prove the currently active predecessor is
+// the one immutable release immediately before the lease endpoint existed; a
+// version string by itself is not sufficient authority for that exception.
+export function taggedReleaseIdentity(
+  version,
+  { repositoryRoot = defaultRepositoryRoot } = {},
+) {
+  if (!/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(
+    String(version ?? ""),
+  )) {
+    throw new Error("historical release version must be MAJOR.MINOR.PATCH");
+  }
+  const tag = `v${version}`;
+  const commit = requiredGit(
+    ["rev-parse", "--verify", `${tag}^{commit}`],
+    repositoryRoot,
+    `${tag} commit`,
+  );
+  const date = requiredGit(
+    ["show", "--no-show-signature", "-s", "--format=%cI", commit],
+    repositoryRoot,
+    `${tag} commit date`,
+  );
+  return Object.freeze({
+    ...validateBuildMetadata({ version, commit, date }),
+    tag,
+  });
+}
+
 export function workerVersionTag(metadata) {
   return `v${validateBuildMetadata(metadata).version}`;
 }

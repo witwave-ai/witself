@@ -41,6 +41,169 @@ test("Cloudflare client exposes no catch-all mutation and uses exact documented 
   assert.equal(calls.every(({ headers }) => headers.Authorization === "Bearer test-token"), true);
 });
 
+test("Cloudflare client reads every Email Routing rule page and fails closed on drift", async () => {
+  const calls = [];
+  const pages = new Map([
+    [1, [{ id: "1" }]],
+    [2, [{ id: "2" }]],
+  ]);
+  const fetchAPI = async (url, init) => {
+    calls.push({ url, ...init });
+    const page = Number(new URL(url).searchParams.get("page"));
+    const result = pages.get(page) ?? [];
+    return Response.json({
+      success: true,
+      errors: [],
+      messages: [],
+      result,
+      result_info: {
+        page,
+        per_page: 50,
+        count: result.length,
+        total_pages: 2,
+        total_count: 2,
+      },
+    });
+  };
+  const api = new CloudflareAPI({
+    accountID: "a".repeat(32), zoneID: "b".repeat(32), apiToken: "test-token", fetchAPI,
+  });
+
+  assert.deepEqual(await api.listRules(), [{ id: "1" }, { id: "2" }]);
+  assert.equal(calls.length, 4);
+  assert.match(calls[0].url, /\?page=1&per_page=50$/);
+  assert.match(calls[1].url, /\?page=2&per_page=50$/);
+  assert.match(calls[2].url, /\?page=1&per_page=50$/);
+  assert.match(calls[3].url, /\?page=2&per_page=50$/);
+
+  let requestCount = 0;
+  const drifting = new CloudflareAPI({
+    accountID: "a".repeat(32),
+    zoneID: "b".repeat(32),
+    apiToken: "test-token",
+    fetchAPI: async (url) => {
+      const page = Number(new URL(url).searchParams.get("page"));
+      const attempt = Math.floor(requestCount / 2);
+      requestCount += 1;
+      const result = pages.get(page) ?? [];
+      return Response.json({
+        success: true,
+        result,
+        result_info: {
+          page,
+          per_page: 50,
+          count: result.length,
+          total_pages: 2,
+          total_count: attempt === 0 && page === 2 ? 3 : 2,
+        },
+      });
+    },
+  });
+  assert.deepEqual(await drifting.listRules(), [{ id: "1" }, { id: "2" }]);
+  assert.equal(requestCount, 6, "one drifted and two stable inventories are required");
+
+  let duplicateRequests = 0;
+  const duplicated = new CloudflareAPI({
+    accountID: "a".repeat(32),
+    zoneID: "b".repeat(32),
+    apiToken: "test-token",
+    fetchAPI: async (url) => {
+      duplicateRequests += 1;
+      const page = Number(new URL(url).searchParams.get("page"));
+      return Response.json({
+        success: true,
+        result: [{ id: "d" }],
+        result_info: {
+          page,
+          per_page: 50,
+          count: 1,
+          total_pages: 2,
+          total_count: 2,
+        },
+      });
+    },
+  });
+  await assert.rejects(() => duplicated.listRules(), /did not stabilize/);
+  assert.equal(duplicateRequests, 8);
+});
+
+test("Cloudflare rule inventory rejects a page-shift hybrid and recovers on two stable snapshots", async () => {
+  const id = (value) => value.toString(16).padStart(4, "0");
+  const original = Array.from({ length: 100 }, (_, index) => ({
+    id: id(index + 1),
+    enabled: true,
+    name: `rule-${index + 1}`,
+  }));
+  const current = Array.from({ length: 100 }, (_, index) => ({
+    id: id(index + 2),
+    enabled: true,
+    name: `rule-${index + 2}`,
+  }));
+  let requestCount = 0;
+  const api = new CloudflareAPI({
+    accountID: "a".repeat(32),
+    zoneID: "b".repeat(32),
+    apiToken: "test-token",
+    fetchAPI: async (url) => {
+      const page = Number(new URL(url).searchParams.get("page"));
+      const snapshot = Math.floor(requestCount / 2);
+      requestCount += 1;
+      // Snapshot zero reads old page one, then current page two. Its 100 unique
+      // ids and unchanged metadata conceal a deleted rule and omit a live rule.
+      const source = snapshot === 0 && page === 1 ? original : current;
+      const result = source.slice((page - 1) * 50, page * 50);
+      return Response.json({
+        success: true,
+        result,
+        result_info: {
+          page,
+          per_page: 50,
+          count: result.length,
+          total_pages: 2,
+          total_count: 100,
+        },
+      });
+    },
+  });
+
+  const rules = await api.listRules();
+  assert.deepEqual(rules, current);
+  assert.equal(requestCount, 6, "hybrid, stable, stable snapshots must all be read");
+  assert.equal(rules.some((rule) => rule.id === id(1)), false);
+  assert.equal(rules.some((rule) => rule.id === id(51)), true);
+});
+
+test("Cloudflare rule inventory compares full content and fails closed on perpetual churn", async () => {
+  let requestCount = 0;
+  const api = new CloudflareAPI({
+    accountID: "a".repeat(32),
+    zoneID: "b".repeat(32),
+    apiToken: "test-token",
+    fetchAPI: async (url) => {
+      requestCount += 1;
+      const page = Number(new URL(url).searchParams.get("page"));
+      const result = [{ id: "a", enabled: true, name: `revision-${requestCount}` }];
+      return Response.json({
+        success: true,
+        result,
+        result_info: {
+          page,
+          per_page: 50,
+          count: 1,
+          total_pages: 1,
+          total_count: 1,
+        },
+      });
+    },
+  });
+
+  await assert.rejects(
+    () => api.listRules(),
+    /did not stabilize after bounded retries/,
+  );
+  assert.equal(requestCount, 4);
+});
+
 test("Cloudflare resource and rule identifiers require true end of input", async () => {
   const valid = {
     CLOUDFLARE_ACCOUNT_ID: "a".repeat(32),

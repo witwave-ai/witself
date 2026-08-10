@@ -490,10 +490,14 @@ their own reviewed stage.
    that cell's ordinary database and production-receive environment:
 
    ```sh
-   /usr/local/bin/witself-server agent-email backfill
+   /usr/local/bin/witself-server agent-email backfill \
+     --exception-output /absolute/private/backfill-exception.json
    ```
 
-   Record only its value-free JSON counts. It pages at 100 agents, is idempotent,
+   Record only its value-free JSON counts. The exception path must be new,
+   canonical, absolute, and outside Git. It is created mode `0600` only if one
+   agent needs a private operator override; review it locally and use a new
+   path on the rerun. The command pages at 100 agents, is idempotent,
    and is safe to rerun after interruption. Never add it to API startup or run
    one copy per replica. A successful result must report
    `missing_mailbox_count_after: 0`. Suspended accounts are verified read-only;
@@ -557,7 +561,8 @@ npm run routes:primary -- prepare /absolute/private/primary-canary.json \
 # cohort digest, gates, and every signed projection fence.
 npm run routes:primary -- apply \
   --plan /absolute/private/primary-prepare-plan.json \
-  --plan-sha256 REVIEWED_SHA256
+  --plan-sha256 REVIEWED_SHA256 \
+  --receipt-output /absolute/private/primary-prepare-receipt.json
 ```
 
 The status and planner compare each realm's authenticated control-plane route
@@ -576,7 +581,8 @@ npm run routes:primary -- activate /absolute/private/primary-canary.json \
   --output /absolute/private/primary-activate-plan.json
 npm run routes:primary -- apply \
   --plan /absolute/private/primary-activate-plan.json \
-  --plan-sha256 REVIEWED_SHA256
+  --plan-sha256 REVIEWED_SHA256 \
+  --receipt-output /absolute/private/primary-activate-receipt.json
 npm run routes:primary -- status /absolute/private/primary-canary.json
 ```
 
@@ -593,16 +599,26 @@ npm run routes:primary -- disable /absolute/private/primary-canary.json \
   --output /absolute/private/primary-disable-plan.json
 npm run routes:primary -- apply \
   --plan /absolute/private/primary-disable-plan.json \
-  --plan-sha256 REVIEWED_DISABLE_SHA256
+  --plan-sha256 REVIEWED_DISABLE_SHA256 \
+  --receipt-output /absolute/private/primary-disable-receipt.json
 npm run routes:primary -- status /absolute/private/primary-canary.json
 # Only after status proves every owned rule disabled may removal be planned.
 npm run routes:primary -- remove /absolute/private/primary-canary.json \
   --output /absolute/private/primary-remove-plan.json
 npm run routes:primary -- apply \
   --plan /absolute/private/primary-remove-plan.json \
-  --plan-sha256 REVIEWED_REMOVE_SHA256
+  --plan-sha256 REVIEWED_REMOVE_SHA256 \
+  --receipt-output /absolute/private/primary-remove-receipt.json
 npm run routes:primary -- status /absolute/private/primary-canary.json
 ```
+
+Each primary apply receipt path must be canonical, absolute, private, and new.
+The tool exclusively creates and fsyncs a complete pending marker before the
+first Cloudflare mutation, then atomically replaces it with the verified
+mode-`0600` receipt containing exact before/after rule evidence. If a crash or
+failure leaves the pending marker, do not delete and retry blindly: inspect
+live status, use the separately planned fail-closed disable path if needed, and
+retain the marker with the incident record.
 
 Do not plan a catch-all while the provider-contract blockers remain open. Once
 an explicit review closes them, hash that external review record and create a
@@ -910,18 +926,39 @@ npm run provision:route-signing-secrets -- \
 This command requires two existing Workers and the existing edge relay secret.
 It preflights both live deployments and secret-name inventories, validates the
 Witself reveal envelopes, proves the private/public Ed25519 keypair, and sends
-values to Wrangler only over stdin with logs and metrics disabled. It installs
+values to Wrangler only over stdin with logs and metrics disabled. The validated
+fallback token authenticates `route_signing_secret_provision` directly against
+the canonical control-plane origin read from the live email edge; the token and
+all endpoint-selector environment variables are removed from every Wrangler
+child. Once the lease is held, the command reacquires the complete live/dark
+fence, renews immediately before and after each bounded secret write, installs
 the route private key on the control plane and one exact fallback token on both
-Workers, re-inspects the resulting secret bindings, and creates a value-free
-mode-`0600` receipt without overwriting a prior path. If a sequential token put
-fails, keep every delivery gate dark, correct the cause, and rerun. Do not use
-independent manual secret puts for this setup; binding presence cannot prove
-that separately entered token values match. A first-ever Worker bootstrap is a
-different, explicitly reviewed `--secrets-file` procedure.
+Workers, re-inspects the resulting bindings, and renews before creating a
+value-free v2 mode-`0600` receipt. If a sequential token put fails, keep every
+delivery gate dark, correct the cause, and rerun. Independent edge secret-put npm
+commands are not exposed and their old names are unknown to npm; binding
+presence cannot prove that separately entered token values match. A first-ever
+Worker bootstrap is a different, explicitly reviewed `--secrets-file`
+procedure.
+
+The desired fallback token must already match the live control-plane lease
+credential. This ceremony therefore cannot rotate `CONTROL_PLANE_EDGE_TOKEN`:
+changing the credential that authenticates acquire, renew, and release would
+invalidate its own fence. Perform such a rotation only through the control-plane
+package's explicit `secret:put:break-glass` path while globally freezing every
+control-plane/email-edge deploy or rollback, route-signing ceremony,
+primary/catch-all apply, and direct Cloudflare dashboard/API Worker mutation.
+Keep that freeze until both Workers and their exact tagged verification have
+converged.
 
 Every secret update creates a successor without the reviewed release
-annotations. After the ceremony, deploy the unchanged exact tag to the edge
-and then the control plane. Only then run readiness. Preserve the ceremony
+annotations. After the ceremony, deploy the unchanged exact tag to the control
+plane first and then the email edge; the release commands enforce this order.
+Each deploy renders and freezes a private per-invocation config, rechecks its
+digest under the global operations lease, and removes it afterward; the shared
+preview config cannot be raced into a provider upload. The edge deploy also
+pins its lease to the exact `https://self.witwave.ai` authority.
+Only then run readiness. Preserve the ceremony
 receipt and both final deployment attestations together; the receipt proves
 same-value upload while readiness proves final binding presence and release
 identity.

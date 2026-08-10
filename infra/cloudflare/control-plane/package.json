@@ -6,10 +6,10 @@
     "activate:plan-lifecycle": "node scripts/activate-plan-lifecycle.mjs",
     "assert:custom-domain-dark": "node scripts/assert-custom-domain-dark.mjs",
     "config": "node scripts/render-wrangler.mjs",
-    "deploy": "npm run config && npm run assert:custom-domain-dark && node scripts/deploy-release.mjs && npm run assert:custom-domain-dark && npm run verify",
+    "deploy": "node scripts/deploy-release.mjs",
     "deploy:plans": "npm run config && wrangler deploy --config ../../../web/plans/wrangler.toml",
     "dev": "wrangler dev --config wrangler.template.jsonc",
-    "secret:put": "npm run config && wrangler secret put --config wrangler.generated.jsonc",
+    "secret:put:break-glass": "npm run config && wrangler secret put --config wrangler.generated.jsonc",
     "test": "node --test test/*.test.mjs",
     "verify": "node scripts/verify-deployment.mjs"
   },

@@ -556,22 +556,76 @@ both deployed Workers to contain those exact bytes while retaining every dark
 delivery-gate check, and emits only count and digest. Operators must run that
 single comparison before provider activation.
 
-The v241 protocol rollout is safe in either code-deployment order only after the
-active v240 edge's canonical and alias delivery gates are both verified false.
+The v241 protocol rollout uses one enforced code-deployment order: control
+plane first, then email edge. Before the control-plane deployment, the active
+v240 edge's canonical and alias delivery gates must both be verified false and
+the target control-plane cohort must be empty.
 A new edge reading a v240 managed row forces refresh and tempfails if the old
 control plane returns v1 again. A v240 edge rejects a new signed-v3 managed row,
 but it can still deliver from a fresh legacy signed-v2 KV row without consulting
 the new control plane when its old route-kind gate is true. The v0.0.241
 control-plane release command therefore follows the exact active email-edge
 version before mutation and refuses a CP-first upgrade unless a v0.0.240 edge
-has both gates false; an already-current v0.0.241 edge is compatible. Under that
-mandatory dark precondition, neither mixed order reads MIME, contacts a cell, or
-bounces the known address. Complete both Worker upgrades before installing a
-nonempty cohort. Install the control-plane cohort first and the edge cohort
+has both gates false and the new control-plane cohort is empty. The v0.0.241
+email-edge release command refuses deployment until the control plane is
+already v0.0.241 or newer. Under those mandatory dark preconditions, the brief
+mixed-version period does not read MIME, contact a cell, or bounce the known
+address. Complete both Worker upgrades before installing a nonempty cohort.
+Install the control-plane cohort first and the edge cohort
 second, run the explicit expected-cohort readiness check, then perform the
 separately reviewed provider and gate activation. To remove an account, remove
 it from the edge cohort first so even fresh cached v2 rows stop immediately,
 then remove it from the control plane.
+
+Every control-plane deploy, email-edge deploy, guarded email-edge rollback,
+coordinated route-signing secret ceremony, primary-routing apply, and
+catch-all-routing apply is serialized by one global operations lease in the
+existing `REALM_EMAIL_ALIASES` Durable Object. The exact operation identifiers
+are `control_plane_deploy`, `email_edge_deploy`, `email_edge_rollback`,
+`route_signing_secret_provision`, `primary_routing_apply`, and
+`catch_all_routing_apply`. The operator must provide the existing
+`CONTROL_PLANE_EDGE_TOKEN` to these local commands without printing or
+persisting it. The command acquires the lease through the authenticated control
+plane API, renews it while work is in progress, proves one final renewal before
+success, and releases it afterward. A second operation fails closed while the
+lease is active; an abandoned lease becomes available only after its bounded
+expiry. Do not bypass a conflict or start either Worker deployment, the guarded
+rollback, or either provider-routing mutation concurrently.
+
+The route-signing ceremony reveals the desired shared fallback token only after
+its complete Witself envelope is validated, uses that value directly to
+authenticate the canonical live control-plane lease, and never passes it through
+the process environment to Wrangler. It reacquires every dark/live fence under
+the lease and renews before and after each secret write. Consequently, a normal
+coordinated rerun works only while the desired token already equals the live
+control-plane credential. Rotating `CONTROL_PLANE_EDGE_TOKEN` cannot safely hold
+a lease authenticated by the credential it is replacing; that is an explicit
+break-glass operation requiring the global provider-mutation freeze documented
+in the control-plane deployment runbook.
+
+The lease coordinates Witself's supported deployment and routing tools; it
+cannot fence a person or unrelated automation that writes Email Routing through
+the Cloudflare dashboard or API. Freeze those external mutations for the whole
+plan/apply window. If that rule is violated, treat the receipt as suspect,
+inspect live state, and use the separately planned fail-closed disable path
+before continuing.
+
+The sole bootstrap exception is the first dark v0.0.241 control-plane deploy,
+when the old control plane returns a literal 404 because it has no lease API.
+The deploy command permits that exception only after stable provider reads
+prove the exact Git-tagged v0.0.240 control plane, unchanged Durable Object
+namespaces, an absent legacy cohort binding, absent canonical inventory and
+delivery gates, an exactly v0.0.240 dark email edge, and empty active and target
+cohorts. The independent alias-administration gate may remain active because it
+does not enable delivery. The one unleased write uses `wrangler deploy
+--containers-rollout none` to install only the byte-identical outer v0.0.241
+Worker. The command then proves the target and namespace continuity, acquires
+the newly installed durable lease, and performs the full Container deployment,
+verification, and convergence checks under that lease. There is no bootstrap
+exception for the email edge, provider-routing changes, v0.0.242 or later, a
+nonempty cohort, or any other response. Cloudflare exposes no compare-and-swap
+for that first outer-only upload, so unrelated dashboard and direct API writes
+must remain frozen during the bootstrap window.
 
 The guarded edge rollback tool may treat v0.0.240's missing cohort binding as
 the empty value only when both the current and candidate alias/canonical gates
@@ -579,6 +633,15 @@ are false and the current cohort is empty. That makes v0.0.240 an honest dark
 emergency rollback candidate, not an active managed-delivery candidate. It
 cannot consume signed-v3 managed KV rows; keep delivery dark until compatible
 Workers are restored. Current custom-domain v1/signed-v2 rows are unchanged.
+Apply checks the supplied plan hash before acquiring `email_edge_rollback`, then
+reconstructs the exact reviewed state, renews immediately before the
+interruptible Wrangler deployment, and verifies the selected version at 100
+percent while still holding the lease. Collision and lease loss fail closed;
+the operation proves a final renewal and exact release and has no bootstrap
+bypass. The production-specific rollback pins the lease authority to
+`https://self.witwave.ai`, passes only `CONTROL_PLANE_EDGE_TOKEN` into the
+lease client, ignores inherited `WITSELF_CONTROL_PLANE` and `CONTROL_PLANE_URL`
+selectors, and refuses HTTP redirects.
 
 Do not enable
 the gate until every release blocker is closed and acceptance-tested: (1) the
@@ -999,9 +1062,20 @@ CLI local selectors enforce a charset. Sanitization is deterministic:
    the agent segment.
 6. Fail closed: an empty result, a length overflow, or a collision with any
    live or tombstoned address in the realm fails provisioning with an
-   explicit error, and the operator supplies an explicit local part (same
-   charset rules) recorded on the address record. No silent auto-suffixing —
-   provisioning order never changes an address.
+   explicit error, and the operator supplies an explicit agent segment (same
+   charset rules) recorded on the address record. New agents accept it through
+   `witself agent create --email-agent-segment`. That flag uses the strict
+   v0.0.241-only `POST /v1/realms/{realm}/agents:with-email-segment` mutation;
+   the ordinary create route never carries the field, and a v0.0.240 server
+   returns 404 before creating anything instead of silently ignoring it. The
+   supplied segment must already be byte-for-byte canonical lowercase ASCII;
+   empty, whitespace-only, normalized, reserved, and unknown-field requests are
+   rejected before the create callback. Existing production-cohort agents
+   accept an override only through the private, preflighted
+   `witself-server agent-email backfill --exception-output ABSOLUTE_PATH
+   --overrides ABSOLUTE_PATH` workflow. The exception artifact is private,
+   mode `0600`, and created only when operator review is required. No silent
+   auto-suffixing — provisioning order never changes an address.
 
 Sanitized segments can never contain a dot, so the address grammar is
 unambiguous: after stripping any RFC 5233 subaddress tag (`+tag`), a valid

@@ -13,14 +13,21 @@ import {
   verifyWorkerVersion,
 } from "../scripts/verify-deployment.mjs";
 import {
+  bootstrapReleaseDeploymentArguments,
   exactGeneratedConfigPath,
   GENERATED_CONFIG_PATH,
+  isFirstManagedCohortProtocolBootstrap,
+  preflightManagedCohortProtocolBootstrapPredecessor,
   preflightManagedCohortProtocolUpgrade,
   releaseDeploymentArguments,
+  verifyManagedCohortProtocolBootstrapConvergence,
+  verifyManagedCohortProtocolBootstrapPredecessor,
+  verifyManagedCohortProtocolBootstrapTarget,
   verifyManagedCohortProtocolUpgrade,
 } from "../scripts/deploy-release.mjs";
 import {
   sourceIdentity,
+  taggedReleaseIdentity,
   workerVersionMessage,
   workerVersionTag,
 } from "../scripts/source-identity.mjs";
@@ -40,6 +47,21 @@ const routeSigningKeyID = "route-2026-08";
 const agentEmailDirectoryID = "b".repeat(32);
 const emailEdgeDeploymentID = "11111111-1111-4111-8111-111111111111";
 const emailEdgeVersionID = "22222222-2222-4222-8222-222222222222";
+const bootstrapControlPlaneDeploymentID = "33333333-3333-4333-8333-333333333333";
+const bootstrapPredecessorVersionID = "44444444-4444-4444-8444-444444444444";
+const bootstrapTargetVersionID = "55555555-5555-4555-8555-555555555555";
+const bootstrapConvergedVersionID = "66666666-6666-4666-8666-666666666666";
+const cohortAccount = "acc_abcdefghijkl2345";
+const secondCohortAccount = "acc_bcdefghijklm2345";
+
+test("generic control-plane secret mutation is explicitly break-glass", async () => {
+  const packageJSON = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(Object.hasOwn(packageJSON.scripts, "secret:put"), false);
+  assert.equal(
+    packageJSON.scripts["secret:put:break-glass"],
+    "npm run config && wrangler secret put --config wrangler.generated.jsonc",
+  );
+});
 
 function emailEdgeDeployment() {
   return {
@@ -53,6 +75,7 @@ function emailEdgeVersion({
   release = "0.0.240",
   alias = "false",
   canonical = "false",
+  cohort = "",
 } = {}) {
   return {
     id: emailEdgeVersionID,
@@ -60,8 +83,10 @@ function emailEdgeVersion({
       script: { handlers: ["email"] },
       bindings: [
         { name: "WITSELF_EDGE_RELEASE_VERSION", type: "plain_text", text: release },
+        { name: "CONTROL_PLANE_URL", type: "plain_text", text: "https://self.witwave.ai/" },
         { name: "REALM_EMAIL_ALIAS_DELIVERY_ENABLED", type: "plain_text", text: alias },
         { name: "REALM_EMAIL_CANONICAL_DELIVERY_ENABLED", type: "plain_text", text: canonical },
+        { name: "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", type: "plain_text", text: cohort },
       ],
     },
   };
@@ -74,7 +99,23 @@ test("v0.0.241 CP-first deployment requires the active v0.0.240 edge to be dark"
       emailEdgeDeployment(),
       emailEdgeVersion(),
     ),
-    { required: true, edge_release: "0.0.240", already_current: false },
+    {
+      required: true,
+      edge_release: "0.0.240",
+      already_current: false,
+      target_account_count: 0,
+      active_edge_account_count: 0,
+      operations_lease_origin: "https://self.witwave.ai",
+    },
+  );
+  assert.throws(
+    () => verifyManagedCohortProtocolUpgrade(
+      "0.0.241",
+      emailEdgeDeployment(),
+      emailEdgeVersion(),
+      cohortAccount,
+    ),
+    /requires an empty managed cohort/,
   );
   for (const overrides of [
     { alias: "true" },
@@ -99,16 +140,47 @@ test("v0.0.241 CP-first deployment requires the active v0.0.240 edge to be dark"
   );
 });
 
+test("current edge requires the control-plane cohort to contain its active cohort", () => {
+  assert.deepEqual(
+    verifyManagedCohortProtocolUpgrade(
+      "0.0.241",
+      emailEdgeDeployment(),
+      emailEdgeVersion({ release: "0.0.241", cohort: cohortAccount }),
+      `${cohortAccount},${secondCohortAccount}`,
+    ),
+    {
+      required: true,
+      edge_release: "0.0.241",
+      already_current: true,
+      target_account_count: 2,
+      active_edge_account_count: 1,
+      operations_lease_origin: "https://self.witwave.ai",
+    },
+  );
+  assert.throws(
+    () => verifyManagedCohortProtocolUpgrade(
+      "0.0.241",
+      emailEdgeDeployment(),
+      emailEdgeVersion({ release: "0.0.241", cohort: cohortAccount }),
+      "",
+    ),
+    /remove from the edge first/,
+  );
+});
+
 test("managed cohort protocol preflight inspects the exact active email edge before CP mutation", () => {
   const calls = [];
-  const result = preflightManagedCohortProtocolUpgrade("0.0.241", (args) => {
+  const result = preflightManagedCohortProtocolUpgrade("0.0.241", "", (args) => {
     calls.push(args);
-    return calls.length === 1 ? emailEdgeDeployment() : emailEdgeVersion();
+    return calls.length === 2 ? emailEdgeVersion() : emailEdgeDeployment();
   });
   assert.deepEqual(result, {
     required: true,
     edge_release: "0.0.240",
     already_current: false,
+    target_account_count: 0,
+    active_edge_account_count: 0,
+    operations_lease_origin: "https://self.witwave.ai",
   });
   assert.deepEqual(calls, [
     ["deployments", "status", "--name", "witself-agent-email-pilot", "--json"],
@@ -116,15 +188,84 @@ test("managed cohort protocol preflight inspects the exact active email edge bef
       "versions", "view", emailEdgeVersionID,
       "--name", "witself-agent-email-pilot", "--json",
     ],
+    ["deployments", "status", "--name", "witself-agent-email-pilot", "--json"],
   ]);
   let inspected = false;
   assert.deepEqual(
-    preflightManagedCohortProtocolUpgrade("0.0.242", () => {
+    preflightManagedCohortProtocolUpgrade("0.0.240", "", () => {
       inspected = true;
     }),
     { required: false },
   );
   assert.equal(inspected, false);
+});
+
+test("managed cohort protocol preflight rejects origin substitution and active-version drift", () => {
+  assert.throws(
+    () => verifyManagedCohortProtocolUpgrade(
+      "0.0.241",
+      emailEdgeDeployment(),
+      {
+        ...emailEdgeVersion(),
+        resources: {
+          ...emailEdgeVersion().resources,
+          bindings: emailEdgeVersion().resources.bindings.map((binding) =>
+            binding.name === "CONTROL_PLANE_URL"
+              ? { ...binding, text: "https://attacker.invalid/" }
+              : binding),
+        },
+      },
+    ),
+    /exact control-plane route/,
+  );
+
+  let calls = 0;
+  assert.throws(
+    () => preflightManagedCohortProtocolUpgrade("0.0.241", "", () => {
+      calls += 1;
+      if (calls === 2) return emailEdgeVersion();
+      if (calls === 3) {
+        return {
+          ...emailEdgeDeployment(),
+          versions: [{
+            version_id: "77777777-7777-4777-8777-777777777777",
+            percentage: 100,
+          }],
+        };
+      }
+      return emailEdgeDeployment();
+    }),
+    /changed during exact provider inspection/,
+  );
+});
+
+test("only the exact dark v0.0.241 transition may bootstrap the operations lease", () => {
+  const dark = verifyManagedCohortProtocolUpgrade(
+    "0.0.241",
+    emailEdgeDeployment(),
+    emailEdgeVersion(),
+  );
+  const predecessor = {
+    schema: "witself.agent-email-control-plane-bootstrap-predecessor.v1",
+    release: { version: "0.0.240" },
+  };
+  assert.equal(
+    isFirstManagedCohortProtocolBootstrap("0.0.241", dark, predecessor),
+    true,
+  );
+  for (const [release, candidate] of [
+    ["0.0.242", dark],
+    ["0.0.241", { ...dark, already_current: true }],
+    ["0.0.241", { ...dark, target_account_count: 1 }],
+    ["0.0.241", { ...dark, active_edge_account_count: 1 }],
+    ["0.0.241", { ...dark, edge_release: "0.0.241" }],
+  ]) {
+    assert.equal(
+      isFirstManagedCohortProtocolBootstrap(release, candidate, predecessor),
+      false,
+    );
+  }
+  assert.equal(isFirstManagedCohortProtocolBootstrap("0.0.241", dark, null), false);
 });
 
 test("release renderer injects matching immutable container and Worker identity", async (t) => {
@@ -497,6 +638,19 @@ test("release source requires one clean exact semantic-version tag", async (t) =
   assert.equal(identity.tag, "v1.2.3");
   assert.match(identity.commit, /^[0-9a-f]{40}$/);
   assert.equal(identity.clean, true);
+  assert.deepEqual(
+    taggedReleaseIdentity("1.2.3", { repositoryRoot }),
+    {
+      version: "1.2.3",
+      commit: identity.commit,
+      date: identity.date,
+      tag: "v1.2.3",
+    },
+  );
+  assert.throws(
+    () => taggedReleaseIdentity("1.2.4", { repositoryRoot }),
+    /could not resolve v1\.2\.4 commit from git/,
+  );
 
   await writeFile(join(repositoryRoot, "dirty.txt"), "dirty\n");
   assert.throws(
@@ -660,6 +814,271 @@ function deployedVersion(overrides = {}) {
     ...overrides,
   };
 }
+
+function controlPlaneDeployment(activeVersionID, {
+  deploymentID = bootstrapControlPlaneDeploymentID,
+} = {}) {
+  return {
+    id: deploymentID,
+    strategy: "percentage",
+    versions: [{ version_id: activeVersionID, percentage: 100 }],
+  };
+}
+
+function controlPlaneReleaseIdentity(release, releaseCommit, releaseDate) {
+  return {
+    ...expectedIdentity(),
+    version: release,
+    commit: releaseCommit,
+    date: releaseDate,
+    managed_delivery_account_allowlist: "",
+  };
+}
+
+function controlPlaneReleaseVersion(identity, {
+  id,
+  includeManagedCohort = true,
+  includeAliasActivation = false,
+  namespaceOverrides = {},
+  scriptETag = "b".repeat(64),
+} = {}) {
+  const candidate = deployedVersion();
+  candidate.id = id;
+  candidate.annotations = {
+    "workers/triggered_by": "upload",
+    "workers/tag": workerVersionTag(identity),
+    "workers/message": workerVersionMessage(identity),
+  };
+  candidate.resources.script.etag = scriptETag;
+  for (const [name, text] of [
+    ["WITSELF_EDGE_RELEASE_VERSION", identity.version],
+    ["WITSELF_EDGE_RELEASE_COMMIT", identity.commit],
+    ["WITSELF_EDGE_RELEASE_DATE", identity.date],
+  ]) {
+    candidate.resources.bindings.find((binding) => binding.name === name).text = text;
+  }
+  candidate.resources.bindings = candidate.resources.bindings.filter((binding) =>
+    (includeManagedCohort ||
+      binding.name !== "CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST") &&
+    (includeAliasActivation ||
+      binding.name !== "CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED"));
+  for (const binding of candidate.resources.bindings) {
+    if (binding.type === "durable_object_namespace" &&
+        Object.hasOwn(namespaceOverrides, binding.name)) {
+      binding.namespace_id = namespaceOverrides[binding.name];
+    }
+  }
+  return candidate;
+}
+
+test("lease bootstrap proves only the exact dark v0.0.240 predecessor", () => {
+  const target = controlPlaneReleaseIdentity(
+    "0.0.241",
+    "a".repeat(40),
+    "2026-08-09T01:02:03Z",
+  );
+  const predecessor = {
+    version: "0.0.240",
+    commit: "d".repeat(40),
+    date: "2026-08-08T01:02:03Z",
+    tag: "v0.0.240",
+  };
+  const predecessorIdentity = {
+    ...target,
+    ...predecessor,
+  };
+  delete predecessorIdentity.tag;
+  const predecessorVersion = controlPlaneReleaseVersion(predecessorIdentity, {
+    id: bootstrapPredecessorVersionID,
+    includeManagedCohort: false,
+    includeAliasActivation: true,
+  });
+  assert.equal(
+    predecessorVersion.resources.bindings.some((binding) =>
+      binding.name === "CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED" &&
+      binding.type === "secret_text"),
+    true,
+    "the live v0.0.240 alias-administration gate is legitimate predecessor state",
+  );
+  const deployment = controlPlaneDeployment(bootstrapPredecessorVersionID);
+
+  const proof = verifyManagedCohortProtocolBootstrapPredecessor(
+    target,
+    predecessor,
+    deployment,
+    predecessorVersion,
+  );
+  assert.equal(
+    proof.schema,
+    "witself.agent-email-control-plane-bootstrap-predecessor.v1",
+  );
+  assert.deepEqual(proof.release, {
+    version: predecessor.version,
+    commit: predecessor.commit,
+    date: predecessor.date,
+  });
+  assert.equal(proof.operations_lease_namespace_id, "c".repeat(32));
+  assert.equal(proof.durable_object_namespaces.REALM_EMAIL_ALIASES, "c".repeat(32));
+  assert.equal(Object.keys(proof.durable_object_namespaces).length, 7);
+
+  const currentVersion = controlPlaneReleaseVersion(target, {
+    id: bootstrapTargetVersionID,
+  });
+  assert.throws(
+    () => verifyManagedCohortProtocolBootstrapPredecessor(
+      target,
+      predecessor,
+      controlPlaneDeployment(bootstrapTargetVersionID),
+      currentVersion,
+    ),
+    /release annotations/,
+    "a current control plane returning 404 must never qualify as legacy",
+  );
+
+  const presentCohort = controlPlaneReleaseVersion(predecessorIdentity, {
+    id: bootstrapPredecessorVersionID,
+    includeManagedCohort: true,
+  });
+  assert.throws(
+    () => verifyManagedCohortProtocolBootstrapPredecessor(
+      target,
+      predecessor,
+      deployment,
+      presentCohort,
+    ),
+    /canonical delivery dark and no managed cohort binding/,
+  );
+
+  const activeGate = controlPlaneReleaseVersion(predecessorIdentity, {
+    id: bootstrapPredecessorVersionID,
+    includeManagedCohort: false,
+    includeAliasActivation: true,
+  });
+  activeGate.resources.bindings.push({
+    name: "CP_REALM_EMAIL_CANONICAL_DELIVERY_ENABLED",
+    type: "secret_text",
+  });
+  assert.throws(
+    () => verifyManagedCohortProtocolBootstrapPredecessor(
+      target,
+      predecessor,
+      deployment,
+      activeGate,
+    ),
+    /canonical delivery dark and no managed cohort binding/,
+  );
+
+  assert.throws(
+    () => verifyManagedCohortProtocolBootstrapPredecessor(
+      target,
+      { ...predecessor, commit: "e".repeat(40) },
+      deployment,
+      predecessorVersion,
+    ),
+    /release annotations/,
+  );
+});
+
+test("lease bootstrap rechecks a stable provider predecessor and preserves every Durable Object namespace", () => {
+  const target = controlPlaneReleaseIdentity(
+    "0.0.241",
+    "a".repeat(40),
+    "2026-08-09T01:02:03Z",
+  );
+  const predecessor = {
+    version: "0.0.240",
+    commit: "d".repeat(40),
+    date: "2026-08-08T01:02:03Z",
+    tag: "v0.0.240",
+  };
+  const predecessorIdentity = { ...target, ...predecessor };
+  delete predecessorIdentity.tag;
+  const predecessorVersion = controlPlaneReleaseVersion(predecessorIdentity, {
+    id: bootstrapPredecessorVersionID,
+    includeManagedCohort: false,
+    includeAliasActivation: true,
+  });
+  const predecessorDeployment = controlPlaneDeployment(bootstrapPredecessorVersionID);
+  const calls = [];
+  const proof = preflightManagedCohortProtocolBootstrapPredecessor(
+    target,
+    predecessor,
+    GENERATED_CONFIG_PATH,
+    (args) => {
+      calls.push(args);
+      return calls.length === 2 ? predecessorVersion : predecessorDeployment;
+    },
+  );
+  assert.equal(proof.version_id, bootstrapPredecessorVersionID);
+  assert.equal(calls.length, 3);
+
+  let driftCalls = 0;
+  assert.throws(
+    () => preflightManagedCohortProtocolBootstrapPredecessor(
+      target,
+      predecessor,
+      GENERATED_CONFIG_PATH,
+      () => {
+        driftCalls += 1;
+        if (driftCalls === 2) return predecessorVersion;
+        if (driftCalls === 3) {
+          return controlPlaneDeployment(bootstrapTargetVersionID);
+        }
+        return predecessorDeployment;
+      },
+    ),
+    /changed during exact provider inspection/,
+  );
+
+  const targetVersion = controlPlaneReleaseVersion(target, {
+    id: bootstrapTargetVersionID,
+  });
+  const staged = verifyManagedCohortProtocolBootstrapTarget(
+    target,
+    proof,
+    controlPlaneDeployment(bootstrapTargetVersionID),
+    targetVersion,
+  );
+  const convergedVersion = controlPlaneReleaseVersion(target, {
+    id: bootstrapConvergedVersionID,
+  });
+  const converged = verifyManagedCohortProtocolBootstrapTarget(
+    target,
+    proof,
+    controlPlaneDeployment(bootstrapConvergedVersionID),
+    convergedVersion,
+  );
+  assert.deepEqual(
+    verifyManagedCohortProtocolBootstrapConvergence(staged, converged),
+    {
+      script_etag: "b".repeat(64),
+      operations_lease_namespace_id: "c".repeat(32),
+      durable_object_namespaces: staged.durable_object_namespaces,
+    },
+  );
+
+  const changedNamespace = controlPlaneReleaseVersion(target, {
+    id: bootstrapConvergedVersionID,
+    namespaceOverrides: { ACCOUNT_BACKUP: "e".repeat(32) },
+  });
+  assert.throws(
+    () => verifyManagedCohortProtocolBootstrapTarget(
+      target,
+      proof,
+      controlPlaneDeployment(bootstrapConvergedVersionID),
+      changedNamespace,
+    ),
+    /changed its Durable Object namespace inventory/,
+  );
+
+  assert.throws(
+    () => verifyManagedCohortProtocolBootstrapConvergence(
+      staged,
+      { ...converged, script_etag: "f".repeat(64) },
+    ),
+    /byte-identical release artifact/,
+  );
+});
 
 test("Worker deployment verification requires one exact 100 percent version", () => {
   assert.equal(currentProductionVersionID({
@@ -933,6 +1352,14 @@ test("release deployment is pinned to the exact generated config", () => {
       "--message", `witself-control-plane v1.2.3 ${commit}`,
     ],
   );
+  assert.deepEqual(
+    bootstrapReleaseDeploymentArguments(expectedIdentity()),
+    [
+      ...releaseDeploymentArguments(expectedIdentity()),
+      "--containers-rollout", "none",
+    ],
+    "the sole unleased bootstrap write must suppress every Container rollout",
+  );
 });
 
 test("dark deployment refuses every persistent agent-email activation secret", async () => {
@@ -954,13 +1381,22 @@ test("dark deployment refuses every persistent agent-email activation secret", a
   }
   const packageJSON = JSON.parse(await readFile(new URL("../package.json", import.meta.url)));
   assert.equal(
-    packageJSON.scripts.deploy.match(/npm run assert:custom-domain-dark/g)?.length,
-    2,
-    "deployment must check persistent activation secrets before and after upload",
+    packageJSON.scripts.deploy,
+    "node scripts/deploy-release.mjs",
+    "deployment must create and hold its own private generated configuration",
+  );
+  const deploySource = await readFile(
+    new URL("../scripts/deploy-release.mjs", import.meta.url),
+    "utf8",
   );
   assert.match(
-    packageJSON.scripts.deploy,
-    /node scripts\/deploy-release\.mjs/,
-    "deployment must pass through the clean tagged release guard",
+    deploySource,
+    /createPrivateDeploymentConfig/,
+    "deployment must use a per-invocation immutable configuration",
+  );
+  assert.match(
+    deploySource,
+    /scripts", "assert-custom-domain-dark\.mjs/,
+    "deployment must validate persistent activation secrets before upload",
   );
 });

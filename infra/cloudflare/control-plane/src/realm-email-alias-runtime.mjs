@@ -20,6 +20,12 @@ import {
 import {
   managedDeliveryAccountIsAdmitted,
 } from "./agent-email-managed-delivery-cohort.mjs";
+import {
+  AgentEmailOperationsLeaseRuntime,
+  agentEmailOperationsLeaseErrorResponse,
+  agentEmailOperationsLeaseJSON,
+  isAgentEmailOperationsLeasePath,
+} from "./agent-email-operations-lease.mjs";
 
 const SCHEMA_VERSION = "witself.realm-email-alias.v1";
 const META_KEY = "meta";
@@ -1018,6 +1024,10 @@ export class DurableRealmEmailAliasRegistry {
     this.log = dependencies.log ?? ((value) => console.log(value));
     this.signRouteProjection = dependencies.signRouteProjection ??
       ((projection) => signAgentEmailRouteProjection(projection, this.env));
+    this.agentEmailOperationsLease = new AgentEmailOperationsLeaseRuntime(
+      this.storage,
+      { now: this.now },
+    );
     this.lanes = new Map();
     this.activeOperationalWork = 0;
     this.authorityJournal = new RealmEmailAliasJournalRuntime(
@@ -1202,6 +1212,17 @@ export class DurableRealmEmailAliasRegistry {
     try {
       const path = new URL(request.url).pathname;
       const rawApply = this.atomicRaw.bind(this);
+      if (isAgentEmailOperationsLeasePath(path)) {
+        try {
+          const result = await this.withLane(
+            "registry:agent-email-operations-lease",
+            () => this.agentEmailOperationsLease.execute(path, input),
+          );
+          return agentEmailOperationsLeaseJSON(result.body, result.status);
+        } catch (error) {
+          return agentEmailOperationsLeaseErrorResponse(error);
+        }
+      }
       if (path === "/journal/status") {
         return json({
           schema_version: SCHEMA_VERSION,

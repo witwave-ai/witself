@@ -241,7 +241,9 @@
   }
   // Runtime-only Worker secrets used by the Go plan lifecycle are deliberately
   // absent from this file. Render the release config first, then configure them
-  // with `npm run secret:put -- NAME`:
+  // only under the documented global provider-mutation freeze with
+  // `npm run secret:put:break-glass -- NAME` (the command is deliberately not
+  // serialized by the CONTROL_PLANE_EDGE_TOKEN-authenticated lease):
   // INTERNAL_BRIDGE_TOKEN (required), CONTROL_PLANE_EDGE_TOKEN (must exactly
   // match the agent-email Worker's secret),
   // CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED=true (only after catch-all,

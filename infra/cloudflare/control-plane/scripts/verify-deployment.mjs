@@ -437,7 +437,9 @@ function exactNamedHandlers(namedHandlers) {
   }
 }
 
-export function verifyWorkerVersion(version, expected, expectedVersionID) {
+export function verifyWorkerVersion(version, expected, expectedVersionID, {
+  allowLegacyEmptyManagedDeliveryCohort = false,
+} = {}) {
   if (version == null || typeof version !== "object" ||
       version.id !== expectedVersionID || !validVersionID(version.id)) {
     throw new Error("Wrangler returned the wrong control-plane Worker version");
@@ -552,12 +554,20 @@ export function verifyWorkerVersion(version, expected, expectedVersionID) {
     ["CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM", "8"],
     ["CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT", "64"],
     ["CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT", "8"],
-    [
-      "CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
-      expected.managed_delivery_account_allowlist,
-    ],
   ]) {
     exactPlainBinding(bindings, name, value);
+  }
+  const legacyManagedDeliveryCohort =
+    allowLegacyEmptyManagedDeliveryCohort === true &&
+    expected.version === "0.0.240" &&
+    expected.managed_delivery_account_allowlist === "" &&
+    !bindings.has("CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST");
+  if (!legacyManagedDeliveryCohort) {
+    exactPlainBinding(
+      bindings,
+      "CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
+      expected.managed_delivery_account_allowlist,
+    );
   }
   for (const [name, bucketName] of Object.entries(R2_BINDINGS)) {
     exactR2Binding(bindings, name, bucketName);

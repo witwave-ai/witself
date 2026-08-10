@@ -81,10 +81,12 @@ schema v3. Custom-domain payloads remain v1/signed-v2. The edge dual-reads a
 v240 managed v1/signed-v2 row only to preserve prior-route evidence, always
 refreshes it from the control plane, and never delivers from it. An old v240
 edge can still deliver from a fresh legacy signed-v2 KV row without consulting
-the upgraded control plane when its old managed-delivery gate is true. Before
-any control-plane-first upgrade, prove both v240 canonical and alias delivery
-gates are false; keep both false until the control plane and edge are upgraded
-and the separately reviewed cohort activation begins.
+the upgraded control plane when its old managed-delivery gate is true. The v241
+release uses control-plane-first code deployment. Before that upgrade, prove
+both v240 canonical and alias delivery gates are false and keep the new
+control-plane cohort empty. The v241 edge deploy refuses to run until the active
+control plane is already v241 or newer. Keep both route-kind gates false until
+both Workers are upgraded and the separately reviewed cohort activation begins.
 
 Dynamic route lookup is protected independently of account policy. A positive
 `EMAIL_DIRECTORY` projection is always checked first and
@@ -181,9 +183,10 @@ canonical `<agent-segment>.<realm-id-body>@witmail.net` for its `realm_id`:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "domain": "witmail.net",
   "worker_name": "witself-agent-email-pilot",
+  "account_ids": ["acc_abcdefghijkl2345"],
   "agents": [
     {
       "agent_id": "agent_aaaaaaaaaaaaaaa2",
@@ -223,9 +226,13 @@ primary mailbox state with the cell's production receive environment:
   --output /absolute/private/primary-canary.json
 ```
 
-The path must be new. The exporter writes the exact sorted manifest with
-exclusive mode `0600`, emits no identities or addresses to stdout, and performs
-no database write. Keep that manifest and every plan outside the repository.
+The path must be new. The exporter writes the exact sorted manifest with the
+complete 1-100 account receive cohort plus 5-10 actual canary mailboxes. The
+cohort is independent of which accounts happen to supply those few literal
+addresses, so a multi-account cohort is not accidentally constrained by the
+canary size. The file is created with exclusive mode `0600`; the command emits
+no identities or addresses to stdout and performs no database write. Keep that
+manifest and every plan outside the repository.
 After deploying the exact managed-account cohort and allowing signed inventory
 to converge, `status` must report `ready_for_prepare: true`. The `prepare`,
 `activate`, `disable`, and `remove` commands only create a new mode-`0600`,
@@ -238,7 +245,8 @@ npm run routes:primary -- prepare /absolute/private/primary-canary.json \
   --output /absolute/private/prepare-plan.json
 npm run routes:primary -- apply \
   --plan /absolute/private/prepare-plan.json \
-  --plan-sha256 REVIEWED_SHA256
+  --plan-sha256 REVIEWED_SHA256 \
+  --receipt-output /absolute/private/prepare-receipt.json
 ```
 
 The primary manager creates, enables, disables, or removes only exact literal
@@ -263,7 +271,9 @@ unmanaged conflicts, an incomplete canary, or concurrent guard drift fail
 closed. A failed activation disables every owned canary rule; partial removal
 leaves survivors disabled. Emergency `disable` and cleanup `remove` remain
 available through their own reviewed plans even when projections or delivery
-gates are unavailable.
+gates are unavailable. Primary apply reserves and fsyncs its mandatory
+mode-`0600` receipt path before any Cloudflare mutation, then atomically replaces
+the pending marker with exact before/after rule evidence after verification.
 
 `npm run routes:catch-all` is a separate, higher-risk workflow. It defaults to
 read-only `status`; `enable`, `disable`, and `rollback` also create plans only.
@@ -326,7 +336,10 @@ and must not be committed. The generated Worker must expose
 `REALM_ROUTE_COLD_MISS_LIMITER` at 10 calls per 10 seconds and
 `REALM_ROUTE_KNOWN_MISS_LIMITER` at 100 calls per 10 seconds; the committed
 template owns their distinct namespace IDs. `CONTROL_PLANE_EDGE_TOKEN` is
-deliberately absent from both the template and generated file.
+deliberately absent from both the template and generated file. It must instead
+be present only in the local operator environment for deployment and routing
+apply commands, which use it to acquire the control plane's global operations
+lease. Never print or persist its value.
 
 Rate-limit `namespace_id` values are account-wide, not repository-local. A
 read-only account preflight on 2026-08-02 found only the control-plane recovery
@@ -359,6 +372,53 @@ managed flags, the route-verification keyring, rate limiters, and the absence of
 the custom-domain activation secret. `npm run verify:deployment` repeats the
 same value-free inspection. `npm run bundle:check` performs a hermetic Wrangler
 dry run and emits only source metadata and bundle/metafile SHA-256 digests.
+
+The control-plane deploy, this email-edge deploy, the guarded email-edge
+rollback, the coordinated route-signing secret ceremony, and both primary and
+catch-all routing apply workflows share one global, expiring operations lease in
+the control plane's existing `REALM_EMAIL_ALIASES` Durable Object. Their exact
+operation identifiers are `control_plane_deploy`, `email_edge_deploy`,
+`email_edge_rollback`, `route_signing_secret_provision`,
+`primary_routing_apply`, and `catch_all_routing_apply`. Each workflow renews the
+lease while its subprocess is running, performs a final renewal before success,
+and releases it afterward. A live conflicting operation fails closed; a crashed
+holder can be replaced only after the bounded expiry. Never bypass a lease
+conflict or run these operations concurrently. Each supported Worker deploy
+renders into its own unpredictable mode-`0700` temporary directory, freezes the
+config mode `0400`, verifies its SHA-256 while holding the lease, and removes it
+afterward. A concurrent `npm run config` or second deploy therefore cannot swap
+the cohort or delivery gates underneath Wrangler. The control-plane deploy and
+secret ceremony derive the lease origin from a stable inspection of the exact
+active email-edge Worker binding. The edge deploy requires the canonical
+`https://self.witwave.ai/` origin directly. All three pin that exact authority;
+process environment cannot redirect the lease.
+
+There is one bounded legacy bootstrap exception. A literal acquire 404 may
+proceed only for the v0.0.240-to-v0.0.241 transition after stable provider reads
+prove the exact Git-tagged v0.0.240 control plane, the missing legacy managed
+cohort binding, absent canonical inventory and delivery gates, an empty target
+cohort, and a dark v0.0.240 email edge. The independent alias-administration
+gate may remain active; it does not enable delivery. The sole unleased write
+uses `wrangler deploy --containers-rollout none` to install the exact outer
+v0.0.241 Worker without building or updating Containers. The deploy then proves
+the target release and every Durable Object namespace are unchanged, acquires
+the newly installed lease, and performs the full Container deploy and endpoint
+verification under that lease. A current or newer control plane returning 404
+never qualifies. The edge deploy and provider-routing workflows have no
+bootstrap bypass.
+
+Cloudflare exposes no compare-and-swap fence around the first outer-Worker
+upload. Simultaneous supported bootstraps therefore converge by uploading the
+same clean tagged source, generated config, annotations, and outer-only
+arguments; the first successful endpoint then serializes the full deployment.
+This makes the supported first write byte-identical and idempotent, but it
+cannot serialize an unrelated dashboard or API write.
+
+This lease covers the supported Witself tools, not unrelated writes made in the
+Cloudflare dashboard or through another API client. Freeze those external
+changes during every plan/apply window. If an external write may have occurred,
+treat the receipt as suspect, inspect live state, and take the separately
+planned fail-closed disable path before proceeding.
 
 After both tagged Workers are deployed, run
 `npm run verify:route-signing-readiness`. This read-only check follows each
@@ -455,33 +515,45 @@ mutation.
    validates both complete Witself reveal envelopes, proves that the PKCS#8
    Ed25519 private key derives the configured public key, validates the shared
    token, and feeds values only through Wrangler stdin with logs and metrics
-   disabled. It uploads the route private key to the control plane and one
-   exact fallback token to both Workers, then re-inspects both active versions
-   and secret-name inventories before creating a mode-`0600` receipt. It never
-   prints a secret value. A failure during the sequential token updates is safe
-   while all delivery gates remain dark; correct the cause and rerun the same
-   ceremony.
+   disabled. The revealed fallback token authenticates the exact
+   `route_signing_secret_provision` lease directly; it is never inherited by a
+   Wrangler child. After acquiring the lease, the command reacquires every live
+   Worker, dark-gate, empty-cohort, and canonical-origin fence. It renews
+   immediately before and after each bounded secret write, uploads the route
+   private key to the control plane and one exact fallback token to both Workers,
+   then re-inspects both active versions and secret-name inventories and renews
+   again before creating the value-free v2 mode-`0600` receipt. It never prints
+   a secret value. A failure during the sequential token updates is safe while
+   all delivery gates remain dark; correct the cause and rerun the same ceremony.
 
    Secret updates create successor Worker versions without the reviewed release
    annotations. Therefore deploy both Workers from the same unchanged tag only
-   after the ceremony, edge first and then control plane, and run coordinated
+   after the ceremony, control plane first and then edge, and run coordinated
    readiness last:
 
    ```sh
-   npm run deploy
    (
      cd ../control-plane
      npm run deploy
    )
+   npm run deploy
    npm run verify:route-signing-readiness
    ```
 
-   Do not use the older independent `secret:put` commands for this coordinated
-   setup. They cannot prove that the two fallback values match. The ceremony
+   Independent edge secret-put npm commands are intentionally not exposed; npm
+   treats those old names as unknown commands because they cannot prove that the
+   two fallback values match or participate in the global lease. The ceremony
    also requires an existing email-edge Worker with its relay secret already
-   bound. A first-ever Worker bootstrap must instead use a separately reviewed
-   one-shot `--secrets-file` deployment; never create a partial Worker and
-   never place that file in the repository.
+   bound and requires the desired fallback token to already authenticate the
+   live control-plane lease. A first-ever Worker bootstrap must instead use a
+   separately reviewed one-shot `--secrets-file` deployment; never create a
+   partial Worker and never place that file in the repository.
+
+   This ceremony cannot rotate `CONTROL_PLANE_EDGE_TOKEN`: replacing the
+   credential that authenticates acquire, renew, and release would invalidate
+   its own live fence. Token rotation uses only the control-plane package's
+   explicit `secret:put:break-glass` path under a documented global
+   provider-mutation freeze, followed by exact convergence and verification.
 
 3. Enable the matching cell configuration with only the public key, deploy the
    cell, and confirm its startup reconciliation and health checks.
@@ -686,8 +758,19 @@ npm run rollback -- \
 Apply requires an interactive terminal. Cloudflare Worker versions include
 secret state, and Wrangler may warn that the selected version restores older
 secret values. Stop and investigate unexpected differences; the tool never
-auto-accepts that warning. It rechecks the complete plan fence immediately
-before mutation and verifies the chosen version at 100 percent afterward.
+auto-accepts that warning. After checking the submitted plan hash, apply acquires
+the shared operations lease as `email_edge_rollback`, reconstructs and rechecks
+the complete plan fence while holding that lease, and renews immediately before
+the provider write. Lease loss terminates the active Wrangler subprocess. The
+tool renews again around readback, verifies the chosen version at 100 percent,
+proves one final renewal, and releases the exact lease afterward. A lease
+conflict fails before the final provider reads or mutation; rollback has no
+bootstrap bypass. Because this rollback tool targets the production
+`witmail.net` Worker, it pins lease acquisition to
+`https://self.witwave.ai`; inherited `WITSELF_CONTROL_PLANE` and
+`CONTROL_PLANE_URL` values cannot redirect its fencing authority. The lease
+client receives only `CONTROL_PLANE_EDGE_TOKEN` from the operator environment
+and refuses HTTP redirects.
 
 The pre-signing release remains incompatible. v0.0.240 is a narrower exception:
 it already has the signed-route/keyring contract but predates the account cohort

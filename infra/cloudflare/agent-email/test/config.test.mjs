@@ -14,6 +14,12 @@ const routePublicKeys = JSON.stringify({
   "route-2026-08": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 });
 
+test("independent secret-put npm commands are not part of the edge surface", async () => {
+  const packageJSON = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(Object.hasOwn(packageJSON.scripts, "secret:put"), false);
+  assert.equal(Object.hasOwn(packageJSON.scripts, "secret:put:control-plane"), false);
+});
+
 test("dark deployment refuses a persistent custom-domain delivery secret", () => {
   assert.doesNotThrow(() => assertCustomDomainDeliveryDark([
     { name: "CONTROL_PLANE_EDGE_TOKEN", type: "secret_text" },

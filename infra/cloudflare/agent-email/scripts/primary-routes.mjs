@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -9,7 +9,13 @@ import {
   applyPrimaryRoutingPlan,
   createPrimaryRoutingPlan,
   inspectPrimaryCanary,
+  operationsLeaseControlPlaneOrigin,
+  verifyPrimaryRoutingPlan,
 } from "./primary-routing-lib.mjs";
+import { reserveJSONReceipt } from "./receipt-journal.mjs";
+import {
+  withAgentEmailOperationsLease,
+} from "../../control-plane/scripts/agent-email-operations-lease-client.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PLANNED_ACTIONS = new Set(["prepare", "activate", "disable", "remove"]);
@@ -22,7 +28,8 @@ function usage() {
   return `usage:
   node scripts/primary-routes.mjs status MANIFEST
   node scripts/primary-routes.mjs <prepare|activate|disable|remove> MANIFEST --output PLAN
-  node scripts/primary-routes.mjs apply --plan PLAN --plan-sha256 SHA256
+  node scripts/primary-routes.mjs apply --plan PLAN --plan-sha256 SHA256 \\
+    --receipt-output RECEIPT
 
 The four lifecycle commands only create a short-lived, mode-0600 review plan.
 Only apply can mutate exact literal canary rules, and apply requires the exact
@@ -55,12 +62,20 @@ function writeNewJSON(path, value) {
   });
 }
 
+function exactPrivatePath(path, label) {
+  if (typeof path !== "string" || !isAbsolute(path) || resolve(path) !== path) {
+    throw new Error(`${label} must be one canonical absolute path`);
+  }
+  return path;
+}
+
 function wranglerJSON(args, operation) {
   const result = spawnSync("wrangler", args, {
     cwd: root,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: 5 * 1024 * 1024,
+    timeout: 30_000,
   });
   if (result.error || result.status !== 0) {
     throw new Error(`could not ${operation} with Wrangler`);
@@ -90,6 +105,7 @@ function inspectWorker(name, label, inspect) {
 export function primaryRoutingRuntime(env = process.env, {
   fetchAPI = fetch,
   inspect = wranglerJSON,
+  newLeaseHolderID,
 } = {}) {
   const edgeToken = String(env.CONTROL_PLANE_EDGE_TOKEN ?? "");
   const controlPlaneJSON = async (url) => {
@@ -122,8 +138,7 @@ export function primaryRoutingRuntime(env = process.env, {
       throw new Error("control-plane managed email inspection returned invalid JSON");
     }
   };
-  return {
-    inspectWorkers: async () => {
+  const inspectWorkers = async () => {
       const controlPlane = inspectWorker(
         WORKERS.control_plane,
         "control plane",
@@ -136,7 +151,9 @@ export function primaryRoutingRuntime(env = process.env, {
         email_edge_deployment: emailEdge.deployment,
         email_edge_version: emailEdge.version,
       };
-    },
+  };
+  return {
+    inspectWorkers,
     getControlPlaneReadiness: async (origin) => controlPlaneJSON(
       new URL("/v1/email/managed-delivery/readiness", origin),
     ),
@@ -146,6 +163,21 @@ export function primaryRoutingRuntime(env = process.env, {
         origin,
       );
       return controlPlaneJSON(url);
+    },
+    operationsLease: {
+      run: async (operation, work) => {
+        const origin = operationsLeaseControlPlaneOrigin(
+          await inspectWorkers(),
+        );
+        return withAgentEmailOperationsLease(operation, work, {
+          endpoint: origin.replace(/\/$/, ""),
+          token: edgeToken,
+          fetchImpl: fetchAPI,
+          ...(newLeaseHolderID
+            ? { randomUUIDImpl: newLeaseHolderID }
+            : {}),
+        });
+      },
     },
   };
 }
@@ -159,19 +191,21 @@ export function parsePrimaryRouteArgs(argv) {
       mode: "plan",
       action: argv[0],
       manifest: argv[1],
-      output: argv[3],
+      output: exactPrivatePath(argv[3], "primary routing plan output"),
       plan: "",
       planSHA256: "",
     };
   }
-  if (argv[0] === "apply" && argv.length === 5 && argv[1] === "--plan" &&
-      argv[2] && argv[3] === "--plan-sha256" && argv[4]) {
+  if (argv[0] === "apply" && argv.length === 7 && argv[1] === "--plan" &&
+      argv[2] && argv[3] === "--plan-sha256" && argv[4] &&
+      argv[5] === "--receipt-output" && argv[6]) {
     return {
       mode: "apply",
       manifest: "",
       output: "",
-      plan: argv[2],
+      plan: exactPrivatePath(argv[2], "primary routing plan"),
       planSHA256: argv[4],
+      receiptOutput: exactPrivatePath(argv[6], "primary routing receipt output"),
     };
   }
   throw new Error(usage());
@@ -207,7 +241,31 @@ export async function runPrimaryRoutes(options, env = process.env, dependencies 
     };
   }
   const plan = readJSON(options.plan, "primary routing plan");
-  return applyPrimaryRoutingPlan(plan, options.planSHA256, api, runtime);
+  verifyPrimaryRoutingPlan(plan, options.planSHA256);
+  const receiptFile = reserveJSONReceipt(options.receiptOutput, {
+    schema: "witself.agent-email-primary-routing-apply-pending.v1",
+    action: plan.action,
+    plan_sha256: plan.apply_fence?.sha256 ?? "",
+    state: "apply_started_receipt_not_committed",
+  });
+  let receipt;
+  try {
+    receipt = await applyPrimaryRoutingPlan(plan, options.planSHA256, api, runtime);
+    receiptFile.commit(receipt);
+  } catch (error) {
+    receiptFile.close();
+    throw error;
+  }
+  return {
+    schema: "witself.agent-email-primary-routing-apply-result.v1",
+    outcome: "verified",
+    action: receipt.action,
+    plan_sha256: receipt.plan_sha256,
+    receipt_sha256: receipt.receipt_fence.sha256,
+    enabled_rules: receipt.rules.enabled,
+    disabled_rules: receipt.rules.disabled,
+    conflicts: receipt.rules.conflicts,
+  };
 }
 
 async function main() {

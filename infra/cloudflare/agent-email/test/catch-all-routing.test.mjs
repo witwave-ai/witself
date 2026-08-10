@@ -42,9 +42,10 @@ const realmID = "realm_abcdefghijkl2345";
 const realmLabel = "abcdefghijkl2345";
 const cohortAccountID = "acc_abcdefghijkl2345";
 const manifest = {
-  schema_version: 1,
+  schema_version: 2,
   domain: "witmail.net",
   worker_name: "witself-agent-email-pilot",
+  account_ids: [cohortAccountID],
   agents: ["alpha", "bravo", "charlie", "delta", "echo"].map((name, index) => ({
     agent_id: `agent_${"a".repeat(15)}${index + 2}`,
     realm_id: realmID,
@@ -55,6 +56,36 @@ const review = {
   change_id: "email-provider-review-2026-08-15",
   provider_contract_review_sha256: "e".repeat(64),
 };
+
+function leaseRuntime(calls = []) {
+  return {
+    run: async (operation, work) => {
+      calls.push(["leaseAcquire", operation]);
+      assert.equal(operation, "catch_all_routing_apply");
+      const evidence = () => ({
+        schema_version: "witself.agent-email-operations-lease-evidence.v1",
+        generation: 52,
+        operation,
+      });
+      const guard = {
+        signal: new AbortController().signal,
+        fence: { generation: 52, operation },
+        renew: async () => {
+          calls.push(["leaseRenew"]);
+          return evidence();
+        },
+        evidence,
+      };
+      try {
+        const result = await work(guard);
+        await guard.renew();
+        return result;
+      } finally {
+        calls.push(["leaseRelease"]);
+      }
+    },
+  };
+}
 
 function plain(name, text) {
   return { name, text, type: "plain_text" };
@@ -135,7 +166,7 @@ function workerState() {
   };
 }
 
-function runtime() {
+function runtime(leaseCalls) {
   return {
     inspectWorkers: async () => structuredClone(workerState()),
     getControlPlaneReadiness: async () => ({
@@ -153,6 +184,7 @@ function runtime() {
       },
     }),
     getControlPlaneProjection: async () => signedProjection(),
+    operationsLease: leaseRuntime(leaseCalls),
   };
 }
 
@@ -181,6 +213,7 @@ class FakeCloudflare {
     this.rules.push(...manifest.agents.map((agent, index) => ({
       ...desiredPrimaryRule(manifest, agent.address, true, index + 10),
       id: String(index + 10).padStart(32, "0"),
+      source: "api",
     })));
     this.calls = [];
   }
@@ -247,6 +280,7 @@ test("enable requires external review and an exact expiring plan fence", async (
   );
   assert.equal(api.catchAll.enabled, true);
   assert.equal(api.catchAll.actions[0].type, "worker");
+  assert.equal(receipt.operations_lease.generation, 52);
   assert.equal(verifyCatchAllReceipt(receipt).receipt_fence.sha256, receipt.receipt_fence.sha256);
   assert.equal(api.calls.filter(([name]) => name === "replaceCatchAll").length, 1);
   const forgedReceipt = structuredClone(receipt);
@@ -282,6 +316,7 @@ test("disable is independently fenced and its receipt cannot re-enable via rollb
   const unavailable = {
     inspectWorkers: async () => { throw new Error("unavailable"); },
     getControlPlaneProjection: async () => { throw new Error("unavailable"); },
+    operationsLease: leaseRuntime(),
   };
   const plan = await createCatchAllPlan(api, unavailable, manifest, "disable", { now });
   const receipt = await applyCatchAllPlan(plan, plan.apply_fence.sha256, api, unavailable, { now });
@@ -292,6 +327,70 @@ test("disable is independently fenced and its receipt cannot re-enable via rollb
       now,
     }),
     /rollback receipt/,
+  );
+});
+
+test("catch-all apply serializes the final read and provider write with the shared lease", async () => {
+  const api = new FakeCloudflare();
+  api.catchAll = {
+    ...api.catchAll,
+    name: "Witself agent email catch-all",
+    enabled: true,
+    actions: [{ type: "worker", value: ["witself-agent-email-pilot"] }],
+  };
+  const leaseCalls = [];
+  const guarded = runtime(leaseCalls);
+  const plan = await createCatchAllPlan(
+    api,
+    guarded,
+    manifest,
+    "disable",
+    { now },
+  );
+  api.calls = [];
+  await applyCatchAllPlan(
+    plan,
+    plan.apply_fence.sha256,
+    api,
+    guarded,
+    { now },
+  );
+  assert.equal(leaseCalls[0][0], "leaseAcquire");
+  assert.equal(leaseCalls.at(-1)[0], "leaseRelease");
+  assert.equal(leaseCalls.filter(([name]) => name === "leaseRenew").length >= 4, true);
+
+  const refusedAPI = new FakeCloudflare();
+  refusedAPI.catchAll = {
+    ...refusedAPI.catchAll,
+    name: "Witself agent email catch-all",
+    enabled: true,
+    actions: [{ type: "worker", value: ["witself-agent-email-pilot"] }],
+  };
+  const refusedPlan = await createCatchAllPlan(
+    refusedAPI,
+    runtime(),
+    manifest,
+    "disable",
+    { now },
+  );
+  refusedAPI.calls = [];
+  await assert.rejects(
+    () => applyCatchAllPlan(
+      refusedPlan,
+      refusedPlan.apply_fence.sha256,
+      refusedAPI,
+      {
+        operationsLease: {
+          run: async () => { throw new Error("lease held elsewhere"); },
+        },
+      },
+      { now },
+    ),
+    /lease held elsewhere/,
+  );
+  assert.equal(
+    refusedAPI.calls.some(([name]) => name === "replaceCatchAll"),
+    false,
   );
 });
 
@@ -365,6 +464,20 @@ test("catch-all plan tampering and expiry fail closed", async () => {
   );
 });
 
+test("catch-all lifecycle refuses a Wrangler-owned catch-all", async () => {
+  const api = new FakeCloudflare();
+  api.catchAll.source = "wrangler";
+  await assert.rejects(
+    () => inspectCatchAll(api, runtime(), manifest, { now }),
+    /not API-owned/,
+  );
+  await assert.rejects(
+    () => createCatchAllPlan(api, runtime(), manifest, "disable", { now }),
+    /not API-owned/,
+  );
+  assert.equal(api.calls.some(([name]) => name === "replaceCatchAll"), false);
+});
+
 test("catch-all API mutation exists only on the explicit subclass", async () => {
   const calls = [];
   const api = new CatchAllCloudflareAPI({
@@ -391,20 +504,26 @@ test("catch-all API mutation exists only on the explicit subclass", async () => 
 
 test("catch-all CLI keeps planning separate and requires an apply receipt", () => {
   assert.equal(parseCatchAllArgs(["status", "manifest.json"]).mode, "status");
+  const planPath = "/private/tmp/witself-catch-all-plan.json";
+  const receiptPath = "/private/tmp/witself-catch-all-receipt.json";
   assert.equal(parseCatchAllArgs([
     "enable", "manifest.json",
     "--change-id", review.change_id,
     "--provider-review-sha256", review.provider_contract_review_sha256,
-    "--output", "plan.json",
+    "--output", planPath,
   ]).mode, "plan");
   const apply = parseCatchAllArgs([
-    "apply", "--plan", "plan.json", "--plan-sha256", "a".repeat(64),
-    "--receipt-output", "receipt.json", "--confirm-enable-witmail-net",
+    "apply", "--plan", planPath, "--plan-sha256", "a".repeat(64),
+    "--receipt-output", receiptPath, "--confirm-enable-witmail-net",
   ]);
   assert.equal(apply.confirmEnable, true);
   assert.throws(
-    () => parseCatchAllArgs(["apply", "--plan", "plan.json", "--plan-sha256", "a".repeat(64)]),
+    () => parseCatchAllArgs(["apply", "--plan", planPath, "--plan-sha256", "a".repeat(64)]),
     /usage/,
+  );
+  assert.throws(
+    () => parseCatchAllArgs(["disable", "manifest.json", "--output", "plan.json"]),
+    /canonical absolute path/,
   );
 });
 
@@ -437,7 +556,7 @@ test("catch-all apply reserves the protected receipt before any mutation", async
         CLOUDFLARE_ACCOUNT_ID: accountID,
         CLOUDFLARE_ZONE_ID: zoneID,
         EMAIL_DIRECTORY_KV_ID: namespaceID,
-      }, { api, runtime: {} }),
+      }, { api, runtime: { operationsLease: leaseRuntime() } }),
       /EEXIST/,
     );
     assert.equal(api.calls.some(([name]) => name === "replaceCatchAll"), false);
@@ -473,10 +592,10 @@ test("catch-all apply durably replaces its pending journal with a mode-0600 rece
       CLOUDFLARE_ACCOUNT_ID: accountID,
       CLOUDFLARE_ZONE_ID: zoneID,
       EMAIL_DIRECTORY_KV_ID: namespaceID,
-    }, { api, runtime: {} });
+      }, { api, runtime: { operationsLease: leaseRuntime() } });
     const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
     assert.equal(result.receipt_sha256, receipt.receipt_fence.sha256);
-    assert.equal(receipt.schema, "witself.agent-email-catch-all-receipt.v1");
+    assert.equal(receipt.schema, "witself.agent-email-catch-all-receipt.v2");
     assert.equal(statSync(receiptPath).mode & 0o777, 0o600);
     assert.equal(api.catchAll.enabled, false);
   } finally {

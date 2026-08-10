@@ -13,6 +13,15 @@ import {
 import {
   managedDeliveryCohortSummary,
 } from "./agent-email-managed-delivery-cohort.mjs";
+import {
+  AgentEmailOperationsLeaseError,
+  agentEmailOperationsLeaseErrorResponse,
+  agentEmailOperationsLeaseJSON,
+  internalAgentEmailOperationsLeasePath,
+  isAgentEmailOperationsLeasePath,
+  validateAgentEmailOperationsLeaseRequest,
+  validateAgentEmailOperationsLeaseResponse,
+} from "./agent-email-operations-lease.mjs";
 
 const SCHEMA_VERSION = "witself.realm-email-alias.v1";
 const ACCOUNT_ID_PATTERN = "[A-Za-z0-9_-]{1,128}";
@@ -369,6 +378,105 @@ export async function handleManagedDeliveryReadinessRequest(request, env) {
       alias_authority_activation_enabled: realmEmailAliasActivationEnabled(env),
     },
   });
+}
+
+export async function handleAgentEmailOperationsLeaseRequest(
+  request,
+  env,
+  url = new URL(request.url),
+) {
+  if (!isAgentEmailOperationsLeasePath(url.pathname)) {
+    return agentEmailOperationsLeaseErrorResponse(
+      new AgentEmailOperationsLeaseError(
+        "agent email operations lease endpoint not found",
+        404,
+        "agent_email_operations_lease_not_found",
+      ),
+    );
+  }
+  if (request.method !== "POST") {
+    return agentEmailOperationsLeaseErrorResponse(
+      new AgentEmailOperationsLeaseError(
+        "method not allowed",
+        405,
+        "agent_email_operations_lease_method_not_allowed",
+      ),
+    );
+  }
+  if (!edgeAuthorized(request, env)) {
+    return agentEmailOperationsLeaseErrorResponse(
+      new AgentEmailOperationsLeaseError(
+        "unauthorized",
+        401,
+        "agent_email_operations_lease_unauthorized",
+      ),
+    );
+  }
+  try {
+    let rawInput;
+    try {
+      rawInput = await boundedJSON(request);
+    } catch (error) {
+      throw new AgentEmailOperationsLeaseError(
+        error?.status === 413 ? "request body too large" :
+          "agent email operations lease request is invalid",
+        error?.status === 413 ? 413 : 400,
+        error?.status === 413
+          ? "agent_email_operations_lease_request_too_large"
+          : "agent_email_operations_lease_invalid",
+      );
+    }
+    const input = validateAgentEmailOperationsLeaseRequest(
+      url.pathname,
+      rawInput,
+    );
+    const stub = realmEmailAliasRegistryStub(env);
+    if (!stub) {
+      throw new AgentEmailOperationsLeaseError(
+        "agent email operations lease authority is unavailable",
+        503,
+        "agent_email_operations_lease_unavailable",
+      );
+    }
+    let response;
+    try {
+      response = await stub.fetch(
+        `https://realm-email-alias.internal${
+          internalAgentEmailOperationsLeasePath(url.pathname)
+        }`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(rawInput),
+        },
+      );
+    } catch {
+      throw new AgentEmailOperationsLeaseError(
+        "agent email operations lease authority is unavailable",
+        503,
+        "agent_email_operations_lease_unavailable",
+      );
+    }
+    let body;
+    try {
+      body = await response.json();
+    } catch {
+      throw new AgentEmailOperationsLeaseError(
+        "agent email operations lease authority returned an invalid response",
+        503,
+        "agent_email_operations_lease_response_invalid",
+      );
+    }
+    const validated = validateAgentEmailOperationsLeaseResponse(
+      url.pathname,
+      response.status,
+      body,
+      input,
+    );
+    return agentEmailOperationsLeaseJSON(validated, response.status);
+  } catch (error) {
+    return agentEmailOperationsLeaseErrorResponse(error);
+  }
 }
 
 export function isRealmEmailAliasAdminPath(pathname) {

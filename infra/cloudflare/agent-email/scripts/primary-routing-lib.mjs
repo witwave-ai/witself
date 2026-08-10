@@ -13,12 +13,15 @@ import {
   parseManagedDeliveryAccountAllowlist as parseControlPlaneManagedDeliveryAccountAllowlist,
 } from "../../control-plane/src/agent-email-managed-delivery-cohort.mjs";
 import { assertIsolatedEmailDirectory } from "./cloudflare.mjs";
+import {
+  validateAgentEmailOperationsLeaseEvidence,
+} from "../../control-plane/src/agent-email-operations-lease.mjs";
 
 export const PRIMARY_CANARY_DOMAIN = "witmail.net";
 export const PRIMARY_CANARY_WORKER = "witself-agent-email-pilot";
 export const PRIMARY_RULE_PREFIX = "witself-agent-email-primary-canary:";
-export const PRIMARY_PLAN_SCHEMA = "witself.agent-email-primary-routing-plan.v1";
-export const PRIMARY_RECEIPT_SCHEMA = "witself.agent-email-primary-routing-receipt.v1";
+export const PRIMARY_PLAN_SCHEMA = "witself.agent-email-primary-routing-plan.v2";
+export const PRIMARY_RECEIPT_SCHEMA = "witself.agent-email-primary-routing-receipt.v2";
 export const PRIMARY_STATUS_SCHEMA = "witself.agent-email-primary-routing-status.v1";
 
 const PLAN_LIFETIME_MS = 15 * 60 * 1_000;
@@ -28,6 +31,7 @@ const ID = /^[0-9a-f]{32}(?![\s\S])/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?![\s\S])/;
 const SHA256 = /^[0-9a-f]{64}(?![\s\S])/;
 const AGENT_ID = /^agent_[a-z2-7]{16}(?![\s\S])/;
+const ACCOUNT_ID = /^acc_[a-z2-7]{16}(?![\s\S])/;
 const REALM_ID = /^realm_([a-z2-7]{16})(?![\s\S])/;
 const KEY_ID = /^[a-z][a-z0-9_-]{0,63}(?![\s\S])/;
 const PUBLIC_KEY = /^[A-Za-z0-9+/]{43}=(?![\s\S])/;
@@ -35,6 +39,7 @@ const RELEASE_VERSION = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[
 const COMMIT = /^[0-9a-f]{40}(?![\s\S])/;
 const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})(?![\s\S])/;
 const RFC3339_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z(?![\s\S])/;
+const OPERATIONS_LEASE_MINIMUM_RELEASE = "0.0.241";
 
 export function canonicalJSON(value) {
   const canonicalize = (item) => {
@@ -63,12 +68,17 @@ function exactKeys(value, keys, label) {
 export function normalizePrimaryCanaryManifest(input) {
   exactKeys(
     input,
-    ["schema_version", "domain", "worker_name", "agents"],
+    ["schema_version", "domain", "worker_name", "account_ids", "agents"],
     "primary canary manifest",
   );
-  if (input.schema_version !== 1 || input.domain !== PRIMARY_CANARY_DOMAIN ||
+  if (input.schema_version !== 2 || input.domain !== PRIMARY_CANARY_DOMAIN ||
       input.worker_name !== PRIMARY_CANARY_WORKER || !Array.isArray(input.agents) ||
-      input.agents.length < 5 || input.agents.length > 10) {
+      input.agents.length < 5 || input.agents.length > 10 ||
+      !Array.isArray(input.account_ids) || input.account_ids.length < 1 ||
+      input.account_ids.length > 100 ||
+      input.account_ids.some((accountID) => !ACCOUNT_ID.test(String(accountID ?? ""))) ||
+      new Set(input.account_ids).size !== input.account_ids.length ||
+      canonicalJSON(input.account_ids) !== canonicalJSON([...input.account_ids].sort())) {
     throw new Error("primary canary manifest must contain 5-10 witmail.net agents");
   }
   const addresses = new Set();
@@ -101,9 +111,10 @@ export function normalizePrimaryCanaryManifest(input) {
   });
   agents.sort((left, right) => left.address.localeCompare(right.address));
   return Object.freeze({
-    schema_version: 1,
+    schema_version: 2,
     domain: PRIMARY_CANARY_DOMAIN,
     worker_name: PRIMARY_CANARY_WORKER,
+    account_ids: [...input.account_ids],
     agents,
   });
 }
@@ -158,7 +169,9 @@ function indexPrimaryRules(rules, manifest) {
   for (const rule of rules) {
     const address = literalAddress(rule);
     const named = typeof rule?.name === "string" && rule.name.startsWith(PRIMARY_RULE_PREFIX);
-    const exactOwned = named && address && rule.name === primaryRuleName(address) &&
+    const exactOwned = rule?.source === "api" && ID.test(String(rule?.id ?? "")) &&
+      typeof rule?.enabled === "boolean" && named && address &&
+      rule.name === primaryRuleName(address) &&
       desiredWorkerAction(rule, manifest.worker_name);
     if (named && !exactOwned) {
       conflicts.push(rule);
@@ -327,6 +340,75 @@ function releaseIdentity(bindings, label) {
   return result;
 }
 
+function releaseAtLeast(release, minimum) {
+  const parse = (value) => {
+    const match = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z.-]+))?$/.exec(value);
+    if (!match) throw new Error("agent-email operations lease release was invalid");
+    return {
+      numbers: match.slice(1, 4).map(Number),
+      prerelease: match[4] ?? "",
+    };
+  };
+  const left = parse(release);
+  const right = parse(minimum);
+  for (let index = 0; index < left.numbers.length; index += 1) {
+    if (left.numbers[index] !== right.numbers[index]) {
+      return left.numbers[index] > right.numbers[index];
+    }
+  }
+  return right.prerelease !== "" || left.prerelease === "";
+}
+
+// operationsLeaseControlPlaneOrigin proves that the active control plane owns
+// the durable v0.0.241+ lease API and derives its exact origin from the active
+// email edge. This deliberately has narrower requirements than full delivery
+// readiness so emergency disable remains available during a partial rollout.
+export function operationsLeaseControlPlaneOrigin(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("operations lease Worker inspection was invalid");
+  }
+  const controlPlaneID = activeVersionID(
+    raw.control_plane_deployment,
+    "control plane",
+  );
+  const edgeID = activeVersionID(raw.email_edge_deployment, "email edge");
+  const controlBindings = bindingMap(
+    raw.control_plane_version,
+    controlPlaneID,
+    "control plane",
+  );
+  const edgeBindings = bindingMap(
+    raw.email_edge_version,
+    edgeID,
+    "email edge",
+  );
+  const controlRelease = releaseIdentity(controlBindings, "control plane");
+  releaseIdentity(edgeBindings, "email edge");
+  if (!releaseAtLeast(
+    controlRelease.version,
+    OPERATIONS_LEASE_MINIMUM_RELEASE,
+  )) {
+    throw new Error(
+      "agent-email routing mutation requires the v0.0.241 durable operations lease",
+    );
+  }
+  secretBound(controlBindings, "CONTROL_PLANE_EDGE_TOKEN", "control plane");
+  secretBound(edgeBindings, "CONTROL_PLANE_EDGE_TOKEN", "email edge");
+  let origin;
+  try {
+    origin = new URL(plain(edgeBindings, "CONTROL_PLANE_URL", "email edge"));
+  } catch {
+    throw new Error("email edge operations lease origin was invalid");
+  }
+  if (origin.protocol !== "https:" || origin.username || origin.password ||
+      origin.search || origin.hash || !origin.hostname ||
+      origin.hostname === "localhost" ||
+      (origin.pathname !== "/" && origin.pathname !== "")) {
+    throw new Error("email edge operations lease origin was invalid");
+  }
+  return origin.toString();
+}
+
 function keyring(raw, activeKeyID) {
   let parsed;
   try {
@@ -488,6 +570,10 @@ export async function inspectPrimaryReadiness(api, runtime, manifestInput, {
   if (workers.summary.gates.email_edge_alias_delivery_enabled) {
     throw new Error("managed alias delivery must remain disabled during the primary canary");
   }
+  if (canonicalJSON(manifest.account_ids) !==
+      canonicalJSON(workers.private.cohort_accounts)) {
+    throw new Error("private canary manifest did not match the active managed delivery cohort");
+  }
   const controlPlaneReadiness = await runtime.getControlPlaneReadiness(
     workers.private.control_plane_url,
   );
@@ -549,15 +635,16 @@ export async function inspectPrimaryReadiness(api, runtime, manifestInput, {
     });
     projectionAccounts.add(route.account_id);
   }
-  if (canonicalJSON([...projectionAccounts].sort()) !==
-      canonicalJSON([...workers.private.cohort_accounts])) {
-    throw new Error("managed delivery cohort contained an account outside the canary manifest");
+  if ([...projectionAccounts].some((accountID) =>
+    !manifest.account_ids.includes(accountID))) {
+    throw new Error("canary projection contained an account outside the managed delivery cohort");
   }
   return Object.freeze({
     checked_at: checkedAt.toISOString(),
     workers: workers.summary,
     projections,
     projection_count: projections.length,
+    represented_account_count: projectionAccounts.size,
     activation_ready:
       workers.summary.gates.control_plane_canonical_inventory_bound &&
       workers.summary.gates.control_plane_canonical_delivery_bound &&
@@ -565,6 +652,16 @@ export async function inspectPrimaryReadiness(api, runtime, manifestInput, {
       managed.canonical_delivery_enabled &&
       workers.summary.gates.email_edge_canonical_delivery_enabled &&
       !workers.summary.gates.email_edge_alias_delivery_enabled,
+  });
+}
+
+export function summarizePrimaryReadiness(readiness) {
+  return Object.freeze({
+    workers: readiness.workers,
+    projection_count: readiness.projection_count,
+    represented_account_count: readiness.represented_account_count,
+    projection_set_sha256: sha256(canonicalJSON(readiness.projections)),
+    activation_ready: readiness.activation_ready,
   });
 }
 
@@ -588,7 +685,10 @@ function assertFoundation(state) {
 }
 
 function assertActionPreconditions(action, state, readiness) {
-  assertCommonMutationState(state);
+  // Disable is the emergency fail-closed path. An unmanaged or malformed
+  // conflict must never prevent us from turning off the exact rules we own;
+  // the conflict remains visible in the fenced state and receipt.
+  if (action !== "disable") assertCommonMutationState(state);
   if (action === "prepare" || action === "activate") {
     assertFoundation(state);
     if (!readiness || readiness.projection_count < 1) {
@@ -636,6 +736,7 @@ function planBody(api, action, manifest, routing, readiness, createdAt) {
     },
     checks: [
       "target_ids_exact",
+      "shared_durable_operations_lease",
       "catch_all_fingerprint_preserved",
       "operator_role_fingerprint_preserved",
       "managed_rule_ownership_exact",
@@ -732,20 +833,29 @@ function exactPlan(actual, expected) {
   }
 }
 
-async function setOwnedRuleState(api, manifest, enabled) {
+async function leasedMutation(leaseGuard, mutation) {
+  await leaseGuard.renew();
+  const result = await mutation();
+  await leaseGuard.renew();
+  return result;
+}
+
+async function setOwnedRuleState(api, manifest, enabled, leaseGuard) {
   const state = await capturePrimaryRoutingState(api, manifest);
-  assertCommonMutationState(state);
   for (const rule of state.indexed.owned) {
     if (rule.enabled !== enabled) {
-      await api.updateRule(
-        rule.id,
-        desiredPrimaryRule(manifest, literalAddress(rule), enabled, rule.priority),
+      await leasedMutation(
+        leaseGuard,
+        () => api.updateRule(
+          rule.id,
+          desiredPrimaryRule(manifest, literalAddress(rule), enabled, rule.priority),
+        ),
       );
     }
   }
 }
 
-async function activateManifestRules(api, manifest) {
+async function activateManifestRules(api, manifest, leaseGuard) {
   const state = await capturePrimaryRoutingState(api, manifest);
   assertCommonMutationState(state);
   if (state.indexed.stale.length !== 0 ||
@@ -754,16 +864,19 @@ async function activateManifestRules(api, manifest) {
   }
   for (const rule of state.indexed.byAddress.values()) {
     if (rule.enabled !== true) {
-      await api.updateRule(
-        rule.id,
-        desiredPrimaryRule(manifest, literalAddress(rule), true, rule.priority),
+      await leasedMutation(
+        leaseGuard,
+        () => api.updateRule(
+          rule.id,
+          desiredPrimaryRule(manifest, literalAddress(rule), true, rule.priority),
+        ),
       );
     }
   }
 }
 
-async function failClosed(api, manifest) {
-  await setOwnedRuleState(api, manifest, false);
+async function failClosed(api, manifest, leaseGuard) {
+  await setOwnedRuleState(api, manifest, false, leaseGuard);
 }
 
 function guardsEqual(left, right) {
@@ -771,23 +884,39 @@ function guardsEqual(left, right) {
     left.summary.role_routes.sha256 === right.summary.role_routes.sha256;
 }
 
-async function mutatePrimaryRules(api, manifest, action, before) {
+async function mutatePrimaryRules(
+  api,
+  manifest,
+  action,
+  before,
+  leaseGuard,
+) {
   let operationError;
   try {
     if (action === "prepare") {
       for (const agent of manifest.agents) {
         if (!before.indexed.byAddress.has(agent.address)) {
-          await api.createRule(desiredPrimaryRule(manifest, agent.address, false));
+          await leasedMutation(
+            leaseGuard,
+            () => api.createRule(
+              desiredPrimaryRule(manifest, agent.address, false),
+            ),
+          );
         }
       }
     } else if (action === "activate") {
-      await activateManifestRules(api, manifest);
+      await activateManifestRules(api, manifest, leaseGuard);
     } else if (action === "disable") {
-      await failClosed(api, manifest);
+      await failClosed(api, manifest, leaseGuard);
     } else if (action === "remove") {
-      await failClosed(api, manifest);
+      await failClosed(api, manifest, leaseGuard);
       const disabled = await capturePrimaryRoutingState(api, manifest);
-      for (const rule of disabled.indexed.owned) await api.deleteRule(rule.id);
+      for (const rule of disabled.indexed.owned) {
+        await leasedMutation(
+          leaseGuard,
+          () => api.deleteRule(rule.id),
+        );
+      }
     }
   } catch (error) {
     operationError = error;
@@ -796,7 +925,7 @@ async function mutatePrimaryRules(api, manifest, action, before) {
   let rollbackError;
   if (operationError) {
     try {
-      await failClosed(api, manifest);
+      await failClosed(api, manifest, leaseGuard);
     } catch (error) {
       rollbackError = error;
     }
@@ -813,7 +942,7 @@ async function mutatePrimaryRules(api, manifest, action, before) {
   }
   if (guardError && !operationError) {
     try {
-      await failClosed(api, manifest);
+      await failClosed(api, manifest, leaseGuard);
     } catch (error) {
       rollbackError = rollbackError ?? error;
     }
@@ -827,7 +956,7 @@ async function mutatePrimaryRules(api, manifest, action, before) {
 }
 
 function assertPostcondition(action, state) {
-  if (state.indexed.conflicts.length !== 0) {
+  if (action !== "disable" && state.indexed.conflicts.length !== 0) {
     throw new Error("primary routing postcondition found a rule conflict");
   }
   if (action === "prepare" &&
@@ -850,6 +979,14 @@ function assertPostcondition(action, state) {
   }
 }
 
+function ownedRuleEvidence(state) {
+  return state.indexed.owned.map((rule) => Object.freeze({
+    id: String(rule.id ?? ""),
+    enabled: rule.enabled === true,
+    sha256: sha256(canonicalJSON(rule)),
+  })).sort((left, right) => left.id.localeCompare(right.id));
+}
+
 export async function applyPrimaryRoutingPlan(plan, suppliedSHA256, api, runtime, {
   now = () => new Date(),
 } = {}) {
@@ -858,50 +995,83 @@ export async function applyPrimaryRoutingPlan(plan, suppliedSHA256, api, runtime
       api.namespaceID !== plan.target.route_directory_id) {
     throw new Error("primary routing plan targeted another Cloudflare resource");
   }
-  const reviewed = await createPrimaryRoutingPlan(
-    api,
-    runtime,
-    plan.manifest,
-    plan.action,
-    { now, createdAt: plan.created_at },
-  );
-  exactPlan(reviewed, plan);
-  const before = await capturePrimaryRoutingState(api, plan.manifest);
-  if (canonicalJSON(before.summary) !==
-      canonicalJSON(plan.precondition.routing)) {
-    throw new Error("primary routing state changed immediately before mutation");
+  if (!runtime?.operationsLease ||
+      typeof runtime.operationsLease.run !== "function") {
+    throw new Error("primary routing durable operations lease was unavailable");
   }
-  const after = await mutatePrimaryRules(api, plan.manifest, plan.action, before);
-  try {
-    assertPostcondition(plan.action, after);
-  } catch (error) {
-    let recoveryError;
-    try {
-      await failClosed(api, plan.manifest);
-    } catch (recovery) {
-      recoveryError = recovery;
-    }
-    if (recoveryError) {
-      throw new AggregateError(
-        [error, recoveryError],
-        "primary routing postcondition failed and recovery was incomplete",
+  return runtime.operationsLease.run(
+    "primary_routing_apply",
+    async (leaseGuard) => {
+      const reviewed = await createPrimaryRoutingPlan(
+        api,
+        runtime,
+        plan.manifest,
+        plan.action,
+        { now, createdAt: plan.created_at },
       );
-    }
-    throw error;
-  }
-  return Object.freeze({
-    schema: PRIMARY_RECEIPT_SCHEMA,
-    outcome: "verified",
-    action: plan.action,
-    domain: plan.domain,
-    worker: plan.worker,
-    plan_sha256: fence,
-    rules: after.summary.managed_rules,
-    guards: {
-      catch_all_sha256: after.summary.catch_all.sha256,
-      role_routes_sha256: after.summary.role_routes.sha256,
+      exactPlan(reviewed, plan);
+      const before = await capturePrimaryRoutingState(api, plan.manifest);
+      if (canonicalJSON(before.summary) !==
+          canonicalJSON(plan.precondition.routing)) {
+        throw new Error("primary routing state changed immediately before mutation");
+      }
+      await leaseGuard.renew();
+      const after = await mutatePrimaryRules(
+        api,
+        plan.manifest,
+        plan.action,
+        before,
+        leaseGuard,
+      );
+      try {
+        assertPostcondition(plan.action, after);
+      } catch (error) {
+        let recoveryError;
+        try {
+          await failClosed(api, plan.manifest, leaseGuard);
+        } catch (recovery) {
+          recoveryError = recovery;
+        }
+        if (recoveryError) {
+          throw new AggregateError(
+            [error, recoveryError],
+            "primary routing postcondition failed and recovery was incomplete",
+          );
+        }
+        throw error;
+      }
+      await leaseGuard.renew();
+      const leaseEvidence = leaseGuard.evidence();
+      validateAgentEmailOperationsLeaseEvidence(
+        leaseEvidence,
+        "primary_routing_apply",
+      );
+      const body = {
+        schema: PRIMARY_RECEIPT_SCHEMA,
+        outcome: "verified",
+        action: plan.action,
+        domain: plan.domain,
+        worker: plan.worker,
+        plan_sha256: fence,
+        target: plan.target,
+        operations_lease: leaseEvidence,
+        before_rules: ownedRuleEvidence(before),
+        after_rules: ownedRuleEvidence(after),
+        rules: after.summary.managed_rules,
+        guards: {
+          catch_all_sha256: after.summary.catch_all.sha256,
+          role_routes_sha256: after.summary.role_routes.sha256,
+        },
+      };
+      return Object.freeze({
+        ...body,
+        receipt_fence: {
+          algorithm: "sha256",
+          sha256: sha256(canonicalJSON(body)),
+        },
+      });
     },
-  });
+  );
 }
 
 export async function inspectPrimaryCanary(api, runtime, manifestInput, {
@@ -921,7 +1091,7 @@ export async function inspectPrimaryCanary(api, runtime, manifestInput, {
     worker: routing.manifest.worker_name,
     addresses: routing.manifest.agents.length,
     routing: routing.summary,
-    readiness,
+    readiness: summarizePrimaryReadiness(readiness),
     ready_for_prepare: clean && foundation &&
       [...routing.indexed.byAddress.values()].every((rule) => rule.enabled === false),
     ready_for_activate: clean && foundation && readiness.activation_ready &&

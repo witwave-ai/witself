@@ -129,20 +129,21 @@ npm run deploy:plans
 # dirty checkout or an untagged HEAD.
 npm run config
 
-# Configure all prerequisites while the lifecycle gate remains false. Each
-# command reads the value from stdin; never put a credential on the command line.
+# Configure all prerequisites while the lifecycle gate remains false. This is
+# the explicit break-glass path described below. Each command reads the value
+# from stdin; never put a credential on the command line.
 printf '%s' "$INTERNAL_BRIDGE_TOKEN" |
-  npm run secret:put -- INTERNAL_BRIDGE_TOKEN
+  npm run secret:put:break-glass -- INTERNAL_BRIDGE_TOKEN
 printf '%s' "$CP_R2_ENDPOINT" |
-  npm run secret:put -- CP_R2_ENDPOINT
+  npm run secret:put:break-glass -- CP_R2_ENDPOINT
 printf '%s' "$CP_R2_BUCKET" |
-  npm run secret:put -- CP_R2_BUCKET
+  npm run secret:put:break-glass -- CP_R2_BUCKET
 printf '%s' "$CP_R2_ACCESS_KEY" |
-  npm run secret:put -- CP_R2_ACCESS_KEY
+  npm run secret:put:break-glass -- CP_R2_ACCESS_KEY
 printf '%s' "$CP_R2_SECRET_KEY" |
-  npm run secret:put -- CP_R2_SECRET_KEY
+  npm run secret:put:break-glass -- CP_R2_SECRET_KEY
 printf '%s' false |
-  npm run secret:put -- CP_PLAN_LIFECYCLE_ENABLED
+  npm run secret:put:break-glass -- CP_PLAN_LIFECYCLE_ENABLED
 
 # This builds VERSION/COMMIT/DATE into the Go container and refuses success
 # unless the deployed /v1/version reports that exact identity.
@@ -157,7 +158,7 @@ activate lifecycle as its own Worker deployment, with the gate written last:
 
 ```sh
 printf '%s' true |
-  npm run secret:put -- CP_PLAN_LIFECYCLE_ENABLED
+  npm run secret:put:break-glass -- CP_PLAN_LIFECYCLE_ENABLED
 # The activation command reads the private credential from the environment,
 # never argv. It force-replaces the singleton Go process with the fresh Worker
 # secret projection and succeeds only after the private lifecycle status route
@@ -167,6 +168,17 @@ npm run activate:plan-lifecycle
 unset INTERNAL_BRIDGE_TOKEN
 npm run verify
 ```
+
+`secret:put:break-glass` is a manual external provider mutation, not a routine
+lease-aware deployment command. Before its first provider read or write, freeze
+control-plane deploys, email-edge deploys and rollbacks, coordinated route-secret
+provisioning, primary/catch-all routing applies, and every Cloudflare dashboard
+or direct-API Worker mutation. Hold that global freeze through the final tagged
+redeploy and verification. This exception is necessary for
+`CONTROL_PLANE_EDGE_TOKEN` rotation: the token authenticates lease acquire,
+renew, and release, so changing it while holding its own lease would make the
+remaining renew/release requests unauthenticated and invalidate the fence. Do
+not describe the break-glass command as serialized by the operations lease.
 
 Changing a Worker secret does not update the environment of an already-running
 container. Do not omit `activate:plan-lifecycle`: it calls the

@@ -30,15 +30,47 @@ const namespaceID = "c".repeat(32);
 const realmID = "realm_abcdefghijkl2345";
 const realmLabel = "abcdefghijkl2345";
 const cohortAccountID = "acc_abcdefghijkl2345";
+const secondCohortAccountID = "acc_bcdefghijklm2345";
 const controlPlaneDeploymentID = "11111111-2222-4333-8444-555555555555";
 const controlPlaneVersionID = "66666666-7777-4888-8999-aaaaaaaaaaaa";
 const edgeDeploymentID = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
 const edgeVersionID = "01234567-89ab-4cde-8f01-23456789abcd";
 
+function leaseRuntime(calls = []) {
+  return {
+    run: async (operation, work) => {
+      calls.push(["leaseAcquire", operation]);
+      assert.equal(operation, "primary_routing_apply");
+      const evidence = () => ({
+        schema_version: "witself.agent-email-operations-lease-evidence.v1",
+        generation: 41,
+        operation,
+      });
+      const guard = {
+        signal: new AbortController().signal,
+        fence: { generation: 41, operation },
+        renew: async () => {
+          calls.push(["leaseRenew"]);
+          return evidence();
+        },
+        evidence,
+      };
+      try {
+        const result = await work(guard);
+        await guard.renew();
+        return result;
+      } finally {
+        calls.push(["leaseRelease"]);
+      }
+    },
+  };
+}
+
 const manifest = Object.freeze({
-  schema_version: 1,
+  schema_version: 2,
   domain: "witmail.net",
   worker_name: "witself-agent-email-pilot",
+  account_ids: Object.freeze([cohortAccountID]),
   agents: Object.freeze([
     ["aaaaaaaaaaaaaaa2", "alpha"],
     ["aaaaaaaaaaaaaaa3", "bravo"],
@@ -68,7 +100,12 @@ function deployment(id, versionID) {
   };
 }
 
-function workerFixtures({ canonical = false, alias = false, controlGates = true } = {}) {
+function workerFixtures({
+  canonical = false,
+  alias = false,
+  controlGates = true,
+  cohort = cohortAccountID,
+} = {}) {
   const releaseBindings = [
     plain("WITSELF_EDGE_RELEASE_VERSION", "1.2.3"),
     plain("WITSELF_EDGE_RELEASE_COMMIT", "d".repeat(40)),
@@ -77,7 +114,7 @@ function workerFixtures({ canonical = false, alias = false, controlGates = true 
   const controlBindings = [
     ...releaseBindings,
     plain("AGENT_EMAIL_ROUTE_SIGNING_KEY_ID", ROUTE_SIGNING_KEY_ID),
-    plain("CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", cohortAccountID),
+    plain("CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", cohort),
     { name: "AGENT_EMAIL_DIRECTORY", namespace_id: namespaceID, type: "kv_namespace" },
     secret("AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY"),
     secret("CONTROL_PLANE_EDGE_TOKEN"),
@@ -89,7 +126,7 @@ function workerFixtures({ canonical = false, alias = false, controlGates = true 
   const edgeBindings = [
     ...releaseBindings,
     plain("AGENT_EMAIL_DOMAIN", "witmail.net"),
-    plain("AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", cohortAccountID),
+    plain("AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", cohort),
     plain("AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS", ROUTE_PUBLIC_KEY_ENV),
     plain("CONTROL_PLANE_URL", "https://control.example/"),
     { name: "EMAIL_DIRECTORY", namespace_id: namespaceID, type: "kv_namespace" },
@@ -184,6 +221,7 @@ class FakeCloudflare {
       ...structuredClone(rule),
       id: String(this.nextID++).padStart(32, "0"),
       priority: this.nextID,
+      source: "api",
     };
     this.rules.push(created);
     return structuredClone(created);
@@ -192,7 +230,7 @@ class FakeCloudflare {
     this.calls.push(["updateRule", id, rule.enabled]);
     const index = this.rules.findIndex((item) => item.id === id);
     assert.notEqual(index, -1);
-    this.rules[index] = { ...structuredClone(rule), id };
+    this.rules[index] = { ...structuredClone(rule), id, source: "api" };
     return structuredClone(this.rules[index]);
   }
   async deleteRule(id) {
@@ -203,6 +241,8 @@ class FakeCloudflare {
 
 function runtime(options = {}) {
   const workers = workerFixtures(options);
+  const cohort = options.cohort ?? cohortAccountID;
+  const cohortAccounts = cohort.split(",");
   return {
     inspectWorkers: async () => structuredClone(workers),
     getControlPlaneReadiness: async () => ({
@@ -210,8 +250,8 @@ function runtime(options = {}) {
       managed_delivery: {
         cohort: {
           schema: "witself.agent-email-managed-delivery-cohort.v1",
-          account_count: 1,
-          allowlist_sha256: sha256(cohortAccountID),
+          account_count: cohortAccounts.length,
+          allowlist_sha256: sha256(cohort),
           empty: false,
         },
         canonical_inventory_enabled: true,
@@ -220,6 +260,7 @@ function runtime(options = {}) {
       },
     }),
     getControlPlaneProjection: async () => signedProjection(),
+    operationsLease: leaseRuntime(options.leaseCalls),
   };
 }
 
@@ -252,8 +293,32 @@ test("status proves signed primary projection and returns no route destinations"
   assert.equal(status.routing.role_routes.ready, true);
   const serialized = JSON.stringify(status);
   assert.doesNotMatch(serialized, /operator@example|cell\.example|route_signature/);
+  assert.doesNotMatch(serialized, new RegExp(realmID));
+  assert.doesNotMatch(serialized, new RegExp(realmLabel));
+  assert.doesNotMatch(serialized, /2026-08-15T11:59:30Z/);
   assert.equal(api.calls.some(([name]) => name === "putKV"), false);
   assert.equal(api.calls.some(([name]) => name === "updateCatchAll"), false);
+});
+
+test("multi-account cohort readiness does not require one canary address per account", async () => {
+  const cohort = `${cohortAccountID},${secondCohortAccountID}`;
+  const multiAccountManifest = {
+    ...structuredClone(manifest),
+    account_ids: [cohortAccountID, secondCohortAccountID],
+  };
+  const status = await inspectPrimaryCanary(
+    new FakeCloudflare(),
+    runtime({ cohort, canonical: true }),
+    multiAccountManifest,
+    { now },
+  );
+  assert.equal(status.readiness.workers.managed_delivery_cohort.account_count, 2);
+  assert.equal(status.readiness.projection_count, 1);
+  assert.equal(status.readiness.represented_account_count, 1);
+  assert.equal(status.readiness.activation_ready, true);
+  const serialized = JSON.stringify(status);
+  assert.doesNotMatch(serialized, new RegExp(cohortAccountID));
+  assert.doesNotMatch(serialized, new RegExp(secondCohortAccountID));
 });
 
 test("status is not prepare-ready without both operator role routes", async () => {
@@ -279,6 +344,8 @@ test("prepare is a short-lived fenced rule-only operation", async () => {
     { now: () => new Date(NOW.valueOf() + 60_000) },
   );
   assert.equal(receipt.outcome, "verified");
+  assert.equal(receipt.operations_lease.generation, 41);
+  assert.equal(receipt.operations_lease.operation, "primary_routing_apply");
   const canary = api.rules.filter((rule) => rule.name.startsWith("witself-agent-email-primary-canary:"));
   assert.equal(canary.length, 5);
   assert.equal(canary.every((rule) => rule.enabled === false), true);
@@ -309,6 +376,36 @@ test("activation requires all three canonical gates and fails closed on a partia
   );
   const canary = api.rules.filter((rule) => rule.name.startsWith("witself-agent-email-primary-canary:"));
   assert.equal(canary.every((rule) => rule.enabled === false), true);
+});
+
+test("activation recovery disables exact-owned rules despite a racing unmanaged conflict", async () => {
+  const api = new FakeCloudflare();
+  const prepare = await createPrimaryRoutingPlan(api, runtime(), manifest, "prepare", { now });
+  await applyPrimaryRoutingPlan(prepare, prepare.apply_fence.sha256, api, runtime(), { now });
+  const activeRuntime = runtime({ canonical: true });
+  const activation = await createPrimaryRoutingPlan(api, activeRuntime, manifest, "activate", { now });
+  const update = api.updateRule.bind(api);
+  let enabled = 0;
+  api.updateRule = async (id, rule) => {
+    const result = await update(id, rule);
+    if (rule.enabled === true && ++enabled === 1) {
+      api.rules.push({
+        id: "7".repeat(32),
+        name: "racing unmanaged conflict",
+        enabled: true,
+        matchers: [{ type: "literal", field: "to", value: manifest.agents[0].address }],
+        actions: [{ type: "forward", value: ["operator@example.com"] }],
+      });
+    }
+    return result;
+  };
+  await assert.rejects(
+    () => applyPrimaryRoutingPlan(activation, activation.apply_fence.sha256, api, activeRuntime, { now }),
+    /rule conflict/,
+  );
+  const owned = api.rules.filter((rule) => rule.name.startsWith("witself-agent-email-primary-canary:"));
+  assert.equal(owned.every((rule) => rule.enabled === false), true);
+  assert.equal(api.rules.find((rule) => rule.id === "7".repeat(32)).enabled, true);
 });
 
 test("stale plans and guard drift refuse mutation", async () => {
@@ -357,6 +454,7 @@ test("disable and remove do not depend on projection or gate readiness", async (
   const unavailable = {
     inspectWorkers: async () => { throw new Error("unavailable"); },
     getControlPlaneProjection: async () => { throw new Error("unavailable"); },
+    operationsLease: leaseRuntime(),
   };
   const disable = await createPrimaryRoutingPlan(api, unavailable, manifest, "disable", { now });
   await applyPrimaryRoutingPlan(disable, disable.apply_fence.sha256, api, unavailable, { now });
@@ -369,6 +467,88 @@ test("disable and remove do not depend on projection or gate readiness", async (
   await applyPrimaryRoutingPlan(remove, remove.apply_fence.sha256, api, unavailable, { now });
   assert.equal(
     api.rules.some((rule) => rule.name.startsWith("witself-agent-email-primary-canary:")),
+    false,
+  );
+});
+
+test("emergency disable preserves and reports an existing unmanaged conflict", async () => {
+  const api = new FakeCloudflare();
+  const prepare = await createPrimaryRoutingPlan(api, runtime(), manifest, "prepare", { now });
+  await applyPrimaryRoutingPlan(prepare, prepare.apply_fence.sha256, api, runtime(), { now });
+  api.rules.push({
+    id: "7".repeat(32),
+    name: "unmanaged conflict",
+    enabled: true,
+    matchers: [{ type: "literal", field: "to", value: manifest.agents[0].address }],
+    actions: [{ type: "forward", value: ["operator@example.com"] }],
+  });
+  const emergencyRuntime = { operationsLease: leaseRuntime() };
+  const disable = await createPrimaryRoutingPlan(
+    api,
+    emergencyRuntime,
+    manifest,
+    "disable",
+    { now },
+  );
+  const receipt = await applyPrimaryRoutingPlan(
+    disable, disable.apply_fence.sha256, api, emergencyRuntime, { now },
+  );
+  const owned = api.rules.filter((rule) => rule.name.startsWith("witself-agent-email-primary-canary:"));
+  assert.equal(owned.every((rule) => rule.enabled === false), true);
+  assert.equal(api.rules.find((rule) => rule.id === "7".repeat(32)).enabled, true);
+  assert.equal(receipt.rules.conflicts, 1);
+});
+
+test("primary apply acquires the shared lease before its final read and always releases it", async () => {
+  const api = new FakeCloudflare();
+  const leaseCalls = [];
+  const guarded = runtime({ leaseCalls });
+  const plan = await createPrimaryRoutingPlan(
+    api,
+    guarded,
+    manifest,
+    "prepare",
+    { now },
+  );
+  api.calls = [];
+  await applyPrimaryRoutingPlan(
+    plan,
+    plan.apply_fence.sha256,
+    api,
+    guarded,
+    { now },
+  );
+  assert.equal(leaseCalls[0][0], "leaseAcquire");
+  assert.equal(leaseCalls.at(-1)[0], "leaseRelease");
+  assert.equal(leaseCalls.filter(([name]) => name === "leaseRenew").length > 5, true);
+
+  const refusedAPI = new FakeCloudflare();
+  const refusedPlan = await createPrimaryRoutingPlan(
+    refusedAPI,
+    runtime(),
+    manifest,
+    "prepare",
+    { now },
+  );
+  refusedAPI.calls = [];
+  await assert.rejects(
+    () => applyPrimaryRoutingPlan(
+      refusedPlan,
+      refusedPlan.apply_fence.sha256,
+      refusedAPI,
+      {
+        operationsLease: {
+          run: async () => { throw new Error("lease held elsewhere"); },
+        },
+      },
+      { now },
+    ),
+    /lease held elsewhere/,
+  );
+  assert.equal(
+    refusedAPI.calls.some(([name]) => [
+      "createRule", "updateRule", "deleteRule",
+    ].includes(name)),
     false,
   );
 });
@@ -399,19 +579,45 @@ test("primary lifecycle refuses stale managed and same-address unmanaged rules",
   }
 });
 
+test("primary lifecycle never adopts a Wrangler-owned lookalike rule", async () => {
+  const api = new FakeCloudflare();
+  const prepare = await createPrimaryRoutingPlan(api, runtime(), manifest, "prepare", { now });
+  await applyPrimaryRoutingPlan(prepare, prepare.apply_fence.sha256, api, runtime(), { now });
+  const lookalike = api.rules.find((rule) => rule.name.startsWith(
+    "witself-agent-email-primary-canary:",
+  ));
+  lookalike.source = "wrangler";
+  const status = await inspectPrimaryCanary(api, runtime(), manifest, { now });
+  assert.equal(status.routing.managed_rules.conflicts, 1);
+  assert.equal(status.ready_for_prepare, false);
+  assert.equal(status.ready_for_activate, false);
+  await assert.rejects(
+    () => createPrimaryRoutingPlan(api, runtime({ canonical: true }), manifest, "activate", { now }),
+    /rule conflict/,
+  );
+});
+
 test("primary CLI exposes plan generation separately from apply", () => {
+  const planPath = "/private/tmp/witself-primary-plan.json";
+  const receiptPath = "/private/tmp/witself-primary-receipt.json";
   assert.deepEqual(parsePrimaryRouteArgs(["status", "manifest.json"]), {
     mode: "status", manifest: "manifest.json", output: "", plan: "", planSHA256: "",
   });
   assert.equal(
-    parsePrimaryRouteArgs(["activate", "manifest.json", "--output", "plan.json"]).mode,
+    parsePrimaryRouteArgs(["activate", "manifest.json", "--output", planPath]).mode,
     "plan",
   );
-  assert.equal(
-    parsePrimaryRouteArgs(["apply", "--plan", "plan.json", "--plan-sha256", "a".repeat(64)]).mode,
-    "apply",
-  );
+  const apply = parsePrimaryRouteArgs([
+    "apply", "--plan", planPath, "--plan-sha256", "a".repeat(64),
+    "--receipt-output", receiptPath,
+  ]);
+  assert.equal(apply.mode, "apply");
+  assert.equal(apply.receiptOutput, receiptPath);
   assert.throws(() => parsePrimaryRouteArgs(["activate", "manifest.json"]), /usage/);
+  assert.throws(
+    () => parsePrimaryRouteArgs(["activate", "manifest.json", "--output", "plan.json"]),
+    /canonical absolute path/,
+  );
 });
 
 test("primary runtime inspects exact active Workers and authenticated control-plane routes", async () => {
@@ -458,6 +664,96 @@ test("primary runtime inspects exact active Workers and authenticated control-pl
   ]);
   assert.equal(
     requests.every(({ headers }) => headers.Authorization === `Bearer ${"x".repeat(32)}`),
+    true,
+  );
+});
+
+test("primary runtime binds route mutations to the active control-plane lease authority", async () => {
+  const inspections = [];
+  const requests = [];
+  const workers = workerFixtures();
+  const inspect = (args) => {
+    inspections.push(args);
+    const name = args[args.indexOf("--name") + 1];
+    const deployment = args[0] === "deployments";
+    if (name === "witself-control-plane") {
+      return structuredClone(deployment
+        ? workers.control_plane_deployment
+        : workers.control_plane_version);
+    }
+    return structuredClone(deployment
+      ? workers.email_edge_deployment
+      : workers.email_edge_version);
+  };
+  let renewals = 0;
+  const runtimeClient = primaryRoutingRuntime({
+    CONTROL_PLANE_EDGE_TOKEN: "x".repeat(32),
+  }, {
+    inspect,
+    newLeaseHolderID: () => "11111111-2222-4333-8444-555555555555",
+    fetchAPI: async (url, init) => {
+      requests.push({ url: String(url), ...init });
+      const body = JSON.parse(init.body);
+      if (String(url).endsWith(":acquire")) {
+        return Response.json({
+          schema_version: "witself.agent-email-operations-lease.v1",
+          lease: {
+            state: "active",
+            generation: 13,
+            holder_id: body.holder_id,
+            operation: body.operation,
+            acquired_at: "2026-08-15T12:00:00.000Z",
+            expires_at: "2026-08-15T12:05:00.000Z",
+          },
+        }, { status: 201, headers: { "Cache-Control": "private, no-store" } });
+      }
+      if (String(url).endsWith(":renew")) {
+        renewals += 1;
+        return Response.json({
+          schema_version: "witself.agent-email-operations-lease.v1",
+          lease: {
+            state: "active",
+            generation: 13,
+            holder_id: body.holder_id,
+            operation: "primary_routing_apply",
+            acquired_at: "2026-08-15T12:00:00.000Z",
+            expires_at: new Date(
+              Date.parse("2026-08-15T12:05:00.000Z") + renewals * 60_000,
+            ).toISOString(),
+          },
+        }, { headers: { "Cache-Control": "private, no-store" } });
+      }
+      return Response.json({
+        schema_version: "witself.agent-email-operations-lease.v1",
+        lease: {
+          state: "released",
+          generation: 13,
+          operation: "primary_routing_apply",
+          released_at: "2026-08-15T12:01:00.000Z",
+          already_released: false,
+        },
+      }, { headers: { "Cache-Control": "private, no-store" } });
+    },
+  });
+
+  const evidence = await runtimeClient.operationsLease.run(
+    "primary_routing_apply",
+    async ({ renew, evidence: currentEvidence }) => {
+      await renew();
+      return currentEvidence();
+    },
+  );
+  assert.equal(evidence.generation, 13);
+  assert.equal(inspections.length, 4);
+  assert.deepEqual(requests.map(({ url }) => url), [
+    "https://control.example/v1/email/operations-lease:acquire",
+    "https://control.example/v1/email/operations-lease:renew",
+    "https://control.example/v1/email/operations-lease:renew",
+    "https://control.example/v1/email/operations-lease:release",
+  ]);
+  assert.equal(
+    requests.every(({ headers }) =>
+      headers.Authorization === `Bearer ${"x".repeat(32)}`),
     true,
   );
 });
