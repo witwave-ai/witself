@@ -56,6 +56,13 @@ For DNS, keep the stable names here:
 - `platform.externalSecrets` points ESO at the cell secret store. AWS uses EKS
   Pod Identity with no auth block in the store, GCP uses a GSA annotation, and
   Azure uses AKS Workload Identity plus a Key Vault `ClusterSecretStore`.
+- `apps.witselfServer.agentEmail.receiveProduction` uses
+  `accountIDsExistingSecret` in managed cells. Store its canonical account CSV
+  outside Git and provision an immutable, versioned Secret in the server
+  namespace before enabling the gate; do not place account IDs in the cell
+  values file. Rotate by creating a new Secret and changing the reference name,
+  which rolls the API pods; in-place mutation is unsupported. Keep the retry
+  canary empty until a Secret-backed form exists.
 
 `witself-infra` still owns the durable cloud side: Route 53, Cloud DNS, or Azure
 DNS zone creation, Cloudflare parent-zone delegation, certificate/static-IP or

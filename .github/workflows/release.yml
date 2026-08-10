@@ -89,7 +89,10 @@ jobs:
         run: go build ./...
 
       - name: test
-        run: go test ./... -race -timeout=20m
+        # The PostgreSQL integration suite deliberately serializes schema
+        # migrations behind one advisory lock. Keep the same bounded margin as
+        # ordinary CI for the hosted-runner lock queue.
+        run: go test ./... -race -timeout=30m
 
       - name: golangci-lint
         run: |
@@ -131,6 +134,9 @@ jobs:
 
       - name: rollout rendering checks
         run: bash scripts/test-helm-rollout.sh
+
+      - name: agent-email isolated cell operation checks
+        run: bash scripts/test-agent-email-cell-operation.sh
 
       - name: helm template + kubeconform
         run: |

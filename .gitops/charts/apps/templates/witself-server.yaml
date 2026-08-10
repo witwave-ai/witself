@@ -6,8 +6,25 @@
 {{- $targetName := default "witself-db" $db.targetName -}}
 {{- $emailPilot := .Values.apps.witselfServer.agentEmail.receivePilot -}}
 {{- $emailProduction := .Values.apps.witselfServer.agentEmail.receiveProduction -}}
+{{- $emailProductionAccountSecret := $emailProduction.accountIDsExistingSecret -}}
+{{- $emailProductionHasLiteralAccounts := gt (len $emailProduction.accountIDs) 0 -}}
+{{- $emailProductionHasSecretAccounts := ne $emailProductionAccountSecret.name "" -}}
 {{- if and $emailPilot.enabled $emailProduction.enabled -}}
 {{- fail "apps.witselfServer agent-email pilot and production receive cannot both be enabled" -}}
+{{- end -}}
+{{- if $emailProductionHasLiteralAccounts -}}
+{{- fail "apps.witselfServer.agentEmail.receiveProduction.accountIDs must remain empty; managed cells require accountIDsExistingSecret" -}}
+{{- end -}}
+{{- if $emailProductionHasSecretAccounts -}}
+{{- if or (gt (len $emailProductionAccountSecret.name) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $emailProductionAccountSecret.name)) -}}
+{{- fail "apps.witselfServer.agentEmail.receiveProduction.accountIDsExistingSecret.name must be a valid Kubernetes Secret name" -}}
+{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9._-]+$" $emailProductionAccountSecret.key) -}}
+{{- fail "apps.witselfServer.agentEmail.receiveProduction.accountIDsExistingSecret.key must be a valid Kubernetes Secret data key" -}}
+{{- end -}}
+{{- if $emailProduction.retryCanaryAgentID -}}
+{{- fail "apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentID must be empty with accountIDsExistingSecret" -}}
+{{- end -}}
 {{- end -}}
 {{- if $emailPilot.enabled -}}
 {{- $agentCount := len $emailPilot.agentIDs -}}
@@ -53,12 +70,8 @@
 {{- $_ := required "apps.witselfServer.agentEmail.receiveProduction.audience is required when enabled" $emailProduction.audience -}}
 {{- $_ := required "apps.witselfServer.agentEmail.receiveProduction.relayPublicKeysJSON is required when enabled" $emailProduction.relayPublicKeysJSON -}}
 {{- $_ := required "apps.witselfServer.agentEmail.receiveProduction.relayReplayWindow is required when enabled" $emailProduction.relayReplayWindow -}}
-{{- $accountCount := len $emailProduction.accountIDs -}}
-{{- if or (lt $accountCount 1) (gt $accountCount 100) -}}
-{{- fail "apps.witselfServer.agentEmail.receiveProduction.accountIDs must contain 1-100 account IDs when enabled" -}}
-{{- end -}}
-{{- if ne (join "," $emailProduction.accountIDs) (join "," (sortAlpha $emailProduction.accountIDs)) -}}
-{{- fail "apps.witselfServer.agentEmail.receiveProduction.accountIDs must be in canonical sorted order" -}}
+{{- if not $emailProductionHasSecretAccounts -}}
+{{- fail "apps.witselfServer.agentEmail.receiveProduction requires accountIDsExistingSecret.name when enabled" -}}
 {{- end -}}
 {{- if gt (len $emailProduction.acceptedLegacyDomains) 1 -}}
 {{- fail "apps.witselfServer.agentEmail.receiveProduction.acceptedLegacyDomains may contain at most 1 domain" -}}

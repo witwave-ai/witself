@@ -62,8 +62,11 @@ func run(args []string) int {
 			args[2] == "--output" && args[3] != "" {
 			return runAgentEmailProductionCanaryManifest(args[3])
 		}
+		if len(args) >= 3 && args[1] == "artifact-helper" {
+			return runAgentEmailArtifactHelper(args[2:])
+		}
 		fmt.Fprintln(os.Stderr,
-			"witself-server: agent-email requires backfill --exception-output ABSOLUTE_PATH [--overrides ABSOLUTE_PATH] or canary-manifest --output ABSOLUTE_PATH")
+			"witself-server: invalid agent-email command")
 		usage(os.Stderr)
 		return 2
 	default:

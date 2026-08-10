@@ -18,6 +18,7 @@ spec:
     metadata:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        witself.io/server-config-checksum: {{ include "witself-server.serverConfigChecksum" . | quote }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -55,8 +56,15 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "witself-server.fullname" . }}
-          {{- if or .Values.database.existingSecret.name .Values.bootstrap.existingSecret.name .Values.provision.existingSecret.name .Values.backup.existingSecret.name }}
+          {{- if or .Values.database.existingSecret.name .Values.bootstrap.existingSecret.name .Values.provision.existingSecret.name .Values.backup.existingSecret.name (and .Values.agentEmail.receiveProduction.enabled .Values.agentEmail.receiveProduction.accountIDsExistingSecret.name) }}
           env:
+          {{- if and .Values.agentEmail.receiveProduction.enabled .Values.agentEmail.receiveProduction.accountIDsExistingSecret.name }}
+            - name: WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.agentEmail.receiveProduction.accountIDsExistingSecret.name | quote }}
+                  key: {{ .Values.agentEmail.receiveProduction.accountIDsExistingSecret.key | quote }}
+          {{- end }}
           {{- if .Values.bootstrap.existingSecret.name }}
             - name: WITSELF_BOOTSTRAP_TOKEN_FILE
               value: {{ .Values.bootstrap.tokenFile | quote }}

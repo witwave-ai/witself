@@ -1,5 +1,6 @@
-# Non-secret app-of-apps fixture proving the exact production cohort reaches
-# only a v0.0.241-or-newer child chart and image. Live cell values remain dark.
+# App-of-apps fixture proving a private production cohort Secret reference
+# reaches only a v0.0.241-or-newer child chart and image. The Secret's account
+# IDs never enter Git, the rendered Application values, or the child ConfigMap.
 apps:
   witselfServer:
     chartVersion: 0.0.241
@@ -11,9 +12,9 @@ apps:
         acceptedLegacyDomains:
           - agent-mail.witwave.ai
         audience: civo-sandbox-usw2-dev
-        accountIDs:
-          - acc_aaaaaaaaaaaaaaaa
-          - acc_bbbbbbbbbbbbbbbb
-        retryCanaryAgentID: agent_aaaaaaaaaaaaaaaa
+        accountIDsExistingSecret:
+          name: witself-agent-email-receive-cohort-v1
+          key: account_ids
+        retryCanaryAgentID: ""
         relayPublicKeysJSON: '{"route-2026-08":"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="}'
         relayReplayWindow: 5m

@@ -89,3 +89,24 @@ app.kubernetes.io/part-of: witself
 {{- $tag := .Values.image.tag | default .Chart.AppVersion -}}
 {{- printf "%s:%s" .Values.image.repository $tag -}}
 {{- end -}}
+
+{{/*
+One shared digest binds the non-secret server ConfigMap to the pod template
+that consumes it. Include Secret references, never Secret values, so a
+versioned database or receive-cohort Secret change also rolls the pod and can
+be fenced by imperative one-shot operations.
+*/}}
+{{- define "witself-server.serverConfigChecksum" -}}
+{{- dict
+  "backend" .Values.backend
+  "cell" .Values.cell
+  "backupValidation" .Values.backup.validation
+  "features" .Values.features
+  "agentEmail" .Values.agentEmail
+  "avatar" .Values.avatar
+  "server" .Values.server
+  "health" .Values.health
+  "metrics" .Values.metrics
+  "databaseSecret" .Values.database.existingSecret
+  | toJson | sha256sum -}}
+{{- end -}}

@@ -304,6 +304,8 @@ test("provisions verified values only after complete dark preflight and both rev
   const fixture = runtimeFixture();
   const environment = {
     CLOUDFLARE_API_TOKEN: "existing-auth",
+    CF_ACCOUNT_ID: "f".repeat(32),
+    CF_API_TOKEN: "conflicting-auth",
     CONTROL_PLANE_EDGE_TOKEN: "must-not-reach-wrangler",
     CONTROL_PLANE_URL: "https://attacker.invalid/",
     CLOUDFLARE_API_BASE_URL: "https://attacker.invalid",
@@ -409,6 +411,8 @@ test("provisions verified values only after complete dark preflight and both rev
     assert.equal(put.runOptions.env.WRANGLER_SEND_ERROR_REPORTS, "false");
     assert.equal(put.runOptions.env.WRANGLER_LOG, "error");
     for (const name of [
+      "CF_ACCOUNT_ID",
+      "CF_API_TOKEN",
       "CLOUDFLARE_API_BASE_URL",
       "CF_API_BASE_URL",
       "WRANGLER_API_ENVIRONMENT",
@@ -436,6 +440,8 @@ test("provisions verified values only after complete dark preflight and both rev
     assert.equal(call.runOptions.env.WRANGLER_SEND_ERROR_REPORTS, "false");
     assert.equal(Object.hasOwn(call.runOptions.env, "WRANGLER_LOG"), false);
     for (const name of [
+      "CF_ACCOUNT_ID",
+      "CF_API_TOKEN",
       "CONTROL_PLANE_EDGE_TOKEN",
       "CONTROL_PLANE_URL",
       "WITSELF_CONTROL_PLANE",
@@ -763,6 +769,8 @@ test("argument parsing requires public selectors and configurable identity", () 
 test("Wrangler environment is fail-closed against redirection and logging overrides", () => {
   const sanitized = sanitizedWranglerEnvironment({
     PATH: "/safe/bin",
+    CF_ACCOUNT_ID: "f".repeat(32),
+    CF_API_TOKEN: "conflicting-auth",
     CLOUDFLARE_API_BASE_URL: "https://attacker.invalid",
     WRANGLER_LOG_SANITIZE: "false",
     WRANGLER_SEND_METRICS: "true",
@@ -781,6 +789,8 @@ test("Wrangler environment is fail-closed against redirection and logging overri
   assert.equal(sanitized.WRANGLER_WRITE_LOGS, "false");
   assert.equal(sanitized.WRANGLER_LOG, "error");
   assert.equal(Object.hasOwn(sanitized, "CLOUDFLARE_API_BASE_URL"), false);
+  assert.equal(Object.hasOwn(sanitized, "CF_ACCOUNT_ID"), false);
+  assert.equal(Object.hasOwn(sanitized, "CF_API_TOKEN"), false);
   assert.equal(Object.hasOwn(sanitized, "WRANGLER_OUTPUT_FILE_PATH"), false);
   assert.equal(Object.hasOwn(sanitized, "WRANGLER_CI_OVERRIDE_NAME"), false);
   assert.equal(Object.hasOwn(sanitized, "CONTROL_PLANE_EDGE_TOKEN"), false);

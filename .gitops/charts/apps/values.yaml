@@ -81,7 +81,17 @@ apps:
         domain: ""
         acceptedLegacyDomains: []
         audience: ""
+        # Managed app-of-apps values must keep this empty. Literal mode exists
+        # only on the portable/private child chart.
         accountIDs: []
+        # Managed cells use this existing Secret reference instead of placing
+        # private account IDs in Git. The Secret value is canonical CSV under
+        # key. Use an immutable, versioned Secret and replace name to roll API
+        # pods; in-place mutation is unsupported.
+        accountIDsExistingSecret:
+          name: ""
+          key: account_ids
+        # Must remain empty with accountIDsExistingSecret in v0.0.241.
         retryCanaryAgentID: ""
         relayPublicKeysJSON: ""
         relayReplayWindow: 5m

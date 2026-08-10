@@ -212,6 +212,16 @@ test("Cloudflare resource and rule identifiers require true end of input", async
     CLOUDFLARE_API_TOKEN: "token",
   };
   assert.equal(cloudflareEnvironment(valid).zoneID, "b".repeat(32));
+  assert.deepEqual(cloudflareEnvironment({
+    ...valid,
+    CF_ACCOUNT_ID: "f".repeat(32),
+    CF_API_TOKEN: "conflicting-token",
+  }), {
+    accountID: valid.CLOUDFLARE_ACCOUNT_ID,
+    zoneID: valid.CLOUDFLARE_ZONE_ID,
+    namespaceID: valid.EMAIL_DIRECTORY_KV_ID,
+    apiToken: valid.CLOUDFLARE_API_TOKEN,
+  });
   for (const name of Object.keys(valid)) {
     assert.throws(
       () => cloudflareEnvironment({ ...valid, [name]: `${valid[name]}\n` }),
@@ -248,6 +258,31 @@ test("Cloudflare client reads zone Email Routing settings without a mutation pat
   assert.equal(calls[0].method, "GET");
   assert.match(calls[0].url, new RegExp(`/zones/${"b".repeat(32)}/email/routing$`));
   assert.equal(typeof api.updateEmailRoutingSettings, "undefined");
+});
+
+test("Cloudflare client resolves the exact selected zone identity", async () => {
+  const calls = [];
+  const zoneID = "b".repeat(32);
+  const zone = {
+    id: zoneID,
+    name: "witmail.net",
+    status: "active",
+    account: { id: "a".repeat(32), name: "Witwave" },
+  };
+  const api = new CloudflareAPI({
+    accountID: zone.account.id,
+    zoneID,
+    apiToken: "zone-token",
+    fetchAPI: async (url, init) => {
+      calls.push({ url, ...init });
+      return Response.json({ success: true, result: zone });
+    },
+  });
+
+  assert.deepEqual(await api.getZone(), zone);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].url, new RegExp(`/zones/${zoneID}$`));
+  assert.equal(calls[0].method, "GET");
 });
 
 test("Cloudflare client reads bounded route projections without a KV mutation", async () => {
