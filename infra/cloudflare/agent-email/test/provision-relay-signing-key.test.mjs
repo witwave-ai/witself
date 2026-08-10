@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import test from "node:test";
 
 import { releaseMessage } from "../scripts/deployment-identity.mjs";
@@ -77,6 +77,7 @@ function configs() {
   return {
     [CP_CONFIG]: JSON.stringify({
       name: CONTROL_PLANE_WORKER,
+      main: "src/index.js",
       secrets: { required: [
         "AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY",
         "CONTROL_PLANE_EDGE_TOKEN",
@@ -94,9 +95,10 @@ function configs() {
         WITSELF_EDGE_RELEASE_COMMIT: release.commit,
         WITSELF_EDGE_RELEASE_DATE: release.date,
       },
-    }),
+    }, null, 2),
     [EDGE_CONFIG]: JSON.stringify({
       name: EMAIL_EDGE_WORKER,
+      main: "src/index.js",
       secrets: { required: [
         "CONTROL_PLANE_EDGE_TOKEN",
         "RELAY_ED25519_PRIVATE_KEY",
@@ -117,8 +119,23 @@ function configs() {
         WITSELF_EDGE_RELEASE_COMMIT: release.commit,
         WITSELF_EDGE_RELEASE_DATE: release.date,
       },
-    }),
+    }, null, 2),
   };
+}
+
+function normalizedSnapshotContents(snapshot) {
+  const directory = basename(dirname(snapshot.path));
+  const expectedMain = directory.startsWith("witself-relay-control-plane-")
+    ? "../control-plane/src/index.js"
+    : directory.startsWith("witself-relay-email-edge-")
+      ? "../agent-email/src/index.js"
+      : "";
+  assert.notEqual(expectedMain, "", "snapshot directory must identify its Worker");
+  assert.equal(JSON.parse(snapshot.contents).main, expectedMain);
+  return snapshot.contents.replace(
+    `"main": "${expectedMain}"`,
+    '"main": "src/index.js"',
+  );
 }
 
 function deployment(id, versionID) {
@@ -622,13 +639,19 @@ test("full rotation sequence creates one successor and a value-free receipt", as
   });
   assert.match(receipt.target.config_fence.control_plane_sha256, /^[0-9a-f]{64}$/);
   assert.match(receipt.target.config_fence.email_edge_sha256, /^[0-9a-f]{64}$/);
+  const controlPlaneSnapshot = value.snapshotMetadata.find((snapshot) =>
+    basename(dirname(snapshot.path)).startsWith("witself-relay-control-plane-"));
+  const emailEdgeSnapshot = value.snapshotMetadata.find((snapshot) =>
+    basename(dirname(snapshot.path)).startsWith("witself-relay-email-edge-"));
+  assert.ok(controlPlaneSnapshot);
+  assert.ok(emailEdgeSnapshot);
   assert.equal(
     receipt.target.config_fence.control_plane_sha256,
-    createHash("sha256").update(value.files[CP_CONFIG]).digest("hex"),
+    createHash("sha256").update(controlPlaneSnapshot.contents).digest("hex"),
   );
   assert.equal(
     receipt.target.config_fence.email_edge_sha256,
-    createHash("sha256").update(value.files[EDGE_CONFIG]).digest("hex"),
+    createHash("sha256").update(emailEdgeSnapshot.contents).digest("hex"),
   );
   assert.deepEqual(receipt.target.provider_zone, {
     contract: "primary",
@@ -725,7 +748,7 @@ test("frozen configs ignore original mutation and are always cleaned", async () 
   assert.equal(receipt.outcome, "provisioned");
   assert.equal(value.snapshotMetadata.length, 2);
   assert.deepEqual(
-    new Set(value.snapshotMetadata.map((snapshot) => snapshot.contents)),
+    new Set(value.snapshotMetadata.map(normalizedSnapshotContents)),
     new Set([original[CP_CONFIG], original[EDGE_CONFIG]]),
   );
   for (const call of value.calls.filter((item) => item.command === "wrangler")) {

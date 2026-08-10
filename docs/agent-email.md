@@ -638,19 +638,22 @@ plan/apply window. If that rule is violated, treat the receipt as suspect,
 inspect live state, and use the separately planned fail-closed disable path
 before continuing.
 
-The sole bootstrap exception is the first dark v0.0.241 control-plane deploy,
-when the old control plane returns a literal 404 because it has no lease API.
+The sole bootstrap exception is the exact dark v0.0.242 recovery control-plane
+deploy, when the old control plane returns a literal 404 because it has no
+lease API.
 The deploy command permits that exception only after stable provider reads
 prove the exact Git-tagged v0.0.240 control plane, unchanged Durable Object
 namespaces, an absent legacy cohort binding, absent canonical inventory and
 delivery gates, an exactly v0.0.240 dark email edge, and empty active and target
 cohorts. The independent alias-administration gate may remain active because it
 does not enable delivery. The one unleased write uses `wrangler deploy
---containers-rollout none` to install only the byte-identical outer v0.0.241
+--containers-rollout none` to install only the byte-identical outer v0.0.242
 Worker. The command then proves the target and namespace continuity, acquires
 the newly installed durable lease, and performs the full Container deployment,
-verification, and convergence checks under that lease. There is no bootstrap
-exception for the email edge, provider-routing changes, v0.0.242 or later, a
+verification, and convergence checks under that lease. The v0.0.241
+control-plane deploy never reached a provider mutation because Wrangler
+rejected its relocated private config paths. There is no bootstrap exception
+for the email edge, provider-routing changes, v0.0.241, v0.0.243 or later, a
 nonempty cohort, or any other response. Cloudflare exposes no compare-and-swap
 for that first outer-only upload, so unrelated dashboard and direct API writes
 must remain frozen during the bootstrap window.

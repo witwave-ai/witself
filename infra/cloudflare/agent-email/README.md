@@ -394,14 +394,17 @@ active email-edge Worker binding. The edge deploy requires the canonical
 `https://self.witwave.ai/` origin directly. All three pin that exact authority;
 process environment cannot redirect the lease.
 
-There is one bounded legacy bootstrap exception. A literal acquire 404 may
-proceed only for the v0.0.240-to-v0.0.241 transition after stable provider reads
-prove the exact Git-tagged v0.0.240 control plane, the missing legacy managed
-cohort binding, absent canonical inventory and delivery gates, an empty target
-cohort, and a dark v0.0.240 email edge. The independent alias-administration
-gate may remain active; it does not enable delivery. The sole unleased write
+There is one bounded legacy bootstrap exception. The published v0.0.241
+control-plane deploy could not reach a provider mutation because Wrangler
+rejected its relocated private config paths. A literal acquire 404 may
+therefore proceed only for the exact v0.0.240-to-v0.0.242 recovery transition
+after stable provider reads prove the exact Git-tagged v0.0.240 control plane,
+the missing legacy managed cohort binding, absent canonical inventory and
+delivery gates, an empty target cohort, and a dark v0.0.240 email edge. The
+independent alias-administration gate may remain active; it does not enable
+delivery. The sole unleased write
 uses `wrangler deploy --containers-rollout none` to install the exact outer
-v0.0.241 Worker without building or updating Containers. The deploy then proves
+v0.0.242 Worker without building or updating Containers. The deploy then proves
 the target release and every Durable Object namespace are unchanged, acquires
 the newly installed lease, and performs the full Container deploy and endpoint
 verification under that lease. A current or newer control plane returning 404
