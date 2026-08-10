@@ -226,10 +226,11 @@ primary mailbox state with the cell's production receive environment:
 The path must be new. The exporter writes the exact sorted manifest with
 exclusive mode `0600`, emits no identities or addresses to stdout, and performs
 no database write. Keep that manifest and every plan outside the repository.
-`prepare`,
-`activate`, `disable`, and `remove` only create a new mode-`0600`, 15-minute
-review plan. Only `apply` mutates rules, and it must receive the exact SHA-256
-printed by the planning command:
+After deploying the exact managed-account cohort and allowing signed inventory
+to converge, `status` must report `ready_for_prepare: true`. The `prepare`,
+`activate`, `disable`, and `remove` commands only create a new mode-`0600`,
+15-minute review plan. Only `apply` mutates rules, and it must receive the exact
+SHA-256 printed by the planning command:
 
 ```sh
 npm run routes:primary -- status /absolute/private/primary-canary.json
