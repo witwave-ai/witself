@@ -12,6 +12,16 @@ chmod 700 "$work_dir"
 work_dir="$(cd "$work_dir" && pwd -P)"
 mkdir -m 700 "$work_dir/bin" "$work_dir/output" "$work_dir/state"
 
+file_mode() {
+  local path="$1"
+  local mode
+  mode="$(stat -f '%Lp' "$path" 2>/dev/null || true)"
+  if [[ ! "$mode" =~ ^[0-7]{3,4}$ ]]; then
+    mode="$(stat -c '%a' "$path" 2>/dev/null || true)"
+  fi
+  printf '%s\n' "$mode"
+}
+
 cat >"$work_dir/bin/kubectl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -243,7 +253,7 @@ if ! "$repo_root/scripts/run-agent-email-cell-operation.sh" \
 fi
 
 test -f "$output_path"
-[ "$(stat -f '%Lp' "$output_path" 2>/dev/null || stat -c '%a' "$output_path")" = 600 ]
+[ "$(file_mode "$output_path")" = 600 ]
 jq -e '.schema_version == 2 and (.agents | length == 5)' "$output_path" >/dev/null
 grep -Fqx '{"status":"completed","private_artifact_exported":true}' "$operation_output"
 if grep -Eq 'acc_[a-z2-7]{16}|agent_[a-z2-7]{16}|realm_[a-z2-7]{16}|@witmail\.net|receive-cohort-v1|witself-db' "$operation_output"; then
@@ -409,7 +419,7 @@ if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
   exit 1
 fi
 test -f "$exception_output"
-[ "$(stat -f '%Lp' "$exception_output" 2>/dev/null || stat -c '%a' "$exception_output")" = 600 ]
+[ "$(file_mode "$exception_output")" = 600 ]
 jq -e '.state == "requires_operator_override"' "$exception_output" >/dev/null
 grep -Fqx 'error: backfill status requires_operator_override; the private exception artifact was exported' "$failure_output"
 if grep -Eq 'acc_[a-z2-7]{16}|agent_[a-z2-7]{16}|realm_[a-z2-7]{16}|@witmail\.net|receive-cohort-v1|witself-db' "$failure_output"; then
