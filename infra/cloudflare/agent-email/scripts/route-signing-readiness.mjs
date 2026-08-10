@@ -145,7 +145,22 @@ export function verifyRouteSigningReadiness({
   controlPlaneVersion,
   emailEdgeDeployment,
   emailEdgeVersion,
-}) {
+}, {
+  expectedManagedDeliveryAccountAllowlist = "",
+} = {}) {
+  const expectedControlPlaneAccounts =
+    parseControlPlaneManagedDeliveryAccountAllowlist(
+      expectedManagedDeliveryAccountAllowlist,
+    );
+  const expectedEmailEdgeAccounts = parseEdgeManagedDeliveryAccountAllowlist(
+    expectedManagedDeliveryAccountAllowlist,
+  );
+  if (expectedControlPlaneAccounts.length !== expectedEmailEdgeAccounts.length ||
+      expectedControlPlaneAccounts.some(
+        (accountID, index) => accountID !== expectedEmailEdgeAccounts[index],
+      )) {
+    throw new Error("control plane and email edge managed delivery cohort contracts diverged");
+  }
   const controlPlaneVersionID = activeVersionID(
     controlPlaneDeployment,
     "control plane",
@@ -218,8 +233,8 @@ export function verifyRouteSigningReadiness({
   if (controlPlaneCohort !== emailEdgeCohort) {
     throw new Error("control plane and email edge managed delivery cohorts did not match");
   }
-  if (controlPlaneAccounts.length !== 0 || emailEdgeAccounts.length !== 0) {
-    throw new Error("managed delivery cohort was not dark");
+  if (controlPlaneCohort !== expectedManagedDeliveryAccountAllowlist) {
+    throw new Error("managed delivery cohort did not match the explicit expected cohort");
   }
 
   const routeSigningKeyID = plain(
@@ -337,7 +352,10 @@ function inspectWorker(name, label, inspect) {
   return { deployment, version };
 }
 
-export function inspectRouteSigningReadiness(inspect = wranglerJSON) {
+export function inspectRouteSigningReadiness(
+  inspect = wranglerJSON,
+  options = {},
+) {
   const controlPlane = inspectWorker(
     CONTROL_PLANE_WORKER,
     "control plane",
@@ -349,15 +367,30 @@ export function inspectRouteSigningReadiness(inspect = wranglerJSON) {
     controlPlaneVersion: controlPlane.version,
     emailEdgeDeployment: emailEdge.deployment,
     emailEdgeVersion: emailEdge.version,
+  }, options);
+}
+
+export function parseReadinessArgs(argv) {
+  if (argv.length === 0) {
+    return Object.freeze({ expectedManagedDeliveryAccountAllowlist: "" });
+  }
+  if (argv.length !== 2 || argv[0] !== "--expected-managed-delivery-cohort" ||
+      argv[1] === "" || argv[1].startsWith("--")) {
+    throw new Error(
+      "readiness accepts only --expected-managed-delivery-cohort CANONICAL_CSV",
+    );
+  }
+  parseControlPlaneManagedDeliveryAccountAllowlist(argv[1]);
+  parseEdgeManagedDeliveryAccountAllowlist(argv[1]);
+  return Object.freeze({
+    expectedManagedDeliveryAccountAllowlist: argv[1],
   });
 }
 
 function main() {
-  if (process.argv.length !== 2) {
-    throw new Error("route-signing readiness verifier does not accept arguments");
-  }
+  const options = parseReadinessArgs(process.argv.slice(2));
   process.stdout.write(
-    `${JSON.stringify(inspectRouteSigningReadiness(), null, 2)}\n`,
+    `${JSON.stringify(inspectRouteSigningReadiness(wranglerJSON, options), null, 2)}\n`,
   );
 }
 

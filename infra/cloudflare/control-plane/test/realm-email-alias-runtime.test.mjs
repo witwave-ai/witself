@@ -24,8 +24,8 @@ import {
   REALM_EMAIL_ALIAS_RECOVERY_KEY,
 } from "../src/realm-email-alias-journal-runtime.mjs";
 
-const ACCOUNT = "acct_alias";
-const OTHER_ACCOUNT = "acct_other";
+const ACCOUNT = "acc_aaaaaaaaaaaaaaaa";
+const OTHER_ACCOUNT = "acc_bbbbbbbbbbbbbbbb";
 const REALM = "realm_aaaaaaaaaaaaaaaa";
 const OTHER_REALM = "realm_bbbbbbbbbbbbbbbb";
 const DOMAIN = "agent-mail.witwave.ai";
@@ -36,7 +36,7 @@ const ADMIN = { kind: "platform_admin", id: "adm_alias" };
 function signTestRouteProjection(projection) {
   return {
     ...structuredClone(projection),
-    schema_version: 2,
+    schema_version: projection.schema_version + 1,
     route_signing_key_id: "route-test",
     route_signature: `${"A".repeat(86)}==`,
   };
@@ -936,7 +936,7 @@ test("customer request, approval, projection, idempotency, and tombstone are dur
       "updated_at",
     ].sort(),
   );
-  assert.equal(projection.schema_version, 2);
+  assert.equal(projection.schema_version, 3);
   assert.equal(projection.route_signing_key_id, "route-test");
   assert.match(projection.route_signature, /^[A-Za-z0-9+/]{86}==$/);
   assert.equal(projection.domain, DOMAIN);

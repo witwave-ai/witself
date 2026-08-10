@@ -21,7 +21,7 @@ import {
   realmEmailRouteKey,
 } from "../src/realm-email-alias-runtime.mjs";
 
-const ACCOUNT = "acct_api";
+const ACCOUNT = "acc_aaaaaaaaaaaaaaaa";
 const REALM = "realm_aaaaaaaaaaaaaaaa";
 const ENDPOINT = "https://cell.example";
 const DOMAIN = "agent-mail.witwave.ai";
@@ -111,7 +111,7 @@ function environment() {
       fetch: projectionFetch,
       signRouteProjection: async (projection) => ({
         ...structuredClone(projection),
-        schema_version: 2,
+        schema_version: projection.schema_version + 1,
         route_signing_key_id: "route-test",
         route_signature: `${"A".repeat(86)}==`,
       }),

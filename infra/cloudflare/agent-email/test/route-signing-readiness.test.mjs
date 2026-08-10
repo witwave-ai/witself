@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   inspectRouteSigningReadiness,
+  parseReadinessArgs,
   verifyRouteSigningReadiness,
 } from "../scripts/route-signing-readiness.mjs";
 
@@ -139,13 +140,13 @@ test("readiness requires identical canonical empty managed cohorts", () => {
     [
       "controlPlaneVersion",
       "CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
-      "acct_canary",
+      "acc_aaaaaaaaaaaaaaaa",
       /cohorts did not match/,
     ],
     [
       "emailEdgeVersion",
       "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
-      "acct_canary",
+      "acc_aaaaaaaaaaaaaaaa",
       /cohorts did not match/,
     ],
     [
@@ -168,14 +169,64 @@ test("readiness requires identical canonical empty managed cohorts", () => {
   const active = fixtures();
   active.controlPlaneVersion.resources.bindings.find((binding) =>
     binding.name === "CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST").text =
-      "acct_canary";
+      "acc_aaaaaaaaaaaaaaaa";
   active.emailEdgeVersion.resources.bindings.find((binding) =>
     binding.name === "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST").text =
-      "acct_canary";
+      "acc_aaaaaaaaaaaaaaaa";
   assert.throws(
     () => verifyRouteSigningReadiness(active),
-    /cohort was not dark/,
+    /did not match the explicit expected cohort/,
   );
+});
+
+test("explicit staged cohort proves CP-edge equality while delivery gates stay dark", () => {
+  const expected = "acc_aaaaaaaaaaaaaaaa,acc_bbbbbbbbbbbbbbbb";
+  const candidate = fixtures();
+  candidate.controlPlaneVersion.resources.bindings.find((binding) =>
+    binding.name === "CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST").text =
+      expected;
+  candidate.emailEdgeVersion.resources.bindings.find((binding) =>
+    binding.name === "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST").text =
+      expected;
+
+  const result = verifyRouteSigningReadiness(candidate, {
+    expectedManagedDeliveryAccountAllowlist: expected,
+  });
+  assert.equal(result.managed_delivery_cohort.account_count, 2);
+  assert.match(
+    result.managed_delivery_cohort.allowlist_sha256,
+    /^[0-9a-f]{64}$/,
+  );
+  assert.equal(JSON.stringify(result).includes("acc_aaaaaaaaaaaaaaaa"), false);
+
+  candidate.emailEdgeVersion.resources.bindings.find((binding) =>
+    binding.name === "REALM_EMAIL_ALIAS_DELIVERY_ENABLED").text = "true";
+  assert.throws(
+    () => verifyRouteSigningReadiness(candidate, {
+      expectedManagedDeliveryAccountAllowlist: expected,
+    }),
+    /managed delivery was not dark/,
+  );
+});
+
+test("readiness CLI requires one canonical explicit cohort or the dark default", () => {
+  assert.deepEqual(parseReadinessArgs([]), {
+    expectedManagedDeliveryAccountAllowlist: "",
+  });
+  assert.deepEqual(
+    parseReadinessArgs([
+      "--expected-managed-delivery-cohort",
+      "acc_aaaaaaaaaaaaaaaa",
+    ]),
+    { expectedManagedDeliveryAccountAllowlist: "acc_aaaaaaaaaaaaaaaa" },
+  );
+  for (const args of [
+    ["--unexpected", "acc_aaaaaaaaaaaaaaaa"],
+    ["--expected-managed-delivery-cohort", "*"],
+    ["--expected-managed-delivery-cohort"],
+  ]) {
+    assert.throws(() => parseReadinessArgs(args));
+  }
 });
 
 test("readiness rejects split or indeterminate production traffic", () => {

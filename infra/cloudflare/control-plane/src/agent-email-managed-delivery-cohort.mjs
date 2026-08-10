@@ -3,9 +3,10 @@ export const MANAGED_DELIVERY_ACCOUNT_ALLOWLIST_BINDING =
 export const MANAGED_DELIVERY_COHORT_SCHEMA =
   "witself.agent-email-managed-delivery-cohort.v1";
 
-const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,128}$/;
+const ACCOUNT_ID = /^acc_[a-z2-7]{16}$/;
 const MAX_ACCOUNTS = 100;
-const MAX_BYTES = MAX_ACCOUNTS * 129;
+const ACCOUNT_ID_BYTES = 20;
+const MAX_BYTES = MAX_ACCOUNTS * ACCOUNT_ID_BYTES + (MAX_ACCOUNTS - 1);
 
 // The rollout cohort is deliberately a canonical, exact CSV rather than a
 // pattern language. An empty value means no account is admitted. Refusing

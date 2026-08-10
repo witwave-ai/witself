@@ -27,6 +27,7 @@ const DEFAULT_REGISTRY_OBJECT_NAME = "global";
 const ALIAS_PATTERN = /^[a-z0-9](?:[a-z0-9-]{1,14}[a-z0-9])$/;
 const CANONICAL_REALM_LABEL_PATTERN = /^[a-z2-7]{16}$/;
 const ACCOUNT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const MANAGED_ROUTE_ACCOUNT_ID_PATTERN = /^acc_[a-z2-7]{16}$/;
 const REALM_ID_PATTERN = /^realm_[a-z2-7]{16}$/;
 const REQUEST_ID_PATTERN = /^earq_[a-z2-7]{16}$/;
 const CLAIM_ID_PATTERN = /^era_[a-z2-7]{16}$/;
@@ -39,6 +40,7 @@ export const REALM_EMAIL_ALIAS_FEATURE = "agent_email_realm_alias";
 export const REALM_EMAIL_ALIAS_LIMIT =
   "agent_email_realm_aliases_per_realm";
 export const REALM_EMAIL_ROUTE_PREFIX = "email:realm-route:v1:";
+export const MANAGED_REALM_EMAIL_ROUTE_SCHEMA_VERSION = 2;
 export const REALM_EMAIL_ROUTE_CACHE_TTL_SECONDS = 300;
 export const REALM_EMAIL_ALIAS_DOWNGRADE_GRACE_DAYS = 30;
 const REALM_EMAIL_ALIAS_DOWNGRADE_GRACE_MS =
@@ -352,7 +354,7 @@ export function buildRealmEmailRouteProjection({
   cache_ttl_seconds: cacheTTLSeconds = REALM_EMAIL_ROUTE_CACHE_TTL_SECONDS,
 }) {
   const canonicalDomain = validateManagedRealmEmailDomain(domain);
-  if (!ACCOUNT_ID_PATTERN.test(accountID ?? "")) {
+  if (!MANAGED_ROUTE_ACCOUNT_ID_PATTERN.test(accountID ?? "")) {
     fail("realm route account_id is invalid", 400);
   }
   if (!REALM_ID_PATTERN.test(realmID ?? "")) fail("realm route realm_id is invalid", 400);
@@ -376,7 +378,10 @@ export function buildRealmEmailRouteProjection({
     fail("realm route freshness fields are invalid", 400);
   }
   const projection = {
-    schema_version: 1,
+    // Managed route v2 adds account_id as signed rollout authority. Version 1
+    // remains readable only by the new edge's migration path and can never be
+    // used for delivery because it cannot prove account cohort membership.
+    schema_version: MANAGED_REALM_EMAIL_ROUTE_SCHEMA_VERSION,
     account_id: accountID,
     domain: canonicalDomain,
     realm_label: realmLabel,

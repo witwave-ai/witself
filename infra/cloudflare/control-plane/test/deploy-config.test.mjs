@@ -313,8 +313,9 @@ test("release renderer accepts only an exact canonical managed account cohort", 
   const temp = await mkdtemp(join(tmpdir(), "witself-cp-cohort-config-"));
   t.after(() => rm(temp, { recursive: true, force: true }));
   for (const [index, value] of [
-    "*", "acct_*", " acct_alpha", "acct_alpha ",
-    "acct_beta,acct_alpha", "acct_alpha,acct_alpha",
+    "*", "acc_*", " acc_aaaaaaaaaaaaaaaa", "acc_aaaaaaaaaaaaaaaa ",
+    "acc_bbbbbbbbbbbbbbbb,acc_aaaaaaaaaaaaaaaa",
+    "acc_aaaaaaaaaaaaaaaa,acc_aaaaaaaaaaaaaaaa",
   ].entries()) {
     const rendered = spawnSync(process.execPath, [
       renderer.pathname,

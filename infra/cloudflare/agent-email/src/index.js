@@ -11,6 +11,7 @@ import {
 import {
   CONFIG_KEY,
   configuredAgentEmailDomains,
+  managedRealmRouteRequiresAccountRefresh,
   parsePilotAddress,
   parseRouteAddress,
   realmRouteKey,
@@ -319,6 +320,12 @@ async function controlPlaneRealmRoute(
     if (expectedRouteKind && route.route_kind !== expectedRouteKind) {
       throw new Error("realm route projection kind is inconsistent");
     }
+    // A v240 managed projection proves that the route existed but does not
+    // carry signed account authority. It may keep a 404 from becoming a
+    // bounce, but it can never authorize delivery under an account cohort.
+    if (managedRealmRouteRequiresAccountRefresh(route)) {
+      throw new Error("managed realm route requires account-authority refresh");
+    }
   } catch {
     emitRouteLookupMetric(env, lookup, "cp_error", response.status);
     throw transient("tempfail_route_lookup", "route", response.status);
@@ -484,6 +491,27 @@ async function projectedRealmRoute(
       expectedRouteKind,
     );
     return fallback.status === "projection" ? realmRouteDisposition(fallback.route) : fallback;
+  }
+  if (managedRealmRouteRequiresAccountRefresh(route)) {
+    const legacyLookup = {
+      ...lookupContext.known,
+      routeKind: routeMetricKind(route),
+    };
+    const fallback = await knownControlPlaneRealmRoute(
+      env,
+      parsed,
+      fetchAPI,
+      cryptoAPI,
+      nowMS,
+      legacyLookup,
+      lookupContext.state,
+      route.controller_revision,
+      true,
+      expectedRouteKind,
+    );
+    return fallback.status === "projection"
+      ? realmRouteDisposition(fallback.route)
+      : fallback;
   }
   if (realmRouteProjectionIsFresh(route, nowMS)) {
     emitRouteLookupMetric(env, lookupContext.known, "kv_fresh", 0, route);

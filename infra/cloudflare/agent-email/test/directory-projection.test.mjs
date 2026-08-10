@@ -15,7 +15,7 @@ const canonicalLabel = "abcdefghijkl2345";
 const aliasLabel = "acme-west";
 const customDomain = "agents.example.com";
 const nowMS = Date.parse("2026-08-01T12:00:00.000Z");
-const accountID = "acct_email_canary";
+const accountID = "acc_aaaaaaaaaaaaaaaa";
 
 test("configured edge domains are bounded, ordered, canonical, and unique", () => {
   assert.deepEqual(configuredAgentEmailDomains({
@@ -34,7 +34,7 @@ test("configured edge domains are bounded, ordered, canonical, and unique", () =
 
 function projection(realmLabel, overrides = {}) {
   return {
-    schema_version: 1,
+    schema_version: 2,
     account_id: accountID,
     domain,
     realm_label: realmLabel,
@@ -52,6 +52,7 @@ function projection(realmLabel, overrides = {}) {
 
 function customProjection(state = "applied", overrides = {}) {
   const value = projection(aliasLabel, {
+    schema_version: 1,
     domain: customDomain,
     route_kind: "custom_domain",
     state,
@@ -91,6 +92,30 @@ test("canonical and realm-alias addresses share one strict route shape", () => {
   assert.equal(canonicalRoute.ingest_url, aliasRoute.ingest_url);
   assert.equal(canonicalRoute.route_kind, "canonical");
   assert.equal(aliasRoute.route_kind, "realm_alias");
+  assert.equal(aliasRoute.schema_version, 2);
+});
+
+test("legacy managed v1 is readable only as account-authority migration evidence", () => {
+  const legacy = projection(aliasLabel, { schema_version: 1 });
+  delete legacy.account_id;
+  const route = validateRealmRouteProjection(legacy, domain, aliasLabel);
+  assert.equal(route.schema_version, 1);
+  assert.equal(Object.hasOwn(route, "account_id"), false);
+
+  assert.throws(
+    () => validateRealmRouteProjection(
+      projection(aliasLabel, { schema_version: 1 }),
+      domain,
+      aliasLabel,
+    ),
+    /schema is invalid/,
+  );
+  const currentMissingAccount = projection(aliasLabel);
+  delete currentMissingAccount.account_id;
+  assert.throws(
+    () => validateRealmRouteProjection(currentMissingAccount, domain, aliasLabel),
+    /schema is invalid/,
+  );
 });
 
 test("custom-domain projections are an exact schema-v1 union variant", () => {

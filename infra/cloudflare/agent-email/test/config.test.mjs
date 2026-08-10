@@ -127,8 +127,9 @@ test("deployment config is email-only and cannot reuse the control-plane DIRECTO
 
 test("deployment config accepts only an exact canonical managed account cohort", () => {
   for (const value of [
-    "*", "acct_*", " acct_alpha", "acct_alpha ",
-    "acct_beta,acct_alpha", "acct_alpha,acct_alpha",
+    "*", "acc_*", " acc_aaaaaaaaaaaaaaaa", "acc_aaaaaaaaaaaaaaaa ",
+    "acc_bbbbbbbbbbbbbbbb,acc_aaaaaaaaaaaaaaaa",
+    "acc_aaaaaaaaaaaaaaaa,acc_aaaaaaaaaaaaaaaa",
   ]) {
     const rendered = spawnSync(process.execPath, [script.pathname], {
       cwd: root,

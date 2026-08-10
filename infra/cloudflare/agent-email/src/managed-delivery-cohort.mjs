@@ -1,9 +1,10 @@
 export const MANAGED_DELIVERY_ACCOUNT_ALLOWLIST_BINDING =
   "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST";
 
-const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,128}$/;
+const ACCOUNT_ID = /^acc_[a-z2-7]{16}$/;
 const MAX_ACCOUNTS = 100;
-const MAX_BYTES = MAX_ACCOUNTS * 129;
+const ACCOUNT_ID_BYTES = 20;
+const MAX_BYTES = MAX_ACCOUNTS * ACCOUNT_ID_BYTES + (MAX_ACCOUNTS - 1);
 
 // This parser intentionally matches the control-plane contract byte for byte.
 // Empty is the safe default; there is no wildcard, trimming, case folding,

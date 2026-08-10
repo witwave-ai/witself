@@ -65,8 +65,9 @@ legacy literal-pilot lane.
 
 All canonical and managed-alias traffic has a second, account-scoped fence:
 `AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST`. It is an exact sorted CSV of
-at most 100 account IDs; the empty committed value admits nobody, and
-whitespace, duplicates, unsorted input, and wildcard-like values are rejected.
+at most 100 generated `acc_[a-z2-7]{16}` IDs (2,099 bytes maximum); the empty
+committed value admits nobody, and whitespace, duplicates, unsorted input, and
+wildcard-like values are rejected.
 The control plane must use the byte-identical
 `CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST`. Its signed managed route
 projection carries `account_id`; the edge checks that authority before an
@@ -74,6 +75,14 @@ inactive-route bounce, content read, or cell request. A held-back known route
 therefore produces only `tempfail_account_cohort`. The metric is a fixed enum
 and contains no account, realm, address, or message value. Custom-domain routes
 remain independent of this managed-domain cohort.
+
+Managed canonical and alias payloads are schema v2 and signed envelopes are
+schema v3. Custom-domain payloads remain v1/signed-v2. The edge dual-reads a
+v240 managed v1/signed-v2 row only to preserve prior-route evidence, always
+refreshes it from the control plane, and never delivers from it. Therefore
+either mixed v240/v241 Worker ordering tempfails known managed mail rather than
+reading content or bouncing it; finish both code upgrades while the delivery
+gates remain false.
 
 Dynamic route lookup is protected independently of account policy. A positive
 `EMAIL_DIRECTORY` projection is always checked first and
@@ -228,8 +237,18 @@ is present in the edge's canonical public-key keyring, and all route-signing,
 authenticated-fallback, and relay secret bindings exist. Its JSON attestation
 contains key ids and binding-presence booleans, never public-key bytes or secret
 values. It requires the release tag/message annotations from `npm run deploy`.
-A dark readiness check also requires both canonical cohort strings to match
-and be empty, and emits only their zero count and SHA-256 digest. A later
+A default readiness check also requires both canonical cohort strings to match
+and be empty, and emits only their zero count and SHA-256 digest. To attest a
+reviewed nonempty cohort before provider activation, keep both delivery gates
+false and supply the exact expected bytes explicitly:
+
+```sh
+npm run verify:route-signing-readiness -- \
+  --expected-managed-delivery-cohort acc_aaaaaaaaaaaaaaaa
+```
+
+This mode requires CP, edge, and the argument to match byte-for-byte and emits
+only count and digest; it does not relax any dark gate check. A later
 secret-only successor must be followed by a tagged redeploy before this
 coordinated readiness check can pass again. Binding presence alone cannot prove
 that the two fallback secrets contain the same value. The value-free receipt
@@ -516,8 +535,8 @@ npm run rollback -- \
   --output /absolute/private/path/agent-email-rollback.json
 ```
 
-The planner requires the candidate to have the same email-only handlers,
-runtime, complete binding inventory, shared KV, metrics dataset, rate
+The planner normally requires the candidate to have the same email-only
+handlers, runtime, complete binding inventory, shared KV, metrics dataset, rate
 limiters, managed-delivery flags, route-verification keyring, and secret
 binding names as the active version. It creates the file with mode `0600` and
 refuses to overwrite an existing path. Review the whole plan, its exact active
@@ -537,11 +556,14 @@ secret values. Stop and investigate unexpected differences; the tool never
 auto-accepts that warning. It rechecks the complete plan fence immediately
 before mutation and verifies the chosen version at 100 percent afterward.
 
-The first signed-route release has no compatible rollback candidate: the
-current pre-signing version lacks the signature/keyring contract and is
-deliberately rejected by the planner. Keep every delivery gate dark and use a
-forward fix until a later older signed release with the exact same operational
-contract exists.
+The pre-signing release remains incompatible. v0.0.240 is a narrower exception:
+it already has the signed-route/keyring contract but predates the account cohort
+binding. The planner may normalize that one absent binding to empty only when
+the current cohort is empty and both the current and v0.0.240 alias/canonical
+delivery gates are false. This is a dark emergency rollback, not an active
+managed-delivery rollback. v0.0.240 cannot read the new signed-v3 managed rows;
+leave managed delivery dark until compatible Workers are restored. Its
+custom-domain v1/signed-v2 route behavior is unchanged.
 
 Literal-pilot route rollback is independent of Worker code rollback. Disable
 the reviewed rules first; this preserves the exact rules and directory rows

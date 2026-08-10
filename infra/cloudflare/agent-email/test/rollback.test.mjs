@@ -109,6 +109,12 @@ function binding(candidate, name) {
   return candidate.resources.bindings.find((item) => item.name === name);
 }
 
+function removeBinding(candidate, name) {
+  candidate.resources.bindings = candidate.resources.bindings.filter(
+    (item) => item.name !== name,
+  );
+}
+
 test("rollback planning produces a value-free exact-ID plan and SHA-256 fence", () => {
   const fixture = fixtures();
   const plan = createPlan(fixture);
@@ -188,6 +194,67 @@ test("rollback planning refuses handler, compatibility, storage, limiter, and fl
     const fixture = fixtures();
     item.mutate(fixture.candidate);
     assert.throws(() => createPlan(fixture), item.error);
+  }
+});
+
+test("v0.0.240 contract is eligible only as a fully dark rollback candidate", () => {
+  const legacy = fixtures();
+  removeBinding(
+    legacy.candidate,
+    "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
+  );
+  const plan = createPlan(legacy);
+  assert.equal(
+    plan.checks.includes("legacy_managed_delivery_candidate_dark"),
+    true,
+  );
+
+  {
+    const activeCohort = fixtures();
+    removeBinding(
+      activeCohort.candidate,
+      "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
+    );
+    binding(
+      activeCohort.current,
+      "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
+    ).text = "acc_aaaaaaaaaaaaaaaa";
+    assert.throws(
+      () => createPlan(activeCohort),
+      /requires an empty current cohort and both current delivery gates false/,
+    );
+  }
+
+  {
+    const activeGate = fixtures();
+    removeBinding(
+      activeGate.candidate,
+      "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
+    );
+    binding(
+      activeGate.current,
+      "REALM_EMAIL_ALIAS_DELIVERY_ENABLED",
+    ).text = "true";
+    assert.throws(
+      () => createPlan(activeGate),
+      /requires an empty current cohort and both current delivery gates false/,
+    );
+  }
+
+  {
+    const unsafeLegacy = fixtures();
+    removeBinding(
+      unsafeLegacy.candidate,
+      "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
+    );
+    binding(
+      unsafeLegacy.candidate,
+      "REALM_EMAIL_CANONICAL_DELIVERY_ENABLED",
+    ).text = "true";
+    assert.throws(
+      () => createPlan(unsafeLegacy),
+      /legacy managed-delivery contract is eligible only while fully dark/,
+    );
   }
 });
 

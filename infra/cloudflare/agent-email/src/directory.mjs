@@ -6,14 +6,16 @@ export const CONFIG_KEY = "pilot:config:v1";
 export const RECIPIENT_PREFIX = "pilot:recipient:v1:";
 export const DIRECTORY_SCHEMA_VERSION = 1;
 export const REALM_ROUTE_PREFIX = "email:realm-route:v1:";
-export const REALM_ROUTE_SCHEMA_VERSION = 1;
+export const LEGACY_MANAGED_REALM_ROUTE_SCHEMA_VERSION = 1;
+export const REALM_ROUTE_SCHEMA_VERSION = 2;
+export const CUSTOM_DOMAIN_REALM_ROUTE_SCHEMA_VERSION = 1;
 export const MAX_MANAGED_AGENT_EMAIL_DOMAINS = 2;
 
 const DOMAIN_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const REALM_ID = /^realm_([a-z2-7]{16})$/;
 const REALM_ID_BODY = /^[a-z2-7]{16}$/;
 const AGENT_ID = /^agent_[a-z2-7]{16}$/;
-const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,128}$/;
+const ACCOUNT_ID = /^acc_[a-z2-7]{16}$/;
 const AGENT_SEGMENT = /^[a-z0-9](?:[a-z0-9-]{0,45}[a-z0-9])?$/;
 const REALM_ALIAS = /^[a-z0-9](?:[a-z0-9-]{1,14}[a-z0-9])$/;
 const DOMAIN_REQUEST_ID = /^aedr_[a-z2-7]{16}$/;
@@ -144,29 +146,37 @@ export function validateRealmRouteProjection(value, expectedDomain, expectedReal
     throw new Error("realm route projection is invalid");
   }
   const state = String(value.state ?? "");
+  const routeKind = String(value.route_kind ?? "");
+  const managedRoute = routeKind === "canonical" || routeKind === "realm_alias";
+  const currentManagedRoute = managedRoute &&
+    value.schema_version === REALM_ROUTE_SCHEMA_VERSION;
+  const legacyManagedRoute = managedRoute &&
+    value.schema_version === LEGACY_MANAGED_REALM_ROUTE_SCHEMA_VERSION;
+  const customDomainRoute = routeKind === "custom_domain" &&
+    value.schema_version === CUSTOM_DOMAIN_REALM_ROUTE_SCHEMA_VERSION;
+  if (!currentManagedRoute && !legacyManagedRoute && !customDomainRoute) {
+    throw new Error("realm route projection schema is invalid");
+  }
   const commonKeys = [
     "schema_version", "domain", "realm_label", "realm_id", "route_kind",
     "state", "controller_revision", "updated_at", "cache_ttl_seconds",
   ];
-  // The schema version stays stable because route_kind is already the exact
-  // union discriminator. Customer-domain routes carry both source-authority
-  // fences; managed canonical and alias records must remain byte-for-byte on
-  // their existing shape.
-  const customDomainKeys = value.route_kind === "custom_domain"
+  // Custom-domain authority remains on its existing v1 contract. Managed v1
+  // is read only as migration evidence; managed v2 adds the exact account
+  // authority required by the rollout cohort.
+  const customDomainKeys = customDomainRoute
     ? [
         "domain_request_id", "domain_allocation_revision",
         "realm_alias_claim_id", "realm_alias_revision",
       ]
     : [];
-  const managedRouteKeys = value.route_kind === "custom_domain"
-    ? []
-    : ["account_id"];
+  const managedRouteKeys = currentManagedRoute ? ["account_id"] : [];
   const expectedKeys = state === "applied"
     ? [...commonKeys, ...managedRouteKeys, ...customDomainKeys, "cell_audience", "ingest_url"]
     : state === "suspended"
     ? [...commonKeys, ...managedRouteKeys, ...customDomainKeys, "suspension_disposition"]
     : [...commonKeys, ...managedRouteKeys, ...customDomainKeys];
-  if (!exactKeys(value, expectedKeys) || value.schema_version !== REALM_ROUTE_SCHEMA_VERSION) {
+  if (!exactKeys(value, expectedKeys)) {
     throw new Error("realm route projection schema is invalid");
   }
 
@@ -179,7 +189,6 @@ export function validateRealmRouteProjection(value, expectedDomain, expectedReal
   const realmMatch = REALM_ID.exec(realmID);
   if (!realmMatch) throw new Error("realm route projection realm id is invalid");
 
-  const routeKind = String(value.route_kind ?? "");
   if (
     (routeKind === "canonical" && (realmLabel !== realmMatch[1] || !REALM_ID_BODY.test(realmLabel))) ||
     (routeKind === "realm_alias" && (realmLabel === realmMatch[1] || REALM_ID_BODY.test(realmLabel))) ||
@@ -202,7 +211,7 @@ export function validateRealmRouteProjection(value, expectedDomain, expectedReal
   }
 
   const route = {
-    schema_version: REALM_ROUTE_SCHEMA_VERSION,
+    schema_version: value.schema_version,
     domain,
     realm_label: realmLabel,
     realm_id: realmID,
@@ -212,7 +221,7 @@ export function validateRealmRouteProjection(value, expectedDomain, expectedReal
     updated_at: value.updated_at,
     cache_ttl_seconds: value.cache_ttl_seconds,
   };
-  if (routeKind !== "custom_domain") {
+  if (currentManagedRoute) {
     const accountID = String(value.account_id ?? "");
     if (!ACCOUNT_ID.test(accountID)) {
       throw new Error("realm route projection account id is invalid");
@@ -257,6 +266,13 @@ export function validateRealmRouteProjection(value, expectedDomain, expectedReal
     route.ingest_url = validateIngestURL(value.ingest_url);
   }
   return route;
+}
+
+export function managedRealmRouteRequiresAccountRefresh(route) {
+  return route != null &&
+    (route.route_kind === "canonical" || route.route_kind === "realm_alias") &&
+    route.schema_version === LEGACY_MANAGED_REALM_ROUTE_SCHEMA_VERSION &&
+    !Object.hasOwn(route, "account_id");
 }
 
 // A route supplies the HTTPS destination that receives raw message content.

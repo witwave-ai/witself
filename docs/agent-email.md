@@ -512,9 +512,15 @@ rollout fence. The control plane reads the canonical sorted CSV
 `CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST`; the Email Worker reads the
 byte-identical `AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST`. Empty or
 missing means no account is admitted. Each list accepts at most 100 exact
-account IDs and rejects whitespace, duplicates, noncanonical ordering, and
-every wildcard-like value. Managed signed route projections carry the exact
-`account_id`, allowing the edge to enforce the cohort even on a fresh KV hit.
+generated account IDs matching `acc_[a-z2-7]{16}` and rejects whitespace,
+duplicates, noncanonical ordering, and every wildcard-like value. The largest
+valid CSV is exactly 2,099 ASCII bytes. Managed route payload v2 carries the
+exact signed `account_id`; its signed envelope is v3. Customer-owned-domain
+payloads intentionally remain v1/signed-v2. A legacy v240 managed
+v1/signed-v2 row is accepted only as evidence that the route was previously
+known: the new edge forces an authoritative control-plane refresh and never
+uses that row for delivery because it cannot prove account membership.
+This allows the edge to enforce the cohort even on a fresh current KV hit.
 The value is route authority only: it is never logged or emitted to Analytics
 Engine. A known route outside the cohort tempfails before an inactive-route
 bounce, raw MIME read, or cell request; the control-plane fallback likewise
@@ -530,8 +536,31 @@ The edge-token-authenticated read-only endpoint
 SHA-256 of the canonical CSV, and the three control-plane gate booleans; it
 never returns account IDs. Deployment attestation reports the same value-free
 count/digest for the edge, and coordinated dark readiness refuses mismatched,
-invalid, or nonempty cohorts. Operators must compare those attestations before
-activation and deploy the same canonical CSV to both Workers.
+or invalid cohorts. Its default invocation requires the empty cohort. Before a
+deliberate staged activation, supply
+`--expected-managed-delivery-cohort CANONICAL_CSV`; the verifier then requires
+both deployed Workers to contain those exact bytes while retaining every dark
+delivery-gate check, and emits only count and digest. Operators must run that
+single comparison before provider activation.
+
+The v241 protocol rollout is safe in either code-deployment order but mixed
+versions are intentionally unavailable for managed mail. A new edge reading a
+v240 managed row forces refresh and tempfails if the old control plane returns
+v1 again. A v240 edge rejects a new signed-v3 managed row, retries through the
+control plane, and tempfails when it receives v3 again. Neither order reads MIME,
+contacts a cell, or bounces the known address. Complete both Worker upgrades
+with the delivery gates false before installing a nonempty cohort. Install the
+control-plane cohort first and the edge cohort second, run the explicit expected
+cohort readiness check, then perform the separately reviewed provider and gate
+activation. To remove an account, remove it from the edge cohort first so even
+fresh cached v2 rows stop immediately, then remove it from the control plane.
+
+The guarded edge rollback tool may treat v0.0.240's missing cohort binding as
+the empty value only when both the current and candidate alias/canonical gates
+are false and the current cohort is empty. That makes v0.0.240 an honest dark
+emergency rollback candidate, not an active managed-delivery candidate. It
+cannot consume signed-v3 managed KV rows; keep delivery dark until compatible
+Workers are restored. Current custom-domain v1/signed-v2 rows are unchanged.
 
 Do not enable
 the gate until every release blocker is closed and acceptance-tested: (1) the

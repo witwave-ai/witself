@@ -110,11 +110,15 @@ test("deployment expectations summarize but never expose the active cohort", () 
   const active = expectedDeployment({
     ...env,
     AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST:
-      "acct_alpha,acct_beta",
+      "acc_aaaaaaaaaaaaaaaa,acc_bbbbbbbbbbbbbbbb",
   }, release);
   assert.equal(active.managedDeliveryAccountCount, 2);
   assert.match(active.managedDeliveryAllowlistSHA256, /^[0-9a-f]{64}$/);
-  for (const value of ["*", "acct_beta,acct_alpha", "acct_alpha "]) {
+  for (const value of [
+    "*",
+    "acc_bbbbbbbbbbbbbbbb,acc_aaaaaaaaaaaaaaaa",
+    "acc_aaaaaaaaaaaaaaaa ",
+  ]) {
     assert.throws(() => expectedDeployment({
       ...env,
       AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: value,
