@@ -395,6 +395,47 @@ func TestNormalizeAgentEmailPilotScope(t *testing.T) {
 	if err := requireAgentEmailPilotPrincipal(scope, restricted); !errors.Is(err, ErrAgentEmailForbidden) {
 		t.Fatalf("restricted principal error = %v", err)
 	}
+
+	production := AgentEmailReceiveScope{
+		Enabled: true, Mode: AgentEmailReceiveModeProduction,
+		Domain: "witmail.net", Audience: "cell-production-1",
+		AccountIDs: map[string]bool{
+			"acc_aaaaaaaaaaaaaaaa": true,
+			"acc_bbbbbbbbbbbbbbbb": true,
+		},
+		RetryCanaryAgentID: "agent_aaaaaaaaaaaaaaaa",
+	}
+	if got, err := normalizeAgentEmailPilotScope(production); err != nil || got != "witmail.net" {
+		t.Fatalf("production scope = %q / %v", got, err)
+	}
+	if _, err := requireAgentEmailReceiveEnrollment(
+		production, "acc_bbbbbbbbbbbbbbbb", "realm_zzzzzzzzzzzzzzzz",
+		"agent_zzzzzzzzzzzzzzzz",
+	); err != nil {
+		t.Fatalf("dynamic production enrollment = %v", err)
+	}
+	if _, err := requireAgentEmailReceiveEnrollment(
+		production, "acc_cccccccccccccccc", realmID, "agent_aaaaaaaaaaaaaaaa",
+	); !errors.Is(err, ErrAgentEmailPilotNotEnrolled) {
+		t.Fatalf("out-of-cohort production enrollment = %v", err)
+	}
+	if err := requireAgentEmailPilotPrincipal(production, Principal{
+		Kind: PrincipalAgent, ID: "agent_zzzzzzzzzzzzzzzz",
+		AccountID: "acc_bbbbbbbbbbbbbbbb", RealmID: "realm_zzzzzzzzzzzzzzzz",
+		AccessProfile: AccessProfileFull,
+	}); err != nil {
+		t.Fatalf("production principal = %v", err)
+	}
+	emptyProduction := production
+	emptyProduction.AccountIDs = nil
+	if _, err := normalizeAgentEmailPilotScope(emptyProduction); !errors.Is(err, ErrAgentEmailInputInvalid) {
+		t.Fatalf("empty production scope error = %v", err)
+	}
+	mixedProduction := production
+	mixedProduction.AgentIDs = agents
+	if _, err := normalizeAgentEmailPilotScope(mixedProduction); !errors.Is(err, ErrAgentEmailInputInvalid) {
+		t.Fatalf("mixed production scope error = %v", err)
+	}
 }
 
 func TestAgentEmailCursorRoundTrip(t *testing.T) {

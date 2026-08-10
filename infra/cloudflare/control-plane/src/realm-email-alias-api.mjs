@@ -3,11 +3,25 @@ import {
   managedRealmEmailPrimaryDomain,
   realmEmailAliasEntitlement,
   realmEmailAliasRegistryStub,
+  realmEmailCanonicalDeliveryEnabled,
+  realmEmailCanonicalInventoryEnabled,
 } from "./realm-email-alias-runtime.mjs";
 import {
   agentEmailCustomDomainRoutingEnabled,
   agentEmailDomainRegistryStub,
 } from "./agent-email-domain-runtime.mjs";
+import {
+  managedDeliveryCohortSummary,
+} from "./agent-email-managed-delivery-cohort.mjs";
+import {
+  AgentEmailOperationsLeaseError,
+  agentEmailOperationsLeaseErrorResponse,
+  agentEmailOperationsLeaseJSON,
+  internalAgentEmailOperationsLeasePath,
+  isAgentEmailOperationsLeasePath,
+  validateAgentEmailOperationsLeaseRequest,
+  validateAgentEmailOperationsLeaseResponse,
+} from "./agent-email-operations-lease.mjs";
 
 const SCHEMA_VERSION = "witself.realm-email-alias.v1";
 const ACCOUNT_ID_PATTERN = "[A-Za-z0-9_-]{1,128}";
@@ -47,6 +61,8 @@ const ADMIN_AUDIT_PATH = "/v1/admin/realm-email-alias-audit";
 const EDGE_ROUTE_PATH =
   /^\/v1\/email\/realm-routes\/([^/]{1,253})\/([^/]{3,16})$/;
 const EDGE_ROUTE_PREFIX = "/v1/email/realm-routes";
+export const EDGE_MANAGED_DELIVERY_READINESS_PATH =
+  "/v1/email/managed-delivery/readiness";
 const BODY_MAX_BYTES = 16 * 1024;
 
 const json = (value, status = 200) =>
@@ -139,6 +155,15 @@ function timingSafeEqual(left, right) {
     different |= leftBytes[index] ^ rightBytes[index];
   }
   return different === 0;
+}
+
+function edgeAuthorized(request, env) {
+  const configured = String(env?.CONTROL_PLANE_EDGE_TOKEN ?? "");
+  const authorization = request.headers.get("Authorization") ?? "";
+  return configured !== "" && configured === configured.trim() &&
+    configured.length >= 16 && configured.length <= 8_192 &&
+    authorization.startsWith("Bearer ") &&
+    timingSafeEqual(authorization.slice(7).trim(), configured);
 }
 
 async function liveCellForAccount(env, accountID) {
@@ -297,12 +322,7 @@ export function isRealmEmailRoutePath(pathname) {
 
 export async function handleRealmEmailRouteRequest(request, env, match) {
   if (request.method !== "GET") return errorResponse("method not allowed", 405);
-  const configured = String(env?.CONTROL_PLANE_EDGE_TOKEN ?? "");
-  const authorization = request.headers.get("Authorization") ?? "";
-  if (!configured || configured !== configured.trim() ||
-      configured.length < 16 || configured.length > 8_192 ||
-      !authorization.startsWith("Bearer ") ||
-      !timingSafeEqual(authorization.slice(7).trim(), configured)) {
+  if (!edgeAuthorized(request, env)) {
     return errorResponse("unauthorized", 401);
   }
   if (!match) return errorResponse("invalid realm email route", 400);
@@ -335,6 +355,128 @@ export async function handleRealmEmailRouteRequest(request, env, match) {
     domain,
     realm_label: realmLabel,
   });
+}
+
+export async function handleManagedDeliveryReadinessRequest(request, env) {
+  if (request.method !== "GET") return errorResponse("method not allowed", 405);
+  if (!edgeAuthorized(request, env)) return errorResponse("unauthorized", 401);
+  let cohort;
+  try {
+    cohort = await managedDeliveryCohortSummary(env);
+  } catch {
+    return errorResponse(
+      "managed email delivery cohort is unavailable",
+      503,
+    );
+  }
+  return json({
+    schema_version: "witself.agent-email-managed-delivery-readiness.v1",
+    managed_delivery: {
+      cohort,
+      canonical_inventory_enabled: realmEmailCanonicalInventoryEnabled(env),
+      canonical_delivery_enabled: realmEmailCanonicalDeliveryEnabled(env),
+      alias_authority_activation_enabled: realmEmailAliasActivationEnabled(env),
+    },
+  });
+}
+
+export async function handleAgentEmailOperationsLeaseRequest(
+  request,
+  env,
+  url = new URL(request.url),
+) {
+  if (!isAgentEmailOperationsLeasePath(url.pathname)) {
+    return agentEmailOperationsLeaseErrorResponse(
+      new AgentEmailOperationsLeaseError(
+        "agent email operations lease endpoint not found",
+        404,
+        "agent_email_operations_lease_not_found",
+      ),
+    );
+  }
+  if (request.method !== "POST") {
+    return agentEmailOperationsLeaseErrorResponse(
+      new AgentEmailOperationsLeaseError(
+        "method not allowed",
+        405,
+        "agent_email_operations_lease_method_not_allowed",
+      ),
+    );
+  }
+  if (!edgeAuthorized(request, env)) {
+    return agentEmailOperationsLeaseErrorResponse(
+      new AgentEmailOperationsLeaseError(
+        "unauthorized",
+        401,
+        "agent_email_operations_lease_unauthorized",
+      ),
+    );
+  }
+  try {
+    let rawInput;
+    try {
+      rawInput = await boundedJSON(request);
+    } catch (error) {
+      throw new AgentEmailOperationsLeaseError(
+        error?.status === 413 ? "request body too large" :
+          "agent email operations lease request is invalid",
+        error?.status === 413 ? 413 : 400,
+        error?.status === 413
+          ? "agent_email_operations_lease_request_too_large"
+          : "agent_email_operations_lease_invalid",
+      );
+    }
+    const input = validateAgentEmailOperationsLeaseRequest(
+      url.pathname,
+      rawInput,
+    );
+    const stub = realmEmailAliasRegistryStub(env);
+    if (!stub) {
+      throw new AgentEmailOperationsLeaseError(
+        "agent email operations lease authority is unavailable",
+        503,
+        "agent_email_operations_lease_unavailable",
+      );
+    }
+    let response;
+    try {
+      response = await stub.fetch(
+        `https://realm-email-alias.internal${
+          internalAgentEmailOperationsLeasePath(url.pathname)
+        }`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(rawInput),
+        },
+      );
+    } catch {
+      throw new AgentEmailOperationsLeaseError(
+        "agent email operations lease authority is unavailable",
+        503,
+        "agent_email_operations_lease_unavailable",
+      );
+    }
+    let body;
+    try {
+      body = await response.json();
+    } catch {
+      throw new AgentEmailOperationsLeaseError(
+        "agent email operations lease authority returned an invalid response",
+        503,
+        "agent_email_operations_lease_response_invalid",
+      );
+    }
+    const validated = validateAgentEmailOperationsLeaseResponse(
+      url.pathname,
+      response.status,
+      body,
+      input,
+    );
+    return agentEmailOperationsLeaseJSON(validated, response.status);
+  } catch (error) {
+    return agentEmailOperationsLeaseErrorResponse(error);
+  }
 }
 
 export function isRealmEmailAliasAdminPath(pathname) {

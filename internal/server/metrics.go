@@ -178,8 +178,8 @@ func (m *runtimeMetrics) instrumentConfig(cfg Config) Config {
 		}
 	}
 	if operation := cfg.CreateAgent; operation != nil {
-		cfg.CreateAgent = func(ctx context.Context, accountID, realmID, name string) (Agent, error) {
-			result, err := operation(ctx, accountID, realmID, name)
+		cfg.CreateAgent = func(ctx context.Context, accountID, realmID string, in CreateAgentRequest) (Agent, error) {
+			result, err := operation(ctx, accountID, realmID, in)
 			m.observePlanLimitRejection(err, "agents_per_realm")
 			return result, err
 		}

@@ -439,9 +439,9 @@ func TestRuntimeMetricsObservePlanLimitRejectionsWithBoundedLabels(t *testing.T)
 				Dimension: "realms", Used: 1, Max: 1, Plan: "free",
 			}
 		},
-		CreateAgent: func(_ context.Context, _, _, name string) (Agent, error) {
+		CreateAgent: func(_ context.Context, _, _ string, in CreateAgentRequest) (Agent, error) {
 			dimension := "agents_per_realm"
-			if name == "legacy_agent_private_name" {
+			if in.Name == "legacy_agent_private_name" {
 				dimension = "agents"
 			}
 			return Agent{}, &PlanLimitError{
@@ -454,13 +454,13 @@ func TestRuntimeMetricsObservePlanLimitRejectionsWithBoundedLabels(t *testing.T)
 		context.Background(),
 		"account_private_identifier",
 		"realm_private_identifier",
-		"agent_private_name",
+		CreateAgentRequest{Name: "agent_private_name"},
 	)
 	_, _ = cfg.CreateAgent(
 		context.Background(),
 		"account_private_identifier",
 		"realm_private_identifier",
-		"legacy_agent_private_name",
+		CreateAgentRequest{Name: "legacy_agent_private_name"},
 	)
 
 	var output bytes.Buffer

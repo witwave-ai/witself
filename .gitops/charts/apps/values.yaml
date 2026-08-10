@@ -73,6 +73,18 @@ apps:
         retryCanaryAgentID: ""
         relayPublicKeysJSON: ""
         relayReplayWindow: 5m
+      # Production receive is an independent, exact-account cohort kill
+      # switch introduced with the v0.0.241 cell chart/image. Keep it dark in
+      # fleet values; no wildcard or implicit all-accounts mode exists.
+      receiveProduction:
+        enabled: false
+        domain: ""
+        acceptedLegacyDomains: []
+        audience: ""
+        accountIDs: []
+        retryCanaryAgentID: ""
+        relayPublicKeysJSON: ""
+        relayReplayWindow: 5m
     # Expand/activate gate for irreversible avatar creative-payload cleanup.
     # Keep false in the version rollout; flip only after all old writers drain.
     avatarPayloadCompactionEnabled: false

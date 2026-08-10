@@ -28,6 +28,7 @@ const canonicalAddress = `alpha.${example.realm_label}@${primaryDomain}`;
 const aliasAddress = `alpha.${aliasLabel}@${primaryDomain}`;
 const customAddress = `alpha.${aliasLabel}@${customDomain}`;
 const vectorNowMS = vector.metadata.timestamp * 1000;
+const rolloutAccount = "acc_aaaaaaaaaaaaaaaa";
 const allowLimiter = { async limit() { return { success: true }; } };
 
 function verdictPoints(points) {
@@ -39,12 +40,19 @@ function routeLookupPoints(points) {
 }
 
 function routeProjection(realmLabel, overrides = {}) {
+  const routeKind = overrides.route_kind ??
+    (realmLabel === example.realm_label ? "canonical" : "realm_alias");
+  const schemaVersion = overrides.schema_version ??
+    (routeKind === "custom_domain" ? 1 : 2);
   const projection = {
-    schema_version: 1,
+    schema_version: schemaVersion,
+    ...(routeKind === "custom_domain" || schemaVersion === 1
+      ? {}
+      : { account_id: rolloutAccount }),
     domain: primaryDomain,
     realm_label: realmLabel,
     realm_id: example.realm_id,
-    route_kind: realmLabel === example.realm_label ? "canonical" : "realm_alias",
+    route_kind: routeKind,
     state: "applied",
     controller_revision: 7,
     updated_at: new Date(vectorNowMS).toISOString(),
@@ -85,6 +93,7 @@ function dynamicEnv(routes, metrics = null, extra = {}) {
     RELAY_KEY_ID: vector.metadata.key_id,
     RELAY_ED25519_PRIVATE_KEY: vector.pkcs8_base64,
     AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS: ROUTE_PUBLIC_KEY_ENV,
+    AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: rolloutAccount,
     REALM_EMAIL_ALIAS_DELIVERY_ENABLED: "true",
     REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "true",
     REALM_ROUTE_COLD_MISS_LIMITER: allowLimiter,
@@ -544,6 +553,261 @@ test("fleet canonical delivery gate is exact-true and independent", async () => 
   );
   assert.equal(aliasRelayed, true);
   assert.deepEqual(alias.rejected, []);
+});
+
+test("managed account cohort tempfails held-back canonical and alias routes before content", async () => {
+  for (const [realmLabel, address, state] of [
+    [example.realm_label, canonicalAddress, "applied"],
+    [aliasLabel, aliasAddress, "applied"],
+    [aliasLabel, aliasAddress, "retired"],
+  ]) {
+    let rawReads = 0;
+    let fetchCalls = 0;
+    const points = [];
+    const mail = message({ to: address });
+    Object.defineProperty(mail, "raw", {
+      get() {
+        rawReads++;
+        throw new Error("held-back mail must not read content");
+      },
+    });
+    await assert.rejects(
+      () => handleEmail(
+        mail,
+        dynamicEnv(
+          { [realmLabel]: routeProjection(realmLabel, { state }) },
+          { writeDataPoint(point) { points.push(point); } },
+          { AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: "" },
+        ),
+        {
+          now: () => vectorNowMS,
+          fetch: async () => {
+            fetchCalls++;
+            throw new Error("held-back mail must not reach a cell");
+          },
+        },
+      ),
+      { message: "agent email relay temporarily unavailable" },
+    );
+    assert.deepEqual(mail.rejected, [], `${realmLabel}:${state}`);
+    assert.equal(rawReads, 0, `${realmLabel}:${state}`);
+    assert.equal(fetchCalls, 0, `${realmLabel}:${state}`);
+    assert.deepEqual(verdictPoints(points).at(-1).blobs, [
+      EDGE_METRICS_SCHEMA, "tempfail_account_cohort", "route",
+    ]);
+    assert.doesNotMatch(
+      JSON.stringify(points),
+      /acc_aaaaaaaaaaaaaaaa|@|realm_|agent_/i,
+    );
+  }
+});
+
+test("legacy managed v1 evidence cannot deliver even when the new cohort admits the account", async () => {
+  let rawReads = 0;
+  let controlPlaneCalls = 0;
+  const points = [];
+  const mail = message({ to: aliasAddress });
+  Object.defineProperty(mail, "raw", {
+    get() {
+      rawReads++;
+      throw new Error("legacy managed authority must not read content");
+    },
+  });
+  await assert.rejects(
+    () => handleEmail(
+      mail,
+      dynamicEnv(
+        { [aliasLabel]: routeProjection(aliasLabel, { schema_version: 1 }) },
+        { writeDataPoint(point) { points.push(point); } },
+        {
+          CONTROL_PLANE_URL: "https://control.example/",
+          CONTROL_PLANE_EDGE_TOKEN: "edge-token-1234567890",
+        },
+      ),
+      {
+        now: () => vectorNowMS,
+        routeLookupState: createRouteLookupState(),
+        fetch: async () => {
+          controlPlaneCalls++;
+          return new Response("old control plane unavailable", { status: 503 });
+        },
+      },
+    ),
+    { message: "agent email relay temporarily unavailable" },
+  );
+  assert.equal(controlPlaneCalls, 1);
+  assert.equal(rawReads, 0);
+  assert.deepEqual(mail.rejected, []);
+  assert.equal(verdictPoints(points).at(-1).blobs[1], "tempfail_route_lookup");
+});
+
+test("new edge with a v240 control plane tempfails legacy authority while dark", async () => {
+  let rawReads = 0;
+  let controlPlaneCalls = 0;
+  const mail = message({ to: aliasAddress });
+  Object.defineProperty(mail, "raw", {
+    get() {
+      rawReads++;
+      throw new Error("mixed-version route must not read content");
+    },
+  });
+  await assert.rejects(
+    () => handleEmail(
+      mail,
+      coldRouteEnv(null, {
+        AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: rolloutAccount,
+        REALM_EMAIL_ALIAS_DELIVERY_ENABLED: "false",
+      }),
+      {
+        now: () => vectorNowMS,
+        routeLookupState: createRouteLookupState(),
+        fetch: async () => {
+          controlPlaneCalls++;
+          return Response.json(routeProjection(aliasLabel, { schema_version: 1 }));
+        },
+      },
+    ),
+    { message: "agent email relay temporarily unavailable" },
+  );
+  assert.equal(controlPlaneCalls, 1);
+  assert.equal(rawReads, 0);
+  assert.deepEqual(mail.rejected, []);
+});
+
+test("removed account makes stale managed v2 evidence retry without content or bounce", async () => {
+  let rawReads = 0;
+  let controlPlaneCalls = 0;
+  const stale = routeProjection(aliasLabel, {
+    updated_at: new Date(vectorNowMS - 301_000).toISOString(),
+  });
+  const mail = message({ to: aliasAddress });
+  Object.defineProperty(mail, "raw", {
+    get() {
+      rawReads++;
+      throw new Error("removed account must not read content");
+    },
+  });
+  await assert.rejects(
+    () => handleEmail(
+      mail,
+      dynamicEnv(
+        { [aliasLabel]: stale },
+        null,
+        {
+          AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: "",
+          CONTROL_PLANE_URL: "https://control.example/",
+          CONTROL_PLANE_EDGE_TOKEN: "edge-token-1234567890",
+        },
+      ),
+      {
+        now: () => vectorNowMS,
+        routeLookupState: createRouteLookupState(),
+        fetch: async () => {
+          controlPlaneCalls++;
+          return Response.json({
+            code: "managed_email_delivery_cohort_held_back",
+          }, { status: 409 });
+        },
+      },
+    ),
+    { message: "agent email relay temporarily unavailable" },
+  );
+  assert.equal(controlPlaneCalls, 1);
+  assert.equal(rawReads, 0);
+  assert.deepEqual(mail.rejected, []);
+});
+
+test("invalid managed account cohorts fail closed as configuration errors", async () => {
+  for (const value of [
+    "*",
+    "acc_aaaaaaaaaaaaaaaa ",
+    "acc_bbbbbbbbbbbbbbbb,acc_aaaaaaaaaaaaaaaa",
+  ]) {
+    let rawReads = 0;
+    let fetchCalls = 0;
+    const points = [];
+    const mail = message({ to: aliasAddress });
+    Object.defineProperty(mail, "raw", {
+      get() {
+        rawReads++;
+        throw new Error("invalid cohort must not read content");
+      },
+    });
+    await assert.rejects(
+      () => handleEmail(
+        mail,
+        dynamicEnv(
+          { [aliasLabel]: routeProjection(aliasLabel) },
+          { writeDataPoint(point) { points.push(point); } },
+          { AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: value },
+        ),
+        {
+          now: () => vectorNowMS,
+          fetch: async () => { fetchCalls++; },
+        },
+      ),
+      { message: "agent email relay temporarily unavailable" },
+    );
+    assert.deepEqual(mail.rejected, []);
+    assert.equal(rawReads, 0);
+    assert.equal(fetchCalls, 0);
+    assert.equal(verdictPoints(points).at(-1).blobs[1], "tempfail_configuration");
+  }
+});
+
+test("control-plane held-back response stays temporary and cannot become unknown", async () => {
+  let rawReads = 0;
+  let controlPlaneCalls = 0;
+  const mail = message({ to: aliasAddress });
+  Object.defineProperty(mail, "raw", {
+    get() {
+      rawReads++;
+      throw new Error("held-back fallback must not read content");
+    },
+  });
+  await assert.rejects(
+    () => handleEmail(mail, coldRouteEnv(null, {
+      AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: rolloutAccount,
+    }), {
+      now: () => vectorNowMS,
+      routeLookupState: createRouteLookupState(),
+      fetch: async () => {
+        controlPlaneCalls++;
+        return Response.json({
+          code: "managed_email_delivery_cohort_held_back",
+        }, { status: 409 });
+      },
+    }),
+    { message: "agent email relay temporarily unavailable" },
+  );
+  assert.equal(controlPlaneCalls, 1);
+  assert.equal(rawReads, 0);
+  assert.deepEqual(mail.rejected, []);
+});
+
+test("managed cohort has no authority over independently gated custom domains", async () => {
+  let relayed = false;
+  const mail = message({ to: customAddress });
+  await handleEmail(
+    mail,
+    dynamicEnv(
+      { [aliasLabel]: customRouteProjection() },
+      null,
+      {
+        AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED: "true",
+        AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: "",
+      },
+    ),
+    {
+      now: () => vectorNowMS,
+      fetch: async () => {
+        relayed = true;
+        return Response.json({ verdict: "accepted" });
+      },
+    },
+  );
+  assert.equal(relayed, true);
+  assert.deepEqual(mail.rejected, []);
 });
 
 test("custom-domain delivery gate is exact-true before lookup, limiters, and raw MIME", async () => {

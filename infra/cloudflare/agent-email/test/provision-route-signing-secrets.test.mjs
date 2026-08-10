@@ -33,6 +33,12 @@ const cpVersionID = "66666666-7777-4888-8999-aaaaaaaaaaaa";
 const edgeDeploymentID = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
 const edgeVersionID = "01234567-89ab-4cde-8f01-23456789abcd";
 const token = "C3dfjS1m6fM9-7QpL2vNx8ZrK4aW0uHyB5eTgDqU";
+const leaseOperation = "route_signing_secret_provision";
+const leaseEvidence = Object.freeze({
+  schema_version: "witself.agent-email-operations-lease-evidence.v1",
+  generation: 7,
+  operation: leaseOperation,
+});
 
 function keyMaterial() {
   const pair = generateKeyPairSync("ed25519");
@@ -53,7 +59,10 @@ function configs(publicKey) {
         "AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY",
         "CONTROL_PLANE_EDGE_TOKEN",
       ]},
-      "vars": {"AGENT_EMAIL_ROUTE_SIGNING_KEY_ID": "route-2026-08"},
+      "vars": {
+        "AGENT_EMAIL_ROUTE_SIGNING_KEY_ID": "route-2026-08",
+        "CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST": ""
+      },
     }`,
     [EDGE_CONFIG]: JSON.stringify({
       name: EMAIL_EDGE_WORKER,
@@ -64,6 +73,7 @@ function configs(publicKey) {
         AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS: JSON.stringify({
           "route-2026-08": publicKey,
         }),
+        AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: "",
         REALM_EMAIL_ALIAS_DELIVERY_ENABLED: "false",
         REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false",
       },
@@ -155,6 +165,8 @@ function runtimeFixture({
   material = keyMaterial(),
   fallbackToken = token,
   mutateJSON = () => {},
+  leaseCollision = false,
+  renewalFailureAt = 0,
 } = {}) {
   const files = configs(material.publicKey);
   const privateField = sensitiveField(privateFieldID, "private-key");
@@ -166,6 +178,7 @@ function runtimeFixture({
   const fallbackField = sensitiveField(tokenFieldID, "token");
   const calls = [];
   const puts = [];
+  const leaseEvents = [];
 
   function response(command, args) {
     if (command === "wrangler") {
@@ -178,10 +191,13 @@ function runtimeFixture({
       if (args[0] === "versions") {
         return worker === CONTROL_PLANE_WORKER
           ? version(cpVersionID, puts.length >= 3 ? [
+            plain("CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", ""),
             secret("AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY"),
             secret("CONTROL_PLANE_EDGE_TOKEN"),
-          ] : [])
+          ] : [plain("CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", "")])
           : version(edgeVersionID, [
+            plain("CONTROL_PLANE_URL", "https://self.witwave.ai/"),
+            plain("AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", ""),
             plain("REALM_EMAIL_ALIAS_DELIVERY_ENABLED", "false"),
             plain("REALM_EMAIL_CANONICAL_DELIVERY_ENABLED", "false"),
             secret("RELAY_ED25519_PRIVATE_KEY"),
@@ -255,13 +271,41 @@ function runtimeFixture({
       calls.push({ type: "receipt-write", path, receipt });
     },
   };
-  return { runtime, calls, puts, material, files };
+  const withLease = async (operation, work, leaseOptions) => {
+    leaseEvents.push({
+      type: "acquire",
+      operation,
+      endpoint: leaseOptions?.endpoint,
+      token_matched: leaseOptions?.token === fallbackToken,
+    });
+    if (leaseCollision) {
+      throw new Error("another agent email operation already holds the lease");
+    }
+    let renewalCount = 0;
+    try {
+      return await work({
+        renew: async () => {
+          renewalCount += 1;
+          leaseEvents.push({ type: "renew", count: renewalCount });
+          if (renewalCount === renewalFailureAt) {
+            throw new Error("agent email operations lease renewal failed");
+          }
+        },
+        evidence: () => leaseEvidence,
+      });
+    } finally {
+      leaseEvents.push({ type: "release" });
+    }
+  };
+  return { runtime, calls, puts, material, files, withLease, leaseEvents };
 }
 
-test("provisions verified values only after complete dark preflight and both reveals", () => {
+test("provisions verified values only after complete dark preflight and both reveals", async () => {
   const fixture = runtimeFixture();
   const environment = {
     CLOUDFLARE_API_TOKEN: "existing-auth",
+    CONTROL_PLANE_EDGE_TOKEN: "must-not-reach-wrangler",
+    CONTROL_PLANE_URL: "https://attacker.invalid/",
     CLOUDFLARE_API_BASE_URL: "https://attacker.invalid",
     CF_API_BASE_URL: "https://attacker.invalid",
     WRANGLER_API_ENVIRONMENT: "staging",
@@ -281,18 +325,22 @@ test("provisions verified values only after complete dark preflight and both rev
     WITSELF_FAKE_PROVIDER_LOG: "/tmp/unsafe-witself.log",
     WITSELF_HOME: "/safe/witself-home",
   };
-  const receipt = provisionRouteSigningSecrets(options(), {
+  const receipt = await provisionRouteSigningSecrets(options(), {
     runtime: fixture.runtime,
     environment,
+    withLease: fixture.withLease,
   });
 
   assert.equal(receipt.outcome, "provisioned");
+  assert.equal(receipt.schema, "witself.agent-email-secret-provisioning.v2");
   assert.equal(receipt.safeguards.route_keypair_verified, true);
   assert.equal(
     receipt.safeguards.exact_same_fallback_value_uploaded_to_both_targets,
     true,
   );
   assert.equal(receipt.safeguards.tagged_redeploy_required, true);
+  assert.equal(receipt.safeguards.serialized_by_global_operations_lease, true);
+  assert.deepEqual(receipt.operations_lease, leaseEvidence);
   assert.equal(fixture.puts.length, 3);
   assert.deepEqual(fixture.puts.map((put) => [
     put.args[2],
@@ -334,8 +382,24 @@ test("provisions verified values only after complete dark preflight and both rev
   assert.equal(
     fixture.calls.filter((call) =>
       call.command === "wrangler" && call.type === "json").length,
-    18,
+    24,
   );
+  assert.deepEqual(fixture.leaseEvents, [
+    {
+      type: "acquire",
+      operation: leaseOperation,
+      endpoint: "https://self.witwave.ai",
+      token_matched: true,
+    },
+    { type: "renew", count: 1 },
+    { type: "renew", count: 2 },
+    { type: "renew", count: 3 },
+    { type: "renew", count: 4 },
+    { type: "renew", count: 5 },
+    { type: "renew", count: 6 },
+    { type: "renew", count: 7 },
+    { type: "release" },
+  ]);
 
   for (const put of fixture.puts) {
     assert.equal(put.runOptions.env.CLOUDFLARE_API_TOKEN, "existing-auth");
@@ -357,6 +421,10 @@ test("provisions verified values only after complete dark preflight and both rev
       "NODE_DEBUG",
       "NODE_V8_COVERAGE",
       "SSLKEYLOGFILE",
+      "CONTROL_PLANE_EDGE_TOKEN",
+      "CONTROL_PLANE_URL",
+      "WITSELF_CONTROL_PLANE",
+      "WITSELF_ENDPOINT",
     ]) assert.equal(Object.hasOwn(put.runOptions.env, name), false);
   }
   for (const call of fixture.calls.filter((item) =>
@@ -367,6 +435,12 @@ test("provisions verified values only after complete dark preflight and both rev
     assert.equal(call.runOptions.env.WRANGLER_SEND_METRICS, "false");
     assert.equal(call.runOptions.env.WRANGLER_SEND_ERROR_REPORTS, "false");
     assert.equal(Object.hasOwn(call.runOptions.env, "WRANGLER_LOG"), false);
+    for (const name of [
+      "CONTROL_PLANE_EDGE_TOKEN",
+      "CONTROL_PLANE_URL",
+      "WITSELF_CONTROL_PLANE",
+      "WITSELF_ENDPOINT",
+    ]) assert.equal(Object.hasOwn(call.runOptions.env, name), false);
   }
   for (const call of fixture.calls.filter((item) => item.command === "witself")) {
     assert.equal(call.runOptions.env.WITSELF_HOME, "/safe/witself-home");
@@ -388,7 +462,100 @@ test("provisions verified values only after complete dark preflight and both rev
   assert.equal(rendered.includes(fixture.material.publicKey), false);
 });
 
-test("rejects an enabled remote delivery gate before any Witself access", () => {
+test("lease collision refuses every secret write without exposing the desired token", async () => {
+  const fixture = runtimeFixture({ leaseCollision: true });
+  await assert.rejects(
+    provisionRouteSigningSecrets(options(), {
+      runtime: fixture.runtime,
+      withLease: fixture.withLease,
+    }),
+    /another agent email operation already holds the lease/,
+  );
+  assert.equal(fixture.puts.length, 0);
+  assert.equal(
+    fixture.calls.some((call) => call.type === "receipt-write"),
+    false,
+  );
+  assert.deepEqual(fixture.leaseEvents, [{
+    type: "acquire",
+    operation: leaseOperation,
+    endpoint: "https://self.witwave.ai",
+    token_matched: true,
+  }]);
+  assert.equal(JSON.stringify(fixture.leaseEvents).includes(token), false);
+});
+
+test("renewal loss after a bounded write stops the ceremony and releases the lease", async () => {
+  const fixture = runtimeFixture({ renewalFailureAt: 2 });
+  await assert.rejects(
+    provisionRouteSigningSecrets(options(), {
+      runtime: fixture.runtime,
+      withLease: fixture.withLease,
+    }),
+    /operations lease renewal failed/,
+  );
+  assert.equal(fixture.puts.length, 1);
+  assert.equal(
+    fixture.calls.some((call) => call.type === "receipt-write"),
+    false,
+  );
+  assert.deepEqual(fixture.leaseEvents.slice(-3), [
+    { type: "renew", count: 1 },
+    { type: "renew", count: 2 },
+    { type: "release" },
+  ]);
+});
+
+test("noncanonical active edge lease origin is rejected before acquire or mutation", async () => {
+  const fixture = runtimeFixture({
+    mutateJSON({ command, args, value }) {
+      if (command === "wrangler" && args[0] === "versions" &&
+          args.includes(EMAIL_EDGE_WORKER)) {
+        value.resources.bindings.find(
+          (binding) => binding.name === "CONTROL_PLANE_URL",
+        ).text = "https://attacker.invalid/";
+      }
+    },
+  });
+  await assert.rejects(
+    provisionRouteSigningSecrets(options(), {
+      runtime: fixture.runtime,
+      withLease: fixture.withLease,
+    }),
+    /operations lease origin is missing or invalid/,
+  );
+  assert.equal(fixture.leaseEvents.length, 0);
+  assert.equal(fixture.puts.length, 0);
+});
+
+test("leased reinspection rejects endpoint authority drift before mutation", async () => {
+  const fixture = runtimeFixture({
+    mutateJSON({ command, args, value }) {
+      const reveals = fixture.calls.filter((call) =>
+        call.command === "witself" && call.args?.[1] === "reveal").length;
+      if (reveals === 2 && command === "wrangler" && args[0] === "versions" &&
+          args.includes(EMAIL_EDGE_WORKER)) {
+        value.resources.bindings.find(
+          (binding) => binding.name === "CONTROL_PLANE_URL",
+        ).text = "https://attacker.invalid/";
+      }
+    },
+  });
+  await assert.rejects(
+    provisionRouteSigningSecrets(options(), {
+      runtime: fixture.runtime,
+      withLease: fixture.withLease,
+    }),
+    /operations lease origin is missing or invalid/,
+  );
+  assert.equal(fixture.puts.length, 0);
+  assert.deepEqual(fixture.leaseEvents.map((event) => event.type), [
+    "acquire",
+    "release",
+  ]);
+});
+
+test("rejects an enabled remote delivery gate before any Witself access", async () => {
   const fixture = runtimeFixture({
     mutateJSON({ command, args, value }) {
       if (command === "wrangler" && args[0] === "secret" &&
@@ -397,15 +564,18 @@ test("rejects an enabled remote delivery gate before any Witself access", () => 
       }
     },
   });
-  assert.throws(
-    () => provisionRouteSigningSecrets(options(), { runtime: fixture.runtime }),
+  await assert.rejects(
+    provisionRouteSigningSecrets(options(), {
+      runtime: fixture.runtime,
+      withLease: fixture.withLease,
+    }),
     /must be dark/,
   );
   assert.equal(fixture.calls.some((call) => call.command === "witself"), false);
   assert.equal(fixture.puts.length, 0);
 });
 
-test("rechecks dark gates after reveals and still refuses every mutation", () => {
+test("rechecks dark gates after reveals and still refuses every mutation", async () => {
   const fixture = runtimeFixture();
   const original = fixture.runtime.json;
   fixture.runtime.json = (command, args, runOptions) => {
@@ -418,14 +588,18 @@ test("rechecks dark gates after reveals and still refuses every mutation", () =>
     }
     return value;
   };
-  assert.throws(
-    () => provisionRouteSigningSecrets(options(), { runtime: fixture.runtime }),
+  await assert.rejects(
+    provisionRouteSigningSecrets(options(), {
+      runtime: fixture.runtime,
+      withLease: fixture.withLease,
+    }),
     /must be dark/,
   );
   assert.equal(fixture.puts.length, 0);
+  assert.equal(fixture.leaseEvents.at(-1)?.type, "release");
 });
 
-test("rejects malformed reveal envelopes before any Cloudflare mutation", () => {
+test("rejects malformed reveal envelopes before any Cloudflare mutation", async () => {
   const fixture = runtimeFixture({
     mutateJSON({ command, args, value }) {
       if (command === "witself" && args[1] === "reveal" &&
@@ -434,14 +608,17 @@ test("rejects malformed reveal envelopes before any Cloudflare mutation", () => 
       }
     },
   });
-  assert.throws(
-    () => provisionRouteSigningSecrets(options(), { runtime: fixture.runtime }),
+  await assert.rejects(
+    provisionRouteSigningSecrets(options(), {
+      runtime: fixture.runtime,
+      withLease: fixture.withLease,
+    }),
     /fallback-token reveal envelope is invalid/,
   );
   assert.equal(fixture.puts.length, 0);
 });
 
-test("post-write verification failure cannot produce a success receipt", () => {
+test("post-write verification failure cannot produce a success receipt", async () => {
   const fixture = runtimeFixture();
   const original = fixture.runtime.json;
   fixture.runtime.json = (command, args, runOptions) => {
@@ -454,8 +631,11 @@ test("post-write verification failure cannot produce a success receipt", () => {
     }
     return value;
   };
-  assert.throws(
-    () => provisionRouteSigningSecrets(options(), { runtime: fixture.runtime }),
+  await assert.rejects(
+    provisionRouteSigningSecrets(options(), {
+      runtime: fixture.runtime,
+      withLease: fixture.withLease,
+    }),
     /post-write Worker secret verification failed.*remain dark/,
   );
   assert.equal(fixture.puts.length, 3);
@@ -463,9 +643,10 @@ test("post-write verification failure cannot produce a success receipt", () => {
     fixture.calls.some((call) => call.type === "receipt-write"),
     false,
   );
+  assert.equal(fixture.leaseEvents.at(-1)?.type, "release");
 });
 
-test("rejects a private key that does not match the configured public key", () => {
+test("rejects a private key that does not match the configured public key", async () => {
   const expected = keyMaterial();
   const different = keyMaterial();
   const fixture = runtimeFixture({ material: expected });
@@ -475,17 +656,23 @@ test("rejects a private key that does not match the configured public key", () =
         args[2] === "route-signing") result.value = different.privateKey;
     return result;
   })(fixture.runtime.json);
-  assert.throws(
-    () => provisionRouteSigningSecrets(options(), { runtime: fixture.runtime }),
+  await assert.rejects(
+    provisionRouteSigningSecrets(options(), {
+      runtime: fixture.runtime,
+      withLease: fixture.withLease,
+    }),
     /does not match the active public key/,
   );
   assert.equal(fixture.puts.length, 0);
 });
 
-test("rejects a weak fallback token before any Cloudflare mutation", () => {
+test("rejects a weak fallback token before any Cloudflare mutation", async () => {
   const fixture = runtimeFixture({ fallbackToken: "a".repeat(64) });
-  assert.throws(
-    () => provisionRouteSigningSecrets(options(), { runtime: fixture.runtime }),
+  await assert.rejects(
+    provisionRouteSigningSecrets(options(), {
+      runtime: fixture.runtime,
+      withLease: fixture.withLease,
+    }),
     /high-entropy token policy/,
   );
   assert.equal(fixture.puts.length, 0);
@@ -582,6 +769,9 @@ test("Wrangler environment is fail-closed against redirection and logging overri
     WRANGLER_WRITE_LOGS: "true",
     WRANGLER_OUTPUT_FILE_PATH: "/tmp/leak",
     WRANGLER_CI_OVERRIDE_NAME: "wrong-worker",
+    CONTROL_PLANE_EDGE_TOKEN: "must-not-reach-wrangler",
+    CONTROL_PLANE_URL: "https://attacker.invalid/",
+    WITSELF_CONTROL_PLANE: "https://attacker.invalid/",
     NODE_OPTIONS: "--inspect",
   });
   assert.equal(sanitized.PATH, "/safe/bin");
@@ -593,6 +783,9 @@ test("Wrangler environment is fail-closed against redirection and logging overri
   assert.equal(Object.hasOwn(sanitized, "CLOUDFLARE_API_BASE_URL"), false);
   assert.equal(Object.hasOwn(sanitized, "WRANGLER_OUTPUT_FILE_PATH"), false);
   assert.equal(Object.hasOwn(sanitized, "WRANGLER_CI_OVERRIDE_NAME"), false);
+  assert.equal(Object.hasOwn(sanitized, "CONTROL_PLANE_EDGE_TOKEN"), false);
+  assert.equal(Object.hasOwn(sanitized, "CONTROL_PLANE_URL"), false);
+  assert.equal(Object.hasOwn(sanitized, "WITSELF_CONTROL_PLANE"), false);
   assert.equal(Object.hasOwn(sanitized, "NODE_OPTIONS"), false);
 
   const inspection = sanitizedWranglerInspectionEnvironment({

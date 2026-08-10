@@ -15,6 +15,7 @@ const canonicalLabel = "abcdefghijkl2345";
 const aliasLabel = "acme-west";
 const customDomain = "agents.example.com";
 const nowMS = Date.parse("2026-08-01T12:00:00.000Z");
+const accountID = "acc_aaaaaaaaaaaaaaaa";
 
 test("configured edge domains are bounded, ordered, canonical, and unique", () => {
   assert.deepEqual(configuredAgentEmailDomains({
@@ -33,7 +34,8 @@ test("configured edge domains are bounded, ordered, canonical, and unique", () =
 
 function projection(realmLabel, overrides = {}) {
   return {
-    schema_version: 1,
+    schema_version: 2,
+    account_id: accountID,
     domain,
     realm_label: realmLabel,
     realm_id: realmID,
@@ -50,6 +52,7 @@ function projection(realmLabel, overrides = {}) {
 
 function customProjection(state = "applied", overrides = {}) {
   const value = projection(aliasLabel, {
+    schema_version: 1,
     domain: customDomain,
     route_kind: "custom_domain",
     state,
@@ -62,6 +65,7 @@ function customProjection(state = "applied", overrides = {}) {
       : {}),
     ...overrides,
   });
+  if (!Object.hasOwn(overrides, "account_id")) delete value.account_id;
   if (state !== "applied") {
     delete value.cell_audience;
     delete value.ingest_url;
@@ -88,6 +92,30 @@ test("canonical and realm-alias addresses share one strict route shape", () => {
   assert.equal(canonicalRoute.ingest_url, aliasRoute.ingest_url);
   assert.equal(canonicalRoute.route_kind, "canonical");
   assert.equal(aliasRoute.route_kind, "realm_alias");
+  assert.equal(aliasRoute.schema_version, 2);
+});
+
+test("legacy managed v1 is readable only as account-authority migration evidence", () => {
+  const legacy = projection(aliasLabel, { schema_version: 1 });
+  delete legacy.account_id;
+  const route = validateRealmRouteProjection(legacy, domain, aliasLabel);
+  assert.equal(route.schema_version, 1);
+  assert.equal(Object.hasOwn(route, "account_id"), false);
+
+  assert.throws(
+    () => validateRealmRouteProjection(
+      projection(aliasLabel, { schema_version: 1 }),
+      domain,
+      aliasLabel,
+    ),
+    /schema is invalid/,
+  );
+  const currentMissingAccount = projection(aliasLabel);
+  delete currentMissingAccount.account_id;
+  assert.throws(
+    () => validateRealmRouteProjection(currentMissingAccount, domain, aliasLabel),
+    /schema is invalid/,
+  );
 });
 
 test("custom-domain projections are an exact schema-v1 union variant", () => {
@@ -182,12 +210,12 @@ test("suspended and retired routes carry no destination authority", () => {
   );
 });
 
-test("projection rejects malformed, misbound, or identity-bearing rows", () => {
+test("projection rejects malformed, misbound, or extraneous identity rows", () => {
   for (const [changed, pattern] of [
     [{ route_kind: "canonical" }, /kind is inconsistent/],
     [{ realm_id: "realm_0000000000000000" }, /realm id is invalid/],
     [{ state: "active" }, /schema is invalid|state is invalid/],
-    [{ account_id: "account_aaaaaaaaaaaaaaaa" }, /schema is invalid/],
+    [{ account_id: "bad account" }, /account id is invalid/],
     [{ agent_id: "agent_aaaaaaaaaaaaaaa2" }, /schema is invalid/],
     [{ domain: "other.example" }, /lookup binding is inconsistent/],
     [{ realm_label: "other-realm" }, /lookup binding is inconsistent/],

@@ -110,7 +110,7 @@
     "agentEmail": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["receivePilot"],
+      "required": ["receivePilot", "receiveProduction"],
       "properties": {
         "receivePilot": {
           "type": "object",
@@ -162,6 +162,61 @@
                   },
                   "realmID": { "pattern": "^realm_[a-z2-7]{16}$" },
                   "agentIDs": { "minItems": 5, "maxItems": 10 },
+                  "relayPublicKeysJSON": { "minLength": 2 }
+                }
+              }
+            }
+          ]
+        },
+        "receiveProduction": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "domain", "acceptedLegacyDomains", "audience", "accountIDs", "retryCanaryAgentID", "relayPublicKeysJSON", "relayReplayWindow"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "domain": { "type": "string" },
+            "acceptedLegacyDomains": {
+              "type": "array",
+              "maxItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"
+              }
+            },
+            "audience": { "type": "string" },
+            "accountIDs": {
+              "type": "array",
+              "maxItems": 100,
+              "uniqueItems": true,
+              "items": { "type": "string", "pattern": "^acc_[a-z2-7]{16}$" }
+            },
+            "retryCanaryAgentID": {
+              "type": "string",
+              "pattern": "^$|^agent_[a-z2-7]{16}$"
+            },
+            "relayPublicKeysJSON": { "type": "string" },
+            "relayReplayWindow": { "type": "string", "minLength": 1 }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": { "enabled": { "const": true } },
+                "required": ["enabled"]
+              },
+              "then": {
+                "properties": {
+                  "domain": {
+                    "minLength": 1,
+                    "maxLength": 253,
+                    "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$"
+                  },
+                  "audience": {
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[a-z]([a-z0-9-]*[a-z0-9])?$"
+                  },
+                  "accountIDs": { "minItems": 1, "maxItems": 100 },
                   "relayPublicKeysJSON": { "minLength": 2 }
                 }
               }

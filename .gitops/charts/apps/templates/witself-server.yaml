@@ -5,6 +5,10 @@
 {{- $bootstrapMountPath := default (printf "/.witself/tokens/%s/bootstrap.token" (required "cell.name is required" .Values.cell.name)) $bootstrap.mountPath -}}
 {{- $targetName := default "witself-db" $db.targetName -}}
 {{- $emailPilot := .Values.apps.witselfServer.agentEmail.receivePilot -}}
+{{- $emailProduction := .Values.apps.witselfServer.agentEmail.receiveProduction -}}
+{{- if and $emailPilot.enabled $emailProduction.enabled -}}
+{{- fail "apps.witselfServer agent-email pilot and production receive cannot both be enabled" -}}
+{{- end -}}
 {{- if $emailPilot.enabled -}}
 {{- $agentCount := len $emailPilot.agentIDs -}}
 {{- if or (lt $agentCount 5) (gt $agentCount 10) -}}
@@ -44,6 +48,45 @@
 {{- end -}}
 {{- end -}}
 {{- end -}}
+{{- if $emailProduction.enabled -}}
+{{- $_ := required "apps.witselfServer.agentEmail.receiveProduction.domain is required when enabled" $emailProduction.domain -}}
+{{- $_ := required "apps.witselfServer.agentEmail.receiveProduction.audience is required when enabled" $emailProduction.audience -}}
+{{- $_ := required "apps.witselfServer.agentEmail.receiveProduction.relayPublicKeysJSON is required when enabled" $emailProduction.relayPublicKeysJSON -}}
+{{- $_ := required "apps.witselfServer.agentEmail.receiveProduction.relayReplayWindow is required when enabled" $emailProduction.relayReplayWindow -}}
+{{- $accountCount := len $emailProduction.accountIDs -}}
+{{- if or (lt $accountCount 1) (gt $accountCount 100) -}}
+{{- fail "apps.witselfServer.agentEmail.receiveProduction.accountIDs must contain 1-100 account IDs when enabled" -}}
+{{- end -}}
+{{- if ne (join "," $emailProduction.accountIDs) (join "," (sortAlpha $emailProduction.accountIDs)) -}}
+{{- fail "apps.witselfServer.agentEmail.receiveProduction.accountIDs must be in canonical sorted order" -}}
+{{- end -}}
+{{- if gt (len $emailProduction.acceptedLegacyDomains) 1 -}}
+{{- fail "apps.witselfServer.agentEmail.receiveProduction.acceptedLegacyDomains may contain at most 1 domain" -}}
+{{- end -}}
+{{- $seenProductionDomains := dict $emailProduction.domain true -}}
+{{- range $legacyDomain := $emailProduction.acceptedLegacyDomains -}}
+{{- if not (regexMatch "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$" $legacyDomain) -}}
+{{- fail (printf "apps.witselfServer.agentEmail.receiveProduction.acceptedLegacyDomains contains invalid domain %q" $legacyDomain) -}}
+{{- end -}}
+{{- if hasKey $seenProductionDomains $legacyDomain -}}
+{{- fail (printf "apps.witselfServer.agentEmail.receiveProduction.acceptedLegacyDomains contains primary or duplicate domain %q" $legacyDomain) -}}
+{{- end -}}
+{{- $_ := set $seenProductionDomains $legacyDomain true -}}
+{{- end -}}
+{{- $seenProductionAccounts := dict -}}
+{{- range $accountID := $emailProduction.accountIDs -}}
+{{- if not (regexMatch "^acc_[a-z2-7]{16}$" $accountID) -}}
+{{- fail (printf "apps.witselfServer.agentEmail.receiveProduction.accountIDs contains invalid account ID %q" $accountID) -}}
+{{- end -}}
+{{- if hasKey $seenProductionAccounts $accountID -}}
+{{- fail (printf "apps.witselfServer.agentEmail.receiveProduction.accountIDs contains duplicate account ID %q" $accountID) -}}
+{{- end -}}
+{{- $_ := set $seenProductionAccounts $accountID true -}}
+{{- end -}}
+{{- if and $emailProduction.retryCanaryAgentID (not (regexMatch "^agent_[a-z2-7]{16}$" $emailProduction.retryCanaryAgentID)) -}}
+{{- fail "apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentID must be one canonical agent ID" -}}
+{{- end -}}
+{{- end -}}
 {{- $serverEmailPilot := dict "enabled" $emailPilot.enabled "domain" $emailPilot.domain "audience" $emailPilot.audience "realmID" $emailPilot.realmID "agentIDs" $emailPilot.agentIDs "retryCanaryAgentID" $emailPilot.retryCanaryAgentID "relayPublicKeysJSON" $emailPilot.relayPublicKeysJSON "relayReplayWindow" $emailPilot.relayReplayWindow -}}
 {{- $emailDomainCutoverReady := and
       (semverCompare ">=0.0.232-0" .Values.apps.witselfServer.chartVersion)
@@ -54,6 +97,16 @@
 {{- if and $emailPilot.enabled (gt (len $emailPilot.acceptedLegacyDomains) 0) -}}
 {{- $_ := set $serverEmailPilot "domain" (first $emailPilot.acceptedLegacyDomains) -}}
 {{- end -}}
+{{- end -}}
+{{- $serverAgentEmail := dict "receivePilot" $serverEmailPilot -}}
+{{- $emailProductionReady := and
+      (semverCompare ">=0.0.241-0" .Values.apps.witselfServer.chartVersion)
+      (semverCompare ">=0.0.241-0" .Values.apps.witselfServer.imageTag) -}}
+{{- if and $emailProduction.enabled (not $emailProductionReady) -}}
+{{- fail "apps.witselfServer.agentEmail.receiveProduction requires chart and image v0.0.241 or newer" -}}
+{{- end -}}
+{{- if $emailProductionReady -}}
+{{- $_ := set $serverAgentEmail "receiveProduction" $emailProduction -}}
 {{- end -}}
 {{- $workerValues := deepCopy .Values.apps.witselfServer.worker -}}
 {{- if not (semverCompare ">=0.0.224-0" .Values.apps.witselfServer.chartVersion) -}}
@@ -66,7 +119,7 @@
 {{- if and $backup.validationEnabled (not $backup.enabled) -}}
 {{- fail "apps.witselfServer.backup.validationEnabled requires apps.witselfServer.backup.enabled" -}}
 {{- end -}}
-{{- $serverValues := dict "backend" (dict "kind" .Values.apps.witselfServer.backendKind) "cell" (dict "name" .Values.cell.name) "backup" (dict "validation" (dict "enabled" $backup.validationEnabled)) "features" (dict "factDeletion" (dict "enabled" .Values.apps.witselfServer.factDeletionEnabled)) "agentEmail" (dict "receivePilot" $serverEmailPilot) "avatar" (dict "payloadCompaction" (dict "enabled" .Values.apps.witselfServer.avatarPayloadCompactionEnabled)) "worker" $workerValues "image" (dict "tag" .Values.apps.witselfServer.imageTag) "database" (dict "existingSecret" (dict "name" $targetName "urlKey" $db.urlKey)) -}}
+{{- $serverValues := dict "backend" (dict "kind" .Values.apps.witselfServer.backendKind) "cell" (dict "name" .Values.cell.name) "backup" (dict "validation" (dict "enabled" $backup.validationEnabled)) "features" (dict "factDeletion" (dict "enabled" .Values.apps.witselfServer.factDeletionEnabled)) "agentEmail" $serverAgentEmail "avatar" (dict "payloadCompaction" (dict "enabled" .Values.apps.witselfServer.avatarPayloadCompactionEnabled)) "worker" $workerValues "image" (dict "tag" .Values.apps.witselfServer.imageTag) "database" (dict "existingSecret" (dict "name" $targetName "urlKey" $db.urlKey)) -}}
 {{- if $backup.enabled -}}
 {{- $_ := set $serverValues.backup "existingSecret" (dict "name" (default "witself-provision" $backup.targetName) "tokenKey" (default "backup_token" $backup.tokenKey)) -}}
 {{- end -}}

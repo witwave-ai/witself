@@ -1,5 +1,7 @@
-export const AGENT_EMAIL_ROUTE_UNSIGNED_SCHEMA_VERSION = 1;
-export const AGENT_EMAIL_ROUTE_SIGNED_SCHEMA_VERSION = 2;
+export const AGENT_EMAIL_ROUTE_LEGACY_UNSIGNED_SCHEMA_VERSION = 1;
+export const AGENT_EMAIL_ROUTE_UNSIGNED_SCHEMA_VERSION = 2;
+export const AGENT_EMAIL_ROUTE_LEGACY_SIGNED_SCHEMA_VERSION = 2;
+export const AGENT_EMAIL_ROUTE_SIGNED_SCHEMA_VERSION = 3;
 export const AGENT_EMAIL_ROUTE_SIGNATURE_VERSION =
   "witself-agent-email-route-projection-v1";
 
@@ -65,7 +67,10 @@ function canonicalScalarObject(value) {
 function validateUnsignedProjection(projection) {
   if (!projection || typeof projection !== "object" ||
       Array.isArray(projection) ||
-      projection.schema_version !== AGENT_EMAIL_ROUTE_UNSIGNED_SCHEMA_VERSION ||
+      ![
+        AGENT_EMAIL_ROUTE_LEGACY_UNSIGNED_SCHEMA_VERSION,
+        AGENT_EMAIL_ROUTE_UNSIGNED_SCHEMA_VERSION,
+      ].includes(projection.schema_version) ||
       Object.hasOwn(projection, KEY_ID_FIELD) ||
       Object.hasOwn(projection, SIGNATURE_FIELD)) {
     fail("agent email route projection is invalid");
@@ -81,7 +86,7 @@ export function agentEmailRouteSignaturePayload(projection, keyID) {
   }
   return {
     ...structuredClone(projection),
-    schema_version: AGENT_EMAIL_ROUTE_SIGNED_SCHEMA_VERSION,
+    schema_version: projection.schema_version + 1,
     [KEY_ID_FIELD]: keyID,
   };
 }

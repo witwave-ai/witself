@@ -40,6 +40,69 @@ func (s *Store) CreateAgent(ctx context.Context, accountID, realmID, name string
 		return Agent{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	agent, err := createAgentTx(ctx, tx, accountID, realmID, agentID, name)
+	if err != nil {
+		return Agent{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Agent{}, err
+	}
+	return agent, nil
+}
+
+// CreateAgentWithEmailMailbox atomically creates a production-cohort agent and
+// its canonical mailbox. Any mailbox/address failure rolls the agent insert
+// back, so a successful create can receive immediately without a pod restart.
+func (s *Store) CreateAgentWithEmailMailbox(
+	ctx context.Context,
+	scope AgentEmailReceiveScope,
+	accountID, realmID, name, explicitSegment string,
+) (Agent, AgentEmailAddress, error) {
+	if !scope.Enabled {
+		return Agent{}, AgentEmailAddress{}, ErrAgentEmailPilotDisabled
+	}
+	if _, err := normalizeAgentEmailPilotScope(scope); err != nil {
+		return Agent{}, AgentEmailAddress{}, err
+	}
+	if agentEmailReceiveMode(scope) != AgentEmailReceiveModeProduction {
+		return Agent{}, AgentEmailAddress{}, fmt.Errorf(
+			"%w: atomic mailbox creation requires production receive mode",
+			ErrAgentEmailInputInvalid,
+		)
+	}
+	if !scope.AccountIDs[accountID] {
+		return Agent{}, AgentEmailAddress{}, ErrAgentEmailPilotNotEnrolled
+	}
+	agentID, err := id.New("agent")
+	if err != nil {
+		return Agent{}, AgentEmailAddress{}, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Agent{}, AgentEmailAddress{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	agent, err := createAgentTx(ctx, tx, accountID, realmID, agentID, name)
+	if err != nil {
+		return Agent{}, AgentEmailAddress{}, err
+	}
+	address, err := ensureAgentEmailMailboxTx(
+		ctx, tx, scope, accountID, realmID, agent.ID, explicitSegment,
+	)
+	if err != nil {
+		return Agent{}, AgentEmailAddress{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Agent{}, AgentEmailAddress{}, err
+	}
+	return agent, address, nil
+}
+
+func createAgentTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	accountID, realmID, agentID, name string,
+) (Agent, error) {
 	// The plan-gate lock subsumes the mint lock's status check and serializes
 	// concurrent creates. During the rollout it protects both the legacy
 	// account-wide cap and the new per-realm cap; once old snapshots have
@@ -121,9 +184,6 @@ func (s *Store) CreateAgent(ctx context.Context, accountID, realmID, name string
 		return Agent{}, fmt.Errorf("create agent: %w", err)
 	}
 	if err := createAgentAvatarProfileTx(ctx, tx, accountID, realmID, agentID); err != nil {
-		return Agent{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return Agent{}, err
 	}
 	return Agent{ID: agentID, Name: name}, nil

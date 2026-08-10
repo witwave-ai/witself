@@ -3,6 +3,9 @@ import {
   realmEmailAliasClaimRouteFingerprint,
   validateRealmEmailAliasClaimProof,
 } from "./agent-email-custom-domain-route-contract.mjs";
+import {
+  AGENT_EMAIL_OPERATIONS_LEASE_STORAGE_KEY,
+} from "./agent-email-operations-lease.mjs";
 
 const ALIAS_PATTERN = /^[a-z0-9](?:[a-z0-9-]{1,14}[a-z0-9])$/;
 const ACCOUNT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
@@ -101,6 +104,7 @@ const DERIVED_PREFIXES = Object.freeze([
 ]);
 
 const JOURNAL_LOCAL_EXACT_KEYS = new Set([
+  AGENT_EMAIL_OPERATIONS_LEASE_STORAGE_KEY,
   "realm-email-alias-journal-meta",
   "realm-email-alias-journal-pending",
   "realm-email-alias-journal-fork",

@@ -27,6 +27,9 @@ import {
   buildRealmEmailAliasClaimProof,
   realmEmailAliasClaimRouteFingerprint,
 } from "../src/agent-email-custom-domain-route-contract.mjs";
+import {
+  AGENT_EMAIL_OPERATIONS_LEASE_STORAGE_KEY,
+} from "../src/agent-email-operations-lease.mjs";
 
 const STREAM = "reaj_aaaaaaaaaaaaaaaa";
 const ACCOUNT = "acct_alias";
@@ -274,6 +277,12 @@ test("storage key classification separates authority, derived, and local state",
   }
   assert.equal(
     classifyRealmEmailAliasStorageKey("realm-email-alias-journal-pending"),
+    "journal_local",
+  );
+  assert.equal(
+    classifyRealmEmailAliasStorageKey(
+      AGENT_EMAIL_OPERATIONS_LEASE_STORAGE_KEY,
+    ),
     "journal_local",
   );
   assert.equal(classifyRealmEmailAliasStorageKey("mystery:key"), "unknown");

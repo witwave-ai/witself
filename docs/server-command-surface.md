@@ -10,10 +10,12 @@ managed and self-hosted backend API deployments.
 > client-custodied AVK; the backend stores ciphertext and public key metadata
 > and cannot decrypt. `WITSELF_SEALED_PLANE_ENABLED`, `WITSELF_KMS_PROVIDER`,
 > and `WITSELF_KMS_KEY_ID` are not implemented or required. The current binary
-> exposes `version` and `serve`; `serve` applies embedded forward Goose
-> migrations before listening. Later sections describing KMS configuration,
-> sealed-plane readiness, or separate `migrate`/`config` commands are
-> superseded target history, not current operational instructions.
+> exposes `version`, `serve`, and the bounded operator-only `agent-email
+> backfill` / `agent-email canary-manifest` actions; `serve` and the mutable
+> backfill apply embedded forward Goose migrations before continuing. Later
+> sections describing KMS configuration, sealed-plane readiness, or separate
+> `migrate`/`config` commands are superseded target history, not current
+> operational instructions.
 
 Narrative-memory decision (accepted 2026-07-14): the server never invokes an LLM
 or embedding provider. PostgreSQL is the canonical store and provides the
@@ -70,6 +72,8 @@ and [key-hierarchy.md](key-hierarchy.md).
 witself-server
   version
   serve
+  agent-email backfill --exception-output ABSOLUTE_PATH [--overrides ABSOLUTE_PATH]
+  agent-email canary-manifest --output ABSOLUTE_PATH
   migrate up|down|status
   config check|print
   bootstrap token
@@ -103,6 +107,14 @@ Expected server environment variables may include:
 | `WITSELF_BACKUP_VALIDATION_ENABLED` | Enable rollback-only `POST /v1/accounts/{id}:validate-backup` on an isolated drill cell. Default: `false`. Enabling requires `WITSELF_BACKUP_TOKEN`; the route performs a complete semantic import, forces deferred constraints, and rolls back instead of exposing a committed restore API. Helm maps `backup.validation.enabled` to this variable. |
 | `WITSELF_FACT_DELETION_ENABLED` | Enable permanent fact deletion routes and explicit recreation of a deleted fact. Default: `false`. Invalid booleans fail startup, and enabling requires compiled store schema 28 or newer. Existing deployments must first converge all writers on the schema-27 compatibility release, then converge schema 28 with this flag still false, and only then set it true; skipping the compatibility release is unsafe. Helm maps `features.factDeletion.enabled` to this variable. |
 | `WITSELF_AVATAR_PAYLOAD_COMPACTION_ENABLED` | Enable irreversible cleanup of eligible inactive avatar SVG payloads. Default: `false`. Keep it false through the compatible image/chart rollout and old-writer convergence, then enable it in a separate config-only Phase-B rollout. Requests that need cleanup fail retryably while it is false. Helm maps `avatar.payloadCompaction.enabled` to this variable. |
+| `WITSELF_AGENT_EMAIL_RECEIVE_PRODUCTION_ENABLED` | Enable exact-account production receive. Default: `false`; mutually exclusive with `WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED`. Serving startup validates only the bounded account list and optional canary and performs no mailbox backfill. |
+| `WITSELF_AGENT_EMAIL_RECEIVE_DOMAIN` | Canonical production receive domain. The primary edge-canary command requires exact `witmail.net`. |
+| `WITSELF_AGENT_EMAIL_RECEIVE_AUDIENCE` | Exact signed relay audience for the destination cell. |
+| `WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS` | Strictly sorted CSV containing 1-100 unique canonical generated `acc_*` IDs. Whitespace, duplicates, wildcards, unsorted input, and invalid IDs fail startup. |
+| `WITSELF_AGENT_EMAIL_ACCEPTED_LEGACY_DOMAINS` | Optional single canonical compatibility domain. It accepts only routes already issued there and never mints a new address. |
+| `WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON` | JSON object of relay key IDs to public Ed25519 verification keys. Relay private keys never enter cell configuration. |
+| `WITSELF_AGENT_EMAIL_RELAY_REPLAY_WINDOW` | Signed relay-envelope replay window. Default: `5m`; maximum `15m`. |
+| `WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID` | Optional canonical retry-canary agent. Production startup proves it is a live member of the exact account cohort; canary-manifest generation additionally requires its mailbox and effective receive state to be enabled. |
 | `WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED` | Enable the durable bounded avatar-style propagation job in `witself-worker`. API deployments set it false. PostgreSQL job fencing prevents duplicate progress across worker replicas. |
 | `WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE` | Maximum agents advanced by one style-rollout batch. Default: `100`; valid range: `1`-`1000`. |
 | `WITSELF_AVATAR_STYLE_ROLLOUT_INTERVAL` | Delay between style-rollout worker attempts. Default: `2s`; valid range: `100ms`-`1h`. |
@@ -228,6 +240,48 @@ mailbox; they are domain modules behind the one API listener. See
 and [inter-agent-messaging.md](inter-agent-messaging.md). Durable message
 delivery and per-recipient ordering depend on the same Postgres adapter; no
 external broker is required for v0.
+
+## `witself-server agent-email`
+
+These are bounded operator actions for an enabled production receive cohort;
+they are not public account-management commands.
+
+```sh
+witself-server agent-email backfill \
+  --exception-output /absolute/private/backfill-exception.json
+witself-server agent-email backfill \
+  --exception-output /absolute/private/backfill-exception-rerun.json \
+  --overrides /absolute/private/overrides.json
+witself-server agent-email canary-manifest \
+  --output /absolute/private/new/primary-canary.json
+```
+
+`backfill` requires production receive configuration and a PostgreSQL DSN. It
+applies forward migrations, validates the exact 1-100-account cohort, pages all
+live agents in batches of 100, idempotently provisions existing mailboxes, and
+then verifies that none are missing. It emits only counts. API `serve` startup
+never calls this path; it performs bounded account/canary validation only. New
+production-cohort agents are created atomically with their mailbox. The
+optional mode-`0600` JSON override manifest supplies an explicit canonical
+agent segment for exceptional existing names; all entries are validated
+against the exact live cohort, each other, live addresses, and permanent route
+reservations before the first write. `--exception-output` must be a canonical
+absolute path that does not exist. It is created mode `0600` only when one
+specific existing agent needs operator intervention and contains that private
+agent/realm identity, a bounded reason code, and the number already processed;
+stderr remains value-free. Review it locally, add an override, and use a new
+exception-output path for the idempotent rerun.
+
+`canary-manifest` performs no database writes and refuses to run until the
+cohort has zero missing mailboxes. It selects 5-10 actual `witmail.net`
+canonical routes with active entitlement and enabled account, realm, agent,
+and mailbox receive state; an optional configured retry canary must be included.
+Entries are sorted by address. `--output` must name a canonical absolute path
+that does not exist. The command creates the exact
+`witself.agent-email-primary-routing` input shape with exclusive-create mode
+`0600`, prints no IDs or addresses, and never overwrites an artifact. Store the
+file outside Git and pass it unchanged to the edge route-status command before
+planning.
 
 ## `witself-server migrate`
 
@@ -395,7 +449,8 @@ full sensitive config.
 ## Non-Goals
 
 - Do not use `witself-server` for human/operator account management.
-- Do not make `witself-server` a private internal admin CLI.
+- Do not make `witself-server` a general private admin CLI. The two bounded,
+  deployment-local agent-email cohort actions above are the explicit exception.
 - Do not require `witself-server` for local CLI-only development.
 - Do not expose policy mutation, group management, message sending, identity
   export/import, secret reveal, TOTP code generation, secret grants, or runtime

@@ -357,11 +357,13 @@ func TestAgentsCreateAndList(t *testing.T) {
 		return "", "", "", false, nil
 	}
 	var created []Agent
-	create := func(_ context.Context, _, realmID, name string) (Agent, error) {
+	var lastCreate CreateAgentRequest
+	create := func(_ context.Context, _, realmID string, in CreateAgentRequest) (Agent, error) {
 		if realmID == "missing" {
 			return Agent{}, ErrNotFound
 		}
-		a := Agent{ID: "agent_" + name, Name: name}
+		lastCreate = in
+		a := Agent{ID: "agent_" + in.Name, Name: in.Name}
 		created = append(created, a)
 		return a, nil
 	}
@@ -369,8 +371,8 @@ func TestAgentsCreateAndList(t *testing.T) {
 	srv := httptest.NewServer(apiMux(Config{Authenticate: auth, CreateAgent: create, ListAgents: list}))
 	defer srv.Close()
 
-	post := func(realm, tok, body string) *http.Response {
-		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/realms/"+realm+"/agents", strings.NewReader(body))
+	postPath := func(path, tok, body string) *http.Response {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+path, strings.NewReader(body))
 		if tok != "" {
 			req.Header.Set("Authorization", "Bearer "+tok)
 		}
@@ -379,6 +381,14 @@ func TestAgentsCreateAndList(t *testing.T) {
 			t.Fatal(err)
 		}
 		return resp
+	}
+	post := func(realm, tok, body string) *http.Response {
+		return postPath("/v1/realms/"+realm+"/agents", tok, body)
+	}
+	postWithEmailSegment := func(realm, tok, body string) *http.Response {
+		return postPath(
+			"/v1/realms/"+realm+"/agents:with-email-segment", tok, body,
+		)
 	}
 
 	r := post("realm_1", "", `{"name":"a1"}`)
@@ -391,10 +401,28 @@ func TestAgentsCreateAndList(t *testing.T) {
 	if r.StatusCode != http.StatusNotFound {
 		t.Errorf("missing realm = %d, want 404", r.StatusCode)
 	}
+	r = post("realm_1", "good", `{"name":"a1","email_agent_segment":"mail-a1"}`)
+	closeBody(t, r)
+	if r.StatusCode != http.StatusBadRequest {
+		t.Errorf("legacy route with email segment = %d, want 400", r.StatusCode)
+	}
 	r = post("realm_1", "good", `{"name":"a1"}`)
 	closeBody(t, r)
 	if r.StatusCode != http.StatusCreated {
-		t.Errorf("create = %d, want 201", r.StatusCode)
+		t.Errorf("ordinary create = %d, want 201", r.StatusCode)
+	}
+	if lastCreate.Name != "a1" || lastCreate.EmailAgentSegment != "" {
+		t.Fatalf("ordinary create request = %+v", lastCreate)
+	}
+	r = postWithEmailSegment(
+		"realm_1", "good", `{"name":"a2","email_agent_segment":"mail-a2"}`,
+	)
+	closeBody(t, r)
+	if r.StatusCode != http.StatusCreated {
+		t.Errorf("email-segment create = %d, want 201", r.StatusCode)
+	}
+	if lastCreate.Name != "a2" || lastCreate.EmailAgentSegment != "mail-a2" {
+		t.Fatalf("create request = %+v", lastCreate)
 	}
 
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/realms/realm_1/agents", nil)
@@ -410,8 +438,119 @@ func TestAgentsCreateAndList(t *testing.T) {
 	if err := json.NewDecoder(lresp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	if len(out.Agents) != 1 || out.Agents[0].Name != "a1" {
+	if len(out.Agents) != 2 || out.Agents[0].Name != "a1" ||
+		out.Agents[1].Name != "a2" {
 		t.Errorf("agents = %+v", out.Agents)
+	}
+}
+
+func TestAgentCreateWithEmailSegmentRouteIsStrict(t *testing.T) {
+	auth := func(_ context.Context, tok string) (string, string, string, bool, error) {
+		return "opr_x", "acc_y", "active", tok == "good", nil
+	}
+	createCalls := 0
+	create := func(_ context.Context, _, _ string, in CreateAgentRequest) (Agent, error) {
+		createCalls++
+		return Agent{ID: "agent_a", Name: in.Name}, nil
+	}
+	srv := httptest.NewServer(apiMux(Config{Authenticate: auth, CreateAgent: create}))
+	defer srv.Close()
+
+	invalidBodies := []string{
+		`{"name":"a"}`,
+		`{"name":"a","email_agent_segment":null}`,
+		`{"name":"a","email_agent_segment":""}`,
+		`{"name":"a","email_agent_segment":"   "}`,
+		`{"name":"a","email_agent_segment":"Mail-Bot"}`,
+		`{"name":"a","email_agent_segment":" mail-bot "}`,
+		`{"name":"a","email_agent_segment":"support"}`,
+		`{"name":"a","email_agent_segment":"mail-bot","unknown":true}`,
+		`{"name":"a","email_agent_segment":"mail-bot"} {}`,
+	}
+	for _, body := range invalidBodies {
+		req, _ := http.NewRequest(
+			http.MethodPost,
+			srv.URL+"/v1/realms/realm_1/agents:with-email-segment",
+			strings.NewReader(body),
+		)
+		req.Header.Set("Authorization", "Bearer good")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		closeBody(t, resp)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("body %q status = %d, want 400", body, resp.StatusCode)
+		}
+	}
+	if createCalls != 0 {
+		t.Fatalf("strict validation invoked create %d times", createCalls)
+	}
+}
+
+func TestAgentEmailSegmentRouteCannotMatchLegacyMutation(t *testing.T) {
+	mutated := false
+	legacyMux := http.NewServeMux()
+	legacyMux.HandleFunc("POST /v1/realms/{realm}/agents", func(
+		w http.ResponseWriter,
+		_ *http.Request,
+	) {
+		mutated = true
+		w.WriteHeader(http.StatusCreated)
+	})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/realms/realm_1/agents:with-email-segment",
+		strings.NewReader(`{"name":"a","email_agent_segment":"mail-bot"}`),
+	)
+	recorder := httptest.NewRecorder()
+	legacyMux.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusNotFound || mutated {
+		t.Fatalf("legacy route status/mutation = %d/%v, want 404/false",
+			recorder.Code, mutated)
+	}
+}
+
+func TestAgentEmailAddressConflictHasStableActionableResponse(t *testing.T) {
+	auth := func(_ context.Context, tok string) (string, string, string, bool, error) {
+		return "opr_x", "acc_private", "active", tok == "good", nil
+	}
+	create := func(_ context.Context, _, _ string, _ CreateAgentRequest) (Agent, error) {
+		return Agent{}, ErrAgentEmailAddressConflict
+	}
+	srv := httptest.NewServer(apiMux(Config{Authenticate: auth, CreateAgent: create}))
+	defer srv.Close()
+	req, _ := http.NewRequest(
+		http.MethodPost,
+		srv.URL+"/v1/realms/realm_private/agents:with-email-segment",
+		strings.NewReader(`{"name":"private-name","email_agent_segment":"mail-bot"}`),
+	)
+	req.Header.Set("Authorization", "Bearer good")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", resp.StatusCode)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["code"] != "agent_email_address_conflict" ||
+		body["error"] != "agent email address is already reserved; retry with a different --email-agent-segment" ||
+		body["retryable"] != false {
+		t.Fatalf("conflict response = %#v", body)
+	}
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, private := range []string{"acc_private", "realm_private", "private-name", "mail-bot"} {
+		if strings.Contains(string(encoded), private) {
+			t.Fatalf("conflict response leaked %q: %s", private, encoded)
+		}
 	}
 }
 

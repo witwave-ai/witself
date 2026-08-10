@@ -4,8 +4,18 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import {
+  parseManagedDeliveryAccountAllowlist,
+} from "../src/managed-delivery-cohort.mjs";
+import {
+  withAgentEmailOperationsLease,
+} from "../../control-plane/scripts/agent-email-operations-lease-client.mjs";
+import {
+  runLeaseGuardedCommand,
+} from "../../control-plane/scripts/agent-email-lease-guarded-command.mjs";
 
 const WORKER_NAME = "witself-agent-email-pilot";
+const OPERATIONS_LEASE_ENDPOINT = "https://self.witwave.ai";
 const PLAN_SCHEMA = "witself.agent-email-edge-rollback-plan.v1";
 const RECEIPT_SCHEMA = "witself.agent-email-edge-rollback-receipt.v1";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -17,10 +27,13 @@ const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d
 const RFC3339_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
 const EXPECTED_COMPATIBILITY_DATE = "2026-07-21";
 const EXPECTED_COMPATIBILITY_FLAGS = Object.freeze(["global_fetch_strictly_public"]);
+const MANAGED_DELIVERY_COHORT_BINDING =
+  "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST";
 
 const REQUIRED_BINDINGS = Object.freeze([
   "AGENT_EMAIL_DOMAIN",
   "AGENT_EMAIL_LEGACY_DOMAINS",
+  MANAGED_DELIVERY_COHORT_BINDING,
   "AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS",
   "CONTROL_PLANE_EDGE_TOKEN",
   "CONTROL_PLANE_URL",
@@ -40,6 +53,7 @@ const REQUIRED_BINDINGS = Object.freeze([
 const CONTRACT_PLAIN_BINDINGS = Object.freeze([
   "AGENT_EMAIL_DOMAIN",
   "AGENT_EMAIL_LEGACY_DOMAINS",
+  MANAGED_DELIVERY_COHORT_BINDING,
   "CONTROL_PLANE_URL",
   "RELAY_KEY_ID",
 ]);
@@ -82,7 +96,9 @@ export function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function bindingMap(bindings, label) {
+function bindingMap(bindings, label, {
+  allowLegacyManagedDeliveryCohort = false,
+} = {}) {
   if (!Array.isArray(bindings)) throw new Error(`${label} binding inventory was invalid`);
   const result = new Map();
   for (const binding of bindings) {
@@ -95,11 +111,20 @@ function bindingMap(bindings, label) {
     }
     result.set(binding.name, binding);
   }
-  if (JSON.stringify([...result.keys()].sort()) !==
-      JSON.stringify([...REQUIRED_BINDINGS].sort())) {
+  const actual = JSON.stringify([...result.keys()].sort());
+  const current = JSON.stringify([...REQUIRED_BINDINGS].sort());
+  const legacy = JSON.stringify(REQUIRED_BINDINGS
+    .filter((name) => name !== MANAGED_DELIVERY_COHORT_BINDING)
+    .sort());
+  const legacyManagedDeliveryCohort =
+    allowLegacyManagedDeliveryCohort && actual === legacy;
+  if (actual !== current && !legacyManagedDeliveryCohort) {
     throw new Error(`${label} binding inventory did not match the dark Worker contract`);
   }
-  return result;
+  return Object.freeze({
+    bindings: result,
+    legacyManagedDeliveryCohort,
+  });
 }
 
 function plain(bindings, name, label) {
@@ -176,7 +201,9 @@ function limiter(bindings, name, label) {
   return expected;
 }
 
-function inspectVersion(version, label) {
+function inspectVersion(version, label, {
+  allowLegacyManagedDeliveryCohort = false,
+} = {}) {
   if (!version || typeof version !== "object" || Array.isArray(version) ||
       !UUID.test(String(version.id ?? "")) ||
       !Number.isSafeInteger(version.number) || version.number < 1) {
@@ -194,7 +221,10 @@ function inspectVersion(version, label) {
     throw new Error(`${label} Worker compatibility contract drifted`);
   }
 
-  const bindings = bindingMap(version.resources?.bindings, label);
+  const inventory = bindingMap(version.resources?.bindings, label, {
+    allowLegacyManagedDeliveryCohort,
+  });
+  const { bindings, legacyManagedDeliveryCohort } = inventory;
   const release = releaseIdentity(bindings, label);
   if (plain(bindings, "AGENT_EMAIL_DOMAIN", label) !== "witmail.net" ||
       plain(bindings, "AGENT_EMAIL_LEGACY_DOMAINS", label) !==
@@ -217,6 +247,10 @@ function inspectVersion(version, label) {
   if (!/^[a-z][a-z0-9_-]{0,63}$/.test(plain(bindings, "RELAY_KEY_ID", label))) {
     throw new Error(`${label} relay key identifier was invalid`);
   }
+  const managedDeliveryAccountAllowlist = legacyManagedDeliveryCohort
+    ? ""
+    : plain(bindings, MANAGED_DELIVERY_COHORT_BINDING, label);
+  parseManagedDeliveryAccountAllowlist(managedDeliveryAccountAllowlist);
   const directory = bindings.get("EMAIL_DIRECTORY");
   if (directory?.type !== "kv_namespace" ||
       !/^[0-9a-f]{32}$/.test(String(directory.namespace_id ?? ""))) {
@@ -234,7 +268,12 @@ function inspectVersion(version, label) {
     compatibility_date: runtime.compatibility_date,
     compatibility_flags: [...runtime.compatibility_flags],
     plain_bindings: Object.fromEntries(
-      CONTRACT_PLAIN_BINDINGS.map((name) => [name, plain(bindings, name, label)]),
+      CONTRACT_PLAIN_BINDINGS.map((name) => [
+        name,
+        name === MANAGED_DELIVERY_COHORT_BINDING
+          ? managedDeliveryAccountAllowlist
+          : plain(bindings, name, label),
+      ]),
     ),
     directory_namespace_id: directory.namespace_id,
     metrics_dataset: metrics.dataset,
@@ -255,7 +294,19 @@ function inspectVersion(version, label) {
     release,
     contract,
     contractSHA256: sha256(canonicalJSON(contract)),
+    legacyManagedDeliveryCohort,
   });
+}
+
+function assertLegacyManagedDeliveryIsDark(version, label) {
+  if (!version.legacyManagedDeliveryCohort) return;
+  if (version.contract.plain_bindings[MANAGED_DELIVERY_COHORT_BINDING] !== "" ||
+      version.contract.managed_delivery_flags.alias !== "false" ||
+      version.contract.managed_delivery_flags.canonical !== "false") {
+    throw new Error(
+      `${label} legacy managed-delivery contract is eligible only while fully dark`,
+    );
+  }
 }
 
 function currentVersionID(status) {
@@ -293,6 +344,7 @@ function planBody(status, current, candidate, createdAt) {
       "metrics_dataset_exact",
       "rate_limiters_exact",
       "managed_delivery_flags_exact",
+      "legacy_managed_delivery_candidate_dark",
       "route_verification_keyring_exact",
       "custom_domain_activation_absent",
       "immutable_release_identity_present",
@@ -315,8 +367,22 @@ export function createRollbackPlan(status, currentVersion, candidateVersion, {
   now = () => new Date(),
 } = {}) {
   const activeVersionID = currentVersionID(status);
-  const current = inspectVersion(currentVersion, "current");
-  const candidate = inspectVersion(candidateVersion, "candidate");
+  const current = inspectVersion(currentVersion, "current", {
+    allowLegacyManagedDeliveryCohort: true,
+  });
+  const candidate = inspectVersion(candidateVersion, "candidate", {
+    allowLegacyManagedDeliveryCohort: true,
+  });
+  assertLegacyManagedDeliveryIsDark(current, "current");
+  assertLegacyManagedDeliveryIsDark(candidate, "candidate");
+  if (candidate.legacyManagedDeliveryCohort &&
+      (current.contract.plain_bindings[MANAGED_DELIVERY_COHORT_BINDING] !== "" ||
+       current.contract.managed_delivery_flags.alias !== "false" ||
+       current.contract.managed_delivery_flags.canonical !== "false")) {
+    throw new Error(
+      "legacy managed-delivery rollback candidate requires an empty current cohort and both current delivery gates false",
+    );
+  }
   if (current.id !== activeVersionID) {
     throw new Error("current Worker version did not match the active deployment");
   }
@@ -380,46 +446,70 @@ function exactPlan(actual, expected) {
 export async function applyRollbackPlan(plan, suppliedSHA256, runtime) {
   const fence = verifyPlan(plan, suppliedSHA256);
   if (!runtime || typeof runtime.loadStatus !== "function" ||
-      typeof runtime.loadVersion !== "function" || typeof runtime.deploy !== "function") {
+      typeof runtime.loadVersion !== "function" || typeof runtime.deploy !== "function" ||
+      !runtime.operationsLease || typeof runtime.operationsLease.run !== "function") {
     throw new Error("rollback apply runtime was invalid");
   }
-  const status = await runtime.loadStatus();
-  const current = await runtime.loadVersion(plan.current.version_id);
-  const candidate = await runtime.loadVersion(plan.candidate.version_id);
-  const reviewed = createRollbackPlan(status, current, candidate, {
-    now: () => new Date(plan.created_at),
-  });
-  exactPlan(reviewed, plan);
+  return runtime.operationsLease.run(
+    "email_edge_rollback",
+    async (leaseGuard) => {
+      if (!leaseGuard || typeof leaseGuard.renew !== "function" ||
+          !leaseGuard.signal || typeof leaseGuard.signal.addEventListener !== "function") {
+        throw new Error("rollback operations lease guard was invalid");
+      }
 
-  await runtime.deploy(plan.candidate.version_id);
+      // Reconstruct the complete reviewed plan only after acquiring the global
+      // lease. No supported deployment or provider-routing mutation can now
+      // move the final precondition between this read and the provider write.
+      const status = await runtime.loadStatus();
+      const current = await runtime.loadVersion(plan.current.version_id);
+      const candidate = await runtime.loadVersion(plan.candidate.version_id);
+      const reviewed = createRollbackPlan(status, current, candidate, {
+        now: () => new Date(plan.created_at),
+      });
+      exactPlan(reviewed, plan);
 
-  const postStatus = await runtime.loadStatus();
-  const postVersionID = currentVersionID(postStatus);
-  if (postVersionID !== plan.candidate.version_id) {
-    throw new Error("rollback mutation completed without the candidate at 100 percent");
-  }
-  const postVersion = inspectVersion(
-    await runtime.loadVersion(plan.candidate.version_id),
-    "post-rollback",
+      await leaseGuard.renew();
+      await runtime.deploy(plan.candidate.version_id, {
+        signal: leaseGuard.signal,
+      });
+      await leaseGuard.renew();
+
+      const postStatus = await runtime.loadStatus();
+      const postVersionID = currentVersionID(postStatus);
+      if (postVersionID !== plan.candidate.version_id) {
+        throw new Error("rollback mutation completed without the candidate at 100 percent");
+      }
+      const postVersion = inspectVersion(
+        await runtime.loadVersion(plan.candidate.version_id),
+        "post-rollback",
+        { allowLegacyManagedDeliveryCohort: true },
+      );
+      const reviewedCandidate = inspectVersion(candidate, "candidate", {
+        allowLegacyManagedDeliveryCohort: true,
+      });
+      if (canonicalJSON(postVersion) !== canonicalJSON(reviewedCandidate)) {
+        throw new Error("post-rollback Worker version did not match the reviewed candidate");
+      }
+      // Prove the exact fence once more after provider readback. The shared
+      // client performs its own final renewal and exact release after return.
+      await leaseGuard.renew();
+      return Object.freeze({
+        schema: RECEIPT_SCHEMA,
+        outcome: "verified",
+        worker: WORKER_NAME,
+        plan_sha256: fence,
+        prior: {
+          deployment_id: plan.current.deployment_id,
+          version_id: plan.current.version_id,
+        },
+        active: {
+          deployment_id: postStatus.id,
+          version_id: postVersionID,
+        },
+      });
+    },
   );
-  const reviewedCandidate = inspectVersion(candidate, "candidate");
-  if (canonicalJSON(postVersion) !== canonicalJSON(reviewedCandidate)) {
-    throw new Error("post-rollback Worker version did not match the reviewed candidate");
-  }
-  return Object.freeze({
-    schema: RECEIPT_SCHEMA,
-    outcome: "verified",
-    worker: WORKER_NAME,
-    plan_sha256: fence,
-    prior: {
-      deployment_id: plan.current.deployment_id,
-      version_id: plan.current.version_id,
-    },
-    active: {
-      deployment_id: postStatus.id,
-      version_id: postVersionID,
-    },
-  });
 }
 
 function wranglerJSON(args) {
@@ -447,6 +537,30 @@ export function rollbackDeploymentArguments(versionID) {
   ];
 }
 
+export function rollbackOperationsLeaseRuntime(
+  environment = process.env,
+  {
+    fetchImpl = globalThis.fetch,
+    randomUUIDImpl,
+  } = {},
+) {
+  // Rollback is intrinsically scoped to the production witmail.net Worker.
+  // Copy only its authentication input and pin the matching production
+  // control-plane authority; inherited endpoint selectors cannot redirect the
+  // fencing request to an attacker-controlled lease service.
+  const leaseEnvironment = Object.freeze({
+    CONTROL_PLANE_EDGE_TOKEN: environment.CONTROL_PLANE_EDGE_TOKEN,
+  });
+  return Object.freeze({
+    run: (operation, work) => withAgentEmailOperationsLease(operation, work, {
+      env: leaseEnvironment,
+      endpoint: OPERATIONS_LEASE_ENDPOINT,
+      fetchImpl,
+      ...(randomUUIDImpl ? { randomUUIDImpl } : {}),
+    }),
+  });
+}
+
 function liveRuntime() {
   return {
     loadStatus: async () => wranglerJSON([
@@ -455,7 +569,7 @@ function liveRuntime() {
     loadVersion: async (versionID) => wranglerJSON([
       "versions", "view", versionID, "--name", WORKER_NAME, "--json",
     ]),
-    deploy: async (versionID) => {
+    deploy: async (versionID, { signal } = {}) => {
       // Worker versions capture encrypted secret values. Wrangler deliberately
       // asks for an extra confirmation when a candidate would restore an older
       // secret. Never auto-accept that warning: a non-interactive rollback
@@ -465,15 +579,13 @@ function liveRuntime() {
           "rollback apply requires an interactive terminal for Cloudflare secret continuity review",
         );
       }
-      const result = spawnSync(
+      await runLeaseGuardedCommand(
         "wrangler",
         rollbackDeploymentArguments(versionID),
-        { stdio: "inherit" },
+        { signal, timeoutMs: 20 * 60_000 },
       );
-      if (result.error || result.status !== 0) {
-        throw new Error("Cloudflare Worker rollback mutation failed");
-      }
     },
+    operationsLease: rollbackOperationsLeaseRuntime(),
   };
 }
 

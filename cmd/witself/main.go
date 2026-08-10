@@ -663,12 +663,16 @@ func agentCreate(args []string) int {
 	endpoint := fs.String("endpoint", "", "witself-server endpoint URL")
 	tokenFile := fs.String("token-file", "", "file containing the operator token")
 	realm := fs.String("realm", "", "realm id the agent belongs to")
+	emailAgentSegment := fs.String(
+		"email-agent-segment", "",
+		"explicit lowercase email agent segment when the display name cannot be derived safely",
+	)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	name := fs.Arg(0)
 	if *realm == "" || name == "" {
-		fmt.Fprintln(os.Stderr, "usage: witself agent create [--account NAME] --realm REALM NAME")
+		fmt.Fprintln(os.Stderr, "usage: witself agent create [--account NAME] --realm REALM [--email-agent-segment SEGMENT] NAME")
 		return 2
 	}
 	ctx := context.Background()
@@ -677,7 +681,14 @@ func agentCreate(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 1
 	}
-	a, err := client.CreateAgent(ctx, ep, tok, *realm, name)
+	var a *client.Agent
+	if flagWasPassed(fs, "email-agent-segment") {
+		a, err = client.CreateAgentWithEmailSegment(
+			ctx, ep, tok, *realm, name, *emailAgentSegment,
+		)
+	} else {
+		a, err = client.CreateAgent(ctx, ep, tok, *realm, name)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 1

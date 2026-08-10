@@ -105,6 +105,40 @@ environment variable. It remains exclusively in the isolated Cloudflare Email
 Worker secret. Changing any pilot value changes the ConfigMap checksum and
 restarts the server pods for fail-closed startup reconciliation.
 
+Production receive is a separate, mutually exclusive, default-off gate under
+`agentEmail.receiveProduction`. It requires the canonical primary domain, the
+destination-cell audience, relay public keys, and a strictly sorted list of
+1-100 unique canonical `acc_*` IDs. There is no wildcard or implicit
+all-accounts mode. An optional retry canary must be one canonical `agent_*` ID;
+the cell verifies that it belongs to the exact configured cohort. Enabling the
+gate renders `WITSELF_AGENT_EMAIL_RECEIVE_PRODUCTION_ENABLED=true`,
+`WITSELF_AGENT_EMAIL_RECEIVE_DOMAIN`, `WITSELF_AGENT_EMAIL_RECEIVE_AUDIENCE`,
+and the comma-separated `WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS` in API pods
+only. The app-of-apps refuses to forward this shape unless both child chart and
+image are `0.0.241` or newer. Direct use of this chart independently refuses
+production receive when the effective server image tag is older than
+`0.0.241`; an enabled value can never be silently ignored by an older binary.
+
+API startup performs only bounded account/canary validation. It neither scans
+all agents nor provisions mailboxes, so scaling API replicas cannot multiply a
+Founder-account backfill. After the production gate is healthy and before any
+edge delivery activation, an operator runs exactly one idempotent
+`witself-server agent-email backfill --exception-output ABSOLUTE_PATH` process.
+The required private path is created only when a legacy agent needs an explicit
+override; it is never written to pod logs. New agents in the configured
+cohort are thereafter created atomically with their canonical mailbox. Generate
+the edge canary only with
+`witself-server agent-email canary-manifest --output /absolute/new/path.json`;
+the command requires zero missing mailboxes and creates the exact 5-10-entry
+manifest as a new mode-0600 file. Never commit that private mapping.
+
+Exceptional existing agent names are never auto-suffixed. If derivation is
+reserved, empty, over budget, or colliding, rerun the one-shot command with a
+reviewed mode-`0600` override manifest via `backfill --exception-output
+NEW_ABSOLUTE_PATH --overrides ABSOLUTE_PATH`; the command validates every
+explicit segment, duplicate target, live-cohort owner, live address, and
+permanent reservation before its first write.
+
 Large-realm avatar style propagation belongs only to the general-purpose
 worker. The `worker.avatarStyleRollout` values render
 `WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED`,
@@ -224,7 +258,7 @@ ingress + TLS, and topology spread.
 - Health and metrics are on their own ports and never exposed through the API
   Service or public ingress.
 - The worker has no API Service or Ingress and receives no
-  bootstrap/provision/agent-email relay or receive-pilot configuration. Its
+  bootstrap/provision/agent-email relay or receive-mode configuration. Its
   metrics Service and monitors select only `app.kubernetes.io/name: witself-worker` plus
   `app.kubernetes.io/component: worker`; they cannot select API pods.
 - Rolling upgrades default to `maxUnavailable: 0`, `maxSurge: 1`, and
@@ -248,6 +282,7 @@ for validation. Most-used: `image.tag`, `replicaCount`, `backend.kind`,
 `worker.transcriptRetention.*`, `worker.messageRetention.*`,
 `worker.agentEmailRetention.*`, `worker.resources`,
 `worker.podDisruptionBudget.*`, `agentEmail.receivePilot.*`,
+`agentEmail.receiveProduction.*`,
 `database.existingSecret.*`, `bootstrap.existingSecret.*`, `resources`,
 `metrics.serviceMonitor.enabled`, `autoscaling.*`, `ingress.*`,
 `networkPolicy.*`, `strategy.*`, `minReadySeconds`,

@@ -17,9 +17,11 @@ import {
 const domain = "witmail.net";
 const realmID = "realm_abcdefghijkl2345";
 const updatedAt = "2026-08-01T12:00:00.000Z";
+const accountID = "acc_aaaaaaaaaaaaaaaa";
 
 function controlPlaneProjection(realmLabel, routeKind, state = "applied") {
   return buildRealmEmailRouteProjection({
+    account_id: accountID,
     domain,
     realm_id: realmID,
     realm_label: realmLabel,

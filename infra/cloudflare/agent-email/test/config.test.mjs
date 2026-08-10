@@ -14,6 +14,12 @@ const routePublicKeys = JSON.stringify({
   "route-2026-08": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 });
 
+test("independent secret-put npm commands are not part of the edge surface", async () => {
+  const packageJSON = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(Object.hasOwn(packageJSON.scripts, "secret:put"), false);
+  assert.equal(Object.hasOwn(packageJSON.scripts, "secret:put:control-plane"), false);
+});
+
 test("dark deployment refuses a persistent custom-domain delivery secret", () => {
   assert.doesNotThrow(() => assertCustomDomainDeliveryDark([
     { name: "CONTROL_PLANE_EDGE_TOKEN", type: "secret_text" },
@@ -44,6 +50,7 @@ test("deployment config is email-only and cannot reuse the control-plane DIRECTO
       RELAY_KEY_ID: "pilot-2026-07",
       CONTROL_PLANE_URL: controlPlaneURL,
       AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS: routePublicKeys,
+      AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: "",
       REALM_EMAIL_ALIAS_DELIVERY_ENABLED: "false",
       REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false",
     },
@@ -61,6 +68,7 @@ test("deployment config is email-only and cannot reuse the control-plane DIRECTO
       RELAY_KEY_ID: "pilot-2026-07",
       CONTROL_PLANE_URL: controlPlaneURL,
       AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS: routePublicKeys,
+      AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: "",
       REALM_EMAIL_ALIAS_DELIVERY_ENABLED: "false",
       REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false",
     },
@@ -109,6 +117,10 @@ test("deployment config is email-only and cannot reuse the control-plane DIRECTO
   );
   assert.match(
     config,
+    /"AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST"\s*:\s*""/,
+  );
+  assert.match(
+    config,
     /"secrets"\s*:\s*\{[\s\S]*?"CONTROL_PLANE_EDGE_TOKEN"[\s\S]*?"RELAY_ED25519_PRIVATE_KEY"[\s\S]*?\}/,
   );
   assert.doesNotMatch(config, /"CONTROL_PLANE_EDGE_TOKEN"\s*:/);
@@ -117,6 +129,31 @@ test("deployment config is email-only and cannot reuse the control-plane DIRECTO
   assert.doesNotMatch(config, /AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED/);
   assert.doesNotMatch(config, /"binding"\s*:\s*"DIRECTORY"/);
   assert.doesNotMatch(config, /"routes"\s*:/);
+});
+
+test("deployment config accepts only an exact canonical managed account cohort", () => {
+  for (const value of [
+    "*", "acc_*", " acc_aaaaaaaaaaaaaaaa", "acc_aaaaaaaaaaaaaaaa ",
+    "acc_bbbbbbbbbbbbbbbb,acc_aaaaaaaaaaaaaaaa",
+    "acc_aaaaaaaaaaaaaaaa,acc_aaaaaaaaaaaaaaaa",
+  ]) {
+    const rendered = spawnSync(process.execPath, [script.pathname], {
+      cwd: root,
+      env: {
+        ...process.env,
+        EMAIL_DIRECTORY_KV_ID: "a".repeat(32),
+        RELAY_KEY_ID: "pilot-2026-07",
+        CONTROL_PLANE_URL: controlPlaneURL,
+        AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS: routePublicKeys,
+        AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: value,
+        REALM_EMAIL_ALIAS_DELIVERY_ENABLED: "false",
+        REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false",
+      },
+      encoding: "utf8",
+    });
+    assert.notEqual(rendered.status, 0, value);
+    assert.match(rendered.stderr, /allowlist is invalid/);
+  }
 });
 
 test("deployment config accepts only explicit boolean alias gate values", () => {

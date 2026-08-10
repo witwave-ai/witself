@@ -97,6 +97,14 @@ The same compatibility rule independently withholds
 email-specific cleanup job together with the schema and binary that understand
 its configuration.
 
+`apps.witselfServer.agentEmail.receiveProduction` is independently withheld
+until both the child chart and image are `0.0.241` or newer. Enabling it on an
+older mixed pin fails rendering instead of silently dropping the exact account
+cohort. It remains false in fleet defaults and must be activated only for a
+reviewed cell after the matching release has converged. API startup performs
+bounded read-only cohort validation; run the explicit cell-local mailbox
+backfill once, never as a per-replica startup action.
+
 Do not treat a committed pin as deployment proof. For every provisioned cell,
 verify Argo health/sync, replacement-pod readiness, and the public
 `/v1/version` response before advancing the wave. When the worker is enabled,

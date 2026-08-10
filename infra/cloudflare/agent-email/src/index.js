@@ -11,6 +11,7 @@ import {
 import {
   CONFIG_KEY,
   configuredAgentEmailDomains,
+  managedRealmRouteRequiresAccountRefresh,
   parsePilotAddress,
   parseRouteAddress,
   realmRouteKey,
@@ -21,6 +22,9 @@ import {
   validateRuntimeRecipient,
 } from "./directory.mjs";
 import { recordEdgeVerdict, recordRouteLookup } from "./metrics.mjs";
+import {
+  managedDeliveryAccountIsAdmitted,
+} from "./managed-delivery-cohort.mjs";
 
 const PERMANENT_REJECTION = "recipient unavailable";
 const OVER_SIZE_REJECTION = "message too large";
@@ -316,6 +320,12 @@ async function controlPlaneRealmRoute(
     if (expectedRouteKind && route.route_kind !== expectedRouteKind) {
       throw new Error("realm route projection kind is inconsistent");
     }
+    // A v240 managed projection proves that the route existed but does not
+    // carry signed account authority. It may keep a 404 from becoming a
+    // bounce, but it can never authorize delivery under an account cohort.
+    if (managedRealmRouteRequiresAccountRefresh(route)) {
+      throw new Error("managed realm route requires account-authority refresh");
+    }
   } catch {
     emitRouteLookupMetric(env, lookup, "cp_error", response.status);
     throw transient("tempfail_route_lookup", "route", response.status);
@@ -424,11 +434,11 @@ function realmRouteDisposition(route) {
       return { status: "route", route };
     case "suspended":
       if (route.suspension_disposition === "inactive") {
-        return { status: "inactive" };
+        return { status: "inactive", route };
       }
       throw transient("tempfail_suspended_route", "route");
     case "retired":
-      return { status: "inactive" };
+      return { status: "inactive", route };
     default:
       throw transient("tempfail_route_lookup", "route");
   }
@@ -481,6 +491,27 @@ async function projectedRealmRoute(
       expectedRouteKind,
     );
     return fallback.status === "projection" ? realmRouteDisposition(fallback.route) : fallback;
+  }
+  if (managedRealmRouteRequiresAccountRefresh(route)) {
+    const legacyLookup = {
+      ...lookupContext.known,
+      routeKind: routeMetricKind(route),
+    };
+    const fallback = await knownControlPlaneRealmRoute(
+      env,
+      parsed,
+      fetchAPI,
+      cryptoAPI,
+      nowMS,
+      legacyLookup,
+      lookupContext.state,
+      route.controller_revision,
+      true,
+      expectedRouteKind,
+    );
+    return fallback.status === "projection"
+      ? realmRouteDisposition(fallback.route)
+      : fallback;
   }
   if (realmRouteProjectionIsFresh(route, nowMS)) {
     emitRouteLookupMetric(env, lookupContext.known, "kv_fresh", 0, route);
@@ -788,6 +819,25 @@ async function handleEmailTransaction(message, env, runtime = {}) {
   if (resolved.status === "unknown") {
     message.setReject(PERMANENT_REJECTION);
     return { outcome: "rejected_unknown_recipient", phase: "recipient", status: 550 };
+  }
+  // The per-account rollout fence is additive to the route-kind fleet gates.
+  // It is evaluated from signed route authority before any permanent inactive
+  // disposition, MIME read, or cell fetch. Thus a known account held back from
+  // the cohort always retries instead of becoming an accidental bounce.
+  if (resolved.route?.route_kind === "canonical" ||
+      resolved.route?.route_kind === "realm_alias") {
+    let admitted;
+    try {
+      admitted = managedDeliveryAccountIsAdmitted(
+        env,
+        resolved.route.account_id,
+      );
+    } catch {
+      throw transient("tempfail_configuration", "configuration");
+    }
+    if (!admitted) {
+      throw transient("tempfail_account_cohort", "route");
+    }
   }
   if (resolved.status === "inactive") {
     message.setReject(PERMANENT_REJECTION);

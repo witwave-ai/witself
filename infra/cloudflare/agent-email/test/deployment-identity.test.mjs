@@ -20,6 +20,7 @@ const env = {
   CONTROL_PLANE_URL: "https://self.witwave.ai/",
   AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS:
     JSON.stringify({ "route-2026-08": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" }),
+  AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: "",
   REALM_EMAIL_ALIAS_DELIVERY_ENABLED: "false",
   REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false",
 };
@@ -57,6 +58,7 @@ function fixtures() {
       bindings: [
         plain("AGENT_EMAIL_DOMAIN", "witmail.net"),
         plain("AGENT_EMAIL_LEGACY_DOMAINS", "agent-mail.witwave.ai"),
+        plain("AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", ""),
         plain("AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS", env.AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS),
         { name: "CONTROL_PLANE_EDGE_TOKEN", type: "secret_text" },
         plain("CONTROL_PLANE_URL", env.CONTROL_PLANE_URL),
@@ -97,6 +99,31 @@ test("deployment attestation accepts one exact email-only release", () => {
   assert.equal(result.cloudflare.provider_script_etag, "provider-artifact-etag-1234567890");
   assert.deepEqual(result.runtime.handlers, ["email"]);
   assert.equal(result.bindings.custom_domain_delivery_enabled, false);
+  assert.deepEqual(result.bindings.managed_delivery_cohort, {
+    account_count: 0,
+    allowlist_sha256:
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  });
+});
+
+test("deployment expectations summarize but never expose the active cohort", () => {
+  const active = expectedDeployment({
+    ...env,
+    AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST:
+      "acc_aaaaaaaaaaaaaaaa,acc_bbbbbbbbbbbbbbbb",
+  }, release);
+  assert.equal(active.managedDeliveryAccountCount, 2);
+  assert.match(active.managedDeliveryAllowlistSHA256, /^[0-9a-f]{64}$/);
+  for (const value of [
+    "*",
+    "acc_bbbbbbbbbbbbbbbb,acc_aaaaaaaaaaaaaaaa",
+    "acc_aaaaaaaaaaaaaaaa ",
+  ]) {
+    assert.throws(() => expectedDeployment({
+      ...env,
+      AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: value,
+    }, release), /allowlist is invalid/);
+  }
 });
 
 test("deployment attestation rejects split traffic and identity drift", () => {

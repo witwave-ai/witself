@@ -103,6 +103,10 @@
     // routable while their domain-qualified authority is retired naturally.
     "AGENT_EMAIL_DOMAIN": "witmail.net",
     "AGENT_EMAIL_LEGACY_DOMAINS": "agent-mail.witwave.ai",
+    // Exact, sorted account IDs only. Empty is the committed dark default;
+    // canonical and managed-alias delivery also retain their independent
+    // runtime gates. The email edge must receive the identical cohort bytes.
+    "CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST": "__CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST__",
     // Independent technical queue ceilings. Plans, including explicit
     // unlimited overrides, cannot raise these values; a deployment may only
     // lower them below the compiled 8-per-realm / 64-per-account maxima.
@@ -237,12 +241,15 @@
   }
   // Runtime-only Worker secrets used by the Go plan lifecycle are deliberately
   // absent from this file. Render the release config first, then configure them
-  // with `npm run secret:put -- NAME`:
+  // only under the documented global provider-mutation freeze with
+  // `npm run secret:put:break-glass -- NAME` (the command is deliberately not
+  // serialized by the CONTROL_PLANE_EDGE_TOKEN-authenticated lease):
   // INTERNAL_BRIDGE_TOKEN (required), CONTROL_PLANE_EDGE_TOKEN (must exactly
   // match the agent-email Worker's secret),
   // CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED=true (only after catch-all,
   // canonical backfill/realm retirement, account lifecycle, terminal recovery,
   // and the Email Worker's independent alias-delivery gate pass acceptance;
+  // the account must also be present in the exact managed-delivery cohort,
   // see docs/agent-email.md), CP_REALM_EMAIL_CANONICAL_INVENTORY_ENABLED=true
   // and CP_REALM_EMAIL_CANONICAL_DELIVERY_ENABLED=true (only during their
   // separately reviewed staged activation), CP_REALM_EMAIL_ALIAS_RECOVERY_TOKEN (distinct

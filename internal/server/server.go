@@ -59,7 +59,7 @@ type Config struct {
 	DeleteRealm func(ctx context.Context, accountID, realmID string) error
 
 	// CreateAgent / ListAgents, when set, enable POST/GET /v1/realms/{realm}/agents.
-	CreateAgent func(ctx context.Context, accountID, realmID, name string) (Agent, error)
+	CreateAgent func(ctx context.Context, accountID, realmID string, in CreateAgentRequest) (Agent, error)
 	ListAgents  func(ctx context.Context, accountID, realmID string) ([]Agent, error)
 	DeleteAgent func(ctx context.Context, accountID, realmID, agentID string) error
 
@@ -555,11 +555,15 @@ type Config struct {
 	ReleaseMessageClaim func(ctx context.Context, p DomainPrincipal, messageID string, in MessageClaimRequest) (MessageProcessing, error)
 	CompleteMessage     func(ctx context.Context, p DomainPrincipal, messageID string, in CompleteMessageRequest) (CompleteMessageResult, error)
 
-	// The capability-limited receive-only email pilot is default-off and
-	// process-scoped to one realm plus 5-10 agents. IngestAgentEmailPilot is a
-	// cell-local signed-relay hook; every other callback receives the exact
-	// bearer-token-derived owner agent. List/checkpoint/listen are value-free,
-	// while ReadAgentEmail is the explicit untrusted-content boundary.
+	// Agent email receive is default-off. Production mode is process-scoped to
+	// an exact account cohort while the compatibility pilot remains scoped to
+	// one realm plus 5-10 agents. IngestAgentEmailPilot is the historical name
+	// of the cell-local signed-relay hook; every other callback receives the
+	// exact bearer-token-derived owner agent. List/checkpoint/listen are
+	// value-free, while ReadAgentEmail is the explicit untrusted-content boundary.
+	AgentEmailReceive AgentEmailReceiveConfig
+	// AgentEmailPilot is the legacy configuration field. apiMux uses it only
+	// when AgentEmailReceive is disabled so older embeddings remain compatible.
 	AgentEmailPilot              AgentEmailPilotConfig
 	IngestAgentEmailPilot        AgentEmailIngestFunc
 	RequireAgentEmailEntitlement func(ctx context.Context, p DomainPrincipal) error
@@ -1520,6 +1524,11 @@ type Realm struct {
 // it (e.g. for a duplicate realm name) without coupling the server to the store.
 var ErrConflict = errors.New("conflict")
 
+// ErrAgentEmailAddressConflict distinguishes a canonical mailbox-address
+// reservation from an agent-name conflict. Handlers return a stable,
+// value-free 409 that tells the operator to choose another explicit segment.
+var ErrAgentEmailAddressConflict = errors.New("agent email address conflict")
+
 // ErrRealmEmailRouteRetirementRequired means an ordinary operator DELETE hit
 // a managed realm.  The control plane must first remove the external route and
 // commit its exact cell fence.
@@ -1699,6 +1708,23 @@ type Agent struct {
 	Name string `json:"name"`
 }
 
+// CreateAgentRequest is the internal dispatch shape shared by the legacy
+// ordinary-create route and the v0.0.241 explicit-email-segment route. Only the
+// latter may populate EmailAgentSegment.
+type CreateAgentRequest struct {
+	Name              string `json:"name"`
+	EmailAgentSegment string `json:"email_agent_segment,omitempty"`
+}
+
+type createAgentBody struct {
+	Name string `json:"name"`
+}
+
+type createAgentWithEmailSegmentBody struct {
+	Name              string  `json:"name"`
+	EmailAgentSegment *string `json:"email_agent_segment"`
+}
+
 // OperatorToken is safe token metadata shown in operator listings.
 type OperatorToken struct {
 	ID          string     `json:"id"`
@@ -1816,13 +1842,17 @@ func apiMux(cfg Config) http.Handler {
 			AccountProvisionProtocolVersion,
 		)
 	})
-	agentEmailPilotSupported := cfg.AgentEmailPilot.Enabled &&
-		ValidateAgentEmailPilotConfig(cfg.AgentEmailPilot) == nil
+	agentEmailReceive := cfg.AgentEmailReceive
+	if !agentEmailReceive.Enabled {
+		agentEmailReceive = cfg.AgentEmailPilot
+	}
+	agentEmailPilotSupported := agentEmailReceive.Enabled &&
+		ValidateAgentEmailReceiveConfig(agentEmailReceive) == nil
 	if agentEmailPilotSupported && cfg.IngestAgentEmailPilot != nil {
 		// This route intentionally does not share bearer authentication with the
 		// public API. Its sole authority is the verified Ed25519 relay envelope.
 		mux.HandleFunc("POST /v1/internal/agent-email:ingest",
-			agentEmailIngestHandler(cfg.AgentEmailPilot, cfg.IngestAgentEmailPilot))
+			agentEmailIngestHandler(agentEmailReceive, cfg.IngestAgentEmailPilot))
 	}
 	selfDigestSupported := cfg.AuthenticatePrincipal != nil
 	transcriptsSupported := selfDigestSupported &&
@@ -1979,6 +2009,10 @@ func apiMux(cfg Config) http.Handler {
 		}
 		if cfg.CreateAgent != nil {
 			mux.HandleFunc("POST /v1/realms/{realm}/agents", createAgentHandler(cfg.Authenticate, cfg.CreateAgent))
+			mux.HandleFunc(
+				"POST /v1/realms/{realm}/agents:with-email-segment",
+				createAgentWithEmailSegmentHandler(cfg.Authenticate, cfg.CreateAgent),
+			)
 		}
 		if cfg.ListAgents != nil {
 			mux.HandleFunc("GET /v1/realms/{realm}/agents", listAgentsHandler(cfg.Authenticate, cfg.ListAgents))
@@ -2113,7 +2147,7 @@ func apiMux(cfg Config) http.Handler {
 			cfg.GetMemoryLimitStatus,
 			cfg.GetSelfMemoryCheckpoint,
 			cfg.GetSelfMessageCheckpoint,
-			cfg.AgentEmailPilot,
+			agentEmailReceive,
 			cfg.RequireAgentEmailEntitlement,
 			cfg.GetSelfAgentEmailCheckpoint,
 			cfg.GetSelfAvatarCheckpoint,
@@ -2400,36 +2434,36 @@ func apiMux(cfg Config) http.Handler {
 		if agentEmailPilotSupported {
 			if cfg.GetAgentEmailAddress != nil {
 				mux.HandleFunc("GET /v1/email/address", getAgentEmailAddressHandler(
-					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot,
+					cfg.AuthenticatePrincipal, agentEmailReceive,
 					cfg.RequireAgentEmailEntitlement, cfg.GetAgentEmailAddress))
 			}
 			if cfg.GetAgentEmailStorageStatus != nil {
 				mux.HandleFunc("GET /v1/email:status", agentEmailStorageStatusHandler(
-					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot,
+					cfg.AuthenticatePrincipal, agentEmailReceive,
 					cfg.RequireAgentEmailEntitlement, cfg.GetAgentEmailStorageStatus))
 			}
 			if cfg.ListAgentEmails != nil {
 				mux.HandleFunc("GET /v1/email", listAgentEmailsHandler(
-					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot,
+					cfg.AuthenticatePrincipal, agentEmailReceive,
 					cfg.RequireAgentEmailEntitlement, cfg.ListAgentEmails))
 				mux.HandleFunc("POST /v1/email:listen", agentEmailListenHandler(
-					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot,
+					cfg.AuthenticatePrincipal, agentEmailReceive,
 					cfg.RequireAgentEmailEntitlement, cfg.ListAgentEmails))
 			}
 			if cfg.GetSelfAgentEmailCheckpoint != nil {
 				mux.HandleFunc("GET /v1/email/checkpoint", getAgentEmailCheckpointHandler(
-					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot,
+					cfg.AuthenticatePrincipal, agentEmailReceive,
 					cfg.RequireAgentEmailEntitlement, cfg.GetSelfAgentEmailCheckpoint))
 			}
-			if cfg.AgentEmailPilot.RetryCanaryAgentID != "" {
+			if agentEmailReceive.RetryCanaryAgentID != "" {
 				if cfg.ArmAgentEmailRetryCanary != nil {
 					mux.HandleFunc("POST /v1/email/retry-canary:arm", agentEmailRetryCanaryHandler(
-						cfg.AuthenticatePrincipal, cfg.AgentEmailPilot,
+						cfg.AuthenticatePrincipal, agentEmailReceive,
 						cfg.RequireAgentEmailEntitlement, cfg.ArmAgentEmailRetryCanary))
 				}
 				if cfg.GetAgentEmailRetryCanary != nil {
 					mux.HandleFunc("POST /v1/email/retry-canary:status", agentEmailRetryCanaryHandler(
-						cfg.AuthenticatePrincipal, cfg.AgentEmailPilot,
+						cfg.AuthenticatePrincipal, agentEmailReceive,
 						cfg.RequireAgentEmailEntitlement, cfg.GetAgentEmailRetryCanary))
 				}
 			}
@@ -2438,7 +2472,7 @@ func apiMux(cfg Config) http.Handler {
 				cfg.RenewAgentEmailClaim != nil || cfg.ReleaseAgentEmailClaim != nil ||
 				cfg.CompleteAgentEmail != nil {
 				mux.HandleFunc("POST /v1/email/{action}", agentEmailActionHandler(
-					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot,
+					cfg.AuthenticatePrincipal, agentEmailReceive,
 					cfg.RequireAgentEmailEntitlement,
 					cfg.ReadAgentEmail, cfg.AckAgentEmail, cfg.MarkAgentEmailCodeConsumed,
 					cfg.ClaimAgentEmail, cfg.RenewAgentEmailClaim,
@@ -5286,19 +5320,57 @@ func deleteRealmHandler(auth AuthFunc, deleteRealm func(ctx context.Context, acc
 	})
 }
 
-func createAgentHandler(auth AuthFunc, create func(ctx context.Context, accountID, realmID, name string) (Agent, error)) http.HandlerFunc {
+func createAgentHandler(
+	auth AuthFunc,
+	create func(ctx context.Context, accountID, realmID string, in CreateAgentRequest) (Agent, error),
+) http.HandlerFunc {
+	return createAgentRequestHandler(auth, create, false)
+}
+
+func createAgentWithEmailSegmentHandler(
+	auth AuthFunc,
+	create func(ctx context.Context, accountID, realmID string, in CreateAgentRequest) (Agent, error),
+) http.HandlerFunc {
+	return createAgentRequestHandler(auth, create, true)
+}
+
+func createAgentRequestHandler(
+	auth AuthFunc,
+	create func(ctx context.Context, accountID, realmID string, in CreateAgentRequest) (Agent, error),
+	requireEmailSegment bool,
+) http.HandlerFunc {
 	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
-		var req struct {
-			Name string `json:"name"`
+		var req CreateAgentRequest
+		if requireEmailSegment {
+			var body createAgentWithEmailSegmentBody
+			if err := decodeStrictAgentEmailJSON(w, r, &body, 8*1024); err != nil ||
+				body.Name == "" || body.EmailAgentSegment == nil ||
+				!validCanonicalAgentEmailSegment(*body.EmailAgentSegment) {
+				writeJSONError(w, http.StatusBadRequest, "invalid agent email segment request")
+				return
+			}
+			req = CreateAgentRequest{
+				Name: body.Name, EmailAgentSegment: *body.EmailAgentSegment,
+			}
+		} else {
+			var body createAgentBody
+			if err := decodeStrictAgentEmailJSON(w, r, &body, 8*1024); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "invalid agent create request")
+				return
+			}
+			req.Name = body.Name
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		if req.Name == "" {
 			writeJSONError(w, http.StatusBadRequest, "missing name")
 			return
 		}
-		agent, err := create(r.Context(), p.accountID, r.PathValue("realm"), req.Name)
+		agent, err := create(r.Context(), p.accountID, r.PathValue("realm"), req)
 		switch {
 		case errors.Is(err, ErrNotFound):
 			writeJSONError(w, http.StatusNotFound, "realm not found")
+			return
+		case errors.Is(err, ErrAgentEmailAddressConflict):
+			writeAgentEmailAddressConflictError(w)
 			return
 		case errors.Is(err, ErrConflict):
 			writeJSONError(w, http.StatusConflict, "agent already exists")
@@ -5308,6 +5380,9 @@ func createAgentHandler(auth AuthFunc, create func(ctx context.Context, accountI
 			// refusal explains itself.
 			writeJSONError(w, http.StatusForbidden, err.Error())
 			return
+		case errors.Is(err, ErrBadInput):
+			writeJSONError(w, http.StatusBadRequest, "invalid agent email segment")
+			return
 		case err != nil:
 			writeJSONError(w, http.StatusInternalServerError, "could not create agent")
 			return
@@ -5315,6 +5390,17 @@ func createAgentHandler(auth AuthFunc, create func(ctx context.Context, accountI
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "witself.v0", "agent": agent})
+	})
+}
+
+func writeAgentEmailAddressConflictError(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"schema_version": "witself.v0",
+		"code":           "agent_email_address_conflict",
+		"error":          "agent email address is already reserved; retry with a different --email-agent-segment",
+		"retryable":      false,
 	})
 }
 

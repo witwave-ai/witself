@@ -24,6 +24,12 @@ import { CUSTOM_DOMAIN_DELIVERY_SECRET } from
 import {
   EMAIL_DARK_SECRET_NAMES,
 } from "../../control-plane/scripts/assert-custom-domain-dark.mjs";
+import {
+  withAgentEmailOperationsLease,
+} from "../../control-plane/scripts/agent-email-operations-lease-client.mjs";
+import {
+  validateAgentEmailOperationsLeaseEvidence,
+} from "../../control-plane/src/agent-email-operations-lease.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CONTROL_PLANE_ROOT = resolve(root, "../control-plane");
@@ -32,6 +38,8 @@ const EMAIL_EDGE_WORKER = "witself-agent-email-pilot";
 const ROUTE_PRIVATE_SECRET = "AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY";
 const FALLBACK_TOKEN_SECRET = "CONTROL_PLANE_EDGE_TOKEN";
 const RELAY_PRIVATE_SECRET = "RELAY_ED25519_PRIVATE_KEY";
+const CANONICAL_CONTROL_PLANE_ORIGIN = "https://self.witwave.ai";
+const OPERATIONS_LEASE_OPERATION = "route_signing_secret_provision";
 const KEY_ID = /^[a-z][a-z0-9_-]{0,63}$/;
 const SECRET_ID = /^sec_[a-z2-7]{16}$/;
 const FIELD_ID = /^fld_[a-z2-7]{16}$/;
@@ -41,6 +49,8 @@ const PUBLIC_KEY = /^[A-Za-z0-9+/]{43}=$/;
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 const MAX_JSON_OUTPUT = 5 * 1024 * 1024;
 const WRANGLER_UNSAFE_ENVIRONMENT = Object.freeze([
+  "CONTROL_PLANE_EDGE_TOKEN",
+  "CONTROL_PLANE_URL",
   "CLOUDFLARE_API_BASE_URL",
   "CF_API_BASE_URL",
   "WRANGLER_API_ENVIRONMENT",
@@ -56,6 +66,9 @@ const WRANGLER_UNSAFE_ENVIRONMENT = Object.freeze([
   "NODE_DEBUG",
   "NODE_V8_COVERAGE",
   "SSLKEYLOGFILE",
+  "WITSELF_CONTROL_PLANE",
+  "WITSELF_CONTROL_PLANE_ADDR",
+  "WITSELF_ENDPOINT",
 ]);
 const WITSELF_UNSAFE_ENVIRONMENT = Object.freeze([
   "NODE_OPTIONS",
@@ -319,6 +332,10 @@ export function validateProvisioningConfigs(controlPlaneRaw, emailEdgeRaw) {
       emailEdge.vars?.REALM_EMAIL_CANONICAL_DELIVERY_ENABLED !== "false") {
     fail("email-edge generated configuration must keep managed delivery dark");
   }
+  if (controlPlane.vars?.CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST !== "" ||
+      emailEdge.vars?.AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST !== "") {
+    fail("generated managed delivery cohorts must be empty before provisioning");
+  }
   return Object.freeze({
     keyID,
     publicKey: keyring[keyID],
@@ -407,12 +424,47 @@ function assertRemoteDark({ controlPlane, emailEdge }) {
       fail("email-edge managed delivery must be dark before provisioning");
     }
   }
+  const cpCohort = cpBindings.get(
+    "CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
+  );
+  const edgeCohort = edgeBindings.get(
+    "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
+  );
+  if (cpCohort?.type !== "plain_text" || cpCohort.text !== "" ||
+      edgeCohort?.type !== "plain_text" || edgeCohort.text !== "") {
+    fail("active managed delivery cohorts must be empty before provisioning");
+  }
   // A pre-existing email Worker is mandatory. This avoids Wrangler's first-
   // deploy secret bootstrap path, which needs a complete --secrets-file.
   assertSecretBinding(edgeBindings, RELAY_PRIVATE_SECRET, "email edge");
   if (!edgeSecrets.has(RELAY_PRIVATE_SECRET)) {
     fail("email edge persistent relay secret is missing");
   }
+}
+
+export function routeSigningOperationsLeaseOrigin({ emailEdge }) {
+  const edgeBindings = activeBindings(
+    emailEdge?.version,
+    activeVersionID(emailEdge?.deployment, "email edge"),
+    "email edge",
+  );
+  const binding = edgeBindings.get("CONTROL_PLANE_URL");
+  if (binding?.type !== "plain_text" || typeof binding.text !== "string") {
+    fail("email edge operations lease origin is missing or invalid");
+  }
+  let origin;
+  try {
+    origin = new URL(binding.text);
+  } catch {
+    fail("email edge operations lease origin is missing or invalid");
+  }
+  if (origin.protocol !== "https:" || origin.username || origin.password ||
+      origin.search || origin.hash || origin.pathname !== "/" ||
+      origin.toString() !== binding.text ||
+      origin.origin !== CANONICAL_CONTROL_PLANE_ORIGIN) {
+    fail("email edge operations lease origin is missing or invalid");
+  }
+  return origin.origin;
 }
 
 function assertProvisionedRemote(remote) {
@@ -735,6 +787,13 @@ function inspectWorker(runtime, worker, config, label, env) {
   const secrets = wranglerJSON(runtime, [
     "secret", "list", "--name", worker, "--format", "json",
   ], config, `inspect the ${label} secret inventory`, env);
+  const finalDeployment = wranglerJSON(runtime, [
+    "deployments", "status", "--name", worker, "--json",
+  ], config, `reinspect the ${label} deployment`, env);
+  if (finalDeployment?.id !== deployment.id ||
+      activeVersionID(finalDeployment, label) !== versionID) {
+    fail(`${label} changed during exact provider inspection`);
+  }
   return { deployment, version, secrets };
 }
 
@@ -770,7 +829,16 @@ function revealSecret(runtime, secret, field, options, env) {
   });
 }
 
-function putWorkerSecret(runtime, worker, config, name, value, env) {
+async function putWorkerSecret(
+  runtime,
+  leaseGuard,
+  worker,
+  config,
+  name,
+  value,
+  env,
+) {
+  await leaseGuard.renew();
   runtime.secretPut("wrangler", [
     "secret", "put", name,
     "--name", worker,
@@ -780,11 +848,13 @@ function putWorkerSecret(runtime, worker, config, name, value, env) {
     env,
     operation: `provision ${name} on ${worker}`,
   });
+  await leaseGuard.renew();
 }
 
-export function provisionRouteSigningSecrets(options, {
+export async function provisionRouteSigningSecrets(options, {
   runtime = createSpawnRuntime(),
   environment = process.env,
+  withLease = withAgentEmailOperationsLease,
 } = {}) {
   runtime.assertReceiptAvailable(options.receipt);
   const config = validateProvisioningConfigs(
@@ -813,6 +883,7 @@ export function provisionRouteSigningSecrets(options, {
     ),
   };
   assertRemoteDark(remote);
+  const leaseOrigin = routeSigningOperationsLeaseOrigin(remote);
 
   const routeShow = validateSecretShowEnvelope(
     showSecret(runtime, options.routeSecret, options, witselfEnv),
@@ -868,125 +939,157 @@ export function provisionRouteSigningSecrets(options, {
   verifyEd25519Keypair(routePrivate, config.publicKey);
   validateFallbackToken(fallbackToken);
 
-  // Reveals and local cryptographic checks can take time. Narrow the race with
-  // any independent operator action by re-reading both live Workers and every
-  // persistent activation gate immediately before the first secret mutation.
-  assertRemoteDark({
-    controlPlane: inspectWorker(
-      runtime,
-      CONTROL_PLANE_WORKER,
-      options.controlPlaneConfig,
-      "control plane",
-      wranglerInspectionEnv,
-    ),
-    emailEdge: inspectWorker(
-      runtime,
-      EMAIL_EDGE_WORKER,
-      options.emailEdgeConfig,
-      "email edge",
-      wranglerInspectionEnv,
-    ),
-  });
+  return withLease(
+    OPERATIONS_LEASE_OPERATION,
+    async (leaseGuard) => {
+      if (!leaseGuard || typeof leaseGuard.renew !== "function" ||
+          typeof leaseGuard.evidence !== "function") {
+        fail("route-signing secret provisioning lease guard is invalid");
+      }
+      // The first inspection only establishes the non-redirectable lease
+      // origin. Reacquire every provider and dark-state fence after the lease
+      // is held, because secret reveal may take an arbitrary amount of time.
+      const leasedRemote = {
+        controlPlane: inspectWorker(
+          runtime,
+          CONTROL_PLANE_WORKER,
+          options.controlPlaneConfig,
+          "control plane",
+          wranglerInspectionEnv,
+        ),
+        emailEdge: inspectWorker(
+          runtime,
+          EMAIL_EDGE_WORKER,
+          options.emailEdgeConfig,
+          "email edge",
+          wranglerInspectionEnv,
+        ),
+      };
+      assertRemoteDark(leasedRemote);
+      if (routeSigningOperationsLeaseOrigin(leasedRemote) !== leaseOrigin) {
+        fail("email edge operations lease origin changed before provisioning");
+      }
 
-  const routePrivateBytes = Buffer.from(routePrivate, "utf8");
-  const fallbackTokenBytes = Buffer.from(fallbackToken, "utf8");
-  try {
-    putWorkerSecret(
-      runtime,
-      CONTROL_PLANE_WORKER,
-      options.controlPlaneConfig,
-      ROUTE_PRIVATE_SECRET,
-      routePrivateBytes,
-      wranglerMutationEnv,
-    );
-    // The two token puts are intentionally sequential. The live dark-gate
-    // preflight above is what makes the temporary mixed-token state safe.
-    try {
-      putWorkerSecret(
-        runtime,
-        CONTROL_PLANE_WORKER,
-        options.controlPlaneConfig,
-        FALLBACK_TOKEN_SECRET,
-        fallbackTokenBytes,
-        wranglerMutationEnv,
-      );
-      putWorkerSecret(
-        runtime,
-        EMAIL_EDGE_WORKER,
-        options.emailEdgeConfig,
-        FALLBACK_TOKEN_SECRET,
-        fallbackTokenBytes,
-        wranglerMutationEnv,
-      );
-    } catch {
-      fail(
-        "fallback-token provisioning did not complete; all delivery gates were verified dark and must remain dark until this command is rerun successfully and followed by the tagged deploy",
-      );
-    }
-  } finally {
-    routePrivateBytes.fill(0);
-    fallbackTokenBytes.fill(0);
-  }
+      const routePrivateBytes = Buffer.from(routePrivate, "utf8");
+      const fallbackTokenBytes = Buffer.from(fallbackToken, "utf8");
+      try {
+        await putWorkerSecret(
+          runtime,
+          leaseGuard,
+          CONTROL_PLANE_WORKER,
+          options.controlPlaneConfig,
+          ROUTE_PRIVATE_SECRET,
+          routePrivateBytes,
+          wranglerMutationEnv,
+        );
+        // The two token puts are intentionally sequential. The exact live
+        // dark-state recheck and global lease make the mixed-token interval
+        // bounded and isolated from every supported provider mutation.
+        try {
+          await putWorkerSecret(
+            runtime,
+            leaseGuard,
+            CONTROL_PLANE_WORKER,
+            options.controlPlaneConfig,
+            FALLBACK_TOKEN_SECRET,
+            fallbackTokenBytes,
+            wranglerMutationEnv,
+          );
+          await putWorkerSecret(
+            runtime,
+            leaseGuard,
+            EMAIL_EDGE_WORKER,
+            options.emailEdgeConfig,
+            FALLBACK_TOKEN_SECRET,
+            fallbackTokenBytes,
+            wranglerMutationEnv,
+          );
+        } catch {
+          fail(
+            "fallback-token provisioning did not complete; all delivery gates were verified dark and must remain dark until this command is rerun successfully and followed by the tagged deploy",
+          );
+        }
+      } finally {
+        routePrivateBytes.fill(0);
+        fallbackTokenBytes.fill(0);
+      }
 
-  try {
-    const postWriteRemote = {
-      controlPlane: inspectWorker(
-        runtime,
-        CONTROL_PLANE_WORKER,
-        options.controlPlaneConfig,
-        "control plane",
-        wranglerInspectionEnv,
-      ),
-      emailEdge: inspectWorker(
-        runtime,
-        EMAIL_EDGE_WORKER,
-        options.emailEdgeConfig,
-        "email edge",
-        wranglerInspectionEnv,
-      ),
-    };
-    assertProvisionedRemote(postWriteRemote);
-  } catch {
-    fail(
-      "post-write Worker secret verification failed; all delivery gates must remain dark until this command is rerun successfully and followed by the tagged deploy",
-    );
-  }
+      try {
+        const postWriteRemote = {
+          controlPlane: inspectWorker(
+            runtime,
+            CONTROL_PLANE_WORKER,
+            options.controlPlaneConfig,
+            "control plane",
+            wranglerInspectionEnv,
+          ),
+          emailEdge: inspectWorker(
+            runtime,
+            EMAIL_EDGE_WORKER,
+            options.emailEdgeConfig,
+            "email edge",
+            wranglerInspectionEnv,
+          ),
+        };
+        assertProvisionedRemote(postWriteRemote);
+        if (routeSigningOperationsLeaseOrigin(postWriteRemote) !== leaseOrigin) {
+          fail("email edge operations lease origin changed during provisioning");
+        }
+      } catch {
+        fail(
+          "post-write Worker secret verification failed; all delivery gates must remain dark until this command is rerun successfully and followed by the tagged deploy",
+        );
+      }
 
-  const receipt = Object.freeze({
-    schema: "witself.agent-email-secret-provisioning.v1",
-    outcome: "provisioned",
-    workers: Object.freeze({
-      control_plane: CONTROL_PLANE_WORKER,
-      email_edge: EMAIL_EDGE_WORKER,
-    }),
-    operations: Object.freeze({
-      control_plane_route_private_key: "succeeded",
-      control_plane_fallback_token: "succeeded",
-      email_edge_fallback_token: "succeeded",
-    }),
-    safeguards: Object.freeze({
-      existing_workers_verified: true,
-      all_delivery_gates_verified_dark: true,
-      delivery_gates_reverified_immediately_before_mutation: true,
-      route_keypair_verified: true,
-      active_key_id_trusted_by_email_edge: true,
-      exact_same_fallback_value_uploaded_to_both_targets: true,
-      values_written_only_over_stdin: true,
-      post_write_bindings_and_inventories_verified: true,
-      tagged_redeploy_required: true,
-    }),
-  });
-  if (options.receipt) runtime.writeReceiptExclusive(options.receipt, receipt);
-  return receipt;
+      await leaseGuard.renew();
+      const leaseEvidence = leaseGuard.evidence();
+      validateAgentEmailOperationsLeaseEvidence(
+        leaseEvidence,
+        OPERATIONS_LEASE_OPERATION,
+      );
+      const receipt = Object.freeze({
+        schema: "witself.agent-email-secret-provisioning.v2",
+        outcome: "provisioned",
+        workers: Object.freeze({
+          control_plane: CONTROL_PLANE_WORKER,
+          email_edge: EMAIL_EDGE_WORKER,
+        }),
+        operations: Object.freeze({
+          control_plane_route_private_key: "succeeded",
+          control_plane_fallback_token: "succeeded",
+          email_edge_fallback_token: "succeeded",
+        }),
+        operations_lease: leaseEvidence,
+        safeguards: Object.freeze({
+          existing_workers_verified: true,
+          all_delivery_gates_verified_dark: true,
+          delivery_gates_reverified_immediately_before_mutation: true,
+          route_keypair_verified: true,
+          active_key_id_trusted_by_email_edge: true,
+          exact_same_fallback_value_uploaded_to_both_targets: true,
+          values_written_only_over_stdin: true,
+          post_write_bindings_and_inventories_verified: true,
+          serialized_by_global_operations_lease: true,
+          tagged_redeploy_required: true,
+        }),
+      });
+      if (options.receipt) runtime.writeReceiptExclusive(options.receipt, receipt);
+      return receipt;
+    },
+    {
+      endpoint: leaseOrigin,
+      token: fallbackToken,
+    },
+  );
 }
 
-function main() {
+async function main() {
   const options = parseProvisioningArgs(process.argv.slice(2));
-  const receipt = provisionRouteSigningSecrets(options);
+  const receipt = await provisionRouteSigningSecrets(options);
   process.stdout.write(`${JSON.stringify(receipt, null, 2)}\n`);
 }
 
 if (process.argv[1] != null &&
     resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main();
+  await main();
 }

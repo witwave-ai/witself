@@ -12,8 +12,8 @@ import {
   buildRealmEmailAliasClaimProof,
 } from "../src/agent-email-custom-domain-route-contract.mjs";
 
-const ACCOUNT = "acct_canonical";
-const OTHER_ACCOUNT = "acct_canonical_other";
+const ACCOUNT = "acc_aaaaaaaaaaaaaaaa";
+const OTHER_ACCOUNT = "acc_bbbbbbbbbbbbbbbb";
 const REALM = "realm_aaaaaaaaaaaaaaaa";
 const DOMAIN = "agent-mail.witwave.ai";
 const PRIMARY_DOMAIN = "witmail.net";
@@ -229,6 +229,7 @@ function fixture({
     ...(legacyDomain ? { AGENT_EMAIL_LEGACY_DOMAINS: legacyDomain } : {}),
     CP_REALM_EMAIL_CANONICAL_INVENTORY_ENABLED: inventory ? "true" : "false",
     CP_REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: delivery ? "true" : "false",
+    CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: ACCOUNT,
     CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED: "true",
     ...(customDomainStub
       ? {
@@ -247,7 +248,7 @@ function fixture({
       fetch: fetchImpl,
       signRouteProjection: async (projection) => ({
         ...structuredClone(projection),
-        schema_version: 2,
+        schema_version: projection.schema_version + 1,
         route_signing_key_id: "route-test",
         route_signature: `${"A".repeat(86)}==`,
       }),
@@ -338,6 +339,34 @@ test("one bounded inventory page publishes primary and legacy canonical routes",
     assert.equal(projection.domain, domain);
     assert.equal(projection.state, "applied");
   }
+});
+
+test("known canonical routes are held back retryably by the exact account cohort", async () => {
+  const { runtime, env } = fixture();
+  assert.equal(
+    (await call(runtime, "/canonical/inventory/reconcile")).response.status,
+    200,
+  );
+
+  env.CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST = "";
+  const heldBack = await call(runtime, "/route/get", {
+    domain: DOMAIN,
+    realm_label: REALM.slice("realm_".length),
+  });
+  assert.equal(heldBack.response.status, 409);
+  assert.equal(
+    heldBack.body.code,
+    "managed_email_delivery_cohort_held_back",
+  );
+
+  env.CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST =
+    "acc_bbbbbbbbbbbbbbbb,acc_aaaaaaaaaaaaaaaa";
+  const invalid = await call(runtime, "/route/get", {
+    domain: DOMAIN,
+    realm_label: REALM.slice("realm_".length),
+  });
+  assert.equal(invalid.response.status, 503);
+  assert.equal(invalid.body.code, "managed_email_delivery_cohort_invalid");
 });
 
 test("canonical ownership is immutable and equal-generation conflicts cannot overwrite authority", async () => {
