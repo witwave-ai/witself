@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 
 	witself "github.com/witwave-ai/witself"
 )
@@ -206,12 +207,17 @@ const (
 type Plan struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+	// Recommended is presentation metadata for the one plan the product wants
+	// to emphasize. It never changes entitlement resolution or purchasability.
+	Recommended bool `json:"recommended,omitempty"`
+	// Badge is the bounded customer-facing label paired with Recommended.
+	Badge string `json:"badge,omitempty"`
 	// PriceMonthly is whole dollars per month (display units, matching the
 	// public document). Use PriceCents for billing math.
-	PriceMonthly *int64 `json:"price_monthly"`
+	PriceMonthly *int64 `json:"price_monthly,omitempty"`
 	// PriceMonthlyMin is whole dollars per month for minimum-commitment tiers.
 	// Set instead of PriceMonthly.
-	PriceMonthlyMin *int64           `json:"price_monthly_min"`
+	PriceMonthlyMin *int64           `json:"price_monthly_min,omitempty"`
 	Available       bool             `json:"available"`
 	UsageBilled     bool             `json:"usage_billed"`
 	Limits          map[string]int64 `json:"limits"` // nil = not yet defined (TBD tiers)
@@ -304,7 +310,11 @@ func Parse(raw []byte) (*Catalog, error) {
 		Plans:    doc.Plans,
 		byID:     make(map[string]Plan, len(doc.Plans)),
 	}
-	for _, p := range doc.Plans {
+	recommendedPlan := ""
+	for i, p := range doc.Plans {
+		p.ID = strings.TrimSpace(p.ID)
+		p.Name = strings.TrimSpace(p.Name)
+		p.Badge = strings.TrimSpace(p.Badge)
 		if p.ID == "" {
 			return nil, fmt.Errorf("plan catalog: plan with empty id")
 		}
@@ -320,6 +330,25 @@ func Parse(raw []byte) (*Catalog, error) {
 		if err := ValidatePolicies(p.Policies); err != nil {
 			return nil, fmt.Errorf("plan catalog: plan %q: %w", p.ID, err)
 		}
+		if len(p.Badge) > 64 {
+			return nil, fmt.Errorf("plan catalog: plan %q badge exceeds 64 bytes", p.ID)
+		}
+		if p.Recommended {
+			if recommendedPlan != "" {
+				return nil, fmt.Errorf("plan catalog: plans %q and %q are both recommended",
+					recommendedPlan, p.ID)
+			}
+			if !p.Purchasable() {
+				return nil, fmt.Errorf("plan catalog: recommended plan %q must be available and priced", p.ID)
+			}
+			if p.Badge == "" {
+				return nil, fmt.Errorf("plan catalog: recommended plan %q requires a badge", p.ID)
+			}
+			recommendedPlan = p.ID
+		} else if p.Badge != "" {
+			return nil, fmt.Errorf("plan catalog: plan %q has a badge but is not recommended", p.ID)
+		}
+		c.Plans[i] = p
 		c.byID[p.ID] = p
 	}
 	free, ok := c.byID[Free]

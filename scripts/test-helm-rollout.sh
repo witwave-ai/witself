@@ -48,6 +48,7 @@ email_retention_preview_render="$render_dir/email-retention-preview.yaml"
 email_retention_enforce_render="$render_dir/email-retention-enforce.yaml"
 style_tuned_render="$render_dir/style-tuned.yaml"
 monitor_render="$render_dir/monitors.yaml"
+apps_monitor_render="$render_dir/apps-monitors.yaml"
 long_name_render="$render_dir/long-name.yaml"
 long_fullname="$(printf 'a%.0s' {1..63})"
 long_worker_fullname="${long_fullname:0:56}-worker"
@@ -191,6 +192,28 @@ helm template witself-server "$server_chart" --namespace witself \
   --set metrics.podMonitor.enabled=true \
   --set worker.metrics.serviceMonitor.enabled=true \
   --set worker.metrics.podMonitor.enabled=true >"$monitor_render"
+helm template witself-apps "$apps_chart" \
+  --values "$gcp_cell" \
+  --values "$apps_profile" \
+  --set apps.witselfServer.metrics.serviceMonitor.enabled=true \
+  --set apps.witselfServer.metrics.serviceMonitor.interval=45s \
+  --set apps.witselfServer.metrics.serviceMonitor.scrapeTimeout=12s \
+  --set-string apps.witselfServer.metrics.serviceMonitor.labels.monitor=server \
+  --set-string 'apps.witselfServer.metrics.serviceMonitor.relabelings[0].targetLabel=service_role' \
+  --set-string 'apps.witselfServer.metrics.serviceMonitor.relabelings[0].replacement=server' \
+  --set-string 'apps.witselfServer.metrics.serviceMonitor.metricRelabelings[0].sourceLabels[0]=__name__' \
+  --set-string 'apps.witselfServer.metrics.serviceMonitor.metricRelabelings[0].regex=witself_server_.+' \
+  --set-string 'apps.witselfServer.metrics.serviceMonitor.metricRelabelings[0].action=keep' \
+  --set apps.witselfServer.worker.metrics.serviceMonitor.enabled=true \
+  --set apps.witselfServer.worker.metrics.serviceMonitor.interval=50s \
+  --set apps.witselfServer.worker.metrics.serviceMonitor.scrapeTimeout=15s \
+  --set-string apps.witselfServer.worker.metrics.serviceMonitor.labels.monitor=worker \
+  --set-string 'apps.witselfServer.worker.metrics.serviceMonitor.relabelings[0].targetLabel=service_role' \
+  --set-string 'apps.witselfServer.worker.metrics.serviceMonitor.relabelings[0].replacement=worker' \
+  --set-string 'apps.witselfServer.worker.metrics.serviceMonitor.metricRelabelings[0].sourceLabels[0]=__name__' \
+  --set-string 'apps.witselfServer.worker.metrics.serviceMonitor.metricRelabelings[0].regex=witself_worker_.+' \
+  --set-string 'apps.witselfServer.worker.metrics.serviceMonitor.metricRelabelings[0].action=keep' \
+  >"$apps_monitor_render"
 helm template witself-server "$server_chart" --namespace witself \
   --set-string fullnameOverride="$long_fullname" \
   --set worker.enabled=true \
@@ -350,6 +373,11 @@ live_nested_render="$render_dir/live-nested-render.yaml"
 live_nested_server_config="$render_dir/live-nested-server-config.yaml"
 live_nested_worker_config="$render_dir/live-nested-worker-config.yaml"
 live_nested_worker_deployment="$render_dir/live-nested-worker-deployment.yaml"
+apps_monitor_application="$render_dir/apps-monitor-application.yaml"
+apps_monitor_nested_values="$render_dir/apps-monitor-nested-values.yaml"
+apps_monitor_nested_render="$render_dir/apps-monitor-nested-render.yaml"
+apps_monitor_server="$render_dir/apps-monitor-server.yaml"
+apps_monitor_worker="$render_dir/apps-monitor-worker.yaml"
 civo_server_application="$render_dir/civo-server-application.yaml"
 civo_backup_server_application="$render_dir/civo-backup-server-application.yaml"
 civo_use1_server_application="$render_dir/civo-use1-server-application.yaml"
@@ -415,6 +443,34 @@ helm template witself-server "$server_chart" --namespace witself \
 extract_document ConfigMap witself-server "$live_nested_render" "$live_nested_server_config"
 extract_document ConfigMap witself-worker "$live_nested_render" "$live_nested_worker_config"
 extract_document Deployment witself-worker "$live_nested_render" "$live_nested_worker_deployment"
+if grep -Fqx 'kind: ServiceMonitor' "$live_nested_render"; then
+  echo "default app-of-apps values unexpectedly rendered a ServiceMonitor" >&2
+  exit 1
+fi
+extract_document Application witself-server "$apps_monitor_render" "$apps_monitor_application"
+extract_application_helm_values "$apps_monitor_application" "$apps_monitor_nested_values"
+helm template witself-server "$server_chart" --namespace witself \
+  --values "$apps_monitor_nested_values" >"$apps_monitor_nested_render"
+extract_document ServiceMonitor witself-server "$apps_monitor_nested_render" "$apps_monitor_server"
+extract_document ServiceMonitor witself-worker "$apps_monitor_nested_render" "$apps_monitor_worker"
+require_line "      interval: 45s" "$apps_monitor_server"
+require_line "      scrapeTimeout: 12s" "$apps_monitor_server"
+require_line "    monitor: server" "$apps_monitor_server"
+require_line "        - replacement: server" "$apps_monitor_server"
+require_line "          targetLabel: service_role" "$apps_monitor_server"
+require_line "        - action: keep" "$apps_monitor_server"
+require_line "          regex: witself_server_.+" "$apps_monitor_server"
+require_line "          sourceLabels:" "$apps_monitor_server"
+require_line "          - __name__" "$apps_monitor_server"
+require_line "      interval: 50s" "$apps_monitor_worker"
+require_line "      scrapeTimeout: 15s" "$apps_monitor_worker"
+require_line "    monitor: worker" "$apps_monitor_worker"
+require_line "        - replacement: worker" "$apps_monitor_worker"
+require_line "          targetLabel: service_role" "$apps_monitor_worker"
+require_line "        - action: keep" "$apps_monitor_worker"
+require_line "          regex: witself_worker_.+" "$apps_monitor_worker"
+require_line "          sourceLabels:" "$apps_monitor_worker"
+require_line "          - __name__" "$apps_monitor_worker"
 extract_document Application witself-server "$civo_apps_render" "$civo_server_application"
 extract_document Application witself-server "$civo_backup_apps_render" "$civo_backup_server_application"
 extract_document Application witself-server "$civo_use1_apps_render" "$civo_use1_server_application"
@@ -1141,6 +1197,14 @@ require_sequence "$apps_render" \
   "            enabled: true" \
   "            interval: 5m" \
   "            mode: enforce" \
+  "          metrics:" \
+  "            serviceMonitor:" \
+  "              enabled: false" \
+  "              interval: 30s" \
+  "              labels: {}" \
+  "              metricRelabelings: []" \
+  "              relabelings: []" \
+  "              scrapeTimeout: 10s" \
   "          minReadySeconds: 10"
 require_sequence "$apps_render" \
   "          replicaCount: 2" \

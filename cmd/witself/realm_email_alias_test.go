@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -76,5 +77,45 @@ func TestRealmEmailAliasCLIInputValidation(t *testing.T) {
 	}
 	if code := realmEmailAliasList([]string{"--realm", "realm_aaaaaaaaaaaaaaaa", "--account-id", "acc_1"}); code != 1 {
 		t.Fatalf("account id without token file exit code = %d", code)
+	}
+}
+
+func TestRealmEmailAliasCLIHumanOutputSanitizesTerminalControls(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.realm-email-alias.v1",
+			"requests": []map[string]any{{
+				"id": "earq_\x1b[31mred", "alias": "acme\tforged",
+				"status": "pending_review\nforged",
+			}},
+			"truncated": true, "next_cursor": "next\u009b31m\nforged",
+		})
+	}))
+	defer srv.Close()
+	tokenPath := filepath.Join(t.TempDir(), "operator.token")
+	if err := os.WriteFile(tokenPath, []byte("operator-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, code := captureFactDeleteCLI(t, func() int {
+		return realmEmailAliasList([]string{
+			"--endpoint", srv.URL, "--token-file", tokenPath,
+			"--account-id", "acc_1", "--realm", "realm_aaaaaaaaaaaaaaaa",
+		})
+	})
+	if code != 0 {
+		t.Fatalf("list = code %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	combined := stdout + stderr
+	if strings.ContainsAny(combined, "\x1b\u009b") || strings.Contains(combined, "\nforged") {
+		t.Fatalf("output retained terminal or row injection: %q", combined)
+	}
+	for _, want := range []string{
+		"earq_[31mred", "acme forged", "pending_review forged",
+		"next cursor: next31m forged",
+	} {
+		if !strings.Contains(combined, want) {
+			t.Errorf("output omitted sanitized value %q: %q", want, combined)
+		}
 	}
 }

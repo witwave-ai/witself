@@ -52,6 +52,16 @@ apps:
       enabled: false
       minAvailable: 1
     topologySpreadConstraints: []
+    # Prometheus Operator discovery is optional and remains disabled until a
+    # cell has an intentionally configured monitoring stack.
+    metrics:
+      serviceMonitor:
+        enabled: false
+        interval: 30s
+        scrapeTimeout: 10s
+        labels: {}
+        relabelings: []
+        metricRelabelings: []
     # Keep permanent deletion disabled through the schema-27 compatibility
     # rollout and the schema-28 activation rollout. Enable it only after every
     # writer has converged on schema-28-compatible code.
@@ -111,6 +121,14 @@ apps:
           maxUnavailable: 0
           maxSurge: 1
       terminationGracePeriodSeconds: 30
+      metrics:
+        serviceMonitor:
+          enabled: false
+          interval: 30s
+          scrapeTimeout: 10s
+          labels: {}
+          relabelings: []
+          metricRelabelings: []
       resources:
         requests:
           cpu: 100m

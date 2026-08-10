@@ -22,6 +22,25 @@ the configured retry canary. No live cell, provider route, MX, catch-all,
 canonical-delivery, alias-delivery, or custom-domain gate is enabled by this
 implementation checkpoint.
 
+Catalog entitlement, account policy, cell rollout, and edge delivery are
+separate facts:
+
+1. The catalog supplies each plan's default inbound-email entitlement;
+   `witself plan list` reports that default.
+2. An audited account override may change the effective entitlement without
+   changing plan or price; `witself plan status` reports the effective value.
+3. A default-off exact-account cell cohort controls mailbox provisioning and
+   cell surfaces independently of entitlement.
+4. DNS, MX, Cloudflare routing, the Worker route, canonical delivery, aliases,
+   and custom domains each have their own rollout gates.
+
+Neither plan command is a delivery-readiness probe. A verified relay delivery
+for an account whose effective policy disables inbound email is accepted and
+dropped with the value-free `feature_disabled` verdict: no message is stored
+and no provider retry is requested. That account-level behavior is distinct
+from an enrolled agent or realm receive switch, which uses the temporary
+`receive_disabled` path described below.
+
 Permanent-domain decision (2026-08-03): `witmail.net` is the managed email
 apex dedicated solely to agent email. It is not a website, human or employee
 mail domain, marketing domain, or generic Witself/Witwave notification sender;
@@ -394,8 +413,9 @@ settle the unused arm or let its 15-minute TTL expire, and only then unset the
 agent or downgrade.
 
 The workflow is manual-only. A successful run acknowledges but does not delete
-its synthetic message, so a future 15-minute cadence would retain about 96
-messages per day until mailbox retention/delete is settled.
+its synthetic message, so a future 15-minute cadence would create about 96
+messages per day. Do not schedule it until the target cell's plan-aware email
+retention worker is verified in enforcement mode.
 
 **Production receive-only contract:** the Inbound SMTP Transaction Contract
 below remains the target. Promotion beyond the internal pilot, catch-all Worker
@@ -414,20 +434,21 @@ but as a local-part segment rather than a subdomain. The subdomain shape from
 kickoff was dropped after verification: Cloudflare Email Routing caps a zone
 at 30 configured domains (apex plus routing/sending subdomains combined) and
 has no wildcard subdomain receive, so per-realm subdomains cannot scale (see
-Inbound Pipeline for the full findings). The launch receive domain is
+Inbound Pipeline for the full findings). The retired receive pilot used
 `agent-mail.witwave.ai`, configured for Email Routing inside the existing
-`witwave.ai` zone (operator decision, 2026-07-21), with `witmail.net` — the
-dedicated Cloudflare-fronted apex registered on 2026-08-03 — as the durable
-home. The address shape is identical on both:
-`<agent-local-part>.<realm-label>@agent-mail.witwave.ai` for a previously
-issued launch identity, the same local part at `witmail.net` after cutover.
+`witwave.ai` zone. `witmail.net` — the dedicated Cloudflare-fronted apex
+registered on 2026-08-03 — is the permanent managed domain. The address shape
+is identical on both: a previously issued launch identity may retain
+`<agent-local-part>.<realm-label>@agent-mail.witwave.ai` compatibility, while
+all new canonical addresses and aliases use the same local-part shape at
+`witmail.net`.
 
-One engineering caveat gates production use of the launch domain: Cloudflare
-documents catch-all at the zone apex only. The launch spike established that
-the zone-global catch-all covers the configured subdomain, but routing that
-catch-all to the Worker would also move existing apex traffic. The limited
-pilot therefore uses exact-address rules and leaves the catch-all unchanged.
-The permanent path is now the `witmail.net` apex. Exact-address routing on
+Cloudflare documents catch-all at the zone apex only. The historical launch
+spike established that the zone-global catch-all covers the configured
+subdomain, but routing that catch-all to the Worker would also move existing
+apex traffic. The retired pilot therefore used exact-address rules and left
+the catch-all unchanged. The permanent path is the `witmail.net` apex.
+Exact-address routing on
 `agent-mail.witwave.ai` is permitted only for previously issued canonical
 local parts during compatibility; it is not a fallback for new addresses.
 Email Routing custom-address rules are capped per zone, and the address
@@ -1257,8 +1278,12 @@ control or metadata.
    returns a typed verdict the Worker maps to the SMTP reply:
    - `accepted` → 250 (only after the durable write — see step 6);
    - `unknown_recipient` → 550 permanent;
-   - `receive_disabled` (kill switch or plan enforcement) → **451 tempfail
-     within a grace window** (operator decision 2026-07-21). A disabled
+   - `feature_disabled` (effective account entitlement is off) → **250
+     accept-and-drop**, with no message row and no provider retry. The edge
+     learns only the fixed verdict and does not expose account state to the
+     sender;
+   - `receive_disabled` (enrolled agent or realm receive switch) → **451
+     tempfail within a grace window** (operator decision 2026-07-21). A disabled
      mailbox defers rather than hard-bouncing, so external services do not
      convert a bounce into permanent address suppression; if the mailbox is
      still disabled when the grace window lapses, the sender's own MTA
@@ -1463,7 +1488,7 @@ The receive-side lifecycle mirrors the proven messaging shape:
 
 ## Surfaces
 
-The pilot shapes are pinned in [json-contracts.md](json-contracts.md),
+The receive-only shapes are pinned in [json-contracts.md](json-contracts.md),
 [cli-command-surface.md](cli-command-surface.md), and
 [mcp-tools.md](mcp-tools.md):
 
@@ -1501,9 +1526,13 @@ first-seen values with occurrence counts. It fails unavailable unless
 
 ## Pilot Implementation Checkpoint
 
+This is the historical 2026-07-21 pilot checkpoint, retained as deployment and
+rollback evidence. It is not the current production-wide rollout description.
+
 The local checkout now contains migrations 0059–0061, scoped
 mailbox/address/message storage, durable suspected-duplicate grouping, MIME
-bounds, archive export/import, fenced foreground processing, value-free audit events, the
+bounds, archive export/import, fenced foreground processing, value-free audit
+events, the
 signed cell ingestion endpoint, startup reconciliation for exactly the
 configured 5–10 agents, API/CLI/MCP owner surfaces, self/hook
 `email_checkpoint` hydration, and the isolated Cloudflare Worker plus
@@ -1533,10 +1562,15 @@ The checkpoint was deployed on 2026-07-21 and hardened through `v0.0.197` on
 feature configuration, synthetic durable-accept canary, stable provider-retry
 proof, delayed provider retries, and disable/re-enable rollback were all
 verified live. The existing catch-all and control-plane KV remained unchanged.
-Production remains blocked on the strict capability gaps above.
-Plan-tier retention, quarantine, trusted sender authentication, provider-id
-idempotency, and billable receive remain production work rather than features
-silently simulated by the pilot.
+Production promotion remains blocked on the strict provider-capability gaps
+above. Plan-tier retention is no longer one of those implementation gaps:
+migration 0069 adds independent preview/enforcement lanes, and the separately
+scalable worker applies finite `agent_email_retention_days` policies with
+Prometheus metrics. Activation remains explicit per cell, and a configured
+retention policy is not proof that the worker is running in enforcement mode.
+Quarantine, trusted sender authentication, provider-id idempotency, and
+billable receive remain production work rather than features silently
+simulated by the retired pilot.
 
 **Authorization (settled 2026-07-21).** Mail is owner-agent-only, matching
 agent messages (the most sensitive existing analog), not the policy-engine-

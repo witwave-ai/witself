@@ -4,29 +4,67 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/plans"
 )
 
 // PlanStatus is the CLI-side view of an account's plan state — enough for
-// `witself plan` to render current + pending truthfully.
+// `witself plan` to render current, applied, effective-policy, and pending
+// truthfully without exposing administrator attribution or audit history.
 type PlanStatus struct {
-	AccountID    string
-	Plan         string
-	Applied      string
-	PastDueSince *time.Time
-	ApplyBlocked string
-	Pending      *PlanPending
+	SchemaVersion    string               `json:"schema_version"`
+	AccountID        string               `json:"account_id"`
+	BillingAvailable bool                 `json:"billing_available"`
+	Plan             string               `json:"plan"`
+	PlanName         string               `json:"plan_name"`
+	BillingPlan      string               `json:"billing_plan"`
+	BillingPlanName  string               `json:"billing_plan_name"`
+	Applied          string               `json:"applied"`
+	Limits           map[string]int64     `json:"limits"`
+	LimitDefaults    map[string]int64     `json:"limit_defaults"`
+	Policies         map[string]int64     `json:"policies"`
+	PolicyDefaults   map[string]int64     `json:"policy_defaults"`
+	Features         []string             `json:"features"`
+	FeatureDefaults  []string             `json:"feature_defaults"`
+	Messaging        *PlanFeatureStatus   `json:"messaging,omitempty"`
+	MessageRetention *PlanRetentionStatus `json:"message_retention,omitempty"`
+	EmailReceive     *PlanFeatureStatus   `json:"email_receive,omitempty"`
+	EmailRetention   *PlanRetentionStatus `json:"email_retention,omitempty"`
+	Transcript       *PlanRetentionStatus `json:"transcript_retention,omitempty"`
+	ApplyPending     bool                 `json:"apply_pending"`
+	PastDueSince     *time.Time           `json:"past_due_since,omitempty"`
+	ApplyBlocked     string               `json:"apply_blocked,omitempty"`
+	Pending          *PlanPending         `json:"pending,omitempty"`
+}
+
+// PlanFeatureStatus is the value-free effective/default view for one
+// switchable account capability such as messaging or inbound email.
+type PlanFeatureStatus struct {
+	DefaultEnabled bool `json:"default_enabled"`
+	Enabled        bool `json:"enabled"`
+	Overridden     bool `json:"overridden"`
+}
+
+// PlanRetentionStatus represents finite days with a pointer. A nil value is
+// the control plane's explicit indefinite policy, not a missing or zero value.
+type PlanRetentionStatus struct {
+	DefaultDays   *int64 `json:"default_days"`
+	EffectiveDays *int64 `json:"effective_days"`
+	Overridden    bool   `json:"overridden"`
 }
 
 // PlanPending mirrors the CP's pendingView shape.
 type PlanPending struct {
-	Kind      string
-	Plan      string
-	URL       string
-	Expires   *time.Time
-	Effective *time.Time
-	Requested time.Time
+	Kind      string     `json:"kind"`
+	Plan      string     `json:"plan"`
+	PlanName  string     `json:"plan_name,omitempty"`
+	URL       string     `json:"url,omitempty"`
+	Expires   *time.Time `json:"expires,omitempty"`
+	Effective *time.Time `json:"effective,omitempty"`
+	Requested time.Time  `json:"requested"`
 }
 
 // PlanOutcome is what a change verb resolved to.
@@ -40,35 +78,30 @@ type PlanOutcome struct {
 // GetPlan reads current plan state from the control plane.
 func GetPlan(ctx context.Context, controlPlane, accountID, bearer string) (PlanStatus, error) {
 	url := planURL(controlPlane, accountID, "")
-	var wire struct {
-		AccountID    string     `json:"account_id"`
-		Plan         string     `json:"plan"`
-		Applied      string     `json:"applied"`
-		PastDueSince *time.Time `json:"past_due_since,omitempty"`
-		ApplyBlocked string     `json:"apply_blocked,omitempty"`
-		Pending      *struct {
-			Kind      string     `json:"kind"`
-			Plan      string     `json:"plan"`
-			URL       string     `json:"url,omitempty"`
-			Expires   *time.Time `json:"expires,omitempty"`
-			Effective *time.Time `json:"effective,omitempty"`
-			Requested time.Time  `json:"requested"`
-		} `json:"pending,omitempty"`
-	}
-	if err := doJSON(ctx, "GET", url, bearer, nil, &wire); err != nil {
+	var status PlanStatus
+	if err := doJSON(ctx, http.MethodGet, url, bearer, nil, &status); err != nil {
 		return PlanStatus{}, err
 	}
-	s := PlanStatus{
-		AccountID: wire.AccountID, Plan: wire.Plan, Applied: wire.Applied,
-		PastDueSince: wire.PastDueSince, ApplyBlocked: wire.ApplyBlocked,
+	if status.SchemaVersion != "witself.v0" || status.AccountID != accountID ||
+		strings.TrimSpace(status.Plan) == "" {
+		return PlanStatus{}, fmt.Errorf("control plane returned an invalid plan status")
 	}
-	if p := wire.Pending; p != nil {
-		s.Pending = &PlanPending{
-			Kind: p.Kind, Plan: p.Plan, URL: p.URL,
-			Expires: p.Expires, Effective: p.Effective, Requested: p.Requested,
-		}
+	return status, nil
+}
+
+// GetPlanCatalog reads and validates the public catalog from the control
+// plane. The endpoint needs no account binding or bearer token.
+func GetPlanCatalog(ctx context.Context, controlPlane string) (*plans.Catalog, error) {
+	url := strings.TrimRight(controlPlane, "/") + "/v1/plans"
+	var raw json.RawMessage
+	if err := doJSON(ctx, http.MethodGet, url, "", nil, &raw); err != nil {
+		return nil, err
 	}
-	return s, nil
+	catalog, err := plans.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("control plane returned an invalid plan catalog: %w", err)
+	}
+	return catalog, nil
 }
 
 // UpgradePlan runs POST .../plan:upgrade.

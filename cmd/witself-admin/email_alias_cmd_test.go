@@ -2,9 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -190,4 +193,98 @@ func TestEmailAliasAdminCLIListPaginationAndFilters(t *testing.T) {
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("calls = %#v; want %#v", calls, want)
 	}
+}
+
+func TestEmailAliasAdminCLIHumanOutputSanitizesTerminalControlsAndPreservesJSON(t *testing.T) {
+	requestID := "earq_\x1b[31mred"
+	alias := "acme\tforged"
+	accountID := "acc_1\nforged"
+	realmID := "realm_\u009b31mred"
+	status := "pending_review\nforged"
+	nextCursor := "next\x1b[2J\tpage\nforged"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.realm-email-alias.v1",
+			"requests": []map[string]any{{
+				"id": requestID, "alias": alias, "account_id": accountID,
+				"realm_id": realmID, "status": status,
+			}},
+			"truncated": true, "next_cursor": nextCursor,
+		})
+	}))
+	defer srv.Close()
+	base := []string{"list", "--endpoint", srv.URL, "--token", "admin-token"}
+
+	stdout, stderr, code := captureEmailAliasAdminCLI(t, func() int {
+		return emailAliasAdminRequests(base)
+	})
+	if code != 0 {
+		t.Fatalf("plain list = code %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	combined := stdout + stderr
+	if strings.ContainsAny(combined, "\x1b\u009b") || strings.Contains(combined, "\nforged") {
+		t.Fatalf("plain output retained terminal or row injection: %q", combined)
+	}
+	for _, want := range []string{
+		"earq_[31mred", "acme forged", "acc_1 forged", "realm_31mred",
+		"pending_review forged", "next cursor: next[2J page forged",
+	} {
+		if !strings.Contains(combined, want) {
+			t.Errorf("plain output omitted sanitized value %q: %q", want, combined)
+		}
+	}
+
+	stdout, stderr, code = captureEmailAliasAdminCLI(t, func() int {
+		return emailAliasAdminRequests(append(append([]string{}, base...), "--json"))
+	})
+	if code != 0 || stderr != "" {
+		t.Fatalf("JSON list = code %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	var page struct {
+		Requests []struct {
+			ID        string `json:"id"`
+			Alias     string `json:"alias"`
+			AccountID string `json:"account_id"`
+			RealmID   string `json:"realm_id"`
+			Status    string `json:"status"`
+		} `json:"requests"`
+		NextCursor string `json:"next_cursor"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &page); err != nil {
+		t.Fatalf("decode JSON output: %v\n%s", err, stdout)
+	}
+	if len(page.Requests) != 1 || page.Requests[0].ID != requestID ||
+		page.Requests[0].Alias != alias || page.Requests[0].AccountID != accountID ||
+		page.Requests[0].RealmID != realmID || page.Requests[0].Status != status ||
+		page.NextCursor != nextCursor {
+		t.Fatalf("JSON output changed remote values: %#v", page)
+	}
+}
+
+func captureEmailAliasAdminCLI(t *testing.T, fn func() int) (stdout, stderr string, code int) {
+	t.Helper()
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		_ = outR.Close()
+		_ = outW.Close()
+		t.Fatal(err)
+	}
+	oldOut, oldErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = outW, errW
+	code = fn()
+	os.Stdout, os.Stderr = oldOut, oldErr
+	_ = outW.Close()
+	_ = errW.Close()
+	outBytes, outReadErr := io.ReadAll(outR)
+	errBytes, errReadErr := io.ReadAll(errR)
+	_ = outR.Close()
+	_ = errR.Close()
+	if outReadErr != nil || errReadErr != nil {
+		t.Fatalf("read captured output: stdout=%v stderr=%v", outReadErr, errReadErr)
+	}
+	return string(outBytes), string(errBytes), code
 }

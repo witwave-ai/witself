@@ -92,12 +92,14 @@ func emailStatus(args []string) int {
 	ctx := context.Background()
 	conn, err := connFlags.connect(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: connect email service: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: connect email service: %s\n",
+			emailCLIColumn(err.Error()))
 		return 1
 	}
 	status, err := client.GetAgentEmailStorageStatus(ctx, conn.Endpoint, conn.Token)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: read email storage status: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: read email storage status: %s\n",
+			emailCLIColumn(err.Error()))
 		return 1
 	}
 	if *jsonOut {
@@ -181,7 +183,7 @@ func emailOperatorReceiveCmd(args []string) int {
 	ctx := context.Background()
 	ep, token, err := connect(ctx, *account, *endpoint, *tokenFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	desiredState := ""
@@ -199,15 +201,16 @@ func emailOperatorReceiveCmd(args []string) int {
 			control, err = client.SetAgentEmailReceiveControl(ctx, ep, token, agent, desiredState)
 		}
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+			fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 			return 1
 		}
 		if *jsonOut {
 			return printJSON(map[string]any{"control": control})
 		}
 		fmt.Printf("agent\t%s\neffective receive\t%s\nagent receive\t%s\nrealm receive\t%s\nrow version\t%d\n",
-			control.AgentID, control.ReceiveState, control.AgentReceiveState,
-			control.RealmReceiveState, control.RowVersion)
+			emailCLIColumn(control.AgentID), emailCLIColumn(control.ReceiveState),
+			emailCLIColumn(control.AgentReceiveState),
+			emailCLIColumn(control.RealmReceiveState), control.RowVersion)
 		return 0
 	}
 	var control client.AgentEmailRealmReceiveControl
@@ -217,14 +220,15 @@ func emailOperatorReceiveCmd(args []string) int {
 		control, err = client.SetRealmAgentEmailReceiveControl(ctx, ep, token, realm, desiredState)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	if *jsonOut {
 		return printJSON(map[string]any{"control": control})
 	}
 	fmt.Printf("realm\t%s\nreceive\t%s\nmailboxes\t%d\nrow version\t%d\n",
-		control.RealmID, control.ReceiveState, control.MailboxCount, control.RowVersion)
+		emailCLIColumn(control.RealmID), emailCLIColumn(control.ReceiveState),
+		control.MailboxCount, control.RowVersion)
 	return 0
 }
 
@@ -247,18 +251,19 @@ func emailAddressCmd(args []string) int {
 	ctx := context.Background()
 	conn, err := connFlags.connect(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	address, err := client.ShowAgentEmailAddress(ctx, conn.Endpoint, conn.Token)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	if *jsonOut {
 		return printJSON(map[string]any{"address": address})
 	}
-	fmt.Printf("%s\t%s\t%s\n", address.Address, address.ReceiveState, address.ID)
+	fmt.Printf("%s\t%s\t%s\n", emailCLIColumn(address.Address),
+		emailCLIColumn(address.ReceiveState), emailCLIColumn(address.ID))
 	return 0
 }
 
@@ -281,14 +286,14 @@ func emailList(args []string) int {
 	ctx := context.Background()
 	conn, err := connFlags.connect(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	page, err := client.ListAgentEmails(ctx, conn.Endpoint, conn.Token, client.AgentEmailListOptions{
 		Unread: *unread, Unacked: *unacked, Limit: *limit, Cursor: *cursor,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	if *jsonOut {
@@ -300,7 +305,8 @@ func emailList(args []string) int {
 	}
 	printAgentEmailSummaryTable(page.Messages)
 	if page.NextCursor != "" {
-		fmt.Fprintf(os.Stderr, "next cursor: %s\n", page.NextCursor)
+		fmt.Fprintf(os.Stderr, "next cursor: %s\n",
+			emailCLIColumn(page.NextCursor))
 	}
 	return 0
 }
@@ -322,14 +328,14 @@ func emailListen(args []string) int {
 	ctx := context.Background()
 	conn, err := connFlags.connect(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	result, err := client.ListenAgentEmails(ctx, conn.Endpoint, conn.Token, client.AgentEmailListenOptions{
 		WaitSeconds: waitSeconds, Limit: *limit,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	if *jsonOut {
@@ -347,11 +353,16 @@ func printAgentEmailSummaryTable(messages []client.AgentEmailMessage) {
 	w, flush := tableWriter("received\tstate\tprocessing\tid\tfrom (unverified)\tsubject\tattachments\tduplicate")
 	for _, msg := range messages {
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%t\n",
-			formatTime(msg.ReceivedAt), msg.ReadState.State, msg.Processing.State, msg.ID,
-			tabSafe(safeText(msg.HeaderFrom)), tabSafe(safeText(msg.Subject)),
+			formatTime(msg.ReceivedAt), emailCLIColumn(msg.ReadState.State),
+			emailCLIColumn(msg.Processing.State), emailCLIColumn(msg.ID),
+			emailCLIColumn(msg.HeaderFrom), emailCLIColumn(msg.Subject),
 			msg.AttachmentCount, msg.PossibleDuplicate)
 	}
 	flush()
+}
+
+func emailCLIColumn(value string) string {
+	return tabSafe(safeText(value))
 }
 
 func emailMessageMutation(action string, args []string) int {
@@ -374,7 +385,7 @@ func emailMessageMutation(action string, args []string) int {
 	ctx := context.Background()
 	conn, err := connFlags.connect(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	var message client.AgentEmailMessage
@@ -387,7 +398,7 @@ func emailMessageMutation(action string, args []string) int {
 		message, err = client.AckAgentEmail(ctx, conn.Endpoint, conn.Token, messageID)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	if action == "read" {
@@ -397,13 +408,15 @@ func emailMessageMutation(action string, args []string) int {
 			return printJSON(map[string]any{"message": message, "warning": warning})
 		}
 		fmt.Printf("email %s\nfrom: %s (unverified)\nto: %s\nstate: %s\nattachments: %d\n",
-			message.ID, safeText(message.HeaderFrom), safeText(message.HeaderTo),
-			message.ReadState.State, message.AttachmentCount)
+			emailCLIColumn(message.ID), emailCLIColumn(message.HeaderFrom),
+			emailCLIColumn(message.HeaderTo), emailCLIColumn(message.ReadState.State),
+			message.AttachmentCount)
 		if message.Subject != "" {
-			fmt.Printf("subject: %s\n", safeText(message.Subject))
+			fmt.Printf("subject: %s\n", emailCLIColumn(message.Subject))
 		}
 		if message.PossibleDuplicate {
-			fmt.Printf("possible duplicate of: %s\n", message.PossibleDuplicateOfMessage)
+			fmt.Printf("possible duplicate of: %s\n",
+				emailCLIColumn(message.PossibleDuplicateOfMessage))
 		}
 		fmt.Printf("\n%s\n", safeText(message.Text))
 		return 0
@@ -411,7 +424,8 @@ func emailMessageMutation(action string, args []string) int {
 	if *jsonOut {
 		return printJSON(map[string]any{"message": message})
 	}
-	fmt.Printf("%s\t%s\n", message.ID, message.ReadState.State)
+	fmt.Printf("%s\t%s\n", emailCLIColumn(message.ID),
+		emailCLIColumn(message.ReadState.State))
 	return 0
 }
 
@@ -435,20 +449,20 @@ func emailCodeCandidates(args []string) int {
 	ctx := context.Background()
 	conn, err := connFlags.connect(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	message, err := client.ReadAgentEmail(ctx, conn.Endpoint, conn.Token, messageID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	result, err := buildAgentEmailCodeCandidatesResult(messageID, message)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
-	fmt.Fprintf(os.Stderr, "warning: %s\n", result.Warning)
+	fmt.Fprintf(os.Stderr, "warning: %s\n", emailCLIColumn(result.Warning))
 	if *jsonOut {
 		return printJSON(result)
 	}
@@ -512,12 +526,13 @@ func buildAgentEmailCodeCandidatesResult(messageID string, message client.AgentE
 }
 
 func printAgentEmailCodeCandidates(w io.Writer, result agentEmailCodeCandidatesResult) {
-	_, _ = fmt.Fprintf(w, "email %s\nfrom: %s (unverified)\n", result.MessageID,
-		tabSafe(safeText(result.HeaderFrom)))
+	_, _ = fmt.Fprintf(w, "email %s\nfrom: %s (unverified)\n",
+		emailCLIColumn(result.MessageID), emailCLIColumn(result.HeaderFrom))
 	if result.Subject != "" {
-		_, _ = fmt.Fprintf(w, "subject: %s\n", tabSafe(safeText(result.Subject)))
+		_, _ = fmt.Fprintf(w, "subject: %s\n", emailCLIColumn(result.Subject))
 	}
-	_, _ = fmt.Fprintf(w, "content: untrusted\nselection: %s\n", result.SelectionState)
+	_, _ = fmt.Fprintf(w, "content: untrusted\nselection: %s\n",
+		emailCLIColumn(result.SelectionState))
 	if result.ContentTruncated {
 		_, _ = fmt.Fprintln(w, "scan incomplete: decoded text exceeded 64 KiB; selection is forced to ambiguous")
 	}
@@ -535,7 +550,7 @@ func printAgentEmailCodeCandidates(w io.Writer, result agentEmailCodeCandidatesR
 				label = "occurrence"
 			}
 			_, _ = fmt.Fprintf(w, "- %s (%d %s)\n",
-				tabSafe(safeText(candidate.Value)), candidate.Occurrences, label)
+				emailCLIColumn(candidate.Value), candidate.Occurrences, label)
 		}
 	}
 	_, _ = fmt.Fprintln(w, "action: no candidate was selected or used; code-consumed was not called")
@@ -564,14 +579,14 @@ func emailClaim(args []string) int {
 	ctx := context.Background()
 	conn, err := connFlags.connect(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	processing, err := client.ClaimAgentEmail(ctx, conn.Endpoint, conn.Token, messageID, client.ClaimAgentEmailInput{
 		LeaseSeconds: int(*lease / time.Second), IdempotencyKey: strings.TrimSpace(*key),
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	return printAgentEmailProcessing(messageID, processing, *jsonOut)
@@ -601,14 +616,14 @@ func emailRenew(args []string) int {
 	ctx := context.Background()
 	conn, err := connFlags.connect(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	processing, err := client.RenewAgentEmailClaim(ctx, conn.Endpoint, conn.Token, messageID, client.RenewAgentEmailClaimInput{
 		ClaimID: strings.TrimSpace(*claimID), Generation: *generation, LeaseSeconds: int(*lease / time.Second),
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	return printAgentEmailProcessing(messageID, processing, *jsonOut)
@@ -638,7 +653,7 @@ func emailRelease(args []string) int {
 	ctx := context.Background()
 	conn, err := connFlags.connect(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	processing, err := client.ReleaseAgentEmailClaim(ctx, conn.Endpoint, conn.Token, messageID, client.AgentEmailClaimInput{
@@ -646,7 +661,7 @@ func emailRelease(args []string) int {
 		DeterministicFailure: *deterministicFailure,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	return printAgentEmailProcessing(messageID, processing, *jsonOut)
@@ -676,7 +691,7 @@ func emailComplete(args []string) int {
 	ctx := context.Background()
 	conn, err := connFlags.connect(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	processing, err := client.CompleteAgentEmail(ctx, conn.Endpoint, conn.Token, messageID, client.CompleteAgentEmailInput{
@@ -684,7 +699,7 @@ func emailComplete(args []string) int {
 		IdempotencyKey: strings.TrimSpace(*key),
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	return printAgentEmailProcessing(messageID, processing, *jsonOut)
@@ -698,7 +713,8 @@ func printAgentEmailProcessing(messageID string, processing client.AgentEmailPro
 	if processing.LeaseExpiresAt != nil {
 		expires = processing.LeaseExpiresAt.Format(time.RFC3339)
 	}
-	fmt.Printf("%s\t%s\t%d\t%s\t%s\t%d\n", messageID, processing.ClaimID,
-		processing.Generation, processing.State, expires, processing.FailureCount)
+	fmt.Printf("%s\t%s\t%d\t%s\t%s\t%d\n", emailCLIColumn(messageID),
+		emailCLIColumn(processing.ClaimID), processing.Generation,
+		emailCLIColumn(processing.State), expires, processing.FailureCount)
 	return 0
 }

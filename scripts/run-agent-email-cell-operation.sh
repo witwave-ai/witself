@@ -366,6 +366,72 @@ complete_artifact_holder() {
   done
 }
 
+read_bounded_runner_failure_reason() {
+  local attempts=0
+  local reason="unavailable"
+  local runner_log="$WORK_DIR/runner-failure.log"
+
+  while true; do
+    if "${KUBE[@]}" logs "$POD_NAME" -c runner --tail=20 --limit-bytes=8192 \
+        >"$runner_log" 2>"$WORK_DIR/runner-failure-log.err"; then
+      break
+    fi
+    attempts=$((attempts + 1))
+    if (( attempts >= 3 || SECONDS >= DEADLINE )); then
+      printf '%s\n' "$reason"
+      return 0
+    fi
+    sleep 1
+  done
+
+  # Pod logs remain private. Only one exact log-safe reason from the server's
+  # closed vocabulary may cross the operator boundary; missing, malformed, or
+  # conflicting reasons collapse to one bounded fallback.
+  if ! reason="$(jq -Rrs '
+    [
+      split("\n")[] |
+      (try capture(
+        "^witself-server: agent-email production (backfill|canary) [a-z][a-z -]* failed \\(reason=(?<reason>[a-z_]+)\\)$"
+      ).reason catch empty) |
+      select(
+        . == "canceled" or
+        . == "deadline_exceeded" or
+        . == "receive_disabled" or
+        . == "invalid_configuration" or
+        . == "cohort_not_ready" or
+        . == "account_not_found" or
+        . == "account_not_active" or
+        . == "mailbox_missing" or
+        . == "conflict" or
+        . == "invalid_override_manifest" or
+        . == "invalid_exception_output" or
+        . == "database_unavailable" or
+        . == "migration_failed" or
+        . == "preflight_failed" or
+        . == "reconciliation_failed" or
+        . == "verification_failed" or
+        . == "result_encoding_failed" or
+        . == "canary_snapshot_failed"
+      )
+    ] | unique |
+    if length == 1 then .[0] else "unavailable" end
+  ' "$runner_log" 2>/dev/null)"; then
+    reason="unavailable"
+  fi
+  case "$reason" in
+    canceled|deadline_exceeded|receive_disabled|invalid_configuration|cohort_not_ready|\
+      account_not_found|account_not_active|mailbox_missing|conflict|\
+      invalid_override_manifest|invalid_exception_output|database_unavailable|\
+      migration_failed|preflight_failed|reconciliation_failed|verification_failed|\
+      result_encoding_failed|canary_snapshot_failed|unavailable)
+      printf '%s\n' "$reason"
+      ;;
+    *)
+      printf '%s\n' unavailable
+      ;;
+  esac
+}
+
 DEPLOYMENT_JSON="$WORK_DIR/deployment.json"
 CONFIG_JSON="$WORK_DIR/config.json"
 if ! "${KUBE[@]}" get deployment "$DEPLOYMENT" -o json >"$DEPLOYMENT_JSON" 2>/dev/null; then
@@ -666,6 +732,11 @@ while [ -z "$RUNNER_EXIT" ]; do
   fi
 done
 
+RUNNER_FAILURE_REASON=""
+if [ "$RUNNER_EXIT" -ne 0 ]; then
+  RUNNER_FAILURE_REASON="$(read_bounded_runner_failure_reason)"
+fi
+
 # The holder may still be starting after a very fast runner. Wait only until it
 # can accept an exec; its stdout is never attached to pod logs.
 while true; do
@@ -760,7 +831,7 @@ if [ "$RUNNER_EXIT" -ne 0 ]; then
     publish_private_artifact "$EXPORTED_ARTIFACT"
     die "backfill status requires_operator_override; the private exception artifact was exported"
   fi
-  die "agent-email operation failed without an exportable private artifact"
+  die "agent-email operation failed (reason=$RUNNER_FAILURE_REASON) without an exportable private artifact"
 fi
 
 if [ "$OPERATION" = canary-manifest ]; then

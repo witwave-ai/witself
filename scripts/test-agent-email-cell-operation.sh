@@ -124,6 +124,15 @@ case "${1:-} ${2:-}" in
     fi
     exit 1
     ;;
+  "logs witself-agent-email-operation-pod")
+	[ "$#" -eq 6 ] || exit 1
+	[ "$3" = -c ] || exit 1
+	[ "$4" = runner ] || exit 1
+	[ "$5" = --tail=20 ] || exit 1
+	[ "$6" = --limit-bytes=8192 ] || exit 1
+    [ "${FAKE_RUNNER_LOG_FAILURE:-false}" != true ] || exit 1
+    printf '%s\n' "${FAKE_RUNNER_LOG:-}"
+    ;;
   "delete job")
     printf '%s\n' "$*" >>"$FAKE_KUBE_STATE/deletes.log"
     printf '%s\n' delete-job >>"$FAKE_KUBE_STATE/cleanup-actions.log"
@@ -229,6 +238,7 @@ reset_fake_run() {
   unset FAKE_SOURCE_DRIFT FAKE_STALE_READINESS FAKE_COMPLETE_ERROR
   unset FAKE_ARTIFACT_INSPECTION_ERROR FAKE_EXEC_READY_FAILURE FAKE_COHORT_IMMUTABLE
   unset FAKE_BACKGROUND_DELETE
+  unset FAKE_RUNNER_LOG FAKE_RUNNER_LOG_FAILURE
   rm -f "$work_dir/state/deployment-get-count" "$work_dir/state/config-get-count"
   rm -f "$work_dir/state/job.json" "$work_dir/state/lock.json" "$work_dir/state/secret.json"
   rm -f "$work_dir/state/job-created.json" "$work_dir/state/lock-created.json"
@@ -383,6 +393,7 @@ reset_fake_run
 export FAKE_PRIVATE_ARTIFACT="$work_dir/canary.json"
 export FAKE_PRIVATE_ARTIFACT_KEY=primary-canary
 export FAKE_RUNNER_EXIT=1
+export FAKE_RUNNER_LOG='witself-server: agent-email production canary database open failed (reason=database_unavailable)'
 canary_failure_output="$work_dir/canary-failure-output"
 if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
     --cell civo-sandbox-usw2-dev --kubeconfig "$work_dir/kubeconfig" --context civo-test \
@@ -392,8 +403,73 @@ if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
   echo "failed canary runner fixture unexpectedly succeeded" >&2
   exit 1
 fi
-grep -Fqx 'error: agent-email operation failed without an exportable private artifact' "$canary_failure_output"
+grep -Fqx \
+  'error: agent-email operation failed (reason=database_unavailable) without an exportable private artifact' \
+  "$canary_failure_output"
 test ! -e "$work_dir/output/failed-canary-must-stay-absent.json"
+if grep -Eq 'acc_[a-z2-7]{16}|agent_[a-z2-7]{16}|realm_[a-z2-7]{16}|@witmail\.net|receive-cohort-v1|witself-db' "$canary_failure_output"; then
+  echo "runner failure output exposed a private identity or Secret reference" >&2
+  exit 1
+fi
+
+reset_fake_run
+export FAKE_PRIVATE_ARTIFACT="$work_dir/canary.json"
+export FAKE_PRIVATE_ARTIFACT_KEY=primary-canary
+export FAKE_RUNNER_EXIT=1
+export FAKE_RUNNER_LOG='witself-server: agent-email production canary database open failed (reason=account_acc_aaaaaaaaaaaaaaaa) secret=witself-db'
+untrusted_reason_output="$work_dir/untrusted-reason-output"
+if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
+    --cell civo-sandbox-usw2-dev --kubeconfig "$work_dir/kubeconfig" --context civo-test \
+    --operation canary-manifest \
+    --artifact-output "$work_dir/output/untrusted-reason-must-stay-absent.json" \
+    --timeout-seconds 60 >"$untrusted_reason_output" 2>&1; then
+  echo "untrusted runner reason fixture unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -Fqx \
+  'error: agent-email operation failed (reason=unavailable) without an exportable private artifact' \
+  "$untrusted_reason_output"
+test ! -e "$work_dir/output/untrusted-reason-must-stay-absent.json"
+if grep -Eq 'acc_[a-z2-7]{16}|agent_[a-z2-7]{16}|realm_[a-z2-7]{16}|@witmail\.net|receive-cohort-v1|witself-db' "$untrusted_reason_output"; then
+  echo "untrusted runner log crossed the bounded failure-reason boundary" >&2
+  exit 1
+fi
+
+reset_fake_run
+export FAKE_PRIVATE_ARTIFACT="$work_dir/canary.json"
+export FAKE_PRIVATE_ARTIFACT_KEY=primary-canary
+export FAKE_RUNNER_EXIT=1
+export FAKE_RUNNER_LOG=$'witself-server: agent-email production canary database open failed (reason=database_unavailable)\nwitself-server: agent-email production canary snapshot failed (reason=canary_snapshot_failed)'
+conflicting_reasons_output="$work_dir/conflicting-reasons-output"
+if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
+    --cell civo-sandbox-usw2-dev --kubeconfig "$work_dir/kubeconfig" --context civo-test \
+    --operation canary-manifest \
+    --artifact-output "$work_dir/output/conflicting-reasons-must-stay-absent.json" \
+    --timeout-seconds 60 >"$conflicting_reasons_output" 2>&1; then
+  echo "conflicting runner reasons fixture unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -Fqx \
+  'error: agent-email operation failed (reason=unavailable) without an exportable private artifact' \
+  "$conflicting_reasons_output"
+
+reset_fake_run
+export FAKE_PRIVATE_ARTIFACT="$work_dir/canary.json"
+export FAKE_PRIVATE_ARTIFACT_KEY=primary-canary
+export FAKE_RUNNER_EXIT=1
+export FAKE_RUNNER_LOG_FAILURE=true
+log_failure_output="$work_dir/log-failure-output"
+if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
+    --cell civo-sandbox-usw2-dev --kubeconfig "$work_dir/kubeconfig" --context civo-test \
+    --operation canary-manifest \
+    --artifact-output "$work_dir/output/log-failure-must-stay-absent.json" \
+    --timeout-seconds 60 >"$log_failure_output" 2>&1; then
+  echo "runner log-fetch failure fixture unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -Fqx \
+  'error: agent-email operation failed (reason=unavailable) without an exportable private artifact' \
+  "$log_failure_output"
 
 cat >"$work_dir/exception.json" <<'EOF'
 {

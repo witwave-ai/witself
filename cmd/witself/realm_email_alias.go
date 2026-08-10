@@ -82,14 +82,15 @@ func realmEmailAliasRequest(args []string) int {
 	resolvedAccountID, token, err := resolveControlPlaneAccountOperator(
 		*account, *accountID, *tokenFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	key := strings.TrimSpace(*idempotencyKey)
 	if key == "" {
 		key, err = id.New("email_alias_request")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "witself: generate idempotency key: %v\n", err)
+			fmt.Fprintf(os.Stderr, "witself: generate idempotency key: %s\n",
+				emailCLIColumn(err.Error()))
 			return 1
 		}
 	}
@@ -97,13 +98,14 @@ func realmEmailAliasRequest(args []string) int {
 		strings.TrimSpace(*endpoint), token, resolvedAccountID,
 		strings.TrimSpace(*realmID), strings.TrimSpace(*alias), key)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	if *jsonOut {
 		return printJSON(map[string]any{"request": request})
 	}
-	fmt.Printf("%s\t%s\t%s\n", request.ID, request.Alias, request.Status)
+	fmt.Printf("%s\t%s\t%s\n", emailCLIColumn(request.ID),
+		emailCLIColumn(request.Alias), emailCLIColumn(request.Status))
 	return 0
 }
 
@@ -122,14 +124,14 @@ func realmEmailAliasList(args []string) int {
 	resolvedAccountID, token, err := resolveControlPlaneAccountOperator(
 		*account, *accountID, *tokenFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	page, err := client.ListRealmEmailAliasRequestsPage(context.Background(),
 		strings.TrimSpace(*endpoint), token, resolvedAccountID,
 		strings.TrimSpace(*realmID), strings.TrimSpace(*cursor))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	if page.Requests == nil {
@@ -141,11 +143,13 @@ func realmEmailAliasList(args []string) int {
 	w, flush := tableWriter("id\talias\tstatus\tupdated")
 	for _, request := range page.Requests {
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
-			request.ID, request.Alias, request.Status, formatTime(request.UpdatedAt))
+			emailCLIColumn(request.ID), emailCLIColumn(request.Alias),
+			emailCLIColumn(request.Status), formatTime(request.UpdatedAt))
 	}
 	flush()
 	if page.NextCursor != "" {
-		fmt.Fprintf(os.Stderr, "next cursor: %s\n", page.NextCursor)
+		fmt.Fprintf(os.Stderr, "next cursor: %s\n",
+			emailCLIColumn(page.NextCursor))
 	}
 	return 0
 }

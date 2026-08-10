@@ -280,6 +280,7 @@ func withAccount(cfg Config, h accountHandler) http.HandlerFunc {
 type pendingView struct {
 	Kind      string     `json:"kind"`
 	Plan      string     `json:"plan"`
+	PlanName  string     `json:"plan_name,omitempty"`
 	URL       string     `json:"url,omitempty"`
 	Expires   *time.Time `json:"expires,omitempty"`
 	Effective *time.Time `json:"effective,omitempty"`
@@ -292,12 +293,22 @@ func planStatus(cfg Config, w http.ResponseWriter, r *http.Request, accountID st
 		writeError(w, http.StatusInternalServerError, "could not read plan status")
 		return
 	}
+	planName := snapshot.Plan
+	if plan, ok := cfg.Catalog.Get(snapshot.Plan); ok {
+		planName = plan.Name
+	}
+	billingPlanName := rec.Entitled
+	if plan, ok := cfg.Catalog.Get(rec.Entitled); ok {
+		billingPlanName = plan.Name
+	}
 	out := map[string]any{
 		"schema_version":       "witself.v0",
 		"account_id":           rec.AccountID,
 		"billing_available":    cfg.Manager.BillingAvailable(),
 		"plan":                 snapshot.Plan,
+		"plan_name":            planName,
 		"billing_plan":         rec.Entitled,
+		"billing_plan_name":    billingPlanName,
 		"applied":              rec.Applied,
 		"limits":               snapshot.Limits,
 		"limit_defaults":       snapshot.DefaultLimits,
@@ -320,6 +331,9 @@ func planStatus(cfg Config, w http.ResponseWriter, r *http.Request, accountID st
 	}
 	if p := rec.Pending; p != nil {
 		pv := pendingView{Kind: string(p.Kind), Plan: p.Plan, URL: p.URL, Requested: p.Requested}
+		if plan, ok := cfg.Catalog.Get(p.Plan); ok {
+			pv.PlanName = plan.Name
+		}
 		if !p.Expires.IsZero() {
 			pv.Expires = &p.Expires
 		}

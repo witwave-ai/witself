@@ -128,11 +128,12 @@
 {{- if not (semverCompare ">=0.0.226-0" .Values.apps.witselfServer.chartVersion) -}}
 {{- $_ := unset $workerValues "agentEmailRateBucketCleanup" -}}
 {{- end -}}
+{{- $metricsValues := deepCopy .Values.apps.witselfServer.metrics -}}
 {{- $backup := .Values.apps.witselfServer.backup -}}
 {{- if and $backup.validationEnabled (not $backup.enabled) -}}
 {{- fail "apps.witselfServer.backup.validationEnabled requires apps.witselfServer.backup.enabled" -}}
 {{- end -}}
-{{- $serverValues := dict "backend" (dict "kind" .Values.apps.witselfServer.backendKind) "cell" (dict "name" .Values.cell.name) "backup" (dict "validation" (dict "enabled" $backup.validationEnabled)) "features" (dict "factDeletion" (dict "enabled" .Values.apps.witselfServer.factDeletionEnabled)) "agentEmail" $serverAgentEmail "avatar" (dict "payloadCompaction" (dict "enabled" .Values.apps.witselfServer.avatarPayloadCompactionEnabled)) "worker" $workerValues "image" (dict "tag" .Values.apps.witselfServer.imageTag) "database" (dict "existingSecret" (dict "name" $targetName "urlKey" $db.urlKey)) -}}
+{{- $serverValues := dict "backend" (dict "kind" .Values.apps.witselfServer.backendKind) "cell" (dict "name" .Values.cell.name) "backup" (dict "validation" (dict "enabled" $backup.validationEnabled)) "features" (dict "factDeletion" (dict "enabled" .Values.apps.witselfServer.factDeletionEnabled)) "agentEmail" $serverAgentEmail "avatar" (dict "payloadCompaction" (dict "enabled" .Values.apps.witselfServer.avatarPayloadCompactionEnabled)) "metrics" $metricsValues "worker" $workerValues "image" (dict "tag" .Values.apps.witselfServer.imageTag) "database" (dict "existingSecret" (dict "name" $targetName "urlKey" $db.urlKey)) -}}
 {{- if $backup.enabled -}}
 {{- $_ := set $serverValues.backup "existingSecret" (dict "name" (default "witself-provision" $backup.targetName) "tokenKey" (default "backup_token" $backup.tokenKey)) -}}
 {{- end -}}

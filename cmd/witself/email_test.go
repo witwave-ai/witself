@@ -56,6 +56,69 @@ func TestEmailCLIAddressListAndRead(t *testing.T) {
 	}
 }
 
+func TestEmailCLIHumanOutputSanitizesTerminalControlsAndPreservesJSON(t *testing.T) {
+	messageID := "emsg_\x1b[31mred\nforged"
+	from := "sender\u009b31m\u202e@example.com\u2069\nforged"
+	subject := "hello\tworld\x1b[2J\u2028second\u2029third\u2066"
+	readState := "unread\nforged"
+	processingState := "available\tforged"
+	nextCursor := "next\u009b31m\tpage\nforged"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(client.AgentEmailPage{
+			Messages: []client.AgentEmailMessage{{
+				ID: messageID, HeaderFrom: from, Subject: subject,
+				ReadState:  client.AgentEmailReadState{State: readState},
+				Processing: client.AgentEmailProcessing{State: processingState},
+			}},
+			NextCursor: nextCursor,
+		})
+	}))
+	defer srv.Close()
+	tokenFile := filepath.Join(t.TempDir(), "agent.token")
+	if err := os.WriteFile(tokenFile, []byte("witself_agt_test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base := []string{"email", "list", "--endpoint", srv.URL, "--token-file", tokenFile}
+
+	stdout, stderr, code := captureFactDeleteCLI(t, func() int { return run(base) })
+	if code != 0 {
+		t.Fatalf("plain list = code %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	combined := stdout + stderr
+	if strings.ContainsAny(combined, "\x1b\u009b\u202e\u2066\u2069\u2028\u2029") ||
+		strings.Contains(combined, "\nforged") {
+		t.Fatalf("plain output retained terminal or row injection: %q", combined)
+	}
+	for _, want := range []string{
+		"emsg_[31mred forged", "sender31m@example.com forged",
+		"hello world[2J second third", "unread forged", "available forged",
+		"next cursor: next31m page forged",
+	} {
+		if !strings.Contains(combined, want) {
+			t.Errorf("plain output omitted sanitized value %q: %q", want, combined)
+		}
+	}
+
+	stdout, stderr, code = captureFactDeleteCLI(t, func() int {
+		return run(append(append([]string{}, base...), "--json"))
+	})
+	if code != 0 || stderr != "" {
+		t.Fatalf("JSON list = code %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	var page client.AgentEmailPage
+	if err := json.Unmarshal([]byte(stdout), &page); err != nil {
+		t.Fatalf("decode JSON output: %v\n%s", err, stdout)
+	}
+	if len(page.Messages) != 1 || page.Messages[0].ID != messageID ||
+		page.Messages[0].HeaderFrom != from || page.Messages[0].Subject != subject ||
+		page.Messages[0].ReadState.State != readState ||
+		page.Messages[0].Processing.State != processingState ||
+		page.NextCursor != nextCursor {
+		t.Fatalf("JSON output changed remote values: %#v", page)
+	}
+}
+
 func TestEmailCLIStatusValidatesAndFormatsBytes(t *testing.T) {
 	response := `{"schema_version":"witself.v0","maximum_raw_bytes":10485760,"attachment_capacity":{"used":1073741824,"max":5368709120,"remaining":4294967296,"unlimited":false,"near_limit":false,"at_limit":false,"over_limit":false}}`
 	var requests int

@@ -125,8 +125,12 @@ func emailAliasAdminRequests(args []string) int {
 		w, flush := tableWriter("id\talias\taccount\trealm\tstatus\tupdated")
 		for _, request := range page.Requests {
 			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
-				request.ID, request.Alias, request.AccountID, request.RealmID,
-				request.Status, emailAliasAdminTime(request.UpdatedAt))
+				emailAliasAdminColumn(request.ID),
+				emailAliasAdminColumn(request.Alias),
+				emailAliasAdminColumn(request.AccountID),
+				emailAliasAdminColumn(request.RealmID),
+				emailAliasAdminColumn(request.Status),
+				emailAliasAdminTime(request.UpdatedAt))
 		}
 		flush()
 		printEmailAliasAdminNextCursor(page.NextCursor)
@@ -171,10 +175,16 @@ func emailAliasAdminRequests(args []string) int {
 			return printJSON(result)
 		}
 		if assignment != nil {
-			fmt.Printf("%s\t%s\t%s\t%s\t%s\n", request.ID, request.Alias,
-				request.Status, assignment.ClaimID, assignment.Status)
+			fmt.Printf("%s\t%s\t%s\t%s\t%s\n",
+				emailAliasAdminColumn(request.ID),
+				emailAliasAdminColumn(request.Alias),
+				emailAliasAdminColumn(request.Status),
+				emailAliasAdminColumn(assignment.ClaimID),
+				emailAliasAdminColumn(assignment.Status))
 		} else {
-			fmt.Printf("%s\t%s\t%s\n", request.ID, request.Alias, request.Status)
+			fmt.Printf("%s\t%s\t%s\n", emailAliasAdminColumn(request.ID),
+				emailAliasAdminColumn(request.Alias),
+				emailAliasAdminColumn(request.Status))
 		}
 		return 0
 	default:
@@ -221,7 +231,10 @@ func emailAliasAdminAssignments(args []string) int {
 		w, flush := tableWriter("alias\taccount\trealm\tstatus\tinternal\tupdated")
 		for _, alias := range page.Aliases {
 			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%t\t%s\n",
-				alias.Alias, alias.AccountID, alias.RealmID, alias.Status,
+				emailAliasAdminColumn(alias.Alias),
+				emailAliasAdminColumn(alias.AccountID),
+				emailAliasAdminColumn(alias.RealmID),
+				emailAliasAdminColumn(alias.Status),
 				alias.AssignmentKind == "internal",
 				emailAliasAdminTime(alias.UpdatedAt))
 		}
@@ -285,8 +298,10 @@ func emailAliasAdminAssignments(args []string) int {
 	if *common.json {
 		return printJSON(map[string]any{"alias": assignment})
 	}
-	fmt.Printf("%s\t%s\t%s\t%s\n", assignment.Alias,
-		assignment.AccountID, assignment.RealmID, assignment.Status)
+	fmt.Printf("%s\t%s\t%s\t%s\n", emailAliasAdminColumn(assignment.Alias),
+		emailAliasAdminColumn(assignment.AccountID),
+		emailAliasAdminColumn(assignment.RealmID),
+		emailAliasAdminColumn(assignment.Status))
 	return 0
 }
 
@@ -336,8 +351,10 @@ func emailAliasAdminReserved(args []string) int {
 			if *common.json {
 				return printJSON(map[string]any{"reserved_name": reserved})
 			}
-			fmt.Printf("%s\t%s\t%t\t%s\n", reserved.Name,
-				reserved.Category, reserved.Enabled, reserved.Reason)
+			fmt.Printf("%s\t%s\t%t\t%s\n",
+				emailAliasAdminColumn(reserved.Name),
+				emailAliasAdminColumn(reserved.Category), reserved.Enabled,
+				emailAliasAdminColumn(reserved.Reason))
 			return 0
 		}
 		page, err := client.ListAdminRealmEmailReservedNamesPage(
@@ -357,9 +374,11 @@ func emailAliasAdminReserved(args []string) int {
 		w, flush := tableWriter("name\tskeleton\tcategory\tenabled\tinternal\tversion\treason")
 		for _, name := range page.ReservedNames {
 			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%t\t%t\t%d\t%s\n",
-				name.Name, name.ConfusableSkeleton, name.Category, name.Enabled,
-				name.InternalAssignable,
-				name.Version, tabSafe(safeText(name.Reason)))
+				emailAliasAdminColumn(name.Name),
+				emailAliasAdminColumn(name.ConfusableSkeleton),
+				emailAliasAdminColumn(name.Category), name.Enabled,
+				name.InternalAssignable, name.Version,
+				emailAliasAdminColumn(name.Reason))
 		}
 		flush()
 		printEmailAliasAdminNextCursor(page.NextCursor)
@@ -437,8 +456,9 @@ func emailAliasAdminReserved(args []string) int {
 	if *common.json {
 		return printJSON(map[string]any{"reserved_name": reserved})
 	}
-	fmt.Printf("%s\t%s\t%t\t%s\n", reserved.Name,
-		reserved.Category, reserved.Enabled, reserved.Reason)
+	fmt.Printf("%s\t%s\t%t\t%s\n", emailAliasAdminColumn(reserved.Name),
+		emailAliasAdminColumn(reserved.Category), reserved.Enabled,
+		emailAliasAdminColumn(reserved.Reason))
 	return 0
 }
 
@@ -475,8 +495,11 @@ func emailAliasAdminAudit(args []string) int {
 	w, flush := tableWriter("sequence\ttime\taction\ttarget\tactor")
 	for _, event := range page.Events {
 		_, _ = fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s:%s\n",
-			event.Sequence, emailAliasAdminTime(event.OccurredAt), event.Action,
-			event.Target, event.ActorKind, event.ActorID)
+			event.Sequence, emailAliasAdminTime(event.OccurredAt),
+			emailAliasAdminColumn(event.Action),
+			emailAliasAdminColumn(event.Target),
+			emailAliasAdminColumn(event.ActorKind),
+			emailAliasAdminColumn(event.ActorID))
 	}
 	flush()
 	printEmailAliasAdminNextCursor(page.NextCursor)
@@ -485,8 +508,13 @@ func emailAliasAdminAudit(args []string) int {
 
 func printEmailAliasAdminNextCursor(cursor string) {
 	if strings.TrimSpace(cursor) != "" {
-		fmt.Fprintf(os.Stderr, "next cursor: %s\n", cursor)
+		fmt.Fprintf(os.Stderr, "next cursor: %s\n",
+			emailAliasAdminColumn(cursor))
 	}
+}
+
+func emailAliasAdminColumn(value string) string {
+	return tabSafe(safeText(value))
 }
 
 func emailAliasOptionalBool(name, raw string) (*bool, error) {
@@ -502,7 +530,8 @@ func emailAliasOptionalBool(name, raw string) (*bool, error) {
 }
 
 func printEmailAliasAdminError(err error, code int) int {
-	fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
+	fmt.Fprintf(os.Stderr, "witself-admin: %s\n",
+		emailAliasAdminColumn(err.Error()))
 	return code
 }
 

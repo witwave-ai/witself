@@ -161,3 +161,10 @@ func TestEmailDomainAdminCLIRejectsUnsafeArguments(t *testing.T) {
 		t.Fatalf("invalid audit limit exit code = %d", code)
 	}
 }
+
+func TestEmailDomainAdminColumnSanitizesTerminalControls(t *testing.T) {
+	got := emailDomainAdminColumn("domain\tvalue\nforged\x1b[2J\u009b31m\u202e\u2066safe\u2069\u2028line")
+	if want := "domain value forged[2J31msafe line"; got != want {
+		t.Fatalf("sanitized column = %q, want %q", got, want)
+	}
+}

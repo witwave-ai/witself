@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -92,5 +93,50 @@ func TestEmailDomainCLIInputValidation(t *testing.T) {
 	}
 	if code := emailDomainCmd([]string{"activate"}); code != 2 {
 		t.Fatalf("unsupported activation exit code = %d", code)
+	}
+}
+
+func TestEmailDomainCLIHumanOutputSanitizesTerminalControls(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.agent-email-domain.v1",
+			"request": map[string]any{
+				"id": "aedr_\x1b[31mred", "domain": "agents.example.com\nforged",
+				"state": "pending\tverification",
+				"ownership_challenge": map[string]any{
+					"record_name": "_witself\nforged", "record_type": "TXT\u009b31m",
+					"record_value": "proof\tvalue\x1b[2J",
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+	tokenPath := filepath.Join(t.TempDir(), "operator.token")
+	if err := os.WriteFile(tokenPath, []byte("operator-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, code := captureFactDeleteCLI(t, func() int {
+		return emailDomainRequest([]string{
+			"--endpoint", srv.URL, "--token-file", tokenPath,
+			"--account-id", "acc_1", "--domain", "agents.example.com",
+			"--idempotency-key", "request-1",
+		})
+	})
+	if code != 0 {
+		t.Fatalf("request = code %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	combined := stdout + stderr
+	if strings.ContainsAny(combined, "\x1b\u009b") || strings.Contains(combined, "\nforged") {
+		t.Fatalf("output retained terminal or row injection: %q", combined)
+	}
+	for _, want := range []string{
+		"aedr_[31mred", "agents.example.com forged", "pending verification",
+		"_witself forged", "TXT31m", "proof value[2J",
+	} {
+		if !strings.Contains(combined, want) {
+			t.Errorf("output omitted sanitized value %q: %q", want, combined)
+		}
 	}
 }

@@ -56,14 +56,15 @@ func emailDomainRequest(args []string) int {
 	resolvedAccountID, token, err := resolveControlPlaneAccountOperator(
 		*account, *accountID, *tokenFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	key := strings.TrimSpace(*idempotencyKey)
 	if key == "" {
 		key, err = id.New("email_domain_request")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "witself: generate idempotency key: %v\n", err)
+			fmt.Fprintf(os.Stderr, "witself: generate idempotency key: %s\n",
+				emailCLIColumn(err.Error()))
 			return 1
 		}
 	}
@@ -71,7 +72,7 @@ func emailDomainRequest(args []string) int {
 		context.Background(), strings.TrimSpace(*endpoint), token,
 		resolvedAccountID, strings.TrimSpace(*domain), key)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	if *jsonOut {
@@ -85,8 +86,9 @@ func emailDomainRequest(args []string) int {
 	}
 	w, flush := tableWriter("id\tdomain\tstate\trecord_name\trecord_type\trecord_value")
 	_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
-		request.RequestID, request.Domain, request.State,
-		recordName, recordType, recordValue)
+		emailCLIColumn(request.RequestID), emailCLIColumn(request.Domain),
+		emailCLIColumn(request.State), emailCLIColumn(recordName),
+		emailCLIColumn(recordType), emailCLIColumn(recordValue))
 	flush()
 	return 0
 }
@@ -106,14 +108,14 @@ func emailDomainList(args []string) int {
 	resolvedAccountID, token, err := resolveControlPlaneAccountOperator(
 		*account, *accountID, *tokenFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	page, err := client.ListAgentEmailDomainRequestsPage(
 		context.Background(), strings.TrimSpace(*endpoint), token,
 		resolvedAccountID, strings.TrimSpace(*cursor))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: %s\n", emailCLIColumn(err.Error()))
 		return 1
 	}
 	if page.Requests == nil {
@@ -130,11 +132,13 @@ func emailDomainList(args []string) int {
 			updated = formatTime(*request.UpdatedAt)
 		}
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
-			request.RequestID, request.Domain, request.State, updated)
+			emailCLIColumn(request.RequestID), emailCLIColumn(request.Domain),
+			emailCLIColumn(request.State), updated)
 	}
 	flush()
 	if page.NextCursor != "" {
-		fmt.Fprintf(os.Stderr, "next cursor: %s\n", page.NextCursor)
+		fmt.Fprintf(os.Stderr, "next cursor: %s\n",
+			emailCLIColumn(page.NextCursor))
 	}
 	return 0
 }

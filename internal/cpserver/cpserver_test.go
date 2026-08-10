@@ -7,10 +7,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	witself "github.com/witwave-ai/witself"
 	"github.com/witwave-ai/witself/internal/billing"
 	"github.com/witwave-ai/witself/internal/billing/fake"
 	"github.com/witwave-ai/witself/internal/billing/lifecycle"
@@ -129,6 +131,13 @@ func TestCatalogEndpoint(t *testing.T) {
 	if len(catalogPlans) != 4 {
 		t.Fatalf("catalog has %d plans; want 4", len(catalogPlans))
 	}
+	var canonical map[string]any
+	if err := json.Unmarshal(witself.PlansJSON, &canonical); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(doc, canonical) {
+		t.Fatalf("control-plane catalog drifted from canonical document:\ncontrol-plane=%v\ncanonical=%v", doc, canonical)
+	}
 	wantEmailLimits := map[string][2]float64{
 		"free":       {0, 0},
 		"standard":   {10_485_760, 5_368_709_120},
@@ -147,6 +156,18 @@ func TestCatalogEndpoint(t *testing.T) {
 			limits[plans.AgentEmailAttachmentStorageBytesLimit] != want[1] {
 			t.Errorf("%s agent-email limits = %v; want raw=%v attachment=%v",
 				planID, limits, want[0], want[1])
+		}
+		if _, present := plan["price_monthly_min"]; present {
+			t.Errorf("%s unexpectedly exposed null price_monthly_min", planID)
+		}
+		if planID == "enterprise" {
+			if _, present := plan["price_monthly"]; present {
+				t.Errorf("enterprise unexpectedly exposed null price_monthly")
+			}
+		}
+		if planID == "standard" &&
+			(plan["recommended"] != true || plan["badge"] != "Most popular") {
+			t.Errorf("professional presentation metadata = %v", plan)
 		}
 		delete(wantEmailLimits, planID)
 	}
