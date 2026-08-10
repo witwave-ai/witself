@@ -79,10 +79,12 @@ remain independent of this managed-domain cohort.
 Managed canonical and alias payloads are schema v2 and signed envelopes are
 schema v3. Custom-domain payloads remain v1/signed-v2. The edge dual-reads a
 v240 managed v1/signed-v2 row only to preserve prior-route evidence, always
-refreshes it from the control plane, and never delivers from it. Therefore
-either mixed v240/v241 Worker ordering tempfails known managed mail rather than
-reading content or bouncing it; finish both code upgrades while the delivery
-gates remain false.
+refreshes it from the control plane, and never delivers from it. An old v240
+edge can still deliver from a fresh legacy signed-v2 KV row without consulting
+the upgraded control plane when its old managed-delivery gate is true. Before
+any control-plane-first upgrade, prove both v240 canonical and alias delivery
+gates are false; keep both false until the control plane and edge are upgraded
+and the separately reviewed cohort activation begins.
 
 Dynamic route lookup is protected independently of account policy. A positive
 `EMAIL_DIRECTORY` projection is always checked first and
@@ -127,7 +129,9 @@ permanent cell verdict is rejected once without retry.
 
 ## Safety boundary
 
-- Keep the existing Email Routing catch-all unchanged.
+- Keep the existing Email Routing catch-all unchanged while operating either
+  literal-canary lifecycle. Only the separately fenced `routes:catch-all`
+  workflow below owns a catch-all mutation method.
 - Use only the dedicated `witself-agent-email-pilot-directory` KV namespace.
 - Treat `CONTROL_PLANE_URL` as public configuration and
   `CONTROL_PLANE_EDGE_TOKEN` as a shared Worker secret. The matching
@@ -163,6 +167,134 @@ surface to this Worker.
 The route manager reads and fingerprints the catch-all before and after every
 operation. Its API client contains no catch-all update operation. It also
 refuses to replace an unmanaged rule for an enrolled literal address.
+
+## Production `witmail.net` routing controls
+
+The original `npm run routes` command is the retired compatibility-pilot
+manager. It writes unsigned `pilot:config:v1` and `pilot:recipient:v1` rows
+that the primary-domain runtime deliberately ignores. Never use it to stage
+`witmail.net`.
+
+`npm run routes:primary` owns the production primary-domain canary. Its private
+manifest has this exact shape, with 5–10 entries; every address must be the
+canonical `<agent-segment>.<realm-id-body>@witmail.net` for its `realm_id`:
+
+```json
+{
+  "schema_version": 1,
+  "domain": "witmail.net",
+  "worker_name": "witself-agent-email-pilot",
+  "agents": [
+    {
+      "agent_id": "agent_aaaaaaaaaaaaaaa2",
+      "realm_id": "realm_abcdefghijkl2345",
+      "address": "alpha.abcdefghijkl2345@witmail.net"
+    },
+    {
+      "agent_id": "agent_aaaaaaaaaaaaaaa3",
+      "realm_id": "realm_abcdefghijkl2345",
+      "address": "bravo.abcdefghijkl2345@witmail.net"
+    },
+    {
+      "agent_id": "agent_aaaaaaaaaaaaaaa4",
+      "realm_id": "realm_abcdefghijkl2345",
+      "address": "charlie.abcdefghijkl2345@witmail.net"
+    },
+    {
+      "agent_id": "agent_aaaaaaaaaaaaaaa5",
+      "realm_id": "realm_abcdefghijkl2345",
+      "address": "delta.abcdefghijkl2345@witmail.net"
+    },
+    {
+      "agent_id": "agent_aaaaaaaaaaaaaaa6",
+      "realm_id": "realm_abcdefghijkl2345",
+      "address": "echo.abcdefghijkl2345@witmail.net"
+    }
+  ]
+}
+```
+
+Do not hand-author the real addresses. After the released cell's explicit
+mailbox backfill reports zero missing rows, generate them from actual enabled
+primary mailbox state with the cell's production receive environment:
+
+```sh
+/usr/local/bin/witself-server agent-email canary-manifest \
+  --output /absolute/private/primary-canary.json
+```
+
+The path must be new. The exporter writes the exact sorted manifest with
+exclusive mode `0600`, emits no identities or addresses to stdout, and performs
+no database write. Keep that manifest and every plan outside the repository.
+`prepare`,
+`activate`, `disable`, and `remove` only create a new mode-`0600`, 15-minute
+review plan. Only `apply` mutates rules, and it must receive the exact SHA-256
+printed by the planning command:
+
+```sh
+npm run routes:primary -- status /absolute/private/primary-canary.json
+npm run routes:primary -- prepare /absolute/private/primary-canary.json \
+  --output /absolute/private/prepare-plan.json
+npm run routes:primary -- apply \
+  --plan /absolute/private/prepare-plan.json \
+  --plan-sha256 REVIEWED_SHA256
+```
+
+The primary manager creates, enables, disables, or removes only exact literal
+rules named `witself-agent-email-primary-canary:<address>`. It never writes KV
+and its API class has no catch-all mutation. Before prepare or activation it
+proves all of the following from live state:
+
+- Email Routing is ready, subaddressing is enabled, the catch-all is disabled,
+  and enabled forwarding rules exist for both `postmaster@witmail.net` and
+  `abuse@witmail.net`;
+- the active control-plane and edge releases, shared route-directory binding,
+  signer/keyring, canonical gates, and exact managed-delivery cohort agree;
+- the authenticated control-plane readiness digest matches both deployed
+  cohort bindings and reports canonical inventory plus delivery enabled;
+- each distinct canary realm has byte-identical control-plane and KV signed
+  projection bytes, a valid trusted signature, fresh applied canonical state,
+  and an `account_id` admitted by that exact cohort.
+
+Every mutation re-reads its entire reviewed precondition. It fingerprints the
+catch-all, role routes, and managed canary rules before and after. Stale plans,
+unmanaged conflicts, an incomplete canary, or concurrent guard drift fail
+closed. A failed activation disables every owned canary rule; partial removal
+leaves survivors disabled. Emergency `disable` and cleanup `remove` remain
+available through their own reviewed plans even when projections or delivery
+gates are unavailable.
+
+`npm run routes:catch-all` is a separate, higher-risk workflow. It defaults to
+read-only `status`; `enable`, `disable`, and `rollback` also create plans only.
+An enable plan additionally requires a change identifier and the SHA-256 of a
+separately reviewed provider-contract record, plus the fully active primary
+canary and all readiness proofs above:
+
+```sh
+npm run routes:catch-all -- enable /absolute/private/primary-canary.json \
+  --change-id REVIEW_ID \
+  --provider-review-sha256 REVIEW_RECORD_SHA256 \
+  --output /absolute/private/catch-all-enable-plan.json
+npm run routes:catch-all -- apply \
+  --plan /absolute/private/catch-all-enable-plan.json \
+  --plan-sha256 REVIEWED_SHA256 \
+  --receipt-output /absolute/private/catch-all-enable-receipt.json \
+  --confirm-enable-witmail-net
+```
+
+The apply command exclusively creates and fsyncs the protected receipt path
+with a pending marker before it calls Cloudflare, so an existing or unwritable
+path is discovered before mutation. A crash may leave that marker; it is not a
+rollback receipt. Inspect live status and use the independently planned disable
+path before removing it. A completed receipt contains the exact predecessor
+needed to plan rollback.
+A rollback receipt is accepted only from a verified enable and may restore
+only a disabled predecessor; a disable receipt can never be used to re-enable
+mail. Enable verification failure restores the exact disabled predecessor.
+Disable and rollback failures never auto-enable anything. The external review
+digest is a fence around operator acceptance, not automated proof that the
+document is sufficient: do not create an enable plan until the provider
+contract blockers in `docs/agent-email.md` are explicitly closed.
 
 ## Local verification
 

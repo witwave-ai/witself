@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CloudflareAPI } from "../scripts/cloudflare.mjs";
+import { CloudflareAPI, cloudflareEnvironment } from "../scripts/cloudflare.mjs";
 import {
   EDGE_METRICS_DATASET,
   routeLookupSummaryQuery,
@@ -41,6 +41,30 @@ test("Cloudflare client exposes no catch-all mutation and uses exact documented 
   assert.equal(calls.every(({ headers }) => headers.Authorization === "Bearer test-token"), true);
 });
 
+test("Cloudflare resource and rule identifiers require true end of input", async () => {
+  const valid = {
+    CLOUDFLARE_ACCOUNT_ID: "a".repeat(32),
+    CLOUDFLARE_ZONE_ID: "b".repeat(32),
+    EMAIL_DIRECTORY_KV_ID: "c".repeat(32),
+    CLOUDFLARE_API_TOKEN: "token",
+  };
+  assert.equal(cloudflareEnvironment(valid).zoneID, "b".repeat(32));
+  for (const name of Object.keys(valid)) {
+    assert.throws(
+      () => cloudflareEnvironment({ ...valid, [name]: `${valid[name]}\n` }),
+      /missing or invalid/,
+    );
+  }
+  const api = new CloudflareAPI({
+    accountID: valid.CLOUDFLARE_ACCOUNT_ID,
+    zoneID: valid.CLOUDFLARE_ZONE_ID,
+    apiToken: valid.CLOUDFLARE_API_TOKEN,
+    fetchAPI: async () => Response.json({ success: true, result: {} }),
+  });
+  await assert.rejects(() => api.updateRule(`${"d".repeat(32)}\n`, {}), /invalid/);
+  await assert.rejects(() => api.deleteRule(`${"d".repeat(32)}\n`), /invalid/);
+});
+
 test("Cloudflare client reads zone Email Routing settings without a mutation path", async () => {
   const calls = [];
   const fetchAPI = async (url, init) => {
@@ -61,6 +85,38 @@ test("Cloudflare client reads zone Email Routing settings without a mutation pat
   assert.equal(calls[0].method, "GET");
   assert.match(calls[0].url, new RegExp(`/zones/${"b".repeat(32)}/email/routing$`));
   assert.equal(typeof api.updateEmailRoutingSettings, "undefined");
+});
+
+test("Cloudflare client reads bounded route projections without a KV mutation", async () => {
+  const calls = [];
+  const projection = { schema_version: 2, state: "applied" };
+  const fetchAPI = async (url, init) => {
+    calls.push({ url, ...init });
+    return new Response(JSON.stringify(projection), {
+      headers: { "Content-Length": String(JSON.stringify(projection).length) },
+    });
+  };
+  const api = new CloudflareAPI({
+    accountID: "a".repeat(32),
+    namespaceID: "c".repeat(32),
+    apiToken: "projection-token",
+    fetchAPI,
+  });
+
+  assert.deepEqual(await api.getKVJSON("email:realm-route:v1:witmail.net:abcdefghijkl2345"), projection);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].method, "GET");
+  assert.match(calls[0].url, /\/values\/email%3Arealm-route%3Av1%3Awitmail\.net%3Aabcdefghijkl2345$/);
+  assert.equal(typeof api.putKV, "function");
+  assert.equal(calls.some(({ method }) => method === "PUT" || method === "DELETE"), false);
+
+  const oversized = new CloudflareAPI({
+    accountID: "a".repeat(32),
+    namespaceID: "c".repeat(32),
+    apiToken: "projection-token",
+    fetchAPI: async () => new Response("{}", { headers: { "Content-Length": "20000" } }),
+  });
+  await assert.rejects(() => oversized.getKVJSON("route"), /exceeded/);
 });
 
 test("Analytics Engine query uses the account-scoped SQL endpoint and remains value-free", async () => {

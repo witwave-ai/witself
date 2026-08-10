@@ -1,21 +1,21 @@
 const API_ROOT = "https://api.cloudflare.com/client/v4";
 export const EMAIL_DIRECTORY_TITLE = "witself-agent-email-pilot-directory";
 
-function required(value, name, pattern = /^[A-Za-z0-9_-]+$/) {
+function required(value, name, pattern = /^[A-Za-z0-9_-]+(?![\s\S])/) {
   if (!value || !pattern.test(value)) throw new Error(`${name} is missing or invalid`);
   return value;
 }
 
 export function cloudflareEnvironment(env = process.env) {
   return {
-    accountID: required(env.CLOUDFLARE_ACCOUNT_ID, "CLOUDFLARE_ACCOUNT_ID", /^[0-9a-f]{32}$/),
+    accountID: required(env.CLOUDFLARE_ACCOUNT_ID, "CLOUDFLARE_ACCOUNT_ID", /^[0-9a-f]{32}(?![\s\S])/),
     zoneID: env.CLOUDFLARE_ZONE_ID
-      ? required(env.CLOUDFLARE_ZONE_ID, "CLOUDFLARE_ZONE_ID", /^[0-9a-f]{32}$/)
+      ? required(env.CLOUDFLARE_ZONE_ID, "CLOUDFLARE_ZONE_ID", /^[0-9a-f]{32}(?![\s\S])/)
       : "",
     namespaceID: env.EMAIL_DIRECTORY_KV_ID
-      ? required(env.EMAIL_DIRECTORY_KV_ID, "EMAIL_DIRECTORY_KV_ID", /^[0-9a-f]{32}$/)
+      ? required(env.EMAIL_DIRECTORY_KV_ID, "EMAIL_DIRECTORY_KV_ID", /^[0-9a-f]{32}(?![\s\S])/)
       : "",
-    apiToken: required(env.CLOUDFLARE_API_TOKEN, "CLOUDFLARE_API_TOKEN", /^\S+$/),
+    apiToken: required(env.CLOUDFLARE_API_TOKEN, "CLOUDFLARE_API_TOKEN", /^\S+(?![\s\S])/),
   };
 }
 
@@ -115,6 +115,27 @@ export class CloudflareAPI {
     );
   }
 
+  async getKVJSON(key) {
+    if (!this.namespaceID) throw new Error("EMAIL_DIRECTORY_KV_ID is required");
+    const response = await this.request(
+      `/accounts/${this.accountID}/storage/kv/namespaces/${this.namespaceID}/values/${encodeURIComponent(key)}`,
+      { raw: true },
+    );
+    const declared = Number(response.headers.get("Content-Length"));
+    if (Number.isFinite(declared) && declared > 16_384) {
+      throw new Error("Cloudflare KV value exceeded the route projection limit");
+    }
+    const raw = await response.text();
+    if (raw.length < 2 || raw.length > 16_384) {
+      throw new Error("Cloudflare KV value exceeded the route projection limit");
+    }
+    try {
+      return JSON.parse(raw);
+    } catch {
+      throw new Error("Cloudflare KV route projection was malformed");
+    }
+  }
+
   async deleteKV(key) {
     if (!this.namespaceID) throw new Error("EMAIL_DIRECTORY_KV_ID is required");
     return this.request(
@@ -143,7 +164,7 @@ export class CloudflareAPI {
   }
 
   async updateRule(ruleID, rule) {
-    if (!/^[0-9a-f]{1,32}$/.test(ruleID)) throw new Error("Cloudflare routing rule id is invalid");
+    if (!/^[0-9a-f]{1,32}(?![\s\S])/.test(ruleID)) throw new Error("Cloudflare routing rule id is invalid");
     return this.request(`/zones/${this.zoneID}/email/routing/rules/${ruleID}`, {
       method: "PUT",
       body: rule,
@@ -151,7 +172,7 @@ export class CloudflareAPI {
   }
 
   async deleteRule(ruleID) {
-    if (!/^[0-9a-f]{1,32}$/.test(ruleID)) throw new Error("Cloudflare routing rule id is invalid");
+    if (!/^[0-9a-f]{1,32}(?![\s\S])/.test(ruleID)) throw new Error("Cloudflare routing rule id is invalid");
     return this.request(`/zones/${this.zoneID}/email/routing/rules/${ruleID}`, { method: "DELETE" });
   }
 
