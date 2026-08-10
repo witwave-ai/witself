@@ -82,6 +82,20 @@ agentEmail:
     retryCanaryAgentID: ""
     relayPublicKeysJSON: ""
     relayReplayWindow: 5m
+  # Production receive is a separate, exact-account cohort gate. It is
+  # mutually exclusive with receivePilot and stays false in every default and
+  # live values file until a reviewed staged rollout.
+  receiveProduction:
+    enabled: false
+    domain: ""
+    acceptedLegacyDomains: []
+    audience: ""
+    # Canonical, strictly sorted acc_* IDs. The chart and server cap this at
+    # 100 accounts; no wildcard or all-accounts value exists.
+    accountIDs: []
+    retryCanaryAgentID: ""
+    relayPublicKeysJSON: ""
+    relayReplayWindow: 5m
 
 avatar:
   payloadCompaction:

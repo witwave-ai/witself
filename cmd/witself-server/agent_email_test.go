@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -57,6 +58,121 @@ func TestAgentEmailPilotConfigFromEnvDefaultOffAndValid(t *testing.T) {
 	pilot, err = agentEmailPilotConfigFromEnv()
 	if err != nil || pilot.RelayReplayWindow != 90*time.Second {
 		t.Fatalf("custom replay window = %s, %v", pilot.RelayReplayWindow, err)
+	}
+}
+
+func TestAgentEmailProductionConfigFromEnvDefaultOffAndValid(t *testing.T) {
+	clearAgentEmailPilotEnv(t)
+	t.Setenv(agentEmailProductionEnabledEnv, "true")
+	t.Setenv(agentEmailReceiveDomainEnv, "witmail.net")
+	t.Setenv(agentEmailReceiveAudienceEnv, "civo-sandbox-usw2-dev")
+	t.Setenv(agentEmailReceiveAccountIDsEnv,
+		"acc_aaaaaaaaaaaaaaaa,acc_bbbbbbbbbbbbbbbb")
+	t.Setenv(agentEmailRetryCanaryAgentIDEnv, "agent_aaaaaaaaaaaaaaaa")
+	setAgentEmailRelayPublicKeyEnv(t)
+
+	receive, err := agentEmailReceiveConfigFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !receive.Enabled || receive.Mode != server.AgentEmailReceiveModeProduction ||
+		receive.Domain != "witmail.net" ||
+		receive.Audience != "civo-sandbox-usw2-dev" ||
+		len(receive.AccountIDs) != 2 ||
+		!receive.AccountIDs["acc_aaaaaaaaaaaaaaaa"] ||
+		len(receive.RealmIDs) != 0 || len(receive.AgentIDs) != 0 ||
+		receive.RetryCanaryAgentID != "agent_aaaaaaaaaaaaaaaa" ||
+		len(receive.RelayPublicKeys["pilot-key"]) != ed25519.PublicKeySize {
+		t.Fatalf("valid production receive = %+v", receive)
+	}
+
+	t.Setenv(agentEmailPilotEnabledEnv, "true")
+	if _, err := agentEmailReceiveConfigFromEnv(); err == nil ||
+		!strings.Contains(err.Error(), "cannot both be true") {
+		t.Fatalf("dual receive mode error = %v", err)
+	}
+}
+
+func TestAgentEmailProductionConfigFromEnvRejectsUnsafeShapes(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T)
+		want   string
+	}{
+		{
+			name: "invalid feature flag", want: agentEmailProductionEnabledEnv,
+			mutate: func(t *testing.T) {
+				t.Setenv(agentEmailProductionEnabledEnv, "enabled")
+			},
+		},
+		{
+			name: "missing domain", want: agentEmailReceiveDomainEnv,
+			mutate: func(t *testing.T) { t.Setenv(agentEmailReceiveDomainEnv, "") },
+		},
+		{
+			name: "missing cohort", want: agentEmailReceiveAccountIDsEnv,
+			mutate: func(t *testing.T) { t.Setenv(agentEmailReceiveAccountIDsEnv, "") },
+		},
+		{
+			name: "duplicate account", want: "duplicated",
+			mutate: func(t *testing.T) {
+				t.Setenv(agentEmailReceiveAccountIDsEnv,
+					"acc_aaaaaaaaaaaaaaaa,acc_aaaaaaaaaaaaaaaa")
+			},
+		},
+		{
+			name: "invalid account", want: "canonical",
+			mutate: func(t *testing.T) {
+				t.Setenv(agentEmailReceiveAccountIDsEnv, "acc_not-valid")
+			},
+		},
+		{
+			name: "whitespace", want: "canonical",
+			mutate: func(t *testing.T) {
+				t.Setenv(agentEmailReceiveAccountIDsEnv, " acc_aaaaaaaaaaaaaaaa")
+			},
+		},
+		{
+			name: "unsorted", want: "sorted order",
+			mutate: func(t *testing.T) {
+				t.Setenv(agentEmailReceiveAccountIDsEnv,
+					"acc_bbbbbbbbbbbbbbbb,acc_aaaaaaaaaaaaaaaa")
+			},
+		},
+		{
+			name: "wildcard", want: "canonical",
+			mutate: func(t *testing.T) {
+				t.Setenv(agentEmailReceiveAccountIDsEnv, "*")
+			},
+		},
+		{
+			name: "over cohort cap", want: "1-100",
+			mutate: func(t *testing.T) {
+				t.Setenv(agentEmailReceiveAccountIDsEnv,
+					strings.TrimSuffix(strings.Repeat("acc_aaaaaaaaaaaaaaaa,", 101), ","))
+			},
+		},
+		{
+			name: "invalid canary", want: "retry canary",
+			mutate: func(t *testing.T) {
+				t.Setenv(agentEmailRetryCanaryAgentIDEnv, "agent_not-valid")
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clearAgentEmailPilotEnv(t)
+			t.Setenv(agentEmailProductionEnabledEnv, "true")
+			t.Setenv(agentEmailReceiveDomainEnv, "witmail.net")
+			t.Setenv(agentEmailReceiveAudienceEnv, "cell-one")
+			t.Setenv(agentEmailReceiveAccountIDsEnv, "acc_aaaaaaaaaaaaaaaa")
+			setAgentEmailRelayPublicKeyEnv(t)
+			tc.mutate(t)
+			_, err := agentEmailReceiveConfigFromEnv()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want substring %q", err, tc.want)
+			}
+		})
 	}
 }
 
@@ -257,7 +373,78 @@ func TestAgentEmailStorageLimitMappingAndConversions(t *testing.T) {
 	}
 }
 
+func TestWriteNewPrivateAgentEmailJSONIsExclusiveAndPrivate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "primary-canary.json")
+	value := agentEmailPrimaryCanaryManifest{
+		SchemaVersion: 1, Domain: "witmail.net",
+		WorkerName: "witself-agent-email-pilot",
+		Agents: []agentEmailPrimaryCanaryManifestAgent{{
+			AgentID: "agent_aaaaaaaaaaaaaaaa",
+			RealmID: "realm_bbbbbbbbbbbbbbbb",
+			Address: "alpha.bbbbbbbbbbbbbbbb@witmail.net",
+		}},
+	}
+	if err := writeNewPrivateAgentEmailJSON(path, value); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("private manifest permissions = %o, want 600", got)
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded) != 4 || decoded["schema_version"] != float64(1) ||
+		decoded["domain"] != "witmail.net" ||
+		decoded["worker_name"] != "witself-agent-email-pilot" {
+		t.Fatalf("private manifest envelope = %#v", decoded)
+	}
+	decodedAgents, ok := decoded["agents"].([]any)
+	if !ok || len(decodedAgents) != 1 {
+		t.Fatalf("private manifest agents = %#v", decoded["agents"])
+	}
+	decodedAgent, ok := decodedAgents[0].(map[string]any)
+	if !ok || len(decodedAgent) != 3 ||
+		decodedAgent["agent_id"] != "agent_aaaaaaaaaaaaaaaa" ||
+		decodedAgent["realm_id"] != "realm_bbbbbbbbbbbbbbbb" ||
+		decodedAgent["address"] != "alpha.bbbbbbbbbbbbbbbb@witmail.net" {
+		t.Fatalf("private manifest agent = %#v", decodedAgents[0])
+	}
+	if err := writeNewPrivateAgentEmailJSON(path, struct{}{}); err == nil {
+		t.Fatal("exclusive manifest rewrite unexpectedly succeeded")
+	}
+	payloadAfter, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(payloadAfter) != string(payload) {
+		t.Fatal("failed exclusive manifest rewrite changed the original file")
+	}
+}
+
 func setValidAgentEmailPilotEnv(t *testing.T) {
+	t.Helper()
+	setAgentEmailRelayPublicKeyEnv(t)
+	t.Setenv(agentEmailPilotEnabledEnv, "TRUE")
+	t.Setenv(agentEmailPilotDomainEnv, "agent-mail.witwave.ai")
+	t.Setenv(agentEmailPilotAudienceEnv, "cell-one")
+	t.Setenv(agentEmailPilotRealmIDEnv, "realm_aaaaaaaaaaaaaaaa")
+	t.Setenv(agentEmailPilotAgentIDsEnv, strings.Join([]string{
+		"agent_aaaaaaaaaaaaaaaa", "agent_bbbbbbbbbbbbbbbb", "agent_cccccccccccccccc",
+		"agent_dddddddddddddddd", "agent_eeeeeeeeeeeeeeee",
+	}, ","))
+	_ = os.Unsetenv(agentEmailRelayReplayWindowEnv)
+}
+
+func setAgentEmailRelayPublicKeyEnv(t *testing.T) {
 	t.Helper()
 	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -269,22 +456,15 @@ func setValidAgentEmailPilotEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(agentEmailPilotEnabledEnv, "TRUE")
-	t.Setenv(agentEmailPilotDomainEnv, "agent-mail.witwave.ai")
-	t.Setenv(agentEmailPilotAudienceEnv, "cell-one")
-	t.Setenv(agentEmailPilotRealmIDEnv, "realm_aaaaaaaaaaaaaaaa")
-	t.Setenv(agentEmailPilotAgentIDsEnv, strings.Join([]string{
-		"agent_aaaaaaaaaaaaaaaa", "agent_bbbbbbbbbbbbbbbb", "agent_cccccccccccccccc",
-		"agent_dddddddddddddddd", "agent_eeeeeeeeeeeeeeee",
-	}, ","))
 	t.Setenv(agentEmailRelayPublicKeysEnv, string(encodedKeys))
-	_ = os.Unsetenv(agentEmailRelayReplayWindowEnv)
 }
 
 func clearAgentEmailPilotEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
 		agentEmailPilotEnabledEnv, agentEmailPilotDomainEnv, agentEmailPilotAudienceEnv,
+		agentEmailProductionEnabledEnv, agentEmailReceiveDomainEnv,
+		agentEmailReceiveAudienceEnv, agentEmailReceiveAccountIDsEnv,
 		agentEmailLegacyDomainsEnv,
 		agentEmailPilotRealmIDEnv, agentEmailPilotAgentIDsEnv,
 		agentEmailRelayPublicKeysEnv, agentEmailRelayReplayWindowEnv,

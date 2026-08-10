@@ -739,6 +739,50 @@ func TestAgentEmailPilotDefaultOffAndValidation(t *testing.T) {
 	if err := ValidateAgentEmailPilotConfig(badCanary); err == nil {
 		t.Fatal("unenrolled retry canary accepted")
 	}
+
+	production := pilot
+	production.Mode = AgentEmailReceiveModeProduction
+	production.AccountIDs = map[string]bool{
+		"acc_aaaaaaaaaaaaaaaa": true,
+		"acc_bbbbbbbbbbbbbbbb": true,
+	}
+	production.RealmIDs = nil
+	production.AgentIDs = nil
+	production.RetryCanaryAgentID = "agent_aaaaaaaaaaaaaaaa"
+	if err := ValidateAgentEmailReceiveConfig(production); err != nil {
+		t.Fatalf("valid production receive config: %v", err)
+	}
+	if !production.allows(DomainPrincipal{
+		Kind: PrincipalKindAgent, AccountID: "acc_bbbbbbbbbbbbbbbb",
+		RealmID: "realm_outsidecohort", ID: "agent_outsidecohort",
+	}) {
+		t.Fatal("production cohort did not allow a dynamically resolved agent")
+	}
+	if production.allows(DomainPrincipal{
+		Kind: PrincipalKindAgent, AccountID: "acc_cccccccccccccccc",
+	}) {
+		t.Fatal("production cohort widened to an unconfigured account")
+	}
+	noAccounts := production
+	noAccounts.AccountIDs = nil
+	if err := ValidateAgentEmailReceiveConfig(noAccounts); err == nil {
+		t.Fatal("production receive accepted an empty account cohort")
+	}
+	mixed := production
+	mixed.AgentIDs = map[string]bool{"agent_aaaaaaaaaaaaaaaa": true}
+	if err := ValidateAgentEmailReceiveConfig(mixed); err == nil {
+		t.Fatal("production receive accepted a pilot agent allowlist")
+	}
+	invalidAccount := production
+	invalidAccount.AccountIDs = map[string]bool{"acc_invalid": true}
+	if err := ValidateAgentEmailReceiveConfig(invalidAccount); err == nil {
+		t.Fatal("production receive accepted an invalid account id")
+	}
+	invalidMode := production
+	invalidMode.Mode = "all_accounts"
+	if err := ValidateAgentEmailReceiveConfig(invalidMode); err == nil {
+		t.Fatal("production receive accepted an unknown mode")
+	}
 }
 
 func TestAgentEmailProcessingLeaseBounds(t *testing.T) {

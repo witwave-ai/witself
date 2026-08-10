@@ -1,6 +1,10 @@
 {{- $emailPilot := .Values.agentEmail.receivePilot -}}
+{{- $emailProduction := .Values.agentEmail.receiveProduction -}}
 {{- if and .Values.backup.validation.enabled (not .Values.backup.existingSecret.name) -}}
 {{- fail "backup.validation.enabled requires backup.existingSecret.name" -}}
+{{- end -}}
+{{- if and $emailPilot.enabled $emailProduction.enabled -}}
+{{- fail "agentEmail.receivePilot.enabled and agentEmail.receiveProduction.enabled cannot both be true" -}}
 {{- end -}}
 {{- if $emailPilot.enabled -}}
 {{- $agentCount := len $emailPilot.agentIDs -}}
@@ -41,6 +45,45 @@
 {{- end -}}
 {{- end -}}
 {{- end -}}
+{{- if $emailProduction.enabled -}}
+{{- $_ := required "agentEmail.receiveProduction.domain is required when enabled" $emailProduction.domain -}}
+{{- $_ := required "agentEmail.receiveProduction.audience is required when enabled" $emailProduction.audience -}}
+{{- $_ := required "agentEmail.receiveProduction.relayPublicKeysJSON is required when enabled" $emailProduction.relayPublicKeysJSON -}}
+{{- $_ := required "agentEmail.receiveProduction.relayReplayWindow is required when enabled" $emailProduction.relayReplayWindow -}}
+{{- $accountCount := len $emailProduction.accountIDs -}}
+{{- if or (lt $accountCount 1) (gt $accountCount 100) -}}
+{{- fail "agentEmail.receiveProduction.accountIDs must contain 1-100 account IDs when enabled" -}}
+{{- end -}}
+{{- if ne (join "," $emailProduction.accountIDs) (join "," (sortAlpha $emailProduction.accountIDs)) -}}
+{{- fail "agentEmail.receiveProduction.accountIDs must be in canonical sorted order" -}}
+{{- end -}}
+{{- if gt (len $emailProduction.acceptedLegacyDomains) 1 -}}
+{{- fail "agentEmail.receiveProduction.acceptedLegacyDomains may contain at most 1 domain" -}}
+{{- end -}}
+{{- $seenProductionDomains := dict $emailProduction.domain true -}}
+{{- range $legacyDomain := $emailProduction.acceptedLegacyDomains -}}
+{{- if not (regexMatch "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$" $legacyDomain) -}}
+{{- fail (printf "agentEmail.receiveProduction.acceptedLegacyDomains contains invalid domain %q" $legacyDomain) -}}
+{{- end -}}
+{{- if hasKey $seenProductionDomains $legacyDomain -}}
+{{- fail (printf "agentEmail.receiveProduction.acceptedLegacyDomains contains primary or duplicate domain %q" $legacyDomain) -}}
+{{- end -}}
+{{- $_ := set $seenProductionDomains $legacyDomain true -}}
+{{- end -}}
+{{- $seenAccountIDs := dict -}}
+{{- range $accountID := $emailProduction.accountIDs -}}
+{{- if not (regexMatch "^acc_[a-z2-7]{16}$" $accountID) -}}
+{{- fail (printf "agentEmail.receiveProduction.accountIDs contains invalid account ID %q" $accountID) -}}
+{{- end -}}
+{{- if hasKey $seenAccountIDs $accountID -}}
+{{- fail (printf "agentEmail.receiveProduction.accountIDs contains duplicate account ID %q" $accountID) -}}
+{{- end -}}
+{{- $_ := set $seenAccountIDs $accountID true -}}
+{{- end -}}
+{{- if and $emailProduction.retryCanaryAgentID (not (regexMatch "^agent_[a-z2-7]{16}$" $emailProduction.retryCanaryAgentID)) -}}
+{{- fail "agentEmail.receiveProduction.retryCanaryAgentID must be one canonical agent ID" -}}
+{{- end -}}
+{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -60,6 +103,7 @@ data:
   WITSELF_BACKUP_VALIDATION_ENABLED: {{ .Values.backup.validation.enabled | quote }}
   WITSELF_FACT_DELETION_ENABLED: {{ .Values.features.factDeletion.enabled | quote }}
   WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED: {{ $emailPilot.enabled | quote }}
+  WITSELF_AGENT_EMAIL_RECEIVE_PRODUCTION_ENABLED: {{ $emailProduction.enabled | quote }}
 {{ if $emailPilot.enabled }}
   WITSELF_AGENT_EMAIL_PILOT_DOMAIN: {{ $emailPilot.domain | quote }}
 {{ if $emailPilot.acceptedLegacyDomains }}
@@ -72,6 +116,19 @@ data:
   WITSELF_AGENT_EMAIL_RELAY_REPLAY_WINDOW: {{ $emailPilot.relayReplayWindow | quote }}
 {{ if $emailPilot.retryCanaryAgentID }}
   WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID: {{ $emailPilot.retryCanaryAgentID | quote }}
+{{ end }}
+{{ end }}
+{{ if $emailProduction.enabled }}
+  WITSELF_AGENT_EMAIL_RECEIVE_DOMAIN: {{ $emailProduction.domain | quote }}
+{{ if $emailProduction.acceptedLegacyDomains }}
+  WITSELF_AGENT_EMAIL_ACCEPTED_LEGACY_DOMAINS: {{ join "," $emailProduction.acceptedLegacyDomains | quote }}
+{{ end }}
+  WITSELF_AGENT_EMAIL_RECEIVE_AUDIENCE: {{ $emailProduction.audience | quote }}
+  WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS: {{ join "," $emailProduction.accountIDs | quote }}
+  WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON: {{ $emailProduction.relayPublicKeysJSON | quote }}
+  WITSELF_AGENT_EMAIL_RELAY_REPLAY_WINDOW: {{ $emailProduction.relayReplayWindow | quote }}
+{{ if $emailProduction.retryCanaryAgentID }}
+  WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID: {{ $emailProduction.retryCanaryAgentID | quote }}
 {{ end }}
 {{ end }}
   WITSELF_AVATAR_PAYLOAD_COMPACTION_ENABLED: {{ .Values.avatar.payloadCompaction.enabled | quote }}

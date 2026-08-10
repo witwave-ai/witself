@@ -1,0 +1,14 @@
+# Non-secret render fixture for the default-off production receive cohort.
+agentEmail:
+  receiveProduction:
+    enabled: true
+    domain: witmail.net
+    acceptedLegacyDomains:
+      - agent-mail.witwave.ai
+    audience: civo-sandbox-usw2-dev
+    accountIDs:
+      - acc_aaaaaaaaaaaaaaaa
+      - acc_bbbbbbbbbbbbbbbb
+    retryCanaryAgentID: agent_aaaaaaaaaaaaaaaa
+    relayPublicKeysJSON: '{"route-2026-08":"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="}'
+    relayReplayWindow: 5m

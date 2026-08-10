@@ -231,4 +231,116 @@ func TestAgentEmailFeatureGateCoversOwnerAndIngressOperationsPostgres(t *testing
 	if message, err := st.IngestAgentEmailPilot(ctx, scope, ingestInput); err != nil || message.ID == "" {
 		t.Fatalf("enabled ingest = %+v / %v", message, err)
 	}
+
+	// Production receive replaces only the fixed realm/agent allowlist. The
+	// exact account cohort is independent, and the same local route, plan,
+	// mailbox, realm, and agent checks remain authoritative.
+	productionScope := AgentEmailReceiveScope{
+		Enabled: true, Mode: AgentEmailReceiveModeProduction,
+		Domain: scope.Domain, Audience: scope.Audience,
+		AccountIDs:         map[string]bool{provisioned.AccountID: true},
+		RetryCanaryAgentID: owner.ID,
+	}
+	preflight, err := st.PreflightAgentEmailProductionCohort(ctx, productionScope)
+	if err != nil || preflight.AccountCount != 1 ||
+		preflight.LiveAgentCount != int64(len(agents)) ||
+		preflight.ReadyMailboxCount != 1 ||
+		preflight.MissingMailboxCount != int64(len(agents)-1) ||
+		!preflight.RetryCanaryReady {
+		t.Fatalf("production read-only preflight = %+v / %v", preflight, err)
+	}
+	if _, err := st.ListAgentEmailProductionCanaryAgents(
+		ctx, productionScope,
+	); !errors.Is(err, ErrAgentEmailPilotNotEnrolled) {
+		t.Fatalf("production canary with missing mailboxes error = %v", err)
+	}
+	reconciled, err := st.ReconcileAgentEmailProductionCohort(ctx, productionScope)
+	if err != nil || reconciled != int64(len(agents)) {
+		t.Fatalf("production cohort reconciliation = %d / %v", reconciled, err)
+	}
+	preflight, err = st.PreflightAgentEmailProductionCohort(ctx, productionScope)
+	if err != nil || preflight.ReadyMailboxCount != int64(len(agents)) ||
+		preflight.MissingMailboxCount != 0 {
+		t.Fatalf("production reconciled preflight = %+v / %v", preflight, err)
+	}
+	for _, agent := range agents {
+		if _, err := st.GetAgentEmailAddress(ctx, productionScope, Principal{
+			Kind: PrincipalAgent, ID: agent.ID, AccountID: provisioned.AccountID,
+			RealmID: realm.ID, AccountStatus: "active",
+		}); err != nil {
+			t.Fatalf("production mailbox for %s: %v", agent.ID, err)
+		}
+	}
+	canaryAgents, err := st.ListAgentEmailProductionCanaryAgents(ctx, productionScope)
+	if err != nil || len(canaryAgents) != len(agents) {
+		t.Fatalf("production canary agents = %+v / %v", canaryAgents, err)
+	}
+	canaryOwnerFound := false
+	for i, candidate := range canaryAgents {
+		if candidate.AgentID == owner.ID {
+			canaryOwnerFound = true
+		}
+		if candidate.RealmID != realm.ID || !strings.HasSuffix(
+			candidate.Address, "."+strings.TrimPrefix(realm.ID, "realm_")+"@"+productionScope.Domain,
+		) {
+			t.Fatalf("production canary candidate = %+v", candidate)
+		}
+		if i > 0 && canaryAgents[i-1].Address >= candidate.Address {
+			t.Fatalf("production canary is not strictly address-sorted: %+v", canaryAgents)
+		}
+	}
+	if !canaryOwnerFound {
+		t.Fatalf("production canary omitted configured retry agent %s", owner.ID)
+	}
+	created, createdAddress, err := st.CreateAgentWithEmailMailbox(
+		ctx, productionScope, provisioned.AccountID, realm.ID, "production-new",
+	)
+	if err != nil || created.ID == "" || createdAddress.OwnerAgentID != created.ID ||
+		createdAddress.AccountID != provisioned.AccountID ||
+		createdAddress.RealmID != realm.ID ||
+		!agentEmailAddressHasPrimaryDomain(createdAddress, productionScope.Domain) {
+		t.Fatalf("atomic production agent/mailbox = %+v / %+v / %v", created, createdAddress, err)
+	}
+	preflight, err = st.PreflightAgentEmailProductionCohort(ctx, productionScope)
+	if err != nil || preflight.LiveAgentCount != int64(len(agents)+1) ||
+		preflight.ReadyMailboxCount != int64(len(agents)+1) ||
+		preflight.MissingMailboxCount != 0 {
+		t.Fatalf("atomic mailbox preflight = %+v / %v", preflight, err)
+	}
+	if _, _, err := st.CreateAgentWithEmailMailbox(
+		ctx, productionScope, provisioned.AccountID, realm.ID, "postmaster",
+	); !errors.Is(err, ErrAgentEmailInputInvalid) {
+		t.Fatalf("reserved production agent segment error = %v", err)
+	}
+	currentAgents, err := st.ListAgents(ctx, provisioned.AccountID, realm.ID)
+	if err != nil || len(currentAgents) != len(agents)+1 {
+		t.Fatalf("failed atomic mailbox create leaked an agent = %d / %v", len(currentAgents), err)
+	}
+	outOfCohort := productionScope
+	outOfCohort.AccountIDs = map[string]bool{"acc_aaaaaaaaaaaaaaaa": true}
+	if _, err := st.IngestAgentEmailPilot(
+		ctx, outOfCohort, ingestInput,
+	); !errors.Is(err, ErrAgentEmailPilotNotEnrolled) {
+		t.Fatalf("out-of-cohort production ingest error = %v", err)
+	}
+
+	applyPlan(4, emailPolicies, []string{"memory", "facts"})
+	if _, err := st.ListAgentEmailProductionCanaryAgents(
+		ctx, productionScope,
+	); !errors.Is(err, ErrAgentEmailPilotNotEnrolled) {
+		t.Fatalf("personal account production canary error = %v", err)
+	}
+	if _, err := st.IngestAgentEmailPilot(
+		ctx, productionScope, ingestInput,
+	); !errors.Is(err, ErrFeatureNotEnabled) {
+		t.Fatalf("personal production ingest error = %v", err)
+	}
+	applyPlan(5, emailPolicies, []string{
+		"memory", "facts", plans.AgentEmailReceiveFeature,
+	})
+	if message, err := st.IngestAgentEmailPilot(
+		ctx, productionScope, ingestInput,
+	); err != nil || message.ID == "" {
+		t.Fatalf("production enabled ingest = %+v / %v", message, err)
+	}
 }

@@ -210,6 +210,74 @@ the [edge README](../infra/cloudflare/agent-email/README.md) for the staged
 procedure. A configured cell, deployed Worker, or enabled routing rule alone is
 not proof of end-to-end operation.
 
+## Production account-cohort agent-email receive
+
+Release `0.0.241` adds a production receive mode without widening the retired
+pilot implicitly. It is a second default-off gate, mutually exclusive with the
+realm/agent pilot:
+
+- `WITSELF_AGENT_EMAIL_RECEIVE_PRODUCTION_ENABLED=true`
+- `WITSELF_AGENT_EMAIL_RECEIVE_DOMAIN=witmail.net`
+- `WITSELF_AGENT_EMAIL_RECEIVE_AUDIENCE` set to the exact destination cell
+- `WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS` set to a canonical, byte-sorted CSV
+  of 1-100 unique generated `acc_*` IDs
+- the existing relay public-key, replay-window, optional legacy-domain, and
+  optional retry-canary settings
+
+Whitespace, duplicates, wildcard-like values, unsorted input, invalid generated
+IDs, or more than 100 accounts fail before the API listens. The app-of-apps
+passes this shape only when the server chart and image are both `0.0.241` or
+newer. Fleet and portable defaults remain false; no live cell is enabled by the
+release itself.
+
+Serving replicas do only a bounded read-only check that each configured account
+exists in the cell and is active or suspended, plus one optional canary
+membership check. They do not scan agents and never provision mailboxes during
+startup. This makes 20 API replicas equivalent to one for receive setup. An
+A Personal account accidentally present in the cohort does not prevent
+startup: the local plan entitlement remains authoritative, and an attempted
+delivery is accepted and discarded without persisting message content. A plan
+transition takes effect from the cell snapshot without reinstalling any client.
+
+Existing mailbox provisioning is an explicit one-shot operator action:
+
+```sh
+/usr/local/bin/witself-server agent-email backfill
+```
+
+Run it once from the released cell image with that cell's normal database and
+production-receive environment. The operation first validates the exact cohort,
+then processes agents in fixed 100-row keyset pages and verifies zero missing
+mailboxes. It is idempotent and safe to rerun after interruption, but it must not
+be placed in an API-pod startup command or run concurrently from every replica.
+Founder remains bounded in memory even with unlimited agents. Suspended accounts
+are checked read-only. Once production mode is active, creating a new cohort
+agent and its canonical mailbox is one database transaction, so a successful
+agent create needs no restart or later repair.
+
+Do not hand-author the edge canary. After a successful backfill, use one selected
+cell process to generate it from actual currently receive-enabled mailbox rows:
+
+```sh
+/usr/local/bin/witself-server agent-email canary-manifest \
+  --output /absolute/private/new/primary-canary.json
+```
+
+The output path must be canonical, absolute, and absent. The command performs no
+database write, requires zero missing cohort mailboxes, includes the configured
+retry canary when present, sorts 5-10 unique entries by canonical address, and
+creates the exact edge manifest with mode `0600` and exclusive-create semantics.
+It prints no IDs or addresses. Keep the file outside Git and ordinary logs, and
+pass it unchanged to `npm run routes:primary -- status ...` before any routing
+plan is prepared.
+
+Production ingress still fails closed through every local check: trusted relay
+signature and audience, exact account cohort, permanent canonical/alias/custom
+route reservation, live account/realm/agent/mailbox state, plan entitlement,
+and independent realm/agent receive controls. The process gate changes routing
+eligibility only; it does not bypass account policy or enable custom-domain,
+alias, canonical-delivery, MX, catch-all, or provider gates.
+
 ## Current GitOps Release Rollout
 
 The directories under `.gitops/cells/` are configured desired-state targets;

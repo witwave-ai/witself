@@ -71,20 +71,21 @@ const (
 	// AgentEmailRealmAliasRetired permanently tombstones the label.
 	AgentEmailRealmAliasRetired = "retired"
 
-	agentEmailPilotProvider           = "cloudflare_email_routing"
-	defaultAgentEmailPageSize         = 50
-	maximumAgentEmailPageSize         = 100
-	maximumAgentEmailFailureCount     = int64(4611686018427387903)
-	maximumAgentEmailGeneration       = int64(4611686018427387903)
-	defaultAgentEmailLease            = 5 * time.Minute
-	minimumAgentEmailLease            = 30 * time.Second
-	maximumAgentEmailLease            = 15 * time.Minute
-	maximumAgentEmailKeyBytes         = 512
-	maximumAgentEmailClaimIDBytes     = 128
-	agentEmailRetryCanaryArmTTL       = 15 * time.Minute
-	agentEmailRetryCanaryRetryGrace   = 24 * time.Hour
-	agentEmailRetryCanaryCleanup      = 7 * 24 * time.Hour
-	agentEmailRetryCanaryCleanupLimit = 32
+	agentEmailPilotProvider             = "cloudflare_email_routing"
+	defaultAgentEmailPageSize           = 50
+	maximumAgentEmailPageSize           = 100
+	maximumAgentEmailFailureCount       = int64(4611686018427387903)
+	maximumAgentEmailGeneration         = int64(4611686018427387903)
+	defaultAgentEmailLease              = 5 * time.Minute
+	minimumAgentEmailLease              = 30 * time.Second
+	maximumAgentEmailLease              = 15 * time.Minute
+	maximumAgentEmailKeyBytes           = 512
+	maximumAgentEmailClaimIDBytes       = 128
+	agentEmailRetryCanaryArmTTL         = 15 * time.Minute
+	agentEmailRetryCanaryRetryGrace     = 24 * time.Hour
+	agentEmailRetryCanaryCleanup        = 7 * 24 * time.Hour
+	agentEmailRetryCanaryCleanupLimit   = 32
+	maximumAgentEmailProductionAccounts = 100
 
 	agentEmailRetryCanaryArmed      = "armed"
 	agentEmailRetryCanaryTempfailed = "tempfailed"
@@ -373,17 +374,30 @@ type CompleteAgentEmailInput struct {
 	IdempotencyKey string
 }
 
-// AgentEmailPilotScope is the process-lifetime default-off allowlist. Both a
-// mailbox row and these exact realm/agent entries are required for ingestion.
-type AgentEmailPilotScope struct {
+const (
+	AgentEmailReceiveModeLegacyPilot = "legacy_pilot"
+	AgentEmailReceiveModeProduction  = "production"
+)
+
+// AgentEmailReceiveScope is the process-lifetime default-off receive fence.
+// Legacy pilot mode requires exact realm/agent enrollment. Production mode
+// replaces that fixed list with an exact account cohort; local durable route,
+// mailbox, entitlement, realm, and agent state remain independently required.
+type AgentEmailReceiveScope struct {
 	Enabled            bool
+	Mode               string
 	Domain             string
 	LegacyDomains      []string
 	Audience           string
+	AccountIDs         map[string]bool
 	RealmIDs           map[string]bool
 	AgentIDs           map[string]bool
 	RetryCanaryAgentID string
 }
+
+// AgentEmailPilotScope preserves the established store API while callers move
+// to AgentEmailReceiveScope. Both names have identical fail-closed semantics.
+type AgentEmailPilotScope = AgentEmailReceiveScope
 
 // AgentEmailIngestInput carries already signature-verified relay metadata and
 // the byte-identical request body.
@@ -509,7 +523,7 @@ type AgentEmailRetryCanaryCheckpoint struct {
 	TempfailCount int64  `json:"tempfail_count"`
 }
 
-// EnsureAgentEmailMailbox idempotently provisions one pilot mailbox. An
+// EnsureAgentEmailMailbox idempotently provisions one authorized mailbox. An
 // explicit segment selects the operator-override path; otherwise the settled
 // deterministic derivation is applied to the current agent name.
 func (s *Store) EnsureAgentEmailMailbox(
@@ -517,16 +531,9 @@ func (s *Store) EnsureAgentEmailMailbox(
 	scope AgentEmailPilotScope,
 	accountID, realmID, agentID, explicitSegment string,
 ) (AgentEmailAddress, error) {
-	domain, err := requireAgentEmailPilotEnrollment(scope, realmID, agentID)
-	if err != nil {
-		return AgentEmailAddress{}, err
-	}
-	addressID, err := id.New("eaddr")
-	if err != nil {
-		return AgentEmailAddress{}, err
-	}
-	mailboxID, err := id.New("emb")
-	if err != nil {
+	if _, err := requireAgentEmailReceiveEnrollment(
+		scope, accountID, realmID, agentID,
+	); err != nil {
 		return AgentEmailAddress{}, err
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -535,6 +542,33 @@ func (s *Store) EnsureAgentEmailMailbox(
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	if err := lockAccountForMint(ctx, tx, accountID, false); err != nil {
+		return AgentEmailAddress{}, err
+	}
+	address, err := ensureAgentEmailMailboxTx(
+		ctx, tx, scope, accountID, realmID, agentID, explicitSegment,
+	)
+	if err != nil {
+		return AgentEmailAddress{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return AgentEmailAddress{}, err
+	}
+	return address, nil
+}
+
+// ensureAgentEmailMailboxTx assumes the caller already holds the account
+// lifecycle/plan lock. It never commits, allowing agent creation and mailbox
+// provisioning to share one atomic transaction.
+func ensureAgentEmailMailboxTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	scope AgentEmailPilotScope,
+	accountID, realmID, agentID, explicitSegment string,
+) (AgentEmailAddress, error) {
+	domain, err := requireAgentEmailReceiveEnrollment(
+		scope, accountID, realmID, agentID,
+	)
+	if err != nil {
 		return AgentEmailAddress{}, err
 	}
 	realmControl, err := ensureAgentEmailRealmReceiveControlTx(ctx, tx, accountID, realmID)
@@ -552,9 +586,6 @@ func (s *Store) EnsureAgentEmailMailbox(
 			return AgentEmailAddress{}, err
 		}
 		if err := populateAgentEmailRealmAliasAddressesTx(ctx, tx, &existing); err != nil {
-			return AgentEmailAddress{}, err
-		}
-		if err := tx.Commit(ctx); err != nil {
 			return AgentEmailAddress{}, err
 		}
 		return existing, nil
@@ -575,6 +606,14 @@ func (s *Store) EnsureAgentEmailMailbox(
 	}
 	if err != nil {
 		return AgentEmailAddress{}, fmt.Errorf("resolve email owner: %w", err)
+	}
+	addressID, err := id.New("eaddr")
+	if err != nil {
+		return AgentEmailAddress{}, err
+	}
+	mailboxID, err := id.New("emb")
+	if err != nil {
+		return AgentEmailAddress{}, err
 	}
 	provisioningKind := "derived"
 	segment := explicitSegment
@@ -647,9 +686,6 @@ func (s *Store) EnsureAgentEmailMailbox(
 		return AgentEmailAddress{}, err
 	}
 	if err := populateAgentEmailRealmAliasAddressesTx(ctx, tx, &address); err != nil {
-		return AgentEmailAddress{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return AgentEmailAddress{}, err
 	}
 	return address, nil
@@ -1095,7 +1131,7 @@ func (s *Store) GetAgentEmailReceiveControl(
 	scope AgentEmailPilotScope,
 	accountID, operatorID, agentID string,
 ) (AgentEmailReceiveControl, error) {
-	if err := requireAgentEmailOperatorTarget(scope, operatorID, "agent", agentID); err != nil {
+	if err := requireAgentEmailOperatorTarget(scope, accountID, operatorID, "agent", agentID); err != nil {
 		return AgentEmailReceiveControl{}, err
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -1123,7 +1159,7 @@ func (s *Store) SetAgentEmailReceiveControl(
 	scope AgentEmailPilotScope,
 	accountID, operatorID, agentID, desiredState string,
 ) (AgentEmailReceiveControl, error) {
-	if err := requireAgentEmailOperatorTarget(scope, operatorID, "agent", agentID); err != nil {
+	if err := requireAgentEmailOperatorTarget(scope, accountID, operatorID, "agent", agentID); err != nil {
 		return AgentEmailReceiveControl{}, err
 	}
 	desiredState = strings.TrimSpace(desiredState)
@@ -1190,7 +1226,7 @@ func (s *Store) GetRealmAgentEmailReceiveControl(
 	scope AgentEmailPilotScope,
 	accountID, operatorID, realmID string,
 ) (AgentEmailRealmReceiveControl, error) {
-	if err := requireAgentEmailOperatorTarget(scope, operatorID, "realm", realmID); err != nil {
+	if err := requireAgentEmailOperatorTarget(scope, accountID, operatorID, "realm", realmID); err != nil {
 		return AgentEmailRealmReceiveControl{}, err
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -1218,7 +1254,7 @@ func (s *Store) SetRealmAgentEmailReceiveControl(
 	scope AgentEmailPilotScope,
 	accountID, operatorID, realmID, desiredState string,
 ) (AgentEmailRealmReceiveControl, error) {
-	if err := requireAgentEmailOperatorTarget(scope, operatorID, "realm", realmID); err != nil {
+	if err := requireAgentEmailOperatorTarget(scope, accountID, operatorID, "realm", realmID); err != nil {
 		return AgentEmailRealmReceiveControl{}, err
 	}
 	desiredState = strings.TrimSpace(desiredState)
@@ -1326,7 +1362,9 @@ func (s *Store) IngestAgentEmailPilot(
 		return AgentEmailMessage{}, err
 	}
 	candidate := candidateRoute.Address
-	if !scope.RealmIDs[candidate.RealmID] || !scope.AgentIDs[candidate.OwnerAgentID] {
+	if !agentEmailReceiveScopeAllows(
+		scope, candidate.AccountID, candidate.RealmID, candidate.OwnerAgentID,
+	) {
 		return AgentEmailMessage{}, ErrAgentEmailPilotNotEnrolled
 	}
 	accountPolicy, err := lockAgentEmailIngestAccountPolicy(
@@ -1361,7 +1399,9 @@ func (s *Store) IngestAgentEmailPilot(
 		parts.Domain != primaryDomain {
 		return AgentEmailMessage{}, ErrAgentEmailUnknownRecipient
 	}
-	if !scope.RealmIDs[address.RealmID] || !scope.AgentIDs[address.OwnerAgentID] {
+	if !agentEmailReceiveScopeAllows(
+		scope, address.AccountID, address.RealmID, address.OwnerAgentID,
+	) {
 		return AgentEmailMessage{}, ErrAgentEmailPilotNotEnrolled
 	}
 	if address.ReceiveState != AgentEmailReceiveEnabled {
@@ -3005,7 +3045,7 @@ func agentEmailReceiveControlFromAddress(address AgentEmailAddress) AgentEmailRe
 
 func requireAgentEmailOperatorTarget(
 	scope AgentEmailPilotScope,
-	operatorID, kind, targetID string,
+	accountID, operatorID, kind, targetID string,
 ) error {
 	if !scope.Enabled {
 		return ErrAgentEmailPilotDisabled
@@ -3015,6 +3055,24 @@ func requireAgentEmailOperatorTarget(
 	}
 	if strings.TrimSpace(operatorID) == "" {
 		return ErrAgentEmailForbidden
+	}
+	if agentEmailReceiveMode(scope) == AgentEmailReceiveModeProduction {
+		if !scope.AccountIDs[accountID] {
+			return ErrAgentEmailPilotNotEnrolled
+		}
+		switch kind {
+		case "agent":
+			if !validAgentEmailGeneratedID(targetID, "agent") {
+				return ErrAgentEmailPilotNotEnrolled
+			}
+		case "realm":
+			if !validAgentEmailGeneratedID(targetID, "realm") {
+				return ErrAgentEmailPilotNotEnrolled
+			}
+		default:
+			return ErrAgentEmailForbidden
+		}
+		return nil
 	}
 	switch kind {
 	case "agent":
@@ -3071,7 +3129,9 @@ func agentEmailAddressForOperatorAgentTx(
 	if err != nil {
 		return AgentEmailAddress{}, fmt.Errorf("read agent-email operator control: %w", err)
 	}
-	if !scope.RealmIDs[address.RealmID] || !scope.AgentIDs[address.OwnerAgentID] {
+	if !agentEmailReceiveScopeAllows(
+		scope, address.AccountID, address.RealmID, address.OwnerAgentID,
+	) {
 		return AgentEmailAddress{}, ErrAgentEmailPilotNotEnrolled
 	}
 	return address, nil
@@ -3156,40 +3216,63 @@ func normalizeAgentEmailPilotScope(scope AgentEmailPilotScope) (string, error) {
 	if audience[len(audience)-1] == '-' {
 		return "", fmt.Errorf("%w: pilot audience is invalid", ErrAgentEmailInputInvalid)
 	}
-	realms := 0
-	for realmID, enabled := range scope.RealmIDs {
-		if !enabled {
-			continue
+	switch agentEmailReceiveMode(scope) {
+	case AgentEmailReceiveModeLegacyPilot:
+		if countEnabledAgentEmailScopeIDs(scope.AccountIDs, "acc") != 0 {
+			return "", fmt.Errorf("%w: pilot cannot include a production account cohort", ErrAgentEmailInputInvalid)
 		}
-		if !validAgentEmailGeneratedID(realmID, "realm") {
-			return "", fmt.Errorf("%w: pilot realm id is invalid", ErrAgentEmailInputInvalid)
+		if countEnabledAgentEmailScopeIDs(scope.RealmIDs, "realm") != 1 {
+			return "", fmt.Errorf("%w: pilot requires exactly one enrolled realm", ErrAgentEmailInputInvalid)
 		}
-		realms++
-	}
-	if realms != 1 {
-		return "", fmt.Errorf("%w: pilot requires exactly one enrolled realm", ErrAgentEmailInputInvalid)
-	}
-	agents := 0
-	for agentID, enabled := range scope.AgentIDs {
-		if !enabled {
-			continue
+		agents := countEnabledAgentEmailScopeIDs(scope.AgentIDs, "agent")
+		if agents < 5 || agents > 10 {
+			return "", fmt.Errorf("%w: pilot requires 5-10 enrolled agents", ErrAgentEmailInputInvalid)
 		}
-		if !validAgentEmailGeneratedID(agentID, "agent") {
-			return "", fmt.Errorf("%w: pilot agent id is invalid", ErrAgentEmailInputInvalid)
-		}
-		agents++
-	}
-	if agents < 5 || agents > 10 {
-		return "", fmt.Errorf("%w: pilot requires 5-10 enrolled agents", ErrAgentEmailInputInvalid)
-	}
-	if scope.RetryCanaryAgentID != "" {
-		if strings.TrimSpace(scope.RetryCanaryAgentID) != scope.RetryCanaryAgentID ||
-			!validAgentEmailGeneratedID(scope.RetryCanaryAgentID, "agent") ||
-			!scope.AgentIDs[scope.RetryCanaryAgentID] {
+		if scope.RetryCanaryAgentID != "" &&
+			(strings.TrimSpace(scope.RetryCanaryAgentID) != scope.RetryCanaryAgentID ||
+				!validAgentEmailGeneratedID(scope.RetryCanaryAgentID, "agent") ||
+				!scope.AgentIDs[scope.RetryCanaryAgentID]) {
 			return "", fmt.Errorf("%w: retry canary agent is not enrolled", ErrAgentEmailInputInvalid)
 		}
+	case AgentEmailReceiveModeProduction:
+		if countEnabledAgentEmailScopeIDs(scope.RealmIDs, "realm") != 0 ||
+			countEnabledAgentEmailScopeIDs(scope.AgentIDs, "agent") != 0 {
+			return "", fmt.Errorf("%w: production receive cannot include pilot enrollment", ErrAgentEmailInputInvalid)
+		}
+		accounts := countEnabledAgentEmailScopeIDs(scope.AccountIDs, "acc")
+		if accounts < 1 || accounts > maximumAgentEmailProductionAccounts {
+			return "", fmt.Errorf("%w: production receive requires 1-100 exact accounts", ErrAgentEmailInputInvalid)
+		}
+		if scope.RetryCanaryAgentID != "" &&
+			(strings.TrimSpace(scope.RetryCanaryAgentID) != scope.RetryCanaryAgentID ||
+				!validAgentEmailGeneratedID(scope.RetryCanaryAgentID, "agent")) {
+			return "", fmt.Errorf("%w: retry canary agent is invalid", ErrAgentEmailInputInvalid)
+		}
+	default:
+		return "", fmt.Errorf("%w: receive mode is invalid", ErrAgentEmailInputInvalid)
 	}
 	return domain, nil
+}
+
+func agentEmailReceiveMode(scope AgentEmailPilotScope) string {
+	if scope.Mode == "" {
+		return AgentEmailReceiveModeLegacyPilot
+	}
+	return scope.Mode
+}
+
+func countEnabledAgentEmailScopeIDs(values map[string]bool, prefix string) int {
+	count := 0
+	for value, enabled := range values {
+		if !enabled {
+			continue
+		}
+		if !validAgentEmailGeneratedID(value, prefix) {
+			return -1
+		}
+		count++
+	}
+	return count
 }
 
 func normalizedAgentEmailPilotDomains(scope AgentEmailPilotScope) ([]string, error) {
@@ -3218,6 +3301,13 @@ func requireAgentEmailPilotEnrollment(
 	scope AgentEmailPilotScope,
 	realmID, agentID string,
 ) (string, error) {
+	return requireAgentEmailReceiveEnrollment(scope, "", realmID, agentID)
+}
+
+func requireAgentEmailReceiveEnrollment(
+	scope AgentEmailPilotScope,
+	accountID, realmID, agentID string,
+) (string, error) {
 	if !scope.Enabled {
 		return "", ErrAgentEmailPilotDisabled
 	}
@@ -3225,10 +3315,20 @@ func requireAgentEmailPilotEnrollment(
 	if err != nil {
 		return "", err
 	}
-	if !scope.RealmIDs[realmID] || !scope.AgentIDs[agentID] {
+	if !agentEmailReceiveScopeAllows(scope, accountID, realmID, agentID) {
 		return "", ErrAgentEmailPilotNotEnrolled
 	}
 	return domain, nil
+}
+
+func agentEmailReceiveScopeAllows(
+	scope AgentEmailPilotScope,
+	accountID, realmID, agentID string,
+) bool {
+	if agentEmailReceiveMode(scope) == AgentEmailReceiveModeProduction {
+		return scope.AccountIDs[accountID]
+	}
+	return scope.RealmIDs[realmID] && scope.AgentIDs[agentID]
 }
 
 func requireAgentEmailPilotPrincipal(scope AgentEmailPilotScope, p Principal) error {
@@ -3242,7 +3342,7 @@ func requireAgentEmailPilotPrincipal(scope AgentEmailPilotScope, p Principal) er
 		(strings.TrimSpace(p.AccessProfile) != "" && p.AccessProfile != AccessProfileFull) {
 		return ErrAgentEmailForbidden
 	}
-	if !scope.RealmIDs[p.RealmID] || !scope.AgentIDs[p.ID] {
+	if !agentEmailReceiveScopeAllows(scope, p.AccountID, p.RealmID, p.ID) {
 		return ErrAgentEmailPilotNotEnrolled
 	}
 	return nil

@@ -8,6 +8,8 @@ apps_profile="$apps_chart/ci/gcp-rollout-values.yaml"
 gcp_profile="$server_chart/ci/gcp-rollout-values.yaml"
 email_pilot_profile="$server_chart/ci/agent-email-pilot-values.yaml"
 apps_email_pilot_profile="$apps_chart/ci/agent-email-pilot-values.yaml"
+email_production_profile="$server_chart/ci/agent-email-production-values.yaml"
+apps_email_production_profile="$apps_chart/ci/agent-email-production-values.yaml"
 gcp_cell="$repo_root/.gitops/cells/gcp-sandbox-use1-dev/values.yaml"
 civo_cell="$repo_root/.gitops/cells/civo-sandbox-usw2-dev/values.yaml"
 civo_backup_cell="$repo_root/.gitops/cells/civo-sandbox-use1-backup/values.yaml"
@@ -35,6 +37,8 @@ email_pilot_apps_render="$render_dir/email-pilot-apps.yaml"
 email_pilot_legacy_apps_render="$render_dir/email-pilot-legacy-apps.yaml"
 email_pilot_new_chart_old_image_render="$render_dir/email-pilot-new-chart-old-image.yaml"
 email_pilot_old_chart_new_image_render="$render_dir/email-pilot-old-chart-new-image.yaml"
+email_production_render="$render_dir/email-production.yaml"
+email_production_apps_render="$render_dir/email-production-apps.yaml"
 retention_preview_render="$render_dir/retention-preview.yaml"
 retention_enforce_render="$render_dir/retention-enforce.yaml"
 retention_preview_apps_render="$render_dir/retention-preview-apps.yaml"
@@ -145,6 +149,11 @@ helm template witself-apps "$apps_chart" \
   --values "$apps_email_pilot_profile" \
   --set apps.witselfServer.chartVersion=0.0.231 \
   --set apps.witselfServer.imageTag=0.0.232 >"$email_pilot_old_chart_new_image_render"
+helm template witself-server "$server_chart" --namespace witself \
+  --values "$email_production_profile" >"$email_production_render"
+helm template witself-apps "$apps_chart" \
+  --values "$civo_cell" \
+  --values "$apps_email_production_profile" >"$email_production_apps_render"
 helm template witself-server "$server_chart" --namespace witself \
   --values "$gcp_profile" \
   --set worker.transcriptRetention.enabled=true \
@@ -341,6 +350,11 @@ civo_default_preset_postgres_application="$render_dir/civo-default-preset-postgr
 civo_server_nested_values="$render_dir/civo-server-nested-values.yaml"
 civo_server_nested_render="$render_dir/civo-server-nested-render.yaml"
 civo_server_config="$render_dir/civo-server-config.yaml"
+email_production_server_config="$render_dir/email-production-server-config.yaml"
+email_production_server_application="$render_dir/email-production-server-application.yaml"
+email_production_nested_values="$render_dir/email-production-nested-values.yaml"
+email_production_nested_render="$render_dir/email-production-nested-render.yaml"
+email_production_nested_config="$render_dir/email-production-nested-config.yaml"
 
 extract_document ConfigMap witself-server "$default_render" "$default_server_config"
 extract_document Deployment witself-server "$default_render" "$default_server_deployment"
@@ -355,6 +369,12 @@ extract_document NetworkPolicy witself-worker "$gcp_render" "$gcp_worker_network
 extract_document PodDisruptionBudget witself-server "$gcp_render" "$gcp_server_pdb"
 extract_document PodDisruptionBudget witself-worker "$gcp_render" "$gcp_worker_pdb"
 extract_document Deployment witself-worker "$portable_worker_render" "$portable_worker_deployment"
+extract_document ConfigMap witself-server "$email_production_render" "$email_production_server_config"
+extract_document Application witself-server "$email_production_apps_render" "$email_production_server_application"
+extract_application_helm_values "$email_production_server_application" "$email_production_nested_values"
+helm template witself-server "$server_chart" --namespace witself \
+  --values "$email_production_nested_values" >"$email_production_nested_render"
+extract_document ConfigMap witself-server "$email_production_nested_render" "$email_production_nested_config"
 extract_document Deployment "$long_fullname" "$long_name_render" "$render_dir/long-name-server-deployment.yaml"
 extract_document Deployment "$long_worker_fullname" "$long_name_render" "$render_dir/long-name-worker-deployment.yaml"
 extract_document Service "$long_worker_metrics_fullname" "$long_name_render" "$render_dir/long-name-worker-metrics-service.yaml"
@@ -415,7 +435,8 @@ require_line '  WITSELF_BACKUP_VALIDATION_ENABLED: "false"' "$default_server_con
 require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED: "false"' "$default_server_config"
 require_line '  WITSELF_TRANSCRIPT_RETENTION_ENABLED: "false"' "$default_server_config"
 require_line '  WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED: "false"' "$default_server_config"
-if [[ "$(grep -c '^  WITSELF_AGENT_EMAIL_' "$default_server_config")" -ne 1 ]]; then
+require_line '  WITSELF_AGENT_EMAIL_RECEIVE_PRODUCTION_ENABLED: "false"' "$default_server_config"
+if [[ "$(grep -c '^  WITSELF_AGENT_EMAIL_' "$default_server_config")" -ne 2 ]]; then
   echo "default render exposed agent-email configuration beyond the disabled gate" >&2
   exit 1
 fi
@@ -750,6 +771,7 @@ expect_server_template_failure \
 extract_document ConfigMap witself-server "$email_pilot_render" "$render_dir/email-server-config.yaml"
 email_server_config="$render_dir/email-server-config.yaml"
 require_line '  WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED: "true"' "$email_server_config"
+require_line '  WITSELF_AGENT_EMAIL_RECEIVE_PRODUCTION_ENABLED: "false"' "$email_server_config"
 require_line '  WITSELF_AGENT_EMAIL_PILOT_DOMAIN: "witmail.net"' "$email_server_config"
 require_line '  WITSELF_AGENT_EMAIL_ACCEPTED_LEGACY_DOMAINS: "agent-mail.witwave.ai"' "$email_server_config"
 require_line '  WITSELF_AGENT_EMAIL_PILOT_AUDIENCE: "gcp-sandbox-use1-dev"' "$email_server_config"
@@ -758,12 +780,13 @@ require_line '  WITSELF_AGENT_EMAIL_PILOT_AGENT_IDS: "agent_aaaaaaaaaaaaaaaa,age
 require_line '  WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID: "agent_aaaaaaaaaaaaaaaa"' "$email_server_config"
 require_line '  WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON: "{\"pilot-2026-07\":\"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\"}"' "$email_server_config"
 require_line '  WITSELF_AGENT_EMAIL_RELAY_REPLAY_WINDOW: "5m"' "$email_server_config"
-if [[ "$(grep -c '^  WITSELF_AGENT_EMAIL_' "$email_server_config")" -ne 9 ]]; then
-  echo "enabled pilot with legacy compatibility and a retry canary did not render exactly nine agent-email variables" >&2
+if [[ "$(grep -c '^  WITSELF_AGENT_EMAIL_' "$email_server_config")" -ne 10 ]]; then
+  echo "enabled pilot with legacy compatibility and a retry canary did not render exactly ten agent-email variables" >&2
   exit 1
 fi
 if grep -Eq 'WITSELF_AGENT_EMAIL_.*PRIVATE|RELAY_ED25519_PRIVATE_KEY|relayPrivateKey' \
-  "$email_pilot_render" "$email_pilot_apps_render" "$email_pilot_legacy_apps_render"; then
+  "$email_pilot_render" "$email_pilot_apps_render" "$email_pilot_legacy_apps_render" \
+  "$email_production_render" "$email_production_apps_render"; then
   echo "relay private-key configuration leaked into the cell render" >&2
   exit 1
 fi
@@ -878,6 +901,96 @@ for mixed_email_render in \
     exit 1
   fi
 done
+
+# Production receive replaces the fixed realm/agent pilot allowlist with one
+# exact, bounded account cohort. It remains independently default-off and is
+# forwarded only when both child chart and image are v0.0.241 or newer.
+for production_config in \
+  "$email_production_server_config" \
+  "$email_production_nested_config"; do
+  require_line '  WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED: "false"' "$production_config"
+  require_line '  WITSELF_AGENT_EMAIL_RECEIVE_PRODUCTION_ENABLED: "true"' "$production_config"
+  require_line '  WITSELF_AGENT_EMAIL_RECEIVE_DOMAIN: "witmail.net"' "$production_config"
+  require_line '  WITSELF_AGENT_EMAIL_ACCEPTED_LEGACY_DOMAINS: "agent-mail.witwave.ai"' "$production_config"
+  require_line '  WITSELF_AGENT_EMAIL_RECEIVE_AUDIENCE: "civo-sandbox-usw2-dev"' "$production_config"
+  require_line '  WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS: "acc_aaaaaaaaaaaaaaaa,acc_bbbbbbbbbbbbbbbb"' "$production_config"
+  require_line '  WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID: "agent_aaaaaaaaaaaaaaaa"' "$production_config"
+  require_line '  WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON: "{\"route-2026-08\":\"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\"}"' "$production_config"
+  require_line '  WITSELF_AGENT_EMAIL_RELAY_REPLAY_WINDOW: "5m"' "$production_config"
+  if [[ "$(grep -c '^  WITSELF_AGENT_EMAIL_' "$production_config")" -ne 9 ]]; then
+    echo "production receive did not render exactly nine agent-email variables" >&2
+    exit 1
+  fi
+done
+require_sequence "$email_production_server_application" \
+  "        agentEmail:" \
+  "          receivePilot:" \
+  "            acceptedLegacyDomains: []" \
+  "            agentIDs: []" \
+  "            audience: \"\"" \
+  "            domain: \"\"" \
+  "            enabled: false" \
+  "            realmID: \"\"" \
+  "            relayPublicKeysJSON: \"\"" \
+  "            relayReplayWindow: 5m" \
+  "            retryCanaryAgentID: \"\"" \
+  "          receiveProduction:" \
+  "            acceptedLegacyDomains:" \
+  "            - agent-mail.witwave.ai" \
+  "            accountIDs:" \
+  "            - acc_aaaaaaaaaaaaaaaa" \
+  "            - acc_bbbbbbbbbbbbbbbb" \
+  "            audience: civo-sandbox-usw2-dev" \
+  "            domain: witmail.net" \
+  "            enabled: true"
+
+expect_server_template_failure \
+  "simultaneous pilot and production receive" \
+  --values "$email_production_profile" \
+  --set agentEmail.receivePilot.enabled=true
+expect_server_template_failure \
+  "empty production receive cohort" \
+  --values "$email_production_profile" \
+  --set-json 'agentEmail.receiveProduction.accountIDs=[]'
+expect_server_template_failure \
+  "duplicate production receive account" \
+  --values "$email_production_profile" \
+  --set-json 'agentEmail.receiveProduction.accountIDs=["acc_aaaaaaaaaaaaaaaa","acc_aaaaaaaaaaaaaaaa"]'
+expect_server_template_failure \
+  "unsorted production receive cohort" \
+  --values "$email_production_profile" \
+  --set-json 'agentEmail.receiveProduction.accountIDs=["acc_bbbbbbbbbbbbbbbb","acc_aaaaaaaaaaaaaaaa"]'
+expect_server_template_failure \
+  "wildcard production receive account" \
+  --values "$email_production_profile" \
+  --set-json 'agentEmail.receiveProduction.accountIDs=["*"]'
+expect_server_template_failure \
+  "overlarge production receive cohort" \
+  --values "$email_production_profile" \
+  --set agentEmail.receiveProduction.accountIDs[100]=acc_aaaaaaaaaaaaaaaa
+expect_server_template_failure \
+  "invalid production retry canary" \
+  --values "$email_production_profile" \
+  --set agentEmail.receiveProduction.retryCanaryAgentID=agent_invalid
+
+for unsafe_pin in chartVersion imageTag; do
+  if helm template witself-apps "$apps_chart" \
+    --values "$civo_cell" \
+    --values "$apps_email_production_profile" \
+    --set "apps.witselfServer.${unsafe_pin}=0.0.240" \
+    >/dev/null 2>&1; then
+    echo "app-of-apps enabled production receive with pre-v0.0.241 ${unsafe_pin}" >&2
+    exit 1
+  fi
+done
+if helm template witself-apps "$apps_chart" \
+  --values "$civo_cell" \
+  --values "$apps_email_production_profile" \
+  --set-json 'apps.witselfServer.agentEmail.receiveProduction.accountIDs=["acc_bbbbbbbbbbbbbbbb","acc_aaaaaaaaaaaaaaaa"]' \
+  >/dev/null 2>&1; then
+  echo "app-of-apps accepted an unsorted production receive cohort" >&2
+  exit 1
+fi
 
 # The chart/image pin and the app-of-apps value-shape migration are atomic.
 # Prove the API remains API-only while the nested worker contract carries both

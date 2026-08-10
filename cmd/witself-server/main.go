@@ -51,6 +51,18 @@ func run(args []string) int {
 		return 0
 	case "serve":
 		return serve()
+	case "agent-email":
+		if len(args) == 2 && args[1] == "backfill" {
+			return runAgentEmailProductionBackfill()
+		}
+		if len(args) == 4 && args[1] == "canary-manifest" &&
+			args[2] == "--output" && args[3] != "" {
+			return runAgentEmailProductionCanaryManifest(args[3])
+		}
+		fmt.Fprintln(os.Stderr,
+			"witself-server: agent-email requires backfill or canary-manifest --output ABSOLUTE_PATH")
+		usage(os.Stderr)
+		return 2
 	default:
 		fmt.Fprintf(os.Stderr, "witself-server: unknown command %q\n\n", args[0])
 		usage(os.Stderr)
@@ -78,7 +90,7 @@ func serve() int {
 		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
 		return 1
 	}
-	agentEmailPilot, err := agentEmailPilotConfigFromEnv()
+	agentEmailReceive, err := agentEmailReceiveConfigFromEnv()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
 		return 1
@@ -155,7 +167,7 @@ func serve() int {
 			}
 			return toServerPrincipal(p), true, nil
 		}
-		if err := configureAgentEmail(ctx, &cfg, st, agentEmailPilot); err != nil {
+		if err := configureAgentEmail(ctx, &cfg, st, agentEmailReceive); err != nil {
 			fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
 			return 1
 		}
@@ -798,12 +810,27 @@ func serve() int {
 			}
 		}
 		cfg.CreateAgent = func(ctx context.Context, accountID, realmID, name string) (server.Agent, error) {
-			a, err := st.CreateAgent(ctx, accountID, realmID, name)
+			var a store.Agent
+			var err error
+			if agentEmailReceive.Enabled &&
+				agentEmailReceive.Mode == server.AgentEmailReceiveModeProduction &&
+				agentEmailReceive.AccountIDs[accountID] {
+				a, _, err = st.CreateAgentWithEmailMailbox(
+					ctx, toStoreAgentEmailReceiveScope(agentEmailReceive),
+					accountID, realmID, name,
+				)
+			} else {
+				a, err = st.CreateAgent(ctx, accountID, realmID, name)
+			}
 			switch {
 			case errors.Is(err, store.ErrRealmNotFound):
 				return server.Agent{}, server.ErrNotFound
 			case errors.Is(err, store.ErrAgentExists):
 				return server.Agent{}, server.ErrConflict
+			case errors.Is(err, store.ErrAgentEmailAddressConflict):
+				return server.Agent{}, server.ErrConflict
+			case errors.Is(err, store.ErrAgentEmailInputInvalid):
+				return server.Agent{}, server.ErrBadInput
 			case errors.Is(err, store.ErrPlanLimitReached):
 				return server.Agent{}, planLimitError(err)
 			case err != nil:
@@ -1697,8 +1724,8 @@ func serve() int {
 			avatarPayloadCompactionEnabled)
 		fmt.Fprintf(os.Stderr, "witself-server: migrated; account %s, root operator %s ready; /readyz gates on it\n", acctID, oprID)
 	} else {
-		if agentEmailPilot.Enabled {
-			fmt.Fprintln(os.Stderr, "witself-server: agent email pilot requires WITSELF_DATABASE_URL")
+		if agentEmailReceive.Enabled {
+			fmt.Fprintln(os.Stderr, "witself-server: agent email receive requires WITSELF_DATABASE_URL")
 			return 1
 		}
 		fmt.Fprintln(os.Stderr, "witself-server: no database configured (WITSELF_DATABASE_URL unset); /readyz unconditional")
@@ -1934,6 +1961,10 @@ func usage(w io.Writer) {
 	usageLine(w, "Usage:")
 	usageLine(w, "  witself-server version    Print version information")
 	usageLine(w, "  witself-server serve      Run the API, health, and metrics listeners")
+	usageLine(w, "  witself-server agent-email backfill")
+	usageLine(w, "                           Reconcile the exact production receive cohort")
+	usageLine(w, "  witself-server agent-email canary-manifest --output ABSOLUTE_PATH")
+	usageLine(w, "                           Write a new mode-0600 primary canary manifest")
 	usageLine(w)
 	usageLine(w, "Listeners (override with env):")
 	usageLine(w, "  WITSELF_API_ADDR      default :8080  (/v1 API)")

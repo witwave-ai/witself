@@ -443,8 +443,8 @@ Keep the rollout dark in this order:
 4. Recreate the `witmail.net` Email Routing foundation only after the Worker,
    target-cell validation, role-address destinations, and rollback path have
    all passed review. Until the production provider-contract gaps are closed,
-   use only a fresh manual 5–10-agent exact-address canary; do not enable a
-   public apex catch-all.
+   use only the fresh guarded 5–10-agent exact-address canary below; do not
+   enable a public apex catch-all.
 5. Treat canonical inventory, canonical delivery, alias activation, and alias
    delivery as separate later reviews. Personal remains receive-disabled even
    after the managed domain is live, and a plan-table address promise never
@@ -461,6 +461,208 @@ The required dark gates are:
 Before any routing review, choose and verify operator-controlled destinations
 for `postmaster@witmail.net` and `abuse@witmail.net`. That is a human governance
 decision; do not silently route either role address to a personal mailbox.
+
+### Roll out the v0.0.241 cell receive foundation
+
+This procedure supersedes the earlier blanket instruction not to deploy schema
+88 to a serving cell, but only for a target running chart and image `v0.0.241`
+or newer. It promotes the cell-side scalable receive foundation; it does not
+approve custom-domain provider delivery or turn on any control-plane, edge, MX,
+catch-all, canonical-delivery, or alias-delivery gate. Those remain dark until
+their own reviewed stage.
+
+1. Create and verify the normal pre-migration backup. Deploy matching chart and
+   image `v0.0.241` with both `receivePilot.enabled` and
+   `receiveProduction.enabled` false. Wait for every old writer to drain and
+   verify schema 88 plus API health before changing receive configuration.
+2. Build one canonical, byte-sorted list of 1-100 exact account IDs resident in
+   this cell. Deploy the identical CSV to the cell production receive value and
+   the separately guarded control-plane/edge cohort settings, but keep every
+   delivery gate false. There is no wildcard. A missing, duplicated, malformed,
+   whitespace-padded, unsorted, or cross-cell account must stop the rollout.
+3. Enable only `agentEmail.receiveProduction` in the cell. Its startup is
+   read-only and O(cohort): each API pod verifies account presence/status and
+   optional retry-canary membership, but never scans or mutates all agents.
+   Missing existing mailboxes therefore do not block readiness. From this point,
+   every successful new-agent create in the cohort includes its mailbox in the
+   same transaction.
+4. Run exactly one explicit backfill process from the released cell image with
+   that cell's ordinary database and production-receive environment:
+
+   ```sh
+   /usr/local/bin/witself-server agent-email backfill
+   ```
+
+   Record only its value-free JSON counts. It pages at 100 agents, is idempotent,
+   and is safe to rerun after interruption. Never add it to API startup or run
+   one copy per replica. A successful result must report
+   `missing_mailbox_count_after: 0`. Suspended accounts are verified read-only;
+   resume and rerun explicitly if repair is required.
+5. Verify a receive-disabled Personal account in the cohort still reaches the
+   deterministic accept-and-discard path with no message or delivery row, while
+   an entitled test account persists one signed synthetic delivery. Keep this
+   inside the cell/relay test boundary; provider routing is still dark. Verify a
+   plan flip takes effect without reinstalling the client.
+6. Generate the mode-0600 canary manifest with the cell-native command in the
+   next section. It must be derived after zero-missing verification and must
+   pass `routes:primary -- status` before a disabled-rule plan is created.
+
+Before provider activation, rollback is config-only: set production receive
+false, wait for every API pod to converge, and leave the idempotently created
+mailboxes and permanent address reservations intact. Do not delete mailbox rows
+to undo a cohort selection. To deploy code older than `v0.0.241`, first disable
+production receive and drain all newer pods; the app-of-apps deliberately
+refuses to pass the new values to an older chart or image. Once any edge rule is
+prepared or activated, also follow the separately fenced primary-route disable
+and removal sequence below.
+
+### Stage the primary-domain canary and catch-all
+
+Do not use `infra/cloudflare/agent-email`'s original `npm run routes` command
+for `witmail.net`. That command owns only the retired legacy manifest and
+unsigned `pilot:*` KV rows; the primary-domain Worker ignores those rows.
+Do not hand-author address strings. After the released cell's explicit mailbox
+backfill reports zero missing mailboxes, run the cell-native read-only exporter
+once with that cell's exact production receive environment:
+
+```sh
+/usr/local/bin/witself-server agent-email canary-manifest \
+  --output /absolute/private/primary-canary.json
+```
+
+The output path must be new and outside the repository. The command derives
+5–10 sorted entries from actual `witmail.net` primary mailbox rows with active
+entitlement and enabled account/realm/agent receive state, includes the
+configured retry canary, and creates the exact edge manifest using exclusive
+mode `0600`. It prints no identities or addresses. Move the private artifact to
+operator-controlled storage without relaxing its mode.
+
+Before preparing rules, deploy the byte-identical sorted canary-account CSV in
+`CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST` and
+`AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST`. Enable the control-plane
+canonical inventory and delivery gates, keep edge canonical delivery false,
+and let inventory converge. The authenticated control-plane readiness endpoint
+must report the same cohort count and SHA-256 as both active Worker bindings,
+with canonical inventory and delivery true. Keep edge alias delivery false.
+
+Only after that cohort and signed inventory have converged, validate the cell
+artifact from `infra/cloudflare/agent-email`. The first command below must
+report `ready_for_prepare: true` before a disabled-rule plan is created:
+
+```sh
+npm run routes:primary -- status /absolute/private/primary-canary.json
+npm run routes:primary -- prepare /absolute/private/primary-canary.json \
+  --output /absolute/private/primary-prepare-plan.json
+# Review the mode-0600 plan, including target ids, route/role/catch-all hashes,
+# cohort digest, gates, and every signed projection fence.
+npm run routes:primary -- apply \
+  --plan /absolute/private/primary-prepare-plan.json \
+  --plan-sha256 REVIEWED_SHA256
+```
+
+The status and planner compare each realm's authenticated control-plane route
+with its isolated-KV row byte for byte, verify its trusted signature and fresh
+applied canonical state, and prove its signed `account_id` is in the exact
+deployed cohort. They also require ready Email Routing with subaddressing, a
+disabled catch-all, and enabled forwarding rules for both operator role
+addresses. Prepare writes no KV and cannot mutate the catch-all.
+
+After the disabled rules are visible in Cloudflare, deploy the same reviewed
+edge release with `REALM_EMAIL_CANONICAL_DELIVERY_ENABLED=true`, leaving alias
+delivery false. Re-run status, then create and apply a new activation plan:
+
+```sh
+npm run routes:primary -- activate /absolute/private/primary-canary.json \
+  --output /absolute/private/primary-activate-plan.json
+npm run routes:primary -- apply \
+  --plan /absolute/private/primary-activate-plan.json \
+  --plan-sha256 REVIEWED_SHA256
+npm run routes:primary -- status /absolute/private/primary-canary.json
+```
+
+Every plan expires after 15 minutes. Apply rejects a changed target, catch-all,
+role route, managed rule, Worker release, gate, cohort, or projection. A partial
+activation disables all owned canary rules. After the first active status, wait
+at least 60 seconds, run status again, then send one synthetic message to one
+exact canary address and verify the committed owner mailbox plus value-free
+edge metrics. Disable and cleanup use separate reviewed plans and do not depend
+on healthy projections or enabled delivery gates:
+
+```sh
+npm run routes:primary -- disable /absolute/private/primary-canary.json \
+  --output /absolute/private/primary-disable-plan.json
+npm run routes:primary -- apply \
+  --plan /absolute/private/primary-disable-plan.json \
+  --plan-sha256 REVIEWED_DISABLE_SHA256
+npm run routes:primary -- status /absolute/private/primary-canary.json
+# Only after status proves every owned rule disabled may removal be planned.
+npm run routes:primary -- remove /absolute/private/primary-canary.json \
+  --output /absolute/private/primary-remove-plan.json
+npm run routes:primary -- apply \
+  --plan /absolute/private/primary-remove-plan.json \
+  --plan-sha256 REVIEWED_REMOVE_SHA256
+npm run routes:primary -- status /absolute/private/primary-canary.json
+```
+
+Do not plan a catch-all while the provider-contract blockers remain open. Once
+an explicit review closes them, hash that external review record and create a
+short-lived catch-all plan. Planning remains read-only:
+
+```sh
+npm run routes:catch-all -- status /absolute/private/primary-canary.json
+npm run routes:catch-all -- enable /absolute/private/primary-canary.json \
+  --change-id REVIEW_ID \
+  --provider-review-sha256 REVIEW_RECORD_SHA256 \
+  --output /absolute/private/catch-all-enable-plan.json
+```
+
+Apply requires the exact plan fence, a literal domain confirmation, and a new
+mode-`0600` receipt path. It rechecks the active primary canary, cohort, gates,
+projections, operator routes, and disabled catch-all before the only catch-all
+mutation:
+
+```sh
+npm run routes:catch-all -- apply \
+  --plan /absolute/private/catch-all-enable-plan.json \
+  --plan-sha256 REVIEWED_SHA256 \
+  --receipt-output /absolute/private/catch-all-enable-receipt.json \
+  --confirm-enable-witmail-net
+```
+
+Apply exclusively creates and fsyncs a pending marker at the receipt path
+before contacting Cloudflare. An existing or unwritable path therefore blocks
+the mutation. If a crash leaves the pending marker, do not treat it as a
+receipt: inspect live status and use the separately planned disable path before
+operator cleanup.
+
+If enable verification fails, the tool restores the exact disabled predecessor.
+Plan rollback only from that protected enable receipt; rollback can target only
+the disabled predecessor and never enables mail:
+
+```sh
+npm run routes:catch-all -- rollback /absolute/private/primary-canary.json \
+  --receipt /absolute/private/catch-all-enable-receipt.json \
+  --output /absolute/private/catch-all-rollback-plan.json
+npm run routes:catch-all -- apply \
+  --plan /absolute/private/catch-all-rollback-plan.json \
+  --plan-sha256 REVIEWED_SHA256 \
+  --receipt-output /absolute/private/catch-all-rollback-receipt.json
+```
+
+A separately reviewed disable is always the emergency path:
+
+```sh
+npm run routes:catch-all -- disable /absolute/private/primary-canary.json \
+  --output /absolute/private/catch-all-disable-plan.json
+npm run routes:catch-all -- apply \
+  --plan /absolute/private/catch-all-disable-plan.json \
+  --plan-sha256 REVIEWED_DISABLE_SHA256 \
+  --receipt-output /absolute/private/catch-all-disable-receipt.json
+```
+
+Disable or rollback recovery never auto-enables a rule. Keep every manifest,
+plan, receipt, external review, token, and account mapping outside Git and in
+operator-controlled storage.
 
 ## Deploy, checkpoint, and drill the dark custom-domain authority
 
@@ -572,7 +774,7 @@ accepted separately.
 
 ### Schema-88 dark routing acceptance: live controls remain off
 
-This engineering slice is not a production activation. It adds the cell
+This engineering slice, through `v0.0.240`, was not a production activation. It adds the cell
 table/API, permanent sparse authority, durable source outboxes, a journal-local
 leaf route intent, the schema-v1 unsigned inner route union carried by the
 signed schema-v2 projection, and receipt provenance for
@@ -580,6 +782,9 @@ signed schema-v2 projection, and receipt provenance for
 deployed dark, but do not deploy schema 88 to a serving cell, enable a live
 route, send a real canary, or change DNS, MX, Cloudflare Email Routing, a
 catch-all, Worker association, or a customer zone during this acceptance pass.
+The `v0.0.241` cell-receive procedure above supersedes only the schema-deployment
+ban for its exact target cell. Every custom-domain and provider-activation ban
+in this section remains in force.
 
 In addition to the four v0.0.238 authority controls above, the new control-plane
 release must prove that both routing controls are absent:
@@ -1189,9 +1394,11 @@ closed through a separately reviewed canary.
 
 ### Stop and rollback rules
 
-- The schema-88 route foundation has no active-cell production rollout or live
-  rollback procedure. On a disposable test cell, an empty route table and zero
-  custom-domain receipts permit the migration's normal down path. Once any
+- The schema-88 custom-domain route foundation still has no live provider
+  activation or destructive rollback procedure. The `v0.0.241` cell receive
+  rollout above permits the schema on its exact serving-cell cohort but does
+  not authorize customer-domain delivery. On a disposable test cell, an empty
+  route table and zero custom-domain receipts permit the migration's normal down path. Once any
   route exists, including a retired tombstone, or any `custom_domain` receipt
   exists, schema 88 refuses downgrade before mutation. Leave schema 88 intact
   and roll application behavior forward; never delete authority or mail to

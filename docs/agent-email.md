@@ -9,6 +9,19 @@ were exercised before retirement. A new Civo canary must use a fresh,
 explicitly reviewed 5–10-agent manifest and remains manual-only. This
 capability does not add a sender-trust claim or automatic code use.
 
+Production-cell receive checkpoint (implemented for `v0.0.241`, default off):
+the server now supports a mutually exclusive exact-account cohort of 1-100
+canonical IDs. Serving-pod startup performs only bounded read-only
+account/canary validation; existing mailbox creation moved to the explicit,
+idempotent, keyset-paged `witself-server agent-email backfill` action, while a
+new cohort agent and mailbox commit atomically. The cell-native read-only
+`agent-email canary-manifest --output ...` action derives the exact sorted
+5-10-address edge manifest from currently enabled stored mailbox routes and
+creates it as a new mode-0600 file. It refuses missing mailboxes and includes
+the configured retry canary. No live cell, provider route, MX, catch-all,
+canonical-delivery, alias-delivery, or custom-domain gate is enabled by this
+implementation checkpoint.
+
 Permanent-domain decision (2026-08-03): `witmail.net` is the managed email
 apex dedicated solely to agent email. It is not a website, human or employee
 mail domain, marketing domain, or generic Witself/Witwave notification sender;

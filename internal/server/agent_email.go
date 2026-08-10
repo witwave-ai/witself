@@ -39,6 +39,7 @@ const (
 	maxAgentEmailProcessingLeaseSeconds    = 15 * 60
 	minAgentEmailRelayReplayWindow         = time.Second
 	maxAgentEmailRelayReplayWindow         = 15 * time.Minute
+	maximumAgentEmailProductionAccounts    = 100
 )
 
 var (
@@ -92,14 +93,28 @@ func (e *AgentEmailRateLimitError) Error() string {
 
 func (e *AgentEmailRateLimitError) Unwrap() error { return ErrAgentEmailRateLimited }
 
-// AgentEmailPilotConfig is a process-lifetime, default-off capability fence.
-// Exactly one realm and 5-10 agents must be enabled. RelayPublicKeys supports
-// bounded dual-key rotation; the signed key id selects one exact key.
-type AgentEmailPilotConfig struct {
+const (
+	// AgentEmailReceiveModeLegacyPilot preserves the original one-realm,
+	// 5-10-agent enrollment boundary and its retry-canary contract.
+	AgentEmailReceiveModeLegacyPilot = "legacy_pilot"
+	// AgentEmailReceiveModeProduction authorizes dynamic local route resolution
+	// only for an exact process-lifetime account cohort. It is still default-off.
+	AgentEmailReceiveModeProduction = "production"
+)
+
+// AgentEmailReceiveConfig is the process-lifetime, default-off receive fence.
+// LegacyPilot keeps the original bounded pilot behavior. Production removes
+// the fixed realm/agent list but still requires an exact account cohort; the
+// database remains authoritative for entitlement, route, mailbox, realm, and
+// agent lifecycle state. RelayPublicKeys supports bounded dual-key rotation;
+// the signed key id selects one exact key.
+type AgentEmailReceiveConfig struct {
 	Enabled            bool
+	Mode               string
 	Domain             string
 	LegacyDomains      []string
 	Audience           string
+	AccountIDs         map[string]bool
 	RealmIDs           map[string]bool
 	AgentIDs           map[string]bool
 	RetryCanaryAgentID string
@@ -108,9 +123,13 @@ type AgentEmailPilotConfig struct {
 	Now                func() time.Time
 }
 
-// ValidateAgentEmailPilotConfig fails closed on an enabled pilot whose scope
-// or relay trust material exceeds the explicitly authorized pilot boundary.
-func ValidateAgentEmailPilotConfig(cfg AgentEmailPilotConfig) error {
+// AgentEmailPilotConfig remains a source-compatible alias for the legacy
+// server/configuration surface while deployments graduate to receive mode.
+type AgentEmailPilotConfig = AgentEmailReceiveConfig
+
+// ValidateAgentEmailReceiveConfig fails closed on an enabled receive mode
+// whose cohort or relay trust material is incomplete or ambiguous.
+func ValidateAgentEmailReceiveConfig(cfg AgentEmailReceiveConfig) error {
 	if !cfg.Enabled {
 		return nil
 	}
@@ -144,21 +163,52 @@ func ValidateAgentEmailPilotConfig(cfg AgentEmailPilotConfig) error {
 			return errors.New("agent-email relay public key entry is invalid")
 		}
 	}
-	if countEnabledAgentEmailIDs(cfg.RealmIDs, "realm") != 1 {
-		return errors.New("agent-email pilot requires exactly one enabled realm")
+	mode := cfg.Mode
+	if mode == "" {
+		mode = AgentEmailReceiveModeLegacyPilot
 	}
-	agents := countEnabledAgentEmailIDs(cfg.AgentIDs, "agent")
-	if agents < 5 || agents > 10 {
-		return errors.New("agent-email pilot requires 5-10 enabled agents")
-	}
-	if cfg.RetryCanaryAgentID != "" {
-		if !validAgentEmailGeneratedID(cfg.RetryCanaryAgentID, "agent") ||
-			!cfg.AgentIDs[cfg.RetryCanaryAgentID] ||
-			cfg.RetryCanaryAgentID != strings.TrimSpace(cfg.RetryCanaryAgentID) {
+	switch mode {
+	case AgentEmailReceiveModeLegacyPilot:
+		if countEnabledAgentEmailIDs(cfg.AccountIDs, "acc") != 0 {
+			return errors.New("agent-email pilot cannot include a production account cohort")
+		}
+		if countEnabledAgentEmailIDs(cfg.RealmIDs, "realm") != 1 {
+			return errors.New("agent-email pilot requires exactly one enabled realm")
+		}
+		agents := countEnabledAgentEmailIDs(cfg.AgentIDs, "agent")
+		if agents < 5 || agents > 10 {
+			return errors.New("agent-email pilot requires 5-10 enabled agents")
+		}
+		if cfg.RetryCanaryAgentID != "" &&
+			(!validAgentEmailGeneratedID(cfg.RetryCanaryAgentID, "agent") ||
+				!cfg.AgentIDs[cfg.RetryCanaryAgentID] ||
+				cfg.RetryCanaryAgentID != strings.TrimSpace(cfg.RetryCanaryAgentID)) {
 			return errors.New("agent-email retry canary agent must be enrolled")
 		}
+	case AgentEmailReceiveModeProduction:
+		if countEnabledAgentEmailIDs(cfg.RealmIDs, "realm") != 0 ||
+			countEnabledAgentEmailIDs(cfg.AgentIDs, "agent") != 0 {
+			return errors.New("agent-email production receive cannot include pilot realm or agent enrollment")
+		}
+		accounts := countEnabledAgentEmailIDs(cfg.AccountIDs, "acc")
+		if accounts < 1 || accounts > maximumAgentEmailProductionAccounts {
+			return errors.New("agent-email production receive requires 1-100 exact accounts")
+		}
+		if cfg.RetryCanaryAgentID != "" &&
+			(!validAgentEmailGeneratedID(cfg.RetryCanaryAgentID, "agent") ||
+				cfg.RetryCanaryAgentID != strings.TrimSpace(cfg.RetryCanaryAgentID)) {
+			return errors.New("agent-email retry canary agent is invalid")
+		}
+	default:
+		return errors.New("agent-email receive mode is invalid")
 	}
 	return nil
+}
+
+// ValidateAgentEmailPilotConfig is the compatibility name used by existing
+// integrations and tests. It validates both supported receive modes.
+func ValidateAgentEmailPilotConfig(cfg AgentEmailPilotConfig) error {
+	return ValidateAgentEmailReceiveConfig(cfg)
 }
 
 func countEnabledAgentEmailIDs(values map[string]bool, prefix string) int {
@@ -213,7 +263,13 @@ func validAgentEmailRelayKeyID(value string) bool {
 }
 
 func (cfg AgentEmailPilotConfig) allows(p DomainPrincipal) bool {
-	return cfg.Enabled && p.Kind == PrincipalKindAgent && cfg.RealmIDs[p.RealmID] && cfg.AgentIDs[p.ID]
+	if !cfg.Enabled || p.Kind != PrincipalKindAgent {
+		return false
+	}
+	if cfg.Mode == AgentEmailReceiveModeProduction {
+		return cfg.AccountIDs[p.AccountID]
+	}
+	return cfg.RealmIDs[p.RealmID] && cfg.AgentIDs[p.ID]
 }
 
 // AgentEmailIngestFunc receives only a byte-identical body and metadata that

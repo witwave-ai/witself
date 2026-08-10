@@ -555,11 +555,15 @@ type Config struct {
 	ReleaseMessageClaim func(ctx context.Context, p DomainPrincipal, messageID string, in MessageClaimRequest) (MessageProcessing, error)
 	CompleteMessage     func(ctx context.Context, p DomainPrincipal, messageID string, in CompleteMessageRequest) (CompleteMessageResult, error)
 
-	// The capability-limited receive-only email pilot is default-off and
-	// process-scoped to one realm plus 5-10 agents. IngestAgentEmailPilot is a
-	// cell-local signed-relay hook; every other callback receives the exact
-	// bearer-token-derived owner agent. List/checkpoint/listen are value-free,
-	// while ReadAgentEmail is the explicit untrusted-content boundary.
+	// Agent email receive is default-off. Production mode is process-scoped to
+	// an exact account cohort while the compatibility pilot remains scoped to
+	// one realm plus 5-10 agents. IngestAgentEmailPilot is the historical name
+	// of the cell-local signed-relay hook; every other callback receives the
+	// exact bearer-token-derived owner agent. List/checkpoint/listen are
+	// value-free, while ReadAgentEmail is the explicit untrusted-content boundary.
+	AgentEmailReceive AgentEmailReceiveConfig
+	// AgentEmailPilot is the legacy configuration field. apiMux uses it only
+	// when AgentEmailReceive is disabled so older embeddings remain compatible.
 	AgentEmailPilot              AgentEmailPilotConfig
 	IngestAgentEmailPilot        AgentEmailIngestFunc
 	RequireAgentEmailEntitlement func(ctx context.Context, p DomainPrincipal) error
@@ -1816,13 +1820,17 @@ func apiMux(cfg Config) http.Handler {
 			AccountProvisionProtocolVersion,
 		)
 	})
-	agentEmailPilotSupported := cfg.AgentEmailPilot.Enabled &&
-		ValidateAgentEmailPilotConfig(cfg.AgentEmailPilot) == nil
+	agentEmailReceive := cfg.AgentEmailReceive
+	if !agentEmailReceive.Enabled {
+		agentEmailReceive = cfg.AgentEmailPilot
+	}
+	agentEmailPilotSupported := agentEmailReceive.Enabled &&
+		ValidateAgentEmailReceiveConfig(agentEmailReceive) == nil
 	if agentEmailPilotSupported && cfg.IngestAgentEmailPilot != nil {
 		// This route intentionally does not share bearer authentication with the
 		// public API. Its sole authority is the verified Ed25519 relay envelope.
 		mux.HandleFunc("POST /v1/internal/agent-email:ingest",
-			agentEmailIngestHandler(cfg.AgentEmailPilot, cfg.IngestAgentEmailPilot))
+			agentEmailIngestHandler(agentEmailReceive, cfg.IngestAgentEmailPilot))
 	}
 	selfDigestSupported := cfg.AuthenticatePrincipal != nil
 	transcriptsSupported := selfDigestSupported &&
@@ -2113,7 +2121,7 @@ func apiMux(cfg Config) http.Handler {
 			cfg.GetMemoryLimitStatus,
 			cfg.GetSelfMemoryCheckpoint,
 			cfg.GetSelfMessageCheckpoint,
-			cfg.AgentEmailPilot,
+			agentEmailReceive,
 			cfg.RequireAgentEmailEntitlement,
 			cfg.GetSelfAgentEmailCheckpoint,
 			cfg.GetSelfAvatarCheckpoint,
@@ -2400,36 +2408,36 @@ func apiMux(cfg Config) http.Handler {
 		if agentEmailPilotSupported {
 			if cfg.GetAgentEmailAddress != nil {
 				mux.HandleFunc("GET /v1/email/address", getAgentEmailAddressHandler(
-					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot,
+					cfg.AuthenticatePrincipal, agentEmailReceive,
 					cfg.RequireAgentEmailEntitlement, cfg.GetAgentEmailAddress))
 			}
 			if cfg.GetAgentEmailStorageStatus != nil {
 				mux.HandleFunc("GET /v1/email:status", agentEmailStorageStatusHandler(
-					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot,
+					cfg.AuthenticatePrincipal, agentEmailReceive,
 					cfg.RequireAgentEmailEntitlement, cfg.GetAgentEmailStorageStatus))
 			}
 			if cfg.ListAgentEmails != nil {
 				mux.HandleFunc("GET /v1/email", listAgentEmailsHandler(
-					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot,
+					cfg.AuthenticatePrincipal, agentEmailReceive,
 					cfg.RequireAgentEmailEntitlement, cfg.ListAgentEmails))
 				mux.HandleFunc("POST /v1/email:listen", agentEmailListenHandler(
-					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot,
+					cfg.AuthenticatePrincipal, agentEmailReceive,
 					cfg.RequireAgentEmailEntitlement, cfg.ListAgentEmails))
 			}
 			if cfg.GetSelfAgentEmailCheckpoint != nil {
 				mux.HandleFunc("GET /v1/email/checkpoint", getAgentEmailCheckpointHandler(
-					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot,
+					cfg.AuthenticatePrincipal, agentEmailReceive,
 					cfg.RequireAgentEmailEntitlement, cfg.GetSelfAgentEmailCheckpoint))
 			}
-			if cfg.AgentEmailPilot.RetryCanaryAgentID != "" {
+			if agentEmailReceive.RetryCanaryAgentID != "" {
 				if cfg.ArmAgentEmailRetryCanary != nil {
 					mux.HandleFunc("POST /v1/email/retry-canary:arm", agentEmailRetryCanaryHandler(
-						cfg.AuthenticatePrincipal, cfg.AgentEmailPilot,
+						cfg.AuthenticatePrincipal, agentEmailReceive,
 						cfg.RequireAgentEmailEntitlement, cfg.ArmAgentEmailRetryCanary))
 				}
 				if cfg.GetAgentEmailRetryCanary != nil {
 					mux.HandleFunc("POST /v1/email/retry-canary:status", agentEmailRetryCanaryHandler(
-						cfg.AuthenticatePrincipal, cfg.AgentEmailPilot,
+						cfg.AuthenticatePrincipal, agentEmailReceive,
 						cfg.RequireAgentEmailEntitlement, cfg.GetAgentEmailRetryCanary))
 				}
 			}
@@ -2438,7 +2446,7 @@ func apiMux(cfg Config) http.Handler {
 				cfg.RenewAgentEmailClaim != nil || cfg.ReleaseAgentEmailClaim != nil ||
 				cfg.CompleteAgentEmail != nil {
 				mux.HandleFunc("POST /v1/email/{action}", agentEmailActionHandler(
-					cfg.AuthenticatePrincipal, cfg.AgentEmailPilot,
+					cfg.AuthenticatePrincipal, agentEmailReceive,
 					cfg.RequireAgentEmailEntitlement,
 					cfg.ReadAgentEmail, cfg.AckAgentEmail, cfg.MarkAgentEmailCodeConsumed,
 					cfg.ClaimAgentEmail, cfg.RenewAgentEmailClaim,
