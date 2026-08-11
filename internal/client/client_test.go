@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -37,6 +39,48 @@ func TestBootstrapLoginUnauthorized(t *testing.T) {
 
 	if _, err := BootstrapLogin(context.Background(), srv.URL, "bad"); err == nil {
 		t.Error("want error on 401, got nil")
+	}
+}
+
+func TestDoJSONRefusesRedirectsBeforeReplayingBearer(t *testing.T) {
+	var redirectedHits atomic.Int64
+	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirectedHits.Add(1)
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("redirect target received Authorization %q", got)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(attacker.Close)
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/start":
+			if got := r.Header.Get("Authorization"); got != "Bearer witself_opr_test" {
+				t.Errorf("validated origin Authorization = %q", got)
+			}
+			http.Redirect(w, r, r.URL.Query().Get("to"), http.StatusTemporaryRedirect)
+		case "/v1/final":
+			redirectedHits.Add(1)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(origin.Close)
+
+	for _, target := range []string{origin.URL + "/v1/final", attacker.URL + "/stolen"} {
+		before := redirectedHits.Load()
+		err := doJSON(
+			context.Background(), http.MethodGet,
+			origin.URL+"/v1/start?to="+url.QueryEscape(target),
+			"witself_opr_test", nil, nil,
+		)
+		if err == nil {
+			t.Fatalf("redirect to %q was followed", target)
+		}
+		if got := redirectedHits.Load(); got != before {
+			t.Fatalf("redirect to %q reached another audience", target)
+		}
 	}
 }
 

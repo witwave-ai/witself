@@ -92,7 +92,7 @@ func GetPlan(ctx context.Context, controlPlane, accountID, bearer string) (PlanS
 // GetPlanCatalog reads and validates the public catalog from the control
 // plane. The endpoint needs no account binding or bearer token.
 func GetPlanCatalog(ctx context.Context, controlPlane string) (*plans.Catalog, error) {
-	url := strings.TrimRight(controlPlane, "/") + "/v1/plans"
+	url := apiV1Base(controlPlane) + "/plans"
 	var raw json.RawMessage
 	if err := doJSON(ctx, http.MethodGet, url, "", nil, &raw); err != nil {
 		return nil, err
@@ -143,5 +143,16 @@ func planChange(ctx context.Context, controlPlane, accountID, bearer, verb, targ
 }
 
 func planURL(controlPlane, accountID, suffix string) string {
-	return strings.TrimRight(controlPlane, "/") + "/v1/accounts/" + accountID + "/plan" + suffix
+	return apiV1Base(controlPlane) + "/accounts/" + accountID + "/plan" + suffix
+}
+
+// apiV1Base accepts either a deployment origin/prefix or an advertised API
+// base that already ends in /v1. Cells historically documented both shapes;
+// normalizing here prevents /v1/v1 for discovery and control-plane calls.
+func apiV1Base(endpoint string) string {
+	base := strings.TrimRight(endpoint, "/")
+	if strings.HasSuffix(base, "/v1") {
+		return base
+	}
+	return base + "/v1"
 }

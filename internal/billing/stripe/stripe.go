@@ -44,6 +44,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -94,6 +95,8 @@ type Provider struct {
 }
 
 var _ billing.Provider = (*Provider)(nil)
+var _ billing.IdempotentSubscriber = (*Provider)(nil)
+var _ billing.EventResolver = (*Provider)(nil)
 
 // New validates cfg and returns a Provider.
 func New(cfg Config) (*Provider, error) {
@@ -295,6 +298,28 @@ func (p *Provider) customerAlive(ctx context.Context, customerID string) (bool, 
 // Subscribe implements billing.Provider: a Checkout session in subscription
 // mode. Always needs_action(url) — see the package comment.
 func (p *Provider) Subscribe(ctx context.Context, customerID, plan string) (billing.Action, error) {
+	return p.subscribe(ctx, customerID, plan, "")
+}
+
+// SubscribeIdempotent creates or replays the Checkout Session for one durable
+// Witself upgrade operation. The operation id is also copied into provider
+// metadata so its later callback can be correlated with the originating claim.
+func (p *Provider) SubscribeIdempotent(
+	ctx context.Context,
+	customerID, plan, operationID string,
+) (billing.Action, error) {
+	operationID = strings.TrimSpace(operationID)
+	if operationID == "" || len(operationID) > 128 {
+		return billing.Action{}, errors.New(
+			"stripe: subscription operation id must be 1-128 characters")
+	}
+	return p.subscribe(ctx, customerID, plan, operationID)
+}
+
+func (p *Provider) subscribe(
+	ctx context.Context,
+	customerID, plan, operationID string,
+) (billing.Action, error) {
 	priceID, err := p.priceID(ctx, plan)
 	if err != nil {
 		return billing.Action{}, err
@@ -302,7 +327,7 @@ func (p *Provider) Subscribe(ctx context.Context, customerID, plan string) (bill
 	var session struct {
 		URL string `json:"url"`
 	}
-	err = p.call(ctx, "POST", "/v1/checkout/sessions", url.Values{
+	params := url.Values{
 		"mode":                    {"subscription"},
 		"customer":                {customerID},
 		"line_items[0][price]":    {priceID},
@@ -311,7 +336,14 @@ func (p *Provider) Subscribe(ctx context.Context, customerID, plan string) (bill
 		"cancel_url":              {p.cfg.CancelURL},
 		"metadata[witself_plan]":  {plan},
 		"subscription_data[metadata][witself_plan]": {plan},
-	}, "", &session)
+	}
+	idempotencyKey := ""
+	if operationID != "" {
+		params.Set("metadata[witself_operation_id]", operationID)
+		params.Set("subscription_data[metadata][witself_operation_id]", operationID)
+		idempotencyKey = "witself-subscribe-" + operationID
+	}
+	err = p.call(ctx, "POST", "/v1/checkout/sessions", params, idempotencyKey, &session)
 	if err != nil {
 		return billing.Action{}, err
 	}
@@ -494,6 +526,7 @@ func (p *Provider) HandleWebhook(r *http.Request) ([]billing.Event, error) {
 	}
 
 	var event struct {
+		ID      string `json:"id"`
 		Type    string `json:"type"`
 		Created int64  `json:"created"`
 		Data    struct {
@@ -504,17 +537,41 @@ func (p *Provider) HandleWebhook(r *http.Request) ([]billing.Event, error) {
 		return nil, fmt.Errorf("stripe: decode event: %w", err)
 	}
 	at := time.Unix(event.Created, 0).UTC()
+	payloadDigest := sha256.Sum256(payload)
+	payloadSHA256 := hex.EncodeToString(payloadDigest[:])
+	identity := func(objectID string) billing.Event {
+		return billing.Event{
+			ProviderEventID:  event.ID,
+			ProviderObjectID: objectID,
+			PayloadSHA256:    payloadSHA256,
+			At:               at,
+		}
+	}
+	requireIdentity := func(objectID string) error {
+		if strings.TrimSpace(event.ID) == "" || strings.TrimSpace(objectID) == "" {
+			return fmt.Errorf("stripe: %s missing event or object id", event.Type)
+		}
+		if event.Created <= 0 {
+			return fmt.Errorf("stripe: %s missing provider timestamp", event.Type)
+		}
+		return nil
+	}
 
 	switch event.Type {
 	case "checkout.session.completed", "checkout.session.async_payment_succeeded":
 		var s struct {
+			ID            string            `json:"id"`
 			Customer      string            `json:"customer"`
+			Subscription  string            `json:"subscription"`
 			Mode          string            `json:"mode"`
 			PaymentStatus string            `json:"payment_status"`
 			Metadata      map[string]string `json:"metadata"`
 		}
 		if err := json.Unmarshal(event.Data.Object, &s); err != nil {
 			return nil, fmt.Errorf("stripe: decode session: %w", err)
+		}
+		if err := requireIdentity(s.ID); err != nil {
+			return nil, err
 		}
 		if s.Mode != "subscription" {
 			return []billing.Event{}, nil // setup-mode completion: card captured, no entitlement change
@@ -531,62 +588,107 @@ func (p *Provider) HandleWebhook(r *http.Request) ([]billing.Event, error) {
 		if s.Customer == "" || plan == "" {
 			return nil, fmt.Errorf("stripe: %s missing customer or witself_plan metadata", event.Type)
 		}
-		return []billing.Event{{
-			Type: billing.EventSubscriptionActivated, CustomerID: s.Customer, Plan: plan, At: at,
-		}}, nil
+		e := identity(s.ID)
+		e.Type = billing.EventSubscriptionActivated
+		e.CustomerID = s.Customer
+		e.Plan = plan
+		e.SubscriptionID = s.Subscription
+		e.OperationID = s.Metadata["witself_operation_id"]
+		return []billing.Event{e}, nil
 
 	case "invoice.payment_failed":
-		cust, err := objectCustomer(event.Data.Object)
+		ref, err := objectReferenceFrom(event.Data.Object)
 		if err != nil {
 			return nil, err
 		}
-		return []billing.Event{{Type: billing.EventPaymentFailed, CustomerID: cust, At: at}}, nil
+		if err := requireIdentity(ref.ID); err != nil {
+			return nil, err
+		}
+		e := identity(ref.ID)
+		e.Type = billing.EventPaymentFailed
+		e.CustomerID = ref.Customer
+		e.SubscriptionID = ref.Subscription
+		return []billing.Event{e}, nil
 
 	case "invoice.paid":
-		cust, err := objectCustomer(event.Data.Object)
+		ref, err := objectReferenceFrom(event.Data.Object)
 		if err != nil {
+			return nil, err
+		}
+		if err := requireIdentity(ref.ID); err != nil {
 			return nil, err
 		}
 		// Every paid invoice reads as "payments are healthy" — it clears
 		// PastDueSince when set and is a fenced no-op otherwise.
-		return []billing.Event{{Type: billing.EventPaymentRecovered, CustomerID: cust, At: at}}, nil
+		e := identity(ref.ID)
+		e.Type = billing.EventPaymentRecovered
+		e.CustomerID = ref.Customer
+		e.SubscriptionID = ref.Subscription
+		return []billing.Event{e}, nil
 
 	case "customer.subscription.deleted":
-		cust, err := objectCustomer(event.Data.Object)
+		ref, err := objectReferenceFrom(event.Data.Object)
 		if err != nil {
 			return nil, err
 		}
-		// The event names only the customer, not which subscription of
-		// theirs died — so a duplicate/stale subscription's deletion must
-		// not revoke a live paid entitlement. Emit the cancel only when NO
-		// live subscription remains; an API error propagates so Stripe
-		// retries the delivery.
-		subs, err := p.liveSubscriptions(r.Context(), cust)
-		if err != nil {
-			return nil, fmt.Errorf("stripe: verify remaining subscriptions for %s: %w", cust, err)
+		if err := requireIdentity(ref.ID); err != nil {
+			return nil, err
 		}
-		if len(subs) > 0 {
-			return []billing.Event{}, nil // another subscription still backs the entitlement
-		}
-		return []billing.Event{{Type: billing.EventSubscriptionCanceled, CustomerID: cust, At: at}}, nil
+		// Do not query Stripe here. The signed event must be durably received
+		// before any provider read; ResolveEvent performs the survivor check.
+		e := identity(ref.ID)
+		e.Type = billing.EventSubscriptionCanceled
+		e.CustomerID = ref.Customer
+		e.SubscriptionID = ref.ID
+		return []billing.Event{e}, nil
 
 	default:
 		return []billing.Event{}, nil // not ours to fold; ACK so Stripe stops redelivering
 	}
 }
 
-// objectCustomer pulls the customer id out of an event payload object.
-func objectCustomer(raw json.RawMessage) (string, error) {
-	var o struct {
-		Customer string `json:"customer"`
+type stripeObjectReference struct {
+	ID           string `json:"id"`
+	Customer     string `json:"customer"`
+	Subscription string `json:"subscription"`
+}
+
+// objectReferenceFrom pulls the reconciliation handles out of a provider
+// event object without retaining the raw object.
+func objectReferenceFrom(raw json.RawMessage) (stripeObjectReference, error) {
+	var ref stripeObjectReference
+	if err := json.Unmarshal(raw, &ref); err != nil {
+		return stripeObjectReference{}, fmt.Errorf("stripe: decode event object: %w", err)
 	}
-	if err := json.Unmarshal(raw, &o); err != nil {
-		return "", fmt.Errorf("stripe: decode event object: %w", err)
+	if ref.Customer == "" {
+		return stripeObjectReference{}, errors.New("stripe: event object has no customer")
 	}
-	if o.Customer == "" {
-		return "", errors.New("stripe: event object has no customer")
+	return ref, nil
+}
+
+// ResolveEvent implements billing.EventResolver. A deleted subscription only
+// revokes entitlement when no other live subscription remains. Keeping this
+// provider read out of HandleWebhook means the exact signed event is already
+// durable before a transient Stripe API failure can occur.
+func (p *Provider) ResolveEvent(
+	ctx context.Context,
+	event billing.Event,
+) (*billing.Event, error) {
+	if event.Type != billing.EventSubscriptionCanceled {
+		resolved := event
+		return &resolved, nil
 	}
-	return o.Customer, nil
+	subs, err := p.liveSubscriptions(ctx, event.CustomerID)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"stripe: verify remaining subscriptions for %s: %w",
+			event.CustomerID, err)
+	}
+	if len(subs) > 0 {
+		return nil, nil
+	}
+	resolved := event
+	return &resolved, nil
 }
 
 // verifySignature checks the Stripe-Signature header: HMAC-SHA256 over
@@ -690,12 +792,17 @@ func (p *Provider) ListInvoices(ctx context.Context, customerID string) ([]billi
 	return out, nil
 }
 
-// ListPayments implements billing.Provider.
+// ListPayments implements billing.Provider for Stripe's bounded recent charge
+// page. Refunds attached to those charges are expanded into negative ledger
+// movements; the hosted portal remains authoritative for refunds against older
+// charges outside this deliberately bounded read surface.
 func (p *Provider) ListPayments(ctx context.Context, customerID string) ([]billing.Payment, error) {
 	var list struct {
 		Data []struct {
+			ID                   string `json:"id"`
 			Created              int64  `json:"created"`
 			Amount               int64  `json:"amount"`
+			AmountRefunded       int64  `json:"amount_refunded"`
 			Currency             string `json:"currency"`
 			Status               string `json:"status"`
 			ReceiptURL           string `json:"receipt_url"`
@@ -721,6 +828,85 @@ func (p *Provider) ListPayments(ctx context.Context, customerID string) ([]billi
 			Date: time.Unix(c.Created, 0).UTC(), AmountCents: c.Amount,
 			Currency: c.Currency, Method: method, Status: c.Status, ReceiptURL: c.ReceiptURL,
 		})
+		if c.AmountRefunded <= 0 || c.ID == "" {
+			continue
+		}
+		refunds, err := p.listChargeRefunds(
+			ctx, c.ID, c.Currency, method, c.AmountRefunded,
+		)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, refunds...)
+	}
+	slices.SortStableFunc(out, func(a, b billing.Payment) int {
+		return b.Date.Compare(a.Date)
+	})
+	if len(out) > 100 {
+		out = out[:100]
+	}
+	return out, nil
+}
+
+// listChargeRefunds reads the complete recent refund list for one refunded
+// charge. Stripe embeds only a bounded sub-list on a charge, so relying on the
+// charge object alone can silently omit partial refunds. Refunds are rare, and
+// this extra request happens only when amount_refunded is non-zero.
+func (p *Provider) listChargeRefunds(
+	ctx context.Context,
+	chargeID, currency, method string,
+	expectedSettledAmount int64,
+) ([]billing.Payment, error) {
+	var list struct {
+		Data []struct {
+			Created int64  `json:"created"`
+			Amount  int64  `json:"amount"`
+			Status  string `json:"status"`
+		} `json:"data"`
+		HasMore bool `json:"has_more"`
+	}
+	q := url.Values{"charge": {chargeID}, "limit": {"100"}}
+	if err := p.call(ctx, "GET", "/v1/refunds?"+q.Encode(), nil, "", &list); err != nil {
+		return nil, err
+	}
+	if list.HasMore {
+		return nil, errors.New("stripe: refund history exceeds the supported page")
+	}
+	out := make([]billing.Payment, 0, len(list.Data))
+	var settledAmount int64
+	for _, refund := range list.Data {
+		if refund.Amount <= 0 {
+			return nil, errors.New("stripe: invalid refund amount")
+		}
+		switch refund.Status {
+		case "succeeded":
+			if settledAmount > expectedSettledAmount ||
+				refund.Amount > expectedSettledAmount-settledAmount {
+				return nil, errors.New(
+					"stripe: settled refunds exceed charge amount_refunded")
+			}
+			settledAmount += refund.Amount
+			out = append(out, billing.Payment{
+				Date:        time.Unix(refund.Created, 0).UTC(),
+				AmountCents: -refund.Amount,
+				Currency:    currency,
+				Method:      method,
+				Status:      "refunded",
+			})
+		case "pending", "requires_action", "failed", "canceled":
+			// These are attempts, not completed negative money movement. The
+			// charge's amount_refunded is the settled aggregate; omit them from
+			// the customer ledger instead of overstating the refund.
+		default:
+			return nil, fmt.Errorf(
+				"stripe: unsupported refund status %q", refund.Status)
+		}
+	}
+	if settledAmount != expectedSettledAmount {
+		return nil, fmt.Errorf(
+			"stripe: settled refund total %d does not match charge amount_refunded %d",
+			settledAmount, expectedSettledAmount,
+		)
 	}
 	return out, nil
 }

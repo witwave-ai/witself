@@ -42,6 +42,8 @@ package lifecycle
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"sort"
@@ -68,12 +70,32 @@ const (
 
 // Pending is the one in-flight change (the "desired" state).
 type Pending struct {
-	Kind      PendingKind
-	Plan      string
-	URL       string    // upgrade: where the payer completes checkout
-	Expires   time.Time // upgrade: when the request lapses
-	Effective time.Time // downgrade: when it takes effect
-	Requested time.Time
+	Kind PendingKind
+	Plan string
+	// OperationID is the durable identity of one provider mutation. Upgrade
+	// retries retain it so Stripe receives the same idempotency key after an
+	// ambiguous response or control-plane crash. Contact claims also carry an
+	// operation identity so a failed cleanup of the provider state they
+	// replaced can be resumed without losing the cleanup fence.
+	OperationID string
+	// CancelPrevious is a durable pre-subscribe phase. It remains true until
+	// CancelPending succeeds and the result is folded, so a provider error or
+	// process crash cannot strand the provider-side change that this claim
+	// replaced. It is deliberately false before Subscribe: an ambiguous
+	// Subscribe failure must be retried with OperationID, not canceled.
+	CancelPrevious bool
+	URL            string    // upgrade: where the payer completes checkout
+	Expires        time.Time // upgrade: when the request lapses
+	Effective      time.Time // downgrade: when it takes effect
+	Requested      time.Time
+}
+
+func newBillingOperationID() (string, error) {
+	var entropy [18]byte
+	if _, err := rand.Read(entropy[:]); err != nil {
+		return "", fmt.Errorf("lifecycle: generate billing operation id: %w", err)
+	}
+	return "bop_" + base64.RawURLEncoding.EncodeToString(entropy[:]), nil
 }
 
 // AdminActor is the immutable administrator identity attached to a policy
@@ -1548,11 +1570,33 @@ func (m *Manager) cancelReplacedPending(ctx context.Context, r Record) error {
 	if r.Pending == nil || r.Pending.Kind == PendingContact || r.CustomerID == "" {
 		return nil
 	}
+	return m.cancelProviderPending(ctx, r)
+}
+
+// cancelProviderPending disarms provider state for a durable replacement
+// phase. Unlike cancelReplacedPending, the record's current Pending describes
+// the NEW claim and may itself be a contact lead; CancelPrevious is the proof
+// that an older provider-side operation still needs cancellation.
+func (m *Manager) cancelProviderPending(ctx context.Context, r Record) error {
+	if r.CustomerID == "" {
+		return errors.New("lifecycle: pending provider cleanup has no customer id")
+	}
 	_, provider, err := m.providerFor(r)
 	if err != nil {
 		return err
 	}
 	return provider.CancelPending(ctx, r.CustomerID)
+}
+
+// cancelCurrentPending honors the durable replacement-cleanup phase even when
+// the current claim is a contact lead. A plain contact has no provider state;
+// a contact with CancelPrevious is the only remaining fence for the provider
+// operation it replaced and must not be skipped.
+func (m *Manager) cancelCurrentPending(ctx context.Context, r Record) error {
+	if r.Pending != nil && r.Pending.CancelPrevious {
+		return m.cancelProviderPending(ctx, r)
+	}
+	return m.cancelReplacedPending(ctx, r)
 }
 
 // RequestUpgrade starts an upgrade to plan. Outcomes: "done" (charged on file
@@ -1568,12 +1612,16 @@ func (m *Manager) RequestUpgrade(ctx context.Context, accountID, email, planID s
 		return Outcome{}, refuse("unknown plan %q", planID)
 	}
 	now := m.cfg.Now()
+	operationID, err := newBillingOperationID()
+	if err != nil {
+		return Outcome{}, err
+	}
 
 	// Claim: validate against the freshest record and park the desired change
 	// BEFORE any provider call, so a concurrent request cannot double-charge —
 	// it either sees our claim (and replaces it, failing our fold) or we see
 	// its state. The claim also captures what pending change it replaces.
-	var replaced Record
+	reused := false
 	claim, err := m.mutate(ctx, accountID, email, func(r *Record) error {
 		current, _ := m.cfg.Catalog.Get(r.Entitled)
 		if target.ID == r.Entitled {
@@ -1584,8 +1632,20 @@ func (m *Manager) RequestUpgrade(ctx context.Context, accountID, email, planID s
 			// hoop is "talk to us" instead of "pay". This check precedes
 			// price ordering because custom-priced Enterprise intentionally
 			// has no catalog amount.
-			replaced = *r
-			r.Pending = &Pending{Kind: PendingContact, Plan: target.ID, Requested: now}
+			if pending := r.Pending; pending != nil &&
+				pending.Kind == PendingContact && pending.Plan == target.ID &&
+				pending.OperationID != "" {
+				reused = true
+				return errSkipWrite
+			}
+			cancelPrevious := r.Pending != nil &&
+				(r.Pending.CancelPrevious ||
+					(r.Pending.Kind != PendingContact && r.CustomerID != ""))
+			r.Pending = &Pending{
+				Kind: PendingContact, Plan: target.ID, OperationID: operationID,
+				CancelPrevious: cancelPrevious,
+				Requested:      now,
+			}
 			return nil
 		}
 		if target.PriceCents() <= current.PriceCents() {
@@ -1594,24 +1654,74 @@ func (m *Manager) RequestUpgrade(ctx context.Context, accountID, email, planID s
 		if !target.Purchasable() {
 			return refuse("plan %q is not purchasable", target.ID)
 		}
-		replaced = *r
+		providerName, provider, err := m.providerFor(*r)
+		if err != nil {
+			return err
+		}
+		if _, ok := provider.(billing.IdempotentSubscriber); !ok {
+			return fmt.Errorf(
+				"billing provider %q does not support idempotent subscription operations",
+				providerName)
+		}
+		if pending := r.Pending; pending != nil &&
+			pending.Kind == PendingUpgrade && pending.Plan == target.ID &&
+			pending.OperationID != "" && !pending.Expires.IsZero() &&
+			now.Before(pending.Expires) {
+			// This is a retry/resume of the same unfinished purchase. Reuse the
+			// durable operation rather than canceling it and manufacturing a
+			// second Checkout Session/idempotency identity.
+			reused = true
+			return errSkipWrite
+		}
+		cancelPrevious := r.Pending != nil &&
+			(r.Pending.CancelPrevious ||
+				(r.Pending.Kind != PendingContact && r.CustomerID != ""))
 		r.Pending = &Pending{
-			Kind: PendingUpgrade, Plan: target.ID,
-			Expires: now.Add(m.cfg.TTL), Requested: now,
+			Kind: PendingUpgrade, Plan: target.ID, OperationID: operationID,
+			CancelPrevious: cancelPrevious,
+			Expires:        now.Add(m.cfg.TTL), Requested: now,
 		}
 		return nil
 	})
 	if err != nil {
 		return Outcome{}, err
 	}
-	if err := m.cancelReplacedPending(ctx, replaced); err != nil {
-		return Outcome{}, err
+	if claim.Pending.CancelPrevious {
+		// This phase is durable. On failure (or a crash before the CAS below),
+		// the same claim retries cancellation. Once the flag is cleared, later
+		// ambiguous Subscribe errors retain the operation and never return to
+		// this destructive phase.
+		if err := m.cancelProviderPending(ctx, claim); err != nil {
+			return Outcome{}, err
+		}
+		claim, err = m.mutate(ctx, accountID, email, func(r *Record) error {
+			p := r.Pending
+			if p == nil || p.OperationID != claim.Pending.OperationID ||
+				p.Kind != claim.Pending.Kind || p.Plan != claim.Pending.Plan {
+				return refuse("upgrade to %s was superseded by another request", target.ID)
+			}
+			if !p.CancelPrevious {
+				return errSkipWrite
+			}
+			p.CancelPrevious = false
+			return nil
+		})
+		if err != nil {
+			return Outcome{}, err
+		}
 	}
 	if claim.Pending.Kind == PendingContact {
 		return Outcome{Kind: "contact", Plan: target.ID}, nil
 	}
+	if reused && claim.Pending.URL != "" {
+		return Outcome{
+			Kind: "action", Plan: target.ID, URL: claim.Pending.URL,
+		}, nil
+	}
 
-	// Provider calls, exactly once, outside any retry loop.
+	// Provider calls remain outside every CAS retry loop. The durable operation
+	// identity makes a whole-request retry safe when Subscribe's response is
+	// ambiguous; providers implementing IdempotentSubscriber replay it.
 	name, provider, err := m.providerFor(claim)
 	if err != nil {
 		return Outcome{}, err
@@ -1619,13 +1729,51 @@ func (m *Manager) RequestUpgrade(ctx context.Context, accountID, email, planID s
 	customerID := claim.CustomerID
 	if customerID == "" {
 		if customerID, err = provider.EnsureCustomer(ctx, accountID, email); err != nil {
-			m.releaseClaim(ctx, accountID, claim)
 			return Outcome{}, err
 		}
+		// Persist the provider/customer routing index BEFORE Checkout can emit
+		// a paid callback. A callback racing the HTTP response can now route on
+		// its first delivery instead of depending on the provider retry horizon.
+		claim, err = m.mutate(ctx, accountID, email, func(r *Record) error {
+			p := r.Pending
+			if p == nil || p.Kind != PendingUpgrade ||
+				p.OperationID != claim.Pending.OperationID {
+				return refuse("upgrade to %s was superseded by another request", target.ID)
+			}
+			if r.Provider != "" && r.Provider != name {
+				return fmt.Errorf(
+					"account %s was concurrently pinned to provider %q",
+					accountID, r.Provider)
+			}
+			if r.CustomerID != "" {
+				return errSkipWrite // a concurrent setup/customer fold won
+			}
+			r.Provider = name
+			r.CustomerID = customerID
+			return nil
+		})
+		if err != nil {
+			return Outcome{}, err
+		}
+		name, provider, err = m.providerFor(claim)
+		if err != nil {
+			return Outcome{}, err
+		}
+		customerID = claim.CustomerID
 	}
-	act, err := provider.Subscribe(ctx, customerID, target.ID)
+	idempotent, ok := provider.(billing.IdempotentSubscriber)
+	if !ok {
+		// The claim-time check should make this unreachable unless provider
+		// routing/configuration changed inside one request. Keep it fail-closed.
+		return Outcome{}, fmt.Errorf(
+			"billing provider %q lost idempotent subscription support", name)
+	}
+	act, err := idempotent.SubscribeIdempotent(
+		ctx, customerID, target.ID, claim.Pending.OperationID)
 	if err != nil {
-		m.releaseClaim(ctx, accountID, claim)
+		// Keep the durable operation parked. A transport error can arrive after
+		// the provider committed Checkout; clearing it here would discard the
+		// only idempotency identity and make the user's retry a second purchase.
 		return Outcome{}, err
 	}
 
@@ -1634,14 +1782,9 @@ func (m *Manager) RequestUpgrade(ctx context.Context, accountID, email, planID s
 	// replaced it, in which case its provider state superseded ours).
 	folded, err := m.mutate(ctx, accountID, email, func(r *Record) error {
 		p := r.Pending
-		if p == nil || p.Kind != PendingUpgrade || p.Plan != target.ID || !p.Requested.Equal(now) {
+		if p == nil || p.Kind != PendingUpgrade ||
+			p.OperationID != claim.Pending.OperationID {
 			return refuse("upgrade to %s was superseded by another request", target.ID)
-		}
-		if r.CustomerID == "" {
-			// First billing objects: pin the provider for the life of the
-			// relationship. A Default switch must not reroute this account.
-			r.CustomerID = customerID
-			r.Provider = name
 		}
 		if act.Done {
 			r.Pending = nil
@@ -1763,7 +1906,8 @@ func (m *Manager) CancelPending(ctx context.Context, accountID string) error {
 	if r.Pending == nil {
 		return refuse("nothing is pending")
 	}
-	if err := m.cancelReplacedPending(ctx, r); err != nil {
+	expected := *r.Pending
+	if err := m.cancelCurrentPending(ctx, r); err != nil {
 		return err
 	}
 	_, err = m.mutate(ctx, accountID, "", func(r *Record) error {
@@ -1772,102 +1916,323 @@ func (m *Manager) CancelPending(ctx context.Context, accountID string) error {
 			// completed checkout): nothing to clear, entitlement stands.
 			return refuse("nothing is pending")
 		}
+		if r.Pending.OperationID != expected.OperationID ||
+			r.Pending.Kind != expected.Kind || r.Pending.Plan != expected.Plan ||
+			!r.Pending.Requested.Equal(expected.Requested) {
+			return refuse("pending change was superseded; retry cancel")
+		}
 		r.Pending = nil
 		return nil
 	})
 	return err
 }
 
-// OnEvents folds normalized provider events into records. provider names the
-// configured partner whose webhook delivered them — the control plane routes
-// one webhook endpoint per partner, so the name is always known — and lookups
-// are scoped to it so another partner's customer ids can never match.
+// OnEvents durably receives and then folds normalized provider events into
+// records. provider names the configured partner whose webhook delivered
+// them; lookups are scoped to it so customer ids from different partners can
+// never cross-match.
 //
-// Redelivery and ordering: entitlement events (activated/canceled) do not
-// commute with intervening changes, so any such event whose partner timestamp
-// predates the record's EntitledAt is stale and dropped; dunning events fence
-// on DunningAt the same way. Within those fences, folding the same event
-// twice converges on the same state. Events that cannot be routed (unknown
-// customer, unknown plan) FAIL the batch — a 2xx would ACK a possibly-paid
-// event forever; redelivery lets the claim/fold race and catalog deploys
-// resolve.
+// Providers may emit at most one normalized Event for one ProviderEventID.
+// Stripe's mapping is deliberately zero-or-one. This invariant keeps the
+// durable receipt identity unambiguous and is enforced before any batch side
+// effects. Legacy in-process events may omit both ProviderEventID and
+// PayloadSHA256; externally delivered events must supply both.
 func (m *Manager) OnEvents(ctx context.Context, provider string, events []billing.Event) error {
-	for _, e := range events {
-		seed, ok, err := m.cfg.Store.ByCustomer(ctx, provider, e.CustomerID)
-		if err != nil {
-			return err
+	seen := make(map[string]struct{}, len(events))
+	for _, event := range events {
+		hasID := event.ProviderEventID != ""
+		hasHash := event.PayloadSHA256 != ""
+		if hasID != hasHash {
+			return errors.New("billing event identity requires both provider event id and payload sha256")
 		}
+		if !hasID {
+			continue
+		}
+		if _, duplicate := seen[event.ProviderEventID]; duplicate {
+			return fmt.Errorf(
+				"provider %s emitted more than one normalized event for provider event %s",
+				provider, event.ProviderEventID)
+		}
+		seen[event.ProviderEventID] = struct{}{}
+	}
+
+	for _, event := range events {
+		if event.ProviderEventID == "" {
+			if _, err := m.processEvent(ctx, provider, event, false); err != nil {
+				return err
+			}
+			continue
+		}
+		store, ok := m.cfg.Store.(EventReceiptStore)
 		if !ok {
-			// Unknown customer: either NOT YET ours (the claim/fold window —
-			// the index lands moments later) or genuinely foreign. We cannot
-			// tell the difference, and a silent ACK on the former loses a
-			// paid event forever. Fail the batch so the provider redelivers;
-			// convergence resolves the race, and truly-foreign deliveries age
-			// out at the provider's retry horizon.
-			return fmt.Errorf("event %s for unknown %s customer — will resolve on redelivery", e.Type, provider)
+			return errors.New(
+				"billing event has durable identity but lifecycle store has no event receipt support")
 		}
-		// An activation for a plan this catalog does not know is deploy skew
-		// (the partner sells something this binary has not heard of). ACKing
-		// would lose a PAID event forever; fail the batch so the provider
-		// redelivers until the catalog catches up.
-		if e.Type == billing.EventSubscriptionActivated {
-			if _, ok := m.cfg.Catalog.Get(e.Plan); !ok {
-				return fmt.Errorf("activation for plan %q not in this catalog — will resolve on redelivery after deploy", e.Plan)
-			}
-		}
-		r, err := m.mutate(ctx, seed.AccountID, "", func(r *Record) error {
-			switch e.Type {
-			case billing.EventSubscriptionActivated:
-				if !e.At.IsZero() && e.At.Before(r.EntitledAt) {
-					return errSkipWrite // stale: predates the current entitlement
-				}
-				r.Entitled = e.Plan
-				r.EntitledAt = e.At
-				r.PastDueSince = nil
-				if p := r.Pending; p != nil && (p.Kind == PendingUpgrade || p.Kind == PendingDowngrade) && p.Plan == e.Plan {
-					r.Pending = nil
-				}
-			case billing.EventSubscriptionCanceled:
-				if !e.At.IsZero() && e.At.Before(r.EntitledAt) {
-					return errSkipWrite // stale cancel of an older subscription
-				}
-				r.Entitled = plans.Free
-				r.EntitledAt = e.At
-				// Terminal states clear dunning: there is no longer a failing
-				// renewal to be past due on.
-				r.PastDueSince = nil
-				if p := r.Pending; p != nil && p.Kind == PendingDowngrade {
-					r.Pending = nil
-				}
-			case billing.EventPaymentFailed:
-				if !e.At.IsZero() && e.At.Before(r.DunningAt) {
-					return errSkipWrite // stale: predates newer dunning state
-				}
-				if r.PastDueSince == nil {
-					t := e.At
-					r.PastDueSince = &t
-				}
-				r.DunningAt = e.At
-			case billing.EventPaymentRecovered:
-				if !e.At.IsZero() && e.At.Before(r.DunningAt) {
-					return errSkipWrite
-				}
-				r.PastDueSince = nil
-				r.DunningAt = e.At
-			default:
-				return errSkipWrite
-			}
-			return nil
-		})
+		receipt, err := newEventReceipt(provider, event, m.cfg.Now())
 		if err != nil {
 			return err
 		}
-		// The provider event is already folded. Keep webhook processing
-		// successful and let the durable apply fence reconcile any
-		// transient cell failure.
-		_ = m.apply(ctx, r.AccountID)
+		stored, _, err := store.ReceiveEvent(ctx, receipt)
+		if err != nil {
+			return err
+		}
+		if err := m.processReceipt(ctx, store, stored); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// processReceipt completes a durable receipt only after its normalized event
+// is safely folded or deliberately ignored. A processed receipt may remain in
+// an R2 pending index when the completion write succeeded but index cleanup
+// failed; repeating CompleteEvent repairs only that index and never refolds.
+func (m *Manager) processReceipt(
+	ctx context.Context,
+	store EventReceiptStore,
+	receipt EventReceipt,
+) error {
+	if err := validateEventReceipt(receipt); err != nil {
+		return fmt.Errorf("billing event store returned an invalid receipt: %w", err)
+	}
+	if receipt.Status == EventReceiptProcessed {
+		return store.CompleteEvent(
+			ctx, receipt, *receipt.ProcessedAt)
+	}
+	claimToken, err := newEventReceiptClaimToken()
+	if err != nil {
+		return err
+	}
+	now := m.cfg.Now()
+	claimed, acquired, err := store.ClaimEvent(
+		ctx, receipt, claimToken, now, now.Add(eventReceiptProcessingLease))
+	if err != nil {
+		return err
+	}
+	// Another worker may have completed between ReceiveEvent/PendingEvents and
+	// this claim attempt. Repair only its pending-index cleanup; never refold.
+	if claimed.Status == EventReceiptProcessed {
+		return store.CompleteEvent(
+			ctx, claimed, *claimed.ProcessedAt)
+	}
+	if !acquired {
+		return ErrEventReceiptInProgress
+	}
+	// Bound all resolution, fold, and completion work to the exact persisted
+	// lease rather than granting a fresh window after claim acquisition latency.
+	remaining := claimed.LeaseExpiresAt.Sub(m.cfg.Now())
+	if remaining <= 0 {
+		return releaseEventReceiptAfterError(ctx, store, claimed, errors.New(
+			"event receipt: processing lease expired before resolution"))
+	}
+	processCtx, cancel := context.WithTimeout(ctx, remaining)
+	defer cancel()
+	if claimed.Resolution == nil {
+		resolution, err := m.resolveEvent(
+			processCtx, claimed.Provider, claimed.Event, true)
+		if err != nil {
+			return releaseEventReceiptAfterError(ctx, store, claimed, err)
+		}
+		claimed, err = store.PinEventResolution(
+			processCtx, claimed, resolution)
+		if err != nil {
+			return releaseEventReceiptAfterError(ctx, store, claimed, err)
+		}
+	}
+	if _, err := m.foldEventResolution(processCtx, *claimed.Resolution); err != nil {
+		return releaseEventReceiptAfterError(ctx, store, claimed, err)
+	}
+	if err := store.CompleteEvent(processCtx, claimed, m.cfg.Now()); err != nil {
+		return releaseEventReceiptAfterError(ctx, store, claimed, err)
+	}
+	return nil
+}
+
+func releaseEventReceiptAfterError(
+	ctx context.Context,
+	store EventReceiptStore,
+	claimed EventReceipt,
+	processErr error,
+) error {
+	if releaseErr := store.ReleaseEvent(ctx, claimed); releaseErr != nil {
+		return errors.Join(processErr, fmt.Errorf(
+			"event receipt: release processing claim: %w", releaseErr))
+	}
+	return processErr
+}
+
+// resolveEvent performs all provider, routing, and catalog reads before an
+// account mutation. Durable callers pin its exact result to their receipt;
+// recovery then folds that saved account/event/decision without resolving it
+// again against provider or routing state that may have changed.
+func (m *Manager) resolveEvent(
+	ctx context.Context,
+	provider string,
+	event billing.Event,
+	durable bool,
+) (EventReceiptResolution, error) {
+	resolvedAt := m.cfg.Now().UTC()
+	configured, ok := m.cfg.Providers[provider]
+	if !ok {
+		return EventReceiptResolution{}, fmt.Errorf(
+			"billing event provider %q is not configured", provider)
+	}
+	seed, ok, err := m.cfg.Store.ByCustomer(ctx, provider, event.CustomerID)
+	if err != nil {
+		return EventReceiptResolution{}, err
+	}
+	if !ok {
+		if durable {
+			return EventReceiptResolution{
+				Decision: "ignored", IgnoreReason: "unknown_customer",
+				ResolvedAt: resolvedAt,
+			}, nil
+		}
+		return EventReceiptResolution{}, fmt.Errorf(
+			"event %s for unknown %s customer — will resolve on redelivery",
+			event.Type, provider)
+	}
+
+	if resolver, ok := configured.(billing.EventResolver); ok {
+		resolved, err := resolver.ResolveEvent(ctx, event)
+		if err != nil {
+			return EventReceiptResolution{}, err
+		}
+		if resolved == nil {
+			return EventReceiptResolution{
+				Decision: "ignored", IgnoreReason: "provider_noop",
+				AccountID: seed.AccountID, ResolvedAt: resolvedAt,
+			}, nil
+		}
+		if resolved.ProviderEventID != event.ProviderEventID ||
+			resolved.PayloadSHA256 != event.PayloadSHA256 ||
+			resolved.CustomerID != event.CustomerID {
+			return EventReceiptResolution{}, errors.New(
+				"billing event resolver changed durable event identity or customer")
+		}
+		event = *resolved
+	}
+
+	// An activation for a plan this catalog does not know is deploy skew (the
+	// partner sells something this binary has not heard of). Keep its receipt
+	// pending until the catalog catches up rather than losing a paid event.
+	if event.Type == billing.EventSubscriptionActivated {
+		if _, ok := m.cfg.Catalog.Get(event.Plan); !ok {
+			return EventReceiptResolution{}, fmt.Errorf(
+				"activation for plan %q not in this catalog — will resolve after deploy",
+				event.Plan)
+		}
+	}
+	switch event.Type {
+	case billing.EventSubscriptionActivated,
+		billing.EventSubscriptionCanceled,
+		billing.EventPaymentFailed,
+		billing.EventPaymentRecovered:
+	default:
+		return EventReceiptResolution{
+			Decision: "ignored", IgnoreReason: "unsupported_event",
+			AccountID: seed.AccountID, ResolvedAt: resolvedAt,
+		}, nil
+	}
+	resolved := event
+	return EventReceiptResolution{
+		Decision: "applied", AccountID: seed.AccountID,
+		Event: &resolved, ResolvedAt: resolvedAt,
+	}, nil
+}
+
+// foldEventResolution applies only a previously selected resolution. It does
+// no provider or routing reads, which makes crash recovery deterministic.
+func (m *Manager) foldEventResolution(
+	ctx context.Context,
+	resolution EventReceiptResolution,
+) (string, error) {
+	if resolution.Decision == "ignored" {
+		return "ignored", nil
+	}
+	if resolution.Decision != "applied" || resolution.AccountID == "" ||
+		resolution.Event == nil {
+		return "", errors.New("billing event has invalid pinned resolution")
+	}
+	event := *resolution.Event
+	r, err := m.mutate(ctx, resolution.AccountID, "", func(r *Record) error {
+		switch event.Type {
+		case billing.EventSubscriptionActivated:
+			if !event.At.IsZero() && event.At.Before(r.EntitledAt) {
+				return errSkipWrite // stale: predates the current entitlement
+			}
+			r.Entitled = event.Plan
+			r.EntitledAt = event.At
+			r.PastDueSince = nil
+			if p := r.Pending; p != nil && p.Plan == event.Plan {
+				switch p.Kind {
+				case PendingUpgrade:
+					// A checkout callback belongs to one durable operation. A
+					// delayed callback from superseded operation A may confirm
+					// entitlement, but it must not erase newer pending operation B
+					// just because both targeted the same plan.
+					if event.OperationID != "" &&
+						p.OperationID == event.OperationID {
+						r.Pending = nil
+					}
+				case PendingDowngrade:
+					// Scheduled downgrades predate operation identities and are
+					// correlated by their one pending target plan.
+					r.Pending = nil
+				}
+			}
+		case billing.EventSubscriptionCanceled:
+			if !event.At.IsZero() && event.At.Before(r.EntitledAt) {
+				return errSkipWrite // stale cancel of an older subscription
+			}
+			r.Entitled = plans.Free
+			r.EntitledAt = event.At
+			// Terminal states clear dunning: there is no longer a failing
+			// renewal to be past due on.
+			r.PastDueSince = nil
+			if p := r.Pending; p != nil && p.Kind == PendingDowngrade {
+				r.Pending = nil
+			}
+		case billing.EventPaymentFailed:
+			if !event.At.IsZero() && event.At.Before(r.DunningAt) {
+				return errSkipWrite // stale: predates newer dunning state
+			}
+			if r.PastDueSince == nil {
+				t := event.At
+				r.PastDueSince = &t
+			}
+			r.DunningAt = event.At
+		case billing.EventPaymentRecovered:
+			if !event.At.IsZero() && event.At.Before(r.DunningAt) {
+				return errSkipWrite
+			}
+			r.PastDueSince = nil
+			r.DunningAt = event.At
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	// The provider event is already folded. Keep webhook processing successful
+	// and let the durable apply fence reconcile any transient cell failure.
+	_ = m.apply(ctx, r.AccountID)
+	return "applied", nil
+}
+
+// processEvent retains the legacy identity-less path. Durable receipt callers
+// invoke resolveEvent, pin the result, and only then foldEventResolution.
+func (m *Manager) processEvent(
+	ctx context.Context,
+	provider string,
+	event billing.Event,
+	durable bool,
+) (string, error) {
+	resolution, err := m.resolveEvent(ctx, provider, event, durable)
+	if err != nil {
+		return "", err
+	}
+	return m.foldEventResolution(ctx, resolution)
 }
 
 // ReconcileAccount expires a lapsed upgrade request and retries one account's
@@ -1883,8 +2248,58 @@ func (m *Manager) reconcileAccount(ctx context.Context, accountID string, now ti
 		return err
 	}
 	var firstErr error
+	// Replay only this account's bounded provider/customer receipt index. No
+	// bucket-wide receipt scan is needed. A malformed/missing indexed receipt
+	// or a receipt whose fold fails is retained as the first error, but it does
+	// not starve the other bounded receipts for this customer.
+	if receiptStore, ok := m.cfg.Store.(EventReceiptStore); ok &&
+		r.Provider != "" && r.CustomerID != "" {
+		receipts, receiptErr := receiptStore.PendingEvents(
+			ctx, r.Provider, r.CustomerID, maxEventReceiptsPerReconcile)
+		if receiptErr != nil {
+			firstErr = receiptErr
+		}
+		for _, receipt := range receipts {
+			if receiptErr := m.processReceipt(ctx, receiptStore, receipt); receiptErr != nil &&
+				firstErr == nil {
+				firstErr = receiptErr
+			}
+		}
+		// A receipt may have changed entitlement or dunning state.
+		r, err = m.load(ctx, accountID, "")
+		if err != nil {
+			return err
+		}
+	}
+	if p := r.Pending; p != nil && p.CancelPrevious {
+		// Replacement cleanup is its own durable phase. Retry it for every
+		// pending kind, including contact leads, then clear only the exact
+		// operation fence observed before the provider call.
+		expected := *p
+		if cleanupErr := m.cancelProviderPending(ctx, r); cleanupErr != nil {
+			if firstErr == nil {
+				firstErr = cleanupErr
+			}
+		} else {
+			r, err = m.mutate(ctx, accountID, "", func(r *Record) error {
+				current := r.Pending
+				if current == nil ||
+					current.OperationID != expected.OperationID ||
+					current.Kind != expected.Kind || current.Plan != expected.Plan ||
+					!current.Requested.Equal(expected.Requested) ||
+					!current.CancelPrevious {
+					return errSkipWrite
+				}
+				current.CancelPrevious = false
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+		}
+	}
 	if p := r.Pending; p != nil &&
-		p.Kind == PendingUpgrade && now.After(p.Expires) {
+		p.Kind == PendingUpgrade && !p.CancelPrevious && now.After(p.Expires) {
 		// Provider state is disarmed BEFORE the local pending marker is
 		// cleared. In providerless recovery mode a pinned legacy record
 		// therefore remains truthful and retryable until its provider is

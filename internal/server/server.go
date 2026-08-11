@@ -11,12 +11,14 @@ import (
 	"io"
 	"net"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/witwave-ai/witself/internal/placement"
 	"github.com/witwave-ai/witself/internal/plans"
@@ -44,6 +46,11 @@ type Config struct {
 	// Authenticate, when set, enables bearer-token auth (e.g. GET /v1/whoami):
 	// it resolves an operator token to its principal.
 	Authenticate AuthFunc
+	// GetOperatorAccountRole enriches authenticated /v1/whoami responses with
+	// the caller's account role. It is never used to authenticate a token; the
+	// returned role lets a remote control plane enforce account-level scopes
+	// without treating mere account membership as billing authority.
+	GetOperatorAccountRole func(ctx context.Context, accountID, operatorID string) (string, error)
 
 	// AuthenticatePrincipal accepts either an operator or agent token for
 	// domain surfaces that intentionally support both. Transcript writes still
@@ -1995,7 +2002,7 @@ func apiMux(cfg Config) http.Handler {
 		})
 	}
 	if cfg.Authenticate != nil {
-		whoami := whoamiHandler(cfg.Authenticate)
+		whoami := whoamiHandler(cfg.Authenticate, cfg.GetOperatorAccountRole)
 		mux.HandleFunc("GET /v1/whoami", whoami)
 		mux.HandleFunc("GET /v1/auth/whoami", whoami)
 		if cfg.CreateRealm != nil {
@@ -2584,7 +2591,7 @@ type capabilities struct {
 	SchemaVersion string             `json:"schema_version"`
 	Backend       backendInfo        `json:"backend"`
 	Account       *accountInfo       `json:"account,omitempty"`
-	Principal     any                `json:"principal"` // null until token auth exists
+	Principal     any                `json:"principal"` // always null; authenticate with /v1/whoami
 	Features      map[string]feature `json:"features"`
 	Limits        map[string]any     `json:"limits"`
 	Billing       billingInfo        `json:"billing"`
@@ -2598,7 +2605,51 @@ type capabilities struct {
 type billingInfo struct {
 	Supported bool   `json:"supported"`
 	Endpoint  string `json:"endpoint,omitempty"` // the control plane's API base
-	Reason    string `json:"reason,omitempty"`   // e.g. "self_hosted"
+	Reason    string `json:"reason,omitempty"`   // e.g. "self_hosted", "invalid_configuration"
+}
+
+func validBillingCapabilityEndpoint(raw string) bool {
+	if raw == "" || raw != strings.TrimSpace(raw) || !utf8.ValidString(raw) ||
+		strings.ContainsRune(raw, '\\') || billingCapabilityURLHasUnsafeRune(raw) {
+		return false
+	}
+	decoded, err := neturl.PathUnescape(raw)
+	if err != nil || strings.ContainsRune(decoded, '\\') || billingCapabilityURLHasUnsafeRune(decoded) {
+		return false
+	}
+	parsed, err := neturl.Parse(raw)
+	if err != nil || parsed.Host == "" || parsed.Hostname() == "" ||
+		parsed.User != nil || parsed.Opaque != "" || parsed.RawQuery != "" ||
+		parsed.Fragment != "" {
+		return false
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "https":
+		return true
+	case "http":
+		host := parsed.Hostname()
+		if strings.EqualFold(host, "localhost") {
+			return true
+		}
+		ip := net.ParseIP(host)
+		return ip != nil && ip.IsLoopback()
+	default:
+		return false
+	}
+}
+
+func billingCapabilityURLHasUnsafeRune(raw string) bool {
+	for _, char := range raw {
+		if unicode.IsControl(char) || char == '\u2028' || char == '\u2029' {
+			return true
+		}
+		switch char {
+		case '\u061c', '\u200e', '\u200f', '\u202a', '\u202b', '\u202c',
+			'\u202d', '\u202e', '\u2066', '\u2067', '\u2068', '\u2069':
+			return true
+		}
+	}
+	return false
 }
 
 func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (string, map[string]int64, map[string]int64, []string, error), selfDigestSupported, transcriptsSupported, messagingSupported, messageListenSupported, messageReplySupported, messageProcessingSupported, messageRequestsSupported, memoriesSupported, memoryRecallSupported, memorySupersedeSupported, memoryDeleteSupported, memoryCurationSupported, memoryVectorsSupported, avatarsSupported, secretsSupported bool) http.HandlerFunc {
@@ -2610,10 +2661,16 @@ func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (s
 			}
 			return notImpl
 		}
+		backendKind := strings.ToLower(strings.TrimSpace(
+			envOr("WITSELF_BACKEND_KIND", "self-hosted"),
+		))
+		if backendKind == "" {
+			backendKind = "self-hosted"
+		}
 		caps := capabilities{
 			SchemaVersion: "witself.v0",
 			Backend: backendInfo{
-				Kind:       envOr("WITSELF_BACKEND_KIND", "self-hosted"),
+				Kind:       backendKind,
 				Version:    version.Version,
 				APIVersion: "v1",
 			},
@@ -2646,8 +2703,10 @@ func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (s
 			Limits:  map[string]any{},
 			Billing: billingInfo{Supported: false, Reason: "self_hosted"},
 		}
-		if ep := envOr("WITSELF_BILLING_ENDPOINT", ""); ep != "" {
+		if ep := envOr("WITSELF_BILLING_ENDPOINT", ""); validBillingCapabilityEndpoint(ep) {
 			caps.Billing = billingInfo{Supported: true, Endpoint: ep}
+		} else if ep != "" {
+			caps.Billing = billingInfo{Supported: false, Reason: "invalid_configuration"}
 		}
 		if !transcriptsSupported {
 			caps.Features["transcripts"] = notImpl
@@ -2661,7 +2720,7 @@ func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (s
 		if !memoriesSupported {
 			caps.Features["memories"] = notImpl
 		}
-		if accountID != "" {
+		if accountID != "" && backendKind != "managed" {
 			caps.Account = &accountInfo{ID: accountID}
 		}
 		if planInfo != nil && caps.Account != nil {
@@ -5179,16 +5238,33 @@ func setPlacementPolicyHandler(auth AuthFunc, set func(ctx context.Context, acco
 }
 
 // whoamiHandler returns the authenticated operator principal, or 401.
-func whoamiHandler(auth AuthFunc) http.HandlerFunc {
-	return requireOperator(auth, func(w http.ResponseWriter, _ *http.Request, p principal) {
+func whoamiHandler(
+	auth AuthFunc,
+	getAccountRole func(context.Context, string, string) (string, error),
+) http.HandlerFunc {
+	return requireOperator(auth, func(w http.ResponseWriter, r *http.Request, p principal) {
+		principal := map[string]string{
+			"kind":        "operator",
+			"operator_id": p.operatorID,
+			"account_id":  p.accountID,
+		}
+		if getAccountRole != nil {
+			role, err := getAccountRole(r.Context(), p.accountID, p.operatorID)
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, "could not resolve account role")
+				return
+			}
+			role = strings.TrimSpace(role)
+			if role == "" || len(role) > 64 {
+				writeJSONError(w, http.StatusInternalServerError, "invalid account role")
+				return
+			}
+			principal["account_role"] = role
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"schema_version": "witself.v0",
-			"principal": map[string]string{
-				"kind":        "operator",
-				"operator_id": p.operatorID,
-				"account_id":  p.accountID,
-			},
+			"principal":      principal,
 		})
 	})
 }

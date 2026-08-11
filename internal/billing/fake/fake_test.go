@@ -67,6 +67,25 @@ func TestHeadlessSubscribe(t *testing.T) {
 	}
 }
 
+func TestSubscribeIdempotentReplaysWithoutChargingTwice(t *testing.T) {
+	f, _, id := newFake(t, false)
+	ctx := context.Background()
+	first, err := f.SubscribeIdempotent(ctx, id, "standard", "bop_1")
+	if err != nil || !first.Done {
+		t.Fatalf("first SubscribeIdempotent = %+v, %v", first, err)
+	}
+	second, err := f.SubscribeIdempotent(ctx, id, "standard", "bop_1")
+	if err != nil || second != first {
+		t.Fatalf("replayed SubscribeIdempotent = %+v, %v; want %+v", second, err, first)
+	}
+	if invoices, err := f.ListInvoices(ctx, id); err != nil || len(invoices) != 1 {
+		t.Fatalf("replay created another invoice: %+v, %v", invoices, err)
+	}
+	if _, err := f.SubscribeIdempotent(ctx, id, "team", "bop_1"); err == nil {
+		t.Fatal("operation identity reused with another plan")
+	}
+}
+
 func TestInteractiveCheckoutThenHeadlessUpgrade(t *testing.T) {
 	f, _, id := newFake(t, true)
 	ctx := context.Background()

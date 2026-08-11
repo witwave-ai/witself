@@ -412,14 +412,7 @@ not the `ok`/`data` envelope. (Over CLI `--json` the same object is carried as t
   "account": {
     "id": "acc_123"
   },
-  "principal": {
-    "kind": "operator",
-    "id": "opr_123",
-    "name": "scott",
-    "realm_id": "realm_123",
-    "realm_name": "prod",
-    "scopes": ["realm:admin"]
-  },
+  "principal": null,
   "features": {
     "memories": {
       "supported": true
@@ -535,6 +528,10 @@ not the `ok`/`data` envelope. (Over CLI `--json` the same object is carried as t
 
 Rules:
 
+- `/v1/capabilities` is public and value-free. It always reports
+  `principal: null`, even if a caller sends an Authorization header; clients
+  must use `GET /v1/whoami` to authenticate and bind an operator token to an
+  account. Managed deployments omit the top-level deployment `account` block.
 - `backend.kind` values are `managed`, `self-hosted`, and `local`. `backend.kind`
   is a configured value, not inferred: it comes from `WITSELF_BACKEND_KIND` and
   defaults to `self-hosted`; `managed` is set only by Witself's managed
@@ -3256,6 +3253,115 @@ Account summary:
   "updated_at": "2026-06-26T18:00:00Z"
 }
 ```
+
+Account billing summary (implemented control-plane read surface):
+
+```json
+{
+  "schema_version": "witself.v0",
+  "account_id": "acct_123",
+  "billing_available": true,
+  "configured": true,
+  "subscription_status": "active",
+  "billing_plan": "standard",
+  "billing_plan_name": "Professional",
+  "effective_plan": "enterprise",
+  "effective_plan_name": "Enterprise",
+  "applied_plan": "enterprise",
+  "entitled_at": "2026-08-01T00:00:00Z",
+  "payment_method": {
+    "label": "visa ****4242"
+  },
+  "next_charge": {
+    "date": "2026-09-01T00:00:00Z",
+    "amount_cents": 3000,
+    "currency": "usd"
+  }
+}
+```
+
+Rules:
+
+- `configured` says only that the account has a durably pinned provider
+  customer relationship. Provider and customer identifiers are never exposed.
+- `billing_plan` is provider-backed subscription truth. `effective_plan` may
+  differ because of an administrator override; the override never changes the
+  subscription or reported charge.
+- `entitled_at` is the lifecycle entitlement timestamp, not a provider current
+  period start.
+- `next_charge` is the provider's actual renewal preview. Clients must never
+  substitute a current catalog price.
+- `payment_method` and `next_charge` are JSON `null` when unavailable.
+
+Recent invoice history:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "account_id": "acct_123",
+  "invoices": [
+    {
+      "number": "INV-0042",
+      "date": "2026-08-01T00:00:00Z",
+      "amount_cents": 3000,
+      "currency": "usd",
+      "status": "paid",
+      "pdf_url": "https://billing.example/invoices/INV-0042.pdf",
+      "hosted_url": "https://billing.example/invoices/INV-0042"
+    }
+  ]
+}
+```
+
+Recent payment history:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "account_id": "acct_123",
+  "payments": [
+    {
+      "date": "2026-08-01T00:00:00Z",
+      "amount_cents": 3000,
+      "currency": "usd",
+      "method": "visa ****4242",
+      "status": "succeeded",
+      "receipt_url": "https://billing.example/receipts/pay_42"
+    }
+  ]
+}
+```
+
+Invoice and payment collections contain at most 100 records and are empty
+arrays for an account with no provider relationship. Stripe payment history is
+drawn from its newest bounded charge page and includes refunds attached to
+those charges; its hosted portal remains authoritative for refunds against
+older charges. Amounts are signed integer cents: charges are positive, refunds
+are negative, and a successful refund uses status `refunded`. Pending,
+action-required, failed, and canceled refund attempts are omitted because they
+are not settled money movement. Document and receipt URLs are provider-hosted
+HTTPS links; the control plane omits unsafe optional links, and human CLI
+output does not print them.
+
+Billing hosted action:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "kind": "action",
+  "url": "https://billing.example/setup/session_42"
+}
+```
+
+`POST /v1/accounts/{account_id}/billing:setup` and `:portal` return exactly one
+of `{"kind":"done"}` or `{"kind":"action","url":"https://..."}`. The
+URL must be a control-free HTTPS URL without embedded credentials. Setup is the
+explicit first-contact operation and idempotently establishes the
+provider-customer mapping, but the provider may create a fresh hosted setup
+session on each invocation. Portal never manufactures a provider customer.
+Neither route accepts raw card, bank, or wallet data. This minimal `kind`/`url`
+shape belongs to the implemented read/setup slice; future resumable checkout
+and crypto flows use the richer hosted-provider-session contract below.
 
 Usage summary:
 

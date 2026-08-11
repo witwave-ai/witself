@@ -262,22 +262,48 @@ func BootstrapLogin(ctx context.Context, endpoint, bootstrapToken string) (*Boot
 	return &BootstrapResult{OperatorToken: out.OperatorToken, OperatorID: out.OperatorID}, nil
 }
 
-// Whoami resolves an operator token to its principal ids via GET {endpoint}/v1/whoami.
-func Whoami(ctx context.Context, endpoint, token string) (operatorID, accountID string, err error) {
+// WhoamiOperator is the authenticated operator projection returned by a cell.
+// AccountRole is empty for older cells; authorization-sensitive callers must
+// fail closed instead of treating that as a permissive legacy role.
+type WhoamiOperator struct {
+	OperatorID  string
+	AccountID   string
+	AccountRole string
+}
+
+// GetWhoamiOperator resolves an operator token via GET {endpoint}/v1/whoami.
+func GetWhoamiOperator(ctx context.Context, endpoint, token string) (WhoamiOperator, error) {
 	var out struct {
 		Principal struct {
-			OperatorID string `json:"operator_id"`
-			AccountID  string `json:"account_id"`
+			OperatorID  string `json:"operator_id"`
+			AccountID   string `json:"account_id"`
+			AccountRole string `json:"account_role"`
 		} `json:"principal"`
 	}
-	url := strings.TrimRight(endpoint, "/") + "/v1/whoami"
+	url := apiV1Base(endpoint) + "/whoami"
 	if err := doJSON(ctx, http.MethodGet, url, token, nil, &out); err != nil {
+		return WhoamiOperator{}, err
+	}
+	if strings.TrimSpace(out.Principal.OperatorID) == "" ||
+		strings.TrimSpace(out.Principal.AccountID) == "" {
+		return WhoamiOperator{}, fmt.Errorf("server returned no principal")
+	}
+	return WhoamiOperator{
+		OperatorID:  out.Principal.OperatorID,
+		AccountID:   out.Principal.AccountID,
+		AccountRole: strings.TrimSpace(out.Principal.AccountRole),
+	}, nil
+
+}
+
+// Whoami resolves an operator token to its principal ids. It preserves the
+// historical two-value API for ordinary identity callers.
+func Whoami(ctx context.Context, endpoint, token string) (operatorID, accountID string, err error) {
+	p, err := GetWhoamiOperator(ctx, endpoint, token)
+	if err != nil {
 		return "", "", err
 	}
-	if out.Principal.OperatorID == "" {
-		return "", "", fmt.Errorf("server returned no principal")
-	}
-	return out.Principal.OperatorID, out.Principal.AccountID, nil
+	return p.OperatorID, p.AccountID, nil
 }
 
 // doJSON performs an authenticated JSON request and decodes the response into
@@ -310,7 +336,17 @@ func doJSONWithHeadersTimeout(ctx context.Context, method, url, token string, he
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := (&http.Client{Timeout: timeout}).Do(req)
+	// API endpoints are credential audiences, not browser destinations. Never
+	// follow redirects: Go may preserve Authorization across same-host and
+	// subdomain redirects, and it does not make an HTTPS-to-HTTP downgrade an
+	// authorization error. The caller must rediscover and revalidate a changed
+	// endpoint explicitly.
+	resp, err := (&http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}).Do(req)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}

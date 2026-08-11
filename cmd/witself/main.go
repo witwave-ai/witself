@@ -136,6 +136,8 @@ func run(args []string) int {
 		return agentCmd(args[1:])
 	case "plan":
 		return planCmd(args[1:])
+	case "billing":
+		return billingCmd(args[1:])
 	case "operator":
 		return operatorCmd(args[1:])
 	case "token":
@@ -4143,6 +4145,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself realm create|list|delete|email-alias")
 	usageLine(w, "  witself agent create|list|peers|delete")
 	usageLine(w, "  witself plan list|status|upgrade|downgrade|cancel  Inspect catalog and effective account policy")
+	usageLine(w, "  witself billing show|invoices|payments|portal|setup  Inspect provider billing and open hosted flows")
 	usageLine(w, "  witself operator list|create|delete")
 	usageLine(w, "  witself token create|revoke  Mint or revoke agent/operator tokens")
 	usageLine(w, "  witself self show|card       Show the self digest or bounded visual identity card")

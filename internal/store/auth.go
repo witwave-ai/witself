@@ -196,6 +196,29 @@ func (s *Store) AuthenticateOperator(ctx context.Context, plaintext string) (ope
 	return operatorID, accountID, accountStatus, true, nil
 }
 
+// GetOperatorAccountRole returns the authenticated cell-side account role for
+// an operator. It is intentionally a separate lookup from AuthenticateOperator
+// so existing route authentication contracts remain stable while trusted
+// callers such as /v1/whoami can expose the role needed for account-scope
+// authorization. The root bit is authoritative for older imported rows.
+func (s *Store) GetOperatorAccountRole(
+	ctx context.Context, accountID, operatorID string,
+) (string, error) {
+	var role string
+	var isRoot bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT role, is_root FROM operators
+		 WHERE id = $1 AND account_id = $2 AND deleted_at IS NULL`,
+		operatorID, accountID).Scan(&role, &isRoot)
+	if err != nil {
+		return "", fmt.Errorf("get operator account role: %w", err)
+	}
+	if isRoot {
+		return "account_owner", nil
+	}
+	return role, nil
+}
+
 // AuthenticatePrincipal resolves either a live operator or a live agent token.
 // The returned kind and ids are derived entirely from the token row and its FK
 // targets. It is intentionally separate from AuthenticateOperator so existing

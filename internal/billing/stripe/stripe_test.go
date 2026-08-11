@@ -28,6 +28,7 @@ type stubStripe struct {
 	created      []string          // paths of POSTs received
 	lastForm     map[string]string // last POST form (flattened)
 	lastVersion  string            // Stripe-Version header seen last
+	lastIdem     string            // Idempotency-Key header seen last
 	failNext     int               // when >0, respond with this status once
 	failCode     string            // error code for failNext (default "boom")
 	failPath     string            // when set, failNext fires only on this path
@@ -37,6 +38,10 @@ type stubStripe struct {
 	custDeleted  bool              // customer GETs report deleted:true
 	openSessions []string          // open checkout session ids
 	expired      []string          // session ids expired via POST .../expire
+	refunded     bool              // charge has one successful partial refund
+	refundMore   bool              // refund list reports unsupported pagination
+	refundAmount int               // settled amount reported by the charge
+	refundData   string            // optional refund-list JSON data override
 }
 
 func newStub(t *testing.T) (*stubStripe, *Provider) {
@@ -68,6 +73,7 @@ func (s *stubStripe) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.lastVersion = r.Header.Get("Stripe-Version")
+	s.lastIdem = r.Header.Get("Idempotency-Key")
 	if s.failNext > 0 && (s.failPath == "" || s.failPath == r.URL.Path) {
 		status := s.failNext
 		s.failNext = 0
@@ -140,7 +146,24 @@ func (s *stubStripe) handle(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/v1/invoices":
 		_, _ = fmt.Fprint(w, `{"data":[{"number":"INV-0001","created":1754265600,"total":3000,"currency":"usd","status":"paid","invoice_pdf":"https://files.stripe.com/inv.pdf","hosted_invoice_url":"https://invoice.stripe.com/i/x"}]}`)
 	case r.URL.Path == "/v1/charges":
-		_, _ = fmt.Fprint(w, `{"data":[{"created":1754265600,"amount":3000,"currency":"usd","status":"succeeded","receipt_url":"https://receipt.stripe.com/r/x","payment_method_details":{"card":{"brand":"visa","last4":"4242"}}}]}`)
+		amountRefunded := 0
+		if s.refunded {
+			amountRefunded = s.refundAmount
+			if amountRefunded == 0 {
+				amountRefunded = 700
+			}
+		}
+		_, _ = fmt.Fprintf(w, `{"data":[{"id":"ch_stub","created":1754265600,"amount":3000,"amount_refunded":%d,"currency":"usd","status":"succeeded","receipt_url":"https://receipt.stripe.com/r/x","payment_method_details":{"card":{"brand":"visa","last4":"4242"}}}]}`, amountRefunded)
+	case r.URL.Path == "/v1/refunds":
+		if got := r.URL.Query().Get("charge"); got != "ch_stub" {
+			http.Error(w, `{"error":{"message":"wrong charge"}}`, http.StatusBadRequest)
+			return
+		}
+		data := s.refundData
+		if data == "" {
+			data = `[{"created":1754269200,"amount":700,"status":"succeeded"}]`
+		}
+		_, _ = fmt.Fprintf(w, `{"data":%s,"has_more":%t}`, data, s.refundMore)
 	case r.URL.Path == "/v1/payment_methods":
 		_, _ = fmt.Fprint(w, `{"data":[{"card":{"brand":"visa","last4":"4242"}}]}`)
 	default:
@@ -272,6 +295,26 @@ func TestSubscribeBuildsCheckout(t *testing.T) {
 	}
 }
 
+func TestSubscribeIdempotentBindsCheckoutOperation(t *testing.T) {
+	s, p := newStub(t)
+	act, err := p.SubscribeIdempotent(
+		context.Background(), "cus_stub_1", "standard", "bop_checkout_1")
+	if err != nil || act.Done || !strings.Contains(act.URL, "checkout.stripe.com") {
+		t.Fatalf("SubscribeIdempotent = %+v, %v; want a checkout URL", act, err)
+	}
+	if s.lastIdem != "witself-subscribe-bop_checkout_1" {
+		t.Fatalf("Idempotency-Key = %q", s.lastIdem)
+	}
+	if s.lastForm["metadata[witself_operation_id]"] != "bop_checkout_1" ||
+		s.lastForm["subscription_data[metadata][witself_operation_id]"] != "bop_checkout_1" {
+		t.Fatalf("operation metadata missing from session/subscription: %v", s.lastForm)
+	}
+	if _, err := p.SubscribeIdempotent(
+		context.Background(), "cus_stub_1", "standard", ""); err == nil {
+		t.Fatal("empty subscription operation id accepted")
+	}
+}
+
 func TestScheduleDowngradeFreeOnly(t *testing.T) {
 	s, p := newStub(t)
 	eff, err := p.ScheduleDowngrade(context.Background(), "cus_stub_1", "free")
@@ -347,6 +390,66 @@ func TestReadPath(t *testing.T) {
 	}
 }
 
+func TestListPaymentsIncludesRefundsAsNegativeMovements(t *testing.T) {
+	s, p := newStub(t)
+	s.refunded = true
+
+	payments, err := p.ListPayments(context.Background(), "cus_stub_1")
+	if err != nil {
+		t.Fatalf("ListPayments: %v", err)
+	}
+	if len(payments) != 2 {
+		t.Fatalf("payments = %+v; want charge and refund", payments)
+	}
+	if payments[0].AmountCents != -700 || payments[0].Status != "refunded" ||
+		payments[0].Method != "visa ****4242" {
+		t.Fatalf("refund = %+v", payments[0])
+	}
+	if payments[1].AmountCents != 3000 || payments[1].Status != "succeeded" ||
+		payments[1].ReceiptURL == "" {
+		t.Fatalf("charge = %+v", payments[1])
+	}
+}
+
+func TestListPaymentsFailsClosedWhenRefundHistoryExceedsPage(t *testing.T) {
+	s, p := newStub(t)
+	s.refunded = true
+	s.refundMore = true
+	if _, err := p.ListPayments(context.Background(), "cus_stub_1"); err == nil {
+		t.Fatal("paginated refund history was silently truncated")
+	}
+}
+
+func TestListPaymentsOmitsUnsettledRefundAttempts(t *testing.T) {
+	s, p := newStub(t)
+	s.refunded = true
+	s.refundData = `[
+		{"created":1754269200,"amount":700,"status":"succeeded"},
+		{"created":1754269300,"amount":200,"status":"pending"},
+		{"created":1754269400,"amount":300,"status":"requires_action"},
+		{"created":1754269500,"amount":400,"status":"failed"},
+		{"created":1754269600,"amount":500,"status":"canceled"}
+	]`
+
+	payments, err := p.ListPayments(context.Background(), "cus_stub_1")
+	if err != nil {
+		t.Fatalf("ListPayments: %v", err)
+	}
+	if len(payments) != 2 || payments[0].AmountCents != -700 ||
+		payments[0].Status != "refunded" {
+		t.Fatalf("payments = %+v; want one settled refund and the charge", payments)
+	}
+}
+
+func TestListPaymentsRejectsSettledRefundTotalMismatch(t *testing.T) {
+	s, p := newStub(t)
+	s.refunded = true
+	s.refundAmount = 800
+	if _, err := p.ListPayments(context.Background(), "cus_stub_1"); err == nil {
+		t.Fatal("charge/refund settled-total mismatch was accepted")
+	}
+}
+
 func TestNextChargeNoneIsNil(t *testing.T) {
 	s, p := newStub(t)
 	// No live subscription: nil without even previewing (create_preview
@@ -418,7 +521,7 @@ func deliver(t *testing.T, p *Provider, payload, sigHeader string) ([]billing.Ev
 func TestWebhookSignatureVerification(t *testing.T) {
 	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
 	_, p := webhookStub(t, now)
-	payload := `{"type":"invoice.paid","created":1751716800,"data":{"object":{"customer":"cus_x"}}}`
+	payload := `{"id":"evt_paid_1","type":"invoice.paid","created":1751716800,"data":{"object":{"id":"in_paid_1","customer":"cus_x","subscription":"sub_x"}}}`
 
 	// Valid signature folds.
 	events, err := deliver(t, p, payload, sign("whsec_secret", now.Unix(), []byte(payload)))
@@ -451,55 +554,74 @@ func TestWebhookEventNormalization(t *testing.T) {
 	sgn := func(payload string) string { return sign("whsec_secret", now.Unix(), []byte(payload)) }
 
 	// checkout.session.completed (subscription mode, PAID) -> activated.
-	payload := `{"type":"checkout.session.completed","created":1751716800,"data":{"object":{"customer":"cus_x","mode":"subscription","payment_status":"paid","metadata":{"witself_plan":"standard"}}}}`
+	payload := `{"id":"evt_checkout_1","type":"checkout.session.completed","created":1751716800,"data":{"object":{"id":"cs_1","customer":"cus_x","subscription":"sub_x","mode":"subscription","payment_status":"paid","metadata":{"witself_plan":"standard","witself_operation_id":"bop_1"}}}}`
 	events, err := deliver(t, p, payload, sgn(payload))
 	if err != nil || len(events) != 1 || events[0].Type != billing.EventSubscriptionActivated ||
-		events[0].Plan != "standard" || events[0].CustomerID != "cus_x" {
+		events[0].Plan != "standard" || events[0].CustomerID != "cus_x" ||
+		events[0].ProviderEventID != "evt_checkout_1" ||
+		events[0].ProviderObjectID != "cs_1" ||
+		events[0].SubscriptionID != "sub_x" || events[0].OperationID != "bop_1" ||
+		len(events[0].PayloadSHA256) != 64 {
 		t.Fatalf("checkout completed = %+v, %v", events, err)
 	}
 	// UNPAID completion (delayed-notification method like ACH): the session
 	// completed but the money has not moved — NOTHING is entitled yet.
-	payload = `{"type":"checkout.session.completed","created":1751716800,"data":{"object":{"customer":"cus_x","mode":"subscription","payment_status":"unpaid","metadata":{"witself_plan":"standard"}}}}`
+	payload = `{"id":"evt_checkout_2","type":"checkout.session.completed","created":1751716800,"data":{"object":{"id":"cs_2","customer":"cus_x","mode":"subscription","payment_status":"unpaid","metadata":{"witself_plan":"standard"}}}}`
 	if events, err = deliver(t, p, payload, sgn(payload)); err != nil || len(events) != 0 {
 		t.Fatalf("unpaid completion = %+v, %v; want empty ACK (entitle on async_payment_succeeded)", events, err)
 	}
 	// The async success lands later and activates.
-	payload = `{"type":"checkout.session.async_payment_succeeded","created":1751716800,"data":{"object":{"customer":"cus_x","mode":"subscription","payment_status":"paid","metadata":{"witself_plan":"standard"}}}}`
+	payload = `{"id":"evt_checkout_3","type":"checkout.session.async_payment_succeeded","created":1751716800,"data":{"object":{"id":"cs_3","customer":"cus_x","subscription":"sub_x","mode":"subscription","payment_status":"paid","metadata":{"witself_plan":"standard"}}}}`
 	if events, err = deliver(t, p, payload, sgn(payload)); err != nil || len(events) != 1 || events[0].Type != billing.EventSubscriptionActivated {
 		t.Fatalf("async_payment_succeeded = %+v, %v; want activation", events, err)
 	}
 	// Setup-mode completion: card captured, no entitlement events.
-	payload = `{"type":"checkout.session.completed","created":1751716800,"data":{"object":{"customer":"cus_x","mode":"setup","payment_status":"no_payment_required"}}}`
+	payload = `{"id":"evt_setup_1","type":"checkout.session.completed","created":1751716800,"data":{"object":{"id":"cs_setup_1","customer":"cus_x","mode":"setup","payment_status":"no_payment_required"}}}`
 	if events, err = deliver(t, p, payload, sgn(payload)); err != nil || len(events) != 0 {
 		t.Fatalf("setup completed = %+v, %v; want empty ACK", events, err)
 	}
 	// Subscription-mode completion MISSING the plan metadata must error (the
 	// entitlement would be unroutable) — never silently ACKed.
-	payload = `{"type":"checkout.session.completed","created":1751716800,"data":{"object":{"customer":"cus_x","mode":"subscription","payment_status":"paid"}}}`
+	payload = `{"id":"evt_checkout_4","type":"checkout.session.completed","created":1751716800,"data":{"object":{"id":"cs_4","customer":"cus_x","mode":"subscription","payment_status":"paid"}}}`
 	if _, err = deliver(t, p, payload, sgn(payload)); err == nil {
 		t.Fatal("activation without witself_plan metadata was ACKed")
 	}
+	// A handled event without Stripe's ordering timestamp must fail rather than
+	// become an epoch-dated event that is silently treated as stale.
+	payload = `{"id":"evt_checkout_no_time","type":"checkout.session.completed","data":{"object":{"id":"cs_no_time","customer":"cus_x","mode":"subscription","payment_status":"paid","metadata":{"witself_plan":"standard"}}}}`
+	if _, err = deliver(t, p, payload, sgn(payload)); err == nil {
+		t.Fatal("handled event without provider timestamp was ACKed")
+	}
 	// payment_failed maps to its event.
-	payload = `{"type":"invoice.payment_failed","created":1751716800,"data":{"object":{"customer":"cus_x"}}}`
-	if events, _ = deliver(t, p, payload, sgn(payload)); len(events) != 1 || events[0].Type != billing.EventPaymentFailed {
+	payload = `{"id":"evt_invoice_failed_1","type":"invoice.payment_failed","created":1751716800,"data":{"object":{"id":"in_failed_1","customer":"cus_x","subscription":"sub_x"}}}`
+	if events, _ = deliver(t, p, payload, sgn(payload)); len(events) != 1 ||
+		events[0].Type != billing.EventPaymentFailed ||
+		events[0].ProviderObjectID != "in_failed_1" ||
+		events[0].SubscriptionID != "sub_x" {
 		t.Fatalf("payment_failed = %+v", events)
 	}
 	// subscription.deleted while ANOTHER live subscription remains is
-	// suppressed — a duplicate/stale subscription's deletion must not revoke
-	// a live paid entitlement.
-	payload = `{"type":"customer.subscription.deleted","created":1751716800,"data":{"object":{"customer":"cus_x"}}}`
-	if events, err = deliver(t, p, payload, sgn(payload)); err != nil || len(events) != 0 {
-		t.Fatalf("deleted with survivor = %+v, %v; want suppressed", events, err)
+	// normalized first, then suppressed only by the post-receipt resolver — a
+	// duplicate/stale subscription's deletion must not revoke a live paid
+	// entitlement, and no Stripe read happens in HandleWebhook.
+	payload = `{"id":"evt_subscription_deleted_1","type":"customer.subscription.deleted","created":1751716800,"data":{"object":{"id":"sub_deleted","customer":"cus_x"}}}`
+	if events, err = deliver(t, p, payload, sgn(payload)); err != nil || len(events) != 1 {
+		t.Fatalf("normalize deleted subscription = %+v, %v", events, err)
+	}
+	resolved, err := p.ResolveEvent(context.Background(), events[0])
+	if err != nil || resolved != nil {
+		t.Fatalf("deleted with survivor resolved = %+v, %v; want suppressed", resolved, err)
 	}
 	// With no live subscription left, the cancel folds.
 	s.subActive = false
-	if events, _ = deliver(t, p, payload, sgn(payload)); len(events) != 1 || events[0].Type != billing.EventSubscriptionCanceled {
-		t.Fatalf("subscription.deleted = %+v", events)
+	resolved, err = p.ResolveEvent(context.Background(), events[0])
+	if err != nil || resolved == nil || resolved.Type != billing.EventSubscriptionCanceled {
+		t.Fatalf("subscription.deleted resolved = %+v, %v", resolved, err)
 	}
-	// And an API failure during the survivor check must ERROR (Stripe
-	// retries), never silently ACK or emit a possibly-wrong cancel.
+	// And an API failure during the post-receipt survivor check must ERROR and
+	// leave the durable receipt pending, never emit a possibly-wrong cancel.
 	s.failNext = http.StatusInternalServerError
-	if _, err = deliver(t, p, payload, sgn(payload)); err == nil {
+	if _, err = p.ResolveEvent(context.Background(), events[0]); err == nil {
 		t.Fatal("survivor-check failure was ACKed")
 	}
 	// Unhandled types ACK with an empty batch.

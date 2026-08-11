@@ -41,8 +41,9 @@ func (c *fakeCell) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"principal": map[string]string{
-				"operator_id": "opr_" + acct,
-				"account_id":  acct,
+				"operator_id":  "opr_" + acct,
+				"account_id":   acct,
+				"account_role": "account_owner",
 			},
 		})
 		return
@@ -242,16 +243,20 @@ func TestCellAuthenticateGranularity(t *testing.T) {
 	auth := CellAuthenticate(StaticCell(url, "witself_prv_test"))
 	ctx := context.Background()
 
-	ok, err := auth(ctx, "acct_A", "opr_token_a")
+	access, ok, err := auth(ctx, "acct_A", "opr_token_a", AccountPermissionBillingManage)
 	if err != nil || !ok {
 		t.Fatalf("A's token on A = (%v, %v); want true", ok, err)
 	}
+	if access.ActorID != "opr_acct_A" || access.Role != "account_owner" ||
+		access.Permission != AccountPermissionBillingManage {
+		t.Fatalf("access = %+v", access)
+	}
 	// Different account: the cell says the token belongs to acct_A, so the
 	// CP refuses. The cross-account leak the interim dev-token had is closed.
-	if ok, _ := auth(ctx, "acct_B", "opr_token_a"); ok {
+	if _, ok, _ := auth(ctx, "acct_B", "opr_token_a", AccountPermissionBillingRead); ok {
 		t.Fatal("A's token on B was authorized — cross-account leak")
 	}
-	if ok, _ := auth(ctx, "acct_A", "bogus"); ok {
+	if _, ok, _ := auth(ctx, "acct_A", "bogus", AccountPermissionBillingRead); ok {
 		t.Fatal("invalid token was authorized")
 	}
 }
@@ -262,7 +267,7 @@ func TestCellAuthenticateGranularity(t *testing.T) {
 func TestCellAuthenticateDistinguishesTransportFromAuth(t *testing.T) {
 	// Point the resolver at a black hole to force a transport error.
 	auth := CellAuthenticate(StaticCell("http://127.0.0.1:1", "witself_prv_test"))
-	_, err := auth(context.Background(), "acct_1", "opr_x")
+	_, _, err := auth(context.Background(), "acct_1", "opr_x", AccountPermissionBillingRead)
 	if err == nil {
 		t.Fatal("transport failure must propagate as an error (→ 500), not silently 403")
 	}
@@ -270,8 +275,33 @@ func TestCellAuthenticateDistinguishesTransportFromAuth(t *testing.T) {
 	// A real 401 from the cell reads as "not authorized" (false, nil).
 	_, url := newFakeCell(t, "witself_prv_test", map[string]string{}) // no operators known
 	auth = CellAuthenticate(StaticCell(url, "witself_prv_test"))
-	ok, err := auth(context.Background(), "acct_1", "bogus")
+	_, ok, err := auth(context.Background(), "acct_1", "bogus", AccountPermissionBillingRead)
 	if err != nil || ok {
 		t.Fatalf("invalid token = (%v, %v); want (false, nil)", ok, err)
+	}
+}
+
+func TestAccountRoleAllowsBillingScopes(t *testing.T) {
+	tests := []struct {
+		role       string
+		permission AccountPermission
+		want       bool
+	}{
+		{"account_owner", AccountPermissionBillingRead, true},
+		{"account_owner", AccountPermissionBillingManage, true},
+		{"account_billing", AccountPermissionBillingRead, true},
+		{"account_billing", AccountPermissionBillingManage, true},
+		{"account_admin", AccountPermissionBillingRead, true},
+		{"account_admin", AccountPermissionBillingManage, false},
+		{"account_member", AccountPermissionBillingRead, false},
+		{"account_operator", AccountPermissionBillingRead, false},
+		{"unknown", AccountPermissionBillingManage, false},
+		{"account_owner", AccountPermission("future"), false},
+	}
+	for _, tt := range tests {
+		if got := accountRoleAllows(tt.role, tt.permission); got != tt.want {
+			t.Errorf("accountRoleAllows(%q, %q) = %v, want %v",
+				tt.role, tt.permission, got, tt.want)
+		}
 	}
 }

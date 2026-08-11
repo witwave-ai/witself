@@ -128,8 +128,8 @@ func TestPlanLifecycleTickIsAuthenticatedBoundedAndValueFree(t *testing.T) {
 	if err := Register(mux, Config{
 		Manager: manager,
 		Catalog: catalog,
-		Authenticate: func(context.Context, string, string) (bool, error) {
-			return false, nil
+		Authenticate: func(context.Context, string, string, AccountPermission) (AccountAccess, bool, error) {
+			return AccountAccess{}, false, nil
 		},
 		LifecycleObserver: observer,
 		InternalAuthenticate: func(_ context.Context, bearer string) (bool, error) {
@@ -215,8 +215,9 @@ func TestProviderlessRoutesKeepStatusAndAdminButHideBillingMutations(t *testing.
 	if err := Register(mux, Config{
 		Manager: manager,
 		Catalog: catalog,
-		Authenticate: func(_ context.Context, accountID, bearer string) (bool, error) {
-			return accountID == "acct_1" && bearer == "owner", nil
+		Authenticate: func(_ context.Context, accountID, bearer string, permission AccountPermission) (AccountAccess, bool, error) {
+			ok := accountID == "acct_1" && bearer == "owner"
+			return AccountAccess{ActorID: "opr_owner", Role: "account_owner", Permission: permission}, ok, nil
 		},
 		AdminAuthenticate: func(
 			_ context.Context,

@@ -193,6 +193,7 @@ func serve() int {
 			return ot, oid, true, nil
 		}
 		cfg.Authenticate = st.AuthenticateOperator
+		cfg.GetOperatorAccountRole = st.GetOperatorAccountRole
 		cfg.AuthenticatePrincipal = func(ctx context.Context, plaintext string) (server.DomainPrincipal, bool, error) {
 			p, ok, err := st.AuthenticatePrincipal(ctx, plaintext)
 			if err != nil || !ok {

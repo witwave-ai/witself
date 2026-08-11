@@ -232,40 +232,79 @@ func formatPlanByteLimit(plan plans.Plan, key string) string {
 	return fmt.Sprintf("%s bytes", formatPlanInteger(value))
 }
 
-// planContext resolves the account name to (accountID, operatorToken, cpURL).
-// The token is the same operator token used for cell verbs — the CP
-// introspects it against the account's cell to authorize.
-func planContext(accountName string) (accountID, token, controlPlane string, err error) {
-	_, acct, tok, err := local.Resolve(accountName)
+// planContext resolves the account and asks its current cell for the
+// authoritative billing control-plane route before forwarding the operator
+// token. Directory lookup and the value-free capability read carry no operator
+// credential. The token first authenticates to the selected account cell, then
+// goes only to the endpoint advertised by that account-verified cell.
+func planContext(
+	ctx context.Context,
+	accountName, cellEndpoint string,
+) (accountID, token, controlPlane string, err error) {
+	return planContextWithLocator(
+		ctx, accountName, cellEndpoint, client.LookupAccount,
+	)
+}
+
+func planContextWithLocator(
+	ctx context.Context,
+	accountName, cellEndpoint string,
+	locate accountLocator,
+) (accountID, token, controlPlane string, err error) {
+	name, acct, tok, err := local.Resolve(accountName)
 	if err != nil {
 		return "", "", "", err
 	}
-	cp := defaultControlPlane
-	if v := strings.TrimSpace(os.Getenv("WITSELF_CONTROL_PLANE")); v != "" {
-		cp = v
+	if strings.TrimSpace(cellEndpoint) == "" {
+		directory := defaultControlPlane
+		// Preserve the existing staging override only as an unauthenticated
+		// directory audience. The operator token still goes exclusively to the
+		// located cell and the billing endpoint that cell advertises.
+		if configured := strings.TrimSpace(os.Getenv("WITSELF_CONTROL_PLANE")); configured != "" {
+			directory = configured
+		}
+		_, cellEndpoint, err = locate(ctx, directory, acct.ID)
+		if err != nil {
+			return "", "", "", fmt.Errorf(
+				"locate account %q (%s): %w", name, acct.ID, err,
+			)
+		}
 	}
-	return acct.ID, tok, cp, nil
+	capability, err := client.GetBillingCapability(ctx, cellEndpoint, acct.ID, tok)
+	if err != nil {
+		return "", "", "", fmt.Errorf("discover billing capability: %w", err)
+	}
+	if !capability.Supported {
+		reason := strings.TrimSpace(capability.Reason)
+		if reason == "" {
+			reason = "not configured"
+		}
+		return "", "", "", fmt.Errorf("billing is not supported for this account (%s)", reason)
+	}
+	return acct.ID, tok, capability.Endpoint, nil
 }
 
 func planStatus(args []string) int {
 	fs := flag.NewFlagSet("plan status", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	account := accountFlag(fs)
+	endpoint := fs.String("endpoint", "", "account cell URL for billing capability discovery")
 	full := fs.Bool("full", false, "show the effective feature set and every known limit and policy")
 	jsonOut := jsonFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if fs.NArg() != 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself plan status [--account NAME] [--full] [--json]")
+		fmt.Fprintln(os.Stderr, "usage: witself plan status [--account NAME] [--endpoint CELL_URL] [--full] [--json]")
 		return 2
 	}
-	acctID, tok, cp, err := planContext(*account)
+	ctx := context.Background()
+	acctID, tok, cp, err := planContext(ctx, *account, *endpoint)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %s\n", planCLIColumn(err.Error()))
 		return 1
 	}
-	status, err := client.GetPlan(context.Background(), cp, acctID, tok)
+	status, err := client.GetPlan(ctx, cp, acctID, tok)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %s\n", planCLIColumn(err.Error()))
 		return 1
@@ -281,21 +320,22 @@ func planChangeCLI(verb string, args []string) int {
 	fs := flag.NewFlagSet("plan "+verb, flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	account := accountFlag(fs)
+	endpoint := fs.String("endpoint", "", "account cell URL for billing capability discovery")
 	email := fs.String("email", "", "billing email (used on first purchase)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	target := fs.Arg(0)
-	if target == "" {
-		fmt.Fprintf(os.Stderr, "usage: witself plan %s [--account NAME] [--email E] TARGET_PLAN\n", verb)
+	if fs.NArg() != 1 {
+		fmt.Fprintf(os.Stderr, "usage: witself plan %s [--account NAME] [--endpoint CELL_URL] [--email E] TARGET_PLAN\n", verb)
 		return 2
 	}
-	acctID, tok, cp, err := planContext(*account)
+	target := fs.Arg(0)
+	ctx := context.Background()
+	acctID, tok, cp, err := planContext(ctx, *account, *endpoint)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %s\n", planCLIColumn(err.Error()))
 		return 1
 	}
-	ctx := context.Background()
 	catalog, err := client.GetPlanCatalog(ctx, cp)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: read plan catalog: %s\n", planCLIColumn(err.Error()))
@@ -339,15 +379,21 @@ func planCancelCLI(args []string) int {
 	fs := flag.NewFlagSet("plan cancel", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	account := accountFlag(fs)
+	endpoint := fs.String("endpoint", "", "account cell URL for billing capability discovery")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	acctID, tok, cp, err := planContext(*account)
+	if fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "usage: witself plan cancel [--account NAME] [--endpoint CELL_URL]")
+		return 2
+	}
+	ctx := context.Background()
+	acctID, tok, cp, err := planContext(ctx, *account, *endpoint)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %s\n", planCLIColumn(err.Error()))
 		return 1
 	}
-	if err := client.CancelPlanChange(context.Background(), cp, acctID, tok); err != nil {
+	if err := client.CancelPlanChange(ctx, cp, acctID, tok); err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %s\n", planCLIColumn(err.Error()))
 		return 1
 	}
