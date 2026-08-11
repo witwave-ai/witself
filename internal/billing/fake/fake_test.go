@@ -86,6 +86,109 @@ func TestSubscribeIdempotentReplaysWithoutChargingTwice(t *testing.T) {
 	}
 }
 
+func TestSetupLinkIdempotentReplaysAndRejectsConflict(t *testing.T) {
+	f, _, id := newFake(t, true)
+	ctx := context.Background()
+
+	first, err := f.SetupLinkIdempotent(ctx, id, "bop_setup_1")
+	if err != nil || first.Done || first.URL == "" {
+		t.Fatalf("first SetupLinkIdempotent = %+v, %v", first, err)
+	}
+	second, err := f.SetupLinkIdempotent(ctx, id, "bop_setup_1")
+	if err != nil || second != first {
+		t.Fatalf("replayed SetupLinkIdempotent = %+v, %v; want %+v", second, err, first)
+	}
+	other, err := f.EnsureCustomer(ctx, "acct_2", "other@example.com")
+	if err != nil {
+		t.Fatalf("EnsureCustomer other: %v", err)
+	}
+	if _, err := f.SetupLinkIdempotent(ctx, other, "bop_setup_1"); err == nil {
+		t.Fatal("setup operation identity reused for another customer")
+	}
+}
+
+func TestDowngradeIdempotentReplaysWithoutRetargeting(t *testing.T) {
+	f, _, id := newFake(t, false)
+	ctx := context.Background()
+	if _, err := f.Subscribe(ctx, id, "team"); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	first, err := f.ScheduleDowngradeIdempotent(ctx, id, "standard", "bop_down_1")
+	if err != nil || first.IsZero() {
+		t.Fatalf("first ScheduleDowngradeIdempotent = %v, %v", first, err)
+	}
+	// A later operation retargets the pending downgrade. Replaying the old
+	// operation must return its original result without overwriting newer state.
+	if _, err := f.ScheduleDowngrade(ctx, id, "free"); err != nil {
+		t.Fatalf("retarget downgrade: %v", err)
+	}
+	second, err := f.ScheduleDowngradeIdempotent(ctx, id, "standard", "bop_down_1")
+	if err != nil || !second.Equal(first) {
+		t.Fatalf("replayed ScheduleDowngradeIdempotent = %v, %v; want %v", second, err, first)
+	}
+	if next, err := f.NextCharge(ctx, id); err != nil || next != nil {
+		t.Fatalf("old replay overwrote newer free downgrade: %+v, %v", next, err)
+	}
+	if _, err := f.ScheduleDowngradeIdempotent(ctx, id, "free", "bop_down_1"); err == nil {
+		t.Fatal("downgrade operation identity reused with another plan")
+	}
+}
+
+func TestCancelPendingIdempotentDoesNotCancelNewerWork(t *testing.T) {
+	f, _, id := newFake(t, false)
+	ctx := context.Background()
+	if _, err := f.Subscribe(ctx, id, "team"); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	if _, err := f.ScheduleDowngrade(ctx, id, "standard"); err != nil {
+		t.Fatalf("ScheduleDowngrade: %v", err)
+	}
+	if err := f.CancelPendingIdempotent(ctx, id, "bop_cancel_1"); err != nil {
+		t.Fatalf("first CancelPendingIdempotent: %v", err)
+	}
+	if err := f.CancelPendingIdempotent(ctx, id, "bop_cancel_1"); err != nil {
+		t.Fatalf("replayed CancelPendingIdempotent: %v", err)
+	}
+
+	if _, err := f.ScheduleDowngrade(ctx, id, "free"); err != nil {
+		t.Fatalf("newer ScheduleDowngrade: %v", err)
+	}
+	if err := f.CancelPendingIdempotent(ctx, id, "bop_cancel_1"); err != nil {
+		t.Fatalf("old cancellation replay: %v", err)
+	}
+	if next, err := f.NextCharge(ctx, id); err != nil || next != nil {
+		t.Fatalf("old cancellation removed newer pending work: %+v, %v", next, err)
+	}
+	other, err := f.EnsureCustomer(ctx, "acct_2", "other@example.com")
+	if err != nil {
+		t.Fatalf("EnsureCustomer other: %v", err)
+	}
+	if err := f.CancelPendingIdempotent(ctx, other, "bop_cancel_1"); err == nil {
+		t.Fatal("cancel operation identity reused for another customer")
+	}
+}
+
+func TestIdempotentOperationIDShape(t *testing.T) {
+	f, _, id := newFake(t, true)
+	ctx := context.Background()
+	for _, operationID := range []string{
+		"",
+		" leading",
+		"trailing ",
+		"slash/value",
+		"unicode-é",
+		strings.Repeat("x", 129),
+	} {
+		if _, err := f.SetupLinkIdempotent(ctx, id, operationID); err == nil {
+			t.Fatalf("SetupLinkIdempotent accepted operation id %q", operationID)
+		}
+	}
+	if _, err := f.SetupLinkIdempotent(ctx, id, strings.Repeat("x", 128)); err != nil {
+		t.Fatalf("SetupLinkIdempotent rejected 128-character normalized id: %v", err)
+	}
+}
+
 func TestInteractiveCheckoutThenHeadlessUpgrade(t *testing.T) {
 	f, _, id := newFake(t, true)
 	ctx := context.Background()

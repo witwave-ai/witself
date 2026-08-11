@@ -52,17 +52,60 @@ fact, policy, group, message, and audit) and the sealed plane (secret and TOTP).
 The metered payload spans identity usage and credential usage; the sealed-plane
 dimensions count events only and never carry secret or seed values.
 
-The dark lifecycle also persists an operation id before subscription checkout,
+The dark lifecycle requires every setup, upgrade, downgrade, and pending-change
+cancel apply request to carry an audit reason, `confirmed: true`, and an
+account-scoped `Idempotency-Key`. The control plane derives actor id and role
+from `billing:manage` authority, persists a mutation receipt before the
+provider call, and returns the operation id and replay state without exposing
+the reason or raw retry key. Retry keys are 16-128 printable ASCII characters;
+reasons are normalized single-line text from 1-512 bytes and reject control or
+bidirectional-override characters. The shared `billing:preview` route accepts
+no confirmation or key and performs policy/capability reads only: it creates
+no receipt, provider session, customer, subscription, or account row.
+
+Receipt attribution keeps the initiating actor and role immutable, but those
+fields are not retry payload: any currently authorized `billing:manage` actor
+may resume the exact request after operator or role rotation. A strict cancel
+whose targeted pending state was already resolved or changed during provider
+disarm completes with value-minimal `resolved`, not a false `cancelled` claim.
+Target-aware provider capability checks refuse unsupported downgrade targets
+before creating a receipt. The initiating account-email digest is immutable
+audit metadata, not mutation semantics, so an account-email change cannot
+strand an otherwise exact pending retry.
+
+Value-minimal account tombstones bridge the crash gap between folding account
+truth and completing the receipt. They retain the exact terminal result kind
+for both successful and raced cancellation, so recovery never touches a
+replacement pending change. If a period-end webhook resolves a downgrade after
+the provider accepted it but before its response was received, the same
+tombstone retains the exact operation, target, and effective time; retry
+completes the original `scheduled` receipt without rescheduling anything.
+
+The lifecycle also persists an operation id before subscription checkout,
 uses that id as the provider idempotency key, and durably records authenticated
 provider-event identities with a signed-body hash before folding them. Exact
-redelivery is suppressed, reuse of an event identity with different content or
-normalization fails closed, and unresolved receipt work remains indexed for
-bounded reconciliation. A short durable processing lease admits one normal
-folder at a time, and its immutable account/event/decision resolution is pinned
-before account mutation. Crash recovery therefore reuses that resolution
-without consulting provider state again. These durability controls make retries
-safer; they are not a claim that cross-replica provider mutations or every
-Stripe transition are ready for production.
+mutation replay returns the original terminal result without another provider
+call; changed semantics under one key fail with a non-retryable conflict, and
+an exact operation held by another live worker returns a retryable in-progress
+conflict. A durable per-account operation generation serializes provider work
+across replicas. Lease expiry permits the same operation to resume. A different
+operation cannot enter while the prior receipt exists and remains nonterminal,
+because an expired client lease cannot prove that an earlier provider call
+stopped. The narrow exception is an expired reservation with no receipt: the
+provider boundary cannot have been reached, so a different operation may
+advance. A late prior worker must revalidate its exact account generation and
+claim token after creating the receipt and is superseded before any provider
+call if that advance won.
+Event redelivery is suppressed, reuse of an event identity with
+different content or normalization fails closed, and unresolved provider-event
+receipt work remains indexed for bounded reconciliation. Mutation receipts are
+currently recovered by an exact caller retry; a bounded pending index and
+reconciler are still required before activation. A short durable processing lease
+admits one normal folder at a time, and its immutable account/event/decision
+resolution is pinned before account mutation. Crash recovery therefore reuses
+that resolution without consulting provider state again. These durability
+controls make retries safer; they are not a claim that every Stripe transition
+is ready for production.
 
 Production payment activation remains gated on an explicit operational and
 security review. Account billing reads and mutations now derive distinct
@@ -70,21 +113,31 @@ security review. Account billing reads and mutations now derive distinct
 account role; older cells that omit the role fail closed. At minimum,
 activation must replace timestamp-only entitlement ordering with an
 authoritative subscription projection, scope dunning to the exact managed
-subscription, durably audit customer billing mutations with actor, reason, and
-confirmation,
-reconcile restored control-plane state against provider truth, provide a real
-downgrade fit checker, and implement the Team usage-billing policy. It must also
-make setup-session creation idempotent, compensate partial multi-subscription
-downgrades, define deterministic ordering for conflicting provider events with
-equal timestamps, and retain completed receipts under an explicit bounded
-policy without ever deleting unresolved work. Rolling activation requires a
-control-plane writer floor that preserves the new operation fields and an
-exclusive webhook/reconciler cutover to the receipt-v2 writers; an older binary
-can bypass or erase these fences. The account fold also needs a durable
-equal-time event fence. The cross-replica replacement path additionally needs
-exact provider-object cancellation or a distributed provider-mutation fence.
-Provider secrets, webhook registration, deployment gates, and a production
-rollback exercise are separate human-controlled rollout steps.
+subscription, reconcile restored control-plane state against provider truth,
+provide a real downgrade fit checker, and implement the Team usage-billing
+policy. It must also compensate partial multi-subscription downgrades, define
+deterministic ordering for conflicting provider events with equal timestamps,
+and retain completed receipts under an explicit bounded policy without ever
+deleting unresolved work. A production reconciler must resolve pending work
+before the provider's idempotency horizon can expire, and hosted-action receipts
+need explicit expiry/refresh behavior rather than replaying a stale URL forever.
+
+This mutation surface remains dark until a rolling-writer floor is enforced:
+every control-plane replica capable of receiving a billing write must preserve
+the receipt/envelope version, actor, confirmation, request digest, and
+idempotency fence. Old writers must be drained or blocked before billing is
+enabled; route availability alone is not an activation signal. Webhook and
+reconciler writers must cut over exclusively with that floor because an older
+binary can bypass or erase the new fences. The account fold also needs a durable
+equal-time event fence. The cross-replica mutation fence is implemented, but
+production replacement still requires authoritative subscription projection
+and exact provider-object cancellation rather than discovery from a bounded
+list. Mutation receipts also need explicit bounded retention that never removes
+unresolved work, plus a reconciler/operator path that can terminalize a
+provider-declared deterministic failure without guessing that an ambiguous
+failure had no side effect. Provider secrets, webhook registration, deployment
+gates, and a production rollback exercise are separate human-controlled rollout
+steps.
 
 The implemented transcript-usage slice is deliberately upstream of this
 billing design: immutable `usage_events` plus hourly/daily `usage_rollups` move

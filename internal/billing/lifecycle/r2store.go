@@ -3,11 +3,14 @@ package lifecycle
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -35,6 +38,7 @@ type R2Store struct {
 
 var _ Store = (*R2Store)(nil)
 var _ EventReceiptStore = (*R2Store)(nil)
+var _ BillingMutationStore = (*R2Store)(nil)
 
 type r2PendingEventIndex struct {
 	SchemaVersion int      `json:"schema_version"`
@@ -118,6 +122,17 @@ func (s *R2Store) eventReceiptKey(provider, eventID string) string {
 func (s *R2Store) pendingEventIndexKey(provider, customerID string) string {
 	return s.prefix + "billing-events/pending/" +
 		eventReceiptCustomerKey(provider, customerID) + ".json"
+}
+
+func (s *R2Store) billingMutationReceiptKey(operationID string) string {
+	return s.prefix + "billing-mutations/receipts/" +
+		base64.RawURLEncoding.EncodeToString([]byte(operationID)) + ".json"
+}
+
+func (s *R2Store) billingMutationAccountKey(accountID string) string {
+	digest := sha256.Sum256([]byte(accountID))
+	return s.prefix + "billing-mutations/accounts/" +
+		hex.EncodeToString(digest[:]) + ".json"
 }
 
 // Get implements Store.
@@ -239,6 +254,669 @@ func (s *R2Store) List(ctx context.Context) ([]Record, error) {
 		out = append(out, r)
 	}
 	return out, nil
+}
+
+// ClaimBillingMutationAccount uses one hashed per-account object as the
+// distributed provider-mutation lane. The account id is verified inside the
+// object, while no raw account identifier appears in the R2 key.
+func (s *R2Store) ClaimBillingMutationAccount(
+	ctx context.Context,
+	accountID, operationID string,
+	expectedOperationGeneration int64,
+	claimToken string,
+	now, leaseExpiresAt time.Time,
+) (BillingAccountMutationLease, bool, error) {
+	if err := validateBillingAccountMutationClaimRequest(
+		accountID, operationID, expectedOperationGeneration,
+		claimToken, now, leaseExpiresAt); err != nil {
+		return BillingAccountMutationLease{}, false, err
+	}
+	key := s.billingMutationAccountKey(accountID)
+	for range casAttempts {
+		data, etag, err := s.c.Get(ctx, key)
+		if errors.Is(err, blob.ErrNotFound) {
+			if expectedOperationGeneration > 0 {
+				return BillingAccountMutationLease{}, false,
+					ErrBillingMutationSuperseded
+			}
+			expires := leaseExpiresAt.UTC()
+			lease := BillingAccountMutationLease{
+				SchemaVersion: billingAccountMutationLeaseSchemaVersion,
+				AccountID:     accountID, OperationID: operationID,
+				OperationGeneration: 1, ClaimToken: claimToken,
+				ClaimGeneration: 1, LeaseExpiresAt: &expires,
+				UpdatedAt: now.UTC(), Version: 1,
+			}
+			encoded, encodeErr := json.Marshal(lease)
+			if encodeErr != nil {
+				return BillingAccountMutationLease{}, false, fmt.Errorf(
+					"billing account mutation lease: encode create: %w", encodeErr)
+			}
+			_, putErr := s.c.Put(
+				ctx, key, encoded, blob.Cond{IfNoneMatchAny: true})
+			if errors.Is(putErr, blob.ErrPrecondition) {
+				continue
+			}
+			if putErr != nil {
+				return BillingAccountMutationLease{}, false, putErr
+			}
+			return cloneBillingAccountMutationLease(lease), true, nil
+		}
+		if err != nil {
+			return BillingAccountMutationLease{}, false, err
+		}
+		var current BillingAccountMutationLease
+		if err := json.Unmarshal(data, &current); err != nil {
+			return BillingAccountMutationLease{}, false, fmt.Errorf(
+				"billing account mutation lease: decode for claim: %w", err)
+		}
+		if err := validateBillingAccountMutationLease(current); err != nil {
+			return BillingAccountMutationLease{}, false, fmt.Errorf(
+				"billing account mutation lease: invalid stored lease: %w", err)
+		}
+		if current.AccountID != accountID {
+			return BillingAccountMutationLease{}, false, ErrBillingMutationConflict
+		}
+		if expectedOperationGeneration > 0 {
+			if current.OperationID != operationID ||
+				current.OperationGeneration != expectedOperationGeneration {
+				return BillingAccountMutationLease{}, false,
+					ErrBillingMutationSuperseded
+			}
+		} else if billingAccountMutationLeaseLive(current, now) {
+			if current.OperationID == operationID && current.ClaimToken == claimToken {
+				return cloneBillingAccountMutationLease(current), true, nil
+			}
+			return cloneBillingAccountMutationLease(current), false, nil
+		}
+		if billingAccountMutationLeaseLive(current, now) {
+			if current.ClaimToken != claimToken {
+				return cloneBillingAccountMutationLease(current), false, nil
+			}
+			if expectedOperationGeneration == 0 {
+				return cloneBillingAccountMutationLease(current), true, nil
+			}
+			// The post-receipt exact-generation handshake must touch this ETag
+			// even while its original same-token lease appears live. A contender
+			// may already have observed the separate receipt key as absent; only
+			// one of its lane advance and this renewal may win the CAS.
+		}
+		if expectedOperationGeneration == 0 &&
+			current.OperationID != operationID {
+			prior, ok, priorErr := s.GetBillingMutation(ctx, current.OperationID)
+			if priorErr != nil {
+				return BillingAccountMutationLease{}, false, priorErr
+			}
+			if ok {
+				if prior.AccountID != accountID ||
+					prior.AccountGeneration != current.OperationGeneration {
+					return BillingAccountMutationLease{}, false,
+						ErrBillingMutationConflict
+				}
+				if !billingMutationReceiptTerminal(prior) {
+					return cloneBillingAccountMutationLease(current), false, nil
+				}
+				if now.Before(prior.UpdatedAt) {
+					return BillingAccountMutationLease{}, false, errors.New(
+						"billing account mutation lease: claim time predates prior terminal receipt")
+				}
+			}
+			// Receipt creation and this lane CAS are separate objects. A missing
+			// receipt permits an idle reservation to advance; a late old worker
+			// must revalidate its exact generation after receipt creation and will
+			// lose to this ETag transition before any provider call.
+		}
+		if now.Before(current.UpdatedAt) {
+			return BillingAccountMutationLease{}, false, errors.New(
+				"billing account mutation lease: claim time predates current state")
+		}
+		expires := leaseExpiresAt.UTC()
+		if current.ClaimGeneration == math.MaxInt64 ||
+			current.Version == math.MaxInt64 {
+			return BillingAccountMutationLease{}, false, errors.New(
+				"billing account mutation lease: counter overflow")
+		}
+		if expectedOperationGeneration == 0 {
+			if current.OperationID != operationID {
+				if current.OperationGeneration == math.MaxInt64 {
+					return BillingAccountMutationLease{}, false, errors.New(
+						"billing account mutation lease: operation generation overflow")
+				}
+				current.OperationID = operationID
+				current.OperationGeneration++
+			}
+		}
+		current.ClaimToken = claimToken
+		current.ClaimGeneration++
+		current.LeaseExpiresAt = &expires
+		current.UpdatedAt = now.UTC()
+		current.Version++
+		if err := validateBillingAccountMutationLease(current); err != nil {
+			return BillingAccountMutationLease{}, false, err
+		}
+		encoded, err := json.Marshal(current)
+		if err != nil {
+			return BillingAccountMutationLease{}, false, fmt.Errorf(
+				"billing account mutation lease: encode claim: %w", err)
+		}
+		_, err = s.c.Put(ctx, key, encoded, blob.Cond{IfMatch: etag})
+		if errors.Is(err, blob.ErrPrecondition) {
+			continue
+		}
+		if err != nil {
+			return BillingAccountMutationLease{}, false, err
+		}
+		return cloneBillingAccountMutationLease(current), true, nil
+	}
+	return BillingAccountMutationLease{}, false, errors.New(
+		"billing account mutation lease: claim has too much contention")
+}
+
+// ReleaseBillingMutationAccount clears only the exact operation and claim
+// generations returned by ClaimBillingMutationAccount.
+func (s *R2Store) ReleaseBillingMutationAccount(
+	ctx context.Context,
+	lease BillingAccountMutationLease,
+	releasedAt time.Time,
+) error {
+	if err := validateBillingAccountMutationLease(lease); err != nil {
+		return err
+	}
+	if lease.ClaimToken == "" || releasedAt.IsZero() {
+		return errors.New(
+			"billing account mutation lease: release requires a claim and timestamp")
+	}
+	key := s.billingMutationAccountKey(lease.AccountID)
+	for range casAttempts {
+		data, etag, err := s.c.Get(ctx, key)
+		if errors.Is(err, blob.ErrNotFound) {
+			return ErrBillingMutationSuperseded
+		}
+		if err != nil {
+			return err
+		}
+		var current BillingAccountMutationLease
+		if err := json.Unmarshal(data, &current); err != nil {
+			return fmt.Errorf(
+				"billing account mutation lease: decode for release: %w", err)
+		}
+		if err := validateBillingAccountMutationLease(current); err != nil {
+			return fmt.Errorf(
+				"billing account mutation lease: invalid stored lease: %w", err)
+		}
+		if current.AccountID != lease.AccountID {
+			return ErrBillingMutationConflict
+		}
+		if current.OperationID != lease.OperationID ||
+			current.OperationGeneration != lease.OperationGeneration {
+			return ErrBillingMutationSuperseded
+		}
+		if current.ClaimToken == "" &&
+			current.ClaimGeneration == lease.ClaimGeneration {
+			return nil
+		}
+		if !billingAccountMutationClaimMatches(current, lease) {
+			return ErrBillingMutationClaimLost
+		}
+		if releasedAt.Before(current.UpdatedAt) {
+			return errors.New(
+				"billing account mutation lease: release time predates current state")
+		}
+		if current.Version == math.MaxInt64 {
+			return errors.New("billing account mutation lease: version overflow")
+		}
+		current.ClaimToken = ""
+		current.LeaseExpiresAt = nil
+		current.UpdatedAt = releasedAt.UTC()
+		current.Version++
+		if err := validateBillingAccountMutationLease(current); err != nil {
+			return err
+		}
+		encoded, err := json.Marshal(current)
+		if err != nil {
+			return fmt.Errorf(
+				"billing account mutation lease: encode release: %w", err)
+		}
+		_, err = s.c.Put(ctx, key, encoded, blob.Cond{IfMatch: etag})
+		if errors.Is(err, blob.ErrPrecondition) {
+			continue
+		}
+		return err
+	}
+	return errors.New(
+		"billing account mutation lease: release has too much contention")
+}
+
+// GetBillingMutation reads one direct operation receipt without changing its
+// claim or terminal replay state.
+func (s *R2Store) GetBillingMutation(
+	ctx context.Context,
+	operationID string,
+) (BillingMutationReceipt, bool, error) {
+	if !validBillingMutationOperationID(operationID) {
+		return BillingMutationReceipt{}, false, errors.New(
+			"billing mutation receipt: invalid operation id")
+	}
+	data, _, err := s.c.Get(ctx, s.billingMutationReceiptKey(operationID))
+	if errors.Is(err, blob.ErrNotFound) {
+		return BillingMutationReceipt{}, false, nil
+	}
+	if err != nil {
+		return BillingMutationReceipt{}, false, err
+	}
+	var receipt BillingMutationReceipt
+	if err := json.Unmarshal(data, &receipt); err != nil {
+		return BillingMutationReceipt{}, false, fmt.Errorf(
+			"billing mutation receipt: decode: %w", err)
+	}
+	if err := validateBillingMutationReceipt(receipt); err != nil {
+		return BillingMutationReceipt{}, false, fmt.Errorf(
+			"billing mutation receipt: invalid stored receipt: %w", err)
+	}
+	if receipt.OperationID != operationID {
+		return BillingMutationReceipt{}, false, ErrBillingMutationConflict
+	}
+	return cloneBillingMutationReceipt(receipt), true, nil
+}
+
+// ReceiveBillingMutation implements create-only operation identity directly
+// on the globally unique operation id. Exact replay returns the stored receipt;
+// changed immutable request semantics fail closed.
+func (s *R2Store) ReceiveBillingMutation(
+	ctx context.Context,
+	receipt BillingMutationReceipt,
+) (BillingMutationReceipt, bool, error) {
+	if err := validateBillingMutationReceipt(receipt); err != nil {
+		return BillingMutationReceipt{}, false, err
+	}
+	if receipt.Version != 0 || receipt.Status != BillingMutationPending ||
+		receipt.Result != nil || receipt.ClaimToken != "" ||
+		receipt.ClaimGeneration != 0 {
+		return BillingMutationReceipt{}, false, errors.New(
+			"billing mutation receipt: new receipt must be unclaimed pending at version zero")
+	}
+	key := s.billingMutationReceiptKey(receipt.OperationID)
+	stored := receipt
+	stored.Version = 1
+	data, err := json.Marshal(stored)
+	if err != nil {
+		return BillingMutationReceipt{}, false, fmt.Errorf(
+			"billing mutation receipt: encode: %w", err)
+	}
+	if _, err := s.c.Put(
+		ctx, key, data, blob.Cond{IfNoneMatchAny: true}); err == nil {
+		return cloneBillingMutationReceipt(stored), true, nil
+	} else if !errors.Is(err, blob.ErrPrecondition) {
+		return BillingMutationReceipt{}, false, err
+	}
+	data, _, err = s.c.Get(ctx, key)
+	if err != nil {
+		return BillingMutationReceipt{}, false, err
+	}
+	if err := json.Unmarshal(data, &stored); err != nil {
+		return BillingMutationReceipt{}, false, fmt.Errorf(
+			"billing mutation receipt: decode existing: %w", err)
+	}
+	if err := validateBillingMutationReceipt(stored); err != nil {
+		return BillingMutationReceipt{}, false, fmt.Errorf(
+			"billing mutation receipt: invalid existing receipt: %w", err)
+	}
+	if !sameBillingMutationIdentity(stored, receipt) {
+		return BillingMutationReceipt{}, false, fmt.Errorf(
+			"%w: operation=%s", ErrBillingMutationConflict,
+			receipt.OperationID)
+	}
+	return cloneBillingMutationReceipt(stored), false, nil
+}
+
+// ClaimBillingMutation uses the receipt object's ETag as the distributed claim
+// CAS. Expired or released claims advance generation before a successor folds.
+func (s *R2Store) ClaimBillingMutation(
+	ctx context.Context,
+	receipt BillingMutationReceipt,
+	claimToken string,
+	now, leaseExpiresAt time.Time,
+) (BillingMutationReceipt, bool, error) {
+	if err := validateBillingMutationReceipt(receipt); err != nil {
+		return BillingMutationReceipt{}, false, err
+	}
+	if err := validateBillingMutationClaimRequest(
+		claimToken, now, leaseExpiresAt); err != nil {
+		return BillingMutationReceipt{}, false, err
+	}
+	key := s.billingMutationReceiptKey(receipt.OperationID)
+	for range casAttempts {
+		data, etag, err := s.c.Get(ctx, key)
+		if err != nil {
+			return BillingMutationReceipt{}, false, err
+		}
+		var current BillingMutationReceipt
+		if err := json.Unmarshal(data, &current); err != nil {
+			return BillingMutationReceipt{}, false, fmt.Errorf(
+				"billing mutation receipt: decode for claim: %w", err)
+		}
+		if err := validateBillingMutationReceipt(current); err != nil {
+			return BillingMutationReceipt{}, false, fmt.Errorf(
+				"billing mutation receipt: invalid receipt for claim: %w", err)
+		}
+		if !sameBillingMutationIdentity(current, receipt) {
+			return BillingMutationReceipt{}, false, ErrBillingMutationConflict
+		}
+		if current.Status == BillingMutationCompleted {
+			return cloneBillingMutationReceipt(current), false, nil
+		}
+		if current.Status == BillingMutationSuperseded {
+			return BillingMutationReceipt{}, false, ErrBillingMutationSuperseded
+		}
+		if current.ClaimToken == claimToken && current.LeaseExpiresAt != nil &&
+			now.Before(*current.LeaseExpiresAt) {
+			return cloneBillingMutationReceipt(current), true, nil
+		}
+		if current.ClaimToken != "" && current.LeaseExpiresAt != nil &&
+			now.Before(*current.LeaseExpiresAt) {
+			return cloneBillingMutationReceipt(current), false, nil
+		}
+		if now.Before(current.UpdatedAt) {
+			return BillingMutationReceipt{}, false, errors.New(
+				"billing mutation receipt: claim time predates current state")
+		}
+		if current.ClaimGeneration == math.MaxInt64 ||
+			current.Version == math.MaxInt64 {
+			return BillingMutationReceipt{}, false, errors.New(
+				"billing mutation receipt: counter overflow")
+		}
+		expires := leaseExpiresAt.UTC()
+		current.ClaimToken = claimToken
+		current.ClaimGeneration++
+		current.LeaseExpiresAt = &expires
+		current.UpdatedAt = now.UTC()
+		current.Version++
+		if err := validateBillingMutationReceipt(current); err != nil {
+			return BillingMutationReceipt{}, false, err
+		}
+		encoded, err := json.Marshal(current)
+		if err != nil {
+			return BillingMutationReceipt{}, false, fmt.Errorf(
+				"billing mutation receipt: encode claim: %w", err)
+		}
+		_, err = s.c.Put(ctx, key, encoded, blob.Cond{IfMatch: etag})
+		if errors.Is(err, blob.ErrPrecondition) {
+			continue
+		}
+		if err != nil {
+			return BillingMutationReceipt{}, false, err
+		}
+		return cloneBillingMutationReceipt(current), true, nil
+	}
+	return BillingMutationReceipt{}, false, errors.New(
+		"billing mutation receipt: claim has too much contention")
+}
+
+// CompleteBillingMutation pins one immutable allowlisted result and clears the
+// exact processing claim in the same receipt CAS.
+func (s *R2Store) CompleteBillingMutation(
+	ctx context.Context,
+	receipt BillingMutationReceipt,
+	result BillingMutationResult,
+	completedAt time.Time,
+) (BillingMutationReceipt, error) {
+	if err := validateBillingMutationReceipt(receipt); err != nil {
+		return BillingMutationReceipt{}, err
+	}
+	if err := validateBillingMutationResultForOperation(
+		receipt.Operation, receipt.TargetPlan, result); err != nil {
+		return BillingMutationReceipt{}, err
+	}
+	if completedAt.IsZero() {
+		return BillingMutationReceipt{}, errors.New(
+			"billing mutation receipt: completed_at is required")
+	}
+	key := s.billingMutationReceiptKey(receipt.OperationID)
+	for range casAttempts {
+		data, etag, err := s.c.Get(ctx, key)
+		if err != nil {
+			return BillingMutationReceipt{}, err
+		}
+		var current BillingMutationReceipt
+		if err := json.Unmarshal(data, &current); err != nil {
+			return BillingMutationReceipt{}, fmt.Errorf(
+				"billing mutation receipt: decode for completion: %w", err)
+		}
+		if err := validateBillingMutationReceipt(current); err != nil {
+			return BillingMutationReceipt{}, fmt.Errorf(
+				"billing mutation receipt: invalid receipt for completion: %w", err)
+		}
+		if !sameBillingMutationIdentity(current, receipt) {
+			return BillingMutationReceipt{}, ErrBillingMutationConflict
+		}
+		if current.Status == BillingMutationCompleted {
+			if current.Result == nil ||
+				!sameBillingMutationResult(*current.Result, result) {
+				return BillingMutationReceipt{}, fmt.Errorf(
+					"%w: terminal result mismatch", ErrBillingMutationConflict)
+			}
+			return cloneBillingMutationReceipt(current), nil
+		}
+		if current.Status == BillingMutationSuperseded {
+			return BillingMutationReceipt{}, ErrBillingMutationSuperseded
+		}
+		if !billingMutationClaimMatches(current, receipt) {
+			return BillingMutationReceipt{}, ErrBillingMutationClaimLost
+		}
+		if completedAt.Before(current.UpdatedAt) {
+			return BillingMutationReceipt{}, errors.New(
+				"billing mutation receipt: completion time predates current state")
+		}
+		if current.Version == math.MaxInt64 {
+			return BillingMutationReceipt{}, errors.New(
+				"billing mutation receipt: version overflow")
+		}
+		at := completedAt.UTC()
+		resultCopy := cloneBillingMutationResult(result)
+		current.Status = BillingMutationCompleted
+		current.Result = &resultCopy
+		current.ClaimToken = ""
+		current.LeaseExpiresAt = nil
+		current.UpdatedAt = at
+		current.CompletedAt = &at
+		current.Version++
+		if err := validateBillingMutationReceipt(current); err != nil {
+			return BillingMutationReceipt{}, err
+		}
+		encoded, err := json.Marshal(current)
+		if err != nil {
+			return BillingMutationReceipt{}, fmt.Errorf(
+				"billing mutation receipt: encode completion: %w", err)
+		}
+		_, err = s.c.Put(ctx, key, encoded, blob.Cond{IfMatch: etag})
+		if errors.Is(err, blob.ErrPrecondition) {
+			continue
+		}
+		if err != nil {
+			return BillingMutationReceipt{}, err
+		}
+		return cloneBillingMutationReceipt(current), nil
+	}
+	return BillingMutationReceipt{}, errors.New(
+		"billing mutation receipt: completion has too much contention")
+}
+
+// SupersedeBillingMutation retires an older receipt with an ETag CAS after its
+// processing claim is absent or expired.
+func (s *R2Store) SupersedeBillingMutation(
+	ctx context.Context,
+	receipt BillingMutationReceipt,
+	supersededAt time.Time,
+) (BillingMutationReceipt, error) {
+	if err := validateBillingMutationReceipt(receipt); err != nil {
+		return BillingMutationReceipt{}, err
+	}
+	if supersededAt.IsZero() {
+		return BillingMutationReceipt{}, errors.New(
+			"billing mutation receipt: superseded_at is required")
+	}
+	key := s.billingMutationReceiptKey(receipt.OperationID)
+	for range casAttempts {
+		data, etag, err := s.c.Get(ctx, key)
+		if err != nil {
+			return BillingMutationReceipt{}, err
+		}
+		var current BillingMutationReceipt
+		if err := json.Unmarshal(data, &current); err != nil {
+			return BillingMutationReceipt{}, fmt.Errorf(
+				"billing mutation receipt: decode for supersede: %w", err)
+		}
+		if err := validateBillingMutationReceipt(current); err != nil {
+			return BillingMutationReceipt{}, fmt.Errorf(
+				"billing mutation receipt: invalid receipt for supersede: %w", err)
+		}
+		if !sameBillingMutationIdentity(current, receipt) {
+			return BillingMutationReceipt{}, ErrBillingMutationConflict
+		}
+		switch current.Status {
+		case BillingMutationSuperseded:
+			return cloneBillingMutationReceipt(current), nil
+		case BillingMutationCompleted:
+			return BillingMutationReceipt{}, ErrBillingMutationConflict
+		}
+		laneData, _, laneErr := s.c.Get(
+			ctx, s.billingMutationAccountKey(current.AccountID))
+		if errors.Is(laneErr, blob.ErrNotFound) {
+			return BillingMutationReceipt{}, ErrBillingMutationConflict
+		}
+		if laneErr != nil {
+			return BillingMutationReceipt{}, laneErr
+		}
+		var lane BillingAccountMutationLease
+		if err := json.Unmarshal(laneData, &lane); err != nil {
+			return BillingMutationReceipt{}, fmt.Errorf(
+				"billing account mutation lease: decode for supersede: %w", err)
+		}
+		if err := validateBillingAccountMutationLease(lane); err != nil {
+			return BillingMutationReceipt{}, err
+		}
+		if lane.AccountID != current.AccountID ||
+			lane.OperationGeneration <= current.AccountGeneration ||
+			lane.OperationID == current.OperationID {
+			return BillingMutationReceipt{}, ErrBillingMutationConflict
+		}
+		if supersededAt.Before(lane.UpdatedAt) {
+			return BillingMutationReceipt{}, errors.New(
+				"billing mutation receipt: supersede time predates superseding account lane")
+		}
+		if current.ClaimToken != "" && current.LeaseExpiresAt != nil &&
+			supersededAt.Before(*current.LeaseExpiresAt) {
+			return BillingMutationReceipt{}, ErrBillingMutationClaimActive
+		}
+		if supersededAt.Before(current.UpdatedAt) {
+			return BillingMutationReceipt{}, errors.New(
+				"billing mutation receipt: supersede time predates current state")
+		}
+		if current.Version == math.MaxInt64 {
+			return BillingMutationReceipt{}, errors.New(
+				"billing mutation receipt: version overflow")
+		}
+		at := supersededAt.UTC()
+		current.Status = BillingMutationSuperseded
+		current.Result = nil
+		current.ClaimToken = ""
+		current.LeaseExpiresAt = nil
+		current.UpdatedAt = at
+		current.CompletedAt = &at
+		current.SupersededByOperationID = lane.OperationID
+		current.Version++
+		if err := validateBillingMutationReceipt(current); err != nil {
+			return BillingMutationReceipt{}, err
+		}
+		encoded, err := json.Marshal(current)
+		if err != nil {
+			return BillingMutationReceipt{}, fmt.Errorf(
+				"billing mutation receipt: encode supersede: %w", err)
+		}
+		_, err = s.c.Put(ctx, key, encoded, blob.Cond{IfMatch: etag})
+		if errors.Is(err, blob.ErrPrecondition) {
+			continue
+		}
+		if err != nil {
+			return BillingMutationReceipt{}, err
+		}
+		return cloneBillingMutationReceipt(current), nil
+	}
+	return BillingMutationReceipt{}, errors.New(
+		"billing mutation receipt: supersede has too much contention")
+}
+
+// ReleaseBillingMutation relinquishes only the exact claim generation. A
+// repeated release after an ambiguous acknowledgement is idempotent.
+func (s *R2Store) ReleaseBillingMutation(
+	ctx context.Context,
+	receipt BillingMutationReceipt,
+	releasedAt time.Time,
+) error {
+	if err := validateBillingMutationReceipt(receipt); err != nil {
+		return err
+	}
+	if receipt.ClaimToken == "" || receipt.ClaimGeneration < 1 ||
+		releasedAt.IsZero() {
+		return errors.New("billing mutation receipt: release requires a claim and timestamp")
+	}
+	key := s.billingMutationReceiptKey(receipt.OperationID)
+	for range casAttempts {
+		data, etag, err := s.c.Get(ctx, key)
+		if err != nil {
+			return err
+		}
+		var current BillingMutationReceipt
+		if err := json.Unmarshal(data, &current); err != nil {
+			return fmt.Errorf(
+				"billing mutation receipt: decode for release: %w", err)
+		}
+		if err := validateBillingMutationReceipt(current); err != nil {
+			return fmt.Errorf(
+				"billing mutation receipt: invalid receipt for release: %w", err)
+		}
+		if !sameBillingMutationIdentity(current, receipt) {
+			return ErrBillingMutationConflict
+		}
+		if current.Status == BillingMutationCompleted {
+			return nil
+		}
+		if current.Status == BillingMutationSuperseded {
+			return nil
+		}
+		if current.ClaimToken == "" &&
+			current.ClaimGeneration == receipt.ClaimGeneration {
+			return nil
+		}
+		if !billingMutationClaimMatches(current, receipt) {
+			return ErrBillingMutationClaimLost
+		}
+		if releasedAt.Before(current.UpdatedAt) {
+			return errors.New(
+				"billing mutation receipt: release time predates current state")
+		}
+		if current.Version == math.MaxInt64 {
+			return errors.New("billing mutation receipt: version overflow")
+		}
+		current.ClaimToken = ""
+		current.LeaseExpiresAt = nil
+		current.UpdatedAt = releasedAt.UTC()
+		current.Version++
+		if err := validateBillingMutationReceipt(current); err != nil {
+			return err
+		}
+		encoded, err := json.Marshal(current)
+		if err != nil {
+			return fmt.Errorf(
+				"billing mutation receipt: encode release: %w", err)
+		}
+		_, err = s.c.Put(ctx, key, encoded, blob.Cond{IfMatch: etag})
+		if errors.Is(err, blob.ErrPrecondition) {
+			continue
+		}
+		return err
+	}
+	return errors.New("billing mutation receipt: release has too much contention")
 }
 
 // ReceiveEvent implements EventReceiptStore. The receipt is create-only by

@@ -134,6 +134,8 @@ func Register(mux *http.ServeMux, cfg Config) error {
 		withAccount(cfg, AccountPermissionBillingRead, billingPayments))
 	mux.HandleFunc("POST /v1/accounts/{id}/billing:portal",
 		withAccount(cfg, AccountPermissionBillingManage, billingPortal))
+	mux.HandleFunc("POST /v1/accounts/{id}/billing:preview",
+		withAccount(cfg, AccountPermissionBillingManage, billingPreview))
 	mux.HandleFunc("POST /v1/accounts/{id}/billing:setup",
 		withAccount(cfg, AccountPermissionBillingManage, billingSetup))
 	if cfg.Manager.BillingAvailable() {
@@ -514,15 +516,68 @@ func billingPayments(cfg Config, w http.ResponseWriter, r *http.Request, account
 	})
 }
 
-func billingSetup(cfg Config, w http.ResponseWriter, r *http.Request, accountID string, _ AccountAccess) {
+func billingPreview(cfg Config, w http.ResponseWriter, r *http.Request, accountID string, _ AccountAccess) {
 	w.Header().Set("Cache-Control", "no-store")
-	action, err := cfg.Manager.CreateBillingSetup(
-		r.Context(), accountID, r.Header.Get("X-Witself-Email"))
-	if err != nil {
-		writeBillingManagerError(w, err)
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	if len(r.Header.Values("Idempotency-Key")) != 0 {
+		writeBillingMutationEnvelopeError(w,
+			"Idempotency-Key is not accepted for a billing preview")
 		return
 	}
-	writeBillingAction(w, action)
+	var req struct {
+		Operation lifecycle.BillingMutationOperation `json:"operation"`
+		Plan      string                             `json:"plan,omitempty"`
+		Reason    string                             `json:"reason"`
+	}
+	if err := decodeStrictJSON(r, &req); err != nil {
+		writeBillingMutationEnvelopeError(w, "a strict billing preview body is required")
+		return
+	}
+	command := lifecycle.BillingMutationCommand{
+		Operation: req.Operation,
+		Plan:      strings.TrimSpace(req.Plan),
+		Reason:    strings.TrimSpace(req.Reason),
+	}
+	if err := validateBillingMutationEnvelope(command, false); err != nil {
+		writeBillingMutationEnvelopeError(w, err.Error())
+		return
+	}
+	preview, err := cfg.Manager.PreviewBillingMutation(
+		r.Context(), accountID, r.Header.Get("X-Witself-Email"), command)
+	if err != nil {
+		writeBillingMutationManagerError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"schema_version":        "witself.v0",
+		"operation":             preview.Operation,
+		"plan":                  preview.Plan,
+		"allowed":               preview.Allowed,
+		"confirmation_required": preview.ConfirmationRequired,
+		"effects":               preview.Effects,
+		"violations":            preview.Violations,
+	})
+}
+
+func billingSetup(cfg Config, w http.ResponseWriter, r *http.Request, accountID string, access AccountAccess) {
+	w.Header().Set("Cache-Control", "no-store")
+	command, err := decodeBillingMutationApply(
+		w, r, lifecycle.BillingMutationSetup, false)
+	if err != nil {
+		return
+	}
+	if !cfg.Manager.BillingAvailable() {
+		writeBillingManagerError(w, lifecycle.ErrBillingUnavailable)
+		return
+	}
+	execution, err := cfg.Manager.ExecuteBillingMutation(
+		r.Context(), accountID, r.Header.Get("X-Witself-Email"),
+		billingActor(access), command)
+	if err != nil {
+		writeBillingMutationManagerError(w, err)
+		return
+	}
+	writeBillingMutationExecution(w, execution)
 }
 
 func billingPortal(cfg Config, w http.ResponseWriter, r *http.Request, accountID string, _ AccountAccess) {
@@ -1397,71 +1452,180 @@ func adminDeleteLimitOverride(
 	writeAdminAccountPolicy(cfg, w, r, accountID, true, dimension)
 }
 
-// decodePlan reads the {"plan": "..."} body the change verbs share.
-func decodePlan(r *http.Request) (string, error) {
-	var req struct {
-		Plan string `json:"plan"`
+func decodeBillingMutationApply(
+	w http.ResponseWriter,
+	r *http.Request,
+	operation lifecycle.BillingMutationOperation,
+	planRequired bool,
+) (lifecycle.BillingMutationCommand, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	values := r.Header.Values("Idempotency-Key")
+	if len(values) != 1 || strings.TrimSpace(values[0]) == "" ||
+		values[0] != strings.TrimSpace(values[0]) {
+		writeBillingMutationEnvelopeError(w,
+			"exactly one non-empty Idempotency-Key header is required")
+		return lifecycle.BillingMutationCommand{}, errors.New("invalid idempotency key")
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Plan) == "" {
-		return "", fmt.Errorf("a plan is required")
+	command := lifecycle.BillingMutationCommand{
+		Operation: operation, Confirmed: true,
+		IdempotencyKey: values[0],
 	}
-	return strings.TrimSpace(req.Plan), nil
+	if planRequired {
+		var req struct {
+			Plan      string `json:"plan"`
+			Reason    string `json:"reason"`
+			Confirmed bool   `json:"confirmed"`
+		}
+		if err := decodeStrictJSON(r, &req); err != nil {
+			writeBillingMutationEnvelopeError(w,
+				"a strict plan, reason, and confirmed body is required")
+			return lifecycle.BillingMutationCommand{}, err
+		}
+		command.Plan = strings.TrimSpace(req.Plan)
+		command.Reason = strings.TrimSpace(req.Reason)
+		command.Confirmed = req.Confirmed
+	} else {
+		var req struct {
+			Reason    string `json:"reason"`
+			Confirmed bool   `json:"confirmed"`
+		}
+		if err := decodeStrictJSON(r, &req); err != nil {
+			writeBillingMutationEnvelopeError(w,
+				"a strict reason and confirmed body is required")
+			return lifecycle.BillingMutationCommand{}, err
+		}
+		command.Reason = strings.TrimSpace(req.Reason)
+		command.Confirmed = req.Confirmed
+	}
+	if err := validateBillingMutationEnvelope(command, true); err != nil {
+		writeBillingMutationEnvelopeError(w, err.Error())
+		return lifecycle.BillingMutationCommand{}, err
+	}
+	return command, nil
 }
 
-// writeOutcome renders a lifecycle.Outcome; the CLI branches on "kind".
-func writeOutcome(w http.ResponseWriter, out lifecycle.Outcome) {
+func validateBillingMutationEnvelope(
+	command lifecycle.BillingMutationCommand,
+	apply bool,
+) error {
+	if strings.TrimSpace(command.Reason) == "" {
+		return errors.New("reason is required")
+	}
+	switch command.Operation {
+	case lifecycle.BillingMutationSetup, lifecycle.BillingMutationCancel:
+		if command.Plan != "" {
+			return errors.New("this billing operation cannot include a plan")
+		}
+	case lifecycle.BillingMutationUpgrade, lifecycle.BillingMutationDowngrade:
+		if strings.TrimSpace(command.Plan) == "" {
+			return errors.New("plan is required for this billing operation")
+		}
+	default:
+		return errors.New("unsupported billing operation")
+	}
+	if apply {
+		if !command.Confirmed {
+			return errors.New("confirmed=true is required")
+		}
+		if strings.TrimSpace(command.IdempotencyKey) == "" {
+			return errors.New("Idempotency-Key is required")
+		}
+	} else if command.Confirmed || command.IdempotencyKey != "" {
+		return errors.New("preview cannot be confirmed or carry an idempotency key")
+	}
+	return nil
+}
+
+func billingActor(access AccountAccess) lifecycle.BillingActor {
+	return lifecycle.BillingActor{
+		ID: strings.TrimSpace(access.ActorID), Role: strings.TrimSpace(access.Role),
+	}
+}
+
+func writeBillingMutationExecution(
+	w http.ResponseWriter,
+	execution lifecycle.BillingMutationExecution,
+) {
+	out := execution.Outcome
 	doc := map[string]any{
 		"schema_version": "witself.v0",
+		"operation_id":   execution.OperationID,
+		"operation":      execution.Operation,
+		"actor_id":       execution.Actor.ID,
+		"actor_role":     execution.Actor.Role,
+		"confirmed":      execution.Confirmed,
+		"replayed":       execution.Replayed,
 		"kind":           out.Kind,
-		"plan":           out.Plan,
+	}
+	if out.Plan != "" {
+		doc["plan"] = out.Plan
 	}
 	if out.URL != "" {
+		if !safeBillingURL(out.URL) {
+			writeBillingManagerError(w,
+				invalidBillingProviderProjection("hosted billing mutation action"))
+			return
+		}
 		doc["url"] = out.URL
 	}
 	if !out.Effective.IsZero() {
 		doc["effective"] = out.Effective
 	}
+	if out.Kind == "cancelled" {
+		doc["cancelled"] = true
+	}
 	writeJSON(w, http.StatusOK, doc)
 }
 
-func planUpgrade(cfg Config, w http.ResponseWriter, r *http.Request, accountID string, _ AccountAccess) {
-	plan, err := decodePlan(r)
+func planUpgrade(cfg Config, w http.ResponseWriter, r *http.Request, accountID string, access AccountAccess) {
+	w.Header().Set("Cache-Control", "no-store")
+	command, err := decodeBillingMutationApply(
+		w, r, lifecycle.BillingMutationUpgrade, true)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	out, err := cfg.Manager.RequestUpgrade(r.Context(), accountID, r.Header.Get("X-Witself-Email"), plan)
+	execution, err := cfg.Manager.ExecuteBillingMutation(
+		r.Context(), accountID, r.Header.Get("X-Witself-Email"),
+		billingActor(access), command)
 	if err != nil {
-		writeManagerError(w, err)
+		writeBillingMutationManagerError(w, err)
 		return
 	}
-	writeOutcome(w, out)
+	writeBillingMutationExecution(w, execution)
 }
 
-func planDowngrade(cfg Config, w http.ResponseWriter, r *http.Request, accountID string, _ AccountAccess) {
-	plan, err := decodePlan(r)
+func planDowngrade(cfg Config, w http.ResponseWriter, r *http.Request, accountID string, access AccountAccess) {
+	w.Header().Set("Cache-Control", "no-store")
+	command, err := decodeBillingMutationApply(
+		w, r, lifecycle.BillingMutationDowngrade, true)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	out, err := cfg.Manager.RequestDowngrade(r.Context(), accountID, r.Header.Get("X-Witself-Email"), plan)
+	execution, err := cfg.Manager.ExecuteBillingMutation(
+		r.Context(), accountID, r.Header.Get("X-Witself-Email"),
+		billingActor(access), command)
 	if err != nil {
-		// Includes the fit-check block with its violations report.
-		writeManagerError(w, err)
+		writeBillingMutationManagerError(w, err)
 		return
 	}
-	writeOutcome(w, out)
+	writeBillingMutationExecution(w, execution)
 }
 
-func planCancel(cfg Config, w http.ResponseWriter, r *http.Request, accountID string, _ AccountAccess) {
-	if err := cfg.Manager.CancelPending(r.Context(), accountID); err != nil {
-		writeManagerError(w, err)
+func planCancel(cfg Config, w http.ResponseWriter, r *http.Request, accountID string, access AccountAccess) {
+	w.Header().Set("Cache-Control", "no-store")
+	command, err := decodeBillingMutationApply(
+		w, r, lifecycle.BillingMutationCancel, false)
+	if err != nil {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"schema_version": "witself.v0",
-		"cancelled":      true,
-	})
+	execution, err := cfg.Manager.ExecuteBillingMutation(
+		r.Context(), accountID, r.Header.Get("X-Witself-Email"),
+		billingActor(access), command)
+	if err != nil {
+		writeBillingMutationManagerError(w, err)
+		return
+	}
+	writeBillingMutationExecution(w, execution)
 }
 
 // webhook verifies and folds one provider's callback. Non-2xx responses make
@@ -1505,6 +1669,54 @@ func writeManagerError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeError(w, http.StatusInternalServerError, "plan change failed — please retry")
+}
+
+func writeBillingMutationEnvelopeError(w http.ResponseWriter, message string) {
+	writeJSON(w, http.StatusBadRequest, map[string]any{
+		"schema_version": "witself.v0",
+		"code":           "invalid_request",
+		"error":          message,
+		"retryable":      false,
+	})
+}
+
+func writeBillingMutationManagerError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, lifecycle.ErrBillingMutationInput):
+		writeBillingMutationEnvelopeError(w,
+			strings.TrimPrefix(err.Error(), lifecycle.ErrBillingMutationInput.Error()+": "))
+	case errors.Is(err, lifecycle.ErrBillingMutationConflict):
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"schema_version": "witself.v0",
+			"code":           "idempotency_conflict",
+			"error":          "Idempotency-Key was already used for a different billing request",
+			"retryable":      false,
+		})
+	case errors.Is(err, lifecycle.ErrBillingMutationSuperseded):
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"schema_version": "witself.v0",
+			"code":           "operation_superseded",
+			"error":          "billing operation was superseded; preview again and use a new Idempotency-Key",
+			"retryable":      false,
+		})
+	case errors.Is(err, lifecycle.ErrBillingMutationInProgress):
+		w.Header().Set("Retry-After", "1")
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"schema_version": "witself.v0",
+			"code":           "operation_in_progress",
+			"error":          "billing operation is already in progress; retry the exact request",
+			"retryable":      true,
+		})
+	case errors.Is(err, lifecycle.ErrBillingUnavailable):
+		writeBillingManagerError(w, err)
+	case errors.Is(err, lifecycle.ErrProviderRequest):
+		writeBillingManagerError(w, err)
+	case errors.Is(err, lifecycle.ErrRefusal):
+		writeManagerError(w, err)
+	default:
+		writeError(w, http.StatusInternalServerError,
+			"billing operation failed — retry the exact request")
+	}
 }
 
 // writeBillingManagerError keeps provider and storage detail on the server

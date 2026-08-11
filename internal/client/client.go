@@ -487,6 +487,20 @@ func responseError(resp *http.Response, fallback string) error {
 			}
 		}
 		if resp.StatusCode == http.StatusConflict &&
+			recognizedBillingMutationErrorCode(out.Code) {
+			retryAfter := out.RetryAfter
+			if retryAfter <= 0 {
+				retryAfter, _ = strconv.ParseInt(
+					strings.TrimSpace(resp.Header.Get("Retry-After")), 10, 64)
+			}
+			return &BillingMutationError{
+				Code:       out.Code,
+				Retryable:  out.Retryable,
+				RetryAfter: durationFromSeconds(retryAfter),
+				Message:    message,
+			}
+		}
+		if resp.StatusCode == http.StatusConflict &&
 			out.Code == "agent_email_address_conflict" {
 			return fmt.Errorf("%w", ErrAgentEmailAddressConflict)
 		}

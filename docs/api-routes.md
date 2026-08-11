@@ -57,8 +57,17 @@ change, or live mail delivery.
 Billing-read amendment (dark foundation, implemented in the current checkout):
 the control plane exposes account-scoped provider-neutral billing status,
 bounded invoice/payment history, and hosted setup/portal actions. Reads never
-create provider objects; setup is the explicit first-contact path and only its
-provider-customer establishment, not each hosted session, is idempotent.
+create provider objects; setup is the explicit first-contact path. Its guarded
+mutation route durably replays both provider-customer establishment and the
+hosted setup action under one operation identity.
+Strict pending-change cancellation distinguishes a successful cancel from a
+race it did not win: the latter returns `kind: "resolved"` and omits
+`cancelled`, plan, URL, and effective time. Exact pending retries remain valid
+after an authorized actor, role, or account-email change; the initiating audit
+attribution remains immutable on the receipt.
+An expired account-lane reservation with no receipt can be safely replaced;
+every late receipt creator must revalidate the original generation and claim
+before it can reach a provider.
 No provider/customer identifiers or raw payment data cross the API. This is a
 code-contract statement, not a release, deployment, or live-charging statement.
 Every billing response uses `Cache-Control: no-store`; optional document links
@@ -213,8 +222,13 @@ POST /v1/email/retry-canary:status
 GET  /v1/accounts/{account_id}/billing
 GET  /v1/accounts/{account_id}/billing/invoices
 GET  /v1/accounts/{account_id}/billing/payments
+POST /v1/accounts/{account_id}/billing:preview
 POST /v1/accounts/{account_id}/billing:setup
 POST /v1/accounts/{account_id}/billing:portal
+GET  /v1/accounts/{account_id}/plan
+POST /v1/accounts/{account_id}/plan:upgrade
+POST /v1/accounts/{account_id}/plan:downgrade
+POST /v1/accounts/{account_id}/plan:cancel
 GET  /v1/accounts/{account_id}/realms/{realm_id}/email-alias-requests
 POST /v1/accounts/{account_id}/realms/{realm_id}/email-alias-requests
 GET  /v1/accounts/{account_id}/email-domain-requests

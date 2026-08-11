@@ -85,8 +85,14 @@ type BillingPayments struct {
 
 // BillingAction is either already complete or a provider-hosted HTTPS flow.
 type BillingAction struct {
-	Kind string `json:"kind"` // done | action
-	URL  string `json:"url,omitempty"`
+	OperationID string                   `json:"operation_id,omitempty"`
+	Operation   BillingMutationOperation `json:"operation,omitempty"`
+	ActorID     string                   `json:"actor_id,omitempty"`
+	ActorRole   string                   `json:"actor_role,omitempty"`
+	Confirmed   bool                     `json:"confirmed,omitempty"`
+	Replayed    bool                     `json:"replayed,omitempty"`
+	Kind        string                   `json:"kind"` // done | action
+	URL         string                   `json:"url,omitempty"`
 }
 
 // BillingCapability is the account cell's routing decision for billing. A
@@ -227,11 +233,54 @@ func CreateBillingPortal(ctx context.Context, controlPlane, accountID, bearer st
 	return billingAction(ctx, billingURL(controlPlane, accountID, ":portal"), bearer, "")
 }
 
-// CreateBillingSetup requests a provider-hosted payment-method setup flow.
-// email is only a customer hint on first provider contact; raw payment details
-// never cross this API.
-func CreateBillingSetup(ctx context.Context, controlPlane, accountID, bearer, email string) (BillingAction, error) {
-	return billingAction(ctx, billingURL(controlPlane, accountID, ":setup"), bearer, email)
+// CreateBillingSetup requests a guarded provider-hosted payment-method setup
+// flow. email is only a customer hint on first provider contact; raw payment
+// details never cross this API.
+func CreateBillingSetup(
+	ctx context.Context,
+	controlPlane, accountID, bearer, email string,
+	options BillingMutationOptions,
+) (BillingAction, error) {
+	body, err := encodeBillingMutationApplyBody("", options)
+	if err != nil {
+		return BillingAction{}, err
+	}
+	headers := map[string]string{"Idempotency-Key": options.IdempotencyKey}
+	if strings.TrimSpace(email) != "" {
+		headers["X-Witself-Email"] = email
+	}
+	var wire struct {
+		SchemaVersion string                   `json:"schema_version"`
+		OperationID   string                   `json:"operation_id"`
+		Operation     BillingMutationOperation `json:"operation"`
+		ActorID       string                   `json:"actor_id"`
+		ActorRole     string                   `json:"actor_role"`
+		Confirmed     bool                     `json:"confirmed"`
+		Replayed      bool                     `json:"replayed"`
+		Kind          string                   `json:"kind"`
+		URL           string                   `json:"url,omitempty"`
+		Cancelled     bool                     `json:"cancelled"`
+	}
+	if err := doJSONWithHeadersTimeout(ctx, http.MethodPost,
+		billingURL(controlPlane, accountID, ":setup"), bearer, headers, body, &wire,
+		billingMutationTransportTimeout); err != nil {
+		return BillingAction{}, err
+	}
+	if wire.SchemaVersion != "witself.v0" || wire.Operation != BillingMutationSetup ||
+		strings.TrimSpace(wire.OperationID) == "" ||
+		strings.TrimSpace(wire.ActorID) == "" || strings.TrimSpace(wire.ActorRole) == "" ||
+		!wire.Confirmed || wire.Cancelled {
+		return BillingAction{}, fmt.Errorf("control plane returned an invalid billing setup outcome")
+	}
+	if err := validateBillingAction(wire.Kind, wire.URL); err != nil {
+		return BillingAction{}, err
+	}
+	return BillingAction{
+		OperationID: wire.OperationID, Operation: wire.Operation,
+		ActorID: wire.ActorID, ActorRole: wire.ActorRole,
+		Confirmed: wire.Confirmed, Replayed: wire.Replayed,
+		Kind: wire.Kind, URL: wire.URL,
+	}, nil
 }
 
 func billingAction(ctx context.Context, url, bearer, email string) (BillingAction, error) {
@@ -247,22 +296,29 @@ func billingAction(ctx context.Context, url, bearer, email string) (BillingActio
 	if err := doJSONWithHeaders(ctx, http.MethodPost, url, bearer, headers, nil, &wire); err != nil {
 		return BillingAction{}, err
 	}
-	switch wire.Kind {
-	case "done":
-		if wire.URL != "" {
-			return BillingAction{}, fmt.Errorf("control plane returned an invalid completed billing action")
-		}
-	case "action":
-		if !validBillingHostedURL(wire.URL) {
-			return BillingAction{}, fmt.Errorf("control plane returned an unsafe billing action URL")
-		}
-	default:
-		return BillingAction{}, fmt.Errorf("control plane returned an unknown billing action")
-	}
 	if wire.SchemaVersion != "witself.v0" {
 		return BillingAction{}, fmt.Errorf("control plane returned an invalid billing action schema")
 	}
+	if err := validateBillingAction(wire.Kind, wire.URL); err != nil {
+		return BillingAction{}, err
+	}
 	return BillingAction{Kind: wire.Kind, URL: wire.URL}, nil
+}
+
+func validateBillingAction(kind, url string) error {
+	switch kind {
+	case "done":
+		if url != "" {
+			return fmt.Errorf("control plane returned an invalid completed billing action")
+		}
+	case "action":
+		if !validBillingHostedURL(url) {
+			return fmt.Errorf("control plane returned an unsafe billing action URL")
+		}
+	default:
+		return fmt.Errorf("control plane returned an unknown billing action")
+	}
+	return nil
 }
 
 func validateBillingEnvelope(schemaVersion, gotAccountID, wantAccountID string) error {

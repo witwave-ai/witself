@@ -135,7 +135,46 @@ func (m *Manager) CreateBillingSetup(
 	if err != nil {
 		return billing.Action{}, wrapProviderRequest(err)
 	}
-	validURL := action.URL != "" && action.URL == strings.TrimSpace(action.URL)
+	validURL := action.URL != "" && validBillingMutationURL(action.URL)
+	switch {
+	case action.Done && action.URL == "":
+	case !action.Done && validURL:
+	default:
+		return billing.Action{}, invalidProviderAction("setup")
+	}
+	return action, nil
+}
+
+// CreateBillingSetupMutation creates or replays one hosted setup flow under a
+// durable operation identity. Providers that cannot guarantee exact replay
+// fail closed before a session is created.
+func (m *Manager) CreateBillingSetupMutation(
+	ctx context.Context,
+	accountID, email, operationID string,
+) (billing.Action, error) {
+	if !validBillingOperationID(operationID) {
+		return billing.Action{}, errors.New("lifecycle: invalid billing operation id")
+	}
+	r, provider, err := m.ensureBillingCustomer(ctx, accountID, email)
+	if err != nil {
+		return billing.Action{}, err
+	}
+	idempotent, ok := provider.(billing.IdempotentSetupper)
+	if !ok {
+		name, _, providerErr := m.providerFor(r)
+		if providerErr != nil {
+			return billing.Action{}, providerErr
+		}
+		return billing.Action{}, fmt.Errorf(
+			"billing provider %q does not support idempotent setup operations",
+			name)
+	}
+	action, err := idempotent.SetupLinkIdempotent(
+		ctx, r.CustomerID, operationID)
+	if err != nil {
+		return billing.Action{}, wrapProviderRequest(err)
+	}
+	validURL := action.URL != "" && validBillingMutationURL(action.URL)
 	switch {
 	case action.Done && action.URL == "":
 	case !action.Done && validURL:

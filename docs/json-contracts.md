@@ -3343,25 +3343,112 @@ are not settled money movement. Document and receipt URLs are provider-hosted
 HTTPS links; the control plane omits unsafe optional links, and human CLI
 output does not print them.
 
-Billing hosted action:
+Billing mutation preview is the only dry-run route:
+
+```http
+POST /v1/accounts/acct_123/billing:preview
+Authorization: Bearer ...
+Content-Type: application/json
+
+{"operation":"plan_upgrade","plan":"standard","reason":"Move to Professional"}
+```
 
 ```json
 {
   "schema_version": "witself.v0",
-  "kind": "action",
-  "url": "https://billing.example/setup/session_42"
+  "operation": "plan_upgrade",
+  "plan": "standard",
+  "allowed": true,
+  "confirmation_required": true,
+  "effects": [
+    "purchase or switch the subscription to standard",
+    "apply the entitled plan after provider confirmation"
+  ],
+  "violations": []
 }
 ```
 
-`POST /v1/accounts/{account_id}/billing:setup` and `:portal` return exactly one
-of `{"kind":"done"}` or `{"kind":"action","url":"https://..."}`. The
-URL must be a control-free HTTPS URL without embedded credentials. Setup is the
-explicit first-contact operation and idempotently establishes the
-provider-customer mapping, but the provider may create a fresh hosted setup
-session on each invocation. Portal never manufactures a provider customer.
-Neither route accepts raw card, bank, or wallet data. This minimal `kind`/`url`
-shape belongs to the implemented read/setup slice; future resumable checkout
-and crypto flows use the richer hosted-provider-session contract below.
+The request accepts exactly `operation`, optional `plan`, and `reason`.
+`plan_upgrade` and `plan_downgrade` require a plan; `billing_setup` and
+`plan_cancel` forbid one. Preview rejects `Idempotency-Key`, never creates a
+mutation receipt, and performs no provider or account write. An optional
+`X-Witself-Email` first-contact hint is available to setup/upgrade previews just
+as it is on apply; it is not billing authority.
+
+Billing mutation apply requests require all three guards: a non-empty audit
+`reason`, `confirmed: true`, and exactly one `Idempotency-Key` header. Upgrade
+and downgrade bodies contain `plan`, `reason`, and `confirmed`; setup and
+cancel bodies contain only `reason` and `confirmed`. Unknown fields are
+rejected. The retry key must contain 16-128 printable ASCII characters. The
+reason is normalized to one line, must contain 1-512 bytes, and rejects control
+and bidirectional-override characters. Actor identity and role are derived from authenticated
+`billing:manage` access and are never accepted from request JSON.
+
+```http
+POST /v1/accounts/acct_123/plan:upgrade
+Authorization: Bearer ...
+Idempotency-Key: cli-2026-08-11-upgrade-1
+Content-Type: application/json
+
+{"plan":"standard","reason":"Move to Professional","confirmed":true}
+```
+
+Billing mutation outcome:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "operation_id": "bop_example",
+  "operation": "plan_upgrade",
+  "actor_id": "opr_example",
+  "actor_role": "account_owner",
+  "confirmed": true,
+  "replayed": false,
+  "kind": "action",
+  "plan": "standard",
+  "url": "https://billing.example/checkout/session_42"
+}
+```
+
+The existing flat `kind`, `plan`, `url`, `effective`, and cancel
+`cancelled: true` fields remain in place; the operation and authenticated actor
+fields make the result auditable. Setup returns `kind: done` or `kind: action`.
+Cancel returns `kind: cancelled` with `cancelled: true` when it disarmed and
+cleared the targeted pending state. If that exact state was already gone or
+changed while the provider was being disarmed, cancel returns the value-minimal
+`kind: resolved` with no plan, URL, effective time, or `cancelled` field; it
+truthfully records that no cancellation was applied to the replacement state.
+An exact completed retry returns the same
+terminal result and `operation_id` with `replayed: true` and does not call the
+provider again. Reusing the account-scoped key for changed request semantics is
+a non-retryable 409 `idempotency_conflict`; an exact request owned by another
+live worker is a retryable 409 `operation_in_progress`. If a newer account
+operation has already replaced the old lane, the response is non-retryable 409
+`operation_superseded`; preview current state and use a new idempotency key.
+Only the same operation may take over an expired account lease while its receipt
+is pending. A different operation remains in progress until that receipt is
+terminal, so timeout alone cannot overlap a late provider side effect. An
+expired reservation with no receipt may be replaced because this implementation
+cannot reach the provider before receiving the receipt. A delayed old worker
+must revalidate its exact account generation and claim token after receipt
+creation; if the replacement won, it is superseded before any provider call.
+The initiating actor remains immutable receipt attribution, while any caller
+that currently holds `billing:manage` may resume the exact operation after an
+operator-token rotation or account-role change. The initiating account-email
+digest is retained as audit metadata but does not define retry identity; an
+email change therefore cannot wedge an exact pending recovery.
+If a downgrade's period-end webhook wins the race with an ambiguous provider
+response, an exact account tombstone preserves its target and actual effective
+time. The retry returns the same `scheduled` shape without calling the provider
+again, even though the visible pending row is already gone.
+
+`POST /v1/accounts/{account_id}/billing:portal` is unchanged and returns only
+`{"kind":"done"}` or `{"kind":"action","url":"https://..."}`. Hosted URLs
+must be control-free HTTPS URLs without embedded credentials. Setup is the
+explicit first-contact operation and both its customer mapping and hosted
+action are replayed under the durable operation identity. Portal never
+manufactures a provider customer. Neither route accepts raw card, bank, or
+wallet data.
 
 Usage summary:
 

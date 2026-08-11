@@ -19,6 +19,7 @@ package billing
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 )
@@ -85,8 +86,68 @@ type Event struct {
 type IdempotentSubscriber interface {
 	SubscribeIdempotent(
 		ctx context.Context,
-		customerID, plan, idempotencyKey string,
+		customerID, plan, operationID string,
 	) (Action, error)
+}
+
+// IdempotentSetupper is the optional strong form of Provider.SetupLink.
+// Implementations replay the original Action for an exact operation retry and
+// reject reuse of the operation identity for another customer.
+type IdempotentSetupper interface {
+	SetupLinkIdempotent(
+		ctx context.Context,
+		customerID, operationID string,
+	) (Action, error)
+}
+
+// IdempotentDowngrader is the optional strong form of
+// Provider.ScheduleDowngrade. Implementations replay the original effective
+// time for an exact operation retry and reject reuse of the operation identity
+// with different customer or plan parameters.
+type IdempotentDowngrader interface {
+	ScheduleDowngradeIdempotent(
+		ctx context.Context,
+		customerID, plan, operationID string,
+	) (effective time.Time, err error)
+}
+
+// DowngradeTargetChecker is the optional target-aware capability side of an
+// IdempotentDowngrader. Providers whose downgrade support is narrower than the
+// plan catalog implement it so a write-free preview can refuse an unsupported
+// target before a durable mutation receipt reserves the account billing lane.
+// Providers that omit this interface retain the broad IdempotentDowngrader
+// contract for compatibility.
+type DowngradeTargetChecker interface {
+	SupportsDowngradeTarget(plan string) bool
+}
+
+// IdempotentPendingCanceller is the optional strong form of
+// Provider.CancelPending. Implementations replay successful completion for an
+// exact operation retry and reject reuse of the operation identity for another
+// customer.
+type IdempotentPendingCanceller interface {
+	CancelPendingIdempotent(
+		ctx context.Context,
+		customerID, operationID string,
+	) error
+}
+
+// ValidateOperationID enforces the portable identity accepted by durable
+// provider mutations. IDs are deliberately restricted to a small ASCII set so
+// they can be copied safely into provider metadata and idempotency headers.
+func ValidateOperationID(operationID string) error {
+	if len(operationID) < 1 || len(operationID) > 128 {
+		return errors.New("billing operation id must be 1-128 characters")
+	}
+	for i := 0; i < len(operationID); i++ {
+		b := operationID[i]
+		if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') ||
+			(b >= '0' && b <= '9') || b == '.' || b == '_' || b == ':' || b == '-' {
+			continue
+		}
+		return errors.New("billing operation id contains unsupported characters")
+	}
+	return nil
 }
 
 // EventResolver performs provider reads that are unsafe to do before a

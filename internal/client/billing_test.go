@@ -163,11 +163,30 @@ func TestBillingClientActionsAndEmailHint(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case "/v1/accounts/acct_1/billing:preview":
+			if got := r.Header.Get("X-Witself-Email"); got != "billing@example.com" {
+				t.Fatalf("preview email hint = %q", got)
+			}
+			if got := r.Header.Get("Idempotency-Key"); got != "" {
+				t.Fatalf("preview Idempotency-Key = %q; want absent", got)
+			}
+			_, _ = w.Write([]byte(`{"schema_version":"witself.v0","operation":"billing_setup","allowed":true,"confirmation_required":true,"effects":[],"violations":[]}`))
 		case "/v1/accounts/acct_1/billing:setup":
 			if got := r.Header.Get("X-Witself-Email"); got != "billing@example.com" {
 				t.Fatalf("email hint = %q", got)
 			}
-			_, _ = w.Write([]byte(`{"schema_version":"witself.v0","kind":"done"}`))
+			if got := r.Header.Get("Idempotency-Key"); got != "setup-key-1" {
+				t.Fatalf("Idempotency-Key = %q", got)
+			}
+			var body struct {
+				Reason    string `json:"reason"`
+				Confirmed bool   `json:"confirmed"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil ||
+				body.Reason != "Add a payment method" || !body.Confirmed {
+				t.Fatalf("setup body = %+v, %v", body, err)
+			}
+			_, _ = w.Write([]byte(`{"schema_version":"witself.v0","operation_id":"bop_setup_1","operation":"billing_setup","actor_id":"opr_owner","actor_role":"account_owner","confirmed":true,"replayed":false,"kind":"done"}`))
 		case "/v1/accounts/acct_1/billing:portal":
 			if got := r.Header.Get("X-Witself-Email"); got != "" {
 				t.Fatalf("portal email hint = %q", got)
@@ -180,9 +199,27 @@ func TestBillingClientActionsAndEmailHint(t *testing.T) {
 	t.Cleanup(srv.Close)
 	ctx := context.Background()
 
-	setup, err := client.CreateBillingSetup(ctx, srv.URL, "acct_1", "owner", "billing@example.com")
+	preview, err := client.PreviewBillingMutation(
+		ctx, srv.URL, "acct_1", "owner", client.BillingMutationSetup,
+		"", "billing@example.com", "Add a payment method")
+	if err != nil || !preview.Allowed ||
+		preview.Operation != client.BillingMutationSetup {
+		t.Fatalf("setup preview = %+v, %v", preview, err)
+	}
+	setup, err := client.CreateBillingSetup(
+		ctx, srv.URL, "acct_1", "owner", "billing@example.com",
+		client.BillingMutationOptions{
+			Reason: "Add a payment method", Confirmed: true,
+			IdempotencyKey: "setup-key-1",
+		})
 	if err != nil || setup.Kind != "done" || setup.URL != "" {
 		t.Fatalf("setup = %+v, %v", setup, err)
+	}
+	if setup.OperationID != "bop_setup_1" ||
+		setup.Operation != client.BillingMutationSetup ||
+		setup.ActorID != "opr_owner" || setup.ActorRole != "account_owner" ||
+		!setup.Confirmed || setup.Replayed {
+		t.Fatalf("setup metadata = %+v", setup)
 	}
 	portal, err := client.CreateBillingPortal(ctx, srv.URL, "acct_1", "owner")
 	if err != nil || portal.Kind != "action" || portal.URL != "https://billing.example/portal" {
@@ -216,7 +253,9 @@ func TestBillingClientRejectsMalformedContracts(t *testing.T) {
 			name: "done with url",
 			body: `{"schema_version":"witself.v0","kind":"done","url":"https://billing.example/unexpected"}`,
 			call: func(ctx context.Context, endpoint string) error {
-				_, err := client.CreateBillingSetup(ctx, endpoint, "acct_1", "owner", "")
+				_, err := client.CreateBillingSetup(
+					ctx, endpoint, "acct_1", "owner", "",
+					client.BillingMutationOptions{Reason: "test", Confirmed: true, IdempotencyKey: "test-key"})
 				return err
 			},
 		},
@@ -224,7 +263,19 @@ func TestBillingClientRejectsMalformedContracts(t *testing.T) {
 			name: "action with encoded control",
 			body: `{"schema_version":"witself.v0","kind":"action","url":"https://billing.example/%0aescape"}`,
 			call: func(ctx context.Context, endpoint string) error {
-				_, err := client.CreateBillingSetup(ctx, endpoint, "acct_1", "owner", "")
+				_, err := client.CreateBillingSetup(
+					ctx, endpoint, "acct_1", "owner", "",
+					client.BillingMutationOptions{Reason: "test", Confirmed: true, IdempotencyKey: "test-key"})
+				return err
+			},
+		},
+		{
+			name: "setup claims cancelled",
+			body: `{"schema_version":"witself.v0","operation_id":"bop_setup","operation":"billing_setup","actor_id":"opr_owner","actor_role":"account_owner","confirmed":true,"replayed":false,"kind":"done","cancelled":true}`,
+			call: func(ctx context.Context, endpoint string) error {
+				_, err := client.CreateBillingSetup(
+					ctx, endpoint, "acct_1", "owner", "",
+					client.BillingMutationOptions{Reason: "test", Confirmed: true, IdempotencyKey: "test-key"})
 				return err
 			},
 		},

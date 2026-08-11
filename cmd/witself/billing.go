@@ -179,12 +179,25 @@ func billingSetup(args []string) int {
 	endpoint := billingEndpointFlag(fs)
 	email := fs.String("email", "", "billing email used on first provider contact")
 	open := fs.Bool("open", false, "open the provider-hosted setup flow in the default browser")
+	reason := fs.String("reason", "", "reason recorded with the billing operation")
+	idempotencyKey := fs.String("idempotency-key", "", "unique retry-safe operation key")
+	confirmed := fs.Bool("yes", false, "confirm the billing operation")
+	dryRun := fs.Bool("dry-run", false, "preview without creating a receipt or calling the provider")
 	jsonOut := jsonFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if fs.NArg() != 0 || (*jsonOut && *open) {
-		fmt.Fprintln(os.Stderr, "usage: witself billing setup [--account NAME] [--endpoint URL] [--email EMAIL] [--open | --json]")
+	const usage = "usage: witself billing setup --reason TEXT (--dry-run | --idempotency-key KEY --yes) [--account NAME] [--endpoint URL] [--email EMAIL] [--open | --json]"
+	if fs.NArg() != 0 || (*jsonOut && *open) || (*dryRun && *open) {
+		if *dryRun && *open {
+			fmt.Fprintln(os.Stderr, "witself: --dry-run cannot be combined with --open")
+		}
+		fmt.Fprintln(os.Stderr, usage)
+		return 2
+	}
+	if !validBillingMutationCLIFlags(
+		*reason, *idempotencyKey, *confirmed, *dryRun, usage,
+	) {
 		return 2
 	}
 	ctx := context.Background()
@@ -192,7 +205,21 @@ func billingSetup(args []string) int {
 	if err != nil {
 		return billingCLIError(err)
 	}
-	action, err := client.CreateBillingSetup(ctx, controlPlane, accountID, token, *email)
+	if *dryRun {
+		preview, err := client.PreviewBillingMutation(
+			ctx, controlPlane, accountID, token, client.BillingMutationSetup, "", *email,
+			strings.TrimSpace(*reason))
+		if err != nil {
+			return billingCLIError(err)
+		}
+		return printBillingMutationPreview(preview, *jsonOut)
+	}
+	action, err := client.CreateBillingSetup(
+		ctx, controlPlane, accountID, token, *email,
+		client.BillingMutationOptions{
+			Reason: strings.TrimSpace(*reason), Confirmed: *confirmed,
+			IdempotencyKey: strings.TrimSpace(*idempotencyKey),
+		})
 	if err != nil {
 		return billingCLIError(err)
 	}
@@ -206,11 +233,22 @@ func renderBillingAction(action client.BillingAction, open, jsonOut bool, doneMe
 		}
 	}
 	if jsonOut {
-		return printJSON(struct {
-			SchemaVersion string `json:"schema_version"`
-			Kind          string `json:"kind"`
-			URL           string `json:"url,omitempty"`
-		}{SchemaVersion: "witself.v0", Kind: action.Kind, URL: action.URL})
+		doc := map[string]any{
+			"schema_version": "witself.v0",
+			"kind":           action.Kind,
+		}
+		if action.URL != "" {
+			doc["url"] = action.URL
+		}
+		if action.Operation != "" {
+			doc["operation_id"] = action.OperationID
+			doc["operation"] = action.Operation
+			doc["actor_id"] = action.ActorID
+			doc["actor_role"] = action.ActorRole
+			doc["confirmed"] = action.Confirmed
+			doc["replayed"] = action.Replayed
+		}
+		return printJSON(doc)
 	}
 	if action.Kind == "done" {
 		fmt.Println(doneMessage)
