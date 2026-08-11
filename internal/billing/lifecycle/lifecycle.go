@@ -98,6 +98,20 @@ func newBillingOperationID() (string, error) {
 	return "bop_" + base64.RawURLEncoding.EncodeToString(entropy[:]), nil
 }
 
+func validBillingOperationID(operationID string) bool {
+	if len(operationID) < 8 || len(operationID) > 128 ||
+		!strings.HasPrefix(operationID, "bop_") ||
+		strings.TrimSpace(operationID) != operationID {
+		return false
+	}
+	for i := 0; i < len(operationID); i++ {
+		if operationID[i] < 0x21 || operationID[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
 // AdminActor is the immutable administrator identity attached to a policy
 // mutation. ID is the durable registry key; Handle is non-secret display
 // metadata and must never be used as the audit identity by itself.
@@ -263,6 +277,16 @@ type Record struct {
 	// it is a redelivered stale event and is dropped — so a redelivered
 	// "failed" can never re-mark an account that has since recovered.
 	DunningAt time.Time
+	// LastBillingMutation* is the value-minimal account fold tombstone for a
+	// durable mutation whose visible Pending state may disappear. It preserves
+	// the exact terminal projection across the crash gap before receipt
+	// completion without retaining provider payloads.
+	LastBillingMutationOperationID string
+	LastBillingMutationKind        BillingMutationOperation
+	LastBillingMutationResultKind  BillingMutationResultKind
+	LastBillingMutationPlan        string
+	LastBillingMutationEffective   time.Time
+	LastBillingMutationAt          time.Time
 	// ApplyBlocked carries the violation report when the authoritative
 	// apply-time fit check refused to push a downgraded snapshot to the cell.
 	// The cell keeps enforcing the old plan (the gap stays visible as
@@ -369,7 +393,8 @@ const casAttempts = 5
 // Outcome is what a plan operation resolved to — the CLI renders it directly.
 type Outcome struct {
 	// Kind: "done" (applied), "action" (continue at URL), "scheduled"
-	// (downgrade at Effective), or "contact" (sales lead recorded).
+	// (downgrade at Effective), "cancelled", "resolved" (the targeted pending
+	// state changed before cancellation could fold), or "contact".
 	Kind      string
 	Plan      string
 	URL       string
@@ -1588,6 +1613,30 @@ func (m *Manager) cancelProviderPending(ctx context.Context, r Record) error {
 	return provider.CancelPending(ctx, r.CustomerID)
 }
 
+// cancelProviderPendingIdempotent is the customer-mutation path used by the
+// durable billing envelope. A provider that cannot bind cancellation to the
+// operation identity is refused before it can make an ambiguous mutation.
+func (m *Manager) cancelProviderPendingIdempotent(
+	ctx context.Context,
+	r Record,
+	operationID string,
+) error {
+	if r.CustomerID == "" {
+		return errors.New("lifecycle: pending provider cleanup has no customer id")
+	}
+	name, provider, err := m.providerFor(r)
+	if err != nil {
+		return err
+	}
+	idempotent, ok := provider.(billing.IdempotentPendingCanceller)
+	if !ok {
+		return fmt.Errorf(
+			"billing provider %q does not support idempotent pending cancellation",
+			name)
+	}
+	return idempotent.CancelPendingIdempotent(ctx, r.CustomerID, operationID)
+}
+
 // cancelCurrentPending honors the durable replacement-cleanup phase even when
 // the current claim is a contact lead. A plain contact has no provider state;
 // a contact with CancelPrevious is the only remaining fence for the provider
@@ -1599,11 +1648,48 @@ func (m *Manager) cancelCurrentPending(ctx context.Context, r Record) error {
 	return m.cancelReplacedPending(ctx, r)
 }
 
+func (m *Manager) cancelCurrentPendingIdempotent(
+	ctx context.Context,
+	r Record,
+	operationID string,
+) error {
+	if r.Pending == nil ||
+		(r.Pending.Kind == PendingContact && !r.Pending.CancelPrevious) {
+		return nil
+	}
+	return m.cancelProviderPendingIdempotent(ctx, r, operationID)
+}
+
 // RequestUpgrade starts an upgrade to plan. Outcomes: "done" (charged on file
 // and applied), "action" (complete at URL), or "contact" (tier not self-serve;
 // lead recorded). A new request replaces any pending change — including its
 // provider-side state.
 func (m *Manager) RequestUpgrade(ctx context.Context, accountID, email, planID string) (Outcome, error) {
+	operationID, err := newBillingOperationID()
+	if err != nil {
+		return Outcome{}, err
+	}
+	return m.requestUpgrade(ctx, accountID, email, planID, operationID, false)
+}
+
+// RequestUpgradeMutation runs an upgrade under the caller's already-durable
+// billing operation fence. It is used only by ExecuteBillingMutation; direct
+// callers should use RequestUpgrade.
+func (m *Manager) RequestUpgradeMutation(
+	ctx context.Context,
+	accountID, email, planID, operationID string,
+) (Outcome, error) {
+	if !validBillingOperationID(operationID) {
+		return Outcome{}, errors.New("lifecycle: invalid billing operation id")
+	}
+	return m.requestUpgrade(ctx, accountID, email, planID, operationID, true)
+}
+
+func (m *Manager) requestUpgrade(
+	ctx context.Context,
+	accountID, email, planID, operationID string,
+	strictOperation bool,
+) (Outcome, error) {
 	if !m.BillingAvailable() {
 		return Outcome{}, ErrBillingUnavailable
 	}
@@ -1612,22 +1698,38 @@ func (m *Manager) RequestUpgrade(ctx context.Context, accountID, email, planID s
 		return Outcome{}, refuse("unknown plan %q", planID)
 	}
 	now := m.cfg.Now()
-	operationID, err := newBillingOperationID()
-	if err != nil {
-		return Outcome{}, err
-	}
 
 	// Claim: validate against the freshest record and park the desired change
 	// BEFORE any provider call, so a concurrent request cannot double-charge —
 	// it either sees our claim (and replaces it, failing our fold) or we see
 	// its state. The claim also captures what pending change it replaces.
 	reused := false
+	pinnedUpgrade := false
 	claim, err := m.mutate(ctx, accountID, email, func(r *Record) error {
+		pinnedUpgrade = false
 		current, _ := m.cfg.Catalog.Get(r.Entitled)
 		if target.ID == r.Entitled {
 			return refuse("already on the %s plan", target.ID)
 		}
-		if !target.Available {
+		if strictOperation && r.Pending != nil &&
+			r.Pending.OperationID == operationID &&
+			r.Pending.Plan == target.ID {
+			switch r.Pending.Kind {
+			case PendingContact:
+				reused = true
+				return errSkipWrite
+			case PendingUpgrade:
+				// Pending.Kind is the durable execution classification approved
+				// before the provider call. Resume it even if a later catalog
+				// deployment changes availability or pricing semantics.
+				pinnedUpgrade = true
+				if !r.Pending.Expires.IsZero() && now.Before(r.Pending.Expires) {
+					reused = true
+					return errSkipWrite
+				}
+			}
+		}
+		if !target.Available && !pinnedUpgrade {
 			// Not self-serve yet: the stored desire IS the sales lead; the
 			// hoop is "talk to us" instead of "pay". This check precedes
 			// price ordering because custom-priced Enterprise intentionally
@@ -1635,6 +1737,9 @@ func (m *Manager) RequestUpgrade(ctx context.Context, accountID, email, planID s
 			if pending := r.Pending; pending != nil &&
 				pending.Kind == PendingContact && pending.Plan == target.ID &&
 				pending.OperationID != "" {
+				if strictOperation && pending.OperationID != operationID {
+					return refuse("another request is already pending for plan %s", target.ID)
+				}
 				reused = true
 				return errSkipWrite
 			}
@@ -1648,10 +1753,10 @@ func (m *Manager) RequestUpgrade(ctx context.Context, accountID, email, planID s
 			}
 			return nil
 		}
-		if target.PriceCents() <= current.PriceCents() {
+		if !pinnedUpgrade && target.PriceCents() <= current.PriceCents() {
 			return refuse("%s is not an upgrade from %s — use downgrade", target.ID, current.ID)
 		}
-		if !target.Purchasable() {
+		if !pinnedUpgrade && !target.Purchasable() {
 			return refuse("plan %q is not purchasable", target.ID)
 		}
 		providerName, provider, err := m.providerFor(*r)
@@ -1667,6 +1772,9 @@ func (m *Manager) RequestUpgrade(ctx context.Context, accountID, email, planID s
 			pending.Kind == PendingUpgrade && pending.Plan == target.ID &&
 			pending.OperationID != "" && !pending.Expires.IsZero() &&
 			now.Before(pending.Expires) {
+			if strictOperation && pending.OperationID != operationID {
+				return refuse("another request is already pending for plan %s", target.ID)
+			}
 			// This is a retry/resume of the same unfinished purchase. Reuse the
 			// durable operation rather than canceling it and manufacturing a
 			// second Checkout Session/idempotency identity.
@@ -1691,8 +1799,15 @@ func (m *Manager) RequestUpgrade(ctx context.Context, accountID, email, planID s
 		// the same claim retries cancellation. Once the flag is cleared, later
 		// ambiguous Subscribe errors retain the operation and never return to
 		// this destructive phase.
-		if err := m.cancelProviderPending(ctx, claim); err != nil {
-			return Outcome{}, err
+		var cancelErr error
+		if strictOperation {
+			cancelErr = m.cancelProviderPendingIdempotent(
+				ctx, claim, claim.Pending.OperationID+"-previous")
+		} else {
+			cancelErr = m.cancelProviderPending(ctx, claim)
+		}
+		if cancelErr != nil {
+			return Outcome{}, cancelErr
 		}
 		claim, err = m.mutate(ctx, accountID, email, func(r *Record) error {
 			p := r.Pending
@@ -1776,6 +1891,10 @@ func (m *Manager) RequestUpgrade(ctx context.Context, accountID, email, planID s
 		// only idempotency identity and make the user's retry a second purchase.
 		return Outcome{}, err
 	}
+	validActionURL := act.URL != "" && validBillingMutationURL(act.URL)
+	if (act.Done && act.URL != "") || (!act.Done && !validActionURL) {
+		return Outcome{}, invalidProviderAction("subscription")
+	}
 
 	// Fold: land the provider outcome on the freshest record — but only if
 	// our claim is still the pending change (a concurrent request may have
@@ -1826,6 +1945,30 @@ func (m *Manager) releaseClaim(ctx context.Context, accountID string, claim Reco
 // the account must be pruned first; nothing is silently degraded. The check
 // runs again, authoritatively, before the snapshot is applied.
 func (m *Manager) RequestDowngrade(ctx context.Context, accountID, email, planID string) (Outcome, error) {
+	operationID, err := newBillingOperationID()
+	if err != nil {
+		return Outcome{}, err
+	}
+	return m.requestDowngrade(ctx, accountID, email, planID, operationID, false)
+}
+
+// RequestDowngradeMutation schedules a downgrade under the durable billing
+// envelope's operation identity.
+func (m *Manager) RequestDowngradeMutation(
+	ctx context.Context,
+	accountID, email, planID, operationID string,
+) (Outcome, error) {
+	if !validBillingOperationID(operationID) {
+		return Outcome{}, errors.New("lifecycle: invalid billing operation id")
+	}
+	return m.requestDowngrade(ctx, accountID, email, planID, operationID, true)
+}
+
+func (m *Manager) requestDowngrade(
+	ctx context.Context,
+	accountID, email, planID, operationID string,
+	strictOperation bool,
+) (Outcome, error) {
 	if !m.BillingAvailable() {
 		return Outcome{}, ErrBillingUnavailable
 	}
@@ -1835,8 +1978,19 @@ func (m *Manager) RequestDowngrade(ctx context.Context, accountID, email, planID
 	}
 	now := m.cfg.Now()
 
-	var replaced Record
+	reused := false
 	claim, err := m.mutate(ctx, accountID, email, func(r *Record) error {
+		if strictOperation && r.Pending != nil &&
+			r.Pending.Kind == PendingDowngrade &&
+			r.Pending.Plan == target.ID &&
+			r.Pending.OperationID == operationID {
+			// The durable Pending classification proves this operation already
+			// passed direction and advisory-fit checks before its provider call.
+			// A recovery retry must replay that exact operation even if mutable
+			// usage or catalog pricing changed after an ambiguous provider result.
+			reused = true
+			return errSkipWrite
+		}
 		current, _ := m.cfg.Catalog.Get(r.Entitled)
 		if target.ID == r.Entitled {
 			return refuse("already on the %s plan", target.ID)
@@ -1852,29 +2006,86 @@ func (m *Manager) RequestDowngrade(ctx context.Context, accountID, email, planID
 			return refuse("blocked — the account does not fit the %s plan:\n  %s",
 				target.ID, strings.Join(violations, "\n  "))
 		}
-		replaced = *r
-		r.Pending = &Pending{Kind: PendingDowngrade, Plan: target.ID, Requested: now}
+		cancelPrevious := r.Pending != nil &&
+			(r.Pending.CancelPrevious ||
+				(r.Pending.Kind != PendingContact && r.CustomerID != ""))
+		r.Pending = &Pending{
+			Kind: PendingDowngrade, Plan: target.ID,
+			OperationID: operationID, CancelPrevious: cancelPrevious,
+			Requested: now,
+		}
 		return nil
 	})
 	if err != nil {
 		return Outcome{}, err
 	}
-	if err := m.cancelReplacedPending(ctx, replaced); err != nil {
-		return Outcome{}, err
+	if claim.Pending.CancelPrevious {
+		var cancelErr error
+		if strictOperation {
+			cancelErr = m.cancelProviderPendingIdempotent(
+				ctx, claim, claim.Pending.OperationID+"-previous")
+		} else {
+			cancelErr = m.cancelProviderPending(ctx, claim)
+		}
+		if cancelErr != nil {
+			return Outcome{}, cancelErr
+		}
+		claim, err = m.mutate(ctx, accountID, email, func(r *Record) error {
+			p := r.Pending
+			if p == nil || p.OperationID != claim.Pending.OperationID ||
+				p.Kind != PendingDowngrade || p.Plan != target.ID {
+				return refuse("downgrade to %s was superseded by another request", target.ID)
+			}
+			if !p.CancelPrevious {
+				return errSkipWrite
+			}
+			p.CancelPrevious = false
+			return nil
+		})
+		if err != nil {
+			return Outcome{}, err
+		}
+	}
+	if reused && !claim.Pending.Effective.IsZero() {
+		return Outcome{
+			Kind: "scheduled", Plan: target.ID,
+			Effective: claim.Pending.Effective,
+		}, nil
 	}
 
-	_, provider, err := m.providerFor(claim)
+	name, provider, err := m.providerFor(claim)
 	if err != nil {
 		return Outcome{}, err
 	}
-	effective, err := provider.ScheduleDowngrade(ctx, claim.CustomerID, target.ID)
+	var effective time.Time
+	if strictOperation {
+		idempotent, ok := provider.(billing.IdempotentDowngrader)
+		if !ok {
+			return Outcome{}, fmt.Errorf(
+				"billing provider %q does not support idempotent downgrade operations",
+				name)
+		}
+		effective, err = idempotent.ScheduleDowngradeIdempotent(
+			ctx, claim.CustomerID, target.ID, operationID)
+	} else {
+		effective, err = provider.ScheduleDowngrade(ctx, claim.CustomerID, target.ID)
+	}
 	if err != nil {
-		m.releaseClaim(ctx, accountID, claim)
+		// A durable-envelope retry must retain the operation identity after an
+		// ambiguous provider response. Legacy direct calls keep their historical
+		// best-effort release behavior.
+		if !strictOperation {
+			m.releaseClaim(ctx, accountID, claim)
+		}
 		return Outcome{}, err
+	}
+	if effective.IsZero() {
+		return Outcome{}, invalidProviderAction("downgrade")
 	}
 	if _, err := m.mutate(ctx, accountID, email, func(r *Record) error {
 		p := r.Pending
-		if p == nil || p.Kind != PendingDowngrade || p.Plan != target.ID || !p.Requested.Equal(now) {
+		if p == nil || p.Kind != PendingDowngrade || p.Plan != target.ID ||
+			p.OperationID != operationID {
 			return refuse("downgrade to %s was superseded by another request", target.ID)
 		}
 		r.Pending.Effective = effective
@@ -1891,8 +2102,29 @@ func (m *Manager) RequestDowngrade(ctx context.Context, accountID, email, planID
 // sees it and this returns "nothing is pending" instead of clobbering the new
 // entitlement.
 func (m *Manager) CancelPending(ctx context.Context, accountID string) error {
+	_, err := m.cancelPending(ctx, accountID, "", false)
+	return err
+}
+
+// CancelPendingMutation cancels an in-flight change under the durable billing
+// operation fence.
+func (m *Manager) CancelPendingMutation(
+	ctx context.Context,
+	accountID, operationID string,
+) (resolved bool, err error) {
+	if !validBillingOperationID(operationID) {
+		return false, errors.New("lifecycle: invalid billing operation id")
+	}
+	return m.cancelPending(ctx, accountID, operationID, true)
+}
+
+func (m *Manager) cancelPending(
+	ctx context.Context,
+	accountID, operationID string,
+	strictOperation bool,
+) (resolved bool, err error) {
 	if !m.BillingAvailable() {
-		return ErrBillingUnavailable
+		return false, ErrBillingUnavailable
 	}
 	// Disarm the provider FIRST: if its cancel fails, the record still shows
 	// the pending change (truthful, retryable). The old order cleared local
@@ -1901,30 +2133,94 @@ func (m *Manager) CancelPending(ctx context.Context, accountID string) error {
 	// at period end with no API path left to disarm it.
 	r, err := m.load(ctx, accountID, "")
 	if err != nil {
-		return err
+		return false, err
 	}
 	if r.Pending == nil {
-		return refuse("nothing is pending")
+		if strictOperation {
+			resolved = true
+			_, err := m.mutate(ctx, accountID, "", func(r *Record) error {
+				if r.LastBillingMutationOperationID == operationID &&
+					r.LastBillingMutationKind == BillingMutationPlanCancel {
+					switch r.LastBillingMutationResultKind {
+					case BillingMutationResultCancelled, "":
+						resolved = false
+					case BillingMutationResultResolved:
+						resolved = true
+					default:
+						return ErrBillingMutationConflict
+					}
+					return errSkipWrite
+				}
+				setBillingMutationTombstone(
+					r, operationID, BillingMutationPlanCancel,
+					BillingMutationResultResolved, "", time.Time{}, m.cfg.Now().UTC())
+				return nil
+			})
+			return resolved, err
+		}
+		return false, refuse("nothing is pending")
 	}
 	expected := *r.Pending
-	if err := m.cancelCurrentPending(ctx, r); err != nil {
-		return err
+	var cancelErr error
+	if strictOperation {
+		cancelErr = m.cancelCurrentPendingIdempotent(ctx, r, operationID)
+	} else {
+		cancelErr = m.cancelCurrentPending(ctx, r)
+	}
+	if cancelErr != nil {
+		return false, cancelErr
 	}
 	_, err = m.mutate(ctx, accountID, "", func(r *Record) error {
 		if r.Pending == nil {
 			// The change resolved while we were disarming (e.g. the payer
 			// completed checkout): nothing to clear, entitlement stands.
+			if strictOperation {
+				resolved = true
+				setBillingMutationTombstone(
+					r, operationID, BillingMutationPlanCancel,
+					BillingMutationResultResolved, "", time.Time{}, m.cfg.Now().UTC())
+				return nil
+			}
 			return refuse("nothing is pending")
 		}
 		if r.Pending.OperationID != expected.OperationID ||
 			r.Pending.Kind != expected.Kind || r.Pending.Plan != expected.Plan ||
 			!r.Pending.Requested.Equal(expected.Requested) {
+			if strictOperation {
+				resolved = true
+				setBillingMutationTombstone(
+					r, operationID, BillingMutationPlanCancel,
+					BillingMutationResultResolved, "", time.Time{}, m.cfg.Now().UTC())
+				return nil
+			}
 			return refuse("pending change was superseded; retry cancel")
+		}
+		if strictOperation {
+			resolved = false
+			setBillingMutationTombstone(
+				r, operationID, BillingMutationPlanCancel,
+				BillingMutationResultCancelled, "", time.Time{}, m.cfg.Now().UTC())
 		}
 		r.Pending = nil
 		return nil
 	})
-	return err
+	return resolved, err
+}
+
+func setBillingMutationTombstone(
+	r *Record,
+	operationID string,
+	operation BillingMutationOperation,
+	resultKind BillingMutationResultKind,
+	plan string,
+	effective, at time.Time,
+) {
+	r.LastBillingMutationOperationID = operationID
+	r.LastBillingMutationKind = operation
+	r.LastBillingMutationResultKind = resultKind
+	r.LastBillingMutationPlan = plan
+	r.LastBillingMutationEffective = effective.UTC()
+	r.LastBillingMutationAt = at.UTC()
 }
 
 // OnEvents durably receives and then folds normalized provider events into
@@ -2176,8 +2472,23 @@ func (m *Manager) foldEventResolution(
 						r.Pending = nil
 					}
 				case PendingDowngrade:
-					// Scheduled downgrades predate operation identities and are
-					// correlated by their one pending target plan.
+					// Persist the exact result before clearing Pending. This closes
+					// the crash gap where the provider committed a schedule, its
+					// response was lost, and the period-end webhook arrives before
+					// the durable receipt can be completed.
+					effective := p.Effective
+					if effective.IsZero() {
+						effective = event.At
+					}
+					if effective.IsZero() {
+						effective = resolution.ResolvedAt
+					}
+					if validBillingOperationID(p.OperationID) && !effective.IsZero() {
+						setBillingMutationTombstone(
+							r, p.OperationID, BillingMutationPlanDowngrade,
+							BillingMutationResultScheduled, p.Plan, effective,
+							m.cfg.Now().UTC())
+					}
 					r.Pending = nil
 				}
 			}
@@ -2191,6 +2502,21 @@ func (m *Manager) foldEventResolution(
 			// renewal to be past due on.
 			r.PastDueSince = nil
 			if p := r.Pending; p != nil && p.Kind == PendingDowngrade {
+				if p.Plan == plans.Free {
+					effective := p.Effective
+					if effective.IsZero() {
+						effective = event.At
+					}
+					if effective.IsZero() {
+						effective = resolution.ResolvedAt
+					}
+					if validBillingOperationID(p.OperationID) && !effective.IsZero() {
+						setBillingMutationTombstone(
+							r, p.OperationID, BillingMutationPlanDowngrade,
+							BillingMutationResultScheduled, p.Plan, effective,
+							m.cfg.Now().UTC())
+					}
+				}
 				r.Pending = nil
 			}
 		case billing.EventPaymentFailed:

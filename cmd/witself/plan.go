@@ -322,11 +322,21 @@ func planChangeCLI(verb string, args []string) int {
 	account := accountFlag(fs)
 	endpoint := fs.String("endpoint", "", "account cell URL for billing capability discovery")
 	email := fs.String("email", "", "billing email (used on first purchase)")
+	reason := fs.String("reason", "", "reason recorded with the billing operation")
+	idempotencyKey := fs.String("idempotency-key", "", "unique retry-safe operation key")
+	confirmed := fs.Bool("yes", false, "confirm the billing operation")
+	dryRun := fs.Bool("dry-run", false, "preview without creating a receipt or calling the provider")
+	jsonOut := jsonFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if fs.NArg() != 1 {
-		fmt.Fprintf(os.Stderr, "usage: witself plan %s [--account NAME] [--endpoint CELL_URL] [--email E] TARGET_PLAN\n", verb)
+	usage := fmt.Sprintf("usage: witself plan %s --reason TEXT (--dry-run | --idempotency-key KEY --yes) [--account NAME] [--endpoint CELL_URL] [--email E] [--json] TARGET_PLAN", verb)
+	if fs.NArg() != 1 || !validBillingMutationCLIFlags(
+		*reason, *idempotencyKey, *confirmed, *dryRun, usage,
+	) {
+		if fs.NArg() != 1 {
+			fmt.Fprintln(os.Stderr, usage)
+		}
 		return 2
 	}
 	target := fs.Arg(0)
@@ -346,16 +356,37 @@ func planChangeCLI(verb string, args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: %s\n", planCLIColumn(err.Error()))
 		return 2
 	}
+	operation := client.BillingMutationUpgrade
+	if verb == "downgrade" {
+		operation = client.BillingMutationDowngrade
+	}
+	if *dryRun {
+		preview, err := client.PreviewBillingMutation(
+			ctx, cp, acctID, tok, operation, targetID, *email,
+			strings.TrimSpace(*reason))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: %s\n", planCLIColumn(err.Error()))
+			return 1
+		}
+		return printBillingMutationPreview(preview, *jsonOut)
+	}
+	options := client.BillingMutationOptions{
+		Reason: strings.TrimSpace(*reason), Confirmed: *confirmed,
+		IdempotencyKey: strings.TrimSpace(*idempotencyKey),
+	}
 	var out client.PlanOutcome
 	switch verb {
 	case "upgrade":
-		out, err = client.UpgradePlan(ctx, cp, acctID, tok, targetID, *email)
+		out, err = client.UpgradePlan(ctx, cp, acctID, tok, targetID, *email, options)
 	case "downgrade":
-		out, err = client.DowngradePlan(ctx, cp, acctID, tok, targetID, *email)
+		out, err = client.DowngradePlan(ctx, cp, acctID, tok, targetID, *email, options)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %s\n", planCLIColumn(err.Error()))
 		return 1
+	}
+	if *jsonOut {
+		return printBillingMutationOutcome(out)
 	}
 	printPlanOutcome(out, targetName)
 	return 0
@@ -380,11 +411,21 @@ func planCancelCLI(args []string) int {
 	fs.SetOutput(os.Stderr)
 	account := accountFlag(fs)
 	endpoint := fs.String("endpoint", "", "account cell URL for billing capability discovery")
+	reason := fs.String("reason", "", "reason recorded with the billing operation")
+	idempotencyKey := fs.String("idempotency-key", "", "unique retry-safe operation key")
+	confirmed := fs.Bool("yes", false, "confirm the billing operation")
+	dryRun := fs.Bool("dry-run", false, "preview without creating a receipt or calling the provider")
+	jsonOut := jsonFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if fs.NArg() != 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself plan cancel [--account NAME] [--endpoint CELL_URL]")
+	const usage = "usage: witself plan cancel --reason TEXT (--dry-run | --idempotency-key KEY --yes) [--account NAME] [--endpoint CELL_URL] [--json]"
+	if fs.NArg() != 0 || !validBillingMutationCLIFlags(
+		*reason, *idempotencyKey, *confirmed, *dryRun, usage,
+	) {
+		if fs.NArg() != 0 {
+			fmt.Fprintln(os.Stderr, usage)
+		}
 		return 2
 	}
 	ctx := context.Background()
@@ -393,12 +434,69 @@ func planCancelCLI(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: %s\n", planCLIColumn(err.Error()))
 		return 1
 	}
-	if err := client.CancelPlanChange(ctx, cp, acctID, tok); err != nil {
+	if *dryRun {
+		preview, err := client.PreviewBillingMutation(
+			ctx, cp, acctID, tok, client.BillingMutationCancel, "", "",
+			strings.TrimSpace(*reason))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself: %s\n", planCLIColumn(err.Error()))
+			return 1
+		}
+		return printBillingMutationPreview(preview, *jsonOut)
+	}
+	out, err := client.CancelPlanChange(ctx, cp, acctID, tok,
+		client.BillingMutationOptions{
+			Reason: strings.TrimSpace(*reason), Confirmed: *confirmed,
+			IdempotencyKey: strings.TrimSpace(*idempotencyKey),
+		})
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: %s\n", planCLIColumn(err.Error()))
 		return 1
 	}
-	fmt.Println("cancelled")
+	if *jsonOut {
+		return printBillingMutationOutcome(out)
+	}
+	return printPlanCancelOutcome(out)
+}
+
+func printPlanCancelOutcome(out client.PlanOutcome) int {
+	if out.Kind == "resolved" {
+		fmt.Println("pending change was already resolved; no cancellation was applied")
+	} else {
+		fmt.Println("cancelled")
+	}
 	return 0
+}
+
+func validBillingMutationCLIFlags(
+	reason, idempotencyKey string,
+	confirmed, dryRun bool,
+	usage string,
+) bool {
+	if strings.TrimSpace(reason) == "" {
+		fmt.Fprintln(os.Stderr, "witself: --reason is required")
+		fmt.Fprintln(os.Stderr, usage)
+		return false
+	}
+	if dryRun {
+		if confirmed || strings.TrimSpace(idempotencyKey) != "" {
+			fmt.Fprintln(os.Stderr, "witself: --dry-run cannot be combined with --yes or --idempotency-key")
+			fmt.Fprintln(os.Stderr, usage)
+			return false
+		}
+		return true
+	}
+	if !confirmed || strings.TrimSpace(idempotencyKey) == "" {
+		fmt.Fprintln(os.Stderr, "witself: applying a billing change requires --yes and --idempotency-key")
+		fmt.Fprintln(os.Stderr, usage)
+		return false
+	}
+	if idempotencyKey != strings.TrimSpace(idempotencyKey) {
+		fmt.Fprintln(os.Stderr, "witself: --idempotency-key cannot have leading or trailing whitespace")
+		fmt.Fprintln(os.Stderr, usage)
+		return false
+	}
+	return true
 }
 
 // printPlanStatus renders the record — designed to say the truth: current
@@ -468,7 +566,7 @@ func printPlanStatus(s client.PlanStatus, full bool) {
 			if p.Effective != nil {
 				fmt.Printf("  effective: %s\n", p.Effective.Format(time.RFC3339))
 			}
-			fmt.Println("  cancel:  witself plan cancel")
+			fmt.Println("  cancel:  witself plan cancel --reason TEXT --idempotency-key KEY --yes")
 		case "contact":
 			fmt.Printf("pending:  interest in %s recorded — we'll be in touch\n",
 				formatPlanIdentity(p.Plan, p.PlanName))
@@ -644,10 +742,63 @@ func printPlanOutcome(out client.PlanOutcome, targetName string) {
 		fmt.Println("(this link expires; re-run to get a new one)")
 	case "scheduled":
 		fmt.Printf("downgrade to %s scheduled for %s\n", plan, out.Effective.Format(time.RFC3339))
-		fmt.Println("witself plan cancel to undo before then")
+		fmt.Println("run witself plan cancel with --reason, --idempotency-key, and --yes to undo before then")
 	case "contact":
 		fmt.Printf("interest in %s recorded — we'll be in touch\n", plan)
 	default:
 		fmt.Printf("%s (kind=%s)\n", plan, planCLIColumn(out.Kind))
 	}
+}
+
+func printBillingMutationOutcome(out client.PlanOutcome) int {
+	doc := map[string]any{
+		"schema_version": "witself.v0",
+		"operation_id":   out.OperationID,
+		"operation":      out.Operation,
+		"actor_id":       out.ActorID,
+		"actor_role":     out.ActorRole,
+		"confirmed":      out.Confirmed,
+		"replayed":       out.Replayed,
+		"kind":           out.Kind,
+	}
+	if out.Plan != "" {
+		doc["plan"] = out.Plan
+	}
+	if out.URL != "" {
+		doc["url"] = out.URL
+	}
+	if !out.Effective.IsZero() {
+		doc["effective"] = out.Effective
+	}
+	if out.Kind == "cancelled" {
+		doc["cancelled"] = true
+	}
+	return printJSON(doc)
+}
+
+func printBillingMutationPreview(preview client.BillingMutationPreview, jsonOut bool) int {
+	if jsonOut {
+		return printJSON(preview)
+	}
+	fmt.Printf("operation:    %s\n", planCLIColumn(string(preview.Operation)))
+	if preview.Plan != "" {
+		fmt.Printf("plan:         %s\n", planCLIColumn(preview.Plan))
+	}
+	if preview.Allowed {
+		fmt.Println("allowed:      yes")
+	} else {
+		fmt.Println("allowed:      no")
+	}
+	if preview.ConfirmationRequired {
+		fmt.Println("confirmation: required for apply")
+	} else {
+		fmt.Println("confirmation: not required")
+	}
+	for _, effect := range preview.Effects {
+		fmt.Printf("effect:       %s\n", planCLIColumn(effect))
+	}
+	for _, violation := range preview.Violations {
+		fmt.Printf("violation:    %s\n", planCLIColumn(violation))
+	}
+	return 0
 }

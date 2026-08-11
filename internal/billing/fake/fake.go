@@ -85,22 +85,43 @@ type subscribeReplay struct {
 	action     billing.Action
 }
 
+type setupReplay struct {
+	customerID string
+	action     billing.Action
+}
+
+type downgradeReplay struct {
+	customerID string
+	plan       string
+	effective  time.Time
+}
+
+type cancelReplay struct {
+	customerID string
+}
+
 // Fake implements billing.Provider in memory. Safe for concurrent use.
 type Fake struct {
 	mu     sync.Mutex
 	cfg    Config
 	byAcct map[string]*customer // accountID -> customer
 	byID   map[string]*customer // customerID -> customer
-	// subscribeOps is provider-wide because an idempotency key names one
-	// mutation, not one customer. Reusing a key with different parameters is
-	// a caller error, matching Stripe's idempotency semantics.
+	// Operation replay maps are provider-wide because an idempotency key names
+	// one mutation, not one customer. Reusing a key with different parameters
+	// is a caller error, matching Stripe's idempotency semantics.
+	setupOps     map[string]setupReplay
 	subscribeOps map[string]subscribeReplay
+	downgradeOps map[string]downgradeReplay
+	cancelOps    map[string]cancelReplay
 	custSeq      int
 	invSeq       int
 }
 
 var _ billing.Provider = (*Fake)(nil)
+var _ billing.IdempotentSetupper = (*Fake)(nil)
 var _ billing.IdempotentSubscriber = (*Fake)(nil)
+var _ billing.IdempotentDowngrader = (*Fake)(nil)
+var _ billing.IdempotentPendingCanceller = (*Fake)(nil)
 
 // New returns a Fake with cfg defaults applied.
 func New(cfg Config) *Fake {
@@ -117,7 +138,10 @@ func New(cfg Config) *Fake {
 		cfg:          cfg,
 		byAcct:       map[string]*customer{},
 		byID:         map[string]*customer{},
+		setupOps:     map[string]setupReplay{},
 		subscribeOps: map[string]subscribeReplay{},
+		downgradeOps: map[string]downgradeReplay{},
+		cancelOps:    map[string]cancelReplay{},
 	}
 }
 
@@ -147,6 +171,38 @@ func (f *Fake) EnsureCustomer(_ context.Context, accountID, email string) (strin
 func (f *Fake) SetupLink(_ context.Context, customerID string) (billing.Action, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	return f.setupLinkLocked(customerID)
+}
+
+// SetupLinkIdempotent implements billing.IdempotentSetupper. An exact replay
+// returns the original action without replacing an interactive setup session;
+// reusing the operation identity for another customer fails closed.
+func (f *Fake) SetupLinkIdempotent(
+	_ context.Context,
+	customerID, operationID string,
+) (billing.Action, error) {
+	if err := billing.ValidateOperationID(operationID); err != nil {
+		return billing.Action{}, fmt.Errorf("fake billing: setup: %w", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if replay, ok := f.setupOps[operationID]; ok {
+		if replay.customerID != customerID {
+			return billing.Action{}, fmt.Errorf(
+				"fake billing: setup operation was reused with different parameters")
+		}
+		return replay.action, nil
+	}
+	action, err := f.setupLinkLocked(customerID)
+	if err != nil {
+		return billing.Action{}, err
+	}
+	f.setupOps[operationID] = setupReplay{customerID: customerID, action: action}
+	return action, nil
+}
+
+// setupLinkLocked performs the non-replayed mutation. Callers hold f.mu.
+func (f *Fake) setupLinkLocked(customerID string) (billing.Action, error) {
 	c, err := f.cust(customerID)
 	if err != nil {
 		return billing.Action{}, err
@@ -189,17 +245,15 @@ func (f *Fake) SubscribeIdempotent(
 	_ context.Context,
 	customerID, plan, operationID string,
 ) (billing.Action, error) {
-	if operationID == "" || len(operationID) > 128 {
-		return billing.Action{}, fmt.Errorf(
-			"fake billing: subscription operation id must be 1-128 characters")
+	if err := billing.ValidateOperationID(operationID); err != nil {
+		return billing.Action{}, fmt.Errorf("fake billing: subscription: %w", err)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if replay, ok := f.subscribeOps[operationID]; ok {
 		if replay.customerID != customerID || replay.plan != plan {
 			return billing.Action{}, fmt.Errorf(
-				"fake billing: subscription operation %q was reused with different parameters",
-				operationID)
+				"fake billing: subscription operation was reused with different parameters")
 		}
 		return replay.action, nil
 	}
@@ -242,6 +296,43 @@ func (f *Fake) subscribeLocked(customerID, plan, operationID string) (billing.Ac
 func (f *Fake) ScheduleDowngrade(_ context.Context, customerID, plan string) (time.Time, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	return f.scheduleDowngradeLocked(customerID, plan)
+}
+
+// ScheduleDowngradeIdempotent implements billing.IdempotentDowngrader. An
+// exact retry returns the originally selected effective time without
+// retargeting pending state; a parameter mismatch fails closed.
+func (f *Fake) ScheduleDowngradeIdempotent(
+	_ context.Context,
+	customerID, plan, operationID string,
+) (time.Time, error) {
+	if err := billing.ValidateOperationID(operationID); err != nil {
+		return time.Time{}, fmt.Errorf("fake billing: downgrade: %w", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if replay, ok := f.downgradeOps[operationID]; ok {
+		if replay.customerID != customerID || replay.plan != plan {
+			return time.Time{}, fmt.Errorf(
+				"fake billing: downgrade operation was reused with different parameters")
+		}
+		return replay.effective, nil
+	}
+	effective, err := f.scheduleDowngradeLocked(customerID, plan)
+	if err != nil {
+		return time.Time{}, err
+	}
+	f.downgradeOps[operationID] = downgradeReplay{
+		customerID: customerID,
+		plan:       plan,
+		effective:  effective,
+	}
+	return effective, nil
+}
+
+// scheduleDowngradeLocked performs the non-replayed mutation. Callers hold
+// f.mu.
+func (f *Fake) scheduleDowngradeLocked(customerID, plan string) (time.Time, error) {
 	c, err := f.cust(customerID)
 	if err != nil {
 		return time.Time{}, err
@@ -271,6 +362,37 @@ func (f *Fake) ScheduleDowngrade(_ context.Context, customerID, plan string) (ti
 func (f *Fake) CancelPending(_ context.Context, customerID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	return f.cancelPendingLocked(customerID)
+}
+
+// CancelPendingIdempotent implements billing.IdempotentPendingCanceller. An
+// exact retry is a no-op even if newer pending state now exists; reusing the
+// operation identity for another customer fails closed.
+func (f *Fake) CancelPendingIdempotent(
+	_ context.Context,
+	customerID, operationID string,
+) error {
+	if err := billing.ValidateOperationID(operationID); err != nil {
+		return fmt.Errorf("fake billing: cancel pending: %w", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if replay, ok := f.cancelOps[operationID]; ok {
+		if replay.customerID != customerID {
+			return fmt.Errorf(
+				"fake billing: cancel-pending operation was reused with different parameters")
+		}
+		return nil
+	}
+	if err := f.cancelPendingLocked(customerID); err != nil {
+		return err
+	}
+	f.cancelOps[operationID] = cancelReplay{customerID: customerID}
+	return nil
+}
+
+// cancelPendingLocked performs the non-replayed mutation. Callers hold f.mu.
+func (f *Fake) cancelPendingLocked(customerID string) error {
 	c, err := f.cust(customerID)
 	if err != nil {
 		return err

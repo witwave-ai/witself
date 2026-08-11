@@ -109,6 +109,117 @@ func TestPlanCancelRejectsPositionalsBeforeAccountOrNetworkAccess(t *testing.T) 
 	}
 }
 
+func TestPlanMutationGuardFlagsFailBeforeAccountOrNetworkAccess(t *testing.T) {
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	tests := []struct {
+		name string
+		call func() int
+		want string
+	}{
+		{
+			name: "reason required",
+			call: func() int {
+				return planChangeCLI("upgrade", []string{"--dry-run", "standard"})
+			},
+			want: "--reason is required",
+		},
+		{
+			name: "dry run rejects apply guards",
+			call: func() int {
+				return planChangeCLI("upgrade", []string{
+					"--reason", "test", "--dry-run", "--yes", "standard",
+				})
+			},
+			want: "--dry-run cannot be combined",
+		},
+		{
+			name: "key required",
+			call: func() int {
+				return planCancelCLI([]string{"--reason", "test", "--yes"})
+			},
+			want: "requires --yes and --idempotency-key",
+		},
+		{
+			name: "confirmation required",
+			call: func() int {
+				return planCancelCLI([]string{
+					"--reason", "test", "--idempotency-key", "cancel-key",
+				})
+			},
+			want: "requires --yes and --idempotency-key",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, stderr, code := capturePlanCLI(t, tc.call)
+			if code != 2 || stdout != "" || !strings.Contains(stderr, tc.want) {
+				t.Fatalf("code=%d stdout=%q stderr=%q; want %q", code, stdout, stderr, tc.want)
+			}
+		})
+	}
+}
+
+func TestPlanMutationJSONPreservesFalseReplayWithoutZeroEffective(t *testing.T) {
+	stdout, stderr, code := capturePlanCLI(t, func() int {
+		return printBillingMutationOutcome(client.PlanOutcome{
+			OperationID: "bop_upgrade", Operation: client.BillingMutationUpgrade,
+			ActorID: "opr_owner", ActorRole: "account_owner", Confirmed: true,
+			Kind: "done", Plan: "standard",
+		})
+	})
+	if code != 0 || stderr != "" {
+		t.Fatalf("JSON outcome = %d stderr=%q", code, stderr)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
+		t.Fatalf("decode outcome: %v", err)
+	}
+	if doc["operation_id"] != "bop_upgrade" || doc["confirmed"] != true ||
+		doc["replayed"] != false || doc["kind"] != "done" {
+		t.Fatalf("JSON outcome = %v", doc)
+	}
+	if _, present := doc["effective"]; present {
+		t.Fatalf("zero effective time leaked into JSON outcome: %v", doc)
+	}
+}
+
+func TestPlanResolvedCancelOutput(t *testing.T) {
+	t.Run("human", func(t *testing.T) {
+		stdout, stderr, code := capturePlanCLI(t, func() int {
+			return printPlanCancelOutcome(client.PlanOutcome{Kind: "resolved"})
+		})
+		if code != 0 || stderr != "" ||
+			stdout != "pending change was already resolved; no cancellation was applied\n" {
+			t.Fatalf("resolved human output = code %d stdout=%q stderr=%q", code, stdout, stderr)
+		}
+	})
+
+	t.Run("json", func(t *testing.T) {
+		stdout, stderr, code := capturePlanCLI(t, func() int {
+			return printBillingMutationOutcome(client.PlanOutcome{
+				OperationID: "bop_resolved", Operation: client.BillingMutationCancel,
+				ActorID: "opr_owner", ActorRole: "account_owner", Confirmed: true,
+				Kind: "resolved",
+			})
+		})
+		if code != 0 || stderr != "" {
+			t.Fatalf("resolved JSON output = code %d stderr=%q", code, stderr)
+		}
+		var doc map[string]any
+		if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
+			t.Fatal(err)
+		}
+		if doc["kind"] != "resolved" || doc["operation"] != "plan_cancel" {
+			t.Fatalf("resolved JSON output = %v", doc)
+		}
+		for _, forbidden := range []string{"cancelled", "plan", "url", "effective"} {
+			if _, present := doc[forbidden]; present {
+				t.Fatalf("resolved JSON output exposed %q: %v", forbidden, doc)
+			}
+		}
+	})
+}
+
 func TestPlanStatusShowsEffectivePolicyAndOverrides(t *testing.T) {
 	days30, days60, days90 := int64(30), int64(60), int64(90)
 	status := client.PlanStatus{

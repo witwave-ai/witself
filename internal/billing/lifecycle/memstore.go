@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"sync"
 	"time"
@@ -13,21 +14,26 @@ import (
 // plane grows a database, and the reference for what a real Store must do —
 // including the compare-and-swap contract on Record.Version.
 type MemStore struct {
-	mu               sync.Mutex
-	byAcct           map[string]Record
-	eventReceipts    map[string]EventReceipt
-	pendingEventKeys map[string][]string
+	mu                      sync.Mutex
+	byAcct                  map[string]Record
+	eventReceipts           map[string]EventReceipt
+	pendingEventKeys        map[string][]string
+	billingMutationReceipts map[string]BillingMutationReceipt
+	billingMutationAccounts map[string]BillingAccountMutationLease
 }
 
 var _ Store = (*MemStore)(nil)
 var _ EventReceiptStore = (*MemStore)(nil)
+var _ BillingMutationStore = (*MemStore)(nil)
 
 // NewMemStore returns an empty MemStore.
 func NewMemStore() *MemStore {
 	return &MemStore{
-		byAcct:           map[string]Record{},
-		eventReceipts:    map[string]EventReceipt{},
-		pendingEventKeys: map[string][]string{},
+		byAcct:                  map[string]Record{},
+		eventReceipts:           map[string]EventReceipt{},
+		pendingEventKeys:        map[string][]string{},
+		billingMutationReceipts: map[string]BillingMutationReceipt{},
+		billingMutationAccounts: map[string]BillingAccountMutationLease{},
 	}
 }
 
@@ -83,6 +89,503 @@ func (s *MemStore) List(_ context.Context) ([]Record, error) {
 		out = append(out, clone(r))
 	}
 	return out, nil
+}
+
+// ClaimBillingMutationAccount serializes provider work for one account. A
+// zero expected generation starts a new operation only after the prior lane is
+// idle; a positive generation can resume only that exact operation.
+func (s *MemStore) ClaimBillingMutationAccount(
+	_ context.Context,
+	accountID, operationID string,
+	expectedOperationGeneration int64,
+	claimToken string,
+	now, leaseExpiresAt time.Time,
+) (BillingAccountMutationLease, bool, error) {
+	if err := validateBillingAccountMutationClaimRequest(
+		accountID, operationID, expectedOperationGeneration,
+		claimToken, now, leaseExpiresAt); err != nil {
+		return BillingAccountMutationLease{}, false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, exists := s.billingMutationAccounts[accountID]
+	if exists {
+		if err := validateBillingAccountMutationLease(current); err != nil {
+			return BillingAccountMutationLease{}, false, err
+		}
+		if current.AccountID != accountID {
+			return BillingAccountMutationLease{}, false,
+				ErrBillingMutationConflict
+		}
+	}
+	if expectedOperationGeneration > 0 {
+		if !exists || current.OperationID != operationID ||
+			current.OperationGeneration != expectedOperationGeneration {
+			return BillingAccountMutationLease{}, false, ErrBillingMutationSuperseded
+		}
+	} else if exists && billingAccountMutationLeaseLive(current, now) {
+		if current.OperationID == operationID && current.ClaimToken == claimToken {
+			return cloneBillingAccountMutationLease(current), true, nil
+		}
+		return cloneBillingAccountMutationLease(current), false, nil
+	}
+	if exists && billingAccountMutationLeaseLive(current, now) {
+		if current.ClaimToken != claimToken {
+			return cloneBillingAccountMutationLease(current), false, nil
+		}
+		if expectedOperationGeneration == 0 {
+			return cloneBillingAccountMutationLease(current), true, nil
+		}
+		// An exact-generation, same-token call is the post-receipt handshake.
+		// Advance its claim generation under this mutex even while the original
+		// lease is live, fencing any contender that observed the earlier gap.
+	}
+	if exists && expectedOperationGeneration == 0 &&
+		current.OperationID != operationID {
+		prior, ok := s.billingMutationReceipts[current.OperationID]
+		if ok {
+			if err := validateBillingMutationReceipt(prior); err != nil {
+				return BillingAccountMutationLease{}, false, err
+			}
+			if prior.OperationID != current.OperationID ||
+				prior.AccountID != accountID ||
+				prior.AccountGeneration != current.OperationGeneration {
+				return BillingAccountMutationLease{}, false,
+					ErrBillingMutationConflict
+			}
+			if !billingMutationReceiptTerminal(prior) {
+				return cloneBillingAccountMutationLease(current), false, nil
+			}
+			if now.Before(prior.UpdatedAt) {
+				return BillingAccountMutationLease{}, false, errors.New(
+					"billing account mutation lease: claim time predates prior terminal receipt")
+			}
+		}
+		// A missing receipt means the prior worker stopped between reserving
+		// this lane and durably receiving its operation. Once that reservation
+		// is idle, a different operation may advance. A late prior worker must
+		// revalidate this exact generation after receiving its receipt, so it
+		// cannot reach the provider after this transition wins.
+	}
+	if exists && now.Before(current.UpdatedAt) {
+		return BillingAccountMutationLease{}, false, errors.New(
+			"billing account mutation lease: claim time predates current state")
+	}
+	expires := leaseExpiresAt.UTC()
+	if current.ClaimGeneration == math.MaxInt64 || current.Version == math.MaxInt64 {
+		return BillingAccountMutationLease{}, false, errors.New(
+			"billing account mutation lease: counter overflow")
+	}
+	if expectedOperationGeneration == 0 {
+		current.AccountID = accountID
+		if current.OperationID != operationID {
+			if current.OperationGeneration == math.MaxInt64 {
+				return BillingAccountMutationLease{}, false, errors.New(
+					"billing account mutation lease: operation generation overflow")
+			}
+			current.OperationID = operationID
+			current.OperationGeneration++
+		}
+	}
+	if !exists {
+		current.SchemaVersion = billingAccountMutationLeaseSchemaVersion
+	}
+	current.ClaimToken = claimToken
+	current.ClaimGeneration++
+	current.LeaseExpiresAt = &expires
+	current.UpdatedAt = now.UTC()
+	current.Version++
+	if err := validateBillingAccountMutationLease(current); err != nil {
+		return BillingAccountMutationLease{}, false, err
+	}
+	s.billingMutationAccounts[accountID] =
+		cloneBillingAccountMutationLease(current)
+	return cloneBillingAccountMutationLease(current), true, nil
+}
+
+// ReleaseBillingMutationAccount clears only the exact account-lane claim.
+// A newer operation generation can never be released by an older worker.
+func (s *MemStore) ReleaseBillingMutationAccount(
+	_ context.Context,
+	lease BillingAccountMutationLease,
+	releasedAt time.Time,
+) error {
+	if err := validateBillingAccountMutationLease(lease); err != nil {
+		return err
+	}
+	if lease.ClaimToken == "" || releasedAt.IsZero() {
+		return errors.New(
+			"billing account mutation lease: release requires a claim and timestamp")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, exists := s.billingMutationAccounts[lease.AccountID]
+	if !exists {
+		return ErrBillingMutationSuperseded
+	}
+	if err := validateBillingAccountMutationLease(current); err != nil {
+		return err
+	}
+	if current.AccountID != lease.AccountID {
+		return ErrBillingMutationConflict
+	}
+	if current.OperationID != lease.OperationID ||
+		current.OperationGeneration != lease.OperationGeneration {
+		return ErrBillingMutationSuperseded
+	}
+	if current.ClaimToken == "" &&
+		current.ClaimGeneration == lease.ClaimGeneration {
+		return nil
+	}
+	if !billingAccountMutationClaimMatches(current, lease) {
+		return ErrBillingMutationClaimLost
+	}
+	if releasedAt.Before(current.UpdatedAt) {
+		return errors.New(
+			"billing account mutation lease: release time predates current state")
+	}
+	if current.Version == math.MaxInt64 {
+		return errors.New("billing account mutation lease: version overflow")
+	}
+	current.ClaimToken = ""
+	current.LeaseExpiresAt = nil
+	current.UpdatedAt = releasedAt.UTC()
+	current.Version++
+	if err := validateBillingAccountMutationLease(current); err != nil {
+		return err
+	}
+	s.billingMutationAccounts[lease.AccountID] =
+		cloneBillingAccountMutationLease(current)
+	return nil
+}
+
+// GetBillingMutation reads one receipt directly by its globally unique
+// operation id without changing replay or claim state.
+func (s *MemStore) GetBillingMutation(
+	_ context.Context,
+	operationID string,
+) (BillingMutationReceipt, bool, error) {
+	if !validBillingMutationOperationID(operationID) {
+		return BillingMutationReceipt{}, false, errors.New(
+			"billing mutation receipt: invalid operation id")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	receipt, ok := s.billingMutationReceipts[operationID]
+	if !ok {
+		return BillingMutationReceipt{}, false, nil
+	}
+	if err := validateBillingMutationReceipt(receipt); err != nil {
+		return BillingMutationReceipt{}, false, err
+	}
+	if receipt.OperationID != operationID {
+		return BillingMutationReceipt{}, false, ErrBillingMutationConflict
+	}
+	return cloneBillingMutationReceipt(receipt), ok, nil
+}
+
+// ReceiveBillingMutation implements create-only operation identity with exact
+// replay. A reused operation id carrying different immutable request semantics
+// fails closed before any caller can reach a billing provider.
+func (s *MemStore) ReceiveBillingMutation(
+	_ context.Context,
+	receipt BillingMutationReceipt,
+) (BillingMutationReceipt, bool, error) {
+	if err := validateBillingMutationReceipt(receipt); err != nil {
+		return BillingMutationReceipt{}, false, err
+	}
+	if receipt.Version != 0 || receipt.Status != BillingMutationPending ||
+		receipt.Result != nil || receipt.ClaimToken != "" ||
+		receipt.ClaimGeneration != 0 {
+		return BillingMutationReceipt{}, false, errors.New(
+			"billing mutation receipt: new receipt must be unclaimed pending at version zero")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if existing, ok := s.billingMutationReceipts[receipt.OperationID]; ok {
+		if err := validateBillingMutationReceipt(existing); err != nil {
+			return BillingMutationReceipt{}, false, err
+		}
+		if !sameBillingMutationIdentity(existing, receipt) {
+			return BillingMutationReceipt{}, false, fmt.Errorf(
+				"%w: operation=%s", ErrBillingMutationConflict,
+				receipt.OperationID)
+		}
+		return cloneBillingMutationReceipt(existing), false, nil
+	}
+	receipt.Version = 1
+	s.billingMutationReceipts[receipt.OperationID] =
+		cloneBillingMutationReceipt(receipt)
+	return cloneBillingMutationReceipt(receipt), true, nil
+}
+
+// ClaimBillingMutation atomically grants one live worker the mutation lease.
+// An expired or explicitly released receipt advances ClaimGeneration before a
+// successor can write, fencing stale completion and release attempts.
+func (s *MemStore) ClaimBillingMutation(
+	_ context.Context,
+	receipt BillingMutationReceipt,
+	claimToken string,
+	now, leaseExpiresAt time.Time,
+) (BillingMutationReceipt, bool, error) {
+	if err := validateBillingMutationReceipt(receipt); err != nil {
+		return BillingMutationReceipt{}, false, err
+	}
+	if err := validateBillingMutationClaimRequest(
+		claimToken, now, leaseExpiresAt); err != nil {
+		return BillingMutationReceipt{}, false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.billingMutationReceipts[receipt.OperationID]
+	if !ok {
+		return BillingMutationReceipt{}, false, errors.New(
+			"billing mutation receipt: receipt disappeared before claim")
+	}
+	if err := validateBillingMutationReceipt(current); err != nil {
+		return BillingMutationReceipt{}, false, err
+	}
+	if !sameBillingMutationIdentity(current, receipt) {
+		return BillingMutationReceipt{}, false, ErrBillingMutationConflict
+	}
+	if current.Status == BillingMutationCompleted {
+		return cloneBillingMutationReceipt(current), false, nil
+	}
+	if current.Status == BillingMutationSuperseded {
+		return BillingMutationReceipt{}, false, ErrBillingMutationSuperseded
+	}
+	if current.ClaimToken == claimToken && current.LeaseExpiresAt != nil &&
+		now.Before(*current.LeaseExpiresAt) {
+		return cloneBillingMutationReceipt(current), true, nil
+	}
+	if current.ClaimToken != "" && current.LeaseExpiresAt != nil &&
+		now.Before(*current.LeaseExpiresAt) {
+		return cloneBillingMutationReceipt(current), false, nil
+	}
+	if now.Before(current.UpdatedAt) {
+		return BillingMutationReceipt{}, false, errors.New(
+			"billing mutation receipt: claim time predates current state")
+	}
+	if current.ClaimGeneration == math.MaxInt64 || current.Version == math.MaxInt64 {
+		return BillingMutationReceipt{}, false, errors.New(
+			"billing mutation receipt: counter overflow")
+	}
+	expires := leaseExpiresAt.UTC()
+	current.ClaimToken = claimToken
+	current.ClaimGeneration++
+	current.LeaseExpiresAt = &expires
+	current.UpdatedAt = now.UTC()
+	current.Version++
+	s.billingMutationReceipts[receipt.OperationID] =
+		cloneBillingMutationReceipt(current)
+	return cloneBillingMutationReceipt(current), true, nil
+}
+
+// CompleteBillingMutation atomically pins the first allowlisted result and
+// makes the receipt terminal. Exact completion replay is idempotent; a changed
+// result under the same operation identity is a conflict.
+func (s *MemStore) CompleteBillingMutation(
+	_ context.Context,
+	receipt BillingMutationReceipt,
+	result BillingMutationResult,
+	completedAt time.Time,
+) (BillingMutationReceipt, error) {
+	if err := validateBillingMutationReceipt(receipt); err != nil {
+		return BillingMutationReceipt{}, err
+	}
+	if err := validateBillingMutationResultForOperation(
+		receipt.Operation, receipt.TargetPlan, result); err != nil {
+		return BillingMutationReceipt{}, err
+	}
+	if completedAt.IsZero() {
+		return BillingMutationReceipt{}, errors.New(
+			"billing mutation receipt: completed_at is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.billingMutationReceipts[receipt.OperationID]
+	if !ok {
+		return BillingMutationReceipt{}, errors.New(
+			"billing mutation receipt: receipt disappeared before completion")
+	}
+	if err := validateBillingMutationReceipt(current); err != nil {
+		return BillingMutationReceipt{}, err
+	}
+	if !sameBillingMutationIdentity(current, receipt) {
+		return BillingMutationReceipt{}, ErrBillingMutationConflict
+	}
+	if current.Status == BillingMutationCompleted {
+		if current.Result == nil ||
+			!sameBillingMutationResult(*current.Result, result) {
+			return BillingMutationReceipt{}, fmt.Errorf(
+				"%w: terminal result mismatch", ErrBillingMutationConflict)
+		}
+		return cloneBillingMutationReceipt(current), nil
+	}
+	if current.Status == BillingMutationSuperseded {
+		return BillingMutationReceipt{}, ErrBillingMutationSuperseded
+	}
+	if !billingMutationClaimMatches(current, receipt) {
+		return BillingMutationReceipt{}, ErrBillingMutationClaimLost
+	}
+	if completedAt.Before(current.UpdatedAt) {
+		return BillingMutationReceipt{}, errors.New(
+			"billing mutation receipt: completion time predates current state")
+	}
+	if current.Version == math.MaxInt64 {
+		return BillingMutationReceipt{}, errors.New(
+			"billing mutation receipt: version overflow")
+	}
+	at := completedAt.UTC()
+	resultCopy := cloneBillingMutationResult(result)
+	current.Status = BillingMutationCompleted
+	current.Result = &resultCopy
+	current.ClaimToken = ""
+	current.LeaseExpiresAt = nil
+	current.UpdatedAt = at
+	current.CompletedAt = &at
+	current.Version++
+	if err := validateBillingMutationReceipt(current); err != nil {
+		return BillingMutationReceipt{}, err
+	}
+	s.billingMutationReceipts[receipt.OperationID] =
+		cloneBillingMutationReceipt(current)
+	return cloneBillingMutationReceipt(current), nil
+}
+
+// SupersedeBillingMutation terminally retires an older pending receipt after
+// its processing claim is absent or expired. The cleared claim plus terminal
+// status fences every stale completion attempt.
+func (s *MemStore) SupersedeBillingMutation(
+	_ context.Context,
+	receipt BillingMutationReceipt,
+	supersededAt time.Time,
+) (BillingMutationReceipt, error) {
+	if err := validateBillingMutationReceipt(receipt); err != nil {
+		return BillingMutationReceipt{}, err
+	}
+	if supersededAt.IsZero() {
+		return BillingMutationReceipt{}, errors.New(
+			"billing mutation receipt: superseded_at is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.billingMutationReceipts[receipt.OperationID]
+	if !ok {
+		return BillingMutationReceipt{}, errors.New(
+			"billing mutation receipt: receipt disappeared before supersede")
+	}
+	if err := validateBillingMutationReceipt(current); err != nil {
+		return BillingMutationReceipt{}, err
+	}
+	if !sameBillingMutationIdentity(current, receipt) {
+		return BillingMutationReceipt{}, ErrBillingMutationConflict
+	}
+	switch current.Status {
+	case BillingMutationSuperseded:
+		return cloneBillingMutationReceipt(current), nil
+	case BillingMutationCompleted:
+		return BillingMutationReceipt{}, ErrBillingMutationConflict
+	}
+	lane, laneExists := s.billingMutationAccounts[current.AccountID]
+	if !laneExists {
+		return BillingMutationReceipt{}, ErrBillingMutationConflict
+	}
+	if err := validateBillingAccountMutationLease(lane); err != nil {
+		return BillingMutationReceipt{}, err
+	}
+	if lane.AccountID != current.AccountID ||
+		lane.OperationGeneration <= current.AccountGeneration ||
+		lane.OperationID == current.OperationID {
+		return BillingMutationReceipt{}, ErrBillingMutationConflict
+	}
+	if supersededAt.Before(lane.UpdatedAt) {
+		return BillingMutationReceipt{}, errors.New(
+			"billing mutation receipt: supersede time predates superseding account lane")
+	}
+	if current.ClaimToken != "" && current.LeaseExpiresAt != nil &&
+		supersededAt.Before(*current.LeaseExpiresAt) {
+		return BillingMutationReceipt{}, ErrBillingMutationClaimActive
+	}
+	if supersededAt.Before(current.UpdatedAt) {
+		return BillingMutationReceipt{}, errors.New(
+			"billing mutation receipt: supersede time predates current state")
+	}
+	if current.Version == math.MaxInt64 {
+		return BillingMutationReceipt{}, errors.New(
+			"billing mutation receipt: version overflow")
+	}
+	at := supersededAt.UTC()
+	current.Status = BillingMutationSuperseded
+	current.Result = nil
+	current.ClaimToken = ""
+	current.LeaseExpiresAt = nil
+	current.UpdatedAt = at
+	current.CompletedAt = &at
+	current.SupersededByOperationID = lane.OperationID
+	current.Version++
+	if err := validateBillingMutationReceipt(current); err != nil {
+		return BillingMutationReceipt{}, err
+	}
+	s.billingMutationReceipts[receipt.OperationID] =
+		cloneBillingMutationReceipt(current)
+	return cloneBillingMutationReceipt(current), nil
+}
+
+// ReleaseBillingMutation clears exactly one live claim. Repeating an
+// ambiguous successful release is safe; an older generation cannot release a
+// successor's claim.
+func (s *MemStore) ReleaseBillingMutation(
+	_ context.Context,
+	receipt BillingMutationReceipt,
+	releasedAt time.Time,
+) error {
+	if err := validateBillingMutationReceipt(receipt); err != nil {
+		return err
+	}
+	if receipt.ClaimToken == "" || receipt.ClaimGeneration < 1 ||
+		releasedAt.IsZero() {
+		return errors.New("billing mutation receipt: release requires a claim and timestamp")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.billingMutationReceipts[receipt.OperationID]
+	if !ok {
+		return errors.New("billing mutation receipt: receipt disappeared before release")
+	}
+	if err := validateBillingMutationReceipt(current); err != nil {
+		return err
+	}
+	if !sameBillingMutationIdentity(current, receipt) {
+		return ErrBillingMutationConflict
+	}
+	if current.Status == BillingMutationCompleted {
+		return nil
+	}
+	if current.Status == BillingMutationSuperseded {
+		return nil
+	}
+	if current.ClaimToken == "" &&
+		current.ClaimGeneration == receipt.ClaimGeneration {
+		return nil
+	}
+	if !billingMutationClaimMatches(current, receipt) {
+		return ErrBillingMutationClaimLost
+	}
+	if releasedAt.Before(current.UpdatedAt) {
+		return errors.New(
+			"billing mutation receipt: release time predates current state")
+	}
+	if current.Version == math.MaxInt64 {
+		return errors.New("billing mutation receipt: version overflow")
+	}
+	current.ClaimToken = ""
+	current.LeaseExpiresAt = nil
+	current.UpdatedAt = releasedAt.UTC()
+	current.Version++
+	s.billingMutationReceipts[receipt.OperationID] =
+		cloneBillingMutationReceipt(current)
+	return nil
 }
 
 // ReceiveEvent implements EventReceiptStore with create-only event identity

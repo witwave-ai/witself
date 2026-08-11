@@ -72,6 +72,15 @@ func billingHTTPRequest(
 	server *httptest.Server,
 	method, path, bearer, email, body string,
 ) (int, []byte) {
+	return billingHTTPRequestWithKey(
+		t, server, method, path, bearer, email, body, "")
+}
+
+func billingHTTPRequestWithKey(
+	t *testing.T,
+	server *httptest.Server,
+	method, path, bearer, email, body, idempotencyKey string,
+) (int, []byte) {
 	t.Helper()
 	var reader io.Reader
 	if body != "" {
@@ -86,6 +95,9 @@ func billingHTTPRequest(
 	}
 	if email != "" {
 		req.Header.Set("X-Witself-Email", email)
+	}
+	if idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", idempotencyKey)
 	}
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
@@ -175,11 +187,26 @@ func TestBillingHTTPReadsAreAuthenticatedAndProviderlessSideEffectFree(t *testin
 	if _, exists, err := store.Get(context.Background(), "acct_1"); err != nil || exists {
 		t.Fatalf("providerless reads persisted lifecycle record: exists=%t err=%v", exists, err)
 	}
+	status, raw = billingHTTPRequest(t, h.server, http.MethodPost,
+		"/v1/accounts/acct_1/billing:setup", "owner", "", "")
+	if status != http.StatusBadRequest {
+		t.Fatalf("providerless invalid setup envelope = %d %s; want 400", status, raw)
+	}
 	for _, path := range []string{
 		"/v1/accounts/acct_1/billing:setup",
 		"/v1/accounts/acct_1/billing:portal",
 	} {
-		status, raw := billingHTTPRequest(t, h.server, http.MethodPost, path, "owner", "", "")
+		var status int
+		var raw []byte
+		if strings.HasSuffix(path, ":setup") {
+			status, raw = billingHTTPRequestWithKey(
+				t, h.server, http.MethodPost, path, "owner", "",
+				`{"reason":"Check providerless setup","confirmed":true}`,
+				"billing-http-providerless-setup")
+		} else {
+			status, raw = billingHTTPRequest(
+				t, h.server, http.MethodPost, path, "owner", "", "")
+		}
 		if status != http.StatusNotImplemented {
 			t.Errorf("providerless mutation %s = %d; want 501", path, status)
 			continue
@@ -218,11 +245,21 @@ func TestBillingHTTPFakeProviderEndToEnd(t *testing.T) {
 	}
 	_ = response.Body.Close()
 
-	setup, err := client.CreateBillingSetup(ctx, h.server.URL, "acct_1", "owner", "owner@example.com")
+	setup, err := client.CreateBillingSetup(
+		ctx, h.server.URL, "acct_1", "owner", "owner@example.com",
+		client.BillingMutationOptions{
+			Reason: "Add a payment method", Confirmed: true,
+			IdempotencyKey: "billing-http-setup",
+		})
 	if err != nil || setup.Kind != "done" || setup.URL != "" {
 		t.Fatalf("setup = %+v, %v", setup, err)
 	}
-	upgrade, err := client.UpgradePlan(ctx, h.server.URL, "acct_1", "owner", "standard", "owner@example.com")
+	upgrade, err := client.UpgradePlan(
+		ctx, h.server.URL, "acct_1", "owner", "standard", "owner@example.com",
+		client.BillingMutationOptions{
+			Reason: "Move to Professional", Confirmed: true,
+			IdempotencyKey: "billing-http-upgrade",
+		})
 	if err != nil || upgrade.Kind != "done" {
 		t.Fatalf("upgrade = %+v, %v", upgrade, err)
 	}
@@ -400,8 +437,10 @@ func TestBillingHTTPProviderFailuresAndRefusalsAreSafelyMapped(t *testing.T) {
 	setupProvider := newBillingHTTPProviderStub()
 	setupProvider.ensureErr = privateProviderError
 	setupHarness := newBillingHTTPHarness(t, setupProvider, nil, nil)
-	status, raw := billingHTTPRequest(t, setupHarness.server, http.MethodPost,
-		"/v1/accounts/acct_1/billing:setup", "owner", "owner@example.com", "")
+	status, raw := billingHTTPRequestWithKey(t, setupHarness.server, http.MethodPost,
+		"/v1/accounts/acct_1/billing:setup", "owner", "owner@example.com",
+		`{"reason":"Exercise provider failure","confirmed":true}`,
+		"billing-http-provider-failure")
 	if status != http.StatusBadGateway ||
 		!strings.Contains(string(raw), "billing provider unavailable") ||
 		strings.Contains(string(raw), privateProviderError.Error()) {
@@ -459,7 +498,17 @@ func TestBillingHTTPValidatesHostedActionsAndDropsUnsafeOptionalLinks(t *testing
 		"/v1/accounts/acct_1/billing:setup",
 		"/v1/accounts/acct_1/billing:portal",
 	} {
-		status, raw := billingHTTPRequest(t, h.server, http.MethodPost, path, "owner", "", "")
+		var status int
+		var raw []byte
+		if strings.HasSuffix(path, ":setup") {
+			status, raw = billingHTTPRequestWithKey(
+				t, h.server, http.MethodPost, path, "owner", "",
+				`{"reason":"Validate hosted action","confirmed":true}`,
+				"billing-http-unsafe-action")
+		} else {
+			status, raw = billingHTTPRequest(
+				t, h.server, http.MethodPost, path, "owner", "", "")
+		}
 		if status != http.StatusBadGateway || strings.Contains(string(raw), "billing.example") ||
 			strings.Contains(string(raw), "secret") {
 			t.Errorf("unsafe action %s = %d %s", path, status, raw)
@@ -625,6 +674,13 @@ func (p *billingHTTPProviderStub) SetupLink(
 	string,
 ) (billing.Action, error) {
 	return p.setupAction, p.setupErr
+}
+
+func (p *billingHTTPProviderStub) SetupLinkIdempotent(
+	ctx context.Context,
+	customerID, _ string,
+) (billing.Action, error) {
+	return p.SetupLink(ctx, customerID)
 }
 
 func (p *billingHTTPProviderStub) PortalLink(

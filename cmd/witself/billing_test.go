@@ -116,6 +116,8 @@ func TestBillingActionRequiresExplicitSafeHTTPSURL(t *testing.T) {
 func TestBillingActionJSONAndAmountEdges(t *testing.T) {
 	stdout, stderr, code := capturePlanCLI(t, func() int {
 		return renderBillingAction(client.BillingAction{
+			OperationID: "bop_setup", Operation: client.BillingMutationSetup,
+			ActorID: "opr_owner", ActorRole: "account_owner", Confirmed: true,
 			Kind: "action", URL: "https://billing.example/setup",
 		}, false, true, "done")
 	})
@@ -124,7 +126,9 @@ func TestBillingActionJSONAndAmountEdges(t *testing.T) {
 	}
 	var doc map[string]any
 	if err := json.Unmarshal([]byte(stdout), &doc); err != nil ||
-		doc["kind"] != "action" || doc["url"] != "https://billing.example/setup" {
+		doc["kind"] != "action" || doc["url"] != "https://billing.example/setup" ||
+		doc["operation_id"] != "bop_setup" || doc["operation"] != "billing_setup" ||
+		doc["confirmed"] != true || doc["replayed"] != false {
 		t.Fatalf("JSON action = %v, %v", doc, err)
 	}
 	if got := formatBillingAmount(math.MinInt64, "usd"); got != "USD -92233720368547758.08" {
@@ -165,6 +169,36 @@ func TestBillingTopLevelFlagsDelegateToSummary(t *testing.T) {
 	if code != 2 || strings.Contains(stderr, "unknown subcommand") ||
 		!strings.Contains(stderr, "flag provided but not defined") {
 		t.Fatalf("billing top-level flags = %d stderr=%q", code, stderr)
+	}
+}
+
+func TestBillingSetupGuardFlagsFailBeforeAccountOrNetworkAccess(t *testing.T) {
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "reason required", args: []string{"--dry-run"}, want: "--reason is required"},
+		{
+			name: "preview cannot open",
+			args: []string{"--reason", "test", "--dry-run", "--open"},
+			want: "--dry-run cannot be combined with --open",
+		},
+		{
+			name: "apply guards required",
+			args: []string{"--reason", "test", "--yes"},
+			want: "requires --yes and --idempotency-key",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, stderr, code := capturePlanCLI(t, func() int {
+				return billingSetup(tc.args)
+			})
+			if code != 2 || stdout != "" || !strings.Contains(stderr, tc.want) {
+				t.Fatalf("code=%d stdout=%q stderr=%q; want %q", code, stdout, stderr, tc.want)
+			}
+		})
 	}
 }
 

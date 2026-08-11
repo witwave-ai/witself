@@ -20,35 +20,66 @@ import (
 // stubStripe fakes the handful of Stripe endpoints the provider calls,
 // recording requests for assertions. Response shapes follow the pinned
 // apiVersion (Basil): current_period_end on subscription items.
+type stubRequest struct {
+	method         string
+	path           string
+	idempotencyKey string
+}
+
+type checkoutReplay struct {
+	fingerprint string
+	response    string
+}
+
 type stubStripe struct {
-	t            *testing.T
-	url          string            // the stub server's base URL
-	prices       map[string]string // lookup_key -> price id
-	priceCents   map[string]int64  // lookup_key -> unit_amount
-	created      []string          // paths of POSTs received
-	lastForm     map[string]string // last POST form (flattened)
-	lastVersion  string            // Stripe-Version header seen last
-	lastIdem     string            // Idempotency-Key header seen last
-	failNext     int               // when >0, respond with this status once
-	failCode     string            // error code for failNext (default "boom")
-	failPath     string            // when set, failNext fires only on this path
-	upcoming     bool              // whether an upcoming invoice exists
-	subActive    bool              // whether a live subscription exists
-	subArmed     bool              // cancel_at_period_end on the stub subscription
-	custDeleted  bool              // customer GETs report deleted:true
-	openSessions []string          // open checkout session ids
-	expired      []string          // session ids expired via POST .../expire
-	refunded     bool              // charge has one successful partial refund
-	refundMore   bool              // refund list reports unsupported pagination
-	refundAmount int               // settled amount reported by the charge
-	refundData   string            // optional refund-list JSON data override
+	t                   *testing.T
+	url                 string            // the stub server's base URL
+	prices              map[string]string // lookup_key -> price id
+	priceCents          map[string]int64  // lookup_key -> unit_amount
+	created             []string          // paths of POSTs received
+	lastForm            map[string]string // last POST form (flattened)
+	lastVersion         string            // Stripe-Version header seen last
+	lastIdem            string            // Idempotency-Key header seen last
+	requests            []stubRequest     // all requests, including read headers
+	checkoutSeq         int               // setup/subscription Checkout objects minted
+	checkoutOps         map[string]checkoutReplay
+	failNext            int    // when >0, respond with this status once
+	failCode            string // error code for failNext (default "boom")
+	failPath            string // when set, failNext fires only on this path
+	upcoming            bool   // whether an upcoming invoice exists
+	subActive           bool   // whether a live subscription exists
+	subArmed            bool   // cancel_at_period_end on the stub subscription
+	custDeleted         bool   // customer GETs report deleted:true
+	customerCreateKeys  []string
+	customerCreateForms []map[string]string
+	customerUpdateKeys  []string
+	customerUpdateForms []map[string]string
+	openSessions        []string // open checkout session ids
+	expired             []string // session ids expired via POST .../expire
+	refunded            bool     // charge has one successful partial refund
+	refundMore          bool     // refund list reports unsupported pagination
+	refundAmount        int      // settled amount reported by the charge
+	refundData          string   // optional refund-list JSON data override
+}
+
+func TestDowngradeTargetCapabilityIsFreeOnly(t *testing.T) {
+	provider := &Provider{}
+	if !provider.SupportsDowngradeTarget(plans.Free) {
+		t.Fatal("free downgrade target must be supported")
+	}
+	for _, target := range []string{"standard", "team", "enterprise", ""} {
+		if provider.SupportsDowngradeTarget(target) {
+			t.Fatalf("downgrade target %q unexpectedly supported", target)
+		}
+	}
 }
 
 func newStub(t *testing.T) (*stubStripe, *Provider) {
 	t.Helper()
 	s := &stubStripe{
 		t: t, prices: map[string]string{}, priceCents: map[string]int64{},
-		lastForm: map[string]string{}, subActive: true, subArmed: true, upcoming: true,
+		lastForm: map[string]string{}, checkoutOps: map[string]checkoutReplay{},
+		subActive: true, subArmed: true, upcoming: true,
 	}
 	srv := httptest.NewServer(http.HandlerFunc(s.handle))
 	t.Cleanup(srv.Close)
@@ -74,6 +105,11 @@ func (s *stubStripe) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	s.lastVersion = r.Header.Get("Stripe-Version")
 	s.lastIdem = r.Header.Get("Idempotency-Key")
+	s.requests = append(s.requests, stubRequest{
+		method:         r.Method,
+		path:           r.URL.Path,
+		idempotencyKey: s.lastIdem,
+	})
 	if s.failNext > 0 && (s.failPath == "" || s.failPath == r.URL.Path) {
 		status := s.failNext
 		s.failNext = 0
@@ -110,11 +146,17 @@ func (s *stubStripe) handle(w http.ResponseWriter, r *http.Request) {
 		s.priceCents[key], _ = strconv.ParseInt(s.lastForm["unit_amount"], 10, 64)
 		_, _ = fmt.Fprintf(w, `{"id":%q}`, "price_"+key)
 	case r.URL.Path == "/v1/customers" && r.Method == http.MethodPost:
+		s.customerCreateKeys = append(s.customerCreateKeys, s.lastIdem)
+		s.customerCreateForms = append(s.customerCreateForms, s.lastForm)
 		_, _ = fmt.Fprint(w, `{"id":"cus_stub_1"}`)
 	case strings.HasPrefix(r.URL.Path, "/v1/customers/") && r.Method == http.MethodGet:
 		deleted := s.custDeleted
 		s.custDeleted = false // one poisoned generation, then healthy
 		_, _ = fmt.Fprintf(w, `{"id":"cus_stub_1","deleted":%t}`, deleted)
+	case strings.HasPrefix(r.URL.Path, "/v1/customers/") && r.Method == http.MethodPost:
+		s.customerUpdateKeys = append(s.customerUpdateKeys, s.lastIdem)
+		s.customerUpdateForms = append(s.customerUpdateForms, s.lastForm)
+		_, _ = fmt.Fprint(w, `{"id":"cus_stub_1"}`)
 	case strings.HasSuffix(r.URL.Path, "/expire"):
 		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/checkout/sessions/"), "/expire")
 		s.expired = append(s.expired, id)
@@ -126,7 +168,29 @@ func (s *stubStripe) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		_, _ = fmt.Fprintf(w, `{"data":[%s]}`, strings.Join(items, ","))
 	case r.URL.Path == "/v1/checkout/sessions":
-		_, _ = fmt.Fprint(w, `{"url":"https://checkout.stripe.com/c/pay/cs_test_stub"}`)
+		fingerprint := r.URL.Path + "\n" + r.PostForm.Encode()
+		if s.lastIdem != "" {
+			if replay, ok := s.checkoutOps[s.lastIdem]; ok {
+				if replay.fingerprint != fingerprint {
+					http.Error(w, `{"error":{"code":"idempotency_error","message":"key reused with different parameters"}}`, http.StatusBadRequest)
+					return
+				}
+				_, _ = fmt.Fprint(w, replay.response)
+				return
+			}
+		}
+		s.checkoutSeq++
+		response := fmt.Sprintf(
+			`{"url":"https://checkout.stripe.com/c/pay/cs_test_stub_%d"}`,
+			s.checkoutSeq,
+		)
+		if s.lastIdem != "" {
+			s.checkoutOps[s.lastIdem] = checkoutReplay{
+				fingerprint: fingerprint,
+				response:    response,
+			}
+		}
+		_, _ = fmt.Fprint(w, response)
 	case r.URL.Path == "/v1/billing_portal/sessions":
 		_, _ = fmt.Fprint(w, `{"url":"https://billing.stripe.com/p/session_stub"}`)
 	case r.URL.Path == "/v1/subscriptions" && r.Method == http.MethodGet:
@@ -246,10 +310,10 @@ func TestPinsAPIVersion(t *testing.T) {
 	}
 }
 
-// TestEnsureCustomerEscapesStaleIdempotency covers the two ways the stable
-// Idempotency-Key's 24h replay window goes stale (both live-test- or
-// review-discovered): the replayed customer was deleted, and the params
-// changed (idempotency_error). Both must fall through to a salted create.
+// TestEnsureCustomerEscapesStaleIdempotency covers stale create generations:
+// a replayed customer was deleted (live-test-discovered), or a prior deployed
+// create shape left a changed-parameter idempotency conflict. Both advance to a
+// deterministic generation.
 func TestEnsureCustomerEscapesStaleIdempotency(t *testing.T) {
 	t.Run("deleted replay", func(t *testing.T) {
 		s, p := newStub(t)
@@ -268,7 +332,7 @@ func TestEnsureCustomerEscapesStaleIdempotency(t *testing.T) {
 			t.Fatalf("customer creates = %d; want 2 (stable-key replay, then generation g1)", creates)
 		}
 	})
-	t.Run("idempotency_error on changed params", func(t *testing.T) {
+	t.Run("legacy create shape idempotency_error", func(t *testing.T) {
 		s, p := newStub(t)
 		s.failNext, s.failCode = http.StatusBadRequest, "idempotency_error"
 		id, err := p.EnsureCustomer(context.Background(), "acct_1", "new@b.example")
@@ -276,6 +340,56 @@ func TestEnsureCustomerEscapesStaleIdempotency(t *testing.T) {
 			t.Fatalf("EnsureCustomer = %q, %v", id, err)
 		}
 	})
+}
+
+func TestEnsureCustomerSeparatesStableCreateFromMutableEmail(t *testing.T) {
+	s, p := newStub(t)
+	ctx := context.Background()
+
+	firstEmail := "first@example.test"
+	firstID, err := p.EnsureCustomer(ctx, "acct_1", firstEmail)
+	if err != nil || firstID != "cus_stub_1" {
+		t.Fatalf("first EnsureCustomer = %q, %v", firstID, err)
+	}
+	secondEmail := "rotated@example.test"
+	secondID, err := p.EnsureCustomer(ctx, "acct_1", secondEmail)
+	if err != nil || secondID != firstID {
+		t.Fatalf("rotated EnsureCustomer = %q, %v; want customer %q", secondID, err, firstID)
+	}
+	if len(s.customerCreateKeys) != 2 ||
+		s.customerCreateKeys[0] != "witself-ensure-acct_1" ||
+		s.customerCreateKeys[1] != s.customerCreateKeys[0] {
+		t.Fatalf("customer create keys = %v; want the same stable account key", s.customerCreateKeys)
+	}
+	for i, form := range s.customerCreateForms {
+		if form["metadata[witself_account]"] != "acct_1" || form["email"] != "" {
+			t.Fatalf("customer create form %d = %v; mutable email leaked into create", i, form)
+		}
+	}
+	if len(s.customerUpdateKeys) != 2 || len(s.customerUpdateForms) != 2 {
+		t.Fatalf("customer email updates = keys %v forms %v; want two", s.customerUpdateKeys, s.customerUpdateForms)
+	}
+	if s.customerUpdateForms[0]["email"] != firstEmail ||
+		s.customerUpdateForms[1]["email"] != secondEmail {
+		t.Fatalf("customer email update forms = %v", s.customerUpdateForms)
+	}
+	if s.customerUpdateKeys[0] == "" ||
+		s.customerUpdateKeys[0] == s.customerUpdateKeys[1] {
+		t.Fatalf("customer email update keys = %v; want distinct non-empty keys", s.customerUpdateKeys)
+	}
+	for _, key := range s.customerUpdateKeys {
+		if strings.Contains(key, firstEmail) || strings.Contains(key, secondEmail) {
+			t.Fatalf("customer email leaked into idempotency key %q", key)
+		}
+	}
+
+	_, err = p.EnsureCustomer(ctx, "acct_1", secondEmail)
+	if err != nil {
+		t.Fatalf("exact rotated-email replay: %v", err)
+	}
+	if got := s.customerUpdateKeys[2]; got != s.customerUpdateKeys[1] {
+		t.Fatalf("exact email update replay key = %q; want %q", got, s.customerUpdateKeys[1])
+	}
 }
 
 func TestSubscribeBuildsCheckout(t *testing.T) {
@@ -312,6 +426,139 @@ func TestSubscribeIdempotentBindsCheckoutOperation(t *testing.T) {
 	if _, err := p.SubscribeIdempotent(
 		context.Background(), "cus_stub_1", "standard", ""); err == nil {
 		t.Fatal("empty subscription operation id accepted")
+	}
+}
+
+func TestSetupLinkIdempotentBindsReplaysAndRejectsConflict(t *testing.T) {
+	s, p := newStub(t)
+	ctx := context.Background()
+
+	first, err := p.SetupLinkIdempotent(ctx, "cus_stub_1", "bop_setup_1")
+	if err != nil || first.Done || !strings.Contains(first.URL, "checkout.stripe.com") {
+		t.Fatalf("first SetupLinkIdempotent = %+v, %v", first, err)
+	}
+	if s.lastIdem != "witself-setup-bop_setup_1" {
+		t.Fatalf("Idempotency-Key = %q", s.lastIdem)
+	}
+	if s.lastForm["metadata[witself_operation_id]"] != "bop_setup_1" {
+		t.Fatalf("operation metadata missing from setup session: %v", s.lastForm)
+	}
+	second, err := p.SetupLinkIdempotent(ctx, "cus_stub_1", "bop_setup_1")
+	if err != nil || second != first {
+		t.Fatalf("replayed SetupLinkIdempotent = %+v, %v; want %+v", second, err, first)
+	}
+	if s.checkoutSeq != 1 {
+		t.Fatalf("exact setup replay minted %d Checkout objects; want 1", s.checkoutSeq)
+	}
+	if _, err := p.SetupLinkIdempotent(ctx, "cus_other", "bop_setup_1"); err == nil {
+		t.Fatal("setup operation identity reused for another customer")
+	}
+	if s.checkoutSeq != 1 {
+		t.Fatalf("conflicting setup minted another Checkout object: %d", s.checkoutSeq)
+	}
+}
+
+func TestStripeStrongOperationIDShape(t *testing.T) {
+	_, p := newStub(t)
+	for _, operationID := range []string{
+		"",
+		" leading",
+		"trailing ",
+		"slash/value",
+		"unicode-é",
+		strings.Repeat("x", 129),
+	} {
+		if _, err := p.SetupLinkIdempotent(
+			context.Background(), "cus_stub_1", operationID,
+		); err == nil {
+			t.Fatalf("SetupLinkIdempotent accepted operation id %q", operationID)
+		}
+	}
+}
+
+func TestScheduleDowngradeIdempotentKeysMutationsOnly(t *testing.T) {
+	s, p := newStub(t)
+	ctx := context.Background()
+
+	first, err := p.ScheduleDowngradeIdempotent(
+		ctx, "cus_stub_1", "free", "bop_down_1",
+	)
+	if err != nil || first.IsZero() {
+		t.Fatalf("first ScheduleDowngradeIdempotent = %v, %v", first, err)
+	}
+	wantKey := childIdempotencyKey("bop_down_1", "downgrade", "sub_stub")
+	if wantKey == "" || len(wantKey) > 255 {
+		t.Fatalf("derived downgrade key has invalid length %d: %q", len(wantKey), wantKey)
+	}
+	if len(s.requests) != 2 {
+		t.Fatalf("downgrade requests = %+v; want one read and one mutation", s.requests)
+	}
+	if got := s.requests[0]; got.method != http.MethodGet || got.idempotencyKey != "" {
+		t.Fatalf("downgrade discovery read carried an idempotency key: %+v", got)
+	}
+	if got := s.requests[1]; got.method != http.MethodPost || got.idempotencyKey != wantKey {
+		t.Fatalf("downgrade mutation request = %+v; want key %q", got, wantKey)
+	}
+
+	start := len(s.requests)
+	second, err := p.ScheduleDowngradeIdempotent(
+		ctx, "cus_stub_1", "free", "bop_down_1",
+	)
+	if err != nil || !second.Equal(first) {
+		t.Fatalf("replayed ScheduleDowngradeIdempotent = %v, %v; want %v", second, err, first)
+	}
+	if got := s.requests[start+1].idempotencyKey; got != wantKey {
+		t.Fatalf("downgrade replay key = %q; want %q", got, wantKey)
+	}
+
+	bounded := childIdempotencyKey(
+		strings.Repeat("x", 128), "cancel-subscription", strings.Repeat("object", 100),
+	)
+	if len(bounded) > 255 {
+		t.Fatalf("maximal child Idempotency-Key is %d bytes; Stripe allows 255", len(bounded))
+	}
+}
+
+func TestCancelPendingIdempotentKeysEveryMutationAndNoRead(t *testing.T) {
+	s, p := newStub(t)
+	s.openSessions = []string{"cs_stale_a", "cs_stale_b"}
+	if err := p.CancelPendingIdempotent(
+		context.Background(), "cus_stub_1", "bop_cancel_1",
+	); err != nil {
+		t.Fatalf("CancelPendingIdempotent: %v", err)
+	}
+
+	wantKeys := map[string]string{
+		"/v1/checkout/sessions/cs_stale_a/expire": childIdempotencyKey(
+			"bop_cancel_1", "cancel-checkout", "cs_stale_a"),
+		"/v1/checkout/sessions/cs_stale_b/expire": childIdempotencyKey(
+			"bop_cancel_1", "cancel-checkout", "cs_stale_b"),
+		"/v1/subscriptions/sub_stub": childIdempotencyKey(
+			"bop_cancel_1", "cancel-subscription", "sub_stub"),
+	}
+	seen := map[string]bool{}
+	for _, request := range s.requests {
+		switch request.method {
+		case http.MethodGet:
+			if request.idempotencyKey != "" {
+				t.Fatalf("cancel discovery read carried key %q: %+v", request.idempotencyKey, request)
+			}
+		case http.MethodPost:
+			want, ok := wantKeys[request.path]
+			if !ok {
+				t.Fatalf("unexpected cancellation mutation: %+v", request)
+			}
+			if request.idempotencyKey != want {
+				t.Fatalf("cancellation mutation %s key = %q; want %q", request.path, request.idempotencyKey, want)
+			}
+			if seen[request.idempotencyKey] {
+				t.Fatalf("two child mutations collided on key %q", request.idempotencyKey)
+			}
+			seen[request.idempotencyKey] = true
+		}
+	}
+	if len(seen) != len(wantKeys) {
+		t.Fatalf("keyed cancellation mutations = %v; want %v", seen, wantKeys)
 	}
 }
 
@@ -490,7 +737,8 @@ func webhookStub(t *testing.T, now time.Time) (*stubStripe, *Provider) {
 	t.Helper()
 	s := &stubStripe{
 		t: t, prices: map[string]string{}, priceCents: map[string]int64{},
-		lastForm: map[string]string{}, subActive: true, subArmed: true, upcoming: true,
+		lastForm: map[string]string{}, checkoutOps: map[string]checkoutReplay{},
+		subActive: true, subArmed: true, upcoming: true,
 	}
 	srv := httptest.NewServer(http.HandlerFunc(s.handle))
 	t.Cleanup(srv.Close)

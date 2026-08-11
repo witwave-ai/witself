@@ -1112,10 +1112,27 @@ complete effective feature, limit, and policy maps and labels values that
 differ from the plan default. `--json` returns the same value-free status
 projection without administrator attribution or audit history.
 
-The implemented lifecycle verbs remain `witself plan upgrade TARGET`,
-`witself plan downgrade TARGET`, and `witself plan cancel`. Upgrade and
-downgrade targets accept either a public plan name or stable plan ID,
-case-insensitively. The provider-neutral billing status, invoice, payment,
+The implemented lifecycle verbs are guarded mutations:
+
+```sh
+witself plan upgrade --reason TEXT --idempotency-key KEY --yes TARGET
+witself plan downgrade --reason TEXT --idempotency-key KEY --yes TARGET
+witself plan cancel --reason TEXT --idempotency-key KEY --yes
+```
+
+Each also supports `--reason TEXT --dry-run` instead of the apply guards; its
+only billing-mutation request is `billing:preview` (account/capability and
+catalog reads may still occur). It forbids `--yes` and
+`--idempotency-key`, and creates neither a receipt nor provider state. Apply
+never prompts or silently confirms: `--reason`, `--idempotency-key`, and
+`--yes` are all required. Reasons are safe single-line text of 1-512 bytes;
+retry keys are 16-128 printable ASCII characters and are scoped to one account.
+`--json` emits the safe preview or mutation outcome. A cancel that loses a
+race to completion or replacement prints that the pending change was already
+resolved and no cancellation was applied; JSON reports value-minimal
+`kind: "resolved"` without `cancelled`, plan, URL, or effective-time fields.
+Upgrade and downgrade targets accept either a public plan name or stable plan
+ID, case-insensitively. The provider-neutral billing status, invoice, payment,
 setup, and portal slice below is also implemented. Subscription management,
 usage/limit aggregation, payment-method CRUD, hosted-session inspection, and
 crypto payments remain the target billing contract.
@@ -1138,7 +1155,7 @@ witself billing show [--account NAME] [--endpoint CELL_URL] [--json]
 witself billing invoices [--account NAME] [--endpoint CELL_URL] [--invoice NUMBER] [--pdf | --json]
 witself billing payments [--account NAME] [--endpoint CELL_URL] [--json]
 witself billing portal [--account NAME] [--endpoint CELL_URL] [--open | --json]
-witself billing setup [--account NAME] [--endpoint CELL_URL] [--email EMAIL] [--open | --json]
+witself billing setup --reason TEXT (--dry-run | --idempotency-key KEY --yes) [--account NAME] [--endpoint CELL_URL] [--email EMAIL] [--open | --json]
 ```
 
 These commands are a dark provider-neutral control-plane surface; their
@@ -1487,9 +1504,9 @@ Flags:
 
 Request provider-hosted payment-method setup. This command is implemented and
 is the only command in this read slice that may idempotently establish the
-account's provider-customer relationship. The provider may create a fresh
-hosted setup session for each invocation; the action as a whole is not promised
-to be idempotent. It never accepts raw payment data.
+account's provider-customer relationship. Exact retries replay the durable
+setup result rather than creating another hosted action. It never accepts raw
+payment data.
 
 Flags:
 
@@ -1500,6 +1517,10 @@ Flags:
 | `--email EMAIL` | Optional customer email hint on first provider contact. |
 | `--open` | Explicitly open the validated HTTPS setup URL. |
 | `--json` | Emit the hosted action instead of opening it. |
+| `--reason TEXT` | Required 1-512 byte, single-line audit reason for preview and apply. |
+| `--dry-run` | Call only the write-free preview route; cannot be combined with `--open`, `--yes`, or `--idempotency-key`. |
+| `--idempotency-key KEY` | Required 16-128 character printable-ASCII, account-scoped retry identity for apply. |
+| `--yes` | Required explicit apply confirmation. |
 
 ### `witself billing invoices show INVOICE_ID`
 

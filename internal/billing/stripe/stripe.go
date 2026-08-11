@@ -95,7 +95,11 @@ type Provider struct {
 }
 
 var _ billing.Provider = (*Provider)(nil)
+var _ billing.IdempotentSetupper = (*Provider)(nil)
 var _ billing.IdempotentSubscriber = (*Provider)(nil)
+var _ billing.IdempotentDowngrader = (*Provider)(nil)
+var _ billing.DowngradeTargetChecker = (*Provider)(nil)
+var _ billing.IdempotentPendingCanceller = (*Provider)(nil)
 var _ billing.EventResolver = (*Provider)(nil)
 
 // New validates cfg and returns a Provider.
@@ -129,6 +133,20 @@ func New(cfg Config) (*Provider, error) {
 
 // lookupKey names a plan's price in Stripe: "witself_standard".
 func lookupKey(planID string) string { return "witself_" + planID }
+
+// childIdempotencyKey derives one bounded Stripe key for a mutation inside a
+// larger durable operation. The provider object id is hashed rather than
+// copied into the header, keeping the key bounded and avoiding raw identifiers
+// in request metadata. Legacy, non-strong calls pass no operation id and
+// intentionally receive no key.
+func childIdempotencyKey(operationID, action, objectID string) string {
+	if operationID == "" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(action + "\x00" + objectID))
+	return "witself-" + action + "-" + operationID + "-" +
+		hex.EncodeToString(digest[:])
+}
 
 // EnsurePrices bootstraps the Stripe side of the catalog: for every
 // purchasable plan, resolve its price by lookup_key, creating the product and
@@ -227,23 +245,25 @@ func (p *Provider) createPrice(ctx context.Context, productID, planID string, ce
 	return price.ID, nil
 }
 
-// EnsureCustomer implements billing.Provider. The Idempotency-Key derived
-// from the account id makes near-term retries return the same customer —
-// BUT Stripe replays the original response even after the resource was
-// deleted (live-test-discovered), so the replayed customer is verified and
-// the create retried with a fresh key when it no longer exists.
+// EnsureCustomer implements billing.Provider. Customer creation is bound only
+// to stable account metadata; mutable email is applied afterward with its own
+// value-derived idempotency key. That separation matters when an exact billing
+// retry arrives after the account email changed: Stripe must replay the same
+// customer create instead of rejecting changed create parameters and advancing
+// to a second customer generation.
+//
+// Stripe replays the original create response even after the resource was
+// deleted (live-test-discovered), so the replayed customer is verified and the
+// create retried with a fresh key when it no longer exists.
 func (p *Provider) EnsureCustomer(ctx context.Context, accountID, email string) (string, error) {
 	params := url.Values{"metadata[witself_account]": {accountID}}
-	if email != "" {
-		params.Set("email", email)
-	}
 	// Walk deterministic key generations: the stable key first, then -g1,
 	// -g2, … A generation goes stale when its 24h replay window returns a
-	// customer that was since deleted, or 400s idempotency_error because
-	// the params changed under it (email update). Deterministic generations
-	// (rather than a time salt) keep EnsureCustomer stable across near-term
-	// retries even when earlier generations are poisoned — retries walk the
-	// same chain to the same live customer.
+	// customer that was since deleted. A 400 idempotency_error can also remain
+	// during rollout from an older create shape. Deterministic generations (rather
+	// than a time salt) keep EnsureCustomer stable across near-term retries even
+	// when earlier generations are poisoned — retries walk the same chain to the
+	// same live customer.
 	for gen := 0; gen < 16; gen++ {
 		key := "witself-ensure-" + accountID
 		if gen > 0 {
@@ -264,6 +284,9 @@ func (p *Provider) EnsureCustomer(ctx context.Context, accountID, email string) 
 			return "", err
 		}
 		if alive {
+			if err := p.updateCustomerEmail(ctx, cust.ID, email); err != nil {
+				return "", err
+			}
 			return cust.ID, nil
 		}
 	}
@@ -276,7 +299,28 @@ func (p *Provider) EnsureCustomer(ctx context.Context, accountID, email string) 
 	if err := p.call(ctx, "POST", "/v1/customers", params, salted, &cust); err != nil {
 		return "", err
 	}
+	if err := p.updateCustomerEmail(ctx, cust.ID, email); err != nil {
+		return "", err
+	}
 	return cust.ID, nil
+}
+
+// updateCustomerEmail applies mutable customer contact state separately from
+// the stable create. The raw email never appears in the idempotency key: a hash
+// of the customer/value pair gives exact retries one key while allowing a later
+// rotation to perform a distinct update.
+func (p *Provider) updateCustomerEmail(
+	ctx context.Context,
+	customerID, email string,
+) error {
+	if email == "" {
+		return nil
+	}
+	digest := sha256.Sum256([]byte(customerID + "\x00" + email))
+	idempotencyKey := "witself-customer-email-" + hex.EncodeToString(digest[:])
+	return p.call(ctx, "POST", "/v1/customers/"+customerID, url.Values{
+		"email": {email},
+	}, idempotencyKey, nil)
 }
 
 // customerAlive reports whether the customer exists and is not deleted.
@@ -308,10 +352,8 @@ func (p *Provider) SubscribeIdempotent(
 	ctx context.Context,
 	customerID, plan, operationID string,
 ) (billing.Action, error) {
-	operationID = strings.TrimSpace(operationID)
-	if operationID == "" || len(operationID) > 128 {
-		return billing.Action{}, errors.New(
-			"stripe: subscription operation id must be 1-128 characters")
+	if err := billing.ValidateOperationID(operationID); err != nil {
+		return billing.Action{}, fmt.Errorf("stripe: subscription: %w", err)
 	}
 	return p.subscribe(ctx, customerID, plan, operationID)
 }
@@ -353,16 +395,43 @@ func (p *Provider) subscribe(
 // SetupLink implements billing.Provider: a Checkout session in setup mode
 // (card capture without charging).
 func (p *Provider) SetupLink(ctx context.Context, customerID string) (billing.Action, error) {
+	return p.setupLink(ctx, customerID, "")
+}
+
+// SetupLinkIdempotent creates or replays the Checkout Session for one durable
+// setup operation. The operation identity is copied into session metadata so
+// Stripe-side diagnostics can correlate the resulting object without copying
+// customer content into the idempotency key.
+func (p *Provider) SetupLinkIdempotent(
+	ctx context.Context,
+	customerID, operationID string,
+) (billing.Action, error) {
+	if err := billing.ValidateOperationID(operationID); err != nil {
+		return billing.Action{}, fmt.Errorf("stripe: setup: %w", err)
+	}
+	return p.setupLink(ctx, customerID, operationID)
+}
+
+func (p *Provider) setupLink(
+	ctx context.Context,
+	customerID, operationID string,
+) (billing.Action, error) {
 	var session struct {
 		URL string `json:"url"`
 	}
-	err := p.call(ctx, "POST", "/v1/checkout/sessions", url.Values{
+	params := url.Values{
 		"mode":        {"setup"},
 		"customer":    {customerID},
 		"currency":    {"usd"}, // required in setup mode (no line items to infer it from)
 		"success_url": {p.cfg.SuccessURL},
 		"cancel_url":  {p.cfg.CancelURL},
-	}, "", &session)
+	}
+	idempotencyKey := ""
+	if operationID != "" {
+		params.Set("metadata[witself_operation_id]", operationID)
+		idempotencyKey = "witself-setup-" + operationID
+	}
+	err := p.call(ctx, "POST", "/v1/checkout/sessions", params, idempotencyKey, &session)
 	if err != nil {
 		return billing.Action{}, err
 	}
@@ -442,6 +511,34 @@ func (p *Provider) liveSubscriptions(ctx context.Context, customerID string) ([]
 // this is also the self-heal. Paid-to-paid needs subscription schedules;
 // that lands with the Team tier.
 func (p *Provider) ScheduleDowngrade(ctx context.Context, customerID, plan string) (time.Time, error) {
+	return p.scheduleDowngrade(ctx, customerID, plan, "")
+}
+
+// ScheduleDowngradeIdempotent applies one durable downgrade operation. Each
+// subscription mutation gets a deterministic child key, so multiple live
+// subscriptions can be repaired in one operation without colliding with one
+// another and an ambiguous retry replays each exact Stripe mutation.
+func (p *Provider) ScheduleDowngradeIdempotent(
+	ctx context.Context,
+	customerID, plan, operationID string,
+) (time.Time, error) {
+	if err := billing.ValidateOperationID(operationID); err != nil {
+		return time.Time{}, fmt.Errorf("stripe: downgrade: %w", err)
+	}
+	return p.scheduleDowngrade(ctx, customerID, plan, operationID)
+}
+
+// SupportsDowngradeTarget reports the exact target set this adapter can
+// schedule today. Paid-to-paid transitions require subscription schedules and
+// remain unavailable until the Team billing slice lands.
+func (*Provider) SupportsDowngradeTarget(plan string) bool {
+	return plan == plans.Free
+}
+
+func (p *Provider) scheduleDowngrade(
+	ctx context.Context,
+	customerID, plan, operationID string,
+) (time.Time, error) {
 	if plan != plans.Free {
 		return time.Time{}, fmt.Errorf("stripe: downgrade to %q not supported yet (only free; paid-to-paid lands with the Team tier)", plan)
 	}
@@ -456,7 +553,7 @@ func (p *Provider) ScheduleDowngrade(ctx context.Context, customerID, plan strin
 	for _, sub := range subs {
 		if err := p.call(ctx, "POST", "/v1/subscriptions/"+sub.ID, url.Values{
 			"cancel_at_period_end": {"true"},
-		}, "", nil); err != nil {
+		}, childIdempotencyKey(operationID, "downgrade", sub.ID), nil); err != nil {
 			return time.Time{}, err
 		}
 		if pe := sub.periodEnd(); pe.After(latest) {
@@ -475,6 +572,26 @@ func (p *Provider) ScheduleDowngrade(ctx context.Context, customerID, plan strin
 // invariant); swallowing an API failure here left downgrades armed at Stripe
 // after the user was told the cancel took.
 func (p *Provider) CancelPending(ctx context.Context, customerID string) error {
+	return p.cancelPending(ctx, customerID, "")
+}
+
+// CancelPendingIdempotent applies one durable cancellation operation. Each
+// expired Checkout Session and disarmed subscription receives its own stable
+// child key; the discovery reads deliberately carry no idempotency header.
+func (p *Provider) CancelPendingIdempotent(
+	ctx context.Context,
+	customerID, operationID string,
+) error {
+	if err := billing.ValidateOperationID(operationID); err != nil {
+		return fmt.Errorf("stripe: cancel pending: %w", err)
+	}
+	return p.cancelPending(ctx, customerID, operationID)
+}
+
+func (p *Provider) cancelPending(
+	ctx context.Context,
+	customerID, operationID string,
+) error {
 	var sessions struct {
 		Data []struct {
 			ID   string `json:"id"`
@@ -489,7 +606,14 @@ func (p *Provider) CancelPending(ctx context.Context, customerID string) error {
 		if s.Mode != "subscription" {
 			continue // leave setup-mode (card capture) links alone
 		}
-		if err := p.call(ctx, "POST", "/v1/checkout/sessions/"+s.ID+"/expire", url.Values{}, "", nil); err != nil {
+		if err := p.call(
+			ctx,
+			"POST",
+			"/v1/checkout/sessions/"+s.ID+"/expire",
+			url.Values{},
+			childIdempotencyKey(operationID, "cancel-checkout", s.ID),
+			nil,
+		); err != nil {
 			return err
 		}
 	}
@@ -503,7 +627,7 @@ func (p *Provider) CancelPending(ctx context.Context, customerID string) error {
 		}
 		if err := p.call(ctx, "POST", "/v1/subscriptions/"+sub.ID, url.Values{
 			"cancel_at_period_end": {"false"},
-		}, "", nil); err != nil {
+		}, childIdempotencyKey(operationID, "cancel-subscription", sub.ID), nil); err != nil {
 			return err
 		}
 	}

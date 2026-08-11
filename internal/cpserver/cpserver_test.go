@@ -94,6 +94,13 @@ func newHarnessWithApplier(t *testing.T, applier lifecycle.Applier) *harness {
 
 // call makes a request and decodes the JSON document.
 func (h *harness) call(t *testing.T, method, path, bearer, body string) (int, map[string]any) {
+	return h.callWithIdempotencyKey(t, method, path, bearer, body, "")
+}
+
+func (h *harness) callWithIdempotencyKey(
+	t *testing.T,
+	method, path, bearer, body, idempotencyKey string,
+) (int, map[string]any) {
 	t.Helper()
 	var rdr io.Reader
 	if body != "" {
@@ -109,6 +116,9 @@ func (h *harness) call(t *testing.T, method, path, bearer, body string) (int, ma
 	if bearer == "admin-good" {
 		req.Header.Set("X-Witself-Admin-ID", testAdminID)
 		req.Header.Set("X-Witself-Admin-Handle", "scott")
+	}
+	if idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", idempotencyKey)
 	}
 	req.Header.Set("X-Witself-Email", "s@example.com")
 	resp, err := http.DefaultClient.Do(req)
@@ -899,7 +909,10 @@ func TestFullLifecycleOverHTTP(t *testing.T) {
 	}
 
 	// Upgrade: interactive fake -> action + checkout URL.
-	status, doc = h.call(t, "POST", "/v1/accounts/acct_1/plan:upgrade", "good", `{"plan":"standard"}`)
+	status, doc = h.callWithIdempotencyKey(t, "POST",
+		"/v1/accounts/acct_1/plan:upgrade", "good",
+		`{"plan":"standard","reason":"Move to Professional","confirmed":true}`,
+		"http-upgrade-standard")
 	if status != 200 || doc["kind"] != "action" || doc["url"] == "" {
 		t.Fatalf("upgrade = %d %v; want action+url", status, doc)
 	}
@@ -935,13 +948,19 @@ func TestFullLifecycleOverHTTP(t *testing.T) {
 	}
 
 	// Downgrade: scheduled for period end.
-	status, doc = h.call(t, "POST", "/v1/accounts/acct_1/plan:downgrade", "good", `{"plan":"free"}`)
+	status, doc = h.callWithIdempotencyKey(t, "POST",
+		"/v1/accounts/acct_1/plan:downgrade", "good",
+		`{"plan":"free","reason":"Return to Personal","confirmed":true}`,
+		"http-downgrade-free")
 	if status != 200 || doc["kind"] != "scheduled" || doc["effective"] == nil {
 		t.Fatalf("downgrade = %d %v; want scheduled+effective", status, doc)
 	}
 
 	// Cancel restores the status quo.
-	if status, doc = h.call(t, "POST", "/v1/accounts/acct_1/plan:cancel", "good", ""); status != 200 || doc["cancelled"] != true {
+	if status, doc = h.callWithIdempotencyKey(t, "POST",
+		"/v1/accounts/acct_1/plan:cancel", "good",
+		`{"reason":"Keep Professional","confirmed":true}`,
+		"http-cancel-downgrade"); status != 200 || doc["cancelled"] != true {
 		t.Fatalf("cancel = %d %v", status, doc)
 	}
 	_, doc = h.call(t, "GET", "/v1/accounts/acct_1/plan", "good", "")
@@ -950,16 +969,136 @@ func TestFullLifecycleOverHTTP(t *testing.T) {
 	}
 }
 
+func TestBillingMutationHTTPEnvelopePreviewReplayAndConflict(t *testing.T) {
+	h := newHarness(t)
+	previewBody := `{"operation":"plan_upgrade","plan":"standard","reason":"Move to Professional"}`
+	status, doc := h.call(t, http.MethodPost,
+		"/v1/accounts/acct_1/billing:preview", "good", previewBody)
+	if status != http.StatusOK || doc["allowed"] != true ||
+		doc["confirmation_required"] != true || doc["operation"] != "plan_upgrade" {
+		t.Fatalf("preview = %d %v", status, doc)
+	}
+
+	applyBody := `{"plan":"standard","reason":"Move to Professional","confirmed":true}`
+	status, doc = h.call(t, http.MethodPost,
+		"/v1/accounts/acct_1/plan:upgrade", "good", applyBody)
+	if status != http.StatusBadRequest || doc["code"] != "invalid_request" {
+		t.Fatalf("missing key = %d %v; want strict 400", status, doc)
+	}
+	status, doc = h.callWithIdempotencyKey(t, http.MethodPost,
+		"/v1/accounts/acct_1/plan:upgrade", "good", applyBody, "http-envelope-upgrade")
+	if status != http.StatusOK || doc["operation_id"] == "" ||
+		doc["operation"] != "plan_upgrade" || doc["actor_id"] != "opr_owner" ||
+		doc["actor_role"] != "account_owner" || doc["confirmed"] != true ||
+		doc["replayed"] != false {
+		t.Fatalf("apply = %d %v", status, doc)
+	}
+	operationID := doc["operation_id"]
+	status, doc = h.callWithIdempotencyKey(t, http.MethodPost,
+		"/v1/accounts/acct_1/plan:upgrade", "good", applyBody, "http-envelope-upgrade")
+	if status != http.StatusOK || doc["replayed"] != true ||
+		doc["operation_id"] != operationID {
+		t.Fatalf("replay = %d %v", status, doc)
+	}
+	status, doc = h.callWithIdempotencyKey(t, http.MethodPost,
+		"/v1/accounts/acct_1/plan:upgrade", "good",
+		`{"plan":"standard","reason":"Changed request","confirmed":true}`,
+		"http-envelope-upgrade")
+	if status != http.StatusConflict || doc["code"] != "idempotency_conflict" ||
+		doc["retryable"] != false {
+		t.Fatalf("changed replay = %d %v", status, doc)
+	}
+
+	for _, tc := range []struct {
+		name string
+		path string
+		body string
+		key  string
+	}{
+		{
+			name: "preview key", path: "/v1/accounts/acct_1/billing:preview",
+			body: previewBody, key: "preview-must-not-have-key",
+		},
+		{
+			name: "preview actor injection", path: "/v1/accounts/acct_1/billing:preview",
+			body: `{"operation":"plan_upgrade","plan":"standard","reason":"test","actor_id":"attacker"}`,
+		},
+		{
+			name: "unconfirmed apply", path: "/v1/accounts/acct_1/plan:upgrade",
+			body: `{"plan":"standard","reason":"test","confirmed":false}`,
+			key:  "unconfirmed-apply",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, doc := h.callWithIdempotencyKey(
+				t, http.MethodPost, tc.path, "good", tc.body, tc.key)
+			if status != http.StatusBadRequest || doc["code"] != "invalid_request" {
+				t.Fatalf("response = %d %v", status, doc)
+			}
+		})
+	}
+}
+
+func TestBillingMutationSupersededHTTPMapping(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	writeBillingMutationManagerError(
+		recorder, fmt.Errorf("resume failed: %w", lifecycle.ErrBillingMutationSuperseded))
+	var doc map[string]any
+	if err := json.NewDecoder(recorder.Body).Decode(&doc); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.Code != http.StatusConflict ||
+		doc["code"] != "operation_superseded" || doc["retryable"] != false ||
+		!strings.Contains(doc["error"].(string), "new Idempotency-Key") {
+		t.Fatalf("superseded = %d %v", recorder.Code, doc)
+	}
+}
+
+func TestBillingMutationResolvedCancelProjectionIsValueMinimal(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	writeBillingMutationExecution(recorder, lifecycle.BillingMutationExecution{
+		OperationID: "bop_resolved_cancel",
+		Operation:   lifecycle.BillingMutationCancel,
+		Actor: lifecycle.BillingActor{
+			ID: "opr_owner", Role: "account_owner",
+		},
+		Confirmed: true,
+		Outcome:   lifecycle.Outcome{Kind: "resolved"},
+	})
+	var doc map[string]any
+	if err := json.NewDecoder(recorder.Body).Decode(&doc); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.Code != http.StatusOK || doc["kind"] != "resolved" ||
+		doc["operation"] != "plan_cancel" || doc["confirmed"] != true {
+		t.Fatalf("resolved projection = %d %v", recorder.Code, doc)
+	}
+	for _, forbidden := range []string{"cancelled", "plan", "url", "effective"} {
+		if _, present := doc[forbidden]; present {
+			t.Fatalf("resolved projection exposed %q: %v", forbidden, doc)
+		}
+	}
+}
+
 func TestVerbRefusalsSurfaceVerbatim(t *testing.T) {
 	h := newHarness(t)
-	status, doc := h.call(t, "POST", "/v1/accounts/acct_1/plan:upgrade", "good", `{"plan":"free"}`)
+	status, doc := h.callWithIdempotencyKey(t, "POST",
+		"/v1/accounts/acct_1/plan:upgrade", "good",
+		`{"plan":"free","reason":"Try current plan","confirmed":true}`,
+		"http-refuse-current-plan")
 	if status != 409 || !strings.Contains(doc["error"].(string), "already on") {
 		t.Fatalf("upgrade-to-free = %d %v; want the Manager's refusal verbatim", status, doc)
 	}
-	if status, _ := h.call(t, "POST", "/v1/accounts/acct_1/plan:upgrade", "good", `{}`); status != 400 {
+	if status, _ := h.callWithIdempotencyKey(t, "POST",
+		"/v1/accounts/acct_1/plan:upgrade", "good",
+		`{"reason":"Missing plan","confirmed":true}`,
+		"http-missing-plan"); status != 400 {
 		t.Fatalf("missing plan = %d; want 400", status)
 	}
-	if status, _ := h.call(t, "POST", "/v1/accounts/acct_1/plan:cancel", "good", ""); status != 409 {
+	if status, _ := h.callWithIdempotencyKey(t, "POST",
+		"/v1/accounts/acct_1/plan:cancel", "good",
+		`{"reason":"Nothing pending","confirmed":true}`,
+		"http-cancel-nothing"); status != 409 {
 		t.Fatalf("cancel with nothing pending = %d; want 409", status)
 	}
 }
@@ -1034,7 +1173,10 @@ func TestInfraErrorsAreNot409s(t *testing.T) {
 	t.Cleanup(srv.Close)
 	h := &harness{srv: srv}
 
-	status, doc := h.call(t, "POST", "/v1/accounts/acct_1/plan:upgrade", "any", `{"plan":"standard"}`)
+	status, doc := h.callWithIdempotencyKey(t, "POST",
+		"/v1/accounts/acct_1/plan:upgrade", "any",
+		`{"plan":"standard","reason":"Exercise store failure","confirmed":true}`,
+		"http-broken-store")
 	if status != 500 {
 		t.Fatalf("store outage = %d %v; want 500, never a 409 refusal", status, doc)
 	}
