@@ -89,6 +89,26 @@ func TestResolvePlanTargetAcceptsStableIDAndCustomerName(t *testing.T) {
 	}
 }
 
+func TestPlanChangeRejectsTrailingFlagsBeforeAccountOrNetworkAccess(t *testing.T) {
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	stdout, stderr, code := capturePlanCLI(t, func() int {
+		return planChangeCLI("upgrade", []string{"standard", "--account", "team"})
+	})
+	if code != 2 || stdout != "" || !strings.Contains(stderr, "usage: witself plan upgrade") {
+		t.Fatalf("trailing flags = %d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+}
+
+func TestPlanCancelRejectsPositionalsBeforeAccountOrNetworkAccess(t *testing.T) {
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	stdout, stderr, code := capturePlanCLI(t, func() int {
+		return planCancelCLI([]string{"junk", "--account", "team"})
+	})
+	if code != 2 || stdout != "" || !strings.Contains(stderr, "usage: witself plan cancel") {
+		t.Fatalf("trailing flags = %d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+}
+
 func TestPlanStatusShowsEffectivePolicyAndOverrides(t *testing.T) {
 	days30, days60, days90 := int64(30), int64(60), int64(90)
 	status := client.PlanStatus{

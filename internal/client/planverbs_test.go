@@ -42,8 +42,9 @@ func TestCLIPlanFlowAgainstCPServer(t *testing.T) {
 	mux := http.NewServeMux()
 	if err := cpserver.Register(mux, cpserver.Config{
 		Manager: m, Catalog: catalog, Providers: providers,
-		Authenticate: func(_ context.Context, accountID, bearer string) (bool, error) {
-			return bearer == "good" && accountID == "acct_1", nil
+		Authenticate: func(_ context.Context, accountID, bearer string, permission cpserver.AccountPermission) (cpserver.AccountAccess, bool, error) {
+			ok := bearer == "good" && accountID == "acct_1"
+			return cpserver.AccountAccess{ActorID: "opr_owner", Role: "account_owner", Permission: permission}, ok, nil
 		},
 	}); err != nil {
 		t.Fatalf("Register: %v", err)

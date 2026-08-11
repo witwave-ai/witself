@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -68,8 +69,9 @@ func newHarnessWithApplier(t *testing.T, applier lifecycle.Applier) *harness {
 	mux := http.NewServeMux()
 	err = Register(mux, Config{
 		Manager: m, Catalog: catalog, Providers: providers,
-		Authenticate: func(_ context.Context, accountID, bearer string) (bool, error) {
-			return bearer == "good" && accountID == "acct_1", nil
+		Authenticate: func(_ context.Context, accountID, bearer string, permission AccountPermission) (AccountAccess, bool, error) {
+			ok := bearer == "good" && accountID == "acct_1"
+			return AccountAccess{ActorID: "opr_owner", Role: "account_owner", Permission: permission}, ok, nil
 		},
 		AdminAuthenticate: func(
 			_ context.Context,
@@ -920,7 +922,8 @@ func TestFullLifecycleOverHTTP(t *testing.T) {
 		t.Fatalf("want 1 activation event, got %d", len(events))
 	}
 	status, doc = h.call(t, "POST", "/v1/billing/webhook/fake", "",
-		`{"customer_id":"fake_cus_0001","type":"subscription_activated","plan":"standard"}`)
+		fmt.Sprintf(`{"customer_id":"fake_cus_0001","type":"subscription_activated","plan":"standard","operation_id":%q}`,
+			events[0].OperationID))
 	if status != 200 || doc["received"].(float64) != 1 {
 		t.Fatalf("webhook = %d %v", status, doc)
 	}
@@ -1021,7 +1024,9 @@ func TestInfraErrorsAreNot409s(t *testing.T) {
 	mux := http.NewServeMux()
 	if err := Register(mux, Config{
 		Manager: m, Catalog: catalog, Providers: providers,
-		Authenticate: func(context.Context, string, string) (bool, error) { return true, nil },
+		Authenticate: func(_ context.Context, _, _ string, permission AccountPermission) (AccountAccess, bool, error) {
+			return AccountAccess{ActorID: "opr_owner", Role: "account_owner", Permission: permission}, true, nil
+		},
 	}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}

@@ -54,6 +54,26 @@ absent from release configuration. DNS is read only after the verification
 gate passes. This slice performs no DNS/provider mutation, MX or Email Routing
 change, or live mail delivery.
 
+Billing-read amendment (dark foundation, implemented in the current checkout):
+the control plane exposes account-scoped provider-neutral billing status,
+bounded invoice/payment history, and hosted setup/portal actions. Reads never
+create provider objects; setup is the explicit first-contact path and only its
+provider-customer establishment, not each hosted session, is idempotent.
+No provider/customer identifiers or raw payment data cross the API. This is a
+code-contract statement, not a release, deployment, or live-charging statement.
+Every billing response uses `Cache-Control: no-store`; optional document links
+that fail hosted-HTTPS validation are omitted, while an unsafe required action
+fails closed. Clients first authenticate the operator against the selected
+account cell with `GET /v1/whoami`, verify that principal's account id, and use
+its authenticated `account_role` to enforce distinct `billing:read` and
+`billing:manage` permissions. Older cells without the role fail closed. They then
+read the same cell's public, value-free `GET /v1/capabilities` billing block
+without a bearer and use only its validated endpoint. This supports managed
+cells with many accounts without treating a deployment account as tenant
+identity. Credential-bearing API requests never follow redirects; a changed
+origin must be rediscovered and revalidated explicitly. Billing-disabled cells
+never fall back to a public control plane.
+
 ## Implemented sealed-plane routes
 
 ```text
@@ -190,6 +210,11 @@ POST /v1/email/retry-canary:arm
 POST /v1/email/retry-canary:status
 
 # Control-plane customer request surface; account-operator bearer token.
+GET  /v1/accounts/{account_id}/billing
+GET  /v1/accounts/{account_id}/billing/invoices
+GET  /v1/accounts/{account_id}/billing/payments
+POST /v1/accounts/{account_id}/billing:setup
+POST /v1/accounts/{account_id}/billing:portal
 GET  /v1/accounts/{account_id}/realms/{realm_id}/email-alias-requests
 POST /v1/accounts/{account_id}/realms/{realm_id}/email-alias-requests
 GET  /v1/accounts/{account_id}/email-domain-requests
@@ -591,6 +616,8 @@ GET  /v1/imports
 POST /v1/imports
 GET  /v1/imports/{import_id}
 
+# Target account-token billing surface; the implemented control-plane routes
+# are account-scoped and listed above.
 GET  /v1/billing
 GET  /v1/billing/usage
 GET  /v1/billing/limits

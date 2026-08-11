@@ -54,10 +54,48 @@ const (
 // plane maps CustomerID back to an account via its registry; events carry no
 // account IDs because the provider does not know them.
 type Event struct {
-	Type       EventType
-	CustomerID string
-	Plan       string // plan id, when the event carries one
-	At         time.Time
+	Type       EventType `json:"type"`
+	CustomerID string    `json:"customer_id"`
+	Plan       string    `json:"plan,omitempty"` // plan id, when the event carries one
+	At         time.Time `json:"at"`
+
+	// ProviderEventID is the provider's immutable delivery identity (for
+	// Stripe, evt_...). PayloadSHA256 binds that identity to the exact signed
+	// body. Together they let the control plane durably suppress exact
+	// redelivery and fail closed if one identity is ever reused for different
+	// content. Providers used only in-process may leave both empty.
+	ProviderEventID string `json:"provider_event_id,omitempty"`
+	PayloadSHA256   string `json:"payload_sha256,omitempty"`
+	// ProviderObjectID identifies data.object inside the provider event.
+	// SubscriptionID is populated when that object refers to a subscription
+	// indirectly (for example a Checkout Session). These are operational
+	// reconciliation handles, never cell policy or customer-facing identity.
+	ProviderObjectID string `json:"provider_object_id,omitempty"`
+	SubscriptionID   string `json:"subscription_id,omitempty"`
+	// OperationID binds a provider callback to the durable Witself operation
+	// that created it when the provider carries that metadata through.
+	OperationID string `json:"operation_id,omitempty"`
+}
+
+// IdempotentSubscriber is the optional strong form of Provider.Subscribe.
+// A lifecycle manager uses it when available so an ambiguous network retry of
+// one durable upgrade operation cannot create a second Checkout Session or
+// subscription. Implementations must replay the same result for the same key
+// and reject reuse with different customer/plan parameters.
+type IdempotentSubscriber interface {
+	SubscribeIdempotent(
+		ctx context.Context,
+		customerID, plan, idempotencyKey string,
+	) (Action, error)
+}
+
+// EventResolver performs provider reads that are unsafe to do before a
+// verified event has a durable receipt. Returning nil means the event is a
+// durable no-op (for example one deleted duplicate subscription while another
+// live subscription still backs the customer). The returned event must retain
+// the input's delivery identity, payload hash, and customer.
+type EventResolver interface {
+	ResolveEvent(ctx context.Context, event Event) (*Event, error)
 }
 
 // PaymentMethod is the payer's stored instrument, described for display only
@@ -79,13 +117,15 @@ type Invoice struct {
 	HostedURL   string
 }
 
-// Payment is a normalized charge with its receipt.
+// Payment is a normalized charge or refund. Charges use a positive amount;
+// refunds use a negative amount so callers can reconstruct the net movement
+// without guessing from a display status.
 type Payment struct {
 	Date        time.Time
 	AmountCents int64
 	Currency    string
 	Method      string // display label, e.g. "visa ****4242"
-	Status      string // succeeded | failed | refunded
+	Status      string // succeeded | failed | pending | refunded
 	ReceiptURL  string
 }
 
@@ -132,7 +172,9 @@ type Provider interface {
 
 	// HandleWebhook verifies and parses a provider callback into normalized
 	// events. Implementations authenticate the request (signatures); callers
-	// must treat redelivery as normal and process events idempotently.
+	// must treat redelivery as normal and process events idempotently. One
+	// provider callback identity may produce zero or one normalized Event,
+	// never multiple Events carrying the same ProviderEventID.
 	HandleWebhook(r *http.Request) ([]Event, error)
 
 	// RecordUsage reports metered usage (phase 1 — gates the Team tier).
@@ -145,7 +187,8 @@ type Provider interface {
 	// ListInvoices returns invoices, newest first.
 	ListInvoices(ctx context.Context, customerID string) ([]Invoice, error)
 
-	// ListPayments returns charges, newest first.
+	// ListPayments returns charges and refunds, newest first. Refund amounts
+	// are negative and successful refunds use status "refunded".
 	ListPayments(ctx context.Context, customerID string) ([]Payment, error)
 
 	// NextCharge previews the next renewal, or nil when none is coming (no

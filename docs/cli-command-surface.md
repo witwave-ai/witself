@@ -1101,7 +1101,10 @@ Professional, Team, and Enterprise while also showing the stable API plan IDs
 `free`, `standard`, `team`, and `enterprise`. Missing catalog caps are shown as
 no catalog cap, and missing retention days as indefinite.
 
-`plan status` accepts `--account NAME`. Its ordinary output distinguishes the
+`plan status` accepts `--account NAME` and optional `--endpoint CELL_URL`.
+Status and lifecycle mutations use the same authenticated cell billing
+capability discovery as `witself billing`; they never guess the control-plane
+credential audience. Its ordinary output distinguishes the
 billing plan, effective-plan override, applied snapshot, pending transition,
 transcript retention, messaging, message retention, inbound-email entitlement,
 and email retention when those projections are available. `--full` adds the
@@ -1112,10 +1115,12 @@ projection without administrator attribution or audit history.
 The implemented lifecycle verbs remain `witself plan upgrade TARGET`,
 `witself plan downgrade TARGET`, and `witself plan cancel`. Upgrade and
 downgrade targets accept either a public plan name or stable plan ID,
-case-insensitively. Hosted checkout, payment methods, invoices, and the broader
-`witself billing` surface below remain the target billing contract.
+case-insensitively. The provider-neutral billing status, invoice, payment,
+setup, and portal slice below is also implemented. Subscription management,
+usage/limit aggregation, payment-method CRUD, hosted-session inspection, and
+crypto payments remain the target billing contract.
 
-## `witself billing` (target; not implemented)
+## `witself billing` (partially implemented)
 
 Manage managed-service billing, usage, plans, payment methods, crypto payment
 flows, and invoices from the CLI. Billing attaches at the account level, and
@@ -1125,12 +1130,50 @@ V0 billing is plan-based and usage-aware. The managed service should meter
 important dimensions internally, but initial pricing should be plan-tier based
 rather than raw per-call billing.
 
+The current implementation provides:
+
+```sh
+witself billing                         # same as billing show
+witself billing show [--account NAME] [--endpoint CELL_URL] [--json]
+witself billing invoices [--account NAME] [--endpoint CELL_URL] [--invoice NUMBER] [--pdf | --json]
+witself billing payments [--account NAME] [--endpoint CELL_URL] [--json]
+witself billing portal [--account NAME] [--endpoint CELL_URL] [--open | --json]
+witself billing setup [--account NAME] [--endpoint CELL_URL] [--email EMAIL] [--open | --json]
+```
+
+These commands are a dark provider-neutral control-plane surface; their
+presence does not enable live charging. Human output keeps the billed plan
+separate from an effective account override, and a next charge is shown only
+when the provider reports the actual amount. It is never inferred from the
+current plan catalog. Invoice PDFs, receipts, setup, and portal pages remain
+provider-hosted. URLs are validated as HTTPS, printed by default, and opened
+only after an explicit `--pdf` or `--open`.
+
+Before sending an operator bearer to the billing control plane, the CLI
+authenticates it against the selected account cell with `GET /v1/whoami` and
+verifies that the principal matches the selected local account. The control
+plane uses the authenticated `account_role` to enforce `billing:read` for
+status/history and `billing:manage` for setup, portal, and lifecycle mutations;
+an older cell that omits the role is denied. The CLI then reads
+that cell's public, value-free `billing` capability without a bearer. This
+principal fence works for managed cells with many accounts; it does not rely on
+a deployment-level account block. The advertised billing endpoint must be
+HTTPS (loopback HTTP is allowed for local testing), and credential-bearing API
+requests never follow redirects. Managed accounts locate
+their current cell without forwarding the operator token to the directory;
+`--endpoint` selects a cell directly for staging, private, or self-hosted use.
+An unsupported cell is a local refusal, not a fallback to the public cloud.
+
+The remaining subsections describe the broader target contract unless they
+match an implemented command above.
+
 Payment workflows are CLI-driven, but Witself should not accept raw card numbers
 or high-risk payment details directly in flags, environment variables, config
 files, or logs. Payment setup should use provider tokens or CLI-initiated hosted
 checkout/setup flows when required.
 
-When a command starts a hosted provider flow, `--json` output should include a
+For the broader target session surface, when a command starts a resumable
+hosted provider flow, `--json` output should include a
 stable `session_id`, current `status`, provider URL when applicable,
 `expires_at` when known, and a `next_command` that can resume, poll, or inspect
 the flow. This applies to checkout, payment-method setup, crypto payment, and
@@ -1146,15 +1189,16 @@ Witself utility token.
 
 ### `witself billing show`
 
-Show billing status for the current account.
+Show the provider-neutral billing status for the current account. This command
+is implemented and is also the default when no billing subcommand is supplied.
 
 Flags:
 
 | Flag | Description |
 |---|---|
-| `--show-payment-method` | Include redacted default payment method summary. |
-| `--show-plan` | Include current plan. |
-| `--show-balance` | Include current balance when available. |
+| `--account NAME` | Select a configured account. |
+| `--endpoint CELL_URL` | Select an account cell for authoritative billing capability discovery. |
+| `--json` | Emit the stable JSON projection. |
 
 ### `witself billing usage`
 
@@ -1390,15 +1434,72 @@ Flags:
 
 ### `witself billing invoices`
 
-List invoices.
+List the newest 100 invoices at most. This command is implemented. Human
+output does not print provider URLs; JSON exposes the provider-hosted document
+URLs, and `--pdf` opens a selected PDF only after explicit request.
 
 Flags:
 
 | Flag | Description |
 |---|---|
-| `--since TIMESTAMP_OR_DURATION` | Invoice window start. |
-| `--until TIMESTAMP` | Invoice window end. |
-| `--status STATUS` | Filter by invoice status. |
+| `--account NAME` | Select a configured account. |
+| `--endpoint CELL_URL` | Select an account cell for authoritative billing capability discovery. |
+| `--invoice NUMBER` | Select one invoice number from recent history. |
+| `--pdf` | Open the selected provider-hosted PDF (newest by default). |
+| `--json` | Emit recent invoice records and provider-hosted URLs. |
+
+### `witself billing payments`
+
+List at most 100 normalized movements from the provider's newest charge page,
+including refunds attached to those charges. This command is implemented.
+Receipt URLs are available in JSON but are not printed in human tables. Charge
+amounts are positive and refund amounts are negative; successful refund rows
+use status `refunded`, so net movement can be reconstructed without guessing
+from display text. Pending, action-required, failed, and canceled refund
+attempts are not money movement and are omitted. The provider-hosted portal
+remains authoritative for a refund made against a charge older than this
+bounded page.
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--account NAME` | Select a configured account. |
+| `--endpoint CELL_URL` | Select an account cell for authoritative billing capability discovery. |
+| `--json` | Emit recent payment records and provider-hosted receipt URLs. |
+
+### `witself billing portal`
+
+Request the provider-hosted customer billing portal. This command is
+implemented. It never creates a provider customer; payment setup must have
+started first.
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--account NAME` | Select a configured account. |
+| `--endpoint CELL_URL` | Select an account cell for authoritative billing capability discovery. |
+| `--open` | Explicitly open the validated HTTPS portal URL. |
+| `--json` | Emit the hosted action instead of opening it. |
+
+### `witself billing setup`
+
+Request provider-hosted payment-method setup. This command is implemented and
+is the only command in this read slice that may idempotently establish the
+account's provider-customer relationship. The provider may create a fresh
+hosted setup session for each invocation; the action as a whole is not promised
+to be idempotent. It never accepts raw payment data.
+
+Flags:
+
+| Flag | Description |
+|---|---|
+| `--account NAME` | Select a configured account. |
+| `--endpoint CELL_URL` | Select an account cell for authoritative billing capability discovery. |
+| `--email EMAIL` | Optional customer email hint on first provider contact. |
+| `--open` | Explicitly open the validated HTTPS setup URL. |
+| `--json` | Emit the hosted action instead of opening it. |
 
 ### `witself billing invoices show INVOICE_ID`
 

@@ -18,19 +18,49 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"slices"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/witwave-ai/witself/internal/billing"
 	"github.com/witwave-ai/witself/internal/billing/lifecycle"
 	"github.com/witwave-ai/witself/internal/plans"
 )
 
-// AuthFunc reports whether bearer may operate on accountID's plan. The
-// production implementation asks the account's cell to validate the token;
-// the zero configuration refuses everything.
-type AuthFunc func(ctx context.Context, accountID, bearer string) (bool, error)
+// AccountPermission is the account-level capability required by a customer
+// billing route. Reads and mutations are deliberately distinct: mere account
+// membership is never billing authority.
+type AccountPermission string
+
+const (
+	// AccountPermissionBillingRead allows provider-neutral account billing and
+	// plan reads without granting any provider or lifecycle mutation.
+	AccountPermissionBillingRead AccountPermission = "billing:read"
+	// AccountPermissionBillingManage allows provider-hosted setup/portal and
+	// subscription lifecycle mutations.
+	AccountPermissionBillingManage AccountPermission = "billing:manage"
+)
+
+// AccountAccess is authenticated, role-derived authority. ActorID and Role
+// are carried to the handler boundary so mutation auditing can attribute the
+// caller instead of reconstructing identity from untrusted request input.
+type AccountAccess struct {
+	ActorID    string
+	Role       string
+	Permission AccountPermission
+}
+
+// AuthFunc authorizes one explicit account permission. The production
+// implementation asks the account's cell to validate the token and return its
+// account role; the zero configuration refuses everything.
+type AuthFunc func(
+	ctx context.Context,
+	accountID, bearer string,
+	permission AccountPermission,
+) (access AccountAccess, ok bool, err error)
 
 // AdminAuthFunc authenticates the Worker's internal bridge credential and
 // validates the already-authenticated immutable admin id plus display handle it
@@ -89,11 +119,30 @@ func Register(mux *http.ServeMux, cfg Config) error {
 	})
 
 	// Plan verbs, mirroring the cell's :verb idiom.
-	mux.HandleFunc("GET /v1/accounts/{id}/plan", withAccount(cfg, planStatus))
+	mux.HandleFunc("GET /v1/accounts/{id}/plan",
+		withAccount(cfg, AccountPermissionBillingRead, planStatus))
+	// Provider-neutral billing reads exist in both managed and providerless
+	// modes. Reading a Personal/free account is side-effect free. Mutation
+	// routes stay registered so a provider can be enabled without a client
+	// reinstall; a providerless deployment returns a stable unsupported
+	// response without creating lifecycle state.
+	mux.HandleFunc("GET /v1/accounts/{id}/billing",
+		withAccount(cfg, AccountPermissionBillingRead, billingStatus))
+	mux.HandleFunc("GET /v1/accounts/{id}/billing/invoices",
+		withAccount(cfg, AccountPermissionBillingRead, billingInvoices))
+	mux.HandleFunc("GET /v1/accounts/{id}/billing/payments",
+		withAccount(cfg, AccountPermissionBillingRead, billingPayments))
+	mux.HandleFunc("POST /v1/accounts/{id}/billing:portal",
+		withAccount(cfg, AccountPermissionBillingManage, billingPortal))
+	mux.HandleFunc("POST /v1/accounts/{id}/billing:setup",
+		withAccount(cfg, AccountPermissionBillingManage, billingSetup))
 	if cfg.Manager.BillingAvailable() {
-		mux.HandleFunc("POST /v1/accounts/{id}/plan:upgrade", withAccount(cfg, planUpgrade))
-		mux.HandleFunc("POST /v1/accounts/{id}/plan:downgrade", withAccount(cfg, planDowngrade))
-		mux.HandleFunc("POST /v1/accounts/{id}/plan:cancel", withAccount(cfg, planCancel))
+		mux.HandleFunc("POST /v1/accounts/{id}/plan:upgrade",
+			withAccount(cfg, AccountPermissionBillingManage, planUpgrade))
+		mux.HandleFunc("POST /v1/accounts/{id}/plan:downgrade",
+			withAccount(cfg, AccountPermissionBillingManage, planDowngrade))
+		mux.HandleFunc("POST /v1/accounts/{id}/plan:cancel",
+			withAccount(cfg, AccountPermissionBillingManage, planCancel))
 	}
 
 	if cfg.AdminAuthenticate != nil {
@@ -245,12 +294,22 @@ func RunReconciler(ctx context.Context, m *lifecycle.Manager, interval time.Dura
 }
 
 // accountHandler is a plan-verb handler bound to an authenticated account.
-type accountHandler func(cfg Config, w http.ResponseWriter, r *http.Request, accountID string)
+type accountHandler func(
+	cfg Config,
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	access AccountAccess,
+)
 
 // withAccount authenticates the bearer for the path's account, mirroring the
 // cell's requireOperator shape. The path id is the account id; the email used
 // on first billing contact rides an optional header set by the CLI.
-func withAccount(cfg Config, h accountHandler) http.HandlerFunc {
+func withAccount(
+	cfg Config,
+	permission AccountPermission,
+	h accountHandler,
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		accountID := r.PathValue("id")
 		if accountID == "" {
@@ -263,7 +322,9 @@ func withAccount(cfg Config, h accountHandler) http.HandlerFunc {
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
-		authorized, err := cfg.Authenticate(r.Context(), accountID, bearer)
+		access, authorized, err := cfg.Authenticate(
+			r.Context(), accountID, bearer, permission,
+		)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "could not authenticate")
 			return
@@ -272,7 +333,12 @@ func withAccount(cfg Config, h accountHandler) http.HandlerFunc {
 			writeError(w, http.StatusForbidden, "not authorized for this account")
 			return
 		}
-		h(cfg, w, r, accountID)
+		if strings.TrimSpace(access.ActorID) == "" ||
+			strings.TrimSpace(access.Role) == "" || access.Permission != permission {
+			writeError(w, http.StatusInternalServerError, "invalid authorization result")
+			return
+		}
+		h(cfg, w, r, accountID, access)
 	}
 }
 
@@ -287,7 +353,309 @@ type pendingView struct {
 	Requested time.Time  `json:"requested"`
 }
 
-func planStatus(cfg Config, w http.ResponseWriter, r *http.Request, accountID string) {
+// billingSummaryView is deliberately provider-neutral. Provider and customer
+// identifiers remain control-plane internals; Configured is the only public
+// indication that a durable provider relationship exists.
+type billingSummaryView struct {
+	SchemaVersion      string                    `json:"schema_version"`
+	AccountID          string                    `json:"account_id"`
+	BillingAvailable   bool                      `json:"billing_available"`
+	Configured         bool                      `json:"configured"`
+	SubscriptionStatus string                    `json:"subscription_status"`
+	BillingPlan        string                    `json:"billing_plan"`
+	BillingPlanName    string                    `json:"billing_plan_name"`
+	EffectivePlan      string                    `json:"effective_plan"`
+	EffectivePlanName  string                    `json:"effective_plan_name"`
+	AppliedPlan        string                    `json:"applied_plan"`
+	EntitledAt         *time.Time                `json:"entitled_at,omitempty"`
+	PastDueSince       *time.Time                `json:"past_due_since,omitempty"`
+	PaymentMethod      *billingPaymentMethodView `json:"payment_method"`
+	NextCharge         *billingChargeView        `json:"next_charge"`
+	Pending            *pendingView              `json:"pending,omitempty"`
+}
+
+type billingPaymentMethodView struct {
+	Label string `json:"label"`
+}
+
+type billingChargeView struct {
+	Date        time.Time `json:"date"`
+	AmountCents int64     `json:"amount_cents"`
+	Currency    string    `json:"currency"`
+}
+
+type billingInvoiceView struct {
+	Number      string    `json:"number"`
+	Date        time.Time `json:"date"`
+	AmountCents int64     `json:"amount_cents"`
+	Currency    string    `json:"currency"`
+	Status      string    `json:"status"`
+	PDFURL      string    `json:"pdf_url,omitempty"`
+	HostedURL   string    `json:"hosted_url,omitempty"`
+}
+
+type billingPaymentView struct {
+	Date        time.Time `json:"date"`
+	AmountCents int64     `json:"amount_cents"`
+	Currency    string    `json:"currency"`
+	Method      string    `json:"method"`
+	Status      string    `json:"status"`
+	ReceiptURL  string    `json:"receipt_url,omitempty"`
+}
+
+const maxBillingCollectionEntries = 100
+
+func billingStatus(cfg Config, w http.ResponseWriter, r *http.Request, accountID string, _ AccountAccess) {
+	w.Header().Set("Cache-Control", "no-store")
+	email := r.Header.Get("X-Witself-Email")
+	rec, snapshot, err := cfg.Manager.ResolvedStatus(r.Context(), accountID, email)
+	if err != nil {
+		writeBillingManagerError(w, err)
+		return
+	}
+	providerSummary, err := cfg.Manager.ReadBillingSummary(r.Context(), accountID, email)
+	if err != nil {
+		writeBillingManagerError(w, err)
+		return
+	}
+
+	pending, err := billingPendingView(cfg.Catalog, rec.Pending)
+	if err != nil {
+		writeBillingManagerError(w, err)
+		return
+	}
+	view := billingSummaryView{
+		SchemaVersion:      "witself.v0",
+		AccountID:          accountID,
+		BillingAvailable:   cfg.Manager.BillingAvailable(),
+		Configured:         providerSummary.Configured,
+		SubscriptionStatus: billingSubscriptionStatus(rec),
+		BillingPlan:        rec.Entitled,
+		BillingPlanName:    billingPlanName(cfg.Catalog, rec.Entitled),
+		EffectivePlan:      snapshot.Plan,
+		EffectivePlanName:  billingPlanName(cfg.Catalog, snapshot.Plan),
+		AppliedPlan:        rec.Applied,
+		PastDueSince:       copyTimePointer(rec.PastDueSince),
+		Pending:            pending,
+	}
+	if !rec.EntitledAt.IsZero() {
+		entitledAt := rec.EntitledAt
+		view.EntitledAt = &entitledAt
+	}
+	if providerSummary.PaymentMethod != nil {
+		view.PaymentMethod = &billingPaymentMethodView{
+			Label: providerSummary.PaymentMethod.Label,
+		}
+	}
+	if providerSummary.NextCharge != nil {
+		view.NextCharge = &billingChargeView{
+			Date:        providerSummary.NextCharge.Date,
+			AmountCents: providerSummary.NextCharge.AmountCents,
+			Currency:    providerSummary.NextCharge.Currency,
+		}
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+func billingInvoices(cfg Config, w http.ResponseWriter, r *http.Request, accountID string, _ AccountAccess) {
+	w.Header().Set("Cache-Control", "no-store")
+	invoices, err := cfg.Manager.ListBillingInvoices(
+		r.Context(), accountID, r.Header.Get("X-Witself-Email"))
+	if err != nil {
+		writeBillingManagerError(w, err)
+		return
+	}
+	if len(invoices) > maxBillingCollectionEntries {
+		invoices = invoices[:maxBillingCollectionEntries]
+	}
+	out := make([]billingInvoiceView, 0, len(invoices))
+	for _, invoice := range invoices {
+		out = append(out, billingInvoiceView{
+			Number: invoice.Number, Date: invoice.Date,
+			AmountCents: invoice.AmountCents, Currency: invoice.Currency,
+			Status: invoice.Status,
+			// Optional provider links are conveniences, not the invoice record.
+			// Drop an unsafe link while preserving the safe financial history.
+			PDFURL:    safeOptionalBillingURL(invoice.PDFURL),
+			HostedURL: safeOptionalBillingURL(invoice.HostedURL),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"schema_version": "witself.v0",
+		"account_id":     accountID,
+		"invoices":       out,
+	})
+}
+
+func billingPayments(cfg Config, w http.ResponseWriter, r *http.Request, accountID string, _ AccountAccess) {
+	w.Header().Set("Cache-Control", "no-store")
+	payments, err := cfg.Manager.ListBillingPayments(
+		r.Context(), accountID, r.Header.Get("X-Witself-Email"))
+	if err != nil {
+		writeBillingManagerError(w, err)
+		return
+	}
+	if len(payments) > maxBillingCollectionEntries {
+		payments = payments[:maxBillingCollectionEntries]
+	}
+	out := make([]billingPaymentView, 0, len(payments))
+	for _, payment := range payments {
+		out = append(out, billingPaymentView{
+			Date: payment.Date, AmountCents: payment.AmountCents,
+			Currency: payment.Currency, Method: payment.Method,
+			Status:     payment.Status,
+			ReceiptURL: safeOptionalBillingURL(payment.ReceiptURL),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"schema_version": "witself.v0",
+		"account_id":     accountID,
+		"payments":       out,
+	})
+}
+
+func billingSetup(cfg Config, w http.ResponseWriter, r *http.Request, accountID string, _ AccountAccess) {
+	w.Header().Set("Cache-Control", "no-store")
+	action, err := cfg.Manager.CreateBillingSetup(
+		r.Context(), accountID, r.Header.Get("X-Witself-Email"))
+	if err != nil {
+		writeBillingManagerError(w, err)
+		return
+	}
+	writeBillingAction(w, action)
+}
+
+func billingPortal(cfg Config, w http.ResponseWriter, r *http.Request, accountID string, _ AccountAccess) {
+	w.Header().Set("Cache-Control", "no-store")
+	url, err := cfg.Manager.CreateBillingPortal(
+		r.Context(), accountID, r.Header.Get("X-Witself-Email"))
+	if err != nil {
+		writeBillingManagerError(w, err)
+		return
+	}
+	writeBillingAction(w, billing.Action{URL: url})
+}
+
+func writeBillingAction(w http.ResponseWriter, action billing.Action) {
+	doc := map[string]any{"schema_version": "witself.v0"}
+	switch {
+	case action.Done && action.URL == "":
+		doc["kind"] = "done"
+	case !action.Done && safeBillingURL(action.URL):
+		doc["kind"] = "action"
+		doc["url"] = action.URL
+	default:
+		writeBillingManagerError(w, invalidBillingProviderProjection("hosted action"))
+		return
+	}
+	writeJSON(w, http.StatusOK, doc)
+}
+
+func billingSubscriptionStatus(rec lifecycle.Record) string {
+	switch {
+	case rec.PastDueSince != nil:
+		return "past_due"
+	case rec.Entitled != plans.Free:
+		return "active"
+	case rec.Pending != nil &&
+		(rec.Pending.Kind == lifecycle.PendingUpgrade ||
+			rec.Pending.Kind == lifecycle.PendingDowngrade):
+		return "pending"
+	default:
+		return "none"
+	}
+}
+
+func billingPlanName(catalog *plans.Catalog, planID string) string {
+	if plan, ok := catalog.Get(planID); ok {
+		return plan.Name
+	}
+	return planID
+}
+
+func billingPendingView(catalog *plans.Catalog, pending *lifecycle.Pending) (*pendingView, error) {
+	if pending == nil {
+		return nil, nil
+	}
+	view := &pendingView{
+		Kind: string(pending.Kind), Plan: pending.Plan,
+		PlanName:  billingPlanName(catalog, pending.Plan),
+		Requested: pending.Requested,
+	}
+	if pending.URL != "" {
+		if !safeBillingURL(pending.URL) {
+			return nil, invalidBillingProviderProjection("pending action")
+		}
+		view.URL = pending.URL
+	}
+	if !pending.Expires.IsZero() {
+		expires := pending.Expires
+		view.Expires = &expires
+	}
+	if !pending.Effective.IsZero() {
+		effective := pending.Effective
+		view.Effective = &effective
+	}
+	return view, nil
+}
+
+func copyTimePointer(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func safeOptionalBillingURL(raw string) string {
+	if raw == "" || !safeBillingURL(raw) {
+		return ""
+	}
+	return raw
+}
+
+func safeBillingURL(raw string) bool {
+	if raw == "" || raw != strings.TrimSpace(raw) || !utf8.ValidString(raw) ||
+		strings.ContainsRune(raw, '\\') || billingURLHasUnsafeRune(raw) {
+		return false
+	}
+	decoded, err := neturl.PathUnescape(raw)
+	if err != nil || strings.ContainsRune(decoded, '\\') || billingURLHasUnsafeRune(decoded) {
+		return false
+	}
+	parsed, err := neturl.Parse(raw)
+	if err != nil || !strings.EqualFold(parsed.Scheme, "https") ||
+		parsed.Opaque != "" || parsed.User != nil || parsed.Host == "" ||
+		parsed.Hostname() == "" {
+		return false
+	}
+	return true
+}
+
+func billingURLHasUnsafeRune(raw string) bool {
+	for _, r := range raw {
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' || isBidiControl(r) {
+			return true
+		}
+	}
+	return false
+}
+
+func isBidiControl(r rune) bool {
+	switch r {
+	case '\u061c', '\u200e', '\u200f', '\u202a', '\u202b', '\u202c',
+		'\u202d', '\u202e', '\u2066', '\u2067', '\u2068', '\u2069':
+		return true
+	default:
+		return false
+	}
+}
+
+func invalidBillingProviderProjection(kind string) error {
+	return fmt.Errorf("%w: invalid %s", lifecycle.ErrProviderRequest, kind)
+}
+
+func planStatus(cfg Config, w http.ResponseWriter, r *http.Request, accountID string, _ AccountAccess) {
 	rec, snapshot, err := cfg.Manager.ResolvedStatus(r.Context(), accountID, r.Header.Get("X-Witself-Email"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not read plan status")
@@ -1056,7 +1424,7 @@ func writeOutcome(w http.ResponseWriter, out lifecycle.Outcome) {
 	writeJSON(w, http.StatusOK, doc)
 }
 
-func planUpgrade(cfg Config, w http.ResponseWriter, r *http.Request, accountID string) {
+func planUpgrade(cfg Config, w http.ResponseWriter, r *http.Request, accountID string, _ AccountAccess) {
 	plan, err := decodePlan(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -1070,7 +1438,7 @@ func planUpgrade(cfg Config, w http.ResponseWriter, r *http.Request, accountID s
 	writeOutcome(w, out)
 }
 
-func planDowngrade(cfg Config, w http.ResponseWriter, r *http.Request, accountID string) {
+func planDowngrade(cfg Config, w http.ResponseWriter, r *http.Request, accountID string, _ AccountAccess) {
 	plan, err := decodePlan(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -1085,7 +1453,7 @@ func planDowngrade(cfg Config, w http.ResponseWriter, r *http.Request, accountID
 	writeOutcome(w, out)
 }
 
-func planCancel(cfg Config, w http.ResponseWriter, r *http.Request, accountID string) {
+func planCancel(cfg Config, w http.ResponseWriter, r *http.Request, accountID string, _ AccountAccess) {
 	if err := cfg.Manager.CancelPending(r.Context(), accountID); err != nil {
 		writeManagerError(w, err)
 		return
@@ -1137,6 +1505,30 @@ func writeManagerError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeError(w, http.StatusInternalServerError, "plan change failed — please retry")
+}
+
+// writeBillingManagerError keeps provider and storage detail on the server
+// side. Only lifecycle refusals are customer-addressed and safe to return.
+func writeBillingManagerError(w http.ResponseWriter, err error) {
+	if errors.Is(err, lifecycle.ErrBillingUnavailable) {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{
+			"schema_version": "witself.v0",
+			"code":           "unsupported_operation",
+			"error":          "billing is not supported by this control plane",
+			"retryable":      false,
+		})
+		return
+	}
+	if errors.Is(err, lifecycle.ErrProviderRequest) {
+		writeError(w, http.StatusBadGateway, "billing provider unavailable — please retry")
+		return
+	}
+	if errors.Is(err, lifecycle.ErrRefusal) {
+		writeError(w, http.StatusConflict,
+			strings.TrimPrefix(err.Error(), lifecycle.ErrRefusal.Error()+": "))
+		return
+	}
+	writeError(w, http.StatusInternalServerError, "billing request failed — please retry")
 }
 
 func bearerToken(r *http.Request) (string, bool) {

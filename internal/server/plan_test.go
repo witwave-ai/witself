@@ -293,3 +293,36 @@ func TestCapabilitiesPlanAndBilling(t *testing.T) {
 		t.Fatalf("billing = %v; want supported with the configured endpoint", billing)
 	}
 }
+
+func TestCapabilitiesNeverAdvertiseUnsafeBillingEndpoint(t *testing.T) {
+	for _, endpoint := range []string{
+		"https://user:secret@cp.example/v1",
+		"https://cp.example/v1?token=secret",
+		"https://cp.example/v1#private",
+		"http://cp.example/v1",
+		"https://cp.example/v1%0aheader",
+		"https://cp.example/v1\\unsafe",
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			t.Setenv("WITSELF_BILLING_ENDPOINT", endpoint)
+			srv := httptest.NewServer(apiMux(Config{}))
+			t.Cleanup(srv.Close)
+			resp, err := http.Get(srv.URL + "/v1/capabilities")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			var doc map[string]any
+			if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
+				t.Fatal(err)
+			}
+			billing := doc["billing"].(map[string]any)
+			if billing["supported"] != false || billing["reason"] != "invalid_configuration" {
+				t.Fatalf("billing = %v; want a fail-closed capability", billing)
+			}
+			if _, advertised := billing["endpoint"]; advertised {
+				t.Fatalf("unsafe endpoint was advertised: %v", billing)
+			}
+		})
+	}
+}

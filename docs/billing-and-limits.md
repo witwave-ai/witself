@@ -41,12 +41,50 @@ This gives Witself enough data to understand real service load without making
 the first pricing model feel like nickel-and-dime metering.
 
 The first v0 release does not need live payment collection or full subscription
-management. Billing, payment, crypto payment, and invoice commands may be
-contract-shaped and capability-gated while the core product matures across both
-planes — the open plane (realm, agent, memory, fact, policy, group, message, and
-audit) and the sealed plane (secret and TOTP). The metered payload spans identity
-usage and credential usage; the sealed-plane dimensions count events only and
-never carry secret or seed values.
+management. The current checkout implements a dark provider-neutral lifecycle
+and an account-scoped billing read/setup contract: status, actual provider next
+charge, redacted payment-method summary, bounded invoice/payment history, and
+provider-hosted setup/portal actions. Its presence does not enable live Stripe,
+charging, or production webhooks. Billing, payment, crypto payment, and invoice
+commands may otherwise remain contract-shaped and capability-gated while the
+core product matures across both planes — the open plane (realm, agent, memory,
+fact, policy, group, message, and audit) and the sealed plane (secret and TOTP).
+The metered payload spans identity usage and credential usage; the sealed-plane
+dimensions count events only and never carry secret or seed values.
+
+The dark lifecycle also persists an operation id before subscription checkout,
+uses that id as the provider idempotency key, and durably records authenticated
+provider-event identities with a signed-body hash before folding them. Exact
+redelivery is suppressed, reuse of an event identity with different content or
+normalization fails closed, and unresolved receipt work remains indexed for
+bounded reconciliation. A short durable processing lease admits one normal
+folder at a time, and its immutable account/event/decision resolution is pinned
+before account mutation. Crash recovery therefore reuses that resolution
+without consulting provider state again. These durability controls make retries
+safer; they are not a claim that cross-replica provider mutations or every
+Stripe transition are ready for production.
+
+Production payment activation remains gated on an explicit operational and
+security review. Account billing reads and mutations now derive distinct
+`billing:read` and `billing:manage` authority from the cell-authenticated
+account role; older cells that omit the role fail closed. At minimum,
+activation must replace timestamp-only entitlement ordering with an
+authoritative subscription projection, scope dunning to the exact managed
+subscription, durably audit customer billing mutations with actor, reason, and
+confirmation,
+reconcile restored control-plane state against provider truth, provide a real
+downgrade fit checker, and implement the Team usage-billing policy. It must also
+make setup-session creation idempotent, compensate partial multi-subscription
+downgrades, define deterministic ordering for conflicting provider events with
+equal timestamps, and retain completed receipts under an explicit bounded
+policy without ever deleting unresolved work. Rolling activation requires a
+control-plane writer floor that preserves the new operation fields and an
+exclusive webhook/reconciler cutover to the receipt-v2 writers; an older binary
+can bypass or erase these fences. The account fold also needs a durable
+equal-time event fence. The cross-replica replacement path additionally needs
+exact provider-object cancellation or a distributed provider-mutation fence.
+Provider secrets, webhook registration, deployment gates, and a production
+rollback exercise are separate human-controlled rollout steps.
 
 The implemented transcript-usage slice is deliberately upstream of this
 billing design: immutable `usage_events` plus hourly/daily `usage_rollups` move
@@ -1229,7 +1267,10 @@ CLI-owned hosted flows:
 
 ## CLI Requirements
 
-The CLI should expose:
+The CLI should expose the following complete target surface. The current
+implemented slice is `billing show`, `billing invoices`, `billing payments`,
+`billing portal`, and `billing setup`; all other entries below remain target
+work unless documented separately:
 
 - `witself billing show`
 - `witself billing usage`
@@ -1238,6 +1279,9 @@ The CLI should expose:
 - `witself billing subscribe --promo-code`
 - `witself billing payment-methods` (list/add/remove/default; hosted-flow
   initiation, never raw card or wallet collection)
+- `witself billing payments`
+- `witself billing portal`
+- `witself billing setup`
 - `witself billing crypto` (quote/checkout/status; provider-mediated, no wallet
   custody)
 - `witself billing invoices` (list/show/download)

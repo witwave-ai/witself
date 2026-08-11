@@ -58,10 +58,11 @@ const (
 )
 
 type pending struct {
-	kind pendingKind
-	plan string    // checkout/downgrade target
-	url  string    // checkout/setup continue-URL
-	at   time.Time // downgrade effective time
+	kind        pendingKind
+	plan        string    // checkout/downgrade target
+	url         string    // checkout/setup continue-URL
+	at          time.Time // downgrade effective time
+	operationID string    // checkout's durable Witself mutation identity
 }
 
 type customer struct {
@@ -78,17 +79,28 @@ type customer struct {
 	usageKeys map[string]bool  // idempotency keys seen
 }
 
+type subscribeReplay struct {
+	customerID string
+	plan       string
+	action     billing.Action
+}
+
 // Fake implements billing.Provider in memory. Safe for concurrent use.
 type Fake struct {
-	mu      sync.Mutex
-	cfg     Config
-	byAcct  map[string]*customer // accountID -> customer
-	byID    map[string]*customer // customerID -> customer
-	custSeq int
-	invSeq  int
+	mu     sync.Mutex
+	cfg    Config
+	byAcct map[string]*customer // accountID -> customer
+	byID   map[string]*customer // customerID -> customer
+	// subscribeOps is provider-wide because an idempotency key names one
+	// mutation, not one customer. Reusing a key with different parameters is
+	// a caller error, matching Stripe's idempotency semantics.
+	subscribeOps map[string]subscribeReplay
+	custSeq      int
+	invSeq       int
 }
 
 var _ billing.Provider = (*Fake)(nil)
+var _ billing.IdempotentSubscriber = (*Fake)(nil)
 
 // New returns a Fake with cfg defaults applied.
 func New(cfg Config) *Fake {
@@ -102,9 +114,10 @@ func New(cfg Config) *Fake {
 		cfg.PeriodDays = 30
 	}
 	return &Fake{
-		cfg:    cfg,
-		byAcct: map[string]*customer{},
-		byID:   map[string]*customer{},
+		cfg:          cfg,
+		byAcct:       map[string]*customer{},
+		byID:         map[string]*customer{},
+		subscribeOps: map[string]subscribeReplay{},
 	}
 }
 
@@ -165,6 +178,45 @@ func (f *Fake) PortalLink(_ context.Context, customerID string) (string, error) 
 func (f *Fake) Subscribe(_ context.Context, customerID, plan string) (billing.Action, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	return f.subscribeLocked(customerID, plan, "")
+}
+
+// SubscribeIdempotent implements billing.IdempotentSubscriber. An exact
+// replay returns the original action without charging again or replacing the
+// interactive checkout; reusing the operation identity with different
+// parameters fails closed.
+func (f *Fake) SubscribeIdempotent(
+	_ context.Context,
+	customerID, plan, operationID string,
+) (billing.Action, error) {
+	if operationID == "" || len(operationID) > 128 {
+		return billing.Action{}, fmt.Errorf(
+			"fake billing: subscription operation id must be 1-128 characters")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if replay, ok := f.subscribeOps[operationID]; ok {
+		if replay.customerID != customerID || replay.plan != plan {
+			return billing.Action{}, fmt.Errorf(
+				"fake billing: subscription operation %q was reused with different parameters",
+				operationID)
+		}
+		return replay.action, nil
+	}
+	action, err := f.subscribeLocked(customerID, plan, operationID)
+	if err != nil {
+		return billing.Action{}, err
+	}
+	f.subscribeOps[operationID] = subscribeReplay{
+		customerID: customerID,
+		plan:       plan,
+		action:     action,
+	}
+	return action, nil
+}
+
+// subscribeLocked performs the non-replayed mutation. Callers hold f.mu.
+func (f *Fake) subscribeLocked(customerID, plan, operationID string) (billing.Action, error) {
 	c, err := f.cust(customerID)
 	if err != nil {
 		return billing.Action{}, err
@@ -175,7 +227,10 @@ func (f *Fake) Subscribe(_ context.Context, customerID, plan string) (billing.Ac
 	// A new request replaces whatever was pending (one change at a time).
 	c.pending = nil
 	if f.cfg.Interactive && c.card == nil {
-		c.pending = &pending{kind: pendingCheckout, plan: plan, url: fakeURL("checkout", c.id)}
+		c.pending = &pending{
+			kind: pendingCheckout, plan: plan, url: fakeURL("checkout", c.id),
+			operationID: operationID,
+		}
 		return billing.Action{URL: c.pending.url}, nil
 	}
 	f.charge(c, plan)
@@ -235,9 +290,10 @@ func (f *Fake) HandleWebhook(r *http.Request) ([]billing.Event, error) {
 		}
 	}
 	var body struct {
-		CustomerID string `json:"customer_id"`
-		Type       string `json:"type"`
-		Plan       string `json:"plan"`
+		CustomerID  string `json:"customer_id"`
+		Type        string `json:"type"`
+		Plan        string `json:"plan"`
+		OperationID string `json:"operation_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		return nil, fmt.Errorf("fake webhook: %w", err)
@@ -256,10 +312,11 @@ func (f *Fake) HandleWebhook(r *http.Request) ([]billing.Event, error) {
 		return nil, fmt.Errorf("fake webhook: unknown event type %q", body.Type)
 	}
 	return []billing.Event{{
-		Type:       billing.EventType(body.Type),
-		CustomerID: body.CustomerID,
-		Plan:       body.Plan,
-		At:         f.cfg.Now(),
+		Type:        billing.EventType(body.Type),
+		CustomerID:  body.CustomerID,
+		Plan:        body.Plan,
+		OperationID: body.OperationID,
+		At:          f.cfg.Now(),
 	}}, nil
 }
 
@@ -374,7 +431,8 @@ func (f *Fake) Complete(customerID string) ([]billing.Event, error) {
 		c.pending = nil
 		f.charge(c, plan)
 		return []billing.Event{{
-			Type: billing.EventSubscriptionActivated, CustomerID: c.id, Plan: plan, At: f.cfg.Now(),
+			Type: billing.EventSubscriptionActivated, CustomerID: c.id, Plan: plan,
+			At: f.cfg.Now(), OperationID: p.operationID,
 		}}, nil
 	default:
 		return nil, fmt.Errorf("pending %s is not completable — it applies at %s", p.kind, p.at.Format(time.RFC3339))

@@ -56,7 +56,15 @@ func TestWhoamiAuth(t *testing.T) {
 		}
 		return "", "", "", false, nil
 	}
-	srv := httptest.NewServer(apiMux(Config{Authenticate: auth}))
+	srv := httptest.NewServer(apiMux(Config{
+		Authenticate: auth,
+		GetOperatorAccountRole: func(_ context.Context, accountID, operatorID string) (string, error) {
+			if accountID != "acc_y" || operatorID != "opr_x" {
+				t.Fatalf("role lookup = (%q, %q)", accountID, operatorID)
+			}
+			return "account_owner", nil
+		},
+	}))
 	defer srv.Close()
 
 	if code := getStatus(t, srv.URL+"/v1/whoami"); code != http.StatusUnauthorized {
@@ -88,15 +96,17 @@ func TestWhoamiAuth(t *testing.T) {
 	}
 	var out struct {
 		Principal struct {
-			Kind       string `json:"kind"`
-			OperatorID string `json:"operator_id"`
-			AccountID  string `json:"account_id"`
+			Kind        string `json:"kind"`
+			OperatorID  string `json:"operator_id"`
+			AccountID   string `json:"account_id"`
+			AccountRole string `json:"account_role"`
 		} `json:"principal"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	if out.Principal.Kind != "operator" || out.Principal.OperatorID != "opr_x" || out.Principal.AccountID != "acc_y" {
+	if out.Principal.Kind != "operator" || out.Principal.OperatorID != "opr_x" ||
+		out.Principal.AccountID != "acc_y" || out.Principal.AccountRole != "account_owner" {
 		t.Errorf("principal = %+v", out.Principal)
 	}
 }
@@ -1411,6 +1421,27 @@ func TestCapabilitiesIncludesAccount(t *testing.T) {
 	}
 	if c.Account == nil || c.Account.ID != "acc_test123" {
 		t.Errorf("account = %+v, want id acc_test123", c.Account)
+	}
+}
+
+func TestManagedCapabilitiesOmitDeploymentAccount(t *testing.T) {
+	t.Setenv("WITSELF_BACKEND_KIND", " MANAGED ")
+	srv := httptest.NewServer(apiMux(Config{AccountID: "acct_seeded_default"}))
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/v1/capabilities")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeBody(t, resp)
+	var c capabilities
+	if err := json.NewDecoder(resp.Body).Decode(&c); err != nil {
+		t.Fatal(err)
+	}
+	if c.Account != nil {
+		t.Fatalf("managed deployment account leaked as tenant context: %+v", c.Account)
+	}
+	if c.Backend.Kind != "managed" {
+		t.Fatalf("backend kind = %q; want canonical managed", c.Backend.Kind)
 	}
 }
 

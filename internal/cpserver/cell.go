@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/witwave-ai/witself/internal/billing/lifecycle"
 	"github.com/witwave-ai/witself/internal/client"
@@ -166,26 +167,53 @@ func BridgeAccountExists(bridgeURL, bridgeToken string) func(context.Context, st
 // CellAuthenticate is the production AuthFunc: the CP cannot validate
 // operator tokens locally (their hashes live in the cell's database), so it
 // introspects the bearer against the account's cell — GET /v1/whoami with the
-// caller's own token — and authorizes only when the token resolves to the
-// SAME account the request targets.
+// caller's own token — and authorizes only when the token resolves to the SAME
+// account and its authenticated account role carries the requested billing
+// permission. Older cells that omit account_role fail closed.
 //
 // Failure classification: a token the cell rejects as invalid reads as "not
 // authorized" (false, nil → HTTP 403); transport failures and cell 5xx
 // propagate as errors (→ HTTP 500), so a cell blip does not present to every
 // user in the cell as a fleet-wide auth incident.
 func CellAuthenticate(resolve CellResolver) AuthFunc {
-	return func(ctx context.Context, accountID, bearer string) (bool, error) {
+	return func(
+		ctx context.Context,
+		accountID, bearer string,
+		permission AccountPermission,
+	) (AccountAccess, bool, error) {
 		endpoint, _, err := resolve(ctx, accountID)
 		if err != nil {
-			return false, err
+			return AccountAccess{}, false, err
 		}
-		_, tokenAccount, err := client.Whoami(ctx, endpoint, bearer)
+		principal, err := client.GetWhoamiOperator(ctx, endpoint, bearer)
 		if err != nil {
 			if errors.Is(err, client.ErrUnauthorized) {
-				return false, nil // invalid operator token
+				return AccountAccess{}, false, nil // invalid operator token
 			}
-			return false, err // transport / cell 5xx / timeout — bubble up
+			return AccountAccess{}, false, err // transport / cell 5xx / timeout — bubble up
 		}
-		return tokenAccount == accountID, nil
+		if principal.AccountID != accountID ||
+			!accountRoleAllows(principal.AccountRole, permission) {
+			return AccountAccess{}, false, nil
+		}
+		return AccountAccess{
+			ActorID:    principal.OperatorID,
+			Role:       principal.AccountRole,
+			Permission: permission,
+		}, true, nil
+	}
+}
+
+func accountRoleAllows(role string, permission AccountPermission) bool {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "account_owner", "account_billing":
+		return permission == AccountPermissionBillingRead ||
+			permission == AccountPermissionBillingManage
+	case "account_admin":
+		return permission == AccountPermissionBillingRead
+	default:
+		// Includes today's least-privilege account_operator plus the planned
+		// account_member role and unknown future values.
+		return false
 	}
 }

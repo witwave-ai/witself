@@ -335,9 +335,9 @@ Capability results should include:
   and each feature is independently gated so a mislabeled kind unlocks nothing.
 - The deployment `account` block (`{"id": "acc_…"}`) on single-account backends
   (local, self-hosted): the seeded default/root account, surfaced unauthenticated.
-  On `managed` the account context comes from the authenticated `principal`
-  instead, so the top-level block is omitted; it is omitted entirely when no
-  database is configured.
+  On `managed` the top-level block is omitted; it is also omitted entirely when
+  no database is configured. Authenticate separately with `GET /v1/whoami`
+  whenever account identity is required.
 - Server version and API version.
 - Supported feature flags.
 - Unsupported feature reasons.
@@ -345,7 +345,11 @@ Capability results should include:
 - Direct memory, lexical recall, atomic-supersede, permanent-delete,
   automatic-curation, and client-vector capability states. Optional vector
   profiles/hybrid recall are reported independently from the lexical baseline.
-- Authenticated principal and realm context when authenticated.
+- `principal: null`; capability discovery is public and never doubles as an
+  authentication or tenant-binding response. Use `GET /v1/whoami` for the
+  authenticated operator principal and account context. Managed cells include
+  the authenticated operator's `account_role`; authorization-sensitive control
+  planes fail closed when an older cell omits it.
 
 Examples of feature flags:
 

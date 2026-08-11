@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/witwave-ai/witself/internal/blob"
 	"github.com/witwave-ai/witself/internal/plans"
@@ -32,6 +34,15 @@ type R2Store struct {
 }
 
 var _ Store = (*R2Store)(nil)
+var _ EventReceiptStore = (*R2Store)(nil)
+
+type r2PendingEventIndex struct {
+	SchemaVersion int      `json:"schema_version"`
+	Provider      string   `json:"provider"`
+	CustomerID    string   `json:"customer_id"`
+	EventIDs      []string `json:"event_ids"`
+	Version       int64    `json:"version"`
+}
 
 // r2LimitAuditKindPrefix makes account-limit audit metadata survive a rollback
 // to a binary whose Record/AdminChange structs predate LimitOverrides. Such a
@@ -97,6 +108,16 @@ func (s *R2Store) accountKey(accountID string) string {
 
 func (s *R2Store) customerKey(provider, customerID string) string {
 	return s.prefix + "customers/" + provider + "/" + customerID
+}
+
+func (s *R2Store) eventReceiptKey(provider, eventID string) string {
+	return s.prefix + "billing-events/receipts/" +
+		eventReceiptIdentityKey(provider, eventID) + ".json"
+}
+
+func (s *R2Store) pendingEventIndexKey(provider, customerID string) string {
+	return s.prefix + "billing-events/pending/" +
+		eventReceiptCustomerKey(provider, customerID) + ".json"
 }
 
 // Get implements Store.
@@ -218,6 +239,544 @@ func (s *R2Store) List(ctx context.Context) ([]Record, error) {
 		out = append(out, r)
 	}
 	return out, nil
+}
+
+// ReceiveEvent implements EventReceiptStore. The receipt is create-only by
+// provider event identity; its separate per-customer pending index is a bounded
+// CAS object used by ReconcileAccount. A crash after receipt creation but before
+// indexing returns no acknowledgement, so provider redelivery repairs the
+// missing index without duplicating the receipt.
+func (s *R2Store) ReceiveEvent(
+	ctx context.Context,
+	receipt EventReceipt,
+) (EventReceipt, bool, error) {
+	if err := validateEventReceipt(receipt); err != nil {
+		return EventReceipt{}, false, err
+	}
+	if receipt.Version != 0 || receipt.Status != EventReceiptPending {
+		return EventReceipt{}, false, errors.New(
+			"event receipt: new receipt must be pending at version zero")
+	}
+	key := s.eventReceiptKey(
+		receipt.Provider, receipt.Event.ProviderEventID)
+	created := false
+	stored := receipt
+	stored.Version = 1
+	data, err := json.Marshal(stored)
+	if err != nil {
+		return EventReceipt{}, false, fmt.Errorf("event receipt: encode: %w", err)
+	}
+	if _, err = s.c.Put(ctx, key, data, blob.Cond{IfNoneMatchAny: true}); err == nil {
+		created = true
+	} else if errors.Is(err, blob.ErrPrecondition) {
+		data, _, err = s.c.Get(ctx, key)
+		if err != nil {
+			return EventReceipt{}, false, err
+		}
+		if err := json.Unmarshal(data, &stored); err != nil {
+			return EventReceipt{}, false, fmt.Errorf(
+				"event receipt: decode existing: %w", err)
+		}
+		if err := validateEventReceipt(stored); err != nil {
+			return EventReceipt{}, false, fmt.Errorf(
+				"event receipt: invalid existing receipt: %w", err)
+		}
+		if !sameEventReceiptIdentity(stored, receipt) {
+			return EventReceipt{}, false, fmt.Errorf(
+				"%w: provider=%s event=%s",
+				ErrEventReceiptConflict, receipt.Provider,
+				receipt.Event.ProviderEventID)
+		}
+	} else {
+		return EventReceipt{}, false, err
+	}
+	if stored.Status == EventReceiptPending {
+		if err := s.ensurePendingEventIndex(ctx, stored); err != nil {
+			if errors.Is(err, errEventReceiptPendingIndexFull) {
+				// The receipt object is already durable. Index saturation must
+				// not prevent this webhook from processing it synchronously, and
+				// redelivery can retry the same object even while the bounded
+				// reconciliation index remains full.
+				return cloneEventReceipt(stored), created, nil
+			}
+			return EventReceipt{}, false, err
+		}
+	}
+	return cloneEventReceipt(stored), created, nil
+}
+
+// ClaimEvent implements EventReceiptStore with a receipt-object CAS. A live
+// claim is exclusive; an expired claim advances ClaimGeneration before a new
+// worker may fold, fencing every completion/release from the former owner.
+func (s *R2Store) ClaimEvent(
+	ctx context.Context,
+	receipt EventReceipt,
+	claimToken string,
+	now, leaseExpiresAt time.Time,
+) (EventReceipt, bool, error) {
+	if err := validateEventReceipt(receipt); err != nil {
+		return EventReceipt{}, false, err
+	}
+	if err := validateEventClaimRequest(claimToken, now, leaseExpiresAt); err != nil {
+		return EventReceipt{}, false, err
+	}
+	key := s.eventReceiptKey(
+		receipt.Provider, receipt.Event.ProviderEventID)
+	for range casAttempts {
+		data, etag, err := s.c.Get(ctx, key)
+		if err != nil {
+			return EventReceipt{}, false, err
+		}
+		var current EventReceipt
+		if err := json.Unmarshal(data, &current); err != nil {
+			return EventReceipt{}, false, fmt.Errorf(
+				"event receipt: decode for claim: %w", err)
+		}
+		if err := validateEventReceipt(current); err != nil {
+			return EventReceipt{}, false, fmt.Errorf(
+				"event receipt: invalid receipt for claim: %w", err)
+		}
+		if !sameEventReceiptIdentity(current, receipt) {
+			return EventReceipt{}, false, ErrEventReceiptConflict
+		}
+		if current.Status == EventReceiptProcessed {
+			return cloneEventReceipt(current), false, nil
+		}
+		if current.ClaimToken == claimToken && current.LeaseExpiresAt != nil &&
+			now.Before(*current.LeaseExpiresAt) {
+			return cloneEventReceipt(current), true, nil
+		}
+		if current.ClaimToken != "" && current.LeaseExpiresAt != nil &&
+			now.Before(*current.LeaseExpiresAt) {
+			return cloneEventReceipt(current), false, nil
+		}
+		expires := leaseExpiresAt.UTC()
+		current.ClaimToken = claimToken
+		current.ClaimGeneration++
+		current.LeaseExpiresAt = &expires
+		current.Version++
+		encoded, err := json.Marshal(current)
+		if err != nil {
+			return EventReceipt{}, false, fmt.Errorf(
+				"event receipt: encode claim: %w", err)
+		}
+		_, err = s.c.Put(ctx, key, encoded, blob.Cond{IfMatch: etag})
+		if errors.Is(err, blob.ErrPrecondition) {
+			continue
+		}
+		if err != nil {
+			return EventReceipt{}, false, err
+		}
+		return cloneEventReceipt(current), true, nil
+	}
+	return EventReceipt{}, false, errors.New(
+		"event receipt: processing claim has too much contention")
+}
+
+// PinEventResolution stores one immutable routing result under the exact claim
+// fence. An expired-lease successor can reuse it, but neither worker can change
+// the account, event, or decision selected before the first fold.
+func (s *R2Store) PinEventResolution(
+	ctx context.Context,
+	receipt EventReceipt,
+	resolution EventReceiptResolution,
+) (EventReceipt, error) {
+	if err := validateEventReceipt(receipt); err != nil {
+		return EventReceipt{}, err
+	}
+	if err := validateEventReceiptResolution(receipt.Event, resolution); err != nil {
+		return EventReceipt{}, err
+	}
+	key := s.eventReceiptKey(
+		receipt.Provider, receipt.Event.ProviderEventID)
+	for range casAttempts {
+		data, etag, err := s.c.Get(ctx, key)
+		if err != nil {
+			return EventReceipt{}, err
+		}
+		var current EventReceipt
+		if err := json.Unmarshal(data, &current); err != nil {
+			return EventReceipt{}, fmt.Errorf(
+				"event receipt: decode for resolution pin: %w", err)
+		}
+		if err := validateEventReceipt(current); err != nil {
+			return EventReceipt{}, fmt.Errorf(
+				"event receipt: invalid receipt for resolution pin: %w", err)
+		}
+		if !sameEventReceiptIdentity(current, receipt) {
+			return EventReceipt{}, ErrEventReceiptConflict
+		}
+		if current.Status == EventReceiptProcessed {
+			if current.Resolution == nil ||
+				!sameEventReceiptResolution(*current.Resolution, resolution) {
+				return EventReceipt{}, fmt.Errorf(
+					"%w: pinned resolution mismatch", ErrEventReceiptConflict)
+			}
+			return cloneEventReceipt(current), nil
+		}
+		if !eventReceiptClaimMatches(current, receipt) {
+			return EventReceipt{}, ErrEventReceiptClaimLost
+		}
+		if current.Resolution != nil {
+			if !sameEventReceiptResolution(*current.Resolution, resolution) {
+				return EventReceipt{}, fmt.Errorf(
+					"%w: pinned resolution mismatch", ErrEventReceiptConflict)
+			}
+			return cloneEventReceipt(current), nil
+		}
+		resolutionCopy := resolution
+		if resolution.Event != nil {
+			event := *resolution.Event
+			resolutionCopy.Event = &event
+		}
+		current.Resolution = &resolutionCopy
+		current.Version++
+		encoded, err := json.Marshal(current)
+		if err != nil {
+			return EventReceipt{}, fmt.Errorf(
+				"event receipt: encode resolution pin: %w", err)
+		}
+		_, err = s.c.Put(ctx, key, encoded, blob.Cond{IfMatch: etag})
+		if errors.Is(err, blob.ErrPrecondition) {
+			continue
+		}
+		if err != nil {
+			return EventReceipt{}, err
+		}
+		return cloneEventReceipt(current), nil
+	}
+	return EventReceipt{}, errors.New(
+		"event receipt: resolution pin has too much contention")
+}
+
+// ReleaseEvent relinquishes one exact receipt claim while keeping its pending
+// index entry available for immediate redelivery or reconciliation.
+func (s *R2Store) ReleaseEvent(
+	ctx context.Context,
+	receipt EventReceipt,
+) error {
+	if err := validateEventReceipt(receipt); err != nil {
+		return err
+	}
+	if receipt.ClaimToken == "" || receipt.ClaimGeneration < 1 {
+		return errors.New("event receipt: release requires a processing claim")
+	}
+	key := s.eventReceiptKey(
+		receipt.Provider, receipt.Event.ProviderEventID)
+	for range casAttempts {
+		data, etag, err := s.c.Get(ctx, key)
+		if err != nil {
+			return err
+		}
+		var current EventReceipt
+		if err := json.Unmarshal(data, &current); err != nil {
+			return fmt.Errorf("event receipt: decode for release: %w", err)
+		}
+		if err := validateEventReceipt(current); err != nil {
+			return fmt.Errorf("event receipt: invalid receipt for release: %w", err)
+		}
+		if !sameEventReceiptIdentity(current, receipt) {
+			return ErrEventReceiptConflict
+		}
+		if current.Status == EventReceiptProcessed {
+			return nil
+		}
+		if current.ClaimToken == "" &&
+			current.ClaimGeneration == receipt.ClaimGeneration {
+			return s.ensurePendingEventIndex(ctx, current)
+		}
+		if !eventReceiptClaimMatches(current, receipt) {
+			return ErrEventReceiptClaimLost
+		}
+		current.ClaimToken = ""
+		current.LeaseExpiresAt = nil
+		current.Version++
+		encoded, err := json.Marshal(current)
+		if err != nil {
+			return fmt.Errorf("event receipt: encode release: %w", err)
+		}
+		_, err = s.c.Put(ctx, key, encoded, blob.Cond{IfMatch: etag})
+		if errors.Is(err, blob.ErrPrecondition) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		return s.ensurePendingEventIndex(ctx, current)
+	}
+	return errors.New("event receipt: processing release has too much contention")
+}
+
+func (s *R2Store) ensurePendingEventIndex(
+	ctx context.Context,
+	receipt EventReceipt,
+) error {
+	key := s.pendingEventIndexKey(
+		receipt.Provider, receipt.Event.CustomerID)
+	for range casAttempts {
+		data, etag, err := s.c.Get(ctx, key)
+		if errors.Is(err, blob.ErrNotFound) {
+			index := r2PendingEventIndex{
+				SchemaVersion: pendingEventIndexSchemaVersion,
+				Provider:      receipt.Provider,
+				CustomerID:    receipt.Event.CustomerID,
+				EventIDs:      []string{receipt.Event.ProviderEventID},
+				Version:       1,
+			}
+			encoded, encodeErr := json.Marshal(index)
+			if encodeErr != nil {
+				return fmt.Errorf("event receipt: encode pending index: %w", encodeErr)
+			}
+			_, err = s.c.Put(ctx, key, encoded, blob.Cond{IfNoneMatchAny: true})
+			if errors.Is(err, blob.ErrPrecondition) {
+				continue
+			}
+			return err
+		}
+		if err != nil {
+			return err
+		}
+		index, err := decodePendingEventIndex(
+			data, receipt.Provider, receipt.Event.CustomerID)
+		if err != nil {
+			return err
+		}
+		for _, eventID := range index.EventIDs {
+			if eventID == receipt.Event.ProviderEventID {
+				return nil
+			}
+		}
+		if len(index.EventIDs) >= maxPendingEventReceiptsPerCustomer {
+			return errEventReceiptPendingIndexFull
+		}
+		index.EventIDs = append(index.EventIDs, receipt.Event.ProviderEventID)
+		index.Version++
+		encoded, err := json.Marshal(index)
+		if err != nil {
+			return fmt.Errorf("event receipt: encode pending index: %w", err)
+		}
+		_, err = s.c.Put(ctx, key, encoded, blob.Cond{IfMatch: etag})
+		if errors.Is(err, blob.ErrPrecondition) {
+			continue
+		}
+		return err
+	}
+	return errors.New("event receipt: pending index has too much contention")
+}
+
+func decodePendingEventIndex(
+	data []byte,
+	provider, customerID string,
+) (r2PendingEventIndex, error) {
+	var index r2PendingEventIndex
+	if err := json.Unmarshal(data, &index); err != nil {
+		return r2PendingEventIndex{}, fmt.Errorf(
+			"event receipt: decode pending index: %w", err)
+	}
+	if index.SchemaVersion != pendingEventIndexSchemaVersion ||
+		index.Provider != provider || index.CustomerID != customerID ||
+		index.Version < 1 ||
+		len(index.EventIDs) > maxPendingEventReceiptsPerCustomer {
+		return r2PendingEventIndex{}, errors.New(
+			"event receipt: invalid pending index")
+	}
+	seen := make(map[string]struct{}, len(index.EventIDs))
+	for _, eventID := range index.EventIDs {
+		if eventID == "" || len(eventID) > 255 {
+			return r2PendingEventIndex{}, errors.New(
+				"event receipt: invalid event id in pending index")
+		}
+		if _, duplicate := seen[eventID]; duplicate {
+			return r2PendingEventIndex{}, errors.New(
+				"event receipt: duplicate event id in pending index")
+		}
+		seen[eventID] = struct{}{}
+	}
+	return index, nil
+}
+
+// CompleteEvent implements EventReceiptStore. Receipt completion precedes
+// pending-index removal. If the second write fails, retry sees the processed
+// receipt and idempotently finishes only the index cleanup.
+func (s *R2Store) CompleteEvent(
+	ctx context.Context,
+	receipt EventReceipt,
+	processedAt time.Time,
+) error {
+	if err := validateEventReceipt(receipt); err != nil {
+		return err
+	}
+	if processedAt.IsZero() {
+		return errors.New("event receipt: processed_at is required")
+	}
+	key := s.eventReceiptKey(
+		receipt.Provider, receipt.Event.ProviderEventID)
+	var current EventReceipt
+	for range casAttempts {
+		data, etag, err := s.c.Get(ctx, key)
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(data, &current); err != nil {
+			return fmt.Errorf("event receipt: decode for completion: %w", err)
+		}
+		if err := validateEventReceipt(current); err != nil {
+			return fmt.Errorf("event receipt: invalid receipt for completion: %w", err)
+		}
+		if !sameEventReceiptIdentity(current, receipt) {
+			return ErrEventReceiptConflict
+		}
+		if current.Status == EventReceiptProcessed {
+			if receipt.Resolution == nil || current.Resolution == nil ||
+				!sameEventReceiptResolution(*current.Resolution, *receipt.Resolution) {
+				return fmt.Errorf(
+					"%w: pinned resolution mismatch", ErrEventReceiptConflict)
+			}
+			break
+		}
+		if !eventReceiptClaimMatches(current, receipt) {
+			return ErrEventReceiptClaimLost
+		}
+		if current.Resolution == nil || receipt.Resolution == nil ||
+			!sameEventReceiptResolution(*current.Resolution, *receipt.Resolution) {
+			return fmt.Errorf(
+				"%w: completion requires the pinned resolution",
+				ErrEventReceiptConflict)
+		}
+		at := processedAt.UTC()
+		current.Status = EventReceiptProcessed
+		current.Decision = current.Resolution.Decision
+		current.ProcessedAt = &at
+		current.ClaimToken = ""
+		current.LeaseExpiresAt = nil
+		current.Version++
+		encoded, err := json.Marshal(current)
+		if err != nil {
+			return fmt.Errorf("event receipt: encode completion: %w", err)
+		}
+		_, err = s.c.Put(ctx, key, encoded, blob.Cond{IfMatch: etag})
+		if errors.Is(err, blob.ErrPrecondition) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		break
+	}
+	if current.Status != EventReceiptProcessed {
+		return errors.New("event receipt: completion has too much contention")
+	}
+	return s.removePendingEventIndex(ctx, current)
+}
+
+func (s *R2Store) removePendingEventIndex(
+	ctx context.Context,
+	receipt EventReceipt,
+) error {
+	key := s.pendingEventIndexKey(
+		receipt.Provider, receipt.Event.CustomerID)
+	for range casAttempts {
+		data, etag, err := s.c.Get(ctx, key)
+		if errors.Is(err, blob.ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		index, err := decodePendingEventIndex(
+			data, receipt.Provider, receipt.Event.CustomerID)
+		if err != nil {
+			return err
+		}
+		kept := index.EventIDs[:0]
+		found := false
+		for _, eventID := range index.EventIDs {
+			if eventID == receipt.Event.ProviderEventID {
+				found = true
+				continue
+			}
+			kept = append(kept, eventID)
+		}
+		if !found {
+			return nil
+		}
+		index.EventIDs = kept
+		index.Version++
+		encoded, err := json.Marshal(index)
+		if err != nil {
+			return fmt.Errorf("event receipt: encode pending cleanup: %w", err)
+		}
+		_, err = s.c.Put(ctx, key, encoded, blob.Cond{IfMatch: etag})
+		if errors.Is(err, blob.ErrPrecondition) {
+			continue
+		}
+		return err
+	}
+	return errors.New("event receipt: pending cleanup has too much contention")
+}
+
+// PendingEvents implements EventReceiptStore. It reads one bounded index and
+// at most its hard maximum of receipt objects; it never performs a bucket-wide
+// prefix list.
+func (s *R2Store) PendingEvents(
+	ctx context.Context,
+	provider, customerID string,
+	limit int,
+) ([]EventReceipt, error) {
+	if limit < 1 || limit > maxPendingEventReceiptsPerCustomer {
+		return nil, fmt.Errorf("event receipt: pending limit must be 1-%d",
+			maxPendingEventReceiptsPerCustomer)
+	}
+	key := s.pendingEventIndexKey(provider, customerID)
+	data, _, err := s.c.Get(ctx, key)
+	if errors.Is(err, blob.ErrNotFound) {
+		return []EventReceipt{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	index, err := decodePendingEventIndex(data, provider, customerID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]EventReceipt, 0, min(limit, len(index.EventIDs)))
+	var pendingErr error
+	for _, eventID := range index.EventIDs {
+		data, _, err := s.c.Get(ctx, s.eventReceiptKey(provider, eventID))
+		if err != nil {
+			pendingErr = errors.Join(pendingErr, fmt.Errorf(
+				"event receipt: pending receipt %s unavailable: %w", eventID, err))
+			continue
+		}
+		var receipt EventReceipt
+		if err := json.Unmarshal(data, &receipt); err != nil {
+			pendingErr = errors.Join(pendingErr, fmt.Errorf(
+				"event receipt: decode pending receipt %s: %w", eventID, err))
+			continue
+		}
+		if err := validateEventReceipt(receipt); err != nil {
+			pendingErr = errors.Join(pendingErr, fmt.Errorf(
+				"event receipt: invalid pending receipt %s: %w", eventID, err))
+			continue
+		}
+		if receipt.Provider != provider || receipt.Event.CustomerID != customerID ||
+			receipt.Event.ProviderEventID != eventID {
+			pendingErr = errors.Join(pendingErr, fmt.Errorf(
+				"event receipt: pending index points at mismatched receipt %s", eventID))
+			continue
+		}
+		out = append(out, cloneEventReceipt(receipt))
+		if len(out) == limit {
+			break
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Event.At.Equal(out[j].Event.At) {
+			return out[i].Event.ProviderEventID < out[j].Event.ProviderEventID
+		}
+		return out[i].Event.At.Before(out[j].Event.At)
+	})
+	return out, pendingErr
 }
 
 func cloneAccountLimitValue(value *AccountLimitValue) *AccountLimitValue {
