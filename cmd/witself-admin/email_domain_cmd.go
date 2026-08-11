@@ -682,7 +682,8 @@ func printEmailDomainAdminNextCursor(cursor string) {
 }
 
 func printEmailDomainAdminError(err error, code int) int {
-	fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
+	fmt.Fprintf(os.Stderr, "witself-admin: %s\n",
+		emailDomainAdminColumn(err.Error()))
 	return code
 }
 

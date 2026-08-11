@@ -101,10 +101,12 @@ The retired `agent-mail.witwave.ai` pilot domain is not another plan benefit.
 Compatibility there is limited to canonical local parts that were actually
 issued before retirement. No plan may request a new legacy-domain canonical
 address or alias; all new Witself-managed addresses use `witmail.net`.
-This matrix describes the plan entitlement, not the current rollout state:
-canonical inventory and delivery remain behind independent default-off gates,
-and custom-domain request, verification, routing, provider onboarding, and
-delivery are all still dark.
+This matrix and `witself plan list` describe catalog entitlements, not service
+readiness. `witself plan status` describes the account's effective policy after
+any audited override; it also does not prove that an edge route or cell cohort
+is live. Canonical inventory and delivery remain behind independent
+default-off gates, and custom-domain request, verification, routing, provider
+onboarding, and delivery are all still dark.
 
 In this table, an included feature does not imply unbounded throughput or a
 per-message charge. Message rate values and agent-email safety breakers are
@@ -1012,7 +1014,7 @@ Witself should meter these dimensions internally in v0:
 | `security_group` | Group count, policy-evaluation surface. |
 | `message_sent` | Outbound mailbox load and abuse control. |
 | `message_delivered` | Fan-out delivery load (group fan-out multiplies this). |
-| `email_received` | Inbound agent-email volume and abuse accounting; never a victim-billed pilot charge. |
+| `email_received` | Inbound agent-email volume and abuse accounting; never a victim-billed inbound charge. |
 | `email_sent` | Future outbound agent-email volume and sender-reputation enforcement. |
 | `email_address` | Provisioned live agent-email address count. |
 | `email_storage_byte` | Internal observation of inline raw-MIME and backup footprint; not a customer quota or overage dimension. |
@@ -1059,10 +1061,10 @@ Notes on a few dimensions:
   the realm-local mailbox. The six resolved ingress-rate keys map internally to
   the closed operational dimensions `email_received` and
   `email_received_bytes`; they are not six new billable dimensions.
-  `email_received` remains accounting-only for the authorized Cloudflare pilot:
-  pilot provisioning and ingestion emit no billable usage event or overage,
-  and hostile inbound volume can never bill the recipient. The canonical
-  dimension and unit names
+  `email_received` remains accounting-only for any gated receive-only
+  activation: provisioning and ingestion emit no billable usage event or
+  overage, and hostile inbound volume can never bill the recipient. The
+  canonical dimension and unit names
   exist in the cell usage contract so later production metering cannot invent
   incompatible keys; emission remains disabled until authoritative abuse
   classification and production pricing are both pinned. `email_sent` remains
@@ -1166,7 +1168,7 @@ Recommended defaults:
 | Security groups | `block` for hard cap, `warn` near cap. |
 | Messages sent/delivered | `throttle` or `warn`; block only for abuse or hard caps. |
 | Agent-email addresses | `block` for the hard address cap, `warn` near cap. |
-| Agent email received | Apply the non-billable temporary platform breakers above, with no plan overage or usage charge in the limited pilot. A production billing default is blocked on authoritative spam/abuse classification; aggregate recipient traffic must never become a victim-billing or mailbox-starvation lever. |
+| Agent email received | Apply the non-billable temporary platform breakers above, with no plan overage or usage charge in any gated receive-only activation. A production billing default is blocked on authoritative spam/abuse classification; aggregate recipient traffic must never become a victim-billing or mailbox-starvation lever. |
 | Agent email sent | `block` at the hard per-period threshold; sending remains dormant until a send slice exists. |
 | Agent-email raw-MIME and attachment storage | Expire inline raw MIME by the plan's age-based retention window and reject messages over `agent_email_max_raw_bytes`. Charge the full retained raw-MIME size of each attachment-bearing message to the account-wide `agent_email_attachment_storage_bytes` pool. When that pool lacks room, preserve bounded text and metadata, explicitly mark the raw attachment-bearing payload unretained, and never create an inbound overage charge. |
 | Stored secrets | `block` for hard cap, `warn` near cap. |

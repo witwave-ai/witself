@@ -19,8 +19,8 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 	if len(c.Plans) != 4 {
 		t.Fatalf("catalog has %d plans; want 4", len(c.Plans))
 	}
-	if c.Updated != "2026-08-03" {
-		t.Fatalf("catalog updated = %q; want 2026-08-03", c.Updated)
+	if c.Updated != "2026-08-10" {
+		t.Fatalf("catalog updated = %q; want 2026-08-10", c.Updated)
 	}
 	if c.Currency != "USD" {
 		t.Fatalf("catalog currency = %q; want USD", c.Currency)
@@ -102,6 +102,8 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 	monthly := func(value int64) *int64 { return &value }
 	type expectedPlan struct {
 		name         string
+		recommended  bool
+		badge        string
 		priceMonthly *int64
 		available    bool
 		usageBilled  bool
@@ -139,6 +141,8 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 		},
 		"standard": {
 			name:         "Professional",
+			recommended:  true,
+			badge:        "Most popular",
 			priceMonthly: monthly(30),
 			available:    true,
 			limits: map[string]int64{
@@ -230,6 +234,8 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 			t.Fatalf("catalog missing plan %q", planID)
 		}
 		if plan.Name != want.name ||
+			plan.Recommended != want.recommended ||
+			plan.Badge != want.badge ||
 			!equalOptionalInt64(plan.PriceMonthly, want.priceMonthly) ||
 			plan.PriceMonthlyMin != nil ||
 			plan.Available != want.available ||
@@ -437,6 +443,11 @@ func TestParseValidation(t *testing.T) {
 		{"empty id", `{"schema_version":"witself.plans.v0","plans":[{"id":""}]}`, "empty id"},
 		{"duplicate id", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true},{"id":"free"}]}`, "duplicate"},
 		{"both prices", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true},{"id":"x","price_monthly":1,"price_monthly_min":2}]}`, "both"},
+		{"badge without recommendation", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","name":"Personal","available":true,"badge":"Popular"}]}`, "not recommended"},
+		{"recommendation without badge", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","name":"Personal","available":true},{"id":"standard","name":"Professional","price_monthly":30,"available":true,"recommended":true}]}`, "requires a badge"},
+		{"unavailable recommendation", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","name":"Personal","available":true},{"id":"standard","name":"Professional","price_monthly":30,"available":false,"recommended":true,"badge":"Popular"}]}`, "available and priced"},
+		{"multiple recommendations", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","name":"Personal","available":true},{"id":"standard","name":"Professional","price_monthly":30,"available":true,"recommended":true,"badge":"Popular"},{"id":"team","name":"Team","price_monthly":250,"available":true,"recommended":true,"badge":"Scale"}]}`, "both recommended"},
+		{"oversized badge", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","name":"Personal","available":true},{"id":"standard","name":"Professional","price_monthly":30,"available":true,"recommended":true,"badge":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}`, "exceeds 64"},
 		{"missing free", `{"schema_version":"witself.plans.v0","plans":[{"id":"standard","price_monthly":30,"available":true}]}`, `missing the "free" plan`},
 		{"paid free", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","price_monthly":5,"available":true}]}`, "must cost 0"},
 		{"unavailable free", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":false}]}`, "must be available"},

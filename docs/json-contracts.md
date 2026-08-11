@@ -3262,7 +3262,7 @@ Usage summary:
 ```json
 {
   "plan": {
-    "id": "plan_team",
+    "id": "team",
     "name": "Team"
   },
   "window": {
@@ -3294,7 +3294,7 @@ Limit summary:
 ```json
 {
   "plan": {
-    "id": "plan_team",
+    "id": "team",
     "name": "Team"
   },
   "realm": {

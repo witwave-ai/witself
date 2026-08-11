@@ -53,8 +53,22 @@ func TestCLIPlanFlowAgainstCPServer(t *testing.T) {
 	ctx := context.Background()
 
 	status, err := client.GetPlan(ctx, srv.URL, "acct_1", "good")
-	if err != nil || status.Plan != "free" {
+	if err != nil || status.Plan != "free" || status.PlanName != "Personal" ||
+		status.BillingPlan != "free" || status.BillingPlanName != "Personal" ||
+		status.EmailReceive == nil || status.EmailReceive.Enabled ||
+		status.EmailRetention == nil || status.EmailRetention.EffectiveDays == nil ||
+		*status.EmailRetention.EffectiveDays != 30 ||
+		status.Transcript == nil || status.Transcript.EffectiveDays == nil ||
+		*status.Transcript.EffectiveDays != 30 {
 		t.Fatalf("GetPlan initial = %+v, %v; want free", status, err)
+	}
+	catalogView, err := client.GetPlanCatalog(ctx, srv.URL)
+	if err != nil {
+		t.Fatalf("GetPlanCatalog: %v", err)
+	}
+	professional, ok := catalogView.Get("standard")
+	if !ok || !professional.Recommended || professional.Badge != "Most popular" {
+		t.Fatalf("professional catalog view = %+v, present=%t", professional, ok)
 	}
 
 	out, err := client.UpgradePlan(ctx, srv.URL, "acct_1", "good", "standard", "s@example.com")
@@ -63,7 +77,10 @@ func TestCLIPlanFlowAgainstCPServer(t *testing.T) {
 	}
 
 	status, err = client.GetPlan(ctx, srv.URL, "acct_1", "good")
-	if err != nil || status.Plan != "standard" || status.Applied != "standard" {
+	if err != nil || status.Plan != "standard" || status.PlanName != "Professional" ||
+		status.Applied != "standard" || status.EmailReceive == nil || !status.EmailReceive.Enabled ||
+		status.EmailRetention == nil || status.EmailRetention.EffectiveDays == nil ||
+		*status.EmailRetention.EffectiveDays != 90 {
 		t.Fatalf("GetPlan after = %+v; want standard/standard", status)
 	}
 

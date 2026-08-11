@@ -1,6 +1,6 @@
 {
   "schema_version": "witself.plans.v0",
-  "updated": "2026-08-03",
+  "updated": "2026-08-10",
   "currency": "USD",
   "plans": [
     {
@@ -17,6 +17,8 @@
     {
       "id": "standard",
       "name": "Professional",
+      "recommended": true,
+      "badge": "Most popular",
       "price_monthly": 30,
       "available": true,
       "usage_billed": false,

@@ -1296,10 +1296,19 @@ func formatTime(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
+// tabSafe renders one terminal-safe table line: line separators become spaces,
+// while terminal and bidirectional display controls are removed.
 func tabSafe(s string) string {
-	s = strings.ReplaceAll(s, "\t", " ")
-	s = strings.ReplaceAll(s, "\n", " ")
-	return s
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\t', '\n', '\r', '\u2028', '\u2029':
+			return ' '
+		}
+		if r < 0x20 || (r >= 0x7F && r <= 0x9F) || isBidiControl(r) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // safeText strips C0 control characters, DEL, and the C1 range
@@ -4133,6 +4142,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself account forget       Remove a local account binding (server untouched)")
 	usageLine(w, "  witself realm create|list|delete|email-alias")
 	usageLine(w, "  witself agent create|list|peers|delete")
+	usageLine(w, "  witself plan list|status|upgrade|downgrade|cancel  Inspect catalog and effective account policy")
 	usageLine(w, "  witself operator list|create|delete")
 	usageLine(w, "  witself token create|revoke  Mint or revoke agent/operator tokens")
 	usageLine(w, "  witself self show|card       Show the self digest or bounded visual identity card")
@@ -4147,6 +4157,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself avatar show|history|version|style|propose|activate|rollback|reset|generation|operator  Manage versioned agent avatars")
 	usageLine(w, "  witself transcript create|append|list|show|tail  Record and retrieve AI interactions")
 	usageLine(w, "  witself message send|reply|list|listen|read|ack|claim|renew|release|complete|request  Exchange and process durable realm-local agent messages")
+	usageLine(w, "  witself email status|address|list|listen|read|code-candidates|code-consumed|ack|claim|renew|release|complete|operator  Inspect and process receive-only agent email")
 	usageLine(w, "  witself integrations [--json]  Show supported AI runtimes and installation status")
 	usageLine(w, "  witself email-domain request|list  Request and inspect organization-owned inbound email domains")
 	usageLine(w, "  witself install RUNTIME[,RUNTIME...]|all  Install runtime memory and MCP integration")

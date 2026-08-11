@@ -243,12 +243,24 @@ func safeText(s string) string {
 	}, s)
 }
 
-// tabSafe replaces embedded \t and \n with spaces for single-line
-// table columns.
+// tabSafe renders one terminal-safe table line: line separators become spaces,
+// while terminal and bidirectional display controls are removed.
 func tabSafe(s string) string {
-	s = strings.ReplaceAll(s, "\t", " ")
-	s = strings.ReplaceAll(s, "\n", " ")
-	return s
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\t', '\n', '\r', '\u2028', '\u2029':
+			return ' '
+		}
+		if r < 0x20 || (r >= 0x7F && r <= 0x9F) || isBidiControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+func isBidiControl(r rune) bool {
+	return r == '\u061c' || r == '\u200e' || r == '\u200f' ||
+		(r >= '\u202a' && r <= '\u202e') || (r >= '\u2066' && r <= '\u2069')
 }
 
 // whoamiCmd: witself-admin whoami

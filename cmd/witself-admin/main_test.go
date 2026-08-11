@@ -38,6 +38,20 @@ func TestSafeTextStripsTerminalEscapes(t *testing.T) {
 	}
 }
 
+func TestTabSafeNeutralizesSingleLineDisplayControls(t *testing.T) {
+	tests := map[string]string{
+		"tabs\tnewlines\nreturns\rline\u2028paragraph\u2029end": "tabs newlines returns line paragraph end",
+		"left\u202eright\u2066isolate\u2069":                    "leftrightisolate",
+		"c0\x1bc1\u009bdel\x7ftext":                             "c0c1deltext",
+		"unicode π survives":                                    "unicode π survives",
+	}
+	for in, want := range tests {
+		if got := tabSafe(in); got != want {
+			t.Errorf("tabSafe(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // TestReadBodyFromFlags pins the three-source rule (only one of --body /
 // --body-file / --stdin may be set) plus the file / '-' / stdin paths.
 func TestReadBodyFromFlags(t *testing.T) {
