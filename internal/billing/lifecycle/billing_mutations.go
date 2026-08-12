@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -32,7 +33,22 @@ var (
 	// ErrBillingMutationInProgress means another control-plane replica owns
 	// the live receipt lease. The caller may retry the exact same request.
 	ErrBillingMutationInProgress = errors.New("billing mutation is already in progress")
+	// ErrBillingMutationApprovalDrift means the approved provider effect can no
+	// longer be reproduced from the deployed provider catalog. The receipt stays
+	// pending for operator resolution; it is never reinterpreted.
+	ErrBillingMutationApprovalDrift = errors.New("billing mutation approval drift")
+	// ErrBillingMutationEffectUnpinned protects pending schema-v1 receipts
+	// written before execution effects were immutable. They may be completed
+	// from exact durable account evidence, but never sent back to a provider.
+	ErrBillingMutationEffectUnpinned = errors.New(
+		"billing mutation execution effect is not pinned")
 )
+
+type billingMutationApproval struct {
+	ExecutionClass     BillingMutationExecutionClass
+	ApprovedPriceCents int64
+	ApprovedCurrency   string
+}
 
 // BillingActor is authenticated account authority captured on the immutable
 // receipt. The HTTP layer derives it from AccountAccess, never request JSON.
@@ -59,6 +75,7 @@ type BillingMutationPreview struct {
 	ConfirmationRequired bool
 	Effects              []string
 	Violations           []string
+	approval             billingMutationApproval
 }
 
 // BillingMutationExecution is the customer-safe terminal projection. Reason,
@@ -124,6 +141,7 @@ func (m *Manager) PreviewBillingMutation(
 
 	switch command.Operation {
 	case BillingMutationSetup:
+		preview.approval.ExecutionClass = BillingMutationExecutionSetup
 		providerCapability(providerErr == nil && implementsIdempotentSetup(provider), "setup")
 		preview.Effects = append(preview.Effects,
 			"create or reuse the account billing customer",
@@ -142,6 +160,7 @@ func (m *Manager) PreviewBillingMutation(
 			preview.Violations = append(preview.Violations,
 				fmt.Sprintf("already on the %s plan", target.ID))
 		case !target.Available:
+			preview.approval.ExecutionClass = BillingMutationExecutionUpgradeContact
 			preview.Effects = append(preview.Effects,
 				fmt.Sprintf("record a contact request for the %s plan", target.ID))
 		case target.PriceCents() <= current.PriceCents():
@@ -151,6 +170,11 @@ func (m *Manager) PreviewBillingMutation(
 			preview.Violations = append(preview.Violations,
 				fmt.Sprintf("plan %q is not purchasable", target.ID))
 		default:
+			preview.approval = billingMutationApproval{
+				ExecutionClass:     BillingMutationExecutionUpgradeSelfServe,
+				ApprovedPriceCents: target.PriceCents(),
+				ApprovedCurrency:   strings.ToLower(m.cfg.Catalog.Currency),
+			}
 			providerCapability(providerErr == nil && implementsIdempotentSubscribe(provider), "subscription")
 			preview.Effects = append(preview.Effects,
 				fmt.Sprintf("purchase or switch the subscription to %s", target.ID),
@@ -170,6 +194,11 @@ func (m *Manager) PreviewBillingMutation(
 			break
 		}
 		current, _ := m.cfg.Catalog.Get(r.Entitled)
+		preview.approval = billingMutationApproval{
+			ExecutionClass:     BillingMutationExecutionDowngrade,
+			ApprovedPriceCents: target.PriceCents(),
+			ApprovedCurrency:   strings.ToLower(m.cfg.Catalog.Currency),
+		}
 		switch {
 		case target.ID == r.Entitled:
 			preview.Violations = append(preview.Violations,
@@ -199,6 +228,7 @@ func (m *Manager) PreviewBillingMutation(
 			fmt.Sprintf("schedule the subscription to change to %s at period end", target.ID))
 
 	case BillingMutationPlanCancel:
+		preview.approval.ExecutionClass = BillingMutationExecutionCancel
 		if r.Pending == nil {
 			preview.Violations = append(preview.Violations, "nothing is pending")
 		} else if r.Pending.Kind != PendingContact || r.Pending.CancelPrevious {
@@ -208,6 +238,11 @@ func (m *Manager) PreviewBillingMutation(
 			"cancel the current pending plan change")
 	}
 	preview.Allowed = len(preview.Violations) == 0
+	if preview.Allowed && !validBillingMutationExecutionClass(
+		preview.approval.ExecutionClass) {
+		return BillingMutationPreview{}, errors.New(
+			"lifecycle: allowed billing preview has no approved execution class")
+	}
 	return preview, nil
 }
 
@@ -246,15 +281,29 @@ func (m *Manager) ExecuteBillingMutation(
 	}
 	var receipt BillingMutationReceipt
 	created := false
+	var approval billingMutationApproval
 	if exists {
+		approval = billingMutationApproval{
+			ExecutionClass:     stored.ExecutionClass,
+			ApprovedPriceCents: stored.ApprovedPriceCents,
+			ApprovedCurrency:   stored.ApprovedCurrency,
+		}
 		// The initiating actor is immutable audit attribution, not part of the
 		// semantic operation payload. Every retry is independently authorized at
 		// the HTTP boundary, so an operator rotation or role change must not strand
 		// an otherwise exact pending operation.
 		initiatingActor := BillingActor{ID: stored.ActorID, Role: stored.ActorRole}
-		receipt, err = buildBillingMutationReceipt(
-			accountID, email, initiatingActor, command, stored.AccountGeneration,
-			m.cfg.Now().UTC())
+		if stored.SchemaVersion == billingMutationLegacyReceiptSchemaVersion {
+			receipt, err = buildBillingMutationReceiptForSchema(
+				billingMutationLegacyReceiptSchemaVersion,
+				accountID, email, initiatingActor, command,
+				stored.AccountGeneration, billingMutationApproval{},
+				m.cfg.Now().UTC())
+		} else {
+			receipt, err = buildBillingMutationReceipt(
+				accountID, email, initiatingActor, command,
+				stored.AccountGeneration, approval, m.cfg.Now().UTC())
+		}
 		if err != nil {
 			return BillingMutationExecution{}, err
 		}
@@ -266,6 +315,13 @@ func (m *Manager) ExecuteBillingMutation(
 		}
 		if stored.Status == BillingMutationSuperseded {
 			return BillingMutationExecution{}, ErrBillingMutationSuperseded
+		}
+		// Repair (or prove) the global recovery index before an exact retry can
+		// reacquire claims and cross the provider boundary. Index saturation is
+		// deliberate backpressure, never a reason to run untracked work.
+		stored, _, err = store.ReceiveBillingMutation(ctx, receipt)
+		if err != nil {
+			return BillingMutationExecution{}, err
 		}
 	} else {
 		previewCommand := command
@@ -280,6 +336,7 @@ func (m *Manager) ExecuteBillingMutation(
 			return BillingMutationExecution{}, refuse("%s",
 				strings.Join(preview.Violations, "; "))
 		}
+		approval = preview.approval
 	}
 
 	claimToken, err := newBillingMutationClaimToken()
@@ -318,7 +375,7 @@ func (m *Manager) ExecuteBillingMutation(
 	if !exists {
 		receipt, err = buildBillingMutationReceipt(
 			accountID, email, actor, command,
-			accountLease.OperationGeneration, claimNow)
+			accountLease.OperationGeneration, approval, claimNow)
 		if err != nil {
 			releaseAccount()
 			return BillingMutationExecution{}, err
@@ -410,6 +467,16 @@ func (m *Manager) ExecuteBillingMutation(
 	} else if recovered {
 		return complete(result)
 	}
+	if claimed.ExecutionClass == "" {
+		releaseClaims()
+		return BillingMutationExecution{}, ErrBillingMutationEffectUnpinned
+	}
+	if !m.cfg.Now().UTC().Before(
+		claimed.CreatedAt.Add(billingMutationAutomaticRetryHorizon)) {
+		releaseClaims()
+		return BillingMutationExecution{},
+			ErrBillingMutationRetryHorizonExceeded
+	}
 
 	executionCtx, cancelExecution := context.WithTimeout(
 		ctx, billingMutationExecutionTimeout)
@@ -428,9 +495,9 @@ func (m *Manager) executeClaimedBillingMutation(
 	accountID, email string,
 	receipt BillingMutationReceipt,
 ) (BillingMutationResult, error) {
-	switch receipt.Operation {
-	case BillingMutationSetup:
-		action, err := m.CreateBillingSetupMutation(
+	switch receipt.ExecutionClass {
+	case BillingMutationExecutionSetup:
+		action, err := m.createBillingSetupMutation(
 			ctx, accountID, email, receipt.OperationID)
 		if err != nil {
 			return BillingMutationResult{}, err
@@ -441,16 +508,27 @@ func (m *Manager) executeClaimedBillingMutation(
 		return BillingMutationResult{
 			Kind: BillingMutationResultAction, URL: action.URL,
 		}, nil
-	case BillingMutationPlanUpgrade:
-		out, err := m.RequestUpgradeMutation(
-			ctx, accountID, email, receipt.TargetPlan, receipt.OperationID)
+	case BillingMutationExecutionUpgradeContact,
+		BillingMutationExecutionUpgradeSelfServe:
+		out, err := m.requestUpgrade(
+			ctx, accountID, email, receipt.TargetPlan, receipt.OperationID, true,
+			billingMutationApproval{
+				ExecutionClass:     receipt.ExecutionClass,
+				ApprovedPriceCents: receipt.ApprovedPriceCents,
+				ApprovedCurrency:   receipt.ApprovedCurrency,
+			})
 		return billingResultFromOutcome(out), err
-	case BillingMutationPlanDowngrade:
-		out, err := m.RequestDowngradeMutation(
-			ctx, accountID, email, receipt.TargetPlan, receipt.OperationID)
+	case BillingMutationExecutionDowngrade:
+		out, err := m.requestDowngrade(
+			ctx, accountID, email, receipt.TargetPlan, receipt.OperationID, true,
+			billingMutationApproval{
+				ExecutionClass:     receipt.ExecutionClass,
+				ApprovedPriceCents: receipt.ApprovedPriceCents,
+				ApprovedCurrency:   receipt.ApprovedCurrency,
+			})
 		return billingResultFromOutcome(out), err
-	case BillingMutationPlanCancel:
-		resolved, err := m.CancelPendingMutation(ctx, accountID, receipt.OperationID)
+	case BillingMutationExecutionCancel:
+		resolved, err := m.cancelPendingMutation(ctx, accountID, receipt.OperationID)
 		if err != nil {
 			return BillingMutationResult{}, err
 		}
@@ -461,7 +539,8 @@ func (m *Manager) executeClaimedBillingMutation(
 			Kind: BillingMutationResultCancelled, Cancelled: true,
 		}, nil
 	default:
-		return BillingMutationResult{}, billingMutationInput("unsupported operation")
+		return BillingMutationResult{}, billingMutationInput(
+			"unsupported approved execution class")
 	}
 }
 
@@ -545,11 +624,252 @@ func (m *Manager) recoverBillingMutation(
 	return BillingMutationResult{}, false, nil
 }
 
+// BillingMutationReconcileSummary is the value-free projection of one bounded
+// global recovery pass. Busy means another live replica retained the exact
+// fence; TerminalCleaned counts stale index markers, not deleted receipts.
+type BillingMutationReconcileSummary struct {
+	Scanned                 int
+	Attempted               int
+	Completed               int
+	Superseded              int
+	Busy                    int
+	Failed                  int
+	TerminalCleaned         int
+	ScanCapped              bool
+	OldestObservedPendingAt *time.Time
+}
+
+type billingMutationReconcileOutcome int
+
+const (
+	billingMutationReconcileNoop billingMutationReconcileOutcome = iota
+	billingMutationReconcileCompleted
+	billingMutationReconcileSuperseded
+	billingMutationReconcileBusy
+)
+
+type billingMutationReconcileResult struct {
+	outcome billingMutationReconcileOutcome
+	err     error
+}
+
+// ReconcileBillingMutations resumes one bounded window from the global shard
+// set. Valid receipts still run when another shard or reference is malformed.
+// A small worker pool keeps one slow provider request from consuming the whole
+// cron deadline; receipt and account claims remain the collision fence.
+func (m *Manager) ReconcileBillingMutations(
+	ctx context.Context,
+) (BillingMutationReconcileSummary, error) {
+	store, ok := m.cfg.Store.(BillingMutationStore)
+	if !ok {
+		return BillingMutationReconcileSummary{}, nil
+	}
+	batch, listErr := store.PendingBillingMutations(
+		ctx, maxBillingMutationsPerReconcile)
+	summary := BillingMutationReconcileSummary{
+		Scanned:                 batch.Scanned,
+		TerminalCleaned:         batch.TerminalCleanup,
+		ScanCapped:              batch.ScanCapped,
+		OldestObservedPendingAt: batch.OldestObservedPendingAt,
+	}
+	if len(batch.Receipts) == 0 {
+		return summary, listErr
+	}
+
+	jobs := make(chan BillingMutationReceipt)
+	results := make(chan billingMutationReconcileResult, len(batch.Receipts))
+	workerCount := min(billingMutationReconcileConcurrency, len(batch.Receipts))
+	var workers sync.WaitGroup
+	for range workerCount {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for receipt := range jobs {
+				outcome, err := m.reconcileBillingMutation(
+					ctx, store, receipt)
+				results <- billingMutationReconcileResult{
+					outcome: outcome, err: err,
+				}
+			}
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for _, receipt := range batch.Receipts {
+			select {
+			case jobs <- receipt:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	go func() {
+		workers.Wait()
+		close(results)
+	}()
+
+	firstErr := listErr
+	for result := range results {
+		if result.outcome == billingMutationReconcileBusy {
+			summary.Busy++
+			continue
+		}
+		summary.Attempted++
+		if result.err != nil {
+			summary.Failed++
+			if firstErr == nil {
+				firstErr = result.err
+			}
+			continue
+		}
+		switch result.outcome {
+		case billingMutationReconcileCompleted:
+			summary.Completed++
+		case billingMutationReconcileSuperseded:
+			summary.Superseded++
+		}
+	}
+	if ctx.Err() != nil && firstErr == nil {
+		firstErr = errors.New("billing mutation reconciliation deadline exceeded")
+	}
+	return summary, firstErr
+}
+
+// reconcileBillingMutation resumes one exact stored receipt without requiring
+// the caller's raw idempotency key or email. The operation id is already the
+// provider retry fence, and an empty email deliberately skips only the mutable
+// customer-contact update; it cannot change receipt semantics or create a
+// second provider customer.
+func (m *Manager) reconcileBillingMutation(
+	ctx context.Context,
+	store BillingMutationStore,
+	stored BillingMutationReceipt,
+) (billingMutationReconcileOutcome, error) {
+	if err := validateBillingMutationReceipt(stored); err != nil {
+		return billingMutationReconcileNoop, err
+	}
+	if stored.Status != BillingMutationPending {
+		return billingMutationReconcileNoop, nil
+	}
+	claimToken, err := newBillingMutationClaimToken()
+	if err != nil {
+		return billingMutationReconcileNoop, err
+	}
+	claimNow := m.cfg.Now().UTC()
+	accountLease, acquired, err := store.ClaimBillingMutationAccount(
+		ctx, stored.AccountID, stored.OperationID, stored.AccountGeneration,
+		claimToken, claimNow, claimNow.Add(billingMutationClaimLease))
+	if errors.Is(err, ErrBillingMutationSuperseded) {
+		_, supersedeErr := store.SupersedeBillingMutation(ctx, stored, claimNow)
+		if errors.Is(supersedeErr, ErrBillingMutationClaimActive) {
+			return billingMutationReconcileBusy, nil
+		}
+		if supersedeErr != nil {
+			return billingMutationReconcileNoop, supersedeErr
+		}
+		return billingMutationReconcileSuperseded, nil
+	}
+	if err != nil {
+		return billingMutationReconcileNoop, err
+	}
+	if !acquired {
+		return billingMutationReconcileBusy, nil
+	}
+	releaseAccount := func() {
+		_ = store.ReleaseBillingMutationAccount(
+			ctx, accountLease, m.cfg.Now().UTC())
+	}
+
+	claimed, acquired, err := store.ClaimBillingMutation(
+		ctx, stored, claimToken, claimNow,
+		claimNow.Add(billingMutationClaimLease))
+	if err != nil {
+		releaseAccount()
+		return billingMutationReconcileNoop, err
+	}
+	if !acquired {
+		releaseAccount()
+		return billingMutationReconcileBusy, nil
+	}
+	releaseClaims := func() {
+		_ = store.ReleaseBillingMutation(ctx, claimed, m.cfg.Now().UTC())
+		releaseAccount()
+	}
+	complete := func(
+		result BillingMutationResult,
+	) (billingMutationReconcileOutcome, error) {
+		_, completeErr := store.CompleteBillingMutation(
+			ctx, claimed, result, m.cfg.Now().UTC())
+		if completeErr != nil {
+			current, currentOK, getErr := store.GetBillingMutation(
+				ctx, claimed.OperationID)
+			if getErr == nil && currentOK &&
+				current.Status == BillingMutationCompleted {
+				releaseAccount()
+				return billingMutationReconcileCompleted, nil
+			}
+			if getErr != nil {
+				return billingMutationReconcileNoop, getErr
+			}
+			// Keep both claims until lease expiry after an ambiguous completion
+			// failure. A successor must not race an unconfirmed terminal write.
+			return billingMutationReconcileNoop, completeErr
+		}
+		releaseAccount()
+		return billingMutationReconcileCompleted, nil
+	}
+
+	if result, recovered, recoverErr := m.recoverBillingMutation(
+		ctx, claimed, false); recoverErr != nil {
+		releaseClaims()
+		return billingMutationReconcileNoop, recoverErr
+	} else if recovered {
+		return complete(result)
+	}
+	if claimed.ExecutionClass == "" {
+		releaseClaims()
+		return billingMutationReconcileNoop,
+			ErrBillingMutationEffectUnpinned
+	}
+	if !m.cfg.Now().UTC().Before(
+		claimed.CreatedAt.Add(billingMutationAutomaticRetryHorizon)) {
+		releaseClaims()
+		return billingMutationReconcileNoop,
+			ErrBillingMutationRetryHorizonExceeded
+	}
+
+	executionCtx, cancelExecution := context.WithTimeout(
+		ctx, billingMutationExecutionTimeout)
+	defer cancelExecution()
+	result, executeErr := m.executeClaimedBillingMutation(
+		executionCtx, claimed.AccountID, "", claimed)
+	if executeErr != nil {
+		releaseClaims()
+		return billingMutationReconcileNoop, executeErr
+	}
+	return complete(result)
+}
+
 func buildBillingMutationReceipt(
 	accountID, email string,
 	actor BillingActor,
 	command BillingMutationCommand,
 	accountGeneration int64,
+	approval billingMutationApproval,
+	now time.Time,
+) (BillingMutationReceipt, error) {
+	return buildBillingMutationReceiptForSchema(
+		billingMutationReceiptSchemaVersion, accountID, email, actor, command,
+		accountGeneration, approval, now)
+}
+
+func buildBillingMutationReceiptForSchema(
+	schemaVersion int,
+	accountID, email string,
+	actor BillingActor,
+	command BillingMutationCommand,
+	accountGeneration int64,
+	approval billingMutationApproval,
 	now time.Time,
 ) (BillingMutationReceipt, error) {
 	keyDigest := sha256.Sum256([]byte(command.IdempotencyKey))
@@ -579,15 +899,18 @@ func buildBillingMutationReceipt(
 	}
 	requestDigest := sha256.Sum256(encoded)
 	receipt := BillingMutationReceipt{
-		SchemaVersion: billingMutationReceiptSchemaVersion,
+		SchemaVersion: schemaVersion,
 		OperationID:   operationID, AccountID: accountID,
 		ActorID: actor.ID, ActorRole: actor.Role, Operation: command.Operation,
+		ExecutionClass:       approval.ExecutionClass,
 		AccountGeneration:    accountGeneration,
 		IdempotencyKeySHA256: hex.EncodeToString(keyDigest[:]),
 		RequestSHA256:        hex.EncodeToString(requestDigest[:]),
 		Reason:               command.Reason, ConfirmedAt: now,
 		TargetPlan: command.Plan, EmailSHA256: emailDigest,
-		Status: BillingMutationPending, CreatedAt: now, UpdatedAt: now,
+		ApprovedPriceCents: approval.ApprovedPriceCents,
+		ApprovedCurrency:   approval.ApprovedCurrency,
+		Status:             BillingMutationPending, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := validateBillingMutationReceipt(receipt); err != nil {
 		return BillingMutationReceipt{}, err

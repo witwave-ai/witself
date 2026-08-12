@@ -145,10 +145,10 @@ func (m *Manager) CreateBillingSetup(
 	return action, nil
 }
 
-// CreateBillingSetupMutation creates or replays one hosted setup flow under a
-// durable operation identity. Providers that cannot guarantee exact replay
-// fail closed before a session is created.
-func (m *Manager) CreateBillingSetupMutation(
+// createBillingSetupMutation creates or replays one hosted setup flow for an
+// already-claimed schema-2 receipt. Keeping this private prevents callers from
+// bypassing the durable envelope, approval, queue, and retry-horizon guards.
+func (m *Manager) createBillingSetupMutation(
 	ctx context.Context,
 	accountID, email, operationID string,
 ) (billing.Action, error) {

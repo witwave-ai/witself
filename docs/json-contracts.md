@@ -3442,6 +3442,46 @@ response, an exact account tombstone preserves its target and actual effective
 time. The retry returns the same `scheduled` shape without calling the provider
 again, even though the visible pending row is already gone.
 
+Before any apply crosses the provider boundary, receipt schema 2 stores the
+server-approved execution class. Self-serve upgrades and downgrades also store
+approved monthly cents and lowercase currency. Recovery uses those immutable
+fields and fails closed on catalog drift; it never derives a new charge/contact
+decision from the current plan matrix. The receipt must also be durably present
+in one of 16 bounded global pending shards. A scheduled control-plane pass
+rotates through up to 64 references, claims each account and receipt with their
+existing generation fences, and leaves missing or malformed references visible
+for repair. Automatic provider execution stops after 23 hours. Legacy unpinned
+schema-1 receipts may complete from exact stored account evidence but are never
+automatically re-sent to a provider.
+
+The private plan-lifecycle tick acknowledgement may include this nested,
+value-free projection; newer Workers validate it while accepting its absence
+from an older container:
+
+```json
+{
+  "billing_mutations": {
+    "scanned": 12,
+    "attempted": 7,
+    "completed": 5,
+    "superseded": 1,
+    "busy": 1,
+    "failed": 1,
+    "terminal_cleaned": 4,
+    "scan_capped": false,
+    "oldest_observed_pending_at": "2026-08-11T20:00:00Z",
+    "succeeded": false
+  }
+}
+```
+
+`oldest_observed_pending_at` is `null` when the bounded batch observed none;
+it is not a fleet-global oldest claim. The top-level account-page `succeeded`
+field is false when either account work or mutation recovery is unhealthy, but
+the Worker still advances the directory cursor after any structurally valid
+acknowledgement. That keeps later accounts reachable without masking recovery
+health.
+
 `POST /v1/accounts/{account_id}/billing:portal` is unchanged and returns only
 `{"kind":"done"}` or `{"kind":"action","url":"https://..."}`. Hosted URLs
 must be control-free HTTPS URLs without embedded credentials. Setup is the

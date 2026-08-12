@@ -48,6 +48,14 @@ type r2PendingEventIndex struct {
 	Version       int64    `json:"version"`
 }
 
+type r2PendingBillingMutationIndex struct {
+	SchemaVersion int      `json:"schema_version"`
+	Shard         int      `json:"shard"`
+	OperationIDs  []string `json:"operation_ids"`
+	Cursor        int      `json:"cursor"`
+	Version       int64    `json:"version"`
+}
+
 // r2LimitAuditKindPrefix makes account-limit audit metadata survive a rollback
 // to a binary whose Record/AdminChange structs predate LimitOverrides. Such a
 // binary still knows and preserves AdminChange.Kind, ActorID, ActorHandle,
@@ -133,6 +141,11 @@ func (s *R2Store) billingMutationAccountKey(accountID string) string {
 	digest := sha256.Sum256([]byte(accountID))
 	return s.prefix + "billing-mutations/accounts/" +
 		hex.EncodeToString(digest[:]) + ".json"
+}
+
+func (s *R2Store) pendingBillingMutationIndexKey(shard int) string {
+	return fmt.Sprintf("%sbilling-mutations/pending/shard-%02d.json",
+		s.prefix, shard)
 }
 
 // Get implements Store.
@@ -545,6 +558,9 @@ func (s *R2Store) ReceiveBillingMutation(
 	}
 	if _, err := s.c.Put(
 		ctx, key, data, blob.Cond{IfNoneMatchAny: true}); err == nil {
+		if err := s.ensurePendingBillingMutationIndex(ctx, stored); err != nil {
+			return cloneBillingMutationReceipt(stored), true, err
+		}
 		return cloneBillingMutationReceipt(stored), true, nil
 	} else if !errors.Is(err, blob.ErrPrecondition) {
 		return BillingMutationReceipt{}, false, err
@@ -566,7 +582,150 @@ func (s *R2Store) ReceiveBillingMutation(
 			"%w: operation=%s", ErrBillingMutationConflict,
 			receipt.OperationID)
 	}
+	if stored.Status == BillingMutationPending {
+		if err := s.ensurePendingBillingMutationIndex(ctx, stored); err != nil {
+			return cloneBillingMutationReceipt(stored), false, err
+		}
+	}
 	return cloneBillingMutationReceipt(stored), false, nil
+}
+
+func (s *R2Store) ensurePendingBillingMutationIndex(
+	ctx context.Context,
+	receipt BillingMutationReceipt,
+) error {
+	shardID := pendingBillingMutationShard(receipt.OperationID)
+	key := s.pendingBillingMutationIndexKey(shardID)
+	for range casAttempts {
+		data, etag, err := s.c.Get(ctx, key)
+		if errors.Is(err, blob.ErrNotFound) {
+			index := r2PendingBillingMutationIndex{
+				SchemaVersion: billingMutationPendingIndexSchemaVersion,
+				Shard:         shardID,
+				OperationIDs:  []string{receipt.OperationID},
+				Cursor:        0,
+				Version:       1,
+			}
+			encoded, encodeErr := json.Marshal(index)
+			if encodeErr != nil {
+				return fmt.Errorf(
+					"billing mutation receipt: encode pending index: %w",
+					encodeErr)
+			}
+			_, err = s.c.Put(ctx, key, encoded, blob.Cond{IfNoneMatchAny: true})
+			if errors.Is(err, blob.ErrPrecondition) {
+				continue
+			}
+			return err
+		}
+		if err != nil {
+			return err
+		}
+		index, err := decodePendingBillingMutationIndex(data, shardID)
+		if err != nil {
+			return err
+		}
+		for _, operationID := range index.OperationIDs {
+			if operationID == receipt.OperationID {
+				return nil
+			}
+		}
+		if len(index.OperationIDs) >= maxPendingBillingMutationsPerShard {
+			return errBillingMutationPendingIndexFull
+		}
+		index.OperationIDs = append(index.OperationIDs, receipt.OperationID)
+		index.Version++
+		encoded, err := json.Marshal(index)
+		if err != nil {
+			return fmt.Errorf(
+				"billing mutation receipt: encode pending index: %w", err)
+		}
+		_, err = s.c.Put(ctx, key, encoded, blob.Cond{IfMatch: etag})
+		if errors.Is(err, blob.ErrPrecondition) {
+			continue
+		}
+		return err
+	}
+	return errors.New(
+		"billing mutation receipt: pending index has too much contention")
+}
+
+func decodePendingBillingMutationIndex(
+	data []byte,
+	shardID int,
+) (r2PendingBillingMutationIndex, error) {
+	var index r2PendingBillingMutationIndex
+	if err := json.Unmarshal(data, &index); err != nil {
+		return r2PendingBillingMutationIndex{}, fmt.Errorf(
+			"billing mutation receipt: decode pending index: %w", err)
+	}
+	if index.SchemaVersion != billingMutationPendingIndexSchemaVersion ||
+		index.Shard != shardID || index.Version < 1 ||
+		len(index.OperationIDs) > maxPendingBillingMutationsPerShard ||
+		(len(index.OperationIDs) == 0 && index.Cursor != 0) ||
+		(len(index.OperationIDs) > 0 &&
+			(index.Cursor < 0 || index.Cursor >= len(index.OperationIDs))) {
+		return r2PendingBillingMutationIndex{}, errors.New(
+			"billing mutation receipt: invalid pending index")
+	}
+	return index, nil
+}
+
+func (s *R2Store) removePendingBillingMutationIndex(
+	ctx context.Context,
+	operationID string,
+) error {
+	shardID := pendingBillingMutationShard(operationID)
+	key := s.pendingBillingMutationIndexKey(shardID)
+	for range casAttempts {
+		data, etag, err := s.c.Get(ctx, key)
+		if errors.Is(err, blob.ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		index, err := decodePendingBillingMutationIndex(data, shardID)
+		if err != nil {
+			return err
+		}
+		kept := index.OperationIDs[:0]
+		found := false
+		removedBeforeCursor := 0
+		for position, candidate := range index.OperationIDs {
+			if candidate == operationID {
+				found = true
+				if position < index.Cursor {
+					removedBeforeCursor++
+				}
+				continue
+			}
+			kept = append(kept, candidate)
+		}
+		if !found {
+			return nil
+		}
+		index.OperationIDs = kept
+		if len(kept) == 0 {
+			index.Cursor = 0
+		} else {
+			index.Cursor -= removedBeforeCursor
+			index.Cursor %= len(kept)
+		}
+		index.Version++
+		encoded, err := json.Marshal(index)
+		if err != nil {
+			return fmt.Errorf(
+				"billing mutation receipt: encode pending cleanup: %w", err)
+		}
+		_, err = s.c.Put(ctx, key, encoded, blob.Cond{IfMatch: etag})
+		if errors.Is(err, blob.ErrPrecondition) {
+			continue
+		}
+		return err
+	}
+	return errors.New(
+		"billing mutation receipt: pending cleanup has too much contention")
 }
 
 // ClaimBillingMutation uses the receipt object's ETag as the distributed claim
@@ -664,7 +823,8 @@ func (s *R2Store) CompleteBillingMutation(
 		return BillingMutationReceipt{}, err
 	}
 	if err := validateBillingMutationResultForOperation(
-		receipt.Operation, receipt.TargetPlan, result); err != nil {
+		receipt.Operation, receipt.ExecutionClass,
+		receipt.TargetPlan, result); err != nil {
 		return BillingMutationReceipt{}, err
 	}
 	if completedAt.IsZero() {
@@ -695,7 +855,9 @@ func (s *R2Store) CompleteBillingMutation(
 				return BillingMutationReceipt{}, fmt.Errorf(
 					"%w: terminal result mismatch", ErrBillingMutationConflict)
 			}
-			return cloneBillingMutationReceipt(current), nil
+			return cloneBillingMutationReceipt(current),
+				s.removePendingBillingMutationIndex(
+					ctx, current.OperationID)
 		}
 		if current.Status == BillingMutationSuperseded {
 			return BillingMutationReceipt{}, ErrBillingMutationSuperseded
@@ -735,7 +897,9 @@ func (s *R2Store) CompleteBillingMutation(
 		if err != nil {
 			return BillingMutationReceipt{}, err
 		}
-		return cloneBillingMutationReceipt(current), nil
+		return cloneBillingMutationReceipt(current),
+			s.removePendingBillingMutationIndex(
+				ctx, current.OperationID)
 	}
 	return BillingMutationReceipt{}, errors.New(
 		"billing mutation receipt: completion has too much contention")
@@ -775,7 +939,9 @@ func (s *R2Store) SupersedeBillingMutation(
 		}
 		switch current.Status {
 		case BillingMutationSuperseded:
-			return cloneBillingMutationReceipt(current), nil
+			return cloneBillingMutationReceipt(current),
+				s.removePendingBillingMutationIndex(
+					ctx, current.OperationID)
 		case BillingMutationCompleted:
 			return BillingMutationReceipt{}, ErrBillingMutationConflict
 		}
@@ -840,7 +1006,9 @@ func (s *R2Store) SupersedeBillingMutation(
 		if err != nil {
 			return BillingMutationReceipt{}, err
 		}
-		return cloneBillingMutationReceipt(current), nil
+		return cloneBillingMutationReceipt(current),
+			s.removePendingBillingMutationIndex(
+				ctx, current.OperationID)
 	}
 	return BillingMutationReceipt{}, errors.New(
 		"billing mutation receipt: supersede has too much contention")
@@ -879,14 +1047,16 @@ func (s *R2Store) ReleaseBillingMutation(
 			return ErrBillingMutationConflict
 		}
 		if current.Status == BillingMutationCompleted {
-			return nil
+			return s.removePendingBillingMutationIndex(
+				ctx, current.OperationID)
 		}
 		if current.Status == BillingMutationSuperseded {
-			return nil
+			return s.removePendingBillingMutationIndex(
+				ctx, current.OperationID)
 		}
 		if current.ClaimToken == "" &&
 			current.ClaimGeneration == receipt.ClaimGeneration {
-			return nil
+			return s.ensurePendingBillingMutationIndex(ctx, current)
 		}
 		if !billingMutationClaimMatches(current, receipt) {
 			return ErrBillingMutationClaimLost
@@ -914,9 +1084,178 @@ func (s *R2Store) ReleaseBillingMutation(
 		if errors.Is(err, blob.ErrPrecondition) {
 			continue
 		}
-		return err
+		if err != nil {
+			return err
+		}
+		return s.ensurePendingBillingMutationIndex(ctx, current)
 	}
 	return errors.New("billing mutation receipt: release has too much contention")
+}
+
+// PendingBillingMutations claims a rotating bounded window from every global
+// shard. Cursor advancement uses the same conditional-write contract as
+// receipt claims, so replicas naturally take different windows. Missing or
+// malformed references remain indexed and surface as errors; only validated
+// terminal receipts are cleaned automatically.
+func (s *R2Store) PendingBillingMutations(
+	ctx context.Context,
+	limit int,
+) (BillingMutationPendingBatch, error) {
+	if limit < billingMutationPendingShardCount ||
+		limit > billingMutationPendingShardCount*maxPendingBillingMutationsPerShard {
+		return BillingMutationPendingBatch{}, fmt.Errorf(
+			"billing mutation receipt: pending limit must be %d-%d",
+			billingMutationPendingShardCount,
+			billingMutationPendingShardCount*maxPendingBillingMutationsPerShard)
+	}
+
+	batch := BillingMutationPendingBatch{
+		Receipts: make([]BillingMutationReceipt, 0, limit),
+	}
+	references := make([]billingMutationPendingReference, 0, limit)
+	var firstErr error
+	baseQuota := limit / billingMutationPendingShardCount
+	remainder := limit % billingMutationPendingShardCount
+	for shardID := 0; shardID < billingMutationPendingShardCount; shardID++ {
+		quota := baseQuota
+		if shardID < remainder {
+			quota++
+		}
+		selected, capped, err := s.rotatePendingBillingMutationShard(
+			ctx, shardID, quota)
+		batch.ScanCapped = batch.ScanCapped || capped
+		if err != nil {
+			firstErr = errors.Join(firstErr, err)
+			continue
+		}
+		for _, operationID := range selected {
+			references = append(references, billingMutationPendingReference{
+				operationID: operationID,
+				shardID:     shardID,
+			})
+		}
+	}
+	batch.Scanned = len(references)
+
+	seen := make(map[string]struct{}, len(references))
+	for _, reference := range references {
+		operationID := reference.operationID
+		if !validBillingMutationOperationID(operationID) ||
+			pendingBillingMutationShard(operationID) != reference.shardID {
+			firstErr = errors.Join(firstErr, fmt.Errorf(
+				"billing mutation receipt: pending shard %d contains an invalid operation id",
+				reference.shardID))
+			continue
+		}
+		if _, duplicate := seen[operationID]; duplicate {
+			firstErr = errors.Join(firstErr, fmt.Errorf(
+				"billing mutation receipt: pending shard %d contains a duplicate operation id",
+				reference.shardID))
+			continue
+		}
+		seen[operationID] = struct{}{}
+		data, _, err := s.c.Get(ctx, s.billingMutationReceiptKey(operationID))
+		if errors.Is(err, blob.ErrNotFound) {
+			firstErr = errors.Join(firstErr, fmt.Errorf(
+				"billing mutation receipt: pending receipt %s unavailable: %w",
+				operationID, err))
+			continue
+		}
+		if err != nil {
+			firstErr = errors.Join(firstErr, fmt.Errorf(
+				"billing mutation receipt: pending receipt %s unavailable: %w",
+				operationID, err))
+			continue
+		}
+		var receipt BillingMutationReceipt
+		if err := json.Unmarshal(data, &receipt); err != nil {
+			firstErr = errors.Join(firstErr, fmt.Errorf(
+				"billing mutation receipt: decode pending receipt %s: %w",
+				operationID, err))
+			continue
+		}
+		if err := validateBillingMutationReceipt(receipt); err != nil {
+			firstErr = errors.Join(firstErr, fmt.Errorf(
+				"billing mutation receipt: invalid pending receipt %s: %w",
+				operationID, err))
+			continue
+		}
+		if receipt.OperationID != operationID {
+			firstErr = errors.Join(firstErr, fmt.Errorf(
+				"billing mutation receipt: pending index points at mismatched receipt %s",
+				operationID))
+			continue
+		}
+		if receipt.Status != BillingMutationPending {
+			if cleanupErr := s.removePendingBillingMutationIndex(
+				ctx, operationID); cleanupErr != nil {
+				firstErr = errors.Join(firstErr, cleanupErr)
+			} else {
+				batch.TerminalCleanup++
+			}
+			continue
+		}
+		if batch.OldestObservedPendingAt == nil ||
+			receipt.CreatedAt.Before(*batch.OldestObservedPendingAt) {
+			createdAt := receipt.CreatedAt
+			batch.OldestObservedPendingAt = &createdAt
+		}
+		batch.Receipts = append(batch.Receipts,
+			cloneBillingMutationReceipt(receipt))
+	}
+	sort.Slice(batch.Receipts, func(i, j int) bool {
+		if batch.Receipts[i].CreatedAt.Equal(batch.Receipts[j].CreatedAt) {
+			return batch.Receipts[i].OperationID < batch.Receipts[j].OperationID
+		}
+		return batch.Receipts[i].CreatedAt.Before(batch.Receipts[j].CreatedAt)
+	})
+	return batch, firstErr
+}
+
+func (s *R2Store) rotatePendingBillingMutationShard(
+	ctx context.Context,
+	shardID, limit int,
+) ([]string, bool, error) {
+	key := s.pendingBillingMutationIndexKey(shardID)
+	for range casAttempts {
+		data, etag, err := s.c.Get(ctx, key)
+		if errors.Is(err, blob.ErrNotFound) {
+			return nil, false, nil
+		}
+		if err != nil {
+			return nil, false, err
+		}
+		index, err := decodePendingBillingMutationIndex(data, shardID)
+		if err != nil {
+			return nil, false, err
+		}
+		if len(index.OperationIDs) == 0 {
+			return nil, false, nil
+		}
+		count := min(limit, len(index.OperationIDs))
+		selected := make([]string, 0, count)
+		for offset := 0; offset < count; offset++ {
+			position := (index.Cursor + offset) % len(index.OperationIDs)
+			selected = append(selected, index.OperationIDs[position])
+		}
+		index.Cursor = (index.Cursor + count) % len(index.OperationIDs)
+		index.Version++
+		encoded, err := json.Marshal(index)
+		if err != nil {
+			return nil, false, fmt.Errorf(
+				"billing mutation receipt: encode pending rotation: %w", err)
+		}
+		_, err = s.c.Put(ctx, key, encoded, blob.Cond{IfMatch: etag})
+		if errors.Is(err, blob.ErrPrecondition) {
+			continue
+		}
+		if err != nil {
+			return nil, false, err
+		}
+		return selected, len(index.OperationIDs) > count, nil
+	}
+	return nil, false, errors.New(
+		"billing mutation receipt: pending rotation has too much contention")
 }
 
 // ReceiveEvent implements EventReceiptStore. The receipt is create-only by

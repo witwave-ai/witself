@@ -1669,26 +1669,16 @@ func (m *Manager) RequestUpgrade(ctx context.Context, accountID, email, planID s
 	if err != nil {
 		return Outcome{}, err
 	}
-	return m.requestUpgrade(ctx, accountID, email, planID, operationID, false)
-}
-
-// RequestUpgradeMutation runs an upgrade under the caller's already-durable
-// billing operation fence. It is used only by ExecuteBillingMutation; direct
-// callers should use RequestUpgrade.
-func (m *Manager) RequestUpgradeMutation(
-	ctx context.Context,
-	accountID, email, planID, operationID string,
-) (Outcome, error) {
-	if !validBillingOperationID(operationID) {
-		return Outcome{}, errors.New("lifecycle: invalid billing operation id")
-	}
-	return m.requestUpgrade(ctx, accountID, email, planID, operationID, true)
+	return m.requestUpgrade(
+		ctx, accountID, email, planID, operationID, false,
+		billingMutationApproval{})
 }
 
 func (m *Manager) requestUpgrade(
 	ctx context.Context,
 	accountID, email, planID, operationID string,
 	strictOperation bool,
+	approval billingMutationApproval,
 ) (Outcome, error) {
 	if !m.BillingAvailable() {
 		return Outcome{}, ErrBillingUnavailable
@@ -1697,6 +1687,24 @@ func (m *Manager) requestUpgrade(
 	if !ok {
 		return Outcome{}, refuse("unknown plan %q", planID)
 	}
+	approvedContact := strictOperation &&
+		approval.ExecutionClass == BillingMutationExecutionUpgradeContact
+	approvedSelfServe := strictOperation &&
+		approval.ExecutionClass == BillingMutationExecutionUpgradeSelfServe
+	if validBillingMutationExecutionClass(approval.ExecutionClass) {
+		switch {
+		case !approvedContact && !approvedSelfServe:
+			return Outcome{}, ErrBillingMutationApprovalDrift
+		case approvedContact &&
+			(approval.ApprovedPriceCents != 0 || approval.ApprovedCurrency != ""):
+			return Outcome{}, ErrBillingMutationApprovalDrift
+		case approvedSelfServe &&
+			(!target.Purchasable() ||
+				target.PriceCents() != approval.ApprovedPriceCents ||
+				strings.ToLower(m.cfg.Catalog.Currency) != approval.ApprovedCurrency):
+			return Outcome{}, ErrBillingMutationApprovalDrift
+		}
+	}
 	now := m.cfg.Now()
 
 	// Claim: validate against the freshest record and park the desired change
@@ -1704,9 +1712,9 @@ func (m *Manager) requestUpgrade(
 	// it either sees our claim (and replaces it, failing our fold) or we see
 	// its state. The claim also captures what pending change it replaces.
 	reused := false
-	pinnedUpgrade := false
+	pinnedUpgrade := approvedSelfServe
 	claim, err := m.mutate(ctx, accountID, email, func(r *Record) error {
-		pinnedUpgrade = false
+		pinnedUpgrade = approvedSelfServe
 		current, _ := m.cfg.Catalog.Get(r.Entitled)
 		if target.ID == r.Entitled {
 			return refuse("already on the %s plan", target.ID)
@@ -1716,9 +1724,15 @@ func (m *Manager) requestUpgrade(
 			r.Pending.Plan == target.ID {
 			switch r.Pending.Kind {
 			case PendingContact:
+				if approvedSelfServe {
+					return ErrBillingMutationConflict
+				}
 				reused = true
 				return errSkipWrite
 			case PendingUpgrade:
+				if approvedContact {
+					return ErrBillingMutationConflict
+				}
 				// Pending.Kind is the durable execution classification approved
 				// before the provider call. Resume it even if a later catalog
 				// deployment changes availability or pricing semantics.
@@ -1729,7 +1743,7 @@ func (m *Manager) requestUpgrade(
 				}
 			}
 		}
-		if !target.Available && !pinnedUpgrade {
+		if approvedContact || !target.Available && !pinnedUpgrade {
 			// Not self-serve yet: the stored desire IS the sales lead; the
 			// hoop is "talk to us" instead of "pay". This check precedes
 			// price ordering because custom-priced Enterprise intentionally
@@ -1949,25 +1963,16 @@ func (m *Manager) RequestDowngrade(ctx context.Context, accountID, email, planID
 	if err != nil {
 		return Outcome{}, err
 	}
-	return m.requestDowngrade(ctx, accountID, email, planID, operationID, false)
-}
-
-// RequestDowngradeMutation schedules a downgrade under the durable billing
-// envelope's operation identity.
-func (m *Manager) RequestDowngradeMutation(
-	ctx context.Context,
-	accountID, email, planID, operationID string,
-) (Outcome, error) {
-	if !validBillingOperationID(operationID) {
-		return Outcome{}, errors.New("lifecycle: invalid billing operation id")
-	}
-	return m.requestDowngrade(ctx, accountID, email, planID, operationID, true)
+	return m.requestDowngrade(
+		ctx, accountID, email, planID, operationID, false,
+		billingMutationApproval{})
 }
 
 func (m *Manager) requestDowngrade(
 	ctx context.Context,
 	accountID, email, planID, operationID string,
 	strictOperation bool,
+	approval billingMutationApproval,
 ) (Outcome, error) {
 	if !m.BillingAvailable() {
 		return Outcome{}, ErrBillingUnavailable
@@ -1975,6 +1980,14 @@ func (m *Manager) requestDowngrade(
 	target, ok := m.cfg.Catalog.Get(planID)
 	if !ok {
 		return Outcome{}, refuse("unknown plan %q", planID)
+	}
+	approvedDowngrade := strictOperation &&
+		approval.ExecutionClass == BillingMutationExecutionDowngrade
+	if validBillingMutationExecutionClass(approval.ExecutionClass) &&
+		(!approvedDowngrade ||
+			target.PriceCents() != approval.ApprovedPriceCents ||
+			strings.ToLower(m.cfg.Catalog.Currency) != approval.ApprovedCurrency) {
+		return Outcome{}, ErrBillingMutationApprovalDrift
 	}
 	now := m.cfg.Now()
 
@@ -1991,20 +2004,22 @@ func (m *Manager) requestDowngrade(
 			reused = true
 			return errSkipWrite
 		}
-		current, _ := m.cfg.Catalog.Get(r.Entitled)
-		if target.ID == r.Entitled {
-			return refuse("already on the %s plan", target.ID)
-		}
-		if target.PriceCents() >= current.PriceCents() {
-			return refuse("%s is not a downgrade from %s — use upgrade", target.ID, current.ID)
-		}
-		violations, err := m.cfg.Fit.Fit(ctx, accountID, target)
-		if err != nil {
-			return err
-		}
-		if len(violations) > 0 {
-			return refuse("blocked — the account does not fit the %s plan:\n  %s",
-				target.ID, strings.Join(violations, "\n  "))
+		if !approvedDowngrade {
+			current, _ := m.cfg.Catalog.Get(r.Entitled)
+			if target.ID == r.Entitled {
+				return refuse("already on the %s plan", target.ID)
+			}
+			if target.PriceCents() >= current.PriceCents() {
+				return refuse("%s is not a downgrade from %s — use upgrade", target.ID, current.ID)
+			}
+			violations, err := m.cfg.Fit.Fit(ctx, accountID, target)
+			if err != nil {
+				return err
+			}
+			if len(violations) > 0 {
+				return refuse("blocked — the account does not fit the %s plan:\n  %s",
+					target.ID, strings.Join(violations, "\n  "))
+			}
 		}
 		cancelPrevious := r.Pending != nil &&
 			(r.Pending.CancelPrevious ||
@@ -2106,9 +2121,10 @@ func (m *Manager) CancelPending(ctx context.Context, accountID string) error {
 	return err
 }
 
-// CancelPendingMutation cancels an in-flight change under the durable billing
-// operation fence.
-func (m *Manager) CancelPendingMutation(
+// cancelPendingMutation cancels an in-flight change for an already-claimed
+// schema-2 receipt. It is intentionally private so the operation identity
+// cannot be used without the receipt's immutable approval and retry guards.
+func (m *Manager) cancelPendingMutation(
 	ctx context.Context,
 	accountID, operationID string,
 ) (resolved bool, err error) {

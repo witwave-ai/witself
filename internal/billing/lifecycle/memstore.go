@@ -20,6 +20,12 @@ type MemStore struct {
 	pendingEventKeys        map[string][]string
 	billingMutationReceipts map[string]BillingMutationReceipt
 	billingMutationAccounts map[string]BillingAccountMutationLease
+	pendingBillingMutations map[int]memBillingMutationPendingShard
+}
+
+type memBillingMutationPendingShard struct {
+	OperationIDs []string
+	Cursor       int
 }
 
 var _ Store = (*MemStore)(nil)
@@ -34,6 +40,7 @@ func NewMemStore() *MemStore {
 		pendingEventKeys:        map[string][]string{},
 		billingMutationReceipts: map[string]BillingMutationReceipt{},
 		billingMutationAccounts: map[string]BillingAccountMutationLease{},
+		pendingBillingMutations: map[int]memBillingMutationPendingShard{},
 	}
 }
 
@@ -311,12 +318,62 @@ func (s *MemStore) ReceiveBillingMutation(
 				"%w: operation=%s", ErrBillingMutationConflict,
 				receipt.OperationID)
 		}
+		if existing.Status == BillingMutationPending {
+			if err := s.ensurePendingBillingMutationLocked(existing); err != nil {
+				return BillingMutationReceipt{}, false, err
+			}
+		}
 		return cloneBillingMutationReceipt(existing), false, nil
 	}
 	receipt.Version = 1
 	s.billingMutationReceipts[receipt.OperationID] =
 		cloneBillingMutationReceipt(receipt)
+	if err := s.ensurePendingBillingMutationLocked(receipt); err != nil {
+		return cloneBillingMutationReceipt(receipt), true, err
+	}
 	return cloneBillingMutationReceipt(receipt), true, nil
+}
+
+func (s *MemStore) ensurePendingBillingMutationLocked(
+	receipt BillingMutationReceipt,
+) error {
+	shardID := pendingBillingMutationShard(receipt.OperationID)
+	shard := s.pendingBillingMutations[shardID]
+	for _, operationID := range shard.OperationIDs {
+		if operationID == receipt.OperationID {
+			return nil
+		}
+	}
+	if len(shard.OperationIDs) >= maxPendingBillingMutationsPerShard {
+		return errBillingMutationPendingIndexFull
+	}
+	shard.OperationIDs = append(shard.OperationIDs, receipt.OperationID)
+	s.pendingBillingMutations[shardID] = shard
+	return nil
+}
+
+func (s *MemStore) removePendingBillingMutationLocked(
+	operationID string,
+) {
+	shardID := pendingBillingMutationShard(operationID)
+	shard := s.pendingBillingMutations[shardID]
+	kept := shard.OperationIDs[:0]
+	removedBeforeCursor := 0
+	for index, candidate := range shard.OperationIDs {
+		if candidate != operationID {
+			kept = append(kept, candidate)
+		} else if index < shard.Cursor {
+			removedBeforeCursor++
+		}
+	}
+	if len(kept) == 0 {
+		delete(s.pendingBillingMutations, shardID)
+		return
+	}
+	shard.Cursor -= removedBeforeCursor
+	shard.OperationIDs = kept
+	shard.Cursor %= len(kept)
+	s.pendingBillingMutations[shardID] = shard
 }
 
 // ClaimBillingMutation atomically grants one live worker the mutation lease.
@@ -394,7 +451,8 @@ func (s *MemStore) CompleteBillingMutation(
 		return BillingMutationReceipt{}, err
 	}
 	if err := validateBillingMutationResultForOperation(
-		receipt.Operation, receipt.TargetPlan, result); err != nil {
+		receipt.Operation, receipt.ExecutionClass,
+		receipt.TargetPlan, result); err != nil {
 		return BillingMutationReceipt{}, err
 	}
 	if completedAt.IsZero() {
@@ -420,6 +478,7 @@ func (s *MemStore) CompleteBillingMutation(
 			return BillingMutationReceipt{}, fmt.Errorf(
 				"%w: terminal result mismatch", ErrBillingMutationConflict)
 		}
+		s.removePendingBillingMutationLocked(current.OperationID)
 		return cloneBillingMutationReceipt(current), nil
 	}
 	if current.Status == BillingMutationSuperseded {
@@ -450,6 +509,7 @@ func (s *MemStore) CompleteBillingMutation(
 	}
 	s.billingMutationReceipts[receipt.OperationID] =
 		cloneBillingMutationReceipt(current)
+	s.removePendingBillingMutationLocked(current.OperationID)
 	return cloneBillingMutationReceipt(current), nil
 }
 
@@ -483,6 +543,7 @@ func (s *MemStore) SupersedeBillingMutation(
 	}
 	switch current.Status {
 	case BillingMutationSuperseded:
+		s.removePendingBillingMutationLocked(current.OperationID)
 		return cloneBillingMutationReceipt(current), nil
 	case BillingMutationCompleted:
 		return BillingMutationReceipt{}, ErrBillingMutationConflict
@@ -529,6 +590,7 @@ func (s *MemStore) SupersedeBillingMutation(
 	}
 	s.billingMutationReceipts[receipt.OperationID] =
 		cloneBillingMutationReceipt(current)
+	s.removePendingBillingMutationLocked(current.OperationID)
 	return cloneBillingMutationReceipt(current), nil
 }
 
@@ -560,13 +622,18 @@ func (s *MemStore) ReleaseBillingMutation(
 		return ErrBillingMutationConflict
 	}
 	if current.Status == BillingMutationCompleted {
+		s.removePendingBillingMutationLocked(current.OperationID)
 		return nil
 	}
 	if current.Status == BillingMutationSuperseded {
+		s.removePendingBillingMutationLocked(current.OperationID)
 		return nil
 	}
 	if current.ClaimToken == "" &&
 		current.ClaimGeneration == receipt.ClaimGeneration {
+		if err := s.ensurePendingBillingMutationLocked(current); err != nil {
+			return err
+		}
 		return nil
 	}
 	if !billingMutationClaimMatches(current, receipt) {
@@ -585,7 +652,120 @@ func (s *MemStore) ReleaseBillingMutation(
 	current.Version++
 	s.billingMutationReceipts[receipt.OperationID] =
 		cloneBillingMutationReceipt(current)
+	if err := s.ensurePendingBillingMutationLocked(current); err != nil {
+		return err
+	}
 	return nil
+}
+
+// PendingBillingMutations rotates a bounded window through every global shard.
+// Poison references remain visible and return an error; only a validated
+// terminal receipt is safe to remove automatically.
+func (s *MemStore) PendingBillingMutations(
+	_ context.Context,
+	limit int,
+) (BillingMutationPendingBatch, error) {
+	if limit < billingMutationPendingShardCount ||
+		limit > billingMutationPendingShardCount*maxPendingBillingMutationsPerShard {
+		return BillingMutationPendingBatch{}, fmt.Errorf(
+			"billing mutation receipt: pending limit must be %d-%d",
+			billingMutationPendingShardCount,
+			billingMutationPendingShardCount*maxPendingBillingMutationsPerShard)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	batch := BillingMutationPendingBatch{
+		Receipts: make([]BillingMutationReceipt, 0, limit),
+	}
+	selected := make([]billingMutationPendingReference, 0, limit)
+	baseQuota := limit / billingMutationPendingShardCount
+	remainder := limit % billingMutationPendingShardCount
+	for shardID := 0; shardID < billingMutationPendingShardCount; shardID++ {
+		quota := baseQuota
+		if shardID < remainder {
+			quota++
+		}
+		shard, ok := s.pendingBillingMutations[shardID]
+		if !ok || len(shard.OperationIDs) == 0 {
+			continue
+		}
+		if shard.Cursor < 0 || shard.Cursor >= len(shard.OperationIDs) {
+			return BillingMutationPendingBatch{}, fmt.Errorf(
+				"billing mutation receipt: shard %d has invalid cursor", shardID)
+		}
+		count := min(quota, len(shard.OperationIDs))
+		batch.ScanCapped = batch.ScanCapped || len(shard.OperationIDs) > count
+		for offset := 0; offset < count; offset++ {
+			index := (shard.Cursor + offset) % len(shard.OperationIDs)
+			selected = append(selected, billingMutationPendingReference{
+				operationID: shard.OperationIDs[index],
+				shardID:     shardID,
+			})
+		}
+		shard.Cursor = (shard.Cursor + count) % len(shard.OperationIDs)
+		s.pendingBillingMutations[shardID] = shard
+	}
+	batch.Scanned = len(selected)
+	var firstErr error
+	seen := make(map[string]struct{}, len(selected))
+	for _, reference := range selected {
+		operationID := reference.operationID
+		if !validBillingMutationOperationID(operationID) ||
+			pendingBillingMutationShard(operationID) != reference.shardID {
+			firstErr = errors.Join(firstErr, fmt.Errorf(
+				"billing mutation receipt: pending shard %d contains an invalid operation id",
+				reference.shardID))
+			continue
+		}
+		if _, duplicate := seen[operationID]; duplicate {
+			firstErr = errors.Join(firstErr, fmt.Errorf(
+				"billing mutation receipt: pending shard %d contains a duplicate operation id",
+				reference.shardID))
+			continue
+		}
+		seen[operationID] = struct{}{}
+		receipt, ok := s.billingMutationReceipts[operationID]
+		if !ok {
+			firstErr = errors.Join(firstErr, fmt.Errorf(
+				"billing mutation receipt: pending receipt %s is unavailable",
+				operationID))
+			continue
+		}
+		if err := validateBillingMutationReceipt(receipt); err != nil {
+			firstErr = errors.Join(firstErr, fmt.Errorf(
+				"billing mutation receipt: invalid pending receipt %s: %w",
+				operationID, err))
+			continue
+		}
+		if receipt.OperationID != operationID ||
+			pendingBillingMutationShard(receipt.OperationID) !=
+				pendingBillingMutationShard(operationID) {
+			firstErr = errors.Join(firstErr, fmt.Errorf(
+				"billing mutation receipt: pending index points at mismatched receipt %s",
+				operationID))
+			continue
+		}
+		if receipt.Status != BillingMutationPending {
+			s.removePendingBillingMutationLocked(operationID)
+			batch.TerminalCleanup++
+			continue
+		}
+		if batch.OldestObservedPendingAt == nil ||
+			receipt.CreatedAt.Before(*batch.OldestObservedPendingAt) {
+			createdAt := receipt.CreatedAt
+			batch.OldestObservedPendingAt = &createdAt
+		}
+		batch.Receipts = append(batch.Receipts,
+			cloneBillingMutationReceipt(receipt))
+	}
+	sort.Slice(batch.Receipts, func(i, j int) bool {
+		if batch.Receipts[i].CreatedAt.Equal(batch.Receipts[j].CreatedAt) {
+			return batch.Receipts[i].OperationID < batch.Receipts[j].OperationID
+		}
+		return batch.Receipts[i].CreatedAt.Before(batch.Receipts[j].CreatedAt)
+	})
+	return batch, firstErr
 }
 
 // ReceiveEvent implements EventReceiptStore with create-only event identity

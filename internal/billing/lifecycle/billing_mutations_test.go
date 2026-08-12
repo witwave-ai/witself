@@ -232,6 +232,7 @@ type failFirstBillingProvider struct {
 	*fake.Fake
 	mu     sync.Mutex
 	failed bool
+	calls  int
 }
 
 func (p *failFirstBillingProvider) SubscribeIdempotent(
@@ -239,6 +240,7 @@ func (p *failFirstBillingProvider) SubscribeIdempotent(
 	customerID, plan, operationID string,
 ) (billing.Action, error) {
 	p.mu.Lock()
+	p.calls++
 	if !p.failed {
 		p.failed = true
 		p.mu.Unlock()
@@ -246,6 +248,45 @@ func (p *failFirstBillingProvider) SubscribeIdempotent(
 	}
 	p.mu.Unlock()
 	return p.Fake.SubscribeIdempotent(ctx, customerID, plan, operationID)
+}
+
+func (p *failFirstBillingProvider) subscribeCalls() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+type countingUpgradeBillingProvider struct {
+	*fake.Fake
+	mu             sync.Mutex
+	ensureCalls    int
+	subscribeCalls int
+}
+
+func (p *countingUpgradeBillingProvider) EnsureCustomer(
+	ctx context.Context,
+	accountID, email string,
+) (string, error) {
+	p.mu.Lock()
+	p.ensureCalls++
+	p.mu.Unlock()
+	return p.Fake.EnsureCustomer(ctx, accountID, email)
+}
+
+func (p *countingUpgradeBillingProvider) SubscribeIdempotent(
+	ctx context.Context,
+	customerID, plan, operationID string,
+) (billing.Action, error) {
+	p.mu.Lock()
+	p.subscribeCalls++
+	p.mu.Unlock()
+	return p.Fake.SubscribeIdempotent(ctx, customerID, plan, operationID)
+}
+
+func (p *countingUpgradeBillingProvider) upgradeMutationCalls() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.ensureCalls + p.subscribeCalls
 }
 
 type mutableBillingFit struct {
@@ -463,6 +504,44 @@ func newBillingMutationManagerWithProvider(
 	return manager
 }
 
+func seedPendingBillingMutationForTest(
+	t *testing.T,
+	store BillingMutationStore,
+	schemaVersion int,
+	accountID, email string,
+	actor BillingActor,
+	command BillingMutationCommand,
+	approval billingMutationApproval,
+	now time.Time,
+) BillingMutationReceipt {
+	t.Helper()
+	ctx := context.Background()
+	operationID := billingMutationOperationID(accountID, command.IdempotencyKey)
+	claimToken := "bcl_seed_" + strings.TrimPrefix(operationID, "bop_")
+	lease, acquired, err := store.ClaimBillingMutationAccount(
+		ctx, accountID, operationID, 0, claimToken,
+		now, now.Add(billingMutationClaimLease))
+	if err != nil || !acquired {
+		t.Fatalf("claim seed account lane = %+v acquired=%v err=%v",
+			lease, acquired, err)
+	}
+	receipt, err := buildBillingMutationReceiptForSchema(
+		schemaVersion, accountID, email, actor, command,
+		lease.OperationGeneration, approval, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, created, err := store.ReceiveBillingMutation(ctx, receipt)
+	if err != nil || !created {
+		t.Fatalf("receive seeded billing mutation = %+v created=%v err=%v",
+			stored, created, err)
+	}
+	if err := store.ReleaseBillingMutationAccount(ctx, lease, now); err != nil {
+		t.Fatalf("release seed account lane: %v", err)
+	}
+	return stored
+}
+
 func TestBillingMutationAccountLaneSerializesUpgradeAndCancel(t *testing.T) {
 	catalog, err := plans.Load()
 	if err != nil {
@@ -677,6 +756,352 @@ func TestBillingMutationPendingReceiptReservesAccountUntilExactRetry(t *testing.
 		context.Background(), operationID)
 	if err != nil || !ok || receipt.Status != BillingMutationCompleted {
 		t.Fatalf("completed receipt = %+v ok=%t err=%v", receipt, ok, err)
+	}
+}
+
+func TestReconcileBillingMutationsAutonomouslyRetriesPendingProviderWork(
+	t *testing.T,
+) {
+	catalog, err := plans.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := &clock{t: time.Date(2026, 8, 11, 15, 30, 0, 0, time.UTC)}
+	base := fake.New(fake.Config{
+		Prices: catalog.Prices(), Interactive: true, Now: clock.now,
+	})
+	provider := &failFirstBillingProvider{Fake: base}
+	store := NewMemStore()
+	manager := newBillingMutationManagerWithProvider(
+		t, catalog, store, provider, clock)
+	actor := BillingActor{ID: "usr_owner_1", Role: "owner"}
+	command := BillingMutationCommand{
+		Operation: BillingMutationUpgrade, Plan: "standard",
+		Reason:         "Recover an ambiguous Professional checkout without user input",
+		Confirmed:      true,
+		IdempotencyKey: "autonomous-reconcile-upgrade-0001",
+	}
+	ctx := context.Background()
+	if _, err := manager.ExecuteBillingMutation(
+		ctx, "acct_autonomous_reconcile", "owner@example.com", actor, command,
+	); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first upgrade error = %v; want deadline", err)
+	}
+	operationID := billingMutationOperationID(
+		"acct_autonomous_reconcile", command.IdempotencyKey)
+	pending, ok, err := store.GetBillingMutation(ctx, operationID)
+	if err != nil || !ok || pending.Status != BillingMutationPending {
+		t.Fatalf("pending autonomous receipt = %+v ok=%v err=%v",
+			pending, ok, err)
+	}
+	if provider.subscribeCalls() != 1 {
+		t.Fatalf("provider calls before reconcile = %d; want 1",
+			provider.subscribeCalls())
+	}
+
+	// The request path released both claims after the transient provider error.
+	// The global reconciler needs no account-directory scan or raw idempotency key
+	// to claim the indexed receipt and replay its exact provider operation.
+	clock.t = clock.t.Add(time.Minute)
+	summary, err := manager.ReconcileBillingMutations(ctx)
+	if err != nil || summary.Scanned != 1 || summary.Attempted != 1 ||
+		summary.Completed != 1 || summary.Superseded != 0 ||
+		summary.Busy != 0 || summary.Failed != 0 ||
+		summary.TerminalCleaned != 0 || summary.ScanCapped ||
+		summary.OldestObservedPendingAt == nil ||
+		!summary.OldestObservedPendingAt.Equal(pending.CreatedAt) {
+		t.Fatalf("autonomous reconcile summary = %+v err=%v", summary, err)
+	}
+	if provider.subscribeCalls() != 2 {
+		t.Fatalf("provider calls after reconcile = %d; want exact retry",
+			provider.subscribeCalls())
+	}
+	completed, ok, err := store.GetBillingMutation(ctx, operationID)
+	if err != nil || !ok || completed.Status != BillingMutationCompleted ||
+		completed.Result == nil ||
+		completed.Result.Kind != BillingMutationResultAction {
+		t.Fatalf("autonomously completed receipt = %+v ok=%v err=%v",
+			completed, ok, err)
+	}
+	empty, err := store.PendingBillingMutations(
+		ctx, billingMutationPendingShardCount)
+	if err != nil || empty.Scanned != 0 || len(empty.Receipts) != 0 {
+		t.Fatalf("pending batch after autonomous reconcile = %+v err=%v",
+			empty, err)
+	}
+}
+
+func TestReconcileBillingMutationKeepsContactApprovalAfterAvailabilityFlip(
+	t *testing.T,
+) {
+	initialCatalog, err := plans.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	team, ok := initialCatalog.Get("team")
+	if !ok || team.Available {
+		t.Fatalf("initial Team fixture = %+v ok=%v; want unavailable", team, ok)
+	}
+	now := time.Date(2026, 8, 11, 15, 40, 0, 0, time.UTC)
+	clock := &clock{t: now}
+	store := NewMemStore()
+	actor := BillingActor{ID: "usr_owner_1", Role: "owner"}
+	command := BillingMutationCommand{
+		Operation: BillingMutationUpgrade, Plan: "team",
+		Reason:         "Ask about moving to Team",
+		Confirmed:      true,
+		IdempotencyKey: "contact-availability-flip-0001",
+	}
+	seeded := seedPendingBillingMutationForTest(
+		t, store, billingMutationReceiptSchemaVersion,
+		"acct_contact_flip", "owner@example.com", actor, command,
+		billingMutationApproval{
+			ExecutionClass: BillingMutationExecutionUpgradeContact,
+		}, now)
+	if seeded.ExecutionClass != BillingMutationExecutionUpgradeContact {
+		t.Fatalf("seeded execution class = %q; want contact", seeded.ExecutionClass)
+	}
+
+	flippedCatalog := catalogWithPlanAvailability(t, "team", true)
+	flippedTeam, ok := flippedCatalog.Get("team")
+	if !ok || !flippedTeam.Purchasable() {
+		t.Fatalf("flipped Team fixture = %+v ok=%v; want self-serve", flippedTeam, ok)
+	}
+	provider := &countingUpgradeBillingProvider{Fake: fake.New(fake.Config{
+		Prices: flippedCatalog.Prices(), Interactive: true, Now: clock.now,
+	})}
+	manager := newBillingMutationManagerWithProvider(
+		t, flippedCatalog, store, provider, clock)
+
+	summary, err := manager.ReconcileBillingMutations(context.Background())
+	if err != nil || summary.Attempted != 1 || summary.Completed != 1 ||
+		summary.Failed != 0 {
+		t.Fatalf("contact reconcile summary = %+v err=%v", summary, err)
+	}
+	if calls := provider.upgradeMutationCalls(); calls != 0 {
+		t.Fatalf("provider upgrade mutation calls = %d; want zero", calls)
+	}
+	record, ok, err := store.Get(context.Background(), seeded.AccountID)
+	if err != nil || !ok || record.Pending == nil ||
+		record.Pending.Kind != PendingContact ||
+		record.Pending.Plan != command.Plan ||
+		record.Pending.OperationID != seeded.OperationID {
+		t.Fatalf("contact account fold = %+v ok=%v err=%v", record, ok, err)
+	}
+	completed, ok, err := store.GetBillingMutation(
+		context.Background(), seeded.OperationID)
+	if err != nil || !ok || completed.Status != BillingMutationCompleted ||
+		completed.ExecutionClass != BillingMutationExecutionUpgradeContact ||
+		completed.Result == nil ||
+		completed.Result.Kind != BillingMutationResultContact {
+		t.Fatalf("completed contact receipt = %+v ok=%v err=%v",
+			completed, ok, err)
+	}
+}
+
+func TestReconcileBillingMutationSelfServePriceDriftFailsClosed(
+	t *testing.T,
+) {
+	initialCatalog, err := plans.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	standard, ok := initialCatalog.Get("standard")
+	if !ok || !standard.Purchasable() {
+		t.Fatalf("initial Professional fixture = %+v ok=%v", standard, ok)
+	}
+	now := time.Date(2026, 8, 11, 15, 45, 0, 0, time.UTC)
+	clock := &clock{t: now}
+	store := NewMemStore()
+	actor := BillingActor{ID: "usr_owner_1", Role: "owner"}
+	command := BillingMutationCommand{
+		Operation: BillingMutationUpgrade, Plan: "standard",
+		Reason:         "Move to Professional at the approved price",
+		Confirmed:      true,
+		IdempotencyKey: "self-serve-price-drift-0001",
+	}
+	seeded := seedPendingBillingMutationForTest(
+		t, store, billingMutationReceiptSchemaVersion,
+		"acct_price_drift", "owner@example.com", actor, command,
+		billingMutationApproval{
+			ExecutionClass:     BillingMutationExecutionUpgradeSelfServe,
+			ApprovedPriceCents: standard.PriceCents(),
+			ApprovedCurrency:   strings.ToLower(initialCatalog.Currency),
+		}, now)
+
+	driftedCatalog := catalogWithPlanMonthlyPrice(t, "standard", 31)
+	driftedStandard, _ := driftedCatalog.Get("standard")
+	if driftedStandard.PriceCents() == seeded.ApprovedPriceCents {
+		t.Fatal("price-drift fixture retained the approved price")
+	}
+	provider := &countingUpgradeBillingProvider{Fake: fake.New(fake.Config{
+		Prices: driftedCatalog.Prices(), Interactive: true, Now: clock.now,
+	})}
+	manager := newBillingMutationManagerWithProvider(
+		t, driftedCatalog, store, provider, clock)
+
+	summary, err := manager.ReconcileBillingMutations(context.Background())
+	if !errors.Is(err, ErrBillingMutationApprovalDrift) ||
+		summary.Attempted != 1 || summary.Completed != 0 || summary.Failed != 1 {
+		t.Fatalf("price-drift reconcile summary = %+v err=%v", summary, err)
+	}
+	if calls := provider.upgradeMutationCalls(); calls != 0 {
+		t.Fatalf("provider upgrade mutation calls = %d; want zero", calls)
+	}
+	pending, ok, err := store.GetBillingMutation(
+		context.Background(), seeded.OperationID)
+	if err != nil || !ok || pending.Status != BillingMutationPending ||
+		pending.ExecutionClass != BillingMutationExecutionUpgradeSelfServe ||
+		pending.ApprovedPriceCents != seeded.ApprovedPriceCents ||
+		pending.ApprovedCurrency != seeded.ApprovedCurrency {
+		t.Fatalf("pending price-pinned receipt = %+v ok=%v err=%v",
+			pending, ok, err)
+	}
+}
+
+func TestReconcileLegacyBillingMutationRequiresExactDurableEvidence(
+	t *testing.T,
+) {
+	catalog, err := plans.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 11, 15, 50, 0, 0, time.UTC)
+	clock := &clock{t: now}
+	store := NewMemStore()
+	actor := BillingActor{ID: "usr_owner_1", Role: "owner"}
+	command := BillingMutationCommand{
+		Operation: BillingMutationUpgrade, Plan: "standard",
+		Reason:         "Resume a receipt written before approvals were pinned",
+		Confirmed:      true,
+		IdempotencyKey: "legacy-unpinned-upgrade-0001",
+	}
+	seeded := seedPendingBillingMutationForTest(
+		t, store, billingMutationLegacyReceiptSchemaVersion,
+		"acct_legacy_unpinned", "owner@example.com", actor, command,
+		billingMutationApproval{}, now)
+	provider := &countingUpgradeBillingProvider{Fake: fake.New(fake.Config{
+		Prices: catalog.Prices(), Interactive: true, Now: clock.now,
+	})}
+	manager := newBillingMutationManagerWithProvider(
+		t, catalog, store, provider, clock)
+
+	first, err := manager.ReconcileBillingMutations(context.Background())
+	if !errors.Is(err, ErrBillingMutationEffectUnpinned) ||
+		first.Attempted != 1 || first.Completed != 0 || first.Failed != 1 {
+		t.Fatalf("unpinned reconcile summary = %+v err=%v", first, err)
+	}
+	if calls := provider.upgradeMutationCalls(); calls != 0 {
+		t.Fatalf("provider calls without durable evidence = %d; want zero", calls)
+	}
+	pending, ok, err := store.GetBillingMutation(
+		context.Background(), seeded.OperationID)
+	if err != nil || !ok || pending.Status != BillingMutationPending ||
+		pending.SchemaVersion != billingMutationLegacyReceiptSchemaVersion ||
+		pending.ExecutionClass != "" {
+		t.Fatalf("legacy pending receipt = %+v ok=%v err=%v", pending, ok, err)
+	}
+
+	// A matching durable Pending fold proves the provider effect already
+	// happened before a lost receipt-completion response. Recovery may project
+	// that exact result, but still must not send the unpinned receipt to billing.
+	clock.t = clock.t.Add(time.Minute)
+	if err := store.Put(context.Background(), Record{
+		AccountID: seeded.AccountID,
+		Entitled:  plans.Free,
+		Applied:   plans.Free,
+		Pending: &Pending{
+			Kind: PendingUpgrade, Plan: seeded.TargetPlan,
+			OperationID: seeded.OperationID,
+			URL:         "https://billing.example.test/recovered-session",
+			Expires:     clock.now().Add(time.Hour),
+			Requested:   now,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := manager.ReconcileBillingMutations(context.Background())
+	if err != nil || second.Attempted != 1 || second.Completed != 1 ||
+		second.Failed != 0 {
+		t.Fatalf("evidence recovery summary = %+v err=%v", second, err)
+	}
+	if calls := provider.upgradeMutationCalls(); calls != 0 {
+		t.Fatalf("provider calls with exact durable evidence = %d; want zero", calls)
+	}
+	completed, ok, err := store.GetBillingMutation(
+		context.Background(), seeded.OperationID)
+	if err != nil || !ok || completed.Status != BillingMutationCompleted ||
+		completed.Result == nil ||
+		completed.Result.Kind != BillingMutationResultAction ||
+		completed.Result.URL != "https://billing.example.test/recovered-session" {
+		t.Fatalf("legacy evidence-completed receipt = %+v ok=%v err=%v",
+			completed, ok, err)
+	}
+}
+
+func TestBillingMutationExactRetryRepairsIndexAndKeepsStoredApproval(
+	t *testing.T,
+) {
+	initialCatalog, err := plans.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	standard, ok := initialCatalog.Get("standard")
+	if !ok {
+		t.Fatal("Professional plan missing from fixture")
+	}
+	now := time.Date(2026, 8, 11, 15, 55, 0, 0, time.UTC)
+	clock := &clock{t: now.Add(time.Minute)}
+	store := NewMemStore()
+	actor := BillingActor{ID: "usr_owner_1", Role: "owner"}
+	command := BillingMutationCommand{
+		Operation: BillingMutationUpgrade, Plan: "standard",
+		Reason:         "Retry the exact approved Professional purchase",
+		Confirmed:      true,
+		IdempotencyKey: "exact-retry-index-approval-0001",
+	}
+	seeded := seedPendingBillingMutationForTest(
+		t, store, billingMutationReceiptSchemaVersion,
+		"acct_exact_retry_approval", "owner-old@example.com", actor, command,
+		billingMutationApproval{
+			ExecutionClass:     BillingMutationExecutionUpgradeSelfServe,
+			ApprovedPriceCents: standard.PriceCents(),
+			ApprovedCurrency:   strings.ToLower(initialCatalog.Currency),
+		}, now)
+	removePendingBillingMutationIndexFixture(t, store, seeded.OperationID)
+	if pendingBillingMutationIndexContains(t, store, seeded.OperationID) {
+		t.Fatal("missing-index fixture still contains the operation")
+	}
+
+	driftedCatalog := catalogWithPlanMonthlyPrice(t, "standard", 31)
+	provider := &countingUpgradeBillingProvider{Fake: fake.New(fake.Config{
+		Prices: driftedCatalog.Prices(), Interactive: true, Now: clock.now,
+	})}
+	manager := newBillingMutationManagerWithProvider(
+		t, driftedCatalog, store, provider, clock)
+	rotatedActor := BillingActor{ID: "usr_billing_2", Role: "billing"}
+	_, err = manager.ExecuteBillingMutation(
+		context.Background(), seeded.AccountID, "owner-new@example.com",
+		rotatedActor, command)
+	if !errors.Is(err, ErrBillingMutationApprovalDrift) {
+		t.Fatalf("exact retry error = %v; want approval drift", err)
+	}
+	if calls := provider.upgradeMutationCalls(); calls != 0 {
+		t.Fatalf("provider calls for drifted exact retry = %d; want zero", calls)
+	}
+	if occurrences := pendingBillingMutationIndexOccurrences(
+		t, store, seeded.OperationID); occurrences != 1 {
+		t.Fatalf("exact retry indexed operation %d times; want one", occurrences)
+	}
+	stored, ok, err := store.GetBillingMutation(
+		context.Background(), seeded.OperationID)
+	if err != nil || !ok || stored.Status != BillingMutationPending ||
+		stored.ExecutionClass != seeded.ExecutionClass ||
+		stored.ApprovedPriceCents != seeded.ApprovedPriceCents ||
+		stored.ApprovedCurrency != seeded.ApprovedCurrency ||
+		stored.ActorID != seeded.ActorID || stored.ActorRole != seeded.ActorRole {
+		t.Fatalf("stored approval after exact retry = %+v ok=%v err=%v",
+			stored, ok, err)
 	}
 }
 
@@ -1094,6 +1519,66 @@ func catalogWithTeamMonthlyPrice(t *testing.T, monthly int64) *plans.Catalog {
 	return catalog
 }
 
+func catalogWithPlanAvailability(
+	t *testing.T,
+	planID string,
+	available bool,
+) *plans.Catalog {
+	t.Helper()
+	return catalogWithPlanEdit(t, planID, func(plan *plans.Plan) {
+		plan.Available = available
+	})
+}
+
+func catalogWithPlanMonthlyPrice(
+	t *testing.T,
+	planID string,
+	monthly int64,
+) *plans.Catalog {
+	t.Helper()
+	return catalogWithPlanEdit(t, planID, func(plan *plans.Plan) {
+		plan.PriceMonthly = &monthly
+		plan.PriceMonthlyMin = nil
+	})
+}
+
+func catalogWithPlanEdit(
+	t *testing.T,
+	planID string,
+	edit func(*plans.Plan),
+) *plans.Catalog {
+	t.Helper()
+	var doc struct {
+		SchemaVersion string       `json:"schema_version"`
+		Updated       string       `json:"updated"`
+		Currency      string       `json:"currency"`
+		Plans         []plans.Plan `json:"plans"`
+	}
+	if err := json.Unmarshal(witself.PlansJSON, &doc); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for i := range doc.Plans {
+		if doc.Plans[i].ID == planID {
+			edit(&doc.Plans[i])
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("plan %q missing from catalog fixture", planID)
+	}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := plans.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return catalog
+}
+
 func billingOperationIDForTest(accountID, key string) string {
 	command := BillingMutationCommand{
 		Operation: BillingMutationSetup,
@@ -1102,7 +1587,9 @@ func billingOperationIDForTest(accountID, key string) string {
 	}
 	receipt, err := buildBillingMutationReceipt(
 		accountID, "", BillingActor{ID: "test_actor", Role: "owner"},
-		command, 1, time.Now().UTC())
+		command, 1, billingMutationApproval{
+			ExecutionClass: BillingMutationExecutionSetup,
+		}, time.Now().UTC())
 	if err != nil {
 		panic(err)
 	}

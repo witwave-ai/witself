@@ -785,6 +785,7 @@ test("scheduled lifecycle persists its cursor across container restarts and page
 
   const first = await runScheduledPlanLifecycle(env, containerFetch);
   assert.equal(first.succeeded, true);
+  assert.equal(first.billing_mutations, undefined);
   const firstCursor = JSON.parse(
     env.DIRECTORY.entries.get(PLAN_LIFECYCLE_CURSOR_KEY),
   );
@@ -808,6 +809,158 @@ test("scheduled lifecycle persists its cursor across container restarts and page
     env.DIRECTORY.entries.get(PLAN_LIFECYCLE_CURSOR_KEY),
   );
   assert.equal(completed.cursor, null);
+});
+
+test("scheduled lifecycle accepts an optional nested billing mutation acknowledgement", async () => {
+  const env = bridgeEnv(
+    { "acct:a": { cell: "cell-a" } },
+    {
+      keys: [{ name: "acct:a" }],
+      list_complete: false,
+      cursor: "after-mutation-batch",
+    },
+  );
+  env.CP_PLAN_LIFECYCLE_ENABLED = "true";
+  const billingMutations = {
+    scanned: 8,
+    attempted: 4,
+    completed: 3,
+    superseded: 1,
+    busy: 2,
+    failed: 0,
+    terminal_cleaned: 2,
+    scan_capped: true,
+    oldest_observed_pending_at: "2026-08-11T20:00:00.123456789Z",
+    succeeded: false,
+    future_field: "ignored",
+  };
+  const result = await runScheduledPlanLifecycle(env, async () =>
+    new Response(JSON.stringify({
+      schema_version: "witself.v0",
+      plan_lifecycle: {
+        scanned: 1,
+        seeded: 1,
+        apply_pending: 0,
+        failed: 0,
+        succeeded: false,
+        billing_mutations: billingMutations,
+      },
+    })));
+
+  assert.equal(result.succeeded, false);
+  assert.deepEqual(result.billing_mutations, billingMutations);
+  const cursor = JSON.parse(
+    env.DIRECTORY.entries.get(PLAN_LIFECYCLE_CURSOR_KEY),
+  );
+  assert.equal(cursor.cursor, "after-mutation-batch");
+});
+
+test("scheduled lifecycle rejects invalid nested billing mutation acknowledgements", async (t) => {
+  const validBatch = () => ({
+    scanned: 3,
+    attempted: 1,
+    completed: 1,
+    superseded: 0,
+    busy: 1,
+    failed: 0,
+    terminal_cleaned: 1,
+    scan_capped: false,
+    oldest_observed_pending_at: "2026-08-11T20:00:00Z",
+    succeeded: true,
+  });
+  const cases = [
+    ["null", () => null],
+    ["array", () => []],
+    ["missing required count", () => {
+      const batch = validBatch();
+      delete batch.attempted;
+      return batch;
+    }],
+    ["negative count", () => ({ ...validBatch(), busy: -1 })],
+    ["fractional count", () => ({ ...validBatch(), scanned: 3.5 })],
+    ["unsafe count", () => ({
+      ...validBatch(),
+      scanned: Number.MAX_SAFE_INTEGER + 1,
+    })],
+    ["attempted exceeds scanned", () => ({
+      ...validBatch(),
+      scanned: 1,
+      attempted: 2,
+    })],
+    ["terminal outcomes exceed attempted", () => ({
+      ...validBatch(),
+      completed: 1,
+      superseded: 1,
+    })],
+    ["scan partitions exceed scanned", () => ({
+      ...validBatch(),
+      scanned: 2,
+      attempted: 1,
+      busy: 1,
+      terminal_cleaned: 1,
+    })],
+    ["scan capped has wrong type", () => ({
+      ...validBatch(),
+      scan_capped: 1,
+    })],
+    ["succeeded has wrong type", () => ({
+      ...validBatch(),
+      succeeded: "true",
+    })],
+    ["successful batch reports failures", () => ({
+      ...validBatch(),
+      scanned: 2,
+      attempted: 1,
+      completed: 0,
+      busy: 0,
+      failed: 1,
+      terminal_cleaned: 1,
+    })],
+    ["top-level success masks an unhealthy batch", () => ({
+      ...validBatch(),
+      succeeded: false,
+    })],
+    ["oldest timestamp is invalid", () => ({
+      ...validBatch(),
+      oldest_observed_pending_at: "not-a-time",
+    })],
+    ["oldest timestamp is oversized", () => ({
+      ...validBatch(),
+      oldest_observed_pending_at: `2026-08-11T20:00:00.${"1".repeat(64)}Z`,
+    })],
+    ["oldest timestamp has no remaining observations", () => ({
+      ...validBatch(),
+      scanned: 1,
+      attempted: 0,
+      completed: 0,
+      busy: 0,
+      terminal_cleaned: 1,
+    })],
+  ];
+
+  for (const [name, batch] of cases) {
+    await t.test(name, async () => {
+      const env = bridgeEnv({ "acct:a": { cell: "cell-a" } });
+      env.CP_PLAN_LIFECYCLE_ENABLED = "true";
+      const result = await runScheduledPlanLifecycle(env, async () =>
+        new Response(JSON.stringify({
+          schema_version: "witself.v0",
+          plan_lifecycle: {
+            scanned: 1,
+            seeded: 1,
+            apply_pending: 0,
+            failed: 0,
+            succeeded: true,
+            billing_mutations: batch(),
+          },
+        })));
+      assert.deepEqual(result, { ran: true, succeeded: false });
+      assert.equal(
+        env.DIRECTORY.entries.has(PLAN_LIFECYCLE_CURSOR_KEY),
+        false,
+      );
+    });
+  }
 });
 
 test("scheduled lifecycle discovers activation without prior cold-path traffic", async () => {
