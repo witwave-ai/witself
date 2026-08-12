@@ -22,12 +22,15 @@ func billingMutationTestReceipt(operationID string, now time.Time) BillingMutati
 		ActorID:              "opr_billing_owner",
 		ActorRole:            "account_owner",
 		Operation:            BillingMutationUpgrade,
+		ExecutionClass:       BillingMutationExecutionUpgradeSelfServe,
 		AccountGeneration:    1,
 		IdempotencyKeySHA256: strings.Repeat("a", 64),
 		RequestSHA256:        strings.Repeat("b", 64),
 		Reason:               "Upgrade the account for additional capacity",
 		ConfirmedAt:          now,
 		TargetPlan:           "standard",
+		ApprovedPriceCents:   3000,
+		ApprovedCurrency:     "usd",
 		EmailSHA256:          strings.Repeat("c", 64),
 		Status:               BillingMutationPending,
 		CreatedAt:            now,
@@ -1561,6 +1564,690 @@ func testBillingMutationStoredSchemaContract(
 	}
 }
 
+func billingMutationTestOperationInShard(
+	prefix string,
+	shard, ordinal int,
+) string {
+	for nonce := 0; ; nonce++ {
+		operationID := fmt.Sprintf("bop_%s_%02d_%03d_%06d",
+			prefix, shard, ordinal, nonce)
+		if pendingBillingMutationShard(operationID) == shard {
+			return operationID
+		}
+	}
+}
+
+func ensurePendingBillingMutationIndexFixture(
+	t *testing.T,
+	store BillingMutationStore,
+	operationID string,
+) {
+	t.Helper()
+	receipt := BillingMutationReceipt{OperationID: operationID}
+	switch typed := store.(type) {
+	case *MemStore:
+		typed.mu.Lock()
+		err := typed.ensurePendingBillingMutationLocked(receipt)
+		typed.mu.Unlock()
+		if err != nil {
+			t.Fatalf("seed mem pending index: %v", err)
+		}
+	case *R2Store:
+		if err := typed.ensurePendingBillingMutationIndex(
+			context.Background(), receipt); err != nil {
+			t.Fatalf("seed R2 pending index: %v", err)
+		}
+	default:
+		t.Fatalf("unsupported billing mutation store fixture %T", store)
+	}
+}
+
+func removePendingBillingMutationIndexFixture(
+	t *testing.T,
+	store BillingMutationStore,
+	operationID string,
+) {
+	t.Helper()
+	switch typed := store.(type) {
+	case *MemStore:
+		typed.mu.Lock()
+		typed.removePendingBillingMutationLocked(operationID)
+		typed.mu.Unlock()
+	case *R2Store:
+		if err := typed.removePendingBillingMutationIndex(
+			context.Background(), operationID); err != nil {
+			t.Fatalf("remove R2 pending index fixture: %v", err)
+		}
+	default:
+		t.Fatalf("unsupported billing mutation store fixture %T", store)
+	}
+}
+
+func seedInvalidPendingBillingMutationReferenceFixture(
+	t *testing.T,
+	store BillingMutationStore,
+	shardID int,
+	operationID string,
+) {
+	t.Helper()
+	switch typed := store.(type) {
+	case *MemStore:
+		typed.mu.Lock()
+		typed.pendingBillingMutations[shardID] = memBillingMutationPendingShard{
+			OperationIDs: []string{operationID},
+		}
+		typed.mu.Unlock()
+	case *R2Store:
+		index := r2PendingBillingMutationIndex{
+			SchemaVersion: billingMutationPendingIndexSchemaVersion,
+			Shard:         shardID,
+			OperationIDs:  []string{operationID},
+			Version:       1,
+		}
+		encoded, err := json.Marshal(index)
+		if err != nil {
+			t.Fatalf("encode invalid R2 pending reference fixture: %v", err)
+		}
+		if _, err := typed.c.Put(
+			context.Background(), typed.pendingBillingMutationIndexKey(shardID),
+			encoded, blob.Cond{IfNoneMatchAny: true}); err != nil {
+			t.Fatalf("seed invalid R2 pending reference fixture: %v", err)
+		}
+	default:
+		t.Fatalf("unsupported billing mutation store fixture %T", store)
+	}
+}
+
+func pendingBillingMutationShardContainsRaw(
+	t *testing.T,
+	store BillingMutationStore,
+	shardID int,
+	operationID string,
+) bool {
+	t.Helper()
+	operationIDs := []string(nil)
+	switch typed := store.(type) {
+	case *MemStore:
+		typed.mu.Lock()
+		operationIDs = append(operationIDs,
+			typed.pendingBillingMutations[shardID].OperationIDs...)
+		typed.mu.Unlock()
+	case *R2Store:
+		data, _, err := typed.c.Get(
+			context.Background(), typed.pendingBillingMutationIndexKey(shardID))
+		if err != nil {
+			t.Fatalf("read R2 pending shard fixture: %v", err)
+		}
+		index, err := decodePendingBillingMutationIndex(data, shardID)
+		if err != nil {
+			t.Fatalf("decode R2 pending shard fixture: %v", err)
+		}
+		operationIDs = index.OperationIDs
+	default:
+		t.Fatalf("unsupported billing mutation store fixture %T", store)
+	}
+	for _, candidate := range operationIDs {
+		if candidate == operationID {
+			return true
+		}
+	}
+	return false
+}
+
+func pendingBillingMutationIndexContains(
+	t *testing.T,
+	store BillingMutationStore,
+	operationID string,
+) bool {
+	t.Helper()
+	shardID := pendingBillingMutationShard(operationID)
+	switch typed := store.(type) {
+	case *MemStore:
+		typed.mu.Lock()
+		defer typed.mu.Unlock()
+		for _, candidate := range typed.pendingBillingMutations[shardID].OperationIDs {
+			if candidate == operationID {
+				return true
+			}
+		}
+		return false
+	case *R2Store:
+		data, _, err := typed.c.Get(
+			context.Background(), typed.pendingBillingMutationIndexKey(shardID))
+		if errors.Is(err, blob.ErrNotFound) {
+			return false
+		}
+		if err != nil {
+			t.Fatalf("read R2 pending index fixture: %v", err)
+		}
+		index, err := decodePendingBillingMutationIndex(data, shardID)
+		if err != nil {
+			t.Fatalf("decode R2 pending index fixture: %v", err)
+		}
+		for _, candidate := range index.OperationIDs {
+			if candidate == operationID {
+				return true
+			}
+		}
+		return false
+	default:
+		t.Fatalf("unsupported billing mutation store fixture %T", store)
+		return false
+	}
+}
+
+func pendingBillingMutationIndexOccurrences(
+	t *testing.T,
+	store BillingMutationStore,
+	operationID string,
+) int {
+	t.Helper()
+	shardID := pendingBillingMutationShard(operationID)
+	operationIDs := []string(nil)
+	switch typed := store.(type) {
+	case *MemStore:
+		typed.mu.Lock()
+		operationIDs = append(operationIDs,
+			typed.pendingBillingMutations[shardID].OperationIDs...)
+		typed.mu.Unlock()
+	case *R2Store:
+		data, _, err := typed.c.Get(
+			context.Background(), typed.pendingBillingMutationIndexKey(shardID))
+		if errors.Is(err, blob.ErrNotFound) {
+			return 0
+		}
+		if err != nil {
+			t.Fatalf("read R2 pending index fixture: %v", err)
+		}
+		index, err := decodePendingBillingMutationIndex(data, shardID)
+		if err != nil {
+			t.Fatalf("decode R2 pending index fixture: %v", err)
+		}
+		operationIDs = index.OperationIDs
+	default:
+		t.Fatalf("unsupported billing mutation store fixture %T", store)
+	}
+	occurrences := 0
+	for _, candidate := range operationIDs {
+		if candidate == operationID {
+			occurrences++
+		}
+	}
+	return occurrences
+}
+
+func fillPendingBillingMutationShardFixture(
+	t *testing.T,
+	store BillingMutationStore,
+	shardID int,
+) {
+	t.Helper()
+	operationIDs := make([]string, 0, maxPendingBillingMutationsPerShard)
+	for ordinal := 0; ordinal < maxPendingBillingMutationsPerShard; ordinal++ {
+		operationIDs = append(operationIDs, billingMutationTestOperationInShard(
+			"pending_full", shardID, ordinal))
+	}
+	switch typed := store.(type) {
+	case *MemStore:
+		typed.mu.Lock()
+		typed.pendingBillingMutations[shardID] = memBillingMutationPendingShard{
+			OperationIDs: operationIDs,
+		}
+		typed.mu.Unlock()
+	case *R2Store:
+		index := r2PendingBillingMutationIndex{
+			SchemaVersion: billingMutationPendingIndexSchemaVersion,
+			Shard:         shardID, OperationIDs: operationIDs, Cursor: 0, Version: 1,
+		}
+		encoded, err := json.Marshal(index)
+		if err != nil {
+			t.Fatalf("encode full R2 pending shard: %v", err)
+		}
+		if _, err := typed.c.Put(
+			context.Background(), typed.pendingBillingMutationIndexKey(shardID),
+			encoded, blob.Cond{IfNoneMatchAny: true}); err != nil {
+			t.Fatalf("seed full R2 pending shard: %v", err)
+		}
+	default:
+		t.Fatalf("unsupported billing mutation store fixture %T", store)
+	}
+}
+
+func testPendingBillingMutationChronologicalRotation(
+	t *testing.T,
+	store BillingMutationStore,
+) {
+	t.Helper()
+	ctx := context.Background()
+	base := time.Date(2026, 8, 12, 0, 0, 0, 0, time.UTC)
+	firstWave := make([]string, billingMutationPendingShardCount)
+	secondWave := make([]string, billingMutationPendingShardCount)
+	for shard := 0; shard < billingMutationPendingShardCount; shard++ {
+		firstWave[shard] = billingMutationTestOperationInShard(
+			"pending_first", shard, 0)
+		secondWave[shard] = billingMutationTestOperationInShard(
+			"pending_second", shard, 1)
+		for wave, operationID := range []string{firstWave[shard], secondWave[shard]} {
+			createdAt := base.Add(time.Duration(wave)*time.Hour +
+				time.Duration(shard)*time.Minute)
+			receipt := billingMutationTestReceipt(operationID, createdAt)
+			receipt.AccountID = fmt.Sprintf(
+				"acct_pending_%d_%02d", wave, shard)
+			if _, created, err := store.ReceiveBillingMutation(
+				ctx, receipt); err != nil || !created {
+				t.Fatalf("receive shard %d wave %d = created=%v err=%v",
+					shard, wave, created, err)
+			}
+		}
+	}
+
+	assertWave := func(want []string, wantOldest time.Time) {
+		t.Helper()
+		batch, err := store.PendingBillingMutations(
+			ctx, billingMutationPendingShardCount)
+		if err != nil {
+			t.Fatalf("pending batch: %v", err)
+		}
+		if batch.Scanned != billingMutationPendingShardCount ||
+			len(batch.Receipts) != billingMutationPendingShardCount ||
+			batch.TerminalCleanup != 0 || !batch.ScanCapped ||
+			batch.OldestObservedPendingAt == nil ||
+			!batch.OldestObservedPendingAt.Equal(wantOldest) {
+			t.Fatalf("pending batch metadata = %+v", batch)
+		}
+		for i, receipt := range batch.Receipts {
+			if receipt.OperationID != want[i] {
+				t.Fatalf("pending receipt %d = %s; want %s",
+					i, receipt.OperationID, want[i])
+			}
+			if i > 0 && receipt.CreatedAt.Before(batch.Receipts[i-1].CreatedAt) {
+				t.Fatalf("pending batch is not chronological: %+v", batch.Receipts)
+			}
+		}
+	}
+	assertWave(firstWave, base)
+	assertWave(secondWave, base.Add(time.Hour))
+	assertWave(firstWave, base)
+
+	for _, limit := range []int{
+		billingMutationPendingShardCount - 1,
+		billingMutationPendingShardCount*maxPendingBillingMutationsPerShard + 1,
+	} {
+		if _, err := store.PendingBillingMutations(ctx, limit); err == nil {
+			t.Fatalf("pending limit %d accepted", limit)
+		}
+	}
+}
+
+func testPendingBillingMutationTerminalCleanup(
+	t *testing.T,
+	store BillingMutationStore,
+) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Date(2026, 8, 12, 3, 0, 0, 0, time.UTC)
+	receipt := billingMutationTestReceipt(
+		billingMutationTestOperationInShard("pending_terminal", 0, 0), now)
+	stored, created, err := store.ReceiveBillingMutation(ctx, receipt)
+	if err != nil || !created {
+		t.Fatalf("receive terminal fixture = created=%v err=%v", created, err)
+	}
+	claimAt := now.Add(time.Second)
+	claimed, acquired, err := store.ClaimBillingMutation(
+		ctx, stored, "bmc_pending_terminal", claimAt, claimAt.Add(time.Minute))
+	if err != nil || !acquired {
+		t.Fatalf("claim terminal fixture = %+v acquired=%v err=%v",
+			claimed, acquired, err)
+	}
+	completed, err := store.CompleteBillingMutation(ctx, claimed, BillingMutationResult{
+		Kind: BillingMutationResultAction, Plan: "standard",
+		URL: "https://billing.example.test/session/pending-terminal",
+	}, claimAt.Add(time.Second))
+	if err != nil {
+		t.Fatalf("complete terminal fixture: %v", err)
+	}
+	if pendingBillingMutationIndexContains(t, store, receipt.OperationID) {
+		t.Fatal("normal completion left a pending-index reference")
+	}
+	batch, err := store.PendingBillingMutations(
+		ctx, billingMutationPendingShardCount)
+	if err != nil || batch.Scanned != 0 || len(batch.Receipts) != 0 ||
+		batch.TerminalCleanup != 0 || batch.OldestObservedPendingAt != nil {
+		t.Fatalf("pending after terminal cleanup = %+v err=%v", batch, err)
+	}
+
+	// Terminal receipt storage is authoritative. If cleanup acknowledgement was
+	// lost and a stale queue reference remains, the next scan prunes it without
+	// handing the terminal receipt to a provider worker.
+	ensurePendingBillingMutationIndexFixture(t, store, completed.OperationID)
+	batch, err = store.PendingBillingMutations(
+		ctx, billingMutationPendingShardCount)
+	if err != nil || batch.Scanned != 1 || len(batch.Receipts) != 0 ||
+		batch.TerminalCleanup != 1 || batch.OldestObservedPendingAt != nil {
+		t.Fatalf("stale terminal pending cleanup = %+v err=%v", batch, err)
+	}
+	if pendingBillingMutationIndexContains(t, store, completed.OperationID) {
+		t.Fatal("stale terminal pending-index reference was not removed")
+	}
+}
+
+func testPendingBillingMutationExactReplayRepairsIndex(
+	t *testing.T,
+	store BillingMutationStore,
+) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Date(2026, 8, 12, 4, 0, 0, 0, time.UTC)
+	receipt := billingMutationTestReceipt(
+		billingMutationTestOperationInShard("pending_repair", 5, 0), now)
+	stored, created, err := store.ReceiveBillingMutation(ctx, receipt)
+	if err != nil || !created {
+		t.Fatalf("receive repair fixture = created=%v err=%v", created, err)
+	}
+	removePendingBillingMutationIndexFixture(t, store, stored.OperationID)
+	if pendingBillingMutationIndexContains(t, store, stored.OperationID) {
+		t.Fatal("pending-index removal fixture did not remove the operation")
+	}
+	replayed, created, err := store.ReceiveBillingMutation(ctx, receipt)
+	if err != nil || created || replayed.OperationID != stored.OperationID {
+		t.Fatalf("exact receipt replay = %+v created=%v err=%v",
+			replayed, created, err)
+	}
+	if occurrences := pendingBillingMutationIndexOccurrences(
+		t, store, stored.OperationID); occurrences != 1 {
+		t.Fatalf("exact receipt replay indexed operation %d times; want 1",
+			occurrences)
+	}
+	if _, created, err := store.ReceiveBillingMutation(
+		ctx, receipt); err != nil || created {
+		t.Fatalf("second exact receipt replay = created=%v err=%v", created, err)
+	}
+	if occurrences := pendingBillingMutationIndexOccurrences(
+		t, store, stored.OperationID); occurrences != 1 {
+		t.Fatalf("repeated exact receipt replay indexed operation %d times; want 1",
+			occurrences)
+	}
+	batch, err := store.PendingBillingMutations(
+		ctx, billingMutationPendingShardCount)
+	if err != nil || batch.Scanned != 1 || len(batch.Receipts) != 1 ||
+		batch.Receipts[0].OperationID != stored.OperationID {
+		t.Fatalf("repaired pending batch = %+v err=%v", batch, err)
+	}
+}
+
+func testPendingBillingMutationPoisonDoesNotStarveValid(
+	t *testing.T,
+	store BillingMutationStore,
+) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Date(2026, 8, 12, 5, 0, 0, 0, time.UTC)
+	shardID := 9
+	missingOperationID := billingMutationTestOperationInShard(
+		"pending_missing", shardID, 0)
+	validOperationID := billingMutationTestOperationInShard(
+		"pending_valid", shardID, 1)
+	ensurePendingBillingMutationIndexFixture(t, store, missingOperationID)
+	valid := billingMutationTestReceipt(validOperationID, now.Add(time.Minute))
+	if _, created, err := store.ReceiveBillingMutation(
+		ctx, valid); err != nil || !created {
+		t.Fatalf("receive valid receipt behind poison = created=%v err=%v",
+			created, err)
+	}
+
+	// A two-per-shard batch reports the missing reference but still returns the
+	// valid receipt behind it. The missing reference remains visible for repair.
+	batch, err := store.PendingBillingMutations(
+		ctx, 2*billingMutationPendingShardCount)
+	if err == nil || batch.Scanned != 2 || len(batch.Receipts) != 1 ||
+		batch.Receipts[0].OperationID != validOperationID ||
+		batch.OldestObservedPendingAt == nil ||
+		!batch.OldestObservedPendingAt.Equal(valid.CreatedAt) {
+		t.Fatalf("poison plus valid batch = %+v err=%v", batch, err)
+	}
+	if !pendingBillingMutationIndexContains(t, store, missingOperationID) {
+		t.Fatal("missing receipt reference was silently dropped")
+	}
+
+	// Rotation returns to the poison rather than hiding it, but it cannot starve
+	// the valid receipt: the following single-slot pass reaches valid work.
+	poisonBatch, poisonErr := store.PendingBillingMutations(
+		ctx, billingMutationPendingShardCount)
+	if poisonErr == nil || poisonBatch.Scanned != 1 ||
+		len(poisonBatch.Receipts) != 0 {
+		t.Fatalf("rotated poison batch = %+v err=%v", poisonBatch, poisonErr)
+	}
+	validBatch, validErr := store.PendingBillingMutations(
+		ctx, billingMutationPendingShardCount)
+	if validErr != nil || validBatch.Scanned != 1 ||
+		len(validBatch.Receipts) != 1 ||
+		validBatch.Receipts[0].OperationID != validOperationID {
+		t.Fatalf("valid batch after poison = %+v err=%v", validBatch, validErr)
+	}
+}
+
+func testInvalidPendingBillingMutationReferenceDoesNotWedgeShard(
+	t *testing.T,
+	store BillingMutationStore,
+) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Date(2026, 8, 12, 5, 30, 0, 0, time.UTC)
+	const invalidOperationID = "../private-invalid-operation"
+	shardID := 10
+	seedInvalidPendingBillingMutationReferenceFixture(
+		t, store, shardID, invalidOperationID)
+	validOperationID := billingMutationTestOperationInShard(
+		"pending_behind_invalid", shardID, 0)
+	valid := billingMutationTestReceipt(validOperationID, now)
+	if _, created, err := store.ReceiveBillingMutation(
+		ctx, valid); err != nil || !created {
+		t.Fatalf("receive valid receipt behind invalid reference = created=%v err=%v",
+			created, err)
+	}
+
+	batch, err := store.PendingBillingMutations(
+		ctx, 2*billingMutationPendingShardCount)
+	if err == nil || strings.Contains(err.Error(), invalidOperationID) ||
+		batch.Scanned != 2 || len(batch.Receipts) != 1 ||
+		batch.Receipts[0].OperationID != validOperationID {
+		t.Fatalf("invalid reference plus valid batch = %+v err=%v", batch, err)
+	}
+	if !pendingBillingMutationShardContainsRaw(
+		t, store, shardID, invalidOperationID) {
+		t.Fatal("invalid reference was silently removed instead of retained for repair")
+	}
+}
+
+func testPendingBillingMutationCleanupPreservesNextCursor(
+	t *testing.T,
+	store BillingMutationStore,
+) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Date(2026, 8, 12, 5, 45, 0, 0, time.UTC)
+	shardID := 11
+	operationIDs := make([]string, 3)
+	for ordinal := range operationIDs {
+		operationIDs[ordinal] = billingMutationTestOperationInShard(
+			"pending_cursor", shardID, ordinal)
+		receipt := billingMutationTestReceipt(
+			operationIDs[ordinal], now.Add(time.Duration(ordinal)*time.Minute))
+		receipt.AccountID = fmt.Sprintf("acct_pending_cursor_%d", ordinal)
+		if _, created, err := store.ReceiveBillingMutation(
+			ctx, receipt); err != nil || !created {
+			t.Fatalf("receive cursor fixture %d = created=%v err=%v",
+				ordinal, created, err)
+		}
+	}
+
+	first, err := store.PendingBillingMutations(
+		ctx, billingMutationPendingShardCount)
+	if err != nil || len(first.Receipts) != 1 ||
+		first.Receipts[0].OperationID != operationIDs[0] {
+		t.Fatalf("first cursor batch = %+v err=%v", first, err)
+	}
+	removePendingBillingMutationIndexFixture(t, store, operationIDs[0])
+	second, err := store.PendingBillingMutations(
+		ctx, billingMutationPendingShardCount)
+	if err != nil || len(second.Receipts) != 1 ||
+		second.Receipts[0].OperationID != operationIDs[1] {
+		t.Fatalf("cursor after cleanup = %+v err=%v; want %s",
+			second, err, operationIDs[1])
+	}
+}
+
+func testConcurrentPendingBillingMutationRotation(
+	t *testing.T,
+	store BillingMutationStore,
+) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Date(2026, 8, 12, 6, 0, 0, 0, time.UTC)
+	for shard := 0; shard < billingMutationPendingShardCount; shard++ {
+		for ordinal := 0; ordinal < 2; ordinal++ {
+			operationID := billingMutationTestOperationInShard(
+				"pending_concurrent", shard, ordinal)
+			receipt := billingMutationTestReceipt(
+				operationID, now.Add(time.Duration(shard*2+ordinal)*time.Minute))
+			receipt.AccountID = fmt.Sprintf(
+				"acct_pending_concurrent_%02d_%d", shard, ordinal)
+			if _, created, err := store.ReceiveBillingMutation(
+				ctx, receipt); err != nil || !created {
+				t.Fatalf("receive concurrent fixture = created=%v err=%v",
+					created, err)
+			}
+		}
+	}
+
+	start := make(chan struct{})
+	results := make(chan struct {
+		batch BillingMutationPendingBatch
+		err   error
+	}, 2)
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			batch, err := store.PendingBillingMutations(
+				ctx, billingMutationPendingShardCount)
+			results <- struct {
+				batch BillingMutationPendingBatch
+				err   error
+			}{batch: batch, err: err}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	seen := make(map[string]struct{}, 2*billingMutationPendingShardCount)
+	for result := range results {
+		if result.err != nil ||
+			result.batch.Scanned != billingMutationPendingShardCount ||
+			len(result.batch.Receipts) != billingMutationPendingShardCount {
+			t.Fatalf("concurrent pending batch = %+v err=%v",
+				result.batch, result.err)
+		}
+		for _, receipt := range result.batch.Receipts {
+			if _, duplicate := seen[receipt.OperationID]; duplicate {
+				t.Fatalf("concurrent rotation selected %s twice", receipt.OperationID)
+			}
+			seen[receipt.OperationID] = struct{}{}
+		}
+	}
+	if len(seen) != 2*billingMutationPendingShardCount {
+		t.Fatalf("concurrent rotation selected %d unique receipts; want %d",
+			len(seen), 2*billingMutationPendingShardCount)
+	}
+}
+
+func testPendingBillingMutationShardBackpressure(
+	t *testing.T,
+	store BillingMutationStore,
+) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Date(2026, 8, 12, 7, 0, 0, 0, time.UTC)
+	shardID := 12
+	fillPendingBillingMutationShardFixture(t, store, shardID)
+	receipt := billingMutationTestReceipt(
+		billingMutationTestOperationInShard("pending_overflow", shardID, 999), now)
+	stored, created, err := store.ReceiveBillingMutation(ctx, receipt)
+	if !errors.Is(err, errBillingMutationPendingIndexFull) || !created ||
+		stored.OperationID != receipt.OperationID {
+		t.Fatalf("receive against full pending shard = %+v created=%v err=%v",
+			stored, created, err)
+	}
+	got, ok, getErr := store.GetBillingMutation(ctx, receipt.OperationID)
+	if getErr != nil || !ok || got.Status != BillingMutationPending {
+		t.Fatalf("receipt written before index backpressure = %+v ok=%v err=%v",
+			got, ok, getErr)
+	}
+	if pendingBillingMutationIndexContains(t, store, receipt.OperationID) {
+		t.Fatal("overflow receipt unexpectedly entered the full pending shard")
+	}
+	if _, created, err := store.ReceiveBillingMutation(
+		ctx, receipt); !errors.Is(err, errBillingMutationPendingIndexFull) || created {
+		t.Fatalf("exact overflow replay = created=%v err=%v", created, err)
+	}
+}
+
+func TestMemStorePendingBillingMutationContract(t *testing.T) {
+	t.Run("chronological bounded rotation", func(t *testing.T) {
+		testPendingBillingMutationChronologicalRotation(t, NewMemStore())
+	})
+	t.Run("terminal cleanup", func(t *testing.T) {
+		testPendingBillingMutationTerminalCleanup(t, NewMemStore())
+	})
+	t.Run("exact replay repairs missing index", func(t *testing.T) {
+		testPendingBillingMutationExactReplayRepairsIndex(t, NewMemStore())
+	})
+	t.Run("poison does not starve valid", func(t *testing.T) {
+		testPendingBillingMutationPoisonDoesNotStarveValid(t, NewMemStore())
+	})
+	t.Run("invalid reference does not wedge shard", func(t *testing.T) {
+		testInvalidPendingBillingMutationReferenceDoesNotWedgeShard(t, NewMemStore())
+	})
+	t.Run("cleanup preserves next cursor", func(t *testing.T) {
+		testPendingBillingMutationCleanupPreservesNextCursor(t, NewMemStore())
+	})
+	t.Run("concurrent rotation", func(t *testing.T) {
+		testConcurrentPendingBillingMutationRotation(t, NewMemStore())
+	})
+	t.Run("shard backpressure", func(t *testing.T) {
+		testPendingBillingMutationShardBackpressure(t, NewMemStore())
+	})
+}
+
+func TestR2StorePendingBillingMutationContract(t *testing.T) {
+	t.Run("chronological bounded rotation", func(t *testing.T) {
+		testPendingBillingMutationChronologicalRotation(t, newR2Store(t))
+	})
+	t.Run("terminal cleanup", func(t *testing.T) {
+		testPendingBillingMutationTerminalCleanup(t, newR2Store(t))
+	})
+	t.Run("exact replay repairs missing index", func(t *testing.T) {
+		testPendingBillingMutationExactReplayRepairsIndex(t, newR2Store(t))
+	})
+	t.Run("poison does not starve valid", func(t *testing.T) {
+		testPendingBillingMutationPoisonDoesNotStarveValid(t, newR2Store(t))
+	})
+	t.Run("invalid reference does not wedge shard", func(t *testing.T) {
+		testInvalidPendingBillingMutationReferenceDoesNotWedgeShard(t, newR2Store(t))
+	})
+	t.Run("cleanup preserves next cursor", func(t *testing.T) {
+		testPendingBillingMutationCleanupPreservesNextCursor(t, newR2Store(t))
+	})
+	t.Run("concurrent rotation", func(t *testing.T) {
+		testConcurrentPendingBillingMutationRotation(t, newR2Store(t))
+	})
+	t.Run("shard backpressure", func(t *testing.T) {
+		testPendingBillingMutationShardBackpressure(t, newR2Store(t))
+	})
+}
+
 func TestMemStoreBillingMutationReceiptContract(t *testing.T) {
 	testBillingMutationStoreContract(t, NewMemStore())
 	testConcurrentBillingMutationReceive(t, NewMemStore())
@@ -1657,14 +2344,14 @@ func TestBillingMutationReceiptValidation(t *testing.T) {
 		})
 	}
 	if err := validateBillingMutationResultForOperation(
-		BillingMutationSetup, "", BillingMutationResult{
+		BillingMutationSetup, BillingMutationExecutionSetup, "", BillingMutationResult{
 			Kind: BillingMutationResultAction,
 			URL:  "http://billing.example.test/insecure",
 		}); err == nil {
 		t.Fatal("insecure hosted URL was accepted")
 	}
 	if err := validateBillingMutationResultForOperation(
-		BillingMutationCancel, "", BillingMutationResult{
+		BillingMutationCancel, BillingMutationExecutionCancel, "", BillingMutationResult{
 			Kind: BillingMutationResultDone,
 		}); err == nil {
 		t.Fatal("result from another operation was accepted")
@@ -1682,7 +2369,8 @@ func TestBillingMutationReceiptValidation(t *testing.T) {
 		" https://billing.example.test/session ",
 	} {
 		if err := validateBillingMutationResultForOperation(
-			BillingMutationUpgrade, "standard", BillingMutationResult{
+			BillingMutationUpgrade, BillingMutationExecutionUpgradeSelfServe,
+			"standard", BillingMutationResult{
 				Kind: BillingMutationResultAction, Plan: "standard", URL: raw,
 			}); err == nil {
 			t.Errorf("unsafe hosted URL was accepted: %q", raw)
@@ -1693,10 +2381,152 @@ func TestBillingMutationReceiptValidation(t *testing.T) {
 		"HTTPS://billing.example.test/session",
 	} {
 		if err := validateBillingMutationResultForOperation(
-			BillingMutationUpgrade, "standard", BillingMutationResult{
+			BillingMutationUpgrade, BillingMutationExecutionUpgradeSelfServe,
+			"standard", BillingMutationResult{
 				Kind: BillingMutationResultAction, Plan: "standard", URL: raw,
 			}); err != nil {
 			t.Errorf("safe hosted URL rejected: %q: %v", raw, err)
+		}
+	}
+}
+
+func TestBillingMutationApprovalAndResultValidationMatrix(t *testing.T) {
+	now := time.Date(2026, 8, 11, 16, 15, 0, 0, time.UTC)
+	effective := now.Add(30 * 24 * time.Hour)
+	type approvalCase struct {
+		name         string
+		operation    BillingMutationOperation
+		execution    BillingMutationExecutionClass
+		targetPlan   string
+		priceCents   int64
+		currency     string
+		allowedKinds map[BillingMutationResultKind]bool
+	}
+	approvals := []approvalCase{
+		{
+			name: "setup", operation: BillingMutationSetup,
+			execution: BillingMutationExecutionSetup,
+			allowedKinds: map[BillingMutationResultKind]bool{
+				BillingMutationResultDone:   true,
+				BillingMutationResultAction: true,
+			},
+		},
+		{
+			name: "contact upgrade", operation: BillingMutationUpgrade,
+			execution:  BillingMutationExecutionUpgradeContact,
+			targetPlan: "standard",
+			allowedKinds: map[BillingMutationResultKind]bool{
+				BillingMutationResultContact: true,
+			},
+		},
+		{
+			name: "self-serve upgrade", operation: BillingMutationUpgrade,
+			execution:  BillingMutationExecutionUpgradeSelfServe,
+			targetPlan: "standard", priceCents: 3000, currency: "usd",
+			allowedKinds: map[BillingMutationResultKind]bool{
+				BillingMutationResultDone:   true,
+				BillingMutationResultAction: true,
+			},
+		},
+		{
+			name: "downgrade", operation: BillingMutationDowngrade,
+			execution:  BillingMutationExecutionDowngrade,
+			targetPlan: "free", currency: "usd",
+			allowedKinds: map[BillingMutationResultKind]bool{
+				BillingMutationResultScheduled: true,
+			},
+		},
+		{
+			name: "cancel", operation: BillingMutationCancel,
+			execution: BillingMutationExecutionCancel,
+			allowedKinds: map[BillingMutationResultKind]bool{
+				BillingMutationResultCancelled: true,
+				BillingMutationResultResolved:  true,
+			},
+		},
+	}
+	operations := []struct {
+		operation  BillingMutationOperation
+		targetPlan string
+	}{
+		{operation: BillingMutationSetup},
+		{operation: BillingMutationUpgrade, targetPlan: "standard"},
+		{operation: BillingMutationDowngrade, targetPlan: "free"},
+		{operation: BillingMutationCancel},
+	}
+
+	// A schema-v2 receipt accepts only the execution classes belonging to its
+	// operation. Both upgrade classes are valid, but their terminal results are
+	// intentionally disjoint below.
+	for _, operation := range operations {
+		for _, approval := range approvals {
+			name := string(operation.operation) + "/" + string(approval.execution)
+			t.Run("approval/"+name, func(t *testing.T) {
+				receipt := billingMutationTestReceipt("bop_approval_matrix", now)
+				receipt.Operation = operation.operation
+				receipt.ExecutionClass = approval.execution
+				receipt.TargetPlan = operation.targetPlan
+				receipt.ApprovedPriceCents = approval.priceCents
+				receipt.ApprovedCurrency = approval.currency
+				err := validateBillingMutationReceipt(receipt)
+				wantValid := approval.operation == operation.operation
+				if wantValid && err != nil {
+					t.Fatalf("valid operation/class approval rejected: %v", err)
+				}
+				if !wantValid && err == nil {
+					t.Fatalf("mismatched operation/class approval accepted: %+v", receipt)
+				}
+			})
+		}
+	}
+
+	resultKinds := []BillingMutationResultKind{
+		BillingMutationResultDone,
+		BillingMutationResultAction,
+		BillingMutationResultScheduled,
+		BillingMutationResultCancelled,
+		BillingMutationResultResolved,
+		BillingMutationResultContact,
+	}
+	resultFor := func(
+		kind BillingMutationResultKind,
+		targetPlan string,
+	) BillingMutationResult {
+		result := BillingMutationResult{Kind: kind, Plan: targetPlan}
+		switch kind {
+		case BillingMutationResultAction:
+			result.URL = "https://billing.example.test/session"
+		case BillingMutationResultScheduled:
+			if result.Plan == "" {
+				result.Plan = "standard"
+			}
+			result.Effective = &effective
+		case BillingMutationResultCancelled:
+			result.Cancelled = true
+		case BillingMutationResultResolved:
+			result.Plan = ""
+		case BillingMutationResultContact:
+			if result.Plan == "" {
+				result.Plan = "standard"
+			}
+		}
+		return result
+	}
+	for _, approval := range approvals {
+		for _, kind := range resultKinds {
+			t.Run("result/"+approval.name+"/"+string(kind), func(t *testing.T) {
+				result := resultFor(kind, approval.targetPlan)
+				err := validateBillingMutationResultForOperation(
+					approval.operation, approval.execution,
+					approval.targetPlan, result)
+				if approval.allowedKinds[kind] && err != nil {
+					t.Fatalf("valid class/result pair rejected: %v", err)
+				}
+				if !approval.allowedKinds[kind] && err == nil {
+					t.Fatalf("mismatched class/result pair accepted: class=%s result=%+v",
+						approval.execution, result)
+				}
+			})
 		}
 	}
 }

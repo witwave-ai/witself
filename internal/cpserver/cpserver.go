@@ -191,7 +191,7 @@ func Register(mux *http.ServeMux, cfg Config) error {
 		mux.HandleFunc("DELETE /v1/admin/accounts/{id}/limit-overrides/{dimension}",
 			withAdmin(cfg, adminDeleteLimitOverride))
 	}
-	if cfg.LifecycleObserver != nil {
+	if cfg.LifecycleObserver != nil && cfg.InternalAuthenticate != nil {
 		mux.HandleFunc("GET /v1/plan-lifecycle/status", func(w http.ResponseWriter, r *http.Request) {
 			if !authorizeInternal(cfg, w, r) {
 				return
@@ -200,6 +200,15 @@ func Register(mux *http.ServeMux, cfg Config) error {
 				"schema_version": "witself.v0",
 				"plan_lifecycle": cfg.LifecycleObserver.Snapshot(),
 			})
+		})
+		mux.HandleFunc("GET /v1/plan-lifecycle/metrics", func(w http.ResponseWriter, r *http.Request) {
+			if !authorizeInternal(cfg, w, r) {
+				return
+			}
+			w.Header().Set("Content-Type",
+				"text/plain; version=0.0.4; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			_ = cfg.LifecycleObserver.WritePrometheus(w)
 		})
 		mux.HandleFunc("POST /v1/plan-lifecycle:tick", func(w http.ResponseWriter, r *http.Request) {
 			if !authorizeInternal(cfg, w, r) {
@@ -225,20 +234,26 @@ func Register(mux *http.ServeMux, cfg Config) error {
 			tickCtx, cancel := context.WithTimeout(
 				r.Context(), planLifecycleTickTimeout)
 			defer cancel()
+			mutationSummary, mutationErr :=
+				reconcileBillingMutationBatch(tickCtx, cfg.Manager)
 			summary, reconcileErr := ReconcileAccountIDs(
 				tickCtx, cfg.Manager, req.AccountIDs,
 				maxPlanLifecycleTickAccounts,
 			)
-			succeeded := reconcileErr == nil
-			cfg.LifecycleObserver.complete(time.Now(), summary, succeeded)
+			summary.BillingMutations = billingMutationBatchView(
+				mutationSummary, mutationErr == nil)
+			succeeded := reconcileErr == nil && mutationErr == nil
+			cfg.LifecycleObserver.complete(time.Now(), summary,
+				succeeded)
 			writeJSON(w, http.StatusOK, map[string]any{
 				"schema_version": "witself.v0",
 				"plan_lifecycle": map[string]any{
-					"scanned":       summary.Scanned,
-					"seeded":        summary.Seeded,
-					"apply_pending": summary.ApplyPending,
-					"failed":        summary.Failed,
-					"succeeded":     succeeded,
+					"scanned":           summary.Scanned,
+					"seeded":            summary.Seeded,
+					"apply_pending":     summary.ApplyPending,
+					"failed":            summary.Failed,
+					"succeeded":         succeeded,
+					"billing_mutations": summary.BillingMutations,
 				},
 			})
 		})

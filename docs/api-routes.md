@@ -68,6 +68,14 @@ attribution remains immutable on the receipt.
 An expired account-lane reservation with no receipt can be safely replaced;
 every late receipt creator must revalidate the original generation and claim
 before it can reach a provider.
+Outbound billing receipts now join a fixed-shard global recovery queue before
+provider work. The hosted plan-lifecycle clock resumes bounded windows under
+the same account and receipt fences, stops provider retries before the assumed
+idempotency horizon, and exposes only value-free nested status. Private
+`GET /v1/plan-lifecycle/metrics` uses the internal bridge bearer and closed
+Prometheus labels; `/healthz` remains liveness-only. Receipt schema 2 pins the
+approved effect and monetary terms so catalog drift cannot reinterpret queued
+work. Billing remains dark pending the separate activation gates below.
 No provider/customer identifiers or raw payment data cross the API. This is a
 code-contract statement, not a release, deployment, or live-charging statement.
 Every billing response uses `Cache-Control: no-store`; optional document links

@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -13,8 +14,20 @@ import (
 )
 
 const (
-	billingMutationReceiptSchemaVersion      = 1
-	billingAccountMutationLeaseSchemaVersion = 1
+	billingMutationLegacyReceiptSchemaVersion = 1
+	billingMutationReceiptSchemaVersion       = 2
+	billingAccountMutationLeaseSchemaVersion  = 1
+	billingMutationPendingIndexSchemaVersion  = 1
+
+	// The recovery queue is split across a fixed number of small global shards.
+	// A cron pass reads every shard, while CAS cursor rotation lets multiple
+	// replicas share work without an account-directory scan. At the maximum
+	// depth, a 64-item pass revisits every item within 64 five-minute ticks.
+	billingMutationPendingShardCount     = 16
+	maxPendingBillingMutationsPerShard   = 256
+	maxBillingMutationsPerReconcile      = 64
+	billingMutationAutomaticRetryHorizon = 23 * time.Hour
+	billingMutationReconcileConcurrency  = 8
 )
 
 // BillingMutationOperation is one allowlisted customer billing mutation.
@@ -35,6 +48,24 @@ const (
 	BillingMutationDowngrade = BillingMutationPlanDowngrade
 	// BillingMutationCancel is the concise pending-cancellation alias.
 	BillingMutationCancel = BillingMutationPlanCancel
+)
+
+// BillingMutationExecutionClass is the immutable effect approved before a
+// receipt becomes visible. Recovery executes this class exactly; it never
+// reinterprets a changed catalog into a different customer or provider effect.
+type BillingMutationExecutionClass string
+
+const (
+	// BillingMutationExecutionSetup creates or replays hosted payment setup.
+	BillingMutationExecutionSetup BillingMutationExecutionClass = "setup"
+	// BillingMutationExecutionUpgradeContact records a contact-only upgrade.
+	BillingMutationExecutionUpgradeContact BillingMutationExecutionClass = "upgrade_contact"
+	// BillingMutationExecutionUpgradeSelfServe purchases a priced upgrade.
+	BillingMutationExecutionUpgradeSelfServe BillingMutationExecutionClass = "upgrade_self_serve"
+	// BillingMutationExecutionDowngrade schedules a priced downgrade.
+	BillingMutationExecutionDowngrade BillingMutationExecutionClass = "downgrade"
+	// BillingMutationExecutionCancel cancels the exact pending billing change.
+	BillingMutationExecutionCancel BillingMutationExecutionClass = "cancel"
 )
 
 // BillingMutationStatus is the durable state of an outbound billing mutation.
@@ -80,6 +111,17 @@ var (
 	// ErrBillingMutationClaimActive means a receipt cannot be superseded while
 	// a worker still owns its unexpired processing lease.
 	ErrBillingMutationClaimActive = errors.New("billing mutation receipt claim is still active")
+	// errBillingMutationPendingIndexFull is internal backpressure. A receipt
+	// and its account lane are already durable before R2 updates the recovery
+	// accelerator, so saturation must never make synchronous provider work
+	// unsafe or unrepeatable.
+	errBillingMutationPendingIndexFull = errors.New(
+		"billing mutation pending index shard is full")
+	// ErrBillingMutationRetryHorizonExceeded leaves an old receipt pending for
+	// operator reconciliation instead of risking a second provider effect after
+	// a partner's idempotency retention window may have expired.
+	ErrBillingMutationRetryHorizonExceeded = errors.New(
+		"billing mutation automatic retry horizon exceeded")
 )
 
 // BillingMutationResult is the allowlisted terminal projection. It contains
@@ -96,29 +138,49 @@ type BillingMutationResult struct {
 // idempotency keys and email addresses are represented only by lowercase
 // SHA-256 digests. Result is immutable once the receipt becomes completed.
 type BillingMutationReceipt struct {
-	SchemaVersion           int                      `json:"schema_version"`
-	OperationID             string                   `json:"operation_id"`
-	AccountID               string                   `json:"account_id"`
-	ActorID                 string                   `json:"actor_id"`
-	ActorRole               string                   `json:"actor_role"`
-	Operation               BillingMutationOperation `json:"operation"`
-	AccountGeneration       int64                    `json:"account_generation"`
-	IdempotencyKeySHA256    string                   `json:"idempotency_key_sha256"`
-	RequestSHA256           string                   `json:"request_sha256"`
-	Reason                  string                   `json:"reason"`
-	ConfirmedAt             time.Time                `json:"confirmed_at"`
-	TargetPlan              string                   `json:"target_plan,omitempty"`
-	EmailSHA256             string                   `json:"email_sha256,omitempty"`
-	Status                  BillingMutationStatus    `json:"status"`
-	Result                  *BillingMutationResult   `json:"result,omitempty"`
-	ClaimToken              string                   `json:"claim_token,omitempty"`
-	ClaimGeneration         int64                    `json:"claim_generation,omitempty"`
-	LeaseExpiresAt          *time.Time               `json:"lease_expires_at,omitempty"`
-	CreatedAt               time.Time                `json:"created_at"`
-	UpdatedAt               time.Time                `json:"updated_at"`
-	CompletedAt             *time.Time               `json:"completed_at,omitempty"`
-	SupersededByOperationID string                   `json:"superseded_by_operation_id,omitempty"`
-	Version                 int64                    `json:"version"`
+	SchemaVersion           int                           `json:"schema_version"`
+	OperationID             string                        `json:"operation_id"`
+	AccountID               string                        `json:"account_id"`
+	ActorID                 string                        `json:"actor_id"`
+	ActorRole               string                        `json:"actor_role"`
+	Operation               BillingMutationOperation      `json:"operation"`
+	ExecutionClass          BillingMutationExecutionClass `json:"execution_class"`
+	AccountGeneration       int64                         `json:"account_generation"`
+	IdempotencyKeySHA256    string                        `json:"idempotency_key_sha256"`
+	RequestSHA256           string                        `json:"request_sha256"`
+	Reason                  string                        `json:"reason"`
+	ConfirmedAt             time.Time                     `json:"confirmed_at"`
+	TargetPlan              string                        `json:"target_plan,omitempty"`
+	ApprovedPriceCents      int64                         `json:"approved_price_cents"`
+	ApprovedCurrency        string                        `json:"approved_currency,omitempty"`
+	EmailSHA256             string                        `json:"email_sha256,omitempty"`
+	Status                  BillingMutationStatus         `json:"status"`
+	Result                  *BillingMutationResult        `json:"result,omitempty"`
+	ClaimToken              string                        `json:"claim_token,omitempty"`
+	ClaimGeneration         int64                         `json:"claim_generation,omitempty"`
+	LeaseExpiresAt          *time.Time                    `json:"lease_expires_at,omitempty"`
+	CreatedAt               time.Time                     `json:"created_at"`
+	UpdatedAt               time.Time                     `json:"updated_at"`
+	CompletedAt             *time.Time                    `json:"completed_at,omitempty"`
+	SupersededByOperationID string                        `json:"superseded_by_operation_id,omitempty"`
+	Version                 int64                         `json:"version"`
+}
+
+// BillingMutationPendingBatch is a value-free bounded view selected from the
+// global recovery shards. Scanned includes malformed and terminal references;
+// valid pending receipts are returned for claims. Poison references stay
+// indexed and surface through the accompanying error.
+type BillingMutationPendingBatch struct {
+	Receipts                []BillingMutationReceipt
+	Scanned                 int
+	TerminalCleanup         int
+	ScanCapped              bool
+	OldestObservedPendingAt *time.Time
+}
+
+type billingMutationPendingReference struct {
+	operationID string
+	shardID     int
 }
 
 // BillingAccountMutationLease serializes provider mutations for one account.
@@ -136,9 +198,10 @@ type BillingAccountMutationLease struct {
 	Version             int64      `json:"version"`
 }
 
-// BillingMutationStore is the durable create/replay and exclusive-fold seam
-// implemented by both lifecycle stores. The bounded foundation intentionally
-// has no pending index or autonomous reconciler yet.
+// BillingMutationStore is the durable create/replay, exclusive-fold, and
+// bounded recovery seam implemented by both lifecycle stores. Pending lookup
+// rotates through a fixed global shard set; receipt and account claims remain
+// authoritative while the index is only a value-minimal discovery structure.
 type BillingMutationStore interface {
 	ClaimBillingMutationAccount(
 		ctx context.Context,
@@ -182,11 +245,16 @@ type BillingMutationStore interface {
 		receipt BillingMutationReceipt,
 		releasedAt time.Time,
 	) error
+	PendingBillingMutations(
+		ctx context.Context,
+		limit int,
+	) (BillingMutationPendingBatch, error)
 }
 
 func validateBillingMutationReceipt(receipt BillingMutationReceipt) error {
 	switch {
-	case receipt.SchemaVersion != billingMutationReceiptSchemaVersion:
+	case receipt.SchemaVersion != billingMutationLegacyReceiptSchemaVersion &&
+		receipt.SchemaVersion != billingMutationReceiptSchemaVersion:
 		return fmt.Errorf("billing mutation receipt: unsupported schema version %d", receipt.SchemaVersion)
 	case !validBillingMutationOperationID(receipt.OperationID):
 		return errors.New("billing mutation receipt: invalid operation id")
@@ -198,6 +266,13 @@ func validateBillingMutationReceipt(receipt BillingMutationReceipt) error {
 		return errors.New("billing mutation receipt: invalid actor role")
 	case !validBillingMutationOperation(receipt.Operation):
 		return fmt.Errorf("billing mutation receipt: unsupported operation %q", receipt.Operation)
+	case receipt.SchemaVersion == billingMutationReceiptSchemaVersion &&
+		!validBillingMutationExecutionClass(receipt.ExecutionClass):
+		return fmt.Errorf("billing mutation receipt: unsupported execution class %q", receipt.ExecutionClass)
+	case receipt.SchemaVersion == billingMutationLegacyReceiptSchemaVersion &&
+		(receipt.ExecutionClass != "" || receipt.ApprovedPriceCents != 0 ||
+			receipt.ApprovedCurrency != ""):
+		return errors.New("billing mutation receipt: legacy receipt cannot carry approval fields")
 	case receipt.AccountGeneration < 1:
 		return errors.New("billing mutation receipt: account_generation must be positive")
 	case !validLowerSHA256(receipt.IdempotencyKeySHA256):
@@ -210,6 +285,10 @@ func validateBillingMutationReceipt(receipt BillingMutationReceipt) error {
 		return errors.New("billing mutation receipt: confirmed_at is required")
 	case receipt.TargetPlan != "" && !validBillingMutationToken(receipt.TargetPlan, 128):
 		return errors.New("billing mutation receipt: invalid target plan")
+	case receipt.ApprovedPriceCents < 0:
+		return errors.New("billing mutation receipt: approved price cannot be negative")
+	case receipt.ApprovedCurrency != "" && !validBillingMutationToken(receipt.ApprovedCurrency, 16):
+		return errors.New("billing mutation receipt: invalid approved currency")
 	case receipt.EmailSHA256 != "" && !validLowerSHA256(receipt.EmailSHA256):
 		return errors.New("billing mutation receipt: invalid email digest")
 	case receipt.CreatedAt.IsZero() || receipt.UpdatedAt.IsZero():
@@ -228,6 +307,11 @@ func validateBillingMutationReceipt(receipt BillingMutationReceipt) error {
 	}
 	if receipt.Operation == BillingMutationSetup && receipt.TargetPlan != "" {
 		return errors.New("billing mutation receipt: setup cannot carry target_plan")
+	}
+	if receipt.SchemaVersion == billingMutationReceiptSchemaVersion {
+		if err := validateBillingMutationApproval(receipt); err != nil {
+			return err
+		}
 	}
 	if receipt.ClaimToken != "" {
 		if !validBillingMutationClaimToken(receipt.ClaimToken) ||
@@ -256,7 +340,8 @@ func validateBillingMutationReceipt(receipt BillingMutationReceipt) error {
 			return errors.New("billing mutation receipt: invalid completion timestamps")
 		}
 		if err := validateBillingMutationResultForOperation(
-			receipt.Operation, receipt.TargetPlan, *receipt.Result); err != nil {
+			receipt.Operation, receipt.ExecutionClass,
+			receipt.TargetPlan, *receipt.Result); err != nil {
 			return err
 		}
 	case BillingMutationSuperseded:
@@ -281,31 +366,43 @@ func validateBillingMutationReceipt(receipt BillingMutationReceipt) error {
 
 func validateBillingMutationResultForOperation(
 	operation BillingMutationOperation,
+	executionClass BillingMutationExecutionClass,
 	targetPlan string,
 	result BillingMutationResult,
 ) error {
 	if err := validateBillingMutationResult(result); err != nil {
 		return err
 	}
+	legacyUnpinned := executionClass == ""
 	switch operation {
 	case BillingMutationSetup:
-		if result.Kind != BillingMutationResultDone &&
-			result.Kind != BillingMutationResultAction || result.Plan != "" {
+		if !legacyUnpinned && executionClass != BillingMutationExecutionSetup ||
+			(result.Kind != BillingMutationResultDone &&
+				result.Kind != BillingMutationResultAction) || result.Plan != "" {
 			return errors.New("billing mutation receipt: result does not match setup operation")
 		}
 	case BillingMutationPlanUpgrade:
-		if result.Kind != BillingMutationResultDone &&
-			result.Kind != BillingMutationResultAction &&
-			result.Kind != BillingMutationResultContact || result.Plan != targetPlan {
+		validKind := legacyUnpinned &&
+			(result.Kind == BillingMutationResultDone ||
+				result.Kind == BillingMutationResultAction ||
+				result.Kind == BillingMutationResultContact) ||
+			executionClass == BillingMutationExecutionUpgradeContact &&
+				result.Kind == BillingMutationResultContact ||
+			executionClass == BillingMutationExecutionUpgradeSelfServe &&
+				(result.Kind == BillingMutationResultDone ||
+					result.Kind == BillingMutationResultAction)
+		if !validKind || result.Plan != targetPlan {
 			return errors.New("billing mutation receipt: result does not match upgrade operation")
 		}
 	case BillingMutationPlanDowngrade:
-		if result.Kind != BillingMutationResultScheduled || result.Plan != targetPlan {
+		if !legacyUnpinned && executionClass != BillingMutationExecutionDowngrade ||
+			result.Kind != BillingMutationResultScheduled || result.Plan != targetPlan {
 			return errors.New("billing mutation receipt: result does not match downgrade operation")
 		}
 	case BillingMutationPlanCancel:
-		if result.Kind != BillingMutationResultCancelled &&
-			result.Kind != BillingMutationResultResolved ||
+		if !legacyUnpinned && executionClass != BillingMutationExecutionCancel ||
+			(result.Kind != BillingMutationResultCancelled &&
+				result.Kind != BillingMutationResultResolved) ||
 			result.Plan != targetPlan {
 			return errors.New("billing mutation receipt: result does not match cancel operation")
 		}
@@ -422,10 +519,63 @@ func sameBillingMutationIdentity(a, b BillingMutationReceipt) bool {
 	return a.SchemaVersion == b.SchemaVersion &&
 		a.OperationID == b.OperationID && a.AccountID == b.AccountID &&
 		a.ActorID == b.ActorID && a.ActorRole == b.ActorRole &&
-		a.Operation == b.Operation && a.AccountGeneration == b.AccountGeneration &&
+		a.Operation == b.Operation && a.ExecutionClass == b.ExecutionClass &&
+		a.AccountGeneration == b.AccountGeneration &&
 		a.IdempotencyKeySHA256 == b.IdempotencyKeySHA256 &&
 		a.RequestSHA256 == b.RequestSHA256 && a.Reason == b.Reason &&
-		a.TargetPlan == b.TargetPlan
+		a.TargetPlan == b.TargetPlan &&
+		a.ApprovedPriceCents == b.ApprovedPriceCents &&
+		a.ApprovedCurrency == b.ApprovedCurrency
+}
+
+func validBillingMutationExecutionClass(value BillingMutationExecutionClass) bool {
+	switch value {
+	case BillingMutationExecutionSetup,
+		BillingMutationExecutionUpgradeContact,
+		BillingMutationExecutionUpgradeSelfServe,
+		BillingMutationExecutionDowngrade,
+		BillingMutationExecutionCancel:
+		return true
+	default:
+		return false
+	}
+}
+
+func validateBillingMutationApproval(receipt BillingMutationReceipt) error {
+	planApproval := receipt.ApprovedCurrency != ""
+	switch receipt.ExecutionClass {
+	case BillingMutationExecutionSetup:
+		if receipt.Operation != BillingMutationSetup || receipt.TargetPlan != "" ||
+			receipt.ApprovedPriceCents != 0 || planApproval {
+			return errors.New("billing mutation receipt: invalid setup approval")
+		}
+	case BillingMutationExecutionUpgradeContact:
+		if receipt.Operation != BillingMutationPlanUpgrade || receipt.TargetPlan == "" ||
+			receipt.ApprovedPriceCents != 0 || planApproval {
+			return errors.New("billing mutation receipt: invalid contact-upgrade approval")
+		}
+	case BillingMutationExecutionUpgradeSelfServe:
+		if receipt.Operation != BillingMutationPlanUpgrade || receipt.TargetPlan == "" ||
+			receipt.ApprovedPriceCents <= 0 || !planApproval {
+			return errors.New("billing mutation receipt: invalid self-serve upgrade approval")
+		}
+	case BillingMutationExecutionDowngrade:
+		if receipt.Operation != BillingMutationPlanDowngrade || receipt.TargetPlan == "" ||
+			!planApproval {
+			return errors.New("billing mutation receipt: invalid downgrade approval")
+		}
+	case BillingMutationExecutionCancel:
+		if receipt.Operation != BillingMutationPlanCancel || receipt.TargetPlan != "" ||
+			receipt.ApprovedPriceCents != 0 || planApproval {
+			return errors.New("billing mutation receipt: invalid cancel approval")
+		}
+	}
+	return nil
+}
+
+func pendingBillingMutationShard(operationID string) int {
+	digest := sha256.Sum256([]byte(operationID))
+	return int(digest[0]) % billingMutationPendingShardCount
 }
 
 func billingAccountMutationClaimMatches(

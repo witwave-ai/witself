@@ -406,8 +406,59 @@ function planLifecycleTickResult(doc, expectedScanned) {
       !count(result.apply_pending) ||
       result.apply_pending > result.scanned ||
       !count(result.failed) || result.failed > result.scanned ||
+      typeof result.succeeded !== "boolean") {
+    return null;
+  }
+  let billingMutations;
+  if (result.billing_mutations !== undefined) {
+    billingMutations = billingMutationTickResult(
+      result.billing_mutations,
+      count,
+    );
+  }
+  if (result.billing_mutations !== undefined && !billingMutations) {
+    return null;
+  }
+  const expectedSucceeded = result.failed === 0 &&
+    (billingMutations === undefined || billingMutations.succeeded);
+  if (result.succeeded !== expectedSucceeded) {
+    return null;
+  }
+  return result;
+}
+
+function billingMutationTickResult(result, count) {
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    return null;
+  }
+  const fields = [
+    "scanned", "attempted", "completed", "superseded", "busy", "failed",
+    "terminal_cleaned",
+  ];
+  if (fields.some((field) => !count(result[field])) ||
+      result.attempted > result.scanned ||
+      result.completed > result.attempted ||
+      result.superseded > result.attempted ||
+      result.failed > result.attempted ||
+      result.completed + result.superseded + result.failed >
+        result.attempted ||
+      result.busy > result.scanned ||
+      result.terminal_cleaned > result.scanned ||
+      result.attempted + result.busy + result.terminal_cleaned >
+        result.scanned ||
+      typeof result.scan_capped !== "boolean" ||
       typeof result.succeeded !== "boolean" ||
-      result.succeeded !== (result.failed === 0)) {
+      (result.succeeded && result.failed !== 0)) {
+    return null;
+  }
+  const oldest = result.oldest_observed_pending_at;
+  if (oldest !== null &&
+      (typeof oldest !== "string" || oldest.length > 64 ||
+       !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(oldest) ||
+       !Number.isFinite(Date.parse(oldest)))) {
+    return null;
+  }
+  if (oldest !== null && result.scanned <= result.terminal_cleaned) {
     return null;
   }
   return result;
@@ -490,7 +541,17 @@ export async function runScheduledPlanLifecycle(env, containerFetch) {
       "plan-lifecycle: scheduled tick " +
       `scanned=${result.scanned} seeded=${result.seeded} ` +
       `apply_pending=${result.apply_pending} failed=${result.failed} ` +
-      `succeeded=${result.succeeded}`,
+      `succeeded=${result.succeeded}` +
+      (result.billing_mutations === undefined ? "" :
+        ` mutation_scanned=${result.billing_mutations.scanned}` +
+        ` mutation_attempted=${result.billing_mutations.attempted}` +
+        ` mutation_completed=${result.billing_mutations.completed}` +
+        ` mutation_superseded=${result.billing_mutations.superseded}` +
+        ` mutation_busy=${result.billing_mutations.busy}` +
+        ` mutation_failed=${result.billing_mutations.failed}` +
+        ` mutation_terminal_cleaned=${result.billing_mutations.terminal_cleaned}` +
+        ` mutation_scan_capped=${result.billing_mutations.scan_capped}` +
+        ` mutation_succeeded=${result.billing_mutations.succeeded}`),
     );
     return {
       ran: true,
@@ -499,6 +560,7 @@ export async function runScheduledPlanLifecycle(env, containerFetch) {
       seeded: result.seeded,
       apply_pending: result.apply_pending,
       failed: result.failed,
+      billing_mutations: result.billing_mutations,
     };
   } catch {
     console.log("plan-lifecycle: scheduled tick unavailable");

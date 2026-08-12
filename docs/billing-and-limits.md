@@ -98,14 +98,50 @@ claim token after creating the receipt and is superseded before any provider
 call if that advance won.
 Event redelivery is suppressed, reuse of an event identity with
 different content or normalization fails closed, and unresolved provider-event
-receipt work remains indexed for bounded reconciliation. Mutation receipts are
-currently recovered by an exact caller retry; a bounded pending index and
-reconciler are still required before activation. A short durable processing lease
-admits one normal folder at a time, and its immutable account/event/decision
-resolution is pinned before account mutation. Crash recovery therefore reuses
-that resolution without consulting provider state again. These durability
-controls make retries safer; they are not a claim that every Stripe transition
-is ready for production.
+receipt work remains indexed for bounded reconciliation. Outbound mutation
+receipts now enter one of 16 fixed global recovery shards before any provider
+call is allowed. Each shard holds at most 256 operation ids and carries a CAS
+rotation cursor; a five-minute pass selects up to 64 receipts across all shards
+and processes them with bounded concurrency. Two control-plane replicas may run
+the pass together: shard cursor CAS spreads their selected windows, while the
+account-generation and receipt claims remain the authoritative duplicate-effect
+fences. Index saturation or an ambiguous index write fails closed before the
+provider boundary. Exact caller replay repairs missing membership.
+
+Only a validated terminal receipt can remove an index reference. A missing,
+malformed, or mismatched target remains visible and makes the batch unhealthy
+without starving valid work later in the rotating shard. Completion makes the
+receipt terminal first and treats index removal as retryable cleanup. Automatic
+provider execution stops 23 hours after receipt creation, before the assumed
+minimum 24-hour provider idempotency horizon; exact durable account evidence
+may still terminalize the receipt, but otherwise an operator must reconcile it.
+
+Receipt schema 2 also pins the server-approved execution class before provider
+work: hosted setup, contact-only upgrade, self-serve upgrade, scheduled
+downgrade, or pending cancellation. Self-serve upgrade and downgrade receipts
+pin approved monthly cents and lowercase currency, and fail closed if the
+deployed catalog no longer matches. Recovery never turns a contact request into
+a purchase because availability changed. Legacy schema-1 pending receipts can
+complete only from exact account-fold or tombstone evidence; an unproved legacy
+receipt is never re-sent to a provider. A short durable processing lease admits
+one normal folder at a time, and its immutable account/event/decision resolution
+is pinned before account mutation. Crash recovery therefore reuses that
+resolution without consulting provider state again. These durability controls
+make retries safer; they are not a claim that every Stripe transition is ready
+for production.
+
+The hosted plan-lifecycle tick runs this global billing pass before its bounded
+account-directory page and still processes that page when mutation recovery has
+partial failures. Its overall success flag includes both lanes, while the
+Worker advances the account-directory cursor after any structurally valid
+acknowledgement so a recovery failure cannot starve later accounts. Tick and
+status JSON expose a nested, value-free
+`billing_mutations` summary. Authenticated
+`GET /v1/plan-lifecycle/metrics` exports closed-label Prometheus counters and
+gauges for batch success, selected items, terminal-index cleanup, capped scans,
+last success, and the oldest pending timestamp observed in that bounded sample.
+Health remains liveness-only; no account, operation, provider, plan, customer,
+actor, digest, URL, or raw error becomes a metric label.
 
 Production payment activation remains gated on an explicit operational and
 security review. Account billing reads and mutations now derive distinct
@@ -118,9 +154,11 @@ provide a real downgrade fit checker, and implement the Team usage-billing
 policy. It must also compensate partial multi-subscription downgrades, define
 deterministic ordering for conflicting provider events with equal timestamps,
 and retain completed receipts under an explicit bounded policy without ever
-deleting unresolved work. A production reconciler must resolve pending work
-before the provider's idempotency horizon can expire, and hosted-action receipts
-need explicit expiry/refresh behavior rather than replaying a stale URL forever.
+deleting unresolved work. The implemented reconciler now stops unsafe automatic
+provider retries before the idempotency horizon, but operations that reach that
+guard still need an operator/provider-object resolution path. Hosted-action
+receipts also need explicit expiry/refresh behavior rather than replaying a
+stale URL forever.
 
 This mutation surface remains dark until a rolling-writer floor is enforced:
 every control-plane replica capable of receiving a billing write must preserve
@@ -132,8 +170,8 @@ binary can bypass or erase the new fences. The account fold also needs a durable
 equal-time event fence. The cross-replica mutation fence is implemented, but
 production replacement still requires authoritative subscription projection
 and exact provider-object cancellation rather than discovery from a bounded
-list. Mutation receipts also need explicit bounded retention that never removes
-unresolved work, plus a reconciler/operator path that can terminalize a
+list. Completed mutation receipts still need explicit bounded retention that
+never removes unresolved work, plus an operator path that can terminalize a
 provider-declared deterministic failure without guessing that an ambiguous
 failure had no side effect. Provider secrets, webhook registration, deployment
 gates, and a production rollback exercise are separate human-controlled rollout
