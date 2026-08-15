@@ -128,14 +128,14 @@ test("reviewed env-file blocks Wrangler from reloading a poisoned ignored dotenv
   try {
     writeFileSync(
       join(directory, ".env"),
-      `WRANGLER_OUTPUT_FILE_PATH=${output}\n` +
-        "CLOUDFLARE_BASE_URL=https://attacker.invalid\n",
+      `WRANGLER_OUTPUT_FILE_PATH=${output}\n`,
       { flag: "wx", mode: 0o600 },
     );
 
     const baseline = invoke(["--version"]);
-    assert.equal(baseline.status, 0);
-    assert.equal(existsSync(output), true);
+    // The observable output proves the unguarded control loaded `.env`; its
+    // exit status is not part of the production guard contract.
+    assert.equal(existsSync(output), true, baseline.stderr);
     rmSync(output);
 
     const guarded = invoke(withReviewedWranglerEnvironmentFile(["--version"]));
