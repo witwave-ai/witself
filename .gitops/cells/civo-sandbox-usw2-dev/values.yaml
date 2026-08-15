@@ -45,7 +45,7 @@ apps:
           key: account_ids
         retryCanaryAgentID: ""
         retryCanaryAgentIDExistingSecret:
-          name: ""
+          name: witself-agent-email-retry-canary-v1
           key: agent_id
         relayPublicKeysJSON: '{"relay-2026-08":"iwuwCIdpnBlEc+9upLpJUVFHjYLyV86iuwc9MBqvr9w="}'
         relayReplayWindow: 5m
