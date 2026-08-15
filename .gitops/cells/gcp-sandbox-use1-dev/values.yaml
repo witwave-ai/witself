@@ -42,27 +42,14 @@ apps:
         interval: 5m
         batchTimeout: 2m
     factDeletionEnabled: true
-    # Receive-only pilot for one internal realm. The matching Ed25519 private
-    # key remains only in the isolated Cloudflare Email Worker secret.
+    # The legacy literal-realm receive path is retired. Keep both receive modes
+    # dark until this cell is upgraded and production receive is explicitly
+    # configured with an immutable account-cohort Secret.
     agentEmail:
       receivePilot:
-        enabled: true
-        domain: witmail.net
-        acceptedLegacyDomains:
-          - agent-mail.witwave.ai
-        audience: gcp-sandbox-use1-dev
-        realmID: realm_drz4xnv73ficcrko
-        agentIDs:
-          - agent_relncdnqkvppmg43
-          - agent_aqgakfkmglnovjut
-          - agent_swo3f54wmdpkzyyq
-          - agent_k7mxv7zemzl7eryc
-          - agent_eshphz2flzvdfnj2
-          - agent_z7flki3nxargu2gl
-          - agent_xixytd2csyffgmll
-        retryCanaryAgentID: agent_xixytd2csyffgmll
-        relayPublicKeysJSON: '{"pilot_20260721_v1":"4YFALyKdS19xyYFyoJkP1kydVKw0xlmhf92Hog5b81s="}'
-        relayReplayWindow: 5m
+        enabled: false
+      receiveProduction:
+        enabled: false
     # Phase B enabled compaction after every schema-54-compatible v186 server
     # pod replaced the old writers.
     avatarPayloadCompactionEnabled: true

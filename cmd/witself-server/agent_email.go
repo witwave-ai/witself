@@ -40,7 +40,7 @@ const (
 	defaultAgentEmailReplayWindow    = 5 * time.Minute
 	maximumAgentEmailReceiveAccounts = 100
 	agentEmailPrimaryCanaryDomain    = "witmail.net"
-	agentEmailPrimaryCanaryWorker    = "witself-agent-email-pilot"
+	agentEmailPrimaryCanaryWorker    = "witself-agent-email-receive"
 )
 
 type agentEmailPrimaryCanaryManifestAgent struct {

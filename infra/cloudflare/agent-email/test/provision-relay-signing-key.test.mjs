@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import test from "node:test";
 
 import { releaseMessage } from "../scripts/deployment-identity.mjs";
@@ -29,11 +29,15 @@ import {
   workerVersionMessage,
   workerVersionTag,
 } from "../../control-plane/scripts/source-identity.mjs";
+import {
+  LEGACY_PILOT_WORKER,
+  PRODUCTION_RECEIVE_WORKER,
+} from "../src/worker-names.mjs";
 
 const CP_CONFIG = "/safe/control-plane.jsonc";
 const EDGE_CONFIG = "/safe/email-edge.jsonc";
 const CONTROL_PLANE_WORKER = "witself-control-plane";
-const EMAIL_EDGE_WORKER = "witself-agent-email-pilot";
+const EMAIL_EDGE_WORKER = PRODUCTION_RECEIVE_WORKER;
 const relaySecretID = "sec_aaaaaaaaaaaaaaaa";
 const keyIDFieldID = "fld_bbbbbbbbbbbbbbbb";
 const publicFieldID = "fld_cccccccccccccccc";
@@ -49,7 +53,7 @@ const priorKeyID = "relay-2026-07";
 const routeKeyID = "route-2026-08";
 const routePublicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 const directoryID = "b".repeat(32);
-const accountID = "0123456789abcdef0123456789abcdef";
+const accountID = "8f0bf04a4e7aab3a8cc60f02cc8c8fdb";
 const zoneID = "fedcba9876543210fedcba9876543210";
 const release = Object.freeze({
   version: "0.0.241",
@@ -125,17 +129,14 @@ function configs() {
 
 function normalizedSnapshotContents(snapshot) {
   const directory = basename(dirname(snapshot.path));
-  const expectedMain = directory.startsWith("witself-relay-control-plane-")
-    ? "../control-plane/src/index.js"
-    : directory.startsWith("witself-relay-email-edge-")
-      ? "../agent-email/src/index.js"
-      : "";
-  assert.notEqual(expectedMain, "", "snapshot directory must identify its Worker");
-  assert.equal(JSON.parse(snapshot.contents).main, expectedMain);
-  return snapshot.contents.replace(
-    `"main": "${expectedMain}"`,
-    '"main": "src/index.js"',
+  assert.equal(
+    directory.startsWith("witself-relay-control-plane-") ||
+      directory.startsWith("witself-relay-email-edge-"),
+    true,
+    "snapshot directory must identify its Worker",
   );
+  assert.equal(JSON.parse(snapshot.contents).main, "src/index.js");
+  return snapshot.contents;
 }
 
 function deployment(id, versionID) {
@@ -413,6 +414,7 @@ function fixture({
   providerZoneName = "witmail.net",
   leaseCollision = false,
   renewalFailureAt = 0,
+  releaseFailure = false,
   mutationFailure = false,
   receiptCollision = false,
   receiptReservationCollision = false,
@@ -570,6 +572,10 @@ function fixture({
       });
     } finally {
       leaseEvents.push({ type: "release" });
+      calls.push({ type: "lease-release" });
+      if (releaseFailure) {
+        throw new Error("agent email operations lease release failed");
+      }
     }
   };
   const reserveReceipt = (path, pending) => {
@@ -577,7 +583,19 @@ function fixture({
     if (receiptReservationCollision) {
       throw new Error("EEXIST: receipt reservation collision");
     }
-    if (realReceipt) return reserveJSONReceipt(path, pending);
+    if (realReceipt) {
+      const journal = reserveJSONReceipt(path, pending);
+      return {
+        commit(receipt) {
+          calls.push({ type: "receipt-commit", path, receipt });
+          journal.commit(receipt);
+        },
+        close() {
+          calls.push({ type: "receipt-close", path });
+          journal.close();
+        },
+      };
+    }
     let settled = false;
     return {
       commit(receipt) {
@@ -603,6 +621,7 @@ function fixture({
     files,
     snapshotPaths,
     snapshotMetadata,
+    environment: productionEnvironment(),
   };
 }
 
@@ -719,8 +738,16 @@ test("full rotation sequence creates one successor and a value-free receipt", as
   for (const snapshot of value.snapshotMetadata) {
     assert.equal(snapshot.fileMode, 0o400);
     assert.equal(snapshot.directoryMode, 0o700);
+    assert.equal(
+      snapshot.path.startsWith(`${resolve(process.cwd())}${sep}`),
+      false,
+    );
     assert.equal(existsSync(snapshot.path), false);
   }
+  assert.ok(
+    value.calls.findIndex((call) => call.type === "lease-release") <
+      value.calls.findIndex((call) => call.type === "receipt-commit"),
+  );
 
   const persisted = readFileSync(receiptPath, "utf8");
   for (const forbidden of [
@@ -775,6 +802,30 @@ test("frozen config mutation is detected and both snapshots are cleaned", async 
   assert.equal(value.puts.length, 0);
   assert.equal(value.leaseEvents.length, 0);
   assert.equal(value.snapshotPaths.size, 2);
+  for (const path of value.snapshotPaths) assert.equal(existsSync(path), false);
+});
+
+test("relay cleanup failure preserves the provisioning failure", async () => {
+  const value = fixture({ leaseCollision: true });
+  await assert.rejects(
+    provisionRelaySigningKey(options(), {
+      ...value,
+      async cleanupSnapshots(snapshots) {
+        await Promise.all([
+          snapshots.controlPlane.cleanup(),
+          snapshots.emailEdge.cleanup(),
+        ]);
+        throw new Error("synthetic relay snapshot cleanup failure");
+      },
+    }),
+    (error) => {
+      assert.equal(error instanceof AggregateError, true);
+      assert.equal(error.errors.length, 2);
+      assert.match(error.errors[0].message, /already holds the lease/);
+      assert.match(error.errors[1].message, /snapshot cleanup failure/);
+      return true;
+    },
+  );
   for (const path of value.snapshotPaths) assert.equal(existsSync(path), false);
 });
 
@@ -842,19 +893,68 @@ test("provider inspection binds exact active zone, account, and dark routes", as
   assert.equal(JSON.stringify(state).includes(accountID), false);
   assert.equal(JSON.stringify(state).includes(zoneID), false);
 
-  for (const [candidate, pattern] of [
+  const legacyForwarding = await captureRelayProviderDarkState(
+    api({
+      zoneName: "witwave.ai",
+      catchAll: {
+        ...disabledCatchAll,
+        enabled: true,
+        actions: [{ type: "forward", value: ["operator@example.net"] }],
+      },
+      rules: [{
+        ...disabledCatchAll,
+        enabled: true,
+        actions: [{ type: "forward", value: ["operator@example.net"] }],
+      }],
+    }),
+    { "witwave.ai": "legacy" },
+  );
+  assert.equal(legacyForwarding.provider_scope.contract, "legacy");
+  assert.equal(legacyForwarding.owned_or_edge_worker_routes_enabled, false);
+
+  const valueLessDrop = await captureRelayProviderDarkState(api({
+    catchAll: {
+      ...disabledCatchAll,
+      actions: [{ type: "drop" }],
+    },
+  }));
+  assert.equal(valueLessDrop.provider_scope.contract, "primary");
+  assert.equal(valueLessDrop.owned_or_edge_worker_routes_enabled, false);
+
+  for (const [candidate, pattern, contract] of [
     [api({ zoneName: "example.com" }), /zone\/account did not match/],
     [api({ zoneAccount: "f".repeat(32) }), /zone\/account did not match/],
     [api({ status: "pending" }), /zone\/account did not match/],
     [api({ catchAll: { ...disabledCatchAll, enabled: true } }), /must remain dark/],
     [api({
+      zoneName: "witwave.ai",
+      catchAll: {
+        ...disabledCatchAll,
+        enabled: true,
+        actions: [{ type: "worker", value: [PRODUCTION_RECEIVE_WORKER] }],
+      },
+    }), /must remain dark/, { "witwave.ai": "legacy" }],
+    [api({
+      zoneName: "witwave.ai",
+      catchAll: {
+        ...disabledCatchAll,
+        enabled: true,
+        actions: [{ type: "forward", value: ["operator@example.net"] }],
+      },
+      rules: [{
+        ...disabledCatchAll,
+        enabled: true,
+        actions: [{ type: "forward", value: ["other@example.net"] }],
+      }],
+    }), /catch-all inventory was inconsistent/, { "witwave.ai": "legacy" }],
+    ...[PRODUCTION_RECEIVE_WORKER, LEGACY_PILOT_WORKER].map((worker) => [api({
       rules: [{
         id: "e".repeat(32),
         name: "unrelated-name",
         enabled: true,
-        actions: [{ type: "worker", value: [EMAIL_EDGE_WORKER] }],
+        actions: [{ type: "worker", value: [worker] }],
       }],
-    }), /must remain dark/],
+    }), /must remain dark/]),
     [api({
       rules: [{
         id: "f".repeat(32),
@@ -863,8 +963,26 @@ test("provider inspection binds exact active zone, account, and dark routes", as
         actions: [{ type: "worker", value: [] }],
       }],
     }), /inventory was invalid/],
+    [api({
+      catchAll: {
+        ...disabledCatchAll,
+        actions: [{ type: "archive", value: ["bucket"] }],
+      },
+    }), /inventory was invalid/],
+    [api({
+      catchAll: {
+        ...disabledCatchAll,
+        actions: [{ type: "forward", value: [
+          "one@example.net",
+          "two@example.net",
+        ] }],
+      },
+    }), /inventory was invalid/],
   ]) {
-    await assert.rejects(captureRelayProviderDarkState(candidate), pattern);
+    await assert.rejects(
+      captureRelayProviderDarkState(candidate, contract),
+      pattern,
+    );
   }
 });
 
@@ -899,6 +1017,10 @@ test("target configs require one matching v0.0.241 release and provider contract
   assert.throws(
     () => options("/private/wrong.json", "example.com"),
     /must be witmail.net or witwave.ai/,
+  );
+  assert.throws(
+    () => options(join(process.cwd(), "relay-receipt.json")),
+    /outside the repository checkout/,
   );
 
   const old = JSON.parse(files[EDGE_CONFIG]);
@@ -997,6 +1119,55 @@ test("receipt collisions refuse mutation and failure after reservation stays pen
     "secret_write_started",
   );
   assert.equal(failed.leaseEvents.at(-1).type, "release");
+});
+
+test("lease-release failure retains the durable pending relay receipt", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "witself-relay-release-failure-"));
+  const receiptPath = join(dir, "receipt.json");
+  const value = fixture({
+    realReceipt: receiptPath,
+    releaseFailure: true,
+  });
+  await assert.rejects(
+    provisionRelaySigningKey(options(receiptPath), value),
+    /operations lease release failed/,
+  );
+  assert.equal(value.puts.length, 1);
+  const persisted = JSON.parse(readFileSync(receiptPath, "utf8"));
+  assert.equal(
+    persisted.schema,
+    "witself.agent-email-relay-signing-key-provisioning-pending.v1",
+  );
+  assert.equal(persisted.state, "secret_write_started");
+  assert.equal(value.calls.some((call) =>
+    call.type === "receipt-commit"), false);
+  assert.equal(value.calls.some((call) =>
+    call.type === "receipt-close"), true);
+});
+
+test("relay ceremony requires the exact production Cloudflare identity", async () => {
+  for (const environment of [
+    {},
+    {
+      CF_ACCOUNT_ID: accountID,
+      CF_API_TOKEN: "alias-token",
+    },
+    {
+      CLOUDFLARE_ACCOUNT_ID: "f".repeat(32),
+      CLOUDFLARE_API_TOKEN: "wrong-account-token",
+    },
+    {
+      CLOUDFLARE_ACCOUNT_ID: accountID,
+      CLOUDFLARE_API_TOKEN: " ",
+    },
+  ]) {
+    const value = fixture();
+    await assert.rejects(
+      provisionRelaySigningKey(options(), { ...value, environment }),
+      /CLOUDFLARE_ACCOUNT_ID must identify production account|CLOUDFLARE_API_TOKEN is missing or invalid/,
+    );
+    assert.equal(value.calls.length, 0);
+  }
 });
 
 test("provider, Worker, lease, and non-secret drift fail closed", async () => {

@@ -44,7 +44,7 @@ const cohortAccountID = "acc_abcdefghijkl2345";
 const manifest = {
   schema_version: 2,
   domain: "witmail.net",
-  worker_name: "witself-agent-email-pilot",
+  worker_name: "witself-agent-email-receive",
   account_ids: [cohortAccountID],
   agents: ["alpha", "bravo", "charlie", "delta", "echo"].map((name, index) => ({
     agent_id: `agent_${"a".repeat(15)}${index + 2}`,
@@ -155,7 +155,7 @@ function workerState() {
         plain("AGENT_EMAIL_DOMAIN", "witmail.net"),
         plain("AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", cohortAccountID),
         plain("AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS", ROUTE_PUBLIC_KEY_ENV),
-        plain("CONTROL_PLANE_URL", "https://control.example/"),
+        plain("CONTROL_PLANE_URL", "https://self.witwave.ai/"),
         { name: "EMAIL_DIRECTORY", namespace_id: namespaceID, type: "kv_namespace" },
         secret("CONTROL_PLANE_EDGE_TOKEN"),
         secret("RELAY_ED25519_PRIVATE_KEY"),
@@ -311,7 +311,7 @@ test("disable is independently fenced and its receipt cannot re-enable via rollb
     ...api.catchAll,
     name: "Witself agent email catch-all",
     enabled: true,
-    actions: [{ type: "worker", value: ["witself-agent-email-pilot"] }],
+    actions: [{ type: "worker", value: ["witself-agent-email-receive"] }],
   };
   const unavailable = {
     inspectWorkers: async () => { throw new Error("unavailable"); },
@@ -336,7 +336,7 @@ test("catch-all apply serializes the final read and provider write with the shar
     ...api.catchAll,
     name: "Witself agent email catch-all",
     enabled: true,
-    actions: [{ type: "worker", value: ["witself-agent-email-pilot"] }],
+    actions: [{ type: "worker", value: ["witself-agent-email-receive"] }],
   };
   const leaseCalls = [];
   const guarded = runtime(leaseCalls);
@@ -364,7 +364,7 @@ test("catch-all apply serializes the final read and provider write with the shar
     ...refusedAPI.catchAll,
     name: "Witself agent email catch-all",
     enabled: true,
-    actions: [{ type: "worker", value: ["witself-agent-email-pilot"] }],
+    actions: [{ type: "worker", value: ["witself-agent-email-receive"] }],
   };
   const refusedPlan = await createCatchAllPlan(
     refusedAPI,
@@ -535,7 +535,7 @@ test("catch-all apply reserves the protected receipt before any mutation", async
       ...api.catchAll,
       name: "Witself agent email catch-all",
       enabled: true,
-      actions: [{ type: "worker", value: ["witself-agent-email-pilot"] }],
+      actions: [{ type: "worker", value: ["witself-agent-email-receive"] }],
     };
     const plan = await createCatchAllPlan(api, {}, manifest, "disable", {
       now: () => new Date(),
@@ -573,7 +573,7 @@ test("catch-all apply durably replaces its pending journal with a mode-0600 rece
       ...api.catchAll,
       name: "Witself agent email catch-all",
       enabled: true,
-      actions: [{ type: "worker", value: ["witself-agent-email-pilot"] }],
+      actions: [{ type: "worker", value: ["witself-agent-email-receive"] }],
     };
     const plan = await createCatchAllPlan(api, {}, manifest, "disable", {
       now: () => new Date(),

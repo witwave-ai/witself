@@ -7,14 +7,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: agent-email-storage-probe
+  group: agent-email-production-receive-probe
   cancel-in-progress: false
 
 jobs:
   raw-mime-storage-probe:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: agent-email-canary
-    timeout-minutes: 5
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: infra/cloudflare/agent-email
@@ -25,8 +26,24 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
+      - name: Verify reviewed production source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - name: Verify the bounded storage probe
         run: node --test test/storage-probe.test.mjs
+      - name: Prove the production receive path
+        run: npm run canary
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.AGENT_EMAIL_CANARY_CLOUDFLARE_TOKEN }}
+          AGENT_EMAIL_CANARY_FROM: ${{ secrets.AGENT_EMAIL_CANARY_FROM }}
+          AGENT_EMAIL_CANARY_TO: ${{ secrets.AGENT_EMAIL_CANARY_TO }}
+          WITSELF_EMAIL_CANARY_ENDPOINT: ${{ vars.WITSELF_EMAIL_CANARY_ENDPOINT }}
+          WITSELF_EMAIL_CANARY_TOKEN: ${{ secrets.WITSELF_EMAIL_CANARY_TOKEN }}
+          AGENT_EMAIL_CANARY_TIMEOUT_SECONDS: "600"
       - name: Submit the raw-MIME storage probe
         run: npm run storage-probe
         env:

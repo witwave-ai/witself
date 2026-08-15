@@ -4,12 +4,22 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { sourceIdentity } from "./source-identity.mjs";
+import {
+  assertReleaseSource,
+  sourceIdentity,
+} from "./source-identity.mjs";
 import {
   parseManagedDeliveryAccountAllowlist,
 } from "../src/managed-delivery-cohort.mjs";
+import { PRODUCTION_RECEIVE_WORKER } from "../src/worker-names.mjs";
+import {
+  assertProductionCloudflareIdentity,
+  sanitizedWranglerInspectionEnvironment,
+  withReviewedWranglerEnvironmentFile,
+} from "./wrangler-environment.mjs";
 
-const WORKER_NAME = "witself-agent-email-pilot";
+const WORKER_NAME = PRODUCTION_RECEIVE_WORKER;
+const CONTROL_PLANE_URL = "https://self.witwave.ai/";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const OPAQUE_ETAG = /^[0-9A-Za-z._:-]{16,256}$/;
 
@@ -104,11 +114,8 @@ export function expectedDeployment(env, release) {
   } catch {
     throw new Error("CONTROL_PLANE_URL is missing or invalid");
   }
-  if (rawControlPlaneURL !== rawControlPlaneURL.trim() ||
-      controlPlaneURL.protocol !== "https:" || controlPlaneURL.username ||
-      controlPlaneURL.password || controlPlaneURL.search || controlPlaneURL.hash ||
-      !controlPlaneURL.hostname || controlPlaneURL.hostname === "localhost" ||
-      (controlPlaneURL.pathname !== "/" && controlPlaneURL.pathname !== "")) {
+  if (rawControlPlaneURL !== CONTROL_PLANE_URL ||
+      controlPlaneURL.toString() !== CONTROL_PLANE_URL) {
     throw new Error("CONTROL_PLANE_URL is missing or invalid");
   }
   return Object.freeze({
@@ -262,7 +269,9 @@ export function verifyDeployment(status, version, expected, {
 }
 
 function wranglerJSON(args) {
-  const result = spawnSync("wrangler", args, {
+  assertProductionCloudflareIdentity(process.env);
+  const result = spawnSync("wrangler", withReviewedWranglerEnvironmentFile(args), {
+    env: sanitizedWranglerInspectionEnvironment(process.env),
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -278,11 +287,18 @@ function wranglerJSON(args) {
 
 export function verifyProduction({
   env = process.env,
+  inspect = wranglerJSON,
   requireAnnotations = false,
+  release = null,
 } = {}) {
-  const release = sourceIdentity({ requireRelease: true });
-  const expected = expectedDeployment(env, release);
-  const status = wranglerJSON([
+  if (typeof inspect !== "function") {
+    throw new Error("production Worker deployment inspector was invalid");
+  }
+  const targetRelease = release == null
+    ? sourceIdentity({ requireRelease: true })
+    : assertReleaseSource(release);
+  const expected = expectedDeployment(env, targetRelease);
+  const status = inspect([
     "deployments", "status", "--name", WORKER_NAME, "--json",
   ]);
   const versionID = status?.versions?.length === 1
@@ -291,10 +307,25 @@ export function verifyProduction({
   if (!UUID.test(versionID)) {
     throw new Error("production Worker deployment did not identify one active version");
   }
-  const version = wranglerJSON([
+  const version = inspect([
     "versions", "view", versionID, "--name", WORKER_NAME, "--json",
   ]);
-  return verifyDeployment(status, version, expected, { requireAnnotations });
+  const attestation = verifyDeployment(
+    status,
+    version,
+    expected,
+    { requireAnnotations },
+  );
+  const finalStatus = inspect([
+    "deployments", "status", "--name", WORKER_NAME, "--json",
+  ]);
+  verifyDeployment(finalStatus, version, expected, { requireAnnotations });
+  if (finalStatus.id !== status.id) {
+    throw new Error(
+      "production Worker deployment changed during exact provider inspection",
+    );
+  }
+  return attestation;
 }
 
 function parseArgs(argv) {

@@ -3,11 +3,13 @@ import {
   normalizePilotManifest,
   recipientKey,
   runtimeConfig,
-  runtimeRecipient,
 } from "../src/directory.mjs";
 import { assertIsolatedEmailDirectory } from "./cloudflare.mjs";
+import { LEGACY_PILOT_WORKER } from "../src/worker-names.mjs";
 
-const RULE_PREFIX = "witself-agent-email-pilot:";
+const RULE_PREFIX = `${LEGACY_PILOT_WORKER}:`;
+export const LEGACY_ROUTE_ACTIVATION_RETIRED =
+  "legacy literal-route prepare and activate are retired; use the production primary-route manager";
 
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
@@ -80,14 +82,6 @@ function assertCatchAllUnchanged(before, after) {
   }
 }
 
-async function assertSubaddressingEnabled(api) {
-  const settings = await api.getEmailRoutingSettings();
-  if (settings?.support_subaddress !== true) {
-    throw new Error("Cloudflare Email Routing subaddressing is not enabled");
-  }
-  return settings;
-}
-
 async function verifyCatchAllUnchanged(api, before) {
   let after;
   try {
@@ -139,23 +133,14 @@ async function operation(api, fn, { rollback } = {}) {
   throw operationError ?? invariantError;
 }
 
-async function writeDirectoryDetails(api, manifest) {
-  for (const agent of manifest.agents) {
-    await api.putKV(recipientKey(agent.address), runtimeRecipient(manifest, agent));
-  }
-}
-
 async function setRuleStates(
   api,
   manifest,
   enabled,
-  { requireComplete = false, rejectStale = true, skipUnmanaged = false } = {},
+  { rejectStale = true, skipUnmanaged = false } = {},
 ) {
   const rules = await api.listRules();
   const indexed = indexRules(rules, manifest, { rejectStale, skipUnmanaged });
-  if (requireComplete && indexed.size !== manifest.agents.length) {
-    throw new Error("pilot routes are incomplete; run prepare before activate");
-  }
   for (const agent of manifest.agents) {
     const current = indexed.get(agent.address);
     if (!current) continue;
@@ -183,41 +168,12 @@ async function failClosed(api, manifest) {
   }
 }
 
-export async function preparePilot(api, manifestInput) {
-  const manifest = normalizePilotManifest(manifestInput);
-  await assertSubaddressingEnabled(api);
-  const rollback = () => failClosed(api, manifest);
-  return operation(api, async () => {
-    // Validate before mutating, then make config-off the first write. Any
-    // subsequent partial preparation is non-accepting even if a prior route
-    // was active.
-    indexRules(await api.listRules(), manifest);
-    await api.putKV(CONFIG_KEY, runtimeConfig(manifest, false));
-    const indexed = await setRuleStates(api, manifest, false);
-    await writeDirectoryDetails(api, manifest);
-    for (const agent of manifest.agents) {
-      if (!indexed.has(agent.address)) {
-        await api.createRule(desiredRule(manifest, agent.address, false));
-      }
-    }
-    return { state: "prepared", realm_id: manifest.realm_id, addresses: manifest.agents.length };
-  }, { rollback });
+export async function preparePilot(_api, _manifestInput) {
+  throw new Error(LEGACY_ROUTE_ACTIVATION_RETIRED);
 }
 
-export async function activatePilot(api, manifestInput) {
-  const manifest = normalizePilotManifest(manifestInput);
-  await assertSubaddressingEnabled(api);
-  const rollback = () => failClosed(api, manifest);
-  return operation(api, async () => {
-    // Validate the complete exact-route set before exposing an enabled config.
-    await setRuleStates(api, manifest, false, { requireComplete: true });
-    // Recipient detail rows were published by prepare and need time to reach
-    // the edge. Activation changes only the small config gate; rewriting every
-    // detail row here would restart their eventual-consistency window.
-    await api.putKV(CONFIG_KEY, runtimeConfig(manifest, true));
-    await setRuleStates(api, manifest, true, { requireComplete: true });
-    return { state: "active", realm_id: manifest.realm_id, addresses: manifest.agents.length };
-  }, { rollback });
+export async function activatePilot(_api, _manifestInput) {
+  throw new Error(LEGACY_ROUTE_ACTIVATION_RETIRED);
 }
 
 export async function disablePilot(api, manifestInput) {

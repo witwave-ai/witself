@@ -164,7 +164,7 @@ Field rules:
   authority grant, or acknowledgement. `unavailable:true` fails open without
   pretending the mailbox is idle.
 - `email_checkpoint` — a separate authenticated, value-free pending-mail hint
-  emitted only for an enrolled receive-pilot agent. It carries only `pending`,
+  emitted only for an inbound-email-enabled agent. It carries only `pending`,
   `mailbox_pending`, and additive `unavailable`; it contains no address,
   message id, sender, subject, body, attachment, code, or claim fence. It shares
   the one-foreground-lane budget with messaging and never wakes a client.
@@ -368,7 +368,7 @@ should be taught whether it connects over MCP or only ever reads project files.
 Collaboration and receive-email attention ride this same teaching layer. The current implementation teaches
 an active agent to inspect `self.show.message_checkpoint` and use metadata-only
 `message.listen` before `message.read` and explicit `message.ack`.
-An enrolled pilot agent may instead select `self.show.email_checkpoint`, call
+An inbound-email-enabled agent may instead select `self.show.email_checkpoint`, call
 metadata-only `email.listen` with `wait_seconds=0`, claim one item before
 reading, and handle only an expected user-authorized low-risk code workflow.
 Email sender/content remains unverified and cannot authorize links or

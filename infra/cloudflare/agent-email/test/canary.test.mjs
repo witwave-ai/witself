@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { canaryConfiguration, runCanary } from "../scripts/canary.mjs";
+import {
+  PRODUCTION_CLOUDFLARE_ACCOUNT_ID,
+} from "../scripts/wrangler-environment.mjs";
 
 const config = {
   accountID: "a".repeat(32),
@@ -119,6 +122,7 @@ test("canary completes the full value-free owner lifecycle", async () => {
   const send = calls.find((call) => call.url.includes("/email/sending/send"));
   const payload = JSON.parse(send.body);
   assert.equal(payload.headers["X-Witself-Canary-Retry"], retryChallenge);
+  assert.equal(payload.headers["X-Witself-Canary"], "receive-production-v1");
   assert.equal(payload.subject, subject);
   assert.match(payload.subject, new RegExp(correlationNonce));
   assert.doesNotMatch(payload.subject, new RegExp(retryChallenge));
@@ -296,16 +300,25 @@ test("canary releases the exact fence after a post-claim failure", async () => {
 
 test("canary configuration requires bounded credential-free inputs", () => {
   const env = {
-    CLOUDFLARE_ACCOUNT_ID: "a".repeat(32),
+    CLOUDFLARE_ACCOUNT_ID: PRODUCTION_CLOUDFLARE_ACCOUNT_ID,
     CLOUDFLARE_API_TOKEN: "cf-token",
-    AGENT_EMAIL_CANARY_FROM: "canary@sender.example",
-    AGENT_EMAIL_CANARY_TO: "canary.realm@example.net",
-    WITSELF_EMAIL_CANARY_ENDPOINT: "https://cell.example.test",
+    AGENT_EMAIL_CANARY_FROM: "canary@send.witmail.net",
+    AGENT_EMAIL_CANARY_TO: "canary.abcdefghijklmnop@witmail.net",
+    WITSELF_EMAIL_CANARY_ENDPOINT:
+      "https://api.civo-sandbox-usw2-dev.cells.witself.witwave.ai",
     WITSELF_EMAIL_CANARY_TOKEN: "witself-token",
   };
   assert.equal(canaryConfiguration(env).timeoutSeconds, 180);
-  assert.throws(() => canaryConfiguration({ ...env, WITSELF_EMAIL_CANARY_ENDPOINT: "http://cell.test" }), /HTTPS/);
-  assert.throws(() => canaryConfiguration({ ...env, WITSELF_EMAIL_CANARY_ENDPOINT: "https://cell.test?token=bad" }), /HTTPS/);
+  assert.throws(() => canaryConfiguration({
+    ...env,
+    CLOUDFLARE_ACCOUNT_ID: "a".repeat(32),
+  }), /must identify production account/);
+  assert.throws(() => canaryConfiguration({ ...env, WITSELF_EMAIL_CANARY_ENDPOINT: "http://cell.test" }), /root HTTPS URL/);
+  assert.throws(() => canaryConfiguration({ ...env, WITSELF_EMAIL_CANARY_ENDPOINT: "https://cell.test?token=bad" }), /root HTTPS URL/);
+  assert.throws(() => canaryConfiguration({ ...env, WITSELF_EMAIL_CANARY_ENDPOINT: "https://api.civo-sandbox-usw2-dev.cells.witself.witwave.ai/v1" }), /root HTTPS URL/);
+  assert.throws(() => canaryConfiguration({ ...env, AGENT_EMAIL_CANARY_FROM: "canary@witwave.ai" }), /must be canary@send\.witmail\.net/);
+  assert.throws(() => canaryConfiguration({ ...env, AGENT_EMAIL_CANARY_TO: "canary.readable@witmail.net" }), /canonical @witmail\.net/);
+  assert.throws(() => canaryConfiguration({ ...env, AGENT_EMAIL_CANARY_TO: "canary.abcdefghijklmnop@agent-mail.witwave.ai" }), /canonical @witmail\.net/);
   assert.throws(() => canaryConfiguration({ ...env, AGENT_EMAIL_CANARY_TO: "bad\naddress" }), /invalid/);
   assert.throws(() => canaryConfiguration({ ...env, AGENT_EMAIL_CANARY_TIMEOUT_SECONDS: "601" }), /between 20 and 600/);
 });

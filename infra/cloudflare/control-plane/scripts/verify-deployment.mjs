@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstatSync } from "node:fs";
+import { lstatSync, readdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import {
   basename,
@@ -21,6 +21,11 @@ import {
 import {
   parseManagedDeliveryAccountAllowlist,
 } from "../src/agent-email-managed-delivery-cohort.mjs";
+import {
+  assertProductionCloudflareIdentity,
+  sanitizedWranglerInspectionEnvironment,
+  withReviewedWranglerEnvironmentFile,
+} from "../../agent-email/scripts/wrangler-environment.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const generatedConfigPath = join(root, "wrangler.generated.jsonc");
@@ -353,13 +358,47 @@ export function expectedBuildMetadata(config, expectedMain = "src/index.js") {
   });
 }
 
-export function privateDeploymentConfigMain(configPath) {
+function privateWranglerStateIsSafe(directory) {
+  const wranglerDirectory = join(directory, ".wrangler");
+  const wranglerTempDirectory = join(wranglerDirectory, "tmp");
+  try {
+    const wranglerMetadata = lstatSync(wranglerDirectory);
+    const wranglerTempMetadata = lstatSync(wranglerTempDirectory);
+    return wranglerMetadata.isDirectory() &&
+      !wranglerMetadata.isSymbolicLink() &&
+      (wranglerMetadata.mode & 0o777) === 0o700 &&
+      JSON.stringify(readdirSync(wranglerDirectory)) ===
+        JSON.stringify(["tmp"]) &&
+      wranglerTempMetadata.isDirectory() &&
+      !wranglerTempMetadata.isSymbolicLink() &&
+      (wranglerTempMetadata.mode & 0o777) === 0o700 &&
+      readdirSync(wranglerTempDirectory).length === 0;
+  } catch {
+    return false;
+  }
+}
+
+export function privateDeploymentConfigMain(
+  configPath,
+  expectedControlPlaneRoot = root,
+) {
   const path = resolve(configPath);
-  const cloudflareRoot = resolve(root, "..");
   const directory = dirname(path);
-  const entrypoint = join(root, "src", "index.js");
+  const cloudflareRoot = dirname(directory);
+  const infraRoot = dirname(cloudflareRoot);
+  const repositoryRoot = dirname(infraRoot);
+  const snapshotRoot = dirname(repositoryRoot);
+  const controlPlane = join(cloudflareRoot, "control-plane");
+  const entrypoint = join(controlPlane, "src", "index.js");
+  const workDirectory = join(snapshotRoot, "work");
   if (basename(path) !== "wrangler.generated.jsonc" ||
-      dirname(directory) !== cloudflareRoot ||
+      basename(cloudflareRoot) !== "cloudflare" ||
+      basename(infraRoot) !== "infra" ||
+      basename(repositoryRoot) !== "repository" ||
+      !/^witself-control-plane-release-[A-Za-z0-9]{6}$/.test(
+        basename(snapshotRoot),
+      ) ||
+      resolve(expectedControlPlaneRoot) !== controlPlane ||
       !/^witself-control-plane-deploy-[A-Za-z0-9]{6}$/.test(
         basename(directory),
       )) {
@@ -367,16 +406,36 @@ export function privateDeploymentConfigMain(configPath) {
       "deployment verification requires an exact private control-plane configuration path",
     );
   }
-  const [directoryMetadata, configMetadata, entrypointMetadata] = [
+  const [
+    snapshotMetadata,
+    repositoryMetadata,
+    workMetadata,
+    directoryMetadata,
+    configMetadata,
+    entrypointMetadata,
+  ] = [
+    lstatSync(snapshotRoot),
+    lstatSync(repositoryRoot),
+    lstatSync(workDirectory),
     lstatSync(directory),
     lstatSync(path),
     lstatSync(entrypoint),
   ];
-  if (!directoryMetadata.isDirectory() || directoryMetadata.isSymbolicLink() ||
+  if (!snapshotMetadata.isDirectory() || snapshotMetadata.isSymbolicLink() ||
+      (snapshotMetadata.mode & 0o777) !== 0o700 ||
+      !repositoryMetadata.isDirectory() || repositoryMetadata.isSymbolicLink() ||
+      (repositoryMetadata.mode & 0o777) !== 0o555 ||
+      !workMetadata.isDirectory() || workMetadata.isSymbolicLink() ||
+      (workMetadata.mode & 0o777) !== 0o700 ||
+      !directoryMetadata.isDirectory() || directoryMetadata.isSymbolicLink() ||
       (directoryMetadata.mode & 0o777) !== 0o700 ||
+      JSON.stringify(readdirSync(directory).sort()) !==
+        JSON.stringify([".wrangler", "wrangler.generated.jsonc"]) ||
+      !privateWranglerStateIsSafe(directory) ||
       !configMetadata.isFile() || configMetadata.isSymbolicLink() ||
       (configMetadata.mode & 0o777) !== 0o400 ||
-      !entrypointMetadata.isFile() || entrypointMetadata.isSymbolicLink()) {
+      !entrypointMetadata.isFile() || entrypointMetadata.isSymbolicLink() ||
+      ![0o444, 0o555].includes(entrypointMetadata.mode & 0o777)) {
     throw new Error(
       "deployment verification requires immutable private configuration metadata",
     );
@@ -645,12 +704,27 @@ export function verifyWorkerVersion(version, expected, expectedVersionID, {
   });
 }
 
-function wranglerJSON(args, operation) {
-  const result = spawnSync("wrangler", args, {
-    cwd: root,
+export function wranglerJSON(
+  args,
+  operation,
+  environment = process.env,
+  run = spawnSync,
+  {
+    cwd = root,
+    reviewedEnvironmentFile,
+  } = {},
+) {
+  assertProductionCloudflareIdentity(environment);
+  const result = run("wrangler", withReviewedWranglerEnvironmentFile(
+    args,
+    reviewedEnvironmentFile,
+  ), {
+    cwd,
+    env: sanitizedWranglerInspectionEnvironment(environment),
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: 5 * 1024 * 1024,
+    timeout: 30_000,
   });
   if (result.error || result.status !== 0) {
     throw new Error(`could not ${operation} with Wrangler`);
@@ -680,6 +754,17 @@ export function verifyCurrentWorkerDeployment(
     "--name", expected.service,
     "--json",
   ], "inspect the current control-plane Worker version");
+  const finalDeployment = inspect([
+    "deployments", "status",
+    "--config", config,
+    "--name", expected.service,
+    "--json",
+  ], "reinspect the current control-plane deployment");
+  if (currentProductionVersionID(finalDeployment) !== versionID) {
+    throw new Error(
+      "control-plane deployment changed during exact provider inspection",
+    );
+  }
   return verifyWorkerVersion(version, expected, versionID);
 }
 
@@ -687,6 +772,8 @@ function parseArgs(argv) {
   const out = {
     config: generatedConfigPath,
     expectedMain: "src/index.js",
+    wranglerCwd: root,
+    reviewedEnvironmentFile: undefined,
     endpoint: process.env.WITSELF_CONTROL_PLANE ?? "https://self.witwave.ai",
     // Container-backed Worker revisions can take several minutes to replace
     // their live instances after the Worker upload has completed.
@@ -695,7 +782,8 @@ function parseArgs(argv) {
   };
   for (let i = 0; i < argv.length; i += 1) {
     const name = argv[i];
-    if (!["--config", "--endpoint", "--attempts", "--delay-ms"].includes(name)) {
+    if (!["--config", "--endpoint", "--attempts", "--delay-ms",
+      "--wrangler-cwd", "--reviewed-env-file"].includes(name)) {
       throw new Error(`unknown argument ${name}`);
     }
     const value = argv[++i];
@@ -709,6 +797,18 @@ function parseArgs(argv) {
       break;
     case "--endpoint":
       out.endpoint = value;
+      break;
+    case "--wrangler-cwd":
+      out.wranglerCwd = resolve(value);
+      if (out.wranglerCwd !== value) {
+        throw new Error("--wrangler-cwd must be a normalized absolute path");
+      }
+      break;
+    case "--reviewed-env-file":
+      out.reviewedEnvironmentFile = resolve(value);
+      if (out.reviewedEnvironmentFile !== value) {
+        throw new Error("--reviewed-env-file must be a normalized absolute path");
+      }
       break;
     case "--attempts":
       out.attempts = Number(value);
@@ -738,7 +838,21 @@ async function main() {
     await readFile(args.config, "utf8"),
     args.expectedMain,
   );
-  const attestation = verifyCurrentWorkerDeployment(expected, args.config);
+  const inspect = (wranglerArgs, operation) => wranglerJSON(
+    wranglerArgs,
+    operation,
+    process.env,
+    spawnSync,
+    {
+      cwd: args.wranglerCwd,
+      reviewedEnvironmentFile: args.reviewedEnvironmentFile,
+    },
+  );
+  const attestation = verifyCurrentWorkerDeployment(
+    expected,
+    args.config,
+    inspect,
+  );
   process.stdout.write(
     `verified outer Worker ${attestation.version_id} (${attestation.script_etag})\n`,
   );

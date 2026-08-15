@@ -2,6 +2,10 @@
 import { randomInt, randomUUID } from "node:crypto";
 
 import { CloudflareAPI } from "./cloudflare.mjs";
+import {
+  assertProductionCloudflareIdentity,
+} from "./wrangler-environment.mjs";
+import { parseRouteAddress } from "../src/directory.mjs";
 
 const MESSAGE_ID = /^emsg_[a-z2-7]{16}$/;
 const CLAIM_ID = /^ecl_[a-z2-7]{16}$/;
@@ -10,6 +14,10 @@ const EMAIL_DISCOVERY_PAGE_SIZE = 100;
 const MAX_EMAIL_DISCOVERY_PAGES = 100;
 const EMAIL_DISCOVERY_RETRY_MS = 1000;
 const MAX_EMAIL_CURSOR_BYTES = 4096;
+const PRODUCTION_CANARY_FROM = "canary@send.witmail.net";
+const PRODUCTION_RECEIVE_DOMAIN = "witmail.net";
+const CANONICAL_REALM_LABEL = /^[a-z2-7]{16}$/;
+const CELL_HOST = /^api\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cells\.witself\.witwave\.ai$/;
 
 function required(value, name) {
   const normalized = String(value ?? "").trim();
@@ -32,10 +40,41 @@ function endpoint(value) {
   } catch {
     throw new Error("WITSELF_EMAIL_CANARY_ENDPOINT is missing or invalid");
   }
-  if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.hash || parsed.search) {
-    throw new Error("WITSELF_EMAIL_CANARY_ENDPOINT must be a credential-free HTTPS URL");
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password ||
+      parsed.hash || parsed.search || parsed.port || parsed.pathname !== "/" ||
+      !CELL_HOST.test(parsed.hostname)) {
+    throw new Error(
+      "WITSELF_EMAIL_CANARY_ENDPOINT must be the root HTTPS URL of one production cell",
+    );
   }
   return parsed.toString().replace(/\/$/, "");
+}
+
+function canarySender(value) {
+  const normalized = emailAddress(value, "AGENT_EMAIL_CANARY_FROM");
+  if (normalized !== PRODUCTION_CANARY_FROM) {
+    throw new Error(`AGENT_EMAIL_CANARY_FROM must be ${PRODUCTION_CANARY_FROM}`);
+  }
+  return normalized;
+}
+
+function canaryRecipient(value) {
+  const normalized = emailAddress(value, "AGENT_EMAIL_CANARY_TO");
+  let parsed;
+  try {
+    parsed = parseRouteAddress(normalized, false);
+  } catch {
+    throw new Error(
+      `AGENT_EMAIL_CANARY_TO must be one canonical @${PRODUCTION_RECEIVE_DOMAIN} address`,
+    );
+  }
+  if (parsed.domain !== PRODUCTION_RECEIVE_DOMAIN ||
+      !CANONICAL_REALM_LABEL.test(parsed.realmLabel)) {
+    throw new Error(
+      `AGENT_EMAIL_CANARY_TO must be one canonical @${PRODUCTION_RECEIVE_DOMAIN} address`,
+    );
+  }
+  return normalized;
 }
 
 function withAbsoluteDeadline(fetchAPI, deadlineAt, now) {
@@ -53,8 +92,7 @@ function withAbsoluteDeadline(fetchAPI, deadlineAt, now) {
 }
 
 export function canaryConfiguration(env = process.env) {
-  const accountID = required(env.CLOUDFLARE_ACCOUNT_ID, "CLOUDFLARE_ACCOUNT_ID");
-  if (!/^[0-9a-f]{32}$/.test(accountID)) throw new Error("CLOUDFLARE_ACCOUNT_ID is missing or invalid");
+  const identity = assertProductionCloudflareIdentity(env);
   const rawTimeout = String(env.AGENT_EMAIL_CANARY_TIMEOUT_SECONDS ?? "180");
   if (!/^\d+$/.test(rawTimeout)) throw new Error("AGENT_EMAIL_CANARY_TIMEOUT_SECONDS is invalid");
   const timeoutSeconds = Number(rawTimeout);
@@ -62,10 +100,10 @@ export function canaryConfiguration(env = process.env) {
     throw new Error("AGENT_EMAIL_CANARY_TIMEOUT_SECONDS must be between 20 and 600");
   }
   return {
-    accountID,
-    cloudflareToken: required(env.CLOUDFLARE_API_TOKEN, "CLOUDFLARE_API_TOKEN"),
-    from: emailAddress(env.AGENT_EMAIL_CANARY_FROM, "AGENT_EMAIL_CANARY_FROM"),
-    to: emailAddress(env.AGENT_EMAIL_CANARY_TO, "AGENT_EMAIL_CANARY_TO"),
+    accountID: identity.account_id,
+    cloudflareToken: env.CLOUDFLARE_API_TOKEN,
+    from: canarySender(env.AGENT_EMAIL_CANARY_FROM),
+    to: canaryRecipient(env.AGENT_EMAIL_CANARY_TO),
     endpoint: endpoint(env.WITSELF_EMAIL_CANARY_ENDPOINT),
     witselfToken: required(env.WITSELF_EMAIL_CANARY_TOKEN, "WITSELF_EMAIL_CANARY_TOKEN"),
     timeoutSeconds,
@@ -246,7 +284,7 @@ export async function runCanary(config, runtime = {}) {
     subject,
     text: `Synthetic monitoring message. Verification code: ${code}.`,
     headers: {
-      "X-Witself-Canary": "receive-pilot-v1",
+      "X-Witself-Canary": "receive-production-v1",
       "X-Witself-Canary-Retry": retryChallenge,
     },
   });

@@ -4944,7 +4944,7 @@ func (ic *importCtx) validateImportedAgentEmailMessage(obj map[string]any) (stri
 		return "", agentEmailMessageImportScope{}, fmt.Errorf("envelope_recipient does not match address and subaddress")
 	}
 	rawSize, ok := importedPositiveInteger(obj["raw_size_bytes"])
-	if !ok || rawSize > int64(agentemail.PilotMaximumRawBytes) {
+	if !ok || rawSize > int64(agentemail.RelayMaximumRawBytes) {
 		return "", agentEmailMessageImportScope{}, fmt.Errorf("raw MIME size is invalid")
 	}
 	rawSHA, err := requireStringField(obj, "raw_sha256")

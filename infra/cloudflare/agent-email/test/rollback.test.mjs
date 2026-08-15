@@ -7,10 +7,15 @@ import {
   createRollbackPlan,
   parseArgs,
   rollbackDeploymentArguments,
+  rollbackLiveRuntime,
   rollbackOperationsLeaseRuntime,
   sha256,
   verifyPlan,
 } from "../scripts/rollback.mjs";
+import {
+  PRODUCTION_CLOUDFLARE_ACCOUNT_ID,
+  WRANGLER_PRODUCTION_ENV_FILE,
+} from "../scripts/wrangler-environment.mjs";
 
 const deploymentID = "11111111-2222-4333-8444-555555555555";
 const currentID = "66666666-7777-4888-8999-aaaaaaaaaaaa";
@@ -322,6 +327,18 @@ test("rollback planning requires immutable identity on both versions and an olde
   }
 });
 
+test("rollback planning requires the canonical production control-plane origin", () => {
+  for (const target of ["current", "candidate"]) {
+    const fixture = fixtures();
+    binding(fixture[target], "CONTROL_PLANE_URL").text =
+      "https://attacker-control.invalid/";
+    assert.throws(
+      () => createPlan(fixture),
+      new RegExp(`${target} control-plane origin was not canonical`),
+    );
+  }
+});
+
 test("apply requires the exact reviewed plan and reverifies the final deployment", async () => {
   const fixture = fixtures();
   const plan = createPlan(fixture);
@@ -510,6 +527,100 @@ test("production rollback lease acquisition ignores hostile endpoint environment
   assert.doesNotMatch(requests[0].url, /attacker/);
 });
 
+test("production rollback scrubs poisoned Wrangler reads and mutation", async () => {
+  const calls = [];
+  const environment = {
+    PATH: "/safe/bin",
+    CLOUDFLARE_ACCOUNT_ID: PRODUCTION_CLOUDFLARE_ACCOUNT_ID,
+    CLOUDFLARE_API_TOKEN: "canonical-token",
+    CF_ACCOUNT_ID: "wrong-account",
+    CF_API_TOKEN: "wrong-token",
+    CONTROL_PLANE_EDGE_TOKEN: "lease-only-secret-at-least-16-characters",
+    CONTROL_PLANE_URL: "https://attacker.invalid",
+    CLOUDFLARE_BASE_URL: "https://attacker.invalid",
+    CLOUDFLARE_API_BASE_URL: "https://attacker.invalid",
+    CLOUDFLARE_ENV: "staging",
+    CF_API_BASE_URL: "https://attacker.invalid",
+    DOTENV_KEY: "dotenv://attacker.invalid",
+    WRANGLER_API_ENVIRONMENT: "staging",
+    WRANGLER_LOG_PATH: "/tmp/unsafe.log",
+    WRANGLER_OUTPUT_FILE_PATH: "/tmp/unsafe-output.json",
+    WRANGLER_CI_OVERRIDE_NAME: "wrong-worker",
+    WRANGLER_AUTH_URL: "https://attacker.invalid",
+    NODE_OPTIONS: "--require attacker",
+    NODE_DEBUG: "http",
+    NODE_V8_COVERAGE: "/tmp/unsafe-coverage",
+    SSLKEYLOGFILE: "/tmp/unsafe-tls",
+    WITSELF_CONTROL_PLANE: "https://attacker.invalid",
+  };
+  const runtime = rollbackLiveRuntime(environment, {
+    inspect: (args, env) => {
+      calls.push({ type: "inspect", args, env });
+      return {};
+    },
+    interactive: () => true,
+    operationsLease: operationsLease(),
+    runCommand: async (command, args, options) => {
+      calls.push({ type: "mutation", command, args, env: options.env });
+    },
+  });
+  await runtime.loadStatus();
+  await runtime.loadVersion(candidateID);
+  await runtime.deploy(candidateID);
+
+  assert.deepEqual(calls[0].args, [
+    "deployments", "status", "--name", "witself-agent-email-receive", "--json",
+    "--env-file", WRANGLER_PRODUCTION_ENV_FILE,
+  ]);
+  assert.deepEqual(calls[1].args, [
+    "versions", "view", candidateID,
+    "--name", "witself-agent-email-receive", "--json",
+    "--env-file", WRANGLER_PRODUCTION_ENV_FILE,
+  ]);
+  assert.equal(calls[2].command, "wrangler");
+  assert.equal(calls[2].args.includes("witself-agent-email-receive"), true);
+  for (const call of calls) {
+    assert.equal(
+      call.env.CLOUDFLARE_ACCOUNT_ID,
+      PRODUCTION_CLOUDFLARE_ACCOUNT_ID,
+    );
+    assert.equal(call.env.CLOUDFLARE_API_TOKEN, "canonical-token");
+    for (const unsafe of [
+      "CF_ACCOUNT_ID",
+      "CF_API_TOKEN",
+      "CONTROL_PLANE_EDGE_TOKEN",
+      "CONTROL_PLANE_URL",
+      "CLOUDFLARE_BASE_URL",
+      "CLOUDFLARE_API_BASE_URL",
+      "CLOUDFLARE_ENV",
+      "CF_API_BASE_URL",
+      "DOTENV_KEY",
+      "WRANGLER_API_ENVIRONMENT",
+      "WRANGLER_LOG_PATH",
+      "WRANGLER_OUTPUT_FILE_PATH",
+      "WRANGLER_CI_OVERRIDE_NAME",
+      "WRANGLER_AUTH_URL",
+      "NODE_OPTIONS",
+      "NODE_DEBUG",
+      "NODE_V8_COVERAGE",
+      "SSLKEYLOGFILE",
+      "WITSELF_CONTROL_PLANE",
+    ]) {
+      assert.equal(Object.hasOwn(call.env, unsafe), false, unsafe);
+    }
+  }
+});
+
+test("production rollback refuses another Cloudflare account before inspection", () => {
+  assert.throws(
+    () => rollbackLiveRuntime({
+      CLOUDFLARE_ACCOUNT_ID: "6236aa0c39cdd8d171deab7f86a12bc5",
+      CLOUDFLARE_API_TOKEN: "canonical-token",
+    }),
+    /must identify production account/,
+  );
+});
+
 test("plan hashing and CLI parsing fail closed", () => {
   const plan = createPlan();
   assert.throws(() => verifyPlan(plan, "0".repeat(64)), /did not match/);
@@ -539,8 +650,9 @@ test("plan hashing and CLI parsing fail closed", () => {
   const deploymentArguments = rollbackDeploymentArguments(candidateID);
   assert.deepEqual(deploymentArguments, [
     "versions", "deploy", `${candidateID}@100`,
-    "--name", "witself-agent-email-pilot",
+    "--name", "witself-agent-email-receive",
     "--message", `Guarded rollback to ${candidateID}`,
+    "--env-file", WRANGLER_PRODUCTION_ENV_FILE,
   ]);
   assert.equal(deploymentArguments.includes("--yes"), false);
 });

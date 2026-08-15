@@ -790,7 +790,7 @@ if [ "$ARTIFACT_EXISTS" = true ]; then
     if ! jq -e '
       (keys | sort == ["account_ids","agents","domain","schema_version","worker_name"]) and
       .schema_version == 2 and .domain == "witmail.net" and
-      .worker_name == "witself-agent-email-pilot" and
+      .worker_name == "witself-agent-email-receive" and
       (.account_ids | type == "array" and length >= 1 and length <= 100 and
         all(.[]; type == "string" and test("^acc_[a-z2-7]{16}$"))) and
       (.agents | type == "array" and length >= 5 and length <= 10 and

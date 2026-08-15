@@ -707,6 +707,12 @@ require_line '  WITSELF_TRANSCRIPT_RETENTION_ENABLED: "false"' "$gcp_server_conf
 # render two worker replicas, keep API loops off, and preserve enforcement.
 require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED: "false"' "$live_nested_server_config"
 require_line '  WITSELF_TRANSCRIPT_RETENTION_ENABLED: "false"' "$live_nested_server_config"
+require_line '  WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED: "false"' "$live_nested_server_config"
+require_line '  WITSELF_AGENT_EMAIL_RECEIVE_PRODUCTION_ENABLED: "false"' "$live_nested_server_config"
+if [[ "$(grep -c '^  WITSELF_AGENT_EMAIL_' "$live_nested_server_config")" -ne 2 ]]; then
+  echo "live GCP desired state exposed agent-email configuration beyond both disabled receive gates" >&2
+  exit 1
+fi
 require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED: "true"' "$live_nested_worker_config"
 require_line '  WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_ENABLED: "true"' "$live_nested_worker_config"
 require_line '  WITSELF_MESSAGE_RATE_BUCKET_CLEANUP_BATCH_SIZE: "10000"' "$live_nested_worker_config"
@@ -1435,7 +1441,7 @@ extract_document Deployment witself-server "$email_pilot_render" "$render_dir/em
 email_server_checksum="$(config_checksum "$render_dir/email-server-deployment.yaml")"
 if [[ -z "$default_server_checksum" || -z "$email_server_checksum" ||
   "$default_server_checksum" == "$email_server_checksum" ]]; then
-  echo "agent-email pilot activation did not restart API pods" >&2
+  echo "agent-email compatibility activation did not restart API pods" >&2
   exit 1
 fi
 

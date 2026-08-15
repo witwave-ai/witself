@@ -7,6 +7,11 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { fileURLToPath } from "node:url";
 
 import { sourceIdentity } from "./source-identity.mjs";
+import {
+  sanitizedWranglerEnvironment,
+  sanitizedWranglerInspectionEnvironment,
+  withReviewedWranglerEnvironmentFile,
+} from "./wrangler-environment.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -141,8 +146,7 @@ export async function main() {
     const directoryID = controlPlaneDirectory === "a".repeat(32)
       ? "b".repeat(32)
       : "a".repeat(32);
-    const env = {
-      ...process.env,
+    const env = Object.assign(sanitizedWranglerEnvironment(process.env), {
       EMAIL_DIRECTORY_KV_ID: directoryID,
       RELAY_KEY_ID: "bundle-check",
       CONTROL_PLANE_URL: "https://self.witwave.ai/",
@@ -151,21 +155,25 @@ export async function main() {
       AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: "",
       REALM_EMAIL_ALIAS_DELIVERY_ENABLED: "false",
       REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false",
-    };
+    });
     run(process.execPath, [
       join(root, "scripts", "render-wrangler.mjs"),
       "--output", config,
     ], { env });
-    run("wrangler", [
+    run("wrangler", withReviewedWranglerEnvironmentFile([
       "deploy",
       join(root, "src", "index.js"),
       "--dry-run",
       "--config", config,
       "--outdir", output,
       "--metafile", metafile,
-    ], { env });
+    ]), { env });
     const source = sourceIdentity();
-    const wranglerVersion = run("wrangler", ["--version"]);
+    const wranglerVersion = run(
+      "wrangler",
+      withReviewedWranglerEnvironmentFile(["--version"]),
+      { env: sanitizedWranglerInspectionEnvironment(env) },
+    );
     const manifest = {
       schema: "witself.agent-email-edge-bundle.v1",
       outcome: "verified",

@@ -14,10 +14,17 @@ import {
 import {
   parseManagedDeliveryAccountAllowlist as parseControlPlaneManagedDeliveryAccountAllowlist,
 } from "../../control-plane/src/agent-email-managed-delivery-cohort.mjs";
+import { PRODUCTION_RECEIVE_WORKER } from "../src/worker-names.mjs";
+import {
+  assertProductionCloudflareIdentity,
+  sanitizedWranglerInspectionEnvironment,
+  withReviewedWranglerEnvironmentFile,
+} from "./wrangler-environment.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CONTROL_PLANE_WORKER = "witself-control-plane";
-const EMAIL_EDGE_WORKER = "witself-agent-email-pilot";
+const EMAIL_EDGE_WORKER = PRODUCTION_RECEIVE_WORKER;
+const CONTROL_PLANE_URL = "https://self.witwave.ai/";
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const RELEASE_VERSION =
@@ -203,7 +210,11 @@ export function verifyRouteSigningReadiness({
   );
   assertAbsent(
     emailEdgeBindings,
-    [CUSTOM_DOMAIN_DELIVERY_SECRET],
+    [
+      CUSTOM_DOMAIN_DELIVERY_SECRET,
+      "LEGACY_PILOT_TRUSTED_INGEST_URL",
+      "LEGACY_PILOT_TRUSTED_CELL_AUDIENCE",
+    ],
     "email edge",
   );
   for (const name of [
@@ -253,6 +264,10 @@ export function verifyRouteSigningReadiness({
   secret(controlPlaneBindings, "CONTROL_PLANE_EDGE_TOKEN", "control plane");
   secret(emailEdgeBindings, "CONTROL_PLANE_EDGE_TOKEN", "email edge");
   secret(emailEdgeBindings, "RELAY_ED25519_PRIVATE_KEY", "email edge");
+  if (plain(emailEdgeBindings, "CONTROL_PLANE_URL", "email edge") !==
+      CONTROL_PLANE_URL) {
+    throw new Error("email edge active Worker control-plane authority was invalid");
+  }
 
   const controlPlaneDirectoryID = kvNamespace(
     controlPlaneBindings,
@@ -325,8 +340,10 @@ export function verifyRouteSigningReadiness({
 }
 
 function wranglerJSON(args, operation) {
-  const result = spawnSync("wrangler", args, {
+  assertProductionCloudflareIdentity(process.env);
+  const result = spawnSync("wrangler", withReviewedWranglerEnvironmentFile(args), {
     cwd: root,
+    env: sanitizedWranglerInspectionEnvironment(process.env),
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: 5 * 1024 * 1024,
@@ -349,6 +366,13 @@ function inspectWorker(name, label, inspect) {
   const version = inspect([
     "versions", "view", versionID, "--name", name, "--json",
   ], `inspect the ${label} Worker version`);
+  const finalDeployment = inspect([
+    "deployments", "status", "--name", name, "--json",
+  ], `reinspect the ${label} deployment`);
+  if (finalDeployment?.id !== deployment?.id ||
+      activeVersionID(finalDeployment, label) !== versionID) {
+    throw new Error(`${label} changed during exact provider inspection`);
+  }
   return { deployment, version };
 }
 

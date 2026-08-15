@@ -6,17 +6,25 @@ has no HTTP route or control-plane Container binding, and it has no access to
 the control-plane `DIRECTORY` KV namespace. The Worker and control plane instead
 share only the dedicated email-route KV namespace.
 
+The production receive Worker is `witself-agent-email-receive`. The older
+`witself-agent-email-pilot` Worker is a retired compatibility target and must
+remain dark and unrouted during migration. Production deployment, readiness,
+rollback, primary routing, and catch-all routing commands target only the
+production Worker. Legacy literal-route cleanup retains the older identity.
+
 `witmail.net` is reserved exclusively for agent email; it is not a general
 mailbox or website domain. `AGENT_EMAIL_DOMAIN` names that primary domain and
 `AGENT_EMAIL_LEGACY_DOMAINS` may name at most one compatibility domain. The
 runtime can resolve a canonical realm label or managed realm alias on the
-primary domain through `email:realm-route:v1:<domain>:<realm-label>`. Both
-labels select the same realm and cell; the cell remains authoritative for the
-agent segment, alias state, and account policy. A malformed, suspended,
-retired, stale, or conflicting projection fails closed. Stale records are
-refreshed through a bounded, authenticated control-plane lookup and are never
-used when that lookup fails or returns an older controller revision. KV is a
-route cache, never alias-claim authority.
+primary domain through `email:realm-route:v1:<domain>:<realm-label>`. On the
+configured legacy domain it accepts only the canonical 16-character Realm-ID
+label and resolves it through that same signed route contract. Both primary
+labels and an admitted legacy canonical label select the signed realm and cell;
+the cell remains authoritative for the agent segment, alias state, and account
+policy. A malformed, suspended, retired, stale, or conflicting projection fails
+closed. Stale records are refreshed through a bounded, authenticated
+control-plane lookup and are never used when that lookup fails or returns an
+older controller revision. KV is a route cache, never alias-claim authority.
 
 Customer-owned domains use the same route key and unsigned schema-version-1
 route shape only as a strict `route_kind: "custom_domain"` union variant. The
@@ -39,20 +47,17 @@ renderer. `npm run deploy` also refuses a persistent Worker secret with that
 name both before and after deployment, so this contract remains dark and cannot
 change live Email Routing or delivery configuration in this phase.
 
-The original one-realm, 5–10-recipient literal-pilot code path is retained only
-for bounded compatibility on the one configured legacy domain. Because its KV
-rows predate signed route projections, the row may only narrow a destination
-already fixed by two immutable Worker bindings:
-`LEGACY_PILOT_TRUSTED_INGEST_URL` and
-`LEGACY_PILOT_TRUSTED_CELL_AUDIENCE`. The committed production template omits
-both bindings, so this release treats the legacy lane as retired and tempfails
-before reading KV or raw MIME. Re-enabling it requires a separately reviewed
-version that binds both anchors and exact literal Email Routing rules. Even
-then, a legacy envelope must match the enabled pilot manifest and recipient
-row, the KV destination must equal both anchors, and traffic never falls
-through to a dynamic realm-route lookup. Merely listing
-`agent-mail.witwave.ai` as the compatibility domain cannot make an address
-reachable.
+The original one-realm, 5–10-recipient literal-pilot delivery code is absent
+from the production Worker. Unsigned `pilot:config:v1` and
+`pilot:recipient:v1` rows are never read and cannot supply or alter a relay
+destination. The retired Worker and cleanup tooling keep their historical names
+only so old resources can be inspected and removed safely. Listing
+`agent-mail.witwave.ai` as the compatibility domain admits no alias or
+catch-all: only a structurally canonical Realm-ID address with a valid signed
+canonical route can proceed. That route is subject to the same account cohort,
+canonical-delivery gate, freshness checks, and cell authority as its
+`witmail.net` counterpart. Legacy-domain minting remains prohibited in the
+control plane and routing procedures.
 
 Managed alias delivery also requires
 `REALM_EMAIL_ALIAS_DELIVERY_ENABLED=true`. The value is exact and defaults to
@@ -60,8 +65,8 @@ Managed alias delivery also requires
 reviewed literal `true` or `false` so an omitted variable cannot silently
 change live behavior. Any other runtime value tempfails `realm_alias` traffic
 at the edge before a message body is read or a cell is contacted. The alias
-gate does not control canonical Realm ID traffic or the independently retired
-legacy literal-pilot lane.
+gate does not control canonical Realm-ID traffic. Legacy compatibility traffic
+is canonical-only and therefore uses the canonical-delivery gate.
 
 All canonical and managed-alias traffic has a second, account-scoped fence:
 `AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST`. It is an exact sorted CSV of
@@ -185,7 +190,7 @@ canonical `<agent-segment>.<realm-id-body>@witmail.net` for its `realm_id`:
 {
   "schema_version": 2,
   "domain": "witmail.net",
-  "worker_name": "witself-agent-email-pilot",
+  "worker_name": "witself-agent-email-receive",
   "account_ids": ["acc_abcdefghijkl2345"],
   "agents": [
     {
@@ -372,6 +377,61 @@ managed flags, the route-verification keyring, rate limiters, and the absence of
 the custom-domain activation secret. `npm run verify:deployment` repeats the
 same value-free inspection. `npm run bundle:check` performs a hermetic Wrangler
 dry run and emits only source metadata and bundle/metafile SHA-256 digests.
+The normal deploy command requires `witself-agent-email-receive` to exist with
+both required secret bindings. It is not a first-deployment secret bootstrap.
+
+### One-time production receive Worker bootstrap
+
+Renaming the production service creates a new Cloudflare Worker; deployments,
+secrets, and routing associations do not transfer from the retired Worker.
+Bootstrap the production Worker once, dark, from the exact tagged release before
+deploying a control plane whose preflight expects the new name.
+
+Create a temporary mode-`0600` JSON file outside the repository containing
+exactly these two keys and no others:
+
+```json
+{
+  "CONTROL_PLANE_EDGE_TOKEN": "REDACTED",
+  "RELAY_ED25519_PRIVATE_KEY": "REDACTED_BASE64_PKCS8"
+}
+```
+
+Set the same public configuration required by `npm run deploy`, plus the exact
+Cloudflare account, `witmail.net` zone, route-directory namespace, and
+`CLOUDFLARE_LEGACY_EMAIL_ZONE_ID` set to the distinct `witwave.ai` zone ID. The
+API token must be able to read the complete Email Routing inventory in both
+zones. Set the reviewed raw 32-byte relay public key as canonical base64 in
+`RELAY_ED25519_PUBLIC_KEY`; the command proves it matches the private key.
+`CONTROL_PLANE_EDGE_TOKEN` in the operator environment must exactly match the
+value in the secrets file so the lease and deployed fallback authority cannot
+diverge. Keep the account cohort empty and both managed-delivery gates exactly
+`false`. Then run:
+
+```sh
+npm run bootstrap:production-receive -- \
+  --secrets-file /absolute/private/receive-bootstrap-secrets.json \
+  --receipt /absolute/private/receive-bootstrap-receipt.json
+```
+
+The command requires the production Worker to be absent, proves every retired
+Worker delivery trust anchor is absent on the same KV/metrics/rate-limit
+resources, proves the `witmail.net` catch-all and every route targeting either
+Worker are disabled, and acquires the global operations lease. The existing
+`witwave.ai` company-mail catch-all and unrelated forwarding rules may remain
+active; their complete state is fingerprinted, and neither may target a
+Witself email Worker. The command copies the exact
+tagged Worker sources into an immutable private bundle, freezes the rendered
+config and secrets in separate private temporary directories, and durably
+reserves a value-free receipt before one tagged strict deploy with both secrets
+in the initial Worker version. Both the secrets file and receipt path must be
+outside the repository. Success is recorded only after exact deployment
+attestation, unchanged retired Worker and two-zone Email Routing inventories,
+successful lease release, and private-input cleanup. A failure after receipt
+reservation leaves the pending receipt for reconciliation; do not rerun at
+another path until live state is understood. Securely remove the
+operator-supplied secrets file after success or failure. The command removes
+its own private snapshots.
 
 The control-plane deploy, this email-edge deploy, the guarded email-edge
 rollback, the coordinated route-signing secret ceremony, and both primary and
@@ -461,6 +521,8 @@ the operator shell without printing their values:
 - `CLOUDFLARE_API_TOKEN`
 - `CLOUDFLARE_ACCOUNT_ID`
 - `CLOUDFLARE_ZONE_ID`
+- `CLOUDFLARE_LEGACY_EMAIL_ZONE_ID` (one-time production receive bootstrap;
+  exact distinct `witwave.ai` zone)
 - `EMAIL_DIRECTORY_KV_ID`
 - `RELAY_KEY_ID`
 - `CONTROL_PLANE_URL`
@@ -549,9 +611,9 @@ mutation.
    two fallback values match or participate in the global lease. The ceremony
    also requires an existing email-edge Worker with its relay secret already
    bound and requires the desired fallback token to already authenticate the
-   live control-plane lease. A first-ever Worker bootstrap must instead use a
-   separately reviewed one-shot `--secrets-file` deployment; never create a
-   partial Worker and never place that file in the repository.
+   live control-plane lease. A first-ever Worker must use the one-time
+   `bootstrap:production-receive` command above; never create a partial Worker
+   or place its secrets file in the repository.
 
    This ceremony cannot rotate `CONTROL_PLANE_EDGE_TOKEN`: replacing the
    credential that authenticates acquire, renew, and release would invalidate
@@ -589,9 +651,9 @@ mutation.
    account used for the Worker inspections. `witwave.ai` is accepted only when
    explicitly selected for a reviewed legacy compatibility operation; that
    receipt is marked `legacy` and cannot stand in for primary-zone staging or
-   launch evidence. The current Founder primary-zone ceremony therefore remains
-   externally blocked until `witmail.net` is active in the target Worker
-   account after the registrar move.
+   launch evidence. The `witmail.net` registrar move is complete and the zone
+   is active in the target Worker account; the Founder ceremony may proceed
+   only after the remaining dark-release and operator-route prerequisites pass.
 
    Before parsing or validating either supplied Worker config, the command
    copies both into separate unpredictable mode-`0700` directories, freezes
@@ -608,9 +670,10 @@ mutation.
    relay id distinct from the desired id. It also requires empty live cohorts,
    both edge delivery gates false, custom-domain delivery dark, the selected
    catch-all disabled, every Witself-owned routing rule disabled, and no enabled
-   rule targeting `witself-agent-email-pilot`. Unrelated enabled Worker rules
-   may remain, but their complete inventory is fingerprinted and must not
-   change. After validating the public metadata, the command reveals only the
+   rule targeting either `witself-agent-email-receive` or the retired
+   `witself-agent-email-pilot`. Unrelated enabled Worker rules may remain, but
+   their complete inventory is fingerprinted and must not change. After
+   validating the public metadata, the command reveals only the
    private field, derives and verifies its Ed25519 public key, acquires
    `relay_signing_key_provision`, and reacquires every live and provider fence.
    It durably reserves the previously nonexistent receipt path with a complete
@@ -631,8 +694,8 @@ mutation.
    readiness. Install the matching public key in the selected cell through its
    separately reviewed cell configuration. Do not enable a cohort, delivery
    gate, or provider route until those attestations pass. This ceremony rotates
-   an already bound relay secret; first-ever Worker bootstrap still requires the
-   separately reviewed complete one-shot `--secrets-file` deployment.
+   an already bound relay secret; a first-ever Worker still requires the
+   complete one-time `bootstrap:production-receive` command above.
 
    A failure after receipt reservation intentionally leaves the complete
    pending marker in place, and every rerun refuses to overwrite it. Keep all
@@ -649,34 +712,29 @@ mutation.
 3. Enable the matching cell configuration with only the public key, deploy the
    cell, and confirm its startup reconciliation and health checks.
 
-4. Copy `pilot.example.json` outside the repository, replace every example
-   value with the reviewed one-realm/5–10-agent enrollment, and prepare disabled
-   literal routes:
+4. The legacy literal-route manager is cleanup-only. It preserves the
+   `witself-agent-email-pilot` manifest and rule identifiers so existing
+   resources can still be found, but `prepare` and `activate` always fail before
+   reading Cloudflare state or mutating anything. Use `routes:primary` for every
+   production prepare or activation. To inspect an existing legacy enrollment,
+   copy `pilot.example.json` outside the repository, restore its exact reviewed
+   values, and run:
 
    ```sh
-   npm run routes -- prepare /absolute/path/to/pilot.json
    npm run routes -- status /absolute/path/to/pilot.json
    ```
 
-5. Wait for directory propagation, review Cloudflare Email Routing and the
-   unchanged catch-all, then activate and immediately recheck status:
+5. After production routes have taken over and the legacy enrollment is ready
+   for cleanup, disable it first and recheck status. Remove it only after that
+   disabled state and the unchanged catch-all have been reviewed:
 
    ```sh
-   npm run routes -- activate /absolute/path/to/pilot.json
+   npm run routes -- disable /absolute/path/to/pilot.json
    npm run routes -- status /absolute/path/to/pilot.json
+   npm run routes -- remove /absolute/path/to/pilot.json
    ```
 
-   Route activation is also eventually consistent. After the first active
-   status, wait at least 60 seconds, run `status` again, and confirm the exact
-   canary rule is still Active in Cloudflare before sending. An immediate
-   message can otherwise miss the new literal rule and follow the unchanged
-   catch-all.
-
-6. Send one synthetic message to the exact canary address. Confirm a committed
-   mailbox row through the owner-only API before allowing expected low-risk
-   verification-code workflows.
-
-7. Confirm the value-free edge outcome and route-lookup streams. The Worker
+6. Confirm the value-free edge outcome and route-lookup streams. The Worker
    writes one best-effort Analytics Engine point per final SMTP-facing outcome
    under `witself.agent-email.edge.v1`. It also writes route observations under
    `witself.agent-email.route-lookup.v1`, using only `result`, `evidence`, and
@@ -746,6 +804,13 @@ repository-wide secrets):
 - `AGENT_EMAIL_CANARY_FROM`
 - `AGENT_EMAIL_CANARY_TO`
 
+Restrict that Environment to protected `main`. Both manual workflows also
+refuse every other Git ref before a secret-using step. The sender secret must
+be exactly `canary@send.witmail.net`; the
+recipient secret must be one reviewed canonical Realm-ID address on
+`witmail.net`; and the endpoint variable must be the root URL of one
+`api.<cell>.cells.witself.witwave.ai` host.
+
 Run one manual workflow dispatch and review both the value-free canary result
 and Analytics Engine outcomes. Add a recurring schedule only when continuous
 monitoring and its retained-message growth are intentionally accepted. The
@@ -761,23 +826,25 @@ settle the unused arm or let its 15-minute TTL expire before unsetting the
 canary agent or deploying older code; otherwise an old replica can
 ordinary-accept the first synthetic delivery.
 
-Acknowledgement does not delete synthetic messages. A future 15-minute schedule
-would add about 96 retained messages per day until the ordinary mailbox
-retention/delete contract is implemented. Keep the workflow manual-only unless
-that accumulation is explicitly accepted and monitored.
+Acknowledgement does not delete synthetic messages. Ordinary account retention
+does eventually remove them, but a future 15-minute schedule would still add
+about 96 retained messages per day inside that window. Keep the workflow
+manual-only until that synthetic volume, retention policy, and cleanup metrics
+are explicitly accepted and monitored.
 
 ## Raw-MIME storage probe
 
 The separate `agent-email-storage-probe` workflow is manual-dispatch-only and
 uses the same protected `agent-email-canary` GitHub Environment. Pin its one
-exact disposable `@agent-mail.witwave.ai` recipient in the separate
+exact disposable canonical `@witmail.net` recipient in the separate
 `AGENT_EMAIL_STORAGE_CANARY_TO` Environment secret; do not reuse or overwrite
-`AGENT_EMAIL_CANARY_TO`. The workflow has no dispatch inputs. The runner creates
-one bounded multipart message with a fixed synthetic attachment and submits it
-through Cloudflare's raw-MIME API. The sender, recipient, and Email Sending
-token remain Environment secrets; the result contains only the exact synthetic
-subject, byte counts, and booleans proving that no token, address, MIME, or
-provider disposition was returned.
+`AGENT_EMAIL_CANARY_TO`. The workflow has no dispatch inputs. It first runs the
+full production receive canary with the same protected environment, then the
+runner creates one bounded multipart message with a fixed synthetic attachment
+and submits it through Cloudflare's raw-MIME API. The sender, recipient, and
+Email Sending token remain Environment secrets; the result contains only the
+exact synthetic subject, byte counts, and booleans proving that no token,
+address, MIME, or provider disposition was returned.
 
 A successful workflow proves only that the Cloudflare Email Sending API
 accepted the submission request. It does not prove eventual delivery,
@@ -818,6 +885,76 @@ Engine writes are best-effort; if the expected point is absent, inspect the
 Worker's built-in invocation metrics and repeat only after the first submission
 has been conclusively accounted for. The workflow never prepares routes,
 changes cell policy, or deletes mail.
+
+## Near-limit production receive acceptance
+
+The manual `agent-email-near-limit-probe` workflow is the production acceptance
+test for the reviewed 25 MiB inbound ceiling. It is not a preview or a pilot
+simulation. It sends one real raw RFC 5322 message through Cloudflare Email
+Sending and the active `witmail.net` Email Routing Worker, then proves the
+result in the owning production cell through the recipient's owner API. It does
+not enable or exercise Witself's outbound-email queue.
+
+The workflow is protected-main-only, uses the same `agent-email-canary`
+Environment, and shares one concurrency group with the ordinary receive canary
+and storage probe so synthetic production submissions cannot collide. In
+addition to the ordinary canary variables and secrets, provision:
+
+- Environment variable `WITSELF_EMAIL_NEAR_LIMIT_ENDPOINT`: the exact root
+  `https://api.<cell>.cells.witself.witwave.ai` URL for the probe recipient's
+  owning cell.
+- Environment secret `AGENT_EMAIL_NEAR_LIMIT_TO`: one reviewed disposable
+  canonical Realm-ID address on `witmail.net` (never an alias or subaddress).
+- Environment secret `WITSELF_EMAIL_NEAR_LIMIT_TOKEN`: a full agent token for
+  that exact recipient. Do not use a control-plane or operator token.
+
+The sender remains exactly the existing `AGENT_EMAIL_CANARY_FROM` value,
+`canary@send.witmail.net`, and the Cloudflare credential remains the dedicated
+Email Sending token. A separate read-only preflight validates all of those
+fences and calls only the recipient's value-free storage-status route; it does
+not allocate the MIME body or make a provider request. Both that preflight and
+the final runner require the account's effective raw-message limit to equal
+exactly 25 MiB and require either unlimited attachment capacity or at least
+another 25 MiB of remaining capacity. The runner then constructs a
+content-free multipart MIME message of exactly 24.75 MiB. Its public,
+deterministic high-entropy synthetic attachment avoids turning the database
+proof into an unrealistically cheap compression test. The message leaves
+256 KiB for provider-added transport and authentication headers. The received
+message must still be at least 24 MiB and no more than 25 MiB.
+
+A `passed` result is emitted only after all of these observations succeed:
+
+- Cloudflare accepts the raw-MIME submission and the message later appears in
+  the exact owner mailbox; the immediate sending response alone is never a
+  delivery verdict.
+- The cell reports the Cloudflare provider, canonical route, expected envelope,
+  a successful MIME parse, exactly one attachment, and
+  `payload_retention_state='retained'`.
+- Both attachment-storage byte fields equal the complete received raw-MIME
+  size, proving that the large payload is durable rather than capacity-omitted.
+- The runner claims and completes the mailbox work, acknowledges it, and then
+  lists the same message again without the unacknowledged filter. This proves
+  that mailbox acknowledgement is non-destructive and the retained MIME
+  remains governed by account retention.
+
+The value-free receipt reports only byte counts, booleans, elapsed time, and
+`time_based_retention_deletion_tested:false`; it never returns the MIME, token,
+addresses, subject nonce, message id, claim id, or provider id. The workflow
+does not alter policy, backdate a row, invoke the destructive retention worker,
+or delete the message. Actual age-based expiry therefore remains covered by
+the retention worker's database tests and operational metrics, not by this
+single bounded production request. Use a disposable mailbox on a finite
+retention policy when automatic eventual cleanup is required; a probe sent to
+an indefinite-retention account remains retained until that policy changes.
+
+Keep this workflow manual. Each successful dispatch deliberately stores nearly
+25 MiB and consumes one provider submission. A checked-in workflow is only the
+safe executable ceremony; production near-limit evidence exists only after an
+authorized main-branch dispatch returns `outcome='passed'`. A failure after
+provider submission can leave one obvious synthetic message with the fixed
+`Witself near-limit receive probe` subject prefix in the disposable mailbox;
+inspect that mailbox without reading the attachment, settle its lifecycle if
+needed, and let the configured retention policy remove it.
 
 ## Rollback
 

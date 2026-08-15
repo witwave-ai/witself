@@ -9,12 +9,14 @@ export function runLeaseGuardedCommand(
   args,
   {
     cwd,
+    env,
     signal,
     timeoutMs = 5 * 60_000,
   } = {},
 ) {
   if (typeof command !== "string" || command === "" ||
       !Array.isArray(args) || args.some((value) => typeof value !== "string") ||
+      (env != null && (typeof env !== "object" || Array.isArray(env))) ||
       !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 ||
       timeoutMs > 20 * 60_000) {
     return Promise.reject(new AgentEmailOperationsLeaseClientError(
@@ -51,6 +53,7 @@ export function runLeaseGuardedCommand(
     try {
       child = spawn(command, args, {
         cwd,
+        env,
         shell: false,
         stdio: "inherit",
       });

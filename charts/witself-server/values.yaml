@@ -62,10 +62,11 @@ features:
     # separate release; older compiled schemas refuse to start when enabled.
     enabled: false
 
-# Capability-limited receive-only agent-email pilot. This stays off unless one
-# managed cell explicitly enrolls exactly one realm and 5-10 agents. The relay
-# private key belongs only in the isolated Cloudflare Worker secret; this chart
-# accepts public verification keys only.
+# Retired receive-pilot compatibility configuration. New production rollouts
+# use receiveProduction; keep receivePilot disabled. These fields remain only
+# so an older deployment can be drained or rolled back without changing the
+# chart contract. The relay private key never belongs in this chart; only
+# public verification keys are accepted.
 agentEmail:
   # Token accepted only by the content-free outbound provider-event callback.
   # The managed send adapter holds the matching value as a Worker secret.
@@ -83,8 +84,8 @@ agentEmail:
     audience: ""
     realmID: ""
     agentIDs: []
-    # Optional synthetic provider-retry proof. Keep empty until every server pod
-    # runs schema-61-capable code, then select exactly one enrolled pilot agent.
+    # Historical synthetic provider-retry proof. Keep empty unless operating a
+    # deliberately restored compatibility deployment on schema-61-capable code.
     retryCanaryAgentID: ""
     relayPublicKeysJSON: ""
     relayReplayWindow: 5m

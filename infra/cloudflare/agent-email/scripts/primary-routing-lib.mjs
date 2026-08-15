@@ -16,13 +16,18 @@ import { assertIsolatedEmailDirectory } from "./cloudflare.mjs";
 import {
   validateAgentEmailOperationsLeaseEvidence,
 } from "../../control-plane/src/agent-email-operations-lease.mjs";
+import {
+  LEGACY_PILOT_WORKER,
+  PRODUCTION_RECEIVE_WORKER,
+} from "../src/worker-names.mjs";
 
 export const PRIMARY_CANARY_DOMAIN = "witmail.net";
-export const PRIMARY_CANARY_WORKER = "witself-agent-email-pilot";
+export const PRIMARY_CANARY_WORKER = PRODUCTION_RECEIVE_WORKER;
 export const PRIMARY_RULE_PREFIX = "witself-agent-email-primary-canary:";
 export const PRIMARY_PLAN_SCHEMA = "witself.agent-email-primary-routing-plan.v2";
 export const PRIMARY_RECEIPT_SCHEMA = "witself.agent-email-primary-routing-receipt.v2";
 export const PRIMARY_STATUS_SCHEMA = "witself.agent-email-primary-routing-status.v1";
+export const PRIMARY_CONTROL_PLANE_URL = "https://self.witwave.ai/";
 
 const PLAN_LIFETIME_MS = 15 * 60 * 1_000;
 const ACTIONS = new Set(["prepare", "activate", "disable", "remove"]);
@@ -133,6 +138,19 @@ function desiredWorkerAction(rule, workerName) {
     rule.actions[0].value[0] === workerName;
 }
 
+function ownedWorkerAction(rule, productionWorker) {
+  if (!Array.isArray(rule?.actions) || rule.actions.length !== 1 ||
+      rule.actions[0]?.type !== "worker" ||
+      !Array.isArray(rule.actions[0].value) ||
+      rule.actions[0].value.length !== 1) {
+    return "";
+  }
+  const worker = rule.actions[0].value[0];
+  return worker === productionWorker || worker === LEGACY_PILOT_WORKER
+    ? worker
+    : "";
+}
+
 export function primaryRuleName(address) {
   return `${PRIMARY_RULE_PREFIX}${address}`;
 }
@@ -164,21 +182,23 @@ function indexPrimaryRules(rules, manifest) {
   const enrolled = new Set(manifest.agents.map((agent) => agent.address));
   const byAddress = new Map();
   const owned = [];
+  const legacy = [];
   const stale = [];
   const conflicts = [];
   for (const rule of rules) {
     const address = literalAddress(rule);
     const named = typeof rule?.name === "string" && rule.name.startsWith(PRIMARY_RULE_PREFIX);
+    const worker = ownedWorkerAction(rule, manifest.worker_name);
     const exactOwned = rule?.source === "api" && ID.test(String(rule?.id ?? "")) &&
       typeof rule?.enabled === "boolean" && named && address &&
-      rule.name === primaryRuleName(address) &&
-      desiredWorkerAction(rule, manifest.worker_name);
+      rule.name === primaryRuleName(address) && worker !== "";
     if (named && !exactOwned) {
       conflicts.push(rule);
       continue;
     }
     if (exactOwned) {
       owned.push(rule);
+      if (worker === LEGACY_PILOT_WORKER) legacy.push(rule);
       if (!enrolled.has(address)) stale.push(rule);
     }
     if (!enrolled.has(address)) continue;
@@ -192,7 +212,7 @@ function indexPrimaryRules(rules, manifest) {
     }
     byAddress.set(address, rule);
   }
-  return { byAddress, owned, stale, conflicts };
+  return { byAddress, owned, legacy, stale, conflicts };
 }
 
 function roleRouteState(rules, domain) {
@@ -268,6 +288,7 @@ export async function capturePrimaryRoutingState(api, manifestInput) {
         missing: manifest.agents.length - indexed.byAddress.size,
         stale: indexed.stale.length,
         conflicts: indexed.conflicts.length,
+        legacy_targets: indexed.legacy.length,
         total_owned: indexed.owned.length,
       },
     }),
@@ -400,10 +421,9 @@ export function operationsLeaseControlPlaneOrigin(raw) {
   } catch {
     throw new Error("email edge operations lease origin was invalid");
   }
-  if (origin.protocol !== "https:" || origin.username || origin.password ||
-      origin.search || origin.hash || !origin.hostname ||
-      origin.hostname === "localhost" ||
-      (origin.pathname !== "/" && origin.pathname !== "")) {
+  if (origin.toString() !== PRIMARY_CONTROL_PLANE_URL ||
+      plain(edgeBindings, "CONTROL_PLANE_URL", "email edge") !==
+        PRIMARY_CONTROL_PLANE_URL) {
     throw new Error("email edge operations lease origin was invalid");
   }
   return origin.toString();
@@ -516,10 +536,9 @@ export function verifyPrimaryWorkerReadiness(raw, expectedNamespaceID, expectedD
   } catch {
     throw new Error("email edge control-plane origin was invalid");
   }
-  if (controlPlaneURL.protocol !== "https:" || controlPlaneURL.username ||
-      controlPlaneURL.password || controlPlaneURL.search || controlPlaneURL.hash ||
-      !controlPlaneURL.hostname || controlPlaneURL.hostname === "localhost" ||
-      (controlPlaneURL.pathname !== "/" && controlPlaneURL.pathname !== "")) {
+  if (controlPlaneURL.toString() !== PRIMARY_CONTROL_PLANE_URL ||
+      plain(edgeBindings, "CONTROL_PLANE_URL", "email edge") !==
+        PRIMARY_CONTROL_PLANE_URL) {
     throw new Error("email edge control-plane origin was invalid");
   }
   return {
@@ -704,6 +723,7 @@ function assertActionPreconditions(action, state, readiness) {
   }
   if (action === "activate") {
     if (state.indexed.byAddress.size !== state.manifest.agents.length ||
+        state.indexed.legacy.length !== 0 ||
         [...state.indexed.byAddress.values()].some((rule) => rule.enabled !== false)) {
       throw new Error("activate requires a complete disabled primary canary");
     }
@@ -858,7 +878,7 @@ async function setOwnedRuleState(api, manifest, enabled, leaseGuard) {
 async function activateManifestRules(api, manifest, leaseGuard) {
   const state = await capturePrimaryRoutingState(api, manifest);
   assertCommonMutationState(state);
-  if (state.indexed.stale.length !== 0 ||
+  if (state.indexed.legacy.length !== 0 || state.indexed.stale.length !== 0 ||
       state.indexed.byAddress.size !== manifest.agents.length) {
     throw new Error("primary canary changed before activation");
   }
@@ -895,11 +915,25 @@ async function mutatePrimaryRules(
   try {
     if (action === "prepare") {
       for (const agent of manifest.agents) {
-        if (!before.indexed.byAddress.has(agent.address)) {
+        const existing = before.indexed.byAddress.get(agent.address);
+        if (!existing) {
           await leasedMutation(
             leaseGuard,
             () => api.createRule(
               desiredPrimaryRule(manifest, agent.address, false),
+            ),
+          );
+        } else if (!desiredWorkerAction(existing, manifest.worker_name)) {
+          await leasedMutation(
+            leaseGuard,
+            () => api.updateRule(
+              existing.id,
+              desiredPrimaryRule(
+                manifest,
+                agent.address,
+                false,
+                existing.priority,
+              ),
             ),
           );
         }
@@ -962,12 +996,14 @@ function assertPostcondition(action, state) {
   if (action === "prepare" &&
       (state.indexed.byAddress.size !== state.manifest.agents.length ||
        [...state.indexed.byAddress.values()].some((rule) => rule.enabled !== false) ||
+       state.indexed.legacy.length !== 0 ||
        state.indexed.stale.length !== 0)) {
     throw new Error("primary routing prepare postcondition failed");
   }
   if (action === "activate" &&
       (state.indexed.byAddress.size !== state.manifest.agents.length ||
        [...state.indexed.byAddress.values()].some((rule) => rule.enabled !== true) ||
+       state.indexed.legacy.length !== 0 ||
        state.indexed.stale.length !== 0)) {
     throw new Error("primary routing activation postcondition failed");
   }
@@ -1095,6 +1131,7 @@ export async function inspectPrimaryCanary(api, runtime, manifestInput, {
     ready_for_prepare: clean && foundation &&
       [...routing.indexed.byAddress.values()].every((rule) => rule.enabled === false),
     ready_for_activate: clean && foundation && readiness.activation_ready &&
+      routing.indexed.legacy.length === 0 &&
       routing.indexed.byAddress.size === routing.manifest.agents.length &&
       [...routing.indexed.byAddress.values()].every((rule) => rule.enabled === false),
   });

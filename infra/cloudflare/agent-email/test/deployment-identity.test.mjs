@@ -5,6 +5,7 @@ import {
   expectedDeployment,
   releaseMessage,
   verifyDeployment,
+  verifyProduction,
 } from "../scripts/deployment-identity.mjs";
 
 const release = Object.freeze({
@@ -106,6 +107,53 @@ test("deployment attestation accepts one exact email-only release", () => {
   });
 });
 
+test("deployment inspection can attest the frozen release without rereading Git", () => {
+  const { status, version } = fixtures();
+  const calls = [];
+  const result = verifyProduction({
+    env,
+    release,
+    requireAnnotations: true,
+    inspect(args) {
+      calls.push(args);
+      return calls.length === 2 ? version : status;
+    },
+  });
+  assert.equal(result.outcome, "verified");
+  assert.deepEqual(calls, [
+    [
+      "deployments", "status", "--name",
+      "witself-agent-email-receive", "--json",
+    ],
+    [
+      "versions", "view", versionID, "--name",
+      "witself-agent-email-receive", "--json",
+    ],
+    [
+      "deployments", "status", "--name",
+      "witself-agent-email-receive", "--json",
+    ],
+  ]);
+});
+
+test("deployment inspection rejects a provider race after version read", () => {
+  const { status, version } = fixtures();
+  const changed = structuredClone(status);
+  changed.id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  let call = 0;
+  assert.throws(() => verifyProduction({
+    env,
+    release,
+    requireAnnotations: true,
+    inspect() {
+      call += 1;
+      if (call === 1) return status;
+      if (call === 2) return version;
+      return changed;
+    },
+  }), /changed during exact provider inspection/);
+});
+
 test("deployment expectations summarize but never expose the active cohort", () => {
   const active = expectedDeployment({
     ...env,
@@ -191,6 +239,20 @@ test("deployment expectations require explicit managed delivery values", () => {
     assert.throws(
       () => expectedDeployment(candidate, release),
       new RegExp(`${name} must be explicitly true or false`),
+    );
+  }
+});
+
+test("deployment expectations pin the production control-plane authority", () => {
+  for (const value of [
+    "https://attacker.invalid/",
+    "https://self.witwave.ai.evil.invalid/",
+    "https://self.witwave.ai/path",
+    "https://SELF.witwave.ai/",
+  ]) {
+    assert.throws(
+      () => expectedDeployment({ ...env, CONTROL_PLANE_URL: value }, release),
+      /CONTROL_PLANE_URL is missing or invalid/,
     );
   }
 });

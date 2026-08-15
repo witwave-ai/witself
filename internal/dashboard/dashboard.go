@@ -861,10 +861,11 @@ func agentEmailUnavailableKind(err error) string {
 	if errors.Is(err, client.ErrNotFound) {
 		return "unavailable"
 	}
-	// The agent-email pilot's principal gate currently returns an untyped 403.
-	// Match its exact stable public error rather than treating arbitrary
-	// forbidden/transport failures as an enrollment verdict.
-	if err != nil && err.Error() == "agent is not enrolled in the email pilot" {
+	// The agent-email principal gate currently returns an untyped 403. Accept
+	// the production wording and the predecessor during mixed-version rollout
+	// rather than treating arbitrary forbidden/transport failures as a scope verdict.
+	if err != nil && (err.Error() == "agent email is not enabled for this agent" ||
+		err.Error() == "agent is not enrolled in the email pilot") {
 		return "not_enrolled"
 	}
 	return ""

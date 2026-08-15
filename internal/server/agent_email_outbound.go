@@ -52,7 +52,7 @@ func (e *AgentEmailOutboundRateLimitError) Unwrap() error { return ErrAgentEmail
 
 // AgentEmailOutboundMessage is the owner-visible, content-minimal projection
 // of one durable outbound email. From is always server-derived. Text is never
-// returned by list or show during the initial outbound beta.
+// returned by list or show under the production outbound contract.
 type AgentEmailOutboundMessage struct {
 	ID                      string     `json:"id"`
 	AccountID               string     `json:"account_id,omitempty"`
@@ -306,7 +306,7 @@ func validAgentEmailOutboundSubject(value string) bool {
 // /v1/email/{action} route between legacy inbound actions and outbound reply.
 // Go wildcards cannot have a literal suffix, so "{inbound}:reply" must be
 // parsed inside the handler. Each selected handler retains its own auth and
-// entitlement gate; outbound reply never inherits receive-pilot enrollment.
+// entitlement gate; outbound reply never inherits inbound receive scope.
 func agentEmailActionDispatchHandler(receive, reply http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		_, operation, ok := strings.Cut(r.PathValue("action"), ":")

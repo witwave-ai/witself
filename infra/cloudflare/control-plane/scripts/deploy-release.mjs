@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -8,6 +7,7 @@ import {
   expectedBuildMetadata,
   privateDeploymentConfigMain,
   verifyWorkerVersion,
+  wranglerJSON,
 } from "./verify-deployment.mjs";
 import {
   sourceIdentity,
@@ -26,13 +26,25 @@ import {
   runLeaseGuardedCommand,
 } from "./agent-email-lease-guarded-command.mjs";
 import {
-  createPrivateDeploymentConfig,
-} from "./private-deployment-config.mjs";
+  createControlPlaneReleaseSnapshot,
+} from "./control-plane-release-snapshot.mjs";
+import {
+  assertCustomDomainSecretsDark,
+  inspectWorkerSecrets,
+} from "./assert-custom-domain-dark.mjs";
+import { PRODUCTION_RECEIVE_WORKER } from
+  "../../agent-email/src/worker-names.mjs";
+import {
+  assertProductionCloudflareIdentity,
+  sanitizedWranglerEnvironment,
+  sanitizedWranglerInspectionEnvironment,
+  withReviewedWranglerEnvironmentFile,
+} from "../../agent-email/scripts/wrangler-environment.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 export const GENERATED_CONFIG_PATH = join(root, "wrangler.generated.jsonc");
 const CONTROL_PLANE_WORKER = "witself-control-plane";
-const EMAIL_EDGE_WORKER = "witself-agent-email-pilot";
+const EMAIL_EDGE_WORKER = PRODUCTION_RECEIVE_WORKER;
 const MANAGED_COHORT_PROTOCOL_RELEASE = "0.0.241";
 const MANAGED_COHORT_PREDECESSOR_RELEASE = "0.0.240";
 // v0.0.241 introduced the protocol, but its private Wrangler snapshot was
@@ -203,24 +215,6 @@ export function verifyManagedCohortProtocolUpgrade(
     active_edge_account_count: 0,
     operations_lease_origin: leaseOrigin,
   });
-}
-
-function wranglerJSON(args, operation) {
-  const result = spawnSync("wrangler", args, {
-    cwd: root,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    maxBuffer: 5 * 1024 * 1024,
-    timeout: 30_000,
-  });
-  if (result.error || result.status !== 0) {
-    throw new Error(`could not ${operation} with Wrangler`);
-  }
-  try {
-    return JSON.parse(result.stdout);
-  } catch {
-    throw new Error(`Wrangler ${operation} output was not valid JSON`);
-  }
 }
 
 export function preflightManagedCohortProtocolUpgrade(
@@ -542,13 +536,82 @@ function exactLeaseOrigin(preflight, expectedOrigin) {
   return preflight;
 }
 
-async function deployPrivateReleaseConfig(config) {
-  const configSource = await config.readText();
+export function productionDeploymentEnvironments(environment = process.env) {
+  assertProductionCloudflareIdentity(environment);
+  const wranglerMutation = sanitizedWranglerEnvironment(environment);
+  const wranglerInspection =
+    sanitizedWranglerInspectionEnvironment(environment);
+  return Object.freeze({
+    wranglerMutation: Object.freeze(wranglerMutation),
+    wranglerInspection: Object.freeze(wranglerInspection),
+    // These Node entrypoints either render from explicit retained inputs or
+    // sanitize their own Wrangler child. Removing Node injection and Wrangler
+    // redirection variables here protects them before their module loads.
+    nestedRender: Object.freeze({ ...wranglerMutation }),
+    nestedInspection: Object.freeze({ ...wranglerInspection }),
+  });
+}
+
+export function runProductionWranglerDeploy(
+  args,
+  {
+    signal,
+    environment = process.env,
+    runCommand = runLeaseGuardedCommand,
+    cwd = root,
+    reviewedEnvironmentFile,
+  } = {},
+) {
+  assertProductionCloudflareIdentity(environment);
+  return runCommand(
+    "wrangler",
+    withReviewedWranglerEnvironmentFile(args, reviewedEnvironmentFile),
+    {
+      cwd,
+      env: sanitizedWranglerEnvironment(environment),
+      signal,
+      timeoutMs: 5 * 60_000,
+    },
+  );
+}
+
+export async function withReleaseInputIntegrity(
+  release,
+  operation,
+  label = "control-plane provider operation",
+) {
+  await release.assertUnchanged();
+  let result;
+  let operationError;
+  try {
+    result = await operation();
+  } catch (error) {
+    operationError = error;
+  }
+  let integrityError;
+  try {
+    await release.assertUnchanged();
+  } catch (error) {
+    integrityError = error;
+  }
+  if (operationError && integrityError) {
+    throw new AggregateError(
+      [operationError, integrityError],
+      `${label} failed and its immutable release inputs changed`,
+    );
+  }
+  if (operationError) throw operationError;
+  if (integrityError) throw integrityError;
+  return result;
+}
+
+async function deployPrivateReleaseConfig(release, commandEnvironments) {
+  const configSource = await release.readText();
   const expected = expectedBuildMetadata(
     configSource,
-    privateDeploymentConfigMain(config.path),
+    privateDeploymentConfigMain(release.path, release.controlPlaneRoot),
   );
-  const source = sourceIdentity();
+  const source = release.source;
   const actual = { service: "witself-control-plane", ...source };
   if (!deploymentMatches(actual, expected)) {
     throw new Error(
@@ -556,66 +619,123 @@ async function deployPrivateReleaseConfig(config) {
     );
   }
 
-  const assertReleaseInputsUnchanged = async () => {
-    const current = sourceIdentity();
-    await config.assertUnchanged();
-    if (current.version !== source.version || current.commit !== source.commit ||
-        current.date !== source.date || current.tag !== source.tag) {
-      throw new Error(
-        "control-plane release source or exact generated config changed during deployment",
-      );
-    }
-  };
-
+  const inspect = (args, operation) => wranglerJSON(
+    args,
+    operation,
+    commandEnvironments.wranglerInspection,
+    undefined,
+    {
+      cwd: release.workDirectory,
+      reviewedEnvironmentFile: release.reviewedEnvironmentFile,
+    },
+  );
   const inspectOrder = () => preflightManagedCohortProtocolUpgrade(
     expected.version,
     expected.managed_delivery_account_allowlist,
+    inspect,
+  );
+  const inspectDarkSecrets = () => assertCustomDomainSecretsDark(
+    inspectWorkerSecrets(
+      release.path,
+      commandEnvironments.wranglerInspection,
+      undefined,
+      {
+        cwd: release.workDirectory,
+        reviewedEnvironmentFile: release.reviewedEnvironmentFile,
+      },
+    ),
   );
   const deploy = async (signal) => {
-    await assertReleaseInputsUnchanged();
-    await runLeaseGuardedCommand(
-      "wrangler",
-      privateReleaseDeploymentArguments(source, config.path),
-      { cwd: root, signal, timeoutMs: 5 * 60_000 },
+    await withReleaseInputIntegrity(
+      release,
+      () => runProductionWranglerDeploy(
+        privateReleaseDeploymentArguments(source, release.path),
+        {
+          environment: commandEnvironments.wranglerMutation,
+          signal,
+          cwd: release.workDirectory,
+          reviewedEnvironmentFile: release.reviewedEnvironmentFile,
+        },
+      ),
+      "control-plane deployment mutation",
     );
-    await assertReleaseInputsUnchanged();
   };
   const deployBootstrapOuterWorker = async () => {
-    await assertReleaseInputsUnchanged();
-    await runLeaseGuardedCommand(
-      "wrangler",
-      privateBootstrapReleaseDeploymentArguments(source, config.path),
-      { cwd: root, timeoutMs: 5 * 60_000 },
+    await withReleaseInputIntegrity(
+      release,
+      () => runProductionWranglerDeploy(
+        privateBootstrapReleaseDeploymentArguments(source, release.path),
+        {
+          environment: commandEnvironments.wranglerMutation,
+          cwd: release.workDirectory,
+          reviewedEnvironmentFile: release.reviewedEnvironmentFile,
+        },
+      ),
+      "control-plane bootstrap deployment mutation",
     );
-    await assertReleaseInputsUnchanged();
   };
   const verify = (signal, endpoint) => runLeaseGuardedCommand(
     process.execPath,
     [
-      join(root, "scripts", "verify-deployment.mjs"),
-      "--config", config.path,
+      join(release.controlPlaneRoot, "scripts", "verify-deployment.mjs"),
+      "--config", release.path,
       "--endpoint", endpoint,
+      "--wrangler-cwd", release.workDirectory,
+      "--reviewed-env-file", release.reviewedEnvironmentFile,
     ],
-    { cwd: root, signal, timeoutMs: 12 * 60_000 },
+    {
+      cwd: release.workDirectory,
+      env: commandEnvironments.nestedInspection,
+      signal,
+      timeoutMs: 12 * 60_000,
+    },
   );
-  const initialOrder = inspectOrder();
+  const attest = (operation, label) => withReleaseInputIntegrity(
+    release,
+    operation,
+    label,
+  );
+  const initialOrder = await attest(
+    inspectOrder,
+    "initial email edge deployment attestation",
+  );
   const leaseOrigin = initialOrder.operations_lease_origin;
   exactLeaseOrigin(initialOrder, leaseOrigin);
-  const guarded = async () => withAgentEmailOperationsLease(
-    "control_plane_deploy",
-    async ({ signal }) => {
-      exactLeaseOrigin(inspectOrder(), leaseOrigin);
-      await deploy(signal);
-      await verify(signal, leaseOrigin);
-      exactLeaseOrigin(inspectOrder(), leaseOrigin);
-    },
-    {
-      endpoint: leaseOrigin,
-      // Only this caller may distinguish an old release's missing endpoint.
-      // The v0.0.241 attempt could not reach a provider mutation. Only the
-      // exact v0.0.242 recovery release may enter the dark v0.0.240 proof.
-      allowLegacyNotFound: isLeaseBootstrapTargetRelease(expected.version),
-    },
+  const guarded = async () => attest(
+    () => withAgentEmailOperationsLease(
+      "control_plane_deploy",
+      async ({ signal }) => {
+        await attest(
+          () => exactLeaseOrigin(inspectOrder(), leaseOrigin),
+          "leased email edge deployment attestation",
+        );
+        await attest(
+          inspectDarkSecrets,
+          "leased dark-secret deployment attestation",
+        );
+        await deploy(signal);
+        await attest(
+          () => verify(signal, leaseOrigin),
+          "leased control-plane deployment attestation",
+        );
+        await attest(
+          inspectDarkSecrets,
+          "leased final dark-secret deployment attestation",
+        );
+        await attest(
+          () => exactLeaseOrigin(inspectOrder(), leaseOrigin),
+          "leased final email edge deployment attestation",
+        );
+      },
+      {
+        endpoint: leaseOrigin,
+        // Only this caller may distinguish an old release's missing endpoint.
+        // The v0.0.241 attempt could not reach a provider mutation. Only the
+        // exact v0.0.242 recovery release may enter the dark v0.0.240 proof.
+        allowLegacyNotFound: isLeaseBootstrapTargetRelease(expected.version),
+      },
+    ),
+    "control-plane operations lease",
   );
   try {
     await guarded();
@@ -625,11 +745,18 @@ async function deployPrivateReleaseConfig(config) {
     const predecessorIdentity = taggedReleaseIdentity(
       MANAGED_COHORT_PREDECESSOR_RELEASE,
     );
-    const bootstrap = exactLeaseOrigin(inspectOrder(), leaseOrigin);
-    const predecessor = preflightManagedCohortProtocolBootstrapPredecessor(
-      expected,
-      predecessorIdentity,
-      config.path,
+    const bootstrap = await attest(
+      () => exactLeaseOrigin(inspectOrder(), leaseOrigin),
+      "bootstrap email edge deployment attestation",
+    );
+    const predecessor = await attest(
+      () => preflightManagedCohortProtocolBootstrapPredecessor(
+        expected,
+        predecessorIdentity,
+        release.path,
+        inspect,
+      ),
+      "bootstrap predecessor deployment attestation",
     );
     if (!isFirstManagedCohortProtocolBootstrap(
       expected.version,
@@ -640,6 +767,10 @@ async function deployPrivateReleaseConfig(config) {
         "control-plane deployment cannot bypass the shared operations lease outside the exact dark v0.0.242 recovery bootstrap",
       );
     }
+    await attest(
+      inspectDarkSecrets,
+      "bootstrap dark-secret deployment attestation",
+    );
 
     // Re-attempt the normal path after the exact provider proof. If another
     // bootstrap installed the endpoint meanwhile, this process must join the
@@ -651,11 +782,18 @@ async function deployPrivateReleaseConfig(config) {
       if (!legacyLeaseNotFound(retryError)) throw retryError;
     }
 
-    const finalBootstrap = exactLeaseOrigin(inspectOrder(), leaseOrigin);
-    const finalPredecessor = preflightManagedCohortProtocolBootstrapPredecessor(
-      expected,
-      predecessorIdentity,
-      config.path,
+    const finalBootstrap = await attest(
+      () => exactLeaseOrigin(inspectOrder(), leaseOrigin),
+      "final bootstrap email edge deployment attestation",
+    );
+    const finalPredecessor = await attest(
+      () => preflightManagedCohortProtocolBootstrapPredecessor(
+        expected,
+        predecessorIdentity,
+        release.path,
+        inspect,
+      ),
+      "final bootstrap predecessor deployment attestation",
     );
     if (!isFirstManagedCohortProtocolBootstrap(
       expected.version,
@@ -666,6 +804,10 @@ async function deployPrivateReleaseConfig(config) {
         "control-plane deployment cannot bypass a changed v0.0.240 predecessor",
       );
     }
+    await attest(
+      inspectDarkSecrets,
+      "final bootstrap dark-secret deployment attestation",
+    );
     // This is the sole unleased provider write. It installs only the exact
     // outer v0.0.242 Worker and explicitly suppresses every Container build or
     // rollout. Concurrent supported bootstraps have identical clean tagged
@@ -674,54 +816,121 @@ async function deployPrivateReleaseConfig(config) {
     await deployBootstrapOuterWorker();
     // The newly installed endpoint must become the durable serialization
     // authority before the Container rollout or any successful completion.
-    await withAgentEmailOperationsLease(
-      "control_plane_deploy",
-      async ({ signal }) => {
-        const first = preflightManagedCohortProtocolBootstrapTarget(
-          expected,
-          finalPredecessor,
-          config.path,
-        );
-        await deploy(signal);
-        await verify(signal, leaseOrigin);
-        const converged = preflightManagedCohortProtocolBootstrapTarget(
-          expected,
-          finalPredecessor,
-          config.path,
-        );
-        verifyManagedCohortProtocolBootstrapConvergence(first, converged);
-        await assertReleaseInputsUnchanged();
-        exactLeaseOrigin(inspectOrder(), leaseOrigin);
-      },
-      { endpoint: leaseOrigin },
+    await attest(
+      () => withAgentEmailOperationsLease(
+        "control_plane_deploy",
+        async ({ signal }) => {
+          const first = await attest(
+            () => preflightManagedCohortProtocolBootstrapTarget(
+              expected,
+              finalPredecessor,
+              release.path,
+              inspect,
+            ),
+            "leased bootstrap target deployment attestation",
+          );
+          await attest(
+            inspectDarkSecrets,
+            "leased bootstrap dark-secret deployment attestation",
+          );
+          await deploy(signal);
+          await attest(
+            () => verify(signal, leaseOrigin),
+            "leased bootstrap deployment attestation",
+          );
+          await attest(
+            inspectDarkSecrets,
+            "leased final bootstrap dark-secret deployment attestation",
+          );
+          const converged = await attest(
+            () => preflightManagedCohortProtocolBootstrapTarget(
+              expected,
+              finalPredecessor,
+              release.path,
+              inspect,
+            ),
+            "leased converged bootstrap target attestation",
+          );
+          verifyManagedCohortProtocolBootstrapConvergence(first, converged);
+          await attest(
+            () => exactLeaseOrigin(inspectOrder(), leaseOrigin),
+            "leased bootstrap email edge deployment attestation",
+          );
+        },
+        { endpoint: leaseOrigin },
+      ),
+      "bootstrap control-plane operations lease",
     );
   }
+}
+
+export async function withPrivateDeploymentConfigCleanup(config, operation) {
+  let result;
+  let operationError;
+  try {
+    result = await operation();
+  } catch (error) {
+    operationError = error;
+  }
+  let cleanupError;
+  try {
+    await config.cleanup();
+  } catch (error) {
+    cleanupError = error;
+  }
+  if (operationError && cleanupError) {
+    const cleanupErrors = cleanupError instanceof AggregateError
+      ? cleanupError.errors
+      : [cleanupError];
+    throw new AggregateError(
+      [operationError, ...cleanupErrors],
+      "control-plane deployment failed and release input cleanup was incomplete",
+    );
+  }
+  if (operationError) throw operationError;
+  if (cleanupError) throw cleanupError;
+  return result;
 }
 
 export async function main(argv = process.argv.slice(2)) {
   if (argv.length !== 0) {
     throw new Error(`unknown or incomplete argument ${argv[0] ?? ""}`.trim());
   }
-  const config = await createPrivateDeploymentConfig({
-    prefix: "witself-control-plane-deploy-",
-    parentDirectory: resolve(root, ".."),
-    entrypointTarget: join(root, "src", "index.js"),
-    render: (path) => runLeaseGuardedCommand(
+  const commandEnvironments = productionDeploymentEnvironments();
+  const source = sourceIdentity();
+  const release = await createControlPlaneReleaseSnapshot({
+    identity: source,
+    render: (path, layout) => runLeaseGuardedCommand(
       process.execPath,
-      [join(root, "scripts", "render-wrangler.mjs"), "--output", path],
-      { cwd: root, timeoutMs: 60_000 },
+      [
+        join(layout.controlPlaneRoot, "scripts", "render-wrangler.mjs"),
+        "--version", source.version,
+        "--commit", source.commit,
+        "--date", source.date,
+        "--output", path,
+      ],
+      {
+        cwd: layout.workDirectory,
+        env: commandEnvironments.nestedRender,
+        timeoutMs: 60_000,
+      },
     ),
-    validate: (path) => runLeaseGuardedCommand(
-      process.execPath,
-      [join(root, "scripts", "assert-custom-domain-dark.mjs"), "--config", path],
-      { cwd: root, timeoutMs: 60_000 },
+    validate: (path, layout) => assertCustomDomainSecretsDark(
+      inspectWorkerSecrets(
+        path,
+        commandEnvironments.nestedInspection,
+        undefined,
+        {
+          cwd: layout.workDirectory,
+          reviewedEnvironmentFile: layout.reviewedEnvironmentFile,
+        },
+      ),
     ),
   });
-  try {
-    return await deployPrivateReleaseConfig(config);
-  } finally {
-    await config.cleanup();
-  }
+  return withPrivateDeploymentConfigCleanup(
+    release,
+    () => deployPrivateReleaseConfig(release, commandEnvironments),
+  );
 }
 
 if (process.argv[1] != null &&

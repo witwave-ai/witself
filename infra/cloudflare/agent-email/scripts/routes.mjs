@@ -1,18 +1,22 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
 import { CloudflareAPI, cloudflareEnvironment } from "./cloudflare.mjs";
-import { activatePilot, disablePilot, inspectPilot, preparePilot, removePilot } from "./routing-lib.mjs";
+import {
+  disablePilot,
+  inspectPilot,
+  LEGACY_ROUTE_ACTIVATION_RETIRED,
+  removePilot,
+} from "./routing-lib.mjs";
 
 const operations = new Map([
-  ["prepare", preparePilot],
-  ["activate", activatePilot],
   ["disable", disablePilot],
   ["remove", removePilot],
   ["status", inspectPilot],
 ]);
+const retiredOperations = new Set(["prepare", "activate"]);
 
 function usage() {
-  return `usage: node scripts/routes.mjs <prepare|activate|disable|remove|status> <pilot.json>
+  return `usage: node scripts/routes.mjs <disable|remove|status> <pilot.json>
 
 Required environment:
   CLOUDFLARE_API_TOKEN    Zone Settings Read, Email Routing Rules Write,
@@ -21,13 +25,16 @@ Required environment:
   CLOUDFLARE_ZONE_ID      32-character Email Routing zone id
   EMAIL_DIRECTORY_KV_ID   isolated witself-agent-email-pilot-directory id
 
-The manager uses literal-address routes only. Prepare and activate require
-Cloudflare Email Routing subaddressing to be enabled; status reports the live
-setting. It reads the catch-all before and after every operation but contains
-no operation capable of updating catch_all.`;
+This legacy literal-route manager is cleanup-only. Prepare and activate are
+retired; use the production primary-route manager. Status reports the live
+subaddressing setting. Disable and remove read the catch-all before and after
+every operation, and no operation can update catch_all.`;
 }
 
 async function main(argv = process.argv.slice(2)) {
+  if (retiredOperations.has(argv[0])) {
+    throw new Error(LEGACY_ROUTE_ACTIVATION_RETIRED);
+  }
   if (argv.length !== 2 || !operations.has(argv[0])) throw new Error(usage());
   let manifest;
   try {

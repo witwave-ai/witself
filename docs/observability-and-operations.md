@@ -260,7 +260,7 @@ Initial metric families should include:
 | `witself_audit_queue_depth` | Buffered audit events waiting to be written when a queue exists. |
 | `witself_usage_events_total` | Usage metering events by dimension and result. |
 
-The pilot-gated Cloudflare inbound-email Worker also writes one best-effort
+The production Cloudflare inbound-email Worker also writes one best-effort
 Analytics Engine point per final SMTP-facing disposition to
 `witself_agent_email_edge`. This is an edge dataset, not a Prometheus family.
 Its fixed schema marker is `witself.agent-email.edge.v1`; `outcome` is one of

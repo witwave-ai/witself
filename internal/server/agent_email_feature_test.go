@@ -138,7 +138,7 @@ func TestAgentEmailEntitlementPrecedesPilotEnrollment(t *testing.T) {
 		apiMux(cfg), http.MethodGet, "/v1/email/address", "token", "", nil,
 	)
 	if response.Code != http.StatusForbidden ||
-		!containsAll(response.Body.String(), "agent is not enrolled in the email pilot") ||
+		!containsAll(response.Body.String(), "agent email is not enabled for this agent") ||
 		addressCalls != 0 {
 		t.Fatalf("enabled non-enrolled response = %d %s calls=%d", response.Code, response.Body.String(), addressCalls)
 	}

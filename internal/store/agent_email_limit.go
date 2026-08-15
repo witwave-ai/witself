@@ -97,7 +97,7 @@ func lockAgentEmailIngestAccountPolicy(
 }
 
 func effectiveAgentEmailMaximumRawBytes(limits map[string]int64) int64 {
-	maximum := int64(agentemail.PilotMaximumRawBytes)
+	maximum := int64(agentemail.RelayMaximumRawBytes)
 	if planMaximum, capped := limits[plans.AgentEmailMaxRawBytesLimit]; capped && planMaximum < maximum {
 		maximum = planMaximum
 	}

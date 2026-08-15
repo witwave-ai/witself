@@ -166,7 +166,7 @@ Use plural resources for ordinary collection and item routes:
 - `/v1/policies`
 - `/v1/groups`
 - `/v1/messages`
-- `/v1/email` (default-off receive-only pilot)
+- `/v1/email` (account-policy-gated production inbound agent email)
 - `/v1/message-requests`
 - `/v1/transcripts`
 - `/v1/usage`
@@ -557,7 +557,7 @@ POST /v1/messages/{message_id}:renew
 POST /v1/messages/{message_id}:release
 POST /v1/messages/{message_id}:complete
 
-# Default-off, owner-agent-only receive-email pilot.
+# Account-policy-gated, owner-agent-only inbound agent email.
 GET  /v1/email/address
 GET  /v1/email:status
 GET  /v1/email
@@ -893,9 +893,10 @@ audit events; read-only recall does neither:
   return HTTP 409.
   The message sender is always derived server-side from the token, never from
   the request body; sender forgery is structurally impossible.
-- The `/v1/email` family exists only when the process-lifetime receive pilot is
-  valid and enabled for exactly one realm plus 5–10 agents. Every owner route
-  independently rechecks that exact realm/agent scope and requires a full agent
+- The `/v1/email` family exists only when a valid process-lifetime receive mode
+  is enabled. Production mode uses an exact account cohort; the retired
+  compatibility mode remains limited to one realm plus 5–10 agents. Every
+  owner route independently rechecks the configured scope and requires a full agent
   token; operator, non-full credential-profile, and unenrolled-agent access is
   denied. `GET /v1/email/address` returns the caller's one provisioned
   address. Startup reconciliation provisions exactly the configured agents and
@@ -938,7 +939,7 @@ audit events; read-only recall does neither:
   `GET /v1/self` are value-free pending-mail hints. They contain no address,
   message id, sender, subject, body, attachment, or processing fence.
 - `POST /v1/internal/agent-email:ingest` accepts only the byte-identical raw body
-  with the pilot's Ed25519 relay headers. It verifies key id, signature, body
+  with the receive service's Ed25519 relay headers. It verifies key id, signature, body
   digest/size, audience, and a bounded timestamp window before calling the
   scoped store. The endpoint is capped at the 25 MiB transport ceiling; the
   owning cell enforces any lower resolved account limit and returns the exact

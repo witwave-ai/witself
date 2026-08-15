@@ -10,7 +10,7 @@ import {
   runtimeConfig,
   runtimeRecipient,
 } from "../src/directory.mjs";
-import { PILOT_MAXIMUM_RAW_BYTES } from "../src/relay.mjs";
+import { RELAY_MAXIMUM_RAW_BYTES } from "../src/relay.mjs";
 import { EDGE_METRICS_SCHEMA, ROUTE_LOOKUP_METRICS_SCHEMA } from "../src/metrics.mjs";
 import {
   ROUTE_PUBLIC_KEY_ENV,
@@ -117,24 +117,22 @@ function coldRouteEnv(metrics = null, extra = {}) {
   });
 }
 
-function env(enabled = true, includeRecipient = true, metrics = null) {
-  const values = new Map([[CONFIG_KEY, runtimeConfig(example, enabled)]]);
-  if (includeRecipient) values.set(recipientKey(first.address), runtimeRecipient(example, first));
-  return {
-    AGENT_EMAIL_DOMAIN: primaryDomain,
-    AGENT_EMAIL_LEGACY_DOMAINS: example.domain,
-    LEGACY_PILOT_TRUSTED_INGEST_URL: example.ingest_url,
-    LEGACY_PILOT_TRUSTED_CELL_AUDIENCE: example.cell_audience,
-    RELAY_KEY_ID: vector.metadata.key_id,
-    RELAY_ED25519_PRIVATE_KEY: vector.pkcs8_base64,
+function legacyEnv(metrics = null, extra = {}, routeNowMS = Date.now()) {
+  const route = routeProjection(example.realm_label, {
+    domain: example.domain,
+    updated_at: new Date(routeNowMS).toISOString(),
+  });
+  return dynamicEnv({}, metrics, {
     EMAIL_DIRECTORY: {
       async get(key, type) {
         assert.equal(type, "json");
-        return values.get(key) ?? null;
+        return key === realmRouteKey(example.domain, example.realm_label)
+          ? route
+          : null;
       },
     },
-    ...(metrics ? { EMAIL_EDGE_METRICS: metrics } : {}),
-  };
+    ...extra,
+  });
 }
 
 function message(overrides = {}) {
@@ -153,7 +151,7 @@ function message(overrides = {}) {
 async function captureAccepted(overrides = {}) {
   let request;
   const mail = message(overrides);
-  await handleEmail(mail, env(), {
+  await handleEmail(mail, legacyEnv(null, {}, vectorNowMS), {
     now: () => vector.metadata.timestamp * 1000,
     fetch: async (url, init) => {
       request = { url, init };
@@ -197,7 +195,7 @@ test("only a 2xx body containing exactly accepted is success", async () => {
   ];
   for (const response of failures) {
     await assert.rejects(
-      () => handleEmail(message(), env(), { fetch: async () => response }),
+      () => handleEmail(message(), legacyEnv(), { fetch: async () => response }),
       { message: "agent email relay temporarily unavailable" },
     );
   }
@@ -207,7 +205,7 @@ test("plan-disabled receipt accepts and drops with a value-free metric", async (
   const points = [];
   const metrics = { writeDataPoint(point) { points.push(point); } };
   const mail = message();
-  await handleEmail(mail, env(true, true, metrics), {
+  await handleEmail(mail, legacyEnv(metrics), {
     fetch: async () => new Response('{"verdict":"feature_disabled"}', { status: 200 }),
   });
   const verdicts = verdictPoints(points);
@@ -226,7 +224,7 @@ test("unknown and permanent cell verdicts use one sanitized permanent rejection"
     ["permanent", 410],
   ]) {
     const mail = message();
-    await handleEmail(mail, env(), {
+    await handleEmail(mail, legacyEnv(), {
       fetch: async () => new Response(JSON.stringify({ verdict }), { status }),
     });
     assert.deepEqual(mail.rejected, ["recipient unavailable"]);
@@ -237,7 +235,7 @@ test("terminal retry-canary verdict rejects once with no marker leakage", async 
   const points = [];
   const metrics = { writeDataPoint(point) { points.push(point); } };
   const mail = message();
-  await handleEmail(mail, env(true, true, metrics), {
+  await handleEmail(mail, legacyEnv(metrics), {
     fetch: async () => new Response('{"verdict":"retry_canary_rejected"}', { status: 410 }),
   });
   const verdicts = verdictPoints(points);
@@ -254,7 +252,7 @@ test("cell over-size verdict maps to a sanitized SMTP 552 outcome", async () => 
   const points = [];
   const metrics = { writeDataPoint(point) { points.push(point); } };
   const mail = message();
-  await handleEmail(mail, env(true, true, metrics), {
+  await handleEmail(mail, legacyEnv(metrics), {
     fetch: async () => new Response('{"verdict":"over_size"}', { status: 413 }),
   });
   const verdicts = verdictPoints(points);
@@ -275,7 +273,7 @@ test("exact cell rate-limit verdict maps to a sanitized temporary outcome", asyn
   const metrics = { writeDataPoint(point) { points.push(point); } };
   const mail = message();
   await assert.rejects(
-    () => handleEmail(mail, env(true, true, metrics), {
+    () => handleEmail(mail, legacyEnv(metrics), {
       fetch: async () => new Response('{"verdict":"rate_limited"}', {
         status: 429,
         headers: { "Retry-After": "17" },
@@ -297,104 +295,124 @@ test("exact cell rate-limit verdict maps to a sanitized temporary outcome", asyn
   );
 });
 
-test("disabled pilot and transport failures use one sanitized transient error", async () => {
+test("legacy canonical gate and transport failures use one sanitized transient error", async () => {
   const points = [];
   await assert.rejects(() => handleEmail(
     message(),
-    env(false, true, { writeDataPoint(point) { points.push(point); } }),
-    {},
+    legacyEnv(
+      { writeDataPoint(point) { points.push(point); } },
+      { REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false" },
+    ),
+    { now: () => Date.now() },
   ), {
     message: "agent email relay temporarily unavailable",
   });
   const lookups = routeLookupPoints(points);
   assert.equal(lookups.length, 1);
   assert.deepEqual(lookups[0].blobs, [
-    ROUTE_LOOKUP_METRICS_SCHEMA, "legacy", "known", "pilot",
+    ROUTE_LOOKUP_METRICS_SCHEMA, "kv_fresh", "known", "canonical",
   ]);
-  await assert.rejects(() => handleEmail(message(), env(), { fetch: async () => { throw new Error("secret upstream"); } }), {
+  await assert.rejects(() => handleEmail(message(), legacyEnv(), {
+    fetch: async () => { throw new Error("secret upstream"); },
+  }), {
     message: "agent email relay temporarily unavailable",
   });
 });
 
-test("legacy pilot directory cannot supply or change its relay destination", async () => {
-  for (const mode of ["anchors_absent", "directory_poisoned"]) {
-    const current = env();
-    const originalGet = current.EMAIL_DIRECTORY.get;
-    let directoryReads = 0;
-    let rawReads = 0;
-    let fetchCalls = 0;
-    if (mode === "anchors_absent") {
-      delete current.LEGACY_PILOT_TRUSTED_INGEST_URL;
-      delete current.LEGACY_PILOT_TRUSTED_CELL_AUDIENCE;
-    } else {
-      current.EMAIL_DIRECTORY.get = async (key, type) => {
-        directoryReads++;
-        if (key === CONFIG_KEY) {
-          return {
-            ...runtimeConfig(example, true),
-            ingest_url: "https://attacker.example/v1/collect",
-          };
-        }
-        return originalGet(key, type);
-      };
-    }
-    if (mode === "anchors_absent") {
-      current.EMAIL_DIRECTORY.get = async (...args) => {
-        directoryReads++;
-        return originalGet(...args);
-      };
-    }
-    const mail = message();
-    Object.defineProperty(mail, "raw", {
-      get() {
-        rawReads++;
-        throw new Error("retired unsigned pilot route must not reach raw MIME");
-      },
-    });
+test("legacy managed delivery ignores unsigned pilot rows", async () => {
+  const signedRoute = routeProjection(example.realm_label, {
+    domain: example.domain,
+    updated_at: new Date(vectorNowMS).toISOString(),
+  });
+  const unsignedConfig = {
+    ...runtimeConfig(example, true),
+    ingest_url: "https://attacker.example/v1/collect",
+  };
+  const unsignedRecipient = runtimeRecipient(example, first);
+  const keys = [];
+  const current = legacyEnv(null, {}, vectorNowMS);
+  current.EMAIL_DIRECTORY.get = async (key, type) => {
+    assert.equal(type, "json");
+    keys.push(key);
+    if (key === CONFIG_KEY) return unsignedConfig;
+    if (key === recipientKey(first.address)) return unsignedRecipient;
+    if (key === realmRouteKey(example.domain, example.realm_label)) return signedRoute;
+    return null;
+  };
+  let relayed;
+  const mail = message();
+  await handleEmail(mail, current, {
+    now: () => vectorNowMS,
+    fetch: async (url) => {
+      relayed = url;
+      return new Response('{"verdict":"accepted"}', { status: 200 });
+    },
+  });
 
-    await assert.rejects(
-      () => handleEmail(mail, current, {
-        fetch: async () => {
-          fetchCalls++;
-          throw new Error("retired unsigned pilot route must not relay");
-        },
-      }),
-      { message: "agent email relay temporarily unavailable" },
-      mode,
-    );
-
-    assert.equal(directoryReads, mode === "anchors_absent" ? 0 : 1, mode);
-    assert.equal(rawReads, 0, mode);
-    assert.equal(fetchCalls, 0, mode);
-    assert.deepEqual(mail.rejected, [], mode);
-  }
+  assert.deepEqual(mail.rejected, []);
+  assert.equal(relayed, example.ingest_url);
+  assert.deepEqual(keys, [realmRouteKey(example.domain, example.realm_label)]);
 });
 
-test("unenrolled and oversized messages reject before relay", async () => {
-  let fetched = false;
+test("unsigned pilot rows cannot make a missing legacy canonical route reachable", async () => {
+  const keys = [];
+  let rawReads = 0;
+  const current = coldRouteEnv(null, {
+    EMAIL_DIRECTORY: {
+      async get(key, type) {
+        assert.equal(type, "json");
+        keys.push(key);
+        if (key === CONFIG_KEY) return runtimeConfig(example, true);
+        if (key === recipientKey(first.address)) return runtimeRecipient(example, first);
+        return null;
+      },
+    },
+  });
+  const mail = message();
+  Object.defineProperty(mail, "raw", {
+    get() {
+      rawReads++;
+      throw new Error("unknown legacy route must not read raw MIME");
+    },
+  });
+  await handleEmail(mail, current, {
+    now: () => vectorNowMS,
+    routeLookupState: createRouteLookupState(),
+    fetch: async () => new Response(null, { status: 404 }),
+  });
+
+  assert.deepEqual(mail.rejected, ["recipient unavailable"]);
+  assert.equal(rawReads, 0);
+  assert.deepEqual(keys, [realmRouteKey(example.domain, example.realm_label)]);
+});
+
+test("legacy canonical delivery leaves agent authority to the cell and rejects oversized mail at the edge", async () => {
+  let fetchCalls = 0;
   const unlistedAddress = `other.${example.realm_label}@${example.domain}`;
   const unlisted = message({ to: unlistedAddress });
-  await handleEmail(unlisted, env(), { fetch: async () => { fetched = true; } });
+  await handleEmail(unlisted, legacyEnv(), {
+    fetch: async () => {
+      fetchCalls++;
+      return new Response('{"verdict":"unknown_recipient"}', { status: 404 });
+    },
+  });
   assert.deepEqual(unlisted.rejected, ["recipient unavailable"]);
+  assert.equal(fetchCalls, 1);
 
   const oversized = message({
-    rawSize: PILOT_MAXIMUM_RAW_BYTES + 1,
+    rawSize: RELAY_MAXIMUM_RAW_BYTES + 1,
     raw: { must_not_be_read: true },
   });
-  await handleEmail(oversized, env(), { fetch: async () => { fetched = true; } });
-  assert.deepEqual(oversized.rejected, ["message too large"]);
-  assert.equal(fetched, false);
-});
-
-test("an enrolled recipient missing from the eventually consistent KV detail map tempfails", async () => {
-  await assert.rejects(() => handleEmail(message(), env(true, false), {}), {
-    message: "agent email relay temporarily unavailable",
+  await handleEmail(oversized, legacyEnv(), {
+    fetch: async () => { fetchCalls++; },
   });
+  assert.deepEqual(oversized.rejected, ["message too large"]);
+  assert.equal(fetchCalls, 1);
 });
 
 test("provider raw-size mismatch tempfails rather than accepting partial content", async () => {
   await assert.rejects(
-    () => handleEmail(message({ rawSize: raw.byteLength + 1 }), env(), { fetch: async () => new Response() }),
+    () => handleEmail(message({ rawSize: raw.byteLength + 1 }), legacyEnv(), { fetch: async () => new Response() }),
     { message: "agent email relay temporarily unavailable" },
   );
 });
@@ -403,25 +421,30 @@ test("edge metrics record value-free accepted, rejected, and tempfailed outcomes
   const points = [];
   const metrics = { writeDataPoint(point) { points.push(point); } };
 
-  await handleEmail(message(), env(true, true, metrics), {
+  await handleEmail(message(), legacyEnv(metrics, {}, vectorNowMS), {
     now: () => vector.metadata.timestamp * 1000,
     fetch: async () => new Response('{"verdict":"accepted"}', { status: 200 }),
   });
 
   const unknown = message({ to: `other.${example.realm_label}@${example.domain}` });
-  await handleEmail(unknown, env(true, true, metrics), {
+  await handleEmail(unknown, legacyEnv(metrics, {}, vectorNowMS), {
     now: () => vector.metadata.timestamp * 1000,
+    fetch: async () => new Response('{"verdict":"unknown_recipient"}', { status: 404 }),
   });
 
   await assert.rejects(
-    () => handleEmail(message(), env(false, true, metrics), {
+    () => handleEmail(message(), legacyEnv(
+      metrics,
+      { REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false" },
+      vectorNowMS,
+    ), {
       now: () => vector.metadata.timestamp * 1000,
     }),
     { message: "agent email relay temporarily unavailable" },
   );
 
   await assert.rejects(
-    () => handleEmail(message(), env(true, true, metrics), {
+    () => handleEmail(message(), legacyEnv(metrics, {}, vectorNowMS), {
       now: () => vector.metadata.timestamp * 1000,
       fetch: async () => new Response('{"verdict":"receive_disabled"}', { status: 503 }),
     }),
@@ -431,7 +454,7 @@ test("edge metrics record value-free accepted, rejected, and tempfailed outcomes
   const verdicts = verdictPoints(points);
   assert.equal(verdicts.length, 4);
   assert.deepEqual(verdicts.map((point) => point.blobs[1]), [
-    "accepted", "rejected_unknown_recipient", "tempfail_disabled", "tempfail_disabled",
+    "accepted", "rejected_cell_permanent", "tempfail_canonical_gate", "tempfail_disabled",
   ]);
   assert.equal(verdicts.at(-1).blobs[2], "response");
   for (const point of verdicts) {
@@ -446,7 +469,7 @@ test("edge metrics record value-free accepted, rejected, and tempfailed outcomes
 test("edge metrics failures never alter the SMTP disposition", async () => {
   const metrics = { writeDataPoint() { throw new Error("analytics unavailable"); } };
   const mail = message();
-  await handleEmail(mail, env(true, true, metrics), {
+  await handleEmail(mail, legacyEnv(metrics), {
     fetch: async () => new Response('{"verdict":"accepted"}', { status: 200 }),
   });
   assert.deepEqual(mail.rejected, []);
@@ -553,6 +576,91 @@ test("fleet canonical delivery gate is exact-true and independent", async () => 
   );
   assert.equal(aliasRelayed, true);
   assert.deepEqual(alias.rejected, []);
+});
+
+test("legacy canonical routes obey the managed account cohort and canonical gate before content", async () => {
+  for (const { extra, outcome } of [
+    {
+      extra: { AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: "" },
+      outcome: "tempfail_account_cohort",
+    },
+    {
+      extra: { REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false" },
+      outcome: "tempfail_canonical_gate",
+    },
+  ]) {
+    const points = [];
+    let rawReads = 0;
+    let fetchCalls = 0;
+    const mail = message();
+    Object.defineProperty(mail, "raw", {
+      get() {
+        rawReads++;
+        throw new Error("held-back legacy mail must not read content");
+      },
+    });
+    await assert.rejects(
+      () => handleEmail(
+        mail,
+        legacyEnv(
+          { writeDataPoint(point) { points.push(point); } },
+          extra,
+          vectorNowMS,
+        ),
+        {
+          now: () => vectorNowMS,
+          fetch: async () => { fetchCalls++; },
+        },
+      ),
+      { message: "agent email relay temporarily unavailable" },
+    );
+    assert.deepEqual(mail.rejected, []);
+    assert.equal(rawReads, 0);
+    assert.equal(fetchCalls, 0);
+    assert.deepEqual(verdictPoints(points).at(-1).blobs, [
+      EDGE_METRICS_SCHEMA, outcome, "route",
+    ]);
+  }
+});
+
+test("legacy canonical labels cannot be authorized by a signed realm-alias route", async () => {
+  let rawReads = 0;
+  let fetchCalls = 0;
+  const route = routeProjection(example.realm_label, {
+    domain: example.domain,
+    route_kind: "realm_alias",
+  });
+  const mail = message();
+  Object.defineProperty(mail, "raw", {
+    get() {
+      rawReads++;
+      throw new Error("inconsistent legacy authority must not read content");
+    },
+  });
+  await assert.rejects(
+    () => handleEmail(
+      mail,
+      dynamicEnv(
+        { [example.realm_label]: route },
+        null,
+        {
+          CONTROL_PLANE_URL: "https://control.example/",
+          CONTROL_PLANE_EDGE_TOKEN: "edge-token-1234567890",
+        },
+      ),
+      {
+        now: () => vectorNowMS,
+        fetch: async () => {
+          fetchCalls++;
+          return new Response(null, { status: 404 });
+        },
+      },
+    ),
+    { message: "agent email relay temporarily unavailable" },
+  );
+  assert.deepEqual(mail.rejected, []);
+  assert.equal(rawReads, 0);
+  assert.equal(fetchCalls, 1);
 });
 
 test("managed account cohort tempfails held-back canonical and alias routes before content", async () => {
@@ -1338,7 +1446,7 @@ test("permanent and exact legacy routes preserve the signed envelope domain", as
     {
       domain: example.domain,
       address: first.address,
-      currentEnv: env(),
+      currentEnv: legacyEnv(null, {}, vectorNowMS),
     },
   ]) {
     let relayed;
@@ -1363,26 +1471,25 @@ test("permanent and exact legacy routes preserve the signed envelope domain", as
   }
 });
 
-test("legacy domain rejects an unlisted address without dynamic KV or control-plane lookup", async () => {
-  const currentEnv = env();
+test("legacy domain rejects realm aliases before KV or control-plane lookup", async () => {
+  const currentEnv = legacyEnv(null, {}, vectorNowMS);
   currentEnv.CONTROL_PLANE_URL = "https://control.example/";
   currentEnv.CONTROL_PLANE_EDGE_TOKEN = "edge-token-1234567890";
-  const originalGet = currentEnv.EMAIL_DIRECTORY.get;
   const keys = [];
-  currentEnv.EMAIL_DIRECTORY.get = async (key, type) => {
+  currentEnv.EMAIL_DIRECTORY.get = async (key) => {
     keys.push(key);
-    return originalGet(key, type);
+    return null;
   };
   let fetched = false;
   const mail = message({
-    to: `unlisted.${example.realm_label}@${example.domain}`,
+    to: `alpha.${aliasLabel}@${example.domain}`,
   });
   await handleEmail(mail, currentEnv, {
     now: () => vectorNowMS,
     fetch: async () => { fetched = true; },
   });
   assert.deepEqual(mail.rejected, ["recipient unavailable"]);
-  assert.deepEqual(keys, [CONFIG_KEY]);
+  assert.deepEqual(keys, []);
   assert.equal(fetched, false);
 });
 
@@ -2187,7 +2294,7 @@ test("a stale known route plus control-plane 404 tempfails instead of bouncing",
 });
 
 test("directory read failure plus control-plane 404 remains transient for legacy routes", async () => {
-  const current = env();
+  const current = legacyEnv(null, {}, vectorNowMS);
   current.CONTROL_PLANE_URL = "https://control.example/";
   current.CONTROL_PLANE_EDGE_TOKEN = "edge-token-1234567890";
   current.EMAIL_DIRECTORY.get = async () => {

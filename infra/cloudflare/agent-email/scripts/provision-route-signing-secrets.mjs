@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import {
+  createHash,
   createPrivateKey,
   createPublicKey,
   randomBytes,
@@ -10,13 +11,21 @@ import {
 import { spawnSync } from "node:child_process";
 import {
   accessSync,
-  chmodSync,
   constants as fsConstants,
   lstatSync,
   readFileSync,
+  realpathSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { CUSTOM_DOMAIN_DELIVERY_SECRET } from
@@ -30,11 +39,29 @@ import {
 import {
   validateAgentEmailOperationsLeaseEvidence,
 } from "../../control-plane/src/agent-email-operations-lease.mjs";
+import {
+  createPrivateDeploymentConfig,
+} from "../../control-plane/scripts/private-deployment-config.mjs";
+import { PRODUCTION_RECEIVE_WORKER } from "../src/worker-names.mjs";
+import { reserveJSONReceipt } from "./receipt-journal.mjs";
+import {
+  assertProductionCloudflareIdentity,
+  sanitizedWranglerEnvironment,
+  sanitizedWranglerInspectionEnvironment,
+  withReviewedWranglerEnvironmentFile,
+} from "./wrangler-environment.mjs";
+export {
+  WRANGLER_UNSAFE_ENVIRONMENT,
+  sanitizedWranglerEnvironment,
+  sanitizedWranglerInspectionEnvironment,
+  withReviewedWranglerEnvironmentFile,
+} from "./wrangler-environment.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const repositoryRoot = resolve(root, "../../..");
 const CONTROL_PLANE_ROOT = resolve(root, "../control-plane");
 const CONTROL_PLANE_WORKER = "witself-control-plane";
-const EMAIL_EDGE_WORKER = "witself-agent-email-pilot";
+const EMAIL_EDGE_WORKER = PRODUCTION_RECEIVE_WORKER;
 const ROUTE_PRIVATE_SECRET = "AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY";
 const FALLBACK_TOKEN_SECRET = "CONTROL_PLANE_EDGE_TOKEN";
 const RELAY_PRIVATE_SECRET = "RELAY_ED25519_PRIVATE_KEY";
@@ -48,30 +75,6 @@ const UUID =
 const PUBLIC_KEY = /^[A-Za-z0-9+/]{43}=$/;
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 const MAX_JSON_OUTPUT = 5 * 1024 * 1024;
-const WRANGLER_UNSAFE_ENVIRONMENT = Object.freeze([
-  "CF_ACCOUNT_ID",
-  "CF_API_TOKEN",
-  "CONTROL_PLANE_EDGE_TOKEN",
-  "CONTROL_PLANE_URL",
-  "CLOUDFLARE_API_BASE_URL",
-  "CF_API_BASE_URL",
-  "WRANGLER_API_ENVIRONMENT",
-  "WRANGLER_LOG_PATH",
-  "WRANGLER_OUTPUT_FILE_DIRECTORY",
-  "WRANGLER_OUTPUT_FILE_PATH",
-  "WRANGLER_CI_OVERRIDE_NAME",
-  "WRANGLER_AUTH_DOMAIN",
-  "WRANGLER_AUTH_URL",
-  "WRANGLER_REVOKE_URL",
-  "WRANGLER_TOKEN_URL",
-  "NODE_OPTIONS",
-  "NODE_DEBUG",
-  "NODE_V8_COVERAGE",
-  "SSLKEYLOGFILE",
-  "WITSELF_CONTROL_PLANE",
-  "WITSELF_CONTROL_PLANE_ADDR",
-  "WITSELF_ENDPOINT",
-]);
 const WITSELF_UNSAFE_ENVIRONMENT = Object.freeze([
   "NODE_OPTIONS",
   "NODE_DEBUG",
@@ -111,6 +114,27 @@ function optionValue(argv, index, name) {
     fail(`${name} requires a value`);
   }
   return value;
+}
+
+function insideDirectory(parent, candidate) {
+  const path = relative(parent, candidate);
+  return path === "" || (!isAbsolute(path) && path !== ".." &&
+    !path.startsWith(`..${sep}`));
+}
+
+export function assertProvisioningReceiptPath(
+  path,
+  checkout = repositoryRoot,
+) {
+  if (typeof path !== "string" || !isAbsolute(path) ||
+      resolve(path) !== path) {
+    fail("--receipt must be one canonical absolute path");
+  }
+  if (typeof checkout !== "string" || !isAbsolute(checkout) ||
+      resolve(checkout) !== checkout || insideDirectory(checkout, path)) {
+    fail("--receipt must be outside the repository checkout");
+  }
+  return path;
 }
 
 export function parseProvisioningArgs(argv, env = process.env) {
@@ -163,13 +187,14 @@ export function parseProvisioningArgs(argv, env = process.env) {
   out.account = identityName(out.account, "--account", "default");
   out.realm = identityName(out.realm, "--realm", "default");
   out.agent = identityName(out.agent, "--agent");
-  for (const property of ["controlPlaneConfig", "emailEdgeConfig", "tokenFile", "receipt"]) {
+  for (const property of ["controlPlaneConfig", "emailEdgeConfig", "tokenFile"]) {
     if (out[property] !== "") {
       out[property] = isAbsolute(out[property])
         ? resolve(out[property])
         : resolve(root, out[property]);
     }
   }
+  assertProvisioningReceiptPath(out.receipt);
   if (out.controlPlaneConfig === out.emailEdgeConfig) {
     fail("control-plane and email-edge config paths must be distinct");
   }
@@ -659,31 +684,6 @@ export function validateFallbackToken(value) {
   return true;
 }
 
-export function sanitizedWranglerEnvironment(source = process.env) {
-  const output = { ...source };
-  for (const name of WRANGLER_UNSAFE_ENVIRONMENT) delete output[name];
-  Object.assign(output, {
-    WRANGLER_WRITE_LOGS: "false",
-    WRANGLER_LOG_SANITIZE: "true",
-    WRANGLER_SEND_METRICS: "false",
-    WRANGLER_SEND_ERROR_REPORTS: "false",
-    WRANGLER_LOG: "error",
-    NO_COLOR: "1",
-    TERM: "dumb",
-  });
-  return output;
-}
-
-export function sanitizedWranglerInspectionEnvironment(source = process.env) {
-  const output = sanitizedWranglerEnvironment(source);
-  // Wrangler 4.120.0 suppresses JSON stdout from read-only inspection
-  // commands when WRANGLER_LOG=error. Keep every redirection, telemetry, and
-  // file-logging guard, but let Wrangler use its default level while stdout
-  // and stderr remain captured by spawnJSON.
-  delete output.WRANGLER_LOG;
-  return output;
-}
-
 export function sanitizedWitselfEnvironment(source = process.env) {
   const output = { ...source };
   for (const name of WITSELF_UNSAFE_ENVIRONMENT) delete output[name];
@@ -730,7 +730,18 @@ function spawnSecretPut(command, args, value, options = {}) {
 }
 
 export function assertReceiptAvailable(path) {
-  if (!path) return;
+  assertProvisioningReceiptPath(path);
+  let parent;
+  let checkout;
+  try {
+    parent = realpathSync(dirname(path));
+    checkout = realpathSync(repositoryRoot);
+  } catch {
+    fail("could not inspect receipt directory");
+  }
+  if (insideDirectory(checkout, join(parent, basename(path)))) {
+    fail("--receipt must be outside the repository checkout");
+  }
   try {
     lstatSync(path);
   } catch (error) {
@@ -745,15 +756,6 @@ export function assertReceiptAvailable(path) {
   fail("receipt path already exists; refusing to overwrite it");
 }
 
-export function writeReceiptExclusive(path, receipt) {
-  writeFileSync(path, `${JSON.stringify(receipt, null, 2)}\n`, {
-    encoding: "utf8",
-    flag: "wx",
-    mode: 0o600,
-  });
-  chmodSync(path, 0o600);
-}
-
 export function createSpawnRuntime() {
   return Object.freeze({
     readText(path) {
@@ -766,12 +768,14 @@ export function createSpawnRuntime() {
       return spawnSecretPut(command, args, value, options);
     },
     assertReceiptAvailable,
-    writeReceiptExclusive,
+    reserveReceipt: reserveJSONReceipt,
   });
 }
 
 function wranglerJSON(runtime, args, config, operation, env) {
-  return runtime.json("wrangler", [...args, "--config", config], {
+  return runtime.json("wrangler", withReviewedWranglerEnvironmentFile([
+    ...args, "--config", config,
+  ]), {
     cwd: root,
     env,
     operation,
@@ -841,11 +845,11 @@ export async function putWorkerSecret(
   env,
 ) {
   await leaseGuard.renew();
-  runtime.secretPut("wrangler", [
+  runtime.secretPut("wrangler", withReviewedWranglerEnvironmentFile([
     "secret", "put", name,
     "--name", worker,
     "--config", config,
-  ], value, {
+  ]), value, {
     cwd: root,
     env,
     operation: `provision ${name} on ${worker}`,
@@ -853,16 +857,103 @@ export async function putWorkerSecret(
   await leaseGuard.renew();
 }
 
-export async function provisionRouteSigningSecrets(options, {
-  runtime = createSpawnRuntime(),
-  environment = process.env,
-  withLease = withAgentEmailOperationsLease,
-} = {}) {
-  runtime.assertReceiptAvailable(options.receipt);
+async function freezeRouteConfig(runtime, source, prefix) {
+  return createPrivateDeploymentConfig({
+    prefix,
+    async render(path) {
+      const value = await runtime.readText(source);
+      if (typeof value !== "string" || value.length < 1) {
+        fail("route signing source configuration was missing or invalid");
+      }
+      writeFileSync(path, value, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    },
+  });
+}
+
+async function createRouteConfigSnapshots(runtime, options) {
+  let controlPlane;
+  let emailEdge;
+  try {
+    controlPlane = await freezeRouteConfig(
+      runtime,
+      options.controlPlaneConfig,
+      "witself-route-control-plane-",
+    );
+    emailEdge = await freezeRouteConfig(
+      runtime,
+      options.emailEdgeConfig,
+      "witself-route-email-edge-",
+    );
+    if (controlPlane.path === emailEdge.path ||
+        controlPlane.path === options.controlPlaneConfig ||
+        emailEdge.path === options.emailEdgeConfig ||
+        insideDirectory(repositoryRoot, controlPlane.path) ||
+        insideDirectory(repositoryRoot, emailEdge.path) ||
+        insideDirectory(
+          realpathSync(repositoryRoot),
+          realpathSync(controlPlane.path),
+        ) || insideDirectory(
+          realpathSync(repositoryRoot),
+          realpathSync(emailEdge.path),
+        )) {
+      fail("route signing configuration snapshots were not isolated");
+    }
+    return Object.freeze({ controlPlane, emailEdge });
+  } catch (error) {
+    const cleanup = await Promise.allSettled([
+      controlPlane?.cleanup(),
+      emailEdge?.cleanup(),
+    ]);
+    const cleanupErrors = cleanup
+      .filter((result) => result.status === "rejected")
+      .map((result) => result.reason);
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(
+        [error, ...cleanupErrors],
+        "route signing configuration snapshot creation and cleanup failed",
+      );
+    }
+    throw error;
+  }
+}
+
+async function assertRouteConfigSnapshotsUnchanged(snapshots) {
+  await Promise.all([
+    snapshots.controlPlane.assertUnchanged(),
+    snapshots.emailEdge.assertUnchanged(),
+  ]);
+}
+
+async function cleanupRouteConfigSnapshots(snapshots) {
+  const results = await Promise.allSettled([
+    snapshots.controlPlane.cleanup(),
+    snapshots.emailEdge.cleanup(),
+  ]);
+  const errors = results
+    .filter((result) => result.status === "rejected")
+    .map((result) => result.reason);
+  if (errors.length > 0) {
+    throw new AggregateError(
+      errors,
+      "could not clean up route signing configuration snapshots",
+    );
+  }
+}
+
+async function provisionRouteSigningSecretsFromSnapshots(options, snapshots, {
+  runtime,
+  environment,
+  withLease,
+  reserveReceipt,
+}) {
+  await assertRouteConfigSnapshotsUnchanged(snapshots);
   const config = validateProvisioningConfigs(
-    runtime.readText(options.controlPlaneConfig),
-    runtime.readText(options.emailEdgeConfig),
+    await snapshots.controlPlane.readText(),
+    await snapshots.emailEdge.readText(),
   );
+  await assertRouteConfigSnapshotsUnchanged(snapshots);
+  const controlPlaneConfig = snapshots.controlPlane.path;
+  const emailEdgeConfig = snapshots.emailEdge.path;
   const wranglerInspectionEnv = sanitizedWranglerInspectionEnvironment(
     environment,
   );
@@ -872,18 +963,19 @@ export async function provisionRouteSigningSecrets(options, {
     controlPlane: inspectWorker(
       runtime,
       CONTROL_PLANE_WORKER,
-      options.controlPlaneConfig,
+      controlPlaneConfig,
       "control plane",
       wranglerInspectionEnv,
     ),
     emailEdge: inspectWorker(
       runtime,
       EMAIL_EDGE_WORKER,
-      options.emailEdgeConfig,
+      emailEdgeConfig,
       "email edge",
       wranglerInspectionEnv,
     ),
   };
+  await assertRouteConfigSnapshotsUnchanged(snapshots);
   assertRemoteDark(remote);
   const leaseOrigin = routeSigningOperationsLeaseOrigin(remote);
 
@@ -940,8 +1032,11 @@ export async function provisionRouteSigningSecrets(options, {
   );
   verifyEd25519Keypair(routePrivate, config.publicKey);
   validateFallbackToken(fallbackToken);
+  await assertRouteConfigSnapshotsUnchanged(snapshots);
 
-  return withLease(
+  let journal;
+  try {
+    const receipt = await withLease(
     OPERATIONS_LEASE_OPERATION,
     async (leaseGuard) => {
       if (!leaseGuard || typeof leaseGuard.renew !== "function" ||
@@ -955,22 +1050,51 @@ export async function provisionRouteSigningSecrets(options, {
         controlPlane: inspectWorker(
           runtime,
           CONTROL_PLANE_WORKER,
-          options.controlPlaneConfig,
+          controlPlaneConfig,
           "control plane",
           wranglerInspectionEnv,
         ),
         emailEdge: inspectWorker(
           runtime,
           EMAIL_EDGE_WORKER,
-          options.emailEdgeConfig,
+          emailEdgeConfig,
           "email edge",
           wranglerInspectionEnv,
         ),
       };
+      await assertRouteConfigSnapshotsUnchanged(snapshots);
       assertRemoteDark(leasedRemote);
       if (routeSigningOperationsLeaseOrigin(leasedRemote) !== leaseOrigin) {
         fail("email edge operations lease origin changed before provisioning");
       }
+
+      const pending = Object.freeze({
+        schema: "witself.agent-email-secret-provisioning-pending.v1",
+        state: "secret_writes_started",
+        operation: OPERATIONS_LEASE_OPERATION,
+        workers: Object.freeze({
+          control_plane: CONTROL_PLANE_WORKER,
+          email_edge: EMAIL_EDGE_WORKER,
+        }),
+        target: Object.freeze({
+          route_signing_key_id: config.keyID,
+          route_public_key_sha256: createHash("sha256")
+            .update(Buffer.from(config.publicKey, "base64"))
+            .digest("hex"),
+          config_fence: Object.freeze({
+            control_plane_sha256: snapshots.controlPlane.sha256,
+            email_edge_sha256: snapshots.emailEdge.sha256,
+          }),
+        }),
+        recovery: "reconcile_dark_live_state_before_retry",
+      });
+      await assertRouteConfigSnapshotsUnchanged(snapshots);
+      journal = reserveReceipt(options.receipt, pending);
+      if (!journal || typeof journal.commit !== "function" ||
+          typeof journal.close !== "function") {
+        fail("route signing receipt journal is invalid");
+      }
+      await assertRouteConfigSnapshotsUnchanged(snapshots);
 
       const routePrivateBytes = Buffer.from(routePrivate, "utf8");
       const fallbackTokenBytes = Buffer.from(fallbackToken, "utf8");
@@ -979,7 +1103,7 @@ export async function provisionRouteSigningSecrets(options, {
           runtime,
           leaseGuard,
           CONTROL_PLANE_WORKER,
-          options.controlPlaneConfig,
+          controlPlaneConfig,
           ROUTE_PRIVATE_SECRET,
           routePrivateBytes,
           wranglerMutationEnv,
@@ -992,7 +1116,7 @@ export async function provisionRouteSigningSecrets(options, {
             runtime,
             leaseGuard,
             CONTROL_PLANE_WORKER,
-            options.controlPlaneConfig,
+            controlPlaneConfig,
             FALLBACK_TOKEN_SECRET,
             fallbackTokenBytes,
             wranglerMutationEnv,
@@ -1001,7 +1125,7 @@ export async function provisionRouteSigningSecrets(options, {
             runtime,
             leaseGuard,
             EMAIL_EDGE_WORKER,
-            options.emailEdgeConfig,
+            emailEdgeConfig,
             FALLBACK_TOKEN_SECRET,
             fallbackTokenBytes,
             wranglerMutationEnv,
@@ -1015,20 +1139,21 @@ export async function provisionRouteSigningSecrets(options, {
         routePrivateBytes.fill(0);
         fallbackTokenBytes.fill(0);
       }
+      await assertRouteConfigSnapshotsUnchanged(snapshots);
 
       try {
         const postWriteRemote = {
           controlPlane: inspectWorker(
             runtime,
             CONTROL_PLANE_WORKER,
-            options.controlPlaneConfig,
+            controlPlaneConfig,
             "control plane",
             wranglerInspectionEnv,
           ),
           emailEdge: inspectWorker(
             runtime,
             EMAIL_EDGE_WORKER,
-            options.emailEdgeConfig,
+            emailEdgeConfig,
             "email edge",
             wranglerInspectionEnv,
           ),
@@ -1044,6 +1169,7 @@ export async function provisionRouteSigningSecrets(options, {
       }
 
       await leaseGuard.renew();
+      await assertRouteConfigSnapshotsUnchanged(snapshots);
       const leaseEvidence = leaseGuard.evidence();
       validateAgentEmailOperationsLeaseEvidence(
         leaseEvidence,
@@ -1062,6 +1188,13 @@ export async function provisionRouteSigningSecrets(options, {
           email_edge_fallback_token: "succeeded",
         }),
         operations_lease: leaseEvidence,
+        target: Object.freeze({
+          route_signing_key_id: config.keyID,
+          config_fence: Object.freeze({
+            control_plane_sha256: snapshots.controlPlane.sha256,
+            email_edge_sha256: snapshots.emailEdge.sha256,
+          }),
+        }),
         safeguards: Object.freeze({
           existing_workers_verified: true,
           all_delivery_gates_verified_dark: true,
@@ -1072,10 +1205,11 @@ export async function provisionRouteSigningSecrets(options, {
           values_written_only_over_stdin: true,
           post_write_bindings_and_inventories_verified: true,
           serialized_by_global_operations_lease: true,
+          frozen_private_config_snapshots_verified: true,
           tagged_redeploy_required: true,
         }),
       });
-      if (options.receipt) runtime.writeReceiptExclusive(options.receipt, receipt);
+      await assertRouteConfigSnapshotsUnchanged(snapshots);
       return receipt;
     },
     {
@@ -1083,6 +1217,60 @@ export async function provisionRouteSigningSecrets(options, {
       token: fallbackToken,
     },
   );
+    await assertRouteConfigSnapshotsUnchanged(snapshots);
+    journal.commit(receipt);
+    return receipt;
+  } catch (error) {
+    try {
+      if (typeof journal?.close === "function") journal.close();
+    } catch (closeError) {
+      throw new AggregateError(
+        [error, closeError],
+        "route signing provisioning and receipt close failed",
+      );
+    }
+    throw error;
+  }
+}
+
+export async function provisionRouteSigningSecrets(options, dependencies = {}) {
+  const runtime = dependencies.runtime ?? createSpawnRuntime();
+  const environment = dependencies.environment ?? process.env;
+  const withLease = dependencies.withLease ?? withAgentEmailOperationsLease;
+  const reserveReceipt = dependencies.reserveReceipt ??
+    runtime.reserveReceipt ?? reserveJSONReceipt;
+  const createSnapshots = dependencies.createSnapshots ??
+    createRouteConfigSnapshots;
+  const cleanupSnapshots = dependencies.cleanupSnapshots ??
+    cleanupRouteConfigSnapshots;
+  assertProductionCloudflareIdentity(environment);
+  assertProvisioningReceiptPath(options?.receipt);
+  runtime.assertReceiptAvailable(options.receipt);
+  const snapshots = await createSnapshots(runtime, options);
+  let result;
+  let primaryError;
+  try {
+    result = await provisionRouteSigningSecretsFromSnapshots(
+      options,
+      snapshots,
+      { runtime, environment, withLease, reserveReceipt },
+    );
+  } catch (error) {
+    primaryError = error;
+  }
+  try {
+    await cleanupSnapshots(snapshots);
+  } catch (cleanupError) {
+    if (primaryError != null) {
+      throw new AggregateError(
+        [primaryError, cleanupError],
+        "route signing provisioning and snapshot cleanup failed",
+      );
+    }
+    throw cleanupError;
+  }
+  if (primaryError != null) throw primaryError;
+  return result;
 }
 
 async function main() {

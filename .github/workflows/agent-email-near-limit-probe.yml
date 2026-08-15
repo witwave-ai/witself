@@ -1,0 +1,66 @@
+name: agent-email-near-limit-probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-email-production-receive-probe
+  cancel-in-progress: false
+
+jobs:
+  near-limit-production-receive:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: agent-email-canary
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: infra/cloudflare/agent-email
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Verify reviewed production source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Verify the bounded near-limit probe
+        run: node --test test/near-limit-probe.test.mjs
+      - name: Preflight the near-limit target without sending
+        run: npm run near-limit-probe -- --preflight
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.AGENT_EMAIL_CANARY_CLOUDFLARE_TOKEN }}
+          AGENT_EMAIL_NEAR_LIMIT_FROM: ${{ secrets.AGENT_EMAIL_CANARY_FROM }}
+          AGENT_EMAIL_NEAR_LIMIT_TO: ${{ secrets.AGENT_EMAIL_NEAR_LIMIT_TO }}
+          WITSELF_EMAIL_NEAR_LIMIT_ENDPOINT: ${{ vars.WITSELF_EMAIL_NEAR_LIMIT_ENDPOINT }}
+          WITSELF_EMAIL_NEAR_LIMIT_TOKEN: ${{ secrets.WITSELF_EMAIL_NEAR_LIMIT_TOKEN }}
+          AGENT_EMAIL_NEAR_LIMIT_TIMEOUT_SECONDS: "60"
+      - name: Prove the production receive path first
+        run: npm run canary
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.AGENT_EMAIL_CANARY_CLOUDFLARE_TOKEN }}
+          AGENT_EMAIL_CANARY_FROM: ${{ secrets.AGENT_EMAIL_CANARY_FROM }}
+          AGENT_EMAIL_CANARY_TO: ${{ secrets.AGENT_EMAIL_CANARY_TO }}
+          WITSELF_EMAIL_CANARY_ENDPOINT: ${{ vars.WITSELF_EMAIL_CANARY_ENDPOINT }}
+          WITSELF_EMAIL_CANARY_TOKEN: ${{ secrets.WITSELF_EMAIL_CANARY_TOKEN }}
+          AGENT_EMAIL_CANARY_TIMEOUT_SECONDS: "600"
+      - name: Prove near-limit production receive and durable storage
+        run: npm run near-limit-probe
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.AGENT_EMAIL_CANARY_CLOUDFLARE_TOKEN }}
+          AGENT_EMAIL_NEAR_LIMIT_FROM: ${{ secrets.AGENT_EMAIL_CANARY_FROM }}
+          AGENT_EMAIL_NEAR_LIMIT_TO: ${{ secrets.AGENT_EMAIL_NEAR_LIMIT_TO }}
+          WITSELF_EMAIL_NEAR_LIMIT_ENDPOINT: ${{ vars.WITSELF_EMAIL_NEAR_LIMIT_ENDPOINT }}
+          WITSELF_EMAIL_NEAR_LIMIT_TOKEN: ${{ secrets.WITSELF_EMAIL_NEAR_LIMIT_TOKEN }}
+          AGENT_EMAIL_NEAR_LIMIT_TIMEOUT_SECONDS: "900"

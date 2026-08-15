@@ -42,7 +42,7 @@ const (
 // canary fence. Duplicate, folded, non-ASCII, or otherwise non-canonical
 // values fail closed.
 func RetryCanaryChallenge(raw []byte) (string, bool, error) {
-	if len(raw) == 0 || len(raw) > PilotMaximumRawBytes {
+	if len(raw) == 0 || len(raw) > RelayMaximumRawBytes {
 		return "", false, ErrMIMEInvalid
 	}
 	end := headerEnd(raw)
@@ -133,7 +133,7 @@ type ParsedMessage struct {
 // preferred human-readable part. It never returns attachment content. An
 // error is safe to collapse to ParseErrorCode while retaining the raw message.
 func ParseMessage(raw []byte, includeText bool) (ParsedMessage, error) {
-	if len(raw) == 0 || len(raw) > PilotMaximumRawBytes {
+	if len(raw) == 0 || len(raw) > RelayMaximumRawBytes {
 		return ParsedMessage{}, ErrMIMEInvalid
 	}
 	end := headerEnd(raw)
@@ -185,7 +185,7 @@ func ParseMessage(raw []byte, includeText bool) (ParsedMessage, error) {
 // walking the MIME body. The value remains untrusted external content; callers
 // must parse it as an address list and enforce their own recipient policy.
 func ReplyToHeader(raw []byte) (string, error) {
-	if len(raw) == 0 || len(raw) > PilotMaximumRawBytes {
+	if len(raw) == 0 || len(raw) > RelayMaximumRawBytes {
 		return "", ErrMIMEInvalid
 	}
 	end := headerEnd(raw)
@@ -206,7 +206,7 @@ func ReplyToHeader(raw []byte) (string, error) {
 // separator. The returned slice aliases raw. Callers that retain it must copy
 // it; the retry-canary fingerprint consumes it synchronously.
 func MIMEBody(raw []byte) ([]byte, error) {
-	if len(raw) == 0 || len(raw) > PilotMaximumRawBytes {
+	if len(raw) == 0 || len(raw) > RelayMaximumRawBytes {
 		return nil, ErrMIMEInvalid
 	}
 	end := headerEnd(raw)
