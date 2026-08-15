@@ -449,6 +449,9 @@ civo_default_preset_postgres_application="$render_dir/civo-default-preset-postgr
 civo_server_nested_values="$render_dir/civo-server-nested-values.yaml"
 civo_server_nested_render="$render_dir/civo-server-nested-render.yaml"
 civo_server_config="$render_dir/civo-server-config.yaml"
+civo_worker_config="$render_dir/civo-worker-config.yaml"
+civo_server_deployment="$render_dir/civo-server-deployment.yaml"
+civo_worker_deployment="$render_dir/civo-worker-deployment.yaml"
 email_production_server_config="$render_dir/email-production-server-config.yaml"
 email_production_server_deployment="$render_dir/email-production-server-deployment.yaml"
 email_production_server_application="$render_dir/email-production-server-application.yaml"
@@ -586,6 +589,23 @@ require_line "          resourcesPreset: nano" "$civo_use1_postgres_application"
 reject_line "          resourcesPreset: micro" "$civo_use1_postgres_application"
 require_line "          resourcesPreset: nano" "$civo_default_preset_postgres_application"
 extract_application_helm_values "$civo_server_application" "$civo_server_nested_values"
+require_line '    targetRevision: "0.0.247"' "$civo_server_application"
+require_line '          tag: 0.0.247' "$civo_server_application"
+require_sequence "$civo_server_application" \
+  "          providerEventTokenSecret:" \
+  "            key: token" \
+  "            name: witself-agent-email-provider-event-v1"
+require_sequence "$civo_server_application" \
+  "          agentEmailOutbound:" \
+  "            batchSize: 10" \
+  "            batchTimeout: 30s" \
+  "            dispatchAudience: witself-agent-email-send" \
+  "            dispatchEndpoint: https://witself-agent-email-send.witwave.workers.dev/v1/dispatch" \
+  "            dispatchKeyID: civo-sandbox-usw2-dev-2026-08" \
+  "            dispatchPrivateKeySecret:" \
+  "              key: private-key" \
+  "              name: witself-agent-email-outbound-dispatch-v1" \
+  "            enabled: false"
 # The app-of-apps chart is reconciled before each child chart pin advances.
 # Forward the value only to cells whose child chart accepts it. The two live
 # v0.0.224 cells include it, while the configured-but-unprovisioned v0.0.223
@@ -604,8 +624,23 @@ reject_line "          agentEmailRateBucketCleanup:" "$civo_use1_server_applicat
 helm template witself-server "$server_chart" --namespace witself \
   --values "$civo_server_nested_values" >"$civo_server_nested_render"
 extract_document ConfigMap witself-server "$civo_server_nested_render" "$civo_server_config"
+extract_document ConfigMap witself-worker "$civo_server_nested_render" "$civo_worker_config"
+extract_document Deployment witself-server "$civo_server_nested_render" "$civo_server_deployment"
+extract_document Deployment witself-worker "$civo_server_nested_render" "$civo_worker_deployment"
 
 require_line '  WITSELF_CELL_NAME: "civo-sandbox-usw2-dev"' "$civo_server_config"
+require_line '  WITSELF_AGENT_EMAIL_OUTBOUND_ENABLED: "false"' "$civo_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_ENDPOINT: "https://witself-agent-email-send.witwave.workers.dev/v1/dispatch"' "$civo_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_AUDIENCE: "witself-agent-email-send"' "$civo_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_KEY_ID: "civo-sandbox-usw2-dev-2026-08"' "$civo_worker_config"
+require_sequence "$civo_server_deployment" \
+  "            - name: WITSELF_AGENT_EMAIL_PROVIDER_EVENT_TOKEN" \
+  "              valueFrom:" \
+  "                secretKeyRef:" \
+  '                  name: "witself-agent-email-provider-event-v1"' \
+  '                  key: "token"'
+reject_line "WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_PRIVATE_KEY" "$civo_worker_deployment"
+reject_line "witself-agent-email-outbound-dispatch-v1" "$civo_worker_deployment"
 
 # Portable defaults keep the API rollout-safe and fail closed on a worker that
 # has no shared database Secret.
@@ -1206,7 +1241,7 @@ require_sequence "$email_production_server_application" \
   "        agentEmail:" \
   "          providerEventTokenSecret:" \
   "            key: token" \
-  "            name: \"\"" \
+  "            name: witself-agent-email-provider-event-v1" \
   "          receivePilot:" \
   "            acceptedLegacyDomains: []" \
   "            agentIDs: []" \
