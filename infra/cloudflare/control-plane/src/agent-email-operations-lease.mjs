@@ -22,6 +22,7 @@ export const AGENT_EMAIL_OPERATIONS = Object.freeze([
   "control_plane_deploy",
   "email_edge_deploy",
   "email_edge_rollback",
+  "email_routing_settings_apply",
   "primary_routing_apply",
   "relay_signing_key_provision",
   "route_signing_secret_provision",

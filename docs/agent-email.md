@@ -670,10 +670,11 @@ it from the edge cohort first so even fresh cached v2 rows stop immediately,
 then remove it from the control plane.
 
 Every control-plane deploy, email-edge deploy, guarded email-edge rollback,
-coordinated route-signing secret ceremony, primary-routing apply, and
-catch-all-routing apply is serialized by one global operations lease in the
-existing `REALM_EMAIL_ALIASES` Durable Object. The exact operation identifiers
-are `control_plane_deploy`, `email_edge_deploy`, `email_edge_rollback`,
+coordinated route-signing secret ceremony, routing-foundation apply,
+primary-routing apply, and catch-all-routing apply is serialized by one global
+operations lease in the existing `REALM_EMAIL_ALIASES` Durable Object. The
+exact operation identifiers are `control_plane_deploy`, `email_edge_deploy`,
+`email_edge_rollback`, `email_routing_settings_apply`,
 `route_signing_secret_provision`, `relay_signing_key_provision`,
 `primary_routing_apply`, and `catch_all_routing_apply`. The operator must
 provide the existing
