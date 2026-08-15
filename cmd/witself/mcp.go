@@ -1859,6 +1859,9 @@ func newWitselfMCPServerForRuntimeOptions(backend witselfMCPBackend, runtimeName
 	if email, ok := backend.(mcpAgentEmailBackend); ok {
 		registerAgentEmailMCPTools(server, runtimeName, email)
 	}
+	if email, ok := backend.(mcpAgentEmailOutboundBackend); ok {
+		registerAgentEmailOutboundMCPTools(server, runtimeName, email)
+	}
 	registerFactStatusMCPTool(server, runtimeName, backend)
 	registerMemoryMCPTools(server, runtimeName, backend)
 	if avatars, ok := backend.(mcpAvatarBackend); ok {
@@ -2276,6 +2279,8 @@ func mcpMutatingToolNames(runtimeName string) []string {
 		"witself.email.renew",
 		"witself.email.release",
 		"witself.email.complete",
+		"witself.email.send",
+		"witself.email.reply",
 		"witself.message.request.open",
 		"witself.message.request.list",
 		"witself.message.request.show",

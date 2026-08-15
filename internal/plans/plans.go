@@ -35,6 +35,10 @@ const (
 	// AgentEmailReceiveFeature enables inbound agent email. The integration is
 	// installed once; cells enforce the account's resolved feature snapshot.
 	AgentEmailReceiveFeature = "agent_email_receive"
+	// AgentEmailSendFeature enables outbound agent email. The integration is
+	// installed once; the account's resolved feature snapshot controls whether
+	// later cell send surfaces may accept work without requiring a reinstall.
+	AgentEmailSendFeature = "agent_email_send"
 	// AgentEmailRealmAliasFeature allows a realm to activate memorable labels
 	// in addition to its permanent ID-body email address. The global claim and
 	// reserved-name policy, downgrade grace, and count enforcement remain
@@ -93,6 +97,16 @@ const (
 	// feature entitlement. Enterprise therefore carries an explicit zero until
 	// a contracted per-account override is applied.
 	AgentEmailCustomDomainsPerAccountLimit = "agent_email_custom_domains_per_account"
+	// AgentEmailSentPerAgentMinuteLimit caps outbound email accepted from each
+	// sending agent under a rolling one-minute rate budget. A missing key means
+	// no commercial plan cap, but the cell's defensive platform maximum still
+	// applies.
+	AgentEmailSentPerAgentMinuteLimit = "agent_email_sent_per_agent_minute"
+	// AgentEmailSentPerRealmMinuteLimit caps aggregate outbound email accepted
+	// within each realm under a rolling one-minute rate budget. A missing key
+	// means no commercial plan cap, but the cell's defensive platform maximum
+	// still applies.
+	AgentEmailSentPerRealmMinuteLimit = "agent_email_sent_per_realm_minute"
 	// MessageSentPerAgentMinuteLimit caps messages accepted from each sending
 	// agent under a rolling one-minute rate budget. A missing key means no
 	// commercial plan cap, but the service's defensive platform maximum still
@@ -131,6 +145,16 @@ const (
 	// defaults and per-account overrides may lower it but cannot promise a
 	// larger message than the receive path can carry.
 	MaxAgentEmailRawBytes int64 = 25 * 1024 * 1024
+	// MaxAgentEmailSentPerAgentMinute is the always-enforced platform maximum
+	// for outbound email accepted from one agent per rolling minute.
+	MaxAgentEmailSentPerAgentMinute int64 = 30
+	// MaxAgentEmailSentPerRealmMinute is the always-enforced aggregate platform
+	// maximum for outbound email accepted in one realm per rolling minute.
+	MaxAgentEmailSentPerRealmMinute int64 = 300
+	// MaxAgentEmailSentPerAccountMinute is the always-enforced aggregate platform
+	// maximum across every realm in one account. It is not a commercial plan
+	// limit: unlimited realms must not bypass shared-domain reputation safety.
+	MaxAgentEmailSentPerAccountMinute int64 = 1_000
 	// MaxMessageSentPerAgentMinute is the always-enforced platform maximum for
 	// one sending agent under a rolling one-minute rate budget.
 	MaxMessageSentPerAgentMinute int64 = 2_000
@@ -183,9 +207,10 @@ const (
 	// MessagingEntitlementVersion is the only marker version understood by
 	// this release.
 	MessagingEntitlementVersion int64 = 1
-	// AgentEmailRetentionDaysPolicy is the maximum age of retained inbound
-	// agent email. It remains meaningful while receipt is disabled so a
-	// downgrade can clean up already-stored mail. Absence means indefinite.
+	// AgentEmailRetentionDaysPolicy is the maximum age of retained inbound and
+	// outbound agent email. It remains meaningful while either direction is
+	// disabled so a downgrade can clean up already-stored mail. Absence means
+	// indefinite retention.
 	AgentEmailRetentionDaysPolicy = "agent_email_retention_days"
 	// AgentEmailEntitlementVersionPolicy makes AgentEmailReceiveFeature
 	// authoritative while preserving legacy snapshots that predate the gate.
@@ -375,6 +400,8 @@ func ValidateLimits(limits map[string]int64) error {
 			AgentEmailAttachmentStorageBytesLimit,
 			AgentEmailRealmAliasesPerRealmLimit,
 			AgentEmailCustomDomainsPerAccountLimit,
+			AgentEmailSentPerAgentMinuteLimit,
+			AgentEmailSentPerRealmMinuteLimit,
 			MessageSentPerAgentMinuteLimit,
 			MessageDeliveredPerRealmMinuteLimit,
 			MessageDeliveredPerRecipientMinuteLimit,
@@ -396,6 +423,16 @@ func ValidateLimits(limits map[string]int64) error {
 				key, MaxAgentEmailRawBytes)
 		}
 		switch key {
+		case AgentEmailSentPerAgentMinuteLimit:
+			if value > MaxAgentEmailSentPerAgentMinute {
+				return fmt.Errorf("%s must be between 0 and %d",
+					key, MaxAgentEmailSentPerAgentMinute)
+			}
+		case AgentEmailSentPerRealmMinuteLimit:
+			if value > MaxAgentEmailSentPerRealmMinute {
+				return fmt.Errorf("%s must be between 0 and %d",
+					key, MaxAgentEmailSentPerRealmMinute)
+			}
 		case MessageSentPerAgentMinuteLimit:
 			if value > MaxMessageSentPerAgentMinute {
 				return fmt.Errorf("%s must be between 0 and %d",

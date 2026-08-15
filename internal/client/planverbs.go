@@ -91,6 +91,7 @@ type PlanStatus struct {
 	Messaging        *PlanFeatureStatus   `json:"messaging,omitempty"`
 	MessageRetention *PlanRetentionStatus `json:"message_retention,omitempty"`
 	EmailReceive     *PlanFeatureStatus   `json:"email_receive,omitempty"`
+	EmailSend        *PlanFeatureStatus   `json:"email_send,omitempty"`
 	EmailRetention   *PlanRetentionStatus `json:"email_retention,omitempty"`
 	Transcript       *PlanRetentionStatus `json:"transcript_retention,omitempty"`
 	ApplyPending     bool                 `json:"apply_pending"`

@@ -34,6 +34,7 @@ func TestPlanListShowsCanonicalPolicyMatrix(t *testing.T) {
 	for _, want := range []string{
 		"Personal", "Professional*", "Team", "Enterprise", "Most popular",
 		"Active memories / agent", "Transcript retention", "Receive-email entitlement",
+		"Send-email entitlement",
 		"90 days", "365 days", "No catalog cap", "Entitlements do not prove delivery readiness",
 	} {
 		if !strings.Contains(stdout, want) {
@@ -63,7 +64,7 @@ func TestPlanListJSONCanFilterUnavailablePlans(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
 		t.Fatalf("decode output: %v\n%s", err, stdout)
 	}
-	if doc.SchemaVersion != plans.SchemaVersion || doc.Updated != "2026-08-10" || len(doc.Plans) != 2 {
+	if doc.SchemaVersion != plans.SchemaVersion || doc.Updated != "2026-08-14" || len(doc.Plans) != 2 {
 		t.Fatalf("filtered catalog = %+v", doc)
 	}
 	if doc.Plans[0].ID != plans.Free || doc.Plans[1].ID != "standard" ||
@@ -229,11 +230,14 @@ func TestPlanStatusShowsEffectivePolicyAndOverrides(t *testing.T) {
 		BillingPlan:     "standard",
 		BillingPlanName: "Professional",
 		Applied:         "standard",
-		Limits:          map[string]int64{plans.StoredMemoryLimit: 20_000},
+		Limits: map[string]int64{
+			plans.StoredMemoryLimit:                 20_000,
+			plans.AgentEmailSentPerAgentMinuteLimit: 12,
+		},
 		LimitDefaults:   map[string]int64{plans.StoredMemoryLimit: 10_000},
 		Policies:        map[string]int64{plans.TranscriptRetentionDaysPolicy: 60},
 		PolicyDefaults:  map[string]int64{plans.TranscriptRetentionDaysPolicy: 90},
-		Features:        []string{plans.AgentEmailReceiveFeature, "memory"},
+		Features:        []string{plans.AgentEmailReceiveFeature, plans.AgentEmailSendFeature, "memory"},
 		FeatureDefaults: []string{"memory"},
 		Transcript: &client.PlanRetentionStatus{
 			DefaultDays: &days90, EffectiveDays: &days60, Overridden: true,
@@ -245,6 +249,9 @@ func TestPlanStatusShowsEffectivePolicyAndOverrides(t *testing.T) {
 			DefaultDays: &days90, EffectiveDays: &days30,
 		},
 		EmailReceive: &client.PlanFeatureStatus{
+			DefaultEnabled: false, Enabled: true, Overridden: true,
+		},
+		EmailSend: &client.PlanFeatureStatus{
 			DefaultEnabled: false, Enabled: true, Overridden: true,
 		},
 		EmailRetention: &client.PlanRetentionStatus{
@@ -265,9 +272,13 @@ func TestPlanStatusShowsEffectivePolicyAndOverrides(t *testing.T) {
 		"messaging:   disabled (account override; plan default enabled)",
 		"email entitlement: enabled (account override; plan default disabled)",
 		"email delivery:    not reported by plan status (separate rollout gates)",
+		"email sending:     enabled (account override; plan default disabled)",
 		"email data:  indefinite (account override; plan default 90 days) retention",
 		"agent_email_receive (account override)",
+		"agent_email_send (account override)",
 		"stored_memory: 20,000 (account override; plan default 10,000)",
+		"agent_email_sent_per_agent_minute: 12 (account override; plan default no plan cap)",
+		"agent_email_sent_per_realm_minute: no plan cap",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("plan status omitted %q:\n%s", want, stdout)

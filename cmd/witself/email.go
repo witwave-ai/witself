@@ -41,7 +41,7 @@ type agentEmailCodeCandidatesResult struct {
 
 func emailCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself email status|address|list|listen|read|code-candidates|code-consumed|ack|claim|renew|release|complete|operator ...")
+		fmt.Fprintln(os.Stderr, "usage: witself email status|address|send|reply|sent|sent-show|list|listen|read|code-candidates|code-consumed|ack|claim|renew|release|complete|operator ...")
 		return 2
 	}
 	switch args[0] {
@@ -49,6 +49,14 @@ func emailCmd(args []string) int {
 		return emailStatus(args[1:])
 	case "address":
 		return emailAddressCmd(args[1:])
+	case "send":
+		return emailSend(args[1:])
+	case "reply":
+		return emailReply(args[1:])
+	case "sent":
+		return emailSent(args[1:])
+	case "sent-show":
+		return emailSentShow(args[1:])
 	case "list":
 		return emailList(args[1:])
 	case "listen":
@@ -150,9 +158,12 @@ func formatAgentEmailBytes(value int64) string {
 }
 
 func emailOperatorCmd(args []string) int {
-	if len(args) == 0 || args[0] != "receive" {
-		fmt.Fprintln(os.Stderr, "usage: witself email operator receive show|enable|disable ...")
+	if len(args) == 0 || (args[0] != "receive" && args[0] != "send") {
+		fmt.Fprintln(os.Stderr, "usage: witself email operator receive|send show|enable|disable ...")
 		return 2
+	}
+	if args[0] == "send" {
+		return emailOperatorSendCmd(args[1:])
 	}
 	return emailOperatorReceiveCmd(args[1:])
 }

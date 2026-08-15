@@ -40,11 +40,12 @@ Worker jobs must be:
 - coordinated through durable PostgreSQL state;
 - free of tenant identifiers or payload values in metrics and logs.
 
-The registered jobs are transcript retention, message retention, inbound
-agent-email retention, avatar-style rollout, message-rate bucket cleanup, and
-agent-email-rate bucket cleanup. Both cleanup jobs are enabled whenever the
-worker runs unless an operator explicitly disables one. New job types must opt
-in explicitly; the worker is not an arbitrary command runner.
+The registered jobs are transcript retention, message retention, agent-email
+retention, outbound agent-email dispatch, avatar-style rollout, message-rate
+bucket cleanup, and agent-email-rate bucket cleanup. Both cleanup jobs are
+enabled whenever the worker runs unless an operator explicitly disables one.
+Outbound dispatch is independently default-off. New job types must opt in
+explicitly; the worker is not an arbitrary command runner.
 
 ## Cooperative Scaling
 
@@ -98,7 +99,31 @@ independent email safety table. PostgreSQL `SKIP LOCKED` divides stale rows
 across replicas, while the store-level database-clock cutoff is the final
 authority on when accumulated email debt has fully expired.
 
-Inbound agent-email retention has its own 16 preview lanes and 16 enforcement
+Outbound agent-email dispatch uses the durable cell outbox rather than a
+process-local queue or timer. Every enabled replica may claim ready rows. A
+claim id, monotonic generation, and database-time lease fence one provider
+attempt; a losing replica skips or fails the stale transition instead of
+sending concurrently. The worker marks the durable provider boundary before
+calling the adapter, but only after rechecking the active account, current send
+entitlement, live agent, both operator controls, recipient suppression, and
+the independent provider-attempt rate lane. It signs one immutable
+dispatch with the cell's Ed25519 key. Exact retries preserve the same `esnd_`
+id so the adapter's Durable Object
+receipt can return the prior result. Transport uncertainty schedules only that
+exact receipt replay; the worker never creates a fresh id and guesses that
+resend is safe. Work closes after 12 attempts or 72 hours, and an outcome that
+still cannot be proved after crossing the provider boundary becomes
+`ambiguous`.
+
+The job processes a bounded batch (default 10), waits two seconds between
+attempts, bounds a batch at 30 seconds, and bounds one adapter request at 20
+seconds. Provider credentials remain at the Cloudflare adapter. The worker has
+only the HTTPS endpoint, audience, key id, and private dispatch key. Scaling
+from two replicas can increase throughput when multiple ready rows and database
+capacity exist; one slow provider request occupies only its bounded job loop,
+not the API service or unrelated worker jobs.
+
+Agent-email retention has its own 16 preview lanes and 16 enforcement
 lanes. The worker briefly leases one lane, then takes an exclusive account row
 with `SKIP LOCKED`; foreground email ingress and mailbox operations use a
 share lock on that same row. This makes a busy account a deferral instead of a
@@ -106,6 +131,14 @@ queue behind live work and prevents new claims, duplicate links, or retry
 proofs from racing deletion. Account-local age cursors use PostgreSQL
 `received_at`, reset when the retention policy changes, and advance past
 temporarily claimed messages so one hold cannot starve later mail.
+
+The same account fence and retention policy also govern the outbox. Eligible
+outbound rows age from `created_at`; `queued`, `claimed`, and
+`provider_started` rows are unresolved-work holds and are never selected.
+Outbound scanning is oldest-first and uses `SKIP LOCKED` inside the existing
+account transaction, while the established inbound cursor remains unchanged.
+Provider-event receipts are deleted in bounded batches before a parent send so
+parent deletion cannot hide an unbounded cascade.
 
 One batch selects at most 100 messages and deletes at most 32 MiB of raw MIME.
 A live processing lease defers its message; unread, unacknowledged, completed,
@@ -154,23 +187,36 @@ Its item kinds distinguish eligible/deleted threads, deleted messages,
 evidence holds, active-work holds, lock deferrals, oversize quarantine, and
 cumulative-budget deferrals.
 
-Inbound email has separate
+Agent email has separate
 `witself_worker_agent_email_retention_*` batch, item, and last-success
-families. Item kinds cover selected and deleted messages, deleted raw bytes,
-live-claim holds, lock/oversize/budget deferrals, duplicate-link repairs, and
-cascaded retry-canary proofs.
+families. The common configured batch budget is spent across selected inbound
+messages, outbound messages, provider-event receipts, and recipient
+suppressions. Item kinds therefore distinguish inbound counts from the closed
+`outbound_message`, `provider_event`, and `recipient_suppression` families,
+along with deleted raw/body bytes, live-work holds, lock/oversize/budget
+deferrals, duplicate-link repairs, and bounded retry-canary cleanup.
+
+Outbound dispatch exposes
+`witself_worker_agent_email_outbound_batches_total{result}`,
+`witself_worker_agent_email_outbound_items_total{kind}`, and
+`witself_worker_agent_email_outbound_last_success_timestamp_seconds`. The
+closed item kinds are claimed, accepted, delivered, retried, bounced,
+rejected, ambiguous, canceled, and `expired_reconciled` outcomes. Send id,
+account, realm, agent, recipient, subject, provider message id, and provider
+error text are forbidden labels.
 
 Message-rate bucket cleanup has separate
 `witself_worker_message_rate_bucket_cleanup_*` batch-result, deleted-row, and
 last-success metrics. Its only result label values are `success`, `no_work`,
 and `error`; it has no tenant-derived labels.
 
-Inbound-email rate-bucket cleanup has an independent
+Inbound- and outbound-email rate-bucket cleanup has an independent
 `witself_worker_agent_email_rate_bucket_cleanup_*` batch-result, deleted-row,
 and last-success family with the same closed result labels and no
 tenant-derived labels. One scheduled sweep drains consecutive 10,000-row
-batches until the table is caught up or the configured sweep timeout expires;
-full-batch throughput and timeout failures are therefore directly visible.
+batches from both rate tables until each is caught up or the shared sweep
+timeout expires. The metrics intentionally aggregate the two value-free row
+counts; full-batch throughput and timeout failures remain directly visible.
 
 Account, realm, agent, conversation, task, transcript, memory, and secret
 identifiers must never be metric labels. Error text and stored content must
@@ -209,9 +255,54 @@ Message retention has a separate activation sequence:
 2. enable `preview` and review only value-free counts;
 3. switch to `enforce` in a config-only worker rollout.
 
-Inbound agent-email retention uses the same sequence with its own schema,
+Agent-email retention uses the same sequence with its own schema,
 lanes, and metrics. Changing `worker.agentEmailRetention` alters only the
 worker ConfigMap checksum; API pods are not restarted.
+
+Outbound agent-email activation is a separate dark rollout:
+
+1. migrate the outbox, send controls, suppressions, provider-event receipts,
+   and rate buckets to schema 89 while dispatch remains disabled;
+2. onboard and authenticate `send.witmail.net`, provision the adapter Email
+   Sending/receipt/route/Queue bindings, configure one cell signing key and the
+   matching adapter public-key/account allowlist, and install the independent
+   provider-event bearer/target map while every gate remains off;
+3. deploy two compatible worker replicas, enable and verify the adapter for an
+   exact canary cohort, then enable `worker.agentEmailOutbound` only in that
+   cell and its resolved account policy;
+4. prove queue-to-provider idempotent replay, timeout-to-ambiguous handling,
+   provider-event folding, suppression, health, metrics, and rollback before
+   widening either cohort.
+
+Schema 89 is a forward-only convergence barrier. The first compatible process
+that starts against a cell applies the migration automatically. After that,
+any pre-0.0.245 binary fails startup with `ErrMigrationSchemaAhead`; it is not
+a viable rollback even if its Deployment manifest still exists. Keep all
+outbound gates off, freeze account export/import and moves, and converge every
+API and worker replica on a schema-89-compatible image before accepting an
+outbound row. Roll back with account, worker, and adapter gates or deploy a
+forward fix. Never down-migrate the database or restart an older image.
+
+A populated source-to-destination move canary is also a release gate, not just
+an archive unit test. Before moving any account with outbound-email history,
+exercise source suspend and export, archive validation, destination import,
+and activation with fixtures containing at least an accepted/delivered send,
+a provider event, a recipient suppression, and a `claimed` send. Verify that
+tenant links and safety rows survive, `claimed` becomes `queued` with its fence
+consumed, its destination-authored retry timestamps use the destination
+database import clock, and no provider call occurs during the move. Source
+history remains bounded by the manifest's exact `exported_at`; only the exact
+timestamps created by claim normalization may cross that boundary. Also prove
+that source evacuation is refused while any send is `provider_started`, leaves
+the account active, and succeeds only after the worker has resolved that
+exact-replay window. Import still normalizes a legacy or manually constructed
+`provider_started` archive to terminal `ambiguous` as a defensive fallback;
+the supported move path never creates such an archive. An empty new cell is
+the preferred migration target, but it does not replace this populated canary
+before the first email-active account moves.
+
+Enabling a catalog feature, account override, realm/agent switch, worker job,
+or adapter gate never implicitly enables the others.
 
 The API process never runs this loop. Multiple worker replicas claim different
 database lanes with `SKIP LOCKED`; replica count is not encoded in the lane

@@ -1172,6 +1172,8 @@ func serve() int {
 				return server.AccountEvacuationRecord{}, server.ErrCannotCloseDefault
 			case errors.Is(err, store.ErrAccountNotActive):
 				return server.AccountEvacuationRecord{}, server.ErrAccountPending
+			case errors.Is(err, store.ErrAccountEvacuationOutboundInFlight):
+				return server.AccountEvacuationRecord{}, server.ErrAccountEvacuationOutboundInFlight
 			case errors.Is(err, store.ErrAccountEvacuationInProgress),
 				errors.Is(err, store.ErrAccountEvacuationMismatch):
 				return server.AccountEvacuationRecord{}, server.ErrConflict

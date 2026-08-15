@@ -64,6 +64,15 @@ var upgraders = map[int]Upgrader{
 	85: addRealmEmailRouteLifecycleDefaults,
 	86: preserveSchema86Rows,
 	87: preserveSchema87Rows,
+	88: preserveSchema88Rows,
+}
+
+// preserveSchema88Rows acknowledges schema 0089's additive outbound-email
+// streams. A schema-88 archive predates every outbound table, so there are no
+// legacy outbound rows to synthesize or transform. Existing archive rows remain
+// valid unchanged, and the new streams correctly restore empty.
+func preserveSchema88Rows(_ string, row map[string]any) (map[string]any, error) {
+	return row, nil
 }
 
 // preserveSchema87Rows acknowledges schema 0088's additive custom-domain

@@ -1391,9 +1391,10 @@ func agentEmailNoStore(next http.HandlerFunc) http.HandlerFunc {
 func agentEmailNoStoreMux(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/email" || r.URL.Path == "/v1/email:listen" ||
-			r.URL.Path == "/v1/email:status" ||
+			r.URL.Path == "/v1/email:status" || r.URL.Path == "/v1/email:send" ||
 			strings.HasPrefix(r.URL.Path, "/v1/email/") ||
-			r.URL.Path == "/v1/internal/agent-email:ingest" {
+			r.URL.Path == "/v1/internal/agent-email:ingest" ||
+			r.URL.Path == "/v1/internal/agent-email-send:provider-event" {
 			w.Header().Set("Cache-Control", "private, no-store")
 		}
 		next.ServeHTTP(w, r)

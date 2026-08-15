@@ -121,6 +121,16 @@ var importColumns = map[string]map[string]bool{
 		"row_version": true, "created_at": true, "updated_at": true,
 		"disabled_at": true,
 	},
+	"agent_email_realm_send_controls": {
+		"account_id": true, "realm_id": true, "send_state": true,
+		"row_version": true, "created_at": true, "updated_at": true,
+		"disabled_at": true,
+	},
+	"agent_email_send_controls": {
+		"account_id": true, "realm_id": true, "owner_agent_id": true,
+		"send_state": true, "row_version": true,
+		"created_at": true, "updated_at": true, "disabled_at": true,
+	},
 	"agent_email_addresses": {
 		"id": true, "account_id": true, "realm_id": true,
 		"provisioned_agent_id": true, "domain": true,
@@ -198,6 +208,35 @@ var importColumns = map[string]map[string]bool{
 		"armed_at": true, "expires_at": true, "tempfailed_at": true,
 		"retry_expires_at": true,
 		"accepted_at":      true,
+	},
+	"agent_email_outbound_messages": {
+		"id": true, "account_id": true, "realm_id": true,
+		"owner_agent_id": true, "address_id": true,
+		"from_address": true, "reply_to_address": true,
+		"to_address": true, "subject": true, "body_text": true,
+		"request_kind": true, "reply_to_inbound_message_id": true,
+		"thread_key": true, "in_reply_to_header": true,
+		"references_headers": true, "idempotency_key_hash": true,
+		"request_hash": true, "state": true, "provider_state": true,
+		"provider": true, "provider_message_id": true,
+		"last_error_code": true, "attempt_count": true,
+		"claim_generation": true, "claim_id": true,
+		"lease_expires_at": true, "next_attempt_at": true,
+		"queued_at": true, "provider_started_at": true,
+		"accepted_at": true, "delivered_at": true,
+		"deferred_at": true, "failed_at": true,
+		"ambiguous_at": true, "canceled_at": true,
+		"created_at": true, "updated_at": true,
+	},
+	"agent_email_outbound_provider_events": {
+		"account_id": true, "provider": true, "event_id_hash": true,
+		"event_request_hash": true, "outbound_id": true,
+		"event_class": true, "occurred_at": true, "received_at": true,
+	},
+	"agent_email_outbound_recipient_suppressions": {
+		"account_id": true, "recipient_sha256": true, "reason": true,
+		"source_send_id": true, "provider": true,
+		"created_at": true, "updated_at": true,
 	},
 	"agent_vault_keys": {
 		"id": true, "account_id": true, "realm_id": true,
@@ -748,6 +787,15 @@ type agentEmailRetryCanaryImportScope struct {
 	messageID string
 }
 
+type agentEmailOutboundImportScope struct {
+	realmID           string
+	ownerAgentID      string
+	addressID         string
+	provider          string
+	providerMessageID string
+	state             string
+}
+
 type messageImportScope struct {
 	realmID             string
 	fromAgentID         string
@@ -982,214 +1030,228 @@ type agentActivityImportKey struct {
 // tokens.agent_id) must have already been inserted by THIS import — the FK
 // constraint alone would accept a target belonging to any tenant on the cell.
 type importCtx struct {
-	accountID                    string
-	accountStatus                string
-	schemaVersion                int
-	exportedAt                   time.Time
-	importedAt                   time.Time
-	accounts                     int
-	operators                    map[string]bool
-	realms                       map[string]bool
-	agents                       map[string]bool
-	liveAgents                   map[string]bool
-	agentRealms                  map[string]string
-	agentActivity                map[agentActivityImportKey]bool
-	dashboardPreferences         map[string]bool
-	agentEmailAddresses          map[string]agentEmailAddressImportScope
-	agentEmailAddressKeys        map[string]string
-	agentEmailAddressDomains     map[string]map[string]bool
-	agentEmailLiveAddresses      map[string]string
-	agentEmailMailboxes          map[string]agentEmailMailboxImportScope
-	agentEmailMailboxOwners      map[string]string
-	agentEmailMailboxAddresses   map[string]string
-	agentEmailRealmReceiveStates map[string]string
-	agentEmailRealmAliases       map[string]agentEmailRealmAliasImportScope
-	agentEmailRealmAliasLabels   map[string]string
-	agentEmailCustomRoutes       map[string]agentEmailCustomDomainRouteImportScope
-	agentEmailCustomLabels       map[string]string
-	agentEmailCustomRequests     map[string]string
-	agentEmailMessages           map[string]agentEmailMessageImportScope
-	agentEmailProviderKeys       map[string]string
-	agentEmailDeliveries         map[string]agentEmailDeliveryImportScope
-	agentEmailRetryCanaries      map[string]agentEmailRetryCanaryImportScope
-	agentEmailCanaryMessages     map[string]bool
-	vaultKeys                    map[string]secretVaultKeyImportScope
-	vaultKeyIdentities           map[secretVaultKeyIdentityImportKey]secretVaultKeyImportScope
-	vaultLiveKeyVersions         map[secretVaultKeyVersionImportKey]string
-	vaultCurrentKeys             map[string]int
-	vaultFingerprints            map[string]bool
-	vaultEnrollments             map[string]vaultEnrollmentImportScope
-	vaultEnrollmentReceipts      map[string]bool
-	secrets                      map[string]secretImportScope
-	secretNames                  map[string]map[string]string
-	secretFields                 map[string]secretFieldImportScope
-	secretFieldNames             map[string]map[string]bool
-	secretFieldCounts            map[string]int
-	secretMaxValueVersions       map[string]int64
-	secretDEKs                   map[string]secretDEKImportScope
-	secretDEKGenerations         map[secretDEKGenerationImportKey]bool
-	secretCurrentDEKs            map[string]int
-	vaultRotations               map[string]vaultRotationImportScope
-	vaultRotationReceipts        map[string]bool
-	secretReceipts               map[string]bool
-	avatarStyleHeads             map[avatarStyleHeadImportKey]avatarStyleHeadImportScope
-	avatarStyleVersions          map[avatarStyleVersionImportKey]avatarStyleVersionImportScope
-	realmAvatarStyles            map[string]realmAvatarStyleImportScope
-	avatarStyleRollouts          map[avatarStyleRolloutImportKey]avatarStyleRolloutImportScope
-	avatarStyleOpenRollouts      map[string]int
-	avatarProfiles               map[string]avatarProfileImportScope
-	avatarVersions               map[avatarVersionImportKey]avatarVersionImportScope
-	avatarVersionIDs             map[string]bool
-	avatarLedgerIDs              map[string]bool
-	avatarActivationHeads        map[avatarLineageImportKey]int64
-	avatarActivationCount        map[avatarLineageImportKey]int64
-	avatarActivationSequence     map[string]int64
-	avatarActivatedVersions      map[avatarVersionImportKey]bool
-	avatarLastActivatedAt        map[avatarVersionImportKey]time.Time
-	avatarRejectedVersions       map[avatarVersionImportKey]bool
-	avatarRejectedAt             map[avatarVersionImportKey]time.Time
-	avatarResets                 map[avatarLineageImportKey]avatarResetImportScope
-	avatarResetReceipts          map[avatarLineageImportKey]bool
-	avatarResetCount             map[string]int64
-	avatarLineageEarliestAt      map[avatarLineageImportKey]time.Time
-	avatarLineageLatestAt        map[avatarLineageImportKey]time.Time
-	avatarLastResetAt            map[string]time.Time
-	tickets                      map[string]bool
-	transcripts                  map[string]transcriptImportScope
-	entries                      map[string]string
-	factSubjects                 map[string]factImportScope
-	factSubjectNames             map[string]map[string]string
-	facts                        map[string]factImportScope
-	assertions                   map[string]string
-	factMutationTombstoneCounts  map[string]int64
-	messages                     map[string]messageImportScope
-	deliveries                   map[string]messageDeliveryImportScope
-	messageRequests              map[string]messageRequestImportScope
-	messageRequestCandidates     map[messageRequestCandidateImportKey]messageRequestCandidateImportScope
-	messageRequestSelections     map[string]messageRequestSelectionImportScope
-	messageRequestClaims         map[string]messageRequestClaimImportScope
-	memoryClocks                 map[memoryOwnerImportKey]int64
-	memories                     map[string]memoryImportScope
-	memoryVersions               map[memoryVersionImportKey]memoryVersionImportScope
-	memoryVectorProfiles         map[string]memoryVectorProfileImportScope
-	memoryVectors                map[memoryVectorImportKey]bool
-	memoryEvidence               map[string]memoryEvidenceImportScope
-	memoryEvidenceTerminal       map[string]bool
-	memoryActiveSupersessionSets map[memoryVersionImportKey]memorySupersessionImportSet
-	memoryDeletedRetryShields    map[string][]memoryDeleteRetryShield
-	memoryCurationLanes          map[memoryOwnerImportKey]memoryCurationLaneImportScope
-	memoryCurationCursors        map[memoryCurationCursorImportKey]int64
-	memoryCurationRequests       map[string]memoryCurationRequestImportScope
-	memoryCurationRuns           map[string]memoryCurationRunImportScope
-	memoryCurationActions        map[string]memoryCurationActionImportScope
-	memoryCurationMutations      map[string]bool
-	factCandidateCurations       map[string]factCandidateCurationImportScope
-	memoryRelationCurations      []memoryRelationCurationImportScope
-	memoryRelations              map[string]memoryRelationCurationImportScope
+	accountID                      string
+	accountStatus                  string
+	schemaVersion                  int
+	exportedAt                     time.Time
+	importedAt                     time.Time
+	accounts                       int
+	operators                      map[string]bool
+	realms                         map[string]bool
+	agents                         map[string]bool
+	liveAgents                     map[string]bool
+	agentRealms                    map[string]string
+	agentActivity                  map[agentActivityImportKey]bool
+	dashboardPreferences           map[string]bool
+	agentEmailAddresses            map[string]agentEmailAddressImportScope
+	agentEmailAddressKeys          map[string]string
+	agentEmailAddressDomains       map[string]map[string]bool
+	agentEmailLiveAddresses        map[string]string
+	agentEmailMailboxes            map[string]agentEmailMailboxImportScope
+	agentEmailMailboxOwners        map[string]string
+	agentEmailMailboxAddresses     map[string]string
+	agentEmailRealmReceiveStates   map[string]string
+	agentEmailRealmSendControls    map[string]bool
+	agentEmailSendControls         map[string]bool
+	agentEmailRealmAliases         map[string]agentEmailRealmAliasImportScope
+	agentEmailRealmAliasLabels     map[string]string
+	agentEmailCustomRoutes         map[string]agentEmailCustomDomainRouteImportScope
+	agentEmailCustomLabels         map[string]string
+	agentEmailCustomRequests       map[string]string
+	agentEmailMessages             map[string]agentEmailMessageImportScope
+	agentEmailProviderKeys         map[string]string
+	agentEmailDeliveries           map[string]agentEmailDeliveryImportScope
+	agentEmailRetryCanaries        map[string]agentEmailRetryCanaryImportScope
+	agentEmailCanaryMessages       map[string]bool
+	agentEmailOutboundMessages     map[string]agentEmailOutboundImportScope
+	agentEmailOutboundNormalized   map[string]string
+	agentEmailOutboundProviders    map[string]string
+	agentEmailOutboundEvents       map[string]bool
+	agentEmailOutboundSuppressions map[string]bool
+	vaultKeys                      map[string]secretVaultKeyImportScope
+	vaultKeyIdentities             map[secretVaultKeyIdentityImportKey]secretVaultKeyImportScope
+	vaultLiveKeyVersions           map[secretVaultKeyVersionImportKey]string
+	vaultCurrentKeys               map[string]int
+	vaultFingerprints              map[string]bool
+	vaultEnrollments               map[string]vaultEnrollmentImportScope
+	vaultEnrollmentReceipts        map[string]bool
+	secrets                        map[string]secretImportScope
+	secretNames                    map[string]map[string]string
+	secretFields                   map[string]secretFieldImportScope
+	secretFieldNames               map[string]map[string]bool
+	secretFieldCounts              map[string]int
+	secretMaxValueVersions         map[string]int64
+	secretDEKs                     map[string]secretDEKImportScope
+	secretDEKGenerations           map[secretDEKGenerationImportKey]bool
+	secretCurrentDEKs              map[string]int
+	vaultRotations                 map[string]vaultRotationImportScope
+	vaultRotationReceipts          map[string]bool
+	secretReceipts                 map[string]bool
+	avatarStyleHeads               map[avatarStyleHeadImportKey]avatarStyleHeadImportScope
+	avatarStyleVersions            map[avatarStyleVersionImportKey]avatarStyleVersionImportScope
+	realmAvatarStyles              map[string]realmAvatarStyleImportScope
+	avatarStyleRollouts            map[avatarStyleRolloutImportKey]avatarStyleRolloutImportScope
+	avatarStyleOpenRollouts        map[string]int
+	avatarProfiles                 map[string]avatarProfileImportScope
+	avatarVersions                 map[avatarVersionImportKey]avatarVersionImportScope
+	avatarVersionIDs               map[string]bool
+	avatarLedgerIDs                map[string]bool
+	avatarActivationHeads          map[avatarLineageImportKey]int64
+	avatarActivationCount          map[avatarLineageImportKey]int64
+	avatarActivationSequence       map[string]int64
+	avatarActivatedVersions        map[avatarVersionImportKey]bool
+	avatarLastActivatedAt          map[avatarVersionImportKey]time.Time
+	avatarRejectedVersions         map[avatarVersionImportKey]bool
+	avatarRejectedAt               map[avatarVersionImportKey]time.Time
+	avatarResets                   map[avatarLineageImportKey]avatarResetImportScope
+	avatarResetReceipts            map[avatarLineageImportKey]bool
+	avatarResetCount               map[string]int64
+	avatarLineageEarliestAt        map[avatarLineageImportKey]time.Time
+	avatarLineageLatestAt          map[avatarLineageImportKey]time.Time
+	avatarLastResetAt              map[string]time.Time
+	tickets                        map[string]bool
+	transcripts                    map[string]transcriptImportScope
+	entries                        map[string]string
+	factSubjects                   map[string]factImportScope
+	factSubjectNames               map[string]map[string]string
+	facts                          map[string]factImportScope
+	assertions                     map[string]string
+	factMutationTombstoneCounts    map[string]int64
+	messages                       map[string]messageImportScope
+	deliveries                     map[string]messageDeliveryImportScope
+	messageRequests                map[string]messageRequestImportScope
+	messageRequestCandidates       map[messageRequestCandidateImportKey]messageRequestCandidateImportScope
+	messageRequestSelections       map[string]messageRequestSelectionImportScope
+	messageRequestClaims           map[string]messageRequestClaimImportScope
+	memoryClocks                   map[memoryOwnerImportKey]int64
+	memories                       map[string]memoryImportScope
+	memoryVersions                 map[memoryVersionImportKey]memoryVersionImportScope
+	memoryVectorProfiles           map[string]memoryVectorProfileImportScope
+	memoryVectors                  map[memoryVectorImportKey]bool
+	memoryEvidence                 map[string]memoryEvidenceImportScope
+	memoryEvidenceTerminal         map[string]bool
+	memoryActiveSupersessionSets   map[memoryVersionImportKey]memorySupersessionImportSet
+	memoryDeletedRetryShields      map[string][]memoryDeleteRetryShield
+	memoryCurationLanes            map[memoryOwnerImportKey]memoryCurationLaneImportScope
+	memoryCurationCursors          map[memoryCurationCursorImportKey]int64
+	memoryCurationRequests         map[string]memoryCurationRequestImportScope
+	memoryCurationRuns             map[string]memoryCurationRunImportScope
+	memoryCurationActions          map[string]memoryCurationActionImportScope
+	memoryCurationMutations        map[string]bool
+	factCandidateCurations         map[string]factCandidateCurationImportScope
+	memoryRelationCurations        []memoryRelationCurationImportScope
+	memoryRelations                map[string]memoryRelationCurationImportScope
 }
 
 func newImportCtx(accountID string) *importCtx {
 	return &importCtx{
-		accountID:                    accountID,
-		schemaVersion:                SchemaVersion(),
-		operators:                    map[string]bool{},
-		realms:                       map[string]bool{},
-		agents:                       map[string]bool{},
-		liveAgents:                   map[string]bool{},
-		agentRealms:                  map[string]string{},
-		agentActivity:                map[agentActivityImportKey]bool{},
-		dashboardPreferences:         map[string]bool{},
-		agentEmailAddresses:          map[string]agentEmailAddressImportScope{},
-		agentEmailAddressKeys:        map[string]string{},
-		agentEmailAddressDomains:     map[string]map[string]bool{},
-		agentEmailLiveAddresses:      map[string]string{},
-		agentEmailMailboxes:          map[string]agentEmailMailboxImportScope{},
-		agentEmailMailboxOwners:      map[string]string{},
-		agentEmailMailboxAddresses:   map[string]string{},
-		agentEmailRealmReceiveStates: map[string]string{},
-		agentEmailRealmAliases:       map[string]agentEmailRealmAliasImportScope{},
-		agentEmailRealmAliasLabels:   map[string]string{},
-		agentEmailCustomRoutes:       map[string]agentEmailCustomDomainRouteImportScope{},
-		agentEmailCustomLabels:       map[string]string{},
-		agentEmailCustomRequests:     map[string]string{},
-		agentEmailMessages:           map[string]agentEmailMessageImportScope{},
-		agentEmailProviderKeys:       map[string]string{},
-		agentEmailDeliveries:         map[string]agentEmailDeliveryImportScope{},
-		agentEmailRetryCanaries:      map[string]agentEmailRetryCanaryImportScope{},
-		agentEmailCanaryMessages:     map[string]bool{},
-		vaultKeys:                    map[string]secretVaultKeyImportScope{},
-		vaultKeyIdentities:           map[secretVaultKeyIdentityImportKey]secretVaultKeyImportScope{},
-		vaultLiveKeyVersions:         map[secretVaultKeyVersionImportKey]string{},
-		vaultCurrentKeys:             map[string]int{},
-		vaultFingerprints:            map[string]bool{},
-		vaultEnrollments:             map[string]vaultEnrollmentImportScope{},
-		vaultEnrollmentReceipts:      map[string]bool{},
-		secrets:                      map[string]secretImportScope{},
-		secretNames:                  map[string]map[string]string{},
-		secretFields:                 map[string]secretFieldImportScope{},
-		secretFieldNames:             map[string]map[string]bool{},
-		secretFieldCounts:            map[string]int{},
-		secretMaxValueVersions:       map[string]int64{},
-		secretDEKs:                   map[string]secretDEKImportScope{},
-		secretDEKGenerations:         map[secretDEKGenerationImportKey]bool{},
-		secretCurrentDEKs:            map[string]int{},
-		vaultRotations:               map[string]vaultRotationImportScope{},
-		vaultRotationReceipts:        map[string]bool{},
-		secretReceipts:               map[string]bool{},
-		avatarStyleHeads:             map[avatarStyleHeadImportKey]avatarStyleHeadImportScope{},
-		avatarStyleVersions:          map[avatarStyleVersionImportKey]avatarStyleVersionImportScope{},
-		realmAvatarStyles:            map[string]realmAvatarStyleImportScope{},
-		avatarStyleRollouts:          map[avatarStyleRolloutImportKey]avatarStyleRolloutImportScope{},
-		avatarStyleOpenRollouts:      map[string]int{},
-		avatarProfiles:               map[string]avatarProfileImportScope{},
-		avatarVersions:               map[avatarVersionImportKey]avatarVersionImportScope{},
-		avatarVersionIDs:             map[string]bool{},
-		avatarLedgerIDs:              map[string]bool{},
-		avatarActivationHeads:        map[avatarLineageImportKey]int64{},
-		avatarActivationCount:        map[avatarLineageImportKey]int64{},
-		avatarActivationSequence:     map[string]int64{},
-		avatarActivatedVersions:      map[avatarVersionImportKey]bool{},
-		avatarLastActivatedAt:        map[avatarVersionImportKey]time.Time{},
-		avatarRejectedVersions:       map[avatarVersionImportKey]bool{},
-		avatarRejectedAt:             map[avatarVersionImportKey]time.Time{},
-		avatarResets:                 map[avatarLineageImportKey]avatarResetImportScope{},
-		avatarResetReceipts:          map[avatarLineageImportKey]bool{},
-		avatarResetCount:             map[string]int64{},
-		avatarLineageEarliestAt:      map[avatarLineageImportKey]time.Time{},
-		avatarLineageLatestAt:        map[avatarLineageImportKey]time.Time{},
-		avatarLastResetAt:            map[string]time.Time{},
-		tickets:                      map[string]bool{},
-		transcripts:                  map[string]transcriptImportScope{},
-		entries:                      map[string]string{},
-		factSubjects:                 map[string]factImportScope{},
-		factSubjectNames:             map[string]map[string]string{},
-		facts:                        map[string]factImportScope{},
-		assertions:                   map[string]string{},
-		factMutationTombstoneCounts:  map[string]int64{},
-		messages:                     map[string]messageImportScope{},
-		deliveries:                   map[string]messageDeliveryImportScope{},
-		messageRequests:              map[string]messageRequestImportScope{},
-		messageRequestCandidates:     map[messageRequestCandidateImportKey]messageRequestCandidateImportScope{},
-		messageRequestSelections:     map[string]messageRequestSelectionImportScope{},
-		messageRequestClaims:         map[string]messageRequestClaimImportScope{},
-		memoryClocks:                 map[memoryOwnerImportKey]int64{},
-		memories:                     map[string]memoryImportScope{},
-		memoryVersions:               map[memoryVersionImportKey]memoryVersionImportScope{},
-		memoryVectorProfiles:         map[string]memoryVectorProfileImportScope{},
-		memoryVectors:                map[memoryVectorImportKey]bool{},
-		memoryEvidence:               map[string]memoryEvidenceImportScope{},
-		memoryEvidenceTerminal:       map[string]bool{},
-		memoryActiveSupersessionSets: map[memoryVersionImportKey]memorySupersessionImportSet{},
-		memoryDeletedRetryShields:    map[string][]memoryDeleteRetryShield{},
-		memoryCurationLanes:          map[memoryOwnerImportKey]memoryCurationLaneImportScope{},
-		memoryCurationCursors:        map[memoryCurationCursorImportKey]int64{},
-		memoryCurationRequests:       map[string]memoryCurationRequestImportScope{},
-		memoryCurationRuns:           map[string]memoryCurationRunImportScope{},
-		memoryCurationActions:        map[string]memoryCurationActionImportScope{},
-		memoryCurationMutations:      map[string]bool{},
-		factCandidateCurations:       map[string]factCandidateCurationImportScope{},
-		memoryRelationCurations:      []memoryRelationCurationImportScope{},
-		memoryRelations:              map[string]memoryRelationCurationImportScope{},
+		accountID:                      accountID,
+		schemaVersion:                  SchemaVersion(),
+		operators:                      map[string]bool{},
+		realms:                         map[string]bool{},
+		agents:                         map[string]bool{},
+		liveAgents:                     map[string]bool{},
+		agentRealms:                    map[string]string{},
+		agentActivity:                  map[agentActivityImportKey]bool{},
+		dashboardPreferences:           map[string]bool{},
+		agentEmailAddresses:            map[string]agentEmailAddressImportScope{},
+		agentEmailAddressKeys:          map[string]string{},
+		agentEmailAddressDomains:       map[string]map[string]bool{},
+		agentEmailLiveAddresses:        map[string]string{},
+		agentEmailMailboxes:            map[string]agentEmailMailboxImportScope{},
+		agentEmailMailboxOwners:        map[string]string{},
+		agentEmailMailboxAddresses:     map[string]string{},
+		agentEmailRealmReceiveStates:   map[string]string{},
+		agentEmailRealmSendControls:    map[string]bool{},
+		agentEmailSendControls:         map[string]bool{},
+		agentEmailRealmAliases:         map[string]agentEmailRealmAliasImportScope{},
+		agentEmailRealmAliasLabels:     map[string]string{},
+		agentEmailCustomRoutes:         map[string]agentEmailCustomDomainRouteImportScope{},
+		agentEmailCustomLabels:         map[string]string{},
+		agentEmailCustomRequests:       map[string]string{},
+		agentEmailMessages:             map[string]agentEmailMessageImportScope{},
+		agentEmailProviderKeys:         map[string]string{},
+		agentEmailDeliveries:           map[string]agentEmailDeliveryImportScope{},
+		agentEmailRetryCanaries:        map[string]agentEmailRetryCanaryImportScope{},
+		agentEmailCanaryMessages:       map[string]bool{},
+		agentEmailOutboundMessages:     map[string]agentEmailOutboundImportScope{},
+		agentEmailOutboundNormalized:   map[string]string{},
+		agentEmailOutboundProviders:    map[string]string{},
+		agentEmailOutboundEvents:       map[string]bool{},
+		agentEmailOutboundSuppressions: map[string]bool{},
+		vaultKeys:                      map[string]secretVaultKeyImportScope{},
+		vaultKeyIdentities:             map[secretVaultKeyIdentityImportKey]secretVaultKeyImportScope{},
+		vaultLiveKeyVersions:           map[secretVaultKeyVersionImportKey]string{},
+		vaultCurrentKeys:               map[string]int{},
+		vaultFingerprints:              map[string]bool{},
+		vaultEnrollments:               map[string]vaultEnrollmentImportScope{},
+		vaultEnrollmentReceipts:        map[string]bool{},
+		secrets:                        map[string]secretImportScope{},
+		secretNames:                    map[string]map[string]string{},
+		secretFields:                   map[string]secretFieldImportScope{},
+		secretFieldNames:               map[string]map[string]bool{},
+		secretFieldCounts:              map[string]int{},
+		secretMaxValueVersions:         map[string]int64{},
+		secretDEKs:                     map[string]secretDEKImportScope{},
+		secretDEKGenerations:           map[secretDEKGenerationImportKey]bool{},
+		secretCurrentDEKs:              map[string]int{},
+		vaultRotations:                 map[string]vaultRotationImportScope{},
+		vaultRotationReceipts:          map[string]bool{},
+		secretReceipts:                 map[string]bool{},
+		avatarStyleHeads:               map[avatarStyleHeadImportKey]avatarStyleHeadImportScope{},
+		avatarStyleVersions:            map[avatarStyleVersionImportKey]avatarStyleVersionImportScope{},
+		realmAvatarStyles:              map[string]realmAvatarStyleImportScope{},
+		avatarStyleRollouts:            map[avatarStyleRolloutImportKey]avatarStyleRolloutImportScope{},
+		avatarStyleOpenRollouts:        map[string]int{},
+		avatarProfiles:                 map[string]avatarProfileImportScope{},
+		avatarVersions:                 map[avatarVersionImportKey]avatarVersionImportScope{},
+		avatarVersionIDs:               map[string]bool{},
+		avatarLedgerIDs:                map[string]bool{},
+		avatarActivationHeads:          map[avatarLineageImportKey]int64{},
+		avatarActivationCount:          map[avatarLineageImportKey]int64{},
+		avatarActivationSequence:       map[string]int64{},
+		avatarActivatedVersions:        map[avatarVersionImportKey]bool{},
+		avatarLastActivatedAt:          map[avatarVersionImportKey]time.Time{},
+		avatarRejectedVersions:         map[avatarVersionImportKey]bool{},
+		avatarRejectedAt:               map[avatarVersionImportKey]time.Time{},
+		avatarResets:                   map[avatarLineageImportKey]avatarResetImportScope{},
+		avatarResetReceipts:            map[avatarLineageImportKey]bool{},
+		avatarResetCount:               map[string]int64{},
+		avatarLineageEarliestAt:        map[avatarLineageImportKey]time.Time{},
+		avatarLineageLatestAt:          map[avatarLineageImportKey]time.Time{},
+		avatarLastResetAt:              map[string]time.Time{},
+		tickets:                        map[string]bool{},
+		transcripts:                    map[string]transcriptImportScope{},
+		entries:                        map[string]string{},
+		factSubjects:                   map[string]factImportScope{},
+		factSubjectNames:               map[string]map[string]string{},
+		facts:                          map[string]factImportScope{},
+		assertions:                     map[string]string{},
+		factMutationTombstoneCounts:    map[string]int64{},
+		messages:                       map[string]messageImportScope{},
+		deliveries:                     map[string]messageDeliveryImportScope{},
+		messageRequests:                map[string]messageRequestImportScope{},
+		messageRequestCandidates:       map[messageRequestCandidateImportKey]messageRequestCandidateImportScope{},
+		messageRequestSelections:       map[string]messageRequestSelectionImportScope{},
+		messageRequestClaims:           map[string]messageRequestClaimImportScope{},
+		memoryClocks:                   map[memoryOwnerImportKey]int64{},
+		memories:                       map[string]memoryImportScope{},
+		memoryVersions:                 map[memoryVersionImportKey]memoryVersionImportScope{},
+		memoryVectorProfiles:           map[string]memoryVectorProfileImportScope{},
+		memoryVectors:                  map[memoryVectorImportKey]bool{},
+		memoryEvidence:                 map[string]memoryEvidenceImportScope{},
+		memoryEvidenceTerminal:         map[string]bool{},
+		memoryActiveSupersessionSets:   map[memoryVersionImportKey]memorySupersessionImportSet{},
+		memoryDeletedRetryShields:      map[string][]memoryDeleteRetryShield{},
+		memoryCurationLanes:            map[memoryOwnerImportKey]memoryCurationLaneImportScope{},
+		memoryCurationCursors:          map[memoryCurationCursorImportKey]int64{},
+		memoryCurationRequests:         map[string]memoryCurationRequestImportScope{},
+		memoryCurationRuns:             map[string]memoryCurationRunImportScope{},
+		memoryCurationActions:          map[string]memoryCurationActionImportScope{},
+		memoryCurationMutations:        map[string]bool{},
+		factCandidateCurations:         map[string]factCandidateCurationImportScope{},
+		memoryRelationCurations:        []memoryRelationCurationImportScope{},
+		memoryRelations:                map[string]memoryRelationCurationImportScope{},
 	}
 }
 
@@ -1343,6 +1405,104 @@ func (ic *importCtx) normalizeImportedAgentEmailClaim(table string, obj map[stri
 	return nil
 }
 
+// normalizeImportedAgentEmailOutboundClaim consumes every source-cell worker
+// fence. Work that had not crossed the provider boundary is safely requeued;
+// work that had crossed it becomes terminally ambiguous and is never resent.
+func (ic *importCtx) normalizeImportedAgentEmailOutboundClaim(
+	table string,
+	obj map[string]any,
+	importedAt time.Time,
+) error {
+	if table != "agent_email_outbound_messages" {
+		return nil
+	}
+	state, generation, err := validateImportedAgentEmailOutboundLifecycle(obj)
+	if err != nil {
+		return fmt.Errorf("%w: agent_email_outbound_messages row %v", ErrArchiveContent, err)
+	}
+	if state != AgentEmailOutboundClaimed && state != AgentEmailOutboundProviderStarted {
+		return nil
+	}
+	if generation >= maximumAgentEmailOutboundGeneration {
+		return fmt.Errorf(
+			"%w: agent_email_outbound_messages active claim has no import fence reserve",
+			ErrArchiveContent,
+		)
+	}
+	id, idErr := requireStringField(obj, "id")
+	if idErr != nil || !validImportedGeneratedID(id, "esnd") {
+		return fmt.Errorf(
+			"%w: agent_email_outbound_messages active claim id is invalid",
+			ErrArchiveContent,
+		)
+	}
+	importedAt = importedAt.UTC()
+	if ic.importedAt.IsZero() {
+		ic.importedAt = importedAt
+	} else if !ic.importedAt.Equal(importedAt) {
+		return fmt.Errorf(
+			"%w: agent_email_outbound_messages import timestamp changed while streaming",
+			ErrArchiveContent,
+		)
+	}
+	ic.agentEmailOutboundNormalized[id] = state
+	obj["claim_generation"] = generation + 1
+	obj["claim_id"] = nil
+	obj["lease_expires_at"] = nil
+	obj["updated_at"] = importedAt.Format(time.RFC3339Nano)
+	if state == AgentEmailOutboundClaimed {
+		obj["state"] = AgentEmailOutboundQueued
+		obj["next_attempt_at"] = importedAt.Format(time.RFC3339Nano)
+		obj["last_error_code"] = AgentEmailOutboundErrorWorkerLeaseExpired
+		return nil
+	}
+	obj["state"] = AgentEmailOutboundAmbiguous
+	obj["next_attempt_at"] = nil
+	obj["ambiguous_at"] = importedAt.Format(time.RFC3339Nano)
+	obj["last_error_code"] = AgentEmailOutboundErrorWorkerLeaseExpired
+	return nil
+}
+
+func validateImportedAgentEmailOutboundLifecycle(obj map[string]any) (string, int64, error) {
+	state, err := requireStringField(obj, "state")
+	if err != nil || !validAgentEmailOutboundState(state) {
+		return "", 0, errors.New("has invalid state")
+	}
+	generation, ok := importedGeneration(obj["claim_generation"], true)
+	if !ok {
+		return "", 0, errors.New("has invalid claim_generation")
+	}
+	claimID, hasClaim := optionalStringField(obj, "claim_id")
+	if hasClaim && !validImportedGeneratedID(claimID, "escl") {
+		return "", 0, errors.New("has invalid claim_id")
+	}
+	_, hasLease, leaseErr := importedOptionalTimestamp(obj, "lease_expires_at")
+	_, hasNextAttempt, nextErr := importedOptionalTimestamp(obj, "next_attempt_at")
+	_, hasProviderStarted, startedErr := importedOptionalTimestamp(obj, "provider_started_at")
+	if leaseErr != nil || nextErr != nil || startedErr != nil {
+		return "", 0, errors.New("has invalid worker timestamp")
+	}
+	switch state {
+	case AgentEmailOutboundQueued:
+		if hasClaim || hasLease || !hasNextAttempt || hasProviderStarted {
+			return "", 0, errors.New("has invalid queued worker shape")
+		}
+	case AgentEmailOutboundClaimed:
+		if !hasClaim || !hasLease || hasNextAttempt || hasProviderStarted || generation < 1 {
+			return "", 0, errors.New("has invalid claimed worker shape")
+		}
+	case AgentEmailOutboundProviderStarted:
+		if !hasClaim || !hasLease || hasNextAttempt || !hasProviderStarted || generation < 1 {
+			return "", 0, errors.New("has invalid provider-started worker shape")
+		}
+	default:
+		if hasClaim || hasLease || hasNextAttempt {
+			return "", 0, errors.New("terminal row carries a worker claim")
+		}
+	}
+	return state, generation, nil
+}
+
 // normalizeImportedMessageRequestClaim prevents a selection reservation or
 // runner fence from becoming live authority on a different cell. The source
 // row must first prove its strict lifecycle shape. Reserved and claimed work
@@ -1407,11 +1567,14 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 	// below is the FK-safety boundary for that table.
 	switch table {
 	case "operators", "realms", "tokens", "account_events",
-		"agent_email_realm_receive_controls",
+		"agent_email_realm_receive_controls", "agent_email_realm_send_controls",
+		"agent_email_send_controls",
 		"agent_email_addresses", "agent_email_address_domains", "agent_email_mailboxes",
 		"agent_email_realm_aliases", "agent_email_custom_domain_routes",
 		"agent_email_messages", "agent_email_deliveries",
-		"agent_email_retry_canary_arms",
+		"agent_email_retry_canary_arms", "agent_email_outbound_messages",
+		"agent_email_outbound_provider_events",
+		"agent_email_outbound_recipient_suppressions",
 		"agent_vault_keys", "agent_vault_key_enrollments",
 		"vault_key_enrollment_receipts", "secrets", "secret_fields", "secret_deks",
 		"agent_vault_key_rotations", "agent_vault_key_rotation_items",
@@ -1681,6 +1844,24 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			return badf("agent_email_realm_receive_controls row duplicates realm %q", realmID)
 		}
 		ic.agentEmailRealmReceiveStates[realmID] = state
+	case "agent_email_realm_send_controls":
+		realmID, err := ic.validateImportedAgentEmailRealmSendControl(obj)
+		if err != nil {
+			return badf("agent_email_realm_send_controls row %v", err)
+		}
+		if ic.agentEmailRealmSendControls[realmID] {
+			return badf("agent_email_realm_send_controls row duplicates realm %q", realmID)
+		}
+		ic.agentEmailRealmSendControls[realmID] = true
+	case "agent_email_send_controls":
+		key, err := ic.validateImportedAgentEmailSendControl(obj)
+		if err != nil {
+			return badf("agent_email_send_controls row %v", err)
+		}
+		if ic.agentEmailSendControls[key] {
+			return badf("agent_email_send_controls row duplicates agent scope")
+		}
+		ic.agentEmailSendControls[key] = true
 	case "agent_email_addresses":
 		id, scope, err := ic.validateImportedAgentEmailAddress(obj)
 		if err != nil {
@@ -1814,6 +1995,40 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		}
 		ic.agentEmailRetryCanaries[key] = scope
 		ic.agentEmailCanaryMessages[scope.messageID] = true
+	case "agent_email_outbound_messages":
+		id, scope, err := ic.validateImportedAgentEmailOutboundMessage(obj)
+		if err != nil {
+			return badf("agent_email_outbound_messages row %v", err)
+		}
+		if _, duplicate := ic.agentEmailOutboundMessages[id]; duplicate {
+			return badf("agent_email_outbound_messages row duplicates id %q", id)
+		}
+		if scope.providerMessageID != "" {
+			providerKey := scope.provider + "\x00" + scope.providerMessageID
+			if previous := ic.agentEmailOutboundProviders[providerKey]; previous != "" {
+				return badf("agent_email_outbound_messages row duplicates provider identity from %q", previous)
+			}
+			ic.agentEmailOutboundProviders[providerKey] = id
+		}
+		ic.agentEmailOutboundMessages[id] = scope
+	case "agent_email_outbound_provider_events":
+		key, err := ic.validateImportedAgentEmailOutboundProviderEvent(obj)
+		if err != nil {
+			return badf("agent_email_outbound_provider_events row %v", err)
+		}
+		if ic.agentEmailOutboundEvents[key] {
+			return badf("agent_email_outbound_provider_events row duplicates provider event")
+		}
+		ic.agentEmailOutboundEvents[key] = true
+	case "agent_email_outbound_recipient_suppressions":
+		key, err := ic.validateImportedAgentEmailOutboundSuppression(obj)
+		if err != nil {
+			return badf("agent_email_outbound_recipient_suppressions row %v", err)
+		}
+		if ic.agentEmailOutboundSuppressions[key] {
+			return badf("agent_email_outbound_recipient_suppressions row duplicates recipient")
+		}
+		ic.agentEmailOutboundSuppressions[key] = true
 	case "agent_vault_keys":
 		scope, err := ic.validateImportedVaultKey(obj)
 		if err != nil {
@@ -4097,6 +4312,369 @@ func (ic *importCtx) validateImportedAgentEmailRealmReceiveControl(obj map[strin
 	return realmID, state, nil
 }
 
+func (ic *importCtx) validateImportedAgentEmailRealmSendControl(
+	obj map[string]any,
+) (string, error) {
+	realmID, err := requireStringField(obj, "realm_id")
+	if err != nil || !ic.realms[realmID] {
+		return "", fmt.Errorf("realm %q is not present in this archive", realmID)
+	}
+	if err := ic.validateImportedAgentEmailSendControlLifecycle(
+		obj, "agent_email_realm_send_controls",
+	); err != nil {
+		return "", err
+	}
+	return realmID, nil
+}
+
+func (ic *importCtx) validateImportedAgentEmailSendControl(
+	obj map[string]any,
+) (string, error) {
+	realmID, err := requireStringField(obj, "realm_id")
+	if err != nil || !ic.realms[realmID] || !ic.agentEmailRealmSendControls[realmID] {
+		return "", fmt.Errorf("realm %q has no imported send control", realmID)
+	}
+	ownerID, err := requireStringField(obj, "owner_agent_id")
+	if err != nil || !ic.agents[ownerID] || ic.agentRealms[ownerID] != realmID {
+		return "", fmt.Errorf("owner agent %q is outside realm %q", ownerID, realmID)
+	}
+	if err := ic.validateImportedAgentEmailSendControlLifecycle(
+		obj, "agent_email_send_controls",
+	); err != nil {
+		return "", err
+	}
+	return realmID + "\x00" + ownerID, nil
+}
+
+func (ic *importCtx) validateImportedAgentEmailSendControlLifecycle(
+	obj map[string]any,
+	table string,
+) error {
+	state, err := requireStringField(obj, "send_state")
+	if err != nil || state != AgentEmailSendEnabled && state != AgentEmailSendDisabled {
+		return fmt.Errorf("send_state is invalid")
+	}
+	revision, ok := importedPositiveInteger(obj["row_version"])
+	if !ok || revision > maximumAgentEmailOutboundGeneration {
+		return fmt.Errorf("row_version is invalid")
+	}
+	createdAt, err := requireImportedTimestamp(obj, "created_at")
+	updatedAt, updateErr := requireImportedTimestamp(obj, "updated_at")
+	if err != nil || updateErr != nil || updatedAt.Before(*createdAt) ||
+		ic.requireTimestampAtOrBeforeExport(table+" created_at", valueOrZero(createdAt)) != nil ||
+		ic.requireTimestampAtOrBeforeExport(table+" updated_at", valueOrZero(updatedAt)) != nil {
+		return fmt.Errorf("timestamps are invalid")
+	}
+	disabledAt, disabled, err := importedOptionalTimestamp(obj, "disabled_at")
+	if err != nil || disabled && (disabledAt.Before(*createdAt) ||
+		ic.requireTimestampAtOrBeforeExport(table+" disabled_at", *disabledAt) != nil) {
+		return fmt.Errorf("disabled_at is invalid")
+	}
+	if state == AgentEmailSendEnabled && disabled ||
+		state == AgentEmailSendDisabled && !disabled {
+		return fmt.Errorf("send-state lifecycle shape is invalid")
+	}
+	return nil
+}
+
+func (ic *importCtx) validateImportedAgentEmailOutboundMessage(
+	obj map[string]any,
+) (string, agentEmailOutboundImportScope, error) {
+	bad := func(message string) (string, agentEmailOutboundImportScope, error) {
+		return "", agentEmailOutboundImportScope{}, errors.New(message)
+	}
+	id, err := requireStringField(obj, "id")
+	if err != nil || !validImportedGeneratedID(id, "esnd") {
+		return bad("id is invalid")
+	}
+	realmID, err := requireStringField(obj, "realm_id")
+	ownerID, ownerErr := requireStringField(obj, "owner_agent_id")
+	addressID, addressErr := requireStringField(obj, "address_id")
+	address, addressExists := ic.agentEmailAddresses[addressID]
+	if err != nil || ownerErr != nil || addressErr != nil ||
+		!ic.realms[realmID] || !ic.agents[ownerID] ||
+		ic.agentRealms[ownerID] != realmID || !addressExists ||
+		address.realmID != realmID || address.agentID != ownerID {
+		return bad("realm, owner, and address scopes do not match")
+	}
+	fromAddress, ok := importedRequiredBoundedString(obj, "from_address", 320, false)
+	if !ok || fromAddress != address.localPart+"@"+agentEmailOutboundSendingDomain {
+		return bad("from_address does not match the canonical sending identity")
+	}
+	replyTo, ok := importedRequiredBoundedString(obj, "reply_to_address", 320, false)
+	if !ok || replyTo != address.localPart+"@"+agentEmailOutboundCanonicalDomain {
+		return bad("reply_to_address does not match the canonical receiving identity")
+	}
+	toAddress, ok := importedRequiredBoundedString(obj, "to_address", 320, false)
+	normalizedTo, normalizeErr := normalizeAgentEmailOutboundMailbox(toAddress)
+	if !ok || normalizeErr != nil || normalizedTo != toAddress {
+		return bad("to_address is invalid or non-canonical")
+	}
+	subject, ok := importedRequiredBoundedString(
+		obj, "subject", maximumAgentEmailOutboundSubjectBytes, true,
+	)
+	normalizedSubject, subjectErr := normalizeAgentEmailOutboundSubject(subject)
+	if !ok || subjectErr != nil || normalizedSubject != subject {
+		return bad("subject is invalid or non-canonical")
+	}
+	body, ok := importedRequiredBoundedString(
+		obj, "body_text", maximumAgentEmailOutboundTextBytes, false,
+	)
+	if _, _, bodyErr := normalizeAgentEmailOutboundTextAndKey(body, "archive"); !ok || bodyErr != nil {
+		return bad("body_text is invalid")
+	}
+	requestKind, err := requireStringField(obj, "request_kind")
+	if err != nil || requestKind != AgentEmailOutboundRequestDirect &&
+		requestKind != AgentEmailOutboundRequestReply {
+		return bad("request_kind is invalid")
+	}
+	replyMessageID, hasReply := optionalStringField(obj, "reply_to_inbound_message_id")
+	if raw, present := obj["reply_to_inbound_message_id"]; present && raw != nil && !hasReply {
+		return bad("reply_to_inbound_message_id is invalid")
+	}
+	if requestKind == AgentEmailOutboundRequestDirect && hasReply ||
+		requestKind == AgentEmailOutboundRequestReply && !hasReply {
+		return bad("reply target does not match request_kind")
+	}
+	if hasReply {
+		inbound, exists := ic.agentEmailMessages[replyMessageID]
+		if !validImportedGeneratedID(replyMessageID, "emsg") {
+			return bad("reply target is invalid")
+		}
+		// Inbound content and outbound history age independently from received_at
+		// and created_at. Retention may therefore remove the inbound parent while
+		// a newer reply remains. Its id is inert historical provenance: require
+		// exact owner scope whenever the parent is still present, but do not make
+		// an ordinary retention outcome impossible to move between cells.
+		if exists && (inbound.realmID != realmID || inbound.ownerAgentID != ownerID) {
+			return bad("reply target is outside the outbound owner scope")
+		}
+	}
+	threadKey, ok := importedRequiredBoundedString(obj, "thread_key", 128, false)
+	if !ok || containsImportedAgentEmailControl(threadKey) {
+		return bad("thread_key is invalid")
+	}
+	inReplyTo, hasInReplyTo, err := importedNullableBoundedString(obj, "in_reply_to_header", 998, false)
+	if err != nil || hasInReplyTo && !validAgentEmailOutboundMessageID(inReplyTo) {
+		return bad("in_reply_to_header is invalid")
+	}
+	references, ok := obj["references_headers"].([]any)
+	if !ok || len(references) > 16 {
+		return bad("references_headers is invalid")
+	}
+	seenReferences := make(map[string]bool, len(references))
+	for _, raw := range references {
+		reference, ok := raw.(string)
+		if !ok || !validAgentEmailOutboundMessageID(reference) || seenReferences[reference] {
+			return bad("references_headers contains an invalid or duplicate id")
+		}
+		seenReferences[reference] = true
+	}
+	if requestKind == AgentEmailOutboundRequestDirect &&
+		(hasInReplyTo || len(references) != 0) {
+		return bad("direct request carries reply headers")
+	}
+	for _, field := range []string{"idempotency_key_hash", "request_hash"} {
+		value, ok := obj[field].(string)
+		if !ok || !isSHA256Hex(value) {
+			return bad(field + " is invalid")
+		}
+	}
+	state, _, err := validateImportedAgentEmailOutboundLifecycle(obj)
+	if err != nil {
+		return bad(err.Error())
+	}
+	attemptCount, ok := importedNonnegativeInteger(obj["attempt_count"])
+	if !ok || attemptCount > maximumAgentEmailOutboundGeneration {
+		return bad("attempt_count is invalid")
+	}
+	providerState, ok := importedRequiredBoundedString(obj, "provider_state", 16, true)
+	if !ok || providerState != "" && providerState != AgentEmailOutboundAccepted &&
+		providerState != AgentEmailOutboundDelivered && providerState != AgentEmailOutboundDeferred &&
+		providerState != AgentEmailOutboundBounced && providerState != AgentEmailOutboundRejected &&
+		providerState != AgentEmailOutboundFailed {
+		return bad("provider_state is invalid")
+	}
+	provider, ok := importedRequiredBoundedString(
+		obj, "provider", maximumAgentEmailOutboundProviderBytes, true,
+	)
+	normalizedProvider, providerErr := normalizeAgentEmailOutboundProvider(provider, true)
+	if !ok || providerErr != nil || normalizedProvider != provider {
+		return bad("provider is invalid or non-canonical")
+	}
+	providerMessageID, ok := importedRequiredBoundedString(
+		obj, "provider_message_id", maximumAgentEmailOutboundProviderIDBytes, true,
+	)
+	if !ok || containsImportedAgentEmailControl(providerMessageID) {
+		return bad("provider_message_id is invalid")
+	}
+	errorCode, ok := importedRequiredBoundedString(obj, "last_error_code", 64, true)
+	if !ok || errorCode != "" && !agentEmailOutboundErrorCodes[errorCode] {
+		return bad("last_error_code is invalid")
+	}
+	createdAt, err := requireImportedTimestamp(obj, "created_at")
+	queuedAt, queuedErr := requireImportedTimestamp(obj, "queued_at")
+	updatedAt, updatedErr := requireImportedTimestamp(obj, "updated_at")
+	if err != nil || queuedErr != nil || updatedErr != nil ||
+		queuedAt.Before(*createdAt) || updatedAt.Before(*createdAt) ||
+		ic.requireTimestampAtOrBeforeExport("agent_email_outbound_messages created_at", valueOrZero(createdAt)) != nil ||
+		ic.requireTimestampAtOrBeforeExport("agent_email_outbound_messages queued_at", valueOrZero(queuedAt)) != nil ||
+		ic.requireAgentEmailOutboundTimestampAtImportBoundary(id, "updated_at", valueOrZero(updatedAt)) != nil {
+		return bad("base timestamps are invalid")
+	}
+	timestamps := make(map[string]*time.Time, 7)
+	for _, field := range []string{
+		"provider_started_at", "accepted_at", "delivered_at", "deferred_at",
+		"failed_at", "ambiguous_at", "canceled_at",
+	} {
+		value, present, timestampErr := importedOptionalTimestamp(obj, field)
+		if timestampErr != nil || present && (value.Before(*createdAt) ||
+			ic.requireAgentEmailOutboundTimestampAtImportBoundary(id, field, *value) != nil) {
+			return bad(field + " is invalid")
+		}
+		if present {
+			timestamps[field] = value
+		}
+	}
+	started := timestamps["provider_started_at"] != nil
+	accepted := timestamps["accepted_at"] != nil
+	delivered := timestamps["delivered_at"] != nil
+	deferred := timestamps["deferred_at"] != nil
+	failed := timestamps["failed_at"] != nil
+	ambiguous := timestamps["ambiguous_at"] != nil
+	canceled := timestamps["canceled_at"] != nil
+	switch state {
+	case AgentEmailOutboundQueued, AgentEmailOutboundClaimed:
+		if providerState != "" || provider != "" || providerMessageID != "" ||
+			started || accepted || delivered || deferred || failed || ambiguous || canceled {
+			return bad("pre-provider state carries provider lifecycle data")
+		}
+	case AgentEmailOutboundProviderStarted:
+		if providerState != "" || provider != "" || providerMessageID != "" ||
+			!started || accepted || delivered || deferred || failed || ambiguous || canceled {
+			return bad("provider_started lifecycle shape is invalid")
+		}
+	case AgentEmailOutboundAccepted, AgentEmailOutboundDelivered, AgentEmailOutboundDeferred,
+		AgentEmailOutboundBounced, AgentEmailOutboundRejected, AgentEmailOutboundFailed:
+		if providerState != state || provider == "" || !started || ambiguous || canceled {
+			return bad("provider terminal lifecycle shape is invalid")
+		}
+		if (state == AgentEmailOutboundAccepted || state == AgentEmailOutboundDelivered ||
+			state == AgentEmailOutboundDeferred) && (providerMessageID == "" || !accepted) {
+			return bad("successful provider state lacks provider identity or acceptance")
+		}
+		if state == AgentEmailOutboundDelivered && !delivered ||
+			state == AgentEmailOutboundDeferred && !deferred ||
+			(state == AgentEmailOutboundBounced || state == AgentEmailOutboundRejected ||
+				state == AgentEmailOutboundFailed) && (!failed || errorCode == "") {
+			return bad("provider terminal state lacks its terminal timestamp or error")
+		}
+	case AgentEmailOutboundAmbiguous:
+		if providerState != "" || !started || !ambiguous || canceled || errorCode == "" {
+			return bad("ambiguous lifecycle shape is invalid")
+		}
+	case AgentEmailOutboundCanceled:
+		if providerState != "" || provider != "" || providerMessageID != "" ||
+			started || accepted || delivered || deferred || failed || ambiguous || !canceled ||
+			errorCode != AgentEmailOutboundErrorDispatchCanceled {
+			return bad("canceled lifecycle shape is invalid")
+		}
+	}
+	return id, agentEmailOutboundImportScope{
+		realmID: realmID, ownerAgentID: ownerID, addressID: addressID,
+		provider: provider, providerMessageID: providerMessageID, state: state,
+	}, nil
+}
+
+func (ic *importCtx) validateImportedAgentEmailOutboundProviderEvent(
+	obj map[string]any,
+) (string, error) {
+	provider, ok := importedRequiredBoundedString(
+		obj, "provider", maximumAgentEmailOutboundProviderBytes, false,
+	)
+	normalizedProvider, providerErr := normalizeAgentEmailOutboundProvider(provider, false)
+	if !ok || providerErr != nil || normalizedProvider != provider {
+		return "", fmt.Errorf("provider is invalid or non-canonical")
+	}
+	eventIDHash, ok := obj["event_id_hash"].(string)
+	requestHash, requestOK := obj["event_request_hash"].(string)
+	if !ok || !requestOK || !isSHA256Hex(eventIDHash) || !isSHA256Hex(requestHash) {
+		return "", fmt.Errorf("event hashes are invalid")
+	}
+	outboundID, err := requireStringField(obj, "outbound_id")
+	outbound, exists := ic.agentEmailOutboundMessages[outboundID]
+	if err != nil || !exists || outbound.provider == "" || outbound.provider != provider {
+		return "", fmt.Errorf("outbound provider scope is missing or inconsistent")
+	}
+	eventClass, err := requireStringField(obj, "event_class")
+	switch eventClass {
+	case AgentEmailOutboundProviderEventDelivered,
+		AgentEmailOutboundProviderEventDeferred,
+		AgentEmailOutboundProviderEventBounced,
+		AgentEmailOutboundProviderEventFailed,
+		AgentEmailOutboundProviderEventRejected,
+		AgentEmailOutboundProviderEventComplained:
+	default:
+		return "", fmt.Errorf("event_class is invalid")
+	}
+	if err != nil {
+		return "", fmt.Errorf("event_class is invalid")
+	}
+	occurredAt, err := requireImportedTimestamp(obj, "occurred_at")
+	receivedAt, receiveErr := requireImportedTimestamp(obj, "received_at")
+	if err != nil || receiveErr != nil || occurredAt.After(receivedAt.Add(5*time.Minute)) ||
+		ic.requireTimestampAtOrBeforeExport("agent_email_outbound_provider_events received_at", valueOrZero(receivedAt)) != nil {
+		return "", fmt.Errorf("event timestamps are invalid")
+	}
+	return provider + "\x00" + eventIDHash, nil
+}
+
+func (ic *importCtx) validateImportedAgentEmailOutboundSuppression(
+	obj map[string]any,
+) (string, error) {
+	recipientHash, ok := obj["recipient_sha256"].(string)
+	if !ok || !isSHA256Hex(recipientHash) {
+		return "", fmt.Errorf("recipient_sha256 is invalid")
+	}
+	reason, err := requireStringField(obj, "reason")
+	if err != nil || reason != "hard_bounce" && reason != "complained" {
+		return "", fmt.Errorf("reason is invalid")
+	}
+	sourceSendID, err := requireStringField(obj, "source_send_id")
+	if err != nil || !validImportedGeneratedID(sourceSendID, "esnd") {
+		return "", fmt.Errorf("source_send_id is invalid")
+	}
+	provider, ok := importedRequiredBoundedString(
+		obj, "provider", maximumAgentEmailOutboundProviderBytes, false,
+	)
+	normalizedProvider, providerErr := normalizeAgentEmailOutboundProvider(provider, false)
+	if !ok || providerErr != nil || normalizedProvider != provider {
+		return "", fmt.Errorf("provider is invalid or non-canonical")
+	}
+	if source, exists := ic.agentEmailOutboundMessages[sourceSendID]; exists &&
+		source.provider != "" && source.provider != provider {
+		return "", fmt.Errorf("source send provider does not match suppression")
+	}
+	createdAt, err := requireImportedTimestamp(obj, "created_at")
+	updatedAt, updateErr := requireImportedTimestamp(obj, "updated_at")
+	if err != nil || updateErr != nil || updatedAt.Before(*createdAt) ||
+		ic.requireTimestampAtOrBeforeExport("agent_email_outbound_recipient_suppressions created_at", valueOrZero(createdAt)) != nil ||
+		ic.requireTimestampAtOrBeforeExport("agent_email_outbound_recipient_suppressions updated_at", valueOrZero(updatedAt)) != nil {
+		return "", fmt.Errorf("timestamps are invalid")
+	}
+	return recipientHash, nil
+}
+
+func importedRequiredBoundedString(
+	obj map[string]any,
+	field string,
+	maxBytes int,
+	allowEmpty bool,
+) (string, bool) {
+	value, ok := obj[field].(string)
+	return value, ok && len(value) <= maxBytes && (allowEmpty || value != "")
+}
+
 func (ic *importCtx) validateImportedAgentEmailRealmAlias(
 	obj map[string]any,
 ) (string, agentEmailRealmAliasImportScope, error) {
@@ -5731,6 +6309,9 @@ func (s *Store) importAccount(
 			if err := ic.normalizeImportedAgentEmailClaim(table, obj); err != nil {
 				return err
 			}
+			if err := ic.normalizeImportedAgentEmailOutboundClaim(table, obj, importedAt); err != nil {
+				return err
+			}
 			if err := ic.normalizeImportedMessageRequestClaim(table, obj, importedAt); err != nil {
 				return err
 			}
@@ -6333,6 +6914,31 @@ func (ic *importCtx) requireTimestampAtOrBeforeExport(field string, value time.T
 		return fmt.Errorf("%s is later than manifest exported_at", field)
 	}
 	return nil
+}
+
+// requireAgentEmailOutboundTimestampAtImportBoundary keeps source-authored
+// history bounded by exported_at while admitting the exact destination clock
+// timestamp created when import consumes an active source-cell fence. The
+// normalization map is populated only after the original strict lifecycle
+// shape has been validated, so an archive cannot opt an ordinary timestamp out
+// of the manifest boundary.
+func (ic *importCtx) requireAgentEmailOutboundTimestampAtImportBoundary(
+	id string,
+	field string,
+	value time.Time,
+) error {
+	normalizedFrom := ic.agentEmailOutboundNormalized[id]
+	allowImportTime := field == "updated_at" &&
+		(normalizedFrom == AgentEmailOutboundClaimed ||
+			normalizedFrom == AgentEmailOutboundProviderStarted) ||
+		field == "ambiguous_at" && normalizedFrom == AgentEmailOutboundProviderStarted
+	if allowImportTime && !ic.importedAt.IsZero() && value.Equal(ic.importedAt) {
+		return nil
+	}
+	return ic.requireTimestampAtOrBeforeExport(
+		"agent_email_outbound_messages "+field,
+		value,
+	)
 }
 
 func (ic *importCtx) validateImportedMessageRequest(obj map[string]any) (messageRequestImportScope, error) {

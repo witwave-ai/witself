@@ -4,6 +4,7 @@ import (
 	"errors"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -107,6 +108,27 @@ func TestCanonicalArchiveTablesMatchMigrationsExporterAndImporter(t *testing.T) 
 	if !reflect.DeepEqual(exporterOrder, registryOrder) {
 		t.Fatalf("ExportAccount table order drifted\nexporter: %v\nregistry: %v",
 			exporterOrder, registryOrder)
+	}
+}
+
+func TestSchema89OutboundEmailArchiveBoundary(t *testing.T) {
+	names := canonicalArchiveTableNamesForSchema(89)
+	for _, table := range []string{
+		"agent_email_realm_send_controls",
+		"agent_email_send_controls",
+		"agent_email_outbound_messages",
+		"agent_email_outbound_provider_events",
+		"agent_email_outbound_recipient_suppressions",
+	} {
+		if !slices.Contains(names, table) {
+			t.Errorf("schema 89 archive omits %q", table)
+		}
+	}
+	if slices.Contains(names, "agent_email_outbound_rate_buckets") {
+		t.Fatal("schema 89 archive includes cell-local outbound rate buckets")
+	}
+	if _, excluded := cellLocalArchiveExclusions["agent_email_outbound_rate_buckets"]; !excluded {
+		t.Fatal("outbound rate buckets are not registered as cell-local")
 	}
 }
 

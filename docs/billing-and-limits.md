@@ -31,10 +31,15 @@ subscription, or invoice history. Finite windows are subject to explicit
 memory-provenance holds; the worker reports those holds without deleting the
 memory or its source graph.
 
-Inbound agent email follows the same account-policy model. Personal does not
-include receipt and carries a 30-day downgrade-cleanup window. Professional,
-Team, and Enterprise include receipt with 90-, 365-, and 365-day defaults.
-Availability and retention can each be overridden without changing billing.
+Agent email follows the same account-policy model with independent receive and
+send entitlements. Personal includes neither direction and carries a 30-day
+downgrade-cleanup window. Professional includes receive but not send and
+retains email for 90 days. Team and Enterprise include both directions with
+365-day defaults; Enterprise retention remains contract-overridable. Receive,
+send, and retention can each be overridden without changing plan, price,
+subscription, or invoice history. The Founder account has explicit unlimited
+commercial entitlement and indefinite retention, while independent platform
+limits continue to apply.
 
 V0 should meter meaningful usage internally, but charge primarily by plan tier.
 This gives Witself enough data to understand real service load without making
@@ -185,10 +190,11 @@ remain deferred.
 
 ## Working Plan Direction
 
-The following table records the current product direction as of 2026-08-03. It
-is a working packaging decision, not a claim that every entitlement is already
-implemented or enforced. Each row moves into the canonical plan catalog and
-resolved cell policy only through its own implementation and rollout decision.
+The following table records the current product direction as of 2026-08-14. It
+is a working packaging decision, not a claim that every runtime is already
+enabled. Receive and send entitlements are implemented in the canonical plan
+catalog and resolved cell policy, but both retain independent cell/edge rollout
+gates; outbound provider dispatch is dark by default.
 The realm, agent, active-memory, current-fact, inbound-agent-email byte, and
 custom-inbound-domain values are the Phase B canonical defaults described
 below; the other rows remain subject to their own implementation and rollout
@@ -241,9 +247,11 @@ In this table, an included feature does not imply unbounded throughput or a
 per-message charge. Message rate values and agent-email safety breakers are
 shared rolling one-minute GCRA/token-bucket-equivalent budgets, not wall-clock
 minute buckets. Inbound hostile traffic must not create recipient charges.
-"Included" confirms that outbound agent email is available, but its sending
-allowance and overage treatment remain to be decided. "Contracted" means the
-quantity or policy is negotiated for the Enterprise account.
+"Included" confirms catalog entitlement to outbound agent email, not that the
+worker or provider adapter is active. Its commercial allowance and overage
+treatment remain to be decided. Independent platform rate breakers still
+apply. "Contracted" means the quantity or policy is negotiated for the
+Enterprise account.
 
 The two agent-email byte allowances are hard limits in the resolved account
 snapshot, not retention policies:
@@ -325,6 +333,33 @@ overage. The owning cell's PostgreSQL limiter is the sole authoritative
 admission point across replicas. Keeping admission below the feature check
 also preserves Personal's accept-and-drop behavior without requiring any edge
 reconfiguration when an account changes plans.
+
+### Agent-email outbound rate breakers
+
+Outbound email has two account-adjustable rolling one-minute safety limits and
+one platform-only account aggregate. They are admission and sender-reputation
+protections, not an indication that provider traffic or usage billing is
+enabled:
+
+| Resolved limit key | Bucket scope | Independent platform maximum |
+|---|---|---:|
+| `agent_email_sent_per_agent_minute` | One sending agent | 30 messages |
+| `agent_email_sent_per_realm_minute` | Aggregate senders in one realm | 300 messages |
+| Platform-only (not a resolved plan key) | All realms in one account | 1,000 messages |
+
+Both keys are intentionally absent from every current plan. Missing or
+explicit unlimited removes only a commercial cap; it never removes the
+platform maximum. The generic audited account limit override may lower either
+value, but rejects a finite value above the corresponding maximum. The Founder
+account's unlimited commercial entitlement therefore still resolves through
+the same 30/300 service-protection ceiling.
+
+The owning cell admits both buckets and inserts the unique durable outbox row
+in one PostgreSQL transaction. An exact idempotent replay returns the existing
+row without consuming another debit. Reusing a key for changed send semantics
+conflicts. Agent and realm operator kill switches, hard-bounce/complaint
+recipient suppression, and the platform breakers remain effective regardless
+of plan or account override.
 
 ### Messaging availability and retention
 
@@ -465,13 +500,15 @@ plane can recompute a legacy snapshot without the new policy.
 
 ### Agent-email availability and retention
 
-The resolved cell snapshot uses feature `agent_email_receive`, policy
-`agent_email_retention_days`, and rollout marker
-`agent_email_entitlement_version: 1`. A marked snapshot without the feature
-rejects inbound email before storage; an unmarked legacy snapshot preserves
-the pre-entitlement receive behavior. Retention remains independent so mail
-already stored before a downgrade can age out on schedule. An absent retention
-key means explicit indefinite retention.
+The resolved cell snapshot uses independent features `agent_email_receive` and
+`agent_email_send`, policy `agent_email_retention_days`, and rollout marker
+`agent_email_entitlement_version: 1`. Personal has neither feature;
+Professional has receive only; Team and Enterprise have both. A marked
+snapshot without receive accepts and discards verified inbound relay traffic
+before storage. A send/reply/list/show operation without send fails before
+queueing with stable `feature_not_enabled` for `agent_email_send`. Retention
+remains independent so records already stored before a downgrade can age out
+on schedule. An absent retention key means explicit indefinite retention.
 
 The integration stays installed across plan and override changes. The
 administrator surface is:
@@ -482,6 +519,11 @@ witself-admin account email-receive set --account ACCOUNT_ID --enabled --reason 
 witself-admin account email-receive set --account ACCOUNT_ID --disabled --reason "..."
 witself-admin account email-receive clear --account ACCOUNT_ID --reason "..."
 
+witself-admin account email-send get --account ACCOUNT_ID
+witself-admin account email-send set --account ACCOUNT_ID --enabled --reason "..."
+witself-admin account email-send set --account ACCOUNT_ID --disabled --reason "..."
+witself-admin account email-send clear --account ACCOUNT_ID --reason "..."
+
 witself-admin account email-retention get --account ACCOUNT_ID
 witself-admin account email-retention set --account ACCOUNT_ID --days 365 --reason "..."
 witself-admin account email-retention set --account ACCOUNT_ID --indefinite --reason "..."
@@ -489,18 +531,27 @@ witself-admin account email-retention clear --account ACCOUNT_ID --reason "..."
 ```
 
 The matching authenticated resources are
-`/v1/admin/accounts/{id}/email-receive` and
+`/v1/admin/accounts/{id}/email-receive`,
+`/v1/admin/accounts/{id}/email-send`, and
 `/v1/admin/accounts/{id}/email-retention`, each with `GET`, `PUT`, and
-`DELETE`. Owner plan status exposes only inherited and effective values.
+`DELETE`. These overrides change effective behavior, not the billed plan or
+price. Owner plan status exposes only inherited and effective values.
 
-Before catalog reconciliation, the founder account receives an explicit
-indefinite email-retention override followed by an explicit enabled
-email-receive override. This keeps its first marked snapshot from temporarily
-inheriting Enterprise's finite default. It also receives and verifies an
-explicit-unlimited `agent_email_attachment_storage_bytes` override before the
-finite catalog default is reconciled. The raw-message limit is intentionally
-left unoverridden: Phase A therefore uses the 25 MiB technical transport
-ceiling, and Phase B later supplies Enterprise's matching 25 MiB plan default.
+Within an entitled account, value-free `GET`/`PATCH
+/v1/agents/{agent}/email-send` and `GET`/`PATCH
+/v1/realms/{realm}/email-send` controls are independent kill switches.
+Effective send requires an active account, the account feature, a live agent,
+and both layers enabled. A suspended account may inspect or disable a layer as
+a harm-reducing action, but it cannot enable one.
+
+Before catalog reconciliation, the Founder account receives an explicit
+indefinite email-retention override plus explicit enabled receive and send
+overrides. This keeps its first marked snapshot from temporarily inheriting
+Enterprise's finite default. It also receives and verifies explicit-unlimited
+commercial overrides, including `agent_email_attachment_storage_bytes` and
+the outbound rate dimensions. Those unlimited values do not bypass the 25 MiB
+inbound transport ceiling or the outbound 30-per-agent/300-per-realm platform
+breakers.
 
 Rollout is cell-and-edge first: deploy a cell that understands the marked
 snapshot and an agent-email edge Worker that accepts the cell's
@@ -1048,12 +1099,26 @@ revisions are included rather than metered as customer-facing monthly usage.
 Per-record size, vector, evidence, relationship, revision-history,
 curation-frequency, and API bounds remain internal service protections.
 
-Email records and inline raw MIME use age-based retention. In the current
-implementation, attachments remain inside the stored raw MIME; they are not
-extracted into separately retained blobs. Deleting an email therefore deletes
+Inbound and outbound email records use the same account-level age policy.
+Inbound age is measured from `received_at`; an eligible outbound record is
+measured from `created_at`. Queued, claimed, and `provider_started` outbound
+work is held regardless of age so retention never deletes unresolved provider
+work. Once eligible, deletion removes the outbound subject/body and its
+metadata; provider-event idempotency receipts are removed in bounded batches
+before their parent so a cascade cannot become unbounded.
+
+Inbound attachments remain inside the stored raw MIME; they are not extracted
+into separately retained blobs. Deleting an inbound email therefore deletes
 its raw MIME and the attachment bytes within it, and that payload expires no
 later than the plan's email-retention window. Personal stores no new raw MIME
-or attachment payloads while receipt is disabled.
+or attachment payloads while receipt is disabled and queues no outbound body
+while send is disabled.
+
+Hard-bounce and complaint suppressions are value-minimal safety state rather
+than customer correspondence. They retain only an account-scoped recipient
+digest and outlive the finite email window by one year, capped at ten years.
+An indefinite/missing email-retention policy still uses the ten-year suppression
+safety lifetime. A plan or account override never bypasses a live suppression.
 
 `agent_email_attachment_storage_bytes` is deliberately defined in terms of
 that storage model: a retained message with one or more attachments consumes
@@ -1144,7 +1209,7 @@ Witself should meter these dimensions internally in v0:
 | `message_sent` | Outbound mailbox load and abuse control. |
 | `message_delivered` | Fan-out delivery load (group fan-out multiplies this). |
 | `email_received` | Inbound agent-email volume and abuse accounting; never a victim-billed inbound charge. |
-| `email_sent` | Future outbound agent-email volume and sender-reputation enforcement. |
+| `email_sent` | Outbound agent-email volume and sender-reputation accounting; emission remains dark until rollout and pricing approval. |
 | `email_address` | Provisioned live agent-email address count. |
 | `email_storage_byte` | Internal observation of inline raw-MIME and backup footprint; not a customer quota or overage dimension. |
 | `storage_byte` | General open-plane data-at-rest footprint and backup size. |
@@ -1196,8 +1261,9 @@ Notes on a few dimensions:
   canonical dimension and unit names
   exist in the cell usage contract so later production metering cannot invent
   incompatible keys; emission remains disabled until authoritative abuse
-  classification and production pricing are both pinned. `email_sent` remains
-  dormant until a send slice exists.
+  classification and production pricing are both pinned. The outbound send
+  core exists, but `email_sent` usage emission and billing remain dormant until
+  the dark worker/adapter rollout and pricing policy are explicitly approved.
   `email_address` counts live provisioned addresses. `email_storage_byte`
   observes inline raw-MIME footprint independently so mail does not silently
   consume the ordinary `storage_byte` allowance, but it is not exposed as a
@@ -1298,7 +1364,7 @@ Recommended defaults:
 | Messages sent/delivered | `throttle` or `warn`; block only for abuse or hard caps. |
 | Agent-email addresses | `block` for the hard address cap, `warn` near cap. |
 | Agent email received | Apply the non-billable temporary platform breakers above, with no plan overage or usage charge in any gated receive-only activation. A production billing default is blocked on authoritative spam/abuse classification; aggregate recipient traffic must never become a victim-billing or mailbox-starvation lever. |
-| Agent email sent | `block` at the hard per-period threshold; sending remains dormant until a send slice exists. |
+| Agent email sent | Enforce the independent 30-per-agent/300-per-realm rolling-minute platform breakers and any lower account override. Provider dispatch and billable `email_sent` usage remain dormant until explicit rollout and pricing approval. |
 | Agent-email raw-MIME and attachment storage | Expire inline raw MIME by the plan's age-based retention window and reject messages over `agent_email_max_raw_bytes`. Charge the full retained raw-MIME size of each attachment-bearing message to the account-wide `agent_email_attachment_storage_bytes` pool. When that pool lacks room, preserve bounded text and metadata, explicitly mark the raw attachment-bearing payload unretained, and never create an inbound overage charge. |
 | Stored secrets | `block` for hard cap, `warn` near cap. |
 | Secret reads | `throttle` or `warn`; block only for abuse or hard caps. |

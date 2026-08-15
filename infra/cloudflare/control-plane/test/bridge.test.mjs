@@ -66,6 +66,8 @@ const bridgeRequest = (path, init = {}) =>
   });
 
 const AGENT_EMAIL_RATE_LIMIT_DIMENSIONS = [
+  "agent_email_sent_per_agent_minute",
+  "agent_email_sent_per_realm_minute",
   "agent_email_received_per_sender_minute",
   "agent_email_received_per_recipient_minute",
   "agent_email_received_per_realm_minute",
@@ -185,6 +187,9 @@ test("bridge path classifiers are exact", () => {
     "/v1/admin/accounts/acct_1/email-receive",
   ));
   assert.ok(matchAdminPolicyPath(
+    "/v1/admin/accounts/acct_1/email-send",
+  ));
+  assert.ok(matchAdminPolicyPath(
     "/v1/admin/accounts/acct_1/email-retention",
   ));
   assert.ok(matchAdminPolicyPath("/v1/admin/accounts/acct_1/plan-override"));
@@ -253,6 +258,9 @@ test("bridge path classifiers are exact", () => {
   ), null);
   assert.equal(matchAdminPolicyPath(
     "/v1/admin/accounts/acct_1/email-receive/extra",
+  ), null);
+  assert.equal(matchAdminPolicyPath(
+    "/v1/admin/accounts/acct_1/email-send/extra",
   ), null);
   assert.equal(
     isInternalBridgePath(PLAN_LIFECYCLE_ACTIVATE_PATH),
@@ -383,7 +391,7 @@ test("admin proxy routes agent-email storage and domain limits exactly", async (
   }
 });
 
-test("admin proxy routes all six agent-email rate dimensions exactly", async () => {
+test("admin proxy routes all agent-email rate dimensions exactly", async () => {
   for (const dimension of AGENT_EMAIL_RATE_LIMIT_DIMENSIONS) {
     const path = `/v1/admin/accounts/acct_1/limit-overrides/${dimension}`;
     let forwarded;

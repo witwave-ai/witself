@@ -577,6 +577,7 @@ func TestAgentEmailCustomDomainRouteDowngradeRefusesAuthorityPostgres(t *testing
 	if _, err := f.store.ApplyAgentEmailCustomDomainRoute(ctx, f.accountID, retired); err != nil {
 		t.Fatal(err)
 	}
+	migrationTestDownTo(t, f.schemaDSN, 88)
 	downErr := migrationTestDown(t, f.schemaDSN, true)
 	if downErr == nil || !strings.Contains(downErr.Error(), "custom-domain email routes exist") {
 		t.Fatalf("schema-88 downgrade error = %v", downErr)

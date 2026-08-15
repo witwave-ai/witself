@@ -188,9 +188,9 @@ on their explicit primary domain and are never fanned out to the legacy domain.
 `A`, `AAAA`, or application `CNAME` on it; do not use it for marketing,
 employee mailboxes, or platform-notification sending. The required
 `postmaster@witmail.net` and `abuse@witmail.net` operator routes are the narrow
-operational exception. A future agent-outbound slice may use separately
-isolated sending infrastructure, but it must remain agent-email-only and must
-not turn this domain into a general company-mail surface.
+operational exception. The outbound beta uses separately isolated sending
+infrastructure on `send.witmail.net`; it remains agent-email-only and does not
+turn either domain into a general company-mail surface.
 
 The edge implementation lives in `infra/cloudflare/agent-email/`. It uses its
 own `witself-agent-email-pilot` Worker and an isolated
@@ -209,6 +209,16 @@ pilot's directory gate and literal routes. See [Agent Email](agent-email.md) and
 the [edge README](../infra/cloudflare/agent-email/README.md) for the staged
 procedure. A configured cell, deployed Worker, or enabled routing rule alone is
 not proof of end-to-end operation.
+
+Outbound provider dispatch lives separately in
+`infra/cloudflare/agent-email-send/`. Its Email Sending binding, Durable Object
+receipts/routes, lifecycle Queue, exact signer/account cohort, and cell event
+targets are not part of the inbound edge deployment. It is dark by default and
+must follow the staged procedure in the
+[sending-adapter README](../infra/cloudflare/agent-email-send/README.md) only
+after the schema-compatible cell release has been published. An outbound plan
+entitlement, cell worker, adapter dispatch gate, event-delivery gate, or Queue
+subscription never implicitly enables any other layer.
 
 ## Production account-cohort agent-email receive
 

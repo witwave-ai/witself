@@ -36,6 +36,7 @@ const (
 	agentEmailRelayPublicKeysEnv     = "WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON"
 	agentEmailRelayReplayWindowEnv   = "WITSELF_AGENT_EMAIL_RELAY_REPLAY_WINDOW"
 	agentEmailRetryCanaryAgentIDEnv  = "WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID"
+	agentEmailProviderEventTokenEnv  = "WITSELF_AGENT_EMAIL_PROVIDER_EVENT_TOKEN"
 	defaultAgentEmailReplayWindow    = 5 * time.Minute
 	maximumAgentEmailReceiveAccounts = 100
 	agentEmailPrimaryCanaryDomain    = "witmail.net"
@@ -676,6 +677,14 @@ func validAgentEmailConfigGeneratedID(value, prefix string) bool {
 
 func configureAgentEmail(ctx context.Context, cfg *server.Config, st *store.Store, receive server.AgentEmailReceiveConfig) error {
 	cfg.AgentEmailReceive = receive
+	if rawToken, present := os.LookupEnv(agentEmailProviderEventTokenEnv); present {
+		cfg.AgentEmailProviderEventToken = strings.TrimSpace(rawToken)
+		if cfg.AgentEmailProviderEventToken != rawToken ||
+			len(cfg.AgentEmailProviderEventToken) < 32 || len(cfg.AgentEmailProviderEventToken) > 4096 {
+			return fmt.Errorf("%s must contain 32-4096 bytes with no surrounding whitespace", agentEmailProviderEventTokenEnv)
+		}
+	}
+	configureAgentEmailOutbound(cfg, st)
 	// Alias projection is a control-plane lifecycle surface, not a process-local
 	// pilot enrollment surface. Keep it wired even while receive is disabled so
 	// a later policy/configuration change needs no client reinstall or schema

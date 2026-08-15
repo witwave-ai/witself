@@ -15,6 +15,7 @@
 //     GET|PUT|DELETE /v1/admin/accounts/{id}/messaging
 //     GET|PUT|DELETE /v1/admin/accounts/{id}/message-retention
 //     GET|PUT|DELETE /v1/admin/accounts/{id}/email-receive
+//     GET|PUT|DELETE /v1/admin/accounts/{id}/email-send
 //     GET|PUT|DELETE /v1/admin/accounts/{id}/email-retention
 //     GET|PUT|DELETE /v1/admin/accounts/{id}/plan-override
 //     GET|PUT|DELETE /v1/admin/accounts/{id}/limit-overrides/{dimension}
@@ -46,6 +47,8 @@ const LIMIT_DIMENSION_PATTERN =
   "agent_email_max_raw_bytes|agent_email_attachment_storage_bytes|" +
   "agent_email_realm_aliases_per_realm|" +
   "agent_email_custom_domains_per_account|" +
+  "agent_email_sent_per_agent_minute|" +
+  "agent_email_sent_per_realm_minute|" +
   "message_sent_per_agent_minute|message_delivered_per_realm_minute|" +
   "message_delivered_per_recipient_minute|" +
   "agent_email_received_per_sender_minute|" +
@@ -55,7 +58,7 @@ const LIMIT_DIMENSION_PATTERN =
   "agent_email_received_bytes_per_recipient_minute|" +
   "agent_email_received_bytes_per_realm_minute)";
 const ADMIN_POLICY_PATH = new RegExp(
-  `^/v1/admin/accounts/(${ACCOUNT_ID_PATTERN})/(?:transcript-retention|messaging|message-retention|email-receive|email-retention|plan-override|limit-overrides/${LIMIT_DIMENSION_PATTERN})$`,
+  `^/v1/admin/accounts/(${ACCOUNT_ID_PATTERN})/(?:transcript-retention|messaging|message-retention|email-receive|email-send|email-retention|plan-override|limit-overrides/${LIMIT_DIMENSION_PATTERN})$`,
 );
 const INTERNAL_RESOLVE_PATH = new RegExp(
   `^/v1/internal/accounts/(${ACCOUNT_ID_PATTERN}):resolve$`,

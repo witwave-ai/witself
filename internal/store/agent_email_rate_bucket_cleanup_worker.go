@@ -19,10 +19,10 @@ const (
 )
 
 // AgentEmailRateBucketCleanupWorkerConfig bounds one cleanup sweep and its
-// cadence. A sweep drains consecutive fixed-size batches until it catches up
-// or reaches BatchTimeout. Each replica may run this loop because
-// DeleteStaleAgentEmailRateBuckets uses PostgreSQL row locks with SKIP LOCKED
-// to divide a batch safely.
+// cadence. A sweep drains consecutive fixed-size batches from both inbound and
+// outbound rate tables until each catches up or the shared BatchTimeout expires.
+// Each replica may run this loop because both delete paths use PostgreSQL row
+// locks with SKIP LOCKED to divide batches safely.
 type AgentEmailRateBucketCleanupWorkerConfig struct {
 	BatchSize    int
 	Interval     time.Duration
@@ -90,7 +90,10 @@ func (s *Store) RunAgentEmailRateBucketCleanupWorker(
 		ctx,
 		cfg,
 		time.Now,
-		s.DeleteStaleAgentEmailRateBuckets,
+		[]agentEmailRateBucketCleanupDeleteFunc{
+			s.DeleteStaleAgentEmailRateBuckets,
+			s.DeleteStaleAgentEmailOutboundRateBuckets,
+		},
 		waitForAgentEmailRateBucketCleanupInterval,
 		onResult,
 		onError,
@@ -101,7 +104,7 @@ func runAgentEmailRateBucketCleanupWorker(
 	ctx context.Context,
 	cfg AgentEmailRateBucketCleanupWorkerConfig,
 	now func() time.Time,
-	deleteBatch agentEmailRateBucketCleanupDeleteFunc,
+	deleteBatches []agentEmailRateBucketCleanupDeleteFunc,
 	wait agentEmailRateBucketCleanupWaitFunc,
 	onResult func(deleted int64),
 	onError func(error),
@@ -109,8 +112,13 @@ func runAgentEmailRateBucketCleanupWorker(
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
-	if now == nil || deleteBatch == nil || wait == nil {
+	if now == nil || len(deleteBatches) == 0 || wait == nil {
 		return errors.New("agent-email rate bucket cleanup worker dependencies are required")
+	}
+	for _, deleteBatch := range deleteBatches {
+		if deleteBatch == nil {
+			return errors.New("agent-email rate bucket cleanup worker dependencies are required")
+		}
 	}
 
 	for {
@@ -119,32 +127,56 @@ func runAgentEmailRateBucketCleanupWorker(
 		}
 		attemptCtx, cancelAttempt := context.WithTimeout(ctx, cfg.BatchTimeout)
 		before := now().UTC()
+		active := make([]bool, len(deleteBatches))
+		for i := range active {
+			active[i] = true
+		}
+	sweep:
 		for {
-			deleted, err := deleteBatch(attemptCtx, before, cfg.BatchSize)
-			if err != nil {
-				if ctx.Err() != nil {
-					cancelAttempt()
-					return nil
+			madeAttempt := false
+			for i, deleteBatch := range deleteBatches {
+				if !active[i] {
+					continue
 				}
-				if !errors.Is(err, context.Canceled) && onError != nil {
-					onError(err)
+				madeAttempt = true
+				deleted, err := deleteBatch(attemptCtx, before, cfg.BatchSize)
+				if err != nil {
+					if ctx.Err() != nil {
+						cancelAttempt()
+						return nil
+					}
+					if attemptErr := attemptCtx.Err(); attemptErr != nil {
+						if onError != nil {
+							onError(attemptErr)
+						}
+						break sweep
+					}
+					if !errors.Is(err, context.Canceled) && onError != nil {
+						onError(err)
+					}
+					// A problem isolated to one rate table must not starve the other
+					// table for the whole interval. Retry this table next sweep.
+					active[i] = false
+					continue
 				}
-				break
+				if onResult != nil {
+					onResult(deleted)
+				}
+				if deleted < int64(cfg.BatchSize) {
+					active[i] = false
+				}
+				if attemptErr := attemptCtx.Err(); attemptErr != nil {
+					if ctx.Err() != nil {
+						cancelAttempt()
+						return nil
+					}
+					if onError != nil {
+						onError(attemptErr)
+					}
+					break sweep
+				}
 			}
-			if onResult != nil {
-				onResult(deleted)
-			}
-			if deleted < int64(cfg.BatchSize) {
-				break
-			}
-			if err := attemptCtx.Err(); err != nil {
-				if ctx.Err() != nil {
-					cancelAttempt()
-					return nil
-				}
-				if onError != nil {
-					onError(err)
-				}
+			if !madeAttempt {
 				break
 			}
 		}

@@ -174,6 +174,16 @@ type AgentEmailReceiveOverride struct {
 	SetAt       time.Time `json:"set_at"`
 }
 
+// AgentEmailSendOverride is an account-specific exception to whether
+// outbound agent email is enabled. Absence means inherit the plan feature.
+type AgentEmailSendOverride struct {
+	Enabled     bool      `json:"enabled"`
+	ActorID     string    `json:"actor_id"`
+	ActorHandle string    `json:"actor_handle"`
+	Reason      string    `json:"reason"`
+	SetAt       time.Time `json:"set_at"`
+}
+
 // AgentEmailRetentionOverride is an account-specific exception to inbound
 // agent-email retention. Days=nil is explicit indefinite retention; absence
 // means inherit the current plan default.
@@ -226,6 +236,10 @@ type AdminChange struct {
 	AgentEmailReceiveTo           *bool              `json:"agent_email_receive_to,omitempty"`
 	AgentEmailReceiveFromSource   string             `json:"agent_email_receive_from_source,omitempty"`
 	AgentEmailReceiveToSource     string             `json:"agent_email_receive_to_source,omitempty"`
+	AgentEmailSendFrom            *bool              `json:"agent_email_send_from,omitempty"`
+	AgentEmailSendTo              *bool              `json:"agent_email_send_to,omitempty"`
+	AgentEmailSendFromSource      string             `json:"agent_email_send_from_source,omitempty"`
+	AgentEmailSendToSource        string             `json:"agent_email_send_to_source,omitempty"`
 	AgentEmailRetentionFrom       *int64             `json:"agent_email_retention_from,omitempty"`
 	AgentEmailRetentionTo         *int64             `json:"agent_email_retention_to,omitempty"`
 	AgentEmailRetentionFromSource string             `json:"agent_email_retention_from_source,omitempty"`
@@ -266,6 +280,7 @@ type Record struct {
 	MessagingOverride           *MessagingOverride
 	MessageRetentionOverride    *MessageRetentionOverride
 	AgentEmailReceiveOverride   *AgentEmailReceiveOverride
+	AgentEmailSendOverride      *AgentEmailSendOverride
 	AgentEmailRetentionOverride *AgentEmailRetentionOverride
 	LimitOverrides              map[string]AccountLimitOverride
 	AdminHistory                []AdminChange
@@ -728,6 +743,10 @@ func (m *Manager) resolveSnapshot(r Record) (PlanSnapshot, error) {
 	if override := r.AgentEmailReceiveOverride; override != nil {
 		snapshot.Features = setFeature(
 			snapshot.Features, plans.AgentEmailReceiveFeature, override.Enabled)
+	}
+	if override := r.AgentEmailSendOverride; override != nil {
+		snapshot.Features = setFeature(
+			snapshot.Features, plans.AgentEmailSendFeature, override.Enabled)
 	}
 	for dimension, override := range r.LimitOverrides {
 		validationValue := int64(0)
@@ -1483,8 +1502,104 @@ func (m *Manager) ClearAgentEmailReceiveOverride(
 	return r, nil
 }
 
-// SetAgentEmailRetentionOverride sets a finite or explicit indefinite inbound
-// email-retention exception independently of receive availability.
+// SetAgentEmailSendOverride enables or disables outbound agent email for one
+// account without changing its plan or requiring a client reinstall.
+func (m *Manager) SetAgentEmailSendOverride(
+	ctx context.Context,
+	accountID string,
+	enabled bool,
+	actor AdminActor,
+	reason string,
+) (Record, error) {
+	actor, reason, err := validateAdminChange(actor, reason)
+	if err != nil {
+		return Record{}, err
+	}
+	now := m.cfg.Now()
+	r, err := m.mutate(ctx, accountID, "", func(r *Record) error {
+		if current := r.AgentEmailSendOverride; current != nil &&
+			current.Enabled == enabled {
+			return errSkipWrite
+		}
+		before, err := m.resolveSnapshot(*r)
+		if err != nil {
+			return err
+		}
+		fromSource := "inherited"
+		if r.AgentEmailSendOverride != nil {
+			fromSource = "override"
+		}
+		r.AgentEmailSendOverride = &AgentEmailSendOverride{
+			Enabled: enabled, ActorID: actor.ID, ActorHandle: actor.Handle,
+			Reason: reason, SetAt: now,
+		}
+		r.AdminHistory = append(r.AdminHistory, AdminChange{
+			Kind:    "agent_email_send_override_set",
+			ActorID: actor.ID, ActorHandle: actor.Handle,
+			Reason: reason, At: now,
+			AgentEmailSendFrom: boolValue(featureEnabled(
+				before.Features, plans.AgentEmailSendFeature)),
+			AgentEmailSendTo:         boolValue(enabled),
+			AgentEmailSendFromSource: fromSource,
+			AgentEmailSendToSource:   "override",
+		})
+		return nil
+	})
+	if err != nil {
+		return Record{}, err
+	}
+	_ = m.apply(ctx, accountID)
+	return r, nil
+}
+
+// ClearAgentEmailSendOverride restores the outbound-email feature state
+// inherited from the account's effective plan.
+func (m *Manager) ClearAgentEmailSendOverride(
+	ctx context.Context,
+	accountID string,
+	actor AdminActor,
+	reason string,
+) (Record, error) {
+	actor, reason, err := validateAdminChange(actor, reason)
+	if err != nil {
+		return Record{}, err
+	}
+	now := m.cfg.Now()
+	r, err := m.mutate(ctx, accountID, "", func(r *Record) error {
+		if r.AgentEmailSendOverride == nil {
+			return errSkipWrite
+		}
+		before, err := m.resolveSnapshot(*r)
+		if err != nil {
+			return err
+		}
+		r.AgentEmailSendOverride = nil
+		after, err := m.resolveSnapshot(*r)
+		if err != nil {
+			return err
+		}
+		r.AdminHistory = append(r.AdminHistory, AdminChange{
+			Kind:    "agent_email_send_override_cleared",
+			ActorID: actor.ID, ActorHandle: actor.Handle,
+			Reason: reason, At: now,
+			AgentEmailSendFrom: boolValue(featureEnabled(
+				before.Features, plans.AgentEmailSendFeature)),
+			AgentEmailSendTo: boolValue(featureEnabled(
+				after.Features, plans.AgentEmailSendFeature)),
+			AgentEmailSendFromSource: "override",
+			AgentEmailSendToSource:   "inherited",
+		})
+		return nil
+	})
+	if err != nil {
+		return Record{}, err
+	}
+	_ = m.apply(ctx, accountID)
+	return r, nil
+}
+
+// SetAgentEmailRetentionOverride sets a finite or explicit indefinite agent
+// email-retention exception independently of receive and send availability.
 func (m *Manager) SetAgentEmailRetentionOverride(
 	ctx context.Context,
 	accountID string,

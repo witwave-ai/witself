@@ -31,6 +31,13 @@ const (
 	maxAgentEmailRetentionMessageBacklinks       = 4096
 	maxAgentEmailRetentionBatchBacklinks         = 65536
 	maxAgentEmailRetentionGeneration       int64 = 4611686018427387903
+
+	// Suppressions contain only one recipient digest and bounded provider
+	// metadata, never the address or message payload. They intentionally outlive
+	// finite mail history by one year, but cannot accumulate forever: every
+	// account, including an indefinite-retention account, has a ten-year ceiling.
+	agentEmailSuppressionSafetyExtensionDays = 365
+	maxAgentEmailSuppressionRetentionDays    = 10 * 365
 )
 
 // AgentEmailRetentionMode selects read-only preview or destructive
@@ -57,6 +64,15 @@ type AgentEmailRetentionBatchResult struct {
 	DeferredBudget        int64
 	ClearedDuplicateLinks int64
 	DeletedCanaryProofs   int64
+	ScannedOutbound       int64
+	EligibleOutbound      int64
+	DeletedOutbound       int64
+	DeletedOutboundBytes  int64
+	ScannedProviderEvents int64
+	DeletedProviderEvents int64
+	ScannedSuppressions   int64
+	EligibleSuppressions  int64
+	DeletedSuppressions   int64
 	ScanCapped            bool
 	LaneAdvanced          bool
 }
@@ -371,7 +387,7 @@ func (s *Store) processClaimedAgentEmailRetentionBatch(
 	lastAccountCursor := laneCursor
 	stopForBudget := false
 
-	for result.Scanned < int64(batchSize) && len(seenAccounts) < batchSize {
+	for agentEmailRetentionWork(result) < int64(batchSize) && len(seenAccounts) < batchSize {
 		accountID, retentionDays, found, locked, selectErr :=
 			selectAgentEmailRetentionAccount(
 				ctx, tx, claim.LaneID, lastAccountCursor,
@@ -392,39 +408,64 @@ func (s *Store) processClaimedAgentEmailRetentionBatch(
 			result.DeferredLocked++
 			continue
 		}
-		// A policy update may commit between the unlocked page lookup and the
-		// exact lock. Advance past that no-longer-finite account without
-		// reporting a lock deferral.
+		// Account deletion may commit between the unlocked page lookup and the
+		// exact lock. Advance past a vanished account without reporting a lock
+		// deferral.
 		if !found {
 			continue
 		}
 
-		remaining := batchSize - int(result.Scanned)
-		accountResult, rawUsed, backlinksUsed, budgetHit, accountErr :=
-			processAgentEmailRetentionAccount(
-				ctx,
-				tx,
-				mode,
-				accountID,
-				retentionDays,
-				remaining,
-				rawBudgetRemaining,
-				backlinkBudgetRemaining,
-				enforce,
-			)
-		if accountErr != nil {
-			return AgentEmailRetentionBatchResult{}, accountErr
+		if retentionDays != nil {
+			remaining := batchSize - int(agentEmailRetentionWork(result))
+			accountResult, rawUsed, backlinksUsed, budgetHit, accountErr :=
+				processAgentEmailRetentionAccount(
+					ctx,
+					tx,
+					mode,
+					accountID,
+					*retentionDays,
+					remaining,
+					rawBudgetRemaining,
+					backlinkBudgetRemaining,
+					enforce,
+				)
+			if accountErr != nil {
+				return AgentEmailRetentionBatchResult{}, accountErr
+			}
+			addAgentEmailRetentionResult(&result, accountResult)
+			rawBudgetRemaining -= rawUsed
+			backlinkBudgetRemaining -= backlinksUsed
+			if budgetHit {
+				stopForBudget = true
+				break
+			}
+
+			remaining = batchSize - int(agentEmailRetentionWork(result))
+			if remaining > 0 {
+				outboundResult, outboundErr := processAgentEmailOutboundRetentionAccount(
+					ctx, tx, accountID, *retentionDays, remaining, enforce,
+				)
+				if outboundErr != nil {
+					return AgentEmailRetentionBatchResult{}, outboundErr
+				}
+				addAgentEmailRetentionResult(&result, outboundResult)
+			}
 		}
-		addAgentEmailRetentionResult(&result, accountResult)
-		rawBudgetRemaining -= rawUsed
-		backlinkBudgetRemaining -= backlinksUsed
-		if budgetHit {
-			stopForBudget = true
-			break
+
+		remaining := batchSize - int(agentEmailRetentionWork(result))
+		if remaining > 0 {
+			suppressionResult, suppressionErr :=
+				processAgentEmailSuppressionRetentionAccount(
+					ctx, tx, accountID, retentionDays, remaining, enforce,
+				)
+			if suppressionErr != nil {
+				return AgentEmailRetentionBatchResult{}, suppressionErr
+			}
+			addAgentEmailRetentionResult(&result, suppressionResult)
 		}
 	}
 
-	result.ScanCapped = result.Scanned >= int64(batchSize) || stopForBudget
+	result.ScanCapped = agentEmailRetentionWork(result) >= int64(batchSize) || stopForBudget
 	command, err := tx.Exec(ctx, `
 		UPDATE agent_email_retention_worker_lanes
 		   SET account_cursor=$4,
@@ -459,7 +500,7 @@ func selectAgentEmailRetentionAccount(
 	tx pgx.Tx,
 	laneID int,
 	cursor string,
-) (string, int, bool, bool, error) {
+) (string, *int, bool, bool, error) {
 	for _, after := range []bool{true, false} {
 		operator := ">"
 		if !after {
@@ -467,15 +508,15 @@ func selectAgentEmailRetentionAccount(
 		}
 		query := fmt.Sprintf(`
 			SELECT id,
-			       (plan_policies ->> $3)::integer
+			       CASE WHEN plan_policies ? $3
+			            THEN (plan_policies ->> $3)::integer END
 			  FROM accounts
-			 WHERE plan_policies ? 'agent_email_retention_days'
-			   AND get_byte(sha256(id::bytea), 0) %% 16 = $1
+			 WHERE get_byte(sha256(id::bytea), 0) %% 16 = $1
 			   AND id %s $2
 			 ORDER BY id
 			 LIMIT 1`, operator)
 		var accountID string
-		var retentionDays int
+		var retentionDays *int
 		err := tx.QueryRow(
 			ctx,
 			query,
@@ -487,50 +528,49 @@ func selectAgentEmailRetentionAccount(
 			continue
 		}
 		if err != nil {
-			return "", 0, false, false,
+			return "", nil, false, false,
 				fmt.Errorf("select agent-email retention account: %w", err)
 		}
-		var lockedRetentionDays int
+		var lockedRetentionDays *int
 		err = tx.QueryRow(ctx, `
-			SELECT (plan_policies ->> $2)::integer
+			SELECT CASE WHEN plan_policies ? $2
+			            THEN (plan_policies ->> $2)::integer END
 			  FROM accounts
 			 WHERE id=$1
-			   AND plan_policies ? 'agent_email_retention_days'
 			 FOR UPDATE SKIP LOCKED`,
 			accountID,
 			plans.AgentEmailRetentionDaysPolicy,
 		).Scan(&lockedRetentionDays)
 		if errors.Is(err, pgx.ErrNoRows) {
-			var stillFinite bool
+			var stillExists bool
 			if err := tx.QueryRow(ctx, `
 				SELECT EXISTS (
 				  SELECT 1
 				    FROM accounts
 				   WHERE id=$1
-				     AND plan_policies ? 'agent_email_retention_days'
 				)`,
 				accountID,
-			).Scan(&stillFinite); err != nil {
-				return "", 0, false, false,
+			).Scan(&stillExists); err != nil {
+				return "", nil, false, false,
 					fmt.Errorf("check locked agent-email retention account: %w", err)
 			}
-			return accountID, retentionDays, false, stillFinite, nil
+			return accountID, retentionDays, false, stillExists, nil
 		}
 		if err != nil {
-			return "", 0, false, false,
+			return "", nil, false, false,
 				fmt.Errorf("lock agent-email retention account: %w", err)
 		}
 		retentionDays = lockedRetentionDays
-		if retentionDays < 1 ||
-			int64(retentionDays) > plans.MaxAgentEmailRetentionDays {
-			return "", 0, false, false, fmt.Errorf(
+		if retentionDays != nil && (*retentionDays < 1 ||
+			int64(*retentionDays) > plans.MaxAgentEmailRetentionDays) {
+			return "", nil, false, false, fmt.Errorf(
 				"select agent-email retention account: %s is outside the defensive bound",
 				plans.AgentEmailRetentionDaysPolicy,
 			)
 		}
 		return accountID, retentionDays, true, false, nil
 	}
-	return "", 0, false, false, nil
+	return "", nil, false, false, nil
 }
 
 func processAgentEmailRetentionAccount(
@@ -914,6 +954,281 @@ func lockAgentEmailRetentionCanaries(
 	return count, nil
 }
 
+// processAgentEmailOutboundRetentionAccount applies the account's ordinary
+// email cutoff to outbound content. Provider-event receipts are removed first
+// under the same shared row budget; a parent send is eligible only after its
+// receipts are gone, so ON DELETE CASCADE can never hide unbounded work.
+// Queued, claimed, and provider_started rows are live work and are never
+// selected, regardless of age.
+func processAgentEmailOutboundRetentionAccount(
+	ctx context.Context,
+	tx pgx.Tx,
+	accountID string,
+	retentionDays int,
+	limit int,
+	enforce bool,
+) (AgentEmailRetentionBatchResult, error) {
+	var result AgentEmailRetentionBatchResult
+	if limit < 1 {
+		return result, nil
+	}
+	var cutoff time.Time
+	if err := tx.QueryRow(ctx, `
+		SELECT statement_timestamp() - make_interval(days => $1)`,
+		retentionDays,
+	).Scan(&cutoff); err != nil {
+		return result, fmt.Errorf("read outbound agent-email retention cutoff: %w", err)
+	}
+
+	if enforce {
+		rows, err := tx.Query(ctx, `
+			WITH candidates AS MATERIALIZED (
+			  SELECT event.ctid
+			    FROM agent_email_outbound_provider_events event
+			    JOIN agent_email_outbound_messages outbound
+			      ON outbound.id=event.outbound_id
+			   WHERE outbound.account_id=$1
+			     AND outbound.created_at<$2
+			     AND outbound.state NOT IN ('queued','claimed','provider_started')
+			   ORDER BY outbound.created_at,outbound.id,event.occurred_at,
+			            event.provider,event.event_id_hash
+			   FOR UPDATE OF event SKIP LOCKED
+			   LIMIT $3
+			)
+			DELETE FROM agent_email_outbound_provider_events event
+			 USING candidates
+			 WHERE event.ctid=candidates.ctid
+			RETURNING 1`, accountID, cutoff, limit)
+		if err != nil {
+			return result, fmt.Errorf("delete retained outbound provider events: %w", err)
+		}
+		for rows.Next() {
+			var ignored int
+			if err := rows.Scan(&ignored); err != nil {
+				rows.Close()
+				return result, fmt.Errorf("scan deleted outbound provider event: %w", err)
+			}
+			result.ScannedProviderEvents++
+			result.DeletedProviderEvents++
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return result, fmt.Errorf("iterate deleted outbound provider events: %w", err)
+		}
+		rows.Close()
+	} else {
+		rows, err := tx.Query(ctx, `
+			SELECT event.event_id_hash
+			  FROM agent_email_outbound_provider_events event
+			  JOIN agent_email_outbound_messages outbound
+			    ON outbound.id=event.outbound_id
+			 WHERE outbound.account_id=$1
+			   AND outbound.created_at<$2
+			   AND outbound.state NOT IN ('queued','claimed','provider_started')
+			 ORDER BY outbound.created_at,outbound.id,event.occurred_at,
+			          event.provider,event.event_id_hash
+			 FOR UPDATE OF event SKIP LOCKED
+			 LIMIT $3`, accountID, cutoff, limit)
+		if err != nil {
+			return result, fmt.Errorf("preview retained outbound provider events: %w", err)
+		}
+		for rows.Next() {
+			var ignored string
+			if err := rows.Scan(&ignored); err != nil {
+				rows.Close()
+				return result, fmt.Errorf("scan retained outbound provider event: %w", err)
+			}
+			result.ScannedProviderEvents++
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return result, fmt.Errorf("iterate retained outbound provider events: %w", err)
+		}
+		rows.Close()
+	}
+
+	remaining := limit - int(result.ScannedProviderEvents)
+	if remaining < 1 {
+		return result, nil
+	}
+	if enforce {
+		rows, err := tx.Query(ctx, `
+			WITH candidates AS MATERIALIZED (
+			  SELECT outbound.ctid
+			    FROM agent_email_outbound_messages outbound
+			   WHERE outbound.account_id=$1
+			     AND outbound.created_at<$2
+			     AND outbound.state NOT IN ('queued','claimed','provider_started')
+			     AND NOT EXISTS (
+			       SELECT 1 FROM agent_email_outbound_provider_events event
+			        WHERE event.outbound_id=outbound.id
+			     )
+			   ORDER BY outbound.created_at,outbound.id
+			   FOR UPDATE OF outbound SKIP LOCKED
+			   LIMIT $3
+			)
+			DELETE FROM agent_email_outbound_messages outbound
+			 USING candidates
+			 WHERE outbound.ctid=candidates.ctid
+			RETURNING octet_length(outbound.body_text)::bigint +
+			          octet_length(outbound.subject)::bigint +
+			          octet_length(outbound.to_address)::bigint`,
+			accountID, cutoff, remaining)
+		if err != nil {
+			return result, fmt.Errorf("delete retained outbound agent email: %w", err)
+		}
+		for rows.Next() {
+			var deletedBytes int64
+			if err := rows.Scan(&deletedBytes); err != nil {
+				rows.Close()
+				return result, fmt.Errorf("scan deleted outbound agent-email bytes: %w", err)
+			}
+			result.ScannedOutbound++
+			result.EligibleOutbound++
+			result.DeletedOutbound++
+			result.DeletedOutboundBytes += deletedBytes
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return result, fmt.Errorf("iterate deleted outbound agent email: %w", err)
+		}
+		rows.Close()
+		return result, nil
+	}
+
+	rows, err := tx.Query(ctx, `
+		SELECT outbound.id
+		  FROM agent_email_outbound_messages outbound
+		 WHERE outbound.account_id=$1
+		   AND outbound.created_at<$2
+		   AND outbound.state NOT IN ('queued','claimed','provider_started')
+		   AND NOT EXISTS (
+		     SELECT 1 FROM agent_email_outbound_provider_events event
+		      WHERE event.outbound_id=outbound.id
+		   )
+		 ORDER BY outbound.created_at,outbound.id
+		 FOR UPDATE OF outbound SKIP LOCKED
+		 LIMIT $3`, accountID, cutoff, remaining)
+	if err != nil {
+		return result, fmt.Errorf("preview retained outbound agent email: %w", err)
+	}
+	for rows.Next() {
+		var ignored string
+		if err := rows.Scan(&ignored); err != nil {
+			rows.Close()
+			return result, fmt.Errorf("scan retained outbound agent email: %w", err)
+		}
+		result.ScannedOutbound++
+		result.EligibleOutbound++
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return result, fmt.Errorf("iterate retained outbound agent email: %w", err)
+	}
+	rows.Close()
+	return result, nil
+}
+
+// processAgentEmailSuppressionRetentionAccount keeps delivery-safety state
+// longer than finite message content without turning it into an unbounded
+// hidden history. Rows contain only a digest and bounded codes, are unique per
+// account+recipient, and expire after one additional year, capped at ten years.
+// Indefinite message-retention accounts use the same ten-year safety ceiling.
+func processAgentEmailSuppressionRetentionAccount(
+	ctx context.Context,
+	tx pgx.Tx,
+	accountID string,
+	retentionDays *int,
+	limit int,
+	enforce bool,
+) (AgentEmailRetentionBatchResult, error) {
+	var result AgentEmailRetentionBatchResult
+	if limit < 1 {
+		return result, nil
+	}
+	suppressionDays := agentEmailSuppressionRetentionDays(retentionDays)
+	if enforce {
+		rows, err := tx.Query(ctx, `
+			WITH candidates AS MATERIALIZED (
+			  SELECT suppression.ctid
+			    FROM agent_email_outbound_recipient_suppressions suppression
+			   WHERE suppression.account_id=$1
+			     AND suppression.updated_at <
+			       statement_timestamp()-make_interval(days => $2)
+			   ORDER BY suppression.updated_at,suppression.recipient_sha256
+			   FOR UPDATE OF suppression SKIP LOCKED
+			   LIMIT $3
+			)
+			DELETE FROM agent_email_outbound_recipient_suppressions suppression
+			 USING candidates
+			 WHERE suppression.ctid=candidates.ctid
+			RETURNING 1`, accountID, suppressionDays, limit)
+		if err != nil {
+			return result, fmt.Errorf("delete stale outbound recipient suppressions: %w", err)
+		}
+		for rows.Next() {
+			var ignored int
+			if err := rows.Scan(&ignored); err != nil {
+				rows.Close()
+				return result, fmt.Errorf("scan deleted outbound recipient suppression: %w", err)
+			}
+			result.ScannedSuppressions++
+			result.EligibleSuppressions++
+			result.DeletedSuppressions++
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return result, fmt.Errorf("iterate deleted outbound recipient suppressions: %w", err)
+		}
+		rows.Close()
+		return result, nil
+	}
+
+	rows, err := tx.Query(ctx, `
+		SELECT suppression.recipient_sha256
+		  FROM agent_email_outbound_recipient_suppressions suppression
+		 WHERE suppression.account_id=$1
+		   AND suppression.updated_at <
+		     statement_timestamp()-make_interval(days => $2)
+		 ORDER BY suppression.updated_at,suppression.recipient_sha256
+		 FOR UPDATE OF suppression SKIP LOCKED
+		 LIMIT $3`, accountID, suppressionDays, limit)
+	if err != nil {
+		return result, fmt.Errorf("preview stale outbound recipient suppressions: %w", err)
+	}
+	for rows.Next() {
+		var ignored string
+		if err := rows.Scan(&ignored); err != nil {
+			rows.Close()
+			return result, fmt.Errorf("scan stale outbound recipient suppression: %w", err)
+		}
+		result.ScannedSuppressions++
+		result.EligibleSuppressions++
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return result, fmt.Errorf("iterate stale outbound recipient suppressions: %w", err)
+	}
+	rows.Close()
+	return result, nil
+}
+
+func agentEmailSuppressionRetentionDays(retentionDays *int) int {
+	if retentionDays == nil {
+		return maxAgentEmailSuppressionRetentionDays
+	}
+	days := *retentionDays + agentEmailSuppressionSafetyExtensionDays
+	if days > maxAgentEmailSuppressionRetentionDays {
+		return maxAgentEmailSuppressionRetentionDays
+	}
+	return days
+}
+
+func agentEmailRetentionWork(result AgentEmailRetentionBatchResult) int64 {
+	return result.Scanned + result.ScannedOutbound +
+		result.ScannedProviderEvents + result.ScannedSuppressions
+}
+
 func addAgentEmailRetentionResult(
 	target *AgentEmailRetentionBatchResult,
 	value AgentEmailRetentionBatchResult,
@@ -929,6 +1244,15 @@ func addAgentEmailRetentionResult(
 	target.DeferredBudget += value.DeferredBudget
 	target.ClearedDuplicateLinks += value.ClearedDuplicateLinks
 	target.DeletedCanaryProofs += value.DeletedCanaryProofs
+	target.ScannedOutbound += value.ScannedOutbound
+	target.EligibleOutbound += value.EligibleOutbound
+	target.DeletedOutbound += value.DeletedOutbound
+	target.DeletedOutboundBytes += value.DeletedOutboundBytes
+	target.ScannedProviderEvents += value.ScannedProviderEvents
+	target.DeletedProviderEvents += value.DeletedProviderEvents
+	target.ScannedSuppressions += value.ScannedSuppressions
+	target.EligibleSuppressions += value.EligibleSuppressions
+	target.DeletedSuppressions += value.DeletedSuppressions
 }
 
 // RunAgentEmailRetentionWorker attempts one bounded non-empty lane immediately

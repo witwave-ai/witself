@@ -20,6 +20,14 @@ data:
   WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_BATCH_SIZE: {{ .Values.worker.agentEmailRateBucketCleanup.batchSize | quote }}
   WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_INTERVAL: {{ .Values.worker.agentEmailRateBucketCleanup.interval | quote }}
   WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_BATCH_TIMEOUT: {{ .Values.worker.agentEmailRateBucketCleanup.batchTimeout | quote }}
+  WITSELF_AGENT_EMAIL_OUTBOUND_ENABLED: {{ .Values.worker.agentEmailOutbound.enabled | quote }}
+  WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_ENDPOINT: {{ .Values.worker.agentEmailOutbound.dispatchEndpoint | quote }}
+  WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_AUDIENCE: {{ .Values.worker.agentEmailOutbound.dispatchAudience | quote }}
+  WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_KEY_ID: {{ .Values.worker.agentEmailOutbound.dispatchKeyID | quote }}
+  WITSELF_AGENT_EMAIL_OUTBOUND_BATCH_SIZE: {{ .Values.worker.agentEmailOutbound.batchSize | quote }}
+  WITSELF_AGENT_EMAIL_OUTBOUND_INTERVAL: {{ .Values.worker.agentEmailOutbound.interval | quote }}
+  WITSELF_AGENT_EMAIL_OUTBOUND_BATCH_TIMEOUT: {{ .Values.worker.agentEmailOutbound.batchTimeout | quote }}
+  WITSELF_AGENT_EMAIL_OUTBOUND_PROVIDER_TIMEOUT: {{ .Values.worker.agentEmailOutbound.providerTimeout | quote }}
   WITSELF_TRANSCRIPT_RETENTION_ENABLED: {{ .Values.worker.transcriptRetention.enabled | quote }}
   WITSELF_TRANSCRIPT_RETENTION_MODE: {{ .Values.worker.transcriptRetention.mode | quote }}
   WITSELF_TRANSCRIPT_RETENTION_BATCH_SIZE: {{ .Values.worker.transcriptRetention.batchSize | quote }}

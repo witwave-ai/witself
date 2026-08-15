@@ -67,6 +67,7 @@ func TestCLIPlanFlowAgainstCPServer(t *testing.T) {
 	if err != nil || status.Plan != "free" || status.PlanName != "Personal" ||
 		status.BillingPlan != "free" || status.BillingPlanName != "Personal" ||
 		status.EmailReceive == nil || status.EmailReceive.Enabled ||
+		status.EmailSend == nil || status.EmailSend.Enabled ||
 		status.EmailRetention == nil || status.EmailRetention.EffectiveDays == nil ||
 		*status.EmailRetention.EffectiveDays != 30 ||
 		status.Transcript == nil || status.Transcript.EffectiveDays == nil ||
@@ -116,6 +117,7 @@ func TestCLIPlanFlowAgainstCPServer(t *testing.T) {
 	status, err = client.GetPlan(ctx, srv.URL, "acct_1", "good")
 	if err != nil || status.Plan != "standard" || status.PlanName != "Professional" ||
 		status.Applied != "standard" || status.EmailReceive == nil || !status.EmailReceive.Enabled ||
+		status.EmailSend == nil || status.EmailSend.Enabled ||
 		status.EmailRetention == nil || status.EmailRetention.EffectiveDays == nil ||
 		*status.EmailRetention.EffectiveDays != 90 {
 		t.Fatalf("GetPlan after = %+v; want standard/standard", status)

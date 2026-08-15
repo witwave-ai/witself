@@ -46,6 +46,8 @@ retention_preview_apps_render="$render_dir/retention-preview-apps.yaml"
 retention_enforce_apps_render="$render_dir/retention-enforce-apps.yaml"
 email_retention_preview_render="$render_dir/email-retention-preview.yaml"
 email_retention_enforce_render="$render_dir/email-retention-enforce.yaml"
+email_outbound_render="$render_dir/email-outbound.yaml"
+email_outbound_apps_render="$render_dir/email-outbound-apps.yaml"
 style_tuned_render="$render_dir/style-tuned.yaml"
 monitor_render="$render_dir/monitors.yaml"
 apps_monitor_render="$render_dir/apps-monitors.yaml"
@@ -183,6 +185,24 @@ helm template witself-server "$server_chart" --namespace witself \
   --values "$gcp_profile" \
   --set worker.agentEmailRetention.enabled=true \
   --set worker.agentEmailRetention.mode=enforce >"$email_retention_enforce_render"
+helm template witself-server "$server_chart" --namespace witself \
+  --values "$gcp_profile" \
+  --set worker.agentEmailOutbound.enabled=true \
+  --set worker.agentEmailOutbound.dispatchEndpoint=https://send.example.test/v1/dispatch \
+  --set worker.agentEmailOutbound.dispatchKeyID=founder-cell \
+  --set worker.agentEmailOutbound.dispatchPrivateKeySecret.name=witself-email-dispatch \
+  >"$email_outbound_render"
+helm template witself-apps "$apps_chart" \
+  --values "$gcp_cell" \
+  --values "$apps_profile" \
+  --set apps.witselfServer.chartVersion=0.0.245 \
+  --set apps.witselfServer.imageTag=0.0.245 \
+  --set apps.witselfServer.agentEmail.providerEventTokenSecret.name=witself-email-provider-events \
+  --set apps.witselfServer.worker.agentEmailOutbound.enabled=true \
+  --set apps.witselfServer.worker.agentEmailOutbound.dispatchEndpoint=https://send.example.test/v1/dispatch \
+  --set apps.witselfServer.worker.agentEmailOutbound.dispatchKeyID=founder-cell \
+  --set apps.witselfServer.worker.agentEmailOutbound.dispatchPrivateKeySecret.name=witself-email-dispatch \
+  >"$email_outbound_apps_render"
 helm template witself-server "$server_chart" --namespace witself \
   --values "$gcp_profile" \
   --set worker.avatarStyleRollout.batchSize=101 >"$style_tuned_render"
@@ -354,6 +374,22 @@ expect_server_template_failure() {
   fi
 }
 
+expect_apps_template_failure() {
+  local description="$1"
+  local expected_message="$2"
+  shift 2
+  local error_output="$render_dir/expected-apps-template-failure.err"
+  if helm template witself-apps "$apps_chart" "$@" \
+    >/dev/null 2>"$error_output"; then
+    echo "$description unexpectedly passed Helm validation" >&2
+    return 1
+  fi
+  if ! grep -Fq "$expected_message" "$error_output"; then
+    echo "$description failed without the expected validation message" >&2
+    return 1
+  fi
+}
+
 default_server_config="$render_dir/default-server-config.yaml"
 default_server_deployment="$render_dir/default-server-deployment.yaml"
 gcp_server_config="$render_dir/gcp-server-config.yaml"
@@ -395,6 +431,13 @@ email_production_nested_values="$render_dir/email-production-nested-values.yaml"
 email_production_nested_render="$render_dir/email-production-nested-render.yaml"
 email_production_nested_config="$render_dir/email-production-nested-config.yaml"
 email_production_nested_deployment="$render_dir/email-production-nested-deployment.yaml"
+email_outbound_worker_config="$render_dir/email-outbound-worker-config.yaml"
+email_outbound_worker_deployment="$render_dir/email-outbound-worker-deployment.yaml"
+email_outbound_server_application="$render_dir/email-outbound-server-application.yaml"
+email_outbound_nested_values="$render_dir/email-outbound-nested-values.yaml"
+email_outbound_nested_render="$render_dir/email-outbound-nested-render.yaml"
+email_outbound_nested_worker_config="$render_dir/email-outbound-nested-worker-config.yaml"
+email_outbound_nested_server_deployment="$render_dir/email-outbound-nested-server-deployment.yaml"
 
 extract_document ConfigMap witself-server "$default_render" "$default_server_config"
 extract_document Deployment witself-server "$default_render" "$default_server_deployment"
@@ -409,6 +452,14 @@ extract_document NetworkPolicy witself-worker "$gcp_render" "$gcp_worker_network
 extract_document PodDisruptionBudget witself-server "$gcp_render" "$gcp_server_pdb"
 extract_document PodDisruptionBudget witself-worker "$gcp_render" "$gcp_worker_pdb"
 extract_document Deployment witself-worker "$portable_worker_render" "$portable_worker_deployment"
+extract_document ConfigMap witself-worker "$email_outbound_render" "$email_outbound_worker_config"
+extract_document Deployment witself-worker "$email_outbound_render" "$email_outbound_worker_deployment"
+extract_document Application witself-server "$email_outbound_apps_render" "$email_outbound_server_application"
+extract_application_helm_values "$email_outbound_server_application" "$email_outbound_nested_values"
+helm template witself-server "$server_chart" --namespace witself \
+  --values "$email_outbound_nested_values" >"$email_outbound_nested_render"
+extract_document ConfigMap witself-worker "$email_outbound_nested_render" "$email_outbound_nested_worker_config"
+extract_document Deployment witself-server "$email_outbound_nested_render" "$email_outbound_nested_server_deployment"
 extract_document ConfigMap witself-server "$email_production_render" "$email_production_server_config"
 extract_document Deployment witself-server "$email_production_render" "$email_production_server_deployment"
 extract_document Application witself-server "$email_production_apps_render" "$email_production_server_application"
@@ -614,6 +665,12 @@ require_line '  WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_ENABLED: "true"' "$gcp_w
 require_line '  WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_BATCH_SIZE: "10000"' "$gcp_worker_config"
 require_line '  WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_INTERVAL: "1m"' "$gcp_worker_config"
 require_line '  WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_BATCH_TIMEOUT: "10s"' "$gcp_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_OUTBOUND_ENABLED: "false"' "$gcp_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_AUDIENCE: "witself-agent-email-send"' "$gcp_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_OUTBOUND_BATCH_SIZE: "10"' "$gcp_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_OUTBOUND_INTERVAL: "2s"' "$gcp_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_OUTBOUND_BATCH_TIMEOUT: "30s"' "$gcp_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_OUTBOUND_PROVIDER_TIMEOUT: "20s"' "$gcp_worker_config"
 require_line '  WITSELF_TRANSCRIPT_RETENTION_ENABLED: "false"' "$gcp_worker_config"
 require_line '  WITSELF_TRANSCRIPT_RETENTION_BATCH_TIMEOUT: "2m"' "$gcp_worker_config"
 require_line '  WITSELF_AGENT_EMAIL_RETENTION_ENABLED: "false"' "$gcp_worker_config"
@@ -621,6 +678,23 @@ require_line '  WITSELF_AGENT_EMAIL_RETENTION_MODE: "preview"' "$gcp_worker_conf
 require_line '  WITSELF_AGENT_EMAIL_RETENTION_BATCH_SIZE: "25"' "$gcp_worker_config"
 require_line '  WITSELF_AGENT_EMAIL_RETENTION_INTERVAL: "5m"' "$gcp_worker_config"
 require_line '  WITSELF_AGENT_EMAIL_RETENTION_BATCH_TIMEOUT: "2m"' "$gcp_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_OUTBOUND_ENABLED: "true"' "$email_outbound_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_ENDPOINT: "https://send.example.test/v1/dispatch"' "$email_outbound_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_KEY_ID: "founder-cell"' "$email_outbound_worker_config"
+require_sequence "$email_outbound_worker_deployment" \
+  "            - name: WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_PRIVATE_KEY" \
+  "              valueFrom:" \
+  "                secretKeyRef:" \
+  '                  name: "witself-email-dispatch"' \
+  '                  key: "private-key"'
+require_line "          agentEmailOutbound:" "$email_outbound_server_application"
+require_line '  WITSELF_AGENT_EMAIL_OUTBOUND_ENABLED: "true"' "$email_outbound_nested_worker_config"
+require_sequence "$email_outbound_nested_server_deployment" \
+  "            - name: WITSELF_AGENT_EMAIL_PROVIDER_EVENT_TOKEN" \
+  "              valueFrom:" \
+  "                secretKeyRef:" \
+  '                  name: "witself-email-provider-events"' \
+  '                  key: "token"'
 if grep -Eq 'WITSELF_(API_ADDR|BOOTSTRAP|PROVISION|AGENT_EMAIL_(RECEIVE|PILOT|RETRY|RELAY)|BACKEND_KIND|FACT_DELETION|AVATAR_PAYLOAD)' \
   "$gcp_worker_config" "$gcp_worker_deployment"; then
   echo "worker received API/bootstrap/provision/email-only configuration" >&2
@@ -792,6 +866,47 @@ expect_server_template_failure \
   "oversized agent-email-rate bucket cleanup timeout" \
   --values "$gcp_profile" \
   --set worker.agentEmailRateBucketCleanup.batchTimeout=6m
+expect_server_template_failure \
+  "agent-email outbound without dispatch key Secret" \
+  --values "$gcp_profile" \
+  --set worker.agentEmailOutbound.enabled=true \
+  --set worker.agentEmailOutbound.dispatchEndpoint=https://send.example.test/v1/dispatch \
+  --set worker.agentEmailOutbound.dispatchKeyID=founder-cell
+expect_server_template_failure \
+  "agent-email outbound without HTTPS endpoint" \
+  --values "$gcp_profile" \
+  --set worker.agentEmailOutbound.enabled=true \
+  --set worker.agentEmailOutbound.dispatchEndpoint=http://send.example.test/v1/dispatch \
+  --set worker.agentEmailOutbound.dispatchKeyID=founder-cell \
+  --set worker.agentEmailOutbound.dispatchPrivateKeySecret.name=witself-email-dispatch
+expect_server_template_failure \
+  "agent-email outbound without dispatch key id" \
+  --values "$gcp_profile" \
+  --set worker.agentEmailOutbound.enabled=true \
+  --set worker.agentEmailOutbound.dispatchEndpoint=https://send.example.test/v1/dispatch \
+  --set worker.agentEmailOutbound.dispatchPrivateKeySecret.name=witself-email-dispatch
+expect_apps_template_failure \
+  "agent-email outbound with an old app image" \
+  "apps.witselfServer.worker.agentEmailOutbound requires chart and image v0.0.245 or newer" \
+  --values "$gcp_cell" \
+  --values "$apps_profile" \
+  --set apps.witselfServer.chartVersion=0.0.245 \
+  --set apps.witselfServer.imageTag=0.0.244 \
+  --set apps.witselfServer.worker.agentEmailOutbound.enabled=true \
+  --set apps.witselfServer.worker.agentEmailOutbound.dispatchEndpoint=https://send.example.test/v1/dispatch \
+  --set apps.witselfServer.worker.agentEmailOutbound.dispatchKeyID=founder-cell \
+  --set apps.witselfServer.worker.agentEmailOutbound.dispatchPrivateKeySecret.name=witself-email-dispatch
+expect_apps_template_failure \
+  "agent-email outbound with an old app chart" \
+  "apps.witselfServer.worker.agentEmailOutbound requires chart and image v0.0.245 or newer" \
+  --values "$gcp_cell" \
+  --values "$apps_profile" \
+  --set apps.witselfServer.chartVersion=0.0.244 \
+  --set apps.witselfServer.imageTag=0.0.245 \
+  --set apps.witselfServer.worker.agentEmailOutbound.enabled=true \
+  --set apps.witselfServer.worker.agentEmailOutbound.dispatchEndpoint=https://send.example.test/v1/dispatch \
+  --set apps.witselfServer.worker.agentEmailOutbound.dispatchKeyID=founder-cell \
+  --set apps.witselfServer.worker.agentEmailOutbound.dispatchPrivateKeySecret.name=witself-email-dispatch
 expect_server_template_failure \
   "unknown transcript retention mode" \
   --values "$gcp_profile" \

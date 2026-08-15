@@ -20,6 +20,10 @@ var (
 	// ErrAccountEvacuationMismatch means a lifecycle maintenance call did not
 	// carry the exact epoch that installed the account's write fence.
 	ErrAccountEvacuationMismatch = errors.New("account evacuation id does not match")
+	// ErrAccountEvacuationOutboundInFlight means at least one outbound email
+	// has crossed the provider boundary and must finish its bounded exact-replay
+	// lifecycle before the account can move to another cell.
+	ErrAccountEvacuationOutboundInFlight = errors.New("outbound email delivery is still in flight")
 )
 
 var evacuationIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
@@ -145,6 +149,41 @@ func (s *Store) BeginAccountEvacuation(
 		// every mutation.
 	default:
 		return AccountEvacuation{}, ErrAccountNotActive
+	}
+	// The accounts row is already held FOR UPDATE. Outbound provider starts
+	// take the corresponding tenant-write FOR SHARE fence first, so every
+	// pre-marker start has drained and no new start can race this stable check.
+	// Keep the account active and let workers finish exact receipt replay rather
+	// than exporting provider_started as an irreversible ambiguous outcome. A
+	// current server must also remain able to operate on a historical schema
+	// while a migration is being verified or rolled forward, so probe for the
+	// schema-89 table before referring to it.
+	var outboundMessagesExist bool
+	if err := tx.QueryRow(ctx, `
+		SELECT to_regclass(
+		         format('%I.%I', current_schema(),
+		                'agent_email_outbound_messages')
+		       ) IS NOT NULL`).Scan(&outboundMessagesExist); err != nil {
+		return AccountEvacuation{}, fmt.Errorf(
+			"check outbound email schema before evacuation: %w", err,
+		)
+	}
+	var outboundProviderCallInFlight bool
+	if outboundMessagesExist {
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				  FROM agent_email_outbound_messages
+				 WHERE account_id = $1
+				   AND state = 'provider_started'
+			)`, accountID).Scan(&outboundProviderCallInFlight); err != nil {
+			return AccountEvacuation{}, fmt.Errorf(
+				"check outbound email delivery before evacuation: %w", err,
+			)
+		}
+	}
+	if outboundProviderCallInFlight {
+		return AccountEvacuation{}, ErrAccountEvacuationOutboundInFlight
 	}
 	if err := setEvacuationAuthorityTx(ctx, tx, evacuationID); err != nil {
 		return AccountEvacuation{}, err

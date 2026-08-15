@@ -53,6 +53,9 @@ func TestMetricsAreBoundedAndContainRetentionCounts(t *testing.T) {
 	if err := registry.Register(Job{Name: "agent_email_rate_bucket_cleanup", Run: blockingJob}); err != nil {
 		t.Fatal(err)
 	}
+	if err := registry.Register(Job{Name: "agent_email_outbound", Run: blockingJob}); err != nil {
+		t.Fatal(err)
+	}
 	if err := registry.Register(Job{Name: "tenant/id", Run: blockingJob}); err == nil {
 		t.Fatal("registered an unsafe, unbounded job label")
 	}
@@ -62,9 +65,11 @@ func TestMetricsAreBoundedAndContainRetentionCounts(t *testing.T) {
 	metrics.setJobRunning("transcript_retention", true)
 	metrics.setJobRunning("message_rate_bucket_cleanup", true)
 	metrics.setJobRunning("agent_email_rate_bucket_cleanup", true)
+	metrics.setJobRunning("agent_email_outbound", true)
 	metrics.RecordJobFailure("transcript_retention")
 	metrics.RecordJobFailure("message_rate_bucket_cleanup")
 	metrics.RecordJobFailure("agent_email_rate_bucket_cleanup")
+	metrics.RecordJobFailure("agent_email_outbound")
 	metrics.RecordJobFailure("tenant_secret")
 	metrics.ObserveRetentionBatch("enforce", RetentionResultSuccess, RetentionCounts{
 		Scanned:                7,
@@ -126,6 +131,27 @@ func TestMetricsAreBoundedAndContainRetentionCounts(t *testing.T) {
 	metrics.ObserveAgentEmailRateBucketCleanupBatch(RetentionResultError, 0)
 	metrics.ObserveAgentEmailRateBucketCleanupBatch(RetentionResult("account_private"), 99)
 	metrics.ObserveAgentEmailRateBucketCleanupBatch(RetentionResultSuccess, 0)
+	metrics.ObserveAgentEmailOutboundBatch(RetentionResultSuccess, AgentEmailOutboundCounts{
+		Claimed:           8,
+		Accepted:          4,
+		Delivered:         1,
+		Retried:           1,
+		Bounced:           1,
+		Rejected:          1,
+		Ambiguous:         1,
+		Canceled:          1,
+		ExpiredReconciled: 2,
+	})
+	metrics.ObserveAgentEmailOutboundBatch(RetentionResultNoWork, AgentEmailOutboundCounts{})
+	metrics.ObserveAgentEmailOutboundBatch(RetentionResultError, AgentEmailOutboundCounts{})
+	metrics.ObserveAgentEmailOutboundBatch(
+		RetentionResult("account_private"),
+		AgentEmailOutboundCounts{Claimed: 99},
+	)
+	metrics.ObserveAgentEmailOutboundBatch(
+		RetentionResultNoWork,
+		AgentEmailOutboundCounts{Claimed: 99},
+	)
 
 	var output strings.Builder
 	metrics.writePrometheus(&output)
@@ -138,6 +164,8 @@ func TestMetricsAreBoundedAndContainRetentionCounts(t *testing.T) {
 		`witself_worker_job_failures_total{job="message_rate_bucket_cleanup"} 1`,
 		`witself_worker_job_running{job="agent_email_rate_bucket_cleanup"} 1`,
 		`witself_worker_job_failures_total{job="agent_email_rate_bucket_cleanup"} 1`,
+		`witself_worker_job_running{job="agent_email_outbound"} 1`,
+		`witself_worker_job_failures_total{job="agent_email_outbound"} 1`,
 		`witself_worker_retention_batches_total{mode="enforce",result="success"} 1`,
 		`witself_worker_retention_items_total{mode="enforce",kind="deleted"} 4`,
 		`witself_worker_retention_items_total{mode="enforce",kind="scan_capped_batches"} 1`,
@@ -169,6 +197,13 @@ func TestMetricsAreBoundedAndContainRetentionCounts(t *testing.T) {
 		`witself_worker_agent_email_rate_bucket_cleanup_batches_total{result="error"} 1`,
 		`witself_worker_agent_email_rate_bucket_cleanup_deleted_rows_total 11`,
 		`witself_worker_agent_email_rate_bucket_cleanup_last_success_timestamp_seconds 1234`,
+		`witself_worker_agent_email_outbound_batches_total{result="success"} 1`,
+		`witself_worker_agent_email_outbound_batches_total{result="no_work"} 1`,
+		`witself_worker_agent_email_outbound_batches_total{result="error"} 1`,
+		`witself_worker_agent_email_outbound_items_total{kind="claimed"} 8`,
+		`witself_worker_agent_email_outbound_items_total{kind="accepted"} 4`,
+		`witself_worker_agent_email_outbound_items_total{kind="expired_reconciled"} 2`,
+		`witself_worker_agent_email_outbound_last_success_timestamp_seconds 1234`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("metrics missing %q:\n%s", want, text)
@@ -188,6 +223,7 @@ func TestRegistryRunsJobsSeparatelyAndStopsGracefully(t *testing.T) {
 		"avatar_style_rollout",
 		"message_rate_bucket_cleanup",
 		"agent_email_rate_bucket_cleanup",
+		"agent_email_outbound",
 		"transcript_retention",
 		"message_retention",
 		"agent_email_retention",
@@ -215,7 +251,7 @@ func TestRegistryRunsJobsSeparatelyAndStopsGracefully(t *testing.T) {
 		})
 	}()
 	seen := map[string]bool{}
-	for range 6 {
+	for range 7 {
 		select {
 		case name := <-started:
 			seen[name] = true
@@ -226,6 +262,7 @@ func TestRegistryRunsJobsSeparatelyAndStopsGracefully(t *testing.T) {
 	if !seen["avatar_style_rollout"] ||
 		!seen["message_rate_bucket_cleanup"] ||
 		!seen["agent_email_rate_bucket_cleanup"] ||
+		!seen["agent_email_outbound"] ||
 		!seen["transcript_retention"] ||
 		!seen["message_retention"] ||
 		!seen["agent_email_retention"] {

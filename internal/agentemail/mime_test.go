@@ -61,6 +61,22 @@ func TestParseMessagePrefersPlainTextAndHidesAttachments(t *testing.T) {
 	}
 }
 
+func TestReplyToHeaderReadsOnlyBoundedTopLevelHeader(t *testing.T) {
+	raw := []byte("From: sender@example.com\r\n" +
+		"Reply-To: =?UTF-8?Q?Reply_Desk?= <reply@example.com>\r\n" +
+		"Content-Type: application/octet-stream\r\n\r\nnot parsed")
+	got, err := ReplyToHeader(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "Reply Desk <reply@example.com>" {
+		t.Fatalf("ReplyToHeader = %q", got)
+	}
+	if _, err := ReplyToHeader([]byte("missing separator")); !errors.Is(err, ErrMIMEInvalid) {
+		t.Fatalf("malformed ReplyToHeader error = %v", err)
+	}
+}
+
 func TestParseMessageRendersHTMLWithoutExecutableText(t *testing.T) {
 	raw := []byte("Subject: html\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<div>Code <b>654321</b></div><style>.x{}</style><script>steal()</script>")
 	parsed, err := ParseMessage(raw, true)

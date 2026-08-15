@@ -476,6 +476,8 @@ func TestReadOnlyMCPRemovesEveryMutatingTool(t *testing.T) {
 		"witself.email.renew",
 		"witself.email.release",
 		"witself.email.complete",
+		"witself.email.send",
+		"witself.email.reply",
 		"witself.message.request.open",
 		"witself.message.request.list",
 		"witself.message.request.show",

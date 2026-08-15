@@ -766,6 +766,33 @@ func TestSchema87CustomDomainUpgradePreservesRows(t *testing.T) {
 	}
 }
 
+func TestSchema88OutboundEmailUpgradePreservesRows(t *testing.T) {
+	upgrade := UpgraderFor(88)
+	if upgrade == nil {
+		t.Fatal("schema 88 outbound-email identity upgrader is not registered")
+	}
+	input := map[string]any{
+		"id":                   "aem_aaaaaaaaaaaaaaaa",
+		"recipient_route_kind": "canonical",
+		"subject":              "legacy inbound email",
+	}
+	want := map[string]any{
+		"id":                   "aem_aaaaaaaaaaaaaaaa",
+		"recipient_route_kind": "canonical",
+		"subject":              "legacy inbound email",
+	}
+	got, err := upgrade("agent_email_messages", input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("schema 88 identity upgrade changed message: got %#v, want %#v", got, want)
+	}
+	if _, exists := got["provider_message_id"]; exists {
+		t.Fatalf("schema 88 identity upgrade fabricated outbound state: %#v", got)
+	}
+}
+
 func TestUpgradeRowRejectsNull(t *testing.T) {
 	_, err := upgradeRow("fact_assertions", []byte(`null`), 25, 26)
 	if !errors.Is(err, ErrCorrupt) {

@@ -1,0 +1,40 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "witself-agent-email-send",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-14",
+  "workers_dev": true,
+  "vars": {
+    "DISPATCH_AUDIENCE": "witself-agent-email-send",
+    "DISPATCH_REPLAY_WINDOW_SECONDS": "300",
+    "DISPATCH_ENABLED": "false",
+    "EVENT_DELIVERY_ENABLED": "false",
+    "SEND_DOMAIN": "send.witmail.net",
+    "REPLY_DOMAIN": "witmail.net"
+  },
+  "send_email": [
+    { "name": "EMAIL" }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "RECEIPTS", "class_name": "OutboundReceipt" },
+      { "name": "PROVIDER_ROUTES", "class_name": "ProviderRoute" }
+    ]
+  },
+  "queues": {
+    "consumers": [
+      {
+        "queue": "witself-agent-email-send-events",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 25,
+        "dead_letter_queue": "witself-agent-email-send-events-dlq",
+        "max_concurrency": 4
+      }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["OutboundReceipt"] },
+    { "tag": "v2", "new_sqlite_classes": ["ProviderRoute"] }
+  ]
+}

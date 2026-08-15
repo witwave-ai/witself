@@ -236,6 +236,167 @@ func TestEmailCLIOperatorReceiveControls(t *testing.T) {
 	}
 }
 
+func TestEmailCLIOutboundSendReplyAndSentHistory(t *testing.T) {
+	var requests []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.RequestURI())
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/email:send":
+			if r.Header.Get("Idempotency-Key") != "send-1" {
+				t.Errorf("send idempotency key = %q", r.Header.Get("Idempotency-Key"))
+			}
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["to"] != "person@example.com" || body["subject"] != "Hello" || body["text"] != "plain text" || body["from"] != nil {
+				t.Errorf("send body = %#v err=%v", body, err)
+			}
+			_, _ = w.Write([]byte(`{"message":{"id":"esnd_aaaaaaaaaaaaaaaa","from":"owner.realm@send.witmail.net","to":"person@example.com","subject":"Hello","state":"queued"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/email/emsg_aaaaaaaaaaaaaaaa:reply":
+			if r.Header.Get("Idempotency-Key") != "reply-1" {
+				t.Errorf("reply idempotency key = %q", r.Header.Get("Idempotency-Key"))
+			}
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["text"] != "reply text" || len(body) != 1 {
+				t.Errorf("reply body = %#v err=%v", body, err)
+			}
+			_, _ = w.Write([]byte(`{"message":{"id":"esnd_bbbbbbbbbbbbbbbb","reply_to_inbound_message_id":"emsg_aaaaaaaaaaaaaaaa","state":"queued"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/email/sent":
+			_, _ = w.Write([]byte(`{"messages":[{"id":"esnd_aaaaaaaaaaaaaaaa","state":"queued"}],"next_cursor":"after"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/email/sent/esnd_aaaaaaaaaaaaaaaa":
+			_, _ = w.Write([]byte(`{"message":{"id":"esnd_aaaaaaaaaaaaaaaa","state":"accepted","provider_state":"accepted"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	tokenFile := filepath.Join(t.TempDir(), "agent.token")
+	if err := os.WriteFile(tokenFile, []byte("witself_agt_test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	connection := []string{"--endpoint", srv.URL, "--token-file", tokenFile, "--json"}
+	commands := [][]string{
+		append([]string{"email", "send", "--to", "person@example.com", "--subject", "Hello", "--text", "plain text", "--idempotency-key", "send-1"}, connection...),
+		append([]string{"email", "reply", "emsg_aaaaaaaaaaaaaaaa", "--text", "reply text", "--idempotency-key", "reply-1"}, connection...),
+		append([]string{"email", "sent", "--state", "queued", "--limit", "7", "--cursor", "next"}, connection...),
+		append([]string{"email", "sent-show", "esnd_aaaaaaaaaaaaaaaa"}, connection...),
+	}
+	for _, command := range commands {
+		if code := run(command); code != 0 {
+			t.Fatalf("run(%v) = %d", command, code)
+		}
+	}
+	want := []string{
+		"POST /v1/email:send",
+		"POST /v1/email/emsg_aaaaaaaaaaaaaaaa:reply",
+		"GET /v1/email/sent?cursor=next&limit=7&state=queued",
+		"GET /v1/email/sent/esnd_aaaaaaaaaaaaaaaa",
+	}
+	if !reflect.DeepEqual(requests, want) {
+		t.Fatalf("requests = %#v, want %#v", requests, want)
+	}
+	requestCount := len(requests)
+	if code := run(append([]string{
+		"email", "send", "--to", "person@example.com", "--subject", "Hello", "--text", "plain text",
+	}, connection...)); code != 2 {
+		t.Fatalf("send without idempotency key = %d, want 2", code)
+	}
+	if code := run(append([]string{
+		"email", "reply", "emsg_aaaaaaaaaaaaaaaa", "--text", "reply text",
+	}, connection...)); code != 2 {
+		t.Fatalf("reply without idempotency key = %d, want 2", code)
+	}
+	if len(requests) != requestCount {
+		t.Fatalf("commands without idempotency keys made requests: %#v", requests[requestCount:])
+	}
+}
+
+func TestEmailCLIOutboundStructuredErrorsAndExitCodes(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "agent.token")
+	if err := os.WriteFile(tokenFile, []byte("witself_agt_test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name      string
+		status    int
+		body      string
+		exitCode  int
+		code      string
+		retryable bool
+	}{
+		{
+			name: "feature policy", status: http.StatusForbidden, exitCode: 3,
+			code: "feature_not_enabled", retryable: false,
+			body: `{"schema_version":"witself.v0","code":"feature_not_enabled","feature":"agent_email_send","error":"Sorry, this feature is not enabled on this account.","retryable":false}`,
+		},
+		{
+			name: "authentication failure", status: http.StatusUnauthorized, exitCode: 4,
+			code: "auth_failed", retryable: false,
+			body: `{"schema_version":"witself.v0","code":"auth_failed","error":"invalid token","retryable":false}`,
+		},
+		{
+			name: "rate limit", status: http.StatusTooManyRequests, exitCode: 7,
+			code: "rate_limited", retryable: true,
+			body: `{"schema_version":"witself.v0","code":"rate_limited","error":"outbound agent-email rate limited","retryable":true,"retry_after":2,"details":{"limit_dimension":"agent_email_sent","limit_key":"agent_email_sent_per_agent_minute","scope":"agent","limit":4,"used":4,"attempted":1,"window_seconds":60,"retry_after":2,"source":"plan"}}`,
+		},
+		{
+			name: "not found", status: http.StatusNotFound, exitCode: 5,
+			code: "not_found", retryable: false,
+			body: `{"schema_version":"witself.v0","code":"not_found","error":"email not found","retryable":false}`,
+		},
+		{
+			name: "idempotency conflict", status: http.StatusConflict, exitCode: 6,
+			code: "agent_email_idempotency_conflict", retryable: false,
+			body: `{"schema_version":"witself.v0","code":"agent_email_idempotency_conflict","error":"idempotency key conflict","retryable":false}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			stdout, stderr, exitCode := captureFactDeleteCLI(t, func() int {
+				return run([]string{
+					"email", "sent-show", "esnd_aaaaaaaaaaaaaaaa",
+					"--endpoint", srv.URL, "--token-file", tokenFile, "--json",
+				})
+			})
+			if exitCode != tc.exitCode || stderr != "" {
+				t.Fatalf("exit/stderr = %d/%q, want %d/empty", exitCode, stderr, tc.exitCode)
+			}
+			var output struct {
+				SchemaVersion string `json:"schema_version"`
+				OK            bool   `json:"ok"`
+				Error         struct {
+					Code      string `json:"code"`
+					Retryable bool   `json:"retryable"`
+					Details   struct {
+						Attempted int64 `json:"attempted"`
+					} `json:"details"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+				t.Fatalf("decode structured error: %v\n%s", err, stdout)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(stdout), &fields); err != nil {
+				t.Fatalf("decode structured error fields: %v\n%s", err, stdout)
+			}
+			if output.SchemaVersion != "witself.v0" || output.OK || fields["ok"] == nil {
+				t.Fatalf("error envelope = %#v fields=%v", output, fields)
+			}
+			if output.Error.Code != tc.code || output.Error.Retryable != tc.retryable {
+				t.Fatalf("structured error = %#v", output.Error)
+			}
+			if tc.code == "rate_limited" && output.Error.Details.Attempted != 1 {
+				t.Fatalf("rate attempted = %d, want 1", output.Error.Details.Attempted)
+			}
+		})
+	}
+}
+
 func TestBuildAgentEmailCodeCandidatesResult(t *testing.T) {
 	tests := []struct {
 		name       string

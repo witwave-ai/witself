@@ -115,6 +115,7 @@ Expected server environment variables may include:
 | `WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON` | JSON object of relay key IDs to public Ed25519 verification keys. Relay private keys never enter cell configuration. |
 | `WITSELF_AGENT_EMAIL_RELAY_REPLAY_WINDOW` | Signed relay-envelope replay window. Default: `5m`; maximum `15m`. |
 | `WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID` | Optional canonical retry-canary agent. Production startup proves it is a live member of the exact account cohort; canary-manifest generation additionally requires its mailbox and effective receive state to be enabled. |
+| `WITSELF_AGENT_EMAIL_PROVIDER_EVENT_TOKEN` | Dedicated 32-4096-byte bearer for content-free outbound provider events at `POST /v1/internal/agent-email-send:provider-event`; the managed adapter's target-map contract enforces the same bound. It is not an agent, operator, provision, backup, relay, or provider credential and must be supplied from a secret. |
 | `WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED` | Enable the durable bounded avatar-style propagation job in `witself-worker`. API deployments set it false. PostgreSQL job fencing prevents duplicate progress across worker replicas. |
 | `WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE` | Maximum agents advanced by one style-rollout batch. Default: `100`; valid range: `1`-`1000`. |
 | `WITSELF_AVATAR_STYLE_ROLLOUT_INTERVAL` | Delay between style-rollout worker attempts. Default: `2s`; valid range: `100ms`-`1h`. |
@@ -127,6 +128,15 @@ Expected server environment variables may include:
 | `WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_BATCH_SIZE` | Maximum stale inbound-email rate-bucket rows deleted by one batch. Default: `10000`; valid range: `1`-`10000`. |
 | `WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_INTERVAL` | Delay between inbound-email rate-bucket cleanup batches. Default: `1m`; valid range: `1m`-`24h`. |
 | `WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_BATCH_TIMEOUT` | Deadline for one bounded inbound-email rate-bucket cleanup attempt. Default: `10s`; valid range: `1s`-`5m`. |
+| `WITSELF_AGENT_EMAIL_OUTBOUND_ENABLED` | Enable the durable outbound dispatch job in `witself-worker`. Default: `false`; API deployments never run it. Enabling requires the complete signed-adapter configuration below and does not itself enable the edge adapter or grant account entitlement. |
+| `WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_ENDPOINT` | HTTPS endpoint for the dedicated managed Cloudflare adapter, normally its `/v1/dispatch` route. Required when outbound dispatch is enabled. |
+| `WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_AUDIENCE` | Exact audience covered by every detached dispatch signature. Chart default: `witself-agent-email-send`. |
+| `WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_KEY_ID` | Bounded public key-ring identifier for the cell dispatch signer. Required when enabled. |
+| `WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_PRIVATE_KEY` | Base64 raw Ed25519 private dispatch key, mounted from the worker-only secret. Provider credentials never enter the cell. |
+| `WITSELF_AGENT_EMAIL_OUTBOUND_BATCH_SIZE` | Maximum ready outbox rows considered by one bounded worker attempt. Default: `10`; valid range: `1`-`100`. |
+| `WITSELF_AGENT_EMAIL_OUTBOUND_INTERVAL` | Delay between dispatch attempts. Default: `2s`; valid range: `100ms`-`5m`. |
+| `WITSELF_AGENT_EMAIL_OUTBOUND_BATCH_TIMEOUT` | Deadline for one bounded outbox attempt. Default: `30s`; valid range: `1s`-`5m`. |
+| `WITSELF_AGENT_EMAIL_OUTBOUND_PROVIDER_TIMEOUT` | HTTPS timeout for one signed adapter request. Default: `20s`; valid range: `1s`-`1m` and it must be shorter than the batch timeout. A timeout after dispatch may be ambiguous and must never cause a fresh logical send id. |
 | `WITSELF_TRANSCRIPT_RETENTION_ENABLED` | Enable the account-policy transcript-retention job in `witself-worker`. API deployments set it false. Enabling alone remains non-destructive because the default mode is `preview`. |
 | `WITSELF_TRANSCRIPT_RETENTION_MODE` | Transcript-retention worker mode: `preview` (default) or `enforce`. Deletion requires both this value to be `enforce` and the enabled gate to be true. |
 | `WITSELF_TRANSCRIPT_RETENTION_BATCH_SIZE` | Maximum whole conversations considered by one retention batch. Default: `100`; valid range: `1`-`1000`. |
@@ -137,11 +147,11 @@ Expected server environment variables may include:
 | `WITSELF_MESSAGE_RETENTION_BATCH_SIZE` | Maximum message threads considered by one batch. Default: `25`; valid range: `1`-`100`. |
 | `WITSELF_MESSAGE_RETENTION_INTERVAL` | Delay between message-retention batches. Default: `5m`; valid range: `1m`-`24h`. |
 | `WITSELF_MESSAGE_RETENTION_BATCH_TIMEOUT` | Deadline for one bounded message-retention attempt. Default: `2m`; valid range: `10s`-`5m`. |
-| `WITSELF_AGENT_EMAIL_RETENTION_ENABLED` | Enable the account-policy inbound-email retention job in `witself-worker`. Default: `false`; enabling alone is non-destructive because mode defaults to `preview`. |
-| `WITSELF_AGENT_EMAIL_RETENTION_MODE` | Inbound-email retention worker mode: `preview` (default) or `enforce`. Deletion requires both this value to be `enforce` and the enabled gate to be true. |
-| `WITSELF_AGENT_EMAIL_RETENTION_BATCH_SIZE` | Maximum email messages considered by one batch. Default: `25`; valid range: `1`-`100`. |
-| `WITSELF_AGENT_EMAIL_RETENTION_INTERVAL` | Delay between inbound-email retention batches. Default: `5m`; valid range: `1m`-`24h`. |
-| `WITSELF_AGENT_EMAIL_RETENTION_BATCH_TIMEOUT` | Deadline for one bounded inbound-email retention attempt. Default: `2m`; valid range: `10s`-`5m`. |
+| `WITSELF_AGENT_EMAIL_RETENTION_ENABLED` | Enable the account-policy agent-email retention job in `witself-worker`. Default: `false`; enabling alone is non-destructive because mode defaults to `preview`. The same account window governs eligible inbound records and durable outbound outbox records. |
+| `WITSELF_AGENT_EMAIL_RETENTION_MODE` | Agent-email retention worker mode: `preview` (default) or `enforce`. Deletion requires both this value to be `enforce` and the enabled gate to be true. |
+| `WITSELF_AGENT_EMAIL_RETENTION_BATCH_SIZE` | Common maximum work items considered by one batch across inbound messages, outbound messages, outbound provider-event receipts, and recipient suppressions. Default: `25`; valid range: `1`-`100`. |
+| `WITSELF_AGENT_EMAIL_RETENTION_INTERVAL` | Delay between agent-email retention batches. Default: `5m`; valid range: `1m`-`24h`. |
+| `WITSELF_AGENT_EMAIL_RETENTION_BATCH_TIMEOUT` | Deadline for one bounded agent-email retention attempt. Default: `2m`; valid range: `10s`-`5m`. |
 | `WITSELF_OBJECT_STORE_PROVIDER` | Object/blob store provider when configured (exports, attachments, backups). |
 | `WITSELF_OBJECT_STORE_BUCKET` | Object/blob store bucket/container. |
 | `WITSELF_SEALED_PLANE_ENABLED` | Enable the sealed plane (secrets, TOTP). When true, the KMS variables below are required. An open-plane-only deployment may leave the sealed plane disabled. |
@@ -156,6 +166,16 @@ Expected server environment variables may include:
 Config validation and logs must redact database passwords, KMS credentials, and
 all other sensitive values. There are no backend model or embedding-provider
 credentials to configure.
+
+Outbound email is deliberately split across processes and trust zones. The API
+server validates account/agent/realm send policy and durably queues one
+`esnd_` record; it never calls Cloudflare Email Sending. `witself-worker`
+cooperatively claims ready outbox rows and sends a signed, immutable
+provider-neutral dispatch. The Cloudflare adapter owns the Email Sending
+binding and a Durable Object receipt keyed by send id. Both the worker job and
+adapter dispatch gate default off. This preserves API scaling, lets multiple
+worker replicas add capacity without racing one logical send, and keeps the
+provider credential outside every cell.
 
 Witself serves two planes with two distinct production dependency sets. The OPEN
 plane (memories, facts) is backed by PostgreSQL. Its required recall path is
