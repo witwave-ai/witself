@@ -32,7 +32,7 @@ apps:
     backendKind: managed
     agentEmail:
       providerEventTokenSecret:
-        name: witself-agent-email-provider-event-v1
+        name: witself-agent-email-provider-event-v2
         key: token
       receivePilot:
         enabled: false

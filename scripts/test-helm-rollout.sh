@@ -594,7 +594,7 @@ require_line '          tag: 0.0.247' "$civo_server_application"
 require_sequence "$civo_server_application" \
   "          providerEventTokenSecret:" \
   "            key: token" \
-  "            name: witself-agent-email-provider-event-v1"
+  "            name: witself-agent-email-provider-event-v2"
 require_sequence "$civo_server_application" \
   "          agentEmailOutbound:" \
   "            batchSize: 10" \
@@ -637,8 +637,10 @@ require_sequence "$civo_server_deployment" \
   "            - name: WITSELF_AGENT_EMAIL_PROVIDER_EVENT_TOKEN" \
   "              valueFrom:" \
   "                secretKeyRef:" \
-  '                  name: "witself-agent-email-provider-event-v1"' \
+  '                  name: "witself-agent-email-provider-event-v2"' \
   '                  key: "token"'
+reject_line "WITSELF_AGENT_EMAIL_PROVIDER_EVENT_TOKEN" "$civo_worker_deployment"
+reject_line "witself-agent-email-provider-event-v2" "$civo_worker_deployment"
 reject_line "WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_PRIVATE_KEY" "$civo_worker_deployment"
 reject_line "witself-agent-email-outbound-dispatch-v1" "$civo_worker_deployment"
 
@@ -1241,7 +1243,7 @@ require_sequence "$email_production_server_application" \
   "        agentEmail:" \
   "          providerEventTokenSecret:" \
   "            key: token" \
-  "            name: witself-agent-email-provider-event-v1" \
+  "            name: witself-agent-email-provider-event-v2" \
   "          receivePilot:" \
   "            acceptedLegacyDomains: []" \
   "            agentIDs: []" \
