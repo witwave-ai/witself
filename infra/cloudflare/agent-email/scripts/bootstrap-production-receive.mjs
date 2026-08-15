@@ -68,6 +68,7 @@ import {
   assertProductionCloudflareIdentity,
   sanitizedWranglerEnvironment,
   sanitizedWranglerInspectionEnvironment,
+  WRANGLER_PRODUCTION_ENV_FILE,
   withReviewedWranglerEnvironmentFile,
 } from "./wrangler-environment.mjs";
 import { reserveJSONReceipt } from "./receipt-journal.mjs";
@@ -744,8 +745,26 @@ export async function createPrivateBootstrapSecrets(sourcePath, runtime = {}) {
   }
 }
 
-function runWranglerInspection(args, environment = process.env) {
-  return spawnSync("wrangler", withReviewedWranglerEnvironmentFile(args), {
+function reviewedWranglerInspectionArguments(args) {
+  const reviewedSuffix = ["--env-file", WRANGLER_PRODUCTION_ENV_FILE];
+  const suffixOffset = Array.isArray(args)
+    ? args.length - reviewedSuffix.length
+    : -1;
+  if (suffixOffset >= 0 &&
+      args[suffixOffset] === reviewedSuffix[0] &&
+      args[suffixOffset + 1] === reviewedSuffix[1]) {
+    // Re-run the raw prefix through the strict guard. This accepts only the
+    // canonical reviewed suffix and still rejects duplicate or embedded
+    // environment-file arguments.
+    return withReviewedWranglerEnvironmentFile(args.slice(0, suffixOffset));
+  }
+  throw new Error(
+    "Wrangler arguments did not contain the reviewed environment file",
+  );
+}
+
+function runReviewedWranglerInspection(args, environment = process.env) {
+  return spawnSync("wrangler", reviewedWranglerInspectionArguments(args), {
     cwd: root,
     encoding: "utf8",
     env: sanitizedWranglerInspectionEnvironment(environment),
@@ -753,6 +772,13 @@ function runWranglerInspection(args, environment = process.env) {
     maxBuffer: 5 * 1024 * 1024,
     timeout: 30_000,
   });
+}
+
+function runWranglerInspection(args, environment = process.env) {
+  return runReviewedWranglerInspection(
+    withReviewedWranglerEnvironmentFile(args),
+    environment,
+  );
 }
 
 function wranglerJSON(args, label, inspect = runWranglerInspection) {
@@ -999,7 +1025,10 @@ export async function bootstrapProductionReceive(options, dependencies = {}) {
         (args) => wranglerJSON(
           args,
           "the active control-plane deployment",
-          wranglerInspection,
+          (reviewedArgs) => runReviewedWranglerInspection(
+            reviewedArgs,
+            environment,
+          ),
         ),
       )),
     "cohort preflight",

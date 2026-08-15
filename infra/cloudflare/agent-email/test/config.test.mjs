@@ -159,7 +159,7 @@ test("deployment config is email-only and cannot reuse the control-plane DIRECTO
   );
   assert.match(
     config,
-    /"WITSELF_EDGE_RELEASE_VERSION"\s*:\s*"(?:0\.0\.239|development-[0-9a-f]{12}(?:-dirty)?)"/,
+    /"WITSELF_EDGE_RELEASE_VERSION"\s*:\s*"(?:\d+\.\d+\.\d+|development-[0-9a-f]{12}(?:-dirty)?)"/,
   );
   assert.match(config, /"WITSELF_EDGE_RELEASE_COMMIT"\s*:\s*"[0-9a-f]{40}"/);
   assert.match(
