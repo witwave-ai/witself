@@ -1,6 +1,8 @@
 const API_ROOT = "https://api.cloudflare.com/client/v4";
 const ROUTING_RULE_ID = /^[0-9a-f]{1,32}(?![\s\S])/;
 const ROUTING_INVENTORY_SNAPSHOT_ATTEMPTS = 4;
+// This provider resource name predates the production Worker split. Its ID is
+// shared by both paths, so keep the title stable during the Worker migration.
 export const EMAIL_DIRECTORY_TITLE = "witself-agent-email-pilot-directory";
 
 class RoutingInventoryDriftError extends Error {}
@@ -174,6 +176,7 @@ export class CloudflareAPI {
     const ruleIDs = new Set();
     let expectedTotalPages;
     let expectedTotalCount;
+    let expectedHasTotalPages;
     for (let page = 1; page <= maximumPages; page += 1) {
       const response = await this.request(
         `/zones/${this.zoneID}/email/routing/rules?page=${page}&per_page=${perPage}`,
@@ -181,21 +184,32 @@ export class CloudflareAPI {
       );
       const info = response?.result_info;
       const pageRules = response?.result;
+      const hasTotalPages = info != null &&
+        Object.hasOwn(info, "total_pages");
       if (!Array.isArray(pageRules) || !info || typeof info !== "object" ||
           !Number.isSafeInteger(info.page) || info.page !== page ||
           !Number.isSafeInteger(info.per_page) || info.per_page !== perPage ||
           !Number.isSafeInteger(info.count) || info.count !== pageRules.length ||
-          !Number.isSafeInteger(info.total_pages) || info.total_pages < page ||
-          !Number.isSafeInteger(info.total_count) || info.total_count < 0) {
+          !Number.isSafeInteger(info.total_count) || info.total_count < 0 ||
+          (hasTotalPages &&
+           (!Number.isSafeInteger(info.total_pages) ||
+            info.total_pages < page))) {
         throw new Error("Cloudflare Email Routing pagination was malformed");
       }
-      if (info.total_pages > maximumPages) {
+      const totalPages = hasTotalPages
+        ? info.total_pages
+        : Math.max(1, Math.ceil(info.total_count / perPage));
+      if (totalPages > maximumPages ||
+          info.total_count > maximumPages * perPage) {
         throw new Error("Cloudflare Email Routing rule inventory exceeded the safe pagination limit");
       }
       if (expectedTotalPages === undefined) {
-        expectedTotalPages = info.total_pages;
+        expectedTotalPages = totalPages;
         expectedTotalCount = info.total_count;
-      } else if (info.total_pages !== expectedTotalPages || info.total_count !== expectedTotalCount) {
+        expectedHasTotalPages = hasTotalPages;
+      } else if (totalPages !== expectedTotalPages ||
+          info.total_count !== expectedTotalCount ||
+          hasTotalPages !== expectedHasTotalPages) {
         throw new RoutingInventoryDriftError(
           "Cloudflare Email Routing rule inventory changed during pagination",
         );

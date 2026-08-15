@@ -9,10 +9,12 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -165,7 +167,7 @@ func TestAgentEmailSignedIngestHTTPContract(t *testing.T) {
 		assertAgentEmailVerdict(t, response, http.StatusUnauthorized, "invalid_relay")
 	})
 	t.Run("oversized raw body is permanent", func(t *testing.T) {
-		body := bytes.Repeat([]byte("x"), agentemail.PilotMaximumRawBytes+1)
+		body := bytes.Repeat([]byte("x"), agentemail.RelayMaximumRawBytes+1)
 		request := testAgentEmailIngestRequestWithSignedMetadata(t, body, metadata, privateKey)
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
@@ -173,6 +175,229 @@ func TestAgentEmailSignedIngestHTTPContract(t *testing.T) {
 	})
 	if calls != validCalls {
 		t.Fatalf("invalid relay requests reached ingest: calls %d want %d", calls, validCalls)
+	}
+}
+
+type failOnAgentEmailBodyRead struct {
+	reads int
+}
+
+func (b *failOnAgentEmailBodyRead) Read([]byte) (int, error) {
+	b.reads++
+	return 0, io.ErrUnexpectedEOF
+}
+
+func (*failOnAgentEmailBodyRead) Close() error { return nil }
+
+type blockingAgentEmailBody struct {
+	data        []byte
+	started     chan struct{}
+	release     chan struct{}
+	startedOnce sync.Once
+	releaseOnce sync.Once
+	mu          sync.Mutex
+	closed      bool
+	offset      int
+}
+
+func newBlockingAgentEmailBody(data []byte) *blockingAgentEmailBody {
+	return &blockingAgentEmailBody{
+		data:    append([]byte(nil), data...),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (b *blockingAgentEmailBody) Read(destination []byte) (int, error) {
+	b.startedOnce.Do(func() { close(b.started) })
+	<-b.release
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return 0, io.ErrClosedPipe
+	}
+	if b.offset == len(b.data) {
+		return 0, io.EOF
+	}
+	written := copy(destination, b.data[b.offset:])
+	b.offset += written
+	return written, nil
+}
+
+func (b *blockingAgentEmailBody) unblock() {
+	b.releaseOnce.Do(func() { close(b.release) })
+}
+
+func (b *blockingAgentEmailBody) Close() error {
+	b.mu.Lock()
+	b.closed = true
+	b.mu.Unlock()
+	b.unblock()
+	return nil
+}
+
+func TestAgentEmailIngestAuthenticatesBeforeReadingBody(t *testing.T) {
+	pilot, privateKey := testAgentEmailPilotConfig(t)
+	raw := []byte("Subject: authenticated envelope\r\n\r\nbody\r\n")
+	metadata := testAgentEmailRelayMetadata(raw, pilot, "pilot-key")
+	handler := agentEmailIngestHandlerWithLimits(
+		pilot,
+		func(context.Context, agentemail.RelayMetadata, []byte) error {
+			t.Fatal("unauthenticated request reached ingest")
+			return nil
+		},
+		1,
+		time.Second,
+	)
+
+	tests := []struct {
+		name string
+		edit func(*http.Request)
+	}{
+		{
+			name: "unknown key",
+			edit: func(request *http.Request) {
+				unknown := metadata
+				unknown.KeyID = "unknown-key"
+				request.Header = testAgentEmailIngestRequest(
+					t, raw, unknown, privateKey,
+				).Header
+			},
+		},
+		{
+			name: "invalid signature",
+			edit: func(request *http.Request) {
+				request.Header.Set(
+					AgentEmailRelayHeaderSignature,
+					base64.StdEncoding.EncodeToString(
+						make([]byte, ed25519.SignatureSize),
+					),
+				)
+			},
+		},
+		{
+			name: "wrong audience",
+			edit: func(request *http.Request) {
+				other := metadata
+				other.Audience = "other-cell"
+				request.Header = testAgentEmailIngestRequest(
+					t, raw, other, privateKey,
+				).Header
+			},
+		},
+		{
+			name: "stale envelope",
+			edit: func(request *http.Request) {
+				stale := metadata
+				stale.Timestamp = pilot.Now().Add(
+					-pilot.RelayReplayWindow - time.Second,
+				).Unix()
+				request.Header = testAgentEmailIngestRequest(
+					t, raw, stale, privateKey,
+				).Header
+			},
+		},
+		{
+			name: "content length mismatch",
+			edit: func(request *http.Request) {
+				request.ContentLength++
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			request := testAgentEmailIngestRequest(
+				t, raw, metadata, privateKey,
+			)
+			body := &failOnAgentEmailBodyRead{}
+			request.Body = body
+			tc.edit(request)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			assertAgentEmailVerdict(
+				t, response, http.StatusUnauthorized, "invalid_relay",
+			)
+			if body.reads != 0 {
+				t.Fatalf("request body was read %d times", body.reads)
+			}
+		})
+	}
+}
+
+func TestAgentEmailIngestBodyAdmissionIsBoundedAndTimed(t *testing.T) {
+	pilot, privateKey := testAgentEmailPilotConfig(t)
+	raw := []byte("Subject: bounded body\r\n\r\nbody\r\n")
+	metadata := testAgentEmailRelayMetadata(raw, pilot, "pilot-key")
+	ingested := make(chan struct{}, 2)
+	handler := agentEmailIngestHandlerWithLimits(
+		pilot,
+		func(context.Context, agentemail.RelayMetadata, []byte) error {
+			ingested <- struct{}{}
+			return nil
+		},
+		1,
+		5*time.Second,
+	)
+
+	firstBody := newBlockingAgentEmailBody(raw)
+	firstRequest := testAgentEmailIngestRequest(
+		t, raw, metadata, privateKey,
+	)
+	firstRequest.Body = firstBody
+	firstResponse := httptest.NewRecorder()
+	firstDone := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(firstResponse, firstRequest)
+		close(firstDone)
+	}()
+	select {
+	case <-firstBody.started:
+	case <-time.After(time.Second):
+		t.Fatal("first authenticated body read did not start")
+	}
+
+	secondResponse := httptest.NewRecorder()
+	handler.ServeHTTP(
+		secondResponse,
+		testAgentEmailIngestRequest(t, raw, metadata, privateKey),
+	)
+	assertAgentEmailVerdict(
+		t, secondResponse, http.StatusServiceUnavailable, "temporary",
+	)
+	if got := secondResponse.Header().Get("Retry-After"); got != "1" {
+		t.Fatalf("saturated body admission Retry-After = %q, want 1", got)
+	}
+	firstBody.unblock()
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("admitted body read did not finish")
+	}
+	assertAgentEmailVerdict(t, firstResponse, http.StatusOK, "accepted")
+	if len(ingested) != 1 {
+		t.Fatalf("ingest calls = %d, want 1", len(ingested))
+	}
+
+	timeoutBody := newBlockingAgentEmailBody(raw)
+	timeoutRequest := testAgentEmailIngestRequest(
+		t, raw, metadata, privateKey,
+	)
+	timeoutRequest.Body = timeoutBody
+	timeoutResponse := httptest.NewRecorder()
+	agentEmailIngestHandlerWithLimits(
+		pilot,
+		func(context.Context, agentemail.RelayMetadata, []byte) error {
+			t.Fatal("timed-out body reached ingest")
+			return nil
+		},
+		1,
+		10*time.Millisecond,
+	).ServeHTTP(timeoutResponse, timeoutRequest)
+	assertAgentEmailVerdict(
+		t, timeoutResponse, http.StatusServiceUnavailable, "temporary",
+	)
+	if got := timeoutResponse.Header().Get("Retry-After"); got != "1" {
+		t.Fatalf("timed-out body Retry-After = %q, want 1", got)
 	}
 }
 

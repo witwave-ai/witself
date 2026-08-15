@@ -133,10 +133,11 @@ cell model, not a problem:
 
 Because cells are isolated, a bad release is contained to the cells it reached.
 
-## Receive-only agent-email pilot
+## Retired literal-route compatibility receive mode
 
-The Cloudflare receive pilot is a managed, capability-limited cell feature. It
-is disabled unless every one of these server settings is present and valid:
+The original bounded receive mode is retained only for compatibility with the
+legacy literal-route deployment. It is not the production service and is
+disabled unless every one of these server settings is present and valid:
 
 - `WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED=true`
 - `WITSELF_AGENT_EMAIL_PILOT_DOMAIN` — the primary lowercase managed domain
@@ -154,9 +155,10 @@ is disabled unless every one of these server settings is present and valid:
   not exceed `15m`
 
 When `WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED` is absent or parses as false,
-the process leaves the pilot disabled and ignores the other pilot variables.
-When it is true, the primary domain and every other required pilot value must be
-present. `WITSELF_AGENT_EMAIL_ACCEPTED_LEGACY_DOMAINS` may be absent/blank or
+the process leaves the compatibility mode disabled and ignores the other legacy
+variables. When it is true, the primary domain and every other required
+compatibility value must be present.
+`WITSELF_AGENT_EMAIL_ACCEPTED_LEGACY_DOMAINS` may be absent/blank or
 contain exactly one canonical lowercase ASCII domain. Although its wire syntax
 is comma-separated, a second entry is rejected. Surrounding whitespace is
 trimmed, but the resulting primary and legacy values must already be canonical
@@ -188,12 +190,13 @@ on their explicit primary domain and are never fanned out to the legacy domain.
 `A`, `AAAA`, or application `CNAME` on it; do not use it for marketing,
 employee mailboxes, or platform-notification sending. The required
 `postmaster@witmail.net` and `abuse@witmail.net` operator routes are the narrow
-operational exception. The outbound beta uses separately isolated sending
+operational exception. Production outbound agent email uses separately
+isolated sending
 infrastructure on `send.witmail.net`; it remains agent-email-only and does not
 turn either domain into a general company-mail surface.
 
-The edge implementation lives in `infra/cloudflare/agent-email/`. It uses its
-own `witself-agent-email-pilot` Worker and an isolated
+The retired edge implementation uses the historical
+`witself-agent-email-pilot` Worker and an isolated
 `witself-agent-email-pilot-directory` KV namespace. It must never bind the
 control-plane `DIRECTORY` namespace. Provider-side route management is limited
 to literal rules for the 5–10 enrolled addresses; the Worker can read isolated
@@ -201,11 +204,12 @@ KV recipient projections after a provider route has delivered mail to it, but
 that directory cannot create provider coverage. Infrastructure reads and
 fingerprints the existing catch-all but has no operation that can update it.
 
-An operator activates the edge only after the cell release and configuration
-are healthy, the disabled exact-route set has been reviewed, and KV propagation
-has settled. A synthetic exact-address canary must then prove Worker-to-cell
-commit before any expected pilot mail is sent. Rollback disables only the
-pilot's directory gate and literal routes. See [Agent Email](agent-email.md) and
+Historically, an operator activated this compatibility edge only after the cell
+release and configuration were healthy, the disabled exact-route set had been
+reviewed, and KV propagation had settled. A synthetic exact-address canary then
+proved Worker-to-cell commit before any expected compatibility mail was sent.
+Rollback disabled only the compatibility mode's directory gate and literal
+routes. See [Agent Email](agent-email.md) and
 the [edge README](../infra/cloudflare/agent-email/README.md) for the staged
 procedure. A configured cell, deployed Worker, or enabled routing rule alone is
 not proof of end-to-end operation.
@@ -222,9 +226,14 @@ subscription never implicitly enables any other layer.
 
 ## Production account-cohort agent-email receive
 
-Release `0.0.241` adds a production receive mode without widening the retired
-pilot implicitly. It is a second default-off gate, mutually exclusive with the
-realm/agent pilot:
+Release `0.0.241` adds the production receive mode without widening the retired
+compatibility mode implicitly. It is a second default-off gate, mutually
+exclusive with the legacy realm/agent compatibility configuration:
+
+The production Cloudflare service is `witself-agent-email-receive`. It reuses
+the existing dedicated email-route KV namespace by ID but has its own Worker
+deployment, secrets, and version history. The retired Worker is never a
+production routing target.
 
 - `WITSELF_AGENT_EMAIL_RECEIVE_PRODUCTION_ENABLED=true`
 - `WITSELF_AGENT_EMAIL_RECEIVE_DOMAIN=witmail.net`
@@ -427,7 +436,7 @@ separate config-only Phase B, wait for every pod to converge again, and only
 then arm/send a manual proof. For rollback, turn off any recurring canary
 schedule that has been added and settle any armed proof first. Before removing
 the canary setting or deploying pre-60/61 code, disable the process-level
-receive pilot and the exact edge routes; never rely on a realm-disabled row to
+receive mode and the exact edge routes; never rely on a realm-disabled row to
 protect traffic from an older binary, and never run a pre-60 export after that
 row has become authoritative.
 
@@ -440,8 +449,8 @@ projection. If one exists in a future rollout, resolve and retire it while the
 legacy domain is still primary; legacy aliases are intentionally unsupported
 after cutover. Migration `0087` backfills each
 existing address's original domain into `agent_email_address_domains`. The new
-startup reconciler then adds `witmail.net` as primary for an existing pilot
-mailbox and preserves its issued `agent-mail.witwave.ai` route; a mailbox first
+startup reconciler then adds `witmail.net` as primary for an existing
+compatibility mailbox and preserves its issued `agent-mail.witwave.ai` route; a mailbox first
 created after cutover receives only `witmail.net`. Until both the child chart
 and image tag are at least `0.0.232`, the app-of-apps withholds the new
 legacy-domain field and passes the issued legacy domain through the old
@@ -467,7 +476,8 @@ is not part of the active-cell production rollout. Until it is separately approv
 exercise it only against fake Cloudflare bindings, a synthetic SMTP transaction,
 and a disposable PostgreSQL database. Do not flip either control-plane routing
 gate or `AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED`, add a customer domain to
-the pilot configuration, change MX/Email Routing, or send a live canary.
+the managed receive configuration, change MX/Email Routing, or send a live
+canary.
 
 For the eventual dark schema-88 cell wave, create and verify the normal
 pre-migration backup, then freeze custom-domain projection, realm-alias

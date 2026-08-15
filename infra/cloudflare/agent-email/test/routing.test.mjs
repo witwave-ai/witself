@@ -1,12 +1,28 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
-import { CONFIG_KEY, normalizePilotManifest } from "../src/directory.mjs";
-import { activatePilot, disablePilot, inspectPilot, preparePilot, removePilot } from "../scripts/routing-lib.mjs";
+import {
+  CONFIG_KEY,
+  normalizePilotManifest,
+  recipientKey,
+  runtimeConfig,
+  runtimeRecipient,
+} from "../src/directory.mjs";
+import {
+  activatePilot,
+  disablePilot,
+  inspectPilot,
+  preparePilot,
+  removePilot,
+} from "../scripts/routing-lib.mjs";
 import { EMAIL_DIRECTORY_TITLE } from "../scripts/cloudflare.mjs";
 
 const example = JSON.parse(await readFile(new URL("../pilot.example.json", import.meta.url), "utf8"));
+const normalizedExample = normalizePilotManifest(example);
+const routesScript = fileURLToPath(new URL("../scripts/routes.mjs", import.meta.url));
 
 class FakeCloudflare {
   constructor() {
@@ -50,64 +66,109 @@ class FakeCloudflare {
   }
 }
 
-test("prepare creates only disabled literal rules and an isolated config", async () => {
-  const api = new FakeCloudflare();
-  const before = structuredClone(api.catchAll);
-  const result = await preparePilot(api, example);
-  assert.deepEqual(result, { state: "prepared", realm_id: example.realm_id, addresses: 5 });
-  assert.equal(api.rules.length, 5);
-  for (const rule of api.rules) {
-    assert.equal(rule.enabled, false);
-    assert.deepEqual(rule.matchers, [{ type: "literal", field: "to", value: rule.name.split(":").slice(1).join(":") }]);
-    assert.deepEqual(rule.actions, [{ type: "worker", value: ["witself-agent-email-pilot"] }]);
-  }
-  assert.equal(api.kv.get(CONFIG_KEY).enabled, false);
-  assert.deepEqual(api.catchAll, before);
-  assert.equal(api.calls.filter(([name]) => name === "getCatchAll").length, 2);
-  assert.equal(api.calls.some(([name]) => name === "updateCatchAll"), false);
-});
-
-test("activate, disable, and remove are exact-route lifecycle operations", async () => {
-  const api = new FakeCloudflare();
-  await preparePilot(api, example);
-  await activatePilot(api, example);
-  assert.equal(api.rules.every((rule) => rule.enabled), true);
-  assert.equal(api.kv.get(CONFIG_KEY).enabled, true);
-
-  await disablePilot(api, example);
-  assert.equal(api.rules.every((rule) => !rule.enabled), true);
-  assert.equal(api.kv.get(CONFIG_KEY).enabled, false);
-
-  const result = await removePilot(api, example);
-  assert.equal(result.state, "removed");
-  assert.equal(api.rules.length, 0);
-  assert.equal(api.kv.size, 0);
-  assert.equal(api.calls.some(([name]) => name === "updateCatchAll"), false);
-});
-
-test("activation refuses incomplete or unmanaged address rules", async () => {
-  const incomplete = new FakeCloudflare();
-  await assert.rejects(() => activatePilot(incomplete, example), /run prepare/);
-
-  const conflict = new FakeCloudflare();
-  const manifest = normalizePilotManifest(example);
-  conflict.rules.push({
-    id: "1".repeat(32), name: "other", enabled: true,
-    matchers: [{ type: "literal", field: "to", value: manifest.agents[0].address }],
-    actions: [{ type: "forward", value: ["owner@example.com"] }],
+function installLegacyPilot(api, { enabled = true } = {}) {
+  api.kv.set(CONFIG_KEY, runtimeConfig(normalizedExample, enabled));
+  normalizedExample.agents.forEach((agent, index) => {
+    api.kv.set(
+      recipientKey(agent.address),
+      runtimeRecipient(normalizedExample, agent),
+    );
+    api.rules.push({
+      id: String(index + 1).padStart(32, "0"),
+      name: `witself-agent-email-pilot:${agent.address}`,
+      enabled,
+      matchers: [{ type: "literal", field: "to", value: agent.address }],
+      actions: [{ type: "worker", value: ["witself-agent-email-pilot"] }],
+      priority: index + 1,
+      source: "api",
+    });
   });
-  await assert.rejects(() => preparePilot(conflict, example), /unmanaged routing rule/);
-});
+}
 
-test("prepare and activate fail closed when subaddressing is disabled", async () => {
+test("legacy prepare and activate are retired before any provider access", async () => {
   for (const operation of [preparePilot, activatePilot]) {
     const api = new FakeCloudflare();
-    api.settings.support_subaddress = false;
-    await assert.rejects(() => operation(api, example), /subaddressing is not enabled/);
-    assert.equal(api.kv.size, 0);
+    await assert.rejects(
+      () => operation(api, example),
+      /legacy literal-route prepare and activate are retired/,
+    );
+    assert.deepEqual(api.calls, []);
     assert.equal(api.rules.length, 0);
-    assert.deepEqual(api.calls, [["getEmailRoutingSettings"]]);
+    assert.equal(api.kv.size, 0);
   }
+});
+
+test("legacy routes CLI refuses prepare and activate before loading configuration", () => {
+  for (const operation of ["prepare", "activate"]) {
+    const result = spawnSync(
+      process.execPath,
+      [routesScript, operation, "/definitely/missing/pilot.json"],
+      { encoding: "utf8" },
+    );
+    assert.equal(result.status, 1, operation);
+    assert.equal(result.stdout, "", operation);
+    assert.match(
+      result.stderr,
+      /legacy literal-route prepare and activate are retired/,
+      operation,
+    );
+    assert.doesNotMatch(
+      result.stderr,
+      /manifest is missing|CLOUDFLARE_ZONE_ID/,
+      operation,
+    );
+  }
+});
+
+test("status reads existing legacy resources without mutating them", async () => {
+  const api = new FakeCloudflare();
+  installLegacyPilot(api);
+  const rulesBefore = structuredClone(api.rules);
+  const kvBefore = structuredClone(api.kv);
+
+  const result = await inspectPilot(api, example);
+  assert.deepEqual(result, {
+    realm_id: example.realm_id,
+    configured: example.agents.length,
+    enabled: example.agents.length,
+    expected: example.agents.length,
+    support_subaddress: true,
+  });
+  assert.deepEqual(api.rules, rulesBefore);
+  assert.deepEqual(api.kv, kvBefore);
+  assert.equal(
+    api.calls.some(([name]) => [
+      "putKV", "deleteKV", "createRule", "updateRule", "deleteRule",
+    ].includes(name)),
+    false,
+  );
+});
+
+test("disable and remove remain cleanup-only operations for legacy resources", async () => {
+  const api = new FakeCloudflare();
+  installLegacyPilot(api);
+  const catchAllBefore = structuredClone(api.catchAll);
+
+  const disabled = await disablePilot(api, example);
+  assert.deepEqual(disabled, {
+    state: "disabled",
+    realm_id: example.realm_id,
+    addresses: example.agents.length,
+  });
+  assert.equal(api.rules.every((rule) => rule.enabled === false), true);
+  assert.equal(api.kv.get(CONFIG_KEY).enabled, false);
+  assert.equal(api.calls.some(([name]) => name === "createRule"), false);
+
+  const removed = await removePilot(api, example);
+  assert.deepEqual(removed, {
+    state: "removed",
+    realm_id: example.realm_id,
+    addresses: example.agents.length,
+  });
+  assert.equal(api.rules.length, 0);
+  assert.equal(api.kv.size, 0);
+  assert.deepEqual(api.catchAll, catchAllBefore);
+  assert.equal(api.calls.some(([name]) => name === "updateCatchAll"), false);
 });
 
 test("status reports disabled subaddressing without mutating the pilot", async () => {
@@ -121,24 +182,9 @@ test("status reports disabled subaddressing without mutating the pilot", async (
   assert.equal(api.rules.length, 0);
 });
 
-test("partial activation failure rolls the config and exact rules back to disabled", async () => {
+test("catch-all drift during disable retains a fail-closed legacy state", async () => {
   const api = new FakeCloudflare();
-  await preparePilot(api, example);
-  const update = api.updateRule.bind(api);
-  let enabledUpdates = 0;
-  api.updateRule = async (id, rule) => {
-    if (rule.enabled && ++enabledUpdates === 3) throw new Error("injected route failure");
-    return update(id, rule);
-  };
-  await assert.rejects(() => activatePilot(api, example), /injected route failure/);
-  assert.equal(api.kv.get(CONFIG_KEY).enabled, false);
-  assert.equal(api.rules.every((rule) => !rule.enabled), true);
-  assert.equal(api.calls.some(([name]) => name === "updateCatchAll"), false);
-});
-
-test("catch-all drift detected after activation triggers fail-closed rollback", async () => {
-  const api = new FakeCloudflare();
-  await preparePilot(api, example);
+  installLegacyPilot(api);
   const originalGetCatchAll = api.getCatchAll.bind(api);
   let reads = 0;
   api.getCatchAll = async () => {
@@ -147,51 +193,34 @@ test("catch-all drift detected after activation triggers fail-closed rollback", 
     if (reads === 2) value.enabled = false;
     return value;
   };
-  await assert.rejects(() => activatePilot(api, example), /catch-all changed/);
+  await assert.rejects(() => disablePilot(api, example), /catch-all changed/);
   assert.equal(api.kv.get(CONFIG_KEY).enabled, false);
   assert.equal(api.rules.every((rule) => !rule.enabled), true);
   assert.equal(api.calls.some(([name]) => name === "updateCatchAll"), false);
 });
 
-test("partial prepare and disable failures retain a config-off, routes-disabled state", async () => {
-  for (const operation of ["prepare", "disable"]) {
-    const api = new FakeCloudflare();
-    await preparePilot(api, example);
-    await activatePilot(api, example);
-    if (operation === "prepare") {
-      const put = api.putKV.bind(api);
-      let failed = false;
-      api.putKV = async (key, value) => {
-        if (!failed && key !== CONFIG_KEY) {
-          failed = true;
-          throw new Error("injected detail failure");
-        }
-        return put(key, value);
-      };
-      await assert.rejects(() => preparePilot(api, example), /injected detail failure/);
-    } else {
-      const update = api.updateRule.bind(api);
-      let disabledUpdates = 0;
-      let failed = false;
-      api.updateRule = async (id, rule) => {
-        if (!failed && !rule.enabled && ++disabledUpdates === 3) {
-          failed = true;
-          throw new Error("injected disable failure");
-        }
-        return update(id, rule);
-      };
-      await assert.rejects(() => disablePilot(api, example), /injected disable failure/);
+test("partial disable failure retains a config-off, routes-disabled state", async () => {
+  const api = new FakeCloudflare();
+  installLegacyPilot(api);
+  const update = api.updateRule.bind(api);
+  let disabledUpdates = 0;
+  let failed = false;
+  api.updateRule = async (id, rule) => {
+    if (!failed && !rule.enabled && ++disabledUpdates === 3) {
+      failed = true;
+      throw new Error("injected disable failure");
     }
-    assert.equal(api.kv.get(CONFIG_KEY).enabled, false, operation);
-    assert.equal(api.rules.every((rule) => !rule.enabled), true, operation);
-    assert.equal(api.calls.some(([name]) => name === "updateCatchAll"), false);
-  }
+    return update(id, rule);
+  };
+  await assert.rejects(() => disablePilot(api, example), /injected disable failure/);
+  assert.equal(api.kv.get(CONFIG_KEY).enabled, false);
+  assert.equal(api.rules.every((rule) => !rule.enabled), true);
+  assert.equal(api.calls.some(([name]) => name === "updateCatchAll"), false);
 });
 
 test("partial removal leaves any surviving exact routes disabled behind config-off", async () => {
   const api = new FakeCloudflare();
-  await preparePilot(api, example);
-  await activatePilot(api, example);
+  installLegacyPilot(api);
   const remove = api.deleteRule.bind(api);
   let deletes = 0;
   api.deleteRule = async (id) => {
@@ -237,7 +266,9 @@ test("manifest agent ids use the exact Go-generated base32 shape", () => {
 
 test("isolated namespace title is mandatory", async () => {
   const api = new FakeCloudflare();
+  installLegacyPilot(api);
   api.getNamespace = async () => ({ id: api.namespaceID, title: "DIRECTORY" });
-  await assert.rejects(() => preparePilot(api, example), /non-isolated KV namespace/);
-  assert.equal(api.rules.length, 0);
+  await assert.rejects(() => disablePilot(api, example), /non-isolated KV namespace/);
+  assert.equal(api.rules.every((rule) => rule.enabled), true);
+  assert.equal(api.kv.get(CONFIG_KEY).enabled, true);
 });

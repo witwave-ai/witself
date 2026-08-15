@@ -6,7 +6,7 @@ import {
   canonicalSignatureInput,
   importSigningKey,
   normalizeEnvelopeAddress,
-  PILOT_MAXIMUM_RAW_BYTES,
+  RELAY_MAXIMUM_RAW_BYTES,
   sha256Hex,
   signRelay,
 } from "../src/relay.mjs";
@@ -41,7 +41,7 @@ test("Worker canonical bytes and signature match the Go golden vector", async ()
   assert.equal(await crypto.subtle.verify("Ed25519", publicKey, signature, canonical), true);
 });
 
-test("envelope normalization matches the Go pilot rules", () => {
+test("envelope normalization matches the Go relay rules", () => {
   assert.equal(normalizeEnvelopeAddress(" <Sender@Example.COM> ", true), "sender@example.com");
   assert.equal(normalizeEnvelopeAddress("<>", true), "");
   assert.throws(() => normalizeEnvelopeAddress("bad\r\n@example.com"));
@@ -65,13 +65,13 @@ test("every canonical metadata field changes the signed bytes", () => {
 });
 
 test("relay metadata accepts exactly 25 MiB and rejects one byte more", () => {
-  assert.equal(PILOT_MAXIMUM_RAW_BYTES, 25 * 1024 * 1024);
+  assert.equal(RELAY_MAXIMUM_RAW_BYTES, 25 * 1024 * 1024);
   assert.doesNotThrow(() => canonicalSignatureInput({
     ...metadata,
-    rawSize: PILOT_MAXIMUM_RAW_BYTES,
+    rawSize: RELAY_MAXIMUM_RAW_BYTES,
   }));
   assert.throws(() => canonicalSignatureInput({
     ...metadata,
-    rawSize: PILOT_MAXIMUM_RAW_BYTES + 1,
+    rawSize: RELAY_MAXIMUM_RAW_BYTES + 1,
   }), /invalid relay raw size/);
 });

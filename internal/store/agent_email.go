@@ -53,7 +53,7 @@ const (
 	// AgentEmailProcessingCompleted indicates durably finished mailbox work.
 	AgentEmailProcessingCompleted = "completed"
 
-	// AgentEmailSenderUnverified is the mandatory receive-pilot sender posture.
+	// AgentEmailSenderUnverified is the mandatory current receive posture.
 	AgentEmailSenderUnverified = "unverified"
 
 	// AgentEmailRecipientRouteCanonical records delivery through the permanent
@@ -113,10 +113,12 @@ var (
 	ErrAgentEmailUnknownRecipient = errors.New("unknown agent-email recipient")
 	// ErrAgentEmailReceiveDisabled reports a known mailbox that refuses delivery.
 	ErrAgentEmailReceiveDisabled = errors.New("agent-email receive is disabled")
-	// ErrAgentEmailPilotDisabled reports the process-lifetime default-off gate.
-	ErrAgentEmailPilotDisabled = errors.New("agent-email receive pilot is disabled")
-	// ErrAgentEmailPilotNotEnrolled reports a principal outside the exact allowlist.
-	ErrAgentEmailPilotNotEnrolled = errors.New("agent is not enrolled in the email pilot")
+	// ErrAgentEmailPilotDisabled is the compatibility name for the
+	// process-lifetime default-off receive gate.
+	ErrAgentEmailPilotDisabled = errors.New("agent-email receive is disabled")
+	// ErrAgentEmailPilotNotEnrolled is the compatibility name for a principal
+	// outside the configured receive scope.
+	ErrAgentEmailPilotNotEnrolled = errors.New("agent email is not enabled for this agent")
 	// ErrAgentEmailBusy reports an email protected by another live processing claim.
 	ErrAgentEmailBusy = errors.New("agent email is claimed for processing")
 	// ErrAgentEmailClaimLost reports a stale or expired processing fence.
@@ -1343,7 +1345,7 @@ func (s *Store) IngestAgentEmailPilot(
 		return AgentEmailMessage{}, err
 	}
 	relay, err := in.Relay.Normalize()
-	if err != nil || len(in.Raw) < 1 || len(in.Raw) > agentemail.PilotMaximumRawBytes {
+	if err != nil || len(in.Raw) < 1 || len(in.Raw) > agentemail.RelayMaximumRawBytes {
 		return AgentEmailMessage{}, fmt.Errorf("%w: relay metadata or body is invalid", ErrAgentEmailInputInvalid)
 	}
 	digest := sha256.Sum256(in.Raw)

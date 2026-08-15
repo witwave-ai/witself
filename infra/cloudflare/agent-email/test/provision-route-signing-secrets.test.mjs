@@ -1,8 +1,15 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 import {
@@ -16,11 +23,11 @@ import {
   validateFallbackToken,
   validateProvisioningConfigs,
   verifyEd25519Keypair,
-  writeReceiptExclusive,
 } from "../scripts/provision-route-signing-secrets.mjs";
+import { reserveJSONReceipt } from "../scripts/receipt-journal.mjs";
 
 const CONTROL_PLANE_WORKER = "witself-control-plane";
-const EMAIL_EDGE_WORKER = "witself-agent-email-pilot";
+const EMAIL_EDGE_WORKER = "witself-agent-email-receive";
 const CP_CONFIG = "/safe/control-plane.jsonc";
 const EDGE_CONFIG = "/safe/email-edge.jsonc";
 const routeSecretID = "sec_aaaaaaaaaaaaaaaa";
@@ -39,6 +46,13 @@ const leaseEvidence = Object.freeze({
   generation: 7,
   operation: leaseOperation,
 });
+
+function productionEnvironment() {
+  return {
+    CLOUDFLARE_ACCOUNT_ID: "8f0bf04a4e7aab3a8cc60f02cc8c8fdb",
+    CLOUDFLARE_API_TOKEN: "production-provider-token",
+  };
+}
 
 function keyMaterial() {
   const pair = generateKeyPairSync("ed25519");
@@ -146,7 +160,7 @@ function reveal(secretID, field, value) {
   };
 }
 
-function options() {
+function options(receipt = "/private/route-receipt.json") {
   return parseProvisioningArgs([
     "--control-plane-config", CP_CONFIG,
     "--email-edge-config", EDGE_CONFIG,
@@ -158,6 +172,7 @@ function options() {
     "--route-public-field", "public-key",
     "--fallback-secret", "edge-token",
     "--fallback-field", "token",
+    "--receipt", receipt,
   ], {});
 }
 
@@ -167,6 +182,10 @@ function runtimeFixture({
   mutateJSON = () => {},
   leaseCollision = false,
   renewalFailureAt = 0,
+  releaseFailure = false,
+  realReceipt = "",
+  mutateOriginalSourcesAfterSnapshot = false,
+  mutateFrozenSnapshot = false,
 } = {}) {
   const files = configs(material.publicKey);
   const privateField = sensitiveField(privateFieldID, "private-key");
@@ -179,6 +198,10 @@ function runtimeFixture({
   const calls = [];
   const puts = [];
   const leaseEvents = [];
+  const snapshotPaths = new Set();
+  const snapshotMetadata = [];
+  let originalSourcesMutated = false;
+  let frozenSnapshotMutated = false;
 
   function response(command, args) {
     if (command === "wrangler") {
@@ -251,6 +274,30 @@ function runtimeFixture({
     },
     json(command, args, runOptions) {
       calls.push({ type: "json", command, args: [...args], runOptions });
+      const configIndex = args.indexOf("--config");
+      if (command === "wrangler" && configIndex >= 0) {
+        const configPath = args[configIndex + 1];
+        if (!snapshotPaths.has(configPath)) {
+          snapshotPaths.add(configPath);
+          snapshotMetadata.push({
+            path: configPath,
+            fileMode: statSync(configPath).mode & 0o777,
+            directoryMode: statSync(dirname(configPath)).mode & 0o777,
+            contents: readFileSync(configPath, "utf8"),
+          });
+        }
+        if (mutateOriginalSourcesAfterSnapshot && !originalSourcesMutated) {
+          originalSourcesMutated = true;
+          files[CP_CONFIG] = "{broken original control-plane config";
+          files[EDGE_CONFIG] = "{broken original email-edge config";
+        }
+        if (mutateFrozenSnapshot && !frozenSnapshotMutated) {
+          frozenSnapshotMutated = true;
+          chmodSync(configPath, 0o600);
+          writeFileSync(configPath, "{mutated frozen config", { mode: 0o600 });
+          chmodSync(configPath, 0o400);
+        }
+      }
       const value = structuredClone(response(command, args));
       mutateJSON({ command, args, value });
       return value;
@@ -266,9 +313,35 @@ function runtimeFixture({
     },
     assertReceiptAvailable(path) {
       calls.push({ type: "receipt-preflight", path });
+      if (realReceipt) assertReceiptAvailable(path);
     },
-    writeReceiptExclusive(path, receipt) {
-      calls.push({ type: "receipt-write", path, receipt });
+    reserveReceipt(path, pending) {
+      calls.push({ type: "receipt-reserve", path, pending });
+      if (realReceipt) {
+        const journal = reserveJSONReceipt(path, pending);
+        return {
+          commit(receipt) {
+            calls.push({ type: "receipt-commit", path, receipt });
+            journal.commit(receipt);
+          },
+          close() {
+            calls.push({ type: "receipt-close", path });
+            journal.close();
+          },
+        };
+      }
+      let settled = false;
+      return {
+        commit(receipt) {
+          if (settled) throw new Error("journal already settled");
+          settled = true;
+          calls.push({ type: "receipt-commit", path, receipt });
+        },
+        close() {
+          settled = true;
+          calls.push({ type: "receipt-close", path });
+        },
+      };
     },
   };
   const withLease = async (operation, work, leaseOptions) => {
@@ -295,15 +368,33 @@ function runtimeFixture({
       });
     } finally {
       leaseEvents.push({ type: "release" });
+      calls.push({ type: "lease-release" });
+      if (releaseFailure) {
+        throw new Error("agent email operations lease release failed");
+      }
     }
   };
-  return { runtime, calls, puts, material, files, withLease, leaseEvents };
+  return {
+    runtime,
+    calls,
+    puts,
+    material,
+    files,
+    withLease,
+    leaseEvents,
+    snapshotPaths,
+    snapshotMetadata,
+    environment: productionEnvironment(),
+  };
 }
 
 test("provisions verified values only after complete dark preflight and both reveals", async () => {
-  const fixture = runtimeFixture();
+  const directory = mkdtempSync(join(tmpdir(), "witself-route-success-"));
+  const receiptPath = join(directory, "receipt.json");
+  const fixture = runtimeFixture({ realReceipt: receiptPath });
   const environment = {
     CLOUDFLARE_API_TOKEN: "existing-auth",
+    CLOUDFLARE_ACCOUNT_ID: "8f0bf04a4e7aab3a8cc60f02cc8c8fdb",
     CF_ACCOUNT_ID: "f".repeat(32),
     CF_API_TOKEN: "conflicting-auth",
     CONTROL_PLANE_EDGE_TOKEN: "must-not-reach-wrangler",
@@ -327,7 +418,7 @@ test("provisions verified values only after complete dark preflight and both rev
     WITSELF_FAKE_PROVIDER_LOG: "/tmp/unsafe-witself.log",
     WITSELF_HOME: "/safe/witself-home",
   };
-  const receipt = await provisionRouteSigningSecrets(options(), {
+  const receipt = await provisionRouteSigningSecrets(options(receiptPath), {
     runtime: fixture.runtime,
     environment,
     withLease: fixture.withLease,
@@ -466,20 +557,86 @@ test("provisions verified values only after complete dark preflight and both rev
   assert.equal(rendered.includes(token), false);
   assert.equal(rendered.includes(fixture.material.privateKey), false);
   assert.equal(rendered.includes(fixture.material.publicKey), false);
+  assert.deepEqual(JSON.parse(readFileSync(receiptPath, "utf8")), receipt);
+  assert.equal(statSync(receiptPath).mode & 0o777, 0o600);
+  assert.equal(fixture.snapshotMetadata.length, 2);
+  for (const snapshot of fixture.snapshotMetadata) {
+    assert.equal(snapshot.fileMode, 0o400);
+    assert.equal(snapshot.directoryMode, 0o700);
+    assert.equal(existsSync(snapshot.path), false);
+  }
+  for (const call of fixture.calls.filter((item) =>
+    item.command === "wrangler")) {
+    const path = call.args[call.args.indexOf("--config") + 1];
+    assert.equal(path === CP_CONFIG || path === EDGE_CONFIG, false);
+  }
+  const pending = fixture.calls.find((call) =>
+    call.type === "receipt-reserve").pending;
+  assert.equal(pending.state, "secret_writes_started");
+  assert.equal(JSON.stringify(pending).includes(token), false);
+  assert.equal(JSON.stringify(pending).includes(fixture.material.privateKey), false);
+  assert.equal(JSON.stringify(pending).includes(fixture.material.publicKey), false);
+  assert.ok(
+    fixture.calls.findIndex((call) => call.type === "lease-release") <
+      fixture.calls.findIndex((call) => call.type === "receipt-commit"),
+  );
+});
+
+test("frozen route configs ignore original mutation and reject snapshot mutation", async () => {
+  const originalMutation = runtimeFixture({
+    mutateOriginalSourcesAfterSnapshot: true,
+  });
+  const receipt = await provisionRouteSigningSecrets(options(), originalMutation);
+  assert.equal(receipt.outcome, "provisioned");
+  assert.equal(originalMutation.snapshotMetadata.length, 2);
+  for (const path of originalMutation.snapshotPaths) {
+    assert.equal(existsSync(path), false);
+  }
+
+  const snapshotMutation = runtimeFixture({ mutateFrozenSnapshot: true });
+  await assert.rejects(
+    provisionRouteSigningSecrets(options(), snapshotMutation),
+    /private deployment configuration changed during deployment/,
+  );
+  assert.equal(snapshotMutation.puts.length, 0);
+  for (const path of snapshotMutation.snapshotPaths) {
+    assert.equal(existsSync(path), false);
+  }
+});
+
+test("route cleanup failure preserves the provisioning failure", async () => {
+  const fixture = runtimeFixture({ leaseCollision: true });
+  await assert.rejects(
+    provisionRouteSigningSecrets(options(), {
+      ...fixture,
+      async cleanupSnapshots(snapshots) {
+        await Promise.all([
+          snapshots.controlPlane.cleanup(),
+          snapshots.emailEdge.cleanup(),
+        ]);
+        throw new Error("synthetic route snapshot cleanup failure");
+      },
+    }),
+    (error) => {
+      assert.equal(error instanceof AggregateError, true);
+      assert.equal(error.errors.length, 2);
+      assert.match(error.errors[0].message, /already holds the lease/);
+      assert.match(error.errors[1].message, /snapshot cleanup failure/);
+      return true;
+    },
+  );
+  for (const path of fixture.snapshotPaths) assert.equal(existsSync(path), false);
 });
 
 test("lease collision refuses every secret write without exposing the desired token", async () => {
   const fixture = runtimeFixture({ leaseCollision: true });
   await assert.rejects(
-    provisionRouteSigningSecrets(options(), {
-      runtime: fixture.runtime,
-      withLease: fixture.withLease,
-    }),
+    provisionRouteSigningSecrets(options(), fixture),
     /another agent email operation already holds the lease/,
   );
   assert.equal(fixture.puts.length, 0);
   assert.equal(
-    fixture.calls.some((call) => call.type === "receipt-write"),
+    fixture.calls.some((call) => call.type === "receipt-commit"),
     false,
   );
   assert.deepEqual(fixture.leaseEvents, [{
@@ -494,15 +651,12 @@ test("lease collision refuses every secret write without exposing the desired to
 test("renewal loss after a bounded write stops the ceremony and releases the lease", async () => {
   const fixture = runtimeFixture({ renewalFailureAt: 2 });
   await assert.rejects(
-    provisionRouteSigningSecrets(options(), {
-      runtime: fixture.runtime,
-      withLease: fixture.withLease,
-    }),
+    provisionRouteSigningSecrets(options(), fixture),
     /operations lease renewal failed/,
   );
   assert.equal(fixture.puts.length, 1);
   assert.equal(
-    fixture.calls.some((call) => call.type === "receipt-write"),
+    fixture.calls.some((call) => call.type === "receipt-commit"),
     false,
   );
   assert.deepEqual(fixture.leaseEvents.slice(-3), [
@@ -510,6 +664,55 @@ test("renewal loss after a bounded write stops the ceremony and releases the lea
     { type: "renew", count: 2 },
     { type: "release" },
   ]);
+});
+
+test("lease-release failure retains the durable pending route receipt", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "witself-route-release-failure-"));
+  const receiptPath = join(directory, "receipt.json");
+  const fixture = runtimeFixture({
+    releaseFailure: true,
+    realReceipt: receiptPath,
+  });
+  await assert.rejects(
+    provisionRouteSigningSecrets(options(receiptPath), fixture),
+    /operations lease release failed/,
+  );
+  assert.equal(fixture.puts.length, 3);
+  const persisted = JSON.parse(readFileSync(receiptPath, "utf8"));
+  assert.equal(
+    persisted.schema,
+    "witself.agent-email-secret-provisioning-pending.v1",
+  );
+  assert.equal(persisted.state, "secret_writes_started");
+  assert.equal(fixture.calls.some((call) =>
+    call.type === "receipt-commit"), false);
+  assert.equal(fixture.calls.some((call) =>
+    call.type === "receipt-close"), true);
+});
+
+test("route ceremony requires the exact production Cloudflare identity", async () => {
+  for (const environment of [
+    {},
+    {
+      CF_ACCOUNT_ID: "8f0bf04a4e7aab3a8cc60f02cc8c8fdb",
+      CF_API_TOKEN: "alias-token",
+    },
+    {
+      CLOUDFLARE_ACCOUNT_ID: "f".repeat(32),
+      CLOUDFLARE_API_TOKEN: "wrong-account-token",
+    },
+    {
+      CLOUDFLARE_ACCOUNT_ID: "8f0bf04a4e7aab3a8cc60f02cc8c8fdb",
+      CLOUDFLARE_API_TOKEN: " ",
+    },
+  ]) {
+    const fixture = runtimeFixture();
+    await assert.rejects(
+      provisionRouteSigningSecrets(options(), { ...fixture, environment }),
+      /CLOUDFLARE_ACCOUNT_ID must identify production account|CLOUDFLARE_API_TOKEN is missing or invalid/,
+    );
+    assert.equal(fixture.calls.length, 0);
+  }
 });
 
 test("noncanonical active edge lease origin is rejected before acquire or mutation", async () => {
@@ -524,10 +727,7 @@ test("noncanonical active edge lease origin is rejected before acquire or mutati
     },
   });
   await assert.rejects(
-    provisionRouteSigningSecrets(options(), {
-      runtime: fixture.runtime,
-      withLease: fixture.withLease,
-    }),
+    provisionRouteSigningSecrets(options(), fixture),
     /operations lease origin is missing or invalid/,
   );
   assert.equal(fixture.leaseEvents.length, 0);
@@ -548,10 +748,7 @@ test("leased reinspection rejects endpoint authority drift before mutation", asy
     },
   });
   await assert.rejects(
-    provisionRouteSigningSecrets(options(), {
-      runtime: fixture.runtime,
-      withLease: fixture.withLease,
-    }),
+    provisionRouteSigningSecrets(options(), fixture),
     /operations lease origin is missing or invalid/,
   );
   assert.equal(fixture.puts.length, 0);
@@ -571,10 +768,7 @@ test("rejects an enabled remote delivery gate before any Witself access", async 
     },
   });
   await assert.rejects(
-    provisionRouteSigningSecrets(options(), {
-      runtime: fixture.runtime,
-      withLease: fixture.withLease,
-    }),
+    provisionRouteSigningSecrets(options(), fixture),
     /must be dark/,
   );
   assert.equal(fixture.calls.some((call) => call.command === "witself"), false);
@@ -595,10 +789,7 @@ test("rechecks dark gates after reveals and still refuses every mutation", async
     return value;
   };
   await assert.rejects(
-    provisionRouteSigningSecrets(options(), {
-      runtime: fixture.runtime,
-      withLease: fixture.withLease,
-    }),
+    provisionRouteSigningSecrets(options(), fixture),
     /must be dark/,
   );
   assert.equal(fixture.puts.length, 0);
@@ -615,10 +806,7 @@ test("rejects malformed reveal envelopes before any Cloudflare mutation", async 
     },
   });
   await assert.rejects(
-    provisionRouteSigningSecrets(options(), {
-      runtime: fixture.runtime,
-      withLease: fixture.withLease,
-    }),
+    provisionRouteSigningSecrets(options(), fixture),
     /fallback-token reveal envelope is invalid/,
   );
   assert.equal(fixture.puts.length, 0);
@@ -638,15 +826,12 @@ test("post-write verification failure cannot produce a success receipt", async (
     return value;
   };
   await assert.rejects(
-    provisionRouteSigningSecrets(options(), {
-      runtime: fixture.runtime,
-      withLease: fixture.withLease,
-    }),
+    provisionRouteSigningSecrets(options(), fixture),
     /post-write Worker secret verification failed.*remain dark/,
   );
   assert.equal(fixture.puts.length, 3);
   assert.equal(
-    fixture.calls.some((call) => call.type === "receipt-write"),
+    fixture.calls.some((call) => call.type === "receipt-commit"),
     false,
   );
   assert.equal(fixture.leaseEvents.at(-1)?.type, "release");
@@ -663,10 +848,7 @@ test("rejects a private key that does not match the configured public key", asyn
     return result;
   })(fixture.runtime.json);
   await assert.rejects(
-    provisionRouteSigningSecrets(options(), {
-      runtime: fixture.runtime,
-      withLease: fixture.withLease,
-    }),
+    provisionRouteSigningSecrets(options(), fixture),
     /does not match the active public key/,
   );
   assert.equal(fixture.puts.length, 0);
@@ -675,10 +857,7 @@ test("rejects a private key that does not match the configured public key", asyn
 test("rejects a weak fallback token before any Cloudflare mutation", async () => {
   const fixture = runtimeFixture({ fallbackToken: "a".repeat(64) });
   await assert.rejects(
-    provisionRouteSigningSecrets(options(), {
-      runtime: fixture.runtime,
-      withLease: fixture.withLease,
-    }),
+    provisionRouteSigningSecrets(options(), fixture),
     /high-entropy token policy/,
   );
   assert.equal(fixture.puts.length, 0);
@@ -755,14 +934,39 @@ test("argument parsing requires public selectors and configurable identity", () 
       "--route-public-field", "public",
       "--fallback-secret", "fallback",
       "--fallback-field", "token",
+      "--receipt", "/private/receipt.json",
     ], {}),
     /--agent is missing/,
   );
   assert.throws(
     () => parseProvisioningArgs([
       "--route-secret", "--looks-like-a-flag",
+      "--receipt", "/private/receipt.json",
     ], { WITSELF_AGENT: "scott" }),
     /--route-secret is invalid|requires a value/,
+  );
+  assert.throws(
+    () => parseProvisioningArgs([
+      "--route-secret", "route",
+      "--route-private-field", "private",
+      "--route-public-field", "public",
+      "--fallback-secret", "fallback",
+      "--fallback-field", "token",
+      "--agent", "scott",
+    ], {}),
+    /--receipt must be one canonical absolute path/,
+  );
+  assert.throws(
+    () => parseProvisioningArgs([
+      "--route-secret", "route",
+      "--route-private-field", "private",
+      "--route-public-field", "public",
+      "--fallback-secret", "fallback",
+      "--fallback-field", "token",
+      "--agent", "scott",
+      "--receipt", join(process.cwd(), "receipt.json"),
+    ], {}),
+    /outside the repository checkout/,
   );
 });
 
@@ -771,7 +975,14 @@ test("Wrangler environment is fail-closed against redirection and logging overri
     PATH: "/safe/bin",
     CF_ACCOUNT_ID: "f".repeat(32),
     CF_API_TOKEN: "conflicting-auth",
+    CLOUDFLARE_BASE_URL: "https://attacker.invalid",
     CLOUDFLARE_API_BASE_URL: "https://attacker.invalid",
+    CLOUDFLARE_ENV: "attacker",
+    DOTENV_KEY: "dotenv://attacker.invalid",
+    AWS_SECRET_ACCESS_KEY: "must-not-reach-wrangler",
+    WITSELF_TEST_STRIPE_SECRET_KEY: "must-not-reach-wrangler",
+    CLOUDFLARE_API_TOKEN: "canonical-provider-token",
+    EMAIL_DIRECTORY_KV_ID: "a".repeat(32),
     WRANGLER_LOG_SANITIZE: "false",
     WRANGLER_SEND_METRICS: "true",
     WRANGLER_WRITE_LOGS: "true",
@@ -783,12 +994,22 @@ test("Wrangler environment is fail-closed against redirection and logging overri
     NODE_OPTIONS: "--inspect",
   });
   assert.equal(sanitized.PATH, "/safe/bin");
+  assert.equal(sanitized.CLOUDFLARE_API_TOKEN, "canonical-provider-token");
+  assert.equal(sanitized.EMAIL_DIRECTORY_KV_ID, "a".repeat(32));
   assert.equal(sanitized.WRANGLER_LOG_SANITIZE, "true");
   assert.equal(sanitized.WRANGLER_SEND_METRICS, "false");
   assert.equal(sanitized.WRANGLER_SEND_ERROR_REPORTS, "false");
   assert.equal(sanitized.WRANGLER_WRITE_LOGS, "false");
   assert.equal(sanitized.WRANGLER_LOG, "error");
   assert.equal(Object.hasOwn(sanitized, "CLOUDFLARE_API_BASE_URL"), false);
+  assert.equal(Object.hasOwn(sanitized, "CLOUDFLARE_BASE_URL"), false);
+  assert.equal(Object.hasOwn(sanitized, "CLOUDFLARE_ENV"), false);
+  assert.equal(Object.hasOwn(sanitized, "DOTENV_KEY"), false);
+  assert.equal(Object.hasOwn(sanitized, "AWS_SECRET_ACCESS_KEY"), false);
+  assert.equal(
+    Object.hasOwn(sanitized, "WITSELF_TEST_STRIPE_SECRET_KEY"),
+    false,
+  );
   assert.equal(Object.hasOwn(sanitized, "CF_ACCOUNT_ID"), false);
   assert.equal(Object.hasOwn(sanitized, "CF_API_TOKEN"), false);
   assert.equal(Object.hasOwn(sanitized, "WRANGLER_OUTPUT_FILE_PATH"), false);
@@ -841,20 +1062,14 @@ test("Witself reveal environment preserves custody paths but blocks redirection 
   ]) assert.equal(Object.hasOwn(sanitized, name), false);
 });
 
-test("optional receipt is mode 0600 and never overwrites", () => {
+test("required receipt preflight never overwrites", () => {
   const directory = mkdtempSync(join(tmpdir(), "witself-secret-receipt-"));
   const path = join(directory, "receipt.json");
-  const receipt = { schema: "value-free", outcome: "provisioned" };
   assert.doesNotThrow(() => assertReceiptAvailable(path));
-  writeReceiptExclusive(path, receipt);
+  writeFileSync(path, "existing", { mode: 0o600 });
   assert.equal(statSync(path).mode & 0o777, 0o600);
-  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), receipt);
   assert.throws(
     () => assertReceiptAvailable(path),
     /refusing to overwrite/,
-  );
-  assert.throws(
-    () => writeReceiptExclusive(path, receipt),
-    /EEXIST/,
   );
 });

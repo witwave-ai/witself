@@ -974,7 +974,7 @@ func TestAgentEmailProxyRendersAvailabilityStates(t *testing.T) {
 
 	t.Run("agent not enrolled", func(t *testing.T) {
 		srv, cfg := newDashboard(t, func(w http.ResponseWriter, _ *http.Request) {
-			writeJSONError(w, http.StatusForbidden, "agent is not enrolled in the email pilot")
+			writeJSONError(w, http.StatusForbidden, "agent email is not enabled for this agent")
 		}, nil)
 		for _, path := range []string{"/api/email/address", "/api/email/status", "/api/email"} {
 			resp := authedGet(t, srv, cfg, path)
@@ -983,6 +983,17 @@ func TestAgentEmailProxyRendersAvailabilityStates(t *testing.T) {
 			}
 			_ = resp.Body.Close()
 		}
+	})
+
+	t.Run("legacy agent enrollment wording", func(t *testing.T) {
+		srv, cfg := newDashboard(t, func(w http.ResponseWriter, _ *http.Request) {
+			writeJSONError(w, http.StatusForbidden, "agent is not enrolled in the email pilot")
+		}, nil)
+		resp := authedGet(t, srv, cfg, "/api/email/status")
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("legacy wording: got %d, want 403", resp.StatusCode)
+		}
+		_ = resp.Body.Close()
 	})
 
 	t.Run("account feature disabled", func(t *testing.T) {

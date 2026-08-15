@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -40,11 +41,13 @@ const (
 	minAgentEmailRelayReplayWindow         = time.Second
 	maxAgentEmailRelayReplayWindow         = 15 * time.Minute
 	maximumAgentEmailProductionAccounts    = 100
+	maxConcurrentAgentEmailRelayBodyReads  = 2
+	maxAgentEmailRelayBodyReadDuration     = 30 * time.Second
 )
 
 var (
 	// ErrAgentEmailUnknownRecipient reports that the signed envelope recipient
-	// does not resolve to an enabled pilot mailbox.
+	// does not resolve to an enabled inbound mailbox.
 	ErrAgentEmailUnknownRecipient = errors.New("unknown agent-email recipient")
 	// ErrAgentEmailReceiveDisabled reports a known mailbox whose receive state is disabled.
 	ErrAgentEmailReceiveDisabled = errors.New("agent-email receive is disabled")
@@ -59,8 +62,9 @@ var (
 	// outcome: bounded text and metadata landed, while attachment-bearing raw
 	// MIME was omitted at the account capacity boundary.
 	ErrAgentEmailAttachmentOmitted = errors.New("agent-email attachment payload omitted at capacity")
-	// ErrAgentEmailPilotUnavailable reports a transient pilot-wide ingestion failure.
-	ErrAgentEmailPilotUnavailable = errors.New("agent-email pilot is unavailable")
+	// ErrAgentEmailPilotUnavailable is the compatibility name for a transient
+	// receive-service-wide ingestion failure.
+	ErrAgentEmailPilotUnavailable = errors.New("agent-email receive is unavailable")
 	// ErrAgentEmailRetryCanaryTemporary reports the deliberate first-attempt
 	// temporary result for the synthetic provider retry proof.
 	ErrAgentEmailRetryCanaryTemporary = errors.New("agent-email retry canary temporary failure")
@@ -599,6 +603,24 @@ type AgentEmailRetryCanaryCheckpoint struct {
 }
 
 func agentEmailIngestHandler(cfg AgentEmailPilotConfig, ingest AgentEmailIngestFunc) http.HandlerFunc {
+	return agentEmailIngestHandlerWithLimits(
+		cfg,
+		ingest,
+		maxConcurrentAgentEmailRelayBodyReads,
+		maxAgentEmailRelayBodyReadDuration,
+	)
+}
+
+func agentEmailIngestHandlerWithLimits(
+	cfg AgentEmailPilotConfig,
+	ingest AgentEmailIngestFunc,
+	maximumConcurrentBodyReads int,
+	bodyReadTimeout time.Duration,
+) http.HandlerFunc {
+	if maximumConcurrentBodyReads < 1 || bodyReadTimeout <= 0 {
+		panic("agent-email relay body admission limits are invalid")
+	}
+	bodyReads := make(chan struct{}, maximumConcurrentBodyReads)
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		metadata, signature, ok := parseAgentEmailRelayHeaders(r)
@@ -606,13 +628,7 @@ func agentEmailIngestHandler(cfg AgentEmailPilotConfig, ingest AgentEmailIngestF
 			writeAgentEmailVerdict(w, http.StatusUnauthorized, "invalid_relay")
 			return
 		}
-		if metadata.RawSize > agentemail.PilotMaximumRawBytes || r.ContentLength > agentemail.PilotMaximumRawBytes {
-			writeAgentEmailVerdict(w, http.StatusRequestEntityTooLarge, "permanent")
-			return
-		}
-		r.Body = http.MaxBytesReader(w, r.Body, agentemail.PilotMaximumRawBytes)
-		raw, err := io.ReadAll(r.Body)
-		if err != nil {
+		if metadata.RawSize > agentemail.RelayMaximumRawBytes || r.ContentLength > agentemail.RelayMaximumRawBytes {
 			writeAgentEmailVerdict(w, http.StatusRequestEntityTooLarge, "permanent")
 			return
 		}
@@ -621,8 +637,55 @@ func agentEmailIngestHandler(cfg AgentEmailPilotConfig, ingest AgentEmailIngestF
 		if cfg.Now != nil {
 			now = cfg.Now()
 		}
-		verified, err := agentemail.VerifyRelay(now, cfg.RelayReplayWindow, key, metadata, raw, signature)
+		verified, err := agentemail.VerifyRelayEnvelope(
+			now,
+			cfg.RelayReplayWindow,
+			key,
+			metadata,
+			signature,
+		)
 		if err != nil || verified.Audience != cfg.Audience {
+			writeAgentEmailVerdict(w, http.StatusUnauthorized, "invalid_relay")
+			return
+		}
+		if r.ContentLength >= 0 && r.ContentLength != verified.RawSize {
+			writeAgentEmailVerdict(w, http.StatusUnauthorized, "invalid_relay")
+			return
+		}
+		select {
+		case bodyReads <- struct{}{}:
+			defer func() { <-bodyReads }()
+		default:
+			w.Header().Set("Retry-After", "1")
+			writeAgentEmailVerdict(w, http.StatusServiceUnavailable, "temporary")
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, agentemail.RelayMaximumRawBytes)
+		var bodyReadTimedOut atomic.Bool
+		bodyReadTimer := time.AfterFunc(bodyReadTimeout, func() {
+			bodyReadTimedOut.Store(true)
+			_ = r.Body.Close()
+		})
+		raw := make([]byte, int(verified.RawSize))
+		_, readErr := io.ReadFull(r.Body, raw)
+		if readErr == nil {
+			var extra [1]byte
+			extraBytes, extraErr := r.Body.Read(extra[:])
+			if extraBytes != 0 || !errors.Is(extraErr, io.EOF) {
+				readErr = agentemail.ErrRelayBodyMismatch
+			}
+		}
+		bodyReadTimer.Stop()
+		if readErr != nil {
+			if bodyReadTimedOut.Load() {
+				w.Header().Set("Retry-After", "1")
+				writeAgentEmailVerdict(w, http.StatusServiceUnavailable, "temporary")
+				return
+			}
+			writeAgentEmailVerdict(w, http.StatusUnauthorized, "invalid_relay")
+			return
+		}
+		if err := agentemail.VerifyRelayBody(verified, raw); err != nil {
 			writeAgentEmailVerdict(w, http.StatusUnauthorized, "invalid_relay")
 			return
 		}
@@ -1362,7 +1425,7 @@ func requireAgentEmailPrincipal(
 			}
 		}
 		if !pilot.allows(p) {
-			writeJSONError(w, http.StatusForbidden, "agent is not enrolled in the email pilot")
+			writeJSONError(w, http.StatusForbidden, "agent email is not enabled for this agent")
 			return
 		}
 		h(w, r, p)

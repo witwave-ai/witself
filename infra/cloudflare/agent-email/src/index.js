@@ -4,22 +4,17 @@ import {
   importSigningKey,
   normalizeEnvelopeAddress,
   normalizeRelayMetadata,
-  PILOT_MAXIMUM_RAW_BYTES,
+  RELAY_MAXIMUM_RAW_BYTES,
   sha256Hex,
   signRelay,
 } from "./relay.mjs";
 import {
-  CONFIG_KEY,
   configuredAgentEmailDomains,
   managedRealmRouteRequiresAccountRefresh,
-  parsePilotAddress,
   parseRouteAddress,
   realmRouteKey,
   realmRouteProjectionIsFresh,
-  recipientKey,
   verifyRealmRouteProjection,
-  validateRuntimeConfig,
-  validateRuntimeRecipient,
 } from "./directory.mjs";
 import { recordEdgeVerdict, recordRouteLookup } from "./metrics.mjs";
 import {
@@ -79,8 +74,6 @@ function routeMetricKind(route) {
       return "alias";
     case "custom_domain":
       return "custom_domain";
-    case "pilot":
-      return "pilot";
     default:
       return "unknown";
   }
@@ -191,14 +184,6 @@ function rememberSuppressedMiss(state, key, nowMS) {
 async function routeMissKey(parsed, cryptoAPI) {
   const input = new TextEncoder().encode(`${parsed.domain}\0${parsed.realmLabel}`);
   return sha256Hex(input, cryptoAPI);
-}
-
-async function directoryJSON(namespace, key) {
-  try {
-    return await namespace.get(key, "json");
-  } catch {
-    throw transient("tempfail_directory", "directory");
-  }
 }
 
 async function optionalDirectoryJSON(namespace, key) {
@@ -444,16 +429,6 @@ function realmRouteDisposition(route) {
   }
 }
 
-function legacyPilotTrustAnchor(env) {
-  const ingestURL = String(env?.LEGACY_PILOT_TRUSTED_INGEST_URL ?? "");
-  const cellAudience = String(env?.LEGACY_PILOT_TRUSTED_CELL_AUDIENCE ?? "");
-  if (ingestURL === "" && cellAudience === "") return null;
-  if (ingestURL === "" || cellAudience === "") {
-    throw transient("tempfail_configuration", "configuration");
-  }
-  return { ingestURL, cellAudience };
-}
-
 async function projectedRealmRoute(
   env,
   parsed,
@@ -533,67 +508,9 @@ async function projectedRealmRoute(
   return fallback.status === "projection" ? realmRouteDisposition(fallback.route) : fallback;
 }
 
-async function legacyPilotRoute(env, parsed, envelopeTo) {
-  // The retired literal-pilot directory is unsigned legacy data. It may only
-  // narrow an immutable version-bound destination, never supply one. The
-  // production Worker intentionally omits both anchors, so this lane tempfails
-  // before KV or MIME until a separately reviewed build binds both values.
-  const trustAnchor = legacyPilotTrustAnchor(env);
-  if (!trustAnchor) throw transient("tempfail_disabled", "configuration");
-  const configValue = await directoryJSON(env.EMAIL_DIRECTORY, CONFIG_KEY);
-  if (configValue == null) return null;
-  // A corrupt legacy row must not poison lookups for unrelated production
-  // realm labels. Only enter the compatibility path when its raw lookup
-  // binding names this exact address domain and realm label.
-  if (configValue?.domain !== parsed.domain || configValue?.realm_label !== parsed.realmLabel) {
-    return null;
-  }
-  let config;
-  try {
-    config = validateRuntimeConfig(configValue);
-  } catch {
-    throw transient("tempfail_configuration", "configuration");
-  }
-  if (config.ingest_url !== trustAnchor.ingestURL ||
-      config.cell_audience !== trustAnchor.cellAudience) {
-    throw transient("tempfail_configuration", "configuration");
-  }
-  if (!config.enabled) throw transient("tempfail_disabled", "configuration");
-
-  let pilotAddress;
-  try {
-    pilotAddress = parsePilotAddress(envelopeTo, config.domain, config.realm_label, true);
-  } catch {
-    return { status: "invalid" };
-  }
-  const enrolled = config.agents.some((agent) => agent.address === pilotAddress.baseAddress);
-  if (!enrolled) return { status: "unknown" };
-  const recipientValue = await directoryJSON(env.EMAIL_DIRECTORY, recipientKey(pilotAddress.baseAddress));
-  // The address is enrolled in the atomic config projection. A missing or
-  // inconsistent detail row can be KV propagation lag or operator error, so
-  // it must retry rather than permanently bouncing an enrolled mailbox.
-  if (recipientValue == null) throw transient("tempfail_directory", "directory");
-  try {
-    validateRuntimeRecipient(recipientValue, config, pilotAddress.baseAddress);
-  } catch {
-    throw transient("tempfail_directory", "directory");
-  }
-  return {
-    status: "route",
-    route: {
-      route_kind: "pilot",
-      state: "applied",
-      realm_id: recipientValue.realm_id,
-      cell_audience: trustAnchor.cellAudience,
-      ingest_url: trustAnchor.ingestURL,
-    },
-  };
-}
-
 async function resolveRealmRoute(
   env,
   parsed,
-  envelopeTo,
   fetchAPI,
   cryptoAPI,
   nowMS,
@@ -602,13 +519,20 @@ async function resolveRealmRoute(
   routeMode = "primary",
 ) {
   const startedAt = nowMS;
+  const canonicalRealmLabel = /^[a-z2-7]{16}$/.test(parsed.realmLabel);
+  // A configured legacy managed domain preserves only canonical Realm-ID
+  // addresses that were issued before the primary-domain cutover. It never
+  // accepts a realm alias, catch-all inference, or the retired unsigned pilot
+  // directory. Existing canonical routes use the same signed authority as the
+  // primary domain and therefore retain every account, gate, and cell fence.
+  if (routeMode === "legacy" && !canonicalRealmLabel) {
+    return { status: "invalid" };
+  }
   const expectedRouteKind = routeMode === "custom"
     ? "custom_domain"
-    : routeMode === "primary" && /^[a-z2-7]{16}$/.test(parsed.realmLabel)
+    : canonicalRealmLabel
     ? "canonical"
-    : routeMode === "primary"
-    ? "realm_alias"
-    : "";
+    : "realm_alias";
   // Preserve the established managed-route miss telemetry. Only the gated
   // customer-domain lane is known before a projection exists, so only it can
   // safely label miss/error observations with a concrete route kind.
@@ -619,29 +543,6 @@ async function resolveRealmRoute(
     cold: { evidence: "none", routeKind: metricRouteKind, startedAt, now },
     state,
   };
-  if (routeMode === "legacy") {
-    let legacy;
-    try {
-      legacy = await legacyPilotRoute(env, parsed, envelopeTo);
-    } catch (error) {
-      if (error?.[EDGE_METRIC]?.outcome === "tempfail_disabled") {
-        emitRouteLookupMetric(
-          env,
-          { ...lookupContext.known, routeKind: "pilot" },
-          "legacy",
-        );
-      } else {
-        emitRouteLookupMetric(env, lookupContext.uncertain, "kv_error");
-      }
-      throw error;
-    }
-    emitRouteLookupMetric(
-      env,
-      { ...lookupContext.known, routeKind: "pilot" },
-      "legacy",
-    );
-    return legacy ?? { status: "unknown" };
-  }
   const projected = await optionalDirectoryJSON(
     env.EMAIL_DIRECTORY,
     realmRouteKey(parsed.domain, parsed.realmLabel),
@@ -804,7 +705,6 @@ async function handleEmailTransaction(message, env, runtime = {}) {
   const resolved = await resolveRealmRoute(
     env,
     parsed,
-    envelopeTo,
     fetchAPI,
     cryptoAPI,
     now(),
@@ -867,7 +767,7 @@ async function handleEmailTransaction(message, env, runtime = {}) {
   if (
     !Number.isSafeInteger(message.rawSize) ||
     message.rawSize < 1 ||
-    message.rawSize > PILOT_MAXIMUM_RAW_BYTES
+    message.rawSize > RELAY_MAXIMUM_RAW_BYTES
   ) {
     message.setReject(OVER_SIZE_REJECTION);
     return { outcome: "rejected_over_size", phase: "content", status: 552 };
@@ -879,7 +779,7 @@ async function handleEmailTransaction(message, env, runtime = {}) {
   } catch {
     throw transient("tempfail_content", "content");
   }
-  if (raw.byteLength !== message.rawSize || raw.byteLength > PILOT_MAXIMUM_RAW_BYTES) {
+  if (raw.byteLength !== message.rawSize || raw.byteLength > RELAY_MAXIMUM_RAW_BYTES) {
     throw transient("tempfail_content", "content");
   }
 

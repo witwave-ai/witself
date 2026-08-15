@@ -127,6 +127,38 @@ test("Cloudflare client reads every Email Routing rule page and fails closed on 
   assert.equal(duplicateRequests, 8);
 });
 
+test("Cloudflare rule inventory accepts the provider pagination shape without total_pages", async () => {
+  let requests = 0;
+  const providerRules = [
+    { id: "1" },
+    { id: "2" },
+    { id: "3" },
+    { id: "4" },
+  ];
+  const api = new CloudflareAPI({
+    accountID: "a".repeat(32),
+    zoneID: "b".repeat(32),
+    apiToken: "test-token",
+    fetchAPI: async (url) => {
+      requests += 1;
+      const page = Number(new URL(url).searchParams.get("page"));
+      return Response.json({
+        success: true,
+        result: providerRules,
+        result_info: {
+          page,
+          per_page: 50,
+          count: providerRules.length,
+          total_count: providerRules.length,
+        },
+      });
+    },
+  });
+
+  assert.deepEqual(await api.listRules(), providerRules);
+  assert.equal(requests, 2, "two provider-shaped snapshots are required");
+});
+
 test("Cloudflare rule inventory rejects a page-shift hybrid and recovers on two stable snapshots", async () => {
   const id = (value) => value.toString(16).padStart(4, "0");
   const original = Array.from({ length: 100 }, (_, index) => ({

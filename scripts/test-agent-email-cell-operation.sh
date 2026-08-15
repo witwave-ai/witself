@@ -213,7 +213,7 @@ EOF
 
 cat >"$work_dir/canary.json" <<'EOF'
 {
-  "schema_version":2,"domain":"witmail.net","worker_name":"witself-agent-email-pilot",
+  "schema_version":2,"domain":"witmail.net","worker_name":"witself-agent-email-receive",
   "account_ids":["acc_aaaaaaaaaaaaaaaa"],
   "agents":[
     {"agent_id":"agent_aaaaaaaaaaaaaaaa","realm_id":"realm_aaaaaaaaaaaaaaaa","address":"a@witmail.net"},

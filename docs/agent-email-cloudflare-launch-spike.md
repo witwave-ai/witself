@@ -1,6 +1,15 @@
 # Agent Email Cloudflare Launch Spike
 
-Status: **STRICT PRODUCTION GATE FAILED — LIMITED PILOT AUTHORIZED**
+> **Historical record only (2026-07-21).** This spike and its limited-pilot
+> authorization are retired. They are preserved as provider evidence, not as
+> current deployment or rollout guidance. Production receive uses
+> `witmail.net`, the `witself-agent-email-receive` Worker, and the separately
+> gated production path documented in [agent-email.md](agent-email.md). Do not
+> recreate the legacy domain, Worker, routing rules, or pilot configuration from
+> this report.
+
+Historical status at the time of the run:
+**STRICT PRODUCTION GATE FAILED — LIMITED PILOT AUTHORIZED**
 
 - Run date: 2026-07-21 UTC
 - Canonical design commit: `f350825b71614db9470f059cb6cdf445e515b247`
@@ -13,7 +22,7 @@ This report records the launch-gating spike required by Open Question 9 in
 No schema, ingestion, Worker, CLI, MCP, API, metering, retention, or archive
 code was started during the spike. A subsequent operator decision authorized a
 capability-limited internal pilot while preserving the failed requirements as
-production promotion gates.
+explicit limitations rather than representing them as satisfied.
 
 ## Decision
 
@@ -33,17 +42,19 @@ settled requirements:
    data visible inside the spike Worker was in MIME headers, which the settled
    contract explicitly forbids treating as authoritative.
 
-The strict production launch gate therefore fails. This is not a total
-Cloudflare receive no-go: the proven baseline is sufficient for an explicitly
-limited internal pilot. Production promotion remains blocked pending an
-inbound edge that exposes the required synchronous controls and metadata, or a
-separate operator decision that revises the production contract.
+The strict production launch gate therefore failed at that checkpoint. This was
+not a total Cloudflare receive no-go: the proven baseline was sufficient for an
+explicitly limited internal pilot. The later production design made a separate
+operator decision to use a bounded Cloudflare provider profile while keeping
+unavailable sender-auth fields untrusted; [agent-email.md](agent-email.md) is
+the current authority for that design and rollout.
 
-## Pilot Authorization And Boundary
+## Historical Pilot Authorization And Boundary
 
-Development may proceed under the Cloudflare limited receive-only pilot in
-[agent-email.md](agent-email.md#capability-tiers-and-authorized-pilot). The
-authorization is deliberately narrower than the production contract:
+Development was authorized to proceed under the Cloudflare limited receive-only
+pilot in
+[agent-email.md](agent-email.md#historical-capability-tiers-and-authorized-pilot).
+The authorization was deliberately narrower than the production contract:
 
 - one internal realm and 5–10 explicitly enrolled agents;
 - one exact Email Routing rule per pilot address, with the pre-existing global

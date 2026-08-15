@@ -97,6 +97,7 @@ function fixtures() {
       bindings: [
         plain("AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS", keyring),
         plain("AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", ""),
+        plain("CONTROL_PLANE_URL", "https://self.witwave.ai/"),
         kv("EMAIL_DIRECTORY"),
         secret("CONTROL_PLANE_EDGE_TOKEN"),
         secret("RELAY_ED25519_PRIVATE_KEY"),
@@ -177,6 +178,25 @@ test("readiness requires identical canonical empty managed cohorts", () => {
     () => verifyRouteSigningReadiness(active),
     /did not match the explicit expected cohort/,
   );
+});
+
+test("readiness pins production authority and rejects retired pilot trust", () => {
+  for (const [name, value] of [
+    ["CONTROL_PLANE_URL", "https://attacker.invalid/"],
+    ["LEGACY_PILOT_TRUSTED_INGEST_URL", "https://cell.example/ingest"],
+    ["LEGACY_PILOT_TRUSTED_CELL_AUDIENCE", "legacy-cell"],
+  ]) {
+    const candidate = fixtures();
+    const existing = candidate.emailEdgeVersion.resources.bindings.find(
+      (binding) => binding.name === name,
+    );
+    if (existing) existing.text = value;
+    else candidate.emailEdgeVersion.resources.bindings.push(plain(name, value));
+    assert.throws(
+      () => verifyRouteSigningReadiness(candidate),
+      /authority was invalid|active Worker was not dark/,
+    );
+  }
 });
 
 test("explicit staged cohort proves CP-edge equality while delivery gates stay dark", () => {
@@ -373,8 +393,10 @@ test("production inspection follows each exact active version through Wrangler J
   const responses = [
     source.controlPlaneDeployment,
     source.controlPlaneVersion,
+    source.controlPlaneDeployment,
     source.emailEdgeDeployment,
     source.emailEdgeVersion,
+    source.emailEdgeDeployment,
   ];
   const result = inspectRouteSigningReadiness((args, operation) => {
     calls.push({ args, operation });
@@ -387,12 +409,32 @@ test("production inspection follows each exact active version through Wrangler J
       "versions", "view", controlPlaneVersionID,
       "--name", "witself-control-plane", "--json",
     ],
+    ["deployments", "status", "--name", "witself-control-plane", "--json"],
     [
-      "deployments", "status", "--name", "witself-agent-email-pilot", "--json",
+      "deployments", "status", "--name", "witself-agent-email-receive", "--json",
     ],
     [
       "versions", "view", emailEdgeVersionID,
-      "--name", "witself-agent-email-pilot", "--json",
+      "--name", "witself-agent-email-receive", "--json",
+    ],
+    [
+      "deployments", "status", "--name", "witself-agent-email-receive", "--json",
     ],
   ]);
+});
+
+test("production readiness rejects deployment drift during inspection", () => {
+  const source = fixtures();
+  const changed = structuredClone(source.controlPlaneDeployment);
+  changed.id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const responses = [
+    source.controlPlaneDeployment,
+    source.controlPlaneVersion,
+    changed,
+  ];
+  let call = 0;
+  assert.throws(
+    () => inspectRouteSigningReadiness(() => responses[call++]),
+    /control plane changed during exact provider inspection/,
+  );
 });

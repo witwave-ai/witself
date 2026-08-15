@@ -8,9 +8,11 @@ import {
   createPrimaryRoutingPlan,
   inspectPrimaryCanary,
   normalizePrimaryCanaryManifest,
+  operationsLeaseControlPlaneOrigin,
   primaryRuleName,
   sha256,
   verifyPrimaryRoutingPlan,
+  verifyPrimaryWorkerReadiness,
 } from "../scripts/primary-routing-lib.mjs";
 import {
   parsePrimaryRouteArgs,
@@ -22,9 +24,12 @@ import {
   ROUTE_SIGNING_KEY_ID,
   signTestRouteProjection,
 } from "./route-signature-fixture.mjs";
+import {
+  PRODUCTION_CLOUDFLARE_ACCOUNT_ID,
+} from "../scripts/wrangler-environment.mjs";
 
 const NOW = new Date("2026-08-15T12:00:00Z");
-const accountID = "a".repeat(32);
+const accountID = PRODUCTION_CLOUDFLARE_ACCOUNT_ID;
 const zoneID = "b".repeat(32);
 const namespaceID = "c".repeat(32);
 const realmID = "realm_abcdefghijkl2345";
@@ -69,7 +74,7 @@ function leaseRuntime(calls = []) {
 const manifest = Object.freeze({
   schema_version: 2,
   domain: "witmail.net",
-  worker_name: "witself-agent-email-pilot",
+  worker_name: "witself-agent-email-receive",
   account_ids: Object.freeze([cohortAccountID]),
   agents: Object.freeze([
     ["aaaaaaaaaaaaaaa2", "alpha"],
@@ -128,7 +133,7 @@ function workerFixtures({
     plain("AGENT_EMAIL_DOMAIN", "witmail.net"),
     plain("AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", cohort),
     plain("AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS", ROUTE_PUBLIC_KEY_ENV),
-    plain("CONTROL_PLANE_URL", "https://control.example/"),
+    plain("CONTROL_PLANE_URL", "https://self.witwave.ai/"),
     { name: "EMAIL_DIRECTORY", namespace_id: namespaceID, type: "kv_namespace" },
     secret("CONTROL_PLANE_EDGE_TOKEN"),
     secret("RELAY_ED25519_PRIVATE_KEY"),
@@ -283,6 +288,40 @@ test("primary manifest accepts only canonical witmail.net address ownership", ()
   }
 });
 
+test("primary readiness and routing leases pin the production control-plane authority", () => {
+  const workers = workerFixtures();
+  assert.equal(
+    operationsLeaseControlPlaneOrigin(workers),
+    "https://self.witwave.ai/",
+  );
+  assert.equal(
+    verifyPrimaryWorkerReadiness(workers, namespaceID, "witmail.net")
+      .private.control_plane_url,
+    "https://self.witwave.ai/",
+  );
+
+  for (const candidate of [
+    "https://attacker.invalid/",
+    "https://self.witwave.ai.evil.invalid/",
+    "https://self.witwave.ai/path",
+    "https://self.witwave.ai/?redirect=1",
+    "https://SELF.witwave.ai/",
+  ]) {
+    const poisoned = workerFixtures();
+    poisoned.email_edge_version.resources.bindings.find(
+      (binding) => binding.name === "CONTROL_PLANE_URL",
+    ).text = candidate;
+    assert.throws(
+      () => operationsLeaseControlPlaneOrigin(poisoned),
+      /operations lease origin was invalid/,
+    );
+    assert.throws(
+      () => verifyPrimaryWorkerReadiness(poisoned, namespaceID, "witmail.net"),
+      /control-plane origin was invalid/,
+    );
+  }
+});
+
 test("status proves signed primary projection and returns no route destinations", async () => {
   const api = new FakeCloudflare();
   const status = await inspectPrimaryCanary(api, runtime(), manifest, { now });
@@ -351,6 +390,53 @@ test("prepare is a short-lived fenced rule-only operation", async () => {
   assert.equal(canary.every((rule) => rule.enabled === false), true);
   assert.equal(api.calls.some(([name]) => name === "putKV" || name === "deleteKV"), false);
   assert.equal(api.calls.some(([name]) => name === "updateCatchAll"), false);
+});
+
+test("prepare migrates an exact disabled legacy pilot rule in place", async () => {
+  const api = new FakeCloudflare();
+  const address = manifest.agents[0].address;
+  const legacyID = "6".repeat(32);
+  api.rules.push({
+    id: legacyID,
+    name: primaryRuleName(address),
+    enabled: false,
+    matchers: [{ type: "literal", field: "to", value: address }],
+    actions: [{ type: "worker", value: ["witself-agent-email-pilot"] }],
+    priority: 7,
+    source: "api",
+  });
+
+  const status = await inspectPrimaryCanary(api, runtime(), manifest, { now });
+  assert.equal(status.routing.managed_rules.configured, 1);
+  assert.equal(status.routing.managed_rules.legacy_targets, 1);
+  assert.equal(status.routing.managed_rules.conflicts, 0);
+  assert.equal(status.ready_for_prepare, true);
+  assert.equal(status.ready_for_activate, false);
+
+  const plan = await createPrimaryRoutingPlan(api, runtime(), manifest, "prepare", { now });
+  await applyPrimaryRoutingPlan(plan, plan.apply_fence.sha256, api, runtime(), { now });
+
+  const migrated = api.rules.filter((rule) =>
+    rule.name === primaryRuleName(address));
+  assert.equal(migrated.length, 1);
+  assert.equal(migrated[0].id, legacyID);
+  assert.equal(migrated[0].enabled, false);
+  assert.deepEqual(migrated[0].actions, [
+    { type: "worker", value: ["witself-agent-email-receive"] },
+  ]);
+  assert.equal(
+    api.rules.filter((rule) => rule.name.startsWith(
+      "witself-agent-email-primary-canary:",
+    )).length,
+    manifest.agents.length,
+  );
+  assert.equal(api.calls.some(([name, id]) => name === "updateRule" && id === legacyID), true);
+  assert.equal(api.calls.some(([name]) => name === "deleteRule"), false);
+
+  const after = await inspectPrimaryCanary(api, runtime(), manifest, { now });
+  assert.equal(after.routing.managed_rules.legacy_targets, 0);
+  assert.equal(after.routing.managed_rules.conflicts, 0);
+  assert.equal(after.ready_for_activate, false);
 });
 
 test("activation requires all three canonical gates and fails closed on a partial update", async () => {
@@ -499,6 +585,49 @@ test("emergency disable preserves and reports an existing unmanaged conflict", a
   assert.equal(receipt.rules.conflicts, 1);
 });
 
+test("emergency disable fails closed an enabled exact legacy pilot rule", async () => {
+  const api = new FakeCloudflare();
+  const address = manifest.agents[0].address;
+  const legacyID = "6".repeat(32);
+  api.rules.push({
+    id: legacyID,
+    name: primaryRuleName(address),
+    enabled: true,
+    matchers: [{ type: "literal", field: "to", value: address }],
+    actions: [{ type: "worker", value: ["witself-agent-email-pilot"] }],
+    priority: 7,
+    source: "api",
+  });
+
+  const emergencyRuntime = { operationsLease: leaseRuntime() };
+  const disable = await createPrimaryRoutingPlan(
+    api,
+    emergencyRuntime,
+    manifest,
+    "disable",
+    { now },
+  );
+  assert.equal(disable.precondition.routing.managed_rules.legacy_targets, 1);
+  const receipt = await applyPrimaryRoutingPlan(
+    disable,
+    disable.apply_fence.sha256,
+    api,
+    emergencyRuntime,
+    { now },
+  );
+
+  const disabled = api.rules.filter((rule) =>
+    rule.name === primaryRuleName(address));
+  assert.equal(disabled.length, 1);
+  assert.equal(disabled[0].id, legacyID);
+  assert.equal(disabled[0].enabled, false);
+  assert.deepEqual(disabled[0].actions, [
+    { type: "worker", value: ["witself-agent-email-receive"] },
+  ]);
+  assert.equal(receipt.rules.legacy_targets, 0);
+  assert.equal(receipt.rules.conflicts, 0);
+});
+
 test("primary apply acquires the shared lease before its final read and always releases it", async () => {
   const api = new FakeCloudflare();
   const leaseCalls = [];
@@ -560,7 +689,7 @@ test("primary lifecycle refuses stale managed and same-address unmanaged rules",
       name: primaryRuleName(`stale.${realmLabel}@witmail.net`),
       enabled: false,
       matchers: [{ type: "literal", field: "to", value: `stale.${realmLabel}@witmail.net` }],
-      actions: [{ type: "worker", value: ["witself-agent-email-pilot"] }],
+      actions: [{ type: "worker", value: ["witself-agent-email-receive"] }],
     },
     {
       id: "8".repeat(32),
@@ -595,6 +724,39 @@ test("primary lifecycle never adopts a Wrangler-owned lookalike rule", async () 
     () => createPrimaryRoutingPlan(api, runtime({ canonical: true }), manifest, "activate", { now }),
     /rule conflict/,
   );
+});
+
+test("legacy migration never adopts malformed or Wrangler-owned pilot lookalikes", async () => {
+  const address = manifest.agents[0].address;
+  for (const mutate of [
+    (rule) => { rule.source = "wrangler"; },
+    (rule) => {
+      rule.actions[0].value.push("witself-agent-email-receive");
+    },
+  ]) {
+    const api = new FakeCloudflare();
+    const lookalike = {
+      id: "6".repeat(32),
+      name: primaryRuleName(address),
+      enabled: false,
+      matchers: [{ type: "literal", field: "to", value: address }],
+      actions: [{ type: "worker", value: ["witself-agent-email-pilot"] }],
+      priority: 7,
+      source: "api",
+    };
+    mutate(lookalike);
+    api.rules.push(lookalike);
+
+    const status = await inspectPrimaryCanary(api, runtime(), manifest, { now });
+    assert.equal(status.routing.managed_rules.configured, 0);
+    assert.equal(status.routing.managed_rules.legacy_targets, 0);
+    assert.equal(status.routing.managed_rules.conflicts, 1);
+    assert.equal(status.ready_for_prepare, false);
+    await assert.rejects(
+      () => createPrimaryRoutingPlan(api, runtime(), manifest, "prepare", { now }),
+      /rule conflict/,
+    );
+  }
 });
 
 test("primary CLI exposes plan generation separately from apply", () => {
@@ -638,6 +800,8 @@ test("primary runtime inspects exact active Workers and authenticated control-pl
       : workers.email_edge_version);
   };
   const runtimeClient = primaryRoutingRuntime({
+    CLOUDFLARE_ACCOUNT_ID: accountID,
+    CLOUDFLARE_API_TOKEN: "canonical-token",
     CONTROL_PLANE_EDGE_TOKEN: "x".repeat(32),
   }, {
     inspect,
@@ -651,16 +815,16 @@ test("primary runtime inspects exact active Workers and authenticated control-pl
   assert.deepEqual(inspections, [
     ["deployments", "status", "--name", "witself-control-plane", "--json"],
     ["versions", "view", controlPlaneVersionID, "--name", "witself-control-plane", "--json"],
-    ["deployments", "status", "--name", "witself-agent-email-pilot", "--json"],
-    ["versions", "view", edgeVersionID, "--name", "witself-agent-email-pilot", "--json"],
+    ["deployments", "status", "--name", "witself-agent-email-receive", "--json"],
+    ["versions", "view", edgeVersionID, "--name", "witself-agent-email-receive", "--json"],
   ]);
-  await runtimeClient.getControlPlaneReadiness("https://control.example/");
+  await runtimeClient.getControlPlaneReadiness("https://self.witwave.ai/");
   await runtimeClient.getControlPlaneProjection(
-    "https://control.example/", "witmail.net", realmLabel,
+    "https://self.witwave.ai/", "witmail.net", realmLabel,
   );
   assert.deepEqual(requests.map(({ url }) => url), [
-    "https://control.example/v1/email/managed-delivery/readiness",
-    `https://control.example/v1/email/realm-routes/witmail.net/${realmLabel}`,
+    "https://self.witwave.ai/v1/email/managed-delivery/readiness",
+    `https://self.witwave.ai/v1/email/realm-routes/witmail.net/${realmLabel}`,
   ]);
   assert.equal(
     requests.every(({ headers }) => headers.Authorization === `Bearer ${"x".repeat(32)}`),
@@ -687,6 +851,8 @@ test("primary runtime binds route mutations to the active control-plane lease au
   };
   let renewals = 0;
   const runtimeClient = primaryRoutingRuntime({
+    CLOUDFLARE_ACCOUNT_ID: accountID,
+    CLOUDFLARE_API_TOKEN: "canonical-token",
     CONTROL_PLANE_EDGE_TOKEN: "x".repeat(32),
   }, {
     inspect,
@@ -746,10 +912,10 @@ test("primary runtime binds route mutations to the active control-plane lease au
   assert.equal(evidence.generation, 13);
   assert.equal(inspections.length, 4);
   assert.deepEqual(requests.map(({ url }) => url), [
-    "https://control.example/v1/email/operations-lease:acquire",
-    "https://control.example/v1/email/operations-lease:renew",
-    "https://control.example/v1/email/operations-lease:renew",
-    "https://control.example/v1/email/operations-lease:release",
+    "https://self.witwave.ai/v1/email/operations-lease:acquire",
+    "https://self.witwave.ai/v1/email/operations-lease:renew",
+    "https://self.witwave.ai/v1/email/operations-lease:renew",
+    "https://self.witwave.ai/v1/email/operations-lease:release",
   ]);
   assert.equal(
     requests.every(({ headers }) =>

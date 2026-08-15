@@ -2,12 +2,17 @@
 import { randomUUID } from "node:crypto";
 
 import { CloudflareAPI } from "./cloudflare.mjs";
+import {
+  assertProductionCloudflareIdentity,
+} from "./wrangler-environment.mjs";
+import { parseRouteAddress } from "../src/directory.mjs";
 
-const ACCOUNT_ID = /^[0-9a-f]{32}$/;
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SIMPLE_LOCAL_PART = /^[a-z0-9][a-z0-9._%+-]*$/;
 const SIMPLE_DOMAIN = /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/;
-const PILOT_DOMAIN = "agent-mail.witwave.ai";
+const PRODUCTION_DOMAIN = "witmail.net";
+const PRODUCTION_CANARY_FROM = "canary@send.witmail.net";
+const CANONICAL_REALM_LABEL = /^[a-z2-7]{16}$/;
 const MAXIMUM_PROBE_BYTES = 16 * 1024;
 const MINIMUM_PROBE_BYTES = 2 * 1024;
 const SYNTHETIC_ATTACHMENT = Buffer.from(
@@ -46,10 +51,31 @@ function emailAddress(value, name) {
   return normalized;
 }
 
-function pilotRecipient(value) {
+function productionRecipient(value) {
   const normalized = emailAddress(value, "AGENT_EMAIL_STORAGE_PROBE_TO");
-  if (!normalized.endsWith(`@${PILOT_DOMAIN}`)) {
-    throw new Error(`AGENT_EMAIL_STORAGE_PROBE_TO must use @${PILOT_DOMAIN}`);
+  let parsed;
+  try {
+    parsed = parseRouteAddress(normalized, false);
+  } catch {
+    throw new Error(
+      `AGENT_EMAIL_STORAGE_PROBE_TO must be one canonical @${PRODUCTION_DOMAIN} address`,
+    );
+  }
+  if (parsed.domain !== PRODUCTION_DOMAIN ||
+      !CANONICAL_REALM_LABEL.test(parsed.realmLabel)) {
+    throw new Error(
+      `AGENT_EMAIL_STORAGE_PROBE_TO must be one canonical @${PRODUCTION_DOMAIN} address`,
+    );
+  }
+  return normalized;
+}
+
+function productionSender(value) {
+  const normalized = emailAddress(value, "AGENT_EMAIL_STORAGE_PROBE_FROM");
+  if (normalized !== PRODUCTION_CANARY_FROM) {
+    throw new Error(
+      `AGENT_EMAIL_STORAGE_PROBE_FROM must be ${PRODUCTION_CANARY_FROM}`,
+    );
   }
   return normalized;
 }
@@ -59,24 +85,12 @@ function base64Lines(value) {
 }
 
 export function storageProbeConfiguration(env = process.env) {
-  const accountID = required(
-    env.CLOUDFLARE_ACCOUNT_ID,
-    "CLOUDFLARE_ACCOUNT_ID",
-  );
-  if (!ACCOUNT_ID.test(accountID)) {
-    throw new Error("CLOUDFLARE_ACCOUNT_ID is missing or invalid");
-  }
+  const identity = assertProductionCloudflareIdentity(env);
   return {
-    accountID,
-    cloudflareToken: required(
-      env.CLOUDFLARE_API_TOKEN,
-      "CLOUDFLARE_API_TOKEN",
-    ),
-    from: emailAddress(
-      env.AGENT_EMAIL_STORAGE_PROBE_FROM,
-      "AGENT_EMAIL_STORAGE_PROBE_FROM",
-    ),
-    to: pilotRecipient(env.AGENT_EMAIL_STORAGE_PROBE_TO),
+    accountID: identity.account_id,
+    cloudflareToken: env.CLOUDFLARE_API_TOKEN,
+    from: productionSender(env.AGENT_EMAIL_STORAGE_PROBE_FROM),
+    to: productionRecipient(env.AGENT_EMAIL_STORAGE_PROBE_TO),
   };
 }
 

@@ -400,6 +400,36 @@ test("email edge rollback proves a final renewal and exact release", async () =>
   ]);
 });
 
+test("guarded command uses exactly the supplied environment", async () => {
+  const sentinel = "WITSELF_GUARDED_PARENT_SENTINEL";
+  const included = "WITSELF_GUARDED_INCLUDED";
+  const previous = process.env[sentinel];
+  process.env[sentinel] = "must-not-inherit";
+  try {
+    await runLeaseGuardedCommand(
+      process.execPath,
+      [
+        "-e",
+        `if (process.env[${JSON.stringify(included)}] !== "supplied-only" ||
+            process.env.WITSELF_GUARDED_SECOND !== "second-supplied" ||
+            Object.hasOwn(process.env, ${JSON.stringify(sentinel)})) {
+          process.exit(23);
+        }`,
+      ],
+      {
+        env: {
+          [included]: "supplied-only",
+          WITSELF_GUARDED_SECOND: "second-supplied",
+        },
+        timeoutMs: 2_000,
+      },
+    );
+  } finally {
+    if (previous === undefined) delete process.env[sentinel];
+    else process.env[sentinel] = previous;
+  }
+});
+
 test("a blocked deployment renews its lease and releases it in finally", async () => {
   const harness = leaseEnvironment();
   let callbackEvidence;

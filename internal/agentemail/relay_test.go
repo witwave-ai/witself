@@ -29,6 +29,19 @@ func TestVerifyRelayBindsEveryPilotFieldAndRawBody(t *testing.T) {
 		t.Fatal(err)
 	}
 	signature := ed25519.Sign(privateKey, input)
+	envelope, err := VerifyRelayEnvelope(
+		now.Add(time.Minute),
+		5*time.Minute,
+		publicKey,
+		metadata,
+		signature,
+	)
+	if err != nil {
+		t.Fatalf("VerifyRelayEnvelope: %v", err)
+	}
+	if err := VerifyRelayBody(envelope, raw); err != nil {
+		t.Fatalf("VerifyRelayBody: %v", err)
+	}
 	verified, err := VerifyRelay(now.Add(time.Minute), 5*time.Minute, publicKey, metadata, raw, signature)
 	if err != nil {
 		t.Fatalf("VerifyRelay: %v", err)
@@ -86,6 +99,18 @@ func TestVerifyRelayRejectsReplayBodyAndEncodingFailures(t *testing.T) {
 	if _, err := VerifyRelay(now.Add(6*time.Minute), 5*time.Minute, publicKey, metadata, raw, signature); !errors.Is(err, ErrRelayTimestampInvalid) {
 		t.Fatalf("stale timestamp error = %v", err)
 	}
+	if _, err := VerifyRelayEnvelope(
+		now,
+		5*time.Minute,
+		publicKey,
+		metadata,
+		make([]byte, ed25519.SignatureSize),
+	); !errors.Is(err, ErrRelaySignatureInvalid) {
+		t.Fatalf("envelope signature error = %v", err)
+	}
+	if err := VerifyRelayBody(metadata, append(raw, '!')); !errors.Is(err, ErrRelayBodyMismatch) {
+		t.Fatalf("body-only mismatch error = %v", err)
+	}
 	if _, err := VerifyRelay(now, 5*time.Minute, publicKey, metadata, append(raw, '!'), signature); !errors.Is(err, ErrRelayBodyMismatch) {
 		t.Fatalf("body mismatch error = %v", err)
 	}
@@ -107,7 +132,7 @@ func TestCanonicalSignatureInputRejectsNonCanonicalMetadata(t *testing.T) {
 		{},
 		{Timestamp: 1, KeyID: "pilot", Audience: "Cell_One", EnvelopeRecipient: "a@b", RawSize: 1, RawSHA256: string(make([]byte, 64))},
 		{Timestamp: 1, KeyID: "pilot", Audience: "cell", EnvelopeRecipient: "missing-at", RawSize: 1, RawSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-		{Timestamp: 1, KeyID: "pilot", Audience: "cell", EnvelopeRecipient: "a@b", RawSize: PilotMaximumRawBytes + 1, RawSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		{Timestamp: 1, KeyID: "pilot", Audience: "cell", EnvelopeRecipient: "a@b", RawSize: RelayMaximumRawBytes + 1, RawSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
 	}
 	for i, metadata := range cases {
 		if _, err := CanonicalSignatureInput(metadata); !errors.Is(err, ErrRelayMetadataInvalid) {
@@ -118,15 +143,15 @@ func TestCanonicalSignatureInputRejectsNonCanonicalMetadata(t *testing.T) {
 
 func TestRelayTechnicalRawSizeBoundaryIsTwentyFiveMiB(t *testing.T) {
 	const want = 25 * 1024 * 1024
-	if PilotMaximumRawBytes != want {
-		t.Fatalf("PilotMaximumRawBytes = %d, want %d", PilotMaximumRawBytes, want)
+	if RelayMaximumRawBytes != want {
+		t.Fatalf("RelayMaximumRawBytes = %d, want %d", RelayMaximumRawBytes, want)
 	}
 	metadata := RelayMetadata{
 		Timestamp:         1,
 		KeyID:             "pilot",
 		Audience:          "cell",
 		EnvelopeRecipient: "a@b",
-		RawSize:           PilotMaximumRawBytes,
+		RawSize:           RelayMaximumRawBytes,
 		RawSHA256:         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 	}
 	if _, err := CanonicalSignatureInput(metadata); err != nil {

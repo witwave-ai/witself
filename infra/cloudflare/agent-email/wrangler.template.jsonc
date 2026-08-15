@@ -3,7 +3,7 @@
 // DIRECTORY namespace. Its bounded stale-route fallback uses the authenticated
 // public control-plane URL. Generate wrangler.generated.jsonc with `npm run config`.
 {
-  "name": "witself-agent-email-pilot",
+  "name": "witself-agent-email-receive",
   "main": "src/index.js",
   "secrets": {
     "required": [

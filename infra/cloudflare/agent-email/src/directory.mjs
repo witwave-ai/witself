@@ -1,6 +1,7 @@
 import {
   verifyAgentEmailRouteProjectionSignature,
 } from "./route-signature.mjs";
+import { LEGACY_PILOT_WORKER } from "./worker-names.mjs";
 
 export const CONFIG_KEY = "pilot:config:v1";
 export const RECIPIENT_PREFIX = "pilot:recipient:v1:";
@@ -349,8 +350,8 @@ export function normalizePilotManifest(input) {
   if (realmLabel !== realmMatch[1]) throw new Error("pilot realm_label must match the realm id body");
   const domain = validateDomain(String(input.domain ?? ""));
   const workerName = String(input.worker_name ?? "");
-  if (!WORKER_NAME.test(workerName) || workerName !== "witself-agent-email-pilot") {
-    throw new Error("pilot manifest must target the isolated witself-agent-email-pilot Worker");
+  if (!WORKER_NAME.test(workerName) || workerName !== LEGACY_PILOT_WORKER) {
+    throw new Error(`pilot manifest must target the isolated ${LEGACY_PILOT_WORKER} Worker`);
   }
   const cellAudience = String(input.cell_audience ?? "");
   if (!AUDIENCE.test(cellAudience) || cellAudience.length > 128) {

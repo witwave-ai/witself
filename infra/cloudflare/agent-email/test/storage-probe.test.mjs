@@ -9,11 +9,11 @@ import {
 
 const correlationNonce = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const baseEnvironment = {
-  CLOUDFLARE_ACCOUNT_ID: "a".repeat(32),
+  CLOUDFLARE_ACCOUNT_ID: "8f0bf04a4e7aab3a8cc60f02cc8c8fdb",
   CLOUDFLARE_API_TOKEN: "sending-token",
-  AGENT_EMAIL_STORAGE_PROBE_FROM: "canary@witwave.ai",
+  AGENT_EMAIL_STORAGE_PROBE_FROM: "canary@send.witmail.net",
   AGENT_EMAIL_STORAGE_PROBE_TO:
-    "canary-a.abcdefghijklmnop@agent-mail.witwave.ai",
+    "canary-a.abcdefghijklmnop@witmail.net",
 };
 
 function cloudflareResponse(result) {
@@ -25,7 +25,7 @@ function cloudflareResponse(result) {
   });
 }
 
-test("storage probe configuration is bounded to the pilot domain", () => {
+test("storage probe configuration is bounded to a production canonical address", () => {
   const config = storageProbeConfiguration(baseEnvironment);
   assert.equal(config.to, baseEnvironment.AGENT_EMAIL_STORAGE_PROBE_TO);
   assert.equal(Object.hasOwn(config, "expectation"), false);
@@ -35,22 +35,43 @@ test("storage probe configuration is bounded to the pilot domain", () => {
       ...baseEnvironment,
       AGENT_EMAIL_STORAGE_PROBE_TO: "canary@example.com",
     }),
-    /must use @agent-mail\.witwave\.ai/,
+    /canonical @witmail\.net address/,
   );
   assert.throws(
     () => storageProbeConfiguration({
       ...baseEnvironment,
-      AGENT_EMAIL_STORAGE_PROBE_TO: "canary@agent-mail.witwave.ai.evil.test",
+      AGENT_EMAIL_STORAGE_PROBE_TO: "canary.abcdefghijklmnop@witmail.net.evil.test",
     }),
-    /must use @agent-mail\.witwave\.ai/,
+    /canonical @witmail\.net address/,
   );
   assert.throws(
     () => storageProbeConfiguration({
       ...baseEnvironment,
       AGENT_EMAIL_STORAGE_PROBE_TO:
-        "canary@agent-mail.witwave.ai\nBcc: attacker@example.com",
+        "canary.abcdefghijklmnop@witmail.net\nBcc: attacker@example.com",
     }),
     /invalid/,
+  );
+  assert.throws(
+    () => storageProbeConfiguration({
+      ...baseEnvironment,
+      CLOUDFLARE_ACCOUNT_ID: "a".repeat(32),
+    }),
+    /must identify production account/,
+  );
+  assert.throws(
+    () => storageProbeConfiguration({
+      ...baseEnvironment,
+      AGENT_EMAIL_STORAGE_PROBE_FROM: "canary@witwave.ai",
+    }),
+    /must be canary@send\.witmail\.net/,
+  );
+  assert.throws(
+    () => storageProbeConfiguration({
+      ...baseEnvironment,
+      AGENT_EMAIL_STORAGE_PROBE_TO: "canary-alias.readable@witmail.net",
+    }),
+    /canonical @witmail\.net address/,
   );
 });
 
@@ -102,7 +123,7 @@ test("storage probe uses send_raw and returns a value-free submission receipt", 
   assert.equal(calls.length, 1);
   assert.match(
     calls[0].url,
-    new RegExp(`/accounts/${"a".repeat(32)}/email/sending/send_raw$`),
+    new RegExp(`/accounts/${baseEnvironment.CLOUDFLARE_ACCOUNT_ID}/email/sending/send_raw$`),
   );
   assert.equal(calls[0].method, "POST");
   assert.equal(calls[0].headers.Authorization, "Bearer sending-token");
@@ -132,8 +153,8 @@ test("storage probe uses send_raw and returns a value-free submission receipt", 
 
   const output = JSON.stringify(result);
   assert.doesNotMatch(output, /sending-token/);
-  assert.doesNotMatch(output, /canary@witwave\.ai/);
-  assert.doesNotMatch(output, /agent-mail\.witwave\.ai/);
+  assert.doesNotMatch(output, /canary@send\.witmail\.net/);
+  assert.doesNotMatch(output, /witmail\.net/);
   assert.doesNotMatch(output, /multipart\/mixed/);
   assert.doesNotMatch(output, /provider-id/);
   assert.doesNotMatch(output, /delivered|queued|permanent_bounces/);

@@ -4383,7 +4383,8 @@ Subcommands:
 | `operator receive show\|enable\|disable` | Show or set one exact `--agent-id` or `--realm-id` receive layer using operator authentication. Agent and realm layers remain independent; output is lifecycle-only and contains no address or message metadata. A suspended account may show or disable either layer as a harm-reducing safety action, but enable remains active-account-only. |
 | `operator send show\|enable\|disable` | Show or set one exact `--agent-id` or `--realm-id` send layer using operator authentication. Effective send requires both layers plus account entitlement. A suspended account may show or disable, but cannot enable. The control is value-free and never grants access to mail content. |
 
-The outbound beta supports one recipient and plain UTF-8 text only. It does not
+The production outbound service currently supports one recipient and plain
+UTF-8 text only. It does not
 support HTML, attachments, CC/BCC, bulk delivery, caller-selected From, or
 caller-selected Reply-To. The cell derives From as the permanent canonical
 local part at `send.witmail.net` and Reply-To as the same local part at
@@ -4423,7 +4424,7 @@ work, account/password recovery, credential/domain transfer, consequential
 automation, and automated link following.
 
 Human `list`/`listen` output labels the displayed From column unverified. JSON
-mirrors [json-contracts.md](json-contracts.md#agent-email-pilot). Read-state,
+mirrors [json-contracts.md](json-contracts.md#agent-email). Read-state,
 code-consumption, processing completion, and acknowledgement are deliberately
 separate transitions. Message projections also carry the value-free
 `attachment_storage_bytes`, `retained_attachment_storage_bytes`, and

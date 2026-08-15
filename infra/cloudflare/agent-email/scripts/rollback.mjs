@@ -13,8 +13,15 @@ import {
 import {
   runLeaseGuardedCommand,
 } from "../../control-plane/scripts/agent-email-lease-guarded-command.mjs";
+import {
+  assertProductionCloudflareIdentity,
+  sanitizedWranglerEnvironment,
+  sanitizedWranglerInspectionEnvironment,
+  withReviewedWranglerEnvironmentFile,
+} from "./wrangler-environment.mjs";
+import { PRODUCTION_RECEIVE_WORKER } from "../src/worker-names.mjs";
 
-const WORKER_NAME = "witself-agent-email-pilot";
+const WORKER_NAME = PRODUCTION_RECEIVE_WORKER;
 const OPERATIONS_LEASE_ENDPOINT = "https://self.witwave.ai";
 const PLAN_SCHEMA = "witself.agent-email-edge-rollback-plan.v1";
 const RECEIPT_SCHEMA = "witself.agent-email-edge-rollback-receipt.v1";
@@ -231,18 +238,19 @@ function inspectVersion(version, label, {
         "agent-mail.witwave.ai") {
     throw new Error(`${label} Worker domain contract drifted`);
   }
+  const controlPlaneOrigin = plain(bindings, "CONTROL_PLANE_URL", label);
   let controlPlaneURL;
   try {
-    controlPlaneURL = new URL(plain(bindings, "CONTROL_PLANE_URL", label));
+    controlPlaneURL = new URL(controlPlaneOrigin);
   } catch {
     throw new Error(`${label} control-plane origin was invalid`);
   }
   if (controlPlaneURL.protocol !== "https:" || controlPlaneURL.username ||
       controlPlaneURL.password || controlPlaneURL.search || controlPlaneURL.hash ||
       !controlPlaneURL.hostname || controlPlaneURL.hostname === "localhost" ||
-      controlPlaneURL.toString() !== plain(bindings, "CONTROL_PLANE_URL", label) ||
-      (controlPlaneURL.pathname !== "/" && controlPlaneURL.pathname !== "")) {
-    throw new Error(`${label} control-plane origin was invalid`);
+      controlPlaneURL.toString() !== controlPlaneOrigin ||
+      controlPlaneOrigin !== `${OPERATIONS_LEASE_ENDPOINT}/`) {
+    throw new Error(`${label} control-plane origin was not canonical`);
   }
   if (!/^[a-z][a-z0-9_-]{0,63}$/.test(plain(bindings, "RELAY_KEY_ID", label))) {
     throw new Error(`${label} relay key identifier was invalid`);
@@ -512,9 +520,10 @@ export async function applyRollbackPlan(plan, suppliedSHA256, runtime) {
   );
 }
 
-function wranglerJSON(args) {
+function wranglerJSON(args, environment = process.env) {
   const result = spawnSync("wrangler", args, {
     encoding: "utf8",
+    env: sanitizedWranglerInspectionEnvironment(environment),
     stdio: ["ignore", "pipe", "pipe"],
   });
   if (result.error || result.status !== 0) {
@@ -531,10 +540,10 @@ export function rollbackDeploymentArguments(versionID) {
   if (!UUID.test(String(versionID ?? ""))) {
     throw new Error("rollback candidate Worker version id was invalid");
   }
-  return [
+  return withReviewedWranglerEnvironmentFile([
     "versions", "deploy", `${versionID}@100`, "--name", WORKER_NAME,
     "--message", `Guarded rollback to ${versionID}`,
-  ];
+  ]);
 }
 
 export function rollbackOperationsLeaseRuntime(
@@ -561,31 +570,55 @@ export function rollbackOperationsLeaseRuntime(
   });
 }
 
-function liveRuntime() {
+export function rollbackLiveRuntime(
+  environment = process.env,
+  {
+    inspect = wranglerJSON,
+    interactive = () => process.stdin.isTTY === true && process.stdout.isTTY === true,
+    operationsLease = rollbackOperationsLeaseRuntime(environment),
+    runCommand = runLeaseGuardedCommand,
+  } = {},
+) {
+  assertProductionCloudflareIdentity(environment);
+  if (typeof inspect !== "function" || typeof interactive !== "function" ||
+      !operationsLease || typeof operationsLease.run !== "function" ||
+      typeof runCommand !== "function") {
+    throw new Error("production rollback runtime was invalid");
+  }
+  const inspectionEnvironment = Object.freeze(
+    sanitizedWranglerInspectionEnvironment(environment),
+  );
+  const mutationEnvironment = Object.freeze(
+    sanitizedWranglerEnvironment(environment),
+  );
   return {
-    loadStatus: async () => wranglerJSON([
+    loadStatus: async () => inspect(withReviewedWranglerEnvironmentFile([
       "deployments", "status", "--name", WORKER_NAME, "--json",
-    ]),
-    loadVersion: async (versionID) => wranglerJSON([
+    ]), inspectionEnvironment),
+    loadVersion: async (versionID) => inspect(withReviewedWranglerEnvironmentFile([
       "versions", "view", versionID, "--name", WORKER_NAME, "--json",
-    ]),
+    ]), inspectionEnvironment),
     deploy: async (versionID, { signal } = {}) => {
       // Worker versions capture encrypted secret values. Wrangler deliberately
       // asks for an extra confirmation when a candidate would restore an older
       // secret. Never auto-accept that warning: a non-interactive rollback
       // could silently reactivate a compromised relay or fallback credential.
-      if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) {
+      if (!interactive()) {
         throw new Error(
           "rollback apply requires an interactive terminal for Cloudflare secret continuity review",
         );
       }
-      await runLeaseGuardedCommand(
+      await runCommand(
         "wrangler",
         rollbackDeploymentArguments(versionID),
-        { signal, timeoutMs: 20 * 60_000 },
+        {
+          env: mutationEnvironment,
+          signal,
+          timeoutMs: 20 * 60_000,
+        },
       );
     },
-    operationsLease: rollbackOperationsLeaseRuntime(),
+    operationsLease,
   };
 }
 
@@ -624,7 +657,7 @@ export function parseArgs(argv) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  const runtime = liveRuntime();
+  const runtime = rollbackLiveRuntime();
   if (options.apply) {
     let plan;
     try {

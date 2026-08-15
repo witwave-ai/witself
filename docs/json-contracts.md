@@ -1116,8 +1116,8 @@ Rules:
   never a processing fence, availability signal, authority grant, message body,
   or acknowledgement. `unavailable:true` means only that this additive
   projection failed; it must not be reported as an idle mailbox.
-- `email_checkpoint` is a separate authenticated, value-free hint for the
-  default-off receive-only email pilot. It is emitted only for an enrolled
+- `email_checkpoint` is a separate authenticated, value-free hint for
+  account-policy-gated inbound agent email. It is emitted only for an enabled
   realm/agent when the projection is selected. `pending:true` requires
   `mailbox_pending:true`. `receive_state` is effective lifecycle state;
   `agent_receive_state` and `realm_receive_state` identify which independent
@@ -1135,11 +1135,12 @@ Rules:
   `sensitive` marker. The ordinary HTTP and manual CLI posture is redacted by
   default. No option can select sealed secret or TOTP values into this digest.
 
-## Agent Email Pilot
+## Agent Email
 
-These contracts exist only behind the default-off, exact one-realm/5–10-agent
-Cloudflare receive pilot. For owner contracts, the full agent token and the
-server's process-lifetime allowlist determine the owner; clients cannot supply
+These contracts exist only behind a valid, default-off receive configuration.
+Production uses an exact account cohort; the retired compatibility mode keeps
+the older one-realm/5–10-agent boundary. For owner contracts, the full agent
+token and the server's process-lifetime scope determine the owner; clients cannot supply
 account, realm, mailbox, or owner selectors. The separate value-free operator
 controls below bind one allowlisted agent or realm target from the route path.
 
@@ -1147,11 +1148,11 @@ controls below bind one allowlisted agent or realm target from the route path.
 not define a website, human/staff mailboxes, marketing mail, or a generic
 platform-notification sender. Required `postmaster@witmail.net` and
 `abuse@witmail.net` destinations are operator-routed operational exceptions.
-The outbound beta uses separately isolated sending infrastructure and remains
+The production outbound service uses separately isolated sending infrastructure and remains
 agent-email-only. Provider dispatch is dark by default even where catalog
 entitlement is present.
 
-### Outbound agent-email beta
+### Outbound agent email
 
 Receive and send are separate account features. Personal has neither;
 Professional has receive only; Team and Enterprise have both. The installed
@@ -2026,8 +2027,9 @@ a retired row) or any custom-domain receipt exists.
 
 ### Realm-route edge projection
 
-The pilot Worker remains backward compatible with its literal-recipient
-directory. Its additive dynamic route cache uses this collision-safe KV key:
+The production receive bundle remains read-compatible with the retired
+literal-recipient directory for controlled cleanup. Its production dynamic
+route cache uses this collision-safe KV key:
 
 ```text
 email:realm-route:v1:<canonical-domain>:<canonical-or-alias-realm-label>
@@ -2384,7 +2386,8 @@ shape (the list envelope uses `next_cursor`; listen uses `timed_out`):
 ```
 
 All envelope/header/display fields above are untrusted external data. In the
-pilot, `spf_result`, `dkim_result`, `dmarc_result`, and `spam_verdict` are always
+current Cloudflare receive integration, `spf_result`, `dkim_result`,
+`dmarc_result`, and `spam_verdict` are always
 `unknown`; `sender_verification_state` is always `unverified`; an authoritative
 provider-message-id field is absent. A suspected retry adds
 `possible_duplicate:true` and `possible_duplicate_of_message_id` but is still a

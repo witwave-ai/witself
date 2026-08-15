@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   chmod,
+  mkdir,
   mkdtemp,
   readFile,
   rm,
@@ -21,6 +22,7 @@ import {
   privateDeploymentConfigMain,
   verifyCurrentWorkerDeployment,
   verifyWorkerVersion,
+  wranglerJSON as verifyWranglerJSON,
 } from "../scripts/verify-deployment.mjs";
 import {
   bootstrapReleaseDeploymentArguments,
@@ -30,11 +32,15 @@ import {
   isLeaseBootstrapTargetRelease,
   preflightManagedCohortProtocolBootstrapPredecessor,
   preflightManagedCohortProtocolUpgrade,
+  productionDeploymentEnvironments,
   releaseDeploymentArguments,
+  runProductionWranglerDeploy,
   verifyManagedCohortProtocolBootstrapConvergence,
   verifyManagedCohortProtocolBootstrapPredecessor,
   verifyManagedCohortProtocolBootstrapTarget,
   verifyManagedCohortProtocolUpgrade,
+  withPrivateDeploymentConfigCleanup,
+  withReleaseInputIntegrity,
 } from "../scripts/deploy-release.mjs";
 import {
   sourceIdentity,
@@ -46,10 +52,15 @@ import {
   assertCustomDomainSecretsDark,
   CANONICAL_EMAIL_DARK_SECRET_NAMES,
   CUSTOM_DOMAIN_DARK_SECRET_NAMES,
+  inspectWorkerSecrets,
 } from "../scripts/assert-custom-domain-dark.mjs";
 import {
   createPrivateDeploymentConfig,
 } from "../scripts/private-deployment-config.mjs";
+import {
+  PRODUCTION_CLOUDFLARE_ACCOUNT_ID,
+  WRANGLER_PRODUCTION_ENV_FILE,
+} from "../../agent-email/scripts/wrangler-environment.mjs";
 
 const root = new URL("..", import.meta.url);
 const renderer = new URL("../scripts/render-wrangler.mjs", import.meta.url);
@@ -68,6 +79,70 @@ const bootstrapConvergedVersionID = "66666666-6666-4666-8666-666666666666";
 const cohortAccount = "acc_abcdefghijkl2345";
 const secondCohortAccount = "acc_bcdefghijklm2345";
 
+function hostileWranglerEnvironment() {
+  return {
+    PATH: "/safe/bin",
+    CLOUDFLARE_ACCOUNT_ID: PRODUCTION_CLOUDFLARE_ACCOUNT_ID,
+    CLOUDFLARE_API_TOKEN: "canonical-token",
+    EMAIL_DIRECTORY_KV_ID: agentEmailDirectoryID,
+    AGENT_EMAIL_ROUTE_SIGNING_KEY_ID: routeSigningKeyID,
+    CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: cohortAccount,
+    CF_ACCOUNT_ID: "redirected-account",
+    CF_API_TOKEN: "redirected-token",
+    CONTROL_PLANE_EDGE_TOKEN: "lease-secret",
+    CONTROL_PLANE_URL: "https://redirect.invalid",
+    CLOUDFLARE_BASE_URL: "https://redirect.invalid/base",
+    CLOUDFLARE_API_BASE_URL: "https://redirect.invalid/client/v4",
+    CLOUDFLARE_ENV: "redirected-environment",
+    DOTENV_KEY: "dotenv://redirected-key",
+    WRANGLER_OUTPUT_FILE_PATH: "/tmp/redirected-output",
+    WRANGLER_CI_OVERRIDE_NAME: "redirected-worker",
+    NODE_OPTIONS: "--require=/tmp/redirected.cjs",
+  };
+}
+
+function assertSanitizedWranglerEnvironment(environment, inspection = false) {
+  assert.equal(environment.PATH, "/safe/bin");
+  assert.equal(
+    environment.CLOUDFLARE_ACCOUNT_ID,
+    PRODUCTION_CLOUDFLARE_ACCOUNT_ID,
+  );
+  assert.equal(environment.CLOUDFLARE_API_TOKEN, "canonical-token");
+  assert.equal(environment.EMAIL_DIRECTORY_KV_ID, agentEmailDirectoryID);
+  assert.equal(
+    environment.AGENT_EMAIL_ROUTE_SIGNING_KEY_ID,
+    routeSigningKeyID,
+  );
+  assert.equal(
+    environment.CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST,
+    cohortAccount,
+  );
+  for (const name of [
+    "CF_ACCOUNT_ID",
+    "CF_API_TOKEN",
+    "CONTROL_PLANE_EDGE_TOKEN",
+    "CONTROL_PLANE_URL",
+    "CLOUDFLARE_BASE_URL",
+    "CLOUDFLARE_API_BASE_URL",
+    "CLOUDFLARE_ENV",
+    "DOTENV_KEY",
+    "WRANGLER_OUTPUT_FILE_PATH",
+    "WRANGLER_CI_OVERRIDE_NAME",
+    "NODE_OPTIONS",
+  ]) {
+    assert.equal(Object.hasOwn(environment, name), false, name);
+  }
+  assert.equal(environment.WRANGLER_WRITE_LOGS, "false");
+  assert.equal(environment.WRANGLER_LOG_SANITIZE, "true");
+  assert.equal(environment.WRANGLER_SEND_METRICS, "false");
+  assert.equal(environment.WRANGLER_SEND_ERROR_REPORTS, "false");
+  assert.equal(
+    Object.hasOwn(environment, "WRANGLER_LOG"),
+    !inspection,
+  );
+  if (!inspection) assert.equal(environment.WRANGLER_LOG, "error");
+}
+
 test("legacy lease bootstrap is pinned to the exact recovery release", () => {
   assert.equal(isLeaseBootstrapTargetRelease("0.0.241"), false);
   assert.equal(isLeaseBootstrapTargetRelease("0.0.242"), true);
@@ -75,22 +150,74 @@ test("legacy lease bootstrap is pinned to the exact recovery release", () => {
 });
 
 test("private deployment verification pins path depth, prefix, modes, and file type", async () => {
-  const cloudflareRoot = resolve(fileURLToPath(new URL("../../", import.meta.url)));
-  const entrypoint = resolve(fileURLToPath(new URL("../src/index.js", import.meta.url)));
+  const snapshotRoot = await mkdtemp(join(
+    tmpdir(),
+    "witself-control-plane-release-",
+  ));
+  const repositoryRoot = join(snapshotRoot, "repository");
+  const cloudflareRoot = join(repositoryRoot, "infra", "cloudflare");
+  const controlPlaneRoot = join(cloudflareRoot, "control-plane");
+  const entrypoint = join(controlPlaneRoot, "src", "index.js");
+  await mkdir(dirname(entrypoint), { recursive: true });
+  await mkdir(join(snapshotRoot, "work"), { mode: 0o700 });
+  await writeFile(entrypoint, "export default {};\n");
   const config = await createPrivateDeploymentConfig({
     prefix: "witself-control-plane-deploy-",
     parentDirectory: cloudflareRoot,
     entrypointTarget: entrypoint,
     render: (path) => writeFile(
       path,
-      '{"main": "src/index.js"}\n',
+      `${JSON.stringify({
+        name: "witself-private-config-regression",
+        main: "src/index.js",
+        compatibility_date: "2026-07-21",
+        workers_dev: false,
+        preview_urls: false,
+      }, null, 2)}\n`,
       { mode: 0o600 },
     ),
   });
   let symlinkDirectory = "";
   try {
+    await chmod(entrypoint, 0o444);
+    await chmod(repositoryRoot, 0o555);
     assert.equal(
-      privateDeploymentConfigMain(config.path),
+      privateDeploymentConfigMain(config.path, controlPlaneRoot),
+      "../control-plane/src/index.js",
+    );
+    const wrangler = join(
+      fileURLToPath(root),
+      "node_modules",
+      "wrangler",
+      "bin",
+      "wrangler.js",
+    );
+    const dryRun = spawnSync(process.execPath, [
+      wrangler,
+      "deploy",
+      "--dry-run",
+      "--config", config.path,
+      "--outdir", join(snapshotRoot, "work", "wrangler-dry-run"),
+      "--env-file", WRANGLER_PRODUCTION_ENV_FILE,
+    ], {
+      cwd: fileURLToPath(root),
+      encoding: "utf8",
+      env: {
+        PATH: process.env.PATH,
+        WRANGLER_SEND_METRICS: "false",
+        WRANGLER_SEND_ERROR_REPORTS: "false",
+        WRANGLER_WRITE_LOGS: "false",
+      },
+      timeout: 60_000,
+    });
+    assert.equal(
+      dryRun.status,
+      0,
+      `pinned Wrangler dry-run failed: ${String(dryRun.stderr ?? "")}`,
+    );
+    await config.assertUnchanged();
+    assert.equal(
+      privateDeploymentConfigMain(config.path, controlPlaneRoot),
       "../control-plane/src/index.js",
     );
     assert.throws(
@@ -98,7 +225,7 @@ test("private deployment verification pins path depth, prefix, modes, and file t
         cloudflareRoot,
         "witself-control-plane-deploy-too-long",
         "wrangler.generated.jsonc",
-      )),
+      ), controlPlaneRoot),
       /exact private control-plane configuration path/,
     );
     assert.throws(
@@ -107,19 +234,19 @@ test("private deployment verification pins path depth, prefix, modes, and file t
         "nested",
         "witself-control-plane-deploy-ABC123",
         "wrangler.generated.jsonc",
-      )),
+      ), controlPlaneRoot),
       /exact private control-plane configuration path/,
     );
 
     await chmod(config.path, 0o600);
     assert.throws(
-      () => privateDeploymentConfigMain(config.path),
+      () => privateDeploymentConfigMain(config.path, controlPlaneRoot),
       /immutable private configuration metadata/,
     );
     await chmod(config.path, 0o400);
     await chmod(dirname(config.path), 0o755);
     assert.throws(
-      () => privateDeploymentConfigMain(config.path),
+      () => privateDeploymentConfigMain(config.path, controlPlaneRoot),
       /immutable private configuration metadata/,
     );
     await chmod(dirname(config.path), 0o700);
@@ -139,15 +266,100 @@ test("private deployment verification pins path depth, prefix, modes, and file t
       () => privateDeploymentConfigMain(join(
         symlinkDirectory,
         "wrangler.generated.jsonc",
-      )),
+      ), controlPlaneRoot),
       /immutable private configuration metadata/,
     );
   } finally {
+    await chmod(repositoryRoot, 0o700);
     await config.cleanup();
     if (symlinkDirectory !== "") {
       await rm(symlinkDirectory, { recursive: true, force: true });
     }
+    await rm(snapshotRoot, { recursive: true, force: true });
   }
+});
+
+test("deployment preserves both operation and private-config cleanup failures", async () => {
+  const operationFailure = new Error("simulated deploy failure");
+  const cleanupFailure = new Error("simulated cleanup failure");
+  let cleanupCalls = 0;
+  await assert.rejects(
+    withPrivateDeploymentConfigCleanup(
+      {
+        cleanup: async () => {
+          cleanupCalls++;
+          throw cleanupFailure;
+        },
+      },
+      async () => { throw operationFailure; },
+    ),
+    (error) => error instanceof AggregateError &&
+      error.errors.length === 2 &&
+      error.errors[0] === operationFailure &&
+      error.errors[1] === cleanupFailure,
+  );
+  assert.equal(cleanupCalls, 1);
+});
+
+test("deployment cleanup preserves every release-artifact failure", async () => {
+  const operationFailure = new Error("simulated provider mutation failure");
+  const configCleanupFailure = new Error("simulated config cleanup failure");
+  const sourceCleanupFailure = new Error("simulated source cleanup failure");
+  await assert.rejects(
+    withPrivateDeploymentConfigCleanup(
+      {
+        cleanup: async () => {
+          throw new AggregateError([
+            configCleanupFailure,
+            sourceCleanupFailure,
+          ], "snapshot cleanup failed");
+        },
+      },
+      async () => { throw operationFailure; },
+    ),
+    (error) => error instanceof AggregateError &&
+      error.errors.length === 3 &&
+      error.errors[0] === operationFailure &&
+      error.errors[1] === configCleanupFailure &&
+      error.errors[2] === sourceCleanupFailure,
+  );
+});
+
+test("every provider operation is fenced by immutable release assertions", async () => {
+  const calls = [];
+  let valid = true;
+  const release = {
+    assertUnchanged: async () => {
+      calls.push("assert");
+      if (!valid) throw new Error("release snapshot changed");
+    },
+  };
+  const result = await withReleaseInputIntegrity(release, async () => {
+    calls.push("operation");
+    return "ok";
+  });
+  assert.equal(result, "ok");
+  assert.deepEqual(calls, ["assert", "operation", "assert"]);
+
+  valid = false;
+  let invoked = false;
+  await assert.rejects(
+    withReleaseInputIntegrity(release, async () => { invoked = true; }),
+    /release snapshot changed/,
+  );
+  assert.equal(invoked, false, "a bad snapshot must fail before provider I/O");
+
+  valid = true;
+  const operationFailure = new Error("provider failed");
+  await assert.rejects(
+    withReleaseInputIntegrity(release, async () => {
+      valid = false;
+      throw operationFailure;
+    }),
+    (error) => error instanceof AggregateError &&
+      error.errors[0] === operationFailure &&
+      /release snapshot changed/.test(error.errors[1]?.message),
+  );
 });
 
 test("generic control-plane secret mutation is explicitly break-glass", async () => {
@@ -279,12 +491,12 @@ test("managed cohort protocol preflight inspects the exact active email edge bef
     operations_lease_origin: "https://self.witwave.ai",
   });
   assert.deepEqual(calls, [
-    ["deployments", "status", "--name", "witself-agent-email-pilot", "--json"],
+    ["deployments", "status", "--name", "witself-agent-email-receive", "--json"],
     [
       "versions", "view", emailEdgeVersionID,
-      "--name", "witself-agent-email-pilot", "--json",
+      "--name", "witself-agent-email-receive", "--json",
     ],
-    ["deployments", "status", "--name", "witself-agent-email-pilot", "--json"],
+    ["deployments", "status", "--name", "witself-agent-email-receive", "--json"],
   ]);
   let inspected = false;
   assert.deepEqual(
@@ -1437,7 +1649,150 @@ test("Worker verifier follows the one production version through Wrangler JSON",
       ],
       operation: "inspect the current control-plane Worker version",
     },
+    {
+      args: [
+        "deployments", "status",
+        "--config", "/tmp/wrangler.jsonc",
+        "--name", "witself-control-plane",
+        "--json",
+      ],
+      operation: "reinspect the current control-plane deployment",
+    },
   ]);
+});
+
+test("Worker verifier rejects an active-version race after inspection", () => {
+  let call = 0;
+  assert.throws(() => verifyCurrentWorkerDeployment(
+    expectedIdentity(),
+    "/tmp/wrangler.jsonc",
+    () => {
+      call += 1;
+      if (call === 1) {
+        return { versions: [{ version_id: versionID, percentage: 100 }] };
+      }
+      if (call === 2) return deployedVersion();
+      return {
+        versions: [{
+          version_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          percentage: 100,
+        }],
+      };
+    },
+  ), /changed during exact provider inspection/);
+});
+
+test("standalone control-plane Wrangler inspections use sanitized environments", () => {
+  const environment = hostileWranglerEnvironment();
+  const calls = [];
+  const run = (command, args, options) => {
+    calls.push({ command, args, options });
+    return {
+      status: 0,
+      stdout: args[0] === "secret" ? "[]" : "{}",
+    };
+  };
+
+  assert.deepEqual(
+    inspectWorkerSecrets("/tmp/wrangler.jsonc", environment, run),
+    [],
+  );
+  assert.deepEqual(
+    verifyWranglerJSON(
+      ["deployments", "status", "--json"],
+      "inspect the current deployment",
+      environment,
+      run,
+    ),
+    {},
+  );
+  assert.equal(calls.length, 2);
+  for (const call of calls) {
+    assert.equal(call.command, "wrangler");
+    assert.deepEqual(call.args.slice(-2), [
+      "--env-file", WRANGLER_PRODUCTION_ENV_FILE,
+    ]);
+    assertSanitizedWranglerEnvironment(call.options.env, true);
+  }
+});
+
+test("every control-plane Wrangler path requires the exact production identity", () => {
+  for (const environment of [
+    { ...hostileWranglerEnvironment(), CLOUDFLARE_ACCOUNT_ID: "f".repeat(32) },
+    { ...hostileWranglerEnvironment(), CLOUDFLARE_API_TOKEN: "" },
+  ]) {
+    let calls = 0;
+    const run = () => { calls++; };
+    assert.throws(
+      () => inspectWorkerSecrets("/tmp/wrangler.jsonc", environment, run),
+      /production account|API_TOKEN/,
+    );
+    assert.throws(
+      () => verifyWranglerJSON(
+        ["deployments", "status", "--json"],
+        "inspect production",
+        environment,
+        run,
+      ),
+      /production account|API_TOKEN/,
+    );
+    assert.throws(
+      () => productionDeploymentEnvironments(environment),
+      /production account|API_TOKEN/,
+    );
+    assert.throws(
+      () => runProductionWranglerDeploy(["deploy"], {
+        environment,
+        runCommand: run,
+      }),
+      /production account|API_TOKEN/,
+    );
+    assert.equal(calls, 0, "invalid identity must fail before Wrangler");
+  }
+});
+
+test("control-plane deployment isolates Wrangler and nested Node environments", async () => {
+  const environment = hostileWranglerEnvironment();
+  const environments = productionDeploymentEnvironments(environment);
+  assertSanitizedWranglerEnvironment(environments.wranglerMutation);
+  assertSanitizedWranglerEnvironment(environments.wranglerInspection, true);
+  assertSanitizedWranglerEnvironment(environments.nestedRender);
+  assertSanitizedWranglerEnvironment(environments.nestedInspection, true);
+
+  const signal = new AbortController().signal;
+  const reviewedDirectory = await mkdtemp(join(
+    tmpdir(),
+    "witself-reviewed-env-test-",
+  ));
+  const reviewedEnvironmentFile = join(reviewedDirectory, "production.env");
+  await writeFile(
+    reviewedEnvironmentFile,
+    "# Intentionally empty: production Wrangler commands must not load local dotenv files.\n",
+  );
+  let command;
+  try {
+    await runProductionWranglerDeploy(
+      ["deploy", "--config", "/tmp/wrangler.jsonc", "--strict"],
+      {
+        environment,
+        signal,
+        cwd: reviewedDirectory,
+        reviewedEnvironmentFile,
+        runCommand: async (...args) => { command = args; },
+      },
+    );
+    assert.equal(command[0], "wrangler");
+    assert.deepEqual(command[1], [
+      "deploy", "--config", "/tmp/wrangler.jsonc", "--strict",
+      "--env-file", reviewedEnvironmentFile,
+    ]);
+    assert.equal(command[2].cwd, reviewedDirectory);
+    assert.equal(command[2].signal, signal);
+    assert.equal(command[2].timeoutMs, 5 * 60_000);
+    assertSanitizedWranglerEnvironment(command[2].env);
+  } finally {
+    await rm(reviewedDirectory, { recursive: true, force: true });
+  }
 });
 
 test("release deployment is pinned to the exact generated config", () => {
@@ -1505,12 +1860,32 @@ test("dark deployment refuses every persistent agent-email activation secret", a
   );
   assert.match(
     deploySource,
-    /createPrivateDeploymentConfig/,
-    "deployment must use a per-invocation immutable configuration",
+    /createControlPlaneReleaseSnapshot/,
+    "deployment must use a per-invocation immutable tagged release snapshot",
   );
   assert.match(
     deploySource,
-    /scripts", "assert-custom-domain-dark\.mjs/,
+    /assertCustomDomainSecretsDark\([\s\S]*?inspectWorkerSecrets\(/,
     "deployment must validate persistent activation secrets before upload",
+  );
+  assert.match(
+    deploySource,
+    /render-wrangler\.mjs"\)[\s\S]*?"--output", path[\s\S]*?env: commandEnvironments\.nestedRender/,
+    "renderer must retain only the sanitized render environment",
+  );
+  assert.match(
+    deploySource,
+    /inspectWorkerSecrets\([\s\S]*?commandEnvironments\.nestedInspection[\s\S]*?reviewedEnvironmentFile: layout\.reviewedEnvironmentFile/,
+    "nested secret validator must receive the inspection-safe environment",
+  );
+  assert.match(
+    deploySource,
+    /verify-deployment\.mjs"\)[\s\S]*?env: commandEnvironments\.nestedInspection/,
+    "nested deployment verifier must receive the inspection-safe environment",
+  );
+  assert.match(
+    deploySource,
+    /runProductionWranglerDeploy\([\s\S]*?environment: commandEnvironments\.wranglerMutation/,
+    "provider mutation must pass the explicit Wrangler mutation environment",
   );
 });

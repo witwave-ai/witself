@@ -5,7 +5,13 @@ import test from "node:test";
 
 import {
   assertCustomDomainDeliveryDark,
+  customDomainDarkInspectionEnvironment,
+  customDomainDarkSecretListArguments,
 } from "../scripts/assert-custom-domain-dark.mjs";
+import {
+  PRODUCTION_CLOUDFLARE_ACCOUNT_ID,
+  WRANGLER_PRODUCTION_ENV_FILE,
+} from "../scripts/wrangler-environment.mjs";
 
 const root = new URL("..", import.meta.url);
 const script = new URL("../scripts/render-wrangler.mjs", import.meta.url);
@@ -34,6 +40,63 @@ test("dark deployment refuses a persistent custom-domain delivery secret", () =>
     () => assertCustomDomainDeliveryDark([{ name: " delivery " }]),
     /invalid entry/,
   );
+  for (const forbidden of [
+    "LEGACY_PILOT_TRUSTED_INGEST_URL",
+    "LEGACY_PILOT_TRUSTED_CELL_AUDIENCE",
+  ]) {
+    assert.throws(
+      () => assertCustomDomainDeliveryDark([
+        { name: "CONTROL_PLANE_EDGE_TOKEN", type: "secret_text" },
+        { name: forbidden, type: "secret_text" },
+      ]),
+      new RegExp(`retired pilot trust secret ${forbidden} present`),
+    );
+  }
+});
+
+test("dark secret inspection scrubs poisoned Wrangler environment", () => {
+  const environment = customDomainDarkInspectionEnvironment({
+    PATH: "/safe/bin",
+    CLOUDFLARE_ACCOUNT_ID: PRODUCTION_CLOUDFLARE_ACCOUNT_ID,
+    CLOUDFLARE_API_TOKEN: "canonical-token",
+    CF_ACCOUNT_ID: "wrong-account",
+    CF_API_TOKEN: "wrong-token",
+    CONTROL_PLANE_EDGE_TOKEN: "must-not-reach-wrangler",
+    CONTROL_PLANE_URL: "https://attacker.invalid",
+    CLOUDFLARE_API_BASE_URL: "https://attacker.invalid",
+    WRANGLER_LOG_PATH: "/tmp/unsafe.log",
+    WRANGLER_OUTPUT_FILE_PATH: "/tmp/unsafe-output",
+    WRANGLER_CI_OVERRIDE_NAME: "wrong-worker",
+    NODE_OPTIONS: "--require attacker",
+  });
+  assert.equal(
+    environment.CLOUDFLARE_ACCOUNT_ID,
+    PRODUCTION_CLOUDFLARE_ACCOUNT_ID,
+  );
+  assert.equal(environment.CLOUDFLARE_API_TOKEN, "canonical-token");
+  for (const unsafe of [
+    "CF_ACCOUNT_ID",
+    "CF_API_TOKEN",
+    "CONTROL_PLANE_EDGE_TOKEN",
+    "CONTROL_PLANE_URL",
+    "CLOUDFLARE_API_BASE_URL",
+    "WRANGLER_LOG_PATH",
+    "WRANGLER_OUTPUT_FILE_PATH",
+    "WRANGLER_CI_OVERRIDE_NAME",
+    "NODE_OPTIONS",
+  ]) {
+    assert.equal(Object.hasOwn(environment, unsafe), false, unsafe);
+  }
+  assert.equal(environment.WRANGLER_WRITE_LOGS, "false");
+  assert.equal(environment.WRANGLER_LOG_SANITIZE, "true");
+});
+
+test("dark secret inspection pins Wrangler to the reviewed empty environment file", () => {
+  const config = "/private/wrangler.generated.jsonc";
+  assert.deepEqual(customDomainDarkSecretListArguments(config), [
+    "secret", "list", "--config", config, "--format", "json",
+    "--env-file", WRANGLER_PRODUCTION_ENV_FILE,
+  ]);
 });
 
 test("deployment config is email-only and cannot reuse the control-plane DIRECTORY id", async () => {
@@ -76,6 +139,7 @@ test("deployment config is email-only and cannot reuse the control-plane DIRECTO
   });
   assert.equal(rendered.status, 0, rendered.stderr);
   const config = await readFile(new URL("../wrangler.generated.jsonc", import.meta.url), "utf8");
+  assert.match(config, /"name"\s*:\s*"witself-agent-email-receive"/);
   assert.match(config, /"workers_dev"\s*:\s*false/);
   assert.match(config, /"preview_urls"\s*:\s*false/);
   assert.match(config, /"compatibility_flags"\s*:\s*\["global_fetch_strictly_public"\]/);

@@ -2,8 +2,10 @@ import { createHash } from "node:crypto";
 import {
   chmod,
   lstat,
+  mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -20,19 +22,62 @@ const MAX_CONFIG_BYTES = 5 * 1024 * 1024;
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const IMMUTABLE_FILE_MODE = 0o400;
 const WRANGLER_MAIN = '"main": "src/index.js"';
+const WRANGLER_STATE_DIRECTORY = ".wrangler";
+const WRANGLER_TEMP_DIRECTORY = "tmp";
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+async function privateWranglerStateIsSafe(directory) {
+  const wranglerDirectory = directory === ""
+    ? ""
+    : join(directory, WRANGLER_STATE_DIRECTORY);
+  const wranglerTempDirectory = wranglerDirectory === ""
+    ? ""
+    : join(wranglerDirectory, WRANGLER_TEMP_DIRECTORY);
+  try {
+    const [
+      wranglerMetadata,
+      wranglerEntries,
+      wranglerTempMetadata,
+      wranglerTempEntries,
+    ] = await Promise.all([
+      lstat(wranglerDirectory),
+      readdir(wranglerDirectory),
+      lstat(wranglerTempDirectory),
+      readdir(wranglerTempDirectory),
+    ]);
+    return wranglerMetadata.isDirectory() &&
+      !wranglerMetadata.isSymbolicLink() &&
+      (wranglerMetadata.mode & 0o777) === PRIVATE_DIRECTORY_MODE &&
+      JSON.stringify(wranglerEntries) ===
+        JSON.stringify([WRANGLER_TEMP_DIRECTORY]) &&
+      wranglerTempMetadata.isDirectory() &&
+      !wranglerTempMetadata.isSymbolicLink() &&
+      (wranglerTempMetadata.mode & 0o777) === PRIVATE_DIRECTORY_MODE &&
+      wranglerTempEntries.length === 0;
+  } catch {
+    return false;
+  }
+}
+
 async function readExactPrivateConfig(path, expectedSHA256 = "", directory = "") {
-  const [metadata, directoryMetadata] = await Promise.all([
-    lstat(path),
-    directory === "" ? null : lstat(directory),
-  ]);
+  const [metadata, directoryMetadata, directoryEntries, wranglerStateSafe] =
+    await Promise.all([
+      lstat(path),
+      directory === "" ? null : lstat(directory),
+      directory === "" ? null : readdir(directory),
+      directory === "" ? true : privateWranglerStateIsSafe(directory),
+    ]);
   if ((directoryMetadata != null &&
         (!directoryMetadata.isDirectory() || directoryMetadata.isSymbolicLink() ||
-         (directoryMetadata.mode & 0o777) !== PRIVATE_DIRECTORY_MODE)) ||
+         (directoryMetadata.mode & 0o777) !== PRIVATE_DIRECTORY_MODE ||
+         JSON.stringify(directoryEntries.sort()) !== JSON.stringify([
+           WRANGLER_STATE_DIRECTORY,
+           "wrangler.generated.jsonc",
+         ]) ||
+         !wranglerStateSafe)) ||
       !metadata.isFile() || metadata.isSymbolicLink() ||
       (metadata.mode & 0o777) !== IMMUTABLE_FILE_MODE ||
       metadata.size < 1 || metadata.size > MAX_CONFIG_BYTES) {
@@ -144,6 +189,13 @@ export async function createPrivateDeploymentConfig({
   let cleaned = false;
   try {
     await chmod(directory, PRIVATE_DIRECTORY_MODE);
+    const wranglerDirectory = join(directory, WRANGLER_STATE_DIRECTORY);
+    const wranglerTempDirectory = join(
+      wranglerDirectory,
+      WRANGLER_TEMP_DIRECTORY,
+    );
+    await mkdir(wranglerDirectory, { mode: PRIVATE_DIRECTORY_MODE });
+    await mkdir(wranglerTempDirectory, { mode: PRIVATE_DIRECTORY_MODE });
     await render(path);
     if (relocation) {
       await relocateWranglerEntrypoint(
@@ -180,7 +232,18 @@ export async function createPrivateDeploymentConfig({
     });
   } catch (error) {
     cleaned = true;
-    await rm(directory, { recursive: true, force: true }).catch(() => {});
+    let cleanupError;
+    try {
+      await rm(directory, { recursive: true, force: true });
+    } catch (failure) {
+      cleanupError = failure;
+    }
+    if (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        "private deployment configuration creation failed and cleanup was incomplete",
+      );
+    }
     throw error;
   }
 }

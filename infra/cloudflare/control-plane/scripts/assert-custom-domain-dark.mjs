@@ -2,6 +2,11 @@
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  assertProductionCloudflareIdentity,
+  sanitizedWranglerInspectionEnvironment,
+  withReviewedWranglerEnvironmentFile,
+} from "../../agent-email/scripts/wrangler-environment.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -45,6 +50,35 @@ export function assertCustomDomainSecretsDark(secrets) {
   }
 }
 
+export function inspectWorkerSecrets(
+  config,
+  environment = process.env,
+  run = spawnSync,
+  {
+    cwd = root,
+    reviewedEnvironmentFile,
+  } = {},
+) {
+  assertProductionCloudflareIdentity(environment);
+  const listed = run("wrangler", withReviewedWranglerEnvironmentFile(
+    ["secret", "list", "--config", config, "--format", "json"],
+    reviewedEnvironmentFile,
+  ), {
+    cwd,
+    env: sanitizedWranglerInspectionEnvironment(environment),
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (listed.error || listed.status !== 0) {
+    throw new Error("could not verify persistent Worker secret names");
+  }
+  try {
+    return JSON.parse(listed.stdout);
+  } catch {
+    throw new Error("Worker secret inventory was not valid JSON");
+  }
+}
+
 function parseArgs(argv) {
   let config = join(root, "wrangler.generated.jsonc");
   for (let i = 0; i < argv.length; i += 1) {
@@ -59,23 +93,7 @@ function parseArgs(argv) {
 
 function main() {
   const { config } = parseArgs(process.argv.slice(2));
-  const listed = spawnSync("wrangler", [
-    "secret", "list", "--config", config, "--format", "json",
-  ], {
-    cwd: root,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  if (listed.error || listed.status !== 0) {
-    throw new Error("could not verify persistent Worker secret names");
-  }
-  let secrets;
-  try {
-    secrets = JSON.parse(listed.stdout);
-  } catch {
-    throw new Error("Worker secret inventory was not valid JSON");
-  }
-  assertCustomDomainSecretsDark(secrets);
+  assertCustomDomainSecretsDark(inspectWorkerSecrets(config));
   process.stdout.write(
     "verified canonical and custom-domain activation secrets are absent\n",
   );

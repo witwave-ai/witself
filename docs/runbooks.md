@@ -462,6 +462,48 @@ Before any routing review, choose and verify operator-controlled destinations
 for `postmaster@witmail.net` and `abuse@witmail.net`. That is a human governance
 decision; do not silently route either role address to a personal mailbox.
 
+### Bootstrap the production receive Worker once
+
+The production service is `witself-agent-email-receive`; it is not the retired
+`witself-agent-email-pilot` Worker. A Worker rename does not transfer secrets,
+deployments, or routes. Before deploying a control plane whose release guard
+expects the production name, bootstrap the new Worker dark from that same clean
+tag. Use the existing email-route KV namespace ID and legacy physical title;
+never create a second namespace.
+
+Prepare a temporary mode-`0600` JSON secrets file outside Git containing
+exactly `CONTROL_PLANE_EDGE_TOKEN` and the base64 PKCS#8
+`RELAY_ED25519_PRIVATE_KEY`. With the cohort empty, both receive delivery gates
+false, the exact `witmail.net` account/zone/KV environment, and an API token
+that can read the complete Email Routing inventory in both managed zones, set
+`CLOUDFLARE_LEGACY_EMAIL_ZONE_ID` to the distinct `witwave.ai` zone ID, set
+`RELAY_ED25519_PUBLIC_KEY` to the reviewed canonical base64 raw public key and
+set the operator `CONTROL_PLANE_EDGE_TOKEN` to the byte-identical token in the
+secrets file. Then run:
+
+```sh
+cd infra/cloudflare/agent-email
+npm run bootstrap:production-receive -- \
+  --secrets-file /absolute/private/receive-bootstrap-secrets.json \
+  --receipt /absolute/private/receive-bootstrap-receipt.json
+```
+
+The command refuses an existing production Worker, checks that every retired
+Worker delivery trust anchor is absent, requires the `witmail.net` catch-all
+and all routes targeting either Witself email Worker to be disabled, and holds
+the global operations lease. The existing `witwave.ai` company-mail catch-all
+and unrelated forwarding rules may remain active, but their complete state is
+fingerprinted and neither may target a Witself email Worker. The command
+freezes the exact tagged Worker sources and writes a durable pending receipt
+before the provider mutation. The secrets file and receipt must both be
+outside the repository. It uploads both secrets with the initial tagged
+version and finalizes success only after the exact resulting deployment,
+unchanged predecessor and two-zone route inventories, lease release, and
+private-input cleanup are verified. A pending receipt means stop and
+reconcile; it is not permission to retry elsewhere. Securely remove the
+operator secrets file afterward. Keep the retired Worker deployed and
+unrouted through the production soak period.
+
 ### Roll out the v0.0.241 cell receive foundation
 
 This procedure supersedes the earlier blanket instruction not to deploy schema
@@ -901,16 +943,10 @@ EDGE_DIR="${WITSELF_RELEASE_CHECKOUT}/infra/cloudflare/agent-email"
   npm run assert:custom-domain-dark
 )
 
-EDGE_SECRET_NAMES="$(
-  cd "$EDGE_DIR" &&
-  npm exec -- wrangler secret list \
-    --name witself-agent-email-pilot --format json | jq -r '.[].name'
-)" || exit 1
-if grep -Fxq 'AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED' \
-    <<<"$EDGE_SECRET_NAMES"; then
-  echo "custom-domain edge delivery secret is present; aborting" >&2
-  exit 1
-fi
+(
+  cd "$EDGE_DIR"
+  npm run assert:custom-domain-dark
+)
 ```
 
 Use repository fakes and a disposable test database to prove this exact order:
@@ -1049,9 +1085,9 @@ while requiring the live edge's old relay id to differ from the desired id.
 `--provider-zone-name` defaults to `witmail.net`; Cloudflare must return that
 exact active zone in the exact Worker account. An explicit `witwave.ai` target
 is only legacy compatibility evidence and cannot satisfy primary-zone staging.
-Because `witmail.net` is still awaiting its inter-account move, the Founder
-primary-zone ceremony is externally blocked until that zone is active in the
-target Worker account.
+The `witmail.net` registrar move is complete and the zone is active in that
+account; the Founder ceremony still requires every remaining dark-release and
+operator-route prerequisite below.
 
 The command freezes the two rendered target configs before validation in
 separate unpredictable mode-`0700` directories with mode-`0400` files. All
@@ -1063,7 +1099,8 @@ authority.
 
 It refuses nonempty control-plane or edge cohorts, either enabled edge delivery
 flag, a custom-domain delivery control, an enabled catch-all, any enabled owned
-route, or any enabled Worker action targeting `witself-agent-email-pilot`.
+route, or any enabled Worker action targeting either
+`witself-agent-email-receive` or the retired `witself-agent-email-pilot`.
 Unrelated enabled Worker routes are permitted but included in the stable
 provider-inventory fingerprint. It validates public field policy, reveals only
 the private field, proves the private key derives the selected public key, then

@@ -1,13 +1,14 @@
 # Witself Agent Email
 
-Status: the original GCP capability-limited receive pilot is retired. Its seven
-literal Cloudflare routes and isolated directory entries were disabled and
-removed on 2026-07-30; no pilot address is currently active, and the catch-all
-was not changed. The durable receipt, provider-managed retry, owner processing,
-disable/re-enable rollback, and default-off exact-agent synthetic retry proof
-were exercised before retirement. A new Civo canary must use a fresh,
-explicitly reviewed 5–10-agent manifest and remains manual-only. This
-capability does not add a sender-trust claim or automatic code use.
+## Current Production Status
+
+Agent-email receive is a production release track, not a pilot product. The
+cell-side exact-account receive gate shipped dark in `v0.0.241`; the current
+release work hardens the production Cloudflare edge, immutable deployment and
+rollback path, signed routing authority, and exact production canary. No live
+provider route is carrying production receive traffic until that reviewed
+release, dark deployment, cell rollout, and canary all succeed. This staged
+activation does not add a sender-trust claim or automatic code use.
 
 Production-cell receive checkpoint (implemented for `v0.0.241`, default off):
 the server now supports a mutually exclusive exact-account cohort of 1-100
@@ -22,12 +23,13 @@ the configured retry canary. No live cell, provider route, MX, catch-all,
 canonical-delivery, alias-delivery, or custom-domain gate is enabled by this
 implementation checkpoint.
 
-Outbound beta checkpoint (implemented 2026-08-14, runtime default off): agents
-can queue a one-recipient plain-text message, queue a reply to an owner-visible
-inbound message, and inspect metadata-only sent-mail state through HTTP, CLI,
-and MCP. The durable cell outbox, idempotency fence, per-agent and per-realm
-send controls, hard-bounce/complaint suppression, signed cell-to-edge dispatch
-contract, and Cloudflare Email Sending adapter are implemented. The
+Production outbound checkpoint (implemented 2026-08-14, runtime default off):
+agents can queue a one-recipient plain-text message, queue a reply to an
+owner-visible inbound message, and inspect metadata-only sent-mail state
+through HTTP, CLI, and MCP. The durable cell outbox, idempotency fence,
+per-agent and per-realm send controls, hard-bounce/complaint suppression,
+signed cell-to-edge dispatch contract, and Cloudflare Email Sending adapter are
+implemented. The
 `witself-worker` dispatch job and edge adapter both remain dark until an
 operator supplies an exact rollout cohort and enables their independent gates;
 catalog entitlement alone does not send mail.
@@ -44,9 +46,10 @@ Receive and send are independent account entitlements. The settled catalog is:
 The Founder account has explicit unlimited commercial entitlement. That does
 not remove platform protection: outbound admission is always capped at 30
 messages per rolling minute for one agent, 300 per realm, and 1,000 across the
-whole account, and the adapter retains its payload and provider safety bounds. Plan or
-account-policy changes require no client or MCP reinstall; the installed tools
-receive a stable `feature_not_enabled` refusal whenever effective send is off.
+whole account, and the adapter retains its payload and provider safety bounds.
+Plan or account-policy changes require no client or MCP reinstall; the
+installed tools receive a stable `feature_not_enabled` refusal whenever
+effective send is off.
 
 Catalog entitlement, account policy, cell rollout, and edge delivery are
 separate facts:
@@ -72,18 +75,18 @@ apex dedicated solely to agent email. It is not a website, human or employee
 mail domain, marketing domain, or generic Witself/Witwave notification sender;
 required `postmaster@` and `abuse@` routes are narrow operator-controlled
 exceptions. It replaces the unacquired `witmail.ai` target; there is no
-`witmail.ai` compatibility surface. The new zone remains deliberately dormant
-while its Cloudflare Registrar registration waits for an inter-account move:
-restrictive SPF/DKIM/DMARC anti-spoofing records are present, but there is no
-MX, Email Routing, catch-all, Worker route, or DNSSEC activation. Cloudflare
-does not move zone configuration with the registration, so the reviewed
-records and routing must be recreated and verified in the production account
-after the move. Keep
-every canonical-inventory, canonical-delivery, alias-activation, and
-alias-delivery gate dark throughout that work. New canonical addresses and all
-new aliases use `witmail.net` only. The retired `agent-mail.witwave.ai` domain
-is bounded compatibility for previously issued canonical local parts only: it
-must never mint a new alias or receive a broad catch-all.
+`witmail.ai` compatibility surface. The Cloudflare Registrar inter-account
+move completed on 2026-08-14, and the zone is active in the production
+Cloudflare account. Apex Email Routing DNS and the isolated
+`send.witmail.net` Email Sending domain are provisioned. The catch-all remains
+disabled and no production receive Worker route is carrying traffic while the
+reviewed production rollout proceeds through its dark and canary stages; this
+is staged activation, not a pilot product. Keep every canonical-inventory,
+canonical-delivery, alias-activation, and alias-delivery gate dark until its
+specific activation step succeeds. New canonical addresses and all new aliases
+use `witmail.net` only. The retired `agent-mail.witwave.ai` domain is bounded
+compatibility for previously issued canonical local parts only: it must never
+mint a new alias or receive a broad catch-all.
 
 Agent-email byte limits use a two-phase rollout. Phase A shipped the schema-81
 counter/enforcement and administrator surfaces with both catalog keys absent.
@@ -102,10 +105,21 @@ breaker; explicit unlimited cannot remove it. The owning cell's PostgreSQL
 limiter is the sole authoritative admission point, after the account feature
 check, so disabled accounts continue to accept-and-drop without edge changes.
 
-Kickoff spec, scoped 2026-07-20. A capability-limited Cloudflare receive pilot
-was authorized on 2026-07-21; the stronger production contract remains the
-promotion target. This document is the go-forward design for **agent email**:
-durable, addressable email identities
+## Historical Context
+
+The original GCP capability-limited receive pilot is retired. Its seven literal
+Cloudflare routes and isolated directory entries were disabled and removed on
+2026-07-30; no pilot address is currently active, and the catch-all was not
+changed. The durable receipt, provider-managed retry, owner processing,
+disable/re-enable rollback, and default-off exact-agent synthetic retry proof
+were exercised before retirement. That pilot is historical evidence, not a
+deployment path for the production service.
+
+The kickoff spec was scoped on 2026-07-20, and a capability-limited Cloudflare
+receive pilot was authorized on 2026-07-21 and later retired. The production
+implementation now follows the bounded provider profile and staged controls in
+this document rather than waiting on a pilot-to-production promotion. This is
+the go-forward design for **agent email**: durable, addressable email identities
 for named Witself agents on a Witself-managed domain, plus a separate
 outbound-only platform-notification surface. It extends the sealed-plane
 roadmap item for email-code 2FA in
@@ -125,8 +139,8 @@ Scoped by the operator at kickoff (2026-07-20):
   mail addressed to the agent, (3) human-to-agent correspondence, and
   (4) platform notifications from Witself to human operators.
 - **The original v1 slice was receive-only.** Reply and direct send are now
-  implemented as a separately gated outbound beta; this historical kickoff
-  ordering does not imply that the send runtime is active.
+  implemented as a separately gated production outbound service; this
+  historical kickoff ordering does not imply that the send runtime is active.
 - **Addressing is a Witself-managed domain.** Bring-your-own inbox
   (IMAP/Gmail/M365 adapters) is deliberately deferred; self-hosted cells bring
   their own domain to the same pipeline.
@@ -143,8 +157,8 @@ A second requirements pass later the same day settled more:
   the agent name: `scott@<realm-label>.witmail.net`. This historical shape was
   later replaced by the apex/local-part design below.
 - **Send followed receive.** The one-recipient plain-text reply/direct-send
-  beta is now implemented behind independent account, worker, adapter, realm,
-  and agent gates; receive still does not depend on send.
+  production service is now implemented behind independent account, worker,
+  adapter, realm, and agent gates; receive still does not depend on send.
 - **Email is a billing point in both directions.** Sent and received mail are
   metered per period; sending stops hard at a per-period threshold; email is
   switchable on and off per agent and per realm; agent-originated spam
@@ -218,14 +232,16 @@ contract. A follow-up operator decision on 2026-07-21 authorized development of
 a deliberately limited pilot rather than treating those production gaps as a
 total provider no-go:
 
-- **The strict contract is preserved.** Explicit temporary SMTP control,
-  trusted structured sender-auth/spam metadata, a provider message id, and the
-  full size/latency envelope remain requirements for production promotion.
-- **The pilot is narrow and capability-honest.** It uses exact-address routes
-  for one internal realm and 5–10 enrolled agents, marks every message
-  unverified, excludes pilot receive from billing, and permits only expected,
-  low-risk verification-code workflows. See Capability Tiers And Authorized
-  Pilot for the full boundary.
+- **The strict contract was not falsely claimed.** Cloudflare did not provide
+  explicit temporary SMTP control, trusted structured sender-auth/spam
+  metadata, or a provider message id. The bounded production profile therefore
+  keeps those fields unavailable or untrusted and does not enable behavior that
+  depends on them.
+- **The retired pilot was narrow and capability-honest.** It used exact-address
+  routes for one internal realm and 5–10 enrolled agents, marked every message
+  unverified, excluded receive from billing, and permitted only expected,
+  low-risk verification-code workflows. See Historical Capability Tiers And
+  Authorized Pilot for the complete historical boundary.
 
 ## Goal
 
@@ -272,7 +288,8 @@ The standing platform invariants carry over unchanged:
 
 ## Sequencing
 
-- **Pilot — Cloudflare-limited receive-only.** Build the slice-1 storage,
+- **Historical launch pilot — retired.** The Cloudflare-limited receive-only
+  stage built the slice-1 storage,
   ingestion, owner-only mailbox, and bounded code-consumption spine behind a
   default-off feature flag for one internal realm. The pilot limitations below
   are part of its contract, not TODOs hidden behind production-looking fields.
@@ -282,7 +299,8 @@ The standing platform invariants carry over unchanged:
   email-OTP consumption, spam/quarantine handling, retention, metering, and
   archive/export coverage. Human-to-agent mail arrives and is readable; the
   agent cannot reply yet.
-- **Outbound beta — implemented, dark.** Reply and direct initiation share one
+- **Production outbound service — implemented, dark.** Reply and direct
+  initiation share one
   deliberately narrow contract: exactly one recipient, plain UTF-8 text, a
   server-derived sender, managed Reply-To, durable idempotency, per-agent and
   per-realm rate breakers, independent operator kill switches, and
@@ -301,17 +319,19 @@ The standing platform invariants carry over unchanged:
 
 Deliverability reality still drives the rollout: receiving mail requires no
 sender reputation, while sending is the largest abuse surface in the feature.
-The outbound beta is therefore implemented but operationally dark by default.
+The production outbound service is therefore implemented but operationally
+dark by default. Canary refers only to a staged production rollout, never to a
+separate or capability-limited product.
 
-## Capability Tiers And Authorized Pilot
+## Historical Capability Tiers And Authorized Pilot
 
 The 2026-07-21 Cloudflare spike was a failure of the **strict production
 contract**, not a failure of basic email receipt. Cloudflare delivered real mail
 to a Worker, matched the configured subdomain, invoked once per envelope
 recipient, exposed the raw MIME stream, supported permanent rejection, and
-retried deliberate Worker exceptions. Development may therefore proceed in two
-explicit tiers. The pilot tier does not weaken or silently redefine the
-production tier.
+retried deliberate Worker exceptions. Development could therefore proceed in
+two explicit tiers. The historical pilot tier did not weaken or silently
+redefine the production tier.
 
 **Cloudflare limited receive-only pilot (authorized 2026-07-21):**
 
@@ -448,13 +468,14 @@ its synthetic message, so a future 15-minute cadence would create about 96
 messages per day. Do not schedule it until the target cell's plan-aware email
 retention worker is verified in enforcement mode.
 
-**Production receive-only contract:** the Inbound SMTP Transaction Contract
-below remains the target. Promotion beyond the internal pilot, catch-all Worker
-cutover, billable receive, sender-auth-dependent behavior,
-or consequential OTP/link automation stays blocked until the provider path (or
-a replacement inbound edge) supplies explicit temporary SMTP semantics,
-trusted structured authentication/spam metadata, a stable provider identity,
-and the size/latency feasibility evidence required by that contract.
+**Full-capability receive contract (historical gate):** the Inbound SMTP
+Transaction Contract below remains the target for sender-auth-dependent and
+consequential automation. At the 2026-07-21 checkpoint, promotion beyond the
+internal pilot was blocked pending explicit temporary SMTP semantics, trusted
+structured authentication/spam metadata, a stable provider identity, and the
+size/latency feasibility evidence required by that contract. The production
+Cloudflare profile now documents those unavailable capabilities explicitly and
+keeps dependent behavior disabled.
 
 ## Addressing And Domain Model
 
@@ -482,6 +503,11 @@ the catch-all unchanged. The permanent path is the `witmail.net` apex.
 Exact-address routing on
 `agent-mail.witwave.ai` is permitted only for previously issued canonical
 local parts during compatibility; it is not a fallback for new addresses.
+The production Worker recognizes only the canonical 16-character Realm-ID
+label on that domain and resolves it through the same signed control-plane/KV
+route contract used by `witmail.net`. It never reads the retired unsigned
+`pilot:*` directory, accepts a realm alias, or infers a catch-all destination;
+the owning cell remains authoritative for the agent segment.
 Email Routing custom-address rules are capped per zone, and the address
 population grows with every agent, so production coverage on `witmail.net`
 still requires the reviewed apex route rather than per-address expansion.
@@ -566,14 +592,17 @@ to publish applied routes for email-enabled accounts, and
 emergency gate. Inventory can safely converge suspended and retired records
 while either delivery gate is dark; a canonical route cannot deliver unless
 both canonical delivery gates are true. Canonical delivery never depends on
-either alias gate. While alias activation is disabled,
+either alias gate. Previously issued canonical addresses on the configured
+legacy managed domain use these same canonical gates; that domain never enters
+the alias lifecycle. While alias activation is disabled,
 customer requests, approval, internal assignment,
 and reactivation fail closed; read-only administration plus suspension,
 retirement, terminal customer/internal-provisioning abort, reserved-name
 management, and audit remain available.
 
-Canonical and managed-alias delivery also share one additive, account-scoped
-rollout fence. The control plane reads the canonical sorted CSV
+Canonical delivery on both managed domains and managed-alias delivery on the
+primary domain also share one additive, account-scoped rollout fence. The
+control plane reads the canonical sorted CSV
 `CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST`; the Email Worker reads the
 byte-identical `AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST`. Empty or
 missing means no account is admitted. Each list accepts at most 100 exact
@@ -786,10 +815,10 @@ accounting. Namespace IDs `2201` and `2202` were verified account-unique on
 operators must repeat that account-wide preflight before first deployment or
 any namespace change.
 Keep both alias gates and all three canonical gates unset until their respective
-acceptance steps are complete. The current exact-address pilot rules do not
-deliver arbitrary new aliases. The canonical inventory is the independent
-backfill path for realms that have never performed an alias operation, but it
-does no work while its default-off inventory gate is unset.
+acceptance steps are complete. The retired exact-address compatibility rules
+did not deliver arbitrary new aliases. The canonical inventory is the
+independent backfill path for realms that have never performed an alias
+operation, but it does no work while its default-off inventory gate is unset.
 
 **Organization-owned inbound domains (dark lifecycle, 2026-08-08; dark routing
 foundation).** A customer-owned domain is an account-level resource
@@ -1193,9 +1222,12 @@ Requirements regardless of format:
   previously issued canonical local parts. External services may hold those
   launch-domain addresses on file, so each reviewed legacy address must keep
   receiving through exact-address compatibility after `witmail.net` activates.
-  The legacy domain must not mint new canonical addresses or aliases, and it
-  must not gain a broad catch-all. Every address a third party ever saw must
-  keep working until its agent is done with the accounts behind it.
+  Runtime resolution uses the same signed canonical route, account cohort,
+  canonical-delivery gate, and cell authority as `witmail.net`; unsigned pilot
+  rows have no delivery authority. The legacy domain must not mint new
+  canonical addresses or aliases, and it must not gain a broad catch-all. Every
+  address a third party ever saw must keep working until its agent is done with
+  the accounts behind it.
 
 ## Inbound Pipeline
 
@@ -1203,9 +1235,11 @@ Witself cells do not terminate SMTP. Cloudflare is the selected inbound edge:
 Email Routing accepts mail for the managed zones, and an Email Worker relays
 each message to the owning cell's signature-verified ingestion endpoint.
 Cloudflare evaluates SPF/DKIM/DMARC at the edge and enforces a provider
-message-size cap. The production contract requires edge results to be signed
-and recorded with the stored message; the limited pilot cannot obtain those
-structured results and records them as `unknown`. MX and routing
+message-size cap. The production contract requires every available edge result
+to be signed and recorded with the stored message. Cloudflare does not expose
+the structured authentication/spam results or a stable provider identity to
+the Worker, so the bounded production provider profile records those fields as
+`unknown` rather than synthesizing trust. MX and routing
 configuration follow the cell topology in
 [deployment-cells.md](deployment-cells.md); the control plane stays thin and
 never handles message content, consistent with the control-plane-only
@@ -1252,6 +1286,10 @@ The kickoff verification items were resolved on 2026-07-20:
   control-plane container binding, or catch-all mutation capability. A later
   production projection may preserve the directory shape, but it must keep the
   same least-privilege content-plane separation.
+  The production projection now runs in the separate
+  `witself-agent-email-receive` Worker. It reuses the dedicated email-route KV
+  namespace by ID, but it does not inherit the retired Worker's deployment,
+  secrets, route associations, or rollback history.
 - **Edge-to-cell authentication (settled): Ed25519 signed relay.** The
   Worker POSTs the raw MIME to the owning cell's ingestion endpoint with a
   detached Ed25519 signature over timestamp, provider message id, envelope
@@ -1276,25 +1314,26 @@ The kickoff verification items were resolved on 2026-07-20:
   bounds the Postgres raw-size cap below. Since July 2025 Cloudflare only
   forwards mail that passes SPF or DKIM, and the spike confirmed that the
   authentication stage precedes Worker delivery. The Worker event does not
-  expose those structured results, so the production relay cannot yet record
-  them authoritatively; pilot rows use `unknown`. Subaddress tags are preserved
-  and stored with recipient metadata. The pilot uses the same 25 MiB technical
-  ceiling and enforces any lower account plan limit inside the owning cell.
+  expose those structured results, so the Cloudflare production relay records
+  them as `unknown` rather than claiming authority. Subaddress tags are
+  preserved and stored with recipient metadata. The service uses the same
+  25 MiB technical ceiling and enforces any lower account plan limit inside the
+  owning cell.
 - **Send is no longer provider-orphaned.** Cloudflare Email Sending entered
   public beta in April 2026 (Workers Paid; 3,000 messages/month included,
   then $0.35 per 1,000; REST, Workers binding, and SMTP submission;
   suppression handling), so the send slices have an in-house leading
   candidate. That dependency still must not leak into the inbound design.
 
-### Inbound SMTP Transaction Contract (Production Target)
+### Inbound SMTP Transaction Contract (Full-Capability Target)
 
 Settled 2026-07-21 after gap review: the never-accepted-and-dropped
 guarantee is only implementable inside the SMTP transaction, so the Worker
 completes the whole verdict path while the sender's connection is open.
-This contract remains mandatory for production promotion. The authorized
-limited pilot uses the documented exception-and-retry downgrade above and does
-not claim compliance with steps 3–8 where Cloudflare lacks the required
-control or metadata.
+This contract remains mandatory before enabling sender-auth-dependent or
+consequential automation. The production Cloudflare service uses the documented
+exception-and-retry profile above and does not claim compliance with steps 3–8
+where Cloudflare lacks the required control or metadata.
 
 1. **Parse.** Case-fold the envelope recipient to lowercase before every
    match (RFC 5321 leaves local-part case to the receiver, and provisioning
@@ -1386,13 +1425,12 @@ Pipeline contract:
   bounded text and metadata remain available while the raw MIME containing the
   attachment bytes is explicitly marked unretained.
 
-The pipeline items above describe the production requirements. In the pilot,
+The production Cloudflare provider profile is intentionally bounded:
 provider-id idempotency is replaced by non-destructive suspected-duplicate
 grouping, raw MIME is capped at 25 MiB (or a lower account plan limit),
-structured auth/spam fields are
-`unknown`, quarantine classification is unavailable, and attachment retrieval
-and raw-MIME reads are disabled even though attachment bytes remain inside the
-stored raw MIME.
+structured auth/spam fields are `unknown`, quarantine classification is
+unavailable, and attachment retrieval and raw-MIME reads are disabled even
+though attachment bytes remain inside the stored raw MIME.
 
 ## Trust Model
 
@@ -1445,10 +1483,11 @@ blur the two:
   the stored message like any other content (see the plaintext-at-rest note
   under Abuse, Privacy, And Metering), and nothing writes a second copy into
   logs, diagnostics, or a dedicated field.
-  Sender binding remains a production requirement. Because the pilot has no
-  authoritative sender-auth metadata, its narrower exception is limited to an
-  already-active, expected, low-risk workflow; it labels the sender unverified
-  and prohibits financial, identity, recovery, or other consequential use.
+  Sender binding remains required for consequential automation. Because the
+  Cloudflare production provider profile has no authoritative sender-auth
+  metadata, code use is limited to an already-active, expected, low-risk
+  workflow; it labels the sender unverified and prohibits financial, identity,
+  recovery, or other consequential use.
 - **Threat-model addition.** Inbound email is a new injection surface with
   attacker-controlled content arriving continuously and for free.
   [threat-model.md](threat-model.md) gains a section covering prompt
@@ -1668,11 +1707,13 @@ The checkpoint was deployed on 2026-07-21 and hardened through `v0.0.197` on
 feature configuration, synthetic durable-accept canary, stable provider-retry
 proof, delayed provider retries, and disable/re-enable rollback were all
 verified live. The existing catch-all and control-plane KV remained unchanged.
-Production promotion remains blocked on the strict inbound-provider capability gaps
-above. Plan-tier retention is no longer one of those implementation gaps:
-migration 0069 adds independent preview/enforcement lanes, and the separately
-scalable worker applies finite `agent_email_retention_days` policies to both
-inbound and eligible outbound records with Prometheus metrics. Activation
+At that historical checkpoint, production promotion was blocked on the strict
+inbound-provider capability gaps above. The go-forward production service uses
+the explicitly bounded Cloudflare provider profile while keeping unavailable
+sender-auth fields untrusted. Plan-tier retention is no longer an implementation
+gap: migration 0069 adds independent preview/enforcement lanes, and the
+separately scalable worker applies finite `agent_email_retention_days` policies
+to both inbound and eligible outbound records with Prometheus metrics. Activation
 remains explicit per cell, and a configured retention policy is not proof that
 the worker is running in enforcement mode.
 Quarantine, trusted sender authentication, provider-id idempotency, and
@@ -1791,7 +1832,8 @@ Receive-only still carries real obligations:
 - No bring-your-own inbox (IMAP/Gmail/M365) in this epic; the provider
   adapter boundary should not preclude it later.
 - No marketing, bulk, multi-recipient, HTML, attachment, caller-selected From,
-  or caller-selected Reply-To sending. The implemented beta is one-recipient
+  or caller-selected Reply-To sending. The production send contract is
+  one-recipient
   plain text only.
 - No server-side inference: no backend summarization, classification beyond
   deterministic spam-verdict pass-through, or auto-extraction of meaning.
@@ -1828,16 +1870,18 @@ Receive-only still carries real obligations:
 5. Platform-notification templating, locale posture, and which events email
    operators at all.
 6. Whether a later plan needs per-thread human approval before an agent may
-   reply. The beta uses account entitlement plus independent realm/agent kill
+   reply. The production service uses account entitlement plus independent
+   realm/agent kill
    switches, not a per-thread approval prompt.
-7. **Beta settled 2026-08-14:** Cloudflare Email Sending is isolated behind a
-   signed, exact-account-allowlisted adapter. Provider credentials live only
-   at the adapter; cells hold a per-dispatch Ed25519 signing key. Sender
+7. **Production implementation settled 2026-08-14:** Cloudflare Email Sending
+   is isolated behind a signed, exact-account-allowlisted adapter. Provider
+   credentials live only at the adapter; cells hold a per-dispatch Ed25519 signing key. Sender
    identity is server-derived on `send.witmail.net`, Reply-To is the matching
    permanent canonical local part on `witmail.net`, and durable adapter
    receipts prevent blind resend after an ambiguous provider boundary. Wider
-   production promotion still requires deliverability/reputation evidence and
-   an explicit operational review; beta implementation is not that approval.
+   production activation still requires deliverability/reputation evidence and
+   an explicit operational change review. Those rollout gates constrain when
+   traffic starts; they do not make the service a beta or pilot product.
 8. Legacy canonical compatibility duration after `witmail.net` activates.
    New canonical addresses and aliases are `.net`-only; the compatibility
    manifest may contain only previously issued canonical local parts on
@@ -1855,8 +1899,10 @@ Receive-only still carries real obligations:
    Full coverage and per-recipient dispatch worked, but Cloudflare exposes
    neither an explicit temporary-reject action nor the trusted structured
    authentication/spam/provider-id fields required by the settled production
-   SMTP contract. Development may proceed only within Capability Tiers And
-   Authorized Pilot; production promotion remains blocked. See
+   SMTP contract. At that checkpoint, development could proceed only within
+   Capability Tiers And Authorized Pilot, and production promotion was blocked.
+   The current production path uses the explicitly bounded provider profile
+   above and keeps sender-auth-dependent behavior disabled. See
    [the launch-spike report](agent-email-cloudflare-launch-spike.md).
 10. Vanity realm-label policy, when that deferred capability is scheduled:
     reservation and dispute rules, the reserved-word and anti-impersonation
@@ -1918,8 +1964,8 @@ in place; these are the remaining important items):
     publication — a self-hoster's own edge and key-publication path, or an
     explicit narrowing of the parity claim.
 18. Sender-auth DNS separation: keep receive/Reply-To on `witmail.net` and
-    publish the outbound beta only from `send.witmail.net`, with provider
-    DKIM/SPF/DMARC alignment verified before enabling dispatch. The retired
+    publish production outbound mail only from `send.witmail.net`, with
+    provider DKIM/SPF/DMARC alignment verified before enabling dispatch. The retired
     `agent-mail.witwave.ai` compatibility domain never becomes a sender.
 19. Edge-key freshness bound: the delist/rotation propagation to cells needs
     a bounded staleness window and a hard-fail on delisted keys, plus the

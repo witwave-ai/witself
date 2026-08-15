@@ -60,10 +60,14 @@ renders `WITSELF_FACT_DELETION_ENABLED`; a server compiled against store schema
 27 or older refuses to start when it is enabled, so turn it on only with schema
 28 or newer.
 
-The receive-only agent-email pilot is disabled by default. Enabling
-`agentEmail.receivePilot.enabled` requires one primary domain, audience and
-realm ID, exactly 5-10 unique canonical agent IDs, one or more relay public keys
-encoded in `relayPublicKeysJSON`, and a replay window. One
+`agentEmail.receivePilot` is a retired compatibility surface and is disabled by
+default. New production receive deployments must use
+`agentEmail.receiveProduction`; do not use `receivePilot` as a canary or rollout
+shortcut. It remains renderable only so an older deployment can be drained or
+rolled back without breaking the chart contract. If that compatibility path is
+explicitly restored, it requires one primary domain, audience and realm ID,
+exactly 5-10 unique canonical agent IDs, one or more relay public keys encoded
+in `relayPublicKeysJSON`, and a replay window. One
 `acceptedLegacyDomains` entry may be configured for previously issued canonical
 local parts; the primary domain cannot appear in that list. New addresses and
 aliases are never minted on a legacy domain. The chart then renders these seven
@@ -84,26 +88,27 @@ the cutover configuration it preserves the first legacy domain as the old
 single-domain runtime's domain until the child chart and image advance
 together.
 
-An optional `agentEmail.receivePilot.retryCanaryAgentID` must equal one of the
-enrolled agent IDs and renders `WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID`.
-Keep it empty until every server pod is schema-61-capable; an older pod would
-ordinary-accept the synthetic first delivery instead of deliberately returning
-a temporary result.
+The historical `agentEmail.receivePilot.retryCanaryAgentID` compatibility field
+must equal one of the enrolled agent IDs and renders
+`WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID`. Keep it empty unless deliberately
+restoring that retired path, and until every server pod is schema-61-capable;
+an older pod would ordinary-accept the synthetic first delivery instead of
+deliberately returning a temporary result.
 
-Use a two-phase rollout: first deploy schema-61-capable code with
-`retryCanaryAgentID` empty and wait for every pod to converge; then set the
-exact enrolled agent in a config-only rollout and wait for convergence again.
-Keep canary automation manual-only until a manual run succeeds. For rollback,
-turn off any recurring schedule that has been added and settle the unused arm
-or let its 15-minute TTL expire before clearing this value or downgrading code.
-A future 15-minute cadence would create about 96 acknowledged synthetic
-messages per day; ordinary account message-retention policy now governs their
-eventual whole-thread cleanup.
+The retired compatibility path used a two-phase rollout: first deploy
+schema-61-capable code with `retryCanaryAgentID` empty and wait for every pod to
+converge; then set the exact enrolled agent in a config-only rollout and wait
+for convergence again. If an operator deliberately restores this path for a
+drain or rollback, keep its canary manual-only and follow the same convergence
+barrier. Before disabling it again, turn off any recurring schedule and settle
+the unused arm or let its 15-minute TTL expire. A 15-minute cadence creates
+about 96 acknowledged synthetic messages per day; ordinary account
+message-retention policy governs their eventual whole-thread cleanup.
 
 The Ed25519 relay private key is not a chart value, Secret reference, or server
 environment variable. It remains exclusively in the isolated Cloudflare Email
-Worker secret. Changing any pilot value changes the ConfigMap checksum and
-restarts the server pods for fail-closed startup reconciliation.
+Worker secret. Changing any retired compatibility value changes the ConfigMap
+checksum and restarts the server pods for fail-closed startup reconciliation.
 
 Production receive is a separate, mutually exclusive, default-off gate under
 `agentEmail.receiveProduction`. It requires the canonical primary domain, the

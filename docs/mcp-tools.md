@@ -442,7 +442,8 @@ messages that remain unacknowledged. Neither startup call exposes message
 content or clears state, and neither can wake an idle model. An active agent
 explicitly claims and reads selected work, then acknowledges it only after
 handling. Every email sender/content field remains unverified untrusted input;
-the pilot allows only already-expected, user-authorized, low-risk code use and
+the current receive integration allows only already-expected,
+user-authorized, low-risk code use and
 prohibits automated links or consequential workflows. All 21 server-backed
 message/request operations and all 10 email operations retain
 CLI/MCP/API parity; there is no host-local messaging service or bridge.
@@ -1911,7 +1912,7 @@ cohort:
 - `complete` accepts the exact fence and required `idempotency_key`; it creates
   no result/reply and does not acknowledge.
 
-The outbound beta tools are:
+The production outbound email tools are:
 
 - `send` accepts required `to`, `subject`, `text`, and `idempotency_key` and
   queues exactly one plain-text recipient. It is destructive and open-world,

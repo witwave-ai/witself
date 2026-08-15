@@ -427,7 +427,7 @@ See [operator-auth.md](operator-auth.md) and
 
 ## Agent-email retry-canary server configuration
 
-The receive pilot remains default-off. Setting
+The retired compatibility receive mode remains default-off. Setting
 `WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID` additionally enables the controlled
 provider-retry proof for exactly one agent already present in
 `WITSELF_AGENT_EMAIL_PILOT_AGENT_IDS`. That agent may use the owner-token POST

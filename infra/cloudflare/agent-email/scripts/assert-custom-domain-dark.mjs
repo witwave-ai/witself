@@ -2,10 +2,19 @@
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  assertProductionCloudflareIdentity,
+  sanitizedWranglerInspectionEnvironment,
+  withReviewedWranglerEnvironmentFile,
+} from "./wrangler-environment.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 export const CUSTOM_DOMAIN_DELIVERY_SECRET =
   "AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED";
+export const LEGACY_PILOT_TRUST_SECRET_NAMES = Object.freeze([
+  "LEGACY_PILOT_TRUSTED_INGEST_URL",
+  "LEGACY_PILOT_TRUSTED_CELL_AUDIENCE",
+]);
 
 export function assertCustomDomainDeliveryDark(secrets) {
   if (!Array.isArray(secrets)) {
@@ -22,7 +31,23 @@ export function assertCustomDomainDeliveryDark(secrets) {
         "dark custom-domain delivery deployment refused: activation secret present",
       );
     }
+    if (LEGACY_PILOT_TRUST_SECRET_NAMES.includes(secret.name)) {
+      throw new Error(
+        `production receive deployment refused: retired pilot trust secret ${secret.name} present`,
+      );
+    }
   }
+}
+
+export function customDomainDarkInspectionEnvironment(env = process.env) {
+  assertProductionCloudflareIdentity(env);
+  return sanitizedWranglerInspectionEnvironment(env);
+}
+
+export function customDomainDarkSecretListArguments(config) {
+  return withReviewedWranglerEnvironmentFile([
+    "secret", "list", "--config", config, "--format", "json",
+  ]);
 }
 
 function parseArgs(argv) {
@@ -40,13 +65,16 @@ function parseArgs(argv) {
 
 function main() {
   const { config } = parseArgs(process.argv.slice(2));
-  const listed = spawnSync("wrangler", [
-    "secret", "list", "--config", config, "--format", "json",
-  ], {
-    cwd: root,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const listed = spawnSync(
+    "wrangler",
+    customDomainDarkSecretListArguments(config),
+    {
+      cwd: root,
+      encoding: "utf8",
+      env: customDomainDarkInspectionEnvironment(process.env),
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
   if (listed.error || listed.status !== 0) {
     throw new Error("could not verify persistent Worker secret names");
   }

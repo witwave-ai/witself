@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
-import { writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { realpath, writeFile } from "node:fs/promises";
+import {
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { CloudflareAPI, cloudflareEnvironment } from "./cloudflare.mjs";
@@ -10,6 +17,7 @@ import { reserveJSONReceipt } from "./receipt-journal.mjs";
 import {
   activeBindings,
   activeVersionID,
+  assertProvisioningReceiptPath,
   assertRemoteDark,
   assertSecretBinding,
   createSpawnRuntime,
@@ -40,13 +48,25 @@ import {
   verifyWorkerVersion as verifyControlPlaneWorkerVersion,
 } from "../../control-plane/scripts/verify-deployment.mjs";
 import {
+  LEGACY_PILOT_WORKER,
+  PRODUCTION_RECEIVE_WORKER,
+} from "../src/worker-names.mjs";
+import {
   createPrivateDeploymentConfig,
 } from "../../control-plane/scripts/private-deployment-config.mjs";
+import {
+  assertProductionCloudflareIdentity,
+} from "./wrangler-environment.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const repositoryRoot = resolve(root, "../../..");
 const CONTROL_PLANE_ROOT = resolve(root, "../control-plane");
 const CONTROL_PLANE_WORKER = "witself-control-plane";
-const EMAIL_EDGE_WORKER = "witself-agent-email-pilot";
+const EMAIL_EDGE_WORKER = PRODUCTION_RECEIVE_WORKER;
+const EMAIL_EDGE_WORKERS = new Set([
+  LEGACY_PILOT_WORKER,
+  PRODUCTION_RECEIVE_WORKER,
+]);
 const RELAY_PRIVATE_SECRET = "RELAY_ED25519_PRIVATE_KEY";
 const OPERATIONS_LEASE_OPERATION = "relay_signing_key_provision";
 const KEY_ID = /^[a-z][a-z0-9_-]{0,63}$/;
@@ -55,7 +75,7 @@ const VERSION = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
 const COMMIT = /^[0-9a-f]{40}$/;
 const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 const PROVIDER_RULE_PREFIXES = Object.freeze([
-  "witself-agent-email-pilot:",
+  `${LEGACY_PILOT_WORKER}:`,
   "witself-agent-email-primary-canary:",
 ]);
 const PROVIDER_ZONE_CONTRACT = Object.freeze({
@@ -93,6 +113,12 @@ function optionValue(argv, index, name) {
   const value = argv[index + 1];
   if (typeof value !== "string" || value === "") fail(`${name} requires a value`);
   return value;
+}
+
+function insideDirectory(parent, candidate) {
+  const path = relative(parent, candidate);
+  return path === "" || (!isAbsolute(path) && path !== ".." &&
+    !path.startsWith(`..${sep}`));
 }
 
 export function parseRelayProvisioningArgs(argv, env = process.env) {
@@ -157,17 +183,20 @@ export function parseRelayProvisioningArgs(argv, env = process.env) {
   if (!isAbsolute(out.receipt) || resolve(out.receipt) !== out.receipt) {
     fail("--receipt must be one canonical absolute path");
   }
+  assertProvisioningReceiptPath(out.receipt);
   if (out.controlPlaneConfig === out.emailEdgeConfig) {
     fail("control-plane and email-edge config paths must be distinct");
   }
   if (out.endpoint !== "") {
-    let parsed;
+    let parsed = null;
     try {
       parsed = new URL(out.endpoint);
     } catch {
-      fail("--endpoint must be a credential-free HTTPS URL");
+      // The single validation failure below covers malformed URLs as well as
+      // credential-bearing or redirected endpoint shapes.
     }
-    if (parsed.protocol !== "https:" || parsed.username || parsed.password ||
+    if (parsed == null || parsed.protocol !== "https:" ||
+        parsed.username || parsed.password ||
         parsed.search || parsed.hash || !parsed.hostname) {
       fail("--endpoint must be a credential-free HTTPS URL");
     }
@@ -318,25 +347,37 @@ function providerRuleID(rule) {
 }
 
 function providerRuleTargetsEmailEdge(actions) {
-  if (!Array.isArray(actions) || actions.length < 1 || actions.length > 16) {
+  if (!Array.isArray(actions) || actions.length !== 1) {
     fail("Cloudflare Email Routing rule inventory was invalid");
   }
   let targetsEmailEdge = false;
   for (const action of actions) {
     if (action == null || Array.isArray(action) || typeof action !== "object" ||
-        typeof action.type !== "string" ||
-        !/^[a-z][a-z0-9_]{0,63}$/.test(action.type) ||
-        !Array.isArray(action.value) || action.value.length > 256 ||
-        action.value.some((value) =>
-          typeof value !== "string" || value.length < 1 || value.length > 512 ||
-          value !== value.trim() || /[\x00-\x1f\x7f]/.test(value))) {
+        !["drop", "forward", "worker"].includes(action.type)) {
+      fail("Cloudflare Email Routing rule inventory was invalid");
+    }
+    const keys = Object.keys(action).sort();
+    if (action.type === "drop") {
+      if (canonicalJSON(keys) !== canonicalJSON(["type"]) &&
+          canonicalJSON(keys) !== canonicalJSON(["type", "value"])) {
+        fail("Cloudflare Email Routing rule inventory was invalid");
+      }
+      if (Object.hasOwn(action, "value") &&
+          (!Array.isArray(action.value) || action.value.length !== 0)) {
+        fail("Cloudflare Email Routing rule inventory was invalid");
+      }
+      continue;
+    }
+    if (canonicalJSON(keys) !== canonicalJSON(["type", "value"]) ||
+        !Array.isArray(action.value) || action.value.length !== 1 ||
+        typeof action.value[0] !== "string" ||
+        action.value[0].length < 1 || action.value[0].length > 512 ||
+        action.value[0] !== action.value[0].trim() ||
+        /[\x00-\x1f\x7f]/.test(action.value[0])) {
       fail("Cloudflare Email Routing rule inventory was invalid");
     }
     if (action.type === "worker") {
-      if (action.value.length !== 1) {
-        fail("Cloudflare Email Routing rule inventory was invalid");
-      }
-      targetsEmailEdge ||= action.value[0] === EMAIL_EDGE_WORKER;
+      targetsEmailEdge ||= EMAIL_EDGE_WORKERS.has(action.value[0]);
     }
   }
   return targetsEmailEdge;
@@ -429,12 +470,29 @@ export async function captureRelayProviderDarkState(
   ]);
   const providerScope = exactProviderZone(zone, api, contract);
   const catchAllState = primaryRoutingInternals.catchAllState(catchAll);
-  if (catchAllState.enabled !== false || !Array.isArray(rules)) {
+  if (!Array.isArray(rules)) {
     fail("provider email routes must remain dark during relay key provisioning");
   }
+  const catchAllTargetsEmailEdge = providerRuleTargetsEmailEdge(
+    catchAll.actions,
+  );
+  if ((providerScope.contract === "primary" &&
+       catchAllState.enabled !== false) ||
+      (catchAllState.enabled && catchAllTargetsEmailEdge)) {
+    fail("provider email routes must remain dark during relay key provisioning");
+  }
+  const catchAllID = providerRuleID(catchAll);
+  let listedCatchAll = false;
   const normalized = [];
   for (const rule of rules) {
     const id = providerRuleID(rule);
+    if (id === catchAllID) {
+      if (listedCatchAll || canonicalJSON(rule) !== canonicalJSON(catchAll)) {
+        fail("Cloudflare Email Routing catch-all inventory was inconsistent");
+      }
+      listedCatchAll = true;
+      continue;
+    }
     if (typeof rule.name !== "string" || rule.name !== rule.name.trim() ||
         rule.name.length < 1 || rule.name.length > 256 ||
         typeof rule.enabled !== "boolean") {
@@ -593,11 +651,9 @@ function relayWitselfEnvironment(environment) {
   return output;
 }
 
-async function freezeRelayConfig(runtime, source, prefix, deploymentRoot) {
+async function freezeRelayConfig(runtime, source, prefix) {
   return createPrivateDeploymentConfig({
     prefix,
-    parentDirectory: dirname(deploymentRoot),
-    entrypointTarget: join(deploymentRoot, "src", "index.js"),
     async render(path) {
       const value = await runtime.readText(source);
       if (typeof value !== "string" || value.length < 1) {
@@ -616,25 +672,41 @@ async function createRelayConfigSnapshots(runtime, options) {
       runtime,
       options.controlPlaneConfig,
       "witself-relay-control-plane-",
-      CONTROL_PLANE_ROOT,
     );
     emailEdge = await freezeRelayConfig(
       runtime,
       options.emailEdgeConfig,
       "witself-relay-email-edge-",
-      root,
     );
     if (controlPlane.path === emailEdge.path ||
         controlPlane.path === options.controlPlaneConfig ||
-        emailEdge.path === options.emailEdgeConfig) {
+        emailEdge.path === options.emailEdgeConfig ||
+        insideDirectory(repositoryRoot, controlPlane.path) ||
+        insideDirectory(repositoryRoot, emailEdge.path) ||
+        insideDirectory(
+          await realpath(repositoryRoot),
+          await realpath(controlPlane.path),
+        ) || insideDirectory(
+          await realpath(repositoryRoot),
+          await realpath(emailEdge.path),
+        )) {
       fail("relay signing configuration snapshots were not isolated");
     }
     return Object.freeze({ controlPlane, emailEdge });
   } catch (error) {
-    await Promise.allSettled([
+    const cleanup = await Promise.allSettled([
       controlPlane?.cleanup(),
       emailEdge?.cleanup(),
     ]);
+    const cleanupErrors = cleanup
+      .filter((result) => result.status === "rejected")
+      .map((result) => result.reason);
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(
+        [error, ...cleanupErrors],
+        "relay signing configuration snapshot creation and cleanup failed",
+      );
+    }
     throw error;
   }
 }
@@ -651,11 +723,14 @@ async function cleanupRelayConfigSnapshots(snapshots) {
     snapshots.controlPlane.cleanup(),
     snapshots.emailEdge.cleanup(),
   ]);
-  const rejected = results.find((result) => result.status === "rejected");
-  if (rejected) {
-    throw new Error("could not clean up relay signing configuration snapshots", {
-      cause: rejected.reason,
-    });
+  const errors = results
+    .filter((result) => result.status === "rejected")
+    .map((result) => result.reason);
+  if (errors.length > 0) {
+    throw new AggregateError(
+      errors,
+      "could not clean up relay signing configuration snapshots",
+    );
   }
 }
 
@@ -755,9 +830,11 @@ async function provisionRelaySigningKeyFromSnapshots(options, snapshots, {
   const digest = publicKeyDigest(shown.publicKey);
 
   await assertRelayConfigSnapshotsUnchanged(snapshots);
-  return withLease(
-    OPERATIONS_LEASE_OPERATION,
-    async (leaseGuard) => {
+  let journal;
+  try {
+    const receipt = await withLease(
+      OPERATIONS_LEASE_OPERATION,
+      async (leaseGuard) => {
       if (!leaseGuard || typeof leaseGuard.renew !== "function" ||
           typeof leaseGuard.evidence !== "function") {
         fail("relay signing key provisioning lease guard is invalid");
@@ -825,8 +902,6 @@ async function provisionRelaySigningKeyFromSnapshots(options, snapshots, {
         provider: initialProvider,
         recovery: "reconcile_dark_live_state_before_retry",
       });
-      let journal;
-      try {
         await assertRelayConfigSnapshotsUnchanged(snapshots);
         journal = reserveReceipt(options.receipt, pending);
         if (!journal || typeof journal.commit !== "function" ||
@@ -955,15 +1030,24 @@ async function provisionRelaySigningKeyFromSnapshots(options, snapshots, {
           }),
         });
         await assertRelayConfigSnapshotsUnchanged(snapshots);
-        journal.commit(receipt);
         return receipt;
-      } catch (error) {
-        if (typeof journal?.close === "function") journal.close();
-        throw error;
-      }
-    },
-    { endpoint: leaseOrigin, env: environment },
-  );
+      },
+      { endpoint: leaseOrigin, env: environment },
+    );
+    await assertRelayConfigSnapshotsUnchanged(snapshots);
+    journal.commit(receipt);
+    return receipt;
+  } catch (error) {
+    try {
+      if (typeof journal?.close === "function") journal.close();
+    } catch (closeError) {
+      throw new AggregateError(
+        [error, closeError],
+        "relay signing provisioning and receipt close failed",
+      );
+    }
+    throw error;
+  }
 }
 
 export async function provisionRelaySigningKey(options, dependencies = {}) {
@@ -972,19 +1056,40 @@ export async function provisionRelaySigningKey(options, dependencies = {}) {
   const provider = dependencies.provider ?? null;
   const withLease = dependencies.withLease ?? withAgentEmailOperationsLease;
   const reserveReceipt = dependencies.reserveReceipt ?? reserveJSONReceipt;
+  const createSnapshots = dependencies.createSnapshots ??
+    createRelayConfigSnapshots;
+  const cleanupSnapshots = dependencies.cleanupSnapshots ??
+    cleanupRelayConfigSnapshots;
+  assertProductionCloudflareIdentity(environment);
+  assertProvisioningReceiptPath(options?.receipt);
   runtime.assertReceiptAvailable(options.receipt);
-  const snapshots = await createRelayConfigSnapshots(runtime, options);
+  const snapshots = await createSnapshots(runtime, options);
+  let result;
+  let primaryError;
   try {
-    return await provisionRelaySigningKeyFromSnapshots(options, snapshots, {
+    result = await provisionRelaySigningKeyFromSnapshots(options, snapshots, {
       runtime,
       environment,
       provider,
       withLease,
       reserveReceipt,
     });
-  } finally {
-    await cleanupRelayConfigSnapshots(snapshots);
+  } catch (error) {
+    primaryError = error;
   }
+  try {
+    await cleanupSnapshots(snapshots);
+  } catch (cleanupError) {
+    if (primaryError != null) {
+      throw new AggregateError(
+        [primaryError, cleanupError],
+        "relay signing provisioning and snapshot cleanup failed",
+      );
+    }
+    throw cleanupError;
+  }
+  if (primaryError != null) throw primaryError;
+  return result;
 }
 
 async function main() {

@@ -208,7 +208,7 @@ func registerAgentEmailMCPTools(server *mcp.Server, runtimeName string, backend 
 	}
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        mcpToolName(runtimeName, "witself.email.address.show"),
-		Description: "Show this token-bound agent's enrolled receive-only mailbox, primary address, managed-domain address set, and effective, agent-level, and realm-level receive states. The pilot feature and exact realm/agent enrollment must both be enabled.",
+		Description: "Show this token-bound agent's inbound mailbox, primary address, managed-domain address set, and effective, agent-level, and realm-level receive states. Inbound email and the configured production account scope must both be enabled.",
 		Annotations: mcpReadOnlyClosedWorldAnnotations(),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ mcpNoInput) (*mcp.CallToolResult, mcpAgentEmailAddressOutput, error) {
 		address, err := backend.ShowAgentEmailAddress(ctx)
@@ -216,7 +216,7 @@ func registerAgentEmailMCPTools(server *mcp.Server, runtimeName string, backend 
 	})
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        mcpToolName(runtimeName, "witself.email.list"),
-		Description: "List this agent's receive-only email metadata without reading content or changing state. Sender identity is unverified in the Cloudflare pilot; list results never expose raw MIME, attachment bytes, decoded body text, or claim capabilities.",
+		Description: "List this agent's inbound email metadata without reading content or changing state. Sender identity is unverified in the current Cloudflare receive integration; list results never expose raw MIME, attachment bytes, decoded body text, or claim capabilities.",
 		Annotations: mcpReadOnlyClosedWorldAnnotations(),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpAgentEmailListInput) (*mcp.CallToolResult, mcpAgentEmailListOutput, error) {
 		limit, err := normalizeMCPAgentEmailLimit(in.Limit)
@@ -230,7 +230,7 @@ func registerAgentEmailMCPTools(server *mcp.Server, runtimeName string, backend 
 	})
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        mcpToolName(runtimeName, "witself.email.listen"),
-		Description: "Wait for oldest unacknowledged receive-only email metadata. This changes no state, exposes no content, cannot wake an idle model, and is not a processing claim. Every pilot sender remains unverified.",
+		Description: "Wait for oldest unacknowledged inbound email metadata. This changes no state, exposes no content, cannot wake an idle model, and is not a processing claim. Every sender remains unverified.",
 		Annotations: mcpReadOnlyClosedWorldAnnotations(),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpAgentEmailListenInput) (*mcp.CallToolResult, mcpAgentEmailListenOutput, error) {
 		if in.WaitSeconds != nil && (*in.WaitSeconds < 0 || *in.WaitSeconds > 20) {
@@ -282,7 +282,7 @@ func registerAgentEmailMCPTools(server *mcp.Server, runtimeName string, backend 
 	})
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        mcpToolName(runtimeName, "witself.email.code.consume"),
-		Description: "Mark that a client used one candidate verification code from this email. Call only for an active user-authorized, expected-service, low-risk workflow after independently validating context. The pilot prohibits financial, identity, recovery, domain, credential-transfer, or automated-link workflows. This stores no code value.",
+		Description: "Mark that a client used one candidate verification code from this email. Call only for an active user-authorized, expected-service, low-risk workflow after independently validating context. The current receive integration prohibits financial, identity, recovery, domain, credential-transfer, or automated-link workflows. This stores no code value.",
 		Annotations: mcpWriteClosedWorldAnnotations(true, true),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mcpAgentEmailIDInput) (*mcp.CallToolResult, mcpAgentEmailMessageOutput, error) {
 		messageID, err := normalizeMCPAgentEmailID(in.MessageID)

@@ -14,14 +14,20 @@ import {
 } from "./primary-routing-lib.mjs";
 import { reserveJSONReceipt } from "./receipt-journal.mjs";
 import {
+  assertProductionCloudflareIdentity,
+  sanitizedWranglerInspectionEnvironment,
+  withReviewedWranglerEnvironmentFile,
+} from "./wrangler-environment.mjs";
+import {
   withAgentEmailOperationsLease,
 } from "../../control-plane/scripts/agent-email-operations-lease-client.mjs";
+import { PRODUCTION_RECEIVE_WORKER } from "../src/worker-names.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PLANNED_ACTIONS = new Set(["prepare", "activate", "disable", "remove"]);
 const WORKERS = Object.freeze({
   control_plane: "witself-control-plane",
-  email_edge: "witself-agent-email-pilot",
+  email_edge: PRODUCTION_RECEIVE_WORKER,
 });
 
 function usage() {
@@ -69,14 +75,19 @@ function exactPrivatePath(path, label) {
   return path;
 }
 
-function wranglerJSON(args, operation) {
-  const result = spawnSync("wrangler", args, {
+function wranglerJSON(args, operation, environment = process.env) {
+  const result = spawnSync(
+    "wrangler",
+    withReviewedWranglerEnvironmentFile(args),
+    {
     cwd: root,
+    env: sanitizedWranglerInspectionEnvironment(environment),
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: 5 * 1024 * 1024,
     timeout: 30_000,
-  });
+    },
+  );
   if (result.error || result.status !== 0) {
     throw new Error(`could not ${operation} with Wrangler`);
   }
@@ -104,9 +115,12 @@ function inspectWorker(name, label, inspect) {
 
 export function primaryRoutingRuntime(env = process.env, {
   fetchAPI = fetch,
-  inspect = wranglerJSON,
+  inspect,
   newLeaseHolderID,
 } = {}) {
+  assertProductionCloudflareIdentity(env);
+  const workerInspector = inspect ?? ((args, operation) =>
+    wranglerJSON(args, operation, env));
   const edgeToken = String(env.CONTROL_PLANE_EDGE_TOKEN ?? "");
   const controlPlaneJSON = async (url) => {
     if (edgeToken.length < 16 || edgeToken.length > 8_192 ||
@@ -142,9 +156,13 @@ export function primaryRoutingRuntime(env = process.env, {
       const controlPlane = inspectWorker(
         WORKERS.control_plane,
         "control plane",
-        inspect,
+        workerInspector,
       );
-      const emailEdge = inspectWorker(WORKERS.email_edge, "email edge", inspect);
+      const emailEdge = inspectWorker(
+        WORKERS.email_edge,
+        "email edge",
+        workerInspector,
+      );
       return {
         control_plane_deployment: controlPlane.deployment,
         control_plane_version: controlPlane.version,

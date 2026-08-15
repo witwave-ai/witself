@@ -468,7 +468,7 @@ func TestWriteNewPrivateAgentEmailJSONIsExclusiveAndPrivate(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "primary-canary.json")
 	value := agentEmailPrimaryCanaryManifest{
 		SchemaVersion: 2, Domain: "witmail.net",
-		WorkerName: "witself-agent-email-pilot",
+		WorkerName: "witself-agent-email-receive",
 		AccountIDs: []string{"acc_aaaaaaaaaaaaaaaa"},
 		Agents: []agentEmailPrimaryCanaryManifestAgent{{
 			AgentID: "agent_aaaaaaaaaaaaaaaa",
@@ -496,7 +496,7 @@ func TestWriteNewPrivateAgentEmailJSONIsExclusiveAndPrivate(t *testing.T) {
 	}
 	if len(decoded) != 5 || decoded["schema_version"] != float64(2) ||
 		decoded["domain"] != "witmail.net" ||
-		decoded["worker_name"] != "witself-agent-email-pilot" {
+		decoded["worker_name"] != "witself-agent-email-receive" {
 		t.Fatalf("private manifest envelope = %#v", decoded)
 	}
 	decodedAccounts, ok := decoded["account_ids"].([]any)

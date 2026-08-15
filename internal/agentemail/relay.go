@@ -21,9 +21,9 @@ const (
 	// RelaySignatureVersion is the first canonical signed-envelope format.
 	RelaySignatureVersion = "witself-email-relay-pilot-v1"
 
-	// PilotMaximumRawBytes is the transport-level technical ceiling shared by
-	// the edge relay and the cell signature envelope.
-	PilotMaximumRawBytes = 25 * 1024 * 1024
+	// RelayMaximumRawBytes is the transport-level technical ceiling shared by
+	// the production edge relay and the cell signature envelope.
+	RelayMaximumRawBytes = 25 * 1024 * 1024
 
 	maxEnvelopeAddressBytes = 320
 	maxAudienceBytes        = 128
@@ -42,7 +42,7 @@ var (
 	ErrRelayTimestampInvalid = errors.New("agent-email relay timestamp is outside the replay window")
 )
 
-// RelayMetadata is the complete capability-limited pilot signature envelope.
+// RelayMetadata is the complete signed edge-to-cell relay envelope.
 // Provider message IDs and authentication/spam results are intentionally
 // absent because Cloudflare's EmailMessage event does not expose authoritative
 // values for them.
@@ -58,8 +58,8 @@ type RelayMetadata struct {
 
 // Normalize validates and canonicalizes the signed envelope. A sender may be
 // empty for the SMTP null reverse-path. Lowercasing the sender is acceptable
-// for this pilot because it is used only as unverified display metadata and a
-// non-destructive suspected-duplicate grouping component.
+// for this provider profile because it is used only as unverified display
+// metadata and a non-destructive suspected-duplicate grouping component.
 func (m RelayMetadata) Normalize() (RelayMetadata, error) {
 	m.Audience = strings.ToLower(strings.TrimSpace(m.Audience))
 	m.KeyID = strings.ToLower(strings.TrimSpace(m.KeyID))
@@ -92,8 +92,8 @@ func (m RelayMetadata) Normalize() (RelayMetadata, error) {
 	if !validEnvelopeAddress(m.EnvelopeRecipient, false) {
 		return RelayMetadata{}, fmt.Errorf("%w: envelope recipient is invalid", ErrRelayMetadataInvalid)
 	}
-	if m.RawSize < 1 || m.RawSize > PilotMaximumRawBytes {
-		return RelayMetadata{}, fmt.Errorf("%w: raw size must be 1-%d bytes", ErrRelayMetadataInvalid, PilotMaximumRawBytes)
+	if m.RawSize < 1 || m.RawSize > RelayMaximumRawBytes {
+		return RelayMetadata{}, fmt.Errorf("%w: raw size must be 1-%d bytes", ErrRelayMetadataInvalid, RelayMaximumRawBytes)
 	}
 	if !isLowerSHA256(m.RawSHA256) {
 		return RelayMetadata{}, fmt.Errorf("%w: raw digest must be lowercase SHA-256", ErrRelayMetadataInvalid)
@@ -123,15 +123,15 @@ func CanonicalSignatureInput(metadata RelayMetadata) ([]byte, error) {
 	return []byte(strings.Join(fields, "\n") + "\n"), nil
 }
 
-// VerifyRelay verifies the timestamp, raw-body binding, and detached Ed25519
-// signature. The caller selects the public key by an independently validated
-// key id. A zero replayWindow is invalid rather than silently unbounded.
-func VerifyRelay(
+// VerifyRelayEnvelope authenticates the signed metadata, including the claimed
+// raw-body size and SHA-256 digest, before a caller allocates or reads that
+// body. The caller selects the public key by an independently validated key id.
+// A zero replayWindow is invalid rather than silently unbounded.
+func VerifyRelayEnvelope(
 	now time.Time,
 	replayWindow time.Duration,
 	publicKey ed25519.PublicKey,
 	metadata RelayMetadata,
-	raw []byte,
 	signature []byte,
 ) (RelayMetadata, error) {
 	m, err := metadata.Normalize()
@@ -149,19 +149,56 @@ func VerifyRelay(
 	if delta < -replayWindow || delta > replayWindow {
 		return RelayMetadata{}, ErrRelayTimestampInvalid
 	}
-	if int64(len(raw)) != m.RawSize {
-		return RelayMetadata{}, ErrRelayBodyMismatch
-	}
-	digest := sha256.Sum256(raw)
-	if hex.EncodeToString(digest[:]) != m.RawSHA256 {
-		return RelayMetadata{}, ErrRelayBodyMismatch
-	}
 	input, err := CanonicalSignatureInput(m)
 	if err != nil {
 		return RelayMetadata{}, err
 	}
 	if !ed25519.Verify(publicKey, input, signature) {
 		return RelayMetadata{}, ErrRelaySignatureInvalid
+	}
+	return m, nil
+}
+
+// VerifyRelayBody binds one fully read body to an already authenticated relay
+// envelope. Callers should use VerifyRelayEnvelope before reading a large body.
+func VerifyRelayBody(metadata RelayMetadata, raw []byte) error {
+	m, err := metadata.Normalize()
+	if err != nil {
+		return err
+	}
+	if int64(len(raw)) != m.RawSize {
+		return ErrRelayBodyMismatch
+	}
+	digest := sha256.Sum256(raw)
+	if hex.EncodeToString(digest[:]) != m.RawSHA256 {
+		return ErrRelayBodyMismatch
+	}
+	return nil
+}
+
+// VerifyRelay verifies the timestamp, detached Ed25519 signature, and raw-body
+// binding. New network handlers should call the two stages separately so an
+// unauthenticated request cannot force a large body allocation.
+func VerifyRelay(
+	now time.Time,
+	replayWindow time.Duration,
+	publicKey ed25519.PublicKey,
+	metadata RelayMetadata,
+	raw []byte,
+	signature []byte,
+) (RelayMetadata, error) {
+	m, err := VerifyRelayEnvelope(
+		now,
+		replayWindow,
+		publicKey,
+		metadata,
+		signature,
+	)
+	if err != nil {
+		return RelayMetadata{}, err
+	}
+	if err := VerifyRelayBody(m, raw); err != nil {
+		return RelayMetadata{}, err
 	}
 	return m, nil
 }

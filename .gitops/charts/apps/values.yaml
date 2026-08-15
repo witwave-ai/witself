@@ -66,9 +66,10 @@ apps:
     # rollout and the schema-28 activation rollout. Enable it only after every
     # writer has converged on schema-28-compatible code.
     factDeletionEnabled: false
-    # Receive-only agent-email pilot. Default off in every cell. Only public
-    # relay verification keys belong here; the relay private key remains in the
-    # isolated Cloudflare Worker secret.
+    # Retired receive-pilot compatibility configuration. Keep it disabled in
+    # every cell; new production rollouts use receiveProduction. It remains in
+    # the app-of-apps contract only so older deployments can be drained or
+    # rolled back. Only public relay verification keys belong here.
     agentEmail:
       providerEventTokenSecret:
         name: ""

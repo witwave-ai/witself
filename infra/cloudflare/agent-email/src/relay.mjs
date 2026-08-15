@@ -1,5 +1,5 @@
 export const RELAY_SIGNATURE_VERSION = "witself-email-relay-pilot-v1";
-export const PILOT_MAXIMUM_RAW_BYTES = 25 * 1024 * 1024;
+export const RELAY_MAXIMUM_RAW_BYTES = 25 * 1024 * 1024;
 
 const textEncoder = new TextEncoder();
 const KEY_ID = /^[a-z][a-z0-9_-]{0,63}$/;
@@ -46,7 +46,7 @@ export function normalizeRelayMetadata(metadata) {
   if (
     !Number.isSafeInteger(normalized.rawSize) ||
     normalized.rawSize < 1 ||
-    normalized.rawSize > PILOT_MAXIMUM_RAW_BYTES
+    normalized.rawSize > RELAY_MAXIMUM_RAW_BYTES
   ) {
     throw new Error("invalid relay raw size");
   }
