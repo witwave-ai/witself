@@ -309,8 +309,9 @@ func (w *mimeWalker) walk(header textproto.MIMEHeader, body io.Reader, depth int
 			}
 		}
 	}
-	// Every non-text leaf is an attachment for the bounded pilot projection,
-	// including inline parts that omit both filename and attachment disposition.
+	// Every non-text leaf is an attachment for the bounded agent-email
+	// projection, including inline parts that omit both filename and attachment
+	// disposition.
 	if mediaType != "text/plain" && mediaType != "text/html" {
 		w.attachmentCount++
 		return w.countAttachmentPayload(body)

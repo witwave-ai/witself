@@ -14,12 +14,13 @@ const (
 	maximumLocalPartBytes    = 64
 )
 
-// ErrAddressInvalid reports an address outside the canonical pilot grammar.
+// ErrAddressInvalid reports an address outside the canonical agent-email
+// grammar.
 var ErrAddressInvalid = errors.New("invalid agent-email address")
 
-// AddressParts is one canonical pilot recipient. Address is the full envelope
-// value including a plus tag when present; BaseAddress is the exact enrolled
-// address used for routing and mailbox lookup.
+// AddressParts is one canonical agent-email recipient. Address is the full
+// envelope value including a plus tag when present; BaseAddress is the exact
+// enrolled address used for routing and mailbox lookup.
 type AddressParts struct {
 	Address       string
 	BaseAddress   string
@@ -91,7 +92,7 @@ func ValidateAgentSegment(segment string) (string, error) {
 	return segment, nil
 }
 
-// ValidateDomain accepts only canonical lowercase ASCII DNS names. The pilot
+// ValidateDomain accepts only canonical lowercase ASCII DNS names. Agent email
 // deliberately does not perform implicit IDNA conversion.
 func ValidateDomain(domain string) (string, error) {
 	domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))

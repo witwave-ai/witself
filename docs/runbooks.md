@@ -442,9 +442,12 @@ Keep the rollout dark in this order:
    the legacy domain.
 4. Recreate the `witmail.net` Email Routing foundation only after the Worker,
    target-cell validation, role-address destinations, and rollback path have
-   all passed review. Until the production provider-contract gaps are closed,
-   use only the fresh guarded 5–10-agent exact-address canary below; do not
-   enable a public apex catch-all.
+   all passed review. Use the separately fenced production path: bootstrap
+   `witself-agent-email-receive` dark, converge the exact account cohort and
+   mailbox backfill, establish the operator role routes, and require the
+   ordinary, storage, and near-limit production probes below to pass before
+   broad routing. Keep the public apex catch-all disabled until its own
+   reviewed activation step.
 5. Treat canonical inventory, canonical delivery, alias activation, and alias
    delivery as separate later reviews. Personal remains receive-disabled even
    after the managed domain is live, and a plan-table address promise never
