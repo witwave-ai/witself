@@ -274,6 +274,12 @@ Personal account accidentally present in the cohort does not prevent
 startup: the local plan entitlement remains authoritative, and an attempted
 delivery is accepted and discarded without persisting message content. A plan
 transition takes effect from the cell snapshot without reinstalling any client.
+Use `scripts/run-agent-email-cell-smoke.sh` and the exact staged procedure in
+[runbooks.md](runbooks.md#prove-the-personal-to-professional-receive-boundary-inside-one-cell)
+to prove that boundary before provider activation. The harness uses the shared
+cell-operation lock, signs only on the operator host, forwards only to
+loopback, fences one byte-identical installed agent credential across both
+phases, never retries ingest, and leaves plan mutation outside the harness.
 
 Existing mailbox provisioning is an explicit one-shot operator action:
 

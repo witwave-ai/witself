@@ -350,6 +350,9 @@ jobs:
       - name: agent-email isolated cell operation checks
         run: bash scripts/test-agent-email-cell-operation.sh
 
+      - name: agent-email receive smoke harness checks
+        run: bash scripts/test-agent-email-cell-smoke.sh
+
       - name: helm template + kubeconform
         run: |
           for v in "" "ci/self-hosted-values.yaml" "ci/cloud-values.yaml" "ci/gcp-rollout-values.yaml"; do

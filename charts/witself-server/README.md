@@ -163,6 +163,13 @@ Founder-account backfill. After the production gate is healthy and before any
 edge delivery activation, an operator uses
 `scripts/run-agent-email-cell-operation.sh --operation backfill` to run exactly
 one idempotent, fixed-name Job outside the API Deployment.
+After backfill, use `scripts/run-agent-email-cell-smoke.sh` for the separately
+fenced Personal-discard and Professional-persist plan-flip proof. It shares the
+same fixed operation lock, uses a loopback port-forward rather than provider
+routing, fences the same installed agent credential across both plan phases,
+performs no plan mutation, and never retries the non-idempotent signed ingest
+request. Follow the private-state and cleanup procedure in
+`docs/runbooks.md`.
 The required private path is created only when a legacy agent needs an explicit
 override; it is never written to pod logs. New agents in the configured
 cohort are thereafter created atomically with their canonical mailbox. Generate
