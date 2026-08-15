@@ -735,6 +735,22 @@ function assertAuthorityTransition(state, key, desired) {
       journalFail("canonical controller_revision regressed",
         "realm_email_alias_recovery_revision_regression");
     }
+    const desiredUpdatedAt = typeof desired.updated_at === "string"
+      ? Date.parse(desired.updated_at)
+      : NaN;
+    if (!Number.isFinite(desiredUpdatedAt)) {
+      journalFail("canonical updated_at is invalid",
+        "realm_email_alias_recovery_revision_regression");
+    }
+    if (desired.controller_revision === previous.controller_revision) {
+      const { updated_at: _previousUpdatedAt, ...previousAuthority } = previous;
+      const { updated_at: _desiredUpdatedAt, ...desiredAuthority } = desired;
+      if (canonicalJSONString(previousAuthority) !==
+            canonicalJSONString(desiredAuthority)) {
+        journalFail("same-revision canonical refresh changed authority",
+          "realm_email_alias_recovery_revision_regression");
+      }
+    }
     if (previous.state === "retired" && desired.state !== "retired") {
       journalFail("retired canonical route was resurrected",
         "realm_email_alias_recovery_tombstone_resurrection");
@@ -1190,6 +1206,8 @@ export function validateRealmEmailAliasRecoveredState(state, options = {}) {
           !ACCOUNT_ID_PATTERN.test(value.account_id ?? "") ||
           !Number.isSafeInteger(value.controller_revision) ||
           value.controller_revision < 1 ||
+          typeof value.updated_at !== "string" ||
+          !Number.isFinite(Date.parse(value.updated_at)) ||
           !["applied", "suspended", "retired"].includes(value.state)) {
         journalFail(`recovered canonical route is invalid: ${key}`,
           "realm_email_alias_recovery_invariant_failed");
