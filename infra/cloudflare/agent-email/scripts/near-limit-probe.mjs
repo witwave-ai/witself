@@ -6,6 +6,7 @@ import { RELAY_MAXIMUM_RAW_BYTES } from "../src/relay.mjs";
 import {
   assertProductionCloudflareIdentity,
 } from "./wrangler-environment.mjs";
+import { isProductionCellHost } from "./production-cell-endpoint.mjs";
 
 const CLOUDFLARE_API_ROOT = "https://api.cloudflare.com/client/v4";
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -14,7 +15,6 @@ const CLAIM_ID = /^ecl_[a-z2-7]{16}$/;
 const SIMPLE_LOCAL_PART = /^[a-z0-9][a-z0-9._%+-]*$/;
 const SIMPLE_DOMAIN = /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/;
 const CANONICAL_REALM_LABEL = /^[a-z2-7]{16}$/;
-const CELL_HOST = /^api\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cells\.witself\.witwave\.ai$/;
 const PRODUCTION_DOMAIN = "witmail.net";
 const PRODUCTION_CANARY_FROM = "canary@send.witmail.net";
 const DISCOVERY_PAGE_SIZE = 100;
@@ -98,7 +98,7 @@ function productionCellEndpoint(value) {
   }
   if (parsed.protocol !== "https:" || parsed.username || parsed.password ||
       parsed.hash || parsed.search || parsed.port || parsed.pathname !== "/" ||
-      !CELL_HOST.test(parsed.hostname)) {
+      !isProductionCellHost(parsed.hostname)) {
     throw new Error(
       "WITSELF_EMAIL_NEAR_LIMIT_ENDPOINT must be the root HTTPS URL of one production cell",
     );

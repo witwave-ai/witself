@@ -851,7 +851,9 @@ refuse every other Git ref before a secret-using step. The sender secret must
 be exactly `canary@send.witmail.net`; the recipient and token secrets must
 belong to the exact agent selected by the cell's retry-canary Secret, using its
 reviewed canonical Realm-ID address on `witmail.net`; and the endpoint variable
-must be the root URL of one `api.<cell>.cells.witself.witwave.ai` host.
+must be the root URL of one `api.<cell>.cells.witself.witwave.ai` host or the
+strict `api.<cluster-uuid>.k8s.civo.com` host emitted by the supported Civo
+Pulumi path. Arbitrary Civo subdomains are rejected.
 
 Run one manual workflow dispatch and review both the value-free canary result
 and Analytics Engine outcomes. Add a recurring schedule only when continuous
@@ -949,7 +951,9 @@ addition to the ordinary canary variables and secrets, provision:
 
 - Environment variable `WITSELF_EMAIL_NEAR_LIMIT_ENDPOINT`: the exact root
   `https://api.<cell>.cells.witself.witwave.ai` URL for the probe recipient's
-  owning cell.
+  owning cell, or that cell's strict
+  `https://api.<cluster-uuid>.k8s.civo.com` URL when the supported Civo path
+  owns its ingress host.
 - Environment secret `AGENT_EMAIL_NEAR_LIMIT_TO`: one reviewed disposable
   canonical Realm-ID address on `witmail.net` (never an alias or subaddress).
 - Environment secret `WITSELF_EMAIL_NEAR_LIMIT_TOKEN`: a full agent token for
