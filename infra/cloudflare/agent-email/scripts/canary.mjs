@@ -5,6 +5,7 @@ import { CloudflareAPI } from "./cloudflare.mjs";
 import {
   assertProductionCloudflareIdentity,
 } from "./wrangler-environment.mjs";
+import { isProductionCellHost } from "./production-cell-endpoint.mjs";
 import { parseRouteAddress } from "../src/directory.mjs";
 
 const MESSAGE_ID = /^emsg_[a-z2-7]{16}$/;
@@ -17,7 +18,6 @@ const MAX_EMAIL_CURSOR_BYTES = 4096;
 const PRODUCTION_CANARY_FROM = "canary@send.witmail.net";
 const PRODUCTION_RECEIVE_DOMAIN = "witmail.net";
 const CANONICAL_REALM_LABEL = /^[a-z2-7]{16}$/;
-const CELL_HOST = /^api\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cells\.witself\.witwave\.ai$/;
 
 function required(value, name) {
   const normalized = String(value ?? "").trim();
@@ -42,7 +42,7 @@ function endpoint(value) {
   }
   if (parsed.protocol !== "https:" || parsed.username || parsed.password ||
       parsed.hash || parsed.search || parsed.port || parsed.pathname !== "/" ||
-      !CELL_HOST.test(parsed.hostname)) {
+      !isProductionCellHost(parsed.hostname)) {
     throw new Error(
       "WITSELF_EMAIL_CANARY_ENDPOINT must be the root HTTPS URL of one production cell",
     );

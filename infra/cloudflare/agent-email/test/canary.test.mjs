@@ -309,6 +309,11 @@ test("canary configuration requires bounded credential-free inputs", () => {
     WITSELF_EMAIL_CANARY_TOKEN: "witself-token",
   };
   assert.equal(canaryConfiguration(env).timeoutSeconds, 180);
+  assert.equal(canaryConfiguration({
+    ...env,
+    WITSELF_EMAIL_CANARY_ENDPOINT:
+      "https://api.c1183b8b-2035-4aae-92b9-15156a8ba1c6.k8s.civo.com",
+  }).endpoint, "https://api.c1183b8b-2035-4aae-92b9-15156a8ba1c6.k8s.civo.com");
   assert.throws(() => canaryConfiguration({
     ...env,
     CLOUDFLARE_ACCOUNT_ID: "a".repeat(32),
@@ -316,6 +321,7 @@ test("canary configuration requires bounded credential-free inputs", () => {
   assert.throws(() => canaryConfiguration({ ...env, WITSELF_EMAIL_CANARY_ENDPOINT: "http://cell.test" }), /root HTTPS URL/);
   assert.throws(() => canaryConfiguration({ ...env, WITSELF_EMAIL_CANARY_ENDPOINT: "https://cell.test?token=bad" }), /root HTTPS URL/);
   assert.throws(() => canaryConfiguration({ ...env, WITSELF_EMAIL_CANARY_ENDPOINT: "https://api.civo-sandbox-usw2-dev.cells.witself.witwave.ai/v1" }), /root HTTPS URL/);
+  assert.throws(() => canaryConfiguration({ ...env, WITSELF_EMAIL_CANARY_ENDPOINT: "https://api.not-a-cluster.k8s.civo.com" }), /root HTTPS URL/);
   assert.throws(() => canaryConfiguration({ ...env, AGENT_EMAIL_CANARY_FROM: "canary@witwave.ai" }), /must be canary@send\.witmail\.net/);
   assert.throws(() => canaryConfiguration({ ...env, AGENT_EMAIL_CANARY_TO: "canary.readable@witmail.net" }), /canonical @witmail\.net/);
   assert.throws(() => canaryConfiguration({ ...env, AGENT_EMAIL_CANARY_TO: "canary.abcdefghijklmnop@agent-mail.witwave.ai" }), /canonical @witmail\.net/);

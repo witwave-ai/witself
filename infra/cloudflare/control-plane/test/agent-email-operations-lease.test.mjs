@@ -130,9 +130,11 @@ async function apiCall(env, path, body, token = TOKEN) {
 test("operations lease API is exact, edge-token authenticated, and no-store", async () => {
   assert.deepEqual(AGENT_EMAIL_OPERATIONS, [
     "catch_all_routing_apply",
+    "control_plane_canonical_gates_apply",
     "control_plane_deploy",
     "email_edge_deploy",
     "email_edge_rollback",
+    "email_routing_settings_apply",
     "primary_routing_apply",
     "relay_signing_key_provision",
     "route_signing_secret_provision",

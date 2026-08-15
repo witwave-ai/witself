@@ -79,6 +79,11 @@ test("near-limit probe configuration is fenced to production identities", () => 
   assert.equal(config.from, "canary@send.witmail.net");
   assert.equal(config.to, baseEnvironment.AGENT_EMAIL_NEAR_LIMIT_TO);
   assert.equal(config.timeoutSeconds, 600);
+  assert.equal(nearLimitProbeConfiguration({
+    ...baseEnvironment,
+    WITSELF_EMAIL_NEAR_LIMIT_ENDPOINT:
+      "https://api.c1183b8b-2035-4aae-92b9-15156a8ba1c6.k8s.civo.com",
+  }).endpoint, "https://api.c1183b8b-2035-4aae-92b9-15156a8ba1c6.k8s.civo.com");
 
   assert.throws(() => nearLimitProbeConfiguration({
     ...baseEnvironment,
@@ -100,6 +105,11 @@ test("near-limit probe configuration is fenced to production identities", () => 
     ...baseEnvironment,
     WITSELF_EMAIL_NEAR_LIMIT_ENDPOINT:
       "https://api.civo-sandbox-usw2-dev.cells.witself.witwave.ai/v1",
+  }), /root HTTPS URL of one production cell/);
+  assert.throws(() => nearLimitProbeConfiguration({
+    ...baseEnvironment,
+    WITSELF_EMAIL_NEAR_LIMIT_ENDPOINT:
+      "https://api.not-a-cluster.k8s.civo.com",
   }), /root HTTPS URL of one production cell/);
   assert.throws(() => nearLimitProbeConfiguration({
     ...baseEnvironment,

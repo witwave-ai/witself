@@ -19,9 +19,11 @@ export const AGENT_EMAIL_OPERATIONS_LEASE_INTERNAL_PATHS = Object.freeze({
 
 export const AGENT_EMAIL_OPERATIONS = Object.freeze([
   "catch_all_routing_apply",
+  "control_plane_canonical_gates_apply",
   "control_plane_deploy",
   "email_edge_deploy",
   "email_edge_rollback",
+  "email_routing_settings_apply",
   "primary_routing_apply",
   "relay_signing_key_provision",
   "route_signing_secret_provision",

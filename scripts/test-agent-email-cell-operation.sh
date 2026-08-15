@@ -135,11 +135,11 @@ case "${1:-} ${2:-}" in
     exit 1
     ;;
   "logs witself-agent-email-operation-pod")
-	[ "$#" -eq 6 ] || exit 1
-	[ "$3" = -c ] || exit 1
-	[ "$4" = runner ] || exit 1
-	[ "$5" = --tail=20 ] || exit 1
-	[ "$6" = --limit-bytes=8192 ] || exit 1
+    [ "$#" -eq 6 ] || exit 1
+    [ "$3" = -c ] || exit 1
+    [ "$4" = runner ] || exit 1
+    [ "$5" = --tail=20 ] || exit 1
+    [ "$6" = --limit-bytes=8192 ] || exit 1
     [ "${FAKE_RUNNER_LOG_FAILURE:-false}" != true ] || exit 1
     printf '%s\n' "${FAKE_RUNNER_LOG:-}"
     ;;
@@ -339,6 +339,53 @@ jq -e '
     ["WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS","WITSELF_DATABASE_URL"]
 ' "$work_dir/state/job-created.json" >/dev/null
 grep -Fqx '{"status":"completed","private_artifact_exported":true}' "$phase_a_output"
+
+# Runtime startup diagnostics share the Kubernetes log stream with the final
+# value-free backfill result. Ignore non-JSON lines, but accept exactly one
+# structurally valid count object and never echo the surrounding log text.
+reset_fake_run
+export FAKE_PRIVATE_ARTIFACT="$work_dir/canary.json"
+export FAKE_PRIVATE_ARTIFACT_KEY=primary-canary
+export FAKE_RUNNER_EXIT=0
+export FAKE_RUNNER_LOG=$'2026/08/15 17:53:44 goose: no migrations to run. current version: 89\n{"account_count":1,"live_agent_count":10,"missing_mailbox_count_after":0,"missing_mailbox_count_before":10,"override_count":0,"processed_agent_count":10,"ready_mailbox_count":10,"retry_canary_ready":false}'
+noisy_backfill_output="$work_dir/noisy-backfill-output"
+if ! "$repo_root/scripts/run-agent-email-cell-operation.sh" \
+    --cell civo-sandbox-usw2-dev \
+    --kubeconfig "$work_dir/kubeconfig" \
+    --context civo-test \
+    --operation backfill \
+    --artifact-output "$work_dir/output/noisy-backfill-must-stay-absent.json" \
+    --timeout-seconds 60 >"$noisy_backfill_output" 2>&1; then
+  printf 'noisy backfill operation fixture failed:\n' >&2
+  sed -n '1,80p' "$noisy_backfill_output" >&2
+  exit 1
+fi
+grep -Fqx \
+  '{"account_count":1,"live_agent_count":10,"missing_mailbox_count_after":0,"missing_mailbox_count_before":10,"override_count":0,"processed_agent_count":10,"ready_mailbox_count":10,"retry_canary_ready":false}' \
+  "$noisy_backfill_output"
+if grep -Fq 'goose:' "$noisy_backfill_output"; then
+  echo "backfill output exposed an unrelated runner log line" >&2
+  exit 1
+fi
+test ! -e "$work_dir/output/noisy-backfill-must-stay-absent.json"
+
+# Multiple valid-looking result objects are ambiguous and must stay fail-closed.
+reset_fake_run
+export FAKE_RUNNER_LOG=$'{"account_count":1,"live_agent_count":10,"missing_mailbox_count_after":0,"missing_mailbox_count_before":0,"override_count":0,"processed_agent_count":10,"ready_mailbox_count":10,"retry_canary_ready":false}\n{"account_count":1,"live_agent_count":10,"missing_mailbox_count_after":0,"missing_mailbox_count_before":0,"override_count":0,"processed_agent_count":10,"ready_mailbox_count":10,"retry_canary_ready":false}'
+ambiguous_backfill_output="$work_dir/ambiguous-backfill-output"
+if ! "$repo_root/scripts/run-agent-email-cell-operation.sh" \
+    --cell civo-sandbox-usw2-dev \
+    --kubeconfig "$work_dir/kubeconfig" \
+    --context civo-test \
+    --operation backfill \
+    --artifact-output "$work_dir/output/ambiguous-backfill-must-stay-absent.json" \
+    --timeout-seconds 60 >"$ambiguous_backfill_output" 2>&1; then
+  printf 'ambiguous backfill operation fixture failed:\n' >&2
+  sed -n '1,80p' "$ambiguous_backfill_output" >&2
+  exit 1
+fi
+grep -Fqx '{"status":"completed","counts":"unavailable"}' "$ambiguous_backfill_output"
+test ! -e "$work_dir/output/ambiguous-backfill-must-stay-absent.json"
 
 # The active ConfigMap is a non-secret source snapshot. It must never carry the
 # selected canary ID even if an operator manually creates such a key.

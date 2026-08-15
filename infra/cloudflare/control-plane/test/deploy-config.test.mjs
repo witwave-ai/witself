@@ -30,6 +30,8 @@ import {
   GENERATED_CONFIG_PATH,
   isFirstManagedCohortProtocolBootstrap,
   isLeaseBootstrapTargetRelease,
+  privateBootstrapReleaseDeploymentArguments,
+  privateReleaseDeploymentArguments,
   preflightManagedCohortProtocolBootstrapPredecessor,
   preflightManagedCohortProtocolUpgrade,
   productionDeploymentEnvironments,
@@ -158,8 +160,9 @@ test("private deployment verification pins path depth, prefix, modes, and file t
   const cloudflareRoot = join(repositoryRoot, "infra", "cloudflare");
   const controlPlaneRoot = join(cloudflareRoot, "control-plane");
   const entrypoint = join(controlPlaneRoot, "src", "index.js");
+  const workDirectory = join(snapshotRoot, "work");
   await mkdir(dirname(entrypoint), { recursive: true });
-  await mkdir(join(snapshotRoot, "work"), { mode: 0o700 });
+  await mkdir(workDirectory, { mode: 0o700 });
   await writeFile(entrypoint, "export default {};\n");
   const config = await createPrivateDeploymentConfig({
     prefix: "witself-control-plane-deploy-",
@@ -192,30 +195,41 @@ test("private deployment verification pins path depth, prefix, modes, and file t
       "bin",
       "wrangler.js",
     );
-    const dryRun = spawnSync(process.execPath, [
-      wrangler,
-      "deploy",
-      "--dry-run",
-      "--config", config.path,
-      "--outdir", join(snapshotRoot, "work", "wrangler-dry-run"),
-      "--env-file", WRANGLER_PRODUCTION_ENV_FILE,
-    ], {
-      cwd: fileURLToPath(root),
-      encoding: "utf8",
-      env: {
-        PATH: process.env.PATH,
-        WRANGLER_SEND_METRICS: "false",
-        WRANGLER_SEND_ERROR_REPORTS: "false",
-        WRANGLER_WRITE_LOGS: "false",
-      },
-      timeout: 60_000,
-    });
-    assert.equal(
-      dryRun.status,
-      0,
-      `pinned Wrangler dry-run failed: ${String(dryRun.stderr ?? "")}`,
-    );
-    await config.assertUnchanged();
+    for (const args of [
+      privateReleaseDeploymentArguments(
+        expectedIdentity(),
+        config.path,
+        workDirectory,
+      ),
+      privateBootstrapReleaseDeploymentArguments(
+        expectedIdentity(),
+        config.path,
+        workDirectory,
+      ),
+    ]) {
+      const dryRun = spawnSync(process.execPath, [
+        wrangler,
+        ...args,
+        "--dry-run",
+        "--env-file", WRANGLER_PRODUCTION_ENV_FILE,
+      ], {
+        cwd: fileURLToPath(root),
+        encoding: "utf8",
+        env: {
+          PATH: process.env.PATH,
+          WRANGLER_SEND_METRICS: "false",
+          WRANGLER_SEND_ERROR_REPORTS: "false",
+          WRANGLER_WRITE_LOGS: "false",
+        },
+        timeout: 60_000,
+      });
+      assert.equal(
+        dryRun.status,
+        0,
+        `pinned Wrangler dry-run failed: ${String(dryRun.stderr ?? "")}`,
+      );
+      await config.assertUnchanged();
+    }
     assert.equal(
       privateDeploymentConfigMain(config.path, controlPlaneRoot),
       "../control-plane/src/index.js",
@@ -1829,6 +1843,63 @@ test("release deployment is pinned to the exact generated config", () => {
     ],
     "the sole unleased bootstrap write must suppress every Container rollout",
   );
+});
+
+test("private deployment routes normal and bootstrap Wrangler output outside the immutable config", () => {
+  const config = [
+    "/private/tmp/release/repository/infra/cloudflare",
+    "witself-control-plane-deploy-ABC123/wrangler.generated.jsonc",
+  ].join("/");
+  const workDirectory = "/private/tmp/release/work";
+  assert.deepEqual(
+    privateReleaseDeploymentArguments(
+      expectedIdentity(),
+      config,
+      workDirectory,
+    ),
+    [
+      "deploy",
+      "--config", config,
+      "--outdir", join(workDirectory, "wrangler-control-plane-deploy"),
+      "--strict",
+      "--tag", "v1.2.3",
+      "--message", `witself-control-plane v1.2.3 ${commit}`,
+    ],
+  );
+  assert.deepEqual(
+    privateBootstrapReleaseDeploymentArguments(
+      expectedIdentity(),
+      config,
+      workDirectory,
+    ),
+    [
+      "deploy",
+      "--config", config,
+      "--outdir", join(workDirectory, "wrangler-control-plane-bootstrap"),
+      "--strict",
+      "--tag", "v1.2.3",
+      "--message", `witself-control-plane v1.2.3 ${commit}`,
+      "--containers-rollout", "none",
+    ],
+  );
+  for (const invalid of ["", "relative/work", `${workDirectory}/../work`]) {
+    assert.throws(
+      () => privateReleaseDeploymentArguments(
+        expectedIdentity(),
+        config,
+        invalid,
+      ),
+      /normalized absolute work directory/,
+    );
+    assert.throws(
+      () => privateBootstrapReleaseDeploymentArguments(
+        expectedIdentity(),
+        config,
+        invalid,
+      ),
+      /normalized absolute work directory/,
+    );
+  }
 });
 
 test("dark deployment refuses every persistent agent-email activation secret", async () => {
