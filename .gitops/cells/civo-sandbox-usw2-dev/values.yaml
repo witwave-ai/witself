@@ -30,6 +30,25 @@ apps:
     chartVersion: 0.0.245
     imageTag: 0.0.245
     backendKind: managed
+    agentEmail:
+      receivePilot:
+        enabled: false
+      receiveProduction:
+        enabled: true
+        domain: witmail.net
+        acceptedLegacyDomains:
+          - agent-mail.witwave.ai
+        audience: civo-sandbox-usw2-dev
+        accountIDs: []
+        accountIDsExistingSecret:
+          name: witself-agent-email-receive-cohort-v1
+          key: account_ids
+        retryCanaryAgentID: ""
+        retryCanaryAgentIDExistingSecret:
+          name: ""
+          key: agent_id
+        relayPublicKeysJSON: '{"relay-2026-08":"iwuwCIdpnBlEc+9upLpJUVFHjYLyV86iuwc9MBqvr9w="}'
+        relayReplayWindow: 5m
     backup:
       enabled: true
       validationEnabled: false
