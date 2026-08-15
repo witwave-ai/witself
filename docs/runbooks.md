@@ -749,9 +749,12 @@ witself-admin account plan-override get \
 Run the entitled phase with the byte-identical target, state, agent token, key
 ID, key, kubeconfig, context, and cell. The harness requires a strictly newer
 applied snapshot while the Deployment UID, generation, image, ConfigMap
-checksum, and target remain unchanged. It rejects a different token digest and
-requires the same token to return its exact enabled canonical mailbox before
-ingest. Together, those are the no-reinstall/no-redeploy proof:
+checksum, API Service UID/resourceVersion, exact selector and port set, and
+target remain unchanged. The Service selector must exactly match the fenced
+Deployment selector before, immediately before, and immediately after the
+request. The harness rejects a different token digest and requires the same
+token to return its exact enabled canonical mailbox before ingest. Together,
+those are the no-reinstall/no-redeploy proof:
 
 ```sh
 scripts/run-agent-email-cell-smoke.sh \
@@ -775,8 +778,11 @@ scripts/run-agent-email-cell-smoke.sh \
   --state-file "$SMOKE_STATE"
 ```
 
-Cleanup locks the account and exact synthetic rows, then refuses any row that
-was read, acknowledged, claimed, completed, failure-counted, duplicate-linked,
+Cleanup locks the account and every row matching any unique probe marker. It
+requires each suspect to satisfy the complete synthetic predicate, recomputes
+the hash from stored raw MIME, and uses the exact verified Professional
+message ID when available. It then refuses any row that was read,
+acknowledged, claimed, completed, failure-counted, duplicate-linked,
 retry-canary-linked, ambiguous, or missing its one receive audit event. On a
 safe row it deletes only the synthetic message; its delivery cascades and the
 attachment counter trigger reconciles. The append-only account event and

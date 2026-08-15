@@ -261,6 +261,7 @@ chmod 700 "$WORK_DIR"
 STATE_PARENT="$(dirname "$STATE_FILE")"
 STATE_PART=""
 PORT_FORWARD_PID=""
+KUBE_PROXY_PID=""
 LOCK_CREATED=false
 LOCK_NAME="witself-agent-email-operation-lock"
 LOCK_UID=""
@@ -291,15 +292,59 @@ stop_port_forward() {
   return 0
 }
 
+stop_kube_proxy() {
+  if [ -z "$KUBE_PROXY_PID" ]; then return 0; fi
+  kill "$KUBE_PROXY_PID" >/dev/null 2>&1 || true
+  wait "$KUBE_PROXY_PID" >/dev/null 2>&1 || true
+  if kill -0 "$KUBE_PROXY_PID" >/dev/null 2>&1; then return 1; fi
+  KUBE_PROXY_PID=""
+  return 0
+}
+
 release_operation_lock() {
-  local current_uid
+  local current_uid proxy_log proxy_port delete_options delete_result delete_succeeded
   [ "$LOCK_CREATED" = true ] || return 0
   [ "$PORT_FORWARD_STOPPED" = true ] || return 1
   current_uid="$("${KUBE[@]}" -n "$NAMESPACE" get configmap "$LOCK_NAME" \
     -o 'jsonpath={.metadata.uid}' 2>/dev/null || true)"
   [ -n "$current_uid" ] && [ "$current_uid" = "$LOCK_UID" ] || return 1
-  "${KUBE[@]}" -n "$NAMESPACE" delete configmap "$LOCK_NAME" \
-    --wait=true --timeout=30s >/dev/null 2>&1 || return 1
+  proxy_log="$WORK_DIR/kube-proxy.log"
+  "${KUBE[@]}" proxy --address=127.0.0.1 --port=0 \
+    --accept-hosts='^127\.0\.0\.1$' \
+    --accept-paths="^/api/v1/namespaces/$NAMESPACE/configmaps/$LOCK_NAME\$" \
+    --reject-methods='^(GET|POST|PUT|PATCH|HEAD|OPTIONS)$' >"$proxy_log" 2>&1 &
+  KUBE_PROXY_PID=$!
+  proxy_port=""
+  for _attempt in $(seq 1 50); do
+    if ! kill -0 "$KUBE_PROXY_PID" >/dev/null 2>&1; then break; fi
+    proxy_port="$(sed -n 's/^Starting to serve on 127\.0\.0\.1:\([0-9][0-9]*\)$/\1/p' "$proxy_log" | head -1)"
+    if [[ "$proxy_port" =~ ^[0-9]+$ ]] && (( proxy_port >= 1 && proxy_port <= 65535 )); then break; fi
+    sleep 0.1
+  done
+  if [[ ! "$proxy_port" =~ ^[0-9]+$ ]] || ! kill -0 "$KUBE_PROXY_PID" >/dev/null 2>&1; then
+    stop_kube_proxy || true
+    return 1
+  fi
+  delete_options="$WORK_DIR/lock-delete-options.json"
+  delete_result="$WORK_DIR/lock-delete-result.json"
+  jq -n --arg uid "$LOCK_UID" '{apiVersion:"v1",kind:"DeleteOptions",preconditions:{uid:$uid}}' \
+    >"$delete_options"
+  chmod 600 "$delete_options"
+  delete_succeeded=false
+  if curl --silent --show-error --fail --max-time 10 --proto '=http' \
+      --request DELETE --header 'Content-Type: application/json' \
+      --data-binary "@$delete_options" \
+      "http://127.0.0.1:$proxy_port/api/v1/namespaces/$NAMESPACE/configmaps/$LOCK_NAME" \
+      >"$delete_result" 2>"$WORK_DIR/lock-delete.err"; then
+    delete_succeeded=true
+  fi
+  stop_kube_proxy || return 1
+  [ "$delete_succeeded" = true ] || return 1
+  jq -e --arg name "$LOCK_NAME" --arg uid "$LOCK_UID" '
+    (.kind=="Status" and .status=="Success" and .details.name==$name and
+      ((.details.uid // $uid)==$uid)) or
+    (.kind=="ConfigMap" and .metadata.name==$name and .metadata.uid==$uid)
+  ' "$delete_result" >/dev/null 2>&1 || return 1
   LOCK_CREATED=false
   return 0
 }
@@ -308,6 +353,7 @@ cleanup_local() {
   local status=$?
   trap - EXIT INT TERM HUP
   stop_port_forward || true
+  stop_kube_proxy || true
   if ! release_operation_lock; then
     printf '%s\n' 'warning: cell operation lock retained because cleanup could not prove ownership or transport shutdown' >&2
   fi
@@ -337,6 +383,9 @@ ACCOUNT_ID="$(jq -er '.account_id' "$TARGET_SNAPSHOT")"
 REALM_ID="$(jq -er '.realm_id' "$TARGET_SNAPSHOT")"
 AGENT_ID="$(jq -er '.agent_id' "$TARGET_SNAPSHOT")"
 BASE_RECIPIENT="$(jq -er '.recipient' "$TARGET_SNAPSHOT")"
+BASE_LOCAL="${BASE_RECIPIENT%@*}"
+AGENT_SEGMENT="${BASE_LOCAL%%.*}"
+REALM_LABEL="${REALM_ID#realm_}"
 TARGET_SHA256="$(sha256_file "$TARGET_SNAPSHOT")"
 [[ "$TARGET_SHA256" =~ ^[0-9a-f]{64}$ ]] || die "target manifest digest failed"
 
@@ -344,13 +393,20 @@ if [ "$PHASE" != disabled ]; then
   if ! jq -e --arg cell "$CELL" --arg target_sha "$TARGET_SHA256" '
     . as $state | type == "object" and .schema_version == 1 and
     ((keys - ["cell","cleanup","client_fence","cohort_fence","config_fence","deployment_fence","disabled",
-      "entitled","schema_version","target","target_sha256"]) | length == 0) and
+      "entitled","schema_version","service_fence","target","target_sha256"]) | length == 0) and
     .cell == $cell and .target_sha256 == $target_sha and
     (.target | type == "object") and
     (.deployment_fence | type == "object" and
       (keys|sort)==["config_checksum","config_name","generation","image","resource_version","uid"]) and
     (.config_fence | type == "object" and
       (keys|sort)==["audience","cell","checksum","domain","public_keys","resource_version","uid"]) and
+    (.service_fence | type == "object" and
+      (keys|sort)==["deployment_uid","ports","resource_version","selector","uid"] and
+      (.uid|type=="string" and length>0) and
+      (.resource_version|type=="string" and length>0) and
+      (.deployment_uid|type=="string" and length>0) and
+      (.selector|type=="object" and length>0) and
+      (.ports|type=="array" and length==1)) and
     (.cohort_fence | type == "object" and
       (keys|sort)==["immutable","resource_version","uid"]) and
     (.client_fence | type == "object" and
@@ -392,7 +448,9 @@ if [ "$PHASE" != disabled ]; then
        (.plan.hash|type=="string" and test("^[0-9a-f]{64}$") and .!=$state.disabled.plan.hash) and
        (if .outcome=="verified" then
           .verdict=="accepted" and .owner_gate=="address_available" and
-          .evidence=={"messages":1,"deliveries":1,"events":1}
+          (.evidence|type=="object" and (keys|sort)==["deliveries","events","message_id","messages"] and
+           .messages==1 and .deliveries==1 and .events==1 and
+           (.message_id|type=="string" and test("^emsg_[a-z2-7]{16}$")))
         else .outcome=="prepared" and ((.verdict//null)==null) and
           ((.owner_gate//null)==null) and ((.evidence//null)==null) end))) and
     ((.cleanup // null)==null or
@@ -438,6 +496,7 @@ LOCK_CREATED=true
 validate_deployment() {
   local file="$1"
   jq -e --arg name "$DEPLOYMENT" '
+    . as $root |
     .metadata.name == $name and
     (.metadata.uid | type=="string" and length>0) and
     (.metadata.resourceVersion | type=="string" and length>0) and
@@ -449,6 +508,10 @@ validate_deployment() {
     .status.availableReplicas == .spec.replicas and
     ((.status.unavailableReplicas // 0)==0) and
     ([.spec.template.spec.containers[] | select(.name=="witself-server")] | length)==1 and
+    (.spec.selector.matchLabels | type=="object" and length>0) and
+    ((.spec.selector.matchExpressions // []) == []) and
+    all(.spec.selector.matchLabels | to_entries[];
+      .value == $root.spec.template.metadata.labels[.key]) and
     (.spec.template.metadata.annotations["witself.io/server-config-checksum"] |
       type=="string" and test("^[0-9a-f]{64}$"))
   ' "$file" >/dev/null
@@ -496,9 +559,16 @@ snapshot_cell_source() {
   ' "$config_file" >/dev/null || die "managed production receive configuration is not ready"
   "${KUBE[@]}" -n "$NAMESPACE" get service "$SERVICE" -o json >"$service_file" 2>/dev/null ||
     die "managed server Service is unavailable"
-  jq -e --arg name "$SERVICE" '
-    .metadata.name==$name and .spec.clusterIP!="None" and
-    ([.spec.ports[] | select(.name=="api" and .port==80 and .targetPort=="api" and .protocol=="TCP")] | length)==1
+  jq -e --arg name "$SERVICE" --slurpfile deployment "$deployment_file" '
+    .metadata.name==$name and
+    (.metadata.uid|type=="string" and length>0) and
+    (.metadata.resourceVersion|type=="string" and length>0) and
+    .spec.clusterIP!="None" and
+    (.spec.selector|type=="object" and length>0) and
+    .spec.selector==$deployment[0].spec.selector.matchLabels and
+    (.spec.ports|type=="array" and length==1) and
+    .spec.ports[0].name=="api" and .spec.ports[0].port==80 and
+    .spec.ports[0].targetPort=="api" and .spec.ports[0].protocol=="TCP"
   ' "$service_file" >/dev/null || die "managed server API Service is invalid"
   jq -S '{uid:.metadata.uid,resource_version:.metadata.resourceVersion,generation:.metadata.generation,
     image:(.spec.template.spec.containers[]|select(.name=="witself-server")|.image),
@@ -510,6 +580,10 @@ snapshot_cell_source() {
     cell:.data.WITSELF_CELL_NAME,audience:.data.WITSELF_AGENT_EMAIL_RECEIVE_AUDIENCE,
     domain:.data.WITSELF_AGENT_EMAIL_RECEIVE_DOMAIN,
     public_keys:.data.WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON}' "$config_file" >"$WORK_DIR/config-$suffix.fence.json"
+  jq -S --slurpfile deployment "$deployment_file" '{uid:.metadata.uid,
+    resource_version:.metadata.resourceVersion,
+    deployment_uid:$deployment[0].metadata.uid,
+    selector:.spec.selector,ports:.spec.ports}' "$service_file" >"$WORK_DIR/service-$suffix.fence.json"
 }
 
 snapshot_cell_source initial
@@ -521,6 +595,8 @@ if [ "$PHASE" = entitled ]; then
     "$WORK_DIR/deployment-initial.fence.json" >/dev/null || die "server Deployment changed between plan phases"
   jq -e --slurpfile state "$STATE_SNAPSHOT" '. == $state[0].config_fence' \
     "$WORK_DIR/config-initial.fence.json" >/dev/null || die "server configuration changed between plan phases"
+  jq -e --slurpfile state "$STATE_SNAPSHOT" '. == $state[0].service_fence' \
+    "$WORK_DIR/service-initial.fence.json" >/dev/null || die "server Service changed between plan phases"
 fi
 
 if [ "$PHASE" != cleanup ]; then
@@ -603,7 +679,7 @@ POSTGRES_CONTAINER="$(jq -er --arg pod "$POSTGRES_POD" '.items[]|select(.metadat
 
 run_sql() {
   local mode="$1" sql_file="$2" output_file="$3"
-  local options='-c statement_timeout=10000 -c lock_timeout=2000'
+  local options='-c statement_timeout=10000 -c lock_timeout=2000' canonical_output
   if [ "$mode" = read ]; then options="-c default_transaction_read_only=on $options"; fi
   # This static shell is evaluated inside the database pod. Tenant values and
   # SQL travel only over stdin, never through kubectl/process arguments.
@@ -624,6 +700,14 @@ run_sql() {
     die "database fence failed"
   fi
   chmod 600 "$output_file"
+  canonical_output="$output_file.canonical"
+  if ! jq -ce -s 'if length==1 and (.[0]|type=="object") then .[0]
+      else error("expected exactly one JSON object") end' \
+      "$output_file" >"$canonical_output" 2>/dev/null; then
+    die "database fence did not return exactly one object"
+  fi
+  chmod 600 "$canonical_output"
+  mv "$canonical_output" "$output_file"
 }
 
 TARGET_SQL="$WORK_DIR/target.sql"
@@ -683,6 +767,20 @@ elif [ "$PHASE" = entitled ]; then
     ' "$TARGET_OBSERVATION" >/dev/null || die "Professional snapshot does not prove a newer plan transition"
 fi
 
+render_probe_raw() {
+  local recipient="$1" mime_message_id="$2" destination="$3"
+  {
+    printf 'From: Witself receive smoke <witself-email-receive-smoke@smoke.invalid>\r\n'
+    printf 'To: %s\r\n' "$recipient"
+    printf 'Subject: Witself production receive smoke\r\n'
+    printf 'Message-ID: %s\r\n' "$mime_message_id"
+    printf 'X-Witself-Production-Receive-Smoke: 1\r\n'
+    printf 'Content-Type: text/plain; charset=utf-8\r\n'
+    printf '\r\nSynthetic receive path proof. No reply is expected.\r\n'
+  } >"$destination"
+  chmod 600 "$destination"
+}
+
 if [ "$PHASE" = cleanup ]; then
   PROBE_JSON="$WORK_DIR/cleanup-probe.json"
   if ! jq -e '
@@ -697,27 +795,42 @@ if [ "$PHASE" = cleanup ]; then
   ' "$STATE_SNAPSHOT" >/dev/null; then
     die "state contains no valid recoverable smoke probe"
   fi
-  jq -c '[.disabled.probe // empty,.entitled.probe // empty]' "$STATE_SNAPSHOT" >"$PROBE_JSON"
+  jq -c '[
+    (.disabled.probe + {message_id:""}),
+    (if (.entitled.probe // null)!=null then
+       .entitled.probe + {message_id:(.entitled.evidence.message_id // "")}
+     else empty end)
+  ]' "$STATE_SNAPSHOT" >"$PROBE_JSON"
+  if ! jq -e '
+    type=="array" and length>=1 and length<=2 and all(.[];
+      (keys|sort)==["message_id","mime_message_id","nonce","raw_sha256","raw_size","recipient","tag"] and
+      (.message_id=="" or (.message_id|test("^emsg_[a-z2-7]{16}$"))))
+  ' "$PROBE_JSON" >/dev/null; then
+    die "state contains an invalid recoverable smoke identity"
+  fi
+  probe_index=0
+  while [ "$probe_index" -lt "$(jq -r 'length' "$PROBE_JSON")" ]; do
+    expected_recipient="$(jq -er --argjson index "$probe_index" '.[$index].recipient' "$PROBE_JSON")"
+    expected_mime_id="$(jq -er --argjson index "$probe_index" '.[$index].mime_message_id' "$PROBE_JSON")"
+    expected_raw_sha="$(jq -er --argjson index "$probe_index" '.[$index].raw_sha256' "$PROBE_JSON")"
+    expected_raw_size="$(jq -er --argjson index "$probe_index" '.[$index].raw_size' "$PROBE_JSON")"
+    recovered_raw="$WORK_DIR/cleanup-probe-$probe_index.eml"
+    render_probe_raw "$expected_recipient" "$expected_mime_id" "$recovered_raw"
+    [ "$(sha256_file "$recovered_raw")" = "$expected_raw_sha" ] &&
+      [ "$(wc -c <"$recovered_raw" | tr -d '[:space:]')" = "$expected_raw_size" ] ||
+      die "recoverable smoke probe does not match its reconstructed raw MIME"
+    probe_index=$((probe_index + 1))
+  done
 else
   NONCE="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(8).toString("hex"))')"
   [[ "$NONCE" =~ ^[0-9a-f]{16}$ ]] || die "probe nonce generation failed"
   TAG="ws-$NONCE"
-  BASE_LOCAL="${BASE_RECIPIENT%@*}"
   DOMAIN="${BASE_RECIPIENT#*@}"
   (( ${#BASE_LOCAL} + 1 + ${#TAG} <= 64 )) || die "canonical address has no room for a smoke subaddress"
   TAGGED_RECIPIENT="$BASE_LOCAL+$TAG@$DOMAIN"
   MIME_MESSAGE_ID="<witself-receive-smoke-$NONCE@smoke.invalid>"
   RAW_FILE="$WORK_DIR/probe.eml"
-  {
-    printf 'From: Witself receive smoke <witself-email-receive-smoke@smoke.invalid>\r\n'
-    printf 'To: %s\r\n' "$TAGGED_RECIPIENT"
-    printf 'Subject: Witself production receive smoke\r\n'
-    printf 'Message-ID: %s\r\n' "$MIME_MESSAGE_ID"
-    printf 'X-Witself-Production-Receive-Smoke: 1\r\n'
-    printf 'Content-Type: text/plain; charset=utf-8\r\n'
-    printf '\r\nSynthetic receive path proof. No reply is expected.\r\n'
-  } >"$RAW_FILE"
-  chmod 600 "$RAW_FILE"
+  render_probe_raw "$TAGGED_RECIPIENT" "$MIME_MESSAGE_ID" "$RAW_FILE"
   RAW_SIZE="$(wc -c <"$RAW_FILE" | tr -d '[:space:]')"
   RAW_SHA256="$(sha256_file "$RAW_FILE")"
   [[ "$RAW_SIZE" =~ ^[0-9]+$ ]] && (( RAW_SIZE >= 1 && RAW_SIZE <= 4096 )) &&
@@ -742,12 +855,21 @@ write_evidence_sql() {
     printf '%s\n' 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;'
     printf "WITH messages AS (SELECT id FROM agent_email_messages WHERE account_id='%s' AND realm_id='%s' AND owner_agent_id='%s'\n" "$ACCOUNT_ID" "$REALM_ID" "$AGENT_ID"
     printf " AND provider='cloudflare_email_routing' AND envelope_sender='witself-email-receive-smoke@smoke.invalid'\n"
-    printf " AND envelope_recipient='%s' AND subaddress_tag='%s' AND raw_sha256='%s' AND raw_size_bytes=%s\n" "$recipient" "$tag" "$raw_sha" "$raw_size"
-    printf " AND header_subject='Witself production receive smoke' AND mime_message_id='%s')\n" "$mime_id"
+    printf " AND provider_message_id IS NULL AND envelope_recipient='%s' AND agent_segment='%s' AND realm_label='%s'\n" "$recipient" "$AGENT_SEGMENT" "$REALM_LABEL"
+    printf " AND recipient_route_kind='canonical' AND recipient_realm_alias_claim_id IS NULL AND recipient_custom_domain_request_id IS NULL\n"
+    printf " AND subaddress_tag='%s' AND raw_sha256='%s' AND raw_size_bytes=%s\n" "$tag" "$raw_sha" "$raw_size"
+    printf " AND raw_mime IS NOT NULL AND octet_length(raw_mime)=%s AND encode(sha256(raw_mime),'hex')='%s'\n" "$raw_size" "$raw_sha"
+    printf " AND parse_state='parsed' AND parse_error IS NULL AND header_from='Witself receive smoke <witself-email-receive-smoke@smoke.invalid>'\n"
+    printf " AND header_to='%s' AND header_subject='Witself production receive smoke' AND mime_message_id='%s'\n" "$recipient" "$mime_id"
+    printf " AND message_date IS NULL AND attachment_count=0 AND attachment_storage_bytes=0 AND retained_attachment_storage_bytes=0\n"
+    printf " AND payload_retention_state='retained' AND spf_result='unknown' AND dkim_result='unknown' AND dmarc_result='unknown'\n"
+    printf " AND spam_verdict='unknown' AND sender_verification_state='unverified' AND possible_duplicate_of_message_id IS NULL\n"
+    printf " AND duplicate_group_sha256=encode(sha256(convert_to('%s','UTF8')||decode('00','hex')||convert_to('%s','UTF8')||decode('00','hex')||convert_to('witself-email-receive-smoke@smoke.invalid','UTF8')),'hex'))\n" "$raw_sha" "$recipient"
     printf "SELECT json_build_object('messages',(SELECT count(*) FROM messages),\n"
     printf " 'deliveries',(SELECT count(*) FROM agent_email_deliveries d JOIN messages m ON m.id=d.message_id),\n"
     printf " 'events',(SELECT count(*) FROM account_events e JOIN messages m ON e.account_id='%s' AND e.verb='agent_email.received' AND e.metadata->>'message_id'=m.id),\n" "$ACCOUNT_ID"
-    printf " 'owner_events',(SELECT count(*) FROM account_events e WHERE e.account_id='%s' AND e.verb='agent_email.received' AND e.metadata->>'owner_agent_id'='%s'));\n" "$ACCOUNT_ID" "$AGENT_ID"
+    printf " 'owner_events',(SELECT count(*) FROM account_events e WHERE e.account_id='%s' AND e.verb='agent_email.received' AND e.metadata->>'owner_agent_id'='%s'),\n" "$ACCOUNT_ID" "$AGENT_ID"
+    printf " 'message_id',COALESCE((SELECT min(id) FROM messages),''));\n"
     printf '%s\n' 'COMMIT;'
   } >"$sql_file"
   chmod 600 "$sql_file"
@@ -761,17 +883,40 @@ if [ "$PHASE" = cleanup ]; then
   CLEANUP_SQL="$WORK_DIR/cleanup.sql"
   {
     printf '%s\n' 'BEGIN;'
-    printf '%s\n' 'CREATE TEMP TABLE smoke_expected(tag text PRIMARY KEY,recipient text,mime_id text,raw_sha text,raw_size bigint) ON COMMIT DROP;'
-    jq -r '.[] | "INSERT INTO smoke_expected VALUES (\u0027"+.tag+"\u0027,\u0027"+.recipient+"\u0027,\u0027"+.mime_message_id+"\u0027,\u0027"+.raw_sha256+"\u0027,"+(.raw_size|tostring)+");"' "$PROBE_JSON"
+    printf '%s\n' 'CREATE TEMP TABLE smoke_expected(tag text PRIMARY KEY,recipient text,mime_id text,raw_sha text,raw_size bigint,expected_message_id text) ON COMMIT DROP;'
+    jq -r '.[] | "INSERT INTO smoke_expected VALUES (\u0027"+.tag+"\u0027,\u0027"+.recipient+"\u0027,\u0027"+.mime_message_id+"\u0027,\u0027"+.raw_sha256+"\u0027,"+(.raw_size|tostring)+",\u0027"+.message_id+"\u0027);"' "$PROBE_JSON"
+    # A PL/pgSQL PERFORM acquires the tenant row lock without emitting a tuple
+    # that could be confused with the one JSON cleanup result.
+    printf '%s\n' "DO \$smoke_lock\$ BEGIN PERFORM 1 FROM accounts WHERE id='$ACCOUNT_ID' FOR NO KEY UPDATE;"
+    printf '%s\n' " IF NOT FOUND THEN RAISE EXCEPTION 'unsafe smoke cleanup'; END IF; END \$smoke_lock\$;"
+    printf '%s\n' 'CREATE TEMP TABLE smoke_suspects(probe_tag text,id text,PRIMARY KEY(probe_tag,id)) ON COMMIT DROP;'
+    printf "INSERT INTO smoke_suspects SELECT x.tag,m.id FROM smoke_expected x JOIN agent_email_messages m ON\n"
+    printf " m.subaddress_tag=x.tag OR m.envelope_recipient=x.recipient OR m.mime_message_id=x.mime_id OR m.raw_sha256=x.raw_sha\n"
+    printf " OR (x.expected_message_id<>'' AND m.id=x.expected_message_id) FOR UPDATE OF m;\n"
     printf '%s\n' 'CREATE TEMP TABLE smoke_candidates(probe_tag text UNIQUE,id text PRIMARY KEY) ON COMMIT DROP;'
-    printf "SELECT 1 FROM accounts WHERE id='%s' FOR NO KEY UPDATE;\n" "$ACCOUNT_ID"
-    printf "INSERT INTO smoke_candidates SELECT x.tag,m.id FROM agent_email_messages m JOIN smoke_expected x ON\n"
-    printf " m.subaddress_tag=x.tag AND m.envelope_recipient=x.recipient AND m.mime_message_id=x.mime_id AND m.raw_sha256=x.raw_sha AND m.raw_size_bytes=x.raw_size\n"
-    printf " WHERE m.account_id='%s' AND m.realm_id='%s' AND m.owner_agent_id='%s' FOR UPDATE OF m;\n" "$ACCOUNT_ID" "$REALM_ID" "$AGENT_ID"
+    printf "INSERT INTO smoke_candidates SELECT x.tag,m.id FROM smoke_suspects s JOIN smoke_expected x ON x.tag=s.probe_tag\n"
+    printf " JOIN agent_email_messages m ON m.id=s.id WHERE m.account_id='%s' AND m.realm_id='%s' AND m.owner_agent_id='%s'\n" "$ACCOUNT_ID" "$REALM_ID" "$AGENT_ID"
+    printf " AND (x.expected_message_id='' OR m.id=x.expected_message_id)\n"
+    printf " AND m.provider='cloudflare_email_routing' AND m.provider_message_id IS NULL\n"
+    printf " AND m.envelope_sender='witself-email-receive-smoke@smoke.invalid' AND m.envelope_recipient=x.recipient\n"
+    printf " AND m.agent_segment='%s' AND m.realm_label='%s' AND m.recipient_route_kind='canonical'\n" "$AGENT_SEGMENT" "$REALM_LABEL"
+    printf " AND m.recipient_realm_alias_claim_id IS NULL AND m.recipient_custom_domain_request_id IS NULL\n"
+    printf " AND m.subaddress_tag=x.tag AND m.raw_sha256=x.raw_sha AND m.raw_size_bytes=x.raw_size\n"
+    printf " AND m.raw_mime IS NOT NULL AND octet_length(m.raw_mime)=x.raw_size AND encode(sha256(m.raw_mime),'hex')=x.raw_sha\n"
+    printf " AND m.parse_state='parsed' AND m.parse_error IS NULL\n"
+    printf " AND m.header_from='Witself receive smoke <witself-email-receive-smoke@smoke.invalid>'\n"
+    printf " AND m.header_to=x.recipient AND m.header_subject='Witself production receive smoke' AND m.mime_message_id=x.mime_id\n"
+    printf " AND m.message_date IS NULL AND m.attachment_count=0 AND m.attachment_storage_bytes=0 AND m.retained_attachment_storage_bytes=0\n"
+    printf " AND m.payload_retention_state='retained' AND m.spf_result='unknown' AND m.dkim_result='unknown'\n"
+    printf " AND m.dmarc_result='unknown' AND m.spam_verdict='unknown' AND m.sender_verification_state='unverified'\n"
+    printf " AND m.possible_duplicate_of_message_id IS NULL\n"
+    printf " AND m.duplicate_group_sha256=encode(sha256(convert_to(x.raw_sha,'UTF8')||decode('00','hex')||convert_to(x.recipient,'UTF8')||decode('00','hex')||convert_to('witself-email-receive-smoke@smoke.invalid','UTF8')),'hex');\n"
     printf '%s\n' 'CREATE TEMP TABLE smoke_result(matched bigint,deleted bigint) ON COMMIT DROP;'
-    printf '%s\n' "DO \$smoke\$ DECLARE matched_count bigint; unsafe_count bigint; deleted_count bigint; BEGIN"
+    printf '%s\n' "DO \$smoke\$ DECLARE matched_count bigint; suspect_count bigint; unsafe_count bigint; deleted_count bigint; BEGIN"
     printf '%s\n' ' SELECT count(*) INTO matched_count FROM smoke_candidates;'
+    printf '%s\n' ' SELECT count(*) INTO suspect_count FROM smoke_suspects;'
     printf '%s\n' " IF matched_count>2 THEN RAISE EXCEPTION 'unsafe smoke cleanup'; END IF;"
+    printf '%s\n' " IF suspect_count<>matched_count THEN RAISE EXCEPTION 'unsafe smoke cleanup'; END IF;"
     printf " SELECT count(*) INTO unsafe_count FROM agent_email_messages m JOIN smoke_candidates c ON c.id=m.id\n"
     printf " WHERE m.account_id<>'%s' OR m.realm_id<>'%s' OR m.owner_agent_id<>'%s'\n" "$ACCOUNT_ID" "$REALM_ID" "$AGENT_ID"
     printf " OR m.provider<>'cloudflare_email_routing' OR m.envelope_sender<>'witself-email-receive-smoke@smoke.invalid'\n"
@@ -794,16 +939,24 @@ if [ "$PHASE" = cleanup ]; then
     # shellcheck disable=SC2016
     printf '%s\n' ' INSERT INTO smoke_result VALUES(matched_count,deleted_count); END $smoke$;'
     printf "SELECT json_build_object('matched',matched,'deleted',deleted,\n"
-    printf " 'remaining',(SELECT count(*) FROM agent_email_messages m JOIN smoke_expected x ON m.raw_sha256=x.raw_sha AND m.subaddress_tag=x.tag WHERE m.account_id='%s' AND m.realm_id='%s' AND m.owner_agent_id='%s'),\n" "$ACCOUNT_ID" "$REALM_ID" "$AGENT_ID"
+    printf " 'remaining',(SELECT count(*) FROM agent_email_messages m JOIN smoke_expected x ON\n"
+    printf "   m.subaddress_tag=x.tag OR m.envelope_recipient=x.recipient OR m.mime_message_id=x.mime_id OR m.raw_sha256=x.raw_sha\n"
+    printf "   OR (x.expected_message_id<>'' AND m.id=x.expected_message_id)),\n"
     printf " 'events_retained',(SELECT count(*) FROM account_events e JOIN smoke_candidates c ON e.account_id='%s' AND e.verb='agent_email.received' AND e.metadata->>'message_id'=c.id)) FROM smoke_result;\n" "$ACCOUNT_ID"
     printf '%s\n' 'COMMIT;'
   } >"$CLEANUP_SQL"
   chmod 600 "$CLEANUP_SQL"
   CLEANUP_RESULT="$WORK_DIR/cleanup-result.json"
   run_sql write "$CLEANUP_SQL" "$CLEANUP_RESULT"
-  jq -e 'type=="object" and (.matched|type=="number" and .>=0 and .<=2) and
-    .deleted==.matched and .remaining==0 and .events_retained==.matched' "$CLEANUP_RESULT" >/dev/null ||
+  CLEANUP_CANONICAL="$WORK_DIR/cleanup-result-canonical.json"
+  jq -ce -s 'if length==1 and (.[0] | type=="object" and
+      (keys|sort)==["deleted","events_retained","matched","remaining"] and
+      (.matched|type=="number" and .>=0 and .<=2) and
+      .deleted==.matched and .remaining==0 and .events_retained==.matched)
+    then .[0] else error("cleanup must return exactly one valid object") end' \
+    "$CLEANUP_RESULT" >"$CLEANUP_CANONICAL" 2>/dev/null ||
     die "synthetic cleanup did not reach a safe exact result"
+  mv "$CLEANUP_CANONICAL" "$CLEANUP_RESULT"
   UPDATED_STATE="$WORK_DIR/state-updated.json"
   jq --argjson result "$(<"$CLEANUP_RESULT")" '.cleanup={outcome:"complete",matched:$result.matched,
     deleted:$result.deleted,events_retained:$result.events_retained}' "$STATE_SNAPSHOT" >"$UPDATED_STATE"
@@ -819,9 +972,10 @@ EVIDENCE_BEFORE_SQL="$WORK_DIR/evidence-before.sql"
 EVIDENCE_BEFORE="$WORK_DIR/evidence-before.json"
 write_evidence_sql "$PROBE_JSON" "$EVIDENCE_BEFORE_SQL"
 run_sql read "$EVIDENCE_BEFORE_SQL" "$EVIDENCE_BEFORE"
-jq -e 'type=="object" and (keys|sort)==["deliveries","events","messages","owner_events"] and
+jq -e -s 'length==1 and (.[0] | type=="object" and
+  (keys|sort)==["deliveries","events","message_id","messages","owner_events"] and
   .messages==0 and .deliveries==0 and .events==0 and
-  (.owner_events|type=="number" and .>=0)' "$EVIDENCE_BEFORE" >/dev/null ||
+  .message_id=="" and (.owner_events|type=="number" and .>=0))' "$EVIDENCE_BEFORE" >/dev/null ||
   die "synthetic probe evidence already exists"
 
 # Read the installed client's credential only after the cell, cohort, target,
@@ -868,10 +1022,12 @@ if [ "$PHASE" = disabled ]; then
   jq -n --arg cell "$CELL" --arg target_sha "$TARGET_SHA256" --arg token_sha "$AGENT_TOKEN_SHA256" \
     --slurpfile target "$TARGET_SNAPSHOT" --slurpfile deployment "$WORK_DIR/deployment-initial.fence.json" \
     --slurpfile config "$WORK_DIR/config-initial.fence.json" --slurpfile cohort "$WORK_DIR/cohort-secret.fence.json" \
+    --slurpfile service "$WORK_DIR/service-initial.fence.json" \
     --slurpfile plan "$PLAN_JSON" --slurpfile probe "$PROBE_JSON" '{schema_version:1,cell:$cell,
       target_sha256:$target_sha,target:$target[0],client_fence:{token_sha256:$token_sha},
       deployment_fence:$deployment[0],config_fence:$config[0],
-      cohort_fence:$cohort[0],disabled:{outcome:"prepared",plan:$plan[0],probe:$probe[0]}}' >"$NEW_STATE"
+      service_fence:$service[0],cohort_fence:$cohort[0],
+      disabled:{outcome:"prepared",plan:$plan[0],probe:$probe[0]}}' >"$NEW_STATE"
   publish_new_state "$NEW_STATE"
   snapshot_file "$STATE_FILE" "$STATE_SNAPSHOT"
 else
@@ -899,7 +1055,8 @@ node -e '
 snapshot_cell_source presend
 snapshot_cohort_fence presend
 if ! cmp -s "$WORK_DIR/deployment-initial.fence.json" "$WORK_DIR/deployment-presend.fence.json" ||
-   ! cmp -s "$WORK_DIR/config-initial.fence.json" "$WORK_DIR/config-presend.fence.json"; then
+   ! cmp -s "$WORK_DIR/config-initial.fence.json" "$WORK_DIR/config-presend.fence.json" ||
+   ! cmp -s "$WORK_DIR/service-initial.fence.json" "$WORK_DIR/service-presend.fence.json"; then
   die "managed server source drifted before the signed request"
 fi
 
@@ -963,7 +1120,8 @@ stop_port_forward || die "loopback port-forward could not be stopped"
 snapshot_cell_source postsend
 snapshot_cohort_fence postsend
 if ! cmp -s "$WORK_DIR/deployment-initial.fence.json" "$WORK_DIR/deployment-postsend.fence.json" ||
-   ! cmp -s "$WORK_DIR/config-initial.fence.json" "$WORK_DIR/config-postsend.fence.json"; then
+   ! cmp -s "$WORK_DIR/config-initial.fence.json" "$WORK_DIR/config-postsend.fence.json" ||
+   ! cmp -s "$WORK_DIR/service-initial.fence.json" "$WORK_DIR/service-postsend.fence.json"; then
   die "managed server source drifted during the signed request"
 fi
 TARGET_AFTER="$WORK_DIR/target-after.json"
@@ -994,7 +1152,7 @@ jq -e --arg verdict "$EXPECTED_VERDICT" --arg owner "$EXPECTED_OWNER_GATE" '
 if [ "$PHASE" = disabled ]; then
   OWNER_EVENTS_BEFORE="$(jq -er '.owner_events' "$EVIDENCE_BEFORE")"
   jq -e --argjson before "$OWNER_EVENTS_BEFORE" '
-    .messages==0 and .deliveries==0 and .events==0 and .owner_events==$before
+    .messages==0 and .deliveries==0 and .events==0 and .message_id=="" and .owner_events==$before
   ' "$EVIDENCE_AFTER" >/dev/null ||
     die "Personal receive was not discarded without persistence"
   UPDATED_STATE="$WORK_DIR/state-disabled-complete.json"
@@ -1014,12 +1172,14 @@ fi
 OWNER_EVENTS_BEFORE="$(jq -er '.owner_events' "$EVIDENCE_BEFORE")"
 jq -e --argjson before "$OWNER_EVENTS_BEFORE" '
   .messages==1 and .deliveries==1 and .events==1 and .owner_events==($before+1)
+  and (.message_id|type=="string" and test("^emsg_[a-z2-7]{16}$"))
 ' "$EVIDENCE_AFTER" >/dev/null ||
   die "Professional receive did not persist exactly one delivery"
+VERIFIED_MESSAGE_ID="$(jq -er '.message_id' "$EVIDENCE_AFTER")"
 UPDATED_STATE="$WORK_DIR/state-entitled-verified.json"
-jq '.entitled.outcome="verified" | .entitled.verdict="accepted" |
+jq --arg message_id "$VERIFIED_MESSAGE_ID" '.entitled.outcome="verified" | .entitled.verdict="accepted" |
   .entitled.owner_gate="address_available" |
-  .entitled.evidence={messages:1,deliveries:1,events:1}' "$STATE_SNAPSHOT" >"$UPDATED_STATE"
+  .entitled.evidence={messages:1,deliveries:1,events:1,message_id:$message_id}' "$STATE_SNAPSHOT" >"$UPDATED_STATE"
 replace_state "$UPDATED_STATE"
 snapshot_file "$STATE_FILE" "$STATE_SNAPSHOT"
 

@@ -81,7 +81,9 @@ pods_json="$private/pods.json"
 
 jq -n --arg checksum "$checksum" '{
   metadata:{name:"witself-server",uid:"deployment-uid",resourceVersion:"41",generation:7},
-  spec:{replicas:2,template:{metadata:{annotations:{"witself.io/server-config-checksum":$checksum}},
+  spec:{replicas:2,selector:{matchLabels:{"app.kubernetes.io/name":"witself-server"}},
+    template:{metadata:{labels:{"app.kubernetes.io/name":"witself-server"},
+      annotations:{"witself.io/server-config-checksum":$checksum}},
     spec:{containers:[{name:"witself-server",image:"ghcr.io/witwave-ai/images/witself-server:0.0.245",
       envFrom:[{configMapRef:{name:"witself-server-config"}}],
       env:[{name:"WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS",valueFrom:{secretKeyRef:{name:"receive-cohort-v1",key:"account_ids",optional:false}}}]}]} }},
@@ -97,7 +99,8 @@ jq -n --arg checksum "$checksum" --arg public "$public_value" '{
     WITSELF_AGENT_EMAIL_RECEIVE_AUDIENCE:"civo-sandbox-usw2-dev",
     WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON:({"relay-1":$public}|tojson)}
 }' >"$config_json"
-jq -n '{metadata:{name:"witself-server"},spec:{clusterIP:"10.0.0.10",
+jq -n '{metadata:{name:"witself-server",uid:"service-uid",resourceVersion:"73"},
+  spec:{clusterIP:"10.0.0.10",selector:{"app.kubernetes.io/name":"witself-server"},
   ports:[{name:"api",port:80,targetPort:"api",protocol:"TCP"}]}}' >"$service_json"
 cohort_base64="$(printf '%s' 'acc_abcdefghijklmnop' | base64 | tr -d '\n')"
 jq -n --arg cohort "$cohort_base64" '{metadata:{name:"receive-cohort-v1",uid:"cohort-uid",resourceVersion:"63"},
@@ -159,6 +162,45 @@ server.listen(0, "127.0.0.1", () => {
 NODE
 chmod 600 "$fake_server"
 
+fake_kube_proxy="$private/fake-kube-proxy.mjs"
+cat >"$fake_kube_proxy" <<'NODE'
+import { writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+
+const expectedPath = "/api/v1/namespaces/witself/configmaps/witself-agent-email-operation-lock";
+const server = createServer((request, response) => {
+  const chunks = [];
+  request.on("data", (chunk) => chunks.push(chunk));
+  request.on("end", () => {
+    let body;
+    try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { body = null; }
+    const requestedUID = body?.preconditions?.uid;
+    const currentUID = process.env.FAKE_LOCK_REPLACED === "1" ? "replacement-lock-uid" : "smoke-lock-uid";
+    if (request.method !== "DELETE" || request.url !== expectedPath ||
+        body?.apiVersion !== "v1" || body?.kind !== "DeleteOptions" ||
+        typeof requestedUID !== "string") {
+      response.writeHead(400, { "Content-Type": "application/json" });
+      response.end('{"kind":"Status","status":"Failure","reason":"BadRequest"}\n');
+      return;
+    }
+    if (requestedUID !== currentUID) {
+      writeFileSync(process.env.FAKE_REPLACEMENT_LOCK_SURVIVED, "replacement-survived\n", { mode: 0o600 });
+      response.writeHead(409, { "Content-Type": "application/json" });
+      response.end('{"kind":"Status","status":"Failure","reason":"Conflict"}\n');
+      return;
+    }
+    writeFileSync(process.env.FAKE_LOCK_DELETED, "deleted\n", { mode: 0o600 });
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(`${JSON.stringify({kind:"Status",apiVersion:"v1",status:"Success",
+      details:{name:"witself-agent-email-operation-lock",kind:"configmaps",uid:currentUID}})}\n`);
+  });
+});
+server.listen(0, "127.0.0.1", () => {
+  process.stdout.write(`Starting to serve on 127.0.0.1:${server.address().port}\n`);
+});
+NODE
+chmod 600 "$fake_kube_proxy"
+
 fake_kubectl="$fake_bin/kubectl"
 cat >"$fake_kubectl" <<'SH'
 #!/usr/bin/env bash
@@ -174,13 +216,26 @@ elif [[ "$joined" == *" create -f - -o json "* ]]; then
 elif [[ "$joined" == *" get configmap witself-agent-email-operation-lock "* ]]; then
   printf '%s' 'smoke-lock-uid'
 elif [[ "$joined" == *" delete configmap witself-agent-email-operation-lock "* ]]; then
-  :
+  printf '%s\n' 'legacy name-only operation-lock deletion is forbidden' >&2
+  exit 1
+elif [[ "$joined" == *" proxy --address=127.0.0.1 --port=0 "* ]]; then
+  exec node "$FAKE_KUBE_PROXY"
 elif [[ "$joined" == *" get deployment witself-server -o json "* ]]; then
   cat "$FAKE_DEPLOYMENT_JSON"
 elif [[ "$joined" == *" get configmap witself-server-config -o json "* ]]; then
   cat "$FAKE_CONFIG_JSON"
 elif [[ "$joined" == *" get service witself-server -o json "* ]]; then
-  cat "$FAKE_SERVICE_JSON"
+  service_get_count=1
+  if [ -f "$FAKE_SERVICE_GET_COUNT" ]; then
+    service_get_count=$(( $(<"$FAKE_SERVICE_GET_COUNT") + 1 ))
+  fi
+  printf '%s\n' "$service_get_count" >"$FAKE_SERVICE_GET_COUNT"
+  if [ "${FAKE_SERVICE_DRIFT_AFTER:-0}" -gt 0 ] &&
+     [ "$service_get_count" -ge "$FAKE_SERVICE_DRIFT_AFTER" ]; then
+    cat "$FAKE_SERVICE_DRIFT_JSON"
+  else
+    cat "$FAKE_SERVICE_JSON"
+  fi
 elif [[ "$joined" == *" get secret receive-cohort-v1 -o json "* ]]; then
   cat "$FAKE_SECRET_JSON"
 elif [[ "$joined" == *" get pods "* ]]; then
@@ -213,14 +268,24 @@ elif [[ "$joined" == *" exec -i witself-postgresql-0 "* ]]; then
   elif grep -F 'FROM tokens t' <<<"$sql" >/dev/null; then
     printf '%s\n' '{"token_count":1}'
   elif grep -F 'CREATE TEMP TABLE smoke_expected' <<<"$sql" >/dev/null; then
+    grep -F 'PERFORM 1 FROM accounts' <<<"$sql" >/dev/null
+    ! grep -F 'SELECT 1 FROM accounts WHERE' <<<"$sql" >/dev/null
+    grep -F 'CREATE TEMP TABLE smoke_suspects(probe_tag text,id text,PRIMARY KEY(probe_tag,id))' <<<"$sql" >/dev/null
+    [ "$(grep -Fc 'm.subaddress_tag=x.tag OR m.envelope_recipient=x.recipient OR m.mime_message_id=x.mime_id OR m.raw_sha256=x.raw_sha' <<<"$sql")" = 2 ]
+    grep -F 'IF suspect_count<>matched_count THEN' <<<"$sql" >/dev/null
     grep -F 'CREATE TEMP TABLE smoke_candidates(probe_tag text UNIQUE,id text PRIMARY KEY)' <<<"$sql" >/dev/null
+    grep -F "encode(sha256(m.raw_mime),'hex')=x.raw_sha" <<<"$sql" >/dev/null
+    grep -F 'm.duplicate_group_sha256=encode(sha256(' <<<"$sql" >/dev/null
+    grep -F "x.expected_message_id<>'' AND m.id=x.expected_message_id" <<<"$sql" >/dev/null
+    grep -F 'emsg_abcdefghijklmnop' <<<"$sql" >/dev/null
     if [ "${FAKE_CLEANUP_UNSAFE:-0}" = 1 ]; then exit 1; fi
+    if [ "${FAKE_CLEANUP_CORRUPT_OUTPUT:-0}" = 1 ]; then printf '%s\n' '1'; fi
     printf '%s\n' '{"matched":1,"deleted":1,"remaining":0,"events_retained":1}'
   else
     if [ "$FAKE_DB_PHASE" = entitled ] && [ -f "$FAKE_ACCEPT_FLAG" ]; then
-      printf '%s\n' '{"messages":1,"deliveries":1,"events":1,"owner_events":10}'
+      printf '%s\n' '{"messages":1,"deliveries":1,"events":1,"owner_events":10,"message_id":"emsg_abcdefghijklmnop"}'
     else
-      printf '%s\n' '{"messages":0,"deliveries":0,"events":0,"owner_events":9}'
+      printf '%s\n' '{"messages":0,"deliveries":0,"events":0,"owner_events":9,"message_id":""}'
     fi
   fi
 else
@@ -237,12 +302,16 @@ export FAKE_SERVICE_JSON="$service_json"
 export FAKE_SECRET_JSON="$secret_json"
 export FAKE_PODS_JSON="$pods_json"
 export FAKE_SERVER="$fake_server"
+export FAKE_KUBE_PROXY="$fake_kube_proxy"
 export FAKE_HASH_FREE="$hash_free"
 export FAKE_HASH_STANDARD="$hash_standard"
 export FAKE_ACCEPT_FLAG="$private/accepted.flag"
 export FAKE_REQUEST_COUNT="$private/request.count"
 export FAKE_OWNER_REQUEST_COUNT="$private/owner-request.count"
 export FAKE_COMMAND_LOG="$private/commands.log"
+export FAKE_SERVICE_GET_COUNT="$private/service-get.count"
+export FAKE_REPLACEMENT_LOCK_SURVIVED="$private/replacement-lock-survived"
+export FAKE_LOCK_DELETED="$private/lock-deleted"
 FAKE_AGENT_AUTHORIZATION="Bearer $(tr -d '\n' <"$agent_token_file")"
 export FAKE_AGENT_AUTHORIZATION
 : >"$FAKE_COMMAND_LOG"
@@ -275,6 +344,106 @@ assert_private_output "$disabled_err"
 disabled_state="$private/disabled-state.json"
 cp "$state" "$disabled_state"
 chmod 600 "$disabled_state"
+
+service_selector_state="$private/service-selector-state.json"
+service_selector_json="$private/service-selector.json"
+cp "$disabled_state" "$service_selector_state"
+jq '.spec.selector={"app.kubernetes.io/name":"replacement"}' "$service_json" >"$service_selector_json"
+chmod 600 "$service_selector_state" "$service_selector_json"
+service_selector_out="$private/service-selector.out"
+service_selector_err="$private/service-selector.err"
+export FAKE_DB_PHASE=entitled FAKE_RELAY_VERDICT=accepted FAKE_ENTITLED_REVISION=2
+export FAKE_OWNER_GATE=address_available FAKE_SERVICE_JSON="$service_selector_json"
+export FAKE_LOCK_REPLACED=1
+rm -f "$FAKE_ACCEPT_FLAG" "$FAKE_REQUEST_COUNT" "$FAKE_OWNER_REQUEST_COUNT" \
+  "$FAKE_REPLACEMENT_LOCK_SURVIVED" "$FAKE_LOCK_DELETED"
+if "$runner" "${common[@]}" --phase entitled --state-file "$service_selector_state" \
+    "${signed[@]}" >"$service_selector_out" 2>"$service_selector_err"; then
+  fail "Service selector not tied to the Deployment was accepted"
+fi
+[ ! -e "$FAKE_REQUEST_COUNT" ] || fail "invalid Service selector reached the ingest endpoint"
+jq -e '.entitled==null' "$service_selector_state" >/dev/null || fail "Service selector failure changed state"
+assert_private_output "$service_selector_out"
+assert_private_output "$service_selector_err"
+[ -f "$FAKE_REPLACEMENT_LOCK_SURVIVED" ] || fail "replacement operation lock did not survive UID-preconditioned cleanup"
+[ ! -e "$FAKE_LOCK_DELETED" ] || fail "replacement operation lock was deleted"
+export FAKE_LOCK_REPLACED=0
+
+service_ports_state="$private/service-ports-state.json"
+service_ports_json="$private/service-ports.json"
+cp "$disabled_state" "$service_ports_state"
+jq '.spec.ports += [{name:"metrics",port:9090,targetPort:"metrics",protocol:"TCP"}]' \
+  "$service_json" >"$service_ports_json"
+chmod 600 "$service_ports_state" "$service_ports_json"
+service_ports_out="$private/service-ports.out"
+service_ports_err="$private/service-ports.err"
+export FAKE_SERVICE_JSON="$service_ports_json"
+if "$runner" "${common[@]}" --phase entitled --state-file "$service_ports_state" \
+    "${signed[@]}" >"$service_ports_out" 2>"$service_ports_err"; then
+  fail "Service with an additional port was accepted"
+fi
+[ ! -e "$FAKE_REQUEST_COUNT" ] || fail "invalid Service ports reached the ingest endpoint"
+jq -e '.entitled==null' "$service_ports_state" >/dev/null || fail "Service ports failure changed state"
+assert_private_output "$service_ports_out"
+assert_private_output "$service_ports_err"
+
+service_drift_state="$private/service-drift-state.json"
+service_drift_json="$private/service-drift.json"
+cp "$disabled_state" "$service_drift_state"
+jq '.metadata.resourceVersion="74"' "$service_json" >"$service_drift_json"
+chmod 600 "$service_drift_state" "$service_drift_json"
+service_drift_out="$private/service-drift.out"
+service_drift_err="$private/service-drift.err"
+export FAKE_SERVICE_JSON="$service_drift_json"
+if "$runner" "${common[@]}" --phase entitled --state-file "$service_drift_state" \
+    "${signed[@]}" >"$service_drift_out" 2>"$service_drift_err"; then
+  fail "changed Service identity was accepted between plan phases"
+fi
+[ ! -e "$FAKE_REQUEST_COUNT" ] || fail "changed Service identity reached the ingest endpoint"
+jq -e '.entitled==null' "$service_drift_state" >/dev/null || fail "Service drift changed state"
+assert_private_output "$service_drift_out"
+assert_private_output "$service_drift_err"
+export FAKE_SERVICE_JSON="$service_json"
+
+service_midrun_state="$private/service-midrun-state.json"
+cp "$disabled_state" "$service_midrun_state"
+chmod 600 "$service_midrun_state"
+service_midrun_out="$private/service-midrun.out"
+service_midrun_err="$private/service-midrun.err"
+export FAKE_SERVICE_DRIFT_AFTER=2 FAKE_SERVICE_DRIFT_JSON="$service_drift_json"
+rm -f "$FAKE_SERVICE_GET_COUNT" "$FAKE_ACCEPT_FLAG" "$FAKE_REQUEST_COUNT" "$FAKE_OWNER_REQUEST_COUNT"
+if "$runner" "${common[@]}" --phase entitled --state-file "$service_midrun_state" \
+    "${signed[@]}" >"$service_midrun_out" 2>"$service_midrun_err"; then
+  fail "mid-run Service resourceVersion drift was accepted"
+fi
+[ ! -e "$FAKE_REQUEST_COUNT" ] || fail "mid-run Service drift reached the ingest endpoint"
+jq -e '.entitled.outcome=="prepared"' "$service_midrun_state" >/dev/null ||
+  fail "mid-run Service drift lost its prepared recovery state"
+assert_private_output "$service_midrun_out"
+assert_private_output "$service_midrun_err"
+
+service_postsend_state="$private/service-postsend-state.json"
+cp "$disabled_state" "$service_postsend_state"
+chmod 600 "$service_postsend_state"
+service_postsend_out="$private/service-postsend.out"
+service_postsend_err="$private/service-postsend.err"
+export FAKE_SERVICE_DRIFT_AFTER=3
+rm -f "$FAKE_SERVICE_GET_COUNT" "$FAKE_ACCEPT_FLAG" "$FAKE_REQUEST_COUNT" "$FAKE_OWNER_REQUEST_COUNT"
+if "$runner" "${common[@]}" --phase entitled --state-file "$service_postsend_state" \
+    "${signed[@]}" >"$service_postsend_out" 2>"$service_postsend_err"; then
+  fail "post-send Service resourceVersion drift was accepted"
+fi
+[ "$(wc -l <"$FAKE_REQUEST_COUNT" | tr -d '[:space:]')" = 1 ] ||
+  fail "post-send Service drift did not preserve exactly one ingest request"
+[ "$(wc -l <"$FAKE_OWNER_REQUEST_COUNT" | tr -d '[:space:]')" = 1 ] ||
+  fail "post-send Service drift did not preserve exactly one owner request"
+jq -e '.entitled.outcome=="prepared"' "$service_postsend_state" >/dev/null ||
+  fail "post-send Service drift lost its prepared recovery state"
+assert_private_output "$service_postsend_out"
+assert_private_output "$service_postsend_err"
+export FAKE_SERVICE_DRIFT_AFTER=0
+unset FAKE_SERVICE_DRIFT_JSON
+rm -f "$FAKE_SERVICE_GET_COUNT"
 
 wrong_verdict_state="$private/wrong-verdict-state.json"
 wrong_verdict_out="$private/wrong-verdict.out"
@@ -357,12 +526,48 @@ jq -e '.phase=="entitled" and .verdict=="accepted" and .owner_gate=="address_ava
   .provider_mutation_performed==false' "$entitled_out" >/dev/null || fail "entitled result is invalid"
 jq -e '.disabled.outcome=="verified" and .entitled.outcome=="verified" and
   .entitled.owner_gate=="address_available" and
-  .entitled.plan.plan=="standard"' "$state" >/dev/null || fail "entitled state fence is invalid"
+  .entitled.plan.plan=="standard" and .entitled.evidence.message_id=="emsg_abcdefghijklmnop"' \
+  "$state" >/dev/null || fail "entitled state fence is invalid"
 [ "$(wc -l <"$FAKE_REQUEST_COUNT" | tr -d '[:space:]')" = 1 ] || fail "entitled phase did not issue exactly one POST"
 [ "$(wc -l <"$FAKE_OWNER_REQUEST_COUNT" | tr -d '[:space:]')" = 1 ] ||
   fail "entitled phase did not prove the installed owner gate exactly once"
 assert_private_output "$entitled_out"
 assert_private_output "$entitled_err"
+
+raw_mismatch_state="$private/raw-mismatch-state.json"
+cp "$state" "$raw_mismatch_state"
+chmod 600 "$raw_mismatch_state"
+jq '.entitled.probe.raw_sha256=("0"*64)' "$raw_mismatch_state" >"$private/raw-mismatch-updated.json"
+mv "$private/raw-mismatch-updated.json" "$raw_mismatch_state"
+chmod 600 "$raw_mismatch_state"
+raw_mismatch_out="$private/raw-mismatch.out"
+raw_mismatch_err="$private/raw-mismatch.err"
+export FAKE_DB_PHASE=cleanup FAKE_CLEANUP_UNSAFE=0 FAKE_CLEANUP_CORRUPT_OUTPUT=0
+requests_before_cleanup="$(wc -l <"$FAKE_REQUEST_COUNT" | tr -d '[:space:]')"
+if "$runner" "${common[@]}" --phase cleanup --state-file "$raw_mismatch_state" \
+    >"$raw_mismatch_out" 2>"$raw_mismatch_err"; then
+  fail "cleanup trusted a state digest that did not match reconstructed raw MIME"
+fi
+jq -e '.cleanup==null' "$raw_mismatch_state" >/dev/null || fail "raw MIME mismatch changed state"
+assert_private_output "$raw_mismatch_out"
+assert_private_output "$raw_mismatch_err"
+[ "$(wc -l <"$FAKE_REQUEST_COUNT" | tr -d '[:space:]')" = "$requests_before_cleanup" ] ||
+  fail "raw MIME mismatch reached the ingest endpoint"
+
+corrupt_cleanup_state="$private/corrupt-cleanup-state.json"
+cp "$state" "$corrupt_cleanup_state"
+chmod 600 "$corrupt_cleanup_state"
+corrupt_cleanup_out="$private/corrupt-cleanup.out"
+corrupt_cleanup_err="$private/corrupt-cleanup.err"
+export FAKE_CLEANUP_CORRUPT_OUTPUT=1
+if "$runner" "${common[@]}" --phase cleanup --state-file "$corrupt_cleanup_state" \
+    >"$corrupt_cleanup_out" 2>"$corrupt_cleanup_err"; then
+  fail "cleanup accepted more than one database result object"
+fi
+jq -e '.cleanup==null' "$corrupt_cleanup_state" >/dev/null || fail "corrupt cleanup output changed state"
+assert_private_output "$corrupt_cleanup_out"
+assert_private_output "$corrupt_cleanup_err"
+export FAKE_CLEANUP_CORRUPT_OUTPUT=0
 
 unsafe_state="$private/unsafe-state.json"
 cp "$state" "$unsafe_state"
@@ -423,5 +628,11 @@ assert_private_output "$permission_err"
 if grep -E 'wrangler|cloudflare\.com|api\.cloudflare| account (create|set)| plan (set|clear)' "$FAKE_COMMAND_LOG" >/dev/null; then
   fail "smoke harness invoked an out-of-scope provider/account/plan operation"
 fi
+grep -F -- 'proxy --address=127.0.0.1 --port=0' "$FAKE_COMMAND_LOG" >/dev/null ||
+  fail "operation-lock cleanup did not use the preconditioned Kubernetes API path"
+if grep -F -- 'delete configmap witself-agent-email-operation-lock' "$FAKE_COMMAND_LOG" >/dev/null; then
+  fail "operation-lock cleanup used a name-only kubectl delete"
+fi
+[ -f "$FAKE_LOCK_DELETED" ] || fail "owned operation lock was never deleted"
 
 printf '%s\n' 'test-agent-email-cell-smoke: ok'
