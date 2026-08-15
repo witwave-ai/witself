@@ -219,9 +219,50 @@ enabled rule targets either email Worker; a failed or ambiguous disable never
 auto-enables subaddressing. If apply leaves a pending receipt, preserve it,
 inspect live status, and reconcile provider state before any retry. A lease
 settlement, release, or receipt-commit failure is ambiguous: subaddressing may
-have changed, but the disabled catch-all and absence of Worker rules keep
+have changed, but the disabled catch-all and absence of Witself Worker rules keep
 delivery dark. Do not change this zone-wide setting directly in the dashboard
 or with an unfenced API request.
+
+`npm run gates:canonical` exclusively stages the two control-plane secrets
+required by `routes:primary`:
+`CP_REALM_EMAIL_CANONICAL_INVENTORY_ENABLED` and
+`CP_REALM_EMAIL_CANONICAL_DELIVERY_ENABLED`. Status and planning are read-only;
+`enable` and `disable` create new mode-`0600`, 15-minute review plans. Only
+`apply` calls Cloudflare's official bulk Worker-secret PATCH, so both names are
+created with the value `true` or both names are deleted in one merge-patch:
+
+```sh
+npm run gates:canonical -- status
+npm run gates:canonical -- enable \
+  --output /absolute/private/canonical-gates-enable-plan.json
+# Review the exact active deployment/release, complete binding and secret-name
+# fingerprints, Founder cohort fence, expiration, and printed plan SHA-256.
+npm run gates:canonical -- apply \
+  --plan /absolute/private/canonical-gates-enable-plan.json \
+  --plan-sha256 REVIEWED_SHA256 \
+  --receipt-output /absolute/private/canonical-gates-enable-receipt.json
+npm run gates:canonical -- status
+```
+
+Enable requires both gates absent and exactly one account in the canonical
+Founder cohort. Disable requires both gates present. Mixed binding/inventory
+state is never planned. Apply reacquires every exact fence under the global
+`control_plane_canonical_gates_apply` lease, rechecks plan expiry immediately
+before the provider request, preserves every unrelated binding and secret, and
+requires exact readback from the active successor. It durably reserves the
+receipt path before mutation and never prints secret values. An ambiguous
+enable attempts one atomic rollback to both gates absent while the original
+lease remains renewable; an ambiguous disable never re-enables either gate.
+Preserve a pending receipt and reconcile live status before any retry. Do not
+edit these secrets individually in the dashboard or with Wrangler.
+
+The active control-plane release must already contain the
+`control_plane_canonical_gates_apply` lease operation before creating an enable
+plan. Keep both gates absent through that release deployment. The protected
+control-plane deploy workflow intentionally refuses active email activation
+secrets; for a later control-plane release, first make external delivery dark,
+apply a canonical-gates `disable` plan, deploy and verify the release, then
+create a fresh enable plan and reconverge inventory before restoring delivery.
 
 `npm run routes:primary` owns the production primary-domain canary. Its private
 manifest has this exact shape, with 5–10 entries; every address must be the
@@ -479,7 +520,8 @@ rollback, the coordinated route-signing secret ceremony, the routing-foundation
 apply, and both primary and catch-all routing apply workflows share one global,
 expiring operations lease in the control plane's existing
 `REALM_EMAIL_ALIASES` Durable Object. Their exact operation identifiers are
-`control_plane_deploy`, `email_edge_deploy`, `email_edge_rollback`,
+`control_plane_deploy`, `control_plane_canonical_gates_apply`,
+`email_edge_deploy`, `email_edge_rollback`,
 `email_routing_settings_apply`, `route_signing_secret_provision`,
 `relay_signing_key_provision`, `primary_routing_apply`, and
 `catch_all_routing_apply`. Each workflow renews the lease while its subprocess

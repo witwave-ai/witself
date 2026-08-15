@@ -210,6 +210,31 @@ test("routing foundation plans are exact, short-lived, and tamper evident", asyn
   );
 });
 
+test("routing foundation rechecks plan expiry immediately before PATCH", async () => {
+  const api = new FakeCloudflare();
+  const plan = await createRoutingFoundationPlan(api, "enable", { now });
+  let calls = 0;
+  const advancingClock = () => {
+    calls += 1;
+    return new Date(NOW.valueOf() + (calls >= 3 ? 16 * 60_000 : 0));
+  };
+  api.calls = [];
+  await assert.rejects(
+    () => applyRoutingFoundationPlan(
+      plan,
+      plan.apply_fence.sha256,
+      api,
+      runtime(),
+      { now: advancingClock },
+    ),
+    /expired/,
+  );
+  assert.equal(
+    api.calls.some(([operation]) => operation === "editEmailRoutingSettings"),
+    false,
+  );
+});
+
 test("enable apply holds the shared lease and changes only subaddressing", async () => {
   const api = new FakeCloudflare();
   const plan = await createRoutingFoundationPlan(api, "enable", { now });

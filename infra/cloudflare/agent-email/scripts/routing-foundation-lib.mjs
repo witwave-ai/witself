@@ -539,8 +539,11 @@ export async function applyRoutingFoundationPlan(
       let verificationError;
       let recoveryError;
       let after;
+      await leaseGuard.renew();
+      verifyRoutingFoundationPlan(plan, suppliedSHA256, { now });
       try {
-        await editSettings(api, plan.desired_settings, leaseGuard);
+        await api.editEmailRoutingSettings(plan.desired_settings);
+        await leaseGuard.renew();
       } catch (error) {
         mutationError = error;
       }

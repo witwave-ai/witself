@@ -9,6 +9,7 @@
     "bootstrap:production-receive": "node scripts/bootstrap-production-receive.mjs",
     "bundle:check": "node scripts/bundle-check.mjs",
     "canary": "node scripts/canary.mjs",
+    "gates:canonical": "node scripts/canonical-gates.mjs",
     "config": "node scripts/render-wrangler.mjs",
     "deploy": "node scripts/deploy.mjs",
     "directory": "node scripts/directory.mjs",

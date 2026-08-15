@@ -152,25 +152,32 @@ export function primaryRoutingRuntime(env = process.env, {
       throw new Error("control-plane managed email inspection returned invalid JSON");
     }
   };
+  const inspectControlPlane = async () => {
+    const controlPlane = inspectWorker(
+      WORKERS.control_plane,
+      "control plane",
+      workerInspector,
+    );
+    return {
+      control_plane_deployment: controlPlane.deployment,
+      control_plane_version: controlPlane.version,
+    };
+  };
   const inspectWorkers = async () => {
-      const controlPlane = inspectWorker(
-        WORKERS.control_plane,
-        "control plane",
-        workerInspector,
-      );
-      const emailEdge = inspectWorker(
-        WORKERS.email_edge,
-        "email edge",
-        workerInspector,
-      );
-      return {
-        control_plane_deployment: controlPlane.deployment,
-        control_plane_version: controlPlane.version,
-        email_edge_deployment: emailEdge.deployment,
-        email_edge_version: emailEdge.version,
-      };
+    const controlPlane = await inspectControlPlane();
+    const emailEdge = inspectWorker(
+      WORKERS.email_edge,
+      "email edge",
+      workerInspector,
+    );
+    return {
+      ...controlPlane,
+      email_edge_deployment: emailEdge.deployment,
+      email_edge_version: emailEdge.version,
+    };
   };
   return {
+    inspectControlPlane,
     inspectWorkers,
     getControlPlaneReadiness: async (origin) => controlPlaneJSON(
       new URL("/v1/email/managed-delivery/readiness", origin),
