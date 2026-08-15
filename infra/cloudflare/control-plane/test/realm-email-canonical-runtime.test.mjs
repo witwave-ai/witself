@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
   DurableRealmEmailAliasRegistry,
+  REALM_EMAIL_ROUTE_CACHE_TTL_SECONDS,
   realmEmailCanonicalDeliveryEnabled,
   realmEmailCanonicalInventoryEnabled,
   realmEmailRouteKey,
@@ -72,9 +74,12 @@ class Storage {
 class Directory {
   constructor(entries = []) {
     this.values = new Map(entries);
+    this.gets = [];
+    this.lists = [];
   }
 
   async get(key, options = {}) {
+    this.gets.push(key);
     const value = this.values.get(key);
     if (value === undefined) return null;
     if (options.type === "json") {
@@ -84,6 +89,7 @@ class Directory {
   }
 
   async list({ prefix = "", limit = 1_000, cursor } = {}) {
+    this.lists.push({ prefix, limit, cursor });
     const offset = cursor ? Number(cursor.slice("cursor:".length)) : 0;
     const keys = [...this.values.keys()]
       .filter((key) => key.startsWith(prefix))
@@ -152,12 +158,20 @@ function fixture({
     generation: 1,
   };
   let failCommit = 0;
+  let failCanonicalGet = 0;
+  let failPlanGet = 0;
   const transitionBodies = [];
+  const fetches = [];
   const fetchImpl = async (url, init = {}) => {
     const parsed = new URL(url);
+    fetches.push({ method: init.method, pathname: parsed.pathname });
     assert.equal(init.headers.Authorization, "Bearer witself_prv_cell");
     if (parsed.pathname === `/v1/accounts/${ACCOUNT}:plan` &&
         init.method === "GET") {
+      if (failPlanGet > 0) {
+        failPlanGet--;
+        throw new Error("simulated account plan lookup failure");
+      }
       return Response.json({
         account_id: ACCOUNT,
         revision: 1,
@@ -177,6 +191,10 @@ function fixture({
     }
     if (parsed.pathname === `/v1/accounts/${ACCOUNT}:email-realm-route` &&
         init.method === "GET") {
+      if (failCanonicalGet > 0) {
+        failCanonicalGet--;
+        throw new Error("simulated canonical route lookup failure");
+      }
       return parsed.searchParams.get("realm_id") === REALM
         ? Response.json(cellRoute)
         : Response.json({ error: "not found" }, { status: 404 });
@@ -260,6 +278,7 @@ function fixture({
     storage,
     directory,
     emailDirectory,
+    fetches,
     transitionBodies,
     setCellRoute(value) {
       cellRoute = structuredClone(value);
@@ -267,8 +286,17 @@ function fixture({
     failNextCommit() {
       failCommit++;
     },
+    failNextCanonicalGet() {
+      failCanonicalGet++;
+    },
+    failNextPlanGet() {
+      failPlanGet++;
+    },
     advance(milliseconds) {
       currentTime += milliseconds;
+    },
+    setNow(milliseconds) {
+      currentTime = milliseconds;
     },
   };
 }
@@ -294,6 +322,52 @@ test("canonical gates are exact-true and the scheduled inventory is dark by defa
   });
 });
 
+test("canonical upsert lane ownership stays centralized with explicit held callers", async () => {
+  const source = await readFile(
+    new URL("../src/realm-email-alias-runtime.mjs", import.meta.url),
+    "utf8",
+  );
+  const closeStart = source.indexOf("  async drainRealmCloseIntent(");
+  const closeEnd = source.indexOf("\n  async boundedValues(", closeStart);
+  assert.ok(closeStart >= 0 && closeEnd > closeStart);
+  const closeSource = source.slice(closeStart, closeEnd);
+  assert.equal(
+    [...closeSource.matchAll(/this\.upsertCanonicalRoute\(/g)].length,
+    0,
+    "realm close already holds every canonical lane and must not re-enter it",
+  );
+  assert.equal(
+    [...closeSource.matchAll(
+      /this\.upsertCanonicalRouteWithLaneHeld\(/g,
+    )].length,
+    2,
+  );
+  const getStart = source.indexOf("  async getRoute(");
+  const getEnd = source.indexOf("\n  async fetchCellCanonicalPage(", getStart);
+  assert.ok(getStart >= 0 && getEnd > getStart);
+  const getSource = source.slice(getStart, getEnd);
+  assert.equal(
+    [...getSource.matchAll(/this\.upsertCanonicalRoute\(/g)].length,
+    0,
+    "canonical route GET already holds account and canonical lanes",
+  );
+  assert.equal(
+    [...getSource.matchAll(
+      /this\.upsertCanonicalRouteWithLaneHeld\(/g,
+    )].length,
+    1,
+  );
+  const ordinarySource = source.slice(0, getStart) +
+    source.slice(getEnd, closeStart) + source.slice(closeEnd);
+  assert.equal(
+    [...ordinarySource.matchAll(
+      /this\.upsertCanonicalRouteWithLaneHeld\(/g,
+    )].length,
+    1,
+    "only the lane-owning wrapper may call the already-held core outside close",
+  );
+});
+
 test("bounded inventory commits canonical authority before KV and retries lost acknowledgement exactly", async () => {
   const { runtime, storage, emailDirectory } = fixture();
   const authorityKey = `canonical:${DOMAIN}:aaaaaaaaaaaaaaaa`;
@@ -316,6 +390,735 @@ test("bounded inventory commits canonical authority before KV and retries lost a
   assert.deepEqual(await storage.get(authorityKey), firstAuthority);
   assert.equal(emailDirectory.values.get(routeKey), firstProjection);
   assert.equal(emailDirectory.value(routeKey).state, "applied");
+});
+
+test("stale unchanged canonical authority refreshes durably before KV without revision churn", async () => {
+  const { runtime, storage, emailDirectory, advance } = fixture();
+  const authorityKey = `canonical:${DOMAIN}:aaaaaaaaaaaaaaaa`;
+  const routeKey = realmEmailRouteKey(DOMAIN, "aaaaaaaaaaaaaaaa");
+  assert.equal(
+    (await call(runtime, "/canonical/inventory/reconcile")).response.status,
+    200,
+  );
+  const firstAuthority = await storage.get(authorityKey);
+  const firstProjection = emailDirectory.value(routeKey);
+
+  advance(REALM_EMAIL_ROUTE_CACHE_TTL_SECONDS * 1_000 + 1);
+  let verifiedDurableBeforeKV = false;
+  emailDirectory.beforePut = async (key, value) => {
+    if (key !== routeKey) return;
+    const durable = await storage.get(authorityKey);
+    const projection = JSON.parse(value);
+    assert.equal(durable.updated_at, projection.updated_at);
+    assert.equal(durable.controller_revision, firstAuthority.controller_revision);
+    assert.ok(
+      Date.parse(durable.updated_at) > Date.parse(firstAuthority.updated_at),
+    );
+    verifiedDurableBeforeKV = true;
+  };
+
+  const refreshed = await call(runtime, "/canonical/inventory/reconcile");
+  assert.equal(refreshed.response.status, 200);
+  const refreshedAuthority = await storage.get(authorityKey);
+  const refreshedProjection = emailDirectory.value(routeKey);
+  assert.equal(verifiedDurableBeforeKV, true);
+  assert.equal(
+    refreshedAuthority.controller_revision,
+    firstAuthority.controller_revision,
+  );
+  assert.equal(
+    refreshedProjection.controller_revision,
+    firstProjection.controller_revision,
+  );
+  assert.equal(refreshedProjection.updated_at, refreshedAuthority.updated_at);
+  assert.ok(
+    Date.parse(refreshedAuthority.updated_at) >
+      Date.parse(firstAuthority.updated_at),
+  );
+});
+
+test("validated background renewal starts at the TTL-derived half-life boundary", async () => {
+  const { runtime, storage, emailDirectory, setNow } = fixture();
+  const authorityKey = `canonical:${DOMAIN}:aaaaaaaaaaaaaaaa`;
+  assert.equal(
+    (await call(runtime, "/canonical/inventory/reconcile")).response.status,
+    200,
+  );
+  const original = await storage.get(authorityKey);
+  const renewalMS = Math.floor(
+    REALM_EMAIL_ROUTE_CACHE_TTL_SECONDS * 1_000 / 2,
+  );
+  const validatedSource = {
+    domain: DOMAIN,
+    cellRoute: {
+      account_id: ACCOUNT,
+      realm_id: REALM,
+      state: "live",
+      generation: 1,
+    },
+    target: {
+      cell_audience: "cell-one",
+      ingest_url: "https://cell.example/v1/internal/agent-email:ingest",
+    },
+    emailEnabled: true,
+    deliveryEnabled: true,
+  };
+
+  setNow(Date.parse(original.updated_at) + renewalMS - 1);
+  const beforeBoundary = await runtime.upsertCanonicalRoute(validatedSource);
+  assert.deepEqual(beforeBoundary, original);
+  assert.deepEqual(await storage.get(authorityKey), original);
+
+  setNow(Date.parse(original.updated_at) + renewalMS);
+  const atBoundary = await runtime.upsertCanonicalRoute(validatedSource);
+  assert.equal(atBoundary.controller_revision, original.controller_revision);
+  assert.equal(
+    atBoundary.updated_at,
+    new Date(Date.parse(original.updated_at) + renewalMS).toISOString(),
+  );
+  assert.deepEqual(await storage.get(authorityKey), atBoundary);
+  assert.equal(
+    emailDirectory.value(realmEmailRouteKey(DOMAIN, "aaaaaaaaaaaaaaaa"))
+      .updated_at,
+    atBoundary.updated_at,
+  );
+});
+
+test("stale freshness renewal retries a lost KV acknowledgement with exact bytes", async () => {
+  const { runtime, storage, emailDirectory, advance } = fixture();
+  const authorityKey = `canonical:${DOMAIN}:aaaaaaaaaaaaaaaa`;
+  const routeKey = realmEmailRouteKey(DOMAIN, "aaaaaaaaaaaaaaaa");
+  assert.equal(
+    (await call(runtime, "/canonical/inventory/reconcile")).response.status,
+    200,
+  );
+  const original = await storage.get(authorityKey);
+
+  advance(REALM_EMAIL_ROUTE_CACHE_TTL_SECONDS * 1_000 + 1);
+  emailDirectory.failAfterWrite = 1;
+  const interrupted = await call(runtime, "/canonical/inventory/reconcile");
+  assert.equal(interrupted.response.status, 502);
+  const renewed = await storage.get(authorityKey);
+  const lostAcknowledgementProjection = emailDirectory.values.get(routeKey);
+  assert.equal(renewed.controller_revision, original.controller_revision);
+  assert.ok(Date.parse(renewed.updated_at) > Date.parse(original.updated_at));
+  assert.equal(
+    JSON.parse(lostAcknowledgementProjection).updated_at,
+    renewed.updated_at,
+  );
+
+  const retried = await call(runtime, "/canonical/inventory/reconcile");
+  assert.equal(retried.response.status, 200);
+  assert.deepEqual(await storage.get(authorityKey), renewed);
+  assert.equal(
+    emailDirectory.values.get(routeKey),
+    lostAcknowledgementProjection,
+  );
+  assert.deepEqual(
+    emailDirectory.puts.slice(-2).map(({ value }) => value),
+    [lostAcknowledgementProjection, lostAcknowledgementProjection],
+  );
+});
+
+test("validated refresh repairs future or invalid timestamps without changing authority", async () => {
+  for (const corruptTimestamp of [
+    (updatedAt) => new Date(
+      Date.parse(updatedAt) +
+        REALM_EMAIL_ROUTE_CACHE_TTL_SECONDS * 2_000 + 1,
+    ).toISOString(),
+    () => "invalid",
+  ]) {
+    const { runtime, storage, emailDirectory } = fixture();
+    const authorityKey = `canonical:${DOMAIN}:aaaaaaaaaaaaaaaa`;
+    assert.equal(
+      (await call(runtime, "/canonical/inventory/reconcile")).response.status,
+      200,
+    );
+    const original = await storage.get(authorityKey);
+    const corrupted = {
+      ...original,
+      updated_at: corruptTimestamp(original.updated_at),
+      legacy_marker: "preserve-this-byte",
+    };
+    await storage.put(authorityKey, corrupted);
+    const writesBefore = emailDirectory.puts.length;
+    let verifiedDurableBeforeKV = false;
+    emailDirectory.beforePut = async (_key, value) => {
+      const durable = await storage.get(authorityKey);
+      const projection = JSON.parse(value);
+      assert.equal(durable.updated_at, projection.updated_at);
+      assert.equal(durable.controller_revision, original.controller_revision);
+      assert.equal(durable.legacy_marker, "preserve-this-byte");
+      assert.equal(Object.hasOwn(projection, "legacy_marker"), false);
+      verifiedDurableBeforeKV = true;
+    };
+
+    const repaired = await runtime.upsertCanonicalRoute({
+      domain: DOMAIN,
+      cellRoute: {
+        account_id: ACCOUNT,
+        realm_id: REALM,
+        state: "live",
+        generation: 1,
+      },
+      target: {
+        cell_audience: "cell-one",
+        ingest_url: "https://cell.example/v1/internal/agent-email:ingest",
+      },
+      emailEnabled: true,
+      deliveryEnabled: true,
+    });
+    assert.equal(verifiedDurableBeforeKV, true);
+    assert.equal(repaired.controller_revision, original.controller_revision);
+    assert.equal(repaired.legacy_marker, "preserve-this-byte");
+    assert.equal(Number.isFinite(Date.parse(repaired.updated_at)), true);
+    assert.notEqual(repaired.updated_at, corrupted.updated_at);
+    const { updated_at: _corruptTime, ...corruptAuthority } = corrupted;
+    const { updated_at: _repairedTime, ...repairedAuthority } = repaired;
+    assert.deepEqual(repairedAuthority, corruptAuthority);
+    assert.deepEqual(await storage.get(authorityKey), repaired);
+    assert.equal(emailDirectory.puts.length, writesBefore + 1);
+  }
+});
+
+test("stale canonical GET synchronously revalidates before returning fresh authority", async () => {
+  const { runtime, storage, emailDirectory, fetches, advance } = fixture();
+  const authorityKey = `canonical:${DOMAIN}:aaaaaaaaaaaaaaaa`;
+  const routeKey = realmEmailRouteKey(DOMAIN, "aaaaaaaaaaaaaaaa");
+  assert.equal(
+    (await call(runtime, "/canonical/inventory/reconcile")).response.status,
+    200,
+  );
+  const firstAuthority = await storage.get(authorityKey);
+
+  advance(REALM_EMAIL_ROUTE_CACHE_TTL_SECONDS * 1_000 + 1);
+  const fetchCount = fetches.length;
+  let verifiedDurableBeforeKV = false;
+  emailDirectory.beforePut = async (key, value) => {
+    if (key !== routeKey) return;
+    const durable = await storage.get(authorityKey);
+    assert.equal(durable.updated_at, JSON.parse(value).updated_at);
+    assert.equal(durable.controller_revision, firstAuthority.controller_revision);
+    verifiedDurableBeforeKV = true;
+  };
+  const refreshed = await call(runtime, "/route/get", {
+    domain: DOMAIN,
+    realm_label: "aaaaaaaaaaaaaaaa",
+  });
+
+  const refreshedAuthority = await storage.get(authorityKey);
+  assert.equal(refreshed.response.status, 200);
+  assert.equal(verifiedDurableBeforeKV, true);
+  assert.equal(
+    refreshedAuthority.controller_revision,
+    firstAuthority.controller_revision,
+  );
+  assert.ok(
+    Date.parse(refreshedAuthority.updated_at) >
+      Date.parse(firstAuthority.updated_at),
+  );
+  assert.equal(
+    emailDirectory.value(routeKey).updated_at,
+    refreshedAuthority.updated_at,
+  );
+  assert.deepEqual(refreshed.body, emailDirectory.value(routeKey));
+  assert.deepEqual(
+    fetches.slice(fetchCount).map(({ pathname }) => pathname).sort(),
+    [
+      `/v1/accounts/${ACCOUNT}:email-realm-route`,
+      `/v1/accounts/${ACCOUNT}:plan`,
+    ],
+  );
+  assert.equal(
+    await storage.get(`route-refresh:${DOMAIN}:aaaaaaaaaaaaaaaa`),
+    undefined,
+  );
+});
+
+test("stale canonical GET applies a changed cell fence at a new controller revision", async () => {
+  const {
+    runtime,
+    storage,
+    emailDirectory,
+    setCellRoute,
+    advance,
+  } = fixture();
+  const authorityKey = `canonical:${DOMAIN}:aaaaaaaaaaaaaaaa`;
+  const routeKey = realmEmailRouteKey(DOMAIN, "aaaaaaaaaaaaaaaa");
+  assert.equal(
+    (await call(runtime, "/canonical/inventory/reconcile")).response.status,
+    200,
+  );
+  const original = await storage.get(authorityKey);
+  setCellRoute({
+    schema_version: "witself.v0",
+    account_id: ACCOUNT,
+    realm_id: REALM,
+    state: "closing",
+    generation: 2,
+    operation_id: "source-fence-closing",
+  });
+  advance(REALM_EMAIL_ROUTE_CACHE_TTL_SECONDS * 1_000 + 1);
+
+  const changed = await call(runtime, "/route/get", {
+    domain: DOMAIN,
+    realm_label: "aaaaaaaaaaaaaaaa",
+  });
+  const durable = await storage.get(authorityKey);
+  assert.equal(changed.response.status, 200);
+  assert.equal(durable.state, "suspended");
+  assert.equal(durable.suspension_disposition, "retry");
+  assert.equal(durable.cell_state, "closing");
+  assert.equal(durable.cell_generation, 2);
+  assert.equal(durable.cell_operation_id, "source-fence-closing");
+  assert.equal(
+    durable.controller_revision,
+    original.controller_revision + 1,
+  );
+  assert.deepEqual(changed.body, emailDirectory.value(routeKey));
+  assert.equal(changed.body.state, "suspended");
+  assert.equal(
+    changed.body.controller_revision,
+    durable.controller_revision,
+  );
+});
+
+test("stale canonical GET fails closed when either source fence is unavailable", async () => {
+  for (const failLookup of [
+    (context) => context.failNextCanonicalGet(),
+    (context) => context.failNextPlanGet(),
+  ]) {
+    const context = fixture();
+    const { runtime, storage, emailDirectory, advance } = context;
+    const authorityKey = `canonical:${DOMAIN}:aaaaaaaaaaaaaaaa`;
+    const routeKey = realmEmailRouteKey(DOMAIN, "aaaaaaaaaaaaaaaa");
+    assert.equal(
+      (await call(runtime, "/canonical/inventory/reconcile")).response.status,
+      200,
+    );
+    const authority = await storage.get(authorityKey);
+    const projection = emailDirectory.values.get(routeKey);
+    const writesBefore = emailDirectory.puts.length;
+    advance(REALM_EMAIL_ROUTE_CACHE_TTL_SECONDS * 1_000 + 1);
+    failLookup(context);
+
+    const unavailable = await call(runtime, "/route/get", {
+      domain: DOMAIN,
+      realm_label: "aaaaaaaaaaaaaaaa",
+    });
+    assert.equal(unavailable.response.status, 502);
+    assert.deepEqual(await storage.get(authorityKey), authority);
+    assert.equal(emailDirectory.values.get(routeKey), projection);
+    assert.equal(emailDirectory.puts.length, writesBefore);
+    assert.equal(
+      await storage.get(`route-refresh:${DOMAIN}:aaaaaaaaaaaaaaaa`),
+      undefined,
+    );
+  }
+});
+
+test("stale canonical GET refuses plan and lifecycle intent windows before renewal I/O", async () => {
+  const intentCases = [
+    {
+      key: `plan-intent:${ACCOUNT}`,
+      value: {
+        account_id: ACCOUNT,
+        plan_revision: 2,
+        plan_snapshot_hash: "b".repeat(64),
+        state: "cell_committed",
+      },
+    },
+    {
+      key: `lifecycle-intent:${ACCOUNT}`,
+      value: {
+        account_id: ACCOUNT,
+        operation_id: "pending-lifecycle",
+        epoch: 2,
+        action: "suspend",
+        phase: "canonical",
+      },
+    },
+  ];
+  for (const intentCase of intentCases) {
+    const {
+      runtime,
+      storage,
+      emailDirectory,
+      fetches,
+      advance,
+    } = fixture();
+    const authorityKey = `canonical:${DOMAIN}:aaaaaaaaaaaaaaaa`;
+    const routeKey = realmEmailRouteKey(DOMAIN, "aaaaaaaaaaaaaaaa");
+    assert.equal(
+      (await call(runtime, "/canonical/inventory/reconcile")).response.status,
+      200,
+    );
+    advance(REALM_EMAIL_ROUTE_CACHE_TTL_SECONDS * 1_000 + 1);
+    await storage.put(intentCase.key, intentCase.value);
+    const authority = await storage.get(authorityKey);
+    const projection = emailDirectory.values.get(routeKey);
+    const fetchCount = fetches.length;
+    const writesBefore = emailDirectory.puts.length;
+
+    const blocked = await call(runtime, "/route/get", {
+      domain: DOMAIN,
+      realm_label: "aaaaaaaaaaaaaaaa",
+    });
+    assert.equal(blocked.response.status, 409);
+    assert.deepEqual(await storage.get(authorityKey), authority);
+    assert.equal(emailDirectory.values.get(routeKey), projection);
+    assert.equal(emailDirectory.puts.length, writesBefore);
+    assert.equal(fetches.length, fetchCount);
+    assert.equal(
+      await storage.get(`route-refresh:${DOMAIN}:aaaaaaaaaaaaaaaa`),
+      undefined,
+    );
+  }
+});
+
+test("bounded inventory refuses plan and lifecycle intent windows before account I/O", async () => {
+  const intentCases = [
+    {
+      key: `plan-intent:${ACCOUNT}`,
+      value: {
+        account_id: ACCOUNT,
+        plan_revision: 2,
+        plan_snapshot_hash: "b".repeat(64),
+        state: "cell_committed",
+      },
+    },
+    {
+      key: `lifecycle-intent:${ACCOUNT}`,
+      value: {
+        account_id: ACCOUNT,
+        operation_id: "pending-lifecycle",
+        epoch: 2,
+        action: "suspend",
+        phase: "canonical",
+      },
+    },
+  ];
+  for (const intentCase of intentCases) {
+    const {
+      runtime,
+      storage,
+      directory,
+      emailDirectory,
+      fetches,
+      advance,
+    } = fixture();
+    const authorityKey = `canonical:${DOMAIN}:aaaaaaaaaaaaaaaa`;
+    const routeKey = realmEmailRouteKey(DOMAIN, "aaaaaaaaaaaaaaaa");
+    assert.equal(
+      (await call(runtime, "/canonical/inventory/reconcile")).response.status,
+      200,
+    );
+    advance(REALM_EMAIL_ROUTE_CACHE_TTL_SECONDS * 1_000 + 1);
+    await storage.put("canonical-inventory", {
+      schema_version: "witself.realm-email-canonical-inventory.v1",
+      directory_cursor: null,
+      next_directory_cursor: null,
+      account_id: ACCOUNT,
+      cell_cursor: null,
+      cycle: 1,
+    });
+    await storage.put(intentCase.key, intentCase.value);
+    const authority = await storage.get(authorityKey);
+    const projection = emailDirectory.values.get(routeKey);
+    const inventory = await storage.get("canonical-inventory");
+    const fetchCount = fetches.length;
+    const directoryGetCount = directory.gets.length;
+    const directoryListCount = directory.lists.length;
+    const writesBefore = emailDirectory.puts.length;
+
+    const blocked = await call(runtime, "/canonical/inventory/reconcile");
+    assert.equal(blocked.response.status, 409);
+    assert.deepEqual(await storage.get(authorityKey), authority);
+    assert.equal(emailDirectory.values.get(routeKey), projection);
+    assert.deepEqual(await storage.get("canonical-inventory"), inventory);
+    assert.equal(emailDirectory.puts.length, writesBefore);
+    assert.equal(fetches.length, fetchCount);
+    assert.equal(directory.gets.length, directoryGetCount);
+    assert.equal(directory.lists.length, directoryListCount);
+  }
+});
+
+test("stale retired canonical authority renews without cell or entitlement I/O", async () => {
+  const { runtime, storage, emailDirectory, fetches, advance } = fixture();
+  const authorityKey = `canonical:${DOMAIN}:aaaaaaaaaaaaaaaa`;
+  const routeKey = realmEmailRouteKey(DOMAIN, "aaaaaaaaaaaaaaaa");
+  assert.equal(
+    (await call(runtime, "/canonical/inventory/reconcile")).response.status,
+    200,
+  );
+  const retired = await runtime.upsertCanonicalRoute({
+    domain: DOMAIN,
+    cellRoute: {
+      account_id: ACCOUNT,
+      realm_id: REALM,
+      state: "retired",
+      generation: 2,
+      operation_id: "retire-for-refresh",
+    },
+  });
+  const fetchCount = fetches.length;
+  advance(REALM_EMAIL_ROUTE_CACHE_TTL_SECONDS * 1_000 + 1);
+  let verifiedDurableBeforeKV = false;
+  emailDirectory.beforePut = async (key, value) => {
+    if (key !== routeKey) return;
+    const durable = await storage.get(authorityKey);
+    const projection = JSON.parse(value);
+    assert.equal(durable.state, "retired");
+    assert.equal(durable.controller_revision, retired.controller_revision);
+    assert.equal(durable.updated_at, projection.updated_at);
+    assert.equal(Object.hasOwn(projection, "cell_audience"), false);
+    assert.equal(Object.hasOwn(projection, "ingest_url"), false);
+    verifiedDurableBeforeKV = true;
+  };
+  const refreshed = await call(runtime, "/route/get", {
+    domain: DOMAIN,
+    realm_label: "aaaaaaaaaaaaaaaa",
+  });
+
+  const renewed = await storage.get(authorityKey);
+  const projection = emailDirectory.value(routeKey);
+  assert.equal(refreshed.response.status, 200);
+  assert.equal(verifiedDurableBeforeKV, true);
+  assert.equal(renewed.state, "retired");
+  assert.equal(renewed.controller_revision, retired.controller_revision);
+  assert.ok(Date.parse(renewed.updated_at) > Date.parse(retired.updated_at));
+  assert.equal(projection.state, "retired");
+  assert.equal(projection.controller_revision, retired.controller_revision);
+  assert.equal(projection.updated_at, renewed.updated_at);
+  assert.deepEqual(refreshed.body, projection);
+  assert.equal(Object.hasOwn(projection, "cell_audience"), false);
+  assert.equal(Object.hasOwn(projection, "ingest_url"), false);
+  assert.equal(fetches.length, fetchCount);
+  assert.equal(
+    await storage.get(`route-refresh:${DOMAIN}:aaaaaaaaaaaaaaaa`),
+    undefined,
+  );
+});
+
+test("retired freshness renewal retries a lost KV acknowledgement with exact bytes", async () => {
+  const { runtime, storage, emailDirectory, fetches, advance } = fixture();
+  const authorityKey = `canonical:${DOMAIN}:aaaaaaaaaaaaaaaa`;
+  const routeKey = realmEmailRouteKey(DOMAIN, "aaaaaaaaaaaaaaaa");
+  assert.equal(
+    (await call(runtime, "/canonical/inventory/reconcile")).response.status,
+    200,
+  );
+  const retired = await runtime.upsertCanonicalRoute({
+    domain: DOMAIN,
+    cellRoute: {
+      account_id: ACCOUNT,
+      realm_id: REALM,
+      state: "retired",
+      generation: 2,
+      operation_id: "retire-for-lost-ack",
+    },
+  });
+  const fetchCount = fetches.length;
+  advance(REALM_EMAIL_ROUTE_CACHE_TTL_SECONDS * 1_000 + 1);
+  emailDirectory.failAfterWrite = 1;
+
+  await assert.rejects(
+    runtime.publishStoredRetiredCanonicalRoute(retired),
+    /agent email routing projection failed/,
+  );
+  const renewed = await storage.get(authorityKey);
+  const lostAcknowledgementProjection = emailDirectory.values.get(routeKey);
+  assert.equal(renewed.state, "retired");
+  assert.equal(renewed.controller_revision, retired.controller_revision);
+  assert.ok(Date.parse(renewed.updated_at) > Date.parse(retired.updated_at));
+  assert.equal(
+    JSON.parse(lostAcknowledgementProjection).updated_at,
+    renewed.updated_at,
+  );
+
+  const retried = await runtime.publishStoredRetiredCanonicalRoute(renewed);
+  assert.equal(retried.state, "retired");
+  assert.deepEqual(await storage.get(authorityKey), renewed);
+  assert.equal(emailDirectory.values.get(routeKey), lostAcknowledgementProjection);
+  assert.deepEqual(
+    emailDirectory.puts.slice(-2).map(({ value }) => value),
+    [lostAcknowledgementProjection, lostAcknowledgementProjection],
+  );
+  assert.equal(fetches.length, fetchCount);
+});
+
+test("canonical route GET waits for every lane-owning upsert through KV acknowledgement", async () => {
+  const { runtime, storage, emailDirectory, advance } = fixture();
+  const routeKey = realmEmailRouteKey(DOMAIN, "aaaaaaaaaaaaaaaa");
+  assert.equal(
+    (await call(runtime, "/canonical/inventory/reconcile")).response.status,
+    200,
+  );
+  advance(REALM_EMAIL_ROUTE_CACHE_TTL_SECONDS * 1_000 + 1);
+
+  let releaseProjection;
+  let markProjectionStarted;
+  const projectionStarted = new Promise((resolve) => {
+    markProjectionStarted = resolve;
+  });
+  const projectionReleased = new Promise((resolve) => {
+    releaseProjection = resolve;
+  });
+  let blocked = false;
+  emailDirectory.beforePut = async (key) => {
+    if (key !== routeKey || blocked) return;
+    blocked = true;
+    markProjectionStarted();
+    await projectionReleased;
+  };
+
+  const upsert = runtime.upsertCanonicalRoute({
+    domain: DOMAIN,
+    cellRoute: {
+      account_id: ACCOUNT,
+      realm_id: REALM,
+      state: "live",
+      generation: 1,
+    },
+    target: {
+      cell_audience: "cell-one",
+      ingest_url: "https://cell.example/v1/internal/agent-email:ingest",
+    },
+    emailEnabled: true,
+    deliveryEnabled: true,
+  });
+  await projectionStarted;
+  let lookupSettled = false;
+  const lookup = call(runtime, "/route/get", {
+    domain: DOMAIN,
+    realm_label: "aaaaaaaaaaaaaaaa",
+  }).then((result) => {
+    lookupSettled = true;
+    return result;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(lookupSettled, false);
+
+  releaseProjection();
+  const [upsertResult, lookupResult] = await Promise.all([
+    upsert,
+    lookup,
+  ]);
+  assert.equal(upsertResult.state, "applied");
+  assert.equal(lookupResult.response.status, 200);
+  assert.deepEqual(lookupResult.body, emailDirectory.value(routeKey));
+  assert.equal(
+    lookupResult.body.updated_at,
+    (await storage.get(`canonical:${DOMAIN}:aaaaaaaaaaaaaaaa`)).updated_at,
+  );
+});
+
+test("stale canonical GET holds the account lane until lifecycle suspension can win", async () => {
+  const { runtime, storage, emailDirectory, advance } = fixture();
+  const authorityKey = `canonical:${DOMAIN}:aaaaaaaaaaaaaaaa`;
+  const routeKey = realmEmailRouteKey(DOMAIN, "aaaaaaaaaaaaaaaa");
+  assert.equal(
+    (await call(runtime, "/canonical/inventory/reconcile")).response.status,
+    200,
+  );
+  advance(REALM_EMAIL_ROUTE_CACHE_TTL_SECONDS * 1_000 + 1);
+
+  const fetchCanonical = runtime.fetchCellCanonicalRoute.bind(runtime);
+  let markLookupStarted;
+  let releaseLookup;
+  const lookupStarted = new Promise((resolve) => {
+    markLookupStarted = resolve;
+  });
+  const lookupReleased = new Promise((resolve) => {
+    releaseLookup = resolve;
+  });
+  runtime.fetchCellCanonicalRoute = async (...args) => {
+    markLookupStarted();
+    await lookupReleased;
+    return fetchCanonical(...args);
+  };
+
+  const lookup = call(runtime, "/route/get", {
+    domain: DOMAIN,
+    realm_label: "aaaaaaaaaaaaaaaa",
+  });
+  await lookupStarted;
+  let lifecycleSettled = false;
+  const lifecycle = call(runtime, "/account-lifecycle/reconcile", {
+    account_id: ACCOUNT,
+    operation_id: "route-get-race-suspend",
+    epoch: 1,
+    action: "suspend",
+    activation_enabled: true,
+  }).then((result) => {
+    lifecycleSettled = true;
+    return result;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(lifecycleSettled, false);
+
+  releaseLookup();
+  const [lookupResult, lifecycleResult] = await Promise.all([
+    lookup,
+    lifecycle,
+  ]);
+  assert.equal(lookupResult.response.status, 200);
+  assert.equal(lifecycleResult.response.status, 200);
+  assert.equal(lifecycleResult.body.complete, true);
+  assert.equal((await storage.get(authorityKey)).state, "suspended");
+  assert.equal(emailDirectory.value(routeKey).state, "suspended");
+});
+
+test("bounded inventory holds the account lane until lifecycle suspension can win", async () => {
+  const { runtime, storage, emailDirectory } = fixture();
+  const authorityKey = `canonical:${DOMAIN}:aaaaaaaaaaaaaaaa`;
+  const routeKey = realmEmailRouteKey(DOMAIN, "aaaaaaaaaaaaaaaa");
+  assert.equal(
+    (await call(runtime, "/canonical/inventory/reconcile")).response.status,
+    200,
+  );
+
+  const fetchPage = runtime.fetchCellCanonicalPage.bind(runtime);
+  let markInventoryStarted;
+  let releaseInventory;
+  const inventoryStarted = new Promise((resolve) => {
+    markInventoryStarted = resolve;
+  });
+  const inventoryReleased = new Promise((resolve) => {
+    releaseInventory = resolve;
+  });
+  runtime.fetchCellCanonicalPage = async (...args) => {
+    markInventoryStarted();
+    await inventoryReleased;
+    return fetchPage(...args);
+  };
+
+  const inventory = call(runtime, "/canonical/inventory/reconcile");
+  await inventoryStarted;
+  let lifecycleSettled = false;
+  const lifecycle = call(runtime, "/account-lifecycle/reconcile", {
+    account_id: ACCOUNT,
+    operation_id: "inventory-race-suspend",
+    epoch: 1,
+    action: "suspend",
+    activation_enabled: true,
+  }).then((result) => {
+    lifecycleSettled = true;
+    return result;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(lifecycleSettled, false);
+
+  releaseInventory();
+  const [inventoryResult, lifecycleResult] = await Promise.all([
+    inventory,
+    lifecycle,
+  ]);
+  assert.equal(inventoryResult.response.status, 200);
+  assert.equal(lifecycleResult.response.status, 200);
+  assert.equal(lifecycleResult.body.complete, true);
+  assert.equal((await storage.get(authorityKey)).state, "suspended");
+  assert.equal(emailDirectory.value(routeKey).state, "suspended");
 });
 
 test("one bounded inventory page publishes primary and legacy canonical routes", async () => {

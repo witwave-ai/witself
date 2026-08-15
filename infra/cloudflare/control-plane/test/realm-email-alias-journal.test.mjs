@@ -630,6 +630,16 @@ test("recovery preserves a bounded dual-domain realm-close fence exactly", () =>
     /canonical revision is inconsistent/,
   );
 
+  const invalidTimestamp = new Map(state);
+  invalidTimestamp.set(`canonical:${domains[1]}:aaaaaaaaaaaaaaaa`, {
+    ...state.get(`canonical:${domains[1]}:aaaaaaaaaaaaaaaa`),
+    updated_at: "invalid",
+  });
+  assert.throws(
+    () => validateRealmEmailAliasRecoveredState(invalidTimestamp),
+    /canonical route is invalid/,
+  );
+
   const extraLive = new Map(state);
   extraLive.set("canonical:mail-archive.example:aaaaaaaaaaaaaaaa", {
     domain: "mail-archive.example",
@@ -681,6 +691,96 @@ test("after-image replay prevents tombstone resurrection and revision regression
     }],
     deletes: [],
   }), /append-only authority key/);
+});
+
+test("same-revision canonical replay permits only freshness metadata changes", () => {
+  const key = `canonical:${DOMAIN}:aaaaaaaaaaaaaaaa`;
+  const canonical = {
+    domain: DOMAIN,
+    account_id: ACCOUNT,
+    realm_id: REALM,
+    realm_label: "aaaaaaaaaaaaaaaa",
+    state: "applied",
+    cell_state: "live",
+    cell_generation: 1,
+    cell_operation_id: null,
+    cell_audience: "cell-one",
+    ingest_url: "https://cell.example/v1/internal/agent-email:ingest",
+    controller_revision: 7,
+    updated_at: NOW,
+  };
+  const state = new Map([[key, canonical]]);
+  const refreshedAt = "2026-08-02T20:00:01.000Z";
+  const refreshed = applyRealmEmailAliasAuthorityAfterImage(state, {
+    puts: [{ key, value: { ...canonical, updated_at: refreshedAt } }],
+    deletes: [],
+  });
+  assert.equal(refreshed.get(key).updated_at, refreshedAt);
+  assert.equal(refreshed.get(key).controller_revision, 7);
+
+  for (const desired of [
+    { ...canonical, updated_at: "invalid" },
+    {
+      ...canonical,
+      cell_audience: "cell-two",
+      updated_at: refreshedAt,
+    },
+  ]) {
+    assert.throws(
+      () => applyRealmEmailAliasAuthorityAfterImage(state, {
+        puts: [{ key, value: desired }],
+        deletes: [],
+      }),
+      (error) => error.code ===
+        "realm_email_alias_recovery_revision_regression",
+    );
+  }
+  for (const updatedAt of [
+    NOW,
+    "2026-08-02T19:59:59.999Z",
+  ]) {
+    assert.doesNotThrow(() => applyRealmEmailAliasAuthorityAfterImage(state, {
+      puts: [{ key, value: { ...canonical, updated_at: updatedAt } }],
+      deletes: [],
+    }));
+  }
+  const repaired = applyRealmEmailAliasAuthorityAfterImage(
+    new Map([[key, { ...canonical, updated_at: "invalid" }]]),
+    {
+      puts: [{ key, value: { ...canonical, updated_at: refreshedAt } }],
+      deletes: [],
+    },
+  );
+  assert.equal(repaired.get(key).updated_at, refreshedAt);
+
+  const {
+    cell_audience: _cellAudience,
+    ingest_url: _ingestURL,
+    ...withoutDestination
+  } = canonical;
+  const semanticChange = {
+    ...withoutDestination,
+    state: "suspended",
+    suspension_disposition: "retry",
+    controller_revision: 8,
+    updated_at: refreshedAt,
+  };
+  const changed = applyRealmEmailAliasAuthorityAfterImage(state, {
+    puts: [{ key, value: semanticChange }],
+    deletes: [],
+  });
+  assert.equal(changed.get(key).state, "suspended");
+  assert.equal(changed.get(key).controller_revision, 8);
+  assert.doesNotThrow(() => applyRealmEmailAliasAuthorityAfterImage(state, {
+    puts: [{
+      key,
+      value: {
+        ...semanticChange,
+        updated_at: "2026-08-02T19:59:59.999Z",
+      },
+    }],
+    deletes: [],
+  }));
 });
 
 test("custom-domain sync replay allows only fenced source and phase transitions", () => {

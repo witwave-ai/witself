@@ -427,6 +427,21 @@ export function buildRealmEmailRouteProjection({
   return projection;
 }
 
+function canonicalRouteAuthorityIsFresh(value, nowMS) {
+  const updatedAt = Date.parse(value?.updated_at ?? "");
+  const freshnessMS = REALM_EMAIL_ROUTE_CACHE_TTL_SECONDS * 1_000;
+  return Number.isFinite(nowMS) && Number.isFinite(updatedAt) &&
+    updatedAt <= nowMS + freshnessMS && nowMS <= updatedAt + freshnessMS;
+}
+
+function canonicalRouteAuthorityShouldRenew(value, nowMS) {
+  const updatedAt = Date.parse(value?.updated_at ?? "");
+  const freshnessMS = REALM_EMAIL_ROUTE_CACHE_TTL_SECONDS * 1_000;
+  const renewalMS = Math.max(1, Math.floor(freshnessMS / 2));
+  return !canonicalRouteAuthorityIsFresh(value, nowMS) ||
+    nowMS >= updatedAt + renewalMS;
+}
+
 function claimKey(alias) {
   return `claim:${alias}`;
 }
@@ -512,6 +527,10 @@ function realmCanonicalIndexKey(canonical) {
 
 function canonicalRouteAuthorityKey(domain, realmID) {
   return `canonical:${domain}:${realmID.slice("realm_".length)}`;
+}
+
+function canonicalRouteLaneKey(domain, realmID) {
+  return `canonical:${domain}:${realmID}`;
 }
 
 function realmCloseIntentKey(accountID, realmID) {
@@ -1172,6 +1191,23 @@ export class DurableRealmEmailAliasRegistry {
         return [`account:${input.account_id}`];
       case "/account-lifecycle/reconcile":
         return [`account:${input.account_id}`];
+      case "/route/get": {
+        const domain = validateManagedRealmEmailDomain(input?.domain);
+        const realmLabel = typeof input?.realm_label === "string"
+          ? input.realm_label
+          : "";
+        realmEmailRouteKey(domain, realmLabel);
+        if (!CANONICAL_REALM_LABEL_PATTERN.test(realmLabel)) return [];
+        const canonical = await this.storage.get(
+          `canonical:${domain}:${realmLabel}`,
+        );
+        return [
+          ...(ACCOUNT_ID_PATTERN.test(canonical?.account_id ?? "")
+            ? [`account:${canonical.account_id}`]
+            : []),
+          canonicalRouteLaneKey(domain, `realm_${realmLabel}`),
+        ];
+      }
       case "/counter/rebuild":
         return ["registry:counter-rebuild"];
       case "/canonical/inventory/reconcile":
@@ -1190,7 +1226,7 @@ export class DurableRealmEmailAliasRegistry {
           `account:${input.account_id}`,
           `realm:${input.account_id}:${input.realm_id}`,
           ...domains.map((domain) =>
-            `canonical:${domain}:${String(input.realm_id ?? "")}`
+            canonicalRouteLaneKey(domain, String(input.realm_id ?? ""))
           ),
         ];
       }
@@ -2089,8 +2125,8 @@ export class DurableRealmEmailAliasRegistry {
     };
   }
 
-  async fetchAuthoritativePlan(accountID) {
-    const target = await this.cellTarget(accountID);
+  async fetchAuthoritativePlan(accountID, currentTarget = null) {
+    const target = currentTarget ?? await this.cellTarget(accountID);
     let response;
     try {
       response = await this.fetchImpl(
@@ -2612,7 +2648,76 @@ export class DurableRealmEmailAliasRegistry {
     });
   }
 
-  async upsertCanonicalRoute({
+  async publishStoredRetiredCanonicalRoute(reference) {
+    const domain = validateManagedRealmEmailDomain(reference?.domain);
+    const realmID = reference?.realm_id;
+    if (!REALM_ID_PATTERN.test(realmID ?? "") ||
+        reference?.realm_label !== realmID.slice("realm_".length) ||
+        reference?.state !== "retired") {
+      fail("retired canonical realm route reference is invalid", 503);
+    }
+    return this.withLane(
+      canonicalRouteLaneKey(domain, realmID),
+      () => this.publishStoredRetiredCanonicalRouteWithLaneHeld({
+        domain,
+        realm_id: realmID,
+      }),
+    );
+  }
+
+  // This helper renews only terminal deny authority. Live destinations must
+  // always pass through upsertCanonicalRoute and its cell/entitlement checks.
+  async publishStoredRetiredCanonicalRouteWithLaneHeld(reference) {
+    const key = canonicalRouteAuthorityKey(
+      reference.domain,
+      reference.realm_id,
+    );
+    const current = await this.storage.get(key);
+    if (!current || current.domain !== reference.domain ||
+        current.realm_id !== reference.realm_id || current.state !== "retired") {
+      fail("retired canonical realm route authority is inconsistent", 503);
+    }
+    const checkedAt = this.now();
+    const refreshFreshness = canonicalRouteAuthorityShouldRenew(
+      current,
+      checkedAt.valueOf(),
+    );
+    const canonical = refreshFreshness
+      ? { ...current, updated_at: checkedAt.toISOString() }
+      : current;
+    // Validate the exact terminal projection before changing durable state.
+    this.canonicalProjection(canonical);
+    if (refreshFreshness) {
+      await this.atomic([
+        [key, canonical],
+        [accountCanonicalIndexKey(canonical), key],
+        [realmCanonicalIndexKey(canonical), key],
+      ]);
+    }
+    await this.publishRoute(this.canonicalProjection(canonical));
+    return canonical;
+  }
+
+  async upsertCanonicalRoute(input) {
+    const domain = validateManagedRealmEmailDomain(input?.domain);
+    const source = validateCellCanonicalRoute(
+      input?.cellRoute,
+      input?.cellRoute?.account_id,
+      input?.cellRoute?.realm_id,
+    );
+    return this.withLane(
+      canonicalRouteLaneKey(domain, source.realm_id),
+      () => this.upsertCanonicalRouteWithLaneHeld({
+        ...input,
+        domain,
+        cellRoute: source,
+      }),
+    );
+  }
+
+  // Only a caller already holding canonicalRouteLaneKey(domain, realm_id) may
+  // use this core. Ordinary writers must use the lane-owning public wrapper.
+  async upsertCanonicalRouteWithLaneHeld({
     domain,
     cellRoute,
     target = null,
@@ -2755,18 +2860,27 @@ export class DurableRealmEmailAliasRegistry {
     if (!Number.isSafeInteger(controllerRevision) || controllerRevision < 1) {
       fail("canonical realm route revision is exhausted", 503);
     }
+    const checkedAt = this.now();
+    const refreshFreshness = current && !changed &&
+      canonicalRouteAuthorityShouldRenew(current, checkedAt.valueOf());
+    const authorityChanged = changed || refreshFreshness;
     const canonical = changed
       ? {
         ...authority,
         controller_revision: controllerRevision,
-        updated_at: this.now().toISOString(),
+        updated_at: checkedAt.toISOString(),
       }
+      : refreshFreshness
+      ? { ...current, updated_at: checkedAt.toISOString() }
       : current;
     // The durable authority after-image must exist before its eventually
     // consistent routing projection can become externally visible. If the KV
-    // acknowledgement is lost, every owner retries these exact bytes at the
-    // same controller revision; no synthetic revision is minted for repair.
-    await this.atomic(changed
+    // acknowledgement is lost, an immediate retry reuses the exact bytes at
+    // the same controller revision. A validated source read may renew only
+    // updated_at without minting a synthetic authority revision. Background
+    // writers renew at a TTL-derived half-life so a five-minute inventory
+    // cadence keeps the five-minute edge authority continuously warm.
+    await this.atomic(authorityChanged
       ? [
         [key, canonical],
         [accountCanonicalIndexKey(canonical), key],
@@ -2786,7 +2900,10 @@ export class DurableRealmEmailAliasRegistry {
       claim.realm_id,
       target,
     );
-    const emailEnabled = await this.canonicalEmailEntitlement(claim.account_id);
+    const emailEnabled = await this.canonicalEmailEntitlement(
+      claim.account_id,
+      target,
+    );
     const canonical = await this.upsertCanonicalRoute({
       domain: claim.domain,
       cellRoute: source,
@@ -2860,6 +2977,13 @@ export class DurableRealmEmailAliasRegistry {
         `canonical:${domain}:${realmLabel}`,
       );
       if (!canonical) fail("realm email route not found", 404);
+      const [lifecycleIntent, planIntent] = await Promise.all([
+        this.storage.get(lifecycleIntentKey(canonical.account_id)),
+        this.storage.get(planIntentKey(canonical.account_id)),
+      ]);
+      if (lifecycleIntent || planIntent) {
+        fail("canonical realm route policy is still converging", 409);
+      }
       let admitted;
       try {
         admitted = managedDeliveryAccountIsAdmitted(
@@ -2879,6 +3003,37 @@ export class DurableRealmEmailAliasRegistry {
           409,
           "managed_email_delivery_cohort_held_back",
         );
+      }
+      if (!canonicalRouteAuthorityIsFresh(
+        canonical,
+        this.now().valueOf(),
+      )) {
+        let refreshed;
+        if (canonical.state === "retired") {
+          refreshed = await this.publishStoredRetiredCanonicalRouteWithLaneHeld({
+            domain,
+            realm_id: canonical.realm_id,
+          });
+        } else {
+          const target = await this.cellTarget(canonical.account_id);
+          const [source, emailEnabled] = await Promise.all([
+            this.fetchCellCanonicalRoute(
+              canonical.account_id,
+              canonical.realm_id,
+              target,
+            ),
+            this.canonicalEmailEntitlement(canonical.account_id, target),
+          ]);
+          refreshed = await this.upsertCanonicalRouteWithLaneHeld({
+            domain,
+            cellRoute: source,
+            target,
+            emailEnabled,
+          });
+        }
+        return json(await this.signedRouteProjection(
+          this.canonicalProjection(refreshed),
+        ));
       }
       const value = this.canonicalProjection(canonical);
       await this.enqueueRouteRefresh({
@@ -2987,8 +3142,8 @@ export class DurableRealmEmailAliasRegistry {
     return { routes, next_cursor: body.next_cursor };
   }
 
-  async canonicalEmailEntitlement(accountID) {
-    const snapshot = await this.fetchAuthoritativePlan(accountID);
+  async canonicalEmailEntitlement(accountID, currentTarget = null) {
+    const snapshot = await this.fetchAuthoritativePlan(accountID, currentTarget);
     return snapshot.features.includes(AGENT_EMAIL_RECEIVE_FEATURE);
   }
 
@@ -3073,7 +3228,23 @@ export class DurableRealmEmailAliasRegistry {
       };
     }
 
+    return this.withLane(
+      `account:${scan.account_id}`,
+      () => this.reconcileCanonicalInventoryAccountWithLaneHeld(scan),
+    );
+  }
+
+  // The account lane fences directory placement, cell inventory, entitlement,
+  // and every nested canonical write against plan/lifecycle convergence.
+  async reconcileCanonicalInventoryAccountWithLaneHeld(scan) {
     const accountID = scan.account_id;
+    const [lifecycleIntent, planIntent] = await Promise.all([
+      this.storage.get(lifecycleIntentKey(accountID)),
+      this.storage.get(planIntentKey(accountID)),
+    ]);
+    if (lifecycleIntent || planIntent) {
+      fail("canonical inventory account policy is still converging", 409);
+    }
     const [route, pending, archived] = await Promise.all([
       this.env.DIRECTORY.get(`acct:${accountID}`, { type: "json" }),
       this.env.DIRECTORY.get(`pending:${accountID}`),
@@ -3103,20 +3274,17 @@ export class DurableRealmEmailAliasRegistry {
     const target = await this.cellTarget(accountID);
     const [page, emailEnabled] = await Promise.all([
       this.fetchCellCanonicalPage(accountID, target, scan.cell_cursor),
-      this.canonicalEmailEntitlement(accountID),
+      this.canonicalEmailEntitlement(accountID, target),
     ]);
     const managedDomains = managedRealmEmailDomains(this.env);
     for (const cellRoute of page.routes) {
       for (const domain of managedDomains) {
-        await this.withLane(
-          `canonical:${domain}:${cellRoute.realm_id}`,
-          () => this.upsertCanonicalRoute({
-            domain,
-            cellRoute,
-            target,
-            emailEnabled,
-          }),
-        );
+        await this.upsertCanonicalRoute({
+          domain,
+          cellRoute,
+          target,
+          emailEnabled,
+        });
       }
     }
     const accountComplete = page.next_cursor === null;
@@ -3517,7 +3685,7 @@ export class DurableRealmEmailAliasRegistry {
           fail("canonical realm close domain cursor is invalid", 503);
         }
         for (let index = startIndex; index < domains.length; index += 1) {
-          const canonical = await this.upsertCanonicalRoute({
+          const canonical = await this.upsertCanonicalRouteWithLaneHeld({
             domain: domains[index],
             cellRoute: intent.cell_route,
             forcedPolicy: { state: "retired", suspension_disposition: null },
@@ -3577,7 +3745,7 @@ export class DurableRealmEmailAliasRegistry {
       }
       const canonicals = [];
       for (const domain of domains) {
-        canonicals.push(await this.upsertCanonicalRoute({
+        canonicals.push(await this.upsertCanonicalRouteWithLaneHeld({
           domain,
           cellRoute: committed,
           forcedPolicy: { state: "retired", suspension_disposition: null },
@@ -4307,7 +4475,7 @@ export class DurableRealmEmailAliasRegistry {
                 return;
               }
               if (canonical.state === "retired") {
-                await this.publishRoute(this.canonicalProjection(canonical));
+                await this.publishStoredRetiredCanonicalRoute(canonical);
               } else {
                 const target = await this.cellTarget(canonical.account_id);
                 const [source, emailEnabled] = await Promise.all([
@@ -4316,7 +4484,10 @@ export class DurableRealmEmailAliasRegistry {
                     canonical.realm_id,
                     target,
                   ),
-                  this.canonicalEmailEntitlement(canonical.account_id),
+                  this.canonicalEmailEntitlement(
+                    canonical.account_id,
+                    target,
+                  ),
                 ]);
                 await this.upsertCanonicalRoute({
                   domain: canonical.domain,
@@ -5979,10 +6150,13 @@ export class DurableRealmEmailAliasRegistry {
     }
     if (canonicalPage.canonicals.length > 0) {
       const target = await this.cellTarget(accountID);
-      const emailEnabled = await this.canonicalEmailEntitlement(accountID);
+      const emailEnabled = await this.canonicalEmailEntitlement(
+        accountID,
+        target,
+      );
       for (const canonical of canonicalPage.canonicals) {
         if (canonical.state === "retired") {
-          await this.publishRoute(this.canonicalProjection(canonical));
+          await this.publishStoredRetiredCanonicalRoute(canonical);
           continue;
         }
         const source = await this.fetchCellCanonicalRoute(
@@ -6505,11 +6679,11 @@ export class DurableRealmEmailAliasRegistry {
         : null;
       const emailEnabled = intent.action === "republish" &&
           activeCanonicals.length > 0
-        ? await this.canonicalEmailEntitlement(intent.account_id)
+        ? await this.canonicalEmailEntitlement(intent.account_id, target)
         : false;
       for (const canonical of canonicalPage.canonicals) {
         if (canonical.state === "retired") {
-          await this.publishRoute(this.canonicalProjection(canonical));
+          await this.publishStoredRetiredCanonicalRoute(canonical);
           continue;
         }
         const source = await this.fetchCellCanonicalRoute(
