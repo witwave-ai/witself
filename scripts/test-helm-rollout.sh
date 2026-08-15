@@ -1414,6 +1414,7 @@ expect_apps_template_failure \
   --values "$civo_cell" \
   --set apps.witselfServer.chartVersion=0.0.245 \
   --set apps.witselfServer.imageTag=0.0.245 \
+  --set apps.witselfServer.agentEmail.receiveProduction.accountIDsExistingSecret.name= \
   --set apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name=retry-canary-v1
 expect_apps_template_failure \
   "app-of-apps retry-canary reusing the account-cohort Secret" \
