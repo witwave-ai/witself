@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -503,19 +503,58 @@ export function bootstrapReleaseDeploymentArguments(
   ];
 }
 
-function privateReleaseDeploymentArguments(metadata, config) {
+function privateWranglerOutdir(workDirectory, name) {
+  if (typeof workDirectory !== "string" || !workDirectory ||
+      !isAbsolute(workDirectory) ||
+      resolve(workDirectory) !== workDirectory) {
+    throw new Error(
+      "private Wrangler output directory requires a normalized absolute work directory",
+    );
+  }
+  return join(workDirectory, name);
+}
+
+function privateDeploymentArguments(
+  metadata,
+  config,
+  workDirectory,
+  outdirName,
+) {
   return [
     "deploy",
     "--config", config,
+    "--outdir", privateWranglerOutdir(workDirectory, outdirName),
     "--strict",
     "--tag", workerVersionTag(metadata),
     "--message", workerVersionMessage(metadata),
   ];
 }
 
-function privateBootstrapReleaseDeploymentArguments(metadata, config) {
+export function privateReleaseDeploymentArguments(
+  metadata,
+  config,
+  workDirectory,
+) {
+  return privateDeploymentArguments(
+    metadata,
+    config,
+    workDirectory,
+    "wrangler-control-plane-deploy",
+  );
+}
+
+export function privateBootstrapReleaseDeploymentArguments(
+  metadata,
+  config,
+  workDirectory,
+) {
   return [
-    ...privateReleaseDeploymentArguments(metadata, config),
+    ...privateDeploymentArguments(
+      metadata,
+      config,
+      workDirectory,
+      "wrangler-control-plane-bootstrap",
+    ),
     "--containers-rollout", "none",
   ];
 }
@@ -649,7 +688,11 @@ async function deployPrivateReleaseConfig(release, commandEnvironments) {
     await withReleaseInputIntegrity(
       release,
       () => runProductionWranglerDeploy(
-        privateReleaseDeploymentArguments(source, release.path),
+        privateReleaseDeploymentArguments(
+          source,
+          release.path,
+          release.workDirectory,
+        ),
         {
           environment: commandEnvironments.wranglerMutation,
           signal,
@@ -664,7 +707,11 @@ async function deployPrivateReleaseConfig(release, commandEnvironments) {
     await withReleaseInputIntegrity(
       release,
       () => runProductionWranglerDeploy(
-        privateBootstrapReleaseDeploymentArguments(source, release.path),
+        privateBootstrapReleaseDeploymentArguments(
+          source,
+          release.path,
+          release.workDirectory,
+        ),
         {
           environment: commandEnvironments.wranglerMutation,
           cwd: release.workDirectory,

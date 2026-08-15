@@ -78,6 +78,30 @@ test("concurrent deployment configurations are private immutable snapshots", asy
   await assert.rejects(access(second.path), { code: "ENOENT" });
 });
 
+test("private deployment configuration rejects residual Wrangler deploy state", async () => {
+  const config = await createPrivateDeploymentConfig({
+    prefix: "witself-config-test-",
+    render: (path) => writeFile(path, "config", { mode: 0o600 }),
+  });
+  const residue = join(
+    dirname(config.path),
+    ".wrangler",
+    "tmp",
+    "deploy-regression",
+  );
+  try {
+    await mkdir(residue, { mode: 0o700 });
+    await assert.rejects(
+      config.assertUnchanged(),
+      /unsafe metadata/,
+    );
+    await rm(residue, { recursive: true, force: true });
+    await config.assertUnchanged();
+  } finally {
+    await config.cleanup();
+  }
+});
+
 test("sibling deployment snapshots preserve Wrangler path resolution and clean up", async () => {
   const fixture = await mkdtemp(join(tmpdir(), "witself-config-layout-test-"));
   const cloudflare = join(fixture, "infra", "cloudflare");
