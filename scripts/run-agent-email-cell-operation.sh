@@ -887,18 +887,22 @@ fi
 
 if [ "$OPERATION" = backfill ]; then
   RUNNER_LOG="$WORK_DIR/runner.log"
-  if "${KUBE[@]}" logs "$POD_NAME" -c runner >"$RUNNER_LOG" 2>/dev/null &&
-    jq -e '
-      type == "object" and
-      (keys | sort == ["account_count","live_agent_count","missing_mailbox_count_after",
-        "missing_mailbox_count_before","override_count","processed_agent_count",
-        "ready_mailbox_count","retry_canary_ready"]) and
-      all(.account_count,.live_agent_count,.missing_mailbox_count_after,
-          .missing_mailbox_count_before,.override_count,.processed_agent_count,
-          .ready_mailbox_count; type == "number" and . >= 0 and floor == .) and
-      (.retry_canary_ready | type == "boolean")
-    ' "$RUNNER_LOG" >/dev/null; then
-    jq -c . "$RUNNER_LOG"
+  if "${KUBE[@]}" logs "$POD_NAME" -c runner --tail=20 --limit-bytes=8192 \
+      >"$RUNNER_LOG" 2>/dev/null &&
+    BACKFILL_COUNTS="$(jq -Rsec '
+      def valid_counts:
+        type == "object" and
+        (keys | sort == ["account_count","live_agent_count","missing_mailbox_count_after",
+          "missing_mailbox_count_before","override_count","processed_agent_count",
+          "ready_mailbox_count","retry_canary_ready"]) and
+        all(.account_count,.live_agent_count,.missing_mailbox_count_after,
+            .missing_mailbox_count_before,.override_count,.processed_agent_count,
+            .ready_mailbox_count; type == "number" and . >= 0 and floor == .) and
+        (.retry_canary_ready | type == "boolean");
+      [split("\n")[] | select(length > 0) | fromjson? | select(valid_counts)] as $counts |
+      if ($counts | length) == 1 then $counts[0] else empty end
+    ' "$RUNNER_LOG")"; then
+    printf '%s\n' "$BACKFILL_COUNTS"
   else
     printf '{"status":"completed","counts":"unavailable"}\n'
   fi
