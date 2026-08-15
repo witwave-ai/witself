@@ -109,6 +109,12 @@ func run(args []string) int {
 		return 0
 	case "serve":
 		return serve()
+	case "agent-email":
+		if len(args) >= 2 && args[1] == "receipt-replay" {
+			return runAgentEmailReceiptReplay(args[2:])
+		}
+		fmt.Fprintln(os.Stderr, "witself-worker: unknown agent-email command")
+		return 2
 	default:
 		fmt.Fprintf(os.Stderr, "witself-worker: unknown command %q\n\n", args[0])
 		usage(os.Stderr)
@@ -1055,6 +1061,7 @@ func usage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "Usage:")
 	_, _ = fmt.Fprintln(w, "  witself-worker version    Print version information")
 	_, _ = fmt.Fprintln(w, "  witself-worker serve      Run jobs, health, and metrics listeners")
+	_, _ = fmt.Fprintln(w, "  witself-worker agent-email receipt-replay --account-id ID --send-id ID --expected-accepted-at TIME --expected-attempt-count 1 --json")
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "Required:")
 	_, _ = fmt.Fprintln(w, "  WITSELF_DATABASE_URL  Postgres DSN (falls back to DATABASE_URL)")

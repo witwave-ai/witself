@@ -29,6 +29,14 @@ const (
 	DispatchSchemaVersion = "witself.agent-email-dispatch.v1"
 	// ResponseSchemaVersion identifies the adapter's closed response envelope.
 	ResponseSchemaVersion = "witself.agent-email-dispatch-response.v1"
+	// ReceiptReplayProofSchemaVersion identifies the edge's value-free proof.
+	ReceiptReplayProofSchemaVersion = "witself.agent-email-dispatch-receipt-proof.v1"
+	// ReceiptReplayAudience is reserved for operator receipt verification.
+	ReceiptReplayAudience = "witself-agent-email-send-receipt-replay"
+	// DispatchPath is the only provider-call path.
+	DispatchPath = "/v1/dispatch"
+	// ReceiptReplayPath is the read-only durable-receipt proof path.
+	ReceiptReplayPath = "/v1/dispatch:receipt-replay"
 
 	// HeaderVersion carries DispatchSchemaVersion on a signed request.
 	HeaderVersion = "X-Witself-Email-Dispatch-Version"
@@ -103,6 +111,20 @@ type Response struct {
 	ProviderMessageID string `json:"provider_message_id,omitempty"`
 	ErrorCode         string `json:"error_code,omitempty"`
 	RetryAfterSeconds int64  `json:"retry_after_seconds,omitempty"`
+}
+
+// ReceiptReplayProof is the closed, value-free evidence returned by the edge.
+// It deliberately contains no provider identifier, dispatch digest, signer key,
+// recipient, subject, or body.
+type ReceiptReplayProof struct {
+	SchemaVersion            string `json:"schema_version"`
+	SendID                   string `json:"send_id"`
+	ReceiptState             string `json:"receipt_state"`
+	DigestMatched            bool   `json:"digest_matched"`
+	SignerMatched            bool   `json:"signer_matched"`
+	ProviderCallStartedCount int64  `json:"provider_call_started_count"`
+	VerifiedReplayCount      int64  `json:"verified_replay_count"`
+	RoutePending             bool   `json:"route_pending"`
 }
 
 // Validate checks the complete immutable provider envelope.
@@ -230,15 +252,28 @@ type Client struct {
 
 // Validate checks the complete adapter endpoint and signing configuration.
 func (c *Client) Validate() error {
+	return c.validateFor(DispatchPath, "")
+}
+
+// ValidateReceiptReplay checks the dedicated operator proof endpoint and
+// audience. A normal dispatch client cannot be reused accidentally.
+func (c *Client) ValidateReceiptReplay() error {
+	return c.validateFor(ReceiptReplayPath, ReceiptReplayAudience)
+}
+
+func (c *Client) validateFor(path, exactAudience string) error {
 	u, err := url.Parse(c.Endpoint)
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" ||
 		u.User != nil || u.Opaque != "" || u.Fragment != "" ||
-		u.RawQuery != "" || u.ForceQuery || u.Path != "/v1/dispatch" || u.RawPath != "" {
-		return errors.New("agent-email dispatch endpoint must be an exact HTTPS /v1/dispatch URL")
+		u.RawQuery != "" || u.ForceQuery || u.Path != path || u.RawPath != "" {
+		return fmt.Errorf("agent-email dispatch endpoint must be an exact HTTPS %s URL", path)
 	}
 	if !keyIDPattern.MatchString(c.KeyID) || c.Audience == "" ||
 		c.Audience != strings.TrimSpace(c.Audience) || strings.ContainsAny(c.Audience, "\r\n") {
 		return errors.New("agent-email dispatch identity is invalid")
+	}
+	if exactAudience != "" && c.Audience != exactAudience {
+		return errors.New("agent-email receipt replay audience is invalid")
 	}
 	if len(c.PrivateKey) != ed25519.PrivateKeySize {
 		return errors.New("agent-email dispatch private key is invalid")
@@ -253,9 +288,58 @@ func (c *Client) Send(ctx context.Context, dispatch Dispatch) (Response, error) 
 	if err := c.Validate(); err != nil {
 		return Response{}, err
 	}
+	status, responseBody, err := c.signedPost(ctx, dispatch)
+	if err != nil {
+		return Response{SchemaVersion: ResponseSchemaVersion, SendID: dispatch.SendID, State: StateAmbiguous, Provider: "managed"}, err
+	}
+	var out Response
+	decoder := json.NewDecoder(bytes.NewReader(responseBody))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&out); err != nil || out.Validate(dispatch.SendID) != nil {
+		return Response{SchemaVersion: ResponseSchemaVersion, SendID: dispatch.SendID, State: StateAmbiguous, Provider: "managed"}, ErrInvalidResponse
+	}
+	if status < 200 || status >= 300 {
+		if out.State != StateRetryable && out.State != StateRejected && out.State != StateAmbiguous {
+			return Response{SchemaVersion: ResponseSchemaVersion, SendID: dispatch.SendID, State: StateAmbiguous, Provider: "managed"}, ErrInvalidResponse
+		}
+		return out, fmt.Errorf("agent-email adapter returned HTTP %d", status)
+	}
+	return out, nil
+}
+
+// ReplayReceipt asks the adapter to prove one exact accepted durable receipt.
+// This operation never authorizes a provider call. Only an exact 200 proof with
+// the closed schema and a single provider-start fence is accepted.
+func (c *Client) ReplayReceipt(
+	ctx context.Context,
+	dispatch Dispatch,
+) (ReceiptReplayProof, error) {
+	if err := c.ValidateReceiptReplay(); err != nil {
+		return ReceiptReplayProof{}, err
+	}
+	status, responseBody, err := c.signedPost(ctx, dispatch)
+	if err != nil {
+		return ReceiptReplayProof{}, err
+	}
+	if status != http.StatusOK {
+		return ReceiptReplayProof{}, fmt.Errorf(
+			"agent-email receipt replay returned HTTP %d", status,
+		)
+	}
+	proof, err := decodeReceiptReplayProof(responseBody, dispatch.SendID)
+	if err != nil {
+		return ReceiptReplayProof{}, err
+	}
+	return proof, nil
+}
+
+func (c *Client) signedPost(
+	ctx context.Context,
+	dispatch Dispatch,
+) (int, []byte, error) {
 	body, err := dispatch.Marshal()
 	if err != nil {
-		return Response{}, err
+		return 0, nil, err
 	}
 	now := time.Now
 	if c.Now != nil {
@@ -264,15 +348,18 @@ func (c *Client) Send(ctx context.Context, dispatch Dispatch) (Response, error) 
 	timestamp := now().UTC().Format(time.RFC3339Nano)
 	digestBytes := sha256.Sum256(body)
 	digest := hex.EncodeToString(digestBytes[:])
-	input, err := SignatureInput(DispatchSchemaVersion, timestamp, c.KeyID, c.Audience, digest)
+	input, err := SignatureInput(
+		DispatchSchemaVersion, timestamp, c.KeyID, c.Audience, digest,
+	)
 	if err != nil {
-		return Response{}, err
+		return 0, nil, err
 	}
 	signature := base64.StdEncoding.EncodeToString(ed25519.Sign(c.PrivateKey, input))
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.Endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(
+		ctx, http.MethodPost, c.Endpoint, bytes.NewReader(body),
+	)
 	if err != nil {
-		return Response{}, fmt.Errorf("create agent-email dispatch request: %w", err)
+		return 0, nil, errors.New("create signed agent-email request")
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(HeaderVersion, DispatchSchemaVersion)
@@ -288,34 +375,88 @@ func (c *Client) Send(ctx context.Context, dispatch Dispatch) (Response, error) 
 	}
 	// A dispatch carries the message body and cell signature. Never allow an
 	// adapter redirect to forward either to a different origin or path. Copy
-	// the configured client so this safety rule cannot mutate shared state or
-	// be weakened by a caller-supplied redirect policy.
+	// the configured client so this rule cannot mutate shared state or be
+	// weakened by a caller-supplied redirect policy.
 	noRedirectClient := *httpClient
 	noRedirectClient.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
 	res, err := noRedirectClient.Do(req)
 	if err != nil {
-		return Response{SchemaVersion: ResponseSchemaVersion, SendID: dispatch.SendID, State: StateAmbiguous, Provider: "managed"}, err
+		return 0, nil, fmt.Errorf("signed agent-email request failed: %w", err)
 	}
 	defer func() { _ = res.Body.Close() }()
 	responseBody, err := io.ReadAll(io.LimitReader(res.Body, maxResponseBytes+1))
 	if err != nil || len(responseBody) > maxResponseBytes {
-		return Response{SchemaVersion: ResponseSchemaVersion, SendID: dispatch.SendID, State: StateAmbiguous, Provider: "managed"}, ErrInvalidResponse
+		return 0, nil, ErrInvalidResponse
 	}
-	var out Response
-	decoder := json.NewDecoder(bytes.NewReader(responseBody))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&out); err != nil || out.Validate(dispatch.SendID) != nil {
-		return Response{SchemaVersion: ResponseSchemaVersion, SendID: dispatch.SendID, State: StateAmbiguous, Provider: "managed"}, ErrInvalidResponse
+	return res.StatusCode, responseBody, nil
+}
+
+func decodeReceiptReplayProof(body []byte, sendID string) (ReceiptReplayProof, error) {
+	allowed := map[string]bool{
+		"schema_version": true, "send_id": true, "receipt_state": true,
+		"digest_matched": true, "signer_matched": true,
+		"provider_call_started_count": true, "verified_replay_count": true,
+		"route_pending": true,
 	}
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		if out.State != StateRetryable && out.State != StateRejected && out.State != StateAmbiguous {
-			return Response{SchemaVersion: ResponseSchemaVersion, SendID: dispatch.SendID, State: StateAmbiguous, Provider: "managed"}, ErrInvalidResponse
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	opening, err := decoder.Token()
+	if err != nil || opening != json.Delim('{') {
+		return ReceiptReplayProof{}, ErrInvalidResponse
+	}
+	seen := make(map[string]bool, len(allowed))
+	for decoder.More() {
+		token, err := decoder.Token()
+		key, ok := token.(string)
+		if err != nil || !ok || !allowed[key] || seen[key] {
+			return ReceiptReplayProof{}, ErrInvalidResponse
 		}
-		return out, fmt.Errorf("agent-email adapter returned HTTP %d", res.StatusCode)
+		seen[key] = true
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return ReceiptReplayProof{}, ErrInvalidResponse
+		}
 	}
-	return out, nil
+	closing, err := decoder.Token()
+	if err != nil || closing != json.Delim('}') || len(seen) != len(allowed) {
+		return ReceiptReplayProof{}, ErrInvalidResponse
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return ReceiptReplayProof{}, ErrInvalidResponse
+	}
+	var wire struct {
+		SchemaVersion            *string `json:"schema_version"`
+		SendID                   *string `json:"send_id"`
+		ReceiptState             *string `json:"receipt_state"`
+		DigestMatched            *bool   `json:"digest_matched"`
+		SignerMatched            *bool   `json:"signer_matched"`
+		ProviderCallStartedCount *int64  `json:"provider_call_started_count"`
+		VerifiedReplayCount      *int64  `json:"verified_replay_count"`
+		RoutePending             *bool   `json:"route_pending"`
+	}
+	if err := json.Unmarshal(body, &wire); err != nil ||
+		wire.SchemaVersion == nil || wire.SendID == nil ||
+		wire.ReceiptState == nil || wire.DigestMatched == nil ||
+		wire.SignerMatched == nil || wire.ProviderCallStartedCount == nil ||
+		wire.VerifiedReplayCount == nil || wire.RoutePending == nil ||
+		*wire.SchemaVersion != ReceiptReplayProofSchemaVersion ||
+		*wire.SendID != sendID || *wire.ReceiptState != StateAccepted ||
+		!*wire.DigestMatched || !*wire.SignerMatched ||
+		*wire.ProviderCallStartedCount != 1 ||
+		*wire.VerifiedReplayCount < 1 || *wire.VerifiedReplayCount > 1_000_000 {
+		return ReceiptReplayProof{}, ErrInvalidResponse
+	}
+	return ReceiptReplayProof{
+		SchemaVersion:            *wire.SchemaVersion,
+		SendID:                   *wire.SendID,
+		ReceiptState:             *wire.ReceiptState,
+		DigestMatched:            *wire.DigestMatched,
+		SignerMatched:            *wire.SignerMatched,
+		ProviderCallStartedCount: *wire.ProviderCallStartedCount,
+		VerifiedReplayCount:      *wire.VerifiedReplayCount,
+		RoutePending:             *wire.RoutePending,
+	}, nil
 }
 
 // Validate checks a closed adapter response against the logical send ID.

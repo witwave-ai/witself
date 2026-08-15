@@ -78,6 +78,12 @@ witself-server
   config check|print
   bootstrap token
   healthcheck
+
+witself-worker
+  version
+  serve
+  agent-email receipt-replay --account-id ID --send-id ID
+    --expected-accepted-at RFC3339NANO --expected-attempt-count 1 --json
 ```
 
 ## Global Flags
@@ -129,10 +135,10 @@ Expected server environment variables may include:
 | `WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_INTERVAL` | Delay between inbound-email rate-bucket cleanup batches. Default: `1m`; valid range: `1m`-`24h`. |
 | `WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_BATCH_TIMEOUT` | Deadline for one bounded inbound-email rate-bucket cleanup attempt. Default: `10s`; valid range: `1s`-`5m`. |
 | `WITSELF_AGENT_EMAIL_OUTBOUND_ENABLED` | Enable the durable outbound dispatch job in `witself-worker`. Default: `false`; API deployments never run it. Enabling requires the complete signed-adapter configuration below and does not itself enable the edge adapter or grant account entitlement. |
-| `WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_ENDPOINT` | HTTPS endpoint for the dedicated managed Cloudflare adapter, normally its `/v1/dispatch` route. Required when outbound dispatch is enabled. |
-| `WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_AUDIENCE` | Exact audience covered by every detached dispatch signature. Chart default: `witself-agent-email-send`. |
-| `WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_KEY_ID` | Bounded public key-ring identifier for the cell dispatch signer. Required when enabled. |
-| `WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_PRIVATE_KEY` | Base64 raw Ed25519 private dispatch key, mounted from the worker-only secret. Provider credentials never enter the cell. |
+| `WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_ENDPOINT` | HTTPS endpoint for the dedicated managed Cloudflare adapter, normally its exact `/v1/dispatch` route. Required when outbound dispatch is enabled and by the operator-only receipt-replay command, which derives only the same origin's `/v1/dispatch:receipt-replay` path. |
+| `WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_AUDIENCE` | Exact audience covered by every live-dispatch signature. Chart default: `witself-agent-email-send`. The receipt-replay command never trusts this override; it always uses the reserved `witself-agent-email-send-receipt-replay` audience. |
+| `WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_KEY_ID` | Bounded public key-ring identifier for the cell dispatch signer. Required when dispatch is enabled and by the operator-only receipt-replay command. |
+| `WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_PRIVATE_KEY` | Base64 raw Ed25519 private dispatch key, mounted from the worker-only secret. It is also the only signing material accepted by the operator-only receipt-replay command. Provider credentials never enter the cell. |
 | `WITSELF_AGENT_EMAIL_OUTBOUND_BATCH_SIZE` | Maximum ready outbox rows considered by one bounded worker attempt. Default: `10`; valid range: `1`-`100`. |
 | `WITSELF_AGENT_EMAIL_OUTBOUND_INTERVAL` | Delay between dispatch attempts. Default: `2s`; valid range: `100ms`-`5m`. |
 | `WITSELF_AGENT_EMAIL_OUTBOUND_BATCH_TIMEOUT` | Deadline for one bounded outbox attempt. Default: `30s`; valid range: `1s`-`5m`. |
@@ -176,6 +182,15 @@ binding and a Durable Object receipt keyed by send id. Both the worker job and
 adapter dispatch gate default off. This preserves API scaling, lets multiple
 worker replicas add capacity without racing one logical send, and keeps the
 provider credential outside every cell.
+
+`witself-worker agent-email receipt-replay` is the narrow operator proof for an
+already accepted, first-attempt production canary. It requires the exact local
+account/send/acceptance assertions, performs only read-only database work,
+reuses the production immutable-dispatch serializer, and signs for the distinct
+`witself-agent-email-send-receipt-replay` audience and exact
+`/v1/dispatch:receipt-replay` path. Only a closed accepted proof with one
+provider-call start and a settled provider route succeeds. See
+[cell-worker.md](cell-worker.md#operator-only-accepted-receipt-proof).
 
 Witself serves two planes with two distinct production dependency sets. The OPEN
 plane (memories, facts) is backed by PostgreSQL. Its required recall path is

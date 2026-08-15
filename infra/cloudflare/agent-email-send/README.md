@@ -9,6 +9,8 @@ The default configuration is dark:
 
 - `DISPATCH_ENABLED=false` rejects no mail permanently; it returns a bounded
   retryable response without calling the provider.
+- `RECEIPT_REPLAY_ENABLED=false` keeps the operator receipt-proof endpoint
+  unavailable.
 - `EVENT_DELIVERY_ENABLED=false` leaves lifecycle events on the Queue retry
   path.
 - The lifecycle event subscription is provisioned disabled.
@@ -19,6 +21,30 @@ The cell marks its outbox row `provider_started` before making the HTTPS call.
 The adapter then stores its own `provider_started` receipt before calling the
 Email Sending binding. An exact replay uses the same send ID and digest. It
 never performs a second provider call after an uncertain provider boundary.
+The receipt also durably increments `provider_call_started_count` as the final
+awaited operation before every real Email Sending call.
+An older retryable receipt created before this counter shipped is treated as
+having crossed at least one provider boundary; its next attempt is persisted as
+call two or later, so an upgraded receipt can never manufacture a one-call
+proof.
+
+`POST /v1/dispatch:receipt-replay` is a separate, default-off operational
+proof. It accepts the byte-identical dispatch body under the distinct
+`witself-agent-email-send-receipt-replay` signature audience. Its Durable
+Object method can only read and update the content-free receipt: it has no
+Email Sending or provider-route call path. A proof succeeds only for an exact
+digest and original signer match against a fully accepted receipt. It then
+increments `verified_replay_count` without changing
+`provider_call_started_count`. Missing receipts return 404; conflicts and
+unresolved or non-accepted receipts return 409. The successful closed response
+contains only the schema, send ID, accepted state, two match booleans, the two
+bounded counters, and `route_pending`; it never returns message content,
+addresses, a digest, signer key, provider ID, or provider response.
+The proof read/increment is one storage-only transaction. Route finalizers also
+reread and merge the fresh exact receipt lineage in short transactions after
+provider-route I/O. They preserve concurrent proof counters and unrelated
+fields, never change `route_pending` from false back to true, and never
+resurrect a missing, expired, or replaced receipt.
 
 If Email Sending returns a message ID but the content-free provider route
 cannot be registered immediately, the known acceptance is returned with that
@@ -108,27 +134,32 @@ source `email.sending`, six configured lifecycle event classes, domain
 ### 2. Deploy dark
 
 Use this helper for the first deployment and every gate change. It supplies
-all six plaintext variables explicitly, so a toggle cannot accidentally omit
+all eight plaintext variables explicitly, so a toggle cannot accidentally omit
 one while Wrangler replaces the `vars` binding set:
 
 ```bash
 deploy_gates() {
   local dispatch_enabled="${1:?dispatch gate is required}"
-  local event_enabled="${2:?event gate is required}"
-  case "$dispatch_enabled:$event_enabled" in
-    false:false|true:false|true:true|false:true) ;;
-    *) echo "both gates must be true or false" >&2; return 2 ;;
-  esac
+  local receipt_replay_enabled="${2:?receipt-replay gate is required}"
+  local event_enabled="${3:?event gate is required}"
+  for gate in "$dispatch_enabled" "$receipt_replay_enabled" "$event_enabled"; do
+    case "$gate" in
+      false|true) ;;
+      *) echo "all gates must be true or false" >&2; return 2 ;;
+    esac
+  done
   wrangler_prod deploy --strict \
     --var DISPATCH_AUDIENCE:witself-agent-email-send \
+    --var RECEIPT_REPLAY_AUDIENCE:witself-agent-email-send-receipt-replay \
     --var DISPATCH_REPLAY_WINDOW_SECONDS:300 \
     --var DISPATCH_ENABLED:"$dispatch_enabled" \
+    --var RECEIPT_REPLAY_ENABLED:"$receipt_replay_enabled" \
     --var EVENT_DELIVERY_ENABLED:"$event_enabled" \
     --var SEND_DOMAIN:send.witmail.net \
     --var REPLY_DOMAIN:witmail.net
 }
 
-deploy_gates false false
+deploy_gates false false false
 wrangler_prod deployments status --json
 ```
 
@@ -209,11 +240,11 @@ wrangler_prod secret list --format json
 wrangler_prod deployments status --json
 ```
 
-Stop unless both names are present, the current version still has both gates
-false, every dispatch signer has the exact intended account-ID cohort, every
-account target names its current cell, each cell carries all unexpired signer
-provenance for its accounts, and every callback is HTTPS. Never print the JSON
-values to verify them.
+Stop unless both names are present, the current version still has all three
+gates false, every dispatch signer has the exact intended account-ID cohort,
+every account target names its current cell, each cell carries all unexpired
+signer provenance for its accounts, and every callback is HTTPS. Never print
+the JSON values to verify them.
 
 For an account move, first import the suspended archive and make the destination
 callback healthy. In one replacement `EVENT_TARGETS_JSON` value, add the
@@ -229,15 +260,16 @@ Keep the source cell entry while any other account still targets it.
 
 1. Finish Email Service domain setup, then create the Queue, dead-letter Queue,
    and disabled subscription as described above.
-2. Deploy the Worker with both gates false. Install the two secrets and verify
-   their names, the exact Founder account cohort, and the dark deployment.
+2. Deploy the Worker with all three gates false. Install the two secrets and
+   verify their names, the exact Founder account cohort, and the dark
+   deployment.
 3. Deploy the schema-89-compatible cell server and two worker replicas with
    cell outbound dispatch still disabled. Observe their health and metrics.
-4. Enable adapter dispatch only, leaving event delivery and the subscription
-   disabled:
+4. Enable adapter dispatch only, leaving the receipt proof, event delivery, and
+   the subscription disabled:
 
    ```bash
-   deploy_gates true false
+   deploy_gates true false false
    wrangler_prod deployments status --json
    export DEPLOYED_VERSION_ID='replace-with-new-version-id-from-deploy-output'
    wrangler_prod versions view "$DEPLOYED_VERSION_ID" --json
@@ -245,13 +277,34 @@ Keep the source cell entry while any other account still targets it.
 
 5. Enable `worker.agentEmailOutbound` and account policy for only the Founder
    cohort. Send one controlled canary. Verify exactly one durable cell outbox
-   transition to accepted and one provider message ID; repeat its cell dispatch
-   idempotently and verify there is no second provider call.
+   transition to accepted and one provider message ID. Open only the temporary
+   proof surface:
+
+   ```bash
+   deploy_gates true true false
+   wrangler_prod deployments status --json
+   ```
+
+   Submit the byte-identical dispatch to
+   `POST /v1/dispatch:receipt-replay`, freshly signed for the replay audience,
+   and require an accepted proof with
+   `provider_call_started_count=1`. Repeat the proof and require the provider
+   count to remain one while `verified_replay_count` increments. Then remove
+   the temporary proof surface and verify its gate is false:
+
+   ```bash
+   deploy_gates true false false
+   wrangler_prod deployments status --json
+   ```
+
+   A 404, 409, malformed response, counter other than one, or changing provider
+   count is a rollout blocker. Never use the ordinary dispatch endpoint as the
+   proof: that path owns the real Email Sending boundary.
 6. Enable adapter event delivery, verify that version's gates, and only then
    enable the subscription:
 
    ```bash
-   deploy_gates true true
+   deploy_gates true false true
    wrangler_prod deployments status --json
    export DEPLOYED_VERSION_ID='replace-with-new-version-id-from-deploy-output'
    wrangler_prod versions view "$DEPLOYED_VERSION_ID" --json
@@ -276,7 +329,7 @@ Rollback is gate-first and forward-only at the cell database:
    provider already accepted:
 
    ```bash
-   deploy_gates false true
+   deploy_gates false false true
    wrangler_prod deployments status --json
    ```
 
@@ -288,7 +341,7 @@ Rollback is gate-first and forward-only at the cell database:
    ```bash
    ./scripts/manage-events.sh disable
    ./scripts/manage-events.sh status
-   deploy_gates false false
+   deploy_gates false false false
    wrangler_prod deployments status --json
    ```
 

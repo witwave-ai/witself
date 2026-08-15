@@ -6,9 +6,15 @@ import {
   ProviderRoute,
   PROVIDER_ROUTE_TTL_MS,
   RECEIPT_IDEMPOTENCY_TTL_MS,
+  durableObjectReceiptReplay,
   validateDispatch,
 } from "../src/dispatch.mjs";
-import adapter, { failure, MAX_BODY_BYTES } from "../src/index.js";
+import adapter, {
+  failure,
+  MAX_BODY_BYTES,
+  RECEIPT_PROOF_SCHEMA,
+  RECEIPT_REPLAY_AUDIENCE,
+} from "../src/index.js";
 import {
   DISPATCH_SCHEMA,
   HEADERS,
@@ -32,16 +38,110 @@ function dispatch() {
 }
 
 function storage(initial) {
-  const values = new Map(initial ? [["receipt", initial]] : []);
+  const clone = (value) => value === undefined
+    ? undefined
+    : structuredClone(value);
+  const values = new Map(initial ? [["receipt", clone(initial)]] : []);
   let alarmAt = null;
+  let tail = Promise.resolve();
+  const exclusively = (callback) => {
+    const previous = tail;
+    let release;
+    tail = new Promise((resolve) => { release = resolve; });
+    return (async () => {
+      await previous;
+      try {
+        return await callback();
+      } finally {
+        release();
+      }
+    })();
+  };
   return {
     values,
-    async get(key) { return values.get(key); },
-    async put(key, value) { values.set(key, value); },
-    async deleteAll() { values.clear(); alarmAt = null; },
-    async setAlarm(value) { alarmAt = value; },
-    async deleteAlarm() { alarmAt = null; },
+    async get(key) {
+      return exclusively(() => clone(values.get(key)));
+    },
+    async put(key, value) {
+      return exclusively(() => { values.set(key, clone(value)); });
+    },
+    async deleteAll() {
+      return exclusively(() => { values.clear(); alarmAt = null; });
+    },
+    async setAlarm(value) {
+      return exclusively(() => { alarmAt = value; });
+    },
+    async deleteAlarm() {
+      return exclusively(() => { alarmAt = null; });
+    },
+    async transaction(callback) {
+      return exclusively(async () => {
+        const draft = new Map(
+          [...values].map(([key, value]) => [key, clone(value)]),
+        );
+        const transaction = {
+          async get(key) { return clone(draft.get(key)); },
+          async put(key, value) { draft.set(key, clone(value)); },
+          async delete(key) { draft.delete(key); },
+          async deleteAll() { draft.clear(); },
+        };
+        const result = await callback(transaction);
+        values.clear();
+        for (const [key, value] of draft) values.set(key, clone(value));
+        return clone(result);
+      });
+    },
     get alarmAt() { return alarmAt; },
+  };
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+async function waitForLength(values, length) {
+  while (values.length < length) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+function acceptedReceipt(overrides = {}) {
+  const route = {
+    schema_version: "witself.agent-email-provider-route.v1",
+    send_id: dispatch().send_id,
+    account_id: dispatch().account_id,
+    realm_id: dispatch().realm_id,
+    signer_key_id: "founder-cell",
+  };
+  return {
+    digest: "a".repeat(64),
+    signer_key_id: "founder-cell",
+    state: "accepted",
+    provider_call_started_count: 1,
+    verified_replay_count: 0,
+    started_at: new Date(Date.now() - 2000).toISOString(),
+    expires_at: new Date(Date.now() + RECEIPT_IDEMPOTENCY_TTL_MS).toISOString(),
+    provider_message_id: "provider-message-1",
+    route,
+    status: 200,
+    response: {
+      schema_version: "witself.agent-email-dispatch-response.v1",
+      send_id: dispatch().send_id,
+      state: "accepted",
+      provider: "cloudflare_email_sending",
+      provider_message_id: "provider-message-1",
+    },
+    route_pending: true,
+    route_attempts: 1,
+    completed_at: new Date(Date.now() - 1000).toISOString(),
+    unrelated_marker: "preserve-me",
+    ...overrides,
   };
 }
 
@@ -52,6 +152,22 @@ function request(value = dispatch(), digest = "a".repeat(64)) {
       "Content-Type": "application/json",
       "X-Witself-Verified-Digest": digest,
       "X-Witself-Verified-Key-Id": "founder-cell",
+    },
+    body: JSON.stringify(value),
+  });
+}
+
+function receiptReplayRequest(
+  value = dispatch(),
+  digest = "a".repeat(64),
+  signerKeyId = "founder-cell",
+) {
+  return new Request("https://receipt.internal/receipt-replay", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Witself-Verified-Digest": digest,
+      "X-Witself-Verified-Key-Id": signerKeyId,
     },
     body: JSON.stringify(value),
   });
@@ -70,7 +186,14 @@ function base64(value) {
   return Buffer.from(value).toString("base64");
 }
 
-async function signedAdapterRequest(value) {
+async function signedAdapterRequest(
+  value,
+  {
+    audience = "witself-agent-email-send",
+    path = "/v1/dispatch",
+    env: envOverride = {},
+  } = {},
+) {
   const keyPair = await webcrypto.subtle.generateKey(
     { name: "Ed25519" },
     true,
@@ -79,7 +202,6 @@ async function signedAdapterRequest(value) {
   const body = new TextEncoder().encode(JSON.stringify(value));
   const digest = await sha256Hex(body, webcrypto);
   const timestamp = new Date().toISOString();
-  const audience = "witself-agent-email-send";
   const keyId = "founder-cell";
   const signature = await webcrypto.subtle.sign(
     { name: "Ed25519" },
@@ -89,7 +211,7 @@ async function signedAdapterRequest(value) {
   const publicKey = await webcrypto.subtle.exportKey("raw", keyPair.publicKey);
   return {
     body,
-    request: new Request("https://send.example/v1/dispatch", {
+    request: new Request(`https://send.example${path}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -104,7 +226,8 @@ async function signedAdapterRequest(value) {
       body,
     }),
     env: {
-      DISPATCH_AUDIENCE: audience,
+      DISPATCH_AUDIENCE: "witself-agent-email-send",
+      RECEIPT_REPLAY_AUDIENCE,
       DISPATCH_REPLAY_WINDOW_SECONDS: "300",
       DISPATCH_SIGNERS_JSON: JSON.stringify({
         [keyId]: {
@@ -113,6 +236,8 @@ async function signedAdapterRequest(value) {
         },
       }),
       DISPATCH_ENABLED: "false",
+      RECEIPT_REPLAY_ENABLED: "false",
+      ...envOverride,
     },
   };
 }
@@ -183,6 +308,142 @@ test("streams no more than the request envelope bound before authentication", as
   assert.equal(declaredOversize.status, 413);
 });
 
+test("normal dispatch and receipt proof audiences are isolated", async () => {
+  const normalOnProof = await signedAdapterRequest(dispatch(), {
+    path: "/v1/dispatch:receipt-replay",
+  });
+  let response = await adapter.fetch(normalOnProof.request, normalOnProof.env);
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), {
+    schema_version: RECEIPT_PROOF_SCHEMA,
+    send_id: "esnd_invalid",
+    receipt_state: "unresolved",
+    error_code: "receipt_unresolved",
+  });
+
+  const proofOnNormal = await signedAdapterRequest(dispatch(), {
+    audience: RECEIPT_REPLAY_AUDIENCE,
+  });
+  response = await adapter.fetch(proofOnNormal.request, proofOnNormal.env);
+  assert.equal(response.status, 401);
+  assert.equal((await response.json()).error_code, "signature_invalid");
+
+  const collapsedAudiences = await signedAdapterRequest(dispatch(), {
+    path: "/v1/dispatch:receipt-replay",
+    env: { RECEIPT_REPLAY_AUDIENCE: "witself-agent-email-send" },
+  });
+  response = await adapter.fetch(
+    collapsedAudiences.request,
+    collapsedAudiences.env,
+  );
+  assert.equal(response.status, 401);
+});
+
+test("receipt replay has an independent default-off public gate", async () => {
+  const signed = await signedAdapterRequest(dispatch(), {
+    audience: RECEIPT_REPLAY_AUDIENCE,
+    path: "/v1/dispatch:receipt-replay",
+    env: { DISPATCH_ENABLED: "true" },
+  });
+  let durableCalls = 0;
+  signed.env.RECEIPTS = {
+    idFromName(value) { return value; },
+    get() {
+      return { fetch() { durableCalls += 1; throw new Error("must stay dark"); } };
+    },
+  };
+  const response = await adapter.fetch(signed.request, signed.env);
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error_code, "receipt_unresolved");
+  assert.equal(durableCalls, 0);
+
+  const normal = await signedAdapterRequest(dispatch(), {
+    env: { DISPATCH_ENABLED: "true", RECEIPT_REPLAY_ENABLED: "false" },
+  });
+  normal.env.RECEIPTS = {
+    idFromName(value) { return value; },
+    get() {
+      return {
+        fetch(url) {
+          assert.equal(url, "https://receipt.internal/dispatch");
+          return new Response(JSON.stringify({ state: "accepted" }), {
+            headers: { "Content-Type": "application/json" },
+          });
+        },
+      };
+    },
+  };
+  const normalResponse = await adapter.fetch(normal.request, normal.env);
+  assert.equal(normalResponse.status, 200);
+  assert.equal((await normalResponse.json()).state, "accepted");
+});
+
+test("public receipt replay forwards only verified identity to the receipt object", async () => {
+  const signed = await signedAdapterRequest(dispatch(), {
+    audience: RECEIPT_REPLAY_AUDIENCE,
+    path: "/v1/dispatch:receipt-replay",
+    env: { RECEIPT_REPLAY_ENABLED: "true" },
+  });
+  const proof = {
+    schema_version: RECEIPT_PROOF_SCHEMA,
+    send_id: dispatch().send_id,
+    receipt_state: "accepted",
+    digest_matched: true,
+    signer_matched: true,
+    provider_call_started_count: 1,
+    verified_replay_count: 1,
+    route_pending: false,
+  };
+  let forwarded;
+  signed.env.RECEIPTS = {
+    idFromName(value) { return `id:${value}`; },
+    get(id) {
+      return {
+        async fetch(url, init) {
+          forwarded = { id, url, init };
+          return new Response(JSON.stringify(proof), {
+            headers: { "Content-Type": "application/json" },
+          });
+        },
+      };
+    },
+  };
+  const response = await adapter.fetch(signed.request, signed.env);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), proof);
+  assert.equal(forwarded.id, `id:${dispatch().send_id}`);
+  assert.equal(forwarded.url, "https://receipt.internal/receipt-replay");
+  assert.equal(
+    forwarded.init.headers["X-Witself-Verified-Key-Id"],
+    "founder-cell",
+  );
+  assert.equal(
+    forwarded.init.headers["X-Witself-Verified-Digest"],
+    await sha256Hex(signed.body, webcrypto),
+  );
+  assert.deepEqual(JSON.parse(forwarded.init.body), dispatch());
+});
+
+test("receipt replay durable helper cannot select the provider dispatch method", async () => {
+  let forwarded;
+  const env = {
+    RECEIPTS: {
+      idFromName(value) { return value; },
+      get() {
+        return { fetch(url, init) { forwarded = { url, init }; return new Response(); } };
+      },
+    },
+  };
+  await durableObjectReceiptReplay(
+    env,
+    dispatch(),
+    "a".repeat(64),
+    "founder-cell",
+  );
+  assert.equal(forwarded.url, "https://receipt.internal/receipt-replay");
+  assert.notEqual(forwarded.url, "https://receipt.internal/dispatch");
+});
+
 test("dark adapter refusal is retryable rather than a terminal rejection", async () => {
   const response = failure(
     503,
@@ -209,6 +470,11 @@ test("durable receipt submits once and replays exact result", async () => {
     EMAIL: {
       async send(message) {
         calls += 1;
+        const receipt = state.storage.values.get("receipt");
+        assert.equal(receipt.state, "provider_started");
+        assert.equal(receipt.provider_call_started_count, 1);
+        assert.equal(receipt.verified_replay_count, 0);
+        assert.equal(receipt.signer_key_id, "founder-cell");
         assert.equal(message.from, dispatch().from);
         return { messageId: "provider-message-1" };
       },
@@ -221,6 +487,231 @@ test("durable receipt submits once and replays exact result", async () => {
   response = await durable.fetch(request());
   assert.equal((await response.json()).provider_message_id, "provider-message-1");
   assert.equal(calls, 1);
+  assert.equal(
+    state.storage.values.get("receipt").provider_call_started_count,
+    1,
+  );
+  assert.equal(state.storage.values.get("receipt").verified_replay_count, 0);
+});
+
+test("receipt replay proves an accepted receipt without an EMAIL binding path", async () => {
+  const receiptStorage = storage();
+  const state = { storage: receiptStorage };
+  const sender = new OutboundReceipt(state, {
+    EMAIL: { async send() { return { messageId: "provider-message-1" }; } },
+    PROVIDER_ROUTES: providerRoutes(),
+  });
+  assert.equal((await sender.fetch(request())).status, 200);
+
+  const proofOnlyEnv = {};
+  Object.defineProperty(proofOnlyEnv, "EMAIL", {
+    get() { throw new Error("receipt proof touched EMAIL"); },
+  });
+  Object.defineProperty(proofOnlyEnv, "PROVIDER_ROUTES", {
+    get() { throw new Error("receipt proof touched PROVIDER_ROUTES"); },
+  });
+  const proofReader = new OutboundReceipt(state, proofOnlyEnv);
+  let response = await proofReader.fetch(receiptReplayRequest());
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    schema_version: RECEIPT_PROOF_SCHEMA,
+    send_id: dispatch().send_id,
+    receipt_state: "accepted",
+    digest_matched: true,
+    signer_matched: true,
+    provider_call_started_count: 1,
+    verified_replay_count: 1,
+    route_pending: false,
+  });
+  response = await proofReader.fetch(receiptReplayRequest());
+  const second = await response.json();
+  assert.equal(second.provider_call_started_count, 1);
+  assert.equal(second.verified_replay_count, 2);
+  assert.deepEqual(Object.keys(second), [
+    "schema_version",
+    "send_id",
+    "receipt_state",
+    "digest_matched",
+    "signer_matched",
+    "provider_call_started_count",
+    "verified_replay_count",
+    "route_pending",
+  ]);
+  assert.doesNotMatch(
+    JSON.stringify(second),
+    /provider-message-1|person@example|Plain text|scott\./,
+  );
+});
+
+test("concurrent receipt proofs increment atomically", async () => {
+  const receiptStorage = storage(acceptedReceipt({ route_pending: false }));
+  const durable = new OutboundReceipt({ storage: receiptStorage }, {});
+  const responses = await Promise.all([
+    durable.fetch(receiptReplayRequest()),
+    durable.fetch(receiptReplayRequest()),
+  ]);
+  const counts = (await Promise.all(responses.map((item) => item.json())))
+    .map((item) => item.verified_replay_count)
+    .sort((left, right) => left - right);
+  assert.deepEqual(counts, [1, 2]);
+  assert.equal(
+    (await receiptStorage.get("receipt")).verified_replay_count,
+    2,
+  );
+});
+
+test("each retryable provider boundary durably increments the provider counter", async () => {
+  const receiptStorage = storage();
+  let calls = 0;
+  const durable = new OutboundReceipt({ storage: receiptStorage }, {
+    EMAIL: {
+      async send() {
+        calls += 1;
+        assert.equal(
+          receiptStorage.values.get("receipt").provider_call_started_count,
+          calls,
+        );
+        if (calls === 1) {
+          throw Object.assign(new Error("rate limited"), {
+            code: "E_RATE_LIMIT_EXCEEDED",
+          });
+        }
+        return { messageId: "provider-message-after-retry" };
+      },
+    },
+    PROVIDER_ROUTES: providerRoutes(),
+  });
+  assert.equal((await durable.fetch(request())).status, 429);
+  assert.equal(receiptStorage.values.get("receipt").provider_call_started_count, 1);
+  assert.equal((await durable.fetch(request())).status, 200);
+  assert.equal(receiptStorage.values.get("receipt").provider_call_started_count, 2);
+  assert.equal(receiptStorage.values.get("receipt").verified_replay_count, 0);
+});
+
+test("base-format retryable receipt upgrades conservatively before retry", async () => {
+  const receiptStorage = storage({
+    digest: "a".repeat(64),
+    state: "retryable",
+    status: 429,
+    response: {
+      schema_version: "witself.agent-email-dispatch-response.v1",
+      send_id: dispatch().send_id,
+      state: "retryable",
+      provider: "cloudflare_email_sending",
+      error_code: "provider_rate_limited",
+      retry_after_seconds: 60,
+    },
+    completed_at: new Date(Date.now() - 1000).toISOString(),
+    expires_at: new Date(Date.now() + RECEIPT_IDEMPOTENCY_TTL_MS).toISOString(),
+  });
+  let calls = 0;
+  const durable = new OutboundReceipt({ storage: receiptStorage }, {
+    EMAIL: {
+      async send() {
+        calls += 1;
+        const started = receiptStorage.values.get("receipt");
+        assert.equal(started.provider_call_started_count, 2);
+        assert.equal(started.verified_replay_count, 0);
+        return { messageId: "provider-message-after-upgrade" };
+      },
+    },
+    PROVIDER_ROUTES: providerRoutes(),
+  });
+  assert.equal((await durable.fetch(request())).status, 200);
+  assert.equal(calls, 1);
+  assert.equal(receiptStorage.values.get("receipt").provider_call_started_count, 2);
+  const proof = await durable.fetch(receiptReplayRequest());
+  assert.equal(proof.status, 200);
+  const body = await proof.json();
+  assert.equal(body.provider_call_started_count, 2);
+  assert.notEqual(body.provider_call_started_count, 1);
+  assert.equal(body.verified_replay_count, 1);
+});
+
+test("a failed provider-boundary receipt write prevents EMAIL.send", async () => {
+  const receiptStorage = storage();
+  const originalPut = receiptStorage.put;
+  receiptStorage.put = async (key, value) => {
+    if (value?.state === "provider_started") {
+      throw new Error("durable write unavailable");
+    }
+    return originalPut(key, value);
+  };
+  let calls = 0;
+  const durable = new OutboundReceipt({ storage: receiptStorage }, {
+    EMAIL: { async send() { calls += 1; return { messageId: "unsafe" }; } },
+    PROVIDER_ROUTES: providerRoutes(),
+  });
+  await assert.rejects(
+    () => durable.fetch(request()),
+    /durable write unavailable/,
+  );
+  assert.equal(calls, 0);
+});
+
+test("receipt replay fails closed on missing, conflict, and unresolved receipts", async () => {
+  const missing = new OutboundReceipt({ storage: storage() }, {});
+  let response = await missing.fetch(receiptReplayRequest());
+  assert.equal(response.status, 404);
+  assert.deepEqual(await response.json(), {
+    schema_version: RECEIPT_PROOF_SCHEMA,
+    send_id: dispatch().send_id,
+    receipt_state: "missing",
+    error_code: "receipt_missing",
+  });
+
+  const receiptStorage = storage();
+  const state = { storage: receiptStorage };
+  const sender = new OutboundReceipt(state, {
+    EMAIL: { async send() { return { messageId: "provider-message-1" }; } },
+    PROVIDER_ROUTES: providerRoutes(),
+  });
+  await sender.fetch(request());
+  const accepted = structuredClone(receiptStorage.values.get("receipt"));
+
+  response = await sender.fetch(receiptReplayRequest(dispatch(), "b".repeat(64)));
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).error_code, "receipt_conflict");
+  response = await sender.fetch(receiptReplayRequest(
+    dispatch(),
+    "a".repeat(64),
+    "other-cell",
+  ));
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).error_code, "receipt_conflict");
+
+  for (const mutation of [
+    (value) => { value.route.account_id = "acc_bbbbbbbbbbbbbbbb"; },
+    (value) => { value.response.subject = "must never be accepted"; },
+  ]) {
+    const value = structuredClone(accepted);
+    mutation(value);
+    receiptStorage.values.set("receipt", value);
+    response = await sender.fetch(receiptReplayRequest());
+    assert.equal(response.status, 409);
+    const body = await response.json();
+    assert.equal(body.receipt_state, "conflict");
+    assert.equal(body.error_code, "receipt_conflict");
+    assert.deepEqual(receiptStorage.values.get("receipt"), value);
+  }
+
+  for (const mutation of [
+    (value) => { value.state = "provider_started"; },
+    (value) => { delete value.provider_call_started_count; },
+    (value) => { delete value.verified_replay_count; },
+    (value) => { value.verified_replay_count = 1_000_000; },
+    (value) => { value.expires_at = new Date(Date.now() - 1000).toISOString(); },
+  ]) {
+    const value = structuredClone(accepted);
+    mutation(value);
+    receiptStorage.values.set("receipt", value);
+    response = await sender.fetch(receiptReplayRequest());
+    assert.equal(response.status, 409);
+    const body = await response.json();
+    assert.equal(body.receipt_state, "unresolved");
+    assert.equal(body.error_code, "receipt_unresolved");
+    assert.deepEqual(receiptStorage.values.get("receipt"), value);
+  }
 });
 
 test("digest conflict never resubmits", async () => {
@@ -356,6 +847,141 @@ test("accepted provider result repairs a failed route without resending", async 
   assert.equal((await response.json()).provider_message_id, "repair-me");
   assert.equal(sends, 1);
   assert.equal(routes, 2);
+});
+
+test("successful route finalization preserves a concurrent receipt proof", async () => {
+  const receiptStorage = storage(acceptedReceipt());
+  const routeStarted = deferred();
+  const finishRoute = deferred();
+  const durable = new OutboundReceipt({ storage: receiptStorage }, {
+    PROVIDER_ROUTES: providerRoutes(async () => {
+      routeStarted.resolve();
+      await finishRoute.promise;
+      return new Response(null, { status: 204 });
+    }),
+  });
+  const alarm = durable.alarm();
+  await routeStarted.promise;
+  const proof = await durable.fetch(receiptReplayRequest());
+  assert.equal(proof.status, 200);
+  assert.equal((await proof.json()).verified_replay_count, 1);
+  finishRoute.resolve();
+  await alarm;
+  const receipt = await receiptStorage.get("receipt");
+  assert.equal(receipt.route_pending, false);
+  assert.equal(receipt.route_attempts, 0);
+  assert.equal(receipt.verified_replay_count, 1);
+  assert.equal(receipt.provider_call_started_count, 1);
+  assert.equal(receipt.unrelated_marker, "preserve-me");
+});
+
+test("failed route finalization merges fresh attempts and proof state", async () => {
+  const receiptStorage = storage(acceptedReceipt());
+  const routeStarted = deferred();
+  const finishRoute = deferred();
+  const durable = new OutboundReceipt({ storage: receiptStorage }, {
+    PROVIDER_ROUTES: providerRoutes(async () => {
+      routeStarted.resolve();
+      await finishRoute.promise;
+      return new Response(null, { status: 503 });
+    }),
+  });
+  const alarm = durable.alarm();
+  await routeStarted.promise;
+  const proof = await durable.fetch(receiptReplayRequest());
+  assert.equal(proof.status, 200);
+  finishRoute.resolve();
+  await alarm;
+  const receipt = await receiptStorage.get("receipt");
+  assert.equal(receipt.route_pending, true);
+  assert.equal(receipt.route_attempts, 2);
+  assert.equal(receipt.verified_replay_count, 1);
+  assert.equal(receipt.provider_call_started_count, 1);
+  assert.equal(receipt.unrelated_marker, "preserve-me");
+});
+
+test("concurrent route finalizers make success monotonic in either order", async () => {
+  for (const order of ["success-first", "failure-first"]) {
+    const receiptStorage = storage(acceptedReceipt());
+    const routes = [];
+    const durable = new OutboundReceipt({ storage: receiptStorage }, {
+      PROVIDER_ROUTES: providerRoutes(() => new Promise((resolve) => {
+        routes.push(resolve);
+      })),
+    });
+    const first = durable.alarm();
+    const second = durable.alarm();
+    await waitForLength(routes, 2);
+    if (order === "success-first") {
+      routes[0](new Response(null, { status: 204 }));
+      await first;
+      routes[1](new Response(null, { status: 503 }));
+      await second;
+    } else {
+      routes[0](new Response(null, { status: 503 }));
+      await first;
+      routes[1](new Response(null, { status: 204 }));
+      await second;
+    }
+    const receipt = await receiptStorage.get("receipt");
+    assert.equal(receipt.route_pending, false, order);
+    assert.equal(receipt.route_attempts, 0, order);
+    assert.equal(receipt.verified_replay_count, 0, order);
+    assert.equal(receipt.unrelated_marker, "preserve-me", order);
+  }
+});
+
+test("stale route finalizers never resurrect or overwrite changed lineage", async () => {
+  const cases = [
+    {
+      name: "missing",
+      status: 204,
+      async mutate(transaction) { await transaction.delete("receipt"); },
+    },
+    {
+      name: "mismatched",
+      status: 503,
+      async mutate(transaction, receipt) {
+        await transaction.put("receipt", { ...receipt, digest: "b".repeat(64) });
+      },
+    },
+    {
+      name: "expired",
+      status: 204,
+      async mutate(transaction, receipt) {
+        await transaction.put("receipt", {
+          ...receipt,
+          expires_at: new Date(Date.now() - 1000).toISOString(),
+        });
+      },
+    },
+  ];
+  for (const value of cases) {
+    const receiptStorage = storage(acceptedReceipt());
+    const routeStarted = deferred();
+    const finishRoute = deferred();
+    const durable = new OutboundReceipt({ storage: receiptStorage }, {
+      PROVIDER_ROUTES: providerRoutes(async () => {
+        routeStarted.resolve();
+        await finishRoute.promise;
+        return new Response(null, { status: value.status });
+      }),
+    });
+    const alarm = durable.alarm();
+    await routeStarted.promise;
+    await receiptStorage.transaction(async (transaction) => {
+      const current = await transaction.get("receipt");
+      await value.mutate(transaction, current);
+    });
+    const beforeFinalize = await receiptStorage.get("receipt");
+    finishRoute.resolve();
+    await alarm;
+    assert.deepEqual(
+      await receiptStorage.get("receipt"),
+      beforeFinalize,
+      value.name,
+    );
+  }
 });
 
 test("route-repair alarm backs off durably without resending", async () => {

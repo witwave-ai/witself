@@ -98,6 +98,167 @@ func TestClientSignsCompleteBodyAndParsesReceipt(t *testing.T) {
 	_ = serverURL
 }
 
+func TestClientReceiptReplayUsesExactPathAudienceAndClosedProof(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDispatchBody, err := validDispatch().Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != ReceiptReplayPath ||
+			r.Header.Get(HeaderAudience) != ReceiptReplayAudience {
+			t.Errorf("request = %s %s audience=%q", r.Method, r.URL.Path, r.Header.Get(HeaderAudience))
+		}
+		body, readErr := io.ReadAll(r.Body)
+		if readErr != nil {
+			t.Error(readErr)
+		}
+		if string(body) != string(wantDispatchBody) {
+			t.Fatalf("replay body changed immutable dispatch")
+		}
+		digestBytes := sha256.Sum256(body)
+		digest := hex.EncodeToString(digestBytes[:])
+		input, inputErr := SignatureInput(
+			r.Header.Get(HeaderVersion), r.Header.Get(HeaderTimestamp),
+			r.Header.Get(HeaderKeyID), r.Header.Get(HeaderAudience), digest,
+		)
+		if inputErr != nil {
+			t.Error(inputErr)
+		}
+		signature, decodeErr := base64.StdEncoding.DecodeString(r.Header.Get(HeaderSignature))
+		if decodeErr != nil || !ed25519.Verify(publicKey, input, signature) {
+			t.Error("receipt replay signature did not verify")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"schema_version":"witself.agent-email-dispatch-receipt-proof.v1","send_id":"esnd_aaaaaaaaaaaaaaaa","receipt_state":"accepted","digest_matched":true,"signer_matched":true,"provider_call_started_count":1,"verified_replay_count":2,"route_pending":false}`)
+	}))
+	defer srv.Close()
+	client := Client{
+		Endpoint: srv.URL + ReceiptReplayPath, Audience: ReceiptReplayAudience,
+		KeyID: "cell-2026-08", PrivateKey: privateKey, HTTPClient: srv.Client(),
+	}
+	proof, err := client.ReplayReceipt(context.Background(), validDispatch())
+	if err != nil || proof.ProviderCallStartedCount != 1 ||
+		proof.VerifiedReplayCount != 2 || proof.RoutePending {
+		t.Fatalf("ReplayReceipt = %#v, %v", proof, err)
+	}
+}
+
+func TestClientReceiptReplayRejectsNonExactProofs(t *testing.T) {
+	_, privateKey, _ := ed25519.GenerateKey(rand.Reader)
+	tests := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{
+			name: "unknown field", status: 200,
+			body: `{"schema_version":"witself.agent-email-dispatch-receipt-proof.v1","send_id":"esnd_aaaaaaaaaaaaaaaa","receipt_state":"accepted","digest_matched":true,"signer_matched":true,"provider_call_started_count":1,"verified_replay_count":1,"route_pending":false,"provider_message_id":"forbidden"}`,
+		},
+		{
+			name: "missing route pending", status: 200,
+			body: `{"schema_version":"witself.agent-email-dispatch-receipt-proof.v1","send_id":"esnd_aaaaaaaaaaaaaaaa","receipt_state":"accepted","digest_matched":true,"signer_matched":true,"provider_call_started_count":1,"verified_replay_count":1}`,
+		},
+		{
+			name: "null route pending", status: 200,
+			body: `{"schema_version":"witself.agent-email-dispatch-receipt-proof.v1","send_id":"esnd_aaaaaaaaaaaaaaaa","receipt_state":"accepted","digest_matched":true,"signer_matched":true,"provider_call_started_count":1,"verified_replay_count":1,"route_pending":null}`,
+		},
+		{
+			name: "duplicate field", status: 200,
+			body: `{"schema_version":"witself.agent-email-dispatch-receipt-proof.v1","send_id":"esnd_aaaaaaaaaaaaaaaa","receipt_state":"accepted","digest_matched":true,"digest_matched":true,"signer_matched":true,"provider_call_started_count":1,"verified_replay_count":1,"route_pending":false}`,
+		},
+		{
+			name: "provider called twice", status: 200,
+			body: `{"schema_version":"witself.agent-email-dispatch-receipt-proof.v1","send_id":"esnd_aaaaaaaaaaaaaaaa","receipt_state":"accepted","digest_matched":true,"signer_matched":true,"provider_call_started_count":2,"verified_replay_count":1,"route_pending":false}`,
+		},
+		{
+			name: "replay count out of bounds", status: 200,
+			body: `{"schema_version":"witself.agent-email-dispatch-receipt-proof.v1","send_id":"esnd_aaaaaaaaaaaaaaaa","receipt_state":"accepted","digest_matched":true,"signer_matched":true,"provider_call_started_count":1,"verified_replay_count":1000001,"route_pending":false}`,
+		},
+		{
+			name: "digest mismatch", status: 200,
+			body: `{"schema_version":"witself.agent-email-dispatch-receipt-proof.v1","send_id":"esnd_aaaaaaaaaaaaaaaa","receipt_state":"accepted","digest_matched":false,"signer_matched":true,"provider_call_started_count":1,"verified_replay_count":1,"route_pending":false}`,
+		},
+		{
+			name: "signer mismatch", status: 200,
+			body: `{"schema_version":"witself.agent-email-dispatch-receipt-proof.v1","send_id":"esnd_aaaaaaaaaaaaaaaa","receipt_state":"accepted","digest_matched":true,"signer_matched":false,"provider_call_started_count":1,"verified_replay_count":1,"route_pending":false}`,
+		},
+		{
+			name: "unresolved state", status: 200,
+			body: `{"schema_version":"witself.agent-email-dispatch-receipt-proof.v1","send_id":"esnd_aaaaaaaaaaaaaaaa","receipt_state":"provider_started","digest_matched":true,"signer_matched":true,"provider_call_started_count":1,"verified_replay_count":1,"route_pending":false}`,
+		},
+		{
+			name: "bounded missing receipt", status: 404,
+			body: `{"schema_version":"witself.agent-email-dispatch-receipt-proof.v1","send_id":"esnd_aaaaaaaaaaaaaaaa","receipt_state":"missing","error_code":"receipt_missing"}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(test.status)
+				_, _ = io.WriteString(w, test.body)
+			}))
+			defer srv.Close()
+			client := Client{
+				Endpoint: srv.URL + ReceiptReplayPath, Audience: ReceiptReplayAudience,
+				KeyID: "cell-2026-08", PrivateKey: privateKey, HTTPClient: srv.Client(),
+			}
+			if _, err := client.ReplayReceipt(context.Background(), validDispatch()); err == nil {
+				t.Fatal("non-exact receipt proof accepted")
+			}
+		})
+	}
+}
+
+func TestClientReceiptReplayRequiresExactEndpointAndAudience(t *testing.T) {
+	_, privateKey, _ := ed25519.GenerateKey(rand.Reader)
+	for name, mutate := range map[string]func(*Client){
+		"normal path": func(client *Client) { client.Endpoint = "https://send.example/v1/dispatch" },
+		"suffix":      func(client *Client) { client.Endpoint += "/" },
+		"query":       func(client *Client) { client.Endpoint += "?mode=proof" },
+		"normal audience": func(client *Client) {
+			client.Audience = "witself-agent-email-send"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := Client{
+				Endpoint: "https://send.example" + ReceiptReplayPath,
+				Audience: ReceiptReplayAudience, KeyID: "cell-key", PrivateKey: privateKey,
+			}
+			mutate(&client)
+			if err := client.ValidateReceiptReplay(); err == nil {
+				t.Fatal("non-exact replay client accepted")
+			}
+		})
+	}
+}
+
+func TestClientReceiptReplayRejectsRedirect(t *testing.T) {
+	_, privateKey, _ := ed25519.GenerateKey(rand.Reader)
+	var forwarded atomic.Int64
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		forwarded.Add(1)
+	}))
+	defer target.Close()
+	adapter := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+ReceiptReplayPath, http.StatusTemporaryRedirect)
+	}))
+	defer adapter.Close()
+	client := Client{
+		Endpoint: adapter.URL + ReceiptReplayPath, Audience: ReceiptReplayAudience,
+		KeyID: "cell-2026-08", PrivateKey: privateKey, HTTPClient: adapter.Client(),
+	}
+	if _, err := client.ReplayReceipt(context.Background(), validDispatch()); err == nil {
+		t.Fatal("redirect accepted")
+	}
+	if forwarded.Load() != 0 {
+		t.Fatalf("redirect target received %d signed dispatches", forwarded.Load())
+	}
+}
+
 func TestClientTreatsTransportAndMalformedResponsesAsAmbiguous(t *testing.T) {
 	_, privateKey, _ := ed25519.GenerateKey(rand.Reader)
 	client := Client{

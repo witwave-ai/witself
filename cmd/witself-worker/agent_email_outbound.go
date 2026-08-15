@@ -20,7 +20,7 @@ const (
 	maximumAgentEmailOutboundBatchSize       = 100
 	maximumAgentEmailOutboundBatchTimeout    = 5 * time.Minute
 	maximumAgentEmailOutboundProviderTimeout = time.Minute
-	agentEmailOutboundProvider               = "cloudflare_email_sending"
+	agentEmailOutboundProvider               = store.AgentEmailOutboundCloudflareProvider
 )
 
 type agentEmailOutboundWorkerConfig struct {
@@ -226,20 +226,7 @@ func dispatchClaimedAgentEmail(
 		}
 	}
 
-	dispatch := agentemailoutbound.Dispatch{
-		SchemaVersion: agentemailoutbound.DispatchSchemaVersion,
-		SendID:        started.Message.ID,
-		AccountID:     started.Message.AccountID,
-		RealmID:       started.Message.RealmID,
-		AgentID:       started.Message.OwnerAgentID,
-		From:          started.Message.FromAddress,
-		ReplyTo:       started.Message.ReplyToAddress,
-		To:            started.Message.ToAddress,
-		Subject:       started.Message.Subject,
-		Text:          started.Text,
-		InReplyTo:     started.InReplyTo,
-		References:    append([]string(nil), started.References...),
-	}
+	dispatch := agentEmailOutboundWireDispatch(started)
 	if err := dispatch.Validate(); err != nil {
 		return markAgentEmailOutboundDispatchAmbiguous(
 			ctx, st, started, store.AgentEmailOutboundErrorProviderResponseInvalid,
@@ -312,6 +299,29 @@ func dispatchClaimedAgentEmail(
 			store.AgentEmailOutboundErrorProviderResponseInvalid,
 			true,
 		)
+	}
+}
+
+// agentEmailOutboundWireDispatch is the single production projection used by
+// both the durable worker and the operator receipt-proof command. Receipt
+// verification therefore cannot drift to a second serialization of the
+// immutable provider request.
+func agentEmailOutboundWireDispatch(
+	dispatch store.AgentEmailOutboundDispatch,
+) agentemailoutbound.Dispatch {
+	return agentemailoutbound.Dispatch{
+		SchemaVersion: agentemailoutbound.DispatchSchemaVersion,
+		SendID:        dispatch.Message.ID,
+		AccountID:     dispatch.Message.AccountID,
+		RealmID:       dispatch.Message.RealmID,
+		AgentID:       dispatch.Message.OwnerAgentID,
+		From:          dispatch.Message.FromAddress,
+		ReplyTo:       dispatch.Message.ReplyToAddress,
+		To:            dispatch.Message.ToAddress,
+		Subject:       dispatch.Message.Subject,
+		Text:          dispatch.Text,
+		InReplyTo:     dispatch.InReplyTo,
+		References:    append([]string(nil), dispatch.References...),
 	}
 }
 

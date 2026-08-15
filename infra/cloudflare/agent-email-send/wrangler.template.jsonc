@@ -6,8 +6,10 @@
   "workers_dev": true,
   "vars": {
     "DISPATCH_AUDIENCE": "witself-agent-email-send",
+    "RECEIPT_REPLAY_AUDIENCE": "witself-agent-email-send-receipt-replay",
     "DISPATCH_REPLAY_WINDOW_SECONDS": "300",
     "DISPATCH_ENABLED": "false",
+    "RECEIPT_REPLAY_ENABLED": "false",
     "EVENT_DELIVERY_ENABLED": "false",
     "SEND_DOMAIN": "send.witmail.net",
     "REPLY_DOMAIN": "witmail.net"

@@ -123,6 +123,44 @@ from two replicas can increase throughput when multiple ready rows and database
 capacity exist; one slow provider request occupies only its bounded job loop,
 not the API service or unrelated worker jobs.
 
+### Operator-only accepted-receipt proof
+
+The worker image also contains one bounded, non-scheduled operator command for
+the first production outbound canary:
+
+```sh
+witself-worker agent-email receipt-replay \
+  --account-id acc_... \
+  --send-id esnd_... \
+  --expected-accepted-at 2026-08-15T18:00:00.000000Z \
+  --expected-attempt-count 1 \
+  --json
+```
+
+Run it only from an operator-controlled Kubernetes Job that mounts the existing
+worker-only database URL and dispatch-signing Secret. It is not an API, worker
+job, retry loop, or agent command. It does not run migrations. Its PostgreSQL
+transaction is explicitly repeatable-read and read-only.
+
+The command reconstructs the dispatch through the same production projection
+and deterministic JSON serializer used by the live worker. Before signing, it
+requires the exact account and send IDs, exact accepted timestamp, local
+`accepted` state, Cloudflare provider, nonempty private provider receipt ID,
+attempt count exactly one, and an acceptance age no greater than the adapter's
+fixed seven-day receipt lifetime. Any mismatch fails closed without contacting
+the edge.
+
+The proof request uses only `POST /v1/dispatch:receipt-replay` and the distinct
+`witself-agent-email-send-receipt-replay` audience. Redirects are forbidden. A
+successful result must be the exact closed
+`witself.agent-email-dispatch-receipt-proof.v1` schema, match the send ID and
+accepted receipt, attest both digest and signer matches, report exactly one
+provider-call start, and report `route_pending=false`. Any non-200 response,
+missing or extra field, unresolved receipt, digest/signer conflict, second
+provider-call start, or unsettled route fails closed. Standard output contains
+only that value-free proof; it never contains the body, recipient, subject,
+provider receipt ID, digest, key material, or token.
+
 Agent-email retention has its own 16 preview lanes and 16 enforcement
 lanes. The worker briefly leases one lane, then takes an exclusive account row
 with `SKIP LOCKED`; foreground email ingress and mailbox operations use a
