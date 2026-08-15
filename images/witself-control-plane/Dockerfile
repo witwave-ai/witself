@@ -3,7 +3,7 @@
 # is multi-stage: wrangler builds straight from source with the repo root as the
 # build context. The release renderer injects VERSION, COMMIT, and DATE through
 # wrangler.generated.jsonc image_vars. Cloudflare Containers requires linux/amd64.
-FROM golang:1.26 AS build
+FROM golang:1.26.6 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

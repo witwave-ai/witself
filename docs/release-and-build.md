@@ -126,8 +126,8 @@ before any future explicit migration Job is introduced.
 
 ## Go Baseline
 
-Witself should use the latest stable Go release. As of July 10, 2026, the
-current stable Go release is `go1.26.5`.
+Witself should use the latest stable Go release. As of August 14, 2026, the
+current stable Go release is `go1.26.6`.
 
 Initial module settings when code starts:
 
@@ -136,7 +136,7 @@ module github.com/witwave-ai/witself
 
 go 1.26
 
-toolchain go1.26.5
+toolchain go1.26.6
 ```
 
 Refresh this baseline before first implementation and before each release. If a
@@ -161,7 +161,7 @@ The initial module bootstrap, once the first Go package exists, should look like
 ```sh
 go mod init github.com/witwave-ai/witself
 go mod edit -go=1.26
-go mod edit -toolchain=go1.26.5
+go mod edit -toolchain=go1.26.6
 go mod tidy
 ```
 
