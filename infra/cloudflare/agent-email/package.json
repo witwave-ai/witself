@@ -17,6 +17,7 @@
     "provision:relay-signing-key": "node scripts/provision-relay-signing-key.mjs",
     "provision:route-signing-secrets": "node scripts/provision-route-signing-secrets.mjs",
     "rollback": "node scripts/rollback.mjs",
+    "routing:foundation": "node scripts/routing-foundation.mjs",
     "routes": "node scripts/routes.mjs",
     "routes:catch-all": "node scripts/catch-all-routes.mjs",
     "routes:primary": "node scripts/primary-routes.mjs",

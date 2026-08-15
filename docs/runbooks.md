@@ -682,6 +682,54 @@ create a second export and require that it includes the selection. The command
 prints no identities or addresses. Move each private artifact to
 operator-controlled storage without relaxing its mode.
 
+Before creating any Worker-targeted rule, enable the zone-wide Email Routing
+subaddressing foundation through its dedicated fenced helper. Run these
+commands from `infra/cloudflare/agent-email` with the exact production
+Cloudflare account and `witmail.net` zone environment:
+
+```sh
+npm run routing:foundation -- status
+npm run routing:foundation -- enable \
+  --output /absolute/private/routing-foundation-enable-plan.json
+# Review the mode-0600 plan's target ids, current and desired settings,
+# complete provider fingerprints, expiration, and printed SHA-256.
+npm run routing:foundation -- apply \
+  --plan /absolute/private/routing-foundation-enable-plan.json \
+  --plan-sha256 REVIEWED_SHA256 \
+  --receipt-output /absolute/private/routing-foundation-enable-receipt.json
+npm run routing:foundation -- status
+```
+
+The enable planner requires ready Email Routing with subaddressing currently
+false, a disabled catch-all, both operator role forwards, and zero rules
+targeting either email Worker. Apply reconstructs the exact 15-minute plan
+under the global `email_routing_settings_apply` lease, PATCHes only the
+normalized settings contract, and refuses changed zone, setting, catch-all,
+role, or rule-inventory state. It reserves and fsyncs a new mode-`0600` pending
+receipt before mutation and replaces it only after exact readback. An enable
+provider mutation or postcondition failure attempts to restore the exact
+disabled predecessor while the original lease remains renewable. If a pending
+marker remains, retain it and reconcile live state before retrying. A lease
+settlement, release, or receipt-commit failure is ambiguous: subaddressing may
+have changed, but the disabled catch-all and absence of Worker rules keep
+delivery dark.
+
+Emergency rollback of this foundation is a separately planned `disable` and
+is accepted only while no enabled rule targets either Worker:
+
+```sh
+npm run routing:foundation -- disable \
+  --output /absolute/private/routing-foundation-disable-plan.json
+npm run routing:foundation -- apply \
+  --plan /absolute/private/routing-foundation-disable-plan.json \
+  --plan-sha256 REVIEWED_DISABLE_SHA256 \
+  --receipt-output /absolute/private/routing-foundation-disable-receipt.json
+npm run routing:foundation -- status
+```
+
+A failed or ambiguous disable never auto-enables subaddressing. Do not use a
+raw Cloudflare API call or dashboard edit for this setting.
+
 Before preparing rules, deploy the byte-identical sorted canary-account CSV in
 `CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST` and
 `AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST`. Enable the control-plane
@@ -1164,9 +1212,9 @@ changing the credential that authenticates acquire, renew, and release would
 invalidate its own fence. Perform such a rotation only through the control-plane
 package's explicit `secret:put:break-glass` path while globally freezing every
 control-plane/email-edge deploy or rollback, route-signing ceremony,
-primary/catch-all apply, and direct Cloudflare dashboard/API Worker mutation.
-Keep that freeze until both Workers and their exact tagged verification have
-converged.
+routing-foundation/primary/catch-all apply, and direct Cloudflare dashboard/API
+Worker mutation. Keep that freeze until both Workers and their exact tagged
+verification have converged.
 
 Every secret update creates a successor without the reviewed release
 annotations. After the ceremony, deploy the unchanged exact tag to the control
