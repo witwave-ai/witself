@@ -95,6 +95,18 @@ function ruleTargetsWorker(rule, worker) {
     action.value.includes(worker));
 }
 
+function validateWorkerActions(actions) {
+  for (const action of actions) {
+    if (action?.type === "worker" &&
+        (!Array.isArray(action.value) || action.value.length < 1 ||
+          action.value.some((value) =>
+            typeof value !== "string" || value.length < 1 ||
+            value.length > 255))) {
+      throw new Error("Cloudflare Email Routing rule inventory was invalid");
+    }
+  }
+}
+
 function normalizeRuleInventory(rules) {
   if (!Array.isArray(rules)) {
     throw new Error("Cloudflare Email Routing rule inventory was invalid");
@@ -108,15 +120,7 @@ function normalizeRuleInventory(rules) {
         !Array.isArray(rule.matchers) || !Array.isArray(rule.actions)) {
       throw new Error("Cloudflare Email Routing rule inventory was invalid");
     }
-    for (const action of rule.actions) {
-      if (action?.type === "worker" &&
-          (!Array.isArray(action.value) || action.value.length < 1 ||
-            action.value.some((value) =>
-              typeof value !== "string" || value.length < 1 ||
-              value.length > 255))) {
-        throw new Error("Cloudflare Email Routing rule inventory was invalid");
-      }
-    }
+    validateWorkerActions(rule.actions);
     ids.add(rule.id);
   }
   const ordered = [...rules].sort((left, right) =>
@@ -159,6 +163,11 @@ export async function captureRoutingFoundationState(api) {
   const zoneIdentity = normalizeZone(zone, api);
   const emailRouting = normalizeSettings(settings, api);
   const catchAllSummary = primaryRoutingInternals.catchAllState(catchAll);
+  validateWorkerActions(catchAll.actions);
+  const catchAllTargetsWitself = [
+    PRODUCTION_RECEIVE_WORKER,
+    LEGACY_PILOT_WORKER,
+  ].some((worker) => ruleTargetsWorker(catchAll, worker));
   const roleRoutes = primaryRoutingInternals.roleRouteState(
     rules,
     ROUTING_FOUNDATION_DOMAIN,
@@ -171,7 +180,12 @@ export async function captureRoutingFoundationState(api) {
         sha256: sha256(canonicalJSON(zoneIdentity)),
       }),
       email_routing: emailRouting,
-      catch_all: catchAllSummary,
+      catch_all: Object.freeze({
+        ...catchAllSummary,
+        witself_worker_targeted: catchAllTargetsWitself,
+        witself_worker_targeted_enabled:
+          catchAllTargetsWitself && catchAllSummary.enabled,
+      }),
       role_routes: roleRoutes,
       routing_rules: routingRules,
     }),
@@ -192,6 +206,7 @@ function disableReady(summary) {
   return summary.zone.active === true &&
     summary.email_routing.contract.enabled === true &&
     summary.email_routing.contract.support_subaddress === true &&
+    summary.catch_all.witself_worker_targeted_enabled === false &&
     summary.routing_rules.witself_worker_targeted_enabled === 0;
 }
 

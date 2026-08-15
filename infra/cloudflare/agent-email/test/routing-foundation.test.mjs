@@ -152,6 +152,10 @@ test("routing foundation status is read-only and proves the exact enable boundar
   assert.equal(status.routing.zone.active, true);
   assert.equal(status.routing.email_routing.contract.support_subaddress, false);
   assert.equal(status.routing.catch_all.enabled, false);
+  assert.equal(
+    status.routing.catch_all.witself_worker_targeted_enabled,
+    false,
+  );
   assert.equal(status.routing.role_routes.ready, true);
   assert.equal(
     status.routing.routing_rules.witself_worker_targeted,
@@ -409,6 +413,26 @@ test("routing foundation refuses unsafe enable and disable boundaries", async ()
   await assert.rejects(
     () => createRoutingFoundationPlan(
       disableWithWorker,
+      "disable",
+      { now },
+    ),
+    /not ready/,
+  );
+
+  const disableWithWorkerCatchAll = new FakeCloudflare({
+    supportSubaddress: true,
+  });
+  disableWithWorkerCatchAll.catchAll = {
+    ...disableWithWorkerCatchAll.catchAll,
+    enabled: true,
+    actions: [{
+      type: "worker",
+      value: ["witself-agent-email-receive"],
+    }],
+  };
+  await assert.rejects(
+    () => createRoutingFoundationPlan(
+      disableWithWorkerCatchAll,
       "disable",
       { now },
     ),
