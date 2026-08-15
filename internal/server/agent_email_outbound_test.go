@@ -282,6 +282,44 @@ func TestAgentEmailOutboundProviderEventRequiresDedicatedTrustAndStrictShape(t *
 	}
 }
 
+func TestAgentEmailOutboundProviderEventStandaloneHandlerUsesProductionRoute(t *testing.T) {
+	token := "provider-event-token-0123456789-abcd"
+	var applied int
+	handler, err := AgentEmailOutboundProviderEventHTTPHandler(
+		token,
+		func(context.Context, AgentEmailOutboundProviderEvent) error {
+			applied++
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"schema_version":"witself.agent-email-provider-event.v1","event_id":"evt_standalone","provider_message_id":"provider-1","event_class":"delivered","occurred_at":"2026-08-14T12:00:00Z"}`
+	request := httptest.NewRequest(
+		http.MethodPost, "/v1/internal/agent-email-send:provider-event",
+		strings.NewReader(body),
+	)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent || applied != 1 {
+		t.Fatalf("standalone provider event = %d / %d", response.Code, applied)
+	}
+
+	wrongMethod := httptest.NewRequest(
+		http.MethodGet, "/v1/internal/agent-email-send:provider-event", nil,
+	)
+	wrongMethodResponse := httptest.NewRecorder()
+	handler.ServeHTTP(wrongMethodResponse, wrongMethod)
+	if wrongMethodResponse.Code != http.StatusMethodNotAllowed || applied != 1 {
+		t.Fatalf("wrong method = %d / %d", wrongMethodResponse.Code, applied)
+	}
+	if _, err := AgentEmailOutboundProviderEventHTTPHandler("short", func(context.Context, AgentEmailOutboundProviderEvent) error { return nil }); err == nil {
+		t.Fatal("short provider-event token was accepted")
+	}
+}
+
 func TestAgentEmailOutboundRateLimitIsStructuredAndValueFree(t *testing.T) {
 	principal := DomainPrincipal{Kind: PrincipalKindAgent, ID: "agent_private", AccountID: "acc_private", RealmID: "realm_private", AccountStatus: "active", AccessProfile: AccessProfileFull}
 	handler := apiMux(Config{

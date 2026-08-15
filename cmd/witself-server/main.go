@@ -52,6 +52,12 @@ func run(args []string) int {
 	case "serve":
 		return serve()
 	case "agent-email":
+		if len(args) >= 2 && args[1] == "provider-event-canary" {
+			input, ok := parseAgentEmailProviderEventCanaryCommandArgs(args[2:])
+			if ok {
+				return runAgentEmailProviderEventCanary(input)
+			}
+		}
 		if len(args) >= 2 && args[1] == "backfill" {
 			overrides, exceptionOutput, ok := parseAgentEmailBackfillCommandArgs(args[2:])
 			if ok {
@@ -2004,6 +2010,8 @@ func usage(w io.Writer) {
 	usageLine(w, "                           Reconcile the exact production receive cohort")
 	usageLine(w, "  witself-server agent-email canary-manifest --output ABSOLUTE_PATH")
 	usageLine(w, "                           Write a new mode-0600 primary canary manifest")
+	usageLine(w, "  witself-server agent-email provider-event-canary --account-id ID --send-id ID --expected-accepted-at RFC3339 --json")
+	usageLine(w, "                           Prove provider-event replay through localhost HTTP")
 	usageLine(w)
 	usageLine(w, "Listeners (override with env):")
 	usageLine(w, "  WITSELF_API_ADDR      default :8080  (/v1 API)")

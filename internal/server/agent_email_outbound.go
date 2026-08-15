@@ -21,7 +21,9 @@ const (
 	maximumAgentEmailOutboundKeyBytes     = 512
 )
 
-const agentEmailOutboundProviderEventSchema = "witself.agent-email-provider-event.v1"
+// AgentEmailOutboundProviderEventSchema is the strict normalized provider
+// event envelope accepted by the cell-local delivery lifecycle route.
+const AgentEmailOutboundProviderEventSchema = "witself.agent-email-provider-event.v1"
 
 const (
 	minimumAgentEmailProviderEventTokenBytes = 32
@@ -192,8 +194,33 @@ func agentEmailOutboundProviderEventHandler(
 	})
 }
 
+// AgentEmailOutboundProviderEventHTTPHandler returns the same exact-method,
+// exact-path handler mounted by the production API mux. It exists so bounded
+// operator probes can exercise the real bearer-authenticated HTTP boundary on
+// localhost without exposing unrelated listeners or routes.
+func AgentEmailOutboundProviderEventHTTPHandler(
+	token string,
+	apply func(context.Context, AgentEmailOutboundProviderEvent) error,
+) (http.Handler, error) {
+	if !validAgentEmailProviderEventToken(token) || apply == nil {
+		return nil, errors.New("invalid agent email provider-event handler configuration")
+	}
+	mux := http.NewServeMux()
+	registerAgentEmailOutboundProviderEventRoute(mux, token, apply)
+	return mux, nil
+}
+
+func registerAgentEmailOutboundProviderEventRoute(
+	mux *http.ServeMux,
+	token string,
+	apply func(context.Context, AgentEmailOutboundProviderEvent) error,
+) {
+	mux.HandleFunc("POST /v1/internal/agent-email-send:provider-event",
+		agentEmailOutboundProviderEventHandler(token, apply))
+}
+
 func validAgentEmailOutboundProviderEvent(event AgentEmailOutboundProviderEvent) bool {
-	if event.SchemaVersion != agentEmailOutboundProviderEventSchema ||
+	if event.SchemaVersion != AgentEmailOutboundProviderEventSchema ||
 		event.EventID != strings.TrimSpace(event.EventID) || event.EventID == "" || len(event.EventID) > 512 ||
 		event.ProviderMessageID != strings.TrimSpace(event.ProviderMessageID) || event.ProviderMessageID == "" || len(event.ProviderMessageID) > 512 ||
 		event.OccurredAt.IsZero() || !event.OccurredAt.Equal(event.OccurredAt.UTC()) {

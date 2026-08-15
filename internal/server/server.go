@@ -1886,11 +1886,10 @@ func apiMux(cfg Config) http.Handler {
 			agentEmailIngestHandler(agentEmailReceive, cfg.IngestAgentEmailPilot))
 	}
 	if validAgentEmailProviderEventToken(cfg.AgentEmailProviderEventToken) && cfg.ApplyAgentEmailOutboundProviderEvent != nil {
-		mux.HandleFunc("POST /v1/internal/agent-email-send:provider-event",
-			agentEmailOutboundProviderEventHandler(
-				cfg.AgentEmailProviderEventToken,
-				cfg.ApplyAgentEmailOutboundProviderEvent,
-			))
+		registerAgentEmailOutboundProviderEventRoute(
+			mux, cfg.AgentEmailProviderEventToken,
+			cfg.ApplyAgentEmailOutboundProviderEvent,
+		)
 	}
 	selfDigestSupported := cfg.AuthenticatePrincipal != nil
 	transcriptsSupported := selfDigestSupported &&

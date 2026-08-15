@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -171,6 +172,13 @@ func TestAgentEmailOutboundLifecyclePostgres(t *testing.T) {
 	if _, err := st.ListAgentEmailOutbox(ctx, restricted, AgentEmailOutboundFilter{Limit: 10}); !errors.Is(err, ErrAgentEmailOutboundForbidden) {
 		t.Fatalf("restricted-profile outbox list error = %v", err)
 	}
+	providerEventCanarySend, err := st.QueueAgentEmail(ctx, p, SendAgentEmailInput{
+		To: "provider-event-canary@example.com", Subject: "provider event canary",
+		Text: "disposable", IdempotencyKey: "provider-event-canary",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	raw := []byte("From: Header Sender <sender@example.com>\r\n" +
 		"Reply-To: Reply Desk <reply@example.com>\r\n" +
@@ -288,7 +296,6 @@ func TestAgentEmailOutboundLifecyclePostgres(t *testing.T) {
 		p.AccountID, direct.ID).Scan(&sentUsage); err != nil || sentUsage != 1 {
 		t.Fatalf("email_sent usage = %d / %v", sentUsage, err)
 	}
-
 	// Preserve a provider's skewed historical timestamp in its receipt while
 	// clamping the folded message lifecycle to the local provider boundary so
 	// the live row remains portable between cells.
@@ -327,6 +334,214 @@ func TestAgentEmailOutboundLifecyclePostgres(t *testing.T) {
 	changedEvent.EventClass = AgentEmailOutboundProviderEventDeferred
 	if _, err := st.ApplyAgentEmailOutboundProviderEvent(ctx, changedEvent); !errors.Is(err, ErrAgentEmailOutboundConflict) {
 		t.Fatalf("changed provider-event replay error = %v", err)
+	}
+
+	canaryClaim, err := st.ClaimAgentEmailOutbound(ctx, AgentEmailOutboundClaimInput{})
+	if err != nil || canaryClaim.Message.ID != providerEventCanarySend.ID {
+		t.Fatalf("provider-event canary claim = %#v / %v", canaryClaim, err)
+	}
+	if _, err := st.StartAgentEmailOutboundProviderCall(
+		ctx, providerEventCanarySend.ID, canaryClaim.Claim,
+	); err != nil {
+		t.Fatal(err)
+	}
+	canaryAccepted, err := st.FinalizeAgentEmailOutbound(
+		ctx, providerEventCanarySend.ID,
+		FinalizeAgentEmailOutboundInput{
+			Claim: canaryClaim.Claim, State: AgentEmailOutboundAccepted,
+			Provider: "cloudflare_email_sending", ProviderMessageID: "provider-canary-1",
+		},
+	)
+	if err != nil || canaryAccepted.AcceptedAt == nil {
+		t.Fatalf("provider-event canary accepted = %#v / %v", canaryAccepted, err)
+	}
+	var canarySentUsage int
+	if err := st.pool.QueryRow(ctx, `
+		SELECT count(*) FROM usage_events
+		 WHERE account_id=$1 AND dimension='email_sent' AND subject_id=$2`,
+		p.AccountID, providerEventCanarySend.ID).Scan(&canarySentUsage); err != nil ||
+		canarySentUsage != 1 {
+		t.Fatalf("provider-event canary email_sent usage = %d / %v",
+			canarySentUsage, err)
+	}
+	const providerEventCanaryID = "event-provider-canary-delivered"
+	identityCollision := AgentEmailOutboundProviderEventInput{
+		Provider: "cloudflare_email_sending", EventID: providerEventCanaryID,
+		ProviderMessageID: "provider-direct-1",
+		EventClass:        AgentEmailOutboundProviderEventDelivered,
+		OccurredAt:        accepted.AcceptedAt.UTC(),
+	}
+	if collision, err := st.ApplyAgentEmailOutboundProviderEvent(
+		ctx, identityCollision,
+	); err != nil || !collision.Applied {
+		t.Fatalf("provider-event canary identity collision fixture = %#v / %v",
+			collision, err)
+	}
+	if _, err := st.PrepareAgentEmailProviderEventCanary(
+		ctx, p.AccountID, providerEventCanarySend.ID,
+		*canaryAccepted.AcceptedAt, providerEventCanaryID,
+	); !errors.Is(err, ErrAgentEmailProviderEventCanaryFence) {
+		t.Fatalf("cross-send provider-event canary identity error = %v", err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		DELETE FROM agent_email_outbound_provider_events
+		 WHERE provider=$1 AND event_id_hash=$2`, identityCollision.Provider,
+		agentEmailOutboundSHA256(identityCollision.EventID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PrepareAgentEmailProviderEventCanary(
+		ctx, p.AccountID, providerEventCanarySend.ID,
+		canaryAccepted.AcceptedAt.Add(time.Microsecond), providerEventCanaryID,
+	); !errors.Is(err, ErrAgentEmailProviderEventCanaryFence) {
+		t.Fatalf("stale provider-event canary fence error = %v", err)
+	}
+	canaryTarget, err := st.PrepareAgentEmailProviderEventCanary(
+		ctx, p.AccountID, providerEventCanarySend.ID,
+		*canaryAccepted.AcceptedAt, providerEventCanaryID,
+	)
+	if err != nil || canaryTarget.ProviderMessageID != "provider-canary-1" {
+		t.Fatalf("provider-event canary target = %#v / %v", canaryTarget, err)
+	}
+
+	// The exact accepted-at event proves that the folded lifecycle and receipt
+	// can be recognized safely by a later retry preflight.
+	canaryEventTime := canaryAccepted.AcceptedAt.UTC()
+	canaryEvent := AgentEmailOutboundProviderEventInput{
+		Provider: "cloudflare_email_sending", EventID: providerEventCanaryID,
+		ProviderMessageID: "provider-canary-1",
+		EventClass:        AgentEmailOutboundProviderEventDelivered,
+		OccurredAt:        canaryEventTime,
+	}
+	canaryDelivered, err := st.ApplyAgentEmailOutboundProviderEvent(ctx, canaryEvent)
+	if err != nil || !canaryDelivered.Applied ||
+		canaryDelivered.Message.State != AgentEmailOutboundDelivered ||
+		canaryDelivered.Message.DeliveredAt == nil ||
+		!canaryDelivered.Message.DeliveredAt.Equal(canaryEventTime) {
+		t.Fatalf("provider-event canary delivered = %#v / %v", canaryDelivered, err)
+	}
+	continuedTarget, err := st.PrepareAgentEmailProviderEventCanary(
+		ctx, p.AccountID, providerEventCanarySend.ID,
+		*canaryAccepted.AcceptedAt, providerEventCanaryID,
+	)
+	if err != nil || continuedTarget != canaryTarget {
+		t.Fatalf("completed provider-event canary continuation = %#v / %v",
+			continuedTarget, err)
+	}
+	canaryDuplicate, err := st.ApplyAgentEmailOutboundProviderEvent(ctx, canaryEvent)
+	if err != nil || canaryDuplicate.Applied ||
+		canaryDuplicate.Message.State != AgentEmailOutboundDelivered {
+		t.Fatalf("duplicate provider-event canary = %#v / %v", canaryDuplicate, err)
+	}
+	changedCanaryEvent := canaryEvent
+	changedCanaryEvent.EventClass = AgentEmailOutboundProviderEventDeferred
+	if _, err := st.ApplyAgentEmailOutboundProviderEvent(
+		ctx, changedCanaryEvent,
+	); !errors.Is(err, ErrAgentEmailOutboundConflict) {
+		t.Fatalf("changed provider-event canary replay error = %v", err)
+	}
+	canaryVerification, err := st.VerifyAgentEmailProviderEventCanary(
+		ctx, canaryTarget, canaryEvent.EventID,
+	)
+	if err != nil || canaryVerification.SendID != providerEventCanarySend.ID ||
+		canaryVerification.State != AgentEmailOutboundDelivered ||
+		canaryVerification.ProviderEventReceiptCount != 1 ||
+		canaryVerification.EmailSentUsageEventCount != 1 {
+		t.Fatalf("provider-event canary verification = %#v / %v",
+			canaryVerification, err)
+	}
+
+	// A completed-send continuation is admitted only for the exact canonical
+	// canary receipt. These rows are restored after each negative probe so the
+	// remainder of this integration graph keeps its canonical event.
+	exactEventIDHash := agentEmailOutboundSHA256(canaryEvent.EventID)
+	exactRequestHash := agentEmailOutboundProviderEventRequestHash(canaryEvent)
+	lookalikeTime := canaryEventTime.Add(time.Nanosecond)
+	lookalikeTimestamp := canaryEvent
+	lookalikeTimestamp.OccurredAt = lookalikeTime
+	lookalikeClass := canaryEvent
+	lookalikeClass.EventClass = AgentEmailOutboundProviderEventDeferred
+	lookalikeProviderID := canaryEvent
+	lookalikeProviderID.ProviderMessageID = "provider-lookalike"
+	for _, candidate := range []struct {
+		name, provider, eventIDHash, requestHash, eventClass string
+		occurredAt                                           time.Time
+	}{
+		{name: "unrelated event id", provider: canaryEvent.Provider,
+			eventIDHash: agentEmailOutboundSHA256("real-provider-event"),
+			requestHash: exactRequestHash, eventClass: canaryEvent.EventClass,
+			occurredAt: canaryEventTime},
+		{name: "different provider", provider: "other_provider",
+			eventIDHash: exactEventIDHash, requestHash: exactRequestHash,
+			eventClass: canaryEvent.EventClass, occurredAt: canaryEventTime},
+		{name: "wrong request hash", provider: canaryEvent.Provider,
+			eventIDHash: exactEventIDHash, requestHash: strings.Repeat("0", 64),
+			eventClass: canaryEvent.EventClass, occurredAt: canaryEventTime},
+		{name: "different provider id", provider: canaryEvent.Provider,
+			eventIDHash: exactEventIDHash,
+			requestHash: agentEmailOutboundProviderEventRequestHash(lookalikeProviderID),
+			eventClass:  canaryEvent.EventClass, occurredAt: canaryEventTime},
+		{name: "different class", provider: canaryEvent.Provider,
+			eventIDHash: exactEventIDHash,
+			requestHash: agentEmailOutboundProviderEventRequestHash(lookalikeClass),
+			eventClass:  lookalikeClass.EventClass, occurredAt: canaryEventTime},
+		{name: "different timestamp", provider: canaryEvent.Provider,
+			eventIDHash: exactEventIDHash,
+			requestHash: agentEmailOutboundProviderEventRequestHash(lookalikeTimestamp),
+			eventClass:  canaryEvent.EventClass, occurredAt: lookalikeTime},
+	} {
+		t.Run("provider event canary rejects "+candidate.name, func(t *testing.T) {
+			if _, err := st.pool.Exec(ctx, `
+				UPDATE agent_email_outbound_provider_events
+				   SET provider=$2,event_id_hash=$3,event_request_hash=$4,
+				       event_class=$5,occurred_at=$6
+				 WHERE account_id=$1 AND outbound_id=$7`,
+				p.AccountID, candidate.provider, candidate.eventIDHash,
+				candidate.requestHash, candidate.eventClass, candidate.occurredAt,
+				providerEventCanarySend.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.PrepareAgentEmailProviderEventCanary(
+				ctx, p.AccountID, providerEventCanarySend.ID,
+				*canaryAccepted.AcceptedAt,
+				providerEventCanaryID,
+			); !errors.Is(err, ErrAgentEmailProviderEventCanaryFence) {
+				t.Fatalf("lookalike continuation error = %v", err)
+			}
+			if _, err := st.pool.Exec(ctx, `
+				UPDATE agent_email_outbound_provider_events
+				   SET provider=$2,event_id_hash=$3,event_request_hash=$4,
+				       event_class=$5,occurred_at=$6
+				 WHERE account_id=$1 AND outbound_id=$7`,
+				p.AccountID, canaryEvent.Provider, exactEventIDHash, exactRequestHash,
+				canaryEvent.EventClass, canaryEventTime,
+				providerEventCanarySend.ID); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	extraEvent := canaryEvent
+	extraEvent.EventID = "real-provider-extra-event"
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO agent_email_outbound_provider_events
+		  (account_id,provider,event_id_hash,event_request_hash,outbound_id,
+		   event_class,occurred_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+		p.AccountID, extraEvent.Provider, agentEmailOutboundSHA256(extraEvent.EventID),
+		agentEmailOutboundProviderEventRequestHash(extraEvent), providerEventCanarySend.ID,
+		extraEvent.EventClass, extraEvent.OccurredAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PrepareAgentEmailProviderEventCanary(
+		ctx, p.AccountID, providerEventCanarySend.ID,
+		*canaryAccepted.AcceptedAt, providerEventCanaryID,
+	); !errors.Is(err, ErrAgentEmailProviderEventCanaryFence) {
+		t.Fatalf("extra real receipt continuation error = %v", err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		DELETE FROM agent_email_outbound_provider_events
+		 WHERE provider=$1 AND event_id_hash=$2`, extraEvent.Provider,
+		agentEmailOutboundSHA256(extraEvent.EventID)); err != nil {
+		t.Fatal(err)
 	}
 
 	// An expired provider_started row is reclaimed only for an exact replay of
