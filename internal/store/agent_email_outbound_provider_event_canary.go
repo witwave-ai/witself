@@ -11,10 +11,6 @@ import (
 )
 
 const (
-	// AgentEmailOutboundCloudflareProvider is the normalized provider identity
-	// committed by the managed Cloudflare outbound adapter.
-	AgentEmailOutboundCloudflareProvider = "cloudflare_email_sending"
-
 	agentEmailProviderEventCanaryMaximumAcceptedAge = 15 * time.Minute
 )
 

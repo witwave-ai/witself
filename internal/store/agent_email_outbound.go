@@ -57,6 +57,10 @@ const (
 	// AgentEmailOutboundRequestReply is a server-derived reply to inbound mail.
 	AgentEmailOutboundRequestReply = "reply"
 
+	// AgentEmailOutboundCloudflareProvider is the normalized managed provider
+	// recorded by dispatch settlement and provider-event processing.
+	AgentEmailOutboundCloudflareProvider = "cloudflare_email_sending"
+
 	// AgentEmailOutboundErrorProviderUnavailable is a closed provider outage code.
 	AgentEmailOutboundErrorProviderUnavailable = "provider_unavailable"
 	// AgentEmailOutboundErrorProviderRateLimited is a closed provider throttle code.

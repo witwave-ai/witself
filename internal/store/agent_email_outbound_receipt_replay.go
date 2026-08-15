@@ -14,9 +14,6 @@ const (
 	// AgentEmailOutboundReceiptReplayTTL matches the managed edge receipt's
 	// bounded idempotency lifetime. Operators cannot extend it at invocation.
 	AgentEmailOutboundReceiptReplayTTL = 7 * 24 * time.Hour
-	// AgentEmailOutboundCloudflareProvider is the normalized managed provider
-	// recorded by both live dispatch settlement and receipt proof validation.
-	AgentEmailOutboundCloudflareProvider = "cloudflare_email_sending"
 )
 
 var (
