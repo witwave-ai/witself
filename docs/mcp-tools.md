@@ -605,6 +605,10 @@ called out explicitly; other deferred rows are not a claim of current exposure.
 | `witself.email.renew` | yes | no | Renew one exact live email claim id/generation using database time. |
 | `witself.email.release` | yes | no | Release one exact fence, optionally recording an email-specific deterministic failure; does not acknowledge. |
 | `witself.email.complete` | yes | no | Complete one exact live fence without creating a reply/result artifact and without acknowledging. |
+| `witself.email.send` | no | no | Queue one irreversible external plain-text email to exactly one recipient from the token-bound agent's server-owned address; requires an idempotency key. |
+| `witself.email.reply` | no | no | Queue one irreversible plain-text reply; recipient, subject/thread provenance, From, and Reply-To are server-derived from the owner-visible inbound message. |
+| `witself.email.sent.list` | yes | yes | List metadata-only outbound history for the token-bound agent; never returns submitted text, worker claims, or provider message ids. |
+| `witself.email.sent.show` | yes | yes | Show one owned metadata-only outbound record by `esnd_` id. |
 | `witself.transcript.list` | yes | yes | Lists the token-bound agent's newest transcript conversations; operators see their authorized account scope. |
 | `witself.transcript.get` | yes | yes | Reads one bounded forward page after a transcript-local sequence. |
 | `witself.transcript.tail` | yes | yes | Reads a bounded newest page, returned oldest-first. |
@@ -1859,8 +1863,13 @@ Output data uses the group detail shape from
 
 ### `witself.email.*`
 
-The twelve receive-only tools are advertised by the configured backend and work
-only for an agent enrolled in the default-off one-realm/5–10-agent pilot:
+The installed email tool set contains twelve inbound tools plus four
+independently gated outbound tools. Plan and account-policy changes do not
+require MCP reinstallation. A disabled direction returns the server's stable
+`feature_not_enabled` refusal; clients should not retry it until policy changes.
+
+The inbound tools work only for an agent enrolled in the managed receive
+cohort:
 
 - `status` takes `{}` and returns `maximum_raw_bytes` plus the value-free
   account-wide `attachment_capacity` projection (`used`, nullable `max` and
@@ -1902,6 +1911,42 @@ only for an agent enrolled in the default-off one-realm/5–10-agent pilot:
 - `complete` accepts the exact fence and required `idempotency_key`; it creates
   no result/reply and does not acknowledge.
 
+The outbound beta tools are:
+
+- `send` accepts required `to`, `subject`, `text`, and `idempotency_key` and
+  queues exactly one plain-text recipient. It is destructive and open-world,
+  with an idempotent retry annotation. From and Reply-To are absent from the
+  schema and server-derived.
+- `reply` accepts required `inbound_message_id`, `text`, and
+  `idempotency_key`. The server derives recipient, safe `Re:` subject, thread
+  provenance, From, and Reply-To from the exact owner-visible inbound row.
+- `sent.list` accepts optional `state`, `limit` (1–100, default 50), and opaque
+  `cursor` and returns `messages` plus optional `next_cursor`.
+- `sent.show` accepts one `message_id` beginning with `esnd_`.
+
+Backend refusals from all four outbound tools are MCP tool errors, not protocol
+errors: `isError` is true and `structuredContent.error` preserves the stable
+`code`, safe `message`, and `retryable` flag. Feature refusals also carry
+`feature`; transient rate refusals carry whole-second `retry_after` plus the
+value-free dimension/key/scope/limit/used/attempted/window/source details; hard
+limits use `limit_exceeded` without retry guidance; and specific conflicts such
+as `agent_email_idempotency_conflict` and `agent_email_processing_busy` retain
+their server code. The same JSON object is present as text content for MCP
+clients that do not consume structured output. No address, identifier, subject,
+body, provider response, or tenant value is added to error details.
+
+Send and reply accept non-empty UTF-8 plain text of at most 128 KiB through
+MCP. The underlying provider contract is one recipient and plain text only;
+there is no HTML, attachment, CC/BCC, bulk, or caller-selected sender surface.
+Direct subjects are required. Outbox states are `queued`, `claimed`,
+`provider_started`, `accepted`, `delivered`, `deferred`, `bounced`, `rejected`,
+`failed`, `ambiguous`, and `canceled`. Metadata-only sent projections never
+return the submitted text, worker claim, provider message id, or raw provider
+response. Exact idempotency replay returns the same durable `esnd_` row;
+changed semantics under one key conflict. Eligible sent records expire under
+the same account `agent_email_retention_days` policy as inbound mail;
+unresolved queued/claimed/provider-started work is held.
+
 List, listen, code-consume, ack, and ordinary read projections never expose an
 active claim id or lease. No tool exposes raw MIME, HTML markup, attachment
 names/media types/payload content, trusted auth/spam fields, or a provider id. Every
@@ -1911,8 +1956,9 @@ expected, current-user-authorized, low-risk flow after independent context
 matching; no financial/identity/recovery/credential/domain-transfer or
 automated-link workflow is permitted.
 
-The read-only profile retains only `status`, `address.show`, `list`, and
-`listen`.
+The read-only profile retains inbound `status`, `address.show`, `list`, and
+`listen` plus outbound `sent.list` and `sent.show`; it removes `send` and
+`reply`.
 `--no-value-tools` does not remove `read` or `code.candidates`: email content is
 an open-plane owner read, not sealed-secret value egress. Grok exposes the same
 tools with underscore-safe names such as `witself_email_code_candidates` and

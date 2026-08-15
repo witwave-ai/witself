@@ -1113,6 +1113,10 @@ func clone(r Record) Record {
 		override := *r.AgentEmailReceiveOverride
 		r.AgentEmailReceiveOverride = &override
 	}
+	if r.AgentEmailSendOverride != nil {
+		override := *r.AgentEmailSendOverride
+		r.AgentEmailSendOverride = &override
+	}
 	if r.AgentEmailRetentionOverride != nil {
 		override := *r.AgentEmailRetentionOverride
 		if override.Days != nil {
@@ -1166,6 +1170,14 @@ func clone(r Record) Record {
 			if r.AdminHistory[i].AgentEmailReceiveTo != nil {
 				value := *r.AdminHistory[i].AgentEmailReceiveTo
 				r.AdminHistory[i].AgentEmailReceiveTo = &value
+			}
+			if r.AdminHistory[i].AgentEmailSendFrom != nil {
+				value := *r.AdminHistory[i].AgentEmailSendFrom
+				r.AdminHistory[i].AgentEmailSendFrom = &value
+			}
+			if r.AdminHistory[i].AgentEmailSendTo != nil {
+				value := *r.AdminHistory[i].AgentEmailSendTo
+				r.AdminHistory[i].AgentEmailSendTo = &value
 			}
 			if r.AdminHistory[i].AgentEmailRetentionFrom != nil {
 				value := *r.AdminHistory[i].AgentEmailRetentionFrom

@@ -21,6 +21,13 @@ import (
 // discrimination via errors.Is — status-based, not message-based.
 var ErrUnauthorized = errors.New("unauthorized")
 
+// ErrForbidden wraps non-feature, non-rate 403 responses while retaining the
+// server's safe message and any more specific typed cause.
+var ErrForbidden = errors.New("forbidden")
+
+// ErrConflict wraps 409 responses while retaining specific conflict types.
+var ErrConflict = errors.New("conflict")
+
 // ErrSecretVaultKeyMismatch identifies the one deterministic create failure
 // that is safe for the sealed-secret client to use as proof that the exact
 // idempotent request has no canonical receipt and targets a retired AVK epoch.
@@ -99,6 +106,22 @@ func (e *MessageRateLimitError) Error() string {
 
 func (e *MessageRateLimitError) Unwrap() error { return ErrMessageRateLimited }
 
+// APIError preserves one stable, value-free server error code that does not
+// have a richer domain-specific client type. HTTP status wrappers still carry
+// the broad forbidden/not-found/conflict classification.
+type APIError struct {
+	Code      string
+	Retryable bool
+	Message   string
+}
+
+func (e *APIError) Error() string {
+	if e != nil && strings.TrimSpace(e.Message) != "" {
+		return e.Message
+	}
+	return "API request failed"
+}
+
 // SecretLimitError preserves the server's value-free capacity snapshot.
 type SecretLimitError struct {
 	Status SecretLimitStatus
@@ -153,7 +176,23 @@ var ErrNotFound = errors.New("not found")
 type notFoundError struct{ cause error }
 
 func (e notFoundError) Error() string { return e.cause.Error() }
-func (e notFoundError) Unwrap() error { return ErrNotFound }
+func (e notFoundError) Unwrap() []error {
+	return []error{ErrNotFound, e.cause}
+}
+
+type forbiddenError struct{ cause error }
+
+func (e forbiddenError) Error() string { return e.cause.Error() }
+func (e forbiddenError) Unwrap() []error {
+	return []error{ErrForbidden, e.cause}
+}
+
+type conflictError struct{ cause error }
+
+func (e conflictError) Error() string { return e.cause.Error() }
+func (e conflictError) Unwrap() []error {
+	return []error{ErrConflict, e.cause}
+}
 
 // ErrBadRequest wraps 400 responses while preserving the server's existing
 // human-readable error text. Proxies (the local dashboard) use it to surface
@@ -163,7 +202,9 @@ var ErrBadRequest = errors.New("bad request")
 type badRequestError struct{ cause error }
 
 func (e badRequestError) Error() string { return e.cause.Error() }
-func (e badRequestError) Unwrap() error { return ErrBadRequest }
+func (e badRequestError) Unwrap() []error {
+	return []error{ErrBadRequest, e.cause}
+}
 
 // BootstrapResult is the outcome of a bootstrap login.
 type BootstrapResult struct {
@@ -355,11 +396,13 @@ func doJSONWithHeadersTimeout(ctx context.Context, method, url, token string, he
 	case resp.StatusCode == http.StatusUnauthorized:
 		return fmt.Errorf("%w: %w", ErrUnauthorized, responseError(resp, "not authorized (check the token)"))
 	case resp.StatusCode == http.StatusConflict:
-		return responseError(resp, "conflict")
+		return conflictError{cause: responseError(resp, "conflict")}
 	case resp.StatusCode == http.StatusNotFound:
 		return notFoundError{cause: responseError(resp, "not found")}
 	case resp.StatusCode == http.StatusBadRequest:
 		return badRequestError{cause: responseError(resp, "bad request")}
+	case resp.StatusCode == http.StatusForbidden:
+		return forbiddenError{cause: responseError(resp, "forbidden")}
 	case resp.StatusCode >= 300:
 		return responseError(resp, "request failed: "+resp.Status)
 	}
@@ -406,6 +449,18 @@ func isMessageRateErrorDetails(details responseErrorDetails) bool {
 	case details.LimitDimension == "message_delivered" &&
 		details.Scope == "recipient" &&
 		details.LimitKey == "message_delivered_per_recipient_minute":
+		return true
+	case details.LimitDimension == "agent_email_sent" &&
+		details.Scope == "account" &&
+		details.LimitKey == "agent_email_sent_per_account_minute":
+		return true
+	case details.LimitDimension == "agent_email_sent" &&
+		details.Scope == "agent" &&
+		details.LimitKey == "agent_email_sent_per_agent_minute":
+		return true
+	case details.LimitDimension == "agent_email_sent" &&
+		details.Scope == "realm" &&
+		details.LimitKey == "agent_email_sent_per_realm_minute":
 		return true
 	default:
 		return false
@@ -525,6 +580,11 @@ func responseError(resp *http.Response, fallback string) error {
 		if resp.StatusCode == http.StatusForbidden && out.Code == "feature_not_enabled" {
 			return &FeatureNotEnabledError{
 				Feature: out.Feature, Retryable: out.Retryable, Message: message,
+			}
+		}
+		if strings.TrimSpace(out.Code) != "" {
+			return &APIError{
+				Code: out.Code, Retryable: out.Retryable, Message: message,
 			}
 		}
 		return fmt.Errorf("%s", message)

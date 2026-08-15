@@ -172,6 +172,12 @@ func Register(mux *http.ServeMux, cfg Config) error {
 			withAdmin(cfg, adminPutAgentEmailReceive))
 		mux.HandleFunc("DELETE /v1/admin/accounts/{id}/email-receive",
 			withAdmin(cfg, adminDeleteAgentEmailReceive))
+		mux.HandleFunc("GET /v1/admin/accounts/{id}/email-send",
+			withAdmin(cfg, adminGetAgentEmailSend))
+		mux.HandleFunc("PUT /v1/admin/accounts/{id}/email-send",
+			withAdmin(cfg, adminPutAgentEmailSend))
+		mux.HandleFunc("DELETE /v1/admin/accounts/{id}/email-send",
+			withAdmin(cfg, adminDeleteAgentEmailSend))
 		mux.HandleFunc("GET /v1/admin/accounts/{id}/email-retention",
 			withAdmin(cfg, adminGetAgentEmailRetention))
 		mux.HandleFunc("PUT /v1/admin/accounts/{id}/email-retention",
@@ -757,6 +763,7 @@ func planStatus(cfg Config, w http.ResponseWriter, r *http.Request, accountID st
 		"messaging":            messagingView(rec, snapshot, false),
 		"message_retention":    messageRetentionView(rec, snapshot, false),
 		"email_receive":        agentEmailReceiveView(rec, snapshot, false),
+		"email_send":           agentEmailSendView(rec, snapshot, false),
 		"email_retention":      agentEmailRetentionView(rec, snapshot, false),
 		"transcript_retention": transcriptRetentionView(rec, snapshot, false),
 		"apply_pending":        lifecycle.SnapshotApplyPending(rec, snapshot),
@@ -838,6 +845,24 @@ func agentEmailReceiveView(
 	}
 	if includeAdminDetail && rec.AgentEmailReceiveOverride != nil {
 		out["override"] = rec.AgentEmailReceiveOverride
+	}
+	return out
+}
+
+func agentEmailSendView(
+	rec lifecycle.Record,
+	snapshot lifecycle.PlanSnapshot,
+	includeAdminDetail bool,
+) map[string]any {
+	out := map[string]any{
+		"default_enabled": slices.Contains(
+			snapshot.DefaultFeatures, plans.AgentEmailSendFeature),
+		"enabled": slices.Contains(
+			snapshot.Features, plans.AgentEmailSendFeature),
+		"overridden": rec.AgentEmailSendOverride != nil,
+	}
+	if includeAdminDetail && rec.AgentEmailSendOverride != nil {
+		out["override"] = rec.AgentEmailSendOverride
 	}
 	return out
 }
@@ -969,6 +994,7 @@ func writeAdminAccountPolicy(
 		"messaging":            messagingView(rec, snapshot, true),
 		"message_retention":    messageRetentionView(rec, snapshot, true),
 		"email_receive":        agentEmailReceiveView(rec, snapshot, true),
+		"email_send":           agentEmailSendView(rec, snapshot, true),
 		"email_retention":      agentEmailRetentionView(rec, snapshot, true),
 		"transcript_retention": transcriptRetentionView(rec, snapshot, true),
 		"admin_history":        rec.AdminHistory,
@@ -1236,6 +1262,65 @@ func adminDeleteAgentEmailReceive(
 		return
 	}
 	if _, err := cfg.Manager.ClearAgentEmailReceiveOverride(
+		r.Context(), accountID, actor, req.Reason,
+	); err != nil {
+		writeManagerError(w, err)
+		return
+	}
+	writeAdminAccountPolicy(cfg, w, r, accountID, true, "")
+}
+
+func adminGetAgentEmailSend(
+	cfg Config,
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	_ lifecycle.AdminActor,
+) {
+	writeAdminAccountPolicy(cfg, w, r, accountID, false, "")
+}
+
+func adminPutAgentEmailSend(
+	cfg Config,
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	actor lifecycle.AdminActor,
+) {
+	var req struct {
+		Enabled *bool  `json:"enabled"`
+		Reason  string `json:"reason"`
+	}
+	if err := decodeStrictJSON(r, &req); err != nil || req.Enabled == nil {
+		writeError(w, http.StatusBadRequest,
+			"a JSON body with enabled and reason is required")
+		return
+	}
+	if _, err := cfg.Manager.SetAgentEmailSendOverride(
+		r.Context(), accountID, *req.Enabled, actor, req.Reason,
+	); err != nil {
+		writeManagerError(w, err)
+		return
+	}
+	writeAdminAccountPolicy(cfg, w, r, accountID, true, "")
+}
+
+func adminDeleteAgentEmailSend(
+	cfg Config,
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	actor lifecycle.AdminActor,
+) {
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if err := decodeStrictJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest,
+			"a JSON body with reason is required")
+		return
+	}
+	if _, err := cfg.Manager.ClearAgentEmailSendOverride(
 		r.Context(), accountID, actor, req.Reason,
 	); err != nil {
 		writeManagerError(w, err)

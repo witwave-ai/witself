@@ -334,6 +334,7 @@ type AdminAccountPolicy struct {
 	Messaging           AdminMessaging                       `json:"messaging"`
 	MessageRetention    AdminMessageRetention                `json:"message_retention"`
 	EmailReceive        AdminAgentEmailReceive               `json:"email_receive"`
+	EmailSend           AdminAgentEmailSend                  `json:"email_send"`
 	EmailRetention      AdminAgentEmailRetention             `json:"email_retention"`
 	TranscriptRetention AdminTranscriptRetention             `json:"transcript_retention"`
 	AdminHistory        []AdminAccountPolicyHistoryChange    `json:"admin_history"`
@@ -427,6 +428,24 @@ type AdminAgentEmailReceiveOverride struct {
 	SetAt       time.Time `json:"set_at"`
 }
 
+// AdminAgentEmailSend describes inherited and effective outbound-email
+// availability.
+type AdminAgentEmailSend struct {
+	DefaultEnabled bool                         `json:"default_enabled"`
+	Enabled        bool                         `json:"enabled"`
+	Overridden     bool                         `json:"overridden"`
+	Override       *AdminAgentEmailSendOverride `json:"override,omitempty"`
+}
+
+// AdminAgentEmailSendOverride is the attributed account exception.
+type AdminAgentEmailSendOverride struct {
+	Enabled     bool      `json:"enabled"`
+	ActorID     string    `json:"actor_id"`
+	ActorHandle string    `json:"actor_handle"`
+	Reason      string    `json:"reason"`
+	SetAt       time.Time `json:"set_at"`
+}
+
 // AdminAgentEmailRetention describes inherited and effective inbound-email
 // retention. Nil days means indefinite retention.
 type AdminAgentEmailRetention struct {
@@ -495,6 +514,10 @@ type AdminAccountPolicyHistoryChange struct {
 	AgentEmailReceiveTo           *bool                   `json:"agent_email_receive_to,omitempty"`
 	AgentEmailReceiveFromSource   string                  `json:"agent_email_receive_from_source,omitempty"`
 	AgentEmailReceiveToSource     string                  `json:"agent_email_receive_to_source,omitempty"`
+	AgentEmailSendFrom            *bool                   `json:"agent_email_send_from,omitempty"`
+	AgentEmailSendTo              *bool                   `json:"agent_email_send_to,omitempty"`
+	AgentEmailSendFromSource      string                  `json:"agent_email_send_from_source,omitempty"`
+	AgentEmailSendToSource        string                  `json:"agent_email_send_to_source,omitempty"`
 	AgentEmailRetentionFrom       *int64                  `json:"agent_email_retention_from,omitempty"`
 	AgentEmailRetentionTo         *int64                  `json:"agent_email_retention_to,omitempty"`
 	AgentEmailRetentionFromSource string                  `json:"agent_email_retention_from_source,omitempty"`
@@ -805,6 +828,58 @@ func ClearAdminAgentEmailReceive(
 ) (*AdminAccountPolicy, error) {
 	return changeAdminAccountPolicy(ctx, cpEndpoint, adminToken, accountID,
 		"email-receive", http.MethodDelete,
+		map[string]string{"reason": reason})
+}
+
+// GetAdminAgentEmailSend returns inherited and effective outbound-email
+// availability for one account.
+func GetAdminAgentEmailSend(
+	ctx context.Context,
+	cpEndpoint, adminToken, accountID string,
+) (*AdminAccountPolicy, error) {
+	return getAdminAccountPolicy(
+		ctx, cpEndpoint, adminToken, accountID, "email-send")
+}
+
+// SetAdminAgentEmailSend creates or replaces an account outbound-email
+// exception without changing its billing plan.
+func SetAdminAgentEmailSend(
+	ctx context.Context,
+	cpEndpoint, adminToken, accountID string,
+	enabled bool,
+	reason string,
+) (*AdminAccountPolicy, error) {
+	reason, err := validateAdminPolicyReason(reason)
+	if err != nil {
+		return nil, err
+	}
+	body, err := json.Marshal(map[string]any{
+		"enabled": enabled,
+		"reason":  reason,
+	})
+	if err != nil {
+		return nil, err
+	}
+	url, err := adminAccountPolicyURL(
+		cpEndpoint, accountID, "email-send")
+	if err != nil {
+		return nil, err
+	}
+	var out AdminAccountPolicy
+	if err := doJSON(
+		ctx, http.MethodPut, url, adminToken, body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ClearAdminAgentEmailSend restores the current plan's feature state.
+func ClearAdminAgentEmailSend(
+	ctx context.Context,
+	cpEndpoint, adminToken, accountID, reason string,
+) (*AdminAccountPolicy, error) {
+	return changeAdminAccountPolicy(ctx, cpEndpoint, adminToken, accountID,
+		"email-send", http.MethodDelete,
 		map[string]string{"reason": reason})
 }
 

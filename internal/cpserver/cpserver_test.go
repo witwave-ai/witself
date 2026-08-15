@@ -417,6 +417,7 @@ func TestAdminMessagingAndRetentionOverridesAreIndependent(t *testing.T) {
 func TestAdminAgentEmailOverridesAreIndependent(t *testing.T) {
 	h := newHarness(t)
 	receivePath := "/v1/admin/accounts/acct_1/email-receive"
+	sendPath := "/v1/admin/accounts/acct_1/email-send"
 	retentionPath := "/v1/admin/accounts/acct_1/email-retention"
 
 	status, doc := h.call(t, http.MethodGet, receivePath, "admin-good", "")
@@ -424,11 +425,12 @@ func TestAdminAgentEmailOverridesAreIndependent(t *testing.T) {
 		t.Fatalf("GET email policy = %d %v", status, doc)
 	}
 	receive := doc["email_receive"].(map[string]any)
+	send := doc["email_send"].(map[string]any)
 	retention := doc["email_retention"].(map[string]any)
-	if receive["enabled"] != false ||
+	if receive["enabled"] != false || send["enabled"] != false ||
 		retention["effective_days"] != float64(30) {
-		t.Fatalf("Personal email policy = receive %v retention %v",
-			receive, retention)
+		t.Fatalf("Personal email policy = receive %v send %v retention %v",
+			receive, send, retention)
 	}
 	status, doc = h.call(t, http.MethodPut, receivePath, "admin-good",
 		`{"enabled":true,"reason":"founder email enabled"}`)
@@ -437,6 +439,14 @@ func TestAdminAgentEmailOverridesAreIndependent(t *testing.T) {
 	}
 	if doc["email_receive"].(map[string]any)["enabled"] != true {
 		t.Fatalf("receive override = %v", doc["email_receive"])
+	}
+	status, doc = h.call(t, http.MethodPut, sendPath, "admin-good",
+		`{"enabled":true,"reason":"founder email sending enabled"}`)
+	if status != http.StatusOK {
+		t.Fatalf("PUT send = %d %v", status, doc)
+	}
+	if doc["email_send"].(map[string]any)["enabled"] != true {
+		t.Fatalf("send override = %v", doc["email_send"])
 	}
 	status, doc = h.call(t, http.MethodPut, retentionPath, "admin-good",
 		`{"indefinite":true,"reason":"founder email retained"}`)
@@ -450,24 +460,41 @@ func TestAdminAgentEmailOverridesAreIndependent(t *testing.T) {
 		t, http.MethodGet, "/v1/accounts/acct_1/plan", "good", "")
 	if status != http.StatusOK ||
 		owner["email_receive"].(map[string]any)["enabled"] != true ||
+		owner["email_send"].(map[string]any)["enabled"] != true ||
 		owner["email_retention"].(map[string]any)["effective_days"] != nil {
 		t.Fatalf("owner effective email policy = %d %v", status, owner)
 	}
 	if _, exposed := owner["email_receive"].(map[string]any)["override"]; exposed {
 		t.Fatalf("owner response exposed receive attribution: %v", owner)
 	}
+	if _, exposed := owner["email_send"].(map[string]any)["override"]; exposed {
+		t.Fatalf("owner response exposed send attribution: %v", owner)
+	}
 	status, doc = h.call(t, http.MethodDelete, receivePath, "admin-good",
 		`{"reason":"inherit receive"}`)
 	if status != http.StatusOK ||
 		doc["email_receive"].(map[string]any)["enabled"] != false ||
+		doc["email_send"].(map[string]any)["enabled"] != true ||
 		doc["email_retention"].(map[string]any)["effective_days"] != nil {
 		t.Fatalf("receive clear disturbed retention = %d %v", status, doc)
+	}
+	status, doc = h.call(t, http.MethodDelete, sendPath, "admin-good",
+		`{"reason":"inherit sending"}`)
+	if status != http.StatusOK ||
+		doc["email_send"].(map[string]any)["enabled"] != false ||
+		doc["email_retention"].(map[string]any)["effective_days"] != nil {
+		t.Fatalf("send clear disturbed retention = %d %v", status, doc)
 	}
 	status, doc = h.call(t, http.MethodDelete, retentionPath, "admin-good",
 		`{"reason":"inherit retention"}`)
 	if status != http.StatusOK ||
 		doc["email_retention"].(map[string]any)["effective_days"] != float64(30) {
 		t.Fatalf("retention clear = %d %v", status, doc)
+	}
+	if status, _ := h.call(t, http.MethodPut, sendPath, "admin-good",
+		`{"reason":"missing enabled"}`,
+	); status != http.StatusBadRequest {
+		t.Fatalf("missing send enabled status = %d; want 400", status)
 	}
 }
 
@@ -708,12 +735,44 @@ func TestAdminLimitOverrideValidation(t *testing.T) {
 		plans.AgentEmailMaxRawBytesLimit,
 		plans.AgentEmailAttachmentStorageBytesLimit,
 		plans.AgentEmailCustomDomainsPerAccountLimit,
+		plans.AgentEmailSentPerAgentMinuteLimit,
+		plans.AgentEmailSentPerRealmMinuteLimit,
 	} {
 		path := "/v1/admin/accounts/acct_1/limit-overrides/" + dimension
 		if status, _ := h.call(
 			t, "GET", path, "admin-good", "",
 		); status != http.StatusOK {
 			t.Fatalf("GET valid dimension %q = %d; want 200", dimension, status)
+		}
+	}
+	for _, tc := range []struct {
+		dimension string
+		maximum   int64
+		lower     int64
+	}{
+		{plans.AgentEmailSentPerAgentMinuteLimit,
+			plans.MaxAgentEmailSentPerAgentMinute, 12},
+		{plans.AgentEmailSentPerRealmMinuteLimit,
+			plans.MaxAgentEmailSentPerRealmMinute, 120},
+	} {
+		path := "/v1/admin/accounts/acct_1/limit-overrides/" + tc.dimension
+		body := fmt.Sprintf(`{"max":%d,"reason":"outbound email breaker"}`,
+			tc.lower)
+		status, doc := h.call(t, http.MethodPut, path, "admin-good", body)
+		if status != http.StatusOK {
+			t.Fatalf("PUT lower %q = %d %v; want 200", tc.dimension, status, doc)
+		}
+		view := doc["limit"].(map[string]any)
+		if view["effective_max"] != float64(tc.lower) ||
+			view["overridden"] != true {
+			t.Fatalf("lower %q view = %v", tc.dimension, view)
+		}
+		tooHigh := fmt.Sprintf(`{"max":%d,"reason":"too high"}`,
+			tc.maximum+1)
+		if status, _ := h.call(
+			t, http.MethodPut, path, "admin-good", tooHigh,
+		); status != http.StatusBadRequest {
+			t.Fatalf("PUT above max %q = %d; want 400", tc.dimension, status)
 		}
 	}
 	validPath := "/v1/admin/accounts/acct_1/limit-overrides/stored_secret"

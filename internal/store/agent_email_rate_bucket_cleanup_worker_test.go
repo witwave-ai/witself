@@ -47,7 +47,7 @@ func TestRunAgentEmailRateBucketCleanupWorkerRetriesAndReportsBoundedBatches(t *
 		ctx,
 		cfg,
 		func() time.Time { return fixedNow },
-		func(attemptCtx context.Context, before time.Time, limit int) (int64, error) {
+		[]agentEmailRateBucketCleanupDeleteFunc{func(attemptCtx context.Context, before time.Time, limit int) (int64, error) {
 			calls++
 			if before != fixedNow.UTC() {
 				t.Fatalf("cleanup cutoff = %s, want %s", before, fixedNow.UTC())
@@ -70,7 +70,7 @@ func TestRunAgentEmailRateBucketCleanupWorkerRetriesAndReportsBoundedBatches(t *
 				t.Fatalf("unexpected cleanup call %d", calls)
 				return 0, nil
 			}
-		},
+		}},
 		func(waitCtx context.Context, interval time.Duration) bool {
 			waits++
 			if interval != cfg.Interval {
@@ -113,7 +113,7 @@ func TestRunAgentEmailRateBucketCleanupWorkerDrainsFullBatchesWithinOneSweep(t *
 		ctx,
 		cfg,
 		func() time.Time { return fixedNow },
-		func(attemptCtx context.Context, before time.Time, limit int) (int64, error) {
+		[]agentEmailRateBucketCleanupDeleteFunc{func(attemptCtx context.Context, before time.Time, limit int) (int64, error) {
 			if before != fixedNow || limit != cfg.BatchSize {
 				t.Fatalf("cleanup call = before %s limit %d", before, limit)
 			}
@@ -123,7 +123,7 @@ func TestRunAgentEmailRateBucketCleanupWorkerDrainsFullBatchesWithinOneSweep(t *
 			deleted := deletions[calls]
 			calls++
 			return deleted, nil
-		},
+		}},
 		func(_ context.Context, interval time.Duration) bool {
 			waits++
 			if interval != cfg.Interval {
@@ -146,6 +146,98 @@ func TestRunAgentEmailRateBucketCleanupWorkerDrainsFullBatchesWithinOneSweep(t *
 	}
 }
 
+func TestRunAgentEmailRateBucketCleanupWorkerDrainsInboundAndOutboundTables(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := DefaultAgentEmailRateBucketCleanupWorkerConfig()
+	cfg.BatchSize = 5
+	fixedNow := time.Date(2026, time.August, 14, 12, 0, 0, 0, time.UTC)
+	deletions := [][]int64{{5, 1}, {5, 5, 2}}
+	calls := make([]int, len(deletions))
+	var results []int64
+	var waits int
+	deleteBatches := make([]agentEmailRateBucketCleanupDeleteFunc, len(deletions))
+	for lane := range deletions {
+		lane := lane
+		deleteBatches[lane] = func(attemptCtx context.Context, before time.Time, limit int) (int64, error) {
+			if before != fixedNow || limit != cfg.BatchSize || attemptCtx.Err() != nil {
+				t.Fatalf("lane %d cleanup call = before %s limit %d error %v",
+					lane, before, limit, attemptCtx.Err())
+			}
+			deleted := deletions[lane][calls[lane]]
+			calls[lane]++
+			return deleted, nil
+		}
+	}
+
+	err := runAgentEmailRateBucketCleanupWorker(
+		ctx,
+		cfg,
+		func() time.Time { return fixedNow },
+		deleteBatches,
+		func(_ context.Context, interval time.Duration) bool {
+			waits++
+			if interval != cfg.Interval {
+				t.Fatalf("wait interval = %s, want %s", interval, cfg.Interval)
+			}
+			cancel()
+			return false
+		},
+		func(deleted int64) { results = append(results, deleted) },
+		func(err error) { t.Fatalf("unexpected cleanup error: %v", err) },
+	)
+	if err != nil {
+		t.Fatalf("worker returned error: %v", err)
+	}
+	if !reflect.DeepEqual(calls, []int{2, 3}) || waits != 1 {
+		t.Fatalf("calls/waits = %#v/%d, want [2 3]/1", calls, waits)
+	}
+	if !reflect.DeepEqual(results, []int64{5, 5, 1, 5, 2}) {
+		t.Fatalf("results = %#v, want [5 5 1 5 2]", results)
+	}
+}
+
+func TestRunAgentEmailRateBucketCleanupWorkerDoesNotStarveHealthyTable(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := DefaultAgentEmailRateBucketCleanupWorkerConfig()
+	transientErr := errors.New("inbound cleanup failed")
+	var healthyCalls, waits int
+	var results []int64
+	var reportedErrors []error
+
+	err := runAgentEmailRateBucketCleanupWorker(
+		ctx,
+		cfg,
+		time.Now,
+		[]agentEmailRateBucketCleanupDeleteFunc{
+			func(context.Context, time.Time, int) (int64, error) {
+				return 0, transientErr
+			},
+			func(context.Context, time.Time, int) (int64, error) {
+				healthyCalls++
+				return 3, nil
+			},
+		},
+		func(context.Context, time.Duration) bool {
+			waits++
+			cancel()
+			return false
+		},
+		func(deleted int64) { results = append(results, deleted) },
+		func(err error) { reportedErrors = append(reportedErrors, err) },
+	)
+	if err != nil {
+		t.Fatalf("worker returned error: %v", err)
+	}
+	if healthyCalls != 1 || waits != 1 || !reflect.DeepEqual(results, []int64{3}) {
+		t.Fatalf("healthy calls/waits/results = %d/%d/%#v", healthyCalls, waits, results)
+	}
+	if len(reportedErrors) != 1 || !errors.Is(reportedErrors[0], transientErr) {
+		t.Fatalf("reported errors = %#v", reportedErrors)
+	}
+}
+
 func TestRunAgentEmailRateBucketCleanupWorkerHonorsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	started := make(chan struct{})
@@ -157,11 +249,11 @@ func TestRunAgentEmailRateBucketCleanupWorkerHonorsCancellation(t *testing.T) {
 			ctx,
 			DefaultAgentEmailRateBucketCleanupWorkerConfig(),
 			time.Now,
-			func(attemptCtx context.Context, _ time.Time, _ int) (int64, error) {
+			[]agentEmailRateBucketCleanupDeleteFunc{func(attemptCtx context.Context, _ time.Time, _ int) (int64, error) {
 				close(started)
 				<-attemptCtx.Done()
 				return 0, attemptCtx.Err()
-			},
+			}},
 			waitForAgentEmailRateBucketCleanupInterval,
 			func(int64) { resultCalls++ },
 			func(error) { errorCalls++ },

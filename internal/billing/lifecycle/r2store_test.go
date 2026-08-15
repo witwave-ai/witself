@@ -546,6 +546,114 @@ func TestR2AgentEmailOverridesSurviveV00210RoundTrip(t *testing.T) {
 	}
 }
 
+func TestR2AgentEmailSendOverrideSurvivesV00244RoundTrip(t *testing.T) {
+	at := time.Date(2026, 8, 14, 16, 0, 0, 0, time.UTC)
+	record := Record{
+		AccountID: "acct_founder_email_send",
+		AgentEmailSendOverride: &AgentEmailSendOverride{
+			Enabled: true, ActorID: "adm_founder", ActorHandle: "scott",
+			Reason: "founder email sending enabled", SetAt: at,
+		},
+		AdminHistory: []AdminChange{{
+			Kind:    "agent_email_send_override_set",
+			ActorID: "adm_founder", ActorHandle: "scott",
+			Reason: "founder email sending enabled", At: at,
+			AgentEmailSendFrom:       boolValue(false),
+			AgentEmailSendTo:         boolValue(true),
+			AgentEmailSendFromSource: "inherited",
+			AgentEmailSendToSource:   "override",
+		}},
+	}
+	encoded, err := marshalR2Record(record)
+	if err != nil {
+		t.Fatalf("marshal current record: %v", err)
+	}
+
+	// Model the v0.0.244 persisted shape: it knows the common audit metadata,
+	// but neither the send override field nor its audit columns. The opaque
+	// reserved Kind must carry the state through that rollback write.
+	type v00244Change struct {
+		Kind        string    `json:"kind"`
+		ActorID     string    `json:"actor_id"`
+		ActorHandle string    `json:"actor_handle"`
+		Reason      string    `json:"reason"`
+		At          time.Time `json:"at"`
+	}
+	var legacy struct {
+		AccountID    string         `json:"AccountID"`
+		AdminHistory []v00244Change `json:"AdminHistory"`
+	}
+	if err := json.Unmarshal(encoded, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if len(legacy.AdminHistory) != 1 || !strings.HasPrefix(
+		legacy.AdminHistory[0].Kind, r2AgentEmailSendPolicyAuditKindPrefix) {
+		t.Fatalf("new rollback-safe prefix missing: %+v", legacy.AdminHistory)
+	}
+	rolledBack, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := unmarshalR2Record(rolledBack)
+	if err != nil {
+		t.Fatalf("restore after v0.0.244 round trip: %v", err)
+	}
+	if got.AgentEmailSendOverride == nil ||
+		!got.AgentEmailSendOverride.Enabled ||
+		got.AgentEmailSendOverride.ActorID != "adm_founder" ||
+		got.AgentEmailSendOverride.Reason != "founder email sending enabled" {
+		t.Fatalf("replayed send override = %+v", got.AgentEmailSendOverride)
+	}
+	if len(got.AdminHistory) != 1 ||
+		got.AdminHistory[0].Kind != "agent_email_send_override_set" ||
+		got.AdminHistory[0].AgentEmailSendFrom == nil ||
+		*got.AdminHistory[0].AgentEmailSendFrom ||
+		got.AdminHistory[0].AgentEmailSendTo == nil ||
+		!*got.AdminHistory[0].AgentEmailSendTo {
+		t.Fatalf("restored send audit = %+v", got.AdminHistory)
+	}
+
+	clearAt := at.Add(time.Minute)
+	record.AgentEmailSendOverride = nil
+	record.AdminHistory = append(record.AdminHistory, AdminChange{
+		Kind:    "agent_email_send_override_cleared",
+		ActorID: "adm_founder", ActorHandle: "scott",
+		Reason: "restore plan sending policy", At: clearAt,
+		AgentEmailSendFrom:       boolValue(true),
+		AgentEmailSendTo:         boolValue(false),
+		AgentEmailSendFromSource: "override",
+		AgentEmailSendToSource:   "inherited",
+	})
+	encoded, err = marshalR2Record(record)
+	if err != nil {
+		t.Fatalf("marshal cleared record: %v", err)
+	}
+	var legacyClear struct {
+		AccountID    string         `json:"AccountID"`
+		AdminHistory []v00244Change `json:"AdminHistory"`
+	}
+	if err := json.Unmarshal(encoded, &legacyClear); err != nil {
+		t.Fatal(err)
+	}
+	rolledBack, err = json.Marshal(legacyClear)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = unmarshalR2Record(rolledBack)
+	if err != nil {
+		t.Fatalf("restore cleared override after v0.0.244 round trip: %v", err)
+	}
+	if got.AgentEmailSendOverride != nil || len(got.AdminHistory) != 2 ||
+		got.AdminHistory[1].Kind != "agent_email_send_override_cleared" ||
+		got.AdminHistory[1].AgentEmailSendFrom == nil ||
+		!*got.AdminHistory[1].AgentEmailSendFrom ||
+		got.AdminHistory[1].AgentEmailSendTo == nil ||
+		*got.AdminHistory[1].AgentEmailSendTo {
+		t.Fatalf("restored cleared send policy = override=%+v history=%+v",
+			got.AgentEmailSendOverride, got.AdminHistory)
+	}
+}
+
 func TestR2MessagingClearEventsSurviveLegacyControlPlaneRoundTrip(t *testing.T) {
 	at := time.Date(2026, 7, 24, 15, 0, 0, 0, time.UTC)
 	inheritedDays := int64(365)
@@ -693,6 +801,9 @@ func TestR2AgentEmailAuditMalformedReservedKindFailsClosed(t *testing.T) {
 		r2AgentEmailPolicyAuditKindPrefix,
 		r2AgentEmailPolicyAuditKindPrefix + "not-base64!",
 		r2AgentEmailPolicyAuditKindPrefix + "e30",
+		r2AgentEmailSendPolicyAuditKindPrefix,
+		r2AgentEmailSendPolicyAuditKindPrefix + "not-base64!",
+		r2AgentEmailSendPolicyAuditKindPrefix + "e30",
 	} {
 		raw, err := json.Marshal(Record{
 			AccountID: "acct_bad_email",

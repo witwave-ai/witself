@@ -592,6 +592,26 @@ type Config struct {
 	GetRealmEmailReceiveControl  func(ctx context.Context, accountID, operatorID, realmID string) (AgentEmailRealmReceiveControl, error)
 	SetRealmEmailReceiveControl  func(ctx context.Context, accountID, operatorID, realmID, receiveState string) (AgentEmailRealmReceiveControl, error)
 
+	// Outbound agent email is independent of receive enrollment. Routes remain
+	// installed whenever the callbacks exist; RequireAgentEmailSendEntitlement
+	// returns the stable feature_not_enabled refusal for ineligible accounts.
+	// From and reply recipients are always derived by the implementation.
+	RequireAgentEmailSendEntitlement func(ctx context.Context, p DomainPrincipal) error
+	QueueAgentEmail                  func(ctx context.Context, p DomainPrincipal, in SendAgentEmailRequest, idempotencyKey string) (AgentEmailOutboundMessage, error)
+	ReplyAgentEmail                  func(ctx context.Context, p DomainPrincipal, inboundMessageID string, in ReplyAgentEmailRequest, idempotencyKey string) (AgentEmailOutboundMessage, error)
+	ListAgentEmailOutbox             func(ctx context.Context, p DomainPrincipal, opts AgentEmailOutboundListOptions) (AgentEmailOutboundPage, error)
+	GetAgentEmailOutbound            func(ctx context.Context, p DomainPrincipal, messageID string) (AgentEmailOutboundMessage, error)
+	GetAgentEmailSendControl         func(ctx context.Context, accountID, operatorID, agentID string) (AgentEmailSendControl, error)
+	SetAgentEmailSendControl         func(ctx context.Context, accountID, operatorID, agentID, sendState string, expectedRowVersion int64) (AgentEmailSendControl, error)
+	GetRealmEmailSendControl         func(ctx context.Context, accountID, operatorID, realmID string) (AgentEmailRealmSendControl, error)
+	SetRealmEmailSendControl         func(ctx context.Context, accountID, operatorID, realmID, sendState string, expectedRowVersion int64) (AgentEmailRealmSendControl, error)
+	// Provider delivery events use a dedicated, least-privilege bearer trust
+	// secret, never an account/operator/agent token or the provisioning token.
+	// The adapter has already normalized the provider webhook into the closed
+	// event vocabulary before crossing this boundary.
+	AgentEmailProviderEventToken         string
+	ApplyAgentEmailOutboundProviderEvent func(ctx context.Context, event AgentEmailOutboundProviderEvent) error
+
 	// Open message requests are realm-local, message-backed delegations. The
 	// backend persists candidate snapshots, offers, coordinator selections, and
 	// fenced claims, but it never invokes a model or ranks an offer. Every hook
@@ -1546,6 +1566,10 @@ var ErrRealmEmailRouteRetirementRequired = errors.New("realm email route retirem
 // mismatched evacuation id as permission to reap.
 var ErrAccountPending = errors.New("account pending")
 
+// ErrAccountEvacuationOutboundInFlight means a retryable account move was
+// fenced until one outbound provider call finishes its exact-replay window.
+var ErrAccountEvacuationOutboundInFlight = errors.New("outbound email delivery is still in flight")
+
 // ErrInvalidPlanSnapshot is returned by the cell store when a provision-token
 // request's revision/hash envelope does not match its payload.
 var ErrInvalidPlanSnapshot = errors.New("invalid plan snapshot")
@@ -1861,6 +1885,13 @@ func apiMux(cfg Config) http.Handler {
 		mux.HandleFunc("POST /v1/internal/agent-email:ingest",
 			agentEmailIngestHandler(agentEmailReceive, cfg.IngestAgentEmailPilot))
 	}
+	if validAgentEmailProviderEventToken(cfg.AgentEmailProviderEventToken) && cfg.ApplyAgentEmailOutboundProviderEvent != nil {
+		mux.HandleFunc("POST /v1/internal/agent-email-send:provider-event",
+			agentEmailOutboundProviderEventHandler(
+				cfg.AgentEmailProviderEventToken,
+				cfg.ApplyAgentEmailOutboundProviderEvent,
+			))
+	}
 	selfDigestSupported := cfg.AuthenticatePrincipal != nil
 	transcriptsSupported := selfDigestSupported &&
 		cfg.CreateTranscript != nil && cfg.AppendTranscriptEntry != nil &&
@@ -1912,13 +1943,18 @@ func apiMux(cfg Config) http.Handler {
 		cfg.ListSecrets != nil && cfg.GetSecret != nil &&
 		cfg.ArchiveSecret != nil && cfg.RestoreSecret != nil &&
 		cfg.DeleteSecret != nil && cfg.AccessSecretField != nil
+	agentEmailSendSupported := selfDigestSupported && cfg.QueueAgentEmail != nil
+	agentEmailReplySupported := selfDigestSupported && cfg.ReplyAgentEmail != nil
+	agentEmailSentHistorySupported := selfDigestSupported &&
+		cfg.ListAgentEmailOutbox != nil && cfg.GetAgentEmailOutbound != nil
 	mux.HandleFunc("/v1/capabilities", capabilitiesHandler(cfg.AccountID,
 		cfg.PlanInfo, selfDigestSupported, transcriptsSupported,
 		messagingSupported, messageListenSupported, messageReplySupported, messageProcessingSupported,
 		messageRequestsSupported,
 		memoriesSupported, memoryRecallSupported, memorySupersedeSupported,
 		memoryDeleteSupported, memoryCurationSupported, memoryVectorsSupported,
-		avatarsSupported, secretsSupported))
+		avatarsSupported, secretsSupported,
+		agentEmailSendSupported, agentEmailReplySupported, agentEmailSentHistorySupported))
 	if cfg.Login != nil {
 		mux.HandleFunc("POST /v1/auth/bootstrap", bootstrapLoginHandler(cfg.Login))
 	}
@@ -2140,6 +2176,22 @@ func apiMux(cfg Config) http.Handler {
 				mux.HandleFunc("PATCH /v1/realms/{realm}/email-receive", setRealmAgentEmailReceiveControlHandler(
 					cfg.Authenticate, cfg.SetRealmEmailReceiveControl))
 			}
+		}
+		if cfg.GetAgentEmailSendControl != nil {
+			mux.HandleFunc("GET /v1/agents/{agent}/email-send", getAgentEmailSendControlHandler(
+				cfg.Authenticate, cfg.GetAgentEmailSendControl))
+		}
+		if cfg.SetAgentEmailSendControl != nil {
+			mux.HandleFunc("PATCH /v1/agents/{agent}/email-send", setAgentEmailSendControlHandler(
+				cfg.Authenticate, cfg.SetAgentEmailSendControl))
+		}
+		if cfg.GetRealmEmailSendControl != nil {
+			mux.HandleFunc("GET /v1/realms/{realm}/email-send", getRealmAgentEmailSendControlHandler(
+				cfg.Authenticate, cfg.GetRealmEmailSendControl))
+		}
+		if cfg.SetRealmEmailSendControl != nil {
+			mux.HandleFunc("PATCH /v1/realms/{realm}/email-send", setRealmAgentEmailSendControlHandler(
+				cfg.Authenticate, cfg.SetRealmEmailSendControl))
 		}
 	}
 	if cfg.AuthenticatePrincipal != nil {
@@ -2438,6 +2490,7 @@ func apiMux(cfg Config) http.Handler {
 				cfg.AuthenticatePrincipal, cfg.ReadMessage, cfg.AckMessage, cfg.ReplyMessage,
 				cfg.ClaimMessage, cfg.RenewMessageClaim, cfg.ReleaseMessageClaim, cfg.CompleteMessage))
 		}
+		var agentEmailReceiveActions http.HandlerFunc
 		if agentEmailPilotSupported {
 			if cfg.GetAgentEmailAddress != nil {
 				mux.HandleFunc("GET /v1/email/address", getAgentEmailAddressHandler(
@@ -2478,13 +2531,38 @@ func apiMux(cfg Config) http.Handler {
 				cfg.MarkAgentEmailCodeConsumed != nil || cfg.ClaimAgentEmail != nil ||
 				cfg.RenewAgentEmailClaim != nil || cfg.ReleaseAgentEmailClaim != nil ||
 				cfg.CompleteAgentEmail != nil {
-				mux.HandleFunc("POST /v1/email/{action}", agentEmailActionHandler(
+				agentEmailReceiveActions = agentEmailActionHandler(
 					cfg.AuthenticatePrincipal, agentEmailReceive,
 					cfg.RequireAgentEmailEntitlement,
 					cfg.ReadAgentEmail, cfg.AckAgentEmail, cfg.MarkAgentEmailCodeConsumed,
 					cfg.ClaimAgentEmail, cfg.RenewAgentEmailClaim,
-					cfg.ReleaseAgentEmailClaim, cfg.CompleteAgentEmail))
+					cfg.ReleaseAgentEmailClaim, cfg.CompleteAgentEmail)
 			}
+		}
+		if cfg.QueueAgentEmail != nil {
+			mux.HandleFunc("POST /v1/email:send", sendAgentEmailHandler(
+				cfg.AuthenticatePrincipal, cfg.RequireAgentEmailSendEntitlement,
+				cfg.QueueAgentEmail))
+		}
+		if agentEmailReceiveActions != nil || cfg.ReplyAgentEmail != nil {
+			var outboundReply http.HandlerFunc
+			if cfg.ReplyAgentEmail != nil {
+				outboundReply = replyAgentEmailHandler(
+					cfg.AuthenticatePrincipal, cfg.RequireAgentEmailSendEntitlement,
+					cfg.ReplyAgentEmail)
+			}
+			mux.HandleFunc("POST /v1/email/{action}",
+				agentEmailActionDispatchHandler(agentEmailReceiveActions, outboundReply))
+		}
+		if cfg.ListAgentEmailOutbox != nil {
+			mux.HandleFunc("GET /v1/email/sent", listAgentEmailOutboundHandler(
+				cfg.AuthenticatePrincipal, cfg.RequireAgentEmailSendEntitlement,
+				cfg.ListAgentEmailOutbox))
+		}
+		if cfg.GetAgentEmailOutbound != nil {
+			mux.HandleFunc("GET /v1/email/sent/{id}", getAgentEmailOutboundHandler(
+				cfg.AuthenticatePrincipal, cfg.RequireAgentEmailSendEntitlement,
+				cfg.GetAgentEmailOutbound))
 		}
 		if cfg.CreateMessageRequest != nil {
 			mux.HandleFunc("POST /v1/message-requests", createMessageRequestHandler(cfg.AuthenticatePrincipal, cfg.CreateMessageRequest))
@@ -2652,7 +2730,7 @@ func billingCapabilityURLHasUnsafeRune(raw string) bool {
 	return false
 }
 
-func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (string, map[string]int64, map[string]int64, []string, error), selfDigestSupported, transcriptsSupported, messagingSupported, messageListenSupported, messageReplySupported, messageProcessingSupported, messageRequestsSupported, memoriesSupported, memoryRecallSupported, memorySupersedeSupported, memoryDeleteSupported, memoryCurationSupported, memoryVectorsSupported, avatarsSupported, secretsSupported bool) http.HandlerFunc {
+func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (string, map[string]int64, map[string]int64, []string, error), selfDigestSupported, transcriptsSupported, messagingSupported, messageListenSupported, messageReplySupported, messageProcessingSupported, messageRequestsSupported, memoriesSupported, memoryRecallSupported, memorySupersedeSupported, memoryDeleteSupported, memoryCurationSupported, memoryVectorsSupported, avatarsSupported, secretsSupported, agentEmailSendSupported, agentEmailReplySupported, agentEmailSentHistorySupported bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		notImpl := feature{Reason: "not_implemented"}
 		featureState := func(supported bool) feature {
@@ -2675,30 +2753,33 @@ func capabilitiesHandler(accountID string, planInfo func(ctx context.Context) (s
 				APIVersion: "v1",
 			},
 			Features: map[string]feature{
-				"memories":                featureState(memoriesSupported),
-				"memory_recall":           featureState(memoryRecallSupported),
-				"memory_supersede":        featureState(memorySupersedeSupported),
-				"memory_permanent_delete": featureState(memoryDeleteSupported),
-				"memory_vector_profiles":  featureState(memoryVectorsSupported),
-				"client_vector_recall":    featureState(memoryVectorsSupported && memoryRecallSupported),
-				"automatic_capture":       notImpl,
-				"opportunistic_curation":  featureState(memoryCurationSupported),
-				"scheduled_curation":      notImpl,
-				"transcript_capture":      featureState(transcriptsSupported),
-				"facts":                   notImpl,
-				"self_digest":             {Supported: selfDigestSupported},
-				"semantic_recall":         featureState(memoryVectorsSupported && memoryRecallSupported),
-				"policies":                notImpl,
-				"groups":                  notImpl,
-				"avatars":                 featureState(avatarsSupported),
-				"secrets":                 featureState(secretsSupported),
-				"messaging":               {Supported: messagingSupported},
-				"message_listen":          featureState(messageListenSupported),
-				"message_reply":           featureState(messageReplySupported),
-				"message_processing":      featureState(messageProcessingSupported),
-				"message_requests":        featureState(messageRequestsSupported),
-				"transcripts":             {Supported: transcriptsSupported},
-				"audit":                   notImpl,
+				"memories":                 featureState(memoriesSupported),
+				"memory_recall":            featureState(memoryRecallSupported),
+				"memory_supersede":         featureState(memorySupersedeSupported),
+				"memory_permanent_delete":  featureState(memoryDeleteSupported),
+				"memory_vector_profiles":   featureState(memoryVectorsSupported),
+				"client_vector_recall":     featureState(memoryVectorsSupported && memoryRecallSupported),
+				"automatic_capture":        notImpl,
+				"opportunistic_curation":   featureState(memoryCurationSupported),
+				"scheduled_curation":       notImpl,
+				"transcript_capture":       featureState(transcriptsSupported),
+				"facts":                    notImpl,
+				"self_digest":              {Supported: selfDigestSupported},
+				"semantic_recall":          featureState(memoryVectorsSupported && memoryRecallSupported),
+				"policies":                 notImpl,
+				"groups":                   notImpl,
+				"avatars":                  featureState(avatarsSupported),
+				"secrets":                  featureState(secretsSupported),
+				"messaging":                {Supported: messagingSupported},
+				"message_listen":           featureState(messageListenSupported),
+				"message_reply":            featureState(messageReplySupported),
+				"message_processing":       featureState(messageProcessingSupported),
+				"message_requests":         featureState(messageRequestsSupported),
+				"agent_email_send":         featureState(agentEmailSendSupported),
+				"agent_email_reply":        featureState(agentEmailReplySupported),
+				"agent_email_sent_history": featureState(agentEmailSentHistorySupported),
+				"transcripts":              {Supported: transcriptsSupported},
+				"audit":                    notImpl,
 			},
 			Limits:  map[string]any{},
 			Billing: billingInfo{Supported: false, Reason: "self_hosted"},
@@ -4299,6 +4380,9 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 				return
 			case errors.Is(err, ErrAccountPending):
 				writeJSONError(w, http.StatusConflict, "account is pending — not suspendable")
+				return
+			case errors.Is(err, ErrAccountEvacuationOutboundInFlight):
+				writeJSONError(w, http.StatusConflict, "outbound email delivery is still in flight")
 				return
 			case errors.Is(err, ErrConflict):
 				writeJSONError(w, http.StatusConflict, "account evacuation id does not match")

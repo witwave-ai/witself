@@ -1147,8 +1147,188 @@ controls below bind one allowlisted agent or realm target from the route path.
 not define a website, human/staff mailboxes, marketing mail, or a generic
 platform-notification sender. Required `postmaster@witmail.net` and
 `abuse@witmail.net` destinations are operator-routed operational exceptions.
-Any future outbound-agent contract must use separately isolated sending
-infrastructure and remain agent-email-only.
+The outbound beta uses separately isolated sending infrastructure and remains
+agent-email-only. Provider dispatch is dark by default even where catalog
+entitlement is present.
+
+### Outbound agent-email beta
+
+Receive and send are separate account features. Personal has neither;
+Professional has receive only; Team and Enterprise have both. The installed
+HTTP/CLI/MCP surface is stable across plan changes. A caller without effective
+`agent_email_send` receives the ordinary non-retryable
+`feature_not_enabled` envelope before any outbox row or rate debit is created.
+
+`POST /v1/email:send` accepts exactly one recipient and plain text. It requires
+an `Idempotency-Key` header and this strict body:
+
+```json
+{
+  "to": "person@example.net",
+  "subject": "Status update",
+  "text": "The job is complete."
+}
+```
+
+`POST /v1/email/{inbound_message_id}:reply` requires the same header and
+accepts only:
+
+```json
+{
+  "text": "Thanks, I received this."
+}
+```
+
+For a reply, the server derives recipient, safe `Re:` subject, thread key,
+optional `In-Reply-To`/`References`, From, and Reply-To from the exact
+owner-visible inbound message. Direct send derives everything except recipient,
+subject, and text. Neither route accepts HTML, attachments, CC/BCC, multiple
+recipients, `from`, or `reply_to`. The server derives From as the permanent
+canonical local part at `send.witmail.net` and Reply-To as the same local part
+at `witmail.net`; aliases and customer domains are not selectable sender
+identities. Subject is at most 4 KiB and body text at most 256 KiB in the HTTP
+and durable store contract; MCP applies a narrower 128 KiB text ceiling.
+
+Both queue routes return HTTP 202 with the same content-minimal envelope:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "message": {
+    "id": "esnd_aaaaaaaaaaaaaaaa",
+    "account_id": "acc_aaaaaaaaaaaaaaaa",
+    "realm_id": "realm_bbbbbbbbbbbbbbbb",
+    "owner_agent_id": "agent_cccccccccccccccc",
+    "from": "browser-agent.bbbbbbbbbbbbbbbb@send.witmail.net",
+    "reply_to": "browser-agent.bbbbbbbbbbbbbbbb@witmail.net",
+    "to": "person@example.net",
+    "subject": "Status update",
+    "state": "queued",
+    "request_kind": "direct",
+    "thread_key": "esnd_aaaaaaaaaaaaaaaa",
+    "attempt_count": 0,
+    "queued_at": "2026-08-14T12:00:00Z",
+    "created_at": "2026-08-14T12:00:00Z",
+    "updated_at": "2026-08-14T12:00:00Z"
+  }
+}
+```
+
+A reply uses `request_kind:"reply"` and includes
+`reply_to_inbound_message_id`. The durable states are exactly `queued`,
+`claimed`, `provider_started`, `accepted`, `delivered`, `deferred`, `bounced`,
+`rejected`, `failed`, `ambiguous`, and `canceled`. Provider-neutral
+`provider_state`, `provider`, `error_code`, and applicable state timestamps are
+included only when present. Submitted text, idempotency-key material, worker
+claim id/generation/lease, provider message id, and raw provider response are
+never returned.
+
+An idempotency key is scoped to the authenticated account, realm, and owner
+agent and is persisted only as a hash. Exact replay returns the same durable
+row without consuming another rate debit. Reusing the key for changed request
+semantics returns conflict. A 202 response proves a durable queue write, not
+provider acceptance or delivery.
+
+Outbound errors use the common `witself.v0` coded envelope. Stable codes are
+`auth_failed`, `feature_not_enabled`, `rate_limited`, `limit_exceeded`,
+`invalid_request`, `not_found`, `forbidden`, `agent_email_processing_busy`,
+`agent_email_idempotency_conflict`, `agent_email_state_conflict`, and
+`backend_unavailable`. Every envelope includes `retryable`; rate refusals also
+include the value-free limit details and `attempted:1`. JSON CLI output
+preserves these codes and retry guidance, while documented exit codes continue
+to distinguish policy, not-found, conflict, and unavailable/limit failures.
+Outbound MCP tools preserve the same machine decision in an `isError:true` tool
+result whose `structuredContent` is `{"error":{...}}`; the error object carries
+`code`, `message`, `retryable`, optional `feature`, optional whole-second
+`retry_after`, and optional value-free rate `details`. It is also serialized as
+the result's JSON text content for clients without structured-output support.
+MCP validation failures remain ordinary tool-validation errors rather than
+inventing a backend code.
+
+The account's `agent_email_retention_days` policy also governs outbound rows,
+using `created_at` as the cutoff timestamp. `queued`, `claimed`, and
+`provider_started` are unresolved-work holds and are not retention candidates.
+Eligible row deletion removes the submitted subject/body and metadata;
+provider-event receipts are selected oldest first and deleted in bounded
+batches before their parent. The configured batch budget is common across
+inbound rows, provider receipts, outbound parents, and suppressions, so no
+foreign-key cascade escapes the worker bound.
+Because inbound age starts at `received_at` while a later reply starts at its
+own `created_at`, retention may remove the inbound content before the reply.
+The surviving outbound row keeps only the opaque
+`reply_to_inbound_message_id` as detached historical provenance; it does not
+retain or restore the inbound body. Account import accepts that ordinary
+retention shape, while still requiring an archived parent that is present to
+match the reply's exact realm and owner.
+Hard-bounce/complaint suppression retains only an account-scoped recipient
+digest and follows its separate safety lifetime rather than exposing or
+keeping message content. That lifetime is the finite mail window plus one
+year, capped at ten years; an indefinite/missing mail policy uses ten years.
+
+`GET /v1/email/sent?state=queued&limit=50&cursor=...` returns a newest-first
+metadata page:
+
+```json
+{
+  "schema_version": "witself.v0",
+  "messages": [],
+  "next_cursor": ""
+}
+```
+
+`state` is optional, `limit` is 1–100, and `cursor` is opaque. `GET
+/v1/email/sent/{send_id}` returns the single-message envelope above. Both are
+owner-only and content-minimal.
+
+Value-free operator controls are:
+
+```text
+GET|PATCH /v1/agents/{agent}/email-send
+GET|PATCH /v1/realms/{realm}/email-send
+```
+
+PATCH accepts `{"send_state":"enabled"}` or
+`{"send_state":"disabled"}` and may add a positive
+`expected_row_version` optimistic-concurrency fence; omitting it requests the
+documented unconditional operator write. Agent control exposes `send_state`,
+`agent_send_state`, `realm_send_state`, `row_version`, `realm_row_version`, and
+lifecycle timestamps. Realm control exposes `send_state`, `agent_count`,
+`row_version`, and lifecycle timestamps. Effective send requires an active
+account, account entitlement, a live agent, and both layers enabled. A
+suspended account may GET or PATCH to disabled, but cannot enable.
+
+The signed cell-worker dispatch body is
+`witself.agent-email-dispatch.v1`. It carries one immutable `send_id`, account,
+realm, agent, derived From/Reply-To, recipient, subject, text, and optional
+reply-thread headers. Detached Ed25519 headers bind schema version, RFC3339Nano
+timestamp, key id, audience, complete JSON SHA-256, and signature. The
+Cloudflare adapter checks an exact account allowlist before using its provider
+credential. Its closed `witself.agent-email-dispatch-response.v1` states are
+`accepted`, `delivered`, `queued`, `permanent_bounce`, `rejected`, `retryable`,
+and `ambiguous`; raw provider errors never cross this seam. A durable receipt
+keyed by `send_id` returns an exact terminal replay and rejects a different
+digest. Once the receipt records `provider_started`, an unprovable outcome is
+`ambiguous`, never an inferred success or blind resend.
+
+Content-free provider updates enter the cell only at bearer-protected `POST
+/v1/internal/agent-email-send:provider-event`:
+
+```json
+{
+  "schema_version": "witself.agent-email-provider-event.v1",
+  "event_id": "provider-event-01",
+  "provider_message_id": "provider-message-01",
+  "event_class": "delivered",
+  "occurred_at": "2026-08-14T12:01:00Z"
+}
+```
+
+`event_class` is `delivered`, `deferred`, `bounced`, `failed`, `rejected`, or
+`complained`; only `bounced` may add `bounce_type:"permanent"`. The cell hashes
+event ids for idempotency and accepts no recipient, body, header, provider
+diagnostic, or arbitrary payload. Permanent bounce and complaint create an
+account-scoped hashed-recipient suppression that ordinary enqueue operations
+cannot bypass.
 
 ### Canonical Realm-ID email-route lifecycle
 

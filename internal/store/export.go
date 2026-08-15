@@ -343,6 +343,14 @@ func (s *Store) exportAccount(
 			  'disabled_at', disabled_at)
 			FROM agent_email_realm_receive_controls
 			WHERE account_id = $1 ORDER BY realm_id`, arg: accountID},
+		&querySource{tx: tx, table: "agent_email_realm_send_controls", q: `
+			SELECT jsonb_build_object(
+			  'account_id', account_id, 'realm_id', realm_id,
+			  'send_state', send_state, 'row_version', row_version,
+			  'created_at', created_at, 'updated_at', updated_at,
+			  'disabled_at', disabled_at)
+			FROM agent_email_realm_send_controls
+			WHERE account_id = $1 ORDER BY realm_id`, arg: accountID},
 		// Realm avatar style heads and immutable versions precede agents so
 		// profiles can reference the selected style as soon as they stream.
 		// The current-version head foreign key is deferred because the head and
@@ -411,6 +419,16 @@ func (s *Store) exportAccount(
 			  'deleted_at', a.deleted_at)
 			FROM agents a JOIN realms r ON r.id = a.realm_id
 			WHERE r.account_id = $1 ORDER BY a.id`, arg: accountID},
+		&querySource{tx: tx, table: "agent_email_send_controls", q: `
+			SELECT jsonb_build_object(
+			  'account_id', account_id, 'realm_id', realm_id,
+			  'owner_agent_id', owner_agent_id,
+			  'send_state', send_state, 'row_version', row_version,
+			  'created_at', created_at, 'updated_at', updated_at,
+			  'disabled_at', disabled_at)
+			FROM agent_email_send_controls
+			WHERE account_id = $1
+			ORDER BY realm_id, owner_agent_id`, arg: accountID},
 		// Agent-email address reservations intentionally retain retired rows. The
 		// remaining streams follow their foreign-key dependency order, and raw
 		// MIME uses the archive's canonical lowercase bytea hex representation.
@@ -536,6 +554,51 @@ func (s *Store) exportAccount(
 			FROM agent_email_retry_canary_arms
 			WHERE account_id = $1 AND state = 'accepted'
 			ORDER BY realm_id, owner_agent_id, accepted_at, challenge_sha256`, arg: accountID},
+		&querySource{tx: tx, table: "agent_email_outbound_messages", q: `
+			SELECT jsonb_build_object(
+			  'id', id, 'account_id', account_id, 'realm_id', realm_id,
+			  'owner_agent_id', owner_agent_id, 'address_id', address_id,
+			  'from_address', from_address, 'reply_to_address', reply_to_address,
+			  'to_address', to_address, 'subject', subject, 'body_text', body_text,
+			  'request_kind', request_kind,
+			  'reply_to_inbound_message_id', reply_to_inbound_message_id,
+			  'thread_key', thread_key, 'in_reply_to_header', in_reply_to_header,
+			  'references_headers', references_headers,
+			  'idempotency_key_hash', idempotency_key_hash,
+			  'request_hash', request_hash, 'state', state,
+			  'provider_state', provider_state, 'provider', provider,
+			  'provider_message_id', provider_message_id,
+			  'last_error_code', last_error_code,
+			  'attempt_count', attempt_count, 'claim_generation', claim_generation,
+			  'claim_id', claim_id, 'lease_expires_at', lease_expires_at,
+			  'next_attempt_at', next_attempt_at, 'queued_at', queued_at,
+			  'provider_started_at', provider_started_at,
+			  'accepted_at', accepted_at, 'delivered_at', delivered_at,
+			  'deferred_at', deferred_at, 'failed_at', failed_at,
+			  'ambiguous_at', ambiguous_at, 'canceled_at', canceled_at,
+			  'created_at', created_at, 'updated_at', updated_at)
+			FROM agent_email_outbound_messages
+			WHERE account_id = $1 ORDER BY realm_id, owner_agent_id, created_at, id`, arg: accountID},
+		&querySource{tx: tx, table: "agent_email_outbound_provider_events", q: `
+			SELECT jsonb_build_object(
+			  'account_id', event.account_id,
+			  'provider', event.provider, 'event_id_hash', event.event_id_hash,
+			  'event_request_hash', event.event_request_hash,
+			  'outbound_id', event.outbound_id,
+			  'event_class', event.event_class,
+			  'occurred_at', event.occurred_at, 'received_at', event.received_at)
+			FROM agent_email_outbound_provider_events event
+			JOIN agent_email_outbound_messages outbound ON outbound.id=event.outbound_id
+			WHERE outbound.account_id = $1
+			ORDER BY event.outbound_id, event.occurred_at, event.provider, event.event_id_hash`, arg: accountID},
+		&querySource{tx: tx, table: "agent_email_outbound_recipient_suppressions", q: `
+			SELECT jsonb_build_object(
+			  'account_id', account_id, 'recipient_sha256', recipient_sha256,
+			  'reason', reason, 'source_send_id', source_send_id,
+			  'provider', provider, 'created_at', created_at,
+			  'updated_at', updated_at)
+			FROM agent_email_outbound_recipient_suppressions
+			WHERE account_id = $1 ORDER BY recipient_sha256`, arg: accountID},
 		// The AVK itself is never exported. These streams preserve only its
 		// public binding plus byte-identical ciphertext and wrapped DEKs so the
 		// same client-held key can reopen the vault after a cell move.

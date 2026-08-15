@@ -1,6 +1,6 @@
 {
   "schema_version": "witself.plans.v0",
-  "updated": "2026-08-10",
+  "updated": "2026-08-14",
   "currency": "USD",
   "plans": [
     {
@@ -35,7 +35,7 @@
       "usage_billed": true,
       "limits": { "agent_email_attachment_storage_bytes": 107374182400, "agent_email_custom_domains_per_account": 1, "agent_email_max_raw_bytes": 26214400, "agent_email_realm_aliases_per_realm": 1, "agents": 2500, "agents_per_realm": 100, "message_delivered_per_realm_minute": 5000, "message_delivered_per_recipient_minute": 300, "message_sent_per_agent_minute": 120, "realms": 25, "stored_fact": 50000, "stored_memory": 50000, "stored_secret": 250 },
       "policies": { "agent_email_entitlement_version": 1, "agent_email_retention_days": 365, "message_retention_days": 365, "messaging_entitlement_version": 1, "transcript_retention_days": 365 },
-      "features": ["memory", "facts", "secrets", "messaging", "agent_email_receive", "agent_email_realm_alias", "agent_email_custom_domain", "collaboration", "support"],
+      "features": ["memory", "facts", "secrets", "messaging", "agent_email_receive", "agent_email_send", "agent_email_realm_alias", "agent_email_custom_domain", "collaboration", "support"],
       "summary": "Coming soon. Everything in Professional for up to 100 agents per realm across 25 realms, plus usage-based billing."
     },
     {
@@ -45,7 +45,7 @@
       "usage_billed": true,
       "limits": { "agent_email_attachment_storage_bytes": 107374182400, "agent_email_custom_domains_per_account": 0, "agent_email_max_raw_bytes": 26214400, "agent_email_realm_aliases_per_realm": 3, "message_delivered_per_realm_minute": 25000, "message_delivered_per_recipient_minute": 1000, "message_sent_per_agent_minute": 600, "stored_fact": 250000, "stored_memory": 250000, "stored_secret": 1000 },
       "policies": { "agent_email_entitlement_version": 1, "agent_email_retention_days": 365, "message_retention_days": 365, "messaging_entitlement_version": 1 },
-      "features": ["memory", "facts", "secrets", "messaging", "agent_email_receive", "agent_email_realm_alias", "agent_email_custom_domain", "collaboration", "support"],
+      "features": ["memory", "facts", "secrets", "messaging", "agent_email_receive", "agent_email_send", "agent_email_realm_alias", "agent_email_custom_domain", "collaboration", "support"],
       "summary": "Coming soon. Everything in Team with custom pricing and support; details to follow."
     }
   ]

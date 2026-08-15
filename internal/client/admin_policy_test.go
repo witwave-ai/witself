@@ -247,6 +247,7 @@ func TestAdminAgentEmailPolicyOperations(t *testing.T) {
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/admin/accounts/acct_1/email-receive" &&
+			r.URL.Path != "/v1/admin/accounts/acct_1/email-send" &&
 			r.URL.Path != "/v1/admin/accounts/acct_1/email-retention" {
 			http.NotFound(w, r)
 			return
@@ -267,6 +268,9 @@ func TestAdminAgentEmailPolicyOperations(t *testing.T) {
 			"email_receive": map[string]any{
 				"default_enabled": false, "enabled": true, "overridden": true,
 			},
+			"email_send": map[string]any{
+				"default_enabled": false, "enabled": true, "overridden": true,
+			},
 			"email_retention": map[string]any{
 				"default_days": 30, "effective_days": nil, "overridden": true,
 			},
@@ -285,6 +289,21 @@ func TestAdminAgentEmailPolicyOperations(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := ClearAdminAgentEmailReceive(
+		ctx, srv.URL, "witself_adm_test", "acct_1", " restore ",
+	); err != nil {
+		t.Fatal(err)
+	}
+	got, err = GetAdminAgentEmailSend(
+		ctx, srv.URL, "witself_adm_test", "acct_1")
+	if err != nil || !got.EmailSend.Enabled {
+		t.Fatalf("GET send = %#v, %v", got, err)
+	}
+	if _, err := SetAdminAgentEmailSend(
+		ctx, srv.URL, "witself_adm_test", "acct_1", true, " founder ",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ClearAdminAgentEmailSend(
 		ctx, srv.URL, "witself_adm_test", "acct_1", " restore ",
 	); err != nil {
 		t.Fatal(err)
@@ -312,12 +331,14 @@ func TestAdminAgentEmailPolicyOperations(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if len(requests) != 7 ||
+	if len(requests) != 10 ||
 		requests[1].path != "/v1/admin/accounts/acct_1/email-receive" ||
 		requests[1].body["enabled"] != true ||
-		requests[4].path != "/v1/admin/accounts/acct_1/email-retention" ||
-		requests[4].body["days"] != float64(365) ||
-		requests[5].body["indefinite"] != true {
+		requests[4].path != "/v1/admin/accounts/acct_1/email-send" ||
+		requests[4].body["enabled"] != true ||
+		requests[7].path != "/v1/admin/accounts/acct_1/email-retention" ||
+		requests[7].body["days"] != float64(365) ||
+		requests[8].body["indefinite"] != true {
 		t.Fatalf("requests = %#v", requests)
 	}
 }

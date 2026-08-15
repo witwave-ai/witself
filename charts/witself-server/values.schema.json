@@ -110,8 +110,24 @@
     "agentEmail": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["receivePilot", "receiveProduction"],
+      "required": ["providerEventTokenSecret", "receivePilot", "receiveProduction"],
       "properties": {
+        "providerEventTokenSecret": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "key"],
+          "properties": {
+            "name": {
+              "type": "string",
+              "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+            },
+            "key": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9._-]+$"
+            }
+          }
+        },
         "receivePilot": {
           "type": "object",
           "additionalProperties": false,
@@ -280,6 +296,7 @@
         "avatarStyleRollout",
         "messageRateBucketCleanup",
         "agentEmailRateBucketCleanup",
+        "agentEmailOutbound",
         "transcriptRetention",
         "messageRetention",
         "agentEmailRetention"
@@ -493,6 +510,74 @@
               "pattern": "^(([1-9][0-9]{3}|[1-9][0-9]{4}|[12][0-9]{5}|300000)ms|([1-9]|[1-9][0-9]|[12][0-9]{2}|300)s|[1-5]m)$"
             }
           }
+        },
+        "agentEmailOutbound": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "dispatchEndpoint",
+            "dispatchAudience",
+            "dispatchKeyID",
+            "dispatchPrivateKeySecret",
+            "batchSize",
+            "interval",
+            "batchTimeout",
+            "providerTimeout"
+          ],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "dispatchEndpoint": {
+              "type": "string",
+              "pattern": "^$|^https://\\S+$"
+            },
+            "dispatchAudience": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[a-z][a-z0-9-]*$"
+            },
+            "dispatchKeyID": {
+              "type": "string",
+              "pattern": "^$|^[a-z][a-z0-9_.-]{0,63}$"
+            },
+            "dispatchPrivateKeySecret": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "key"],
+              "properties": {
+                "name": { "type": "string" },
+                "key": { "type": "string", "minLength": 1 }
+              }
+            },
+            "batchSize": { "type": "integer", "minimum": 1, "maximum": 100 },
+            "interval": {
+              "type": "string",
+              "pattern": "^(([1-9][0-9]{2,4}|[12][0-9]{5}|300000)ms|([1-9]|[1-9][0-9]|[12][0-9]{2}|300)s|[1-5]m)$"
+            },
+            "batchTimeout": {
+              "type": "string",
+              "pattern": "^((1[0-9]{3}|[2-9][0-9]{3}|[1-9][0-9]{4}|[12][0-9]{5}|300000)ms|([1-9]|[1-9][0-9]|[12][0-9]{2}|300)s|[1-5]m)$"
+            },
+            "providerTimeout": {
+              "type": "string",
+              "pattern": "^((1[0-9]{3}|[2-9][0-9]{3}|[1-5][0-9]{4}|60000)ms|([1-9]|[1-5][0-9]|60)s|1m)$"
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": { "enabled": { "const": true } },
+                "required": ["enabled"]
+              },
+              "then": {
+                "properties": {
+                  "dispatchEndpoint": { "minLength": 9 },
+                  "dispatchKeyID": { "minLength": 1 }
+                }
+              }
+            }
+          ]
         },
         "transcriptRetention": {
           "type": "object",

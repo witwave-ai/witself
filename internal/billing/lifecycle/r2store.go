@@ -70,6 +70,11 @@ const r2MessagingPolicyAuditKindPrefix = "witself.messaging-policy-override.v1:"
 // so a rollback cannot erase email override state from the audit log.
 const r2AgentEmailPolicyAuditKindPrefix = "witself.agent-email-policy-override.v1:"
 
+// Keep outbound entitlement in its own rollback envelope. A v0.0.244 binary
+// understands the inbound v1 prefix and would reject new fields in that
+// envelope, but safely preserves this unknown Kind string for later replay.
+const r2AgentEmailSendPolicyAuditKindPrefix = "witself.agent-email-send-policy-override.v1:"
+
 type r2LimitAuditEnvelope struct {
 	Kind       string             `json:"kind"`
 	Dimension  string             `json:"dimension"`
@@ -103,6 +108,16 @@ type r2AgentEmailPolicyAuditEnvelope struct {
 	RetentionTo   *int64 `json:"retention_to,omitempty"`
 	FromSource    string `json:"from_source"`
 	ToSource      string `json:"to_source"`
+}
+
+// r2AgentEmailSendPolicyAuditEnvelope preserves outbound-email override state
+// across rollback to a binary whose Record predates the send entitlement.
+type r2AgentEmailSendPolicyAuditEnvelope struct {
+	Kind       string `json:"kind"`
+	SendFrom   *bool  `json:"send_from"`
+	SendTo     *bool  `json:"send_to"`
+	FromSource string `json:"from_source"`
+	ToSource   string `json:"to_source"`
 }
 
 // NewR2Store returns an R2Store on c, namespacing every key under prefix
@@ -2370,6 +2385,121 @@ func replayR2AgentEmailPolicyOverrides(
 	return receive, retention
 }
 
+func normalizeR2AgentEmailSendPolicyAudit(
+	change AdminChange,
+) (r2AgentEmailSendPolicyAuditEnvelope, error) {
+	switch change.Kind {
+	case "agent_email_send_override_set":
+		if change.AgentEmailSendFrom == nil || change.AgentEmailSendTo == nil ||
+			change.AgentEmailSendToSource != "override" ||
+			(change.AgentEmailSendFromSource != "inherited" &&
+				change.AgentEmailSendFromSource != "override") {
+			return r2AgentEmailSendPolicyAuditEnvelope{}, errors.New(
+				"invalid agent email send set audit")
+		}
+	case "agent_email_send_override_cleared":
+		if change.AgentEmailSendFrom == nil || change.AgentEmailSendTo == nil ||
+			change.AgentEmailSendFromSource != "override" ||
+			change.AgentEmailSendToSource != "inherited" {
+			return r2AgentEmailSendPolicyAuditEnvelope{}, errors.New(
+				"invalid agent email send clear audit")
+		}
+	default:
+		return r2AgentEmailSendPolicyAuditEnvelope{}, fmt.Errorf(
+			"unsupported normalized kind %q", change.Kind)
+	}
+	return r2AgentEmailSendPolicyAuditEnvelope{
+		Kind: change.Kind, SendFrom: change.AgentEmailSendFrom,
+		SendTo: change.AgentEmailSendTo, FromSource: change.AgentEmailSendFromSource,
+		ToSource: change.AgentEmailSendToSource,
+	}, nil
+}
+
+func encodeR2AgentEmailSendPolicyAuditKind(change AdminChange) (string, error) {
+	envelope, err := normalizeR2AgentEmailSendPolicyAudit(change)
+	if err != nil {
+		return "", err
+	}
+	payload, err := json.Marshal(envelope)
+	if err != nil {
+		return "", err
+	}
+	return r2AgentEmailSendPolicyAuditKindPrefix +
+		base64.RawURLEncoding.EncodeToString(payload), nil
+}
+
+func decodeR2AgentEmailSendPolicyAuditKind(
+	kind string,
+) (r2AgentEmailSendPolicyAuditEnvelope, error) {
+	encoded := strings.TrimPrefix(kind, r2AgentEmailSendPolicyAuditKindPrefix)
+	if encoded == kind || encoded == "" {
+		return r2AgentEmailSendPolicyAuditEnvelope{}, errors.New(
+			"missing agent-email-send-policy audit envelope")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return r2AgentEmailSendPolicyAuditEnvelope{}, fmt.Errorf(
+			"decode base64url: %w", err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	var envelope r2AgentEmailSendPolicyAuditEnvelope
+	if err := decoder.Decode(&envelope); err != nil {
+		return r2AgentEmailSendPolicyAuditEnvelope{}, fmt.Errorf(
+			"decode JSON: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return r2AgentEmailSendPolicyAuditEnvelope{}, errors.New(
+				"multiple JSON values")
+		}
+		return r2AgentEmailSendPolicyAuditEnvelope{}, fmt.Errorf(
+			"decode trailing JSON: %w", err)
+	}
+	change := AdminChange{
+		Kind: envelope.Kind, AgentEmailSendFrom: envelope.SendFrom,
+		AgentEmailSendTo:         envelope.SendTo,
+		AgentEmailSendFromSource: envelope.FromSource,
+		AgentEmailSendToSource:   envelope.ToSource,
+	}
+	return normalizeR2AgentEmailSendPolicyAudit(change)
+}
+
+func restoreR2AgentEmailSendPolicyAudit(
+	change *AdminChange,
+	envelope r2AgentEmailSendPolicyAuditEnvelope,
+) {
+	change.Kind = envelope.Kind
+	change.AgentEmailSendFrom = envelope.SendFrom
+	change.AgentEmailSendTo = envelope.SendTo
+	change.AgentEmailSendFromSource = envelope.FromSource
+	change.AgentEmailSendToSource = envelope.ToSource
+}
+
+func replayR2AgentEmailSendPolicyOverride(
+	current *AgentEmailSendOverride,
+	changes []AdminChange,
+) *AgentEmailSendOverride {
+	var send *AgentEmailSendOverride
+	if current != nil {
+		value := *current
+		send = &value
+	}
+	for _, change := range changes {
+		switch change.Kind {
+		case "agent_email_send_override_set":
+			send = &AgentEmailSendOverride{
+				Enabled: *change.AgentEmailSendTo,
+				ActorID: change.ActorID, ActorHandle: change.ActorHandle,
+				Reason: change.Reason, SetAt: change.At,
+			}
+		case "agent_email_send_override_cleared":
+			send = nil
+		}
+	}
+	return send
+}
+
 func marshalR2Record(r Record) ([]byte, error) {
 	stored := clone(r)
 	for i := range stored.AdminHistory {
@@ -2397,6 +2527,14 @@ func marshalR2Record(r Record) ([]byte, error) {
 			}
 			restoreR2AgentEmailPolicyAudit(change, envelope)
 		}
+		if strings.HasPrefix(change.Kind, r2AgentEmailSendPolicyAuditKindPrefix) {
+			envelope, err := decodeR2AgentEmailSendPolicyAuditKind(change.Kind)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"admin history %d: malformed reserved kind: %w", i, err)
+			}
+			restoreR2AgentEmailSendPolicyAudit(change, envelope)
+		}
 		switch change.Kind {
 		case "messaging_override_set", "messaging_override_cleared",
 			"message_retention_override_set", "message_retention_override_cleared":
@@ -2417,6 +2555,18 @@ func marshalR2Record(r Record) ([]byte, error) {
 			if err != nil {
 				return nil, fmt.Errorf(
 					"admin history %d: encode agent email policy audit: %w",
+					i, err)
+			}
+			change.Kind = kind
+			continue
+		}
+		switch change.Kind {
+		case "agent_email_send_override_set",
+			"agent_email_send_override_cleared":
+			kind, err := encodeR2AgentEmailSendPolicyAuditKind(*change)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"admin history %d: encode agent email send policy audit: %w",
 					i, err)
 			}
 			change.Kind = kind
@@ -2443,6 +2593,7 @@ func unmarshalR2Record(data []byte) (Record, error) {
 	replay := make([]AdminChange, 0)
 	policyReplay := make([]AdminChange, 0)
 	emailPolicyReplay := make([]AdminChange, 0)
+	emailSendPolicyReplay := make([]AdminChange, 0)
 	for i := range r.AdminHistory {
 		change := &r.AdminHistory[i]
 		if strings.HasPrefix(change.Kind, r2LimitAuditKindPrefix) {
@@ -2475,6 +2626,16 @@ func unmarshalR2Record(data []byte) (Record, error) {
 			emailPolicyReplay = append(emailPolicyReplay, *change)
 			continue
 		}
+		if strings.HasPrefix(change.Kind, r2AgentEmailSendPolicyAuditKindPrefix) {
+			envelope, err := decodeR2AgentEmailSendPolicyAuditKind(change.Kind)
+			if err != nil {
+				return Record{}, fmt.Errorf(
+					"admin history %d: malformed reserved kind: %w", i, err)
+			}
+			restoreR2AgentEmailSendPolicyAudit(change, envelope)
+			emailSendPolicyReplay = append(emailSendPolicyReplay, *change)
+			continue
+		}
 		// Before this envelope existed, development builds could write the
 		// normal kind plus the new fields directly. Replay those when they are
 		// complete, but leave unrelated/legacy history untouched.
@@ -2500,6 +2661,13 @@ func unmarshalR2Record(data []byte) (Record, error) {
 				emailPolicyReplay = append(emailPolicyReplay, *change)
 			}
 		}
+		switch change.Kind {
+		case "agent_email_send_override_set",
+			"agent_email_send_override_cleared":
+			if _, err := normalizeR2AgentEmailSendPolicyAudit(*change); err == nil {
+				emailSendPolicyReplay = append(emailSendPolicyReplay, *change)
+			}
+		}
 	}
 	r.LimitOverrides = replayR2LimitOverrides(r.LimitOverrides, replay)
 	r.MessagingOverride, r.MessageRetentionOverride =
@@ -2509,5 +2677,7 @@ func unmarshalR2Record(data []byte) (Record, error) {
 		replayR2AgentEmailPolicyOverrides(
 			r.AgentEmailReceiveOverride, r.AgentEmailRetentionOverride,
 			emailPolicyReplay)
+	r.AgentEmailSendOverride = replayR2AgentEmailSendPolicyOverride(
+		r.AgentEmailSendOverride, emailSendPolicyReplay)
 	return r, nil
 }

@@ -67,6 +67,12 @@ features:
 # private key belongs only in the isolated Cloudflare Worker secret; this chart
 # accepts public verification keys only.
 agentEmail:
+  # Token accepted only by the content-free outbound provider-event callback.
+  # The managed send adapter holds the matching value as a Worker secret.
+  # Empty keeps the callback route absent.
+  providerEventTokenSecret:
+    name: ""
+    key: token
   receivePilot:
     enabled: false
     domain: ""
@@ -213,6 +219,22 @@ worker:
     batchSize: 10000
     interval: 1m
     batchTimeout: 10s
+  # Outbound agent email is a durable, cooperatively claimed worker job. The
+  # provider credential stays at the managed edge adapter; each cell receives
+  # only an Ed25519 dispatch key. Keep this disabled until the exact account
+  # cohort and adapter signer ring have both been configured.
+  agentEmailOutbound:
+    enabled: false
+    dispatchEndpoint: ""
+    dispatchAudience: witself-agent-email-send
+    dispatchKeyID: ""
+    dispatchPrivateKeySecret:
+      name: ""
+      key: private-key
+    batchSize: 10
+    interval: 2s
+    batchTimeout: 30s
+    providerTimeout: 20s
   # Transcript retention is an explicit three-stage rollout:
   # disabled -> preview -> enforce. Enabling the job still defaults to preview,
   # so deletion requires both enabled: true and mode: enforce.

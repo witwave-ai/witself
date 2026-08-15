@@ -1,0 +1,14 @@
+{
+  "name": "@witwave/agent-email-send",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Signed, durable Cloudflare Email Sending adapter for Witself agent email",
+  "scripts": {
+    "bundle:check": "node scripts/bundle-check.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.123.0"
+  }
+}

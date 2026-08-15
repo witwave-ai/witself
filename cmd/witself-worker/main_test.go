@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +32,14 @@ func TestJobConfigFromEnvDefaultsAndOverrides(t *testing.T) {
 			"agent-email rate bucket cleanup defaults = enabled %t config %#v",
 			defaults.agentEmailRateBucketCleanupEnabled,
 			defaults.agentEmailRateBucketCleanup,
+		)
+	}
+	if defaults.agentEmailOutboundEnabled ||
+		defaults.agentEmailOutbound != defaultAgentEmailOutboundWorkerConfig() {
+		t.Fatalf(
+			"outbound agent-email defaults = enabled %t config %#v",
+			defaults.agentEmailOutboundEnabled,
+			defaults.agentEmailOutbound,
 		)
 	}
 	if defaults.retentionEnabled || defaults.retention != store.DefaultTranscriptRetentionWorkerConfig() {
@@ -69,6 +78,15 @@ func TestJobConfigFromEnvDefaultsAndOverrides(t *testing.T) {
 		agentEmailRateBucketCleanupBatchSizeEnv:    "4000",
 		agentEmailRateBucketCleanupIntervalEnv:     "12m",
 		agentEmailRateBucketCleanupBatchTimeoutEnv: "2m",
+		agentEmailOutboundEnabledEnv:               "true",
+		agentEmailOutboundDispatchEndpointEnv:      "https://send.example.test/v1/dispatch",
+		agentEmailOutboundDispatchAudienceEnv:      "witself-agent-email-send",
+		agentEmailOutboundDispatchKeyIDEnv:         "founder-cell",
+		agentEmailOutboundDispatchPrivateKeyEnv:    base64.StdEncoding.EncodeToString(make([]byte, 64)),
+		agentEmailOutboundBatchSizeEnv:             "9",
+		agentEmailOutboundIntervalEnv:              "3s",
+		agentEmailOutboundBatchTimeoutEnv:          "40s",
+		agentEmailOutboundProviderTimeoutEnv:       "15s",
 		transcriptRetentionEnabledEnv:              "true",
 		transcriptRetentionModeEnv:                 "ENFORCE",
 		transcriptRetentionBatchSizeEnv:            "250",
@@ -111,6 +129,23 @@ func TestJobConfigFromEnvDefaultsAndOverrides(t *testing.T) {
 			"configured agent-email rate bucket cleanup = enabled %t config %#v",
 			configured.agentEmailRateBucketCleanupEnabled,
 			configured.agentEmailRateBucketCleanup,
+		)
+	}
+	if !configured.agentEmailOutboundEnabled ||
+		configured.agentEmailOutbound.BatchSize != 9 ||
+		configured.agentEmailOutbound.Interval != 3*time.Second ||
+		configured.agentEmailOutbound.BatchTimeout != 40*time.Second ||
+		configured.agentEmailOutbound.ProviderTimeout != 15*time.Second ||
+		configured.agentEmailOutboundClient.Endpoint != "https://send.example.test/v1/dispatch" ||
+		configured.agentEmailOutboundClient.KeyID != "founder-cell" ||
+		len(configured.agentEmailOutboundClient.PrivateKey) != 64 {
+		t.Fatalf(
+			"outbound agent-email configured = enabled %t config %#v client endpoint=%q key_id=%q key_bytes=%d",
+			configured.agentEmailOutboundEnabled,
+			configured.agentEmailOutbound,
+			configured.agentEmailOutboundClient.Endpoint,
+			configured.agentEmailOutboundClient.KeyID,
+			len(configured.agentEmailOutboundClient.PrivateKey),
 		)
 	}
 	if !configured.retentionEnabled ||
@@ -167,6 +202,15 @@ func TestJobConfigFromEnvRejectsNamedInvalidValues(t *testing.T) {
 		{agentEmailRateBucketCleanupIntervalEnv, "25h"},
 		{agentEmailRateBucketCleanupBatchTimeoutEnv, "999ms"},
 		{agentEmailRateBucketCleanupBatchTimeoutEnv, "6m"},
+		{agentEmailOutboundEnabledEnv, "sometimes"},
+		{agentEmailOutboundBatchSizeEnv, "0"},
+		{agentEmailOutboundBatchSizeEnv, "101"},
+		{agentEmailOutboundIntervalEnv, "99ms"},
+		{agentEmailOutboundIntervalEnv, "6m"},
+		{agentEmailOutboundBatchTimeoutEnv, "999ms"},
+		{agentEmailOutboundBatchTimeoutEnv, "6m"},
+		{agentEmailOutboundProviderTimeoutEnv, "999ms"},
+		{agentEmailOutboundProviderTimeoutEnv, "61s"},
 		{transcriptRetentionEnabledEnv, "sometimes"},
 		{transcriptRetentionModeEnv, "destructive"},
 		{transcriptRetentionBatchSizeEnv, "0"},
@@ -195,6 +239,44 @@ func TestJobConfigFromEnvRejectsNamedInvalidValues(t *testing.T) {
 				t.Fatalf("error = %v, want validation naming %s", err, test.key)
 			}
 		})
+	}
+}
+
+func TestJobConfigFromEnvRequiresCompleteOutboundDispatchIdentity(t *testing.T) {
+	base := map[string]string{
+		agentEmailOutboundEnabledEnv:            "true",
+		agentEmailOutboundDispatchEndpointEnv:   "https://send.example.test/v1/dispatch",
+		agentEmailOutboundDispatchAudienceEnv:   "witself-agent-email-send",
+		agentEmailOutboundDispatchKeyIDEnv:      "founder-cell",
+		agentEmailOutboundDispatchPrivateKeyEnv: base64.StdEncoding.EncodeToString(make([]byte, 64)),
+	}
+	for _, missing := range []string{
+		agentEmailOutboundDispatchEndpointEnv,
+		agentEmailOutboundDispatchKeyIDEnv,
+		agentEmailOutboundDispatchPrivateKeyEnv,
+	} {
+		t.Run(missing, func(t *testing.T) {
+			values := make(map[string]string, len(base))
+			for key, value := range base {
+				values[key] = value
+			}
+			delete(values, missing)
+			_, err := jobConfigFromEnv(mapLookup(values))
+			if err == nil || !strings.Contains(err.Error(), missing) {
+				t.Fatalf("error = %v, want missing key %s", err, missing)
+			}
+		})
+	}
+
+	secret := "this-is-not-a-private-key"
+	values := make(map[string]string, len(base))
+	for key, value := range base {
+		values[key] = value
+	}
+	values[agentEmailOutboundDispatchPrivateKeyEnv] = secret
+	_, err := jobConfigFromEnv(mapLookup(values))
+	if err == nil || strings.Contains(err.Error(), secret) {
+		t.Fatalf("invalid private-key error leaked input: %v", err)
 	}
 }
 

@@ -181,6 +181,27 @@ func ParseMessage(raw []byte, includeText bool) (ParsedMessage, error) {
 	return parsed, nil
 }
 
+// ReplyToHeader returns the bounded, decoded top-level Reply-To value without
+// walking the MIME body. The value remains untrusted external content; callers
+// must parse it as an address list and enforce their own recipient policy.
+func ReplyToHeader(raw []byte) (string, error) {
+	if len(raw) == 0 || len(raw) > PilotMaximumRawBytes {
+		return "", ErrMIMEInvalid
+	}
+	end := headerEnd(raw)
+	if end < 0 {
+		return "", ErrMIMEInvalid
+	}
+	if end > maximumMIMEHeaderBytes {
+		return "", ErrMIMEHeaderLimit
+	}
+	message, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		return "", fmt.Errorf("%w: read message", ErrMIMEInvalid)
+	}
+	return decodedHeader(message.Header.Get("Reply-To"), maximumHeaderValue), nil
+}
+
 // MIMEBody returns the exact bytes after the top-level RFC 5322 header
 // separator. The returned slice aliases raw. Callers that retain it must copy
 // it; the retry-canary fingerprint consumes it synchronously.

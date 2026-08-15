@@ -115,7 +115,7 @@ Deliverables:
 - Initial Go module:
   - Module path: `github.com/witwave-ai/witself`.
   - `go 1.26`.
-  - `toolchain go1.26.5`, refreshed before implementation and release.
+  - `toolchain go1.26.6`, refreshed before implementation and release.
 
 Exit criteria:
 

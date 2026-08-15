@@ -100,6 +100,12 @@
 {{- fail "apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentID must be one canonical agent ID" -}}
 {{- end -}}
 {{- end -}}
+{{- $emailOutboundReady := and
+      (semverCompare ">=0.0.245-0" .Values.apps.witselfServer.chartVersion)
+      (semverCompare ">=0.0.245-0" .Values.apps.witselfServer.imageTag) -}}
+{{- if and .Values.apps.witselfServer.worker.agentEmailOutbound.enabled (not $emailOutboundReady) -}}
+{{- fail "apps.witselfServer.worker.agentEmailOutbound requires chart and image v0.0.245 or newer" -}}
+{{- end -}}
 {{- $serverEmailPilot := dict "enabled" $emailPilot.enabled "domain" $emailPilot.domain "audience" $emailPilot.audience "realmID" $emailPilot.realmID "agentIDs" $emailPilot.agentIDs "retryCanaryAgentID" $emailPilot.retryCanaryAgentID "relayPublicKeysJSON" $emailPilot.relayPublicKeysJSON "relayReplayWindow" $emailPilot.relayReplayWindow -}}
 {{- $emailDomainCutoverReady := and
       (semverCompare ">=0.0.232-0" .Values.apps.witselfServer.chartVersion)
@@ -112,6 +118,9 @@
 {{- end -}}
 {{- end -}}
 {{- $serverAgentEmail := dict "receivePilot" $serverEmailPilot -}}
+{{- if $emailOutboundReady -}}
+{{- $_ := set $serverAgentEmail "providerEventTokenSecret" .Values.apps.witselfServer.agentEmail.providerEventTokenSecret -}}
+{{- end -}}
 {{- $emailProductionReady := and
       (semverCompare ">=0.0.241-0" .Values.apps.witselfServer.chartVersion)
       (semverCompare ">=0.0.241-0" .Values.apps.witselfServer.imageTag) -}}
@@ -127,6 +136,9 @@
 {{- end -}}
 {{- if not (semverCompare ">=0.0.226-0" .Values.apps.witselfServer.chartVersion) -}}
 {{- $_ := unset $workerValues "agentEmailRateBucketCleanup" -}}
+{{- end -}}
+{{- if not (semverCompare ">=0.0.245-0" .Values.apps.witselfServer.chartVersion) -}}
+{{- $_ := unset $workerValues "agentEmailOutbound" -}}
 {{- end -}}
 {{- $metricsValues := deepCopy .Values.apps.witselfServer.metrics -}}
 {{- $backup := .Values.apps.witselfServer.backup -}}

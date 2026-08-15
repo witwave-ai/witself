@@ -117,6 +117,7 @@ func printPlanCatalog(catalog *plans.Catalog, entries []plans.Plan) {
 		return formatPlanRetention(plan, plans.MessageRetentionDaysPolicy, !plan.HasFeature(plans.MessagingFeature))
 	})
 	writeRow("Receive-email entitlement", func(plan plans.Plan) string { return formatPlanFeature(plan, plans.AgentEmailReceiveFeature) })
+	writeRow("Send-email entitlement", func(plan plans.Plan) string { return formatPlanFeature(plan, plans.AgentEmailSendFeature) })
 	writeRow("Email retention", func(plan plans.Plan) string {
 		return formatPlanRetention(plan, plans.AgentEmailRetentionDaysPolicy, !plan.HasFeature(plans.AgentEmailReceiveFeature))
 	})
@@ -539,6 +540,9 @@ func printPlanStatus(s client.PlanStatus, full bool) {
 		fmt.Printf("email entitlement: %s\n", formatPlanFeatureStatus(*s.EmailReceive))
 		fmt.Println("email delivery:    not reported by plan status (separate rollout gates)")
 	}
+	if s.EmailSend != nil {
+		fmt.Printf("email sending:     %s\n", formatPlanFeatureStatus(*s.EmailSend))
+	}
 	if s.EmailRetention != nil {
 		fmt.Printf("email data:  %s retention\n", formatPlanRetentionStatus(*s.EmailRetention))
 	}
@@ -655,6 +659,8 @@ var planStatusLimitKeys = []string{
 	plans.AgentEmailAttachmentStorageBytesLimit,
 	plans.AgentEmailRealmAliasesPerRealmLimit,
 	plans.AgentEmailCustomDomainsPerAccountLimit,
+	plans.AgentEmailSentPerAgentMinuteLimit,
+	plans.AgentEmailSentPerRealmMinuteLimit,
 	plans.AgentEmailReceivedPerSenderMinuteLimit,
 	plans.AgentEmailReceivedPerRecipientMinuteLimit,
 	plans.AgentEmailReceivedPerRealmMinuteLimit,

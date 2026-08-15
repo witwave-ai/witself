@@ -2406,6 +2406,8 @@ func TestBeginAccountEvacuationRequiresExactID(t *testing.T) {
 			return AccountEvacuationRecord{}, ErrAccountPending
 		case "acc_wrong_epoch":
 			return AccountEvacuationRecord{}, ErrConflict
+		case "acc_outbound_in_flight":
+			return AccountEvacuationRecord{}, ErrAccountEvacuationOutboundInFlight
 		case "acc_missing":
 			return AccountEvacuationRecord{}, ErrNotFound
 		}
@@ -2448,6 +2450,7 @@ func TestBeginAccountEvacuationRequiresExactID(t *testing.T) {
 		{"/v1/accounts/acc_evac:begin-evacuation", "witself_prv_test", `{"for":"owner_request","evacuation_id":"` + evacuationID + `"}`, http.StatusBadRequest},
 		{"/v1/accounts/acc_pending:begin-evacuation", "witself_prv_test", `{"for":"evacuation","evacuation_id":"` + evacuationID + `"}`, http.StatusConflict},
 		{"/v1/accounts/acc_wrong_epoch:begin-evacuation", "witself_prv_test", `{"for":"evacuation","evacuation_id":"` + evacuationID + `"}`, http.StatusConflict},
+		{"/v1/accounts/acc_outbound_in_flight:begin-evacuation", "witself_prv_test", `{"for":"evacuation","evacuation_id":"` + evacuationID + `"}`, http.StatusConflict},
 		{"/v1/accounts/acc_missing:begin-evacuation", "witself_prv_test", `{"for":"evacuation","evacuation_id":"` + evacuationID + `"}`, http.StatusNotFound},
 	} {
 		resp := do(tc.path, tc.token, tc.body)

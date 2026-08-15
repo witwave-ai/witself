@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/witwave-ai/witself/internal/agentemailoutbound"
 	"github.com/witwave-ai/witself/internal/store"
 	"github.com/witwave-ai/witself/internal/version"
 	"github.com/witwave-ai/witself/internal/worker"
@@ -22,6 +24,7 @@ const (
 	avatarStyleRolloutJob          = "avatar_style_rollout"
 	messageRateBucketCleanupJob    = "message_rate_bucket_cleanup"
 	agentEmailRateBucketCleanupJob = "agent_email_rate_bucket_cleanup"
+	agentEmailOutboundJob          = "agent_email_outbound"
 	transcriptRetentionJob         = "transcript_retention"
 	messageRetentionJob            = "message_retention"
 	agentEmailRetentionJob         = "agent_email_retention"
@@ -40,6 +43,16 @@ const (
 	agentEmailRateBucketCleanupBatchSizeEnv    = "WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_BATCH_SIZE"
 	agentEmailRateBucketCleanupIntervalEnv     = "WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_INTERVAL"
 	agentEmailRateBucketCleanupBatchTimeoutEnv = "WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_BATCH_TIMEOUT"
+
+	agentEmailOutboundEnabledEnv            = "WITSELF_AGENT_EMAIL_OUTBOUND_ENABLED"
+	agentEmailOutboundDispatchEndpointEnv   = "WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_ENDPOINT"
+	agentEmailOutboundDispatchAudienceEnv   = "WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_AUDIENCE"
+	agentEmailOutboundDispatchKeyIDEnv      = "WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_KEY_ID"
+	agentEmailOutboundDispatchPrivateKeyEnv = "WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_PRIVATE_KEY"
+	agentEmailOutboundBatchSizeEnv          = "WITSELF_AGENT_EMAIL_OUTBOUND_BATCH_SIZE"
+	agentEmailOutboundIntervalEnv           = "WITSELF_AGENT_EMAIL_OUTBOUND_INTERVAL"
+	agentEmailOutboundBatchTimeoutEnv       = "WITSELF_AGENT_EMAIL_OUTBOUND_BATCH_TIMEOUT"
+	agentEmailOutboundProviderTimeoutEnv    = "WITSELF_AGENT_EMAIL_OUTBOUND_PROVIDER_TIMEOUT"
 
 	transcriptRetentionEnabledEnv      = "WITSELF_TRANSCRIPT_RETENTION_ENABLED"
 	transcriptRetentionModeEnv         = "WITSELF_TRANSCRIPT_RETENTION_MODE"
@@ -67,6 +80,9 @@ type jobConfig struct {
 	messageRateBucketCleanup           store.MessageRateBucketCleanupWorkerConfig
 	agentEmailRateBucketCleanupEnabled bool
 	agentEmailRateBucketCleanup        store.AgentEmailRateBucketCleanupWorkerConfig
+	agentEmailOutboundEnabled          bool
+	agentEmailOutbound                 agentEmailOutboundWorkerConfig
+	agentEmailOutboundClient           agentemailoutbound.Client
 	retentionEnabled                   bool
 	retention                          store.TranscriptRetentionWorkerConfig
 	messageRetentionEnabled            bool
@@ -250,6 +266,48 @@ func serve() int {
 			cfg.BatchSize,
 			cfg.Interval,
 			cfg.BatchTimeout,
+		)
+	}
+	if jobs.agentEmailOutboundEnabled {
+		cfg := jobs.agentEmailOutbound
+		dispatchClient := jobs.agentEmailOutboundClient
+		dispatchClient.HTTPClient = &http.Client{Timeout: cfg.ProviderTimeout}
+		if err := registry.Register(worker.Job{
+			Name: agentEmailOutboundJob,
+			Run: func(jobCtx context.Context) error {
+				return runAgentEmailOutboundWorker(
+					jobCtx,
+					st,
+					&dispatchClient,
+					cfg,
+					func(result agentEmailOutboundBatchResult) {
+						metrics.ObserveAgentEmailOutboundBatch(
+							agentEmailOutboundMetricResult(result),
+							agentEmailOutboundMetricCounts(result),
+						)
+						logAgentEmailOutboundResult(result)
+					},
+					func(err error) {
+						metrics.RecordJobFailure(agentEmailOutboundJob)
+						metrics.ObserveAgentEmailOutboundBatch(
+							worker.RetentionResultError,
+							worker.AgentEmailOutboundCounts{},
+						)
+						fmt.Fprintf(os.Stderr, "witself-worker: outbound agent email: %v\n", err)
+					},
+				)
+			},
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "witself-worker: register outbound agent email: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(
+			os.Stderr,
+			"witself-worker: outbound agent email enabled (batch %d, interval %s, batch timeout %s, provider timeout %s)\n",
+			cfg.BatchSize,
+			cfg.Interval,
+			cfg.BatchTimeout,
+			cfg.ProviderTimeout,
 		)
 	}
 	if jobs.retentionEnabled {
@@ -506,6 +564,81 @@ func jobConfigFromEnv(lookup func(string) (string, bool)) (jobConfig, error) {
 		)
 	}
 
+	agentEmailOutboundEnabled, err := boolEnv(lookup, agentEmailOutboundEnabledEnv, false)
+	if err != nil {
+		return jobConfig{}, err
+	}
+	agentEmailOutbound := defaultAgentEmailOutboundWorkerConfig()
+	if raw, ok := lookup(agentEmailOutboundBatchSizeEnv); ok {
+		agentEmailOutbound.BatchSize, err = parseIntEnv(agentEmailOutboundBatchSizeEnv, raw)
+		if err != nil {
+			return jobConfig{}, err
+		}
+	}
+	if raw, ok := lookup(agentEmailOutboundIntervalEnv); ok {
+		agentEmailOutbound.Interval, err = parseDurationEnv(agentEmailOutboundIntervalEnv, raw)
+		if err != nil {
+			return jobConfig{}, err
+		}
+	}
+	if raw, ok := lookup(agentEmailOutboundBatchTimeoutEnv); ok {
+		agentEmailOutbound.BatchTimeout, err = parseDurationEnv(agentEmailOutboundBatchTimeoutEnv, raw)
+		if err != nil {
+			return jobConfig{}, err
+		}
+	}
+	if raw, ok := lookup(agentEmailOutboundProviderTimeoutEnv); ok {
+		agentEmailOutbound.ProviderTimeout, err = parseDurationEnv(
+			agentEmailOutboundProviderTimeoutEnv,
+			raw,
+		)
+		if err != nil {
+			return jobConfig{}, err
+		}
+	}
+	if err := agentEmailOutbound.Validate(); err != nil {
+		return jobConfig{}, fmt.Errorf(
+			"%s/%s/%s/%s outbound agent-email configuration: %w",
+			agentEmailOutboundBatchSizeEnv,
+			agentEmailOutboundIntervalEnv,
+			agentEmailOutboundBatchTimeoutEnv,
+			agentEmailOutboundProviderTimeoutEnv,
+			err,
+		)
+	}
+	agentEmailOutboundClient := agentemailoutbound.Client{
+		Audience: "witself-agent-email-send",
+	}
+	if raw, ok := lookup(agentEmailOutboundDispatchEndpointEnv); ok {
+		agentEmailOutboundClient.Endpoint = strings.TrimSpace(raw)
+	}
+	if raw, ok := lookup(agentEmailOutboundDispatchAudienceEnv); ok {
+		agentEmailOutboundClient.Audience = strings.TrimSpace(raw)
+	}
+	if raw, ok := lookup(agentEmailOutboundDispatchKeyIDEnv); ok {
+		agentEmailOutboundClient.KeyID = strings.TrimSpace(raw)
+	}
+	if agentEmailOutboundEnabled {
+		rawKey, ok := lookup(agentEmailOutboundDispatchPrivateKeyEnv)
+		if !ok || strings.TrimSpace(rawKey) == "" {
+			return jobConfig{}, fmt.Errorf("%s is required when %s=true",
+				agentEmailOutboundDispatchPrivateKeyEnv, agentEmailOutboundEnabledEnv)
+		}
+		agentEmailOutboundClient.PrivateKey, err = agentemailoutbound.ParsePrivateKey(rawKey)
+		if err != nil {
+			return jobConfig{}, fmt.Errorf("%s: %w", agentEmailOutboundDispatchPrivateKeyEnv, err)
+		}
+		if err := agentEmailOutboundClient.Validate(); err != nil {
+			return jobConfig{}, fmt.Errorf(
+				"%s/%s/%s outbound agent-email dispatch configuration: %w",
+				agentEmailOutboundDispatchEndpointEnv,
+				agentEmailOutboundDispatchAudienceEnv,
+				agentEmailOutboundDispatchKeyIDEnv,
+				err,
+			)
+		}
+	}
+
 	retentionEnabled, err := boolEnv(lookup, transcriptRetentionEnabledEnv, false)
 	if err != nil {
 		return jobConfig{}, err
@@ -642,6 +775,9 @@ func jobConfigFromEnv(lookup func(string) (string, bool)) (jobConfig, error) {
 		messageRateBucketCleanup:           messageRateBucketCleanup,
 		agentEmailRateBucketCleanupEnabled: agentEmailRateBucketCleanupEnabled,
 		agentEmailRateBucketCleanup:        agentEmailRateBucketCleanup,
+		agentEmailOutboundEnabled:          agentEmailOutboundEnabled,
+		agentEmailOutbound:                 agentEmailOutbound,
+		agentEmailOutboundClient:           agentEmailOutboundClient,
 		retentionEnabled:                   retentionEnabled,
 		retention:                          retention,
 		messageRetentionEnabled:            messageRetentionEnabled,
@@ -663,6 +799,50 @@ func agentEmailRateBucketCleanupMetricResult(deleted int64) worker.RetentionResu
 		return worker.RetentionResultNoWork
 	}
 	return worker.RetentionResultSuccess
+}
+
+func agentEmailOutboundMetricResult(result agentEmailOutboundBatchResult) worker.RetentionResult {
+	if result.empty() {
+		return worker.RetentionResultNoWork
+	}
+	return worker.RetentionResultSuccess
+}
+
+func agentEmailOutboundMetricCounts(
+	result agentEmailOutboundBatchResult,
+) worker.AgentEmailOutboundCounts {
+	return worker.AgentEmailOutboundCounts{
+		Claimed:           result.Claimed,
+		Accepted:          result.Accepted,
+		Delivered:         result.Delivered,
+		Retried:           result.Retried,
+		Bounced:           result.Bounced,
+		Rejected:          result.Rejected,
+		Failed:            result.Failed,
+		Ambiguous:         result.Ambiguous,
+		Canceled:          result.Canceled,
+		ExpiredReconciled: result.ExpiredReconciled,
+	}
+}
+
+func logAgentEmailOutboundResult(result agentEmailOutboundBatchResult) {
+	if result.empty() {
+		return
+	}
+	fmt.Fprintf(
+		os.Stderr,
+		"witself-worker: outbound agent email: claimed=%d accepted=%d delivered=%d retried=%d bounced=%d rejected=%d failed=%d ambiguous=%d canceled=%d expired_reconciled=%d\n",
+		result.Claimed,
+		result.Accepted,
+		result.Delivered,
+		result.Retried,
+		result.Bounced,
+		result.Rejected,
+		result.Failed,
+		result.Ambiguous,
+		result.Canceled,
+		result.ExpiredReconciled,
+	)
 }
 
 func boolEnv(lookup func(string) (string, bool), key string, defaultValue bool) (bool, error) {

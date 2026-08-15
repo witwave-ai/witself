@@ -113,6 +113,8 @@ check-infra: ## Gates for nested Pulumi plus the isolated Cloudflare agent-email
 	cd infra/pulumi && go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
 	npm --prefix infra/cloudflare/agent-email test
 	npm --prefix infra/cloudflare/agent-email run bundle:check
+	npm --prefix infra/cloudflare/agent-email-send test
+	npm --prefix infra/cloudflare/agent-email-send run bundle:check
 	bash scripts/test-agent-email-cell-operation.sh
 	npm --prefix infra/cloudflare/control-plane test
 	@echo "check-infra: infra gates green"

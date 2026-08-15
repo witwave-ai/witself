@@ -22,10 +22,36 @@ the configured retry canary. No live cell, provider route, MX, catch-all,
 canonical-delivery, alias-delivery, or custom-domain gate is enabled by this
 implementation checkpoint.
 
+Outbound beta checkpoint (implemented 2026-08-14, runtime default off): agents
+can queue a one-recipient plain-text message, queue a reply to an owner-visible
+inbound message, and inspect metadata-only sent-mail state through HTTP, CLI,
+and MCP. The durable cell outbox, idempotency fence, per-agent and per-realm
+send controls, hard-bounce/complaint suppression, signed cell-to-edge dispatch
+contract, and Cloudflare Email Sending adapter are implemented. The
+`witself-worker` dispatch job and edge adapter both remain dark until an
+operator supplies an exact rollout cohort and enables their independent gates;
+catalog entitlement alone does not send mail.
+
+Receive and send are independent account entitlements. The settled catalog is:
+
+| Plan | Receive | Send |
+|---|---:|---:|
+| Personal | No | No |
+| Professional | Yes | No |
+| Team | Yes | Yes |
+| Enterprise | Yes | Yes |
+
+The Founder account has explicit unlimited commercial entitlement. That does
+not remove platform protection: outbound admission is always capped at 30
+messages per rolling minute for one agent, 300 per realm, and 1,000 across the
+whole account, and the adapter retains its payload and provider safety bounds. Plan or
+account-policy changes require no client or MCP reinstall; the installed tools
+receive a stable `feature_not_enabled` refusal whenever effective send is off.
+
 Catalog entitlement, account policy, cell rollout, and edge delivery are
 separate facts:
 
-1. The catalog supplies each plan's default inbound-email entitlement;
+1. The catalog supplies each plan's independent receive and send entitlements;
    `witself plan list` reports that default.
 2. An audited account override may change the effective entitlement without
    changing plan or price; `witself plan status` reports the effective value.
@@ -98,8 +124,9 @@ Scoped by the operator at kickoff (2026-07-20):
   email-OTP codes for accounts agents create, (2) service and transactional
   mail addressed to the agent, (3) human-to-agent correspondence, and
   (4) platform notifications from Witself to human operators.
-- **V1 slice is receive-only.** No agent-authored outbound email ships in v1.
-  Reply-only send and full outbound initiation are follow-on slices.
+- **The original v1 slice was receive-only.** Reply and direct send are now
+  implemented as a separately gated outbound beta; this historical kickoff
+  ordering does not imply that the send runtime is active.
 - **Addressing is a Witself-managed domain.** Bring-your-own inbox
   (IMAP/Gmail/M365 adapters) is deliberately deferred; self-hosted cells bring
   their own domain to the same pipeline.
@@ -115,9 +142,9 @@ A second requirements pass later the same day settled more:
   subdomain derived from the realm's unique identifier, and the local part is
   the agent name: `scott@<realm-label>.witmail.net`. This historical shape was
   later replaced by the apex/local-part design below.
-- **Send is confirmed but later.** Agents will eventually send — verification
-  flows may force it sooner than correspondence does — and the design
-  documents it now, but receive ships first and nothing in v1 depends on send.
+- **Send followed receive.** The one-recipient plain-text reply/direct-send
+  beta is now implemented behind independent account, worker, adapter, realm,
+  and agent gates; receive still does not depend on send.
 - **Email is a billing point in both directions.** Sent and received mail are
   metered per period; sending stops hard at a per-period threshold; email is
   switchable on and off per agent and per realm; agent-originated spam
@@ -255,12 +282,16 @@ The standing platform invariants carry over unchanged:
   email-OTP consumption, spam/quarantine handling, retention, metering, and
   archive/export coverage. Human-to-agent mail arrives and is readable; the
   agent cannot reply yet.
-- **Slice 2 — reply-only send.** An agent may reply within an existing inbound
-  thread (no initiation), rate-limited, with outbound authentication
-  (SPF/DKIM/DMARC) on the managed domain and complaint/suppression handling.
-- **Slice 3 — full outbound.** Agent-initiated email with the complete
-  anti-abuse program: reputation management, content policy, per-agent and
-  per-realm send limits, and operator governance controls.
+- **Outbound beta — implemented, dark.** Reply and direct initiation share one
+  deliberately narrow contract: exactly one recipient, plain UTF-8 text, a
+  server-derived sender, managed Reply-To, durable idempotency, per-agent and
+  per-realm rate breakers, independent operator kill switches, and
+  hard-bounce/complaint suppression. Attachments, HTML, CC/BCC, bulk delivery,
+  and caller-selected sender identity are excluded.
+- **Outbound rollout.** Enable the signed cell-worker dispatch path and the
+  Cloudflare adapter only for an exact reviewed cohort, observe durable outbox
+  and provider-event telemetry, then widen deliberately. The catalog feature
+  is necessary but never sufficient to activate provider traffic.
 - **Parallel track — platform notifications.** Witself-authored operator email
   (billing, alerts, digests). Outbound-only, no agent mailbox involvement, and
   no model inference; it may reuse provider-adapter implementation patterns,
@@ -268,9 +299,9 @@ The standing platform invariants carry over unchanged:
   sends from `witmail.net` and may ship in any order relative to the slices
   above.
 
-Deliverability reality drives this order: receiving mail requires no sender
-reputation, while sending is the largest abuse surface in the feature. V1
-deliberately sidesteps it.
+Deliverability reality still drives the rollout: receiving mail requires no
+sender reputation, while sending is the largest abuse surface in the feature.
+The outbound beta is therefore implemented but operationally dark by default.
 
 ## Capability Tiers And Authorized Pilot
 
@@ -1479,16 +1510,22 @@ The receive-side lifecycle mirrors the proven messaging shape:
   components, and an additive `unavailable` projection state. The shared
   foreground policy handles at most one Witself messaging-or-email lane per
   turn, after user work, with no background service or wake behavior.
-- Retention is plan-scoped: raw MIME, including inline attachment bytes, ages
-  out by plan window;
-  quarantined spam ages out faster; metadata and content-free audit events
-  follow [audit-retention.md](audit-retention.md). Account archives include
-  the mailbox (addresses, messages, state) with the same interrupt-on-import
-  handling of active claims that messaging archives use.
+- Retention is plan-scoped in both directions. Inbound records age from
+  `received_at`; eligible outbound records age from `created_at`. Raw MIME,
+  including inline attachment bytes, and outbound subject/body content are
+  deleted with their message row. Queued, claimed, and `provider_started`
+  sends are unresolved-work holds and never age out. Quarantined spam may age
+  out faster; metadata and content-free audit events follow
+  [audit-retention.md](audit-retention.md). Account archives include the
+  mailbox and outbox with active-work fences preserved. Account-scoped
+  digest-only hard-bounce/complaint suppressions outlive a finite mail window
+  by one year, capped at ten years; an indefinite mail policy still uses the
+  ten-year safety lifetime.
 
 ## Surfaces
 
-The receive-only shapes are pinned in [json-contracts.md](json-contracts.md),
+The receive and independently gated outbound shapes are pinned in
+[json-contracts.md](json-contracts.md),
 [cli-command-surface.md](cli-command-surface.md), and
 [mcp-tools.md](mcp-tools.md):
 
@@ -1500,8 +1537,16 @@ The receive-only shapes are pinned in [json-contracts.md](json-contracts.md),
   sanctioned wait rather than a poll loop, mirroring `message.listen`), and
   operator-only `witself email operator receive show|enable|disable` for one
   exact enrolled agent or realm.
-- MCP: `witself.email.*` mirroring the CLI, with metadata-only list results
-  and untrusted-content framing in every content-bearing tool description.
+- Outbound CLI: `witself email send`, `witself email reply`, `witself email
+  sent`, `witself email sent-show`, and operator-only `witself email operator
+  send show|enable|disable` for one exact agent or realm. `send` and `reply`
+  accept plain text only and queue durable work; they do not claim provider
+  delivery.
+- MCP: `witself.email.*` mirrors the CLI. The outbound additions are
+  `witself.email.send`, `witself.email.reply`, `witself.email.sent.list`, and
+  `witself.email.sent.show`. The write tools require an idempotency key and
+  are marked destructive/open-world/idempotent; sent-mail reads are
+  metadata-only.
 - API: owner routes are `GET /v1/email/address`, `GET /v1/email:status`,
   `GET /v1/email`, `POST /v1/email:listen`, `GET /v1/email/checkpoint`, and the
   `/v1/email/{message_id}:read|code-consumed|ack|claim|renew|release|complete`
@@ -1509,6 +1554,29 @@ The receive-only shapes are pinned in [json-contracts.md](json-contracts.md),
   `/v1/agents/{agent}/email-receive` and
   `/v1/realms/{realm}/email-receive`. The Worker relay uses the separate
   cell-local signed `POST /v1/internal/agent-email:ingest` endpoint.
+- Outbound API: `POST /v1/email:send`, `POST
+  /v1/email/{inbound_message_id}:reply`, `GET /v1/email/sent`, and `GET
+  /v1/email/sent/{send_id}`. Value-free operator controls are `GET` / `PATCH`
+  `/v1/agents/{agent}/email-send` and `/v1/realms/{realm}/email-send`.
+  Content-free provider delivery events enter only through bearer-protected
+  `POST /v1/internal/agent-email-send:provider-event`.
+
+Direct send accepts `to`, `subject`, and `text`; reply accepts only `text` and
+derives its recipient and safe `Re:` subject from the exact inbound message.
+Neither accepts `from`, `reply_to`, HTML, attachments, CC, BCC, or multiple
+recipients. The cell derives the sending identity as the permanent canonical
+local part at `send.witmail.net` and its managed Reply-To as the same local part
+at `witmail.net`. This does not use a realm alias or customer domain and gives a
+caller no sender-spoofing surface.
+
+The outbox states are `queued`, `claimed`, `provider_started`, `accepted`,
+`delivered`, `deferred`, `bounced`, `rejected`, `failed`, `ambiguous`, and
+`canceled`. An idempotency key is scoped to the authenticated
+account/realm/agent. Exact replay returns the same `esnd_` row without another
+rate debit; changed request semantics under the same key fail with conflict.
+List/show expose state, addresses, subject, timestamps, and bounded
+provider-neutral error metadata, but never submitted body text, a worker claim,
+provider message id, or provider payload.
 
 List, listen, ack, code-consumed, and ordinary read-state projections never
 return raw MIME, attachment bytes, body HTML, or active claim capabilities.
@@ -1523,6 +1591,44 @@ completeness flags, `none`/`single`/`ambiguous`, and at most 32 distinct
 first-seen values with occurrence counts. It fails unavailable unless
 `parse_state` is `parsed`; truncation or candidate overflow forces
 `ambiguous`. It never follows, selects, uses, or consumes anything.
+
+### Outbound worker and Cloudflare adapter
+
+Outbound delivery does not run in API replicas. Every enabled
+`witself-worker` replica claims bounded ready rows from the PostgreSQL outbox;
+the durable claim/generation fence lets replicas divide work without sending
+the same row concurrently. Immediately before dispatch it rechecks account,
+feature, agent, operator-control, recipient-suppression, and independent
+provider-attempt rate state. Transport uncertainty and a lost local settlement
+schedule only an exact replay against the adapter receipt; they never create a
+fresh logical send. Work closes after 12 attempts or 72 hours, with unresolved
+provider-crossed work recorded as `ambiguous`. The worker signs one immutable
+`witself.agent-email-dispatch.v1` envelope with a cell-held Ed25519 key and
+sends it over HTTPS to the dedicated adapter. Provider credentials never enter
+the cell.
+
+The Cloudflare adapter verifies the signature, timestamp, audience, key id,
+body digest, exact account allowlist, one-recipient/plain-text contract, and
+server-owned From/Reply-To domains before crossing the Email Sending provider
+boundary. A Durable Object keyed by `send_id` records the request digest and
+provider-boundary state. Exact replay returns the durable result; reuse of the
+same id with different content fails closed. The adapter records
+`provider_started` before calling the provider. If it cannot prove what
+happened after that point, it returns `ambiguous` rather than guessing and
+creating a second send.
+
+The adapter and cell exchange only a closed provider-neutral result. Later
+delivery/defer/bounce/reject/complaint signals are normalized into content-free
+Cloudflare Queue events. A provider-message route Durable Object preserves the
+originating account and historical signer provenance without exposing content;
+the bounded account-target map selects that account's current cell when the
+event is delivered. An independent `EVENT_DELIVERY_ENABLED` gate controls
+forwarding. Events are applied idempotently at the cell. A
+permanent bounce or complaint
+creates an account-scoped SHA-256 recipient suppression that ordinary sends,
+plan overrides, and operator enable switches cannot bypass. Raw provider
+webhooks, diagnostics, bodies, and recipient values do not cross the event
+boundary.
 
 ## Pilot Implementation Checkpoint
 
@@ -1562,12 +1668,13 @@ The checkpoint was deployed on 2026-07-21 and hardened through `v0.0.197` on
 feature configuration, synthetic durable-accept canary, stable provider-retry
 proof, delayed provider retries, and disable/re-enable rollback were all
 verified live. The existing catch-all and control-plane KV remained unchanged.
-Production promotion remains blocked on the strict provider-capability gaps
+Production promotion remains blocked on the strict inbound-provider capability gaps
 above. Plan-tier retention is no longer one of those implementation gaps:
 migration 0069 adds independent preview/enforcement lanes, and the separately
-scalable worker applies finite `agent_email_retention_days` policies with
-Prometheus metrics. Activation remains explicit per cell, and a configured
-retention policy is not proof that the worker is running in enforcement mode.
+scalable worker applies finite `agent_email_retention_days` policies to both
+inbound and eligible outbound records with Prometheus metrics. Activation
+remains explicit per cell, and a configured retention policy is not proof that
+the worker is running in enforcement mode.
 Quarantine, trusted sender authentication, provider-id idempotency, and
 billable receive remain production work rather than features silently
 simulated by the retired pilot.
@@ -1644,14 +1751,19 @@ Receive-only still carries real obligations:
   MIME bytes across the whole account. The latter counts the complete raw
   message whenever its MIME tree contains an attachment; it is not a
   per-agent allowance and does not imply extracted attachment blobs.
-- Email is switchable per agent and per realm: an operator or plan
-  enforcement can turn receive — and later send — off independently without
-  deprovisioning addresses.
-- Sending, when it ships, stops hard at a per-period threshold. The cap is a
-  backend-enforced gate, not client-side advice, because agent-originated
-  spam is a first-class threat to the shared domain's reputation and to the
-  platform; threshold accounting exists per agent and per realm from the
-  first send slice.
+- Email is switchable independently per direction. An operator may turn
+  receive or send off at either the agent or realm layer without
+  deprovisioning addresses; the account plan/override gate is a third,
+  independent layer. A suspended account may inspect or disable a send layer
+  but may not enable one.
+- Outbound admission always enforces shared PostgreSQL rolling-minute breakers
+  of at most 30 messages per agent, 300 per realm, and 1,000 per account.
+  Provider attempts use an independent platform-only lane at those same
+  ceilings so retries and multiple workers cannot burst the provider. A finite audited account
+  override may lower either breaker. Missing or explicit unlimited removes
+  only a commercial cap, never the platform maximum. These are backend gates,
+  not client advice, because agent-originated spam threatens shared sender
+  reputation.
 - Content never appears in logs, metrics, or diagnostics; audit events for
   provision/ingest/read/ack/purge are content-free, matching messaging. Note
   the honest boundary: message bodies — including any OTP or reset link they
@@ -1662,9 +1774,11 @@ Receive-only still carries real obligations:
   not that credential-bearing mail is encrypted at rest. Whether a shorter
   retention floor should apply to mail classified as carrying a transient
   code is an Open Question.
-- Mailbox deletion purges content and attachments from live storage while
-  preserving value-free usage events and rollups — the standing deletion
-  posture. Export before purge remains available through account archives.
+- Retention or mailbox/outbox deletion purges inbound content and attachments
+  plus eligible outbound subject/body content from live storage while
+  preserving value-free usage events and rollups. Queued, claimed, and
+  provider-started sends remain until resolved. Export before purge remains
+  available through account archives.
 - The privacy, anti-abuse, retry, and delivery-failure obligations that
   [post-v0-roadmap.md](post-v0-roadmap.md#sms-and-email-code-2fa) named as
   the reason email-code 2FA was deferred are this document's checklist, not a
@@ -1676,8 +1790,9 @@ Receive-only still carries real obligations:
   messaging substrate, full stop.
 - No bring-your-own inbox (IMAP/Gmail/M365) in this epic; the provider
   adapter boundary should not preclude it later.
-- No agent-authored outbound mail in v1; no marketing/bulk sending in any
-  slice, ever.
+- No marketing, bulk, multi-recipient, HTML, attachment, caller-selected From,
+  or caller-selected Reply-To sending. The implemented beta is one-recipient
+  plain text only.
 - No server-side inference: no backend summarization, classification beyond
   deterministic spam-verdict pass-through, or auto-extraction of meaning.
 - No automatic promotion of email content into facts, memories, or secrets;
@@ -1712,16 +1827,17 @@ Receive-only still carries real obligations:
    caps are plan-scoped in [billing-and-limits.md](billing-and-limits.md).
 5. Platform-notification templating, locale posture, and which events email
    operators at all.
-6. Whether slice 2 reply-only send needs per-thread human approval policy
-   (operator-configurable) before an agent can reply to a human.
-7. Outbound provider confirmation for the send slices: Cloudflare Email
-   Sending (public beta April 2026) is the leading candidate; confirm GA
-   status, deliverability posture, and suppression semantics when a send
-   slice is scheduled. Also settle then: the cell-to-provider send path and
-   sending-credential custody, per-realm spoofing blast radius on the
-   shared apex (any realm's compromise can send as any address unless
-   sending is scoped), and how sending domains consume the 30-domain zone
-   cap.
+6. Whether a later plan needs per-thread human approval before an agent may
+   reply. The beta uses account entitlement plus independent realm/agent kill
+   switches, not a per-thread approval prompt.
+7. **Beta settled 2026-08-14:** Cloudflare Email Sending is isolated behind a
+   signed, exact-account-allowlisted adapter. Provider credentials live only
+   at the adapter; cells hold a per-dispatch Ed25519 signing key. Sender
+   identity is server-derived on `send.witmail.net`, Reply-To is the matching
+   permanent canonical local part on `witmail.net`, and durable adapter
+   receipts prevent blind resend after an ambiguous provider boundary. Wider
+   production promotion still requires deliverability/reputation evidence and
+   an explicit operational review; beta implementation is not that approval.
 8. Legacy canonical compatibility duration after `witmail.net` activates.
    New canonical addresses and aliases are `.net`-only; the compatibility
    manifest may contain only previously issued canonical local parts on
@@ -1768,10 +1884,16 @@ in place; these are the remaining important items):
     attachment bytes, and surfaces a value-free parse-error code. Parsing is
     bounded to 25 MiB raw MIME, 256 KiB headers, 64 MIME parts, depth 8, and
     1 MiB decoded text; every content surface retains untrusted-input framing.
-13. Retention enforcement mechanics: what runs the aging, and the guard so
-    aging never silently expires unread/unclaimed mail (especially the
-    verification mail the feature exists to receive) — a durable-mailbox
-    promise needs an expiry that cannot black-hole pending work.
+13. **Settled 2026-08-14:** the general worker's independent 16-lane preview
+    and enforcement jobs run aging. The plan window is a maximum storage
+    window, not a guaranteed unread-mail lifetime: inbound mail ages from
+    `received_at`, and unread, unacknowledged, available, completed, and
+    expired-claim mail may age out. A live processing lease defers its message.
+    Eligible terminal outbound mail ages from `created_at`; `queued`,
+    `claimed`, and `provider_started` sends remain unresolved-work holds and
+    never expire. The account fence, bounded batches, preview mode, and
+    value-free retention metrics make enforcement observable without pinning
+    unclaimed mail indefinitely.
 14. Quarantine lifecycle: a rescue/disposition path (list, inspect, release,
     or discard quarantined mail) and the fix for the checkpoint-exclusion
     trap — legitimate OTP mail misflagged as spam is invisible to the
@@ -1795,10 +1917,10 @@ in place; these are the remaining important items):
     analog for the Cloudflare-specific delivery guarantee and for edge-key
     publication — a self-hoster's own edge and key-publication path, or an
     explicit narrowing of the parity claim.
-18. Restrictive sender-auth DNS on the receive domains: publish `SPF -all`
-    and `DMARC p=reject` on `agent-mail.witwave.ai` / `witmail.net` (they
-    send no mail in v1) so the domains cannot be spoofed outbound; confirm
-    this composes with a future send slice.
+18. Sender-auth DNS separation: keep receive/Reply-To on `witmail.net` and
+    publish the outbound beta only from `send.witmail.net`, with provider
+    DKIM/SPF/DMARC alignment verified before enabling dispatch. The retired
+    `agent-mail.witwave.ai` compatibility domain never becomes a sender.
 19. Edge-key freshness bound: the delist/rotation propagation to cells needs
     a bounded staleness window and a hard-fail on delisted keys, plus the
     ingestion-endpoint hardening and availability posture (the OTP use case

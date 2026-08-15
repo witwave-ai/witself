@@ -85,6 +85,12 @@ jobs:
           npm --prefix infra/cloudflare/agent-email test
           npm --prefix infra/cloudflare/agent-email run bundle:check
 
+      - name: Cloudflare agent-email sending adapter gates
+        run: |
+          npm --prefix infra/cloudflare/agent-email-send ci
+          npm --prefix infra/cloudflare/agent-email-send test
+          npm --prefix infra/cloudflare/agent-email-send run bundle:check
+
       - name: Cloudflare control-plane Worker gates
         run: |
           npm --prefix infra/cloudflare/control-plane ci

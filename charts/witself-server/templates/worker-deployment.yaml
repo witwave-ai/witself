@@ -2,6 +2,9 @@
 {{- if not .Values.database.existingSecret.name }}
 {{- fail "worker.enabled requires database.existingSecret.name" }}
 {{- end }}
+{{- if and .Values.worker.agentEmailOutbound.enabled (not .Values.worker.agentEmailOutbound.dispatchPrivateKeySecret.name) }}
+{{- fail "worker.agentEmailOutbound.enabled requires worker.agentEmailOutbound.dispatchPrivateKeySecret.name" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -57,6 +60,13 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.database.existingSecret.name | quote }}
                   key: {{ .Values.database.existingSecret.urlKey | quote }}
+            {{- if .Values.worker.agentEmailOutbound.enabled }}
+            - name: WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.worker.agentEmailOutbound.dispatchPrivateKeySecret.name | quote }}
+                  key: {{ .Values.worker.agentEmailOutbound.dispatchPrivateKeySecret.key | quote }}
+            {{- end }}
           ports:
             - name: health
               containerPort: {{ .Values.worker.health.port }}

@@ -70,6 +70,9 @@ apps:
     # relay verification keys belong here; the relay private key remains in the
     # isolated Cloudflare Worker secret.
     agentEmail:
+      providerEventTokenSecret:
+        name: ""
+        key: token
       receivePilot:
         enabled: false
         domain: ""
@@ -163,6 +166,20 @@ apps:
         batchSize: 10000
         interval: 1m
         batchTimeout: 10s
+      # Durable outbound email stays dark until the managed adapter, exact
+      # account cohort, and per-cell signing key are all provisioned.
+      agentEmailOutbound:
+        enabled: false
+        dispatchEndpoint: ""
+        dispatchAudience: witself-agent-email-send
+        dispatchKeyID: ""
+        dispatchPrivateKeySecret:
+          name: ""
+          key: private-key
+        batchSize: 10
+        interval: 2s
+        batchTimeout: 30s
+        providerTimeout: 20s
       # Keep retention disabled by default. Activation is explicit per cell,
       # with preview available before enforcement.
       transcriptRetention:

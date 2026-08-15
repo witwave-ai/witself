@@ -81,6 +81,21 @@ type AgentEmailRetentionCounts struct {
 	ScanCapped            bool
 }
 
+// AgentEmailOutboundCounts contains value-free send-worker outcomes. It has
+// no account, realm, agent, recipient, message, or provider identifiers.
+type AgentEmailOutboundCounts struct {
+	Claimed           int64
+	Accepted          int64
+	Delivered         int64
+	Retried           int64
+	Bounced           int64
+	Rejected          int64
+	Failed            int64
+	Ambiguous         int64
+	Canceled          int64
+	ExpiredReconciled int64
+}
+
 type jobMetric struct {
 	Running  bool
 	Failures uint64
@@ -117,6 +132,9 @@ type Metrics struct {
 	agentEmailRateBucketCleanupBatches     map[RetentionResult]uint64
 	agentEmailRateBucketCleanupDeletedRows uint64
 	agentEmailRateBucketCleanupLastSuccess float64
+	agentEmailOutboundBatches              map[RetentionResult]uint64
+	agentEmailOutboundItems                map[string]uint64
+	agentEmailOutboundLastSuccess          float64
 	now                                    func() time.Time
 }
 
@@ -142,7 +160,13 @@ func newMetrics() *Metrics {
 			RetentionResultNoWork:  0,
 			RetentionResultError:   0,
 		},
-		now: time.Now,
+		agentEmailOutboundBatches: map[RetentionResult]uint64{
+			RetentionResultSuccess: 0,
+			RetentionResultNoWork:  0,
+			RetentionResultError:   0,
+		},
+		agentEmailOutboundItems: make(map[string]uint64),
+		now:                     time.Now,
 	}
 }
 
@@ -379,6 +403,55 @@ func (m *Metrics) ObserveAgentEmailRateBucketCleanupBatch(
 	}
 }
 
+// ObserveAgentEmailOutboundBatch records one bounded, value-free send-worker
+// attempt. Invalid result/count combinations are ignored rather than creating
+// data-controlled metric labels.
+func (m *Metrics) ObserveAgentEmailOutboundBatch(
+	result RetentionResult,
+	counts AgentEmailOutboundCounts,
+) {
+	if result != RetentionResultSuccess &&
+		result != RetentionResultNoWork &&
+		result != RetentionResultError {
+		return
+	}
+	values := map[string]int64{
+		"claimed":            counts.Claimed,
+		"accepted":           counts.Accepted,
+		"delivered":          counts.Delivered,
+		"retried":            counts.Retried,
+		"bounced":            counts.Bounced,
+		"rejected":           counts.Rejected,
+		"failed":             counts.Failed,
+		"ambiguous":          counts.Ambiguous,
+		"canceled":           counts.Canceled,
+		"expired_reconciled": counts.ExpiredReconciled,
+	}
+	hasItems := false
+	for _, value := range values {
+		if value < 0 {
+			return
+		}
+		hasItems = hasItems || value > 0
+	}
+	if result == RetentionResultSuccess && !hasItems ||
+		result != RetentionResultSuccess && hasItems {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.agentEmailOutboundBatches[result]++
+	if result == RetentionResultSuccess || result == RetentionResultNoWork {
+		m.agentEmailOutboundLastSuccess = float64(m.now().Unix())
+	}
+	for kind, value := range values {
+		if value > 0 {
+			m.agentEmailOutboundItems[kind] += uint64(value)
+		}
+	}
+}
+
 func (m *Metrics) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
@@ -456,6 +529,18 @@ func (m *Metrics) writePrometheus(w io.Writer) {
 	}
 	agentEmailRateBucketCleanupDeletedRows := m.agentEmailRateBucketCleanupDeletedRows
 	agentEmailRateBucketCleanupLastSuccess := m.agentEmailRateBucketCleanupLastSuccess
+	agentEmailOutboundBatches := make(
+		map[RetentionResult]uint64,
+		len(m.agentEmailOutboundBatches),
+	)
+	for result, value := range m.agentEmailOutboundBatches {
+		agentEmailOutboundBatches[result] = value
+	}
+	agentEmailOutboundItems := make(map[string]uint64, len(m.agentEmailOutboundItems))
+	for kind, value := range m.agentEmailOutboundItems {
+		agentEmailOutboundItems[kind] = value
+	}
+	agentEmailOutboundLastSuccess := m.agentEmailOutboundLastSuccess
 	m.mu.Unlock()
 
 	_, _ = fmt.Fprintln(w, "# HELP witself_worker_up 1 if the witself-worker process is up.")
@@ -608,6 +693,46 @@ func (m *Metrics) writePrometheus(w io.Writer) {
 			"witself_worker_agent_email_retention_last_success_timestamp_seconds{mode=%q} %.0f\n",
 			mode, emailLastSuccess[mode])
 	}
+
+	_, _ = fmt.Fprintln(w, "# HELP witself_worker_agent_email_outbound_batches_total Outbound agent-email worker batches by bounded result.")
+	_, _ = fmt.Fprintln(w, "# TYPE witself_worker_agent_email_outbound_batches_total counter")
+	outboundResults := make([]string, 0, len(agentEmailOutboundBatches))
+	for result := range agentEmailOutboundBatches {
+		outboundResults = append(outboundResults, string(result))
+	}
+	sort.Strings(outboundResults)
+	for _, result := range outboundResults {
+		_, _ = fmt.Fprintf(
+			w,
+			"witself_worker_agent_email_outbound_batches_total{result=%q} %d\n",
+			result,
+			agentEmailOutboundBatches[RetentionResult(result)],
+		)
+	}
+
+	_, _ = fmt.Fprintln(w, "# HELP witself_worker_agent_email_outbound_items_total Value-free outbound agent-email outcomes by bounded kind.")
+	_, _ = fmt.Fprintln(w, "# TYPE witself_worker_agent_email_outbound_items_total counter")
+	outboundKinds := make([]string, 0, len(agentEmailOutboundItems))
+	for kind := range agentEmailOutboundItems {
+		outboundKinds = append(outboundKinds, kind)
+	}
+	sort.Strings(outboundKinds)
+	for _, kind := range outboundKinds {
+		_, _ = fmt.Fprintf(
+			w,
+			"witself_worker_agent_email_outbound_items_total{kind=%q} %d\n",
+			kind,
+			agentEmailOutboundItems[kind],
+		)
+	}
+
+	_, _ = fmt.Fprintln(w, "# HELP witself_worker_agent_email_outbound_last_success_timestamp_seconds Unix timestamp of the last successful or no-work outbound agent-email batch.")
+	_, _ = fmt.Fprintln(w, "# TYPE witself_worker_agent_email_outbound_last_success_timestamp_seconds gauge")
+	_, _ = fmt.Fprintf(
+		w,
+		"witself_worker_agent_email_outbound_last_success_timestamp_seconds %.0f\n",
+		agentEmailOutboundLastSuccess,
+	)
 
 	_, _ = fmt.Fprintln(w, "# HELP witself_worker_message_rate_bucket_cleanup_batches_total Message-rate-bucket cleanup batches by bounded result.")
 	_, _ = fmt.Fprintln(w, "# TYPE witself_worker_message_rate_bucket_cleanup_batches_total counter")

@@ -71,6 +71,20 @@ activation ordering remain separate rollout gates; transcript retention's
 disabled-to-preview sequence is in
 [Transcript Retention](transcript-retention.md#control-plane-lifecycle-rollout).
 
+The managed outbound agent-email sending adapter is a third, separately gated
+Cloudflare deployment. The tag workflow validates its committed lockfile,
+tests, and Worker bundle but intentionally does not provision its Email Sending
+domain, Queues, Durable Objects, secrets, signer cohort, or event targets. Run
+the [sending-adapter procedure](../infra/cloudflare/agent-email-send/README.md)
+only from the same clean, exactly tagged checkout after the release workflow
+succeeds. Before invoking Wrangler, independently require an empty
+`git status --porcelain`, exactly one `vMAJOR.MINOR.PATCH` tag at `HEAD`, and a
+tag/commit equal to the released cell artifacts. Deploy both adapter gates dark
+first and record the Git tag, commit, Cloudflare account, and returned Worker
+version ID in the private rollout record. Secret or gate changes can create a
+new Worker version, so reverify those bindings and record the successor version
+before enabling any cell or account layer.
+
 The current Helm chart does not render a migration Job. With a database DSN,
 `witself-server serve` applies its embedded Goose migrations before opening the
 service; a migration failure prevents that process from serving. A rollout is
@@ -112,8 +126,8 @@ before any future explicit migration Job is introduced.
 
 ## Go Baseline
 
-Witself should use the latest stable Go release. As of July 10, 2026, the
-current stable Go release is `go1.26.5`.
+Witself should use the latest stable Go release. As of August 14, 2026, the
+current stable Go release is `go1.26.6`.
 
 Initial module settings when code starts:
 
@@ -122,7 +136,7 @@ module github.com/witwave-ai/witself
 
 go 1.26
 
-toolchain go1.26.5
+toolchain go1.26.6
 ```
 
 Refresh this baseline before first implementation and before each release. If a
@@ -147,7 +161,7 @@ The initial module bootstrap, once the first Go package exists, should look like
 ```sh
 go mod init github.com/witwave-ai/witself
 go mod edit -go=1.26
-go mod edit -toolchain=go1.26.5
+go mod edit -toolchain=go1.26.6
 go mod tidy
 ```
 

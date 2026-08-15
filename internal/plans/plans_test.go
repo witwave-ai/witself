@@ -19,8 +19,8 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 	if len(c.Plans) != 4 {
 		t.Fatalf("catalog has %d plans; want 4", len(c.Plans))
 	}
-	if c.Updated != "2026-08-10" {
-		t.Fatalf("catalog updated = %q; want 2026-08-10", c.Updated)
+	if c.Updated != "2026-08-14" {
+		t.Fatalf("catalog updated = %q; want 2026-08-14", c.Updated)
 	}
 	if c.Currency != "USD" {
 		t.Fatalf("catalog currency = %q; want USD", c.Currency)
@@ -42,8 +42,9 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 	}
 	if free.Policies[AgentEmailRetentionDaysPolicy] != 30 ||
 		free.Policies[AgentEmailEntitlementVersionPolicy] != AgentEmailEntitlementVersion ||
-		free.HasFeature(AgentEmailReceiveFeature) {
-		t.Fatalf("free = %+v; want disabled inbound email with 30-day cleanup", free)
+		free.HasFeature(AgentEmailReceiveFeature) ||
+		free.HasFeature(AgentEmailSendFeature) {
+		t.Fatalf("free = %+v; want disabled agent email with 30-day cleanup", free)
 	}
 	if !free.HasFeature("memory") || !free.HasFeature("facts") ||
 		free.HasFeature("secrets") || free.HasFeature(MessagingFeature) {
@@ -65,8 +66,9 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 		t.Fatalf("standard policies = %v; want 90-day message retention", std.Policies)
 	}
 	if std.Policies[AgentEmailRetentionDaysPolicy] != 90 ||
-		!std.HasFeature(AgentEmailReceiveFeature) {
-		t.Fatalf("standard = %+v; want inbound email with 90-day retention", std)
+		!std.HasFeature(AgentEmailReceiveFeature) ||
+		std.HasFeature(AgentEmailSendFeature) {
+		t.Fatalf("standard = %+v; want inbound-only email with 90-day retention", std)
 	}
 
 	team, ok := c.Get("team")
@@ -81,8 +83,9 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 		t.Fatalf("team = %+v; want messaging with 365-day retention", team)
 	}
 	if team.Policies[AgentEmailRetentionDaysPolicy] != 365 ||
-		!team.HasFeature(AgentEmailReceiveFeature) {
-		t.Fatalf("team = %+v; want inbound email with 365-day retention", team)
+		!team.HasFeature(AgentEmailReceiveFeature) ||
+		!team.HasFeature(AgentEmailSendFeature) {
+		t.Fatalf("team = %+v; want send/receive email with 365-day retention", team)
 	}
 	enterprise, _ := c.Get("enterprise")
 	if enterprise.Available || enterprise.Purchasable() || enterprise.Paid() || !enterprise.UsageBilled {
@@ -96,8 +99,9 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 		t.Fatalf("enterprise = %+v; want messaging with 365-day default retention", enterprise)
 	}
 	if enterprise.Policies[AgentEmailRetentionDaysPolicy] != 365 ||
-		!enterprise.HasFeature(AgentEmailReceiveFeature) {
-		t.Fatalf("enterprise = %+v; want inbound email with 365-day default retention", enterprise)
+		!enterprise.HasFeature(AgentEmailReceiveFeature) ||
+		!enterprise.HasFeature(AgentEmailSendFeature) {
+		t.Fatalf("enterprise = %+v; want send/receive email with 365-day default retention", enterprise)
 	}
 	monthly := func(value int64) *int64 { return &value }
 	type expectedPlan struct {
@@ -196,7 +200,7 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 				MessagingEntitlementVersionPolicy:  MessagingEntitlementVersion,
 				TranscriptRetentionDaysPolicy:      365,
 			},
-			features: []string{"memory", "facts", "secrets", MessagingFeature, AgentEmailReceiveFeature, AgentEmailRealmAliasFeature, AgentEmailCustomDomainFeature, "collaboration", "support"},
+			features: []string{"memory", "facts", "secrets", MessagingFeature, AgentEmailReceiveFeature, AgentEmailSendFeature, AgentEmailRealmAliasFeature, AgentEmailCustomDomainFeature, "collaboration", "support"},
 			summary:  "Coming soon. Everything in Professional for up to 100 agents per realm across 25 realms, plus usage-based billing.",
 		},
 		"enterprise": {
@@ -220,7 +224,7 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 				MessageRetentionDaysPolicy:         365,
 				MessagingEntitlementVersionPolicy:  MessagingEntitlementVersion,
 			},
-			features: []string{"memory", "facts", "secrets", MessagingFeature, AgentEmailReceiveFeature, AgentEmailRealmAliasFeature, AgentEmailCustomDomainFeature, "collaboration", "support"},
+			features: []string{"memory", "facts", "secrets", MessagingFeature, AgentEmailReceiveFeature, AgentEmailSendFeature, AgentEmailRealmAliasFeature, AgentEmailCustomDomainFeature, "collaboration", "support"},
 			summary:  "Coming soon. Everything in Team with custom pricing and support; details to follow.",
 		},
 	}
@@ -415,6 +419,8 @@ func TestCanonicalAgentEmailRateLimitsRemainPlatformOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	dimensions := []string{
+		AgentEmailSentPerAgentMinuteLimit,
+		AgentEmailSentPerRealmMinuteLimit,
 		AgentEmailReceivedPerSenderMinuteLimit,
 		AgentEmailReceivedPerRecipientMinuteLimit,
 		AgentEmailReceivedPerRealmMinuteLimit,
@@ -458,6 +464,8 @@ func TestParseValidation(t *testing.T) {
 		{"agent send rate above platform maximum", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"limits":{"message_sent_per_agent_minute":2001}}]}`, "between 0 and 2000"},
 		{"realm delivery rate above platform maximum", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"limits":{"message_delivered_per_realm_minute":100001}}]}`, "between 0 and 100000"},
 		{"recipient delivery rate above platform maximum", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"limits":{"message_delivered_per_recipient_minute":5001}}]}`, "between 0 and 5000"},
+		{"agent email send rate above platform maximum", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"limits":{"agent_email_sent_per_agent_minute":31}}]}`, "between 0 and 30"},
+		{"realm email send rate above platform maximum", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"limits":{"agent_email_sent_per_realm_minute":301}}]}`, "between 0 and 300"},
 		{"unknown agent email rate limit", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"limits":{"agent_email_received_per_source_minute":1}}]}`, "unknown limit"},
 		{"zero retention", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"policies":{"transcript_retention_days":0}}]}`, "between 1"},
 		{"zero message retention", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"policies":{"message_retention_days":0}}]}`, "between 1"},
@@ -521,6 +529,8 @@ func TestValidateMessageRateLimitBounds(t *testing.T) {
 
 func TestValidateAgentEmailRateLimitBounds(t *testing.T) {
 	limits := map[string]int64{
+		AgentEmailSentPerAgentMinuteLimit:              MaxAgentEmailSentPerAgentMinute,
+		AgentEmailSentPerRealmMinuteLimit:              MaxAgentEmailSentPerRealmMinute,
 		AgentEmailReceivedPerSenderMinuteLimit:         MaxAgentEmailReceivedPerSenderMinute,
 		AgentEmailReceivedPerRecipientMinuteLimit:      MaxAgentEmailReceivedPerRecipientMinute,
 		AgentEmailReceivedPerRealmMinuteLimit:          MaxAgentEmailReceivedPerRealmMinute,
@@ -554,6 +564,8 @@ func TestValidateLimitsZeroAndMissingUnlimited(t *testing.T) {
 			MessageDeliveredPerRecipientMinuteLimit: 0,
 		},
 		{
+			AgentEmailSentPerAgentMinuteLimit:              0,
+			AgentEmailSentPerRealmMinuteLimit:              0,
 			AgentEmailReceivedPerSenderMinuteLimit:         0,
 			AgentEmailReceivedPerRecipientMinuteLimit:      0,
 			AgentEmailReceivedPerRealmMinuteLimit:          0,

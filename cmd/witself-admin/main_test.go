@@ -369,6 +369,23 @@ func TestAccountPolicyCommandsRejectUnsafeMutations(t *testing.T) {
 			},
 		},
 		{
+			name: "email send set needs selection",
+			call: func() int {
+				return accountAgentEmailSend([]string{
+					"set", "--account", "acct_1", "--reason", "bad",
+				})
+			},
+		},
+		{
+			name: "email send set rejects both values",
+			call: func() int {
+				return accountAgentEmailSend([]string{
+					"set", "--account", "acct_1", "--enabled", "--disabled",
+					"--reason", "bad",
+				})
+			},
+		},
+		{
 			name: "email retention set needs reason",
 			call: func() int {
 				return accountAgentEmailRetention([]string{
@@ -555,6 +572,9 @@ func TestAccountMessagingCLITransmitsIndependentOverrides(t *testing.T) {
 			"email_receive": map[string]any{
 				"default_enabled": false, "enabled": true, "overridden": true,
 			},
+			"email_send": map[string]any{
+				"default_enabled": false, "enabled": true, "overridden": true,
+			},
 			"email_retention": map[string]any{
 				"default_days": 30, "effective_days": nil, "overridden": true,
 			},
@@ -590,6 +610,13 @@ func TestAccountMessagingCLITransmitsIndependentOverrides(t *testing.T) {
 	}); code != 0 {
 		t.Fatalf("email receive exit code = %d, want 0", code)
 	}
+	if code := accountAgentEmailSend([]string{
+		"set", "--endpoint", srv.URL, "--token", "admin-token",
+		"--account", "acct_1", "--enabled",
+		"--reason", " founder email sending ", "--json",
+	}); code != 0 {
+		t.Fatalf("email send exit code = %d, want 0", code)
+	}
 	if code := accountAgentEmailRetention([]string{
 		"set", "--endpoint", srv.URL, "--token", "admin-token",
 		"--account", "acct_1", "--indefinite",
@@ -598,7 +625,7 @@ func TestAccountMessagingCLITransmitsIndependentOverrides(t *testing.T) {
 		t.Fatalf("email retention exit code = %d, want 0", code)
 	}
 
-	if len(requests) != 4 {
+	if len(requests) != 5 {
 		t.Fatalf("requests = %#v", requests)
 	}
 	if requests[0].method != http.MethodPut ||
@@ -620,10 +647,16 @@ func TestAccountMessagingCLITransmitsIndependentOverrides(t *testing.T) {
 		t.Fatalf("email receive request = %#v", requests[2])
 	}
 	if requests[3].method != http.MethodPut ||
-		requests[3].path != "/v1/admin/accounts/acct_1/email-retention" ||
-		requests[3].body["indefinite"] != true ||
-		requests[3].body["reason"] != "founder email retention" {
-		t.Fatalf("email retention request = %#v", requests[3])
+		requests[3].path != "/v1/admin/accounts/acct_1/email-send" ||
+		requests[3].body["enabled"] != true ||
+		requests[3].body["reason"] != "founder email sending" {
+		t.Fatalf("email send request = %#v", requests[3])
+	}
+	if requests[4].method != http.MethodPut ||
+		requests[4].path != "/v1/admin/accounts/acct_1/email-retention" ||
+		requests[4].body["indefinite"] != true ||
+		requests[4].body["reason"] != "founder email retention" {
+		t.Fatalf("email retention request = %#v", requests[4])
 	}
 }
 
