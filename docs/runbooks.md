@@ -504,25 +504,30 @@ reconcile; it is not permission to retry elsewhere. Securely remove the
 operator secrets file afterward. Keep the retired Worker deployed and
 unrouted through the production soak period.
 
-### Roll out the v0.0.241 cell receive foundation
+### Roll out production cell receive and the v0.0.245 retry canary
 
 This procedure supersedes the earlier blanket instruction not to deploy schema
-88 to a serving cell, but only for a target running chart and image `v0.0.241`
-or newer. It promotes the cell-side scalable receive foundation; it does not
+88 to a serving cell. Production receive itself requires chart and image
+`v0.0.241` or newer; this production procedure uses matching `v0.0.245` or
+newer so the selected retry canary can remain outside Git and the non-secret
+ConfigMap. It promotes the cell-side scalable receive foundation; it does not
 approve custom-domain provider delivery or turn on any control-plane, edge, MX,
 catch-all, canonical-delivery, or alias-delivery gate. Those remain dark until
 their own reviewed stage.
 
 1. Create and verify the normal pre-migration backup. Deploy matching chart and
-   image `v0.0.241` with both `receivePilot.enabled` and
+   image `v0.0.245` or newer with both `receivePilot.enabled` and
    `receiveProduction.enabled` false. Wait for every old writer to drain and
-   verify schema 88 plus API health before changing receive configuration.
+   verify the release's migrations plus API health before changing receive
+   configuration.
 2. Build one canonical, byte-sorted CSV of 1-100 exact account IDs resident in
    this cell, with no whitespace or trailing newline. Store it outside Git and
    provision it as one immutable, versioned Kubernetes Secret data value in the
    server namespace. Set only `accountIDsExistingSecret.name` and `.key` in
    managed cell values; leave the literal `accountIDs` array and
-   `retryCanaryAgentID` empty. Deploy the identical CSV to the
+   `retryCanaryAgentID` empty. Also leave
+   `retryCanaryAgentIDExistingSecret.name` empty for this first rollout. Deploy
+   the identical CSV to the
    separately guarded control-plane/edge cohort settings, but keep every
    delivery gate false. There is no wildcard. A missing Secret/key, duplicated,
    malformed, whitespace-padded, unsorted, or cross-cell account must stop the
@@ -530,9 +535,9 @@ their own reviewed stage.
    immutable Secret and update its versioned reference name, which rolls every
    API pod. Verify the new cohort before changing edge state.
 3. Enable only `agentEmail.receiveProduction` in the cell. Its startup is
-   read-only and O(cohort): each API pod verifies account presence/status and
-   optional retry-canary membership in literal/private mode, but never scans or
-   mutates all agents.
+   read-only and O(cohort): each API pod verifies account presence/status and,
+   after the second rollout below, the selected retry-canary membership. It
+   never scans or mutates all agents.
    Missing existing mailboxes therefore do not block readiness. From this point,
    every successful new-agent create in the cohort includes its mailbox in the
    same transaction.
@@ -547,9 +552,11 @@ their own reviewed stage.
    ```
 
    The fixed Job name prevents concurrent runs. The script snapshots only the
-   non-secret ConfigMap, inherits the exact database/cohort Secret references
-   without reading their values, and exports from a memory-backed volume without
-   putting identities or Secret references in its output. Record only its
+   non-secret ConfigMap, inherits the exact database/cohort and optional
+   retry-canary Secret references without reading their values, and exports
+   from a memory-backed volume without putting identities or Secret references
+   in its output. A retry-canary Secret is accepted only from a `v0.0.245` or
+   newer source image. Record only its
    value-free JSON counts. The exception path must be new,
    canonical, absolute, and outside Git. It is created mode `0600` only if one
    agent needs a private operator override; review it locally and use a new
@@ -619,18 +626,30 @@ their own reviewed stage.
    an entitled test account persists one signed synthetic delivery. Keep this
    inside the cell/relay test boundary; provider routing is still dark. Verify a
    plan flip takes effect without reinstalling the client.
-6. Generate the mode-0600 canary manifest with the cell-native command in the
-   next section. It must be derived after zero-missing verification and must
-   pass `routes:primary -- status` before a disabled-rule plan is created.
+6. Generate a new mode-0600 canary manifest with the cell-native command in the
+   next section. It must be derived after zero-missing verification. Choose one
+   eligible agent from that private artifact. Store exactly its canonical
+   `agent_*` ID, with no leading or trailing whitespace and no trailing newline,
+   in a distinct immutable, versioned Kubernetes Secret. Do not reuse the
+   cohort Secret. Keep the literal `retryCanaryAgentID` empty and set only
+   `retryCanaryAgentIDExistingSecret.name` and `.key` in a separate config-only
+   rollout. Changing either field changes both server rollout checksums. Wait
+   for every replacement API pod to become Ready; startup must verify that the
+   selected agent is live and belongs to the configured cohort. Re-run the
+   exporter to a new absent path and verify privately that the selected agent
+   is included. That second manifest must pass `routes:primary -- status`
+   before a disabled-rule plan is created.
 
-Before provider activation, rollback is config-only: set production receive
-false, wait for every API pod to converge, and leave the idempotently created
-mailboxes and permanent address reservations intact. Do not delete mailbox rows
-to undo a cohort selection. To deploy code older than `v0.0.241`, first disable
-production receive and drain all newer pods; the app-of-apps deliberately
-refuses to pass the new values to an older chart or image. Once any edge rule is
-prepared or activated, also follow the separately fenced primary-route disable
-and removal sequence below.
+Before provider activation, rollback is config-only: disable any canary
+schedule, settle an unused arm or let its 15-minute TTL expire, clear
+`retryCanaryAgentIDExistingSecret.name`, and wait for every API pod to converge.
+To deploy code older than `v0.0.245`, that Secret reference must be empty; the
+app-of-apps omits the unknown field from older strict child schemas. To deploy
+code older than `v0.0.241`, also set production receive false and drain all
+newer pods. Leave the idempotently created mailboxes and permanent address
+reservations intact; do not delete mailbox rows to undo a cohort selection.
+Once any edge rule is prepared or activated, also follow the separately fenced
+primary-route disable and removal sequence below.
 
 ### Stage the primary-domain canary and catch-all
 
@@ -652,8 +671,12 @@ The output path must be new and outside the repository. The command derives
 5-10 sorted entries from actual `witmail.net` primary mailbox rows with active
 entitlement and enabled account/realm/agent receive state, and creates the exact
 edge manifest using exclusive mode `0600`. A configured retry canary is included
-only for literal/private mode; managed Secret-backed v0.0.241 keeps it empty.
-The command prints no identities or addresses. Move the private artifact to
+for both literal/private and managed Secret-backed modes. The operation Job
+copies and fences the optional Secret reference without reading or printing its
+value. On the first managed export the reference is empty; after choosing one
+eligible agent and completing the `v0.0.245` config-only Secret rollout above,
+create a second export and require that it includes the selection. The command
+prints no identities or addresses. Move each private artifact to
 operator-controlled storage without relaxing its mode.
 
 Before preparing rules, deploy the byte-identical sorted canary-account CSV in

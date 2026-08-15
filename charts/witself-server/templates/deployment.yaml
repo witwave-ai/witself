@@ -56,7 +56,7 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "witself-server.fullname" . }}
-          {{- if or .Values.database.existingSecret.name .Values.bootstrap.existingSecret.name .Values.provision.existingSecret.name .Values.backup.existingSecret.name .Values.agentEmail.providerEventTokenSecret.name (and .Values.agentEmail.receiveProduction.enabled .Values.agentEmail.receiveProduction.accountIDsExistingSecret.name) }}
+          {{- if or .Values.database.existingSecret.name .Values.bootstrap.existingSecret.name .Values.provision.existingSecret.name .Values.backup.existingSecret.name .Values.agentEmail.providerEventTokenSecret.name (and .Values.agentEmail.receiveProduction.enabled .Values.agentEmail.receiveProduction.accountIDsExistingSecret.name) (and .Values.agentEmail.receiveProduction.enabled .Values.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name) }}
           env:
           {{- if .Values.agentEmail.providerEventTokenSecret.name }}
             - name: WITSELF_AGENT_EMAIL_PROVIDER_EVENT_TOKEN
@@ -71,6 +71,13 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.agentEmail.receiveProduction.accountIDsExistingSecret.name | quote }}
                   key: {{ .Values.agentEmail.receiveProduction.accountIDsExistingSecret.key | quote }}
+          {{- end }}
+          {{- if and .Values.agentEmail.receiveProduction.enabled .Values.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name }}
+            - name: WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name | quote }}
+                  key: {{ .Values.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.key | quote }}
           {{- end }}
           {{- if .Values.bootstrap.existingSecret.name }}
             - name: WITSELF_BOOTSTRAP_TOKEN_FILE

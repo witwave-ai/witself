@@ -230,11 +230,20 @@ func agentEmailReceiveConfigFromEnv() (server.AgentEmailReceiveConfig, error) {
 			return server.AgentEmailReceiveConfig{}, fmt.Errorf("%s must be a duration: %w", agentEmailRelayReplayWindowEnv, err)
 		}
 	}
+	retryCanaryAgentID := os.Getenv(agentEmailRetryCanaryAgentIDEnv)
+	if retryCanaryAgentID != "" &&
+		(retryCanaryAgentID != strings.TrimSpace(retryCanaryAgentID) ||
+			!validAgentEmailConfigGeneratedID(retryCanaryAgentID, "agent")) {
+		return server.AgentEmailReceiveConfig{}, fmt.Errorf(
+			"%s must be empty or one canonical agent ID with no surrounding whitespace",
+			agentEmailRetryCanaryAgentIDEnv,
+		)
+	}
 	receive := server.AgentEmailReceiveConfig{
 		Enabled: true, Mode: mode, Domain: domain,
 		LegacyDomains: legacyDomains, Audience: audience,
 		AccountIDs: accountIDs, RealmIDs: realmIDs, AgentIDs: agentIDs,
-		RetryCanaryAgentID: strings.TrimSpace(os.Getenv(agentEmailRetryCanaryAgentIDEnv)),
+		RetryCanaryAgentID: retryCanaryAgentID,
 		RelayPublicKeys:    publicKeys, RelayReplayWindow: replayWindow,
 	}
 	if err := server.ValidateAgentEmailReceiveConfig(receive); err != nil {

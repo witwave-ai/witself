@@ -23,6 +23,16 @@ the configured retry canary. No live cell, provider route, MX, catch-all,
 canonical-delivery, alias-delivery, or custom-domain gate is enabled by this
 implementation checkpoint.
 
+Managed retry-canary selection is implemented for matching chart and image
+`v0.0.245` or newer. The literal canary remains empty; a distinct immutable,
+versioned Kubernetes Secret supplies exactly one canonical `agent_*` ID with
+no whitespace or trailing newline. The new Secret field is withheld from older
+strict child schemas. Its name and key participate in the API rollout
+checksums, and startup verifies cohort membership. Operators first converge
+code, cohort, backfill, and a private canary export with the reference empty;
+they then select an eligible agent in a separate config-only rollout and
+re-export before activating provider delivery.
+
 Production outbound checkpoint (implemented 2026-08-14, runtime default off):
 agents can queue a one-recipient plain-text message, queue a reply to an
 owner-visible inbound message, and inspect metadata-only sent-mail state

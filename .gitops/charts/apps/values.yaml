@@ -105,8 +105,14 @@ apps:
         accountIDsExistingSecret:
           name: ""
           key: account_ids
-        # Must remain empty with accountIDsExistingSecret in v0.0.241.
+        # Managed installs never place a canary agent ID in this literal.
         retryCanaryAgentID: ""
+        # Optional private retry-canary selection introduced in v0.0.245.
+        # Keep empty during the code/cohort rollout, then point at a distinct
+        # immutable, versioned Secret for the config-only selection rollout.
+        retryCanaryAgentIDExistingSecret:
+          name: ""
+          key: agent_id
         relayPublicKeysJSON: ""
         relayReplayWindow: 5m
     # Expand/activate gate for irreversible avatar creative-payload cleanup.

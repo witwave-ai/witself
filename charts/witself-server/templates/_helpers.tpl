@@ -93,8 +93,8 @@ app.kubernetes.io/part-of: witself
 {{/*
 One shared digest binds the non-secret server ConfigMap to the pod template
 that consumes it. Include Secret references, never Secret values, so a
-versioned database or receive-cohort Secret change also rolls the pod and can
-be fenced by imperative one-shot operations.
+versioned database, receive-cohort, or retry-canary Secret change also rolls
+the pod and can be fenced by imperative one-shot operations.
 */}}
 {{- define "witself-server.serverConfigChecksum" -}}
 {{- dict

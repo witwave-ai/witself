@@ -154,9 +154,21 @@ func TestAgentEmailProductionConfigFromEnvRejectsUnsafeShapes(t *testing.T) {
 			},
 		},
 		{
-			name: "invalid canary", want: "retry canary",
+			name: "invalid canary", want: agentEmailRetryCanaryAgentIDEnv,
 			mutate: func(t *testing.T) {
 				t.Setenv(agentEmailRetryCanaryAgentIDEnv, "agent_not-valid")
+			},
+		},
+		{
+			name: "canary leading whitespace", want: agentEmailRetryCanaryAgentIDEnv,
+			mutate: func(t *testing.T) {
+				t.Setenv(agentEmailRetryCanaryAgentIDEnv, " agent_aaaaaaaaaaaaaaaa")
+			},
+		},
+		{
+			name: "canary trailing newline", want: agentEmailRetryCanaryAgentIDEnv,
+			mutate: func(t *testing.T) {
+				t.Setenv(agentEmailRetryCanaryAgentIDEnv, "agent_aaaaaaaaaaaaaaaa\n")
 			},
 		},
 	}

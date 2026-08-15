@@ -61,8 +61,14 @@ For DNS, keep the stable names here:
   outside Git and provision an immutable, versioned Secret in the server
   namespace before enabling the gate; do not place account IDs in the cell
   values file. Rotate by creating a new Secret and changing the reference name,
-  which rolls the API pods; in-place mutation is unsupported. Keep the retry
-  canary empty until a Secret-backed form exists.
+  which rolls the API pods; in-place mutation is unsupported. Managed cells
+  always keep the literal retry canary empty. On matching chart and image
+  `v0.0.245` or newer, `retryCanaryAgentIDExistingSecret` may reference a
+  distinct immutable, versioned Secret whose value is exactly one canonical
+  `agent_*` ID with no whitespace or trailing newline. Leave its name empty for
+  the first code/cohort rollout, then select one eligible exported canary in a
+  separate config-only rollout. Changing either Secret name or key rolls the
+  API pods; older strict child schemas never receive the empty new field.
 
 `witself-infra` still owns the durable cloud side: Route 53, Cloud DNS, or Azure
 DNS zone creation, Cloudflare parent-zone delegation, certificate/static-IP or

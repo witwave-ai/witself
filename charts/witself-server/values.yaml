@@ -110,10 +110,17 @@ agentEmail:
       # to roll the pods because in-place Secret data mutation is unsupported.
       # API startup applies the same 1-100 cohort validation.
       key: account_ids
-    # Keep empty with accountIDsExistingSecret. Secret-backed retry-canary
-    # identity is not part of v0.0.241; literal/private installs may set it
-    # only when they also use literal accountIDs.
+    # Portable/private installs using literal accountIDs may select one
+    # canonical agent directly. Managed installs must keep this empty and use
+    # the immutable Secret reference below so the agent identity never enters
+    # Git or the non-secret ConfigMap.
     retryCanaryAgentID: ""
+    retryCanaryAgentIDExistingSecret:
+      name: ""
+      # Exact canonical agent_* ID with no whitespace or trailing newline.
+      # Introduced in v0.0.245. Use a distinct immutable, versioned Secret and
+      # replace its name for the empty-to-selected config-only rollout.
+      key: agent_id
     relayPublicKeysJSON: ""
     relayReplayWindow: 5m
 

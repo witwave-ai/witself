@@ -113,8 +113,23 @@ CSV with no spaces or trailing newline. The app-of-apps forwards only the
 Secret reference, and the child ConfigMap contains no account IDs. A missing or
 malformed value fails closed at pod creation or API startup. In-place Secret
 mutation is unsupported: create a new versioned Secret and update the reference
-name so the Deployment rolls. Keep `retryCanaryAgentID` empty in this mode;
-v0.0.241 has no Secret-backed retry-canary field.
+name so the Deployment rolls. Keep the literal `retryCanaryAgentID` empty in
+managed mode. Starting with matching chart and image `v0.0.245`, select the
+production retry canary through `retryCanaryAgentIDExistingSecret.name` and
+`.key`. That distinct Secret must be immutable and versioned, and its value
+must be exactly one canonical `agent_*` ID with no whitespace or trailing
+newline. The app-of-apps rejects a literal canary even while the gate is dark,
+withholds the empty new field from pre-`0.0.245` strict child schemas, and
+fails rendering if a nonempty Secret reference is paired with an older chart
+or image. Changing the Secret name or key changes both server rollout
+checksums and restarts the API pods.
+
+Roll it out in two commits. First converge `v0.0.245`, the Secret-backed
+account cohort, and production receive with the retry-canary Secret name empty.
+After backfill, export the private canary manifest and choose one eligible
+agent. Create its distinct immutable versioned Secret, then set the reference
+in a config-only commit and wait for all replacement pods. Re-export and verify
+the selected agent is included before any edge/provider activation.
 
 Do not treat a committed pin as deployment proof. For every provisioned cell,
 verify Argo health/sync, replacement-pod readiness, and the public
