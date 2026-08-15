@@ -408,6 +408,18 @@ func TestNormalizeAgentEmailPilotScope(t *testing.T) {
 	if got, err := normalizeAgentEmailPilotScope(production); err != nil || got != "witmail.net" {
 		t.Fatalf("production scope = %q / %v", got, err)
 	}
+	invalidProductionDomain := production
+	invalidProductionDomain.Domain = ""
+	if _, err := normalizeAgentEmailPilotScope(invalidProductionDomain); err == nil ||
+		err.Error() != "invalid agent-email input: agent-email receive domain is invalid" {
+		t.Fatalf("invalid production domain error = %v", err)
+	}
+	invalidProductionAudience := production
+	invalidProductionAudience.Audience = "cell_production_1"
+	if _, err := normalizeAgentEmailPilotScope(invalidProductionAudience); err == nil ||
+		err.Error() != "invalid agent-email input: agent-email receive audience is invalid" {
+		t.Fatalf("invalid production audience error = %v", err)
+	}
 	if _, err := requireAgentEmailReceiveEnrollment(
 		production, "acc_bbbbbbbbbbbbbbbb", "realm_zzzzzzzzzzzzzzzz",
 		"agent_zzzzzzzzzzzzzzzz",

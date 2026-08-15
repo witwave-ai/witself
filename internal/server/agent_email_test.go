@@ -939,8 +939,9 @@ func TestAgentEmailPilotDefaultOffAndValidation(t *testing.T) {
 	}
 	tooFew := pilot
 	tooFew.AgentIDs = map[string]bool{"agent_aaaaaaaaaaaaaaaa": true}
-	if err := ValidateAgentEmailPilotConfig(tooFew); err == nil {
-		t.Fatal("one-agent pilot config accepted")
+	if err := ValidateAgentEmailPilotConfig(tooFew); err == nil ||
+		!strings.Contains(err.Error(), "agent-email pilot requires 5-10 enabled agents") {
+		t.Fatalf("one-agent pilot config error = %v", err)
 	}
 	twoRealms := pilot
 	twoRealms.RealmIDs = map[string]bool{
@@ -976,6 +977,18 @@ func TestAgentEmailPilotDefaultOffAndValidation(t *testing.T) {
 	production.RetryCanaryAgentID = "agent_aaaaaaaaaaaaaaaa"
 	if err := ValidateAgentEmailReceiveConfig(production); err != nil {
 		t.Fatalf("valid production receive config: %v", err)
+	}
+	invalidProductionDomain := production
+	invalidProductionDomain.Domain = "WITMAIL.NET"
+	if err := ValidateAgentEmailReceiveConfig(invalidProductionDomain); err == nil ||
+		err.Error() != "agent-email receive domain is invalid" {
+		t.Fatalf("invalid production domain error = %v", err)
+	}
+	invalidProductionAudience := production
+	invalidProductionAudience.Audience = "Cell-Production-1"
+	if err := ValidateAgentEmailReceiveConfig(invalidProductionAudience); err == nil ||
+		err.Error() != "agent-email receive audience is invalid" {
+		t.Fatalf("invalid production audience error = %v", err)
 	}
 	if !production.allows(DomainPrincipal{
 		Kind: PrincipalKindAgent, AccountID: "acc_bbbbbbbbbbbbbbbb",

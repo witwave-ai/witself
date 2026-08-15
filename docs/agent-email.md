@@ -279,9 +279,10 @@ The standing platform invariants carry over unchanged:
 - **The backend is model-free.** It terminates inbound mail through a provider
   adapter, verifies webhook signatures, parses MIME structure, records
   available SPF/DKIM/DMARC results, stores, filters, meters where authorized,
-  and returns data. The limited pilot records unavailable authentication and
-  spam results as `unknown` and excludes receive from billing. Reading
-  mail, deciding what it means, extracting anything semantic, and (in later
+  and returns data. The retired limited pilot recorded unavailable
+  authentication and spam results as `unknown` and excluded receive from
+  billing. Reading mail, deciding what it means, extracting anything semantic,
+  and (in later
   slices) drafting replies are client-side inference in the active AI client.
 - **No wake.** Inbound mail lands durably and waits. Witself and MCP never
   wake or launch an AI client; an offline agent's mail is processed on its
@@ -1780,11 +1781,11 @@ Receive-only still carries real obligations:
   can be stopped without disabling the whole mailbox; the fallback
   classification when Cloudflare supplies no usable spam verdict is an Open
   Question.
-  The limited pilot resolves billing conservatively by excluding received mail
-  from usage overage charges. It still enforces the non-billable raw-message and
-  account-wide attachment-storage plan caps: a message that cannot fit the
-  attachment pool retains bounded text and metadata but not its raw
-  attachment-bearing MIME.
+  Historically, the retired limited pilot resolved billing conservatively by
+  excluding received mail from usage overage charges. It still enforced the
+  non-billable raw-message and account-wide attachment-storage plan caps: a
+  message that could not fit the attachment pool retained bounded text and
+  metadata but not its raw attachment-bearing MIME.
 - **Billing dimensions (settled 2026-07-21).** Email gets its own
   `billing-and-limits.md` dimensions rather than reusing the messaging keys
   (the separate-surface rule, and to keep abuse signals distinct):

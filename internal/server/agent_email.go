@@ -139,22 +139,22 @@ func ValidateAgentEmailReceiveConfig(cfg AgentEmailReceiveConfig) error {
 	}
 	domain, err := agentemail.ValidateDomain(cfg.Domain)
 	if err != nil || domain != cfg.Domain {
-		return errors.New("agent-email pilot domain is invalid")
+		return errors.New("agent-email receive domain is invalid")
 	}
 	if len(cfg.LegacyDomains) > 1 {
-		return errors.New("agent-email pilot accepts at most 1 legacy domain")
+		return errors.New("agent-email receive accepts at most 1 legacy domain")
 	}
 	seenDomains := map[string]bool{domain: true}
 	for _, legacy := range cfg.LegacyDomains {
 		normalized, legacyErr := agentemail.ValidateDomain(legacy)
 		if legacyErr != nil || normalized != legacy || seenDomains[normalized] {
-			return errors.New("agent-email pilot legacy domain entry is invalid or duplicated")
+			return errors.New("agent-email receive legacy domain entry is invalid or duplicated")
 		}
 		seenDomains[normalized] = true
 	}
 	audience := strings.TrimSpace(cfg.Audience)
 	if !validAgentEmailAudience(audience) || audience != strings.ToLower(audience) {
-		return errors.New("agent-email pilot audience is invalid")
+		return errors.New("agent-email receive audience is invalid")
 	}
 	if cfg.RelayReplayWindow < minAgentEmailRelayReplayWindow || cfg.RelayReplayWindow > maxAgentEmailRelayReplayWindow {
 		return errors.New("agent-email relay replay window must be between 1s and 15m")

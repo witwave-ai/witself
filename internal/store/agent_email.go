@@ -29,7 +29,7 @@ const (
 	// AgentEmailReceiveRetired permanently makes the reserved address unroutable.
 	AgentEmailReceiveRetired = "retired"
 
-	// AgentEmailFolderInbox is the pilot's visible delivery folder.
+	// AgentEmailFolderInbox is the mailbox's visible delivery folder.
 	AgentEmailFolderInbox = "inbox"
 	// AgentEmailFolderQuarantine is reserved for isolated deliveries.
 	AgentEmailFolderQuarantine = "quarantine"
@@ -284,7 +284,8 @@ type AgentEmailProcessing struct {
 
 // AgentEmailMessage is one immutable external message plus owner-only delivery
 // state. Text is populated only by ReadAgentEmail and remains untrusted input.
-// Raw MIME and attachment bytes are never surfaced by the pilot API.
+// Raw MIME and attachment bytes are never surfaced by the agent-email receive
+// API.
 type AgentEmailMessage struct {
 	ID                             string               `json:"id"`
 	AccountID                      string               `json:"account_id"`
@@ -496,10 +497,10 @@ func requireAgentEmailReceiveEnabled(ctx context.Context, tx pgx.Tx, accountID s
 }
 
 // RequireAgentEmailReceiveEnabled performs a content-free account entitlement
-// precheck before the server applies the narrower process-local pilot
-// enrollment fence. It lets disabled plans receive the stable
-// feature_not_enabled response even when an agent is outside the pilot,
-// without weakening pilot enrollment for enabled accounts.
+// precheck before the server applies the narrower process-local receive cohort
+// fence. It lets disabled plans receive the stable feature_not_enabled response
+// even when an agent is outside the configured receive cohort, without
+// weakening receive enrollment for enabled accounts.
 func (s *Store) RequireAgentEmailReceiveEnabled(ctx context.Context, p Principal) error {
 	if p.Kind != PrincipalAgent {
 		return ErrAgentEmailForbidden
@@ -1329,9 +1330,10 @@ func (s *Store) SetRealmAgentEmailReceiveControl(
 	return updated, nil
 }
 
-// IngestAgentEmailPilot durably stores one signed Cloudflare delivery. Digest
-// matches only group suspected duplicates; every pilot invocation inserts a
-// new immutable row and delivery.
+// IngestAgentEmailPilot is the source-compatible entry point that durably
+// stores one signed Cloudflare delivery. Digest matches only group suspected
+// duplicates; every accepted relay invocation inserts a new immutable row and
+// delivery.
 func (s *Store) IngestAgentEmailPilot(
 	ctx context.Context,
 	scope AgentEmailPilotScope,
@@ -1450,7 +1452,7 @@ func (s *Store) IngestAgentEmailPilot(
 
 	// Parse only after the shared cross-replica safety budgets admit this
 	// signed attempt. Text remains transient here; only its validated MIME
-	// metadata is persisted by the receive-only pilot.
+	// metadata is persisted by the receive service.
 	parsed, parseErr := agentemail.ParseMessage(in.Raw, true)
 	parseState := AgentEmailParseParsed
 	parseErrorCode := ""
@@ -1747,7 +1749,7 @@ func (s *Store) ListAgentEmails(
 
 // ReadAgentEmail explicitly crosses the untrusted-content boundary, marks the
 // delivery read, and returns only bounded decoded text. Raw MIME, HTML markup,
-// and attachment bytes remain unavailable in the pilot.
+// and attachment bytes remain unavailable through the receive API.
 func (s *Store) ReadAgentEmail(
 	ctx context.Context,
 	scope AgentEmailPilotScope,
@@ -3217,15 +3219,15 @@ func normalizeAgentEmailPilotScope(scope AgentEmailPilotScope) (string, error) {
 
 	audience := strings.ToLower(strings.TrimSpace(scope.Audience))
 	if audience == "" || len(audience) > 128 || audience[0] < 'a' || audience[0] > 'z' {
-		return "", fmt.Errorf("%w: pilot audience is invalid", ErrAgentEmailInputInvalid)
+		return "", fmt.Errorf("%w: agent-email receive audience is invalid", ErrAgentEmailInputInvalid)
 	}
 	for _, char := range []byte(audience) {
 		if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '-' {
-			return "", fmt.Errorf("%w: pilot audience is invalid", ErrAgentEmailInputInvalid)
+			return "", fmt.Errorf("%w: agent-email receive audience is invalid", ErrAgentEmailInputInvalid)
 		}
 	}
 	if audience[len(audience)-1] == '-' {
-		return "", fmt.Errorf("%w: pilot audience is invalid", ErrAgentEmailInputInvalid)
+		return "", fmt.Errorf("%w: agent-email receive audience is invalid", ErrAgentEmailInputInvalid)
 	}
 	switch agentEmailReceiveMode(scope) {
 	case AgentEmailReceiveModeLegacyPilot:
@@ -3289,10 +3291,10 @@ func countEnabledAgentEmailScopeIDs(values map[string]bool, prefix string) int {
 func normalizedAgentEmailPilotDomains(scope AgentEmailPilotScope) ([]string, error) {
 	domain, err := agentemail.ValidateDomain(scope.Domain)
 	if err != nil {
-		return nil, fmt.Errorf("%w: pilot domain is invalid", ErrAgentEmailInputInvalid)
+		return nil, fmt.Errorf("%w: agent-email receive domain is invalid", ErrAgentEmailInputInvalid)
 	}
 	if len(scope.LegacyDomains) > 1 {
-		return nil, fmt.Errorf("%w: pilot accepts at most 1 legacy domain", ErrAgentEmailInputInvalid)
+		return nil, fmt.Errorf("%w: agent-email receive accepts at most 1 legacy domain", ErrAgentEmailInputInvalid)
 	}
 	domains := make([]string, 1, len(scope.LegacyDomains)+1)
 	domains[0] = domain
@@ -3300,7 +3302,7 @@ func normalizedAgentEmailPilotDomains(scope AgentEmailPilotScope) ([]string, err
 	for _, legacy := range scope.LegacyDomains {
 		normalized, legacyErr := agentemail.ValidateDomain(legacy)
 		if legacyErr != nil || seen[normalized] {
-			return nil, fmt.Errorf("%w: pilot legacy domain is invalid or duplicated", ErrAgentEmailInputInvalid)
+			return nil, fmt.Errorf("%w: agent-email receive legacy domain is invalid or duplicated", ErrAgentEmailInputInvalid)
 		}
 		seen[normalized] = true
 		domains = append(domains, normalized)
