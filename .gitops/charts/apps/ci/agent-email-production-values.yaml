@@ -1,10 +1,10 @@
-# App-of-apps fixture proving a private production cohort Secret reference
-# reaches only a v0.0.241-or-newer child chart and image. The Secret's account
-# IDs never enter Git, the rendered Application values, or the child ConfigMap.
+# App-of-apps fixture proving private production cohort and retry-canary Secret
+# references reach only a v0.0.245-or-newer child chart and image. Their values
+# never enter Git, the rendered Application values, or the child ConfigMap.
 apps:
   witselfServer:
-    chartVersion: 0.0.241
-    imageTag: 0.0.241
+    chartVersion: 0.0.245
+    imageTag: 0.0.245
     agentEmail:
       receiveProduction:
         enabled: true
@@ -16,5 +16,8 @@ apps:
           name: witself-agent-email-receive-cohort-v1
           key: account_ids
         retryCanaryAgentID: ""
+        retryCanaryAgentIDExistingSecret:
+          name: witself-agent-email-retry-canary-v1
+          key: agent_id
         relayPublicKeysJSON: '{"route-2026-08":"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="}'
         relayReplayWindow: 5m

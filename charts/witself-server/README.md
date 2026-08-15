@@ -122,21 +122,40 @@ ConfigMap; the API Deployment reads `WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS`
 through one non-optional `secretKeyRef`. A missing Secret or key prevents the
 pod from starting, and API startup applies the same canonical-ID, ordering,
 uniqueness, and 1-100 bounds to its value. There is no wildcard or implicit
-all-accounts mode. In v0.0.241, `retryCanaryAgentID` must stay empty when the
-cohort is Secret-backed so no private agent ID moves into the ConfigMap;
-literal/private installs may set one canonical `agent_*` ID, which the cell
-verifies belongs to the exact configured cohort. Enabling the gate renders
+all-accounts mode. Literal/private installs may set one canonical `agent_*`
+ID in `retryCanaryAgentID`, which the cell verifies belongs to the exact
+configured cohort. Managed installs keep that literal empty. Starting in
+`v0.0.245`, they may instead set
+`retryCanaryAgentIDExistingSecret.name` and `.key`. Its value must be exactly
+one canonical `agent_*` ID with no leading or trailing whitespace and no
+trailing newline. The referenced Secret must be distinct, immutable, and
+versioned; the API Deployment reads it through the non-optional
+`WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID` `secretKeyRef`, while the ID remains
+absent from Helm values and the ConfigMap. Startup fails closed unless the
+selected agent is live and belongs to the exact configured account cohort.
+Enabling the gate renders
 `WITSELF_AGENT_EMAIL_RECEIVE_PRODUCTION_ENABLED=true`,
 `WITSELF_AGENT_EMAIL_RECEIVE_DOMAIN`, `WITSELF_AGENT_EMAIL_RECEIVE_AUDIENCE`,
 and the cohort environment variable in API pods only. The app-of-apps refuses
-to forward this shape unless both child chart and image are `0.0.241` or newer.
+to forward production receive unless both child chart and image are `0.0.241`
+or newer, refuses the Secret-backed retry canary unless both are `0.0.245` or
+newer, and omits the empty new field from older strict child schemas.
 Direct use of this chart independently refuses production receive when the
 effective server image tag is older than `0.0.241`; an enabled value can never
-be silently ignored by an older binary. Use immutable, versioned cohort
-Secrets. In-place Secret content mutation is unsupported because it cannot
-change an existing container environment; create the next immutable Secret and
-update `.name`, which changes the pod template and rolls the API pods. Verify
-readiness before edge activation.
+be silently ignored by an older binary. Use immutable, versioned cohort and
+retry-canary Secrets. In-place Secret content mutation is unsupported because
+it cannot change an existing container environment; create the next immutable
+Secret and update `.name`. Changing either retry-canary Secret name or key is
+part of the server configuration checksum and rolls the API pods.
+
+Use two managed rollout phases. First deploy `v0.0.245` code and the cohort
+with `retryCanaryAgentIDExistingSecret.name` empty, then wait for every pod and
+the mailbox backfill to converge. Generate a private canary manifest and choose
+one eligible agent from it. Create a distinct immutable, versioned Secret with
+that exact ID and no newline, set only the Secret reference in a config-only
+rollout, and wait for every replacement pod to become Ready. Re-export the
+manifest and verify that it includes the selected canary before activating any
+edge or provider path.
 
 API startup performs only bounded account/canary validation. It neither scans
 all agents nor provisions mailboxes, so scaling API replicas cannot multiply a

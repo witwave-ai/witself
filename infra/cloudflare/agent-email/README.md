@@ -806,10 +806,10 @@ repository-wide secrets):
 
 Restrict that Environment to protected `main`. Both manual workflows also
 refuse every other Git ref before a secret-using step. The sender secret must
-be exactly `canary@send.witmail.net`; the
-recipient secret must be one reviewed canonical Realm-ID address on
-`witmail.net`; and the endpoint variable must be the root URL of one
-`api.<cell>.cells.witself.witwave.ai` host.
+be exactly `canary@send.witmail.net`; the recipient and token secrets must
+belong to the exact agent selected by the cell's retry-canary Secret, using its
+reviewed canonical Realm-ID address on `witmail.net`; and the endpoint variable
+must be the root URL of one `api.<cell>.cells.witself.witwave.ai` host.
 
 Run one manual workflow dispatch and review both the value-free canary result
 and Analytics Engine outcomes. Add a recurring schedule only when continuous
@@ -817,14 +817,19 @@ monitoring and its retained-message growth are intentionally accepted. The
 Cloudflare sender must already belong to an onboarded Email Sending domain.
 The job has a 15-minute outer limit and a 600-second absolute canary deadline.
 
-Do not arm or send during a mixed-version deployment. Deploy schema-61-capable
-server code with `WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID` empty, wait for
-every pod to converge, then perform a config-only rollout selecting exactly one
-enrolled agent and wait for every pod again. Only then run the manual canary.
-For rollback, first disable any recurring schedule that has been added, then
-settle the unused arm or let its 15-minute TTL expire before unsetting the
-canary agent or deploying older code; otherwise an old replica can
-ordinary-accept the first synthetic delivery.
+Do not arm or send during a mixed-version deployment. For managed production,
+deploy matching chart and image `v0.0.245` or newer with both the literal
+`retryCanaryAgentID` and `retryCanaryAgentIDExistingSecret.name` empty, then
+wait for every pod to converge. After mailbox backfill, generate the private
+cell canary manifest and choose one eligible agent. Put exactly that canonical
+ID, with no whitespace or trailing newline, in a distinct immutable, versioned
+Kubernetes Secret. Set only its name and key in a config-only rollout, wait for
+every replacement pod, and re-export the manifest to prove the selected agent
+is included. Only then run the manual canary with that same agent's token and
+address. For rollback, first disable any recurring schedule that has been
+added, then settle the unused arm or let its 15-minute TTL expire before
+clearing the Secret reference or deploying older code; otherwise an old
+replica can ordinary-accept the first synthetic delivery.
 
 Acknowledgement does not delete synthetic messages. Ordinary account retention
 does eventually remove them, but a future 15-minute schedule would still add

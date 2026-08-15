@@ -114,7 +114,7 @@ Expected server environment variables may include:
 | `WITSELF_AGENT_EMAIL_ACCEPTED_LEGACY_DOMAINS` | Optional single canonical compatibility domain. It accepts only routes already issued there and never mints a new address. |
 | `WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON` | JSON object of relay key IDs to public Ed25519 verification keys. Relay private keys never enter cell configuration. |
 | `WITSELF_AGENT_EMAIL_RELAY_REPLAY_WINDOW` | Signed relay-envelope replay window. Default: `5m`; maximum `15m`. |
-| `WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID` | Optional canonical retry-canary agent. Production startup proves it is a live member of the exact account cohort; canary-manifest generation additionally requires its mailbox and effective receive state to be enabled. |
+| `WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID` | Optional canonical retry-canary agent. The raw value must be exactly one canonical `agent_*` ID with no surrounding whitespace or trailing newline. Production startup proves it is a live member of the exact account cohort; canary-manifest generation additionally requires its mailbox and effective receive state to be enabled. Managed chart/image `v0.0.245` or newer injects it from a distinct immutable, versioned Secret rather than the non-secret ConfigMap. |
 | `WITSELF_AGENT_EMAIL_PROVIDER_EVENT_TOKEN` | Dedicated 32-4096-byte bearer for content-free outbound provider events at `POST /v1/internal/agent-email-send:provider-event`; the managed adapter's target-map contract enforces the same bound. It is not an agent, operator, provision, backup, relay, or provider credential and must be supplied from a secret. |
 | `WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED` | Enable the durable bounded avatar-style propagation job in `witself-worker`. API deployments set it false. PostgreSQL job fencing prevents duplicate progress across worker replicas. |
 | `WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE` | Maximum agents advanced by one style-rollout batch. Default: `100`; valid range: `1`-`1000`. |
@@ -427,13 +427,21 @@ See [operator-auth.md](operator-auth.md) and
 
 ## Agent-email retry-canary server configuration
 
-The retired compatibility receive mode remains default-off. Setting
-`WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID` additionally enables the controlled
-provider-retry proof for exactly one agent already present in
-`WITSELF_AGENT_EMAIL_PILOT_AGENT_IDS`. That agent may use the owner-token POST
+Setting `WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID` enables the controlled
+provider-retry proof for exactly one agent. The raw environment value must be
+one canonical `agent_*` ID with no leading or trailing whitespace and no
+trailing newline. In the retired pilot mode it must be present in
+`WITSELF_AGENT_EMAIL_PILOT_AGENT_IDS`; in production it must be live and belong
+to the exact configured account cohort. That agent may use the owner-token POST
 routes `/v1/email/retry-canary:arm` and `/v1/email/retry-canary:status`; the
 ephemeral UUID challenge is accepted only in the JSON body and never echoed.
-Do not set the variable until schema 61 code has converged on every replica.
+
+Managed production cells on matching chart and image `v0.0.245` or newer keep
+the literal Helm value empty and inject this variable from a distinct
+immutable, versioned Secret. First converge the code/cohort with the Secret
+reference empty; then select an eligible agent and add the reference in a
+config-only rollout. Do not set either form until schema-61-capable code has
+converged on every replica.
 
 ## `witself-server healthcheck`
 

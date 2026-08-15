@@ -1,8 +1,10 @@
 {{- $emailPilot := .Values.agentEmail.receivePilot -}}
 {{- $emailProduction := .Values.agentEmail.receiveProduction -}}
 {{- $emailProductionAccountSecret := $emailProduction.accountIDsExistingSecret -}}
+{{- $emailProductionRetryCanarySecret := $emailProduction.retryCanaryAgentIDExistingSecret -}}
 {{- $emailProductionHasLiteralAccounts := gt (len $emailProduction.accountIDs) 0 -}}
 {{- $emailProductionHasSecretAccounts := ne $emailProductionAccountSecret.name "" -}}
+{{- $emailProductionHasSecretRetryCanary := ne $emailProductionRetryCanarySecret.name "" -}}
 {{- $imageTag := .Values.image.tag | default .Chart.AppVersion -}}
 {{- if and .Values.backup.validation.enabled (not .Values.backup.existingSecret.name) -}}
 {{- fail "backup.validation.enabled requires backup.existingSecret.name" -}}
@@ -13,6 +15,9 @@
 {{- if and $emailProductionHasLiteralAccounts $emailProductionHasSecretAccounts -}}
 {{- fail "agentEmail.receiveProduction must use exactly one of accountIDs or accountIDsExistingSecret.name" -}}
 {{- end -}}
+{{- if and $emailProduction.retryCanaryAgentID $emailProductionHasSecretRetryCanary -}}
+{{- fail "agentEmail.receiveProduction must use at most one retry-canary agent source" -}}
+{{- end -}}
 {{- if $emailProductionHasSecretAccounts -}}
 {{- if or (gt (len $emailProductionAccountSecret.name) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $emailProductionAccountSecret.name)) -}}
 {{- fail "agentEmail.receiveProduction.accountIDsExistingSecret.name must be a valid Kubernetes Secret name" -}}
@@ -22,6 +27,26 @@
 {{- end -}}
 {{- if $emailProduction.retryCanaryAgentID -}}
 {{- fail "agentEmail.receiveProduction.retryCanaryAgentID must be empty with accountIDsExistingSecret" -}}
+{{- end -}}
+{{- end -}}
+{{- if $emailProductionHasSecretRetryCanary -}}
+{{- if or (gt (len $emailProductionRetryCanarySecret.name) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $emailProductionRetryCanarySecret.name)) -}}
+{{- fail "agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name must be a valid Kubernetes Secret name" -}}
+{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9._-]+$" $emailProductionRetryCanarySecret.key) -}}
+{{- fail "agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.key must be a valid Kubernetes Secret data key" -}}
+{{- end -}}
+{{- if not $emailProductionHasSecretAccounts -}}
+{{- fail "agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret requires accountIDsExistingSecret.name" -}}
+{{- end -}}
+{{- if eq $emailProductionRetryCanarySecret.name $emailProductionAccountSecret.name -}}
+{{- fail "agentEmail.receiveProduction retry-canary and account-cohort Secrets must have distinct names" -}}
+{{- end -}}
+{{- if $emailProduction.retryCanaryAgentID -}}
+{{- fail "agentEmail.receiveProduction must use at most one retry-canary agent source" -}}
+{{- end -}}
+{{- if not (semverCompare ">=0.0.245-0" $imageTag) -}}
+{{- fail "agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret requires image v0.0.245 or newer" -}}
 {{- end -}}
 {{- end -}}
 {{- if $emailPilot.enabled -}}

@@ -40,6 +40,7 @@ email_pilot_new_chart_old_image_render="$render_dir/email-pilot-new-chart-old-im
 email_pilot_old_chart_new_image_render="$render_dir/email-pilot-old-chart-new-image.yaml"
 email_production_render="$render_dir/email-production.yaml"
 email_production_apps_render="$render_dir/email-production-apps.yaml"
+email_production_pre245_apps_render="$render_dir/email-production-pre245-apps.yaml"
 retention_preview_render="$render_dir/retention-preview.yaml"
 retention_enforce_render="$render_dir/retention-enforce.yaml"
 retention_preview_apps_render="$render_dir/retention-preview-apps.yaml"
@@ -159,6 +160,13 @@ helm template witself-server "$server_chart" --namespace witself \
 helm template witself-apps "$apps_chart" \
   --values "$civo_cell" \
   --values "$apps_email_production_profile" >"$email_production_apps_render"
+helm template witself-apps "$apps_chart" \
+  --values "$civo_cell" \
+  --values "$apps_email_production_profile" \
+  --set apps.witselfServer.chartVersion=0.0.244 \
+  --set apps.witselfServer.imageTag=0.0.244 \
+  --set apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name= \
+  >"$email_production_pre245_apps_render"
 helm template witself-server "$server_chart" --namespace witself \
   --values "$gcp_profile" \
   --set worker.transcriptRetention.enabled=true \
@@ -374,6 +382,22 @@ expect_server_template_failure() {
   fi
 }
 
+expect_server_template_failure_message() {
+  local description="$1"
+  local expected_message="$2"
+  shift 2
+  local error_output="$render_dir/expected-server-template-failure.err"
+  if helm template witself-server "$server_chart" --namespace witself "$@" \
+    >/dev/null 2>"$error_output"; then
+    echo "$description unexpectedly passed Helm validation" >&2
+    return 1
+  fi
+  if ! grep -Fq "$expected_message" "$error_output"; then
+    echo "$description failed without the expected validation message" >&2
+    return 1
+  fi
+}
+
 expect_apps_template_failure() {
   local description="$1"
   local expected_message="$2"
@@ -431,6 +455,14 @@ email_production_nested_values="$render_dir/email-production-nested-values.yaml"
 email_production_nested_render="$render_dir/email-production-nested-render.yaml"
 email_production_nested_config="$render_dir/email-production-nested-config.yaml"
 email_production_nested_deployment="$render_dir/email-production-nested-deployment.yaml"
+email_production_pre245_server_application="$render_dir/email-production-pre245-server-application.yaml"
+email_production_pre245_nested_values="$render_dir/email-production-pre245-nested-values.yaml"
+email_production_retry_name_render="$render_dir/email-production-retry-name.yaml"
+email_production_retry_name_config="$render_dir/email-production-retry-name-config.yaml"
+email_production_retry_name_deployment="$render_dir/email-production-retry-name-deployment.yaml"
+email_production_retry_key_render="$render_dir/email-production-retry-key.yaml"
+email_production_retry_key_config="$render_dir/email-production-retry-key-config.yaml"
+email_production_retry_key_deployment="$render_dir/email-production-retry-key-deployment.yaml"
 email_outbound_worker_config="$render_dir/email-outbound-worker-config.yaml"
 email_outbound_worker_deployment="$render_dir/email-outbound-worker-deployment.yaml"
 email_outbound_server_application="$render_dir/email-outbound-server-application.yaml"
@@ -468,11 +500,27 @@ helm template witself-server "$server_chart" --namespace witself \
   --values "$email_production_nested_values" >"$email_production_nested_render"
 extract_document ConfigMap witself-server "$email_production_nested_render" "$email_production_nested_config"
 extract_document Deployment witself-server "$email_production_nested_render" "$email_production_nested_deployment"
+extract_document Application witself-server "$email_production_pre245_apps_render" "$email_production_pre245_server_application"
+extract_application_helm_values "$email_production_pre245_server_application" "$email_production_pre245_nested_values"
+helm template witself-server "$server_chart" --namespace witself \
+  --values "$email_production_nested_values" \
+  --set agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name=witself-agent-email-retry-canary-v2 \
+  >"$email_production_retry_name_render"
+helm template witself-server "$server_chart" --namespace witself \
+  --values "$email_production_nested_values" \
+  --set agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.key=canary_agent_id \
+  >"$email_production_retry_key_render"
+extract_document ConfigMap witself-server "$email_production_retry_name_render" "$email_production_retry_name_config"
+extract_document Deployment witself-server "$email_production_retry_name_render" "$email_production_retry_name_deployment"
+extract_document ConfigMap witself-server "$email_production_retry_key_render" "$email_production_retry_key_config"
+extract_document Deployment witself-server "$email_production_retry_key_render" "$email_production_retry_key_deployment"
 for checksum_pair in \
   "$default_server_config:$default_server_deployment" \
   "$gcp_server_config:$gcp_server_deployment" \
   "$email_production_server_config:$email_production_server_deployment" \
-  "$email_production_nested_config:$email_production_nested_deployment"; do
+  "$email_production_nested_config:$email_production_nested_deployment" \
+  "$email_production_retry_name_config:$email_production_retry_name_deployment" \
+  "$email_production_retry_key_config:$email_production_retry_key_deployment"; do
   config_document="${checksum_pair%%:*}"
   deployment_document="${checksum_pair#*:}"
   config_digest="$(server_config_checksum "$config_document")"
@@ -1109,8 +1157,8 @@ done
 
 # Production receive replaces the fixed realm/agent pilot allowlist with one
 # exact, bounded account cohort. Portable installs retain the literal list;
-# managed app-of-apps values pass only a Kubernetes Secret reference. Both are
-# forwarded only when child chart and image are v0.0.241 or newer.
+# managed app-of-apps values pass only Kubernetes Secret references. Production
+# receive starts at v0.0.241; the private retry-canary Secret starts at v0.0.245.
 require_line '  WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED: "false"' "$email_production_server_config"
 require_line '  WITSELF_AGENT_EMAIL_RECEIVE_PRODUCTION_ENABLED: "true"' "$email_production_server_config"
 require_line '  WITSELF_AGENT_EMAIL_RECEIVE_DOMAIN: "witmail.net"' "$email_production_server_config"
@@ -1142,14 +1190,22 @@ require_sequence "$email_production_nested_deployment" \
   "              valueFrom:" \
   "                secretKeyRef:" \
   "                  name: \"witself-agent-email-receive-cohort-v1\"" \
-  "                  key: \"account_ids\""
+  "                  key: \"account_ids\"" \
+  "            - name: WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID" \
+  "              valueFrom:" \
+  "                secretKeyRef:" \
+  "                  name: \"witself-agent-email-retry-canary-v1\"" \
+  "                  key: \"agent_id\""
 reject_line 'WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS' "$email_production_server_deployment"
-if grep -Fq 'acc_aaaaaaaaaaaaaaaa' "$email_production_apps_render"; then
-  echo "private production receive account IDs leaked into the app-of-apps render" >&2
+if grep -Eq 'acc_aaaaaaaaaaaaaaaa|agent_aaaaaaaaaaaaaaaa' "$email_production_apps_render"; then
+  echo "private production receive account or canary IDs leaked into the app-of-apps render" >&2
   exit 1
 fi
 require_sequence "$email_production_server_application" \
   "        agentEmail:" \
+  "          providerEventTokenSecret:" \
+  "            key: token" \
+  "            name: \"\"" \
   "          receivePilot:" \
   "            acceptedLegacyDomains: []" \
   "            agentIDs: []" \
@@ -1169,7 +1225,53 @@ require_sequence "$email_production_server_application" \
   "              name: witself-agent-email-receive-cohort-v1" \
   "            audience: civo-sandbox-usw2-dev" \
   "            domain: witmail.net" \
-  "            enabled: true"
+  "            enabled: true" \
+  "            relayPublicKeysJSON: '{\"route-2026-08\":\"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\"}'" \
+  "            relayReplayWindow: 5m" \
+  "            retryCanaryAgentID: \"\"" \
+  "            retryCanaryAgentIDExistingSecret:" \
+  "              key: agent_id" \
+  "              name: witself-agent-email-retry-canary-v1"
+
+# Strict pre-0.0.245 child schemas never see the new field when it is empty;
+# production receive and its existing cohort Secret remain available at 0.0.244.
+require_line '  receiveProduction:' "$email_production_pre245_nested_values"
+if grep -Fq 'retryCanaryAgentIDExistingSecret:' "$email_production_pre245_nested_values"; then
+  echo "pre-0.0.245 child values received the unsupported retry-canary Secret field" >&2
+  exit 1
+fi
+
+# The Secret reference itself is part of both deployment checksums. Replacing
+# either immutable Secret name or key must roll the API pods without exposing
+# the selected agent ID in the ConfigMap.
+baseline_server_checksum="$(server_config_checksum "$email_production_nested_deployment")"
+baseline_pod_checksum="$(config_checksum "$email_production_nested_deployment")"
+for retry_variant_deployment in \
+  "$email_production_retry_name_deployment" \
+  "$email_production_retry_key_deployment"; do
+  variant_server_checksum="$(server_config_checksum "$retry_variant_deployment")"
+  variant_pod_checksum="$(config_checksum "$retry_variant_deployment")"
+  if [ -z "$baseline_server_checksum" ] || [ -z "$baseline_pod_checksum" ] ||
+     [ "$variant_server_checksum" = "$baseline_server_checksum" ] ||
+     [ "$variant_pod_checksum" = "$baseline_pod_checksum" ]; then
+    echo "retry-canary Secret reference change did not roll the API pod checksums" >&2
+    exit 1
+  fi
+done
+require_sequence "$email_production_retry_name_deployment" \
+  "            - name: WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID" \
+  "              valueFrom:" \
+  "                secretKeyRef:" \
+  "                  name: \"witself-agent-email-retry-canary-v2\"" \
+  "                  key: \"agent_id\""
+require_sequence "$email_production_retry_key_deployment" \
+  "            - name: WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID" \
+  "              valueFrom:" \
+  "                secretKeyRef:" \
+  "                  name: \"witself-agent-email-retry-canary-v1\"" \
+  "                  key: \"canary_agent_id\""
+reject_line 'WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID' "$email_production_retry_name_config"
+reject_line 'WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID' "$email_production_retry_key_config"
 
 expect_server_template_failure \
   "simultaneous pilot and production receive" \
@@ -1221,6 +1323,53 @@ expect_server_template_failure \
   --values "$email_production_profile" \
   --set image.tag=0.0.241 \
   --set agentEmail.receiveProduction.retryCanaryAgentID=agent_invalid
+expect_server_template_failure \
+  "production receive with both literal and Secret retry-canary sources" \
+  --values "$email_production_profile" \
+  --set image.tag=0.0.245 \
+  --set-json 'agentEmail.receiveProduction.accountIDs=[]' \
+  --set agentEmail.receiveProduction.accountIDsExistingSecret.name=receive-cohort-v1 \
+  --set agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name=retry-canary-v1
+expect_server_template_failure \
+  "production retry-canary Secret without a Secret-backed cohort" \
+  --values "$email_production_profile" \
+  --set image.tag=0.0.245 \
+  --set agentEmail.receiveProduction.retryCanaryAgentID= \
+  --set agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name=retry-canary-v1
+expect_server_template_failure_message \
+  "production retry-canary reusing the account-cohort Secret" \
+  "agentEmail.receiveProduction retry-canary and account-cohort Secrets must have distinct names" \
+  --values "$email_production_profile" \
+  --set image.tag=0.0.245 \
+  --set-json 'agentEmail.receiveProduction.accountIDs=[]' \
+  --set agentEmail.receiveProduction.accountIDsExistingSecret.name=shared-email-config-v1 \
+  --set agentEmail.receiveProduction.retryCanaryAgentID= \
+  --set agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name=shared-email-config-v1
+expect_server_template_failure \
+  "production retry-canary with an invalid Secret name" \
+  --values "$email_production_profile" \
+  --set image.tag=0.0.245 \
+  --set-json 'agentEmail.receiveProduction.accountIDs=[]' \
+  --set agentEmail.receiveProduction.accountIDsExistingSecret.name=receive-cohort-v1 \
+  --set agentEmail.receiveProduction.retryCanaryAgentID= \
+  --set agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name=Invalid_Secret
+expect_server_template_failure \
+  "production retry-canary with an invalid Secret key" \
+  --values "$email_production_profile" \
+  --set image.tag=0.0.245 \
+  --set-json 'agentEmail.receiveProduction.accountIDs=[]' \
+  --set agentEmail.receiveProduction.accountIDsExistingSecret.name=receive-cohort-v1 \
+  --set agentEmail.receiveProduction.retryCanaryAgentID= \
+  --set agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name=retry-canary-v1 \
+  --set agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.key=bad/key
+expect_server_template_failure \
+  "production retry-canary Secret with pre-0.0.245 image" \
+  --values "$email_production_profile" \
+  --set image.tag=0.0.244 \
+  --set-json 'agentEmail.receiveProduction.accountIDs=[]' \
+  --set agentEmail.receiveProduction.accountIDsExistingSecret.name=receive-cohort-v1 \
+  --set agentEmail.receiveProduction.retryCanaryAgentID= \
+  --set agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name=retry-canary-v1
 
 for unsafe_pin in chartVersion imageTag; do
   if helm template witself-apps "$apps_chart" \
@@ -1228,10 +1377,55 @@ for unsafe_pin in chartVersion imageTag; do
     --values "$apps_email_production_profile" \
     --set "apps.witselfServer.${unsafe_pin}=0.0.240" \
     >/dev/null 2>&1; then
-    echo "app-of-apps enabled production receive with pre-v0.0.241 ${unsafe_pin}" >&2
+    echo "app-of-apps enabled a retry-canary Secret with pre-v0.0.245 ${unsafe_pin}" >&2
     exit 1
   fi
 done
+expect_apps_template_failure \
+  "app-of-apps pre-v0.0.241 production receive" \
+  "apps.witselfServer.agentEmail.receiveProduction requires chart and image v0.0.241 or newer" \
+  --values "$civo_cell" \
+  --values "$apps_email_production_profile" \
+  --set apps.witselfServer.chartVersion=0.0.240 \
+  --set apps.witselfServer.imageTag=0.0.240 \
+  --set apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name=
+expect_apps_template_failure \
+  "app-of-apps pre-v0.0.245 retry-canary Secret" \
+  "apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret requires chart and image v0.0.245 or newer" \
+  --values "$civo_cell" \
+  --values "$apps_email_production_profile" \
+  --set apps.witselfServer.chartVersion=0.0.244 \
+  --set apps.witselfServer.imageTag=0.0.244
+expect_apps_template_failure \
+  "app-of-apps retry-canary with an invalid Secret name" \
+  "apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name must be a valid Kubernetes Secret name" \
+  --values "$civo_cell" \
+  --values "$apps_email_production_profile" \
+  --set apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name=Invalid_Secret
+expect_apps_template_failure \
+  "app-of-apps retry-canary with an invalid Secret key" \
+  "apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.key must be a valid Kubernetes Secret data key" \
+  --values "$civo_cell" \
+  --values "$apps_email_production_profile" \
+  --set apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.key=bad/key
+expect_apps_template_failure \
+  "app-of-apps retry-canary Secret without a Secret-backed cohort" \
+  "apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret requires accountIDsExistingSecret.name" \
+  --values "$civo_cell" \
+  --set apps.witselfServer.chartVersion=0.0.245 \
+  --set apps.witselfServer.imageTag=0.0.245 \
+  --set apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name=retry-canary-v1
+expect_apps_template_failure \
+  "app-of-apps retry-canary reusing the account-cohort Secret" \
+  "apps.witselfServer.agentEmail.receiveProduction retry-canary and account-cohort Secrets must have distinct names" \
+  --values "$civo_cell" \
+  --values "$apps_email_production_profile" \
+  --set apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name=witself-agent-email-receive-cohort-v1
+expect_apps_template_failure \
+  "app-of-apps dark literal retry canary" \
+  "apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentID must remain empty; managed cells require retryCanaryAgentIDExistingSecret" \
+  --values "$civo_cell" \
+  --set apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentID=agent_aaaaaaaaaaaaaaaa
 if helm template witself-apps "$apps_chart" \
   --values "$civo_cell" \
   --values "$apps_email_production_profile" \

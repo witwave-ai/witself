@@ -24,8 +24,9 @@ only when an exception requires an operator override. Canary generation always
 exports the generated manifest there.
 
 The script snapshots the active non-secret server ConfigMap and copies only the
-exact database and receive-cohort Secret references from the active Deployment.
-It never reads either Secret value. A fixed Job name prevents concurrent runs.
+exact database, receive-cohort, and optional retry-canary Secret references from
+the active Deployment. It never reads any Secret value. A fixed Job name
+prevents concurrent runs.
 EOF
 }
 
@@ -96,9 +97,15 @@ extract_source_config_name() {
 write_private_env_refs() {
   jq -cer '
     [.spec.template.spec.containers[] | select(.name == "witself-server") | .env[]? |
-     select(.name == "WITSELF_DATABASE_URL" or .name == "WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS")] |
+     select(.name == "WITSELF_DATABASE_URL" or
+            .name == "WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS" or
+            .name == "WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID")] |
     sort_by(.name) |
-    if (map(.name) == ["WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS", "WITSELF_DATABASE_URL"]) and
+    (map(.name)) as $names |
+    if (($names == ["WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS", "WITSELF_DATABASE_URL"]) or
+        ($names == ["WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS",
+                    "WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID",
+                    "WITSELF_DATABASE_URL"])) and
        all(.[]; (.value == null) and
                 (.valueFrom.secretKeyRef.name | type == "string" and length > 0) and
                 (.valueFrom.secretKeyRef.key | type == "string" and length > 0) and
@@ -125,7 +132,8 @@ validate_source_config() {
     .data.WITSELF_AGENT_EMAIL_RECEIVE_PRODUCTION_ENABLED == "true" and
     .data.WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED == "false" and
     .data.WITSELF_AGENT_EMAIL_RECEIVE_DOMAIN == "witmail.net" and
-    ((.data.WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS // "") == "")
+    ((.data.WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS // "") == "") and
+    ((.data.WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID // "") == "")
   ' "$source_file" >/dev/null
 }
 
@@ -450,7 +458,10 @@ esac
 SERVER_VERSION="${SERVER_IMAGE##*:}"
 [[ "$SERVER_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] ||
   die "managed operation requires a semantic released image tag"
-if (( 10#${BASH_REMATCH[1]} == 0 && 10#${BASH_REMATCH[2]} == 0 && 10#${BASH_REMATCH[3]} < 241 )); then
+SERVER_VERSION_MAJOR="${BASH_REMATCH[1]}"
+SERVER_VERSION_MINOR="${BASH_REMATCH[2]}"
+SERVER_VERSION_PATCH="${BASH_REMATCH[3]}"
+if (( 10#$SERVER_VERSION_MAJOR == 0 && 10#$SERVER_VERSION_MINOR == 0 && 10#$SERVER_VERSION_PATCH < 241 )); then
   die "managed agent-email operations require image v0.0.241 or newer"
 fi
 
@@ -467,12 +478,22 @@ fi
 
 PRIVATE_ENV_FILE="$WORK_DIR/private-env.json"
 if ! write_private_env_refs "$DEPLOYMENT_JSON" "$PRIVATE_ENV_FILE" 2>/dev/null; then
-  die "managed server must expose exact database and receive-cohort Secret references"
+  die "managed server must expose exact database, receive-cohort, and optional retry-canary Secret references"
 fi
 COHORT_SECRET_NAME="$(jq -er '.[] | select(.name == "WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS") | .valueFrom.secretKeyRef.name' "$PRIVATE_ENV_FILE")" ||
   die "could not resolve the receive-cohort Secret reference"
 DATABASE_SECRET_NAME="$(jq -er '.[] | select(.name == "WITSELF_DATABASE_URL") | .valueFrom.secretKeyRef.name' "$PRIVATE_ENV_FILE")" ||
   die "could not resolve the database Secret reference"
+RETRY_CANARY_SECRET_NAME="$(jq -r '[.[] | select(.name == "WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID") |
+  .valueFrom.secretKeyRef.name][0] // ""' "$PRIVATE_ENV_FILE")" ||
+  die "could not resolve the retry-canary Secret reference"
+if [ -n "$RETRY_CANARY_SECRET_NAME" ] && [ "$RETRY_CANARY_SECRET_NAME" = "$COHORT_SECRET_NAME" ]; then
+  die "receive-cohort and retry-canary Secret references must use distinct Secret names"
+fi
+if [ -n "$RETRY_CANARY_SECRET_NAME" ] &&
+   (( 10#$SERVER_VERSION_MAJOR == 0 && 10#$SERVER_VERSION_MINOR == 0 && 10#$SERVER_VERSION_PATCH < 245 )); then
+  die "managed retry-canary Secret operations require image v0.0.245 or newer"
+fi
 COHORT_SECRET_FENCE="$WORK_DIR/cohort-secret.fence"
 if ! "${KUBE[@]}" get secret "$COHORT_SECRET_NAME" \
     -o 'jsonpath={.metadata.uid}{"\n"}{.metadata.resourceVersion}{"\n"}{.immutable}{"\n"}' \
@@ -493,6 +514,21 @@ fi
 if [ -z "$(sed -n '1p' "$DATABASE_SECRET_FENCE")" ] ||
    [ -z "$(sed -n '2p' "$DATABASE_SECRET_FENCE")" ]; then
   die "database Secret metadata is incomplete"
+fi
+RETRY_CANARY_SECRET_FENCE="$WORK_DIR/retry-canary-secret.fence"
+if [ -n "$RETRY_CANARY_SECRET_NAME" ]; then
+  if ! "${KUBE[@]}" get secret "$RETRY_CANARY_SECRET_NAME" \
+      -o 'jsonpath={.metadata.uid}{"\n"}{.metadata.resourceVersion}{"\n"}{.immutable}{"\n"}' \
+      >"$RETRY_CANARY_SECRET_FENCE" 2>/dev/null; then
+    die "could not verify the retry-canary Secret metadata"
+  fi
+  if [ "$(sed -n '3p' "$RETRY_CANARY_SECRET_FENCE")" != true ] ||
+     [ -z "$(sed -n '1p' "$RETRY_CANARY_SECRET_FENCE")" ] ||
+     [ -z "$(sed -n '2p' "$RETRY_CANARY_SECRET_FENCE")" ]; then
+    die "retry-canary Secret must be live and immutable"
+  fi
+else
+  printf 'absent\n' >"$RETRY_CANARY_SECRET_FENCE"
 fi
 
 DEPLOYMENT_FENCE="$WORK_DIR/deployment.fence.json"
@@ -564,6 +600,7 @@ CURRENT_DEPLOYMENT_FENCE="$WORK_DIR/deployment-current.fence.json"
 CURRENT_CONFIG_FENCE="$WORK_DIR/config-current.fence.json"
 CURRENT_COHORT_SECRET_FENCE="$WORK_DIR/cohort-secret-current.fence"
 CURRENT_DATABASE_SECRET_FENCE="$WORK_DIR/database-secret-current.fence"
+CURRENT_RETRY_CANARY_SECRET_FENCE="$WORK_DIR/retry-canary-secret-current.fence"
 if ! "${KUBE[@]}" get deployment "$DEPLOYMENT" -o json >"$CURRENT_DEPLOYMENT_JSON" 2>/dev/null ||
    ! validate_source_deployment "$CURRENT_DEPLOYMENT_JSON" "$DEPLOYMENT"; then
   die "managed server Deployment changed or lost readiness before Job creation"
@@ -591,12 +628,22 @@ if ! "${KUBE[@]}" get secret "$DATABASE_SECRET_NAME" \
     >"$CURRENT_DATABASE_SECRET_FENCE" 2>/dev/null; then
   die "database Secret changed before Job creation"
 fi
+if [ -n "$RETRY_CANARY_SECRET_NAME" ]; then
+  if ! "${KUBE[@]}" get secret "$RETRY_CANARY_SECRET_NAME" \
+      -o 'jsonpath={.metadata.uid}{"\n"}{.metadata.resourceVersion}{"\n"}{.immutable}{"\n"}' \
+      >"$CURRENT_RETRY_CANARY_SECRET_FENCE" 2>/dev/null; then
+    die "retry-canary Secret changed before Job creation"
+  fi
+else
+  printf 'absent\n' >"$CURRENT_RETRY_CANARY_SECRET_FENCE"
+fi
 write_deployment_fence "$CURRENT_DEPLOYMENT_JSON" "$CURRENT_PRIVATE_ENV_FILE" "$CURRENT_DEPLOYMENT_FENCE"
 write_config_fence "$CURRENT_CONFIG_JSON" "$CURRENT_CONFIG_FENCE"
 if ! cmp -s "$DEPLOYMENT_FENCE" "$CURRENT_DEPLOYMENT_FENCE" ||
    ! cmp -s "$CONFIG_FENCE" "$CURRENT_CONFIG_FENCE" ||
    ! cmp -s "$COHORT_SECRET_FENCE" "$CURRENT_COHORT_SECRET_FENCE" ||
-   ! cmp -s "$DATABASE_SECRET_FENCE" "$CURRENT_DATABASE_SECRET_FENCE"; then
+   ! cmp -s "$DATABASE_SECRET_FENCE" "$CURRENT_DATABASE_SECRET_FENCE" ||
+   ! cmp -s "$RETRY_CANARY_SECRET_FENCE" "$CURRENT_RETRY_CANARY_SECRET_FENCE"; then
   die "managed server source drifted before Job creation"
 fi
 

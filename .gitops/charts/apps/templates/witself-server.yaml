@@ -7,13 +7,18 @@
 {{- $emailPilot := .Values.apps.witselfServer.agentEmail.receivePilot -}}
 {{- $emailProduction := .Values.apps.witselfServer.agentEmail.receiveProduction -}}
 {{- $emailProductionAccountSecret := $emailProduction.accountIDsExistingSecret -}}
+{{- $emailProductionRetryCanarySecret := $emailProduction.retryCanaryAgentIDExistingSecret -}}
 {{- $emailProductionHasLiteralAccounts := gt (len $emailProduction.accountIDs) 0 -}}
 {{- $emailProductionHasSecretAccounts := ne $emailProductionAccountSecret.name "" -}}
+{{- $emailProductionHasSecretRetryCanary := ne $emailProductionRetryCanarySecret.name "" -}}
 {{- if and $emailPilot.enabled $emailProduction.enabled -}}
 {{- fail "apps.witselfServer agent-email pilot and production receive cannot both be enabled" -}}
 {{- end -}}
 {{- if $emailProductionHasLiteralAccounts -}}
 {{- fail "apps.witselfServer.agentEmail.receiveProduction.accountIDs must remain empty; managed cells require accountIDsExistingSecret" -}}
+{{- end -}}
+{{- if $emailProduction.retryCanaryAgentID -}}
+{{- fail "apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentID must remain empty; managed cells require retryCanaryAgentIDExistingSecret" -}}
 {{- end -}}
 {{- if $emailProductionHasSecretAccounts -}}
 {{- if or (gt (len $emailProductionAccountSecret.name) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $emailProductionAccountSecret.name)) -}}
@@ -22,8 +27,19 @@
 {{- if not (regexMatch "^[A-Za-z0-9._-]+$" $emailProductionAccountSecret.key) -}}
 {{- fail "apps.witselfServer.agentEmail.receiveProduction.accountIDsExistingSecret.key must be a valid Kubernetes Secret data key" -}}
 {{- end -}}
-{{- if $emailProduction.retryCanaryAgentID -}}
-{{- fail "apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentID must be empty with accountIDsExistingSecret" -}}
+{{- end -}}
+{{- if $emailProductionHasSecretRetryCanary -}}
+{{- if or (gt (len $emailProductionRetryCanarySecret.name) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $emailProductionRetryCanarySecret.name)) -}}
+{{- fail "apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name must be a valid Kubernetes Secret name" -}}
+{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9._-]+$" $emailProductionRetryCanarySecret.key) -}}
+{{- fail "apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.key must be a valid Kubernetes Secret data key" -}}
+{{- end -}}
+{{- if not $emailProductionHasSecretAccounts -}}
+{{- fail "apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret requires accountIDsExistingSecret.name" -}}
+{{- end -}}
+{{- if eq $emailProductionRetryCanarySecret.name $emailProductionAccountSecret.name -}}
+{{- fail "apps.witselfServer.agentEmail.receiveProduction retry-canary and account-cohort Secrets must have distinct names" -}}
 {{- end -}}
 {{- end -}}
 {{- if $emailPilot.enabled -}}
@@ -127,8 +143,18 @@
 {{- if and $emailProduction.enabled (not $emailProductionReady) -}}
 {{- fail "apps.witselfServer.agentEmail.receiveProduction requires chart and image v0.0.241 or newer" -}}
 {{- end -}}
+{{- $emailProductionRetryCanarySecretReady := and
+      (semverCompare ">=0.0.245-0" .Values.apps.witselfServer.chartVersion)
+      (semverCompare ">=0.0.245-0" .Values.apps.witselfServer.imageTag) -}}
+{{- if and $emailProductionHasSecretRetryCanary (not $emailProductionRetryCanarySecretReady) -}}
+{{- fail "apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret requires chart and image v0.0.245 or newer" -}}
+{{- end -}}
 {{- if $emailProductionReady -}}
-{{- $_ := set $serverAgentEmail "receiveProduction" $emailProduction -}}
+{{- $serverEmailProduction := deepCopy $emailProduction -}}
+{{- if not $emailProductionRetryCanarySecretReady -}}
+{{- $_ := unset $serverEmailProduction "retryCanaryAgentIDExistingSecret" -}}
+{{- end -}}
+{{- $_ := set $serverAgentEmail "receiveProduction" $serverEmailProduction -}}
 {{- end -}}
 {{- $workerValues := deepCopy .Values.apps.witselfServer.worker -}}
 {{- if not (semverCompare ">=0.0.224-0" .Values.apps.witselfServer.chartVersion) -}}

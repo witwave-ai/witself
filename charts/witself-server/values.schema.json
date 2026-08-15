@@ -187,7 +187,7 @@
         "receiveProduction": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["enabled", "domain", "acceptedLegacyDomains", "audience", "accountIDs", "accountIDsExistingSecret", "retryCanaryAgentID", "relayPublicKeysJSON", "relayReplayWindow"],
+          "required": ["enabled", "domain", "acceptedLegacyDomains", "audience", "accountIDs", "accountIDsExistingSecret", "retryCanaryAgentID", "retryCanaryAgentIDExistingSecret", "relayPublicKeysJSON", "relayReplayWindow"],
           "properties": {
             "enabled": { "type": "boolean" },
             "domain": { "type": "string" },
@@ -227,6 +227,23 @@
             "retryCanaryAgentID": {
               "type": "string",
               "pattern": "^$|^agent_[a-z2-7]{16}$"
+            },
+            "retryCanaryAgentIDExistingSecret": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "key"],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "maxLength": 253,
+                  "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+                },
+                "key": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9._-]+$"
+                }
+              }
             },
             "relayPublicKeysJSON": { "type": "string" },
             "relayReplayWindow": { "type": "string", "minLength": 1 }

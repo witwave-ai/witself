@@ -59,6 +59,16 @@ case "${1:-} ${2:-}" in
   "get secret")
     case "${3:-}" in
       receive-cohort-v1) printf 'cohort-uid\ncohort-rv\n%s\n' "${FAKE_COHORT_IMMUTABLE:-true}" ;;
+      retry-canary-v1)
+        retry_count_file="$FAKE_KUBE_STATE/retry-secret-get-count"
+        retry_count=$(($(cat "$retry_count_file" 2>/dev/null || printf 0) + 1))
+        printf '%s\n' "$retry_count" >"$retry_count_file"
+        retry_rv=retry-rv
+        if [ "${FAKE_SOURCE_DRIFT:-}" = retry-secret ] && [ "$retry_count" -ge 2 ]; then
+          retry_rv=retry-rv-drift
+        fi
+        printf 'retry-uid\n%s\n%s\n' "$retry_rv" "${FAKE_RETRY_CANARY_IMMUTABLE:-true}"
+        ;;
       witself-db) printf 'database-uid\ndatabase-rv\n' ;;
       *) exit 1 ;;
     esac
@@ -168,11 +178,12 @@ cat >"$work_dir/state/deployment.json" <<'EOF'
     "spec":{
     "serviceAccountName":"witself-server","automountServiceAccountToken":false,
     "containers":[{"name":"witself-server",
-      "image":"ghcr.io/witwave-ai/images/witself-server:0.0.241",
+      "image":"ghcr.io/witwave-ai/images/witself-server:0.0.245",
       "imagePullPolicy":"IfNotPresent",
       "envFrom":[{"configMapRef":{"name":"witself-server"}}],
       "env":[
         {"name":"WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS","valueFrom":{"secretKeyRef":{"name":"receive-cohort-v1","key":"account_ids"}}},
+        {"name":"WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID","valueFrom":{"secretKeyRef":{"name":"retry-canary-v1","key":"agent_id"}}},
         {"name":"WITSELF_DATABASE_URL","valueFrom":{"secretKeyRef":{"name":"witself-db","key":"dsn"}}},
         {"name":"WITSELF_PROVISION_TOKEN","valueFrom":{"secretKeyRef":{"name":"not-for-job","key":"token"}}}
       ],
@@ -181,6 +192,7 @@ cat >"$work_dir/state/deployment.json" <<'EOF'
   }}}
 }
 EOF
+cp "$work_dir/state/deployment.json" "$work_dir/state/deployment-with-retry.json"
 
 cat >"$work_dir/state/config.json" <<'EOF'
 {
@@ -199,6 +211,7 @@ cat >"$work_dir/state/config.json" <<'EOF'
   }
 }
 EOF
+cp "$work_dir/state/config.json" "$work_dir/state/config-dark.json"
 
 cat >"$work_dir/state/pods.json" <<'EOF'
 {
@@ -237,9 +250,11 @@ export PATH="$work_dir/bin:$PATH"
 reset_fake_run() {
   unset FAKE_SOURCE_DRIFT FAKE_STALE_READINESS FAKE_COMPLETE_ERROR
   unset FAKE_ARTIFACT_INSPECTION_ERROR FAKE_EXEC_READY_FAILURE FAKE_COHORT_IMMUTABLE
+  unset FAKE_RETRY_CANARY_IMMUTABLE
   unset FAKE_BACKGROUND_DELETE
   unset FAKE_RUNNER_LOG FAKE_RUNNER_LOG_FAILURE
   rm -f "$work_dir/state/deployment-get-count" "$work_dir/state/config-get-count"
+  rm -f "$work_dir/state/retry-secret-get-count"
   rm -f "$work_dir/state/job.json" "$work_dir/state/lock.json" "$work_dir/state/secret.json"
   rm -f "$work_dir/state/job-created.json" "$work_dir/state/lock-created.json"
   rm -f "$work_dir/state/secret-created.json" "$work_dir/state/job-deleted"
@@ -266,7 +281,7 @@ test -f "$output_path"
 [ "$(file_mode "$output_path")" = 600 ]
 jq -e '.schema_version == 2 and (.agents | length == 5)' "$output_path" >/dev/null
 grep -Fqx '{"status":"completed","private_artifact_exported":true}' "$operation_output"
-if grep -Eq 'acc_[a-z2-7]{16}|agent_[a-z2-7]{16}|realm_[a-z2-7]{16}|@witmail\.net|receive-cohort-v1|witself-db' "$operation_output"; then
+if grep -Eq 'acc_[a-z2-7]{16}|agent_[a-z2-7]{16}|realm_[a-z2-7]{16}|@witmail\.net|receive-cohort-v1|retry-canary-v1|witself-db' "$operation_output"; then
   echo "operation output exposed a private identity or Secret reference" >&2
   exit 1
 fi
@@ -276,12 +291,16 @@ jq -e '
   .spec.backoffLimit == 0 and .spec.template.spec.automountServiceAccountToken == false and
   (.spec.template.spec.containers | map(.name) == ["runner","artifact-export"]) and
   (.spec.template.spec.containers[0].env | map(.name) ==
-    ["WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS","WITSELF_DATABASE_URL"]) and
+    ["WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS","WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID","WITSELF_DATABASE_URL"]) and
   (.spec.template.spec.containers[0].env | all(.valueFrom.secretKeyRef != null)) and
-  (.spec.template.spec.containers | all(.image == "ghcr.io/witwave-ai/images/witself-server:0.0.241")) and
+  (.spec.template.spec.containers | all(.image == "ghcr.io/witwave-ai/images/witself-server:0.0.245")) and
   (.spec.template.spec.volumes[] | select(.name == "private") | .emptyDir.medium == "Memory")
 ' "$work_dir/state/job-created.json" >/dev/null
-jq -e '.immutable == true and (.data.WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS == null)' \
+jq -e '
+  .immutable == true and
+  (.data.WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS == null) and
+  (.data.WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID == null)
+' \
   "$work_dir/state/lock-created.json" >/dev/null
 grep -Fq 'delete job witself-agent-email-operation --ignore-not-found=true --cascade=foreground --wait=true --timeout=1s' \
   "$work_dir/state/deletes.log"
@@ -293,6 +312,101 @@ awk '
   $0 == "delete-configmap" { lock = NR }
   END { exit !(job > 0 && pods > job && lock > pods) }
 ' "$work_dir/state/cleanup-actions.log"
+
+# Phase A deliberately has no selected retry canary. The one-shot runner must
+# remain compatible and copy exactly the cohort and database Secret refs.
+reset_fake_run
+jq '
+  .spec.template.spec.containers[0].env |=
+    map(select(.name != "WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID"))
+' "$work_dir/state/deployment-with-retry.json" >"$work_dir/state/deployment.json"
+phase_a_output="$work_dir/phase-a-output"
+if ! "$repo_root/scripts/run-agent-email-cell-operation.sh" \
+    --cell civo-sandbox-usw2-dev \
+    --kubeconfig "$work_dir/kubeconfig" \
+    --context civo-test \
+    --operation canary-manifest \
+    --artifact-output "$work_dir/output/phase-a-canary.json" \
+    --timeout-seconds 60 >"$phase_a_output" 2>&1; then
+  cp "$work_dir/state/deployment-with-retry.json" "$work_dir/state/deployment.json"
+  printf 'phase-A no-canary operation fixture failed:\n' >&2
+  sed -n '1,80p' "$phase_a_output" >&2
+  exit 1
+fi
+cp "$work_dir/state/deployment-with-retry.json" "$work_dir/state/deployment.json"
+jq -e '
+  .spec.template.spec.containers[0].env | map(.name) ==
+    ["WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS","WITSELF_DATABASE_URL"]
+' "$work_dir/state/job-created.json" >/dev/null
+grep -Fqx '{"status":"completed","private_artifact_exported":true}' "$phase_a_output"
+
+# The active ConfigMap is a non-secret source snapshot. It must never carry the
+# selected canary ID even if an operator manually creates such a key.
+reset_fake_run
+jq '.data.WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID = "agent_aaaaaaaaaaaaaaaa"' \
+  "$work_dir/state/config-dark.json" >"$work_dir/state/config.json"
+literal_config_output="$work_dir/literal-config-output"
+if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
+    --cell civo-sandbox-usw2-dev --kubeconfig "$work_dir/kubeconfig" --context civo-test \
+    --operation canary-manifest \
+    --artifact-output "$work_dir/output/literal-config-must-stay-absent.json" \
+    --timeout-seconds 60 >"$literal_config_output" 2>&1; then
+  cp "$work_dir/state/config-dark.json" "$work_dir/state/config.json"
+  echo "literal retry-canary ConfigMap fixture unexpectedly succeeded" >&2
+  exit 1
+fi
+cp "$work_dir/state/config-dark.json" "$work_dir/state/config.json"
+grep -Fqx \
+  'error: managed cell identity or secret-backed production receive configuration is not ready' \
+  "$literal_config_output"
+test ! -e "$work_dir/output/literal-config-must-stay-absent.json"
+test ! -e "$work_dir/state/job.json"
+
+# A Secret-backed retry canary was introduced in 0.0.245. Refuse to copy that
+# env source into a runner using older code even if every other fence is valid.
+reset_fake_run
+jq '.spec.template.spec.containers[0].image = "ghcr.io/witwave-ai/images/witself-server:0.0.244"' \
+  "$work_dir/state/deployment-with-retry.json" >"$work_dir/state/deployment.json"
+pre245_retry_output="$work_dir/pre245-retry-output"
+if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
+    --cell civo-sandbox-usw2-dev --kubeconfig "$work_dir/kubeconfig" --context civo-test \
+    --operation canary-manifest \
+    --artifact-output "$work_dir/output/pre245-retry-must-stay-absent.json" \
+    --timeout-seconds 60 >"$pre245_retry_output" 2>&1; then
+  cp "$work_dir/state/deployment-with-retry.json" "$work_dir/state/deployment.json"
+  echo "pre-0.0.245 retry-canary Secret fixture unexpectedly succeeded" >&2
+  exit 1
+fi
+cp "$work_dir/state/deployment-with-retry.json" "$work_dir/state/deployment.json"
+grep -Fqx 'error: managed retry-canary Secret operations require image v0.0.245 or newer' \
+  "$pre245_retry_output"
+test ! -e "$work_dir/output/pre245-retry-must-stay-absent.json"
+test ! -e "$work_dir/state/job.json"
+
+# The canary has a separate empty-to-selected lifecycle. Sharing the cohort
+# Secret would force an unrelated cohort rotation and is therefore rejected.
+reset_fake_run
+jq '
+  (.spec.template.spec.containers[0].env[] |
+   select(.name == "WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID") |
+   .valueFrom.secretKeyRef.name) = "receive-cohort-v1"
+' "$work_dir/state/deployment-with-retry.json" >"$work_dir/state/deployment.json"
+shared_secret_output="$work_dir/shared-secret-output"
+if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
+    --cell civo-sandbox-usw2-dev --kubeconfig "$work_dir/kubeconfig" --context civo-test \
+    --operation canary-manifest \
+    --artifact-output "$work_dir/output/shared-secret-must-stay-absent.json" \
+    --timeout-seconds 60 >"$shared_secret_output" 2>&1; then
+  cp "$work_dir/state/deployment-with-retry.json" "$work_dir/state/deployment.json"
+  echo "shared cohort/retry-canary Secret fixture unexpectedly succeeded" >&2
+  exit 1
+fi
+cp "$work_dir/state/deployment-with-retry.json" "$work_dir/state/deployment.json"
+grep -Fqx \
+  'error: receive-cohort and retry-canary Secret references must use distinct Secret names' \
+  "$shared_secret_output"
+test ! -e "$work_dir/output/shared-secret-must-stay-absent.json"
+test ! -e "$work_dir/state/job.json"
 
 cat >"$work_dir/overrides.json" <<'EOF'
 {"schema_version":1,"overrides":[{"agent_id":"agent_aaaaaaaaaaaaaaaa","agent_segment":"support-agent"}]}
@@ -358,6 +472,21 @@ test ! -e "$work_dir/output/mutable-cohort-must-stay-absent.json"
 test ! -e "$work_dir/state/job.json"
 
 reset_fake_run
+export FAKE_RETRY_CANARY_IMMUTABLE=false
+mutable_retry_canary_output="$work_dir/mutable-retry-canary-output"
+if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
+    --cell civo-sandbox-usw2-dev --kubeconfig "$work_dir/kubeconfig" --context civo-test \
+    --operation canary-manifest \
+    --artifact-output "$work_dir/output/mutable-retry-canary-must-stay-absent.json" \
+    --timeout-seconds 60 >"$mutable_retry_canary_output" 2>&1; then
+  echo "mutable retry-canary Secret fixture unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -Fqx 'error: retry-canary Secret must be live and immutable' "$mutable_retry_canary_output"
+test ! -e "$work_dir/output/mutable-retry-canary-must-stay-absent.json"
+test ! -e "$work_dir/state/job.json"
+
+reset_fake_run
 export FAKE_SOURCE_DRIFT=config
 drift_output="$work_dir/drift-output"
 if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
@@ -370,6 +499,21 @@ if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
 fi
 grep -Fqx 'error: managed server source drifted before Job creation' "$drift_output"
 test ! -e "$work_dir/output/drift-must-stay-absent.json"
+test ! -e "$work_dir/state/job.json"
+
+reset_fake_run
+export FAKE_SOURCE_DRIFT=retry-secret
+retry_secret_drift_output="$work_dir/retry-secret-drift-output"
+if "$repo_root/scripts/run-agent-email-cell-operation.sh" \
+    --cell civo-sandbox-usw2-dev --kubeconfig "$work_dir/kubeconfig" --context civo-test \
+    --operation canary-manifest \
+    --artifact-output "$work_dir/output/retry-secret-drift-must-stay-absent.json" \
+    --timeout-seconds 60 >"$retry_secret_drift_output" 2>&1; then
+  echo "retry-canary Secret drift fixture unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -Fqx 'error: managed server source drifted before Job creation' "$retry_secret_drift_output"
+test ! -e "$work_dir/output/retry-secret-drift-must-stay-absent.json"
 test ! -e "$work_dir/state/job.json"
 
 reset_fake_run
@@ -407,7 +551,7 @@ grep -Fqx \
   'error: agent-email operation failed (reason=database_unavailable) without an exportable private artifact' \
   "$canary_failure_output"
 test ! -e "$work_dir/output/failed-canary-must-stay-absent.json"
-if grep -Eq 'acc_[a-z2-7]{16}|agent_[a-z2-7]{16}|realm_[a-z2-7]{16}|@witmail\.net|receive-cohort-v1|witself-db' "$canary_failure_output"; then
+if grep -Eq 'acc_[a-z2-7]{16}|agent_[a-z2-7]{16}|realm_[a-z2-7]{16}|@witmail\.net|receive-cohort-v1|retry-canary-v1|witself-db' "$canary_failure_output"; then
   echo "runner failure output exposed a private identity or Secret reference" >&2
   exit 1
 fi
@@ -430,7 +574,7 @@ grep -Fqx \
   'error: agent-email operation failed (reason=unavailable) without an exportable private artifact' \
   "$untrusted_reason_output"
 test ! -e "$work_dir/output/untrusted-reason-must-stay-absent.json"
-if grep -Eq 'acc_[a-z2-7]{16}|agent_[a-z2-7]{16}|realm_[a-z2-7]{16}|@witmail\.net|receive-cohort-v1|witself-db' "$untrusted_reason_output"; then
+if grep -Eq 'acc_[a-z2-7]{16}|agent_[a-z2-7]{16}|realm_[a-z2-7]{16}|@witmail\.net|receive-cohort-v1|retry-canary-v1|witself-db' "$untrusted_reason_output"; then
   echo "untrusted runner log crossed the bounded failure-reason boundary" >&2
   exit 1
 fi
@@ -498,7 +642,7 @@ test -f "$exception_output"
 [ "$(file_mode "$exception_output")" = 600 ]
 jq -e '.state == "requires_operator_override"' "$exception_output" >/dev/null
 grep -Fqx 'error: backfill status requires_operator_override; the private exception artifact was exported' "$failure_output"
-if grep -Eq 'acc_[a-z2-7]{16}|agent_[a-z2-7]{16}|realm_[a-z2-7]{16}|@witmail\.net|receive-cohort-v1|witself-db' "$failure_output"; then
+if grep -Eq 'acc_[a-z2-7]{16}|agent_[a-z2-7]{16}|realm_[a-z2-7]{16}|@witmail\.net|receive-cohort-v1|retry-canary-v1|witself-db' "$failure_output"; then
   echo "failure output exposed a private identity or Secret reference" >&2
   exit 1
 fi

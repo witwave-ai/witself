@@ -242,7 +242,8 @@ production routing target.
   referenced Kubernetes Secret as a canonical, byte-sorted CSV of 1-100 unique
   generated `acc_*` IDs (portable/private chart users may use the literal list)
 - the existing relay public-key, replay-window, and optional legacy-domain
-  settings; Secret-backed managed mode keeps the retry canary empty
+  settings; managed chart/image `v0.0.245` or newer may source the optional
+  retry canary from a distinct immutable, versioned Secret
 
 Whitespace, duplicates, wildcard-like values, unsorted input, invalid generated
 IDs, or more than 100 accounts fail before the API listens. The app-of-apps
@@ -255,8 +256,15 @@ The managed app-of-apps commits only
 must be immutable, versioned, and present in the server namespace before
 activation. Its key is non-optional; missing data prevents pod startup, while
 malformed CSV prevents API readiness. In-place mutation is unsupported: create
-the next Secret and update the reference name so the Deployment rolls. Keep
-`retryCanaryAgentID` empty until a Secret-backed form is available.
+the next Secret and update the reference name so the Deployment rolls. Managed
+cells always keep the literal `retryCanaryAgentID` empty. First converge
+`v0.0.245` code and the cohort with
+`retryCanaryAgentIDExistingSecret.name` empty. After backfill and a private
+canary export, choose one eligible agent and store exactly its canonical
+`agent_*` ID, with no whitespace or trailing newline, in a distinct immutable,
+versioned Secret. Set the new Secret name and key in a separate config-only
+rollout. Both fields participate in the pod checksums; pre-`0.0.245` strict
+child schemas never receive the empty field.
 
 Serving replicas do only a bounded read-only check that each configured account
 exists in the cell and is active or suspended, plus one optional canary
@@ -277,16 +285,16 @@ scripts/run-agent-email-cell-operation.sh \
 ```
 
 The supported script copies no values: it snapshots the active non-secret
-ConfigMap, reuses only the exact database/cohort Secret references, and runs the
-released image in a fixed-name, non-API Kubernetes Job. The fixed name is the
-concurrency lock. Its memory-backed private volume is exported through the same
-distroless binary directly to a new mode-`0600` local file outside Git; neither
-identities nor Secret references are printed. On a successful backfill the
-requested exception path remains absent.
+ConfigMap, reuses only the exact database, cohort, and optional retry-canary
+Secret references, and runs the released image in a fixed-name, non-API
+Kubernetes Job. The fixed name is the concurrency lock. Its memory-backed
+private volume is exported through the same distroless binary directly to a new
+mode-`0600` local file outside Git; neither identities nor Secret references are
+printed. On a successful backfill the requested exception path remains absent.
 
 If an ungraceful operator-client exit leaves the fixed lock, follow the exact
 Job/pod inspection and fixed-resource recovery sequence in
-[runbooks.md](runbooks.md#roll-out-the-v00241-cell-receive-foundation). Never
+[runbooks.md](runbooks.md#roll-out-production-cell-receive-and-the-v00245-retry-canary). Never
 delete the lock while the exact Job is active or one of its pods is Pending or
 Running—or in any other nonterminal phase, including `Unknown`—and never use a
 broad application selector for cleanup.
