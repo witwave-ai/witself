@@ -34,6 +34,7 @@ import {
 } from "../scripts/bootstrap-production-receive.mjs";
 import {
   PRODUCTION_CLOUDFLARE_ACCOUNT_ID,
+  WRANGLER_PRODUCTION_ENV_FILE,
 } from "../scripts/wrangler-environment.mjs";
 
 function validSecrets() {
@@ -923,6 +924,79 @@ test("production bootstrap journals, deploys, attests, and cleans up end to end"
   }
   assert.equal(deployedEnvironment.WRANGLER_WRITE_LOGS, "false");
   assert.equal(deployedEnvironment.WRANGLER_LOG_SANITIZE, "true");
+});
+
+test("production bootstrap preserves the reviewed cohort preflight argument handoff", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "witself-bootstrap-wrangler-"));
+  const executable = join(directory, "wrangler");
+  const callLog = join(directory, "calls.jsonl");
+  const harness = bootstrapHarness();
+  delete harness.dependencies.preflightCohort;
+  harness.dependencies.inspectLegacyWorker = () => {
+    throw new Error("stop after cohort preflight");
+  };
+  harness.environment.PATH = `${directory}:${process.env.PATH}`;
+  const deployment = {
+    id: "11111111-1111-4111-8111-111111111111",
+    strategy: "percentage",
+    versions: [{
+      version_id: "22222222-2222-4222-8222-222222222222",
+      percentage: 100,
+    }],
+  };
+  const version = {
+    id: "22222222-2222-4222-8222-222222222222",
+    resources: {
+      bindings: [
+        {
+          name: "WITSELF_EDGE_RELEASE_VERSION",
+          type: "plain_text",
+          text: release.version,
+        },
+        {
+          name: "CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
+          type: "plain_text",
+          text: "",
+        },
+      ],
+    },
+  };
+  const fakeWrangler = `#!/usr/bin/env node
+const { appendFileSync } = require("node:fs");
+const args = process.argv.slice(2);
+appendFileSync(${JSON.stringify(callLog)}, JSON.stringify(args) + "\\n");
+const output = args[0] === "versions"
+  ? ${JSON.stringify(JSON.stringify(version))}
+  : ${JSON.stringify(JSON.stringify(deployment))};
+process.stdout.write(output);
+`;
+  try {
+    await writeFile(executable, fakeWrangler, { flag: "wx", mode: 0o700 });
+    await assert.rejects(
+      bootstrapProductionReceive({
+        secretsFile: "/private/receive-bootstrap-secrets.json",
+        receipt: "/private/receive-bootstrap-receipt.json",
+      }, harness.dependencies),
+      /stop after cohort preflight/,
+    );
+    const calls = (await readFile(callLog, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    assert.equal(calls.length, 3);
+    for (const args of calls) {
+      assert.equal(args.filter((arg) => arg === "--env-file").length, 1);
+      assert.deepEqual(args.slice(-2), [
+        "--env-file", WRANGLER_PRODUCTION_ENV_FILE,
+      ]);
+    }
+    assert.deepEqual(calls.map((args) => args[0]), [
+      "deployments", "versions", "deployments",
+    ]);
+    assert.equal(harness.events.includes("provider_deploy"), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("production bootstrap performs no provider mutation when receipt reservation fails", async () => {
