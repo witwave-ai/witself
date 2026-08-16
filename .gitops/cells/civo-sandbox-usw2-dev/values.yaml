@@ -74,6 +74,12 @@ apps:
         dispatchPrivateKeySecret:
           name: witself-agent-email-outbound-dispatch-v1
           key: private-key
+      agentEmailRetention:
+        enabled: true
+        mode: enforce
+        batchSize: 100
+        interval: 1m
+        batchTimeout: 2m
     awsAlbIngress:
       enabled: false
     gcpIngress:
