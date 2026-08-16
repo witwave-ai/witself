@@ -32,6 +32,8 @@ jobs:
           set -euo pipefail
           test "$GITHUB_REF" = refs/heads/main
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Install pinned receive-edge dependencies
+        run: npm ci
       - name: Verify the bounded storage probe
         run: node --test test/storage-probe.test.mjs
       - name: Prove the production receive path
