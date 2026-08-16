@@ -515,7 +515,7 @@ async function discoverMessage(request, subject, deadlineAt, now, sleep) {
 function assertRetainedLargePayloadMessage(message, config, subject) {
   if (!message || message.subject !== subject ||
       message.provider !== "cloudflare_email_routing" ||
-      message.envelope_sender !== config.from ||
+      message.header_from !== config.from ||
       message.envelope_recipient !== config.to ||
       message.recipient_route_kind !== "canonical" ||
       String(message.subaddress_tag ?? "") !== "" ||

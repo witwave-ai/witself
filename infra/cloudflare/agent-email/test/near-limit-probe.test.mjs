@@ -39,12 +39,18 @@ function uuidGenerator() {
   return () => values.shift() ?? completionKey;
 }
 
-function retainedMessage({ acknowledged = false, completed = false } = {}) {
+function retainedMessage({
+  acknowledged = false,
+  completed = false,
+  envelopeSender = "bounce+rewritten@notify.cloudflare.com",
+  headerFrom = config.from,
+} = {}) {
   return {
     id: messageID,
     provider: "cloudflare_email_routing",
-    envelope_sender: config.from,
+    envelope_sender: envelopeSender,
     envelope_recipient: config.to,
+    header_from: headerFrom,
     recipient_route_kind: "canonical",
     subaddress_tag: "",
     subject,
@@ -344,6 +350,37 @@ test("large-payload probe refuses a lower plan limit before provider submission"
     },
   }), /reviewed 25 MiB service ceiling/);
   assert.deepEqual(paths, ["/v1/email:status"]);
+});
+
+test("large-payload probe rejects a message whose Header From does not match", async () => {
+  await assert.rejects(() => runLargePayloadProbe(config, {
+    randomUUID: uuidGenerator(),
+    sleep: async () => {},
+    fetch: async (url) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/v1/email:status")) {
+        return Response.json(storageStatus());
+      }
+      if (path.endsWith("/email/sending/send_raw")) {
+        return Response.json({
+          success: true,
+          errors: [],
+          result: {
+            delivered: [config.to],
+            queued: [],
+            permanent_bounces: [],
+          },
+        });
+      }
+      if (path === "/v1/email") {
+        return Response.json({
+          messages: [retainedMessage({ headerFrom: "other@example.com" })],
+          next_cursor: "",
+        });
+      }
+      throw new Error(`unexpected test path ${path}`);
+    },
+  }), /did not produce one canonical durably retained message/);
 });
 
 test("Cloudflare submission failures expose only bounded numeric codes", async () => {
