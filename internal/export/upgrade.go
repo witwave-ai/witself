@@ -65,6 +65,15 @@ var upgraders = map[int]Upgrader{
 	86: preserveSchema86Rows,
 	87: preserveSchema87Rows,
 	88: preserveSchema88Rows,
+	89: preserveSchema89Rows,
+}
+
+// preserveSchema89Rows acknowledges schema 0090's changes to cell-local rate
+// bucket constraints. All three limiter tables are excluded from account archives,
+// so every durable account row remains byte-for-byte valid and no defensive
+// debt is synthesized when an archive moves between cells.
+func preserveSchema89Rows(_ string, row map[string]any) (map[string]any, error) {
+	return row, nil
 }
 
 // preserveSchema88Rows acknowledges schema 0089's additive outbound-email

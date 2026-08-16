@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/base64"
+	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -388,6 +390,15 @@ func TestAgentEmailRetentionMetricMappingContainsNoIdentifiers(t *testing.T) {
 		DeferredBudget:        5,
 		ClearedDuplicateLinks: 6,
 		DeletedCanaryProofs:   1,
+		ScannedOutbound:       7,
+		EligibleOutbound:      6,
+		DeletedOutbound:       5,
+		DeletedOutboundBytes:  4096,
+		ScannedProviderEvents: 4,
+		DeletedProviderEvents: 3,
+		ScannedSuppressions:   2,
+		EligibleSuppressions:  2,
+		DeletedSuppressions:   1,
 		ScanCapped:            true,
 		LaneAdvanced:          true,
 	}
@@ -395,6 +406,16 @@ func TestAgentEmailRetentionMetricMappingContainsNoIdentifiers(t *testing.T) {
 		store.AgentEmailRetentionBatchResult{LaneAdvanced: true},
 	); got != worker.RetentionResultNoWork {
 		t.Fatalf("empty agent-email result metric = %q", got)
+	}
+	for name, outboundOnly := range map[string]store.AgentEmailRetentionBatchResult{
+		"outbound message":  {ScannedOutbound: 1},
+		"outbound bytes":    {DeletedOutboundBytes: 1},
+		"provider receipt":  {ScannedProviderEvents: 1},
+		"recipient cleanup": {ScannedSuppressions: 1},
+	} {
+		if got := agentEmailRetentionMetricResult(outboundOnly); got != worker.RetentionResultSuccess {
+			t.Errorf("%s-only agent-email result metric = %q", name, got)
+		}
 	}
 	if got := agentEmailRetentionMetricResult(result); got != worker.RetentionResultSuccess {
 		t.Fatalf("non-empty agent-email result metric = %q", got)
@@ -409,8 +430,54 @@ func TestAgentEmailRetentionMetricMappingContainsNoIdentifiers(t *testing.T) {
 		counts.DeferredBudget != 5 ||
 		counts.ClearedDuplicateLinks != 6 ||
 		counts.DeletedCanaryProofs != 1 ||
+		counts.ScannedOutbound != 7 ||
+		counts.EligibleOutbound != 6 ||
+		counts.DeletedOutbound != 5 ||
+		counts.DeletedOutboundBytes != 4096 ||
+		counts.ScannedProviderEvents != 4 ||
+		counts.DeletedProviderEvents != 3 ||
+		counts.ScannedSuppressions != 2 ||
+		counts.EligibleSuppressions != 2 ||
+		counts.DeletedSuppressions != 1 ||
 		!counts.ScanCapped {
 		t.Fatalf("mapped agent-email counts = %#v", counts)
+	}
+}
+
+func TestLogAgentEmailRetentionResultIncludesOutboundCleanup(t *testing.T) {
+	readEnd, writeEnd, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalStderr := os.Stderr
+	os.Stderr = writeEnd
+	logAgentEmailRetentionResult(store.AgentEmailRetentionModeEnforce,
+		store.AgentEmailRetentionBatchResult{
+			DeletedOutbound:       2,
+			DeletedOutboundBytes:  2048,
+			DeletedProviderEvents: 3,
+			DeletedSuppressions:   4,
+		})
+	os.Stderr = originalStderr
+	if err := writeEnd.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output, err := io.ReadAll(readEnd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := readEnd.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"deleted_outbound=2",
+		"deleted_outbound_bytes=2048",
+		"deleted_provider_events=3",
+		"deleted_suppressions=4",
+	} {
+		if !strings.Contains(string(output), want) {
+			t.Errorf("agent-email retention log missing %q: %s", want, output)
+		}
 	}
 }
 

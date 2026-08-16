@@ -21,6 +21,9 @@ const (
 
 	// AgentEmailRateScopeRealm identifies an aggregate realm breaker.
 	AgentEmailRateScopeRealm = "realm"
+	// AgentEmailRateScopeAccount identifies the non-optional aggregate breaker
+	// shared by every realm in one account.
+	AgentEmailRateScopeAccount = "account"
 	// AgentEmailRateScopeRecipient identifies one receiving agent.
 	AgentEmailRateScopeRecipient = "recipient"
 	// AgentEmailRateScopeSender identifies a hashed unverified
@@ -82,6 +85,7 @@ type agentEmailRateDebit struct {
 	scopeID       string
 	quantity      int64
 	platformLimit int64
+	burstLimit    int64
 }
 
 // enforceAgentEmailRateLimitsTx applies account-plan caps without ever
@@ -99,6 +103,18 @@ func enforceAgentEmailRateLimitsTx(
 ) error {
 	senderScopeID := agentEmailSenderScopeID(relay.EnvelopeSender, address.Address)
 	debits := []agentEmailRateDebit{
+		{
+			dimension: AgentEmailRateDimensionReceived,
+			scope:     AgentEmailRateScopeAccount, scopeID: address.AccountID,
+			quantity: 1, platformLimit: plans.MaxAgentEmailReceivedPerAccountMinute,
+			burstLimit: plans.MaxAgentEmailReceivedPerAccountMinuteBurst,
+		},
+		{
+			dimension: AgentEmailRateDimensionReceivedBytes,
+			scope:     AgentEmailRateScopeAccount, scopeID: address.AccountID,
+			quantity: rawBytes, platformLimit: plans.MaxAgentEmailReceivedBytesPerAccountMinute,
+			burstLimit: plans.MaxAgentEmailReceivedBytesPerAccountMinuteBurst,
+		},
 		{
 			planKey:   plans.AgentEmailReceivedPerRealmMinuteLimit,
 			dimension: AgentEmailRateDimensionReceived,
@@ -198,6 +214,29 @@ func consumeAgentEmailRateBucketTx(
 	debit agentEmailRateDebit,
 	limit int64,
 ) (agentEmailRateDecision, error) {
+	bucketCapacity := agentEmailRateBucketCapacity(debit, limit)
+	if debit.scope == AgentEmailRateScopeAccount {
+		var decision agentEmailRateDecision
+		err := tx.QueryRow(ctx, `
+			SELECT admitted, current_tat, now_nanoseconds
+			  FROM witself_consume_agent_email_account_rate_bucket($1,$2,$3,$4,$5)`,
+			accountID,
+			debit.dimension,
+			agentEmailRateIntervalNanoseconds(limit),
+			bucketCapacity,
+			debit.quantity,
+		).Scan(
+			&decision.admitted,
+			&decision.currentTAT,
+			&decision.nowNanoseconds,
+		)
+		if err != nil {
+			return agentEmailRateDecision{}, fmt.Errorf(
+				"debit agent-email account %s rate: %w", debit.dimension, err,
+			)
+		}
+		return decision, nil
+	}
 	var decision agentEmailRateDecision
 	err := tx.QueryRow(ctx, `
 		SELECT admitted, current_tat, now_nanoseconds
@@ -208,10 +247,17 @@ func consumeAgentEmailRateBucketTx(
 		debit.scope,
 		debit.scopeID,
 		agentEmailRateIntervalNanoseconds(limit),
-		limit,
+		bucketCapacity,
 		debit.quantity,
 	).Scan(&decision.admitted, &decision.currentTAT, &decision.nowNanoseconds)
 	return decision, err
+}
+
+func agentEmailRateBucketCapacity(debit agentEmailRateDebit, limit int64) int64 {
+	if debit.burstLimit > 0 && debit.burstLimit < limit {
+		return debit.burstLimit
+	}
+	return limit
 }
 
 func consumeAgentEmailRateTx(
@@ -223,7 +269,8 @@ func consumeAgentEmailRateTx(
 	source string,
 ) error {
 	intervalNanoseconds := agentEmailRateIntervalNanoseconds(limit)
-	retryable := agentEmailRateDebitRetryable(limit, debit.quantity)
+	bucketCapacity := agentEmailRateBucketCapacity(debit, limit)
+	retryable := agentEmailRateDebitRetryable(bucketCapacity, debit.quantity)
 	decision, err := consumeAgentEmailRateBucketTx(
 		ctx,
 		tx,
@@ -257,7 +304,7 @@ func consumeAgentEmailRateTx(
 	if retryable {
 		baseTAT := max(decision.currentTAT, decision.nowNanoseconds)
 		admittedTAT := baseTAT + debit.quantity*intervalNanoseconds
-		bucketCeiling := decision.nowNanoseconds + limit*intervalNanoseconds
+		bucketCeiling := decision.nowNanoseconds + bucketCapacity*intervalNanoseconds
 		retryNanoseconds = admittedTAT - bucketCeiling
 		if retryNanoseconds < 1 {
 			retryNanoseconds = 1
@@ -297,7 +344,7 @@ func (s *Store) DeleteStaleAgentEmailRateBuckets(
 	}
 	var deleted int64
 	err := s.pool.QueryRow(ctx, `
-		WITH stale AS MATERIALIZED (
+		WITH realm_stale AS MATERIALIZED (
 		  SELECT bucket.ctid
 		    FROM agent_email_rate_buckets bucket
 		   WHERE bucket.updated_at < LEAST(
@@ -310,13 +357,31 @@ func (s *Store) DeleteStaleAgentEmailRateBuckets(
 		            bucket.dimension, bucket.scope, bucket.scope_id
 		   FOR UPDATE SKIP LOCKED
 		   LIMIT $2
-		), removed AS (
+		), realm_removed AS (
 		  DELETE FROM agent_email_rate_buckets bucket
-		   USING stale
-		   WHERE bucket.ctid = stale.ctid
+		   USING realm_stale
+		   WHERE bucket.ctid = realm_stale.ctid
+		   RETURNING 1
+		), account_stale AS MATERIALIZED (
+		  SELECT bucket.ctid
+		    FROM agent_email_account_rate_buckets bucket
+		   WHERE bucket.updated_at < LEAST(
+		           $1::timestamptz,
+		           clock_timestamp() - interval '60 seconds'
+		         )
+		     AND bucket.theoretical_arrival_nanoseconds <=
+		         floor(extract(epoch FROM clock_timestamp()) * 1000000000)::bigint
+		   ORDER BY bucket.updated_at, bucket.account_id, bucket.dimension
+		   FOR UPDATE SKIP LOCKED
+		   LIMIT GREATEST($2-(SELECT count(*) FROM realm_removed),0)
+		), account_removed AS (
+		  DELETE FROM agent_email_account_rate_buckets bucket
+		   USING account_stale
+		   WHERE bucket.ctid = account_stale.ctid
 		   RETURNING 1
 		)
-		SELECT count(*) FROM removed`, before.UTC(), limit).Scan(&deleted)
+		SELECT (SELECT count(*) FROM realm_removed) +
+		       (SELECT count(*) FROM account_removed)`, before.UTC(), limit).Scan(&deleted)
 	if err != nil {
 		return 0, fmt.Errorf("delete stale agent-email rate buckets: %w", err)
 	}

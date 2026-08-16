@@ -374,13 +374,19 @@ Do not run a live restore as part of this procedure.
 
 ## Move and stage the `witmail.net` managed-email domain
 
-This is a registrar and edge-foundation procedure, not an email activation.
-`witmail.net` was registered with Cloudflare Registrar on 2026-08-03 in a
-source Cloudflare account so the name could be secured. The source-account zone
-is intentionally dormant: it contains restrictive SPF/DKIM/DMARC
-anti-spoofing records but no MX records, Email Routing configuration, Worker
-route, catch-all, or DNSSEC delegation. Do not add any of those delivery paths
-while the registration remains in the source account.
+This is the retained registrar and edge-foundation procedure, not an email
+activation. The inter-account move completed on 2026-08-14; `witmail.net` is now
+in the production Cloudflare account and carries the separately gated Founder
+production service. Do not repeat the move steps against the live zone. They are
+preserved to explain the fail-closed transfer and recovery boundary and must be
+revalidated against Cloudflare's current rules before any future domain move.
+
+`witmail.net` was originally registered with Cloudflare Registrar on 2026-08-03
+in a source Cloudflare account so the name could be secured. Before the move,
+the source-account zone was intentionally dormant: it contained restrictive
+SPF/DKIM/DMARC anti-spoofing records but no MX records, Email Routing
+configuration, Worker route, catch-all, or DNSSEC delegation. No delivery path
+was added while the registration remained in the source account.
 
 Cloudflare's
 [Registrar inter-account move](https://developers.cloudflare.com/registrar/account-options/inter-account-transfer/)
@@ -425,7 +431,8 @@ primary-domain configuration first. The compatibility path deliberately keeps
 only previously issued canonical local parts; it cannot converge a legacy
 realm alias after `.net` becomes primary.
 
-Keep the rollout dark in this order:
+The completed production rollout used this fail-closed order; repeat it only
+for an explicitly reviewed recovery or equivalent new-domain ceremony:
 
 1. Deploy code and configuration that name `witmail.net` as the primary managed
    domain while all five gates below are absent or exactly `false`. If an
@@ -1072,6 +1079,120 @@ npm run routes:catch-all -- apply \
 Disable or rollback recovery never auto-enables a rule. Keep every manifest,
 plan, receipt, external review, token, and account mapping outside Git and in
 operator-controlled storage.
+
+## Operate production outbound agent email
+
+Outbound agent email is live only for the exact Founder cohort. This is a
+production service, but it is not a broad customer rollout. Repository templates
+and a new cell remain dark by default; current live state must be verified, not
+inferred from those defaults or from plan entitlement.
+
+The production resources are:
+
+- Worker: `witself-agent-email-send`;
+- sending domain: `send.witmail.net`;
+- managed Reply-To domain: `witmail.net`;
+- lifecycle Queue: `witself-agent-email-send-events`;
+- dead-letter Queue: `witself-agent-email-send-events-dlq`;
+- Email Service subscription: `witself-agent-email-send-lifecycle`, source
+  `email.sending`, scoped to `send.witmail.net` and the six configured lifecycle
+  event classes.
+
+For the Founder cohort, expected live gates are
+`DISPATCH_ENABLED=true`, `RECEIPT_REPLAY_ENABLED=false`, and
+`EVENT_DELIVERY_ENABLED=true`; the lifecycle subscription is enabled. The Civo
+cell runs two `witself-worker` replicas with `worker.agentEmailOutbound`
+enabled. Only the exact Founder account may appear in the adapter signer cohort,
+event target map, cell receive cohort, and effective account policy. Never print
+or export the signer or target-map secret values to verify them.
+
+From `infra/cloudflare/agent-email-send`, select the production Cloudflare
+account and zone as described in the component README, then perform the
+value-free status check:
+
+```sh
+npx --no-install wrangler --config wrangler.template.jsonc deployments status --json
+./scripts/manage-events.sh status
+npx --no-install wrangler --config wrangler.template.jsonc \
+  queues info witself-agent-email-send-events
+npx --no-install wrangler --config wrangler.template.jsonc \
+  queues consumer list witself-agent-email-send-events
+npx --no-install wrangler --config wrangler.template.jsonc \
+  queues info witself-agent-email-send-events-dlq
+```
+
+Stop if the selected Cloudflare account is not the account that owns
+`witmail.net`, if either required secret name is absent, if the subscription
+source/domain/event set differs, if the main Queue has no consumer, or if any
+gate differs from the expected posture. The configured consumer uses batches of
+10, a five-second batch timeout, 25 retries, concurrency four, and the named
+DLQ. Treat configuration drift as an incident rather than repairing it with an
+ad hoc dashboard edit.
+
+Monitor both boundaries. In the cell, inspect `/readyz`, `/healthz`, `/metrics`,
+the bounded `witself_worker_agent_email_outbound_*` families, and the durable
+outbox states. At the edge, correlate Queue backlog and DLQ depth with the
+privacy-safe `witself.agent-email-provider-event-consume-log.v1` outcome codes.
+Those logs intentionally contain no tenant, address, send, provider, target URL,
+token, body, or error-text value. Successful provider acceptance emits one
+idempotent `email_sent` usage observation. It is operational and non-billable;
+invoice and overage conversion remain disabled.
+
+Rollback is gate-first and forward-only:
+
+1. Disable effective send for the affected account or cohort and disable
+   `worker.agentEmailOutbound` in its cell. Confirm that no new outbox rows are
+   claimed.
+2. Set adapter dispatch false while leaving lifecycle delivery true so already
+   accepted sends can still settle.
+3. Let the main Queue drain and reconcile every accepted send and any DLQ
+   evidence.
+4. Only when no accepted send can produce another expected event, disable the
+   subscription and then make lifecycle delivery dark.
+
+Do not down-migrate the cell database or deploy an older schema-incompatible
+binary. Do not purge the main lifecycle Queue. A non-empty DLQ is retained
+incident evidence: reconcile its value-free cell/provider state and use an
+explicitly reviewed repair or replay procedure. `queues purge` is irreversible
+deletion, not replay; the DLQ may be purged only after durable reconciliation
+and explicit operator approval.
+
+Before adding a cell or widening beyond Founder, repeat the complete staged
+procedure in
+[the sending-adapter README](../infra/cloudflare/agent-email-send/README.md):
+provision the Queue/DLQ/subscription disabled, deploy every gate dark, converge
+the schema-compatible cell and two worker replicas, prove receipt replay and
+provider-event idempotency with disposable canaries, then enable dispatch,
+lifecycle delivery, and the subscription in that order. Keep the account-only
+1,000-per-minute and 10,000-per-day breakers, the recipient-only 100-per-day
+breaker, and the agent/realm 30/300-per-minute breakers in force. Inbound
+expansion also retains the non-optional account-wide 5,000-message/minute and
+1-GiB/minute GCRA refill rates across all realms, with 100-message and 64-MiB
+burst tolerances.
+
+After the schema-90 image rollout, production keeps
+`worker.agentEmailRetention` running in enforcement mode on both replicas even
+though Founder has an explicit indefinite policy. Verify the
+exact cell configuration: `batchSize: 100`, `interval: 1m`,
+`batchTimeout: 2m`, and `mode: enforce`. Each enforce attempt is bounded to 32
+productive passes and 48 total passes, allowing one sparse 16-lane sweep.
+Capped nonempty lanes remain due behind older work; empty and lock-only lanes
+wait the normal interval. Preview executes one bounded sample per interval. At
+batch 100, one replica can scan at most 3,200 rows and delete at most 1,024 MiB
+of raw MIME per enforce attempt; two replicas can scan at most 6,400 rows and
+delete at most 2,048 MiB. Maximum-sized 25 MiB rows yield 800/1,600 MiB because
+each database batch fits only one. Durable per-account kind rotation prevents
+outbound/provider-event and suppression starvation over repeated visits. These
+are work ceilings, not throughput guarantees or reserved inbound shares;
+persistent capped/time-out batches require investigation, and they do not
+provide a multi-account cell-capacity guarantee.
+
+For a new cell, first run this exact shape in preview and review only value-free
+counts, then explicitly promote it to enforcement before admitting a finite
+cohort. Once production enforcement is active, Professional mail automatically
+ages at 90 days and Team mail at 365 days without another mode change. Prove the
+finite path with a disposable policy canary; Founder's indefinite policy alone
+cannot demonstrate deletion.
 
 ## Deploy, checkpoint, and drill the dark custom-domain authority
 

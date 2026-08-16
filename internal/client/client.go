@@ -455,12 +455,20 @@ func isMessageRateErrorDetails(details responseErrorDetails) bool {
 		details.LimitKey == "agent_email_sent_per_account_minute":
 		return true
 	case details.LimitDimension == "agent_email_sent" &&
+		details.Scope == "account" &&
+		details.LimitKey == "agent_email_sent_per_account_day":
+		return true
+	case details.LimitDimension == "agent_email_sent" &&
 		details.Scope == "agent" &&
 		details.LimitKey == "agent_email_sent_per_agent_minute":
 		return true
 	case details.LimitDimension == "agent_email_sent" &&
 		details.Scope == "realm" &&
 		details.LimitKey == "agent_email_sent_per_realm_minute":
+		return true
+	case details.LimitDimension == "agent_email_sent" &&
+		details.Scope == "recipient" &&
+		details.LimitKey == "agent_email_sent_per_recipient_day":
 		return true
 	default:
 		return false

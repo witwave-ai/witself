@@ -27,6 +27,31 @@ func TestAgentEmailRateIntervalUsesCeilingForNonDivisorLimit(t *testing.T) {
 	}
 }
 
+func TestAgentEmailAccountRateUsesBoundedBurstCapacity(t *testing.T) {
+	countDebit := agentEmailRateDebit{
+		burstLimit: plans.MaxAgentEmailReceivedPerAccountMinuteBurst,
+	}
+	if got := agentEmailRateBucketCapacity(
+		countDebit, plans.MaxAgentEmailReceivedPerAccountMinute,
+	); got != plans.MaxAgentEmailReceivedPerAccountMinuteBurst {
+		t.Fatalf("account count burst = %d", got)
+	}
+	byteDebit := agentEmailRateDebit{
+		burstLimit: plans.MaxAgentEmailReceivedBytesPerAccountMinuteBurst,
+	}
+	if got := agentEmailRateBucketCapacity(
+		byteDebit, plans.MaxAgentEmailReceivedBytesPerAccountMinute,
+	); got != plans.MaxAgentEmailReceivedBytesPerAccountMinuteBurst {
+		t.Fatalf("account byte burst = %d", got)
+	}
+	if got := agentEmailRateBucketCapacity(agentEmailRateDebit{}, 7); got != 7 {
+		t.Fatalf("ordinary rate burst = %d, want effective limit", got)
+	}
+	if got := agentEmailRateBucketCapacity(agentEmailRateDebit{burstLimit: 10}, 4); got != 4 {
+		t.Fatalf("lower effective limit burst = %d, want 4", got)
+	}
+}
+
 func TestAgentEmailSenderScopeIDIsStableAndValueFree(t *testing.T) {
 	const (
 		sender    = "sender@example.com"

@@ -263,16 +263,22 @@ witself-admin account limit-override clear \
 
 `set --max` replaces the inherited plan value, `clear` restores inheritance,
 and `set --unlimited` explicitly removes the plan cap from the resolved cell
-snapshot. Unlimited does not bypass the independent platform ceiling. These
-are shared rolling one-minute budgets enforced in PostgreSQL across API pods;
-they are not wall-clock minute counters. The current catalog omits all eight
-agent-email keys, so their inherited value is the platform breaker and an
-administrator can only lower it. The outbound ceilings are 30 sends per agent,
-300 per realm, and a platform-only 1,000 per account in a rolling minute.
-Inbound attempts are non-billable safety
-traffic and never create an `email_received` usage charge; outbound usage
-billing remains dark during the beta. Every set/clear requires an audit reason
-and advances the normal desired/applied account-policy snapshot fence.
+snapshot. Unlimited does not bypass the independent platform ceiling. These are
+shared rolling budgets enforced in PostgreSQL across API pods; they are not
+wall-clock counters. The current catalog omits all eight resolved agent-email
+keys, so their inherited value is the platform breaker and an administrator can
+only lower it. Inbound also has non-optional account-wide GCRA refill rates of
+5,000 messages and 1 GiB raw MIME per minute across all realms, with
+100-message and 64-MiB burst tolerances. Outbound refills at 30 sends per agent,
+300 per realm, and 1,000 per account each minute. Its long-horizon lanes refill
+at 10,000 per account and 100 per normalized recipient each day, with 1,000/10
+burst tolerances and rolling-day upper bounds of 11,000/110. The recipient
+bucket stores only an account-domain-separated SHA-256 identifier.
+Inbound attempts are non-billable safety traffic and never create an
+`email_received` usage charge. Successful provider acceptance creates one
+idempotent, non-billable `email_sent` usage observation; invoice and overage
+conversion remain disabled. Every set/clear requires an audit reason and
+advances the normal desired/applied account-policy snapshot fence.
 
 ### Operator-only agent-email account policy
 
@@ -2418,6 +2424,8 @@ Flags:
 
 `ingest` emits `fact.imported` and `memory.imported` audit events. It is excluded
 in `--read-only` MCP mode.
+
+<a id="witself-bootstrap-instructions"></a>
 
 ## `witself bootstrap-instructions` (target; not implemented)
 
@@ -4944,13 +4952,15 @@ witself mcp serve --runtime codex
 witself mcp serve --runtime claude-code
 ```
 
-The current full server exposes 67 tools across self and realm-safe peer
-activity, deterministic facts and
+The current full server exposes the configured backend's registered tools across
+self and realm-safe peer activity, deterministic facts and
 fact review/deletion, transcripts, direct-agent messages, the implemented
 realm request lifecycle, direct narrative-memory lifecycle/recall/delete
-surface, and fifteen client-curation tools documented in
-[MCP Tools](mcp-tools.md). The broader catalog and posture below remain the
-target contract as additional domain capabilities are wired in.
+surface, fifteen client-curation tools, and independently gated inbound and
+outbound agent email documented in [MCP Tools](mcp-tools.md). Optional backend
+capabilities can change the aggregate count; tests pin each configured registry
+shape. The broader catalog and posture below remain the target contract as
+additional domain capabilities are wired in.
 
 The default MCP posture should be local-first. Stdio is the first target.
 Network transports are a later, explicit deployment mode and must be

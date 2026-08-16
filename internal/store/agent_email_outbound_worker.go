@@ -238,15 +238,17 @@ func (s *Store) StartAgentEmailOutboundProviderCall(
 		}
 		return dispatchFromAgentEmailOutbound(msg), policyErr
 	}
-	if err := enforceAgentEmailOutboundDispatchRateLimitsTx(ctx, tx, p); err != nil {
-		return dispatchFromAgentEmailOutbound(msg), err
-	}
 	if msg.State == AgentEmailOutboundProviderStarted {
 		if err := tx.Commit(ctx); err != nil {
 			return AgentEmailOutboundDispatch{}, err
 		}
 		return dispatchFromAgentEmailOutbound(msg),
 			ErrAgentEmailOutboundProviderAlreadyStarted
+	}
+	if err := enforceAgentEmailOutboundDispatchRateLimitsTx(
+		ctx, tx, p, msg.ToAddress,
+	); err != nil {
+		return dispatchFromAgentEmailOutbound(msg), err
 	}
 	err = tx.QueryRow(ctx, `
 		UPDATE agent_email_outbound_messages

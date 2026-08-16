@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -159,7 +160,9 @@ func TestAgentEmailOutboundRetentionLifecyclePostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	if preview.ScannedProviderEvents != 1 || preview.DeletedProviderEvents != 0 ||
-		preview.DeletedOutbound != 0 || preview.ScannedSuppressions != 1 ||
+		preview.ScannedOutbound != 1 || preview.EligibleOutbound != 1 ||
+		preview.DeletedOutbound != 0 || preview.DeletedOutboundBytes != 0 ||
+		preview.ScannedSuppressions != 1 ||
 		preview.DeletedSuppressions != 0 {
 		t.Fatalf("outbound retention preview = %+v", preview)
 	}
@@ -253,6 +256,159 @@ func TestAgentEmailOutboundRetentionLifecyclePostgres(t *testing.T) {
 	assertAgentEmailOutboundRetentionCount(
 		ctx, t, st, recentTerminal.ID, 0,
 	)
+}
+
+func TestAgentEmailRetentionRotatesKindsUnderSustainedInboundBacklogPostgres(t *testing.T) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	st, _ := newMigrationTestStore(t, baseDSN)
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	fixture := newAgentEmailRetentionAccountFixture(ctx, t, st, "kind-fairness")
+	if _, err := st.SetAccountPlan(
+		ctx, fixture.accountID, 0, "", "test", map[string]int64{},
+		map[string]int64{
+			plans.AgentEmailEntitlementVersionPolicy: plans.AgentEmailEntitlementVersion,
+			plans.AgentEmailRetentionDaysPolicy:      30,
+		},
+		[]string{plans.AgentEmailReceiveFeature, plans.AgentEmailSendFeature},
+	); err != nil {
+		t.Fatal(err)
+	}
+	localPart, _, ok := strings.Cut(fixture.address.Address, "@")
+	if !ok {
+		t.Fatalf("fixture address = %q", fixture.address.Address)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO agent_email_address_domains
+		  (account_id,realm_id,provisioned_agent_id,address_id,domain,local_part)
+		VALUES ($1,$2,$3,$4,'witmail.net',$5)`, fixture.accountID,
+		fixture.realmID, fixture.owner.ID, fixture.address.ID, localPart); err != nil {
+		t.Fatal(err)
+	}
+
+	outbound, err := st.QueueAgentEmail(ctx, fixture.owner, SendAgentEmailInput{
+		To: "fairness@example.com", Subject: "retention fairness",
+		Text: "bounded body", IdempotencyKey: "retention-kind-fairness",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatch, err := st.ClaimAgentEmailOutbound(ctx, AgentEmailOutboundClaimInput{})
+	if err != nil || dispatch.Message.ID != outbound.ID {
+		t.Fatalf("claim fairness outbound = %#v / %v", dispatch, err)
+	}
+	dispatch, err = st.StartAgentEmailOutboundProviderCall(
+		ctx, dispatch.Message.ID, dispatch.Claim,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.FinalizeAgentEmailOutbound(
+		ctx, dispatch.Message.ID, FinalizeAgentEmailOutboundInput{
+			Claim: dispatch.Claim, State: AgentEmailOutboundAccepted,
+			Provider: "cloudflare", ProviderMessageID: "fairness-provider-id",
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().UTC().Add(-31 * 24 * time.Hour)
+	if _, err := st.ApplyAgentEmailOutboundProviderEvent(
+		ctx,
+		AgentEmailOutboundProviderEventInput{
+			Provider: "cloudflare", EventID: "fairness-delivered",
+			ProviderMessageID: "fairness-provider-id",
+			EventClass:        AgentEmailOutboundProviderEventDelivered,
+			OccurredAt:        old.Add(time.Minute),
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE agent_email_outbound_messages
+		   SET created_at=$2,queued_at=$2,provider_started_at=$2,
+		       accepted_at=$2,delivered_at=$2,updated_at=$2
+		 WHERE id=$1`, outbound.ID, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE agent_email_outbound_provider_events
+		   SET occurred_at=$2,received_at=$2
+		 WHERE outbound_id=$1`, outbound.ID, old.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO agent_email_outbound_recipient_suppressions
+		  (account_id,recipient_sha256,reason,source_send_id,provider,
+		   created_at,updated_at)
+		VALUES ($1,$2,'hard_bounce',$3,'cloudflare',$4,$4)`,
+		fixture.accountID, strings.Repeat("e", 64), outbound.ID,
+		time.Now().UTC().Add(-396*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	const inboundBacklog = 6
+	inboundIDs := make([]string, 0, inboundBacklog)
+	for index := range inboundBacklog {
+		message := ingestAgentEmailRetentionFixture(
+			ctx, t, st, fixture, fmt.Sprintf("fairness inbound %d", index),
+		)
+		inboundIDs = append(inboundIDs, message.ID)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE agent_email_messages
+		   SET received_at=$2,created_at=$2
+		 WHERE id=ANY($1::text[])`, inboundIDs, old); err != nil {
+		t.Fatal(err)
+	}
+	configureAgentEmailRetentionTestLanes(
+		ctx, t, st, AgentEmailRetentionModeEnforce, fixture.laneID,
+	)
+
+	var aggregate AgentEmailRetentionBatchResult
+	for range 5 {
+		result, err := st.ProcessAgentEmailRetentionBatch(ctx, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.ScanCapped || !result.LaneAdvanced || agentEmailRetentionWork(result) != 1 {
+			t.Fatalf("bounded fairness pass = %+v", result)
+		}
+		addAgentEmailRetentionResult(&aggregate, result)
+	}
+	if aggregate.Deleted != 2 || aggregate.DeletedProviderEvents != 1 ||
+		aggregate.DeletedOutbound != 1 || aggregate.DeletedSuppressions != 1 {
+		t.Fatalf("fair retention aggregate = %+v", aggregate)
+	}
+	var inboundRemaining, outboundRemaining, eventRemaining, suppressionRemaining int64
+	if err := st.pool.QueryRow(ctx, `
+		SELECT
+		  (SELECT count(*) FROM agent_email_messages WHERE account_id=$1),
+		  (SELECT count(*) FROM agent_email_outbound_messages WHERE account_id=$1),
+		  (SELECT count(*) FROM agent_email_outbound_provider_events event
+		    JOIN agent_email_outbound_messages outbound ON outbound.id=event.outbound_id
+		   WHERE outbound.account_id=$1),
+		  (SELECT count(*) FROM agent_email_outbound_recipient_suppressions
+		    WHERE account_id=$1)`, fixture.accountID).Scan(
+		&inboundRemaining,
+		&outboundRemaining,
+		&eventRemaining,
+		&suppressionRemaining,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if inboundRemaining != inboundBacklog-2 || outboundRemaining != 0 ||
+		eventRemaining != 0 || suppressionRemaining != 0 {
+		t.Fatalf(
+			"fair retention remainder = inbound:%d outbound:%d events:%d suppressions:%d",
+			inboundRemaining, outboundRemaining, eventRemaining, suppressionRemaining,
+		)
+	}
 }
 
 func TestAgentEmailOutboundRetainedReplyAndClaimArchiveRoundTripPostgres(t *testing.T) {

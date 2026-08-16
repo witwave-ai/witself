@@ -92,9 +92,10 @@ plane.
   inter-agent-messaging.md as the first post-v0 epic.
 - [agent-email.md](agent-email.md): implemented managed-domain agent mail —
   receiving for verification/OTP mail, service mail, and human-to-agent
-  correspondence plus the independently gated, operationally dark outbound
-  beta; covers the inverted (unverified-sender) trust boundary, fenced
-  foreground processing, retention, and provider-isolated sending.
+  correspondence plus independently gated provider-isolated sending, currently
+  live for the exact Founder production cohort; covers the inverted
+  (unverified-sender) trust boundary, fenced foreground processing, retention,
+  durable lifecycle queues, and default-off expansion controls.
 - [agent-avatars.md](agent-avatars.md): portable versioned agent portraits,
   deterministic placeholders, realm style packs, client-side AI generation,
   autonomy policy, safe SVG validation, evolution, and CLI/API/MCP routing for

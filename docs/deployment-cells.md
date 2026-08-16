@@ -217,12 +217,25 @@ not proof of end-to-end operation.
 Outbound provider dispatch lives separately in
 `infra/cloudflare/agent-email-send/`. Its Email Sending binding, Durable Object
 receipts/routes, lifecycle Queue, exact signer/account cohort, and cell event
-targets are not part of the inbound edge deployment. It is dark by default and
-must follow the staged procedure in the
+targets are not part of the inbound edge deployment. Committed templates and a
+fresh cell keep it dark by default and must follow the staged procedure in the
 [sending-adapter README](../infra/cloudflare/agent-email-send/README.md) only
 after the schema-compatible cell release has been published. An outbound plan
 entitlement, cell worker, adapter dispatch gate, event-delivery gate, or Queue
 subscription never implicitly enables any other layer.
+
+Current production state is narrower than the catalog and intentionally differs
+from those defaults: the Civo Founder cohort has two outbound worker replicas,
+adapter dispatch, lifecycle delivery, and the `email.sending` subscription
+enabled; receipt replay remains off. The same two replicas keep agent-email
+retention capable but currently off on cell application `0.0.249`. The
+schema-90 rollout target enables bounded enforcement at batch 100, a one-minute
+interval, and a two-minute timeout only after the release artifact and both
+pre-migration backups are verified; Founder's effective retention remains
+indefinite.
+Every other cell/account remains subject to its own explicit activation. Treat
+the README procedure as the repeatable contract for a new cell or cohort, not
+as evidence that the current Founder deployment is still dark.
 
 ## Production account-cohort agent-email receive
 
@@ -485,18 +498,17 @@ while leaving schema 87 and all permanent route reservations intact; never
 delete a route merely to make the down migration pass. Delivery activation is
 a later, separately reviewed edge rollout.
 
-The custom-domain routing foundation advances compatible cells to schema 88 but
-is not part of the active-cell production rollout. Until it is separately approved,
-exercise it only against fake Cloudflare bindings, a synthetic SMTP transaction,
-and a disposable PostgreSQL database. Do not flip either control-plane routing
-gate or `AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED`, add a customer domain to
-the managed receive configuration, change MX/Email Routing, or send a live
-canary.
+The custom-domain routing foundation completed its dark schema-88 cell wave;
+the active Civo cell has since advanced to schema 89. That does not activate
+customer-domain provider delivery. Keep both control-plane routing gates and
+`AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED` off, do not add a customer domain
+to managed receive configuration, and do not change MX/Email Routing or send a
+live custom-domain canary until separately approved.
 
-For the eventual dark schema-88 cell wave, create and verify the normal
-pre-migration backup, then freeze custom-domain projection, realm-alias
-projection, realm close, account export/import, and cell movement for the
-mixed-version window. Migration `0088` adds the account-scoped,
+The completed schema-88 wave created and verified the normal pre-migration
+backup, then froze custom-domain projection, realm-alias projection, realm
+close, account export/import, and cell movement during mixed-version
+convergence. Migration `0088` adds the account-scoped,
 evacuation-fenced `agent_email_custom_domain_routes` table and nullable
 `agent_email_messages.recipient_custom_domain_request_id`. Deploy the canary
 cell and then every intended destination before the control plane is allowed to
@@ -565,6 +577,14 @@ tombstone, or a custom-domain receipt exists, migration `0088` refuses downgrade
 before mutation. Roll application behavior or configuration back while leaving
 schema 88 intact and roll forward to repair; never delete authority or mail to
 force schema 87.
+
+Schema-89 archives add the durable outbound email streams: realm/agent send
+controls, outbound messages, provider-event receipts, and recipient
+suppressions. Schema 90 preserves those rows byte-for-byte and adds no portable
+stream; inbound realm/account and outbound minute/daily/recipient limiter debt
+is cell-local and excluded from export. Freeze account moves while a possible
+destination remains below schema 90. After convergence, a restored account
+starts with fresh defensive debt rather than importing source-cell buckets.
 
 For avatar creative-payload compaction, this release pin is Phase A: leave
 `apps.witselfServer.avatarPayloadCompactionEnabled: false`, freeze avatar

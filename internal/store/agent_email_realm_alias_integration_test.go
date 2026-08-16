@@ -337,11 +337,16 @@ func TestAgentEmailRealmAliasProjectionAndDeliveryPostgres(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	// Schema 0089 carries no outbound-email authority in this fixture, so it can
-	// first step back to 0088. Schema 0088 carries no custom-domain authority in
+	// Schema 0090 carries no bounded email-rate debt in this fixture, so it can
+	// first step back to 0089. Schema 0089 carries no outbound-email authority in
+	// this fixture, so it can then step back to 0088. Schema 0088 carries no custom-domain authority in
 	// this fixture, so it can then step back to 0087. Schema 0087 can safely discard its sole
 	// original-domain route, and schema 0086 can step back to 0085. The following 0085 -> 0084
 	// downgrade must still refuse to discard realm-alias delivery provenance.
+	if err := migrationTestDown(t, schemaDSN, false); err != nil {
+		t.Fatalf("downgrade schema 0090 to 0089: %v", err)
+	}
+	assertMigrationTestVersion(t, schemaDSN, 89)
 	if err := migrationTestDown(t, schemaDSN, false); err != nil {
 		t.Fatalf("downgrade schema 0089 to 0088: %v", err)
 	}

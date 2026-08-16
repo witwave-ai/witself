@@ -155,6 +155,22 @@ const (
 	// maximum across every realm in one account. It is not a commercial plan
 	// limit: unlimited realms must not bypass shared-domain reputation safety.
 	MaxAgentEmailSentPerAccountMinute int64 = 1_000
+	// MaxAgentEmailSentPerAccountDay is the non-optional long-horizon platform
+	// budget across every realm. It bounds provider cost and reputation exposure
+	// that a rolling minute breaker alone cannot constrain.
+	MaxAgentEmailSentPerAccountDay int64 = 10_000
+	// MaxAgentEmailSentPerAccountDayBurst is the account's instantaneous
+	// tolerance inside the long-horizon GCRA. The 10,000/day rate refills this
+	// bounded 1,000-message bucket instead of permitting a second full daily
+	// budget inside one rolling day.
+	MaxAgentEmailSentPerAccountDayBurst int64 = 1_000
+	// MaxAgentEmailSentPerRecipientDay bounds repeated delivery attempts from one
+	// account to one normalized recipient. The recipient is stored only as a
+	// SHA-256 bucket id, never as an address in operational limiter state.
+	MaxAgentEmailSentPerRecipientDay int64 = 100
+	// MaxAgentEmailSentPerRecipientDayBurst bounds an immediate burst to one
+	// normalized external recipient while the 100/day budget refills.
+	MaxAgentEmailSentPerRecipientDayBurst int64 = 10
 	// MaxMessageSentPerAgentMinute is the always-enforced platform maximum for
 	// one sending agent under a rolling one-minute rate budget.
 	MaxMessageSentPerAgentMinute int64 = 2_000
@@ -174,6 +190,14 @@ const (
 	// MaxAgentEmailReceivedPerRealmMinute is the always-enforced aggregate
 	// platform breaker for one realm.
 	MaxAgentEmailReceivedPerRealmMinute int64 = 5_000
+	// MaxAgentEmailReceivedPerAccountMinute is the always-enforced aggregate
+	// platform breaker across every realm in one account. It prevents unlimited
+	// realm creation from multiplying the realm safety ceiling.
+	MaxAgentEmailReceivedPerAccountMinute int64 = 5_000
+	// MaxAgentEmailReceivedPerAccountMinuteBurst is the immediate account-wide
+	// message tolerance. The sustained 5,000/minute rate refills this bucket
+	// while leaving headroom under the retention worker's fair inbound share.
+	MaxAgentEmailReceivedPerAccountMinuteBurst int64 = 100
 	// MaxAgentEmailReceivedBytesPerSenderMinute bounds raw-MIME ingress from one
 	// unverified envelope-sender/recipient pair to 64 MiB per rolling minute.
 	MaxAgentEmailReceivedBytesPerSenderMinute int64 = 64 * 1024 * 1024
@@ -183,6 +207,15 @@ const (
 	// MaxAgentEmailReceivedBytesPerRealmMinute bounds aggregate raw-MIME ingress
 	// for one realm to 4 GiB per rolling minute.
 	MaxAgentEmailReceivedBytesPerRealmMinute int64 = 4 * 1024 * 1024 * 1024
+	// MaxAgentEmailReceivedBytesPerAccountMinute bounds aggregate raw-MIME ingress
+	// across every realm in one account. The value is deliberately below the
+	// realm ceiling so bounded retention workers can drain expired payloads at
+	// least as quickly as the platform can admit them.
+	MaxAgentEmailReceivedBytesPerAccountMinute int64 = 1024 * 1024 * 1024
+	// MaxAgentEmailReceivedBytesPerAccountMinuteBurst allows at least two
+	// maximum-size messages immediately while keeping the rolling-minute
+	// account byte envelope below the retention worker's bounded capacity.
+	MaxAgentEmailReceivedBytesPerAccountMinuteBurst int64 = 64 * 1024 * 1024
 	// MaxPlanLimit is the largest exact integer shared by Go and JavaScript's
 	// JSON number representation. Unlimited is represented by a missing key,
 	// never by an oversized sentinel.

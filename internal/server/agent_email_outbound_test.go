@@ -356,6 +356,33 @@ func TestAgentEmailOutboundAccountBreakerHasStableWireShape(t *testing.T) {
 	}
 }
 
+func TestAgentEmailOutboundDailyBreakersHaveStableWireShape(t *testing.T) {
+	for _, test := range []struct {
+		scope string
+		key   string
+	}{
+		{scope: "account", key: "agent_email_sent_per_account_day"},
+		{scope: "recipient", key: "agent_email_sent_per_recipient_day"},
+	} {
+		response := httptest.NewRecorder()
+		writeAgentEmailOutboundRateLimitError(response, &AgentEmailOutboundRateLimitError{
+			Scope: test.scope, Limit: 100, Used: 100, WindowSeconds: 86_400,
+			RetryAfter: time.Minute, Source: "platform", Retryable: true,
+		})
+		body := response.Body.String()
+		if response.Code != http.StatusTooManyRequests ||
+			!containsAll(body,
+				`"limit_dimension":"agent_email_sent"`,
+				`"limit_key":"`+test.key+`"`,
+				`"scope":"`+test.scope+`"`,
+				`"source":"platform"`,
+				`"window_seconds":86400`,
+			) {
+			t.Fatalf("daily %s breaker = %d %s", test.scope, response.Code, body)
+		}
+	}
+}
+
 func TestAgentEmailOutboundHTTPEnvelopeAllowsFullTextLimit(t *testing.T) {
 	principal := DomainPrincipal{Kind: PrincipalKindAgent, ID: "agent_aaaaaaaaaaaaaaaa", AccountID: "acc_1", RealmID: "realm_1", AccountStatus: "active", AccessProfile: AccessProfileFull}
 	queueCalls := 0

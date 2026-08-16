@@ -210,6 +210,46 @@ func TestAgentEmailOutboundMCPToolsPreserveMachineReadableErrors(t *testing.T) {
 			},
 		},
 		{
+			name: "daily recipient breaker",
+			tool: "witself.email.send",
+			arguments: map[string]any{
+				"to": "person@example.com", "subject": "Hello", "text": "body",
+				"idempotency_key": "send-daily-rate",
+			},
+			configure: func(backend *fakeAgentEmailOutboundMCPBackend) {
+				backend.sendErr = &client.MessageRateLimitError{
+					LimitDimension: "agent_email_sent",
+					LimitKey:       "agent_email_sent_per_recipient_day",
+					Scope:          "recipient",
+					Limit:          100,
+					Used:           100,
+					Attempted:      1,
+					WindowSeconds:  86_400,
+					RetryAfter:     time.Minute,
+					ResetAt:        resetAt,
+					Source:         "platform",
+					Retryable:      true,
+					Message:        "outbound agent-email rate limit reached",
+				}
+			},
+			want: mcpAgentEmailOutboundError{
+				Code: "rate_limited", Message: "outbound agent-email rate limit reached",
+				Retryable: true, RetryAfter: 60,
+				Details: &mcpAgentEmailOutboundErrorDetails{
+					LimitDimension: "agent_email_sent",
+					LimitKey:       "agent_email_sent_per_recipient_day",
+					Scope:          "recipient",
+					Limit:          100,
+					Used:           100,
+					Attempted:      1,
+					WindowSeconds:  86_400,
+					RetryAfter:     60,
+					ResetAt:        resetAt.Format(time.RFC3339Nano),
+					Source:         "platform",
+				},
+			},
+		},
+		{
 			name:      "specific conflict",
 			tool:      "witself.email.sent.show",
 			arguments: map[string]any{"message_id": "esnd_aaaaaaaaaaaaaaaa"},

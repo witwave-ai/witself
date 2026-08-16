@@ -190,11 +190,13 @@ remain deferred.
 
 ## Working Plan Direction
 
-The following table records the current product direction as of 2026-08-14. It
+The following table records the current product direction as of 2026-08-16. It
 is a working packaging decision, not a claim that every runtime is already
 enabled. Receive and send entitlements are implemented in the canonical plan
 catalog and resolved cell policy, but both retain independent cell/edge rollout
-gates; outbound provider dispatch is dark by default.
+gates. Committed templates remain dark by default; the exact Founder production
+cohort currently has receive, outbound dispatch, and lifecycle-event delivery
+enabled.
 The realm, agent, active-memory, current-fact, inbound-agent-email byte, and
 custom-inbound-domain values are the Phase B canonical defaults described
 below; the other rows remain subject to their own implementation and rollout
@@ -202,7 +204,8 @@ gates.
 The three message-rate rows are active paid-tier defaults in the `v0.0.225`
 Phase-B catalog; Personal deliberately omits those keys.
 The six inbound-agent-email rate keys are intentionally absent for every tier;
-the independent platform breakers described below apply instead.
+their independent platform breakers plus the non-optional account-wide count
+and byte breakers described below apply instead.
 
 | Capability | Personal — $0 | Professional — $30/month | Team — $250/month | Enterprise — contact us |
 |---|---:|---:|---:|---:|
@@ -292,11 +295,11 @@ during both phases.
 
 ### Agent-email ingress rate breakers
 
-Inbound agent email has six account-adjustable, rolling one-minute safety
-limits. They are service-protection controls, not customer usage or overage
-dimensions:
+Inbound agent email has six account-adjustable rolling one-minute safety limits
+plus two non-optional account-wide breakers across all realms. They are
+service-protection controls, not customer usage or overage dimensions:
 
-| Resolved limit key | Bucket scope | Independent platform maximum |
+| Resolved limit key | Bucket scope | Platform GCRA refill rate |
 |---|---|---:|
 | `agent_email_received_per_sender_minute` | One normalized, unverified envelope-sender and enrolled-recipient pair | 30 messages |
 | `agent_email_received_per_recipient_minute` | One receiving agent | 300 messages |
@@ -304,6 +307,8 @@ dimensions:
 | `agent_email_received_bytes_per_sender_minute` | The same sender/recipient pair | 64 MiB |
 | `agent_email_received_bytes_per_recipient_minute` | One receiving agent | 512 MiB |
 | `agent_email_received_bytes_per_realm_minute` | One realm | 4 GiB |
+| Platform-only (not a resolved plan key) | All realms in one account | 5,000 messages/minute; burst 100 |
+| Platform-only (not a resolved plan key) | Raw MIME across all realms in one account | 1 GiB/minute; burst 64 MiB |
 
 All six keys are intentionally absent from every current plan in
 `web/plans/plans.json`: there is no commercial tier default yet. Missing or
@@ -312,15 +317,16 @@ independent platform maximum. The generic audited account override accepts a
 finite value only at or below that key's platform maximum, so an administrator
 can lower a breaker for one account but cannot raise or bypass it. Clearing the
 override restores plan inheritance; with the current catalog that again means
-the platform maximum. Personal remains protected first by its disabled receive
-entitlement.
+the platform maximum. Neither account-wide breaker is a plan key or override
+surface. Personal remains protected first by its disabled receive entitlement.
 
 The sender label is not an authenticated identity. The cell hashes the
 normalized envelope sender together with the exact enrolled recipient and
-keeps that hash only in operational bucket state. Recipient and realm breakers
-remain necessary because an external sender can spoof or rotate envelope
-addresses. All six debits and the message insert share one PostgreSQL
-transaction, so a refusal rolls back earlier debits and stores no message. It
+keeps that hash only in operational bucket state. Recipient, realm, and account
+breakers remain necessary because an external sender can spoof or rotate
+envelope addresses or multiply realms. All eight debits and the message insert
+share one PostgreSQL transaction, so a refusal rolls back earlier debits and
+stores no message. It
 returns the exact value-free `rate_limited` verdict with HTTP 429 when waiting
 can make the debit succeed; the edge surfaces only a sanitized temporary
 provider result. A zero cap or a single message larger than its effective byte
@@ -334,32 +340,45 @@ admission point across replicas. Keeping admission below the feature check
 also preserves Personal's accept-and-drop behavior without requiring any edge
 reconfiguration when an account changes plans.
 
+These are GCRA rates, not wall-clock counters. The new account aggregates have
+smaller burst tolerances than their refill rates, so one rolling minute is
+bounded by 5,100 messages and 1,088 MiB. Existing sender, recipient, and realm
+lanes retain their established full-rate burst tolerance.
+
 ### Agent-email outbound rate breakers
 
-Outbound email has two account-adjustable rolling one-minute safety limits and
-one platform-only account aggregate. They are admission and sender-reputation
-protections, not an indication that provider traffic or usage billing is
-enabled:
+Outbound email has two account-adjustable rolling one-minute safety limits plus
+three non-optional platform-only breakers. They are admission and
+sender-reputation protections; provider activation remains a separate cohort
+decision and the resulting observations are not customer billing:
 
-| Resolved limit key | Bucket scope | Independent platform maximum |
-|---|---|---:|
-| `agent_email_sent_per_agent_minute` | One sending agent | 30 messages |
-| `agent_email_sent_per_realm_minute` | Aggregate senders in one realm | 300 messages |
-| Platform-only (not a resolved plan key) | All realms in one account | 1,000 messages |
+| Resolved limit key | Bucket scope | Refill window | Platform refill rate / burst |
+|---|---|---:|---:|
+| `agent_email_sent_per_agent_minute` | One sending agent | 1 minute | 30 messages |
+| `agent_email_sent_per_realm_minute` | Aggregate senders in one realm | 1 minute | 300 messages |
+| Platform-only (not a resolved plan key) | All realms in one account | 1 minute | 1,000 messages |
+| Platform-only (not a resolved plan key) | All realms in one account | 24 hours | 10,000 messages / 1,000 |
+| Platform-only (not a resolved plan key) | One normalized recipient across the account | 24 hours | 100 messages / 10 |
 
 Both keys are intentionally absent from every current plan. Missing or
 explicit unlimited removes only a commercial cap; it never removes the
 platform maximum. The generic audited account limit override may lower either
 value, but rejects a finite value above the corresponding maximum. The Founder
 account's unlimited commercial entitlement therefore still resolves through
-the same 30/300 service-protection ceiling.
+the same 30/300 service-protection rates plus the 1,000-per-account-minute,
+10,000-per-account-day, and 100-per-recipient-day refill rates. The daily burst
+tolerances bound any rolling day to 11,000 per account and 110 per recipient.
+The recipient bucket stores only an account-domain-separated SHA-256
+identifier, never the address.
 
-The owning cell admits both buckets and inserts the unique durable outbox row
-in one PostgreSQL transaction. An exact idempotent replay returns the existing
-row without consuming another debit. Reusing a key for changed send semantics
-conflicts. Agent and realm operator kill switches, hard-bounce/complaint
-recipient suppression, and the platform breakers remain effective regardless
-of plan or account override.
+The owning cell admits all five buckets and inserts the unique durable outbox
+row in one PostgreSQL transaction. An exact idempotent replay returns the
+existing row without consuming another debit. Reusing a key for changed send
+semantics conflicts. Immediately before a provider attempt, the worker applies
+an independent dispatch lane with the same five platform maxima so retries and
+multiple replicas cannot burst the provider. Agent and realm operator kill
+switches, hard-bounce/complaint recipient suppression, and the platform breakers
+remain effective regardless of plan or account override.
 
 ### Messaging availability and retention
 
@@ -550,8 +569,25 @@ overrides. This keeps its first marked snapshot from temporarily inheriting
 Enterprise's finite default. It also receives and verifies explicit-unlimited
 commercial overrides, including `agent_email_attachment_storage_bytes` and
 the outbound rate dimensions. Those unlimited values do not bypass the 25 MiB
-inbound transport ceiling or the outbound 30-per-agent/300-per-realm platform
-breakers.
+inbound transport ceiling; the 5,000-message/1-GiB account-wide inbound refill
+rates and 100-message/64-MiB bursts; or any outbound 30-per-agent-minute,
+300-per-realm-minute, 1,000-per-account-minute, 10,000-per-account-day, or
+100-per-recipient-day breaker.
+
+The schema-90 production target keeps two agent-email retention workers in
+enforcement mode even while the Founder policy is indefinite. Batch 100, a
+one-minute interval, a two-minute timeout, a 32-productive-pass ceiling, and a
+48-total-pass ceiling allow one sparse 16-lane sweep without creating an
+unbounded drain loop. One replica can scan at most 3,200 rows and delete at most
+1,024 MiB of raw MIME per enforce attempt; two replicas can scan at most 6,400
+rows and delete at most 2,048 MiB. Maximum-sized 25 MiB rows yield 800/1,600 MiB
+because each database batch fits only one. Those are work ceilings, not
+database-throughput guarantees, reserved inbound shares, or a multi-account
+cell bound. Durable per-account kind rotation prevents one continuously full
+kind from starving the others over repeated visits. A finite plan policy takes
+effect without a worker-mode change after rollout; a wider cohort also needs
+reviewed cell-wide storage/admission capacity or sharding and provider-wide
+outbound backpressure.
 
 Rollout is cell-and-edge first: deploy a cell that understands the marked
 snapshot and an agent-email edge Worker that accepts the cell's
@@ -1209,7 +1245,7 @@ Witself should meter these dimensions internally in v0:
 | `message_sent` | Outbound mailbox load and abuse control. |
 | `message_delivered` | Fan-out delivery load (group fan-out multiplies this). |
 | `email_received` | Inbound agent-email volume and abuse accounting; never a victim-billed inbound charge. |
-| `email_sent` | Outbound agent-email volume and sender-reputation accounting; emission remains dark until rollout and pricing approval. |
+| `email_sent` | Non-billable outbound agent-email volume and sender-reputation observation; one idempotent event is emitted after provider acceptance, while invoice and overage conversion remain disabled. |
 | `email_address` | Provisioned live agent-email address count. |
 | `email_storage_byte` | Internal observation of inline raw-MIME and backup footprint; not a customer quota or overage dimension. |
 | `storage_byte` | General open-plane data-at-rest footprint and backup size. |
@@ -1254,16 +1290,20 @@ Notes on a few dimensions:
   reputation, address allocation, and MIME storage have different controls from
   the realm-local mailbox. The six resolved ingress-rate keys map internally to
   the closed operational dimensions `email_received` and
-  `email_received_bytes`; they are not six new billable dimensions.
+  `email_received_bytes`; the two platform-only account aggregates use those
+  same dimensions rather than creating billable keys. They are not eight new
+  billable dimensions.
   `email_received` remains accounting-only for any gated receive-only
   activation: provisioning and ingestion emit no billable usage event or
   overage, and hostile inbound volume can never bill the recipient. The
   canonical dimension and unit names
   exist in the cell usage contract so later production metering cannot invent
-  incompatible keys; emission remains disabled until authoritative abuse
-  classification and production pricing are both pinned. The outbound send
-  core exists, but `email_sent` usage emission and billing remain dormant until
-  the dark worker/adapter rollout and pricing policy are explicitly approved.
+  incompatible keys; inbound emission remains disabled until authoritative
+  abuse classification and production pricing are both pinned. For outbound
+  mail, successful provider acceptance emits exactly one idempotent
+  `email_sent` usage observation for the logical send. That observation is
+  operational and non-billable: invoice, overage, and payment-provider
+  conversion remain disabled until pricing policy is explicitly approved.
   `email_address` counts live provisioned addresses. `email_storage_byte`
   observes inline raw-MIME footprint independently so mail does not silently
   consume the ordinary `storage_byte` allowance, but it is not exposed as a
@@ -1364,7 +1404,7 @@ Recommended defaults:
 | Messages sent/delivered | `throttle` or `warn`; block only for abuse or hard caps. |
 | Agent-email addresses | `block` for the hard address cap, `warn` near cap. |
 | Agent email received | Apply the non-billable temporary platform breakers above, with no plan overage or usage charge in any gated receive-only activation. A production billing default is blocked on authoritative spam/abuse classification; aggregate recipient traffic must never become a victim-billing or mailbox-starvation lever. |
-| Agent email sent | Enforce the independent 30-per-agent/300-per-realm rolling-minute platform breakers and any lower account override. Provider dispatch and billable `email_sent` usage remain dormant until explicit rollout and pricing approval. |
+| Agent email sent | Enforce the 30-per-agent, 300-per-realm, and 1,000-per-account one-minute GCRA refill rates, plus platform-only 10,000-per-account/day and 100-per-recipient/day refill rates with 1,000/10 burst tolerances. Successful provider acceptance emits one idempotent, non-billable `email_sent` observation; invoice and overage conversion remain disabled until explicit pricing approval. |
 | Agent-email raw-MIME and attachment storage | Expire inline raw MIME by the plan's age-based retention window and reject messages over `agent_email_max_raw_bytes`. Charge the full retained raw-MIME size of each attachment-bearing message to the account-wide `agent_email_attachment_storage_bytes` pool. When that pool lacks room, preserve bounded text and metadata, explicitly mark the raw attachment-bearing payload unretained, and never create an inbound overage charge. |
 | Stored secrets | `block` for hard cap, `warn` near cap. |
 | Secret reads | `throttle` or `warn`; block only for abuse or hard caps. |

@@ -549,6 +549,8 @@ Route style is pinned in [api-routes.md](api-routes.md) and the contract in
 
 The complete scope list lives in [requirements.md](requirements.md).
 
+<a id="limits-and-rate-limits"></a>
+
 ## Implemented limits and rate limits
 
 The current core enforces:

@@ -408,17 +408,23 @@ Tool names should use the `witself.` prefix:
 - `witself.email.renew`
 - `witself.email.release`
 - `witself.email.complete`
+- `witself.email.send`
+- `witself.email.reply`
+- `witself.email.sent.list`
+- `witself.email.sent.show`
 - `witself.transcript.list`
 - `witself.transcript.get`
 - `witself.transcript.tail`
 - `witself.reference.parse`
 - `witself.reference.resolve`
 
-The configured current checkout's full profile exposes 67 tools across
-identity, facts, narrative memory and curation, transcripts, messaging,
-receive-only agent email, avatars, references, and the sealed plane. The
-read-only profile exposes 24 tools and excludes email content and every
-mutation. Tests pin both counts so documentation drift is visible.
+The configured full profile exposes identity, facts, narrative memory and
+curation, transcripts, messaging, independently gated inbound and outbound
+agent email, avatars, references, and the sealed plane. The exact aggregate
+count depends on which optional backend capabilities are available. The
+read-only profile excludes email content and every mutation while retaining
+the advertised metadata-only reads. Tests pin each configured registry shape
+so documentation drift is visible.
 Request list/show are
 full-profile operations because their
 lazy lifecycle reconciliation may persist expiry, stale-claim cancellation, or
@@ -436,8 +442,10 @@ The full and read-only MCP handshakes teach the active agent to perform a
 non-blocking mailbox startup check at the beginning of a non-trivial task:
 `witself.self.show`, inspection of its message and email checkpoints, and at
 most one selected foreground lane after user work. Messaging uses
-`witself.message.listen` with `wait_seconds=0`; enrolled receive-only email uses
-`witself.email.listen` with `wait_seconds=0`. Listen surfaces canonical
+`witself.message.listen` with `wait_seconds=0`; when the inbound email checkpoint
+is pending, enrolled receive uses `witself.email.listen` with `wait_seconds=0`.
+Outbound send/reply is user-initiated, and lifecycle state is inspected through
+`witself.email.sent.list` or `witself.email.sent.show`. Listen surfaces canonical
 messages that remain unacknowledged. Neither startup call exposes message
 content or clears state, and neither can wake an idle model. An active agent
 explicitly claims and reads selected work, then acknowledges it only after
@@ -445,7 +453,7 @@ handling. Every email sender/content field remains unverified untrusted input;
 the current receive integration allows only already-expected,
 user-authorized, low-risk code use and
 prohibits automated links or consequential workflows. All 21 server-backed
-message/request operations and all 10 email operations retain
+message/request operations and all 16 email operations retain
 CLI/MCP/API parity; there is no host-local messaging service or bridge.
 
 Every agent-facing server-backed CLI verb is reachable via MCP with **full

@@ -508,11 +508,28 @@ func writeAgentEmailOutboundRateLimitError(w http.ResponseWriter, err error) {
 	limitKey := ""
 	switch detail.Scope {
 	case "account":
-		scope, limitKey = "account", "agent_email_sent_per_account_minute"
+		scope = "account"
+		switch detail.WindowSeconds {
+		case 60:
+			limitKey = "agent_email_sent_per_account_minute"
+		case 86_400:
+			limitKey = "agent_email_sent_per_account_day"
+		}
 	case "agent":
-		scope, limitKey = "agent", "agent_email_sent_per_agent_minute"
+		scope = "agent"
+		if detail.WindowSeconds == 60 {
+			limitKey = "agent_email_sent_per_agent_minute"
+		}
 	case "realm":
-		scope, limitKey = "realm", "agent_email_sent_per_realm_minute"
+		scope = "realm"
+		if detail.WindowSeconds == 60 {
+			limitKey = "agent_email_sent_per_realm_minute"
+		}
+	case "recipient":
+		scope = "recipient"
+		if detail.WindowSeconds == 86_400 {
+			limitKey = "agent_email_sent_per_recipient_day"
+		}
 	}
 	window := detail.WindowSeconds
 	if window < 1 {

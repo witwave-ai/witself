@@ -106,8 +106,9 @@ attempt; a losing replica skips or fails the stale transition instead of
 sending concurrently. The worker marks the durable provider boundary before
 calling the adapter, but only after rechecking the active account, current send
 entitlement, live agent, both operator controls, recipient suppression, and
-the independent provider-attempt rate lane. It signs one immutable
-dispatch with the cell's Ed25519 key. Exact retries preserve the same `esnd_`
+the independent provider-attempt rate lane, including platform-only account and
+normalized-recipient rolling-day budgets. It signs one immutable dispatch with
+the cell's Ed25519 key. Exact retries preserve the same `esnd_`
 id so the adapter's Durable Object
 receipt can return the prior result. Transport uncertainty schedules only that
 exact receipt replay; the worker never creates a fresh id and guesses that
@@ -298,9 +299,11 @@ Inbound- and outbound-email rate-bucket cleanup has an independent
 `witself_worker_agent_email_rate_bucket_cleanup_*` batch-result, deleted-row,
 and last-success family with the same closed result labels and no
 tenant-derived labels. One scheduled sweep drains consecutive 10,000-row
-batches from both rate tables until each is caught up or the shared sweep
-timeout expires. The metrics intentionally aggregate the two value-free row
-counts; full-batch throughput and timeout failures remain directly visible.
+batches across the inbound realm/account tables and the outbound
+minute/daily/recipient table until all three are caught up or the shared sweep
+timeout expires. Metrics intentionally aggregate the inbound and outbound
+delete-operation counts; full-batch throughput and timeout failures remain
+directly visible.
 
 Account, realm, agent, conversation, task, transcript, memory, and secret
 identifiers must never be metric labels. Error text and stored content must
@@ -343,10 +346,37 @@ Agent-email retention uses the same sequence with its own schema,
 lanes, and metrics. Changing `worker.agentEmailRetention` alters only the
 worker ConfigMap checksum; API pods are not restarted.
 
-Outbound agent-email activation is a separate dark rollout:
+The schema-90 production target keeps enforcement active even when the only
+current account has an indefinite policy: two replicas, batch size 100,
+one-minute interval, and one shared two-minute timeout per scheduled run. An
+enforce attempt executes at most 32 productive passes and 48 total passes, so
+one complete sparse 16-lane set can be skipped without consuming productive
+capacity. A capped nonempty lane is immediately due but sorts behind older due
+lanes. Empty and lock-only lanes keep the configured interval, preventing a
+no-work busy loop. Preview runs only one bounded sample per interval because it
+does not consume the rows it observes.
+
+Durable per-account kind rotation prevents inbound, outbound/provider-event,
+or suppression work from starving over repeated visits. At batch 100, one
+replica can scan at most 3,200 rows and delete at most 1,024 MiB of raw MIME per
+enforce attempt; two replicas can scan at most 6,400 rows and delete at most
+2,048 MiB. Maximum-sized 25 MiB rows yield 800/1,600 MiB because each database
+batch fits only one. These work ceilings exceed one account's
+5,100-row/1,088-MiB rolling-minute envelope, but they are neither a
+database-throughput promise nor a reserved inbound share or multi-account
+cell-capacity guarantee. Alert on capped batches, timeouts, last-success age,
+and persistent backlog. Do not activate this target on the current v0.0.249
+cell before the schema-90 release artifact and backups exist.
+
+Outbound agent-email activation and cohort expansion use a separate staged
+rollout. Committed defaults remain dark; the initial Founder production cohort
+has completed these steps with two worker replicas, while every new cell or
+cohort must repeat them:
 
 1. migrate the outbox, send controls, suppressions, provider-event receipts,
-   and rate buckets to schema 89 while dispatch remains disabled;
+   and original minute-rate buckets to schema 89, then the account-wide inbound
+   and outbound daily/recipient bucket shapes to schema 90, while dispatch
+   remains disabled;
 2. onboard and authenticate `send.witmail.net`, provision the adapter Email
    Sending/receipt/route/Queue bindings, configure one cell signing key and the
    matching adapter public-key/account allowlist, and install the independent
@@ -358,12 +388,12 @@ Outbound agent-email activation is a separate dark rollout:
    provider-event folding, suppression, health, metrics, and rollback before
    widening either cohort.
 
-Schema 89 is a forward-only convergence barrier. The first compatible process
-that starts against a cell applies the migration automatically. After that,
-any pre-0.0.245 binary fails startup with `ErrMigrationSchemaAhead`; it is not
-a viable rollback even if its Deployment manifest still exists. Keep all
+Schema 90 is the current forward-only convergence barrier. The first compatible
+process that starts against a cell applies the migration automatically. After
+that, a schema-89-only binary fails startup with `ErrMigrationSchemaAhead`; it
+is not a viable rollback even if its Deployment manifest still exists. Keep all
 outbound gates off, freeze account export/import and moves, and converge every
-API and worker replica on a schema-89-compatible image before accepting an
+API and worker replica on a schema-90-compatible image before accepting another
 outbound row. Roll back with account, worker, and adapter gates or deploy a
 forward fix. Never down-migrate the database or restart an older image.
 

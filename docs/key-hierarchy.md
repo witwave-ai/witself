@@ -345,6 +345,8 @@ tables) and self-hosted (typically single-tenant) share the identical model — 
 [threat-model.md](threat-model.md) open question by making the key hierarchy structurally
 identical and the trust posture the configurable part.
 
+<a id="reconciliation-with-the-reveal-totp-contract"></a>
+
 ## Reconciliation with the reveal / TOTP contract
 
 The two custody modes map onto the existing contracts without new endpoints. Mode is

@@ -308,6 +308,8 @@ in [threat-model.md](threat-model.md):
 - **Deletion blast radius** — deleting a group can break many policies at once;
   mitigated by guarded deletion, `--dry-run`, and default-deny fallthrough.
 
+<a id="cross-realm-channels"></a>
+
 ## Cross-Realm Channels (Post-v0)
 
 In-realm groups stop at the realm boundary. The cross-realm sibling of a group

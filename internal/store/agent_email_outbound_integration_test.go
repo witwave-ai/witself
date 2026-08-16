@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -244,18 +245,32 @@ func TestAgentEmailOutboundLifecyclePostgres(t *testing.T) {
 		started.Text != directInput.Text {
 		t.Fatalf("provider start = %#v / %v", started, err)
 	}
-	var admissionBuckets, dispatchBuckets, accountBuckets int
+	var admissionMinuteBuckets, admissionDailyBuckets int
+	var dispatchMinuteBuckets, dispatchDailyBuckets, accountBuckets, recipientBuckets int
 	if err := st.pool.QueryRow(ctx, `
 		SELECT count(*) FILTER (WHERE lane='admission'),
+		       count(*) FILTER (WHERE lane='admission_daily'),
 		       count(*) FILTER (WHERE lane='dispatch'),
-		       count(*) FILTER (WHERE scope='account' AND realm_id='')
+		       count(*) FILTER (WHERE lane='dispatch_daily'),
+		       count(*) FILTER (WHERE scope='account' AND realm_id=''),
+		       count(*) FILTER (WHERE scope='recipient' AND realm_id='')
 		  FROM agent_email_outbound_rate_buckets WHERE account_id=$1`,
-		p.AccountID).Scan(&admissionBuckets, &dispatchBuckets, &accountBuckets); err != nil {
+		p.AccountID).Scan(
+		&admissionMinuteBuckets, &admissionDailyBuckets,
+		&dispatchMinuteBuckets, &dispatchDailyBuckets,
+		&accountBuckets, &recipientBuckets,
+	); err != nil {
 		t.Fatal(err)
 	}
-	if admissionBuckets != 3 || dispatchBuckets != 3 || accountBuckets != 2 {
-		t.Fatalf("outbound rate buckets admission=%d dispatch=%d account=%d",
-			admissionBuckets, dispatchBuckets, accountBuckets)
+	if admissionMinuteBuckets != 3 || admissionDailyBuckets != 4 ||
+		dispatchMinuteBuckets != 3 || dispatchDailyBuckets != 2 ||
+		accountBuckets != 4 || recipientBuckets != 4 {
+		t.Fatalf(
+			"outbound rate buckets admission=%d/%d dispatch=%d/%d account=%d recipient=%d",
+			admissionMinuteBuckets, admissionDailyBuckets,
+			dispatchMinuteBuckets, dispatchDailyBuckets,
+			accountBuckets, recipientBuckets,
+		)
 	}
 	// The general agent-email maintenance lane calls this outbound-specific
 	// bounded primitive alongside the inbound table. Stale debt drains in fixed
@@ -268,7 +283,7 @@ func TestAgentEmailOutboundLifecyclePostgres(t *testing.T) {
 		 WHERE account_id=$1`, p.AccountID); err != nil {
 		t.Fatal(err)
 	}
-	for index, want := range []int64{2, 2, 2, 0} {
+	for index, want := range []int64{2, 2, 2, 2, 2, 2, 0} {
 		deleted, err := st.DeleteStaleAgentEmailOutboundRateBuckets(
 			ctx, time.Now().UTC(), 2,
 		)
@@ -277,8 +292,28 @@ func TestAgentEmailOutboundLifecyclePostgres(t *testing.T) {
 				index+1, deleted, err, want)
 		}
 	}
+	var rateBucketCountBeforeReplay int64
+	if err := st.pool.QueryRow(ctx, `
+		SELECT count(*) FROM agent_email_outbound_rate_buckets WHERE account_id=$1`,
+		p.AccountID,
+	).Scan(&rateBucketCountBeforeReplay); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := st.StartAgentEmailOutboundProviderCall(ctx, direct.ID, reclaimed.Claim); !errors.Is(err, ErrAgentEmailOutboundProviderAlreadyStarted) {
 		t.Fatalf("replayed provider start error = %v", err)
+	}
+	var rateBucketCountAfterReplay int64
+	if err := st.pool.QueryRow(ctx, `
+		SELECT count(*) FROM agent_email_outbound_rate_buckets WHERE account_id=$1`,
+		p.AccountID,
+	).Scan(&rateBucketCountAfterReplay); err != nil {
+		t.Fatal(err)
+	}
+	if rateBucketCountAfterReplay != rateBucketCountBeforeReplay {
+		t.Fatalf(
+			"provider receipt replay changed dispatch rate buckets: before=%d after=%d",
+			rateBucketCountBeforeReplay, rateBucketCountAfterReplay,
+		)
 	}
 	accepted, err := st.FinalizeAgentEmailOutbound(ctx, direct.ID,
 		FinalizeAgentEmailOutboundInput{
@@ -881,4 +916,113 @@ func TestAgentEmailOutboundLifecyclePostgres(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestAgentEmailOutboundDailyBreakersPostgres(t *testing.T) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	st, _ := newMigrationTestStore(t, baseDSN)
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	fixture := newAgentEmailRetentionAccountFixture(
+		ctx, t, st, "outbound-daily-"+fmt.Sprintf("%d", time.Now().UnixNano()),
+	)
+	sendScope := fixture.scope
+	sendScope.Domain = "witmail.net"
+	sendScope.LegacyDomains = []string{fixture.scope.Domain}
+	sendScope.Audience = "outbound-daily-test"
+	if _, err := st.ReconcileAgentEmailPilot(ctx, sendScope); err != nil {
+		t.Fatal(err)
+	}
+	policies := map[string]int64{
+		plans.AgentEmailEntitlementVersionPolicy: plans.AgentEmailEntitlementVersion,
+		plans.AgentEmailRetentionDaysPolicy:      30,
+	}
+	features := []string{plans.AgentEmailReceiveFeature, plans.AgentEmailSendFeature}
+	hash, err := plans.SnapshotHash("daily-test", map[string]int64{}, policies, features)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SetAccountPlan(
+		ctx, fixture.accountID, 1, hash, "daily-test",
+		map[string]int64{}, policies, features,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	const recipient = "daily-recipient@example.com"
+	for _, tc := range []struct {
+		name    string
+		scope   string
+		scopeID string
+		limit   int64
+	}{
+		{
+			name: "account", scope: AgentEmailOutboundRateScopeAccount,
+			scopeID: fixture.accountID, limit: plans.MaxAgentEmailSentPerAccountDay,
+		},
+		{
+			name: "recipient", scope: AgentEmailOutboundRateScopeRecipient,
+			scopeID: agentEmailOutboundRecipientScopeID(fixture.accountID, recipient),
+			limit:   plans.MaxAgentEmailSentPerRecipientDay,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := st.pool.Exec(ctx, `
+				DELETE FROM agent_email_outbound_rate_buckets WHERE account_id=$1`,
+				fixture.accountID,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.pool.Exec(ctx, `
+				INSERT INTO agent_email_outbound_rate_buckets
+				  (account_id,realm_id,lane,scope,scope_id,
+				   theoretical_arrival_microseconds)
+				VALUES ($1,'','admission_daily',$2,$3,
+				        floor(extract(epoch FROM clock_timestamp()+interval '2 days')*1000000)::bigint)`,
+				fixture.accountID, tc.scope, tc.scopeID,
+			); err != nil {
+				t.Fatal(err)
+			}
+			_, err := st.QueueAgentEmail(ctx, fixture.owner, SendAgentEmailInput{
+				To: recipient, Subject: "daily bound", Text: "bounded body",
+				IdempotencyKey: "daily-" + tc.name,
+			})
+			var detail *AgentEmailOutboundRateLimitError
+			if !errors.As(err, &detail) || detail == nil ||
+				detail.Scope != tc.scope || detail.Limit != tc.limit ||
+				detail.WindowSeconds != agentEmailOutboundRateDaySeconds ||
+				detail.Source != AgentEmailOutboundRateSourcePlatform ||
+				!detail.Retryable {
+				t.Fatalf("daily %s refusal = %#v / %v", tc.name, detail, err)
+			}
+			if strings.Contains(err.Error(), recipient) {
+				t.Fatalf("daily refusal leaked recipient: %v", err)
+			}
+			if got := countAgentEmailOutboundMessages(ctx, t, st, fixture.accountID); got != 0 {
+				t.Fatalf("daily refusal stored %d outbound messages", got)
+			}
+		})
+	}
+}
+
+func countAgentEmailOutboundMessages(
+	ctx context.Context,
+	t *testing.T,
+	st *Store,
+	accountID string,
+) int64 {
+	t.Helper()
+	var count int64
+	if err := st.pool.QueryRow(ctx, `
+		SELECT count(*) FROM agent_email_outbound_messages WHERE account_id=$1`,
+		accountID,
+	).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
 }

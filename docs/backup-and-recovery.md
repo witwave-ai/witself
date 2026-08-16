@@ -135,6 +135,17 @@ the prior application behavior/configuration posture while leaving the database
 at schema 87 and preserving all route reservations. Use a forward fix; never
 delete a route reservation merely to make the down migration pass.
 
+Schema-88 archives add canonical custom-domain route authority and immutable
+message provenance. Schema-89 archives additionally carry realm/agent send
+controls, outbound messages, provider-event receipts, and account-scoped
+recipient suppressions in dependency order. Those rows are account data and
+move with the mailbox. Schema 90 changes only cell-local defensive debt: the
+inbound realm table, inbound account table, and outbound minute/daily/recipient
+rate-bucket table are all excluded from account archives. A destination starts
+with fresh limiter state; export/import never synthesizes or transfers debt.
+Freeze moves while any possible destination is older than schema 90 because it
+must reject a newer archive rather than silently discard these streams.
+
 Later instructions to reconnect a backend embedding provider or run server-side
 re-embedding are superseded.
 
@@ -945,11 +956,14 @@ Migration is dual-plane, matching the two postures above:
   destination CMK. See [key-hierarchy.md](key-hierarchy.md) and
   [storage.md](storage.md).
 
-Agent-email mailboxes, messages, aliases, and permanent domain-route
-reservations are account spine state. They move in the implemented
-whole-account logical archive, not the per-agent plaintext identity export.
-Freeze export/import and cell movement during a schema-87 mixed-version rollout
-so no pre-87 archive path can omit an additive domain reservation.
+Agent-email mailboxes, messages, aliases, permanent domain-route reservations,
+send controls, outbound messages, provider-event receipts, and recipient
+suppressions are account spine state. They move in the implemented whole-account
+logical archive, not the per-agent plaintext identity export. Freeze
+export/import and cell movement during any mixed-version wave until every
+possible destination accepts the source archive schema. For schema 90 that
+means every destination understands the schema-89 outbound streams and the
+schema-90 rule that all three rate-bucket tables are cell-local exclusions.
 
 After both planes land in cell B, the control-plane realm/account -> home-cell
 mapping is repointed and clients re-resolve to cell B. Migration emits
@@ -994,6 +1008,11 @@ A managed or self-hosted restore should proceed in this order:
    also verify every agent-email address has its original domain route, every
    additive `(domain, local_part)` remains globally reserved, and no restored
    legacy route was synthesized for a post-cutover mailbox.
+   For schema 89 or newer, verify realm/agent send controls, outbound messages,
+   provider-event receipts, recipient suppressions, reply provenance, and
+   terminal versus unresolved state. For schema 90, also verify that inbound
+   realm/account and outbound minute/daily/recipient rate debt was not imported;
+   the destination must begin with fresh cell-local limiter state.
 9. Confirm lexical recall works. Confirm restored hybrid recall and reported
    coverage when compatible vector rows exist; zero coverage remains a supported
    lexical fallback, not an unsupported memory service.
