@@ -44,6 +44,9 @@ try {
     "RECEIPT_REPLAY_ENABLED",
     "provider_call_started_count",
     "verified_replay_count",
+    "witself.agent-email-provider-event-consume-log.v1",
+    "target_account_unmapped",
+    "target_signer_unauthorized",
   ]) {
     if (!bundle.includes(marker)) {
       throw new Error(`outbound email adapter bundle omitted ${marker}`);
