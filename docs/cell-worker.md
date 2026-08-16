@@ -137,10 +137,40 @@ witself-worker agent-email receipt-replay \
   --json
 ```
 
-Run it only from an operator-controlled Kubernetes Job that mounts the existing
-worker-only database URL and dispatch-signing Secret. It is not an API, worker
-job, retry loop, or agent command. It does not run migrations. Its PostgreSQL
-transaction is explicitly repeatable-read and read-only.
+Do not exec that command in a live worker pod. Use the repository's transient
+operator helper, pinning the exact image and worker ConfigMap checksum already
+verified for the rollout:
+
+```sh
+scripts/run-agent-email-receipt-proof.sh \
+  --cell civo-sandbox-usw2-dev \
+  --kubeconfig /absolute/private/path/kubeconfig \
+  --context witself-civo-sandbox-usw2-dev \
+  --namespace witself \
+  --expected-image ghcr.io/witwave-ai/images/witself-server:0.0.249 \
+  --expected-config-checksum 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --expected-replicas 2 \
+  --account-id acc_... \
+  --send-id esnd_... \
+  --expected-accepted-at 2026-08-15T18:00:00.000000Z
+```
+
+Replace the checksum example with the exact 64-character `checksum/config`
+annotation approved for that rollout. The helper also verifies the active
+server's checksummed managed-cell identity, requires exactly two fully ready
+worker replicas, and rereads every source before its fixed lock and Job are
+created. It copies only the dispatch endpoint, dispatch key ID, provider
+timeout, database Secret reference, and immutable dispatch-key Secret
+reference. Secret values are never read. The expected attempt count is fixed
+at one; it is not an operator-adjustable flag.
+
+The Job is fixed-name, backoff-free, deadline bounded, tokenless, non-root,
+read-only-root, and deleted with foreground propagation. If deletion or pod
+absence cannot be proved, the immutable fixed-name lock remains for explicit
+operator cleanup. On success stdout is only the locally revalidated closed
+receipt proof. It is not an API, worker job, retry loop, or agent command. It
+does not run migrations. Its PostgreSQL transaction is explicitly
+repeatable-read and read-only.
 
 The command reconstructs the dispatch through the same production projection
 and deterministic JSON serializer used by the live worker. Before signing, it
