@@ -206,7 +206,9 @@ async function deliverProviderEvent(event, route, env, fetchImpl) {
     try {
       response = await fetchImpl(target.url, {
         method: "POST",
-        redirect: "error",
+        // Workers supports only follow/manual. Manual preserves the no-follow
+        // boundary while exposing any 3xx as a retryable non-success status.
+        redirect: "manual",
         signal: controller.signal,
         headers: {
           "Authorization": `Bearer ${target.token}`,
