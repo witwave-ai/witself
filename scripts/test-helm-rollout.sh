@@ -166,6 +166,7 @@ helm template witself-apps "$apps_chart" \
   --values "$apps_email_production_profile" \
   --set apps.witselfServer.chartVersion=0.0.244 \
   --set apps.witselfServer.imageTag=0.0.244 \
+  --set apps.witselfServer.worker.agentEmailOutbound.enabled=false \
   --set apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name= \
   >"$email_production_pre245_apps_render"
 helm template witself-server "$server_chart" --namespace witself \
@@ -605,7 +606,7 @@ require_sequence "$civo_server_application" \
   "            dispatchPrivateKeySecret:" \
   "              key: private-key" \
   "              name: witself-agent-email-outbound-dispatch-v1" \
-  "            enabled: false"
+  "            enabled: true"
 # The app-of-apps chart is reconciled before each child chart pin advances.
 # Forward the value only to cells whose child chart accepts it. The two live
 # v0.0.224 cells include it, while the configured-but-unprovisioned v0.0.223
@@ -631,7 +632,7 @@ extract_document Deployment witself-worker "$civo_server_nested_render" "$civo_w
 require_line "  replicas: 1" "$civo_server_deployment"
 require_line "  replicas: 2" "$civo_worker_deployment"
 require_line '  WITSELF_CELL_NAME: "civo-sandbox-usw2-dev"' "$civo_server_config"
-require_line '  WITSELF_AGENT_EMAIL_OUTBOUND_ENABLED: "false"' "$civo_worker_config"
+require_line '  WITSELF_AGENT_EMAIL_OUTBOUND_ENABLED: "true"' "$civo_worker_config"
 require_line '  WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_ENDPOINT: "https://witself-agent-email-send.witwave.workers.dev/v1/dispatch"' "$civo_worker_config"
 require_line '  WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_AUDIENCE: "witself-agent-email-send"' "$civo_worker_config"
 require_line '  WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_KEY_ID: "civo-sandbox-usw2-dev-2026-08"' "$civo_worker_config"
@@ -645,8 +646,12 @@ reject_line "            - name: WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_PRIVATE_K
 reject_line '                  name: "witself-agent-email-outbound-dispatch-v1"' "$civo_server_deployment"
 reject_line "            - name: WITSELF_AGENT_EMAIL_PROVIDER_EVENT_TOKEN" "$civo_worker_deployment"
 reject_line '                  name: "witself-agent-email-provider-event-v2"' "$civo_worker_deployment"
-reject_line "            - name: WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_PRIVATE_KEY" "$civo_worker_deployment"
-reject_line '                  name: "witself-agent-email-outbound-dispatch-v1"' "$civo_worker_deployment"
+require_sequence "$civo_worker_deployment" \
+  "            - name: WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_PRIVATE_KEY" \
+  "              valueFrom:" \
+  "                secretKeyRef:" \
+  '                  name: "witself-agent-email-outbound-dispatch-v1"' \
+  '                  key: "private-key"'
 
 # Portable defaults keep the API rollout-safe and fail closed on a worker that
 # has no shared database Secret.
@@ -1418,6 +1423,7 @@ for unsafe_pin in chartVersion imageTag; do
     --values "$civo_cell" \
     --values "$apps_email_production_profile" \
     --set "apps.witselfServer.${unsafe_pin}=0.0.240" \
+    --set apps.witselfServer.worker.agentEmailOutbound.enabled=false \
     >/dev/null 2>&1; then
     echo "app-of-apps enabled a retry-canary Secret with pre-v0.0.245 ${unsafe_pin}" >&2
     exit 1
@@ -1430,6 +1436,7 @@ expect_apps_template_failure \
   --values "$apps_email_production_profile" \
   --set apps.witselfServer.chartVersion=0.0.240 \
   --set apps.witselfServer.imageTag=0.0.240 \
+  --set apps.witselfServer.worker.agentEmailOutbound.enabled=false \
   --set apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name=
 expect_apps_template_failure \
   "app-of-apps pre-v0.0.245 retry-canary Secret" \
@@ -1437,7 +1444,8 @@ expect_apps_template_failure \
   --values "$civo_cell" \
   --values "$apps_email_production_profile" \
   --set apps.witselfServer.chartVersion=0.0.244 \
-  --set apps.witselfServer.imageTag=0.0.244
+  --set apps.witselfServer.imageTag=0.0.244 \
+  --set apps.witselfServer.worker.agentEmailOutbound.enabled=false
 expect_apps_template_failure \
   "app-of-apps retry-canary with an invalid Secret name" \
   "apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name must be a valid Kubernetes Secret name" \
