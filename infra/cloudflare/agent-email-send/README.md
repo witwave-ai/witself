@@ -164,7 +164,7 @@ wrangler_prod deployments status --json
 ```
 
 Record the version ID printed by the deploy. Verify its plaintext bindings,
-especially both `false` gates, before installing secrets:
+especially all three `false` gates, before installing secrets:
 
 ```bash
 export DEPLOYED_VERSION_ID='replace-with-version-id-from-deploy-output'
@@ -285,12 +285,16 @@ Keep the source cell entry while any other account still targets it.
    wrangler_prod deployments status --json
    ```
 
-   Submit the byte-identical dispatch to
-   `POST /v1/dispatch:receipt-replay`, freshly signed for the replay audience,
-   and require an accepted proof with
-   `provider_call_started_count=1`. Repeat the proof and require the provider
-   count to remain one while `verified_replay_count` increments. Then remove
-   the temporary proof surface and verify its gate is false:
+   Run the released `scripts/run-agent-email-receipt-proof.sh` helper from an
+   operator workstation with an explicit kubeconfig, context, and cell. The
+   helper creates a separate, short-lived Kubernetes Job from the fully
+   converged worker deployment; never run this command with `kubectl exec` in
+   a live worker pod. Supply the exact account ID, send ID, and canonical
+   `accepted_at` fence. Require an accepted proof with
+   `provider_call_started_count=1`. Run the helper a second time with the same
+   fence and require the provider count to remain one while
+   `verified_replay_count` increments. Then remove the temporary proof surface
+   and verify its gate is false:
 
    ```bash
    deploy_gates true false false
@@ -300,7 +304,18 @@ Keep the source cell entry while any other account still targets it.
    A 404, 409, malformed response, counter other than one, or changing provider
    count is a rollout blocker. Never use the ordinary dispatch endpoint as the
    proof: that path owns the real Email Sending boundary.
-6. Enable adapter event delivery, verify that version's gates, and only then
+
+6. While adapter event delivery and the Queue subscription are still disabled,
+   and within 15 minutes of the first canary's `accepted_at`, run the released
+   `witself-server agent-email provider-event-canary` command for that exact
+   fence against the exact cell. This bounded operator command intentionally
+   and permanently changes the disposable canary from `accepted` to `delivered`.
+   Require its internal `204`/`204`/`409` replay proof and final exact
+   `delivered` state with one receipt. A continuation run with the same fence
+   must converge on that same result. Do not use customer mail, and do not
+   enable either real event path until this proof is complete.
+
+7. Enable adapter event delivery, verify that version's gates, and only then
    enable the subscription:
 
    ```bash
@@ -312,10 +327,12 @@ Keep the source cell entry while any other account still targets it.
    ./scripts/manage-events.sh status
    ```
 
-7. Send a **new** second canary. Events emitted while the subscription was
+8. Send a **new** second canary. Events emitted while the subscription was
    disabled are not a lifecycle-delivery test. Verify its delivered event is
-   folded into the cell once, then repeat the callback idempotently.
-8. Keep platform and plan rate breakers active before widening either the
+   folded into the cell exactly once and that both the main Queue and dead-letter
+   Queue drain. Do not improvise a replay of a real Queue callback; the isolated
+   provider-event canary in step 6 is the idempotency proof.
+9. Keep platform and plan rate breakers active before widening either the
    adapter cohort or account policy.
 
 ## Rollback and shutdown
