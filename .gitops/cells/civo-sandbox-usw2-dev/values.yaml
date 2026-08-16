@@ -67,7 +67,7 @@ apps:
         enabled: false
       topologySpreadConstraints: []
       agentEmailOutbound:
-        enabled: false
+        enabled: true
         dispatchEndpoint: https://witself-agent-email-send.witwave.workers.dev/v1/dispatch
         dispatchAudience: witself-agent-email-send
         dispatchKeyID: civo-sandbox-usw2-dev-2026-08
