@@ -413,8 +413,8 @@ func (f *fakeAgentEmailProviderEventCanaryStore) ApplyAgentEmailOutboundProvider
 	f.mu.Lock()
 	f.applied = append(f.applied, event)
 	if f.first == nil {
-		copy := event
-		f.first = &copy
+		firstEvent := event
+		f.first = &firstEvent
 		f.receiptCount = 1
 		persisted := f.firstApplyPersisted
 		release := f.firstApplyRelease

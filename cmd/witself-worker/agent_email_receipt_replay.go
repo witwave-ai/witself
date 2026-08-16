@@ -66,27 +66,27 @@ func runAgentEmailReceiptReplayWith(
 		return 0
 	}
 	if err != nil {
-		fmt.Fprintln(stderr, "witself-worker: invalid agent-email receipt-replay command")
+		_, _ = fmt.Fprintln(stderr, "witself-worker: invalid agent-email receipt-replay command")
 		return 2
 	}
 	dsn := dbDSN(lookup)
 	if dsn == "" {
-		fmt.Fprintln(stderr, "witself-worker: WITSELF_DATABASE_URL is required (falls back to DATABASE_URL)")
+		_, _ = fmt.Fprintln(stderr, "witself-worker: WITSELF_DATABASE_URL is required (falls back to DATABASE_URL)")
 		return 1
 	}
 	client, err := agentEmailReceiptReplayClientFromEnv(lookup, httpClient)
 	if err != nil {
-		fmt.Fprintln(stderr, "witself-worker: agent-email receipt-replay signing configuration is invalid")
+		_, _ = fmt.Fprintln(stderr, "witself-worker: agent-email receipt-replay signing configuration is invalid")
 		return 1
 	}
 	st, err := openStore(ctx, dsn)
 	if err != nil {
-		fmt.Fprintln(stderr, "witself-worker: agent-email receipt-replay database configuration is invalid")
+		_, _ = fmt.Fprintln(stderr, "witself-worker: agent-email receipt-replay database configuration is invalid")
 		return 1
 	}
 	defer st.Close()
 	if err := st.Ping(ctx); err != nil {
-		fmt.Fprintln(stderr, "witself-worker: agent-email receipt-replay database is unavailable")
+		_, _ = fmt.Fprintln(stderr, "witself-worker: agent-email receipt-replay database is unavailable")
 		return 1
 	}
 	source, err := st.LoadAgentEmailOutboundReceiptReplay(
@@ -100,30 +100,30 @@ func runAgentEmailReceiptReplayWith(
 	)
 	if err != nil {
 		if errors.Is(err, store.ErrAgentEmailOutboundReceiptReplayRefused) {
-			fmt.Fprintln(stderr, "witself-worker: local receipt assertions were not satisfied")
+			_, _ = fmt.Fprintln(stderr, "witself-worker: local receipt assertions were not satisfied")
 		} else {
-			fmt.Fprintln(stderr, "witself-worker: local receipt read failed")
+			_, _ = fmt.Fprintln(stderr, "witself-worker: local receipt read failed")
 		}
 		return 1
 	}
 	dispatch := agentEmailOutboundWireDispatch(source)
 	if err := dispatch.Validate(); err != nil {
-		fmt.Fprintln(stderr, "witself-worker: immutable local dispatch is invalid")
+		_, _ = fmt.Fprintln(stderr, "witself-worker: immutable local dispatch is invalid")
 		return 1
 	}
 	proof, err := client.ReplayReceipt(ctx, dispatch)
 	if err != nil {
-		fmt.Fprintln(stderr, "witself-worker: edge receipt proof failed")
+		_, _ = fmt.Fprintln(stderr, "witself-worker: edge receipt proof failed")
 		return 1
 	}
 	if proof.RoutePending {
-		fmt.Fprintln(stderr, "witself-worker: edge receipt route is not settled")
+		_, _ = fmt.Fprintln(stderr, "witself-worker: edge receipt route is not settled")
 		return 1
 	}
 	encoder := json.NewEncoder(stdout)
 	encoder.SetEscapeHTML(false)
 	if err := encoder.Encode(proof); err != nil {
-		fmt.Fprintln(stderr, "witself-worker: could not encode value-free receipt proof")
+		_, _ = fmt.Fprintln(stderr, "witself-worker: could not encode value-free receipt proof")
 		return 1
 	}
 	return 0
@@ -148,7 +148,7 @@ func parseAgentEmailReceiptReplayOptions(
 	flags.BoolVar(&jsonOutput, "json", false, "emit only the value-free JSON proof")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			fmt.Fprintln(stderr, "witself-worker agent-email receipt-replay --account-id ID --send-id ID --expected-accepted-at RFC3339NANO --expected-attempt-count 1 --json")
+			_, _ = fmt.Fprintln(stderr, "witself-worker agent-email receipt-replay --account-id ID --send-id ID --expected-accepted-at RFC3339NANO --expected-attempt-count 1 --json")
 			return agentEmailReceiptReplayOptions{}, true, nil
 		}
 		return agentEmailReceiptReplayOptions{}, false, err
