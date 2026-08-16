@@ -206,6 +206,7 @@ test("forwards only normalized content and exact account route", async () => {
   });
   assert.equal(result, "ack");
   assert.equal(forwarded.init.headers.Authorization, `Bearer ${token}`);
+  assert.equal(forwarded.init.redirect, "manual");
   assert.deepEqual(JSON.parse(forwarded.init.body), event);
 });
 
@@ -364,13 +365,16 @@ test("queue consumer emits bounded privacy-safe outcome codes", async (t) => {
       disposition: "retry",
     },
     {
-      name: "other cell HTTP status",
+      name: "cell redirect is not followed",
       env: {
         EVENT_DELIVERY_ENABLED: "true",
         PROVIDER_ROUTES: providerRoutes(),
         EVENT_TARGETS_JSON: targets(),
       },
-      fetchImpl: async () => new Response(null, { status: 302 }),
+      fetchImpl: async (_url, init) => {
+        assert.equal(init.redirect, "manual");
+        return Response.redirect("https://redirect.example/", 302);
+      },
       outcome: "cell_http_other",
       disposition: "retry",
     },
