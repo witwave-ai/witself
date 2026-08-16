@@ -1,4 +1,7 @@
-name: agent-email-near-limit-probe
+# Keep this filename stable so existing protected dispatch automation does not
+# need to change; the displayed workflow name reflects what the provider path
+# can actually prove.
+name: agent-email-large-payload-probe
 
 on:
   workflow_dispatch:
@@ -11,7 +14,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  near-limit-production-receive:
+  large-payload-production-receive:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: agent-email-canary
@@ -34,18 +37,18 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - name: Install pinned receive-edge dependencies
         run: npm ci
-      - name: Verify the bounded near-limit probe
+      - name: Verify the bounded large-payload probe
         run: node --test test/near-limit-probe.test.mjs
-      - name: Preflight the near-limit target without sending
-        run: npm run near-limit-probe -- --preflight
+      - name: Preflight the large-payload target without sending
+        run: npm run large-payload-probe -- --preflight
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.AGENT_EMAIL_CANARY_CLOUDFLARE_TOKEN }}
-          AGENT_EMAIL_NEAR_LIMIT_FROM: ${{ secrets.AGENT_EMAIL_CANARY_FROM }}
-          AGENT_EMAIL_NEAR_LIMIT_TO: ${{ secrets.AGENT_EMAIL_NEAR_LIMIT_TO }}
-          WITSELF_EMAIL_NEAR_LIMIT_ENDPOINT: ${{ vars.WITSELF_EMAIL_NEAR_LIMIT_ENDPOINT }}
-          WITSELF_EMAIL_NEAR_LIMIT_TOKEN: ${{ secrets.WITSELF_EMAIL_NEAR_LIMIT_TOKEN }}
-          AGENT_EMAIL_NEAR_LIMIT_TIMEOUT_SECONDS: "60"
+          AGENT_EMAIL_LARGE_PAYLOAD_FROM: ${{ secrets.AGENT_EMAIL_CANARY_FROM }}
+          AGENT_EMAIL_LARGE_PAYLOAD_TO: ${{ secrets.AGENT_EMAIL_NEAR_LIMIT_TO }}
+          WITSELF_EMAIL_LARGE_PAYLOAD_ENDPOINT: ${{ vars.WITSELF_EMAIL_NEAR_LIMIT_ENDPOINT }}
+          WITSELF_EMAIL_LARGE_PAYLOAD_TOKEN: ${{ secrets.WITSELF_EMAIL_NEAR_LIMIT_TOKEN }}
+          AGENT_EMAIL_LARGE_PAYLOAD_TIMEOUT_SECONDS: "60"
       - name: Prove the production receive path first
         run: npm run canary
         env:
@@ -56,13 +59,13 @@ jobs:
           WITSELF_EMAIL_CANARY_ENDPOINT: ${{ vars.WITSELF_EMAIL_CANARY_ENDPOINT }}
           WITSELF_EMAIL_CANARY_TOKEN: ${{ secrets.WITSELF_EMAIL_CANARY_TOKEN }}
           AGENT_EMAIL_CANARY_TIMEOUT_SECONDS: "600"
-      - name: Prove near-limit production receive and durable storage
-        run: npm run near-limit-probe
+      - name: Prove 4 MiB production receive and durable storage
+        run: npm run large-payload-probe
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.AGENT_EMAIL_CANARY_CLOUDFLARE_TOKEN }}
-          AGENT_EMAIL_NEAR_LIMIT_FROM: ${{ secrets.AGENT_EMAIL_CANARY_FROM }}
-          AGENT_EMAIL_NEAR_LIMIT_TO: ${{ secrets.AGENT_EMAIL_NEAR_LIMIT_TO }}
-          WITSELF_EMAIL_NEAR_LIMIT_ENDPOINT: ${{ vars.WITSELF_EMAIL_NEAR_LIMIT_ENDPOINT }}
-          WITSELF_EMAIL_NEAR_LIMIT_TOKEN: ${{ secrets.WITSELF_EMAIL_NEAR_LIMIT_TOKEN }}
-          AGENT_EMAIL_NEAR_LIMIT_TIMEOUT_SECONDS: "900"
+          AGENT_EMAIL_LARGE_PAYLOAD_FROM: ${{ secrets.AGENT_EMAIL_CANARY_FROM }}
+          AGENT_EMAIL_LARGE_PAYLOAD_TO: ${{ secrets.AGENT_EMAIL_NEAR_LIMIT_TO }}
+          WITSELF_EMAIL_LARGE_PAYLOAD_ENDPOINT: ${{ vars.WITSELF_EMAIL_NEAR_LIMIT_ENDPOINT }}
+          WITSELF_EMAIL_LARGE_PAYLOAD_TOKEN: ${{ secrets.WITSELF_EMAIL_NEAR_LIMIT_TOKEN }}
+          AGENT_EMAIL_LARGE_PAYLOAD_TIMEOUT_SECONDS: "900"

@@ -13,6 +13,7 @@
     "config": "node scripts/render-wrangler.mjs",
     "deploy": "node scripts/deploy.mjs",
     "directory": "node scripts/directory.mjs",
+    "large-payload-probe": "node scripts/near-limit-probe.mjs",
     "metrics": "node scripts/metrics.mjs",
     "near-limit-probe": "node scripts/near-limit-probe.mjs",
     "provision:relay-signing-key": "node scripts/provision-relay-signing-key.mjs",

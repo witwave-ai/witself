@@ -177,6 +177,39 @@ test("email-only handler signs and relays the byte-identical raw message", async
   assert.equal(Buffer.from(headers.get("X-Witself-Email-Envelope-To"), "base64url").toString(), first.address);
 });
 
+test("Worker locally accepts and relays the exact 25 MiB inbound boundary", async () => {
+  const exactBoundaryRaw = Buffer.alloc(RELAY_MAXIMUM_RAW_BYTES, 0x61);
+  const mail = message({
+    rawSize: exactBoundaryRaw.byteLength,
+    raw: new ReadableStream({
+      start(controller) {
+        controller.enqueue(exactBoundaryRaw);
+        controller.close();
+      },
+    }),
+  });
+  let request;
+  await handleEmail(mail, legacyEnv(null, {}, vectorNowMS), {
+    now: () => vectorNowMS,
+    fetch: async (url, init) => {
+      request = { url, init };
+      return new Response('{"verdict":"accepted"}', { status: 200 });
+    },
+  });
+
+  assert.deepEqual(mail.rejected, []);
+  assert.equal(request.url, example.ingest_url);
+  assert.equal(request.init.body.byteLength, RELAY_MAXIMUM_RAW_BYTES);
+  assert.equal(
+    request.init.headers.get("X-Witself-Email-Raw-Size"),
+    String(RELAY_MAXIMUM_RAW_BYTES),
+  );
+  assert.deepEqual(
+    Buffer.from(request.init.body).subarray(0, 64),
+    exactBoundaryRaw.subarray(0, 64),
+  );
+});
+
 test("subaddress tags stay in the signed envelope but use the exact enrolled key", async () => {
   const tagged = first.address.replace("@", "+signup@");
   const { request } = await captureAccepted({ to: tagged });

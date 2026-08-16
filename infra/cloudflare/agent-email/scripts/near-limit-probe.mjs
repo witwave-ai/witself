@@ -22,13 +22,26 @@ const MAXIMUM_DISCOVERY_PAGES = 20;
 const MAXIMUM_CURSOR_BYTES = 4096;
 const DISCOVERY_RETRY_MS = 2000;
 const CLAIM_LEASE_SECONDS = 300;
+const MAXIMUM_CLOUDFLARE_ERROR_CODES = 8;
 
-// Leave room for provider-added transport and authentication headers while
-// still proving a sent MIME body within one percent of the reviewed ceiling.
-export const NEAR_LIMIT_HEADROOM_BYTES = 256 * 1024;
-export const NEAR_LIMIT_TARGET_RAW_BYTES =
-  RELAY_MAXIMUM_RAW_BYTES - NEAR_LIMIT_HEADROOM_BYTES;
-export const NEAR_LIMIT_MINIMUM_RECEIVED_BYTES = 24 * 1024 * 1024;
+// Cloudflare Email Sending to a Worker-routed destination accepts at most
+// 5 MiB, even though Email Routing accepts inbound messages up to 25 MiB. Stay
+// a full MiB below the sending boundary so this recurring end-to-end probe
+// does not pretend it can exercise the separate inbound provider ceiling.
+export const CLOUDFLARE_WORKER_ROUTE_SENDING_MAXIMUM_RAW_BYTES =
+  5 * 1024 * 1024;
+export const LARGE_PAYLOAD_HEADROOM_BYTES = 1024 * 1024;
+export const LARGE_PAYLOAD_TARGET_RAW_BYTES =
+  CLOUDFLARE_WORKER_ROUTE_SENDING_MAXIMUM_RAW_BYTES -
+  LARGE_PAYLOAD_HEADROOM_BYTES;
+export const LARGE_PAYLOAD_MINIMUM_RECEIVED_BYTES = 4 * 1024 * 1024;
+
+// Compatibility exports for existing callers. New code and receipts use the
+// truthful large-payload terminology.
+export const NEAR_LIMIT_HEADROOM_BYTES = LARGE_PAYLOAD_HEADROOM_BYTES;
+export const NEAR_LIMIT_TARGET_RAW_BYTES = LARGE_PAYLOAD_TARGET_RAW_BYTES;
+export const NEAR_LIMIT_MINIMUM_RECEIVED_BYTES =
+  LARGE_PAYLOAD_MINIMUM_RECEIVED_BYTES;
 
 function required(value, name) {
   const raw = String(value ?? "");
@@ -61,29 +74,29 @@ function emailAddress(value, name) {
 }
 
 function productionSender(value) {
-  const normalized = emailAddress(value, "AGENT_EMAIL_NEAR_LIMIT_FROM");
+  const normalized = emailAddress(value, "AGENT_EMAIL_LARGE_PAYLOAD_FROM");
   if (normalized !== PRODUCTION_CANARY_FROM) {
     throw new Error(
-      `AGENT_EMAIL_NEAR_LIMIT_FROM must be ${PRODUCTION_CANARY_FROM}`,
+      `AGENT_EMAIL_LARGE_PAYLOAD_FROM must be ${PRODUCTION_CANARY_FROM}`,
     );
   }
   return normalized;
 }
 
 function productionRecipient(value) {
-  const normalized = emailAddress(value, "AGENT_EMAIL_NEAR_LIMIT_TO");
+  const normalized = emailAddress(value, "AGENT_EMAIL_LARGE_PAYLOAD_TO");
   let parsed;
   try {
     parsed = parseRouteAddress(normalized, false);
   } catch {
     throw new Error(
-      `AGENT_EMAIL_NEAR_LIMIT_TO must be one canonical @${PRODUCTION_DOMAIN} address`,
+      `AGENT_EMAIL_LARGE_PAYLOAD_TO must be one canonical @${PRODUCTION_DOMAIN} address`,
     );
   }
   if (parsed.domain !== PRODUCTION_DOMAIN ||
       !CANONICAL_REALM_LABEL.test(parsed.realmLabel)) {
     throw new Error(
-      `AGENT_EMAIL_NEAR_LIMIT_TO must be one canonical @${PRODUCTION_DOMAIN} address`,
+      `AGENT_EMAIL_LARGE_PAYLOAD_TO must be one canonical @${PRODUCTION_DOMAIN} address`,
     );
   }
   return normalized;
@@ -92,15 +105,15 @@ function productionRecipient(value) {
 function productionCellEndpoint(value) {
   let parsed;
   try {
-    parsed = new URL(required(value, "WITSELF_EMAIL_NEAR_LIMIT_ENDPOINT"));
+    parsed = new URL(required(value, "WITSELF_EMAIL_LARGE_PAYLOAD_ENDPOINT"));
   } catch {
-    throw new Error("WITSELF_EMAIL_NEAR_LIMIT_ENDPOINT is missing or invalid");
+    throw new Error("WITSELF_EMAIL_LARGE_PAYLOAD_ENDPOINT is missing or invalid");
   }
   if (parsed.protocol !== "https:" || parsed.username || parsed.password ||
       parsed.hash || parsed.search || parsed.port || parsed.pathname !== "/" ||
       !isProductionCellHost(parsed.hostname)) {
     throw new Error(
-      "WITSELF_EMAIL_NEAR_LIMIT_ENDPOINT must be the root HTTPS URL of one production cell",
+      "WITSELF_EMAIL_LARGE_PAYLOAD_ENDPOINT must be the root HTTPS URL of one production cell",
     );
   }
   return parsed.toString().replace(/\/$/, "");
@@ -109,31 +122,62 @@ function productionCellEndpoint(value) {
 function boundedTimeout(value) {
   const raw = String(value ?? "600");
   if (!/^\d+$/.test(raw)) {
-    throw new Error("AGENT_EMAIL_NEAR_LIMIT_TIMEOUT_SECONDS is invalid");
+    throw new Error("AGENT_EMAIL_LARGE_PAYLOAD_TIMEOUT_SECONDS is invalid");
   }
   const seconds = Number(raw);
   if (!Number.isSafeInteger(seconds) || seconds < 60 || seconds > 900) {
     throw new Error(
-      "AGENT_EMAIL_NEAR_LIMIT_TIMEOUT_SECONDS must be between 60 and 900",
+      "AGENT_EMAIL_LARGE_PAYLOAD_TIMEOUT_SECONDS must be between 60 and 900",
     );
   }
   return seconds;
 }
 
-export function nearLimitProbeConfiguration(env = process.env) {
+function preferredEnvironmentValue(env, preferredName, compatibilityName) {
+  return env[preferredName] === undefined
+    ? env[compatibilityName]
+    : env[preferredName];
+}
+
+export function largePayloadProbeConfiguration(env = process.env) {
   const identity = assertProductionCloudflareIdentity(env);
   return {
     accountID: identity.account_id,
     cloudflareToken: env.CLOUDFLARE_API_TOKEN,
-    from: productionSender(env.AGENT_EMAIL_NEAR_LIMIT_FROM),
-    to: productionRecipient(env.AGENT_EMAIL_NEAR_LIMIT_TO),
-    endpoint: productionCellEndpoint(env.WITSELF_EMAIL_NEAR_LIMIT_ENDPOINT),
+    from: productionSender(preferredEnvironmentValue(
+      env,
+      "AGENT_EMAIL_LARGE_PAYLOAD_FROM",
+      "AGENT_EMAIL_NEAR_LIMIT_FROM",
+    )),
+    to: productionRecipient(preferredEnvironmentValue(
+      env,
+      "AGENT_EMAIL_LARGE_PAYLOAD_TO",
+      "AGENT_EMAIL_NEAR_LIMIT_TO",
+    )),
+    endpoint: productionCellEndpoint(preferredEnvironmentValue(
+      env,
+      "WITSELF_EMAIL_LARGE_PAYLOAD_ENDPOINT",
+      "WITSELF_EMAIL_NEAR_LIMIT_ENDPOINT",
+    )),
     witselfToken: credential(
-      env.WITSELF_EMAIL_NEAR_LIMIT_TOKEN,
-      "WITSELF_EMAIL_NEAR_LIMIT_TOKEN",
+      preferredEnvironmentValue(
+        env,
+        "WITSELF_EMAIL_LARGE_PAYLOAD_TOKEN",
+        "WITSELF_EMAIL_NEAR_LIMIT_TOKEN",
+      ),
+      "WITSELF_EMAIL_LARGE_PAYLOAD_TOKEN",
     ),
-    timeoutSeconds: boundedTimeout(env.AGENT_EMAIL_NEAR_LIMIT_TIMEOUT_SECONDS),
+    timeoutSeconds: boundedTimeout(preferredEnvironmentValue(
+      env,
+      "AGENT_EMAIL_LARGE_PAYLOAD_TIMEOUT_SECONDS",
+      "AGENT_EMAIL_NEAR_LIMIT_TIMEOUT_SECONDS",
+    )),
   };
+}
+
+// Retained so an older operator wrapper can load this module during rollout.
+export function nearLimitProbeConfiguration(env = process.env) {
+  return largePayloadProbeConfiguration(env);
 }
 
 function syntheticAttachmentBody(bytes, correlationNonce) {
@@ -141,11 +185,11 @@ function syntheticAttachmentBody(bytes, correlationNonce) {
   // incompressible storage pressure without incorporating user data or a
   // secret. Map it to 7-bit-safe characters and bounded RFC 5322 lines.
   const key = createHash("sha256")
-    .update("witself-near-limit-probe-key-v1\0", "utf8")
+    .update("witself-large-payload-probe-key-v1\0", "utf8")
     .update(correlationNonce, "ascii")
     .digest();
   const iv = createHash("sha256")
-    .update("witself-near-limit-probe-iv-v1\0", "utf8")
+    .update("witself-large-payload-probe-iv-v1\0", "utf8")
     .update(correlationNonce, "ascii")
     .digest()
     .subarray(0, 16);
@@ -160,7 +204,7 @@ function syntheticAttachmentBody(bytes, correlationNonce) {
     offset += encrypted.length;
   }
   if (cipher.final().length !== 0 || offset !== body.length) {
-    throw new Error("near-limit probe synthetic stream generation failed");
+    throw new Error("large-payload probe synthetic stream generation failed");
   }
   const alphabet = Buffer.from(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
@@ -182,61 +226,66 @@ function syntheticAttachmentBody(bytes, correlationNonce) {
   return body.toString("ascii");
 }
 
-export function buildNearLimitProbeMIME(
+export function buildLargePayloadProbeMIME(
   config,
   { correlationNonce, now = Date.now() },
 ) {
   if (!UUID_V4.test(String(correlationNonce ?? ""))) {
-    throw new Error("near-limit probe correlation nonce is invalid");
+    throw new Error("large-payload probe correlation nonce is invalid");
   }
   const instant = new Date(now);
   if (Number.isNaN(instant.getTime())) {
-    throw new Error("near-limit probe clock is invalid");
+    throw new Error("large-payload probe clock is invalid");
   }
-  const boundary = `witself-near-limit-${correlationNonce}`;
-  const subject = `Witself near-limit receive probe ${correlationNonce}`;
+  const boundary = `witself-large-payload-${correlationNonce}`;
+  const subject = `Witself large-payload receive probe ${correlationNonce}`;
   const prefix = [
     `From: ${config.from}`,
     `To: ${config.to}`,
     `Date: ${instant.toUTCString()}`,
-    `Message-ID: <near-limit-${correlationNonce}@send.witmail.net>`,
+    `Message-ID: <large-payload-${correlationNonce}@send.witmail.net>`,
     `Subject: ${subject}`,
     "MIME-Version: 1.0",
-    "X-Witself-Canary: receive-near-limit-v1",
+    "X-Witself-Canary: receive-large-payload-v1",
     `Content-Type: multipart/mixed; boundary="${boundary}"`,
     "",
     `--${boundary}`,
     'Content-Type: text/plain; charset="utf-8"',
     "Content-Transfer-Encoding: 7bit",
     "",
-    "Synthetic near-limit production receive probe. No user content.",
+    "Synthetic large-payload production receive probe. No user content.",
     `--${boundary}`,
-    'Content-Type: application/octet-stream; name="near-limit-probe.bin"',
+    'Content-Type: application/octet-stream; name="large-payload-probe.bin"',
     "Content-Transfer-Encoding: 7bit",
-    'Content-Disposition: attachment; filename="near-limit-probe.bin"',
+    'Content-Disposition: attachment; filename="large-payload-probe.bin"',
     "",
   ].join("\r\n") + "\r\n";
   const suffix = `\r\n--${boundary}--\r\n`;
-  const attachmentBytes = NEAR_LIMIT_TARGET_RAW_BYTES -
+  const attachmentBytes = LARGE_PAYLOAD_TARGET_RAW_BYTES -
     Buffer.byteLength(prefix, "utf8") - Buffer.byteLength(suffix, "utf8");
   if (!Number.isSafeInteger(attachmentBytes) || attachmentBytes < 1) {
-    throw new Error("near-limit probe MIME framing exceeded its target");
+    throw new Error("large-payload probe MIME framing exceeded its target");
   }
   const mimeMessage = prefix +
     syntheticAttachmentBody(attachmentBytes, correlationNonce) + suffix;
   const rawBytes = Buffer.byteLength(mimeMessage, "utf8");
-  if (rawBytes !== NEAR_LIMIT_TARGET_RAW_BYTES ||
-      rawBytes >= RELAY_MAXIMUM_RAW_BYTES) {
-    throw new Error("near-limit probe MIME size missed its reviewed target");
+  if (rawBytes !== LARGE_PAYLOAD_TARGET_RAW_BYTES ||
+      rawBytes >= CLOUDFLARE_WORKER_ROUTE_SENDING_MAXIMUM_RAW_BYTES) {
+    throw new Error("large-payload probe MIME size missed its reviewed target");
   }
   return { mimeMessage, subject, rawBytes, attachmentBytes };
+}
+
+// Compatibility export for the prior module API.
+export function buildNearLimitProbeMIME(config, options) {
+  return buildLargePayloadProbeMIME(config, options);
 }
 
 function withAbsoluteDeadline(fetchAPI, deadlineAt, now) {
   return async function boundedFetch(url, init = {}) {
     const remainingMS = Math.ceil(deadlineAt - now());
     if (!Number.isSafeInteger(remainingMS) || remainingMS <= 0) {
-      throw new Error("near-limit receive probe deadline exceeded");
+      throw new Error("large-payload receive probe deadline exceeded");
     }
     const deadlineSignal = AbortSignal.timeout(remainingMS);
     const signal = init.signal
@@ -245,12 +294,27 @@ function withAbsoluteDeadline(fetchAPI, deadlineAt, now) {
     try {
       return await fetchAPI(url, { ...init, signal });
     } catch {
-      throw new Error("near-limit receive probe request failed");
+      throw new Error("large-payload receive probe request failed");
     }
   };
 }
 
-async function responseJSON(response, operation) {
+function cloudflareErrorCodeSuffix(value) {
+  if (!Array.isArray(value?.errors)) return "";
+  const codes = [];
+  for (const error of value.errors.slice(0, MAXIMUM_CLOUDFLARE_ERROR_CODES)) {
+    const code = error?.code;
+    if (Number.isSafeInteger(code) && code >= 0 && code <= 999_999_999 &&
+        !codes.includes(code)) {
+      codes.push(code);
+    }
+  }
+  return codes.length === 0
+    ? ""
+    : ` (Cloudflare error codes: ${codes.join(",")})`;
+}
+
+async function responseJSON(response, operation, { cloudflare = false } = {}) {
   let value;
   try {
     value = await response.json();
@@ -259,7 +323,8 @@ async function responseJSON(response, operation) {
   }
   if (!response.ok || !value || typeof value !== "object" ||
       Array.isArray(value)) {
-    throw new Error(`${operation} failed with status ${response.status}`);
+    const suffix = cloudflare ? cloudflareErrorCodeSuffix(value) : "";
+    throw new Error(`${operation} failed with status ${response.status}${suffix}`);
   }
   return value;
 }
@@ -282,14 +347,14 @@ function witselfClient(config, fetchAPI) {
       body: body === undefined ? undefined : JSON.stringify(body),
       redirect: "error",
     });
-    return responseJSON(response, "Witself near-limit probe request");
+    return responseJSON(response, "Witself large-payload probe request");
   };
 }
 
 function assertStoragePreflight(value) {
   if (value?.maximum_raw_bytes !== RELAY_MAXIMUM_RAW_BYTES) {
     throw new Error(
-      "near-limit probe requires the account raw-message limit at the reviewed service ceiling",
+      "large-payload probe requires the account raw-message limit at the reviewed 25 MiB service ceiling",
     );
   }
   const capacity = value.attachment_capacity;
@@ -300,7 +365,7 @@ function assertStoragePreflight(value) {
         (!Number.isSafeInteger(capacity.remaining) ||
           capacity.remaining < RELAY_MAXIMUM_RAW_BYTES))) {
     throw new Error(
-      "near-limit probe requires enough attachment capacity to retain one complete message",
+      "large-payload probe requires enough attachment capacity for one service-ceiling message",
     );
   }
 }
@@ -333,6 +398,20 @@ function sendingResult(value) {
 }
 
 async function submitRawEmail(config, message, fetchAPI) {
+  const requestBody = JSON.stringify({
+    from: config.from,
+    recipients: [config.to],
+    mime_message: message.mimeMessage,
+  });
+  // Cloudflare documents the mail-size limit rather than whether JSON escape
+  // overhead is counted. Keep the complete REST request body under the same
+  // 5 MiB bound as an additional fail-closed safety margin.
+  if (Buffer.byteLength(requestBody, "utf8") >=
+      CLOUDFLARE_WORKER_ROUTE_SENDING_MAXIMUM_RAW_BYTES) {
+    throw new Error(
+      "large-payload probe request framing exceeded the sending safety margin",
+    );
+  }
   const response = await fetchAPI(
     `${CLOUDFLARE_API_ROOT}/accounts/${config.accountID}/email/sending/send_raw`,
     {
@@ -341,37 +420,39 @@ async function submitRawEmail(config, message, fetchAPI) {
         Authorization: `Bearer ${config.cloudflareToken}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        from: config.from,
-        recipients: [config.to],
-        mime_message: message.mimeMessage,
-      }),
+      body: requestBody,
       redirect: "error",
     },
   );
-  const envelope = await responseJSON(response, "Cloudflare raw email submission");
+  const envelope = await responseJSON(
+    response,
+    "Cloudflare raw email submission",
+    { cloudflare: true },
+  );
   if (envelope.success !== true) {
-    throw new Error("Cloudflare raw email submission was rejected");
+    throw new Error(
+      `Cloudflare raw email submission was rejected${cloudflareErrorCodeSuffix(envelope)}`,
+    );
   }
   const result = sendingResult(envelope.result);
   if (result.permanent_bounces.length > 0) {
-    throw new Error("Cloudflare permanently bounced the near-limit probe");
+    throw new Error("Cloudflare permanently bounced the large-payload probe");
   }
   if (!acceptedBySendingAPI(result)) {
-    throw new Error("Cloudflare did not confirm the near-limit probe submission");
+    throw new Error("Cloudflare did not confirm the large-payload probe submission");
   }
 }
 
 function emailPage(value) {
   if (!Array.isArray(value?.messages) ||
       value.messages.length > DISCOVERY_PAGE_SIZE) {
-    throw new Error("near-limit probe email list response was invalid");
+    throw new Error("large-payload probe email list response was invalid");
   }
   for (const message of value.messages) {
     if (!message || typeof message !== "object" || Array.isArray(message) ||
         !MESSAGE_ID.test(String(message.id ?? "")) ||
         (message.subject !== undefined && typeof message.subject !== "string")) {
-      throw new Error("near-limit probe email list response was invalid");
+      throw new Error("large-payload probe email list response was invalid");
     }
   }
   const cursor = value.next_cursor;
@@ -380,7 +461,7 @@ function emailPage(value) {
   }
   if (typeof cursor !== "string" || cursor.length > MAXIMUM_CURSOR_BYTES ||
       /[\u0000-\u001f\u007f]/.test(cursor)) {
-    throw new Error("near-limit probe email list cursor was invalid");
+    throw new Error("large-payload probe email list cursor was invalid");
   }
   return { messages: value.messages, nextCursor: cursor };
 }
@@ -407,18 +488,18 @@ async function findMessageOnce(request, subject, unacked) {
     if (message) return message;
     if (!page.nextCursor) return undefined;
     if (seen.has(page.nextCursor)) {
-      throw new Error("near-limit probe email list cursor repeated");
+      throw new Error("large-payload probe email list cursor repeated");
     }
     seen.add(page.nextCursor);
     cursor = page.nextCursor;
   }
-  throw new Error("near-limit probe email list exceeded the safe page limit");
+  throw new Error("large-payload probe email list exceeded the safe page limit");
 }
 
 async function deadlineSleep(milliseconds, deadlineAt, now, sleep) {
   const remaining = deadlineAt - now();
   if (!Number.isSafeInteger(remaining) || remaining <= 0) {
-    throw new Error("near-limit receive probe deadline exceeded");
+    throw new Error("large-payload receive probe deadline exceeded");
   }
   await sleep(Math.min(milliseconds, remaining));
 }
@@ -431,7 +512,7 @@ async function discoverMessage(request, subject, deadlineAt, now, sleep) {
   }
 }
 
-function assertRetainedNearLimitMessage(message, config, subject) {
+function assertRetainedLargePayloadMessage(message, config, subject) {
   if (!message || message.subject !== subject ||
       message.provider !== "cloudflare_email_routing" ||
       message.envelope_sender !== config.from ||
@@ -440,13 +521,13 @@ function assertRetainedNearLimitMessage(message, config, subject) {
       String(message.subaddress_tag ?? "") !== "" ||
       message.parse_state !== "parsed" || message.attachment_count !== 1 ||
       !Number.isSafeInteger(message.raw_size_bytes) ||
-      message.raw_size_bytes < NEAR_LIMIT_MINIMUM_RECEIVED_BYTES ||
+      message.raw_size_bytes < LARGE_PAYLOAD_MINIMUM_RECEIVED_BYTES ||
       message.raw_size_bytes > RELAY_MAXIMUM_RAW_BYTES ||
       message.attachment_storage_bytes !== message.raw_size_bytes ||
       message.retained_attachment_storage_bytes !== message.raw_size_bytes ||
       message.payload_retention_state !== "retained") {
     throw new Error(
-      "near-limit probe did not produce one canonical durably retained message",
+      "large-payload probe did not produce one canonical durably retained message",
     );
   }
   return message.raw_size_bytes;
@@ -457,7 +538,7 @@ function processingClaim(value) {
   if (!processing || processing.state !== "claimed" ||
       !CLAIM_ID.test(String(processing.claim_id ?? "")) ||
       !Number.isSafeInteger(processing.generation) || processing.generation < 1) {
-    throw new Error("near-limit probe claim response was invalid");
+    throw new Error("large-payload probe claim response was invalid");
   }
   return processing;
 }
@@ -465,12 +546,12 @@ function processingClaim(value) {
 function freshUUID(uuid, operation) {
   const value = uuid();
   if (!UUID_V4.test(String(value ?? ""))) {
-    throw new Error(`near-limit probe ${operation} UUID was invalid`);
+    throw new Error(`large-payload probe ${operation} UUID was invalid`);
   }
   return value;
 }
 
-export async function runNearLimitProbePreflight(config, runtime = {}) {
+export async function runLargePayloadProbePreflight(config, runtime = {}) {
   const now = runtime.now ?? Date.now;
   const startedAt = now();
   const deadlineAt = startedAt + config.timeoutSeconds * 1000;
@@ -478,10 +559,13 @@ export async function runNearLimitProbePreflight(config, runtime = {}) {
   const request = witselfClient(config, fetchAPI);
   assertStoragePreflight(await request("/v1/email:status"));
   return {
-    schema: "witself.agent-email.near-limit-probe-preflight.v1",
+    schema: "witself.agent-email.large-payload-probe-preflight.v1",
     outcome: "ready",
-    ceiling_bytes: RELAY_MAXIMUM_RAW_BYTES,
-    target_raw_bytes: NEAR_LIMIT_TARGET_RAW_BYTES,
+    service_inbound_ceiling_bytes: RELAY_MAXIMUM_RAW_BYTES,
+    worker_route_sending_maximum_raw_bytes:
+      CLOUDFLARE_WORKER_ROUTE_SENDING_MAXIMUM_RAW_BYTES,
+    target_raw_bytes: LARGE_PAYLOAD_TARGET_RAW_BYTES,
+    live_provider_inbound_ceiling_certified: false,
     attachment_capacity_sufficient: true,
     provider_mutation_performed: false,
     payload_allocated: false,
@@ -490,7 +574,7 @@ export async function runNearLimitProbePreflight(config, runtime = {}) {
   };
 }
 
-export async function runNearLimitProbe(config, runtime = {}) {
+export async function runLargePayloadProbe(config, runtime = {}) {
   const now = runtime.now ?? Date.now;
   const sleep = runtime.sleep ?? ((milliseconds) =>
     new Promise((resolve) => setTimeout(resolve, milliseconds)));
@@ -502,7 +586,7 @@ export async function runNearLimitProbe(config, runtime = {}) {
 
   assertStoragePreflight(await request("/v1/email:status"));
   const correlationNonce = freshUUID(uuid, "correlation");
-  const message = buildNearLimitProbeMIME(config, {
+  const message = buildLargePayloadProbeMIME(config, {
     correlationNonce,
     now: now(),
   });
@@ -515,7 +599,7 @@ export async function runNearLimitProbe(config, runtime = {}) {
     now,
     sleep,
   );
-  const receivedRawBytes = assertRetainedNearLimitMessage(
+  const receivedRawBytes = assertRetainedLargePayloadMessage(
     received,
     config,
     message.subject,
@@ -546,7 +630,7 @@ export async function runNearLimitProbe(config, runtime = {}) {
     if (completion?.processing?.state !== "completed" ||
         completion.processing.claim_id !== claim.claim_id ||
         completion.processing.generation !== claim.generation) {
-      throw new Error("near-limit probe completion response was invalid");
+      throw new Error("large-payload probe completion response was invalid");
     }
     completed = true;
 
@@ -557,9 +641,9 @@ export async function runNearLimitProbe(config, runtime = {}) {
     if (acknowledged?.message?.id !== received.id ||
         acknowledged.message.read_state?.state !== "acked" ||
         acknowledged.message.processing?.state !== "completed") {
-      throw new Error("near-limit probe acknowledgement response was invalid");
+      throw new Error("large-payload probe acknowledgement response was invalid");
     }
-    assertRetainedNearLimitMessage(
+    assertRetainedLargePayloadMessage(
       acknowledged.message,
       config,
       message.subject,
@@ -590,15 +674,19 @@ export async function runNearLimitProbe(config, runtime = {}) {
       afterCleanup.read_state?.state !== "acked" ||
       afterCleanup.processing?.state !== "completed") {
     throw new Error(
-      "near-limit probe was not durable after mailbox acknowledgement",
+      "large-payload probe was not durable after mailbox acknowledgement",
     );
   }
-  assertRetainedNearLimitMessage(afterCleanup, config, message.subject);
+  assertRetainedLargePayloadMessage(afterCleanup, config, message.subject);
 
   return {
-    schema: "witself.agent-email.near-limit-probe.v1",
+    schema: "witself.agent-email.large-payload-probe.v1",
     outcome: "passed",
-    ceiling_bytes: RELAY_MAXIMUM_RAW_BYTES,
+    service_inbound_ceiling_bytes: RELAY_MAXIMUM_RAW_BYTES,
+    worker_route_sending_maximum_raw_bytes:
+      CLOUDFLARE_WORKER_ROUTE_SENDING_MAXIMUM_RAW_BYTES,
+    live_provider_inbound_ceiling_certified: false,
+    local_inbound_ceiling_tests_required: true,
     submitted_raw_bytes: message.rawBytes,
     received_raw_bytes: receivedRawBytes,
     retained_attachment_storage_bytes: receivedRawBytes,
@@ -616,21 +704,30 @@ export async function runNearLimitProbe(config, runtime = {}) {
   };
 }
 
+// Compatibility exports for the prior module API and npm command.
+export function runNearLimitProbePreflight(config, runtime = {}) {
+  return runLargePayloadProbePreflight(config, runtime);
+}
+
+export function runNearLimitProbe(config, runtime = {}) {
+  return runLargePayloadProbe(config, runtime);
+}
+
 async function main(args = process.argv.slice(2)) {
   if (args.length > 1 || (args.length === 1 && args[0] !== "--preflight")) {
-    throw new Error("usage: near-limit-probe.mjs [--preflight]");
+    throw new Error("usage: large-payload-probe [--preflight]");
   }
-  const config = nearLimitProbeConfiguration();
+  const config = largePayloadProbeConfiguration();
   return args[0] === "--preflight"
-    ? runNearLimitProbePreflight(config)
-    : runNearLimitProbe(config);
+    ? runLargePayloadProbePreflight(config)
+    : runLargePayloadProbe(config);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   main()
     .then((result) => process.stdout.write(`${JSON.stringify(result)}\n`))
     .catch((error) => {
-      process.stderr.write(`agent-email near-limit probe: ${error.message}\n`);
+      process.stderr.write(`agent-email large-payload probe: ${error.message}\n`);
       process.exitCode = 1;
     });
 }

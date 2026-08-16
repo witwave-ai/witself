@@ -445,7 +445,7 @@ Keep the rollout dark in this order:
    all passed review. Use the separately fenced production path: bootstrap
    `witself-agent-email-receive` dark, converge the exact account cohort and
    mailbox backfill, establish the operator role routes, and require the
-   ordinary, storage, and near-limit production probes below to pass before
+   ordinary, storage, and large-payload production probes below to pass before
    broad routing. Keep the public apex catch-all disabled until its own
    reviewed activation step.
 5. Treat canonical inventory, canonical delivery, alias activation, and alias
