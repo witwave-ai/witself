@@ -27,10 +27,13 @@ apps:
     namespace: witself
     # The apps chart emits worker.agentEmailRetention settings, which require
     # the v0.0.211+ server chart schema.
-    chartVersion: 0.0.245
-    imageTag: 0.0.245
+    chartVersion: 0.0.249
+    imageTag: 0.0.249
     backendKind: managed
     agentEmail:
+      providerEventTokenSecret:
+        name: witself-agent-email-provider-event-v2
+        key: token
       receivePilot:
         enabled: false
       receiveProduction:
@@ -63,6 +66,14 @@ apps:
       podDisruptionBudget:
         enabled: false
       topologySpreadConstraints: []
+      agentEmailOutbound:
+        enabled: false
+        dispatchEndpoint: https://witself-agent-email-send.witwave.workers.dev/v1/dispatch
+        dispatchAudience: witself-agent-email-send
+        dispatchKeyID: civo-sandbox-usw2-dev-2026-08
+        dispatchPrivateKeySecret:
+          name: witself-agent-email-outbound-dispatch-v1
+          key: private-key
     awsAlbIngress:
       enabled: false
     gcpIngress:
