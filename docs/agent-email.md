@@ -65,7 +65,12 @@ Inbound admission retains its independent sender-recipient, recipient, and
 realm count/byte breakers. Its non-optional account lanes refill at 5,000
 messages and 1 GiB raw MIME per minute with immediate burst tolerances of 100
 messages and 64 MiB. The adapter retains its payload, receipt, route, retry, and
-provider safety bounds.
+provider safety bounds. Those rate and payload ceilings bound the arrival rate
+and per-request work; they do not bound cumulative retained storage. Founder's
+explicit-unlimited attachment pool plus indefinite retention can therefore grow
+PostgreSQL without a fixed total byte ceiling. Keep the production cohort narrow
+until a reviewed cell-wide retained-byte high-water, object-storage/sharding
+design, or equivalent admission control exists.
 Plan or account-policy changes require no client or MCP reinstall; the
 installed tools receive a stable `feature_not_enabled` refusal whenever
 effective send is off.
@@ -137,7 +142,10 @@ reopening provider traffic; schema-89-only binaries are not a rollback after
 that migration lands.
 
 The Founder account has explicit indefinite agent-email retention, so its mail
-is not eligible for age deletion. The v0.0.252/schema-90 production deployment
+is not eligible for age deletion. Combined with the explicit-unlimited
+attachment-storage override, that leaves Founder's cumulative retained
+PostgreSQL storage unbounded even though ingress rate and individual payload
+work are bounded. The v0.0.252/schema-90 production deployment
 runs the bounded `agentEmailRetention` worker in enforcement mode on both worker
 replicas: batch 100, one-minute interval, and one shared two-minute timeout per
 run. Activation followed verification of both required pre-migration backups.
@@ -1328,23 +1336,15 @@ The kickoff verification items were resolved on 2026-07-20:
   documented at the zone apex only. Native per-realm subdomain configuration
   therefore cannot scale, which is what moved the realm label into the local
   part (see Addressing And Domain Model).
-- **Production topology: a full-coverage catch-all into an Email Worker.** On
-  the `witmail.net` apex this is the documented zone-apex catch-all; on the
-  `agent-mail.witwave.ai` launch domain, the spike confirmed that the
-  zone-global catch-all covers the configured subdomain but cannot be moved
-  without also moving existing apex traffic (see Addressing And Domain Model).
-  The Worker
-  first matches reserved/role addresses and routes them to the operator —
-  explicit Email Routing rules ahead of the catch-all delivering to the
-  operator support inbox; a handful of exact addresses, well inside rule
-  caps — then parses the envelope recipient: strip any subaddress tag, split
-  the local part on its single dot, resolve `<realm-label>` to the owning
-  cell.
-  Structurally invalid or unknown recipients are rejected during the SMTP
-  transaction so the sender gets a bounce — never accepted and dropped.
-  The limited pilot is the explicit exception: exact-address rules feed the
-  Worker for enrolled agents while the pre-existing global catch-all remains
-  unchanged.
+- **Current production topology: reviewed exact-address rules into an Email
+  Worker.** The exact Founder cohort on `witmail.net` is routed to
+  `witself-agent-email-receive`; the catch-all is disabled with a drop action.
+  Separate literal role-address rules forward `postmaster` and `abuse` to the
+  operator. An unknown address therefore never reaches the content-handling
+  Worker. A full-coverage catch-all remains a possible later topology, not the
+  current production state. It may be enabled only with the reserved-address,
+  malformed-recipient, unknown-recipient, abuse-budget, and broad-cohort gates
+  reviewed together; no documentation or template should imply that it is live.
 - **Realm-to-cell routing map (settled): a KV projection.** The map
   (`realm-label` → cell ingestion endpoint) follows the locked control-plane
   directory shape: the control plane maintains a write-through Workers KV
@@ -1367,24 +1367,23 @@ The kickoff verification items were resolved on 2026-07-20:
   secrets, route associations, or rollback history.
 - **Edge-to-cell authentication (settled): Ed25519 signed relay.** The
   Worker POSTs the raw MIME to the owning cell's ingestion endpoint with a
-  detached Ed25519 signature over timestamp, provider message id, envelope
-  recipient, destination-cell audience, the edge-evaluated SPF/DKIM/DMARC
-  results, the provider spam verdict, and the body digest (standard-webhooks
-  style) — audience binding, so a capture replayed at a different cell never
-  verifies, and authentication/spam results are covered by the signature so
-  they are the cell's sole trust anchor for sender authenticity (the cell
-  never trusts message-header trace fields; see the SMTP contract). The private key lives as a Worker secret; cells verify against
-  the control-plane-published public key, cached and pinned, with a bounded
-  clock-skew replay window. Rotation is a dual-key overlap: publish the
-  successor, re-sign, retire the predecessor. Compromise recovery is the
-  same mechanism run fast: publish the successor and delist the compromised
+  detached Ed25519 signature over timestamp, key id, destination-cell audience,
+  envelope sender, envelope recipient, raw size, and body digest. Audience
+  binding means a capture replayed at another cell never verifies. Cloudflare's
+  EmailMessage event exposes no authoritative provider message id,
+  SPF/DKIM/DMARC result, or spam verdict, so none appears in the signed envelope
+  and none may be synthesized from MIME headers. Stored mail therefore remains
+  sender-unverified. The private key lives as a Worker secret; cells verify
+  against the control-plane-published public key, cached and pinned, with a
+  bounded clock-skew replay window. Rotation is a dual-key overlap: publish the
+  successor, re-sign, retire the predecessor. Compromise recovery is the same
+  mechanism run fast: publish the successor and delist the compromised
   key; cells hard-fail on delisted keys and surface the attempt as a
   forged-relay event. No per-cell secret fan-out; self-hosted cells verify
   their own edge's key the same way.
-  During the limited pilot the same signature and audience binding protect a
-  reduced envelope containing only Worker-observable fields; unavailable
-  provider identity, authentication, and spam fields are represented as
-  absent/unknown, never synthesized from MIME headers.
+  The retired pilot and current production profile both sign only
+  Worker-observable fields; unavailable provider identity, authentication, and
+  spam fields are represented as absent/unknown.
 - **Provider constraints recorded.** Inbound messages cap at 25 MiB, which
   bounds the Postgres raw-size cap below. Since July 2025 Cloudflare only
   forwards mail that passes SPF or DKIM, and the spike confirmed that the
@@ -2092,10 +2091,11 @@ in place; these are the remaining important items):
     a bounded staleness window and a hard-fail on delisted keys, plus the
     ingestion-endpoint hardening and availability posture (the OTP use case
     makes ingestion availability load-bearing).
-20. Audit + attribution: register the email audit event family; decide how
+20. Audit + attribution: the `agent_email.*` audit family and its cell
+    integration coverage are implemented. Remaining work is to settle how
     ingestion attributes a token-derived actor when the "sender" is external
-    (edge-attributed, not agent-attributed); register cell-side telemetry
-    and the synchronous-verdict latency SLO.
+    (edge-attributed, not agent-attributed), and to define the production
+    telemetry and synchronous-verdict latency SLO.
 21. Compliance posture for stored third-party correspondence: per-message
     purge/redaction, illegal-content handling, and the controller/processor,
     DSAR, and data-residency decisions for mail content held in a cell.
