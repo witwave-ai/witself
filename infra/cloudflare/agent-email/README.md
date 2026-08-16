@@ -977,43 +977,60 @@ Worker's built-in invocation metrics and repeat only after the first submission
 has been conclusively accounted for. The workflow never prepares routes,
 changes cell policy, or deletes mail.
 
-## Near-limit production receive acceptance
+## Large-payload production receive acceptance
 
-The manual `agent-email-near-limit-probe` workflow is the production acceptance
-test for the reviewed 25 MiB inbound ceiling. It is not a preview or a pilot
-simulation. It sends one real raw RFC 5322 message through Cloudflare Email
-Sending and the active `witmail.net` Email Routing Worker, then proves the
-result in the owning production cell through the recipient's owner API. It does
-not enable or exercise Witself's outbound-email queue.
+The protected workflow displayed as `agent-email-large-payload-probe` sends one
+real raw RFC 5322 message through Cloudflare Email Sending and the active
+`witmail.net` Email Routing Worker, then proves the result in the owning
+production cell through the recipient's owner API. The workflow file keeps its
+former `agent-email-near-limit-probe.yml` path so existing protected dispatch
+automation remains compatible, but this is deliberately **not** called a
+near-limit or 25 MiB provider-boundary test.
+
+For this Worker-routed destination, Cloudflare Email Sending accepts at most
+5 MiB, while Cloudflare Email Routing accepts inbound messages up to 25 MiB.
+A message sent through that 5 MiB path therefore cannot live-certify the
+separate 25 MiB inbound boundary. This probe submits exactly 4 MiB, leaving a
+full 1 MiB below the Worker-route sending limit. It proves the real end-to-end
+route, relay, MIME parsing, durable storage, mailbox lifecycle, and
+non-destructive acknowledgement for a large payload. It does not enable or
+exercise Witself's outbound-email queue. The 25 MiB Worker, signed-relay, and
+Postgres boundaries remain exact local tests: 25 MiB is accepted and one byte
+more is rejected.
 
 The workflow is protected-main-only, uses the same `agent-email-canary`
 Environment, and shares one concurrency group with the ordinary receive canary
-and storage probe so synthetic production submissions cannot collide. In
-addition to the ordinary canary variables and secrets, provision:
+and storage probe so synthetic production submissions cannot collide. Existing
+GitHub Environment configuration names are retained to avoid a credential
+migration: `WITSELF_EMAIL_NEAR_LIMIT_ENDPOINT`,
+`AGENT_EMAIL_NEAR_LIMIT_TO`, and `WITSELF_EMAIL_NEAR_LIMIT_TOKEN`. The workflow
+maps them into the canonical `*_LARGE_PAYLOAD_*` runtime names. Their values
+remain, respectively:
 
-- Environment variable `WITSELF_EMAIL_NEAR_LIMIT_ENDPOINT`: the exact root
-  `https://api.<cell>.cells.witself.witwave.ai` URL for the probe recipient's
-  owning cell, or that cell's strict
+- the exact root `https://api.<cell>.cells.witself.witwave.ai` URL for the
+  recipient's owning cell, or that cell's strict
   `https://api.<cluster-uuid>.k8s.civo.com` URL when the supported Civo path
-  owns its ingress host.
-- Environment secret `AGENT_EMAIL_NEAR_LIMIT_TO`: one reviewed disposable
-  canonical Realm-ID address on `witmail.net` (never an alias or subaddress).
-- Environment secret `WITSELF_EMAIL_NEAR_LIMIT_TOKEN`: a full agent token for
-  that exact recipient. Do not use a control-plane or operator token.
+  owns its ingress host;
+- one reviewed disposable canonical Realm-ID address on `witmail.net`, never
+  an alias or subaddress; and
+- a full agent token for that exact recipient, never a control-plane or
+  operator token.
 
 The sender remains exactly the existing `AGENT_EMAIL_CANARY_FROM` value,
 `canary@send.witmail.net`, and the Cloudflare credential remains the dedicated
-Email Sending token. A separate read-only preflight validates all of those
-fences and calls only the recipient's value-free storage-status route; it does
-not allocate the MIME body or make a provider request. Both that preflight and
-the final runner require the account's effective raw-message limit to equal
-exactly 25 MiB and require either unlimited attachment capacity or at least
-another 25 MiB of remaining capacity. The runner then constructs a
-content-free multipart MIME message of exactly 24.75 MiB. Its public,
-deterministic high-entropy synthetic attachment avoids turning the database
-proof into an unrealistically cheap compression test. The message leaves
-256 KiB for provider-added transport and authentication headers. The received
-message must still be at least 24 MiB and no more than 25 MiB.
+Email Sending token. A separate read-only preflight validates all identity and
+address fences and calls only the recipient's value-free storage-status route;
+it does not allocate the MIME body or make a provider request. The preflight
+still requires the account's effective raw-message policy to equal exactly
+25 MiB. Conservatively, it also requires either unlimited attachment capacity
+or at least one service-ceiling message's 25 MiB of remaining capacity before
+submission. The runner then constructs a content-free multipart MIME message
+of exactly 4 MiB. Its public,
+deterministic high-entropy synthetic attachment avoids turning the storage
+proof into an unrealistically cheap compression test. The runner also refuses
+submission unless the complete JSON request, including escape overhead, stays
+below 5 MiB. The received message must be at least 4 MiB and no more than
+25 MiB.
 
 A `passed` result is emitted only after all of these observations succeed:
 
@@ -1031,8 +1048,11 @@ A `passed` result is emitted only after all of these observations succeed:
   remains governed by account retention.
 
 The value-free receipt reports only byte counts, booleans, elapsed time, and
+explicitly reports `live_provider_inbound_ceiling_certified:false` and
 `time_based_retention_deletion_tested:false`; it never returns the MIME, token,
-addresses, subject nonce, message id, claim id, or provider id. The workflow
+addresses, subject nonce, message id, claim id, or provider id. A failed
+Cloudflare submission may report at most eight bounded numeric provider error
+codes; it never returns provider error messages. The workflow
 does not alter policy, backdate a row, invoke the destructive retention worker,
 or delete the message. Actual age-based expiry therefore remains covered by
 the retention worker's database tests and operational metrics, not by this
@@ -1040,12 +1060,12 @@ single bounded production request. Use a disposable mailbox on a finite
 retention policy when automatic eventual cleanup is required; a probe sent to
 an indefinite-retention account remains retained until that policy changes.
 
-Keep this workflow manual. Each successful dispatch deliberately stores nearly
-25 MiB and consumes one provider submission. A checked-in workflow is only the
-safe executable ceremony; production near-limit evidence exists only after an
-authorized main-branch dispatch returns `outcome='passed'`. A failure after
+Keep this workflow manual. Each successful dispatch deliberately stores about
+4 MiB and consumes one provider submission. A checked-in workflow is only the
+safe executable ceremony; production large-payload evidence exists only after
+an authorized main-branch dispatch returns `outcome='passed'`. A failure after
 provider submission can leave one obvious synthetic message with the fixed
-`Witself near-limit receive probe` subject prefix in the disposable mailbox;
+`Witself large-payload receive probe` subject prefix in the disposable mailbox;
 inspect that mailbox without reading the attachment, settle its lifecycle if
 needed, and let the configured retention policy remove it.
 
