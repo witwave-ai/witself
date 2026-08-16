@@ -346,10 +346,11 @@ Agent-email retention uses the same sequence with its own schema,
 lanes, and metrics. Changing `worker.agentEmailRetention` alters only the
 worker ConfigMap checksum; API pods are not restarted.
 
-The active `civo-sandbox-usw2-dev` production configuration keeps enforcement
-running even though the Founder account has an indefinite policy: two replicas,
-batch size 100, a one-minute interval, and one shared two-minute timeout per
-scheduled run. An
+The active `civo-sandbox-usw2-dev` production configuration runs retention
+cell-wide across its accounts: two replicas, batch size 100, a one-minute
+interval, and one shared two-minute timeout per scheduled run. The Founder
+email cohort has an indefinite policy, so its mail remains ineligible for age
+deletion. An
 enforce attempt executes at most 32 productive passes and 48 total passes, so
 one complete sparse 16-lane set can be skipped without consuming productive
 capacity. A capped nonempty lane is immediately due but sorts behind older due
