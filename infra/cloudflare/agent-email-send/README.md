@@ -413,6 +413,18 @@ provider schema drift, and malformed lifecycle events therefore require
 incident reconciliation instead of destroying possible bounce or complaint
 evidence.
 
+Each Queue attempt emits one structured
+`witself.agent-email-provider-event-consume-log.v1` record. Its `outcome` is a
+fixed low-cardinality reason code: `delivery_disabled`, `normalize_invalid`,
+`route_lookup_error`, `route_missing`, `target_config_invalid`,
+`target_account_unmapped`, `target_signer_unauthorized`, `cell_fetch_error`,
+`cell_http_4xx`, `cell_http_5xx`, `cell_http_other`, `unexpected_error`, or
+`acked`. The record contains only the schema, component, outcome, and
+`ack`/`retry` disposition. It never contains event or message identifiers,
+account/realm/send identifiers, addresses, message content, target URLs,
+tokens, HTTP bodies, or raw errors. Use these codes with Queue backlog and DLQ
+metrics to locate the failing boundary without exposing mail or tenancy data.
+
 Only after durable reconciliation and explicit operator approval may the DLQ
 be discarded:
 

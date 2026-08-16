@@ -17,6 +17,45 @@ const EVENT_CLASSES = new Map([
 
 class PermanentEventError extends Error {}
 
+class ProviderEventDeliveryError extends Error {
+  constructor(outcome) {
+    super("provider event delivery failed");
+    this.outcome = outcome;
+  }
+}
+
+const PROVIDER_EVENT_OUTCOMES = new Set([
+  "acked",
+  "cell_fetch_error",
+  "cell_http_4xx",
+  "cell_http_5xx",
+  "cell_http_other",
+  "delivery_disabled",
+  "normalize_invalid",
+  "route_lookup_error",
+  "route_missing",
+  "target_account_unmapped",
+  "target_config_invalid",
+  "target_signer_unauthorized",
+  "unexpected_error",
+]);
+
+function recordProviderEventOutcome(outcome, disposition, logger) {
+  const safeOutcome = PROVIDER_EVENT_OUTCOMES.has(outcome) ?
+    outcome : "unexpected_error";
+  const safeDisposition = disposition === "ack" ? "ack" : "retry";
+  try {
+    logger({
+      schema: "witself.agent-email-provider-event-consume-log.v1",
+      component: "agent-email-send",
+      outcome: safeOutcome,
+      disposition: safeDisposition,
+    });
+  } catch {
+    // Observability must never change Queue acknowledgement or retry behavior.
+  }
+}
+
 function canonicalTargetURL(raw) {
   let parsed;
   try {
@@ -145,64 +184,150 @@ export async function getProviderRoute(env, providerMessageId) {
   return route;
 }
 
-export async function forwardProviderEvent(event, route, env, fetchImpl = fetch) {
-  const routing = parseEventTargets(env.EVENT_TARGETS_JSON);
+async function deliverProviderEvent(event, route, env, fetchImpl) {
+  let routing;
+  try {
+    routing = parseEventTargets(env.EVENT_TARGETS_JSON);
+  } catch {
+    throw new ProviderEventDeliveryError("target_config_invalid");
+  }
   const cellId = routing.accountTargets.get(route.account_id);
   const target = routing.cells.get(cellId);
-  if (!target || !target.acceptedSignerKeyIds.has(route.signer_key_id)) {
-    throw new Error("provider event target does not authorize route");
+  if (!target) {
+    throw new ProviderEventDeliveryError("target_account_unmapped");
+  }
+  if (!target.acceptedSignerKeyIds.has(route.signer_key_id)) {
+    throw new ProviderEventDeliveryError("target_signer_unauthorized");
   }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10_000);
   let response;
   try {
-    response = await fetchImpl(target.url, {
-      method: "POST",
-      redirect: "error",
-      signal: controller.signal,
-      headers: {
-        "Authorization": `Bearer ${target.token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(event),
-    });
+    try {
+      response = await fetchImpl(target.url, {
+        method: "POST",
+        redirect: "error",
+        signal: controller.signal,
+        headers: {
+          "Authorization": `Bearer ${target.token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(event),
+      });
+    } catch {
+      throw new ProviderEventDeliveryError("cell_fetch_error");
+    }
   } finally {
     clearTimeout(timeout);
   }
-  if (response.status === 204) return "ack";
+  if (response?.status === 204) {
+    return { disposition: "ack", outcome: "acked" };
+  }
   // Only the cell's durable success is acknowledgement authority. A 404 can
   // race the worker's accepted-state commit, while validation or idempotency
   // conflicts can expose clock skew, schema drift, or changed provider
   // evidence. Retry every non-success through the bounded Queue policy so a
   // persistent failure becomes inspectable DLQ evidence instead of silently
   // losing a bounce or complaint.
-  return "retry";
+  if (response?.status >= 400 && response.status < 500) {
+    return { disposition: "retry", outcome: "cell_http_4xx" };
+  }
+  if (response?.status >= 500 && response.status < 600) {
+    return { disposition: "retry", outcome: "cell_http_5xx" };
+  }
+  return { disposition: "retry", outcome: "cell_http_other" };
 }
 
-export async function consumeProviderEvents(batch, env) {
+export async function forwardProviderEvent(event, route, env, fetchImpl = fetch) {
+  const result = await deliverProviderEvent(event, route, env, fetchImpl);
+  return result.disposition;
+}
+
+function settleProviderEvent(message, result, logger) {
+  if (result.disposition === "ack") {
+    message.ack();
+  } else {
+    message.retry({ delaySeconds: 60 });
+  }
+  recordProviderEventOutcome(result.outcome, result.disposition, logger);
+}
+
+async function consumeProviderEvent(message, env, fetchImpl, logger) {
+  if (String(env.EVENT_DELIVERY_ENABLED ?? "false") !== "true") {
+    settleProviderEvent(message, {
+      disposition: "retry",
+      outcome: "delivery_disabled",
+    }, logger);
+    return;
+  }
+
+  let event;
+  try {
+    event = normalizeProviderEvent(
+      message.body,
+      String(env.SEND_DOMAIN ?? "send.witmail.net"),
+    );
+  } catch {
+    settleProviderEvent(message, {
+      disposition: "retry",
+      outcome: "normalize_invalid",
+    }, logger);
+    return;
+  }
+
+  let route;
+  try {
+    route = await getProviderRoute(env, event.provider_message_id);
+  } catch {
+    settleProviderEvent(message, {
+      disposition: "retry",
+      outcome: "route_lookup_error",
+    }, logger);
+    return;
+  }
+  if (!route) {
+    // Late route registration or unexpected route loss must remain visible.
+    // Retrying through max_retries lets the Queue move it to the DLQ rather
+    // than silently acknowledging an event that could not be routed.
+    settleProviderEvent(message, {
+      disposition: "retry",
+      outcome: "route_missing",
+    }, logger);
+    return;
+  }
+
+  let result;
+  try {
+    result = await deliverProviderEvent(event, route, env, fetchImpl);
+  } catch (error) {
+    // Event-subscription schema drift and malformed provider evidence must
+    // remain inspectable. Bounded Queue retries move every unprocessable
+    // event to the DLQ instead of silently deleting bounce/complaint facts.
+    result = {
+      disposition: "retry",
+      outcome: error instanceof ProviderEventDeliveryError ?
+        error.outcome : "unexpected_error",
+    };
+  }
+  settleProviderEvent(message, result, logger);
+}
+
+export async function consumeProviderEvents(
+  batch,
+  env,
+  fetchImpl = fetch,
+  logger = (entry) => console.log(entry),
+) {
   for (const message of batch.messages) {
     try {
-      if (String(env.EVENT_DELIVERY_ENABLED ?? "false") !== "true") {
-        message.retry({ delaySeconds: 60 });
-        continue;
-      }
-      const event = normalizeProviderEvent(message.body, String(env.SEND_DOMAIN ?? "send.witmail.net"));
-      const route = await getProviderRoute(env, event.provider_message_id);
-      if (!route) {
-        // Late route registration or unexpected route loss must remain visible.
-        // Retrying through max_retries lets the Queue move it to the DLQ rather
-        // than silently acknowledging an event that could not be routed.
-        message.retry({ delaySeconds: 60 });
-        continue;
-      }
-      const result = await forwardProviderEvent(event, route, env);
-      if (result === "ack") message.ack();
-      else message.retry({ delaySeconds: 60 });
+      await consumeProviderEvent(message, env, fetchImpl, logger);
     } catch {
-      // Event-subscription schema drift and malformed provider evidence must
-      // remain inspectable. Bounded Queue retries move every unprocessable
-      // event to the DLQ instead of silently deleting bounce/complaint facts.
-      message.retry({ delaySeconds: 60 });
+      // Preserve the original fail-closed behavior for any unclassified error,
+      // including an acknowledgement failure.
+      settleProviderEvent(message, {
+        disposition: "retry",
+        outcome: "unexpected_error",
+      }, logger);
     }
   }
 }
