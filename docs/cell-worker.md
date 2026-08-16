@@ -158,19 +158,35 @@ scripts/run-agent-email-receipt-proof.sh \
 Replace the checksum example with the exact 64-character `checksum/config`
 annotation approved for that rollout. The helper also verifies the active
 server's checksummed managed-cell identity, requires exactly two fully ready
-worker replicas, and rereads every source before its fixed lock and Job are
-created. It copies only the dispatch endpoint, dispatch key ID, provider
-timeout, database Secret reference, and immutable dispatch-key Secret
-reference. Secret values are never read. The expected attempt count is fixed
-at one; it is not an operator-adjustable flag.
+worker replicas, validates the exact Deployment-to-ReplicaSet-to-Pod ownership
+chain for both ready worker Pods, and rereads every source before its fixed
+lock and Job are created. It first snapshots the private kubeconfig at mode
+0400, so a concurrent rewrite of the operator's original file cannot redirect
+later reads, writes, logs, or cleanup. It copies only the dispatch endpoint,
+dispatch key ID, provider timeout, database Secret reference, and immutable
+dispatch-key Secret reference. Secret values are never read. The database
+Secret remains compatible with ExternalSecret rotation: its explicit mutable
+state and exact UID/resourceVersion must remain unchanged through the initial,
+pre-lock, pre-Job, post-proof-Pod-start, and post-proof-read fences. The
+dispatch Secret is immutable and receives the same UID/resourceVersion
+rechecks. That metadata fence is paired with an exact
+account/send/accepted-at/attempt/provider row check and the edge receipt's
+digest-and-signer match. The expected attempt count is fixed at one; it is not
+an operator-adjustable flag.
 
 The Job is fixed-name, backoff-free, deadline bounded, tokenless, non-root,
-read-only-root, and deleted with foreground propagation. If deletion or pod
-absence cannot be proved, the immutable fixed-name lock remains for explicit
-operator cleanup. On success stdout is only the locally revalidated closed
-receipt proof. It is not an API, worker job, retry loop, or agent command. It
-does not run migrations. Its PostgreSQL transaction is explicitly
-repeatable-read and read-only.
+read-only-root, and deleted with foreground propagation. The helper captures
+the API-assigned lock and Job UIDs, accepts logs only from the exact Pod whose
+controller owner is that Job UID, and rereads the exact lock, Job, and Pod
+after the log read. Cleanup sends Kubernetes `DeleteOptions` with the captured
+UID as a precondition, so a same-name replacement cannot be read or deleted.
+It then polls the exact Pod name to absence while enforcing the captured Pod
+UID and separately requires the Job-label selector to be empty. If exact
+deletion or owned-Pod absence cannot be proved, the immutable fixed-name lock
+remains for explicit operator cleanup. On success stdout is only the locally
+revalidated closed receipt proof. It is not an API, worker job, retry loop, or
+agent command. It does not run migrations. Its PostgreSQL transaction is
+explicitly repeatable-read and read-only.
 
 The command reconstructs the dispatch through the same production projection
 and deterministic JSON serializer used by the live worker. Before signing, it

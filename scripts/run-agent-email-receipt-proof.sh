@@ -47,6 +47,15 @@ file_mode() {
   printf '%s\n' "$mode"
 }
 
+file_identity() {
+  local identity
+  identity="$(stat -f '%d:%i:%z:%m' "$1" 2>/dev/null || true)"
+  if [[ ! "$identity" =~ ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$ ]]; then
+    identity="$(stat -c '%d:%i:%s:%Y' "$1" 2>/dev/null || true)"
+  fi
+  printf '%s\n' "$identity"
+}
+
 canonical_file_path() {
   local path="$1"
   local parent base resolved_parent
@@ -94,6 +103,11 @@ validate_source_deployment() {
     ((.status.unavailableReplicas // 0) == 0) and
     .spec.template.spec.automountServiceAccountToken == false and
     (.spec.template.spec.serviceAccountName | type == "string" and length > 0) and
+    .spec.selector.matchLabels == {
+      "app.kubernetes.io/component": "worker",
+      "app.kubernetes.io/instance": "witself-server",
+      "app.kubernetes.io/name": "witself-worker"
+    } and
     .spec.template.metadata.annotations["checksum/config"] == $checksum and
     ([.spec.template.spec.containers[] | select(.name == "witself-worker")] | length == 1) and
     (.spec.template.spec.containers[] | select(.name == "witself-worker") |
@@ -289,6 +303,203 @@ write_config_fence() {
   }' "$source_file" >"$output_file"
 }
 
+read_secret_metadata_fence() {
+  local secret_name="$1"
+  local expected_immutable="$2"
+  local output_file="$3"
+  local raw_file="$output_file.raw"
+  if ! "${KUBE[@]}" get secret "$secret_name" \
+      -o 'jsonpath={.metadata.uid}{"\n"}{.metadata.resourceVersion}{"\n"}{.immutable}{"\n"}' \
+      >"$raw_file" 2>/dev/null; then
+    return 1
+  fi
+  local uid resource_version immutable
+  uid="$(sed -n '1p' "$raw_file")"
+  resource_version="$(sed -n '2p' "$raw_file")"
+  immutable="$(sed -n '3p' "$raw_file")"
+  [ -n "$immutable" ] || immutable=false
+  [ -n "$uid" ] && [ -n "$resource_version" ] || return 1
+  [ "$immutable" = "$expected_immutable" ] || return 1
+  jq -n --arg uid "$uid" --arg resource_version "$resource_version" \
+    --argjson immutable "$immutable" '{
+      uid: $uid,
+      resourceVersion: $resource_version,
+      immutable: $immutable
+    }' >"$output_file"
+}
+
+read_and_validate_worker_pods() {
+  local deployment_file="$1"
+  local private_env_file="$2"
+  local output_file="$3"
+  local replicasets_file="$output_file.replicasets.json"
+  local pods_file="$output_file.pods.json"
+  local selector='app.kubernetes.io/name=witself-worker,app.kubernetes.io/instance=witself-server,app.kubernetes.io/component=worker'
+  "${KUBE[@]}" get replicasets -l "$selector" -o json >"$replicasets_file" 2>/dev/null || return 1
+  "${KUBE[@]}" get pods -l "$selector" -o json >"$pods_file" 2>/dev/null || return 1
+  jq -enS --slurpfile deployment "$deployment_file" \
+    --slurpfile private_env "$private_env_file" \
+    --slurpfile replicasets "$replicasets_file" \
+    --slurpfile pods "$pods_file" '
+    def controller_owners($object):
+      [$object.metadata.ownerReferences[]? | select(.controller == true)];
+    def template_projection($template):
+      ($template.spec.containers[] | select(.name == "witself-worker")) as $worker |
+      {
+        checksum: $template.metadata.annotations["checksum/config"],
+        automountServiceAccountToken: $template.spec.automountServiceAccountToken,
+        serviceAccountName: $template.spec.serviceAccountName,
+        image: $worker.image,
+        command: $worker.command,
+        args: $worker.args,
+        configMapRefs: [$worker.envFrom[]? | select(.configMapRef.name != null) | .configMapRef],
+        privateEnv: ([$worker.env[]? |
+          select(.name == "WITSELF_DATABASE_URL" or
+                 .name == "WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_PRIVATE_KEY") |
+          {name: .name, valueFrom: .valueFrom}] | sort_by(.name))
+      };
+    ($deployment[0]) as $source |
+    ($source.metadata.uid) as $deployment_uid |
+    (template_projection($source.spec.template)) as $source_template |
+    [
+      $pods[0].items[] as $pod |
+      (controller_owners($pod)) as $pod_controllers |
+      select($pod_controllers | length == 1) |
+      ($pod_controllers[0]) as $pod_owner |
+      select($pod_owner.apiVersion == "apps/v1" and
+             $pod_owner.kind == "ReplicaSet" and
+             ($pod_owner.name | type == "string" and length > 0) and
+             ($pod_owner.uid | type == "string" and length > 0)) |
+      ([$replicasets[0].items[] |
+        select(.metadata.name == $pod_owner.name and .metadata.uid == $pod_owner.uid) |
+        select((controller_owners(.)) == [{
+          apiVersion: "apps/v1", blockOwnerDeletion: true, controller: true,
+          kind: "Deployment", name: $source.metadata.name, uid: $deployment_uid
+        }]) |
+        select(template_projection(.spec.template) == $source_template)
+      ]) as $owned_replicaset |
+      select($owned_replicaset | length == 1) |
+      select(($pod.metadata.uid | type == "string" and length > 0) and
+             ($pod.metadata.resourceVersion | type == "string" and length > 0) and
+             $pod.metadata.deletionTimestamp == null and
+             $pod.status.phase == "Running" and
+             ($pod.status.startTime | type == "string" and
+               test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
+             ([ $pod.status.conditions[]? |
+                select(.type == "Ready" and .status == "True") ] | length == 1) and
+             ([ $pod.status.containerStatuses[]? |
+                select(.name == "witself-worker" and .ready == true) ] | length == 1) and
+             template_projection({metadata: $pod.metadata, spec: $pod.spec}) == $source_template) |
+      {
+        podName: $pod.metadata.name,
+        podUID: $pod.metadata.uid,
+        podResourceVersion: $pod.metadata.resourceVersion,
+        podStartTime: $pod.status.startTime,
+        replicaSetName: $owned_replicaset[0].metadata.name,
+        replicaSetUID: $owned_replicaset[0].metadata.uid,
+        replicaSetResourceVersion: $owned_replicaset[0].metadata.resourceVersion
+      }
+    ] as $owned |
+    if ($pods[0].items | length) == 2 and
+       ($owned | length) == 2 and
+       ([$owned[].podUID] | unique | length) == 2
+    then ($owned | sort_by(.podName))
+    else error("expected exact ready worker pods") end
+  ' >"$output_file" 2>/dev/null
+}
+
+write_lock_fence() {
+  jq -S '{
+    uid: .metadata.uid,
+    resourceVersion: .metadata.resourceVersion,
+    annotations: {
+      sourceImage: .metadata.annotations["witself.io/source-image"],
+      sourceConfigChecksum: .metadata.annotations["witself.io/source-config-checksum"]
+    },
+    labels: {
+      name: .metadata.labels["app.kubernetes.io/name"],
+      component: .metadata.labels["app.kubernetes.io/component"],
+      managedBy: .metadata.labels["app.kubernetes.io/managed-by"],
+      cell: .metadata.labels["witself.io/cell"]
+    },
+    immutable: .immutable,
+    data: .data
+  }' "$1" >"$2"
+}
+
+write_job_fence() {
+  jq -S '{
+    uid: .metadata.uid,
+    annotations: {
+      sourceConfigChecksum: .metadata.annotations["witself.io/source-config-checksum"],
+      operatorLockUID: .metadata.annotations["witself.io/operator-lock-uid"]
+    },
+    labels: {
+      name: .metadata.labels["app.kubernetes.io/name"],
+      component: .metadata.labels["app.kubernetes.io/component"],
+      managedBy: .metadata.labels["app.kubernetes.io/managed-by"],
+      cell: .metadata.labels["witself.io/cell"]
+    },
+    spec: .spec
+  }' "$1" >"$2"
+}
+
+validate_proof_pod() {
+  local pod_file="$1"
+  local require_terminated="$2"
+  jq -e --arg pod_name "$POD_NAME" --arg pod_uid "$POD_UID" \
+    --arg job_name "$JOB_NAME" --arg job_uid "$JOB_UID" \
+    --argjson require_terminated "$require_terminated" \
+    --slurpfile job "$JOB_CREATE_OUTPUT" '
+    def controller_owners($object):
+      [$object.metadata.ownerReferences[]? | select(.controller == true)];
+    def container_projection($container): {
+      name: $container.name,
+      image: $container.image,
+      imagePullPolicy: $container.imagePullPolicy,
+      command: $container.command,
+      args: $container.args,
+      envFrom: $container.envFrom,
+      env: $container.env,
+      securityContext: $container.securityContext,
+      resources: $container.resources
+    };
+    .metadata.name == $pod_name and
+    .metadata.uid == $pod_uid and
+    .metadata.deletionTimestamp == null and
+    controller_owners(.) == [{
+      apiVersion: "batch/v1", blockOwnerDeletion: true, controller: true,
+      kind: "Job", name: $job_name, uid: $job_uid
+    }] and
+    ([.spec.containers[] | select(.name == "runner")] | length == 1) and
+    (container_projection(.spec.containers[] | select(.name == "runner")) ==
+      container_projection($job[0].spec.template.spec.containers[] |
+        select(.name == "runner"))) and
+    (if $require_terminated then
+      ([.status.containerStatuses[]? |
+        select(.name == "runner" and .state.terminated.exitCode != null)] | length == 1)
+     else true end)
+  ' "$pod_file" >/dev/null
+}
+
+validate_live_operation_sources() {
+  local suffix="$1"
+  local require_terminated="$2"
+  local lock_file="$WORK_DIR/lock-$suffix.json"
+  local job_file="$WORK_DIR/job-$suffix.json"
+  local pod_file="$WORK_DIR/proof-pod-$suffix.json"
+  local lock_fence="$WORK_DIR/lock-$suffix.fence.json"
+  local job_fence="$WORK_DIR/job-$suffix.fence.json"
+  "${KUBE[@]}" get configmap "$LOCK_NAME" -o json >"$lock_file" 2>/dev/null || return 1
+  "${KUBE[@]}" get job "$JOB_NAME" -o json >"$job_file" 2>/dev/null || return 1
+  "${KUBE[@]}" get pod "$POD_NAME" -o json >"$pod_file" 2>/dev/null || return 1
+  write_lock_fence "$lock_file" "$lock_fence"
+  write_job_fence "$job_file" "$job_fence"
+  cmp -s "$LOCK_CREATE_FENCE" "$lock_fence" &&
+    cmp -s "$JOB_CREATE_FENCE" "$job_fence" &&
+    validate_proof_pod "$pod_file" "$require_terminated"
+}
+
 CELL=""
 KUBECONFIG_FILE=""
 KUBE_CONTEXT=""
@@ -360,12 +571,90 @@ require_private_kubeconfig "$KUBECONFIG_FILE"
 umask 077
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/witself-agent-email-receipt-proof.XXXXXX")"
 chmod 700 "$WORK_DIR"
+KUBECONFIG_SNAPSHOT="$WORK_DIR/kubeconfig"
+KUBECONFIG_IDENTITY_BEFORE="$(file_identity "$KUBECONFIG_FILE")"
+if [[ ! "$KUBECONFIG_IDENTITY_BEFORE" =~ ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$ ]] ||
+   ! cp "$KUBECONFIG_FILE" "$KUBECONFIG_SNAPSHOT"; then
+  find "$WORK_DIR" -depth -mindepth 1 -delete 2>/dev/null || true
+  rmdir "$WORK_DIR" 2>/dev/null || true
+  die "could not snapshot kubeconfig"
+fi
+chmod 400 "$KUBECONFIG_SNAPSHOT"
+KUBECONFIG_IDENTITY_AFTER="$(file_identity "$KUBECONFIG_FILE")"
+if [ "$KUBECONFIG_IDENTITY_BEFORE" != "$KUBECONFIG_IDENTITY_AFTER" ] ||
+   ! cmp -s "$KUBECONFIG_FILE" "$KUBECONFIG_SNAPSHOT"; then
+  find "$WORK_DIR" -depth -mindepth 1 -delete 2>/dev/null || true
+  rmdir "$WORK_DIR" 2>/dev/null || true
+  die "kubeconfig changed while it was snapshotted"
+fi
 LOCK_CREATED=false
+LOCK_OWNERSHIP_CONFIRMED=false
+LOCK_UID=""
 JOB_CREATE_ATTEMPTED=false
 JOB_CREATED=false
+JOB_OWNERSHIP_CONFIRMED=false
+JOB_UID=""
 JOB_NAME="witself-agent-email-receipt-proof"
 LOCK_NAME="witself-agent-email-receipt-proof-lock"
-KUBE=(kubectl --request-timeout=30s --kubeconfig "$KUBECONFIG_FILE" --context "$KUBE_CONTEXT" -n "$NAMESPACE")
+KUBE=(kubectl --request-timeout=30s --kubeconfig "$KUBECONFIG_SNAPSHOT" --context "$KUBE_CONTEXT" -n "$NAMESPACE")
+
+delete_resource_with_uid() {
+  local resource_kind="$1"
+  local resource_name="$2"
+  local resource_uid="$3"
+  local api_path response_kind response_plural stem
+  case "$resource_kind" in
+    Job)
+      api_path="/apis/batch/v1/namespaces/$NAMESPACE/jobs/$resource_name"
+      response_kind=Job
+      response_plural="jobs"
+      stem="job"
+      ;;
+    ConfigMap)
+      api_path="/api/v1/namespaces/$NAMESPACE/configmaps/$resource_name"
+      response_kind=ConfigMap
+      response_plural="configmaps"
+      stem="configmap"
+      ;;
+    *) return 1 ;;
+  esac
+  local delete_options="$WORK_DIR/$stem-delete-options.json"
+  local delete_result="$WORK_DIR/$stem-delete-result.json"
+  jq -n --arg uid "$resource_uid" '{
+    apiVersion: "v1", kind: "DeleteOptions", propagationPolicy: "Foreground",
+    preconditions: {uid: $uid}
+  }' >"$delete_options"
+  chmod 600 "$delete_options"
+  if ! "${KUBE[@]}" delete --raw="$api_path" -f "$delete_options" \
+      >"$delete_result" 2>"$WORK_DIR/$stem-delete.err"; then
+    return 1
+  fi
+  if ! jq -e --arg name "$resource_name" --arg uid "$resource_uid" \
+    --arg kind "$response_kind" --arg plural "$response_plural" '
+    (.kind == "Status" and .status == "Success" and
+      .details.name == $name and .details.kind == $plural and
+      ((.details.uid // $uid) == $uid)) or
+    (.kind == $kind and .metadata.name == $name and .metadata.uid == $uid)
+  ' "$delete_result" >/dev/null 2>&1; then
+    return 1
+  fi
+  local absence_deadline=$((SECONDS + CLEANUP_TIMEOUT_SECONDS))
+  local current_file="$WORK_DIR/$stem-delete-current.json"
+  while true; do
+    if ! "${KUBE[@]}" get "$stem" "$resource_name" --ignore-not-found -o json \
+        >"$current_file" 2>/dev/null; then
+      return 1
+    fi
+    if [ ! -s "$current_file" ]; then
+      return 0
+    fi
+    local current_uid
+    current_uid="$(jq -er '.metadata.uid' "$current_file" 2>/dev/null)" || return 1
+    [ "$current_uid" = "$resource_uid" ] || return 1
+    (( SECONDS < absence_deadline )) || return 1
+    sleep 1
+  done
+}
 
 proof_pods_are_absent() {
   local deadline=$((SECONDS + CLEANUP_TIMEOUT_SECONDS))
@@ -381,23 +670,47 @@ proof_pods_are_absent() {
   done
 }
 
+proof_pod_is_absent() {
+  local deadline=$((SECONDS + CLEANUP_TIMEOUT_SECONDS))
+  local pod_file="$WORK_DIR/cleanup-pod.json"
+  local current_uid
+  while true; do
+    if ! "${KUBE[@]}" get pod "$POD_NAME" --ignore-not-found -o json \
+        >"$pod_file" 2>/dev/null; then
+      return 1
+    fi
+    if [ ! -s "$pod_file" ]; then
+      return 0
+    fi
+    current_uid="$(jq -er '.metadata.uid' "$pod_file" 2>/dev/null)" || return 1
+    [ "$current_uid" = "$POD_UID" ] || return 1
+    (( SECONDS < deadline )) || return 1
+    sleep 1
+  done
+}
+
 cleanup() {
   local status=$?
   local safe_to_unlock=false
   trap - EXIT INT TERM
-  if [ "$JOB_CREATED" = true ]; then
-    if "${KUBE[@]}" delete job "$JOB_NAME" --ignore-not-found=true \
-        --cascade=foreground --wait=true --timeout="${CLEANUP_TIMEOUT_SECONDS}s" \
-        >/dev/null 2>&1 && proof_pods_are_absent; then
+  if [ "$JOB_CREATED" = true ] && [ "$JOB_OWNERSHIP_CONFIRMED" = true ]; then
+    if delete_resource_with_uid Job "$JOB_NAME" "$JOB_UID" &&
+       proof_pod_is_absent && proof_pods_are_absent; then
       safe_to_unlock=true
+      JOB_CREATED=false
     fi
   elif [ "$JOB_CREATE_ATTEMPTED" != true ]; then
     safe_to_unlock=true
   fi
-  if [ "$LOCK_CREATED" = true ] && [ "$safe_to_unlock" = true ]; then
-    if ! "${KUBE[@]}" delete configmap "$LOCK_NAME" --ignore-not-found=true \
-        --wait=true --timeout="${CLEANUP_TIMEOUT_SECONDS}s" >/dev/null 2>&1; then
+  if [ "$LOCK_CREATED" = true ] && [ "$LOCK_OWNERSHIP_CONFIRMED" != true ]; then
+    safe_to_unlock=false
+  fi
+  if [ "$LOCK_CREATED" = true ] && [ "$LOCK_OWNERSHIP_CONFIRMED" = true ] &&
+     [ "$safe_to_unlock" = true ]; then
+    if ! delete_resource_with_uid ConfigMap "$LOCK_NAME" "$LOCK_UID"; then
       safe_to_unlock=false
+    else
+      LOCK_CREATED=false
     fi
   fi
   if [ "$LOCK_CREATED" = true ] && [ "$safe_to_unlock" != true ]; then
@@ -448,17 +761,10 @@ read_and_validate_sources() {
   if [ -n "${DISPATCH_SECRET_NAME:-}" ] && [ "$dispatch_secret_name" != "$DISPATCH_SECRET_NAME" ]; then
     return 1
   fi
-  "${KUBE[@]}" get secret "$database_secret_name" \
-    -o 'jsonpath={.metadata.uid}{"\n"}{.metadata.resourceVersion}{"\n"}' \
-    >"$database_secret_fence_file" 2>/dev/null || return 1
-  "${KUBE[@]}" get secret "$dispatch_secret_name" \
-    -o 'jsonpath={.metadata.uid}{"\n"}{.metadata.resourceVersion}{"\n"}{.immutable}{"\n"}' \
-    >"$dispatch_secret_fence_file" 2>/dev/null || return 1
-  [ -n "$(sed -n '1p' "$database_secret_fence_file")" ] &&
-    [ -n "$(sed -n '2p' "$database_secret_fence_file")" ] &&
-    [ -n "$(sed -n '1p' "$dispatch_secret_fence_file")" ] &&
-    [ -n "$(sed -n '2p' "$dispatch_secret_fence_file")" ] &&
-    [ "$(sed -n '3p' "$dispatch_secret_fence_file")" = true ]
+  read_secret_metadata_fence "$database_secret_name" false \
+    "$database_secret_fence_file" || return 1
+  read_secret_metadata_fence "$dispatch_secret_name" true \
+    "$dispatch_secret_fence_file" || return 1
 }
 
 read_and_validate_cell_identity() {
@@ -493,6 +799,7 @@ INITIAL_CELL_DEPLOYMENT="$WORK_DIR/cell-deployment-initial.json"
 INITIAL_CELL_CONFIG="$WORK_DIR/cell-config-initial.json"
 INITIAL_CELL_DEPLOYMENT_FENCE="$WORK_DIR/cell-deployment-initial.fence.json"
 INITIAL_CELL_CONFIG_FENCE="$WORK_DIR/cell-config-initial.fence.json"
+INITIAL_WORKER_PODS_FENCE="$WORK_DIR/worker-pods-initial.fence.json"
 
 if ! read_and_validate_sources "$INITIAL_DEPLOYMENT" "$INITIAL_CONFIG" \
     "$INITIAL_PRIVATE_ENV" "$INITIAL_SELECTED_CONFIG" "$INITIAL_DEPLOYMENT_FENCE" \
@@ -511,6 +818,10 @@ DATABASE_SECRET_NAME="$(jq -er '.[] | select(.name == "WITSELF_DATABASE_URL") |
 DISPATCH_SECRET_NAME="$(jq -er '.[] |
   select(.name == "WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_PRIVATE_KEY") |
   .valueFrom.secretKeyRef.name' "$INITIAL_PRIVATE_ENV")"
+if ! read_and_validate_worker_pods "$INITIAL_DEPLOYMENT" "$INITIAL_PRIVATE_ENV" \
+    "$INITIAL_WORKER_PODS_FENCE"; then
+  die "managed worker Pods are not exact, ready Deployment owners"
+fi
 
 if ! "${KUBE[@]}" get job "$JOB_NAME" --ignore-not-found -o name \
     >"$WORK_DIR/existing-job.out" 2>/dev/null; then
@@ -534,22 +845,27 @@ compare_sources_to_initial() {
   local cell_config_file="$WORK_DIR/cell-config-$suffix.json"
   local cell_deployment_fence_file="$WORK_DIR/cell-deployment-$suffix.fence.json"
   local cell_config_fence_file="$WORK_DIR/cell-config-$suffix.fence.json"
+  local worker_pods_fence_file="$WORK_DIR/worker-pods-$suffix.fence.json"
   read_and_validate_sources "$deployment_file" "$config_file" "$private_env_file" \
     "$selected_config_file" "$deployment_fence_file" "$config_fence_file" \
     "$database_secret_fence_file" "$dispatch_secret_fence_file" || return 1
   read_and_validate_cell_identity "$cell_deployment_file" "$cell_config_file" \
     "$cell_deployment_fence_file" "$cell_config_fence_file" || return 1
+  read_and_validate_worker_pods "$deployment_file" "$private_env_file" \
+    "$worker_pods_fence_file" || return 1
   cmp -s "$INITIAL_DEPLOYMENT_FENCE" "$deployment_fence_file" &&
     cmp -s "$INITIAL_CONFIG_FENCE" "$config_fence_file" &&
     cmp -s "$INITIAL_DATABASE_SECRET_FENCE" "$database_secret_fence_file" &&
     cmp -s "$INITIAL_DISPATCH_SECRET_FENCE" "$dispatch_secret_fence_file" &&
     cmp -s "$INITIAL_CELL_DEPLOYMENT_FENCE" "$cell_deployment_fence_file" &&
-    cmp -s "$INITIAL_CELL_CONFIG_FENCE" "$cell_config_fence_file"
+    cmp -s "$INITIAL_CELL_CONFIG_FENCE" "$cell_config_fence_file" &&
+    cmp -s "$INITIAL_WORKER_PODS_FENCE" "$worker_pods_fence_file"
 }
 
 # This is the final source read immediately before the first mutation.
 compare_sources_to_initial prelock || die "managed worker source drifted before lock creation"
 
+LOCK_CREATE_OUTPUT="$WORK_DIR/lock-created.json"
 if ! jq -n --arg name "$LOCK_NAME" --arg image "$EXPECTED_IMAGE" \
     --arg checksum "$EXPECTED_CONFIG_CHECKSUM" --arg cell "$CELL" \
     --slurpfile data "$INITIAL_SELECTED_CONFIG" '
@@ -571,22 +887,58 @@ if ! jq -n --arg name "$LOCK_NAME" --arg image "$EXPECTED_IMAGE" \
     immutable: true,
     data: $data[0]
   }
-' | "${KUBE[@]}" create -f - >/dev/null 2>"$WORK_DIR/create-lock.err"; then
+' | "${KUBE[@]}" create -f - -o json >"$LOCK_CREATE_OUTPUT" \
+    2>"$WORK_DIR/create-lock.err"; then
   die "another receipt-proof operation is active or requires cleanup"
 fi
 LOCK_CREATED=true
+if ! jq -e --arg name "$LOCK_NAME" --arg image "$EXPECTED_IMAGE" \
+    --arg checksum "$EXPECTED_CONFIG_CHECKSUM" --arg cell "$CELL" \
+    --slurpfile selected "$INITIAL_SELECTED_CONFIG" '
+  .apiVersion == "v1" and .kind == "ConfigMap" and
+  .metadata.name == $name and
+  (.metadata.uid | type == "string" and length > 0) and
+  (.metadata.resourceVersion | type == "string" and length > 0) and
+  .metadata.annotations == {
+    "witself.io/source-config-checksum": $checksum,
+    "witself.io/source-image": $image
+  } and
+  .metadata.labels == {
+    "app.kubernetes.io/component": "operator-proof",
+    "app.kubernetes.io/managed-by": "witself-operator",
+    "app.kubernetes.io/name": "witself-agent-email-receipt-proof",
+    "witself.io/cell": $cell
+  } and
+  .immutable == true and .data == $selected[0]
+' "$LOCK_CREATE_OUTPUT" >/dev/null; then
+  die "receipt-proof lock creation was not safely confirmed"
+fi
+LOCK_UID="$(jq -er '.metadata.uid' "$LOCK_CREATE_OUTPUT")"
+LOCK_OWNERSHIP_CONFIRMED=true
+LOCK_CREATE_FENCE="$WORK_DIR/lock-created.fence.json"
+write_lock_fence "$LOCK_CREATE_OUTPUT" "$LOCK_CREATE_FENCE"
 
 # Recheck once more after acquiring the fixed lock and immediately before Job
 # creation. No live source is used if any metadata or selected input drifted.
 compare_sources_to_initial prejob || die "managed worker source drifted before Job creation"
+PREJOB_LOCK="$WORK_DIR/lock-prejob.json"
+PREJOB_LOCK_FENCE="$WORK_DIR/lock-prejob.fence.json"
+if ! "${KUBE[@]}" get configmap "$LOCK_NAME" -o json >"$PREJOB_LOCK" 2>/dev/null; then
+  die "receipt-proof lock disappeared before Job creation"
+fi
+write_lock_fence "$PREJOB_LOCK" "$PREJOB_LOCK_FENCE"
+cmp -s "$LOCK_CREATE_FENCE" "$PREJOB_LOCK_FENCE" ||
+  die "receipt-proof lock was replaced before Job creation"
 
 JOB_CREATE_ATTEMPTED=true
+JOB_CREATE_OUTPUT="$WORK_DIR/job-created.json"
 if ! jq -n \
     --arg name "$JOB_NAME" \
     --arg image "$EXPECTED_IMAGE" \
     --arg config "$LOCK_NAME" \
     --arg checksum "$EXPECTED_CONFIG_CHECKSUM" \
     --arg cell "$CELL" \
+    --arg lock_uid "$LOCK_UID" \
     --arg account_id "$ACCOUNT_ID" \
     --arg send_id "$SEND_ID" \
     --arg accepted_at "$EXPECTED_ACCEPTED_AT" \
@@ -599,7 +951,10 @@ if ! jq -n \
     apiVersion: "batch/v1", kind: "Job",
     metadata: {
       name: $name,
-      annotations: {"witself.io/source-config-checksum": $checksum},
+      annotations: {
+        "witself.io/source-config-checksum": $checksum,
+        "witself.io/operator-lock-uid": $lock_uid
+      },
       labels: {
         "app.kubernetes.io/name": "witself-agent-email-receipt-proof",
         "app.kubernetes.io/component": "operator-proof",
@@ -662,13 +1017,59 @@ if ! jq -n \
       }
     }
   }
-' | "${KUBE[@]}" create -f - >/dev/null 2>"$WORK_DIR/create-job.err"; then
+' | "${KUBE[@]}" create -f - -o json >"$JOB_CREATE_OUTPUT" \
+    2>"$WORK_DIR/create-job.err"; then
   die "receipt-proof Job creation was not confirmed; the fixed lock was retained"
 fi
 JOB_CREATED=true
+if ! jq -e --arg name "$JOB_NAME" --arg image "$EXPECTED_IMAGE" \
+    --arg config "$LOCK_NAME" --arg checksum "$EXPECTED_CONFIG_CHECKSUM" \
+    --arg cell "$CELL" --arg lock_uid "$LOCK_UID" --arg account_id "$ACCOUNT_ID" \
+    --arg send_id "$SEND_ID" --arg accepted_at "$EXPECTED_ACCEPTED_AT" \
+    --arg database_secret "$DATABASE_SECRET_NAME" \
+    --arg dispatch_secret "$DISPATCH_SECRET_NAME" \
+    --argjson timeout "$TIMEOUT_SECONDS" --slurpfile private_env "$INITIAL_PRIVATE_ENV" '
+  .apiVersion == "batch/v1" and .kind == "Job" and .metadata.name == $name and
+  (.metadata.uid | type == "string" and length > 0) and
+  (.metadata.resourceVersion | type == "string" and length > 0) and
+  .metadata.annotations["witself.io/source-config-checksum"] == $checksum and
+  .metadata.annotations["witself.io/operator-lock-uid"] == $lock_uid and
+  .metadata.labels["app.kubernetes.io/name"] == "witself-agent-email-receipt-proof" and
+  .metadata.labels["app.kubernetes.io/component"] == "operator-proof" and
+  .metadata.labels["app.kubernetes.io/managed-by"] == "witself-operator" and
+  .metadata.labels["witself.io/cell"] == $cell and
+  .spec.backoffLimit == 0 and .spec.activeDeadlineSeconds == $timeout and
+  .spec.ttlSecondsAfterFinished == 3600 and
+  .spec.template.spec.automountServiceAccountToken == false and
+  .spec.template.spec.enableServiceLinks == false and
+  ([.spec.template.spec.containers[] | select(.name == "runner")] | length == 1) and
+  (.spec.template.spec.containers[] | select(.name == "runner") |
+    .image == $image and
+    .command == ["/usr/local/bin/witself-worker"] and
+    .args == [
+      "agent-email", "receipt-replay",
+      "--account-id", $account_id,
+      "--send-id", $send_id,
+      "--expected-accepted-at", $accepted_at,
+      "--expected-attempt-count", "1", "--json"
+    ] and
+    .envFrom == [{configMapRef: {name: $config}}] and
+    .env == $private_env[0] and
+    ([.env[] | {name, secret: .valueFrom.secretKeyRef.name}] | sort_by(.name)) == [
+      {name: "WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_PRIVATE_KEY", secret: $dispatch_secret},
+      {name: "WITSELF_DATABASE_URL", secret: $database_secret}
+    ])
+' "$JOB_CREATE_OUTPUT" >/dev/null; then
+  die "receipt-proof Job creation response was not safely confirmed"
+fi
+JOB_UID="$(jq -er '.metadata.uid' "$JOB_CREATE_OUTPUT")"
+JOB_OWNERSHIP_CONFIRMED=true
+JOB_CREATE_FENCE="$WORK_DIR/job-created.fence.json"
+write_job_fence "$JOB_CREATE_OUTPUT" "$JOB_CREATE_FENCE"
 
 DEADLINE=$((SECONDS + TIMEOUT_SECONDS))
 POD_NAME=""
+POD_UID=""
 RUNNER_EXIT=""
 while [ -z "$RUNNER_EXIT" ]; do
   PODS_JSON="$WORK_DIR/pods.json"
@@ -677,8 +1078,27 @@ while [ -z "$RUNNER_EXIT" ]; do
     POD_COUNT="$(jq -r '.items | length' "$PODS_JSON")"
     [ "$POD_COUNT" -le 1 ] || die "receipt-proof Job created more than one pod"
     if [ "$POD_COUNT" -eq 1 ]; then
-      POD_NAME="$(jq -er '.items[0].metadata.name' "$PODS_JSON")" ||
+      if ! jq -e --arg job_name "$JOB_NAME" --arg job_uid "$JOB_UID" '
+        (.items | length) == 1 and
+        (.items[0].metadata.name | type == "string" and length > 0) and
+        (.items[0].metadata.uid | type == "string" and length > 0) and
+        ([.items[0].metadata.ownerReferences[]? | select(.controller == true)] == [{
+          apiVersion: "batch/v1", blockOwnerDeletion: true, controller: true,
+          kind: "Job", name: $job_name, uid: $job_uid
+        }])
+      ' "$PODS_JSON" >/dev/null; then
+        die "receipt-proof Job pod ownership is invalid"
+      fi
+      CURRENT_POD_NAME="$(jq -er '.items[0].metadata.name' "$PODS_JSON")" ||
         die "receipt-proof pod name is unavailable"
+      CURRENT_POD_UID="$(jq -er '.items[0].metadata.uid' "$PODS_JSON")" ||
+        die "receipt-proof pod UID is unavailable"
+      if [ -n "$POD_UID" ] &&
+         { [ "$CURRENT_POD_NAME" != "$POD_NAME" ] || [ "$CURRENT_POD_UID" != "$POD_UID" ]; }; then
+        die "receipt-proof Job pod was replaced"
+      fi
+      POD_NAME="$CURRENT_POD_NAME"
+      POD_UID="$CURRENT_POD_UID"
       RUNNER_EXIT="$(jq -r '[.items[0].status.containerStatuses[]? |
         select(.name == "runner") | .state.terminated.exitCode][0] // empty' "$PODS_JSON")"
     fi
@@ -689,6 +1109,20 @@ while [ -z "$RUNNER_EXIT" ]; do
   fi
 done
 [ "$RUNNER_EXIT" -eq 0 ] || die "receipt-proof Job failed"
+
+if ! validate_live_operation_sources prelog true; then
+  die "receipt-proof lock, Job, or owned Pod changed before proof read"
+fi
+POSTSTART_DATABASE_SECRET_FENCE="$WORK_DIR/database-secret-poststart.fence.json"
+POSTSTART_DISPATCH_SECRET_FENCE="$WORK_DIR/dispatch-secret-poststart.fence.json"
+if ! read_secret_metadata_fence "$DATABASE_SECRET_NAME" false \
+      "$POSTSTART_DATABASE_SECRET_FENCE" ||
+   ! read_secret_metadata_fence "$DISPATCH_SECRET_NAME" true \
+      "$POSTSTART_DISPATCH_SECRET_FENCE" ||
+   ! cmp -s "$INITIAL_DATABASE_SECRET_FENCE" "$POSTSTART_DATABASE_SECRET_FENCE" ||
+   ! cmp -s "$INITIAL_DISPATCH_SECRET_FENCE" "$POSTSTART_DISPATCH_SECRET_FENCE"; then
+  die "managed Secret metadata drifted before receipt-proof read"
+fi
 
 RUNNER_LOG="$WORK_DIR/runner.log"
 if ! "${KUBE[@]}" logs "$POD_NAME" -c runner --tail=4 --limit-bytes=16384 \
@@ -719,4 +1153,18 @@ if ! jq -ce --arg send_id "$SEND_ID" '
 fi
 [ "$(wc -l <"$PROOF_FILE" | tr -d '[:space:]')" = 1 ] ||
   die "receipt-proof output was ambiguous"
+
+if ! validate_live_operation_sources postlog true; then
+  die "receipt-proof lock, Job, or owned Pod changed after proof read"
+fi
+POSTFLIGHT_DATABASE_SECRET_FENCE="$WORK_DIR/database-secret-postflight.fence.json"
+POSTFLIGHT_DISPATCH_SECRET_FENCE="$WORK_DIR/dispatch-secret-postflight.fence.json"
+if ! read_secret_metadata_fence "$DATABASE_SECRET_NAME" false \
+      "$POSTFLIGHT_DATABASE_SECRET_FENCE" ||
+   ! read_secret_metadata_fence "$DISPATCH_SECRET_NAME" true \
+      "$POSTFLIGHT_DISPATCH_SECRET_FENCE" ||
+   ! cmp -s "$INITIAL_DATABASE_SECRET_FENCE" "$POSTFLIGHT_DATABASE_SECRET_FENCE" ||
+   ! cmp -s "$INITIAL_DISPATCH_SECRET_FENCE" "$POSTFLIGHT_DISPATCH_SECRET_FENCE"; then
+  die "managed Secret metadata drifted after receipt-proof read"
+fi
 printf '%s\n' "$(cat "$PROOF_FILE")"

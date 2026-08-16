@@ -18,13 +18,61 @@ set -euo pipefail
 
 [ "${1:-}" = --request-timeout=30s ] || exit 91
 shift
-[ "${1:-}" = --kubeconfig ] && [ "${2:-}" = "$FAKE_EXPECTED_KUBECONFIG" ] || exit 92
+[ "${1:-}" = --kubeconfig ] || exit 92
+kubeconfig_snapshot="${2:-}"
+[ "$kubeconfig_snapshot" != "$FAKE_ORIGINAL_KUBECONFIG" ] || exit 92
+[ -f "$kubeconfig_snapshot" ] && [ ! -L "$kubeconfig_snapshot" ] || exit 92
+snapshot_mode="$(stat -f '%Lp' "$kubeconfig_snapshot" 2>/dev/null || true)"
+if [[ ! "$snapshot_mode" =~ ^[0-7]{3,4}$ ]]; then
+  snapshot_mode="$(stat -c '%a' "$kubeconfig_snapshot" 2>/dev/null || true)"
+fi
+[ "$snapshot_mode" = 400 ] || exit 92
+cmp -s "$kubeconfig_snapshot" "$FAKE_EXPECTED_KUBECONFIG_CONTENT" || exit 92
+printf '%s\n' "$kubeconfig_snapshot" >>"$FAKE_KUBE_STATE/kubeconfig-paths.log"
 shift 2
 [ "${1:-}" = --context ] && [ "${2:-}" = "$FAKE_EXPECTED_CONTEXT" ] || exit 93
 shift 2
 [ "${1:-}" = -n ] && [ "${2:-}" = "$FAKE_EXPECTED_NAMESPACE" ] || exit 94
 shift 2
 printf '%s\n' "$*" >>"$FAKE_KUBE_STATE/calls.log"
+if [ "${FAKE_REWRITE_KUBECONFIG:-false}" = true ] &&
+   [ ! -e "$FAKE_KUBE_STATE/kubeconfig-rewritten" ]; then
+  printf '%s\n' rewritten-cross-cluster >"$FAKE_ORIGINAL_KUBECONFIG"
+  chmod 600 "$FAKE_ORIGINAL_KUBECONFIG"
+  : >"$FAKE_KUBE_STATE/kubeconfig-rewritten"
+fi
+
+render_proof_pods() {
+  local job_uid=proof-job-uid
+  local pod_uid=proof-pod-uid
+  local job_file="$FAKE_KUBE_STATE/job.json"
+  [ -f "$job_file" ] || job_file="$FAKE_KUBE_STATE/job-created.json"
+  if [ "${FAKE_REPLACE_POD:-}" = owner ]; then job_uid=replacement-job-uid; fi
+  if [ "${FAKE_REPLACE_POD:-}" = uid ]; then pod_uid=replacement-pod-uid; fi
+  if [ "${FAKE_REPLACE_POD:-}" = postlog ] && [ -e "$FAKE_KUBE_STATE/logs-read" ]; then
+    pod_uid=replacement-pod-uid
+  fi
+  if [ "${FAKE_CLEANUP_POD_STATE:-}" = replacement ] &&
+     [ -e "$FAKE_KUBE_STATE/job-deleted" ]; then
+    pod_uid=replacement-pod-uid
+  fi
+  jq -n --arg job_uid "$job_uid" --arg pod_uid "$pod_uid" \
+    --argjson runner_exit "${FAKE_RUNNER_EXIT:-0}" --slurpfile job "$job_file" '{
+    items:[{
+      apiVersion:"v1",kind:"Pod",
+      metadata:{name:"witself-agent-email-receipt-proof-pod",uid:$pod_uid,
+        resourceVersion:"proof-pod-rv",
+        annotations:$job[0].spec.template.metadata.annotations,
+        labels:$job[0].spec.template.metadata.labels,
+        ownerReferences:[{apiVersion:"batch/v1",kind:"Job",
+          name:"witself-agent-email-receipt-proof",uid:$job_uid,
+          controller:true,blockOwnerDeletion:true}]},
+      spec:$job[0].spec.template.spec,
+      status:{phase:"Succeeded",containerStatuses:[{name:"runner",ready:false,
+        state:{terminated:{exitCode:$runner_exit}}}]}
+    }]
+  }'
+}
 
 case "${1:-} ${2:-}" in
   "get deployment")
@@ -76,6 +124,17 @@ case "${1:-} ${2:-}" in
           cat "$FAKE_KUBE_STATE/cell-config.json"
         fi
         ;;
+      witself-agent-email-receipt-proof-lock)
+        [ -f "$FAKE_KUBE_STATE/lock.json" ] || exit 0
+        if [ "${FAKE_REPLACE_LOCK:-false}" = true ] ||
+           { [ "${FAKE_REPLACE_LOCK:-}" = postlog ] && [ -e "$FAKE_KUBE_STATE/logs-read" ]; }; then
+          jq '.metadata.uid = "replacement-lock-uid" |
+            .metadata.resourceVersion = "replacement-lock-rv"' \
+            "$FAKE_KUBE_STATE/lock.json" >"$FAKE_KUBE_STATE/lock-replacement.json"
+          mv "$FAKE_KUBE_STATE/lock-replacement.json" "$FAKE_KUBE_STATE/lock.json"
+        fi
+        cat "$FAKE_KUBE_STATE/lock.json"
+        ;;
       *) exit 1 ;;
     esac
     ;;
@@ -87,10 +146,12 @@ case "${1:-} ${2:-}" in
     case "$secret_name" in
       witself-db)
         rv=database-rv
-        if [ "${FAKE_SECRET_DRIFT:-}" = database ] && [ "$count" -ge 2 ]; then
+        if { [ "${FAKE_SECRET_DRIFT:-}" = database ] && [ "$count" -ge 2 ]; } ||
+           { [ "${FAKE_SECRET_DRIFT:-}" = db-poststart ] && [ "$count" -ge 4 ]; } ||
+           { [ "${FAKE_SECRET_DRIFT:-}" = db-postflight ] && [ "$count" -ge 5 ]; }; then
           rv=database-rv-drift
         fi
-        printf 'database-uid\n%s\n' "$rv"
+        printf 'database-uid\n%s\nfalse\n' "$rv"
         ;;
       outbound-dispatch-v1)
         rv=dispatch-rv
@@ -103,7 +164,15 @@ case "${1:-} ${2:-}" in
     esac
     ;;
   "get job")
-    if [ "${FAKE_EXISTING_JOB:-false}" = true ]; then
+    if [ -f "$FAKE_KUBE_STATE/job.json" ]; then
+      if [ "${FAKE_REPLACE_JOB:-false}" = true ] ||
+         { [ "${FAKE_REPLACE_JOB:-}" = postlog ] && [ -e "$FAKE_KUBE_STATE/logs-read" ]; }; then
+        jq '.metadata.uid = "replacement-job-uid"' \
+          "$FAKE_KUBE_STATE/job.json" >"$FAKE_KUBE_STATE/job-replacement.json"
+        mv "$FAKE_KUBE_STATE/job-replacement.json" "$FAKE_KUBE_STATE/job.json"
+      fi
+      cat "$FAKE_KUBE_STATE/job.json"
+    elif [ "${FAKE_EXISTING_JOB:-false}" = true ]; then
       printf 'job.batch/witself-agent-email-receipt-proof\n'
     elif [ "${FAKE_JOB_LOOKUP_FAILURE:-false}" = true ]; then
       exit 1
@@ -115,49 +184,118 @@ case "${1:-} ${2:-}" in
     case "$kind" in
       ConfigMap)
         [ "${FAKE_LOCK_CREATE_FAILURE:-false}" != true ] || exit 1
-        printf '%s\n' "$payload" >"$FAKE_KUBE_STATE/lock-created.json"
-        printf '%s\n' "$payload" >"$FAKE_KUBE_STATE/lock.json"
+        created="$(jq '.metadata.uid = "proof-lock-uid" |
+          .metadata.resourceVersion = "proof-lock-rv"' <<<"$payload")"
+        printf '%s\n' "$created" >"$FAKE_KUBE_STATE/lock-created.json"
+        printf '%s\n' "$created" >"$FAKE_KUBE_STATE/lock.json"
+        printf '%s\n' "$created"
         ;;
       Job)
         if [ "${FAKE_JOB_CREATE_FAILURE:-false}" = true ]; then
           exit 1
         fi
-        printf '%s\n' "$payload" >"$FAKE_KUBE_STATE/job-created.json"
-        printf '%s\n' "$payload" >"$FAKE_KUBE_STATE/job.json"
+        created="$(jq '.metadata.uid = "proof-job-uid" |
+          .metadata.resourceVersion = "proof-job-rv"' <<<"$payload")"
+        printf '%s\n' "$created" >"$FAKE_KUBE_STATE/job-created.json"
+        printf '%s\n' "$created" >"$FAKE_KUBE_STATE/job.json"
+        printf '%s\n' "$created"
         ;;
       *) exit 1 ;;
     esac
     ;;
   "get pods")
+    case "${4:-}" in
+      app.kubernetes.io/name=witself-worker,app.kubernetes.io/instance=witself-server,app.kubernetes.io/component=worker)
+        if [ "${FAKE_REPLACE_WORKER_POD_OWNER:-false}" = true ]; then
+          jq '.items[0].metadata.ownerReferences[0].uid = "foreign-rs-uid"' \
+            "$FAKE_KUBE_STATE/worker-pods.json"
+        elif [ "${FAKE_EXTRA_WORKER_POD:-false}" = true ]; then
+          jq '.items += [(.items[0] |
+            .metadata.name = "witself-worker-rogue" |
+            .metadata.uid = "worker-pod-rogue-uid" |
+            .metadata.resourceVersion = "worker-pod-rogue-rv" |
+            .metadata.ownerReferences[0].uid = "foreign-rs-uid")]' \
+            "$FAKE_KUBE_STATE/worker-pods.json"
+        else
+          cat "$FAKE_KUBE_STATE/worker-pods.json"
+        fi
+        ;;
+      batch.kubernetes.io/job-name=witself-agent-email-receipt-proof)
+        if [ -f "$FAKE_KUBE_STATE/job-deleted" ] &&
+           [ "${FAKE_BACKGROUND_DELETE:-false}" != true ] &&
+           [ -z "${FAKE_CLEANUP_POD_STATE:-}" ]; then
+          printf '%s\n' pods-absent >>"$FAKE_KUBE_STATE/cleanup-actions.log"
+          printf '%s\n' '{"items":[]}'
+        elif [ -f "$FAKE_KUBE_STATE/job-deleted" ] &&
+             [ "${FAKE_CLEANUP_POD_STATE:-}" = relabeled ]; then
+          printf '%s\n' pods-absent >>"$FAKE_KUBE_STATE/cleanup-actions.log"
+          printf '%s\n' '{"items":[]}'
+        else
+          render_proof_pods
+        fi
+        ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  "get replicasets")
+    cat "$FAKE_KUBE_STATE/worker-replicasets.json"
+    ;;
+  "get pod")
     if [ -f "$FAKE_KUBE_STATE/job-deleted" ] &&
-       [ "${FAKE_BACKGROUND_DELETE:-false}" != true ]; then
-      printf '%s\n' pods-absent >>"$FAKE_KUBE_STATE/cleanup-actions.log"
-      printf '%s\n' '{"items":[]}'
-    else
-      jq --argjson runner_exit "${FAKE_RUNNER_EXIT:-0}" \
-        '(.items[0].status.containerStatuses[] | select(.name == "runner") |
-          .state.terminated.exitCode) = $runner_exit' "$FAKE_KUBE_STATE/pods.json"
+       [ "${FAKE_BACKGROUND_DELETE:-false}" != true ] &&
+       [ -z "${FAKE_CLEANUP_POD_STATE:-}" ]; then
+      exit 0
     fi
+    render_proof_pods | jq '.items[0]'
     ;;
   "logs witself-agent-email-receipt-proof-pod")
     [ "$#" -eq 6 ] || exit 1
     [ "$3" = -c ] && [ "$4" = runner ] && [ "$5" = --tail=4 ] &&
       [ "$6" = --limit-bytes=16384 ] || exit 1
     [ "${FAKE_LOG_FAILURE:-false}" != true ] || exit 1
+    : >"$FAKE_KUBE_STATE/logs-read"
     printf '%s\n' "${FAKE_RUNNER_LOG:-}"
     ;;
-  "delete job")
-    printf '%s\n' "$*" >>"$FAKE_KUBE_STATE/deletes.log"
-    printf '%s\n' delete-job >>"$FAKE_KUBE_STATE/cleanup-actions.log"
-    : >"$FAKE_KUBE_STATE/job-deleted"
-    if [ "${FAKE_BACKGROUND_DELETE:-false}" != true ]; then
-      rm -f "$FAKE_KUBE_STATE/job.json"
-    fi
-    ;;
-  "delete configmap")
-    printf '%s\n' "$*" >>"$FAKE_KUBE_STATE/deletes.log"
-    printf '%s\n' delete-configmap >>"$FAKE_KUBE_STATE/cleanup-actions.log"
-    rm -f "$FAKE_KUBE_STATE/lock.json"
+  "delete --raw="*)
+    raw_path="${2#--raw=}"
+    [ "${3:-}" = -f ] && [ -f "${4:-}" ] || exit 1
+    requested_uid="$(jq -er '.preconditions.uid' "$4")"
+    [ "$(jq -r '.propagationPolicy' "$4")" = Foreground ] || exit 1
+    printf '%s|%s\n' "$raw_path" "$requested_uid" >>"$FAKE_KUBE_STATE/deletes.log"
+    case "$raw_path" in
+      /apis/batch/v1/namespaces/witself/jobs/witself-agent-email-receipt-proof)
+        current_uid="$(jq -r '.metadata.uid' "$FAKE_KUBE_STATE/job.json")"
+        if [ "${FAKE_REPLACE_JOB_AT_CLEANUP:-false}" = true ]; then
+          current_uid=replacement-job-uid
+          jq --arg uid "$current_uid" '.metadata.uid = $uid' "$FAKE_KUBE_STATE/job.json" \
+            >"$FAKE_KUBE_STATE/job-replacement.json"
+          mv "$FAKE_KUBE_STATE/job-replacement.json" "$FAKE_KUBE_STATE/job.json"
+        fi
+        [ "$requested_uid" = "$current_uid" ] || exit 1
+        printf '%s\n' delete-job >>"$FAKE_KUBE_STATE/cleanup-actions.log"
+        : >"$FAKE_KUBE_STATE/job-deleted"
+        if [ "${FAKE_BACKGROUND_DELETE:-false}" != true ]; then
+          rm -f "$FAKE_KUBE_STATE/job.json"
+        fi
+        jq -n --arg uid "$current_uid" '{kind:"Status",status:"Success",
+          details:{name:"witself-agent-email-receipt-proof",kind:"jobs",uid:$uid}}'
+        ;;
+      /api/v1/namespaces/witself/configmaps/witself-agent-email-receipt-proof-lock)
+        current_uid="$(jq -r '.metadata.uid' "$FAKE_KUBE_STATE/lock.json")"
+        if [ "${FAKE_REPLACE_LOCK_AT_CLEANUP:-false}" = true ]; then
+          current_uid=replacement-lock-uid
+          jq --arg uid "$current_uid" '.metadata.uid = $uid' "$FAKE_KUBE_STATE/lock.json" \
+            >"$FAKE_KUBE_STATE/lock-replacement.json"
+          mv "$FAKE_KUBE_STATE/lock-replacement.json" "$FAKE_KUBE_STATE/lock.json"
+        fi
+        [ "$requested_uid" = "$current_uid" ] || exit 1
+        printf '%s\n' delete-configmap >>"$FAKE_KUBE_STATE/cleanup-actions.log"
+        rm -f "$FAKE_KUBE_STATE/lock.json"
+        jq -n --arg uid "$current_uid" '{kind:"Status",status:"Success",
+          details:{name:"witself-agent-email-receipt-proof-lock",kind:"configmaps",uid:$uid}}'
+        ;;
+      *) exit 1 ;;
+    esac
     ;;
   "exec "*)
     printf '%s\n' "$*" >"$FAKE_KUBE_STATE/forbidden-exec.log"
@@ -173,8 +311,12 @@ cat >"$work_dir/state/deployment.json" <<'EOF'
   "apiVersion":"apps/v1","kind":"Deployment",
   "metadata":{"name":"witself-worker","uid":"deployment-uid","resourceVersion":"deployment-rv","generation":8},
   "status":{"observedGeneration":8,"replicas":2,"readyReplicas":2,"updatedReplicas":2,"availableReplicas":2,"unavailableReplicas":0},
-  "spec":{"replicas":2,"template":{
-    "metadata":{"annotations":{"checksum/config":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}},
+  "spec":{"replicas":2,"selector":{"matchLabels":{
+    "app.kubernetes.io/component":"worker","app.kubernetes.io/instance":"witself-server",
+    "app.kubernetes.io/name":"witself-worker"}},"template":{
+    "metadata":{"labels":{"app.kubernetes.io/component":"worker",
+      "app.kubernetes.io/instance":"witself-server","app.kubernetes.io/name":"witself-worker"},
+      "annotations":{"checksum/config":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}},
     "spec":{
       "serviceAccountName":"witself-server","automountServiceAccountToken":false,
       "imagePullSecrets":[{"name":"registry-read"}],
@@ -195,6 +337,31 @@ cat >"$work_dir/state/deployment.json" <<'EOF'
   }}
 }
 EOF
+
+jq -n --slurpfile deployment "$work_dir/state/deployment.json" '{items:[{
+  apiVersion:"apps/v1",kind:"ReplicaSet",
+  metadata:{name:"witself-worker-current",uid:"worker-rs-uid",resourceVersion:"worker-rs-rv",
+    ownerReferences:[{apiVersion:"apps/v1",kind:"Deployment",name:"witself-worker",
+      uid:"deployment-uid",controller:true,blockOwnerDeletion:true}]},
+  spec:{template:$deployment[0].spec.template}
+}]}' >"$work_dir/state/worker-replicasets.json"
+
+jq -n --slurpfile deployment "$work_dir/state/deployment.json" '{items:[
+  {apiVersion:"v1",kind:"Pod",metadata:{name:"witself-worker-current-a",uid:"worker-pod-a-uid",
+    resourceVersion:"worker-pod-a-rv",labels:$deployment[0].spec.template.metadata.labels,
+    annotations:$deployment[0].spec.template.metadata.annotations,
+    ownerReferences:[{apiVersion:"apps/v1",kind:"ReplicaSet",name:"witself-worker-current",
+      uid:"worker-rs-uid",controller:true,blockOwnerDeletion:true}]},
+    spec:$deployment[0].spec.template.spec,status:{phase:"Running",startTime:"2026-08-15T09:52:23Z",
+      conditions:[{type:"Ready",status:"True"}],containerStatuses:[{name:"witself-worker",ready:true}]}},
+  {apiVersion:"v1",kind:"Pod",metadata:{name:"witself-worker-current-b",uid:"worker-pod-b-uid",
+    resourceVersion:"worker-pod-b-rv",labels:$deployment[0].spec.template.metadata.labels,
+    annotations:$deployment[0].spec.template.metadata.annotations,
+    ownerReferences:[{apiVersion:"apps/v1",kind:"ReplicaSet",name:"witself-worker-current",
+      uid:"worker-rs-uid",controller:true,blockOwnerDeletion:true}]},
+    spec:$deployment[0].spec.template.spec,status:{phase:"Running",startTime:"2026-08-15T09:52:50Z",
+      conditions:[{type:"Ready",status:"True"}],containerStatuses:[{name:"witself-worker",ready:true}]}}
+]}' >"$work_dir/state/worker-pods.json"
 
 cat >"$work_dir/state/config.json" <<'EOF'
 {
@@ -247,10 +414,13 @@ cat >"$work_dir/state/pods.json" <<'EOF'
 }
 EOF
 
-printf '%s\n' test-kubeconfig >"$work_dir/kubeconfig"
+printf '%s\n' test-kubeconfig >"$work_dir/kubeconfig-expected"
+chmod 400 "$work_dir/kubeconfig-expected"
+cp "$work_dir/kubeconfig-expected" "$work_dir/kubeconfig"
 chmod 600 "$work_dir/kubeconfig"
 export FAKE_KUBE_STATE="$work_dir/state"
-export FAKE_EXPECTED_KUBECONFIG="$work_dir/kubeconfig"
+export FAKE_ORIGINAL_KUBECONFIG="$work_dir/kubeconfig"
+export FAKE_EXPECTED_KUBECONFIG_CONTENT="$work_dir/kubeconfig-expected"
 export FAKE_EXPECTED_CONTEXT=witself-civo-sandbox-usw2-dev
 export FAKE_EXPECTED_NAMESPACE=witself
 export WITSELF_AGENT_EMAIL_RECEIPT_PROOF_CLEANUP_TIMEOUT_SECONDS=1
@@ -278,16 +448,25 @@ reset_fake_run() {
   unset FAKE_NOT_READY FAKE_WRONG_REPLICAS FAKE_WRONG_CELL
   unset FAKE_DISABLED FAKE_LITERAL_PRIVATE_CONFIG
   unset FAKE_SOURCE_DRIFT FAKE_SECRET_DRIFT FAKE_DISPATCH_IMMUTABLE
+  unset FAKE_REWRITE_KUBECONFIG FAKE_REPLACE_POD FAKE_REPLACE_JOB FAKE_REPLACE_LOCK
+  unset FAKE_REPLACE_WORKER_POD_OWNER FAKE_EXTRA_WORKER_POD
   unset FAKE_EXISTING_JOB FAKE_LOCK_CREATE_FAILURE FAKE_JOB_CREATE_FAILURE
   unset FAKE_JOB_LOOKUP_FAILURE
-  unset FAKE_BACKGROUND_DELETE FAKE_LOG_FAILURE
+  unset FAKE_REPLACE_JOB_AT_CLEANUP FAKE_REPLACE_LOCK_AT_CLEANUP
+  unset FAKE_BACKGROUND_DELETE FAKE_CLEANUP_POD_STATE FAKE_LOG_FAILURE
   export FAKE_RUNNER_EXIT=0
   export FAKE_RUNNER_LOG="$proof"
   rm -f "$work_dir/state/"*-get-count "$work_dir/state/calls.log"
   rm -f "$work_dir/state/lock.json" "$work_dir/state/lock-created.json"
+  rm -f "$work_dir/state/lock-replacement.json"
   rm -f "$work_dir/state/job.json" "$work_dir/state/job-created.json"
+  rm -f "$work_dir/state/job-replacement.json"
   rm -f "$work_dir/state/job-deleted" "$work_dir/state/deletes.log"
   rm -f "$work_dir/state/cleanup-actions.log" "$work_dir/state/forbidden-exec.log"
+  rm -f "$work_dir/state/kubeconfig-paths.log" "$work_dir/state/kubeconfig-rewritten"
+  rm -f "$work_dir/state/logs-read"
+  cp "$work_dir/kubeconfig-expected" "$work_dir/kubeconfig"
+  chmod 600 "$work_dir/kubeconfig"
 }
 
 run_expect_failure() {
@@ -352,7 +531,11 @@ jq -e '
   $runner.securityContext.allowPrivilegeEscalation == false and
   $runner.securityContext.capabilities.drop == ["ALL"]
 ' "$work_dir/state/job-created.json" >/dev/null
-grep -Fq 'delete job witself-agent-email-receipt-proof --ignore-not-found=true --cascade=foreground --wait=true --timeout=1s' \
+grep -Fqx \
+  '/apis/batch/v1/namespaces/witself/jobs/witself-agent-email-receipt-proof|proof-job-uid' \
+  "$work_dir/state/deletes.log"
+grep -Fqx \
+  '/api/v1/namespaces/witself/configmaps/witself-agent-email-receipt-proof-lock|proof-lock-uid' \
   "$work_dir/state/deletes.log"
 awk '
   $0 == "delete-job" { job = NR }
@@ -360,6 +543,165 @@ awk '
   $0 == "delete-configmap" { lock = NR }
   END { exit !(job > 0 && pods > job && lock > pods) }
 ' "$work_dir/state/cleanup-actions.log"
+
+# Every kubectl call uses one immutable mode-0400 snapshot. Rewriting the
+# operator's original kubeconfig after the first call cannot redirect any later
+# source read, mutation, log read, or UID-preconditioned cleanup.
+reset_fake_run
+export FAKE_REWRITE_KUBECONFIG=true
+kubeconfig_rewrite_output="$work_dir/kubeconfig-rewrite-output"
+if ! "$repo_root/scripts/run-agent-email-receipt-proof.sh" "${base_args[@]}" \
+    >"$kubeconfig_rewrite_output" 2>&1; then
+  printf 'kubeconfig rewrite fixture unexpectedly failed:\n' >&2
+  sed -n '1,80p' "$kubeconfig_rewrite_output" >&2
+  exit 1
+fi
+grep -Fqx "$proof" "$kubeconfig_rewrite_output"
+grep -Fqx rewritten-cross-cluster "$work_dir/kubeconfig"
+test -e "$work_dir/state/kubeconfig-rewritten"
+[ "$(sort -u "$work_dir/state/kubeconfig-paths.log" | wc -l | tr -d '[:space:]')" = 1 ]
+if grep -Fqx "$work_dir/kubeconfig" "$work_dir/state/kubeconfig-paths.log"; then
+  echo "a kubectl call used the mutable original kubeconfig" >&2
+  exit 1
+fi
+
+reset_fake_run
+export FAKE_REPLACE_WORKER_POD_OWNER=true
+worker_owner_output="$work_dir/worker-owner-output"
+run_expect_failure 'error: managed worker Pods are not exact, ready Deployment owners' \
+  "$worker_owner_output" "${base_args[@]}"
+test ! -e "$work_dir/state/lock-created.json"
+
+reset_fake_run
+export FAKE_EXTRA_WORKER_POD=true
+extra_worker_output="$work_dir/extra-worker-output"
+run_expect_failure 'error: managed worker Pods are not exact, ready Deployment owners' \
+  "$extra_worker_output" "${base_args[@]}"
+test ! -e "$work_dir/state/lock-created.json"
+
+# Mutable ExternalSecret rotation remains supported, but the canonical DB
+# Secret UID/RV must be unchanged after the exact proof Pod starts and after
+# its logs are read. The value itself is never requested.
+reset_fake_run
+export FAKE_SECRET_DRIFT=db-poststart
+db_poststart_output="$work_dir/db-poststart-output"
+run_expect_failure 'error: managed Secret metadata drifted before receipt-proof read' \
+  "$db_poststart_output" "${base_args[@]}"
+test ! -e "$work_dir/state/logs-read"
+if grep -Fq "$proof" "$db_poststart_output"; then
+  echo "a proof escaped after pre-read DB Secret drift" >&2
+  exit 1
+fi
+
+reset_fake_run
+export FAKE_SECRET_DRIFT=db-postflight
+db_postflight_output="$work_dir/db-postflight-output"
+run_expect_failure 'error: managed Secret metadata drifted after receipt-proof read' \
+  "$db_postflight_output" "${base_args[@]}"
+test -e "$work_dir/state/logs-read"
+if grep -Fq "$proof" "$db_postflight_output"; then
+  echo "a proof escaped after post-read DB Secret drift" >&2
+  exit 1
+fi
+
+reset_fake_run
+export FAKE_REPLACE_POD=postlog
+replacement_pod_output="$work_dir/replacement-pod-output"
+run_expect_failure 'error: receipt-proof lock, Job, or owned Pod changed after proof read' \
+  "$replacement_pod_output" "${base_args[@]}"
+test -e "$work_dir/state/logs-read"
+if grep -Fq "$proof" "$replacement_pod_output"; then
+  echo "a proof escaped after Pod replacement" >&2
+  exit 1
+fi
+
+reset_fake_run
+export FAKE_REPLACE_JOB=postlog
+replacement_job_output="$work_dir/replacement-job-output"
+run_expect_failure 'error: receipt-proof lock, Job, or owned Pod changed after proof read' \
+  "$replacement_job_output" "${base_args[@]}"
+test -e "$work_dir/state/job.json"
+[ "$(jq -r '.metadata.uid' "$work_dir/state/job.json")" = replacement-job-uid ]
+test -e "$work_dir/state/lock.json"
+
+reset_fake_run
+export FAKE_REPLACE_LOCK=postlog
+replacement_lock_output="$work_dir/replacement-lock-output"
+run_expect_failure 'error: receipt-proof lock, Job, or owned Pod changed after proof read' \
+  "$replacement_lock_output" "${base_args[@]}"
+test -e "$work_dir/state/lock.json"
+[ "$(jq -r '.metadata.uid' "$work_dir/state/lock.json")" = replacement-lock-uid ]
+
+# UID-preconditioned cleanup cannot delete a same-name foreign replacement.
+reset_fake_run
+export FAKE_REPLACE_JOB_AT_CLEANUP=true
+replacement_job_cleanup_output="$work_dir/replacement-job-cleanup-output"
+if ! "$repo_root/scripts/run-agent-email-receipt-proof.sh" "${base_args[@]}" \
+    >"$replacement_job_cleanup_output" 2>&1; then
+  echo "replacement Job cleanup fixture unexpectedly failed" >&2
+  exit 1
+fi
+grep -Fqx "$proof" "$replacement_job_cleanup_output"
+grep -Fqx \
+  'warning: receipt-proof cleanup could not prove the runner absent; the fixed lock was retained' \
+  "$replacement_job_cleanup_output"
+[ "$(jq -r '.metadata.uid' "$work_dir/state/job.json")" = replacement-job-uid ]
+test -e "$work_dir/state/lock.json"
+
+reset_fake_run
+export FAKE_REPLACE_LOCK_AT_CLEANUP=true
+replacement_lock_cleanup_output="$work_dir/replacement-lock-cleanup-output"
+if ! "$repo_root/scripts/run-agent-email-receipt-proof.sh" "${base_args[@]}" \
+    >"$replacement_lock_cleanup_output" 2>&1; then
+  echo "replacement lock cleanup fixture unexpectedly failed" >&2
+  exit 1
+fi
+grep -Fqx "$proof" "$replacement_lock_cleanup_output"
+grep -Fqx \
+  'warning: receipt-proof cleanup could not prove the runner absent; the fixed lock was retained' \
+  "$replacement_lock_cleanup_output"
+[ "$(jq -r '.metadata.uid' "$work_dir/state/lock.json")" = replacement-lock-uid ]
+
+# The selector alone cannot prove cleanup: the exact Pod may be relabeled out
+# of the Job selector or replaced under the same name. Both cases retain the
+# fixed lock, and a foreign replacement is never mistaken for the proof Pod.
+reset_fake_run
+export FAKE_CLEANUP_POD_STATE=relabeled
+relabeled_pod_cleanup_output="$work_dir/relabeled-pod-cleanup-output"
+if ! "$repo_root/scripts/run-agent-email-receipt-proof.sh" "${base_args[@]}" \
+    >"$relabeled_pod_cleanup_output" 2>&1; then
+  echo "relabeled Pod cleanup fixture unexpectedly failed" >&2
+  exit 1
+fi
+grep -Fqx "$proof" "$relabeled_pod_cleanup_output"
+grep -Fqx \
+  'warning: receipt-proof cleanup could not prove the runner absent; the fixed lock was retained' \
+  "$relabeled_pod_cleanup_output"
+test -e "$work_dir/state/lock.json"
+if grep -Fq '/configmaps/witself-agent-email-receipt-proof-lock|' \
+    "$work_dir/state/deletes.log"; then
+  echo "cleanup removed the lock while the exact relabeled Pod remained" >&2
+  exit 1
+fi
+
+reset_fake_run
+export FAKE_CLEANUP_POD_STATE=replacement
+replacement_pod_cleanup_output="$work_dir/replacement-pod-cleanup-output"
+if ! "$repo_root/scripts/run-agent-email-receipt-proof.sh" "${base_args[@]}" \
+    >"$replacement_pod_cleanup_output" 2>&1; then
+  echo "replacement Pod cleanup fixture unexpectedly failed" >&2
+  exit 1
+fi
+grep -Fqx "$proof" "$replacement_pod_cleanup_output"
+grep -Fqx \
+  'warning: receipt-proof cleanup could not prove the runner absent; the fixed lock was retained' \
+  "$replacement_pod_cleanup_output"
+test -e "$work_dir/state/lock.json"
+if grep -Fq '/configmaps/witself-agent-email-receipt-proof-lock|' \
+    "$work_dir/state/deletes.log"; then
+  echo "cleanup removed the lock after a same-name Pod replacement" >&2
+  exit 1
+fi
 
 # Namespace is intentionally mandatory; no implicit production namespace is
 # permitted and validation fails before Kubernetes is contacted.
@@ -445,7 +787,9 @@ run_expect_failure 'error: managed worker source drifted before Job creation' \
 test -e "$work_dir/state/lock-created.json"
 test ! -e "$work_dir/state/job-created.json"
 test ! -e "$work_dir/state/lock.json"
-grep -Fq 'delete configmap witself-agent-email-receipt-proof-lock' "$work_dir/state/deletes.log"
+grep -Fqx \
+  '/api/v1/namespaces/witself/configmaps/witself-agent-email-receipt-proof-lock|proof-lock-uid' \
+  "$work_dir/state/deletes.log"
 
 reset_fake_run
 export FAKE_EXISTING_JOB=true
@@ -467,11 +811,9 @@ grep -Fqx \
   'warning: receipt-proof cleanup could not prove the runner absent; the fixed lock was retained' \
   "$job_create_output"
 test -e "$work_dir/state/lock.json"
-if [ -e "$work_dir/state/deletes.log" ]; then
-  if grep -Eq '^delete (job|configmap) ' "$work_dir/state/deletes.log"; then
-    echo "ambiguous Job creation removed a fixed resource" >&2
-    exit 1
-  fi
+if [ -s "$work_dir/state/deletes.log" ]; then
+  echo "ambiguous Job creation attempted to remove a fixed resource" >&2
+  exit 1
 fi
 
 # Runner failures and malformed logs remain private. Neither the account nor
@@ -519,7 +861,8 @@ grep -Fqx \
   'warning: receipt-proof cleanup could not prove the runner absent; the fixed lock was retained' \
   "$lingering_output"
 test -e "$work_dir/state/lock.json"
-if grep -Fq 'delete configmap' "$work_dir/state/deletes.log"; then
+if grep -Fq '/configmaps/witself-agent-email-receipt-proof-lock|' \
+    "$work_dir/state/deletes.log"; then
   echo "cleanup removed the lock while the Job pod remained" >&2
   exit 1
 fi
