@@ -93,20 +93,29 @@ and run the local checks:
 
 ```bash
 cd infra/cloudflare/agent-email-send
-export CLOUDFLARE_PROFILE=production
+export CLOUDFLARE_ACCOUNT_ID='replace-with-32-character-production-account-id'
 export CLOUDFLARE_ZONE_ID='replace-with-32-character-lowercase-zone-id'
 export WITSELF_EMAIL_SENDING_DOMAIN=send.witmail.net
 
 wrangler_prod() {
-  npx wrangler --config wrangler.template.jsonc \
-    --profile "$CLOUDFLARE_PROFILE" "$@"
+  npx --no-install wrangler --config wrangler.template.jsonc "$@"
 }
 
-wrangler_prod whoami
 npm ci
 npm test
 npm run bundle:check
+
+auth_json="$(npx --no-install wrangler whoami \
+  --account "$CLOUDFLARE_ACCOUNT_ID" --json)"
+printf '%s' "$auth_json" | jq -e --arg id "$CLOUDFLARE_ACCOUNT_ID" '
+  .loggedIn == true and
+  ([.accounts[]? | select(.id == $id)] | length == 1)
+' >/dev/null
 ```
+
+`whoami` does not accept Wrangler's `--profile` flag. The explicit account ID
+and membership assertion above therefore fence both the selected deployment
+account and the authenticated operator without relying on a named profile.
 
 Do not export, echo, paste into command arguments, or save either JSON secret
 described below. Wrangler prompts for those values without putting them in

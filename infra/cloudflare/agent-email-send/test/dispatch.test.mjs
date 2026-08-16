@@ -43,6 +43,8 @@ function storage(initial) {
     : structuredClone(value);
   const values = new Map(initial ? [["receipt", clone(initial)]] : []);
   let alarmAt = null;
+  let activeTransaction = null;
+  let deleteAllCalls = 0;
   let tail = Promise.resolve();
   const exclusively = (callback) => {
     const previous = tail;
@@ -66,10 +68,23 @@ function storage(initial) {
       return exclusively(() => { values.set(key, clone(value)); });
     },
     async deleteAll() {
-      return exclusively(() => { values.clear(); alarmAt = null; });
+      if (activeTransaction) {
+        activeTransaction.values.clear();
+        activeTransaction.alarmAt = null;
+        activeTransaction.deleteAllCalls += 1;
+        return;
+      }
+      return exclusively(() => {
+        values.clear();
+        alarmAt = null;
+        deleteAllCalls += 1;
+      });
     },
     async setAlarm(value) {
       return exclusively(() => { alarmAt = value; });
+    },
+    async getAlarm() {
+      return exclusively(() => alarmAt);
     },
     async deleteAlarm() {
       return exclusively(() => { alarmAt = null; });
@@ -79,19 +94,31 @@ function storage(initial) {
         const draft = new Map(
           [...values].map(([key, value]) => [key, clone(value)]),
         );
+        const transactionState = {
+          values: draft,
+          alarmAt,
+          deleteAllCalls: 0,
+        };
         const transaction = {
           async get(key) { return clone(draft.get(key)); },
           async put(key, value) { draft.set(key, clone(value)); },
           async delete(key) { draft.delete(key); },
-          async deleteAll() { draft.clear(); },
         };
-        const result = await callback(transaction);
-        values.clear();
-        for (const [key, value] of draft) values.set(key, clone(value));
-        return clone(result);
+        activeTransaction = transactionState;
+        try {
+          const result = await callback(transaction);
+          values.clear();
+          for (const [key, value] of draft) values.set(key, clone(value));
+          alarmAt = transactionState.alarmAt;
+          deleteAllCalls += transactionState.deleteAllCalls;
+          return clone(result);
+        } finally {
+          activeTransaction = null;
+        }
       });
     },
     get alarmAt() { return alarmAt; },
+    get deleteAllCalls() { return deleteAllCalls; },
   };
 }
 
@@ -494,6 +521,49 @@ test("durable receipt submits once and replays exact result", async () => {
   assert.equal(state.storage.values.get("receipt").verified_replay_count, 0);
 });
 
+test("invalid provider message IDs close ambiguously without resending", async (t) => {
+  const cases = [
+    ["ASCII byte overflow", "x".repeat(513)],
+    ["UTF-8 byte overflow", "é".repeat(257)],
+    ["control character", "provider\nmessage"],
+  ];
+  for (const [name, messageId] of cases) {
+    await t.test(name, async () => {
+      const receiptStorage = storage();
+      let sends = 0;
+      let routes = 0;
+      const durable = new OutboundReceipt({ storage: receiptStorage }, {
+        EMAIL: {
+          async send() {
+            sends += 1;
+            return { messageId };
+          },
+        },
+        PROVIDER_ROUTES: providerRoutes(async () => {
+          routes += 1;
+          return new Response(null, { status: 204 });
+        }),
+      });
+      let result = await durable.fetch(request());
+      const firstBody = await result.json();
+      assert.equal(result.status, 503);
+      assert.equal(firstBody.state, "ambiguous");
+      assert.equal(firstBody.error_code, "provider_outcome_ambiguous");
+      const receipt = await receiptStorage.get("receipt");
+      assert.equal(receipt.state, "ambiguous");
+      assert.equal(receipt.provider_call_started_count, 1);
+      assert.equal("provider_message_id" in receipt, false);
+      assert.equal(routes, 0);
+
+      result = await durable.fetch(request());
+      assert.equal(result.status, 503);
+      assert.deepEqual(await result.json(), firstBody);
+      assert.equal(sends, 1);
+      assert.equal(routes, 0);
+    });
+  }
+});
+
 test("receipt replay proves an accepted receipt without an EMAIL binding path", async () => {
   const receiptStorage = storage();
   const state = { storage: receiptStorage };
@@ -700,7 +770,6 @@ test("receipt replay fails closed on missing, conflict, and unresolved receipts"
     (value) => { delete value.provider_call_started_count; },
     (value) => { delete value.verified_replay_count; },
     (value) => { value.verified_replay_count = 1_000_000; },
-    (value) => { value.expires_at = new Date(Date.now() - 1000).toISOString(); },
   ]) {
     const value = structuredClone(accepted);
     mutation(value);
@@ -712,6 +781,14 @@ test("receipt replay fails closed on missing, conflict, and unresolved receipts"
     assert.equal(body.error_code, "receipt_unresolved");
     assert.deepEqual(receiptStorage.values.get("receipt"), value);
   }
+
+  const expired = structuredClone(accepted);
+  expired.expires_at = new Date(Date.now() - 1000).toISOString();
+  receiptStorage.values.set("receipt", expired);
+  response = await sender.fetch(receiptReplayRequest());
+  assert.equal(response.status, 404);
+  assert.equal((await response.json()).error_code, "receipt_missing");
+  assert.equal(receiptStorage.values.has("receipt"), false);
 });
 
 test("digest conflict never resubmits", async () => {
@@ -730,7 +807,11 @@ test("digest conflict never resubmits", async () => {
 
 test("unfinished provider boundary resolves ambiguous without a second call", async () => {
   const state = {
-    storage: storage({ digest: "a".repeat(64), state: "provider_started" }),
+    storage: storage({
+      digest: "a".repeat(64),
+      state: "provider_started",
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    }),
   };
   let calls = 0;
   const durable = new OutboundReceipt(state, {
@@ -741,6 +822,197 @@ test("unfinished provider boundary resolves ambiguous without a second call", as
   assert.equal(response.status, 503);
   assert.equal((await response.json()).state, "ambiguous");
   assert.equal(calls, 0);
+});
+
+test("legacy unfinished receipt repairs its original missing expiry alarm", async () => {
+  const expiresAt = new Date(Date.now() + 60_000).toISOString();
+  const receiptStorage = storage({
+    digest: "a".repeat(64),
+    signer_key_id: "founder-cell",
+    state: "provider_started",
+    provider_call_started_count: 1,
+    verified_replay_count: 0,
+    started_at: new Date(Date.now() - 1000).toISOString(),
+    expires_at: expiresAt,
+  });
+  let sends = 0;
+  const durable = new OutboundReceipt({ storage: receiptStorage }, {
+    EMAIL: { async send() { sends += 1; return { messageId: "never" }; } },
+  });
+
+  let result = await durable.fetch(request());
+  assert.equal(result.status, 503);
+  assert.equal((await result.json()).state, "ambiguous");
+  assert.equal(await receiptStorage.getAlarm(), Date.parse(expiresAt));
+  const fixedExpiry = await receiptStorage.getAlarm();
+  result = await durable.fetch(request());
+  assert.equal(result.status, 503);
+  assert.equal(await receiptStorage.getAlarm(), fixedExpiry);
+  assert.equal(sends, 0);
+});
+
+test("legacy provider-started invalid message ID closes ambiguously", async () => {
+  const expiresAt = new Date(Date.now() + 60_000).toISOString();
+  const invalidId = "x".repeat(513);
+  const original = {
+    digest: "a".repeat(64),
+    signer_key_id: "founder-cell",
+    state: "provider_started",
+    provider_call_started_count: 1,
+    verified_replay_count: 0,
+    started_at: new Date(Date.now() - 1000).toISOString(),
+    expires_at: expiresAt,
+    provider_message_id: invalidId,
+    route: acceptedReceipt().route,
+  };
+  const receiptStorage = storage(original);
+  const env = {};
+  Object.defineProperties(env, {
+    EMAIL: {
+      get() { throw new Error("legacy replay touched EMAIL"); },
+    },
+    PROVIDER_ROUTES: {
+      get() { throw new Error("legacy replay touched routes"); },
+    },
+  });
+  const durable = new OutboundReceipt({ storage: receiptStorage }, env);
+
+  const result = await durable.fetch(request());
+  assert.equal(result.status, 503);
+  assert.deepEqual(await result.json(), {
+    schema_version: "witself.agent-email-dispatch-response.v1",
+    send_id: dispatch().send_id,
+    state: "ambiguous",
+    provider: "cloudflare_email_sending",
+    error_code: "provider_outcome_ambiguous",
+  });
+  assert.equal(await receiptStorage.getAlarm(), Date.parse(expiresAt));
+  assert.deepEqual(await receiptStorage.get("receipt"), original);
+});
+
+test("legacy terminal receipt repairs its original missing expiry alarm", async () => {
+  const expiresAt = new Date(Date.now() + 60_000).toISOString();
+  const receiptStorage = storage(acceptedReceipt({
+    expires_at: expiresAt,
+    route_pending: false,
+    route_attempts: 0,
+  }));
+  const durable = new OutboundReceipt({ storage: receiptStorage }, {});
+
+  let result = await durable.fetch(request());
+  assert.equal(result.status, 200);
+  assert.equal((await result.json()).state, "accepted");
+  assert.equal(await receiptStorage.getAlarm(), Date.parse(expiresAt));
+  const fixedExpiry = await receiptStorage.getAlarm();
+  result = await durable.fetch(request());
+  assert.equal(result.status, 200);
+  assert.equal(await receiptStorage.getAlarm(), fixedExpiry);
+});
+
+test("legacy accepted invalid message lineage closes ambiguously", async (t) => {
+  const cases = [
+    {
+      name: "truncated oversized provider ID",
+      storedId: "x".repeat(513),
+      responseId: "x".repeat(512),
+    },
+    {
+      name: "control character provider ID",
+      storedId: "provider\nmessage",
+      responseId: "provider\nmessage",
+    },
+  ];
+  for (const { name, storedId, responseId } of cases) {
+    await t.test(name, async () => {
+      const expiresAt = new Date(Date.now() + 60_000).toISOString();
+      const original = acceptedReceipt({
+        expires_at: expiresAt,
+        provider_message_id: storedId,
+        response: {
+          schema_version: "witself.agent-email-dispatch-response.v1",
+          send_id: dispatch().send_id,
+          state: "accepted",
+          provider: "cloudflare_email_sending",
+          provider_message_id: responseId,
+        },
+      });
+      const receiptStorage = storage(original);
+      const env = {};
+      Object.defineProperties(env, {
+        EMAIL: {
+          get() { throw new Error("legacy replay touched EMAIL"); },
+        },
+        PROVIDER_ROUTES: {
+          get() { throw new Error("legacy replay touched routes"); },
+        },
+      });
+      const durable = new OutboundReceipt({ storage: receiptStorage }, env);
+
+      const result = await durable.fetch(request());
+      const body = await result.json();
+      assert.equal(result.status, 503);
+      assert.equal(body.state, "ambiguous");
+      assert.equal(body.error_code, "provider_outcome_ambiguous");
+      assert.equal("provider_message_id" in body, false);
+      assert.equal(await receiptStorage.getAlarm(), Date.parse(expiresAt));
+      assert.deepEqual(await receiptStorage.get("receipt"), original);
+    });
+  }
+});
+
+test("receipt proof repairs a legacy accepted receipt's missing alarm", async () => {
+  const expiresAt = new Date(Date.now() + 60_000).toISOString();
+  const receiptStorage = storage(acceptedReceipt({
+    expires_at: expiresAt,
+    route_pending: false,
+  }));
+  const durable = new OutboundReceipt({ storage: receiptStorage }, {});
+
+  const result = await durable.fetch(receiptReplayRequest());
+  assert.equal(result.status, 200);
+  assert.equal((await result.json()).verified_replay_count, 1);
+  assert.equal(await receiptStorage.getAlarm(), Date.parse(expiresAt));
+});
+
+test("existing receipt alarm failure escapes no result and calls no provider", async () => {
+  const receiptStorage = storage(acceptedReceipt({ route_pending: false }));
+  receiptStorage.setAlarm = async () => {
+    throw new Error("receipt alarm unavailable");
+  };
+  let sends = 0;
+  const durable = new OutboundReceipt({ storage: receiptStorage }, {
+    EMAIL: { async send() { sends += 1; return { messageId: "never" }; } },
+  });
+
+  await assert.rejects(durable.fetch(request()), /receipt alarm unavailable/);
+  await assert.rejects(
+    durable.fetch(receiptReplayRequest()),
+    /receipt alarm unavailable/,
+  );
+  assert.equal(sends, 0);
+  assert.equal((await receiptStorage.get("receipt")).verified_replay_count, 0);
+});
+
+test("expired legacy receipt is retired without a provider call", async () => {
+  const receiptStorage = storage({
+    digest: "a".repeat(64),
+    signer_key_id: "founder-cell",
+    state: "provider_started",
+    provider_call_started_count: 1,
+    verified_replay_count: 0,
+    started_at: new Date(Date.now() - 120_000).toISOString(),
+    expires_at: new Date(Date.now() - 60_000).toISOString(),
+  });
+  let sends = 0;
+  const durable = new OutboundReceipt({ storage: receiptStorage }, {
+    EMAIL: { async send() { sends += 1; return { messageId: "never" }; } },
+  });
+
+  const result = await durable.fetch(request());
+  assert.equal(result.status, 503);
+  assert.equal((await result.json()).state, "ambiguous");
+  assert.equal(receiptStorage.values.has("receipt"), false);
+  assert.equal(sends, 0);
 });
 
 test("known provider throttling is retryable and content-free", async () => {
@@ -821,6 +1093,74 @@ test("provider route is immutable and content-free", async () => {
   await durable.alarm();
   response = await durable.fetch(new Request("https://route.internal/route"));
   assert.equal(response.status, 404);
+});
+
+test("provider route is not persisted until its expiry alarm is durable", async () => {
+  const routeStorage = storage();
+  const originalSetAlarm = routeStorage.setAlarm;
+  let alarmAttempts = 0;
+  routeStorage.setAlarm = async (value) => {
+    alarmAttempts += 1;
+    if (alarmAttempts === 1) throw new Error("alarm unavailable");
+    return originalSetAlarm(value);
+  };
+  const durable = new ProviderRoute({ storage: routeStorage });
+  const route = {
+    schema_version: "witself.agent-email-provider-route.v1",
+    send_id: dispatch().send_id,
+    account_id: dispatch().account_id,
+    realm_id: dispatch().realm_id,
+    signer_key_id: "founder-cell",
+  };
+  const post = () => durable.fetch(new Request("https://route.internal/route", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(route),
+  }));
+
+  await assert.rejects(post, /alarm unavailable/);
+  assert.equal(routeStorage.values.has("route"), false);
+  assert.equal(routeStorage.alarmAt, null);
+
+  let response = await post();
+  assert.equal(response.status, 204);
+  assert.deepEqual(routeStorage.values.get("route"), route);
+  const fixedExpiry = routeStorage.alarmAt;
+  response = await post();
+  assert.equal(response.status, 204);
+  assert.equal(routeStorage.alarmAt, fixedExpiry);
+  assert.equal(alarmAttempts, 2);
+});
+
+test("an exact legacy provider route repairs its missing expiry alarm", async () => {
+  const routeStorage = storage();
+  const route = {
+    schema_version: "witself.agent-email-provider-route.v1",
+    send_id: dispatch().send_id,
+    account_id: dispatch().account_id,
+    realm_id: dispatch().realm_id,
+    signer_key_id: "founder-cell",
+  };
+  routeStorage.values.set("route", structuredClone(route));
+  assert.equal(await routeStorage.getAlarm(), null);
+  const durable = new ProviderRoute({ storage: routeStorage });
+  const post = () => durable.fetch(new Request("https://route.internal/route", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(route),
+  }));
+
+  const scheduledAt = Date.now();
+  let result = await post();
+  assert.equal(result.status, 204);
+  const repairedExpiry = await routeStorage.getAlarm();
+  assert.ok(repairedExpiry >= scheduledAt + PROVIDER_ROUTE_TTL_MS);
+  assert.ok(repairedExpiry <= Date.now() + PROVIDER_ROUTE_TTL_MS);
+  assert.deepEqual(routeStorage.values.get("route"), route);
+
+  result = await post();
+  assert.equal(result.status, 204);
+  assert.equal(await routeStorage.getAlarm(), repairedExpiry);
 });
 
 test("accepted provider result repairs a failed route without resending", async () => {
@@ -946,7 +1286,7 @@ test("stale route finalizers never resurrect or overwrite changed lineage", asyn
       },
     },
     {
-      name: "expired",
+      name: "changed-expiry",
       status: 204,
       async mutate(transaction, receipt) {
         await transaction.put("receipt", {
@@ -984,6 +1324,88 @@ test("stale route finalizers never resurrect or overwrite changed lineage", asyn
   }
 });
 
+test("route finalizers delete their exact receipt when I/O crosses expiry", async (t) => {
+  for (const status of [204, 503]) {
+    await t.test(`route status ${status}`, async () => {
+      const startedAt = Date.now();
+      const expiry = startedAt + 60_000;
+      const receiptStorage = storage(acceptedReceipt({
+        expires_at: new Date(expiry).toISOString(),
+      }));
+      await receiptStorage.put("extra-storage", { must: "also disappear" });
+      const originalSetAlarm = receiptStorage.setAlarm;
+      let alarmSchedules = 0;
+      receiptStorage.setAlarm = async (value) => {
+        alarmSchedules += 1;
+        return originalSetAlarm(value);
+      };
+      const routeStarted = deferred();
+      const finishRoute = deferred();
+      const durable = new OutboundReceipt({ storage: receiptStorage }, {
+        PROVIDER_ROUTES: providerRoutes(async () => {
+          routeStarted.resolve();
+          await finishRoute.promise;
+          return new Response(null, { status });
+        }),
+      });
+      const alarm = durable.alarm();
+      await routeStarted.promise;
+      const originalNow = Date.now;
+      try {
+        Date.now = () => expiry + 1;
+        finishRoute.resolve();
+        await alarm;
+      } finally {
+        Date.now = originalNow;
+      }
+      assert.equal(receiptStorage.values.size, 0);
+      assert.equal(receiptStorage.alarmAt, null);
+      assert.equal(receiptStorage.deleteAllCalls, 1);
+      assert.equal(alarmSchedules, 1);
+    });
+  }
+});
+
+test("expired route finalizer cleanup preserves replacement lineage", async () => {
+  const startedAt = Date.now();
+  const expiry = startedAt + 60_000;
+  const receiptStorage = storage(acceptedReceipt({
+    expires_at: new Date(expiry).toISOString(),
+  }));
+  await receiptStorage.put("extra-storage", { preserve: true });
+  const routeStarted = deferred();
+  const finishRoute = deferred();
+  const durable = new OutboundReceipt({ storage: receiptStorage }, {
+    PROVIDER_ROUTES: providerRoutes(async () => {
+      routeStarted.resolve();
+      await finishRoute.promise;
+      return new Response(null, { status: 204 });
+    }),
+  });
+  const alarm = durable.alarm();
+  await routeStarted.promise;
+  await receiptStorage.transaction(async (transaction) => {
+    const receipt = await transaction.get("receipt");
+    await transaction.put("receipt", { ...receipt, digest: "b".repeat(64) });
+  });
+  const replacement = await receiptStorage.get("receipt");
+  const originalNow = Date.now;
+  try {
+    Date.now = () => expiry + 1;
+    finishRoute.resolve();
+    await alarm;
+  } finally {
+    Date.now = originalNow;
+  }
+  assert.deepEqual(await receiptStorage.get("receipt"), replacement);
+  assert.deepEqual(
+    receiptStorage.values.get("extra-storage"),
+    { preserve: true },
+  );
+  assert.equal(receiptStorage.alarmAt, expiry);
+  assert.equal(receiptStorage.deleteAllCalls, 0);
+});
+
 test("route-repair alarm backs off durably without resending", async () => {
   const receiptStorage = storage();
   const durable = new OutboundReceipt({ storage: receiptStorage }, {
@@ -999,6 +1421,56 @@ test("route-repair alarm backs off durably without resending", async () => {
   assert.equal(receipt.route_pending, true);
   assert.equal(receipt.route_attempts, 2);
   assert.ok(receiptStorage.alarmAt > firstAlarm);
+});
+
+test("route alarm reinstalls absolute receipt expiry before provider I/O", async () => {
+  const expiresAt = new Date(Date.now() + 60_000).toISOString();
+  const receiptStorage = storage(acceptedReceipt({ expires_at: expiresAt }));
+  let observedFallback = null;
+  const durable = new OutboundReceipt({ storage: receiptStorage }, {
+    PROVIDER_ROUTES: providerRoutes(async () => {
+      observedFallback = receiptStorage.alarmAt;
+      return new Response(null, { status: 503 });
+    }),
+  });
+
+  await receiptStorage.deleteAlarm();
+  await durable.alarm();
+  assert.equal(observedFallback, Date.parse(expiresAt));
+  assert.ok(receiptStorage.alarmAt <= Date.parse(expiresAt));
+  assert.equal(
+    (await receiptStorage.get("receipt")).route_pending,
+    true,
+  );
+});
+
+test("invalid legacy route lineage keeps its absolute cleanup alarm", async () => {
+  const expiresAt = new Date(Date.now() + 60_000).toISOString();
+  const oversizedId = "x".repeat(513);
+  const receiptStorage = storage(acceptedReceipt({
+    expires_at: expiresAt,
+    provider_message_id: oversizedId,
+    response: {
+      schema_version: "witself.agent-email-dispatch-response.v1",
+      send_id: dispatch().send_id,
+      state: "accepted",
+      provider: "cloudflare_email_sending",
+      provider_message_id: oversizedId,
+    },
+  }));
+  const env = { PROVIDER_ROUTES: providerRoutes() };
+  Object.defineProperty(env, "EMAIL", {
+    get() { throw new Error("alarm touched EMAIL"); },
+  });
+  const durable = new OutboundReceipt({ storage: receiptStorage }, env);
+
+  await durable.alarm();
+  assert.equal(receiptStorage.values.has("receipt"), true);
+  assert.equal(await receiptStorage.getAlarm(), Date.parse(expiresAt));
+  assert.equal(
+    (await receiptStorage.get("receipt")).provider_message_id,
+    oversizedId,
+  );
 });
 
 test("receipt idempotency expires separately without retaining message content", async () => {
@@ -1018,6 +1490,9 @@ test("receipt idempotency expires separately without retaining message content",
     ...receipt,
     expires_at: new Date(Date.now() - 1000).toISOString(),
   });
+  receiptStorage.values.set("extra-storage", { must: "also disappear" });
   await durable.alarm();
   assert.equal(receiptStorage.values.size, 0);
+  assert.equal(receiptStorage.alarmAt, null);
+  assert.equal(receiptStorage.deleteAllCalls, 1);
 });

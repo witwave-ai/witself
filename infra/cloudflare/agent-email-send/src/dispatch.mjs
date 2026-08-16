@@ -40,8 +40,32 @@ const RECEIPT_FINALIZATION_STATES = new Set([
   "provider_started",
   "accepted",
 ]);
+const MAX_PROVIDER_MESSAGE_ID_BYTES = 512;
 export const RECEIPT_IDEMPOTENCY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const PROVIDER_ROUTE_TTL_MS = 400 * 24 * 60 * 60 * 1000;
+
+function validProviderMessageId(value) {
+  if (
+    typeof value !== "string" ||
+    value.length < 1 ||
+    value !== value.trim() ||
+    /\p{Cc}/u.test(value)
+  ) {
+    return false;
+  }
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) return false;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return false;
+    }
+  }
+  return new TextEncoder().encode(value).length <=
+    MAX_PROVIDER_MESSAGE_ID_BYTES;
+}
 
 function canonicalMailbox(value) {
   if (
@@ -139,8 +163,11 @@ export function response(sendId, state, options = {}) {
     state,
     provider: "cloudflare_email_sending",
   };
-  if (options.providerMessageId) {
-    body.provider_message_id = String(options.providerMessageId).slice(0, 512);
+  if (options.providerMessageId !== undefined) {
+    if (!validProviderMessageId(options.providerMessageId)) {
+      throw new Error("bad provider message id");
+    }
+    body.provider_message_id = options.providerMessageId;
   }
   if (options.errorCode) {
     if (!CLOSED_CODE.test(options.errorCode)) throw new Error("bad closed code");
@@ -229,9 +256,7 @@ function receiptLineageMatches(current, expected, acceptedResult, now) {
     !RECEIPT_FINALIZATION_STATES.has(expected.state) ||
     current.digest !== expected.digest ||
     current.provider_message_id !== expected.provider_message_id ||
-    typeof current.provider_message_id !== "string" ||
-    current.provider_message_id.length < 1 ||
-    current.provider_message_id.length > 512 ||
+    !validProviderMessageId(current.provider_message_id) ||
     current.expires_at !== expected.expires_at ||
     !Number.isFinite(Date.parse(current.expires_at)) ||
     Date.parse(current.expires_at) <= now ||
@@ -324,6 +349,9 @@ export class OutboundReceipt {
       return jsonResponse(response(dispatch.send_id, "rejected", { errorCode: "signer_invalid" }), 400);
     }
     const existing = await this.state.storage.get("receipt");
+    const existingExpired = existing
+      ? await this.fenceExistingReceiptExpiry(existing)
+      : false;
     if (existing && existing.digest !== digest) {
       return jsonResponse(response(dispatch.send_id, "rejected", { errorCode: "idempotency_conflict" }), 409);
     }
@@ -331,9 +359,15 @@ export class OutboundReceipt {
       return jsonResponse(response(dispatch.send_id, "ambiguous", { errorCode: "provider_outcome_ambiguous" }), 503);
     }
     if (existing?.state === "provider_started" && existing.provider_message_id) {
+      if (!validProviderMessageId(existing.provider_message_id)) {
+        return jsonResponse(response(dispatch.send_id, "ambiguous", {
+          errorCode: "provider_outcome_ambiguous",
+        }), 503);
+      }
       const result = response(dispatch.send_id, "accepted", {
         providerMessageId: existing.provider_message_id,
       });
+      if (existingExpired) return jsonResponse(result);
       let routePending = false;
       try {
         await registerProviderRoute(this.env, existing.provider_message_id, existing.route);
@@ -344,6 +378,18 @@ export class OutboundReceipt {
       return jsonResponse(result);
     }
     if (existing && TERMINAL.has(existing.state)) {
+      if (existing.state === "accepted" && (
+        !validProviderMessageId(existing.provider_message_id) ||
+        !acceptedResponseMatches(
+          existing.response,
+          dispatch.send_id,
+          existing.provider_message_id,
+        )
+      )) {
+        return jsonResponse(response(dispatch.send_id, "ambiguous", {
+          errorCode: "provider_outcome_ambiguous",
+        }), 503);
+      }
       if (existing.route_pending) {
         try {
           await this.scheduleRouteRepair(
@@ -356,6 +402,15 @@ export class OutboundReceipt {
         }
       }
       return jsonResponse(existing.response, existing.status ?? 200);
+    }
+
+    // Never cross the provider boundary in the same request that retires an
+    // expired legacy receipt. The caller receives a closed ambiguous result;
+    // a later request may observe the receipt's normal bounded absence.
+    if (existingExpired) {
+      return jsonResponse(response(dispatch.send_id, "ambiguous", {
+        errorCode: "provider_outcome_ambiguous",
+      }), 503);
     }
 
     if (existing && existing.state !== "retryable") {
@@ -417,8 +472,8 @@ export class OutboundReceipt {
         text: dispatch.text,
         headers,
       });
-      if (!sent || typeof sent.messageId !== "string" || sent.messageId.length < 1) {
-        throw Object.assign(new Error("provider returned no message id"), {
+      if (!sent || !validProviderMessageId(sent.messageId)) {
+        throw Object.assign(new Error("provider returned invalid message id"), {
           code: "E_INTERNAL_SERVER_ERROR",
         });
       }
@@ -483,6 +538,10 @@ export class OutboundReceipt {
     if (!KEY_ID.test(signerKeyId)) {
       return receiptProofFailure(409, "receipt_conflict", dispatch.send_id, "conflict");
     }
+    const existingForExpiry = await this.state.storage.get("receipt");
+    if (existingForExpiry) {
+      await this.fenceExistingReceiptExpiry(existingForExpiry);
+    }
     const outcome = await this.state.storage.transaction(async (transaction) => {
       const existing = await transaction.get("receipt");
       if (!existing) return { state: "missing" };
@@ -497,9 +556,7 @@ export class OutboundReceipt {
       const route = existing.route;
       if (
         existing.status !== 200 ||
-        typeof existing.provider_message_id !== "string" ||
-        existing.provider_message_id.length < 1 ||
-        existing.provider_message_id.length > 512 ||
+        !validProviderMessageId(existing.provider_message_id) ||
         !validProviderRoute(route) ||
         route.send_id !== dispatch.send_id ||
         route.account_id !== dispatch.account_id ||
@@ -622,6 +679,64 @@ export class OutboundReceipt {
     });
   }
 
+  async deleteExpiredReceipt(existing) {
+    const now = Date.now();
+    return this.state.storage.transaction(async (transaction) => {
+      const current = await transaction.get("receipt");
+      const routeMatches = (
+        current?.route === undefined && existing?.route === undefined
+      ) || exactObject(current?.route, existing?.route);
+      if (
+        !current || !existing ||
+        current.digest !== existing.digest ||
+        current.provider_message_id !== existing.provider_message_id ||
+        current.provider_call_started_count !==
+          existing.provider_call_started_count ||
+        current.started_at !== existing.started_at ||
+        current.expires_at !== existing.expires_at ||
+        !Number.isFinite(Date.parse(current.expires_at)) ||
+        Date.parse(current.expires_at) > now ||
+        current.signer_key_id !== existing.signer_key_id ||
+        receiptSignerKeyId(current) !== receiptSignerKeyId(existing) ||
+        !routeMatches
+      ) {
+        return false;
+      }
+      // These are SQLite-backed Durable Objects. Direct storage operations
+      // participate in the surrounding explicit transaction, while only
+      // deleteAll fully deallocates the object's hidden storage metadata.
+      // The compatibility date also makes deleteAll clear the alarm.
+      await this.state.storage.deleteAll();
+      return true;
+    });
+  }
+
+  async fenceExistingReceiptExpiry(existing) {
+    const expiry = Date.parse(existing?.expires_at);
+    if (!Number.isFinite(expiry)) {
+      throw new Error("receipt expiry is invalid");
+    }
+    if (expiry <= Date.now()) {
+      await this.deleteExpiredReceipt(existing);
+      return true;
+    }
+    if (
+      typeof this.state.storage.getAlarm !== "function" ||
+      typeof this.state.storage.setAlarm !== "function"
+    ) {
+      throw new Error("receipt alarm storage is unavailable");
+    }
+    const currentAlarm = await this.state.storage.getAlarm();
+    if (
+      currentAlarm === null ||
+      !Number.isFinite(currentAlarm) ||
+      currentAlarm > expiry
+    ) {
+      await this.state.storage.setAlarm(expiry);
+    }
+    return false;
+  }
+
   async scheduleRouteRepair(attempts, expiresAt) {
     if (typeof this.state.storage.setAlarm !== "function") return;
     const exponent = Math.min(Math.max(0, attempts - 1), 7);
@@ -644,15 +759,11 @@ export class OutboundReceipt {
   async alarm() {
     const receipt = await this.state.storage.get("receipt");
     if (!receipt) return;
-    const expiry = Date.parse(receipt.expires_at);
-    if (Number.isFinite(expiry) && expiry <= Date.now()) {
-      if (typeof this.state.storage.deleteAll === "function") {
-        await this.state.storage.deleteAll();
-      }
-      return;
-    }
+    // An alarm is consumed as it starts. Reinstall the receipt's original
+    // absolute expiry before any route I/O or finalization can fail; later
+    // repair scheduling may move it earlier, but never beyond this horizon.
+    if (await this.fenceExistingReceiptExpiry(receipt)) return;
     if (!receipt.route_pending || !receipt.provider_message_id || !receipt.route) {
-      await this.scheduleExpiry(receipt.expires_at);
       return;
     }
     try {
@@ -668,16 +779,32 @@ export class OutboundReceipt {
           retry.route_attempts,
           retry.expires_at,
         );
+      } else {
+        await this.deleteExpiredReceipt(receipt);
       }
       return;
     }
-    await this.persistAccepted(receipt, receipt.response, false);
+    const accepted = await this.persistAccepted(receipt, receipt.response, false);
+    if (!accepted) await this.deleteExpiredReceipt(receipt);
   }
 }
 
 export class ProviderRoute {
   constructor(state) {
     this.state = state;
+  }
+
+  async ensureExpiryAlarm() {
+    if (
+      typeof this.state.storage.getAlarm !== "function" ||
+      typeof this.state.storage.setAlarm !== "function"
+    ) {
+      throw new Error("provider route alarm storage is unavailable");
+    }
+    const existingAlarm = await this.state.storage.getAlarm();
+    if (existingAlarm === null) {
+      await this.state.storage.setAlarm(Date.now() + PROVIDER_ROUTE_TTL_MS);
+    }
   }
 
   async fetch(request) {
@@ -697,11 +824,13 @@ export class ProviderRoute {
     if (existing && JSON.stringify(existing) !== JSON.stringify(route)) {
       return new Response("route conflict", { status: 409 });
     }
+    // Releases before the alarm-before-put ordering could leave an exact route
+    // behind if setAlarm failed after the route write. Repair that bounded
+    // legacy state before acknowledging an exact registration. An existing
+    // alarm is never moved, so ordinary replays cannot extend route retention.
+    await this.ensureExpiryAlarm();
     if (!existing) {
       await this.state.storage.put("route", route);
-      if (typeof this.state.storage.setAlarm === "function") {
-        await this.state.storage.setAlarm(Date.now() + PROVIDER_ROUTE_TTL_MS);
-      }
     }
     return new Response(null, { status: 204 });
   }
@@ -723,8 +852,7 @@ function validProviderRoute(route) {
 }
 
 export async function registerProviderRoute(env, providerMessageId, route) {
-  if (!env.PROVIDER_ROUTES || typeof providerMessageId !== "string" ||
-      providerMessageId.length < 1 || providerMessageId.length > 512 ||
+  if (!env.PROVIDER_ROUTES || !validProviderMessageId(providerMessageId) ||
       !validProviderRoute(route)) {
     throw new Error("provider route is invalid");
   }
