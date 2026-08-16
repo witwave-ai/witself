@@ -189,6 +189,60 @@ func TestAgentEmailProductionConfigFromEnvRejectsUnsafeShapes(t *testing.T) {
 	}
 }
 
+func TestAgentEmailCellStorageLimitsFromEnv(t *testing.T) {
+	clearAgentEmailPilotEnv(t)
+	got, err := agentEmailCellStorageLimitsFromEnv()
+	want := agentEmailCellStorageLimits{
+		AdmissionBytes: defaultAgentEmailCellStorageAdmissionBytes,
+		AdmissionRows:  defaultAgentEmailCellStorageAdmissionRows,
+		HardBytes:      defaultAgentEmailCellStorageHardBytes,
+		HardRows:       defaultAgentEmailCellStorageHardRows,
+	}
+	if err != nil || got != want {
+		t.Fatalf("default storage limits = %#v / %v, want %#v", got, err, want)
+	}
+
+	t.Setenv(agentEmailCellStorageAdmissionBytesEnv, "1024")
+	t.Setenv(agentEmailCellStorageAdmissionRowsEnv, "10")
+	t.Setenv(agentEmailCellStorageHardBytesEnv, "2048")
+	t.Setenv(agentEmailCellStorageHardRowsEnv, "20")
+	got, err = agentEmailCellStorageLimitsFromEnv()
+	if err != nil || got != (agentEmailCellStorageLimits{
+		AdmissionBytes: 1024, AdmissionRows: 10, HardBytes: 2048, HardRows: 20,
+	}) {
+		t.Fatalf("configured storage limits = %#v / %v", got, err)
+	}
+
+	for _, test := range []struct {
+		name, value string
+	}{
+		{agentEmailCellStorageAdmissionBytesEnv, "0"},
+		{agentEmailCellStorageAdmissionRowsEnv, "-1"},
+		{agentEmailCellStorageHardBytesEnv, " 2048"},
+		{agentEmailCellStorageHardRowsEnv, "invalid"},
+		{agentEmailCellStorageHardRowsEnv, "4611686018427387904"},
+	} {
+		clearAgentEmailPilotEnv(t)
+		t.Setenv(test.name, test.value)
+		if _, err := agentEmailCellStorageLimitsFromEnv(); err == nil {
+			t.Fatalf("%s=%q unexpectedly accepted", test.name, test.value)
+		}
+	}
+
+	clearAgentEmailPilotEnv(t)
+	t.Setenv(agentEmailCellStorageAdmissionBytesEnv, "2048")
+	t.Setenv(agentEmailCellStorageHardBytesEnv, "2048")
+	if _, err := agentEmailCellStorageLimitsFromEnv(); err == nil {
+		t.Fatal("equal byte admission and hard limits were accepted")
+	}
+	clearAgentEmailPilotEnv(t)
+	t.Setenv(agentEmailCellStorageAdmissionRowsEnv, "20")
+	t.Setenv(agentEmailCellStorageHardRowsEnv, "10")
+	if _, err := agentEmailCellStorageLimitsFromEnv(); err == nil {
+		t.Fatal("inverted row admission and hard limits were accepted")
+	}
+}
+
 func TestAgentEmailIdentifierParseErrorsAreValueFree(t *testing.T) {
 	privateAccountID := "acc_aaaaaaaaaaaaaaaa"
 	privateAgentID := "agent_bbbbbbbbbbbbbbbb"
@@ -392,6 +446,7 @@ func TestAgentEmailErrorMapping(t *testing.T) {
 		!errors.Is(mapAgentEmailIngestError(store.ErrAgentEmailRetryCanaryTemporary), server.ErrAgentEmailRetryCanaryTemporary) ||
 		!errors.Is(mapAgentEmailIngestError(store.ErrAgentEmailRetryCanaryPermanent), server.ErrAgentEmailRetryCanaryPermanent) ||
 		!errors.Is(mapAgentEmailIngestError(store.ErrAgentEmailPilotDisabled), server.ErrAgentEmailPilotUnavailable) ||
+		!errors.Is(mapAgentEmailIngestError(fmt.Errorf("wrapped: %w", store.ErrAgentEmailDatabaseCapacity)), server.ErrAgentEmailDatabaseCapacity) ||
 		!errors.Is(mapAgentEmailIngestError(rateLimit), server.ErrAgentEmailRateLimited) {
 		t.Fatal("ingestion errors did not map to typed relay verdict errors")
 	}
@@ -763,6 +818,10 @@ func clearAgentEmailPilotEnv(t *testing.T) {
 		agentEmailPilotRealmIDEnv, agentEmailPilotAgentIDsEnv,
 		agentEmailRelayPublicKeysEnv, agentEmailRelayReplayWindowEnv,
 		agentEmailRetryCanaryAgentIDEnv,
+		agentEmailCellStorageAdmissionBytesEnv,
+		agentEmailCellStorageAdmissionRowsEnv,
+		agentEmailCellStorageHardBytesEnv,
+		agentEmailCellStorageHardRowsEnv,
 	} {
 		original, present := os.LookupEnv(name)
 		name, original, present := name, original, present

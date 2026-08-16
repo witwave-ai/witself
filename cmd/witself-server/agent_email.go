@@ -23,25 +23,86 @@ import (
 )
 
 const (
-	agentEmailPilotEnabledEnv        = "WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED"
-	agentEmailPilotDomainEnv         = "WITSELF_AGENT_EMAIL_PILOT_DOMAIN"
-	agentEmailProductionEnabledEnv   = "WITSELF_AGENT_EMAIL_RECEIVE_PRODUCTION_ENABLED"
-	agentEmailReceiveDomainEnv       = "WITSELF_AGENT_EMAIL_RECEIVE_DOMAIN"
-	agentEmailReceiveAudienceEnv     = "WITSELF_AGENT_EMAIL_RECEIVE_AUDIENCE"
-	agentEmailReceiveAccountIDsEnv   = "WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS"
-	agentEmailLegacyDomainsEnv       = "WITSELF_AGENT_EMAIL_ACCEPTED_LEGACY_DOMAINS"
-	agentEmailPilotAudienceEnv       = "WITSELF_AGENT_EMAIL_PILOT_AUDIENCE"
-	agentEmailPilotRealmIDEnv        = "WITSELF_AGENT_EMAIL_PILOT_REALM_ID"
-	agentEmailPilotAgentIDsEnv       = "WITSELF_AGENT_EMAIL_PILOT_AGENT_IDS"
-	agentEmailRelayPublicKeysEnv     = "WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON"
-	agentEmailRelayReplayWindowEnv   = "WITSELF_AGENT_EMAIL_RELAY_REPLAY_WINDOW"
-	agentEmailRetryCanaryAgentIDEnv  = "WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID"
-	agentEmailProviderEventTokenEnv  = "WITSELF_AGENT_EMAIL_PROVIDER_EVENT_TOKEN"
-	defaultAgentEmailReplayWindow    = 5 * time.Minute
-	maximumAgentEmailReceiveAccounts = 100
-	agentEmailPrimaryCanaryDomain    = "witmail.net"
-	agentEmailPrimaryCanaryWorker    = "witself-agent-email-receive"
+	agentEmailPilotEnabledEnv                  = "WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED"
+	agentEmailPilotDomainEnv                   = "WITSELF_AGENT_EMAIL_PILOT_DOMAIN"
+	agentEmailProductionEnabledEnv             = "WITSELF_AGENT_EMAIL_RECEIVE_PRODUCTION_ENABLED"
+	agentEmailReceiveDomainEnv                 = "WITSELF_AGENT_EMAIL_RECEIVE_DOMAIN"
+	agentEmailReceiveAudienceEnv               = "WITSELF_AGENT_EMAIL_RECEIVE_AUDIENCE"
+	agentEmailReceiveAccountIDsEnv             = "WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS"
+	agentEmailLegacyDomainsEnv                 = "WITSELF_AGENT_EMAIL_ACCEPTED_LEGACY_DOMAINS"
+	agentEmailPilotAudienceEnv                 = "WITSELF_AGENT_EMAIL_PILOT_AUDIENCE"
+	agentEmailPilotRealmIDEnv                  = "WITSELF_AGENT_EMAIL_PILOT_REALM_ID"
+	agentEmailPilotAgentIDsEnv                 = "WITSELF_AGENT_EMAIL_PILOT_AGENT_IDS"
+	agentEmailRelayPublicKeysEnv               = "WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON"
+	agentEmailRelayReplayWindowEnv             = "WITSELF_AGENT_EMAIL_RELAY_REPLAY_WINDOW"
+	agentEmailRetryCanaryAgentIDEnv            = "WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID"
+	agentEmailProviderEventTokenEnv            = "WITSELF_AGENT_EMAIL_PROVIDER_EVENT_TOKEN"
+	agentEmailCellStorageAdmissionBytesEnv     = "WITSELF_AGENT_EMAIL_CELL_STORAGE_ADMISSION_BYTES"
+	agentEmailCellStorageAdmissionRowsEnv      = "WITSELF_AGENT_EMAIL_CELL_STORAGE_ADMISSION_ROWS"
+	agentEmailCellStorageHardBytesEnv          = "WITSELF_AGENT_EMAIL_CELL_STORAGE_HARD_BYTES"
+	agentEmailCellStorageHardRowsEnv           = "WITSELF_AGENT_EMAIL_CELL_STORAGE_HARD_ROWS"
+	defaultAgentEmailReplayWindow              = 5 * time.Minute
+	defaultAgentEmailCellStorageAdmissionBytes = int64(3 * 1024 * 1024 * 1024)
+	defaultAgentEmailCellStorageAdmissionRows  = int64(25_000)
+	defaultAgentEmailCellStorageHardBytes      = int64(4 * 1024 * 1024 * 1024)
+	defaultAgentEmailCellStorageHardRows       = int64(100_000)
+	maximumAgentEmailCellStorageLimit          = int64(4611686018427387903)
+	maximumAgentEmailReceiveAccounts           = 100
+	agentEmailPrimaryCanaryDomain              = "witmail.net"
+	agentEmailPrimaryCanaryWorker              = "witself-agent-email-receive"
 )
+
+type agentEmailCellStorageLimits struct {
+	AdmissionBytes int64
+	AdmissionRows  int64
+	HardBytes      int64
+	HardRows       int64
+}
+
+func agentEmailCellStorageLimitsFromEnv() (agentEmailCellStorageLimits, error) {
+	limits := agentEmailCellStorageLimits{}
+	values := []struct {
+		name       string
+		defaultVal int64
+		dest       *int64
+	}{
+		{agentEmailCellStorageAdmissionBytesEnv, defaultAgentEmailCellStorageAdmissionBytes, &limits.AdmissionBytes},
+		{agentEmailCellStorageAdmissionRowsEnv, defaultAgentEmailCellStorageAdmissionRows, &limits.AdmissionRows},
+		{agentEmailCellStorageHardBytesEnv, defaultAgentEmailCellStorageHardBytes, &limits.HardBytes},
+		{agentEmailCellStorageHardRowsEnv, defaultAgentEmailCellStorageHardRows, &limits.HardRows},
+	}
+	for _, value := range values {
+		raw, present := os.LookupEnv(value.name)
+		if !present || raw == "" {
+			*value.dest = value.defaultVal
+			continue
+		}
+		if raw != strings.TrimSpace(raw) {
+			return agentEmailCellStorageLimits{}, fmt.Errorf("%s must not contain surrounding whitespace", value.name)
+		}
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || parsed <= 0 || parsed > maximumAgentEmailCellStorageLimit {
+			return agentEmailCellStorageLimits{}, fmt.Errorf(
+				"%s must be an integer between 1 and %d",
+				value.name, maximumAgentEmailCellStorageLimit,
+			)
+		}
+		*value.dest = parsed
+	}
+	if limits.AdmissionBytes >= limits.HardBytes {
+		return agentEmailCellStorageLimits{}, fmt.Errorf(
+			"%s must be smaller than %s",
+			agentEmailCellStorageAdmissionBytesEnv, agentEmailCellStorageHardBytesEnv,
+		)
+	}
+	if limits.AdmissionRows >= limits.HardRows {
+		return agentEmailCellStorageLimits{}, fmt.Errorf(
+			"%s must be smaller than %s",
+			agentEmailCellStorageAdmissionRowsEnv, agentEmailCellStorageHardRowsEnv,
+		)
+	}
+	return limits, nil
+}
 
 type agentEmailPrimaryCanaryManifestAgent struct {
 	AgentID string `json:"agent_id"`
@@ -1085,6 +1146,8 @@ func mapAgentEmailIngestError(err error) error {
 	case errors.As(err, &limitErr) &&
 		limitErr.Dimension == plans.AgentEmailMaxRawBytesLimit:
 		return server.ErrAgentEmailRawSizeExceeded
+	case store.IsAgentEmailDatabaseCapacityError(err):
+		return server.ErrAgentEmailDatabaseCapacity
 	case errors.Is(err, store.ErrAgentEmailUnknownRecipient),
 		errors.Is(err, store.ErrAgentEmailPilotNotEnrolled),
 		errors.Is(err, store.ErrAgentEmailAddressMissing):

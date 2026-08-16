@@ -587,6 +587,14 @@ is cell-local and excluded from export. Freeze account moves while a possible
 destination remains below schema 90. After convergence, a restored account
 starts with fresh defensive debt rather than importing source-cell buckets.
 
+Schema 91 also adds no portable stream. Its retained-email capacity singleton
+and triggers are cell-local platform safety state. The destination charges
+imported mail against its own configured ledger and fails the account import
+atomically if the rows do not fit; it never imports or overwrites the source
+singleton. Freeze moves while any possible destination remains below schema 91,
+and verify destination headroom before cutover. Do not raise the cell boundary
+as an implicit accommodation for an account move.
+
 For avatar creative-payload compaction, this release pin is Phase A: leave
 `apps.witselfServer.avatarPayloadCompactionEnabled: false`, freeze avatar
 mutation/import/export during writer convergence, and wait until every old

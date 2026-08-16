@@ -4,6 +4,17 @@
   "main": "src/index.js",
   "compatibility_date": "2026-08-14",
   "workers_dev": true,
+  "preview_urls": false,
+  "ratelimits": [
+    {
+      "name": "DISPATCH_FRONTDOOR_LIMITER",
+      "namespace_id": "2301",
+      "simple": {
+        "limit": 1000,
+        "period": 60
+      }
+    }
+  ],
   "vars": {
     "DISPATCH_AUDIENCE": "witself-agent-email-send",
     "RECEIPT_REPLAY_AUDIENCE": "witself-agent-email-send-receipt-replay",
@@ -38,5 +49,8 @@
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["OutboundReceipt"] },
     { "tag": "v2", "new_sqlite_classes": ["ProviderRoute"] }
-  ]
+  ],
+  "observability": {
+    "enabled": true
+  }
 }

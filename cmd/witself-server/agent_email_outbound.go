@@ -82,6 +82,8 @@ func mapAgentEmailOutboundProviderEventError(err error) error {
 		return server.ErrNotFound
 	case errors.Is(err, store.ErrAgentEmailOutboundConflict):
 		return server.ErrConflict
+	case store.IsAgentEmailDatabaseCapacityError(err):
+		return server.ErrAgentEmailDatabaseCapacity
 	default:
 		return err
 	}
@@ -110,6 +112,8 @@ func mapAgentEmailOutboundError(err error) error {
 			WindowSeconds: rateErr.WindowSeconds, RetryAfter: rateErr.RetryAfter,
 			ResetAt: rateErr.ResetAt, Source: rateErr.Source, Retryable: rateErr.Retryable,
 		}
+	case store.IsAgentEmailDatabaseCapacityError(err):
+		return server.ErrAgentEmailDatabaseCapacity
 	case errors.Is(err, store.ErrAgentEmailOutboundInputInvalid),
 		errors.Is(err, store.ErrAgentEmailOutboundCursorInvalid):
 		return server.ErrBadInput

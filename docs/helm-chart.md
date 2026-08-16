@@ -117,6 +117,16 @@ Production chart defaults should assume:
   coordination rows through `worker.agentEmailRateBucketCleanup`. It drains
   inbound realm/account and outbound minute/daily/recipient debt across three
   physical tables under the same bounded multi-replica contract and metrics.
+- A schema-91 logical cell email-storage boundary under
+  `agentEmail.cellStorage`: 3 GiB/25,000 inbound-plus-outbound roots for
+  admission and 4 GiB/100,000 counted rows for the hard default. The chart must
+  reject non-positive or non-increasing thresholds and render the four values as
+  `WITSELF_AGENT_EMAIL_CELL_STORAGE_*` server variables. This is platform
+  safety, independent of account plans and retention; database triggers charge
+  8 KiB per retained row plus immutable/customer-content fields and let deletes
+  release capacity. The fixed charge absorbs bounded mutable lifecycle metadata,
+  and 128-byte claim-ID caps keep lifecycle transitions charge-neutral at the
+  hard boundary.
 - Transcript retention disabled by default, with a separate bounded
   `worker.transcriptRetention.mode: preview` stage before an explicit switch
   to `enforce`.

@@ -683,10 +683,14 @@ require_line '  WITSELF_CELL_NAME: ""' "$default_server_config"
 require_line '  WITSELF_BACKUP_VALIDATION_ENABLED: "false"' "$default_server_config"
 require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED: "false"' "$default_server_config"
 require_line '  WITSELF_TRANSCRIPT_RETENTION_ENABLED: "false"' "$default_server_config"
+require_line '  WITSELF_AGENT_EMAIL_CELL_STORAGE_ADMISSION_BYTES: "3221225472"' "$default_server_config"
+require_line '  WITSELF_AGENT_EMAIL_CELL_STORAGE_ADMISSION_ROWS: "25000"' "$default_server_config"
+require_line '  WITSELF_AGENT_EMAIL_CELL_STORAGE_HARD_BYTES: "4294967296"' "$default_server_config"
+require_line '  WITSELF_AGENT_EMAIL_CELL_STORAGE_HARD_ROWS: "100000"' "$default_server_config"
 require_line '  WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED: "false"' "$default_server_config"
 require_line '  WITSELF_AGENT_EMAIL_RECEIVE_PRODUCTION_ENABLED: "false"' "$default_server_config"
-if [[ "$(grep -c '^  WITSELF_AGENT_EMAIL_' "$default_server_config")" -ne 2 ]]; then
-  echo "default render exposed agent-email configuration beyond the disabled gate" >&2
+if [[ "$(grep -c '^  WITSELF_AGENT_EMAIL_' "$default_server_config")" -ne 6 ]]; then
+  echo "default render did not expose exactly four cell bounds and two disabled receive gates" >&2
   exit 1
 fi
 if grep -Eq 'WITSELF_AVATAR_STYLE_ROLLOUT_(BATCH_SIZE|INTERVAL|BATCH_TIMEOUT)|WITSELF_TRANSCRIPT_RETENTION_(MODE|BATCH_SIZE|INTERVAL|BATCH_TIMEOUT)' \
@@ -823,8 +827,12 @@ require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED: "false"' "$live_nested_ser
 require_line '  WITSELF_TRANSCRIPT_RETENTION_ENABLED: "false"' "$live_nested_server_config"
 require_line '  WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED: "false"' "$live_nested_server_config"
 require_line '  WITSELF_AGENT_EMAIL_RECEIVE_PRODUCTION_ENABLED: "false"' "$live_nested_server_config"
-if [[ "$(grep -c '^  WITSELF_AGENT_EMAIL_' "$live_nested_server_config")" -ne 2 ]]; then
-  echo "live GCP desired state exposed agent-email configuration beyond both disabled receive gates" >&2
+require_line '  WITSELF_AGENT_EMAIL_CELL_STORAGE_ADMISSION_BYTES: "3221225472"' "$live_nested_server_config"
+require_line '  WITSELF_AGENT_EMAIL_CELL_STORAGE_ADMISSION_ROWS: "25000"' "$live_nested_server_config"
+require_line '  WITSELF_AGENT_EMAIL_CELL_STORAGE_HARD_BYTES: "4294967296"' "$live_nested_server_config"
+require_line '  WITSELF_AGENT_EMAIL_CELL_STORAGE_HARD_ROWS: "100000"' "$live_nested_server_config"
+if [[ "$(grep -c '^  WITSELF_AGENT_EMAIL_' "$live_nested_server_config")" -ne 6 ]]; then
+  echo "live GCP desired state did not expose exactly four cell bounds and two disabled receive gates" >&2
   exit 1
 fi
 require_line '  WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED: "true"' "$live_nested_worker_config"
@@ -906,6 +914,12 @@ expect_server_template_failure \
 expect_server_template_failure \
   "legacy top-level agent-email retention values" \
   --set agentEmailRetention.enabled=true
+expect_server_template_failure \
+  "agent-email cell byte admission at hard boundary" \
+  --set agentEmail.cellStorage.admissionBytes=4294967296
+expect_server_template_failure \
+  "agent-email cell row admission at hard boundary" \
+  --set agentEmail.cellStorage.admissionRows=100000
 expect_server_template_failure \
   "zero worker replicas" \
   --values "$gcp_profile" \
@@ -1099,8 +1113,8 @@ require_line '  WITSELF_AGENT_EMAIL_PILOT_AGENT_IDS: "agent_aaaaaaaaaaaaaaaa,age
 require_line '  WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID: "agent_aaaaaaaaaaaaaaaa"' "$email_server_config"
 require_line '  WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON: "{\"pilot-2026-07\":\"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\"}"' "$email_server_config"
 require_line '  WITSELF_AGENT_EMAIL_RELAY_REPLAY_WINDOW: "5m"' "$email_server_config"
-if [[ "$(grep -c '^  WITSELF_AGENT_EMAIL_' "$email_server_config")" -ne 10 ]]; then
-  echo "enabled pilot with legacy compatibility and a retry canary did not render exactly ten agent-email variables" >&2
+if [[ "$(grep -c '^  WITSELF_AGENT_EMAIL_' "$email_server_config")" -ne 14 ]]; then
+  echo "enabled pilot with cell bounds, legacy compatibility, and a retry canary did not render exactly fourteen agent-email variables" >&2
   exit 1
 fi
 if grep -Eq 'WITSELF_AGENT_EMAIL_.*PRIVATE|RELAY_ED25519_PRIVATE_KEY|relayPrivateKey' \
@@ -1234,8 +1248,8 @@ require_line '  WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS: "acc_aaaaaaaaaaaaaaaa,a
 require_line '  WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID: "agent_aaaaaaaaaaaaaaaa"' "$email_production_server_config"
 require_line '  WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON: "{\"route-2026-08\":\"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\"}"' "$email_production_server_config"
 require_line '  WITSELF_AGENT_EMAIL_RELAY_REPLAY_WINDOW: "5m"' "$email_production_server_config"
-if [[ "$(grep -c '^  WITSELF_AGENT_EMAIL_' "$email_production_server_config")" -ne 9 ]]; then
-  echo "production receive did not render exactly nine agent-email variables" >&2
+if [[ "$(grep -c '^  WITSELF_AGENT_EMAIL_' "$email_production_server_config")" -ne 13 ]]; then
+  echo "production receive with cell bounds did not render exactly thirteen agent-email variables" >&2
   exit 1
 fi
 require_line '  WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED: "false"' "$email_production_nested_config"
@@ -1247,8 +1261,8 @@ require_line '  WITSELF_AGENT_EMAIL_RELAY_PUBLIC_KEYS_JSON: "{\"route-2026-08\":
 require_line '  WITSELF_AGENT_EMAIL_RELAY_REPLAY_WINDOW: "5m"' "$email_production_nested_config"
 reject_line 'WITSELF_AGENT_EMAIL_RECEIVE_ACCOUNT_IDS' "$email_production_nested_config"
 reject_line 'WITSELF_AGENT_EMAIL_RETRY_CANARY_AGENT_ID' "$email_production_nested_config"
-if [[ "$(grep -c '^  WITSELF_AGENT_EMAIL_' "$email_production_nested_config")" -ne 7 ]]; then
-  echo "Secret-backed production receive did not render exactly seven non-secret agent-email variables" >&2
+if [[ "$(grep -c '^  WITSELF_AGENT_EMAIL_' "$email_production_nested_config")" -ne 11 ]]; then
+  echo "Secret-backed production receive with cell bounds did not render exactly eleven non-secret agent-email variables" >&2
   exit 1
 fi
 require_sequence "$email_production_nested_deployment" \

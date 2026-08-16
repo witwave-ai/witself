@@ -1449,10 +1449,21 @@ func (s *Store) IngestAgentEmailPilot(
 	); err != nil {
 		return AgentEmailMessage{}, err
 	}
+	// This lower-bound read deliberately does not lock the cell ledger. Refuse
+	// an already-full cell before MIME parsing, while leaving the schema-91
+	// triggers to serialize exact charged bytes and concurrent admissions.
+	if err := preflightAgentEmailCellStorageRootTx(ctx, tx, 2); err != nil {
+		if IsAgentEmailDatabaseCapacityError(err) {
+			return AgentEmailMessage{},
+				commitAgentEmailCellStorageRefusal(ctx, tx, err)
+		}
+		return AgentEmailMessage{}, err
+	}
 
 	// Parse only after the shared cross-replica safety budgets admit this
-	// signed attempt. Text remains transient here; only its validated MIME
-	// metadata is persisted by the receive service.
+	// signed attempt and the lock-free storage preflight shows minimum room.
+	// Text remains transient here; only its validated MIME metadata is
+	// persisted by the receive service.
 	parsed, parseErr := agentemail.ParseMessage(in.Raw, true)
 	parseState := AgentEmailParseParsed
 	parseErrorCode := ""
@@ -1565,9 +1576,21 @@ func (s *Store) IngestAgentEmailPilot(
 		payloadRetentionState = AgentEmailPayloadOmittedCapacity
 	}
 
+	// Keep the root and its required delivery in one savepoint, but issue the
+	// writes sequentially. The root consumes admission space first; the child
+	// then consumes hard-reserve space. A trigger-time capacity race rolls both
+	// writes back while the outer transaction commits the already-applied GCRA
+	// debt so a full cell cannot become a free retry lane.
+	writeTx, err := tx.Begin(ctx)
+	if err != nil {
+		return AgentEmailMessage{}, fmt.Errorf(
+			"begin agent-email storage savepoint: %w", err,
+		)
+	}
+	defer func() { _ = writeTx.Rollback(ctx) }()
+
 	var receivedAt, createdAt, deliveredAt time.Time
-	err = tx.QueryRow(ctx, `
-		WITH inserted_message AS (
+	err = writeTx.QueryRow(ctx, `
 		  INSERT INTO agent_email_messages
 		    (id,account_id,realm_id,mailbox_id,owner_agent_id,address_id,
 		     provider,provider_message_id,envelope_sender,envelope_recipient,
@@ -1588,16 +1611,7 @@ func (s *Store) IngestAgentEmailPilot(
 		     $27,$28,$29,$30,$31,true,
 		     'unknown','unknown','unknown','unknown','unverified',$32,$33,
 		     clock_timestamp())
-		  RETURNING received_at,created_at
-		), inserted_delivery AS (
-		  INSERT INTO agent_email_deliveries
-		    (message_id,account_id,realm_id,mailbox_id,owner_agent_id,folder)
-		  VALUES ($1,$2,$3,$4,$5,'inbox')
-		  RETURNING delivered_at
-		)
-		SELECT inserted_message.received_at,inserted_message.created_at,
-		       inserted_delivery.delivered_at
-		FROM inserted_message,inserted_delivery`,
+		  RETURNING received_at,created_at`,
 		messageID, address.AccountID, address.RealmID, address.MailboxID,
 		address.OwnerAgentID, address.ID, agentEmailPilotProvider,
 		relay.EnvelopeSender, parts.Address, parts.AgentSegment, parts.RealmLabel,
@@ -1610,9 +1624,39 @@ func (s *Store) IngestAgentEmailPilot(
 		agentEmailNullableString(parsed.Text), agentEmailNullableString(parsed.TextKind),
 		attachmentStorageBytes, retainedAttachmentStorageBytes, payloadRetentionState,
 		duplicateGroup, agentEmailNullableString(possibleDuplicate)).
-		Scan(&receivedAt, &createdAt, &deliveredAt)
+		Scan(&receivedAt, &createdAt)
 	if err != nil {
-		return AgentEmailMessage{}, fmt.Errorf("store agent email: %w", err)
+		storedErr := fmt.Errorf("store agent email: %w", err)
+		if IsAgentEmailDatabaseCapacityError(err) {
+			return AgentEmailMessage{},
+				rollbackAgentEmailCellStorageWriteAndCommitRefusal(
+					ctx, tx, writeTx, storedErr,
+				)
+		}
+		return AgentEmailMessage{}, storedErr
+	}
+	err = writeTx.QueryRow(ctx, `
+		INSERT INTO agent_email_deliveries
+		  (message_id,account_id,realm_id,mailbox_id,owner_agent_id,folder)
+		VALUES ($1,$2,$3,$4,$5,'inbox')
+		RETURNING delivered_at`,
+		messageID, address.AccountID, address.RealmID, address.MailboxID,
+		address.OwnerAgentID,
+	).Scan(&deliveredAt)
+	if err != nil {
+		storedErr := fmt.Errorf("store agent-email delivery: %w", err)
+		if IsAgentEmailDatabaseCapacityError(err) {
+			return AgentEmailMessage{},
+				rollbackAgentEmailCellStorageWriteAndCommitRefusal(
+					ctx, tx, writeTx, storedErr,
+				)
+		}
+		return AgentEmailMessage{}, storedErr
+	}
+	if err := writeTx.Commit(ctx); err != nil {
+		return AgentEmailMessage{}, fmt.Errorf(
+			"commit agent-email storage savepoint: %w", err,
+		)
 	}
 	if canaryGate.acceptAfterInsert {
 		command, err := tx.Exec(ctx, `

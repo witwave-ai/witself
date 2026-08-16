@@ -244,7 +244,8 @@ Initial metric families should include:
 | `witself_group_operations_total` | Group operations by operation (`create`, `delete`, `member_add`, `member_remove`) and result. |
 | `witself_messages_total` | Messaging events by stage (`sent`, `delivered`, `read`), recipient kind, and result. |
 | `witself_message_rate_limit_rejections_total` | Implemented shared message-write budget refusals, including both retryable exhaustion and non-retryable zero/oversized-debit cases. Labels are the closed sets `limit_dimension` (`message_sent`, `message_delivered`, or `unknown`), `scope` (`agent`, `realm`, `recipient`, or `unknown`), and `operation` (`send`, `reply`, `complete`, `request_open`, `request_offer`, `request_complete`, or `unknown`). It never carries account, realm, agent, recipient, request, or message ids; plan/source names; limit/usage/retry values; content; or error text. |
-| `witself_agent_email_ingests_total` | Signed inbound agent-email deliveries by the single bounded `outcome` label: `retained`, `omitted_capacity`, `over_size`, `feature_disabled`, `receive_disabled`, `unknown_recipient`, `retry_canary_temporary`, `retry_canary_rejected`, or `error`. `retained` means the accepted message kept its raw MIME, including ordinary text-only mail, while `omitted_capacity` means bounded text and metadata were retained without the attachment-bearing raw payload. The metric never carries account, realm, agent, address, sender, message id, plan, byte count, limit value, content, or error text. |
+| `witself_agent_email_ingests_total` | Signed inbound agent-email deliveries by the single bounded `outcome` label: `retained`, `omitted_capacity`, `over_size`, `storage_full`, `feature_disabled`, `receive_disabled`, `unknown_recipient`, `retry_canary_temporary`, `retry_canary_rejected`, or `error`. `retained` means the accepted message kept its raw MIME, including ordinary text-only mail, while `omitted_capacity` means bounded text and metadata were retained without the attachment-bearing raw payload. `storage_full` is the independent schema-91 cell-ledger refusal; it is not an account-plan limit. The metric never carries account, realm, agent, address, sender, message id, plan, byte count, limit value, content, or error text. |
+| `witself_agent_email_cell_storage_metrics_up`, `witself_agent_email_cell_storage_retained_bytes`, `witself_agent_email_cell_storage_admission_bytes`, `witself_agent_email_cell_storage_hard_bytes`, `witself_agent_email_cell_storage_root_rows`, `witself_agent_email_cell_storage_admission_root_rows`, `witself_agent_email_cell_storage_counted_rows`, `witself_agent_email_cell_storage_hard_counted_rows` | Implemented unlabeled, value-free schema-91 cell-ledger gauges. The server performs one read-only singleton query per scrape under a fixed two-second deadline. A read/query/invariant failure emits only `metrics_up 0` and omits the seven values; it never exports database error text or account/message identity. These are logical charges and thresholds, not PostgreSQL relation size, PVC usage, or billable account allowance. |
 | `witself_agent_email_rate_limit_rejections_total` | Signed inbound safety refusals with only closed `limit_dimension`, `scope`, and `source` labels. Account scope is explicit and bounded; no tenant, sender, address, limit value, or arbitrary key becomes a label. |
 | `witself_worker_agent_email_outbound_batches_total`, `witself_worker_agent_email_outbound_items_total`, `witself_worker_agent_email_outbound_last_success_timestamp_seconds` | Durable outbound worker health and value-free closed outcomes. No sender, recipient, message, provider id, or error text is a label. |
 | `witself_worker_agent_email_retention_batches_total`, `witself_worker_agent_email_retention_items_total`, `witself_worker_agent_email_retention_last_success_timestamp_seconds` | Preview/enforce batch results, bounded inbound/outbound/provider-event/suppression item kinds, and last successful attempt. An errored multi-pass attempt records one error batch with any already-committed counts and does not refresh last-success. |
@@ -268,7 +269,8 @@ The production Cloudflare inbound-email Worker also writes one best-effort
 Analytics Engine point per final SMTP-facing disposition to
 `witself_agent_email_edge`. This is an edge dataset, not a Prometheus family.
 Its fixed schema marker is `witself.agent-email.edge.v1`; `outcome` is one of
-`accepted`, `discarded_feature_disabled`, `rejected_invalid_recipient`,
+`accepted`, `discarded_feature_disabled`, `rejected_cell_capacity`,
+`rejected_invalid_recipient`,
 `rejected_unknown_recipient`, `rejected_inactive_route`, `rejected_over_size`,
 `rejected_cell_permanent`, `rejected_retry_canary`,
 `tempfail_configuration`, `tempfail_disabled`, `tempfail_directory`,
@@ -285,6 +287,23 @@ failure never changes the SMTP disposition. When the renderer-issued release
 version, full commit, and commit date are all valid, they are appended as
 deployment-attribution blobs. They are never sampling indexes or summary group
 dimensions, and a missing or malformed triple is omitted in full.
+
+`rejected_cell_capacity` is the receive Worker's sanitized permanent SMTP
+response to an exact HTTP 507 `storage_full` cell verdict. Alert on it as a cell
+capacity incident; do not reinterpret it as a sender fault, plan downgrade, or
+retryable provider error. The unlabeled
+`witself_agent_email_cell_storage_*` gauges expose schema 91's one-row ledger
+without account or message identity. Alert if the collector is absent/down,
+charged bytes or roots reach 80% of admission, or charged bytes/counts reach 80%
+of hard reserve. Confirm an alert through the authenticated read-only ledger
+query in the runbook before changing gates or capacity.
+
+The ledger is logical: deletion releases its charge transactionally but does
+not make PostgreSQL relation files or a persistent volume shrink. Monitor PVC
+available bytes and database/relation growth independently, alert before 80%
+physical utilization, and keep backup/restore evidence current. A healthy
+logical ledger is not proof of physical disk headroom, and physical file size
+must never replace the transactionally enforced admission decision.
 
 The same dataset carries a second fixed schema marker,
 `witself.agent-email.route-lookup.v1`, for dependency shielding and route-cache
@@ -316,6 +335,17 @@ DLQ for operator inspection. See [cell-worker.md](cell-worker.md) for worker
 metrics and the
 [sending-adapter README](../infra/cloudflare/agent-email-send/README.md) for the
 Queue/DLQ boundary.
+
+The hardened outbound adapter candidate also enables Cloudflare Worker
+observability and a Rate Limiter binding. Its request order is source-IP lane,
+Ed25519 header verification, bounded 2-MiB body/digest and account authorization,
+then aggregate and signer lanes. Namespace `2301` is configured for 1,000
+requests per 60 seconds with preview URLs disabled. Treat sustained 429
+`frontdoor_rate_limited` or 503 `frontdoor_unavailable` responses as edge
+capacity/configuration signals. Cloudflare counters are point-of-presence-local
+and eventually consistent, so their absence is not proof of a global exact
+budget. Verify account-wide namespace uniqueness before deployment and keep
+request/signature/source values out of logs.
 
 From `infra/cloudflare/agent-email`, `npm run metrics -- summary [minutes]`
 queries both schemas for the same bounded window. The additive v2 CLI envelope
@@ -649,6 +679,18 @@ Initial alert candidates:
   probing pressure from directory/control-plane convergence without exposing
   the probed domain or label; alerts remain aggregate because the protective
   limiter is approximate and per location.
+- Any inbound-email `rejected_cell_capacity` edge outcome or cell ingest
+  `storage_full` outcome; absent/down
+  `witself_agent_email_cell_storage_metrics_up`; logical email-ledger bytes or
+  roots at 80% of admission; or logical bytes/counts at 80% of the hard
+  boundary. The 3-GiB/25,000-root admission boundary is the operating ceiling;
+  the 4-GiB/100,000-row hard boundary is emergency lifecycle reserve, not a
+  normal target. Alert separately when the PostgreSQL PVC or database reaches
+  80% physical utilization because logical deletion does not shrink files.
+- Sustained outbound-dispatch `frontdoor_rate_limited` or
+  `frontdoor_unavailable` responses after the hardened adapter is deployed.
+  Distinguish hostile-source pressure from a missing/unavailable Rate Limiter
+  binding without adding source IP, signer, account, or request labels.
 - Relay envelope drop or quarantine rate above a baseline (cross-realm routing or
   flood signal).
 - Loop-suspension or budget-exhaustion spikes (possible cross-realm loop, flood,

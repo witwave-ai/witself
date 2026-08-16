@@ -15,6 +15,12 @@
 {{- if and $emailProductionHasLiteralAccounts $emailProductionHasSecretAccounts -}}
 {{- fail "agentEmail.receiveProduction must use exactly one of accountIDs or accountIDsExistingSecret.name" -}}
 {{- end -}}
+{{- if ge (int64 .Values.agentEmail.cellStorage.admissionBytes) (int64 .Values.agentEmail.cellStorage.hardBytes) -}}
+{{- fail "agentEmail.cellStorage.admissionBytes must be smaller than hardBytes" -}}
+{{- end -}}
+{{- if ge (int64 .Values.agentEmail.cellStorage.admissionRows) (int64 .Values.agentEmail.cellStorage.hardRows) -}}
+{{- fail "agentEmail.cellStorage.admissionRows must be smaller than hardRows" -}}
+{{- end -}}
 {{- if and $emailProduction.retryCanaryAgentID $emailProductionHasSecretRetryCanary -}}
 {{- fail "agentEmail.receiveProduction must use at most one retry-canary agent source" -}}
 {{- end -}}
@@ -155,6 +161,10 @@ data:
   WITSELF_CELL_NAME: {{ .Values.cell.name | quote }}
   WITSELF_BACKUP_VALIDATION_ENABLED: {{ .Values.backup.validation.enabled | quote }}
   WITSELF_FACT_DELETION_ENABLED: {{ .Values.features.factDeletion.enabled | quote }}
+  WITSELF_AGENT_EMAIL_CELL_STORAGE_ADMISSION_BYTES: {{ printf "%d" (int64 .Values.agentEmail.cellStorage.admissionBytes) | quote }}
+  WITSELF_AGENT_EMAIL_CELL_STORAGE_ADMISSION_ROWS: {{ printf "%d" (int64 .Values.agentEmail.cellStorage.admissionRows) | quote }}
+  WITSELF_AGENT_EMAIL_CELL_STORAGE_HARD_BYTES: {{ printf "%d" (int64 .Values.agentEmail.cellStorage.hardBytes) | quote }}
+  WITSELF_AGENT_EMAIL_CELL_STORAGE_HARD_ROWS: {{ printf "%d" (int64 .Values.agentEmail.cellStorage.hardRows) | quote }}
   WITSELF_AGENT_EMAIL_RECEIVE_PILOT_ENABLED: {{ $emailPilot.enabled | quote }}
   WITSELF_AGENT_EMAIL_RECEIVE_PRODUCTION_ENABLED: {{ $emailProduction.enabled | quote }}
 {{ if $emailPilot.enabled }}

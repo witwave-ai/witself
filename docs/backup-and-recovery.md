@@ -146,6 +146,17 @@ with fresh limiter state; export/import never synthesizes or transfers debt.
 Freeze moves while any possible destination is older than schema 90 because it
 must reject a newer archive rather than silently discard these streams.
 
+Schema 91 likewise adds no portable account stream. Its one-row
+`agent_email_cell_storage_capacity` ledger is cell-local platform safety state
+and is excluded from logical account archives. The destination's schema-91
+triggers charge each imported mail row in the same transaction as that row; an
+import that crosses the destination admission or hard boundary fails atomically
+with the capacity refusal. Never copy the source singleton, disable the
+triggers, or treat a Founder-unlimited account override as import headroom.
+Freeze moves while any possible destination is older than schema 91. A physical
+whole-database restore does preserve the singleton and triggers; verify its
+three measured counters against the five counted tables before reopening mail.
+
 Later instructions to reconnect a backend embedding provider or run server-side
 re-embedding are superseded.
 
@@ -968,6 +979,12 @@ export/import and cell movement during any mixed-version wave until every
 possible destination accepts the source archive schema. For schema 90 that
 means every destination understands the schema-89 outbound streams and the
 schema-90 rule that all three rate-bucket tables are cell-local exclusions.
+For schema 91, the destination must also have its own configured cell-storage
+singleton and active triggers. That singleton is not imported: destination
+triggers reconstruct its charge from the portable rows and fail the whole
+account import if the destination cannot admit them. Capacity must be checked
+before cutover alongside archive-schema compatibility; increasing a cell safety
+boundary is a separately reviewed infrastructure change, not an account move.
 
 After both planes land in cell B, the control-plane realm/account -> home-cell
 mapping is repointed and clients re-resolve to cell B. Migration emits
@@ -1017,6 +1034,11 @@ A managed or self-hosted restore should proceed in this order:
    terminal versus unresolved state. For schema 90, also verify that inbound
    realm/account and outbound minute/daily/recipient rate debt was not imported;
    the destination must begin with fresh cell-local limiter state.
+   For schema 91, verify exactly one destination-local
+   `agent_email_cell_storage_capacity` row, confirm its configured thresholds,
+   and reconcile `root_rows`/`counted_rows` plus the logical byte charge against
+   the five counted mail tables. A logical account archive must never contain or
+   overwrite the source cell's singleton.
 9. Confirm lexical recall works. Confirm restored hybrid recall and reported
    coverage when compatible vector rows exist; zero coverage remains a supported
    lexical fallback, not an unsupported memory service.

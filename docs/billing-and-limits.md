@@ -293,6 +293,41 @@ present before and after reconciliation. Personal email remains disabled
 throughout; the edge Worker retains its independent 25 MiB technical ceiling
 during both phases.
 
+### Agent-email cell storage safety boundary
+
+Account byte allowances and age retention are commercial policy. They do not
+bound the sum of several accounts on one cell, and an explicit-unlimited Founder
+override intentionally removes those commercial caps. The schema-91 candidate
+therefore adds a separate, non-billable platform safety boundary that no plan or
+account override can raise or bypass.
+
+One transactionally maintained logical ledger covers all retained inbound and
+outbound roots, inbound deliveries, outbound provider-event receipts, and
+recipient suppressions in the cell. The default root-admission boundary is
+3 GiB of charged storage or 25,000 inbound-plus-outbound roots. The default hard
+boundary is 4 GiB or 100,000 counted rows. Every counted row is charged 8 KiB of
+fixed overhead plus retained immutable identity and customer-content fields.
+The fixed charge absorbs bounded mutable lifecycle metadata; inbound-delivery
+and outbound claim IDs have independent 128-byte database caps. Claim, release,
+and terminalization updates are charge-neutral even at the hard boundary. The
+lower root threshold leaves 75,000 rows—three lifecycle children per fully
+admitted root on average—for lifecycle headroom. Repeated provider events are
+still bounded by the hard cap, not guaranteed unlimited capacity. Database
+triggers apply the hard threshold to all positive writes, including rolling-old
+binaries, imports, and direct maintenance. Deletes and cascades release their
+exact logical charge, so retention can reopen admission without waiting for
+PostgreSQL's physical file size to shrink.
+
+At the boundary, an enabled inbound delivery returns HTTP 507 with the closed
+`storage_full` verdict. The receive edge converts that refusal into a sanitized
+permanent SMTP rejection instead of discarding the message or asking the sender
+provider to retry forever. A new outbound message returns HTTP 507 with
+`agent_email_storage_full`, `retryable: false`, and no `Retry-After`. These are
+platform refusals, not billable overages, plan downgrades, or changes to the
+Founder's indefinite retention. The current v0.0.252/schema-90 production cell
+does not yet have this ledger; operators must complete and verify the schema-91
+rollout before treating it as live protection.
+
 ### Agent-email ingress rate breakers
 
 Inbound agent email has six account-adjustable rolling one-minute safety limits
@@ -572,7 +607,8 @@ the outbound rate dimensions. Those unlimited values do not bypass the 25 MiB
 inbound transport ceiling; the 5,000-message/1-GiB account-wide inbound refill
 rates and 100-message/64-MiB bursts; or any outbound 30-per-agent-minute,
 300-per-realm-minute, 1,000-per-account-minute, 10,000-per-account-day, or
-100-per-recipient-day breaker.
+100-per-recipient-day breaker. Once schema 91 is rolled out, they also do not
+bypass the cell's logical email-storage admission or hard boundary.
 
 Production keeps two agent-email retention workers in enforcement mode even
 while the Founder policy is indefinite. Batch 100, a
@@ -583,11 +619,13 @@ unbounded drain loop. One replica can scan at most 3,200 rows and delete at most
 rows and delete at most 2,048 MiB. Maximum-sized 25 MiB rows yield 800/1,600 MiB
 because each database batch fits only one. Those are work ceilings, not
 database-throughput guarantees, reserved inbound shares, or a multi-account
-cell bound. Durable per-account kind rotation prevents one continuously full
-kind from starving the others over repeated visits. A finite plan policy takes
-effect without a worker-mode change after rollout; a wider cohort also needs
-reviewed cell-wide storage/admission capacity or sharding and provider-wide
-outbound backpressure.
+cell bound. Schema 91's independent database-triggered ledger supplies that
+cell bound after it is deployed; the retention sweep does not. Durable
+per-account kind rotation prevents one continuously full kind from starving the
+others over repeated visits. A finite plan policy takes effect without a
+worker-mode change after rollout; a wider cohort must first verify the schema-91
+ledger (or equivalent sharding) and still needs provider-wide outbound
+backpressure.
 
 Rollout is cell-and-edge first: deploy a cell that understands the marked
 snapshot and an agent-email edge Worker that accepts the cell's

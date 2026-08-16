@@ -1102,12 +1102,28 @@ The production resources are:
   `email.sending`, scoped to `send.witmail.net` and the six configured lifecycle
   event classes.
 
-The public dispatch endpoint authenticates its signed envelope only after
-streaming at most 2 MiB. Exact-signer admission prevents unauthorized provider
-sends, but the current deployment has no separate Cloudflare Rate Limiter or
-private Service Binding in front of invalid signatures. Keep a front-door
-request budget as a blocker for widening beyond the exact Founder cohort so an
-unauthenticated flood cannot multiply that parsing cost.
+The currently deployed adapter authenticates its signed envelope only after
+streaming at most 2 MiB and has no separate Cloudflare Rate Limiter. The
+hardened release candidate changes that order: it first charges a hashed
+source-IP lane, verifies the Ed25519 header envelope before reading the body,
+then performs the bounded 2 MiB body read/digest and exact JSON/account
+authorization. Only an authenticated, account-authorized request may charge the
+aggregate and signer lanes or reach Durable Objects/provider dispatch. The
+candidate binds namespace `2301` at 1,000 requests per 60 seconds, keeps
+`preview_urls: false`, and enables Worker observability. These claims are not
+live until the adapter deployment is completed and verified.
+
+Cloudflare Rate Limiter namespaces are shared account-wide. Before deploying
+the candidate, inventory every Worker binding in the selected production
+Cloudflare account and stop if namespace `2301` is already used. Also stop if
+the rendered deployment omits `DISPATCH_FRONTDOOR_LIMITER`, changes its 1,000/60
+configuration, exposes preview URLs, or disables observability. The counters
+are point-of-presence-local and eventually consistent; use this as a coarse
+abuse breaker, not exact global accounting, a tenant quota, or a substitute for
+the cell's authoritative rate controls. Valid worker pods that share one NAT
+egress address also share the source-IP lane, so keep expected aggregate
+legitimate dispatch below the 1,000/60 boundary and alert on saturation before
+widening a cohort.
 
 For the Founder cohort, expected live gates are
 `DISPATCH_ENABLED=true`, `RECEIPT_REPLAY_ENABLED=false`, and
@@ -1135,10 +1151,12 @@ npx --no-install wrangler --config wrangler.template.jsonc \
 Stop if the selected Cloudflare account is not the account that owns
 `witmail.net`, if either required secret name is absent, if the subscription
 source/domain/event set differs, if the main Queue has no consumer, or if any
-gate differs from the expected posture. The configured consumer uses batches of
-10, a five-second batch timeout, 25 retries, concurrency four, and the named
-DLQ. Treat configuration drift as an incident rather than repairing it with an
-ad hoc dashboard edit.
+gate differs from the expected posture. For the hardened candidate, also stop
+unless the live Worker reports the reviewed Rate Limiter binding, namespace,
+preview-URL posture, and observability configuration above. The configured
+consumer uses batches of 10, a five-second batch timeout, 25 retries,
+concurrency four, and the named DLQ. Treat configuration drift as an incident
+rather than repairing it with an ad hoc dashboard edit.
 
 Monitor both boundaries. In the cell, inspect `/readyz`, `/healthz`, `/metrics`,
 the bounded `witself_worker_agent_email_outbound_*` families, and the durable
@@ -1197,6 +1215,91 @@ are work ceilings, not throughput guarantees or reserved inbound shares;
 persistent capped/time-out batches require investigation, and they do not
 provide a multi-account cell-capacity guarantee.
 
+Schema 91 adds that independent cell-capacity guarantee. Its logical ledger is
+transactionally maintained by database triggers across inbound roots,
+deliveries, outbound roots, provider-event receipts, and recipient
+suppressions. The defaults are a 3-GiB/25,000-root admission boundary and a
+4-GiB/100,000-counted-row hard boundary. Each row is charged 8 KiB plus the
+retained immutable identity and customer-content fields actually stored. The
+fixed charge absorbs bounded mutable lifecycle metadata; inbound-delivery and
+outbound claim IDs have 128-byte database caps, so claim, release, and terminal
+updates remain charge-neutral even at the hard boundary. The 25,000-root
+admission threshold leaves 75,000 rows—three lifecycle children per fully
+admitted root on average—under the hard cap. Repeated provider events remain
+bounded by that cap, not guaranteed unlimited headroom. The hard threshold also
+catches old binaries, imports, and direct maintenance writers. Deletes and
+cascades release charge, so do not use `pg_database_size` as the admission
+signal.
+
+Treat the schema-91 deployment as a forward migration:
+
+1. Verify current encrypted backups and restore evidence. Deploy the receive
+   Worker version that recognizes HTTP 507 `storage_full` before a cell can
+   emit that verdict; it must issue only the sanitized permanent SMTP rejection.
+2. Set and review `agentEmail.cellStorage.admissionBytes`, `admissionRows`,
+   `hardBytes`, and `hardRows`. Defaults are `3221225472`, `25000`,
+   `4294967296`, and `100000`; each admission value must be strictly below its
+   corresponding hard value. These are cell safety values, not plan values.
+3. Roll the schema-91-capable image. The migration takes account-first `NOWAIT`
+   locks, measures the existing five-table footprint, and installs the triggers
+   in one transaction. A lock conflict must fail and be retried through the
+   normal rollout; do not bypass the fence or seed the singleton manually.
+4. After every process is Ready, verify the configured and measured state with
+   a read-only query:
+
+   ```sql
+   SELECT retained_bytes, root_rows, counted_rows,
+          admission_bytes, admission_root_rows,
+          hard_bytes, hard_counted_rows, updated_at
+     FROM agent_email_cell_storage_capacity
+    WHERE singleton = 1;
+   ```
+
+   Require exactly one row, nonnegative counts, `root_rows <= counted_rows`,
+   and the reviewed four thresholds. Re-read after a bounded create/delete
+   canary and verify that exact logical charge is added and then released.
+5. Scrape the API pod's `/metrics` listener and require
+   `witself_agent_email_cell_storage_metrics_up 1` plus all seven unlabeled
+   usage/threshold gauges. Install aggregate alerts equivalent to:
+
+   ```promql
+   absent(witself_agent_email_cell_storage_metrics_up)
+   or witself_agent_email_cell_storage_metrics_up != 1
+
+   witself_agent_email_cell_storage_retained_bytes
+     / witself_agent_email_cell_storage_admission_bytes >= 0.80
+   or witself_agent_email_cell_storage_root_rows
+     / witself_agent_email_cell_storage_admission_root_rows >= 0.80
+
+   witself_agent_email_cell_storage_retained_bytes
+     / witself_agent_email_cell_storage_hard_bytes >= 0.80
+   or witself_agent_email_cell_storage_counted_rows
+     / witself_agent_email_cell_storage_hard_counted_rows >= 0.80
+   ```
+
+   Also require an independent PVC/PostgreSQL physical-utilization alert before
+   80%; the logical ledger releases charge on delete but database files need not
+   shrink. A scrape failure emits only `metrics_up 0`, never database error text.
+6. Verify the closed refusal contracts without provider traffic: inbound is
+   HTTP 507 `storage_full`, which the receive edge maps to
+   `rejected_cell_capacity`; a new outbound root is HTTP 507
+   `agent_email_storage_full` with `retryable: false` and no `Retry-After`.
+   Keep the exact-account cohort unchanged until these checks and the outbound
+   front-door deployment are both complete.
+
+Alert well before either admission threshold; the hard boundary is emergency
+lifecycle reserve, not a normal operating target. If root admission closes,
+stop cohort growth and new sends, investigate retention/evacuation, and preserve
+the permanent inbound rejection so providers do not retry without bound. If a
+cell is already above a newly lowered threshold, leave the limits in place:
+positive writes remain closed while deletes and charge-reducing updates can
+recover capacity. No plan change or Founder-unlimited override is a remedy.
+
+Do not down-migrate schema 91 on a cell that retains any counted email row. The
+down migration deliberately refuses before removing its triggers. Gate receive
+and send off, drain or evacuate the account data under the normal migration
+contract, and roll forward; never disable triggers to force a rollback.
+
 For a new cell, first run this exact shape in preview and review only value-free
 counts, then explicitly promote it to enforcement before admitting a finite
 cohort. Once production enforcement is active, Professional mail automatically
@@ -1206,9 +1309,12 @@ cannot demonstrate deletion.
 
 The safe config-only pause is `enabled: false`; returning `mode` to `preview`
 also stops destructive deletion while retaining bounded observations. Roll only
-the worker Deployment, keep schema 90 in place, verify the API pod UID and config
-checksum remain unchanged, and confirm the retention deletion counters stop
-advancing. Schema-89 binaries are not a rollback after schema 90 has landed.
+the worker Deployment, keep the current database schema in place, verify the API
+pod UID and config checksum remain unchanged, and confirm the retention deletion
+counters stop advancing. The live v0.0.252 cell remains on schema 90 until the
+separate schema-91 rollout above; after schema 91 lands, do not remove its
+storage triggers. Schema-89 binaries are not a rollback after schema 90 has
+landed.
 
 ## Deploy, checkpoint, and drill the dark custom-domain authority
 

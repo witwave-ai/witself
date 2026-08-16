@@ -3,7 +3,9 @@ import {
   RECEIPT_PROOF_SCHEMA,
   RECEIPT_REPLAY_AUDIENCE,
   RESPONSE_SCHEMA,
-  verifyDispatchRequest,
+  sha256Hex,
+  verifyDispatchBodyDigest,
+  verifyDispatchHeaders,
 } from "./signature.mjs";
 import {
   OutboundReceipt,
@@ -20,6 +22,76 @@ import { consumeProviderEvents } from "./events.mjs";
 // envelope needs substantially more room than the decoded text contract.
 // Validation below still enforces the independent 256 KiB text limit.
 export const MAX_BODY_BYTES = 2 * 1024 * 1024;
+export const FRONTDOOR_LIMIT_PER_MINUTE = 1000;
+
+const FRONTDOOR_KEY_PREFIX = "witself-agent-email-send.frontdoor.v1";
+
+async function consumeFrontDoorLane(binding, key) {
+  if (!binding || typeof binding.limit !== "function") {
+    return "unavailable";
+  }
+  let result;
+  try {
+    result = await binding.limit({ key });
+  } catch {
+    return "unavailable";
+  }
+  if (!result || typeof result.success !== "boolean") {
+    return "unavailable";
+  }
+  return result.success ? "allowed" : "limited";
+}
+
+// Cloudflare supplies CF-Connecting-IP at the public workers.dev boundary.
+// Hash it before using it as limiter state and never return or log either form.
+// Missing or malformed edge identity fails closed because falling back to one
+// unbounded anonymous lane would defeat the front-door contract.
+export async function admitFrontDoorSource(
+  request,
+  env,
+  cryptoAPI = crypto,
+) {
+  const binding = env?.DISPATCH_FRONTDOOR_LIMITER;
+  const connectingIP = request.headers.get("CF-Connecting-IP") ?? "";
+  if (
+    connectingIP.length < 1 ||
+    connectingIP.length > 128 ||
+    connectingIP !== connectingIP.trim() ||
+    /[\u0000-\u001f\u007f]/.test(connectingIP)
+  ) {
+    return "unavailable";
+  }
+  let ipDigest;
+  try {
+    ipDigest = await sha256Hex(
+      `${FRONTDOOR_KEY_PREFIX}:ip\0${connectingIP}`,
+      cryptoAPI,
+    );
+  } catch {
+    return "unavailable";
+  }
+  return consumeFrontDoorLane(
+    binding,
+    `${FRONTDOOR_KEY_PREFIX}:ip:${ipDigest}`,
+  );
+}
+
+// Anonymous callers can spend only their own source lane. Charge shared
+// aggregate and signer budgets only after the complete signed body and its
+// account authorization have been verified, otherwise anyone could exhaust a
+// shared lane and deny valid cell traffic.
+export async function admitVerifiedDispatch(env, keyId) {
+  const binding = env?.DISPATCH_FRONTDOOR_LIMITER;
+  const aggregate = await consumeFrontDoorLane(
+    binding,
+    `${FRONTDOOR_KEY_PREFIX}:aggregate`,
+  );
+  if (aggregate !== "allowed") return aggregate;
+  return consumeFrontDoorLane(
+    binding,
+    `${FRONTDOOR_KEY_PREFIX}:signer:${keyId}`,
+  );
+}
 
 export function failure(
   status,
@@ -108,6 +180,22 @@ export default {
     ) => isReceiptReplay
       ? receiptProofFailure(status, "receipt_unresolved", sendId)
       : failure(status, code, sendId, state, retryAfterSeconds);
+    const frontDoorFailure = (admission, sendId = "esnd_invalid") => {
+      const limited = admission === "limited";
+      const response = endpointFailure(
+        limited ? 429 : 503,
+        limited ? "frontdoor_rate_limited" : "frontdoor_unavailable",
+        sendId,
+        "retryable",
+        60,
+      );
+      response.headers.set("Retry-After", "60");
+      return response;
+    };
+    const requestAdmission = await admitFrontDoorSource(request, env);
+    if (requestAdmission !== "allowed") {
+      return frontDoorFailure(requestAdmission);
+    }
     const declaredHeader = request.headers.get("Content-Length");
     let declaredLength = null;
     if (declaredHeader !== null) {
@@ -122,13 +210,6 @@ export default {
         return endpointFailure(413, "request_too_large");
       }
     }
-    const body = await readBoundedBody(request);
-    if (body === null || body.length < 2) {
-      return endpointFailure(413, "request_too_large");
-    }
-    if (declaredLength !== null && declaredLength !== body.length) {
-      return endpointFailure(400, "request_invalid");
-    }
     const dispatchAudience = String(env.DISPATCH_AUDIENCE ?? "");
     const receiptReplayAudience = String(env.RECEIPT_REPLAY_AUDIENCE ?? "");
     if (
@@ -140,11 +221,23 @@ export default {
     }
     let verified;
     try {
-      verified = await verifyDispatchRequest(request, body, env, {
+      verified = await verifyDispatchHeaders(request, env, {
         expectedAudience: isReceiptReplay
           ? receiptReplayAudience
           : dispatchAudience,
       });
+    } catch {
+      return endpointFailure(401, "signature_invalid");
+    }
+    const body = await readBoundedBody(request);
+    if (body === null || body.length < 2) {
+      return endpointFailure(413, "request_too_large");
+    }
+    if (declaredLength !== null && declaredLength !== body.length) {
+      return endpointFailure(400, "request_invalid");
+    }
+    try {
+      await verifyDispatchBodyDigest(body, verified.digest);
     } catch {
       return endpointFailure(401, "signature_invalid");
     }
@@ -156,6 +249,10 @@ export default {
     }
     if (!verified.signer.accountIds.has(dispatch.account_id)) {
       return endpointFailure(403, "account_not_allowed", dispatch.send_id);
+    }
+    const verifiedAdmission = await admitVerifiedDispatch(env, verified.keyId);
+    if (verifiedAdmission !== "allowed") {
+      return frontDoorFailure(verifiedAdmission, dispatch.send_id);
     }
     if (isReceiptReplay) {
       if (String(env.RECEIPT_REPLAY_ENABLED ?? "false") !== "true") {

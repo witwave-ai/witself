@@ -110,8 +110,19 @@
     "agentEmail": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["providerEventTokenSecret", "receivePilot", "receiveProduction"],
+      "required": ["cellStorage", "providerEventTokenSecret", "receivePilot", "receiveProduction"],
       "properties": {
+        "cellStorage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["admissionBytes", "admissionRows", "hardBytes", "hardRows"],
+          "properties": {
+            "admissionBytes": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+            "admissionRows": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+            "hardBytes": { "type": "integer", "minimum": 2, "maximum": 9007199254740991 },
+            "hardRows": { "type": "integer", "minimum": 2, "maximum": 9007199254740991 }
+          }
+        },
         "providerEventTokenSecret": {
           "type": "object",
           "additionalProperties": false,

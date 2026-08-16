@@ -60,6 +60,43 @@ renders `WITSELF_FACT_DELETION_ENABLED`; a server compiled against store schema
 27 or older refuses to start when it is enabled, so turn it on only with schema
 28 or newer.
 
+`agentEmail.cellStorage` configures schema 91's independent logical cell email
+budget. Defaults are 3 GiB/25,000 inbound-plus-outbound roots for admission and
+4 GiB/100,000 total counted rows for the hard boundary:
+
+```yaml
+agentEmail:
+  cellStorage:
+    admissionBytes: 3221225472
+    admissionRows: 25000
+    hardBytes: 4294967296
+    hardRows: 100000
+```
+
+The chart renders these four positive integers as
+`WITSELF_AGENT_EMAIL_CELL_STORAGE_ADMISSION_BYTES`,
+`WITSELF_AGENT_EMAIL_CELL_STORAGE_ADMISSION_ROWS`,
+`WITSELF_AGENT_EMAIL_CELL_STORAGE_HARD_BYTES`, and
+`WITSELF_AGENT_EMAIL_CELL_STORAGE_HARD_ROWS`. Each admission value must be
+strictly smaller than the corresponding hard value or rendering/startup fails.
+Server startup writes the reviewed limits to the transactionally maintained
+singleton after migrations. Database triggers charge every retained inbound or
+outbound root, inbound delivery, provider-event receipt, and recipient
+suppression 8 KiB plus its immutable/customer-content fields. The fixed charge
+absorbs bounded mutable lifecycle metadata; 128-byte database caps on
+inbound-delivery and outbound claim IDs keep claim/release/terminal updates
+charge-neutral at the hard boundary. Root admission leaves 75,000 rows—three
+lifecycle children per fully admitted root on average—under the hard cap;
+repeated provider events are still bounded by that cap. The hard boundary covers
+old/import/direct writers. Deletes and cascades release capacity.
+
+These settings are platform safety, not a plan allowance, billable quota, or
+retention window. No explicit-unlimited account override bypasses them. Keep the
+defaults unless cell sizing and evacuation evidence supports a reviewed change;
+alert before admission closes and never treat the hard threshold as normal
+operating capacity. Schema 91 is forward-only while durable email remains: its
+down migration deliberately refuses rather than removing the triggers.
+
 `agentEmail.receivePilot` is a retired compatibility surface and is disabled by
 default. New production receive deployments must use
 `agentEmail.receiveProduction`; do not use `receivePilot` as a canary or rollout

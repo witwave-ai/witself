@@ -62,6 +62,10 @@ var (
 	// outcome: bounded text and metadata landed, while attachment-bearing raw
 	// MIME was omitted at the account capacity boundary.
 	ErrAgentEmailAttachmentOmitted = errors.New("agent-email attachment payload omitted at capacity")
+	// ErrAgentEmailDatabaseCapacity reports the independent cell-wide retained
+	// email safety boundary. Inbound delivery is permanently rejected instead
+	// of silently discarded; authenticated outbound queueing fails closed.
+	ErrAgentEmailDatabaseCapacity = errors.New("agent-email cell storage capacity reached")
 	// ErrAgentEmailPilotUnavailable is the compatibility name for a transient
 	// receive-service-wide ingestion failure.
 	ErrAgentEmailPilotUnavailable = errors.New("agent-email receive is unavailable")
@@ -699,6 +703,8 @@ func agentEmailIngestHandlerWithLimits(
 			writeAgentEmailVerdict(w, http.StatusRequestEntityTooLarge, "over_size")
 		case errors.Is(err, ErrAgentEmailFeatureDisabled):
 			writeAgentEmailVerdict(w, http.StatusOK, "feature_disabled")
+		case errors.Is(err, ErrAgentEmailDatabaseCapacity):
+			writeAgentEmailVerdict(w, http.StatusInsufficientStorage, "storage_full")
 		case errors.Is(err, ErrAgentEmailUnknownRecipient), errors.Is(err, ErrNotFound):
 			writeAgentEmailVerdict(w, http.StatusNotFound, "unknown_recipient")
 		case errors.Is(err, ErrAgentEmailReceiveDisabled):
