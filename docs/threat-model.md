@@ -859,6 +859,62 @@ incident, deliberately not a tenant-data breach. See
   [backup-and-recovery.md](backup-and-recovery.md),
   [key-hierarchy.md](key-hierarchy.md)).
 
+## Agent Email
+
+Agent email introduces unsolicited, attacker-controlled content and public edge
+surfaces. Every sender, header, subject, body, attachment name, link, and
+verification code is untrusted data, never an instruction or authorization.
+Mailbox reads expose bounded decoded text with an explicit unverified-sender
+warning; they do not expose raw MIME, HTML, attachment bytes, or trusted spam or
+authentication claims. Clients must not follow links or let mail authorize
+writes, deletion, secret access, billing, identity proof, account recovery, or
+domain transfer. A numeric code is usable only in an already-expected,
+user-authorized, low-risk flow after independently matching the service and
+context, and is then marked consumed.
+
+The inbound edge validates the destination route, account cohort, signed
+projection, size ceiling, and relay target before reading raw MIME. The cell
+then verifies the Ed25519 body signature, digest, timestamp/replay window,
+audience, and recipient authority before a durable write. A forged public relay
+request therefore cannot select an account or bypass the cell's authority.
+Relay signing keys are isolated from the control plane and cells retain an
+explicit bounded verification ring so rotation can overlap safely. Suspected
+edge-key compromise requires disabling the affected route/cohort, removing the
+key id from the cell ring, rotating it through the fenced deployment ceremony,
+and treating messages accepted during the exposure window as untrusted incident
+evidence.
+
+Flooding is bounded per request and by per-minute account ingress: the edge
+rejects more than 25 MiB and the cell has sender/recipient, recipient, realm,
+and account count/byte GCRA breakers. Finite-policy retention is bounded and
+cooperatively drained. Founder currently has unlimited attachment storage and
+indefinite retention, so its total retained bytes and age are not bounded by
+those controls; its exact narrow cohort still requires a cell high-water mark
+or external payload storage before expansion. Disabled/Personal mail is
+accepted and dropped without persistence or provider retry, but the current
+edge still buffers and relays up to 25 MiB before the cell resolves entitlement.
+The signed disposition/preflight needed to avoid that cost is a prerequisite
+for a broad account cohort. Per-account limits also do not bound aggregate cell
+storage or a shared sending-domain/provider budget; cohort expansion requires
+cell-wide high-water enforcement or external payload storage plus global
+provider backpressure.
+
+The public outbound dispatch endpoint authenticates the signed cell envelope
+before provider delivery and streams at most 2 MiB of JSON, with an independent
+256 KiB text cap. There is not yet a separate Cloudflare rate-limiter or service
+binding in front of invalid-signature traffic, so broad exposure requires one.
+Provider receipts, routes, callbacks, and suppressions contain only bounded
+identifiers/digests and closed outcomes. Idempotency fences prevent ambiguous
+provider calls from becoming a second logical send. Queue failures are retried
+and dead-lettered; a DLQ is incident evidence, not authorization to replay.
+
+Address harvesting and quarantine evasion are reduced by exact canonical
+routes, reserved/protected alias namespaces, no broad catch-all delivery,
+default-off aliases/custom domains, and bounded route lookups. These controls do
+not authenticate an external sender or classify spam. Prompt-injection and
+spoofed-verification resistance therefore remain client judgment backed by the
+untrusted-content contract, not a claim that malicious mail has been made safe.
+
 ## Self-Hosted Risks
 
 Self-hosted deployments add infrastructure risks:

@@ -208,11 +208,11 @@ Inbound- and outbound-email rate coordination share a separate cleanup lane.
 size, interval, and timeout as
 `WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_*`. It has the same enabled-by-default
 10,000-row, one-minute, ten-second worker bounds. Each scheduled sweep drains
-consecutive full batches from both rate tables until each catches up or the
-shared deadline is reached. Every replica may run it because both email-specific
-delete batches use PostgreSQL `FOR UPDATE SKIP LOCKED`; API pods never schedule
-it. Metrics aggregate the two value-free row counts under this one maintenance
-lane.
+consecutive full batches from all three physical rate tables until each catches
+up or the shared deadline is reached. Every replica may run it because the
+inbound and outbound delete operations use PostgreSQL `FOR UPDATE SKIP LOCKED`;
+API pods never schedule it. Metrics aggregate their two value-free result counts
+under this one maintenance lane.
 
 Avatar payload compaction is disabled by default.
 `avatar.payloadCompaction.enabled` renders
@@ -251,15 +251,16 @@ only. Contended graph rows are skipped without waiting, and bounded oversize
 graphs are quarantined and surfaced through value-free Prometheus counters so
 one thread cannot monopolize a worker lane.
 
-Inbound agent-email retention follows the same three-stage gate through
+Agent-email retention follows the same three-stage gate through
 `worker.agentEmailRetention` and the `WITSELF_AGENT_EMAIL_RETENTION_*`
-variables. Its defaults are `enabled: false`, `mode: preview`, 25 messages per
-batch, a five-minute interval, and a two-minute attempt timeout. Each batch is
-also capped at 32 MiB of raw MIME. The worker defers a still-live processing
-claim, but expired claims and unread or unacknowledged messages remain
-eligible. Deleting an email cascades its delivery and accepted retry-canary
-proof, clears suspected-duplicate backlinks, and preserves the mailbox,
-address reservation, audit events, and usage records.
+variables. Its defaults are `enabled: false`, `mode: preview`, 25 shared work
+items per batch, a five-minute interval, and a two-minute attempt timeout. The
+shared budget covers inbound rows, outbound rows, provider-event receipts, and
+recipient suppressions; inbound raw MIME is additionally capped at 32 MiB per
+database batch. Preview takes one non-destructive sample per interval. Enforce
+may drain up to 32 productive passes and 48 total passes per scheduled attempt.
+The worker defers live inbound processing and unresolved outbound work. It
+preserves mailboxes, address reservations, audit events, and usage records.
 
 The public chart default keeps `worker.enabled: false` because it has no shared
 database Secret. After PostgreSQL is configured, enabling it starts the

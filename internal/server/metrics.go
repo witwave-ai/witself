@@ -515,7 +515,7 @@ func (m *runtimeMetrics) observeAgentEmailRateRejection(err error) {
 			dimension = detail.Dimension
 		}
 		switch detail.Scope {
-		case "realm", "recipient", "sender":
+		case "account", "realm", "recipient", "sender":
 			scope = detail.Scope
 		}
 		switch detail.Source {

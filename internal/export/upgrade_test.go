@@ -9,6 +9,25 @@ import (
 	"testing"
 )
 
+func TestSchema89AccountEmailRateBoundsPreserveArchivedRows(t *testing.T) {
+	upgrade := UpgraderFor(89)
+	if upgrade == nil {
+		t.Fatal("schema 89 identity upgrader is not registered")
+	}
+	input := map[string]any{
+		"id": "acc_1", "plan": "enterprise",
+		"plan_revision": json.Number("15"),
+	}
+	want := map[string]any{
+		"id": "acc_1", "plan": "enterprise",
+		"plan_revision": json.Number("15"),
+	}
+	got, err := upgrade("accounts", input)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("schema 89 identity upgrade changed account: %#v / %v", got, err)
+	}
+}
+
 func TestSchema25FactIdempotencyUpgrade(t *testing.T) {
 	upgrade := UpgraderFor(25)
 	if upgrade == nil {

@@ -12,6 +12,12 @@ remain dark and unrouted during migration. Production deployment, readiness,
 rollback, primary routing, and catch-all routing commands target only the
 production Worker. Legacy literal-route cleanup retains the older identity.
 
+As of 2026-08-16, production managed-domain receive is enabled only for the
+exact Founder account cohort. Committed templates remain fail-closed, and the
+active cohort does not enable Personal receive, managed aliases, custom domains,
+or the retired compatibility Worker. Always verify live routing, gates, and the
+byte-identical account allowlist before operating this edge.
+
 `witmail.net` is reserved exclusively for agent email; it is not a general
 mailbox or website domain. `AGENT_EMAIL_DOMAIN` names that primary domain and
 `AGENT_EMAIL_LEGACY_DOMAINS` may name at most one compatibility domain. The
@@ -132,7 +138,11 @@ becomes a sanitized temporary provider result and a value-free
 `{"verdict":"accepted"}` or the deliberate accept-and-drop
 `{"verdict":"feature_disabled"}` counts as SMTP success. This preserves the
 Personal-plan discard behavior at the signed cell policy boundary. An exact
-permanent cell verdict is rejected once without retry.
+permanent cell verdict is rejected once without retry. The edge has already
+read and relayed the bounded raw body before the cell can resolve that plan
+policy, so disabled mail costs up to the 25 MiB transport path even though it is
+not persisted. A signed disposition/preflight that can refuse disabled accounts
+before body buffering is required before broadening the production cohort.
 
 ## Safety boundary
 
@@ -159,19 +169,24 @@ permanent cell verdict is rejected once without retry.
   be read or is disabled.
 - Do not activate until the destination cell is enabled and healthy.
 - The owning cell's PostgreSQL limiter is the sole authoritative account and
-  delivery-throughput decision. The edge route-lookup limiters protect one
-  shared dependency and never implement plan or billable usage. Every enrolled
-  delivery reaches the cell feature check first, preserving accept-and-drop
-  behavior for plan-disabled accounts without edge changes.
-- A failed operation attempts to disable the pilot gate and its managed rules;
-  inspect Cloudflare state before retrying any reported incomplete rollback.
+  delivery-throughput decision. In addition to the sender-recipient, recipient,
+  and realm scopes, it always applies account-wide 5,000-message/minute and
+  1-GiB/minute GCRA refill rates across all realms, with 100-message and 64-MiB
+  burst tolerances. The edge route-lookup
+  limiters protect one shared dependency and never implement plan or billable
+  usage. Every enrolled delivery reaches the cell feature check first,
+  preserving accept-and-drop behavior for plan-disabled accounts without edge
+  changes.
+- A failed retired-compatibility operation attempts to disable its historical
+  gate and literal managed rules; inspect Cloudflare state before retrying any
+  reported incomplete rollback. Production primary or catch-all operations use
+  their own fenced plans and receipts below.
 
-The route-manager scripts in this directory still create and manage only the
-reviewed literal pilot rules. They do not replace, disable, or redirect the
-existing catch-all, and this change does not claim that full managed-domain
-Email Routing has been promoted. Dynamic canonical and alias addresses receive
-traffic only after a separate reviewed routing change directs that address
-surface to this Worker.
+The original `npm run routes` manager creates and manages only the reviewed
+literal compatibility rules. It does not replace, disable, or redirect the
+catch-all. Production `routing:foundation`, `routes:primary`, and
+`routes:catch-all` are separate fenced managers for the live managed-domain
+surface; do not substitute the legacy command for them.
 
 The route manager reads and fingerprints the catch-all before and after every
 operation. Its API client contains no catch-all update operation. It also

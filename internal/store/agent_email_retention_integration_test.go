@@ -678,6 +678,67 @@ func TestAgentEmailRetentionWorkerPreservesLockOnlyLaneMetricsPostgres(t *testin
 	}
 }
 
+func TestAgentEmailRetentionWorkerDrainsConsecutiveCappedBatchesPostgres(t *testing.T) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	st, _ := newMigrationTestStore(t, baseDSN)
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	fixture := newAgentEmailRetentionAccountFixture(
+		ctx, t, st, "worker-consecutive-drain",
+	)
+	messages := []AgentEmailMessage{
+		ingestAgentEmailRetentionFixture(ctx, t, st, fixture, "drain one"),
+		ingestAgentEmailRetentionFixture(ctx, t, st, fixture, "drain two"),
+		ingestAgentEmailRetentionFixture(ctx, t, st, fixture, "drain three"),
+	}
+	messageIDs := make([]string, 0, len(messages))
+	for _, message := range messages {
+		messageIDs = append(messageIDs, message.ID)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE agent_email_messages
+		   SET received_at=clock_timestamp()-interval '31 days'
+		 WHERE id=ANY($1::text[])`, messageIDs); err != nil {
+		t.Fatal(err)
+	}
+	configureAgentEmailRetentionTestLanes(
+		ctx, t, st, AgentEmailRetentionModeEnforce, fixture.laneID,
+	)
+
+	cfg := DefaultAgentEmailRetentionWorkerConfig()
+	cfg.Mode = AgentEmailRetentionModeEnforce
+	cfg.BatchSize = 1
+	cfg.Interval = time.Minute
+	cfg.BatchTimeout = minAgentEmailRetentionBatchTimeout
+	result, err := st.processAgentEmailRetentionWorkerBatch(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Scanned != 3 || result.Eligible != 3 || result.Deleted != 3 ||
+		!result.ScanCapped || !result.LaneAdvanced {
+		t.Fatalf("consecutive drain result = %+v", result)
+	}
+	for _, message := range messages {
+		assertAgentEmailRetentionMessageCount(ctx, t, st, message.ID, 0)
+	}
+	var delayed bool
+	if err := st.pool.QueryRow(ctx, `
+		SELECT next_run_at > clock_timestamp()
+		  FROM agent_email_retention_worker_lanes
+		 WHERE mode='enforce' AND lane_id=$1`, fixture.laneID).Scan(&delayed); err != nil {
+		t.Fatal(err)
+	}
+	if !delayed {
+		t.Fatal("drained lane remained immediately due after its empty pass")
+	}
+}
+
 func TestAgentEmailRetentionStaleLaneGenerationCannotDeletePostgres(t *testing.T) {
 	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
 	if baseDSN == "" {

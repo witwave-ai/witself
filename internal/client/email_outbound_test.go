@@ -84,6 +84,7 @@ func TestAgentEmailOutboundClientPreservesRateLimitDetails(t *testing.T) {
 		scope      string
 		limit      int64
 		used       int64
+		window     int64
 		retryAfter time.Duration
 		retryable  bool
 		source     string
@@ -94,7 +95,23 @@ func TestAgentEmailOutboundClientPreservesRateLimitDetails(t *testing.T) {
 			body:      `{"schema_version":"witself.v0","code":"rate_limited","error":"outbound agent-email rate limit reached","retryable":true,"retry_after":1,"details":{"limit_dimension":"agent_email_sent","limit_key":"agent_email_sent_per_account_minute","scope":"account","limit":1000,"used":1000,"attempted":1,"window_seconds":60,"retry_after":1,"source":"platform"}}`,
 			dimension: "agent_email_sent", key: "agent_email_sent_per_account_minute",
 			scope: "account", limit: 1000, used: 1000, retryAfter: time.Second,
-			retryable: true, source: "platform",
+			window: 60, retryable: true, source: "platform",
+		},
+		{
+			name:      "platform daily account breaker",
+			status:    http.StatusTooManyRequests,
+			body:      `{"schema_version":"witself.v0","code":"rate_limited","error":"outbound agent-email rate limit reached","retryable":true,"retry_after":60,"details":{"limit_dimension":"agent_email_sent","limit_key":"agent_email_sent_per_account_day","scope":"account","limit":10000,"used":10000,"attempted":1,"window_seconds":86400,"retry_after":60,"source":"platform"}}`,
+			dimension: "agent_email_sent", key: "agent_email_sent_per_account_day",
+			scope: "account", limit: 10_000, used: 10_000, window: 86_400,
+			retryAfter: time.Minute, retryable: true, source: "platform",
+		},
+		{
+			name:      "platform daily recipient breaker",
+			status:    http.StatusTooManyRequests,
+			body:      `{"schema_version":"witself.v0","code":"rate_limited","error":"outbound agent-email rate limit reached","retryable":true,"retry_after":60,"details":{"limit_dimension":"agent_email_sent","limit_key":"agent_email_sent_per_recipient_day","scope":"recipient","limit":100,"used":100,"attempted":1,"window_seconds":86400,"retry_after":60,"source":"platform"}}`,
+			dimension: "agent_email_sent", key: "agent_email_sent_per_recipient_day",
+			scope: "recipient", limit: 100, used: 100, window: 86_400,
+			retryAfter: time.Minute, retryable: true, source: "platform",
 		},
 		{
 			name:      "transient agent limit",
@@ -102,14 +119,14 @@ func TestAgentEmailOutboundClientPreservesRateLimitDetails(t *testing.T) {
 			body:      `{"schema_version":"witself.v0","code":"rate_limited","error":"outbound agent-email rate limit reached","retryable":true,"retry_after":2,"details":{"limit_dimension":"agent_email_sent","limit_key":"agent_email_sent_per_agent_minute","scope":"agent","limit":4,"used":4,"attempted":1,"window_seconds":60,"retry_after":2,"source":"plan"}}`,
 			dimension: "agent_email_sent", key: "agent_email_sent_per_agent_minute",
 			scope: "agent", limit: 4, used: 4, retryAfter: 2 * time.Second,
-			retryable: true, source: "plan",
+			window: 60, retryable: true, source: "plan",
 		},
 		{
 			name:      "hard realm limit",
 			status:    http.StatusForbidden,
 			body:      `{"schema_version":"witself.v0","code":"limit_exceeded","error":"outbound agent-email rate limit reached","retryable":false,"details":{"limit_dimension":"agent_email_sent","limit_key":"agent_email_sent_per_realm_minute","scope":"realm","limit":10,"used":10,"attempted":1,"window_seconds":60,"source":"account_override"}}`,
 			dimension: "agent_email_sent", key: "agent_email_sent_per_realm_minute",
-			scope: "realm", limit: 10, used: 10, source: "account_override",
+			scope: "realm", limit: 10, used: 10, window: 60, source: "account_override",
 		},
 	}
 	for _, test := range tests {
@@ -135,7 +152,7 @@ func TestAgentEmailOutboundClientPreservesRateLimitDetails(t *testing.T) {
 			if rateErr.LimitDimension != test.dimension || rateErr.LimitKey != test.key ||
 				rateErr.Scope != test.scope || rateErr.Limit != test.limit ||
 				rateErr.Used != test.used || rateErr.Attempted != 1 ||
-				rateErr.WindowSeconds != 60 || rateErr.RetryAfter != test.retryAfter ||
+				rateErr.WindowSeconds != test.window || rateErr.RetryAfter != test.retryAfter ||
 				rateErr.Retryable != test.retryable || rateErr.Source != test.source ||
 				rateErr.Error() != "outbound agent-email rate limit reached" {
 				t.Fatalf("rate error = %+v", rateErr)

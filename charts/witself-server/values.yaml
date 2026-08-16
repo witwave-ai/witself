@@ -218,10 +218,10 @@ worker:
     batchSize: 10000
     interval: 1m
     batchTimeout: 10s
-  # Inbound-email safety buckets are independent from inter-agent messaging.
-  # Every worker replica may run the same cooperatively locked cleanup loop.
-  # A scheduled sweep drains consecutive full batches until caught up or the
-  # batch timeout expires.
+  # Agent-email safety debt is independent from inter-agent messaging. The
+  # cleanup covers inbound realm/account and outbound minute/daily/recipient
+  # buckets across three physical tables. Every replica may run the same
+  # cooperatively locked loop until caught up or the timeout expires.
   agentEmailRateBucketCleanup:
     enabled: true
     batchSize: 10000
@@ -261,9 +261,10 @@ worker:
     batchSize: 25
     interval: 5m
     batchTimeout: 2m
-  # Inbound agent-email retention deletes whole stored email rows (including
-  # raw MIME through the row itself) while preserving mailboxes and addresses.
-  # Keep disabled through schema rollout, then observe preview before enforce.
+  # Agent-email retention shares one bounded budget across inbound rows,
+  # outbound rows, provider-event receipts, and recipient suppressions while
+  # preserving mailboxes and addresses. Keep disabled through schema rollout,
+  # then observe one-sample preview before bounded multi-pass enforcement.
   agentEmailRetention:
     enabled: false
     mode: preview

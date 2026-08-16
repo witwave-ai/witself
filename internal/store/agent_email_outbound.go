@@ -372,7 +372,9 @@ func (s *Store) queueAgentEmailDraft(
 		}
 		return redactAgentEmailOutbound(existing), nil
 	}
-	if err := enforceAgentEmailOutboundRateLimitsTx(ctx, tx, p, limits); err != nil {
+	if err := enforceAgentEmailOutboundRateLimitsTx(
+		ctx, tx, p, limits, draft.to,
+	); err != nil {
 		return AgentEmailOutboundMessage{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {

@@ -7,7 +7,7 @@
 > DEKs, group-owned v0 secrets, and server-decrypt columns below are historical
 > target design and are superseded for the implemented slice.
 
-Status: draft with implementation-backed amendments. Last reviewed 2026-07-19.
+Status: draft with implementation-backed amendments. Last reviewed 2026-08-16.
 Decision: Witself uses a single
 multi-tenant PostgreSQL schema as the system of
 record, scoped on every row by `account_id` / `realm_id`, spanning **two
@@ -27,8 +27,17 @@ universal, and deterministic bounded hybrid ranking requires no extension.
 `pgvector`/ANN is only a possible future projection; the backend never calls a
 model. The narrative projection in
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md) supersedes
-the earlier memory draft in this document. Other domain tables remain governed
-by this document.
+the earlier memory draft in this document.
+
+Agent-email amendment (reviewed 2026-08-16): migration `0089` is authoritative
+for independently gated send controls, durable outbound messages, provider-event
+receipts, recipient suppressions, and outbound GCRA debt. Migration `0090` adds
+the account-wide inbound table and outbound daily/recipient bucket shapes while
+preserving the original realm foreign-key boundary. Durable mail streams are
+portable; all three limiter tables are cell-local coordination state and are
+excluded from account archives. [agent-email.md](agent-email.md) and the
+embedded migrations govern these newer tables; this older overview does not
+restate them column-for-column.
 
 This doc is the prerequisite for the first Goose migration and the
 authorization/storage layers. It is the relational view of the domain objects in

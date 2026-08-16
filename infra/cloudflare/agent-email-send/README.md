@@ -15,6 +15,15 @@ The default configuration is dark:
   path.
 - The lifecycle event subscription is provisioned disabled.
 
+That is the committed deployment default, not the current production status.
+As of 2026-08-16, the exact Founder cohort has adapter dispatch and lifecycle
+event delivery enabled, the `witself-agent-email-send-lifecycle` subscription
+enabled, and receipt replay disabled. The main lifecycle Queue is
+`witself-agent-email-send-events`; its retained incident path is
+`witself-agent-email-send-events-dlq`. Always inspect live gates, cohort,
+subscription, Queue consumer, and deployment version before an operation. A
+catalog entitlement is never proof of provider readiness.
+
 ## Safety model
 
 The cell marks its outbox row `provider_started` before making the HTTPS call.
@@ -46,6 +55,15 @@ provider-route I/O. They preserve concurrent proof counters and unrelated
 fields, never change `route_pending` from false back to true, and never
 resurrect a missing, expired, or replaced receipt.
 
+The cell, not this adapter, owns sender admission. Its GCRA lanes refill at 30
+per agent, 300 per realm, and 1,000 per account each minute. Long-horizon lanes
+refill at 10,000 per account and 100 per normalized recipient each day, with
+1,000/10 burst tolerances and rolling-day upper bounds of 11,000/110.
+Immediately before dispatch, the worker applies an independent provider-attempt
+lane with those same rates and burst tolerances so retries and multiple replicas
+cannot bypass this boundary. Recipient limiter state contains only an
+account-domain-separated SHA-256 bucket identifier.
+
 If Email Sending returns a message ID but the content-free provider route
 cannot be registered immediately, the known acceptance is returned with that
 message ID and a Durable Object alarm repairs the route. This does not resend
@@ -66,6 +84,11 @@ The public dispatch endpoint streams at most a 2 MiB signed JSON envelope
 before authentication and rejects a larger body. The decoded text field still
 has its independent 256 KiB UTF-8 cap. The larger envelope limit is necessary
 because valid one-byte text characters can expand to six-byte JSON escapes.
+The current deployment has no separate Cloudflare Rate Limiter binding or
+private Service Binding in front of invalid signatures. Exact-signer admission
+keeps provider sends safe, but a broad public rollout also requires a
+front-door request budget so unauthenticated floods cannot multiply the 2 MiB
+parsing cost.
 
 Lifecycle events enter a Queue, are reduced to identifiers, class, and time,
 and are forwarded to the authorized cell. Sender, recipient, subject, SMTP
@@ -272,7 +295,7 @@ Keep the source cell entry while any other account still targets it.
 2. Deploy the Worker with all three gates false. Install the two secrets and
    verify their names, the exact Founder account cohort, and the dark
    deployment.
-3. Deploy the schema-89-compatible cell server and two worker replicas with
+3. Deploy the schema-90-compatible cell server and two worker replicas with
    cell outbound dispatch still disabled. Observe their health and metrics.
 4. Enable adapter dispatch only, leaving the receipt proof, event delivery, and
    the subscription disabled:
@@ -383,8 +406,8 @@ Rollback is gate-first and forward-only at the cell database:
    ```
 
    Keep the account and cell gates off until the reverted version is verified.
-   Once a cell reaches schema 89, do not deploy an older cell binary or attempt
-   a schema downgrade; recover with gates and a forward fix.
+   Once a cell reaches schema 90, do not deploy a schema-89-only cell binary or
+   attempt a schema downgrade; recover with gates and a forward fix.
 
 ### Queue and dead-letter handling
 

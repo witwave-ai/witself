@@ -819,6 +819,13 @@ schema-87 archive upgrades with an empty route stream and null custom-domain
 message provenance. The schema-88 down migration refuses before mutation when
 any custom-domain route, including a retired tombstone, or custom-domain receipt
 exists.
+Schema-89 archives additionally require the realm/agent send controls,
+outbound-message, provider-event, and recipient-suppression streams. Schema 90
+adds no portable rows: all three physical agent-email limiter tables are
+cell-local coordination state and are intentionally excluded, so a restored
+account begins with fresh defensive debt. A schema-89-only destination rejects
+a schema-90 archive; account movement remains frozen during mixed-version cell
+rollout.
 Export/import is tracked in
 [backup-and-recovery.md](backup-and-recovery.md).
 

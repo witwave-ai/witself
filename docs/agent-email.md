@@ -2,47 +2,48 @@
 
 ## Current Production Status
 
-Agent-email receive is a production release track, not a pilot product. The
-cell-side exact-account receive gate shipped dark in `v0.0.241`; the current
-release work hardens the production Cloudflare edge, immutable deployment and
-rollback path, signed routing authority, and exact production canary. No live
-provider route is carrying production receive traffic until that reviewed
-release, dark deployment, cell rollout, and canary all succeed. This staged
-activation does not add a sender-trust claim or automatic code use.
+As of 2026-08-16, agent email is a production service for one exact Founder
+account cohort, not a pilot product or a broad customer launch. Production
+receive runs through `witself-agent-email-receive` on `witmail.net`; production
+send runs through the isolated `witself-agent-email-send` adapter using
+`send.witmail.net`, with replies returning to `witmail.net`. The retired
+`witself-agent-email-pilot` Worker remains deployed dark only as rollback and
+historical evidence. It is not a routing target.
 
-Production-cell receive checkpoint (implemented for `v0.0.241`, default off):
-the server now supports a mutually exclusive exact-account cohort of 1-100
-canonical IDs. Serving-pod startup performs only bounded read-only
-account/canary validation; existing mailbox creation moved to the explicit,
-idempotent, keyset-paged `witself-server agent-email backfill` action, while a
-new cohort agent and mailbox commit atomically. The cell-native read-only
-`agent-email canary-manifest --output ...` action derives the exact sorted
-5-10-address edge manifest from currently enabled stored mailbox routes and
-creates it as a new mode-0600 file. It refuses missing mailboxes and includes
-the configured retry canary. No live cell, provider route, MX, catch-all,
-canonical-delivery, alias-delivery, or custom-domain gate is enabled by this
-implementation checkpoint.
+Committed templates and a fresh cell remain fail-closed. The current Founder
+deployment deliberately differs from those defaults:
 
-Managed retry-canary selection is implemented for matching chart and image
-`v0.0.245` or newer. The literal canary remains empty; a distinct immutable,
-versioned Kubernetes Secret supplies exactly one canonical `agent_*` ID with
-no whitespace or trailing newline. The new Secret field is withheld from older
-strict child schemas. Its name and key participate in the API rollout
-checksums, and startup verifies cohort membership. Operators first converge
-code, cohort, backfill, and a private canary export with the reference empty;
-they then select an eligible agent in a separate config-only rollout and
-re-export before activating provider delivery.
+| Layer | Committed default | Current Founder production state |
+|---|---|---|
+| Cell production receive | Off | Enabled for one exact account cohort |
+| Cell outbound worker | Off | Enabled with two cooperating worker replicas |
+| Adapter provider dispatch | Off | Enabled for the exact signer/account cohort |
+| Adapter receipt replay | Off | Off; opened only for a bounded operator proof |
+| Adapter lifecycle delivery | Off | Enabled |
+| `witself-agent-email-send-lifecycle` subscription (`email.sending` source) | Disabled | Enabled for six lifecycle event classes |
+| Agent-email retention | Off, preview defaults | Currently off on cell v0.0.249; schema-90 target is two replicas, enforce, batch 100, 1-minute interval, 2-minute timeout |
 
-Production outbound checkpoint (implemented 2026-08-14, runtime default off):
-agents can queue a one-recipient plain-text message, queue a reply to an
-owner-visible inbound message, and inspect metadata-only sent-mail state
-through HTTP, CLI, and MCP. The durable cell outbox, idempotency fence,
-per-agent and per-realm send controls, hard-bounce/complaint suppression,
-signed cell-to-edge dispatch contract, and Cloudflare Email Sending adapter are
-implemented. The
-`witself-worker` dispatch job and edge adapter both remain dark until an
-operator supplies an exact rollout cohort and enables their independent gates;
-catalog entitlement alone does not send mail.
+The lifecycle path uses `witself-agent-email-send-events`, its configured
+consumer, and `witself-agent-email-send-events-dlq`. A real delivered event was
+folded exactly once after the `v0.0.251` redirect-handling fix, producing one
+provider receipt and one canonical `email_sent` usage observation. That
+observation is operational and non-billable: no invoice, overage, or
+payment-provider conversion is enabled. The original DLQ copy remains retained
+as incident evidence. The serving Civo cell remains on application `0.0.249`
+because the `v0.0.250` and `v0.0.251` changes were isolated to the edge event
+consumer; no cell migration was required.
+
+Production scope is still intentionally narrow. There is no wildcard account
+cohort. Widening requires a new reviewed cell, account-policy, adapter, queue,
+and retention decision, plus either a cell-wide retained-byte/row high-water
+mark or external payload storage sized for the admitted cohort and a
+provider-wide/shared-sending-domain capacity and backpressure breaker.
+Per-account limits do not bound several accounts against one cell volume or one
+provider/domain reputation budget. Catalog entitlement alone never activates a
+provider route.
+This activation does not add sender authentication, spam
+classification, trusted content, wake-on-mail behavior, automatic link
+following, or automatic verification-code use.
 
 Receive and send are independent account entitlements. The settled catalog is:
 
@@ -54,9 +55,16 @@ Receive and send are independent account entitlements. The settled catalog is:
 | Enterprise | Yes | Yes |
 
 The Founder account has explicit unlimited commercial entitlement. That does
-not remove platform protection: outbound admission is always capped at 30
-messages per rolling minute for one agent, 300 per realm, and 1,000 across the
-whole account, and the adapter retains its payload and provider safety bounds.
+not remove platform protection. Outbound admission uses GCRA refill rates of 30
+per agent, 300 per realm, and 1,000 per account each minute. Long-horizon lanes
+refill at 10,000 per account and 100 per normalized recipient each day, with
+immediate burst tolerances of 1,000 and 10 respectively; their rolling-day
+upper bounds are therefore 11,000 and 110, not almost twice the stated rate.
+Inbound admission retains its independent sender-recipient, recipient, and
+realm count/byte breakers. Its non-optional account lanes refill at 5,000
+messages and 1 GiB raw MIME per minute with immediate burst tolerances of 100
+messages and 64 MiB. The adapter retains its payload, receipt, route, retry, and
+provider safety bounds.
 Plan or account-policy changes require no client or MCP reinstall; the
 installed tools receive a stable `feature_not_enabled` refusal whenever
 effective send is off.
@@ -69,16 +77,22 @@ separate facts:
 2. An audited account override may change the effective entitlement without
    changing plan or price; `witself plan status` reports the effective value.
 3. A default-off exact-account cell cohort controls mailbox provisioning and
-   cell surfaces independently of entitlement.
-4. DNS, MX, Cloudflare routing, the Worker route, canonical delivery, aliases,
-   and custom domains each have their own rollout gates.
+   cell surfaces independently of entitlement. The current Founder cohort is an
+   explicit deployment override, not a changed template default.
+4. DNS, MX, Cloudflare routing, the receive Worker, the send adapter, lifecycle
+   Queue, canonical delivery, aliases, and custom domains each have their own
+   rollout gates.
 
 Neither plan command is a delivery-readiness probe. A verified relay delivery
 for an account whose effective policy disables inbound email is accepted and
 dropped with the value-free `feature_disabled` verdict: no message is stored
 and no provider retry is requested. That account-level behavior is distinct
 from an enrolled agent or realm receive switch, which uses the temporary
-`receive_disabled` path described below.
+`receive_disabled` path described below. The current edge must still read and
+relay up to the 25 MiB transport ceiling before the cell can make that effective
+plan decision, so disabled mail is bounded but not zero-cost. Broad cohort
+activation therefore also requires a signed disposition/preflight design that
+can reject disabled accounts before raw MIME is buffered.
 
 Permanent-domain decision (2026-08-03): `witmail.net` is the managed email
 apex dedicated solely to agent email. It is not a website, human or employee
@@ -88,15 +102,13 @@ exceptions. It replaces the unacquired `witmail.ai` target; there is no
 `witmail.ai` compatibility surface. The Cloudflare Registrar inter-account
 move completed on 2026-08-14, and the zone is active in the production
 Cloudflare account. Apex Email Routing DNS and the isolated
-`send.witmail.net` Email Sending domain are provisioned. The catch-all remains
-disabled and no production receive Worker route is carrying traffic while the
-reviewed production rollout proceeds through its dark and canary stages; this
-is staged activation, not a pilot product. Keep every canonical-inventory,
-canonical-delivery, alias-activation, and alias-delivery gate dark until its
-specific activation step succeeds. New canonical addresses and all new aliases
-use `witmail.net` only. The retired `agent-mail.witwave.ai` domain is bounded
-compatibility for previously issued canonical local parts only: it must never
-mint a new alias or receive a broad catch-all.
+`send.witmail.net` Email Sending domain are provisioned. The reviewed production
+receive route carries only the exact Founder cohort; broad cohort expansion,
+alias activation, and custom-domain delivery remain separately gated. New
+canonical addresses and all new aliases use `witmail.net` only. The retired
+`agent-mail.witwave.ai` domain is bounded compatibility for previously issued
+canonical local parts only: it must never mint a new alias or receive a broad
+catch-all.
 
 Agent-email byte limits use a two-phase rollout. Phase A shipped the schema-81
 counter/enforcement and administrator surfaces with both catalog keys absent.
@@ -107,13 +119,49 @@ Team and Enterprise `25 MiB`/`100 GiB` raw-message/attachment-storage limits.
 The Founder account remains explicitly unlimited for attachment storage; that
 audited override must survive final catalog reconciliation.
 
-This ingress-protection slice adds schema 84 and six rolling count/byte rate
-keys across unverified sender/recipient, recipient, and realm scopes. Every
-current plan intentionally omits those keys, so independent platform breakers
-apply to all enabled accounts. An audited account override can only lower a
-breaker; explicit unlimited cannot remove it. The owning cell's PostgreSQL
+This ingress-protection slice adds six count/byte GCRA rate keys across
+unverified sender/recipient, recipient, and realm scopes. Every current plan
+intentionally omits those keys, so independent platform breakers apply to all
+enabled accounts. The platform additionally enforces non-optional account-wide
+5,000-message/minute and 1-GiB/minute refill rates across every realm, with
+100-message and 64-MiB burst tolerances. An
+audited account override can only lower one of the six keyed breakers; explicit
+unlimited cannot remove any platform maximum. The owning cell's PostgreSQL
 limiter is the sole authoritative admission point, after the account feature
 check, so disabled accounts continue to accept-and-drop without edge changes.
+Schema 90 extends the operational bucket constraints for the inbound account
+scope and outbound account-day/recipient-day lanes. Keep send gates off and
+converge every API and worker writer on a schema-90-compatible image before
+reopening provider traffic; schema-89-only binaries are not a rollback after
+that migration lands.
+
+The Founder account has explicit indefinite agent-email retention, so its mail
+is not eligible for age deletion. The schema-90 rollout target keeps the bounded
+`agentEmailRetention` worker running in enforcement mode on both worker
+replicas: batch 100, one-minute interval, and one shared two-minute timeout per
+run. The current v0.0.249 cell remains off until the schema-90 image and both
+required backups exist. An enforce attempt stops after 32 productive passes and
+at most 48 total passes, leaving room to skip one complete sparse 16-lane set.
+A capped nonempty lane becomes immediately eligible behind older due lanes;
+empty and lock-only lanes keep the normal interval. Preview intentionally runs
+one bounded sample per interval because it cannot consume the rows it observes.
+Durable per-account kind rotation prevents sustained inbound backlog from
+starving outbound/provider-event or suppression work over repeated visits. At
+batch 100, one replica can scan at most 3,200 rows and delete at most 1,024 MiB
+of raw MIME per enforce attempt; two replicas can scan at most 6,400 rows and
+delete at most 2,048 MiB. Maximum-sized 25 MiB rows yield 800/1,600 MiB because
+each 32 MiB database batch fits only one. These are work ceilings, not
+throughput guarantees or reserved inbound shares. They exceed one saturated
+account's rolling-minute envelope of at most 5,100 rows or 1,088 MiB, but
+database latency still requires monitoring and a wider cohort remains blocked
+on a reviewed cell-wide storage/admission budget or sharding.
+
+After enforcement is activated, a later Professional or Team account needs no
+worker-mode change when its 90-day or 365-day policy becomes effective.
+A new cell must still start in preview, review value-free counts, and explicitly
+promote the same bounded configuration before it serves a finite-retention
+cohort. Unresolved outbound work remains held until settled; terminal sent mail
+and eligible inbound mail age under the same account policy.
 
 ## Historical Context
 
@@ -124,6 +172,15 @@ changed. The durable receipt, provider-managed retry, owner processing,
 disable/re-enable rollback, and default-off exact-agent synthetic retry proof
 were exercised before retirement. That pilot is historical evidence, not a
 deployment path for the production service.
+
+The production path then converged in explicit stages. `v0.0.241` introduced
+the default-off exact-account receive cohort and bounded mailbox backfill;
+`v0.0.245` moved retry-canary selection into a distinct immutable Secret;
+application `v0.0.249` supplied the durable two-replica outbound cell worker;
+and edge releases `v0.0.250` and `v0.0.251` added privacy-safe lifecycle outcome
+logs and fixed redirect handling without widening the account cohort. These are
+release-history checkpoints, not statements that the current Founder path is
+still dark.
 
 The kickoff spec was scoped on 2026-07-20, and a capability-limited Cloudflare
 receive pilot was authorized on 2026-07-21 and later retired. The production
@@ -150,7 +207,8 @@ Scoped by the operator at kickoff (2026-07-20):
   (4) platform notifications from Witself to human operators.
 - **The original v1 slice was receive-only.** Reply and direct send are now
   implemented as a separately gated production outbound service; this
-  historical kickoff ordering does not imply that the send runtime is active.
+  historical kickoff ordering does not imply universal send activation. The
+  current exact Founder cohort is active; other cohorts remain off.
 - **Addressing is a Witself-managed domain.** Bring-your-own inbox
   (IMAP/Gmail/M365 adapters) is deliberately deferred; self-hosted cells bring
   their own domain to the same pipeline.
@@ -304,23 +362,25 @@ The standing platform invariants carry over unchanged:
   ingestion, owner-only mailbox, and bounded code-consumption spine behind a
   default-off feature flag for one internal realm. The pilot limitations below
   are part of its contract, not TODOs hidden behind production-looking fields.
-- **Slice 1 — receive-only core (v1).** Managed-domain address provisioning,
+- **Slice 1 — originally receive-only core (v1).** Managed-domain address
+  provisioning,
   inbound pipeline, durable per-agent mailbox with fenced foreground
   processing, metadata list/read/ack surfaces, verification-link and
   email-OTP consumption, spam/quarantine handling, retention, metering, and
-  archive/export coverage. Human-to-agent mail arrives and is readable; the
-  agent cannot reply yet.
-- **Production outbound service — implemented, dark.** Reply and direct
-  initiation share one
+  archive/export coverage. The original slice did not include replies; the
+  separately gated outbound service now does.
+- **Production outbound service — implemented and Founder-live.** Reply and
+  direct initiation share one
   deliberately narrow contract: exactly one recipient, plain UTF-8 text, a
   server-derived sender, managed Reply-To, durable idempotency, per-agent and
   per-realm rate breakers, independent operator kill switches, and
   hard-bounce/complaint suppression. Attachments, HTML, CC/BCC, bulk delivery,
   and caller-selected sender identity are excluded.
-- **Outbound rollout.** Enable the signed cell-worker dispatch path and the
-  Cloudflare adapter only for an exact reviewed cohort, observe durable outbox
-  and provider-event telemetry, then widen deliberately. The catalog feature
-  is necessary but never sufficient to activate provider traffic.
+- **Outbound expansion.** The signed cell-worker dispatch path and Cloudflare
+  adapter are enabled only for the exact Founder cohort. Observe the durable
+  outbox, provider-event telemetry, lifecycle Queue, and DLQ before deliberately
+  widening. The catalog feature is necessary but never sufficient to activate
+  provider traffic.
 - **Parallel track — platform notifications.** Witself-authored operator email
   (billing, alerts, digests). Outbound-only, no agent mailbox involvement, and
   no model inference; it may reuse provider-adapter implementation patterns,
@@ -330,9 +390,9 @@ The standing platform invariants carry over unchanged:
 
 Deliverability reality still drives the rollout: receiving mail requires no
 sender reputation, while sending is the largest abuse surface in the feature.
-The production outbound service is therefore implemented but operationally
-dark by default. Canary refers only to a staged production rollout, never to a
-separate or capability-limited product.
+The production outbound service is therefore operationally dark by default but
+enabled for the exact Founder cohort. Canary refers only to a staged production
+rollout, never to a separate or capability-limited product.
 
 ## Historical Capability Tiers And Authorized Pilot
 
@@ -1501,14 +1561,11 @@ blur the two:
   metadata, code use is limited to an already-active, expected, low-risk
   workflow; it labels the sender unverified and prohibits financial, identity,
   recovery, or other consequential use.
-- **Threat-model addition.** Inbound email is a new injection surface with
-  attacker-controlled content arriving continuously and for free.
-  [threat-model.md](threat-model.md) gains a section covering prompt
-  injection via mail, address harvesting, mailbox flooding, spoofed
-  verification mail (a service the agent never signed up for "confirming" an
-  account), quarantine-evasion, and the edge boundary — forged relay
-  webhooks against cell ingestion endpoints and edge-key compromise recovery
-  — before v1 promotion.
+- **Threat model.** Inbound email is an injection surface with continuously
+  arriving attacker-controlled content. The implemented controls and residual
+  risks for prompt injection, harvesting/flooding, spoofed verification mail,
+  quarantine evasion, forged relay requests, and edge-key compromise are
+  recorded in [Agent Email](threat-model.md#agent-email).
 
 ## Mailbox Semantics
 
@@ -1713,6 +1770,14 @@ plan overrides, and operator enable switches cannot bypass. Raw provider
 webhooks, diagnostics, bodies, and recipient values do not cross the event
 boundary.
 
+The production subscription `witself-agent-email-send-lifecycle` writes those
+six lifecycle event classes to `witself-agent-email-send-events`. Its consumer
+uses bounded batches and retries, then moves exhausted work to
+`witself-agent-email-send-events-dlq`. A non-empty DLQ is retained incident
+evidence, never a normal cleanup target. Reconcile the cell/provider state before
+an explicitly approved repair or purge, and never purge the main lifecycle
+Queue during rollout or rollback.
+
 ## Pilot Implementation Checkpoint
 
 This is the historical 2026-07-21 pilot checkpoint, retained as deployment and
@@ -1784,21 +1849,26 @@ triggers) rather than agent tools; that design lands with its track.
 
 ## Abuse, Privacy, And Metering
 
-Receive-only still carries real obligations:
+Inbound mail still carries real obligations:
 
-- Six rolling one-minute count/byte breakers are enforced transactionally at
+- Eight one-minute GCRA count/byte breakers are enforced transactionally at
   ingestion: 30 messages and 64 MiB per normalized unverified
   envelope-sender/enrolled-recipient pair, 300 messages and 512 MiB per
-  receiving agent, and 5,000 messages and 4 GiB per realm. The sender scope is
-  hashed operational state, not authenticated identity; recipient and realm
-  breakers remain necessary against spoofing and sender rotation. A refusal
+  receiving agent, 5,000 messages and 4 GiB per realm, and platform-only
+  account refill rates of 5,000 messages and 1 GiB across all realms. The
+  account lanes allow only a 100-message and 64-MiB immediate burst, bounding
+  any rolling minute to 5,100 messages and 1,088 MiB. The sender
+  scope is hashed operational state, not authenticated identity; recipient,
+  realm, and account breakers remain necessary against spoofing, sender
+  rotation, and realm multiplication. A refusal
   rolls back every earlier debit, stores no message, creates no billable usage
   event, and takes the temporary provider-retry path rather than being silently
   dropped after storage.
-- The six account limit keys are intentionally missing from all current plan
+- The six resolved inbound limit keys are intentionally missing from all current plan
   defaults. Missing or explicit-unlimited means no commercial cap while the
   independent platform breaker remains. An administrator may set an audited
-  account maximum at or below that breaker, but cannot raise or disable it.
+  account maximum at or below that breaker, but cannot raise or disable it. The
+  two account-aggregate breakers are platform-only and have no override key.
 - **Hostile inbound volume does not bill the victim (settled 2026-07-21).**
   Nobody controls who sends an agent mail, so metering must not hand an
   attacker a lever. Provider-flagged spam, quarantined mail, and traffic
@@ -1825,11 +1895,12 @@ Receive-only still carries real obligations:
   `email_received`, `email_sent`, `email_address`, and a dedicated
   `email_storage_byte` for inline raw MIME — mail bytes must not fall under
   the general open-plane `storage_byte`, or 25 MiB messages silently consume
-  the general storage cap. Each dimension needs its cap-vs-rate
-  classification and overage default recorded in the billing doc's canonical
-  table before the slice-1 metering deliverable can be built against the
-  `/v1/capabilities`, `/v1/billing/usage`, and Prometheus `limit_dimension`
-  machinery. Platform notifications are cost of service and not user-metered.
+  the general storage cap. The billing document records each dimension's
+  cap-vs-rate classification and overage default. Inbound attempts create no
+  billable `email_received` event. Provider acceptance emits one idempotent,
+  non-billable `email_sent` observation, while invoice and overage conversion
+  remain disabled. Platform notifications are cost of service and not
+  user-metered.
   The plan caps are separate from those usage observations:
   `agent_email_max_raw_bytes` limits each inbound raw message, while
   `agent_email_attachment_storage_bytes` pools retained attachment-bearing
@@ -1841,14 +1912,18 @@ Receive-only still carries real obligations:
   deprovisioning addresses; the account plan/override gate is a third,
   independent layer. A suspended account may inspect or disable a send layer
   but may not enable one.
-- Outbound admission always enforces shared PostgreSQL rolling-minute breakers
-  of at most 30 messages per agent, 300 per realm, and 1,000 per account.
-  Provider attempts use an independent platform-only lane at those same
-  ceilings so retries and multiple workers cannot burst the provider. A finite audited account
-  override may lower either breaker. Missing or explicit unlimited removes
-  only a commercial cap, never the platform maximum. These are backend gates,
-  not client advice, because agent-originated spam threatens shared sender
-  reputation.
+- Outbound admission always enforces shared PostgreSQL GCRA refill rates of 30
+  messages per agent, 300 per realm, and 1,000 per account each minute. Its
+  long-horizon lanes refill at 10,000 per account and 100 per normalized
+  recipient each day, with burst tolerances of 1,000 and 10; this bounds a
+  rolling day to 11,000 and 110 respectively. Provider attempts use an
+  independent platform-only lane with the same rates and burst tolerances, so
+  retries and multiple workers cannot bypass them. The
+  recipient bucket retains only a SHA-256 identifier. A finite audited account
+  override may lower the agent or realm minute breaker. Missing or explicit
+  unlimited removes only a commercial cap, never any platform maximum. These
+  are backend gates, not client advice, because agent-originated spam threatens
+  shared sender reputation.
 - Content never appears in logs, metrics, or diagnostics; audit events for
   provision/ingest/read/ack/purge are content-free, matching messaging. Note
   the honest boundary: message bodies — including any OTP or reset link they
@@ -2043,7 +2118,8 @@ durability, and the email billing dimensions (all in the sections above).
 ## Relationship To Existing Docs
 
 - [post-v0-roadmap.md](post-v0-roadmap.md): the SMS-and-email-code-2FA entry
-  should point here once this draft is accepted; SMS stays deferred.
+  distinguishes this production open-plane mailbox/code helper from stronger
+  sealed-plane email 2FA; SMS stays deferred.
 - [inter-agent-messaging.md](inter-agent-messaging.md) /
   [autonomous-realm-messaging.md](autonomous-realm-messaging.md): pattern
   source for mailbox, fences, checkpoints, and foreground policy; contracts
@@ -2053,8 +2129,8 @@ durability, and the email billing dimensions (all in the sections above).
   account-provisioning flow email verification serves, and the sealed-plane
   carve-outs bounding code handling.
 - [billing-and-limits.md](billing-and-limits.md): plan gating and metering.
-- [threat-model.md](threat-model.md): gains the inbound-email injection
-  surface before v1 promotion.
+- [threat-model.md](threat-model.md#agent-email): records the production
+  injection, flooding, forged-relay, key-compromise, and residual edge risks.
 - [deployment-cells.md](deployment-cells.md) /
   [self-hosting.md](self-hosting.md): cell-local webhook termination and the
   self-host domain story.

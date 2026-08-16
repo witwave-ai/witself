@@ -19,6 +19,18 @@ const (
 	minAgentEmailRetentionBatchTimeout        = 10 * time.Second
 	maxAgentEmailRetentionBatchTimeout        = 5 * time.Minute
 	defaultAgentEmailRetentionWorkerLaneCount = 16
+	agentEmailRetentionProductivePasses       = 32
+	// Allow enough total passes for one complete sparse-lane sweep plus a bounded
+	// productive drain. The loop counts productive passes separately, so an empty
+	// or lock-only lane does not consume cleanup capacity and a full lane cannot
+	// turn the worker into an endless drain loop. With batchSize=100, one replica
+	// can scan at most 3,200 rows and delete at most 1,024 MiB of raw MIME per
+	// scheduled attempt; two steady replicas can scan at most 6,400 rows and
+	// delete at most 2,048 MiB. Maximum-sized 25 MiB rows yield 800/1,600 MiB
+	// respectively because each 32 MiB database batch fits only one such row.
+	// Those are work ceilings, not throughput guarantees.
+	maxAgentEmailRetentionWorkerPasses = defaultAgentEmailRetentionWorkerLaneCount +
+		agentEmailRetentionProductivePasses
 
 	// Retained raw_mime is bounded to 25 MiB per row. Capacity-omitted rows
 	// contribute zero here. The additional batch ceiling keeps WAL, cascades,
@@ -189,6 +201,41 @@ type agentEmailRetentionScanState struct {
 	LastReceived  *time.Time
 	LastMessageID *string
 	Generation    int64
+}
+
+type agentEmailRetentionKind uint8
+
+const (
+	agentEmailRetentionKindInbound agentEmailRetentionKind = iota
+	agentEmailRetentionKindOutbound
+	agentEmailRetentionKindSuppression
+	agentEmailRetentionKindCount
+)
+
+// The cycle deliberately matches the productive pass allowance above. It
+// preserves ingress drain headroom while preventing an always-full inbound
+// page from monopolizing the shared account budget. Spread the minority slots
+// so neither outbound content nor suppressions waits for the whole cycle.
+func agentEmailRetentionFirstKind(generation int64) agentEmailRetentionKind {
+	position := generation % agentEmailRetentionProductivePasses
+	switch position {
+	case 1, 4, 17:
+		return agentEmailRetentionKindOutbound
+	case 2, 14, 26:
+		return agentEmailRetentionKindSuppression
+	default:
+		return agentEmailRetentionKindInbound
+	}
+}
+
+func agentEmailRetentionKindOrder(generation int64) [agentEmailRetentionKindCount]agentEmailRetentionKind {
+	var order [agentEmailRetentionKindCount]agentEmailRetentionKind
+	first := agentEmailRetentionFirstKind(generation)
+	for offset := range int(agentEmailRetentionKindCount) {
+		order[offset] = (first + agentEmailRetentionKind(offset)) %
+			agentEmailRetentionKindCount
+	}
+	return order
 }
 
 func nextAgentEmailRetentionGeneration(current int64) int64 {
@@ -415,33 +462,57 @@ func (s *Store) processClaimedAgentEmailRetentionBatch(
 			continue
 		}
 
-		if retentionDays != nil {
+		if retentionDays == nil {
 			remaining := batchSize - int(agentEmailRetentionWork(result))
-			accountResult, rawUsed, backlinksUsed, budgetHit, accountErr :=
-				processAgentEmailRetentionAccount(
-					ctx,
-					tx,
-					mode,
-					accountID,
-					*retentionDays,
-					remaining,
-					rawBudgetRemaining,
-					backlinkBudgetRemaining,
-					enforce,
+			suppressionResult, suppressionErr :=
+				processAgentEmailSuppressionRetentionAccount(
+					ctx, tx, accountID, nil, remaining, enforce,
 				)
-			if accountErr != nil {
-				return AgentEmailRetentionBatchResult{}, accountErr
+			if suppressionErr != nil {
+				return AgentEmailRetentionBatchResult{}, suppressionErr
 			}
-			addAgentEmailRetentionResult(&result, accountResult)
-			rawBudgetRemaining -= rawUsed
-			backlinkBudgetRemaining -= backlinksUsed
-			if budgetHit {
-				stopForBudget = true
+			addAgentEmailRetentionResult(&result, suppressionResult)
+			continue
+		}
+
+		// Rotate which finite-retention kind receives the first chance at this
+		// account's shared row budget. The cursor is account-local, not lane-local,
+		// so any number of accounts (including a multiple of the kind count) cannot
+		// resonate with the lane generation and starve one kind indefinitely.
+		kindGeneration, kindStateExists, generationErr :=
+			loadAgentEmailRetentionAccountGeneration(ctx, tx, mode, accountID)
+		if generationErr != nil {
+			return AgentEmailRetentionBatchResult{}, generationErr
+		}
+		inboundProcessed := false
+		for _, kind := range agentEmailRetentionKindOrder(kindGeneration) {
+			remaining := batchSize - int(agentEmailRetentionWork(result))
+			if remaining < 1 {
 				break
 			}
-
-			remaining = batchSize - int(agentEmailRetentionWork(result))
-			if remaining > 0 {
+			switch kind {
+			case agentEmailRetentionKindInbound:
+				accountResult, rawUsed, backlinksUsed, budgetHit, accountErr :=
+					processAgentEmailRetentionAccount(
+						ctx,
+						tx,
+						mode,
+						accountID,
+						*retentionDays,
+						remaining,
+						rawBudgetRemaining,
+						backlinkBudgetRemaining,
+						enforce,
+					)
+				if accountErr != nil {
+					return AgentEmailRetentionBatchResult{}, accountErr
+				}
+				inboundProcessed = true
+				addAgentEmailRetentionResult(&result, accountResult)
+				rawBudgetRemaining -= rawUsed
+				backlinkBudgetRemaining -= backlinksUsed
+				stopForBudget = stopForBudget || budgetHit
+			case agentEmailRetentionKindOutbound:
 				outboundResult, outboundErr := processAgentEmailOutboundRetentionAccount(
 					ctx, tx, accountID, *retentionDays, remaining, enforce,
 				)
@@ -449,23 +520,44 @@ func (s *Store) processClaimedAgentEmailRetentionBatch(
 					return AgentEmailRetentionBatchResult{}, outboundErr
 				}
 				addAgentEmailRetentionResult(&result, outboundResult)
+			case agentEmailRetentionKindSuppression:
+				suppressionResult, suppressionErr :=
+					processAgentEmailSuppressionRetentionAccount(
+						ctx, tx, accountID, retentionDays, remaining, enforce,
+					)
+				if suppressionErr != nil {
+					return AgentEmailRetentionBatchResult{}, suppressionErr
+				}
+				addAgentEmailRetentionResult(&result, suppressionResult)
 			}
 		}
-
-		remaining := batchSize - int(agentEmailRetentionWork(result))
-		if remaining > 0 {
-			suppressionResult, suppressionErr :=
-				processAgentEmailSuppressionRetentionAccount(
-					ctx, tx, accountID, retentionDays, remaining, enforce,
-				)
-			if suppressionErr != nil {
-				return AgentEmailRetentionBatchResult{}, suppressionErr
+		if !inboundProcessed {
+			if err := advanceAgentEmailRetentionAccountGeneration(
+				ctx,
+				tx,
+				mode,
+				accountID,
+				*retentionDays,
+				kindGeneration,
+				kindStateExists,
+			); err != nil {
+				return AgentEmailRetentionBatchResult{}, err
 			}
-			addAgentEmailRetentionResult(&result, suppressionResult)
+		}
+		if stopForBudget {
+			break
 		}
 	}
 
 	result.ScanCapped = agentEmailRetentionWork(result) >= int64(batchSize) || stopForBudget
+	nextRunDelay := workerInterval
+	if result.ScanCapped && agentEmailRetentionWork(result) > 0 {
+		// A capped lane still has bounded evidence of work. Make it immediately
+		// claimable, but leave ORDER BY next_run_at,lane_id to put every older due
+		// lane first. Empty and lock-only lanes keep the normal interval so the
+		// worker cannot busy-loop on them.
+		nextRunDelay = 0
+	}
 	command, err := tx.Exec(ctx, `
 		UPDATE agent_email_retention_worker_lanes
 		   SET account_cursor=$4,
@@ -478,7 +570,7 @@ func (s *Store) processClaimedAgentEmailRetentionBatch(
 		claim.LaneID,
 		claim.Generation,
 		lastAccountCursor,
-		workerInterval.Microseconds(),
+		nextRunDelay.Microseconds(),
 	)
 	if err != nil {
 		return AgentEmailRetentionBatchResult{},
@@ -571,6 +663,77 @@ func selectAgentEmailRetentionAccount(
 		return accountID, retentionDays, true, false, nil
 	}
 	return "", nil, false, false, nil
+}
+
+func loadAgentEmailRetentionAccountGeneration(
+	ctx context.Context,
+	tx pgx.Tx,
+	mode AgentEmailRetentionMode,
+	accountID string,
+) (int64, bool, error) {
+	var generation int64
+	err := tx.QueryRow(ctx, `
+		SELECT generation
+		  FROM agent_email_retention_account_scan_state
+		 WHERE mode=$1 AND account_id=$2
+		 FOR UPDATE`, string(mode), accountID).Scan(&generation)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf(
+			"lock agent-email retention account generation: %w", err,
+		)
+	}
+	return generation, true, nil
+}
+
+// advanceAgentEmailRetentionAccountGeneration records one finite-policy
+// account visit when another kind exhausted the shared row budget before the
+// inbound scan ran. processAgentEmailRetentionAccount performs the same one
+// step advance when it does run, so every committed visit rotates exactly once.
+func advanceAgentEmailRetentionAccountGeneration(
+	ctx context.Context,
+	tx pgx.Tx,
+	mode AgentEmailRetentionMode,
+	accountID string,
+	retentionDays int,
+	generation int64,
+	stateExists bool,
+) error {
+	nextGeneration := nextAgentEmailRetentionGeneration(generation)
+	if stateExists {
+		command, err := tx.Exec(ctx, `
+			UPDATE agent_email_retention_account_scan_state
+			   SET generation=$4,updated_at=statement_timestamp()
+			 WHERE mode=$1 AND account_id=$2 AND generation=$3`,
+			string(mode), accountID, generation, nextGeneration,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"advance agent-email retention account generation: %w", err,
+			)
+		}
+		if command.RowsAffected() != 1 {
+			return errors.New(
+				"advance agent-email retention account generation lost its fence",
+			)
+		}
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO agent_email_retention_account_scan_state
+		  (mode,account_id,retention_days,cycle_cutoff,last_received_at,
+		   last_message_id,generation,updated_at)
+		VALUES (
+		  $1,$2,$3,statement_timestamp()-make_interval(days => $3),
+		  NULL,NULL,$4,statement_timestamp()
+		)`, string(mode), accountID, retentionDays, nextGeneration); err != nil {
+		return fmt.Errorf(
+			"initialize agent-email retention account generation: %w", err,
+		)
+	}
+	return nil
 }
 
 func processAgentEmailRetentionAccount(
@@ -972,6 +1135,33 @@ func processAgentEmailOutboundRetentionAccount(
 	if limit < 1 {
 		return result, nil
 	}
+	if !enforce {
+		// Preview the exact destructive graph plan inside a savepoint, then undo
+		// it. A read-only approximation cannot see that removing the selected
+		// provider events makes their parent sends eligible later in this same
+		// shared batch. The savepoint keeps preview non-destructive while making
+		// its bounded sample match enforce semantics exactly.
+		const previewSavepoint = "agent_email_outbound_retention_preview"
+		if _, err := tx.Exec(ctx, "SAVEPOINT "+previewSavepoint); err != nil {
+			return result, fmt.Errorf("begin outbound agent-email retention preview: %w", err)
+		}
+		preview, previewErr := processAgentEmailOutboundRetentionAccount(
+			ctx, tx, accountID, retentionDays, limit, true,
+		)
+		if _, err := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+previewSavepoint); err != nil {
+			return result, fmt.Errorf("rollback outbound agent-email retention preview: %w", err)
+		}
+		if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT "+previewSavepoint); err != nil {
+			return result, fmt.Errorf("release outbound agent-email retention preview: %w", err)
+		}
+		if previewErr != nil {
+			return result, previewErr
+		}
+		preview.DeletedOutbound = 0
+		preview.DeletedOutboundBytes = 0
+		preview.DeletedProviderEvents = 0
+		return preview, nil
+	}
 	var cutoff time.Time
 	if err := tx.QueryRow(ctx, `
 		SELECT statement_timestamp() - make_interval(days => $1)`,
@@ -980,8 +1170,7 @@ func processAgentEmailOutboundRetentionAccount(
 		return result, fmt.Errorf("read outbound agent-email retention cutoff: %w", err)
 	}
 
-	if enforce {
-		rows, err := tx.Query(ctx, `
+	rows, err := tx.Query(ctx, `
 			WITH candidates AS MATERIALIZED (
 			  SELECT event.ctid
 			    FROM agent_email_outbound_provider_events event
@@ -999,60 +1188,29 @@ func processAgentEmailOutboundRetentionAccount(
 			 USING candidates
 			 WHERE event.ctid=candidates.ctid
 			RETURNING 1`, accountID, cutoff, limit)
-		if err != nil {
-			return result, fmt.Errorf("delete retained outbound provider events: %w", err)
-		}
-		for rows.Next() {
-			var ignored int
-			if err := rows.Scan(&ignored); err != nil {
-				rows.Close()
-				return result, fmt.Errorf("scan deleted outbound provider event: %w", err)
-			}
-			result.ScannedProviderEvents++
-			result.DeletedProviderEvents++
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return result, fmt.Errorf("iterate deleted outbound provider events: %w", err)
-		}
-		rows.Close()
-	} else {
-		rows, err := tx.Query(ctx, `
-			SELECT event.event_id_hash
-			  FROM agent_email_outbound_provider_events event
-			  JOIN agent_email_outbound_messages outbound
-			    ON outbound.id=event.outbound_id
-			 WHERE outbound.account_id=$1
-			   AND outbound.created_at<$2
-			   AND outbound.state NOT IN ('queued','claimed','provider_started')
-			 ORDER BY outbound.created_at,outbound.id,event.occurred_at,
-			          event.provider,event.event_id_hash
-			 FOR UPDATE OF event SKIP LOCKED
-			 LIMIT $3`, accountID, cutoff, limit)
-		if err != nil {
-			return result, fmt.Errorf("preview retained outbound provider events: %w", err)
-		}
-		for rows.Next() {
-			var ignored string
-			if err := rows.Scan(&ignored); err != nil {
-				rows.Close()
-				return result, fmt.Errorf("scan retained outbound provider event: %w", err)
-			}
-			result.ScannedProviderEvents++
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return result, fmt.Errorf("iterate retained outbound provider events: %w", err)
-		}
-		rows.Close()
+	if err != nil {
+		return result, fmt.Errorf("delete retained outbound provider events: %w", err)
 	}
+	for rows.Next() {
+		var ignored int
+		if err := rows.Scan(&ignored); err != nil {
+			rows.Close()
+			return result, fmt.Errorf("scan deleted outbound provider event: %w", err)
+		}
+		result.ScannedProviderEvents++
+		result.DeletedProviderEvents++
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return result, fmt.Errorf("iterate deleted outbound provider events: %w", err)
+	}
+	rows.Close()
 
 	remaining := limit - int(result.ScannedProviderEvents)
 	if remaining < 1 {
 		return result, nil
 	}
-	if enforce {
-		rows, err := tx.Query(ctx, `
+	rows, err = tx.Query(ctx, `
 			WITH candidates AS MATERIALIZED (
 			  SELECT outbound.ctid
 			    FROM agent_email_outbound_messages outbound
@@ -1073,57 +1231,24 @@ func processAgentEmailOutboundRetentionAccount(
 			RETURNING octet_length(outbound.body_text)::bigint +
 			          octet_length(outbound.subject)::bigint +
 			          octet_length(outbound.to_address)::bigint`,
-			accountID, cutoff, remaining)
-		if err != nil {
-			return result, fmt.Errorf("delete retained outbound agent email: %w", err)
-		}
-		for rows.Next() {
-			var deletedBytes int64
-			if err := rows.Scan(&deletedBytes); err != nil {
-				rows.Close()
-				return result, fmt.Errorf("scan deleted outbound agent-email bytes: %w", err)
-			}
-			result.ScannedOutbound++
-			result.EligibleOutbound++
-			result.DeletedOutbound++
-			result.DeletedOutboundBytes += deletedBytes
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return result, fmt.Errorf("iterate deleted outbound agent email: %w", err)
-		}
-		rows.Close()
-		return result, nil
-	}
-
-	rows, err := tx.Query(ctx, `
-		SELECT outbound.id
-		  FROM agent_email_outbound_messages outbound
-		 WHERE outbound.account_id=$1
-		   AND outbound.created_at<$2
-		   AND outbound.state NOT IN ('queued','claimed','provider_started')
-		   AND NOT EXISTS (
-		     SELECT 1 FROM agent_email_outbound_provider_events event
-		      WHERE event.outbound_id=outbound.id
-		   )
-		 ORDER BY outbound.created_at,outbound.id
-		 FOR UPDATE OF outbound SKIP LOCKED
-		 LIMIT $3`, accountID, cutoff, remaining)
+		accountID, cutoff, remaining)
 	if err != nil {
-		return result, fmt.Errorf("preview retained outbound agent email: %w", err)
+		return result, fmt.Errorf("delete retained outbound agent email: %w", err)
 	}
 	for rows.Next() {
-		var ignored string
-		if err := rows.Scan(&ignored); err != nil {
+		var deletedBytes int64
+		if err := rows.Scan(&deletedBytes); err != nil {
 			rows.Close()
-			return result, fmt.Errorf("scan retained outbound agent email: %w", err)
+			return result, fmt.Errorf("scan deleted outbound agent-email bytes: %w", err)
 		}
 		result.ScannedOutbound++
 		result.EligibleOutbound++
+		result.DeletedOutbound++
+		result.DeletedOutboundBytes += deletedBytes
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return result, fmt.Errorf("iterate retained outbound agent email: %w", err)
+		return result, fmt.Errorf("iterate deleted outbound agent email: %w", err)
 	}
 	rows.Close()
 	return result, nil
@@ -1255,28 +1380,20 @@ func addAgentEmailRetentionResult(
 	target.DeletedSuppressions += value.DeletedSuppressions
 }
 
-// RunAgentEmailRetentionWorker attempts one bounded non-empty lane immediately
-// and on each interval. Separate replicas can claim separate due lanes.
+// RunAgentEmailRetentionWorker drains a bounded set of due lanes immediately
+// and on each interval. Separate replicas cooperate through the existing lane
+// claims, and capped lanes remain due so backlog can use the remaining passes.
 func (s *Store) RunAgentEmailRetentionWorker(
 	ctx context.Context,
 	cfg AgentEmailRetentionWorkerConfig,
-	onResult func(AgentEmailRetentionBatchResult),
-	onError func(error),
+	onAttempt func(AgentEmailRetentionBatchResult, error),
 ) error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
 	run := func() {
 		result, err := s.processAgentEmailRetentionWorkerBatch(ctx, cfg)
-		if err != nil {
-			if !errors.Is(err, context.Canceled) && onError != nil {
-				onError(err)
-			}
-			return
-		}
-		if onResult != nil {
-			onResult(result)
-		}
+		reportAgentEmailRetentionWorkerAttempt(result, err, onAttempt)
 	}
 	run()
 	ticker := time.NewTicker(cfg.Interval)
@@ -1300,21 +1417,75 @@ func (s *Store) processAgentEmailRetentionWorkerBatch(
 	}
 	attemptCtx, cancelAttempt := context.WithTimeout(ctx, cfg.BatchTimeout)
 	defer cancelAttempt()
-	var aggregate AgentEmailRetentionBatchResult
-	for attempt := 0; attempt < cfg.LaneCount; attempt++ {
-		result, err := s.processAgentEmailRetentionBatch(
+	if cfg.Mode == AgentEmailRetentionModePreview {
+		// Preview is a bounded sample, not a backlog enumerator. Unlike enforce,
+		// it cannot make rows disappear between passes, so draining repeatedly
+		// would recount the same oldest outbound and suppression rows.
+		return s.processAgentEmailRetentionBatch(
 			attemptCtx,
+			cfg.BatchSize,
+			false,
+			cfg.Interval,
+			cfg.BatchTimeout,
+			cfg.LaneCount,
+		)
+	}
+	return drainAgentEmailRetentionWorkerBatches(attemptCtx, func(passCtx context.Context) (
+		AgentEmailRetentionBatchResult,
+		error,
+	) {
+		return s.processAgentEmailRetentionBatch(
+			passCtx,
 			cfg.BatchSize,
 			cfg.Mode == AgentEmailRetentionModeEnforce,
 			cfg.Interval,
 			cfg.BatchTimeout,
 			cfg.LaneCount,
 		)
+	})
+}
+
+type agentEmailRetentionWorkerPass func(
+	context.Context,
+) (AgentEmailRetentionBatchResult, error)
+
+func reportAgentEmailRetentionWorkerAttempt(
+	result AgentEmailRetentionBatchResult,
+	err error,
+	onAttempt func(AgentEmailRetentionBatchResult, error),
+) {
+	if errors.Is(err, context.Canceled) || onAttempt == nil {
+		return
+	}
+	// Report one attempt exactly once. The callback can classify an errored
+	// multi-pass attempt while retaining counts from earlier committed passes;
+	// it must never refresh success and then emit a second error for the same run.
+	onAttempt(result, err)
+}
+
+func drainAgentEmailRetentionWorkerBatches(
+	ctx context.Context,
+	process agentEmailRetentionWorkerPass,
+) (AgentEmailRetentionBatchResult, error) {
+	var aggregate AgentEmailRetentionBatchResult
+	productivePasses := 0
+	for range maxAgentEmailRetentionWorkerPasses {
+		if err := ctx.Err(); err != nil {
+			return aggregate, err
+		}
+		result, err := process(ctx)
+		if err != nil {
+			return aggregate, err
+		}
 		addAgentEmailRetentionResult(&aggregate, result)
 		aggregate.ScanCapped = aggregate.ScanCapped || result.ScanCapped
 		aggregate.LaneAdvanced = aggregate.LaneAdvanced || result.LaneAdvanced
-		if err != nil || result.Scanned > 0 || !result.LaneAdvanced {
-			return aggregate, err
+		if agentEmailRetentionWork(result) > 0 {
+			productivePasses++
+		}
+		if !result.LaneAdvanced ||
+			productivePasses >= agentEmailRetentionProductivePasses {
+			return aggregate, nil
 		}
 	}
 	return aggregate, nil

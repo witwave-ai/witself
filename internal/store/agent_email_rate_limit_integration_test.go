@@ -164,11 +164,48 @@ func TestAgentEmailRateLimitsPostgres(t *testing.T) {
 		}
 	})
 
+	t.Run("account breaker cannot be bypassed by rotating realms", func(t *testing.T) {
+		fixture := newAgentEmailRateFixture(ctx, t, st, "account", 2, 1)
+		setAgentEmailRatePlan(ctx, t, st, fixture.accountID, 1, map[string]int64{})
+		if _, err := st.pool.Exec(ctx, `
+			INSERT INTO agent_email_account_rate_buckets
+			  (account_id,dimension,theoretical_arrival_nanoseconds)
+			VALUES ($1,$2,
+			        floor(extract(epoch FROM clock_timestamp() + interval '2 minutes') * 1000000000)::bigint)`,
+			fixture.accountID,
+			AgentEmailRateDimensionReceived,
+		); err != nil {
+			t.Fatal(err)
+		}
+
+		for _, realm := range fixture.realms {
+			_, err := ingestAgentEmailRate(
+				ctx, st, realm, 0, "rotating@example.com",
+				agentEmailRateRaw(realm.addresses[0].Address, "account-rotation"),
+			)
+			assertAgentEmailRateError(
+				t, err,
+				AgentEmailRateDimensionReceived,
+				AgentEmailRateScopeAccount,
+				plans.MaxAgentEmailReceivedPerAccountMinute,
+				1,
+				AgentEmailRateSourcePlatform,
+				true,
+			)
+		}
+		if got := countAgentEmailMessages(ctx, t, st, fixture.accountID); got != 0 {
+			t.Fatalf("account breaker stored %d emails", got)
+		}
+		if got := countAgentEmailRateBuckets(ctx, t, st, fixture.accountID); got != 1 {
+			t.Fatalf("account refusal created per-realm debt: %d buckets", got)
+		}
+	})
+
 	t.Run("zero late cap rolls back earlier debits", func(t *testing.T) {
 		fixture := newAgentEmailRateFixture(ctx, t, st, "rollback", 1, 1)
 		limits := agentEmailMaximumRateLimits()
-		// Sender bytes is the sixth and final debit. Its refusal must roll the
-		// preceding realm, recipient, and sender-count debits back atomically.
+		// Sender bytes is the eighth and final debit. Its refusal must roll the
+		// preceding account, realm, recipient, and sender-count debits back atomically.
 		limits[plans.AgentEmailReceivedBytesPerSenderMinuteLimit] = 0
 		setAgentEmailRatePlan(ctx, t, st, fixture.accountID, 1, limits)
 
@@ -206,8 +243,8 @@ func TestAgentEmailRateLimitsPostgres(t *testing.T) {
 		); err != nil {
 			t.Fatalf("ingest after removing zero cap failed: %v", err)
 		}
-		if got := countAgentEmailRateBuckets(ctx, t, st, fixture.accountID); got != 6 {
-			t.Fatalf("accepted ingest rate buckets = %d, want 6", got)
+		if got := countAgentEmailRateBuckets(ctx, t, st, fixture.accountID); got != 8 {
+			t.Fatalf("accepted ingest rate buckets = %d, want 8", got)
 		}
 	})
 
@@ -337,11 +374,19 @@ func TestAgentEmailRateLimitsPostgres(t *testing.T) {
 		); err != nil {
 			t.Fatal(err)
 		}
-		if got := countAgentEmailRateBuckets(ctx, t, st, fixture.accountID); got != 6 {
-			t.Fatalf("accepted ingest rate buckets = %d, want 6", got)
+		if got := countAgentEmailRateBuckets(ctx, t, st, fixture.accountID); got != 8 {
+			t.Fatalf("accepted ingest rate buckets = %d, want 8", got)
 		}
 		if _, err := st.pool.Exec(ctx, `
 			UPDATE agent_email_rate_buckets
+			   SET updated_at=clock_timestamp() - interval '2 minutes',
+			       theoretical_arrival_nanoseconds=
+			         floor(extract(epoch FROM clock_timestamp() - interval '1 minute') * 1000000000)::bigint
+			 WHERE account_id=$1`, fixture.accountID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.pool.Exec(ctx, `
+			UPDATE agent_email_account_rate_buckets
 			   SET updated_at=clock_timestamp() - interval '2 minutes',
 			       theoretical_arrival_nanoseconds=
 			         floor(extract(epoch FROM clock_timestamp() - interval '1 minute') * 1000000000)::bigint
@@ -368,7 +413,7 @@ func TestAgentEmailRateLimitsPostgres(t *testing.T) {
 			t.Fatal("cleanup accepted a zero batch limit")
 		}
 
-		for index, want := range []int64{2, 2, 1, 0} {
+		for index, want := range []int64{2, 2, 2, 1, 0} {
 			deleted, err := st.DeleteStaleAgentEmailRateBuckets(
 				ctx, time.Now().UTC(), 2,
 			)
@@ -383,6 +428,14 @@ func TestAgentEmailRateLimitsPostgres(t *testing.T) {
 
 		if _, err := st.pool.Exec(ctx, `
 			UPDATE agent_email_rate_buckets
+			   SET updated_at=clock_timestamp() - interval '2 minutes',
+			       theoretical_arrival_nanoseconds=
+			         floor(extract(epoch FROM clock_timestamp() - interval '1 minute') * 1000000000)::bigint
+			 WHERE account_id=$1`, fixture.accountID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.pool.Exec(ctx, `
+			UPDATE agent_email_account_rate_buckets
 			   SET updated_at=clock_timestamp() - interval '2 minutes',
 			       theoretical_arrival_nanoseconds=
 			         floor(extract(epoch FROM clock_timestamp() - interval '1 minute') * 1000000000)::bigint
@@ -418,6 +471,14 @@ func TestAgentEmailRateLimitsPostgres(t *testing.T) {
 		}
 		if _, err := st.pool.Exec(ctx, `
 			UPDATE agent_email_rate_buckets
+			   SET updated_at=clock_timestamp() - interval '2 minutes',
+			       theoretical_arrival_nanoseconds=
+			         floor(extract(epoch FROM clock_timestamp() - interval '1 minute') * 1000000000)::bigint
+			 WHERE account_id=$1`, fixture.accountID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.pool.Exec(ctx, `
+			UPDATE agent_email_account_rate_buckets
 			   SET updated_at=clock_timestamp() - interval '2 minutes',
 			       theoretical_arrival_nanoseconds=
 			         floor(extract(epoch FROM clock_timestamp() - interval '1 minute') * 1000000000)::bigint
@@ -461,8 +522,8 @@ func TestAgentEmailRateLimitsPostgres(t *testing.T) {
 			}
 			total += result.deleted
 		}
-		if total != 6 {
-			t.Fatalf("concurrent cleanup deleted %d rows, want 6", total)
+		if total != 8 {
+			t.Fatalf("concurrent cleanup deleted %d rows, want 8", total)
 		}
 		if got := countAgentEmailRateBuckets(ctx, t, st, fixture.accountID); got != 0 {
 			t.Fatalf("concurrent cleanup left %d stale buckets", got)
@@ -710,7 +771,9 @@ func countAgentEmailRateBuckets(
 	t.Helper()
 	var count int64
 	if err := st.pool.QueryRow(ctx, `
-		SELECT count(*) FROM agent_email_rate_buckets WHERE account_id=$1`,
+		SELECT
+		  (SELECT count(*) FROM agent_email_rate_buckets WHERE account_id=$1) +
+		  (SELECT count(*) FROM agent_email_account_rate_buckets WHERE account_id=$1)`,
 		accountID,
 	).Scan(&count); err != nil {
 		t.Fatal(err)

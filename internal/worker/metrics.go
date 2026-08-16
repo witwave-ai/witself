@@ -65,7 +65,7 @@ type MessageRetentionCounts struct {
 	ScanCapped       bool
 }
 
-// AgentEmailRetentionCounts contains value-free inbound-email cleanup counts.
+// AgentEmailRetentionCounts contains value-free agent-email cleanup counts.
 type AgentEmailRetentionCounts struct {
 	Scanned               int64
 	SkippedLocked         int64
@@ -78,6 +78,15 @@ type AgentEmailRetentionCounts struct {
 	DeferredBudget        int64
 	ClearedDuplicateLinks int64
 	DeletedCanaryProofs   int64
+	ScannedOutbound       int64
+	EligibleOutbound      int64
+	DeletedOutbound       int64
+	DeletedOutboundBytes  int64
+	ScannedProviderEvents int64
+	DeletedProviderEvents int64
+	ScannedSuppressions   int64
+	EligibleSuppressions  int64
+	DeletedSuppressions   int64
 	ScanCapped            bool
 }
 
@@ -296,7 +305,7 @@ func (m *Metrics) ObserveMessageRetentionBatch(
 	}
 }
 
-// ObserveAgentEmailRetentionBatch records one value-free inbound-email
+// ObserveAgentEmailRetentionBatch records one value-free agent-email
 // retention attempt. Mode, result, and item kinds are closed process enums.
 func (m *Metrics) ObserveAgentEmailRetentionBatch(
 	mode string,
@@ -330,6 +339,15 @@ func (m *Metrics) ObserveAgentEmailRetentionBatch(
 		"deferred_budget":         counts.DeferredBudget,
 		"cleared_duplicate_links": counts.ClearedDuplicateLinks,
 		"deleted_canary_proofs":   counts.DeletedCanaryProofs,
+		"scanned_outbound":        counts.ScannedOutbound,
+		"eligible_outbound":       counts.EligibleOutbound,
+		"deleted_outbound":        counts.DeletedOutbound,
+		"deleted_outbound_bytes":  counts.DeletedOutboundBytes,
+		"scanned_provider_events": counts.ScannedProviderEvents,
+		"deleted_provider_events": counts.DeletedProviderEvents,
+		"scanned_suppressions":    counts.ScannedSuppressions,
+		"eligible_suppressions":   counts.EligibleSuppressions,
+		"deleted_suppressions":    counts.DeletedSuppressions,
 	} {
 		if value > 0 {
 			m.emailRetentionItems[retentionItemLabels{

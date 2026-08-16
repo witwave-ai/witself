@@ -571,11 +571,21 @@ POST /v1/email/{message_id}:renew
 POST /v1/email/{message_id}:release
 POST /v1/email/{message_id}:complete
 
-# Operator-only, value-free receive lifecycle controls.
+# Independently account-policy-gated outbound agent email.
+POST /v1/email:send
+POST /v1/email/{inbound_message_id}:reply
+GET  /v1/email/sent
+GET  /v1/email/sent/{send_id}
+
+# Operator-only, value-free receive and send lifecycle controls.
 GET   /v1/agents/{agent_id}/email-receive
 PATCH /v1/agents/{agent_id}/email-receive
 GET   /v1/realms/{realm_id}/email-receive
 PATCH /v1/realms/{realm_id}/email-receive
+GET   /v1/agents/{agent_id}/email-send
+PATCH /v1/agents/{agent_id}/email-send
+GET   /v1/realms/{realm_id}/email-send
+PATCH /v1/realms/{realm_id}/email-send
 
 # Exact configured canary agent only; opaque challenge is POST-body-only.
 POST /v1/email/retry-canary:arm
@@ -583,6 +593,9 @@ POST /v1/email/retry-canary:status
 
 # Cell-local signed relay endpoint; no agent/operator bearer token.
 POST /v1/internal/agent-email:ingest
+
+# Bearer-protected, content-free provider lifecycle callback.
+POST /v1/internal/agent-email-send:provider-event
 
 # Control-plane-to-cell system projection; provision-token authenticated.
 POST /v1/accounts/{account_id}:email-realm-alias
@@ -893,15 +906,26 @@ audit events; read-only recall does neither:
   return HTTP 409.
   The message sender is always derived server-side from the token, never from
   the request body; sender forgery is structurally impossible.
-- The `/v1/email` family exists only when a valid process-lifetime receive mode
-  is enabled. Production mode uses an exact account cohort; the retired
+- Inbound and outbound `/v1/email` routes are independently registered and
+  gated. Inbound owner routes require a valid process-lifetime receive mode;
+  production receive uses an exact account cohort, while the retired
   compatibility mode remains limited to one realm plus 5–10 agents. Every
-  owner route independently rechecks the configured scope and requires a full agent
-  token; operator, non-full credential-profile, and unenrolled-agent access is
-  denied. `GET /v1/email/address` returns the caller's one provisioned
-  address. Startup reconciliation provisions exactly the configured agents and
-  fails closed on a missing agent, wrong realm, name collision, or ownership
-  mismatch.
+  inbound owner route rechecks that scope and requires a full agent token;
+  operator, non-full credential-profile, and unenrolled-agent access is denied.
+  `GET /v1/email/address` returns the caller's one provisioned address. Startup
+  reconciliation provisions exactly the configured agents and fails closed on
+  a missing agent, wrong realm, name collision, or ownership mismatch.
+- Outbound owner routes are separate from process-local receive configuration.
+  `POST /v1/email:send`, `POST /v1/email/{inbound_message_id}:reply`, and the
+  metadata-only sent list/show routes require effective `agent_email_send` plus
+  the current agent and realm send controls. A disabled direction returns the
+  stable, non-retryable `feature_not_enabled` refusal before an outbox row or
+  rate debit is created. Plan and account-policy changes take effect from the
+  resolved snapshot without reinstalling a client or restarting the server.
+  Send and reply accept one recipient and plain UTF-8 text only; sender,
+  Reply-To, and reply provenance are server-derived. Admission always retains
+  platform-only account-minute, account-day, and normalized-recipient-day
+  breakers in addition to the agent and realm minute limits.
 - `GET /v1/email` is metadata-only and cursor-paginated (`unread`, `unacked`,
   `limit` 1–100, `cursor`). `POST /v1/email:listen` is a stateless metadata-only
   long poll (`wait_seconds` 0–20, default 20; `limit` 1–100) over oldest
@@ -949,6 +973,21 @@ audit events; read-only recall does neither:
   at the edge and is not forwarded. The cell derives canonical, managed-alias,
   or custom-domain receipt provenance from the existing signed envelope
   recipient and its local route rows.
+- `POST /v1/internal/agent-email-send:provider-event` is the independent,
+  content-free lifecycle callback used by the sending adapter's Queue consumer.
+  It requires the dedicated provider-event bearer, derives the target account
+  and cell from the adapter's bounded route map, validates the exact event and
+  dispatch provenance, and folds one closed `delivered`, `deferred`, `bounced`,
+  `failed`, `rejected`, or `complained` outcome idempotently into the durable
+  outbox. It accepts no sender, recipient,
+  subject, body, or arbitrary target selector. Cloudflare retries every non-204
+  response and moves exhausted work to the configured DLQ; the cell never asks
+  the adapter to resend a logical message.
+- `GET|PATCH /v1/agents/{agent_id}/email-send` and
+  `GET|PATCH /v1/realms/{realm_id}/email-send` are operator-only, path-bound,
+  value-free kill switches. Effective send requires an active account, effective
+  account send entitlement, a live agent, and both layers enabled. A suspended
+  account may inspect or disable a layer but cannot enable one.
 - Canonical Realm-ID routes have an independent bounded inventory. The
   control-plane schedule does nothing unless
   `CP_REALM_EMAIL_CANONICAL_INVENTORY_ENABLED` is exactly `true`. Its controller

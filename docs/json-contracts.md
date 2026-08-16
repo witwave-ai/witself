@@ -1137,10 +1137,12 @@ Rules:
 
 ## Agent Email
 
-These contracts exist only behind a valid, default-off receive configuration.
-Production uses an exact account cohort; the retired compatibility mode keeps
-the older one-realm/5–10-agent boundary. For owner contracts, the full agent
-token and the server's process-lifetime scope determine the owner; clients cannot supply
+Inbound contracts require a valid, default-off receive configuration.
+Production receive uses an exact account cohort; the retired compatibility mode
+keeps the older one-realm/5–10-agent boundary. Outbound contracts are registered
+independently and require effective send entitlement plus the agent and realm
+send controls; they do not depend on process-local receive mode. For every owner
+contract, the full agent token determines the owner, and clients cannot supply
 account, realm, mailbox, or owner selectors. The separate value-free operator
 controls below bind one allowlisted agent or realm target from the route path.
 
@@ -1148,9 +1150,12 @@ controls below bind one allowlisted agent or realm target from the route path.
 not define a website, human/staff mailboxes, marketing mail, or a generic
 platform-notification sender. Required `postmaster@witmail.net` and
 `abuse@witmail.net` destinations are operator-routed operational exceptions.
-The production outbound service uses separately isolated sending infrastructure and remains
-agent-email-only. Provider dispatch is dark by default even where catalog
-entitlement is present.
+The production outbound service uses separately isolated sending infrastructure
+and remains agent-email-only. Committed adapter and cell templates keep provider
+dispatch dark by default even where catalog entitlement is present. The current
+Founder production cohort has dispatch and lifecycle-event delivery enabled;
+receipt replay remains a temporary, default-off operator proof surface. Never
+infer provider readiness from catalog entitlement alone.
 
 ### Outbound agent email
 
@@ -1230,6 +1235,13 @@ row without consuming another rate debit. Reusing the key for changed request
 semantics returns conflict. A 202 response proves a durable queue write, not
 provider acceptance or delivery.
 
+Admission and the independent provider-attempt lane each enforce GCRA refill
+rates of 30 per agent minute, 300 per realm minute, 1,000 per account minute,
+10,000 per account day, and 100 per normalized recipient day. The last two are
+platform-only, use 1,000/10 burst tolerances, bound a rolling day to 11,000/110,
+and cannot be removed by plan or account override. The recipient bucket stores
+only an account-domain-separated SHA-256 identifier.
+
 Outbound errors use the common `witself.v0` coded envelope. Stable codes are
 `auth_failed`, `feature_not_enabled`, `rate_limited`, `limit_exceeded`,
 `invalid_request`, `not_found`, `forbidden`, `agent_email_processing_busy`,
@@ -1238,6 +1250,14 @@ Outbound errors use the common `witself.v0` coded envelope. Stable codes are
 include the value-free limit details and `attempted:1`. JSON CLI output
 preserves these codes and retry guidance, while documented exit codes continue
 to distinguish policy, not-found, conflict, and unavailable/limit failures.
+The closed `details.limit_key` set is
+`agent_email_sent_per_agent_minute`,
+`agent_email_sent_per_realm_minute`,
+`agent_email_sent_per_account_minute`,
+`agent_email_sent_per_account_day`, or
+`agent_email_sent_per_recipient_day`. The two daily keys are platform-only;
+clients must preserve them as typed rate decisions rather than collapsing them
+into an unknown 429.
 Outbound MCP tools preserve the same machine decision in an `isError:true` tool
 result whose `structuredContent` is `{"error":{...}}`; the error object carries
 `code`, `message`, `retryable`, optional `feature`, optional whole-second
@@ -2549,6 +2569,11 @@ X-Witself-Email-Raw-Size: <canonical decimal>
 X-Witself-Email-Raw-SHA256: sha256:<lowercase-hex>
 X-Witself-Email-Signature: <standard padded base64 Ed25519 signature>
 ```
+
+`witself-email-relay-pilot-v1` is the frozen legacy wire-version identifier used
+by the production relay. It is retained for compatibility and does not mean the
+current service is a pilot; changing it requires an explicitly versioned
+protocol migration across the edge and every receiving cell.
 
 Schema 88 adds no route-provenance relay header. The route-projection signature
 is verified at the edge and is not forwarded. In particular, route kind, domain

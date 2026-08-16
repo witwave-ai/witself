@@ -863,6 +863,11 @@ The product goal is a CLI-first agent durable-state service spanning both planes
 - Security groups that act as both policy subjects and policy targets and can own
   group-scoped shared memories and facts.
 - Durable inter-agent messaging with delivery, ordering, and acknowledgement.
+- Production agent email: owner-only inbound on `witmail.net` plus separately
+  gated, one-recipient plain-text outbound from `send.witmail.net`, with
+  plan/account/agent/realm controls, durable worker and provider-event queues,
+  and no client reinstall when policy changes. See
+  [docs/agent-email.md](docs/agent-email.md).
 - Cross-realm agent collaboration: a verified, loop-safe channel for agents to
   work together across machines, realms, and accounts — signed realm discovery,
   a blind relay, and enforced loop and spend caps — built on the realm-local

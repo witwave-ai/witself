@@ -245,6 +245,10 @@ Initial metric families should include:
 | `witself_messages_total` | Messaging events by stage (`sent`, `delivered`, `read`), recipient kind, and result. |
 | `witself_message_rate_limit_rejections_total` | Implemented shared message-write budget refusals, including both retryable exhaustion and non-retryable zero/oversized-debit cases. Labels are the closed sets `limit_dimension` (`message_sent`, `message_delivered`, or `unknown`), `scope` (`agent`, `realm`, `recipient`, or `unknown`), and `operation` (`send`, `reply`, `complete`, `request_open`, `request_offer`, `request_complete`, or `unknown`). It never carries account, realm, agent, recipient, request, or message ids; plan/source names; limit/usage/retry values; content; or error text. |
 | `witself_agent_email_ingests_total` | Signed inbound agent-email deliveries by the single bounded `outcome` label: `retained`, `omitted_capacity`, `over_size`, `feature_disabled`, `receive_disabled`, `unknown_recipient`, `retry_canary_temporary`, `retry_canary_rejected`, or `error`. `retained` means the accepted message kept its raw MIME, including ordinary text-only mail, while `omitted_capacity` means bounded text and metadata were retained without the attachment-bearing raw payload. The metric never carries account, realm, agent, address, sender, message id, plan, byte count, limit value, content, or error text. |
+| `witself_agent_email_rate_limit_rejections_total` | Signed inbound safety refusals with only closed `limit_dimension`, `scope`, and `source` labels. Account scope is explicit and bounded; no tenant, sender, address, limit value, or arbitrary key becomes a label. |
+| `witself_worker_agent_email_outbound_batches_total`, `witself_worker_agent_email_outbound_items_total`, `witself_worker_agent_email_outbound_last_success_timestamp_seconds` | Durable outbound worker health and value-free closed outcomes. No sender, recipient, message, provider id, or error text is a label. |
+| `witself_worker_agent_email_retention_batches_total`, `witself_worker_agent_email_retention_items_total`, `witself_worker_agent_email_retention_last_success_timestamp_seconds` | Preview/enforce batch results, bounded inbound/outbound/provider-event/suppression item kinds, and last successful attempt. An errored multi-pass attempt records one error batch with any already-committed counts and does not refresh last-success. |
+| `witself_worker_agent_email_rate_bucket_cleanup_batches_total`, `witself_worker_agent_email_rate_bucket_cleanup_deleted_rows_total`, `witself_worker_agent_email_rate_bucket_cleanup_last_success_timestamp_seconds` | Cooperative cleanup across the three physical inbound/outbound limiter tables with bounded result labels and no tenant-derived labels. |
 | `witself_message_delivery_duration_seconds` | Send-to-delivery latency histogram by recipient kind. |
 | `witself_conversations_total` | Cross-realm conversation/task lifecycle transitions by `conversation_state` (`submitted`, `working`, `input_required`, `auth_required`, `completed`, `failed`, `canceled`) and result. Counts state transitions only; it never carries the `conversation_id`, participant handles, or message content (see [agent-collaboration.md](agent-collaboration.md)). |
 | `witself_relay_envelopes_total` | Blind-relay envelope throughput by `direction` (`inbound`, `outbound`), `relay_action` (`routed`, `dropped`, `quarantined`), and `result`. The relay sees only routing metadata, so this metric carries no envelope body, signature, or peer realm handle. |
@@ -301,6 +305,17 @@ the fixed-key, per-location Cloudflare shield. Singleflight followers consume
 no additional admission. Cloudflare's shared rate counters are permissive and
 eventually consistent, so neither layer is exact account-level accounting or a
 customer quota.
+
+The outbound adapter's lifecycle Queue consumer emits exactly one privacy-safe
+`witself.agent-email-provider-event-consume-log.v1` record per attempt. Its only
+fields are the fixed schema/component, a closed outcome, and disposition (`ack`
+or `retry`); it never
+logs provider event ids, accounts, cells, recipients, provider message ids, or
+error text. Exhausted retries move the original Queue item to the configured
+DLQ for operator inspection. See [cell-worker.md](cell-worker.md) for worker
+metrics and the
+[sending-adapter README](../infra/cloudflare/agent-email-send/README.md) for the
+Queue/DLQ boundary.
 
 From `infra/cloudflare/agent-email`, `npm run metrics -- summary [minutes]`
 queries both schemas for the same bounded window. The additive v2 CLI envelope

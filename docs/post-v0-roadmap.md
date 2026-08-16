@@ -270,14 +270,13 @@ self-digest, or plaintext-exported, and is reveal-gated.
 
 ### SMS And Email-Code 2FA
 
-SMS and email-code capture are post-v0. They require integrations with inboxes,
-phone-number providers, anti-abuse controls, privacy rules, retry behavior,
-delivery failure handling, and support boundaries.
-
-The email half is now being specced: [agent-email.md](agent-email.md) designs
-managed-domain receive-only agent mailboxes whose v1 slice includes
-verification-link and email-OTP consumption under the sealed-plane carve-outs.
-SMS and phone-number channels remain deferred with no active design.
+Production [agent email](agent-email.md) now provides independently gated
+receive and send mailboxes. Its conservative code-candidate helper may support
+an already-expected, user-authorized, low-risk workflow, but stored mail remains
+open-plane untrusted content and is not a sealed 2FA credential or identity
+proof. Stronger sealed-plane email-code 2FA and SMS remain post-v0; they require
+provider integrations, sender authentication, anti-abuse controls, privacy and
+retry rules, delivery-failure handling, and explicit support boundaries.
 
 V0 solves authenticator-app style TOTP first
 (see [totp-2fa.md](totp-2fa.md)).

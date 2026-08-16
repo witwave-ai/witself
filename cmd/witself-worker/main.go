@@ -389,21 +389,23 @@ func serve() int {
 				return st.RunAgentEmailRetentionWorker(
 					jobCtx,
 					cfg,
-					func(result store.AgentEmailRetentionBatchResult) {
+					func(result store.AgentEmailRetentionBatchResult, err error) {
+						metricResult := agentEmailRetentionMetricResult(result)
+						if err != nil {
+							metrics.RecordJobFailure(agentEmailRetentionJob)
+							metricResult = worker.RetentionResultError
+						}
 						metrics.ObserveAgentEmailRetentionBatch(
 							mode,
-							agentEmailRetentionMetricResult(result),
+							metricResult,
 							agentEmailRetentionMetricCounts(result),
 						)
-						logAgentEmailRetentionResult(cfg.Mode, result)
-					},
-					func(err error) {
-						metrics.RecordJobFailure(agentEmailRetentionJob)
-						metrics.ObserveAgentEmailRetentionBatch(
-							mode,
-							worker.RetentionResultError,
-							worker.AgentEmailRetentionCounts{},
-						)
+						if result != (store.AgentEmailRetentionBatchResult{}) {
+							logAgentEmailRetentionResult(cfg.Mode, result)
+						}
+						if err == nil {
+							return
+						}
 						fmt.Fprintf(
 							os.Stderr,
 							"witself-worker: agent-email retention: %v\n",
@@ -967,7 +969,16 @@ func agentEmailRetentionMetricResult(
 		result.DeferredOversize == 0 &&
 		result.DeferredBudget == 0 &&
 		result.ClearedDuplicateLinks == 0 &&
-		result.DeletedCanaryProofs == 0 {
+		result.DeletedCanaryProofs == 0 &&
+		result.ScannedOutbound == 0 &&
+		result.EligibleOutbound == 0 &&
+		result.DeletedOutbound == 0 &&
+		result.DeletedOutboundBytes == 0 &&
+		result.ScannedProviderEvents == 0 &&
+		result.DeletedProviderEvents == 0 &&
+		result.ScannedSuppressions == 0 &&
+		result.EligibleSuppressions == 0 &&
+		result.DeletedSuppressions == 0 {
 		return worker.RetentionResultNoWork
 	}
 	return worker.RetentionResultSuccess
@@ -988,6 +999,15 @@ func agentEmailRetentionMetricCounts(
 		DeferredBudget:        result.DeferredBudget,
 		ClearedDuplicateLinks: result.ClearedDuplicateLinks,
 		DeletedCanaryProofs:   result.DeletedCanaryProofs,
+		ScannedOutbound:       result.ScannedOutbound,
+		EligibleOutbound:      result.EligibleOutbound,
+		DeletedOutbound:       result.DeletedOutbound,
+		DeletedOutboundBytes:  result.DeletedOutboundBytes,
+		ScannedProviderEvents: result.ScannedProviderEvents,
+		DeletedProviderEvents: result.DeletedProviderEvents,
+		ScannedSuppressions:   result.ScannedSuppressions,
+		EligibleSuppressions:  result.EligibleSuppressions,
+		DeletedSuppressions:   result.DeletedSuppressions,
 		ScanCapped:            result.ScanCapped,
 	}
 }
@@ -1038,7 +1058,7 @@ func logAgentEmailRetentionResult(
 	}
 	fmt.Fprintf(
 		os.Stderr,
-		"witself-worker: agent-email retention: mode=%s scanned=%d skipped_locked=%d scan_capped=%t eligible=%d deleted=%d deleted_raw_bytes=%d deferred_active=%d deferred_locked=%d deferred_oversize=%d deferred_budget=%d cleared_duplicate_links=%d deleted_canary_proofs=%d\n",
+		"witself-worker: agent-email retention: mode=%s scanned=%d skipped_locked=%d scan_capped=%t eligible=%d deleted=%d deleted_raw_bytes=%d deferred_active=%d deferred_locked=%d deferred_oversize=%d deferred_budget=%d cleared_duplicate_links=%d deleted_canary_proofs=%d scanned_outbound=%d eligible_outbound=%d deleted_outbound=%d deleted_outbound_bytes=%d scanned_provider_events=%d deleted_provider_events=%d scanned_suppressions=%d eligible_suppressions=%d deleted_suppressions=%d\n",
 		mode,
 		result.Scanned,
 		result.SkippedLocked,
@@ -1052,6 +1072,15 @@ func logAgentEmailRetentionResult(
 		result.DeferredBudget,
 		result.ClearedDuplicateLinks,
 		result.DeletedCanaryProofs,
+		result.ScannedOutbound,
+		result.EligibleOutbound,
+		result.DeletedOutbound,
+		result.DeletedOutboundBytes,
+		result.ScannedProviderEvents,
+		result.DeletedProviderEvents,
+		result.ScannedSuppressions,
+		result.EligibleSuppressions,
+		result.DeletedSuppressions,
 	)
 }
 
