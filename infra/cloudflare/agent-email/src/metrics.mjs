@@ -4,6 +4,7 @@ export const ROUTE_LOOKUP_METRICS_SCHEMA = "witself.agent-email.route-lookup.v1"
 const OUTCOMES = new Set([
   "accepted",
   "discarded_feature_disabled",
+  "rejected_cell_capacity",
   "rejected_invalid_recipient",
   "rejected_unknown_recipient",
   "rejected_inactive_route",

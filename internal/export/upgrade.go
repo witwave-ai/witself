@@ -66,6 +66,17 @@ var upgraders = map[int]Upgrader{
 	87: preserveSchema87Rows,
 	88: preserveSchema88Rows,
 	89: preserveSchema89Rows,
+	90: preserveSchema90Rows,
+}
+
+// preserveSchema90Rows acknowledges schema 0091's cell-local retained-email
+// ledger and database enforcement triggers. The ledger is rebuilt from the
+// destination cell's canonical email rows and is never portable account data.
+// Existing archive rows already pass the store importer's 128-byte claim-fence
+// validation, so they need no wire transformation before the database adds the
+// equivalent constraints.
+func preserveSchema90Rows(_ string, row map[string]any) (map[string]any, error) {
+	return row, nil
 }
 
 // preserveSchema89Rows acknowledges schema 0090's changes to cell-local rate

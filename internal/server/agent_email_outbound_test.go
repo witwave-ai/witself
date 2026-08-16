@@ -282,6 +282,28 @@ func TestAgentEmailOutboundProviderEventRequiresDedicatedTrustAndStrictShape(t *
 	}
 }
 
+func TestAgentEmailOutboundProviderEventStorageCapacityIsExplicitAndRetryable(t *testing.T) {
+	const providerToken = "provider-secret-0123456789-abcdef"
+	handler := apiMux(Config{
+		AgentEmailProviderEventToken: providerToken,
+		ApplyAgentEmailOutboundProviderEvent: func(context.Context, AgentEmailOutboundProviderEvent) error {
+			return ErrAgentEmailDatabaseCapacity
+		},
+	})
+	body := `{"schema_version":"witself.agent-email-provider-event.v1","event_id":"evt_capacity","provider_message_id":"provider-1","event_class":"delivered","occurred_at":"2026-08-14T12:00:00Z"}`
+	request := httptest.NewRequest(
+		http.MethodPost, "/v1/internal/agent-email-send:provider-event",
+		strings.NewReader(body),
+	)
+	request.Header.Set("Authorization", "Bearer "+providerToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	assertAgentEmailOutboundCodedError(
+		t, response, http.StatusInsufficientStorage,
+		"agent_email_storage_full", true,
+	)
+}
+
 func TestAgentEmailOutboundProviderEventStandaloneHandlerUsesProductionRoute(t *testing.T) {
 	token := "provider-event-token-0123456789-abcd"
 	var applied int
@@ -338,6 +360,24 @@ func TestAgentEmailOutboundRateLimitIsStructuredAndValueFree(t *testing.T) {
 		!containsAll(response.Body.String(), `"code":"rate_limited"`, `"limit_key":"agent_email_sent_per_agent_minute"`, `"attempted":1`, `"retryable":true`) ||
 		strings.Contains(response.Body.String(), "agent_private") || strings.Contains(response.Body.String(), "person@example.com") {
 		t.Fatalf("rate response = %d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
+	}
+}
+
+func TestAgentEmailOutboundDatabaseCapacityFailsClosedAndIsValueFree(t *testing.T) {
+	principal := DomainPrincipal{Kind: PrincipalKindAgent, ID: "agent_private", AccountID: "acc_private", RealmID: "realm_private", AccountStatus: "active", AccessProfile: AccessProfileFull}
+	handler := apiMux(Config{
+		AuthenticatePrincipal: func(context.Context, string) (DomainPrincipal, bool, error) { return principal, true, nil },
+		QueueAgentEmail: func(context.Context, DomainPrincipal, SendAgentEmailRequest, string) (AgentEmailOutboundMessage, error) {
+			return AgentEmailOutboundMessage{}, ErrAgentEmailDatabaseCapacity
+		},
+	})
+	response := performAgentEmailOwnerRequest(handler, http.MethodPost, "/v1/email:send", "agent-token",
+		`{"to":"person@example.com","subject":"Hello","text":"body"}`,
+		map[string]string{"Idempotency-Key": "send-capacity-1"})
+	if response.Code != http.StatusInsufficientStorage || response.Header().Get("Retry-After") != "" ||
+		!containsAll(response.Body.String(), `"code":"agent_email_storage_full"`, `"retryable":false`) ||
+		strings.Contains(response.Body.String(), "agent_private") || strings.Contains(response.Body.String(), "person@example.com") {
+		t.Fatalf("capacity response = %d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
 	}
 }
 

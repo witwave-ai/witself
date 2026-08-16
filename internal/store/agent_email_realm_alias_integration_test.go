@@ -337,12 +337,34 @@ func TestAgentEmailRealmAliasProjectionAndDeliveryPostgres(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	// Schema 0090 carries no bounded email-rate debt in this fixture, so it can
-	// first step back to 0089. Schema 0089 carries no outbound-email authority in
-	// this fixture, so it can then step back to 0088. Schema 0088 carries no custom-domain authority in
-	// this fixture, so it can then step back to 0087. Schema 0087 can safely discard its sole
-	// original-domain route, and schema 0086 can step back to 0085. The following 0085 -> 0084
+	// Schema 0091 intentionally prevents carrying retained email into any older
+	// schema. Its nonempty guard is covered independently, so remove this
+	// delivery and disposable rate debt before reaching the schema-0085
+	// provenance guard that this test owns. The exact alias message is recreated
+	// under schema 0085 below.
+	if _, err := st.pool.Exec(ctx, `
+		DELETE FROM agent_email_messages WHERE id=$1`, delivered.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, query := range []string{
+		`DELETE FROM agent_email_rate_buckets WHERE account_id=$1`,
+		`DELETE FROM agent_email_account_rate_buckets WHERE account_id=$1`,
+	} {
+		if _, err := st.pool.Exec(ctx, query, provisioned.AccountID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Schema 0091 can now step back to 0090. Schema 0090 can discard its empty
+	// account-wide coordination table, and schema 0089 carries no outbound
+	// authority in this fixture, so it can then step back to 0088. Schema 0088
+	// carries no custom-domain authority in this fixture, so it can then step
+	// back to 0087. Schema 0087 can safely discard its sole original-domain
+	// route, and schema 0086 can step back to 0085. The following 0085 -> 0084
 	// downgrade must still refuse to discard realm-alias delivery provenance.
+	if err := migrationTestDown(t, schemaDSN, false); err != nil {
+		t.Fatalf("downgrade schema 0091 to 0090: %v", err)
+	}
+	assertMigrationTestVersion(t, schemaDSN, 90)
 	if err := migrationTestDown(t, schemaDSN, false); err != nil {
 		t.Fatalf("downgrade schema 0090 to 0089: %v", err)
 	}
@@ -363,6 +385,28 @@ func TestAgentEmailRealmAliasProjectionAndDeliveryPostgres(t *testing.T) {
 		t.Fatalf("downgrade schema 0086 to 0085: %v", err)
 	}
 	assertMigrationTestVersion(t, schemaDSN, 85)
+	legacyRaw := []byte("schema-85 realm-alias provenance")
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO agent_email_messages
+		  (id,account_id,realm_id,mailbox_id,owner_agent_id,address_id,
+		   provider,envelope_sender,envelope_recipient,agent_segment,realm_label,
+		   recipient_route_kind,recipient_realm_alias_claim_id,
+		   raw_mime,raw_size_bytes,raw_sha256,parse_state,attachment_count,
+		   body_text,body_text_kind,attachment_storage_bytes,
+		   retained_attachment_storage_bytes,payload_retention_state,
+		   attachment_storage_accounted,sender_verification_state,
+		   duplicate_group_sha256,received_at)
+		VALUES
+		  ($1,$2,$3,$4,$5,$6,'migration_test','sender@example.com',$7,$8,$9,
+		   'realm_alias',$10,$11,$12,repeat('a',64),'parsed',0,
+		   'bounded provenance','text/plain',0,0,'retained',true,'unverified',
+		   repeat('b',64),clock_timestamp())`,
+		delivered.ID, provisioned.AccountID, realm.ID, canonical.MailboxID,
+		canonical.OwnerAgentID, canonical.ID, aliasRecipient,
+		canonical.AgentSegment, "founder", first.ClaimID, legacyRaw, len(legacyRaw),
+	); err != nil {
+		t.Fatal(err)
+	}
 	downErr := migrationTestDown(t, schemaDSN, true)
 	if downErr == nil || !strings.Contains(
 		downErr.Error(), "realm-alias email messages exist",

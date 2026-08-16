@@ -251,6 +251,23 @@ test("plan-disabled receipt accepts and drops with a value-free metric", async (
   assert.doesNotMatch(JSON.stringify(points), /@|address|account|realm_|agent_/i);
 });
 
+test("cell capacity receipt rejects permanently with a value-free metric", async () => {
+  const points = [];
+  const metrics = { writeDataPoint(point) { points.push(point); } };
+  const mail = message();
+  await handleEmail(mail, legacyEnv(metrics), {
+    fetch: async () => new Response('{"verdict":"storage_full"}', { status: 507 }),
+  });
+  const verdicts = verdictPoints(points);
+  assert.deepEqual(mail.rejected, ["recipient unavailable"]);
+  assert.equal(verdicts.length, 1);
+  assert.deepEqual(verdicts[0].blobs, [
+    EDGE_METRICS_SCHEMA, "rejected_cell_capacity", "response",
+  ]);
+  assert.equal(verdicts[0].doubles[3], 552);
+  assert.doesNotMatch(JSON.stringify(points), /@|address|account|realm_|agent_/i);
+});
+
 test("unknown and permanent cell verdicts use one sanitized permanent rejection", async () => {
   for (const [verdict, status] of [
     ["unknown_recipient", 404],

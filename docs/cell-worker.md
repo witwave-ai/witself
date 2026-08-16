@@ -378,8 +378,9 @@ cohort must repeat them:
 
 1. migrate the outbox, send controls, suppressions, provider-event receipts,
    and original minute-rate buckets to schema 89, then the account-wide inbound
-   and outbound daily/recipient bucket shapes to schema 90, while dispatch
-   remains disabled;
+   and outbound daily/recipient bucket shapes to schema 90, then install the
+   schema-91 cell-storage ledger only after the receive edge understands its
+   `storage_full` verdict, while dispatch remains disabled;
 2. onboard and authenticate `send.witmail.net`, provision the adapter Email
    Sending/receipt/route/Queue bindings, configure one cell signing key and the
    matching adapter public-key/account allowlist, and install the independent
@@ -399,6 +400,16 @@ outbound gates off, freeze account export/import and moves, and converge every
 API and worker replica on a schema-90-compatible image before accepting another
 outbound row. Roll back with account, worker, and adapter gates or deploy a
 forward fix. Never down-migrate the database or restart an older image.
+
+The schema-91 retained-email boundary is the next forward-only barrier. Deploy
+the receive edge that understands HTTP 507 `storage_full` first, keep the exact
+Founder cohort fixed, freeze account moves, and then converge every API and
+worker process on the schema-91 image. The singleton ledger is cell-local and
+is not part of an account archive; destination triggers charge imported mail,
+so movement remains frozen until every possible destination is schema 91 and
+has verified headroom. Once any process installs schema 91, a schema-90 binary
+is not a rollback. Disable receive/send gates or deploy a forward fix while
+leaving the database and its storage triggers intact.
 
 A populated source-to-destination move canary is also a release gate, not just
 an archive unit test. Before moving any account with outbound-email history,

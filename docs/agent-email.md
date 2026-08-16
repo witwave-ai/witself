@@ -22,6 +22,7 @@ deployment deliberately differs from those defaults:
 | Adapter lifecycle delivery | Off | Enabled |
 | `witself-agent-email-send-lifecycle` subscription (`email.sending` source) | Disabled | Enabled for six lifecycle event classes |
 | Agent-email retention | Off, preview defaults | Cell-wide on `civo-sandbox-usw2-dev`; enabled on v0.0.252/schema 90 with two replicas in enforce mode, batch 100, 1-minute interval, and 2-minute timeout; Founder's effective policy remains indefinite |
+| Cell storage ledger | Schema-91 candidate | Not live; rollout verification required |
 
 The lifecycle path uses `witself-agent-email-send-events`, its configured
 consumer, and `witself-agent-email-send-events-dlq`. A real delivered event was
@@ -36,9 +37,13 @@ cell rollout added the bounded traffic and retention controls described below.
 
 Production scope is still intentionally narrow. There is no wildcard account
 cohort. Widening requires a new reviewed cell, account-policy, adapter, queue,
-and retention decision, plus either a cell-wide retained-byte/row high-water
-mark or external payload storage sized for the admitted cohort and a
-provider-wide/shared-sending-domain capacity and backpressure breaker.
+retention, and provider-capacity decision. The schema-91 release candidate adds
+a transactionally maintained cell-wide retained-byte/row ledger; it is not a
+claim that the current schema-90 cell already has that protection. The ledger
+must be deployed and verified, or an equivalent external payload
+storage/sharding design must be in place, before cohort expansion. A
+provider-wide/shared-sending-domain capacity and backpressure breaker remains a
+separate requirement.
 Per-account limits do not bound several accounts against one cell volume or one
 provider/domain reputation budget. Catalog entitlement alone never activates a
 provider route.
@@ -66,11 +71,12 @@ realm count/byte breakers. Its non-optional account lanes refill at 5,000
 messages and 1 GiB raw MIME per minute with immediate burst tolerances of 100
 messages and 64 MiB. The adapter retains its payload, receipt, route, retry, and
 provider safety bounds. Those rate and payload ceilings bound the arrival rate
-and per-request work; they do not bound cumulative retained storage. Founder's
-explicit-unlimited attachment pool plus indefinite retention can therefore grow
-PostgreSQL without a fixed total byte ceiling. Keep the production cohort narrow
-until a reviewed cell-wide retained-byte high-water, object-storage/sharding
-design, or equivalent admission control exists.
+and per-request work; they do not by themselves bound cumulative retained
+storage. Founder's explicit-unlimited attachment pool plus indefinite retention
+can therefore grow the current schema-90 PostgreSQL cell without a fixed total
+byte ceiling. Schema 91 closes that gap with an independent platform boundary,
+but it must be rolled out and verified before it is treated as production
+protection.
 Plan or account-policy changes require no client or MCP reinstall; the
 installed tools receive a stable `feature_not_enabled` refusal whenever
 effective send is off.
@@ -141,11 +147,38 @@ converge every API and worker writer on a schema-90-compatible image before
 reopening provider traffic; schema-89-only binaries are not a rollback after
 that migration lands.
 
+The schema-91 candidate adds one transactionally maintained logical
+agent-email storage ledger per cell. Root admission defaults to 3 GiB of charged
+storage and 25,000 inbound-plus-outbound root rows. The independent hard boundary
+defaults to 4 GiB and 100,000 counted rows. Every retained inbound message,
+delivery, outbound message, provider-event receipt, and recipient suppression is
+charged 8 KiB of fixed row overhead plus its retained immutable identity and
+customer-content fields. The fixed charge absorbs bounded mutable lifecycle
+metadata; inbound-delivery and outbound claim IDs additionally have 128-byte
+database caps. Claim, release, and terminalization updates are therefore
+charge-neutral even at the hard boundary. The lower root boundary leaves 75,000
+counted rows of hard reserve—three lifecycle children per fully admitted root on
+average. Repeated provider events remain bounded by the hard cap, not promised
+unbounded space. Database triggers enforce that cap for current, rolling-old,
+direct-maintenance, and import writers. Deletes and cascades release their exact
+logical charge, so ordinary retention can recover admission capacity even when
+the physical PostgreSQL file does not immediately shrink.
+
+These thresholds are cell platform safety, not account allowance, billing, or
+retention. No plan or explicit-unlimited Founder override bypasses them. When
+capacity refuses an enabled inbound message, the cell returns HTTP 507 with the
+closed `storage_full` verdict and the receive Worker converts it into a
+sanitized permanent SMTP rejection; it does not silently discard the message
+or create an unbounded provider retry. A new outbound root receives HTTP 507
+with `agent_email_storage_full`, `retryable: false`, and no `Retry-After`.
+
 The Founder account has explicit indefinite agent-email retention, so its mail
 is not eligible for age deletion. Combined with the explicit-unlimited
 attachment-storage override, that leaves Founder's cumulative retained
-PostgreSQL storage unbounded even though ingress rate and individual payload
-work are bounded. The v0.0.252/schema-90 production deployment
+PostgreSQL storage unbounded on the current schema-90 deployment even though
+ingress rate and individual payload work are bounded. The schema-91 candidate
+adds the platform ledger described above without changing that commercial
+policy. The v0.0.252/schema-90 production deployment
 runs the bounded `agentEmailRetention` worker in enforcement mode on both worker
 replicas: batch 100, one-minute interval, and one shared two-minute timeout per
 run. Activation followed verification of both required pre-migration backups.
@@ -162,8 +195,9 @@ delete at most 2,048 MiB. Maximum-sized 25 MiB rows yield 800/1,600 MiB because
 each 32 MiB database batch fits only one. These are work ceilings, not
 throughput guarantees or reserved inbound shares. They exceed one saturated
 account's rolling-minute envelope of at most 5,100 rows or 1,088 MiB, but
-database latency still requires monitoring and a wider cohort remains blocked
-on a reviewed cell-wide storage/admission budget or sharding.
+database latency still requires monitoring. A wider cohort remains blocked
+until the schema-91 storage boundary is deployed and verified (or equivalent
+sharding is in place) and the independent provider-wide budget is settled.
 
 With enforcement active, a Professional or Team account later admitted to the
 production email cohort needs no worker-mode change for its 90-day or 365-day
@@ -1751,7 +1785,20 @@ the cell.
 The Cloudflare adapter verifies the signature, timestamp, audience, key id,
 body digest, exact account allowlist, one-recipient/plain-text contract, and
 server-owned From/Reply-To domains before crossing the Email Sending provider
-boundary. A Durable Object keyed by `send_id` records the request digest and
+boundary. The hardened adapter candidate first charges a hashed source-IP lane,
+then verifies the Ed25519 header envelope before it reads or hashes the body.
+Only a valid header envelope may spend the bounded 2 MiB body read and digest;
+JSON validation and exact account authorization follow. Only then may the
+request spend the aggregate and signer lanes or reach Durable Objects and the
+provider. Anonymous or malformed callers therefore cannot consume the shared
+valid-traffic budget. The candidate binds Cloudflare Rate Limiting namespace
+`2301` at 1,000 requests per 60 seconds, disables preview URLs, and enables
+Worker observability. Namespace `2301` is account-wide and must be proven unused
+by every other Worker in the selected Cloudflare account before deployment.
+Cloudflare counters remain point-of-presence-local and eventually consistent,
+so this is an abuse breaker rather than exact global accounting.
+
+A Durable Object keyed by `send_id` records the request digest and
 provider-boundary state. Exact replay returns the durable result; reuse of the
 same id with different content fails closed. The adapter records
 `provider_started` before calling the provider. If it cannot prove what
@@ -1984,9 +2031,12 @@ Inbound mail still carries real obligations:
    count, storage byte counts, and payload-retention state. Raw MIME, attachment
    names, media types, and attachment bytes are unavailable. A future production
    retrieval surface still requires the injection review.
-4. The quarantine window and the Postgres growth watermarks that would trigger
-   revisiting object storage. Ordinary retention windows and inbound storage
-   caps are plan-scoped in [billing-and-limits.md](billing-and-limits.md).
+4. The quarantine window and the utilization watermark below schema 91's
+   3-GiB/25,000-root admission threshold that should trigger cell evacuation,
+   sharding, or object-storage work. The 4-GiB/100,000-row hard boundary is an
+   emergency safety ceiling, not a normal capacity target. Ordinary retention
+   windows and inbound storage caps remain plan-scoped in
+   [billing-and-limits.md](billing-and-limits.md).
 5. Platform-notification templating, locale posture, and which events email
    operators at all.
 6. Whether a later plan needs per-thread human approval before an agent may
@@ -2032,7 +2082,9 @@ Inbound mail still carries real obligations:
 11. Edge observability baseline is implemented through best-effort, value-free
     Analytics Engine points. `witself.agent-email.edge.v1` records each
     SMTP-facing outcome, including the closed `tempfail_rate_limited` outcome
-    with phase `response` for an authoritative retryable cell refusal.
+    with phase `response` for an authoritative retryable cell refusal and
+    `rejected_cell_capacity` for the sanitized permanent response to a
+    schema-91 `storage_full` refusal.
     `witself.agent-email.route-lookup.v1` separately records fixed route result,
     evidence, and route-kind enums plus count, latency, and numeric status; it
     emits exactly one terminal event per recipient lookup and never records an

@@ -68,6 +68,16 @@ features:
 # chart contract. The relay private key never belongs in this chart; only
 # public verification keys are accepted.
 agentEmail:
+  # Independent cell-level safety limits for all retained agent-email records.
+  # Root message admission stops at the lower threshold, reserving headroom for
+  # lifecycle receipts and cleanup. The hard threshold is enforced by database
+  # triggers for every counted row, including old or importing writers. These
+  # limits do not change any account's commercial plan or retention policy.
+  cellStorage:
+    admissionBytes: 3221225472
+    admissionRows: 25000
+    hardBytes: 4294967296
+    hardRows: 100000
   # Token accepted only by the content-free outbound provider-event callback.
   # The managed send adapter holds the matching value as a Worker secret.
   # Empty keeps the callback route absent.

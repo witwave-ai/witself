@@ -80,15 +80,62 @@ may repeat the exact signed envelope to read this receipt, but the adapter never
 starts another provider call after its own boundary became ambiguous. Exact
 provider-route re-registration does not extend the fixed 400-day expiry.
 
-The public dispatch endpoint streams at most a 2 MiB signed JSON envelope
-before authentication and rejects a larger body. The decoded text field still
-has its independent 256 KiB UTF-8 cap. The larger envelope limit is necessary
-because valid one-byte text characters can expand to six-byte JSON escapes.
-The current deployment has no separate Cloudflare Rate Limiter binding or
-private Service Binding in front of invalid signatures. Exact-signer admission
-keeps provider sends safe, but a broad public rollout also requires a
-front-door request budget so unauthenticated floods cannot multiply the 2 MiB
-parsing cost.
+The public dispatch endpoint first consumes only a domain-separated,
+SHA-256-hashed connecting-IP Rate Limiter lane. It then authenticates the
+Ed25519 signature over the declared body digest without reading the body.
+Only a request with valid signed headers may stream a body, and that stream is
+bounded at a 2 MiB JSON envelope and must match the signed digest. After JSON
+validation and signer-to-account authorization, the request consumes fixed
+shared aggregate and verified-signer lanes before it can reach receipt storage
+or Email Sending. An anonymous caller can therefore spend only its own source
+lane; it cannot drain either shared lane and deny valid cell traffic. A caller
+replaying a captured signed header with a different body also cannot consume a
+shared lane. The decoded text field still has its independent 256 KiB UTF-8
+cap. The larger envelope limit is necessary because valid one-byte text
+characters can expand to six-byte JSON escapes.
+
+All three front-door lanes use the one committed `DISPATCH_FRONTDOOR_LIMITER`
+binding at 1,000 requests per 60 seconds per key. That fixed ceiling is sized
+for the current cell deployment: two replicas, a batch of 10, and one poll
+every two seconds can make at most 600 dispatch attempts per minute; a rolling
+update with one surge replica can make at most 900. Changing replica count,
+`maxSurge`, batch size, or poll interval requires recalculating this ceiling
+and reviewing the config, tests, and bundle gate before rollout. A missing
+binding, binding exception, malformed result, or missing connecting IP fails
+closed with `503` and `Retry-After: 60`; an exhausted lane returns `429` with
+the same retry hint. Source-lane failures happen without reading the body and
+use only the fixed `esnd_invalid` identifier. Shared-lane failures occur only
+after the exact signed dispatch has been authenticated and may safely echo its
+validated send ID for an exact retry.
+
+The current cell client requires an exact send ID in every closed adapter
+response, while the send ID intentionally exists only inside the unread body.
+It therefore treats a pre-body source-lane refusal conservatively as an
+uncertain result and exact-replays the same logical dispatch; it does not use
+the response body's 60-second delay. The shared lanes return the authenticated
+send ID, so their delay is honored normally. The 100-request headroom above the
+900-attempt surge ceiling, plus the cell's authoritative provider-attempt GCRA
+lane, keeps that conservative source retry bounded. Do not lower the
+front-door ceiling below the reviewed surge capacity without changing and
+revalidating this response contract.
+
+Cloudflare's [Workers Rate Limiting API](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/)
+is deliberately a coarse abuse circuit breaker: its counters are local to a
+Cloudflare location, eventually consistent, and may be permissive. It is not
+global quota accounting and must not replace the cell's authoritative
+Postgres GCRA lanes. The deterministic header-first body-read boundary remains
+the primary cost defense. Worker code emits no custom per-refusal log
+containing an IP, digest, signer, or send ID; use Workers
+HTTP-status/invocation metrics for aggregate `401`, `429`, and `503` pressure
+and exception monitoring. Status alone does not identify the front-door lane:
+provider throttling also returns `429`, while a provider-ambiguous result or a
+dark gate may return `503`. Use the bounded response `error_code` from a
+controlled, signed probe to distinguish those cases; do not add per-denial
+request logs. Workers observability is enabled and version preview URLs are
+disabled. The production `workers.dev` endpoint is still public. Cloudflare
+Access with a cell-held service token is the next stronger ingress boundary
+before a broad cohort; a Service Binding by itself cannot be called directly
+by the Kubernetes cell.
 
 Lifecycle events enter a Queue, are reduced to identifiers, class, and time,
 and are forwarded to the authorized cell. Sender, recipient, subject, SMTP
@@ -99,7 +146,9 @@ responses, complaint text, and bounce reasons are not forwarded.
 1. `send.witmail.net` must be an onboarded Email Sending domain in the same
    production Cloudflare account as this Worker. Cloudflare DNS is required.
 2. The Worker must have the `EMAIL` send binding, `RECEIPTS` and
-   `PROVIDER_ROUTES` Durable Objects, and the configured Queue consumer.
+   `PROVIDER_ROUTES` Durable Objects, the configured Queue consumer, and the
+   `DISPATCH_FRONTDOOR_LIMITER` Rate Limiter binding with namespace `2301` and
+   exactly 1,000 requests per 60 seconds.
 3. The lifecycle Queue and dead-letter Queue must exist before deployment.
 4. A domain-scoped `email.sending` event subscription must target the lifecycle
    Queue.
@@ -139,6 +188,16 @@ printf '%s' "$auth_json" | jq -e --arg id "$CLOUDFLARE_ACCOUNT_ID" '
 `whoami` does not accept Wrangler's `--profile` flag. The explicit account ID
 and membership assertion above therefore fence both the selected deployment
 account and the authenticated operator without relying on a named profile.
+
+Namespace candidate `2301` was absent from committed Worker configuration and
+from the current deployed `witself-agent-email-send` version when this change
+was prepared on 2026-08-16; that deployed version had no Rate Limiter binding.
+The available read-only session could not prove non-use across every Worker in
+the Cloudflare account. Rate Limiter namespace IDs can be shared across
+Workers, so inspect the account's Worker-version bindings before the first
+deployment and stop if `2301` is unexpectedly reused. The three keys are
+nevertheless prefixed with `witself-agent-email-send.frontdoor.v1` to prevent
+accidental cross-Worker counter overlap.
 
 Do not export, echo, paste into command arguments, or save either JSON secret
 described below. Wrangler prompts for those values without putting them in
@@ -196,12 +255,19 @@ wrangler_prod deployments status --json
 ```
 
 Record the version ID printed by the deploy. Verify its plaintext bindings,
-especially all three `false` gates, before installing secrets:
+especially all three `false` gates, before installing secrets. Also require
+exactly one `DISPATCH_FRONTDOOR_LIMITER` binding at namespace `2301` with
+limit `1000` and period `60`, and require `.metadata.has_preview=false`:
 
 ```bash
 export DEPLOYED_VERSION_ID='replace-with-version-id-from-deploy-output'
 wrangler_prod versions view "$DEPLOYED_VERSION_ID" --json
 ```
+
+`versions view` does not expose the Workers Observability setting. Verify
+observability separately in the Worker settings/API and stop unless it is
+enabled; the local bundle gate enforces the committed value but is not evidence
+of live state.
 
 ## Secrets
 
@@ -293,10 +359,14 @@ Keep the source cell entry while any other account still targets it.
 1. Finish Email Service domain setup, then create the Queue, dead-letter Queue,
    and disabled subscription as described above.
 2. Deploy the Worker with all three gates false. Install the two secrets and
-   verify their names, the exact Founder account cohort, and the dark
-   deployment.
-3. Deploy the schema-90-compatible cell server and two worker replicas with
-   cell outbound dispatch still disabled. Observe their health and metrics.
+   verify their names, the exact Founder account cohort, the exact front-door
+   binding, disabled preview URLs, enabled observability, and the dark
+   deployment. Stop if namespace `2301` is unexpectedly present on another
+   account Worker.
+3. For the current hardened release, deploy the schema-91-compatible cell
+   server and two worker replicas with cell outbound dispatch still disabled.
+   Observe their health, the logical cell-storage gauges, and the independent
+   PostgreSQL/PVC headroom signal before enabling dispatch.
 4. Enable adapter dispatch only, leaving the receipt proof, event delivery, and
    the subscription disabled:
 
@@ -365,7 +435,13 @@ Keep the source cell entry while any other account still targets it.
    Queue drain. Do not improvise a replay of a real Queue callback; the isolated
    provider-event canary in step 6 is the idempotency proof.
 9. Keep platform and plan rate breakers active before widening either the
-   adapter cohort or account policy.
+   adapter cohort or account policy. During each widening step, watch aggregate
+   `401`, `429`, and `503` rates plus worker exceptions. If `429` or `503`
+   pressure rises, use a controlled, signed probe and its bounded `error_code`
+   to distinguish front-door admission from provider throttling, ambiguity, or
+   a dark gate. A confirmed front-door `503` means binding/edge identity failure
+   and is a rollout blocker. Do not infer that classification from status-only
+   metrics or add unbounded per-request denial logs as a diagnostic shortcut.
 
 ## Rollback and shutdown
 
@@ -395,7 +471,10 @@ Rollback is gate-first and forward-only at the cell database:
    ```
 
 5. If the adapter code itself must be reverted, first inspect a known-good
-   version and confirm its bindings are safe, then move all traffic to it:
+   version and confirm it retains header-first verification and the exact
+   fail-closed front-door binding. An older version without both protections is
+   not safe to receive public traffic; keep dispatch dark and deploy a forward
+   fix instead. Then move all traffic to the reviewed version:
 
    ```bash
    export KNOWN_GOOD_VERSION='replace-with-reviewed-version-id'

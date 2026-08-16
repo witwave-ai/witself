@@ -33,9 +33,14 @@ Agent-email amendment (reviewed 2026-08-16): migration `0089` is authoritative
 for independently gated send controls, durable outbound messages, provider-event
 receipts, recipient suppressions, and outbound GCRA debt. Migration `0090` adds
 the account-wide inbound table and outbound daily/recipient bucket shapes while
-preserving the original realm foreign-key boundary. Durable mail streams are
-portable; all three limiter tables are cell-local coordination state and are
-excluded from account archives. [agent-email.md](agent-email.md) and the
+preserving the original realm foreign-key boundary. Migration `0091` adds the
+transactionally maintained cell-wide retained-email ledger and trigger
+boundary. Durable mail streams are portable; all three limiter tables and the
+schema-91 singleton ledger are cell-local coordination/safety state and are
+excluded from account archives. Destination triggers rebuild the ledger while
+portable rows import, so an import that cannot fit the destination boundary
+fails instead of copying or bypassing source-cell capacity state.
+[agent-email.md](agent-email.md) and the
 embedded migrations govern these newer tables; this older overview does not
 restate them column-for-column.
 
@@ -724,6 +729,54 @@ recovery replays that authority into `recovery:<rear_id>`, reconstructs derived
 state in bounded pages, validates the exact checkpoint digest and
 registry/audit fences, then permanently seals the target. Recovery state is
 never merged into or automatically selected as the active registry.
+
+### `agent_email_cell_storage_capacity` (migration `0091`)
+
+Purpose: one transactionally maintained logical safety ledger for all durable
+agent-email storage in one cell. It is independent of account plans, billing,
+attachment pools, and age-retention policy. The Founder account may remain
+commercially unlimited and retain mail indefinitely; it cannot bypass this
+platform boundary.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `singleton` | `smallint` PK | exactly `1`; one ledger per cell database |
+| `retained_bytes` | `bigint` | logical charge across all counted rows |
+| `root_rows` | `bigint` | inbound plus outbound message roots |
+| `counted_rows` | `bigint` | roots, inbound deliveries, provider-event receipts, and recipient suppressions |
+| `admission_bytes` | `bigint` | new-root byte boundary; default 3 GiB |
+| `admission_root_rows` | `bigint` | new-root count boundary; default 25,000 |
+| `hard_bytes` | `bigint` | all-positive-write byte boundary; default 4 GiB |
+| `hard_counted_rows` | `bigint` | all-positive-write row boundary; default 100,000 |
+| `updated_at` | `timestamptz` | database-clock ledger/config update time |
+
+The migration charges each row 8 KiB of fixed overhead plus the retained
+immutable identity and customer-content values persisted in `agent_email_messages`,
+`agent_email_deliveries`, `agent_email_outbound_messages`,
+`agent_email_outbound_provider_events`, and
+`agent_email_outbound_recipient_suppressions`. A discarded raw payload is `NULL`
+and is not charged as if it were retained. The fixed 8-KiB charge absorbs
+bounded mutable lifecycle metadata. Separate constraints cap inbound-delivery
+and outbound claim IDs at 128 bytes, so claim, release, and terminalization
+updates are charge-neutral even at the hard boundary. Migration setup locks
+accounts before the five child tables, measures existing rows, seeds the
+singleton, and installs one common `AFTER INSERT OR UPDATE OR DELETE` trigger in
+the same transaction.
+
+New inbound and outbound roots must fit both the lower admission boundary and
+the hard boundary. At the defaults, 25,000 admitted roots leave 75,000 rows—an
+average of three lifecycle children per fully admitted root—under the 100,000
+hard cap. Repeated provider events remain bounded by the hard cap; the reserve
+is not an unlimited per-root guarantee. Child/lifecycle inserts and genuinely
+charge-increasing content updates may use the reserved space only up to that
+boundary. This makes the trigger the
+linearization point for current binaries, rolling-old writers, imports, and
+direct maintenance. Deletes, cascades, and charge-reducing updates remain
+allowed above either configured threshold and release their exact old charge.
+Logical capacity therefore recovers through retention even when PostgreSQL's
+physical file size does not shrink. The down migration refuses before changing
+anything while any counted mail remains; removing the triggers is not a valid
+rollback.
 
 ## Open-Plane Tables
 

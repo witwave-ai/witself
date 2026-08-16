@@ -134,7 +134,13 @@ func serve() int {
 		))
 		return 1
 	}
-
+	agentEmailCellStorage, err := agentEmailCellStorageLimitsFromEnv()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", newAgentEmailLogSafeError(
+			"agent-email cell storage configuration", "invalid_configuration", err,
+		))
+		return 1
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -159,6 +165,33 @@ func serve() int {
 		if err := st.Migrate(); err != nil {
 			fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
 			return 1
+		}
+		if err := st.ConfigureAgentEmailCellStorageLimits(
+			ctx,
+			agentEmailCellStorage.AdmissionBytes,
+			agentEmailCellStorage.AdmissionRows,
+			agentEmailCellStorage.HardBytes,
+			agentEmailCellStorage.HardRows,
+		); err != nil {
+			fmt.Fprintf(os.Stderr, "witself-server: agent-email cell storage: %v\n", err)
+			return 1
+		}
+		cfg.ReadAgentEmailCellStorageMetrics = func(
+			ctx context.Context,
+		) (server.AgentEmailCellStorageMetrics, error) {
+			status, err := st.ReadAgentEmailCellStorageStatus(ctx)
+			if err != nil {
+				return server.AgentEmailCellStorageMetrics{}, err
+			}
+			return server.AgentEmailCellStorageMetrics{
+				RetainedBytes:     status.RetainedBytes,
+				RootRows:          status.RootRows,
+				CountedRows:       status.CountedRows,
+				AdmissionBytes:    status.AdmissionBytes,
+				AdmissionRootRows: status.AdmissionRootRows,
+				HardBytes:         status.HardBytes,
+				HardCountedRows:   status.HardCountedRows,
+			}, nil
 		}
 		acctID, err := st.EnsureDefaultAccount(ctx)
 		if err != nil {

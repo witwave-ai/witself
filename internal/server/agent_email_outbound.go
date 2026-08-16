@@ -185,6 +185,8 @@ func agentEmailOutboundProviderEventHandler(
 				writeAgentEmailOutboundCodedError(w, http.StatusNotFound, "not_found", "outbound email not found", false)
 			case errors.Is(err, ErrConflict), errors.Is(err, ErrIdempotencyConflict):
 				writeAgentEmailOutboundCodedError(w, http.StatusConflict, "agent_email_state_conflict", "agent email provider event conflicts with existing state", false)
+			case errors.Is(err, ErrAgentEmailDatabaseCapacity):
+				writeAgentEmailOutboundCodedError(w, http.StatusInsufficientStorage, "agent_email_storage_full", "agent email storage capacity has been reached", true)
 			default:
 				writeAgentEmailOutboundCodedError(w, http.StatusInternalServerError, "backend_unavailable", "could not apply agent email provider event", true)
 			}
@@ -463,6 +465,11 @@ func writeAgentEmailOutboundError(w http.ResponseWriter, err error, internalMess
 		writeFeatureNotEnabledError(w, err)
 	case errors.Is(err, ErrAgentEmailOutboundRateLimited):
 		writeAgentEmailOutboundRateLimitError(w, err)
+	case errors.Is(err, ErrAgentEmailDatabaseCapacity):
+		writeAgentEmailOutboundCodedError(
+			w, http.StatusInsufficientStorage, "agent_email_storage_full",
+			"agent email storage capacity has been reached", false,
+		)
 	case errors.Is(err, ErrBadInput):
 		writeAgentEmailOutboundCodedError(w, http.StatusBadRequest, "invalid_request", err.Error(), false)
 	case errors.Is(err, ErrNotFound):

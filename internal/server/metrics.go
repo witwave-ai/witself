@@ -87,6 +87,21 @@ type agentEmailRateMetricLabels struct {
 	LimitDimension, Scope, Source string
 }
 
+// AgentEmailCellStorageMetrics is a value-free cell-level projection. It has
+// no tenant labels and intentionally reports logical charge, not PostgreSQL or
+// persistent-volume bytes.
+type AgentEmailCellStorageMetrics struct {
+	RetainedBytes     int64
+	RootRows          int64
+	CountedRows       int64
+	AdmissionBytes    int64
+	AdmissionRootRows int64
+	HardBytes         int64
+	HardCountedRows   int64
+}
+
+const agentEmailCellStorageMetricsTimeout = 2 * time.Second
+
 type metricHistogram struct {
 	Buckets []uint64
 	Count   uint64
@@ -486,6 +501,8 @@ func agentEmailIngestMetricOutcome(err error) string {
 		return "over_size"
 	case errors.Is(err, ErrAgentEmailFeatureDisabled):
 		return "feature_disabled"
+	case errors.Is(err, ErrAgentEmailDatabaseCapacity):
+		return "storage_full"
 	case errors.Is(err, ErrAgentEmailReceiveDisabled):
 		return "receive_disabled"
 	case errors.Is(err, ErrAgentEmailRateLimited):
@@ -594,6 +611,47 @@ func observeHistogram[K comparable](target map[K]*metricHistogram, key K, value 
 func (m *runtimeMetrics) writePrometheus(w io.Writer) {
 	snapshot := m.snapshot()
 	snapshot.writePrometheusSnapshot(w)
+}
+
+func writeAgentEmailCellStoragePrometheus(
+	ctx context.Context,
+	w io.Writer,
+	read func(context.Context) (AgentEmailCellStorageMetrics, error),
+) {
+	if read == nil {
+		return
+	}
+	_, _ = fmt.Fprintln(w, "# HELP witself_agent_email_cell_storage_metrics_up 1 when the schema-91 cell-storage ledger was read successfully.")
+	_, _ = fmt.Fprintln(w, "# TYPE witself_agent_email_cell_storage_metrics_up gauge")
+	readCtx, cancel := context.WithTimeout(ctx, agentEmailCellStorageMetricsTimeout)
+	defer cancel()
+	status, err := read(readCtx)
+	if err != nil || !validAgentEmailCellStorageMetrics(status) {
+		_, _ = fmt.Fprintln(w, "witself_agent_email_cell_storage_metrics_up 0")
+		return
+	}
+	_, _ = fmt.Fprintln(w, "witself_agent_email_cell_storage_metrics_up 1")
+	writeIntGauge(w, "witself_agent_email_cell_storage_retained_bytes", "Current logical retained-email charge in this cell.", status.RetainedBytes)
+	writeIntGauge(w, "witself_agent_email_cell_storage_admission_bytes", "Logical byte boundary for admitting new email roots in this cell.", status.AdmissionBytes)
+	writeIntGauge(w, "witself_agent_email_cell_storage_hard_bytes", "Hard logical byte boundary for all positive counted email writes in this cell.", status.HardBytes)
+	writeIntGauge(w, "witself_agent_email_cell_storage_root_rows", "Current inbound-plus-outbound email root rows in this cell.", status.RootRows)
+	writeIntGauge(w, "witself_agent_email_cell_storage_admission_root_rows", "Root-row boundary for admitting new email roots in this cell.", status.AdmissionRootRows)
+	writeIntGauge(w, "witself_agent_email_cell_storage_counted_rows", "Current roots and lifecycle rows charged to this cell's email ledger.", status.CountedRows)
+	writeIntGauge(w, "witself_agent_email_cell_storage_hard_counted_rows", "Hard counted-row boundary for this cell's email ledger.", status.HardCountedRows)
+}
+
+func validAgentEmailCellStorageMetrics(status AgentEmailCellStorageMetrics) bool {
+	return status.RetainedBytes >= 0 &&
+		status.RootRows >= 0 &&
+		status.CountedRows >= status.RootRows &&
+		status.AdmissionBytes > 0 &&
+		status.HardBytes > status.AdmissionBytes &&
+		status.AdmissionRootRows > 0 &&
+		status.HardCountedRows > status.AdmissionRootRows
+}
+
+func writeIntGauge(w io.Writer, name, help string, value int64) {
+	_, _ = fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n%s %d\n", name, help, name, name, value)
 }
 
 func (m *runtimeMetrics) snapshot() *runtimeMetrics {

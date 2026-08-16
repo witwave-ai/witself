@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -55,6 +56,12 @@ func TestAgentEmailOutboundErrorMappingPreservesPolicyRateAndConflictMeaning(t *
 	}
 	if got := mapAgentEmailOutboundError(store.ErrAgentEmailOutboundConflict); !errors.Is(got, server.ErrIdempotencyConflict) {
 		t.Fatalf("send conflict = %v", got)
+	}
+	if got := mapAgentEmailOutboundError(store.ErrAgentEmailDatabaseCapacity); !errors.Is(got, server.ErrAgentEmailDatabaseCapacity) {
+		t.Fatalf("database capacity = %v", got)
+	}
+	if got := mapAgentEmailOutboundProviderEventError(fmt.Errorf("wrapped: %w", store.ErrAgentEmailDatabaseCapacity)); !errors.Is(got, server.ErrAgentEmailDatabaseCapacity) {
+		t.Fatalf("provider-event database capacity = %v", got)
 	}
 	if got := mapAgentEmailOutboundControlError(store.ErrAgentEmailOutboundConflict); !errors.Is(got, server.ErrConflict) || errors.Is(got, server.ErrIdempotencyConflict) {
 		t.Fatalf("control conflict = %v", got)

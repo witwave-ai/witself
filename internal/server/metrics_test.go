@@ -41,6 +41,86 @@ func TestRuntimeMetricsUseBoundedRouteTemplates(t *testing.T) {
 	}
 }
 
+func TestAgentEmailCellStorageMetricsAreValueFreeAndBounded(t *testing.T) {
+	metrics := newRuntimeMetrics()
+	reads := 0
+	handler := metricsMuxFor(metrics, func(ctx context.Context) (AgentEmailCellStorageMetrics, error) {
+		reads++
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > agentEmailCellStorageMetricsTimeout {
+			return AgentEmailCellStorageMetrics{}, errors.New("collector deadline missing")
+		}
+		return AgentEmailCellStorageMetrics{
+			RetainedBytes: 1234, RootRows: 12, CountedRows: 34,
+			AdmissionBytes: 3221225472, AdmissionRootRows: 25000,
+			HardBytes: 4294967296, HardCountedRows: 100000,
+		}, nil
+	})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if response.Code != http.StatusOK || reads != 1 {
+		t.Fatalf("metrics response=%d reads=%d", response.Code, reads)
+	}
+	text := response.Body.String()
+	for _, want := range []string{
+		"witself_agent_email_cell_storage_metrics_up 1",
+		"witself_agent_email_cell_storage_retained_bytes 1234",
+		"witself_agent_email_cell_storage_admission_bytes 3221225472",
+		"witself_agent_email_cell_storage_hard_bytes 4294967296",
+		"witself_agent_email_cell_storage_root_rows 12",
+		"witself_agent_email_cell_storage_admission_root_rows 25000",
+		"witself_agent_email_cell_storage_counted_rows 34",
+		"witself_agent_email_cell_storage_hard_counted_rows 100000",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("metrics missing %q:\n%s", want, text)
+		}
+	}
+	for _, forbidden := range []string{"account_private", "realm_private", "agent_private"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("cell storage metrics exposed %q:\n%s", forbidden, text)
+		}
+	}
+}
+
+func TestAgentEmailCellStorageMetricsFailClosedWithoutErrorText(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		read func(context.Context) (AgentEmailCellStorageMetrics, error)
+	}{
+		{
+			name: "query failure",
+			read: func(context.Context) (AgentEmailCellStorageMetrics, error) {
+				return AgentEmailCellStorageMetrics{}, errors.New("database_private_host account_private_identifier")
+			},
+		},
+		{
+			name: "invalid projection",
+			read: func(context.Context) (AgentEmailCellStorageMetrics, error) {
+				return AgentEmailCellStorageMetrics{RetainedBytes: -1}, nil
+			},
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			metricsMuxFor(newRuntimeMetrics(), test.read).ServeHTTP(
+				response,
+				httptest.NewRequest(http.MethodGet, "/metrics", nil),
+			)
+			text := response.Body.String()
+			if !strings.Contains(text, "witself_agent_email_cell_storage_metrics_up 0") {
+				t.Fatalf("metrics did not fail closed:\n%s", text)
+			}
+			if strings.Contains(text, "witself_agent_email_cell_storage_retained_bytes") ||
+				strings.Contains(text, "database_private_host") ||
+				strings.Contains(text, "account_private_identifier") {
+				t.Fatalf("failed collector exposed values or error text:\n%s", text)
+			}
+		})
+	}
+}
+
 func TestRuntimeMetricsObserveDomainMemoryAndCurationOperations(t *testing.T) {
 	metrics := newRuntimeMetrics()
 	cfg := metrics.instrumentConfig(Config{
@@ -87,6 +167,7 @@ func TestRuntimeMetricsObserveBoundedAgentEmailIngestOutcomes(t *testing.T) {
 			errors.New("account_private_identifier plan_private_name"),
 		),
 		ErrAgentEmailFeatureDisabled,
+		ErrAgentEmailDatabaseCapacity,
 		ErrAgentEmailReceiveDisabled,
 		errors.Join(
 			&AgentEmailRateLimitError{
@@ -140,6 +221,7 @@ func TestRuntimeMetricsObserveBoundedAgentEmailIngestOutcomes(t *testing.T) {
 		"omitted_capacity":       1,
 		"over_size":              1,
 		"feature_disabled":       1,
+		"storage_full":           1,
 		"receive_disabled":       1,
 		"rate_limited":           2,
 		"unknown_recipient":      2,

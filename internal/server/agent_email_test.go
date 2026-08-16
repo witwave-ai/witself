@@ -104,6 +104,11 @@ func TestAgentEmailSignedIngestHTTPContract(t *testing.T) {
 	handler.ServeHTTP(response, testAgentEmailIngestRequest(t, raw, metadata, privateKey))
 	assertAgentEmailVerdict(t, response, http.StatusOK, "feature_disabled")
 
+	ingestErr = ErrAgentEmailDatabaseCapacity
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, testAgentEmailIngestRequest(t, raw, metadata, privateKey))
+	assertAgentEmailVerdict(t, response, http.StatusInsufficientStorage, "storage_full")
+
 	ingestErr = ErrAgentEmailRawSizeExceeded
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, testAgentEmailIngestRequest(t, raw, metadata, privateKey))

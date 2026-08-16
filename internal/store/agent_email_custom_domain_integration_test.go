@@ -566,9 +566,10 @@ func TestAgentEmailCustomDomainRouteDowngradeRefusesAuthorityPostgres(t *testing
 	if _, err := f.store.ApplyAgentEmailCustomDomainRoute(ctx, f.accountID, f.customInput); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.ingest(
+	delivered, err := f.ingest(
 		t, f.scope, "owner.founder@"+f.customInput.Domain,
-	); err != nil {
+	)
+	if err != nil {
 		t.Fatal(err)
 	}
 	retired := f.customInput
@@ -576,6 +577,22 @@ func TestAgentEmailCustomDomainRouteDowngradeRefusesAuthorityPostgres(t *testing
 	retired.ControllerRevision = 2
 	if _, err := f.store.ApplyAgentEmailCustomDomainRoute(ctx, f.accountID, retired); err != nil {
 		t.Fatal(err)
+	}
+	// Schema 0091 intentionally refuses every downgrade while retained email
+	// exists. That invariant has its own focused migration test. Remove this
+	// delivery and disposable rate coordination state so this test can reach
+	// schema 0088 and exercise that older schema's independent authority fences.
+	if _, err := f.store.pool.Exec(ctx, `
+		DELETE FROM agent_email_messages WHERE id=$1`, delivered.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, query := range []string{
+		`DELETE FROM agent_email_rate_buckets WHERE account_id=$1`,
+		`DELETE FROM agent_email_account_rate_buckets WHERE account_id=$1`,
+	} {
+		if _, err := f.store.pool.Exec(ctx, query, f.accountID); err != nil {
+			t.Fatal(err)
+		}
 	}
 	migrationTestDownTo(t, f.schemaDSN, 88)
 	downErr := migrationTestDown(t, f.schemaDSN, true)
@@ -590,6 +607,33 @@ func TestAgentEmailCustomDomainRouteDowngradeRefusesAuthorityPostgres(t *testing
 
 	// Exercise the independent message-provenance fence under a hostile legacy
 	// shape where route authority was removed outside supported product paths.
+	// Recreate the exact immutable provenance only after reaching schema 0088;
+	// carrying it through 0091 would correctly stop at the newer global guard.
+	legacyRaw := []byte("schema-88 custom-domain provenance")
+	if _, err := f.store.pool.Exec(ctx, `
+		INSERT INTO agent_email_messages
+		  (id,account_id,realm_id,mailbox_id,owner_agent_id,address_id,
+		   provider,envelope_sender,envelope_recipient,agent_segment,realm_label,
+		   recipient_route_kind,recipient_realm_alias_claim_id,
+		   recipient_custom_domain_request_id,
+		   raw_mime,raw_size_bytes,raw_sha256,parse_state,attachment_count,
+		   body_text,body_text_kind,attachment_storage_bytes,
+		   retained_attachment_storage_bytes,payload_retention_state,
+		   attachment_storage_accounted,sender_verification_state,
+		   duplicate_group_sha256,received_at)
+		VALUES
+		  ($1,$2,$3,$4,$5,$6,'migration_test','sender@example.com',$7,$8,$9,
+		   'custom_domain',$10,$11,$12,$13,repeat('a',64),'parsed',0,
+		   'bounded provenance','text/plain',0,0,'retained',true,'unverified',
+		   repeat('b',64),clock_timestamp())`,
+		delivered.ID, f.accountID, f.realm.ID, f.address.MailboxID,
+		f.address.OwnerAgentID, f.address.ID,
+		"owner.founder@"+f.customInput.Domain, f.address.AgentSegment,
+		f.customInput.RealmLabel, f.customInput.RealmAliasClaimID,
+		f.customInput.DomainRequestID, legacyRaw, len(legacyRaw),
+	); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := f.store.pool.Exec(ctx, `
 		ALTER TABLE agent_email_messages
 		  DROP CONSTRAINT agent_email_messages_custom_domain_route_fk`); err != nil {

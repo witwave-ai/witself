@@ -826,6 +826,12 @@ cell-local coordination state and are intentionally excluded, so a restored
 account begins with fresh defensive debt. A schema-89-only destination rejects
 a schema-90 archive; account movement remains frozen during mixed-version cell
 rollout.
+Schema 91 also adds no portable rows. The
+`agent_email_cell_storage_capacity` singleton is destination-cell safety state,
+not account data, and is excluded from the archive. Schema-91 triggers charge
+portable mail rows as they import; crossing the destination admission or hard
+boundary fails the import atomically. A schema-90-only destination rejects a
+schema-91 archive, and moves remain frozen during mixed-version convergence.
 Export/import is tracked in
 [backup-and-recovery.md](backup-and-recovery.md).
 

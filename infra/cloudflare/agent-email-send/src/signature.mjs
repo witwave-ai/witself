@@ -100,9 +100,11 @@ export function parseSignerRing(raw) {
   return result;
 }
 
-export async function verifyDispatchRequest(
+// The signature covers the complete body digest supplied in the headers. Verify
+// that authenticated envelope before reading the body so an untrusted caller
+// cannot make the Worker buffer or hash up to the full request limit.
+export async function verifyDispatchHeaders(
   request,
-  body,
   env,
   {
     cryptoAPI = crypto,
@@ -134,10 +136,6 @@ export async function verifyDispatchRequest(
   ) {
     throw new Error("dispatch timestamp is outside the replay window");
   }
-  const actualDigest = await sha256Hex(body, cryptoAPI);
-  if (digest !== actualDigest) {
-    throw new Error("dispatch body digest does not match");
-  }
   const signer = parseSignerRing(env.DISPATCH_SIGNERS_JSON).get(keyId);
   if (!signer) throw new Error("dispatch signing key is not trusted");
   const signature = decodeBase64(signatureText);
@@ -157,4 +155,21 @@ export async function verifyDispatchRequest(
   );
   if (!verified) throw new Error("dispatch signature is invalid");
   return { keyId, signer, digest };
+}
+
+// Header authentication does not make the body trustworthy. The complete
+// bounded body must still match the signed digest before JSON parsing,
+// account admission, Durable Object lookup, or provider dispatch.
+export async function verifyDispatchBodyDigest(
+  body,
+  expectedDigest,
+  cryptoAPI = crypto,
+) {
+  if (!SHA256.test(expectedDigest)) {
+    throw new Error("dispatch body digest is invalid");
+  }
+  const actualDigest = await sha256Hex(body, cryptoAPI);
+  if (expectedDigest !== actualDigest) {
+    throw new Error("dispatch body digest does not match");
+  }
 }

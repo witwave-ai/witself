@@ -316,6 +316,18 @@ func (s *Store) queueAgentEmailDraft(
 	}
 
 	keyHash := agentEmailOutboundSHA256(draft.idempotencyKey)
+	// Serialize first attempts for the same owner/key before inspecting the
+	// durable receipt. This keeps a concurrent exact replay ahead of all rate
+	// debits while the unique index remains the database backstop.
+	if _, err := tx.Exec(ctx, `
+		SELECT pg_advisory_xact_lock(hashtextextended($1,0))`,
+		"witself.agent-email-outbound-idempotency.v1|"+
+			p.AccountID+"|"+p.RealmID+"|"+p.ID+"|"+keyHash,
+	); err != nil {
+		return AgentEmailOutboundMessage{}, fmt.Errorf(
+			"lock outbound agent-email idempotency key: %w", err,
+		)
+	}
 	if existing, found, err := agentEmailOutboundByIdempotencyTx(
 		ctx, tx, p, keyHash, false,
 	); err != nil {
@@ -351,13 +363,43 @@ func (s *Store) queueAgentEmailDraft(
 	if draft.requestKind == AgentEmailOutboundRequestDirect {
 		draft.threadKey = sendID
 	}
+	if err := enforceAgentEmailOutboundRateLimitsTx(
+		ctx, tx, p, limits, draft.to,
+	); err != nil {
+		return AgentEmailOutboundMessage{}, err
+	}
+	if err := preflightAgentEmailCellStorageRootTx(ctx, tx, 1); err != nil {
+		if IsAgentEmailDatabaseCapacityError(err) {
+			return AgentEmailOutboundMessage{},
+				commitAgentEmailCellStorageRefusal(ctx, tx, err)
+		}
+		return AgentEmailOutboundMessage{}, err
+	}
+	writeTx, err := tx.Begin(ctx)
+	if err != nil {
+		return AgentEmailOutboundMessage{}, fmt.Errorf(
+			"begin outbound agent-email storage savepoint: %w", err,
+		)
+	}
+	defer func() { _ = writeTx.Rollback(ctx) }()
 	msg, inserted, err := insertAgentEmailOutboundTx(
-		ctx, tx, p, sender, sendID, keyHash, draft,
+		ctx, writeTx, p, sender, sendID, keyHash, draft,
 	)
 	if err != nil {
+		if IsAgentEmailDatabaseCapacityError(err) {
+			return AgentEmailOutboundMessage{},
+				rollbackAgentEmailCellStorageWriteAndCommitRefusal(
+					ctx, tx, writeTx, err,
+				)
+		}
 		return AgentEmailOutboundMessage{}, err
 	}
 	if !inserted {
+		if err := writeTx.Rollback(ctx); err != nil {
+			return AgentEmailOutboundMessage{}, fmt.Errorf(
+				"rollback duplicate outbound agent-email storage savepoint: %w", err,
+			)
+		}
 		existing, found, findErr := agentEmailOutboundByIdempotencyTx(
 			ctx, tx, p, keyHash, false,
 		)
@@ -372,10 +414,10 @@ func (s *Store) queueAgentEmailDraft(
 		}
 		return redactAgentEmailOutbound(existing), nil
 	}
-	if err := enforceAgentEmailOutboundRateLimitsTx(
-		ctx, tx, p, limits, draft.to,
-	); err != nil {
-		return AgentEmailOutboundMessage{}, err
+	if err := writeTx.Commit(ctx); err != nil {
+		return AgentEmailOutboundMessage{}, fmt.Errorf(
+			"commit outbound agent-email storage savepoint: %w", err,
+		)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return AgentEmailOutboundMessage{}, err

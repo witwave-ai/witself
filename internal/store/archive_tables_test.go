@@ -130,6 +130,9 @@ func TestSchema89OutboundEmailArchiveBoundary(t *testing.T) {
 	if _, excluded := cellLocalArchiveExclusions["agent_email_outbound_rate_buckets"]; !excluded {
 		t.Fatal("outbound rate buckets are not registered as cell-local")
 	}
+	if _, excluded := cellLocalArchiveExclusions["agent_email_cell_storage_capacity"]; !excluded {
+		t.Fatal("agent-email cell storage capacity is not registered as cell-local")
+	}
 }
 
 func TestEvacuationFenceMigrationExcludesLateCellLocalReceipts(t *testing.T) {

@@ -637,6 +637,7 @@ function exactVerdict(text) {
     case "permanent":
     case "receive_disabled":
     case "feature_disabled":
+    case "storage_full":
     case "temporary":
     case "invalid_relay":
     case "retry_canary_rejected":
@@ -843,6 +844,14 @@ async function handleEmailTransaction(message, env, runtime = {}) {
     // Returning normally prevents provider retries and exposes no account
     // policy detail to the external sender.
     return { outcome: "discarded_feature_disabled", phase: "response", status: response.status };
+  }
+  if (verdict === "storage_full" && response.status === 507) {
+    // Enabled-account mail is never silently discarded at the platform
+    // boundary. A sanitized permanent SMTP rejection stops an attacker from
+    // creating an unbounded provider retry loop and gives a legitimate sender
+    // a normal non-delivery signal without exposing cell or account detail.
+    message.setReject(PERMANENT_REJECTION);
+    return { outcome: "rejected_cell_capacity", phase: "response", status: 552 };
   }
   if (verdict === "over_size") {
     message.setReject(OVER_SIZE_REJECTION);

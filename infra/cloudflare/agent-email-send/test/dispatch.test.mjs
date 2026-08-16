@@ -11,6 +11,7 @@ import {
 } from "../src/dispatch.mjs";
 import adapter, {
   failure,
+  FRONTDOOR_LIMIT_PER_MINUTE,
   MAX_BODY_BYTES,
   RECEIPT_PROOF_SCHEMA,
   RECEIPT_REPLAY_AUDIENCE,
@@ -213,10 +214,22 @@ function base64(value) {
   return Buffer.from(value).toString("base64");
 }
 
+function allowFrontDoorLimiter(onLimit = () => {}) {
+  return {
+    async limit(input) {
+      onLimit(input);
+      return { success: true };
+    },
+  };
+}
+
 async function signedAdapterRequest(
   value,
   {
     audience = "witself-agent-email-send",
+    body: bodyOverride,
+    connectingIP = "192.0.2.10",
+    contentLength = true,
     path = "/v1/dispatch",
     env: envOverride = {},
   } = {},
@@ -226,7 +239,8 @@ async function signedAdapterRequest(
     true,
     ["sign", "verify"],
   );
-  const body = new TextEncoder().encode(JSON.stringify(value));
+  const body = bodyOverride ??
+    new TextEncoder().encode(JSON.stringify(value));
   const digest = await sha256Hex(body, webcrypto);
   const timestamp = new Date().toISOString();
   const keyId = "founder-cell";
@@ -242,7 +256,8 @@ async function signedAdapterRequest(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Content-Length": String(body.byteLength),
+        ...(contentLength ? { "Content-Length": String(body.byteLength) } : {}),
+        "CF-Connecting-IP": connectingIP,
         [HEADERS.version]: DISPATCH_SCHEMA,
         [HEADERS.timestamp]: timestamp,
         [HEADERS.keyId]: keyId,
@@ -264,6 +279,7 @@ async function signedAdapterRequest(
       }),
       DISPATCH_ENABLED: "false",
       RECEIPT_REPLAY_ENABLED: "false",
+      DISPATCH_FRONTDOOR_LIMITER: allowFrontDoorLimiter(),
       ...envOverride,
     },
   };
@@ -300,39 +316,308 @@ test("accepts the worst-case escaped 256 KiB text envelope", async () => {
   assert.equal((await response.json()).error_code, "provider_unavailable");
 });
 
-test("streams no more than the request envelope bound before authentication", async () => {
+test("rejects untrusted requests without reading their bodies", async () => {
   let pulls = 0;
-  let canceled = false;
   const body = new ReadableStream({
     pull(controller) {
       pulls += 1;
-      if (pulls === 1) controller.enqueue(new Uint8Array(MAX_BODY_BYTES));
-      else if (pulls === 2) controller.enqueue(new Uint8Array(1));
-      else controller.close();
+      controller.enqueue(new Uint8Array(MAX_BODY_BYTES));
     },
-    cancel() { canceled = true; },
-  });
+  }, { highWaterMark: 0 });
   const response = await adapter.fetch(new Request("https://send.example/v1/dispatch", {
     method: "POST",
+    headers: { "CF-Connecting-IP": "192.0.2.20" },
     body,
     duplex: "half",
-  }), {});
+  }), {
+    DISPATCH_AUDIENCE: "witself-agent-email-send",
+    RECEIPT_REPLAY_AUDIENCE,
+    DISPATCH_REPLAY_WINDOW_SECONDS: "300",
+    DISPATCH_SIGNERS_JSON: "{}",
+    DISPATCH_FRONTDOOR_LIMITER: allowFrontDoorLimiter(),
+  });
+  assert.equal(response.status, 401);
+  assert.equal(pulls, 0);
+});
+
+test("streams no more than the authenticated request envelope bound", async () => {
+  const raw = new Uint8Array(MAX_BODY_BYTES + 1);
+  const signed = await signedAdapterRequest(dispatch(), {
+    body: raw,
+    contentLength: false,
+  });
+  let offset = 0;
+  let canceled = false;
+  const body = new ReadableStream({
+    pull(controller) {
+      if (offset >= raw.length) {
+        controller.close();
+        return;
+      }
+      const end = Math.min(raw.length, offset + MAX_BODY_BYTES);
+      controller.enqueue(raw.slice(offset, end));
+      offset = end;
+    },
+    cancel() { canceled = true; },
+  }, { highWaterMark: 0 });
+  const response = await adapter.fetch(new Request(signed.request.url, {
+    method: "POST",
+    headers: signed.request.headers,
+    body,
+    duplex: "half",
+  }), signed.env);
   assert.equal(response.status, 413);
   assert.equal(canceled, true);
 
+  const frontDoorEnv = {
+    DISPATCH_FRONTDOOR_LIMITER: allowFrontDoorLimiter(),
+  };
   const invalidLength = await adapter.fetch(new Request("https://send.example/v1/dispatch", {
     method: "POST",
-    headers: { "Content-Length": "not-a-number" },
+    headers: {
+      "CF-Connecting-IP": "192.0.2.30",
+      "Content-Length": "not-a-number",
+    },
     body: "{}",
-  }), {});
+  }), frontDoorEnv);
   assert.equal(invalidLength.status, 400);
 
   const declaredOversize = await adapter.fetch(new Request("https://send.example/v1/dispatch", {
     method: "POST",
-    headers: { "Content-Length": String(MAX_BODY_BYTES + 1) },
+    headers: {
+      "CF-Connecting-IP": "192.0.2.30",
+      "Content-Length": String(MAX_BODY_BYTES + 1),
+    },
     body: "{}",
-  }), {});
+  }), frontDoorEnv);
   assert.equal(declaredOversize.status, 413);
+});
+
+test("only the source lane precedes body authentication", async () => {
+  assert.equal(FRONTDOOR_LIMIT_PER_MINUTE, 1000);
+  const events = [];
+  const signed = await signedAdapterRequest(dispatch(), {
+    env: {
+      DISPATCH_FRONTDOOR_LIMITER: allowFrontDoorLimiter(
+        ({ key }) => events.push(key),
+      ),
+    },
+  });
+  const body = new ReadableStream({
+    pull(controller) {
+      events.push("body");
+      controller.enqueue(signed.body);
+      controller.close();
+    },
+  }, { highWaterMark: 0 });
+  const response = await adapter.fetch(new Request(signed.request.url, {
+    method: "POST",
+    headers: signed.request.headers,
+    body,
+    duplex: "half",
+  }), signed.env);
+  assert.equal(response.status, 503);
+  assert.equal(events.length, 4);
+  assert.match(
+    events[0],
+    /^witself-agent-email-send\.frontdoor\.v1:ip:[0-9a-f]{64}$/,
+  );
+  assert.deepEqual(events.slice(1), [
+    "body",
+    "witself-agent-email-send.frontdoor.v1:aggregate",
+    "witself-agent-email-send.frontdoor.v1:signer:founder-cell",
+  ]);
+  assert.ok(!events.some((event) => event.includes("192.0.2.10")));
+});
+
+test("front-door limiter failures fail closed at their trust boundary", async (t) => {
+  const cases = [
+    {
+      name: "missing binding",
+      limiter: null,
+      expectedStatus: 503,
+      expectedPulls: 0,
+    },
+    {
+      name: "binding error",
+      limiter: { async limit() { throw new Error("down"); } },
+      expectedStatus: 503,
+      expectedPulls: 0,
+    },
+    {
+      name: "malformed result",
+      limiter: { async limit() { return {}; } },
+      expectedStatus: 503,
+      expectedPulls: 0,
+    },
+    {
+      name: "missing edge identity",
+      limiter: allowFrontDoorLimiter(),
+      connectingIP: "",
+      expectedStatus: 503,
+      expectedPulls: 0,
+    },
+    {
+      name: "source refusal",
+      limiter: { async limit() { return { success: false }; } },
+      expectedStatus: 429,
+      expectedPulls: 0,
+    },
+    {
+      name: "aggregate refusal",
+      limiter: {
+        calls: 0,
+        async limit() {
+          this.calls += 1;
+          return { success: this.calls === 1 };
+        },
+      },
+      expectedStatus: 429,
+      expectedPulls: 1,
+      expectedSendId: dispatch().send_id,
+    },
+    {
+      name: "signer refusal",
+      limiter: {
+        calls: 0,
+        async limit() {
+          this.calls += 1;
+          return { success: this.calls < 3 };
+        },
+      },
+      expectedStatus: 429,
+      expectedPulls: 1,
+      expectedSendId: dispatch().send_id,
+    },
+  ];
+  for (const {
+    name,
+    limiter,
+    connectingIP,
+    expectedStatus,
+    expectedPulls,
+    expectedSendId = "esnd_invalid",
+  } of cases) {
+    await t.test(name, async () => {
+      const signed = await signedAdapterRequest(dispatch(), { connectingIP });
+      if (limiter === null) delete signed.env.DISPATCH_FRONTDOOR_LIMITER;
+      else signed.env.DISPATCH_FRONTDOOR_LIMITER = limiter;
+      let pulls = 0;
+      let durableCalls = 0;
+      signed.env.RECEIPTS = {
+        idFromName(value) { return value; },
+        get() {
+          durableCalls += 1;
+          throw new Error("front-door refusal reached receipt storage");
+        },
+      };
+      const stream = new ReadableStream({
+        pull(controller) {
+          pulls += 1;
+          controller.enqueue(signed.body);
+          controller.close();
+        },
+      }, { highWaterMark: 0 });
+      const response = await adapter.fetch(new Request(signed.request.url, {
+        method: "POST",
+        headers: signed.request.headers,
+        body: stream,
+        duplex: "half",
+      }), signed.env);
+      assert.equal(response.status, expectedStatus);
+      assert.equal(response.headers.get("Retry-After"), "60");
+      assert.equal((await response.json()).send_id, expectedSendId);
+      assert.equal(pulls, expectedPulls);
+      assert.equal(durableCalls, 0);
+    });
+  }
+});
+
+test("invalid signatures never read the request body", async () => {
+  const signed = await signedAdapterRequest(dispatch());
+  const keys = [];
+  signed.env.DISPATCH_FRONTDOOR_LIMITER = allowFrontDoorLimiter(
+    ({ key }) => keys.push(key),
+  );
+  const headers = new Headers(signed.request.headers);
+  headers.set(HEADERS.signature, base64(new Uint8Array(64)));
+  let pulls = 0;
+  const body = new ReadableStream({
+    pull(controller) {
+      pulls += 1;
+      controller.enqueue(signed.body);
+      controller.close();
+    },
+  }, { highWaterMark: 0 });
+  const response = await adapter.fetch(new Request(signed.request.url, {
+    method: "POST",
+    headers,
+    body,
+    duplex: "half",
+  }), signed.env);
+  assert.equal(response.status, 401);
+  assert.equal(pulls, 0);
+  assert.equal(keys.length, 1);
+  assert.match(
+    keys[0],
+    /^witself-agent-email-send\.frontdoor\.v1:ip:[0-9a-f]{64}$/,
+  );
+});
+
+test("a signed digest mismatch never reaches receipt storage", async () => {
+  const keys = [];
+  const signed = await signedAdapterRequest(dispatch(), {
+    env: {
+      DISPATCH_ENABLED: "true",
+      DISPATCH_FRONTDOOR_LIMITER: allowFrontDoorLimiter(
+        ({ key }) => keys.push(key),
+      ),
+    },
+  });
+  const changed = Uint8Array.from(signed.body);
+  changed[changed.length - 2] ^= 1;
+  let durableCalls = 0;
+  signed.env.RECEIPTS = {
+    idFromName(value) { return value; },
+    get() {
+      durableCalls += 1;
+      throw new Error("digest mismatch reached receipt storage");
+    },
+  };
+  const response = await adapter.fetch(new Request(signed.request.url, {
+    method: "POST",
+    headers: signed.request.headers,
+    body: changed,
+  }), signed.env);
+  assert.equal(response.status, 401);
+  assert.equal(durableCalls, 0);
+  assert.equal(keys.length, 1);
+  assert.match(
+    keys[0],
+    /^witself-agent-email-send\.frontdoor\.v1:ip:[0-9a-f]{64}$/,
+  );
+});
+
+test("an unauthorized signed account cannot consume shared lanes", async () => {
+  const keys = [];
+  const signed = await signedAdapterRequest(dispatch(), {
+    env: {
+      DISPATCH_FRONTDOOR_LIMITER: allowFrontDoorLimiter(
+        ({ key }) => keys.push(key),
+      ),
+    },
+  });
+  const signerRing = JSON.parse(signed.env.DISPATCH_SIGNERS_JSON);
+  signerRing["founder-cell"].account_ids = ["acc_bbbbbbbbbbbbbbbb"];
+  signed.env.DISPATCH_SIGNERS_JSON = JSON.stringify(signerRing);
+  const response = await adapter.fetch(signed.request, signed.env);
+  assert.equal(response.status, 403);
+  assert.equal((await response.json()).error_code, "account_not_allowed");
+  assert.equal(keys.length, 1);
+  assert.match(
+    keys[0],
+    /^witself-agent-email-send\.frontdoor\.v1:ip:[0-9a-f]{64}$/,
+  );
 });
 
 test("normal dispatch and receipt proof audiences are isolated", async () => {

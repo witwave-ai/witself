@@ -31,6 +31,11 @@ type Config struct {
 	HealthAddr  string // Kubernetes liveness/readiness/startup probes
 	MetricsAddr string // Prometheus metrics
 
+	// ReadAgentEmailCellStorageMetrics supplies one value-free schema-91
+	// cell-storage snapshot per Prometheus scrape. It is never called by API or
+	// health traffic; nil omits this database-backed metric family.
+	ReadAgentEmailCellStorageMetrics func(context.Context) (AgentEmailCellStorageMetrics, error)
+
 	// Ready, when set, gates /readyz: it returns 200 only when Ready returns
 	// nil, else 503. nil means always-ready. Liveness/startup never gate on it.
 	Ready func(context.Context) error
@@ -1813,7 +1818,7 @@ func Run(ctx context.Context, cfg Config) error {
 	}{
 		{"api", cfg.APIAddr, metrics.instrument(apiMux(instrumentedConfig))},
 		{"health", cfg.HealthAddr, healthMux(cfg.Ready)},
-		{"metrics", cfg.MetricsAddr, metricsMuxFor(metrics)},
+		{"metrics", cfg.MetricsAddr, metricsMuxFor(metrics, cfg.ReadAgentEmailCellStorageMetrics)},
 	}
 
 	type running struct {
@@ -6175,14 +6180,20 @@ func healthMux(ready func(context.Context) error) http.Handler {
 }
 
 func metricsMux() http.Handler {
-	return metricsMuxFor(newRuntimeMetrics())
+	return metricsMuxFor(newRuntimeMetrics(), nil)
 }
 
-func metricsMuxFor(metrics *runtimeMetrics) http.Handler {
+func metricsMuxFor(
+	metrics *runtimeMetrics,
+	readAgentEmailCellStorage func(context.Context) (AgentEmailCellStorageMetrics, error),
+) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		metrics.writePrometheus(w)
+		writeAgentEmailCellStoragePrometheus(
+			r.Context(), w, readAgentEmailCellStorage,
+		)
 	})
 	return mux
 }
