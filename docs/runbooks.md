@@ -1170,9 +1170,8 @@ expansion also retains the non-optional account-wide 5,000-message/minute and
 1-GiB/minute GCRA refill rates across all realms, with 100-message and 64-MiB
 burst tolerances.
 
-After the schema-90 image rollout, production keeps
-`worker.agentEmailRetention` running in enforcement mode on both replicas even
-though Founder has an explicit indefinite policy. Verify the
+Production runs `worker.agentEmailRetention` in enforcement mode on both
+replicas, even though Founder has an explicit indefinite policy. Verify the
 exact cell configuration: `batchSize: 100`, `interval: 1m`,
 `batchTimeout: 2m`, and `mode: enforce`. Each enforce attempt is bounded to 32
 productive passes and 48 total passes, allowing one sparse 16-lane sweep.

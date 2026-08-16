@@ -21,7 +21,7 @@ deployment deliberately differs from those defaults:
 | Adapter receipt replay | Off | Off; opened only for a bounded operator proof |
 | Adapter lifecycle delivery | Off | Enabled |
 | `witself-agent-email-send-lifecycle` subscription (`email.sending` source) | Disabled | Enabled for six lifecycle event classes |
-| Agent-email retention | Off, preview defaults | Currently off on cell v0.0.249; schema-90 target is two replicas, enforce, batch 100, 1-minute interval, 2-minute timeout |
+| Agent-email retention | Off, preview defaults | Enabled on `civo-sandbox-usw2-dev` v0.0.252/schema 90 with two replicas in enforce mode; batch 100, 1-minute interval, 2-minute timeout |
 
 The lifecycle path uses `witself-agent-email-send-events`, its configured
 consumer, and `witself-agent-email-send-events-dlq`. A real delivered event was
@@ -29,9 +29,10 @@ folded exactly once after the `v0.0.251` redirect-handling fix, producing one
 provider receipt and one canonical `email_sent` usage observation. That
 observation is operational and non-billable: no invoice, overage, or
 payment-provider conversion is enabled. The original DLQ copy remains retained
-as incident evidence. The serving Civo cell remains on application `0.0.249`
-because the `v0.0.250` and `v0.0.251` changes were isolated to the edge event
-consumer; no cell migration was required.
+as incident evidence. The Founder-serving Civo cell now runs application
+`0.0.252` at schema 90. Releases `v0.0.250` and `v0.0.251` were edge-only
+event-consumer releases; the later `v0.0.252` cell rollout added the bounded
+storage and retention controls described below.
 
 Production scope is still intentionally narrow. There is no wildcard account
 cohort. Widening requires a new reviewed cell, account-policy, adapter, queue,
@@ -136,11 +137,11 @@ reopening provider traffic; schema-89-only binaries are not a rollback after
 that migration lands.
 
 The Founder account has explicit indefinite agent-email retention, so its mail
-is not eligible for age deletion. The schema-90 rollout target keeps the bounded
-`agentEmailRetention` worker running in enforcement mode on both worker
+is not eligible for age deletion. The v0.0.252/schema-90 production deployment
+runs the bounded `agentEmailRetention` worker in enforcement mode on both worker
 replicas: batch 100, one-minute interval, and one shared two-minute timeout per
-run. The current v0.0.249 cell remains off until the schema-90 image and both
-required backups exist. An enforce attempt stops after 32 productive passes and
+run. Activation followed verification of both required pre-migration backups.
+An enforce attempt stops after 32 productive passes and
 at most 48 total passes, leaving room to skip one complete sparse 16-lane set.
 A capped nonempty lane becomes immediately eligible behind older due lanes;
 empty and lock-only lanes keep the normal interval. Preview intentionally runs
@@ -156,7 +157,7 @@ account's rolling-minute envelope of at most 5,100 rows or 1,088 MiB, but
 database latency still requires monitoring and a wider cohort remains blocked
 on a reviewed cell-wide storage/admission budget or sharding.
 
-After enforcement is activated, a later Professional or Team account needs no
+With enforcement active, a later Professional or Team account needs no
 worker-mode change when its 90-day or 365-day policy becomes effective.
 A new cell must still start in preview, review value-free counts, and explicitly
 promote the same bounded configuration before it serves a finite-retention

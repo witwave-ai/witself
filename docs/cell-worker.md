@@ -148,7 +148,7 @@ scripts/run-agent-email-receipt-proof.sh \
   --kubeconfig /absolute/private/path/kubeconfig \
   --context witself-civo-sandbox-usw2-dev \
   --namespace witself \
-  --expected-image ghcr.io/witwave-ai/images/witself-server:0.0.249 \
+  --expected-image ghcr.io/witwave-ai/images/witself-server:0.0.252 \
   --expected-config-checksum 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
   --expected-replicas 2 \
   --account-id acc_... \
@@ -346,9 +346,10 @@ Agent-email retention uses the same sequence with its own schema,
 lanes, and metrics. Changing `worker.agentEmailRetention` alters only the
 worker ConfigMap checksum; API pods are not restarted.
 
-The schema-90 production target keeps enforcement active even when the only
-current account has an indefinite policy: two replicas, batch size 100,
-one-minute interval, and one shared two-minute timeout per scheduled run. An
+The active `civo-sandbox-usw2-dev` production configuration keeps enforcement
+running even though the Founder account has an indefinite policy: two replicas,
+batch size 100, a one-minute interval, and one shared two-minute timeout per
+scheduled run. An
 enforce attempt executes at most 32 productive passes and 48 total passes, so
 one complete sparse 16-lane set can be skipped without consuming productive
 capacity. A capped nonempty lane is immediately due but sorts behind older due
@@ -365,8 +366,9 @@ batch fits only one. These work ceilings exceed one account's
 5,100-row/1,088-MiB rolling-minute envelope, but they are neither a
 database-throughput promise nor a reserved inbound share or multi-account
 cell-capacity guarantee. Alert on capped batches, timeouts, last-success age,
-and persistent backlog. Do not activate this target on the current v0.0.249
-cell before the schema-90 release artifact and backups exist.
+and persistent backlog. This configuration was enabled on v0.0.252 only after
+the schema-90 artifact and both backups were verified; repeat that gate for
+every new cell.
 
 Outbound agent-email activation and cohort expansion use a separate staged
 rollout. Committed defaults remain dark; the initial Founder production cohort

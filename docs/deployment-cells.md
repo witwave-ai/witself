@@ -228,11 +228,10 @@ Current production state is narrower than the catalog and intentionally differs
 from those defaults: the Civo Founder cohort has two outbound worker replicas,
 adapter dispatch, lifecycle delivery, and the `email.sending` subscription
 enabled; receipt replay remains off. The same two replicas keep agent-email
-retention capable but currently off on cell application `0.0.249`. The
-schema-90 rollout target enables bounded enforcement at batch 100, a one-minute
-interval, and a two-minute timeout only after the release artifact and both
-pre-migration backups are verified; Founder's effective retention remains
-indefinite.
+retention active on `civo-sandbox-usw2-dev` application `0.0.252` at schema 90:
+enforce mode, batch 100, a one-minute interval, and a two-minute timeout.
+Activation followed verification of the release artifact and both pre-migration
+backups; Founder's effective retention remains indefinite.
 Every other cell/account remains subject to its own explicit activation. Treat
 the README procedure as the repeatable contract for a new cell or cohort, not
 as evidence that the current Founder deployment is still dark.
@@ -499,8 +498,9 @@ delete a route merely to make the down migration pass. Delivery activation is
 a later, separately reviewed edge rollout.
 
 The custom-domain routing foundation completed its dark schema-88 cell wave;
-the active Civo cell has since advanced to schema 89. That does not activate
-customer-domain provider delivery. Keep both control-plane routing gates and
+the Founder-serving `civo-sandbox-usw2-dev` cell has since advanced to schema
+90. That does not activate customer-domain provider delivery. Keep both
+control-plane routing gates and
 `AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED` off, do not add a customer domain
 to managed receive configuration, and do not change MX/Email Routing or send a
 live custom-domain canary until separately approved.
