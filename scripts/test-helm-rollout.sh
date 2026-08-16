@@ -589,8 +589,8 @@ require_line "          resourcesPreset: nano" "$civo_use1_postgres_application"
 reject_line "          resourcesPreset: micro" "$civo_use1_postgres_application"
 require_line "          resourcesPreset: nano" "$civo_default_preset_postgres_application"
 extract_application_helm_values "$civo_server_application" "$civo_server_nested_values"
-require_line '    targetRevision: "0.0.247"' "$civo_server_application"
-require_line '          tag: 0.0.247' "$civo_server_application"
+require_line '    targetRevision: "0.0.249"' "$civo_server_application"
+require_line '          tag: 0.0.249' "$civo_server_application"
 require_sequence "$civo_server_application" \
   "          providerEventTokenSecret:" \
   "            key: token" \
@@ -628,6 +628,8 @@ extract_document ConfigMap witself-worker "$civo_server_nested_render" "$civo_wo
 extract_document Deployment witself-server "$civo_server_nested_render" "$civo_server_deployment"
 extract_document Deployment witself-worker "$civo_server_nested_render" "$civo_worker_deployment"
 
+require_line "  replicas: 1" "$civo_server_deployment"
+require_line "  replicas: 2" "$civo_worker_deployment"
 require_line '  WITSELF_CELL_NAME: "civo-sandbox-usw2-dev"' "$civo_server_config"
 require_line '  WITSELF_AGENT_EMAIL_OUTBOUND_ENABLED: "false"' "$civo_worker_config"
 require_line '  WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_ENDPOINT: "https://witself-agent-email-send.witwave.workers.dev/v1/dispatch"' "$civo_worker_config"
@@ -639,10 +641,12 @@ require_sequence "$civo_server_deployment" \
   "                secretKeyRef:" \
   '                  name: "witself-agent-email-provider-event-v2"' \
   '                  key: "token"'
-reject_line "WITSELF_AGENT_EMAIL_PROVIDER_EVENT_TOKEN" "$civo_worker_deployment"
-reject_line "witself-agent-email-provider-event-v2" "$civo_worker_deployment"
-reject_line "WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_PRIVATE_KEY" "$civo_worker_deployment"
-reject_line "witself-agent-email-outbound-dispatch-v1" "$civo_worker_deployment"
+reject_line "            - name: WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_PRIVATE_KEY" "$civo_server_deployment"
+reject_line '                  name: "witself-agent-email-outbound-dispatch-v1"' "$civo_server_deployment"
+reject_line "            - name: WITSELF_AGENT_EMAIL_PROVIDER_EVENT_TOKEN" "$civo_worker_deployment"
+reject_line '                  name: "witself-agent-email-provider-event-v2"' "$civo_worker_deployment"
+reject_line "            - name: WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_PRIVATE_KEY" "$civo_worker_deployment"
+reject_line '                  name: "witself-agent-email-outbound-dispatch-v1"' "$civo_worker_deployment"
 
 # Portable defaults keep the API rollout-safe and fail closed on a worker that
 # has no shared database Secret.
