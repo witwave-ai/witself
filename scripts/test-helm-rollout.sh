@@ -258,6 +258,23 @@ require_line() {
   fi
 }
 
+read_witself_server_semver_scalar() {
+  local key="$1"
+  local file="$2"
+  local value
+  value="$(awk -v key="${key}:" '
+    /^  witselfServer:[[:space:]]*$/ { in_server = 1; next }
+    in_server && /^  [^ ]/ { in_server = 0 }
+    in_server && $1 == key { count += 1; value = $2 }
+    END { if (count == 1) print value }
+  ' "$file")"
+  if [[ ! "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "expected exactly one semantic-version value for ${key} in ${file}" >&2
+    exit 1
+  fi
+  printf '%s' "$value"
+}
+
 reject_line() {
   local unexpected="$1"
   local file="$2"
@@ -590,8 +607,10 @@ require_line "          resourcesPreset: nano" "$civo_use1_postgres_application"
 reject_line "          resourcesPreset: micro" "$civo_use1_postgres_application"
 require_line "          resourcesPreset: nano" "$civo_default_preset_postgres_application"
 extract_application_helm_values "$civo_server_application" "$civo_server_nested_values"
-require_line '    targetRevision: "0.0.249"' "$civo_server_application"
-require_line '          tag: 0.0.249' "$civo_server_application"
+civo_server_chart_version="$(read_witself_server_semver_scalar chartVersion "$civo_cell")"
+civo_server_image_tag="$(read_witself_server_semver_scalar imageTag "$civo_cell")"
+require_line "    targetRevision: \"${civo_server_chart_version}\"" "$civo_server_application"
+require_line "          tag: ${civo_server_image_tag}" "$civo_server_application"
 require_sequence "$civo_server_application" \
   "          providerEventTokenSecret:" \
   "            key: token" \
