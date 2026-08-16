@@ -643,6 +643,176 @@ their own reviewed stage.
    is included. That second manifest must pass `routes:primary -- status`
    before a disabled-rule plan is created.
 
+### Prove the Personal-to-Professional receive boundary inside one cell
+
+Run this before enabling a provider rule. It proves the signed cell-ingest
+boundary only; it does not send through Cloudflare, change DNS or routing,
+create an account, install a client, or mutate a plan. Use an existing,
+dedicated Personal account already in the exact cell cohort with one live
+canonical `@witmail.net` mailbox. Do not use a customer mailbox or an account
+with an existing plan override.
+
+Prepare a mode-`0700` directory outside every Git worktree. In it, create:
+
+- a mode-`0600` target JSON with exactly the schema printed by
+  `scripts/run-agent-email-cell-smoke.sh --help`;
+- an absent path for the state JSON;
+- the existing installed client's full `witself_agt_*` token in a mode-`0600`
+  file; use the same file and bytes in both signed phases;
+- the reviewed base64 PKCS8 Ed25519 relay private key in a mode-`0600` file,
+  obtained from approved escrow rather than a pod or provider log;
+- the mode-`0600` kubeconfig for the destination cell.
+
+The target is private because it contains account, realm, agent, and canonical
+address identities. The state is private crash-recovery evidence and remains
+the same path for every phase. The harness obtains the matching public key and
+audience from the fenced cell ConfigMap, proves the private key has exactly one
+matching key ID, and does not read that key until the cell, cohort, target,
+effective policy, and zero-row preconditions pass.
+It likewise delays reading the agent token until those preconditions pass,
+proves its hash is one live full credential for the exact target, and stores
+only that digest in the private state. The plaintext token is never placed in
+an argument, environment variable, SQL statement, or operator output.
+
+First prove authoritative Personal policy. The entitlement-version marker must
+be `1`, `agent_email_receive` must be absent, and there must be no existing
+message, delivery, or receive-event row for the fresh probe:
+
+```sh
+SMOKE_STATE=/absolute/private/receive-smoke-state.json
+SMOKE_TARGET=/absolute/private/receive-smoke-target.json
+RELAY_KEY_FILE=/absolute/private/relay-ed25519-private-key
+RELAY_KEY_ID=reviewed-key-id
+AGENT_TOKEN_FILE=/absolute/private/installed-agent-token
+
+scripts/run-agent-email-cell-smoke.sh \
+  --cell CELL --kubeconfig KUBECONFIG --context CONTEXT \
+  --phase disabled --target-file "$SMOKE_TARGET" \
+  --state-file "$SMOKE_STATE" \
+  --agent-token-file "$AGENT_TOKEN_FILE" \
+  --relay-key-id "$RELAY_KEY_ID" \
+  --relay-private-key-file "$RELAY_KEY_FILE"
+```
+
+Success is one value-free JSON document with HTTP 200,
+`verdict:"feature_disabled"`, and zero messages, deliveries, and audit events
+before and after, including zero change in the target owner's total receive
+event count. Before ingest, the same loopback service must return the exact
+HTTP 403, non-retryable `feature_not_enabled` owner response to that agent token.
+The script signs operator-side, reaches only a loopback
+`kubectl port-forward` to the fenced API Service, and issues at most one POST.
+It shares the fixed cell-operation lock with backfill/canary Jobs. A timeout or
+lost response is `indeterminate`; never rerun the signed phase. Keep the state
+and use `--phase cleanup` to reconcile zero or one row.
+
+This is a temporary audited classification exception, not a billing change.
+First prove that the billing and effective plans are Personal, application is
+settled, and no plan override exists:
+
+```sh
+CONTROL_PLANE_URL="${CONTROL_PLANE_URL:-https://self.witwave.ai}"
+PLATFORM_ADMIN_TOKEN_FILE=/absolute/private/platform-admin-token
+ACCOUNT_ID=acc_reviewed
+
+witself-admin account plan-override get \
+  --endpoint "$CONTROL_PLANE_URL" \
+  --token-file "$PLATFORM_ADMIN_TOKEN_FILE" \
+  --account "$ACCOUNT_ID" --json |
+  jq -e '.billing_plan=="free" and .plan=="free" and
+    .plan_override==null and .apply_pending==false and
+    .desired_revision==.applied_revision'
+```
+
+Stop if this read fails or reports a pre-existing override. Set Professional
+with a reviewed reason, then poll `plan-override get --json` until
+`plan=="standard"`, `email_receive.enabled==true`, `apply_pending==false`, and
+the desired/applied revisions match. A `set` response may intentionally return
+nonzero while cell application is pending; accept only a parseable policy
+document and verify convergence independently:
+
+```sh
+witself-admin account plan-override set \
+  --endpoint "$CONTROL_PLANE_URL" \
+  --token-file "$PLATFORM_ADMIN_TOKEN_FILE" \
+  --account "$ACCOUNT_ID" --plan standard \
+  --reason "production receive plan-flip smoke" --json
+
+witself-admin account plan-override get \
+  --endpoint "$CONTROL_PLANE_URL" \
+  --token-file "$PLATFORM_ADMIN_TOKEN_FILE" \
+  --account "$ACCOUNT_ID" --json |
+  jq -e '.billing_plan=="free" and .plan=="standard" and
+    .plan_override.plan=="standard" and .email_receive.enabled==true and
+    .apply_pending==false and .desired_revision==.applied_revision'
+```
+
+Run the entitled phase with the byte-identical target, state, agent token, key
+ID, key, kubeconfig, context, and cell. The harness requires a strictly newer
+applied snapshot while the Deployment UID, generation, image, ConfigMap
+checksum, API Service UID/resourceVersion, exact selector and port set, and
+target remain unchanged. The Service selector must exactly match the fenced
+Deployment selector before, immediately before, and immediately after the
+request. The harness rejects a different token digest and requires the same
+token to return its exact enabled canonical mailbox before ingest. Together,
+those are the no-reinstall/no-redeploy proof:
+
+```sh
+scripts/run-agent-email-cell-smoke.sh \
+  --cell CELL --kubeconfig KUBECONFIG --context CONTEXT \
+  --phase entitled --target-file "$SMOKE_TARGET" \
+  --state-file "$SMOKE_STATE" \
+  --agent-token-file "$AGENT_TOKEN_FILE" \
+  --relay-key-id "$RELAY_KEY_ID" \
+  --relay-private-key-file "$RELAY_KEY_FILE"
+```
+
+Success is HTTP 200 with `verdict:"accepted"`, an exact `0 -> 1` message,
+delivery, and probe-linked event transition, and exactly `+1` in the target
+owner's total receive-event count. It also reports `cleanup_required:true`.
+Run cleanup once; it uses no relay key and sends no request:
+
+```sh
+scripts/run-agent-email-cell-smoke.sh \
+  --cell CELL --kubeconfig KUBECONFIG --context CONTEXT \
+  --phase cleanup --target-file "$SMOKE_TARGET" \
+  --state-file "$SMOKE_STATE"
+```
+
+Cleanup locks the account and every row matching any unique probe marker. It
+requires each suspect to satisfy the complete synthetic predicate, recomputes
+the hash from stored raw MIME, and uses the exact verified Professional
+message ID when available. It then refuses any row that was read,
+acknowledged, claimed, completed, failure-counted, duplicate-linked,
+retry-canary-linked, ambiguous, or missing its one receive audit event. On a
+safe row it deletes only the synthetic message; its delivery cascades and the
+attachment counter trigger reconciles. The append-only account event and
+shared rate-limiter state remain. If cleanup cannot prove safety, retain the
+state and investigate; never hand-delete by digest, address, or broad label.
+
+Finally clear only the override created above and poll until Personal is
+settled again. Do this on success and on every failure after `set`:
+
+```sh
+witself-admin account plan-override clear \
+  --endpoint "$CONTROL_PLANE_URL" \
+  --token-file "$PLATFORM_ADMIN_TOKEN_FILE" \
+  --account "$ACCOUNT_ID" \
+  --reason "restore Personal after production receive smoke" --json
+
+witself-admin account plan-override get \
+  --endpoint "$CONTROL_PLANE_URL" \
+  --token-file "$PLATFORM_ADMIN_TOKEN_FILE" \
+  --account "$ACCOUNT_ID" --json |
+  jq -e '.billing_plan=="free" and .plan=="free" and
+    .plan_override==null and .email_receive.enabled==false and
+    .apply_pending==false and .desired_revision==.applied_revision'
+```
+
+Do not delete the private state until synthetic cleanup and Personal restore
+are both verified. Record only the three value-free harness result documents
+and the control-plane audit reason; never attach the target, state, key, or raw
+SQL/HTTP artifacts to a ticket.
+
 Before provider activation, rollback is config-only: disable any canary
 schedule, settle an unused arm or let its 15-minute TTL expire, clear
 `retryCanaryAgentIDExistingSecret.name`, and wait for every API pod to converge.
