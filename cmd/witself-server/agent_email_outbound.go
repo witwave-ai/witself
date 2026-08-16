@@ -16,7 +16,7 @@ import (
 func configureAgentEmailOutbound(cfg *server.Config, st *store.Store) {
 	cfg.ApplyAgentEmailOutboundProviderEvent = func(ctx context.Context, event server.AgentEmailOutboundProviderEvent) error {
 		_, err := st.ApplyAgentEmailOutboundProviderEvent(ctx, store.AgentEmailOutboundProviderEventInput{
-			Provider: "cloudflare_email_sending", EventID: event.EventID,
+			Provider: store.AgentEmailOutboundCloudflareProvider, EventID: event.EventID,
 			ProviderMessageID: event.ProviderMessageID,
 			EventClass:        event.EventClass, OccurredAt: event.OccurredAt,
 		})

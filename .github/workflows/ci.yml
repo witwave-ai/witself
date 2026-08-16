@@ -350,6 +350,9 @@ jobs:
       - name: agent-email isolated cell operation checks
         run: bash scripts/test-agent-email-cell-operation.sh
 
+      - name: agent-email transient receipt proof checks
+        run: bash scripts/test-agent-email-receipt-proof.sh
+
       - name: agent-email receive smoke harness checks
         run: bash scripts/test-agent-email-cell-smoke.sh
 

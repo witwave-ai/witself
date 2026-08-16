@@ -1,12 +1,16 @@
 import {
   DISPATCH_SCHEMA,
+  RECEIPT_PROOF_SCHEMA,
+  RECEIPT_REPLAY_AUDIENCE,
   RESPONSE_SCHEMA,
   verifyDispatchRequest,
 } from "./signature.mjs";
 import {
   OutboundReceipt,
   ProviderRoute,
+  durableObjectReceiptReplay,
   durableObjectRequest,
+  receiptProofFailure,
   validateDispatch,
 } from "./dispatch.mjs";
 import { consumeProviderEvents } from "./events.mjs";
@@ -88,44 +92,81 @@ async function readBoundedBody(request) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (request.method !== "POST" || url.pathname !== "/v1/dispatch") {
+    const isDispatch = request.method === "POST" &&
+      url.pathname === "/v1/dispatch";
+    const isReceiptReplay = request.method === "POST" &&
+      url.pathname === "/v1/dispatch:receipt-replay";
+    if (!isDispatch && !isReceiptReplay) {
       return new Response("not found", { status: 404 });
     }
+    const endpointFailure = (
+      status,
+      code,
+      sendId = "esnd_invalid",
+      state = "rejected",
+      retryAfterSeconds = 0,
+    ) => isReceiptReplay
+      ? receiptProofFailure(status, "receipt_unresolved", sendId)
+      : failure(status, code, sendId, state, retryAfterSeconds);
     const declaredHeader = request.headers.get("Content-Length");
     let declaredLength = null;
     if (declaredHeader !== null) {
       if (!/^(?:0|[1-9][0-9]*)$/.test(declaredHeader)) {
-        return failure(400, "request_invalid");
+        return endpointFailure(400, "request_invalid");
       }
       declaredLength = Number(declaredHeader);
       if (!Number.isSafeInteger(declaredLength)) {
-        return failure(400, "request_invalid");
+        return endpointFailure(400, "request_invalid");
       }
       if (declaredLength > MAX_BODY_BYTES) {
-        return failure(413, "request_too_large");
+        return endpointFailure(413, "request_too_large");
       }
     }
     const body = await readBoundedBody(request);
     if (body === null || body.length < 2) {
-      return failure(413, "request_too_large");
+      return endpointFailure(413, "request_too_large");
     }
     if (declaredLength !== null && declaredLength !== body.length) {
-      return failure(400, "request_invalid");
+      return endpointFailure(400, "request_invalid");
+    }
+    const dispatchAudience = String(env.DISPATCH_AUDIENCE ?? "");
+    const receiptReplayAudience = String(env.RECEIPT_REPLAY_AUDIENCE ?? "");
+    if (
+      dispatchAudience.length < 1 ||
+      receiptReplayAudience !== RECEIPT_REPLAY_AUDIENCE ||
+      dispatchAudience === receiptReplayAudience
+    ) {
+      return endpointFailure(401, "signature_invalid");
     }
     let verified;
     try {
-      verified = await verifyDispatchRequest(request, body, env);
+      verified = await verifyDispatchRequest(request, body, env, {
+        expectedAudience: isReceiptReplay
+          ? receiptReplayAudience
+          : dispatchAudience,
+      });
     } catch {
-      return failure(401, "signature_invalid");
+      return endpointFailure(401, "signature_invalid");
     }
     let dispatch;
     try {
       dispatch = validateDispatch(JSON.parse(new TextDecoder().decode(body)), env);
     } catch {
-      return failure(400, "request_invalid");
+      return endpointFailure(400, "request_invalid");
     }
     if (!verified.signer.accountIds.has(dispatch.account_id)) {
-      return failure(403, "account_not_allowed", dispatch.send_id);
+      return endpointFailure(403, "account_not_allowed", dispatch.send_id);
+    }
+    if (isReceiptReplay) {
+      if (String(env.RECEIPT_REPLAY_ENABLED ?? "false") !== "true") {
+        return endpointFailure(503, "receipt_replay_unavailable", dispatch.send_id);
+      }
+      return durableObjectReceiptReplay(
+        env,
+        dispatch,
+        verified.digest,
+        verified.keyId,
+      );
     }
     if (String(env.DISPATCH_ENABLED ?? "false") !== "true") {
       return failure(
@@ -143,4 +184,4 @@ export default {
   },
 };
 
-export { DISPATCH_SCHEMA };
+export { DISPATCH_SCHEMA, RECEIPT_PROOF_SCHEMA, RECEIPT_REPLAY_AUDIENCE };

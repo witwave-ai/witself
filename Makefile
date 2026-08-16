@@ -116,6 +116,7 @@ check-infra: ## Gates for nested Pulumi plus the isolated Cloudflare agent-email
 	npm --prefix infra/cloudflare/agent-email-send test
 	npm --prefix infra/cloudflare/agent-email-send run bundle:check
 	bash scripts/test-agent-email-cell-operation.sh
+	bash scripts/test-agent-email-receipt-proof.sh
 	bash scripts/test-agent-email-cell-smoke.sh
 	npm --prefix infra/cloudflare/control-plane test
 	@echo "check-infra: infra gates green"

@@ -1613,6 +1613,37 @@ The receive and independently gated outbound shapes are pinned in
   Content-free provider delivery events enter only through bearer-protected
   `POST /v1/internal/agent-email-send:provider-event`.
 
+Operators can prove this boundary against one fresh synthetic accepted send
+with `witself-server agent-email provider-event-canary`. The command takes an
+exact `--account-id`, `--send-id`, and canonical UTC
+`--expected-accepted-at`, plus mandatory `--json`. Before opening a socket it
+requires a Cloudflare send no more than 15 minutes old and exactly one
+canonical `email_sent` usage event. The send must be either pristine accepted
+with no receipt, or already delivered solely by the exact deterministic event
+for this fence. The continuation case requires exactly one total receipt with
+the exact event identity, canonical request hash, provider correlation,
+`delivered` class, and accepted-at `occurred_at` and `delivered_at`; any
+lookalike, unrelated, or extra provider receipt refuses before HTTP.
+Run it only for a disposable canary while Cloudflare provider-event delivery
+and the associated queue subscription are disabled. It then binds only
+ephemeral IPv4 loopback, calls this production handler with
+the dedicated provider-event bearer, requires exact replay statuses
+`204`/`204`, and requires `409` for the same event id with changed semantics.
+The event id is derived before preflight with a domain-separated SHA-256 over
+the exact account, send, and accepted-at fence; `occurred_at` is exactly that
+accepted-at value. Retries, restarts, and staggered overlapping invocations
+therefore submit byte-identical envelopes, still exercise `204`/`204`/`409`,
+and converge on one receipt. Redirects are never followed. Postflight proves
+the exact canonical receipt and accepted-at delivery timestamp, one usage
+event, and `delivered` state.
+It detects but cannot prevent a real provider event racing after preflight, so
+the Cloudflare delivery gate and queue subscription must remain disabled for
+the whole proof. The selected send is intentionally and permanently
+delivered by this proof, so it must be a disposable canary rather than customer
+mail. Output is limited to `send_id`, `status`, `count`, and `state`; private
+event/provider ids, credentials, and message content never cross stdout or
+stderr.
+
 Direct send accepts `to`, `subject`, and `text`; reply accepts only `text` and
 derives its recipient and safe `Re:` subject from the exact inbound message.
 Neither accepts `from`, `reply_to`, HTML, attachments, CC, BCC, or multiple

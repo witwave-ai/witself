@@ -1311,6 +1311,46 @@ keyed by `send_id` returns an exact terminal replay and rejects a different
 digest. Once the receipt records `provider_started`, an unprovable outcome is
 `ambiguous`, never an inferred success or blind resend.
 
+The operator-only accepted-receipt proof posts that same byte-identical
+dispatch to the exact `/v1/dispatch:receipt-replay` path under the distinct
+`witself-agent-email-send-receipt-replay` audience. Its 200 response has exactly
+these fields:
+
+```json
+{
+  "schema_version": "witself.agent-email-dispatch-receipt-proof.v1",
+  "send_id": "esnd_aaaaaaaaaaaaaaaa",
+  "receipt_state": "accepted",
+  "digest_matched": true,
+  "signer_matched": true,
+  "provider_call_started_count": 1,
+  "verified_replay_count": 1,
+  "route_pending": false
+}
+```
+
+Both booleans ending in `_matched` must be true. Counters are positive bounded
+integers no greater than 1,000,000; the production canary command additionally
+requires `provider_call_started_count=1` and `route_pending=false`. The response
+never includes the message body, recipient, subject, provider receipt ID,
+digest, signer key, credential, or token. Redirects and every non-200 response
+fail the command.
+
+Proof failures use the same schema marker but the separate exact four-field
+shape `schema_version`, `send_id`, `receipt_state`, and `error_code`. The closed
+outcomes are:
+
+| HTTP | `receipt_state` | `error_code` |
+|---|---|---|
+| 404 | `missing` | `receipt_missing` |
+| 409 | `conflict` | `receipt_conflict` |
+| 409 | `unresolved` | `receipt_unresolved` |
+
+Authentication, gate, malformed-request, or other pre-receipt failures also
+fail closed and may use their appropriate non-200 HTTP status with
+`receipt_state=unresolved` and `error_code=receipt_unresolved`. No error response
+is accepted as proof.
+
 Content-free provider updates enter the cell only at bearer-protected `POST
 /v1/internal/agent-email-send:provider-event`:
 

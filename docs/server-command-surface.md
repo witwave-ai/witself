@@ -11,7 +11,8 @@ managed and self-hosted backend API deployments.
 > and cannot decrypt. `WITSELF_SEALED_PLANE_ENABLED`, `WITSELF_KMS_PROVIDER`,
 > and `WITSELF_KMS_KEY_ID` are not implemented or required. The current binary
 > exposes `version`, `serve`, and the bounded operator-only `agent-email
-> backfill` / `agent-email canary-manifest` actions; `serve` and the mutable
+> backfill`, `agent-email canary-manifest`, and `agent-email
+> provider-event-canary` actions; `serve` and the mutable
 > backfill apply embedded forward Goose migrations before continuing. Later
 > sections describing KMS configuration, sealed-plane readiness, or separate
 > `migrate`/`config` commands are superseded target history, not current
@@ -74,10 +75,18 @@ witself-server
   serve
   agent-email backfill --exception-output ABSOLUTE_PATH [--overrides ABSOLUTE_PATH]
   agent-email canary-manifest --output ABSOLUTE_PATH
+  agent-email provider-event-canary --account-id ID --send-id ID \
+    --expected-accepted-at RFC3339 --json
   migrate up|down|status
   config check|print
   bootstrap token
   healthcheck
+
+witself-worker
+  version
+  serve
+  agent-email receipt-replay --account-id ID --send-id ID
+    --expected-accepted-at RFC3339NANO --expected-attempt-count 1 --json
 ```
 
 ## Global Flags
@@ -129,10 +138,10 @@ Expected server environment variables may include:
 | `WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_INTERVAL` | Delay between inbound-email rate-bucket cleanup batches. Default: `1m`; valid range: `1m`-`24h`. |
 | `WITSELF_AGENT_EMAIL_RATE_BUCKET_CLEANUP_BATCH_TIMEOUT` | Deadline for one bounded inbound-email rate-bucket cleanup attempt. Default: `10s`; valid range: `1s`-`5m`. |
 | `WITSELF_AGENT_EMAIL_OUTBOUND_ENABLED` | Enable the durable outbound dispatch job in `witself-worker`. Default: `false`; API deployments never run it. Enabling requires the complete signed-adapter configuration below and does not itself enable the edge adapter or grant account entitlement. |
-| `WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_ENDPOINT` | HTTPS endpoint for the dedicated managed Cloudflare adapter, normally its `/v1/dispatch` route. Required when outbound dispatch is enabled. |
-| `WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_AUDIENCE` | Exact audience covered by every detached dispatch signature. Chart default: `witself-agent-email-send`. |
-| `WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_KEY_ID` | Bounded public key-ring identifier for the cell dispatch signer. Required when enabled. |
-| `WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_PRIVATE_KEY` | Base64 raw Ed25519 private dispatch key, mounted from the worker-only secret. Provider credentials never enter the cell. |
+| `WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_ENDPOINT` | HTTPS endpoint for the dedicated managed Cloudflare adapter, normally its exact `/v1/dispatch` route. Required when outbound dispatch is enabled and by the operator-only receipt-replay command, which derives only the same origin's `/v1/dispatch:receipt-replay` path. |
+| `WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_AUDIENCE` | Exact audience covered by every live-dispatch signature. Chart default: `witself-agent-email-send`. The receipt-replay command never trusts this override; it always uses the reserved `witself-agent-email-send-receipt-replay` audience. |
+| `WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_KEY_ID` | Bounded public key-ring identifier for the cell dispatch signer. Required when dispatch is enabled and by the operator-only receipt-replay command. |
+| `WITSELF_AGENT_EMAIL_OUTBOUND_DISPATCH_PRIVATE_KEY` | Base64 raw Ed25519 private dispatch key, mounted from the worker-only secret. It is also the only signing material accepted by the operator-only receipt-replay command. Provider credentials never enter the cell. |
 | `WITSELF_AGENT_EMAIL_OUTBOUND_BATCH_SIZE` | Maximum ready outbox rows considered by one bounded worker attempt. Default: `10`; valid range: `1`-`100`. |
 | `WITSELF_AGENT_EMAIL_OUTBOUND_INTERVAL` | Delay between dispatch attempts. Default: `2s`; valid range: `100ms`-`5m`. |
 | `WITSELF_AGENT_EMAIL_OUTBOUND_BATCH_TIMEOUT` | Deadline for one bounded outbox attempt. Default: `30s`; valid range: `1s`-`5m`. |
@@ -176,6 +185,15 @@ binding and a Durable Object receipt keyed by send id. Both the worker job and
 adapter dispatch gate default off. This preserves API scaling, lets multiple
 worker replicas add capacity without racing one logical send, and keeps the
 provider credential outside every cell.
+
+`witself-worker agent-email receipt-replay` is the narrow operator proof for an
+already accepted, first-attempt production canary. It requires the exact local
+account/send/acceptance assertions, performs only read-only database work,
+reuses the production immutable-dispatch serializer, and signs for the distinct
+`witself-agent-email-send-receipt-replay` audience and exact
+`/v1/dispatch:receipt-replay` path. Only a closed accepted proof with one
+provider-call start and a settled provider route succeeds. See
+[cell-worker.md](cell-worker.md#operator-only-accepted-receipt-proof).
 
 Witself serves two planes with two distinct production dependency sets. The OPEN
 plane (memories, facts) is backed by PostgreSQL. Its required recall path is
@@ -263,8 +281,10 @@ external broker is required for v0.
 
 ## `witself-server agent-email`
 
-These are bounded operator actions for an enabled production receive cohort;
-they are not public account-management commands.
+These are bounded operator actions, not public account-management commands.
+`backfill` and `canary-manifest` operate on an enabled production receive
+cohort; `provider-event-canary` independently proves the outbound lifecycle
+boundary for one explicitly selected synthetic send.
 
 ```sh
 witself-server agent-email backfill \
@@ -274,6 +294,11 @@ witself-server agent-email backfill \
   --overrides /absolute/private/overrides.json
 witself-server agent-email canary-manifest \
   --output /absolute/private/new/primary-canary.json
+witself-server agent-email provider-event-canary \
+  --account-id acc_aaaaaaaaaaaaaaaa \
+  --send-id esnd_bbbbbbbbbbbbbbbb \
+  --expected-accepted-at 2026-08-15T12:34:56.123456Z \
+  --json
 ```
 
 `backfill` requires production receive configuration and a PostgreSQL DSN. It
@@ -302,6 +327,52 @@ that does not exist. The command creates the exact
 `0600`, prints no IDs or addresses, and never overwrites an artifact. Store the
 file outside Git and pass it unchanged to the edge route-status command before
 planning.
+
+`provider-event-canary` is a destructive, one-send operator proof for the
+cell's real provider-event HTTP boundary. Use only a newly accepted synthetic
+canary send, and run it only while Cloudflare provider-event delivery and its
+queue subscription are disabled: a successful run permanently folds that send
+to `delivered`. The command requires the dedicated
+`WITSELF_AGENT_EMAIL_PROVIDER_EVENT_TOKEN`, a
+PostgreSQL DSN, one exact canonical account/send pair, and the accepted row's
+exact canonical UTC `accepted_at` value. Its read-only preflight fails before
+opening any listener unless the row uses `cloudflare_email_sending`, is no
+more than 15 minutes old, has a private provider correlation, and already has
+exactly one canonical `email_sent` usage event. The row may be either pristine
+(`accepted`, with no delivery
+timestamp or provider-event receipt) or the exact result of an earlier run for
+the same fence (`delivered`, with exactly one receipt). Continuation accepts
+only the deterministic event identity and canonical request hash for a
+`delivered` event whose `occurred_at` and folded `delivered_at` both equal the
+accepted-at fence; unrelated, lookalike, or additional receipts refuse before
+HTTP.
+
+After preflight, the command binds only an ephemeral `127.0.0.1` listener and
+uses the production bearer-authenticated
+`POST /v1/internal/agent-email-send:provider-event` handler. It submits one
+synthetic `delivered` event twice byte-for-byte and requires `204`, `204`; it
+then changes the semantics under the same private event id and requires `409`.
+The synthetic event id is a deterministic, domain-separated SHA-256 identity
+over the exact account, send, and accepted-at fence. It is derived before
+preflight, and `occurred_at` is that same accepted-at value. Concurrent,
+staggered, or restarted commands for the same fence therefore pass the same
+identity through preflight and converge on the same receipt while still
+exercising `204`/`204`/`409`. Redirects are disabled. Postflight requires the
+exact private provider fence and canonical request hash, one matching
+provider-event receipt, one `email_sent` usage event, exact accepted-at
+`delivered_at`, and `delivered` state. On success `--json` emits only:
+
+```json
+{"send_id":"esnd_bbbbbbbbbbbbbbbb","status":"passed","count":1,"state":"delivered"}
+```
+
+Here `count:1` means both independently verified ledgers have exactly one row.
+Failures are value-free and emit no provider id, event id, token, recipient,
+subject, or body content. Preflight and deterministic identity minimize command
+races, but they cannot lock out a real provider event arriving after preflight;
+postflight detects that race and fails after the provider-event mutation. Keep
+the real Cloudflare delivery gate and queue subscription disabled for the whole
+proof.
 
 ## `witself-server migrate`
 

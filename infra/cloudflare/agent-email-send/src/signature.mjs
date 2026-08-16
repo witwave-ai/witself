@@ -1,5 +1,9 @@
 export const DISPATCH_SCHEMA = "witself.agent-email-dispatch.v1";
 export const RESPONSE_SCHEMA = "witself.agent-email-dispatch-response.v1";
+export const RECEIPT_PROOF_SCHEMA =
+  "witself.agent-email-dispatch-receipt-proof.v1";
+export const RECEIPT_REPLAY_AUDIENCE =
+  "witself-agent-email-send-receipt-replay";
 
 export const HEADERS = Object.freeze({
   version: "X-Witself-Email-Dispatch-Version",
@@ -100,7 +104,11 @@ export async function verifyDispatchRequest(
   request,
   body,
   env,
-  { cryptoAPI = crypto, now = Date.now } = {},
+  {
+    cryptoAPI = crypto,
+    now = Date.now,
+    expectedAudience = env.DISPATCH_AUDIENCE,
+  } = {},
 ) {
   const version = request.headers.get(HEADERS.version) ?? "";
   const timestamp = request.headers.get(HEADERS.timestamp) ?? "";
@@ -108,7 +116,11 @@ export async function verifyDispatchRequest(
   const audience = request.headers.get(HEADERS.audience) ?? "";
   const digest = request.headers.get(HEADERS.digest) ?? "";
   const signatureText = request.headers.get(HEADERS.signature) ?? "";
-  if (audience !== env.DISPATCH_AUDIENCE) {
+  if (
+    typeof expectedAudience !== "string" ||
+    expectedAudience.length < 1 ||
+    audience !== expectedAudience
+  ) {
     throw new Error("dispatch audience is invalid");
   }
   const parsedTime = Date.parse(timestamp);
