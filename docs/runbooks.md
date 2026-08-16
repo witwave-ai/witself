@@ -336,12 +336,16 @@ witself account status --account <name>          # says "archived — awaiting p
 curl https://self.witwave.ai/v1/directory/<account-id>
 ```
 
-## Back up both serving Civo databases before a migration
+## Back up both reviewed Civo databases before a migration
 
 Before running `scripts/roll-cell.sh` for a release that can advance the
 database schema, run the encrypted logical backup and disposable restore drill
-for **both** serving Civo cells. This is not the account-archive or periodic R2
-backup path.
+for **both** reviewed Civo databases. `civo-sandbox-usw2-dev` is the serving
+development cell. `civo-sandbox-use1-backup` is an isolated validation-only
+target registered `backup_validation_target=true` and `accepting=false`, with no
+registered accounts; do not move or import accounts into it until it has been
+deliberately upgraded and reclassified. This is not the account-archive or
+periodic R2 backup path.
 
 Use an explicit owner-only kubeconfig/context for each cell, an existing
 mode-0700 output directory outside the checkout, a separate age recipient and
@@ -1098,6 +1102,13 @@ The production resources are:
   `email.sending`, scoped to `send.witmail.net` and the six configured lifecycle
   event classes.
 
+The public dispatch endpoint authenticates its signed envelope only after
+streaming at most 2 MiB. Exact-signer admission prevents unauthorized provider
+sends, but the current deployment has no separate Cloudflare Rate Limiter or
+private Service Binding in front of invalid signatures. Keep a front-door
+request budget as a blocker for widening beyond the exact Founder cohort so an
+unauthenticated flood cannot multiply that parsing cost.
+
 For the Founder cohort, expected live gates are
 `DISPATCH_ENABLED=true`, `RECEIPT_REPLAY_ENABLED=false`, and
 `EVENT_DELIVERY_ENABLED=true`; the lifecycle subscription is enabled. The Civo
@@ -1170,10 +1181,9 @@ expansion also retains the non-optional account-wide 5,000-message/minute and
 1-GiB/minute GCRA refill rates across all realms, with 100-message and 64-MiB
 burst tolerances.
 
-After the schema-90 image rollout, production keeps
-`worker.agentEmailRetention` running in enforcement mode on both replicas even
-though Founder has an explicit indefinite policy. Verify the
-exact cell configuration: `batchSize: 100`, `interval: 1m`,
+Production runs `worker.agentEmailRetention` in enforcement mode on both
+replicas, even though Founder has an explicit indefinite policy. Verify the
+exact cell configuration: `enabled: true`, `batchSize: 100`, `interval: 1m`,
 `batchTimeout: 2m`, and `mode: enforce`. Each enforce attempt is bounded to 32
 productive passes and 48 total passes, allowing one sparse 16-lane sweep.
 Capped nonempty lanes remain due behind older work; empty and lock-only lanes
@@ -1193,6 +1203,12 @@ cohort. Once production enforcement is active, Professional mail automatically
 ages at 90 days and Team mail at 365 days without another mode change. Prove the
 finite path with a disposable policy canary; Founder's indefinite policy alone
 cannot demonstrate deletion.
+
+The safe config-only pause is `enabled: false`; returning `mode` to `preview`
+also stops destructive deletion while retaining bounded observations. Roll only
+the worker Deployment, keep schema 90 in place, verify the API pod UID and config
+checksum remain unchanged, and confirm the retention deletion counters stop
+advancing. Schema-89 binaries are not a rollback after schema 90 has landed.
 
 ## Deploy, checkpoint, and drill the dark custom-domain authority
 

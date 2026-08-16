@@ -738,9 +738,13 @@ successful restore drill and the other acceptance prerequisites complete.
 
 ### Civo PostgreSQL pre-migration backup
 
-The two serving Civo development cells use standalone PostgreSQL on an
-in-cluster persistent volume. Before changing either cell's GitOps image or
-chart to a release that may advance the schema, create a separate logical
+The two reviewed Civo development databases use standalone PostgreSQL on an
+in-cluster persistent volume. `civo-sandbox-usw2-dev` serves development
+accounts. `civo-sandbox-use1-backup` is an empty isolated validation-only target
+registered `backup_validation_target=true` and `accepting=false`; do not move or
+import accounts into it until it is deliberately upgraded and reclassified.
+Before changing either cell's GitOps image or chart to a release that may
+advance the schema, create a separate logical
 backup with [`scripts/civo-pre-migration-backup.sh`](../scripts/civo-pre-migration-backup.sh).
 This is a hard gate for both `civo-sandbox-use1-backup` and
 `civo-sandbox-usw2-dev`; an account-level R2 snapshot or the existence of the
@@ -749,7 +753,7 @@ persistent volume does not satisfy it.
 The script is intentionally narrower than a general database administration
 tool:
 
-- it accepts only the two serving Civo cell names and an explicit kubeconfig
+- it accepts only the two reviewed Civo cell names and an explicit kubeconfig
   plus context, then verifies that context against the cell label on the Argo
   CD PostgreSQL Application;
 - it selects exactly one Ready PostgreSQL primary and runs only read-only

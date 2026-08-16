@@ -574,8 +574,8 @@ rates and 100-message/64-MiB bursts; or any outbound 30-per-agent-minute,
 300-per-realm-minute, 1,000-per-account-minute, 10,000-per-account-day, or
 100-per-recipient-day breaker.
 
-The schema-90 production target keeps two agent-email retention workers in
-enforcement mode even while the Founder policy is indefinite. Batch 100, a
+Production keeps two agent-email retention workers in enforcement mode even
+while the Founder policy is indefinite. Batch 100, a
 one-minute interval, a two-minute timeout, a 32-productive-pass ceiling, and a
 48-total-pass ceiling allow one sparse 16-lane sweep without creating an
 unbounded drain loop. One replica can scan at most 3,200 rows and delete at most

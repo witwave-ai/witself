@@ -120,6 +120,10 @@ Production chart defaults should assume:
 - Transcript retention disabled by default, with a separate bounded
   `worker.transcriptRetention.mode: preview` stage before an explicit switch
   to `enforce`.
+- Message and agent-email retention are independently disabled by default and
+  use the same explicit preview-before-enforce rollout shape. Managed cells may
+  override them only after the schema-compatible API and worker image has
+  converged; API pods never schedule retention work.
 - Resource requests and limits.
 - Pod disruption budget where practical.
 - Optional horizontal pod autoscaling.

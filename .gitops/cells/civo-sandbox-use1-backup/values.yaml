@@ -85,6 +85,7 @@ platform:
     azureVaultURL: ""
   keda:
     enabled: false
-  # Civo's K3s profile supplies metrics-server.
+  # This cell currently has no resource Metrics API. Replica counts remain
+  # manual; install metrics-server only through a separately reviewed rollout.
   metricsServer:
     enabled: false
