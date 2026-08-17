@@ -528,6 +528,37 @@ async function approve(runtime, request, fields = {}) {
   });
 }
 
+test("realm-alias plan-fit aggregates commercial allocations and detects incomplete counters", async () => {
+  const fixture = registry();
+  const requested = await requestAlias(fixture.runtime, "plan-fit-alias");
+  assert.equal(requested.response.status, 202);
+  const approved = await approve(fixture.runtime, requested.body.request);
+  assert.equal(approved.response.status, 200);
+
+  const fit = await call(fixture.runtime, "/plan/fit", {
+    account_id: ACCOUNT,
+    maximum: 0,
+  });
+  assert.equal(fit.response.status, 200);
+  assert.deepEqual(fit.body, {
+    schema_version: "witself.realm-email-alias.v1",
+    account_id: ACCOUNT,
+    maximum: 0,
+    over_limit_count: 1,
+    highest_used: 1,
+  });
+
+  await fixture.storage.delete(
+    `claim-usage-account-member:${ACCOUNT}:${approved.body.assignment.claim_id}`,
+  );
+  const incomplete = await call(fixture.runtime, "/plan/fit", {
+    account_id: ACCOUNT,
+    maximum: 1,
+  });
+  assert.equal(incomplete.response.status, 503);
+  assert.match(incomplete.body.error, /counters disagree/);
+});
+
 test("integrated journal bootstrap freezes an existing registry and later mutations are R2-first", async () => {
   const bucket = new JournalBucket();
   const fixture = registry({ journalBucket: bucket, journalEnabled: false });

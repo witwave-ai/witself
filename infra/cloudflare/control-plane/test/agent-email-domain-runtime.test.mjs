@@ -524,6 +524,34 @@ function create(runtime, domain, fields = {}) {
   });
 }
 
+test("custom-domain plan-fit counts pending reservations and fails closed while policy converges", async () => {
+  const fixture = registry();
+  const created = await create(fixture.runtime, "plan-fit.example", {
+    domain_limit: 1,
+  });
+  assert.equal(created.response.status, 202);
+
+  const fit = await call(fixture.runtime, "/plan/fit", {
+    account_id: ACCOUNT,
+    maximum: 0,
+  });
+  assert.equal(fit.response.status, 200);
+  assert.deepEqual(fit.body, {
+    schema_version: "witself.agent-email-domain.v1",
+    account_id: ACCOUNT,
+    maximum: 0,
+    used: 1,
+  });
+
+  await fixture.storage.put(`plan-intent:${ACCOUNT}`, { pending: true });
+  const converging = await call(fixture.runtime, "/plan/fit", {
+    account_id: ACCOUNT,
+    maximum: 1,
+  });
+  assert.equal(converging.response.status, 409);
+  assert.match(converging.body.error, /converging/);
+});
+
 function auditRows(storage) {
   return [...storage.values].filter(([key]) => key.startsWith("audit:"));
 }
