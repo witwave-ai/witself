@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-preflight="$repo_root/scripts/billing-transition-rollout-preflight.sh"
+source_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 captured_at=2026-08-17T22:00:00Z
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/witself-billing-rollout-test.XXXXXX")
 cleanup() {
@@ -10,6 +9,33 @@ cleanup() {
   rmdir "$work_dir" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
+
+# Build a complete local Git fixture so this suite does not depend on checkout
+# depth, historical tags, or the branch ancestry of the calling repository.
+repo_root="$work_dir/repo"
+mkdir -p \
+  "$repo_root/scripts" \
+  "$repo_root/internal/billing/lifecycle/compatibility"
+cp "$source_root/scripts/billing-transition-rollout-preflight.sh" \
+  "$repo_root/scripts/billing-transition-rollout-preflight.sh"
+chmod +x "$repo_root/scripts/billing-transition-rollout-preflight.sh"
+git -C "$repo_root" init -q
+git -C "$repo_root" config user.name "Witself rollout test"
+git -C "$repo_root" config user.email "rollout-test@invalid.example"
+printf 'historical\n' >"$repo_root/release-state"
+git -C "$repo_root" add .
+git -C "$repo_root" commit -qm "historical release"
+git -C "$repo_root" tag v0.0.253
+printf 'unsafe predecessor\n' >"$repo_root/release-state"
+git -C "$repo_root" add release-state
+git -C "$repo_root" commit -qm "unsafe predecessor"
+git -C "$repo_root" tag v0.0.254
+printf 'witself.billing.exact-provider-target.v1\n' \
+  >"$repo_root/internal/billing/lifecycle/compatibility/exact-provider-target-v1"
+git -C "$repo_root" add \
+  internal/billing/lifecycle/compatibility/exact-provider-target-v1
+git -C "$repo_root" commit -qm "safe reader capability"
+preflight="$repo_root/scripts/billing-transition-rollout-preflight.sh"
 
 write_inventory() {
   local path=$1 cohort=$2 api=$3 reconcilers=$4 prepared=$5 targetless=$6
@@ -86,7 +112,7 @@ for field in cohort api reconcilers prepared targetless malformed_pending malfor
   expect_failure "$field" "FAIL:" run_activate "$fixture"
 done
 
-expect_failure unsafe-target 'does not contain safe reader/canceller floor' \
+expect_failure unsafe-target 'does not carry the safe reader/canceller capability marker' \
   "$preflight" \
     --mode activate \
     --from-version v0.0.254 --from-ref v0.0.254 \
@@ -102,33 +128,10 @@ expect_failure wrong-version-binding 'does not resolve to requested version tag'
     --allow-untagged-target --inventory "$clean" \
     --expected-captured-at "$captured_at"
 
-rollback_prepared="$work_dir/rollback-prepared.json"
-write_inventory "$rollback_prepared" 0 0 0 1 0 0 0 0
-expect_failure rollback-prepared 'prepared downgrades forbid' \
-  "$preflight" \
-    --mode rollback \
-    --from-version v0.0.255 --from-ref HEAD \
-    --to-version v0.0.254 --to-ref v0.0.254 \
-    --inventory "$rollback_prepared" --allow-untagged-source \
-    --expected-captured-at "$captured_at"
-
-"$preflight" \
-  --mode rollback \
-  --from-version v0.0.255 --from-ref HEAD \
-  --to-version v0.0.254 --to-ref v0.0.254 \
-  --inventory "$clean" --allow-untagged-source \
-  --expected-captured-at "$captured_at" \
-  >"$work_dir/rollback-pass.output"
-
-compatible="$work_dir/compatible.json"
-write_inventory "$compatible" 1 2 1 3 0 0 0 0
-"$preflight" \
-  --mode compatible-roll \
-  --from-version v0.0.255 --from-ref HEAD \
-  --to-version v0.0.256 --to-ref HEAD \
-  --inventory "$compatible" --allow-untagged-source --allow-untagged-target \
-  --expected-captured-at "$captured_at" \
-  >"$work_dir/compatible-pass.output"
+expect_failure rollback-mode 'unsupported --mode: rollback' \
+  "$preflight" --mode rollback
+expect_failure compatible-roll-mode 'unsupported --mode: compatible-roll' \
+  "$preflight" --mode compatible-roll
 
 printf '{"schema":"wrong"}\n' >"$work_dir/malformed.json"
 expect_failure malformed-inventory 'count-only JSON' run_activate "$work_dir/malformed.json"

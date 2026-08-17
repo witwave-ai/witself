@@ -44,10 +44,12 @@ provider objects other than the one the new operation prepared. The
 `prepared_downgrade_fence` marker does not protect against this predecessor:
 `v0.0.254` never consults that exact target before issuing broad cleanup.
 
-Commit `d12af5c7384cb443c3f79910c86b2b597a447e85` is the minimum safe
-reader/canceller floor. It binds cleanup to an exact provider object and refuses
-targetless cancellation. A release version is not proof of that behavior by
-itself; the deployed Git object must contain this commit.
+The exact reader/canceller capability binds cleanup to one provider object and
+refuses targetless cancellation. Because normal pull requests are squash-
+merged, ancestry of a pre-squash branch commit is not durable release evidence.
+The deployed Git tree must instead contain the exact reviewed capability marker
+`internal/billing/lifecycle/compatibility/exact-provider-target-v1`; a version
+number or marker copied outside that reviewed implementation is not proof.
 
 Consequences:
 
@@ -56,20 +58,24 @@ Consequences:
    `v0.0.254` reconciliation/tick workers before the first new writer starts.
 3. Do not run `v0.0.254` concurrently with a prepared-downgrade writer, even
    for a one-replica rolling overlap.
-4. Do not roll back to `v0.0.254` while any prepared downgrade exists.
-5. Before an incompatible rollback, empty the cohort, drain every source API
-   and reconciler, prove the hazardous inventory is zero, and keep billing dark
-   after rollback.
+4. Do not roll back to `v0.0.254`; forward-fix on an exact-aware release.
 
 This is an exclusive stop-and-start cutover, not an ordinary rolling update.
-Future releases that both contain the floor may roll together only after the
-same inventory shows no targetless, malformed, or post-retry-horizon work.
+The marker proves this exact reader/canceller capability, not arbitrary future
+lifecycle, receipt, or bridge compatibility. Any future rolling pair requires
+an independent protocol review and a new or updated rollout guard.
 
 ## Count-only inventory
 
 Take the inventory after the source fleet is drained and before the first
 target writer starts. The privileged collector may read the billing R2
 registry, but its shared output must contain counts only:
+
+No checked-in collector currently produces this complete artifact. Activation
+is blocked until an audited, privileged, read-only collector (or an equivalently
+reviewed operator procedure) proves a complete R2 registry scan and emits this
+exact schema. A hand-authored JSON file or the bounded reconciler sample is not
+inventory evidence.
 
 ```json
 {
@@ -125,10 +131,8 @@ operation; never sum them into an alleged unique-operation total.
 
 ## Quarantine and reconciliation
 
-Any targetless, malformed, or post-retry-horizon count blocks activation and
-every rollout mode. A prepared count blocks activation from, or rollback to,
-`v0.0.254`; it is permitted only when both source and target contain the safe
-reader/canceller floor.
+Any targetless, malformed, post-retry-horizon, or prepared count blocks this
+one-time activation from `v0.0.254`.
 
 For every blocked record:
 
@@ -152,14 +156,14 @@ For every blocked record:
    decrement the shared count by hand.
 
 If a prepared downgrade exists during an emergency, forward-fix on a release
-at or above the safe floor. Rolling back to `v0.0.254` is not an emergency
-recovery option.
+carrying the exact reader/canceller capability. Rolling back to `v0.0.254` is
+not an emergency recovery option.
 
 ## Hermetic preflight
 
 The preflight reads only the local Git graph and the count-only JSON above. It
 does not contact or change Cloudflare, Kubernetes, R2, Stripe, or an account.
-For the first tagged release containing the floor:
+For the first tagged release carrying the capability marker:
 
 ```sh
 scripts/billing-transition-rollout-preflight.sh \
@@ -170,32 +174,25 @@ scripts/billing-transition-rollout-preflight.sh \
   --expected-captured-at "$CAPTURED_AT"
 ```
 
-Before an explicitly approved rollback:
-
-```sh
-scripts/billing-transition-rollout-preflight.sh \
-  --mode rollback \
-  --from-version "$CURRENT_VERSION" --from-ref "$CURRENT_VERSION" \
-  --to-version v0.0.254 --to-ref v0.0.254 \
-  --inventory billing-rollout-inventory.json \
-  --expected-captured-at "$CAPTURED_AT"
-```
-
 The command fails unless version tags bind to the requested commits, the safe
-side contains `d12af5c`, the incompatible-transition cohort and source fleet
-are zero, every hazardous count is zero, and the inventory timestamp equals the
-operator-supplied exact capture fence. The explicit untagged flags exist only
-for a reviewed pre-release drill; never use them to deploy an unbound image.
+side carries the exact reader/canceller capability marker, the incompatible-
+transition cohort and source fleet are zero, every hazardous count is zero, and
+the inventory timestamp equals the operator-supplied exact capture fence. The
+explicit untagged flags exist only for a reviewed pre-release drill; never use
+them to deploy an unbound image.
 Separately bind the immutable image digest and chart revision to the same target
 commit before rollout.
 
 ## Activation sequence
 
 1. Confirm Stripe test mode, the reviewed hosted-portal configuration, test
-   webhook secret, and production-live key absence. Confirm Team and Enterprise
-   remain unavailable in the catalog. If period-boundary acceleration is part
-   of the retained canary, set `WITSELF_CP_STRIPE_TEST_CLOCK_ID` only for the
-   fresh disposable test customer and record a value-free configuration hash.
+   webhook secret, and production-live key absence. Prove all three configured
+   HTTPS success, cancel, and portal-return routes exist on an owned surface and
+   safely converge back to read-only billing status; a syntactically valid dead
+   URL is a blocker. Confirm Team and Enterprise remain unavailable in the
+   catalog. If period-boundary acceleration is part of the retained canary, set
+   `WITSELF_CP_STRIPE_TEST_CLOCK_ID` only for the fresh disposable test customer
+   and record a value-free configuration hash.
 2. Set the billing account allowlist to empty and verify mutation previews and
    applies fail closed before receipt, provider, or account writes.
 3. Stop every `v0.0.254` API and plan-lifecycle reconciliation process. Verify
@@ -204,16 +201,26 @@ commit before rollout.
 4. Produce the complete count-only inventory, quarantine any nonzero hazard,
    and retain the source snapshot plus capture time.
 5. Run `activate` preflight against the exact release tag and retain its output.
-6. Start only target replicas whose image provenance contains the floor. Keep
-   the allowlist empty; verify health, billing reads, pending-recovery metrics,
-   and that no provider write occurred.
-7. After every API and reconciler is on the target, add one disposable sandbox
+6. Start only target replicas whose image provenance carries the capability
+   marker. Keep the allowlist empty; verify health, billing reads, and pending-
+   recovery metrics. Startup may perform bounded Stripe product/price catalog
+   reconciliation even with an empty account cohort: retain that catalog-write
+   evidence separately and prove that no customer, subscription, Checkout,
+   invoice, or payment mutation occurred.
+7. Before enabling the disposable account, verify the Cloudflare bridge Worker
+   is exactly the reviewed target version at 100%, including both alias/domain
+   Durable Object bindings and the atomic `:plan-fit-apply` route. Verify the
+   account routes to a cell on the target image digest and that the direct
+   `:plan` and atomic `:plan-fit-apply` protocols return the reviewed strict
+   envelopes under a non-mutating refusal/replay probe. An old Worker or cell is
+   a hard abort, not a compatibility mode.
+8. After every API and reconciler is on the target, add one disposable sandbox
    account to the allowlist. Exercise setup, Personal to Professional checkout,
    signed webhook replay, exact idempotent retry, Professional to Personal fit
    rejection and fit success, period-boundary scheduling, test-clock advance
    when selected, and exact pending cancellation. Retain value-free results and
    access-controlled Stripe sandbox object evidence.
-8. Remove the account from the allowlist immediately after the canary, clear
+9. Remove the account from the allowlist immediately after the canary, clear
    `WITSELF_CP_STRIPE_TEST_CLOCK_ID`, and prove the cohort is empty before any
    broader test cohort. Production live mode and production webhooks remain
    disabled.
@@ -222,14 +229,16 @@ Abort and return to the empty dark cohort on any unknown record, incomplete
 scan, stale inventory, unexpected provider object, response-loss ambiguity,
 fit-authority disagreement, webhook signature/replay anomaly, old replica,
 test clock outside the single disposable cohort, nonzero recovery backlog, or
-attempted Team/Enterprise/refund mutation. Do not choose rollback until the
-rollback preflight independently passes.
+attempted Team/Enterprise/refund mutation. Keep the cohort empty and forward-
+fix; this guard intentionally provides no rollback mode to `v0.0.254`.
 
 ## Required retained evidence
 
-Retain the release/tag/commit and image digests, the value-free inventory and
-capture time, source and target API/reconciler replica counts, preflight output,
-empty-cohort proof before and after the run, test-mode/provider configuration
-hashes, webhook replay result, plan-fit result, and the final zero-hazard
-inventory. Never retain secret values or customer/provider identifiers in the
-shared rollout report.
+Retain the release/tag/commit, control-plane and cell image digests, cell
+version/protocol probes, the exact Cloudflare Worker version or script ETag and
+Durable Object binding inventory, the value-free inventory and capture time,
+source and target API/reconciler replica counts, preflight output, empty-cohort
+proof before and after the run, bounded Stripe catalog-bootstrap result, test-
+mode/provider configuration hashes, webhook replay result, plan-fit result, and
+the final zero-hazard inventory. Never retain secret values or customer/provider
+identifiers in the shared rollout report.

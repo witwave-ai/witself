@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# d12af5c is the first reader/canceller that refuses targetless provider
-# cleanup and binds cancellation to the exact provider object. Do not advance
-# this floor by version number alone; the target Git object must contain it.
-readonly safe_reader_floor=d12af5c7384cb443c3f79910c86b2b597a447e85
+# This tree marker is reviewed with the exact reader/canceller implementation
+# and survives the repository's normal squash-merge release history. A version
+# number or unreachable pre-squash branch commit is not capability evidence.
+readonly safe_reader_marker_path=internal/billing/lifecycle/compatibility/exact-provider-target-v1
+readonly safe_reader_marker_value=witself.billing.exact-provider-target.v1
 readonly inventory_schema=witself.billing-rollout-inventory.v1
 
 fail() {
@@ -16,7 +17,7 @@ usage() {
   cat <<'EOF'
 Usage:
   scripts/billing-transition-rollout-preflight.sh \
-    --mode activate|rollback|compatible-roll \
+    --mode activate \
     --from-version vMAJOR.MINOR.PATCH --from-ref GIT_REF \
     --to-version vMAJOR.MINOR.PATCH --to-ref GIT_REF \
     --inventory PATH --expected-captured-at YYYY-MM-DDTHH:MM:SSZ \
@@ -97,7 +98,7 @@ while (($# > 0)); do
 done
 
 case $mode in
-  activate|rollback|compatible-roll) ;;
+  activate) ;;
   '') fail "--mode is required" ;;
   *) fail "unsupported --mode: $mode" ;;
 esac
@@ -139,8 +140,6 @@ resolve_commit() {
 
 from_commit=$(resolve_commit "$from_ref" "--from-ref")
 to_commit=$(resolve_commit "$to_ref" "--to-ref")
-floor_commit=$(resolve_commit "$safe_reader_floor" "safe reader/canceller floor")
-
 bind_version_tag() {
   local version=$1 commit=$2 label=$3 allow_missing=$4 tag_commit
   if tag_commit=$(git -C "$repo_root" rev-parse --verify \
@@ -158,37 +157,26 @@ bind_version_tag \
 bind_version_tag \
   "$to_version" "$to_commit" "--to-ref" "$allow_untagged_target"
 
-contains_safe_floor() {
-  git -C "$repo_root" merge-base --is-ancestor "$floor_commit" "$1"
+contains_safe_reader_capability() {
+  local marker
+  marker=$(git -C "$repo_root" show "$1:$safe_reader_marker_path" 2>/dev/null) \
+    || return 1
+  [[ $marker == "$safe_reader_marker_value" ]]
 }
 
 from_safe=false
 to_safe=false
-if contains_safe_floor "$from_commit"; then
+if contains_safe_reader_capability "$from_commit"; then
   from_safe=true
 fi
-if contains_safe_floor "$to_commit"; then
+if contains_safe_reader_capability "$to_commit"; then
   to_safe=true
 fi
 
-case $mode in
-  activate)
-    [[ $from_version == v0.0.254 && $from_safe == false ]] \
-      || fail "activate must start from the known-unsafe v0.0.254 predecessor"
-    [[ $to_safe == true ]] \
-      || fail "activation target does not contain safe reader/canceller floor $safe_reader_floor"
-    ;;
-  rollback)
-    [[ $from_safe == true ]] \
-      || fail "rollback source does not contain the safe reader/canceller floor"
-    [[ $to_version == v0.0.254 && $to_safe == false ]] \
-      || fail "this guard supports rollback only to the known v0.0.254 predecessor"
-    ;;
-  compatible-roll)
-    [[ $from_safe == true && $to_safe == true ]] \
-      || fail "compatible-roll requires both source and target to contain $safe_reader_floor"
-    ;;
-esac
+[[ $from_version == v0.0.254 && $from_safe == false ]] \
+  || fail "activate must start from the known-unsafe v0.0.254 predecessor"
+[[ $to_safe == true ]] \
+  || fail "activation target does not carry the safe reader/canceller capability marker"
 
 if ! jq -e --arg schema "$inventory_schema" '
   def nonnegative_integer:
@@ -248,16 +236,14 @@ post_horizon=$(jq -r '.records.post_retry_horizon_receipts' "$inventory_path")
 ((post_horizon == 0)) \
   || fail "post-retry-horizon receipts require operator reconciliation"
 
-if [[ $mode != compatible-roll ]]; then
-  ((cohort_accounts == 0)) \
-    || fail "billing mutation cohort must be empty for an incompatible cutover"
-  ((source_api == 0)) \
-    || fail "source API replicas must be fully drained before the first target writer"
-  ((source_reconcilers == 0)) \
-    || fail "source reconcilers must be fully drained before the first target writer"
-  ((prepared == 0)) \
-    || fail "prepared downgrades forbid activation with or rollback to v0.0.254"
-fi
+((cohort_accounts == 0)) \
+  || fail "billing mutation cohort must be empty for the incompatible cutover"
+((source_api == 0)) \
+  || fail "source API replicas must be fully drained before the first target writer"
+((source_reconcilers == 0)) \
+  || fail "source reconcilers must be fully drained before the first target writer"
+((prepared == 0)) \
+  || fail "prepared downgrades forbid activation from v0.0.254"
 
 printf '%s\n' \
   "billing rollout preflight: PASS" \

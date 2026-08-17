@@ -106,12 +106,20 @@ runs in manual mode: plan status, catalog defaults, admin overrides, account
 seeding, and cell enforcement work, while upgrade, downgrade, cancel, and
 webhook routes are absent. Manual mode never creates a provider customer,
 subscription, invoice, or charge. Stripe can be enabled later without changing
-the already-stored Personal/free baseline. In the Cloudflare deployment, set
-the runtime Worker bindings `CP_BILLING_PROVIDER=stripe`,
-`CP_STRIPE_SECRET_KEY`, and `CP_STRIPE_WEBHOOK_SECRET`; optional hosted return
-URLs use `CP_STRIPE_SUCCESS_URL` and `CP_STRIPE_CANCEL_URL`. The Backend
-allowlist projects those bindings to their corresponding `WITSELF_CP_*`
-container variables. The fake provider is refused on the production bridge.
+the already-stored Personal/free baseline. In the Cloudflare deployment,
+Stripe additionally requires the runtime Worker bindings
+`CP_BILLING_PROVIDER=stripe`, exact `CP_STRIPE_MODE=test|live`, a mode-matching
+`CP_STRIPE_SECRET_KEY`, `CP_STRIPE_WEBHOOK_SECRET`, canonical HTTPS
+`CP_STRIPE_SUCCESS_URL`, `CP_STRIPE_CANCEL_URL`, and
+`CP_STRIPE_PORTAL_RETURN_URL`, plus a reviewed safe
+`CP_STRIPE_PORTAL_CONFIGURATION_ID`. `CP_BILLING_ACCOUNT_ALLOWLIST` is the
+strict account mutation cohort; an empty value keeps every provider mutation
+dark while read surfaces remain available. `CP_STRIPE_TEST_CLOCK_ID` is
+optional only in test mode and requires at most one allowlisted disposable
+account. The Backend allowlist projects those bindings to corresponding
+`WITSELF_CP_*` container variables. The fake provider is refused on the
+production bridge, live mode rejects a test clock, and mode/key mismatches fail
+startup.
 
 Cloudflare deployment is intentionally separate from the GitHub tag workflow.
 Run it only from the same clean checkout whose `vMAJOR.MINOR.PATCH` tag finished

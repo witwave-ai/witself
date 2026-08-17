@@ -962,7 +962,7 @@
       "gates": {
         "behavior": {
           "state": "conditional",
-          "summary": "Personal-to-Professional preview, setup, checkout and apply plus exact Professional-to-Personal fit, scheduling, cancellation, receipts, recovery, and reconciliation are implemented; Team, Enterprise, paid-to-paid transitions, dunning, and refund mutations remain out.",
+          "summary": "Personal-to-Professional preview, setup, checkout and apply plus exact Professional-to-Personal fit, scheduling, cancellation, receipts, recovery, and reconciliation are implemented; Team, Enterprise, paid-to-paid transitions, automated dunning policy or collection mutations, and refund mutations remain out.",
           "evidence": [
             "docs/billing-and-limits.md",
             "internal/billing/lifecycle/billing_mutations_test.go"
@@ -978,11 +978,12 @@
         },
         "bounds_abuse": {
           "state": "conditional",
-          "summary": "Idempotency, exact provider cancellation, hosted-action expiry, recovery shards, lease fences, replay windows, count-only inventory, and a checked reader-floor preflight exist; equal-time event fencing, receipt retention, operator terminalization, and retained cutover proof remain incomplete.",
+          "summary": "Idempotency, deterministic equal-time event fencing, exact provider cancellation, hosted-action expiry, recovery shards, lease fences, replay windows, count-only inventory, and a checked exact-reader activation preflight exist; receipt retention, operator terminalization, and retained cutover proof remain incomplete.",
           "evidence": [
             "docs/billing-and-limits.md",
             "docs/billing-transition-rollout.md",
             "internal/billing/lifecycle/billing_durability_test.go",
+            "internal/billing/lifecycle/lifecycle_test.go",
             "scripts/billing-transition-rollout-preflight.sh",
             "scripts/test-billing-transition-rollout-preflight.sh"
           ]
@@ -997,7 +998,7 @@
         },
         "recovery": {
           "state": "conditional",
-          "summary": "Crash-resumable exact mutation recovery is implemented, but a real-provider activation/rollback drill, restore reconciliation, dunning, and terminal operator handling of ambiguous old work remain unproven.",
+          "summary": "Crash-resumable exact mutation recovery and exact-subscription failed/recovered projection are implemented, but a real-provider activation/forward-fix drill, restore reconciliation, automated dunning policy or collection mutations, and terminal operator handling of ambiguous old work remain unproven.",
           "evidence": [
             "docs/billing-and-limits.md",
             "internal/billing/lifecycle/billing_durability_test.go"
@@ -1014,7 +1015,7 @@
         },
         "docs_support": {
           "state": "pass",
-          "summary": "Authority boundaries, supported transition scope, durable mutation design, v0.0.254 incompatibility, inventory/quarantine, dark cutover, rollback, and remaining provider gates are documented.",
+          "summary": "Authority boundaries, supported transition scope, durable mutation design, v0.0.254 incompatibility, inventory/quarantine, forward-fix-only cutover, and remaining provider gates are documented.",
           "evidence": [
             "docs/billing-and-limits.md",
             "docs/billing-transition-rollout.md",
@@ -1032,25 +1033,25 @@
         {
           "id": "billing-safety-completion",
           "gate_ids": ["bounds_abuse", "recovery"],
-          "summary": "Complete equal-time event fencing, bounded completed-receipt retention, and operator terminalization of deterministic provider failures.",
+          "summary": "Complete bounded completed-receipt retention and operator terminalization of deterministic provider failures without clearing ambiguous work.",
           "ref": "docs/billing-and-limits.md"
         },
         {
           "id": "billing-v254-exclusive-cutover",
           "gate_ids": ["bounds_abuse", "recovery", "rollout_canaries"],
-          "summary": "Bind the release and image to the d12af5c safe floor, prove an empty cohort and zero hazard inventory, fully drain every v0.0.254 API and reconciler before the first new writer, and retain activation and rollback drill evidence.",
+          "summary": "Add complete audited R2 inventory collection; bind the exact-reader marker; prove an empty cohort and zero hazards; fully drain v0.0.254 API and reconcilers; forbid v0.0.254 rollback; retain activation and forward-fix evidence.",
           "ref": "docs/billing-transition-rollout.md"
         },
         {
           "id": "full-lifecycle-reconciliation",
           "gate_ids": ["behavior", "recovery"],
-          "summary": "Complete Team and Enterprise transitions, paid-to-paid compensation, dunning, refund mutations, and restore reconciliation.",
+          "summary": "Complete Team and Enterprise transitions, paid-to-paid compensation, automated dunning policy or collection mutations, refund mutations, and restore reconciliation.",
           "ref": "https://github.com/witwave-ai/witself/issues/33"
         },
         {
           "id": "stripe-sandbox-acceptance",
           "gate_ids": ["rollout_canaries"],
-          "summary": "Finish Stripe sandbox secrets, hosted portal and webhook verification, then retain an end-to-end Personal-to-Professional-to-Personal transition and rollback canary; Team, Enterprise, and refund mutations remain excluded.",
+          "summary": "Finish Stripe sandbox secrets, owned HTTPS return surfaces, hosted portal and webhook verification, then retain an end-to-end Personal-to-Professional-to-Personal transition and forward-fix canary; Team, Enterprise, and refund mutations remain excluded.",
           "ref": "docs/billing-transition-rollout.md"
         }
       ]
