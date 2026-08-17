@@ -289,7 +289,7 @@ func (s *stubStripe) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if s.subActive {
-			_, _ = fmt.Fprintf(w, `{"data":[{"id":"sub_stub","customer":%q,"status":%q,"cancel_at_period_end":%t,"metadata":{"witself_plan":"standard"},"items":{"data":[{"current_period_end":%d,"price":{"id":"price_standard","lookup_key":"witself_standard"}}]}}],"has_more":false}`, s.subCustomer, s.subStatus, s.subArmed, periodEnd)
+			_, _ = fmt.Fprintf(w, `{"data":[{"id":"sub_stub","customer":%q,"status":%q,"cancel_at_period_end":%t,"metadata":{"witself_plan":"standard","witself_pending_downgrade_operation_id":%q},"items":{"data":[{"current_period_end":%d,"price":{"id":"price_standard","lookup_key":"witself_standard"}}]}}],"has_more":false}`, s.subCustomer, s.subStatus, s.subArmed, s.subDowngradeOperation, periodEnd)
 			return
 		}
 		_, _ = fmt.Fprint(w, `{"data":[],"has_more":false}`)
@@ -678,6 +678,7 @@ func TestStripeStrongOperationIDShape(t *testing.T) {
 
 func TestScheduleDowngradeIdempotentKeysMutationsOnly(t *testing.T) {
 	s, p := newStub(t)
+	s.subArmed = false
 	ctx := context.Background()
 
 	first, err := p.ScheduleDowngradeIdempotent(
@@ -710,8 +711,15 @@ func TestScheduleDowngradeIdempotentKeysMutationsOnly(t *testing.T) {
 	if err != nil || !second.Equal(first) {
 		t.Fatalf("replayed ScheduleDowngradeIdempotent = %v, %v; want %v", second, err, first)
 	}
-	if got := s.requests[start+2].idempotencyKey; got != wantKey {
-		t.Fatalf("downgrade replay key = %q; want %q", got, wantKey)
+	if got := s.requests[start:]; len(got) != 2 ||
+		got[0].method != http.MethodGet ||
+		got[1].method != http.MethodGet {
+		t.Fatalf("downgrade replay requests = %+v; want discovery and exact confirmation reads", got)
+	}
+	for _, request := range s.requests[start:] {
+		if request.method == http.MethodPost {
+			t.Fatalf("exact downgrade replay mutated Stripe: %+v", s.requests[start:])
+		}
 	}
 
 	bounded := childIdempotencyKey(
@@ -719,6 +727,59 @@ func TestScheduleDowngradeIdempotentKeysMutationsOnly(t *testing.T) {
 	)
 	if len(bounded) > 255 {
 		t.Fatalf("maximal child Idempotency-Key is %d bytes; Stripe allows 255", len(bounded))
+	}
+}
+
+func TestPreparedDowngradeRefusesPrearmedSubscriptionWithoutExactOwnership(t *testing.T) {
+	t.Run("preparation cannot adopt external cancellation", func(t *testing.T) {
+		s, p := newStub(t)
+		s.subDowngradeOperation = ""
+
+		_, err := p.PrepareDowngrade(
+			context.Background(), "cus_stub_1", plans.Free,
+		)
+		if err == nil || !strings.Contains(err.Error(), "outside this exact") {
+			t.Fatalf("external pre-armed preparation error = %v", err)
+		}
+		for _, request := range s.requests {
+			if request.method == http.MethodPost {
+				t.Fatalf("external pre-armed preparation mutated Stripe: %+v", s.requests)
+			}
+		}
+	})
+
+	for _, tc := range []struct {
+		name, owner string
+	}{
+		{name: "external cancellation", owner: ""},
+		{name: "different Witself operation", owner: "bop_other_downgrade"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, p := newStub(t)
+			s.subArmed = false
+			prepared, err := p.PrepareDowngrade(
+				context.Background(), "cus_stub_1", plans.Free,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			s.subArmed = true
+			s.subDowngradeOperation = tc.owner
+			s.requests = nil
+			_, err = p.SchedulePreparedDowngradeIdempotent(
+				context.Background(), "cus_stub_1", plans.Free,
+				"bop_expected_downgrade", prepared,
+			)
+			if err == nil || !strings.Contains(err.Error(), "outside this exact") {
+				t.Fatalf("pre-armed ownership mismatch error = %v", err)
+			}
+			if len(s.requests) != 1 ||
+				s.requests[0].method != http.MethodGet ||
+				s.requests[0].path != "/v1/subscriptions/sub_stub" {
+				t.Fatalf("pre-armed ownership mismatch requests = %+v; want exact read only", s.requests)
+			}
+		})
 	}
 }
 
@@ -869,6 +930,7 @@ func TestExactCheckoutCancellationRejectsMismatchedAuthority(t *testing.T) {
 
 func TestExactDowngradePersistsAndDisarmsOneSubscription(t *testing.T) {
 	s, p := newStub(t)
+	s.subArmed = false
 	ctx := context.Background()
 	scheduled, err := p.ScheduleDowngradeExactIdempotent(
 		ctx, "cus_stub_1", plans.Free, "bop_downgrade_exact",
@@ -940,6 +1002,7 @@ func TestExactDowngradePersistsAndDisarmsOneSubscription(t *testing.T) {
 
 func TestPreparedDowngradeNeverRediscoversReplacementSubscription(t *testing.T) {
 	s, p := newStub(t)
+	s.subArmed = false
 	ctx := context.Background()
 	prepared, err := p.PrepareDowngrade(ctx, "cus_stub_1", plans.Free)
 	if err != nil {
@@ -986,6 +1049,7 @@ func TestPreparedDowngradeNeverRediscoversReplacementSubscription(t *testing.T) 
 
 func TestPreparedDowngradeRequiresSafeRenewalLead(t *testing.T) {
 	s, p := newStub(t)
+	s.subArmed = false
 	now := p.cfg.Now().UTC()
 	s.subPeriodEnd = now.Add(minimumDowngradeScheduleLead).Unix()
 	if _, err := p.PrepareDowngrade(
@@ -1016,6 +1080,7 @@ func TestPreparedDowngradeRequiresSafeRenewalLead(t *testing.T) {
 
 func TestPreparedDowngradeDetectsPeriodRolloverDuringMutation(t *testing.T) {
 	s, p := newStub(t)
+	s.subArmed = false
 	ctx := context.Background()
 	prepared, err := p.PrepareDowngrade(ctx, "cus_stub_1", plans.Free)
 	if err != nil {
@@ -1074,6 +1139,7 @@ func TestLegacyCancelFailsClosedOnCheckoutPagination(t *testing.T) {
 
 func TestScheduleDowngradeFreeOnly(t *testing.T) {
 	s, p := newStub(t)
+	s.subArmed = false
 	eff, err := p.ScheduleDowngrade(context.Background(), "cus_stub_1", "free")
 	if err != nil {
 		t.Fatalf("ScheduleDowngrade: %v", err)

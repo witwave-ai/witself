@@ -753,7 +753,7 @@ func (p *Provider) managedLiveSubscription(
 // ambiguous provider state and fails closed for operator reconciliation;
 // paid-to-paid needs subscription schedules and lands with the Team tier.
 func (p *Provider) ScheduleDowngrade(ctx context.Context, customerID, plan string) (time.Time, error) {
-	prepared, err := p.PrepareDowngrade(ctx, customerID, plan)
+	prepared, err := p.prepareDowngrade(ctx, customerID, plan, "")
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -772,7 +772,7 @@ func (p *Provider) ScheduleDowngradeIdempotent(
 	if err := billing.ValidateOperationID(operationID); err != nil {
 		return time.Time{}, fmt.Errorf("stripe: downgrade: %w", err)
 	}
-	prepared, err := p.PrepareDowngrade(ctx, customerID, plan)
+	prepared, err := p.prepareDowngrade(ctx, customerID, plan, operationID)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -790,7 +790,7 @@ func (p *Provider) ScheduleDowngradeExactIdempotent(
 	if err := billing.ValidateOperationID(operationID); err != nil {
 		return billing.ScheduledDowngrade{}, fmt.Errorf("stripe: downgrade: %w", err)
 	}
-	prepared, err := p.PrepareDowngrade(ctx, customerID, plan)
+	prepared, err := p.prepareDowngrade(ctx, customerID, plan, operationID)
 	if err != nil {
 		return billing.ScheduledDowngrade{}, err
 	}
@@ -811,6 +811,19 @@ func (p *Provider) PrepareDowngrade(
 	ctx context.Context,
 	customerID, plan string,
 ) (billing.ScheduledDowngrade, error) {
+	return p.prepareDowngrade(ctx, customerID, plan, "")
+}
+
+// prepareDowngrade permits an already armed subscription only when the
+// caller supplies the exact Witself operation recorded on that subscription.
+// The public read-only preparation API has no operation identity, so it must
+// refuse every pre-armed target rather than silently adopt an external
+// period-end cancellation. Strong wrappers pass their validated operation id
+// so an exact retry can recover without another provider mutation.
+func (p *Provider) prepareDowngrade(
+	ctx context.Context,
+	customerID, plan, operationID string,
+) (billing.ScheduledDowngrade, error) {
 	if plan != plans.Free {
 		return billing.ScheduledDowngrade{}, fmt.Errorf("stripe: downgrade to %q not supported yet (only free; paid-to-paid lands with the Team tier)", plan)
 	}
@@ -820,6 +833,12 @@ func (p *Provider) PrepareDowngrade(
 	}
 	if sub == nil {
 		return billing.ScheduledDowngrade{}, fmt.Errorf("stripe: customer %s has no live subscription", customerID)
+	}
+	if sub.CancelAtPeriodEnd &&
+		(operationID == "" ||
+			sub.Metadata["witself_pending_downgrade_operation_id"] != operationID) {
+		return billing.ScheduledDowngrade{}, errors.New(
+			"stripe: subscription is already scheduled for period-end cancellation outside this exact Witself downgrade operation")
 	}
 	if err := validateStripeResourceID(sub.ID, "sub_"); err != nil {
 		return billing.ScheduledDowngrade{}, fmt.Errorf(
@@ -888,6 +907,14 @@ func (p *Provider) SchedulePreparedDowngradeIdempotent(
 	if currentPlan == plan || !sub.periodEnd().Equal(prepared.Effective) {
 		return billing.ScheduledDowngrade{}, errors.New(
 			"stripe: prepared downgrade target changed before mutation")
+	}
+	if sub.CancelAtPeriodEnd {
+		if operationID == "" ||
+			sub.Metadata["witself_pending_downgrade_operation_id"] != operationID {
+			return billing.ScheduledDowngrade{}, errors.New(
+				"stripe: prepared subscription is already scheduled for period-end cancellation outside this exact Witself downgrade operation")
+		}
+		return prepared, nil
 	}
 	if !prepared.Effective.After(
 		p.cfg.Now().UTC().Add(minimumDowngradeScheduleLead)) {
