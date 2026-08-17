@@ -29,7 +29,7 @@ A feature being implemented does not mean it is generally available. A plan enti
 | [Agent email send](#agent-email-send) | Email | `implemented` | `limited` | **conditional** | 3/7 pass | 4 |
 | [Agent self, context, and foreground hydration](#agent-self-context) | Agent experience | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
 | [Account audit trail and retention](#audit-trail-retention) | Governance | `building` | `limited` | **not ready** | 0/7 pass | 4 |
-| [Billing and plan transitions](#billing-plan-transitions) | Commercial | `building` | `dark` | **not ready** | 2/7 pass | 4 |
+| [Billing and plan transitions](#billing-plan-transitions) | Commercial | `building` | `dark` | **not ready** | 2/7 pass | 5 |
 | [Custom inbound email domains](#custom-email-domains) | Email | `building` | `dark` | **not ready** | 2/7 pass | 6 |
 | [Durable facts](#facts) | Memory | `implemented` | `limited` | **conditional** | 4/7 pass | 3 |
 | [Fleet deployment, backup, and recovery](#fleet-deployment-recovery) | Platform | `implemented` | `limited` | **conditional** | 4/7 pass | 3 |
@@ -332,29 +332,30 @@ Open gates:
 
 ### Billing and plan transitions
 
-The provider-neutral billing read and mutation envelopes, durable receipts, recovery indexes, reconciler, and Stripe adapter are implemented foundations, but real charging and production webhooks remain dark.
+The Personal-to-Professional Stripe sandbox transition and exact Professional-to-Personal downgrade foundation are implemented behind an empty account cohort, but no retained end-to-end sandbox canary exists and production charging and webhooks remain dark.
 
 - Implementation: `building`
 - Managed rollout: `dark`
 - Readiness: **not ready**
-- Detailed docs: [billing-and-limits.md](../docs/billing-and-limits.md)
+- Detailed docs: [billing-and-limits.md](../docs/billing-and-limits.md), [billing-transition-rollout.md](../docs/billing-transition-rollout.md)
 
 | Gate | State | Current evidence and conclusion |
 |---|---|---|
-| Behavior | **CONDITIONAL** | Preview/apply transitions, payment setup, provider calls, durable receipts, recovery, and reconciliation exist; full subscription truth, dunning, cancellation, and downgrade-fit flows remain incomplete. [billing-and-limits.md](../docs/billing-and-limits.md), [billing_mutations_test.go](../internal/billing/lifecycle/billing_mutations_test.go) |
+| Behavior | **CONDITIONAL** | Personal-to-Professional preview, setup, checkout and apply plus exact Professional-to-Personal fit, scheduling, cancellation, receipts, recovery, and reconciliation are implemented; Team, Enterprise, paid-to-paid transitions, dunning, and refund mutations remain out. [billing-and-limits.md](../docs/billing-and-limits.md), [billing_mutations_test.go](../internal/billing/lifecycle/billing_mutations_test.go) |
 | Entitlement / policy | **PASS** | The control plane owns billing truth and resolves immutable cell snapshots; plan and account overrides remain separate and auditable. [billing-and-limits.md](../docs/billing-and-limits.md), [plans.json](../web/plans/plans.json) |
-| Bounds / abuse | **CONDITIONAL** | Idempotency, provider receipts, recovery shards, lease fences, replay windows, and high-risk data exclusions exist; hosted-action expiry, equal-time event fencing, receipt retention, writer floors, exact cancellation, and operator terminalization remain incomplete. [billing-and-limits.md](../docs/billing-and-limits.md), [billing_durability_test.go](../internal/billing/lifecycle/billing_durability_test.go) |
+| Bounds / abuse | **CONDITIONAL** | Idempotency, exact provider cancellation, hosted-action expiry, recovery shards, lease fences, replay windows, count-only inventory, and a checked reader-floor preflight exist; equal-time event fencing, receipt retention, operator terminalization, and retained cutover proof remain incomplete. [billing-and-limits.md](../docs/billing-and-limits.md), [billing-transition-rollout.md](../docs/billing-transition-rollout.md), [billing_durability_test.go](../internal/billing/lifecycle/billing_durability_test.go), [billing-transition-rollout-preflight.sh](../scripts/billing-transition-rollout-preflight.sh), [test-billing-transition-rollout-preflight.sh](../scripts/test-billing-transition-rollout-preflight.sh) |
 | Observability | **CONDITIONAL** | Value-free billing state, receipts, usage, and reconciler metrics exist; production alerts, provider event dashboards, and support escalation are not connected. [billing-and-limits.md](../docs/billing-and-limits.md), [observability-and-operations.md](../docs/observability-and-operations.md) |
-| Recovery | **CONDITIONAL** | Crash-resumable mutation recovery is implemented, but real-provider rollback, restore reconciliation, dunning, and operator drills remain unproven. [billing-and-limits.md](../docs/billing-and-limits.md), [billing_durability_test.go](../internal/billing/lifecycle/billing_durability_test.go) |
-| Rollout / canaries | **CONDITIONAL** | The complete foundation is deliberately dark; no account is charged and production Stripe webhooks are not enabled. [billing-and-limits.md](../docs/billing-and-limits.md) |
-| Docs / support | **PASS** | Authority boundaries, plan transitions, durable mutation design, dark posture, and remaining provider gates are documented. [billing-and-limits.md](../docs/billing-and-limits.md), [runbooks.md](../docs/runbooks.md) |
+| Recovery | **CONDITIONAL** | Crash-resumable exact mutation recovery is implemented, but a real-provider activation/rollback drill, restore reconciliation, dunning, and terminal operator handling of ambiguous old work remain unproven. [billing-and-limits.md](../docs/billing-and-limits.md), [billing_durability_test.go](../internal/billing/lifecycle/billing_durability_test.go) |
+| Rollout / canaries | **CONDITIONAL** | The transition foundation is deliberately dark behind an empty account cohort; Stripe test-mode product setup is partial, no retained Personal-to-Professional-to-Personal canary exists, and production charging and webhooks are disabled. [billing-and-limits.md](../docs/billing-and-limits.md), [billing-transition-rollout.md](../docs/billing-transition-rollout.md), [test-billing-transition-rollout-preflight.sh](../scripts/test-billing-transition-rollout-preflight.sh) |
+| Docs / support | **PASS** | Authority boundaries, supported transition scope, durable mutation design, v0.0.254 incompatibility, inventory/quarantine, dark cutover, rollback, and remaining provider gates are documented. [billing-and-limits.md](../docs/billing-and-limits.md), [billing-transition-rollout.md](../docs/billing-transition-rollout.md), [runbooks.md](../docs/runbooks.md) |
 
 Open gates:
 
 - `billing-operations` (observability, recovery): Connect billing metrics, alerts, receipt retention, support escalation, and operator recovery. ([tracking/evidence](../docs/billing-and-limits.md))
-- `billing-safety-completion` (bounds / abuse, recovery): Complete hosted-URL expiry/refresh, equal-time event fencing, bounded completed-receipt retention, rolling-writer floors, exact provider-object cancellation, and operator terminalization of deterministic provider failures. ([tracking/evidence](../docs/billing-and-limits.md))
-- `full-lifecycle-reconciliation` (behavior, recovery): Complete dunning, exact cancellation, downgrade-fit, restore reconciliation, and compensation behavior. ([tracking/evidence](https://github.com/witwave-ai/witself/issues/33))
-- `stripe-sandbox-acceptance` (rollout / canaries): Provision Stripe sandbox products, prices, secrets, webhook verification, replay, rollback, and an end-to-end plan transition canary. ([tracking/evidence](../docs/billing-and-limits.md))
+- `billing-safety-completion` (bounds / abuse, recovery): Complete equal-time event fencing, bounded completed-receipt retention, and operator terminalization of deterministic provider failures. ([tracking/evidence](../docs/billing-and-limits.md))
+- `billing-v254-exclusive-cutover` (bounds / abuse, recovery, rollout / canaries): Bind the release and image to the d12af5c safe floor, prove an empty cohort and zero hazard inventory, fully drain every v0.0.254 API and reconciler before the first new writer, and retain activation and rollback drill evidence. ([tracking/evidence](../docs/billing-transition-rollout.md))
+- `full-lifecycle-reconciliation` (behavior, recovery): Complete Team and Enterprise transitions, paid-to-paid compensation, dunning, refund mutations, and restore reconciliation. ([tracking/evidence](https://github.com/witwave-ai/witself/issues/33))
+- `stripe-sandbox-acceptance` (rollout / canaries): Finish Stripe sandbox secrets, hosted portal and webhook verification, then retain an end-to-end Personal-to-Professional-to-Personal transition and rollback canary; Team, Enterprise, and refund mutations remain excluded. ([tracking/evidence](../docs/billing-transition-rollout.md))
 
 <a id="custom-email-domains"></a>
 
