@@ -403,7 +403,7 @@ func TestStaticIndexServedWithSecurityHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read body: %v", err)
 	}
-	if !strings.Contains(string(body), "witself dashboard") {
+	if !strings.Contains(string(body), "Witself Agent Console") {
 		t.Fatal("index body missing title")
 	}
 	if !strings.Contains(resp.Header.Get("Content-Type"), "text/html") {
@@ -439,9 +439,12 @@ func TestStaticEmailSurfaceIsMetadataOnlyAndCheckpointLinked(t *testing.T) {
 	for _, want := range []string{
 		`self.email_checkpoint`, `href: "#/email"`, `fetchJSON("/api/email/address")`,
 		`fetchJSON("/api/email/status")`, `fetchJSON("/api/email?"`,
+		`fetchJSON("/api/email/sent?limit=100")`, `params.push("email_sent=true")`,
+		`source.addEventListener("email_sent"`, `message.request_kind`,
 		`params.push("email=true")`, `params.push("email_unread=true")`,
 		`params.push("email_unacked=true")`, "raw MIME", "processing claims never enter this page",
 		"account-wide attachment capacity", "attachment payload omitted because account-wide capacity is full",
+		"newest 100 sent messages at most", "Bodies, message identifiers, and delivery actions never enter this page",
 		`updateEmailAddressFromCheckpoint(self.email_checkpoint)`,
 		`emailStateChanged && current.section === "email"`,
 		`checkpoint.enabled === false`, `inbound email is not enabled on this account`,
@@ -456,6 +459,11 @@ func TestStaticEmailSurfaceIsMetadataOnlyAndCheckpointLinked(t *testing.T) {
 	// active agents through the CLI/MCP surfaces, never this local viewer.
 	if strings.Contains(string(app), `"/api/email:`) || strings.Contains(string(app), `"/api/email/" +`) {
 		t.Fatal("email UI contains a per-message action URL")
+	}
+	for _, forbidden := range []string{`":send"`, `":reply"`, `":read"`, `":ack"`, `":claim"`, `":complete"`, `":retry"`, `":cancel"`} {
+		if strings.Contains(string(app), forbidden) {
+			t.Fatalf("email UI contains lifecycle action %s", forbidden)
+		}
 	}
 }
 
@@ -480,6 +488,18 @@ func TestDashboardAgentEmailStorageRendering(t *testing.T) {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("dashboard email capacity JavaScript test: %v\n%s", err, output)
+	}
+}
+
+func TestDashboardAgentEmailSentRendering(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not installed")
+	}
+	cmd := exec.Command(node, "--test", "testdata/email_sent_test.cjs")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dashboard sent email JavaScript test: %v\n%s", err, output)
 	}
 }
 
@@ -1044,6 +1064,175 @@ func TestAgentEmailProxyRendersAvailabilityStates(t *testing.T) {
 	})
 }
 
+func TestAgentEmailSentProxyUsesOnlyPassiveGETAndAllowListsMetadata(t *testing.T) {
+	now := time.Date(2026, 8, 17, 14, 15, 16, 0, time.UTC)
+	providerStarted := now.Add(time.Second)
+	accepted := now.Add(2 * time.Second)
+	delivered := now.Add(3 * time.Second)
+	backend := func(w http.ResponseWriter, r *http.Request) {
+		if r.Method+" "+r.URL.Path != "GET /v1/email/sent" {
+			t.Errorf("sent-email dashboard touched non-list route %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		query := r.URL.Query()
+		if query.Get("limit") != "7" || query.Get("cursor") != "" || query.Get("state") != "" || len(query) != 1 {
+			t.Errorf("unexpected sent-email query %s", r.URL.RawQuery)
+		}
+		writeTestJSON(t, w, map[string]any{
+			"messages": []map[string]any{{
+				"id": "leaked-sent-message-id", "account_id": "leaked-account-id",
+				"realm_id": "leaked-realm-id", "owner_agent_id": "leaked-owner-id",
+				"from": "dash@witmail.net", "reply_to": "reply@witmail.net",
+				"to": "person@example.net", "subject": "safe sent subject",
+				"state": "delivered", "provider_state": "delivered",
+				"provider": "leaked-provider-name", "provider_message_id": "leaked-provider-message-id",
+				"error_code": "provider_timeout", "request_kind": "send", "attempt_count": 2,
+				"reply_to_inbound_message_id": "leaked-inbound-reply-target",
+				"thread_key":                  "leaked-thread-key", "text": "leaked submitted body",
+				"future_private_field": "leaked-future-field",
+				"queued_at":            now, "created_at": now, "updated_at": delivered,
+				"provider_started_at": providerStarted, "accepted_at": accepted, "delivered_at": delivered,
+			}},
+			"next_cursor": "leaked-sent-cursor",
+		})
+	}
+	srv, cfg := newDashboard(t, backend, nil)
+
+	resp := authedGet(t, srv, cfg, "/api/email/sent?limit=7")
+	raw, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read sent list: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("sent list got %d: %s", resp.StatusCode, raw)
+	}
+	for _, want := range []string{
+		`"available":true`, `"from":"dash@witmail.net"`, `"reply_to":"reply@witmail.net"`,
+		`"to":"person@example.net"`, `"subject":"safe sent subject"`, `"state":"delivered"`,
+		`"provider_state":"delivered"`, `"error_code":"provider_timeout"`,
+		`"request_kind":"send"`, `"attempt_count":2`,
+		`"provider_started_at":"2026-08-17T14:15:17Z"`, `"accepted_at":"2026-08-17T14:15:18Z"`,
+		`"delivered_at":"2026-08-17T14:15:19Z"`,
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("safe sent metadata %q missing: %s", want, raw)
+		}
+	}
+	for _, forbidden := range []string{
+		"leaked-sent-message-id", "leaked-account-id", "leaked-realm-id", "leaked-owner-id",
+		"leaked-provider-name", "leaked-provider-message-id", "leaked-inbound-reply-target",
+		"leaked-thread-key", "leaked submitted body", "leaked-future-field", "leaked-sent-cursor",
+		`"id"`, `"account_id"`, `"realm_id"`, `"owner_agent_id"`, `"provider"`,
+		`"reply_to_inbound_message_id"`, `"thread_key"`, `"text"`, `"next_cursor"`,
+	} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("sent-email projection leaked %q: %s", forbidden, raw)
+		}
+	}
+}
+
+func TestAgentEmailSentProxyValidatesAndBoundsQuery(t *testing.T) {
+	backendCalls := 0
+	backend := func(w http.ResponseWriter, r *http.Request) {
+		backendCalls++
+		if r.Method+" "+r.URL.Path != "GET /v1/email/sent" || r.URL.Query().Get("limit") != "100" || len(r.URL.Query()) != 1 {
+			t.Errorf("default sent-email query = %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+		}
+		writeTestJSON(t, w, client.AgentEmailOutboundPage{})
+	}
+	srv, cfg := newDashboard(t, backend, nil)
+	for _, path := range []string{
+		"/api/email/sent?limit=nope", "/api/email/sent?limit=-1", "/api/email/sent?limit=0",
+		"/api/email/sent?limit=101", "/api/email/sent?cursor=1700000000000000000:esnd_leak",
+		"/api/email/sent?state=queued", "/api/email/sent?extra=1",
+	} {
+		resp := authedGet(t, srv, cfg, path)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: got %d, want 400", path, resp.StatusCode)
+		}
+		_ = resp.Body.Close()
+	}
+	if backendCalls != 0 {
+		t.Fatalf("invalid sent-email queries reached backend %d times", backendCalls)
+	}
+	resp := authedGet(t, srv, cfg, "/api/email/sent")
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || backendCalls != 1 {
+		t.Fatalf("default sent-email page = %d calls=%d", resp.StatusCode, backendCalls)
+	}
+}
+
+func TestAgentEmailSentProjectionIsHardBounded(t *testing.T) {
+	messages := make([]client.AgentEmailOutboundMessage, sseEmailSentPageLimit+1)
+	for i := range messages {
+		messages[i].Subject = strconv.Itoa(i)
+	}
+	got := sanitizeAgentEmailSentMessages(messages)
+	if len(got) != sseEmailSentPageLimit {
+		t.Fatalf("sanitized sent messages = %d, want %d", len(got), sseEmailSentPageLimit)
+	}
+	if got[0].Subject != "0" || got[len(got)-1].Subject != strconv.Itoa(sseEmailSentPageLimit-1) {
+		t.Fatalf("sent sanitizer did not retain bounded prefix: first=%q last=%q", got[0].Subject, got[len(got)-1].Subject)
+	}
+}
+
+func TestAgentEmailSentProxyRendersAvailabilityStates(t *testing.T) {
+	t.Run("pre-feature cell", func(t *testing.T) {
+		srv, cfg := newDashboard(t, func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) }, nil)
+		resp := authedGet(t, srv, cfg, "/api/email/sent")
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusNotImplemented || !strings.Contains(string(body), "cell does not serve outbound agent email") {
+			t.Fatalf("pre-feature sent email = %d %s", resp.StatusCode, body)
+		}
+	})
+
+	t.Run("account feature disabled", func(t *testing.T) {
+		srv, cfg := newDashboard(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version": "witself.v0", "code": "feature_not_enabled",
+				"feature": "agent_email_send", "error": "Sorry, this feature is not enabled on this account.",
+				"retryable": false,
+			})
+		}, nil)
+		resp := authedGet(t, srv, cfg, "/api/email/sent")
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusForbidden || !strings.Contains(string(body), "outbound email is not enabled on this account") {
+			t.Fatalf("disabled sent email = %d %s", resp.StatusCode, body)
+		}
+	})
+
+	t.Run("upstream errors are content free", func(t *testing.T) {
+		const leaked = "private recipient, subject, and esnd_aaaaaaaaaaaaaaaa"
+		srv, cfg := newDashboard(t, func(w http.ResponseWriter, _ *http.Request) {
+			writeJSONError(w, http.StatusInternalServerError, leaked)
+		}, nil)
+		resp := authedGet(t, srv, cfg, "/api/email/sent")
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusBadGateway || !strings.Contains(string(body), agentEmailSentUpstreamMessage) {
+			t.Fatalf("sent upstream error = %d %s", resp.StatusCode, body)
+		}
+		if strings.Contains(string(body), leaked) || strings.Contains(string(body), "esnd_") {
+			t.Fatalf("sent-email upstream error leaked: %s", body)
+		}
+	})
+}
+
 func TestEventsStreamEmitsSelfAndTranscript(t *testing.T) {
 	backend := func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -1371,7 +1560,7 @@ func TestEventsStreamEmitsSettledEmailUnavailableState(t *testing.T) {
 		switch r.URL.Path {
 		case "/v1/self":
 			writeTestJSON(t, w, testSelfDigest())
-		case "/v1/email":
+		case "/v1/email", "/v1/email:status":
 			http.NotFound(w, r)
 		default:
 			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
@@ -1399,7 +1588,7 @@ func TestEventsStreamEmitsSettledEmailUnavailableState(t *testing.T) {
 			sawEmailDegraded = true
 		}
 		if strings.HasPrefix(line, "data: ") && strings.Contains(line, `"available":false`) &&
-			strings.Contains(line, `"reason":"unavailable"`) {
+			strings.Contains(line, `"reason":"pre_feature"`) {
 			sawUnavailable = true
 		}
 	}
@@ -1418,6 +1607,10 @@ func TestEventsStreamRedactsAgentEmailUpstreamError(t *testing.T) {
 			writeTestJSON(t, w, testSelfDigest())
 		case "/v1/email":
 			writeJSONError(w, http.StatusInternalServerError, leaked)
+		case "/v1/email:status":
+			writeTestJSON(t, w, client.AgentEmailStorageStatus{
+				SchemaVersion: "witself.v0", AttachmentCapacity: client.MemoryLimitStatus{Unlimited: true},
+			})
 		default:
 			http.NotFound(w, r)
 		}
@@ -1449,11 +1642,349 @@ func TestEventsStreamRedactsAgentEmailUpstreamError(t *testing.T) {
 	t.Fatalf("email upstream event not observed: %v", scanner.Err())
 }
 
+func TestEventsStreamEmitsAgentEmailSentIndependently(t *testing.T) {
+	now := time.Date(2026, 8, 17, 16, 17, 18, 0, time.UTC)
+	var mu sync.Mutex
+	receiveCalls, sentCalls := 0, 0
+	backend := func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("email stream touched mutating route %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		switch r.URL.Path {
+		case "/v1/self":
+			writeTestJSON(t, w, testSelfDigest())
+		case "/v1/email":
+			mu.Lock()
+			receiveCalls++
+			mu.Unlock()
+			writeTestJSON(t, w, client.AgentEmailPage{Messages: []client.AgentEmailMessage{{
+				EnvelopeSender: "sender@example.net", Subject: "inbound live subject",
+				SenderVerificationState: "unverified", ReceivedAt: now, DeliveredAt: now,
+			}}})
+		case "/v1/email:status":
+			writeTestJSON(t, w, client.AgentEmailStorageStatus{
+				SchemaVersion: "witself.v0", MaximumRawBytes: 25 * 1024 * 1024,
+				AttachmentCapacity: client.MemoryLimitStatus{Unlimited: true},
+			})
+		case "/v1/email/sent":
+			if r.URL.Query().Get("limit") != strconv.Itoa(sseEmailSentPageLimit) || len(r.URL.Query()) != 1 {
+				t.Errorf("sent-email tick query = %s", r.URL.RawQuery)
+			}
+			mu.Lock()
+			sentCalls++
+			mu.Unlock()
+			writeTestJSON(t, w, map[string]any{"messages": []map[string]any{{
+				"id": "leaked-live-sent-id", "account_id": "leaked-live-account",
+				"provider": "leaked-live-provider", "reply_to_inbound_message_id": "leaked-live-reply-target",
+				"thread_key": "leaked-live-thread", "future_body": "leaked-live-body",
+				"from": "dash@witmail.net", "reply_to": "reply@witmail.net",
+				"to": "person@example.net", "subject": "outbound live subject",
+				"state": "queued", "request_kind": "send", "attempt_count": 0,
+				"queued_at": now, "created_at": now, "updated_at": now,
+			}}})
+		default:
+			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}
+	srv, cfg := newDashboard(t, backend, nil)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	req := authedRequest(t, srv, cfg, "/api/events?email=true&email_sent=true").WithContext(ctx)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("open email events: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	sawReceive, sawSent := false, false
+	lastEvent := ""
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 1<<20), 1<<20)
+	for scanner.Scan() && (!sawReceive || !sawSent) {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "event: ") {
+			lastEvent = strings.TrimPrefix(line, "event: ")
+			continue
+		}
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		switch lastEvent {
+		case "email":
+			if strings.Contains(line, "inbound live subject") {
+				sawReceive = true
+			}
+		case "email_sent":
+			if strings.Contains(line, "outbound live subject") {
+				sawSent = true
+				for _, forbidden := range []string{
+					"leaked-live-sent-id", "leaked-live-account", "leaked-live-provider",
+					"leaked-live-reply-target", "leaked-live-thread", "leaked-live-body",
+				} {
+					if strings.Contains(line, forbidden) {
+						t.Fatalf("sent-email SSE leaked %q: %s", forbidden, line)
+					}
+				}
+			}
+		}
+	}
+	if !sawReceive || !sawSent {
+		t.Fatalf("independent email events: receive=%v sent=%v (%v)", sawReceive, sawSent, scanner.Err())
+	}
+	mu.Lock()
+	if receiveCalls == 0 || sentCalls == 0 {
+		t.Errorf("email polls: receive=%d sent=%d", receiveCalls, sentCalls)
+	}
+	mu.Unlock()
+	cancel()
+}
+
+func TestEventsStreamAgentEmailFetchesAreConcurrentAndBudgeted(t *testing.T) {
+	started := make(chan string, 4)
+	backend := func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/self":
+			writeTestJSON(t, w, testSelfDigest())
+		case "/v1/email", "/v1/email:status":
+			select {
+			case started <- r.URL.Path:
+			default:
+			}
+			<-r.Context().Done()
+		case "/v1/email/sent":
+			writeTestJSON(t, w, client.AgentEmailOutboundPage{Messages: []client.AgentEmailOutboundMessage{{
+				Subject: "sent is not blocked by receive", State: "queued",
+			}}})
+		default:
+			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}
+	srv, cfg := newDashboard(t, backend, func(cfg *Config) {
+		cfg.PollInterval = 150 * time.Millisecond
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	req := authedRequest(t, srv, cfg, "/api/events?email=true&email_sent=true").WithContext(ctx)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("open email events: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	startedPaths := map[string]bool{}
+	for len(startedPaths) != 2 {
+		select {
+		case path := <-started:
+			startedPaths[path] = true
+		case <-time.After(time.Second):
+			t.Fatalf("receive list and status did not start concurrently: %v", startedPaths)
+		}
+	}
+
+	sawSent, sawReceiveBudget := false, false
+	lastEvent := ""
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() && !sawReceiveBudget {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "event: ") {
+			lastEvent = strings.TrimPrefix(line, "event: ")
+			continue
+		}
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		if lastEvent == "email_sent" && strings.Contains(line, "sent is not blocked by receive") {
+			sawSent = true
+		}
+		if lastEvent == "upstream" && strings.Contains(line, `"source":"email"`) {
+			if !sawSent {
+				t.Fatalf("blocked receive withheld the ready sent frame: %s", line)
+			}
+			if !strings.Contains(line, agentEmailUpstreamMessage) || strings.Contains(line, "deadline exceeded") {
+				t.Fatalf("receive budget error was not fixed and redacted: %s", line)
+			}
+			sawReceiveBudget = true
+		}
+	}
+	if !sawSent || !sawReceiveBudget {
+		t.Fatalf("bounded independent email tick: sent=%v receive_budget=%v (%v)",
+			sawSent, sawReceiveBudget, scanner.Err())
+	}
+	cancel()
+}
+
+func TestEventsStreamAgentEmailDirectionsFailIndependently(t *testing.T) {
+	const leaked = "private email subject and actionable-id"
+	tests := []struct {
+		name          string
+		failedPath    string
+		failedSource  string
+		successEvent  string
+		successMarker string
+		fixedMessage  string
+	}{
+		{
+			name: "receive failure does not suppress sent", failedPath: "/v1/email",
+			failedSource: "email", successEvent: "email_sent", successMarker: "sent survives",
+			fixedMessage: agentEmailUpstreamMessage,
+		},
+		{
+			name: "sent failure does not suppress receive", failedPath: "/v1/email/sent",
+			failedSource: "email_sent", successEvent: "email", successMarker: "receive survives",
+			fixedMessage: agentEmailSentUpstreamMessage,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/self":
+					writeTestJSON(t, w, testSelfDigest())
+				case "/v1/email":
+					if tc.failedPath == r.URL.Path {
+						writeJSONError(w, http.StatusInternalServerError, leaked)
+						return
+					}
+					writeTestJSON(t, w, client.AgentEmailPage{Messages: []client.AgentEmailMessage{{Subject: "receive survives"}}})
+				case "/v1/email:status":
+					writeTestJSON(t, w, client.AgentEmailStorageStatus{
+						SchemaVersion: "witself.v0", AttachmentCapacity: client.MemoryLimitStatus{Unlimited: true},
+					})
+				case "/v1/email/sent":
+					if tc.failedPath == r.URL.Path {
+						writeJSONError(w, http.StatusInternalServerError, leaked)
+						return
+					}
+					writeTestJSON(t, w, client.AgentEmailOutboundPage{Messages: []client.AgentEmailOutboundMessage{{Subject: "sent survives"}}})
+				default:
+					http.NotFound(w, r)
+				}
+			}
+			srv, cfg := newDashboard(t, backend, nil)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			req := authedRequest(t, srv, cfg, "/api/events?email=true&email_sent=true").WithContext(ctx)
+			resp, err := srv.Client().Do(req)
+			if err != nil {
+				t.Fatalf("open email events: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+
+			sawSuccess, sawFailure := false, false
+			lastEvent := ""
+			scanner := bufio.NewScanner(resp.Body)
+			for scanner.Scan() && (!sawSuccess || !sawFailure) {
+				line := scanner.Text()
+				if strings.Contains(line, leaked) || strings.Contains(line, "actionable-id") {
+					t.Fatalf("email direction error leaked: %s", line)
+				}
+				if strings.HasPrefix(line, "event: ") {
+					lastEvent = strings.TrimPrefix(line, "event: ")
+					continue
+				}
+				if !strings.HasPrefix(line, "data: ") {
+					continue
+				}
+				if lastEvent == tc.successEvent && strings.Contains(line, tc.successMarker) {
+					sawSuccess = true
+				}
+				if lastEvent == "upstream" && strings.Contains(line, `"source":"`+tc.failedSource+`"`) {
+					if !strings.Contains(line, tc.fixedMessage) {
+						t.Fatalf("email direction error was not fixed: %s", line)
+					}
+					sawFailure = true
+				}
+			}
+			if !sawSuccess || !sawFailure {
+				t.Fatalf("email direction isolation: success=%v failure=%v (%v)", sawSuccess, sawFailure, scanner.Err())
+			}
+			cancel()
+		})
+	}
+}
+
+func TestEventsStreamEmitsSettledAgentEmailSentAvailability(t *testing.T) {
+	tests := []struct {
+		name   string
+		reason string
+		reply  func(http.ResponseWriter)
+	}{
+		{
+			name: "feature disabled", reason: "feature_disabled",
+			reply: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"code": "feature_not_enabled", "feature": "agent_email_send",
+					"error": "Sorry, this feature is not enabled on this account.", "retryable": false,
+				})
+			},
+		},
+		{name: "pre-feature cell", reason: "pre_feature", reply: func(w http.ResponseWriter) { w.WriteHeader(http.StatusNotFound) }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/self":
+					writeTestJSON(t, w, testSelfDigest())
+				case "/v1/email/sent":
+					tc.reply(w)
+				default:
+					http.NotFound(w, r)
+				}
+			}
+			srv, cfg := newDashboard(t, backend, nil)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			req := authedRequest(t, srv, cfg, "/api/events?email_sent=true").WithContext(ctx)
+			resp, err := srv.Client().Do(req)
+			if err != nil {
+				t.Fatalf("open sent-email events: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+
+			sawEvent, sawUnavailable, sawDegraded := false, false, false
+			lastEvent := ""
+			scanner := bufio.NewScanner(resp.Body)
+			for scanner.Scan() && !sawUnavailable {
+				line := scanner.Text()
+				if strings.HasPrefix(line, "event: ") {
+					lastEvent = strings.TrimPrefix(line, "event: ")
+					if lastEvent == "email_sent" {
+						sawEvent = true
+					}
+					continue
+				}
+				if !strings.HasPrefix(line, "data: ") {
+					continue
+				}
+				if lastEvent == "upstream" && strings.Contains(line, `"source":"email_sent"`) {
+					sawDegraded = true
+				}
+				if lastEvent == "email_sent" && strings.Contains(line, `"available":false`) &&
+					strings.Contains(line, `"reason":"`+tc.reason+`"`) {
+					sawUnavailable = true
+				}
+			}
+			if !sawEvent || !sawUnavailable || sawDegraded {
+				t.Fatalf("sent availability: event=%v unavailable=%v degraded=%v (%v)",
+					sawEvent, sawUnavailable, sawDegraded, scanner.Err())
+			}
+			cancel()
+		})
+	}
+}
+
 func TestEventsStreamRejectsInvalidMessagesFlag(t *testing.T) {
 	srv, cfg := newDashboard(t, selfBackend(t), nil)
 	for _, path := range []string{
 		"/api/events?messages=nope", "/api/events?memories=nope", "/api/events?facts=nope", "/api/events?secrets=nope",
-		"/api/events?email=nope", "/api/events?email=true&email_unread=nope", "/api/events?email=true&email_unacked=nope",
+		"/api/events?email=nope", "/api/events?email_sent=nope", "/api/events?email=true&email_unread=nope", "/api/events?email=true&email_unacked=nope",
 	} {
 		resp := authedGet(t, srv, cfg, path)
 		if resp.StatusCode != http.StatusBadRequest {

@@ -104,6 +104,10 @@ deployment cells under a thin global control plane.
   live for the exact Founder production cohort; covers the inverted
   (unverified-sender) trust boundary, fenced foreground processing, retention,
   durable lifecycle queues, and default-off expansion controls.
+- [agent-console.md](agent-console.md): the local, per-agent, content-read-only
+  Console presentation matrix, including received and sent email metadata,
+  domain-ownership boundaries, degraded states, and the distinction from the
+  fleet-admin TUI and any future hosted console.
 - [agent-avatars.md](agent-avatars.md): portable versioned agent portraits,
   deterministic placeholders, realm style packs, client-side AI generation,
   autonomy policy, safe SVG validation, evolution, and CLI/API/MCP routing for
@@ -225,6 +229,7 @@ deployment cells under a thin global control plane.
   agent's separate client-held AVK the sealed-plane decrypt root while the
   backend remains a portable ciphertext store.
 - [ADR 0004](decisions/0004-local-agent-dashboard.md):
-  serving a loopback-only, read-only, live per-agent dashboard from the CLI
-  over the same public API, authorization, and redaction rules as every other
-  client — distinct from the deferred operator/admin web dashboard.
+  serving the loopback-only, content-read-only local Agent Console through
+  `witself dashboard`, over the same public API, authorization, and redaction
+  rules as every other client — distinct from the fleet-admin TUI and deferred
+  operator/admin web dashboard.

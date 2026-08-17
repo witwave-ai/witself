@@ -1710,6 +1710,22 @@ The receive and independently gated outbound shapes are pinned in
   `/v1/agents/{agent}/email-send` and `/v1/realms/{realm}/email-send`.
   Content-free provider delivery events enter only through bearer-protected
   `POST /v1/internal/agent-email-send:provider-event`.
+- Local Agent Console: the email panel is a passive presentation adapter with
+  independent Received and Sent views. Received shows address/receive state,
+  account-wide capacity, and allow-listed inbound metadata. Sent shows
+  allow-listed owner-outbox metadata and provider-neutral lifecycle state.
+  Neither view exposes bodies, email/send or provider ids, attachment details,
+  claim fences, browser cursors, or action targets. The Console never reads,
+  acknowledges, claims, completes, sends, replies, retries, or cancels mail;
+  those user-initiated mutations remain agent-driven CLI or MCP operations and
+  the Console reflects their results plus automatic worker/provider lifecycle
+  transitions. See [agent-console.md](agent-console.md).
+
+The Console presentation does not own email readiness. Receive and send retain
+their independent entitlement, storage, worker, provider, abuse, recovery, and
+rollout gates in the canonical [Feature Status](feature-status.md) scorecard.
+An unavailable or disabled direction settles independently in the Console and
+does not imply that the other direction is unavailable.
 
 Operators can prove this boundary against one fresh synthetic accepted send
 with `witself-server agent-email provider-event-canary`. The command takes an

@@ -13,7 +13,8 @@
     sseMemories: false,  // whether the current EventSource polls memories
     sseFacts: false,     // whether the current EventSource polls facts
     sseSecrets: false,   // whether the current EventSource polls secrets
-    sseEmail: false,     // whether the current EventSource polls email metadata
+    sseEmail: false,     // whether the current EventSource polls received email metadata
+    sseEmailSent: false, // whether the current EventSource polls sent email metadata
     sseEmailUnread: false,
     sseEmailUnacked: false,
     seenSequences: {},   // transcript id -> highest rendered sequence
@@ -22,8 +23,19 @@
     emailStatus: null,   // value-free raw-message and attachment capacity
     emailMessages: [],   // metadata only; no ids, bodies, MIME, or claim fence
     emailAvailable: null,
+    emailReceiveUnavailableReason: null,
+    emailReceiveDegraded: false,
+    emailReceiveLiveRevision: 0, // invalidates slower direct reads after a live frame
+    emailReceiveRequestRevision: 0, // newest direct status/list read wins within one view
+    emailViewGeneration: 0, // invalidates direct reads from an earlier visit to the pane
+    emailAddressRecoveryPending: false, // one bounded reprobe after a transient initial miss
     emailCheckpointEnabled: null,
     emailFilters: { unread: false, unacked: false },
+    emailSentMessages: [], // content-minimal metadata; no ids or submitted text
+    emailSentAvailable: null,
+    emailSentUnavailableReason: null,
+    emailSentDegraded: false,
+    emailSentLiveRevision: 0, // invalidates slower direct reads after a live frame
     facts: {},           // fact id -> redacted fact (never a revealed value)
     filters: {},         // section -> list filter text, reapplied on re-render
     upstreamErrors: {},  // SSE source -> upstream error text while degraded
@@ -31,7 +43,8 @@
     lastMemoriesData: null, // last raw "memories" frame, same reason
     lastFactsData: null,    // last raw "facts" frame, same reason
     lastSecretsData: null,  // last raw "secrets" frame, same reason
-    lastEmailData: null,    // list + capacity frame; policy changes alter it
+    lastEmailData: null,    // received list + capacity frame; policy changes alter it
+    lastEmailSentData: null,// sent lifecycle frame, independent of receive policy
     themes: ["console"],    // replaced by /api/themes (the embedded theme dir)
   };
 
@@ -213,11 +226,15 @@
   function updateEmailAddressFromCheckpoint(checkpoint) {
     if (!checkpoint || checkpoint.unavailable) { return false; }
     if (checkpoint.enabled === false) {
+      state.emailReceiveLiveRevision++;
       state.emailCheckpointEnabled = false;
       var disabledChanged = state.emailAvailable !== false || state.emailAddress !== null ||
         state.emailStatus !== null ||
         (state.emailMessages && state.emailMessages.length !== 0);
       state.emailAvailable = false;
+      state.emailReceiveUnavailableReason = "feature_disabled";
+      state.emailReceiveDegraded = false;
+      state.emailAddressRecoveryPending = false;
       state.emailAddress = null;
       state.emailStatus = null;
       state.emailMessages = [];
@@ -225,7 +242,10 @@
     }
     var reenabled = checkpoint.enabled === true && state.emailCheckpointEnabled === false;
     if (checkpoint.enabled === true) { state.emailCheckpointEnabled = true; }
-    if (reenabled) { return "reenabled"; }
+    if (reenabled) {
+      state.emailReceiveLiveRevision++;
+      return "reenabled";
+    }
     if (!state.emailAddress) { return false; }
     var changed = false;
     [["receive_state", checkpoint.receive_state],
@@ -235,6 +255,7 @@
       state.emailAddress[pair[0]] = pair[1];
       changed = true;
     });
+    if (changed) { state.emailReceiveLiveRevision++; }
     return changed ? "changed" : false;
   }
 
@@ -265,18 +286,20 @@
   }
 
   // --- server-sent events ----------------------------------------------
-  function openEvents(transcriptID, afterSequence, withMessages, withMemories, withFacts, withSecrets, withEmail, emailUnread, emailUnacked) {
+  function openEvents(transcriptID, afterSequence, withMessages, withMemories, withFacts, withSecrets, withEmail, emailUnread, emailUnacked, withEmailSent) {
     withMessages = withMessages === true;
     withMemories = withMemories === true;
     withFacts = withFacts === true;
     withSecrets = withSecrets === true;
     withEmail = withEmail === true;
+    withEmailSent = withEmailSent === true;
     emailUnread = withEmail && emailUnread === true;
     emailUnacked = withEmail && emailUnacked === true;
     if (state.eventSource && state.sseTranscript === (transcriptID || null) &&
         state.sseMessages === withMessages && state.sseMemories === withMemories &&
         state.sseFacts === withFacts && state.sseSecrets === withSecrets &&
-        state.sseEmail === withEmail && state.sseEmailUnread === emailUnread &&
+        state.sseEmail === withEmail && state.sseEmailSent === withEmailSent &&
+        state.sseEmailUnread === emailUnread &&
         state.sseEmailUnacked === emailUnacked) { return; }
     if (state.eventSource) { state.eventSource.close(); }
     var params = [];
@@ -295,6 +318,7 @@
       if (emailUnread) { params.push("email_unread=true"); }
       if (emailUnacked) { params.push("email_unacked=true"); }
     }
+    if (withEmailSent) { params.push("email_sent=true"); }
     var source = new EventSource("/api/events" + (params.length ? "?" + params.join("&") : ""));
     state.eventSource = source;
     state.sseTranscript = transcriptID || null;
@@ -303,8 +327,15 @@
     state.sseFacts = withFacts;
     state.sseSecrets = withSecrets;
     state.sseEmail = withEmail;
+    state.sseEmailSent = withEmailSent;
     state.sseEmailUnread = emailUnread;
     state.sseEmailUnacked = emailUnacked;
+    // Digests belong to one stream shape. Direct reads may have changed the
+    // rendered state while another panel owned the EventSource, so the first
+    // frame of each newly opened direction must be applied even when its wire
+    // payload matches a frame seen during an earlier visit.
+    if (withEmail) { state.lastEmailData = null; }
+    if (withEmailSent) { state.lastEmailSentData = null; }
     // Each stream's tracker starts fresh server-side and re-announces any
     // still-failing source, so stale degradation must not carry over. The
     // same reset runs in onopen: a browser auto-reconnect reuses this
@@ -314,20 +345,52 @@
     state.upstreamErrors = {};
     renderUpstreamStatus();
     source.onopen = function () {
+      if (state.eventSource !== source) { return; }
+      // Browser auto-reconnect keeps this EventSource object but the server
+      // creates a fresh upstream tracker. Reapply the first healthy frame even
+      // when its bytes equal the last frame from the prior HTTP connection,
+      // so a latched degraded state can clear without data changing.
+      if (withEmail) { state.lastEmailData = null; }
+      if (withEmailSent) { state.lastEmailSentData = null; }
       setSSEState(true);
       state.upstreamErrors = {};
       renderUpstreamStatus();
     };
-    source.onerror = function () { setSSEState(false); };
+    source.onerror = function () {
+      if (state.eventSource === source) { setSSEState(false); }
+    };
     source.addEventListener("upstream", function (event) {
+      if (state.eventSource !== source) { return; }
       var body;
       try { body = JSON.parse(event.data); } catch (_) { return; }
       if (!body || !body.source) { return; }
       if (body.ok) { delete state.upstreamErrors[body.source]; }
       else { state.upstreamErrors[body.source] = String(body.message || "upstream error"); }
+      if (body.source === "email") {
+        state.emailReceiveLiveRevision++;
+        state.emailReceiveDegraded = !body.ok;
+        if (!body.ok && state.emailAvailable === null) {
+          state.emailAvailable = false;
+          state.emailReceiveUnavailableReason = "upstream";
+        }
+      }
+      if (body.source === "email_sent") {
+        state.emailSentLiveRevision++;
+        state.emailSentDegraded = !body.ok;
+        if (!body.ok && state.emailSentAvailable === null) {
+          state.emailSentAvailable = false;
+          state.emailSentUnavailableReason = "upstream";
+        }
+      }
       renderUpstreamStatus();
+      if ((body.source === "email" || body.source === "email_sent") &&
+          parseHash().section === "email") { renderEmailList(); }
+      if (body.source === "email" && body.ok) {
+        retryEmailAddressAfterRecovery(state.emailViewGeneration);
+      }
     });
     source.addEventListener("self", function (event) {
+      if (state.eventSource !== source) { return; }
       setSSEState(true);
       // The digest carries no clock, so identical frames mean nothing
       // changed; skip the no-op re-render.
@@ -342,10 +405,18 @@
       if (emailStateChanged && current.section === "email") {
         if (emailStateChanged === "disabled") {
           renderEmailUnavailable("feature_disabled");
+          // Receive policy is independent from sent history. Reopen without
+          // the receive poll while retaining the sent lifecycle subscription.
+          openEmailEvents(state.emailViewGeneration);
         } else if (emailStateChanged === "reenabled") {
-          probeEmailMailbox();
+          probeEmailMailbox(state.emailViewGeneration);
         } else {
           renderEmailList();
+          // A receive-state checkpoint may win the race with the initial
+          // status/list GET. That older GET is correctly discarded by the
+          // live revision fence, so the checkpoint itself must also upgrade
+          // the existing sent-only stream to include received-email frames.
+          openEmailEvents(state.emailViewGeneration);
         }
       }
     });
@@ -397,29 +468,57 @@
       else { renderConversationList(); }
     });
     source.addEventListener("email", function (event) {
+      if (state.eventSource !== source) { return; }
       // The server bundles value-free capacity into the existing email tick.
       // Skip identical frames so the poll cadence never becomes a DOM-render
       // cadence, while a new message or admin limit change still refreshes the
       // visible pane immediately.
       if (event.data === state.lastEmailData) { return; }
       state.lastEmailData = event.data;
+      state.emailReceiveLiveRevision++;
       var body;
       try { body = JSON.parse(event.data); } catch (_) { return; }
       if (body.available === false) {
-        state.emailAvailable = false;
-        state.emailStatus = null;
-        state.emailMessages = [];
-        if (parseHash().section === "email") { renderEmailUnavailable(body.reason || "unavailable"); }
-        // Keep the general self digest live without repeatedly probing a
-        // missing or no-longer-enrolled mailbox every poll interval.
-        openEvents(null);
+        settleReceivedEmailUnavailable(body.reason || "unavailable", true);
+        if (parseHash().section === "email") {
+          renderEmailUnavailable(state.emailReceiveUnavailableReason);
+          // Settled policy/enrollment/build states return to a sent-only
+          // stream. Transient availability keeps email=true so the next
+          // successful live frame repairs the pane without a reload.
+          openEmailEvents(state.emailViewGeneration);
+        }
         return;
       }
       state.emailAvailable = true;
+      state.emailReceiveUnavailableReason = null;
+      state.emailReceiveDegraded = false;
       if (Object.prototype.hasOwnProperty.call(body, "status")) {
         state.emailStatus = body.status || null;
       }
       state.emailMessages = body.messages || [];
+      if (parseHash().section === "email") {
+        renderEmailList();
+        retryEmailAddressAfterRecovery(state.emailViewGeneration);
+      }
+    });
+    source.addEventListener("email_sent", function (event) {
+      if (state.eventSource !== source) { return; }
+      // Sent availability and lifecycle are deliberately independent from the
+      // inbound checkpoint and receive filters. A disabled sent feature stays
+      // subscribed so a live policy re-enable can recover without reinstall.
+      if (event.data === state.lastEmailSentData) { return; }
+      state.lastEmailSentData = event.data;
+      state.emailSentLiveRevision++;
+      var body;
+      try { body = JSON.parse(event.data); } catch (_) { return; }
+      if (body.available === false) {
+        settleSentEmailUnavailable(body.reason || "unavailable");
+      } else {
+        state.emailSentAvailable = true;
+        state.emailSentUnavailableReason = null;
+        state.emailSentDegraded = false;
+        state.emailSentMessages = body.messages || [];
+      }
       if (parseHash().section === "email") { renderEmailList(); }
     });
   }
@@ -451,19 +550,20 @@
   }
 
   function route() {
-    var route = parseHash();
-    setNav(route.section);
-    if (route.section === "transcripts" && route.id) { return viewTranscript(route.id, route.query); }
-    if (route.section === "transcripts") { return viewTranscripts(); }
-    if (route.section === "facts" && route.id) { return viewFact(route.id); }
-    if (route.section === "facts") { return viewFacts(); }
-    if (route.section === "memories" && route.id) { return viewMemory(route.id); }
-    if (route.section === "memories") { return viewMemories(); }
-    if (route.section === "secrets" && route.id) { return viewSecret(route.id); }
-    if (route.section === "secrets") { return viewSecrets(); }
-    if (route.section === "conversations" && route.id) { return viewConversation(decodeURIComponent(route.id)); }
-    if (route.section === "conversations") { return viewConversations(); }
-    if (route.section === "email") { return viewEmail(); }
+    var viewGeneration = invalidateEmailView();
+    var current = parseHash();
+    setNav(current.section);
+    if (current.section === "transcripts" && current.id) { return viewTranscript(current.id, current.query); }
+    if (current.section === "transcripts") { return viewTranscripts(); }
+    if (current.section === "facts" && current.id) { return viewFact(current.id); }
+    if (current.section === "facts") { return viewFacts(); }
+    if (current.section === "memories" && current.id) { return viewMemory(current.id); }
+    if (current.section === "memories") { return viewMemories(); }
+    if (current.section === "secrets" && current.id) { return viewSecret(current.id); }
+    if (current.section === "secrets") { return viewSecrets(); }
+    if (current.section === "conversations" && current.id) { return viewConversation(decodeURIComponent(current.id)); }
+    if (current.section === "conversations") { return viewConversations(); }
+    if (current.section === "email") { return viewEmail(viewGeneration); }
     return viewOverview();
   }
 
@@ -1010,10 +1110,11 @@
     }).catch(secretsError);
   }
 
-  // --- receive-only email ---------------------------------------------
-  // The browser receives a purpose-built projection with no email/message
-  // ids, decoded body, MIME/header material, attachment detail, or processing
-  // fence. There are deliberately no per-message actions in this view.
+  // --- read-only agent email ------------------------------------------
+  // Received and sent email are separate purpose-built projections. Neither
+  // contains email/message ids, bodies, raw MIME/header material, attachment
+  // details, worker fences, or action capabilities. The pane never composes,
+  // replies, acknowledges, marks read, retries, or changes email settings.
   function emailQuery() {
     var params = ["limit=100"];
     if (state.emailFilters.unread) { params.push("unread=true"); }
@@ -1021,22 +1122,78 @@
     return params.join("&");
   }
 
-  function emailUnavailableReason(err) {
+  function normalizeEmailUnavailableReason(err) {
     var message = String((err && err.message) || err || "").toLowerCase();
     if (message.indexOf("not enabled on this account") >= 0 ||
-        message.indexOf("feature_not_enabled") >= 0) { return "feature_disabled"; }
-    if ((err && err.status === 403) || message.indexOf("not enrolled") >= 0) { return "not_enrolled"; }
+        message.indexOf("feature_not_enabled") >= 0 ||
+        message === "feature_disabled") { return "feature_disabled"; }
+    if ((err && (err.status === 404 || err.status === 501)) ||
+        message.indexOf("not implemented") >= 0 ||
+        message.indexOf("pre_feature") >= 0 ||
+        message.indexOf("pre-feature") >= 0) { return "pre_feature"; }
+    if ((err && (err.status === 502 || err.status === 503 || err.status === 504)) ||
+        message.indexOf("backend_unavailable") >= 0 ||
+        message.indexOf("upstream") >= 0) { return "upstream"; }
+    if ((err && err.status === 403) || message.indexOf("not enrolled") >= 0 ||
+        message === "not_enrolled") { return "not_enrolled"; }
     return "unavailable";
   }
 
+  function emailUnavailableReason(err) { return normalizeEmailUnavailableReason(err); }
+
+  function emailAvailabilityLabel(reason) {
+    reason = normalizeEmailUnavailableReason(reason);
+    if (reason === "feature_disabled") { return "feature disabled"; }
+    if (reason === "not_enrolled") { return "not enrolled"; }
+    if (reason === "pre_feature") { return "not available yet"; }
+    if (reason === "upstream") { return "upstream degraded"; }
+    return "unavailable";
+  }
+
+  function emailAvailabilityMessage(direction, reason) {
+    reason = normalizeEmailUnavailableReason(reason);
+    if (reason === "feature_disabled") {
+      return direction === "sent"
+        ? "outbound email is not enabled on this account. Sent history remains subscribed and will recover after a live policy change; no reinstall is required."
+        : "inbound email is not enabled on this account. This pane will reprobe after a live policy change; no reinstall is required.";
+    }
+    if (reason === "not_enrolled") {
+      return direction === "sent"
+        ? "this agent is not enrolled in outbound email."
+        : "this agent is not enrolled in inbound email.";
+    }
+    if (reason === "pre_feature") {
+      return direction === "sent"
+        ? "sent email history is not available in this cell build."
+        : "received email is not available in this cell build.";
+    }
+    if (reason === "upstream") {
+      return direction === "sent"
+        ? "sent email history is temporarily unavailable because its upstream service is degraded."
+        : "received email is temporarily unavailable because its upstream service is degraded.";
+    }
+    return direction === "sent"
+      ? "sent email history is temporarily unavailable on this cell."
+      : "received email is temporarily unavailable on this cell.";
+  }
+
+  function emailUnavailablePanelHTML(direction, reason, trailingHTML) {
+    var heading = direction === "sent" ? "sent email" : "received email";
+    return '<div class="panel"><h2>' + heading + ' <span class="badge">' +
+      esc(emailAvailabilityLabel(reason)) + '</span></h2><div class="empty">' +
+      esc(emailAvailabilityMessage(direction, reason)) + "</div>" + (trailingHTML || "") + "</div>";
+  }
+
+  function emailLoadingPanelHTML(direction) {
+    var heading = direction === "sent" ? "sent email" : "received email";
+    return '<div class="panel"><h2>' + heading +
+      ' <span class="badge">read only</span></h2><div class="empty">checking availability&hellip;</div></div>';
+  }
+
   function renderEmailUnavailable(reason) {
-    var message = reason === "feature_disabled"
-      ? "inbound email is not enabled on this account."
-      : (reason === "not_enrolled"
-        ? "this agent is not enrolled in receive-only email."
-        : "receive-only email is not available on this cell right now.");
-    $("view").innerHTML = '<div class="panel"><h2>email <span class="badge">metadata only</span></h2>' +
-      '<div class="empty">' + esc(message) + "</div></div>";
+    state.emailAvailable = false;
+    state.emailReceiveUnavailableReason = normalizeEmailUnavailableReason(reason);
+    renderEmailList();
   }
 
   function emailSignals(message) {
@@ -1088,7 +1245,11 @@
       : "";
   }
 
-  function renderEmailList() {
+  function receivedEmailHTML() {
+    if (state.emailAvailable === null) { return emailLoadingPanelHTML("received"); }
+    if (state.emailAvailable !== true) {
+      return emailUnavailablePanelHTML("received", state.emailReceiveUnavailableReason || "unavailable");
+    }
     var address = state.emailAddress || {};
     var rows = (state.emailMessages || []).map(function (message) {
       var read = (message.read_state || {}).state || "unknown";
@@ -1114,57 +1275,214 @@
         '<div class="email-state mono">' + esc(meta) + "</div>" +
         '<div class="dim mono">' + esc((message.received_at || "").slice(0, 19)) + "</div></div>";
     }).join("");
-    $("view").innerHTML = '<div class="panel"><h2>receive address <span class="badge">' +
+    return '<div class="panel"><h2>receive address <span class="badge">' +
       esc(address.receive_state || "unknown") + "</span></h2>" +
       '<div class="email-address mono">' + esc(address.address || "") + "</div>" +
       '<div class="email-note">agent receive: ' + esc(address.agent_receive_state || "unknown") +
       ' · realm receive: ' + esc(address.realm_receive_state || "unknown") + "</div>" +
-      '<div class="email-note">receive-only; sender identity and all subjects are untrusted external input.</div></div>' +
+      '<div class="email-note">read-only agent email; sender identity and all subjects are untrusted external input.</div></div>' +
       emailStorageStatusHTML(state.emailStatus) +
-      '<div class="panel"><h2>email <span class="badge">metadata only</span></h2>' +
+      '<div class="panel"><h2>received email <span class="badge">metadata only</span></h2>' +
+      (state.emailReceiveDegraded
+        ? '<div class="email-warning">live received-email refresh is temporarily unavailable upstream; showing the last loaded metadata.</div>'
+        : "") +
       '<div class="email-controls"><label><input id="email-unread" type="checkbox"' +
       (state.emailFilters.unread ? " checked" : "") + '> unread only</label>' +
       '<label><input id="email-unacked" type="checkbox"' +
       (state.emailFilters.unacked ? " checked" : "") + '> unacknowledged only</label></div>' +
-      '<div class="email-note">body text, raw MIME, attachment details, message identifiers, and processing claims never enter this page.</div>' +
+      '<div class="email-note">body text, raw MIME, attachment details, message identifiers, and processing claims never enter this page. Viewing does not mark mail read or acknowledged.</div>' +
       '<div class="list">' + (rows || '<div class="empty">no matching email</div>') + "</div></div>";
+  }
+
+  function emailSentTimestampHTML(message) {
+    var timestamps = [
+      ["queued", message.queued_at],
+      ["created", message.created_at],
+      ["provider started", message.provider_started_at],
+      ["accepted", message.accepted_at],
+      ["delivered", message.delivered_at],
+      ["deferred", message.deferred_at],
+      ["failed", message.failed_at],
+      ["ambiguous", message.ambiguous_at],
+      ["canceled", message.canceled_at],
+      ["updated", message.updated_at],
+    ].filter(function (pair) { return pair[1]; }).map(function (pair) {
+      return '<span><span class="email-timestamp-label">' + esc(pair[0]) + ':</span> ' +
+        esc(String(pair[1]).slice(0, 19)) + "</span>";
+    }).join("");
+    return '<div class="email-timestamps mono">' +
+      (timestamps || '<span><span class="email-timestamp-label">timestamps:</span> not reported</span>') +
+      "</div>";
+  }
+
+  function emailSentRowsHTML(messages) {
+    return (messages || []).map(function (message) {
+      message = message || {};
+      var attempts = Number(message.attempt_count);
+      attempts = !isFinite(attempts) || attempts < 0 ? 0 : Math.floor(attempts);
+      var stateLabel = message.state || "unknown";
+      var providerState = message.provider_state || "not reported";
+      var errorCode = message.error_code || "none";
+      var requestKind = message.request_kind || "not reported";
+      return '<div class="row email-row email-sent-row"><div class="grow">' +
+        '<div class="email-subject">' + esc(message.subject || "(no subject)") + "</div>" +
+        '<div class="email-recipient">recipient: <span class="mono">' + esc(message.to || "not reported") + "</span></div>" +
+        '<div class="email-route">from: <span class="mono">' + esc(message.from || "not reported") +
+        '</span> · reply-to: <span class="mono">' + esc(message.reply_to || "not reported") + "</span></div>" +
+        '<div class="email-lifecycle mono">kind: ' + esc(requestKind) +
+        " · provider state: " + esc(providerState) +
+        " · error code: " + esc(errorCode) + " · attempts: " + esc(attempts) + "</div>" +
+        emailSentTimestampHTML(message) + "</div>" +
+        '<div class="email-state"><span class="badge">state: ' + esc(stateLabel) + "</span></div></div>";
+    }).join("");
+  }
+
+  function sentEmailHTML() {
+    if (state.emailSentAvailable === null) { return emailLoadingPanelHTML("sent"); }
+    var rows = emailSentRowsHTML(state.emailSentMessages);
+    var newestNote = '<div class="email-note">newest 100 sent messages at most; older sent messages are not loaded. Bodies, message identifiers, and delivery actions never enter this page.</div>';
+    if (state.emailSentAvailable !== true) {
+      var retained = rows
+        ? newestNote + '<div class="email-warning">showing the last loaded sent metadata while live refresh is unavailable.</div><div class="list">' + rows + "</div>"
+        : "";
+      return emailUnavailablePanelHTML("sent", state.emailSentUnavailableReason || "unavailable", retained);
+    }
+    return '<div class="panel"><h2>sent email <span class="badge">metadata only</span></h2>' +
+      newestNote + (state.emailSentDegraded
+        ? '<div class="email-warning">live sent-email refresh is temporarily unavailable upstream; showing the last loaded metadata.</div>'
+        : "") + '<div class="list">' + (rows || '<div class="empty">no sent email</div>') + "</div></div>";
+  }
+
+  function renderEmailList() {
+    $("view").innerHTML = receivedEmailHTML() + sentEmailHTML();
     bindEmailControls();
   }
 
-  function openEmailEvents() {
-    openEvents(null, 0, false, false, false, false, true,
-      state.emailFilters.unread, state.emailFilters.unacked);
+  function invalidateEmailView() {
+    state.emailViewGeneration++;
+    return state.emailViewGeneration;
   }
 
-  function refreshEmail() {
+  function emailViewIsCurrent(viewGeneration) {
+    return viewGeneration === state.emailViewGeneration && parseHash().section === "email";
+  }
+
+  function currentEmailViewGeneration(viewGeneration) {
+    return typeof viewGeneration === "number" ? viewGeneration : state.emailViewGeneration;
+  }
+
+  function emailReceiveShouldPoll() {
+    if (state.emailAvailable === true) { return true; }
+    if (state.emailAvailable !== false) { return false; }
+    var reason = normalizeEmailUnavailableReason(state.emailReceiveUnavailableReason);
+    return reason === "upstream" || reason === "unavailable";
+  }
+
+  function settleReceivedEmailUnavailable(reason, clearAddress) {
+    reason = normalizeEmailUnavailableReason(reason);
+    var transientFailure = reason === "upstream" || reason === "unavailable";
+    state.emailAvailable = false;
+    state.emailReceiveUnavailableReason = reason;
+    state.emailReceiveDegraded = transientFailure;
+    // A transient list/status/address miss does not invalidate an address we
+    // already displayed. Settled policy/enrollment/build states do.
+    if (clearAddress && !transientFailure) { state.emailAddress = null; }
+    if (!transientFailure) { state.emailAddressRecoveryPending = false; }
+    state.emailStatus = null;
+    state.emailMessages = [];
+    if (reason === "feature_disabled") {
+      state.emailCheckpointEnabled = false;
+      // A stale disabled response can arrive after an enabled self frame.
+      // Permit the next identical frame to be processed so it can trigger
+      // the one-shot mailbox reprobe.
+      state.lastSelfData = null;
+    }
+  }
+
+  function openEmailEvents(viewGeneration) {
+    viewGeneration = currentEmailViewGeneration(viewGeneration);
+    if (!emailViewIsCurrent(viewGeneration)) { return; }
+    openEvents(null, 0, false, false, false, false, emailReceiveShouldPoll(),
+      state.emailFilters.unread, state.emailFilters.unacked, true);
+  }
+
+  function retryEmailAddressAfterRecovery(viewGeneration) {
+    if (!state.emailAddressRecoveryPending || state.emailAddress ||
+        !emailViewIsCurrent(viewGeneration)) { return null; }
+    state.emailAddressRecoveryPending = false;
+    return probeEmailMailbox(viewGeneration, true);
+  }
+
+  function refreshEmail(viewGeneration) {
+    viewGeneration = currentEmailViewGeneration(viewGeneration);
+    var liveRevision = state.emailReceiveLiveRevision;
+    var requestRevision = ++state.emailReceiveRequestRevision;
     return Promise.all([
       fetchJSON("/api/email/status"),
       fetchJSON("/api/email?" + emailQuery()),
     ]).then(function (results) {
+      if (!emailViewIsCurrent(viewGeneration) ||
+          liveRevision !== state.emailReceiveLiveRevision ||
+          requestRevision !== state.emailReceiveRequestRevision) { return; }
       var statusBody = results[0];
       var body = results[1];
+      if (body.available === false) {
+        settleReceivedEmailUnavailable(body.reason || "unavailable", true);
+        renderEmailUnavailable(state.emailReceiveUnavailableReason);
+        openEmailEvents(viewGeneration);
+        return;
+      }
       state.emailStatus = statusBody.status || null;
-      state.emailAvailable = body.available !== false;
+      state.emailAvailable = true;
+      state.emailReceiveUnavailableReason = null;
+      state.emailReceiveDegraded = false;
       state.emailMessages = body.messages || [];
       renderEmailList();
-      openEmailEvents();
+      openEmailEvents(viewGeneration);
     }).catch(function (err) {
-      state.emailAvailable = false;
-      state.emailStatus = null;
-      state.emailMessages = [];
-      openEvents(null);
-      var reason = emailUnavailableReason(err);
-      // The plan can change after the address probe but before the list
-      // request. Preserve that disabled edge too, so the first later
-      // enabled=true checkpoint performs a one-shot full reprobe.
-      if (reason === "feature_disabled") {
-        state.emailCheckpointEnabled = false;
-        // A stale disabled response can arrive after an enabled self frame.
-        // Permit the next identical frame to be processed so it can trigger
-        // the one-shot mailbox reprobe.
-        state.lastSelfData = null;
+      if (!emailViewIsCurrent(viewGeneration) ||
+          liveRevision !== state.emailReceiveLiveRevision ||
+          requestRevision !== state.emailReceiveRequestRevision) { return; }
+      settleReceivedEmailUnavailable(emailUnavailableReason(err), true);
+      // Transient direct-read failures deliberately keep the receive poll in
+      // the live stream. A later successful frame heals the pane without a
+      // reload; settled policy/enrollment/build states remain sent-only.
+      openEmailEvents(viewGeneration);
+      renderEmailUnavailable(state.emailReceiveUnavailableReason);
+    });
+  }
+
+  function settleSentEmailUnavailable(reason) {
+    reason = normalizeEmailUnavailableReason(reason);
+    state.emailSentAvailable = false;
+    state.emailSentUnavailableReason = reason;
+    state.emailSentDegraded = reason === "upstream" || reason === "unavailable";
+    // A transient upstream failure may recover with the next SSE poll. Keep
+    // the last loaded projection clearly labeled; settled policy/build
+    // unavailability clears it so stale lifecycle is never mistaken as live.
+    if (reason !== "upstream" && reason !== "unavailable") { state.emailSentMessages = []; }
+  }
+
+  function refreshSentEmail(viewGeneration) {
+    viewGeneration = currentEmailViewGeneration(viewGeneration);
+    var liveRevision = state.emailSentLiveRevision;
+    return fetchJSON("/api/email/sent?limit=100").then(function (body) {
+      if (!emailViewIsCurrent(viewGeneration) ||
+          liveRevision !== state.emailSentLiveRevision) { return; }
+      if (body.available === false) {
+        settleSentEmailUnavailable(body.reason || "unavailable");
+      } else {
+        state.emailSentAvailable = true;
+        state.emailSentUnavailableReason = null;
+        state.emailSentDegraded = false;
+        state.emailSentMessages = body.messages || [];
       }
-      renderEmailUnavailable(reason);
+      renderEmailList();
+    }).catch(function (err) {
+      if (!emailViewIsCurrent(viewGeneration) ||
+          liveRevision !== state.emailSentLiveRevision) { return; }
+      settleSentEmailUnavailable(emailUnavailableReason(err));
+      renderEmailList();
     });
   }
 
@@ -1174,43 +1492,98 @@
       if (!input) { return; }
       input.addEventListener("change", function () {
         state.emailFilters[pair[1]] = input.checked;
-        refreshEmail();
+        refreshEmail(state.emailViewGeneration);
       });
     });
   }
 
-  function viewEmail() {
-    breadcrumb([{ label: "email" }]);
-    // Keep the self/checkpoint stream active while enrollment is resolved;
-    // only start email polling after the read-only address probe succeeds.
-    openEvents(null);
-    probeEmailMailbox();
+  function viewEmail(viewGeneration) {
+    viewGeneration = currentEmailViewGeneration(viewGeneration);
+    state.emailAddressRecoveryPending = false;
+    breadcrumb([{ label: "agent email" }]);
+    // Sent lifecycle polling starts even while inbound enrollment is being
+    // resolved. The two availability domains never gate or erase each other.
+    renderEmailList();
+    openEmailEvents(viewGeneration);
+    refreshSentEmail(viewGeneration);
+    probeEmailMailbox(viewGeneration);
   }
 
   // Resolve enrollment after opening the pane and after a live account policy
   // transition from disabled to enabled. The checkpoint edge invokes this
   // once; ordinary enabled checkpoints never create a polling loop.
-  function probeEmailMailbox() {
+  function probeEmailMailbox(viewGeneration, recoveryAttempt) {
+    viewGeneration = currentEmailViewGeneration(viewGeneration);
+    var liveRevision = state.emailReceiveLiveRevision;
     return fetchJSON("/api/email/address").then(function (body) {
-      state.emailAddress = body.address || null;
-      state.emailAvailable = body.available !== false;
-      return refreshEmail();
-    }).catch(function (err) {
-      state.emailAddress = null;
-      state.emailStatus = null;
-      state.emailMessages = [];
-      state.emailAvailable = false;
-      var reason = emailUnavailableReason(err);
-      // Preserve a feature-disabled edge even when the address probe loses
-      // the race with the first self frame. A later explicit enabled=true
-      // checkpoint can then trigger the same one-shot reprobe.
-      if (reason === "feature_disabled") {
-        state.emailCheckpointEnabled = false;
-        // Do not let an earlier enabled-frame digest suppress recovery after
-        // this slower feature-disabled response.
-        state.lastSelfData = null;
+      if (!emailViewIsCurrent(viewGeneration)) { return; }
+      var receiveChanged = liveRevision !== state.emailReceiveLiveRevision;
+      if (receiveChanged && recoveryAttempt !== true) {
+        // List/status state may legitimately arrive before the independent
+        // address read. Fill an empty address without perturbing that newer
+        // content, but never replace an address already advanced elsewhere or
+        // reopen a settled disabled/enrollment/build state.
+        if (body.available !== false && !state.emailAddress &&
+            (state.emailAvailable === true || emailReceiveShouldPoll())) {
+          state.emailAddress = body.address || null;
+          renderEmailList();
+        }
+        return;
       }
-      renderEmailUnavailable(reason);
+      // A recovery address read is independent from the list/status frame.
+      // Accept only a successful address while receive state is still live or
+      // transient; never let this bounded one-shot probe reopen a settled
+      // disabled/enrollment/build state or overwrite newer list/status data.
+      if (recoveryAttempt === true) {
+        state.emailAddressRecoveryPending = false;
+        if (body.available === false ||
+            (state.emailAvailable !== true && !emailReceiveShouldPoll())) { return; }
+        state.emailAddress = body.address || null;
+        renderEmailList();
+        return;
+      }
+      if (body.available === false) {
+        settleReceivedEmailUnavailable(body.reason || "unavailable", true);
+        if (state.emailReceiveDegraded && !state.emailAddress && recoveryAttempt !== true) {
+          state.emailAddressRecoveryPending = true;
+        }
+        openEmailEvents(viewGeneration);
+        renderEmailUnavailable(state.emailReceiveUnavailableReason);
+        return;
+      }
+      state.emailAddress = body.address || null;
+      state.emailAddressRecoveryPending = false;
+      state.emailAvailable = true;
+      state.emailReceiveUnavailableReason = null;
+      return refreshEmail(viewGeneration);
+    }).catch(function (err) {
+      if (!emailViewIsCurrent(viewGeneration)) { return; }
+      if (recoveryAttempt === true) {
+        // Address recovery is independent from list/status availability. One
+        // failed bounded probe must not erase a healthy live frame or recurse.
+        state.emailAddressRecoveryPending = false;
+        return;
+      }
+      if (liveRevision !== state.emailReceiveLiveRevision) {
+        // The live frame that made this direct result stale arrived before we
+        // knew address recovery was needed. Arm and run the one bounded probe
+        // immediately; identical future frames may be de-duplicated and are
+        // therefore not a reliable retry trigger.
+        var staleReason = emailUnavailableReason(err);
+        if ((staleReason === "upstream" || staleReason === "unavailable") &&
+            !state.emailAddress &&
+            (state.emailAvailable === true || emailReceiveShouldPoll())) {
+          state.emailAddressRecoveryPending = true;
+          return retryEmailAddressAfterRecovery(viewGeneration);
+        }
+        return;
+      }
+      settleReceivedEmailUnavailable(emailUnavailableReason(err), true);
+      if (state.emailReceiveDegraded && !state.emailAddress && recoveryAttempt !== true) {
+        state.emailAddressRecoveryPending = true;
+      }
+      openEmailEvents(viewGeneration);
+      renderEmailUnavailable(state.emailReceiveUnavailableReason);
     });
   }
 
@@ -1352,7 +1725,14 @@
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
       state: state,
+      invalidateEmailView: invalidateEmailView,
       probeEmailMailbox: probeEmailMailbox,
+      refreshEmail: refreshEmail,
+      refreshSentEmail: refreshSentEmail,
+      openEmailEvents: openEmailEvents,
+      renderEmailList: renderEmailList,
+      emailSentRowsHTML: emailSentRowsHTML,
+      normalizeEmailUnavailableReason: normalizeEmailUnavailableReason,
       emailStorageStatusHTML: emailStorageStatusHTML,
       emailPayloadRetentionWarning: emailPayloadRetentionWarning,
       factCapacityHTML: factCapacityHTML,
