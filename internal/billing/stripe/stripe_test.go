@@ -62,6 +62,9 @@ type stubStripe struct {
 	subArmed              bool   // cancel_at_period_end on the stub subscription
 	subDowngradeOperation string
 	subCustomer           string
+	subStatus             string
+	subPeriodEnd          int64
+	advancePeriodOnArm    bool
 	subscriptionsJSON     string // optional exact list response override
 	custDeleted           bool   // customer GETs report deleted:true
 	customerCreateKeys    []string
@@ -119,7 +122,7 @@ func newStub(t *testing.T) (*stubStripe, *Provider) {
 		lastForm: map[string]string{}, checkoutOps: map[string]checkoutReplay{},
 		checkoutSessions: map[string]stubCheckout{},
 		subActive:        true, subArmed: true, upcoming: true,
-		subCustomer: "cus_stub_1",
+		subCustomer: "cus_stub_1", subStatus: "active",
 	}
 	srv := httptest.NewServer(http.HandlerFunc(s.handle))
 	t.Cleanup(srv.Close)
@@ -173,7 +176,10 @@ func (s *stubStripe) handle(w http.ResponseWriter, r *http.Request) {
 			s.lastForm[k] = v[0]
 		}
 	}
-	periodEnd := time.Date(2026, 8, 4, 0, 0, 0, 0, time.UTC).Unix()
+	periodEnd := s.subPeriodEnd
+	if periodEnd == 0 {
+		periodEnd = time.Date(2026, 8, 4, 0, 0, 0, 0, time.UTC).Unix()
+	}
 	checkoutExpires := time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC).Unix()
 	switch {
 	case r.URL.Path == "/v1/prices" && r.Method == http.MethodGet:
@@ -283,7 +289,7 @@ func (s *stubStripe) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if s.subActive {
-			_, _ = fmt.Fprintf(w, `{"data":[{"id":"sub_stub","customer":%q,"status":"active","cancel_at_period_end":%t,"metadata":{"witself_plan":"standard"},"items":{"data":[{"current_period_end":%d,"price":{"id":"price_standard","lookup_key":"witself_standard"}}]}}],"has_more":false}`, s.subCustomer, s.subArmed, periodEnd)
+			_, _ = fmt.Fprintf(w, `{"data":[{"id":"sub_stub","customer":%q,"status":%q,"cancel_at_period_end":%t,"metadata":{"witself_plan":"standard"},"items":{"data":[{"current_period_end":%d,"price":{"id":"price_standard","lookup_key":"witself_standard"}}]}}],"has_more":false}`, s.subCustomer, s.subStatus, s.subArmed, periodEnd)
 			return
 		}
 		_, _ = fmt.Fprint(w, `{"data":[],"has_more":false}`)
@@ -296,6 +302,10 @@ func (s *stubStripe) handle(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			switch s.lastForm["cancel_at_period_end"] {
 			case "true":
+				if s.advancePeriodOnArm {
+					periodEnd = time.Unix(periodEnd, 0).UTC().AddDate(0, 1, 0).Unix()
+					s.subPeriodEnd = periodEnd
+				}
 				s.subArmed = true
 				if operation := s.lastForm["metadata[witself_pending_downgrade_operation_id]"]; operation != "" {
 					s.subDowngradeOperation = operation
@@ -305,8 +315,8 @@ func (s *stubStripe) handle(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		_, _ = fmt.Fprintf(w,
-			`{"id":"sub_stub","customer":%q,"cancel_at_period_end":%t,"metadata":{"witself_pending_downgrade_operation_id":%q}}`,
-			s.subCustomer, s.subArmed, s.subDowngradeOperation)
+			`{"id":"sub_stub","customer":%q,"status":%q,"cancel_at_period_end":%t,"metadata":{"witself_plan":"standard","witself_pending_downgrade_operation_id":%q},"items":{"data":[{"current_period_end":%d,"price":{"id":"price_standard","lookup_key":"witself_standard"}}]}}`,
+			s.subCustomer, s.subStatus, s.subArmed, s.subDowngradeOperation, periodEnd)
 	case r.URL.Path == "/v1/invoices/create_preview":
 		if !s.upcoming {
 			http.Error(w, `{"error":{"code":"invoice_upcoming_none","message":"none"}}`, http.StatusNotFound)
@@ -636,17 +646,20 @@ func TestScheduleDowngradeIdempotentKeysMutationsOnly(t *testing.T) {
 	if err != nil || first.IsZero() {
 		t.Fatalf("first ScheduleDowngradeIdempotent = %v, %v", first, err)
 	}
-	wantKey := childIdempotencyKey("bop_down_1", "downgrade", "sub_stub")
+	wantKey := childIdempotencyKey("bop_down_1", "downgrade", "prepared")
 	if wantKey == "" || len(wantKey) > 255 {
 		t.Fatalf("derived downgrade key has invalid length %d: %q", len(wantKey), wantKey)
 	}
-	if len(s.requests) != 2 {
-		t.Fatalf("downgrade requests = %+v; want one read and one mutation", s.requests)
+	if len(s.requests) != 3 {
+		t.Fatalf("downgrade requests = %+v; want discovery, exact read, and mutation", s.requests)
 	}
 	if got := s.requests[0]; got.method != http.MethodGet || got.idempotencyKey != "" {
 		t.Fatalf("downgrade discovery read carried an idempotency key: %+v", got)
 	}
-	if got := s.requests[1]; got.method != http.MethodPost || got.idempotencyKey != wantKey {
+	if got := s.requests[1]; got.method != http.MethodGet || got.idempotencyKey != "" {
+		t.Fatalf("downgrade exact read carried an idempotency key: %+v", got)
+	}
+	if got := s.requests[2]; got.method != http.MethodPost || got.idempotencyKey != wantKey {
 		t.Fatalf("downgrade mutation request = %+v; want key %q", got, wantKey)
 	}
 
@@ -657,7 +670,7 @@ func TestScheduleDowngradeIdempotentKeysMutationsOnly(t *testing.T) {
 	if err != nil || !second.Equal(first) {
 		t.Fatalf("replayed ScheduleDowngradeIdempotent = %v, %v; want %v", second, err, first)
 	}
-	if got := s.requests[start+1].idempotencyKey; got != wantKey {
+	if got := s.requests[start+2].idempotencyKey; got != wantKey {
 		t.Fatalf("downgrade replay key = %q; want %q", got, wantKey)
 	}
 
@@ -856,6 +869,135 @@ func TestExactDowngradePersistsAndDisarmsOneSubscription(t *testing.T) {
 	}
 	if !s.subArmed {
 		t.Fatal("mismatched downgrade target was mutated")
+	}
+
+	s.subStatus = "canceled"
+	s.subArmed = false
+	s.subDowngradeOperation = "bop_downgrade_exact"
+	postsBefore := 0
+	for _, request := range s.requests {
+		if request.method == http.MethodPost &&
+			request.path == "/v1/subscriptions/sub_stub" {
+			postsBefore++
+		}
+	}
+	err = p.CancelPendingObjectIdempotent(
+		ctx, "cus_stub_1", target, "bop_terminal_downgrade_cancel")
+	if !errors.Is(err, billing.ErrPendingAlreadyResolved) {
+		t.Fatalf("terminal period-end cancel = %v; want already resolved", err)
+	}
+	postsAfter := 0
+	for _, request := range s.requests {
+		if request.method == http.MethodPost &&
+			request.path == "/v1/subscriptions/sub_stub" {
+			postsAfter++
+		}
+	}
+	if postsAfter != postsBefore {
+		t.Fatal("terminal subscription was mutated during exact cancellation")
+	}
+}
+
+func TestPreparedDowngradeNeverRediscoversReplacementSubscription(t *testing.T) {
+	s, p := newStub(t)
+	ctx := context.Background()
+	prepared, err := p.PrepareDowngrade(ctx, "cus_stub_1", plans.Free)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.ProviderObjectID != "sub_stub" || prepared.Effective.IsZero() {
+		t.Fatalf("prepared target = %+v", prepared)
+	}
+
+	// Provider projection can change after lifecycle durably records sub_stub.
+	// The mutation phase must use that exact object rather than list and select
+	// the now-current replacement.
+	s.subscriptionsJSON = fmt.Sprintf(
+		`{"data":[{"id":"sub_replacement","customer":"cus_stub_1","status":"active","metadata":{"witself_plan":"standard"},"items":{"data":[{"current_period_end":%d,"price":{"lookup_key":"witself_standard"}}]}}],"has_more":false}`,
+		prepared.Effective.Add(24*time.Hour).Unix())
+	s.requests = nil
+	confirmed, err := p.SchedulePreparedDowngradeIdempotent(
+		ctx, "cus_stub_1", plans.Free, "bop_prepared_target_a", prepared)
+	if err != nil || confirmed != prepared {
+		t.Fatalf("schedule prepared target = %+v, %v", confirmed, err)
+	}
+	if len(s.requests) != 2 ||
+		s.requests[0].method != http.MethodGet ||
+		s.requests[0].path != "/v1/subscriptions/sub_stub" ||
+		s.requests[1].method != http.MethodPost ||
+		s.requests[1].path != "/v1/subscriptions/sub_stub" {
+		t.Fatalf("prepared target requests = %+v; replacement must not be discovered", s.requests)
+	}
+
+	// If the prepared target reaches a terminal state before exact replay, fail
+	// closed. The replacement remains untouched and no mutation is attempted.
+	s.subStatus = "canceled"
+	s.requests = nil
+	_, err = p.SchedulePreparedDowngradeIdempotent(
+		ctx, "cus_stub_1", plans.Free, "bop_prepared_target_terminal", prepared)
+	if err == nil {
+		t.Fatal("terminal prepared target was silently retargeted")
+	}
+	if len(s.requests) != 1 || s.requests[0].method != http.MethodGet ||
+		s.requests[0].path != "/v1/subscriptions/sub_stub" {
+		t.Fatalf("terminal prepared target requests = %+v; want exact read only", s.requests)
+	}
+}
+
+func TestPreparedDowngradeRequiresSafeRenewalLead(t *testing.T) {
+	s, p := newStub(t)
+	now := p.cfg.Now().UTC()
+	s.subPeriodEnd = now.Add(minimumDowngradeScheduleLead).Unix()
+	if _, err := p.PrepareDowngrade(
+		context.Background(), "cus_stub_1", plans.Free,
+	); err == nil || !strings.Contains(err.Error(), "too close to renewal") {
+		t.Fatalf("near-boundary preparation = %v", err)
+	}
+	for _, request := range s.requests {
+		if request.method == http.MethodPost {
+			t.Fatalf("near-boundary preparation mutated Stripe: %+v", s.requests)
+		}
+	}
+
+	s.requests = nil
+	_, err := p.SchedulePreparedDowngradeIdempotent(
+		context.Background(), "cus_stub_1", plans.Free,
+		"bop_near_boundary", billing.ScheduledDowngrade{
+			ProviderObjectID: "sub_stub",
+			Effective:        now.Add(minimumDowngradeScheduleLead - time.Second),
+		})
+	if err == nil || !strings.Contains(err.Error(), "too close to renewal") {
+		t.Fatalf("near-boundary mutation = %v", err)
+	}
+	if len(s.requests) != 0 {
+		t.Fatalf("near-boundary prepared target made provider calls: %+v", s.requests)
+	}
+}
+
+func TestPreparedDowngradeDetectsPeriodRolloverDuringMutation(t *testing.T) {
+	s, p := newStub(t)
+	ctx := context.Background()
+	prepared, err := p.PrepareDowngrade(ctx, "cus_stub_1", plans.Free)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.advancePeriodOnArm = true
+	s.requests = nil
+	_, err = p.SchedulePreparedDowngradeIdempotent(
+		ctx, "cus_stub_1", plans.Free, "bop_period_rollover", prepared)
+	if err == nil || !strings.Contains(
+		err.Error(), "did not confirm exact period-end schedule",
+	) {
+		t.Fatalf("period rollover mutation = %v", err)
+	}
+	if !s.subArmed || s.subPeriodEnd == prepared.Effective.Unix() {
+		t.Fatalf("rollover fixture did not arm a changed period: armed=%t end=%d",
+			s.subArmed, s.subPeriodEnd)
+	}
+	if len(s.requests) != 2 ||
+		s.requests[0].method != http.MethodGet ||
+		s.requests[1].method != http.MethodPost {
+		t.Fatalf("period rollover requests = %+v", s.requests)
 	}
 }
 
@@ -1177,7 +1319,7 @@ func webhookStub(t *testing.T, now time.Time) (*stubStripe, *Provider) {
 		t: t, prices: map[string]string{}, priceCents: map[string]int64{},
 		lastForm: map[string]string{}, checkoutOps: map[string]checkoutReplay{},
 		subActive: true, subArmed: true, upcoming: true,
-		subCustomer: "cus_x",
+		subCustomer: "cus_x", subStatus: "active",
 	}
 	srv := httptest.NewServer(http.HandlerFunc(s.handle))
 	t.Cleanup(srv.Close)

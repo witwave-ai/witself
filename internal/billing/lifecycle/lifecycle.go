@@ -94,10 +94,30 @@ type Pending struct {
 	// never returned to the customer, but survives a control-plane restart so
 	// cleanup can target the original provider object.
 	ProviderObjectID string
-	Expires          time.Time // upgrade: provider/local request expiry
-	Effective        time.Time // downgrade: when it takes effect
-	Requested        time.Time
+	// PreparedEffective is the period boundary selected before the provider
+	// mutation. Effective remains zero until the provider confirms the exact
+	// schedule, so older binaries cannot mistake preparation for completion.
+	PreparedEffective time.Time
+	// ProviderPhase distinguishes a read-only prepared target from a confirmed
+	// provider schedule. Empty is the legacy encoding: an exact object plus a
+	// nonzero Effective is treated as applied; targetless legacy state remains
+	// ambiguous and fails closed.
+	ProviderPhase string
+	Expires       time.Time // upgrade: provider/local request expiry
+	Effective     time.Time // downgrade: when it takes effect
+	Requested     time.Time
 }
+
+// preparedDowngradeFenceKind is intentionally not a supported provider
+// cancellation kind. Older binaries reject it before any provider mutation,
+// making this preparation phase fail closed across rollout or rollback. New
+// binaries consume it only as durable lifecycle state.
+const preparedDowngradeFenceKind billing.PendingCancellationKind = "prepared_downgrade_fence"
+
+const (
+	pendingProviderPrepared = "prepared"
+	pendingProviderApplied  = "applied"
+)
 
 func newBillingOperationID() (string, error) {
 	var entropy [18]byte
@@ -1761,6 +1781,10 @@ func pendingCancellationTarget(r Record) (*billing.PendingCancellation, error) {
 	if p == nil {
 		return nil, nil
 	}
+	if isPreparedDowngradeFence(p) {
+		return nil, errors.New(
+			"lifecycle: downgrade provider result is ambiguous; retry the original operation or use operator reconciliation")
+	}
 	if p.CancelPrevious {
 		if p.CancelPreviousTarget == nil {
 			return nil, errors.New(
@@ -1788,6 +1812,10 @@ func pendingCancellationTarget(r Record) (*billing.PendingCancellation, error) {
 			return nil, errors.New(
 				"lifecycle: scheduled downgrade has no exact provider target; operator reconciliation is required")
 		}
+		if !providerEffectApplied(p) {
+			return nil, errors.New(
+				"lifecycle: scheduled downgrade provider result is ambiguous; retry the original operation or use operator reconciliation")
+		}
 		target = billing.PendingCancellation{
 			Kind:             billing.PendingCancellationPeriodEnd,
 			ProviderObjectID: p.ProviderObjectID, OriginalOperationID: p.OperationID,
@@ -1799,6 +1827,37 @@ func pendingCancellationTarget(r Record) (*billing.PendingCancellation, error) {
 		return nil, err
 	}
 	return &target, nil
+}
+
+func providerEffectApplied(p *Pending) bool {
+	if p == nil {
+		return false
+	}
+	switch p.ProviderPhase {
+	case pendingProviderApplied:
+		return true
+	case pendingProviderPrepared:
+		return false
+	case "":
+		// Backward compatibility for schedules completed before the phase field:
+		// old writers persisted both exact object and effective boundary only
+		// after the provider call returned successfully.
+		return p.Kind == PendingDowngrade && p.ProviderObjectID != "" &&
+			!p.Effective.IsZero()
+	default:
+		return false
+	}
+}
+
+func isPreparedDowngradeFence(p *Pending) bool {
+	return p != nil && p.Kind == PendingDowngrade &&
+		p.ProviderPhase == pendingProviderPrepared && p.CancelPrevious &&
+		p.CancelPreviousTarget != nil &&
+		p.CancelPreviousTarget.Kind == preparedDowngradeFenceKind &&
+		p.ProviderObjectID != "" &&
+		p.CancelPreviousTarget.ProviderObjectID == p.ProviderObjectID &&
+		p.OperationID != "" &&
+		p.CancelPreviousTarget.OriginalOperationID == p.OperationID
 }
 
 func validatePendingCancellationTarget(target billing.PendingCancellation) error {
@@ -2305,7 +2364,7 @@ func (m *Manager) requestDowngrade(
 	if err != nil {
 		return Outcome{}, err
 	}
-	if claim.Pending.CancelPrevious {
+	if claim.Pending.CancelPrevious && !isPreparedDowngradeFence(claim.Pending) {
 		var cancelErr error
 		if strictOperation {
 			cancelErr = m.cancelProviderPendingIdempotent(
@@ -2334,7 +2393,8 @@ func (m *Manager) requestDowngrade(
 			return Outcome{}, err
 		}
 	}
-	if reused && !claim.Pending.Effective.IsZero() {
+	if reused && providerEffectApplied(claim.Pending) &&
+		!claim.Pending.Effective.IsZero() {
 		return Outcome{
 			Kind: "scheduled", Plan: target.ID,
 			Effective: claim.Pending.Effective,
@@ -2345,14 +2405,63 @@ func (m *Manager) requestDowngrade(
 	if err != nil {
 		return Outcome{}, err
 	}
-	idempotent, ok := provider.(billing.ExactIdempotentDowngrader)
+	idempotent, ok := provider.(billing.PreparedIdempotentDowngrader)
 	if !ok {
 		return Outcome{}, fmt.Errorf(
-			"billing provider %q does not support exact idempotent downgrade operations",
+			"billing provider %q does not support prepared idempotent downgrade operations",
 			name)
 	}
-	scheduled, err := idempotent.ScheduleDowngradeExactIdempotent(
-		ctx, claim.CustomerID, target.ID, operationID)
+	prepared := billing.ScheduledDowngrade{
+		Effective:        claim.Pending.PreparedEffective,
+		ProviderObjectID: claim.Pending.ProviderObjectID,
+	}
+	if prepared.Effective.IsZero() || prepared.ProviderObjectID == "" {
+		prepared, err = idempotent.PrepareDowngrade(
+			ctx, claim.CustomerID, target.ID)
+		if err != nil {
+			return Outcome{}, err
+		}
+		if prepared.Effective.IsZero() ||
+			billing.ValidateProviderObjectID(prepared.ProviderObjectID) != nil {
+			return Outcome{}, invalidProviderAction("downgrade preparation")
+		}
+		claim, err = m.mutate(ctx, accountID, email, func(r *Record) error {
+			p := r.Pending
+			if p == nil || p.Kind != PendingDowngrade || p.Plan != target.ID ||
+				p.OperationID != operationID {
+				return refuse("downgrade to %s was superseded by another request", target.ID)
+			}
+			if providerEffectApplied(p) {
+				return errSkipWrite
+			}
+			if (p.ProviderObjectID != "" &&
+				p.ProviderObjectID != prepared.ProviderObjectID) ||
+				(!p.PreparedEffective.IsZero() &&
+					!p.PreparedEffective.Equal(prepared.Effective)) {
+				return errors.New(
+					"lifecycle: prepared downgrade target changed concurrently")
+			}
+			p.ProviderObjectID = prepared.ProviderObjectID
+			p.PreparedEffective = prepared.Effective
+			p.ProviderPhase = pendingProviderPrepared
+			p.CancelPrevious = true
+			p.CancelPreviousTarget = &billing.PendingCancellation{
+				Kind:                preparedDowngradeFenceKind,
+				ProviderObjectID:    prepared.ProviderObjectID,
+				OriginalOperationID: operationID,
+			}
+			return nil
+		})
+		if err != nil {
+			return Outcome{}, err
+		}
+		prepared = billing.ScheduledDowngrade{
+			Effective:        claim.Pending.PreparedEffective,
+			ProviderObjectID: claim.Pending.ProviderObjectID,
+		}
+	}
+	scheduled, err := idempotent.SchedulePreparedDowngradeIdempotent(
+		ctx, claim.CustomerID, target.ID, operationID, prepared)
 	if err != nil {
 		// Retain the operation identity after an ambiguous provider response.
 		// Exact retries can recover the same scheduled subscription; releasing
@@ -2360,7 +2469,9 @@ func (m *Manager) requestDowngrade(
 		return Outcome{}, err
 	}
 	if scheduled.Effective.IsZero() ||
-		billing.ValidateProviderObjectID(scheduled.ProviderObjectID) != nil {
+		billing.ValidateProviderObjectID(scheduled.ProviderObjectID) != nil ||
+		scheduled.ProviderObjectID != prepared.ProviderObjectID ||
+		!scheduled.Effective.Equal(prepared.Effective) {
 		return Outcome{}, invalidProviderAction("downgrade")
 	}
 	if _, err := m.mutate(ctx, accountID, email, func(r *Record) error {
@@ -2369,8 +2480,17 @@ func (m *Manager) requestDowngrade(
 			p.OperationID != operationID {
 			return refuse("downgrade to %s was superseded by another request", target.ID)
 		}
+		if r.Pending.ProviderObjectID != scheduled.ProviderObjectID ||
+			!r.Pending.PreparedEffective.Equal(scheduled.Effective) ||
+			!isPreparedDowngradeFence(r.Pending) {
+			return errors.New(
+				"lifecycle: provider confirmed a different prepared downgrade target")
+		}
 		r.Pending.Effective = scheduled.Effective
-		r.Pending.ProviderObjectID = scheduled.ProviderObjectID
+		r.Pending.PreparedEffective = time.Time{}
+		r.Pending.ProviderPhase = pendingProviderApplied
+		r.Pending.CancelPrevious = false
+		r.Pending.CancelPreviousTarget = nil
 		return nil
 	}); err != nil {
 		return Outcome{}, err
@@ -2852,6 +2972,9 @@ func (m *Manager) foldEventResolution(
 					// the durable receipt can be completed.
 					effective := p.Effective
 					if effective.IsZero() {
+						effective = p.PreparedEffective
+					}
+					if effective.IsZero() {
 						effective = event.At
 					}
 					if effective.IsZero() {
@@ -2891,6 +3014,9 @@ func (m *Manager) foldEventResolution(
 			if p := r.Pending; p != nil && p.Kind == PendingDowngrade {
 				if p.Plan == plans.Free {
 					effective := p.Effective
+					if effective.IsZero() {
+						effective = p.PreparedEffective
+					}
 					if effective.IsZero() {
 						effective = event.At
 					}

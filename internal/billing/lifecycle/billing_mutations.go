@@ -607,6 +607,7 @@ func (m *Manager) recoverBillingMutation(
 		if r.Pending != nil && r.Pending.OperationID == receipt.OperationID &&
 			r.Pending.Kind == PendingDowngrade &&
 			r.Pending.Plan == receipt.TargetPlan &&
+			providerEffectApplied(r.Pending) &&
 			!r.Pending.Effective.IsZero() {
 			effective := r.Pending.Effective
 			return BillingMutationResult{
@@ -1106,7 +1107,7 @@ func implementsIdempotentSubscribe(provider billing.Provider) bool {
 }
 
 func implementsIdempotentDowngrade(provider billing.Provider) bool {
-	_, ok := provider.(billing.ExactIdempotentDowngrader)
+	_, ok := provider.(billing.PreparedIdempotentDowngrader)
 	return ok
 }
 

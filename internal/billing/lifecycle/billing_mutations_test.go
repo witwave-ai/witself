@@ -428,23 +428,59 @@ func (f *mutableBillingFit) set(violations ...string) {
 // reclassifying it against mutable catalog or fit inputs.
 type ambiguousDowngradeBillingProvider struct {
 	*fake.Fake
-	mu     sync.Mutex
-	failed bool
-	calls  int
+	mu                sync.Mutex
+	failed            bool
+	calls             int
+	prepareCalls      int
+	driftAfterPrepare bool
+	targets           []billing.ScheduledDowngrade
 }
 
 func (p *ambiguousDowngradeBillingProvider) ScheduleDowngradeExactIdempotent(
 	ctx context.Context,
 	customerID, plan, operationID string,
 ) (billing.ScheduledDowngrade, error) {
-	scheduled, err := p.Fake.ScheduleDowngradeExactIdempotent(
-		ctx, customerID, plan, operationID)
+	prepared, err := p.PrepareDowngrade(ctx, customerID, plan)
+	if err != nil {
+		return billing.ScheduledDowngrade{}, err
+	}
+	return p.SchedulePreparedDowngradeIdempotent(
+		ctx, customerID, plan, operationID, prepared)
+}
+
+func (p *ambiguousDowngradeBillingProvider) PrepareDowngrade(
+	ctx context.Context,
+	customerID, plan string,
+) (billing.ScheduledDowngrade, error) {
+	prepared, err := p.Fake.PrepareDowngrade(ctx, customerID, plan)
+	if err != nil {
+		return billing.ScheduledDowngrade{}, err
+	}
+	p.mu.Lock()
+	p.prepareCalls++
+	call := p.prepareCalls
+	drift := p.driftAfterPrepare
+	p.mu.Unlock()
+	if drift && call > 1 {
+		prepared.ProviderObjectID = "fake_subscription_replacement"
+	}
+	return prepared, nil
+}
+
+func (p *ambiguousDowngradeBillingProvider) SchedulePreparedDowngradeIdempotent(
+	ctx context.Context,
+	customerID, plan, operationID string,
+	prepared billing.ScheduledDowngrade,
+) (billing.ScheduledDowngrade, error) {
+	scheduled, err := p.Fake.SchedulePreparedDowngradeIdempotent(
+		ctx, customerID, plan, operationID, prepared)
 	if err != nil {
 		return billing.ScheduledDowngrade{}, err
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.calls++
+	p.targets = append(p.targets, prepared)
 	if !p.failed {
 		p.failed = true
 		return billing.ScheduledDowngrade{}, context.DeadlineExceeded
@@ -453,6 +489,45 @@ func (p *ambiguousDowngradeBillingProvider) ScheduleDowngradeExactIdempotent(
 }
 
 func (p *ambiguousDowngradeBillingProvider) downgradeCalls() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+func (p *ambiguousDowngradeBillingProvider) preparedCalls() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.prepareCalls
+}
+
+func (p *ambiguousDowngradeBillingProvider) downgradeTargets() []billing.ScheduledDowngrade {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]billing.ScheduledDowngrade(nil), p.targets...)
+}
+
+// alreadyResolvedExactCancelProvider models Stripe observing that period end
+// already won before its subscription-deleted webhook reached lifecycle state.
+// The local pending fence must remain visible until that webhook is folded.
+type alreadyResolvedExactCancelProvider struct {
+	*fake.Fake
+	mu    sync.Mutex
+	calls int
+}
+
+func (p *alreadyResolvedExactCancelProvider) CancelPendingObjectIdempotent(
+	_ context.Context,
+	_ string,
+	_ billing.PendingCancellation,
+	_ string,
+) error {
+	p.mu.Lock()
+	p.calls++
+	p.mu.Unlock()
+	return billing.ErrPendingAlreadyResolved
+}
+
+func (p *alreadyResolvedExactCancelProvider) cancelCalls() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.calls
@@ -1467,7 +1542,9 @@ func TestBillingMutationExactDowngradeRetryIgnoresFitAndCatalogDrift(t *testing.
 	prices := catalog.Prices()
 	prices["team"] = 25_000
 	base := fake.New(fake.Config{Prices: prices, Now: clock.now})
-	provider := &ambiguousDowngradeBillingProvider{Fake: base}
+	provider := &ambiguousDowngradeBillingProvider{
+		Fake: base, driftAfterPrepare: true,
+	}
 	ctx := context.Background()
 	customerID, err := base.EnsureCustomer(ctx, "acct_drift", "owner@example.com")
 	if err != nil {
@@ -1519,8 +1596,17 @@ func TestBillingMutationExactDowngradeRetryIgnoresFitAndCatalogDrift(t *testing.
 	}
 	record, ok, err := store.Get(ctx, "acct_drift")
 	if err != nil || !ok || record.Pending == nil ||
-		record.Pending.OperationID != operationID || !record.Pending.Effective.IsZero() {
+		record.Pending.OperationID != operationID || !record.Pending.Effective.IsZero() ||
+		record.Pending.PreparedEffective.IsZero() ||
+		record.Pending.ProviderObjectID == "" ||
+		record.Pending.ProviderPhase != pendingProviderPrepared ||
+		!isPreparedDowngradeFence(record.Pending) {
 		t.Fatalf("ambiguous account state = %+v ok=%t err=%v", record, ok, err)
+	}
+	preparedEffective := record.Pending.PreparedEffective
+	if err := validatePendingCancellationTarget(
+		*record.Pending.CancelPreviousTarget); err == nil {
+		t.Fatal("prepared downgrade fence became a provider cancellation target")
 	}
 
 	fit.set("current usage now exceeds the Professional cap")
@@ -1534,9 +1620,32 @@ func TestBillingMutationExactDowngradeRetryIgnoresFitAndCatalogDrift(t *testing.
 	recovered, err := newManager(driftedCatalog).ExecuteBillingMutation(
 		ctx, "acct_drift", "owner@example.com", actor, command)
 	if err != nil || recovered.Outcome.Kind != "scheduled" ||
-		recovered.Outcome.Plan != "standard" || recovered.Outcome.Effective.IsZero() ||
+		recovered.Outcome.Plan != "standard" ||
+		!recovered.Outcome.Effective.Equal(preparedEffective) ||
 		!recovered.Replayed {
 		t.Fatalf("exact recovery = %+v, %v", recovered, err)
+	}
+	if provider.preparedCalls() != 1 {
+		t.Fatalf("provider prepare calls = %d; want one durable target selection",
+			provider.preparedCalls())
+	}
+	targets := provider.downgradeTargets()
+	if provider.downgradeCalls() != 2 || len(targets) != 2 ||
+		targets[0] != targets[1] ||
+		targets[0].ProviderObjectID != record.Pending.ProviderObjectID ||
+		!targets[0].Effective.Equal(preparedEffective) {
+		t.Fatalf("provider retry targets = %+v calls=%d; want exact prepared replay",
+			targets, provider.downgradeCalls())
+	}
+	record, ok, err = store.Get(ctx, "acct_drift")
+	if err != nil || !ok || record.Pending == nil ||
+		record.Pending.ProviderPhase != pendingProviderApplied ||
+		!providerEffectApplied(record.Pending) ||
+		record.Pending.ProviderObjectID != targets[0].ProviderObjectID ||
+		!record.Pending.Effective.Equal(preparedEffective) ||
+		!record.Pending.PreparedEffective.IsZero() ||
+		record.Pending.CancelPrevious || record.Pending.CancelPreviousTarget != nil {
+		t.Fatalf("confirmed prepared state = %+v ok=%t err=%v", record, ok, err)
 	}
 }
 
@@ -1584,6 +1693,17 @@ func TestBillingMutationDowngradeWebhookTombstoneRecoversLostProviderResponse(t 
 	}
 	operationID := billingMutationOperationID(
 		"acct_webhook_recovery", command.IdempotencyKey)
+	preparedRecord, ok, err := store.Get(ctx, "acct_webhook_recovery")
+	if err != nil || !ok || preparedRecord.Pending == nil ||
+		preparedRecord.Pending.ProviderPhase != pendingProviderPrepared ||
+		preparedRecord.Pending.ProviderObjectID == "" ||
+		preparedRecord.Pending.PreparedEffective.IsZero() ||
+		!preparedRecord.Pending.Effective.IsZero() ||
+		!isPreparedDowngradeFence(preparedRecord.Pending) {
+		t.Fatalf("prepared account state = %+v ok=%t err=%v",
+			preparedRecord, ok, err)
+	}
+	preparedEffective := preparedRecord.Pending.PreparedEffective
 
 	clock.t = clock.t.AddDate(0, 0, 31)
 	events := base.ApplyDue()
@@ -1599,7 +1719,7 @@ func TestBillingMutationDowngradeWebhookTombstoneRecoversLostProviderResponse(t 
 		record.LastBillingMutationKind != BillingMutationPlanDowngrade ||
 		record.LastBillingMutationResultKind != BillingMutationResultScheduled ||
 		record.LastBillingMutationPlan != plans.Free ||
-		!record.LastBillingMutationEffective.Equal(events[0].At) {
+		!record.LastBillingMutationEffective.Equal(preparedEffective) {
 		t.Fatalf("webhook tombstone = %+v ok=%t err=%v", record, ok, err)
 	}
 
@@ -1607,7 +1727,7 @@ func TestBillingMutationDowngradeWebhookTombstoneRecoversLostProviderResponse(t 
 		ctx, "acct_webhook_recovery", "owner@example.com", actor, command)
 	if err != nil || recovered.Outcome.Kind != "scheduled" ||
 		recovered.Outcome.Plan != plans.Free ||
-		!recovered.Outcome.Effective.Equal(events[0].At) || !recovered.Replayed {
+		!recovered.Outcome.Effective.Equal(preparedEffective) || !recovered.Replayed {
 		t.Fatalf("webhook recovery = %+v, %v", recovered, err)
 	}
 	if provider.downgradeCalls() != 1 {
@@ -1617,8 +1737,111 @@ func TestBillingMutationDowngradeWebhookTombstoneRecoversLostProviderResponse(t 
 	if err != nil || !ok || receipt.Status != BillingMutationCompleted ||
 		receipt.Result == nil || receipt.Result.Kind != BillingMutationResultScheduled ||
 		receipt.Result.Plan != plans.Free || receipt.Result.Effective == nil ||
-		!receipt.Result.Effective.Equal(events[0].At) {
+		!receipt.Result.Effective.Equal(preparedEffective) {
 		t.Fatalf("completed receipt = %+v ok=%t err=%v", receipt, ok, err)
+	}
+}
+
+func TestBillingMutationCancelWaitsForTerminalDowngradeWebhook(t *testing.T) {
+	catalog, err := plans.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := &clock{t: time.Date(2026, 8, 11, 17, 45, 0, 0, time.UTC)}
+	base := fake.New(fake.Config{Prices: catalog.Prices(), Now: clock.now})
+	provider := &alreadyResolvedExactCancelProvider{Fake: base}
+	ctx := context.Background()
+	accountID := "acct_terminal_downgrade_cancel"
+	customerID, err := base.EnsureCustomer(ctx, accountID, "owner@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := base.SubscribeIdempotent(
+		ctx, customerID, "standard", "bop_seed_terminal_cancel",
+	); err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemStore()
+	if err := store.Put(ctx, Record{
+		AccountID: accountID, Provider: "billing", CustomerID: customerID,
+		Entitled: "standard", Applied: "standard", EntitledAt: clock.now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manager := newBillingMutationManagerWithProvider(
+		t, catalog, store, provider, clock)
+	actor := BillingActor{ID: "usr_owner_1", Role: "owner"}
+	downgrade := BillingMutationCommand{
+		Operation: BillingMutationDowngrade, Plan: plans.Free,
+		Reason: "Return to Personal at period end", Confirmed: true,
+		IdempotencyKey: "terminal-downgrade-2026-08-11",
+	}
+	scheduled, err := manager.ExecuteBillingMutation(
+		ctx, accountID, "owner@example.com", actor, downgrade)
+	if err != nil || scheduled.Outcome.Kind != "scheduled" {
+		t.Fatalf("schedule downgrade = %+v, %v", scheduled, err)
+	}
+	downgradeOperationID := billingMutationOperationID(
+		accountID, downgrade.IdempotencyKey)
+	before, ok, err := store.Get(ctx, accountID)
+	if err != nil || !ok || before.Pending == nil ||
+		before.Pending.OperationID != downgradeOperationID ||
+		before.Pending.ProviderPhase != pendingProviderApplied ||
+		!providerEffectApplied(before.Pending) {
+		t.Fatalf("scheduled pending = %+v ok=%t err=%v", before, ok, err)
+	}
+	clock.t = before.Pending.Effective.Add(-time.Minute)
+
+	cancel := BillingMutationCommand{
+		Operation: BillingMutationCancel,
+		Reason:    "Cancel period-end downgrade", Confirmed: true,
+		IdempotencyKey: "terminal-cancel-2026-08-11",
+	}
+	if _, err := manager.ExecuteBillingMutation(
+		ctx, accountID, "owner@example.com", actor, cancel,
+	); !errors.Is(err, billing.ErrPendingAlreadyResolved) {
+		t.Fatalf("terminal cancel = %v; want pending already resolved", err)
+	}
+	after, ok, err := store.Get(ctx, accountID)
+	if err != nil || !ok || after.Pending == nil ||
+		after.Pending.OperationID != before.Pending.OperationID ||
+		after.Pending.ProviderObjectID != before.Pending.ProviderObjectID ||
+		!after.Pending.Effective.Equal(before.Pending.Effective) ||
+		after.Pending.ProviderPhase != pendingProviderApplied {
+		t.Fatalf("terminal cancel changed pending = %+v ok=%t err=%v", after, ok, err)
+	}
+	cancelOperationID := billingMutationOperationID(
+		accountID, cancel.IdempotencyKey)
+	receipt, ok, err := store.GetBillingMutation(ctx, cancelOperationID)
+	if err != nil || !ok || receipt.Status != BillingMutationPending {
+		t.Fatalf("terminal cancel receipt = %+v ok=%t err=%v", receipt, ok, err)
+	}
+	if provider.cancelCalls() != 1 {
+		t.Fatalf("terminal provider cancel calls = %d; want one", provider.cancelCalls())
+	}
+
+	clock.t = before.Pending.Effective.Add(time.Minute)
+	events := base.ApplyDue()
+	if len(events) != 1 || events[0].Type != billing.EventSubscriptionCanceled {
+		t.Fatalf("terminal period-end events = %+v", events)
+	}
+	if err := manager.OnEvents(ctx, "billing", events); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := manager.ExecuteBillingMutation(
+		ctx, accountID, "owner@example.com", actor, cancel)
+	if err != nil || !replayed.Replayed || replayed.Outcome.Kind != "resolved" {
+		t.Fatalf("terminal cancel recovery = %+v, %v", replayed, err)
+	}
+	if provider.cancelCalls() != 1 {
+		t.Fatalf("terminal cancel retried provider after webhook: %d", provider.cancelCalls())
+	}
+	receipt, ok, err = store.GetBillingMutation(ctx, cancelOperationID)
+	if err != nil || !ok || receipt.Status != BillingMutationCompleted ||
+		receipt.Result == nil || receipt.Result.Kind != BillingMutationResultResolved ||
+		receipt.Result.Cancelled {
+		t.Fatalf("terminal cancel completed receipt = %+v ok=%t err=%v",
+			receipt, ok, err)
 	}
 }
 
@@ -1760,6 +1983,71 @@ func TestR2StorePreservesBillingMutationTombstoneProjection(t *testing.T) {
 		!got.LastBillingMutationEffective.Equal(record.LastBillingMutationEffective) ||
 		!got.LastBillingMutationAt.Equal(record.LastBillingMutationAt) {
 		t.Fatalf("R2 tombstone = %+v ok=%t err=%v", got, ok, err)
+	}
+}
+
+func TestR2StorePreservesPreparedDowngradePhase(t *testing.T) {
+	store := newR2Store(t)
+	now := time.Date(2026, 8, 11, 18, 30, 0, 0, time.UTC)
+	effective := now.AddDate(0, 1, 0)
+	record := Record{
+		AccountID: "acct_r2_prepared_downgrade", Provider: "billing",
+		CustomerID: "cus_r2_prepared", Entitled: "standard", Applied: "standard",
+		Pending: &Pending{
+			Kind: PendingDowngrade, Plan: plans.Free,
+			OperationID:      "bop_r2_prepared_downgrade",
+			ProviderObjectID: "sub_r2_prepared",
+			ProviderPhase:    pendingProviderApplied,
+			Effective:        effective, Requested: now,
+		},
+	}
+	if err := store.Put(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := store.Get(context.Background(), record.AccountID)
+	if err != nil || !ok || got.Pending == nil ||
+		got.Pending.Kind != PendingDowngrade ||
+		got.Pending.OperationID != record.Pending.OperationID ||
+		got.Pending.ProviderObjectID != record.Pending.ProviderObjectID ||
+		got.Pending.ProviderPhase != pendingProviderApplied ||
+		!got.Pending.Effective.Equal(effective) ||
+		!got.Pending.Requested.Equal(now) {
+		t.Fatalf("R2 prepared downgrade = %+v ok=%t err=%v", got.Pending, ok, err)
+	}
+}
+
+func TestLegacyAppliedDowngradeRemainsCancellable(t *testing.T) {
+	effective := time.Date(2026, 9, 11, 18, 30, 0, 0, time.UTC)
+	record := Record{
+		AccountID: "acct_legacy_applied_downgrade", CustomerID: "cus_legacy",
+		Pending: &Pending{
+			Kind: PendingDowngrade, Plan: plans.Free,
+			OperationID:      "bop_legacy_applied_downgrade",
+			ProviderObjectID: "sub_legacy_applied", Effective: effective,
+			// ProviderPhase is deliberately absent, matching pre-field data.
+		},
+	}
+	if !providerEffectApplied(record.Pending) {
+		t.Fatal("legacy exact applied downgrade was quarantined")
+	}
+	target, err := pendingCancellationTarget(record)
+	if err != nil || target == nil ||
+		target.Kind != billing.PendingCancellationPeriodEnd ||
+		target.ProviderObjectID != record.Pending.ProviderObjectID ||
+		target.OriginalOperationID != record.Pending.OperationID {
+		t.Fatalf("legacy cancellation target = %+v, %v", target, err)
+	}
+
+	ambiguous := record
+	ambiguous.Pending = &Pending{
+		Kind: PendingDowngrade, Plan: plans.Free,
+		OperationID: "bop_legacy_ambiguous_downgrade",
+	}
+	if providerEffectApplied(ambiguous.Pending) {
+		t.Fatal("targetless legacy downgrade was treated as provider-applied")
+	}
+	if _, err := pendingCancellationTarget(ambiguous); err == nil {
+		t.Fatal("targetless legacy downgrade did not fail closed")
 	}
 }
 

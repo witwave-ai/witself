@@ -143,6 +143,22 @@ type ExactIdempotentDowngrader interface {
 	) (ScheduledDowngrade, error)
 }
 
+// PreparedIdempotentDowngrader splits a period-end downgrade into a read-only
+// target selection and an exact mutation. Managed lifecycle persists the
+// prepared target before crossing the provider mutation boundary, so a lost
+// response cannot make a retry rediscover and arm a different subscription.
+type PreparedIdempotentDowngrader interface {
+	PrepareDowngrade(
+		ctx context.Context,
+		customerID, plan string,
+	) (ScheduledDowngrade, error)
+	SchedulePreparedDowngradeIdempotent(
+		ctx context.Context,
+		customerID, plan, operationID string,
+		prepared ScheduledDowngrade,
+	) (ScheduledDowngrade, error)
+}
+
 // DowngradeTargetChecker is the optional target-aware capability side of an
 // IdempotentDowngrader. Providers whose downgrade support is narrower than the
 // plan catalog implement it so a write-free preview can refuse an unsupported

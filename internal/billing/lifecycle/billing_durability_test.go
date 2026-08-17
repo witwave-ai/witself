@@ -650,6 +650,24 @@ func (p *cancelOnceProvider) ScheduleDowngradeExactIdempotent(
 		ScheduleDowngradeExactIdempotent(ctx, customerID, plan, operationID)
 }
 
+func (p *cancelOnceProvider) PrepareDowngrade(
+	ctx context.Context,
+	customerID, plan string,
+) (billing.ScheduledDowngrade, error) {
+	return p.Provider.(billing.PreparedIdempotentDowngrader).
+		PrepareDowngrade(ctx, customerID, plan)
+}
+
+func (p *cancelOnceProvider) SchedulePreparedDowngradeIdempotent(
+	ctx context.Context,
+	customerID, plan, operationID string,
+	prepared billing.ScheduledDowngrade,
+) (billing.ScheduledDowngrade, error) {
+	return p.Provider.(billing.PreparedIdempotentDowngrader).
+		SchedulePreparedDowngradeIdempotent(
+			ctx, customerID, plan, operationID, prepared)
+}
+
 func (p *cancelOnceProvider) CancelPendingObjectIdempotent(
 	ctx context.Context,
 	customerID string,

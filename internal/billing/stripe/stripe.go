@@ -63,6 +63,12 @@ const apiBase = "https://api.stripe.com"
 // Floating with the account's default version would silently break both.
 const apiVersion = "2025-03-31.basil"
 
+// minimumDowngradeScheduleLead is longer than lifecycle's four-minute
+// provider execution budget. A downgrade too close to renewal is refused
+// before mutation so cancel_at_period_end cannot silently bind to the newly
+// renewed period while Witself reports the old boundary.
+const minimumDowngradeScheduleLead = 5 * time.Minute
+
 // Config assembles the provider.
 type Config struct {
 	// SecretKey is the sk_test_/sk_live_ API key.
@@ -104,6 +110,7 @@ var _ billing.IdempotentSetupper = (*Provider)(nil)
 var _ billing.IdempotentSubscriber = (*Provider)(nil)
 var _ billing.IdempotentDowngrader = (*Provider)(nil)
 var _ billing.ExactIdempotentDowngrader = (*Provider)(nil)
+var _ billing.PreparedIdempotentDowngrader = (*Provider)(nil)
 var _ billing.DowngradeTargetChecker = (*Provider)(nil)
 var _ billing.IdempotentPendingCanceller = (*Provider)(nil)
 var _ billing.ExactPendingCanceller = (*Provider)(nil)
@@ -596,6 +603,15 @@ type stripeSubscription struct {
 	} `json:"items"`
 }
 
+func liveStripeSubscriptionStatus(status string) bool {
+	switch status {
+	case "active", "trialing", "past_due", "unpaid":
+		return true
+	default:
+		return false
+	}
+}
+
 // periodEnd is the subscription's latest item period end.
 func (s stripeSubscription) periodEnd() time.Time {
 	var latest int64
@@ -676,8 +692,7 @@ func (p *Provider) liveSubscriptions(ctx context.Context, customerID string) ([]
 				"stripe: subscription %s belongs to unexpected customer %q",
 				s.ID, s.Customer)
 		}
-		switch s.Status {
-		case "active", "trialing", "past_due", "unpaid":
+		if liveStripeSubscriptionStatus(s.Status) {
 			live = append(live, s)
 		}
 	}
@@ -720,7 +735,12 @@ func (p *Provider) managedLiveSubscription(
 // ambiguous provider state and fails closed for operator reconciliation;
 // paid-to-paid needs subscription schedules and lands with the Team tier.
 func (p *Provider) ScheduleDowngrade(ctx context.Context, customerID, plan string) (time.Time, error) {
-	scheduled, err := p.scheduleDowngrade(ctx, customerID, plan, "")
+	prepared, err := p.PrepareDowngrade(ctx, customerID, plan)
+	if err != nil {
+		return time.Time{}, err
+	}
+	scheduled, err := p.SchedulePreparedDowngradeIdempotent(
+		ctx, customerID, plan, "", prepared)
 	return scheduled.Effective, err
 }
 
@@ -734,7 +754,12 @@ func (p *Provider) ScheduleDowngradeIdempotent(
 	if err := billing.ValidateOperationID(operationID); err != nil {
 		return time.Time{}, fmt.Errorf("stripe: downgrade: %w", err)
 	}
-	scheduled, err := p.scheduleDowngrade(ctx, customerID, plan, operationID)
+	prepared, err := p.PrepareDowngrade(ctx, customerID, plan)
+	if err != nil {
+		return time.Time{}, err
+	}
+	scheduled, err := p.SchedulePreparedDowngradeIdempotent(
+		ctx, customerID, plan, operationID, prepared)
 	return scheduled.Effective, err
 }
 
@@ -747,7 +772,12 @@ func (p *Provider) ScheduleDowngradeExactIdempotent(
 	if err := billing.ValidateOperationID(operationID); err != nil {
 		return billing.ScheduledDowngrade{}, fmt.Errorf("stripe: downgrade: %w", err)
 	}
-	return p.scheduleDowngrade(ctx, customerID, plan, operationID)
+	prepared, err := p.PrepareDowngrade(ctx, customerID, plan)
+	if err != nil {
+		return billing.ScheduledDowngrade{}, err
+	}
+	return p.SchedulePreparedDowngradeIdempotent(
+		ctx, customerID, plan, operationID, prepared)
 }
 
 // SupportsDowngradeTarget reports the exact target set this adapter can
@@ -757,9 +787,11 @@ func (*Provider) SupportsDowngradeTarget(plan string) bool {
 	return plan == plans.Free
 }
 
-func (p *Provider) scheduleDowngrade(
+// PrepareDowngrade selects the one exact live subscription and its current
+// period boundary without mutating Stripe.
+func (p *Provider) PrepareDowngrade(
 	ctx context.Context,
-	customerID, plan, operationID string,
+	customerID, plan string,
 ) (billing.ScheduledDowngrade, error) {
 	if plan != plans.Free {
 		return billing.ScheduledDowngrade{}, fmt.Errorf("stripe: downgrade to %q not supported yet (only free; paid-to-paid lands with the Team tier)", plan)
@@ -780,32 +812,91 @@ func (p *Provider) scheduleDowngrade(
 		return billing.ScheduledDowngrade{}, fmt.Errorf(
 			"stripe: subscription %s has no future current period end", sub.ID)
 	}
-	// Validate all provider state before the mutation. A missing Basil
-	// item-level current_period_end must not arm cancellation and only then
-	// return an epoch effective time.
+	if !effective.After(p.cfg.Now().UTC().Add(minimumDowngradeScheduleLead)) {
+		return billing.ScheduledDowngrade{}, errors.New(
+			"stripe: subscription is too close to renewal to schedule a bounded downgrade safely; retry after provider reconciliation")
+	}
+	return billing.ScheduledDowngrade{
+		Effective: effective, ProviderObjectID: sub.ID,
+	}, nil
+}
+
+// SchedulePreparedDowngradeIdempotent arms only the target durably prepared
+// by lifecycle state. Retry uses an operation-only Stripe idempotency key, so
+// even an accidental target drift cannot create a second mutation.
+func (p *Provider) SchedulePreparedDowngradeIdempotent(
+	ctx context.Context,
+	customerID, plan, operationID string,
+	prepared billing.ScheduledDowngrade,
+) (billing.ScheduledDowngrade, error) {
+	if plan != plans.Free {
+		return billing.ScheduledDowngrade{}, fmt.Errorf(
+			"stripe: downgrade to %q not supported yet (only free; paid-to-paid lands with the Team tier)", plan)
+	}
+	if operationID != "" {
+		if err := billing.ValidateOperationID(operationID); err != nil {
+			return billing.ScheduledDowngrade{}, fmt.Errorf(
+				"stripe: downgrade: %w", err)
+		}
+	}
+	if err := validateStripeResourceID(
+		prepared.ProviderObjectID, "sub_"); err != nil {
+		return billing.ScheduledDowngrade{}, fmt.Errorf(
+			"stripe: invalid prepared subscription id: %w", err)
+	}
+	if prepared.Effective.IsZero() {
+		return billing.ScheduledDowngrade{}, errors.New(
+			"stripe: prepared downgrade has no period boundary")
+	}
+	if !prepared.Effective.After(
+		p.cfg.Now().UTC().Add(minimumDowngradeScheduleLead)) {
+		return billing.ScheduledDowngrade{}, errors.New(
+			"stripe: prepared downgrade is too close to renewal; reconcile before retrying")
+	}
+	path := "/v1/subscriptions/" + url.PathEscape(prepared.ProviderObjectID)
+	var sub stripeSubscription
+	if err := p.call(ctx, "GET", path+"?expand[]=items.data.price.product", nil, "", &sub); err != nil {
+		return billing.ScheduledDowngrade{}, err
+	}
+	if sub.ID != prepared.ProviderObjectID || sub.Customer != customerID ||
+		!liveStripeSubscriptionStatus(sub.Status) {
+		return billing.ScheduledDowngrade{}, errors.New(
+			"stripe: prepared downgrade target is no longer the exact live subscription")
+	}
+	currentPlan, err := p.subscriptionPlan(sub)
+	if err != nil {
+		return billing.ScheduledDowngrade{}, err
+	}
+	if currentPlan == plan || !sub.periodEnd().Equal(prepared.Effective) {
+		return billing.ScheduledDowngrade{}, errors.New(
+			"stripe: prepared downgrade target changed before mutation")
+	}
+	if !prepared.Effective.After(
+		p.cfg.Now().UTC().Add(minimumDowngradeScheduleLead)) {
+		return billing.ScheduledDowngrade{}, errors.New(
+			"stripe: prepared downgrade crossed the safe renewal margin")
+	}
 	params := url.Values{"cancel_at_period_end": {"true"}}
 	if operationID != "" {
 		params.Set("metadata[witself_pending_downgrade_operation_id]", operationID)
 	}
-	var armed struct {
-		ID                string            `json:"id"`
-		Customer          string            `json:"customer"`
-		CancelAtPeriodEnd bool              `json:"cancel_at_period_end"`
-		Metadata          map[string]string `json:"metadata"`
-	}
-	if err := p.call(ctx, "POST", "/v1/subscriptions/"+sub.ID, params,
-		childIdempotencyKey(operationID, "downgrade", sub.ID), &armed); err != nil {
+	var armed stripeSubscription
+	if err := p.call(ctx, "POST", path, params,
+		childIdempotencyKey(operationID, "downgrade", "prepared"), &armed); err != nil {
 		return billing.ScheduledDowngrade{}, err
 	}
-	if armed.ID != sub.ID || armed.Customer != customerID ||
+	if armed.ID != prepared.ProviderObjectID || armed.Customer != customerID ||
+		!liveStripeSubscriptionStatus(armed.Status) ||
 		!armed.CancelAtPeriodEnd ||
+		!armed.periodEnd().Equal(prepared.Effective) ||
 		(operationID != "" &&
 			armed.Metadata["witself_pending_downgrade_operation_id"] != operationID) {
 		return billing.ScheduledDowngrade{}, errors.New(
 			"stripe: subscription response did not confirm exact period-end schedule")
 	}
 	return billing.ScheduledDowngrade{
-		Effective: effective, ProviderObjectID: sub.ID,
+		Effective:        prepared.Effective,
+		ProviderObjectID: prepared.ProviderObjectID,
 	}, nil
 }
 
@@ -909,6 +1000,7 @@ func (p *Provider) CancelPendingObjectIdempotent(
 		var sub struct {
 			ID                string            `json:"id"`
 			Customer          string            `json:"customer"`
+			Status            string            `json:"status"`
 			CancelAtPeriodEnd bool              `json:"cancel_at_period_end"`
 			Metadata          map[string]string `json:"metadata"`
 		}
@@ -921,12 +1013,25 @@ func (p *Provider) CancelPendingObjectIdempotent(
 				target.OriginalOperationID {
 			return errors.New("stripe: exact period-end cancellation target mismatch")
 		}
+		switch sub.Status {
+		case "canceled", "incomplete_expired":
+			return fmt.Errorf(
+				"stripe: subscription already reached a terminal state; awaiting provider reconciliation: %w",
+				billing.ErrPendingAlreadyResolved)
+		default:
+			if !liveStripeSubscriptionStatus(sub.Status) {
+				return fmt.Errorf(
+					"stripe: unsupported subscription status %q during cancellation",
+					sub.Status)
+			}
+		}
 		if !sub.CancelAtPeriodEnd {
 			return nil
 		}
 		var disarmed struct {
 			ID                string            `json:"id"`
 			Customer          string            `json:"customer"`
+			Status            string            `json:"status"`
 			CancelAtPeriodEnd bool              `json:"cancel_at_period_end"`
 			Metadata          map[string]string `json:"metadata"`
 		}
@@ -938,6 +1043,7 @@ func (p *Provider) CancelPendingObjectIdempotent(
 		}
 		if disarmed.ID != target.ProviderObjectID ||
 			disarmed.Customer != customerID || disarmed.CancelAtPeriodEnd ||
+			!liveStripeSubscriptionStatus(disarmed.Status) ||
 			disarmed.Metadata["witself_pending_downgrade_operation_id"] !=
 				target.OriginalOperationID {
 			return errors.New(
