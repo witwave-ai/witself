@@ -199,7 +199,7 @@ func validateStripeCheckoutAction(
 		return errors.New("invalid Stripe Checkout URL")
 	}
 	if !expiresAt.After(now.UTC()) {
-		return errors.New("Stripe Checkout action is already expired")
+		return errors.New("stripe Checkout action is already expired")
 	}
 	return nil
 }

@@ -2316,19 +2316,6 @@ func (m *Manager) requestUpgrade(
 	}, nil
 }
 
-// releaseClaim clears the claim we parked if it is still ours — best effort;
-// an unreleasable claim simply expires at its TTL.
-func (m *Manager) releaseClaim(ctx context.Context, accountID string, claim Record) {
-	_, _ = m.mutate(ctx, accountID, claim.Email, func(r *Record) error {
-		p, q := r.Pending, claim.Pending
-		if p == nil || q == nil || p.Kind != q.Kind || p.Plan != q.Plan || !p.Requested.Equal(q.Requested) {
-			return errSkipWrite
-		}
-		r.Pending = nil
-		return nil
-	})
-}
-
 // RequestDowngrade schedules a downgrade for period end after the advisory
 // fit check. A blocked downgrade returns an error listing every violation —
 // the account must be pruned first; nothing is silently degraded. The check

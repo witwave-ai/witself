@@ -14,6 +14,8 @@ import (
 	"github.com/witwave-ai/witself/internal/plans"
 )
 
+// Plan-fit wire constants define the closed violation, scope, and apply-state
+// vocabularies shared by the store and server layers.
 const (
 	PlanFitViolationLimitExceeded       = "limit_exceeded"
 	PlanFitViolationAuthorityIncomplete = "authority_incomplete"

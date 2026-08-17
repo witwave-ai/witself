@@ -70,6 +70,8 @@ type AccountPlanFitReport struct {
 	Violations         []AccountPlanFitViolation `json:"violations"`
 }
 
+// Account plan-fit apply states are the closed response values accepted from
+// direct cells and the directory bridge.
 const (
 	AccountPlanFitApplyStateApplied = "applied"
 	AccountPlanFitApplyStateBlocked = "blocked"

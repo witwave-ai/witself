@@ -887,6 +887,7 @@ type PlanFitReport struct {
 	Violations         []PlanFitViolation `json:"violations"`
 }
 
+// Plan-fit apply states are the closed provision-token response values.
 const (
 	PlanFitApplyStateApplied = "applied"
 	PlanFitApplyStateBlocked = "blocked"
