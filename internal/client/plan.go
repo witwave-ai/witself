@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/plans"
 )
 
 var bridgeAccountIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
@@ -35,6 +37,37 @@ type AccountPlanSnapshot struct {
 type AccountPlanFence struct {
 	Revision int64
 	Hash     string
+}
+
+// AccountPlanFitTarget is a complete resolved target snapshot. Nil maps or a
+// nil feature slice are rejected instead of being normalized to accidental
+// unlimited behavior at this downgrade-safety boundary.
+type AccountPlanFitTarget struct {
+	Plan         string           `json:"plan"`
+	SnapshotHash string           `json:"snapshot_hash"`
+	Limits       map[string]int64 `json:"limits"`
+	Policies     map[string]int64 `json:"policies"`
+	Features     []string         `json:"features"`
+}
+
+// AccountPlanFitViolation is one value-free aggregate target-cap refusal.
+type AccountPlanFitViolation struct {
+	Code         string `json:"code"`
+	Dimension    string `json:"dimension"`
+	Scope        string `json:"scope"`
+	Used         int64  `json:"used"`
+	Max          int64  `json:"max"`
+	SubjectCount int64  `json:"subject_count"`
+}
+
+// AccountPlanFitReport is returned by the cell directly or through the
+// directory bridge. It contains counts only, never tenant resource ids.
+type AccountPlanFitReport struct {
+	SchemaVersion      string                    `json:"schema_version"`
+	AccountID          string                    `json:"account_id"`
+	TargetPlan         string                    `json:"target_plan"`
+	TargetSnapshotHash string                    `json:"target_snapshot_hash"`
+	Violations         []AccountPlanFitViolation `json:"violations"`
 }
 
 // ApplyAccountPlan pushes a plan snapshot to a cell via the provision-token
@@ -104,6 +137,137 @@ func applyAccountPlanAtURL(
 		return AccountPlanSnapshot{}, fmt.Errorf("cell returned a mismatched plan snapshot acknowledgement")
 	}
 	return ack, nil
+}
+
+// CheckAccountPlanFit asks one cell to compare its current durable usage with
+// a complete resolved target snapshot. The RPC is POST because the target is
+// structured, but it is a read-only operation.
+func CheckAccountPlanFit(
+	ctx context.Context,
+	endpoint, provisionToken, accountID string,
+	target AccountPlanFitTarget,
+) (AccountPlanFitReport, error) {
+	url := strings.TrimRight(endpoint, "/") +
+		"/v1/accounts/" + accountID + ":plan-fit"
+	return checkAccountPlanFitAtURL(ctx, url, provisionToken, accountID, target)
+}
+
+// CheckAccountPlanFitViaBridge lets the directory-owning Worker resolve the
+// account's current cell and merge cell usage with control-plane-owned alias
+// and custom-domain allocation authorities.
+func CheckAccountPlanFitViaBridge(
+	ctx context.Context,
+	bridgeURL, bridgeToken, accountID string,
+	target AccountPlanFitTarget,
+) (AccountPlanFitReport, error) {
+	url := strings.TrimRight(bridgeURL, "/") +
+		"/v1/internal/accounts/" + accountID + ":plan-fit"
+	return checkAccountPlanFitAtURL(ctx, url, bridgeToken, accountID, target)
+}
+
+func checkAccountPlanFitAtURL(
+	ctx context.Context,
+	url, bearer, accountID string,
+	target AccountPlanFitTarget,
+) (AccountPlanFitReport, error) {
+	if err := validateAccountPlanFitTarget(target); err != nil {
+		return AccountPlanFitReport{}, err
+	}
+	body, err := json.Marshal(struct {
+		SchemaVersion string               `json:"schema_version"`
+		Target        AccountPlanFitTarget `json:"target"`
+	}{SchemaVersion: "witself.v0", Target: target})
+	if err != nil {
+		return AccountPlanFitReport{}, fmt.Errorf("encode plan-fit target: %w", err)
+	}
+	var report AccountPlanFitReport
+	if err := doJSON(ctx, http.MethodPost, url, bearer, body, &report); err != nil {
+		return AccountPlanFitReport{}, err
+	}
+	if err := validateAccountPlanFitReport(accountID, target, report); err != nil {
+		return AccountPlanFitReport{}, err
+	}
+	return report, nil
+}
+
+func validateAccountPlanFitTarget(target AccountPlanFitTarget) error {
+	if target.Plan == "" || target.Plan != strings.TrimSpace(target.Plan) ||
+		target.SnapshotHash == "" || target.Limits == nil ||
+		target.Policies == nil || target.Features == nil {
+		return fmt.Errorf("complete resolved plan-fit target snapshot is required")
+	}
+	if err := plans.ValidateLimits(target.Limits); err != nil {
+		return fmt.Errorf("invalid plan-fit target limits: %w", err)
+	}
+	if err := plans.ValidatePolicies(target.Policies); err != nil {
+		return fmt.Errorf("invalid plan-fit target policies: %w", err)
+	}
+	if err := plans.ValidateFeatures(target.Features); err != nil {
+		return fmt.Errorf("invalid plan-fit target features: %w", err)
+	}
+	expected, err := plans.SnapshotHash(
+		target.Plan, target.Limits, target.Policies, target.Features,
+	)
+	if err != nil || expected != target.SnapshotHash {
+		return fmt.Errorf("plan-fit target snapshot hash does not match payload")
+	}
+	return nil
+}
+
+func validateAccountPlanFitReport(
+	accountID string,
+	target AccountPlanFitTarget,
+	report AccountPlanFitReport,
+) error {
+	if report.SchemaVersion != "witself.v0" || report.AccountID != accountID ||
+		report.TargetPlan != target.Plan ||
+		report.TargetSnapshotHash != target.SnapshotHash ||
+		report.Violations == nil {
+		return fmt.Errorf("cell returned an invalid plan-fit report envelope")
+	}
+	seen := make(map[string]bool, len(report.Violations))
+	for _, violation := range report.Violations {
+		maximum, finite := target.Limits[violation.Dimension]
+		if !finite || maximum != violation.Max || seen[violation.Dimension] {
+			return fmt.Errorf("cell returned an invalid plan-fit violation")
+		}
+		seen[violation.Dimension] = true
+		expectedScope, known := planFitDimensionScope(violation.Dimension)
+		if !known || violation.SubjectCount < 1 {
+			return fmt.Errorf("cell returned an invalid plan-fit violation")
+		}
+		switch violation.Code {
+		case "limit_exceeded":
+			if violation.Scope != expectedScope || violation.Used <= violation.Max ||
+				(expectedScope == "account" && violation.SubjectCount != 1) {
+				return fmt.Errorf("cell returned an invalid plan-fit violation")
+			}
+		case "authority_incomplete":
+			if violation.Scope != "authority" || violation.Used != 0 ||
+				(violation.Dimension != plans.AgentEmailRealmAliasesPerRealmLimit &&
+					violation.Dimension != plans.AgentEmailCustomDomainsPerAccountLimit) {
+				return fmt.Errorf("cell returned an invalid plan-fit authority violation")
+			}
+		default:
+			return fmt.Errorf("cell returned an unknown plan-fit violation code")
+		}
+	}
+	return nil
+}
+
+func planFitDimensionScope(dimension string) (string, bool) {
+	switch dimension {
+	case plans.RealmLimit, plans.AgentLimit,
+		plans.AgentEmailAttachmentStorageBytesLimit,
+		plans.AgentEmailCustomDomainsPerAccountLimit:
+		return "account", true
+	case plans.AgentPerRealmLimit, plans.AgentEmailRealmAliasesPerRealmLimit:
+		return "realm", true
+	case plans.StoredMemoryLimit, plans.StoredFactLimit, plans.StoredSecretLimit:
+		return "agent", true
+	default:
+		return "", false
+	}
 }
 
 // ResolveAccountViaBridge returns the current cell endpoint for an account.

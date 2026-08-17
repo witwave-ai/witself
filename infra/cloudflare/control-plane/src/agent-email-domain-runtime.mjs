@@ -783,6 +783,33 @@ export function agentEmailDomainRegistryStub(env = {}) {
   return namespace.get(namespace.idFromName(DEFAULT_REGISTRY_OBJECT_NAME));
 }
 
+// readAgentEmailDomainPlanFit returns only the commercial capacity count. It
+// includes pending reservations as well as verified allocations so a domain
+// that has not produced a cell route cannot silently pass a downgrade check.
+export async function readAgentEmailDomainPlanFit(
+  env,
+  accountID,
+  maximum,
+) {
+  const stub = agentEmailDomainRegistryStub(env);
+  if (!stub) throw new Error("custom domain authority is not configured");
+  const response = await stub.fetch(
+    "https://agent-email-domain.internal/plan/fit",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account_id: accountID, maximum }),
+    },
+  );
+  const body = await response.json().catch(() => null);
+  if (!response.ok || body?.schema_version !== SCHEMA_VERSION ||
+      body?.account_id !== accountID || body?.maximum !== maximum ||
+      !Number.isSafeInteger(body?.used) || body.used < 0) {
+    throw new Error(body?.error ?? "custom domain plan-fit authority is unavailable");
+  }
+  return body;
+}
+
 export function agentEmailCustomDomainVerificationEnabled(env = {}) {
   return String(
     env.CP_AGENT_EMAIL_CUSTOM_DOMAIN_VERIFICATION_ENABLED ?? "",
@@ -1258,6 +1285,8 @@ export class DurableAgentEmailDomainRegistry {
           return await this.listAudit(input);
         case "/plan/reconcile":
           return await this.reconcilePlan(input);
+        case "/plan/fit":
+          return await this.planFit(input);
         case "/account-lifecycle/reconcile":
           return await this.reconcileAccountLifecycle(input);
         case "/route/get":
@@ -1541,6 +1570,28 @@ export class DurableAgentEmailDomainRegistry {
       ...usage,
       allocated_domains: usage.allocated_domains ?? usage.open_requests,
     };
+  }
+
+  async planFit(input) {
+    const accountID = validateAccountID(input?.account_id);
+    const maximum = input?.maximum;
+    if (!Number.isSafeInteger(maximum) || maximum < 0) {
+      fail("custom inbound domain plan-fit maximum is invalid", 400);
+    }
+    if (await this.accountPolicyConverging(accountID)) {
+      fail("custom inbound domain policy is still converging", 409);
+    }
+    const rawUsage = await this.storage.get(usageKey(accountID));
+    if (!rawUsage && await this.accountHasActiveRequest(accountID)) {
+      fail("custom inbound domain account usage is missing", 503);
+    }
+    const usage = await this.accountUsage(accountID);
+    return json({
+      schema_version: SCHEMA_VERSION,
+      account_id: accountID,
+      maximum,
+      used: usage.allocated_domains,
+    });
   }
 
   async mintUniqueRequestID() {

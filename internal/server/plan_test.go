@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/witwave-ai/witself/internal/plans"
 )
 
 // planTestServer builds a test server whose lifecycle route is enabled (the
@@ -33,6 +35,93 @@ func planTestServer(
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+func TestAccountPlanFitEndpointRequiresAndReturnsExactSnapshot(t *testing.T) {
+	limits := map[string]int64{
+		plans.AgentLimit:        10,
+		plans.StoredFactLimit:   100,
+		plans.StoredSecretLimit: 50,
+	}
+	policies := map[string]int64{plans.TranscriptRetentionDaysPolicy: 30}
+	features := []string{plans.FactsFeature, plans.MemoryFeature, plans.SecretsFeature}
+	hash, err := plans.SnapshotHash("free", limits, policies, features)
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := 0
+	srv := httptest.NewServer(apiMux(Config{
+		ProvisionToken: "witself_prv_test",
+		ProvisionAccountExact: func(context.Context, string, string, string) (ProvisionedAccount, error) {
+			return ProvisionedAccount{}, nil
+		},
+		CheckAccountPlanFit: func(
+			_ context.Context,
+			accountID string,
+			target PlanFitTargetRecord,
+		) (PlanFitReport, error) {
+			called++
+			if accountID != "acct_1" || target.Plan != "free" ||
+				target.SnapshotHash != hash || target.Limits[plans.AgentLimit] != 10 {
+				t.Fatalf("fit callback account=%q target=%+v", accountID, target)
+			}
+			return PlanFitReport{
+				AccountID: accountID, TargetPlan: target.Plan,
+				TargetSnapshotHash: target.SnapshotHash,
+				Violations: []PlanFitViolation{
+					{Code: "limit_exceeded", Dimension: plans.AgentLimit,
+						Scope: "account", Used: 12, Max: 10, SubjectCount: 1},
+					{Code: "limit_exceeded", Dimension: plans.StoredFactLimit,
+						Scope: "agent", Used: 104, Max: 100, SubjectCount: 2},
+				},
+			}, nil
+		},
+	}))
+	t.Cleanup(srv.Close)
+
+	target := PlanFitTargetRecord{
+		Plan: "free", SnapshotHash: hash, Limits: limits,
+		Policies: policies, Features: features,
+	}
+	body, err := json.Marshal(struct {
+		SchemaVersion string              `json:"schema_version"`
+		Target        PlanFitTargetRecord `json:"target"`
+	}{SchemaVersion: "witself.v0", Target: target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := postPlan(
+		t, srv.URL+"/v1/accounts/acct_1:plan-fit",
+		"witself_prv_test", string(body),
+	)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("fit status=%d want=200", response.StatusCode)
+	}
+	var report PlanFitReport
+	if err := json.NewDecoder(response.Body).Decode(&report); err != nil {
+		t.Fatal(err)
+	}
+	if report.SchemaVersion != "witself.v0" || report.AccountID != "acct_1" ||
+		report.TargetSnapshotHash != hash || len(report.Violations) != 2 {
+		t.Fatalf("fit report=%+v", report)
+	}
+
+	for _, invalid := range []string{
+		`{"schema_version":"witself.v0"}`,
+		`{"schema_version":"witself.v0","target":{"plan":"free","snapshot_hash":"` +
+			strings.Repeat("a", 64) + `","limits":{},"policies":{},"features":[]}}`,
+	} {
+		response := postPlan(
+			t, srv.URL+"/v1/accounts/acct_1:plan-fit",
+			"witself_prv_test", invalid,
+		)
+		if response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("invalid fit status=%d want=400 body=%s", response.StatusCode, invalid)
+		}
+	}
+	if called != 1 {
+		t.Fatalf("fit callback calls=%d want=1", called)
+	}
 }
 
 func postPlan(t *testing.T, url, token, body string) *http.Response {

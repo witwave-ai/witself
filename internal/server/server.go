@@ -299,6 +299,14 @@ type Config struct {
 	// protocol. It proves account existence and returns the cell's exact
 	// persisted revision/hash acknowledgement.
 	GetAccountPlan func(ctx context.Context, accountID string) (PlanSnapshotRecord, error)
+	// CheckAccountPlanFit is the provision-token-gated, read-only downgrade
+	// preflight. The control plane supplies the complete resolved target
+	// snapshot; the cell returns only aggregate, value-free violations.
+	CheckAccountPlanFit func(
+		ctx context.Context,
+		accountID string,
+		target PlanFitTargetRecord,
+	) (PlanFitReport, error)
 	// ApplyAgentEmailRealmAlias / GetAgentEmailRealmAlias are the
 	// provision-token-authorized cell side of the globally authoritative alias
 	// projection protocol. The control plane owns availability and reserved-name
@@ -835,6 +843,58 @@ type PlanSnapshotRecord struct {
 	Policies     map[string]int64 `json:"policies"`
 	Features     []string         `json:"features"`
 	AppliedAt    *time.Time       `json:"applied_at"`
+}
+
+// PlanFitTargetRecord is a complete resolved snapshot that has not
+// necessarily been applied yet. SnapshotHash proves the behavioral payload is
+// exact and prevents an omitted limits/features field from reading as an
+// accidental unlimited target.
+type PlanFitTargetRecord struct {
+	Plan         string           `json:"plan"`
+	SnapshotHash string           `json:"snapshot_hash"`
+	Limits       map[string]int64 `json:"limits"`
+	Policies     map[string]int64 `json:"policies"`
+	Features     []string         `json:"features"`
+}
+
+// PlanFitViolation is one bounded, value-free target-cap refusal.
+type PlanFitViolation struct {
+	Code         string `json:"code"`
+	Dimension    string `json:"dimension"`
+	Scope        string `json:"scope"`
+	Used         int64  `json:"used"`
+	Max          int64  `json:"max"`
+	SubjectCount int64  `json:"subject_count"`
+}
+
+// PlanFitReport is the provision-token response for a read-only fit check.
+type PlanFitReport struct {
+	SchemaVersion      string             `json:"schema_version"`
+	AccountID          string             `json:"account_id"`
+	TargetPlan         string             `json:"target_plan"`
+	TargetSnapshotHash string             `json:"target_snapshot_hash"`
+	Violations         []PlanFitViolation `json:"violations"`
+}
+
+func validPlanFitTargetRecord(target PlanFitTargetRecord) bool {
+	if target.Plan == "" || target.Plan != strings.TrimSpace(target.Plan) ||
+		target.SnapshotHash == "" || target.Limits == nil ||
+		target.Policies == nil || target.Features == nil {
+		return false
+	}
+	if err := plans.ValidateLimits(target.Limits); err != nil {
+		return false
+	}
+	if err := plans.ValidatePolicies(target.Policies); err != nil {
+		return false
+	}
+	if err := plans.ValidateFeatures(target.Features); err != nil {
+		return false
+	}
+	expected, err := plans.SnapshotHash(
+		target.Plan, target.Limits, target.Policies, target.Features,
+	)
+	return err == nil && target.SnapshotHash == expected
 }
 
 // ProvisionedAccount is the API view of a freshly provisioned account. The
@@ -2003,7 +2063,8 @@ func apiMux(cfg Config) http.Handler {
 			cfg.StreamAccountExport != nil ||
 			cfg.ImportAccountArchive != nil ||
 			cfg.ResumeAccountSystem != nil || cfg.LogAccountEvent != nil ||
-			cfg.SetAccountPlan != nil || cfg.ApplyAgentEmailRealmAlias != nil ||
+			cfg.SetAccountPlan != nil || cfg.CheckAccountPlanFit != nil ||
+			cfg.ApplyAgentEmailRealmAlias != nil ||
 			cfg.ApplyAgentEmailCustomDomainRoute != nil ||
 			cfg.PrepareRealmEmailRouteRetirement != nil ||
 			cfg.CommitRealmEmailRouteRetirement != nil)
@@ -4280,6 +4341,47 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(route)
+			return
+		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "plan-fit"); ok && cfg.CheckAccountPlanFit != nil {
+			var req struct {
+				SchemaVersion string              `json:"schema_version"`
+				Target        PlanFitTargetRecord `json:"target"`
+			}
+			decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&req); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "invalid plan-fit target snapshot")
+				return
+			}
+			var extra any
+			if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) ||
+				req.SchemaVersion != "witself.v0" ||
+				!validPlanFitTargetRecord(req.Target) {
+				writeJSONError(w, http.StatusBadRequest, "invalid plan-fit target snapshot")
+				return
+			}
+			report, err := cfg.CheckAccountPlanFit(r.Context(), accountID, req.Target)
+			switch {
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "account not found")
+				return
+			case errors.Is(err, ErrConflict):
+				writeJSONError(w, http.StatusConflict, "account plan-fit state is unavailable")
+				return
+			case errors.Is(err, ErrInvalidPlanSnapshot), errors.Is(err, ErrBadInput):
+				writeJSONError(w, http.StatusBadRequest, "invalid plan-fit target snapshot")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not check account plan fit")
+				return
+			}
+			if report.Violations == nil {
+				report.Violations = []PlanFitViolation{}
+			}
+			report.SchemaVersion = "witself.v0"
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(report)
 			return
 		}
 		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "plan"); ok && cfg.SetAccountPlan != nil {

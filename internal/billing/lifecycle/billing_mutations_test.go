@@ -297,7 +297,7 @@ type mutableBillingFit struct {
 func (f *mutableBillingFit) Fit(
 	_ context.Context,
 	_ string,
-	_ plans.Plan,
+	_ PlanSnapshot,
 ) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

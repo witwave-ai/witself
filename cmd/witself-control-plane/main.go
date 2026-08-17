@@ -227,6 +227,7 @@ func setupBilling(ctx context.Context, mux *http.ServeMux) error {
 
 	cellResolve := cpserver.BridgeCell(bridgeURL, bridgeToken)
 	applier := cpserver.NewBridgeApplier(bridgeURL, bridgeToken)
+	fitChecker := cpserver.NewBridgeFitChecker(bridgeURL, bridgeToken)
 	authenticate := cpserver.CellAuthenticate(cellResolve)
 	manager, err := lifecycle.NewManager(lifecycle.Config{
 		Catalog:   catalog,
@@ -234,6 +235,7 @@ func setupBilling(ctx context.Context, mux *http.ServeMux) error {
 		Default:   providerName,
 		Store:     lifecycle.NewR2Store(blobClient, prefix),
 		Applier:   applier,
+		Fit:       fitChecker,
 	})
 	if err != nil {
 		return err

@@ -126,6 +126,64 @@ func (a bridgeApplier) ReadApplyFence(
 	return lifecycle.ApplyFence{Revision: fence.Revision, Hash: fence.Hash}, nil
 }
 
+type bridgeFitChecker struct {
+	url   string
+	token string
+}
+
+// NewBridgeFitChecker returns the production downgrade checker. The Worker
+// resolves the active cell, reads only value-free durable usage, and merges
+// the control-plane-owned alias/domain allocation authorities before Go makes
+// a plan decision.
+func NewBridgeFitChecker(bridgeURL, bridgeToken string) lifecycle.FitChecker {
+	return bridgeFitChecker{url: bridgeURL, token: bridgeToken}
+}
+
+func (checker bridgeFitChecker) Fit(
+	ctx context.Context,
+	accountID string,
+	target lifecycle.PlanSnapshot,
+) ([]string, error) {
+	report, err := client.CheckAccountPlanFitViaBridge(
+		ctx, checker.url, checker.token, accountID,
+		client.AccountPlanFitTarget{
+			Plan: target.Plan, SnapshotHash: target.Hash,
+			Limits: target.Limits, Policies: target.Policies,
+			Features: target.Features,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("read account downgrade fit: %w", err)
+	}
+	violations := make([]string, 0, len(report.Violations))
+	for _, violation := range report.Violations {
+		dimension := strings.ReplaceAll(violation.Dimension, "_", " ")
+		if violation.Code == "authority_incomplete" {
+			violations = append(violations, fmt.Sprintf(
+				"cannot verify %s because its control-plane authority is unavailable",
+				dimension,
+			))
+			continue
+		}
+		switch violation.Scope {
+		case "account":
+			violations = append(violations, fmt.Sprintf(
+				"%s usage is %d; target maximum is %d",
+				dimension, violation.Used, violation.Max,
+			))
+		case "realm", "agent":
+			violations = append(violations, fmt.Sprintf(
+				"%d %s scopes exceed the %s target maximum of %d; highest usage is %d",
+				violation.SubjectCount, violation.Scope, dimension,
+				violation.Max, violation.Used,
+			))
+		default:
+			return nil, fmt.Errorf("read account downgrade fit: invalid violation scope")
+		}
+	}
+	return violations, nil
+}
+
 // CellAccountExists verifies an admin target against cell truth before the
 // control plane creates or mutates an override record.
 func CellAccountExists(resolve CellResolver) func(context.Context, string) (bool, error) {

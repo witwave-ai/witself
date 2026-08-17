@@ -1642,6 +1642,43 @@ func serve() int {
 			}
 			return toPlanSnapshot(snapshot), nil
 		}
+		cfg.CheckAccountPlanFit = func(
+			ctx context.Context,
+			accountID string,
+			target server.PlanFitTargetRecord,
+		) (server.PlanFitReport, error) {
+			report, err := st.CheckAccountPlanFit(ctx, accountID, store.AccountPlanFitTarget{
+				Plan: target.Plan, SnapshotHash: target.SnapshotHash,
+				Limits: target.Limits, Policies: target.Policies,
+				Features: target.Features,
+			})
+			switch {
+			case errors.Is(err, store.ErrAccountNotFound):
+				return server.PlanFitReport{}, server.ErrNotFound
+			case errors.Is(err, store.ErrAccountNotActive),
+				errors.Is(err, store.ErrPlanFitStateAmbiguous):
+				return server.PlanFitReport{}, server.ErrConflict
+			case errors.Is(err, store.ErrPlanSnapshotInvalid),
+				errors.Is(err, store.ErrPlanPolicyInvalid):
+				return server.PlanFitReport{}, server.ErrInvalidPlanSnapshot
+			case err != nil:
+				return server.PlanFitReport{}, err
+			}
+			violations := make([]server.PlanFitViolation, 0, len(report.Violations))
+			for _, violation := range report.Violations {
+				violations = append(violations, server.PlanFitViolation{
+					Code: violation.Code, Dimension: violation.Dimension,
+					Scope: violation.Scope, Used: violation.Used,
+					Max: violation.Max, SubjectCount: violation.SubjectCount,
+				})
+			}
+			return server.PlanFitReport{
+				SchemaVersion: "witself.v0", AccountID: report.AccountID,
+				TargetPlan:         report.TargetPlan,
+				TargetSnapshotHash: report.TargetSnapshotHash,
+				Violations:         violations,
+			}, nil
+		}
 		// Surface the deployment account's applied plan in /v1/capabilities.
 		if acctID := cfg.AccountID; acctID != "" {
 			cfg.PlanInfo = func(ctx context.Context) (string, map[string]int64, map[string]int64, []string, error) {

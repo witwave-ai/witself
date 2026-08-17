@@ -207,7 +207,11 @@ func (m *Manager) PreviewBillingMutation(
 			preview.Violations = append(preview.Violations,
 				fmt.Sprintf("%s is not a downgrade from %s", target.ID, current.ID))
 		default:
-			violations, fitErr := m.cfg.Fit.Fit(ctx, accountID, target)
+			targetSnapshot, resolveErr := m.resolveSnapshotForEntitlement(r, target.ID)
+			if resolveErr != nil {
+				return BillingMutationPreview{}, resolveErr
+			}
+			violations, fitErr := m.cfg.Fit.Fit(ctx, accountID, targetSnapshot)
 			if fitErr != nil {
 				return BillingMutationPreview{}, fitErr
 			}

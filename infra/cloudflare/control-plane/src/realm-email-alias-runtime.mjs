@@ -67,6 +67,8 @@ const PENDING_COUNTER_SCHEMA_VERSION = 1;
 const PENDING_COUNTER_MIGRATION_KEY = "pending-counter-migration";
 const PENDING_COUNTER_MIGRATION_PAGE_LIMIT = 100;
 const PENDING_COUNTER_MIGRATION_RETRY_MS = 5_000;
+const PLAN_FIT_AUTHORITY_PAGE_LIMIT = 500;
+const PLAN_FIT_AUTHORITY_SCAN_LIMIT = 10_000;
 const PENDING_COUNTER_DERIVED_PREFIXES = Object.freeze([
   "claim-usage-member:",
   "claim-usage-account-member:",
@@ -883,6 +885,35 @@ export function realmEmailAliasRegistryStub(env) {
   return namespace.get(namespace.idFromName(DEFAULT_REGISTRY_OBJECT_NAME));
 }
 
+// readRealmEmailAliasPlanFit returns only aggregate commercial allocation
+// usage. Suspended/grace allocations continue to consume their reserved slot,
+// while internal Witself assignments do not.
+export async function readRealmEmailAliasPlanFit(
+  env,
+  accountID,
+  maximum,
+) {
+  const stub = realmEmailAliasRegistryStub(env);
+  if (!stub) throw new Error("realm alias authority is not configured");
+  const response = await stub.fetch(
+    "https://realm-email-alias.internal/plan/fit",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account_id: accountID, maximum }),
+    },
+  );
+  const body = await response.json().catch(() => null);
+  if (!response.ok || body?.schema_version !== SCHEMA_VERSION ||
+      body?.account_id !== accountID || body?.maximum !== maximum ||
+      !Number.isSafeInteger(body?.over_limit_count) ||
+      body.over_limit_count < 0 ||
+      !Number.isSafeInteger(body?.highest_used) || body.highest_used < 0) {
+    throw new Error(body?.error ?? "realm alias plan-fit authority is unavailable");
+  }
+  return body;
+}
+
 function agentEmailDomainRegistryStub(env) {
   if (!env?.AGENT_EMAIL_DOMAINS) return null;
   const namespace = env.AGENT_EMAIL_DOMAINS;
@@ -1365,6 +1396,8 @@ export class DurableRealmEmailAliasRegistry {
           return await this.getRoute(input);
         case "/plan/reconcile":
           return await this.reconcilePlan(input);
+        case "/plan/fit":
+          return await this.planFit(input);
         case "/account-lifecycle/reconcile":
           return await this.reconcileAccountLifecycle(input);
         case "/counter/rebuild":
@@ -1860,6 +1893,96 @@ export class DurableRealmEmailAliasRegistry {
       account: this.validateUsageRecord(accountRaw, "account", accountID),
       realm: this.validateUsageRecord(realmRaw, "realm", accountID, realmID),
     };
+  }
+
+  async planFit(input) {
+    const accountID = input?.account_id;
+    const maximum = input?.maximum;
+    if (!ACCOUNT_ID_PATTERN.test(accountID ?? "") ||
+        !Number.isSafeInteger(maximum) || maximum < 0) {
+      fail("realm email alias plan-fit request is invalid", 400);
+    }
+    await this.assertPendingCountersReady();
+    const [planIntent, lifecycleIntent] = await Promise.all([
+      this.storage.get(planIntentKey(accountID)),
+      this.storage.get(lifecycleIntentKey(accountID)),
+    ]);
+    if (planIntent || lifecycleIntent) {
+      fail("realm email alias policy is still converging", 409);
+    }
+
+    let cursor = null;
+    let scannedRealms = 0;
+    let totalOpenRequests = 0;
+    let expectedMemberCount = 0;
+    let overLimitCount = 0;
+    let highestUsed = 0;
+    do {
+      const page = await this.boundedValues(
+        realmUsageKey(accountID, ""),
+        PLAN_FIT_AUTHORITY_PAGE_LIMIT,
+        false,
+        cursor,
+      );
+      scannedRealms += page.values.length;
+      if (scannedRealms > PLAN_FIT_AUTHORITY_SCAN_LIMIT) {
+        fail("realm email alias plan-fit authority scan is capped", 503);
+      }
+      for (const raw of page.values) {
+        if (!REALM_ID_PATTERN.test(raw?.realm_id ?? "")) {
+          fail("realm email alias realm counter is invalid", 503);
+        }
+        const usage = this.validateUsageRecord(
+          raw,
+          "realm",
+          accountID,
+          raw.realm_id,
+        );
+        totalOpenRequests += usage.open_requests;
+        expectedMemberCount += usage.pending_review + usage.customer_allocated;
+        highestUsed = Math.max(highestUsed, usage.customer_allocated);
+        if (usage.customer_allocated > maximum) overLimitCount += 1;
+      }
+      cursor = page.next_cursor;
+    } while (cursor);
+
+    let memberCursor = null;
+    let memberCount = 0;
+    do {
+      const page = await this.boundedValues(
+        accountUsageMemberPrefix(accountID),
+        PLAN_FIT_AUTHORITY_PAGE_LIMIT,
+        false,
+        memberCursor,
+      );
+      memberCount += page.values.length;
+      if (memberCount > PLAN_FIT_AUTHORITY_SCAN_LIMIT) {
+        fail("realm email alias plan-fit authority scan is capped", 503);
+      }
+      if (page.values.some((claimID) =>
+        !CLAIM_ID_PATTERN.test(claimID ?? "")
+      )) {
+        fail("realm email alias account counter membership is invalid", 503);
+      }
+      memberCursor = page.next_cursor;
+    } while (memberCursor);
+
+    const account = this.validateUsageRecord(
+      await this.storage.get(accountUsageKey(accountID)),
+      "account",
+      accountID,
+    );
+    if (account.open_requests !== totalOpenRequests ||
+        memberCount !== expectedMemberCount) {
+      fail("realm email alias plan-fit counters disagree", 503);
+    }
+    return json({
+      schema_version: SCHEMA_VERSION,
+      account_id: accountID,
+      maximum,
+      over_limit_count: overLimitCount,
+      highest_used: highestUsed,
+    });
   }
 
   pendingCapacity(usage) {

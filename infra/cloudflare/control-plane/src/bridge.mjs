@@ -29,6 +29,9 @@
 //             (never the cell provision token)
 //     GET|POST /v1/internal/accounts/{id}:apply-plan
 //       GET reads only the current cell fence; POST applies a snapshot.
+//     POST /v1/internal/accounts/{id}:plan-fit
+//       read-only target comparison; combines cell usage with global email
+//       alias/domain allocation authorities.
 //     Authorization: Bearer $INTERNAL_BRIDGE_TOKEN
 //
 // The callback paths terminate at the Worker. They must never fall through to
@@ -36,9 +39,11 @@
 
 import {
   reconcileRealmEmailAliasesForPlan,
+  readRealmEmailAliasPlanFit,
 } from "./realm-email-alias-runtime.mjs";
 import {
   reconcileAgentEmailDomainsForPlan,
+  readAgentEmailDomainPlanFit,
 } from "./agent-email-domain-runtime.mjs";
 
 const ACCOUNT_ID_PATTERN = "[A-Za-z0-9_-]{1,128}";
@@ -66,6 +71,34 @@ const INTERNAL_RESOLVE_PATH = new RegExp(
 const INTERNAL_APPLY_PATH = new RegExp(
   `^/v1/internal/accounts/(${ACCOUNT_ID_PATTERN}):apply-plan$`,
 );
+const INTERNAL_FIT_PATH = new RegExp(
+  `^/v1/internal/accounts/(${ACCOUNT_ID_PATTERN}):plan-fit$`,
+);
+
+const PLAN_FIT_ALIAS_LIMIT = "agent_email_realm_aliases_per_realm";
+const PLAN_FIT_DOMAIN_LIMIT = "agent_email_custom_domains_per_account";
+const PLAN_FIT_DIMENSION_ORDER = Object.freeze([
+  "realms",
+  "agents",
+  "agents_per_realm",
+  "stored_memory",
+  "stored_fact",
+  "stored_secret",
+  "agent_email_attachment_storage_bytes",
+  PLAN_FIT_ALIAS_LIMIT,
+  PLAN_FIT_DOMAIN_LIMIT,
+]);
+const PLAN_FIT_DIMENSION_SCOPE = Object.freeze({
+  realms: "account",
+  agents: "account",
+  agents_per_realm: "realm",
+  stored_memory: "agent",
+  stored_fact: "agent",
+  stored_secret: "agent",
+  agent_email_attachment_storage_bytes: "account",
+  [PLAN_FIT_ALIAS_LIMIT]: "realm",
+  [PLAN_FIT_DOMAIN_LIMIT]: "account",
+});
 
 export const ADMIN_ID_HEADER = "X-Witself-Admin-ID";
 export const ADMIN_HANDLE_HEADER = "X-Witself-Admin-Handle";
@@ -774,6 +807,184 @@ async function applyPlanSnapshot(request, env, accountID, fetchImpl) {
   }
 }
 
+function validPlanFitTarget(input) {
+  const target = input?.target;
+  if (input?.schema_version !== "witself.v0" ||
+      !target || typeof target !== "object" || Array.isArray(target) ||
+      typeof target.plan !== "string" || target.plan === "" ||
+      target.plan !== target.plan.trim() ||
+      typeof target.snapshot_hash !== "string" ||
+      !/^[0-9a-f]{64}$/.test(target.snapshot_hash) ||
+      !target.limits || typeof target.limits !== "object" ||
+      Array.isArray(target.limits) ||
+      !target.policies || typeof target.policies !== "object" ||
+      Array.isArray(target.policies) || !Array.isArray(target.features)) {
+    return null;
+  }
+  for (const value of Object.values(target.limits)) {
+    if (!Number.isSafeInteger(value) || value < 0) return null;
+  }
+  return target;
+}
+
+function validPlanFitCellReport(report, accountID, target) {
+  if (report?.schema_version !== "witself.v0" ||
+      report?.account_id !== accountID ||
+      report?.target_plan !== target.plan ||
+      report?.target_snapshot_hash !== target.snapshot_hash ||
+      !Array.isArray(report?.violations)) return false;
+  const seen = new Set();
+  return report.violations.every((violation) => {
+    const dimension = violation?.dimension;
+    const expectedScope = PLAN_FIT_DIMENSION_SCOPE[dimension];
+    const maximum = target.limits[dimension];
+    const valid = violation && typeof violation === "object" &&
+      violation.code === "limit_exceeded" &&
+      typeof expectedScope === "string" && !seen.has(dimension) &&
+      Object.hasOwn(target.limits, dimension) &&
+      violation.scope === expectedScope &&
+      Number.isSafeInteger(violation.used) &&
+      Number.isSafeInteger(violation.max) && violation.max === maximum &&
+      violation.used > violation.max &&
+      Number.isSafeInteger(violation.subject_count) &&
+      violation.subject_count >= 1 &&
+      (expectedScope !== "account" || violation.subject_count === 1);
+    if (valid) seen.add(dimension);
+    return valid;
+  });
+}
+
+function mergeAuthoritativePlanFit(report, dimension, authoritative) {
+  const existing = report.violations.find(
+    (violation) => violation.dimension === dimension,
+  );
+  report.violations = report.violations.filter(
+    (violation) => violation.dimension !== dimension,
+  );
+  if (authoritative.code === "authority_incomplete") {
+    report.violations.push(authoritative);
+  } else if (existing || authoritative.used > authoritative.max) {
+    report.violations.push({
+      ...authoritative,
+      used: Math.max(authoritative.used, existing?.used ?? 0),
+      subject_count: Math.max(
+        authoritative.subject_count,
+        existing?.subject_count ?? 0,
+      ),
+    });
+  }
+  const order = new Map(
+    PLAN_FIT_DIMENSION_ORDER.map((value, index) => [value, index]),
+  );
+  report.violations.sort((left, right) =>
+    (order.get(left.dimension) ?? Number.MAX_SAFE_INTEGER) -
+      (order.get(right.dimension) ?? Number.MAX_SAFE_INTEGER)
+  );
+}
+
+async function planFitAuthorityViolation(
+  env,
+  accountID,
+  dimension,
+  maximum,
+) {
+  try {
+    if (dimension === PLAN_FIT_ALIAS_LIMIT) {
+      const fit = await readRealmEmailAliasPlanFit(env, accountID, maximum);
+      return {
+        code: "limit_exceeded",
+        dimension,
+        scope: "realm",
+        used: fit.highest_used,
+        max: maximum,
+        subject_count: fit.over_limit_count,
+      };
+    }
+    const fit = await readAgentEmailDomainPlanFit(env, accountID, maximum);
+    return {
+      code: "limit_exceeded",
+      dimension,
+      scope: "account",
+      used: fit.used,
+      max: maximum,
+      subject_count: fit.used > maximum ? 1 : 0,
+    };
+  } catch {
+    return {
+      code: "authority_incomplete",
+      dimension,
+      scope: "authority",
+      used: 0,
+      max: maximum,
+      subject_count: 1,
+    };
+  }
+}
+
+async function checkPlanFit(request, env, accountID, fetchImpl) {
+  const resolved = await activeAccountRoute(env, accountID);
+  if (resolved.response) return resolved.response;
+  const cell = await env.DIRECTORY.get(`cell:${resolved.route.cell}`, {
+    type: "json",
+  });
+  const endpoint = validCellEndpoint(cell?.endpoint);
+  if (!endpoint || !cell?.provision_token) {
+    return err("account cell is not configured for plan-fit reads", 502);
+  }
+  const bounded = await boundedBody(request);
+  if (bounded?.tooLarge) return err("request body too large", 413);
+  if (bounded?.body == null) return err("plan-fit target snapshot is required", 400);
+  let input;
+  try {
+    input = JSON.parse(new TextDecoder().decode(bounded.body));
+  } catch {
+    return err("invalid plan-fit target snapshot", 400);
+  }
+  const target = validPlanFitTarget(input);
+  if (!target) return err("invalid plan-fit target snapshot", 400);
+
+  let response;
+  try {
+    response = await fetchImpl(
+      `${endpoint.replace(/\/+$/, "")}/v1/accounts/${accountID}:plan-fit`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${cell.provision_token}`,
+          "Content-Type": "application/json",
+        },
+        body: bounded.body,
+        signal: AbortSignal.timeout(BRIDGE_TIMEOUT_MS),
+      },
+    );
+  } catch (cause) {
+    const detail = cause?.name === "TimeoutError" ? "timed out" : "unreachable";
+    return err(`cell ${detail}`, 502);
+  }
+  if (!response.ok) return relay(response);
+  let report;
+  try {
+    report = await response.json();
+  } catch {
+    return err("cell returned an invalid plan-fit report", 502);
+  }
+  if (!validPlanFitCellReport(report, accountID, target)) {
+    return err("cell returned an invalid plan-fit report", 502);
+  }
+
+  for (const dimension of [PLAN_FIT_ALIAS_LIMIT, PLAN_FIT_DOMAIN_LIMIT]) {
+    if (!Object.hasOwn(target.limits, dimension)) continue;
+    const authoritative = await planFitAuthorityViolation(
+      env,
+      accountID,
+      dimension,
+      target.limits[dimension],
+    );
+    mergeAuthoritativePlanFit(report, dimension, authoritative);
+  }
+  return json(report);
+}
+
 // handleInternalBridgeRequest terminates every /v1/internal/* request at the
 // Worker. Authentication precedes route disclosure.
 export async function handleInternalBridgeRequest(
@@ -804,6 +1015,11 @@ export async function handleInternalBridgeRequest(
       return err("method not allowed", 405);
     }
     return applyPlanSnapshot(request, env, applyMatch[1], fetchImpl);
+  }
+  const fitMatch = url.pathname.match(INTERNAL_FIT_PATH);
+  if (fitMatch) {
+    if (request.method !== "POST") return err("method not allowed", 405);
+    return checkPlanFit(request, env, fitMatch[1], fetchImpl);
   }
   return err("not found", 404);
 }
