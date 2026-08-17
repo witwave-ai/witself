@@ -28,6 +28,15 @@ func (a *providerlessApplier) Apply(
 	return ApplyAck{Revision: request.Revision, Hash: request.Hash}, nil
 }
 
+func (a *providerlessApplier) ApplyIfFits(
+	ctx context.Context,
+	accountID string,
+	request ApplyRequest,
+) (ConditionalApplyResult, error) {
+	ack, err := a.Apply(ctx, accountID, request)
+	return ConditionalApplyResult{Applied: err == nil, Ack: ack}, err
+}
+
 type recoveryApplier struct {
 	fence    ApplyFence
 	requests []ApplyRequest
@@ -51,6 +60,15 @@ func (a *recoveryApplier) Apply(
 	a.requests = append(a.requests, request)
 	a.fence = ApplyFence{Revision: request.Revision, Hash: request.Hash}
 	return ApplyAck{Revision: request.Revision, Hash: request.Hash}, nil
+}
+
+func (a *recoveryApplier) ApplyIfFits(
+	ctx context.Context,
+	accountID string,
+	request ApplyRequest,
+) (ConditionalApplyResult, error) {
+	ack, err := a.Apply(ctx, accountID, request)
+	return ConditionalApplyResult{Applied: err == nil, Ack: ack}, err
 }
 
 var errLostApplyAcknowledgement = errors.New("lost apply acknowledgement")
@@ -93,6 +111,15 @@ func (a *lostAcknowledgementApplier) Apply(
 		return ApplyAck{}, errLostApplyAcknowledgement
 	}
 	return ApplyAck{Revision: request.Revision, Hash: request.Hash}, nil
+}
+
+func (a *lostAcknowledgementApplier) ApplyIfFits(
+	ctx context.Context,
+	accountID string,
+	request ApplyRequest,
+) (ConditionalApplyResult, error) {
+	ack, err := a.Apply(ctx, accountID, request)
+	return ConditionalApplyResult{Applied: err == nil, Ack: ack}, err
 }
 
 func TestProviderlessManagerSeedsAndAppliesPersonalWithoutBilling(t *testing.T) {

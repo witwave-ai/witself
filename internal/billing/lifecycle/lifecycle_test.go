@@ -31,6 +31,7 @@ type applyCall struct {
 type recApplier struct {
 	mu    sync.Mutex
 	fail  bool
+	fit   FitChecker
 	calls []applyCall
 }
 
@@ -46,6 +47,27 @@ func (a *recApplier) Apply(_ context.Context, accountID string, request ApplyReq
 		features: request.Features,
 	})
 	return ApplyAck{Revision: request.Revision, Hash: request.Hash}, nil
+}
+
+func (a *recApplier) ApplyIfFits(
+	ctx context.Context,
+	accountID string,
+	request ApplyRequest,
+) (ConditionalApplyResult, error) {
+	if a.fit != nil {
+		violations, err := a.fit.Fit(ctx, accountID, request.PlanSnapshot)
+		if err != nil {
+			return ConditionalApplyResult{}, err
+		}
+		if len(violations) > 0 {
+			return ConditionalApplyResult{Violations: violations}, nil
+		}
+	}
+	ack, err := a.Apply(ctx, accountID, request)
+	if err != nil {
+		return ConditionalApplyResult{}, err
+	}
+	return ConditionalApplyResult{Applied: true, Ack: ack}, nil
 }
 
 func (a *recApplier) last(t *testing.T) applyCall {
@@ -118,8 +140,8 @@ func newHarness(t *testing.T, interactive bool) *harness {
 	f := fake.New(fake.Config{Prices: catalog.Prices(), Interactive: interactive, Now: ck.now})
 	st := NewMemStore()
 	hooked := &hookStore{Store: st}
-	ap := &recApplier{}
 	fit := &fitStub{}
+	ap := &recApplier{fit: fit}
 	m, err := NewManager(Config{
 		Catalog: catalog, Providers: map[string]billing.Provider{"fake": f}, Default: "fake",
 		Store: hooked, Applier: ap, Fit: fit, Now: ck.now,

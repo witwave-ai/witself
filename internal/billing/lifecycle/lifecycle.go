@@ -424,6 +424,31 @@ type Applier interface {
 	Apply(ctx context.Context, accountID string, request ApplyRequest) (ApplyAck, error)
 }
 
+// ConditionalApplier atomically rechecks the account against a complete
+// downgrade target and applies that exact target only when it still fits.
+// Production appliers implement this at the same authority boundary that
+// accepts the plan snapshot; a separate Fit followed by Apply has a race in
+// which usage can grow between the two calls.
+//
+// Applied and blocked are mutually exclusive. Applied carries an exact Ack
+// and no violations. Blocked carries one or more value-minimal violations and
+// a zero Ack. Transport, authority, or indeterminate-fit failures are errors,
+// never blocked outcomes.
+type ConditionalApplier interface {
+	ApplyIfFits(
+		ctx context.Context,
+		accountID string,
+		request ApplyRequest,
+	) (ConditionalApplyResult, error)
+}
+
+// ConditionalApplyResult is the strict result of ApplyIfFits.
+type ConditionalApplyResult struct {
+	Applied    bool
+	Ack        ApplyAck
+	Violations []string
+}
+
 // ApplyFenceReader is the optional read side of Applier. Production appliers
 // implement it so a restored/rolled-back lifecycle store cannot reuse a
 // revision the cell has already accepted. Only the fence is returned: the
@@ -434,8 +459,9 @@ type ApplyFenceReader interface {
 
 // FitChecker reports why an account does NOT fit a downgrade target (agents
 // over the cap, features in use the target lacks, ...). Empty means it fits.
-// It runs twice by design: advisory at request time, authoritative at apply
-// time — usage keeps moving while hoops are jumped.
+// It is the advisory preview-time read. ConditionalApplier is the
+// authoritative apply-time check because usage keeps moving while checkout,
+// webhooks, and scheduled transitions run.
 type FitChecker interface {
 	Fit(ctx context.Context, accountID string, target PlanSnapshot) (violations []string, err error)
 }
@@ -3202,9 +3228,9 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 	return firstErr
 }
 
-// apply converges the cell onto the effective plan. For downgrades it runs the
-// AUTHORITATIVE fit check first — the advisory one ran at request time, but
-// usage kept moving while the hoops were jumped — and refuses to push a
+// apply converges the cell onto the effective plan. For downgrades it requires
+// an atomic fit-and-apply capability — the advisory check ran at request time,
+// but usage kept moving while the hoops were jumped — and refuses to push a
 // snapshot the account no longer fits: the cell keeps enforcing the old plan
 // (in the customer's favor), the gap stays visible as Entitled != Applied plus
 // ApplyBlocked, and every Reconcile retries until the account is pruned.
@@ -3305,31 +3331,45 @@ func (m *Manager) apply(ctx context.Context, accountID string) error {
 		r.DesiredSnapshotHash == snapshot.Hash &&
 			r.SnapshotRevision == observed.Revision &&
 			observed.Hash == snapshot.Hash
+	request := ApplyRequest{Revision: r.SnapshotRevision, PlanSnapshot: snapshot}
+	var ack ApplyAck
 	// Do not let a fresh fit violation wedge completion after the cell already
 	// accepted this exact downgrade. The exact replay changes no cell policy; it
 	// only gives the bridge another chance to finish its fenced projections.
 	if targetRank < appliedRank && !cellAcceptedDesiredFence {
-		violations, err := m.cfg.Fit.Fit(ctx, accountID, snapshot)
+		conditional, ok := m.cfg.Applier.(ConditionalApplier)
+		if !ok {
+			return errors.New("plan apply blocked: atomic downgrade fit-and-apply is unavailable")
+		}
+		result, err := conditional.ApplyIfFits(ctx, accountID, request)
 		if err != nil {
 			return err
 		}
-		if len(violations) > 0 {
+		if result.Applied {
+			if len(result.Violations) != 0 || result.Ack.Revision == 0 || result.Ack.Hash == "" {
+				return errors.New("cell returned an invalid applied fit-and-apply result")
+			}
+			ack = result.Ack
+		} else {
+			if len(result.Violations) == 0 || result.Ack != (ApplyAck{}) {
+				return errors.New("cell returned an invalid blocked fit-and-apply result")
+			}
+			report := strings.Join(result.Violations, "; ")
 			_, _ = m.mutate(ctx, accountID, "", func(r *Record) error {
-				report := strings.Join(violations, "; ")
 				current, err := m.resolveSnapshot(*r)
-				if err != nil || current.Plan != target.ID || r.ApplyBlocked == report {
+				if err != nil || current.Hash != request.Hash || r.ApplyBlocked == report {
 					return errSkipWrite
 				}
 				r.ApplyBlocked = report
 				return nil
 			})
-			return fmt.Errorf("plan apply blocked: %s", strings.Join(violations, "; "))
+			return fmt.Errorf("plan apply blocked: %s", report)
 		}
-	}
-	request := ApplyRequest{Revision: r.SnapshotRevision, PlanSnapshot: snapshot}
-	ack, err := m.cfg.Applier.Apply(ctx, accountID, request)
-	if err != nil {
-		return err
+	} else {
+		ack, err = m.cfg.Applier.Apply(ctx, accountID, request)
+		if err != nil {
+			return err
+		}
 	}
 	if ack.Revision != request.Revision || ack.Hash != request.Hash {
 		return errors.New("cell returned a mismatched plan snapshot acknowledgement")

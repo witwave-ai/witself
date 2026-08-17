@@ -33,6 +33,15 @@ func (planFitNoopApplier) Apply(
 	return ApplyAck{Revision: request.Revision, Hash: request.Hash}, nil
 }
 
+func (a planFitNoopApplier) ApplyIfFits(
+	ctx context.Context,
+	accountID string,
+	request ApplyRequest,
+) (ConditionalApplyResult, error) {
+	ack, err := a.Apply(ctx, accountID, request)
+	return ConditionalApplyResult{Applied: err == nil, Ack: ack}, err
+}
+
 func TestBillingDowngradePreviewChecksExactResolvedTargetAndKeepsAllViolations(t *testing.T) {
 	catalog, err := plans.Load()
 	if err != nil {
