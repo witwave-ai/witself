@@ -21,6 +21,18 @@ func (a *legacyOnlyApplyRecorder) Apply(
 	return ApplyAck{Revision: request.Revision, Hash: request.Hash}, nil
 }
 
+type legacyFenceApplyRecorder struct {
+	legacyOnlyApplyRecorder
+	fence ApplyFence
+}
+
+func (a *legacyFenceApplyRecorder) ReadApplyFence(
+	context.Context,
+	string,
+) (ApplyFence, error) {
+	return a.fence, nil
+}
+
 type conditionalApplyRecorder struct {
 	legacyOnlyApplyRecorder
 	result ConditionalApplyResult
@@ -66,6 +78,38 @@ func TestDowngradeApplyRequiresAtomicFitAndApplyCapability(t *testing.T) {
 	}
 	if applier.calls != 0 {
 		t.Fatalf("legacy Apply calls = %d; downgrade must fail before a racy write", applier.calls)
+	}
+}
+
+func TestUnknownNewerCellFenceRequiresAtomicFitAndApplyCapability(t *testing.T) {
+	catalog, err := plans.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemStore()
+	const accountID = "acct_restored_unknown_cell_plan"
+	if err := store.Put(context.Background(), Record{
+		AccountID: accountID, Entitled: plans.Free, Applied: plans.Free,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	applier := &legacyFenceApplyRecorder{fence: ApplyFence{
+		Revision: 9,
+		Hash:     strings.Repeat("a", 64),
+	}}
+	manager, err := NewManager(Config{
+		Catalog: catalog, Store: store, Applier: applier,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = manager.ReconcileAccount(context.Background(), accountID)
+	if err == nil || !strings.Contains(err.Error(), "atomic downgrade fit-and-apply is unavailable") {
+		t.Fatalf("ReconcileAccount error = %v", err)
+	}
+	if applier.calls != 0 {
+		t.Fatalf("legacy Apply calls = %d; unknown cell plan must fail closed", applier.calls)
 	}
 }
 

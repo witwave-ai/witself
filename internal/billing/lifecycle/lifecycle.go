@@ -3337,12 +3337,18 @@ func (m *Manager) apply(ctx context.Context, accountID string) error {
 		r.DesiredSnapshotHash == snapshot.Hash &&
 			r.SnapshotRevision == observed.Revision &&
 			observed.Hash == snapshot.Hash
+	// A restored lifecycle record may be behind a newer cell fence. Because
+	// the read side deliberately returns no cell payload, its plan rank is
+	// unknown; treating the restored Record.Applied label as authoritative
+	// could send a capacity-decreasing snapshot through ordinary Apply. Use the
+	// atomic path whenever the cell and stored acknowledgement differ.
+	requiresConditionalApply := targetRank < appliedRank || !cellMatchesRecord
 	request := ApplyRequest{Revision: r.SnapshotRevision, PlanSnapshot: snapshot}
 	var ack ApplyAck
 	// Do not let a fresh fit violation wedge completion after the cell already
 	// accepted this exact downgrade. The exact replay changes no cell policy; it
 	// only gives the bridge another chance to finish its fenced projections.
-	if targetRank < appliedRank && !cellAcceptedDesiredFence {
+	if requiresConditionalApply && !cellAcceptedDesiredFence {
 		conditional, ok := m.cfg.Applier.(ConditionalApplier)
 		if !ok {
 			return errors.New("plan apply blocked: atomic downgrade fit-and-apply is unavailable")
