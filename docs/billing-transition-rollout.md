@@ -95,6 +95,11 @@ emails, URLs, reasons, claim tokens, object keys, ETags, or raw errors in this
 file. Record those only in an access-controlled operator case when a nonzero
 count must be investigated. Counts must come from a complete registry scan,
 not the bounded reconciler sample or its rotating shard window.
+Record the exact `captured_at` value in the reviewed cutover ticket immediately
+after the scan. The preflight requires that independently supplied value to
+match the artifact, preventing an operator from accidentally selecting a
+different old zero-count file. This is an exact artifact fence, not a wall-clock
+freshness oracle; the operator must still prove no writer ran after capture.
 
 Classify records in this order, retaining the raw object unchanged:
 
@@ -161,7 +166,8 @@ scripts/billing-transition-rollout-preflight.sh \
   --mode activate \
   --from-version v0.0.254 --from-ref v0.0.254 \
   --to-version "$TARGET_VERSION" --to-ref "$TARGET_VERSION" \
-  --inventory billing-rollout-inventory.json
+  --inventory billing-rollout-inventory.json \
+  --expected-captured-at "$CAPTURED_AT"
 ```
 
 Before an explicitly approved rollback:
@@ -171,15 +177,17 @@ scripts/billing-transition-rollout-preflight.sh \
   --mode rollback \
   --from-version "$CURRENT_VERSION" --from-ref "$CURRENT_VERSION" \
   --to-version v0.0.254 --to-ref v0.0.254 \
-  --inventory billing-rollout-inventory.json
+  --inventory billing-rollout-inventory.json \
+  --expected-captured-at "$CAPTURED_AT"
 ```
 
 The command fails unless version tags bind to the requested commits, the safe
 side contains `d12af5c`, the incompatible-transition cohort and source fleet
-are zero, and every hazardous count is zero. The explicit untagged flags exist
-only for a reviewed pre-release drill; never use them to deploy an unbound
-image. Separately bind the immutable image digest and chart revision to the
-same target commit before rollout.
+are zero, every hazardous count is zero, and the inventory timestamp equals the
+operator-supplied exact capture fence. The explicit untagged flags exist only
+for a reviewed pre-release drill; never use them to deploy an unbound image.
+Separately bind the immutable image digest and chart revision to the same target
+commit before rollout.
 
 ## Activation sequence
 

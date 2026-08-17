@@ -19,7 +19,8 @@ Usage:
     --mode activate|rollback|compatible-roll \
     --from-version vMAJOR.MINOR.PATCH --from-ref GIT_REF \
     --to-version vMAJOR.MINOR.PATCH --to-ref GIT_REF \
-    --inventory PATH [--allow-untagged-source] [--allow-untagged-target]
+    --inventory PATH --expected-captured-at YYYY-MM-DDTHH:MM:SSZ \
+    [--allow-untagged-source] [--allow-untagged-target]
 
 The command is hermetic: it reads the local Git graph and one count-only JSON
 inventory. It does not query or mutate Kubernetes, Cloudflare, R2, or Stripe.
@@ -36,6 +37,7 @@ from_ref=
 to_version=
 to_ref=
 inventory_path=
+expected_captured_at=
 allow_untagged_target=false
 allow_untagged_source=false
 
@@ -69,6 +71,11 @@ while (($# > 0)); do
     --inventory)
       (($# >= 2)) || fail "--inventory requires a value"
       inventory_path=$2
+      shift 2
+      ;;
+    --expected-captured-at)
+      (($# >= 2)) || fail "--expected-captured-at requires a value"
+      expected_captured_at=$2
       shift 2
       ;;
     --allow-untagged-target)
@@ -116,6 +123,8 @@ valid_git_ref "$from_ref" "--from-ref"
 valid_git_ref "$to_ref" "--to-ref"
 [[ -n $inventory_path ]] || fail "--inventory is required"
 [[ -f $inventory_path ]] || fail "inventory file does not exist"
+[[ $expected_captured_at =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
+  || fail "--expected-captured-at must be an exact UTC second fence"
 command -v git >/dev/null 2>&1 || fail "git is required"
 command -v jq >/dev/null 2>&1 || fail "jq is required"
 
@@ -218,6 +227,7 @@ if ! jq -e --arg schema "$inventory_schema" '
 fi
 
 cohort_accounts=$(jq -r '.billing_mutation_cohort_accounts' "$inventory_path")
+captured_at=$(jq -r '.captured_at' "$inventory_path")
 source_api=$(jq -r '.source_fleet.api_replicas' "$inventory_path")
 source_reconcilers=$(jq -r '.source_fleet.reconciler_replicas' "$inventory_path")
 prepared=$(jq -r '.records.prepared_downgrades' "$inventory_path")
@@ -225,6 +235,9 @@ targetless=$(jq -r '.records.targetless_pending_changes' "$inventory_path")
 malformed_pending=$(jq -r '.records.malformed_pending_changes' "$inventory_path")
 malformed_receipts=$(jq -r '.records.malformed_mutation_receipts' "$inventory_path")
 post_horizon=$(jq -r '.records.post_retry_horizon_receipts' "$inventory_path")
+
+[[ $captured_at == "$expected_captured_at" ]] \
+  || fail "inventory captured_at does not match the operator-supplied exact fence"
 
 ((targetless == 0)) \
   || fail "targetless pending changes require operator quarantine"
@@ -251,5 +264,6 @@ printf '%s\n' \
   "mode=$mode" \
   "from=$from_version commit=$from_commit safe_reader=$from_safe" \
   "to=$to_version commit=$to_commit safe_reader=$to_safe" \
+  "captured_at=$captured_at" \
   "cohort_accounts=$cohort_accounts source_api=$source_api source_reconcilers=$source_reconcilers" \
   "prepared=$prepared targetless=$targetless malformed_pending=$malformed_pending malformed_receipts=$malformed_receipts post_horizon=$post_horizon"
