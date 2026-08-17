@@ -266,11 +266,21 @@ type Record struct {
 	CustomerID string // provider customer id, once one exists
 	Entitled   string // plan billing has confirmed; plans.Free when none
 	Applied    string // plan the cell is enforcing; plans.Free until pushed
+	// ManagedSubscriptionID is the exact provider subscription currently
+	// backing Entitled. It is an internal reconciliation fence: invoice and
+	// cancellation events for another subscription must never change this
+	// account's plan or dunning state.
+	ManagedSubscriptionID string
 	// EntitledAt is when Entitled last changed — the staleness fence for
 	// entitlement events: an activation/cancellation whose partner timestamp
 	// predates it is stale (redelivered or out of order) and is dropped.
 	EntitledAt time.Time
-	Pending    *Pending
+	// EntitlementEventKey makes equal-provider-timestamp events deterministic.
+	// Stripe timestamps have one-second resolution, so arrival order is not a
+	// safe tie breaker. The key encodes a conservative semantic priority plus
+	// the immutable provider event id.
+	EntitlementEventKey string
+	Pending             *Pending
 	// PlanOverride, retention overrides, MessagingOverride, and LimitOverrides
 	// are administrator-owned entitlement exceptions. They never create or
 	// mutate provider billing objects. AdminHistory preserves every real
@@ -292,6 +302,10 @@ type Record struct {
 	// it is a redelivered stale event and is dropped — so a redelivered
 	// "failed" can never re-mark an account that has since recovered.
 	DunningAt time.Time
+	// DunningEventKey is the equal-timestamp analogue of
+	// EntitlementEventKey. Recovery outranks failure at the same provider
+	// second so redelivery order cannot re-open a recovered incident.
+	DunningEventKey string
 	// LastBillingMutation* is the value-minimal account fold tombstone for a
 	// durable mutation whose visible Pending state may disappear. It preserves
 	// the exact terminal projection across the crash gap before receipt
@@ -388,14 +402,14 @@ type ApplyFenceReader interface {
 // It runs twice by design: advisory at request time, authoritative at apply
 // time — usage keeps moving while hoops are jumped.
 type FitChecker interface {
-	Fit(ctx context.Context, accountID string, target plans.Plan) (violations []string, err error)
+	Fit(ctx context.Context, accountID string, target PlanSnapshot) (violations []string, err error)
 }
 
 // AlwaysFits is the FitChecker used until cells expose usage queries.
 type AlwaysFits struct{}
 
 // Fit implements FitChecker: no violations.
-func (AlwaysFits) Fit(context.Context, string, plans.Plan) ([]string, error) { return nil, nil }
+func (AlwaysFits) Fit(context.Context, string, PlanSnapshot) ([]string, error) { return nil, nil }
 
 // DefaultPendingTTL matches hosted checkout-session expiry (~24h): an
 // abandoned upgrade lapses instead of lingering as a zombie intent.
@@ -777,6 +791,18 @@ func (m *Manager) resolveSnapshot(r Record) (PlanSnapshot, error) {
 	}
 	snapshot.Hash = hash
 	return snapshot, nil
+}
+
+// resolveSnapshotForEntitlement computes the exact effective snapshot that
+// would result if billing entitlement moved to planID. Account-owned plan,
+// limit, policy, and feature overrides remain in force, so fit checks compare
+// usage with the same resolved payload apply() will eventually push.
+func (m *Manager) resolveSnapshotForEntitlement(
+	r Record,
+	planID string,
+) (PlanSnapshot, error) {
+	r.Entitled = planID
+	return m.resolveSnapshot(r)
 }
 
 func cloneInt64Map(in map[string]int64) map[string]int64 {
@@ -2127,7 +2153,11 @@ func (m *Manager) requestDowngrade(
 			if target.PriceCents() >= current.PriceCents() {
 				return refuse("%s is not a downgrade from %s — use upgrade", target.ID, current.ID)
 			}
-			violations, err := m.cfg.Fit.Fit(ctx, accountID, target)
+			targetSnapshot, err := m.resolveSnapshotForEntitlement(*r, target.ID)
+			if err != nil {
+				return err
+			}
+			violations, err := m.cfg.Fit.Fit(ctx, accountID, targetSnapshot)
 			if err != nil {
 				return err
 			}
@@ -2570,6 +2600,46 @@ func (m *Manager) resolveEvent(
 
 // foldEventResolution applies only a previously selected resolution. It does
 // no provider or routing reads, which makes crash recovery deterministic.
+func entitlementEventKey(event billing.Event) string {
+	priority := "1"
+	if event.Type == billing.EventSubscriptionCanceled {
+		// Under a genuinely ambiguous same-second transition, fail toward the
+		// lower entitlement. Provider resolvers normally collapse both events
+		// to the same current projection before this fallback is needed.
+		priority = "2"
+	}
+	return priority + ":" + event.ProviderEventID
+}
+
+func dunningEventKey(event billing.Event) string {
+	priority := "1"
+	if event.Type == billing.EventPaymentRecovered {
+		priority = "2"
+	}
+	return priority + ":" + event.ProviderEventID
+}
+
+func billingEventIsStale(
+	incomingAt time.Time,
+	incomingKey string,
+	currentAt time.Time,
+	currentKey string,
+) bool {
+	if incomingAt.Before(currentAt) {
+		return true
+	}
+	if incomingAt.After(currentAt) {
+		return false
+	}
+	// Records written before the deterministic fence was introduced have no
+	// key. Let the first equal-time event establish one; every later replay is
+	// then ordered without depending on delivery order.
+	if currentKey == "" {
+		return false
+	}
+	return incomingKey <= currentKey
+}
+
 func (m *Manager) foldEventResolution(
 	ctx context.Context,
 	resolution EventReceiptResolution,
@@ -2585,12 +2655,26 @@ func (m *Manager) foldEventResolution(
 	r, err := m.mutate(ctx, resolution.AccountID, "", func(r *Record) error {
 		switch event.Type {
 		case billing.EventSubscriptionActivated:
-			if !event.At.IsZero() && event.At.Before(r.EntitledAt) {
-				return errSkipWrite // stale: predates the current entitlement
+			key := entitlementEventKey(event)
+			if billingEventIsStale(
+				event.At, key, r.EntitledAt, r.EntitlementEventKey,
+			) {
+				return errSkipWrite
 			}
+			newSubscription := event.SubscriptionID != "" &&
+				event.SubscriptionID != r.ManagedSubscriptionID
 			r.Entitled = event.Plan
 			r.EntitledAt = event.At
-			r.PastDueSince = nil
+			r.EntitlementEventKey = key
+			if event.SubscriptionID != "" {
+				r.ManagedSubscriptionID = event.SubscriptionID
+			}
+			// A newly paid Checkout (new subscription or exact originating
+			// operation) starts healthy. A reconciliation projection of the same
+			// surviving subscription must not erase a newer invoice failure.
+			if newSubscription || event.OperationID != "" {
+				r.PastDueSince = nil
+			}
 			if p := r.Pending; p != nil && p.Plan == event.Plan {
 				switch p.Kind {
 				case PendingUpgrade:
@@ -2624,11 +2708,24 @@ func (m *Manager) foldEventResolution(
 				}
 			}
 		case billing.EventSubscriptionCanceled:
-			if !event.At.IsZero() && event.At.Before(r.EntitledAt) {
-				return errSkipWrite // stale cancel of an older subscription
+			// A provider resolver should already turn a deletion with a live
+			// survivor into the survivor's activation projection. Keep a second
+			// local fence so an identity-aware provider cannot accidentally clear
+			// a different managed subscription.
+			if r.ManagedSubscriptionID != "" && event.SubscriptionID != "" &&
+				event.SubscriptionID != r.ManagedSubscriptionID {
+				return errSkipWrite
+			}
+			key := entitlementEventKey(event)
+			if billingEventIsStale(
+				event.At, key, r.EntitledAt, r.EntitlementEventKey,
+			) {
+				return errSkipWrite
 			}
 			r.Entitled = plans.Free
 			r.EntitledAt = event.At
+			r.EntitlementEventKey = key
+			r.ManagedSubscriptionID = ""
 			// Terminal states clear dunning: there is no longer a failing
 			// renewal to be past due on.
 			r.PastDueSince = nil
@@ -2651,20 +2748,32 @@ func (m *Manager) foldEventResolution(
 				r.Pending = nil
 			}
 		case billing.EventPaymentFailed:
-			if !event.At.IsZero() && event.At.Before(r.DunningAt) {
-				return errSkipWrite // stale: predates newer dunning state
+			if r.ManagedSubscriptionID != "" &&
+				event.SubscriptionID != r.ManagedSubscriptionID {
+				return errSkipWrite
+			}
+			key := dunningEventKey(event)
+			if billingEventIsStale(event.At, key, r.DunningAt, r.DunningEventKey) {
+				return errSkipWrite
 			}
 			if r.PastDueSince == nil {
 				t := event.At
 				r.PastDueSince = &t
 			}
 			r.DunningAt = event.At
+			r.DunningEventKey = key
 		case billing.EventPaymentRecovered:
-			if !event.At.IsZero() && event.At.Before(r.DunningAt) {
+			if r.ManagedSubscriptionID != "" &&
+				event.SubscriptionID != r.ManagedSubscriptionID {
+				return errSkipWrite
+			}
+			key := dunningEventKey(event)
+			if billingEventIsStale(event.At, key, r.DunningAt, r.DunningEventKey) {
 				return errSkipWrite
 			}
 			r.PastDueSince = nil
 			r.DunningAt = event.At
+			r.DunningEventKey = key
 		}
 		return nil
 	})
@@ -2914,7 +3023,7 @@ func (m *Manager) apply(ctx context.Context, accountID string) error {
 	// accepted this exact downgrade. The exact replay changes no cell policy; it
 	// only gives the bridge another chance to finish its fenced projections.
 	if targetRank < appliedRank && !cellAcceptedDesiredFence {
-		violations, err := m.cfg.Fit.Fit(ctx, accountID, target)
+		violations, err := m.cfg.Fit.Fit(ctx, accountID, snapshot)
 		if err != nil {
 			return err
 		}

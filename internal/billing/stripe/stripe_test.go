@@ -49,6 +49,7 @@ type stubStripe struct {
 	upcoming            bool   // whether an upcoming invoice exists
 	subActive           bool   // whether a live subscription exists
 	subArmed            bool   // cancel_at_period_end on the stub subscription
+	subscriptionsJSON   string // optional exact list response override
 	custDeleted         bool   // customer GETs report deleted:true
 	customerCreateKeys  []string
 	customerCreateForms []map[string]string
@@ -91,6 +92,9 @@ func newStub(t *testing.T) (*stubStripe, *Provider) {
 	p, err := New(Config{
 		SecretKey: "sk_test_stub", WebhookSecret: "whsec_stub",
 		Catalog: catalog, BaseURL: srv.URL,
+		Now: func() time.Time {
+			return time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+		},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -194,11 +198,15 @@ func (s *stubStripe) handle(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/v1/billing_portal/sessions":
 		_, _ = fmt.Fprint(w, `{"url":"https://billing.stripe.com/p/session_stub"}`)
 	case r.URL.Path == "/v1/subscriptions" && r.Method == http.MethodGet:
-		if s.subActive {
-			_, _ = fmt.Fprintf(w, `{"data":[{"id":"sub_stub","status":"active","cancel_at_period_end":%t,"items":{"data":[{"current_period_end":%d}]}}]}`, s.subArmed, periodEnd)
+		if s.subscriptionsJSON != "" {
+			_, _ = fmt.Fprint(w, s.subscriptionsJSON)
 			return
 		}
-		_, _ = fmt.Fprint(w, `{"data":[]}`)
+		if s.subActive {
+			_, _ = fmt.Fprintf(w, `{"data":[{"id":"sub_stub","status":"active","cancel_at_period_end":%t,"metadata":{"witself_plan":"standard"},"items":{"data":[{"current_period_end":%d,"price":{"id":"price_standard","lookup_key":"witself_standard"}}]}}],"has_more":false}`, s.subArmed, periodEnd)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"data":[],"has_more":false}`)
 	case strings.HasPrefix(r.URL.Path, "/v1/subscriptions/"):
 		_, _ = fmt.Fprint(w, `{"id":"sub_stub"}`)
 	case r.URL.Path == "/v1/invoices/create_preview":
@@ -580,6 +588,85 @@ func TestScheduleDowngradeFreeOnly(t *testing.T) {
 	}
 }
 
+func TestScheduleDowngradeValidatesProjectionBeforeMutation(t *testing.T) {
+	s, p := newStub(t)
+	s.subscriptionsJSON = `{"data":[{"id":"sub_bad","status":"active","metadata":{"witself_plan":"standard"},"items":{"data":[{"price":{"id":"price_standard","lookup_key":"witself_standard"}}]}}],"has_more":false}`
+	if _, err := p.ScheduleDowngradeIdempotent(
+		context.Background(), "cus_stub_1", plans.Free, "bop_bad_period",
+	); err == nil || !strings.Contains(err.Error(), "future current period end") {
+		t.Fatalf("ScheduleDowngradeIdempotent error = %v; want invalid period refusal", err)
+	}
+	for _, request := range s.requests {
+		if request.method == http.MethodPost &&
+			strings.HasPrefix(request.path, "/v1/subscriptions/") {
+			t.Fatalf("invalid subscription was mutated before validation: %+v", request)
+		}
+	}
+}
+
+func TestManagedSubscriptionProjectionFailsClosed(t *testing.T) {
+	t.Parallel()
+	one := `{"id":"sub_a","status":"active","metadata":{"witself_plan":"standard"},"items":{"data":[{"current_period_end":1783123200,"price":{"id":"price_a","lookup_key":"witself_standard"}}]}}`
+	tests := []struct {
+		name     string
+		response string
+		want     string
+	}{
+		{name: "pagination", response: `{"data":[],"has_more":true}`, want: "more than 100"},
+		{name: "multiple", response: `{"data":[` + one + `,` + strings.ReplaceAll(one, "sub_a", "sub_b") + `],"has_more":false}`, want: "2 live subscriptions"},
+		{name: "missing metadata", response: `{"data":[{"id":"sub_a","status":"active","items":{"data":[{"current_period_end":1783123200,"price":{"id":"price_a","lookup_key":"witself_standard"}}]}}],"has_more":false}`, want: "witself_plan"},
+		{name: "price mismatch", response: `{"data":[{"id":"sub_a","status":"active","metadata":{"witself_plan":"standard"},"items":{"data":[{"current_period_end":1783123200,"price":{"id":"price_a","lookup_key":"witself_team"}}]}}],"has_more":false}`, want: "does not match"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s, p := newStub(t)
+			s.subscriptionsJSON = tc.response
+			if _, _, err := p.managedLiveSubscription(
+				context.Background(), "cus_stub_1",
+			); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("managedLiveSubscription error = %v; want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveEventUsesExactManagedSubscription(t *testing.T) {
+	_, p := newStub(t)
+	ctx := context.Background()
+	at := time.Date(2026, 7, 1, 1, 0, 0, 0, time.UTC)
+
+	unrelated, err := p.ResolveEvent(ctx, billing.Event{
+		Type: billing.EventPaymentFailed, CustomerID: "cus_stub_1", At: at,
+		SubscriptionID: "sub_unrelated",
+	})
+	if err != nil || unrelated != nil {
+		t.Fatalf("unrelated invoice resolved = %+v, %v; want ignored", unrelated, err)
+	}
+
+	managed, err := p.ResolveEvent(ctx, billing.Event{
+		Type: billing.EventPaymentFailed, CustomerID: "cus_stub_1", At: at,
+		SubscriptionID: "sub_stub",
+	})
+	if err != nil || managed == nil || managed.SubscriptionID != "sub_stub" ||
+		managed.Plan != "standard" {
+		t.Fatalf("managed invoice resolved = %+v, %v", managed, err)
+	}
+
+	staleCheckout, err := p.ResolveEvent(ctx, billing.Event{
+		Type: billing.EventSubscriptionActivated, CustomerID: "cus_stub_1",
+		Plan: "team", At: at, SubscriptionID: "sub_old",
+		OperationID: "bop_old",
+	})
+	if err != nil || staleCheckout == nil ||
+		staleCheckout.Type != billing.EventSubscriptionActivated ||
+		staleCheckout.Plan != "standard" ||
+		staleCheckout.SubscriptionID != "sub_stub" ||
+		staleCheckout.OperationID != "" {
+		t.Fatalf("stale checkout resolved = %+v, %v; want current provider projection", staleCheckout, err)
+	}
+}
+
 func TestCancelPendingReleasesDowngrade(t *testing.T) {
 	s, p := newStub(t)
 	s.openSessions = []string{"cs_stale_tab"}
@@ -849,21 +936,26 @@ func TestWebhookEventNormalization(t *testing.T) {
 		t.Fatalf("payment_failed = %+v", events)
 	}
 	// subscription.deleted while ANOTHER live subscription remains is
-	// normalized first, then suppressed only by the post-receipt resolver — a
-	// duplicate/stale subscription's deletion must not revoke a live paid
-	// entitlement, and no Stripe read happens in HandleWebhook.
+	// normalized first, then projected back to that exact managed survivor by
+	// the post-receipt resolver. A duplicate/stale subscription's deletion must
+	// not revoke a live paid entitlement, and no Stripe read happens in
+	// HandleWebhook.
 	payload = `{"id":"evt_subscription_deleted_1","type":"customer.subscription.deleted","created":1751716800,"data":{"object":{"id":"sub_deleted","customer":"cus_x"}}}`
 	if events, err = deliver(t, p, payload, sgn(payload)); err != nil || len(events) != 1 {
 		t.Fatalf("normalize deleted subscription = %+v, %v", events, err)
 	}
 	resolved, err := p.ResolveEvent(context.Background(), events[0])
-	if err != nil || resolved != nil {
-		t.Fatalf("deleted with survivor resolved = %+v, %v; want suppressed", resolved, err)
+	if err != nil || resolved == nil ||
+		resolved.Type != billing.EventSubscriptionActivated ||
+		resolved.Plan != "standard" || resolved.SubscriptionID != "sub_stub" {
+		t.Fatalf("deleted with survivor resolved = %+v, %v; want survivor projection", resolved, err)
 	}
 	// With no live subscription left, the cancel folds.
 	s.subActive = false
 	resolved, err = p.ResolveEvent(context.Background(), events[0])
-	if err != nil || resolved == nil || resolved.Type != billing.EventSubscriptionCanceled {
+	if err != nil || resolved == nil ||
+		resolved.Type != billing.EventSubscriptionCanceled ||
+		resolved.SubscriptionID != "" {
 		t.Fatalf("subscription.deleted resolved = %+v, %v", resolved, err)
 	}
 	// And an API failure during the post-receipt survivor check must ERROR and

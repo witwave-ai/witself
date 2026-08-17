@@ -233,12 +233,13 @@ func (p *Provider) createPrice(ctx context.Context, productID, planID string, ce
 		ID string `json:"id"`
 	}
 	if err := p.call(ctx, "POST", "/v1/prices", url.Values{
-		"product":             {productID},
-		"unit_amount":         {strconv.FormatInt(cents, 10)},
-		"currency":            {"usd"},
-		"recurring[interval]": {"month"},
-		"lookup_key":          {key},
-		"transfer_lookup_key": {"true"},
+		"product":                {productID},
+		"unit_amount":            {strconv.FormatInt(cents, 10)},
+		"currency":               {"usd"},
+		"recurring[interval]":    {"month"},
+		"lookup_key":             {key},
+		"transfer_lookup_key":    {"true"},
+		"metadata[witself_plan]": {planID},
 	}, fmt.Sprintf("witself-price-%s-%d", planID, cents), &price); err != nil {
 		return "", err
 	}
@@ -458,12 +459,21 @@ func (p *Provider) PortalLink(ctx context.Context, customerID string) (string, e
 // of API 2025-03-31.basil, current_period_end lives on subscription ITEMS —
 // it was removed from the subscription top level.
 type stripeSubscription struct {
-	ID                string `json:"id"`
-	Status            string `json:"status"`
-	CancelAtPeriodEnd bool   `json:"cancel_at_period_end"`
+	ID                string            `json:"id"`
+	Status            string            `json:"status"`
+	CancelAtPeriodEnd bool              `json:"cancel_at_period_end"`
+	Metadata          map[string]string `json:"metadata"`
 	Items             struct {
 		Data []struct {
 			CurrentPeriodEnd int64 `json:"current_period_end"`
+			Price            struct {
+				ID        string `json:"id"`
+				LookupKey string `json:"lookup_key"`
+				Product   struct {
+					ID       string            `json:"id"`
+					Metadata map[string]string `json:"metadata"`
+				} `json:"product"`
+			} `json:"price"`
 		} `json:"data"`
 	} `json:"items"`
 }
@@ -479,6 +489,34 @@ func (s stripeSubscription) periodEnd() time.Time {
 	return time.Unix(latest, 0).UTC()
 }
 
+func (p *Provider) subscriptionPlan(s stripeSubscription) (string, error) {
+	planID := strings.TrimSpace(s.Metadata["witself_plan"])
+	plan, ok := p.cfg.Catalog.Get(planID)
+	if !ok || !plan.Paid() {
+		return "", fmt.Errorf(
+			"stripe: subscription %s has unknown or non-paid witself_plan %q",
+			s.ID, planID)
+	}
+	if len(s.Items.Data) != 1 {
+		return "", fmt.Errorf(
+			"stripe: subscription %s has %d items; want exactly one",
+			s.ID, len(s.Items.Data))
+	}
+	price := s.Items.Data[0].Price
+	productPlan := strings.TrimSpace(price.Product.Metadata["witself_plan"])
+	lookupMatches := price.LookupKey == lookupKey(planID)
+	productMatches := productPlan == planID
+	if price.ID == "" ||
+		(price.LookupKey != "" && !lookupMatches) ||
+		(productPlan != "" && !productMatches) ||
+		(!lookupMatches && !productMatches) {
+		return "", fmt.Errorf(
+			"stripe: subscription %s price does not match plan %q",
+			s.ID, planID)
+	}
+	return planID, nil
+}
+
 // liveSubscriptions lists the customer's subscriptions that still back an
 // entitlement: active, trialing, past_due, or unpaid. past_due matters — a
 // dunned customer must still be able to downgrade to free, and a
@@ -486,11 +524,20 @@ func (s stripeSubscription) periodEnd() time.Time {
 // mid-flight) and canceled do not count.
 func (p *Provider) liveSubscriptions(ctx context.Context, customerID string) ([]stripeSubscription, error) {
 	var list struct {
-		Data []stripeSubscription `json:"data"`
+		Data    []stripeSubscription `json:"data"`
+		HasMore bool                 `json:"has_more"`
 	}
-	q := url.Values{"customer": {customerID}, "limit": {"100"}}
+	q := url.Values{
+		"customer": {customerID}, "limit": {"100"},
+		"expand[]": {"data.items.data.price.product"},
+	}
 	if err := p.call(ctx, "GET", "/v1/subscriptions?"+q.Encode(), nil, "", &list); err != nil {
 		return nil, err
+	}
+	if list.HasMore {
+		return nil, fmt.Errorf(
+			"stripe: customer %s has more than 100 subscriptions; refusing a partial projection",
+			customerID)
 	}
 	live := list.Data[:0]
 	for _, s := range list.Data {
@@ -502,22 +549,48 @@ func (p *Provider) liveSubscriptions(ctx context.Context, customerID string) ([]
 	return live, nil
 }
 
+// managedLiveSubscription returns the one exact Witself subscription backing
+// the account. A dedicated Stripe customer must never have multiple or
+// unrelated live subscriptions: choosing one would make entitlement,
+// dunning, and cancellation arrival-order dependent. Ambiguity remains
+// pending for operator reconciliation instead of being guessed.
+func (p *Provider) managedLiveSubscription(
+	ctx context.Context,
+	customerID string,
+) (*stripeSubscription, string, error) {
+	subs, err := p.liveSubscriptions(ctx, customerID)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(subs) == 0 {
+		return nil, "", nil
+	}
+	if len(subs) != 1 {
+		return nil, "", fmt.Errorf(
+			"stripe: customer %s has %d live subscriptions; refusing ambiguous billing state",
+			customerID, len(subs))
+	}
+	planID, err := p.subscriptionPlan(subs[0])
+	if err != nil {
+		return nil, "", err
+	}
+	return &subs[0], planID, nil
+}
+
 // ScheduleDowngrade implements billing.Provider. Today's only downgrade
 // target is free (Standard is the sole purchasable paid plan):
 // cancel_at_period_end ends the subscription at the period boundary and
 // Stripe announces it with customer.subscription.deleted — the canceled
-// event the Manager already folds. Downgrade-to-free ends EVERY live
-// subscription, so if a duplicate ever slipped in (two paid checkout tabs)
-// this is also the self-heal. Paid-to-paid needs subscription schedules;
-// that lands with the Team tier.
+// event the Manager already folds. More than one live subscription is an
+// ambiguous provider state and fails closed for operator reconciliation;
+// paid-to-paid needs subscription schedules and lands with the Team tier.
 func (p *Provider) ScheduleDowngrade(ctx context.Context, customerID, plan string) (time.Time, error) {
 	return p.scheduleDowngrade(ctx, customerID, plan, "")
 }
 
-// ScheduleDowngradeIdempotent applies one durable downgrade operation. Each
-// subscription mutation gets a deterministic child key, so multiple live
-// subscriptions can be repaired in one operation without colliding with one
-// another and an ambiguous retry replays each exact Stripe mutation.
+// ScheduleDowngradeIdempotent applies one durable downgrade operation. The
+// exact managed subscription mutation receives a deterministic child key, so
+// an ambiguous retry replays that effect instead of discovering a new target.
 func (p *Provider) ScheduleDowngradeIdempotent(
 	ctx context.Context,
 	customerID, plan, operationID string,
@@ -542,25 +615,27 @@ func (p *Provider) scheduleDowngrade(
 	if plan != plans.Free {
 		return time.Time{}, fmt.Errorf("stripe: downgrade to %q not supported yet (only free; paid-to-paid lands with the Team tier)", plan)
 	}
-	subs, err := p.liveSubscriptions(ctx, customerID)
+	sub, _, err := p.managedLiveSubscription(ctx, customerID)
 	if err != nil {
 		return time.Time{}, err
 	}
-	if len(subs) == 0 {
+	if sub == nil {
 		return time.Time{}, fmt.Errorf("stripe: customer %s has no live subscription", customerID)
 	}
-	var latest time.Time
-	for _, sub := range subs {
-		if err := p.call(ctx, "POST", "/v1/subscriptions/"+sub.ID, url.Values{
-			"cancel_at_period_end": {"true"},
-		}, childIdempotencyKey(operationID, "downgrade", sub.ID), nil); err != nil {
-			return time.Time{}, err
-		}
-		if pe := sub.periodEnd(); pe.After(latest) {
-			latest = pe
-		}
+	effective := sub.periodEnd()
+	if effective.IsZero() || !effective.After(p.cfg.Now().UTC()) {
+		return time.Time{}, fmt.Errorf(
+			"stripe: subscription %s has no future current period end", sub.ID)
 	}
-	return latest, nil
+	// Validate all provider state before the mutation. A missing Basil
+	// item-level current_period_end must not arm cancellation and only then
+	// return an epoch effective time.
+	if err := p.call(ctx, "POST", "/v1/subscriptions/"+sub.ID, url.Values{
+		"cancel_at_period_end": {"true"},
+	}, childIdempotencyKey(operationID, "downgrade", sub.ID), nil); err != nil {
+		return time.Time{}, err
+	}
+	return effective, nil
 }
 
 // CancelPending implements billing.Provider: undo whatever the pending
@@ -790,28 +865,70 @@ func objectReferenceFrom(raw json.RawMessage) (stripeObjectReference, error) {
 	return ref, nil
 }
 
-// ResolveEvent implements billing.EventResolver. A deleted subscription only
-// revokes entitlement when no other live subscription remains. Keeping this
-// provider read out of HandleWebhook means the exact signed event is already
-// durable before a transient Stripe API failure can occur.
+// ResolveEvent implements billing.EventResolver. Every entitlement or dunning
+// event is collapsed to the provider's current one-subscription projection
+// only after the exact signed callback is durable. This prevents a stale
+// Checkout callback, a deleted duplicate, or an unrelated invoice from
+// changing local account state. Provider ambiguity remains pending and
+// retryable instead of being guessed.
 func (p *Provider) ResolveEvent(
 	ctx context.Context,
 	event billing.Event,
 ) (*billing.Event, error) {
-	if event.Type != billing.EventSubscriptionCanceled {
+	switch event.Type {
+	case billing.EventSubscriptionActivated,
+		billing.EventSubscriptionCanceled,
+		billing.EventPaymentFailed,
+		billing.EventPaymentRecovered:
+	default:
 		resolved := event
 		return &resolved, nil
 	}
-	subs, err := p.liveSubscriptions(ctx, event.CustomerID)
+	sub, planID, err := p.managedLiveSubscription(ctx, event.CustomerID)
 	if err != nil {
 		return nil, fmt.Errorf(
-			"stripe: verify remaining subscriptions for %s: %w",
+			"stripe: resolve managed subscription for %s: %w",
 			event.CustomerID, err)
 	}
-	if len(subs) > 0 {
+	if sub == nil {
+		switch event.Type {
+		case billing.EventPaymentFailed, billing.EventPaymentRecovered:
+			return nil, nil
+		default:
+			resolved := event
+			resolved.Type = billing.EventSubscriptionCanceled
+			resolved.Plan = ""
+			// Empty means the provider authoritatively observed no survivor; it
+			// intentionally bypasses the local stale-subscription mismatch fence.
+			resolved.SubscriptionID = ""
+			resolved.OperationID = ""
+			return &resolved, nil
+		}
+	}
+
+	if event.Type == billing.EventPaymentFailed ||
+		event.Type == billing.EventPaymentRecovered {
+		if event.SubscriptionID == "" || event.SubscriptionID != sub.ID {
+			return nil, nil
+		}
+		resolved := event
+		resolved.Plan = planID
+		resolved.SubscriptionID = sub.ID
+		return &resolved, nil
+	}
+
+	resolved := event
+	resolved.Type = billing.EventSubscriptionActivated
+	resolved.Plan = planID
+	if event.SubscriptionID != "" && event.SubscriptionID != sub.ID {
+		// The provider projection is authoritative, but a callback for a
+		// different subscription cannot complete the current Witself operation.
+		resolved.OperationID = ""
+	}
+	resolved.SubscriptionID = sub.ID
+	if resolved.SubscriptionID == "" {
 		return nil, nil
 	}
-	resolved := event
 	return &resolved, nil
 }
 
@@ -1044,11 +1161,11 @@ func (p *Provider) listChargeRefunds(
 // — anything else stays an error, so an endpoint-shape regression cannot
 // masquerade as "no upcoming charge" forever.
 func (p *Provider) NextCharge(ctx context.Context, customerID string) (*billing.UpcomingCharge, error) {
-	subs, err := p.liveSubscriptions(ctx, customerID)
+	sub, _, err := p.managedLiveSubscription(ctx, customerID)
 	if err != nil {
 		return nil, err
 	}
-	if len(subs) == 0 {
+	if sub == nil {
 		return nil, nil // nothing to charge
 	}
 	var up struct {
@@ -1059,7 +1176,7 @@ func (p *Provider) NextCharge(ctx context.Context, customerID string) (*billing.
 	}
 	err = p.call(ctx, "POST", "/v1/invoices/create_preview", url.Values{
 		"customer":     {customerID},
-		"subscription": {subs[0].ID},
+		"subscription": {sub.ID},
 	}, "", &up)
 	if err != nil {
 		var se *apiError

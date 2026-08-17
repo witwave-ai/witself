@@ -69,7 +69,7 @@ func (f *fitStub) set(v []string) {
 	f.violations = v
 }
 
-func (f *fitStub) Fit(context.Context, string, plans.Plan) ([]string, error) {
+func (f *fitStub) Fit(context.Context, string, PlanSnapshot) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.violations, nil
@@ -1652,6 +1652,162 @@ func TestPastDueTracking(t *testing.T) {
 	}
 	if r = h.record(t, "acct_1"); r.PastDueSince != nil {
 		t.Fatal("recovery should clear PastDueSince")
+	}
+}
+
+func TestEqualTimestampEntitlementEventsConverge(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	type finalState struct {
+		entitled      string
+		subscription  string
+		entitlementAt time.Time
+		eventKey      string
+	}
+	run := func(t *testing.T, events []billing.Event) finalState {
+		t.Helper()
+		h := newHarness(t, false)
+		if _, err := h.m.RequestUpgrade(
+			ctx, "acct_1", "s@example.com", "standard",
+		); err != nil {
+			t.Fatalf("RequestUpgrade: %v", err)
+		}
+		r := h.record(t, "acct_1")
+		for i := range events {
+			events[i].CustomerID = r.CustomerID
+		}
+		if err := h.m.OnEvents(ctx, "fake", events); err != nil {
+			t.Fatalf("OnEvents: %v", err)
+		}
+		r = h.record(t, "acct_1")
+		return finalState{
+			entitled: r.Entitled, subscription: r.ManagedSubscriptionID,
+			entitlementAt: r.EntitledAt, eventKey: r.EntitlementEventKey,
+		}
+	}
+	at := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	activation := billing.Event{
+		Type: billing.EventSubscriptionActivated, Plan: "standard", At: at,
+		SubscriptionID: "sub_managed",
+	}
+	cancellation := billing.Event{
+		Type: billing.EventSubscriptionCanceled, At: at,
+		SubscriptionID: "sub_managed",
+	}
+	first := run(t, []billing.Event{activation, cancellation})
+	second := run(t, []billing.Event{cancellation, activation})
+	if first != second {
+		t.Fatalf("equal-time entitlement folds diverged: %+v vs %+v", first, second)
+	}
+	if first.entitled != plans.Free || first.subscription != "" ||
+		first.eventKey != "2:" {
+		t.Fatalf("equal-time entitlement result = %+v; want deterministic cancellation", first)
+	}
+}
+
+func TestEqualTimestampDunningEventsConvergeAndIgnoreOtherSubscription(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	type finalState struct {
+		pastDue bool
+		at      time.Time
+		key     string
+	}
+	run := func(t *testing.T, events []billing.Event) finalState {
+		t.Helper()
+		h := newHarness(t, false)
+		if _, err := h.m.RequestUpgrade(
+			ctx, "acct_1", "s@example.com", "standard",
+		); err != nil {
+			t.Fatalf("RequestUpgrade: %v", err)
+		}
+		r := h.record(t, "acct_1")
+		activationAt := h.ck.t.Add(time.Minute)
+		if err := h.m.OnEvents(ctx, "fake", []billing.Event{{
+			Type: billing.EventSubscriptionActivated, CustomerID: r.CustomerID,
+			Plan: "standard", At: activationAt, SubscriptionID: "sub_managed",
+		}}); err != nil {
+			t.Fatalf("activation projection: %v", err)
+		}
+		for i := range events {
+			events[i].CustomerID = r.CustomerID
+		}
+		if err := h.m.OnEvents(ctx, "fake", events); err != nil {
+			t.Fatalf("OnEvents: %v", err)
+		}
+		r = h.record(t, "acct_1")
+		return finalState{
+			pastDue: r.PastDueSince != nil, at: r.DunningAt,
+			key: r.DunningEventKey,
+		}
+	}
+	at := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	failure := billing.Event{
+		Type: billing.EventPaymentFailed, At: at,
+		SubscriptionID: "sub_managed",
+	}
+	recovery := billing.Event{
+		Type: billing.EventPaymentRecovered, At: at,
+		SubscriptionID: "sub_managed",
+	}
+	first := run(t, []billing.Event{failure, recovery})
+	second := run(t, []billing.Event{recovery, failure})
+	if first != second {
+		t.Fatalf("equal-time dunning folds diverged: %+v vs %+v", first, second)
+	}
+	if first.pastDue || first.key != "2:" {
+		t.Fatalf("equal-time dunning result = %+v; want deterministic recovery", first)
+	}
+
+	other := failure
+	other.SubscriptionID = "sub_unrelated"
+	ignored := run(t, []billing.Event{other})
+	if ignored.pastDue || !ignored.at.IsZero() || ignored.key != "" {
+		t.Fatalf("unrelated subscription changed dunning state: %+v", ignored)
+	}
+}
+
+func TestReconciledSurvivorDoesNotClearManagedSubscriptionDunning(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, false)
+	ctx := context.Background()
+	if _, err := h.m.RequestUpgrade(
+		ctx, "acct_1", "s@example.com", "standard",
+	); err != nil {
+		t.Fatalf("RequestUpgrade: %v", err)
+	}
+	r := h.record(t, "acct_1")
+	at := h.ck.t.Add(time.Minute)
+	events := []billing.Event{{
+		Type: billing.EventSubscriptionActivated, CustomerID: r.CustomerID,
+		Plan: "standard", At: at, SubscriptionID: "sub_managed",
+	}, {
+		Type: billing.EventPaymentFailed, CustomerID: r.CustomerID,
+		At: at.Add(time.Minute), SubscriptionID: "sub_managed",
+	}, {
+		// A deletion of some other subscription can resolve to this current
+		// survivor projection. It is not proof that the failed renewal recovered.
+		Type: billing.EventSubscriptionActivated, CustomerID: r.CustomerID,
+		Plan: "standard", At: at.Add(2 * time.Minute),
+		SubscriptionID: "sub_managed",
+	}}
+	if err := h.m.OnEvents(ctx, "fake", events); err != nil {
+		t.Fatalf("OnEvents: %v", err)
+	}
+	if r = h.record(t, "acct_1"); r.PastDueSince == nil {
+		t.Fatalf("survivor reconciliation cleared dunning: %+v", r)
+	}
+
+	if err := h.m.OnEvents(ctx, "fake", []billing.Event{{
+		Type: billing.EventSubscriptionActivated, CustomerID: r.CustomerID,
+		Plan: "standard", At: at.Add(3 * time.Minute),
+		SubscriptionID: "sub_replacement", OperationID: "bop_replacement",
+	}}); err != nil {
+		t.Fatalf("replacement activation: %v", err)
+	}
+	if r = h.record(t, "acct_1"); r.PastDueSince != nil ||
+		r.ManagedSubscriptionID != "sub_replacement" {
+		t.Fatalf("new paid subscription did not clear dunning: %+v", r)
 	}
 }
 
