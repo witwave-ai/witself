@@ -97,7 +97,7 @@ versioned database, receive-cohort, or retry-canary Secret change also rolls
 the pod and can be fenced by imperative one-shot operations.
 */}}
 {{- define "witself-server.serverConfigChecksum" -}}
-{{- dict
+{{- $config := dict
   "backend" .Values.backend
   "cell" .Values.cell
   "backupValidation" .Values.backup.validation
@@ -108,5 +108,9 @@ the pod and can be fenced by imperative one-shot operations.
   "health" .Values.health
   "metrics" .Values.metrics
   "databaseSecret" .Values.database.existingSecret
-  | toJson | sha256sum -}}
+  -}}
+{{- if .Values.billing.endpoint -}}
+{{- $_ := set $config "billing" .Values.billing -}}
+{{- end -}}
+{{- $config | toJson | sha256sum -}}
 {{- end -}}

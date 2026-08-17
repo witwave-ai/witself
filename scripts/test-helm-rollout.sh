@@ -22,6 +22,9 @@ trap 'rm -r "$render_dir"' EXIT
 
 default_render="$render_dir/default.yaml"
 gcp_render="$render_dir/gcp.yaml"
+billing_empty_render="$render_dir/billing-empty.yaml"
+billing_render="$render_dir/billing.yaml"
+billing_apps_render="$render_dir/billing-apps.yaml"
 portable_worker_render="$render_dir/portable-worker.yaml"
 apps_render="$render_dir/apps.yaml"
 live_apps_render="$render_dir/live-apps.yaml"
@@ -61,6 +64,17 @@ long_worker_metrics_fullname="${long_fullname:0:48}-worker-metrics"
 helm template witself-server "$server_chart" --namespace witself >"$default_render"
 helm template witself-server "$server_chart" --namespace witself \
   --values "$gcp_profile" >"$gcp_render"
+helm template witself-server "$server_chart" --namespace witself \
+  --set-string billing.endpoint= >"$billing_empty_render"
+helm template witself-server "$server_chart" --namespace witself \
+  --set-string billing.endpoint=https://self.witwave.ai/control-plane \
+  >"$billing_render"
+helm template witself-apps "$apps_chart" \
+  --values "$civo_cell" \
+  --set apps.witselfServer.chartVersion=0.0.255 \
+  --set apps.witselfServer.imageTag=0.0.255 \
+  --set-string apps.witselfServer.billing.endpoint=https://self.witwave.ai/control-plane \
+  >"$billing_apps_render"
 helm template witself-server "$server_chart" --namespace witself \
   --set worker.enabled=true \
   --set database.existingSecret.name=witself-db >"$portable_worker_render"
@@ -436,6 +450,12 @@ expect_apps_template_failure() {
 default_server_config="$render_dir/default-server-config.yaml"
 default_server_deployment="$render_dir/default-server-deployment.yaml"
 gcp_server_config="$render_dir/gcp-server-config.yaml"
+billing_server_config="$render_dir/billing-server-config.yaml"
+billing_server_deployment="$render_dir/billing-server-deployment.yaml"
+billing_server_application="$render_dir/billing-server-application.yaml"
+billing_nested_values="$render_dir/billing-nested-values.yaml"
+billing_nested_render="$render_dir/billing-nested-render.yaml"
+billing_nested_server_config="$render_dir/billing-nested-server-config.yaml"
 gcp_worker_config="$render_dir/gcp-worker-config.yaml"
 gcp_server_deployment="$render_dir/gcp-server-deployment.yaml"
 gcp_worker_deployment="$render_dir/gcp-worker-deployment.yaml"
@@ -496,6 +516,13 @@ email_outbound_nested_server_deployment="$render_dir/email-outbound-nested-serve
 extract_document ConfigMap witself-server "$default_render" "$default_server_config"
 extract_document Deployment witself-server "$default_render" "$default_server_deployment"
 extract_document ConfigMap witself-server "$gcp_render" "$gcp_server_config"
+extract_document ConfigMap witself-server "$billing_render" "$billing_server_config"
+extract_document Deployment witself-server "$billing_render" "$billing_server_deployment"
+extract_document Application witself-server "$billing_apps_render" "$billing_server_application"
+extract_application_helm_values "$billing_server_application" "$billing_nested_values"
+helm template witself-server "$server_chart" --namespace witself \
+  --values "$billing_nested_values" >"$billing_nested_render"
+extract_document ConfigMap witself-server "$billing_nested_render" "$billing_nested_server_config"
 extract_document ConfigMap witself-worker "$gcp_render" "$gcp_worker_config"
 extract_document Deployment witself-server "$gcp_render" "$gcp_server_deployment"
 extract_document Deployment witself-worker "$gcp_render" "$gcp_worker_deployment"
@@ -539,6 +566,7 @@ extract_document Deployment witself-server "$email_production_retry_key_render" 
 for checksum_pair in \
   "$default_server_config:$default_server_deployment" \
   "$gcp_server_config:$gcp_server_deployment" \
+  "$billing_server_config:$billing_server_deployment" \
   "$email_production_server_config:$email_production_server_deployment" \
   "$email_production_nested_config:$email_production_nested_deployment" \
   "$email_production_retry_name_config:$email_production_retry_name_deployment" \
@@ -671,6 +699,42 @@ require_sequence "$civo_worker_deployment" \
   "                secretKeyRef:" \
   '                  name: "witself-agent-email-outbound-dispatch-v1"' \
   '                  key: "private-key"'
+
+# Billing discovery is absent by default, forwarded only when explicitly set,
+# and server-only. An explicit empty value must preserve the exact portable
+# render and its stable configuration checksum.
+if ! cmp -s "$default_render" "$billing_empty_render"; then
+  echo "an explicit empty billing endpoint changed the default render" >&2
+  exit 1
+fi
+for dark_billing_config in \
+  "$default_server_config" \
+  "$gcp_server_config" \
+  "$live_nested_server_config" \
+  "$civo_server_config"; do
+  reject_line "  WITSELF_BILLING_ENDPOINT:" "$dark_billing_config"
+done
+for dark_billing_application in \
+  "$live_server_application" \
+  "$civo_server_application"; do
+  reject_line "        billing:" "$dark_billing_application"
+done
+require_line '  WITSELF_BILLING_ENDPOINT: "https://self.witwave.ai/control-plane"' \
+  "$billing_server_config"
+require_line '        billing:' "$billing_server_application"
+require_line '          endpoint: https://self.witwave.ai/control-plane' \
+  "$billing_server_application"
+require_line '  WITSELF_BILLING_ENDPOINT: "https://self.witwave.ai/control-plane"' \
+  "$billing_nested_server_config"
+if [[ "$(grep -c 'WITSELF_BILLING_ENDPOINT' "$billing_nested_render")" -ne 1 ]]; then
+  echo "billing endpoint was not isolated to the server ConfigMap" >&2
+  exit 1
+fi
+if [[ "$(server_config_checksum "$default_server_config")" == \
+      "$(server_config_checksum "$billing_server_config")" ]]; then
+  echo "a configured billing endpoint did not change the server configuration checksum" >&2
+  exit 1
+fi
 
 # Portable defaults keep the API rollout-safe and fail closed on a worker that
 # has no shared database Secret.
@@ -902,6 +966,43 @@ require_line "          whenUnsatisfiable: DoNotSchedule" "$gcp_server_deploymen
 
 # Schema/template validation rejects unsafe rolling strategies, invalid job
 # bounds, and an enabled worker without its shared database Secret.
+expect_server_template_failure \
+  "HTTP billing endpoint" \
+  --set-string billing.endpoint=http://self.witwave.ai
+expect_server_template_failure_message \
+  "HTTP billing endpoint with schema validation bypassed" \
+  "billing.endpoint must be empty or a canonical HTTPS URL" \
+  --skip-schema-validation \
+  --set-string billing.endpoint=http://self.witwave.ai
+expect_server_template_failure \
+  "credential-bearing billing endpoint" \
+  --set-string billing.endpoint=https://operator:secret@self.witwave.ai
+expect_server_template_failure \
+  "billing endpoint containing a control character" \
+  --set-string $'billing.endpoint=https://self.witwave.ai/control\nplane'
+expect_server_template_failure \
+  "billing endpoint containing an encoded control character" \
+  --set-string billing.endpoint=https://self.witwave.ai/%0aescape
+expect_server_template_failure \
+  "billing endpoint containing a backslash" \
+  --set-string 'billing.endpoint=https://self.witwave.ai\\@forged.example'
+expect_server_template_failure \
+  "billing endpoint containing a query" \
+  --set-string 'billing.endpoint=https://self.witwave.ai?tenant=founder'
+expect_apps_template_failure \
+  "managed billing endpoint with an old child image" \
+  "apps.witselfServer.billing.endpoint requires chart and image v0.0.255 or newer" \
+  --values "$civo_cell" \
+  --set apps.witselfServer.chartVersion=0.0.255 \
+  --set apps.witselfServer.imageTag=0.0.254 \
+  --set-string apps.witselfServer.billing.endpoint=https://self.witwave.ai
+expect_apps_template_failure \
+  "unsafe managed billing endpoint" \
+  "apps.witselfServer.billing.endpoint must be empty or a canonical HTTPS URL" \
+  --values "$civo_cell" \
+  --set apps.witselfServer.chartVersion=0.0.255 \
+  --set apps.witselfServer.imageTag=0.0.255 \
+  --set-string apps.witselfServer.billing.endpoint=https://self.witwave.ai/%0aescape
 expect_server_template_failure \
   "worker without database Secret" \
   --set worker.enabled=true

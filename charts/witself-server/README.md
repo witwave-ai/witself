@@ -55,6 +55,19 @@ Set `bootstrap.existingSecret.name` to mount a first-operator bootstrap token at
 `bootstrap.tokenFile` (default `/.witself/tokens/bootstrap.token`) and expose
 the configured TTL as `WITSELF_BOOTSTRAP_TOKEN_TTL`.
 
+`billing.endpoint` is optional public discovery configuration for managed
+cells. Its empty default omits `WITSELF_BILLING_ENDPOINT`, so portable installs
+and existing cells remain providerless and billing commands stay dark. A
+non-empty value renders only into the server ConfigMap and must be a simple,
+canonical HTTPS origin or prefix, such as `https://self.witwave.ai` or
+`https://self.witwave.ai/control-plane`. Credentials, query strings, fragments,
+percent-encoded characters, control characters, and other non-ASCII URL forms
+are rejected during Helm validation. Changing a non-empty value participates
+in both server configuration checksums and rolls the API pods; the worker never
+receives it. Advertising this endpoint does not configure Stripe, enable a
+provider, mutate a plan, or charge an account—it only tells an authenticated
+client where the provider-neutral control-plane billing API lives.
+
 Permanent fact deletion is disabled by default. `features.factDeletion.enabled`
 renders `WITSELF_FACT_DELETION_ENABLED`; a server compiled against store schema
 27 or older refuses to start when it is enabled, so turn it on only with schema
@@ -361,6 +374,7 @@ ingress + TLS, and topology spread.
 
 See [values.yaml](values.yaml) for the full set and [values.schema.json](values.schema.json)
 for validation. Most-used: `image.tag`, `replicaCount`, `backend.kind`,
+`billing.endpoint`,
 `features.factDeletion.enabled`, `avatar.payloadCompaction.enabled`,
 `worker.enabled`, `worker.replicaCount`, `worker.avatarStyleRollout.*`,
 `worker.messageRateBucketCleanup.*`,

@@ -31,6 +31,11 @@ apps:
     chartVersion: 0.0.45
     imageTag: 0.0.45
     backendKind: managed
+    # Public control-plane origin/prefix advertised by managed cells for
+    # provider-neutral billing commands. Empty keeps discovery dark and is not
+    # forwarded to the child chart. Activate only after chart/image rollout.
+    billing:
+      endpoint: ""
     backup:
       # Activation is staged after every cell's cloud secret contains the
       # distinct backup-only token. Validation remains test-cell-only.
