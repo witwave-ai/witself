@@ -3,7 +3,8 @@
 // authenticated proxy over the public /v1 read API using the agent's own
 // token: self digests, transcripts, and fact lists use observational reads,
 // messages use the passive metadata-only list, receive-only email uses only
-// its address and passive metadata list (with a stricter browser allow-list),
+// its address and passive metadata list, and sent email uses only the bounded
+// owner outbox list (both email directions have strict browser allow-lists),
 // broad memory and fact reads stay redacted (a sensitive fact value appears
 // only in the single-fact user-initiated reveal response), and the
 // avatar SVG passes the same canonical sanitizer-and-hash gate as
@@ -33,6 +34,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -91,11 +93,22 @@ const (
 	// cannot turn this local view into an unbounded projection.
 	sseEmailPageLimit = 100
 
+	// sseEmailSentPageLimit is the newest-first sent-mail page the dashboard
+	// may project. Sent-mail cursors contain an outbound message id, while the
+	// browser projection deliberately omits ids, so both the direct route and
+	// live stream stay on one hard-bounded newest page.
+	sseEmailSentPageLimit = 100
+
 	// agentEmailUpstreamMessage is the only failure detail allowed across the
 	// email browser boundary. Unlike ordinary dashboard reads, email's strict
 	// projection must also distrust a cell-provided JSON error string because
 	// it could contain message content or an actionable identifier.
 	agentEmailUpstreamMessage = "receive-only email metadata is temporarily unavailable"
+
+	// agentEmailSentUpstreamMessage is the only failure detail allowed across
+	// the sent-email browser boundary. Cell errors may contain a recipient,
+	// subject, provider identifier, or another actionable value.
+	agentEmailSentUpstreamMessage = "sent email metadata is temporarily unavailable"
 
 	// sseMemoryPageLimit is the first-page size the memories tick asks for,
 	// matching the memories view's own fetch. Every tick re-reads the first
@@ -179,6 +192,7 @@ func Register(mux *http.ServeMux, cfg Config) error {
 	mux.Handle("GET /api/messages", secure(cfg, session, messagesHandler(cfg)))
 	mux.Handle("GET /api/email/address", secure(cfg, session, agentEmailAddressHandler(cfg)))
 	mux.Handle("GET /api/email/status", secure(cfg, session, agentEmailStatusHandler(cfg)))
+	mux.Handle("GET /api/email/sent", secure(cfg, session, agentEmailSentHandler(cfg)))
 	mux.Handle("GET /api/email", secure(cfg, session, agentEmailsHandler(cfg)))
 	mux.Handle("GET /api/facts", secure(cfg, session, factsHandler(cfg, factReads)))
 	mux.Handle("GET /api/facts/{id}/history", secure(cfg, session, factHistoryHandler(cfg, factReads)))
@@ -853,6 +867,67 @@ func sanitizeAgentEmails(messages []client.AgentEmailMessage) []sanitizedAgentEm
 	return out
 }
 
+// sanitizedAgentEmailSentMessage is the complete sent-mail shape allowed
+// across the local browser boundary. It is rebuilt field-by-field rather than
+// clearing today's sensitive fields, so future client additions cannot expose
+// message/account/realm/owner ids, the reply target, thread key, provider,
+// submitted body, provider identifiers, or another lifecycle capability.
+// From, ReplyTo, To, and Subject are deliberately retained because this is a
+// human-facing owner outbox; like inbound sender and subject metadata, the UI
+// must continue to treat them as untrusted text.
+type sanitizedAgentEmailSentMessage struct {
+	From              string     `json:"from"`
+	ReplyTo           string     `json:"reply_to,omitempty"`
+	To                string     `json:"to"`
+	Subject           string     `json:"subject,omitempty"`
+	State             string     `json:"state"`
+	ProviderState     string     `json:"provider_state,omitempty"`
+	ErrorCode         string     `json:"error_code,omitempty"`
+	RequestKind       string     `json:"request_kind,omitempty"`
+	AttemptCount      int64      `json:"attempt_count"`
+	QueuedAt          time.Time  `json:"queued_at"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	ProviderStartedAt *time.Time `json:"provider_started_at,omitempty"`
+	AcceptedAt        *time.Time `json:"accepted_at,omitempty"`
+	DeliveredAt       *time.Time `json:"delivered_at,omitempty"`
+	DeferredAt        *time.Time `json:"deferred_at,omitempty"`
+	FailedAt          *time.Time `json:"failed_at,omitempty"`
+	AmbiguousAt       *time.Time `json:"ambiguous_at,omitempty"`
+	CanceledAt        *time.Time `json:"canceled_at,omitempty"`
+}
+
+func sanitizeAgentEmailSentMessages(messages []client.AgentEmailOutboundMessage) []sanitizedAgentEmailSentMessage {
+	if len(messages) > sseEmailSentPageLimit {
+		messages = messages[:sseEmailSentPageLimit]
+	}
+	out := make([]sanitizedAgentEmailSentMessage, 0, len(messages))
+	for _, message := range messages {
+		out = append(out, sanitizedAgentEmailSentMessage{
+			From:              message.From,
+			ReplyTo:           message.ReplyTo,
+			To:                message.To,
+			Subject:           message.Subject,
+			State:             message.State,
+			ProviderState:     message.ProviderState,
+			ErrorCode:         message.ErrorCode,
+			RequestKind:       message.RequestKind,
+			AttemptCount:      message.AttemptCount,
+			QueuedAt:          message.QueuedAt,
+			CreatedAt:         message.CreatedAt,
+			UpdatedAt:         message.UpdatedAt,
+			ProviderStartedAt: message.ProviderStartedAt,
+			AcceptedAt:        message.AcceptedAt,
+			DeliveredAt:       message.DeliveredAt,
+			DeferredAt:        message.DeferredAt,
+			FailedAt:          message.FailedAt,
+			AmbiguousAt:       message.AmbiguousAt,
+			CanceledAt:        message.CanceledAt,
+		})
+	}
+	return out
+}
+
 func agentEmailUnavailableKind(err error) string {
 	var featureErr *client.FeatureNotEnabledError
 	if errors.As(err, &featureErr) && featureErr.Feature == "agent_email_receive" {
@@ -880,6 +955,25 @@ func writeAgentEmailUnavailable(w http.ResponseWriter, kind string) {
 	default:
 		writeJSONError(w, http.StatusNotImplemented, "cell does not serve receive-only agent email")
 	}
+}
+
+func agentEmailSentUnavailableKind(err error) string {
+	var featureErr *client.FeatureNotEnabledError
+	if errors.As(err, &featureErr) && featureErr.Feature == "agent_email_send" {
+		return "feature_disabled"
+	}
+	if errors.Is(err, client.ErrNotFound) {
+		return "unavailable"
+	}
+	return ""
+}
+
+func writeAgentEmailSentUnavailable(w http.ResponseWriter, kind string) {
+	if kind == "feature_disabled" {
+		writeJSONError(w, http.StatusForbidden, "outbound email is not enabled on this account")
+		return
+	}
+	writeJSONError(w, http.StatusNotImplemented, "cell does not serve outbound agent email")
 }
 
 // agentEmailAddressHandler proxies exactly GET /v1/email/address and returns
@@ -947,6 +1041,53 @@ func agentEmailsHandler(cfg Config) http.Handler {
 			"messages":  sanitizeAgentEmails(page.Messages),
 		})
 	})
+}
+
+// agentEmailSentHandler proxies exactly the passive GET /v1/email/sent owner
+// outbox. It exposes no item id or cursor and never calls send, reply, show,
+// control, retry, cancel, provider-event, or another lifecycle route.
+func agentEmailSentHandler(cfg Config) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		opts, ok := parseAgentEmailSentListOptions(w, r.URL.Query())
+		if !ok {
+			return
+		}
+		page, err := client.ListSentAgentEmails(r.Context(), cfg.Endpoint, cfg.BearerToken, opts)
+		if err != nil {
+			if kind := agentEmailSentUnavailableKind(err); kind != "" {
+				writeAgentEmailSentUnavailable(w, kind)
+				return
+			}
+			writeAgentEmailSentUpstreamError(w, err)
+			return
+		}
+		writeJSON(w, map[string]any{
+			"available": true,
+			"messages":  sanitizeAgentEmailSentMessages(page.Messages),
+		})
+	})
+}
+
+func parseAgentEmailSentListOptions(w http.ResponseWriter, query url.Values) (client.AgentEmailOutboundListOptions, bool) {
+	// Only a caller-chosen page size is useful without browser-visible ids.
+	// Reject cursor, state, and unknown parameters locally rather than growing
+	// a hidden addressing/filter surface or forwarding arbitrary future input.
+	for name := range query {
+		if name != "limit" {
+			writeJSONError(w, http.StatusBadRequest, "sent email supports only the limit query parameter")
+			return client.AgentEmailOutboundListOptions{}, false
+		}
+	}
+	opts := client.AgentEmailOutboundListOptions{Limit: sseEmailSentPageLimit}
+	if raw := query.Get("limit"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 1 || value > sseEmailSentPageLimit {
+			writeJSONError(w, http.StatusBadRequest, "limit must be an integer between 1 and 100")
+			return client.AgentEmailOutboundListOptions{}, false
+		}
+		opts.Limit = value
+	}
+	return opts, true
 }
 
 func parseAgentEmailListOptions(w http.ResponseWriter, query interface{ Get(string) string }, defaultLimit int) (client.AgentEmailListOptions, bool) {
@@ -1432,6 +1573,15 @@ func eventsHandler(cfg Config, sem chan struct{}, factReads *factReadCapability,
 			}
 			includeEmail = value
 		}
+		var includeEmailSent bool
+		if raw := query.Get("email_sent"); raw != "" {
+			value, err := strconv.ParseBool(raw)
+			if err != nil {
+				writeJSONError(w, http.StatusBadRequest, "email_sent must be a boolean")
+				return
+			}
+			includeEmailSent = value
+		}
 		emailOpts := client.AgentEmailListOptions{Limit: sseEmailPageLimit}
 		for name, target := range map[string]*bool{
 			"email_unread":  &emailOpts.Unread,
@@ -1485,7 +1635,7 @@ func eventsHandler(cfg Config, sem chan struct{}, factReads *factReadCapability,
 		ticker := time.NewTicker(cfg.PollInterval)
 		defer ticker.Stop()
 		for {
-			lastSeen = emitEvents(ctx, cfg, factReads, secrets, upstream, w, flusher, transcriptID, includeMessages, includeMemories, includeFacts, includeSecrets, includeEmail, emailOpts, lastSeen)
+			lastSeen = emitEvents(ctx, cfg, factReads, secrets, upstream, w, flusher, transcriptID, includeMessages, includeMemories, includeFacts, includeSecrets, includeEmail, includeEmailSent, emailOpts, lastSeen)
 			select {
 			case <-ctx.Done():
 				return
@@ -1532,6 +1682,8 @@ func (t *upstreamTracker) observe(w io.Writer, flusher http.Flusher, source stri
 	message := err.Error()
 	if source == "email" {
 		message = agentEmailUpstreamMessage
+	} else if source == "email_sent" {
+		message = agentEmailSentUpstreamMessage
 	}
 	writeSSE(w, flusher, "upstream", "", upstreamEvent{Source: source, OK: false, Message: message})
 }
@@ -1544,7 +1696,7 @@ func (t *upstreamTracker) observe(w io.Writer, flusher http.Flusher, source stri
 // and the next tick retries from the same cursor; each failure and recovery
 // also flows through the tracker so the browser sees per-source "upstream"
 // state-change events instead of a silent stall.
-func emitEvents(ctx context.Context, cfg Config, factReads *factReadCapability, secrets *secretsCapability, upstream *upstreamTracker, w io.Writer, flusher http.Flusher, transcriptID string, includeMessages, includeMemories, includeFacts, includeSecrets, includeEmail bool, emailOpts client.AgentEmailListOptions, lastSeen int64) int64 {
+func emitEvents(ctx context.Context, cfg Config, factReads *factReadCapability, secrets *secretsCapability, upstream *upstreamTracker, w io.Writer, flusher http.Flusher, transcriptID string, includeMessages, includeMemories, includeFacts, includeSecrets, includeEmail, includeEmailSent bool, emailOpts client.AgentEmailListOptions, lastSeen int64) int64 {
 	digest, observational, err := fetchSelf(ctx, cfg)
 	upstream.observe(w, flusher, "self", err)
 	if err == nil {
@@ -1564,6 +1716,9 @@ func emitEvents(ctx context.Context, cfg Config, factReads *factReadCapability, 
 	}
 	if includeEmail {
 		upstream.observe(w, flusher, "email", emitAgentEmailEvent(ctx, cfg, emailOpts, w, flusher))
+	}
+	if includeEmailSent {
+		upstream.observe(w, flusher, "email_sent", emitAgentEmailSentEvent(ctx, cfg, w, flusher))
 	}
 	if transcriptID == "" {
 		return lastSeen
@@ -1666,6 +1821,33 @@ func emitAgentEmailEvent(ctx context.Context, cfg Config, opts client.AgentEmail
 		"enrolled":  true,
 		"messages":  sanitizeAgentEmails(page.Messages),
 		"status":    sanitizeAgentEmailStorageStatus(status),
+	})
+	return nil
+}
+
+// emitAgentEmailSentEvent polls only the bounded passive GET /v1/email/sent
+// owner outbox and emits its independent email_sent channel. Account feature
+// disablement and a pre-feature cell are settled availability frames; an
+// actual upstream failure is returned to the independently tracked
+// "email_sent" source and cannot suppress or degrade inbound email.
+func emitAgentEmailSentEvent(ctx context.Context, cfg Config, w io.Writer, flusher http.Flusher) error {
+	page, err := client.ListSentAgentEmails(ctx, cfg.Endpoint, cfg.BearerToken, client.AgentEmailOutboundListOptions{
+		Limit: sseEmailSentPageLimit,
+	})
+	if err != nil {
+		if kind := agentEmailSentUnavailableKind(err); kind != "" {
+			writeSSE(w, flusher, "email_sent", "", map[string]any{
+				"available": false,
+				"reason":    kind,
+				"messages":  []sanitizedAgentEmailSentMessage{},
+			})
+			return nil
+		}
+		return err
+	}
+	writeSSE(w, flusher, "email_sent", "", map[string]any{
+		"available": true,
+		"messages":  sanitizeAgentEmailSentMessages(page.Messages),
 	})
 	return nil
 }
@@ -1793,4 +1975,12 @@ func writeAgentEmailUpstreamError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeJSONError(w, http.StatusBadGateway, agentEmailUpstreamMessage)
+}
+
+func writeAgentEmailSentUpstreamError(w http.ResponseWriter, err error) {
+	if errors.Is(err, client.ErrBadRequest) {
+		writeJSONError(w, http.StatusBadRequest, "sent email filters were rejected")
+		return
+	}
+	writeJSONError(w, http.StatusBadGateway, agentEmailSentUpstreamMessage)
 }
