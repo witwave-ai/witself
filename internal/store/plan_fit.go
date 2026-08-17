@@ -2,8 +2,11 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -19,6 +22,9 @@ const (
 	PlanFitScopeRealm     = "realm"
 	PlanFitScopeAgent     = "agent"
 	PlanFitScopeAuthority = "authority"
+
+	PlanFitApplyStateApplied = "applied"
+	PlanFitApplyStateBlocked = "blocked"
 )
 
 // ErrPlanFitStateAmbiguous means the cell could not prove a coherent,
@@ -59,6 +65,38 @@ type AccountPlanFitReport struct {
 	Violations         []AccountPlanFitViolation
 }
 
+// AccountPlanFitApplyTarget is a fenced, complete resolved snapshot. Unlike a
+// read-only fit target, it carries the positive control-plane revision that the
+// cell must acknowledge if the target fits.
+type AccountPlanFitApplyTarget struct {
+	Revision     int64
+	Plan         string
+	SnapshotHash string
+	Limits       map[string]int64
+	Policies     map[string]int64
+	Features     []string
+}
+
+// AccountPlanFitApplyResult is the strict outcome of one atomic fit-and-apply
+// attempt. AppliedSnapshot is set only for applied (including exact replay),
+// while CurrentSnapshot and non-empty Violations are set only for blocked.
+type AccountPlanFitApplyResult struct {
+	State              string
+	AccountID          string
+	TargetRevision     int64
+	TargetPlan         string
+	TargetSnapshotHash string
+	Violations         []AccountPlanFitViolation
+	CurrentSnapshot    *AccountPlanSnapshot
+	AppliedSnapshot    *AccountPlanSnapshot
+}
+
+type accountPlanFitApplyContext struct {
+	target  AccountPlanFitApplyTarget
+	current AccountPlanSnapshot
+	applied *AccountPlanSnapshot
+}
+
 // CheckAccountPlanFit compares canonical durable account usage with every
 // finite storage/count limit understood by the target snapshot. The complete
 // read runs in one repeatable-read, read-only transaction. It never trims,
@@ -68,6 +106,54 @@ func (s *Store) CheckAccountPlanFit(
 	accountID string,
 	target AccountPlanFitTarget,
 ) (AccountPlanFitReport, error) {
+	return s.checkAccountPlanFit(ctx, accountID, target, nil)
+}
+
+// ApplyAccountPlanIfFits rechecks every finite durable-capacity dimension and
+// applies the fenced target snapshot in the same READ COMMITTED transaction.
+// The account row is locked FOR NO KEY UPDATE before the recheck. All resource
+// writers that can change these counts take a conflicting account lock, so no
+// create can slip between the final fit read and the snapshot update.
+//
+// An exact revision/hash replay returns the already-persisted snapshot without
+// re-running fit. Older revisions and same-revision/different-hash attempts are
+// rejected by the same monotonic fence as SetAccountPlan.
+func (s *Store) ApplyAccountPlanIfFits(
+	ctx context.Context,
+	accountID string,
+	target AccountPlanFitApplyTarget,
+) (AccountPlanFitApplyResult, error) {
+	if err := validateAccountPlanFitApplyTarget(target); err != nil {
+		return AccountPlanFitApplyResult{}, err
+	}
+	accountID = strings.TrimSpace(accountID)
+	apply := &accountPlanFitApplyContext{target: target}
+	report, err := s.checkAccountPlanFit(ctx, accountID, target.fitTarget(), apply)
+	if err != nil {
+		return AccountPlanFitApplyResult{}, err
+	}
+	result := AccountPlanFitApplyResult{
+		AccountID: accountID, TargetRevision: target.Revision,
+		TargetPlan: target.Plan, TargetSnapshotHash: target.SnapshotHash,
+		Violations: append([]AccountPlanFitViolation{}, report.Violations...),
+	}
+	if apply.applied != nil {
+		result.State = PlanFitApplyStateApplied
+		result.AppliedSnapshot = apply.applied
+		return result, nil
+	}
+	result.State = PlanFitApplyStateBlocked
+	current := apply.current
+	result.CurrentSnapshot = &current
+	return result, nil
+}
+
+func (s *Store) checkAccountPlanFit(
+	ctx context.Context,
+	accountID string,
+	target AccountPlanFitTarget,
+	apply *accountPlanFitApplyContext,
+) (AccountPlanFitReport, error) {
 	if err := validateAccountPlanFitTarget(target); err != nil {
 		return AccountPlanFitReport{}, err
 	}
@@ -75,10 +161,14 @@ func (s *Store) CheckAccountPlanFit(
 	if accountID == "" {
 		return AccountPlanFitReport{}, ErrAccountNotFound
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
+	txOptions := pgx.TxOptions{
 		IsoLevel:   pgx.RepeatableRead,
 		AccessMode: pgx.ReadOnly,
-	})
+	}
+	if apply != nil {
+		txOptions = pgx.TxOptions{IsoLevel: pgx.ReadCommitted}
+	}
+	tx, err := s.pool.BeginTx(ctx, txOptions)
 	if err != nil {
 		return AccountPlanFitReport{}, fmt.Errorf("begin account plan-fit read: %w", err)
 	}
@@ -86,18 +176,28 @@ func (s *Store) CheckAccountPlanFit(
 
 	var accountStatus string
 	var retainedAttachmentBytes int64
-	err = tx.QueryRow(ctx, `
-		SELECT status,retained_agent_email_attachment_bytes
-		  FROM accounts
-		 WHERE id=$1`, accountID).Scan(&accountStatus, &retainedAttachmentBytes)
+	if apply == nil {
+		err = tx.QueryRow(ctx, `
+			SELECT status,retained_agent_email_attachment_bytes
+			  FROM accounts
+			 WHERE id=$1`, accountID).Scan(&accountStatus, &retainedAttachmentBytes)
+	} else {
+		err = lockAccountPlanForFitApply(
+			ctx, tx, accountID, &accountStatus, &retainedAttachmentBytes,
+			&apply.current,
+		)
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AccountPlanFitReport{}, ErrAccountNotFound
 	}
 	if err != nil {
 		return AccountPlanFitReport{}, fmt.Errorf("read account plan-fit state: %w", err)
 	}
-	if accountStatus != "active" {
-		return AccountPlanFitReport{}, ErrAccountNotActive
+	if apply != nil && !validAccountPlanSnapshotForFitApply(apply.current) {
+		return AccountPlanFitReport{}, fmt.Errorf(
+			"%w: persisted current plan snapshot is invalid",
+			ErrPlanFitStateAmbiguous,
+		)
 	}
 
 	report := AccountPlanFitReport{
@@ -105,6 +205,32 @@ func (s *Store) CheckAccountPlanFit(
 		TargetPlan:         target.Plan,
 		TargetSnapshotHash: target.SnapshotHash,
 		Violations:         []AccountPlanFitViolation{},
+	}
+	if apply != nil {
+		switch {
+		case apply.target.Revision < apply.current.Revision,
+			apply.target.Revision == apply.current.Revision &&
+				apply.target.SnapshotHash != apply.current.Hash:
+			return AccountPlanFitReport{}, ErrPlanSnapshotStale
+		case apply.target.Revision == apply.current.Revision:
+			if !accountPlanSnapshotMatchesFitApplyTarget(apply.current, apply.target) {
+				return AccountPlanFitReport{}, fmt.Errorf(
+					"%w: persisted plan snapshot does not match its fence",
+					ErrPlanFitStateAmbiguous,
+				)
+			}
+			current := apply.current
+			apply.applied = &current
+			if err := tx.Commit(ctx); err != nil {
+				return AccountPlanFitReport{}, fmt.Errorf(
+					"commit account plan-fit apply replay: %w", err,
+				)
+			}
+			return report, nil
+		}
+	}
+	if accountStatus != "active" {
+		return AccountPlanFitReport{}, ErrAccountNotActive
 	}
 	if maximum, finite := target.Limits[plans.RealmLimit]; finite {
 		used, err := accountPlanFitCount(ctx, tx, `
@@ -294,11 +420,173 @@ func (s *Store) CheckAccountPlanFit(
 			plans.AgentEmailCustomDomainsPerAccountLimit, used, maximum,
 		)
 	}
+	if apply != nil && len(report.Violations) == 0 {
+		applied, err := applyAccountPlanFitTargetTx(
+			ctx, tx, accountID, apply.current, apply.target,
+		)
+		if err != nil {
+			return AccountPlanFitReport{}, err
+		}
+		apply.applied = &applied
+	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return AccountPlanFitReport{}, fmt.Errorf("commit account plan-fit read: %w", err)
+		operation := "read"
+		if apply != nil {
+			operation = "apply"
+		}
+		return AccountPlanFitReport{}, fmt.Errorf("commit account plan-fit %s: %w", operation, err)
 	}
 	return report, nil
+}
+
+func (target AccountPlanFitApplyTarget) fitTarget() AccountPlanFitTarget {
+	return AccountPlanFitTarget{
+		Plan: target.Plan, SnapshotHash: target.SnapshotHash,
+		Limits: target.Limits, Policies: target.Policies, Features: target.Features,
+	}
+}
+
+func validateAccountPlanFitApplyTarget(target AccountPlanFitApplyTarget) error {
+	if target.Revision < 1 {
+		return fmt.Errorf("%w: revision must be positive", ErrPlanSnapshotInvalid)
+	}
+	return validateAccountPlanFitTarget(target.fitTarget())
+}
+
+func lockAccountPlanForFitApply(
+	ctx context.Context,
+	tx pgx.Tx,
+	accountID string,
+	status *string,
+	retainedAttachmentBytes *int64,
+	snapshot *AccountPlanSnapshot,
+) error {
+	var limits, policies, features []byte
+	err := tx.QueryRow(ctx, `
+		SELECT status,retained_agent_email_attachment_bytes,
+		       id,plan_snapshot_revision,plan_snapshot_hash,plan,
+		       plan_limits,plan_policies,plan_features,plan_applied_at
+		  FROM accounts
+		 WHERE id=$1
+		 FOR NO KEY UPDATE`, accountID).Scan(
+		status, retainedAttachmentBytes,
+		&snapshot.AccountID, &snapshot.Revision, &snapshot.Hash, &snapshot.Plan,
+		&limits, &policies, &features, &snapshot.AppliedAt,
+	)
+	if err != nil {
+		return err
+	}
+	if err := decodeAccountPlanSnapshot(snapshot, limits, policies, features); err != nil {
+		return fmt.Errorf("decode current account plan for fit apply: %w", err)
+	}
+	return nil
+}
+
+func accountPlanSnapshotMatchesFitApplyTarget(
+	snapshot AccountPlanSnapshot,
+	target AccountPlanFitApplyTarget,
+) bool {
+	if snapshot.AccountID == "" || snapshot.Revision != target.Revision ||
+		snapshot.Hash != target.SnapshotHash || snapshot.Plan != target.Plan ||
+		!maps.Equal(snapshot.Limits, target.Limits) ||
+		!maps.Equal(snapshot.Policies, target.Policies) {
+		return false
+	}
+	wantFeatures := append([]string{}, target.Features...)
+	slices.Sort(wantFeatures)
+	if !slices.Equal(snapshot.Features, wantFeatures) {
+		return false
+	}
+	hash, err := plans.SnapshotHash(
+		snapshot.Plan, snapshot.Limits, snapshot.Policies, snapshot.Features,
+	)
+	return err == nil && hash == snapshot.Hash
+}
+
+func validAccountPlanSnapshotForFitApply(snapshot AccountPlanSnapshot) bool {
+	if snapshot.AccountID == "" || snapshot.Revision < 0 || snapshot.Plan == "" ||
+		snapshot.Plan != strings.TrimSpace(snapshot.Plan) || snapshot.Limits == nil ||
+		snapshot.Policies == nil || snapshot.Features == nil {
+		return false
+	}
+	if err := plans.ValidateLimits(snapshot.Limits); err != nil {
+		return false
+	}
+	if err := plans.ValidatePolicies(snapshot.Policies); err != nil {
+		return false
+	}
+	if err := plans.ValidateFeatures(snapshot.Features); err != nil {
+		return false
+	}
+	if snapshot.Revision == 0 {
+		return snapshot.Hash == ""
+	}
+	if snapshot.AppliedAt == nil {
+		return false
+	}
+	hash, err := plans.SnapshotHash(
+		snapshot.Plan, snapshot.Limits, snapshot.Policies, snapshot.Features,
+	)
+	return err == nil && hash == snapshot.Hash
+}
+
+func applyAccountPlanFitTargetTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	accountID string,
+	current AccountPlanSnapshot,
+	target AccountPlanFitApplyTarget,
+) (AccountPlanSnapshot, error) {
+	features := append([]string{}, target.Features...)
+	slices.Sort(features)
+	limitsJSON, err := json.Marshal(target.Limits)
+	if err != nil {
+		return AccountPlanSnapshot{}, fmt.Errorf("marshal plan-fit apply limits: %w", err)
+	}
+	policiesJSON, err := json.Marshal(target.Policies)
+	if err != nil {
+		return AccountPlanSnapshot{}, fmt.Errorf("marshal plan-fit apply policies: %w", err)
+	}
+	featuresJSON, err := json.Marshal(features)
+	if err != nil {
+		return AccountPlanSnapshot{}, fmt.Errorf("marshal plan-fit apply features: %w", err)
+	}
+
+	var applied AccountPlanSnapshot
+	var appliedLimits, appliedPolicies, appliedFeatures []byte
+	err = tx.QueryRow(ctx, `
+		UPDATE accounts
+		   SET plan=$2,plan_limits=$3,plan_policies=$4,plan_features=$5,
+		       plan_applied_at=statement_timestamp(),
+		       plan_snapshot_revision=$6,plan_snapshot_hash=$7
+		 WHERE id=$1
+		   AND plan_snapshot_revision=$8 AND plan_snapshot_hash=$9
+		 RETURNING id,plan_snapshot_revision,plan_snapshot_hash,plan,
+		           plan_limits,plan_policies,plan_features,plan_applied_at`,
+		accountID, target.Plan, limitsJSON, policiesJSON, featuresJSON,
+		target.Revision, target.SnapshotHash, current.Revision, current.Hash,
+	).Scan(
+		&applied.AccountID, &applied.Revision, &applied.Hash, &applied.Plan,
+		&appliedLimits, &appliedPolicies, &appliedFeatures, &applied.AppliedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AccountPlanSnapshot{}, ErrPlanSnapshotStale
+	}
+	if err != nil {
+		return AccountPlanSnapshot{}, fmt.Errorf("apply account plan after fit: %w", err)
+	}
+	if err := decodeAccountPlanSnapshot(
+		&applied, appliedLimits, appliedPolicies, appliedFeatures,
+	); err != nil {
+		return AccountPlanSnapshot{}, err
+	}
+	if !accountPlanSnapshotMatchesFitApplyTarget(applied, target) {
+		return AccountPlanSnapshot{}, fmt.Errorf(
+			"%w: applied plan snapshot does not match target", ErrPlanFitStateAmbiguous,
+		)
+	}
+	return applied, nil
 }
 
 func validateAccountPlanFitTarget(target AccountPlanFitTarget) error {

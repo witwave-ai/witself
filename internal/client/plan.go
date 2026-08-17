@@ -70,6 +70,37 @@ type AccountPlanFitReport struct {
 	Violations         []AccountPlanFitViolation `json:"violations"`
 }
 
+const (
+	AccountPlanFitApplyStateApplied = "applied"
+	AccountPlanFitApplyStateBlocked = "blocked"
+)
+
+// AccountPlanFitApplyTarget is a complete resolved target plus the positive
+// control-plane snapshot revision the cell must atomically acknowledge.
+type AccountPlanFitApplyTarget struct {
+	Revision     int64            `json:"revision"`
+	Plan         string           `json:"plan"`
+	SnapshotHash string           `json:"snapshot_hash"`
+	Limits       map[string]int64 `json:"limits"`
+	Policies     map[string]int64 `json:"policies"`
+	Features     []string         `json:"features"`
+}
+
+// AccountPlanFitApplyResult is a strict mutually exclusive response. Applied
+// carries only AppliedSnapshot and an empty violation list. Blocked carries at
+// least one violation and the exact CurrentSnapshot read under the fit lock.
+type AccountPlanFitApplyResult struct {
+	SchemaVersion      string                    `json:"schema_version"`
+	State              string                    `json:"state"`
+	AccountID          string                    `json:"account_id"`
+	TargetRevision     int64                     `json:"target_revision"`
+	TargetPlan         string                    `json:"target_plan"`
+	TargetSnapshotHash string                    `json:"target_snapshot_hash"`
+	Violations         []AccountPlanFitViolation `json:"violations"`
+	CurrentSnapshot    *AccountPlanSnapshot      `json:"current_snapshot,omitempty"`
+	AppliedSnapshot    *AccountPlanSnapshot      `json:"applied_snapshot,omitempty"`
+}
+
 // ApplyAccountPlan pushes a plan snapshot to a cell via the provision-token
 // system endpoint POST {endpoint}/v1/accounts/{id}:plan — the control plane's
 // half of "the CP computes, the cell enforces". provisionToken is the CP↔cell
@@ -105,6 +136,62 @@ func ApplyAccountPlanViaBridge(
 		ctx, url, bridgeToken, accountID, revision, snapshotHash, plan,
 		limits, policies, features,
 	)
+}
+
+// ApplyAccountPlanIfFits asks a cell to lock the account, recheck every finite
+// durable capacity, and apply the exact fenced target in one transaction.
+func ApplyAccountPlanIfFits(
+	ctx context.Context,
+	endpoint, provisionToken, accountID string,
+	target AccountPlanFitApplyTarget,
+) (AccountPlanFitApplyResult, error) {
+	url := strings.TrimRight(endpoint, "/") +
+		"/v1/accounts/" + accountID + ":plan-fit-apply"
+	return applyAccountPlanIfFitsAtURL(
+		ctx, url, provisionToken, accountID, target,
+	)
+}
+
+// ApplyAccountPlanIfFitsViaBridge sends the same strict request through the
+// directory-owning Worker, which resolves the current cell and holds the
+// provision credential.
+func ApplyAccountPlanIfFitsViaBridge(
+	ctx context.Context,
+	bridgeURL, bridgeToken, accountID string,
+	target AccountPlanFitApplyTarget,
+) (AccountPlanFitApplyResult, error) {
+	url := strings.TrimRight(bridgeURL, "/") +
+		"/v1/internal/accounts/" + accountID + ":plan-fit-apply"
+	return applyAccountPlanIfFitsAtURL(
+		ctx, url, bridgeToken, accountID, target,
+	)
+}
+
+func applyAccountPlanIfFitsAtURL(
+	ctx context.Context,
+	url, bearer, accountID string,
+	target AccountPlanFitApplyTarget,
+) (AccountPlanFitApplyResult, error) {
+	if err := validateAccountPlanFitApplyTarget(target); err != nil {
+		return AccountPlanFitApplyResult{}, err
+	}
+	body, err := json.Marshal(struct {
+		SchemaVersion string                    `json:"schema_version"`
+		Target        AccountPlanFitApplyTarget `json:"target"`
+	}{SchemaVersion: "witself.v0", Target: target})
+	if err != nil {
+		return AccountPlanFitApplyResult{}, fmt.Errorf(
+			"encode plan-fit apply target: %w", err,
+		)
+	}
+	var result AccountPlanFitApplyResult
+	if err := doJSON(ctx, http.MethodPost, url, bearer, body, &result); err != nil {
+		return AccountPlanFitApplyResult{}, err
+	}
+	if err := validateAccountPlanFitApplyResult(accountID, target, result); err != nil {
+		return AccountPlanFitApplyResult{}, err
+	}
+	return result, nil
 }
 
 func applyAccountPlanAtURL(
@@ -210,6 +297,117 @@ func validateAccountPlanFitTarget(target AccountPlanFitTarget) error {
 	)
 	if err != nil || expected != target.SnapshotHash {
 		return fmt.Errorf("plan-fit target snapshot hash does not match payload")
+	}
+	return nil
+}
+
+func validateAccountPlanFitApplyTarget(target AccountPlanFitApplyTarget) error {
+	if target.Revision < 1 {
+		return fmt.Errorf("positive plan-fit apply target revision is required")
+	}
+	return validateAccountPlanFitTarget(AccountPlanFitTarget{
+		Plan: target.Plan, SnapshotHash: target.SnapshotHash,
+		Limits: target.Limits, Policies: target.Policies, Features: target.Features,
+	})
+}
+
+func validateAccountPlanFitApplyResult(
+	accountID string,
+	target AccountPlanFitApplyTarget,
+	result AccountPlanFitApplyResult,
+) error {
+	if result.SchemaVersion != "witself.v0" || result.AccountID != accountID ||
+		result.TargetRevision != target.Revision || result.TargetPlan != target.Plan ||
+		result.TargetSnapshotHash != target.SnapshotHash || result.Violations == nil {
+		return fmt.Errorf("cell returned an invalid plan-fit apply envelope")
+	}
+	fitTarget := AccountPlanFitTarget{
+		Plan: target.Plan, SnapshotHash: target.SnapshotHash,
+		Limits: target.Limits, Policies: target.Policies, Features: target.Features,
+	}
+	switch result.State {
+	case AccountPlanFitApplyStateApplied:
+		if len(result.Violations) != 0 || result.CurrentSnapshot != nil ||
+			result.AppliedSnapshot == nil ||
+			!accountPlanSnapshotMatchesApplyTarget(
+				accountID, target, *result.AppliedSnapshot,
+			) {
+			return fmt.Errorf("cell returned an invalid applied plan-fit result")
+		}
+	case AccountPlanFitApplyStateBlocked:
+		if len(result.Violations) == 0 || result.CurrentSnapshot == nil ||
+			result.AppliedSnapshot != nil ||
+			result.CurrentSnapshot.Revision >= target.Revision ||
+			validateCurrentAccountPlanSnapshot(
+				accountID, *result.CurrentSnapshot,
+			) != nil {
+			return fmt.Errorf("cell returned an invalid blocked plan-fit result")
+		}
+		if err := validateAccountPlanFitReport(accountID, fitTarget, AccountPlanFitReport{
+			SchemaVersion: "witself.v0", AccountID: accountID,
+			TargetPlan: target.Plan, TargetSnapshotHash: target.SnapshotHash,
+			Violations: result.Violations,
+		}); err != nil {
+			return fmt.Errorf("cell returned an invalid blocked plan-fit result: %w", err)
+		}
+		for _, violation := range result.Violations {
+			if violation.Code != "limit_exceeded" {
+				return fmt.Errorf("cell returned a non-cell plan-fit apply violation")
+			}
+		}
+	default:
+		return fmt.Errorf("cell returned an unknown plan-fit apply state")
+	}
+	return nil
+}
+
+func accountPlanSnapshotMatchesApplyTarget(
+	accountID string,
+	target AccountPlanFitApplyTarget,
+	snapshot AccountPlanSnapshot,
+) bool {
+	wantFeatures := append([]string{}, target.Features...)
+	slices.Sort(wantFeatures)
+	return snapshot.AccountID == accountID && snapshot.Revision == target.Revision &&
+		snapshot.SnapshotHash == target.SnapshotHash && snapshot.Plan == target.Plan &&
+		maps.Equal(snapshot.Limits, target.Limits) &&
+		maps.Equal(snapshot.Policies, target.Policies) &&
+		slices.Equal(snapshot.Features, wantFeatures) && snapshot.AppliedAt != nil
+}
+
+func validateCurrentAccountPlanSnapshot(
+	accountID string,
+	snapshot AccountPlanSnapshot,
+) error {
+	if snapshot.AccountID != accountID || snapshot.Revision < 0 ||
+		snapshot.Plan == "" || snapshot.Plan != strings.TrimSpace(snapshot.Plan) ||
+		snapshot.Limits == nil ||
+		snapshot.Policies == nil || snapshot.Features == nil {
+		return fmt.Errorf("invalid current plan snapshot")
+	}
+	if err := plans.ValidateLimits(snapshot.Limits); err != nil {
+		return fmt.Errorf("invalid current plan limits: %w", err)
+	}
+	if err := plans.ValidatePolicies(snapshot.Policies); err != nil {
+		return fmt.Errorf("invalid current plan policies: %w", err)
+	}
+	if err := plans.ValidateFeatures(snapshot.Features); err != nil {
+		return fmt.Errorf("invalid current plan features: %w", err)
+	}
+	if snapshot.Revision == 0 {
+		if snapshot.SnapshotHash != "" {
+			return fmt.Errorf("invalid unfenced current plan snapshot")
+		}
+		return nil
+	}
+	if snapshot.AppliedAt == nil {
+		return fmt.Errorf("fenced current plan snapshot has no applied time")
+	}
+	expected, err := plans.SnapshotHash(
+		snapshot.Plan, snapshot.Limits, snapshot.Policies, snapshot.Features,
+	)
+	if err != nil || expected != snapshot.SnapshotHash {
+		return fmt.Errorf("current plan snapshot hash does not match payload")
 	}
 	return nil
 }
