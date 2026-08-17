@@ -1859,6 +1859,13 @@ func providerEffectApplied(p *Pending) bool {
 	if p == nil {
 		return false
 	}
+	coherent := p.Kind == PendingDowngrade &&
+		billing.ValidateProviderObjectID(p.ProviderObjectID) == nil &&
+		!p.Effective.IsZero() && p.PreparedEffective.IsZero() &&
+		!p.CancelPrevious && p.CancelPreviousTarget == nil
+	if !coherent {
+		return false
+	}
 	switch p.ProviderPhase {
 	case pendingProviderApplied:
 		return true
@@ -1868,8 +1875,7 @@ func providerEffectApplied(p *Pending) bool {
 		// Backward compatibility for schedules completed before the phase field:
 		// old writers persisted both exact object and effective boundary only
 		// after the provider call returned successfully.
-		return p.Kind == PendingDowngrade && p.ProviderObjectID != "" &&
-			!p.Effective.IsZero()
+		return true
 	default:
 		return false
 	}

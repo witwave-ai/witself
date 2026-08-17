@@ -1990,15 +1990,24 @@ func TestR2StorePreservesPreparedDowngradePhase(t *testing.T) {
 	store := newR2Store(t)
 	now := time.Date(2026, 8, 11, 18, 30, 0, 0, time.UTC)
 	effective := now.AddDate(0, 1, 0)
+	operationID := "bop_r2_prepared_downgrade"
+	providerObjectID := "sub_r2_prepared"
 	record := Record{
 		AccountID: "acct_r2_prepared_downgrade", Provider: "billing",
 		CustomerID: "cus_r2_prepared", Entitled: "standard", Applied: "standard",
 		Pending: &Pending{
 			Kind: PendingDowngrade, Plan: plans.Free,
-			OperationID:      "bop_r2_prepared_downgrade",
-			ProviderObjectID: "sub_r2_prepared",
-			ProviderPhase:    pendingProviderApplied,
-			Effective:        effective, Requested: now,
+			OperationID:       operationID,
+			ProviderObjectID:  providerObjectID,
+			PreparedEffective: effective,
+			ProviderPhase:     pendingProviderPrepared,
+			CancelPrevious:    true,
+			CancelPreviousTarget: &billing.PendingCancellation{
+				Kind:                preparedDowngradeFenceKind,
+				ProviderObjectID:    providerObjectID,
+				OriginalOperationID: operationID,
+			},
+			Requested: now,
 		},
 	}
 	if err := store.Put(context.Background(), record); err != nil {
@@ -2009,10 +2018,105 @@ func TestR2StorePreservesPreparedDowngradePhase(t *testing.T) {
 		got.Pending.Kind != PendingDowngrade ||
 		got.Pending.OperationID != record.Pending.OperationID ||
 		got.Pending.ProviderObjectID != record.Pending.ProviderObjectID ||
-		got.Pending.ProviderPhase != pendingProviderApplied ||
-		!got.Pending.Effective.Equal(effective) ||
+		got.Pending.ProviderPhase != pendingProviderPrepared ||
+		!got.Pending.PreparedEffective.Equal(effective) ||
+		!got.Pending.Effective.IsZero() || !got.Pending.CancelPrevious ||
+		got.Pending.CancelPreviousTarget == nil ||
+		*got.Pending.CancelPreviousTarget != *record.Pending.CancelPreviousTarget ||
 		!got.Pending.Requested.Equal(now) {
 		t.Fatalf("R2 prepared downgrade = %+v ok=%t err=%v", got.Pending, ok, err)
+	}
+	if !isPreparedDowngradeFence(got.Pending) {
+		t.Fatalf("R2 prepared downgrade fence is incoherent: %+v", got.Pending)
+	}
+}
+
+func TestProviderEffectAppliedRequiresCoherentState(t *testing.T) {
+	effective := time.Date(2026, 9, 11, 18, 30, 0, 0, time.UTC)
+	target := billing.PendingCancellation{
+		Kind:             billing.PendingCancellationPeriodEnd,
+		ProviderObjectID: "sub_coherent", OriginalOperationID: "bop_coherent",
+	}
+	tests := []struct {
+		name    string
+		pending *Pending
+		want    bool
+	}{
+		{
+			name: "applied",
+			pending: &Pending{
+				Kind: PendingDowngrade, ProviderObjectID: "sub_coherent",
+				ProviderPhase: pendingProviderApplied, Effective: effective,
+			},
+			want: true,
+		},
+		{
+			name: "legacy applied",
+			pending: &Pending{
+				Kind: PendingDowngrade, ProviderObjectID: "sub_legacy",
+				Effective: effective,
+			},
+			want: true,
+		},
+		{
+			name: "wrong kind",
+			pending: &Pending{
+				Kind: PendingUpgrade, ProviderObjectID: "sub_coherent",
+				ProviderPhase: pendingProviderApplied, Effective: effective,
+			},
+		},
+		{
+			name: "invalid provider object",
+			pending: &Pending{
+				Kind: PendingDowngrade, ProviderObjectID: "sub invalid",
+				ProviderPhase: pendingProviderApplied, Effective: effective,
+			},
+		},
+		{
+			name: "zero effective",
+			pending: &Pending{
+				Kind: PendingDowngrade, ProviderObjectID: "sub_coherent",
+				ProviderPhase: pendingProviderApplied,
+			},
+		},
+		{
+			name: "prepared effective remains",
+			pending: &Pending{
+				Kind: PendingDowngrade, ProviderObjectID: "sub_coherent",
+				ProviderPhase: pendingProviderApplied, Effective: effective,
+				PreparedEffective: effective,
+			},
+		},
+		{
+			name: "cancel flag remains",
+			pending: &Pending{
+				Kind: PendingDowngrade, ProviderObjectID: "sub_coherent",
+				ProviderPhase: pendingProviderApplied, Effective: effective,
+				CancelPrevious: true,
+			},
+		},
+		{
+			name: "cancel target remains",
+			pending: &Pending{
+				Kind: PendingDowngrade, ProviderObjectID: "sub_coherent",
+				ProviderPhase: pendingProviderApplied, Effective: effective,
+				CancelPreviousTarget: &target,
+			},
+		},
+		{
+			name: "prepared phase",
+			pending: &Pending{
+				Kind: PendingDowngrade, ProviderObjectID: "sub_coherent",
+				ProviderPhase: pendingProviderPrepared, Effective: effective,
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := providerEffectApplied(test.pending); got != test.want {
+				t.Fatalf("providerEffectApplied(%+v) = %t; want %t", test.pending, got, test.want)
+			}
+		})
 	}
 }
 
