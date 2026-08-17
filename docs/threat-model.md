@@ -889,7 +889,7 @@ rejects more than 25 MiB and the cell has sender/recipient, recipient, realm,
 and account count/byte GCRA breakers. Finite-policy retention is bounded and
 cooperatively drained. Founder currently has unlimited attachment storage and
 indefinite retention, so its total retained bytes and age are not bounded by
-those commercial controls. The schema-91 candidate adds a transactionally
+those commercial controls. The live schema-91 deployment adds a transactionally
 maintained logical cell ledger that no account plan or unlimited override can
 bypass: root admission defaults to 3 GiB/25,000 inbound-plus-outbound roots,
 while a 4 GiB/100,000-counted-row hard boundary covers roots, deliveries,
@@ -904,9 +904,13 @@ provider events remain bounded by the hard cap, not guaranteed unlimited
 headroom. Deletes and cascades release capacity. Enabled inbound mail refused at
 the boundary receives a sanitized permanent SMTP rejection rather than silent
 loss or an unbounded provider retry; outbound root refusal is non-retryable.
-The current schema-90 production cell does not have this ledger, so expansion
-must wait for schema-91 deployment and verification or an equivalent external
-payload-storage design. Disabled/Personal mail is
+The v0.0.253/schema-91 production cell has this ledger, and its point-in-time
+metric scrape was verified. Database triggers enforce it independently of the
+monitoring plane, but continuous Prometheus scraping, PVC metrics collection,
+Alertmanager routing, and a tested external receiver are not installed.
+Continuous logical/PVC alerts with a tested receiver and global provider
+backpressure block expansion.
+Disabled/Personal mail is
 accepted and dropped without persistence or provider retry, but the current
 edge still buffers and relays up to 25 MiB before the cell resolves entitlement.
 The signed disposition/preflight needed to avoid that cost is a prerequisite
@@ -915,15 +919,17 @@ storage or a shared sending-domain/provider budget; schema 91 addresses the
 cell-storage half only. Cohort expansion still requires global provider
 backpressure.
 
-The hardened public outbound-dispatch candidate charges a hashed source-IP lane
-before authentication, verifies the Ed25519 header envelope before reading the
-body, then reads and hashes at most 2 MiB of JSON. It validates JSON and exact
-account authorization before charging aggregate and signer lanes or reaching a
-Durable Object/provider; anonymous or malformed traffic cannot exhaust those
-shared valid-traffic budgets. The Cloudflare Rate Limiter binding uses namespace
-`2301` at 1,000 requests per 60 seconds, preview URLs are disabled, and Worker
-observability is enabled. Deployment must first prove that account-wide
-namespace `2301` is unused by every other Worker. Cloudflare counters are
+The deployed hardened public outbound-dispatch Worker charges a hashed
+source-IP lane before authentication, verifies the Ed25519 header envelope
+before reading the body, then reads and hashes at most 2 MiB of JSON. It
+validates JSON and exact account authorization before charging aggregate and
+signer lanes or reaching a Durable Object/provider; anonymous or malformed
+traffic cannot exhaust those shared valid-traffic budgets. The Cloudflare Rate
+Limiter binding uses namespace `2301` at 1,000 requests per 60 seconds, version
+preview URLs are disabled (`preview_urls=false`), and Cloudflare Workers
+Observability is enabled. The v0.0.253 deployment's account-wide inventory
+proved namespace `2301` was unused by every other Worker; future binding changes
+must repeat that audit. Cloudflare counters are
 point-of-presence-local and eventually consistent, so the limiter is a coarse
 front-door abuse breaker rather than exact global accounting or a customer
 quota. The independent decoded-text cap remains 256 KiB.

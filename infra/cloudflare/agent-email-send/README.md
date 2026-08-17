@@ -16,13 +16,17 @@ The default configuration is dark:
 - The lifecycle event subscription is provisioned disabled.
 
 That is the committed deployment default, not the current production status.
-As of 2026-08-16, the exact Founder cohort has adapter dispatch and lifecycle
-event delivery enabled, the `witself-agent-email-send-lifecycle` subscription
-enabled, and receipt replay disabled. The main lifecycle Queue is
+As of 2026-08-16, v0.0.253 serves the exact Founder cohort with adapter dispatch
+and lifecycle event delivery enabled, the
+`witself-agent-email-send-lifecycle` subscription enabled, and receipt replay
+disabled. The main lifecycle Queue is
 `witself-agent-email-send-events`; its retained incident path is
 `witself-agent-email-send-events-dlq`. Always inspect live gates, cohort,
 subscription, Queue consumer, and deployment version before an operation. A
-catalog entitlement is never proof of provider readiness.
+catalog entitlement is never proof of provider readiness. The live Worker binds
+Rate Limiter namespace `2301` at 1,000 requests per 60 seconds, has version
+preview URLs disabled (`preview_urls=false`), and has Cloudflare Workers
+Observability enabled. Its production `workers.dev` endpoint remains public.
 
 ## Safety model
 
@@ -131,8 +135,9 @@ and exception monitoring. Status alone does not identify the front-door lane:
 provider throttling also returns `429`, while a provider-ambiguous result or a
 dark gate may return `503`. Use the bounded response `error_code` from a
 controlled, signed probe to distinguish those cases; do not add per-denial
-request logs. Workers observability is enabled and version preview URLs are
-disabled. The production `workers.dev` endpoint is still public. Cloudflare
+request logs. Cloudflare Workers Observability is enabled and version preview
+URLs are disabled (`preview_urls=false`). The production `workers.dev` endpoint
+is still public. Cloudflare
 Access with a cell-held service token is the next stronger ingress boundary
 before a broad cohort; a Service Binding by itself cannot be called directly
 by the Kubernetes cell.
@@ -189,15 +194,13 @@ printf '%s' "$auth_json" | jq -e --arg id "$CLOUDFLARE_ACCOUNT_ID" '
 and membership assertion above therefore fence both the selected deployment
 account and the authenticated operator without relying on a named profile.
 
-Namespace candidate `2301` was absent from committed Worker configuration and
-from the current deployed `witself-agent-email-send` version when this change
-was prepared on 2026-08-16; that deployed version had no Rate Limiter binding.
-The available read-only session could not prove non-use across every Worker in
-the Cloudflare account. Rate Limiter namespace IDs can be shared across
-Workers, so inspect the account's Worker-version bindings before the first
-deployment and stop if `2301` is unexpectedly reused. The three keys are
-nevertheless prefixed with `witself-agent-email-send.frontdoor.v1` to prevent
-accidental cross-Worker counter overlap.
+The v0.0.253 deployment completed an account-wide read-only inventory and proved
+that no other Worker used namespace `2301` before binding it to
+`witself-agent-email-send`. Rate Limiter namespace IDs can be shared across
+Workers, so repeat that inventory before every future deployment or binding
+change and stop if `2301` is unexpectedly reused. The three keys are prefixed
+with `witself-agent-email-send.frontdoor.v1` to prevent accidental cross-Worker
+counter overlap.
 
 Do not export, echo, paste into command arguments, or save either JSON secret
 described below. Wrangler prompts for those values without putting them in
@@ -360,13 +363,19 @@ Keep the source cell entry while any other account still targets it.
    and disabled subscription as described above.
 2. Deploy the Worker with all three gates false. Install the two secrets and
    verify their names, the exact Founder account cohort, the exact front-door
-   binding, disabled preview URLs, enabled observability, and the dark
+   binding, disabled version preview URLs, enabled Cloudflare Workers
+   Observability, and the dark
    deployment. Stop if namespace `2301` is unexpectedly present on another
-   account Worker.
-3. For the current hardened release, deploy the schema-91-compatible cell
+   Worker in the Cloudflare account.
+3. Deploy the schema-91-compatible cell
    server and two worker replicas with cell outbound dispatch still disabled.
    Observe their health, the logical cell-storage gauges, and the independent
-   PostgreSQL/PVC headroom signal before enabling dispatch.
+   PostgreSQL/PVC headroom signal before enabling dispatch. Before expanding a
+   cohort, require continuous Prometheus scraping, PVC metrics collection,
+   Alertmanager routing, and a tested external receiver for those logical and
+   physical signals, plus provider-wide backpressure. The v0.0.253 production
+   rollout verified the gauges only at a point in time; those continuous
+   controls are not installed yet.
 4. Enable adapter dispatch only, leaving the receipt proof, event delivery, and
    the subscription disabled:
 
@@ -485,8 +494,8 @@ Rollback is gate-first and forward-only at the cell database:
    ```
 
    Keep the account and cell gates off until the reverted version is verified.
-   Once a cell reaches schema 90, do not deploy a schema-89-only cell binary or
-   attempt a schema downgrade; recover with gates and a forward fix.
+   Once a cell reaches schema 91, do not deploy a schema 90 or earlier cell binary
+   or attempt a schema downgrade; recover with gates and a forward fix.
 
 ### Queue and dead-letter handling
 

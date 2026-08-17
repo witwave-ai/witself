@@ -264,6 +264,13 @@ Initial metric families should include:
 | `witself_audit_write_failures_total` | Audit sink write failures. |
 | `witself_audit_queue_depth` | Buffered audit events waiting to be written when a queue exists. |
 | `witself_usage_events_total` | Usage metering events by dimension and result. |
+| `witself_limit_decisions_total` | Rate limit, quota, and plan-limit decisions by dimension and action. |
+| `witself_storage_operations_total` | Storage operations by backend, operation, and result. |
+| `witself_storage_operation_duration_seconds` | Storage operation latency histogram. |
+| `witself_vector_storage_bytes` | Approximate client-vector JSONB storage size when known. |
+| `witself_object_store_operations_total` | Object/blob storage operations when configured. |
+| `witself_migration_version` | Applied migration version. |
+| `witself_migration_pending` | Pending migration count when known. |
 
 The production Cloudflare inbound-email Worker also writes one best-effort
 Analytics Engine point per final SMTP-facing disposition to
@@ -297,6 +304,15 @@ without account or message identity. Alert if the collector is absent/down,
 charged bytes or roots reach 80% of admission, or charged bytes/counts reach 80%
 of hard reserve. Confirm an alert through the authenticated read-only ledger
 query in the runbook before changing gates or capacity.
+
+The v0.0.253/schema-91 rollout verified a point-in-time scrape with
+`witself_agent_email_cell_storage_metrics_up 1` and all seven usage/threshold
+gauges. That verification is not continuous monitoring: the production cluster
+has no continuous Prometheus scraping, PVC metrics collection, Alertmanager
+routing, or tested external alert receiver. Database triggers enforce the
+logical boundary independently.
+Continuous logical-ledger and physical-PVC alerts with a tested receiver are
+required before expanding the email cohort.
 
 The ledger is logical: deletion releases its charge transactionally but does
 not make PostgreSQL relation files or a persistent volume shrink. Monitor PVC
@@ -336,16 +352,19 @@ metrics and the
 [sending-adapter README](../infra/cloudflare/agent-email-send/README.md) for the
 Queue/DLQ boundary.
 
-The hardened outbound adapter candidate also enables Cloudflare Worker
-observability and a Rate Limiter binding. Its request order is source-IP lane,
+The deployed hardened outbound adapter enables Cloudflare Workers Observability
+and a Rate Limiter binding. Its request order is source-IP lane,
 Ed25519 header verification, bounded 2-MiB body/digest and account authorization,
 then aggregate and signer lanes. Namespace `2301` is configured for 1,000
-requests per 60 seconds with preview URLs disabled. Treat sustained 429
+requests per 60 seconds with version preview URLs disabled
+(`preview_urls=false`). Treat sustained 429
 `frontdoor_rate_limited` or 503 `frontdoor_unavailable` responses as edge
 capacity/configuration signals. Cloudflare counters are point-of-presence-local
 and eventually consistent, so their absence is not proof of a global exact
 budget. Verify account-wide namespace uniqueness before deployment and keep
-request/signature/source values out of logs.
+request/signature/source values out of logs. The v0.0.253 deployment completed
+the account-wide inventory and proved namespace `2301` was unused by every
+other Worker before binding it; repeat that audit before future changes.
 
 From `infra/cloudflare/agent-email`, `npm run metrics -- summary [minutes]`
 queries both schemas for the same bounded window. The additive v2 CLI envelope
@@ -353,14 +372,6 @@ keeps the final-verdict response in `result` and returns the value-free route
 breakdown in `route_lookup_result`, grouped only by `result`, `evidence`, and
 `route_kind`. This makes `cp_error` on `custom_domain` routes directly visible
 without exposing a customer domain or tenant identifier.
-| `witself_limit_decisions_total` | Rate limit, quota, and plan-limit decisions by dimension and action. |
-| `witself_storage_operations_total` | Storage operations by backend, operation, and result. |
-| `witself_storage_operation_duration_seconds` | Storage operation latency histogram. |
-| `witself_vector_storage_bytes` | Approximate client-vector JSONB storage size when known. |
-| `witself_object_store_operations_total` | Object/blob storage operations when configured. |
-| `witself_migration_version` | Applied migration version. |
-| `witself_migration_pending` | Pending migration count when known. |
-
 Metric names can evolve during implementation, but the coverage categories
 should remain. The sealed-plane families (`witself_secret_operations_total`,
 `witself_secret_reveals_total`, `witself_totp_operations_total`,
@@ -688,7 +699,7 @@ Initial alert candidates:
   normal target. Alert separately when the PostgreSQL PVC or database reaches
   80% physical utilization because logical deletion does not shrink files.
 - Sustained outbound-dispatch `frontdoor_rate_limited` or
-  `frontdoor_unavailable` responses after the hardened adapter is deployed.
+  `frontdoor_unavailable` responses from the live hardened adapter.
   Distinguish hostile-source pressure from a missing/unavailable Rate Limiter
   binding without adding source IP, signer, account, or request labels.
 - Relay envelope drop or quarantine rate above a baseline (cross-realm routing or
@@ -705,6 +716,12 @@ Alerting rules should avoid customer-specific labels and must not include memory
 content, fact values, message bodies, embedding vectors, fact names, secret
 names, field names, TOTP material, KMS key material, raw paths, user input, or
 payment details.
+
+These email alerts are required operating controls, not a description of the
+current production installation. The v0.0.253 rollout verified the logical
+gauges only at a point in time; continuous Prometheus scraping, PVC metrics
+collection, Alertmanager routing, and a tested external receiver remain absent
+and block cohort expansion.
 
 ## CI And Release Checks
 
