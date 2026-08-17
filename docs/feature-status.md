@@ -24,7 +24,7 @@ A feature being implemented does not mean it is generally available. A plan enti
 | [Managed account onboarding and recovery](#account-onboarding-recovery) | Identity | `implemented` | `limited` | **conditional** | 2/7 pass | 4 |
 | [Agent avatars](#agent-avatars) | Identity | `implemented` | `limited` | **conditional** | 5/7 pass | 3 |
 | [Agent collaboration requests](#agent-collaboration) | Communication | `implemented` | `limited` | **conditional** | 4/7 pass | 3 |
-| [Local agent dashboard](#agent-dashboard) | Operator experience | `implemented` | `not applicable` | **conditional** | 5/6 pass | 1 |
+| [Local Agent Console](#agent-dashboard) | Operator experience | `implemented` | `not applicable` | **conditional** | 5/6 pass | 1 |
 | [Agent email receive](#agent-email-receive) | Email | `implemented` | `limited` | **conditional** | 3/7 pass | 5 |
 | [Agent email send](#agent-email-send) | Email | `implemented` | `limited` | **conditional** | 3/7 pass | 4 |
 | [Agent self, context, and foreground hydration](#agent-self-context) | Agent experience | `implemented` | `limited` | **conditional** | 5/7 pass | 2 |
@@ -187,28 +187,28 @@ Open gates:
 
 <a id="agent-dashboard"></a>
 
-### Local agent dashboard
+### Local Agent Console
 
-The loopback-only per-agent dashboard is implemented and shipped through the CLI with passive or observational projections for transcripts, memories, facts, messaging, inbound email, secrets metadata, identity, and local preferences.
+The loopback-only per-agent Agent Console is implemented as `witself dashboard`, with passive or observational projections for identity, transcripts, memories, facts, messaging, received-email metadata and capacity, sent-email provider-neutral lifecycle metadata, secrets metadata, and local preferences.
 
 - Implementation: `implemented`
 - Managed rollout: `not applicable`
 - Readiness: **conditional**
-- Detailed docs: [README.md](../README.md), [cli-command-surface.md](../docs/cli-command-surface.md), [0004-local-agent-dashboard.md](../docs/decisions/0004-local-agent-dashboard.md)
+- Detailed docs: [README.md](../README.md), [agent-console.md](../docs/agent-console.md), [cli-command-surface.md](../docs/cli-command-surface.md), [0004-local-agent-dashboard.md](../docs/decisions/0004-local-agent-dashboard.md)
 
 | Gate | State | Current evidence and conclusion |
 |---|---|---|
-| Behavior | **PASS** | Serve, status, stop, live updates, preferences, capability degradation, and all advertised passive data panels are implemented with broad Go and browser-contract tests. [README.md](../README.md), [dashboard_test.go](../cmd/witself/dashboard_test.go), [dashboard_test.go](../internal/dashboard/dashboard_test.go) |
-| Entitlement / policy | **PASS** | The dashboard uses exactly one agent token, preserves upstream authorization, strips unavailable fields, and adds no privileged cross-agent or admin read path. [0004-local-agent-dashboard.md](../docs/decisions/0004-local-agent-dashboard.md), [dashboard_test.go](../internal/dashboard/dashboard_test.go) |
-| Bounds / abuse | **PASS** | Loopback binding, host checks, per-process URL and cookie credentials, method and body caps, strict projections, CSP, pagination bounds, and sanitized SVG handling constrain the browser boundary. [0004-local-agent-dashboard.md](../docs/decisions/0004-local-agent-dashboard.md), [dashboard_test.go](../internal/dashboard/dashboard_test.go) |
+| Behavior | **PASS** | Serve, status, stop, live updates, preferences, capability degradation, and all seven advertised panels are implemented, including independent read-only Received and Sent email projections. [README.md](../README.md), [dashboard_test.go](../cmd/witself/dashboard_test.go), [dashboard_test.go](../internal/dashboard/dashboard_test.go) |
+| Entitlement / policy | **PASS** | The Console uses exactly one agent token, inherits each domain's authorization and entitlement result, and adds no plan ownership, privileged cross-agent access, admin read path, or domain mutation. [agent-console.md](../docs/agent-console.md), [0004-local-agent-dashboard.md](../docs/decisions/0004-local-agent-dashboard.md), [dashboard_test.go](../internal/dashboard/dashboard_test.go) |
+| Bounds / abuse | **PASS** | Loopback binding, host checks, per-process URL and cookie credentials, method and body caps, CSP, bounded newest pages, sanitized SVG, and strict email projections that remove inbound-message and outbound-send ids, bodies, provider payloads, and action targets constrain the browser boundary. [0004-local-agent-dashboard.md](../docs/decisions/0004-local-agent-dashboard.md), [dashboard_test.go](../internal/dashboard/dashboard_test.go) |
 | Observability | **N/A** | This is an operator-started local foreground process, not an always-on managed service; status, startup errors, and foreground logs are its explicit operator surface. |
 | Recovery | **PASS** | Per-process registry claims, stale-process detection, conservative stop behavior, transactional preference persistence, and process-local credentials make crash and restart recovery bounded. [0004-local-agent-dashboard.md](../docs/decisions/0004-local-agent-dashboard.md), [registry_test.go](../internal/dashboard/registry_test.go), [dashboard_preferences_integration_test.go](../internal/store/dashboard_preferences_integration_test.go) |
-| Rollout / canaries | **CONDITIONAL** | The command is generally shipped, but no current release-specific macOS, Linux, and Windows acceptance artifact is retained for the complete panel set. [release.yml](../.github/workflows/release.yml), [0004-local-agent-dashboard.md](../docs/decisions/0004-local-agent-dashboard.md) |
-| Docs / support | **PASS** | The command, threat boundary, passive-read contract, local lifecycle, supported panels, and deliberate operator-dashboard distinction are documented. [README.md](../README.md), [cli-command-surface.md](../docs/cli-command-surface.md), [0004-local-agent-dashboard.md](../docs/decisions/0004-local-agent-dashboard.md) |
+| Rollout / canaries | **CONDITIONAL** | The command is generally shipped, but no current release-specific macOS, Linux, and Windows acceptance artifact is retained for all seven panels, both email directions, and their disabled or unavailable states. [release.yml](../.github/workflows/release.yml), [agent-console.md](../docs/agent-console.md), [0004-local-agent-dashboard.md](../docs/decisions/0004-local-agent-dashboard.md) |
+| Docs / support | **PASS** | The command, presentation matrix, domain-ownership boundary, local lifecycle, received/sent email projections, and distinction from the fleet-admin TUI and any future hosted console are documented. [README.md](../README.md), [agent-console.md](../docs/agent-console.md), [cli-command-surface.md](../docs/cli-command-surface.md), [0004-local-agent-dashboard.md](../docs/decisions/0004-local-agent-dashboard.md) |
 
 Open gates:
 
-- `dashboard-release-acceptance` (rollout / canaries): Retain current cross-platform release acceptance for serve, status, stop, browser authentication, every panel, live updates, and graceful unavailable states. ([tracking/evidence](../docs/decisions/0004-local-agent-dashboard.md))
+- `dashboard-release-acceptance` (rollout / canaries): Retain current cross-platform release acceptance for serve, status, stop, browser authentication, all seven panels, independent received/sent email metadata, live updates, strict redaction, and graceful disabled or unavailable states. ([tracking/evidence](../docs/agent-console.md))
 
 <a id="agent-email-receive"></a>
 

@@ -439,9 +439,12 @@ func TestStaticEmailSurfaceIsMetadataOnlyAndCheckpointLinked(t *testing.T) {
 	for _, want := range []string{
 		`self.email_checkpoint`, `href: "#/email"`, `fetchJSON("/api/email/address")`,
 		`fetchJSON("/api/email/status")`, `fetchJSON("/api/email?"`,
+		`fetchJSON("/api/email/sent?limit=100")`, `params.push("email_sent=true")`,
+		`source.addEventListener("email_sent"`, `message.request_kind`,
 		`params.push("email=true")`, `params.push("email_unread=true")`,
 		`params.push("email_unacked=true")`, "raw MIME", "processing claims never enter this page",
 		"account-wide attachment capacity", "attachment payload omitted because account-wide capacity is full",
+		"newest 100 sent messages at most", "Bodies, message identifiers, and delivery actions never enter this page",
 		`updateEmailAddressFromCheckpoint(self.email_checkpoint)`,
 		`emailStateChanged && current.section === "email"`,
 		`checkpoint.enabled === false`, `inbound email is not enabled on this account`,
@@ -456,6 +459,11 @@ func TestStaticEmailSurfaceIsMetadataOnlyAndCheckpointLinked(t *testing.T) {
 	// active agents through the CLI/MCP surfaces, never this local viewer.
 	if strings.Contains(string(app), `"/api/email:`) || strings.Contains(string(app), `"/api/email/" +`) {
 		t.Fatal("email UI contains a per-message action URL")
+	}
+	for _, forbidden := range []string{`":send"`, `":reply"`, `":read"`, `":ack"`, `":claim"`, `":complete"`, `":retry"`, `":cancel"`} {
+		if strings.Contains(string(app), forbidden) {
+			t.Fatalf("email UI contains lifecycle action %s", forbidden)
+		}
 	}
 }
 
@@ -480,6 +488,18 @@ func TestDashboardAgentEmailStorageRendering(t *testing.T) {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("dashboard email capacity JavaScript test: %v\n%s", err, output)
+	}
+}
+
+func TestDashboardAgentEmailSentRendering(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not installed")
+	}
+	cmd := exec.Command(node, "--test", "testdata/email_sent_test.cjs")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dashboard sent email JavaScript test: %v\n%s", err, output)
 	}
 }
 
@@ -1540,7 +1560,7 @@ func TestEventsStreamEmitsSettledEmailUnavailableState(t *testing.T) {
 		switch r.URL.Path {
 		case "/v1/self":
 			writeTestJSON(t, w, testSelfDigest())
-		case "/v1/email":
+		case "/v1/email", "/v1/email:status":
 			http.NotFound(w, r)
 		default:
 			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
@@ -1568,7 +1588,7 @@ func TestEventsStreamEmitsSettledEmailUnavailableState(t *testing.T) {
 			sawEmailDegraded = true
 		}
 		if strings.HasPrefix(line, "data: ") && strings.Contains(line, `"available":false`) &&
-			strings.Contains(line, `"reason":"unavailable"`) {
+			strings.Contains(line, `"reason":"pre_feature"`) {
 			sawUnavailable = true
 		}
 	}
@@ -1587,6 +1607,10 @@ func TestEventsStreamRedactsAgentEmailUpstreamError(t *testing.T) {
 			writeTestJSON(t, w, testSelfDigest())
 		case "/v1/email":
 			writeJSONError(w, http.StatusInternalServerError, leaked)
+		case "/v1/email:status":
+			writeTestJSON(t, w, client.AgentEmailStorageStatus{
+				SchemaVersion: "witself.v0", AttachmentCapacity: client.MemoryLimitStatus{Unlimited: true},
+			})
 		default:
 			http.NotFound(w, r)
 		}
@@ -1718,6 +1742,81 @@ func TestEventsStreamEmitsAgentEmailSentIndependently(t *testing.T) {
 	cancel()
 }
 
+func TestEventsStreamAgentEmailFetchesAreConcurrentAndBudgeted(t *testing.T) {
+	started := make(chan string, 4)
+	backend := func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/self":
+			writeTestJSON(t, w, testSelfDigest())
+		case "/v1/email", "/v1/email:status":
+			select {
+			case started <- r.URL.Path:
+			default:
+			}
+			<-r.Context().Done()
+		case "/v1/email/sent":
+			writeTestJSON(t, w, client.AgentEmailOutboundPage{Messages: []client.AgentEmailOutboundMessage{{
+				Subject: "sent is not blocked by receive", State: "queued",
+			}}})
+		default:
+			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}
+	srv, cfg := newDashboard(t, backend, func(cfg *Config) {
+		cfg.PollInterval = 150 * time.Millisecond
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	req := authedRequest(t, srv, cfg, "/api/events?email=true&email_sent=true").WithContext(ctx)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("open email events: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	startedPaths := map[string]bool{}
+	for len(startedPaths) != 2 {
+		select {
+		case path := <-started:
+			startedPaths[path] = true
+		case <-time.After(time.Second):
+			t.Fatalf("receive list and status did not start concurrently: %v", startedPaths)
+		}
+	}
+
+	sawSent, sawReceiveBudget := false, false
+	lastEvent := ""
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() && !sawReceiveBudget {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "event: ") {
+			lastEvent = strings.TrimPrefix(line, "event: ")
+			continue
+		}
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		if lastEvent == "email_sent" && strings.Contains(line, "sent is not blocked by receive") {
+			sawSent = true
+		}
+		if lastEvent == "upstream" && strings.Contains(line, `"source":"email"`) {
+			if !sawSent {
+				t.Fatalf("blocked receive withheld the ready sent frame: %s", line)
+			}
+			if !strings.Contains(line, agentEmailUpstreamMessage) || strings.Contains(line, "deadline exceeded") {
+				t.Fatalf("receive budget error was not fixed and redacted: %s", line)
+			}
+			sawReceiveBudget = true
+		}
+	}
+	if !sawSent || !sawReceiveBudget {
+		t.Fatalf("bounded independent email tick: sent=%v receive_budget=%v (%v)",
+			sawSent, sawReceiveBudget, scanner.Err())
+	}
+	cancel()
+}
+
 func TestEventsStreamAgentEmailDirectionsFailIndependently(t *testing.T) {
 	const leaked = "private email subject and actionable-id"
 	tests := []struct {
@@ -1825,7 +1924,7 @@ func TestEventsStreamEmitsSettledAgentEmailSentAvailability(t *testing.T) {
 				})
 			},
 		},
-		{name: "pre-feature cell", reason: "unavailable", reply: func(w http.ResponseWriter) { w.WriteHeader(http.StatusNotFound) }},
+		{name: "pre-feature cell", reason: "pre_feature", reply: func(w http.ResponseWriter) { w.WriteHeader(http.StatusNotFound) }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

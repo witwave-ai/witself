@@ -99,6 +99,15 @@ const (
 	// live stream stay on one hard-bounded newest page.
 	sseEmailSentPageLimit = 100
 
+	// Email's live projection makes three independent upstream reads (receive
+	// list, receive capacity, and sent lifecycle). One tick shares a short
+	// context budget across all three so a wedged cell route cannot hold the
+	// SSE writer for the client's full per-request timeout. Very fast test or
+	// operator poll cadences still get a practical floor; very slow cadences do
+	// not turn into an unbounded live-read timeout.
+	minimumSSEEmailFetchBudget = 100 * time.Millisecond
+	maximumSSEEmailFetchBudget = 5 * time.Second
+
 	// agentEmailUpstreamMessage is the only failure detail allowed across the
 	// email browser boundary. Unlike ordinary dashboard reads, email's strict
 	// projection must also distrust a cell-provided JSON error string because
@@ -934,7 +943,7 @@ func agentEmailUnavailableKind(err error) string {
 		return "feature_disabled"
 	}
 	if errors.Is(err, client.ErrNotFound) {
-		return "unavailable"
+		return "pre_feature"
 	}
 	// The agent-email principal gate currently returns an untyped 403. Accept
 	// the production wording and the predecessor during mixed-version rollout
@@ -963,7 +972,7 @@ func agentEmailSentUnavailableKind(err error) string {
 		return "feature_disabled"
 	}
 	if errors.Is(err, client.ErrNotFound) {
-		return "unavailable"
+		return "pre_feature"
 	}
 	return ""
 }
@@ -1714,11 +1723,8 @@ func emitEvents(ctx context.Context, cfg Config, factReads *factReadCapability, 
 	if includeSecrets {
 		upstream.observe(w, flusher, "secrets", emitSecretsEvent(ctx, cfg, secrets, w, flusher))
 	}
-	if includeEmail {
-		upstream.observe(w, flusher, "email", emitAgentEmailEvent(ctx, cfg, emailOpts, w, flusher))
-	}
-	if includeEmailSent {
-		upstream.observe(w, flusher, "email_sent", emitAgentEmailSentEvent(ctx, cfg, w, flusher))
+	if includeEmail || includeEmailSent {
+		emitAgentEmailEvents(ctx, cfg, upstream, w, flusher, includeEmail, includeEmailSent, emailOpts)
 	}
 	if transcriptID == "" {
 		return lastSeen
@@ -1779,77 +1785,187 @@ func emitMessagesEvent(ctx context.Context, cfg Config, w io.Writer, flusher htt
 	return nil
 }
 
-// emitAgentEmailEvent polls the passive GET /v1/email list and the value-free
-// GET /v1/email:status capacity view. It never long-polls :listen, reads
-// content, acknowledges delivery, or acquires a processing lease. Bundling
-// capacity into this existing email tick keeps an open pane current after
-// message ingestion or an admin policy change without adding a browser timer.
-// The same allow-list projections as the JSON routes are applied before the
-// frame crosses into the browser. Feature absence or revoked pilot enrollment
-// is a settled UI state, not a degraded transport.
-func emitAgentEmailEvent(ctx context.Context, cfg Config, opts client.AgentEmailListOptions, w io.Writer, flusher http.Flusher) error {
+type agentEmailSSEFetchResult struct {
+	source  string
+	payload any
+	err     error
+}
+
+type agentEmailReceiveFetchPart struct {
+	page   *client.AgentEmailPage
+	status *client.AgentEmailStorageStatus
+	err    error
+}
+
+func agentEmailSSEFetchBudget(pollInterval time.Duration) time.Duration {
+	if pollInterval <= 0 {
+		pollInterval = defaultPollInterval
+	}
+	if pollInterval < minimumSSEEmailFetchBudget {
+		return minimumSSEEmailFetchBudget
+	}
+	if pollInterval > maximumSSEEmailFetchBudget {
+		return maximumSSEEmailFetchBudget
+	}
+	return pollInterval
+}
+
+// emitAgentEmailEvents gives all requested email reads one bounded concurrent
+// fetch phase, then serializes every SSE frame and upstream-tracker write in
+// this goroutine. A stuck receive list or capacity read therefore cannot hold
+// back a ready sent frame (or vice versa), while concurrent fetchers never
+// write to net/http's ResponseWriter.
+func emitAgentEmailEvents(
+	ctx context.Context,
+	cfg Config,
+	upstream *upstreamTracker,
+	w io.Writer,
+	flusher http.Flusher,
+	includeReceive, includeSent bool,
+	receiveOpts client.AgentEmailListOptions,
+) {
+	if ctx.Err() != nil || (!includeReceive && !includeSent) {
+		return
+	}
+	count := 0
+	if includeReceive {
+		count++
+	}
+	if includeSent {
+		count++
+	}
+	fetchCtx, cancel := context.WithTimeout(ctx, agentEmailSSEFetchBudget(cfg.PollInterval))
+	defer cancel()
+	results := make(chan agentEmailSSEFetchResult, count)
+	pending := make(map[string]bool, count)
+	if includeReceive {
+		pending["email"] = true
+		go func() {
+			payload, err := fetchAgentEmailEvent(fetchCtx, cfg, receiveOpts)
+			results <- agentEmailSSEFetchResult{source: "email", payload: payload, err: err}
+		}()
+	}
+	if includeSent {
+		pending["email_sent"] = true
+		go func() {
+			payload, err := fetchAgentEmailSentEvent(fetchCtx, cfg)
+			results <- agentEmailSSEFetchResult{source: "email_sent", payload: payload, err: err}
+		}()
+	}
+
+	for len(pending) != 0 {
+		select {
+		case result := <-results:
+			if ctx.Err() != nil {
+				return
+			}
+			if !pending[result.source] {
+				continue
+			}
+			delete(pending, result.source)
+			if result.err == nil {
+				writeSSE(w, flusher, result.source, "", result.payload)
+			}
+			upstream.observe(w, flusher, result.source, result.err)
+		case <-fetchCtx.Done():
+			if ctx.Err() != nil {
+				return
+			}
+			for source := range pending {
+				upstream.observe(w, flusher, source, fetchCtx.Err())
+			}
+			return
+		}
+	}
+}
+
+// fetchAgentEmailEvent polls the passive GET /v1/email list and value-free
+// GET /v1/email:status capacity view concurrently. It never long-polls
+// :listen, reads content, acknowledges delivery, or acquires a processing
+// lease. It only builds an allow-listed payload; the caller owns the SSE
+// writer. Feature absence or revoked enrollment is a settled frame rather
+// than a degraded transport.
+func fetchAgentEmailEvent(ctx context.Context, cfg Config, opts client.AgentEmailListOptions) (any, error) {
 	opts.Cursor = ""
 	opts.Limit = sseEmailPageLimit
-	page, err := client.ListAgentEmails(ctx, cfg.Endpoint, cfg.BearerToken, opts)
-	if err != nil {
-		if kind := agentEmailUnavailableKind(err); kind != "" {
-			writeSSE(w, flusher, "email", "", map[string]any{
-				"available": false,
-				"enrolled":  false,
-				"reason":    kind,
-				"messages":  []sanitizedAgentEmailMessage{},
-			})
-			return nil
+	receiveCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	parts := make(chan agentEmailReceiveFetchPart, 2)
+	go func() {
+		page, err := client.ListAgentEmails(receiveCtx, cfg.Endpoint, cfg.BearerToken, opts)
+		parts <- agentEmailReceiveFetchPart{page: &page, err: err}
+	}()
+	go func() {
+		status, err := client.GetAgentEmailStorageStatus(receiveCtx, cfg.Endpoint, cfg.BearerToken)
+		parts <- agentEmailReceiveFetchPart{status: status, err: err}
+	}()
+
+	var page *client.AgentEmailPage
+	var status *client.AgentEmailStorageStatus
+	var firstErr error
+	for range 2 {
+		select {
+		case part := <-parts:
+			if part.err != nil {
+				if kind := agentEmailUnavailableKind(part.err); kind != "" {
+					return map[string]any{
+						"available": false,
+						"enrolled":  false,
+						"reason":    kind,
+						"messages":  []sanitizedAgentEmailMessage{},
+					}, nil
+				}
+				if firstErr == nil {
+					firstErr = part.err
+				}
+				continue
+			}
+			if part.page != nil {
+				page = part.page
+			}
+			if part.status != nil {
+				status = part.status
+			}
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
-		return err
 	}
-	status, err := client.GetAgentEmailStorageStatus(ctx, cfg.Endpoint, cfg.BearerToken)
-	if err != nil {
-		if kind := agentEmailUnavailableKind(err); kind != "" {
-			writeSSE(w, flusher, "email", "", map[string]any{
-				"available": false,
-				"enrolled":  false,
-				"reason":    kind,
-				"messages":  []sanitizedAgentEmailMessage{},
-			})
-			return nil
-		}
-		return err
+	if firstErr != nil {
+		return nil, firstErr
 	}
-	writeSSE(w, flusher, "email", "", map[string]any{
+	if page == nil || status == nil {
+		return nil, errors.New("receive-only email metadata response is incomplete")
+	}
+	return map[string]any{
 		"available": true,
 		"enrolled":  true,
 		"messages":  sanitizeAgentEmails(page.Messages),
 		"status":    sanitizeAgentEmailStorageStatus(status),
-	})
-	return nil
+	}, nil
 }
 
-// emitAgentEmailSentEvent polls only the bounded passive GET /v1/email/sent
-// owner outbox and emits its independent email_sent channel. Account feature
-// disablement and a pre-feature cell are settled availability frames; an
-// actual upstream failure is returned to the independently tracked
-// "email_sent" source and cannot suppress or degrade inbound email.
-func emitAgentEmailSentEvent(ctx context.Context, cfg Config, w io.Writer, flusher http.Flusher) error {
+// fetchAgentEmailSentEvent polls only the bounded passive GET /v1/email/sent
+// owner outbox. It builds an independent allow-listed payload and never owns
+// the shared writer. Account disablement and a pre-feature cell are settled
+// availability frames; actual upstream failures remain independently tracked.
+func fetchAgentEmailSentEvent(ctx context.Context, cfg Config) (any, error) {
 	page, err := client.ListSentAgentEmails(ctx, cfg.Endpoint, cfg.BearerToken, client.AgentEmailOutboundListOptions{
 		Limit: sseEmailSentPageLimit,
 	})
 	if err != nil {
 		if kind := agentEmailSentUnavailableKind(err); kind != "" {
-			writeSSE(w, flusher, "email_sent", "", map[string]any{
+			return map[string]any{
 				"available": false,
 				"reason":    kind,
 				"messages":  []sanitizedAgentEmailSentMessage{},
-			})
-			return nil
+			}, nil
 		}
-		return err
+		return nil, err
 	}
-	writeSSE(w, flusher, "email_sent", "", map[string]any{
+	return map[string]any{
 		"available": true,
 		"messages":  sanitizeAgentEmailSentMessages(page.Messages),
-	})
-	return nil
+	}, nil
 }
 
 // emitMemoriesEvent polls the first page of the redacted-by-default broad

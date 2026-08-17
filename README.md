@@ -526,16 +526,25 @@ implemented same-realm direct, fanout, and client-ranked open-request boundary.
 Group audiences, cross-realm routing, and responsibility-aware eligibility
 remain separate follow-on work.
 
-## Local Agent Dashboard
+## Local Agent Console
 
-One command serves a loopback-only, read-only web dashboard for a single
-agent: six live surfaces (overview, transcripts, facts, memories,
-conversations, and sealed-secret metadata) over the agent's own token, using
-observational and passive reads so viewing never perturbs retrieval usage or
-read-state. The listener binds `127.0.0.1` only and requires the per-process
-tokened URL printed at startup; `status` and `stop` manage running dashboards
-from the same local registry. See
-[ADR 0004](docs/decisions/0004-local-agent-dashboard.md).
+One command serves a loopback-only, content-read-only Agent Console for a
+single agent. Its seven live panels are overview, transcripts, facts,
+memories, conversations, email, and sealed-secret metadata. The email panel
+shows received-message metadata and account capacity plus sent-message
+provider-neutral lifecycle metadata; it exposes no bodies, message/send ids,
+provider ids, attachment details, or processing and delivery actions.
+User-initiated email, message, memory, fact, and secret mutations remain in the
+existing agent-driven CLI and MCP workflows, and the Console reflects the
+resulting state through observational or passive reads. Its only write is the
+narrowly scoped theme
+preference described in [ADR 0004](docs/decisions/0004-local-agent-dashboard.md).
+
+The listener binds `127.0.0.1` only and requires the per-process tokened URL
+printed at startup; `status` and `stop` manage running Consoles from the same
+local registry. See the [Agent Console presentation
+matrix](docs/agent-console.md) and [ADR
+0004](docs/decisions/0004-local-agent-dashboard.md).
 
 ```sh
 witself dashboard serve --agent scout --open

@@ -4166,7 +4166,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself install RUNTIME[,RUNTIME...]|all  Install runtime memory and MCP integration")
 	usageLine(w, "  witself uninstall RUNTIME[,RUNTIME...]|all  Remove runtime integration (preserves data)")
 	usageLine(w, "  witself mcp serve             Serve Witself tools over local stdio MCP")
-	usageLine(w, "  witself dashboard serve|status|stop  Serve a local read-only live agent dashboard, list registered ones, or stop one")
+	usageLine(w, "  witself dashboard serve|status|stop  Serve a local content-read-only Agent Console, list registered ones, or stop one")
 	usageLine(w, "  witself help                 Show this help")
 	usageLine(w)
 	usageLine(w, "Cloud commands take --account NAME (a local account name; when omitted,")

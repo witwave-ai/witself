@@ -5184,7 +5184,9 @@ reset`. It is not a permanent purge command.
 
 ## `witself dashboard`
 
-Serve local, read-only web views over the agent's own `/v1` read surface.
+Serve the local, content-read-only Agent Console over the agent's own `/v1`
+read surface. The command remains `witself dashboard`; the presentation
+contract is summarized in [agent-console.md](agent-console.md).
 
 ### `witself dashboard serve`
 
@@ -5212,7 +5214,27 @@ custody, the backend stores ciphertext only), the proxy rebuilds every
 secrets payload through an allow-list projection so ciphertext, wrapped
 DEKs, and field values of any kind never reach the browser, and a cell
 released before the sealed plane surfaces as a clean "not available on
-this cell" state. The listener binds
+this cell" state.
+
+The email panel has independent Received and Sent projections. Received uses
+only the managed-address, value-free capacity/status, and passive newest-mail
+reads. It shows receive policy, storage capacity, sender/subject and lifecycle
+metadata, attachment counts, retention warnings, and provider-supplied
+authentication/spam signals. Sent uses only the bounded owner outbox list and
+shows From, Reply-To, recipient, subject, request kind, durable/provider-neutral
+state, error code, attempt count, and lifecycle timestamps. Both projections
+are rebuilt through strict allow lists. They expose no message or send ids,
+account/realm/owner ids, bodies, raw MIME or headers, attachment details,
+provider ids or payloads, claim fences, browser cursors, or action targets.
+The Console never reads or processes a received message and never sends,
+replies, retries, or cancels outbound email. Those user-initiated mutations
+remain in the existing agent-driven CLI or MCP workflows; the Console only
+reflects their resulting state, including automatic worker/provider lifecycle
+transitions. Disabled, not-enrolled, pre-feature, and temporarily
+unavailable directions settle independently instead of breaking the whole
+email panel.
+
+The listener binds
 `127.0.0.1` only, validates the
 `Host` header, and requires the per-process `?token=` URL printed at startup
 (exchanged once for a `SameSite=Strict` session cookie holding a distinct
@@ -5228,6 +5250,8 @@ exactly one registered winner). Live updates are
 cursor polls of the cell fanned out to the browser over server-sent events;
 the dashboard never calls `message:read` or `message:listen`, and message
 body fields are stripped by the proxy before anything reaches the browser.
+Received and Sent email use independent bounded live frames, so an unavailable
+direction does not suppress the other.
 The dashboard writes no agent content; its sole write is the agent's own
 size-capped, strictly validated UI preferences row (the theme choice) via
 `PUT /v1/self/dashboard-preferences`, which rides account export/import so
