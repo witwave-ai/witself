@@ -92,10 +92,15 @@ test("container env projection is explicit, runtime-only, and opt-in", () => {
     CP_R2_SECRET_KEY: "secret",
     CP_R2_PREFIX: "registry/",
     CP_BILLING_PROVIDER: "stripe",
+    CP_STRIPE_MODE: "test",
     CP_STRIPE_SECRET_KEY: "stripe-secret-placeholder",
     CP_STRIPE_WEBHOOK_SECRET: "webhook-secret-placeholder",
     CP_STRIPE_SUCCESS_URL: "https://app.example/billing/success",
     CP_STRIPE_CANCEL_URL: "https://app.example/billing/cancel",
+    CP_STRIPE_PORTAL_RETURN_URL: "https://app.example/billing",
+    CP_STRIPE_PORTAL_CONFIGURATION_ID: "bpc_reviewed",
+    CP_STRIPE_TEST_CLOCK_ID: "clock_sandbox",
+    CP_BILLING_ACCOUNT_ALLOWLIST: "acct_sandbox",
     ARCHIVES: archiveBinding,
     FLEET_TOKEN: "must-not-cross",
     WITSELF_CP_STRIPE_SECRET_KEY: "must-not-cross-directly",
@@ -109,10 +114,15 @@ test("container env projection is explicit, runtime-only, and opt-in", () => {
     WITSELF_CP_R2_SECRET_KEY: "secret",
     WITSELF_CP_R2_PREFIX: "registry/",
     WITSELF_CP_BILLING_PROVIDER: "stripe",
+    WITSELF_CP_STRIPE_MODE: "test",
     WITSELF_CP_STRIPE_SECRET_KEY: "stripe-secret-placeholder",
     WITSELF_CP_STRIPE_WEBHOOK_SECRET: "webhook-secret-placeholder",
     WITSELF_CP_STRIPE_SUCCESS_URL: "https://app.example/billing/success",
     WITSELF_CP_STRIPE_CANCEL_URL: "https://app.example/billing/cancel",
+    WITSELF_CP_STRIPE_PORTAL_RETURN_URL: "https://app.example/billing",
+    WITSELF_CP_STRIPE_PORTAL_CONFIGURATION_ID: "bpc_reviewed",
+    WITSELF_CP_STRIPE_TEST_CLOCK_ID: "clock_sandbox",
+    WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST: "acct_sandbox",
   });
 
   assert.deepEqual(containerEnvVars({}), {
@@ -120,10 +130,15 @@ test("container env projection is explicit, runtime-only, and opt-in", () => {
   });
   assert.deepEqual(containerEnvVars({
     CP_BILLING_PROVIDER: "",
+    CP_STRIPE_MODE: "",
     CP_STRIPE_SECRET_KEY: "",
     CP_STRIPE_WEBHOOK_SECRET: "",
     CP_STRIPE_SUCCESS_URL: "",
     CP_STRIPE_CANCEL_URL: "",
+    CP_STRIPE_PORTAL_RETURN_URL: "",
+    CP_STRIPE_PORTAL_CONFIGURATION_ID: "",
+    CP_STRIPE_TEST_CLOCK_ID: "",
+    CP_BILLING_ACCOUNT_ALLOWLIST: "",
   }), {
     WITSELF_CP_BRIDGE_URL: "https://self.witwave.ai",
   });

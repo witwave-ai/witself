@@ -278,6 +278,7 @@ var (
 	billingAllowlistAccountIDPattern   = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 	stripePortalConfigurationIDPattern = regexp.MustCompile(`^bpc_[A-Za-z0-9]{1,123}$`)
 	stripeTestClockIDPattern           = regexp.MustCompile(`^clock_[A-Za-z0-9]{1,123}$`)
+	stripeWebhookSecretPattern         = regexp.MustCompile(`^whsec_[A-Za-z0-9]{1,250}$`)
 )
 
 // stripeControlPlaneConfig validates every safety-sensitive Stripe setting
@@ -297,8 +298,9 @@ func stripeControlPlaneConfig(
 	// The webhook secret is mandatory: without it the binary would boot,
 	// mint checkout links, take payments, and refuse every webhook delivery.
 	webhookSecret := os.Getenv("WITSELF_CP_STRIPE_WEBHOOK_SECRET")
-	if webhookSecret == "" {
-		return stripeprovider.Config{}, nil, errors.New("WITSELF_CP_STRIPE_WEBHOOK_SECRET is required with the stripe provider (whsec_...): without it webhooks are refused and paid activations are lost")
+	if webhookSecret == "" || webhookSecret != strings.TrimSpace(webhookSecret) ||
+		!stripeWebhookSecretPattern.MatchString(webhookSecret) {
+		return stripeprovider.Config{}, nil, errors.New("WITSELF_CP_STRIPE_WEBHOOK_SECRET must be a non-empty canonical whsec_ Stripe signing secret: without a valid secret webhooks are refused and paid activations are lost")
 	}
 
 	successURL, err := canonicalHTTPSURLFromEnv("WITSELF_CP_STRIPE_SUCCESS_URL")

@@ -658,6 +658,26 @@ func TestSupportedPlanContractKeyVocabularies(t *testing.T) {
 	}
 }
 
+func TestSnapshotHashCloudflareBridgeVector(t *testing.T) {
+	got, err := SnapshotHash(
+		"personal<\u2028&\u2029>",
+		map[string]int64{
+			AgentEmailCustomDomainsPerAccountLimit: 1,
+			AgentEmailRealmAliasesPerRealmLimit:    1,
+			AgentLimit:                             10,
+		},
+		map[string]int64{AgentEmailRetentionDaysPolicy: 30},
+		[]string{AgentEmailRealmAliasFeature},
+	)
+	if err != nil {
+		t.Fatalf("SnapshotHash: %v", err)
+	}
+	const want = "a24f5d7725ddfe4836252dbbde8f9761983c78805bee265b74c20a9be5785a62"
+	if got != want {
+		t.Fatalf("SnapshotHash bridge vector = %s; want %s", got, want)
+	}
+}
+
 func assertUniqueStrings(t *testing.T, kind string, values []string) {
 	t.Helper()
 	seen := make(map[string]bool, len(values))

@@ -425,8 +425,8 @@ func validateAccountPlanFitReport(
 	}
 	seen := make(map[string]bool, len(report.Violations))
 	for _, violation := range report.Violations {
-		maximum, finite := target.Limits[violation.Dimension]
-		if !finite || maximum != violation.Max || seen[violation.Dimension] {
+		maximum, finite := planFitViolationMaximum(target, violation.Dimension)
+		if !finite || seen[violation.Dimension] {
 			return fmt.Errorf("cell returned an invalid plan-fit violation")
 		}
 		seen[violation.Dimension] = true
@@ -436,12 +436,14 @@ func validateAccountPlanFitReport(
 		}
 		switch violation.Code {
 		case "limit_exceeded":
-			if violation.Scope != expectedScope || violation.Used <= violation.Max ||
+			if !planFitLimitMaximumMatches(target, violation, maximum) ||
+				violation.Scope != expectedScope || violation.Used <= violation.Max ||
 				(expectedScope == "account" && violation.SubjectCount != 1) {
 				return fmt.Errorf("cell returned an invalid plan-fit violation")
 			}
 		case "authority_incomplete":
-			if violation.Scope != "authority" || violation.Used != 0 ||
+			if violation.Max != maximum || violation.Scope != "authority" ||
+				violation.Used != 0 ||
 				(violation.Dimension != plans.AgentEmailRealmAliasesPerRealmLimit &&
 					violation.Dimension != plans.AgentEmailCustomDomainsPerAccountLimit) {
 				return fmt.Errorf("cell returned an invalid plan-fit authority violation")
@@ -451,6 +453,45 @@ func validateAccountPlanFitReport(
 		}
 	}
 	return nil
+}
+
+func planFitLimitMaximumMatches(
+	target AccountPlanFitTarget,
+	violation AccountPlanFitViolation,
+	effectiveMaximum int64,
+) bool {
+	if violation.Max == effectiveMaximum {
+		return true
+	}
+	if violation.Dimension != plans.AgentEmailRealmAliasesPerRealmLimit &&
+		violation.Dimension != plans.AgentEmailCustomDomainsPerAccountLimit {
+		return false
+	}
+	// The global authority bridge applies feature entitlement before its
+	// allocation count and therefore reports zero when the feature is absent.
+	// A direct cell remains authoritative only for its local projection and
+	// evaluates the raw resolved limit. Accept either exact representation for
+	// these two dimensions while keeping every other maximum exact.
+	rawMaximum, finite := target.Limits[violation.Dimension]
+	return finite && violation.Max == rawMaximum
+}
+
+func planFitViolationMaximum(
+	target AccountPlanFitTarget,
+	dimension string,
+) (int64, bool) {
+	feature := ""
+	switch dimension {
+	case plans.AgentEmailRealmAliasesPerRealmLimit:
+		feature = plans.AgentEmailRealmAliasFeature
+	case plans.AgentEmailCustomDomainsPerAccountLimit:
+		feature = plans.AgentEmailCustomDomainFeature
+	}
+	if feature != "" && !slices.Contains(target.Features, feature) {
+		return 0, true
+	}
+	maximum, finite := target.Limits[dimension]
+	return maximum, finite
 }
 
 func planFitDimensionScope(dimension string) (string, bool) {

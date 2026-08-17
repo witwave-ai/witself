@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import { handleInternalBridgeRequest } from "../src/bridge.mjs";
@@ -16,9 +17,20 @@ class KV {
   }
 }
 
+function snapshotHash(snapshot) {
+  const ordered = (values) => Object.fromEntries(
+    Object.keys(values).sort().map((key) => [key, values[key]]),
+  );
+  return createHash("sha256").update(JSON.stringify({
+    plan: snapshot.plan,
+    limits: ordered(snapshot.limits),
+    policies: ordered(snapshot.policies),
+    features: [...snapshot.features].sort(),
+  })).digest("hex");
+}
+
 const target = Object.freeze({
   plan: "personal",
-  snapshot_hash: "a".repeat(64),
   limits: {
     agents: 10,
     agent_email_realm_aliases_per_realm: 1,
@@ -26,6 +38,9 @@ const target = Object.freeze({
   },
   policies: {},
   features: [],
+  get snapshot_hash() {
+    return snapshotHash(this);
+  },
 });
 
 function environment() {
@@ -72,12 +87,12 @@ test("plan-fit forwards the exact snapshot and merges global authorities", async
   env.REALM_EMAIL_ALIASES = authorityNamespace(async (_url, init) => {
     assert.deepEqual(JSON.parse(init.body), {
       account_id: "acct_1",
-      maximum: 1,
+      maximum: 0,
     });
     return Response.json({
       schema_version: "witself.realm-email-alias.v1",
       account_id: "acct_1",
-      maximum: 1,
+      maximum: 0,
       over_limit_count: 2,
       highest_used: 3,
     });
@@ -152,7 +167,7 @@ test("plan-fit forwards the exact snapshot and merges global authorities", async
       dimension: "agent_email_realm_aliases_per_realm",
       scope: "realm",
       used: 3,
-      max: 1,
+      max: 0,
       subject_count: 2,
     },
     {
@@ -185,7 +200,7 @@ test("finite global limits fail closed when either authority is unavailable", as
       dimension: "agent_email_realm_aliases_per_realm",
       scope: "authority",
       used: 0,
-      max: 1,
+      max: 0,
       subject_count: 1,
     },
     {
@@ -204,7 +219,7 @@ test("plan-fit turns an internally inconsistent alias authority result into an i
   env.REALM_EMAIL_ALIASES = authorityNamespace(async () => Response.json({
     schema_version: "witself.realm-email-alias.v1",
     account_id: "acct_1",
-    maximum: 1,
+    maximum: 0,
     over_limit_count: 0,
     highest_used: 2,
   }));
@@ -231,7 +246,7 @@ test("plan-fit turns an internally inconsistent alias authority result into an i
     dimension: "agent_email_realm_aliases_per_realm",
     scope: "authority",
     used: 0,
-    max: 1,
+    max: 0,
     subject_count: 1,
   }]);
 });

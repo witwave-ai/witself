@@ -195,6 +195,24 @@ func TestStripeControlPlaneConfigRequiresAndPassesSafePortalConfig(t *testing.T)
 	}
 }
 
+func TestStripeControlPlaneConfigRejectsMalformedWebhookSecret(t *testing.T) {
+	catalog := testCatalog(t)
+	for _, webhookSecret := range []string{
+		"", "whsec_", " whsec_hermetic", "whsec_hermetic ",
+		"secret_hermetic", "WHSEC_hermetic", "whsec_bad-value",
+	} {
+		t.Run(webhookSecret, func(t *testing.T) {
+			setValidStripeControlPlaneEnv(t)
+			t.Setenv("WITSELF_CP_STRIPE_WEBHOOK_SECRET", webhookSecret)
+			_, _, err := stripeControlPlaneConfig(catalog)
+			if err == nil ||
+				!strings.Contains(err.Error(), "WITSELF_CP_STRIPE_WEBHOOK_SECRET") {
+				t.Fatalf("error = %v; want webhook-secret refusal", err)
+			}
+		})
+	}
+}
+
 func TestStripeControlPlaneConfigGatesTestClockToTestMode(t *testing.T) {
 	catalog := testCatalog(t)
 	setValidStripeControlPlaneEnv(t)

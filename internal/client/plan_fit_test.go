@@ -44,7 +44,7 @@ func TestCheckAccountPlanFitViaBridgeForwardsExactSnapshot(t *testing.T) {
 					Scope: "account", Used: 12, Max: 10, SubjectCount: 1},
 				{Code: "authority_incomplete",
 					Dimension: plans.AgentEmailRealmAliasesPerRealmLimit,
-					Scope:     "authority", Used: 0, Max: 1, SubjectCount: 1},
+					Scope:     "authority", Used: 0, Max: 0, SubjectCount: 1},
 			},
 		})
 	}))
@@ -56,6 +56,43 @@ func TestCheckAccountPlanFitViaBridgeForwardsExactSnapshot(t *testing.T) {
 	if err != nil || len(report.Violations) != 2 ||
 		report.Violations[1].Code != "authority_incomplete" {
 		t.Fatalf("fit report=%+v error=%v", report, err)
+	}
+}
+
+func TestCheckAccountPlanFitAcceptsDirectAndAuthorityFeatureDisabledMaximums(t *testing.T) {
+	target := planFitClientTarget(t)
+	for _, test := range []struct {
+		name    string
+		maximum int64
+	}{
+		{name: "direct cell raw limit", maximum: 1},
+		{name: "global authority effective limit", maximum: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(
+				w http.ResponseWriter,
+				_ *http.Request,
+			) {
+				_ = json.NewEncoder(w).Encode(client.AccountPlanFitReport{
+					SchemaVersion: "witself.v0", AccountID: "acct_1",
+					TargetPlan: target.Plan, TargetSnapshotHash: target.SnapshotHash,
+					Violations: []client.AccountPlanFitViolation{{
+						Code:      "limit_exceeded",
+						Dimension: plans.AgentEmailRealmAliasesPerRealmLimit,
+						Scope:     "realm", Used: 2, Max: test.maximum, SubjectCount: 1,
+					}},
+				})
+			}))
+			t.Cleanup(server.Close)
+
+			report, err := client.CheckAccountPlanFit(
+				context.Background(), server.URL, "provision-token", "acct_1", target,
+			)
+			if err != nil || len(report.Violations) != 1 ||
+				report.Violations[0].Max != test.maximum {
+				t.Fatalf("fit report=%+v error=%v", report, err)
+			}
+		})
 	}
 }
 
@@ -159,6 +196,41 @@ func TestApplyAccountPlanIfFitsViaBridgeAcceptsBlockedWithCurrentSnapshot(t *tes
 		result.CurrentSnapshot == nil ||
 		result.CurrentSnapshot.SnapshotHash != currentHash {
 		t.Fatalf("blocked result=%+v error=%v", result, err)
+	}
+}
+
+func TestApplyAccountPlanIfFitsViaBridgeAcceptsDisabledFeatureAuthorityLimit(t *testing.T) {
+	target := planFitApplyClientTarget(t)
+	now := time.Now().UTC()
+	server := httptest.NewServer(http.HandlerFunc(func(
+		w http.ResponseWriter,
+		_ *http.Request,
+	) {
+		_ = json.NewEncoder(w).Encode(client.AccountPlanFitApplyResult{
+			SchemaVersion: "witself.v0",
+			State:         client.AccountPlanFitApplyStateBlocked,
+			AccountID:     "acct_1", TargetRevision: target.Revision,
+			TargetPlan: target.Plan, TargetSnapshotHash: target.SnapshotHash,
+			Violations: []client.AccountPlanFitViolation{{
+				Code:      "limit_exceeded",
+				Dimension: plans.AgentEmailRealmAliasesPerRealmLimit,
+				Scope:     "realm", Used: 1, Max: 0, SubjectCount: 1,
+			}},
+			CurrentSnapshot: &client.AccountPlanSnapshot{
+				AccountID: "acct_1", Revision: 0, SnapshotHash: "", Plan: "free",
+				Limits: map[string]int64{}, Policies: map[string]int64{},
+				Features: []string{}, AppliedAt: &now,
+			},
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	result, err := client.ApplyAccountPlanIfFitsViaBridge(
+		context.Background(), server.URL, "bridge-token", "acct_1", target,
+	)
+	if err != nil || result.State != client.AccountPlanFitApplyStateBlocked ||
+		len(result.Violations) != 1 || result.Violations[0].Max != 0 {
+		t.Fatalf("disabled-feature blocked result=%+v error=%v", result, err)
 	}
 }
 

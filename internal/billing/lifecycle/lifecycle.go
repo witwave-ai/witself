@@ -96,7 +96,7 @@ type Pending struct {
 	ProviderObjectID string
 	// PreparedEffective is the period boundary selected before the provider
 	// mutation. Effective remains zero until the provider confirms the exact
-	// schedule, so older binaries cannot mistake preparation for completion.
+	// schedule, so exact-aware readers cannot mistake preparation for completion.
 	PreparedEffective time.Time
 	// ProviderPhase distinguishes a read-only prepared target from a confirmed
 	// provider schedule. Empty is the legacy encoding: an exact object plus a
@@ -109,9 +109,11 @@ type Pending struct {
 }
 
 // preparedDowngradeFenceKind is intentionally not a supported provider
-// cancellation kind. Older binaries reject it before any provider mutation,
-// making this preparation phase fail closed across rollout or rollback. New
-// binaries consume it only as durable lifecycle state.
+// cancellation kind. Exact-aware readers reject it before any provider
+// mutation and new writers consume it only as durable lifecycle state. The
+// released v0.0.254 predecessor ignores this field and can still execute broad
+// cleanup, so rollout requires the exclusive drain documented in the billing
+// transition runbook; this marker alone is not rolling-compatibility proof.
 const preparedDowngradeFenceKind billing.PendingCancellationKind = "prepared_downgrade_fence"
 
 const (
@@ -3367,10 +3369,6 @@ func (m *Manager) apply(ctx context.Context, accountID string) error {
 	if !targetRankOK || !appliedRankOK {
 		return fmt.Errorf("cannot order applied plan %q and target plan %q", r.Applied, target.ID)
 	}
-	cellAcceptedDesiredFence :=
-		r.DesiredSnapshotHash == snapshot.Hash &&
-			r.SnapshotRevision == observed.Revision &&
-			observed.Hash == snapshot.Hash
 	// A restored lifecycle record may be behind a newer cell fence. Because
 	// the read side deliberately returns no cell payload, its plan rank is
 	// unknown; treating the restored Record.Applied label as authoritative
@@ -3379,10 +3377,12 @@ func (m *Manager) apply(ctx context.Context, accountID string) error {
 	requiresConditionalApply := targetRank < appliedRank || !cellMatchesRecord
 	request := ApplyRequest{Revision: r.SnapshotRevision, PlanSnapshot: snapshot}
 	var ack ApplyAck
-	// Do not let a fresh fit violation wedge completion after the cell already
-	// accepted this exact downgrade. The exact replay changes no cell policy; it
-	// only gives the bridge another chance to finish its fenced projections.
-	if requiresConditionalApply && !cellAcceptedDesiredFence {
+	// Exact accepted-fence replays stay on the conditional bridge path. The
+	// cell returns its persisted acknowledgement without refitting, while the
+	// bridge can finish the exact prepared global-authority fences left by a
+	// lost post-cell response. Sending that replay through ordinary Apply would
+	// hit restrict-only and conflict with those prepared fences.
+	if requiresConditionalApply {
 		conditional, ok := m.cfg.Applier.(ConditionalApplier)
 		if !ok {
 			return errors.New("plan apply blocked: atomic downgrade fit-and-apply is unavailable")
