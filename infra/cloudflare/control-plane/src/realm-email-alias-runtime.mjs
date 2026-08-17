@@ -908,7 +908,9 @@ export async function readRealmEmailAliasPlanFit(
       body?.account_id !== accountID || body?.maximum !== maximum ||
       !Number.isSafeInteger(body?.over_limit_count) ||
       body.over_limit_count < 0 ||
-      !Number.isSafeInteger(body?.highest_used) || body.highest_used < 0) {
+      !Number.isSafeInteger(body?.highest_used) || body.highest_used < 0 ||
+      (body.over_limit_count === 0 && body.highest_used > maximum) ||
+      (body.over_limit_count > 0 && body.highest_used <= maximum)) {
     throw new Error(body?.error ?? "realm alias plan-fit authority is unavailable");
   }
   return body;
@@ -1220,6 +1222,10 @@ export class DurableRealmEmailAliasRegistry {
       }
       case "/plan/reconcile":
         return [`account:${input.account_id}`];
+      case "/plan/fit":
+        return ACCOUNT_ID_PATTERN.test(input?.account_id ?? "")
+          ? [`account:${input.account_id}`]
+          : [];
       case "/account-lifecycle/reconcile":
         return [`account:${input.account_id}`];
       case "/route/get": {
@@ -1976,6 +1982,9 @@ export class DurableRealmEmailAliasRegistry {
         memberCount !== expectedMemberCount) {
       fail("realm email alias plan-fit counters disagree", 503);
     }
+    // A repair can begin between the first readiness check and the final
+    // page. Never return a mixed pre/post-rebuild view as a successful fit.
+    await this.assertPendingCountersReady();
     return json({
       schema_version: SCHEMA_VERSION,
       account_id: accountID,

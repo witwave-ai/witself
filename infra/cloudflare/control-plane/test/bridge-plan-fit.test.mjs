@@ -199,6 +199,43 @@ test("finite global limits fail closed when either authority is unavailable", as
   ]);
 });
 
+test("plan-fit turns an internally inconsistent alias authority result into an incomplete refusal", async () => {
+  const env = environment();
+  env.REALM_EMAIL_ALIASES = authorityNamespace(async () => Response.json({
+    schema_version: "witself.realm-email-alias.v1",
+    account_id: "acct_1",
+    maximum: 1,
+    over_limit_count: 0,
+    highest_used: 2,
+  }));
+  env.AGENT_EMAIL_DOMAINS = authorityNamespace(async () => Response.json({
+    schema_version: "witself.agent-email-domain.v1",
+    account_id: "acct_1",
+    maximum: 0,
+    used: 0,
+  }));
+  const response = await handleInternalBridgeRequest(
+    request(),
+    env,
+    async () => Response.json({
+      schema_version: "witself.v0",
+      account_id: "acct_1",
+      target_plan: target.plan,
+      target_snapshot_hash: target.snapshot_hash,
+      violations: [],
+    }),
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).violations, [{
+    code: "authority_incomplete",
+    dimension: "agent_email_realm_aliases_per_realm",
+    scope: "authority",
+    used: 0,
+    max: 1,
+    subject_count: 1,
+  }]);
+});
+
 test("plan-fit rejects an ambiguous or mismatched cell report", async () => {
   const response = await handleInternalBridgeRequest(
     request(),

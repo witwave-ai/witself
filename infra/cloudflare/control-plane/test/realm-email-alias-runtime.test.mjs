@@ -559,6 +559,31 @@ test("realm-alias plan-fit aggregates commercial allocations and detects incompl
   assert.match(incomplete.body.error, /counters disagree/);
 });
 
+test("realm-alias plan-fit shares the account lane with allocation mutations", async () => {
+  const fixture = registry();
+  const requested = await requestAlias(fixture.runtime, "plan-fit-lane");
+  const projection = fixture.blockNextProjection();
+  const approving = approve(fixture.runtime, requested.body.request);
+  await projection.started;
+
+  const fitting = call(fixture.runtime, "/plan/fit", {
+    account_id: ACCOUNT,
+    maximum: 0,
+  });
+  const raced = await Promise.race([
+    fitting.then(() => "finished"),
+    new Promise((resolve) => setTimeout(() => resolve("account-lane"), 20)),
+  ]);
+  assert.equal(raced, "account-lane");
+
+  projection.release();
+  assert.equal((await approving).response.status, 200);
+  const fit = await fitting;
+  assert.equal(fit.response.status, 200);
+  assert.equal(fit.body.highest_used, 1);
+  assert.equal(fit.body.over_limit_count, 1);
+});
+
 test("integrated journal bootstrap freezes an existing registry and later mutations are R2-first", async () => {
   const bucket = new JournalBucket();
   const fixture = registry({ journalBucket: bucket, journalEnabled: false });
