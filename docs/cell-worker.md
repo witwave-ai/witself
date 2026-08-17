@@ -148,7 +148,7 @@ scripts/run-agent-email-receipt-proof.sh \
   --kubeconfig /absolute/private/path/kubeconfig \
   --context witself-civo-sandbox-usw2-dev \
   --namespace witself \
-  --expected-image ghcr.io/witwave-ai/images/witself-server:0.0.252 \
+  --expected-image ghcr.io/witwave-ai/images/witself-server:0.0.253 \
   --expected-config-checksum 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
   --expected-replicas 2 \
   --account-id acc_... \
@@ -367,9 +367,10 @@ batch fits only one. These work ceilings exceed one account's
 5,100-row/1,088-MiB rolling-minute envelope, but they are neither a
 database-throughput promise nor a reserved inbound share or multi-account
 cell-capacity guarantee. Alert on capped batches, timeouts, last-success age,
-and persistent backlog. This configuration was enabled on v0.0.252 only after
-the schema-90 artifact and both backups were verified; repeat that gate for
-every new cell.
+and persistent backlog. This retention configuration was enabled on v0.0.252
+only after the schema-90 artifact and both backups were verified. The v0.0.253
+rollout repeated that backup/restore gate before installing schema 91; repeat it
+for every new cell.
 
 Outbound agent-email activation and cohort expansion use a separate staged
 rollout. Committed defaults remain dark; the initial Founder production cohort
@@ -392,24 +393,25 @@ cohort must repeat them:
    provider-event folding, suppression, health, metrics, and rollback before
    widening either cohort.
 
-Schema 90 is the current forward-only convergence barrier. The first compatible
-process that starts against a cell applies the migration automatically. After
-that, a schema-89-only binary fails startup with `ErrMigrationSchemaAhead`; it
-is not a viable rollback even if its Deployment manifest still exists. Keep all
-outbound gates off, freeze account export/import and moves, and converge every
-API and worker replica on a schema-90-compatible image before accepting another
-outbound row. Roll back with account, worker, and adapter gates or deploy a
-forward fix. Never down-migrate the database or restart an older image.
+Schema 90 was the preceding forward-only convergence barrier; schema 91 is the
+current one on the v0.0.253 production cell. The rollout deployed the receive
+edge that understands HTTP 507 `storage_full` first, held the exact Founder
+cohort fixed, froze account moves, and converged every API and worker process on
+the schema-91 image. A schema-90 binary is no longer a rollback. Disable
+receive/send gates or deploy a forward fix while leaving the database and its
+storage triggers intact; never down-migrate the database or restart an older
+image.
 
-The schema-91 retained-email boundary is the next forward-only barrier. Deploy
-the receive edge that understands HTTP 507 `storage_full` first, keep the exact
-Founder cohort fixed, freeze account moves, and then converge every API and
-worker process on the schema-91 image. The singleton ledger is cell-local and
-is not part of an account archive; destination triggers charge imported mail,
-so movement remains frozen until every possible destination is schema 91 and
-has verified headroom. Once any process installs schema 91, a schema-90 binary
-is not a rollback. Disable receive/send gates or deploy a forward fix while
-leaving the database and its storage triggers intact.
+The singleton ledger is cell-local and is not part of an account archive;
+destination triggers charge imported mail, so movement remains frozen until
+every possible accepting destination is schema 91, has verified headroom, and
+has continuous capacity monitoring. The live cell's point-in-time scrape verified
+`witself_agent_email_cell_storage_metrics_up 1` and all seven logical
+usage/threshold gauges, but it has no continuous Prometheus scraping, PVC
+metrics collection, Alertmanager routing, or tested external receiver. Database
+triggers still enforce the safety boundary. Continuous logical-ledger and
+physical-PVC alerts with a tested receiver, plus provider-wide backpressure,
+block cohort expansion.
 
 A populated source-to-destination move canary is also a release gate, not just
 an archive unit test. Before moving any account with outbound-email history,

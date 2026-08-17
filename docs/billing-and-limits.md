@@ -297,9 +297,9 @@ during both phases.
 
 Account byte allowances and age retention are commercial policy. They do not
 bound the sum of several accounts on one cell, and an explicit-unlimited Founder
-override intentionally removes those commercial caps. The schema-91 candidate
-therefore adds a separate, non-billable platform safety boundary that no plan or
-account override can raise or bypass.
+override intentionally removes those commercial caps. The live schema-91
+deployment therefore has a separate, non-billable platform safety boundary that
+no plan or account override can raise or bypass.
 
 One transactionally maintained logical ledger covers all retained inbound and
 outbound roots, inbound deliveries, outbound provider-event receipts, and
@@ -324,9 +324,14 @@ permanent SMTP rejection instead of discarding the message or asking the sender
 provider to retry forever. A new outbound message returns HTTP 507 with
 `agent_email_storage_full`, `retryable: false`, and no `Retry-After`. These are
 platform refusals, not billable overages, plan downgrades, or changes to the
-Founder's indefinite retention. The current v0.0.252/schema-90 production cell
-does not yet have this ledger; operators must complete and verify the schema-91
-rollout before treating it as live protection.
+Founder's indefinite retention. The v0.0.253/schema-91 production cell has this
+ledger live, and a point-in-time scrape verified
+`witself_agent_email_cell_storage_metrics_up 1` plus all seven usage/threshold
+gauges. Database triggers remain authoritative without a
+collector. Continuous Prometheus scraping, PVC metrics collection, Alertmanager
+routing, and a tested external receiver are not yet installed end to end.
+Those controls, logical-ledger and physical-PVC alerts, and provider
+backpressure block cohort expansion.
 
 ### Agent-email ingress rate breakers
 
@@ -607,8 +612,9 @@ the outbound rate dimensions. Those unlimited values do not bypass the 25 MiB
 inbound transport ceiling; the 5,000-message/1-GiB account-wide inbound refill
 rates and 100-message/64-MiB bursts; or any outbound 30-per-agent-minute,
 300-per-realm-minute, 1,000-per-account-minute, 10,000-per-account-day, or
-100-per-recipient-day breaker. Once schema 91 is rolled out, they also do not
-bypass the cell's logical email-storage admission or hard boundary.
+100-per-recipient-day breaker. They also do not bypass the live schema-91
+cell's 3-GiB/25,000-root logical admission boundary or its
+4-GiB/100,000-counted-row hard boundary.
 
 Production keeps two agent-email retention workers in enforcement mode even
 while the Founder policy is indefinite. Batch 100, a
@@ -619,13 +625,13 @@ unbounded drain loop. One replica can scan at most 3,200 rows and delete at most
 rows and delete at most 2,048 MiB. Maximum-sized 25 MiB rows yield 800/1,600 MiB
 because each database batch fits only one. Those are work ceilings, not
 database-throughput guarantees, reserved inbound shares, or a multi-account
-cell bound. Schema 91's independent database-triggered ledger supplies that
-cell bound after it is deployed; the retention sweep does not. Durable
+cell bound. Schema 91's live independent database-triggered ledger supplies
+that cell bound; the retention sweep does not. Durable
 per-account kind rotation prevents one continuously full kind from starving the
 others over repeated visits. A finite plan policy takes effect without a
-worker-mode change after rollout; a wider cohort must first verify the schema-91
-ledger (or equivalent sharding) and still needs provider-wide outbound
-backpressure.
+worker-mode change. A wider cohort remains blocked until continuous logical/PVC
+alerts reach a tested external receiver and provider-wide outbound backpressure
+is in place.
 
 Rollout is cell-and-edge first: deploy a cell that understands the marked
 snapshot and an agent-email edge Worker that accepts the cell's

@@ -229,10 +229,25 @@ from those defaults. The multi-account `civo-sandbox-usw2-dev` cell runs two
 worker replicas; receive, adapter dispatch, lifecycle delivery, and the
 `email.sending` subscription are enabled only for the exact Founder email
 cohort, while receipt replay remains off. Agent-email retention is cell-wide and
-active on application `0.0.252` at schema 90: enforce mode, batch 100, a
+active on application `0.0.253` at schema 91: enforce mode, batch 100, a
 one-minute interval, and a two-minute timeout. Activation followed verification
 of the release artifact and both pre-migration backups; Founder's effective
-retention remains indefinite.
+retention remains indefinite. Schema 91's database triggers enforce the
+3-GiB/25,000-root admission and 4-GiB/100,000-counted-row hard boundaries even
+for Founder. A point-in-time metric scrape passed, but continuous Prometheus
+scraping, PVC metrics collection, Alertmanager routing, a tested external
+receiver, and provider backpressure still block cohort expansion.
+
+At the v0.0.253 rollout freeze, placement status reported zero movable live
+accounts, one placeable archived account, and no pending or active placement.
+The runner remains disabled because capacity monitoring is incomplete; the
+schema-88 backup validation cell remains non-accepting and therefore is not a
+possible destination. Do not re-enable scheduled placement or invoke manual restore,
+rebalance, export/import, or evacuation until every possible accepting
+destination is schema-91-capable, has verified storage headroom, and has
+continuous capacity monitoring. The runner's disable flag does not revoke
+manual fleet-token placement authority.
+
 Every other cell/account remains subject to its own explicit activation. Treat
 the README procedure as the repeatable contract for a new cell or cohort, not
 as evidence that the current Founder deployment is still dark.
@@ -500,11 +515,11 @@ a later, separately reviewed edge rollout.
 
 The custom-domain routing foundation completed its dark schema-88 cell wave;
 the multi-account `civo-sandbox-usw2-dev` cell hosting the exact Founder email
-cohort has since advanced to schema 90. That does not activate customer-domain
-provider delivery. Keep both control-plane routing gates and
-`AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED` off, do not add a customer domain
-to managed receive configuration, and do not change MX/Email Routing or send a
-live custom-domain canary until separately approved.
+cohort later advanced through schema 90 and now runs schema 91. That does not
+activate customer-domain provider delivery. Keep both control-plane routing
+gates and `AGENT_EMAIL_CUSTOM_DOMAIN_DELIVERY_ENABLED` off. Do not add a
+customer domain to managed receive configuration, change MX/Email Routing, or
+send a live custom-domain canary until separately approved.
 
 The completed schema-88 wave created and verified the normal pre-migration
 backup, then froze custom-domain projection, realm-alias projection, realm

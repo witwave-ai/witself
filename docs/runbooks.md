@@ -1102,22 +1102,22 @@ The production resources are:
   `email.sending`, scoped to `send.witmail.net` and the six configured lifecycle
   event classes.
 
-The currently deployed adapter authenticates its signed envelope only after
-streaming at most 2 MiB and has no separate Cloudflare Rate Limiter. The
-hardened release candidate changes that order: it first charges a hashed
-source-IP lane, verifies the Ed25519 header envelope before reading the body,
+The v0.0.253 deployed adapter first charges a hashed source-IP lane, verifies
+the Ed25519 header envelope before reading the body,
 then performs the bounded 2 MiB body read/digest and exact JSON/account
 authorization. Only an authenticated, account-authorized request may charge the
 aggregate and signer lanes or reach Durable Objects/provider dispatch. The
-candidate binds namespace `2301` at 1,000 requests per 60 seconds, keeps
-`preview_urls: false`, and enables Worker observability. These claims are not
-live until the adapter deployment is completed and verified.
+live Worker binds namespace `2301` at 1,000 requests per 60 seconds, disables
+version preview URLs (`preview_urls=false`), and enables Cloudflare Workers
+Observability. The deployment-time account-wide inventory proved `2301` was
+unused by every other Worker.
 
-Cloudflare Rate Limiter namespaces are shared account-wide. Before deploying
-the candidate, inventory every Worker binding in the selected production
+Cloudflare Rate Limiter namespaces are shared account-wide. Before any future
+deployment or binding change, inventory every Worker binding in the production
 Cloudflare account and stop if namespace `2301` is already used. Also stop if
 the rendered deployment omits `DISPATCH_FRONTDOOR_LIMITER`, changes its 1,000/60
-configuration, exposes preview URLs, or disables observability. The counters
+configuration, exposes version preview URLs, or disables Cloudflare Workers
+Observability. The counters
 are point-of-presence-local and eventually consistent; use this as a coarse
 abuse breaker, not exact global accounting, a tenant quota, or a substitute for
 the cell's authoritative rate controls. Valid worker pods that share one NAT
@@ -1151,7 +1151,7 @@ npx --no-install wrangler --config wrangler.template.jsonc \
 Stop if the selected Cloudflare account is not the account that owns
 `witmail.net`, if either required secret name is absent, if the subscription
 source/domain/event set differs, if the main Queue has no consumer, or if any
-gate differs from the expected posture. For the hardened candidate, also stop
+gate differs from the expected posture. Also stop
 unless the live Worker reports the reviewed Rate Limiter binding, namespace,
 preview-URL posture, and observability configuration above. The configured
 consumer uses batches of 10, a five-second batch timeout, 25 retries,
@@ -1233,6 +1233,16 @@ signal.
 
 Treat the schema-91 deployment as a forward migration:
 
+Before changing GitOps, disable the fleet placement runner and verify zero
+pending moves, restores, evacuation work, database migration locks, active
+Jobs, and outbound claims. Disabling the scheduled runner does not revoke a
+fleet token or fence manual placement endpoints, so operators must also avoid
+manual restore, rebalance, export/import, and evacuation during the rollout.
+Keep the runner disabled while any possible accepting destination remains below
+schema 91, lacks verified email-capacity headroom, or lacks continuous capacity
+monitoring; otherwise an archived account can enter an unsafe cell between
+checks.
+
 1. Verify current encrypted backups and restore evidence. Deploy the receive
    Worker version that recognizes HTTP 507 `storage_full` before a cell can
    emit that verdict; it must issue only the sanitized permanent SMTP rejection.
@@ -1280,12 +1290,18 @@ Treat the schema-91 deployment as a forward migration:
    Also require an independent PVC/PostgreSQL physical-utilization alert before
    80%; the logical ledger releases charge on delete but database files need not
    shrink. A scrape failure emits only `metrics_up 0`, never database error text.
+   The v0.0.253 production rollout passed this point-in-time scrape and ledger
+   check, but continuous Prometheus scraping, PVC metrics collection,
+   Alertmanager routing, and a tested external receiver are not installed.
+   Database triggers still enforce the safety boundary; continuous logical/PVC alerts
+   with a tested receiver and provider backpressure block cohort expansion.
 6. Verify the closed refusal contracts without provider traffic: inbound is
    HTTP 507 `storage_full`, which the receive edge maps to
    `rejected_cell_capacity`; a new outbound root is HTTP 507
    `agent_email_storage_full` with `retryable: false` and no `Retry-After`.
-   Keep the exact-account cohort unchanged until these checks and the outbound
-   front-door deployment are both complete.
+   Keep the exact-account cohort unchanged until these checks, continuous alert
+   delivery, provider backpressure, and the outbound front-door deployment are
+   all complete.
 
 Alert well before either admission threshold; the hard boundary is emergency
 lifecycle reserve, not a normal operating target. If root admission closes,
@@ -1311,10 +1327,8 @@ The safe config-only pause is `enabled: false`; returning `mode` to `preview`
 also stops destructive deletion while retaining bounded observations. Roll only
 the worker Deployment, keep the current database schema in place, verify the API
 pod UID and config checksum remain unchanged, and confirm the retention deletion
-counters stop advancing. The live v0.0.252 cell remains on schema 90 until the
-separate schema-91 rollout above; after schema 91 lands, do not remove its
-storage triggers. Schema-89 binaries are not a rollback after schema 90 has
-landed.
+counters stop advancing. The live v0.0.253 cell is on schema 91; do not remove
+its storage triggers. Neither schema-90 nor schema-89 binaries are a rollback.
 
 ## Deploy, checkpoint, and drill the dark custom-domain authority
 
