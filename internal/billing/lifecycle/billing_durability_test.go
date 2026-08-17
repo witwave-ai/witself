@@ -642,6 +642,35 @@ func (p *cancelOnceProvider) SubscribeIdempotent(
 	return p.idempotent.SubscribeIdempotent(ctx, customerID, plan, operationID)
 }
 
+func (p *cancelOnceProvider) ScheduleDowngradeExactIdempotent(
+	ctx context.Context,
+	customerID, plan, operationID string,
+) (billing.ScheduledDowngrade, error) {
+	return p.Provider.(billing.ExactIdempotentDowngrader).
+		ScheduleDowngradeExactIdempotent(ctx, customerID, plan, operationID)
+}
+
+func (p *cancelOnceProvider) CancelPendingObjectIdempotent(
+	ctx context.Context,
+	customerID string,
+	target billing.PendingCancellation,
+	operationID string,
+) error {
+	p.mu.Lock()
+	p.calls++
+	fail := p.failures > 0
+	if fail {
+		p.failures--
+	}
+	p.mu.Unlock()
+	if fail {
+		return context.DeadlineExceeded
+	}
+	return p.Provider.(billing.ExactPendingCanceller).
+		CancelPendingObjectIdempotent(
+			ctx, customerID, target, operationID)
+}
+
 func (p *cancelOnceProvider) CancelPending(
 	ctx context.Context,
 	customerID string,

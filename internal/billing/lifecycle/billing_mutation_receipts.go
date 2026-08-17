@@ -11,6 +11,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/witwave-ai/witself/internal/billing"
 )
 
 const (
@@ -425,7 +427,7 @@ func validateBillingMutationResult(result BillingMutationResult) error {
 		return errors.New("billing mutation receipt: invalid action expiry")
 	}
 	if result.ProviderObjectID != "" &&
-		!validBillingMutationToken(result.ProviderObjectID, 255) {
+		billing.ValidateProviderObjectID(result.ProviderObjectID) != nil {
 		return errors.New("billing mutation receipt: invalid provider object id")
 	}
 	switch result.Kind {

@@ -290,9 +290,8 @@ func validBillingProviderAction(action billing.Action, now time.Time) bool {
 			action.ExpiresAt.IsZero()
 	}
 	if !validBillingMutationURL(action.URL) ||
-		len(action.ProviderObjectID) > 255 ||
-		strings.TrimSpace(action.ProviderObjectID) != action.ProviderObjectID {
+		billing.ValidateProviderObjectID(action.ProviderObjectID) != nil {
 		return false
 	}
-	return action.ExpiresAt.IsZero() || action.ExpiresAt.After(now)
+	return action.ExpiresAt.After(now)
 }

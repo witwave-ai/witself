@@ -1708,6 +1708,7 @@ func TestEqualTimestampEntitlementEventsConverge(t *testing.T) {
 func TestEqualTimestampDunningEventsConvergeAndIgnoreOtherSubscription(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
+	activationAt := time.Date(2026, 7, 4, 12, 1, 0, 0, time.UTC)
 	type finalState struct {
 		pastDue bool
 		at      time.Time
@@ -1722,7 +1723,6 @@ func TestEqualTimestampDunningEventsConvergeAndIgnoreOtherSubscription(t *testin
 			t.Fatalf("RequestUpgrade: %v", err)
 		}
 		r := h.record(t, "acct_1")
-		activationAt := h.ck.t.Add(time.Minute)
 		if err := h.m.OnEvents(ctx, "fake", []billing.Event{{
 			Type: billing.EventSubscriptionActivated, CustomerID: r.CustomerID,
 			Plan: "standard", At: activationAt, SubscriptionID: "sub_managed",
@@ -1762,8 +1762,53 @@ func TestEqualTimestampDunningEventsConvergeAndIgnoreOtherSubscription(t *testin
 	other := failure
 	other.SubscriptionID = "sub_unrelated"
 	ignored := run(t, []billing.Event{other})
-	if ignored.pastDue || !ignored.at.IsZero() || ignored.key != "" {
+	if ignored.pastDue || !ignored.at.Equal(activationAt) ||
+		ignored.key != "" {
 		t.Fatalf("unrelated subscription changed dunning state: %+v", ignored)
+	}
+}
+
+func TestOlderActivationCannotEraseNewerPaymentFailure(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	failureAt := time.Date(2026, 8, 17, 12, 0, 1, 0, time.UTC)
+	activationAt := failureAt.Add(-time.Second)
+	run := func(t *testing.T, events []billing.Event) Record {
+		t.Helper()
+		h := newHarness(t, false)
+		if _, err := h.m.RequestUpgrade(
+			ctx, "acct_1", "s@example.com", "standard",
+		); err != nil {
+			t.Fatalf("RequestUpgrade: %v", err)
+		}
+		r := h.record(t, "acct_1")
+		for i := range events {
+			events[i].CustomerID = r.CustomerID
+		}
+		if err := h.m.OnEvents(ctx, "fake", events); err != nil {
+			t.Fatalf("OnEvents: %v", err)
+		}
+		return h.record(t, "acct_1")
+	}
+	failure := billing.Event{
+		Type: billing.EventPaymentFailed, At: failureAt,
+		SubscriptionID: "sub_managed",
+	}
+	activation := billing.Event{
+		Type: billing.EventSubscriptionActivated, At: activationAt,
+		Plan: "standard", SubscriptionID: "sub_managed",
+		OperationID: "bop_original_checkout",
+	}
+	for _, events := range [][]billing.Event{
+		{failure, activation},
+		{activation, failure},
+	} {
+		r := run(t, events)
+		if r.PastDueSince == nil || !r.PastDueSince.Equal(failureAt) ||
+			!r.DunningAt.Equal(failureAt) ||
+			r.ManagedSubscriptionID != "sub_managed" {
+			t.Fatalf("out-of-order dunning result = %+v", r)
+		}
 	}
 }
 
@@ -1953,6 +1998,24 @@ func (h *hookProvider) CancelPending(ctx context.Context, customerID string) err
 		f()
 	}
 	return h.Provider.CancelPending(ctx, customerID)
+}
+
+func (h *hookProvider) CancelPendingObjectIdempotent(
+	ctx context.Context,
+	customerID string,
+	target billing.PendingCancellation,
+	operationID string,
+) error {
+	if f := h.beforeCancel; f != nil {
+		h.beforeCancel = nil
+		f()
+	}
+	exact, ok := h.Provider.(billing.ExactPendingCanceller)
+	if !ok {
+		return errors.New("hook provider: exact cancellation unsupported")
+	}
+	return exact.CancelPendingObjectIdempotent(
+		ctx, customerID, target, operationID)
 }
 
 // TestStaleCancelDropped reproduces the review's redelivery finding: a

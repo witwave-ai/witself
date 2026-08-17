@@ -43,6 +43,7 @@ package lifecycle
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -84,7 +85,11 @@ type Pending struct {
 	// replaced. It is deliberately false before Subscribe: an ambiguous
 	// Subscribe failure must be retried with OperationID, not canceled.
 	CancelPrevious bool
-	URL            string // upgrade: where the payer completes checkout
+	// CancelPreviousTarget survives the claim that replaces an older pending
+	// effect. Without this exact object identity, retrying cleanup after a crash
+	// would have to discover and mutate every open object for the customer.
+	CancelPreviousTarget *billing.PendingCancellation
+	URL                  string // upgrade: where the payer completes checkout
 	// ProviderObjectID is the exact hosted checkout object behind URL. It is
 	// never returned to the customer, but survives a control-plane restart so
 	// cleanup can target the original provider object.
@@ -114,6 +119,12 @@ func validBillingOperationID(operationID string) bool {
 		}
 	}
 	return true
+}
+
+func derivedBillingOperationID(parent, phase string) string {
+	digest := sha256.Sum256([]byte(
+		"witself.billing-child-operation.v1\x00" + parent + "\x00" + phase))
+	return "bop_" + base64.RawURLEncoding.EncodeToString(digest[:24])
 }
 
 // AdminActor is the immutable administrator identity attached to a policy
@@ -1745,6 +1756,67 @@ func (m *Manager) cancelReplacedPending(ctx context.Context, r Record) error {
 	return m.cancelProviderPending(ctx, r)
 }
 
+func pendingCancellationTarget(r Record) (*billing.PendingCancellation, error) {
+	p := r.Pending
+	if p == nil {
+		return nil, nil
+	}
+	if p.CancelPrevious {
+		if p.CancelPreviousTarget == nil {
+			return nil, errors.New(
+				"lifecycle: pending replacement has no exact provider target; operator reconciliation is required")
+		}
+		target := *p.CancelPreviousTarget
+		if err := validatePendingCancellationTarget(target); err != nil {
+			return nil, err
+		}
+		return &target, nil
+	}
+	var target billing.PendingCancellation
+	switch p.Kind {
+	case PendingUpgrade:
+		if p.ProviderObjectID == "" {
+			return nil, errors.New(
+				"lifecycle: hosted purchase has no exact provider target; operator reconciliation is required")
+		}
+		target = billing.PendingCancellation{
+			Kind:             billing.PendingCancellationHostedAction,
+			ProviderObjectID: p.ProviderObjectID, OriginalOperationID: p.OperationID,
+		}
+	case PendingDowngrade:
+		if p.ProviderObjectID == "" {
+			return nil, errors.New(
+				"lifecycle: scheduled downgrade has no exact provider target; operator reconciliation is required")
+		}
+		target = billing.PendingCancellation{
+			Kind:             billing.PendingCancellationPeriodEnd,
+			ProviderObjectID: p.ProviderObjectID, OriginalOperationID: p.OperationID,
+		}
+	default:
+		return nil, nil
+	}
+	if err := validatePendingCancellationTarget(target); err != nil {
+		return nil, err
+	}
+	return &target, nil
+}
+
+func validatePendingCancellationTarget(target billing.PendingCancellation) error {
+	switch target.Kind {
+	case billing.PendingCancellationHostedAction,
+		billing.PendingCancellationPeriodEnd:
+	default:
+		return errors.New("lifecycle: unsupported pending cancellation target")
+	}
+	if err := billing.ValidateProviderObjectID(target.ProviderObjectID); err != nil {
+		return fmt.Errorf("lifecycle: invalid pending cancellation object: %w", err)
+	}
+	if err := billing.ValidateOperationID(target.OriginalOperationID); err != nil {
+		return fmt.Errorf("lifecycle: invalid pending cancellation operation: %w", err)
+	}
+	return nil
+}
+
 // cancelProviderPending disarms provider state for a durable replacement
 // phase. Unlike cancelReplacedPending, the record's current Pending describes
 // the NEW claim and may itself be a contact lead; CancelPrevious is the proof
@@ -1753,11 +1825,26 @@ func (m *Manager) cancelProviderPending(ctx context.Context, r Record) error {
 	if r.CustomerID == "" {
 		return errors.New("lifecycle: pending provider cleanup has no customer id")
 	}
-	_, provider, err := m.providerFor(r)
+	name, provider, err := m.providerFor(r)
 	if err != nil {
 		return err
 	}
-	return provider.CancelPending(ctx, r.CustomerID)
+	target, err := pendingCancellationTarget(r)
+	if err != nil {
+		return err
+	}
+	if target != nil {
+		exact, ok := provider.(billing.ExactPendingCanceller)
+		if !ok {
+			return fmt.Errorf(
+				"billing provider %q does not support exact pending cancellation", name)
+		}
+		return exact.CancelPendingObjectIdempotent(
+			ctx, r.CustomerID, *target,
+			derivedBillingOperationID(target.OriginalOperationID, "cancel"))
+	}
+	return fmt.Errorf(
+		"billing provider %q cannot safely cancel a targetless pending change", name)
 }
 
 // cancelProviderPendingIdempotent is the customer-mutation path used by the
@@ -1775,13 +1862,21 @@ func (m *Manager) cancelProviderPendingIdempotent(
 	if err != nil {
 		return err
 	}
-	idempotent, ok := provider.(billing.IdempotentPendingCanceller)
-	if !ok {
-		return fmt.Errorf(
-			"billing provider %q does not support idempotent pending cancellation",
-			name)
+	target, err := pendingCancellationTarget(r)
+	if err != nil {
+		return err
 	}
-	return idempotent.CancelPendingIdempotent(ctx, r.CustomerID, operationID)
+	if target != nil {
+		exact, ok := provider.(billing.ExactPendingCanceller)
+		if !ok {
+			return fmt.Errorf(
+				"billing provider %q does not support exact pending cancellation", name)
+		}
+		return exact.CancelPendingObjectIdempotent(
+			ctx, r.CustomerID, *target, operationID)
+	}
+	return fmt.Errorf(
+		"billing provider %q cannot safely cancel a targetless pending change", name)
 }
 
 // cancelCurrentPending honors the durable replacement-cleanup phase even when
@@ -1907,10 +2002,15 @@ func (m *Manager) requestUpgrade(
 			cancelPrevious := r.Pending != nil &&
 				(r.Pending.CancelPrevious ||
 					(r.Pending.Kind != PendingContact && r.CustomerID != ""))
+			cancelTarget, err := pendingCancellationTarget(*r)
+			if err != nil {
+				return err
+			}
 			r.Pending = &Pending{
 				Kind: PendingContact, Plan: target.ID, OperationID: operationID,
-				CancelPrevious: cancelPrevious,
-				Requested:      now,
+				CancelPrevious:       cancelPrevious,
+				CancelPreviousTarget: cancelTarget,
+				Requested:            now,
 			}
 			return nil
 		}
@@ -1945,10 +2045,15 @@ func (m *Manager) requestUpgrade(
 		cancelPrevious := r.Pending != nil &&
 			(r.Pending.CancelPrevious ||
 				(r.Pending.Kind != PendingContact && r.CustomerID != ""))
+		cancelTarget, err := pendingCancellationTarget(*r)
+		if err != nil {
+			return err
+		}
 		r.Pending = &Pending{
 			Kind: PendingUpgrade, Plan: target.ID, OperationID: operationID,
-			CancelPrevious: cancelPrevious,
-			Expires:        now.Add(m.cfg.TTL), Requested: now,
+			CancelPrevious:       cancelPrevious,
+			CancelPreviousTarget: cancelTarget,
+			Expires:              now.Add(m.cfg.TTL), Requested: now,
 		}
 		return nil
 	})
@@ -1963,7 +2068,8 @@ func (m *Manager) requestUpgrade(
 		var cancelErr error
 		if strictOperation {
 			cancelErr = m.cancelProviderPendingIdempotent(
-				ctx, claim, claim.Pending.OperationID+"-previous")
+				ctx, claim, derivedBillingOperationID(
+					claim.Pending.OperationID, "cancel-previous"))
 		} else {
 			cancelErr = m.cancelProviderPending(ctx, claim)
 		}
@@ -1980,6 +2086,7 @@ func (m *Manager) requestUpgrade(
 				return errSkipWrite
 			}
 			p.CancelPrevious = false
+			p.CancelPreviousTarget = nil
 			return nil
 		})
 		if err != nil {
@@ -2184,10 +2291,14 @@ func (m *Manager) requestDowngrade(
 		cancelPrevious := r.Pending != nil &&
 			(r.Pending.CancelPrevious ||
 				(r.Pending.Kind != PendingContact && r.CustomerID != ""))
+		cancelTarget, err := pendingCancellationTarget(*r)
+		if err != nil {
+			return err
+		}
 		r.Pending = &Pending{
 			Kind: PendingDowngrade, Plan: target.ID,
 			OperationID: operationID, CancelPrevious: cancelPrevious,
-			Requested: now,
+			CancelPreviousTarget: cancelTarget, Requested: now,
 		}
 		return nil
 	})
@@ -2198,7 +2309,8 @@ func (m *Manager) requestDowngrade(
 		var cancelErr error
 		if strictOperation {
 			cancelErr = m.cancelProviderPendingIdempotent(
-				ctx, claim, claim.Pending.OperationID+"-previous")
+				ctx, claim, derivedBillingOperationID(
+					claim.Pending.OperationID, "cancel-previous"))
 		} else {
 			cancelErr = m.cancelProviderPending(ctx, claim)
 		}
@@ -2215,6 +2327,7 @@ func (m *Manager) requestDowngrade(
 				return errSkipWrite
 			}
 			p.CancelPrevious = false
+			p.CancelPreviousTarget = nil
 			return nil
 		})
 		if err != nil {
@@ -2232,29 +2345,22 @@ func (m *Manager) requestDowngrade(
 	if err != nil {
 		return Outcome{}, err
 	}
-	var effective time.Time
-	if strictOperation {
-		idempotent, ok := provider.(billing.IdempotentDowngrader)
-		if !ok {
-			return Outcome{}, fmt.Errorf(
-				"billing provider %q does not support idempotent downgrade operations",
-				name)
-		}
-		effective, err = idempotent.ScheduleDowngradeIdempotent(
-			ctx, claim.CustomerID, target.ID, operationID)
-	} else {
-		effective, err = provider.ScheduleDowngrade(ctx, claim.CustomerID, target.ID)
+	idempotent, ok := provider.(billing.ExactIdempotentDowngrader)
+	if !ok {
+		return Outcome{}, fmt.Errorf(
+			"billing provider %q does not support exact idempotent downgrade operations",
+			name)
 	}
+	scheduled, err := idempotent.ScheduleDowngradeExactIdempotent(
+		ctx, claim.CustomerID, target.ID, operationID)
 	if err != nil {
-		// A durable-envelope retry must retain the operation identity after an
-		// ambiguous provider response. Legacy direct calls keep their historical
-		// best-effort release behavior.
-		if !strictOperation {
-			m.releaseClaim(ctx, accountID, claim)
-		}
+		// Retain the operation identity after an ambiguous provider response.
+		// Exact retries can recover the same scheduled subscription; releasing
+		// the claim would lose the only provider mutation fence.
 		return Outcome{}, err
 	}
-	if effective.IsZero() {
+	if scheduled.Effective.IsZero() ||
+		billing.ValidateProviderObjectID(scheduled.ProviderObjectID) != nil {
 		return Outcome{}, invalidProviderAction("downgrade")
 	}
 	if _, err := m.mutate(ctx, accountID, email, func(r *Record) error {
@@ -2263,12 +2369,15 @@ func (m *Manager) requestDowngrade(
 			p.OperationID != operationID {
 			return refuse("downgrade to %s was superseded by another request", target.ID)
 		}
-		r.Pending.Effective = effective
+		r.Pending.Effective = scheduled.Effective
+		r.Pending.ProviderObjectID = scheduled.ProviderObjectID
 		return nil
 	}); err != nil {
 		return Outcome{}, err
 	}
-	return Outcome{Kind: "scheduled", Plan: target.ID, Effective: effective}, nil
+	return Outcome{
+		Kind: "scheduled", Plan: target.ID, Effective: scheduled.Effective,
+	}, nil
 }
 
 // CancelPending abandons the in-flight change (unfinished checkout, scheduled
@@ -2342,6 +2451,22 @@ func (m *Manager) cancelPending(
 		cancelErr = m.cancelCurrentPendingIdempotent(ctx, r, operationID)
 	} else {
 		cancelErr = m.cancelCurrentPending(ctx, r)
+	}
+	if errors.Is(cancelErr, billing.ErrPendingAlreadyResolved) {
+		// Completion is not cancellation. Only a fresh local fold that has
+		// already removed or superseded the exact pending fence lets this cancel
+		// operation continue as resolved; otherwise keep it visible and retryable.
+		current, loadErr := m.load(ctx, accountID, "")
+		if loadErr != nil {
+			return false, loadErr
+		}
+		if current.Pending == nil ||
+			current.Pending.OperationID != expected.OperationID ||
+			current.Pending.Kind != expected.Kind ||
+			current.Pending.Plan != expected.Plan ||
+			!current.Pending.Requested.Equal(expected.Requested) {
+			cancelErr = nil
+		}
 	}
 	if cancelErr != nil {
 		return false, cancelErr
@@ -2687,8 +2812,27 @@ func (m *Manager) foldEventResolution(
 			// A newly paid Checkout (new subscription or exact originating
 			// operation) starts healthy. A reconciliation projection of the same
 			// surviving subscription must not erase a newer invoice failure.
-			if newSubscription || event.OperationID != "" {
+			if (newSubscription || event.OperationID != "") &&
+				(r.DunningAt.IsZero() || event.At.After(r.DunningAt)) {
 				r.PastDueSince = nil
+				r.DunningAt = event.At
+				r.DunningEventKey = ""
+			}
+			if p := r.Pending; p != nil && p.CancelPrevious &&
+				p.CancelPreviousTarget != nil &&
+				p.CancelPreviousTarget.Kind == billing.PendingCancellationHostedAction &&
+				p.CancelPreviousTarget.ProviderObjectID == event.ProviderObjectID &&
+				p.CancelPreviousTarget.OriginalOperationID == event.OperationID {
+				// The provider completed the exact Checkout while its replacement
+				// was trying to expire it. Do not create a second subscription. A
+				// same-plan replacement is now redundant; a different later request
+				// may proceed only after this durable fence is cleared.
+				if p.Plan == event.Plan {
+					r.Pending = nil
+				} else {
+					p.CancelPrevious = false
+					p.CancelPreviousTarget = nil
+				}
 			}
 			if p := r.Pending; p != nil && p.Plan == event.Plan {
 				switch p.Kind {
@@ -2872,6 +3016,7 @@ func (m *Manager) reconcileAccount(ctx context.Context, accountID string, now ti
 					return errSkipWrite
 				}
 				current.CancelPrevious = false
+				current.CancelPreviousTarget = nil
 				return nil
 			})
 			if err != nil {

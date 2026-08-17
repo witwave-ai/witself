@@ -24,6 +24,12 @@ import (
 	"time"
 )
 
+// ErrPendingAlreadyResolved means an exact provider object can no longer be
+// cancelled because its effect completed. Callers must not report success or
+// clear local pending state unless a fresh authoritative fold independently
+// proves that resolution.
+var ErrPendingAlreadyResolved = errors.New("billing pending object already resolved")
+
 // Action is the outcome of a billing operation that may need the payer's
 // browser: either it completed (Done) or the payer must continue at URL — a
 // checkout page, a card-update form, or a bank's 3DS challenge.
@@ -119,6 +125,24 @@ type IdempotentDowngrader interface {
 	) (effective time.Time, err error)
 }
 
+// ScheduledDowngrade is the exact provider effect armed for a period-end
+// plan change. ProviderObjectID identifies the subscription whose period-end
+// flag was mutated; it must be persisted before cancellation can be exact.
+type ScheduledDowngrade struct {
+	Effective        time.Time
+	ProviderObjectID string
+}
+
+// ExactIdempotentDowngrader is the strong form used by durable managed
+// billing. It returns both the effective boundary and the exact provider
+// object that was armed.
+type ExactIdempotentDowngrader interface {
+	ScheduleDowngradeExactIdempotent(
+		ctx context.Context,
+		customerID, plan, operationID string,
+	) (ScheduledDowngrade, error)
+}
+
 // DowngradeTargetChecker is the optional target-aware capability side of an
 // IdempotentDowngrader. Providers whose downgrade support is narrower than the
 // plan catalog implement it so a write-free preview can refuse an unsupported
@@ -140,6 +164,41 @@ type IdempotentPendingCanceller interface {
 	) error
 }
 
+// PendingCancellationKind identifies the exact provider object whose pending
+// effect must be disarmed. These names describe provider-neutral effects, not
+// Stripe resource types.
+type PendingCancellationKind string
+
+const (
+	// PendingCancellationHostedAction is an unfinished hosted purchase action
+	// such as a Stripe Checkout Session.
+	PendingCancellationHostedAction PendingCancellationKind = "hosted_action"
+	// PendingCancellationPeriodEnd is a subscription already armed to end at
+	// its current billing period boundary.
+	PendingCancellationPeriodEnd PendingCancellationKind = "period_end"
+)
+
+// PendingCancellation is the durable, value-minimal identity of one provider
+// effect. OriginalOperationID lets a provider verify that a hosted object was
+// created by the exact Witself operation now being replaced.
+type PendingCancellation struct {
+	Kind                PendingCancellationKind
+	ProviderObjectID    string
+	OriginalOperationID string
+}
+
+// ExactPendingCanceller is the strong, object-scoped form of pending
+// cancellation. Implementations must inspect and mutate only target; they must
+// never discover and cancel every open object belonging to customerID.
+type ExactPendingCanceller interface {
+	CancelPendingObjectIdempotent(
+		ctx context.Context,
+		customerID string,
+		target PendingCancellation,
+		operationID string,
+	) error
+}
+
 // ValidateOperationID enforces the portable identity accepted by durable
 // provider mutations. IDs are deliberately restricted to a small ASCII set so
 // they can be copied safely into provider metadata and idempotency headers.
@@ -154,6 +213,24 @@ func ValidateOperationID(operationID string) error {
 			continue
 		}
 		return errors.New("billing operation id contains unsupported characters")
+	}
+	return nil
+}
+
+// ValidateProviderObjectID enforces the small ASCII identity admitted into
+// durable billing state. It intentionally accepts the same portable alphabet
+// as operation IDs while allowing the longer provider resource identifiers.
+func ValidateProviderObjectID(objectID string) error {
+	if len(objectID) < 1 || len(objectID) > 255 {
+		return errors.New("billing provider object id must be 1-255 characters")
+	}
+	for i := 0; i < len(objectID); i++ {
+		b := objectID[i]
+		if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') ||
+			(b >= '0' && b <= '9') || b == '.' || b == '_' || b == ':' || b == '-' {
+			continue
+		}
+		return errors.New("billing provider object id contains unsupported characters")
 	}
 	return nil
 }

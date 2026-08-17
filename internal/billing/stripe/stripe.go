@@ -79,6 +79,11 @@ type Config struct {
 	CancelURL  string
 	// PortalReturnURL is where the hosted portal's "back" goes.
 	PortalReturnURL string
+	// PortalConfigurationID pins a reviewed portal configuration whose
+	// subscription update and cancellation features are disabled. An empty id
+	// disables portal creation rather than falling back to Stripe's mutable
+	// account-wide default configuration.
+	PortalConfigurationID string
 	// HTTPClient defaults to a 30s-timeout client.
 	HTTPClient *http.Client
 	// Now injects a clock for signature-tolerance tests.
@@ -98,8 +103,10 @@ var _ billing.Provider = (*Provider)(nil)
 var _ billing.IdempotentSetupper = (*Provider)(nil)
 var _ billing.IdempotentSubscriber = (*Provider)(nil)
 var _ billing.IdempotentDowngrader = (*Provider)(nil)
+var _ billing.ExactIdempotentDowngrader = (*Provider)(nil)
 var _ billing.DowngradeTargetChecker = (*Provider)(nil)
 var _ billing.IdempotentPendingCanceller = (*Provider)(nil)
+var _ billing.ExactPendingCanceller = (*Provider)(nil)
 var _ billing.EventResolver = (*Provider)(nil)
 
 // New validates cfg and returns a Provider.
@@ -146,6 +153,36 @@ func childIdempotencyKey(operationID, action, objectID string) string {
 	digest := sha256.Sum256([]byte(action + "\x00" + objectID))
 	return "witself-" + action + "-" + operationID + "-" +
 		hex.EncodeToString(digest[:])
+}
+
+func validateStripeResourceID(objectID, prefix string) error {
+	if err := billing.ValidateProviderObjectID(objectID); err != nil {
+		return err
+	}
+	if !strings.HasPrefix(objectID, prefix) {
+		return fmt.Errorf("expected Stripe %s resource id", prefix)
+	}
+	return nil
+}
+
+func validateStripeCheckoutAction(
+	objectID, rawURL string,
+	expiresAt time.Time,
+	now time.Time,
+) error {
+	if err := validateStripeResourceID(objectID, "cs_"); err != nil {
+		return err
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Scheme != "https" ||
+		!strings.EqualFold(parsed.Hostname(), "checkout.stripe.com") ||
+		parsed.User != nil || strings.TrimSpace(rawURL) != rawURL {
+		return errors.New("invalid Stripe Checkout URL")
+	}
+	if !expiresAt.After(now.UTC()) {
+		return errors.New("Stripe Checkout action is already expired")
+	}
+	return nil
 }
 
 // EnsurePrices bootstraps the Stripe side of the catalog: for every
@@ -195,6 +232,9 @@ func (p *Provider) priceID(ctx context.Context, planID string) (string, error) {
 	}
 	if len(list.Data) > 0 {
 		existing := list.Data[0]
+		if err := p.reconcileProduct(ctx, existing.Product, plan); err != nil {
+			return "", err
+		}
 		if existing.UnitAmount == cents && existing.Currency == "usd" {
 			p.prices.put(key, existing.ID)
 			return existing.ID, nil
@@ -222,6 +262,49 @@ func (p *Provider) priceID(ctx context.Context, planID string) (string, error) {
 	}
 	p.prices.put(key, id)
 	return id, nil
+}
+
+func (p *Provider) reconcileProduct(
+	ctx context.Context,
+	productID string,
+	plan plans.Plan,
+) error {
+	if err := validateStripeResourceID(productID, "prod_"); err != nil {
+		return fmt.Errorf("stripe: invalid product id for plan %s: %w", plan.ID, err)
+	}
+	var product struct {
+		ID       string            `json:"id"`
+		Name     string            `json:"name"`
+		Metadata map[string]string `json:"metadata"`
+	}
+	path := "/v1/products/" + url.PathEscape(productID)
+	if err := p.call(ctx, "GET", path, nil, "", &product); err != nil {
+		return err
+	}
+	wantName := "Witself " + plan.Name
+	if product.ID != productID {
+		return errors.New("stripe: product lookup returned a different object")
+	}
+	if product.Name == wantName && product.Metadata["witself_plan"] == plan.ID {
+		return nil
+	}
+	digest := sha256.Sum256([]byte(wantName + "\x00" + plan.ID))
+	var updated struct {
+		ID       string            `json:"id"`
+		Name     string            `json:"name"`
+		Metadata map[string]string `json:"metadata"`
+	}
+	if err := p.call(ctx, "POST", path, url.Values{
+		"name":                   {wantName},
+		"metadata[witself_plan]": {plan.ID},
+	}, fmt.Sprintf("witself-product-sync-%s-%x", plan.ID, digest[:8]), &updated); err != nil {
+		return err
+	}
+	if updated.ID != productID || updated.Name != wantName ||
+		updated.Metadata["witself_plan"] != plan.ID {
+		return errors.New("stripe: product update did not confirm catalog identity")
+	}
+	return nil
 }
 
 // createPrice mints a monthly recurring price carrying the plan's
@@ -373,13 +456,17 @@ func (p *Provider) subscribe(
 		ExpiresAt int64  `json:"expires_at"`
 	}
 	params := url.Values{
-		"mode":                    {"subscription"},
-		"customer":                {customerID},
-		"line_items[0][price]":    {priceID},
-		"line_items[0][quantity]": {"1"},
-		"success_url":             {p.cfg.SuccessURL},
-		"cancel_url":              {p.cfg.CancelURL},
-		"metadata[witself_plan]":  {plan},
+		"mode": {"subscription"},
+		// Pin the purchase flow to synchronous cards. Leaving this absent lets
+		// mutable Dashboard settings add delayed-notification methods; a
+		// completed-but-unpaid Checkout cannot be safely reported cancelled.
+		"payment_method_types[]":                    {"card"},
+		"customer":                                  {customerID},
+		"line_items[0][price]":                      {priceID},
+		"line_items[0][quantity]":                   {"1"},
+		"success_url":                               {p.cfg.SuccessURL},
+		"cancel_url":                                {p.cfg.CancelURL},
+		"metadata[witself_plan]":                    {plan},
 		"subscription_data[metadata][witself_plan]": {plan},
 	}
 	idempotencyKey := ""
@@ -392,13 +479,16 @@ func (p *Provider) subscribe(
 	if err != nil {
 		return billing.Action{}, err
 	}
-	if session.ID == "" || session.URL == "" || session.ExpiresAt <= 0 {
-		return billing.Action{}, errors.New(
-			"stripe: subscription checkout response missing id, url, or expires_at")
+	expiresAt := time.Unix(session.ExpiresAt, 0).UTC()
+	if err := validateStripeCheckoutAction(
+		session.ID, session.URL, expiresAt, p.cfg.Now(),
+	); err != nil {
+		return billing.Action{}, fmt.Errorf(
+			"stripe: invalid subscription checkout response: %w", err)
 	}
 	return billing.Action{
 		URL: session.URL, ProviderObjectID: session.ID,
-		ExpiresAt: time.Unix(session.ExpiresAt, 0).UTC(),
+		ExpiresAt: expiresAt,
 	}, nil
 }
 
@@ -432,11 +522,12 @@ func (p *Provider) setupLink(
 		ExpiresAt int64  `json:"expires_at"`
 	}
 	params := url.Values{
-		"mode":        {"setup"},
-		"customer":    {customerID},
-		"currency":    {"usd"}, // required in setup mode (no line items to infer it from)
-		"success_url": {p.cfg.SuccessURL},
-		"cancel_url":  {p.cfg.CancelURL},
+		"mode":                   {"setup"},
+		"payment_method_types[]": {"card"},
+		"customer":               {customerID},
+		"currency":               {"usd"}, // required in setup mode (no line items to infer it from)
+		"success_url":            {p.cfg.SuccessURL},
+		"cancel_url":             {p.cfg.CancelURL},
 	}
 	idempotencyKey := ""
 	if operationID != "" {
@@ -447,25 +538,33 @@ func (p *Provider) setupLink(
 	if err != nil {
 		return billing.Action{}, err
 	}
-	if session.ID == "" || session.URL == "" || session.ExpiresAt <= 0 {
-		return billing.Action{}, errors.New(
-			"stripe: setup checkout response missing id, url, or expires_at")
+	expiresAt := time.Unix(session.ExpiresAt, 0).UTC()
+	if err := validateStripeCheckoutAction(
+		session.ID, session.URL, expiresAt, p.cfg.Now(),
+	); err != nil {
+		return billing.Action{}, fmt.Errorf(
+			"stripe: invalid setup checkout response: %w", err)
 	}
 	return billing.Action{
 		URL: session.URL, ProviderObjectID: session.ID,
-		ExpiresAt: time.Unix(session.ExpiresAt, 0).UTC(),
+		ExpiresAt: expiresAt,
 	}, nil
 }
 
-// PortalLink implements billing.Provider: a hosted customer-portal session
-// (the default portal configuration — activated in the dashboard).
+// PortalLink implements billing.Provider using one explicitly reviewed portal
+// configuration. The mutable account-wide default is never used.
 func (p *Provider) PortalLink(ctx context.Context, customerID string) (string, error) {
+	if err := validateStripeResourceID(p.cfg.PortalConfigurationID, "bpc_"); err != nil {
+		return "", fmt.Errorf(
+			"stripe: safe billing portal configuration is not configured: %w", err)
+	}
 	var session struct {
 		URL string `json:"url"`
 	}
 	err := p.call(ctx, "POST", "/v1/billing_portal/sessions", url.Values{
-		"customer":   {customerID},
-		"return_url": {p.cfg.PortalReturnURL},
+		"customer":      {customerID},
+		"return_url":    {p.cfg.PortalReturnURL},
+		"configuration": {p.cfg.PortalConfigurationID},
 	}, "", &session)
 	if err != nil {
 		return "", err
@@ -478,6 +577,7 @@ func (p *Provider) PortalLink(ctx context.Context, customerID string) (string, e
 // it was removed from the subscription top level.
 type stripeSubscription struct {
 	ID                string            `json:"id"`
+	Customer          string            `json:"customer"`
 	Status            string            `json:"status"`
 	CancelAtPeriodEnd bool              `json:"cancel_at_period_end"`
 	Metadata          map[string]string `json:"metadata"`
@@ -508,6 +608,9 @@ func (s stripeSubscription) periodEnd() time.Time {
 }
 
 func (p *Provider) subscriptionPlan(s stripeSubscription) (string, error) {
+	if err := validateStripeResourceID(s.ID, "sub_"); err != nil {
+		return "", fmt.Errorf("stripe: invalid managed subscription id: %w", err)
+	}
 	planID := strings.TrimSpace(s.Metadata["witself_plan"])
 	plan, ok := p.cfg.Catalog.Get(planID)
 	if !ok || !plan.Paid() {
@@ -522,15 +625,24 @@ func (p *Provider) subscriptionPlan(s stripeSubscription) (string, error) {
 	}
 	price := s.Items.Data[0].Price
 	productPlan := strings.TrimSpace(price.Product.Metadata["witself_plan"])
+	if err := validateStripeResourceID(price.ID, "price_"); err != nil {
+		return "", fmt.Errorf(
+			"stripe: subscription %s has invalid price id: %w", s.ID, err)
+	}
 	lookupMatches := price.LookupKey == lookupKey(planID)
 	productMatches := productPlan == planID
-	if price.ID == "" ||
-		(price.LookupKey != "" && !lookupMatches) ||
+	if (price.LookupKey != "" && !lookupMatches) ||
 		(productPlan != "" && !productMatches) ||
 		(!lookupMatches && !productMatches) {
 		return "", fmt.Errorf(
 			"stripe: subscription %s price does not match plan %q",
 			s.ID, planID)
+	}
+	if productMatches {
+		if err := validateStripeResourceID(price.Product.ID, "prod_"); err != nil {
+			return "", fmt.Errorf(
+				"stripe: subscription %s has invalid product id: %w", s.ID, err)
+		}
 	}
 	return planID, nil
 }
@@ -559,6 +671,11 @@ func (p *Provider) liveSubscriptions(ctx context.Context, customerID string) ([]
 	}
 	live := list.Data[:0]
 	for _, s := range list.Data {
+		if s.Customer != customerID {
+			return nil, fmt.Errorf(
+				"stripe: subscription %s belongs to unexpected customer %q",
+				s.ID, s.Customer)
+		}
 		switch s.Status {
 		case "active", "trialing", "past_due", "unpaid":
 			live = append(live, s)
@@ -603,7 +720,8 @@ func (p *Provider) managedLiveSubscription(
 // ambiguous provider state and fails closed for operator reconciliation;
 // paid-to-paid needs subscription schedules and lands with the Team tier.
 func (p *Provider) ScheduleDowngrade(ctx context.Context, customerID, plan string) (time.Time, error) {
-	return p.scheduleDowngrade(ctx, customerID, plan, "")
+	scheduled, err := p.scheduleDowngrade(ctx, customerID, plan, "")
+	return scheduled.Effective, err
 }
 
 // ScheduleDowngradeIdempotent applies one durable downgrade operation. The
@@ -615,6 +733,19 @@ func (p *Provider) ScheduleDowngradeIdempotent(
 ) (time.Time, error) {
 	if err := billing.ValidateOperationID(operationID); err != nil {
 		return time.Time{}, fmt.Errorf("stripe: downgrade: %w", err)
+	}
+	scheduled, err := p.scheduleDowngrade(ctx, customerID, plan, operationID)
+	return scheduled.Effective, err
+}
+
+// ScheduleDowngradeExactIdempotent returns the exact subscription armed for
+// period-end cancellation in addition to the effective boundary.
+func (p *Provider) ScheduleDowngradeExactIdempotent(
+	ctx context.Context,
+	customerID, plan, operationID string,
+) (billing.ScheduledDowngrade, error) {
+	if err := billing.ValidateOperationID(operationID); err != nil {
+		return billing.ScheduledDowngrade{}, fmt.Errorf("stripe: downgrade: %w", err)
 	}
 	return p.scheduleDowngrade(ctx, customerID, plan, operationID)
 }
@@ -629,31 +760,53 @@ func (*Provider) SupportsDowngradeTarget(plan string) bool {
 func (p *Provider) scheduleDowngrade(
 	ctx context.Context,
 	customerID, plan, operationID string,
-) (time.Time, error) {
+) (billing.ScheduledDowngrade, error) {
 	if plan != plans.Free {
-		return time.Time{}, fmt.Errorf("stripe: downgrade to %q not supported yet (only free; paid-to-paid lands with the Team tier)", plan)
+		return billing.ScheduledDowngrade{}, fmt.Errorf("stripe: downgrade to %q not supported yet (only free; paid-to-paid lands with the Team tier)", plan)
 	}
 	sub, _, err := p.managedLiveSubscription(ctx, customerID)
 	if err != nil {
-		return time.Time{}, err
+		return billing.ScheduledDowngrade{}, err
 	}
 	if sub == nil {
-		return time.Time{}, fmt.Errorf("stripe: customer %s has no live subscription", customerID)
+		return billing.ScheduledDowngrade{}, fmt.Errorf("stripe: customer %s has no live subscription", customerID)
+	}
+	if err := validateStripeResourceID(sub.ID, "sub_"); err != nil {
+		return billing.ScheduledDowngrade{}, fmt.Errorf(
+			"stripe: invalid managed subscription id: %w", err)
 	}
 	effective := sub.periodEnd()
 	if effective.IsZero() || !effective.After(p.cfg.Now().UTC()) {
-		return time.Time{}, fmt.Errorf(
+		return billing.ScheduledDowngrade{}, fmt.Errorf(
 			"stripe: subscription %s has no future current period end", sub.ID)
 	}
 	// Validate all provider state before the mutation. A missing Basil
 	// item-level current_period_end must not arm cancellation and only then
 	// return an epoch effective time.
-	if err := p.call(ctx, "POST", "/v1/subscriptions/"+sub.ID, url.Values{
-		"cancel_at_period_end": {"true"},
-	}, childIdempotencyKey(operationID, "downgrade", sub.ID), nil); err != nil {
-		return time.Time{}, err
+	params := url.Values{"cancel_at_period_end": {"true"}}
+	if operationID != "" {
+		params.Set("metadata[witself_pending_downgrade_operation_id]", operationID)
 	}
-	return effective, nil
+	var armed struct {
+		ID                string            `json:"id"`
+		Customer          string            `json:"customer"`
+		CancelAtPeriodEnd bool              `json:"cancel_at_period_end"`
+		Metadata          map[string]string `json:"metadata"`
+	}
+	if err := p.call(ctx, "POST", "/v1/subscriptions/"+sub.ID, params,
+		childIdempotencyKey(operationID, "downgrade", sub.ID), &armed); err != nil {
+		return billing.ScheduledDowngrade{}, err
+	}
+	if armed.ID != sub.ID || armed.Customer != customerID ||
+		!armed.CancelAtPeriodEnd ||
+		(operationID != "" &&
+			armed.Metadata["witself_pending_downgrade_operation_id"] != operationID) {
+		return billing.ScheduledDowngrade{}, errors.New(
+			"stripe: subscription response did not confirm exact period-end schedule")
+	}
+	return billing.ScheduledDowngrade{
+		Effective: effective, ProviderObjectID: sub.ID,
+	}, nil
 }
 
 // CancelPending implements billing.Provider: undo whatever the pending
@@ -681,6 +834,121 @@ func (p *Provider) CancelPendingIdempotent(
 	return p.cancelPending(ctx, customerID, operationID)
 }
 
+// CancelPendingObjectIdempotent inspects and disarms one exact object. A
+// completed Checkout is deliberately an error: reporting it as cancelled
+// would let the lifecycle clear local pending state before its activation
+// webhook arrives.
+func (p *Provider) CancelPendingObjectIdempotent(
+	ctx context.Context,
+	customerID string,
+	target billing.PendingCancellation,
+	operationID string,
+) error {
+	if err := billing.ValidateOperationID(operationID); err != nil {
+		return fmt.Errorf("stripe: exact cancel: %w", err)
+	}
+	if err := billing.ValidateOperationID(target.OriginalOperationID); err != nil {
+		return fmt.Errorf("stripe: exact cancel original operation: %w", err)
+	}
+	switch target.Kind {
+	case billing.PendingCancellationHostedAction:
+		if err := validateStripeResourceID(target.ProviderObjectID, "cs_"); err != nil {
+			return fmt.Errorf("stripe: exact checkout cancel: %w", err)
+		}
+		var session struct {
+			ID       string            `json:"id"`
+			Customer string            `json:"customer"`
+			Mode     string            `json:"mode"`
+			Status   string            `json:"status"`
+			Metadata map[string]string `json:"metadata"`
+		}
+		path := "/v1/checkout/sessions/" + url.PathEscape(target.ProviderObjectID)
+		if err := p.call(ctx, "GET", path, nil, "", &session); err != nil {
+			return err
+		}
+		if session.ID != target.ProviderObjectID || session.Customer != customerID ||
+			session.Mode != "subscription" ||
+			session.Metadata["witself_operation_id"] != target.OriginalOperationID {
+			return errors.New("stripe: exact checkout cancellation target mismatch")
+		}
+		switch session.Status {
+		case "expired":
+			return nil
+		case "open":
+			var expired struct {
+				ID       string `json:"id"`
+				Customer string `json:"customer"`
+				Status   string `json:"status"`
+			}
+			if err := p.call(
+				ctx, "POST", path+"/expire", url.Values{},
+				childIdempotencyKey(
+					operationID, "cancel-checkout", target.ProviderObjectID),
+				&expired); err != nil {
+				return err
+			}
+			if expired.ID != target.ProviderObjectID ||
+				expired.Customer != customerID || expired.Status != "expired" {
+				return errors.New(
+					"stripe: checkout expiry response did not confirm exact cancellation")
+			}
+			return nil
+		case "complete":
+			return fmt.Errorf(
+				"stripe: checkout already completed; awaiting provider reconciliation: %w",
+				billing.ErrPendingAlreadyResolved)
+		default:
+			return fmt.Errorf(
+				"stripe: unsupported checkout status %q during cancellation",
+				session.Status)
+		}
+	case billing.PendingCancellationPeriodEnd:
+		if err := validateStripeResourceID(target.ProviderObjectID, "sub_"); err != nil {
+			return fmt.Errorf("stripe: exact period-end cancel: %w", err)
+		}
+		var sub struct {
+			ID                string            `json:"id"`
+			Customer          string            `json:"customer"`
+			CancelAtPeriodEnd bool              `json:"cancel_at_period_end"`
+			Metadata          map[string]string `json:"metadata"`
+		}
+		path := "/v1/subscriptions/" + url.PathEscape(target.ProviderObjectID)
+		if err := p.call(ctx, "GET", path, nil, "", &sub); err != nil {
+			return err
+		}
+		if sub.ID != target.ProviderObjectID || sub.Customer != customerID ||
+			sub.Metadata["witself_pending_downgrade_operation_id"] !=
+				target.OriginalOperationID {
+			return errors.New("stripe: exact period-end cancellation target mismatch")
+		}
+		if !sub.CancelAtPeriodEnd {
+			return nil
+		}
+		var disarmed struct {
+			ID                string            `json:"id"`
+			Customer          string            `json:"customer"`
+			CancelAtPeriodEnd bool              `json:"cancel_at_period_end"`
+			Metadata          map[string]string `json:"metadata"`
+		}
+		if err := p.call(ctx, "POST", path, url.Values{
+			"cancel_at_period_end": {"false"},
+		}, childIdempotencyKey(
+			operationID, "cancel-subscription", target.ProviderObjectID), &disarmed); err != nil {
+			return err
+		}
+		if disarmed.ID != target.ProviderObjectID ||
+			disarmed.Customer != customerID || disarmed.CancelAtPeriodEnd ||
+			disarmed.Metadata["witself_pending_downgrade_operation_id"] !=
+				target.OriginalOperationID {
+			return errors.New(
+				"stripe: subscription response did not confirm exact period-end cancellation")
+		}
+		return nil
+	default:
+		return errors.New("stripe: unsupported exact cancellation target")
+	}
+}
+
 func (p *Provider) cancelPending(
 	ctx context.Context,
 	customerID, operationID string,
@@ -690,24 +958,42 @@ func (p *Provider) cancelPending(
 			ID   string `json:"id"`
 			Mode string `json:"mode"`
 		} `json:"data"`
+		HasMore bool `json:"has_more"`
 	}
 	q := url.Values{"customer": {customerID}, "status": {"open"}, "limit": {"100"}}
 	if err := p.call(ctx, "GET", "/v1/checkout/sessions?"+q.Encode(), nil, "", &sessions); err != nil {
 		return err
 	}
+	if sessions.HasMore {
+		return errors.New(
+			"stripe: more than 100 open Checkout Sessions; refusing partial cancellation")
+	}
 	for _, s := range sessions.Data {
 		if s.Mode != "subscription" {
 			continue // leave setup-mode (card capture) links alone
 		}
+		if err := validateStripeResourceID(s.ID, "cs_"); err != nil {
+			return fmt.Errorf("stripe: invalid legacy Checkout Session id: %w", err)
+		}
+		var expired struct {
+			ID       string `json:"id"`
+			Customer string `json:"customer"`
+			Status   string `json:"status"`
+		}
 		if err := p.call(
 			ctx,
 			"POST",
-			"/v1/checkout/sessions/"+s.ID+"/expire",
+			"/v1/checkout/sessions/"+url.PathEscape(s.ID)+"/expire",
 			url.Values{},
 			childIdempotencyKey(operationID, "cancel-checkout", s.ID),
-			nil,
+			&expired,
 		); err != nil {
 			return err
+		}
+		if expired.ID != s.ID || expired.Customer != customerID ||
+			expired.Status != "expired" {
+			return errors.New(
+				"stripe: legacy Checkout response did not confirm cancellation")
 		}
 	}
 	subs, err := p.liveSubscriptions(ctx, customerID)
@@ -718,10 +1004,24 @@ func (p *Provider) cancelPending(
 		if !sub.CancelAtPeriodEnd {
 			continue
 		}
-		if err := p.call(ctx, "POST", "/v1/subscriptions/"+sub.ID, url.Values{
+		if err := validateStripeResourceID(sub.ID, "sub_"); err != nil {
+			return fmt.Errorf("stripe: invalid legacy subscription id: %w", err)
+		}
+		var disarmed struct {
+			ID                string `json:"id"`
+			Customer          string `json:"customer"`
+			CancelAtPeriodEnd bool   `json:"cancel_at_period_end"`
+		}
+		if err := p.call(ctx, "POST", "/v1/subscriptions/"+url.PathEscape(sub.ID), url.Values{
 			"cancel_at_period_end": {"false"},
-		}, childIdempotencyKey(operationID, "cancel-subscription", sub.ID), nil); err != nil {
+		}, childIdempotencyKey(
+			operationID, "cancel-subscription", sub.ID), &disarmed); err != nil {
 			return err
+		}
+		if disarmed.ID != sub.ID || disarmed.Customer != customerID ||
+			disarmed.CancelAtPeriodEnd {
+			return errors.New(
+				"stripe: legacy subscription response did not confirm cancellation")
 		}
 	}
 	return nil
@@ -794,11 +1094,12 @@ func (p *Provider) HandleWebhook(r *http.Request) ([]billing.Event, error) {
 			return []billing.Event{}, nil // setup-mode completion: card captured, no entitlement change
 		}
 		if s.PaymentStatus != "paid" {
-			// A delayed-notification method (ACH debit, SEPA): the session
-			// completed but the money has not moved. Entitle nothing yet —
-			// checkout.session.async_payment_succeeded lands here again with
-			// payment_status=paid when it clears, and a failure never
-			// entitles at all (the Manager's pending TTL cleans up).
+			// New Witself Checkout sessions explicitly allow only synchronous
+			// cards, so this is defensive compatibility for a pre-change or
+			// externally-created delayed-notification session. Entitle nothing;
+			// async success may later activate it, while an ambiguous failure
+			// remains fenced for operator reconciliation rather than being
+			// reported as a successful cancellation.
 			return []billing.Event{}, nil
 		}
 		plan := s.Metadata["witself_plan"]
@@ -814,7 +1115,7 @@ func (p *Provider) HandleWebhook(r *http.Request) ([]billing.Event, error) {
 		return []billing.Event{e}, nil
 
 	case "invoice.payment_failed":
-		ref, err := objectReferenceFrom(event.Data.Object)
+		ref, err := invoiceReferenceFrom(event.Data.Object)
 		if err != nil {
 			return nil, err
 		}
@@ -828,7 +1129,7 @@ func (p *Provider) HandleWebhook(r *http.Request) ([]billing.Event, error) {
 		return []billing.Event{e}, nil
 
 	case "invoice.paid":
-		ref, err := objectReferenceFrom(event.Data.Object)
+		ref, err := invoiceReferenceFrom(event.Data.Object)
 		if err != nil {
 			return nil, err
 		}
@@ -881,6 +1182,62 @@ func objectReferenceFrom(raw json.RawMessage) (stripeObjectReference, error) {
 		return stripeObjectReference{}, errors.New("stripe: event object has no customer")
 	}
 	return ref, nil
+}
+
+// invoiceReferenceFrom supports both the Basil invoice shape and historical
+// webhook endpoints. Basil removed invoice.subscription in favor of
+// parent.subscription_details.subscription. A dual-shaped event must agree;
+// otherwise using it as a dunning fence would be arrival-order dependent.
+func invoiceReferenceFrom(raw json.RawMessage) (stripeObjectReference, error) {
+	var invoice struct {
+		ID           string `json:"id"`
+		Customer     string `json:"customer"`
+		Subscription string `json:"subscription"`
+		Parent       *struct {
+			Type                string `json:"type"`
+			SubscriptionDetails *struct {
+				Subscription string `json:"subscription"`
+			} `json:"subscription_details"`
+		} `json:"parent"`
+	}
+	if err := json.Unmarshal(raw, &invoice); err != nil {
+		return stripeObjectReference{}, fmt.Errorf(
+			"stripe: decode invoice event object: %w", err)
+	}
+	if invoice.Customer == "" {
+		return stripeObjectReference{}, errors.New(
+			"stripe: invoice event object has no customer")
+	}
+	nested := ""
+	if invoice.Parent != nil {
+		switch invoice.Parent.Type {
+		case "subscription_details":
+			if invoice.Parent.SubscriptionDetails == nil ||
+				invoice.Parent.SubscriptionDetails.Subscription == "" {
+				return stripeObjectReference{}, errors.New(
+					"stripe: subscription invoice parent has no subscription")
+			}
+			nested = invoice.Parent.SubscriptionDetails.Subscription
+		default:
+			if invoice.Parent.SubscriptionDetails != nil &&
+				invoice.Parent.SubscriptionDetails.Subscription != "" {
+				return stripeObjectReference{}, errors.New(
+					"stripe: invoice parent type conflicts with subscription details")
+			}
+		}
+	}
+	if invoice.Subscription != "" && nested != "" &&
+		invoice.Subscription != nested {
+		return stripeObjectReference{}, errors.New(
+			"stripe: invoice subscription references disagree")
+	}
+	if nested != "" {
+		invoice.Subscription = nested
+	}
+	return stripeObjectReference{
+		ID: invoice.ID, Customer: invoice.Customer,
+		Subscription: invoice.Subscription,
+	}, nil
 }
 
 // ResolveEvent implements billing.EventResolver. Every entitlement or dunning
