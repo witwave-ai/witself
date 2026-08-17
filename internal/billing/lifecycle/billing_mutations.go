@@ -315,7 +315,7 @@ func (m *Manager) ExecuteBillingMutation(
 			return BillingMutationExecution{}, ErrBillingMutationConflict
 		}
 		if stored.Status == BillingMutationCompleted {
-			return billingExecutionFromReceipt(stored, true)
+			return billingExecutionFromReceipt(stored, true, m.cfg.Now().UTC())
 		}
 		if stored.Status == BillingMutationSuperseded {
 			return BillingMutationExecution{}, ErrBillingMutationSuperseded
@@ -451,7 +451,8 @@ func (m *Manager) ExecuteBillingMutation(
 			if getErr == nil && currentOK &&
 				current.Status == BillingMutationCompleted {
 				releaseAccount()
-				return billingExecutionFromReceipt(current, !created)
+				return billingExecutionFromReceipt(
+					current, !created, m.cfg.Now().UTC())
 			}
 			if getErr != nil {
 				return BillingMutationExecution{}, getErr
@@ -459,7 +460,8 @@ func (m *Manager) ExecuteBillingMutation(
 			return BillingMutationExecution{}, completeErr
 		}
 		releaseAccount()
-		return billingExecutionFromReceipt(completed, !created)
+		return billingExecutionFromReceipt(
+			completed, !created, m.cfg.Now().UTC())
 	}
 
 	// A crash can occur after the account fold but before receipt completion.
@@ -511,6 +513,8 @@ func (m *Manager) executeClaimedBillingMutation(
 		}
 		return BillingMutationResult{
 			Kind: BillingMutationResultAction, URL: action.URL,
+			ProviderObjectID: action.ProviderObjectID,
+			ActionExpiresAt:  timePointer(action.ExpiresAt),
 		}, nil
 	case BillingMutationExecutionUpgradeContact,
 		BillingMutationExecutionUpgradeSelfServe:
@@ -575,9 +579,12 @@ func (m *Manager) recoverBillingMutation(
 					Kind: BillingMutationResultContact, Plan: receipt.TargetPlan,
 				}, true, nil
 			case r.Pending.Kind == PendingUpgrade && r.Pending.URL != "":
+				expires := r.Pending.Expires
 				return BillingMutationResult{
 					Kind: BillingMutationResultAction,
 					Plan: receipt.TargetPlan, URL: r.Pending.URL,
+					ProviderObjectID: r.Pending.ProviderObjectID,
+					ActionExpiresAt:  &expires,
 				}, true, nil
 			}
 		}
@@ -931,6 +938,11 @@ func billingMutationOperationID(accountID, idempotencyKey string) string {
 func billingResultFromOutcome(out Outcome) BillingMutationResult {
 	result := BillingMutationResult{
 		Kind: BillingMutationResultKind(out.Kind), Plan: out.Plan, URL: out.URL,
+		ProviderObjectID: out.ProviderObjectID,
+	}
+	if !out.ActionExpiresAt.IsZero() {
+		expires := out.ActionExpiresAt
+		result.ActionExpiresAt = &expires
 	}
 	if !out.Effective.IsZero() {
 		effective := out.Effective
@@ -939,14 +951,29 @@ func billingResultFromOutcome(out Outcome) BillingMutationResult {
 	return result
 }
 
+func timePointer(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+	cloned := value
+	return &cloned
+}
+
 func billingExecutionFromReceipt(
 	receipt BillingMutationReceipt,
 	replayed bool,
+	now time.Time,
 ) (BillingMutationExecution, error) {
 	if receipt.Status != BillingMutationCompleted || receipt.Result == nil {
 		return BillingMutationExecution{}, errors.New("lifecycle: billing mutation is not completed")
 	}
 	result := receipt.Result
+	if result.Kind == BillingMutationResultAction &&
+		result.ActionExpiresAt != nil &&
+		!now.Before(*result.ActionExpiresAt) {
+		return BillingMutationExecution{}, refuse(
+			"hosted billing action expired; start a new request with a new idempotency key")
+	}
 	out := Outcome{
 		Kind: string(result.Kind), Plan: result.Plan, URL: result.URL,
 	}

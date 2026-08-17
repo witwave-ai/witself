@@ -121,6 +121,31 @@ func TestBillingMutationSetupExactReplayAndConflict(t *testing.T) {
 	}
 }
 
+func TestBillingExecutionNeverReplaysExpiredHostedAction(t *testing.T) {
+	t.Parallel()
+	expires := time.Date(2026, 8, 17, 13, 0, 0, 0, time.UTC)
+	receipt := BillingMutationReceipt{
+		Status: BillingMutationCompleted,
+		Result: &BillingMutationResult{
+			Kind:             BillingMutationResultAction,
+			URL:              "https://checkout.stripe.com/c/pay/cs_test_expiring",
+			ProviderObjectID: "cs_test_expiring",
+			ActionExpiresAt:  &expires,
+		},
+	}
+	if execution, err := billingExecutionFromReceipt(
+		receipt, true, expires.Add(-time.Nanosecond),
+	); err != nil || execution.Outcome.URL != receipt.Result.URL {
+		t.Fatalf("pre-expiry replay = %+v, %v", execution, err)
+	}
+	for _, now := range []time.Time{expires, expires.Add(time.Second)} {
+		if _, err := billingExecutionFromReceipt(receipt, true, now); !errors.Is(err, ErrRefusal) ||
+			!strings.Contains(err.Error(), "new idempotency key") {
+			t.Fatalf("expired replay at %v error = %v", now, err)
+		}
+	}
+}
+
 func TestBillingMutationRequiresReasonConfirmationAndRetryKey(t *testing.T) {
 	manager, _, _ := newBillingMutationManager(t, false)
 	base := BillingMutationCommand{

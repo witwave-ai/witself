@@ -134,6 +134,7 @@ func (s *stubStripe) handle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	periodEnd := time.Date(2026, 8, 4, 0, 0, 0, 0, time.UTC).Unix()
+	checkoutExpires := time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC).Unix()
 	switch {
 	case r.URL.Path == "/v1/prices" && r.Method == http.MethodGet:
 		key := r.URL.Query().Get("lookup_keys[]")
@@ -185,8 +186,8 @@ func (s *stubStripe) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		s.checkoutSeq++
 		response := fmt.Sprintf(
-			`{"url":"https://checkout.stripe.com/c/pay/cs_test_stub_%d"}`,
-			s.checkoutSeq,
+			`{"id":"cs_test_stub_%d","url":"https://checkout.stripe.com/c/pay/cs_test_stub_%d","expires_at":%d}`,
+			s.checkoutSeq, s.checkoutSeq, checkoutExpires,
 		)
 		if s.lastIdem != "" {
 			s.checkoutOps[s.lastIdem] = checkoutReplay{
@@ -406,6 +407,9 @@ func TestSubscribeBuildsCheckout(t *testing.T) {
 	if err != nil || act.Done || !strings.Contains(act.URL, "checkout.stripe.com") {
 		t.Fatalf("Subscribe = %+v, %v; want a checkout URL", act, err)
 	}
+	if act.ProviderObjectID == "" || !act.ExpiresAt.After(p.cfg.Now()) {
+		t.Fatalf("Subscribe hosted action lacks exact object/expiry: %+v", act)
+	}
 	if s.lastForm["mode"] != "subscription" || s.lastForm["customer"] != "cus_stub_1" {
 		t.Fatalf("checkout form = %v", s.lastForm)
 	}
@@ -444,6 +448,9 @@ func TestSetupLinkIdempotentBindsReplaysAndRejectsConflict(t *testing.T) {
 	first, err := p.SetupLinkIdempotent(ctx, "cus_stub_1", "bop_setup_1")
 	if err != nil || first.Done || !strings.Contains(first.URL, "checkout.stripe.com") {
 		t.Fatalf("first SetupLinkIdempotent = %+v, %v", first, err)
+	}
+	if first.ProviderObjectID == "" || !first.ExpiresAt.After(p.cfg.Now()) {
+		t.Fatalf("setup hosted action lacks exact object/expiry: %+v", first)
 	}
 	if s.lastIdem != "witself-setup-bop_setup_1" {
 		t.Fatalf("Idempotency-Key = %q", s.lastIdem)

@@ -368,7 +368,9 @@ func (p *Provider) subscribe(
 		return billing.Action{}, err
 	}
 	var session struct {
-		URL string `json:"url"`
+		ID        string `json:"id"`
+		URL       string `json:"url"`
+		ExpiresAt int64  `json:"expires_at"`
 	}
 	params := url.Values{
 		"mode":                    {"subscription"},
@@ -390,7 +392,14 @@ func (p *Provider) subscribe(
 	if err != nil {
 		return billing.Action{}, err
 	}
-	return billing.Action{URL: session.URL}, nil
+	if session.ID == "" || session.URL == "" || session.ExpiresAt <= 0 {
+		return billing.Action{}, errors.New(
+			"stripe: subscription checkout response missing id, url, or expires_at")
+	}
+	return billing.Action{
+		URL: session.URL, ProviderObjectID: session.ID,
+		ExpiresAt: time.Unix(session.ExpiresAt, 0).UTC(),
+	}, nil
 }
 
 // SetupLink implements billing.Provider: a Checkout session in setup mode
@@ -418,7 +427,9 @@ func (p *Provider) setupLink(
 	customerID, operationID string,
 ) (billing.Action, error) {
 	var session struct {
-		URL string `json:"url"`
+		ID        string `json:"id"`
+		URL       string `json:"url"`
+		ExpiresAt int64  `json:"expires_at"`
 	}
 	params := url.Values{
 		"mode":        {"setup"},
@@ -436,7 +447,14 @@ func (p *Provider) setupLink(
 	if err != nil {
 		return billing.Action{}, err
 	}
-	return billing.Action{URL: session.URL}, nil
+	if session.ID == "" || session.URL == "" || session.ExpiresAt <= 0 {
+		return billing.Action{}, errors.New(
+			"stripe: setup checkout response missing id, url, or expires_at")
+	}
+	return billing.Action{
+		URL: session.URL, ProviderObjectID: session.ID,
+		ExpiresAt: time.Unix(session.ExpiresAt, 0).UTC(),
+	}, nil
 }
 
 // PortalLink implements billing.Provider: a hosted customer-portal session

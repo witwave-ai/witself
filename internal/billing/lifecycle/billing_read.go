@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/witwave-ai/witself/internal/billing"
 )
@@ -135,11 +136,7 @@ func (m *Manager) CreateBillingSetup(
 	if err != nil {
 		return billing.Action{}, wrapProviderRequest(err)
 	}
-	validURL := action.URL != "" && validBillingMutationURL(action.URL)
-	switch {
-	case action.Done && action.URL == "":
-	case !action.Done && validURL:
-	default:
+	if !validBillingProviderAction(action, m.cfg.Now().UTC()) {
 		return billing.Action{}, invalidProviderAction("setup")
 	}
 	return action, nil
@@ -174,11 +171,7 @@ func (m *Manager) createBillingSetupMutation(
 	if err != nil {
 		return billing.Action{}, wrapProviderRequest(err)
 	}
-	validURL := action.URL != "" && validBillingMutationURL(action.URL)
-	switch {
-	case action.Done && action.URL == "":
-	case !action.Done && validURL:
-	default:
+	if !validBillingProviderAction(action, m.cfg.Now().UTC()) {
 		return billing.Action{}, invalidProviderAction("setup")
 	}
 	return action, nil
@@ -289,4 +282,17 @@ func wrapProviderRequest(err error) error {
 func invalidProviderAction(kind string) error {
 	return fmt.Errorf("%w: billing provider returned an invalid %s action",
 		ErrProviderRequest, kind)
+}
+
+func validBillingProviderAction(action billing.Action, now time.Time) bool {
+	if action.Done {
+		return action.URL == "" && action.ProviderObjectID == "" &&
+			action.ExpiresAt.IsZero()
+	}
+	if !validBillingMutationURL(action.URL) ||
+		len(action.ProviderObjectID) > 255 ||
+		strings.TrimSpace(action.ProviderObjectID) != action.ProviderObjectID {
+		return false
+	}
+	return action.ExpiresAt.IsZero() || action.ExpiresAt.After(now)
 }

@@ -84,10 +84,14 @@ type Pending struct {
 	// replaced. It is deliberately false before Subscribe: an ambiguous
 	// Subscribe failure must be retried with OperationID, not canceled.
 	CancelPrevious bool
-	URL            string    // upgrade: where the payer completes checkout
-	Expires        time.Time // upgrade: when the request lapses
-	Effective      time.Time // downgrade: when it takes effect
-	Requested      time.Time
+	URL            string // upgrade: where the payer completes checkout
+	// ProviderObjectID is the exact hosted checkout object behind URL. It is
+	// never returned to the customer, but survives a control-plane restart so
+	// cleanup can target the original provider object.
+	ProviderObjectID string
+	Expires          time.Time // upgrade: provider/local request expiry
+	Effective        time.Time // downgrade: when it takes effect
+	Requested        time.Time
 }
 
 func newBillingOperationID() (string, error) {
@@ -424,10 +428,12 @@ type Outcome struct {
 	// Kind: "done" (applied), "action" (continue at URL), "scheduled"
 	// (downgrade at Effective), "cancelled", "resolved" (the targeted pending
 	// state changed before cancellation could fold), or "contact".
-	Kind      string
-	Plan      string
-	URL       string
-	Effective time.Time
+	Kind             string
+	Plan             string
+	URL              string
+	ProviderObjectID string
+	ActionExpiresAt  time.Time
+	Effective        time.Time
 }
 
 // PlanSnapshot is the control plane's resolved account policy. DefaultLimits,
@@ -1986,6 +1992,8 @@ func (m *Manager) requestUpgrade(
 	if reused && claim.Pending.URL != "" {
 		return Outcome{
 			Kind: "action", Plan: target.ID, URL: claim.Pending.URL,
+			ProviderObjectID: claim.Pending.ProviderObjectID,
+			ActionExpiresAt:  claim.Pending.Expires,
 		}, nil
 	}
 
@@ -2046,8 +2054,7 @@ func (m *Manager) requestUpgrade(
 		// only idempotency identity and make the user's retry a second purchase.
 		return Outcome{}, err
 	}
-	validActionURL := act.URL != "" && validBillingMutationURL(act.URL)
-	if (act.Done && act.URL != "") || (!act.Done && !validActionURL) {
+	if !validBillingProviderAction(act, now) {
 		return Outcome{}, invalidProviderAction("subscription")
 	}
 
@@ -2066,6 +2073,10 @@ func (m *Manager) requestUpgrade(
 			r.EntitledAt = now
 		} else {
 			r.Pending.URL = act.URL
+			r.Pending.ProviderObjectID = act.ProviderObjectID
+			if !act.ExpiresAt.IsZero() && act.ExpiresAt.Before(r.Pending.Expires) {
+				r.Pending.Expires = act.ExpiresAt
+			}
 		}
 		return nil
 	})
@@ -2079,7 +2090,11 @@ func (m *Manager) requestUpgrade(
 		_ = m.apply(ctx, folded.AccountID)
 		return Outcome{Kind: "done", Plan: target.ID}, nil
 	}
-	return Outcome{Kind: "action", Plan: target.ID, URL: act.URL}, nil
+	return Outcome{
+		Kind: "action", Plan: target.ID, URL: act.URL,
+		ProviderObjectID: act.ProviderObjectID,
+		ActionExpiresAt:  folded.Pending.Expires,
+	}, nil
 }
 
 // releaseClaim clears the claim we parked if it is still ours — best effort;

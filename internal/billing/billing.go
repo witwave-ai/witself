@@ -30,6 +30,14 @@ import (
 type Action struct {
 	Done bool
 	URL  string // set when !Done; where the payer completes the operation
+	// ProviderObjectID is the exact hosted object backing URL (for Stripe, a
+	// Checkout Session). It remains control-plane internal and lets retries or
+	// cancellation target the original object rather than customer-wide state.
+	ProviderObjectID string
+	// ExpiresAt is the provider's own action expiry. A durable receipt may
+	// replay URL only before this instant; afterward the caller must start a
+	// fresh operation with a new idempotency key.
+	ExpiresAt time.Time
 }
 
 // EventType classifies the normalized webhook events a Provider emits. These
