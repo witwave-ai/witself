@@ -82,8 +82,10 @@ acceptance, and load/quality/defaults gates remain open in
 
 Named security-group fan-out, cross-realm federation, stored
 responsibilities/directives, a backend wake/presence service, large
-attachments, and plan-backed rate/metering integration are separate follow-on
-features. They do not reopen the agreed same-realm foreground slice. The
+attachments, and cross-realm federation are separate follow-on features.
+Plan-backed per-agent, per-realm, and per-recipient rate enforcement is now
+implemented as a later hardening layer. These additions and follow-ons do not
+reopen the agreed same-realm foreground slice. The
 no-wake boundary and model compliance with installed instructions are product
 constraints, not missing adapter code.
 
@@ -374,7 +376,7 @@ The realm-shout path is:
    directive schema.
 3. An offer is advisory and reserves no capacity. Each candidate may send at
    most one current idempotent offer during the bounded offer window, using the
-   ordinary message body/payload ceilings. Future plan-backed rate limits apply
+   ordinary message body/payload ceilings. Current plan-backed rate limits apply
    at this same send boundary. The request enters
    `awaiting_selection` when every candidate responds or the offer deadline
    passes; on Scott's next active turn, Scott uses client-side inference to rank
@@ -691,9 +693,10 @@ available for diagnosis without suppressing the next startup-wide pass.
    renewal, expiry, release, completion, reassignment, and archive interruption.
    This slice consumes current runtime instructions and does not wait for a
    future responsibility/directive schema.
-7. **Platform hardening (deferred; not a core completion blocker)** — add
-   plan-backed rate/meter enforcement, disabled-agent-specific policy,
-   additional metrics, and broader live three-cloud conformance. Core
+7. **Platform hardening (partially complete; not a core completion blocker)** —
+   plan-backed rate/meter enforcement is implemented. Disabled-agent-specific
+   policy, additional metrics, and broader live three-cloud conformance remain.
+   Core
    competing-client races, interruption recovery, audit, and export/import are
    already covered.
 

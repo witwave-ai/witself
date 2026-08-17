@@ -2,6 +2,10 @@
 
 Status: implemented.
 
+That status describes the worker runtime, not every registered job's managed
+rollout. The canonical [Feature Status](feature-status.md) scorecard tracks
+transcript, message, email, avatar, and other job gates independently.
+
 ## Purpose
 
 `witself-worker` is the long-running background-work process for one Witself

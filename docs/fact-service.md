@@ -2,6 +2,10 @@
 
 Status: implemented core slice. Last reviewed 2026-07-13.
 
+“Implemented core” is a behavior claim, not full operational acceptance. See
+the canonical [Feature Status](feature-status.md) scorecard for rollout,
+observability, advanced-policy, and current-canary gates.
+
 Narrative-boundary amendment (accepted 2026-07-14): this implemented fact core
 remains canonical. The target client curator may create evidence-backed fact
 candidates but never promote inferred assertions; portable narrative context

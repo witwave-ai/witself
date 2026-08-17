@@ -5,6 +5,10 @@ has an implemented code/database gate below. The larger 21-case live
 runtime/cloud certification remains a release target and cannot be claimed
 until its harness, deferred runtime injection, and every named live case pass.
 
+The canonical [Feature Status](feature-status.md) scorecard is the
+repository-wide progress view; this document remains the detailed sealed-plane
+acceptance contract.
+
 This is the release gate for the client-custodied agent vault defined by
 [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
 [Client-Custodied Agent Vault](client-custodied-agent-vault.md) plan. Where an

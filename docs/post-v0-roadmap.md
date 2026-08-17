@@ -3,6 +3,10 @@
 Status: draft. This document records features that are intentionally deferred
 from v0. They are product candidates, not first-release blockers.
 
+This roadmap records candidates, not current delivery status. Use the canonical
+[Feature Status](feature-status.md) scorecard for reviewed implementation,
+managed rollout, evidence, and open gates.
+
 Narrative-memory amendment (accepted 2026-07-14): client-side curation and
 client-supplied vector profiles replace backend re-embedding/provider work.
 The roadmap below follows the canonical contract in

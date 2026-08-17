@@ -3,6 +3,11 @@
 Status: draft. Decision: v0 billing is account-level, plan-based, usage-aware,
 and not raw per-call billing at launch.
 
+This document and `web/plans/plans.json` define packaging and resolved account
+behavior, not feature readiness. The canonical [Feature Status](feature-status.md)
+scorecard owns implementation, managed rollout, evidence, and open gates while
+referencing every plan feature, limit, and policy key exactly once.
+
 Narrative-memory amendment (accepted 2026-07-14): Witself may meter vector
 storage/search and curation records, but it performs no billable backend model
 or re-embedding inference. Client model cost stays with the client under
@@ -245,6 +250,8 @@ any audited override; it also does not prove that an edge route or cell cohort
 is live. Canonical inventory and delivery remain behind independent
 default-off gates, and custom-domain request, verification, routing, provider
 onboarding, and delivery are all still dark.
+The [Feature Status](feature-status.md) scorecard is the authoritative progress
+view for those separately gated capabilities.
 
 In this table, an included feature does not imply unbounded throughput or a
 per-message charge. Message rate values and agent-email safety breakers are

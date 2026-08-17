@@ -4,18 +4,26 @@ Status: evolving architecture and implementation reference. Narrative-memory
 sections were reconciled on 2026-07-14; older documents retain explicit
 supersession notices where implementation has moved ahead of the original draft.
 
+Current cross-feature implementation, managed rollout, evidence, and open gates
+are tracked in the canonical [Feature Status](feature-status.md) scorecard.
+Feature documents remain the detailed contracts; their local status paragraphs
+do not replace the repository-wide readiness declaration.
+
 Witself is the agent durable-state platform and the trust fabric agents
 collaborate over: one open plane (memories + facts + avatars, plaintext at rest,
 recallable, in the self-digest, plaintext-exportable) and one sealed plane
 (secrets + TOTP, envelope-encrypted, reveal-gated, never embedded, recalled, in
 the digest, or plaintext-exported). On top of that durable, attributable self,
-Witself adds a cross-realm agent collaboration substrate — a verified, loop-safe
-channel agents work over across machines, realms, and accounts — and runs as a
-multi-cloud platform of independent deployment cells under a thin global control
-plane.
+Witself adds durable same-realm agent messaging and collaboration requests.
+Cross-realm and cross-account federation remain planned work rather than a live
+product claim. Witself runs as a multi-cloud-shaped platform of independent
+deployment cells under a thin global control plane.
 
 ## Product And Architecture
 
+- [feature-status.md](feature-status.md): the generated human view of the
+  canonical feature-progress catalog, with separate implementation and rollout
+  axes, seven non-averaged gates, repository evidence, and concrete open gates.
 - [requirements.md](requirements.md): product requirements, terminology,
   identity posture, billing posture, backend requirements, and settled v0
   decisions.
@@ -129,8 +137,9 @@ plane.
   messages, audit, usage), and sealed-plane tables (secrets, secret_fields,
   secret_grants, totp_enrollments, realm_keys, secret_deks, attachments).
 - [storage.md](storage.md): authoritative PostgreSQL storage, deterministic
-  full-text retrieval, optional client-supplied vectors, object/blob usage, KMS
-  plus realm_keys and secret_deks for the sealed plane, and Goose migrations.
+  full-text retrieval, optional client-supplied vectors, object/blob usage,
+  infrastructure encryption, client-custodied secret envelopes, and Goose
+  migrations.
 - [encryption-model.md](encryption-model.md): the earlier KMS-rooted sealed-plane
   confidentiality draft, superseded for vault custody by ADR 0003.
 - [key-hierarchy.md](key-hierarchy.md): the earlier CMK/realm-KEK hierarchy,

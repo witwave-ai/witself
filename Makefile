@@ -24,7 +24,7 @@ MEMORY_LOAD_QUALITY_COMMIT      ?= $(shell git rev-parse HEAD)
 MEMORY_LOAD_QUALITY_PROVIDER    ?= local
 MEMORY_LOAD_QUALITY_HARDWARE    ?= unspecified
 
-.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality build check check-infra
+.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality feature-status build check check-infra
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:[^#]*## /\t/' | sort
@@ -93,6 +93,9 @@ test-memory-load-quality: ## Run the opt-in deterministic PostgreSQL memory load
 	@go test ./internal/store -run '^TestNarrativeMemoryLoadQualityPostgres$$' \
 			-count=1 -v -timeout 30m
 	@printf 'sanitized result: %s\n' "$$WITSELF_MEMORY_LOAD_QUALITY_RESULTS"
+
+feature-status: ## Regenerate the reviewed feature status scorecard
+	go run ./internal/cmd/render-feature-status
 
 check: ## Run CI's go gates locally (gofmt, vet, build, test -race, golangci-lint) — run before every push
 	@unformatted="$$(gofmt -l .)"; \

@@ -1,6 +1,13 @@
 # ADR 0004: Local Read-Only Agent Dashboard Served By The CLI
 
-Status: accepted; implementation in progress (2026-07-19).
+Status: accepted and implemented (2026-07-20). The command and its current
+panels are generally shipped; cross-platform release acceptance remains a
+tracked operational gate in the canonical [Feature Status](../feature-status.md)
+scorecard.
+
+This per-agent dashboard is not the feature-progress authority. The canonical
+[Feature Status](../feature-status.md) scorecard is repository-wide, and any
+future admin projection must read that source rather than inventing status.
 
 ## Context
 

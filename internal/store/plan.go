@@ -97,6 +97,9 @@ func (s *Store) SetAccountPlan(
 	if features == nil {
 		features = []string{}
 	}
+	if err := plans.ValidateFeatures(features); err != nil {
+		return AccountPlanSnapshot{}, fmt.Errorf("%w: %v", ErrPlanSnapshotInvalid, err)
+	}
 	// Preserve the documented nil-to-empty normalization in the durable JSON
 	// shape. Appending to a nil destination turns an empty slice back into nil
 	// and json.Marshal would emit null instead of [].

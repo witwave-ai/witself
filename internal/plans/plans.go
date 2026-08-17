@@ -27,6 +27,12 @@ const SchemaVersion = "witself.plans.v0"
 const Free = "free"
 
 const (
+	// MemoryFeature enables narrative memory storage and retrieval.
+	MemoryFeature = "memory"
+	// FactsFeature enables the durable fact service.
+	FactsFeature = "facts"
+	// SecretsFeature enables the client-custodied agent vault.
+	SecretsFeature = "secrets"
 	// MessagingFeature enables the durable realm-local agent messaging
 	// surface. Cells enforce this feature from the resolved account snapshot;
 	// clients install the messaging tools once and do not reinstall when the
@@ -51,6 +57,11 @@ const (
 	// Cells trust only the applied route projection and continue to enforce the
 	// separate inbound-email entitlement.
 	AgentEmailCustomDomainFeature = "agent_email_custom_domain"
+	// CollaborationFeature enables the durable same-realm request graph.
+	CollaborationFeature = "collaboration"
+	// SupportFeature declares the managed support entitlement. The support
+	// policy remains a separately resolved, operator-overridable cell control.
+	SupportFeature = "support"
 
 	// RealmLimit caps live realms account-wide.
 	RealmLimit = "realms"
@@ -261,6 +272,63 @@ const (
 	MaxAgentEmailRetentionDays int64 = 36500
 )
 
+var supportedFeatureKeys = []string{
+	AgentEmailCustomDomainFeature,
+	AgentEmailRealmAliasFeature,
+	AgentEmailReceiveFeature,
+	AgentEmailSendFeature,
+	CollaborationFeature,
+	FactsFeature,
+	MemoryFeature,
+	MessagingFeature,
+	SecretsFeature,
+	SupportFeature,
+}
+
+var supportedLimitKeys = []string{
+	AgentEmailAttachmentStorageBytesLimit,
+	AgentEmailCustomDomainsPerAccountLimit,
+	AgentEmailMaxRawBytesLimit,
+	AgentEmailRealmAliasesPerRealmLimit,
+	AgentEmailReceivedBytesPerRealmMinuteLimit,
+	AgentEmailReceivedBytesPerRecipientMinuteLimit,
+	AgentEmailReceivedBytesPerSenderMinuteLimit,
+	AgentEmailReceivedPerRealmMinuteLimit,
+	AgentEmailReceivedPerRecipientMinuteLimit,
+	AgentEmailReceivedPerSenderMinuteLimit,
+	AgentEmailSentPerAgentMinuteLimit,
+	AgentEmailSentPerRealmMinuteLimit,
+	AgentLimit,
+	AgentPerRealmLimit,
+	MessageDeliveredPerRealmMinuteLimit,
+	MessageDeliveredPerRecipientMinuteLimit,
+	MessageSentPerAgentMinuteLimit,
+	RealmLimit,
+	StoredFactLimit,
+	StoredMemoryLimit,
+	StoredSecretLimit,
+}
+
+var supportedPolicyKeys = []string{
+	AgentEmailEntitlementVersionPolicy,
+	AgentEmailRetentionDaysPolicy,
+	MessageRetentionDaysPolicy,
+	MessagingEntitlementVersionPolicy,
+	TranscriptRetentionDaysPolicy,
+}
+
+// SupportedFeatureKeys returns the closed, sorted vocabulary accepted in a
+// resolved account feature snapshot. The caller receives a fresh copy.
+func SupportedFeatureKeys() []string { return append([]string(nil), supportedFeatureKeys...) }
+
+// SupportedLimitKeys returns the closed, sorted vocabulary accepted in a
+// resolved account limit snapshot. The caller receives a fresh copy.
+func SupportedLimitKeys() []string { return append([]string(nil), supportedLimitKeys...) }
+
+// SupportedPolicyKeys returns the closed, sorted vocabulary accepted in a
+// resolved account policy snapshot. The caller receives a fresh copy.
+func SupportedPolicyKeys() []string { return append([]string(nil), supportedPolicyKeys...) }
+
 // Plan is one catalog entry.
 type Plan struct {
 	ID   string `json:"id"`
@@ -388,6 +456,9 @@ func Parse(raw []byte) (*Catalog, error) {
 		if err := ValidatePolicies(p.Policies); err != nil {
 			return nil, fmt.Errorf("plan catalog: plan %q: %w", p.ID, err)
 		}
+		if err := ValidateFeatures(p.Features); err != nil {
+			return nil, fmt.Errorf("plan catalog: plan %q: %w", p.ID, err)
+		}
 		if len(p.Badge) > 64 {
 			return nil, fmt.Errorf("plan catalog: plan %q badge exceeds 64 bytes", p.ID)
 		}
@@ -421,30 +492,30 @@ func Parse(raw []byte) (*Catalog, error) {
 	return c, nil
 }
 
+// ValidateFeatures validates one resolved feature snapshot. Feature names are
+// closed and unique so a misspelling or duplicate cannot silently diverge
+// between the plan catalog, control plane, cells, and readiness scorecard.
+func ValidateFeatures(features []string) error {
+	seen := make(map[string]bool, len(features))
+	for _, feature := range features {
+		if !slices.Contains(supportedFeatureKeys, feature) {
+			return fmt.Errorf("unknown feature %q", feature)
+		}
+		if seen[feature] {
+			return fmt.Errorf("duplicate feature %q", feature)
+		}
+		seen[feature] = true
+	}
+	return nil
+}
+
 // ValidateLimits validates one resolved hard-cap snapshot. Keys are closed so
 // a misspelling cannot make a paid limit appear applied while every cell
 // silently ignores it. Zero is a real cap; unlimited is represented by an
 // omitted key.
 func ValidateLimits(limits map[string]int64) error {
 	for key, value := range limits {
-		switch key {
-		case RealmLimit, AgentLimit, AgentPerRealmLimit, StoredSecretLimit,
-			StoredMemoryLimit, StoredFactLimit, AgentEmailMaxRawBytesLimit,
-			AgentEmailAttachmentStorageBytesLimit,
-			AgentEmailRealmAliasesPerRealmLimit,
-			AgentEmailCustomDomainsPerAccountLimit,
-			AgentEmailSentPerAgentMinuteLimit,
-			AgentEmailSentPerRealmMinuteLimit,
-			MessageSentPerAgentMinuteLimit,
-			MessageDeliveredPerRealmMinuteLimit,
-			MessageDeliveredPerRecipientMinuteLimit,
-			AgentEmailReceivedPerSenderMinuteLimit,
-			AgentEmailReceivedPerRecipientMinuteLimit,
-			AgentEmailReceivedPerRealmMinuteLimit,
-			AgentEmailReceivedBytesPerSenderMinuteLimit,
-			AgentEmailReceivedBytesPerRecipientMinuteLimit,
-			AgentEmailReceivedBytesPerRealmMinuteLimit:
-		default:
+		if !slices.Contains(supportedLimitKeys, key) {
 			return fmt.Errorf("unknown limit %q", key)
 		}
 		if value < 0 || value > MaxPlanLimit {
@@ -521,6 +592,9 @@ func ValidateLimits(limits map[string]int64) error {
 // retention promise appear applied while the cell ignored it.
 func ValidatePolicies(policies map[string]int64) error {
 	for key, value := range policies {
+		if !slices.Contains(supportedPolicyKeys, key) {
+			return fmt.Errorf("unknown policy %q", key)
+		}
 		switch key {
 		case TranscriptRetentionDaysPolicy:
 			if value < 1 || value > MaxTranscriptRetentionDays {
@@ -550,7 +624,7 @@ func ValidatePolicies(policies map[string]int64) error {
 					AgentEmailEntitlementVersion)
 			}
 		default:
-			return fmt.Errorf("unknown policy %q", key)
+			return fmt.Errorf("supported policy %q has no validator", key)
 		}
 	}
 	return nil
@@ -561,6 +635,9 @@ func ValidatePolicies(policies map[string]int64) error {
 // acknowledged by the cell proves that every behavioral field was understood
 // and persisted.
 func SnapshotHash(plan string, limits, policies map[string]int64, features []string) (string, error) {
+	if err := ValidateFeatures(features); err != nil {
+		return "", err
+	}
 	if limits == nil {
 		limits = map[string]int64{}
 	}

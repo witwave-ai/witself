@@ -1,0 +1,2520 @@
+{
+  "schema": "witself.feature-status.v1",
+  "features": [
+    {
+      "id": "access-policy-security-groups",
+      "name": "Cross-agent access policies and security groups",
+      "area": "Authorization",
+      "summary": "Default-deny, realm-local cross-agent memory and fact policy plus group-owned identity are specified in detail, but the policy engine, group lifecycle, enforcement, and operational surfaces are not implemented.",
+      "implementation": "specified",
+      "managed_rollout": "not_started",
+      "docs": [
+        "docs/access-policy.md",
+        "docs/api-contract.md",
+        "docs/security-groups.md"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "conditional",
+          "summary": "Policy, permission, group, membership, collective-memory, and default-deny behavior are specified but have no store, API, CLI, or MCP implementation.",
+          "evidence": [
+            "docs/access-policy.md",
+            "docs/security-groups.md",
+            "internal/server/server.go"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "conditional",
+          "summary": "The intended realm-local authority and operator override are documented, but no runtime evaluator enforces them.",
+          "evidence": [
+            "docs/access-policy.md"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "conditional",
+          "summary": "Default deny, non-nesting, guarded membership, filters, and audit requirements are designed but not executable protections.",
+          "evidence": [
+            "docs/access-policy.md",
+            "docs/api-contract.md",
+            "docs/security-groups.md"
+          ]
+        },
+        "observability": {
+          "state": "conditional",
+          "summary": "Planned value-free decision and membership audit signals have no metrics, dashboards, SLOs, or alert path.",
+          "evidence": [
+            "docs/access-policy.md",
+            "docs/observability-and-operations.md"
+          ]
+        },
+        "recovery": {
+          "state": "conditional",
+          "summary": "Membership rollback, policy invalidation, archive/import, and crash recovery remain design requirements rather than tested behavior.",
+          "evidence": [
+            "docs/access-policy.md",
+            "docs/security-groups.md"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "No managed cohort, dark gate, migration, or release canary exists for this specified feature.",
+          "evidence": [
+            "docs/access-policy.md"
+          ]
+        },
+        "docs_support": {
+          "state": "conditional",
+          "summary": "The design is extensive, but contracts must be reconciled with the current client-custodied vault, fact deletion, collaboration, and plan surfaces before implementation.",
+          "evidence": [
+            "docs/access-policy.md",
+            "docs/security-groups.md"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "access-policy-contract-reconciliation",
+          "gate_ids": ["docs_support"],
+          "summary": "Reconcile the drafts with current memory, fact, collaboration, vault, and authorization contracts and pin the versioned wire shapes.",
+          "ref": "docs/api-contract.md"
+        },
+        {
+          "id": "access-policy-core-implementation",
+          "gate_ids": ["behavior", "bounds_abuse", "entitlement_policy"],
+          "summary": "Implement the policy evaluator, security-group lifecycle, transactional membership, collective ownership, authorization hooks, audit, API, CLI, MCP, and hostile-input tests.",
+          "ref": "docs/security-groups.md"
+        },
+        {
+          "id": "access-policy-operations",
+          "gate_ids": ["observability", "recovery"],
+          "summary": "Add bounded decision metrics, invalidation and backlog alerts, archive/import, rollback, and crash-recovery drills without exposing identity content.",
+          "ref": "docs/observability-and-operations.md"
+        },
+        {
+          "id": "access-policy-release-canary",
+          "gate_ids": ["rollout_canaries"],
+          "summary": "Ship behind a dark account cohort and retain allow, deny, membership-revocation, rollback, and cross-agent isolation canaries before widening.",
+          "ref": "docs/access-policy.md"
+        }
+      ]
+    },
+    {
+      "id": "account-lifecycle",
+      "name": "Account lifecycle and movement",
+      "area": "Platform",
+      "summary": "Activation, suspension, closure, archive/import, and deliberate whole-account evacuation and placement mechanics are implemented; broad movement remains frozen until monitoring and multi-cell drills are complete. Realm-level placement and dual-write cutover are outside this slice.",
+      "implementation": "implemented",
+      "managed_rollout": "limited",
+      "docs": [
+        "docs/backup-and-recovery.md",
+        "docs/deployment-cells.md",
+        "docs/governance-and-support.md"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "pass",
+          "summary": "Lifecycle transitions, archive/import, evacuation fences, and resumable control-plane state have transactional and crash-recovery coverage.",
+          "evidence": [
+            "docs/deployment-cells.md",
+            "internal/store/evacuation_integration_test.go"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "pass",
+          "summary": "Owner and fleet-admin operations are separated, suspended accounts fail closed, and placement eligibility is controlled centrally.",
+          "evidence": [
+            "docs/authorization-and-roles.md",
+            "docs/deployment-cells.md"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "pass",
+          "summary": "Exact-id idempotency, mutation fences, bounded batches, lifecycle receipts, and target-cell validation constrain concurrent movement.",
+          "evidence": [
+            "docs/deployment-cells.md",
+            "internal/store/evacuation_integration_test.go"
+          ]
+        },
+        "observability": {
+          "state": "conditional",
+          "summary": "Value-free status and metrics exist, but continuous Prometheus scraping, PVC metrics, Alertmanager routing, and a tested external receiver are not deployed.",
+          "evidence": [
+            "docs/observability-and-operations.md"
+          ]
+        },
+        "recovery": {
+          "state": "conditional",
+          "summary": "Archive integrity and backup restore are exercised, but directed multi-cell movement and sealed-state recovery still need a retained production drill.",
+          "evidence": [
+            "docs/backup-and-recovery.md",
+            "docs/deployment-cells.md"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "The placement runner is intentionally paused; widening requires every accepting destination to meet schema, headroom, and monitoring gates.",
+          "evidence": [
+            "docs/deployment-cells.md",
+            "docs/runbooks.md"
+          ]
+        },
+        "docs_support": {
+          "state": "pass",
+          "summary": "Lifecycle, backup, movement, freeze, and operator recovery procedures are documented.",
+          "evidence": [
+            "docs/backup-and-recovery.md",
+            "docs/deployment-cells.md",
+            "docs/runbooks.md"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "continuous-capacity-alerting",
+          "gate_ids": ["observability"],
+          "summary": "Deploy continuous capacity scraping and alert delivery before automatic placement resumes.",
+          "ref": "docs/observability-and-operations.md"
+        },
+        {
+          "id": "directed-move-drill",
+          "gate_ids": ["recovery", "rollout_canaries"],
+          "summary": "Retain a release-specific multi-cell evacuation, restore, and sealed-state recovery drill.",
+          "ref": "docs/deployment-cells.md"
+        }
+      ]
+    },
+    {
+      "id": "account-onboarding-recovery",
+      "name": "Managed account onboarding and recovery",
+      "area": "Identity",
+      "summary": "Invite-gated signup, cell placement, email verification and resend, credential recovery, email change and undo, and crash-safe CLI provisioning are implemented for managed accounts; broad abuse protection and release acceptance remain limited.",
+      "implementation": "implemented",
+      "managed_rollout": "limited",
+      "docs": [
+        "docs/cli-command-surface.md",
+        "docs/runbooks.md"
+      ],
+      "gates": {
+        "behavior": {
+        "state": "conditional",
+        "summary": "Signup, exact invite consumption, pending-account projection, and resumable CLI setup are tested; verification, resend, recovery, email change, and undo handlers lack direct Worker contract tests.",
+        "evidence": [
+          "cmd/witself/account_create_recovery_test.go",
+          "infra/cloudflare/control-plane/src/index.js",
+          "infra/cloudflare/control-plane/test/account-signup-runtime.test.mjs"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "pass",
+          "summary": "Managed signup requires an authorized invite, self-hosted operation has no signup, and account identity and cell placement remain control-plane authoritative.",
+          "evidence": [
+            "docs/runbooks.md",
+            "infra/cloudflare/control-plane/src/account-signup-runtime.mjs"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "conditional",
+          "summary": "Inputs, invite use, verification and recovery state, retries, and pending-account lifetime are bounded, but a durable account-wide signup, resend, and recovery abuse limiter is not implemented.",
+          "evidence": [
+            "docs/post-v0-roadmap.md",
+            "infra/cloudflare/control-plane/src/account-signup-runtime.mjs"
+          ]
+        },
+        "observability": {
+          "state": "conditional",
+          "summary": "Durable phases and value-free logs are inspectable without continuous funnel, delivery, pending-age, recovery-failure, or abuse alerts and a tested receiver.",
+          "evidence": [
+            "docs/observability-and-operations.md",
+            "infra/cloudflare/control-plane/src/account-signup-runtime.mjs"
+          ]
+        },
+        "recovery": {
+        "state": "conditional",
+        "summary": "Durable signup phases, exact idempotency, target-cell acknowledgements, and retry-safe CLI state are tested; credential-recovery and email-change undo paths still need direct recovery tests.",
+        "evidence": [
+          "cmd/witself/account_create_recovery_test.go",
+          "infra/cloudflare/control-plane/src/index.js",
+          "infra/cloudflare/control-plane/test/account-signup-runtime.test.mjs"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "Signup remains invite-gated and the repository does not retain a current release-specific end-to-end signup, verification, recovery, and undo canary.",
+          "evidence": [
+            "docs/runbooks.md"
+          ]
+        },
+        "docs_support": {
+          "state": "pass",
+          "summary": "Customer setup, pending verification, resend, credential recovery, email change, undo, and incomplete-signup cleanup are documented.",
+          "evidence": [
+            "docs/cli-command-surface.md",
+            "docs/runbooks.md"
+          ]
+        }
+      },
+      "open_gates": [
+    {
+      "id": "signup-abuse-limits",
+          "gate_ids": ["bounds_abuse"],
+      "summary": "Add durable account, invite, address, and source-rate controls for signup, verification resend, recovery, and email-change attempts without enabling account enumeration.",
+      "ref": "docs/post-v0-roadmap.md"
+    },
+    {
+      "id": "signup-lifecycle-contract-tests",
+      "gate_ids": [
+        "behavior",
+        "recovery"
+      ],
+      "summary": "Add direct Worker contract and interruption tests for verification, resend, credential recovery, email change, undo, and expiration behavior.",
+      "ref": "infra/cloudflare/control-plane/src/index.js"
+    },
+    {
+      "id": "signup-operations-alerting",
+          "gate_ids": ["observability"],
+          "summary": "Connect value-free phase, delivery, pending-age, recovery, and abuse signals to continuous dashboards and a tested external receiver.",
+          "ref": "docs/observability-and-operations.md"
+        },
+        {
+          "id": "signup-release-canary",
+          "gate_ids": ["rollout_canaries"],
+          "summary": "Retain a current invite-through-active-account canary plus resend, recovery, email-change undo, crash-resume, and cleanup evidence before widening signup.",
+          "ref": "docs/runbooks.md"
+        }
+      ]
+    },
+    {
+      "id": "agent-avatars",
+      "name": "Agent avatars",
+      "area": "Identity",
+      "summary": "Versioned portable SVG identity, autonomy policy, style rollout, continuity guards, reset, rollback, archive, and quota accounting are implemented; payload compaction and live acceptance remain staged.",
+      "implementation": "implemented",
+      "managed_rollout": "limited",
+      "docs": [
+        "docs/agent-avatars.md"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "pass",
+          "summary": "Proposal, activation, evolution, reset, rollback, style, archive, and continuity behavior are implemented across store, API, CLI, and MCP.",
+          "evidence": [
+            "docs/agent-avatars.md",
+            "internal/store/avatar_quota_integration_test.go"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "pass",
+          "summary": "Agent-self-managed, agent-proposes, and operator-only autonomy policies are enforced with exact revisions and immutable history.",
+          "evidence": [
+            "docs/agent-avatars.md"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "pass",
+          "summary": "SVG sanitization, structural continuity checks, bounded canonical rendering, quota accounting, and fail-closed cleanup protect storage and identity.",
+          "evidence": [
+            "docs/agent-avatars.md",
+            "internal/avatar/continuity.go"
+          ]
+        },
+        "observability": {
+          "state": "conditional",
+          "summary": "Lifecycle metrics and audit events exist, but no end-to-end production alert path or avatar-specific SLO is retained.",
+          "evidence": [
+            "docs/agent-avatars.md",
+            "docs/observability-and-operations.md"
+          ]
+        },
+        "recovery": {
+          "state": "pass",
+          "summary": "Immutable versions, rollback, reset, archive/import, and deterministic placeholders provide recovery paths without deleting history.",
+          "evidence": [
+            "docs/agent-avatars.md",
+            "docs/backup-and-recovery.md"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "Bounded style rollout is active with the worker, while payload compaction remains off and no release-specific live acceptance record is retained.",
+          "evidence": [
+            "charts/witself-server/values.yaml",
+            "docs/agent-avatars.md"
+          ]
+        },
+        "docs_support": {
+          "state": "pass",
+          "summary": "The identity model, autonomy rules, lifecycle, continuity, safety boundaries, and operator surfaces are documented.",
+          "evidence": [
+            "docs/agent-avatars.md",
+            "docs/runbooks.md"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "avatar-operations-alerting",
+          "gate_ids": ["observability"],
+          "summary": "Connect value-free avatar lifecycle, failure, compaction, and quota metrics to an avatar SLO and tested external alert receiver.",
+          "ref": "docs/observability-and-operations.md"
+        },
+        {
+          "id": "live-avatar-acceptance",
+          "gate_ids": ["rollout_canaries"],
+          "summary": "Retain a release-specific live lifecycle and archive/restore acceptance record.",
+          "ref": "docs/agent-avatars.md"
+        },
+        {
+          "id": "payload-compaction",
+          "gate_ids": ["rollout_canaries"],
+          "summary": "Activate and verify payload compaction before cleanup-dependent mutations can be generally available.",
+          "ref": "docs/agent-avatars.md"
+        }
+      ]
+    },
+    {
+      "id": "agent-collaboration",
+      "name": "Agent collaboration requests",
+      "area": "Communication",
+      "summary": "Same-realm open requests, offers, assignment, results, claims, and foreground processing are implemented on the durable messaging graph; cross-realm federation and wake behavior are separate roadmap work.",
+      "implementation": "implemented",
+      "managed_rollout": "limited",
+      "plan_feature_keys": [
+        "collaboration"
+      ],
+      "docs": [
+        "docs/agent-collaboration.md",
+        "docs/autonomous-realm-messaging.md"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "pass",
+          "summary": "Request, offer, selection, assignment, result, claim, acknowledge, release, and escalation state machines are implemented and tested.",
+          "evidence": [
+            "docs/autonomous-realm-messaging.md",
+            "internal/store/message_request_hardening_integration_test.go"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "conditional",
+          "summary": "Same-realm authority and claim fences are enforced, but request-graph operations currently check messaging rather than the separately cataloged collaboration feature key.",
+          "evidence": [
+            "docs/billing-and-limits.md",
+            "internal/store/message_feature_gate_integration_test.go"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "pass",
+          "summary": "Bounded payloads, claim leases, deterministic failure escalation, request state transitions, and messaging rate limits constrain work.",
+          "evidence": [
+            "docs/autonomous-realm-messaging.md",
+            "docs/inter-agent-messaging.md"
+          ]
+        },
+        "observability": {
+          "state": "conditional",
+          "summary": "Value-free message and worker metrics exist, but continuous scrape, alert routing, and a tested receiver are absent.",
+          "evidence": [
+            "docs/observability-and-operations.md"
+          ]
+        },
+        "recovery": {
+          "state": "pass",
+          "summary": "Durable canonical mailboxes, exact claim fences, retryable releases, request history, and archive/import preserve work across failures.",
+          "evidence": [
+            "docs/autonomous-realm-messaging.md",
+            "docs/backup-and-recovery.md"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "The same-realm substrate has operational evidence, but the request graph lacks a current release-specific live acceptance record.",
+          "evidence": [
+            "docs/autonomous-realm-messaging.md"
+          ]
+        },
+        "docs_support": {
+          "state": "pass",
+          "summary": "Protocol roles, foreground constraints, untrusted-input boundaries, failure handling, and deferred federation are documented.",
+          "evidence": [
+            "docs/agent-collaboration.md",
+            "docs/autonomous-realm-messaging.md"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "collaboration-entitlement-enforcement",
+          "gate_ids": ["entitlement_policy"],
+          "summary": "Define collaboration as bundled metadata or independently enforce its plan key on request-graph operations without breaking existing snapshots.",
+          "ref": "internal/store/message_feature_gate_integration_test.go"
+        },
+        {
+          "id": "current-live-request-canary",
+          "gate_ids": ["rollout_canaries"],
+          "summary": "Retain a current-release offer, assignment, result, retry, and escalation canary.",
+          "ref": "docs/autonomous-realm-messaging.md"
+        },
+        {
+          "id": "external-alert-path",
+          "gate_ids": ["observability"],
+          "summary": "Connect message and worker metrics to continuous alerts with a tested receiver.",
+          "ref": "docs/observability-and-operations.md"
+        }
+      ]
+    },
+    {
+      "id": "agent-dashboard",
+      "name": "Local agent dashboard",
+      "area": "Operator experience",
+      "summary": "The loopback-only per-agent dashboard is implemented and shipped through the CLI with passive or observational projections for transcripts, memories, facts, messaging, inbound email, secrets metadata, identity, and local preferences.",
+      "implementation": "implemented",
+      "managed_rollout": "not_applicable",
+      "docs": [
+        "README.md",
+        "docs/cli-command-surface.md",
+        "docs/decisions/0004-local-agent-dashboard.md"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "pass",
+          "summary": "Serve, status, stop, live updates, preferences, capability degradation, and all advertised passive data panels are implemented with broad Go and browser-contract tests.",
+          "evidence": [
+            "README.md",
+            "cmd/witself/dashboard_test.go",
+            "internal/dashboard/dashboard_test.go"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "pass",
+          "summary": "The dashboard uses exactly one agent token, preserves upstream authorization, strips unavailable fields, and adds no privileged cross-agent or admin read path.",
+          "evidence": [
+            "docs/decisions/0004-local-agent-dashboard.md",
+            "internal/dashboard/dashboard_test.go"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "pass",
+          "summary": "Loopback binding, host checks, per-process URL and cookie credentials, method and body caps, strict projections, CSP, pagination bounds, and sanitized SVG handling constrain the browser boundary.",
+          "evidence": [
+            "docs/decisions/0004-local-agent-dashboard.md",
+            "internal/dashboard/dashboard_test.go"
+          ]
+        },
+        "observability": {
+          "state": "not_applicable",
+          "summary": "This is an operator-started local foreground process, not an always-on managed service; status, startup errors, and foreground logs are its explicit operator surface."
+        },
+        "recovery": {
+          "state": "pass",
+          "summary": "Per-process registry claims, stale-process detection, conservative stop behavior, transactional preference persistence, and process-local credentials make crash and restart recovery bounded.",
+          "evidence": [
+            "docs/decisions/0004-local-agent-dashboard.md",
+            "internal/dashboard/registry_test.go",
+            "internal/store/dashboard_preferences_integration_test.go"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "The command is generally shipped, but no current release-specific macOS, Linux, and Windows acceptance artifact is retained for the complete panel set.",
+          "evidence": [
+            ".github/workflows/release.yml",
+            "docs/decisions/0004-local-agent-dashboard.md"
+          ]
+        },
+        "docs_support": {
+          "state": "pass",
+          "summary": "The command, threat boundary, passive-read contract, local lifecycle, supported panels, and deliberate operator-dashboard distinction are documented.",
+          "evidence": [
+            "README.md",
+            "docs/cli-command-surface.md",
+            "docs/decisions/0004-local-agent-dashboard.md"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "dashboard-release-acceptance",
+          "gate_ids": ["rollout_canaries"],
+          "summary": "Retain current cross-platform release acceptance for serve, status, stop, browser authentication, every panel, live updates, and graceful unavailable states.",
+          "ref": "docs/decisions/0004-local-agent-dashboard.md"
+        }
+      ]
+    },
+    {
+      "id": "agent-email-receive",
+      "name": "Agent email receive",
+      "area": "Email",
+      "summary": "Inbound email on witmail.net is a production service for the exact Founder cohort, with account entitlements, canonical addressing, bounded storage, retention, rate gates, durable claims, and Cloudflare-to-cell route authority.",
+      "implementation": "implemented",
+      "managed_rollout": "limited",
+      "evidence_release": "v0.0.253",
+      "evidence_scope": "Exact Founder receive deployment and storage postflight; a fresh real-mail canary remains open.",
+      "plan_feature_keys": [
+        "agent_email_receive"
+      ],
+      "plan_limit_keys": [
+        "agent_email_attachment_storage_bytes",
+        "agent_email_max_raw_bytes",
+        "agent_email_received_bytes_per_realm_minute",
+        "agent_email_received_bytes_per_recipient_minute",
+        "agent_email_received_bytes_per_sender_minute",
+        "agent_email_received_per_realm_minute",
+        "agent_email_received_per_recipient_minute",
+        "agent_email_received_per_sender_minute"
+      ],
+      "plan_policy_keys": [
+        "agent_email_entitlement_version",
+        "agent_email_retention_days"
+      ],
+      "docs": [
+        "docs/agent-email.md",
+        "docs/billing-and-limits.md"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "pass",
+          "summary": "Canonical delivery, disabled-account discard, durable storage, listen/claim/read/ack/release, retention, and move-safe routing are implemented and tested.",
+          "evidence": [
+            "docs/agent-email.md",
+            "scripts/test-agent-email-cell-smoke.sh"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "pass",
+          "summary": "Personal is disabled, paid-plan policy is resolved per account, Founder is explicitly allowlisted, and clients need no reinstall when policy changes.",
+          "evidence": [
+            "docs/agent-email.md",
+            "docs/billing-and-limits.md"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "conditional",
+          "summary": "Raw-size, byte, sender, recipient, realm, account, storage-ledger, root-count, and hard-row ceilings are enforced; trusted sender authentication, spam classification, and provider-wide pressure handling remain incomplete.",
+          "evidence": [
+            "docs/agent-email.md",
+            "docs/threat-model.md"
+          ]
+        },
+        "observability": {
+          "state": "conditional",
+          "summary": "Workers Observability, cell metrics, storage gauges, health, logs, and audits exist, but continuous capacity alerts and a tested external receiver do not.",
+          "evidence": [
+            "docs/agent-email.md",
+            "docs/observability-and-operations.md"
+          ]
+        },
+        "recovery": {
+          "state": "conditional",
+          "summary": "Route journals, signed projections, retry-safe ingress, claims, retention, and archive/import are implemented; a populated schema-91 email account move and restore drill remains required.",
+          "evidence": [
+            "docs/agent-email.md",
+            "docs/backup-and-recovery.md"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "Release v0.0.253 is live for the Founder cohort with exact edge and cell gates, but broad-plan enrollment and a fresh real-mail canary remain open.",
+          "evidence": [
+            "docs/agent-email.md",
+            "https://github.com/witwave-ai/witself/releases/tag/v0.0.253"
+          ]
+        },
+        "docs_support": {
+          "state": "pass",
+          "summary": "Architecture, account behavior, addresses, bounds, operations, routing, recovery, security, and rollout state are documented as production rather than pilot.",
+          "evidence": [
+            "docs/agent-email.md",
+            "docs/runbooks.md"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "continuous-capacity-alerting",
+          "gate_ids": ["observability"],
+          "summary": "Connect logical and PVC capacity metrics to continuous alerts and a tested external receiver.",
+          "ref": "docs/observability-and-operations.md"
+        },
+        {
+          "id": "disabled-account-edge-preflight",
+          "gate_ids": ["bounds_abuse"],
+          "summary": "Add signed disposition/preflight so mail for disabled accounts is rejected before raw MIME is buffered or relayed.",
+          "ref": "docs/agent-email.md"
+        },
+        {
+          "id": "email-move-recovery-canary",
+          "gate_ids": ["recovery"],
+          "summary": "Move and restore populated schema-91 email state, including inbound, accepted/delivered sends, provider events, suppressions, claims, and provider-started refusal.",
+          "ref": "docs/cell-worker.md"
+        },
+        {
+          "id": "fresh-real-mail-canary",
+          "gate_ids": ["rollout_canaries"],
+          "summary": "Retain a v0.0.253-or-later real inbound mail canary through claim, read, acknowledge, and retention accounting.",
+          "ref": "docs/agent-email.md"
+        },
+        {
+          "id": "inbound-abuse-classification",
+          "gate_ids": ["bounds_abuse"],
+          "summary": "Define and verify sender authentication, spam/reputation policy, and provider-wide backpressure before cohort expansion.",
+          "ref": "docs/threat-model.md"
+        }
+      ]
+    },
+    {
+      "id": "agent-email-send",
+      "name": "Agent email send",
+      "area": "Email",
+      "summary": "Outbound agent email is production-deployed for the Founder cohort through a signed cell adapter and isolated Cloudflare dispatch worker with receipts, provider lifecycle events, suppression, and bounded admission.",
+      "implementation": "implemented",
+      "managed_rollout": "limited",
+      "evidence_release": "v0.0.253",
+      "evidence_scope": "Exact Founder dispatch deployment and lifecycle postflight; a fresh provider-delivery canary remains open.",
+      "plan_feature_keys": [
+        "agent_email_send"
+      ],
+      "plan_limit_keys": [
+        "agent_email_sent_per_agent_minute",
+        "agent_email_sent_per_realm_minute"
+      ],
+      "docs": [
+        "docs/agent-email.md",
+        "docs/billing-and-limits.md"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "pass",
+          "summary": "Prepare, enqueue, signed dispatch, provider acceptance, receipts, event delivery, suppression, reply routing, and deterministic disabled responses are implemented and tested.",
+          "evidence": [
+            "docs/agent-email.md",
+            "scripts/test-agent-email-receipt-proof.sh"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "pass",
+          "summary": "Send is independently gated from receive, disabled for Personal and Professional, and enabled only by resolved account policy and exact rollout cohort.",
+          "evidence": [
+            "docs/agent-email.md",
+            "docs/billing-and-limits.md"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "conditional",
+          "summary": "Per-agent, realm, account, recipient, minute, day, edge, database, payload, and suppression limits are enforced; provider-wide reputation and pressure controls remain a widening gate.",
+          "evidence": [
+            "docs/agent-email.md",
+            "docs/threat-model.md"
+          ]
+        },
+        "observability": {
+          "state": "conditional",
+          "summary": "Workers Observability, queue metrics, lifecycle events, cell metrics, storage gauges, logs, and health exist without continuous alert routing to a tested receiver.",
+          "evidence": [
+            "docs/agent-email.md",
+            "docs/observability-and-operations.md"
+          ]
+        },
+        "recovery": {
+          "state": "conditional",
+          "summary": "Idempotent send records, queue retries, receipts, lifecycle reconciliation, DLQ, retention, and archive/import are implemented; populated schema-91 email movement and restore remain unproven.",
+          "evidence": [
+            "docs/agent-email.md",
+            "infra/cloudflare/agent-email-send/README.md"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "Release v0.0.253 is live for the Founder cohort with dispatch and lifecycle events enabled, but broad enrollment and a fresh end-to-end delivery canary remain open.",
+          "evidence": [
+            "docs/agent-email.md",
+            "https://github.com/witwave-ai/witself/releases/tag/v0.0.253"
+          ]
+        },
+        "docs_support": {
+          "state": "pass",
+          "summary": "Dispatch, provider lifecycle, limits, failure semantics, operations, recovery, and production topology are documented.",
+          "evidence": [
+            "docs/agent-email.md",
+            "infra/cloudflare/agent-email-send/README.md"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "continuous-delivery-alerting",
+          "gate_ids": ["observability"],
+          "summary": "Connect queue, outcome, storage, and worker metrics to continuous alerts and a tested external receiver.",
+          "ref": "docs/observability-and-operations.md"
+        },
+        {
+          "id": "email-move-recovery-canary",
+          "gate_ids": ["recovery"],
+          "summary": "Move and restore populated schema-91 email state, including accepted/delivered sends, provider events, suppressions, claims, and provider-started refusal.",
+          "ref": "docs/cell-worker.md"
+        },
+        {
+          "id": "fresh-delivery-canary",
+          "gate_ids": ["rollout_canaries"],
+          "summary": "Retain a v0.0.253-or-later real send through accepted and delivered provider lifecycle states.",
+          "ref": "docs/agent-email.md"
+        },
+        {
+          "id": "provider-wide-backpressure",
+          "gate_ids": ["bounds_abuse"],
+          "summary": "Add and exercise shared-domain capacity and reputation budgets plus a provider-wide pause, then review the cell, account-policy, adapter, queue, retention, and provider-capacity envelope before widening.",
+          "ref": "docs/agent-email.md"
+        }
+      ]
+    },
+    {
+      "id": "agent-self-context",
+      "name": "Agent self, context, and foreground hydration",
+      "area": "Agent experience",
+      "summary": "The bounded self digest, self card, identity and capacity projections, memory, message, email, and avatar checkpoints, plus managed model-visible hook hydration are implemented; automatic delivery remains runtime-dependent and operationally limited.",
+      "implementation": "implemented",
+      "managed_rollout": "limited",
+      "docs": [
+        "docs/context-hydration.md",
+        "docs/mcp-tools.md"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "pass",
+          "summary": "Self show, self card, bounded facts and memories, capacities, value-free checkpoints, elision, filters, and installed hook hydration are implemented and tested.",
+          "evidence": [
+            "docs/context-hydration.md",
+            "internal/server/self_test.go"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "pass",
+          "summary": "Identity is token-derived, broad sensitive values stay redacted, checkpoints are content-free, and disabled messaging or email is represented without changing the installed client toolset.",
+          "evidence": [
+            "docs/context-hydration.md",
+            "docs/threat-model.md"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "pass",
+          "summary": "Fact, memory, snippet, tag, checkpoint, output, hook-time, and rendered-context bounds prevent the digest from becoming an unbounded prompt or value-bearing control channel.",
+          "evidence": [
+            "docs/context-hydration.md",
+            "internal/server/self_test.go"
+          ]
+        },
+        "observability": {
+          "state": "conditional",
+          "summary": "Integration verification and value-free hook state exist without recurring hydration-success, latency, staleness, truncation, or provider-regression alerts.",
+          "evidence": [
+            "docs/observability-and-operations.md",
+            "docs/provider-integration-certification.md"
+          ]
+        },
+        "recovery": {
+          "state": "pass",
+          "summary": "The self projection is rebuilt from canonical rows, hook installation is transactional, unavailable optional sections fail open, and installed guidance provides an MCP fallback.",
+          "evidence": [
+            "docs/context-hydration.md",
+            "docs/provider-integration-certification.md"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "Core self reads are released, but automatic model-visible delivery and foreground checkpoint handling lack current signed-in acceptance across every advertised runtime and operating system.",
+          "evidence": [
+            "docs/context-hydration.md",
+            "docs/provider-integration-certification.md"
+          ]
+        },
+        "docs_support": {
+          "state": "pass",
+          "summary": "Digest shape, privacy boundary, runtime differences, hook behavior, checkpoint semantics, foreground processing, and future file bridge are documented.",
+          "evidence": [
+            "docs/context-hydration.md",
+            "docs/mcp-tools.md"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "self-hydration-operations",
+          "gate_ids": ["observability"],
+          "summary": "Add recurring value-free hydration success, latency, staleness, truncation, and provider-regression evidence with a tested alert path.",
+          "ref": "docs/observability-and-operations.md"
+        },
+        {
+          "id": "self-hydration-runtime-acceptance",
+          "gate_ids": ["rollout_canaries"],
+          "summary": "Retain signed-in acceptance for automatic and guided hydration, every checkpoint, disabled-feature transitions, and MCP fallback across the supported runtime matrix.",
+          "ref": "docs/provider-integration-certification.md"
+        }
+      ]
+    },
+    {
+      "id": "audit-trail-retention",
+      "name": "Account audit trail and retention",
+      "area": "Governance",
+      "summary": "The value-free account event registry, durable audit rows, owner-facing account events API and CLI, filtering, pagination, and authorization are implemented; retention modes, scheduled cleanup, export, and plan policy remain a building slice.",
+      "implementation": "building",
+      "managed_rollout": "limited",
+      "docs": [
+        "docs/audit-retention.md",
+        "docs/cli-command-surface.md"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "conditional",
+          "summary": "Event append, registry validation, account list, filters, pagination, and authorization work; delete, archive, hold, status, export, and scheduled retention do not.",
+          "evidence": [
+            "docs/audit-retention.md",
+            "internal/store/events_test.go"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "conditional",
+          "summary": "Account-scoped read authorization is enforced, but the specified per-plan retention policy, operator modes, and legal-hold authority are not represented in the canonical plan contract.",
+          "evidence": [
+            "docs/audit-retention.md",
+            "web/plans/plans.json"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "conditional",
+          "summary": "Event shape, metadata, labels, filters, time range, and pages are bounded and value-free; live audit volume remains unbounded because no retention worker or storage ceiling is implemented.",
+          "evidence": [
+            "docs/audit-retention.md",
+            "internal/store/events.go"
+          ]
+        },
+        "observability": {
+          "state": "conditional",
+          "summary": "Audit is itself inspectable, but append failures, registry drift, backlog, oldest-row age, storage growth, export, and retention health have no continuous SLO and alert path.",
+          "evidence": [
+            "docs/audit-retention.md",
+            "docs/observability-and-operations.md"
+          ]
+        },
+        "recovery": {
+          "state": "conditional",
+          "summary": "Canonical rows survive ordinary database backup and account movement, while the specified archive, hold, export, and retention-failure recovery paths are not implemented or drilled.",
+          "evidence": [
+            "docs/audit-retention.md",
+            "docs/backup-and-recovery.md"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "The account events surface is released, but there is no dark retention worker, selected retention cohort, or release-specific append, query, expiry, archive, and hold canary.",
+          "evidence": [
+            "docs/audit-retention.md"
+          ]
+        },
+        "docs_support": {
+          "state": "conditional",
+          "summary": "The event registry and intended retention contract are extensive, but the document still presents unimplemented defaults, modes, export, and commands as decisions rather than separating current core from target behavior.",
+          "evidence": [
+            "docs/audit-retention.md"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "audit-doc-reconciliation",
+          "gate_ids": ["docs_support"],
+          "summary": "Separate the implemented account-events core from target retention, export, hold, metering, and command behavior throughout the audit contract.",
+          "ref": "docs/audit-retention.md"
+        },
+        {
+          "id": "audit-operations-alerting",
+          "gate_ids": ["observability"],
+          "summary": "Connect append failures, registry drift, backlog, oldest age, storage, export, and retention health to continuous metrics and a tested receiver.",
+          "ref": "docs/observability-and-operations.md"
+        },
+        {
+          "id": "audit-retention-enforcement",
+          "gate_ids": ["behavior", "bounds_abuse", "entitlement_policy", "rollout_canaries"],
+          "summary": "Add a canonical retention policy, bounded worker, delete/archive/hold modes, storage safety, admin override, tests, dark cohort, and expiry canary.",
+          "ref": "docs/audit-retention.md"
+        },
+        {
+          "id": "audit-retention-recovery",
+          "gate_ids": ["recovery"],
+          "summary": "Implement and drill audit export, archive verification, hold preservation, interrupted sweep recovery, account movement, and restore reconciliation.",
+          "ref": "docs/backup-and-recovery.md"
+        }
+      ]
+    },
+    {
+      "id": "billing-plan-transitions",
+      "name": "Billing and plan transitions",
+      "area": "Commercial",
+      "summary": "The provider-neutral billing read and mutation envelopes, durable receipts, recovery indexes, reconciler, and Stripe adapter are implemented foundations, but real charging and production webhooks remain dark.",
+      "implementation": "building",
+      "managed_rollout": "dark",
+      "docs": [
+        "docs/billing-and-limits.md"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "conditional",
+          "summary": "Preview/apply transitions, payment setup, provider calls, durable receipts, recovery, and reconciliation exist; full subscription truth, dunning, cancellation, and downgrade-fit flows remain incomplete.",
+          "evidence": [
+            "docs/billing-and-limits.md",
+            "internal/billing/lifecycle/billing_mutations_test.go"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "pass",
+          "summary": "The control plane owns billing truth and resolves immutable cell snapshots; plan and account overrides remain separate and auditable.",
+          "evidence": [
+            "docs/billing-and-limits.md",
+            "web/plans/plans.json"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "conditional",
+          "summary": "Idempotency, provider receipts, recovery shards, lease fences, replay windows, and high-risk data exclusions exist; hosted-action expiry, equal-time event fencing, receipt retention, writer floors, exact cancellation, and operator terminalization remain incomplete.",
+          "evidence": [
+            "docs/billing-and-limits.md",
+            "internal/billing/lifecycle/billing_durability_test.go"
+          ]
+        },
+        "observability": {
+          "state": "conditional",
+          "summary": "Value-free billing state, receipts, usage, and reconciler metrics exist; production alerts, provider event dashboards, and support escalation are not connected.",
+          "evidence": [
+            "docs/billing-and-limits.md",
+            "docs/observability-and-operations.md"
+          ]
+        },
+        "recovery": {
+          "state": "conditional",
+          "summary": "Crash-resumable mutation recovery is implemented, but real-provider rollback, restore reconciliation, dunning, and operator drills remain unproven.",
+          "evidence": [
+            "docs/billing-and-limits.md",
+            "internal/billing/lifecycle/billing_durability_test.go"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "The complete foundation is deliberately dark; no account is charged and production Stripe webhooks are not enabled.",
+          "evidence": [
+            "docs/billing-and-limits.md"
+          ]
+        },
+        "docs_support": {
+          "state": "pass",
+          "summary": "Authority boundaries, plan transitions, durable mutation design, dark posture, and remaining provider gates are documented.",
+          "evidence": [
+            "docs/billing-and-limits.md",
+            "docs/runbooks.md"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "billing-operations",
+          "gate_ids": ["observability", "recovery"],
+          "summary": "Connect billing metrics, alerts, receipt retention, support escalation, and operator recovery.",
+          "ref": "docs/billing-and-limits.md"
+        },
+        {
+          "id": "billing-safety-completion",
+          "gate_ids": ["bounds_abuse", "recovery"],
+          "summary": "Complete hosted-URL expiry/refresh, equal-time event fencing, bounded completed-receipt retention, rolling-writer floors, exact provider-object cancellation, and operator terminalization of deterministic provider failures.",
+          "ref": "docs/billing-and-limits.md"
+        },
+        {
+          "id": "full-lifecycle-reconciliation",
+          "gate_ids": ["behavior", "recovery"],
+          "summary": "Complete dunning, exact cancellation, downgrade-fit, restore reconciliation, and compensation behavior.",
+          "ref": "https://github.com/witwave-ai/witself/issues/33"
+        },
+        {
+          "id": "stripe-sandbox-acceptance",
+          "gate_ids": ["rollout_canaries"],
+          "summary": "Provision Stripe sandbox products, prices, secrets, webhook verification, replay, rollback, and an end-to-end plan transition canary.",
+          "ref": "docs/billing-and-limits.md"
+        }
+      ]
+    },
+    {
+      "id": "custom-email-domains",
+      "name": "Custom inbound email domains",
+      "area": "Email",
+      "summary": "Domain request, allowlist, ownership verification, durable journal, recovery, CLI/admin, plan, and route-projection contracts exist, while customer DNS and live delivery remain intentionally dark.",
+      "implementation": "building",
+      "managed_rollout": "dark",
+      "plan_feature_keys": [
+        "agent_email_custom_domain"
+      ],
+      "plan_limit_keys": [
+        "agent_email_custom_domains_per_account"
+      ],
+      "docs": [
+        "docs/agent-email.md",
+        "docs/billing-and-limits.md"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "conditional",
+          "summary": "Request, proof, activation journal, recovery, projection, and retirement mechanics exist, but no real DNS/MX/customer-zone delivery has completed.",
+          "evidence": [
+            "docs/agent-email.md",
+            "infra/cloudflare/control-plane/test/agent-email-domain-journal.test.mjs"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "pass",
+          "summary": "Feature entitlement, per-account count, administrative allowlist, authority, and independent inbound-email gate are explicit.",
+          "evidence": [
+            "docs/agent-email.md",
+            "docs/billing-and-limits.md"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "conditional",
+          "summary": "Normalized domains, reserved names, ownership proof, count limits, idempotency, and route authority exist; global authority capacity/monitoring and transfer/quarantine governance remain activation gates.",
+          "evidence": [
+            "docs/agent-email.md",
+            "docs/threat-model.md"
+          ]
+        },
+        "observability": {
+          "state": "conditional",
+          "summary": "Journal and route state are inspectable, but DNS verification, delivery, expiration, and capacity alerts are not connected to a tested receiver.",
+          "evidence": [
+            "docs/agent-email.md",
+            "docs/observability-and-operations.md"
+          ]
+        },
+        "recovery": {
+          "state": "conditional",
+          "summary": "Recovery journals and route retirement are tested with fakes; authority bootstrap, restore, and customer DNS recovery need a live drill.",
+          "evidence": [
+            "docs/agent-email.md",
+            "infra/cloudflare/control-plane/test/agent-email-domain-journal.test.mjs"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "All managed activation gates remain dark and no customer domain routes mail to an agent.",
+          "evidence": [
+            "docs/agent-email.md"
+          ]
+        },
+        "docs_support": {
+          "state": "pass",
+          "summary": "Authority, proof, lifecycle, limits, recovery, security, and dark rollout boundaries are documented.",
+          "evidence": [
+            "docs/agent-email.md",
+            "docs/billing-and-limits.md"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "alias-dependency-and-plan-replay",
+          "gate_ids": ["behavior", "rollout_canaries"],
+          "summary": "Require an already-authorized realm alias and exercise refresh/claim plus exact plan-lifecycle replay before domain activation.",
+          "ref": "docs/agent-email.md"
+        },
+        {
+          "id": "authority-capacity-monitoring",
+          "gate_ids": ["bounds_abuse", "observability"],
+          "summary": "Prove journal health, sealed empty-target restore, and live head-capacity monitoring below the global 10,000-authority-key ceiling.",
+          "ref": "docs/agent-email.md"
+        },
+        {
+          "id": "custom-domain-canary",
+          "gate_ids": ["behavior", "recovery", "rollout_canaries"],
+          "summary": "Complete a human-controlled domain request, DNS proof, MX route, delivery, retirement, and recovery canary.",
+          "ref": "docs/agent-email.md"
+        },
+        {
+          "id": "dns-provider-lane",
+          "gate_ids": ["observability", "rollout_canaries"],
+          "summary": "Implement the production DNS/MX provisioning and verification lane with expiry and alerting.",
+          "ref": "docs/agent-email.md"
+        },
+        {
+          "id": "route-authority-drill",
+          "gate_ids": ["recovery"],
+          "summary": "Exercise authority bootstrap, backup restore, route republishing, and conflict recovery.",
+          "ref": "docs/agent-email.md"
+        },
+        {
+          "id": "transfer-quarantine-governance",
+          "gate_ids": ["behavior", "bounds_abuse", "recovery"],
+          "summary": "Define and verify ownership transfer, quarantine, conflict, suspension, and retirement governance before customer activation.",
+          "ref": "docs/agent-email.md"
+        }
+      ]
+    },
+    {
+      "id": "facts",
+      "name": "Durable facts",
+      "area": "Memory",
+      "summary": "Stable subjects, immutable assertions, candidates, typed values, primary resolution, guarded permanent deletion, archive/import, and per-agent fact limits are implemented; advanced conflict and cross-agent policy remain later work.",
+      "implementation": "implemented",
+      "managed_rollout": "limited",
+      "plan_feature_keys": [
+        "facts"
+      ],
+      "plan_limit_keys": [
+        "stored_fact"
+      ],
+      "docs": [
+        "docs/fact-service.md",
+        "docs/facts-model.md"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "pass",
+          "summary": "Subject resolution, assertions, candidates, review, primary selection, typed values, deletion preview/apply, and archive/import are implemented across store, API, CLI, and MCP.",
+          "evidence": [
+            "docs/fact-service.md",
+            "docs/facts-model.md"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "pass",
+          "summary": "Per-agent stored_fact limits and owner-authorized sensitive reveal and permanent deletion boundaries are enforced.",
+          "evidence": [
+            "docs/billing-and-limits.md",
+            "docs/fact-service.md"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "pass",
+          "summary": "Typed-value validation, stable addresses, active-fact counting, revision fences, candidate bounds, and value-safe usage records bound the service.",
+          "evidence": [
+            "docs/fact-service.md",
+            "docs/facts-model.md"
+          ]
+        },
+        "observability": {
+          "state": "conditional",
+          "summary": "Value-free usage and audit records exist, but fact-specific SLOs and an external alert path are not retained.",
+          "evidence": [
+            "docs/fact-service.md",
+            "docs/observability-and-operations.md"
+          ]
+        },
+        "recovery": {
+          "state": "pass",
+          "summary": "Immutable assertion history, candidate review, reversible changes, archive/import, and explicit permanent-delete fencing provide recovery semantics.",
+          "evidence": [
+            "docs/backup-and-recovery.md",
+            "docs/fact-service.md"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "Core behavior is in released code, while the guarded permanent-delete path remains disabled in the active managed cohort and lacks current live acceptance evidence.",
+          "evidence": [
+            "docs/fact-service.md",
+            "docs/runbooks.md"
+          ]
+        },
+        "docs_support": {
+          "state": "conditional",
+          "summary": "Core facts and deletion are documented, but advanced conflict authority, predicate registries, reminder delivery, and cross-agent policy remain explicitly unresolved.",
+          "evidence": [
+            "docs/fact-service.md",
+            "docs/facts-model.md"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "advanced-fact-policy",
+          "gate_ids": ["docs_support"],
+          "summary": "Resolve authority/conflict policy, predicate registries, reminder delivery, and cross-agent fact access before declaring the broader model complete.",
+          "ref": "docs/facts-model.md"
+        },
+        {
+          "id": "fact-delete-canary",
+          "gate_ids": ["rollout_canaries"],
+          "summary": "Enable the guarded path for a selected cohort and retain a current preview/apply/isolation canary.",
+          "ref": "docs/fact-service.md"
+        },
+        {
+          "id": "fact-operations",
+          "gate_ids": ["observability"],
+          "summary": "Define fact SLOs and connect value-free metrics to the shared external alert path.",
+          "ref": "docs/observability-and-operations.md"
+        }
+      ]
+    },
+    {
+      "id": "fleet-deployment-recovery",
+      "name": "Fleet deployment, backup, and recovery",
+      "area": "Platform",
+      "summary": "Signed releases, immutable images, Helm/GitOps cells, schema checks, encrypted backups, archive validation, and recovery runbooks are implemented; broad mobility and continuous monitoring remain constrained.",
+      "implementation": "implemented",
+      "managed_rollout": "limited",
+      "evidence_release": "v0.0.253",
+      "evidence_scope": "Signed release publication plus active-cell and edge postflight; broad placement and external monitoring remain open.",
+      "docs": [
+        "docs/backup-and-recovery.md",
+        "docs/deployment-cells.md",
+        "docs/release-and-build.md"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "pass",
+          "summary": "Build, sign, attest, publish, render, migrate, health-check, archive, backup, restore validation, and GitOps convergence paths are implemented.",
+          "evidence": [
+            "docs/backup-and-recovery.md",
+            "docs/release-and-build.md"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "pass",
+          "summary": "Control-plane placement authority, accepting-cell policy, cohort gates, schema compatibility, and fleet-admin boundaries are explicit.",
+          "evidence": [
+            "docs/deployment-cells.md",
+            "docs/governance-and-support.md"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "pass",
+          "summary": "Immutable digests, migration locks, bounded workers, schema floors, placement freezes, exact cohorts, and encrypted artifact permissions constrain rollout risk.",
+          "evidence": [
+            "docs/deployment-cells.md",
+            "docs/release-and-build.md"
+          ]
+        },
+        "observability": {
+          "state": "conditional",
+          "summary": "Health and metrics surfaces exist, but the production cells lack continuous Prometheus scraping, PVC collection, Alertmanager routing, and a tested external receiver.",
+          "evidence": [
+            "docs/observability-and-operations.md"
+          ]
+        },
+        "recovery": {
+          "state": "conditional",
+          "summary": "Encrypted pre-migration backups and disposable restore validation exist; provider PITR, committed production restore, and multi-cell movement drills remain incomplete.",
+          "evidence": [
+            "docs/backup-and-recovery.md",
+            "docs/deployment-cells.md"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "v0.0.253 passed release, active-cell, and edge postflight, while the backup cell remains a non-accepting validation target and placement stays paused.",
+          "evidence": [
+            "docs/deployment-cells.md",
+            "https://github.com/witwave-ai/witself/releases/tag/v0.0.253"
+          ]
+        },
+        "docs_support": {
+          "state": "pass",
+          "summary": "Release, GitOps, migration, backup, restore, cell movement, and incident procedures are documented.",
+          "evidence": [
+            "docs/backup-and-recovery.md",
+            "docs/deployment-cells.md",
+            "docs/runbooks.md"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "continuous-platform-alerting",
+          "gate_ids": ["observability"],
+          "summary": "Deploy and exercise the end-to-end metrics, alert routing, and external receiver chain.",
+          "ref": "docs/observability-and-operations.md"
+        },
+        {
+          "id": "provider-pitr-drill",
+          "gate_ids": ["recovery"],
+          "summary": "Enable and retain provider PITR plus a committed production-grade restore rehearsal.",
+          "ref": "https://github.com/witwave-ai/witself/issues/68"
+        },
+        {
+          "id": "schema-converged-movement",
+          "gate_ids": ["rollout_canaries"],
+          "summary": "Upgrade every possible accepting destination, verify capacity monitoring, and complete a directed move before resuming placement.",
+          "ref": "docs/deployment-cells.md"
+        }
+      ]
+    },
+    {
+      "id": "identity-tenancy",
+      "name": "Accounts, realms, agents, and tokens",
+      "area": "Identity",
+      "summary": "Account, realm, agent, token, role, suspension, and transactional realm/agent capacity enforcement form the shared identity spine; current managed evidence is narrow and the legacy total-agent cap remains a compatibility floor.",
+      "implementation": "implemented",
+      "managed_rollout": "limited",
+      "plan_limit_keys": [
+        "agents",
+        "agents_per_realm",
+        "realms"
+      ],
+      "docs": [
+        "docs/authorization-and-roles.md",
+        "docs/billing-and-limits.md",
+        "docs/data-model.md"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "pass",
+          "summary": "Account provisioning, realm and agent lifecycle, tokens, roles, suspension, concurrency, deletion, archive/import, and capacity boundaries are implemented and tested.",
+          "evidence": [
+            "docs/data-model.md",
+            "internal/store/resource_limit_integration_test.go"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "pass",
+          "summary": "Resolved realms, agents, and agents-per-realm limits are transactionally enforced per account with audited overrides and explicit unlimited semantics.",
+          "evidence": [
+            "docs/billing-and-limits.md",
+            "internal/store/resource_limit_integration_test.go"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "pass",
+          "summary": "Row locks, exact counters, concurrent creation tests, token hashing, role checks, lifecycle fences, and legacy rollback floors constrain identity mutation.",
+          "evidence": [
+            "docs/authorization-and-roles.md",
+            "internal/store/resource_limit_integration_test.go"
+          ]
+        },
+        "observability": {
+          "state": "conditional",
+          "summary": "Audit, usage, capacity, token, and lifecycle state are inspectable without a unified identity-capacity dashboard or tested external alert path.",
+          "evidence": [
+            "docs/observability-and-operations.md"
+          ]
+        },
+        "recovery": {
+          "state": "pass",
+          "summary": "Idempotent provisioning, immutable identifiers, token rotation, suspension, archive/import, and lifecycle receipts preserve identity across retries and movement.",
+          "evidence": [
+            "docs/backup-and-recovery.md",
+            "docs/token-lifecycle.md"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "The identity spine is live and released, but the repository does not retain a current multi-plan capacity and Founder-override acceptance record.",
+          "evidence": [
+            "docs/billing-and-limits.md",
+            "docs/runbooks.md"
+          ]
+        },
+        "docs_support": {
+          "state": "pass",
+          "summary": "Identity, roles, token lifecycle, data model, plan limits, admin overrides, and account operations are documented.",
+          "evidence": [
+            "docs/authorization-and-roles.md",
+            "docs/billing-and-limits.md",
+            "docs/token-lifecycle.md"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "identity-capacity-alerting",
+          "gate_ids": ["observability"],
+          "summary": "Add a value-free dashboard and alert path for realm, agent, token, and lifecycle capacity or drift.",
+          "ref": "docs/observability-and-operations.md"
+        },
+        {
+          "id": "multi-plan-capacity-canary",
+          "gate_ids": ["rollout_canaries"],
+          "summary": "Retain current boundary, concurrency, upgrade, downgrade, and Founder-unlimited evidence from managed accounts.",
+          "ref": "docs/billing-and-limits.md"
+        }
+      ]
+    },
+    {
+      "id": "managed-support",
+      "name": "Managed support",
+      "area": "Commercial",
+      "summary": "Durable account-scoped support tickets, messages, state transitions, tenant and fleet-admin CLI/API surfaces, TUI operations, audit, and archive/import are implemented; plan enforcement, operating policy, abuse controls, alerting, and SLA claims remain limited.",
+      "implementation": "implemented",
+      "managed_rollout": "limited",
+      "plan_feature_keys": [
+        "support"
+      ],
+      "docs": [
+        "docs/api-routes.md",
+        "docs/cli-command-surface.md",
+        "docs/governance-and-support.md",
+        "docs/self-host-support.md"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "pass",
+          "summary": "Ticket open, list, show, reply, close, bounded state transitions, tenant CLI/API, fleet-admin CLI/TUI, audit, and archive/import are implemented and tested.",
+          "evidence": [
+            "docs/api-routes.md",
+            "internal/store/support_test.go"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "conditional",
+          "summary": "Paid plans advertise support, but ticket admission checks the separate support_policy field, whose migration default is enabled and is not synchronized from resolved plan features; Personal can therefore remain enabled unless explicitly overridden.",
+          "evidence": [
+            "docs/billing-and-limits.md",
+            "internal/store/migrations/0015_add_support_tickets.sql",
+            "web/plans/plans.json"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "conditional",
+          "summary": "Subjects, bodies, list pages, roles, states, and value exposure are bounded, while ticket/message retention, attachment/evidence handling, and intake-rate abuse controls remain incomplete.",
+          "evidence": [
+            "docs/security-policy.md",
+            "internal/store/support.go"
+          ]
+        },
+        "observability": {
+          "state": "conditional",
+          "summary": "The admin TUI exposes ticket state and age, but no continuous response-time, escalation, backlog, or SLA metric and alert path is operationally declared.",
+          "evidence": [
+            "cmd/witself-admin/tui_model.go",
+            "docs/governance-and-support.md"
+          ]
+        },
+        "recovery": {
+          "state": "pass",
+          "summary": "Tickets and messages are durable, audited, included in account archive/import, and remain available for administrator continuity across account-policy changes.",
+          "evidence": [
+            "docs/backup-and-recovery.md",
+            "internal/store/support_test.go"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "The support surface is implemented, but there is no retained plan-entitlement canary, selected support cohort declaration, or production SLA launch evidence.",
+          "evidence": [
+            "docs/billing-and-limits.md",
+            "docs/governance-and-support.md"
+          ]
+        },
+        "docs_support": {
+          "state": "conditional",
+          "summary": "Boundaries and prerequisites are documented, while the promised channels, hours, severity matrix, targets, ownership, and escalation path remain undecided.",
+          "evidence": [
+            "docs/governance-and-support.md",
+            "docs/self-host-support.md"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "support-abuse-retention",
+          "gate_ids": ["bounds_abuse"],
+          "summary": "Define and enforce ticket/message retention, bounded evidence attachments, intake-rate controls, and diagnostic-data handling.",
+          "ref": "internal/store/support.go"
+        },
+        {
+          "id": "support-entitlement-enforcement",
+          "gate_ids": ["entitlement_policy"],
+          "summary": "Resolve paid-plan support entitlement into support_policy while preserving explicit audited account overrides and disabling Personal by default.",
+          "ref": "internal/store/migrations/0015_add_support_tickets.sql"
+        },
+        {
+          "id": "support-operating-policy",
+          "gate_ids": ["docs_support"],
+          "summary": "Decide channels, hours, severities, response targets, ownership, escalation, retention, and customer-visible limitations.",
+          "ref": "docs/governance-and-support.md"
+        },
+        {
+          "id": "support-operations-alerting",
+          "gate_ids": ["observability"],
+          "summary": "Publish value-free backlog and response-time metrics, define the selected support SLOs, and connect them to a tested external escalation path.",
+          "ref": "docs/observability-and-operations.md"
+        },
+        {
+          "id": "support-rollout-canary",
+          "gate_ids": ["rollout_canaries"],
+          "summary": "Run a selected-account case from intake through escalation, resolution, export, retention, and customer closure before advertising the benefit.",
+          "ref": "docs/governance-and-support.md"
+        }
+      ]
+    },
+    {
+      "id": "narrative-memory",
+      "name": "Narrative memory and curation",
+      "area": "Memory",
+      "summary": "Capture, versioned recall, lexical and client-vector retrieval, fenced client-authored curation, guarded deletion, archive/import, hydration, and per-agent memory limits are implemented but not production-certified across runtimes and clouds.",
+      "implementation": "implemented",
+      "managed_rollout": "limited",
+      "plan_feature_keys": [
+        "memory"
+      ],
+      "plan_limit_keys": [
+        "stored_memory"
+      ],
+      "docs": [
+        "docs/memory-runtime-acceptance.md",
+        "docs/narrative-memory-and-curation.md"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "pass",
+          "summary": "Capture, recall, revision, relations, evidence, curation plan/apply/rollback, hydration, archive/import, and guarded deletion are implemented across store, API, CLI, and MCP.",
+          "evidence": [
+            "docs/narrative-memory-and-curation.md",
+            "internal/store/memory_curation_hardening_integration_test.go"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "pass",
+          "summary": "Per-agent stored_memory limits, owner authority, sensitive broad-redaction, cross-agent isolation, and explicit deletion authorization are enforced.",
+          "evidence": [
+            "docs/billing-and-limits.md",
+            "docs/narrative-memory-and-curation.md"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "pass",
+          "summary": "Payload, evidence, action, page, lease, revision, vector, result, and active-head bounds protect storage and curation; salience is ranking metadata, not a separate quota.",
+          "evidence": [
+            "docs/narrative-memory-and-curation.md",
+            "docs/threat-model.md"
+          ]
+        },
+        "observability": {
+          "state": "conditional",
+          "summary": "Value-free memory, curation, worker, and quality evidence schemas exist without continuous production alerts or retained multi-environment SLO evidence.",
+          "evidence": [
+            "docs/memory-load-quality.md",
+            "docs/observability-and-operations.md"
+          ]
+        },
+        "recovery": {
+          "state": "pass",
+          "summary": "Immutable versions, rollback, lease recovery, dead-letter handling, evidence preservation, archive/import, and rebuildable search projections provide recovery paths.",
+          "evidence": [
+            "docs/backup-and-recovery.md",
+            "docs/narrative-memory-and-curation.md"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "The feature is released and used, but multi-cloud conformance, signed-in provider-runtime acceptance, and retained load/quality certification are incomplete.",
+          "evidence": [
+            "docs/memory-cloud-conformance.md",
+            "docs/memory-runtime-acceptance.md"
+          ]
+        },
+        "docs_support": {
+          "state": "conditional",
+          "summary": "The current client-side inference model is documented, but historical server-embedding and server-decryption language still needs systematic consistency cleanup.",
+          "evidence": [
+            "docs/narrative-memory-and-curation.md",
+            "docs/v0-scope.md"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "docs-contract-consistency",
+          "gate_ids": ["docs_support"],
+          "summary": "Remove or clearly mark stale historical server-inference and sealed-plane claims that conflict with current architecture.",
+          "ref": "https://github.com/witwave-ai/witself/issues/47"
+        },
+        {
+          "id": "live-runtime-acceptance",
+          "gate_ids": ["rollout_canaries"],
+          "summary": "Run and retain signed-in acceptance across the supported provider-runtime matrix.",
+          "ref": "https://github.com/witwave-ai/witself/issues/45"
+        },
+        {
+          "id": "load-quality-certification",
+          "gate_ids": ["rollout_canaries"],
+          "summary": "Run the deterministic load, relevance, isolation, export, and hybrid-recall thresholds on production-shaped infrastructure.",
+          "ref": "https://github.com/witwave-ai/witself/issues/46"
+        },
+        {
+          "id": "memory-production-alerting",
+          "gate_ids": ["observability"],
+          "summary": "Connect value-free memory, curation, quality, backlog, and failure metrics to continuous SLOs and a tested external alert receiver.",
+          "ref": "docs/observability-and-operations.md"
+        },
+        {
+          "id": "multi-cloud-conformance",
+          "gate_ids": ["rollout_canaries"],
+          "summary": "Complete the account-move and archive/restore matrix on AWS, Google Cloud, and Azure targets.",
+          "ref": "https://github.com/witwave-ai/witself/issues/44"
+        }
+      ]
+    },
+    {
+      "id": "operator-authentication",
+      "name": "Managed operator authentication",
+      "area": "Security",
+      "summary": "Browser PKCE, device-code fallback, secure local session custody, revocation, and managed operator authorization are specified, while the current CLI implements only bootstrap-token-file exchange and agent-token flows.",
+      "implementation": "specified",
+      "managed_rollout": "not_started",
+      "docs": [
+        "docs/operator-auth.md"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "conditional",
+          "summary": "The hosted browser, callback, device-code, status, refresh, logout, and revocation flows are specified but not implemented in the CLI or control plane.",
+          "evidence": [
+            "cmd/witself/main.go",
+            "docs/operator-auth.md"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "conditional",
+          "summary": "Operator roles and scopes are documented, but a managed human session does not yet carry and refresh that authorization contract.",
+          "evidence": [
+            "docs/authorization-and-roles.md",
+            "docs/operator-auth.md"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "conditional",
+          "summary": "PKCE, short-lived codes, no-password CLI handling, revocation, and secure local storage are design requirements without executable replay, phishing, callback, or device-code abuse tests.",
+          "evidence": [
+            "docs/operator-auth.md",
+            "docs/threat-model.md"
+          ]
+        },
+        "observability": {
+          "state": "conditional",
+          "summary": "No value-free login, refresh, revocation, callback, device-code, or abuse metrics and alert path exist for the target managed flow.",
+          "evidence": [
+            "docs/observability-and-operations.md",
+            "docs/operator-auth.md"
+          ]
+        },
+        "recovery": {
+          "state": "conditional",
+          "summary": "Session revocation, credential-store fallback, lost-device recovery, and provider outage behavior are specified but not implemented or drilled.",
+          "evidence": [
+            "docs/operator-auth.md"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "No dark managed cohort, hosted callback, device-code, multi-platform credential-store, or revocation canary exists.",
+          "evidence": [
+            "docs/operator-auth.md"
+          ]
+        },
+        "docs_support": {
+          "state": "conditional",
+          "summary": "The target is documented, but policy and security-group dependencies plus the current bootstrap-only command boundary need an implementation-ready contract pass.",
+          "evidence": [
+            "docs/operator-auth.md"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "operator-auth-contract-reconciliation",
+          "gate_ids": ["docs_support"],
+          "summary": "Reconcile the target with current account onboarding, implemented roles, unimplemented policies/groups, CLI commands, hosted endpoints, and credential-store support.",
+          "ref": "docs/operator-auth.md"
+        },
+        {
+          "id": "operator-auth-core-implementation",
+          "gate_ids": ["behavior", "bounds_abuse", "entitlement_policy", "recovery"],
+          "summary": "Implement hosted PKCE and device-code sessions, refresh, revocation, secure local custody, lost-device recovery, authorization propagation, and hostile-flow tests.",
+          "ref": "docs/operator-auth.md"
+        },
+        {
+          "id": "operator-auth-operations",
+          "gate_ids": ["observability"],
+          "summary": "Add value-free login, callback, device-code, refresh, revocation, failure, and abuse metrics with SLOs and a tested receiver.",
+          "ref": "docs/observability-and-operations.md"
+        },
+        {
+          "id": "operator-auth-release-canary",
+          "gate_ids": ["rollout_canaries"],
+          "summary": "Ship behind a dark operator cohort and retain browser, headless, refresh, revoke, lost-device, and cross-platform credential-store acceptance.",
+          "ref": "docs/operator-auth.md"
+        }
+      ]
+    },
+    {
+      "id": "plan-enforcement",
+      "name": "Plans, limits, and account overrides",
+      "area": "Commercial",
+      "summary": "A validated catalog defines Personal, Professional, Team, and Enterprise pricing direction, entitlements, limits, and policies; the control plane resolves account snapshots and cells enforce them with audited per-account overrides.",
+      "implementation": "implemented",
+      "managed_rollout": "limited",
+      "docs": [
+        "docs/billing-and-limits.md",
+        "web/plans/plans.json"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "pass",
+          "summary": "Catalog load, pricing projection, account plan state, effective snapshots, limit resolution, overrides, and admin inspection are implemented and tested.",
+          "evidence": [
+            "docs/billing-and-limits.md",
+            "internal/plans/plans_test.go"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "pass",
+          "summary": "Plans remain global control-plane truth while cells store only resolved account behavior; per-account overrides change operation without rewriting price or plan identity.",
+          "evidence": [
+            "docs/billing-and-limits.md",
+            "web/plans/plans.json"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "pass",
+          "summary": "Commercial limits are bounded by independent platform ceilings, missing keys have explicit unlimited semantics, and invalid zero or oversized policies fail closed.",
+          "evidence": [
+            "docs/billing-and-limits.md",
+            "internal/plans/plans.go"
+          ]
+        },
+        "observability": {
+          "state": "conditional",
+          "summary": "Usage events, current policy views, and admin surfaces exist; there is no unified entitlement-drift dashboard or alert path.",
+          "evidence": [
+            "docs/billing-and-limits.md",
+            "docs/observability-and-operations.md"
+          ]
+        },
+        "recovery": {
+          "state": "pass",
+          "summary": "Resolved snapshots, version floors, overrides, usage events, and account archive/import preserve policy state across retries and movement.",
+          "evidence": [
+            "docs/backup-and-recovery.md",
+            "docs/billing-and-limits.md"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "Personal and Professional are catalog-available; Team and Enterprise remain unavailable, and repository state alone cannot prove each live account override.",
+          "evidence": [
+            "docs/billing-and-limits.md",
+            "web/plans/plans.json"
+          ]
+        },
+        "docs_support": {
+          "state": "pass",
+          "summary": "Pricing direction, limits, retention, account overrides, authority split, and unavailable-plan behavior are documented.",
+          "evidence": [
+            "docs/billing-and-limits.md",
+            "web/plans/plans.json"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "entitlement-drift-monitoring",
+          "gate_ids": ["observability"],
+          "summary": "Add a value-free control-plane versus cell snapshot drift view and alert.",
+          "ref": "docs/billing-and-limits.md"
+        },
+        {
+          "id": "professional-purchase-readiness",
+          "gate_ids": ["rollout_canaries"],
+          "summary": "Reconcile Professional's catalog-purchasable flag with dark billing, limited inbound email enrollment, and support-policy enforcement before customer checkout opens.",
+          "ref": "web/plans/plans.json"
+        },
+        {
+          "id": "team-enterprise-activation",
+          "gate_ids": ["rollout_canaries"],
+          "summary": "Keep Team and Enterprise unavailable until their dependent features and billing transitions meet this scorecard's gates.",
+          "ref": "web/plans/plans.json"
+        }
+      ]
+    },
+    {
+      "id": "realm-email-aliases",
+      "name": "Realm email aliases",
+      "area": "Email",
+      "summary": "Permanent canonical agent.realm-ID addresses are implemented independently from memorable realm aliases; alias reservation, lifecycle, admin controls, limits, and recovery exist while edge delivery remains dark.",
+      "implementation": "implemented",
+      "managed_rollout": "dark",
+      "plan_feature_keys": [
+        "agent_email_realm_alias"
+      ],
+      "plan_limit_keys": [
+        "agent_email_realm_aliases_per_realm"
+      ],
+      "docs": [
+        "docs/agent-email.md",
+        "docs/billing-and-limits.md"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "conditional",
+          "summary": "Claim, reserve, activate, downgrade grace, retire, tombstone, project, CLI, and admin behavior exist; real alias delivery remains disabled.",
+          "evidence": [
+            "docs/agent-email.md",
+            "infra/cloudflare/control-plane/test/realm-email-alias-journal.test.mjs"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "pass",
+          "summary": "Alias entitlement and per-realm count are separate from inbound email; reserved names and service-admin controls are globally authoritative.",
+          "evidence": [
+            "docs/agent-email.md",
+            "docs/billing-and-limits.md"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "conditional",
+          "summary": "Normalization, exact count, reserved words, tombstones, ownership, and immutable canonical fallback are enforced; request-rate and enumeration pressure need a dedicated edge guard.",
+          "evidence": [
+            "docs/agent-email.md",
+            "docs/threat-model.md"
+          ]
+        },
+        "observability": {
+          "state": "conditional",
+          "summary": "Journal and route state are inspectable, but alias conflicts, projection lag, delivery, and expiry are not wired to continuous alerts.",
+          "evidence": [
+            "docs/agent-email.md",
+            "docs/observability-and-operations.md"
+          ]
+        },
+        "recovery": {
+          "state": "conditional",
+          "summary": "Durable journals, tombstones, canonical fallback, retirement, and retry tests exist; move and route-republication recovery need a live drill.",
+          "evidence": [
+            "docs/agent-email.md",
+            "infra/cloudflare/control-plane/test/realm-email-alias-journal.test.mjs"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "The receive edge alias gate remains off and no managed customer alias delivers mail.",
+          "evidence": [
+            "docs/agent-email.md"
+          ]
+        },
+        "docs_support": {
+          "state": "pass",
+          "summary": "Canonical fallback, reserved terms, request lifecycle, limits, downgrade, retirement, and rollout requirements are documented.",
+          "evidence": [
+            "docs/agent-email.md",
+            "docs/billing-and-limits.md"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "alias-canonical-inventory",
+          "gate_ids": ["behavior", "rollout_canaries"],
+          "summary": "Converge the complete canonical address inventory before any alias delivery is enabled.",
+          "ref": "docs/agent-email.md"
+        },
+        {
+          "id": "alias-operations-alerting",
+          "gate_ids": ["observability"],
+          "summary": "Connect alias conflicts, projection lag, delivery, route coverage, and expiry metrics to continuous alerts and a tested external receiver.",
+          "ref": "docs/observability-and-operations.md"
+        },
+        {
+          "id": "alias-request-rate-guard",
+          "gate_ids": ["bounds_abuse"],
+          "summary": "Add and test a request and enumeration guard at the global alias authority.",
+          "ref": "docs/threat-model.md"
+        },
+        {
+          "id": "alias-route-coverage",
+          "gate_ids": ["behavior", "rollout_canaries"],
+          "summary": "Prove managed-domain catch-all or equivalent full route coverage before enabling alias delivery.",
+          "ref": "docs/agent-email.md"
+        },
+        {
+          "id": "alias-route-recovery",
+          "gate_ids": ["recovery"],
+          "summary": "Exercise account movement, projection replay, retirement, tombstone, and canonical fallback recovery.",
+          "ref": "docs/agent-email.md"
+        },
+        {
+          "id": "live-alias-canary",
+          "gate_ids": ["behavior", "rollout_canaries"],
+          "summary": "Enable one selected alias and retain request-through-delivery and downgrade-grace evidence before widening.",
+          "ref": "docs/agent-email.md"
+        }
+      ]
+    },
+    {
+      "id": "realm-messaging",
+      "name": "Realm-local messaging",
+      "area": "Communication",
+      "summary": "Durable same-realm direct and fan-out messaging, mailbox claims, retention, account entitlements, rate limits, and installed-once foreground routing are implemented; cross-realm delivery and waking clients are explicitly outside the core.",
+      "implementation": "implemented",
+      "managed_rollout": "limited",
+      "evidence_release": "v0.0.172",
+      "evidence_scope": "Same-realm messaging-core completion; current message-retention enforcement is excluded.",
+      "plan_feature_keys": [
+        "messaging"
+      ],
+      "plan_limit_keys": [
+        "message_delivered_per_realm_minute",
+        "message_delivered_per_recipient_minute",
+        "message_sent_per_agent_minute"
+      ],
+      "plan_policy_keys": [
+        "message_retention_days",
+        "messaging_entitlement_version"
+      ],
+      "docs": [
+        "docs/autonomous-realm-messaging.md",
+        "docs/inter-agent-messaging.md",
+        "docs/message-retention.md"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "pass",
+          "summary": "Send, list, fan-out, listen, claim, acknowledge, release, escalation, disabled behavior, and whole-thread retention are implemented and tested.",
+          "evidence": [
+            "docs/autonomous-realm-messaging.md",
+            "docs/inter-agent-messaging.md"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "pass",
+          "summary": "Personal is disabled; enabled plans and account overrides take effect without reinstall, and same-realm authority fails closed.",
+          "evidence": [
+            "docs/billing-and-limits.md",
+            "docs/inter-agent-messaging.md"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "pass",
+          "summary": "Payload, fan-out, per-agent, per-realm, per-recipient, claim, retry, escalation, and retention bounds are enforced with independent platform ceilings.",
+          "evidence": [
+            "docs/inter-agent-messaging.md",
+            "docs/message-retention.md"
+          ]
+        },
+        "observability": {
+          "state": "conditional",
+          "summary": "Value-free mailbox, rate, retention, claim, and worker metrics exist without continuous scraping and tested external alert delivery.",
+          "evidence": [
+            "docs/observability-and-operations.md"
+          ]
+        },
+        "recovery": {
+          "state": "pass",
+          "summary": "Canonical PostgreSQL mailboxes, claim fences, retry releases, escalations, provenance holds, archive/import, and retention cursors preserve work.",
+          "evidence": [
+            "docs/backup-and-recovery.md",
+            "docs/message-retention.md"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "The same-realm core has retained operational evidence, while this combined capability is limited because the managed message-retention worker remains disabled and lacks a current canary.",
+          "evidence": [
+            "docs/autonomous-realm-messaging.md",
+            "docs/message-retention.md"
+          ]
+        },
+        "docs_support": {
+          "state": "pass",
+          "summary": "Supported behavior, disabled semantics, rate limits, retention, foreground processing, and non-goals are documented.",
+          "evidence": [
+            "docs/autonomous-realm-messaging.md",
+            "docs/inter-agent-messaging.md",
+            "docs/message-retention.md"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "continuous-message-alerting",
+          "gate_ids": ["observability"],
+          "summary": "Connect mailbox backlog, rate, claim, failure, and retention metrics to a tested external alert receiver.",
+          "ref": "docs/observability-and-operations.md"
+        },
+        {
+          "id": "message-retention-rollout",
+          "gate_ids": ["rollout_canaries"],
+          "summary": "Enable enforce mode for a selected cohort and retain expiry, provenance-hold, and worker-fairness canaries.",
+          "ref": "docs/message-retention.md"
+        }
+      ]
+    },
+    {
+      "id": "runtime-integrations",
+      "name": "Agent runtime integrations",
+      "area": "Integration",
+      "summary": "Transactional MCP and routing installers exist for Codex, Claude Code, Grok Build, Cursor, OpenClaw, Antigravity, and GitHub Copilot, with capability-accurate hook support; broad signed-in model acceptance remains incomplete.",
+      "implementation": "implemented",
+      "managed_rollout": "limited",
+      "docs": [
+        "docs/provider-integration-certification.md"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "pass",
+          "summary": "Install, verify, upgrade, uninstall, ownership, collision handling, rollback, MCP catalog, and supported transcript-hook paths have extensive contract tests.",
+          "evidence": [
+            "docs/provider-integration-certification.md"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "pass",
+          "summary": "The full toolset installs once and backend feature gates change behavior without client reinstallation; value-returning tools can be independently removed.",
+          "evidence": [
+            "docs/mcp-tools.md",
+            "docs/provider-integration-certification.md"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "pass",
+          "summary": "Exact ownership markers, path validation, collision-resistant IDs, bounded hooks, transactional backups, and no-value modes constrain installer risk.",
+          "evidence": [
+            "docs/provider-integration-certification.md",
+            "docs/threat-model.md"
+          ]
+        },
+        "observability": {
+          "state": "conditional",
+          "summary": "Verification JSON and sanitized acceptance evidence schemas exist, but no recurring provider acceptance job or alerting surface is active.",
+          "evidence": [
+            "docs/memory-runtime-acceptance.md",
+            "docs/provider-integration-certification.md"
+          ]
+        },
+        "recovery": {
+          "state": "pass",
+          "summary": "Install journals, pre-edit backups, rollback, exact ownership, idempotent reinstall, and conservative uninstall protect client configuration.",
+          "evidence": [
+            "docs/provider-integration-certification.md"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "Contract tests are strong, but only the Codex contract gate crosses MCP stdio and no provider cell is advertised model-tested with a current signed-in record.",
+          "evidence": [
+            "docs/provider-integration-certification.md"
+          ]
+        },
+        "docs_support": {
+          "state": "pass",
+          "summary": "The per-runtime capability matrix, hooks, preview limitations, ownership, verification, and certification boundary are documented.",
+          "evidence": [
+            "docs/provider-integration-certification.md"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "retained-provider-evidence",
+          "gate_ids": ["rollout_canaries"],
+          "summary": "Publish retained release JSON and the public support-matrix result from the existing credential-free provider contract gates.",
+          "ref": "https://github.com/witwave-ai/witself/issues/45"
+        },
+        {
+          "id": "runtime-acceptance-operations",
+          "gate_ids": ["observability"],
+          "summary": "Run provider acceptance on a recurring cadence and alert on capability regressions without retaining credentials or private prompt content.",
+          "ref": "docs/provider-integration-certification.md"
+        },
+        {
+          "id": "signed-in-runtime-matrix",
+          "gate_ids": ["rollout_canaries"],
+          "summary": "Complete current signed-in model acceptance for every advertised runtime and operating-system capability cell.",
+          "ref": "docs/provider-integration-certification.md"
+        }
+      ]
+    },
+    {
+      "id": "secrets-vault",
+      "name": "Secrets, vault, passwords, and TOTP",
+      "area": "Security",
+      "summary": "The client-custodied agent vault, ciphertext-only backend, secret lifecycle, guarded reveal, password generation, TOTP, archive/import, recovery, rotation, and per-agent limits are implemented; update, runtime injection, grants, and certification remain follow-ons.",
+      "implementation": "implemented",
+      "managed_rollout": "limited",
+      "plan_feature_keys": [
+        "secrets"
+      ],
+      "plan_limit_keys": [
+        "stored_secret"
+      ],
+      "docs": [
+        "docs/client-custodied-agent-vault.md",
+        "docs/sealed-plane-acceptance.md",
+        "docs/secret-model.md"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "conditional",
+          "summary": "Enrollment, create, search, show, reveal, archive, restore, delete, password, TOTP, recovery, and rotation exist; secret update and runtime injection are not complete.",
+          "evidence": [
+            "docs/client-custodied-agent-vault.md",
+            "docs/secret-model.md"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "pass",
+          "summary": "Personal has zero secret capacity, paid plans have per-agent caps, and only the active agent client can decrypt value fields under explicit reveal policy.",
+          "evidence": [
+            "docs/billing-and-limits.md",
+            "docs/client-custodied-agent-vault.md"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "pass",
+          "summary": "Ciphertext-only storage, local AVK binding, size limits, field bounds, reveal audit, no-value mode, rotation fences, and excluded exports constrain exposure.",
+          "evidence": [
+            "docs/client-custodied-agent-vault.md",
+            "docs/secret-size-and-attachments.md"
+          ]
+        },
+        "observability": {
+          "state": "conditional",
+          "summary": "Value-free audit and lifecycle state exist, but sealed-plane SLOs, anomaly alerts, and external escalation are not connected.",
+          "evidence": [
+            "docs/observability-and-operations.md",
+            "docs/sealed-plane-acceptance.md"
+          ]
+        },
+        "recovery": {
+          "state": "conditional",
+          "summary": "Client recovery, rotation, encrypted archive/import, and fail-closed vault binding exist; cross-cloud movement and loss/recovery drills remain incomplete.",
+          "evidence": [
+            "docs/backup-and-recovery.md",
+            "docs/client-custodied-agent-vault.md"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "The implemented slice is released, but four-runtime and multi-cloud acceptance evidence is incomplete and advanced operations remain unavailable.",
+          "evidence": [
+            "docs/provider-integration-certification.md",
+            "docs/sealed-plane-acceptance.md"
+          ]
+        },
+        "docs_support": {
+          "state": "conditional",
+          "summary": "The authoritative AVK design is documented, while older KMS/server-decryption language remains in historical documents and needs consistency cleanup.",
+          "evidence": [
+            "docs/client-custodied-agent-vault.md",
+            "docs/sealed-plane-acceptance.md"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "advanced-secret-operations",
+          "gate_ids": ["behavior"],
+          "summary": "Implement secret update, local runtime injection, grants/group ownership, and irreversible tombstone purge with matching policy and tests.",
+          "ref": "docs/secret-model.md"
+        },
+        {
+          "id": "sealed-doc-consistency",
+          "gate_ids": ["docs_support"],
+          "summary": "Remove or clearly label stale KMS and server-decryption claims that conflict with the client-custodied AVK architecture.",
+          "ref": "docs/sealed-plane-acceptance.md"
+        },
+        {
+          "id": "sealed-live-certification",
+          "gate_ids": ["recovery", "rollout_canaries"],
+          "summary": "Complete four-runtime reveal/TOTP recovery and multi-cloud archive/movement drills with sanitized evidence.",
+          "ref": "docs/sealed-plane-acceptance.md"
+        },
+        {
+          "id": "sealed-operations-alerting",
+          "gate_ids": ["observability"],
+          "summary": "Define sealed-plane SLOs and connect value-free enrollment, reveal, recovery, rotation, and anomaly signals to a tested external escalation path.",
+          "ref": "docs/observability-and-operations.md"
+        }
+      ]
+    },
+    {
+      "id": "self-hosting",
+      "name": "Self-hosted Witself",
+      "area": "Deployment",
+      "summary": "The portable server, startup migrations, Helm chart, capability contract, PostgreSQL path, and multi-cloud Pulumi cell tooling are implemented and released for self-host preview; production support and cross-cloud acceptance remain conditional.",
+      "implementation": "implemented",
+      "managed_rollout": "not_applicable",
+      "docs": [
+        "charts/witself-server/README.md",
+        "docs/self-hosting.md",
+        "infra/pulumi/README.md"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "conditional",
+          "summary": "Portable server, startup migrations, Helm, and Pulumi cell paths exist, but the complete fresh-install, upgrade, and optional-feature matrix is not retained across supported substrates.",
+          "evidence": [
+            "charts/witself-server/README.md",
+            "infra/pulumi/README.md"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "conditional",
+          "summary": "Backend-kind and capability contracts distinguish managed-only dependencies, but the current capabilities response marks implemented facts unsupported and omits documented optional-feature flags.",
+          "evidence": [
+            "charts/witself-server/values.yaml",
+            "docs/api-contract.md",
+            "docs/self-hosting.md",
+            "internal/server/server.go"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "conditional",
+          "summary": "The chart has hardened workload defaults and bounded application controls, while production capacity profiles, ingress policy, and operator-owned abuse protections are not certified end to end.",
+          "evidence": [
+            "charts/witself-server/README.md",
+            "docs/self-hosting.md"
+          ]
+        },
+        "observability": {
+          "state": "conditional",
+          "summary": "Metrics, health endpoints, structured logs, and worker status exist, but the preview does not deliver a verified continuous scrape, PVC metrics, Alertmanager routing, dashboard, and tested external receiver.",
+          "evidence": [
+            "docs/observability-and-operations.md",
+            "docs/self-hosting.md"
+          ]
+        },
+        "recovery": {
+          "state": "conditional",
+          "summary": "Migration, backup, archive/import, and infrastructure recovery guidance exist without a retained operator-owned PostgreSQL restore and full deployment recovery drill.",
+          "evidence": [
+            "docs/backup-and-recovery.md",
+            "docs/self-hosting.md"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "Managed cohort rollout does not apply, but current release acceptance across fresh install, upgrade, rollback, and the supported cloud or Kubernetes matrix is incomplete.",
+          "evidence": [
+            "charts/witself-server/README.md",
+            "infra/pulumi/README.md"
+          ]
+        },
+        "docs_support": {
+          "state": "conditional",
+          "summary": "Chart and Pulumi guides are substantial, while self-host and server-command history still contains superseded KMS/server-decryption and target-only command language; production support remains explicitly uncommitted.",
+          "evidence": [
+            "docs/self-host-support.md",
+            "docs/self-hosting.md"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "self-host-capability-reconciliation",
+          "gate_ids": ["entitlement_policy"],
+          "summary": "Make the capabilities response accurately describe implemented facts and every supported optional feature, then pin it against server routes and Helm values.",
+          "ref": "internal/server/server.go"
+        },
+        {
+          "id": "self-host-doc-consistency",
+          "gate_ids": ["docs_support"],
+          "summary": "Reconcile self-host and server-command history with startup migrations, gen-bootstrap-token plus auth login, Pulumi, current capabilities, and the released client-custodied vault.",
+          "ref": "docs/server-command-surface.md"
+        },
+        {
+          "id": "self-host-production-hardening",
+          "gate_ids": ["behavior", "bounds_abuse", "observability"],
+          "summary": "Certify hardened production values, ingress and abuse controls, database and storage capacity, continuous monitoring, alerts, and every supported optional feature.",
+          "ref": "docs/self-host-support.md"
+        },
+        {
+          "id": "self-host-recovery-drill",
+          "gate_ids": ["recovery"],
+          "summary": "Retain a fresh PostgreSQL backup restore, migration failure, worker restart, archive/import, and client-vault recovery drill on operator-owned infrastructure.",
+          "ref": "docs/backup-and-recovery.md"
+        },
+        {
+          "id": "self-host-release-acceptance",
+          "gate_ids": ["rollout_canaries"],
+          "summary": "Retain release-specific fresh-install, upgrade, rollback, and health evidence for every advertised Kubernetes and cloud substrate.",
+          "ref": "infra/pulumi/README.md"
+        }
+      ]
+    },
+    {
+      "id": "transcripts",
+      "name": "Transcripts and retention",
+      "area": "Core data",
+      "summary": "The transcript ledger, durable local hook outbox, normalized supported-runtime capture, usage rollups, account retention policy, whole-conversation cleanup, evidence holds, admin override, and scalable worker are implemented; managed enforcement remains staged.",
+      "implementation": "implemented",
+      "managed_rollout": "limited",
+      "docs": [
+        "docs/transcript-ledger.md",
+        "docs/transcript-retention.md"
+      ],
+      "plan_policy_keys": [
+        "transcript_retention_days"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "conditional",
+          "summary": "Append, read, tail, durable hook flush, normalized events, usage rollups, account-policy retention, preview/enforce, whole-conversation deletion, and evidence holds are implemented and tested; materializing durable evidence to release resolved holds remains unimplemented.",
+          "evidence": [
+            "docs/transcript-ledger.md",
+            "docs/transcript-retention.md"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "pass",
+          "summary": "Catalog defaults are 30, 90, 365, and indefinite by plan; resolved cell snapshots and audited account overrides control behavior without changing price or plan.",
+          "evidence": [
+            "docs/billing-and-limits.md",
+            "docs/transcript-retention.md"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "pass",
+          "summary": "Payload, outbox, retry, page, claim, batch, cursor, time, worker lane, and defensive retention bounds constrain capture and cleanup.",
+          "evidence": [
+            "docs/transcript-ledger.md",
+            "docs/transcript-retention.md"
+          ]
+        },
+        "observability": {
+          "state": "conditional",
+          "summary": "Capture, outbox, retention, failure, and worker metrics exist without continuous scrape, alert routing, or a tested external receiver.",
+          "evidence": [
+            "docs/observability-and-operations.md",
+            "docs/transcript-retention.md"
+          ]
+        },
+        "recovery": {
+          "state": "pass",
+          "summary": "Durable local outbox, idempotent append, SKIP LOCKED cleanup, cursors, provenance holds, archive/import, and preview mode support safe retries and recovery.",
+          "evidence": [
+            "docs/backup-and-recovery.md",
+            "docs/transcript-retention.md"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "The worker is deployable and tested, but transcript retention remains disabled/preview in the active managed cell and lacks an enforce-mode canary.",
+          "evidence": [
+            "charts/witself-server/values.yaml",
+            "docs/transcript-retention.md"
+          ]
+        },
+        "docs_support": {
+          "state": "pass",
+          "summary": "Capture support, platform differences, ledger, policy semantics, evidence safety, worker scaling, metrics, and rollout are documented.",
+          "evidence": [
+            "docs/transcript-ledger.md",
+            "docs/transcript-retention.md"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "continuous-retention-alerting",
+          "gate_ids": ["observability"],
+          "summary": "Connect outbox and retention backlog, failure, age, and throughput metrics to a tested external alert receiver.",
+          "ref": "docs/observability-and-operations.md"
+        },
+        {
+          "id": "evidence-materialization",
+          "gate_ids": ["behavior"],
+          "summary": "Implement the documented path that materializes durable evidence so resolved transcript holds can be released.",
+          "ref": "docs/transcript-retention.md"
+        },
+        {
+          "id": "retention-enforce-canary",
+          "gate_ids": ["rollout_canaries"],
+          "summary": "Enable enforce mode for a selected account and retain expiry, evidence-hold, crash, and multi-worker fairness evidence.",
+          "ref": "docs/transcript-retention.md"
+        }
+      ]
+    },
+    {
+      "id": "usage-metering",
+      "name": "Usage metering and customer reporting",
+      "area": "Commercial",
+      "summary": "Immutable value-free usage events, hourly and daily rollups, time and dimension filtering, agent-scoped API authorization, and the customer CLI report are implemented; account aggregation and billing conversion remain follow-ons.",
+      "implementation": "implemented",
+      "managed_rollout": "limited",
+      "docs": [
+        "docs/cli-command-surface.md",
+        "docs/transcript-ledger.md"
+      ],
+      "gates": {
+        "behavior": {
+          "state": "pass",
+          "summary": "Event append, canonical dimensions, hourly and daily rollups, time windows, grouping, filters, JSON output, API, and CLI reporting are implemented and tested.",
+          "evidence": [
+            "internal/server/usage_test.go",
+            "internal/store/usage_integration_test.go"
+          ]
+        },
+        "entitlement_policy": {
+          "state": "pass",
+          "summary": "Only an active agent token may read its own rollups in the current slice; account, realm, and cross-agent reporting are not silently exposed.",
+          "evidence": [
+            "docs/transcript-ledger.md",
+            "internal/server/usage_test.go"
+          ]
+        },
+        "bounds_abuse": {
+          "state": "conditional",
+          "summary": "Events are value-free and query windows and groups are validated, but usage dimensions are extensible and the current report query has no result-row cap or pagination.",
+          "evidence": [
+            "docs/transcript-ledger.md",
+            "internal/store/usage_integration_test.go"
+          ]
+        },
+        "observability": {
+          "state": "conditional",
+          "summary": "Usage can be queried, but append failures, rollup lag, missing intervals, reconciliation drift, and storage growth lack continuous SLOs and alerts.",
+          "evidence": [
+            "docs/observability-and-operations.md",
+            "docs/transcript-ledger.md"
+          ]
+        },
+        "recovery": {
+          "state": "pass",
+          "summary": "Immutable events, deterministic buckets, canonical database backup, and semantic validation of events and rollups on account archive/import provide a verified restore path.",
+          "evidence": [
+            "docs/backup-and-recovery.md",
+            "internal/store/usage_integration_test.go"
+          ]
+        },
+        "rollout_canaries": {
+          "state": "conditional",
+          "summary": "Agent-scoped reporting is released, while account and realm aggregation, billing-unit conversion, current managed reconciliation, and retained load evidence are incomplete.",
+          "evidence": [
+            "docs/billing-and-limits.md",
+            "docs/transcript-ledger.md"
+          ]
+        },
+        "docs_support": {
+          "state": "pass",
+          "summary": "Current query scope, value-free dimensions, bucketing, filters, API, CLI, rollups, authorization, and deferred billing aggregation are documented.",
+          "evidence": [
+            "docs/cli-command-surface.md",
+            "docs/transcript-ledger.md"
+          ]
+        }
+      },
+      "open_gates": [
+        {
+          "id": "usage-operations-alerting",
+          "gate_ids": ["observability"],
+          "summary": "Connect append failures, rollup lag, missing buckets, reconciliation drift, and retained volume to continuous metrics and a tested receiver.",
+          "ref": "docs/observability-and-operations.md"
+        },
+        {
+          "id": "usage-query-bounds",
+          "gate_ids": ["bounds_abuse"],
+          "summary": "Define the accepted dimension vocabulary and add a hard returned-row cap or cursor pagination with boundary, hostile-import, and high-cardinality tests.",
+          "ref": "internal/store/usage.go"
+        },
+        {
+          "id": "usage-rollup-expansion",
+          "gate_ids": ["rollout_canaries"],
+          "summary": "Implement and retain canaries for account and realm aggregation, billing-unit conversion, archive/restore reconciliation, and production-shaped load.",
+          "ref": "docs/billing-and-limits.md"
+        }
+      ]
+    }
+  ]
+}

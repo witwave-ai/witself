@@ -3,6 +3,10 @@
 Status: draft. Decision: v0 is a usable cloud-shaped slice, not only a local
 mock and not yet the full commercial managed service.
 
+This document defines scope, not current completion. Use the canonical
+[Feature Status](feature-status.md) scorecard for reviewed implementation,
+managed rollout, evidence, and remaining gates.
+
 Open-plane amendment (accepted 2026-07-14): the memory slice now follows
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md). Narrative
 capture is a Witself capability, inference is client-side, PostgreSQL lexical
@@ -18,9 +22,10 @@ rollout, dormant-cell desired-state sync, four-provider integration refresh,
 live direct-message smoke, and clean-inbox evidence is retained in
 [autonomous-realm-messaging.md](autonomous-realm-messaging.md#completion-boundary).
 Named-group fan-out, cross-realm delivery, responsibility/directive routing,
-wake/presence, and plan-backed messaging rate/meter integration are follow-ons,
-not blockers for that core. This amendment does not close the narrative-memory
-production gates in issues
+wake/presence, and broader provider conformance are follow-ons, not blockers
+for that core. Plan-backed per-agent, per-realm, and per-recipient messaging
+rate enforcement was implemented as a later hardening layer. This amendment
+does not close the narrative-memory production gates in issues
 [#44](https://github.com/witwave-ai/witself/issues/44),
 [#45](https://github.com/witwave-ai/witself/issues/45), and
 [#46](https://github.com/witwave-ai/witself/issues/46).
