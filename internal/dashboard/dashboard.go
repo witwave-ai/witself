@@ -1689,9 +1689,10 @@ func (t *upstreamTracker) observe(w io.Writer, flusher http.Flusher, source stri
 	}
 	t.failed[source] = true
 	message := err.Error()
-	if source == "email" {
+	switch source {
+	case "email":
 		message = agentEmailUpstreamMessage
-	} else if source == "email_sent" {
+	case "email_sent":
 		message = agentEmailSentUpstreamMessage
 	}
 	writeSSE(w, flusher, "upstream", "", upstreamEvent{Source: source, OK: false, Message: message})
