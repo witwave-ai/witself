@@ -13,6 +13,9 @@ auto` worker and per-user launchd/systemd service are retained only as
 legacy/manual compatibility paths in
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
+Current runtime-by-runtime rollout and certification gaps are summarized in the
+canonical [Feature Status](feature-status.md) scorecard.
+
 ## Authority and delivery
 
 The CLI owns installation and lifecycle, MCP owns runtime tool guidance, and

@@ -1,8 +1,10 @@
 # Witself Operator Authentication
 
-Status: draft. Decision: managed v0 operator authentication is CLI-initiated,
-browser/device-code based, and token-file friendly. The CLI must not collect
-raw account passwords.
+Status: specified, not implemented. The current CLI exchanges a bootstrap-token
+file through `witself auth login`; it does not implement the browser PKCE,
+device-code, refresh, revocation, or credential-store flows below. Track the
+implementation and rollout gates in the canonical
+[Feature Status](feature-status.md) scorecard.
 
 ## Decision
 

@@ -1,8 +1,11 @@
 # Witself Audit Retention
 
-Status: draft. Decision: managed v0 keeps audit events for one year by default,
-with plan-configurable retention later. Audit is part of the integrity product,
-not only backend diagnostics.
+Status: implemented account-events core; retention is still a building target.
+Durable value-free events, registry validation, filtering, pagination, owner
+authorization, `GET /v1/account/events`, and `witself account events` exist.
+The 365-day default, plan policy, delete/archive/hold modes, export, status, and
+scheduled sweeper below are not implemented. Track those gates in the canonical
+[Feature Status](feature-status.md) scorecard.
 
 Narrative-memory amendment (accepted 2026-07-14): the memory event registry
 below now follows client-authored capture and curation plans. Autonomous

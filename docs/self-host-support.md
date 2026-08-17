@@ -1,8 +1,9 @@
 # Witself Self-Hosted Support
 
-Status: draft. Decision: self-hosting is available from the public repo, but
-production self-host support is paid or contracted once the hardening path is
-real.
+Status: implemented self-host preview. Production self-host support is not yet
+an advertised entitlement; it may become paid or contracted after the
+hardening and acceptance gates in the canonical
+[Feature Status](feature-status.md) scorecard are closed.
 
 Narrative-memory amendment (accepted 2026-07-14): self-host support includes
 the deterministic PostgreSQL memory path, not a backend embedding provider.
@@ -12,13 +13,13 @@ Client curation and optional client-supplied vectors follow
 > **Sealed-plane custody amendment (accepted 2026-07-18):**
 > [ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
 > [client-custodied vault plan](client-custodied-agent-vault.md) supersede the
-> KMS prerequisites below. Self-hosted and managed servers use the same
+> earlier KMS prerequisites. Self-hosted and managed servers use the same
 > ciphertext-only backend: the AVK remains in the authorized client, and the
 > backend has no decrypt key or server-decrypt route. No
 > `WITSELF_SEALED_PLANE_ENABLED`, `WITSELF_KMS_PROVIDER`, or
 > `WITSELF_KMS_KEY_ID` configuration is implemented or required for secrets.
-> KMS/realm-KEK readiness, rotation, and cross-cloud re-wrap sections below are
-> retained only as superseded support-design history. Operators still own
+> Any remaining KMS/realm-KEK or cross-cloud re-wrap language is superseded
+> support-design history. Operators still own
 > ordinary infrastructure encryption, database backups, and separate custody
 > of client AVKs.
 
@@ -26,8 +27,8 @@ Client curation and optional client-supplied vectors follow
 
 Managed Witself Cloud is the default supported product.
 
-Self-hosting is first-class in the sense that the public repo should include the
-backend server, Helm chart, Terraform modules, configuration docs, migration
+Self-hosting is first-class in the sense that the public repo includes the
+backend server, Helm chart, Pulumi cell tooling, configuration docs, migration
 paths, PostgreSQL retrieval and optional client-vector guidance, and operational
 guidance needed to run Witself outside Witself Cloud.
 
@@ -35,17 +36,13 @@ Self-hosting is not automatically a production support entitlement. Production
 self-host support should be paid or contracted after the required production
 hardening docs and operational paths exist.
 
-Witself self-hosters protect two payloads with two postures. They protect the
-integrity and authenticity of **open-plane** identity data (memories, facts,
-policies, groups, and messages), and, when the **sealed plane** is enabled, the
-confidentiality of secret material and TOTP seeds. The sealed plane is
-KMS-backed envelope-encrypted (CMK → per-realm KEK → per-secret/field DEK) and
-carries production prerequisites — a KMS provider and key-rotation guidance —
-that the open plane does not. Sealed-plane values are never embedded, never
-returned by semantic recall, never in the self-digest, and never in the
-plaintext export; reveal is the only audited value-returning path. See
-[encryption-model.md](encryption-model.md) and
-[key-hierarchy.md](key-hierarchy.md).
+Witself self-hosters protect the integrity and authenticity of **open-plane**
+identity data and preserve **sealed-plane** ciphertext, public metadata, and
+audit state. The authorized client holds the AVK and performs secret/TOTP value
+encryption and decryption; the server has no decrypt key or plaintext reveal
+path. Sealed values are never embedded, semantically recalled, included in the
+self-digest, or plaintext-exported. See
+[client-custodied-agent-vault.md](client-custodied-agent-vault.md).
 
 ## Support Levels
 
@@ -62,14 +59,14 @@ Notes:
   full-text retrieval path and no model provider. It is scaffolding, not a
   production mode.
 - Self-host preview covers the public `witself-server` image, Helm chart, and
-  Terraform modules run against externally managed PostgreSQL, on a best-effort
+  Pulumi cell tooling run against externally managed PostgreSQL, on a best-effort
   basis. Optional client vectors use migration-0032 JSONB and need no extension.
 - Production self-hosted is the only tier that carries a support commitment, and
   only under a paid or contracted agreement.
 
-The tiers span both planes. A deployment may run the open plane only (no KMS),
-or enable the sealed plane, which adds a KMS provider as a hard dependency and
-the key-rotation operational path below.
+The tiers span both planes. A deployment may run the open plane only or enable
+the ciphertext-only sealed plane. The latter adds vault enrollment, ciphertext
+backup, and client-AVK recovery responsibilities, not a server KMS dependency.
 
 ## Production Support Prerequisites
 
@@ -79,14 +76,14 @@ Open-plane (memory, fact, identity) prerequisites:
 
 - Backup and restore documentation for PostgreSQL memory content and full-text
   index rebuilds, plus optional vector profile/row handling when enabled.
-- Database migration and rollback guidance (`witself-server migrate`, advisory
-  lock, Helm migration Job).
+- Forward-only startup migration and recovery guidance for the embedded shared
+  migration lock; the current chart has no separate migration Job or down path.
 - Optional client-vector profile, validation, JSONB storage, coverage, and
   future ANN-projection guidance. Client software, not the server, owns vector
   generation after a profile change.
 - Upgrade guide.
 - Production Helm values examples.
-- Terraform state and configuration-management guidance.
+- Pulumi state and configuration-management guidance.
 - Observability guidance.
 - Disaster recovery guidance.
 - Security patch and release process.
@@ -94,19 +91,13 @@ Open-plane (memory, fact, identity) prerequisites:
 Sealed-plane (secret, TOTP) prerequisites — required only when the sealed plane
 is enabled:
 
-- A configured **KMS provider** (`WITSELF_KMS_PROVIDER` ∈ `aws-kms`, `gcp-kms`,
-  `azure-key-vault`; `local-dev` is not a production mode) and a reachable root
-  CMK (`WITSELF_KMS_KEY_ID`). The server must unwrap the active per-realm KEK at
-  startup; readiness gates on KMS reachability whenever the sealed plane is on.
-- **Key-rotation guidance** covering per-realm KEK rotation (re-wrapping the
-  `realm_keys` KEK under a new CMK version) and DEK rotation, emitting the
-  `key.rotated` audit event, with no plaintext exposure during rotation. See
-  [key-hierarchy.md](key-hierarchy.md).
-- Encrypted-only secret backup that carries the envelope plus KMS key identity
-  and rotation metadata (never key material, never plaintext), and a documented
-  crypto-shred / KMS-loss posture: losing CMK access renders that realm's secret
-  values and TOTP seeds unrecoverable, while leaving the open plane intact. See
-  [backup-and-recovery.md](backup-and-recovery.md).
+- Documented client-vault enrollment, recovery, and rotation with fail-closed
+  behavior when the local AVK is missing or mismatched.
+- Ciphertext-only secret backup and restore that preserves vault-key bindings,
+  immutable lifecycle state, and audit without exporting AVKs or plaintext.
+- A tested client-AVK loss and recovery posture. Losing every valid AVK/recovery
+  copy makes value fields unrecoverable while leaving open-plane data and public
+  secret metadata intact.
 
 Federation prerequisites — required only when a self-hosted realm participates
 in cross-realm collaboration (a post-v0 epic; an isolated single-realm deployment
@@ -132,21 +123,20 @@ Deployment-cell prerequisites — required only when a self-hosted deployment ru
 as more than one cell (whether a self-host is always a single cell or may itself be
 a fleet is an Open decision in [deployment-cells.md](deployment-cells.md)):
 
-- Per-cell operational ownership: each cell is one complete, isolated Witself stack
-  (`witself-server`, PostgreSQL, sealed-plane KMS rooted
-  in that cell, and blob storage) with its own backup, recovery, and KMS. A cell holds the full data
-  and key material for its own tenants and depends on nothing in another cell.
-- Tenant migration between cells, when used, leans on the first-class export/import
-  for the open plane and a KMS **re-wrap** (decrypt-at-source / re-encrypt-at-dest)
-  for the sealed plane, both audited end to end. See
+- Per-cell operational ownership: each cell is one complete, isolated Witself
+  stack (`witself-server`, PostgreSQL including sealed ciphertext, and blob
+  storage) with its own backup and recovery. Client AVKs never enter the cell.
+- Tenant migration between cells, when used, leans on first-class export/import
+  for open-plane rows and sealed ciphertext; the client-held AVK does not move
+  through either server. See
   [backup-and-recovery.md](backup-and-recovery.md).
 
-Data-at-rest protection for the open plane relies on ordinary RDS/disk
-encryption; KMS is not a dependency for an open-plane-only deployment. The
-sealed plane, when enabled, makes KMS a hard dependency rather than an optional
-capability. Sealed-plane material is never embedded, recalled, placed in the
-self-digest, or included in the plaintext export. See
-[storage.md](storage.md) and [encryption-model.md](encryption-model.md).
+Data-at-rest protection relies on ordinary database and disk encryption. Sealed
+value confidentiality additionally relies on the client-held AVK; the backend
+stores ciphertext and has no decrypt key. Sealed-plane material is never
+embedded, recalled, placed in the self digest, or included in the plaintext
+export. See [storage.md](storage.md) and
+[client-custodied-agent-vault.md](client-custodied-agent-vault.md).
 
 ## What Self-Hosted Operators Own
 
@@ -164,17 +154,16 @@ Self-hosted operators remain responsible for:
   in client software and are not `witself-server` configuration.
 - Object/blob storage for exports, attachments, diagnostic bundles, and backup
   artifacts.
-- **KMS configuration (sealed plane)**: provisioning the KMS provider and root
-  CMK, granting the server workload identity wrap/unwrap on it, and owning per-realm
-  KEK and DEK rotation including the `key.rotated` audit trail. Required only when
-  the sealed plane is enabled; not needed for open-plane-only deployments. See
+- **Client-vault recovery (sealed plane)**: preserving ciphertext backups and
+  supporting client AVK enrollment, recovery, and rotation without receiving
+  the AVK or plaintext. See
   [Sealed-Plane Configuration Guidance](#sealed-plane-configuration-guidance).
 - Network ingress and TLS.
 - Backups and disaster recovery execution.
-- Terraform state protection.
-- Helm values and Kubernetes Secret management (agent token files, database
-  URLs, and — when the sealed plane is enabled —
-  KMS provider configuration and the `WITSELF_KMS_KEY_ID` reference).
+- Pulumi state protection.
+- Helm values and Kubernetes Secret management for agent token files, database
+  URLs, object-store credentials, and infrastructure integrations. The chart
+  has no sealed-plane decrypt key or KMS setting.
 - Policy, security-group, and messaging configuration appropriate to their
   deployment (see [Identity Configuration Guidance](#identity-configuration-guidance)).
 - **Federation (cross-realm, post-v0)**: the realm FQDN and TLS certificate, the
@@ -182,10 +171,11 @@ Self-hosted operators remain responsible for:
   and the deny-by-default federation allow-list of accepted peer realm handles and
   keys. Required only when the realm participates in cross-realm collaboration. See
   [agent-collaboration.md](agent-collaboration.md).
-- **Per-cell operations (multi-cell self-host)**: when a deployment runs more than
-  one cell, the operator owns each cell as an isolated stack with its own Postgres,
-  KMS, blob storage, and backup, plus the audited export/import + KMS re-wrap that a
-  tenant migration between cells uses. See [deployment-cells.md](deployment-cells.md).
+- **Per-cell operations (multi-cell self-host)**: when a deployment runs more
+  than one cell, the operator owns each isolated PostgreSQL/blob/backup stack
+  plus audited export/import. Sealed ciphertext moves without server-side
+  re-encryption; client AVKs remain outside every cell. See
+  [deployment-cells.md](deployment-cells.md).
 - Payment, billing, and support integrations they choose to wire themselves.
 
 ## Identity Configuration Guidance
@@ -249,47 +239,25 @@ production self-hosting.
 
 ## Sealed-Plane Configuration Guidance
 
-When the sealed plane (secrets, TOTP) is enabled, self-hosted operators configure
-the confidentiality controls that the managed service would otherwise run for
-them. These are operator responsibilities in production self-hosting and apply
-only to the sealed plane; an open-plane-only deployment skips this section.
+When the sealed plane (secrets, TOTP) is enabled, self-hosted deployments use
+the same client-custodied vault contract as managed Witself Cloud.
 
-### KMS provider
+### Client vault and recovery
 
-- Provision a KMS provider and root CMK and configure it through
-  `WITSELF_KMS_PROVIDER` (`aws-kms`, `gcp-kms`, or `azure-key-vault`) and
-  `WITSELF_KMS_KEY_ID`. Do not run `local-dev` in production. Provide credentials
-  and the key reference through Kubernetes Secrets and workload identity, not Helm
-  values or environment files committed to source.
-- Grant the `witself-server` workload identity wrap/unwrap permission on the CMK
-  only. The server unwraps the active per-realm KEK (`realm_keys`) at startup and
-  on reveal; readiness gates on KMS reachability whenever the sealed plane is on.
-- Sealed-plane encryption is a CMK → per-realm KEK → per-secret/field DEK
-  envelope (`XCHACHA20_POLY1305` / `AES_256_GCM`) with client-held and
-  server-mediated decrypt behind the `client_side_decrypt` / `server_side_decrypt`
-  capability switch. See [encryption-model.md](encryption-model.md) and
-  [key-hierarchy.md](key-hierarchy.md).
-
-### Key rotation
-
-- Own per-realm KEK rotation (re-wrapping the `realm_keys` KEK under a new CMK
-  version, updating `secret_deks.kek_id` in place) and DEK rotation as audited
-  maintenance operations. Each rotation emits the `key.rotated` audit event and
-  exposes no plaintext during re-wrap.
-- Old ciphertext keeps its frozen `dek_version`; the current wrapping KEK is
-  always resolved through `secret_deks.kek_id`, so historical reads continue to
-  unwrap after rotation. See [key-hierarchy.md](key-hierarchy.md).
-
-### Sealed-plane backup and crypto-shred
-
-- Back up secrets as encrypted-only envelope ciphertext plus KMS key identity and
-  rotation metadata — never key material, never plaintext. Secrets are excluded
-  from the plaintext identity export; any encrypted secret export is a separate,
-  explicit, audited flag.
-- Understand the crypto-shred posture: losing CMK access renders that realm's
-  secret values and TOTP seeds unrecoverable, while leaving the open plane
-  (memories, facts) fully intact. Validate KMS access and KEK unwrap as part of
-  disaster-recovery drills. See [backup-and-recovery.md](backup-and-recovery.md).
+- The authorized client creates and holds the AVK. The backend stores only a
+  public vault-key binding, encrypted envelopes, ciphertext value fields,
+  lifecycle metadata, and value-free audit records.
+- Encryption, decryption, password generation, and TOTP calculation happen in
+  the active client. The server has no decrypt key, KMS provider setting, or
+  server-decrypt route.
+- A missing or mismatched AVK fails closed. The backend never creates a
+  replacement key for an existing binding.
+- Back up ciphertext and binding metadata without AVKs or plaintext. Users must
+  separately preserve valid AVK recovery material; losing every valid copy makes
+  value fields unrecoverable while leaving open-plane data and public secret
+  metadata intact. See
+  [client-custodied-agent-vault.md](client-custodied-agent-vault.md) and
+  [backup-and-recovery.md](backup-and-recovery.md).
 
 ### Reveal and value-returning surfaces
 
@@ -340,7 +308,7 @@ provider because `witself-server` has none.
 - [governance-and-support.md](governance-and-support.md)
 - [requirements.md](requirements.md)
 - [helm-chart.md](helm-chart.md)
-- [terraform-infrastructure.md](terraform-infrastructure.md)
+- [Pulumi infrastructure guide](../infra/pulumi/README.md)
 - [implementation-plan.md](implementation-plan.md)
 - [backup-and-recovery.md](backup-and-recovery.md)
 - [memory-model.md](memory-model.md)

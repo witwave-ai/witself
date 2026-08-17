@@ -909,12 +909,20 @@ support path once hardening docs and operational guidance are real.
 
 ## Repository Status
 
-This repository is pre-v0 and still docs-led, but implementation is now landing
-incrementally. The `witself` CLI, `witself-server`, Helm chart, GitOps tree, release
-workflows, and Pulumi-based `witself-infra` module are built in this repo.
+This is an active pre-v1 product repository. Major capabilities are implemented,
+but implementation, managed rollout, and operational acceptance are deliberately
+separate claims. The canonical [Feature Status](docs/feature-status.md)
+scorecard applies the same behavior, policy, bounds, observability, recovery,
+rollout, and documentation gates to every tracked feature.
+
+The `witself` CLI, `witself-server`, `witself-worker`, control plane, Cloudflare
+edge services, Helm chart, GitOps tree, release workflows, and Pulumi-based
+`witself-infra` module are built in this repository.
 
 ## Docs
 
+- [Feature Status](docs/feature-status.md) — canonical reviewed progress,
+  rollout scope, evidence, and open gates for every major capability
 - [Runbooks](docs/runbooks.md) — hand-testing recipes for everything that is built and running
 - [Requirements](docs/requirements.md)
 - [Data Model](docs/data-model.md)

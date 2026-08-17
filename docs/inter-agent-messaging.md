@@ -13,6 +13,11 @@ metering. It binds the message shapes pinned in
 [json-contracts.md](json-contracts.md) and conforms to the master spec in
 [requirements.md](requirements.md).
 
+“Operationally complete” above is scoped to the released same-realm behavior.
+The canonical [Feature Status](feature-status.md) scorecard separately records
+the current observability and retention-rollout gates; plan entitlement and
+implemented behavior do not by themselves mean full operational acceptance.
+
 Inter-agent messaging is **fully in scope for v0**, not a stub. It ships a
 durable mailbox/queue with at-least-once delivery, per-recipient ordering, and
 explicit read/acknowledgement state.

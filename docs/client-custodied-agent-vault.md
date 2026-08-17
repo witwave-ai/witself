@@ -5,6 +5,10 @@ The agent-owned vertical, multi-installation enrollment, offline recovery, and
 crash-resumable AVK rotation are implemented through schema `0067`; only the
 explicitly listed follow-on slices remain planned. Last reviewed 2026-07-23.
 
+The canonical [Feature Status](feature-status.md) scorecard records which
+implemented vault behavior is still waiting on operations, recovery
+certification, runtime acceptance, and documentation consistency.
+
 This document turns Witself's agent-secrets product into buildable slices. It is
 the authoritative custody and delivery contract wherever an older sealed-plane
 draft still describes KMS-rooted keys or server-side decryption.

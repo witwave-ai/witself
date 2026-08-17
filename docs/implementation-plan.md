@@ -5,6 +5,10 @@ describes a practical build order for a repo that
 contains the CLI, MCP adapter, backend API server, images, Helm chart, Terraform
 substrate, release automation, and docs.
 
+This plan is not the current progress authority. Use the canonical
+[Feature Status](feature-status.md) scorecard for implementation, managed
+rollout, evidence, and open gates.
+
 Memory-plan amendment (accepted 2026-07-14): the narrative-memory phases and
 first coding slice in
 [narrative-memory-and-curation.md](narrative-memory-and-curation.md) replace

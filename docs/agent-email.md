@@ -1,5 +1,9 @@
 # Witself Agent Email
 
+The canonical [Feature Status](feature-status.md) scorecard evaluates receive,
+send, realm aliases, and custom domains as separate capabilities under the same
+seven readiness gates used by the rest of Witself.
+
 ## Current Production Status
 
 As of 2026-08-16, agent email is a production service for one exact Founder

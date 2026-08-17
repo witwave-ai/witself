@@ -473,6 +473,8 @@ func TestParseValidation(t *testing.T) {
 		{"zero agent email retention", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"policies":{"agent_email_retention_days":0}}]}`, "between 1"},
 		{"bad agent email entitlement marker", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"policies":{"agent_email_entitlement_version":2}}]}`, "must be 1"},
 		{"unknown policy", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"policies":{"transcript_retention_dayz":30}}]}`, "unknown policy"},
+		{"unknown feature", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"features":["memories"]}]}`, "unknown feature"},
+		{"duplicate feature", `{"schema_version":"witself.plans.v0","plans":[{"id":"free","available":true,"features":["memory","memory"]}]}`, "duplicate feature"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -590,5 +592,79 @@ func TestValidateLimitsZeroAndMissingUnlimited(t *testing.T) {
 		if err := ValidateLimits(limits); err != nil {
 			t.Fatalf("ValidateLimits(%v): %v", limits, err)
 		}
+	}
+}
+
+func TestSnapshotHashRejectsInvalidFeatures(t *testing.T) {
+	for _, features := range [][]string{
+		{"unknown"},
+		{MemoryFeature, MemoryFeature},
+	} {
+		if _, err := SnapshotHash(Free, nil, nil, features); err == nil {
+			t.Errorf("SnapshotHash accepted invalid features %v", features)
+		}
+	}
+}
+
+func TestSupportedPlanContractKeyVocabularies(t *testing.T) {
+	featureKeys := SupportedFeatureKeys()
+	if len(featureKeys) == 0 || !slices.IsSorted(featureKeys) {
+		t.Fatalf("SupportedFeatureKeys() = %v; want nonempty sorted vocabulary", featureKeys)
+	}
+	assertUniqueStrings(t, "feature", featureKeys)
+	firstFeature := featureKeys[0]
+	featureKeys[0] = "mutated"
+	if got := SupportedFeatureKeys(); got[0] != firstFeature {
+		t.Fatalf("SupportedFeatureKeys() returned shared storage: first = %q; want %q", got[0], firstFeature)
+	}
+	if err := ValidateFeatures(SupportedFeatureKeys()); err != nil {
+		t.Fatalf("supported feature vocabulary rejected: %v", err)
+	}
+	if err := ValidateFeatures([]string{MemoryFeature, MemoryFeature}); err == nil ||
+		!strings.Contains(err.Error(), "duplicate feature") {
+		t.Fatalf("duplicate feature error = %v", err)
+	}
+
+	limitKeys := SupportedLimitKeys()
+	if len(limitKeys) == 0 || !slices.IsSorted(limitKeys) {
+		t.Fatalf("SupportedLimitKeys() = %v; want nonempty sorted vocabulary", limitKeys)
+	}
+	assertUniqueStrings(t, "limit", limitKeys)
+	firstLimit := limitKeys[0]
+	limitKeys[0] = "mutated"
+	if got := SupportedLimitKeys(); got[0] != firstLimit {
+		t.Fatalf("SupportedLimitKeys() returned shared storage: first = %q; want %q", got[0], firstLimit)
+	}
+	for _, key := range SupportedLimitKeys() {
+		if err := ValidateLimits(map[string]int64{key: 0}); err != nil {
+			t.Errorf("supported limit %q rejected neutral value: %v", key, err)
+		}
+	}
+
+	policyKeys := SupportedPolicyKeys()
+	if len(policyKeys) == 0 || !slices.IsSorted(policyKeys) {
+		t.Fatalf("SupportedPolicyKeys() = %v; want nonempty sorted vocabulary", policyKeys)
+	}
+	assertUniqueStrings(t, "policy", policyKeys)
+	firstPolicy := policyKeys[0]
+	policyKeys[0] = "mutated"
+	if got := SupportedPolicyKeys(); got[0] != firstPolicy {
+		t.Fatalf("SupportedPolicyKeys() returned shared storage: first = %q; want %q", got[0], firstPolicy)
+	}
+	for _, key := range SupportedPolicyKeys() {
+		if err := ValidatePolicies(map[string]int64{key: 1}); err != nil {
+			t.Errorf("supported policy %q rejected neutral value: %v", key, err)
+		}
+	}
+}
+
+func assertUniqueStrings(t *testing.T, kind string, values []string) {
+	t.Helper()
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		if seen[value] {
+			t.Errorf("supported %s vocabulary contains duplicate %q", kind, value)
+		}
+		seen[value] = true
 	}
 }

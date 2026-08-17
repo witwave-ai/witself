@@ -1,35 +1,49 @@
 # Witself Governance And Support
 
-Status: draft. This document defines the initial public-code, self-hosting,
-support, and contribution boundaries before implementation.
+Status: partially implemented. Public-code, licensing, artifacts, the
+self-host preview, and durable managed support tickets exist; contribution,
+production-support, support-entitlement, and SLA decisions remain conditional.
+The canonical [Feature Status](feature-status.md) scorecard records the current
+gates instead of treating this design history as delivery evidence.
 
 Narrative-memory amendment (accepted 2026-07-14): the public backend includes
 client-vector validation/search and curation-plan application, not an embedding
 provider or its credentials. Conflicting support language below is superseded
 by [narrative-memory-and-curation.md](narrative-memory-and-curation.md).
 
+Sealed-plane custody amendment (accepted 2026-07-18):
+[ADR 0003](decisions/0003-client-custodied-agent-vault.md) and the
+[client-custodied vault plan](client-custodied-agent-vault.md) supersede the
+earlier server-KMS design. The backend stores ciphertext and public metadata;
+the authorized client holds the agent vault key and performs decryption. KMS,
+realm KEK, server-decrypt, and cross-cloud re-wrap language is historical, not
+an implemented server contract. Operators still own ordinary infrastructure
+encryption, backups, and separate recovery custody for client vault keys.
+
 ## Public Code Stance
 
 Witself should be inspectable and self-hostable. The public repository should
 contain the CLI, MCP adapter, backend API server, storage adapters,
 authorization and policy logic, audit model, deterministic retrieval and
-client-vector validation, Helm chart, Terraform modules, and release definitions
+client-vector validation, Helm chart, Pulumi modules, and release definitions
 unless a clear security or operational reason requires a split.
 
 Public code is part of the trust model across both planes. It lets users,
 customers, and security reviewers inspect how Witself stores, authorizes,
 audits, ranks, recalls, and serves open-plane identity material — memories,
-facts, policies, groups, and messages — and how it encrypts, key-manages, and
-reveal-gates sealed-plane credential material — secrets and TOTP enrollments.
+facts, policies, groups, and messages — and how the ciphertext-only backend
+validates, stores, audits, and reveal-gates sealed-plane credential material —
+secrets and TOTP enrollments.
 
 Witself proves two postures at once: the *integrity and authenticity* handling
 of open-plane identity data, and the *confidentiality* handling of sealed-plane
 secret material. The sealed plane is inspectable precisely so reviewers can
 confirm the carve-outs hold — that secret values are never embedded, never
 returned by semantic recall, never in the self-digest, and never in the
-plaintext export, and that values surface only through the audited reveal
-ceremony. See [encryption-model.md](encryption-model.md),
-[key-hierarchy.md](key-hierarchy.md), and [secret-model.md](secret-model.md).
+plaintext export, and that values surface only through an audited client-side
+reveal ceremony. See
+[client-custodied-agent-vault.md](client-custodied-agent-vault.md) and
+[secret-model.md](secret-model.md).
 
 Realm-local inter-agent messaging is a v0 part of this trust surface. The
 cross-realm collaboration components are post-v0 and join the same inspectable
@@ -101,14 +115,21 @@ maintainer review.
 
 Managed Witself Cloud support and self-hosted support are different products.
 
-Managed Witself Cloud support may include:
+Managed Witself Cloud already implements durable account-scoped support tickets
+and messages through tenant CLI/API and fleet-admin CLI/TUI surfaces, with
+audit and archive/import coverage. That mechanism is not yet a generally
+advertised support promise: its plan entitlement is not synchronized into the
+separate `support_policy`, and channels, hours, severities, response targets,
+retention, ownership, escalation, monitoring, and SLA language remain open.
+
+When those gates are closed, managed support may cover:
 
 - Account and billing help.
 - Service availability issues.
 - Managed backend incidents.
 - Hosted payment flow issues, including crypto payment rails.
 - Managed identity export, import, and recovery assistance.
-- Managed support workflows.
+- The implemented managed support-ticket workflow.
 
 Self-hosted support should be explicit by support level:
 
@@ -132,16 +153,14 @@ Self-hosted operators remain responsible for:
 - Client-vector profile policy and capacity when that optional feature is
   enabled. `witself-server` has no embedding-provider configuration,
   credentials, egress, or health dependency.
-- KMS provider configuration, key access, and key rotation for the sealed plane
-  (`aws-kms`, `gcp-kms`, `azure-key-vault`, or `local-dev`), when the sealed
-  plane is enabled. KMS loss makes secret values unrecoverable (crypto-shred)
-  and does not affect the open plane; see [key-hierarchy.md](key-hierarchy.md)
-  and [backup-and-recovery.md](backup-and-recovery.md).
+- Ordinary infrastructure encryption and database key management. Sealed secret
+  values remain ciphertext-only at the server; operators must preserve the
+  backend ciphertext and users must separately preserve their client-held AVKs.
 - Object/blob storage for exports, attachments, and backups.
 - Network ingress and TLS.
 - Backups and disaster recovery, including full-text index rebuilds and optional
   vector profile/row handling. Vector data is not needed for lexical recall.
-- Terraform state protection.
+- Pulumi state and secret-bearing stack configuration protection.
 - Helm values and Kubernetes Secret management for agent token delivery.
 - Federation governance (post-v0), when cross-realm collaboration is enabled:
   managing the deny-by-default allow-list / trust registry, publishing and
@@ -152,11 +171,12 @@ Self-hosted operators remain responsible for:
 
 Optional field-level encryption of `sensitive` facts is an open-plane capability,
 not a core dependency; operators who enable it also own the associated key
-material. This is distinct from the sealed plane: secrets and TOTP seeds are
-always envelope-encrypted under KMS (CMK to per-realm KEK to per-secret/field
-DEK) whenever the sealed plane is enabled — that is mandatory, not optional. A
-credential belongs in the sealed plane as a secret, not as a `sensitive` fact;
-see [secret-model.md](secret-model.md) and [facts-model.md](facts-model.md).
+material. This is distinct from the sealed plane: secret and TOTP value fields
+are encrypted and decrypted by the authorized client under its AVK, while the
+backend stores ciphertext and public metadata only. A credential belongs in the
+sealed plane as a secret, not as a `sensitive` fact; see
+[client-custodied-agent-vault.md](client-custodied-agent-vault.md),
+[secret-model.md](secret-model.md), and [facts-model.md](facts-model.md).
 
 ## Feature Boundary
 
@@ -200,17 +220,14 @@ owns its own federation allow-list and realm card. See
 
 The public repository must not contain:
 
-- Real Terraform state.
-- Production `.tfvars`.
+- Real Pulumi state or secret-bearing stack configuration.
 - Cloud credentials.
 - Kubeconfigs.
 - Database passwords.
 - Client-side model API keys or credentials that may appear in optional client
   tooling or examples. These are never backend configuration or server secrets.
-- KMS credentials, KMS configuration secrets, or local-dev passphrase files
-  (`WITSELF_PASSPHRASE_FILE`).
-- Sealed-plane key material — CMK, per-realm KEK, or per-secret/field DEK
-  material — and any unwrapped DEKs.
+- Infrastructure-encryption credentials or provider key-management material.
+- Agent vault keys, recovery material, or any decrypted sealed-plane value.
 - Raw secret values, plaintext secret fixtures, or plaintext reveal output.
 - TOTP seeds (otpauth URIs or Base32 seeds) and TOTP QR images.
 - Optional field-level fact-encryption key material (when that capability is
@@ -225,7 +242,7 @@ The public repository must not contain:
 - Real memory, fact, message, policy, group, or secret fixtures derived from
   customer or production data.
 - Production identity exports.
-- Encrypted secret backups containing real envelope blobs or KMS key identity.
+- Encrypted secret backups containing real ciphertext or vault-key binding data.
 - Production support exports and diagnostic bundles.
 
 The repository should include `.gitignore`, secret scanning, and CI checks that
@@ -233,10 +250,10 @@ make these mistakes harder. Test fixtures must be synthetic. Two kinds of
 material are especially easy to commit by accident and must be screened:
 open-plane identity export, which is plaintext by default (see
 [backup-and-recovery.md](backup-and-recovery.md)); and sealed-plane material —
-note that raw secret values, TOTP seeds, and DEKs never appear in any export at
-all (secret backup is encrypted-only, and the plaintext export excludes the
+note that raw secret values, TOTP seeds, and AVKs never appear in any export at
+all (secret backup is ciphertext-only, and the plaintext export excludes the
 sealed plane), so any such plaintext in the repo is necessarily a mistake. See
-[encryption-model.md](encryption-model.md) and
+[client-custodied-agent-vault.md](client-custodied-agent-vault.md) and
 [secret-model.md](secret-model.md).
 
 ## Package And Artifact Ownership
@@ -276,6 +293,6 @@ tracked in [security-policy.md](security-policy.md) and
 - [agent-collaboration.md](agent-collaboration.md)
 - [api-contract.md](api-contract.md)
 - [release-and-build.md](release-and-build.md)
-- [terraform-infrastructure.md](terraform-infrastructure.md)
+- [Pulumi infrastructure module](../infra/pulumi/README.md)
 - [billing-and-limits.md](billing-and-limits.md)
 - [backup-and-recovery.md](backup-and-recovery.md)

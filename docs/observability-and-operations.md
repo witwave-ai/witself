@@ -3,6 +3,11 @@
 Status: draft. This document defines the observability and Kubernetes
 operations requirements for `witself-server` and `witself-worker`.
 
+The canonical [Feature Status](feature-status.md) scorecard applies this
+operational bar to every feature. Instrumentation alone does not pass its
+observability gate without continuous collection, alert routing, and a tested
+external receiver.
+
 Implementation status (2026-07-16): the server now exports `witself_up`,
 bounded route-template HTTP request/in-flight/latency metrics, narrative-memory
 domain-operation and recall counters/histograms, vector coverage/fallback
