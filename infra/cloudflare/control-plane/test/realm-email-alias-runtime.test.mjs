@@ -657,6 +657,123 @@ test("realm-alias prepare atomically fits, fences, replays, and compensates with
   assert.equal(entitlementConflict.response.status, 409);
   assert.deepEqual([...fixture.storage.values.entries()], preparedState);
 
+  const newerSnapshot = {
+    revision: 9,
+    snapshot_hash: "a".repeat(64),
+    features: [REALM_EMAIL_ALIAS_FEATURE],
+    limits: { [REALM_EMAIL_ALIAS_LIMIT]: 2 },
+  };
+  const newer = await call(fixture.runtime, "/plan/reconcile", {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    activation_enabled: true,
+    alias_limit: 2,
+    mode: "prepare",
+    plan_revision: newerSnapshot.revision,
+    plan_snapshot_hash: newerSnapshot.snapshot_hash,
+  });
+  assert.equal(newer.response.status, 409);
+  assert.deepEqual(newer.body, {
+    schema_version: "witself.realm-email-alias.v1",
+    error: "an older realm email alias plan-fit fence is awaiting cell apply",
+    code: "plan_fit_prepared_fence_conflict",
+    account_id: ACCOUNT,
+    mode: "prepare",
+    plan_revision: 9,
+    plan_snapshot_hash: "a".repeat(64),
+    prepared: false,
+    pending: true,
+    stale: false,
+    complete: false,
+    pending_state: "awaiting_cell",
+    pending_plan_revision: 8,
+    pending_plan_snapshot_hash: "8".repeat(64),
+  });
+  assert.deepEqual([...fixture.storage.values.entries()], preparedState);
+  const newerEnvironment = {
+    ...fixture.env,
+    REALM_EMAIL_ALIASES: {
+      idFromName: (name) => name,
+      get: () => ({
+        fetch: (request, init) => fixture.runtime.fetch(
+          new Request(request, init),
+        ),
+      }),
+    },
+  };
+  assert.deepEqual(
+    await reconcileRealmEmailAliasesForPlan(
+      newerEnvironment,
+      ACCOUNT,
+      newerSnapshot,
+      "prepare",
+    ),
+    newer.body,
+  );
+  const malformedEnvironment = {
+    ...newerEnvironment,
+    REALM_EMAIL_ALIASES: {
+      idFromName: (name) => name,
+      get: () => ({
+        fetch: () => Response.json(
+          { ...newer.body, unexpected: true },
+          { status: 409 },
+        ),
+      }),
+    },
+  };
+  await assert.rejects(
+    reconcileRealmEmailAliasesForPlan(
+      malformedEnvironment,
+      ACCOUNT,
+      newerSnapshot,
+      "prepare",
+    ),
+    /older realm email alias plan-fit fence/,
+  );
+
+  await fixture.storage.put(`plan-intent:${ACCOUNT}`, {
+    ...intent,
+    state: "cell_committed",
+  });
+  const nonAwaiting = await call(fixture.runtime, "/plan/reconcile", {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    activation_enabled: true,
+    alias_limit: 2,
+    mode: "prepare",
+    plan_revision: newerSnapshot.revision,
+    plan_snapshot_hash: newerSnapshot.snapshot_hash,
+  });
+  assert.equal(nonAwaiting.response.status, 409);
+  assert.equal(nonAwaiting.body.code, undefined);
+  assert.equal(
+    (await fixture.storage.get(`plan-intent:${ACCOUNT}`)).state,
+    "cell_committed",
+  );
+
+  await fixture.storage.put(`plan-intent:${ACCOUNT}`, {
+    ...intent,
+    prepare_fit: { ...intent.prepare_fit, authority_revision: -1 },
+  });
+  const corrupt = await call(fixture.runtime, "/plan/reconcile", {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    activation_enabled: true,
+    alias_limit: 2,
+    mode: "prepare",
+    plan_revision: newerSnapshot.revision,
+    plan_snapshot_hash: newerSnapshot.snapshot_hash,
+  });
+  assert.equal(corrupt.response.status, 503);
+  assert.equal(corrupt.body.code, undefined);
+  assert.equal(
+    (await fixture.storage.get(`plan-intent:${ACCOUNT}`)).prepare_fit
+      .authority_revision,
+    -1,
+  );
+  await fixture.storage.put(`plan-intent:${ACCOUNT}`, intent);
+
   const crossing = await requestAlias(fixture.runtime, "prepare-crossing", {
     alias_limit: 2,
     plan_revision: 8,

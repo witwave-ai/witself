@@ -211,6 +211,47 @@ function validRealmEmailAliasPrepareFit(
   return true;
 }
 
+function validRealmEmailAliasPreparedFenceConflict(
+  value,
+  accountID,
+  requestedRevision,
+  requestedSnapshotHash,
+) {
+  if (!isObject(value)) return false;
+  const allowed = new Set([
+    "schema_version",
+    "error",
+    "code",
+    "account_id",
+    "mode",
+    "plan_revision",
+    "plan_snapshot_hash",
+    "prepared",
+    "pending",
+    "stale",
+    "complete",
+    "pending_state",
+    "pending_plan_revision",
+    "pending_plan_snapshot_hash",
+  ]);
+  return Object.keys(value).length === allowed.size &&
+    Object.keys(value).every((key) => allowed.has(key)) &&
+    value.schema_version === SCHEMA_VERSION &&
+    typeof value.error === "string" && value.error.length > 0 &&
+    value.code === "plan_fit_prepared_fence_conflict" &&
+    value.account_id === accountID && value.mode === "prepare" &&
+    value.plan_revision === requestedRevision &&
+    value.plan_snapshot_hash === requestedSnapshotHash &&
+    value.prepared === false && value.pending === true &&
+    value.stale === false && value.complete === false &&
+    value.pending_state === "awaiting_cell" &&
+    validPlanFence(
+      value.pending_plan_revision,
+      value.pending_plan_snapshot_hash,
+    ) &&
+    comparePlanFence(requestedRevision, value.pending_plan_revision) > 0;
+}
+
 class RegistryError extends Error {
   constructor(message, status = 500, code = "", details = {}) {
     super(message);
@@ -1021,6 +1062,15 @@ export async function reconcileRealmEmailAliasesForPlan(
       body?.stale === false && body?.complete === true &&
       body?.code === "plan_fit_failed" &&
       validRealmEmailAliasPrepareFit(body.fit, expectedMaximum, false)) {
+    return body;
+  }
+  if (mode === "prepare" && response.status === 409 &&
+      validRealmEmailAliasPreparedFenceConflict(
+        body,
+        accountID,
+        snapshot.revision,
+        snapshot.snapshot_hash,
+      )) {
     return body;
   }
   if (!response.ok) {
@@ -7293,6 +7343,44 @@ export class DurableRealmEmailAliasRegistry {
             fit: pending.prepare_fit,
             registry_revision: pending.prepare_fit.authority_revision,
           });
+        }
+        if (pendingRelation > 0 && pending.state === "awaiting_cell") {
+          const pendingMaximum = pending.feature_enabled
+            ? pending.alias_limit
+            : 0;
+          const pendingFenceValid = validPlanFence(
+            pending.plan_revision,
+            pending.plan_snapshot_hash,
+          );
+          const pendingEntitlementValid =
+            typeof pending.feature_enabled === "boolean" &&
+            typeof pending.activation_enabled === "boolean" &&
+            validAliasLimit(pending.alias_limit);
+          if (!pendingFenceValid || !pendingEntitlementValid ||
+              !validRealmEmailAliasPrepareFit(
+                pending.prepare_fit,
+                pendingMaximum,
+              ) || pending.prepare_fit.over_limit_count !== 0) {
+            fail("persisted realm email alias prepare evidence is invalid", 503);
+          }
+          fail(
+            "an older realm email alias plan-fit fence is awaiting cell apply",
+            409,
+            "plan_fit_prepared_fence_conflict",
+            {
+              account_id: input.account_id,
+              mode: input.mode,
+              plan_revision: input.plan_revision,
+              plan_snapshot_hash: input.plan_snapshot_hash,
+              prepared: false,
+              pending: true,
+              stale: false,
+              complete: false,
+              pending_state: "awaiting_cell",
+              pending_plan_revision: pending.plan_revision,
+              pending_plan_snapshot_hash: pending.plan_snapshot_hash,
+            },
+          );
         }
         fail("realm email alias policy is still converging", 409);
       }

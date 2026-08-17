@@ -623,6 +623,107 @@ test("custom-domain prepare atomically fits, fences, replays, and compensates wi
   assert.equal(entitlementConflict.response.status, 409);
   assert.deepEqual([...fixture.storage.values.entries()], preparedState);
 
+  const newerSnapshot = {
+    revision: 9,
+    snapshot_hash: "a".repeat(64),
+    features: [AGENT_EMAIL_CUSTOM_DOMAIN_FEATURE],
+    limits: { [AGENT_EMAIL_CUSTOM_DOMAIN_LIMIT]: 1 },
+  };
+  const newer = await call(fixture.runtime, "/plan/reconcile", {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    domain_limit: 1,
+    mode: "prepare",
+    plan_revision: newerSnapshot.revision,
+    plan_snapshot_hash: newerSnapshot.snapshot_hash,
+  });
+  assert.equal(newer.response.status, 409);
+  assert.deepEqual(newer.body, {
+    schema_version: "witself.agent-email-domain.v1",
+    error: "an older custom domain plan-fit fence is awaiting cell apply",
+    code: "plan_fit_prepared_fence_conflict",
+    account_id: ACCOUNT,
+    mode: "prepare",
+    plan_revision: 9,
+    plan_snapshot_hash: "a".repeat(64),
+    prepared: false,
+    pending: true,
+    stale: false,
+    complete: false,
+    pending_state: "awaiting_cell",
+    pending_plan_revision: 8,
+    pending_plan_snapshot_hash: "8".repeat(64),
+  });
+  assert.deepEqual([...fixture.storage.values.entries()], preparedState);
+  assert.deepEqual(
+    await reconcileAgentEmailDomainsForPlan(
+      runtimeEnvironment(fixture.runtime),
+      ACCOUNT,
+      newerSnapshot,
+      "prepare",
+    ),
+    newer.body,
+  );
+  const malformedEnvironment = runtimeEnvironment(fixture.runtime);
+  malformedEnvironment.AGENT_EMAIL_DOMAINS = {
+    idFromName: (name) => name,
+    get: () => ({
+      fetch: () => Response.json(
+        { ...newer.body, unexpected: true },
+        { status: 409 },
+      ),
+    }),
+  };
+  await assert.rejects(
+    reconcileAgentEmailDomainsForPlan(
+      malformedEnvironment,
+      ACCOUNT,
+      newerSnapshot,
+      "prepare",
+    ),
+    /older custom domain plan-fit fence/,
+  );
+
+  await fixture.storage.put(`plan-intent:${ACCOUNT}`, {
+    ...intent,
+    state: "cell_committed",
+  });
+  const nonAwaiting = await call(fixture.runtime, "/plan/reconcile", {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    domain_limit: 1,
+    mode: "prepare",
+    plan_revision: newerSnapshot.revision,
+    plan_snapshot_hash: newerSnapshot.snapshot_hash,
+  });
+  assert.equal(nonAwaiting.response.status, 409);
+  assert.equal(nonAwaiting.body.code, undefined);
+  assert.equal(
+    (await fixture.storage.get(`plan-intent:${ACCOUNT}`)).state,
+    "cell_committed",
+  );
+
+  await fixture.storage.put(`plan-intent:${ACCOUNT}`, {
+    ...intent,
+    prepare_fit: { ...intent.prepare_fit, authority_revision: -1 },
+  });
+  const corrupt = await call(fixture.runtime, "/plan/reconcile", {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    domain_limit: 1,
+    mode: "prepare",
+    plan_revision: newerSnapshot.revision,
+    plan_snapshot_hash: newerSnapshot.snapshot_hash,
+  });
+  assert.equal(corrupt.response.status, 503);
+  assert.equal(corrupt.body.code, undefined);
+  assert.equal(
+    (await fixture.storage.get(`plan-intent:${ACCOUNT}`)).prepare_fit
+      .authority_revision,
+    -1,
+  );
+  await fixture.storage.put(`plan-intent:${ACCOUNT}`, intent);
+
   const crossing = await create(fixture.runtime, "prepare-crossing.example", {
     domain_limit: 1,
     plan_revision: 8,

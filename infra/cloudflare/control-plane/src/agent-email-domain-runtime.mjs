@@ -191,6 +191,47 @@ function validAgentEmailDomainPrepareFit(
   return true;
 }
 
+function validAgentEmailDomainPreparedFenceConflict(
+  value,
+  accountID,
+  requestedRevision,
+  requestedSnapshotHash,
+) {
+  if (!isObject(value)) return false;
+  const allowed = new Set([
+    "schema_version",
+    "error",
+    "code",
+    "account_id",
+    "mode",
+    "plan_revision",
+    "plan_snapshot_hash",
+    "prepared",
+    "pending",
+    "stale",
+    "complete",
+    "pending_state",
+    "pending_plan_revision",
+    "pending_plan_snapshot_hash",
+  ]);
+  return Object.keys(value).length === allowed.size &&
+    Object.keys(value).every((key) => allowed.has(key)) &&
+    value.schema_version === SCHEMA_VERSION &&
+    typeof value.error === "string" && value.error.length > 0 &&
+    value.code === "plan_fit_prepared_fence_conflict" &&
+    value.account_id === accountID && value.mode === "prepare" &&
+    value.plan_revision === requestedRevision &&
+    value.plan_snapshot_hash === requestedSnapshotHash &&
+    value.prepared === false && value.pending === true &&
+    value.stale === false && value.complete === false &&
+    value.pending_state === "awaiting_cell" &&
+    validPlanRevisionFence(
+      value.pending_plan_revision,
+      value.pending_plan_snapshot_hash,
+    ) &&
+    comparePlanRevision(requestedRevision, value.pending_plan_revision) > 0;
+}
+
 class DomainRegistryError extends Error {
   constructor(message, status = 500, code = "", details = {}) {
     super(message);
@@ -950,6 +991,15 @@ export async function reconcileAgentEmailDomainsForPlan(
       body?.stale === false && body?.complete === true &&
       body?.code === "plan_fit_failed" &&
       validAgentEmailDomainPrepareFit(body.fit, expectedMaximum, false)) {
+    return body;
+  }
+  if (mode === "prepare" && response.status === 409 &&
+      validAgentEmailDomainPreparedFenceConflict(
+        body,
+        accountID,
+        snapshot.revision,
+        snapshot.snapshot_hash,
+      )) {
     return body;
   }
   if (!response.ok) {
@@ -2713,6 +2763,43 @@ export class DurableAgentEmailDomainRegistry {
             fit: pending.prepare_fit,
             registry_revision: pending.prepare_fit.authority_revision,
           });
+        }
+        if (relation > 0 && pending.state === "awaiting_cell") {
+          const pendingMaximum = pending.feature_enabled
+            ? pending.domain_limit
+            : 0;
+          const pendingFenceValid = validPlanRevisionFence(
+            pending.plan_revision,
+            pending.plan_snapshot_hash,
+          );
+          const pendingEntitlementValid =
+            typeof pending.feature_enabled === "boolean" &&
+            validDomainLimit(pending.domain_limit);
+          if (!pendingFenceValid || !pendingEntitlementValid ||
+              !validAgentEmailDomainPrepareFit(
+                pending.prepare_fit,
+                pendingMaximum,
+              ) || pending.prepare_fit.over_limit_count !== 0) {
+            fail("persisted custom domain prepare evidence is invalid", 503);
+          }
+          fail(
+            "an older custom domain plan-fit fence is awaiting cell apply",
+            409,
+            "plan_fit_prepared_fence_conflict",
+            {
+              account_id: accountID,
+              mode: input.mode,
+              plan_revision: planFence.revision,
+              plan_snapshot_hash: planFence.snapshot_hash,
+              prepared: false,
+              pending: true,
+              stale: false,
+              complete: false,
+              pending_state: "awaiting_cell",
+              pending_plan_revision: pending.plan_revision,
+              pending_plan_snapshot_hash: pending.plan_snapshot_hash,
+            },
+          );
         }
         fail("custom inbound domain policy is still converging", 409);
       }
