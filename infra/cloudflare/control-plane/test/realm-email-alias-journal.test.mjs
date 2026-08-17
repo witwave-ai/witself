@@ -908,6 +908,86 @@ test("only the exact prepared-to-committed audit overwrite is replayable", () =>
   }
 });
 
+test("prepared alias plan evidence is strict, phase-stable, and has no due work", () => {
+  const key = `plan-intent:${ACCOUNT}`;
+  const prepared = {
+    account_id: ACCOUNT,
+    plan_revision: 8,
+    plan_snapshot_hash: "b".repeat(64),
+    feature_enabled: true,
+    alias_limit: 2,
+    activation_enabled: false,
+    state: "awaiting_cell",
+    claim_cursor: null,
+    realm_positions: {},
+    gate_phase: "claims",
+    gate_claim_cursor: null,
+    gate_canonical_cursor: null,
+    operational_gate_complete: false,
+    prepare_fit: {
+      complete: true,
+      dimension: "agent_email_realm_aliases_per_realm",
+      maximum: 2,
+      highest_used: 2,
+      over_limit_count: 0,
+      scanned_subject_count: 1,
+      scanned_allocation_count: 2,
+      authority_revision: 3,
+    },
+    retry_at_ms: 44,
+    created_at: NOW,
+    updated_at: NOW,
+  };
+  const state = applyRealmEmailAliasAuthorityAfterImage(new Map(), {
+    puts: [{ key, value: prepared }],
+    deletes: [],
+  });
+  assert.deepEqual(state.get(key).prepare_fit, prepared.prepare_fit);
+  const recoveryState = fixtureState();
+  recoveryState.set(key, prepared);
+  const derived = rebuildRealmEmailAliasDerivedState(recoveryState, {
+    retry_at_ms: 50,
+    updated_at: NOW,
+  });
+  assert.equal([...derived.keys()].some((value) =>
+    value.startsWith("plan-due:")
+  ), false);
+
+  const committed = {
+    ...prepared,
+    state: "cell_committed",
+    retry_at_ms: 45,
+  };
+  assert.equal(applyRealmEmailAliasAuthorityAfterImage(state, {
+    puts: [{ key, value: committed }],
+    deletes: [],
+  }).get(key).state, "cell_committed");
+  const { prepare_fit: _discarded, ...withoutFit } = committed;
+  assert.throws(() => applyRealmEmailAliasAuthorityAfterImage(state, {
+    puts: [{ key, value: withoutFit }],
+    deletes: [],
+  }), /plan intent regressed/);
+  assert.throws(() => applyRealmEmailAliasAuthorityAfterImage(new Map(), {
+    puts: [{ key, value: {
+      ...prepared,
+      prepare_fit: { ...prepared.prepare_fit, over_limit_count: 1 },
+    } }],
+    deletes: [],
+  }), /prepare_fit/);
+
+  const legacy = { ...prepared };
+  delete legacy.prepare_fit;
+  const legacyState = fixtureState();
+  legacyState.set(key, legacy);
+  const legacyDerived = rebuildRealmEmailAliasDerivedState(legacyState, {
+    retry_at_ms: 50,
+    updated_at: NOW,
+  });
+  assert.equal([...legacyDerived.keys()].some((value) =>
+    value.startsWith("plan-due:")
+  ), true);
+});
+
 test("derived-state rebuild recreates indexes, counters, and due work only", () => {
   const state = fixtureState();
   const claim = {

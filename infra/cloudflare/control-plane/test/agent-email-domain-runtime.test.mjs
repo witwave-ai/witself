@@ -14,6 +14,7 @@ import {
   agentEmailDomainRegistryStub,
   isProtectedAgentEmailDomain,
   normalizeAgentEmailCustomDomain,
+  reconcileAgentEmailDomainsForPlan,
   runAgentEmailDomainManualVerification,
   runScheduledAgentEmailDomainVerification,
 } from "../src/agent-email-domain-runtime.mjs";
@@ -550,6 +551,231 @@ test("custom-domain plan-fit counts pending reservations and fails closed while 
   });
   assert.equal(converging.response.status, 409);
   assert.match(converging.body.error, /converging/);
+});
+
+test("custom-domain prepare atomically fits, fences, replays, and compensates without allocation changes", async () => {
+  const fixture = registry();
+  const created = await create(fixture.runtime, "prepare-domain.example", {
+    domain_limit: 1,
+  });
+  assert.equal(created.response.status, 202);
+  const blockedInput = {
+    account_id: ACCOUNT,
+    feature_enabled: false,
+    domain_limit: 0,
+    mode: "prepare",
+    plan_revision: 8,
+    plan_snapshot_hash: "8".repeat(64),
+  };
+  const beforeBlocked = structuredClone([...fixture.storage.values.entries()]);
+  const blocked = await call(fixture.runtime, "/plan/reconcile", blockedInput);
+  assert.equal(blocked.response.status, 409);
+  assert.equal(blocked.body.code, "plan_fit_failed");
+  assert.equal(blocked.body.prepared, false);
+  assert.deepEqual(blocked.body.fit, {
+    complete: true,
+    dimension: AGENT_EMAIL_CUSTOM_DOMAIN_LIMIT,
+    maximum: 0,
+    used: 1,
+    over_limit_count: 1,
+    scanned_subject_count: 1,
+    scanned_allocation_count: 1,
+  });
+  assert.deepEqual([...fixture.storage.values.entries()], beforeBlocked);
+
+  const input = {
+    ...blockedInput,
+    feature_enabled: true,
+    domain_limit: 1,
+  };
+  const prepared = await call(fixture.runtime, "/plan/reconcile", input);
+  assert.equal(prepared.response.status, 200);
+  assert.equal(prepared.body.prepared, true);
+  assert.equal(prepared.body.pending, true);
+  assert.equal(prepared.body.fit.over_limit_count, 0);
+  assert.equal(
+    prepared.body.fit.authority_revision,
+    prepared.body.registry_revision,
+  );
+  const intent = await fixture.storage.get(`plan-intent:${ACCOUNT}`);
+  assert.equal(intent.state, "awaiting_cell");
+  assert.deepEqual(intent.prepare_fit, prepared.body.fit);
+  assert.equal((await fixture.storage.list({ prefix: "plan-due:" })).size, 0);
+  assert.equal(
+    (await fixture.storage.get(`request:${created.body.request.id}`)).state,
+    "pending_verification",
+  );
+
+  const preparedState = structuredClone([...fixture.storage.values.entries()]);
+  const replay = await call(fixture.runtime, "/plan/reconcile", input);
+  assert.deepEqual(replay.body, prepared.body);
+  assert.deepEqual([...fixture.storage.values.entries()], preparedState);
+  const conflict = await call(fixture.runtime, "/plan/reconcile", {
+    ...input,
+    plan_snapshot_hash: "9".repeat(64),
+  });
+  assert.equal(conflict.response.status, 409);
+  assert.deepEqual([...fixture.storage.values.entries()], preparedState);
+  const entitlementConflict = await call(fixture.runtime, "/plan/reconcile", {
+    ...input,
+    domain_limit: 2,
+  });
+  assert.equal(entitlementConflict.response.status, 409);
+  assert.deepEqual([...fixture.storage.values.entries()], preparedState);
+
+  const crossing = await create(fixture.runtime, "prepare-crossing.example", {
+    domain_limit: 1,
+    plan_revision: 8,
+    plan_snapshot_hash: "8".repeat(64),
+  });
+  assert.equal(crossing.response.status, 409);
+  assert.equal(crossing.body.code, "account_policy_converging");
+  await fixture.runtime.alarm();
+  assert.equal(
+    (await fixture.storage.get(`request:${created.body.request.id}`)).state,
+    "pending_verification",
+  );
+
+  const recovered = await call(fixture.runtime, "/plan/reconcile", {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    domain_limit: 1,
+    mode: "complete",
+    plan_revision: 7,
+    plan_snapshot_hash: PLAN_HASH,
+    recover_pending_revision: 8,
+    recover_pending_snapshot_hash: "8".repeat(64),
+  });
+  assert.equal(recovered.response.status, 200);
+  assert.equal(recovered.body.recovered, true);
+  assert.equal(await fixture.storage.get(`plan-intent:${ACCOUNT}`), undefined);
+
+  const wrapperBlocked = await reconcileAgentEmailDomainsForPlan(
+    runtimeEnvironment(fixture.runtime),
+    ACCOUNT,
+    {
+      revision: 9,
+      snapshot_hash: "a".repeat(64),
+      features: [],
+      limits: { [AGENT_EMAIL_CUSTOM_DOMAIN_LIMIT]: 0 },
+    },
+    "prepare",
+  );
+  assert.equal(wrapperBlocked.code, "plan_fit_failed");
+  assert.equal(wrapperBlocked.prepared, false);
+
+  const finalInput = {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    domain_limit: 1,
+    mode: "prepare",
+    plan_revision: 10,
+    plan_snapshot_hash: "b".repeat(64),
+  };
+  assert.equal(
+    (await call(fixture.runtime, "/plan/reconcile", finalInput)).body.prepared,
+    true,
+  );
+  const completed = await call(fixture.runtime, "/plan/reconcile", {
+    ...finalInput,
+    mode: "complete",
+  });
+  assert.equal(completed.response.status, 200);
+  assert.equal(completed.body.complete, true);
+  assert.equal(
+    (await fixture.storage.get(`plan-fence:${ACCOUNT}`)).committed_revision,
+    10,
+  );
+});
+
+test("custom-domain plan wrapper prepares and exactly replays disabled finite and enabled unlimited targets", async () => {
+  const disabled = registry();
+  const disabledSnapshot = {
+    revision: 8,
+    snapshot_hash: "c".repeat(64),
+    features: [],
+    limits: { [AGENT_EMAIL_CUSTOM_DOMAIN_LIMIT]: 5 },
+  };
+  const disabledPrepared = await reconcileAgentEmailDomainsForPlan(
+    runtimeEnvironment(disabled.runtime),
+    ACCOUNT,
+    disabledSnapshot,
+    "prepare",
+  );
+  assert.equal(disabledPrepared.prepared, true);
+  assert.equal(disabledPrepared.fit.maximum, 0);
+  const disabledState = structuredClone([...disabled.storage.values.entries()]);
+  assert.deepEqual(
+    await reconcileAgentEmailDomainsForPlan(
+      runtimeEnvironment(disabled.runtime),
+      ACCOUNT,
+      disabledSnapshot,
+      "prepare",
+    ),
+    disabledPrepared,
+  );
+  assert.deepEqual([...disabled.storage.values.entries()], disabledState);
+
+  const unlimited = registry();
+  const created = await create(unlimited.runtime, "prepare-unlimited.example", {
+    domain_limit: null,
+  });
+  assert.equal(created.response.status, 202);
+  const unlimitedSnapshot = {
+    revision: 8,
+    snapshot_hash: "d".repeat(64),
+    features: [AGENT_EMAIL_CUSTOM_DOMAIN_FEATURE],
+    limits: {},
+  };
+  const unlimitedPrepared = await reconcileAgentEmailDomainsForPlan(
+    runtimeEnvironment(unlimited.runtime),
+    ACCOUNT,
+    unlimitedSnapshot,
+    "prepare",
+  );
+  assert.equal(unlimitedPrepared.prepared, true);
+  assert.equal(unlimitedPrepared.fit.maximum, null);
+  assert.equal(unlimitedPrepared.fit.used, 1);
+  const unlimitedState = structuredClone([...unlimited.storage.values.entries()]);
+  assert.deepEqual(
+    await reconcileAgentEmailDomainsForPlan(
+      runtimeEnvironment(unlimited.runtime),
+      ACCOUNT,
+      unlimitedSnapshot,
+      "prepare",
+    ),
+    unlimitedPrepared,
+  );
+  assert.deepEqual([...unlimited.storage.values.entries()], unlimitedState);
+});
+
+test("custom-domain prepare fails closed on inconsistent authority without a fence", async () => {
+  const fixture = registry();
+  const created = await create(fixture.runtime, "prepare-incomplete.example", {
+    domain_limit: 1,
+  });
+  const activeKey = [...fixture.storage.values.keys()].find((key) =>
+    key.startsWith(`account-domain:${ACCOUNT}:`)
+  );
+  assert.ok(activeKey);
+  await fixture.storage.delete(activeKey);
+  const before = structuredClone([...fixture.storage.values.entries()]);
+  const result = await call(fixture.runtime, "/plan/reconcile", {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    domain_limit: 1,
+    mode: "prepare",
+    plan_revision: 8,
+    plan_snapshot_hash: "8".repeat(64),
+  });
+  assert.equal(result.response.status, 503);
+  assert.match(result.body.error, /index is incomplete/);
+  assert.equal(await fixture.storage.get(`plan-intent:${ACCOUNT}`), undefined);
+  assert.equal(
+    (await fixture.storage.get(`request:${created.body.request.id}`)).state,
+    "pending_verification",
+  );
+  assert.deepEqual([...fixture.storage.values.entries()], before);
 });
 
 function auditRows(storage) {

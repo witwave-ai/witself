@@ -142,6 +142,45 @@ function exactKeys(value, allowed, name) {
   }
 }
 
+function validateRealmEmailAliasPlanPrepareFit(value) {
+  exactKeys(value, new Set([
+    "complete",
+    "dimension",
+    "maximum",
+    "highest_used",
+    "over_limit_count",
+    "scanned_subject_count",
+    "scanned_allocation_count",
+    "authority_revision",
+  ]), "realm email alias plan prepare_fit");
+  if (Object.keys(value).length !== 8 || value.complete !== true ||
+      value.dimension !== "agent_email_realm_aliases_per_realm" ||
+      !(value.maximum === null ||
+        (Number.isSafeInteger(value.maximum) && value.maximum >= 0)) ||
+      !Number.isSafeInteger(value.highest_used) || value.highest_used < 0 ||
+      !Number.isSafeInteger(value.over_limit_count) ||
+      value.over_limit_count < 0 ||
+      !Number.isSafeInteger(value.scanned_subject_count) ||
+      value.scanned_subject_count < 0 || value.scanned_subject_count > 10_000 ||
+      !Number.isSafeInteger(value.scanned_allocation_count) ||
+      value.scanned_allocation_count < 0 ||
+      value.scanned_allocation_count > 10_000 ||
+      value.over_limit_count > value.scanned_subject_count ||
+      value.highest_used > value.scanned_allocation_count ||
+      (value.scanned_subject_count === 0 && value.highest_used !== 0) ||
+      (value.maximum === null && value.over_limit_count !== 0) ||
+      (value.maximum !== null &&
+        ((value.highest_used > value.maximum) !==
+          (value.over_limit_count > 0))) ||
+      !Number.isSafeInteger(value.authority_revision) ||
+      value.authority_revision < 0) {
+    journalFail(
+      "realm email alias plan prepare_fit is invalid",
+      "realm_email_alias_recovery_invariant_failed",
+    );
+  }
+}
+
 function canonicalize(value, depth, seen, budget) {
   if (depth > CANONICAL_MAX_DEPTH) {
     journalFail("canonical JSON exceeds the maximum depth");
@@ -598,6 +637,9 @@ function isPreparedAuditCompletion(previous, desired) {
 }
 
 function assertAuthorityTransition(state, key, desired) {
+  if (key.startsWith("plan-intent:") && desired.prepare_fit !== undefined) {
+    validateRealmEmailAliasPlanPrepareFit(desired.prepare_fit);
+  }
   const previous = state.get(key);
   if (!previous) return;
   if (key.startsWith("audit:")) {
@@ -673,6 +715,9 @@ function assertAuthorityTransition(state, key, desired) {
     const previousOrder = order[previous.state] ?? 0;
     const desiredOrder = order[desired.state] ?? 0;
     const sameRevision = previous.plan_revision === desired.plan_revision;
+    const prepareFitChanged = sameRevision &&
+      canonicalJSONString(previous.prepare_fit ?? null) !==
+        canonicalJSONString(desired.prepare_fit ?? null);
     if (previous.account_id !== desired.account_id ||
         desired.plan_revision < previous.plan_revision ||
         previous.created_at !== desired.created_at ||
@@ -681,7 +726,7 @@ function assertAuthorityTransition(state, key, desired) {
             previous.feature_enabled !== desired.feature_enabled ||
             previous.alias_limit !== desired.alias_limit ||
             previous.activation_enabled !== desired.activation_enabled ||
-            desiredOrder < previousOrder)) ||
+            desiredOrder < previousOrder || prepareFitChanged)) ||
         Date.parse(desired.updated_at) < Date.parse(previous.updated_at)) {
       journalFail("realm email alias plan intent regressed",
         "realm_email_alias_recovery_revision_regression");
@@ -1240,6 +1285,9 @@ export function validateRealmEmailAliasRecoveredState(state, options = {}) {
         journalFail("recovered realm email alias plan intent is invalid",
           "realm_email_alias_recovery_invariant_failed");
       }
+      if (value.prepare_fit !== undefined) {
+        validateRealmEmailAliasPlanPrepareFit(value.prepare_fit);
+      }
       validateISODate(value.created_at, "alias plan intent created_at");
       validateISODate(value.updated_at, "alias plan intent updated_at");
     } else if (key.startsWith("lifecycle-intent:")) {
@@ -1627,10 +1675,13 @@ export function rebuildRealmEmailAliasDerivedState(state, options = {}) {
         value.alias,
       );
     } else if (key.startsWith("plan-intent:")) {
-      derived.set(
-        `plan-due:${dueSegment(value.retry_at_ms, retryAt)}:${value.account_id}`,
-        value.account_id,
-      );
+      if (!(value.state === "awaiting_cell" &&
+          value.prepare_fit !== undefined)) {
+        derived.set(
+          `plan-due:${dueSegment(value.retry_at_ms, retryAt)}:${value.account_id}`,
+          value.account_id,
+        );
+      }
     } else if (key.startsWith("lifecycle-intent:")) {
       derived.set(
         `lifecycle-due:${dueSegment(value.retry_at_ms, retryAt)}:${value.account_id}`,

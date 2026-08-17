@@ -66,6 +66,8 @@ const ROUTE_PROJECTION_MAX_RETRY_MS = 60 * 60 * 1_000;
 const ROUTE_CONVERGENCE_PAGE_LIMIT = 4;
 const ROUTE_CONVERGENCE_RETRY_MS = 1_000;
 const ROUTE_CONVERGENCE_MAX_RETRY_MS = 60 * 60 * 1_000;
+const PLAN_FIT_AUTHORITY_PAGE_LIMIT = 100;
+const PLAN_FIT_AUTHORITY_SCAN_LIMIT = 10_000;
 const ROUTE_SOURCE_INTENT_SCHEMA =
   "witself.agent-email-custom-domain-route-source-intent.v1";
 const ROUTE_ALIAS_TASK_SCHEMA =
@@ -147,6 +149,46 @@ function errorResponse(
 function isObject(value) {
   return value !== null && typeof value === "object" &&
     !Array.isArray(value);
+}
+
+function validAgentEmailDomainPrepareFit(
+  value,
+  expectedMaximum,
+  requireAuthorityRevision = true,
+) {
+  if (!isObject(value)) return false;
+  const allowed = new Set([
+    "complete",
+    "dimension",
+    "maximum",
+    "used",
+    "over_limit_count",
+    "scanned_subject_count",
+    "scanned_allocation_count",
+    ...(requireAuthorityRevision ? ["authority_revision"] : []),
+  ]);
+  if (Object.keys(value).length !== allowed.size ||
+      Object.keys(value).some((key) => !allowed.has(key)) ||
+      value.complete !== true ||
+      value.dimension !== AGENT_EMAIL_CUSTOM_DOMAIN_LIMIT ||
+      value.maximum !== expectedMaximum ||
+      !(value.maximum === null ||
+        (Number.isSafeInteger(value.maximum) && value.maximum >= 0)) ||
+      !Number.isSafeInteger(value.used) || value.used < 0 ||
+      value.used > PLAN_FIT_AUTHORITY_SCAN_LIMIT ||
+      !Number.isSafeInteger(value.over_limit_count) ||
+      ![0, 1].includes(value.over_limit_count) ||
+      value.scanned_subject_count !== 1 ||
+      value.scanned_allocation_count !== value.used ||
+      (value.maximum === null && value.over_limit_count !== 0) ||
+      (value.maximum !== null &&
+        ((value.used > value.maximum) !== (value.over_limit_count === 1))) ||
+      (requireAuthorityRevision &&
+        (!Number.isSafeInteger(value.authority_revision) ||
+          value.authority_revision < 0))) {
+    return false;
+  }
+  return true;
 }
 
 class DomainRegistryError extends Error {
@@ -860,11 +902,16 @@ export async function reconcileAgentEmailDomainsForPlan(
   options = {},
 ) {
   const stub = agentEmailDomainRegistryStub(env);
-  if (!stub) return { skipped: true, complete: true };
+  if (!stub) {
+    if (mode === "prepare") {
+      throw new Error("custom domain authority is not configured");
+    }
+    return { skipped: true, complete: true };
+  }
   if (!ACCOUNT_ID_PATTERN.test(accountID ?? "") ||
       !validPlanRevisionFence(snapshot?.revision, snapshot?.snapshot_hash) ||
       !Array.isArray(snapshot?.features) || !isObject(snapshot?.limits) ||
-      !["restrict_only", "complete"].includes(mode)) {
+      !["prepare", "restrict_only", "complete"].includes(mode)) {
     throw new Error("invalid account plan snapshot for domain reconciliation");
   }
   const entitlement = agentEmailCustomDomainEntitlement(snapshot);
@@ -893,11 +940,41 @@ export async function reconcileAgentEmailDomainsForPlan(
     },
   );
   const body = await response.json().catch(() => null);
+  const expectedMaximum = entitlement.enabled ? entitlement.limit : 0;
+  if (mode === "prepare" && response.status === 409 &&
+      body?.schema_version === SCHEMA_VERSION &&
+      body?.account_id === accountID && body?.mode === "prepare" &&
+      body?.plan_revision === snapshot.revision &&
+      body?.plan_snapshot_hash === snapshot.snapshot_hash &&
+      body?.prepared === false && body?.pending === false &&
+      body?.stale === false && body?.complete === true &&
+      body?.code === "plan_fit_failed" &&
+      validAgentEmailDomainPrepareFit(body.fit, expectedMaximum, false)) {
+    return body;
+  }
   if (!response.ok) {
     throw new Error(
       body?.error ??
         "custom domain plan reconciliation failed",
     );
+  }
+  if (mode === "prepare") {
+    const prepared = body?.prepared === true && body?.pending === true &&
+      body?.stale === false && body?.complete === true &&
+      body?.plan_revision === snapshot.revision &&
+      body?.plan_snapshot_hash === snapshot.snapshot_hash &&
+      validAgentEmailDomainPrepareFit(body?.fit, expectedMaximum) &&
+      body.fit.over_limit_count === 0 &&
+      body?.registry_revision === body.fit.authority_revision;
+    const stale = body?.prepared === false && body?.pending === false &&
+      body?.stale === true && body?.complete === true && body?.fit === undefined &&
+      body?.plan_revision === snapshot.revision &&
+      body?.plan_snapshot_hash === snapshot.snapshot_hash;
+    if (body?.schema_version !== SCHEMA_VERSION ||
+        body?.account_id !== accountID || body?.mode !== "prepare" ||
+        (!prepared && !stale)) {
+      throw new Error("custom domain prepare response is invalid");
+    }
   }
   return body;
 }
@@ -1572,6 +1649,141 @@ export class DurableAgentEmailDomainRegistry {
     };
   }
 
+  async planFitAuthorityPage(prefix, cursor = null) {
+    const listed = await this.storage.list({
+      prefix,
+      limit: PLAN_FIT_AUTHORITY_PAGE_LIMIT + 1,
+      ...(cursor ? { startAfter: cursor } : {}),
+    });
+    const rows = [...listed.entries()];
+    const page = rows.slice(0, PLAN_FIT_AUTHORITY_PAGE_LIMIT);
+    return {
+      entries: page,
+      next_cursor: rows.length > PLAN_FIT_AUTHORITY_PAGE_LIMIT &&
+          page.length > 0
+        ? page.at(-1)[0]
+        : null,
+    };
+  }
+
+  async collectPlanFitEvidence(accountID, maximum) {
+    let cursor = null;
+    let scannedRequests = 0;
+    let activeRequests = 0;
+    let pendingRequests = 0;
+    do {
+      const page = await this.planFitAuthorityPage(
+        accountRequestPrefix(accountID),
+        cursor,
+      );
+      scannedRequests += page.entries.length;
+      if (scannedRequests > PLAN_FIT_AUTHORITY_SCAN_LIMIT) {
+        fail("custom inbound domain plan-fit authority scan is capped", 503);
+      }
+      for (const [indexKey, requestID] of page.entries) {
+        const request = REQUEST_ID_PATTERN.test(requestID ?? "")
+          ? await this.storage.get(requestStorageKey(requestID))
+          : null;
+        if (!request || request.id !== requestID ||
+            request.account_id !== accountID ||
+            accountRequestKey(accountID, requestID) !== indexKey ||
+            !["pending_verification", "verified", "rejected", "expired",
+              "retired"].includes(request.state)) {
+          fail("custom inbound domain account request index is invalid", 503);
+        }
+        try {
+          normalizeAgentEmailCustomDomain(request.domain);
+        } catch {
+          fail("custom inbound domain account request is invalid", 503);
+        }
+        const active = ["pending_verification", "verified"].includes(
+          request.state,
+        );
+        const activeKey = accountDomainKey(request);
+        if (!activeKey) {
+          fail("custom inbound domain account request is invalid", 503);
+        }
+        const activeIndex = await this.storage.get(activeKey);
+        if (active) {
+          if (activeIndex !== requestID) {
+            fail("custom inbound domain account allocation index is incomplete", 503);
+          }
+          activeRequests += 1;
+          if (activeRequests > PLAN_FIT_AUTHORITY_SCAN_LIMIT) {
+            fail("custom inbound domain plan-fit authority scan is capped", 503);
+          }
+          if (request.state === "pending_verification") {
+            pendingRequests += 1;
+            if (await this.storage.get(domainPendingKey(request)) !== requestID) {
+              fail("custom inbound domain pending reservation is incomplete", 503);
+            }
+          } else {
+            const allocation = await this.storage.get(
+              domainStorageKey(request.domain),
+            );
+            if (!assertLegacyDomainMirror(allocation, request) &&
+                (allocation?.schema_version !==
+                    "witself.agent-email-domain-allocation.v1" ||
+                  allocation?.domain !== request.domain ||
+                  allocation?.account_id !== accountID ||
+                  allocation?.source_request_id !== requestID ||
+                  allocation?.state !== "allocated")) {
+              fail("custom inbound domain allocation is invalid", 503);
+            }
+          }
+        } else if (activeIndex !== undefined) {
+          fail("custom inbound domain account allocation index is stale", 503);
+        }
+      }
+      cursor = page.next_cursor;
+    } while (cursor);
+
+    cursor = null;
+    let indexedAllocations = 0;
+    do {
+      const page = await this.planFitAuthorityPage(
+        accountDomainPrefix(accountID),
+        cursor,
+      );
+      indexedAllocations += page.entries.length;
+      if (indexedAllocations > PLAN_FIT_AUTHORITY_SCAN_LIMIT) {
+        fail("custom inbound domain plan-fit authority scan is capped", 503);
+      }
+      for (const [indexKey, requestID] of page.entries) {
+        const request = REQUEST_ID_PATTERN.test(requestID ?? "")
+          ? await this.storage.get(requestStorageKey(requestID))
+          : null;
+        if (!request || request.account_id !== accountID ||
+            !["pending_verification", "verified"].includes(request.state) ||
+            accountDomainKey(request) !== indexKey) {
+          fail("custom inbound domain account allocation index is invalid", 503);
+        }
+      }
+      cursor = page.next_cursor;
+    } while (cursor);
+
+    const rawUsage = await this.storage.get(usageKey(accountID));
+    if (!rawUsage && activeRequests > 0) {
+      fail("custom inbound domain account usage is missing", 503);
+    }
+    const usage = await this.accountUsage(accountID);
+    if (indexedAllocations !== activeRequests ||
+        usage.allocated_domains !== activeRequests ||
+        usage.open_requests !== pendingRequests) {
+      fail("custom inbound domain plan-fit counters disagree", 503);
+    }
+    return {
+      complete: true,
+      dimension: AGENT_EMAIL_CUSTOM_DOMAIN_LIMIT,
+      maximum,
+      used: activeRequests,
+      over_limit_count:
+        maximum !== null && activeRequests > maximum ? 1 : 0,
+      scanned_subject_count: 1,
+      scanned_allocation_count: activeRequests,
+    };
+  }
+
   async planFit(input) {
     const accountID = validateAccountID(input?.account_id);
     const maximum = input?.maximum;
@@ -1581,16 +1793,12 @@ export class DurableAgentEmailDomainRegistry {
     if (await this.accountPolicyConverging(accountID)) {
       fail("custom inbound domain policy is still converging", 409);
     }
-    const rawUsage = await this.storage.get(usageKey(accountID));
-    if (!rawUsage && await this.accountHasActiveRequest(accountID)) {
-      fail("custom inbound domain account usage is missing", 503);
-    }
-    const usage = await this.accountUsage(accountID);
+    const fit = await this.collectPlanFitEvidence(accountID, maximum);
     return json({
       schema_version: SCHEMA_VERSION,
       account_id: accountID,
       maximum,
-      used: usage.allocated_domains,
+      used: fit.used,
     });
   }
 
@@ -2057,7 +2265,7 @@ export class DurableAgentEmailDomainRegistry {
     return Boolean(planIntent || lifecycleIntent);
   }
 
-  planIntent(input, state) {
+  planIntent(input, state, prepareFit = undefined) {
     const now = this.now();
     return {
       account_id: input.account_id,
@@ -2069,6 +2277,9 @@ export class DurableAgentEmailDomainRegistry {
       cursor: null,
       position: 0,
       failure_count: 0,
+      ...(prepareFit === undefined
+        ? {}
+        : { prepare_fit: structuredClone(prepareFit) }),
       retry_at_ms: state === "cell_committed"
         ? now.getTime() + RECONCILE_RETRY_MS
         : null,
@@ -2110,17 +2321,37 @@ export class DurableAgentEmailDomainRegistry {
   }
 
   async persistPlanIntent(intent, previous = null) {
-    await this.ensureMeta();
-    const entries = [[planIntentKey(intent.account_id), intent]];
-    if (planDueKey(intent)) {
-      entries.push([planDueKey(intent), intent.account_id]);
+    const meta = await this.ensureMeta();
+    const durable = intent.prepare_fit === undefined
+      ? intent
+      : {
+        ...intent,
+        prepare_fit: {
+          ...intent.prepare_fit,
+          authority_revision: intent.prepare_fit.authority_revision ??
+            meta.registry_revision,
+        },
+      };
+    if (previous && previous.plan_revision === durable.plan_revision &&
+        previous.plan_snapshot_hash === durable.plan_snapshot_hash &&
+        previous.feature_enabled === durable.feature_enabled &&
+        previous.domain_limit === durable.domain_limit &&
+        previous.state === durable.state &&
+        canonicalJSONString(previous.prepare_fit ?? null) ===
+          canonicalJSONString(durable.prepare_fit ?? null)) {
+      await this.scheduleNextAlarm().catch(() => {});
+      return previous;
     }
-    const deletes = previous && planDueKey(previous) !== planDueKey(intent)
+    const entries = [[planIntentKey(durable.account_id), durable]];
+    if (planDueKey(durable)) {
+      entries.push([planDueKey(durable), durable.account_id]);
+    }
+    const deletes = previous && planDueKey(previous) !== planDueKey(durable)
       ? [planDueKey(previous)].filter(Boolean)
       : [];
     await this.atomic(entries, deletes);
     await this.scheduleNextAlarm().catch(() => {});
-    return intent;
+    return durable;
   }
 
   desiredPlanRequest(request, intent, position) {
@@ -2366,7 +2597,7 @@ export class DurableAgentEmailDomainRegistry {
 
   async reconcilePlan(input) {
     const accountID = validateAccountID(input?.account_id);
-    if (!["restrict_only", "complete"].includes(input?.mode) ||
+    if (!["prepare", "restrict_only", "complete"].includes(input?.mode) ||
         typeof input?.feature_enabled !== "boolean" ||
         !Object.hasOwn(input ?? {}, "domain_limit") ||
         !validDomainLimit(input.domain_limit)) {
@@ -2381,10 +2612,14 @@ export class DurableAgentEmailDomainRegistry {
     )) {
       fail("invalid recovery plan fence", 400);
     }
-    const [committed, pending] = await Promise.all([
+    const [committed, pending, lifecycleIntent] = await Promise.all([
       this.storage.get(planFenceKey(accountID)),
       this.storage.get(planIntentKey(accountID)),
+      this.storage.get(lifecycleIntentKey(accountID)),
     ]);
+    if (input.mode === "prepare" && lifecycleIntent) {
+      fail("custom inbound domain policy is still converging", 409);
+    }
     const committedRelation = committed
       ? comparePlanRevision(planFence.revision, committed.committed_revision)
       : 1;
@@ -2397,7 +2632,7 @@ export class DurableAgentEmailDomainRegistry {
           input.domain_limit !== committed.domain_limit)) {
       fail("plan entitlement conflicts with custom domain policy fence", 409);
     }
-    if (input.activation_enabled !== true && !pending &&
+    if (input.mode !== "prepare" && input.activation_enabled !== true && !pending &&
         committedRelation !== 0 &&
         !await this.accountHasActiveRequest(accountID)) {
       return json({
@@ -2415,7 +2650,144 @@ export class DurableAgentEmailDomainRegistry {
       pending.plan_revision === input.recover_pending_revision &&
       pending.plan_snapshot_hash === input.recover_pending_snapshot_hash;
 
+    if (input.mode === "prepare") {
+      const maximum = input.feature_enabled ? input.domain_limit : 0;
+      if (committedRelation <= 0) {
+        return json({
+          schema_version: SCHEMA_VERSION,
+          account_id: accountID,
+          mode: input.mode,
+          plan_revision: planFence.revision,
+          plan_snapshot_hash: planFence.snapshot_hash,
+          prepared: false,
+          pending: false,
+          stale: true,
+          complete: true,
+        });
+      }
+      if (pending) {
+        const relation = comparePlanRevision(
+          planFence.revision,
+          pending.plan_revision,
+        );
+        if (relation === 0 &&
+            planFence.snapshot_hash !== pending.plan_snapshot_hash) {
+          fail("plan revision conflicts with pending custom domain policy", 409);
+        }
+        if (relation === 0 &&
+            (input.feature_enabled !== pending.feature_enabled ||
+              input.domain_limit !== pending.domain_limit)) {
+          fail("plan entitlement conflicts with pending custom domain policy", 409);
+        }
+        if (relation < 0) {
+          return json({
+            schema_version: SCHEMA_VERSION,
+            account_id: accountID,
+            mode: input.mode,
+            plan_revision: planFence.revision,
+            plan_snapshot_hash: planFence.snapshot_hash,
+            prepared: false,
+            pending: false,
+            stale: true,
+            complete: true,
+          });
+        }
+        if (relation === 0 && pending.state === "awaiting_cell" &&
+            pending.prepare_fit !== undefined) {
+          if (!validAgentEmailDomainPrepareFit(
+            pending.prepare_fit,
+            maximum,
+          ) || pending.prepare_fit.over_limit_count !== 0) {
+            fail("persisted custom domain prepare evidence is invalid", 503);
+          }
+          return json({
+            schema_version: SCHEMA_VERSION,
+            account_id: accountID,
+            mode: input.mode,
+            plan_revision: planFence.revision,
+            plan_snapshot_hash: planFence.snapshot_hash,
+            prepared: true,
+            pending: true,
+            stale: false,
+            complete: true,
+            fit: pending.prepare_fit,
+            registry_revision: pending.prepare_fit.authority_revision,
+          });
+        }
+        fail("custom inbound domain policy is still converging", 409);
+      }
+      const fit = await this.collectPlanFitEvidence(accountID, maximum);
+      if (!validAgentEmailDomainPrepareFit(fit, maximum, false)) {
+        fail("custom domain prepare evidence is invalid", 503);
+      }
+      if (fit.over_limit_count > 0) {
+        fail(
+          "account does not fit the target custom domain allocation",
+          409,
+          "plan_fit_failed",
+          {
+            account_id: accountID,
+            mode: input.mode,
+            plan_revision: planFence.revision,
+            plan_snapshot_hash: planFence.snapshot_hash,
+            prepared: false,
+            pending: false,
+            stale: false,
+            complete: true,
+            fit,
+          },
+        );
+      }
+      const durable = await this.persistPlanIntent(this.planIntent({
+        ...input,
+        plan_revision: planFence.revision,
+        plan_snapshot_hash: planFence.snapshot_hash,
+      }, "awaiting_cell", fit));
+      return json({
+        schema_version: SCHEMA_VERSION,
+        account_id: accountID,
+        mode: input.mode,
+        plan_revision: planFence.revision,
+        plan_snapshot_hash: planFence.snapshot_hash,
+        prepared: true,
+        pending: true,
+        stale: false,
+        complete: true,
+        fit: durable.prepare_fit,
+        registry_revision: durable.prepare_fit.authority_revision,
+      });
+    }
+
+    if (input.mode === "complete" && recoversPending &&
+        pending.prepare_fit !== undefined &&
+        comparePlanRevision(planFence.revision, pending.plan_revision) < 0) {
+      const maximum = pending.feature_enabled ? pending.domain_limit : 0;
+      if (!validAgentEmailDomainPrepareFit(pending.prepare_fit, maximum)) {
+        fail("persisted custom domain prepare evidence is invalid", 503);
+      }
+      await this.atomic([], [
+        planIntentKey(accountID),
+        planDueKey(pending),
+      ].filter(Boolean));
+      await this.scheduleNextAlarm().catch(() => {});
+      return json({
+        schema_version: SCHEMA_VERSION,
+        account_id: accountID,
+        mode: input.mode,
+        stale: false,
+        complete: true,
+        changed: 0,
+        recovered: true,
+        registry_revision: (await this.ensureMeta()).registry_revision,
+      });
+    }
+
     if (input.mode === "restrict_only") {
+      if (pending?.prepare_fit !== undefined &&
+          pending.plan_revision === planFence.revision &&
+          pending.plan_snapshot_hash === planFence.snapshot_hash) {
+        fail("custom inbound domain policy is still prepared for the cell", 409);
+      }
       if (committedRelation <= 0) {
         return json({
           schema_version: SCHEMA_VERSION,
@@ -2518,11 +2890,16 @@ export class DurableAgentEmailDomainRegistry {
         registry_revision: (await this.ensureMeta()).registry_revision,
       });
     }
+    const prepareFit = pending &&
+        pending.plan_revision === planFence.revision &&
+        pending.plan_snapshot_hash === planFence.snapshot_hash
+      ? pending.prepare_fit
+      : undefined;
     const intent = this.planIntent({
       ...input,
       plan_revision: planFence.revision,
       plan_snapshot_hash: planFence.snapshot_hash,
-    }, "cell_committed");
+    }, "cell_committed", prepareFit);
     // Completing the exact restrict-only fence advances one durable intent;
     // it does not create a second intent with a different identity. Keeping
     // created_at stable also makes the journal stream self-recoverable.

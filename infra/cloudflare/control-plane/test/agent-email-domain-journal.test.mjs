@@ -840,6 +840,74 @@ test("plan intent replay rejects revision and progress regression", () => {
   assert.ok(completed.has("plan-fence:acc_1"));
 });
 
+test("prepared plan evidence is strict, phase-stable, and safely abandonable", () => {
+  const key = "plan-intent:acc_1";
+  const prepared = {
+    account_id: "acc_1",
+    plan_revision: 8,
+    plan_snapshot_hash: "e".repeat(64),
+    feature_enabled: true,
+    domain_limit: 1,
+    state: "awaiting_cell",
+    cursor: null,
+    position: 0,
+    failure_count: 0,
+    prepare_fit: {
+      complete: true,
+      dimension: "agent_email_custom_domains_per_account",
+      maximum: 1,
+      used: 1,
+      over_limit_count: 0,
+      scanned_subject_count: 1,
+      scanned_allocation_count: 1,
+      authority_revision: 2,
+    },
+    retry_at_ms: null,
+    created_at: requestedAt,
+    updated_at: requestedAt,
+  };
+  const state = applyAgentEmailDomainAuthorityAfterImage(new Map(), {
+    puts: [{ key, value: prepared }],
+    deletes: [],
+  });
+  assert.deepEqual(state.get(key).prepare_fit, prepared.prepare_fit);
+  const recovered = pendingState();
+  recovered.set(key, prepared);
+  assert.equal(validateAgentEmailDomainRecoveredState(recovered).requests, 1);
+  assert.equal([...rebuildAgentEmailDomainDerivedState(recovered).keys()].some(
+    (value) => value.startsWith("plan-due:"),
+  ), false);
+
+  const committed = {
+    ...prepared,
+    state: "cell_committed",
+    retry_at_ms: Date.parse(rejectedAt),
+    updated_at: rejectedAt,
+  };
+  assert.equal(applyAgentEmailDomainAuthorityAfterImage(state, {
+    puts: [{ key, value: committed }],
+    deletes: [],
+  }).get(key).state, "cell_committed");
+  const { prepare_fit: _discarded, ...withoutFit } = committed;
+  assert.throws(() => applyAgentEmailDomainAuthorityAfterImage(state, {
+    puts: [{ key, value: withoutFit }],
+    deletes: [],
+  }), /prepare_fit|regressed|identity changed/);
+  assert.throws(() => applyAgentEmailDomainAuthorityAfterImage(new Map(), {
+    puts: [{ key, value: {
+      ...prepared,
+      prepare_fit: { ...prepared.prepare_fit, used: 2 },
+    } }],
+    deletes: [],
+  }), /prepare_fit/);
+
+  const abandoned = applyAgentEmailDomainAuthorityAfterImage(state, {
+    puts: [],
+    deletes: [key],
+  });
+  assert.equal(abandoned.has(key), false);
+});
+
 test("account policy audits bind the system actor and lifecycle fence", () => {
   const planAudit = {
     sequence: 2,
