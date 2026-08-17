@@ -23,6 +23,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/witwave-ai/witself/internal/billing"
 	"github.com/witwave-ai/witself/internal/billing/lifecycle"
@@ -128,10 +129,15 @@ func run() int {
 //	WITSELF_CP_BRIDGE_URL         directory-owning Worker base URL
 //	WITSELF_CP_BRIDGE_TOKEN       shared Worker/container bridge credential
 //	WITSELF_CP_BILLING_PROVIDER  "fake" or "stripe"
-//	WITSELF_CP_STRIPE_SECRET_KEY      sk_live_/sk_test_ API key   (stripe)
+//	WITSELF_CP_STRIPE_MODE            exact "test" or "live" key mode (stripe)
+//	WITSELF_CP_STRIPE_SECRET_KEY      matching sk_test_/sk_live_ API key (stripe)
 //	WITSELF_CP_STRIPE_WEBHOOK_SECRET  whsec_ signing secret       (stripe)
-//	WITSELF_CP_STRIPE_SUCCESS_URL     optional checkout return URLs
-//	WITSELF_CP_STRIPE_CANCEL_URL
+//	WITSELF_CP_STRIPE_SUCCESS_URL     canonical HTTPS checkout success URL
+//	WITSELF_CP_STRIPE_CANCEL_URL      canonical HTTPS checkout cancel URL
+//	WITSELF_CP_STRIPE_PORTAL_RETURN_URL canonical HTTPS portal return URL
+//	WITSELF_CP_STRIPE_PORTAL_CONFIGURATION_ID reviewed safe bpc_ configuration
+//	WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST strict comma-separated account cohort;
+//	                                         empty enables no customer mutations
 //	WITSELF_CP_R2_ENDPOINT       https://<account>.r2.cloudflarestorage.com
 //	WITSELF_CP_R2_BUCKET         registry bucket (witself-control-plane)
 //	WITSELF_CP_R2_ACCESS_KEY     R2 S3 credentials (Object Read & Write)
@@ -163,31 +169,23 @@ func setupBilling(ctx context.Context, mux *http.ServeMux) error {
 	providerName := strings.TrimSpace(os.Getenv("WITSELF_CP_BILLING_PROVIDER"))
 	var provider billing.Provider
 	var bootstrap func(context.Context) error
+	var billingMutationGate cpserver.BillingMutationGateFunc
 	switch providerName {
 	case "":
 		// Providerless/manual mode is intentional. It powers defaults,
 		// administrator overrides, seeding, status, and cell enforcement
 		// without pretending a customer can purchase or cancel anything.
 	case "stripe":
-		// The webhook secret is mandatory: without it the binary would boot
-		// cleanly, mint checkout links, take payments — and refuse every
-		// webhook delivery, silently losing paid activations once Stripe's
-		// ~3-day retry horizon passes. Fail at boot instead.
-		webhookSecret := os.Getenv("WITSELF_CP_STRIPE_WEBHOOK_SECRET")
-		if webhookSecret == "" {
-			return errors.New("WITSELF_CP_STRIPE_WEBHOOK_SECRET is required with the stripe provider (whsec_...): without it webhooks are refused and paid activations are lost")
+		stripeConfig, gate, err := stripeControlPlaneConfig(catalog)
+		if err != nil {
+			return err
 		}
-		sp, err := stripeprovider.New(stripeprovider.Config{
-			SecretKey:     os.Getenv("WITSELF_CP_STRIPE_SECRET_KEY"),
-			WebhookSecret: webhookSecret,
-			Catalog:       catalog,
-			SuccessURL:    os.Getenv("WITSELF_CP_STRIPE_SUCCESS_URL"),
-			CancelURL:     os.Getenv("WITSELF_CP_STRIPE_CANCEL_URL"),
-		})
+		sp, err := stripeprovider.New(stripeConfig)
 		if err != nil {
 			return err
 		}
 		provider = sp
+		billingMutationGate = gate
 		// Self-provision the catalog's products/prices (by lookup_key) so a
 		// plans.json change needs no dashboard clicks.
 		bootstrap = sp.EnsurePrices
@@ -251,6 +249,7 @@ func setupBilling(ctx context.Context, mux *http.ServeMux) error {
 		Catalog:              catalog,
 		Providers:            providers,
 		Authenticate:         authenticate,
+		BillingMutationGate:  billingMutationGate,
 		AdminAuthenticate:    adminAuthenticate,
 		AdminAccountExists:   cpserver.BridgeAccountExists(bridgeURL, bridgeToken),
 		LifecycleObserver:    observer,
@@ -268,6 +267,131 @@ func setupBilling(ctx context.Context, mux *http.ServeMux) error {
 	// process restarts cannot reset fleet progress.
 	fmt.Fprintf(os.Stderr, "witself-control-plane: plan lifecycle enabled (provider %s, worker-cron scheduled)\n", providerLabel)
 	return nil
+}
+
+const maxBillingAllowlistAccounts = 1024
+
+var (
+	billingAllowlistAccountIDPattern   = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+	stripePortalConfigurationIDPattern = regexp.MustCompile(`^bpc_[A-Za-z0-9]{1,123}$`)
+)
+
+// stripeControlPlaneConfig validates every safety-sensitive Stripe setting
+// before a provider is constructed or any catalog bootstrap can reach Stripe.
+// The returned mutation gate is always non-nil: an empty cohort intentionally
+// denies every customer billing mutation while webhook reconciliation and
+// billing reads remain available.
+func stripeControlPlaneConfig(
+	catalog *plans.Catalog,
+) (stripeprovider.Config, cpserver.BillingMutationGateFunc, error) {
+	mode := os.Getenv("WITSELF_CP_STRIPE_MODE")
+	secretKey := os.Getenv("WITSELF_CP_STRIPE_SECRET_KEY")
+	if err := validateStripeModeAndKey(mode, secretKey); err != nil {
+		return stripeprovider.Config{}, nil, err
+	}
+
+	// The webhook secret is mandatory: without it the binary would boot,
+	// mint checkout links, take payments, and refuse every webhook delivery.
+	webhookSecret := os.Getenv("WITSELF_CP_STRIPE_WEBHOOK_SECRET")
+	if webhookSecret == "" {
+		return stripeprovider.Config{}, nil, errors.New("WITSELF_CP_STRIPE_WEBHOOK_SECRET is required with the stripe provider (whsec_...): without it webhooks are refused and paid activations are lost")
+	}
+
+	successURL, err := canonicalHTTPSURLFromEnv("WITSELF_CP_STRIPE_SUCCESS_URL")
+	if err != nil {
+		return stripeprovider.Config{}, nil, err
+	}
+	cancelURL, err := canonicalHTTPSURLFromEnv("WITSELF_CP_STRIPE_CANCEL_URL")
+	if err != nil {
+		return stripeprovider.Config{}, nil, err
+	}
+	portalReturnURL, err := canonicalHTTPSURLFromEnv("WITSELF_CP_STRIPE_PORTAL_RETURN_URL")
+	if err != nil {
+		return stripeprovider.Config{}, nil, err
+	}
+
+	portalConfigurationID := os.Getenv("WITSELF_CP_STRIPE_PORTAL_CONFIGURATION_ID")
+	if portalConfigurationID == "" ||
+		portalConfigurationID != strings.TrimSpace(portalConfigurationID) ||
+		!stripePortalConfigurationIDPattern.MatchString(portalConfigurationID) {
+		return stripeprovider.Config{}, nil, errors.New("WITSELF_CP_STRIPE_PORTAL_CONFIGURATION_ID must be a canonical bpc_ Stripe configuration id")
+	}
+
+	gate, err := billingAccountAllowlistGate(
+		os.Getenv("WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST"),
+	)
+	if err != nil {
+		return stripeprovider.Config{}, nil, err
+	}
+
+	return stripeprovider.Config{
+		SecretKey:             secretKey,
+		WebhookSecret:         webhookSecret,
+		Catalog:               catalog,
+		SuccessURL:            successURL,
+		CancelURL:             cancelURL,
+		PortalReturnURL:       portalReturnURL,
+		PortalConfigurationID: portalConfigurationID,
+	}, gate, nil
+}
+
+func validateStripeModeAndKey(mode, secretKey string) error {
+	if mode != "test" && mode != "live" {
+		return errors.New("WITSELF_CP_STRIPE_MODE must be exactly test or live")
+	}
+	if secretKey == "" || secretKey != strings.TrimSpace(secretKey) {
+		return errors.New("WITSELF_CP_STRIPE_SECRET_KEY must be a non-empty canonical Stripe secret key")
+	}
+	wantPrefix := "sk_" + mode + "_"
+	if !strings.HasPrefix(secretKey, wantPrefix) || len(secretKey) == len(wantPrefix) {
+		return fmt.Errorf("WITSELF_CP_STRIPE_SECRET_KEY must have the exact %s prefix when WITSELF_CP_STRIPE_MODE=%s", wantPrefix, mode)
+	}
+	return nil
+}
+
+func canonicalHTTPSURLFromEnv(name string) (string, error) {
+	rawURL := os.Getenv(name)
+	if rawURL == "" || rawURL != strings.TrimSpace(rawURL) ||
+		strings.IndexFunc(rawURL, unicode.IsControl) >= 0 {
+		return "", fmt.Errorf("%s must be a canonical HTTPS URL without credentials, control characters, query, or fragment", name)
+	}
+	parsed, err := neturl.Parse(rawURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" ||
+		parsed.Hostname() == "" || parsed.User != nil || parsed.Opaque != "" ||
+		parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" ||
+		parsed.RawFragment != "" || parsed.String() != rawURL {
+		return "", fmt.Errorf("%s must be a canonical HTTPS URL without credentials, control characters, query, or fragment", name)
+	}
+	return rawURL, nil
+}
+
+func billingAccountAllowlistGate(
+	raw string,
+) (cpserver.BillingMutationGateFunc, error) {
+	allowed := make(map[string]struct{})
+	if raw != "" {
+		if raw != strings.TrimSpace(raw) {
+			return nil, errors.New("WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST must be a strict comma-separated list without whitespace")
+		}
+		parts := strings.Split(raw, ",")
+		if len(parts) > maxBillingAllowlistAccounts {
+			return nil, fmt.Errorf("WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST may contain at most %d accounts", maxBillingAllowlistAccounts)
+		}
+		for _, accountID := range parts {
+			if accountID == "" || accountID != strings.TrimSpace(accountID) ||
+				!billingAllowlistAccountIDPattern.MatchString(accountID) {
+				return nil, errors.New("WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST must contain only canonical account ids separated by commas without whitespace")
+			}
+			if _, exists := allowed[accountID]; exists {
+				return nil, fmt.Errorf("WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST contains duplicate account %q", accountID)
+			}
+			allowed[accountID] = struct{}{}
+		}
+	}
+	return func(_ context.Context, accountID string) (bool, error) {
+		_, ok := allowed[accountID]
+		return ok, nil
+	}, nil
 }
 
 func validateProductionBridgeURL(rawURL string) error {
