@@ -542,6 +542,46 @@ func TestEnsureCustomerSeparatesStableCreateFromMutableEmail(t *testing.T) {
 	}
 }
 
+func TestEnsureCustomerAttachesOnlyExplicitTestClock(t *testing.T) {
+	s, _ := newStub(t)
+	catalog, err := plans.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, err := New(Config{
+		SecretKey: "sk_test_stub", WebhookSecret: "whsec_stub",
+		Catalog: catalog, BaseURL: s.url, TestClockID: "clock_sandbox123",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.EnsureCustomer(
+		context.Background(), "acct_clock", "clock@example.test",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.customerCreateForms) != 1 ||
+		s.customerCreateForms[0]["test_clock"] != "clock_sandbox123" ||
+		s.customerCreateForms[0]["metadata[witself_account]"] != "acct_clock" {
+		t.Fatalf("customer create forms = %v", s.customerCreateForms)
+	}
+	if len(s.customerCreateKeys) != 1 ||
+		!strings.HasPrefix(s.customerCreateKeys[0], "witself-ensure-acct_clock-clock-") ||
+		strings.Contains(s.customerCreateKeys[0], "clock_sandbox123") {
+		t.Fatalf("test-clock customer key = %v", s.customerCreateKeys)
+	}
+
+	for _, tc := range []Config{
+		{SecretKey: "sk_live_stub", Catalog: catalog, TestClockID: "clock_sandbox123"},
+		{SecretKey: "sk_test_stub", Catalog: catalog, TestClockID: "clock_"},
+		{SecretKey: "sk_test_stub", Catalog: catalog, TestClockID: " clock_sandbox123"},
+	} {
+		if _, err := New(tc); err == nil {
+			t.Fatalf("New accepted unsafe test-clock config: %+v", tc)
+		}
+	}
+}
+
 func TestSubscribeBuildsCheckout(t *testing.T) {
 	s, p := newStub(t)
 	act, err := p.Subscribe(context.Background(), "cus_stub_1", "standard")

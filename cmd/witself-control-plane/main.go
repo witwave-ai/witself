@@ -136,6 +136,7 @@ func run() int {
 //	WITSELF_CP_STRIPE_CANCEL_URL      canonical HTTPS checkout cancel URL
 //	WITSELF_CP_STRIPE_PORTAL_RETURN_URL canonical HTTPS portal return URL
 //	WITSELF_CP_STRIPE_PORTAL_CONFIGURATION_ID reviewed safe bpc_ configuration
+//	WITSELF_CP_STRIPE_TEST_CLOCK_ID optional clock_ for test-mode acceptance only
 //	WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST strict comma-separated account cohort;
 //	                                         empty enables no customer mutations
 //	WITSELF_CP_R2_ENDPOINT       https://<account>.r2.cloudflarestorage.com
@@ -274,6 +275,7 @@ const maxBillingAllowlistAccounts = 1024
 var (
 	billingAllowlistAccountIDPattern   = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 	stripePortalConfigurationIDPattern = regexp.MustCompile(`^bpc_[A-Za-z0-9]{1,123}$`)
+	stripeTestClockIDPattern           = regexp.MustCompile(`^clock_[A-Za-z0-9]{1,123}$`)
 )
 
 // stripeControlPlaneConfig validates every safety-sensitive Stripe setting
@@ -316,6 +318,16 @@ func stripeControlPlaneConfig(
 		!stripePortalConfigurationIDPattern.MatchString(portalConfigurationID) {
 		return stripeprovider.Config{}, nil, errors.New("WITSELF_CP_STRIPE_PORTAL_CONFIGURATION_ID must be a canonical bpc_ Stripe configuration id")
 	}
+	testClockID := os.Getenv("WITSELF_CP_STRIPE_TEST_CLOCK_ID")
+	if testClockID != "" {
+		if mode != "test" {
+			return stripeprovider.Config{}, nil, errors.New("WITSELF_CP_STRIPE_TEST_CLOCK_ID is allowed only when WITSELF_CP_STRIPE_MODE=test")
+		}
+		if testClockID != strings.TrimSpace(testClockID) ||
+			!stripeTestClockIDPattern.MatchString(testClockID) {
+			return stripeprovider.Config{}, nil, errors.New("WITSELF_CP_STRIPE_TEST_CLOCK_ID must be a canonical clock_ Stripe test-clock id")
+		}
+	}
 
 	gate, err := billingAccountAllowlistGate(
 		os.Getenv("WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST"),
@@ -332,6 +344,7 @@ func stripeControlPlaneConfig(
 		CancelURL:             cancelURL,
 		PortalReturnURL:       portalReturnURL,
 		PortalConfigurationID: portalConfigurationID,
+		TestClockID:           testClockID,
 	}, gate, nil
 }
 

@@ -90,6 +90,10 @@ type Config struct {
 	// disables portal creation rather than falling back to Stripe's mutable
 	// account-wide default configuration.
 	PortalConfigurationID string
+	// TestClockID attaches newly created customers to one Stripe test clock so
+	// sandbox acceptance can advance renewal and period-end downgrades without
+	// waiting a month. It is rejected with non-test keys and is never inferred.
+	TestClockID string
 	// HTTPClient defaults to a 30s-timeout client.
 	HTTPClient *http.Client
 	// Now injects a clock for signature-tolerance tests.
@@ -123,6 +127,14 @@ func New(cfg Config) (*Provider, error) {
 	}
 	if cfg.Catalog == nil {
 		return nil, errors.New("stripe: Catalog is required")
+	}
+	if cfg.TestClockID != "" {
+		if !strings.HasPrefix(cfg.SecretKey, "sk_test_") {
+			return nil, errors.New("stripe: TestClockID requires an sk_test_ key")
+		}
+		if err := validateStripeResourceID(cfg.TestClockID, "clock_"); err != nil {
+			return nil, fmt.Errorf("stripe: invalid TestClockID: %w", err)
+		}
 	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: 30 * time.Second}
@@ -166,7 +178,7 @@ func validateStripeResourceID(objectID, prefix string) error {
 	if err := billing.ValidateProviderObjectID(objectID); err != nil {
 		return err
 	}
-	if !strings.HasPrefix(objectID, prefix) {
+	if !strings.HasPrefix(objectID, prefix) || len(objectID) == len(prefix) {
 		return fmt.Errorf("expected Stripe %s resource id", prefix)
 	}
 	return nil
@@ -348,6 +360,12 @@ func (p *Provider) createPrice(ctx context.Context, productID, planID string, ce
 // create retried with a fresh key when it no longer exists.
 func (p *Provider) EnsureCustomer(ctx context.Context, accountID, email string) (string, error) {
 	params := url.Values{"metadata[witself_account]": {accountID}}
+	keyBase := "witself-ensure-" + accountID
+	if p.cfg.TestClockID != "" {
+		params.Set("test_clock", p.cfg.TestClockID)
+		digest := sha256.Sum256([]byte(p.cfg.TestClockID))
+		keyBase += "-clock-" + hex.EncodeToString(digest[:8])
+	}
 	// Walk deterministic key generations: the stable key first, then -g1,
 	// -g2, … A generation goes stale when its 24h replay window returns a
 	// customer that was since deleted. A 400 idempotency_error can also remain
@@ -356,7 +374,7 @@ func (p *Provider) EnsureCustomer(ctx context.Context, accountID, email string) 
 	// when earlier generations are poisoned — retries walk the same chain to the
 	// same live customer.
 	for gen := 0; gen < 16; gen++ {
-		key := "witself-ensure-" + accountID
+		key := keyBase
 		if gen > 0 {
 			key = fmt.Sprintf("%s-g%d", key, gen)
 		}
@@ -386,7 +404,7 @@ func (p *Provider) EnsureCustomer(ctx context.Context, accountID, email string) 
 	var cust struct {
 		ID string `json:"id"`
 	}
-	salted := fmt.Sprintf("witself-ensure-%s-%d", accountID, p.cfg.Now().Unix())
+	salted := fmt.Sprintf("%s-%d", keyBase, p.cfg.Now().Unix())
 	if err := p.call(ctx, "POST", "/v1/customers", params, salted, &cust); err != nil {
 		return "", err
 	}

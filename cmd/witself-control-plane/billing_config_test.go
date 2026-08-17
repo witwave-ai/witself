@@ -17,6 +17,7 @@ func setValidStripeControlPlaneEnv(t *testing.T) {
 	t.Setenv("WITSELF_CP_STRIPE_CANCEL_URL", "https://console.example.invalid/billing/cancelled")
 	t.Setenv("WITSELF_CP_STRIPE_PORTAL_RETURN_URL", "https://console.example.invalid/billing")
 	t.Setenv("WITSELF_CP_STRIPE_PORTAL_CONFIGURATION_ID", "bpc_hermetic123")
+	t.Setenv("WITSELF_CP_STRIPE_TEST_CLOCK_ID", "")
 	t.Setenv("WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST", "acct_founder,acct_sandbox")
 }
 
@@ -189,6 +190,39 @@ func TestStripeControlPlaneConfigRequiresAndPassesSafePortalConfig(t *testing.T)
 			_, _, err := stripeControlPlaneConfig(catalog)
 			if err == nil || !strings.Contains(err.Error(), "WITSELF_CP_STRIPE_PORTAL_CONFIGURATION_ID") {
 				t.Fatalf("error = %v; want portal configuration refusal", err)
+			}
+		})
+	}
+}
+
+func TestStripeControlPlaneConfigGatesTestClockToTestMode(t *testing.T) {
+	catalog := testCatalog(t)
+	setValidStripeControlPlaneEnv(t)
+	t.Setenv("WITSELF_CP_STRIPE_TEST_CLOCK_ID", "clock_hermetic123")
+	cfg, _, err := stripeControlPlaneConfig(catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TestClockID != "clock_hermetic123" {
+		t.Fatalf("TestClockID = %q", cfg.TestClockID)
+	}
+
+	for _, test := range []struct {
+		name, mode, key, clock string
+	}{
+		{name: "live mode", mode: "live", key: "sk_live_hermetic", clock: "clock_hermetic123"},
+		{name: "prefix only", mode: "test", key: "sk_test_hermetic", clock: "clock_"},
+		{name: "whitespace", mode: "test", key: "sk_test_hermetic", clock: " clock_hermetic123"},
+		{name: "wrong resource", mode: "test", key: "sk_test_hermetic", clock: "test_clock_hermetic123"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			setValidStripeControlPlaneEnv(t)
+			t.Setenv("WITSELF_CP_STRIPE_MODE", test.mode)
+			t.Setenv("WITSELF_CP_STRIPE_SECRET_KEY", test.key)
+			t.Setenv("WITSELF_CP_STRIPE_TEST_CLOCK_ID", test.clock)
+			if _, _, err := stripeControlPlaneConfig(catalog); err == nil ||
+				!strings.Contains(err.Error(), "WITSELF_CP_STRIPE_TEST_CLOCK_ID") {
+				t.Fatalf("error = %v; want test-clock refusal", err)
 			}
 		})
 	}
