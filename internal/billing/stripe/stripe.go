@@ -1053,9 +1053,7 @@ func (p *Provider) CancelPendingObjectIdempotent(
 		if err := p.call(ctx, "GET", path, nil, "", &sub); err != nil {
 			return err
 		}
-		if sub.ID != target.ProviderObjectID || sub.Customer != customerID ||
-			sub.Metadata["witself_pending_downgrade_operation_id"] !=
-				target.OriginalOperationID {
+		if sub.ID != target.ProviderObjectID || sub.Customer != customerID {
 			return errors.New("stripe: exact period-end cancellation target mismatch")
 		}
 		switch sub.Status {
@@ -1070,8 +1068,16 @@ func (p *Provider) CancelPendingObjectIdempotent(
 					sub.Status)
 			}
 		}
+		owner, hasOwner := sub.Metadata["witself_pending_downgrade_operation_id"]
 		if !sub.CancelAtPeriodEnd {
-			return nil
+			if !hasOwner {
+				return nil
+			}
+			if owner != target.OriginalOperationID {
+				return errors.New("stripe: exact period-end cancellation target mismatch")
+			}
+		} else if !hasOwner || owner != target.OriginalOperationID {
+			return errors.New("stripe: exact period-end cancellation target mismatch")
 		}
 		var disarmed struct {
 			ID                string            `json:"id"`
@@ -1081,16 +1087,17 @@ func (p *Provider) CancelPendingObjectIdempotent(
 			Metadata          map[string]string `json:"metadata"`
 		}
 		if err := p.call(ctx, "POST", path, url.Values{
-			"cancel_at_period_end": {"false"},
+			"cancel_at_period_end":                             {"false"},
+			"metadata[witself_pending_downgrade_operation_id]": {""},
 		}, childIdempotencyKey(
 			operationID, "cancel-subscription", target.ProviderObjectID), &disarmed); err != nil {
 			return err
 		}
+		_, hasOwner = disarmed.Metadata["witself_pending_downgrade_operation_id"]
 		if disarmed.ID != target.ProviderObjectID ||
 			disarmed.Customer != customerID || disarmed.CancelAtPeriodEnd ||
 			!liveStripeSubscriptionStatus(disarmed.Status) ||
-			disarmed.Metadata["witself_pending_downgrade_operation_id"] !=
-				target.OriginalOperationID {
+			hasOwner {
 			return errors.New(
 				"stripe: subscription response did not confirm exact period-end cancellation")
 		}
@@ -1159,18 +1166,21 @@ func (p *Provider) cancelPending(
 			return fmt.Errorf("stripe: invalid legacy subscription id: %w", err)
 		}
 		var disarmed struct {
-			ID                string `json:"id"`
-			Customer          string `json:"customer"`
-			CancelAtPeriodEnd bool   `json:"cancel_at_period_end"`
+			ID                string            `json:"id"`
+			Customer          string            `json:"customer"`
+			CancelAtPeriodEnd bool              `json:"cancel_at_period_end"`
+			Metadata          map[string]string `json:"metadata"`
 		}
 		if err := p.call(ctx, "POST", "/v1/subscriptions/"+url.PathEscape(sub.ID), url.Values{
-			"cancel_at_period_end": {"false"},
+			"cancel_at_period_end":                             {"false"},
+			"metadata[witself_pending_downgrade_operation_id]": {""},
 		}, childIdempotencyKey(
 			operationID, "cancel-subscription", sub.ID), &disarmed); err != nil {
 			return err
 		}
+		_, hasOwner := disarmed.Metadata["witself_pending_downgrade_operation_id"]
 		if disarmed.ID != sub.ID || disarmed.Customer != customerID ||
-			disarmed.CancelAtPeriodEnd {
+			disarmed.CancelAtPeriodEnd || hasOwner {
 			return errors.New(
 				"stripe: legacy subscription response did not confirm cancellation")
 		}

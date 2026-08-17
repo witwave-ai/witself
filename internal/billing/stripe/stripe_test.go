@@ -65,6 +65,7 @@ type stubStripe struct {
 	subStatus             string
 	subPeriodEnd          int64
 	advancePeriodOnArm    bool
+	preserveOwnerOnDisarm bool
 	subscriptionsJSON     string // optional exact list response override
 	custDeleted           bool   // customer GETs report deleted:true
 	customerCreateKeys    []string
@@ -78,6 +79,16 @@ type stubStripe struct {
 	refundMore            bool     // refund list reports unsupported pagination
 	refundAmount          int      // settled amount reported by the charge
 	refundData            string   // optional refund-list JSON data override
+}
+
+func (s *stubStripe) subscriptionMetadataJSON() string {
+	if s.subDowngradeOperation == "" {
+		return `{"witself_plan":"standard"}`
+	}
+	return fmt.Sprintf(
+		`{"witself_plan":"standard","witself_pending_downgrade_operation_id":%q}`,
+		s.subDowngradeOperation,
+	)
 }
 
 func TestDowngradeTargetCapabilityIsFreeOnly(t *testing.T) {
@@ -289,7 +300,7 @@ func (s *stubStripe) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if s.subActive {
-			_, _ = fmt.Fprintf(w, `{"data":[{"id":"sub_stub","customer":%q,"status":%q,"cancel_at_period_end":%t,"metadata":{"witself_plan":"standard","witself_pending_downgrade_operation_id":%q},"items":{"data":[{"current_period_end":%d,"price":{"id":"price_standard","lookup_key":"witself_standard"}}]}}],"has_more":false}`, s.subCustomer, s.subStatus, s.subArmed, s.subDowngradeOperation, periodEnd)
+			_, _ = fmt.Fprintf(w, `{"data":[{"id":"sub_stub","customer":%q,"status":%q,"cancel_at_period_end":%t,"metadata":%s,"items":{"data":[{"current_period_end":%d,"price":{"id":"price_standard","lookup_key":"witself_standard"}}]}}],"has_more":false}`, s.subCustomer, s.subStatus, s.subArmed, s.subscriptionMetadataJSON(), periodEnd)
 			return
 		}
 		_, _ = fmt.Fprint(w, `{"data":[],"has_more":false}`)
@@ -312,11 +323,14 @@ func (s *stubStripe) handle(w http.ResponseWriter, r *http.Request) {
 				}
 			case "false":
 				s.subArmed = false
+				if marker, ok := s.lastForm["metadata[witself_pending_downgrade_operation_id]"]; ok && marker == "" && !s.preserveOwnerOnDisarm {
+					s.subDowngradeOperation = ""
+				}
 			}
 		}
 		_, _ = fmt.Fprintf(w,
-			`{"id":"sub_stub","customer":%q,"status":%q,"cancel_at_period_end":%t,"metadata":{"witself_plan":"standard","witself_pending_downgrade_operation_id":%q},"items":{"data":[{"current_period_end":%d,"price":{"id":"price_standard","lookup_key":"witself_standard"}}]}}`,
-			s.subCustomer, s.subStatus, s.subArmed, s.subDowngradeOperation, periodEnd)
+			`{"id":"sub_stub","customer":%q,"status":%q,"cancel_at_period_end":%t,"metadata":%s,"items":{"data":[{"current_period_end":%d,"price":{"id":"price_standard","lookup_key":"witself_standard"}}]}}`,
+			s.subCustomer, s.subStatus, s.subArmed, s.subscriptionMetadataJSON(), periodEnd)
 	case r.URL.Path == "/v1/invoices/create_preview":
 		if !s.upcoming {
 			http.Error(w, `{"error":{"code":"invoice_upcoming_none","message":"none"}}`, http.StatusNotFound)
@@ -956,6 +970,12 @@ func TestExactDowngradePersistsAndDisarmsOneSubscription(t *testing.T) {
 	if s.subArmed {
 		t.Fatal("exact period-end cancellation left subscription armed")
 	}
+	if s.subDowngradeOperation != "" {
+		t.Fatalf("exact period-end cancellation left ownership marker %q", s.subDowngradeOperation)
+	}
+	if marker, ok := s.lastForm["metadata[witself_pending_downgrade_operation_id]"]; !ok || marker != "" {
+		t.Fatalf("exact period-end cancellation form did not atomically clear ownership: %v", s.lastForm)
+	}
 	if err := p.CancelPendingObjectIdempotent(
 		ctx, "cus_stub_1", target, "bop_downgrade_exact_cancel",
 	); err != nil {
@@ -997,6 +1017,92 @@ func TestExactDowngradePersistsAndDisarmsOneSubscription(t *testing.T) {
 	}
 	if postsAfter != postsBefore {
 		t.Fatal("terminal subscription was mutated during exact cancellation")
+	}
+}
+
+func TestExactDowngradeCancelRetryRefusesExternalRearmAfterLostFold(t *testing.T) {
+	s, p := newStub(t)
+	s.subArmed = false
+	ctx := context.Background()
+	scheduled, err := p.ScheduleDowngradeExactIdempotent(
+		ctx, "cus_stub_1", plans.Free, "bop_downgrade_lost_fold",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := billing.PendingCancellation{
+		Kind:                billing.PendingCancellationPeriodEnd,
+		ProviderObjectID:    scheduled.ProviderObjectID,
+		OriginalOperationID: "bop_downgrade_lost_fold",
+	}
+	if err := p.CancelPendingObjectIdempotent(
+		ctx, "cus_stub_1", target, "bop_cancel_lost_fold",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if s.subArmed || s.subDowngradeOperation != "" {
+		t.Fatalf("first disarm state = armed %t, owner %q", s.subArmed, s.subDowngradeOperation)
+	}
+
+	// The provider call succeeded, but lifecycle has not folded that response.
+	// An external actor then re-arms period-end cancellation without Witself's
+	// cleared ownership marker. Retrying the same local cancellation must not
+	// replay the old idempotent response and misreport the external action as
+	// disarmed.
+	s.subArmed = true
+	postsBefore := 0
+	for _, request := range s.requests {
+		if request.method == http.MethodPost &&
+			request.path == "/v1/subscriptions/sub_stub" {
+			postsBefore++
+		}
+	}
+	err = p.CancelPendingObjectIdempotent(
+		ctx, "cus_stub_1", target, "bop_cancel_lost_fold",
+	)
+	if err == nil || !strings.Contains(err.Error(), "target mismatch") {
+		t.Fatalf("external re-arm retry error = %v; want ownership mismatch", err)
+	}
+	if !s.subArmed {
+		t.Fatal("external re-arm was disarmed by a stale exact retry")
+	}
+	postsAfter := 0
+	for _, request := range s.requests {
+		if request.method == http.MethodPost &&
+			request.path == "/v1/subscriptions/sub_stub" {
+			postsAfter++
+		}
+	}
+	if postsAfter != postsBefore {
+		t.Fatalf("external re-arm retry reached mutation: before=%d after=%d", postsBefore, postsAfter)
+	}
+}
+
+func TestExactDowngradeCancelRequiresOwnershipMarkerRemoval(t *testing.T) {
+	s, p := newStub(t)
+	s.subArmed = false
+	scheduled, err := p.ScheduleDowngradeExactIdempotent(
+		context.Background(), "cus_stub_1", plans.Free,
+		"bop_downgrade_marker_confirmation",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.preserveOwnerOnDisarm = true
+	err = p.CancelPendingObjectIdempotent(
+		context.Background(), "cus_stub_1", billing.PendingCancellation{
+			Kind:                billing.PendingCancellationPeriodEnd,
+			ProviderObjectID:    scheduled.ProviderObjectID,
+			OriginalOperationID: "bop_downgrade_marker_confirmation",
+		}, "bop_cancel_marker_confirmation",
+	)
+	if err == nil || !strings.Contains(
+		err.Error(), "did not confirm exact period-end cancellation",
+	) {
+		t.Fatalf("retained ownership marker response error = %v", err)
+	}
+	if marker, ok := s.lastForm["metadata[witself_pending_downgrade_operation_id]"]; !ok || marker != "" {
+		t.Fatalf("disarm did not request atomic marker removal: %v", s.lastForm)
 	}
 }
 
