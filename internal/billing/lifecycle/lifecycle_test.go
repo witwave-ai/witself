@@ -1518,6 +1518,82 @@ func TestPendingUpgradeExpires(t *testing.T) {
 	}
 }
 
+func TestPendingUpgradeExpiryHonorsBillingMutationCohort(t *testing.T) {
+	h := newHarness(t, true)
+	ctx := context.Background()
+	const accountID = "acct_expiry_cohort"
+
+	if _, err := h.m.RequestUpgrade(
+		ctx, accountID, "owner@example.com", "standard",
+	); err != nil {
+		t.Fatalf("RequestUpgrade: %v", err)
+	}
+	r := h.record(t, accountID)
+	if r.Pending == nil || r.Pending.ProviderObjectID == "" {
+		t.Fatalf("pending upgrade = %+v", r.Pending)
+	}
+	enabled := false
+	h.m.cfg.BillingMutationGate = func(
+		_ context.Context,
+		gotAccountID string,
+	) (bool, error) {
+		if gotAccountID != accountID {
+			t.Fatalf("expiry gate account = %q; want %q", gotAccountID, accountID)
+		}
+		return enabled, nil
+	}
+	h.ck.t = h.ck.t.Add(DefaultPendingTTL + time.Hour)
+
+	if err := h.m.ReconcileAccount(ctx, accountID); err != nil {
+		t.Fatalf("denied ReconcileAccount: %v", err)
+	}
+	if r = h.record(t, accountID); r.Pending == nil {
+		t.Fatal("denied account lost its retryable pending checkout")
+	}
+
+	enabled = true
+	if err := h.m.ReconcileAccount(ctx, accountID); err != nil {
+		t.Fatalf("enabled ReconcileAccount: %v", err)
+	}
+	if r = h.record(t, accountID); r.Pending != nil {
+		t.Fatalf("enabled account retained expired checkout: %+v", r.Pending)
+	}
+	if _, err := h.fake.Complete(r.CustomerID); err == nil {
+		t.Fatal("provider checkout remained payable after cohort-enabled expiry")
+	}
+}
+
+func TestPendingUpgradeExpiryFailsClosedWhenMutationGateErrors(t *testing.T) {
+	h := newHarness(t, true)
+	ctx := context.Background()
+	const accountID = "acct_expiry_gate_error"
+
+	if _, err := h.m.RequestUpgrade(
+		ctx, accountID, "owner@example.com", "standard",
+	); err != nil {
+		t.Fatalf("RequestUpgrade: %v", err)
+	}
+	r := h.record(t, accountID)
+	gateErr := errors.New("cohort source unavailable")
+	h.m.cfg.BillingMutationGate = func(
+		context.Context,
+		string,
+	) (bool, error) {
+		return false, gateErr
+	}
+	h.ck.t = h.ck.t.Add(DefaultPendingTTL + time.Hour)
+
+	if err := h.m.ReconcileAccount(ctx, accountID); !errors.Is(err, gateErr) {
+		t.Fatalf("ReconcileAccount error = %v; want gate failure", err)
+	}
+	if current := h.record(t, accountID); current.Pending == nil {
+		t.Fatal("gate failure cleared retryable pending checkout")
+	}
+	if _, err := h.fake.Complete(r.CustomerID); err != nil {
+		t.Fatalf("gate failure mutated provider checkout: %v", err)
+	}
+}
+
 func TestUpgradeValidation(t *testing.T) {
 	h := newHarness(t, false)
 	ctx := context.Background()

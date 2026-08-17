@@ -673,6 +673,7 @@ const (
 	billingMutationReconcileCompleted
 	billingMutationReconcileSuperseded
 	billingMutationReconcileBusy
+	billingMutationReconcileCohortDeferred
 )
 
 type billingMutationReconcileResult struct {
@@ -741,6 +742,9 @@ func (m *Manager) ReconcileBillingMutations(
 			summary.Busy++
 			continue
 		}
+		if result.outcome == billingMutationReconcileCohortDeferred {
+			continue
+		}
 		summary.Attempted++
 		if result.err != nil {
 			summary.Failed++
@@ -777,6 +781,15 @@ func (m *Manager) reconcileBillingMutation(
 	}
 	if stored.Status != BillingMutationPending {
 		return billingMutationReconcileNoop, nil
+	}
+	enabled, err := m.billingMutationEnabledForAccount(ctx, stored.AccountID)
+	if err != nil {
+		return billingMutationReconcileNoop, fmt.Errorf(
+			"billing mutation recovery gate for account %s: %w",
+			stored.AccountID, err)
+	}
+	if !enabled {
+		return billingMutationReconcileCohortDeferred, nil
 	}
 	claimToken, err := newBillingMutationClaimToken()
 	if err != nil {

@@ -537,9 +537,18 @@ type Config struct {
 	Default string
 	Store   Store
 	Applier Applier
-	Fit     FitChecker       // nil -> AlwaysFits
-	TTL     time.Duration    // nil-ish (0) -> DefaultPendingTTL
-	Now     func() time.Time // nil -> time.Now
+	Fit     FitChecker // nil -> AlwaysFits
+	// BillingMutationGate is the account cohort fence for background provider
+	// mutation recovery. The control-plane HTTP layer checks the same gate before
+	// it creates a receipt; lifecycle must check it again because durable receipts
+	// and provider-side cleanup outlive any one request. nil preserves the
+	// provider-neutral library behavior.
+	BillingMutationGate func(
+		ctx context.Context,
+		accountID string,
+	) (enabled bool, err error)
+	TTL time.Duration    // nil-ish (0) -> DefaultPendingTTL
+	Now func() time.Time // nil -> time.Now
 }
 
 // Manager runs the plan state machine.
@@ -590,6 +599,16 @@ func NewManager(cfg Config) (*Manager, error) {
 // plan/policy overrides.
 func (m *Manager) BillingAvailable() bool {
 	return len(m.cfg.Providers) > 0 && m.cfg.Default != ""
+}
+
+func (m *Manager) billingMutationEnabledForAccount(
+	ctx context.Context,
+	accountID string,
+) (bool, error) {
+	if m.cfg.BillingMutationGate == nil {
+		return true, nil
+	}
+	return m.cfg.BillingMutationGate(ctx, accountID)
 }
 
 // perAccountApplyMu returns (creating on demand) the mutex serializing apply
@@ -3154,7 +3173,22 @@ func (m *Manager) reconcileAccount(ctx context.Context, accountID string, now ti
 			return err
 		}
 	}
-	if p := r.Pending; p != nil && p.CancelPrevious {
+	providerMutationEnabled := true
+	if p := r.Pending; p != nil &&
+		(p.CancelPrevious ||
+			(p.Kind == PendingUpgrade && !p.CancelPrevious && now.After(p.Expires))) {
+		providerMutationEnabled, err = m.billingMutationEnabledForAccount(
+			ctx, accountID)
+		if err != nil {
+			providerMutationEnabled = false
+			if firstErr == nil {
+				firstErr = fmt.Errorf(
+					"billing mutation recovery gate for account %s: %w",
+					accountID, err)
+			}
+		}
+	}
+	if p := r.Pending; providerMutationEnabled && p != nil && p.CancelPrevious {
 		// Replacement cleanup is its own durable phase. Retry it for every
 		// pending kind, including contact leads, then clear only the exact
 		// operation fence observed before the provider call.
@@ -3182,7 +3216,7 @@ func (m *Manager) reconcileAccount(ctx context.Context, accountID string, now ti
 			}
 		}
 	}
-	if p := r.Pending; p != nil &&
+	if p := r.Pending; providerMutationEnabled && p != nil &&
 		p.Kind == PendingUpgrade && !p.CancelPrevious && now.After(p.Expires) {
 		// Provider state is disarmed BEFORE the local pending marker is
 		// cleared. In providerless recovery mode a pinned legacy record

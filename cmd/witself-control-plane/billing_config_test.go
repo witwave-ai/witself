@@ -199,6 +199,7 @@ func TestStripeControlPlaneConfigGatesTestClockToTestMode(t *testing.T) {
 	catalog := testCatalog(t)
 	setValidStripeControlPlaneEnv(t)
 	t.Setenv("WITSELF_CP_STRIPE_TEST_CLOCK_ID", "clock_hermetic123")
+	t.Setenv("WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST", "acct_sandbox")
 	cfg, _, err := stripeControlPlaneConfig(catalog)
 	if err != nil {
 		t.Fatal(err)
@@ -223,6 +224,36 @@ func TestStripeControlPlaneConfigGatesTestClockToTestMode(t *testing.T) {
 			if _, _, err := stripeControlPlaneConfig(catalog); err == nil ||
 				!strings.Contains(err.Error(), "WITSELF_CP_STRIPE_TEST_CLOCK_ID") {
 				t.Fatalf("error = %v; want test-clock refusal", err)
+			}
+		})
+	}
+}
+
+func TestStripeControlPlaneConfigBoundsTestClockCohort(t *testing.T) {
+	catalog := testCatalog(t)
+	for _, test := range []struct {
+		name      string
+		allowlist string
+		wantError bool
+	}{
+		{name: "dark", allowlist: ""},
+		{name: "one disposable account", allowlist: "acct_sandbox"},
+		{name: "broader cohort", allowlist: "acct_sandbox,acct_other", wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			setValidStripeControlPlaneEnv(t)
+			t.Setenv("WITSELF_CP_STRIPE_TEST_CLOCK_ID", "clock_hermetic123")
+			t.Setenv("WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST", test.allowlist)
+			_, _, err := stripeControlPlaneConfig(catalog)
+			if test.wantError {
+				if err == nil ||
+					!strings.Contains(err.Error(), "at most one account") {
+					t.Fatalf("error = %v; want bounded test-clock cohort refusal", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
 			}
 		})
 	}

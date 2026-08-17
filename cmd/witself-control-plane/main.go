@@ -136,7 +136,8 @@ func run() int {
 //	WITSELF_CP_STRIPE_CANCEL_URL      canonical HTTPS checkout cancel URL
 //	WITSELF_CP_STRIPE_PORTAL_RETURN_URL canonical HTTPS portal return URL
 //	WITSELF_CP_STRIPE_PORTAL_CONFIGURATION_ID reviewed safe bpc_ configuration
-//	WITSELF_CP_STRIPE_TEST_CLOCK_ID optional clock_ for test-mode acceptance only
+//	WITSELF_CP_STRIPE_TEST_CLOCK_ID optional clock_ for test-mode acceptance only;
+//	                                    allows at most one cohort account
 //	WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST strict comma-separated account cohort;
 //	                                         empty enables no customer mutations
 //	WITSELF_CP_R2_ENDPOINT       https://<account>.r2.cloudflarestorage.com
@@ -229,12 +230,13 @@ func setupBilling(ctx context.Context, mux *http.ServeMux) error {
 	fitChecker := cpserver.NewBridgeFitChecker(bridgeURL, bridgeToken)
 	authenticate := cpserver.CellAuthenticate(cellResolve)
 	manager, err := lifecycle.NewManager(lifecycle.Config{
-		Catalog:   catalog,
-		Providers: providers,
-		Default:   providerName,
-		Store:     lifecycle.NewR2Store(blobClient, prefix),
-		Applier:   applier,
-		Fit:       fitChecker,
+		Catalog:             catalog,
+		Providers:           providers,
+		Default:             providerName,
+		Store:               lifecycle.NewR2Store(blobClient, prefix),
+		Applier:             applier,
+		Fit:                 fitChecker,
+		BillingMutationGate: billingMutationGate,
 	})
 	if err != nil {
 		return err
@@ -329,12 +331,16 @@ func stripeControlPlaneConfig(
 		}
 	}
 
-	gate, err := billingAccountAllowlistGate(
-		os.Getenv("WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST"),
-	)
+	allowedAccounts, err := parseBillingAccountAllowlist(
+		os.Getenv("WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST"))
 	if err != nil {
 		return stripeprovider.Config{}, nil, err
 	}
+	if testClockID != "" && len(allowedAccounts) > 1 {
+		return stripeprovider.Config{}, nil, errors.New(
+			"WITSELF_CP_STRIPE_TEST_CLOCK_ID requires at most one account in WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST")
+	}
+	gate := billingMutationGateForAccounts(allowedAccounts)
 
 	return stripeprovider.Config{
 		SecretKey:             secretKey,
@@ -381,6 +387,14 @@ func canonicalHTTPSURLFromEnv(name string) (string, error) {
 func billingAccountAllowlistGate(
 	raw string,
 ) (cpserver.BillingMutationGateFunc, error) {
+	allowed, err := parseBillingAccountAllowlist(raw)
+	if err != nil {
+		return nil, err
+	}
+	return billingMutationGateForAccounts(allowed), nil
+}
+
+func parseBillingAccountAllowlist(raw string) (map[string]struct{}, error) {
 	allowed := make(map[string]struct{})
 	if raw != "" {
 		if raw != strings.TrimSpace(raw) {
@@ -401,10 +415,16 @@ func billingAccountAllowlistGate(
 			allowed[accountID] = struct{}{}
 		}
 	}
+	return allowed, nil
+}
+
+func billingMutationGateForAccounts(
+	allowed map[string]struct{},
+) cpserver.BillingMutationGateFunc {
 	return func(_ context.Context, accountID string) (bool, error) {
 		_, ok := allowed[accountID]
 		return ok, nil
-	}, nil
+	}
 }
 
 func validateProductionBridgeURL(rawURL string) error {

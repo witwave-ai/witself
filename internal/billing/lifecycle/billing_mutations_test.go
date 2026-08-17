@@ -1065,6 +1065,155 @@ func TestReconcileBillingMutationsAutonomouslyRetriesPendingProviderWork(
 	}
 }
 
+func TestReconcileBillingMutationsDefersAccountsOutsideMutationCohort(
+	t *testing.T,
+) {
+	catalog, err := plans.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	standard, ok := catalog.Get("standard")
+	if !ok || !standard.Purchasable() {
+		t.Fatalf("Professional fixture = %+v ok=%v", standard, ok)
+	}
+	now := time.Date(2026, 8, 17, 18, 0, 0, 0, time.UTC)
+	clock := &clock{t: now}
+	store := NewMemStore()
+	actor := BillingActor{ID: "usr_owner_1", Role: "owner"}
+	command := BillingMutationCommand{
+		Operation: BillingMutationUpgrade, Plan: "standard",
+		Reason:         "Exercise cohort-fenced recovery",
+		Confirmed:      true,
+		IdempotencyKey: "cohort-fenced-recovery-0001",
+	}
+	seeded := seedPendingBillingMutationForTest(
+		t, store, billingMutationReceiptSchemaVersion,
+		"acct_cohort_recovery", "owner@example.com", actor, command,
+		billingMutationApproval{
+			ExecutionClass:     BillingMutationExecutionUpgradeSelfServe,
+			ApprovedPriceCents: standard.PriceCents(),
+			ApprovedCurrency:   strings.ToLower(catalog.Currency),
+		}, now)
+	provider := &countingUpgradeBillingProvider{Fake: fake.New(fake.Config{
+		Prices: catalog.Prices(), Interactive: true, Now: clock.now,
+	})}
+	var gateMu sync.Mutex
+	enabled := false
+	gatedAccount := ""
+	manager, err := NewManager(Config{
+		Catalog: catalog,
+		Providers: map[string]billing.Provider{
+			"billing": provider,
+		},
+		Default: "billing", Store: store,
+		Applier: &recApplier{}, Now: clock.now,
+		BillingMutationGate: func(_ context.Context, accountID string) (bool, error) {
+			gateMu.Lock()
+			defer gateMu.Unlock()
+			gatedAccount = accountID
+			return enabled, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deferred, err := manager.ReconcileBillingMutations(context.Background())
+	if err != nil || deferred.Scanned != 1 || deferred.Attempted != 0 ||
+		deferred.Completed != 0 || deferred.Failed != 0 {
+		t.Fatalf("cohort-deferred summary = %+v err=%v", deferred, err)
+	}
+	if calls := provider.upgradeMutationCalls(); calls != 0 {
+		t.Fatalf("provider calls outside cohort = %d; want zero", calls)
+	}
+	gateMu.Lock()
+	gotGatedAccount := gatedAccount
+	enabled = true
+	gateMu.Unlock()
+	if gotGatedAccount != seeded.AccountID {
+		t.Fatalf("recovery gate account = %q; want %q",
+			gotGatedAccount, seeded.AccountID)
+	}
+	pending, ok, err := store.GetBillingMutation(
+		context.Background(), seeded.OperationID)
+	if err != nil || !ok || pending.Status != BillingMutationPending {
+		t.Fatalf("deferred receipt = %+v ok=%v err=%v", pending, ok, err)
+	}
+
+	resumed, err := manager.ReconcileBillingMutations(context.Background())
+	if err != nil || resumed.Scanned != 1 || resumed.Attempted != 1 ||
+		resumed.Completed != 1 || resumed.Failed != 0 {
+		t.Fatalf("cohort-resumed summary = %+v err=%v", resumed, err)
+	}
+	if calls := provider.upgradeMutationCalls(); calls != 2 {
+		t.Fatalf("provider calls after cohort enable = %d; want customer+checkout", calls)
+	}
+	completed, ok, err := store.GetBillingMutation(
+		context.Background(), seeded.OperationID)
+	if err != nil || !ok || completed.Status != BillingMutationCompleted {
+		t.Fatalf("resumed receipt = %+v ok=%v err=%v", completed, ok, err)
+	}
+}
+
+func TestReconcileBillingMutationsFailsClosedWhenMutationGateErrors(
+	t *testing.T,
+) {
+	catalog, err := plans.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	standard, _ := catalog.Get("standard")
+	now := time.Date(2026, 8, 17, 18, 15, 0, 0, time.UTC)
+	clock := &clock{t: now}
+	store := NewMemStore()
+	seeded := seedPendingBillingMutationForTest(
+		t, store, billingMutationReceiptSchemaVersion,
+		"acct_cohort_gate_error", "owner@example.com",
+		BillingActor{ID: "usr_owner_1", Role: "owner"},
+		BillingMutationCommand{
+			Operation: BillingMutationUpgrade, Plan: "standard",
+			Reason:         "Exercise recovery gate failure",
+			Confirmed:      true,
+			IdempotencyKey: "cohort-gate-error-0001",
+		}, billingMutationApproval{
+			ExecutionClass:     BillingMutationExecutionUpgradeSelfServe,
+			ApprovedPriceCents: standard.PriceCents(),
+			ApprovedCurrency:   strings.ToLower(catalog.Currency),
+		}, now)
+	provider := &countingUpgradeBillingProvider{Fake: fake.New(fake.Config{
+		Prices: catalog.Prices(), Interactive: true, Now: clock.now,
+	})}
+	gateErr := errors.New("cohort source unavailable")
+	manager, err := NewManager(Config{
+		Catalog: catalog,
+		Providers: map[string]billing.Provider{
+			"billing": provider,
+		},
+		Default: "billing", Store: store,
+		Applier: &recApplier{}, Now: clock.now,
+		BillingMutationGate: func(context.Context, string) (bool, error) {
+			return false, gateErr
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := manager.ReconcileBillingMutations(context.Background())
+	if !errors.Is(err, gateErr) || summary.Scanned != 1 ||
+		summary.Attempted != 1 || summary.Failed != 1 || summary.Completed != 0 {
+		t.Fatalf("gate-error summary = %+v err=%v", summary, err)
+	}
+	if calls := provider.upgradeMutationCalls(); calls != 0 {
+		t.Fatalf("provider calls after gate error = %d; want zero", calls)
+	}
+	pending, ok, getErr := store.GetBillingMutation(
+		context.Background(), seeded.OperationID)
+	if getErr != nil || !ok || pending.Status != BillingMutationPending {
+		t.Fatalf("gate-error receipt = %+v ok=%v err=%v", pending, ok, getErr)
+	}
+}
+
 func TestReconcileBillingMutationKeepsContactApprovalAfterAvailabilityFlip(
 	t *testing.T,
 ) {
