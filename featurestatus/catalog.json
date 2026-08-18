@@ -978,16 +978,16 @@
         },
         "bounds_abuse": {
           "state": "conditional",
-          "summary": "Idempotency, exact provider cancellation, recovery fencing, a complete fenced count-only R2 inventory collector, and exact-reader preflight exist; receipt retention, operator terminalization, and retained production cutover proof remain incomplete.",
+          "summary": "Idempotency, exact provider cancellation, recovery fencing, a complete fenced count-only R2 collector with a canonical capture wrapper, and exact-reader preflight exist; receipt retention, operator terminalization, and retained production cutover proof remain incomplete.",
           "evidence": [
             "cmd/witself-control-plane/billing_rollout_inventory_test.go",
-            "docs/billing-and-limits.md",
             "docs/billing-transition-rollout.md",
             "infra/cloudflare/control-plane/test/billing-rollout-source-fence.test.mjs",
-            "internal/billing/lifecycle/billing_durability_test.go",
             "internal/billing/lifecycle/rollout_inventory_test.go",
             "scripts/billing-transition-rollout-preflight.sh",
-            "scripts/test-billing-transition-rollout-preflight.sh"
+            "scripts/capture-billing-rollout-inventory.sh",
+            "scripts/test-billing-transition-rollout-preflight.sh",
+            "scripts/test-capture-billing-rollout-inventory.sh"
           ]
         },
         "observability": {
@@ -1017,7 +1017,7 @@
         },
         "docs_support": {
           "state": "pass",
-          "summary": "Authority boundaries, supported transition scope, durable mutation design, v0.0.254 incompatibility, the private prior/drain/BEFORE/scan/AFTER inventory ceremony, quarantine, forward-fix-only cutover, and remaining provider gates are documented.",
+          "summary": "Authority boundaries, supported transition scope, durable mutation design, v0.0.254 incompatibility, the canonical wrapper-owned prior/drain/BEFORE/scan/AFTER ceremony, quarantine, forward-fix-only cutover, and remaining provider gates are documented.",
           "evidence": [
             "docs/billing-and-limits.md",
             "docs/billing-transition-rollout.md",

@@ -98,16 +98,31 @@ bounded reconciler sample is not inventory evidence.
 
 ### Fenced production collection
 
-Run every step from one immutable tagged release snapshot. Its repository tree
-must be read-only, and `PRIVATE_WRANGLER_CONFIG` must be the frozen private
-`wrangler.generated.jsonc` created inside that snapshot, with immutable
-release-snapshot metadata and mode `0400`. A mutable checkout config is
-rejected. Use fresh, normalized absolute paths on a private filesystem for
-`INITIAL_SOURCE_FENCE`, `SOURCE_FENCE_BEFORE`, `PROVISIONAL_INVENTORY`,
-`SOURCE_FENCE_AFTER`, and `FINAL_INVENTORY`; none may be a symlink or already
-exist. The source fences must be regular mode-`0600` files. The inventory
-command creates its provisional and final outputs atomically at mode `0600`
-and refuses overwrite.
+The canonical operator entry point is the frozen tagged copy of
+`scripts/capture-billing-rollout-inventory.sh`. Do not reproduce its timing or
+subcommands by hand. Create its input with
+`createControlPlaneReleaseSnapshot` from
+`infra/cloudflare/control-plane/scripts/control-plane-release-snapshot.mjs`,
+using the exact reviewed tag identity and the normal reviewed render/validation
+hooks. A hand-built directory or mutable checkout is not a release snapshot.
+
+The operator driver owns the returned snapshot for the entire capture. Keep its
+mode-`0700` root, mode-`0555` repository, private work directory, and frozen
+mode-`0400` `wrangler.generated.jsonc` in custody; do not call the snapshot's
+`cleanup()` while the wrapper is running. Retain the generator's
+`inventory.source_sha256` evidence with the successful capture, then clean up
+the snapshot only after the retained evidence has been transferred to its
+access-controlled case. That source hash binds the frozen tagged tree,
+including the wrapper and source-fence helper. A mutable config is rejected.
+
+`CAPTURE_WORK_DIR` must be a fresh, absent, normalized absolute directory path
+on a private filesystem. `FINAL_INVENTORY` must be a different fresh, absent,
+normalized absolute file path whose real parent already exists. The wrapper
+creates the work directory at mode `0700` and every evidence file at mode
+`0600`; it refuses overwrite and removes only its own fixed artifacts after a
+failed capture. If an output appears during a failed finalize race and the
+wrapper cannot prove that it owns that path, quarantine it rather than deleting
+or reusing it. Every retry requires new absent work-directory and output paths.
 
 The Cloudflare inspection process must carry a dedicated read-only
 `CLOUDFLARE_API_TOKEN` and the exact
@@ -122,31 +137,46 @@ provider object:
 - `TARGET_APPLICATION_VERSION`: exact positive Container application version;
 - `TARGET_IMAGE_DIGEST`: exact lowercase `sha256:<64-hex>` image digest;
 - `TARGET_RELEASE_VERSION`: canonical semantic version without a leading `v`;
-- `TARGET_RELEASE_COMMIT`: exact lowercase 40-hex Git commit.
+- `TARGET_RELEASE_COMMIT`: exact lowercase 40-hex Git commit;
+- `CONTROL_PLANE_BINARY`: exact target `witself-control-plane` executable;
+- `CONTROL_PLANE_BINARY_SHA256`: separately reviewed lowercase SHA-256 of that
+  target binary. Do not derive the expected value from the binary being tested.
 
-Take the first private lifecycle-disabled attestation with all required target
-bindings. `SOURCE_FENCE_SCRIPT` must name the copy in the same immutable release
-snapshot as the private config. `umask 077` plus shell no-clobber makes the
-redirected source-fence files private and create-only:
+The wrapper checks the binary digest, its reported release version/commit, its
+file identity, and its non-writable executable mode throughout the capture.
+Set the exact production R2 authority and inject the dedicated credentials,
+then run:
 
 ```sh
-umask 077
-set -o noclobber
+export WITSELF_BILLING_INVENTORY_R2_ENDPOINT=\
+'https://8f0bf04a4e7aab3a8cc60f02cc8c8fdb.r2.cloudflarestorage.com'
+export WITSELF_BILLING_INVENTORY_R2_BUCKET='witself-control-plane'
+export WITSELF_BILLING_INVENTORY_R2_PREFIX='registry/'
+: "${WITSELF_BILLING_INVENTORY_R2_ACCESS_KEY:?dedicated read-only key required}"
+: "${WITSELF_BILLING_INVENTORY_R2_SECRET_KEY:?dedicated read-only secret required}"
 
-source_fence() {
-  node "$SOURCE_FENCE_SCRIPT" \
-    --config "$PRIVATE_WRANGLER_CONFIG" \
-    --expected-account-id 8f0bf04a4e7aab3a8cc60f02cc8c8fdb \
-    --expected-target-application-id "$TARGET_APPLICATION_ID" \
-    --expected-target-application-version "$TARGET_APPLICATION_VERSION" \
-    --expected-target-image-digest "$TARGET_IMAGE_DIGEST" \
-    --expected-target-release-version "$TARGET_RELEASE_VERSION" \
-    --expected-target-release-commit "$TARGET_RELEASE_COMMIT" \
-    "$@"
-}
-
-source_fence > "$INITIAL_SOURCE_FENCE"
+"$CAPTURE_SCRIPT" \
+  --release-snapshot-config "$PRIVATE_WRANGLER_CONFIG" \
+  --control-plane-binary "$CONTROL_PLANE_BINARY" \
+  --control-plane-binary-sha256 "$CONTROL_PLANE_BINARY_SHA256" \
+  --work-dir "$CAPTURE_WORK_DIR" \
+  --output "$FINAL_INVENTORY" \
+  --expected-account-id 8f0bf04a4e7aab3a8cc60f02cc8c8fdb \
+  --expected-target-application-id "$TARGET_APPLICATION_ID" \
+  --expected-target-application-version "$TARGET_APPLICATION_VERSION" \
+  --expected-target-image-digest "$TARGET_IMAGE_DIGEST" \
+  --expected-target-release-version "$TARGET_RELEASE_VERSION" \
+  --expected-target-release-commit "$TARGET_RELEASE_COMMIT"
 ```
+
+`CAPTURE_SCRIPT` must be the copy inside the same frozen snapshot as
+`PRIVATE_WRANGLER_CONFIG`. The wrapper derives that snapshot's source-fence
+helper, pinned Wrangler working directory, and reviewed empty environment file.
+It takes the initial private lifecycle-disabled attestation, waits the fixed
+240-second in-flight bound, takes `BEFORE` using that initial artifact as its
+prior, runs `witself-control-plane billing-rollout-inventory scan`, immediately
+takes `AFTER` from the same prior, and runs
+`witself-control-plane billing-rollout-inventory finalize`.
 
 The initial artifact is a self-hashed absence attestation, not a usable scan
 fence. It must prove an empty mutation cohort, absent lifecycle gate, the exact
@@ -157,37 +187,6 @@ blocks the ceremony; only an inactive/version-null tombstone is non-writing.
 The current target application may remain spawnable with zero rows because a
 new instance would receive the currently attested absent bindings.
 
-Wait at least four minutes after that successful initial observation. Then
-take `BEFORE`, perform the complete scan, immediately take `AFTER`, and
-finalize, in that order:
-
-```sh
-source_fence \
-  --prior-lifecycle-disabled-attestation "$INITIAL_SOURCE_FENCE" \
-  > "$SOURCE_FENCE_BEFORE"
-
-export WITSELF_BILLING_INVENTORY_R2_ENDPOINT=\
-'https://8f0bf04a4e7aab3a8cc60f02cc8c8fdb.r2.cloudflarestorage.com'
-export WITSELF_BILLING_INVENTORY_R2_BUCKET='witself-control-plane'
-export WITSELF_BILLING_INVENTORY_R2_PREFIX='registry/'
-: "${WITSELF_BILLING_INVENTORY_R2_ACCESS_KEY:?dedicated read-only key required}"
-: "${WITSELF_BILLING_INVENTORY_R2_SECRET_KEY:?dedicated read-only secret required}"
-
-witself-control-plane billing-rollout-inventory scan \
-  --source-fence-before "$SOURCE_FENCE_BEFORE" \
-  --provisional "$PROVISIONAL_INVENTORY"
-
-source_fence \
-  --prior-lifecycle-disabled-attestation "$INITIAL_SOURCE_FENCE" \
-  > "$SOURCE_FENCE_AFTER"
-
-witself-control-plane billing-rollout-inventory finalize \
-  --source-fence-before "$SOURCE_FENCE_BEFORE" \
-  --provisional "$PROVISIONAL_INVENTORY" \
-  --source-fence-after "$SOURCE_FENCE_AFTER" \
-  --output "$FINAL_INVENTORY"
-```
-
 The two R2 credential variables must come from a separately provisioned,
 read-only inventory principal and must not reuse
 `WITSELF_CP_R2_ACCESS_KEY`/`WITSELF_CP_R2_SECRET_KEY`. Verify and retain its
@@ -197,11 +196,10 @@ bucket, and prefix above are the only accepted production authority.
 The scan follows the complete paginated registry listing with strict cursor,
 object, and snapshot checks and fails closed instead of truncating if either
 the account-object or mutation-receipt class exceeds 1,000,000 objects.
-
-The source helper also accepts `--reviewed-env-file` for a frozen reviewed
-empty Wrangler environment file (the default is the operating-system null
-device) and `--wrangler-cwd` for an absolute pinned Wrangler working directory.
-If either is used, pass the same reviewed value to all three observations.
+Only the source-observation subprocesses receive the Cloudflare token, and only
+the scan subprocess receives the dedicated R2 access key and secret. Finalize
+receives the exact non-secret endpoint/bucket/prefix authority but no
+Cloudflare, R2, or Stripe credential and performs no provider read.
 
 `BEFORE` and `AFTER` must independently prove the empty cohort, absent
 lifecycle gate, zero API/reconciler sources, and zero non-null-version
@@ -213,12 +211,21 @@ allowed only because both endpoints separately prove zero possible writers.
 Any failed timing or identity check requires fresh artifact paths and a new
 ceremony; never repair an attestation or provisional file.
 
-Retain the initial attestation, both source fences, provisional inventory,
-exact private config/release evidence, dedicated credential-policy evidence,
-and final inventory in the access-controlled operator case. Only
-`FINAL_INVENTORY` is a count-only shared artifact; even though the command
-creates it privately, its exact JSON content may be copied into the shared
-rollout report. Do not share the source fences or provisional artifact.
+A successful wrapper run retains these exact private evidence paths:
+
+- `$CAPTURE_WORK_DIR/initial-lifecycle-disabled.json`;
+- `$CAPTURE_WORK_DIR/source-fence-before.json`;
+- `$CAPTURE_WORK_DIR/registry-provisional.json`;
+- `$CAPTURE_WORK_DIR/source-fence-after.json`;
+- `$FINAL_INVENTORY`.
+
+Retain them with the tagged snapshot generator's `inventory.source_sha256`,
+the reviewed control-plane binary SHA-256, exact private config/release
+evidence, and dedicated credential-policy evidence in the access-controlled
+operator case. Only `$FINAL_INVENTORY` is a count-only shared artifact; even
+though the wrapper creates it privately, its exact JSON content may be copied
+into the shared rollout report. Do not share the source fences or provisional
+artifact.
 
 This collector closes the implementation gap only. Billing remains dark and
 conditional. Activation is still blocked until this ceremony has produced and
@@ -328,10 +335,11 @@ commit before rollout.
 3. Stop every `v0.0.254` API and plan-lifecycle reconciliation process. Verify
    both source replica counts are zero; stopping only the HTTP listener is not
    sufficient.
-4. Complete the private initial-attestation, four-minute drain, `BEFORE`, R2
-   scan, `AFTER`, and finalize ceremony above. Quarantine any nonzero hazard;
-   retain all private fence/provisional evidence and the final count-only
-   inventory plus capture time.
+4. Run the canonical capture wrapper, which owns the private initial
+   attestation, fixed four-minute drain, `BEFORE`, R2 scan, `AFTER`, and
+   finalize ceremony. Quarantine any nonzero hazard; retain the tagged source
+   hash, binary hash, all private fence/provisional evidence, and final
+   count-only inventory plus capture time.
 5. Run `activate` preflight against the exact release tag and retain its output.
 6. Start only target replicas whose image provenance carries the capability
    marker. Keep the allowlist empty; verify health, billing reads, and pending-
@@ -369,11 +377,13 @@ fix; this guard intentionally provides no rollback mode to `v0.0.254`.
 Retain the release/tag/commit, control-plane and cell image digests, cell
 version/protocol probes, the exact Cloudflare Worker version or script ETag and
 Durable Object binding inventory, the immutable private config identity, the
-initial lifecycle-disabled attestation, both source fences, private provisional
-inventory, dedicated read-only credential-policy evidence, the value-free final
-inventory and capture time, source and target API/reconciler replica counts,
-preflight output, empty-cohort proof before and after the run, bounded Stripe
-catalog-bootstrap result, test-mode/provider configuration hashes, webhook
-replay result, plan-fit result, and the final zero-hazard inventory. Never
-retain secret values or customer/provider identifiers in the shared rollout
-report, and never attach private fence/provisional artifacts to it.
+tagged snapshot `inventory.source_sha256`, reviewed control-plane binary
+SHA-256, initial lifecycle-disabled attestation, both source fences, private
+provisional inventory, dedicated read-only credential-policy evidence, the
+value-free final inventory and capture time, source and target API/reconciler
+replica counts, preflight output, empty-cohort proof before and after the run,
+bounded Stripe catalog-bootstrap result, test-mode/provider configuration
+hashes, webhook replay result, plan-fit result, and the final zero-hazard
+inventory. Never retain secret values or customer/provider identifiers in the
+shared rollout report, and never attach private fence/provisional artifacts to
+it.
