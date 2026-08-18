@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -134,6 +135,18 @@ func (c *Client) get(ctx context.Context, key string, maxBytes int64) (data []by
 	defer func() { _ = resp.Body.Close() }()
 	switch resp.StatusCode {
 	case http.StatusOK:
+		etag := strings.Trim(resp.Header.Get("ETag"), `"`)
+		if maxBytes >= 0 {
+			etagValues := resp.Header.Values("ETag")
+			if len(etagValues) == 1 {
+				etag, err = normalizeCompleteListETag(etagValues[0])
+			} else {
+				err = errors.New("ambiguous ETag header")
+			}
+			if err != nil {
+				return nil, "", fmt.Errorf("blob: get %s returned an invalid ETag", key)
+			}
+		}
 		var b []byte
 		if maxBytes < 0 {
 			b, err = io.ReadAll(resp.Body)
@@ -146,7 +159,7 @@ func (c *Client) get(ctx context.Context, key string, maxBytes int64) (data []by
 		if err != nil {
 			return nil, "", fmt.Errorf("blob: read %s: %w", key, err)
 		}
-		return b, strings.Trim(resp.Header.Get("ETag"), `"`), nil
+		return b, etag, nil
 	case http.StatusNotFound:
 		// A 404 is only "the object is absent" when the body says NoSuchKey.
 		// NoSuchBucket is ALSO a 404, and conflating them is dangerous: a
@@ -262,17 +275,20 @@ func (c *Client) List(ctx context.Context, prefix string) ([]string, error) {
 	}
 }
 
-const maxCompleteListPageBytes int64 = 16 << 20
+const (
+	maxCompleteListPageBytes      int64 = 16 << 20
+	maxCompleteListAggregateBytes int64 = 1 << 30
+	maxCompleteListPages                = 8_192
+	maxCompleteListObjectsPerPage       = 1_000
+	maxCompleteListKeyBytes             = 1_024
+	maxCompleteListETagBytes            = 256
+	maxCompleteListTokenBytes           = 8_192
+)
 
 type listPage struct {
-	XMLName  xml.Name `xml:"ListBucketResult"`
-	Contents []struct {
-		Key  string `xml:"Key"`
-		ETag string `xml:"ETag"`
-		Size *int64 `xml:"Size"`
-	} `xml:"Contents"`
-	IsTruncated           bool   `xml:"IsTruncated"`
-	NextContinuationToken string `xml:"NextContinuationToken"`
+	Contents              []ObjectInfo
+	IsTruncated           bool
+	NextContinuationToken string
 }
 
 // ListComplete returns a bounded, stable-metadata inventory under prefix.
@@ -291,7 +307,13 @@ func (c *Client) ListComplete(ctx context.Context, prefix string, maxKeys int) (
 	seenTokens := map[string]struct{}{}
 	token := ""
 	previousKey := ""
+	var aggregatePageBytes int64
+	pages := 0
 	for {
+		pages++
+		if pages > maxCompleteListPages {
+			return nil, fmt.Errorf("%w: list %s exceeds %d pages", ErrLimitExceeded, prefix, maxCompleteListPages)
+		}
 		q := url.Values{}
 		q.Set("list-type", "2")
 		q.Set("prefix", prefix)
@@ -317,8 +339,12 @@ func (c *Client) ListComplete(ctx context.Context, prefix string, maxKeys int) (
 		if readErr != nil {
 			return nil, fmt.Errorf("blob: list %s: %w", prefix, readErr)
 		}
-		var page listPage
-		if err := xml.Unmarshal(pageBody, &page); err != nil {
+		if int64(len(pageBody)) > maxCompleteListAggregateBytes-aggregatePageBytes {
+			return nil, fmt.Errorf("%w: list %s exceeds %d response bytes", ErrLimitExceeded, prefix, maxCompleteListAggregateBytes)
+		}
+		aggregatePageBytes += int64(len(pageBody))
+		page, err := decodeCompleteListPage(pageBody)
+		if err != nil {
 			return nil, fmt.Errorf("%w: list %s response: %v", ErrInvalidListing, prefix, err)
 		}
 		if token != "" && len(page.Contents) == 0 {
@@ -332,14 +358,10 @@ func (c *Client) ListComplete(ctx context.Context, prefix string, maxKeys int) (
 			if previousKey != "" && listed.Key <= previousKey {
 				return nil, fmt.Errorf("%w: list %s returned duplicate or non-increasing keys", ErrInvalidListing, prefix)
 			}
-			etag := strings.Trim(strings.TrimSpace(listed.ETag), `"`)
-			if etag == "" || listed.Size == nil || *listed.Size < 0 {
-				return nil, fmt.Errorf("%w: list %s returned incomplete object metadata", ErrInvalidListing, prefix)
-			}
 			if len(objects) >= maxKeys {
 				return nil, fmt.Errorf("%w: list %s exceeds %d keys", ErrLimitExceeded, prefix, maxKeys)
 			}
-			objects = append(objects, ObjectInfo{Key: listed.Key, ETag: etag, Size: *listed.Size})
+			objects = append(objects, listed)
 			previousKey = listed.Key
 		}
 
@@ -363,6 +385,282 @@ func (c *Client) ListComplete(ctx context.Context, prefix string, maxKeys int) (
 		}
 		seenTokens[page.NextContinuationToken] = struct{}{}
 		token = page.NextContinuationToken
+	}
+}
+
+// decodeCompleteListPage is deliberately stricter than encoding/xml's normal
+// struct decoding. Scalar S3 protocol fields must occur exactly once, so a
+// malformed response cannot smuggle two IsTruncated values and let the last
+// one silently turn an incomplete page into a complete listing.
+func decodeCompleteListPage(data []byte) (listPage, error) {
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+	root, err := nextCompleteListStart(decoder)
+	if err != nil {
+		return listPage{}, err
+	}
+	if root.Name.Local != "ListBucketResult" {
+		return listPage{}, errors.New("unexpected list response root")
+	}
+
+	page := listPage{Contents: make([]ObjectInfo, 0)}
+	truncatedSeen := false
+	nextSeen := false
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return listPage{}, err
+		}
+		switch value := token.(type) {
+		case xml.StartElement:
+			if value.Name.Space != root.Name.Space {
+				if err := decoder.Skip(); err != nil {
+					return listPage{}, err
+				}
+				continue
+			}
+			switch value.Name.Local {
+			case "Contents":
+				if len(page.Contents) >= maxCompleteListObjectsPerPage {
+					return listPage{}, errors.New("list page exceeded requested object count")
+				}
+				object, err := decodeCompleteListObject(decoder, value, root.Name.Space)
+				if err != nil {
+					return listPage{}, err
+				}
+				page.Contents = append(page.Contents, object)
+			case "IsTruncated":
+				if truncatedSeen {
+					return listPage{}, errors.New("duplicate IsTruncated field")
+				}
+				truncatedSeen = true
+				raw, err := decodeCompleteListText(decoder, value, 5)
+				if err != nil {
+					return listPage{}, err
+				}
+				switch raw {
+				case "true":
+					page.IsTruncated = true
+				case "false":
+					page.IsTruncated = false
+				default:
+					return listPage{}, errors.New("invalid IsTruncated field")
+				}
+			case "NextContinuationToken":
+				if nextSeen {
+					return listPage{}, errors.New("duplicate NextContinuationToken field")
+				}
+				nextSeen = true
+				page.NextContinuationToken, err = decodeCompleteListText(
+					decoder, value, maxCompleteListTokenBytes)
+				if err != nil {
+					return listPage{}, err
+				}
+			default:
+				if err := decoder.Skip(); err != nil {
+					return listPage{}, err
+				}
+			}
+		case xml.EndElement:
+			if value.Name != root.Name {
+				return listPage{}, errors.New("unexpected list response close")
+			}
+			if !truncatedSeen {
+				return listPage{}, errors.New("missing IsTruncated field")
+			}
+			if page.IsTruncated && (!nextSeen ||
+				!validCompleteListContinuationToken(page.NextContinuationToken)) {
+				return listPage{}, errors.New("truncated page lacks a continuation token")
+			}
+			if !page.IsTruncated && nextSeen {
+				return listPage{}, errors.New("complete page contains a continuation token")
+			}
+			if err := completeListOnlyTrailingSpace(decoder); err != nil {
+				return listPage{}, err
+			}
+			return page, nil
+		case xml.CharData:
+			if strings.TrimSpace(string(value)) != "" {
+				return listPage{}, errors.New("unexpected list response text")
+			}
+		}
+	}
+}
+
+func validCompleteListContinuationToken(value string) bool {
+	if value == "" || len(value) > maxCompleteListTokenBytes {
+		return false
+	}
+	for index := range len(value) {
+		if value[index] <= 0x20 || value[index] == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func nextCompleteListStart(decoder *xml.Decoder) (xml.StartElement, error) {
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return xml.StartElement{}, err
+		}
+		switch value := token.(type) {
+		case xml.StartElement:
+			return value, nil
+		case xml.CharData:
+			if strings.TrimSpace(string(value)) != "" {
+				return xml.StartElement{}, errors.New("unexpected text before list response")
+			}
+		}
+	}
+}
+
+func decodeCompleteListObject(
+	decoder *xml.Decoder,
+	start xml.StartElement,
+	namespace string,
+) (ObjectInfo, error) {
+	var object ObjectInfo
+	keySeen, etagSeen, sizeSeen := false, false, false
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return ObjectInfo{}, err
+		}
+		switch value := token.(type) {
+		case xml.StartElement:
+			if value.Name.Space != namespace {
+				if err := decoder.Skip(); err != nil {
+					return ObjectInfo{}, err
+				}
+				continue
+			}
+			switch value.Name.Local {
+			case "Key":
+				if keySeen {
+					return ObjectInfo{}, errors.New("duplicate object Key field")
+				}
+				keySeen = true
+				object.Key, err = decodeCompleteListText(
+					decoder, value, maxCompleteListKeyBytes)
+			case "ETag":
+				if etagSeen {
+					return ObjectInfo{}, errors.New("duplicate object ETag field")
+				}
+				etagSeen = true
+				var raw string
+				raw, err = decodeCompleteListText(
+					decoder, value, maxCompleteListETagBytes+2)
+				if err == nil {
+					object.ETag, err = normalizeCompleteListETag(raw)
+				}
+			case "Size":
+				if sizeSeen {
+					return ObjectInfo{}, errors.New("duplicate object Size field")
+				}
+				sizeSeen = true
+				var raw string
+				raw, err = decodeCompleteListText(decoder, value, 20)
+				if err == nil {
+					object.Size, err = parseCompleteListSize(raw)
+				}
+			default:
+				err = decoder.Skip()
+			}
+			if err != nil {
+				return ObjectInfo{}, err
+			}
+		case xml.EndElement:
+			if value.Name != start.Name {
+				return ObjectInfo{}, errors.New("unexpected object metadata close")
+			}
+			if !keySeen || !etagSeen || !sizeSeen || object.Key == "" || object.ETag == "" {
+				return ObjectInfo{}, errors.New("incomplete object metadata")
+			}
+			return object, nil
+		case xml.CharData:
+			if strings.TrimSpace(string(value)) != "" {
+				return ObjectInfo{}, errors.New("unexpected object metadata text")
+			}
+		}
+	}
+}
+
+func decodeCompleteListText(
+	decoder *xml.Decoder,
+	start xml.StartElement,
+	maxBytes int,
+) (string, error) {
+	var value strings.Builder
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return "", err
+		}
+		switch part := token.(type) {
+		case xml.CharData:
+			if len(part) > maxBytes-value.Len() {
+				return "", errors.New("list response field exceeded its length bound")
+			}
+			_, _ = value.Write(part)
+		case xml.EndElement:
+			if part.Name != start.Name {
+				return "", errors.New("unexpected list response field close")
+			}
+			return value.String(), nil
+		default:
+			return "", errors.New("list response scalar contained nested content")
+		}
+	}
+}
+
+func normalizeCompleteListETag(value string) (string, error) {
+	if len(value) < 3 || value[0] != '"' || value[len(value)-1] != '"' {
+		return "", errors.New("invalid object ETag")
+	}
+	value = value[1 : len(value)-1]
+	if value == "" || len(value) > maxCompleteListETagBytes {
+		return "", errors.New("invalid object ETag")
+	}
+	// RFC 9110 entity-tags are one quoted sequence of etagc bytes. Reject
+	// whitespace, controls, DEL, and an embedded quote so callers receive one
+	// unambiguous normalized identity rather than a permissively trimmed header.
+	for index := range len(value) {
+		if value[index] <= 0x20 || value[index] == '"' || value[index] == 0x7f {
+			return "", errors.New("invalid object ETag")
+		}
+	}
+	return value, nil
+}
+
+func parseCompleteListSize(value string) (int64, error) {
+	if value == "" || (len(value) > 1 && value[0] == '0') {
+		return 0, errors.New("invalid object Size")
+	}
+	for i := range len(value) {
+		if value[i] < '0' || value[i] > '9' {
+			return 0, errors.New("invalid object Size")
+		}
+	}
+	size, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, errors.New("invalid object Size")
+	}
+	return size, nil
+}
+
+func completeListOnlyTrailingSpace(decoder *xml.Decoder) error {
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if text, ok := token.(xml.CharData); !ok || strings.TrimSpace(string(text)) != "" {
+			return errors.New("unexpected content after list response")
+		}
 	}
 }
 

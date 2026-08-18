@@ -103,13 +103,12 @@ func billingRolloutTestETag(data []byte) string {
 	return hex.EncodeToString(digest[:])
 }
 
-func billingRolloutTestOptions(at time.Time) BillingRolloutInventoryOptions {
-	cohort, api, reconcilers := 0, 0, 0
-	return BillingRolloutInventoryOptions{
-		R2Prefix: "registry", CapturedAt: at,
-		BillingMutationCohortAccounts: &cohort,
-		SourceAPIReplicas:             &api,
-		SourceReconcilerReplicas:      &reconcilers,
+func billingRolloutTestOptions(at time.Time) BillingRolloutRegistryOptions {
+	return BillingRolloutRegistryOptions{
+		R2Prefix:                     "registry",
+		BeforeSourceInspectionSHA256: strings.Repeat("a", 64),
+		RegistryAuthoritySHA256:      strings.Repeat("b", 64),
+		Now:                          func() time.Time { return at },
 	}
 }
 
@@ -230,7 +229,7 @@ func billingRolloutPreparedPending(
 	}
 }
 
-func TestCollectBillingRolloutInventoryCountOnlyArtifact(t *testing.T) {
+func TestCollectBillingRolloutRegistryPrivateCapture(t *testing.T) {
 	capturedAt := time.Date(2026, 8, 17, 22, 0, 0, 0, time.UTC)
 	reader := newBillingRolloutFakeReader()
 
@@ -273,45 +272,96 @@ func TestCollectBillingRolloutInventoryCountOnlyArtifact(t *testing.T) {
 	billingRolloutAddReceipt(t, reader, "registry", youngSetup)
 
 	options := billingRolloutTestOptions(capturedAt)
-	cohort, api, reconcilers := 3, 4, 5
-	options.BillingMutationCohortAccounts = &cohort
-	options.SourceAPIReplicas = &api
-	options.SourceReconcilerReplicas = &reconcilers
-	inventory, err := CollectBillingRolloutInventory(
+	capture, err := CollectBillingRolloutRegistry(
 		context.Background(), reader, options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantRecords := BillingRolloutInventoryRecords{
+	wantRecords := BillingRolloutRegistryRecords{
 		PreparedDowngrades: 1, TargetlessPendingChanges: 1,
 		MalformedPendingChanges: 1, MalformedMutationReceipts: 1,
 		PostRetryHorizonReceipts: 2,
 	}
-	if inventory.Schema != BillingRolloutInventorySchema ||
-		inventory.CapturedAt != "2026-08-17T22:00:00Z" ||
-		inventory.BillingMutationCohortAccounts != cohort ||
-		inventory.SourceFleet.APIReplicas != api ||
-		inventory.SourceFleet.ReconcilerReplicas != reconcilers ||
-		inventory.Records != wantRecords {
-		t.Fatalf("inventory = %+v; want records %+v", inventory, wantRecords)
+	if !capture.ScanStartedAt.Equal(capturedAt) ||
+		!capture.ScanCompletedAt.Equal(capturedAt) ||
+		capture.BeforeSourceInspectionSHA256 != options.BeforeSourceInspectionSHA256 ||
+		capture.RegistryAuthoritySHA256 != options.RegistryAuthoritySHA256 ||
+		capture.AccountObjectsScanned != 3 ||
+		capture.MutationReceiptObjectsScanned != 4 ||
+		capture.Records != wantRecords {
+		t.Fatalf("capture = %+v; want records %+v", capture, wantRecords)
 	}
-	encoded, err := json.Marshal(inventory)
+	encoded, err := json.Marshal(capture)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, forbidden := range []string{
-		"acct_", "bop_", "cus_", "sub_", "owner@", "registry/", "private",
-	} {
-		if strings.Contains(string(encoded), forbidden) {
-			t.Fatalf("count-only artifact leaked %q: %s", forbidden, encoded)
-		}
+	if string(encoded) != `{}` {
+		t.Fatalf("private in-memory capture unexpectedly serialized: %s", encoded)
 	}
-	var shape map[string]json.RawMessage
-	if err := json.Unmarshal(encoded, &shape); err != nil {
+}
+
+func TestCollectBillingRolloutRegistryOwnsCanonicalScanClockAndCompletionHorizon(t *testing.T) {
+	location := time.FixedZone("inventory-test", -7*60*60)
+	startedRaw := time.Date(2026, 8, 17, 15, 0, 0, 900_000_000, location)
+	startedAt := startedRaw.UTC().Truncate(time.Second)
+	completedRaw := startedRaw.Add(2*time.Second + 25*time.Millisecond)
+	completedAt := completedRaw.UTC().Truncate(time.Second)
+
+	reader := newBillingRolloutFakeReader()
+	receipt := billingRolloutPendingReceipt(
+		t, "acct_completion_horizon", BillingMutationSetup, "",
+		startedAt.Add(-billingMutationAutomaticRetryHorizon+time.Second),
+		"completion-horizon")
+	billingRolloutAddReceipt(t, reader, "registry", receipt)
+
+	options := billingRolloutTestOptions(startedAt)
+	clockCalls := 0
+	options.Now = func() time.Time {
+		clockCalls++
+		if clockCalls == 1 {
+			return startedRaw
+		}
+		return completedRaw
+	}
+	capture, err := CollectBillingRolloutRegistry(
+		context.Background(), reader, options)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if len(shape) != 5 {
-		t.Fatalf("top-level artifact fields = %v", shape)
+	if clockCalls != 2 || !capture.ScanStartedAt.Equal(startedAt) ||
+		!capture.ScanCompletedAt.Equal(completedAt) ||
+		capture.ScanStartedAt.Location() != time.UTC ||
+		capture.ScanCompletedAt.Location() != time.UTC ||
+		capture.ScanStartedAt.Nanosecond() != 0 ||
+		capture.ScanCompletedAt.Nanosecond() != 0 {
+		t.Fatalf("scan clock = %s..%s (%d calls); want %s..%s",
+			capture.ScanStartedAt, capture.ScanCompletedAt, clockCalls,
+			startedAt, completedAt)
+	}
+	if capture.Records.PostRetryHorizonReceipts != 1 {
+		t.Fatalf("completion-fenced horizon counts = %+v", capture.Records)
+	}
+}
+
+func TestCollectBillingRolloutRegistryRejectsBackwardCompletionClock(t *testing.T) {
+	startedAt := time.Date(2026, 8, 17, 22, 0, 2, 400_000_000, time.UTC)
+	completedAt := startedAt.Add(-2 * time.Second)
+	options := billingRolloutTestOptions(startedAt)
+	clockCalls := 0
+	options.Now = func() time.Time {
+		clockCalls++
+		if clockCalls == 1 {
+			return startedAt
+		}
+		return completedAt
+	}
+	capture, err := CollectBillingRolloutRegistry(
+		context.Background(), newBillingRolloutFakeReader(), options)
+	if capture != nil || !errors.Is(err, ErrBillingRolloutInventoryIncomplete) {
+		t.Fatalf("capture/error = %#v / %v", capture, err)
+	}
+	if clockCalls != 2 {
+		t.Fatalf("clock calls = %d; want 2", clockCalls)
 	}
 }
 
@@ -540,8 +590,8 @@ func TestBillingRolloutReceiptTerminalEvidence(t *testing.T) {
 				capturedAt.Add(-24*time.Hour), fmt.Sprintf("evidence-%04d", i))
 			record := billingRolloutBaseRecord(receipt.AccountID)
 			test.mutate(&record, receipt)
-			accounts := map[string]billingRolloutScannedAccount{
-				record.AccountID: {record: record, valid: true},
+			accounts := map[string]billingRolloutAccountEvidence{
+				record.AccountID: projectBillingRolloutAccountEvidence(record),
 			}
 			if got := billingRolloutHasTerminalAccountEvidence(receipt, accounts); got != test.want {
 				t.Fatalf("terminal evidence = %t; want %t", got, test.want)
@@ -550,7 +600,92 @@ func TestBillingRolloutReceiptTerminalEvidence(t *testing.T) {
 	}
 }
 
-func TestCollectBillingRolloutInventoryValidatesEveryTerminalReceipt(t *testing.T) {
+func TestCollectBillingRolloutRegistryBlocksEvidenceLessLegacyPendingAtAnyAge(t *testing.T) {
+	scanStartedAt := time.Date(2026, 8, 17, 22, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name        string
+		createdAt   time.Time
+		addEvidence bool
+		wantBad     int
+	}{
+		{
+			name:      "young without evidence",
+			createdAt: scanStartedAt.Add(-time.Minute), wantBad: 1,
+		},
+		{
+			name:      "old without evidence",
+			createdAt: scanStartedAt.Add(-48 * time.Hour), wantBad: 1,
+		},
+		{
+			name:      "old with exact terminal evidence",
+			createdAt: scanStartedAt.Add(-48 * time.Hour), addEvidence: true,
+		},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reader := newBillingRolloutFakeReader()
+			receipt := billingRolloutPendingReceipt(
+				t, fmt.Sprintf("acct_legacy_%d", index),
+				BillingMutationPlanUpgrade, "professional", test.createdAt,
+				fmt.Sprintf("legacy-%04d", index))
+			receipt.SchemaVersion = billingMutationLegacyReceiptSchemaVersion
+			receipt.ExecutionClass = ""
+			receipt.ApprovedPriceCents = 0
+			receipt.ApprovedCurrency = ""
+			if err := validateBillingMutationReceipt(receipt); err != nil {
+				t.Fatalf("legacy fixture is invalid: %v", err)
+			}
+			billingRolloutAddReceipt(t, reader, "registry", receipt)
+			if test.addEvidence {
+				record := billingRolloutBaseRecord(receipt.AccountID)
+				record.Entitled = receipt.TargetPlan
+				billingRolloutAddRecord(t, reader, "registry", record)
+			}
+
+			capture, err := CollectBillingRolloutRegistry(
+				context.Background(), reader,
+				billingRolloutTestOptions(scanStartedAt))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if capture.Records.MalformedMutationReceipts != test.wantBad ||
+				capture.Records.PostRetryHorizonReceipts != 0 {
+				t.Fatalf("legacy pending counts = %+v", capture.Records)
+			}
+		})
+	}
+}
+
+func TestBillingRolloutAccountEvidenceProjectionIsMinimal(t *testing.T) {
+	const excluded = "private-value-that-must-not-enter-capture"
+	now := time.Date(2026, 8, 17, 22, 0, 0, 0, time.UTC)
+	record := billingRolloutBaseRecord("acct_minimal_projection")
+	record.Email = excluded
+	record.ApplyBlocked = excluded
+	record.LimitOverrides = map[string]AccountLimitOverride{
+		excluded: {},
+	}
+	record.Provider, record.CustomerID = "stripe", "cus_minimal_projection"
+	record.Pending = &Pending{
+		Kind: PendingUpgrade, Plan: "professional",
+		OperationID: "bop_minimal_projection", Requested: now,
+		Expires:          now.Add(time.Hour),
+		URL:              "https://billing.example.invalid/" + excluded,
+		ProviderObjectID: "cs_minimal_projection",
+	}
+	evidence := projectBillingRolloutAccountEvidence(record)
+	if strings.Contains(fmt.Sprintf("%+v", evidence), excluded) {
+		t.Fatalf("minimal account evidence retained excluded record data: %+v", evidence)
+	}
+	if evidence.accountID != record.AccountID ||
+		evidence.pendingOperationID != record.Pending.OperationID ||
+		evidence.pendingPlan != record.Pending.Plan ||
+		!evidence.pendingUpgradeExactAction {
+		t.Fatalf("minimal account evidence lost terminal fields: %+v", evidence)
+	}
+}
+
+func TestCollectBillingRolloutRegistryValidatesEveryTerminalReceipt(t *testing.T) {
 	capturedAt := time.Date(2026, 8, 17, 22, 0, 0, 0, time.UTC)
 	reader := newBillingRolloutFakeReader()
 
@@ -581,7 +716,7 @@ func TestCollectBillingRolloutInventoryValidatesEveryTerminalReceipt(t *testing.
 	invalidTerminal.CompletedAt = nil
 	billingRolloutAddReceipt(t, reader, "registry", invalidTerminal)
 
-	inventory, err := CollectBillingRolloutInventory(
+	inventory, err := CollectBillingRolloutRegistry(
 		context.Background(), reader, billingRolloutTestOptions(capturedAt))
 	if err != nil {
 		t.Fatal(err)
@@ -592,7 +727,7 @@ func TestCollectBillingRolloutInventoryValidatesEveryTerminalReceipt(t *testing.
 	}
 }
 
-func TestCollectBillingRolloutInventoryMalformedAccountCannotSupplyReceiptEvidence(t *testing.T) {
+func TestCollectBillingRolloutRegistryMalformedAccountCannotSupplyReceiptEvidence(t *testing.T) {
 	capturedAt := time.Date(2026, 8, 17, 22, 0, 0, 0, time.UTC)
 	reader := newBillingRolloutFakeReader()
 	receipt := billingRolloutPendingReceipt(
@@ -608,7 +743,7 @@ func TestCollectBillingRolloutInventoryMalformedAccountCannotSupplyReceiptEviden
 	reader.objects[billingRolloutTestAccountKey("registry", record.AccountID)] = data
 	billingRolloutAddReceipt(t, reader, "registry", receipt)
 
-	inventory, err := CollectBillingRolloutInventory(
+	inventory, err := CollectBillingRolloutRegistry(
 		context.Background(), reader, billingRolloutTestOptions(capturedAt))
 	if err != nil {
 		t.Fatal(err)
@@ -619,7 +754,7 @@ func TestCollectBillingRolloutInventoryMalformedAccountCannotSupplyReceiptEviden
 	}
 }
 
-func TestCollectBillingRolloutInventoryRejectsMismatchedObjectIdentity(t *testing.T) {
+func TestCollectBillingRolloutRegistryRejectsMismatchedObjectIdentity(t *testing.T) {
 	capturedAt := time.Date(2026, 8, 17, 22, 0, 0, 0, time.UTC)
 	reader := newBillingRolloutFakeReader()
 	record := billingRolloutBaseRecord("acct_body_identity")
@@ -639,7 +774,7 @@ func TestCollectBillingRolloutInventoryRejectsMismatchedObjectIdentity(t *testin
 	reader.objects[billingRolloutTestReceiptKey(
 		"registry", "bop_different_key_identity")] = receiptData
 
-	inventory, err := CollectBillingRolloutInventory(
+	inventory, err := CollectBillingRolloutRegistry(
 		context.Background(), reader, billingRolloutTestOptions(capturedAt))
 	if err != nil {
 		t.Fatal(err)
@@ -650,6 +785,109 @@ func TestCollectBillingRolloutInventoryRejectsMismatchedObjectIdentity(t *testin
 	}
 }
 
+func TestBillingRolloutRejectsPostScanCausalTimestamps(t *testing.T) {
+	scanStartedAt := time.Date(2026, 8, 17, 22, 0, 0, 0, time.UTC)
+	future := scanStartedAt.Add(time.Second)
+	accountTests := []struct {
+		name   string
+		mutate func(*Record)
+	}{
+		{
+			name: "entitlement timestamp",
+			mutate: func(record *Record) {
+				record.EntitledAt = future
+			},
+		},
+		{
+			name: "dunning timestamp",
+			mutate: func(record *Record) {
+				record.DunningAt = future
+			},
+		},
+		{
+			name: "pending request timestamp",
+			mutate: func(record *Record) {
+				record.Pending = &Pending{
+					Kind: PendingContact, Plan: "enterprise",
+					OperationID: "bop_future_pending", Requested: future,
+				}
+			},
+		},
+		{
+			name: "mutation tombstone timestamp",
+			mutate: func(record *Record) {
+				setBillingMutationTombstone(
+					record, "bop_future_tombstone", BillingMutationPlanCancel,
+					BillingMutationResultCancelled, "", time.Time{}, future)
+			},
+		},
+	}
+	for index, test := range accountTests {
+		t.Run("account "+test.name, func(t *testing.T) {
+			record := billingRolloutBaseRecord(
+				fmt.Sprintf("acct_future_account_%d", index))
+			test.mutate(&record)
+			data, err := marshalR2Record(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, class, valid := classifyBillingRolloutAccount(
+				"registry/", billingRolloutTestAccountKey(
+					"registry", record.AccountID), data, scanStartedAt)
+			if valid || class != billingRolloutPendingMalformed {
+				t.Fatalf("future account classified as valid=%t class=%d", valid, class)
+			}
+		})
+	}
+
+	receiptTests := []struct {
+		name   string
+		mutate func(*BillingMutationReceipt)
+	}{
+		{
+			name: "created timestamp",
+			mutate: func(receipt *BillingMutationReceipt) {
+				receipt.CreatedAt = future
+				receipt.ConfirmedAt = future
+				receipt.UpdatedAt = future
+			},
+		},
+		{
+			name: "updated timestamp",
+			mutate: func(receipt *BillingMutationReceipt) {
+				receipt.UpdatedAt = future
+			},
+		},
+		{
+			name: "confirmed timestamp",
+			mutate: func(receipt *BillingMutationReceipt) {
+				receipt.ConfirmedAt = future
+			},
+		},
+	}
+	for index, test := range receiptTests {
+		t.Run("receipt "+test.name, func(t *testing.T) {
+			receipt := billingRolloutPendingReceipt(
+				t, fmt.Sprintf("acct_future_receipt_%d", index),
+				BillingMutationSetup, "", scanStartedAt.Add(-time.Hour),
+				fmt.Sprintf("future-receipt-%04d", index))
+			test.mutate(&receipt)
+			if err := validateBillingMutationReceipt(receipt); err != nil {
+				t.Fatalf("future receipt fixture is structurally invalid: %v", err)
+			}
+			data, err := json.Marshal(receipt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, valid := decodeBillingRolloutReceipt(
+				"registry/", billingRolloutTestReceiptKey(
+					"registry", receipt.OperationID), data, scanStartedAt); valid {
+				t.Fatal("post-scan causal timestamp was accepted")
+			}
+		})
+	}
+}
+
 func TestDecodeCanonicalBillingRolloutJSON(t *testing.T) {
 	tests := []struct {
 		name string
@@ -657,7 +895,11 @@ func TestDecodeCanonicalBillingRolloutJSON(t *testing.T) {
 		ok   bool
 	}{
 		{name: "canonical", data: []byte(`{"value":1}`), ok: true},
+		{name: "null root", data: []byte(`null`)},
 		{name: "unknown", data: []byte(`{"value":1,"extra":2}`)},
+		{name: "wrong case", data: []byte(`{"Value":1}`)},
+		{name: "case semantic duplicate", data: []byte(`{"value":1,"VALUE":2}`)},
+		{name: "escaped semantic duplicate", data: []byte(`{"value":1,"\u0076alue":2}`)},
 		{name: "duplicate", data: []byte(`{"value":1,"value":2}`)},
 		{name: "nested duplicate", data: []byte(`{"value":1,"child":{"name":1,"name":2}}`)},
 		{name: "trailing", data: []byte(`{"value":1} {"value":2}`)},
@@ -674,77 +916,116 @@ func TestDecodeCanonicalBillingRolloutJSON(t *testing.T) {
 			}
 		})
 	}
+	t.Run("canonical null map and slice", func(t *testing.T) {
+		var target struct {
+			Values map[string]int `json:"values"`
+			Items  []string       `json:"items"`
+		}
+		if err := decodeCanonicalBillingRolloutJSON(
+			[]byte(`{"values":null,"items":null}`), &target); err != nil {
+			t.Fatalf("canonical nil containers rejected: %v", err)
+		}
+	})
 }
 
-func TestCollectBillingRolloutInventoryRejectsOmittedOrNoncanonicalEvidence(t *testing.T) {
+func TestCollectBillingRolloutRegistryRejectsOmittedOrNoncanonicalEvidence(t *testing.T) {
 	now := time.Date(2026, 8, 17, 22, 0, 0, 0, time.UTC)
 	reader := newBillingRolloutFakeReader()
 	tests := []struct {
 		name    string
 		reader  BillingRolloutInventoryReader
-		options BillingRolloutInventoryOptions
+		options BillingRolloutRegistryOptions
 	}{
 		{name: "nil reader", options: billingRolloutTestOptions(now)},
 		{
-			name:   "missing cohort",
+			name:   "missing before inspection hash",
 			reader: reader,
-			options: func() BillingRolloutInventoryOptions {
+			options: func() BillingRolloutRegistryOptions {
 				o := billingRolloutTestOptions(now)
-				o.BillingMutationCohortAccounts = nil
+				o.BeforeSourceInspectionSHA256 = ""
 				return o
 			}(),
 		},
 		{
-			name:   "missing api",
+			name:   "noncanonical before inspection hash",
 			reader: reader,
-			options: func() BillingRolloutInventoryOptions {
+			options: func() BillingRolloutRegistryOptions {
 				o := billingRolloutTestOptions(now)
-				o.SourceAPIReplicas = nil
+				o.BeforeSourceInspectionSHA256 = strings.Repeat("A", 64)
 				return o
 			}(),
 		},
 		{
-			name:   "missing reconciler",
+			name:   "missing registry authority hash",
 			reader: reader,
-			options: func() BillingRolloutInventoryOptions {
+			options: func() BillingRolloutRegistryOptions {
 				o := billingRolloutTestOptions(now)
-				o.SourceReconcilerReplicas = nil
+				o.RegistryAuthoritySHA256 = ""
 				return o
 			}(),
 		},
 		{
-			name:   "negative external count",
+			name:   "missing clock",
 			reader: reader,
-			options: func() BillingRolloutInventoryOptions {
+			options: func() BillingRolloutRegistryOptions {
 				o := billingRolloutTestOptions(now)
-				negative := -1
-				o.SourceAPIReplicas = &negative
+				o.Now = nil
 				return o
 			}(),
 		},
 		{
-			name:    "fractional capture",
-			reader:  reader,
-			options: billingRolloutTestOptions(now.Add(time.Nanosecond)),
+			name:   "zero clock",
+			reader: reader,
+			options: func() BillingRolloutRegistryOptions {
+				o := billingRolloutTestOptions(now)
+				o.Now = func() time.Time { return time.Time{} }
+				return o
+			}(),
 		},
 		{
-			name:    "non UTC capture",
-			reader:  reader,
-			options: billingRolloutTestOptions(now.In(time.FixedZone("zero", 0))),
+			name:   "clock outside UTC wire range",
+			reader: reader,
+			options: func() BillingRolloutRegistryOptions {
+				o := billingRolloutTestOptions(now)
+				o.Now = func() time.Time {
+					return time.Date(1, 1, 1, 0, 0, 0, 0,
+						time.FixedZone("east", 14*60*60))
+				}
+				return o
+			}(),
 		},
 		{
 			name:   "unclean prefix",
 			reader: reader,
-			options: func() BillingRolloutInventoryOptions {
+			options: func() BillingRolloutRegistryOptions {
 				o := billingRolloutTestOptions(now)
 				o.R2Prefix = " registry"
+				return o
+			}(),
+		},
+		{
+			name:   "control in prefix",
+			reader: reader,
+			options: func() BillingRolloutRegistryOptions {
+				o := billingRolloutTestOptions(now)
+				o.R2Prefix = "reg\nistry"
+				return o
+			}(),
+		},
+		{
+			name:   "oversized prefix",
+			reader: reader,
+			options: func() BillingRolloutRegistryOptions {
+				o := billingRolloutTestOptions(now)
+				o.R2Prefix = strings.Repeat(
+					"r", billingRolloutInventoryMaxPrefixBytes+1)
 				return o
 			}(),
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			inventory, err := CollectBillingRolloutInventory(
+			inventory, err := CollectBillingRolloutRegistry(
 				context.Background(), test.reader, test.options)
 			if inventory != nil || !errors.Is(err, ErrBillingRolloutInventoryInput) {
 				t.Fatalf("inventory/error = %#v / %v", inventory, err)
@@ -753,7 +1034,7 @@ func TestCollectBillingRolloutInventoryRejectsOmittedOrNoncanonicalEvidence(t *t
 	}
 }
 
-func TestCollectBillingRolloutInventoryDropsPartialArtifactOnReadOrDrift(t *testing.T) {
+func TestCollectBillingRolloutRegistryDropsPartialArtifactOnReadOrDrift(t *testing.T) {
 	capturedAt := time.Date(2026, 8, 17, 22, 0, 0, 0, time.UTC)
 	const secretID = "acct_do_not_leak_private_identifier"
 	tests := []struct {
@@ -867,6 +1148,47 @@ func TestCollectBillingRolloutInventoryDropsPartialArtifactOnReadOrDrift(t *test
 				}
 			},
 		},
+		{
+			name: "oversized object key metadata",
+			configure: func(reader *billingRolloutFakeReader) {
+				reader.listTransform = func(prefix string, call int, in []blob.ObjectInfo) ([]blob.ObjectInfo, error) {
+					if strings.HasSuffix(prefix, "accounts/") && call == 1 {
+						out := append([]blob.ObjectInfo(nil), in...)
+						out[0].Key = prefix + strings.Repeat(
+							"x", billingRolloutInventoryMaxObjectKeyBytes-len(prefix)+1)
+						return out, nil
+					}
+					return in, nil
+				}
+			},
+		},
+		{
+			name: "oversized etag metadata",
+			configure: func(reader *billingRolloutFakeReader) {
+				reader.listTransform = func(prefix string, call int, in []blob.ObjectInfo) ([]blob.ObjectInfo, error) {
+					if strings.HasSuffix(prefix, "accounts/") && call == 1 {
+						out := append([]blob.ObjectInfo(nil), in...)
+						out[0].ETag = strings.Repeat(
+							"e", billingRolloutInventoryMaxETagBytes+1)
+						return out, nil
+					}
+					return in, nil
+				}
+			},
+		},
+		{
+			name: "noncanonical etag metadata",
+			configure: func(reader *billingRolloutFakeReader) {
+				reader.listTransform = func(prefix string, call int, in []blob.ObjectInfo) ([]blob.ObjectInfo, error) {
+					if strings.HasSuffix(prefix, "accounts/") && call == 1 {
+						out := append([]blob.ObjectInfo(nil), in...)
+						out[0].ETag = "has control\t"
+						return out, nil
+					}
+					return in, nil
+				}
+			},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -878,7 +1200,7 @@ func TestCollectBillingRolloutInventoryDropsPartialArtifactOnReadOrDrift(t *test
 				capturedAt.Add(-time.Hour), "drift-test-0001")
 			billingRolloutAddReceipt(t, reader, "registry", receipt)
 			test.configure(reader)
-			inventory, err := CollectBillingRolloutInventory(
+			inventory, err := CollectBillingRolloutRegistry(
 				context.Background(), reader, billingRolloutTestOptions(capturedAt))
 			if inventory != nil || !errors.Is(err, ErrBillingRolloutInventoryIncomplete) {
 				t.Fatalf("inventory/error = %#v / %v", inventory, err)
@@ -890,18 +1212,18 @@ func TestCollectBillingRolloutInventoryDropsPartialArtifactOnReadOrDrift(t *test
 	}
 }
 
-func TestCollectBillingRolloutInventoryCancellationReturnsNoArtifact(t *testing.T) {
+func TestCollectBillingRolloutRegistryCancellationReturnsNoArtifact(t *testing.T) {
 	capturedAt := time.Date(2026, 8, 17, 22, 0, 0, 0, time.UTC)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	inventory, err := CollectBillingRolloutInventory(
+	inventory, err := CollectBillingRolloutRegistry(
 		ctx, newBillingRolloutFakeReader(), billingRolloutTestOptions(capturedAt))
 	if inventory != nil || !errors.Is(err, ErrBillingRolloutInventoryIncomplete) {
 		t.Fatalf("inventory/error = %#v / %v", inventory, err)
 	}
 }
 
-func TestCollectBillingRolloutInventoryConcurrentReadOnly(t *testing.T) {
+func TestCollectBillingRolloutRegistryConcurrentReadOnly(t *testing.T) {
 	capturedAt := time.Date(2026, 8, 17, 22, 0, 0, 0, time.UTC)
 	reader := newBillingRolloutFakeReader()
 	record := billingRolloutBaseRecord("acct_concurrent_inventory")
@@ -915,13 +1237,13 @@ func TestCollectBillingRolloutInventoryConcurrentReadOnly(t *testing.T) {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			inventory, err := CollectBillingRolloutInventory(
+			inventory, err := CollectBillingRolloutRegistry(
 				context.Background(), reader, options)
 			if err != nil {
 				errorsFound <- err
 				return
 			}
-			if inventory.Records != (BillingRolloutInventoryRecords{}) {
+			if inventory.Records != (BillingRolloutRegistryRecords{}) {
 				errorsFound <- fmt.Errorf("unexpected counts: %+v", inventory.Records)
 			}
 		}()

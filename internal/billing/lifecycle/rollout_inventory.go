@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/witwave-ai/witself/internal/billing"
@@ -17,13 +19,13 @@ import (
 )
 
 const (
-	// BillingRolloutInventorySchema is the strict count-only artifact consumed
-	// by the incompatible billing-transition preflight.
-	BillingRolloutInventorySchema = "witself.billing-rollout-inventory.v1"
-
 	billingRolloutInventoryMaxAccountObjects = 1_000_000
 	billingRolloutInventoryMaxReceiptObjects = 1_000_000
 	billingRolloutInventoryMaxObjectBytes    = 16 << 20
+	billingRolloutInventoryMaxObjectKeyBytes = 1_024
+	billingRolloutInventoryMaxETagBytes      = 256
+	billingRolloutInventoryMaxPrefixBytes    = billingRolloutInventoryMaxObjectKeyBytes -
+		len("accounts/") - 255 - len(".json")
 )
 
 var (
@@ -55,42 +57,36 @@ type BillingRolloutInventoryReader interface {
 	) (data []byte, etag string, err error)
 }
 
-// BillingRolloutInventoryOptions combines the R2 namespace with external
-// stop-the-world evidence. Pointer counts are intentional: nil means the
-// evidence was omitted, which is different from an attested zero.
-type BillingRolloutInventoryOptions struct {
-	R2Prefix string
-	// CapturedAt is the exact operator fence and must already be canonical UTC
-	// at whole-second precision. The collector never silently rounds it.
-	CapturedAt time.Time
-
-	BillingMutationCohortAccounts *int
-	SourceAPIReplicas             *int
-	SourceReconcilerReplicas      *int
+// BillingRolloutRegistryOptions binds one private R2 scan to the independently
+// captured source observation that preceded it and to the reviewed non-secret
+// registry authority. The lifecycle package does not interpret either digest;
+// the rollout finalizer verifies them against the strict source attestations
+// and the endpoint/bucket/prefix authority before it emits any public artifact.
+type BillingRolloutRegistryOptions struct {
+	R2Prefix                     string
+	BeforeSourceInspectionSHA256 string
+	RegistryAuthoritySHA256      string
+	Now                          func() time.Time
 }
 
-// BillingRolloutInventory is deliberately value-free. It is safe to share as
-// JSON: no identifier, object metadata, raw error, or inspected field can be
-// represented by this type.
-type BillingRolloutInventory struct {
-	Schema                        string                             `json:"schema"`
-	CapturedAt                    string                             `json:"captured_at"`
-	BillingMutationCohortAccounts int                                `json:"billing_mutation_cohort_accounts"`
-	SourceFleet                   BillingRolloutInventorySourceFleet `json:"source_fleet"`
-	Records                       BillingRolloutInventoryRecords     `json:"records"`
+// BillingRolloutRegistryCapture is a private in-memory projection. It is not
+// the public rollout inventory and intentionally has no JSON representation;
+// rollout orchestration owns the provisional schema, temporal bracketing, and
+// final public v1 artifact.
+type BillingRolloutRegistryCapture struct {
+	ScanStartedAt                 time.Time                     `json:"-"`
+	ScanCompletedAt               time.Time                     `json:"-"`
+	BeforeSourceInspectionSHA256  string                        `json:"-"`
+	RegistryAuthoritySHA256       string                        `json:"-"`
+	AccountObjectsScanned         int                           `json:"-"`
+	MutationReceiptObjectsScanned int                           `json:"-"`
+	Records                       BillingRolloutRegistryRecords `json:"-"`
 }
 
-// BillingRolloutInventorySourceFleet is the externally attested stopped
-// source fleet. The collector requires both counts even when each is zero.
-type BillingRolloutInventorySourceFleet struct {
-	APIReplicas        int `json:"api_replicas"`
-	ReconcilerReplicas int `json:"reconciler_replicas"`
-}
-
-// BillingRolloutInventoryRecords contains independent object-class counts.
+// BillingRolloutRegistryRecords contains independent object-class counts.
 // Pending-state and receipt counts can describe the same operation and must
 // not be summed into a unique-operation total.
-type BillingRolloutInventoryRecords struct {
+type BillingRolloutRegistryRecords struct {
 	PreparedDowngrades        int `json:"prepared_downgrades"`
 	TargetlessPendingChanges  int `json:"targetless_pending_changes"`
 	MalformedPendingChanges   int `json:"malformed_pending_changes"`
@@ -107,24 +103,41 @@ const (
 	billingRolloutPendingPrepared
 )
 
-type billingRolloutScannedAccount struct {
-	record Record
-	valid  bool
+type billingRolloutAccountEvidence struct {
+	accountID string
+	entitled  string
+
+	pendingOperationID        string
+	pendingPlan               string
+	pendingKind               PendingKind
+	pendingUpgradeExactAction bool
+	pendingDowngradeApplied   bool
+
+	tombstoneOperationID string
+	tombstoneKind        BillingMutationOperation
+	tombstoneResultKind  BillingMutationResultKind
+	tombstonePlan        string
+	tombstoneEffective   bool
 }
 
-// CollectBillingRolloutInventory takes one complete, stable, read-only view of
-// the canonical account and billing-mutation receipt namespaces. Any listing,
-// bounded-read, metadata, cancellation, or second-list failure returns a nil
-// artifact. Malformed stored JSON is inventory data and is counted instead.
-func CollectBillingRolloutInventory(
+// CollectBillingRolloutRegistry takes one complete, stable, read-only view of
+// the canonical account and billing-mutation receipt namespaces. It returns a
+// private capture only. A separate finalizer must bracket this exact capture
+// between independent source observations before public rollout evidence can
+// exist. Any listing, bounded-read, metadata, cancellation, clock, or second-
+// list failure drops the partial capture. Malformed stored JSON is counted.
+func CollectBillingRolloutRegistry(
 	ctx context.Context,
 	reader BillingRolloutInventoryReader,
-	options BillingRolloutInventoryOptions,
-) (*BillingRolloutInventory, error) {
-	prefix, cohortAccounts, sourceAPI, sourceReconcilers, err :=
-		validateBillingRolloutInventoryOptions(reader, options)
+	options BillingRolloutRegistryOptions,
+) (*BillingRolloutRegistryCapture, error) {
+	prefix, err := validateBillingRolloutRegistryOptions(reader, options)
 	if err != nil {
 		return nil, err
+	}
+	scanStartedAt, ok := billingRolloutRegistryNow(options.Now)
+	if !ok {
+		return nil, ErrBillingRolloutInventoryInput
 	}
 	accountPrefix := prefix + "accounts/"
 	receiptPrefix := prefix + "billing-mutations/receipts/"
@@ -146,15 +159,15 @@ func CollectBillingRolloutInventory(
 	}
 	receiptObjects = append([]blob.ObjectInfo(nil), receiptObjects...)
 
-	recordCounts := BillingRolloutInventoryRecords{}
-	accounts := make(map[string]billingRolloutScannedAccount, len(accountObjects))
+	recordCounts := BillingRolloutRegistryRecords{}
+	accounts := make(map[string]billingRolloutAccountEvidence, len(accountObjects))
 	for _, object := range accountObjects {
 		data, readErr := readBillingRolloutObject(ctx, reader, object)
 		if readErr != nil {
 			return nil, readErr
 		}
-		record, class, valid := classifyBillingRolloutAccount(
-			prefix, object.Key, data)
+		evidence, class, valid := classifyBillingRolloutAccount(
+			prefix, object.Key, data, scanStartedAt)
 		switch class {
 		case billingRolloutPendingMalformed:
 			recordCounts.MalformedPendingChanges++
@@ -164,28 +177,37 @@ func CollectBillingRolloutInventory(
 			recordCounts.PreparedDowngrades++
 		}
 		if valid {
-			accounts[record.AccountID] = billingRolloutScannedAccount{
-				record: record,
-				valid:  true,
-			}
+			accounts[evidence.accountID] = evidence
 		}
 	}
 
+	pendingWithoutEvidence := make([]time.Time, 0)
 	for _, object := range receiptObjects {
 		data, readErr := readBillingRolloutObject(ctx, reader, object)
 		if readErr != nil {
 			return nil, readErr
 		}
-		receipt, valid := decodeBillingRolloutReceipt(prefix, object.Key, data)
+		receipt, valid := decodeBillingRolloutReceipt(
+			prefix, object.Key, data, scanStartedAt)
 		if !valid {
 			recordCounts.MalformedMutationReceipts++
 			continue
 		}
-		if receipt.Status == BillingMutationPending &&
-			!options.CapturedAt.Before(
-				receipt.CreatedAt.Add(billingMutationAutomaticRetryHorizon)) &&
-			!billingRolloutHasTerminalAccountEvidence(receipt, accounts) {
-			recordCounts.PostRetryHorizonReceipts++
+		if receipt.Status != BillingMutationPending {
+			continue
+		}
+		hasEvidence := billingRolloutHasTerminalAccountEvidence(receipt, accounts)
+		if receipt.SchemaVersion == billingMutationLegacyReceiptSchemaVersion &&
+			!hasEvidence {
+			// Schema-v1 did not pin an execution class. Current recovery refuses
+			// to send it to a provider at any age unless exact account evidence
+			// can complete it without a second provider effect.
+			recordCounts.MalformedMutationReceipts++
+			continue
+		}
+		if !hasEvidence {
+			pendingWithoutEvidence = append(
+				pendingWithoutEvidence, receipt.CreatedAt)
 		}
 	}
 
@@ -208,45 +230,62 @@ func CollectBillingRolloutInventory(
 		return nil, billingRolloutInventoryIncomplete(
 			"capture was cancelled before completion")
 	}
+	scanCompletedAt, ok := billingRolloutRegistryNow(options.Now)
+	if !ok || scanCompletedAt.Before(scanStartedAt) {
+		return nil, billingRolloutInventoryIncomplete(
+			"capture clock was invalid or moved backwards")
+	}
+	for _, createdAt := range pendingWithoutEvidence {
+		if !scanCompletedAt.Before(
+			createdAt.Add(billingMutationAutomaticRetryHorizon)) {
+			recordCounts.PostRetryHorizonReceipts++
+		}
+	}
 
-	return &BillingRolloutInventory{
-		Schema:                        BillingRolloutInventorySchema,
-		CapturedAt:                    options.CapturedAt.Format(time.RFC3339),
-		BillingMutationCohortAccounts: cohortAccounts,
-		SourceFleet: BillingRolloutInventorySourceFleet{
-			APIReplicas: sourceAPI, ReconcilerReplicas: sourceReconcilers,
-		},
-		Records: recordCounts,
+	return &BillingRolloutRegistryCapture{
+		ScanStartedAt:                 scanStartedAt,
+		ScanCompletedAt:               scanCompletedAt,
+		BeforeSourceInspectionSHA256:  options.BeforeSourceInspectionSHA256,
+		RegistryAuthoritySHA256:       options.RegistryAuthoritySHA256,
+		AccountObjectsScanned:         len(accountObjects),
+		MutationReceiptObjectsScanned: len(receiptObjects),
+		Records:                       recordCounts,
 	}, nil
 }
 
-func validateBillingRolloutInventoryOptions(
+func validateBillingRolloutRegistryOptions(
 	reader BillingRolloutInventoryReader,
-	options BillingRolloutInventoryOptions,
-) (prefix string, cohortAccounts, sourceAPI, sourceReconcilers int, err error) {
-	if reader == nil || options.CapturedAt.IsZero() ||
-		options.CapturedAt.Location() != time.UTC ||
-		options.CapturedAt.Nanosecond() != 0 ||
-		options.CapturedAt.Year() < 1 || options.CapturedAt.Year() > 9999 ||
-		options.BillingMutationCohortAccounts == nil ||
-		options.SourceAPIReplicas == nil ||
-		options.SourceReconcilerReplicas == nil {
-		return "", 0, 0, 0, ErrBillingRolloutInventoryInput
-	}
-	cohortAccounts = *options.BillingMutationCohortAccounts
-	sourceAPI = *options.SourceAPIReplicas
-	sourceReconcilers = *options.SourceReconcilerReplicas
-	if cohortAccounts < 0 || sourceAPI < 0 || sourceReconcilers < 0 {
-		return "", 0, 0, 0, ErrBillingRolloutInventoryInput
+	options BillingRolloutRegistryOptions,
+) (prefix string, err error) {
+	if reader == nil || options.Now == nil ||
+		!validLowerSHA256(options.BeforeSourceInspectionSHA256) ||
+		!validLowerSHA256(options.RegistryAuthoritySHA256) {
+		return "", ErrBillingRolloutInventoryInput
 	}
 	prefix = options.R2Prefix
-	if strings.TrimSpace(prefix) != prefix || strings.ContainsRune(prefix, '\x00') {
-		return "", 0, 0, 0, ErrBillingRolloutInventoryInput
+	if strings.TrimSpace(prefix) != prefix || !utf8.ValidString(prefix) ||
+		strings.IndexFunc(prefix, unicode.IsControl) >= 0 {
+		return "", ErrBillingRolloutInventoryInput
 	}
 	if prefix != "" && !strings.HasSuffix(prefix, "/") {
 		prefix += "/"
 	}
-	return prefix, cohortAccounts, sourceAPI, sourceReconcilers, nil
+	if len(prefix) > billingRolloutInventoryMaxPrefixBytes {
+		return "", ErrBillingRolloutInventoryInput
+	}
+	return prefix, nil
+}
+
+func billingRolloutRegistryNow(now func() time.Time) (time.Time, bool) {
+	value := now()
+	if value.IsZero() {
+		return time.Time{}, false
+	}
+	value = value.UTC().Truncate(time.Second)
+	if value.Year() < 1 || value.Year() > 9999 {
+		return time.Time{}, false
+	}
+	return value, true
 }
 
 func validBillingRolloutObjectList(
@@ -260,12 +299,26 @@ func validBillingRolloutObjectList(
 	previous := ""
 	for i, object := range objects {
 		if object.Key == "" || !strings.HasPrefix(object.Key, prefix) ||
-			object.ETag == "" || object.Size < 0 ||
+			len(object.Key) > billingRolloutInventoryMaxObjectKeyBytes ||
+			!validBillingRolloutNormalizedETag(object.ETag) ||
+			object.Size < 0 ||
 			object.Size > billingRolloutInventoryMaxObjectBytes ||
 			(i > 0 && object.Key <= previous) {
 			return false
 		}
 		previous = object.Key
+	}
+	return true
+}
+
+func validBillingRolloutNormalizedETag(value string) bool {
+	if value == "" || len(value) > billingRolloutInventoryMaxETagBytes {
+		return false
+	}
+	for index := range len(value) {
+		if value[index] <= 0x20 || value[index] == '"' || value[index] == 0x7f {
+			return false
+		}
 	}
 	return true
 }
@@ -304,21 +357,60 @@ func billingRolloutInventoryIncomplete(stage string) error {
 func classifyBillingRolloutAccount(
 	prefix, key string,
 	data []byte,
-) (Record, billingRolloutPendingClass, bool) {
+	causalityFence time.Time,
+) (billingRolloutAccountEvidence, billingRolloutPendingClass, bool) {
 	var strictRecord Record
+	if decodeCanonicalBillingRolloutJSON(data, &strictRecord) != nil {
+		return billingRolloutAccountEvidence{}, billingRolloutPendingMalformed, false
+	}
 	record, err := unmarshalR2Record(data)
-	if err != nil || decodeCanonicalBillingRolloutJSON(data, &strictRecord) != nil ||
+	if err != nil ||
 		!validBillingMutationText(record.AccountID, 255) ||
 		key != prefix+"accounts/"+record.AccountID+".json" ||
 		record.Version < 1 || !validBillingRolloutProviderIdentity(record) ||
-		validateBillingRolloutTombstone(record) != nil {
-		return Record{}, billingRolloutPendingMalformed, false
+		validateBillingRolloutTombstone(record) != nil ||
+		billingRolloutRecordCausalityAfter(record, causalityFence) {
+		return billingRolloutAccountEvidence{}, billingRolloutPendingMalformed, false
 	}
 	class := classifyBillingRolloutPending(record)
 	if class == billingRolloutPendingMalformed {
-		return Record{}, class, false
+		return billingRolloutAccountEvidence{}, class, false
 	}
-	return record, class, true
+	return projectBillingRolloutAccountEvidence(record), class, true
+}
+
+func billingRolloutRecordCausalityAfter(record Record, fence time.Time) bool {
+	if !record.EntitledAt.IsZero() && record.EntitledAt.After(fence) ||
+		!record.DunningAt.IsZero() && record.DunningAt.After(fence) ||
+		!record.LastBillingMutationAt.IsZero() &&
+			record.LastBillingMutationAt.After(fence) {
+		return true
+	}
+	return record.Pending != nil && record.Pending.Requested.After(fence)
+}
+
+func projectBillingRolloutAccountEvidence(
+	record Record,
+) billingRolloutAccountEvidence {
+	evidence := billingRolloutAccountEvidence{
+		accountID:            record.AccountID,
+		entitled:             record.Entitled,
+		tombstoneOperationID: record.LastBillingMutationOperationID,
+		tombstoneKind:        record.LastBillingMutationKind,
+		tombstoneResultKind:  record.LastBillingMutationResultKind,
+		tombstonePlan:        record.LastBillingMutationPlan,
+		tombstoneEffective:   !record.LastBillingMutationEffective.IsZero(),
+	}
+	if pending := record.Pending; pending != nil {
+		evidence.pendingOperationID = pending.OperationID
+		evidence.pendingPlan = pending.Plan
+		evidence.pendingKind = pending.Kind
+		evidence.pendingUpgradeExactAction = pending.Kind == PendingUpgrade &&
+			pending.URL != "" && pending.ProviderObjectID != ""
+		evidence.pendingDowngradeApplied = pending.Kind == PendingDowngrade &&
+			providerEffectApplied(pending)
+	}
+	return evidence
 }
 
 func validBillingRolloutProviderIdentity(record Record) bool {
@@ -517,10 +609,12 @@ func validPreparedBillingRolloutDowngrade(
 func decodeBillingRolloutReceipt(
 	prefix, key string,
 	data []byte,
+	causalityFence time.Time,
 ) (BillingMutationReceipt, bool) {
 	var receipt BillingMutationReceipt
 	if err := decodeCanonicalBillingRolloutJSON(data, &receipt); err != nil ||
 		validateBillingMutationReceipt(receipt) != nil || receipt.Version < 1 ||
+		billingRolloutReceiptCausalityAfter(receipt, causalityFence) ||
 		key != prefix+"billing-mutations/receipts/"+
 			base64.RawURLEncoding.EncodeToString([]byte(receipt.OperationID))+".json" {
 		return BillingMutationReceipt{}, false
@@ -528,16 +622,31 @@ func decodeBillingRolloutReceipt(
 	return receipt, true
 }
 
+func billingRolloutReceiptCausalityAfter(
+	receipt BillingMutationReceipt,
+	fence time.Time,
+) bool {
+	if receipt.CreatedAt.After(fence) || receipt.UpdatedAt.After(fence) ||
+		receipt.ConfirmedAt.After(fence) ||
+		receipt.ConfirmedAt.After(receipt.CreatedAt) {
+		return true
+	}
+	return receipt.CompletedAt != nil && receipt.CompletedAt.After(fence)
+}
+
 // decodeCanonicalBillingRolloutJSON rejects extensions, trailing values, and
-// duplicate names before a stored object can become inventory evidence. R2
-// writers use encoding/json over the current structs, so none of those forms
-// is canonical output. The caller deliberately converts every returned error
-// to a count rather than exposing parser input or detail.
+// duplicate or non-exact field names before a stored object can become
+// inventory evidence. encoding/json normally matches struct fields without
+// case sensitivity; the exact shape walk closes that ambiguity so AccountID
+// and accountid cannot both target one semantic field. R2 writers use
+// encoding/json over the current structs, so only their emitted spelling is
+// accepted. The caller converts every error to a count and never exposes input.
 func decodeCanonicalBillingRolloutJSON(data []byte, target any) error {
 	if !utf8.Valid(data) {
 		return errors.New("invalid UTF-8")
 	}
-	if err := rejectDuplicateBillingRolloutJSONNames(data); err != nil {
+	if err := validateExactBillingRolloutJSONShape(
+		data, reflect.TypeOf(target)); err != nil {
 		return err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -555,58 +664,22 @@ func decodeCanonicalBillingRolloutJSON(data []byte, target any) error {
 	return nil
 }
 
-func rejectDuplicateBillingRolloutJSONNames(data []byte) error {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	var walk func() error
-	walk = func() error {
-		token, err := decoder.Token()
-		if err != nil {
-			return err
-		}
-		delimiter, isDelimiter := token.(json.Delim)
-		if !isDelimiter {
-			return nil
-		}
-		switch delimiter {
-		case '{':
-			seen := make(map[string]struct{})
-			for decoder.More() {
-				nameToken, err := decoder.Token()
-				if err != nil {
-					return err
-				}
-				name, ok := nameToken.(string)
-				if !ok {
-					return errors.New("invalid JSON object name")
-				}
-				if _, duplicate := seen[name]; duplicate {
-					return errors.New("duplicate JSON object name")
-				}
-				seen[name] = struct{}{}
-				if err := walk(); err != nil {
-					return err
-				}
-			}
-			closing, err := decoder.Token()
-			if err != nil || closing != json.Delim('}') {
-				return errors.New("invalid JSON object")
-			}
-		case '[':
-			for decoder.More() {
-				if err := walk(); err != nil {
-					return err
-				}
-			}
-			closing, err := decoder.Token()
-			if err != nil || closing != json.Delim(']') {
-				return errors.New("invalid JSON array")
-			}
-		default:
-			return errors.New("invalid JSON delimiter")
-		}
-		return nil
+var billingRolloutJSONUnmarshalerType = reflect.TypeOf(
+	(*json.Unmarshaler)(nil)).Elem()
+
+func validateExactBillingRolloutJSONShape(
+	data []byte,
+	targetType reflect.Type,
+) error {
+	if targetType == nil || targetType.Kind() != reflect.Pointer {
+		return errors.New("JSON destination must be a pointer")
 	}
-	if err := walk(); err != nil {
+	// The outer pointer is the decoder destination, not a nullable part of the
+	// stored schema. Nested pointer fields still accept their canonical null.
+	targetType = targetType.Elem()
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := walkExactBillingRolloutJSON(decoder, targetType); err != nil {
 		return err
 	}
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
@@ -618,44 +691,261 @@ func rejectDuplicateBillingRolloutJSONNames(data []byte) error {
 	return nil
 }
 
+func walkExactBillingRolloutJSON(
+	decoder *json.Decoder,
+	targetType reflect.Type,
+) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	return walkExactBillingRolloutJSONToken(decoder, token, targetType)
+}
+
+func walkExactBillingRolloutJSONToken(
+	decoder *json.Decoder,
+	token json.Token,
+	targetType reflect.Type,
+) error {
+	for targetType != nil && targetType.Kind() == reflect.Pointer {
+		if token == nil {
+			return nil
+		}
+		targetType = targetType.Elem()
+	}
+	if targetType == nil {
+		return walkAnyBillingRolloutJSONToken(decoder, token)
+	}
+	if token == nil {
+		switch targetType.Kind() {
+		case reflect.Map, reflect.Slice, reflect.Interface:
+			// encoding/json emits null for nil maps and slices. They remain
+			// canonical values for those fields and contain no names to walk.
+			return nil
+		}
+	}
+	if billingRolloutJSONAtomic(targetType) {
+		if _, composite := token.(json.Delim); composite {
+			return errors.New("atomic JSON value was composite")
+		}
+		return nil
+	}
+
+	delimiter, isDelimiter := token.(json.Delim)
+	switch targetType.Kind() {
+	case reflect.Struct:
+		if !isDelimiter || delimiter != '{' {
+			return errors.New("JSON struct was not an object")
+		}
+		fields, ok := exactBillingRolloutJSONFields(targetType)
+		if !ok {
+			return errors.New("ambiguous JSON struct field set")
+		}
+		seen := make(map[string]struct{}, len(fields))
+		for decoder.More() {
+			nameToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			name, ok := nameToken.(string)
+			if !ok {
+				return errors.New("invalid JSON object name")
+			}
+			fieldType, known := fields[name]
+			if !known {
+				return errors.New("non-exact JSON field name")
+			}
+			if _, duplicate := seen[name]; duplicate {
+				return errors.New("duplicate JSON object name")
+			}
+			seen[name] = struct{}{}
+			if err := walkExactBillingRolloutJSON(decoder, fieldType); err != nil {
+				return err
+			}
+		}
+		return closeBillingRolloutJSON(decoder, '}')
+	case reflect.Map:
+		if !isDelimiter || delimiter != '{' {
+			return errors.New("JSON map was not an object")
+		}
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			nameToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			name, ok := nameToken.(string)
+			if !ok {
+				return errors.New("invalid JSON map name")
+			}
+			if _, duplicate := seen[name]; duplicate {
+				return errors.New("duplicate JSON map name")
+			}
+			seen[name] = struct{}{}
+			if err := walkExactBillingRolloutJSON(
+				decoder, targetType.Elem()); err != nil {
+				return err
+			}
+		}
+		return closeBillingRolloutJSON(decoder, '}')
+	case reflect.Slice, reflect.Array:
+		if targetType == reflect.TypeOf(json.RawMessage{}) {
+			return walkAnyBillingRolloutJSONToken(decoder, token)
+		}
+		if !isDelimiter || delimiter != '[' {
+			return errors.New("JSON slice was not an array")
+		}
+		for decoder.More() {
+			if err := walkExactBillingRolloutJSON(
+				decoder, targetType.Elem()); err != nil {
+				return err
+			}
+		}
+		return closeBillingRolloutJSON(decoder, ']')
+	case reflect.Interface:
+		return walkAnyBillingRolloutJSONToken(decoder, token)
+	default:
+		if isDelimiter {
+			return errors.New("scalar JSON value was composite")
+		}
+		return nil
+	}
+}
+
+func walkAnyBillingRolloutJSONToken(
+	decoder *json.Decoder,
+	token json.Token,
+) error {
+	delimiter, composite := token.(json.Delim)
+	if !composite {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			nameToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			name, ok := nameToken.(string)
+			if !ok {
+				return errors.New("invalid JSON object name")
+			}
+			if _, duplicate := seen[name]; duplicate {
+				return errors.New("duplicate JSON object name")
+			}
+			seen[name] = struct{}{}
+			if err := walkExactBillingRolloutJSON(decoder, nil); err != nil {
+				return err
+			}
+		}
+		return closeBillingRolloutJSON(decoder, '}')
+	case '[':
+		for decoder.More() {
+			if err := walkExactBillingRolloutJSON(decoder, nil); err != nil {
+				return err
+			}
+		}
+		return closeBillingRolloutJSON(decoder, ']')
+	default:
+		return errors.New("invalid JSON delimiter")
+	}
+}
+
+func closeBillingRolloutJSON(decoder *json.Decoder, want json.Delim) error {
+	closing, err := decoder.Token()
+	if err != nil || closing != want {
+		return errors.New("invalid JSON composite close")
+	}
+	return nil
+}
+
+func billingRolloutJSONAtomic(targetType reflect.Type) bool {
+	return targetType.Implements(billingRolloutJSONUnmarshalerType) ||
+		reflect.PointerTo(targetType).Implements(
+			billingRolloutJSONUnmarshalerType)
+}
+
+func exactBillingRolloutJSONFields(
+	targetType reflect.Type,
+) (map[string]reflect.Type, bool) {
+	fields := make(map[string]reflect.Type)
+	for index := 0; index < targetType.NumField(); index++ {
+		field := targetType.Field(index)
+		if field.PkgPath != "" {
+			continue
+		}
+		tag := field.Tag.Get("json")
+		name, _, _ := strings.Cut(tag, ",")
+		if name == "-" {
+			continue
+		}
+		if field.Anonymous && name == "" {
+			embedded := field.Type
+			for embedded.Kind() == reflect.Pointer {
+				embedded = embedded.Elem()
+			}
+			if embedded.Kind() == reflect.Struct {
+				nested, ok := exactBillingRolloutJSONFields(embedded)
+				if !ok {
+					return nil, false
+				}
+				for nestedName, nestedType := range nested {
+					if _, exists := fields[nestedName]; exists {
+						return nil, false
+					}
+					fields[nestedName] = nestedType
+				}
+				continue
+			}
+		}
+		if name == "" {
+			name = field.Name
+		}
+		if _, exists := fields[name]; exists {
+			return nil, false
+		}
+		fields[name] = field.Type
+	}
+	return fields, true
+}
+
 func billingRolloutHasTerminalAccountEvidence(
 	receipt BillingMutationReceipt,
-	accounts map[string]billingRolloutScannedAccount,
+	accounts map[string]billingRolloutAccountEvidence,
 ) bool {
-	account, ok := accounts[receipt.AccountID]
-	if !ok || !account.valid {
+	record, ok := accounts[receipt.AccountID]
+	if !ok {
 		return false
 	}
-	record := account.record
 	switch receipt.Operation {
 	case BillingMutationPlanUpgrade:
-		if record.Entitled == receipt.TargetPlan {
+		if record.entitled == receipt.TargetPlan {
 			return true
 		}
-		pending := record.Pending
-		return pending != nil && pending.OperationID == receipt.OperationID &&
-			pending.Plan == receipt.TargetPlan &&
-			(pending.Kind == PendingContact ||
-				(pending.Kind == PendingUpgrade && pending.URL != "" &&
-					pending.ProviderObjectID != ""))
+		return record.pendingOperationID == receipt.OperationID &&
+			record.pendingPlan == receipt.TargetPlan &&
+			(record.pendingKind == PendingContact ||
+				record.pendingUpgradeExactAction)
 	case BillingMutationPlanDowngrade:
-		pending := record.Pending
-		if pending != nil && pending.OperationID == receipt.OperationID &&
-			pending.Kind == PendingDowngrade &&
-			pending.Plan == receipt.TargetPlan && providerEffectApplied(pending) {
+		if record.pendingOperationID == receipt.OperationID &&
+			record.pendingKind == PendingDowngrade &&
+			record.pendingPlan == receipt.TargetPlan &&
+			record.pendingDowngradeApplied {
 			return true
 		}
-		return record.LastBillingMutationOperationID == receipt.OperationID &&
-			record.LastBillingMutationKind == BillingMutationPlanDowngrade &&
-			record.LastBillingMutationResultKind == BillingMutationResultScheduled &&
-			record.LastBillingMutationPlan == receipt.TargetPlan &&
-			!record.LastBillingMutationEffective.IsZero()
+		return record.tombstoneOperationID == receipt.OperationID &&
+			record.tombstoneKind == BillingMutationPlanDowngrade &&
+			record.tombstoneResultKind == BillingMutationResultScheduled &&
+			record.tombstonePlan == receipt.TargetPlan &&
+			record.tombstoneEffective
 	case BillingMutationPlanCancel:
-		return record.LastBillingMutationOperationID == receipt.OperationID &&
-			record.LastBillingMutationKind == BillingMutationPlanCancel &&
-			(record.LastBillingMutationResultKind == "" ||
-				record.LastBillingMutationResultKind == BillingMutationResultCancelled ||
-				record.LastBillingMutationResultKind == BillingMutationResultResolved)
+		return record.tombstoneOperationID == receipt.OperationID &&
+			record.tombstoneKind == BillingMutationPlanCancel &&
+			(record.tombstoneResultKind == "" ||
+				record.tombstoneResultKind == BillingMutationResultCancelled ||
+				record.tombstoneResultKind == BillingMutationResultResolved)
 	default:
 		return false
 	}

@@ -3,6 +3,7 @@ package blob_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -76,6 +77,74 @@ func TestGetBounded(t *testing.T) {
 	data, _, err = c.GetBounded(ctx, "bounded/empty", 0)
 	if err != nil || len(data) != 0 {
 		t.Fatalf("GetBounded empty = %q, %v; want an empty body", data, err)
+	}
+}
+
+func TestGetBoundedRequiresCanonicalQuotedETag(t *testing.T) {
+	for _, etag := range []string{
+		"", "unquoted", `"partial`, `partial"`, `""nested""`,
+		`W/"weak"`, `"has space"`, "\"has\tcontrol\"",
+	} {
+		t.Run(fmt.Sprintf("etag_%q", etag), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if etag != "" {
+					w.Header().Set("ETag", etag)
+				}
+				_, _ = w.Write([]byte("body"))
+			}))
+			t.Cleanup(srv.Close)
+			client, err := blob.New(blob.Config{
+				Endpoint: srv.URL, Bucket: "b",
+				AccessKey: "AKTEST", SecretKey: "secret",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, gotETag, err := client.GetBounded(
+				context.Background(), "key", 4)
+			if err == nil || data != nil || gotETag != "" {
+				t.Fatalf("GetBounded malformed ETag = %q, %q, %v", data, gotETag, err)
+			}
+		})
+	}
+}
+
+func TestGetBoundedRejectsMultipleETagHeaders(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Add("ETag", `"first"`)
+		w.Header().Add("ETag", `"second"`)
+		_, _ = w.Write([]byte("body"))
+	}))
+	t.Cleanup(srv.Close)
+	client, err := blob.New(blob.Config{
+		Endpoint: srv.URL, Bucket: "b",
+		AccessKey: "AKTEST", SecretKey: "secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, etag, err := client.GetBounded(context.Background(), "key", 4)
+	if err == nil || data != nil || etag != "" {
+		t.Fatalf("GetBounded duplicate ETags = %q, %q, %v", data, etag, err)
+	}
+}
+
+func TestGetRetainsPermissiveLegacyETagHandling(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("ETag", "legacy-unquoted")
+		_, _ = w.Write([]byte("body"))
+	}))
+	t.Cleanup(srv.Close)
+	client, err := blob.New(blob.Config{
+		Endpoint: srv.URL, Bucket: "b",
+		AccessKey: "AKTEST", SecretKey: "secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, etag, err := client.Get(context.Background(), "key")
+	if err != nil || string(data) != "body" || etag != "legacy-unquoted" {
+		t.Fatalf("legacy Get = %q, %q, %v", data, etag, err)
 	}
 }
 
@@ -175,6 +244,11 @@ func TestListCompleteRejectsAmbiguousPagination(t *testing.T) {
 				[]testListedObject{{key: "p/a", etag: "a", size: "1"}}, true, "")},
 		},
 		{
+			name: "truncated with control token",
+			pages: map[string]string{"": listPageXML(
+				[]testListedObject{{key: "p/a", etag: "a", size: "1"}}, true, "bad\ttoken")},
+		},
+		{
 			name: "immediately repeated token",
 			pages: map[string]string{
 				"":       listPageXML([]testListedObject{{key: "p/a", etag: "a", size: "1"}}, true, "repeat"),
@@ -230,6 +304,75 @@ func TestListCompleteRejectsAmbiguousPagination(t *testing.T) {
 	}
 }
 
+func TestListCompleteRejectsDuplicateProtocolFields(t *testing.T) {
+	tests := []struct {
+		name string
+		xml  string
+	}{
+		{
+			name: "duplicate truncation can not hide a continuation",
+			xml: `<ListBucketResult>` +
+				`<Contents><Key>p/a</Key><ETag>&quot;a&quot;</ETag><Size>1</Size></Contents>` +
+				`<IsTruncated>true</IsTruncated><IsTruncated>false</IsTruncated>` +
+				`</ListBucketResult>`,
+		},
+		{
+			name: "duplicate continuation token",
+			xml: `<ListBucketResult>` +
+				`<Contents><Key>p/a</Key><ETag>&quot;a&quot;</ETag><Size>1</Size></Contents>` +
+				`<IsTruncated>true</IsTruncated>` +
+				`<NextContinuationToken>one</NextContinuationToken>` +
+				`<NextContinuationToken>two</NextContinuationToken>` +
+				`</ListBucketResult>`,
+		},
+		{
+			name: "duplicate object key",
+			xml: `<ListBucketResult><Contents>` +
+				`<Key>outside/a</Key><Key>p/a</Key>` +
+				`<ETag>&quot;a&quot;</ETag><Size>1</Size>` +
+				`</Contents><IsTruncated>false</IsTruncated></ListBucketResult>`,
+		},
+		{
+			name: "duplicate object etag",
+			xml: `<ListBucketResult><Contents>` +
+				`<Key>p/a</Key><ETag>&quot;a&quot;</ETag><ETag>&quot;b&quot;</ETag><Size>1</Size>` +
+				`</Contents><IsTruncated>false</IsTruncated></ListBucketResult>`,
+		},
+		{
+			name: "duplicate object size",
+			xml: `<ListBucketResult><Contents>` +
+				`<Key>p/a</Key><ETag>&quot;a&quot;</ETag><Size>1</Size><Size>2</Size>` +
+				`</Contents><IsTruncated>false</IsTruncated></ListBucketResult>`,
+		},
+		{
+			name: "nested scalar content",
+			xml: `<ListBucketResult><Contents>` +
+				`<Key><Value>p/a</Value></Key>` +
+				`<ETag>&quot;a&quot;</ETag><Size>1</Size>` +
+				`</Contents><IsTruncated>false</IsTruncated></ListBucketResult>`,
+		},
+		{
+			name: "missing truncation control",
+			xml: `<ListBucketResult><Contents>` +
+				`<Key>p/a</Key><ETag>&quot;a&quot;</ETag><Size>1</Size>` +
+				`</Contents></ListBucketResult>`,
+		},
+		{
+			name: "noncanonical truncation control",
+			xml:  `<ListBucketResult><IsTruncated>False</IsTruncated></ListBucketResult>`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newScriptedListClient(t, map[string]string{"": tt.xml})
+			got, err := c.ListComplete(context.Background(), "p/", 10)
+			if !errors.Is(err, blob.ErrInvalidListing) || got != nil {
+				t.Fatalf("ListComplete = %#v, %v; want no result and ErrInvalidListing", got, err)
+			}
+		})
+	}
+}
+
 func TestListCompleteRejectsInvalidKeysAndMetadata(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -247,6 +390,11 @@ func TestListCompleteRejectsInvalidKeysAndMetadata(t *testing.T) {
 		{name: "missing size", objects: []testListedObject{{key: "p/a", etag: "a"}}},
 		{name: "negative size", objects: []testListedObject{{key: "p/a", etag: "a", size: "-1"}}},
 		{name: "size overflow", objects: []testListedObject{{key: "p/a", etag: "a", size: "9223372036854775808"}}},
+		{name: "noncanonical size", objects: []testListedObject{{key: "p/a", etag: "a", size: "01"}}},
+		{name: "oversized key", objects: []testListedObject{{key: "p/" + strings.Repeat("a", 1023), etag: "a", size: "1"}}},
+		{name: "oversized etag", objects: []testListedObject{{key: "p/a", etag: strings.Repeat("a", 257), size: "1"}}},
+		{name: "etag with whitespace", objects: []testListedObject{{key: "p/a", etag: "has space", size: "1"}}},
+		{name: "etag with control", objects: []testListedObject{{key: "p/a", etag: "has\tcontrol", size: "1"}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -256,6 +404,33 @@ func TestListCompleteRejectsInvalidKeysAndMetadata(t *testing.T) {
 				t.Fatalf("ListComplete = %#v, %v; want no result and ErrInvalidListing", got, err)
 			}
 		})
+	}
+}
+
+func TestListCompleteRejectsOversizedContinuationToken(t *testing.T) {
+	page := listPageXML(
+		[]testListedObject{{key: "p/a", etag: "a", size: "1"}}, true,
+		strings.Repeat("t", 8_193))
+	c := newScriptedListClient(t, map[string]string{"": page})
+	got, err := c.ListComplete(context.Background(), "p/", 10)
+	if !errors.Is(err, blob.ErrInvalidListing) || got != nil {
+		t.Fatalf("ListComplete oversized token = %#v, %v; want no result and ErrInvalidListing", got, err)
+	}
+}
+
+func TestListCompleteRejectsTooManyObjectsInOnePage(t *testing.T) {
+	objects := make([]testListedObject, 1_001)
+	for index := range objects {
+		objects[index] = testListedObject{
+			key: fmt.Sprintf("p/%04d", index), etag: "a", size: "1",
+		}
+	}
+	c := newScriptedListClient(t, map[string]string{
+		"": listPageXML(objects, false, ""),
+	})
+	got, err := c.ListComplete(context.Background(), "p/", len(objects))
+	if !errors.Is(err, blob.ErrInvalidListing) || got != nil {
+		t.Fatalf("ListComplete oversized object page = %#v, %v; want no result and ErrInvalidListing", got, err)
 	}
 }
 
@@ -305,9 +480,9 @@ func listPageXML(objects []testListedObject, truncated bool, next string) string
 		}
 		b.WriteString(`</Contents>`)
 	}
-	if truncated {
-		b.WriteString(`<IsTruncated>true</IsTruncated>`)
-	}
+	b.WriteString(`<IsTruncated>`)
+	b.WriteString(fmt.Sprintf("%t", truncated))
+	b.WriteString(`</IsTruncated>`)
 	if next != "" {
 		b.WriteString(`<NextContinuationToken>`)
 		b.WriteString(next)
