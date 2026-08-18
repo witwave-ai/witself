@@ -142,8 +142,98 @@ provider object:
 - `CONTROL_PLANE_BINARY_SHA256`: separately reviewed lowercase SHA-256 of that
   target binary. Do not derive the expected value from the binary being tested.
 
+Obtain the binary only from the target tag's
+`witself-control-plane_<version>_<os>_<arch>.tar.gz` GitHub Release asset. Verify
+the archive against the keyless-signed `checksums.txt` and verify its GitHub
+build-provenance attestation before extraction. The release contract guarantees
+one root `witself-control-plane` executable and stamps it with the full 40-hex
+release commit. After those checks, extract into a fresh private directory,
+review and retain the executable's SHA-256 independently, and use that retained
+value as `CONTROL_PLANE_BINARY_SHA256`. Do not use an untagged build, a binary
+copied from a container, or a digest calculated from an unverified archive.
+There is intentionally no Homebrew formula for this operator evidence binary.
+
+The review procedure below assumes Bash, a fresh private destination, and a
+native macOS/Linux archive. It verifies only the selected archive entry in the
+manifest, because the other release payloads are intentionally not downloaded:
+
+```sh
+set -euo pipefail
+umask 077
+
+TARGET_RELEASE_TAG="v${TARGET_RELEASE_VERSION}"
+TARGET_OS="$(go env GOOS)"
+TARGET_ARCH="$(go env GOARCH)"
+ARCHIVE="witself-control-plane_${TARGET_RELEASE_VERSION}_${TARGET_OS}_${TARGET_ARCH}.tar.gz"
+DOWNLOAD_DIR="$(mktemp -d)"
+EXTRACT_DIR="${DOWNLOAD_DIR}/extracted"
+mkdir -m 0700 "$EXTRACT_DIR"
+
+TAG_COMMIT="$(gh api \
+  "repos/witwave-ai/witself/commits/${TARGET_RELEASE_TAG}" --jq .sha)"
+test "$TAG_COMMIT" = "$TARGET_RELEASE_COMMIT"
+
+gh release download "$TARGET_RELEASE_TAG" \
+  --repo witwave-ai/witself \
+  --dir "$DOWNLOAD_DIR" \
+  --pattern "$ARCHIVE" \
+  --pattern checksums.txt \
+  --pattern checksums.txt.sigstore.json
+
+cosign verify-blob \
+  --bundle "$DOWNLOAD_DIR/checksums.txt.sigstore.json" \
+  --certificate-identity \
+  "https://github.com/witwave-ai/witself/.github/workflows/release.yml@refs/tags/${TARGET_RELEASE_TAG}" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "$DOWNLOAD_DIR/checksums.txt"
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+EXPECTED_ARCHIVE_SHA="$(awk -v name="$ARCHIVE" '
+  $2 == name { count++; digest=$1 }
+  END { if (count != 1) exit 1; print digest }
+' "$DOWNLOAD_DIR/checksums.txt")"
+test "$EXPECTED_ARCHIVE_SHA" = "$(sha256_file "$DOWNLOAD_DIR/$ARCHIVE")"
+
+gh attestation verify "$DOWNLOAD_DIR/$ARCHIVE" \
+  --repo witwave-ai/witself \
+  --signer-workflow witwave-ai/witself/.github/workflows/release.yml \
+  --signer-digest "$TARGET_RELEASE_COMMIT" \
+  --source-ref "refs/tags/${TARGET_RELEASE_TAG}" \
+  --source-digest "$TARGET_RELEASE_COMMIT" \
+  --deny-self-hosted-runners \
+  --format json >"$DOWNLOAD_DIR/archive-provenance.json"
+test -s "$DOWNLOAD_DIR/archive-provenance.json"
+
+test "$(tar -tzf "$DOWNLOAD_DIR/$ARCHIVE")" = witself-control-plane
+tar -xzf "$DOWNLOAD_DIR/$ARCHIVE" -C "$EXTRACT_DIR"
+CONTROL_PLANE_BINARY="$EXTRACT_DIR/witself-control-plane"
+test -f "$CONTROL_PLANE_BINARY"
+test ! -L "$CONTROL_PLANE_BINARY"
+test -x "$CONTROL_PLANE_BINARY"
+VERSION_OUTPUT="$("$CONTROL_PLANE_BINARY" version)"
+[[ "$VERSION_OUTPUT" =~ ^witself-control-plane\ ([0-9]+\.[0-9]+\.[0-9]+)\ \(commit\ ([0-9a-f]{40}),\ built\ ([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)\)$ ]]
+test "${BASH_REMATCH[1]}" = "$TARGET_RELEASE_VERSION"
+test "${BASH_REMATCH[2]}" = "$TARGET_RELEASE_COMMIT"
+TARGET_RELEASE_DATE="${BASH_REMATCH[3]}"
+CONTROL_PLANE_BINARY_SHA256="$(sha256_file "$CONTROL_PLANE_BINARY")"
+```
+
+Retain `TARGET_RELEASE_DATE` as the exact reported UTC build second. A second
+reviewer must compare and retain
+`CONTROL_PLANE_BINARY_SHA256` before it is supplied to the capture wrapper; do
+not calculate the expected digest inline in the wrapper invocation. Keep the
+verified archive, signed manifest, provenance result, extracted binary, and
+review record together in the private operator case.
+
 The wrapper checks the binary digest, its reported release version/commit, its
-file identity, and its non-writable executable mode throughout the capture.
+file identity, and its non-group/world-writable executable mode throughout the
+capture.
 Set the exact production R2 authority and inject the dedicated credentials,
 then run:
 
@@ -206,8 +296,9 @@ lifecycle gate, zero API/reconciler sources, and zero non-null-version
 Container rows. Finalization requires strict `BEFORE < scan start <= scan
 completion <= AFTER` ordering and stable account, config, Worker deployment,
 binding/secret inventory, Container application, target app/version/image, and
-release version/commit/date identity. Inactive tombstone count/hash changes are
-allowed only because both endpoints separately prove zero possible writers.
+release version/commit/date identity. Inactive tombstone count/hash changes do
+not invalidate the fence because each endpoint independently proves that no
+possible writer exists.
 Any failed timing or identity check requires fresh artifact paths and a new
 ceremony; never repair an attestation or provisional file.
 

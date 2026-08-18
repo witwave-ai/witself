@@ -1,7 +1,8 @@
 name: release
 
-# Tag-triggered release: pushing a vX.Y.Z tag builds the binaries, signs the
-# checksums (cosign keyless), generates SBOMs, publishes the GitHub release,
+# Tag-triggered release: pushing a vX.Y.Z tag builds the binaries (including the
+# operator-only control-plane evidence binary), signs the checksums (cosign
+# keyless), generates SBOMs, publishes the GitHub release,
 # attaches build-provenance attestations, pushes the witself and witself-server
 # multi-arch images to GHCR, publishes the witself Helm chart as an OCI artifact
 # to ghcr.io/witwave-ai/charts, and renders and publishes the Homebrew formulae
@@ -146,6 +147,9 @@ jobs:
 
       - name: billing rollout inventory capture checks
         run: bash scripts/test-capture-billing-rollout-inventory.sh
+
+      - name: release artifact count contract checks
+        run: bash scripts/test-release-artifact-contract.sh
 
       - name: agent-email isolated cell operation checks
         run: bash scripts/test-agent-email-cell-operation.sh
@@ -380,6 +384,12 @@ jobs:
           --parallelism 1
           --timeout 2h
 
+      - name: Verify control-plane release archive contract
+        run: |
+          version="$(jq -er '.version | select(type == "string" and length > 0)' dist/metadata.json)"
+          bash scripts/test-control-plane-release-artifact.sh \
+            "$(realpath dist)" "$version" "$(git rev-parse --verify HEAD)"
+
       - name: Render and audit actual Homebrew archives
         run: |
           version="$(jq -r '.version // empty' dist/metadata.json)"
@@ -500,6 +510,13 @@ jobs:
 
           date +%s > "$release_end"
           exit "$status"
+
+      - name: Verify signed release artifact contract
+        if: github.event_name == 'push'
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          bash scripts/verify-release-artifact-contract.sh \
+            local "$(realpath dist)" "$version" "${GITHUB_SHA}"
 
       - name: Render Homebrew formulae
         id: homebrew
@@ -636,6 +653,14 @@ jobs:
           subject-path: |
             dist/*.tar.gz
             dist/*.zip
+
+      - name: Verify published assets and archive provenance
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          bash scripts/verify-release-artifact-contract.sh
+          published "$(realpath dist)" "${GITHUB_REF_NAME}" "${GITHUB_REPOSITORY}" "${GITHUB_SHA}"
 
       # Package the chart with version + appVersion pinned to the release tag, so
       # the chart's default image tag matches the image built in this same run.

@@ -45,6 +45,18 @@ func TestRenderFormulasHashesAndContent(t *testing.T) {
 			testArg:     "version",
 		},
 	}
+	directoryEntries, err := os.ReadDir(formulaDir)
+	if err != nil {
+		t.Fatalf("read formula directory: %v", err)
+	}
+	if got, want := len(directoryEntries), len(expectedFormulae); got != want {
+		t.Fatalf("formula count = %d, want exactly %d; operator-only binaries must not gain formulae", got, want)
+	}
+	for _, entry := range directoryEntries {
+		if _, ok := expectedFormulae[entry.Name()]; !ok || entry.IsDir() {
+			t.Fatalf("unexpected formula output %q", entry.Name())
+		}
+	}
 
 	firstRender := make(map[string][]byte, len(expectedFormulae))
 	for filename, expected := range expectedFormulae {

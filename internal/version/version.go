@@ -5,7 +5,9 @@ package version
 var (
 	// Version is the semantic version, e.g. "0.0.1". "dev" for local builds.
 	Version = "dev"
-	// Commit is the short git commit the binary was built from.
+	// Commit identifies the git commit the binary was built from. Its length is
+	// release-surface-specific: most commands use a short commit, while evidence
+	// binaries that require an exact immutable identity use the full commit.
 	Commit = "none"
 	// Date is the build timestamp.
 	Date = "unknown"
