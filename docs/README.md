@@ -168,6 +168,8 @@ deployment cells under a thin global control plane.
   token file format, rotation, revocation, and agent disable effects.
 - [billing-and-limits.md](billing-and-limits.md): account-level plan billing,
   realm-rolled metered dimensions, limits, and overage behavior.
+- [billing-return-pages.md](billing-return-pages.md): value-free hosted
+  checkout and portal return routes that hand control back to the AI or CLI.
 - [audit-retention.md](audit-retention.md): managed, self-hosted, and local
   audit retention defaults and audit content rules.
 - [transcript-retention.md](transcript-retention.md): account plan defaults,
