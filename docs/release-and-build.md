@@ -260,8 +260,9 @@ The implemented release action owns:
   before publication. Cursor's native-Windows cell skips because Windows is
   supported through WSL-as-Linux.
 - Building release archives for macOS, Linux, and Windows x64.
-- Building `witself`, `witself-server`, `witself-worker`, `witself-admin`, and
-  `witself-infra`.
+- Building `witself`, `witself-server`, `witself-worker`, `witself-admin`,
+  `witself-infra`, and the operator-only `witself-control-plane` evidence
+  binary.
 - Generating SHA256 checksums.
 - Signing the checksum manifest into a keyless Sigstore bundle, while retaining
   the detached `.sig` and `.pem` assets required by older updaters.
@@ -314,7 +315,10 @@ signing.
 
 Current releases include the tenant CLI/MCP binary `witself` (with `ws` as an
 installed alias), the separate `witself-server`, the fleet-admin CLI
-`witself-admin`, and the Pulumi-based cell provisioner `witself-infra`.
+`witself-admin`, the Pulumi-based cell provisioner `witself-infra`, and the
+operator-only `witself-control-plane`. The control-plane artifact is downloaded
+directly for reviewed rollout ceremonies; it intentionally has no Homebrew
+formula.
 
 The primary repository should be public:
 
@@ -345,13 +349,23 @@ Current release artifacts include:
 - `witself` `.tar.gz` archives for macOS and Linux, plus
   `witself_<version>_windows_amd64.zip` for Windows x64.
 - Separate `.tar.gz` archives for `witself-server`, `witself-worker`,
-  `witself-admin`, and `witself-infra` on the macOS and Linux targets.
+  `witself-admin`, `witself-infra`, and `witself-control-plane` on the macOS and
+  Linux targets. Every archive contains exactly one root executable.
 - SHA256 checksums.
 - A keyless `checksums.txt.sigstore.json` bundle for the checksum manifest,
   plus transitional `checksums.txt.sig` and `checksums.txt.pem` compatibility
   assets for older `witself-admin` updaters.
 - Per-archive SBOMs.
 - Build-provenance attestations for release archives.
+
+The stable release inventory is fail-closed at exactly 25 executable archives,
+25 per-archive SPDX SBOMs, and four checksum/signing assets (`checksums.txt`,
+its Sigstore bundle, compatibility certificate, and detached signature): 54
+nonempty GitHub Release assets total. `checksums.txt` binds all 50 archive and
+SBOM payloads, and GitHub build provenance covers all 25 archives. The
+`witself-control-plane` executable is the only command stamped with the full
+40-hex release commit because billing inventory capture compares that exact
+identity; the other commands retain their historical short-commit output.
 
 Verify the preferred bundle form with:
 

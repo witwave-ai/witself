@@ -46,6 +46,28 @@ builds:
       - -X github.com/witwave-ai/witself/internal/version.Commit={{ .ShortCommit }}
       - -X github.com/witwave-ai/witself/internal/version.Date={{ .Date }}
 
+  # This executable is an operator evidence source, not an end-user install
+  # surface. The billing inventory ceremony compares its reported identity to
+  # an exact immutable release commit, so it deliberately carries the full
+  # commit while the existing public commands retain their historical short
+  # commit output.
+  - id: witself-control-plane
+    main: ./cmd/witself-control-plane
+    binary: witself-control-plane
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/witwave-ai/witself/internal/version.Version={{ .Version }}
+      - -X github.com/witwave-ai/witself/internal/version.Commit={{ .FullCommit }}
+      - -X github.com/witwave-ai/witself/internal/version.Date={{ .Date }}
+
   - id: witself-worker
     main: ./cmd/witself-worker
     binary: witself-worker
@@ -122,6 +144,16 @@ archives:
     formats:
       - tar.gz
     name_template: "witself-server_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - none*
+  - id: witself-control-plane
+    ids:
+      - witself-control-plane
+    formats:
+      - tar.gz
+    name_template: "witself-control-plane_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    # The reviewed SHA-256 belongs to this exact executable. Additional archive
+    # members would make extraction ambiguous and are therefore forbidden.
     files:
       - none*
   - id: witself-worker

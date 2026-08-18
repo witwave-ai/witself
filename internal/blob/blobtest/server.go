@@ -150,7 +150,9 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request, bucket string) {
 		next = keys[len(keys)-1]
 	}
 	type contents struct {
-		Key string `xml:"Key"`
+		Key  string `xml:"Key"`
+		ETag string `xml:"ETag"`
+		Size int64  `xml:"Size"`
 	}
 	out := struct {
 		XMLName               xml.Name   `xml:"ListBucketResult"`
@@ -159,7 +161,10 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request, bucket string) {
 		NextContinuationToken string     `xml:"NextContinuationToken,omitempty"`
 	}{IsTruncated: truncated, NextContinuationToken: next}
 	for _, k := range keys {
-		out.Contents = append(out.Contents, contents{Key: k})
+		o := s.objects[bucket+"/"+k]
+		out.Contents = append(out.Contents, contents{
+			Key: k, ETag: `"` + o.etag + `"`, Size: int64(len(o.data)),
+		})
 	}
 	w.Header().Set("Content-Type", "application/xml")
 	if err := xml.NewEncoder(w).Encode(out); err != nil {

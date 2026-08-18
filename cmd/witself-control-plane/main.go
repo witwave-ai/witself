@@ -39,6 +39,15 @@ func main() {
 }
 
 func run() int {
+	if len(os.Args) > 1 && os.Args[1] == "billing-rollout-inventory" {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		if err := runBillingRolloutInventory(ctx, os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "witself-control-plane: billing rollout inventory: %v\n", err)
+			return 1
+		}
+		return 0
+	}
 	if len(os.Args) > 1 && (os.Args[1] == "version" || os.Args[1] == "--version" || os.Args[1] == "-v") {
 		fmt.Println(version.String("witself-control-plane"))
 		return 0

@@ -105,6 +105,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
 
       # Pin both the action wrapper and the binary: release configuration is a
       # production interface, so upgrades should arrive as reviewed changes.
@@ -122,6 +129,12 @@ jobs:
         run: |
           scripts/render-goreleaser-witself-smoke-config.sh "$RUNNER_TEMP/goreleaser-witself-smoke.yaml" .goreleaser.yaml
           goreleaser check -f "$RUNNER_TEMP/goreleaser-witself-smoke.yaml"
+
+      - name: Test control-plane release artifact contract
+        run: bash scripts/test-control-plane-release-artifact.sh
+
+      - name: Test complete release asset-count contract
+        run: bash scripts/test-release-artifact-contract.sh
 
       - name: Test Homebrew tap publisher
         run: bash scripts/test-publish-homebrew-formulas.sh
@@ -349,6 +362,9 @@ jobs:
 
       - name: billing transition rollout preflight checks
         run: bash scripts/test-billing-transition-rollout-preflight.sh
+
+      - name: billing rollout inventory capture checks
+        run: bash scripts/test-capture-billing-rollout-inventory.sh
 
       - name: agent-email isolated cell operation checks
         run: bash scripts/test-agent-email-cell-operation.sh

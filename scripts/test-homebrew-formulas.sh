@@ -67,6 +67,18 @@ fi
     --output "$output_dir"
 )
 
+formula_inventory=$(find "$output_dir/Formula" -maxdepth 1 -type f -name '*.rb' \
+  -exec basename {} \; | LC_ALL=C sort)
+expected_formula_inventory=$'witself-admin.rb\nwitself-infra.rb\nwitself.rb'
+[[ $formula_inventory == "$expected_formula_inventory" ]] || {
+  echo "error: renderer must emit exactly the three supported Homebrew formulae" >&2
+  exit 1
+}
+[[ ! -e $output_dir/Formula/witself-control-plane.rb ]] || {
+  echo "error: operator-only witself-control-plane must not have a Homebrew formula" >&2
+  exit 1
+}
+
 for formula in "$output_dir"/Formula/*.rb; do
   ruby -c "$formula" >/dev/null
 done
