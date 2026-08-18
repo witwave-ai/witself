@@ -156,6 +156,23 @@ func newStub(t *testing.T) (*stubStripe, *Provider) {
 	return s, p
 }
 
+func TestDefaultReturnURLsStayOnOwnedValueFreeRoutes(t *testing.T) {
+	catalog, err := plans.Load()
+	if err != nil {
+		t.Fatalf("plans.Load: %v", err)
+	}
+	p, err := New(Config{SecretKey: "sk_test_stub", Catalog: catalog})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if p.cfg.SuccessURL != "https://self.witwave.ai/billing/success" ||
+		p.cfg.CancelURL != "https://self.witwave.ai/billing/cancelled" ||
+		p.cfg.PortalReturnURL != "https://self.witwave.ai/billing/portal-return" {
+		t.Fatalf("default return URLs = success %q, cancel %q, portal %q",
+			p.cfg.SuccessURL, p.cfg.CancelURL, p.cfg.PortalReturnURL)
+	}
+}
+
 func (s *stubStripe) handle(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Authorization") != "Bearer sk_test_stub" {
 		http.Error(w, `{"error":{"message":"bad key"}}`, http.StatusUnauthorized)

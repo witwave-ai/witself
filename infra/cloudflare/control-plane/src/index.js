@@ -147,6 +147,9 @@ import {
   handleRealmEmailAliasRecoveryAdminRequest,
   isRealmEmailAliasRecoveryAdminPath,
 } from "./realm-email-alias-recovery-api.mjs";
+import {
+  billingReturnResponse,
+} from "./billing-return-pages.mjs";
 
 export class Backend extends Container {
   defaultPort = 8080;
@@ -4064,6 +4067,12 @@ async function handleAccountBackups(request, env, url) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+
+    // Provider-hosted Checkout and portal flows return to value-free public
+    // pages at this already-owned edge. They never reach the container, read
+    // account state, or gain mutation authority from a browser redirect.
+    const billingReturn = billingReturnResponse(request, url);
+    if (billingReturn !== null) return billingReturn;
 
     // Hot path: directory lookups from KV, never the container.
     const m = url.pathname.match(DIRECTORY_PATH);

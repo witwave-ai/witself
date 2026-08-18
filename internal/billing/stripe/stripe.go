@@ -80,7 +80,7 @@ type Config struct {
 	// Catalog maps plan ids to prices for bootstrap and lookup_key naming.
 	Catalog *plans.Catalog
 	// SuccessURL / CancelURL are where Checkout returns the payer. Defaults
-	// point at the public site until the CP has a better destination.
+	// point at the owned, value-free control-plane return pages.
 	SuccessURL string
 	CancelURL  string
 	// PortalReturnURL is where the hosted portal's "back" goes.
@@ -146,13 +146,13 @@ func New(cfg Config) (*Provider, error) {
 		cfg.BaseURL = apiBase
 	}
 	if cfg.SuccessURL == "" {
-		cfg.SuccessURL = "https://witself.witwave.ai/billing/success"
+		cfg.SuccessURL = "https://self.witwave.ai/billing/success"
 	}
 	if cfg.CancelURL == "" {
-		cfg.CancelURL = "https://witself.witwave.ai/billing/cancelled"
+		cfg.CancelURL = "https://self.witwave.ai/billing/cancelled"
 	}
 	if cfg.PortalReturnURL == "" {
-		cfg.PortalReturnURL = "https://witself.witwave.ai"
+		cfg.PortalReturnURL = "https://self.witwave.ai/billing/portal-return"
 	}
 	return &Provider{cfg: cfg, prices: priceCache{ids: map[string]string{}}}, nil
 }
