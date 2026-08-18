@@ -1066,7 +1066,7 @@ func TestCollectBillingRolloutRegistryDropsPartialArtifactOnReadOrDrift(t *testi
 		{
 			name: "object read failure",
 			configure: func(reader *billingRolloutFakeReader) {
-				reader.getTransform = func(key string, data []byte, etag string) ([]byte, string, error) {
+				reader.getTransform = func(key string, _ []byte, _ string) ([]byte, string, error) {
 					return nil, "", fmt.Errorf("%s at %s", secretID, key)
 				}
 			},
@@ -1074,7 +1074,7 @@ func TestCollectBillingRolloutRegistryDropsPartialArtifactOnReadOrDrift(t *testi
 		{
 			name: "get etag drift",
 			configure: func(reader *billingRolloutFakeReader) {
-				reader.getTransform = func(key string, data []byte, etag string) ([]byte, string, error) {
+				reader.getTransform = func(_ string, data []byte, etag string) ([]byte, string, error) {
 					return data, "changed-" + etag, nil
 				}
 			},
@@ -1082,7 +1082,7 @@ func TestCollectBillingRolloutRegistryDropsPartialArtifactOnReadOrDrift(t *testi
 		{
 			name: "get size drift",
 			configure: func(reader *billingRolloutFakeReader) {
-				reader.getTransform = func(key string, data []byte, etag string) ([]byte, string, error) {
+				reader.getTransform = func(_ string, data []byte, etag string) ([]byte, string, error) {
 					return append(data, 'x'), etag, nil
 				}
 			},

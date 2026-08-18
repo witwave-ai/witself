@@ -481,7 +481,7 @@ func listPageXML(objects []testListedObject, truncated bool, next string) string
 		b.WriteString(`</Contents>`)
 	}
 	b.WriteString(`<IsTruncated>`)
-	b.WriteString(fmt.Sprintf("%t", truncated))
+	fmt.Fprintf(&b, "%t", truncated)
 	b.WriteString(`</IsTruncated>`)
 	if next != "" {
 		b.WriteString(`<NextContinuationToken>`)
