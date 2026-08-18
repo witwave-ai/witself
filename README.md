@@ -975,6 +975,7 @@ edge services, Helm chart, GitOps tree, release workflows, and Pulumi-based
 - [Backup And Recovery](docs/backup-and-recovery.md)
 - [Billing And Limits](docs/billing-and-limits.md)
 - [Billing Transition Dark-Rollout Guard](docs/billing-transition-rollout.md)
+- [Hosted Billing Return Pages](docs/billing-return-pages.md)
 - [Release And Build](docs/release-and-build.md)
 - [Implementation Plan](docs/implementation-plan.md)
 - [Scaffold Readiness](docs/scaffold-readiness.md)
