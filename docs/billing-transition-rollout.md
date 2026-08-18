@@ -325,9 +325,10 @@ commit before rollout.
 1. Confirm Stripe test mode, the reviewed hosted-portal configuration, test
    webhook secret, and production-live key absence. Prove all three configured
    HTTPS success, cancel, and portal-return routes exist on an owned surface and
-   safely converge back to read-only billing status; a syntactically valid dead
-   URL is a blocker. Confirm Team and Enterprise remain unavailable in the
-   catalog. If period-boundary acceleration is part of the retained canary, set
+   satisfy the [value-free return-page contract](billing-return-pages.md); a
+   syntactically valid dead URL is a blocker. Confirm Team and Enterprise remain
+   unavailable in the catalog. If period-boundary acceleration is part of the
+   retained canary, set
    `WITSELF_CP_STRIPE_TEST_CLOCK_ID` only for the fresh disposable test customer
    and record a value-free configuration hash.
 2. Set the billing account allowlist to empty and verify mutation previews and
