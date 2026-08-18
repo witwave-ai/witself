@@ -206,7 +206,7 @@ scrub_environment_except() {
 
 run_source_phase() (
   scrub_environment_except \
-    "PATH,HOME,TMPDIR,TMP,TEMP,LANG,TZ"
+    "HOME,TMPDIR,TMP,TEMP,LANG,TZ"
   CLOUDFLARE_ACCOUNT_ID="$cloudflare_account_id" \
   CLOUDFLARE_API_TOKEN="$cloudflare_api_token" \
     "$@"
@@ -652,8 +652,6 @@ source_common_args=(
   --expected-target-image-digest "$expected_target_image_digest"
   --expected-target-release-version "$expected_target_release_version"
   --expected-target-release-commit "$expected_target_release_commit"
-  --reviewed-env-file "$reviewed_env_file"
-  --wrangler-cwd "$snapshot_control_plane_root"
 )
 
 capture_source_fence() {

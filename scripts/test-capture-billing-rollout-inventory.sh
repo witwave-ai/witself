@@ -65,6 +65,10 @@ log="$case_root/log"
 state="$case_root/source-count"
 fail_phase="$(cat "$case_root/fail-phase" 2>/dev/null || true)"
 
+case ":${PATH:-}:" in
+  *":$case_root/fakes:"*) exit 70 ;;
+esac
+
 [ "${CLOUDFLARE_ACCOUNT_ID:-}" = "8f0bf04a4e7aab3a8cc60f02cc8c8fdb" ] || exit 71
 [ "${CLOUDFLARE_API_TOKEN:-}" = "cloudflare-token-sentinel" ] || exit 72
 [ -z "${NODE_OPTIONS+x}" ] && [ -z "${NODE_PATH+x}" ] &&
@@ -89,8 +93,6 @@ printf 'source:%s\n' "$phase" >>"$log"
 snapshot="$case_root/witself-control-plane-release-Ab12c3"
 config="$snapshot/repository/infra/cloudflare/witself-control-plane-deploy-Cd34e5/wrangler.generated.jsonc"
 source_script="$snapshot/repository/infra/cloudflare/control-plane/scripts/billing-rollout-source-fence.mjs"
-reviewed_env="$snapshot/repository/infra/cloudflare/wrangler-production-empty.env"
-wrangler_cwd="$snapshot/repository/infra/cloudflare/control-plane"
 initial="$case_root/evidence/initial-lifecycle-disabled.json"
 
 [ "$1" = "$source_script" ] || exit 75
@@ -105,15 +107,13 @@ shift
   [ "${10}" = sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ] &&
   [ "${11}" = --expected-target-release-version ] && [ "${12}" = 1.2.3 ] &&
   [ "${13}" = --expected-target-release-commit ] &&
-  [ "${14}" = cccccccccccccccccccccccccccccccccccccccc ] &&
-  [ "${15}" = --reviewed-env-file ] && [ "${16}" = "$reviewed_env" ] &&
-  [ "${17}" = --wrangler-cwd ] && [ "${18}" = "$wrangler_cwd" ] || exit 76
+  [ "${14}" = cccccccccccccccccccccccccccccccccccccccc ] || exit 76
 if [ "$phase" = initial ]; then
-  [ "$#" -eq 18 ] || exit 77
+  [ "$#" -eq 14 ] || exit 77
 else
-  [ "$#" -eq 20 ] &&
-    [ "${19}" = --prior-lifecycle-disabled-attestation ] &&
-    [ "${20}" = "$initial" ] || exit 78
+  [ "$#" -eq 16 ] &&
+    [ "${15}" = --prior-lifecycle-disabled-attestation ] &&
+    [ "${16}" = "$initial" ] || exit 78
 fi
 
 if [ "$fail_phase" = "source-$phase" ]; then
@@ -122,6 +122,18 @@ if [ "$fail_phase" = "source-$phase" ]; then
 fi
 printf '{"phase":"%s"}\n' "$phase"
 FAKE_NODE
+  chmod 700 "$path"
+}
+
+write_fake_wrangler() {
+  local path="$1"
+  cat >"$path" <<'FAKE_WRANGLER'
+#!/bin/bash
+set -euo pipefail
+case_root="$(cd "$(dirname "$0")/.." && pwd -P)"
+printf 'invoked\n' >"$case_root/wrangler-invoked"
+exit 119
+FAKE_WRANGLER
   chmod 700 "$path"
 }
 
@@ -314,6 +326,7 @@ make_fixture() {
   chmod 700 "$CONFIG_DIR" "$CONFIG_DIR/.wrangler" "$CONFIG_DIR/.wrangler/tmp"
 
   write_fake_node "$CASE_ROOT/fakes/node"
+  write_fake_wrangler "$CASE_ROOT/fakes/wrangler"
   write_fake_sleep "$CASE_ROOT/fakes/sleep"
   write_fake_sha256sum "$CASE_ROOT/fakes/sha256sum"
   write_fake_control_plane "$BINARY"
@@ -377,6 +390,8 @@ invoke_capture || fail "happy path failed"
 expected_log="$(printf '%s\n' \
   binary:version source:initial sleep:240 source:before binary:scan source:after binary:finalize)"
 [ "$(cat "$LOG")" = "$expected_log" ] || fail "phase order was not exact"
+[ ! -e "$CASE_ROOT/wrangler-invoked" ] ||
+  fail "PATH-shadowed Wrangler was invoked"
 [ -d "$WORK_DIR" ] && [ "$(file_mode "$WORK_DIR")" = 700 ] ||
   fail "successful private work directory was not retained at mode 0700"
 for artifact in \

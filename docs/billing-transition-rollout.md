@@ -130,7 +130,10 @@ The Cloudflare inspection process must carry a dedicated read-only
 the token's read-only policy outside this command; the collector can validate
 identity and observed state, not the token's provider-side grant. Set the
 target values from reviewed release evidence, not from the currently returned
-provider object:
+provider object. The frozen source helper performs only bounded, no-redirect
+bearer-authenticated GETs against the fixed `https://api.cloudflare.com`
+production API origin for the exact Worker and Container resources. It does
+not resolve or invoke Wrangler from `PATH`:
 
 - `TARGET_APPLICATION_ID`: exact lowercase Cloudflare Container application
   UUID;
@@ -261,11 +264,14 @@ export WITSELF_BILLING_INVENTORY_R2_PREFIX='registry/'
 
 `CAPTURE_SCRIPT` must be the copy inside the same frozen snapshot as
 `PRIVATE_WRANGLER_CONFIG`. The wrapper derives that snapshot's source-fence
-helper, pinned Wrangler working directory, and reviewed empty environment file.
-It takes the initial private lifecycle-disabled attestation, waits the fixed
-240-second in-flight bound, takes `BEFORE` using that initial artifact as its
-prior, runs `witself-control-plane billing-rollout-inventory scan`, immediately
-takes `AFTER` from the same prior, and runs
+helper and retains the snapshot config and reviewed empty environment file in
+its immutable custody hash. The source phase receives no `PATH`; the helper
+reads the frozen config identity and uses its source-owned direct Cloudflare
+API inspector. The wrapper takes the initial private lifecycle-disabled
+attestation, waits the fixed 240-second in-flight bound, takes `BEFORE` using
+that initial artifact as its prior, runs `witself-control-plane
+billing-rollout-inventory scan`, immediately takes `AFTER` from the same prior,
+and runs
 `witself-control-plane billing-rollout-inventory finalize`.
 
 The initial artifact is a self-hashed absence attestation, not a usable scan

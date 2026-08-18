@@ -9,22 +9,27 @@ import {
   readFileSync,
   realpathSync,
 } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
   expectedBuildMetadata,
   privateDeploymentConfigMain,
-  wranglerJSON,
 } from "./verify-deployment.mjs";
 import {
   PRODUCTION_CLOUDFLARE_ACCOUNT_ID,
 } from "../../agent-email/scripts/wrangler-environment.mjs";
 
-const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const WORKER_NAME = "witself-control-plane";
 const CONTAINER_APPLICATION_NAME = "witself-control-plane";
 const SOURCE_FENCE_SCHEMA = "witself.billing-rollout-source-fence.v1";
+// This provider trust boundary is intentionally source-owned. None of the
+// authority, operation paths, timeout, or response bounds are configurable by
+// the operator environment or CLI.
+const CLOUDFLARE_API_ORIGIN = "https://api.cloudflare.com";
+const CLOUDFLARE_API_PREFIX = "/client/v4";
+const CLOUDFLARE_REQUEST_TIMEOUT_MS = 30 * 1000;
+const MAX_CLOUDFLARE_RESPONSE_BYTES = 4 * 1024 * 1024;
 const INSTANCE_PAGE_SIZE = 100;
 const MAX_INSTANCE_PAGES = 128;
 const MAX_CONFIG_BYTES = 1024 * 1024;
@@ -49,6 +54,8 @@ const RELEASE_VERSION = /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*
 const RELEASE_COMMIT = /^[0-9a-f]{40}$/;
 const EXACT_UTC_SECOND =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+const EXACT_RFC3339_SECOND =
+  /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(Z|([+-])(\d{2}):(\d{2}))$/;
 const SAFE_NAME = /^[A-Z][A-Z0-9_]{0,127}$/;
 const INSTANCE_STATES = new Set([
   "failed",
@@ -123,11 +130,11 @@ function exactReleaseIdentity(value, label) {
       !RELEASE_COMMIT.test(String(value.commit ?? ""))) {
     throw new Error(`${label} was invalid`);
   }
-  exactUTCSecond(value.date, `${label} date`);
+  const date = canonicalReleaseUTCSecond(value.date, `${label} date`);
   return Object.freeze({
     version: value.version,
     commit: value.commit,
-    date: value.date,
+    date,
   });
 }
 
@@ -206,6 +213,37 @@ function exactUTCSecond(value, label) {
   return milliseconds;
 }
 
+function canonicalReleaseUTCSecond(value, label) {
+  if (typeof value !== "string") {
+    throw new Error(`${label} must be an exact RFC 3339 second`);
+  }
+  const match = value.match(EXACT_RFC3339_SECOND);
+  if (match === null) {
+    throw new Error(`${label} must be an exact RFC 3339 second`);
+  }
+  const milliseconds = Date.parse(value);
+  if (!Number.isFinite(milliseconds)) {
+    throw new Error(`${label} must be a real RFC 3339 second`);
+  }
+  let offsetMinutes = 0;
+  if (match[2] !== "Z") {
+    const hours = Number(match[4]);
+    const minutes = Number(match[5]);
+    if (hours > 23 || minutes > 59) {
+      throw new Error(`${label} must have a real RFC 3339 offset`);
+    }
+    offsetMinutes = (match[3] === "+" ? 1 : -1) *
+      (hours * 60 + minutes);
+  }
+  const localRoundTrip = new Date(
+    milliseconds + offsetMinutes * 60 * 1000,
+  ).toISOString().slice(0, 19);
+  if (localRoundTrip !== match[1]) {
+    throw new Error(`${label} must be a real RFC 3339 second`);
+  }
+  return new Date(milliseconds).toISOString().replace(".000Z", "Z");
+}
+
 function observedAt(clock) {
   const value = clock();
   const date = value instanceof Date ? value : new Date(value);
@@ -214,6 +252,296 @@ function observedAt(clock) {
   }
   return new Date(Math.floor(date.getTime() / 1000) * 1000)
     .toISOString().replace(".000Z", "Z");
+}
+
+function fixedCloudflareURL(pathname, query = undefined) {
+  if (typeof pathname !== "string" ||
+      !pathname.startsWith("/accounts/") ||
+      /[?#\x00-\x1f\x7f]/.test(pathname)) {
+    throw new Error("Cloudflare inspection path was invalid");
+  }
+  const url = new URL(`${CLOUDFLARE_API_ORIGIN}${CLOUDFLARE_API_PREFIX}${pathname}`);
+  if (query !== undefined) url.search = query.toString();
+  if (url.origin !== CLOUDFLARE_API_ORIGIN ||
+      !url.pathname.startsWith(`${CLOUDFLARE_API_PREFIX}/accounts/`) ||
+      url.username !== "" || url.password !== "" || url.hash !== "") {
+    throw new Error("Cloudflare inspection authority was invalid");
+  }
+  return url;
+}
+
+async function boundedJSONResponse(response, expectedURL, operation) {
+  if (!isRecord(response) || response.status !== 200 || response.ok !== true ||
+      response.redirected !== false || response.url !== expectedURL.href ||
+      !isRecord(response.headers) ||
+      typeof response.headers.get !== "function") {
+    throw new Error(`${operation} returned an invalid HTTP response`);
+  }
+  const contentType = response.headers.get("content-type");
+  if (typeof contentType !== "string" ||
+      !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(contentType)) {
+    throw new Error(`${operation} did not return exact JSON content`);
+  }
+  const contentLength = response.headers.get("content-length");
+  if (contentLength !== null &&
+      (!/^(?:0|[1-9][0-9]*)$/.test(contentLength) ||
+       Number(contentLength) > MAX_CLOUDFLARE_RESPONSE_BYTES)) {
+    throw new Error(`${operation} response exceeded its byte bound`);
+  }
+  if (!isRecord(response.body) ||
+      typeof response.body.getReader !== "function") {
+    throw new Error(`${operation} response body was unavailable`);
+  }
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let length = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!(value instanceof Uint8Array)) {
+        throw new Error(`${operation} response body was invalid`);
+      }
+      length += value.byteLength;
+      if (length > MAX_CLOUDFLARE_RESPONSE_BYTES) {
+        throw new Error(`${operation} response exceeded its byte bound`);
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => {});
+    throw error;
+  }
+  let source;
+  try {
+    source = new TextDecoder("utf-8", { fatal: true }).decode(
+      Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))),
+    );
+  } catch {
+    throw new Error(`${operation} response was not valid UTF-8`);
+  }
+  try {
+    return JSON.parse(source);
+  } catch {
+    throw new Error(`${operation} response was not valid JSON`);
+  }
+}
+
+async function cloudflareGETEnvelope(
+  fetchImpl,
+  apiToken,
+  url,
+  operation,
+  includeResultInfo = false,
+) {
+  const controller = new AbortController();
+  let timeout;
+  const timeoutPromise = new Promise((_, rejectPromise) => {
+    timeout = setTimeout(() => {
+      controller.abort();
+      rejectPromise(new Error(`${operation} timed out`));
+    }, CLOUDFLARE_REQUEST_TIMEOUT_MS);
+    timeout.unref?.();
+  });
+  try {
+    const response = await Promise.race([
+      fetchImpl(url, {
+        method: "GET",
+        headers: Object.freeze({
+          accept: "application/json",
+          authorization: `Bearer ${apiToken}`,
+        }),
+        redirect: "error",
+        credentials: "omit",
+        cache: "no-store",
+        referrerPolicy: "no-referrer",
+        signal: controller.signal,
+      }),
+      timeoutPromise,
+    ]);
+    const envelope = await Promise.race([
+      boundedJSONResponse(response, url, operation),
+      timeoutPromise,
+    ]);
+    exactKeys(
+      envelope,
+      includeResultInfo
+        ? ["errors", "messages", "result", "result_info", "success"]
+        : ["errors", "messages", "result", "success"],
+      `${operation} response envelope`,
+    );
+    if (envelope.success !== true || !Array.isArray(envelope.errors) ||
+        envelope.errors.length !== 0 || !Array.isArray(envelope.messages)) {
+      throw new Error(`${operation} response envelope reported failure`);
+    }
+    return envelope;
+  } finally {
+    clearTimeout(timeout);
+    controller.abort();
+  }
+}
+
+function deriveContainerInstanceState(instance) {
+  const status = instance?.current_placement?.status;
+  if (!isRecord(status)) return "unknown";
+  const raw = status.container_status ?? status.health;
+  if (raw === "placed") return "provisioning";
+  return INSTANCE_STATES.has(raw) && raw !== "inactive" ? raw : "unknown";
+}
+
+function normalizedContainerInstancePage(result, resultInfo, pageToken) {
+  if (!isRecord(result) ||
+      !Object.keys(result).every((key) =>
+        key === "instances" || key === "durable_objects") ||
+      !Object.hasOwn(result, "instances") ||
+      !Array.isArray(result.instances) ||
+      (result.durable_objects != null &&
+       !Array.isArray(result.durable_objects)) ||
+      !isRecord(resultInfo) ||
+      !Object.keys(resultInfo).every((key) => [
+        "next_page_token",
+        "page_token",
+        "per_page",
+      ].includes(key))) {
+    throw new Error("container instance response envelope was invalid");
+  }
+  const perPage = resultInfo.per_page ?? INSTANCE_PAGE_SIZE;
+  const returnedPageToken = resultInfo.page_token ?? pageToken;
+  const nextPageToken = resultInfo.next_page_token ?? null;
+  if (perPage !== INSTANCE_PAGE_SIZE || returnedPageToken !== pageToken) {
+    throw new Error("container instance response pagination was invalid");
+  }
+
+  const durableObjects = result.durable_objects ?? [];
+  let rows;
+  if (durableObjects.length === 0) {
+    rows = result.instances.map((instance) => ({
+      id: instance?.id ?? null,
+      state: deriveContainerInstanceState(instance),
+      location: instance?.location ?? null,
+      version: instance?.app_version ?? null,
+      created: instance?.created_at ?? null,
+    }));
+  } else {
+    const instanceByDeploymentID = new Map();
+    for (const instance of result.instances) {
+      if (instanceByDeploymentID.has(instance?.id)) {
+        throw new Error("container instance response had a duplicate deployment id");
+      }
+      instanceByDeploymentID.set(instance?.id, instance);
+    }
+    rows = durableObjects.map((durableObject) => {
+      const instance = durableObject?.deployment_id
+        ? instanceByDeploymentID.get(durableObject.deployment_id)
+        : undefined;
+      return {
+        id: durableObject?.id ?? instance?.id ?? null,
+        name: durableObject?.name ?? null,
+        state: instance === undefined
+          ? "inactive"
+          : deriveContainerInstanceState(instance),
+        location: instance?.location ?? null,
+        version: instance?.app_version ?? null,
+        created: instance?.created_at ?? durableObject?.assigned_at ?? null,
+      };
+    });
+  }
+  return Object.freeze({
+    instances: rows,
+    result_info: Object.freeze({
+      per_page: perPage,
+      page_token: returnedPageToken,
+      next_page_token: nextPageToken,
+    }),
+  });
+}
+
+export function createCloudflareBillingRolloutInspector({
+  accountID,
+  applicationID,
+  apiToken,
+  fetchImpl = globalThis.fetch,
+}) {
+  if (accountID !== PRODUCTION_CLOUDFLARE_ACCOUNT_ID ||
+      !UUID.test(String(applicationID ?? "")) ||
+      typeof apiToken !== "string" || apiToken === "" ||
+      apiToken.length > 4096 || /[\s\x00-\x1f\x7f]/.test(apiToken) ||
+      typeof fetchImpl !== "function") {
+    throw new Error("Cloudflare source inspector configuration was invalid");
+  }
+  const workersBase = `/accounts/${accountID}/workers/scripts/${WORKER_NAME}`;
+  const containersBase = `/accounts/${accountID}/containers`;
+  const get = (pathname, operation, includeResultInfo = false, query) =>
+    cloudflareGETEnvelope(
+      fetchImpl,
+      apiToken,
+      fixedCloudflareURL(pathname, query),
+      operation,
+      includeResultInfo,
+    );
+  return Object.freeze({
+    async deployment() {
+      const envelope = await get(
+        `${workersBase}/deployments`,
+        "inspect active control-plane deployment",
+      );
+      exactKeys(envelope.result, ["deployments"],
+        "control-plane deployment result");
+      if (!Array.isArray(envelope.result.deployments) ||
+          envelope.result.deployments.length < 1) {
+        throw new Error("control-plane deployment result was empty");
+      }
+      return envelope.result.deployments[0];
+    },
+    async version(versionID) {
+      if (!UUID.test(String(versionID ?? ""))) {
+        throw new Error("control-plane Worker version request was invalid");
+      }
+      return (await get(
+        `${workersBase}/versions/${versionID}`,
+        "inspect active control-plane Worker version",
+      )).result;
+    },
+    async secrets() {
+      const result = (await get(
+        `${workersBase}/secrets`,
+        "inspect persistent control-plane secret names",
+      )).result;
+      if (!Array.isArray(result)) {
+        throw new Error("persistent control-plane secret result was invalid");
+      }
+      return result;
+    },
+    async application() {
+      return (await get(
+        `${containersBase}/applications/${applicationID}`,
+        "inspect control-plane container application",
+      )).result;
+    },
+    async instances(pageToken = null) {
+      if (pageToken !== null &&
+          (typeof pageToken !== "string" || pageToken === "" ||
+           pageToken.length > 2048 || /[\x00-\x1f\x7f]/.test(pageToken))) {
+        throw new Error("container instance page request was invalid");
+      }
+      const query = new URLSearchParams({
+        per_page: String(INSTANCE_PAGE_SIZE),
+      });
+      if (pageToken !== null) query.set("page_token", pageToken);
+      const envelope = await get(
+        `${containersBase}/dash/applications/${applicationID}/instances`,
+        "inspect control-plane container instances",
+        true,
+        query,
+      );
+      return normalizedContainerInstancePage(
+        envelope.result,
+        envelope.result_info,
+        pageToken,
+      );
+    },
+  });
 }
 
 export function reviewedBillingRolloutConfigIdentity(
@@ -243,7 +571,10 @@ export function reviewedBillingRolloutConfigIdentity(
     target_release: Object.freeze({
       version: release.version,
       commit: release.commit,
-      date: release.date,
+      date: canonicalReleaseUTCSecond(
+        release.date,
+        "reviewed config target release date",
+      ),
     }),
   });
 }
@@ -323,7 +654,6 @@ function bindingInventory(version, expectedVersionID, expectedRelease) {
   for (const [name, expected] of [
     ["WITSELF_EDGE_RELEASE_VERSION", expectedRelease.version],
     ["WITSELF_EDGE_RELEASE_COMMIT", expectedRelease.commit],
-    ["WITSELF_EDGE_RELEASE_DATE", expectedRelease.date],
   ]) {
     const binding = bindings.get(name);
     if (binding?.type !== "plain_text" || binding.text !== expected) {
@@ -331,6 +661,16 @@ function bindingInventory(version, expectedVersionID, expectedRelease) {
         `active control-plane Worker ${name} release identity was invalid`,
       );
     }
+  }
+  const releaseDate = bindings.get("WITSELF_EDGE_RELEASE_DATE");
+  if (releaseDate?.type !== "plain_text" ||
+      canonicalReleaseUTCSecond(
+        releaseDate.text,
+        "active control-plane Worker WITSELF_EDGE_RELEASE_DATE",
+      ) !== expectedRelease.date) {
+    throw new Error(
+      "active control-plane Worker WITSELF_EDGE_RELEASE_DATE release identity was invalid",
+    );
   }
   for (const name of [
     "CP_BILLING_ACCOUNT_ALLOWLIST",
@@ -503,24 +843,13 @@ function canonicalInstance(row) {
   });
 }
 
-function inspectInstanceInventory(
-  inspect,
-  config,
-  applicationID,
-) {
+async function inspectInstanceInventory(inspect) {
   const rows = [];
   const ids = new Set();
   const pageTokens = new Set();
   let pageToken = null;
   for (let pageNumber = 0; pageNumber < MAX_INSTANCE_PAGES; pageNumber += 1) {
-    const args = [
-      "containers", "instances", applicationID,
-      "--config", config,
-      "--per-page", String(INSTANCE_PAGE_SIZE),
-      "--json",
-    ];
-    if (pageToken !== null) args.push("--page-token", pageToken);
-    const page = inspect(args, "inspect control-plane container instances");
+    const page = await inspect.instances(pageToken);
     const next = instanceInventoryPage(page, pageToken);
     for (const raw of page.instances) {
       const row = canonicalInstance(raw);
@@ -547,37 +876,22 @@ function sameJSON(left, right) {
   return canonicalJSON(left) === canonicalJSON(right);
 }
 
-function inspectOneState(options, target, inspect) {
-  const deployment = activeDeploymentFence(inspect([
-    "deployments", "status",
-    "--config", options.config,
-    "--name", WORKER_NAME,
-    "--json",
-  ], "inspect active control-plane deployment"));
-  const worker = bindingInventory(inspect([
-    "versions", "view", deployment.version_id,
-    "--config", options.config,
-    "--name", WORKER_NAME,
-    "--json",
-  ], "inspect active control-plane Worker version"), deployment.version_id,
-  target.release);
-  const secrets = secretNameInventory(inspect([
-    "secret", "list",
-    "--config", options.config,
-    "--name", WORKER_NAME,
-    "--format", "json",
-  ], "inspect persistent control-plane secret names"));
+async function inspectOneState(target, inspect) {
+  const deployment = activeDeploymentFence(await inspect.deployment());
+  const worker = bindingInventory(
+    await inspect.version(deployment.version_id),
+    deployment.version_id,
+    target.release,
+  );
+  const secrets = secretNameInventory(await inspect.secrets());
   assertSameSecretInventories(worker.secret_names, secrets);
-  const application = containerApplicationFence(inspect([
-    "containers", "info", target.application_id,
-    "--config", options.config,
-    "--json",
-  ], "inspect control-plane container application"),
-  target, worker.backend_namespace_id);
-  const instances = inspectInstanceInventory(
+  const application = containerApplicationFence(
+    await inspect.application(),
+    target,
+    worker.backend_namespace_id,
+  );
+  const instances = await inspectInstanceInventory(
     inspect,
-    options.config,
-    target.application_id,
   );
   return Object.freeze({ deployment, worker, secrets, application, instances });
 }
@@ -848,13 +1162,13 @@ export function assertBillingRolloutSourceFenceBracket(before, after) {
  * scan, and compare pre/post fence fields. This function deliberately cannot
  * turn one operator-supplied timestamp into proof of continuous quiescence.
  */
-export function observeBillingRolloutSourceFence(
+export async function observeBillingRolloutSourceFence(
   options,
-  inspect = wranglerJSON,
+  inspect,
   clock = () => new Date(),
 ) {
   if (!isRecord(options) || typeof options.config !== "string" ||
-      options.config === "") {
+      options.config === "" || !isRecord(inspect)) {
     throw new Error("source fence options were invalid");
   }
   const target = exactTargetIdentity(options);
@@ -863,19 +1177,14 @@ export function observeBillingRolloutSourceFence(
     ? null
     : assertInitialDisabledAttestation(prior, target);
 
-  const first = inspectOneState(options, target, inspect);
-  const second = inspectOneState(options, target, inspect);
+  const first = await inspectOneState(target, inspect);
+  const second = await inspectOneState(target, inspect);
   if (!samePrivateState(first, second)) {
     throw new Error(
       "control-plane source state changed during exact provider inspection",
     );
   }
-  const finalDeployment = activeDeploymentFence(inspect([
-    "deployments", "status",
-    "--config", options.config,
-    "--name", WORKER_NAME,
-    "--json",
-  ], "reinspect active control-plane deployment"));
+  const finalDeployment = activeDeploymentFence(await inspect.deployment());
   if (!sameJSON(finalDeployment, second.deployment)) {
     throw new Error(
       "control-plane deployment changed after exact provider inspection",
@@ -1049,8 +1358,6 @@ export function readBillingRolloutSourceFenceAttestationFile(path) {
 export function parseBillingRolloutSourceFenceArgs(argv) {
   const options = {
     config: "",
-    wranglerCwd: root,
-    reviewedEnvironmentFile: undefined,
     expectedAccountID: "",
     expectedTargetApplicationID: "",
     expectedTargetApplicationVersion: 0,
@@ -1068,8 +1375,6 @@ export function parseBillingRolloutSourceFenceArgs(argv) {
     "--expected-target-release-version",
     "--expected-target-release-commit",
     "--prior-lifecycle-disabled-attestation",
-    "--reviewed-env-file",
-    "--wrangler-cwd",
   ]);
   const seen = new Set();
   for (let index = 0; index < argv.length; index += 1) {
@@ -1117,18 +1422,6 @@ export function parseBillingRolloutSourceFenceArgs(argv) {
         throw new Error(
           "--prior-lifecycle-disabled-attestation must be a normalized absolute path",
         );
-      }
-      break;
-    case "--reviewed-env-file":
-      options.reviewedEnvironmentFile = resolve(value);
-      if (options.reviewedEnvironmentFile !== value) {
-        throw new Error("--reviewed-env-file must be a normalized absolute path");
-      }
-      break;
-    case "--wrangler-cwd":
-      options.wranglerCwd = resolve(value);
-      if (options.wranglerCwd !== value) {
-        throw new Error("--wrangler-cwd must be a normalized absolute path");
       }
       break;
     }
@@ -1181,14 +1474,28 @@ export function parseBillingRolloutSourceFenceArgs(argv) {
   return Object.freeze(options);
 }
 
-export function main(argv = process.argv.slice(2)) {
+export async function main(
+  argv = process.argv.slice(2),
+  {
+    fetchImpl = globalThis.fetch,
+    clock = () => new Date(),
+    writeOutput = (value) => process.stdout.write(value),
+    expectedControlPlaneRoot = undefined,
+  } = {},
+) {
+  if (typeof writeOutput !== "function") {
+    throw new Error("source fence output sink was invalid");
+  }
   const options = parseBillingRolloutSourceFenceArgs(argv);
   const readReviewedConfig = () => {
     // This production observation must run from the immutable tagged release
-    // snapshot and its frozen 0400 private Wrangler config. A mutable checkout
-    // config could otherwise swap an account_id in only while Wrangler opens
-    // it and restore the reviewed bytes before the final hash check.
-    const expectedMain = privateDeploymentConfigMain(options.config);
+    // snapshot and its frozen 0400 private config. A mutable checkout config
+    // could otherwise change only while the provider identity is inspected and
+    // restore the reviewed bytes before the final hash check.
+    const expectedMain = privateDeploymentConfigMain(
+      options.config,
+      expectedControlPlaneRoot,
+    );
     const source = readStablePrivateTextFile(
       options.config,
       "reviewed generated control-plane config",
@@ -1210,37 +1517,34 @@ export function main(argv = process.argv.slice(2)) {
       : readBillingRolloutSourceFenceAttestationFile(
         options.priorLifecycleDisabledAttestationPath,
       );
-  const inspect = (args, operation) => wranglerJSON(
-    args,
-    operation,
-    process.env,
-    undefined,
-    {
-      cwd: options.wranglerCwd,
-      reviewedEnvironmentFile: options.reviewedEnvironmentFile,
-    },
-  );
-  const attestation = observeBillingRolloutSourceFence({
+  if (process.env.CLOUDFLARE_ACCOUNT_ID !== options.expectedAccountID) {
+    throw new Error("Cloudflare source inspector account identity was invalid");
+  }
+  const inspect = createCloudflareBillingRolloutInspector({
+    accountID: options.expectedAccountID,
+    applicationID: options.expectedTargetApplicationID,
+    apiToken: process.env.CLOUDFLARE_API_TOKEN,
+    fetchImpl,
+  });
+  const attestation = await observeBillingRolloutSourceFence({
     ...options,
     reviewedConfigIdentity,
     priorLifecycleDisabledAttestation,
-  }, inspect);
+  }, inspect, clock);
   if (!sameJSON(readReviewedConfig(), reviewedConfigIdentity)) {
     throw new Error(
       "reviewed generated control-plane config changed during inspection",
     );
   }
-  process.stdout.write(`${canonicalJSON(attestation)}\n`);
+  writeOutput(`${canonicalJSON(attestation)}\n`);
 }
 
 if (process.argv[1] != null &&
     resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try {
-    main();
-  } catch (error) {
+  main().catch((error) => {
     process.stderr.write(
       `billing rollout source fence: FAIL: ${String(error?.message ?? error)}\n`,
     );
     process.exitCode = 1;
-  }
+  });
 }
