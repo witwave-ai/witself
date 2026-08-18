@@ -37,6 +37,25 @@ var ErrNotFound = errors.New("blob: not found")
 // (IfNoneMatchAny). This is the storage-enforced compare-and-swap failure.
 var ErrPrecondition = errors.New("blob: precondition failed")
 
+// ErrLimitExceeded is returned by bounded reads and complete listings when
+// the caller's explicit safety limit would be exceeded. No partial object or
+// listing is returned with this error.
+var ErrLimitExceeded = errors.New("blob: limit exceeded")
+
+// ErrInvalidListing is returned by ListComplete when the object service
+// returns a response that cannot prove a complete, consistently ordered
+// prefix walk. The ordinary List method intentionally retains its historical
+// permissive behavior for non-activation callers.
+var ErrInvalidListing = errors.New("blob: invalid listing")
+
+// ObjectInfo is stable object metadata returned by ListComplete. ETag is
+// normalized without surrounding quotes, matching the ETag returned by Get.
+type ObjectInfo struct {
+	Key  string
+	ETag string
+	Size int64
+}
+
 // Cond expresses a conditional write. Zero value = unconditional.
 type Cond struct {
 	// IfMatch makes the Put succeed only if the object's current ETag equals
@@ -92,6 +111,22 @@ func New(cfg Config) (*Client, error) {
 
 // Get fetches the object and its ETag. ErrNotFound for missing keys.
 func (c *Client) Get(ctx context.Context, key string) (data []byte, etag string, err error) {
+	return c.get(ctx, key, -1)
+}
+
+// GetBounded fetches the object and its ETag while refusing a body larger
+// than maxBytes. maxBytes may be zero (only an empty object fits) and must not
+// be negative. On overflow it returns ErrLimitExceeded and no partial body.
+func (c *Client) GetBounded(ctx context.Context, key string, maxBytes int64) (data []byte, etag string, err error) {
+	if maxBytes < 0 {
+		return nil, "", fmt.Errorf("blob: get %s: maxBytes must be non-negative", key)
+	}
+	return c.get(ctx, key, maxBytes)
+}
+
+// get implements Get and GetBounded. A negative maxBytes means unbounded and
+// is used only by the existing Get API.
+func (c *Client) get(ctx context.Context, key string, maxBytes int64) (data []byte, etag string, err error) {
 	resp, err := c.do(ctx, http.MethodGet, key, nil, nil, nil)
 	if err != nil {
 		return nil, "", err
@@ -99,7 +134,15 @@ func (c *Client) Get(ctx context.Context, key string) (data []byte, etag string,
 	defer func() { _ = resp.Body.Close() }()
 	switch resp.StatusCode {
 	case http.StatusOK:
-		b, err := io.ReadAll(resp.Body)
+		var b []byte
+		if maxBytes < 0 {
+			b, err = io.ReadAll(resp.Body)
+		} else {
+			b, err = readAtMost(resp.Body, maxBytes)
+			if errors.Is(err, ErrLimitExceeded) {
+				return nil, "", fmt.Errorf("%w: get %s exceeds %d bytes", ErrLimitExceeded, key, maxBytes)
+			}
+		}
 		if err != nil {
 			return nil, "", fmt.Errorf("blob: read %s: %w", key, err)
 		}
@@ -118,6 +161,28 @@ func (c *Client) Get(ctx context.Context, key string) (data []byte, etag string,
 	default:
 		return nil, "", httpError("get", key, resp)
 	}
+}
+
+// readAtMost reads at most maxBytes plus a one-byte overflow probe without
+// computing maxBytes+1 (which could overflow int64). The probe is necessary
+// for chunked responses whose Content-Length is unknown.
+func readAtMost(r io.Reader, maxBytes int64) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(r, maxBytes))
+	if err != nil {
+		return nil, err
+	}
+	var probe [1]byte
+	n, err := io.ReadFull(r, probe[:])
+	if n > 0 {
+		return nil, ErrLimitExceeded
+	}
+	if errors.Is(err, io.EOF) {
+		return b, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return b, nil
 }
 
 // Put writes the object under cond and returns the new ETag.
@@ -193,6 +258,110 @@ func (c *Client) List(ctx context.Context, prefix string) ([]string, error) {
 		if !page.IsTruncated || page.NextContinuationToken == "" {
 			return keys, nil
 		}
+		token = page.NextContinuationToken
+	}
+}
+
+const maxCompleteListPageBytes int64 = 16 << 20
+
+type listPage struct {
+	XMLName  xml.Name `xml:"ListBucketResult"`
+	Contents []struct {
+		Key  string `xml:"Key"`
+		ETag string `xml:"ETag"`
+		Size *int64 `xml:"Size"`
+	} `xml:"Contents"`
+	IsTruncated           bool   `xml:"IsTruncated"`
+	NextContinuationToken string `xml:"NextContinuationToken"`
+}
+
+// ListComplete returns a bounded, stable-metadata inventory under prefix.
+// Unlike List, it treats any pagination ambiguity as an error: every
+// truncated page must advance a unique continuation token, every returned key
+// must remain under prefix and be globally strictly increasing, and the total
+// may not exceed maxKeys. Each page body is also bounded defensively.
+//
+// maxKeys may be zero (only an empty listing fits) and must not be negative.
+func (c *Client) ListComplete(ctx context.Context, prefix string, maxKeys int) ([]ObjectInfo, error) {
+	if maxKeys < 0 {
+		return nil, fmt.Errorf("blob: list %s: maxKeys must be non-negative", prefix)
+	}
+
+	objects := make([]ObjectInfo, 0)
+	seenTokens := map[string]struct{}{}
+	token := ""
+	previousKey := ""
+	for {
+		q := url.Values{}
+		q.Set("list-type", "2")
+		q.Set("prefix", prefix)
+		q.Set("max-keys", "1000")
+		if token != "" {
+			q.Set("continuation-token", token)
+		}
+		resp, err := c.do(ctx, http.MethodGet, "", q, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			err := httpError("list", prefix, resp)
+			_ = resp.Body.Close()
+			return nil, err
+		}
+
+		pageBody, readErr := readAtMost(resp.Body, maxCompleteListPageBytes)
+		_ = resp.Body.Close()
+		if errors.Is(readErr, ErrLimitExceeded) {
+			return nil, fmt.Errorf("%w: list %s page exceeds %d bytes", ErrLimitExceeded, prefix, maxCompleteListPageBytes)
+		}
+		if readErr != nil {
+			return nil, fmt.Errorf("blob: list %s: %w", prefix, readErr)
+		}
+		var page listPage
+		if err := xml.Unmarshal(pageBody, &page); err != nil {
+			return nil, fmt.Errorf("%w: list %s response: %v", ErrInvalidListing, prefix, err)
+		}
+		if token != "" && len(page.Contents) == 0 {
+			return nil, fmt.Errorf("%w: list %s returned an empty continuation page", ErrInvalidListing, prefix)
+		}
+
+		for _, listed := range page.Contents {
+			if listed.Key == "" || !strings.HasPrefix(listed.Key, prefix) {
+				return nil, fmt.Errorf("%w: list %s returned a key outside the requested prefix", ErrInvalidListing, prefix)
+			}
+			if previousKey != "" && listed.Key <= previousKey {
+				return nil, fmt.Errorf("%w: list %s returned duplicate or non-increasing keys", ErrInvalidListing, prefix)
+			}
+			etag := strings.Trim(strings.TrimSpace(listed.ETag), `"`)
+			if etag == "" || listed.Size == nil || *listed.Size < 0 {
+				return nil, fmt.Errorf("%w: list %s returned incomplete object metadata", ErrInvalidListing, prefix)
+			}
+			if len(objects) >= maxKeys {
+				return nil, fmt.Errorf("%w: list %s exceeds %d keys", ErrLimitExceeded, prefix, maxKeys)
+			}
+			objects = append(objects, ObjectInfo{Key: listed.Key, ETag: etag, Size: *listed.Size})
+			previousKey = listed.Key
+		}
+
+		if !page.IsTruncated {
+			if page.NextContinuationToken != "" {
+				return nil, fmt.Errorf("%w: list %s returned a continuation token on a complete page", ErrInvalidListing, prefix)
+			}
+			return objects, nil
+		}
+		if page.NextContinuationToken == "" {
+			return nil, fmt.Errorf("%w: list %s returned a truncated page without a continuation token", ErrInvalidListing, prefix)
+		}
+		if len(page.Contents) == 0 {
+			return nil, fmt.Errorf("%w: list %s returned a truncated page without keys", ErrInvalidListing, prefix)
+		}
+		if page.NextContinuationToken == token {
+			return nil, fmt.Errorf("%w: list %s repeated its continuation token", ErrInvalidListing, prefix)
+		}
+		if _, exists := seenTokens[page.NextContinuationToken]; exists {
+			return nil, fmt.Errorf("%w: list %s repeated a prior continuation token", ErrInvalidListing, prefix)
+		}
+		seenTokens[page.NextContinuationToken] = struct{}{}
 		token = page.NextContinuationToken
 	}
 }
