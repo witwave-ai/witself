@@ -71,11 +71,11 @@ Take the inventory after the source fleet is drained and before the first
 target writer starts. The privileged collector may read the billing R2
 registry, but its shared output must contain counts only:
 
-No checked-in collector currently produces this complete artifact. Activation
-is blocked until an audited, privileged, read-only collector (or an equivalently
-reviewed operator procedure) proves a complete R2 registry scan and emits this
-exact schema. A hand-authored JSON file or the bounded reconciler sample is not
-inventory evidence.
+The repository includes a complete, fenced, read-only collector. It binds an
+immutable target release and the exact production Cloudflare/R2 authority,
+requires a stopped source-fleet observation before and after the complete R2
+scan, and emits this exact shared schema. A hand-authored JSON file or the
+bounded reconciler sample is not inventory evidence.
 
 ```json
 {
@@ -95,6 +95,136 @@ inventory evidence.
   }
 }
 ```
+
+### Fenced production collection
+
+Run every step from one immutable tagged release snapshot. Its repository tree
+must be read-only, and `PRIVATE_WRANGLER_CONFIG` must be the frozen private
+`wrangler.generated.jsonc` created inside that snapshot, with immutable
+release-snapshot metadata and mode `0400`. A mutable checkout config is
+rejected. Use fresh, normalized absolute paths on a private filesystem for
+`INITIAL_SOURCE_FENCE`, `SOURCE_FENCE_BEFORE`, `PROVISIONAL_INVENTORY`,
+`SOURCE_FENCE_AFTER`, and `FINAL_INVENTORY`; none may be a symlink or already
+exist. The source fences must be regular mode-`0600` files. The inventory
+command creates its provisional and final outputs atomically at mode `0600`
+and refuses overwrite.
+
+The Cloudflare inspection process must carry a dedicated read-only
+`CLOUDFLARE_API_TOKEN` and the exact
+`CLOUDFLARE_ACCOUNT_ID=8f0bf04a4e7aab3a8cc60f02cc8c8fdb` identity. Verify
+the token's read-only policy outside this command; the collector can validate
+identity and observed state, not the token's provider-side grant. Set the
+target values from reviewed release evidence, not from the currently returned
+provider object:
+
+- `TARGET_APPLICATION_ID`: exact lowercase Cloudflare Container application
+  UUID;
+- `TARGET_APPLICATION_VERSION`: exact positive Container application version;
+- `TARGET_IMAGE_DIGEST`: exact lowercase `sha256:<64-hex>` image digest;
+- `TARGET_RELEASE_VERSION`: canonical semantic version without a leading `v`;
+- `TARGET_RELEASE_COMMIT`: exact lowercase 40-hex Git commit.
+
+Take the first private lifecycle-disabled attestation with all required target
+bindings. `SOURCE_FENCE_SCRIPT` must name the copy in the same immutable release
+snapshot as the private config. `umask 077` plus shell no-clobber makes the
+redirected source-fence files private and create-only:
+
+```sh
+umask 077
+set -o noclobber
+
+source_fence() {
+  node "$SOURCE_FENCE_SCRIPT" \
+    --config "$PRIVATE_WRANGLER_CONFIG" \
+    --expected-account-id 8f0bf04a4e7aab3a8cc60f02cc8c8fdb \
+    --expected-target-application-id "$TARGET_APPLICATION_ID" \
+    --expected-target-application-version "$TARGET_APPLICATION_VERSION" \
+    --expected-target-image-digest "$TARGET_IMAGE_DIGEST" \
+    --expected-target-release-version "$TARGET_RELEASE_VERSION" \
+    --expected-target-release-commit "$TARGET_RELEASE_COMMIT" \
+    "$@"
+}
+
+source_fence > "$INITIAL_SOURCE_FENCE"
+```
+
+The initial artifact is a self-hashed absence attestation, not a usable scan
+fence. It must prove an empty mutation cohort, absent lifecycle gate, the exact
+target application current, and zero Container rows with a non-null version.
+It deliberately reports one possible reconciler until the drain bound has
+elapsed. A stopped row with a retained version is still a possible writer and
+blocks the ceremony; only an inactive/version-null tombstone is non-writing.
+The current target application may remain spawnable with zero rows because a
+new instance would receive the currently attested absent bindings.
+
+Wait at least four minutes after that successful initial observation. Then
+take `BEFORE`, perform the complete scan, immediately take `AFTER`, and
+finalize, in that order:
+
+```sh
+source_fence \
+  --prior-lifecycle-disabled-attestation "$INITIAL_SOURCE_FENCE" \
+  > "$SOURCE_FENCE_BEFORE"
+
+export WITSELF_BILLING_INVENTORY_R2_ENDPOINT=\
+'https://8f0bf04a4e7aab3a8cc60f02cc8c8fdb.r2.cloudflarestorage.com'
+export WITSELF_BILLING_INVENTORY_R2_BUCKET='witself-control-plane'
+export WITSELF_BILLING_INVENTORY_R2_PREFIX='registry/'
+: "${WITSELF_BILLING_INVENTORY_R2_ACCESS_KEY:?dedicated read-only key required}"
+: "${WITSELF_BILLING_INVENTORY_R2_SECRET_KEY:?dedicated read-only secret required}"
+
+witself-control-plane billing-rollout-inventory scan \
+  --source-fence-before "$SOURCE_FENCE_BEFORE" \
+  --provisional "$PROVISIONAL_INVENTORY"
+
+source_fence \
+  --prior-lifecycle-disabled-attestation "$INITIAL_SOURCE_FENCE" \
+  > "$SOURCE_FENCE_AFTER"
+
+witself-control-plane billing-rollout-inventory finalize \
+  --source-fence-before "$SOURCE_FENCE_BEFORE" \
+  --provisional "$PROVISIONAL_INVENTORY" \
+  --source-fence-after "$SOURCE_FENCE_AFTER" \
+  --output "$FINAL_INVENTORY"
+```
+
+The two R2 credential variables must come from a separately provisioned,
+read-only inventory principal and must not reuse
+`WITSELF_CP_R2_ACCESS_KEY`/`WITSELF_CP_R2_SECRET_KEY`. Verify and retain its
+provider-side read-only policy; the command rejects the ordinary credential
+values when they are present but cannot introspect the grant. The endpoint,
+bucket, and prefix above are the only accepted production authority.
+The scan follows the complete paginated registry listing with strict cursor,
+object, and snapshot checks and fails closed instead of truncating if either
+the account-object or mutation-receipt class exceeds 1,000,000 objects.
+
+The source helper also accepts `--reviewed-env-file` for a frozen reviewed
+empty Wrangler environment file (the default is the operating-system null
+device) and `--wrangler-cwd` for an absolute pinned Wrangler working directory.
+If either is used, pass the same reviewed value to all three observations.
+
+`BEFORE` and `AFTER` must independently prove the empty cohort, absent
+lifecycle gate, zero API/reconciler sources, and zero non-null-version
+Container rows. Finalization requires strict `BEFORE < scan start <= scan
+completion <= AFTER` ordering and stable account, config, Worker deployment,
+binding/secret inventory, Container application, target app/version/image, and
+release version/commit/date identity. Inactive tombstone count/hash changes are
+allowed only because both endpoints separately prove zero possible writers.
+Any failed timing or identity check requires fresh artifact paths and a new
+ceremony; never repair an attestation or provisional file.
+
+Retain the initial attestation, both source fences, provisional inventory,
+exact private config/release evidence, dedicated credential-policy evidence,
+and final inventory in the access-controlled operator case. Only
+`FINAL_INVENTORY` is a count-only shared artifact; even though the command
+creates it privately, its exact JSON content may be copied into the shared
+rollout report. Do not share the source fences or provisional artifact.
+
+This collector closes the implementation gap only. Billing remains dark and
+conditional. Activation is still blocked until this ceremony has produced and
+retained real zero-hazard production evidence, all configured success, cancel,
+and portal-return routes are live on owned HTTPS surfaces, and the complete
+Stripe sandbox canary below has been retained.
 
 Do not put account ids, operation ids, customer ids, provider object ids,
 emails, URLs, reasons, claim tokens, object keys, ETags, or raw errors in this
@@ -198,8 +328,10 @@ commit before rollout.
 3. Stop every `v0.0.254` API and plan-lifecycle reconciliation process. Verify
    both source replica counts are zero; stopping only the HTTP listener is not
    sufficient.
-4. Produce the complete count-only inventory, quarantine any nonzero hazard,
-   and retain the source snapshot plus capture time.
+4. Complete the private initial-attestation, four-minute drain, `BEFORE`, R2
+   scan, `AFTER`, and finalize ceremony above. Quarantine any nonzero hazard;
+   retain all private fence/provisional evidence and the final count-only
+   inventory plus capture time.
 5. Run `activate` preflight against the exact release tag and retain its output.
 6. Start only target replicas whose image provenance carries the capability
    marker. Keep the allowlist empty; verify health, billing reads, and pending-
@@ -236,9 +368,12 @@ fix; this guard intentionally provides no rollback mode to `v0.0.254`.
 
 Retain the release/tag/commit, control-plane and cell image digests, cell
 version/protocol probes, the exact Cloudflare Worker version or script ETag and
-Durable Object binding inventory, the value-free inventory and capture time,
-source and target API/reconciler replica counts, preflight output, empty-cohort
-proof before and after the run, bounded Stripe catalog-bootstrap result, test-
-mode/provider configuration hashes, webhook replay result, plan-fit result, and
-the final zero-hazard inventory. Never retain secret values or customer/provider
-identifiers in the shared rollout report.
+Durable Object binding inventory, the immutable private config identity, the
+initial lifecycle-disabled attestation, both source fences, private provisional
+inventory, dedicated read-only credential-policy evidence, the value-free final
+inventory and capture time, source and target API/reconciler replica counts,
+preflight output, empty-cohort proof before and after the run, bounded Stripe
+catalog-bootstrap result, test-mode/provider configuration hashes, webhook
+replay result, plan-fit result, and the final zero-hazard inventory. Never
+retain secret values or customer/provider identifiers in the shared rollout
+report, and never attach private fence/provisional artifacts to it.

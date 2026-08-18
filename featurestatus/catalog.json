@@ -978,12 +978,14 @@
         },
         "bounds_abuse": {
           "state": "conditional",
-          "summary": "Idempotency, deterministic equal-time event fencing, exact provider cancellation, hosted-action expiry, recovery shards, lease fences, replay windows, count-only inventory, and a checked exact-reader activation preflight exist; receipt retention, operator terminalization, and retained cutover proof remain incomplete.",
+          "summary": "Idempotency, exact provider cancellation, recovery fencing, a complete fenced count-only R2 inventory collector, and exact-reader preflight exist; receipt retention, operator terminalization, and retained production cutover proof remain incomplete.",
           "evidence": [
+            "cmd/witself-control-plane/billing_rollout_inventory_test.go",
             "docs/billing-and-limits.md",
             "docs/billing-transition-rollout.md",
+            "infra/cloudflare/control-plane/test/billing-rollout-source-fence.test.mjs",
             "internal/billing/lifecycle/billing_durability_test.go",
-            "internal/billing/lifecycle/lifecycle_test.go",
+            "internal/billing/lifecycle/rollout_inventory_test.go",
             "scripts/billing-transition-rollout-preflight.sh",
             "scripts/test-billing-transition-rollout-preflight.sh"
           ]
@@ -1006,7 +1008,7 @@
         },
         "rollout_canaries": {
           "state": "conditional",
-          "summary": "The transition foundation is deliberately dark behind an empty account cohort; Stripe test-mode product setup is partial, no retained Personal-to-Professional-to-Personal canary exists, and production charging and webhooks are disabled.",
+          "summary": "The transition foundation and fenced inventory collector are deliberately dark behind an empty account cohort; real owned HTTPS return routes and a retained Personal-to-Professional-to-Personal Stripe canary are absent, and production charging and webhooks are disabled.",
           "evidence": [
             "docs/billing-and-limits.md",
             "docs/billing-transition-rollout.md",
@@ -1015,7 +1017,7 @@
         },
         "docs_support": {
           "state": "pass",
-          "summary": "Authority boundaries, supported transition scope, durable mutation design, v0.0.254 incompatibility, inventory/quarantine, forward-fix-only cutover, and remaining provider gates are documented.",
+          "summary": "Authority boundaries, supported transition scope, durable mutation design, v0.0.254 incompatibility, the private prior/drain/BEFORE/scan/AFTER inventory ceremony, quarantine, forward-fix-only cutover, and remaining provider gates are documented.",
           "evidence": [
             "docs/billing-and-limits.md",
             "docs/billing-transition-rollout.md",
@@ -1039,7 +1041,7 @@
         {
           "id": "billing-v254-exclusive-cutover",
           "gate_ids": ["bounds_abuse", "recovery", "rollout_canaries"],
-          "summary": "Add complete audited R2 inventory collection; bind the exact-reader marker; prove an empty cohort and zero hazards; fully drain v0.0.254 API and reconcilers; forbid v0.0.254 rollback; retain activation and forward-fix evidence.",
+          "summary": "Execute the fenced complete R2 inventory against the exact production authority; bind the exact-reader release, application, and image; prove an empty cohort, zero writers, and zero hazards; fully drain v0.0.254; forbid rollback; retain cutover and forward-fix evidence.",
           "ref": "docs/billing-transition-rollout.md"
         },
         {
