@@ -884,6 +884,121 @@ test("direct Cloudflare inspector fixes every GET authority and normalizes raw C
   );
 });
 
+test("direct Cloudflare inspector fails closed on lossy Containers mappings", async (t) => {
+  const rawDeploymentID = "77777777-7777-4777-8777-777777777777";
+  const otherDeploymentID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const rawDurableObjectID = "88888888-8888-4888-8888-888888888888";
+  const rawInstance = (id = rawDeploymentID) => ({
+    id,
+    app_version: targetVersion,
+    location: "private-location",
+    created_at: "2026-08-17T21:00:00Z",
+    current_placement: { status: { container_status: "running" } },
+  });
+  const rawDurableObject = (deploymentID) => ({
+    id: rawDurableObjectID,
+    name: "private-name",
+    deployment_id: deploymentID,
+    assigned_at: "2026-08-17T20:59:00Z",
+  });
+  const inspect = (rawInstanceResult) => {
+    const provider = cloudflareFetchFixtures({ rawInstanceResult });
+    return createCloudflareBillingRolloutInspector({
+      accountID: PRODUCTION_CLOUDFLARE_ACCOUNT_ID,
+      applicationID,
+      apiToken: "test-cloudflare-read-token",
+      fetchImpl: provider.fetchImpl,
+    });
+  };
+
+  await t.test("running deployment is not dropped behind a null tombstone", async () => {
+    await assert.rejects(
+      inspect({
+        instances: [rawInstance()],
+        durable_objects: [rawDurableObject(null)],
+      }).instances(),
+      /unconsumed deployment/,
+    );
+  });
+  await t.test("non-null durable-object deployment must resolve", async () => {
+    await assert.rejects(
+      inspect({
+        instances: [rawInstance()],
+        durable_objects: [rawDurableObject(otherDeploymentID)],
+      }).instances(),
+      /unmatched durable-object deployment id/,
+    );
+  });
+  await t.test("one raw deployment cannot satisfy two durable objects", async () => {
+    await assert.rejects(
+      inspect({
+        instances: [rawInstance()],
+        durable_objects: [
+          rawDurableObject(rawDeploymentID),
+          {
+            ...rawDurableObject(rawDeploymentID),
+            id: "99999999-9999-4999-8999-999999999999",
+            name: "other-private-name",
+          },
+        ],
+      }).instances(),
+      /duplicate durable-object deployment id/,
+    );
+  });
+  await t.test("raw deployment ids are valid and unique", async () => {
+    await assert.rejects(
+      inspect({
+        instances: [rawInstance(), rawInstance()],
+        durable_objects: [rawDurableObject(rawDeploymentID)],
+      }).instances(),
+      /duplicate deployment id/,
+    );
+    await assert.rejects(
+      inspect({
+        instances: [rawInstance("not-a-deployment-id")],
+        durable_objects: [rawDurableObject("not-a-deployment-id")],
+      }).instances(),
+      /invalid deployment id/,
+    );
+  });
+  await t.test("matched deployment and exact null tombstone remain valid", async () => {
+    const inactiveDurableObjectID = "99999999-9999-4999-8999-999999999999";
+    assert.deepEqual(await inspect({
+      instances: [rawInstance()],
+      durable_objects: [
+        rawDurableObject(rawDeploymentID),
+        {
+          id: inactiveDurableObjectID,
+          name: "inactive-private-name",
+          deployment_id: null,
+          assigned_at: "2026-08-17T20:58:00Z",
+        },
+      ],
+    }).instances(), {
+      instances: [{
+        id: rawDurableObjectID,
+        name: "private-name",
+        state: "running",
+        location: "private-location",
+        version: targetVersion,
+        created: "2026-08-17T21:00:00Z",
+      }, {
+        id: inactiveDurableObjectID,
+        name: "inactive-private-name",
+        state: "inactive",
+        location: null,
+        version: null,
+        created: "2026-08-17T20:58:00Z",
+      }],
+      result_info: {
+        per_page: 100,
+        page_token: null,
+        next_page_token: null,
+      },
+    });
+  });
+});
+
 test("direct Cloudflare inspector rejects HTTP and envelope ambiguity", async (t) => {
   const validEnvelope = cloudflareEnvelope({ deployments: [deployment()] });
   const inspectWith = (fetchImpl) => createCloudflareBillingRolloutInspector({

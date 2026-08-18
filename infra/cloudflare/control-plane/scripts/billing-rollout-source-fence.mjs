@@ -426,15 +426,37 @@ function normalizedContainerInstancePage(result, resultInfo, pageToken) {
   } else {
     const instanceByDeploymentID = new Map();
     for (const instance of result.instances) {
-      if (instanceByDeploymentID.has(instance?.id)) {
+      if (!isRecord(instance) || !UUID.test(String(instance.id ?? ""))) {
+        throw new Error("container instance response had an invalid deployment id");
+      }
+      if (instanceByDeploymentID.has(instance.id)) {
         throw new Error("container instance response had a duplicate deployment id");
       }
-      instanceByDeploymentID.set(instance?.id, instance);
+      instanceByDeploymentID.set(instance.id, instance);
     }
+    const consumedDeploymentIDs = new Set();
     rows = durableObjects.map((durableObject) => {
-      const instance = durableObject?.deployment_id
-        ? instanceByDeploymentID.get(durableObject.deployment_id)
-        : undefined;
+      const deploymentID = durableObject?.deployment_id;
+      let instance;
+      if (deploymentID !== null) {
+        if (!UUID.test(String(deploymentID ?? ""))) {
+          throw new Error(
+            "container instance response had an invalid durable-object deployment id",
+          );
+        }
+        instance = instanceByDeploymentID.get(deploymentID);
+        if (instance === undefined) {
+          throw new Error(
+            "container instance response had an unmatched durable-object deployment id",
+          );
+        }
+        if (consumedDeploymentIDs.has(deploymentID)) {
+          throw new Error(
+            "container instance response had a duplicate durable-object deployment id",
+          );
+        }
+        consumedDeploymentIDs.add(deploymentID);
+      }
       return {
         id: durableObject?.id ?? instance?.id ?? null,
         name: durableObject?.name ?? null,
@@ -446,6 +468,11 @@ function normalizedContainerInstancePage(result, resultInfo, pageToken) {
         created: instance?.created_at ?? durableObject?.assigned_at ?? null,
       };
     });
+    if (consumedDeploymentIDs.size !== instanceByDeploymentID.size) {
+      throw new Error(
+        "container instance response had an unconsumed deployment",
+      );
+    }
   }
   return Object.freeze({
     instances: rows,
