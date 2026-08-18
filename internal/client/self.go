@@ -131,6 +131,7 @@ type SelfAgentEntitlements struct {
 	RetentionDays  *SelfAgentRetentionDays       `json:"retention_days,omitempty"`
 }
 
+// UnmarshalJSON decodes only the exact closed entitlement projection keys.
 func (e *SelfAgentEntitlements) UnmarshalJSON(data []byte) error {
 	*e = SelfAgentEntitlements{}
 	var fields map[string]json.RawMessage
@@ -159,6 +160,7 @@ func (e *SelfAgentEntitlements) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// SelfAgentEntitlementFeatures is the closed set of agent-domain feature gates.
 type SelfAgentEntitlementFeatures struct {
 	Memory            bool `json:"memory"`
 	Facts             bool `json:"facts"`
@@ -170,6 +172,7 @@ type SelfAgentEntitlementFeatures struct {
 	complete          bool
 }
 
+// SelfAgentRetentionDays contains the closed set of agent-visible retention policies.
 type SelfAgentRetentionDays struct {
 	TranscriptRetentionDays *int64 `json:"transcript_retention_days"`
 	MessageRetentionDays    *int64 `json:"message_retention_days"`
@@ -177,6 +180,7 @@ type SelfAgentRetentionDays struct {
 	complete                bool
 }
 
+// UnmarshalJSON decodes only exact required feature keys and types.
 func (f *SelfAgentEntitlementFeatures) UnmarshalJSON(data []byte) error {
 	*f = SelfAgentEntitlementFeatures{}
 	var fields map[string]json.RawMessage
@@ -199,6 +203,7 @@ func (f *SelfAgentEntitlementFeatures) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// UnmarshalJSON decodes only exact required retention keys and types.
 func (r *SelfAgentRetentionDays) UnmarshalJSON(data []byte) error {
 	*r = SelfAgentRetentionDays{}
 	var fields map[string]json.RawMessage
@@ -214,10 +219,12 @@ func (r *SelfAgentRetentionDays) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// Complete reports whether every closed feature field decoded successfully.
 func (f *SelfAgentEntitlementFeatures) Complete() bool {
 	return f != nil && f.complete
 }
 
+// Complete reports whether every closed retention field decoded successfully.
 func (r *SelfAgentRetentionDays) Complete() bool {
 	return r != nil && r.complete
 }

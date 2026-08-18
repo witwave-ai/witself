@@ -1155,11 +1155,16 @@ type SelfDigest struct {
 }
 
 const (
+	// SelfAgentEntitlementsSchema identifies the closed projection wire version.
 	SelfAgentEntitlementsSchema = "witself.agent-entitlements.v1"
+	// SelfAgentEntitlementsSource identifies the cell-applied snapshot authority.
 	SelfAgentEntitlementsSource = "cell_applied_snapshot"
 
-	SelfAgentEntitlementsApplied     = "applied"
-	SelfAgentEntitlementsUnmanaged   = "unmanaged"
+	// SelfAgentEntitlementsApplied marks an available applied projection.
+	SelfAgentEntitlementsApplied = "applied"
+	// SelfAgentEntitlementsUnmanaged marks a cell without a managed plan snapshot.
+	SelfAgentEntitlementsUnmanaged = "unmanaged"
+	// SelfAgentEntitlementsUnavailable marks a projection that cannot be safely reported.
 	SelfAgentEntitlementsUnavailable = "unavailable"
 
 	maxSelfEnforcedPlanIDBytes = 64
