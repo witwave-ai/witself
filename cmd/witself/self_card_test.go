@@ -51,7 +51,8 @@ func TestSelfCardJSONUsesIdentityOnlySelfAndOmitsCreativePayloads(t *testing.T) 
 			selfCalls++
 			for _, key := range []string{
 				"include_facts", "include_salient", "include_counts", "include_checkpoint",
-				"include_message_checkpoint", "include_email_checkpoint", "include_avatar_checkpoint", "include_sensitive",
+				"include_message_checkpoint", "include_email_checkpoint", "include_avatar_checkpoint",
+				"include_plan_entitlements", "include_sensitive",
 			} {
 				if got := r.URL.Query().Get(key); got != "false" {
 					t.Errorf("%s = %q, want false", key, got)

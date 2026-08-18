@@ -14,6 +14,7 @@ import (
 	"net/http"
 	neturl "net/url"
 	"os"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -458,6 +459,10 @@ type Config struct {
 	GetSelfMemoryCheckpoint        func(ctx context.Context, p DomainPrincipal) (*SelfMemoryCheckpoint, error)
 	GetSelfMessageCheckpoint       func(ctx context.Context, p DomainPrincipal) (*SelfMessageCheckpoint, error)
 	GetSelfAvatarCheckpoint        func(ctx context.Context, p DomainPrincipal) (*SelfAvatarCheckpoint, error)
+	// GetSelfPlanEntitlements projects only the exact account snapshot already
+	// accepted and enforced by this cell. It must never consult a plan catalog,
+	// billing provider, control plane, or caller-supplied account selector.
+	GetSelfPlanEntitlements func(ctx context.Context, p DomainPrincipal) (*SelfAgentEntitlements, error)
 
 	// Per-agent dashboard UI preferences: the local dashboard's single write
 	// surface. Both callbacks receive only the exact bearer-token-derived
@@ -1131,8 +1136,8 @@ type DomainPrincipal struct {
 type PrincipalAuthFunc func(ctx context.Context, token string) (DomainPrincipal, bool, error)
 
 // SelfDigest is the bounded, token-derived agent identity and open-plane
-// session-start view returned by GET /v1/self. Facts and memories are empty in
-// the identity-only slice and can be populated without changing this envelope.
+// session-start view returned by GET /v1/self. Facts, memories, checkpoints,
+// and the closed cell-applied plan projection are independently selectable.
 type SelfDigest struct {
 	SchemaVersion     string                 `json:"schema_version"`
 	Identity          SelfIdentity           `json:"identity"`
@@ -1144,8 +1149,126 @@ type SelfDigest struct {
 	MessageCheckpoint *SelfMessageCheckpoint `json:"message_checkpoint,omitempty"`
 	EmailCheckpoint   *AgentEmailCheckpoint  `json:"email_checkpoint,omitempty"`
 	AvatarCheckpoint  *SelfAvatarCheckpoint  `json:"avatar_checkpoint,omitempty"`
+	PlanEntitlements  *SelfAgentEntitlements `json:"plan_entitlements,omitempty"`
 	Index             SelfIndex              `json:"index"`
 	Elided            bool                   `json:"elided"`
+}
+
+const (
+	SelfAgentEntitlementsSchema = "witself.agent-entitlements.v1"
+	SelfAgentEntitlementsSource = "cell_applied_snapshot"
+
+	SelfAgentEntitlementsApplied     = "applied"
+	SelfAgentEntitlementsUnmanaged   = "unmanaged"
+	SelfAgentEntitlementsUnavailable = "unavailable"
+
+	maxSelfEnforcedPlanIDBytes = 64
+)
+
+var selfEnforcedPlanIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// SelfAgentEntitlements is the closed, value-free agent-domain projection of
+// the account plan snapshot this cell actually enforces. The applied shape is
+// intentionally narrower than the stored snapshot: it contains no limits,
+// revisions, hashes, provider state, billing state, URLs, pending transition,
+// account administration, or cross-agent usage.
+type SelfAgentEntitlements struct {
+	SchemaVersion  string                        `json:"schema_version"`
+	State          string                        `json:"state"`
+	Source         string                        `json:"source"`
+	EnforcedPlanID string                        `json:"enforced_plan_id,omitempty"`
+	Features       *SelfAgentEntitlementFeatures `json:"features,omitempty"`
+	RetentionDays  *SelfAgentRetentionDays       `json:"retention_days,omitempty"`
+}
+
+// SelfAgentEntitlementFeatures is a closed enforced-behavior vocabulary.
+// Unknown stored features never cross the self-digest boundary; rollout-marker
+// compatibility is resolved before these booleans reach the handler.
+type SelfAgentEntitlementFeatures struct {
+	Memory            bool `json:"memory"`
+	Facts             bool `json:"facts"`
+	Secrets           bool `json:"secrets"`
+	Messaging         bool `json:"messaging"`
+	Collaboration     bool `json:"collaboration"`
+	AgentEmailReceive bool `json:"agent_email_receive"`
+	AgentEmailSend    bool `json:"agent_email_send"`
+}
+
+// SelfAgentRetentionDays carries only the three agent-domain retention
+// policies. A nil value is encoded as JSON null and means indefinite.
+type SelfAgentRetentionDays struct {
+	TranscriptRetentionDays *int64 `json:"transcript_retention_days"`
+	MessageRetentionDays    *int64 `json:"message_retention_days"`
+	AgentEmailRetentionDays *int64 `json:"agent_email_retention_days"`
+}
+
+func unavailableSelfAgentEntitlements() *SelfAgentEntitlements {
+	return &SelfAgentEntitlements{
+		SchemaVersion: SelfAgentEntitlementsSchema,
+		State:         SelfAgentEntitlementsUnavailable,
+		Source:        SelfAgentEntitlementsSource,
+	}
+}
+
+// normalizeSelfAgentEntitlements makes the HTTP boundary authoritative for
+// this closed schema even when an embedder supplies a malformed callback
+// result. Unmanaged and unavailable states never retain plan-specific fields;
+// malformed applied state degrades to unavailable rather than reflecting an
+// unbounded identifier or implying entitlements the cell cannot prove.
+func normalizeSelfAgentEntitlements(in *SelfAgentEntitlements) *SelfAgentEntitlements {
+	switch in.State {
+	case SelfAgentEntitlementsUnmanaged:
+		return &SelfAgentEntitlements{
+			SchemaVersion: SelfAgentEntitlementsSchema,
+			State:         SelfAgentEntitlementsUnmanaged,
+			Source:        SelfAgentEntitlementsSource,
+		}
+	case SelfAgentEntitlementsUnavailable:
+		return unavailableSelfAgentEntitlements()
+	case SelfAgentEntitlementsApplied:
+	default:
+		return unavailableSelfAgentEntitlements()
+	}
+	if len(in.EnforcedPlanID) == 0 || len(in.EnforcedPlanID) > maxSelfEnforcedPlanIDBytes ||
+		!selfEnforcedPlanIDPattern.MatchString(in.EnforcedPlanID) ||
+		in.Features == nil || in.RetentionDays == nil ||
+		!validSelfRetentionDays(in.RetentionDays.TranscriptRetentionDays, plans.MaxTranscriptRetentionDays) ||
+		!validSelfRetentionDays(in.RetentionDays.MessageRetentionDays, plans.MaxMessageRetentionDays) ||
+		!validSelfRetentionDays(in.RetentionDays.AgentEmailRetentionDays, plans.MaxAgentEmailRetentionDays) {
+		return unavailableSelfAgentEntitlements()
+	}
+	return &SelfAgentEntitlements{
+		SchemaVersion:  SelfAgentEntitlementsSchema,
+		State:          SelfAgentEntitlementsApplied,
+		Source:         SelfAgentEntitlementsSource,
+		EnforcedPlanID: in.EnforcedPlanID,
+		Features: &SelfAgentEntitlementFeatures{
+			Memory:            in.Features.Memory,
+			Facts:             in.Features.Facts,
+			Secrets:           in.Features.Secrets,
+			Messaging:         in.Features.Messaging,
+			Collaboration:     in.Features.Collaboration,
+			AgentEmailReceive: in.Features.AgentEmailReceive,
+			AgentEmailSend:    in.Features.AgentEmailSend,
+		},
+		RetentionDays: &SelfAgentRetentionDays{
+			TranscriptRetentionDays: cloneInt64(in.RetentionDays.TranscriptRetentionDays),
+			MessageRetentionDays:    cloneInt64(in.RetentionDays.MessageRetentionDays),
+			AgentEmailRetentionDays: cloneInt64(in.RetentionDays.AgentEmailRetentionDays),
+		},
+	}
+}
+
+func validSelfRetentionDays(value *int64, maximum int64) bool {
+	return value == nil || (*value >= 1 && *value <= maximum)
+}
+
+func cloneInt64(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 // SelfMemoryCheckpoint is an authenticated, value-free pointer to unfinished
@@ -2435,6 +2558,7 @@ func apiMux(cfg Config) http.Handler {
 			cfg.RequireAgentEmailEntitlement,
 			cfg.GetSelfAgentEmailCheckpoint,
 			cfg.GetSelfAvatarCheckpoint,
+			cfg.GetSelfPlanEntitlements,
 		))
 		if cfg.ListSelfPeers != nil {
 			mux.HandleFunc("GET /v1/self/peers", selfPeersHandler(cfg.AuthenticatePrincipal, cfg.ListSelfPeers))
@@ -3170,6 +3294,7 @@ func selfHandler(
 	requireEmailEntitlement func(context.Context, DomainPrincipal) error,
 	getEmailCheckpoint func(context.Context, DomainPrincipal) (AgentEmailCheckpoint, error),
 	getAvatarCheckpoint func(context.Context, DomainPrincipal) (*SelfAvatarCheckpoint, error),
+	getPlanEntitlements func(context.Context, DomainPrincipal) (*SelfAgentEntitlements, error),
 ) http.HandlerFunc {
 	return requireDomainPrincipal(auth, func(w http.ResponseWriter, r *http.Request, p DomainPrincipal) {
 		// Self digests can contain durable personal context and must never be
@@ -3180,7 +3305,13 @@ func selfHandler(
 			return
 		}
 		q := r.URL.Query()
-		for _, name := range []string{"include_facts", "include_salient", "include_counts", "include_checkpoint", "include_message_checkpoint", "include_email_checkpoint", "include_avatar_checkpoint", "include_sensitive", "observational"} {
+		for _, name := range []string{"account", "account_id"} {
+			if q.Has(name) {
+				writeJSONError(w, http.StatusBadRequest, "self digest does not accept an account selector")
+				return
+			}
+		}
+		for _, name := range []string{"include_facts", "include_salient", "include_counts", "include_checkpoint", "include_message_checkpoint", "include_email_checkpoint", "include_avatar_checkpoint", "include_plan_entitlements", "include_sensitive", "observational"} {
 			if value := q.Get(name); value != "" {
 				if _, err := strconv.ParseBool(value); err != nil {
 					writeJSONError(w, http.StatusBadRequest, name+" must be true or false")
@@ -3297,6 +3428,19 @@ func selfHandler(
 				// Avatar lifecycle state is additive and value-free. Preserve the
 				// authenticated digest while making projection failure explicit.
 				avatarCheckpoint = &SelfAvatarCheckpoint{Unavailable: true}
+			}
+		}
+		includePlanEntitlements := false
+		if raw := q.Get("include_plan_entitlements"); raw != "" {
+			includePlanEntitlements, _ = strconv.ParseBool(raw)
+		}
+		var planEntitlements *SelfAgentEntitlements
+		if includePlanEntitlements && getPlanEntitlements != nil {
+			projected, err := getPlanEntitlements(r.Context(), p)
+			if err != nil || projected == nil {
+				planEntitlements = unavailableSelfAgentEntitlements()
+			} else {
+				planEntitlements = normalizeSelfAgentEntitlements(projected)
 			}
 		}
 
@@ -3447,6 +3591,7 @@ func selfHandler(
 			MessageCheckpoint: messageCheckpoint,
 			EmailCheckpoint:   emailCheckpoint,
 			AvatarCheckpoint:  avatarCheckpoint,
+			PlanEntitlements:  planEntitlements,
 			Index: SelfIndex{Kinds: kinds, Tags: tags, Counts: func() map[string]int {
 				if !includeCounts {
 					return map[string]int{}

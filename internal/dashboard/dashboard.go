@@ -2,6 +2,8 @@
 // mounted by `witself dashboard serve` (ADR 0004). Every route is a thin
 // authenticated proxy over the public /v1 read API using the agent's own
 // token: self digests, transcripts, and fact lists use observational reads,
+// the enforced-plan card is rebuilt from the self digest's closed
+// cell-applied entitlement block,
 // messages use the passive metadata-only list, receive-only email uses only
 // its address and passive metadata list, and sent email uses only the bounded
 // owner outbox list (both email directions have strict browser allow-lists),
@@ -135,7 +137,12 @@ const (
 	// SELECTs — unlike the field :access route, they write no audit event
 	// and no usage row — so polling cannot spam the value-free ledger.
 	sseSecretPageLimit = 100
+
+	maxDashboardPlanIDBytes   = 64
+	maxDashboardRetentionDays = int64(36_500)
 )
+
+var dashboardPlanIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 // maxSSEConnections caps concurrent /api/events streams. A var only so tests
 // can lower it; Register snapshots it into the connection semaphore.
@@ -460,7 +467,8 @@ type selfEnvelope struct {
 }
 
 // dashboardSelfOptions is the exact bounded digest the dashboard renders:
-// no fact values, salient memories, counts, and the value-free checkpoints.
+// no fact values, salient memories, counts, value-free checkpoints, and the
+// closed cell-applied plan entitlement projection.
 var dashboardSelfOptions = client.SelfOptions{
 	Observational:            true,
 	IncludeFacts:             false,
@@ -470,6 +478,7 @@ var dashboardSelfOptions = client.SelfOptions{
 	IncludeMessageCheckpoint: true,
 	IncludeEmailCheckpoint:   true,
 	IncludeAvatarCheckpoint:  true,
+	IncludePlanEntitlements:  true,
 }
 
 // fetchSelf reads the observational self digest, degrading exactly once to a
@@ -503,12 +512,77 @@ func isObservationalUnavailable(err error) bool {
 }
 
 func (cfg Config) selfEnvelope(digest client.SelfDigest, observational bool) selfEnvelope {
+	// Rebuild the entitlement block even though the client decoder is typed.
+	// This is the explicit browser allow-list boundary: no future upstream
+	// snapshot field can reach the page merely by being added to a shared type.
+	digest.PlanEntitlements = sanitizeSelfAgentEntitlements(digest.PlanEntitlements)
 	return selfEnvelope{
 		SelfDigest:     digest,
 		Observational:  observational,
 		Version:        cfg.Version,
 		PollIntervalMS: cfg.PollInterval.Milliseconds(),
 	}
+}
+
+func sanitizeSelfAgentEntitlements(in *client.SelfAgentEntitlements) *client.SelfAgentEntitlements {
+	if in == nil {
+		return nil // pre-feature cell: omit the whole compatibility block
+	}
+	base := &client.SelfAgentEntitlements{
+		SchemaVersion: "witself.agent-entitlements.v1",
+		State:         "unavailable",
+		Source:        "cell_applied_snapshot",
+	}
+	if in.SchemaVersion != base.SchemaVersion || in.Source != base.Source {
+		return base
+	}
+	switch in.State {
+	case "unmanaged":
+		base.State = "unmanaged"
+		return base
+	case "unavailable":
+		return base
+	case "applied":
+	default:
+		return base
+	}
+	if len(in.EnforcedPlanID) == 0 || len(in.EnforcedPlanID) > maxDashboardPlanIDBytes ||
+		!dashboardPlanIDPattern.MatchString(in.EnforcedPlanID) ||
+		!in.Features.Complete() || !in.RetentionDays.Complete() ||
+		!validDashboardRetentionDays(in.RetentionDays.TranscriptRetentionDays) ||
+		!validDashboardRetentionDays(in.RetentionDays.MessageRetentionDays) ||
+		!validDashboardRetentionDays(in.RetentionDays.AgentEmailRetentionDays) {
+		return base
+	}
+	base.State = "applied"
+	base.EnforcedPlanID = in.EnforcedPlanID
+	base.Features = &client.SelfAgentEntitlementFeatures{
+		Memory:            in.Features.Memory,
+		Facts:             in.Features.Facts,
+		Secrets:           in.Features.Secrets,
+		Messaging:         in.Features.Messaging,
+		Collaboration:     in.Features.Collaboration,
+		AgentEmailReceive: in.Features.AgentEmailReceive,
+		AgentEmailSend:    in.Features.AgentEmailSend,
+	}
+	base.RetentionDays = &client.SelfAgentRetentionDays{
+		TranscriptRetentionDays: cloneDashboardInt64(in.RetentionDays.TranscriptRetentionDays),
+		MessageRetentionDays:    cloneDashboardInt64(in.RetentionDays.MessageRetentionDays),
+		AgentEmailRetentionDays: cloneDashboardInt64(in.RetentionDays.AgentEmailRetentionDays),
+	}
+	return base
+}
+
+func validDashboardRetentionDays(value *int64) bool {
+	return value == nil || (*value >= 1 && *value <= maxDashboardRetentionDays)
+}
+
+func cloneDashboardInt64(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 func selfHandler(cfg Config) http.Handler {

@@ -29,7 +29,7 @@ too. Its sole write is its own size-capped, validated theme preference.
 
 | Panel | Presented | Deliberately absent |
 |---|---|---|
-| Overview | Agent identity, avatar, value-free checkpoints, salient-memory summaries, and memory/fact capacity | Domain mutations, account administration, billing, and feature-progress authority |
+| Overview | Agent identity, avatar, value-free checkpoints, salient-memory summaries, memory/fact capacity, and the cell-applied enforced plan plus closed agent-domain entitlement and retention projection | Domain mutations; account, subscription, payment, provider, pending-transition, and billing administration; cross-agent usage; feature-progress authority |
 | Transcripts | Observational transcript inventory and entries | Append, retention-policy changes, and evidence mutation |
 | Facts | Observational redacted inventory and history; one explicit exact reveal where authorized | Set, propose, confirm, reject, or delete |
 | Memories | Redacted inventory, detail, version history, and evidence | Create, adjust, curate, supersede, forget, restore, or delete |
@@ -58,6 +58,34 @@ not-enrolled, or unavailable state instead of a generic broken panel. A later
 plan or account-policy change takes effect through the same installed command;
 no Console reinstall is required.
 
+The Overview requests `include_plan_entitlements=true` on that token-bound
+`GET /v1/self` read. A current cell returns the closed
+`witself.agent-entitlements.v1` block sourced only from its already-applied
+account snapshot:
+
+- `state` is `applied`, `unmanaged`, or `unavailable`, and `source` is always
+  `cell_applied_snapshot`; a pre-feature cell omits the whole block;
+- `enforced_plan_id` is a bounded clean identifier and appears only for
+  `applied`;
+- `features` contains exactly `memory`, `facts`, `secrets`, `messaging`,
+  `collaboration`, `agent_email_receive`, and `agent_email_send` booleans;
+- `retention_days` contains exactly `transcript_retention_days`,
+  `message_retention_days`, and `agent_email_retention_days`; JSON `null`
+  means indefinite.
+
+The cell makes no control-plane, catalog, or billing-provider call for this
+projection. The browser proxy rebuilds it through a second explicit allow
+list, and the Overview card has no action target. Subscription state, payment
+method, provider details, revisions, hashes, URLs, pending changes, reasons,
+admin/support state, limits, and account or cross-agent usage do not enter the
+browser.
+
+The `messaging` and `agent_email_receive` booleans reuse their production
+entitlement-version marker logic, including the bounded legacy rule that an
+applied snapshot predating the marker remains allowed until a modern snapshot
+lands. The card therefore reports what the current cell enforces, not merely
+raw feature-array membership.
+
 The Console may be accepted as a presentation surface while a domain feature
 remains limited or dark, provided it accurately shows the applicable disabled
 or unavailable state. Domain readiness remains on that domain's feature-status
@@ -85,7 +113,9 @@ Current release acceptance must retain macOS, Linux, and Windows evidence for:
   and strict absence of bodies, ids, provider payloads, and action targets;
 - disabled, not-enrolled, pre-feature, and temporarily unavailable states;
 - token isolation, redaction, untrusted-text rendering, SSE and pagination
-  bounds, stale-registry recovery, and theme-preference persistence.
+  bounds, live cell-applied entitlement refresh, old/unmanaged/unavailable
+  entitlement states, stale-registry recovery, and theme-preference
+  persistence.
 
 The feature remains conditional until that release-specific cross-platform
 artifact is retained in the canonical scorecard evidence.

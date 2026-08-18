@@ -635,6 +635,44 @@
       '<div class="dim">' + esc(remaining) + " remaining · existing-fact updates and separately authorized deletion remain available at the limit</div></div>";
   }
 
+  function planEntitlementsHTML(entitlements) {
+    var title = '<div class="panel"><h2>Enforced plan &amp; entitlements</h2>';
+    if (!entitlements) {
+      return title + '<div class="dim">applied entitlement projection is not available on this cell version</div></div>';
+    }
+    if (entitlements.state === "unmanaged") {
+      return title + '<div class="capacity-line"><span class="badge">unmanaged</span></div>' +
+        '<div class="dim">this cell has no applied plan snapshot; no plan is implied</div></div>';
+    }
+    if (entitlements.state !== "applied") {
+      return title + '<div class="capacity-line"><span class="badge">unavailable</span></div>' +
+        '<div class="dim">cell-applied entitlement status is temporarily unavailable</div></div>';
+    }
+    var features = entitlements.features || {};
+    var featureKeys = [
+      "memory", "facts", "secrets", "messaging", "collaboration",
+      "agent_email_receive", "agent_email_send",
+    ];
+    var featureRows = featureKeys.map(function (key) {
+      return '<div class="row"><span class="grow mono">' + esc(key) + '</span><span class="badge">' +
+        (features[key] === true ? "enabled" : "disabled") + "</span></div>";
+    }).join("");
+    var retention = entitlements.retention_days || {};
+    var retentionKeys = [
+      "transcript_retention_days", "message_retention_days", "agent_email_retention_days",
+    ];
+    var retentionRows = retentionKeys.map(function (key) {
+      var value = retention[key];
+      var label = value == null ? "indefinite" : (Number.isInteger(value) && value > 0 ? value + " days" : "unavailable");
+      return '<div class="row"><span class="grow mono">' + esc(key) + '</span><span class="dim">' + esc(label) + "</span></div>";
+    }).join("");
+    return title + '<div class="capacity-line"><span class="mono">' + esc(entitlements.enforced_plan_id || "") +
+      '</span><span class="badge">applied</span></div>' +
+      '<h3>features</h3><div class="list">' + featureRows + "</div>" +
+      '<h3>retention</h3><div class="list">' + retentionRows + "</div>" +
+      '<div class="dim">source: cell-applied snapshot · display only</div></div>';
+  }
+
   function renderOverview(self) {
     var counts = (self.index && self.index.counts) || {};
     var cards = Object.keys(counts).sort().map(function (key) {
@@ -655,6 +693,7 @@
     if (self.avatar_checkpoint && self.avatar_checkpoint.pending) { checkpoints.push({ label: "avatar lifecycle pending" }); }
     $("view").innerHTML =
       '<div class="panel"><h2>inventory</h2><div class="cards">' + (cards || '<span class="empty">no counts</span>') + "</div></div>" +
+      planEntitlementsHTML(self.plan_entitlements) +
       factCapacityHTML(self.fact_capacity) +
       memoryCapacityHTML(self.memory_capacity) +
       '<div class="panel"><h2>salient memories</h2><div class="list">' + (salient || '<div class="empty">none</div>') + "</div></div>" +
@@ -1737,6 +1776,7 @@
       emailPayloadRetentionWarning: emailPayloadRetentionWarning,
       factCapacityHTML: factCapacityHTML,
       memoryCapacityHTML: memoryCapacityHTML,
+      planEntitlementsHTML: planEntitlementsHTML,
       applyEmailCheckpoint: function (checkpoint) {
         var change = updateEmailAddressFromCheckpoint(checkpoint);
         if (!change || parseHash().section !== "email") { return null; }

@@ -1335,7 +1335,25 @@ POST /v1/memories:consolidate # superseded target; not implemented
   what to include (`include_facts`, `include_salient`, `salient_limit`,
   `max_bytes`, `include_counts`, `include_checkpoint`,
   `include_message_checkpoint`, `include_email_checkpoint`,
-  `include_avatar_checkpoint`, and `include_sensitive`). Each checkpoint is
+  `include_avatar_checkpoint`, `include_plan_entitlements`, and
+  `include_sensitive`). `include_plan_entitlements` defaults false. When true
+  on a current cell, the agent-token-only response adds
+  `plan_entitlements`; an older cell ignores the selector and omits the block.
+  The block schema is `witself.agent-entitlements.v1`, its source is
+  `cell_applied_snapshot`, and its state is `applied`, `unmanaged`, or
+  `unavailable`. Applied state alone includes a bounded `enforced_plan_id`,
+  the closed booleans `memory`, `facts`, `secrets`, `messaging`,
+  `collaboration`, `agent_email_receive`, and `agent_email_send`, and the three
+  retention-day keys `transcript_retention_days`, `message_retention_days`,
+  and `agent_email_retention_days` (`null` means indefinite). It is projected
+  only from the token account's already-applied cell snapshot and performs no
+  control-plane, catalog, billing, provider, or caller-selected account read;
+  `account` and `account_id` selectors are rejected.
+  Subscription/payment/provider/pending-transition details, reasons, URLs,
+  revisions, hashes, limits, admin/support state, and account or cross-agent
+  usage are absent. The messaging and inbound-email booleans use the exact
+  production entitlement-marker interpretation, including the missing-marker
+  legacy allow for an applied pre-entitlement snapshot. Each checkpoint is
   additive and independently fails open with `unavailable:true`; none is
   source content or authority. Both capacity projections are value-free and
   additive. `fact_capacity` reports current-fact pressure without authorizing

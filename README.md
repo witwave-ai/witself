@@ -539,6 +539,10 @@ existing agent-driven CLI and MCP workflows, and the Console reflects the
 resulting state through observational or passive reads. Its only write is the
 narrowly scoped theme
 preference described in [ADR 0004](docs/decisions/0004-local-agent-dashboard.md).
+The Overview also shows the bounded enforced plan, closed agent-domain feature
+booleans, and retention days from the token account's cell-applied snapshot;
+it performs no billing/control-plane read and exposes no subscription,
+payment, provider, pending-change, admin, or cross-agent usage detail.
 
 The listener binds `127.0.0.1` only and requires the per-process tokened URL
 printed at startup; `status` and `stop` manage running Consoles from the same

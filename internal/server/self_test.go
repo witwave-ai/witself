@@ -599,6 +599,8 @@ func TestSelfDigestAuthorizationAndBounds(t *testing.T) {
 			return DomainPrincipal{Kind: PrincipalKindOperator, ID: "opr_1", AccountID: "acc_1", AccountStatus: "active"}, true, nil
 		case "suspended-token":
 			return DomainPrincipal{Kind: PrincipalKindAgent, ID: "agent_1", AccountID: "acc_1", AccountStatus: "suspended"}, true, nil
+		case "curator-token":
+			return DomainPrincipal{Kind: PrincipalKindAgent, ID: "agent_1", AccountID: "acc_1", RealmID: "realm_1", AccountStatus: "active", AccessProfile: AccessProfileCuratorPreview}, true, nil
 		default:
 			return DomainPrincipal{}, false, nil
 		}
@@ -615,12 +617,15 @@ func TestSelfDigestAuthorizationAndBounds(t *testing.T) {
 		{name: "missing token", path: "/v1/self", want: http.StatusUnauthorized},
 		{name: "invalid token", path: "/v1/self", token: "invalid", want: http.StatusUnauthorized},
 		{name: "operator", path: "/v1/self", token: "operator-token", want: http.StatusForbidden},
+		{name: "restricted profile", path: "/v1/self?include_plan_entitlements=true", token: "curator-token", want: http.StatusForbidden},
 		{name: "suspended account", path: "/v1/self", token: "suspended-token", want: http.StatusForbidden},
 		{name: "bad boolean", path: "/v1/self?include_facts=perhaps", token: "agent-token", want: http.StatusBadRequest},
 		{name: "bad count boolean", path: "/v1/self?include_counts=perhaps", token: "agent-token", want: http.StatusBadRequest},
 		{name: "bad checkpoint boolean", path: "/v1/self?include_checkpoint=perhaps", token: "agent-token", want: http.StatusBadRequest},
 		{name: "bad message checkpoint boolean", path: "/v1/self?include_message_checkpoint=perhaps", token: "agent-token", want: http.StatusBadRequest},
 		{name: "bad email checkpoint boolean", path: "/v1/self?include_email_checkpoint=perhaps", token: "agent-token", want: http.StatusBadRequest},
+		{name: "bad plan entitlements boolean", path: "/v1/self?include_plan_entitlements=perhaps", token: "agent-token", want: http.StatusBadRequest},
+		{name: "account selector", path: "/v1/self?account_id=acc_other", token: "agent-token", want: http.StatusBadRequest},
 		{name: "bad sensitive boolean", path: "/v1/self?include_sensitive=perhaps", token: "agent-token", want: http.StatusBadRequest},
 		{name: "bad salient limit", path: "/v1/self?salient_limit=101", token: "agent-token", want: http.StatusBadRequest},
 		{name: "bad max bytes", path: "/v1/self?max_bytes=100", token: "agent-token", want: http.StatusBadRequest},
@@ -633,6 +638,215 @@ func TestSelfDigestAuthorizationAndBounds(t *testing.T) {
 				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.want)
 			}
 		})
+	}
+}
+
+func TestSelfDigestPlanEntitlementsAreOptInAgentScopedAndClosed(t *testing.T) {
+	auth := func(_ context.Context, token string) (DomainPrincipal, bool, error) {
+		if token != "agent-token" {
+			return DomainPrincipal{}, false, nil
+		}
+		return DomainPrincipal{
+			Kind: PrincipalKindAgent, ID: "agent_1", AgentName: "scott",
+			AccountID: "acc_token", RealmID: "realm_token", RealmName: "default",
+			AccountStatus: "active",
+		}, true, nil
+	}
+	transcriptDays, messageDays := int64(90), int64(30)
+	calls := 0
+	var callbackPrincipal DomainPrincipal
+	srv := httptest.NewServer(apiMux(Config{
+		AuthenticatePrincipal: auth,
+		GetSelfPlanEntitlements: func(_ context.Context, p DomainPrincipal) (*SelfAgentEntitlements, error) {
+			calls++
+			callbackPrincipal = p
+			return &SelfAgentEntitlements{
+				// The handler owns these constants and must normalize spoofed values.
+				SchemaVersion: "spoofed", State: SelfAgentEntitlementsApplied, Source: "billing_provider",
+				EnforcedPlanID: "standard",
+				Features: &SelfAgentEntitlementFeatures{
+					Memory: true, Facts: true, Secrets: true, Messaging: true,
+					Collaboration: true, AgentEmailReceive: true,
+				},
+				RetentionDays: &SelfAgentRetentionDays{
+					TranscriptRetentionDays: &transcriptDays,
+					MessageRetentionDays:    &messageDays,
+					AgentEmailRetentionDays: nil,
+				},
+			}, nil
+		},
+	}))
+	defer srv.Close()
+
+	resp := selfRequest(t, srv.URL+"/v1/self?include_plan_entitlements=false", "agent-token")
+	defer closeBody(t, resp)
+	var omitted map[string]json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&omitted); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("opt-out callback calls = %d, want 0", calls)
+	}
+	if _, exists := omitted["plan_entitlements"]; exists {
+		t.Fatal("opt-out response contains plan_entitlements")
+	}
+
+	resp = selfRequest(t, srv.URL+"/v1/self?include_plan_entitlements=true", "agent-token")
+	defer closeBody(t, resp)
+	var root map[string]json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&root); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || callbackPrincipal.Kind != PrincipalKindAgent ||
+		callbackPrincipal.ID != "agent_1" || callbackPrincipal.AccountID != "acc_token" ||
+		callbackPrincipal.RealmID != "realm_token" {
+		t.Fatalf("callback calls/principal = %d / %#v", calls, callbackPrincipal)
+	}
+	var block map[string]json.RawMessage
+	if err := json.Unmarshal(root["plan_entitlements"], &block); err != nil {
+		t.Fatal(err)
+	}
+	assertExactJSONKeys(t, block, "schema_version", "state", "source", "enforced_plan_id", "features", "retention_days")
+	if string(block["schema_version"]) != `"witself.agent-entitlements.v1"` ||
+		string(block["state"]) != `"applied"` || string(block["source"]) != `"cell_applied_snapshot"` ||
+		string(block["enforced_plan_id"]) != `"standard"` {
+		t.Fatalf("normalized block = %s", root["plan_entitlements"])
+	}
+	var features map[string]json.RawMessage
+	if err := json.Unmarshal(block["features"], &features); err != nil {
+		t.Fatal(err)
+	}
+	assertExactJSONKeys(t, features, "memory", "facts", "secrets", "messaging", "collaboration", "agent_email_receive", "agent_email_send")
+	if string(features["agent_email_send"]) != "false" {
+		t.Fatalf("closed false feature = %s", features["agent_email_send"])
+	}
+	var retention map[string]json.RawMessage
+	if err := json.Unmarshal(block["retention_days"], &retention); err != nil {
+		t.Fatal(err)
+	}
+	assertExactJSONKeys(t, retention, "transcript_retention_days", "message_retention_days", "agent_email_retention_days")
+	if string(retention["transcript_retention_days"]) != "90" ||
+		string(retention["message_retention_days"]) != "30" ||
+		string(retention["agent_email_retention_days"]) != "null" {
+		t.Fatalf("retention = %s", block["retention_days"])
+	}
+}
+
+func TestSelfDigestPlanEntitlementCompatibilityAndFailureStates(t *testing.T) {
+	auth := func(context.Context, string) (DomainPrincipal, bool, error) {
+		return DomainPrincipal{
+			Kind: PrincipalKindAgent, ID: "agent_1", AccountID: "acc_1",
+			RealmID: "realm_1", AccountStatus: "active",
+		}, true, nil
+	}
+
+	t.Run("old cell omits whole block", func(t *testing.T) {
+		srv := httptest.NewServer(apiMux(Config{AuthenticatePrincipal: auth}))
+		defer srv.Close()
+		resp := selfRequest(t, srv.URL+"/v1/self?include_plan_entitlements=true", "agent-token")
+		defer closeBody(t, resp)
+		var root map[string]json.RawMessage
+		if err := json.NewDecoder(resp.Body).Decode(&root); err != nil {
+			t.Fatal(err)
+		}
+		if _, exists := root["plan_entitlements"]; exists {
+			t.Fatal("old-cell response contains plan_entitlements")
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		get  func(context.Context, DomainPrincipal) (*SelfAgentEntitlements, error)
+		want string
+	}{
+		{
+			name: "unmanaged strips plan fields",
+			get: func(context.Context, DomainPrincipal) (*SelfAgentEntitlements, error) {
+				return &SelfAgentEntitlements{
+					State: SelfAgentEntitlementsUnmanaged, EnforcedPlanID: "free",
+					Features:      &SelfAgentEntitlementFeatures{Memory: true},
+					RetentionDays: &SelfAgentRetentionDays{},
+				}, nil
+			},
+			want: SelfAgentEntitlementsUnmanaged,
+		},
+		{
+			name: "upstream error is unavailable",
+			get: func(context.Context, DomainPrincipal) (*SelfAgentEntitlements, error) {
+				return nil, errors.New("database details must not cross boundary")
+			},
+			want: SelfAgentEntitlementsUnavailable,
+		},
+		{
+			name: "unbounded plan id is unavailable",
+			get: func(context.Context, DomainPrincipal) (*SelfAgentEntitlements, error) {
+				return &SelfAgentEntitlements{
+					State:          SelfAgentEntitlementsApplied,
+					EnforcedPlanID: strings.Repeat("x", maxSelfEnforcedPlanIDBytes+1),
+					Features:       &SelfAgentEntitlementFeatures{}, RetentionDays: &SelfAgentRetentionDays{},
+				}, nil
+			},
+			want: SelfAgentEntitlementsUnavailable,
+		},
+		{
+			name: "unsafe plan id is unavailable",
+			get: func(context.Context, DomainPrincipal) (*SelfAgentEntitlements, error) {
+				return &SelfAgentEntitlements{
+					State: SelfAgentEntitlementsApplied, EnforcedPlanID: `<img src=x onerror=alert(1)>`,
+					Features: &SelfAgentEntitlementFeatures{}, RetentionDays: &SelfAgentRetentionDays{},
+				}, nil
+			},
+			want: SelfAgentEntitlementsUnavailable,
+		},
+		{
+			name: "out of bounds retention is unavailable",
+			get: func(context.Context, DomainPrincipal) (*SelfAgentEntitlements, error) {
+				invalid := int64(0)
+				return &SelfAgentEntitlements{
+					State: SelfAgentEntitlementsApplied, EnforcedPlanID: "standard",
+					Features:      &SelfAgentEntitlementFeatures{},
+					RetentionDays: &SelfAgentRetentionDays{TranscriptRetentionDays: &invalid},
+				}, nil
+			},
+			want: SelfAgentEntitlementsUnavailable,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(apiMux(Config{AuthenticatePrincipal: auth, GetSelfPlanEntitlements: tc.get}))
+			defer srv.Close()
+			resp := selfRequest(t, srv.URL+"/v1/self?include_plan_entitlements=true", "agent-token")
+			defer closeBody(t, resp)
+			var root map[string]json.RawMessage
+			if err := json.NewDecoder(resp.Body).Decode(&root); err != nil {
+				t.Fatal(err)
+			}
+			var rawBlock map[string]json.RawMessage
+			if err := json.Unmarshal(root["plan_entitlements"], &rawBlock); err != nil {
+				t.Fatal(err)
+			}
+			assertExactJSONKeys(t, rawBlock, "schema_version", "state", "source")
+			var got SelfAgentEntitlements
+			if err := json.Unmarshal(root["plan_entitlements"], &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.State != tc.want || got.SchemaVersion != SelfAgentEntitlementsSchema ||
+				got.Source != SelfAgentEntitlementsSource || got.EnforcedPlanID != "" ||
+				got.Features != nil || got.RetentionDays != nil {
+				t.Fatalf("projection = %#v", got)
+			}
+		})
+	}
+}
+
+func assertExactJSONKeys(t *testing.T, object map[string]json.RawMessage, want ...string) {
+	t.Helper()
+	if len(object) != len(want) {
+		t.Fatalf("keys = %v, want exactly %v", object, want)
+	}
+	for _, key := range want {
+		if _, ok := object[key]; !ok {
+			t.Fatalf("keys = %v, missing %q", object, key)
+		}
 	}
 }
 
