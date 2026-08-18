@@ -11,6 +11,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/witwave-ai/witself/internal/billing"
 )
 
 const (
@@ -127,11 +129,13 @@ var (
 // BillingMutationResult is the allowlisted terminal projection. It contains
 // no provider error text, payment data, email, or raw idempotency material.
 type BillingMutationResult struct {
-	Kind      BillingMutationResultKind `json:"kind"`
-	Plan      string                    `json:"plan,omitempty"`
-	URL       string                    `json:"url,omitempty"`
-	Effective *time.Time                `json:"effective,omitempty"`
-	Cancelled bool                      `json:"cancelled,omitempty"`
+	Kind             BillingMutationResultKind `json:"kind"`
+	Plan             string                    `json:"plan,omitempty"`
+	URL              string                    `json:"url,omitempty"`
+	ProviderObjectID string                    `json:"provider_object_id,omitempty"`
+	ActionExpiresAt  *time.Time                `json:"action_expires_at,omitempty"`
+	Effective        *time.Time                `json:"effective,omitempty"`
+	Cancelled        bool                      `json:"cancelled,omitempty"`
 }
 
 // BillingMutationReceipt durably fences one outbound provider mutation. Raw
@@ -419,9 +423,17 @@ func validateBillingMutationResult(result BillingMutationResult) error {
 	if result.Effective != nil && result.Effective.IsZero() {
 		return errors.New("billing mutation receipt: invalid result effective time")
 	}
+	if result.ActionExpiresAt != nil && result.ActionExpiresAt.IsZero() {
+		return errors.New("billing mutation receipt: invalid action expiry")
+	}
+	if result.ProviderObjectID != "" &&
+		billing.ValidateProviderObjectID(result.ProviderObjectID) != nil {
+		return errors.New("billing mutation receipt: invalid provider object id")
+	}
 	switch result.Kind {
 	case BillingMutationResultDone:
-		if result.URL != "" || result.Effective != nil || result.Cancelled {
+		if result.URL != "" || result.ProviderObjectID != "" ||
+			result.ActionExpiresAt != nil || result.Effective != nil || result.Cancelled {
 			return errors.New("billing mutation receipt: invalid done result")
 		}
 	case BillingMutationResultAction:
@@ -429,19 +441,23 @@ func validateBillingMutationResult(result BillingMutationResult) error {
 			return errors.New("billing mutation receipt: invalid action result")
 		}
 	case BillingMutationResultScheduled:
-		if result.Plan == "" || result.URL != "" || result.Effective == nil || result.Cancelled {
+		if result.Plan == "" || result.URL != "" || result.ProviderObjectID != "" ||
+			result.ActionExpiresAt != nil || result.Effective == nil || result.Cancelled {
 			return errors.New("billing mutation receipt: invalid scheduled result")
 		}
 	case BillingMutationResultCancelled:
-		if result.URL != "" || result.Effective != nil || !result.Cancelled {
+		if result.URL != "" || result.ProviderObjectID != "" ||
+			result.ActionExpiresAt != nil || result.Effective != nil || !result.Cancelled {
 			return errors.New("billing mutation receipt: invalid cancelled result")
 		}
 	case BillingMutationResultResolved:
-		if result.Plan != "" || result.URL != "" || result.Effective != nil || result.Cancelled {
+		if result.Plan != "" || result.URL != "" || result.ProviderObjectID != "" ||
+			result.ActionExpiresAt != nil || result.Effective != nil || result.Cancelled {
 			return errors.New("billing mutation receipt: invalid resolved result")
 		}
 	case BillingMutationResultContact:
-		if result.Plan == "" || result.URL != "" || result.Effective != nil || result.Cancelled {
+		if result.Plan == "" || result.URL != "" || result.ProviderObjectID != "" ||
+			result.ActionExpiresAt != nil || result.Effective != nil || result.Cancelled {
 			return errors.New("billing mutation receipt: invalid contact result")
 		}
 	default:
@@ -597,7 +613,12 @@ func billingAccountMutationLeaseLive(
 
 func sameBillingMutationResult(a, b BillingMutationResult) bool {
 	if a.Kind != b.Kind || a.Plan != b.Plan || a.URL != b.URL ||
-		a.Cancelled != b.Cancelled || (a.Effective == nil) != (b.Effective == nil) {
+		a.ProviderObjectID != b.ProviderObjectID || a.Cancelled != b.Cancelled ||
+		(a.ActionExpiresAt == nil) != (b.ActionExpiresAt == nil) ||
+		(a.Effective == nil) != (b.Effective == nil) {
+		return false
+	}
+	if a.ActionExpiresAt != nil && !a.ActionExpiresAt.Equal(*b.ActionExpiresAt) {
 		return false
 	}
 	return a.Effective == nil || a.Effective.Equal(*b.Effective)
@@ -613,22 +634,30 @@ func cloneBillingMutationReceipt(receipt BillingMutationReceipt) BillingMutation
 		value := *receipt.LeaseExpiresAt
 		receipt.LeaseExpiresAt = &value
 	}
-	if receipt.CompletedAt != nil {
-		value := *receipt.CompletedAt
-		receipt.CompletedAt = &value
-	}
 	if receipt.Result != nil {
 		result := *receipt.Result
+		if result.ActionExpiresAt != nil {
+			value := *result.ActionExpiresAt
+			result.ActionExpiresAt = &value
+		}
 		if result.Effective != nil {
 			value := *result.Effective
 			result.Effective = &value
 		}
 		receipt.Result = &result
 	}
+	if receipt.CompletedAt != nil {
+		value := *receipt.CompletedAt
+		receipt.CompletedAt = &value
+	}
 	return receipt
 }
 
 func cloneBillingMutationResult(result BillingMutationResult) BillingMutationResult {
+	if result.ActionExpiresAt != nil {
+		value := *result.ActionExpiresAt
+		result.ActionExpiresAt = &value
+	}
 	if result.Effective != nil {
 		value := *result.Effective
 		result.Effective = &value

@@ -271,9 +271,14 @@
   // CP_PLAN_LIFECYCLE_ENABLED=true (only
   // when intentionally activating lifecycle), CP_R2_ENDPOINT, CP_R2_BUCKET,
   // CP_R2_ACCESS_KEY, CP_R2_SECRET_KEY, and optionally CP_R2_PREFIX. To enable
-  // Stripe, also set CP_BILLING_PROVIDER=stripe, CP_STRIPE_SECRET_KEY, and
-  // CP_STRIPE_WEBHOOK_SECRET; CP_STRIPE_SUCCESS_URL and CP_STRIPE_CANCEL_URL
-  // are optional. The Backend class explicitly maps only these bindings to
-  // WITSELF_CP_* container env vars; the ARCHIVES R2 binding itself remains
-  // Worker-only.
+  // Stripe, also set CP_BILLING_PROVIDER=stripe, CP_STRIPE_MODE=test or live,
+  // CP_STRIPE_SECRET_KEY, CP_STRIPE_WEBHOOK_SECRET,
+  // CP_STRIPE_SUCCESS_URL, CP_STRIPE_CANCEL_URL,
+  // CP_STRIPE_PORTAL_RETURN_URL, CP_STRIPE_PORTAL_CONFIGURATION_ID, and
+  // CP_BILLING_ACCOUNT_ALLOWLIST. CP_STRIPE_TEST_CLOCK_ID is optional and
+  // accepted only with test mode for retained sandbox renewal drills. Every
+  // URL/configuration is mandatory. An
+  // empty account allowlist intentionally keeps all customer mutations dark.
+  // The Backend class explicitly maps only these bindings to WITSELF_CP_*
+  // container env vars; the ARCHIVES R2 binding itself remains Worker-only.
 }

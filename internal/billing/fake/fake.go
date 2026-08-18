@@ -16,6 +16,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -91,13 +92,17 @@ type setupReplay struct {
 }
 
 type downgradeReplay struct {
-	customerID string
-	plan       string
-	effective  time.Time
+	customerID       string
+	plan             string
+	effective        time.Time
+	providerObjectID string
 }
 
 type cancelReplay struct {
-	customerID string
+	customerID          string
+	kind                billing.PendingCancellationKind
+	providerObjectID    string
+	originalOperationID string
 }
 
 // Fake implements billing.Provider in memory. Safe for concurrent use.
@@ -121,7 +126,10 @@ var _ billing.Provider = (*Fake)(nil)
 var _ billing.IdempotentSetupper = (*Fake)(nil)
 var _ billing.IdempotentSubscriber = (*Fake)(nil)
 var _ billing.IdempotentDowngrader = (*Fake)(nil)
+var _ billing.ExactIdempotentDowngrader = (*Fake)(nil)
+var _ billing.PreparedIdempotentDowngrader = (*Fake)(nil)
 var _ billing.IdempotentPendingCanceller = (*Fake)(nil)
+var _ billing.ExactPendingCanceller = (*Fake)(nil)
 
 // New returns a Fake with cfg defaults applied.
 func New(cfg Config) *Fake {
@@ -212,7 +220,10 @@ func (f *Fake) setupLinkLocked(customerID string) (billing.Action, error) {
 	}
 	if f.cfg.Interactive {
 		c.pending = &pending{kind: pendingSetup, url: fakeURL("setup", c.id)}
-		return billing.Action{URL: c.pending.url}, nil
+		return billing.Action{
+			URL: c.pending.url, ProviderObjectID: "fake_setup_" + c.id,
+			ExpiresAt: f.cfg.Now().UTC().Add(24 * time.Hour),
+		}, nil
 	}
 	c.card = &billing.PaymentMethod{Label: "visa ****4242"}
 	return billing.Action{Done: true}, nil
@@ -285,7 +296,10 @@ func (f *Fake) subscribeLocked(customerID, plan, operationID string) (billing.Ac
 			kind: pendingCheckout, plan: plan, url: fakeURL("checkout", c.id),
 			operationID: operationID,
 		}
-		return billing.Action{URL: c.pending.url}, nil
+		return billing.Action{
+			URL: c.pending.url, ProviderObjectID: "fake_checkout_" + c.id,
+			ExpiresAt: f.cfg.Now().UTC().Add(24 * time.Hour),
+		}, nil
 	}
 	f.charge(c, plan)
 	return billing.Action{Done: true}, nil
@@ -303,31 +317,115 @@ func (f *Fake) ScheduleDowngrade(_ context.Context, customerID, plan string) (ti
 // exact retry returns the originally selected effective time without
 // retargeting pending state; a parameter mismatch fails closed.
 func (f *Fake) ScheduleDowngradeIdempotent(
-	_ context.Context,
+	ctx context.Context,
 	customerID, plan, operationID string,
 ) (time.Time, error) {
+	prepared, err := f.PrepareDowngrade(ctx, customerID, plan)
+	if err != nil {
+		return time.Time{}, err
+	}
+	scheduled, err := f.SchedulePreparedDowngradeIdempotent(
+		ctx, customerID, plan, operationID, prepared)
+	return scheduled.Effective, err
+}
+
+// ScheduleDowngradeExactIdempotent returns the fake subscription identity
+// alongside the stable period boundary so managed lifecycle cancellation can
+// target only the schedule created by this operation.
+func (f *Fake) ScheduleDowngradeExactIdempotent(
+	ctx context.Context,
+	customerID, plan, operationID string,
+) (billing.ScheduledDowngrade, error) {
+	prepared, err := f.PrepareDowngrade(ctx, customerID, plan)
+	if err != nil {
+		return billing.ScheduledDowngrade{}, err
+	}
+	return f.SchedulePreparedDowngradeIdempotent(
+		ctx, customerID, plan, operationID, prepared)
+}
+
+// PrepareDowngrade selects the exact fake subscription and period boundary
+// without mutating provider state.
+func (f *Fake) PrepareDowngrade(
+	_ context.Context,
+	customerID, plan string,
+) (billing.ScheduledDowngrade, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.prepareDowngradeLocked(customerID, plan)
+}
+
+// SchedulePreparedDowngradeIdempotent mutates only the exact target selected
+// by PrepareDowngrade. An exact replay can never retarget a newer subscription.
+func (f *Fake) SchedulePreparedDowngradeIdempotent(
+	_ context.Context,
+	customerID, plan, operationID string,
+	prepared billing.ScheduledDowngrade,
+) (billing.ScheduledDowngrade, error) {
 	if err := billing.ValidateOperationID(operationID); err != nil {
-		return time.Time{}, fmt.Errorf("fake billing: downgrade: %w", err)
+		return billing.ScheduledDowngrade{}, fmt.Errorf(
+			"fake billing: downgrade: %w", err)
+	}
+	if err := billing.ValidateProviderObjectID(
+		prepared.ProviderObjectID); err != nil || prepared.Effective.IsZero() {
+		return billing.ScheduledDowngrade{}, errors.New(
+			"fake billing: invalid prepared downgrade target")
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if replay, ok := f.downgradeOps[operationID]; ok {
-		if replay.customerID != customerID || replay.plan != plan {
-			return time.Time{}, fmt.Errorf(
+		if replay.customerID != customerID || replay.plan != plan ||
+			replay.effective != prepared.Effective ||
+			replay.providerObjectID != prepared.ProviderObjectID {
+			return billing.ScheduledDowngrade{}, errors.New(
 				"fake billing: downgrade operation was reused with different parameters")
 		}
-		return replay.effective, nil
+		return prepared, nil
 	}
-	effective, err := f.scheduleDowngradeLocked(customerID, plan)
+	current, err := f.prepareDowngradeLocked(customerID, plan)
 	if err != nil {
-		return time.Time{}, err
+		return billing.ScheduledDowngrade{}, err
+	}
+	if current != prepared {
+		return billing.ScheduledDowngrade{}, errors.New(
+			"fake billing: prepared downgrade target changed")
+	}
+	c := f.byID[customerID]
+	c.pending = &pending{
+		kind: pendingDowngrade, plan: plan, at: prepared.Effective,
+		operationID: operationID,
 	}
 	f.downgradeOps[operationID] = downgradeReplay{
-		customerID: customerID,
-		plan:       plan,
-		effective:  effective,
+		customerID: customerID, plan: plan, effective: prepared.Effective,
+		providerObjectID: prepared.ProviderObjectID,
 	}
-	return effective, nil
+	return prepared, nil
+}
+
+func (f *Fake) prepareDowngradeLocked(
+	customerID, plan string,
+) (billing.ScheduledDowngrade, error) {
+	c, err := f.cust(customerID)
+	if err != nil {
+		return billing.ScheduledDowngrade{}, err
+	}
+	if c.plan == "" {
+		return billing.ScheduledDowngrade{}, fmt.Errorf(
+			"customer %s has no subscription to downgrade", customerID)
+	}
+	price, priced := f.cfg.Prices[plan]
+	switch {
+	case plan == "free":
+	case !priced:
+		return billing.ScheduledDowngrade{}, fmt.Errorf("unknown plan %q", plan)
+	case price >= f.cfg.Prices[c.plan]:
+		return billing.ScheduledDowngrade{}, fmt.Errorf(
+			"plan %q is not a downgrade from %q", plan, c.plan)
+	}
+	return billing.ScheduledDowngrade{
+		Effective:        c.periodEnd,
+		ProviderObjectID: "fake_subscription_" + customerID,
+	}, nil
 }
 
 // scheduleDowngradeLocked performs the non-replayed mutation. Callers hold
@@ -388,6 +486,66 @@ func (f *Fake) CancelPendingIdempotent(
 		return err
 	}
 	f.cancelOps[operationID] = cancelReplay{customerID: customerID}
+	return nil
+}
+
+// CancelPendingObjectIdempotent disarms only the exact fake object recorded by
+// the lifecycle state. A completed action is not reported as cancelled.
+func (f *Fake) CancelPendingObjectIdempotent(
+	_ context.Context,
+	customerID string,
+	target billing.PendingCancellation,
+	operationID string,
+) error {
+	if err := billing.ValidateOperationID(operationID); err != nil {
+		return fmt.Errorf("fake billing: exact cancel: %w", err)
+	}
+	if err := billing.ValidateProviderObjectID(target.ProviderObjectID); err != nil {
+		return fmt.Errorf("fake billing: exact cancel: %w", err)
+	}
+	if err := billing.ValidateOperationID(target.OriginalOperationID); err != nil {
+		return fmt.Errorf("fake billing: exact cancel original operation: %w", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if replay, ok := f.cancelOps[operationID]; ok {
+		if replay.customerID != customerID || replay.kind != target.Kind ||
+			replay.providerObjectID != target.ProviderObjectID ||
+			replay.originalOperationID != target.OriginalOperationID {
+			return errors.New(
+				"fake billing: exact cancel operation was reused with different parameters")
+		}
+		return nil
+	}
+	c, err := f.cust(customerID)
+	if err != nil {
+		return err
+	}
+	if c.pending == nil {
+		return fmt.Errorf("fake billing: %w", billing.ErrPendingAlreadyResolved)
+	}
+	switch target.Kind {
+	case billing.PendingCancellationHostedAction:
+		if c.pending.kind != pendingCheckout ||
+			target.ProviderObjectID != "fake_checkout_"+customerID ||
+			c.pending.operationID != target.OriginalOperationID {
+			return errors.New("fake billing: hosted cancellation target mismatch")
+		}
+	case billing.PendingCancellationPeriodEnd:
+		if c.pending.kind != pendingDowngrade ||
+			target.ProviderObjectID != "fake_subscription_"+customerID ||
+			c.pending.operationID != target.OriginalOperationID {
+			return errors.New("fake billing: period-end cancellation target mismatch")
+		}
+	default:
+		return errors.New("fake billing: unsupported exact cancellation target")
+	}
+	c.pending = nil
+	f.cancelOps[operationID] = cancelReplay{
+		customerID: customerID, kind: target.Kind,
+		providerObjectID:    target.ProviderObjectID,
+		originalOperationID: target.OriginalOperationID,
+	}
 	return nil
 }
 

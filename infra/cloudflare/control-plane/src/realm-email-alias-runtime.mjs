@@ -67,6 +67,8 @@ const PENDING_COUNTER_SCHEMA_VERSION = 1;
 const PENDING_COUNTER_MIGRATION_KEY = "pending-counter-migration";
 const PENDING_COUNTER_MIGRATION_PAGE_LIMIT = 100;
 const PENDING_COUNTER_MIGRATION_RETRY_MS = 5_000;
+const PLAN_FIT_AUTHORITY_PAGE_LIMIT = 500;
+const PLAN_FIT_AUTHORITY_SCAN_LIMIT = 10_000;
 const PENDING_COUNTER_DERIVED_PREFIXES = Object.freeze([
   "claim-usage-member:",
   "claim-usage-account-member:",
@@ -160,6 +162,94 @@ function errorResponse(message, status, code = "", details = {}) {
 function isObject(value) {
   return value !== null && typeof value === "object" &&
     !Array.isArray(value);
+}
+
+function validRealmEmailAliasPrepareFit(
+  value,
+  expectedMaximum,
+  requireAuthorityRevision = true,
+) {
+  if (!isObject(value)) return false;
+  const allowed = new Set([
+    "complete",
+    "dimension",
+    "maximum",
+    "highest_used",
+    "over_limit_count",
+    "scanned_subject_count",
+    "scanned_allocation_count",
+    ...(requireAuthorityRevision ? ["authority_revision"] : []),
+  ]);
+  if (Object.keys(value).length !== allowed.size ||
+      Object.keys(value).some((key) => !allowed.has(key)) ||
+      value.complete !== true ||
+      value.dimension !== REALM_EMAIL_ALIAS_LIMIT ||
+      value.maximum !== expectedMaximum ||
+      !(value.maximum === null ||
+        (Number.isSafeInteger(value.maximum) && value.maximum >= 0)) ||
+      !Number.isSafeInteger(value.highest_used) || value.highest_used < 0 ||
+      !Number.isSafeInteger(value.over_limit_count) ||
+      value.over_limit_count < 0 ||
+      !Number.isSafeInteger(value.scanned_subject_count) ||
+      value.scanned_subject_count < 0 ||
+      value.scanned_subject_count > PLAN_FIT_AUTHORITY_SCAN_LIMIT ||
+      !Number.isSafeInteger(value.scanned_allocation_count) ||
+      value.scanned_allocation_count < 0 ||
+      value.scanned_allocation_count > PLAN_FIT_AUTHORITY_SCAN_LIMIT ||
+      value.over_limit_count > value.scanned_subject_count ||
+      value.highest_used > value.scanned_allocation_count ||
+      (value.scanned_subject_count === 0 && value.highest_used !== 0) ||
+      (value.maximum === null && value.over_limit_count !== 0) ||
+      (value.maximum !== null &&
+        ((value.highest_used > value.maximum) !==
+          (value.over_limit_count > 0))) ||
+      (requireAuthorityRevision &&
+        (!Number.isSafeInteger(value.authority_revision) ||
+          value.authority_revision < 0))) {
+    return false;
+  }
+  return true;
+}
+
+function validRealmEmailAliasPreparedFenceConflict(
+  value,
+  accountID,
+  requestedRevision,
+  requestedSnapshotHash,
+) {
+  if (!isObject(value)) return false;
+  const allowed = new Set([
+    "schema_version",
+    "error",
+    "code",
+    "account_id",
+    "mode",
+    "plan_revision",
+    "plan_snapshot_hash",
+    "prepared",
+    "pending",
+    "stale",
+    "complete",
+    "pending_state",
+    "pending_plan_revision",
+    "pending_plan_snapshot_hash",
+  ]);
+  return Object.keys(value).length === allowed.size &&
+    Object.keys(value).every((key) => allowed.has(key)) &&
+    value.schema_version === SCHEMA_VERSION &&
+    typeof value.error === "string" && value.error.length > 0 &&
+    value.code === "plan_fit_prepared_fence_conflict" &&
+    value.account_id === accountID && value.mode === "prepare" &&
+    value.plan_revision === requestedRevision &&
+    value.plan_snapshot_hash === requestedSnapshotHash &&
+    value.prepared === false && value.pending === true &&
+    value.stale === false && value.complete === false &&
+    value.pending_state === "awaiting_cell" &&
+    validPlanFence(
+      value.pending_plan_revision,
+      value.pending_plan_snapshot_hash,
+    ) &&
+    comparePlanFence(requestedRevision, value.pending_plan_revision) > 0;
 }
 
 class RegistryError extends Error {
@@ -883,6 +973,37 @@ export function realmEmailAliasRegistryStub(env) {
   return namespace.get(namespace.idFromName(DEFAULT_REGISTRY_OBJECT_NAME));
 }
 
+// readRealmEmailAliasPlanFit returns only aggregate commercial allocation
+// usage. Suspended/grace allocations continue to consume their reserved slot,
+// while internal Witself assignments do not.
+export async function readRealmEmailAliasPlanFit(
+  env,
+  accountID,
+  maximum,
+) {
+  const stub = realmEmailAliasRegistryStub(env);
+  if (!stub) throw new Error("realm alias authority is not configured");
+  const response = await stub.fetch(
+    "https://realm-email-alias.internal/plan/fit",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account_id: accountID, maximum }),
+    },
+  );
+  const body = await response.json().catch(() => null);
+  if (!response.ok || body?.schema_version !== SCHEMA_VERSION ||
+      body?.account_id !== accountID || body?.maximum !== maximum ||
+      !Number.isSafeInteger(body?.over_limit_count) ||
+      body.over_limit_count < 0 ||
+      !Number.isSafeInteger(body?.highest_used) || body.highest_used < 0 ||
+      (body.over_limit_count === 0 && body.highest_used > maximum) ||
+      (body.over_limit_count > 0 && body.highest_used <= maximum)) {
+    throw new Error(body?.error ?? "realm alias plan-fit authority is unavailable");
+  }
+  return body;
+}
+
 function agentEmailDomainRegistryStub(env) {
   if (!env?.AGENT_EMAIL_DOMAINS) return null;
   const namespace = env.AGENT_EMAIL_DOMAINS;
@@ -897,10 +1018,16 @@ export async function reconcileRealmEmailAliasesForPlan(
   options = {},
 ) {
   const stub = realmEmailAliasRegistryStub(env);
-  if (!stub) return { skipped: true };
+  if (!stub) {
+    if (mode === "prepare") {
+      throw new Error("realm email alias authority is not configured");
+    }
+    return { skipped: true };
+  }
   if (!ACCOUNT_ID_PATTERN.test(accountID ?? "") ||
       !validPlanFence(snapshot?.revision, snapshot?.snapshot_hash) ||
-      !Array.isArray(snapshot?.features) || !isObject(snapshot?.limits)) {
+      !Array.isArray(snapshot?.features) || !isObject(snapshot?.limits) ||
+      !["prepare", "restrict_only", "complete"].includes(mode)) {
     throw new Error("invalid account plan snapshot for alias reconciliation");
   }
   const entitlement = realmEmailAliasEntitlement(snapshot);
@@ -924,11 +1051,49 @@ export async function reconcileRealmEmailAliasesForPlan(
         }),
     }),
   });
+  const body = await response.json().catch(() => null);
+  const expectedMaximum = entitlement.enabled ? entitlement.limit : 0;
+  if (mode === "prepare" && response.status === 409 &&
+      body?.schema_version === SCHEMA_VERSION &&
+      body?.account_id === accountID && body?.mode === "prepare" &&
+      body?.plan_revision === snapshot.revision &&
+      body?.plan_snapshot_hash === snapshot.snapshot_hash &&
+      body?.prepared === false && body?.pending === false &&
+      body?.stale === false && body?.complete === true &&
+      body?.code === "plan_fit_failed" &&
+      validRealmEmailAliasPrepareFit(body.fit, expectedMaximum, false)) {
+    return body;
+  }
+  if (mode === "prepare" && response.status === 409 &&
+      validRealmEmailAliasPreparedFenceConflict(
+        body,
+        accountID,
+        snapshot.revision,
+        snapshot.snapshot_hash,
+      )) {
+    return body;
+  }
   if (!response.ok) {
-    const body = await response.json().catch(() => null);
     throw new Error(body?.error ?? "realm email alias plan reconciliation failed");
   }
-  const body = await response.json();
+  if (mode === "prepare") {
+    const prepared = body?.prepared === true && body?.pending === true &&
+      body?.stale === false && body?.complete === true &&
+      body?.plan_revision === snapshot.revision &&
+      body?.plan_snapshot_hash === snapshot.snapshot_hash &&
+      validRealmEmailAliasPrepareFit(body?.fit, expectedMaximum) &&
+      body.fit.over_limit_count === 0 &&
+      body?.registry_revision === body.fit.authority_revision;
+    const stale = body?.prepared === false && body?.pending === false &&
+      body?.stale === true && body?.complete === true && body?.fit === undefined &&
+      body?.plan_revision === snapshot.revision &&
+      body?.plan_snapshot_hash === snapshot.snapshot_hash;
+    if (body?.schema_version !== SCHEMA_VERSION ||
+        body?.account_id !== accountID || body?.mode !== "prepare" ||
+        (!prepared && !stale)) {
+      throw new Error("realm email alias prepare response is invalid");
+    }
+  }
   // The account plan must not advance while an activation-gate suspension is
   // only partially projected. A later bridge retry (and the registry alarm)
   // advances the durable cursor without turning this call into an unbounded
@@ -1189,6 +1354,10 @@ export class DurableRealmEmailAliasRegistry {
       }
       case "/plan/reconcile":
         return [`account:${input.account_id}`];
+      case "/plan/fit":
+        return ACCOUNT_ID_PATTERN.test(input?.account_id ?? "")
+          ? [`account:${input.account_id}`]
+          : [];
       case "/account-lifecycle/reconcile":
         return [`account:${input.account_id}`];
       case "/route/get": {
@@ -1365,6 +1534,8 @@ export class DurableRealmEmailAliasRegistry {
           return await this.getRoute(input);
         case "/plan/reconcile":
           return await this.reconcilePlan(input);
+        case "/plan/fit":
+          return await this.planFit(input);
         case "/account-lifecycle/reconcile":
           return await this.reconcileAccountLifecycle(input);
         case "/counter/rebuild":
@@ -1860,6 +2031,123 @@ export class DurableRealmEmailAliasRegistry {
       account: this.validateUsageRecord(accountRaw, "account", accountID),
       realm: this.validateUsageRecord(realmRaw, "realm", accountID, realmID),
     };
+  }
+
+  async collectPlanFitEvidence(accountID, maximum) {
+    await this.assertPendingCountersReady();
+
+    let cursor = null;
+    let scannedRealms = 0;
+    let totalOpenRequests = 0;
+    let expectedMemberCount = 0;
+    let totalAllocated = 0;
+    let overLimitCount = 0;
+    let highestUsed = 0;
+    do {
+      const page = await this.boundedValues(
+        realmUsageKey(accountID, ""),
+        PLAN_FIT_AUTHORITY_PAGE_LIMIT,
+        false,
+        cursor,
+      );
+      scannedRealms += page.values.length;
+      if (scannedRealms > PLAN_FIT_AUTHORITY_SCAN_LIMIT) {
+        fail("realm email alias plan-fit authority scan is capped", 503);
+      }
+      for (const raw of page.values) {
+        if (!REALM_ID_PATTERN.test(raw?.realm_id ?? "")) {
+          fail("realm email alias realm counter is invalid", 503);
+        }
+        const usage = this.validateUsageRecord(
+          raw,
+          "realm",
+          accountID,
+          raw.realm_id,
+        );
+        totalOpenRequests += usage.open_requests;
+        expectedMemberCount += usage.pending_review + usage.customer_allocated;
+        totalAllocated += usage.customer_allocated;
+        if (!Number.isSafeInteger(totalOpenRequests) ||
+            !Number.isSafeInteger(expectedMemberCount) ||
+            !Number.isSafeInteger(totalAllocated) ||
+            totalAllocated > PLAN_FIT_AUTHORITY_SCAN_LIMIT) {
+          fail("realm email alias plan-fit authority scan is capped", 503);
+        }
+        highestUsed = Math.max(highestUsed, usage.customer_allocated);
+        if (maximum !== null && usage.customer_allocated > maximum) {
+          overLimitCount += 1;
+        }
+      }
+      cursor = page.next_cursor;
+    } while (cursor);
+
+    let memberCursor = null;
+    let memberCount = 0;
+    do {
+      const page = await this.boundedValues(
+        accountUsageMemberPrefix(accountID),
+        PLAN_FIT_AUTHORITY_PAGE_LIMIT,
+        false,
+        memberCursor,
+      );
+      memberCount += page.values.length;
+      if (memberCount > PLAN_FIT_AUTHORITY_SCAN_LIMIT) {
+        fail("realm email alias plan-fit authority scan is capped", 503);
+      }
+      if (page.values.some((claimID) =>
+        !CLAIM_ID_PATTERN.test(claimID ?? "")
+      )) {
+        fail("realm email alias account counter membership is invalid", 503);
+      }
+      memberCursor = page.next_cursor;
+    } while (memberCursor);
+
+    const account = this.validateUsageRecord(
+      await this.storage.get(accountUsageKey(accountID)),
+      "account",
+      accountID,
+    );
+    if (account.open_requests !== totalOpenRequests ||
+        memberCount !== expectedMemberCount) {
+      fail("realm email alias plan-fit counters disagree", 503);
+    }
+    // A repair can begin between the first readiness check and the final
+    // page. Never return a mixed pre/post-rebuild view as a successful fit.
+    await this.assertPendingCountersReady();
+    return {
+      complete: true,
+      dimension: REALM_EMAIL_ALIAS_LIMIT,
+      maximum,
+      highest_used: highestUsed,
+      over_limit_count: overLimitCount,
+      scanned_subject_count: scannedRealms,
+      scanned_allocation_count: totalAllocated,
+    };
+  }
+
+  async planFit(input) {
+    const accountID = input?.account_id;
+    const maximum = input?.maximum;
+    if (!ACCOUNT_ID_PATTERN.test(accountID ?? "") ||
+        !Number.isSafeInteger(maximum) || maximum < 0) {
+      fail("realm email alias plan-fit request is invalid", 400);
+    }
+    await this.assertPendingCountersReady();
+    const [planIntent, lifecycleIntent] = await Promise.all([
+      this.storage.get(planIntentKey(accountID)),
+      this.storage.get(lifecycleIntentKey(accountID)),
+    ]);
+    if (planIntent || lifecycleIntent) {
+      fail("realm email alias policy is still converging", 409);
+    }
+    const fit = await this.collectPlanFitEvidence(accountID, maximum);
+    return json({
+      schema_version: SCHEMA_VERSION,
+      account_id: accountID,
+      maximum,
+      over_limit_count: fit.over_limit_count,
+      highest_used: fit.highest_used,
+    });
   }
 
   pendingCapacity(usage) {
@@ -5942,7 +6230,7 @@ export class DurableRealmEmailAliasRegistry {
     });
   }
 
-  planIntent(input, state) {
+  planIntent(input, state, prepareFit = undefined) {
     return {
       account_id: input.account_id,
       plan_revision: input.plan_revision,
@@ -5957,6 +6245,9 @@ export class DurableRealmEmailAliasRegistry {
       gate_claim_cursor: null,
       gate_canonical_cursor: null,
       operational_gate_complete: input.activation_enabled === true,
+      ...(prepareFit === undefined
+        ? {}
+        : { prepare_fit: structuredClone(prepareFit) }),
       retry_at_ms: this.now().getTime() +
         (input.activation_enabled === true
           ? REALM_EMAIL_ALIAS_RETRY_MS
@@ -5971,7 +6262,9 @@ export class DurableRealmEmailAliasRegistry {
         current.feature_enabled === intent.feature_enabled &&
         current.alias_limit === intent.alias_limit &&
         current.activation_enabled === intent.activation_enabled &&
-        current.state === intent.state) {
+        current.state === intent.state &&
+        fingerprint(current.prepare_fit ?? null) ===
+          fingerprint(intent.prepare_fit ?? null)) {
       await this.scheduleNextAlarm().catch(() => {});
       return current;
     }
@@ -5989,13 +6282,22 @@ export class DurableRealmEmailAliasRegistry {
     );
     const durable = {
       ...intent,
+      ...(intent.prepare_fit === undefined
+        ? {}
+        : {
+          prepare_fit: {
+            ...intent.prepare_fit,
+            authority_revision: intent.prepare_fit.authority_revision ??
+              mutation.meta.registry_revision,
+          },
+        }),
       created_at: current?.created_at ?? mutation.now,
       updated_at: mutation.now,
     };
-    mutation.entries.push(
-      [planIntentKey(intent.account_id), durable],
-      [planDueKey(durable), intent.account_id],
-    );
+    mutation.entries.push([planIntentKey(intent.account_id), durable]);
+    if (!(durable.state === "awaiting_cell" && durable.prepare_fit)) {
+      mutation.entries.push([planDueKey(durable), intent.account_id]);
+    }
     await this.atomic(
       mutation.entries,
       current && planDueKey(current) !== planDueKey(durable)
@@ -6935,8 +7237,13 @@ export class DurableRealmEmailAliasRegistry {
     if (!ACCOUNT_ID_PATTERN.test(input?.account_id ?? "")) {
       fail("invalid account_id", 400);
     }
-    if (!["restrict_only", "complete"].includes(input.mode)) {
+    if (!["prepare", "restrict_only", "complete"].includes(input.mode)) {
       fail("invalid reconciliation mode", 400);
+    }
+    if (input.mode === "prepare" &&
+        (typeof input.feature_enabled !== "boolean" ||
+          typeof input.activation_enabled !== "boolean")) {
+      fail("invalid prepare entitlement", 400);
     }
     if (!validAliasLimit(input.alias_limit)) fail("invalid alias_limit", 400);
     if (!validPlanFence(input.plan_revision, input.plan_snapshot_hash)) {
@@ -6961,11 +7268,192 @@ export class DurableRealmEmailAliasRegistry {
         input.plan_snapshot_hash !== fence.committed_snapshot_hash) {
       fail("plan revision conflicts with the committed alias policy fence", 409);
     }
+    if (relation === 0 &&
+        ((input.feature_enabled === true) !== fence.feature_enabled ||
+          input.alias_limit !== fence.alias_limit ||
+          (input.activation_enabled === true) !== fence.activation_enabled)) {
+      fail("plan entitlement conflicts with the committed alias policy fence", 409);
+    }
     const recoversPending = recoveryProvided && pending &&
       pending.plan_revision === input.recover_pending_revision &&
       pending.plan_snapshot_hash === input.recover_pending_snapshot_hash;
 
+    if (input.mode === "prepare") {
+      const maximum = input.feature_enabled === true ? input.alias_limit : 0;
+      if (relation <= 0) {
+        return json({
+          schema_version: SCHEMA_VERSION,
+          account_id: input.account_id,
+          mode: input.mode,
+          plan_revision: input.plan_revision,
+          plan_snapshot_hash: input.plan_snapshot_hash,
+          prepared: false,
+          pending: false,
+          stale: true,
+          complete: true,
+        });
+      }
+      if (pending) {
+        const pendingRelation = comparePlanFence(
+          input.plan_revision,
+          pending.plan_revision,
+        );
+        if (pendingRelation === 0 &&
+            input.plan_snapshot_hash !== pending.plan_snapshot_hash) {
+          fail("plan revision conflicts with the pending alias policy fence", 409);
+        }
+        if (pendingRelation === 0 &&
+            ((input.feature_enabled === true) !== pending.feature_enabled ||
+              input.alias_limit !== pending.alias_limit ||
+              (input.activation_enabled === true) !==
+                pending.activation_enabled)) {
+          fail("plan entitlement conflicts with the pending alias policy fence", 409);
+        }
+        if (pendingRelation < 0) {
+          return json({
+            schema_version: SCHEMA_VERSION,
+            account_id: input.account_id,
+            mode: input.mode,
+            plan_revision: input.plan_revision,
+            plan_snapshot_hash: input.plan_snapshot_hash,
+            prepared: false,
+            pending: false,
+            stale: true,
+            complete: true,
+          });
+        }
+        if (pendingRelation === 0 && pending.state === "awaiting_cell" &&
+            pending.prepare_fit !== undefined) {
+          if (!validRealmEmailAliasPrepareFit(
+            pending.prepare_fit,
+            maximum,
+          ) || pending.prepare_fit.over_limit_count !== 0) {
+            fail("persisted realm email alias prepare evidence is invalid", 503);
+          }
+          return json({
+            schema_version: SCHEMA_VERSION,
+            account_id: input.account_id,
+            mode: input.mode,
+            plan_revision: input.plan_revision,
+            plan_snapshot_hash: input.plan_snapshot_hash,
+            prepared: true,
+            pending: true,
+            stale: false,
+            complete: true,
+            fit: pending.prepare_fit,
+            registry_revision: pending.prepare_fit.authority_revision,
+          });
+        }
+        if (pendingRelation > 0 && pending.state === "awaiting_cell") {
+          const pendingMaximum = pending.feature_enabled
+            ? pending.alias_limit
+            : 0;
+          const pendingFenceValid = validPlanFence(
+            pending.plan_revision,
+            pending.plan_snapshot_hash,
+          );
+          const pendingEntitlementValid =
+            typeof pending.feature_enabled === "boolean" &&
+            typeof pending.activation_enabled === "boolean" &&
+            validAliasLimit(pending.alias_limit);
+          if (!pendingFenceValid || !pendingEntitlementValid ||
+              !validRealmEmailAliasPrepareFit(
+                pending.prepare_fit,
+                pendingMaximum,
+              ) || pending.prepare_fit.over_limit_count !== 0) {
+            fail("persisted realm email alias prepare evidence is invalid", 503);
+          }
+          fail(
+            "an older realm email alias plan-fit fence is awaiting cell apply",
+            409,
+            "plan_fit_prepared_fence_conflict",
+            {
+              account_id: input.account_id,
+              mode: input.mode,
+              plan_revision: input.plan_revision,
+              plan_snapshot_hash: input.plan_snapshot_hash,
+              prepared: false,
+              pending: true,
+              stale: false,
+              complete: false,
+              pending_state: "awaiting_cell",
+              pending_plan_revision: pending.plan_revision,
+              pending_plan_snapshot_hash: pending.plan_snapshot_hash,
+            },
+          );
+        }
+        fail("realm email alias policy is still converging", 409);
+      }
+      const fit = await this.collectPlanFitEvidence(input.account_id, maximum);
+      if (!validRealmEmailAliasPrepareFit(fit, maximum, false)) {
+        fail("realm email alias prepare evidence is invalid", 503);
+      }
+      if (fit.over_limit_count > 0) {
+        fail(
+          "account does not fit the target realm email alias allocation",
+          409,
+          "plan_fit_failed",
+          {
+            account_id: input.account_id,
+            mode: input.mode,
+            plan_revision: input.plan_revision,
+            plan_snapshot_hash: input.plan_snapshot_hash,
+            prepared: false,
+            pending: false,
+            stale: false,
+            complete: true,
+            fit,
+          },
+        );
+      }
+      const durable = await this.persistPlanIntent(
+        this.planIntent(input, "awaiting_cell", fit),
+      );
+      return json({
+        schema_version: SCHEMA_VERSION,
+        account_id: input.account_id,
+        mode: input.mode,
+        plan_revision: input.plan_revision,
+        plan_snapshot_hash: input.plan_snapshot_hash,
+        prepared: true,
+        pending: true,
+        stale: false,
+        complete: true,
+        fit: durable.prepare_fit,
+        registry_revision: durable.prepare_fit.authority_revision,
+      });
+    }
+
+    if (input.mode === "complete" && recoversPending &&
+        pending.prepare_fit !== undefined &&
+        comparePlanFence(input.plan_revision, pending.plan_revision) < 0) {
+      const maximum = pending.feature_enabled ? pending.alias_limit : 0;
+      if (!validRealmEmailAliasPrepareFit(pending.prepare_fit, maximum)) {
+        fail("persisted realm email alias prepare evidence is invalid", 503);
+      }
+      await this.atomic([], [
+        planIntentKey(input.account_id),
+        planDueKey(pending),
+      ]);
+      await this.scheduleNextAlarm().catch(() => {});
+      return json({
+        schema_version: SCHEMA_VERSION,
+        account_id: input.account_id,
+        mode: input.mode,
+        changed: 0,
+        stale: false,
+        complete: true,
+        recovered: true,
+        registry_revision: (await this.storage.get(META_KEY)).registry_revision,
+      });
+    }
+
     if (input.mode === "restrict_only") {
+      if (pending?.prepare_fit !== undefined &&
+          pending.plan_revision === input.plan_revision &&
+          pending.plan_snapshot_hash === input.plan_snapshot_hash) {
+        fail("realm email alias policy is still prepared for the cell", 409);
+      }
       let stale = relation <= 0;
       if (pending) {
         const pendingRelation = comparePlanFence(
@@ -6975,6 +7463,13 @@ export class DurableRealmEmailAliasRegistry {
         if (pendingRelation === 0 &&
             input.plan_snapshot_hash !== pending.plan_snapshot_hash) {
           fail("plan revision conflicts with the pending alias policy fence", 409);
+        }
+        if (pendingRelation === 0 &&
+            ((input.feature_enabled === true) !== pending.feature_enabled ||
+              input.alias_limit !== pending.alias_limit ||
+              (input.activation_enabled === true) !==
+                pending.activation_enabled)) {
+          fail("plan entitlement conflicts with the pending alias policy fence", 409);
         }
         stale ||= pendingRelation <= 0;
       }
@@ -7051,6 +7546,12 @@ export class DurableRealmEmailAliasRegistry {
           input.plan_snapshot_hash !== pending.plan_snapshot_hash) {
         fail("plan revision conflicts with the pending alias policy fence", 409);
       }
+      if (pendingRelation === 0 &&
+          ((input.feature_enabled === true) !== pending.feature_enabled ||
+            input.alias_limit !== pending.alias_limit ||
+            (input.activation_enabled === true) !== pending.activation_enabled)) {
+        fail("plan entitlement conflicts with the pending alias policy fence", 409);
+      }
       if (pendingRelation < 0 ||
           (relation === 0 && pendingRelation < 0)) {
         const meta = await this.storage.get(META_KEY);
@@ -7075,8 +7576,13 @@ export class DurableRealmEmailAliasRegistry {
         });
       }
     }
+    const prepareFit = pending &&
+        pending.plan_revision === input.plan_revision &&
+        pending.plan_snapshot_hash === input.plan_snapshot_hash
+      ? pending.prepare_fit
+      : undefined;
     const committed = await this.persistPlanIntent(
-      this.planIntent(input, "cell_committed"),
+      this.planIntent(input, "cell_committed", prepareFit),
       pending,
     );
     const result = await this.applyPlanIntent(committed);

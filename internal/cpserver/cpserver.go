@@ -73,6 +73,16 @@ type AdminAuthFunc func(
 // InternalAuthFunc authenticates platform-only value-free observability reads.
 type InternalAuthFunc func(ctx context.Context, bearer string) (bool, error)
 
+// BillingMutationGateFunc makes the customer billing mutation surface
+// account-specific. Implementations are expected to be read-only (for example,
+// a sandbox cohort allowlist). False is a settled feature refusal; an error is
+// an indeterminate decision and also fails closed without touching lifecycle or
+// provider state.
+type BillingMutationGateFunc func(
+	ctx context.Context,
+	accountID string,
+) (enabled bool, err error)
+
 // Config assembles the HTTP layer.
 type Config struct {
 	Manager *lifecycle.Manager
@@ -83,6 +93,11 @@ type Config struct {
 	// Authenticate guards the plan verbs. Required — there is deliberately
 	// no default-open mode.
 	Authenticate AuthFunc
+	// BillingMutationGate optionally limits every billing:manage route to an
+	// account cohort. nil preserves the historical globally-enabled behavior.
+	// The gate runs only after account authentication and before any handler can
+	// read or write lifecycle/provider state.
+	BillingMutationGate BillingMutationGateFunc
 	// AdminAuthenticate enables account policy/plan override routes. nil keeps
 	// the routes absent; account-owner tokens can never mint these exceptions.
 	AdminAuthenticate AdminAuthFunc
@@ -361,8 +376,39 @@ func withAccount(
 			writeError(w, http.StatusInternalServerError, "invalid authorization result")
 			return
 		}
+		if permission == AccountPermissionBillingManage {
+			enabled, err := billingMutationEnabledForAccount(
+				r.Context(), cfg, accountID)
+			if err != nil {
+				writeBillingMutationGateUnavailable(w)
+				return
+			}
+			if !enabled {
+				writeBillingMutationFeatureNotEnabled(w)
+				return
+			}
+		}
 		h(cfg, w, r, accountID, access)
 	}
+}
+
+func billingMutationEnabledForAccount(
+	ctx context.Context,
+	cfg Config,
+	accountID string,
+) (bool, error) {
+	if cfg.BillingMutationGate == nil {
+		return true, nil
+	}
+	return cfg.BillingMutationGate(ctx, accountID)
+}
+
+func billingAvailableForAccount(ctx context.Context, cfg Config, accountID string) bool {
+	if !cfg.Manager.BillingAvailable() {
+		return false
+	}
+	enabled, err := billingMutationEnabledForAccount(ctx, cfg, accountID)
+	return err == nil && enabled
 }
 
 // pendingView is the wire shape of an in-flight change.
@@ -430,6 +476,7 @@ const maxBillingCollectionEntries = 100
 
 func billingStatus(cfg Config, w http.ResponseWriter, r *http.Request, accountID string, _ AccountAccess) {
 	w.Header().Set("Cache-Control", "no-store")
+	billingAvailable := billingAvailableForAccount(r.Context(), cfg, accountID)
 	email := r.Header.Get("X-Witself-Email")
 	rec, snapshot, err := cfg.Manager.ResolvedStatus(r.Context(), accountID, email)
 	if err != nil {
@@ -450,7 +497,7 @@ func billingStatus(cfg Config, w http.ResponseWriter, r *http.Request, accountID
 	view := billingSummaryView{
 		SchemaVersion:      "witself.v0",
 		AccountID:          accountID,
-		BillingAvailable:   cfg.Manager.BillingAvailable(),
+		BillingAvailable:   billingAvailable,
 		Configured:         providerSummary.Configured,
 		SubscriptionStatus: billingSubscriptionStatus(rec),
 		BillingPlan:        rec.Entitled,
@@ -732,6 +779,7 @@ func invalidBillingProviderProjection(kind string) error {
 }
 
 func planStatus(cfg Config, w http.ResponseWriter, r *http.Request, accountID string, _ AccountAccess) {
+	billingAvailable := billingAvailableForAccount(r.Context(), cfg, accountID)
 	rec, snapshot, err := cfg.Manager.ResolvedStatus(r.Context(), accountID, r.Header.Get("X-Witself-Email"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not read plan status")
@@ -748,7 +796,7 @@ func planStatus(cfg Config, w http.ResponseWriter, r *http.Request, accountID st
 	out := map[string]any{
 		"schema_version":       "witself.v0",
 		"account_id":           rec.AccountID,
-		"billing_available":    cfg.Manager.BillingAvailable(),
+		"billing_available":    billingAvailable,
 		"plan":                 snapshot.Plan,
 		"plan_name":            planName,
 		"billing_plan":         rec.Entitled,
@@ -1777,6 +1825,27 @@ func writeBillingMutationEnvelopeError(w http.ResponseWriter, message string) {
 		"code":           "invalid_request",
 		"error":          message,
 		"retryable":      false,
+	})
+}
+
+func writeBillingMutationFeatureNotEnabled(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusForbidden, map[string]any{
+		"schema_version": "witself.v0",
+		"code":           "feature_not_enabled",
+		"feature":        "billing",
+		"error":          "Sorry, this feature is not enabled on this account.",
+		"retryable":      false,
+	})
+}
+
+func writeBillingMutationGateUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+		"schema_version": "witself.v0",
+		"code":           "feature_availability_unavailable",
+		"error":          "Billing availability could not be determined; please retry.",
+		"retryable":      true,
 	})
 }
 

@@ -30,10 +30,28 @@ func (noopApplier) Apply(_ context.Context, _ string, request lifecycle.ApplyReq
 	return lifecycle.ApplyAck{Revision: request.Revision, Hash: request.Hash}, nil
 }
 
+func (a noopApplier) ApplyIfFits(
+	ctx context.Context,
+	accountID string,
+	request lifecycle.ApplyRequest,
+) (lifecycle.ConditionalApplyResult, error) {
+	ack, err := a.Apply(ctx, accountID, request)
+	return lifecycle.ConditionalApplyResult{Applied: err == nil, Ack: ack}, err
+}
+
 type failingApplier struct{}
 
 func (failingApplier) Apply(context.Context, string, lifecycle.ApplyRequest) (lifecycle.ApplyAck, error) {
 	return lifecycle.ApplyAck{}, errors.New("cell unavailable")
+}
+
+func (a failingApplier) ApplyIfFits(
+	ctx context.Context,
+	accountID string,
+	request lifecycle.ApplyRequest,
+) (lifecycle.ConditionalApplyResult, error) {
+	_, err := a.Apply(ctx, accountID, request)
+	return lifecycle.ConditionalApplyResult{}, err
 }
 
 type harness struct {

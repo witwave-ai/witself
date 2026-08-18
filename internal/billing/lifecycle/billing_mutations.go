@@ -138,6 +138,21 @@ func (m *Manager) PreviewBillingMutation(
 	requiresPendingCancellation := r.Pending != nil &&
 		(r.Pending.CancelPrevious ||
 			(r.Pending.Kind != PendingContact && r.CustomerID != ""))
+	requirePendingCancellationCapability := func() {
+		if !requiresPendingCancellation {
+			return
+		}
+		target, targetErr := pendingCancellationTarget(r)
+		if targetErr != nil {
+			preview.Violations = append(preview.Violations,
+				"the existing pending billing change has no exact provider target and requires operator reconciliation")
+			return
+		}
+		_, exact := provider.(billing.ExactPendingCanceller)
+		providerCapability(
+			providerErr == nil && target != nil && exact,
+			"exact pending cancellation")
+	}
 
 	switch command.Operation {
 	case BillingMutationSetup:
@@ -181,7 +196,7 @@ func (m *Manager) PreviewBillingMutation(
 				"apply the entitled plan after provider confirmation")
 		}
 		if requiresPendingCancellation {
-			providerCapability(providerErr == nil && implementsIdempotentCancel(provider), "pending cancellation")
+			requirePendingCancellationCapability()
 			preview.Effects = append(preview.Effects,
 				"replace the existing pending billing change")
 		}
@@ -207,7 +222,11 @@ func (m *Manager) PreviewBillingMutation(
 			preview.Violations = append(preview.Violations,
 				fmt.Sprintf("%s is not a downgrade from %s", target.ID, current.ID))
 		default:
-			violations, fitErr := m.cfg.Fit.Fit(ctx, accountID, target)
+			targetSnapshot, resolveErr := m.resolveSnapshotForEntitlement(r, target.ID)
+			if resolveErr != nil {
+				return BillingMutationPreview{}, resolveErr
+			}
+			violations, fitErr := m.cfg.Fit.Fit(ctx, accountID, targetSnapshot)
 			if fitErr != nil {
 				return BillingMutationPreview{}, fitErr
 			}
@@ -222,7 +241,7 @@ func (m *Manager) PreviewBillingMutation(
 				supportsDowngradeTarget(provider, target.ID),
 			fmt.Sprintf("downgrade to %s", target.ID))
 		if requiresPendingCancellation {
-			providerCapability(providerErr == nil && implementsIdempotentCancel(provider), "pending cancellation")
+			requirePendingCancellationCapability()
 		}
 		preview.Effects = append(preview.Effects,
 			fmt.Sprintf("schedule the subscription to change to %s at period end", target.ID))
@@ -232,7 +251,7 @@ func (m *Manager) PreviewBillingMutation(
 		if r.Pending == nil {
 			preview.Violations = append(preview.Violations, "nothing is pending")
 		} else if r.Pending.Kind != PendingContact || r.Pending.CancelPrevious {
-			providerCapability(providerErr == nil && implementsIdempotentCancel(provider), "pending cancellation")
+			requirePendingCancellationCapability()
 		}
 		preview.Effects = append(preview.Effects,
 			"cancel the current pending plan change")
@@ -311,7 +330,7 @@ func (m *Manager) ExecuteBillingMutation(
 			return BillingMutationExecution{}, ErrBillingMutationConflict
 		}
 		if stored.Status == BillingMutationCompleted {
-			return billingExecutionFromReceipt(stored, true)
+			return billingExecutionFromReceipt(stored, true, m.cfg.Now().UTC())
 		}
 		if stored.Status == BillingMutationSuperseded {
 			return BillingMutationExecution{}, ErrBillingMutationSuperseded
@@ -447,7 +466,8 @@ func (m *Manager) ExecuteBillingMutation(
 			if getErr == nil && currentOK &&
 				current.Status == BillingMutationCompleted {
 				releaseAccount()
-				return billingExecutionFromReceipt(current, !created)
+				return billingExecutionFromReceipt(
+					current, !created, m.cfg.Now().UTC())
 			}
 			if getErr != nil {
 				return BillingMutationExecution{}, getErr
@@ -455,7 +475,8 @@ func (m *Manager) ExecuteBillingMutation(
 			return BillingMutationExecution{}, completeErr
 		}
 		releaseAccount()
-		return billingExecutionFromReceipt(completed, !created)
+		return billingExecutionFromReceipt(
+			completed, !created, m.cfg.Now().UTC())
 	}
 
 	// A crash can occur after the account fold but before receipt completion.
@@ -507,6 +528,8 @@ func (m *Manager) executeClaimedBillingMutation(
 		}
 		return BillingMutationResult{
 			Kind: BillingMutationResultAction, URL: action.URL,
+			ProviderObjectID: action.ProviderObjectID,
+			ActionExpiresAt:  timePointer(action.ExpiresAt),
 		}, nil
 	case BillingMutationExecutionUpgradeContact,
 		BillingMutationExecutionUpgradeSelfServe:
@@ -571,9 +594,12 @@ func (m *Manager) recoverBillingMutation(
 					Kind: BillingMutationResultContact, Plan: receipt.TargetPlan,
 				}, true, nil
 			case r.Pending.Kind == PendingUpgrade && r.Pending.URL != "":
+				expires := r.Pending.Expires
 				return BillingMutationResult{
 					Kind: BillingMutationResultAction,
 					Plan: receipt.TargetPlan, URL: r.Pending.URL,
+					ProviderObjectID: r.Pending.ProviderObjectID,
+					ActionExpiresAt:  &expires,
 				}, true, nil
 			}
 		}
@@ -581,6 +607,7 @@ func (m *Manager) recoverBillingMutation(
 		if r.Pending != nil && r.Pending.OperationID == receipt.OperationID &&
 			r.Pending.Kind == PendingDowngrade &&
 			r.Pending.Plan == receipt.TargetPlan &&
+			providerEffectApplied(r.Pending) &&
 			!r.Pending.Effective.IsZero() {
 			effective := r.Pending.Effective
 			return BillingMutationResult{
@@ -646,6 +673,7 @@ const (
 	billingMutationReconcileCompleted
 	billingMutationReconcileSuperseded
 	billingMutationReconcileBusy
+	billingMutationReconcileCohortDeferred
 )
 
 type billingMutationReconcileResult struct {
@@ -714,6 +742,9 @@ func (m *Manager) ReconcileBillingMutations(
 			summary.Busy++
 			continue
 		}
+		if result.outcome == billingMutationReconcileCohortDeferred {
+			continue
+		}
 		summary.Attempted++
 		if result.err != nil {
 			summary.Failed++
@@ -750,6 +781,15 @@ func (m *Manager) reconcileBillingMutation(
 	}
 	if stored.Status != BillingMutationPending {
 		return billingMutationReconcileNoop, nil
+	}
+	enabled, err := m.billingMutationEnabledForAccount(ctx, stored.AccountID)
+	if err != nil {
+		return billingMutationReconcileNoop, fmt.Errorf(
+			"billing mutation recovery gate for account %s: %w",
+			stored.AccountID, err)
+	}
+	if !enabled {
+		return billingMutationReconcileCohortDeferred, nil
 	}
 	claimToken, err := newBillingMutationClaimToken()
 	if err != nil {
@@ -927,6 +967,11 @@ func billingMutationOperationID(accountID, idempotencyKey string) string {
 func billingResultFromOutcome(out Outcome) BillingMutationResult {
 	result := BillingMutationResult{
 		Kind: BillingMutationResultKind(out.Kind), Plan: out.Plan, URL: out.URL,
+		ProviderObjectID: out.ProviderObjectID,
+	}
+	if !out.ActionExpiresAt.IsZero() {
+		expires := out.ActionExpiresAt
+		result.ActionExpiresAt = &expires
 	}
 	if !out.Effective.IsZero() {
 		effective := out.Effective
@@ -935,16 +980,44 @@ func billingResultFromOutcome(out Outcome) BillingMutationResult {
 	return result
 }
 
+func timePointer(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+	cloned := value
+	return &cloned
+}
+
 func billingExecutionFromReceipt(
 	receipt BillingMutationReceipt,
 	replayed bool,
+	now time.Time,
 ) (BillingMutationExecution, error) {
 	if receipt.Status != BillingMutationCompleted || receipt.Result == nil {
 		return BillingMutationExecution{}, errors.New("lifecycle: billing mutation is not completed")
 	}
 	result := receipt.Result
+	actionExpiresAt := time.Time{}
+	if result.Kind == BillingMutationResultAction {
+		if result.ActionExpiresAt != nil {
+			actionExpiresAt = *result.ActionExpiresAt
+		} else if !receipt.CreatedAt.IsZero() {
+			// Compatibility for completed schema-1/2 receipts written before the
+			// provider expiry was persisted. They receive one bounded local replay
+			// window rather than turning into immortal hosted links.
+			actionExpiresAt = receipt.CreatedAt.UTC().Add(DefaultPendingTTL)
+		}
+		if actionExpiresAt.IsZero() || !now.Before(actionExpiresAt) {
+			return BillingMutationExecution{}, refuse(
+				"hosted billing action is no longer usable; refresh billing state, then use a new idempotency key only if the change is still needed")
+		}
+	}
 	out := Outcome{
 		Kind: string(result.Kind), Plan: result.Plan, URL: result.URL,
+		ProviderObjectID: result.ProviderObjectID,
+	}
+	if !actionExpiresAt.IsZero() {
+		out.ActionExpiresAt = actionExpiresAt
 	}
 	if result.Effective != nil {
 		out.Effective = *result.Effective
@@ -1047,16 +1120,11 @@ func implementsIdempotentSubscribe(provider billing.Provider) bool {
 }
 
 func implementsIdempotentDowngrade(provider billing.Provider) bool {
-	_, ok := provider.(billing.IdempotentDowngrader)
+	_, ok := provider.(billing.PreparedIdempotentDowngrader)
 	return ok
 }
 
 func supportsDowngradeTarget(provider billing.Provider, plan string) bool {
 	checker, ok := provider.(billing.DowngradeTargetChecker)
 	return !ok || checker.SupportsDowngradeTarget(plan)
-}
-
-func implementsIdempotentCancel(provider billing.Provider) bool {
-	_, ok := provider.(billing.IdempotentPendingCanceller)
-	return ok
 }

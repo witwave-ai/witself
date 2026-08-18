@@ -93,6 +93,46 @@ func TestPlanLimitErrorPreservesBoundedDimension(t *testing.T) {
 	}
 }
 
+func TestPlanFitApplyResultMappingPreservesExclusiveSnapshots(t *testing.T) {
+	now := time.Now().UTC()
+	snapshot := store.AccountPlanSnapshot{
+		AccountID: "acct_1", Revision: 7, Hash: strings.Repeat("a", 64),
+		Plan: "personal", Limits: map[string]int64{"realms": 1},
+		Policies: map[string]int64{}, Features: []string{}, AppliedAt: &now,
+	}
+	applied := toPlanFitApplyResult(store.AccountPlanFitApplyResult{
+		State: store.PlanFitApplyStateApplied, AccountID: "acct_1",
+		TargetRevision: 7, TargetPlan: "personal",
+		TargetSnapshotHash: snapshot.Hash,
+		Violations:         []store.AccountPlanFitViolation{},
+		AppliedSnapshot:    &snapshot,
+	})
+	if applied.SchemaVersion != "witself.v0" ||
+		applied.State != server.PlanFitApplyStateApplied ||
+		len(applied.Violations) != 0 || applied.CurrentSnapshot != nil ||
+		applied.AppliedSnapshot == nil ||
+		applied.AppliedSnapshot.SnapshotHash != snapshot.Hash {
+		t.Fatalf("mapped applied=%+v", applied)
+	}
+
+	blocked := toPlanFitApplyResult(store.AccountPlanFitApplyResult{
+		State: store.PlanFitApplyStateBlocked, AccountID: "acct_1",
+		TargetRevision: 8, TargetPlan: "personal",
+		TargetSnapshotHash: strings.Repeat("b", 64),
+		Violations: []store.AccountPlanFitViolation{{
+			Code: store.PlanFitViolationLimitExceeded, Dimension: "realms",
+			Scope: store.PlanFitScopeAccount, Used: 2, Max: 1, SubjectCount: 1,
+		}},
+		CurrentSnapshot: &snapshot,
+	})
+	if blocked.State != server.PlanFitApplyStateBlocked ||
+		len(blocked.Violations) != 1 || blocked.AppliedSnapshot != nil ||
+		blocked.CurrentSnapshot == nil || blocked.CurrentSnapshot.Revision != 7 ||
+		blocked.Violations[0].Dimension != "realms" {
+		t.Fatalf("mapped blocked=%+v", blocked)
+	}
+}
+
 func TestMessageRateLimitErrorPreservesValueFreeThrottleDetails(t *testing.T) {
 	resetAt := time.Date(2026, 7, 31, 12, 0, 2, 0, time.UTC)
 	source := &store.MessageRateLimitError{

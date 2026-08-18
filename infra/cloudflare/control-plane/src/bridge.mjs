@@ -29,6 +29,13 @@
 //             (never the cell provision token)
 //     GET|POST /v1/internal/accounts/{id}:apply-plan
 //       GET reads only the current cell fence; POST applies a snapshot.
+//     POST /v1/internal/accounts/{id}:plan-fit
+//       read-only target comparison; combines cell usage with global email
+//       alias/domain allocation authorities.
+//     POST /v1/internal/accounts/{id}:plan-fit-apply
+//       prepares exact global-authority fences, then atomically checks and
+//       applies the target in the cell. A blocked leg compensates every
+//       prepared authority against the cell's still-current snapshot.
 //     Authorization: Bearer $INTERNAL_BRIDGE_TOKEN
 //
 // The callback paths terminate at the Worker. They must never fall through to
@@ -36,9 +43,11 @@
 
 import {
   reconcileRealmEmailAliasesForPlan,
+  readRealmEmailAliasPlanFit,
 } from "./realm-email-alias-runtime.mjs";
 import {
   reconcileAgentEmailDomainsForPlan,
+  readAgentEmailDomainPlanFit,
 } from "./agent-email-domain-runtime.mjs";
 
 const ACCOUNT_ID_PATTERN = "[A-Za-z0-9_-]{1,128}";
@@ -66,6 +75,106 @@ const INTERNAL_RESOLVE_PATH = new RegExp(
 const INTERNAL_APPLY_PATH = new RegExp(
   `^/v1/internal/accounts/(${ACCOUNT_ID_PATTERN}):apply-plan$`,
 );
+const INTERNAL_FIT_PATH = new RegExp(
+  `^/v1/internal/accounts/(${ACCOUNT_ID_PATTERN}):plan-fit$`,
+);
+const INTERNAL_FIT_APPLY_PATH = new RegExp(
+  `^/v1/internal/accounts/(${ACCOUNT_ID_PATTERN}):plan-fit-apply$`,
+);
+
+const PLAN_FIT_ALIAS_LIMIT = "agent_email_realm_aliases_per_realm";
+const PLAN_FIT_DOMAIN_LIMIT = "agent_email_custom_domains_per_account";
+const PLAN_FIT_DIMENSION_FEATURE = Object.freeze({
+  [PLAN_FIT_ALIAS_LIMIT]: "agent_email_realm_alias",
+  [PLAN_FIT_DOMAIN_LIMIT]: "agent_email_custom_domain",
+});
+const PLAN_FIT_DIMENSION_ORDER = Object.freeze([
+  "realms",
+  "agents",
+  "agents_per_realm",
+  "stored_memory",
+  "stored_fact",
+  "stored_secret",
+  "agent_email_attachment_storage_bytes",
+  PLAN_FIT_ALIAS_LIMIT,
+  PLAN_FIT_DOMAIN_LIMIT,
+]);
+const PLAN_FIT_DIMENSION_SCOPE = Object.freeze({
+  realms: "account",
+  agents: "account",
+  agents_per_realm: "realm",
+  stored_memory: "agent",
+  stored_fact: "agent",
+  stored_secret: "agent",
+  agent_email_attachment_storage_bytes: "account",
+  [PLAN_FIT_ALIAS_LIMIT]: "realm",
+  [PLAN_FIT_DOMAIN_LIMIT]: "account",
+});
+const PLAN_FEATURE_KEYS = new Set([
+  "agent_email_custom_domain",
+  "agent_email_realm_alias",
+  "agent_email_receive",
+  "agent_email_send",
+  "collaboration",
+  "facts",
+  "memory",
+  "messaging",
+  "secrets",
+  "support",
+]);
+const PLAN_LIMIT_KEYS = new Set([
+  "agent_email_attachment_storage_bytes",
+  "agent_email_custom_domains_per_account",
+  "agent_email_max_raw_bytes",
+  "agent_email_realm_aliases_per_realm",
+  "agent_email_received_bytes_per_realm_minute",
+  "agent_email_received_bytes_per_recipient_minute",
+  "agent_email_received_bytes_per_sender_minute",
+  "agent_email_received_per_realm_minute",
+  "agent_email_received_per_recipient_minute",
+  "agent_email_received_per_sender_minute",
+  "agent_email_sent_per_agent_minute",
+  "agent_email_sent_per_realm_minute",
+  "agents",
+  "agents_per_realm",
+  "message_delivered_per_realm_minute",
+  "message_delivered_per_recipient_minute",
+  "message_sent_per_agent_minute",
+  "realms",
+  "stored_fact",
+  "stored_memory",
+  "stored_secret",
+]);
+const PLAN_POLICY_KEYS = new Set([
+  "agent_email_entitlement_version",
+  "agent_email_retention_days",
+  "message_retention_days",
+  "messaging_entitlement_version",
+  "transcript_retention_days",
+]);
+const PLAN_LIMIT_MAXIMUMS = Object.freeze({
+  agent_email_max_raw_bytes: 25 * 1024 * 1024,
+  agent_email_received_bytes_per_realm_minute: 4 * 1024 * 1024 * 1024,
+  agent_email_received_bytes_per_recipient_minute: 512 * 1024 * 1024,
+  agent_email_received_bytes_per_sender_minute: 64 * 1024 * 1024,
+  agent_email_received_per_realm_minute: 5_000,
+  agent_email_received_per_recipient_minute: 300,
+  agent_email_received_per_sender_minute: 30,
+  agent_email_sent_per_agent_minute: 30,
+  agent_email_sent_per_realm_minute: 300,
+  message_delivered_per_realm_minute: 100_000,
+  message_delivered_per_recipient_minute: 5_000,
+  message_sent_per_agent_minute: 2_000,
+});
+const RETENTION_POLICY_KEYS = new Set([
+  "agent_email_retention_days",
+  "message_retention_days",
+  "transcript_retention_days",
+]);
+const ENTITLEMENT_POLICY_KEYS = new Set([
+  "agent_email_entitlement_version",
+  "messaging_entitlement_version",
+]);
 
 export const ADMIN_ID_HEADER = "X-Witself-Admin-ID";
 export const ADMIN_HANDLE_HEADER = "X-Witself-Admin-Handle";
@@ -104,10 +213,21 @@ export function containerEnvVars(env) {
     ["CP_R2_SECRET_KEY", "WITSELF_CP_R2_SECRET_KEY"],
     ["CP_R2_PREFIX", "WITSELF_CP_R2_PREFIX"],
     ["CP_BILLING_PROVIDER", "WITSELF_CP_BILLING_PROVIDER"],
+    ["CP_STRIPE_MODE", "WITSELF_CP_STRIPE_MODE"],
     ["CP_STRIPE_SECRET_KEY", "WITSELF_CP_STRIPE_SECRET_KEY"],
     ["CP_STRIPE_WEBHOOK_SECRET", "WITSELF_CP_STRIPE_WEBHOOK_SECRET"],
     ["CP_STRIPE_SUCCESS_URL", "WITSELF_CP_STRIPE_SUCCESS_URL"],
     ["CP_STRIPE_CANCEL_URL", "WITSELF_CP_STRIPE_CANCEL_URL"],
+    ["CP_STRIPE_PORTAL_RETURN_URL", "WITSELF_CP_STRIPE_PORTAL_RETURN_URL"],
+    [
+      "CP_STRIPE_PORTAL_CONFIGURATION_ID",
+      "WITSELF_CP_STRIPE_PORTAL_CONFIGURATION_ID",
+    ],
+    ["CP_STRIPE_TEST_CLOCK_ID", "WITSELF_CP_STRIPE_TEST_CLOCK_ID"],
+    [
+      "CP_BILLING_ACCOUNT_ALLOWLIST",
+      "WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST",
+    ],
   ];
   for (const [binding, variable] of mappings) {
     if (typeof env[binding] === "string" && env[binding] !== "") {
@@ -281,11 +401,32 @@ async function boundedBody(request) {
   if (Number.isFinite(declared) && declared > BRIDGE_BODY_MAX_BYTES) {
     return { tooLarge: true };
   }
-  const body = await request.arrayBuffer();
-  if (body.byteLength > BRIDGE_BODY_MAX_BYTES) {
-    return { tooLarge: true };
+  if (!request.body) return { body: new ArrayBuffer(0) };
+
+  const reader = request.body.getReader();
+  const chunks = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > BRIDGE_BODY_MAX_BYTES) {
+        await reader.cancel().catch(() => {});
+        return { tooLarge: true };
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
   }
-  return { body };
+  const body = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { body: body.buffer };
 }
 
 function relay(response) {
@@ -774,6 +915,846 @@ async function applyPlanSnapshot(request, env, accountID, fetchImpl) {
   }
 }
 
+function validPlanFitTarget(input) {
+  const target = input?.target;
+  if (input?.schema_version !== "witself.v0" ||
+      !target || typeof target !== "object" || Array.isArray(target) ||
+      !validPlanName(target.plan) ||
+      typeof target.snapshot_hash !== "string" ||
+      !/^[0-9a-f]{64}$/.test(target.snapshot_hash) ||
+      !validPlanLimits(target.limits) ||
+      !validPlanPolicies(target.policies) ||
+      !validPlanFeatures(target.features)) {
+    return null;
+  }
+  return target;
+}
+
+function validPlanFitApplyTarget(input) {
+  const target = validPlanFitTarget(input);
+  if (!target || !Number.isSafeInteger(target.revision) ||
+      target.revision < 1) return null;
+  return target;
+}
+
+function sameIntegerMap(left, right) {
+  if (!left || typeof left !== "object" || Array.isArray(left) ||
+      !right || typeof right !== "object" || Array.isArray(right)) return false;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return leftKeys.length === rightKeys.length &&
+    leftKeys.every((key, index) => key === rightKeys[index] &&
+      Number.isSafeInteger(left[key]) && left[key] === right[key]);
+}
+
+function validPlanName(plan) {
+  return typeof plan === "string" && plan !== "" && plan === plan.trim();
+}
+
+function validPlanLimits(limits) {
+  if (!limits || typeof limits !== "object" || Array.isArray(limits)) {
+    return false;
+  }
+  return Object.entries(limits).every(([key, value]) => {
+    const maximum = PLAN_LIMIT_MAXIMUMS[key] ?? Number.MAX_SAFE_INTEGER;
+    return PLAN_LIMIT_KEYS.has(key) && Number.isSafeInteger(value) &&
+      value >= 0 && value <= maximum;
+  });
+}
+
+function validPlanPolicies(policies) {
+  if (!policies || typeof policies !== "object" || Array.isArray(policies)) {
+    return false;
+  }
+  return Object.entries(policies).every(([key, value]) =>
+    PLAN_POLICY_KEYS.has(key) && Number.isSafeInteger(value) &&
+    ((RETENTION_POLICY_KEYS.has(key) && value >= 1 && value <= 36_500) ||
+      (ENTITLEMENT_POLICY_KEYS.has(key) && value === 1))
+  );
+}
+
+function validPlanFeatures(features) {
+  return sameStringSet(features, features) &&
+    features.every((feature) => PLAN_FEATURE_KEYS.has(feature));
+}
+
+function orderedIntegerMap(values) {
+  return Object.fromEntries(
+    Object.keys(values).sort().map((key) => [key, values[key]]),
+  );
+}
+
+function canonicalPlanSnapshotJSON(snapshot) {
+  const raw = JSON.stringify({
+    plan: snapshot.plan,
+    limits: orderedIntegerMap(snapshot.limits),
+    policies: orderedIntegerMap(snapshot.policies),
+    features: [...snapshot.features].sort(),
+  });
+  // encoding/json escapes these five runes by default. Matching that behavior
+  // keeps this edge verifier byte-identical to plans.SnapshotHash even for an
+  // unusual but valid plan label.
+  return raw.replace(/[<>&\u2028\u2029]/gu, (value) => ({
+    "<": "\\u003c",
+    ">": "\\u003e",
+    "&": "\\u0026",
+    "\u2028": "\\u2028",
+    "\u2029": "\\u2029",
+  })[value]);
+}
+
+async function planSnapshotHashMatches(snapshot) {
+  if (!globalThis.crypto?.subtle) return false;
+  try {
+    const digest = await globalThis.crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(canonicalPlanSnapshotJSON(snapshot)),
+    );
+    const actual = Array.from(new Uint8Array(digest), (value) =>
+      value.toString(16).padStart(2, "0")
+    ).join("");
+    return actual === snapshot.snapshot_hash;
+  } catch {
+    return false;
+  }
+}
+
+function validAppliedAt(value) {
+  const match = typeof value === "string" && value.length <= 64
+    ? value.match(
+      /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|[+-](\d{2}):(\d{2}))$/u,
+    )
+    : null;
+  if (!match) return false;
+  const [, year, month, day, hour, minute, second, zoneHour, zoneMinute] =
+    match.map((part, index) => index === 0 || part === undefined
+      ? part
+      : Number(part));
+  if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59 ||
+      (zoneHour !== undefined && (zoneHour > 23 || zoneMinute > 59))) {
+    return false;
+  }
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const monthDays = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31,
+    30, 31][month - 1];
+  return day >= 1 && day <= monthDays;
+}
+
+function validPlanSnapshotFields(snapshot) {
+  return validPlanName(snapshot?.plan) && validPlanLimits(snapshot?.limits) &&
+    validPlanPolicies(snapshot?.policies) &&
+    validPlanFeatures(snapshot?.features);
+}
+
+function sameStringSet(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) ||
+      left.some((value) => typeof value !== "string" || value === "" ||
+        value !== value.trim()) ||
+      right.some((value) => typeof value !== "string" || value === "" ||
+        value !== value.trim())) return false;
+  const sortedLeft = [...left].sort();
+  const sortedRight = [...right].sort();
+  return new Set(sortedLeft).size === sortedLeft.length &&
+    new Set(sortedRight).size === sortedRight.length &&
+    sortedLeft.length === sortedRight.length &&
+    sortedLeft.every((value, index) => value === sortedRight[index]);
+}
+
+function validCurrentPlanSnapshot(snapshot, accountID, targetRevision) {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot) ||
+      snapshot.account_id !== accountID ||
+      !Number.isSafeInteger(snapshot.revision) || snapshot.revision < 0 ||
+      snapshot.revision === targetRevision ||
+      !validPlanSnapshotFields(snapshot)) return false;
+  if (snapshot.revision === 0) return snapshot.snapshot_hash === "";
+  return typeof snapshot.snapshot_hash === "string" &&
+    /^[0-9a-f]{64}$/.test(snapshot.snapshot_hash) &&
+    validAppliedAt(snapshot.applied_at);
+}
+
+async function verifiedCurrentPlanSnapshot(snapshot, accountID, targetRevision) {
+  return validCurrentPlanSnapshot(snapshot, accountID, targetRevision) &&
+    (snapshot.revision === 0 || await planSnapshotHashMatches(snapshot));
+}
+
+function snapshotMatchesPlanFitTarget(snapshot, accountID, target) {
+  return snapshot?.account_id === accountID &&
+    snapshot?.revision === target.revision &&
+    snapshot?.snapshot_hash === target.snapshot_hash &&
+    snapshot?.plan === target.plan &&
+    sameIntegerMap(snapshot?.limits, target.limits) &&
+    sameIntegerMap(snapshot?.policies, target.policies) &&
+    sameStringSet(snapshot?.features, target.features) &&
+    validAppliedAt(snapshot?.applied_at);
+}
+
+async function validPlanFitApplyCellResult(result, accountID, target) {
+  if (result?.schema_version !== "witself.v0" ||
+      result?.account_id !== accountID ||
+      result?.target_revision !== target.revision ||
+      result?.target_plan !== target.plan ||
+      result?.target_snapshot_hash !== target.snapshot_hash ||
+      !Array.isArray(result?.violations)) return false;
+  if (result.state === "applied") {
+    return result.violations.length === 0 &&
+      result.current_snapshot === undefined &&
+      snapshotMatchesPlanFitTarget(result.applied_snapshot, accountID, target);
+  }
+  if (result.state !== "blocked" || result.applied_snapshot !== undefined ||
+      !await verifiedCurrentPlanSnapshot(
+        result.current_snapshot,
+        accountID,
+        target.revision,
+      ) || result.current_snapshot.revision >= target.revision ||
+      result.violations.length === 0) return false;
+  return validPlanFitCellReport({
+    schema_version: "witself.v0",
+    account_id: accountID,
+    target_plan: target.plan,
+    target_snapshot_hash: target.snapshot_hash,
+    violations: result.violations,
+  }, accountID, target);
+}
+
+function validPlanFitCellReport(report, accountID, target) {
+  if (report?.schema_version !== "witself.v0" ||
+      report?.account_id !== accountID ||
+      report?.target_plan !== target.plan ||
+      report?.target_snapshot_hash !== target.snapshot_hash ||
+      !Array.isArray(report?.violations)) return false;
+  const seen = new Set();
+  return report.violations.every((violation) => {
+    const dimension = violation?.dimension;
+    const expectedScope = PLAN_FIT_DIMENSION_SCOPE[dimension];
+    const maximum = target.limits[dimension];
+    const valid = violation && typeof violation === "object" &&
+      violation.code === "limit_exceeded" &&
+      typeof expectedScope === "string" && !seen.has(dimension) &&
+      Object.hasOwn(target.limits, dimension) &&
+      violation.scope === expectedScope &&
+      Number.isSafeInteger(violation.used) &&
+      Number.isSafeInteger(violation.max) && violation.max === maximum &&
+      violation.used > violation.max &&
+      Number.isSafeInteger(violation.subject_count) &&
+      violation.subject_count >= 1 &&
+      (expectedScope !== "account" || violation.subject_count === 1);
+    if (valid) seen.add(dimension);
+    return valid;
+  });
+}
+
+function mergeAuthoritativePlanFit(report, dimension, authoritative) {
+  const existing = report.violations.find(
+    (violation) => violation.dimension === dimension,
+  );
+  report.violations = report.violations.filter(
+    (violation) => violation.dimension !== dimension,
+  );
+  if (authoritative.code === "authority_incomplete") {
+    report.violations.push(authoritative);
+  } else if (existing || authoritative.used > authoritative.max) {
+    report.violations.push({
+      ...authoritative,
+      used: Math.max(authoritative.used, existing?.used ?? 0),
+      subject_count: Math.max(
+        authoritative.subject_count,
+        existing?.subject_count ?? 0,
+      ),
+    });
+  }
+  const order = new Map(
+    PLAN_FIT_DIMENSION_ORDER.map((value, index) => [value, index]),
+  );
+  report.violations.sort((left, right) =>
+    (order.get(left.dimension) ?? Number.MAX_SAFE_INTEGER) -
+      (order.get(right.dimension) ?? Number.MAX_SAFE_INTEGER)
+  );
+}
+
+async function planFitAuthorityViolation(
+  env,
+  accountID,
+  dimension,
+  maximum,
+) {
+  try {
+    if (dimension === PLAN_FIT_ALIAS_LIMIT) {
+      const fit = await readRealmEmailAliasPlanFit(env, accountID, maximum);
+      return {
+        code: "limit_exceeded",
+        dimension,
+        scope: "realm",
+        used: fit.highest_used,
+        max: maximum,
+        subject_count: fit.over_limit_count,
+      };
+    }
+    const fit = await readAgentEmailDomainPlanFit(env, accountID, maximum);
+    return {
+      code: "limit_exceeded",
+      dimension,
+      scope: "account",
+      used: fit.used,
+      max: maximum,
+      subject_count: fit.used > maximum ? 1 : 0,
+    };
+  } catch {
+    return {
+      code: "authority_incomplete",
+      dimension,
+      scope: "authority",
+      used: 0,
+      max: maximum,
+      subject_count: 1,
+    };
+  }
+}
+
+function preparedAuthorityOutcome(body, dimension, maximum, target) {
+  if (body?.code === "plan_fit_prepared_fence_conflict") {
+    if (body.prepared !== false || body.pending !== true ||
+        body.stale !== false || body.complete !== false ||
+        body.pending_state !== "awaiting_cell" ||
+        !Number.isSafeInteger(body.pending_plan_revision) ||
+        body.pending_plan_revision < 1 ||
+        body.pending_plan_revision >= target.revision ||
+        typeof body.pending_plan_snapshot_hash !== "string" ||
+        !/^[0-9a-f]{64}$/.test(body.pending_plan_snapshot_hash) ||
+        body.fit !== undefined) {
+      throw new Error("plan-fit authority returned an invalid prepared fence");
+    }
+    return {
+      prepared: false,
+      violation: null,
+      conflict: {
+        dimension,
+        revision: body.pending_plan_revision,
+        snapshot_hash: body.pending_plan_snapshot_hash,
+      },
+    };
+  }
+  if (!body || typeof body !== "object" || body.skipped === true ||
+      body.complete !== true || !body.fit || body.fit.complete !== true ||
+      body.fit.dimension !== dimension || body.fit.maximum !== maximum) {
+    throw new Error("plan-fit authority returned an invalid preparation result");
+  }
+  const isAlias = dimension === PLAN_FIT_ALIAS_LIMIT;
+  const used = isAlias ? body.fit.highest_used : body.fit.used;
+  const subjectCount = body.fit.over_limit_count;
+  if (!Number.isSafeInteger(used) || used < 0 ||
+      !Number.isSafeInteger(subjectCount) || subjectCount < 0 ||
+      (!isAlias && subjectCount > 1)) {
+    throw new Error("plan-fit authority returned invalid bounded evidence");
+  }
+  if (body.prepared === true) {
+    if ((maximum !== null && used > maximum) || subjectCount !== 0) {
+      throw new Error("plan-fit authority prepared an over-limit target");
+    }
+    return { prepared: true, violation: null, conflict: null };
+  }
+  if (body.prepared !== false || body.code !== "plan_fit_failed" ||
+      maximum === null || used <= maximum || subjectCount < 1) {
+    throw new Error("plan-fit authority returned an invalid refusal");
+  }
+  return {
+    prepared: false,
+    conflict: null,
+    violation: {
+      code: "limit_exceeded",
+      dimension,
+      scope: PLAN_FIT_DIMENSION_SCOPE[dimension],
+      used,
+      max: maximum,
+      subject_count: subjectCount,
+    },
+  };
+}
+
+function planFitAuthorityMaximum(target, dimension) {
+  const feature = PLAN_FIT_DIMENSION_FEATURE[dimension];
+  if (typeof feature !== "string" || !target.features.includes(feature)) {
+    return 0;
+  }
+  return Object.hasOwn(target.limits, dimension)
+    ? target.limits[dimension]
+    : null;
+}
+
+function validPlanAuthorityCompletion(
+  body,
+  schemaVersion,
+  accountID,
+  recovery = false,
+) {
+  const valid = body?.schema_version === schemaVersion &&
+    body?.account_id === accountID && body?.mode === "complete" &&
+    body?.stale === false && body?.complete === true &&
+    Number.isSafeInteger(body?.changed) && body.changed >= 0 &&
+    Number.isSafeInteger(body?.registry_revision) &&
+    body.registry_revision >= 0;
+  return valid && (recovery
+    ? body.recovered === true && body.changed === 0
+    : body.recovered === undefined);
+}
+
+async function preparePlanAuthorities(env, accountID, target) {
+  const prepared = [];
+  for (const authority of [
+    {
+      dimension: PLAN_FIT_DOMAIN_LIMIT,
+      reconcile: reconcileAgentEmailDomainsForPlan,
+    },
+    {
+      dimension: PLAN_FIT_ALIAS_LIMIT,
+      reconcile: reconcileRealmEmailAliasesForPlan,
+    },
+  ]) {
+    const maximum = planFitAuthorityMaximum(target, authority.dimension);
+    let outcome;
+    try {
+      const body = await authority.reconcile(
+        env,
+        accountID,
+        target,
+        "prepare",
+      );
+      outcome = preparedAuthorityOutcome(
+        body,
+        authority.dimension,
+        maximum,
+        target,
+      );
+    } catch {
+      return { prepared, violation: null, conflict: null, unavailable: true };
+    }
+    if (outcome.conflict) {
+      return {
+        prepared,
+        violation: null,
+        conflict: outcome.conflict,
+        unavailable: false,
+      };
+    }
+    if (outcome.violation) {
+      return {
+        prepared,
+        violation: outcome.violation,
+        conflict: null,
+        unavailable: false,
+      };
+    }
+    prepared.push(authority.dimension);
+  }
+  return { prepared, violation: null, conflict: null, unavailable: false };
+}
+
+async function completePlanAuthorities(env, accountID, target) {
+  const alias = await reconcileRealmEmailAliasesForPlan(
+    env,
+    accountID,
+    target,
+    "complete",
+  );
+  if (!validPlanAuthorityCompletion(
+    alias,
+    "witself.realm-email-alias.v1",
+    accountID,
+  )) {
+    throw new Error("realm email alias completion acknowledgement is invalid");
+  }
+  const domain = await reconcileAgentEmailDomainsForPlan(
+    env,
+    accountID,
+    target,
+    "complete",
+  );
+  if (!validPlanAuthorityCompletion(
+    domain,
+    "witself.agent-email-domain.v1",
+    accountID,
+  )) {
+    throw new Error("custom domain completion acknowledgement is invalid");
+  }
+}
+
+async function recoverPlanAuthorities(
+  env,
+  accountID,
+  target,
+  current,
+  prepared,
+) {
+  const options = {
+    recover_pending_revision: target.revision,
+    recover_pending_snapshot_hash: target.snapshot_hash,
+  };
+  const selected = new Set(prepared);
+  for (const authority of [
+    {
+      dimension: PLAN_FIT_ALIAS_LIMIT,
+      schema: "witself.realm-email-alias.v1",
+      label: "realm email alias",
+      reconcile: reconcileRealmEmailAliasesForPlan,
+    },
+    {
+      dimension: PLAN_FIT_DOMAIN_LIMIT,
+      schema: "witself.agent-email-domain.v1",
+      label: "custom domain",
+      reconcile: reconcileAgentEmailDomainsForPlan,
+    },
+  ]) {
+    if (!selected.has(authority.dimension)) continue;
+    const body = await authority.reconcile(
+      env,
+      accountID,
+      current,
+      "complete",
+      options,
+    );
+    if (!validPlanAuthorityCompletion(
+      body,
+      authority.schema,
+      accountID,
+      current.revision < target.revision,
+    )) {
+      throw new Error(`${authority.label} recovery acknowledgement is invalid`);
+    }
+  }
+}
+
+async function readCellPlanSnapshot(fetchImpl, endpoint, token, accountID, target) {
+  const response = await fetchImpl(
+    `${endpoint.replace(/\/+$/, "")}/v1/accounts/${accountID}:plan`,
+    {
+      method: "GET",
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(BRIDGE_TIMEOUT_MS),
+    },
+  );
+  if (!response.ok) {
+    throw new Error("cell current plan is unavailable");
+  }
+  const snapshot = await response.json().catch(() => null);
+  if (!snapshotMatchesPlanFitTarget(snapshot, accountID, target) &&
+      !await verifiedCurrentPlanSnapshot(
+        snapshot,
+        accountID,
+        target.revision,
+      )) {
+    throw new Error("cell returned an invalid current plan snapshot");
+  }
+  return snapshot;
+}
+
+function appliedPlanFitEnvelope(accountID, target, snapshot) {
+  return {
+    schema_version: "witself.v0",
+    state: "applied",
+    account_id: accountID,
+    target_revision: target.revision,
+    target_plan: target.plan,
+    target_snapshot_hash: target.snapshot_hash,
+    violations: [],
+    applied_snapshot: snapshot,
+  };
+}
+
+function blockedPlanFitEnvelope(accountID, target, current, violation) {
+  return {
+    schema_version: "witself.v0",
+    state: "blocked",
+    account_id: accountID,
+    target_revision: target.revision,
+    target_plan: target.plan,
+    target_snapshot_hash: target.snapshot_hash,
+    violations: [violation],
+    current_snapshot: current,
+  };
+}
+
+async function applyPlanSnapshotIfFits(request, env, accountID, fetchImpl) {
+  const resolved = await activeAccountRoute(env, accountID);
+  if (resolved.response) return resolved.response;
+  const cell = await env.DIRECTORY.get(`cell:${resolved.route.cell}`, {
+    type: "json",
+  });
+  const endpoint = validCellEndpoint(cell?.endpoint);
+  if (!endpoint || !cell?.provision_token) {
+    return err("account cell is not configured for plan-fit application", 502);
+  }
+  const bounded = await boundedBody(request);
+  if (bounded?.tooLarge) return err("request body too large", 413);
+  if (bounded?.body == null) {
+    return err("plan-fit apply target snapshot is required", 400);
+  }
+  let input;
+  try {
+    input = JSON.parse(new TextDecoder().decode(bounded.body));
+  } catch {
+    return err("invalid plan-fit apply target snapshot", 400);
+  }
+  const target = validPlanFitApplyTarget(input);
+  if (!target || !await planSnapshotHashMatches(target)) {
+    return err("invalid plan-fit apply target snapshot", 400);
+  }
+  if (!env.AGENT_EMAIL_DOMAINS || !env.REALM_EMAIL_ALIASES) {
+    return err("agent email plan-fit authority is unavailable", 502);
+  }
+
+  let authority;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    authority = await preparePlanAuthorities(env, accountID, target);
+    if (!authority.conflict) break;
+
+    let current;
+    try {
+      current = await readCellPlanSnapshot(
+        fetchImpl,
+        endpoint,
+        cell.provision_token,
+        accountID,
+        target,
+      );
+      if (current.revision === authority.conflict.revision &&
+          current.snapshot_hash !== authority.conflict.snapshot_hash) {
+        return err("prepared plan-fit fence conflicts with the cell", 502);
+      }
+      if (snapshotMatchesPlanFitTarget(current, accountID, target)) {
+        await recoverPlanAuthorities(
+          env,
+          accountID,
+          authority.conflict,
+          current,
+          [authority.conflict.dimension],
+        );
+        await completePlanAuthorities(env, accountID, target);
+        return json(appliedPlanFitEnvelope(accountID, target, current));
+      }
+      if (authority.prepared.length > 0) {
+        await recoverPlanAuthorities(
+          env,
+          accountID,
+          target,
+          current,
+          authority.prepared,
+        );
+      }
+      await recoverPlanAuthorities(
+        env,
+        accountID,
+        authority.conflict,
+        current,
+        [authority.conflict.dimension],
+      );
+    } catch {
+      return err("prepared plan-fit authority recovery failed", 502);
+    }
+    if (current.revision > target.revision) {
+      return err("cell plan snapshot supersedes plan-fit target", 409);
+    }
+  }
+  if (authority?.conflict) {
+    return err("prepared plan-fit authority recovery did not converge", 502);
+  }
+  if (authority.unavailable) {
+    try {
+      const current = await readCellPlanSnapshot(
+        fetchImpl,
+        endpoint,
+        cell.provision_token,
+        accountID,
+        target,
+      );
+      if (snapshotMatchesPlanFitTarget(current, accountID, target)) {
+        await completePlanAuthorities(env, accountID, target);
+        return json(appliedPlanFitEnvelope(accountID, target, current));
+      }
+      if (authority.prepared.length > 0) {
+        await recoverPlanAuthorities(
+          env,
+          accountID,
+          target,
+          current,
+          authority.prepared,
+        );
+      }
+    } catch {
+      // The exact prepared intent remains fail closed for a retry or operator.
+    }
+    return err("agent email plan-fit authority is unavailable", 502);
+  }
+
+  if (authority.violation) {
+    let current;
+    try {
+      current = await readCellPlanSnapshot(
+        fetchImpl,
+        endpoint,
+        cell.provision_token,
+        accountID,
+        target,
+      );
+      if (snapshotMatchesPlanFitTarget(current, accountID, target)) {
+        return err("agent email plan-fit authority conflicts with the cell", 502);
+      }
+      if (authority.prepared.length > 0) {
+        await recoverPlanAuthorities(
+          env,
+          accountID,
+          target,
+          current,
+          authority.prepared,
+        );
+      }
+      if (current.revision > target.revision) {
+        return err("cell plan snapshot supersedes plan-fit target", 409);
+      }
+    } catch {
+      return err("agent email plan-fit authority recovery failed", 502);
+    }
+    return json(blockedPlanFitEnvelope(
+      accountID,
+      target,
+      current,
+      authority.violation,
+    ));
+  }
+
+  let response;
+  try {
+    response = await fetchImpl(
+      `${endpoint.replace(/\/+$/, "")}/v1/accounts/${accountID}:plan-fit-apply`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${cell.provision_token}`,
+          "Content-Type": "application/json",
+        },
+        body: bounded.body,
+        signal: AbortSignal.timeout(BRIDGE_TIMEOUT_MS),
+      },
+    );
+  } catch {
+    response = null;
+  }
+
+  let result = null;
+  if (response?.ok) {
+    result = await response.json().catch(() => null);
+  }
+  if (!response?.ok ||
+      !await validPlanFitApplyCellResult(result, accountID, target)) {
+    try {
+      const current = await readCellPlanSnapshot(
+        fetchImpl,
+        endpoint,
+        cell.provision_token,
+        accountID,
+        target,
+      );
+      if (snapshotMatchesPlanFitTarget(current, accountID, target)) {
+        await completePlanAuthorities(env, accountID, target);
+        return json(appliedPlanFitEnvelope(accountID, target, current));
+      }
+      await recoverPlanAuthorities(
+        env,
+        accountID,
+        target,
+        current,
+        authority.prepared,
+      );
+    } catch {
+      return err("cell plan-fit application outcome is indeterminate", 502);
+    }
+    if (response && !response.ok) return relay(response);
+    return err("cell returned an invalid plan-fit apply result", 502);
+  }
+
+  try {
+    if (result.state === "applied") {
+      await completePlanAuthorities(env, accountID, target);
+    } else {
+      await recoverPlanAuthorities(
+        env,
+        accountID,
+        target,
+        result.current_snapshot,
+        authority.prepared,
+      );
+    }
+  } catch {
+    return err("agent email plan-fit authority reconciliation failed", 502);
+  }
+  return json(result);
+}
+
+async function checkPlanFit(request, env, accountID, fetchImpl) {
+  const resolved = await activeAccountRoute(env, accountID);
+  if (resolved.response) return resolved.response;
+  const cell = await env.DIRECTORY.get(`cell:${resolved.route.cell}`, {
+    type: "json",
+  });
+  const endpoint = validCellEndpoint(cell?.endpoint);
+  if (!endpoint || !cell?.provision_token) {
+    return err("account cell is not configured for plan-fit reads", 502);
+  }
+  const bounded = await boundedBody(request);
+  if (bounded?.tooLarge) return err("request body too large", 413);
+  if (bounded?.body == null) return err("plan-fit target snapshot is required", 400);
+  let input;
+  try {
+    input = JSON.parse(new TextDecoder().decode(bounded.body));
+  } catch {
+    return err("invalid plan-fit target snapshot", 400);
+  }
+  const target = validPlanFitTarget(input);
+  if (!target || !await planSnapshotHashMatches(target)) {
+    return err("invalid plan-fit target snapshot", 400);
+  }
+
+  let response;
+  try {
+    response = await fetchImpl(
+      `${endpoint.replace(/\/+$/, "")}/v1/accounts/${accountID}:plan-fit`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${cell.provision_token}`,
+          "Content-Type": "application/json",
+        },
+        body: bounded.body,
+        signal: AbortSignal.timeout(BRIDGE_TIMEOUT_MS),
+      },
+    );
+  } catch (cause) {
+    const detail = cause?.name === "TimeoutError" ? "timed out" : "unreachable";
+    return err(`cell ${detail}`, 502);
+  }
+  if (!response.ok) return relay(response);
+  let report;
+  try {
+    report = await response.json();
+  } catch {
+    return err("cell returned an invalid plan-fit report", 502);
+  }
+  if (!validPlanFitCellReport(report, accountID, target)) {
+    return err("cell returned an invalid plan-fit report", 502);
+  }
+
+  for (const dimension of [PLAN_FIT_ALIAS_LIMIT, PLAN_FIT_DOMAIN_LIMIT]) {
+    const maximum = planFitAuthorityMaximum(target, dimension);
+    if (maximum === null) continue;
+    const authoritative = await planFitAuthorityViolation(
+      env,
+      accountID,
+      dimension,
+      maximum,
+    );
+    mergeAuthoritativePlanFit(report, dimension, authoritative);
+  }
+  return json(report);
+}
+
 // handleInternalBridgeRequest terminates every /v1/internal/* request at the
 // Worker. Authentication precedes route disclosure.
 export async function handleInternalBridgeRequest(
@@ -804,6 +1785,21 @@ export async function handleInternalBridgeRequest(
       return err("method not allowed", 405);
     }
     return applyPlanSnapshot(request, env, applyMatch[1], fetchImpl);
+  }
+  const fitMatch = url.pathname.match(INTERNAL_FIT_PATH);
+  if (fitMatch) {
+    if (request.method !== "POST") return err("method not allowed", 405);
+    return checkPlanFit(request, env, fitMatch[1], fetchImpl);
+  }
+  const fitApplyMatch = url.pathname.match(INTERNAL_FIT_APPLY_PATH);
+  if (fitApplyMatch) {
+    if (request.method !== "POST") return err("method not allowed", 405);
+    return applyPlanSnapshotIfFits(
+      request,
+      env,
+      fitApplyMatch[1],
+      fetchImpl,
+    );
   }
   return err("not found", 404);
 }

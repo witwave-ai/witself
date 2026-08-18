@@ -50,17 +50,27 @@ V0 should meter meaningful usage internally, but charge primarily by plan tier.
 This gives Witself enough data to understand real service load without making
 the first pricing model feel like nickel-and-dime metering.
 
-The first v0 release does not need live payment collection or full subscription
-management. The current checkout implements a dark provider-neutral lifecycle
-and an account-scoped billing read/setup contract: status, actual provider next
-charge, redacted payment-method summary, bounded invoice/payment history, and
-provider-hosted setup/portal actions. Its presence does not enable live Stripe,
-charging, or production webhooks. Billing, payment, crypto payment, and invoice
-commands may otherwise remain contract-shaped and capability-gated while the
+The current checkout implements a dark provider-neutral lifecycle and an
+account-scoped billing read/setup contract: status, actual provider next charge,
+redacted payment-method summary, bounded invoice/payment history, and
+provider-hosted setup/portal actions. The Stripe test-mode transition slice is
+limited to Personal to Professional purchase and Professional to Personal
+period-end downgrade/cancellation. Team, Enterprise, paid-to-paid changes,
+automated dunning policy or collection mutations, and refund mutations remain
+out. Its presence does not enable live Stripe, charging, or production
+webhooks. The exclusive `v0.0.254` cutover and forward-fix rules are in
+[billing-transition-rollout.md](billing-transition-rollout.md). Billing,
+payment, crypto payment, and invoice commands may otherwise remain
+contract-shaped and capability-gated while the
 core product matures across both planes — the open plane (realm, agent, memory,
 fact, policy, group, message, and audit) and the sealed plane (secret and TOTP).
 The metered payload spans identity usage and credential usage; the sealed-plane
 dimensions count events only and never carry secret or seed values.
+
+The optional `WITSELF_CP_STRIPE_TEST_CLOCK_ID` exists only to attach one fresh,
+disposable test customer to a Stripe test clock for retained period-boundary
+acceptance. It must be cleared before any broader cohort and is refused in live
+mode; it is not general subscription-time control.
 
 The dark lifecycle requires every setup, upgrade, downgrade, and pending-change
 cancel apply request to carry an audit reason, `confirmed: true`, and an
@@ -157,35 +167,42 @@ Production payment activation remains gated on an explicit operational and
 security review. Account billing reads and mutations now derive distinct
 `billing:read` and `billing:manage` authority from the cell-authenticated
 account role; older cells that omit the role fail closed. At minimum,
-activation must replace timestamp-only entitlement ordering with an
-authoritative subscription projection, scope dunning to the exact managed
-subscription, reconcile restored control-plane state against provider truth,
-provide a real downgrade fit checker, and implement the Team usage-billing
-policy. It must also compensate partial multi-subscription downgrades, define
-deterministic ordering for conflicting provider events with equal timestamps,
-and retain completed receipts under an explicit bounded policy without ever
-deleting unresolved work. The implemented reconciler now stops unsafe automatic
-provider retries before the idempotency horizon, but operations that reach that
-guard still need an operator/provider-object resolution path. Hosted-action
-receipts also need explicit expiry/refresh behavior rather than replaying a
-stale URL forever.
+activation must retain real-provider proof of the implemented exact managed-
+subscription projection, exact-subscription dunning, and deterministic
+equal-time event ordering; reconcile restored control-plane state against
+provider truth; and implement the Team usage-billing policy. The implemented
+Personal downgrade path now requires an atomic, cell-backed fit apply and exact
+provider target; that does not make paid-to-paid Team transitions complete.
+Production must also compensate partial multi-subscription downgrades and retain
+completed receipts under an explicit bounded policy without ever deleting
+unresolved work. The implemented reconciler now stops unsafe automatic provider
+retries before the idempotency horizon, but operations that reach that guard
+still need an operator/provider-object resolution path. Hosted-action receipts
+now expire and refresh under their exact operation fence rather than replaying
+a stale URL forever; retained sandbox expiry and response-loss proof is still
+required.
 
-This mutation surface remains dark until a rolling-writer floor is enforced:
-every control-plane replica capable of receiving a billing write must preserve
-the receipt/envelope version, actor, confirmation, request digest, and
-idempotency fence. Old writers must be drained or blocked before billing is
-enabled; route availability alone is not an activation signal. Webhook and
-reconciler writers must cut over exclusively with that floor because an older
-binary can bypass or erase the new fences. The account fold also needs a durable
-equal-time event fence. The cross-replica mutation fence is implemented, but
-production replacement still requires authoritative subscription projection
-and exact provider-object cancellation rather than discovery from a bounded
-list. Completed mutation receipts still need explicit bounded retention that
-never removes unresolved work, plus an operator path that can terminalize a
-provider-declared deterministic failure without guessing that an ambiguous
-failure had no side effect. Provider secrets, webhook registration, deployment
-gates, and a production rollback exercise are separate human-controlled rollout
-steps.
+This mutation surface remains dark behind an empty account cohort. The exact
+reader/canceller release tree must carry the reviewed
+`internal/billing/lifecycle/compatibility/exact-provider-target-v1` capability
+marker; squash-merge ancestry or a version number is not proof. The actual
+predecessor `v0.0.254` can broad-cancel a prepared downgrade from either its API
+path or its reconciler, so it cannot coexist with a prepared-downgrade writer.
+Every old API and reconciliation process must be fully drained before the first
+new writer. Rollback to `v0.0.254` is unsupported once this transition release
+is introduced; keep the cohort empty and forward-fix instead. The count-only
+inventory, quarantine procedure, and hermetic preflight are in
+[billing-transition-rollout.md](billing-transition-rollout.md).
+
+The account fold now gives cancellation precedence over activation and recovery
+precedence over failure at identical provider timestamps, with the provider
+event id as the stable tie-breaker; permutation tests pin both outcomes and
+exact-subscription isolation. Completed mutation receipts still need explicit
+bounded retention that never removes unresolved work, plus an operator path
+that can terminalize a provider-declared deterministic failure without guessing
+that an ambiguous failure had no side effect. Production provider secrets,
+webhook registration, alerting, restore reconciliation, and retained sandbox
+activation/forward-fix proof remain human-controlled gates.
 
 The implemented transcript-usage slice is deliberately upstream of this
 billing design: immutable `usage_events` plus hourly/daily `usage_rollups` move

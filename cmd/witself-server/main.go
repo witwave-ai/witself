@@ -1600,14 +1600,6 @@ func serve() int {
 			}
 			return toEvacuationRecord(evacuation), nil
 		}
-		toPlanSnapshot := func(snapshot store.AccountPlanSnapshot) server.PlanSnapshotRecord {
-			return server.PlanSnapshotRecord{
-				AccountID: snapshot.AccountID, Revision: snapshot.Revision,
-				SnapshotHash: snapshot.Hash, Plan: snapshot.Plan,
-				Limits: snapshot.Limits, Policies: snapshot.Policies,
-				Features: snapshot.Features, AppliedAt: snapshot.AppliedAt,
-			}
-		}
 		cfg.SetAccountPlan = func(
 			ctx context.Context,
 			accountID string,
@@ -1629,7 +1621,7 @@ func serve() int {
 			case err != nil:
 				return server.PlanSnapshotRecord{}, err
 			default:
-				return toPlanSnapshot(snapshot), nil
+				return toPlanSnapshotRecord(snapshot), nil
 			}
 		}
 		cfg.GetAccountPlan = func(ctx context.Context, accountID string) (server.PlanSnapshotRecord, error) {
@@ -1640,7 +1632,72 @@ func serve() int {
 			if err != nil {
 				return server.PlanSnapshotRecord{}, err
 			}
-			return toPlanSnapshot(snapshot), nil
+			return toPlanSnapshotRecord(snapshot), nil
+		}
+		cfg.CheckAccountPlanFit = func(
+			ctx context.Context,
+			accountID string,
+			target server.PlanFitTargetRecord,
+		) (server.PlanFitReport, error) {
+			report, err := st.CheckAccountPlanFit(ctx, accountID, store.AccountPlanFitTarget{
+				Plan: target.Plan, SnapshotHash: target.SnapshotHash,
+				Limits: target.Limits, Policies: target.Policies,
+				Features: target.Features,
+			})
+			switch {
+			case errors.Is(err, store.ErrAccountNotFound):
+				return server.PlanFitReport{}, server.ErrNotFound
+			case errors.Is(err, store.ErrAccountNotActive),
+				errors.Is(err, store.ErrPlanFitStateAmbiguous):
+				return server.PlanFitReport{}, server.ErrConflict
+			case errors.Is(err, store.ErrPlanSnapshotInvalid),
+				errors.Is(err, store.ErrPlanPolicyInvalid):
+				return server.PlanFitReport{}, server.ErrInvalidPlanSnapshot
+			case err != nil:
+				return server.PlanFitReport{}, err
+			}
+			violations := make([]server.PlanFitViolation, 0, len(report.Violations))
+			for _, violation := range report.Violations {
+				violations = append(violations, server.PlanFitViolation{
+					Code: violation.Code, Dimension: violation.Dimension,
+					Scope: violation.Scope, Used: violation.Used,
+					Max: violation.Max, SubjectCount: violation.SubjectCount,
+				})
+			}
+			return server.PlanFitReport{
+				SchemaVersion: "witself.v0", AccountID: report.AccountID,
+				TargetPlan:         report.TargetPlan,
+				TargetSnapshotHash: report.TargetSnapshotHash,
+				Violations:         violations,
+			}, nil
+		}
+		cfg.ApplyAccountPlanIfFits = func(
+			ctx context.Context,
+			accountID string,
+			target server.PlanFitApplyTargetRecord,
+		) (server.PlanFitApplyResult, error) {
+			result, err := st.ApplyAccountPlanIfFits(
+				ctx, accountID, store.AccountPlanFitApplyTarget{
+					Revision: target.Revision, Plan: target.Plan,
+					SnapshotHash: target.SnapshotHash, Limits: target.Limits,
+					Policies: target.Policies, Features: target.Features,
+				},
+			)
+			switch {
+			case errors.Is(err, store.ErrAccountNotFound):
+				return server.PlanFitApplyResult{}, server.ErrNotFound
+			case errors.Is(err, store.ErrAccountNotActive),
+				errors.Is(err, store.ErrPlanFitStateAmbiguous),
+				errors.Is(err, store.ErrPlanSnapshotStale):
+				return server.PlanFitApplyResult{}, server.ErrConflict
+			case errors.Is(err, store.ErrPlanSnapshotInvalid),
+				errors.Is(err, store.ErrPlanPolicyInvalid):
+				return server.PlanFitApplyResult{}, server.ErrInvalidPlanSnapshot
+			case err != nil:
+				return server.PlanFitApplyResult{}, err
+			default:
+				return toPlanFitApplyResult(result), nil
+			}
 		}
 		// Surface the deployment account's applied plan in /v1/capabilities.
 		if acctID := cfg.AccountID; acctID != "" {
@@ -2497,6 +2554,42 @@ func toServerFactAssertion(a store.FactAssertion) server.FactAssertion {
 		ObservedAt: a.ObservedAt, ConfirmedAt: a.ConfirmedAt, ValidFrom: a.ValidFrom,
 		ValidUntil: a.ValidUntil, SupersedesID: a.SupersedesID, CreatedAt: a.CreatedAt,
 	}
+}
+
+func toPlanSnapshotRecord(snapshot store.AccountPlanSnapshot) server.PlanSnapshotRecord {
+	return server.PlanSnapshotRecord{
+		AccountID: snapshot.AccountID, Revision: snapshot.Revision,
+		SnapshotHash: snapshot.Hash, Plan: snapshot.Plan,
+		Limits: snapshot.Limits, Policies: snapshot.Policies,
+		Features: snapshot.Features, AppliedAt: snapshot.AppliedAt,
+	}
+}
+
+func toPlanFitApplyResult(result store.AccountPlanFitApplyResult) server.PlanFitApplyResult {
+	violations := make([]server.PlanFitViolation, 0, len(result.Violations))
+	for _, violation := range result.Violations {
+		violations = append(violations, server.PlanFitViolation{
+			Code: violation.Code, Dimension: violation.Dimension,
+			Scope: violation.Scope, Used: violation.Used,
+			Max: violation.Max, SubjectCount: violation.SubjectCount,
+		})
+	}
+	mapped := server.PlanFitApplyResult{
+		SchemaVersion: "witself.v0", State: result.State,
+		AccountID: result.AccountID, TargetRevision: result.TargetRevision,
+		TargetPlan:         result.TargetPlan,
+		TargetSnapshotHash: result.TargetSnapshotHash,
+		Violations:         violations,
+	}
+	if result.CurrentSnapshot != nil {
+		current := toPlanSnapshotRecord(*result.CurrentSnapshot)
+		mapped.CurrentSnapshot = &current
+	}
+	if result.AppliedSnapshot != nil {
+		applied := toPlanSnapshotRecord(*result.AppliedSnapshot)
+		mapped.AppliedSnapshot = &applied
+	}
+	return mapped
 }
 
 func toServerFactCandidate(c store.FactCandidate) server.FactCandidate {

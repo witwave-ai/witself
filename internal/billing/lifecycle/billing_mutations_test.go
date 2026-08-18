@@ -100,7 +100,9 @@ func TestBillingMutationSetupExactReplayAndConflict(t *testing.T) {
 
 	receipt, ok, err := store.GetBillingMutation(ctx, first.OperationID)
 	if err != nil || !ok || receipt.Status != BillingMutationCompleted ||
-		receipt.ClaimToken != "" || receipt.Result == nil {
+		receipt.ClaimToken != "" || receipt.Result == nil ||
+		receipt.Result.ProviderObjectID == "" ||
+		receipt.Result.ActionExpiresAt == nil {
 		t.Fatalf("receipt = %+v ok=%t err=%v", receipt, ok, err)
 	}
 	encoded, err := json.Marshal(receipt)
@@ -118,6 +120,71 @@ func TestBillingMutationSetupExactReplayAndConflict(t *testing.T) {
 		ctx, "acct_setup", "owner@example.com", actor, changed,
 	); !errors.Is(err, ErrBillingMutationConflict) {
 		t.Fatalf("changed replay error = %v; want conflict", err)
+	}
+
+	clock.t = *receipt.Result.ActionExpiresAt
+	if _, err := manager.ExecuteBillingMutation(
+		ctx, "acct_setup", "owner@example.com", actor, command,
+	); !errors.Is(err, ErrRefusal) || !strings.Contains(err.Error(), "new idempotency key") {
+		t.Fatalf("expired exact replay error = %v", err)
+	}
+	fresh := command
+	fresh.IdempotencyKey = "setup-2026-08-11-0002"
+	renewed, err := manager.ExecuteBillingMutation(
+		ctx, "acct_setup", "owner@example.com", actor, fresh)
+	if err != nil || renewed.OperationID == first.OperationID ||
+		renewed.Outcome.Kind != "action" {
+		t.Fatalf("renewed hosted setup = %+v, %v", renewed, err)
+	}
+}
+
+func TestBillingExecutionNeverReplaysExpiredHostedAction(t *testing.T) {
+	t.Parallel()
+	expires := time.Date(2026, 8, 17, 13, 0, 0, 0, time.UTC)
+	receipt := BillingMutationReceipt{
+		Status: BillingMutationCompleted,
+		Result: &BillingMutationResult{
+			Kind:             BillingMutationResultAction,
+			URL:              "https://checkout.stripe.com/c/pay/cs_test_expiring",
+			ProviderObjectID: "cs_test_expiring",
+			ActionExpiresAt:  &expires,
+		},
+	}
+	if execution, err := billingExecutionFromReceipt(
+		receipt, true, expires.Add(-time.Nanosecond),
+	); err != nil || execution.Outcome.URL != receipt.Result.URL {
+		t.Fatalf("pre-expiry replay = %+v, %v", execution, err)
+	}
+	for _, now := range []time.Time{expires, expires.Add(time.Second)} {
+		if _, err := billingExecutionFromReceipt(receipt, true, now); !errors.Is(err, ErrRefusal) ||
+			!strings.Contains(err.Error(), "new idempotency key") {
+			t.Fatalf("expired replay at %v error = %v", now, err)
+		}
+	}
+}
+
+func TestLegacyHostedActionGetsBoundedCreatedAtFallback(t *testing.T) {
+	t.Parallel()
+	created := time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC)
+	completed := created.Add(23 * time.Hour)
+	receipt := BillingMutationReceipt{
+		CreatedAt: created, CompletedAt: &completed,
+		Status: BillingMutationCompleted,
+		Result: &BillingMutationResult{
+			Kind: BillingMutationResultAction,
+			URL:  "https://checkout.stripe.com/c/pay/cs_test_legacy",
+		},
+	}
+	boundary := created.Add(DefaultPendingTTL)
+	if _, err := billingExecutionFromReceipt(
+		receipt, true, boundary.Add(-time.Nanosecond),
+	); err != nil {
+		t.Fatalf("legacy pre-boundary replay: %v", err)
+	}
+	if _, err := billingExecutionFromReceipt(
+		receipt, true, boundary,
+	); !errors.Is(err, ErrRefusal) {
+		t.Fatalf("legacy boundary replay error = %v", err)
 	}
 }
 
@@ -230,30 +297,75 @@ func (p *blockingBillingProvider) SubscribeIdempotent(
 
 type failFirstBillingProvider struct {
 	*fake.Fake
-	mu     sync.Mutex
-	failed bool
-	calls  int
+	mu          sync.Mutex
+	failed      bool
+	calls       int
+	firstAction billing.Action
+	lastAction  billing.Action
+}
+
+// providerWithoutExactCancel deliberately exposes the historical broad
+// cancellation interface but not ExactPendingCanceller. Preview must not
+// approve work that execution would later refuse after owning the receipt.
+type providerWithoutExactCancel struct {
+	billing.Provider
+	subscriber billing.IdempotentSubscriber
+	canceller  billing.IdempotentPendingCanceller
+}
+
+func (p *providerWithoutExactCancel) SubscribeIdempotent(
+	ctx context.Context,
+	customerID, plan, operationID string,
+) (billing.Action, error) {
+	return p.subscriber.SubscribeIdempotent(ctx, customerID, plan, operationID)
+}
+
+func (p *providerWithoutExactCancel) CancelPendingIdempotent(
+	ctx context.Context,
+	customerID, operationID string,
+) error {
+	return p.canceller.CancelPendingIdempotent(ctx, customerID, operationID)
 }
 
 func (p *failFirstBillingProvider) SubscribeIdempotent(
 	ctx context.Context,
 	customerID, plan, operationID string,
 ) (billing.Action, error) {
+	action, err := p.Fake.SubscribeIdempotent(
+		ctx, customerID, plan, operationID)
 	p.mu.Lock()
 	p.calls++
-	if !p.failed {
+	fail := !p.failed
+	if fail {
 		p.failed = true
-		p.mu.Unlock()
-		return billing.Action{}, context.DeadlineExceeded
+		p.firstAction = action
+	} else {
+		p.lastAction = action
 	}
 	p.mu.Unlock()
-	return p.Fake.SubscribeIdempotent(ctx, customerID, plan, operationID)
+	if err != nil {
+		return billing.Action{}, err
+	}
+	if fail {
+		// The provider committed Checkout, but its response was lost. The exact
+		// retry must recover the same object rather than minting a second one.
+		return billing.Action{}, context.DeadlineExceeded
+	}
+	return action, nil
 }
 
 func (p *failFirstBillingProvider) subscribeCalls() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.calls
+}
+
+func (p *failFirstBillingProvider) replayedExactAction() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls >= 2 && p.firstAction == p.lastAction &&
+		p.firstAction.ProviderObjectID != "" && p.firstAction.URL != "" &&
+		!p.firstAction.ExpiresAt.IsZero()
 }
 
 type countingUpgradeBillingProvider struct {
@@ -297,7 +409,7 @@ type mutableBillingFit struct {
 func (f *mutableBillingFit) Fit(
 	_ context.Context,
 	_ string,
-	_ plans.Plan,
+	_ PlanSnapshot,
 ) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -316,31 +428,106 @@ func (f *mutableBillingFit) set(violations ...string) {
 // reclassifying it against mutable catalog or fit inputs.
 type ambiguousDowngradeBillingProvider struct {
 	*fake.Fake
-	mu     sync.Mutex
-	failed bool
-	calls  int
+	mu                sync.Mutex
+	failed            bool
+	calls             int
+	prepareCalls      int
+	driftAfterPrepare bool
+	targets           []billing.ScheduledDowngrade
 }
 
-func (p *ambiguousDowngradeBillingProvider) ScheduleDowngradeIdempotent(
+func (p *ambiguousDowngradeBillingProvider) ScheduleDowngradeExactIdempotent(
 	ctx context.Context,
 	customerID, plan, operationID string,
-) (time.Time, error) {
-	effective, err := p.Fake.ScheduleDowngradeIdempotent(
-		ctx, customerID, plan, operationID)
+) (billing.ScheduledDowngrade, error) {
+	prepared, err := p.PrepareDowngrade(ctx, customerID, plan)
 	if err != nil {
-		return time.Time{}, err
+		return billing.ScheduledDowngrade{}, err
+	}
+	return p.SchedulePreparedDowngradeIdempotent(
+		ctx, customerID, plan, operationID, prepared)
+}
+
+func (p *ambiguousDowngradeBillingProvider) PrepareDowngrade(
+	ctx context.Context,
+	customerID, plan string,
+) (billing.ScheduledDowngrade, error) {
+	prepared, err := p.Fake.PrepareDowngrade(ctx, customerID, plan)
+	if err != nil {
+		return billing.ScheduledDowngrade{}, err
+	}
+	p.mu.Lock()
+	p.prepareCalls++
+	call := p.prepareCalls
+	drift := p.driftAfterPrepare
+	p.mu.Unlock()
+	if drift && call > 1 {
+		prepared.ProviderObjectID = "fake_subscription_replacement"
+	}
+	return prepared, nil
+}
+
+func (p *ambiguousDowngradeBillingProvider) SchedulePreparedDowngradeIdempotent(
+	ctx context.Context,
+	customerID, plan, operationID string,
+	prepared billing.ScheduledDowngrade,
+) (billing.ScheduledDowngrade, error) {
+	scheduled, err := p.Fake.SchedulePreparedDowngradeIdempotent(
+		ctx, customerID, plan, operationID, prepared)
+	if err != nil {
+		return billing.ScheduledDowngrade{}, err
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.calls++
+	p.targets = append(p.targets, prepared)
 	if !p.failed {
 		p.failed = true
-		return time.Time{}, context.DeadlineExceeded
+		return billing.ScheduledDowngrade{}, context.DeadlineExceeded
 	}
-	return effective, nil
+	return scheduled, nil
 }
 
 func (p *ambiguousDowngradeBillingProvider) downgradeCalls() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+func (p *ambiguousDowngradeBillingProvider) preparedCalls() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.prepareCalls
+}
+
+func (p *ambiguousDowngradeBillingProvider) downgradeTargets() []billing.ScheduledDowngrade {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]billing.ScheduledDowngrade(nil), p.targets...)
+}
+
+// alreadyResolvedExactCancelProvider models Stripe observing that period end
+// already won before its subscription-deleted webhook reached lifecycle state.
+// The local pending fence must remain visible until that webhook is folded.
+type alreadyResolvedExactCancelProvider struct {
+	*fake.Fake
+	mu    sync.Mutex
+	calls int
+}
+
+func (p *alreadyResolvedExactCancelProvider) CancelPendingObjectIdempotent(
+	_ context.Context,
+	_ string,
+	_ billing.PendingCancellation,
+	_ string,
+) error {
+	p.mu.Lock()
+	p.calls++
+	p.mu.Unlock()
+	return billing.ErrPendingAlreadyResolved
+}
+
+func (p *alreadyResolvedExactCancelProvider) cancelCalls() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.calls
@@ -368,6 +555,44 @@ func (p *resolveDuringCancelBillingProvider) CancelPendingIdempotent(
 	p.calls++
 	p.mu.Unlock()
 	if err := p.Fake.CancelPendingIdempotent(ctx, customerID, operationID); err != nil {
+		return err
+	}
+	p.once.Do(func() {
+		record, ok, err := p.store.Get(ctx, p.accountID)
+		if err != nil {
+			p.err = err
+			return
+		}
+		if !ok {
+			p.err = errors.New("cancel race fixture: account record disappeared")
+			return
+		}
+		if p.replace == nil {
+			record.Pending = nil
+		} else {
+			replacement := *p.replace
+			record.Pending = &replacement
+		}
+		record.Entitled = "standard"
+		record.Applied = "standard"
+		record.EntitledAt = p.now().UTC()
+		p.err = p.store.Put(ctx, record)
+	})
+	return p.err
+}
+
+func (p *resolveDuringCancelBillingProvider) CancelPendingObjectIdempotent(
+	ctx context.Context,
+	customerID string,
+	target billing.PendingCancellation,
+	operationID string,
+) error {
+	p.mu.Lock()
+	p.calls++
+	p.mu.Unlock()
+	if err := p.Fake.CancelPendingObjectIdempotent(
+		ctx, customerID, target, operationID,
+	); err != nil {
 		return err
 	}
 	p.once.Do(func() {
@@ -588,8 +813,9 @@ func TestBillingMutationAccountLaneSerializesUpgradeAndCancel(t *testing.T) {
 	}
 	if _, err := cancelManager.ExecuteBillingMutation(
 		context.Background(), "acct_lane", "", actor, cancelCommand,
-	); !errors.Is(err, ErrBillingMutationInProgress) {
-		t.Fatalf("concurrent cancel error = %v; want in progress", err)
+	); !errors.Is(err, ErrRefusal) ||
+		!strings.Contains(err.Error(), "operator reconciliation") {
+		t.Fatalf("concurrent targetless cancel error = %v; want safe refusal", err)
 	}
 	cancelOperationID := billingMutationOperationID(
 		"acct_lane", cancelCommand.IdempotencyKey)
@@ -718,8 +944,9 @@ func TestBillingMutationPendingReceiptReservesAccountUntilExactRetry(t *testing.
 	}
 	if _, err := manager.ExecuteBillingMutation(
 		context.Background(), "acct_supersede", "", actor, cancelCommand,
-	); !errors.Is(err, ErrBillingMutationInProgress) {
-		t.Fatalf("cancel during ambiguous upgrade = %v; want in progress", err)
+	); !errors.Is(err, ErrRefusal) ||
+		!strings.Contains(err.Error(), "operator reconciliation") {
+		t.Fatalf("cancel during ambiguous upgrade = %v; want safe refusal", err)
 	}
 	cancelOperationID := billingMutationOperationID(
 		"acct_supersede", cancelCommand.IdempotencyKey)
@@ -734,6 +961,10 @@ func TestBillingMutationPendingReceiptReservesAccountUntilExactRetry(t *testing.
 	)
 	if err != nil || upgrade.Outcome.Kind != "action" || !upgrade.Replayed {
 		t.Fatalf("exact upgrade recovery = %+v, %v", upgrade, err)
+	}
+	if !provider.replayedExactAction() ||
+		upgrade.Outcome.ProviderObjectID != provider.firstAction.ProviderObjectID {
+		t.Fatalf("ambiguous retry did not recover one exact Checkout: %+v", upgrade)
 	}
 	if upgrade.Actor != actor {
 		t.Fatalf("recovered actor = %+v; want immutable initiator %+v", upgrade.Actor, actor)
@@ -816,6 +1047,9 @@ func TestReconcileBillingMutationsAutonomouslyRetriesPendingProviderWork(
 		t.Fatalf("provider calls after reconcile = %d; want exact retry",
 			provider.subscribeCalls())
 	}
+	if !provider.replayedExactAction() {
+		t.Fatal("autonomous retry did not recover the exact created Checkout")
+	}
 	completed, ok, err := store.GetBillingMutation(ctx, operationID)
 	if err != nil || !ok || completed.Status != BillingMutationCompleted ||
 		completed.Result == nil ||
@@ -828,6 +1062,155 @@ func TestReconcileBillingMutationsAutonomouslyRetriesPendingProviderWork(
 	if err != nil || empty.Scanned != 0 || len(empty.Receipts) != 0 {
 		t.Fatalf("pending batch after autonomous reconcile = %+v err=%v",
 			empty, err)
+	}
+}
+
+func TestReconcileBillingMutationsDefersAccountsOutsideMutationCohort(
+	t *testing.T,
+) {
+	catalog, err := plans.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	standard, ok := catalog.Get("standard")
+	if !ok || !standard.Purchasable() {
+		t.Fatalf("Professional fixture = %+v ok=%v", standard, ok)
+	}
+	now := time.Date(2026, 8, 17, 18, 0, 0, 0, time.UTC)
+	clock := &clock{t: now}
+	store := NewMemStore()
+	actor := BillingActor{ID: "usr_owner_1", Role: "owner"}
+	command := BillingMutationCommand{
+		Operation: BillingMutationUpgrade, Plan: "standard",
+		Reason:         "Exercise cohort-fenced recovery",
+		Confirmed:      true,
+		IdempotencyKey: "cohort-fenced-recovery-0001",
+	}
+	seeded := seedPendingBillingMutationForTest(
+		t, store, billingMutationReceiptSchemaVersion,
+		"acct_cohort_recovery", "owner@example.com", actor, command,
+		billingMutationApproval{
+			ExecutionClass:     BillingMutationExecutionUpgradeSelfServe,
+			ApprovedPriceCents: standard.PriceCents(),
+			ApprovedCurrency:   strings.ToLower(catalog.Currency),
+		}, now)
+	provider := &countingUpgradeBillingProvider{Fake: fake.New(fake.Config{
+		Prices: catalog.Prices(), Interactive: true, Now: clock.now,
+	})}
+	var gateMu sync.Mutex
+	enabled := false
+	gatedAccount := ""
+	manager, err := NewManager(Config{
+		Catalog: catalog,
+		Providers: map[string]billing.Provider{
+			"billing": provider,
+		},
+		Default: "billing", Store: store,
+		Applier: &recApplier{}, Now: clock.now,
+		BillingMutationGate: func(_ context.Context, accountID string) (bool, error) {
+			gateMu.Lock()
+			defer gateMu.Unlock()
+			gatedAccount = accountID
+			return enabled, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deferred, err := manager.ReconcileBillingMutations(context.Background())
+	if err != nil || deferred.Scanned != 1 || deferred.Attempted != 0 ||
+		deferred.Completed != 0 || deferred.Failed != 0 {
+		t.Fatalf("cohort-deferred summary = %+v err=%v", deferred, err)
+	}
+	if calls := provider.upgradeMutationCalls(); calls != 0 {
+		t.Fatalf("provider calls outside cohort = %d; want zero", calls)
+	}
+	gateMu.Lock()
+	gotGatedAccount := gatedAccount
+	enabled = true
+	gateMu.Unlock()
+	if gotGatedAccount != seeded.AccountID {
+		t.Fatalf("recovery gate account = %q; want %q",
+			gotGatedAccount, seeded.AccountID)
+	}
+	pending, ok, err := store.GetBillingMutation(
+		context.Background(), seeded.OperationID)
+	if err != nil || !ok || pending.Status != BillingMutationPending {
+		t.Fatalf("deferred receipt = %+v ok=%v err=%v", pending, ok, err)
+	}
+
+	resumed, err := manager.ReconcileBillingMutations(context.Background())
+	if err != nil || resumed.Scanned != 1 || resumed.Attempted != 1 ||
+		resumed.Completed != 1 || resumed.Failed != 0 {
+		t.Fatalf("cohort-resumed summary = %+v err=%v", resumed, err)
+	}
+	if calls := provider.upgradeMutationCalls(); calls != 2 {
+		t.Fatalf("provider calls after cohort enable = %d; want customer+checkout", calls)
+	}
+	completed, ok, err := store.GetBillingMutation(
+		context.Background(), seeded.OperationID)
+	if err != nil || !ok || completed.Status != BillingMutationCompleted {
+		t.Fatalf("resumed receipt = %+v ok=%v err=%v", completed, ok, err)
+	}
+}
+
+func TestReconcileBillingMutationsFailsClosedWhenMutationGateErrors(
+	t *testing.T,
+) {
+	catalog, err := plans.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	standard, _ := catalog.Get("standard")
+	now := time.Date(2026, 8, 17, 18, 15, 0, 0, time.UTC)
+	clock := &clock{t: now}
+	store := NewMemStore()
+	seeded := seedPendingBillingMutationForTest(
+		t, store, billingMutationReceiptSchemaVersion,
+		"acct_cohort_gate_error", "owner@example.com",
+		BillingActor{ID: "usr_owner_1", Role: "owner"},
+		BillingMutationCommand{
+			Operation: BillingMutationUpgrade, Plan: "standard",
+			Reason:         "Exercise recovery gate failure",
+			Confirmed:      true,
+			IdempotencyKey: "cohort-gate-error-0001",
+		}, billingMutationApproval{
+			ExecutionClass:     BillingMutationExecutionUpgradeSelfServe,
+			ApprovedPriceCents: standard.PriceCents(),
+			ApprovedCurrency:   strings.ToLower(catalog.Currency),
+		}, now)
+	provider := &countingUpgradeBillingProvider{Fake: fake.New(fake.Config{
+		Prices: catalog.Prices(), Interactive: true, Now: clock.now,
+	})}
+	gateErr := errors.New("cohort source unavailable")
+	manager, err := NewManager(Config{
+		Catalog: catalog,
+		Providers: map[string]billing.Provider{
+			"billing": provider,
+		},
+		Default: "billing", Store: store,
+		Applier: &recApplier{}, Now: clock.now,
+		BillingMutationGate: func(context.Context, string) (bool, error) {
+			return false, gateErr
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := manager.ReconcileBillingMutations(context.Background())
+	if !errors.Is(err, gateErr) || summary.Scanned != 1 ||
+		summary.Attempted != 1 || summary.Failed != 1 || summary.Completed != 0 {
+		t.Fatalf("gate-error summary = %+v err=%v", summary, err)
+	}
+	if calls := provider.upgradeMutationCalls(); calls != 0 {
+		t.Fatalf("provider calls after gate error = %d; want zero", calls)
+	}
+	pending, ok, getErr := store.GetBillingMutation(
+		context.Background(), seeded.OperationID)
+	if getErr != nil || !ok || pending.Status != BillingMutationPending {
+		t.Fatalf("gate-error receipt = %+v ok=%v err=%v", pending, ok, getErr)
 	}
 }
 
@@ -1105,6 +1488,51 @@ func TestBillingMutationExactRetryRepairsIndexAndKeepsStoredApproval(
 	}
 }
 
+func TestAmbiguousHostedPurchaseStaysQuarantinedAfterRetryHorizon(t *testing.T) {
+	catalog, err := plans.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := &clock{t: time.Date(2026, 8, 11, 16, 0, 0, 0, time.UTC)}
+	base := fake.New(fake.Config{
+		Prices: catalog.Prices(), Interactive: true, Now: clock.now,
+	})
+	provider := &failFirstBillingProvider{Fake: base}
+	store := NewMemStore()
+	manager := newBillingMutationManagerWithProvider(
+		t, catalog, store, provider, clock)
+	command := BillingMutationCommand{
+		Operation: BillingMutationUpgrade, Plan: "standard",
+		Reason:    "Exercise a lost Checkout response beyond the automatic retry window",
+		Confirmed: true, IdempotencyKey: "ambiguous-horizon-2026-08-11",
+	}
+	ctx := context.Background()
+	if _, err := manager.ExecuteBillingMutation(
+		ctx, "acct_ambiguous_horizon", "owner@example.com",
+		BillingActor{ID: "usr_owner_1", Role: "owner"}, command,
+	); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first ambiguous upgrade = %v", err)
+	}
+	clock.t = clock.t.Add(25 * time.Hour)
+	if err := manager.ReconcileAccount(ctx, "acct_ambiguous_horizon"); err == nil || !strings.Contains(err.Error(), "operator reconciliation") {
+		t.Fatalf("expired ambiguous reconcile = %v; want quarantine", err)
+	}
+	record, ok, err := store.Get(ctx, "acct_ambiguous_horizon")
+	if err != nil || !ok || record.Pending == nil ||
+		record.Pending.Kind != PendingUpgrade ||
+		record.Pending.ProviderObjectID != "" {
+		t.Fatalf("ambiguous hosted purchase was cleared: %+v ok=%t err=%v",
+			record, ok, err)
+	}
+	operationID := billingMutationOperationID(
+		"acct_ambiguous_horizon", command.IdempotencyKey)
+	receipt, ok, err := store.GetBillingMutation(ctx, operationID)
+	if err != nil || !ok || receipt.Status != BillingMutationPending {
+		t.Fatalf("ambiguous receipt was terminalized: %+v ok=%t err=%v",
+			receipt, ok, err)
+	}
+}
+
 func TestBillingMutationStripeRejectsUnsupportedPaidDowngradeBeforeReceipt(t *testing.T) {
 	catalog, err := plans.Load()
 	if err != nil {
@@ -1180,6 +1608,80 @@ func TestBillingMutationStripeRejectsUnsupportedPaidDowngradeBeforeReceipt(t *te
 	}
 }
 
+func TestBillingMutationPreviewRequiresExactPendingCancellationTargetAndCapability(t *testing.T) {
+	catalog, err := plans.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := &clock{t: time.Date(2026, 8, 11, 16, 30, 0, 0, time.UTC)}
+	base := fake.New(fake.Config{
+		Prices: catalog.Prices(), Interactive: true, Now: clock.now,
+	})
+	provider := &providerWithoutExactCancel{
+		Provider: base, subscriber: base, canceller: base,
+	}
+	store := NewMemStore()
+	put := func(accountID, objectID string) {
+		t.Helper()
+		if err := store.Put(context.Background(), Record{
+			AccountID: accountID, Provider: "billing", CustomerID: "cus_" + accountID,
+			Entitled: plans.Free, Applied: plans.Free,
+			Pending: &Pending{
+				Kind: PendingUpgrade, Plan: "standard",
+				OperationID:      "bop_existing_" + accountID,
+				ProviderObjectID: objectID,
+				Requested:        clock.now(), Expires: clock.now().Add(time.Hour),
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("acct_no_exact", "cs_existing_exact")
+	put("acct_no_target", "")
+	manager, err := NewManager(Config{
+		Catalog: catalog, Providers: map[string]billing.Provider{"billing": provider},
+		Default: "billing", Store: store, Applier: &recApplier{}, Now: clock.now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := BillingMutationCommand{
+		Operation: BillingMutationCancel,
+		Reason:    "Cancel the unfinished purchase",
+	}
+
+	preview, err := manager.PreviewBillingMutation(
+		context.Background(), "acct_no_exact", "", command)
+	if err != nil || preview.Allowed || !strings.Contains(
+		strings.Join(preview.Violations, "\n"), "exact pending cancellation",
+	) {
+		t.Fatalf("legacy-only cancellation preview = %+v, %v", preview, err)
+	}
+	preview, err = manager.PreviewBillingMutation(
+		context.Background(), "acct_no_target", "", command)
+	if err != nil || preview.Allowed || !strings.Contains(
+		strings.Join(preview.Violations, "\n"), "operator reconciliation",
+	) {
+		t.Fatalf("targetless cancellation preview = %+v, %v", preview, err)
+	}
+
+	command.Confirmed = true
+	command.IdempotencyKey = "targetless-cancel-2026-08-11"
+	if _, err := manager.ExecuteBillingMutation(
+		context.Background(), "acct_no_target", "",
+		BillingActor{ID: "usr_owner_1", Role: "owner"}, command,
+	); !errors.Is(err, ErrRefusal) {
+		t.Fatalf("targetless cancellation apply = %v; want refusal", err)
+	}
+	operationID := billingMutationOperationID(
+		"acct_no_target", command.IdempotencyKey)
+	if _, ok, err := store.GetBillingMutation(
+		context.Background(), operationID,
+	); err != nil || ok {
+		t.Fatalf("targetless refusal receipt exists=%t err=%v", ok, err)
+	}
+}
+
 func TestBillingMutationExactDowngradeRetryIgnoresFitAndCatalogDrift(t *testing.T) {
 	catalog, err := plans.Load()
 	if err != nil {
@@ -1189,7 +1691,9 @@ func TestBillingMutationExactDowngradeRetryIgnoresFitAndCatalogDrift(t *testing.
 	prices := catalog.Prices()
 	prices["team"] = 25_000
 	base := fake.New(fake.Config{Prices: prices, Now: clock.now})
-	provider := &ambiguousDowngradeBillingProvider{Fake: base}
+	provider := &ambiguousDowngradeBillingProvider{
+		Fake: base, driftAfterPrepare: true,
+	}
 	ctx := context.Background()
 	customerID, err := base.EnsureCustomer(ctx, "acct_drift", "owner@example.com")
 	if err != nil {
@@ -1241,8 +1745,17 @@ func TestBillingMutationExactDowngradeRetryIgnoresFitAndCatalogDrift(t *testing.
 	}
 	record, ok, err := store.Get(ctx, "acct_drift")
 	if err != nil || !ok || record.Pending == nil ||
-		record.Pending.OperationID != operationID || !record.Pending.Effective.IsZero() {
+		record.Pending.OperationID != operationID || !record.Pending.Effective.IsZero() ||
+		record.Pending.PreparedEffective.IsZero() ||
+		record.Pending.ProviderObjectID == "" ||
+		record.Pending.ProviderPhase != pendingProviderPrepared ||
+		!isPreparedDowngradeFence(record.Pending) {
 		t.Fatalf("ambiguous account state = %+v ok=%t err=%v", record, ok, err)
+	}
+	preparedEffective := record.Pending.PreparedEffective
+	if err := validatePendingCancellationTarget(
+		*record.Pending.CancelPreviousTarget); err == nil {
+		t.Fatal("prepared downgrade fence became a provider cancellation target")
 	}
 
 	fit.set("current usage now exceeds the Professional cap")
@@ -1256,9 +1769,32 @@ func TestBillingMutationExactDowngradeRetryIgnoresFitAndCatalogDrift(t *testing.
 	recovered, err := newManager(driftedCatalog).ExecuteBillingMutation(
 		ctx, "acct_drift", "owner@example.com", actor, command)
 	if err != nil || recovered.Outcome.Kind != "scheduled" ||
-		recovered.Outcome.Plan != "standard" || recovered.Outcome.Effective.IsZero() ||
+		recovered.Outcome.Plan != "standard" ||
+		!recovered.Outcome.Effective.Equal(preparedEffective) ||
 		!recovered.Replayed {
 		t.Fatalf("exact recovery = %+v, %v", recovered, err)
+	}
+	if provider.preparedCalls() != 1 {
+		t.Fatalf("provider prepare calls = %d; want one durable target selection",
+			provider.preparedCalls())
+	}
+	targets := provider.downgradeTargets()
+	if provider.downgradeCalls() != 2 || len(targets) != 2 ||
+		targets[0] != targets[1] ||
+		targets[0].ProviderObjectID != record.Pending.ProviderObjectID ||
+		!targets[0].Effective.Equal(preparedEffective) {
+		t.Fatalf("provider retry targets = %+v calls=%d; want exact prepared replay",
+			targets, provider.downgradeCalls())
+	}
+	record, ok, err = store.Get(ctx, "acct_drift")
+	if err != nil || !ok || record.Pending == nil ||
+		record.Pending.ProviderPhase != pendingProviderApplied ||
+		!providerEffectApplied(record.Pending) ||
+		record.Pending.ProviderObjectID != targets[0].ProviderObjectID ||
+		!record.Pending.Effective.Equal(preparedEffective) ||
+		!record.Pending.PreparedEffective.IsZero() ||
+		record.Pending.CancelPrevious || record.Pending.CancelPreviousTarget != nil {
+		t.Fatalf("confirmed prepared state = %+v ok=%t err=%v", record, ok, err)
 	}
 }
 
@@ -1306,6 +1842,17 @@ func TestBillingMutationDowngradeWebhookTombstoneRecoversLostProviderResponse(t 
 	}
 	operationID := billingMutationOperationID(
 		"acct_webhook_recovery", command.IdempotencyKey)
+	preparedRecord, ok, err := store.Get(ctx, "acct_webhook_recovery")
+	if err != nil || !ok || preparedRecord.Pending == nil ||
+		preparedRecord.Pending.ProviderPhase != pendingProviderPrepared ||
+		preparedRecord.Pending.ProviderObjectID == "" ||
+		preparedRecord.Pending.PreparedEffective.IsZero() ||
+		!preparedRecord.Pending.Effective.IsZero() ||
+		!isPreparedDowngradeFence(preparedRecord.Pending) {
+		t.Fatalf("prepared account state = %+v ok=%t err=%v",
+			preparedRecord, ok, err)
+	}
+	preparedEffective := preparedRecord.Pending.PreparedEffective
 
 	clock.t = clock.t.AddDate(0, 0, 31)
 	events := base.ApplyDue()
@@ -1321,7 +1868,7 @@ func TestBillingMutationDowngradeWebhookTombstoneRecoversLostProviderResponse(t 
 		record.LastBillingMutationKind != BillingMutationPlanDowngrade ||
 		record.LastBillingMutationResultKind != BillingMutationResultScheduled ||
 		record.LastBillingMutationPlan != plans.Free ||
-		!record.LastBillingMutationEffective.Equal(events[0].At) {
+		!record.LastBillingMutationEffective.Equal(preparedEffective) {
 		t.Fatalf("webhook tombstone = %+v ok=%t err=%v", record, ok, err)
 	}
 
@@ -1329,7 +1876,7 @@ func TestBillingMutationDowngradeWebhookTombstoneRecoversLostProviderResponse(t 
 		ctx, "acct_webhook_recovery", "owner@example.com", actor, command)
 	if err != nil || recovered.Outcome.Kind != "scheduled" ||
 		recovered.Outcome.Plan != plans.Free ||
-		!recovered.Outcome.Effective.Equal(events[0].At) || !recovered.Replayed {
+		!recovered.Outcome.Effective.Equal(preparedEffective) || !recovered.Replayed {
 		t.Fatalf("webhook recovery = %+v, %v", recovered, err)
 	}
 	if provider.downgradeCalls() != 1 {
@@ -1339,8 +1886,111 @@ func TestBillingMutationDowngradeWebhookTombstoneRecoversLostProviderResponse(t 
 	if err != nil || !ok || receipt.Status != BillingMutationCompleted ||
 		receipt.Result == nil || receipt.Result.Kind != BillingMutationResultScheduled ||
 		receipt.Result.Plan != plans.Free || receipt.Result.Effective == nil ||
-		!receipt.Result.Effective.Equal(events[0].At) {
+		!receipt.Result.Effective.Equal(preparedEffective) {
 		t.Fatalf("completed receipt = %+v ok=%t err=%v", receipt, ok, err)
+	}
+}
+
+func TestBillingMutationCancelWaitsForTerminalDowngradeWebhook(t *testing.T) {
+	catalog, err := plans.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := &clock{t: time.Date(2026, 8, 11, 17, 45, 0, 0, time.UTC)}
+	base := fake.New(fake.Config{Prices: catalog.Prices(), Now: clock.now})
+	provider := &alreadyResolvedExactCancelProvider{Fake: base}
+	ctx := context.Background()
+	accountID := "acct_terminal_downgrade_cancel"
+	customerID, err := base.EnsureCustomer(ctx, accountID, "owner@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := base.SubscribeIdempotent(
+		ctx, customerID, "standard", "bop_seed_terminal_cancel",
+	); err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemStore()
+	if err := store.Put(ctx, Record{
+		AccountID: accountID, Provider: "billing", CustomerID: customerID,
+		Entitled: "standard", Applied: "standard", EntitledAt: clock.now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manager := newBillingMutationManagerWithProvider(
+		t, catalog, store, provider, clock)
+	actor := BillingActor{ID: "usr_owner_1", Role: "owner"}
+	downgrade := BillingMutationCommand{
+		Operation: BillingMutationDowngrade, Plan: plans.Free,
+		Reason: "Return to Personal at period end", Confirmed: true,
+		IdempotencyKey: "terminal-downgrade-2026-08-11",
+	}
+	scheduled, err := manager.ExecuteBillingMutation(
+		ctx, accountID, "owner@example.com", actor, downgrade)
+	if err != nil || scheduled.Outcome.Kind != "scheduled" {
+		t.Fatalf("schedule downgrade = %+v, %v", scheduled, err)
+	}
+	downgradeOperationID := billingMutationOperationID(
+		accountID, downgrade.IdempotencyKey)
+	before, ok, err := store.Get(ctx, accountID)
+	if err != nil || !ok || before.Pending == nil ||
+		before.Pending.OperationID != downgradeOperationID ||
+		before.Pending.ProviderPhase != pendingProviderApplied ||
+		!providerEffectApplied(before.Pending) {
+		t.Fatalf("scheduled pending = %+v ok=%t err=%v", before, ok, err)
+	}
+	clock.t = before.Pending.Effective.Add(-time.Minute)
+
+	cancel := BillingMutationCommand{
+		Operation: BillingMutationCancel,
+		Reason:    "Cancel period-end downgrade", Confirmed: true,
+		IdempotencyKey: "terminal-cancel-2026-08-11",
+	}
+	if _, err := manager.ExecuteBillingMutation(
+		ctx, accountID, "owner@example.com", actor, cancel,
+	); !errors.Is(err, billing.ErrPendingAlreadyResolved) {
+		t.Fatalf("terminal cancel = %v; want pending already resolved", err)
+	}
+	after, ok, err := store.Get(ctx, accountID)
+	if err != nil || !ok || after.Pending == nil ||
+		after.Pending.OperationID != before.Pending.OperationID ||
+		after.Pending.ProviderObjectID != before.Pending.ProviderObjectID ||
+		!after.Pending.Effective.Equal(before.Pending.Effective) ||
+		after.Pending.ProviderPhase != pendingProviderApplied {
+		t.Fatalf("terminal cancel changed pending = %+v ok=%t err=%v", after, ok, err)
+	}
+	cancelOperationID := billingMutationOperationID(
+		accountID, cancel.IdempotencyKey)
+	receipt, ok, err := store.GetBillingMutation(ctx, cancelOperationID)
+	if err != nil || !ok || receipt.Status != BillingMutationPending {
+		t.Fatalf("terminal cancel receipt = %+v ok=%t err=%v", receipt, ok, err)
+	}
+	if provider.cancelCalls() != 1 {
+		t.Fatalf("terminal provider cancel calls = %d; want one", provider.cancelCalls())
+	}
+
+	clock.t = before.Pending.Effective.Add(time.Minute)
+	events := base.ApplyDue()
+	if len(events) != 1 || events[0].Type != billing.EventSubscriptionCanceled {
+		t.Fatalf("terminal period-end events = %+v", events)
+	}
+	if err := manager.OnEvents(ctx, "billing", events); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := manager.ExecuteBillingMutation(
+		ctx, accountID, "owner@example.com", actor, cancel)
+	if err != nil || !replayed.Replayed || replayed.Outcome.Kind != "resolved" {
+		t.Fatalf("terminal cancel recovery = %+v, %v", replayed, err)
+	}
+	if provider.cancelCalls() != 1 {
+		t.Fatalf("terminal cancel retried provider after webhook: %d", provider.cancelCalls())
+	}
+	receipt, ok, err = store.GetBillingMutation(ctx, cancelOperationID)
+	if err != nil || !ok || receipt.Status != BillingMutationCompleted ||
+		receipt.Result == nil || receipt.Result.Kind != BillingMutationResultResolved ||
+		receipt.Result.Cancelled {
+		t.Fatalf("terminal cancel completed receipt = %+v ok=%t err=%v",
+			receipt, ok, err)
 	}
 }
 
@@ -1482,6 +2132,175 @@ func TestR2StorePreservesBillingMutationTombstoneProjection(t *testing.T) {
 		!got.LastBillingMutationEffective.Equal(record.LastBillingMutationEffective) ||
 		!got.LastBillingMutationAt.Equal(record.LastBillingMutationAt) {
 		t.Fatalf("R2 tombstone = %+v ok=%t err=%v", got, ok, err)
+	}
+}
+
+func TestR2StorePreservesPreparedDowngradePhase(t *testing.T) {
+	store := newR2Store(t)
+	now := time.Date(2026, 8, 11, 18, 30, 0, 0, time.UTC)
+	effective := now.AddDate(0, 1, 0)
+	operationID := "bop_r2_prepared_downgrade"
+	providerObjectID := "sub_r2_prepared"
+	record := Record{
+		AccountID: "acct_r2_prepared_downgrade", Provider: "billing",
+		CustomerID: "cus_r2_prepared", Entitled: "standard", Applied: "standard",
+		Pending: &Pending{
+			Kind: PendingDowngrade, Plan: plans.Free,
+			OperationID:       operationID,
+			ProviderObjectID:  providerObjectID,
+			PreparedEffective: effective,
+			ProviderPhase:     pendingProviderPrepared,
+			CancelPrevious:    true,
+			CancelPreviousTarget: &billing.PendingCancellation{
+				Kind:                preparedDowngradeFenceKind,
+				ProviderObjectID:    providerObjectID,
+				OriginalOperationID: operationID,
+			},
+			Requested: now,
+		},
+	}
+	if err := store.Put(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := store.Get(context.Background(), record.AccountID)
+	if err != nil || !ok || got.Pending == nil ||
+		got.Pending.Kind != PendingDowngrade ||
+		got.Pending.OperationID != record.Pending.OperationID ||
+		got.Pending.ProviderObjectID != record.Pending.ProviderObjectID ||
+		got.Pending.ProviderPhase != pendingProviderPrepared ||
+		!got.Pending.PreparedEffective.Equal(effective) ||
+		!got.Pending.Effective.IsZero() || !got.Pending.CancelPrevious ||
+		got.Pending.CancelPreviousTarget == nil ||
+		*got.Pending.CancelPreviousTarget != *record.Pending.CancelPreviousTarget ||
+		!got.Pending.Requested.Equal(now) {
+		t.Fatalf("R2 prepared downgrade = %+v ok=%t err=%v", got.Pending, ok, err)
+	}
+	if !isPreparedDowngradeFence(got.Pending) {
+		t.Fatalf("R2 prepared downgrade fence is incoherent: %+v", got.Pending)
+	}
+}
+
+func TestProviderEffectAppliedRequiresCoherentState(t *testing.T) {
+	effective := time.Date(2026, 9, 11, 18, 30, 0, 0, time.UTC)
+	target := billing.PendingCancellation{
+		Kind:             billing.PendingCancellationPeriodEnd,
+		ProviderObjectID: "sub_coherent", OriginalOperationID: "bop_coherent",
+	}
+	tests := []struct {
+		name    string
+		pending *Pending
+		want    bool
+	}{
+		{
+			name: "applied",
+			pending: &Pending{
+				Kind: PendingDowngrade, ProviderObjectID: "sub_coherent",
+				ProviderPhase: pendingProviderApplied, Effective: effective,
+			},
+			want: true,
+		},
+		{
+			name: "legacy applied",
+			pending: &Pending{
+				Kind: PendingDowngrade, ProviderObjectID: "sub_legacy",
+				Effective: effective,
+			},
+			want: true,
+		},
+		{
+			name: "wrong kind",
+			pending: &Pending{
+				Kind: PendingUpgrade, ProviderObjectID: "sub_coherent",
+				ProviderPhase: pendingProviderApplied, Effective: effective,
+			},
+		},
+		{
+			name: "invalid provider object",
+			pending: &Pending{
+				Kind: PendingDowngrade, ProviderObjectID: "sub invalid",
+				ProviderPhase: pendingProviderApplied, Effective: effective,
+			},
+		},
+		{
+			name: "zero effective",
+			pending: &Pending{
+				Kind: PendingDowngrade, ProviderObjectID: "sub_coherent",
+				ProviderPhase: pendingProviderApplied,
+			},
+		},
+		{
+			name: "prepared effective remains",
+			pending: &Pending{
+				Kind: PendingDowngrade, ProviderObjectID: "sub_coherent",
+				ProviderPhase: pendingProviderApplied, Effective: effective,
+				PreparedEffective: effective,
+			},
+		},
+		{
+			name: "cancel flag remains",
+			pending: &Pending{
+				Kind: PendingDowngrade, ProviderObjectID: "sub_coherent",
+				ProviderPhase: pendingProviderApplied, Effective: effective,
+				CancelPrevious: true,
+			},
+		},
+		{
+			name: "cancel target remains",
+			pending: &Pending{
+				Kind: PendingDowngrade, ProviderObjectID: "sub_coherent",
+				ProviderPhase: pendingProviderApplied, Effective: effective,
+				CancelPreviousTarget: &target,
+			},
+		},
+		{
+			name: "prepared phase",
+			pending: &Pending{
+				Kind: PendingDowngrade, ProviderObjectID: "sub_coherent",
+				ProviderPhase: pendingProviderPrepared, Effective: effective,
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := providerEffectApplied(test.pending); got != test.want {
+				t.Fatalf("providerEffectApplied(%+v) = %t; want %t", test.pending, got, test.want)
+			}
+		})
+	}
+}
+
+func TestLegacyAppliedDowngradeRemainsCancellable(t *testing.T) {
+	effective := time.Date(2026, 9, 11, 18, 30, 0, 0, time.UTC)
+	record := Record{
+		AccountID: "acct_legacy_applied_downgrade", CustomerID: "cus_legacy",
+		Pending: &Pending{
+			Kind: PendingDowngrade, Plan: plans.Free,
+			OperationID:      "bop_legacy_applied_downgrade",
+			ProviderObjectID: "sub_legacy_applied", Effective: effective,
+			// ProviderPhase is deliberately absent, matching pre-field data.
+		},
+	}
+	if !providerEffectApplied(record.Pending) {
+		t.Fatal("legacy exact applied downgrade was quarantined")
+	}
+	target, err := pendingCancellationTarget(record)
+	if err != nil || target == nil ||
+		target.Kind != billing.PendingCancellationPeriodEnd ||
+		target.ProviderObjectID != record.Pending.ProviderObjectID ||
+		target.OriginalOperationID != record.Pending.OperationID {
+		t.Fatalf("legacy cancellation target = %+v, %v", target, err)
+	}
+
+	ambiguous := record
+	ambiguous.Pending = &Pending{
+		Kind: PendingDowngrade, Plan: plans.Free,
+		OperationID: "bop_legacy_ambiguous_downgrade",
+	}
+	if providerEffectApplied(ambiguous.Pending) {
+		t.Fatal("targetless legacy downgrade was treated as provider-applied")
+	}
+	if _, err := pendingCancellationTarget(ambiguous); err == nil {
+		t.Fatal("targetless legacy downgrade did not fail closed")
 	}
 }
 

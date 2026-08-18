@@ -97,6 +97,16 @@ The same compatibility rule independently withholds
 email-specific cleanup job together with the schema and binary that understand
 its configuration.
 
+`apps.witselfServer.billing.endpoint` remains empty and is not forwarded by
+default, preserving existing cells' providerless state and compatibility with
+older strict child schemas. A non-empty value is accepted only for a managed
+cell with matching chart and image `v0.0.255` or newer, and must be a canonical
+HTTPS control-plane origin or prefix without credentials, query, fragment,
+encoded characters, or unsafe characters. Roll chart and image first; activate
+the endpoint in a separate reviewed cell-values commit only after the
+control-plane route and authentication fence are verified. The value is public
+discovery metadata, not a Stripe secret or provider activation switch.
+
 `apps.witselfServer.agentEmail.receiveProduction` is independently withheld
 until both the child chart and image are `0.0.241` or newer. Enabling it on an
 older mixed pin fails rendering instead of silently dropping the exact account

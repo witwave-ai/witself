@@ -11,6 +11,19 @@
 {{- $emailProductionHasLiteralAccounts := gt (len $emailProduction.accountIDs) 0 -}}
 {{- $emailProductionHasSecretAccounts := ne $emailProductionAccountSecret.name "" -}}
 {{- $emailProductionHasSecretRetryCanary := ne $emailProductionRetryCanarySecret.name "" -}}
+{{- $billingEndpoint := .Values.apps.witselfServer.billing.endpoint -}}
+{{- if and $billingEndpoint (not (regexMatch "^https://[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*(:[0-9]{1,5})?(/[A-Za-z0-9._~!$&'()*+,;=:@-]+)*/?$" $billingEndpoint)) -}}
+{{- fail "apps.witselfServer.billing.endpoint must be empty or a canonical HTTPS URL without credentials, query, fragment, encoded characters, or unsafe characters" -}}
+{{- end -}}
+{{- $billingReady := and
+      (semverCompare ">=0.0.255-0" .Values.apps.witselfServer.chartVersion)
+      (semverCompare ">=0.0.255-0" .Values.apps.witselfServer.imageTag) -}}
+{{- if and $billingEndpoint (not $billingReady) -}}
+{{- fail "apps.witselfServer.billing.endpoint requires chart and image v0.0.255 or newer" -}}
+{{- end -}}
+{{- if and $billingEndpoint (ne .Values.apps.witselfServer.backendKind "managed") -}}
+{{- fail "apps.witselfServer.billing.endpoint is supported only for managed cells" -}}
+{{- end -}}
 {{- if and $emailPilot.enabled $emailProduction.enabled -}}
 {{- fail "apps.witselfServer agent-email pilot and production receive cannot both be enabled" -}}
 {{- end -}}
@@ -172,6 +185,9 @@
 {{- fail "apps.witselfServer.backup.validationEnabled requires apps.witselfServer.backup.enabled" -}}
 {{- end -}}
 {{- $serverValues := dict "backend" (dict "kind" .Values.apps.witselfServer.backendKind) "cell" (dict "name" .Values.cell.name) "backup" (dict "validation" (dict "enabled" $backup.validationEnabled)) "features" (dict "factDeletion" (dict "enabled" .Values.apps.witselfServer.factDeletionEnabled)) "agentEmail" $serverAgentEmail "avatar" (dict "payloadCompaction" (dict "enabled" .Values.apps.witselfServer.avatarPayloadCompactionEnabled)) "metrics" $metricsValues "worker" $workerValues "image" (dict "tag" .Values.apps.witselfServer.imageTag) "database" (dict "existingSecret" (dict "name" $targetName "urlKey" $db.urlKey)) -}}
+{{- if $billingEndpoint -}}
+{{- $_ := set $serverValues "billing" (dict "endpoint" $billingEndpoint) -}}
+{{- end -}}
 {{- if $backup.enabled -}}
 {{- $_ := set $serverValues.backup "existingSecret" (dict "name" (default "witself-provision" $backup.targetName) "tokenKey" (default "backup_token" $backup.tokenKey)) -}}
 {{- end -}}

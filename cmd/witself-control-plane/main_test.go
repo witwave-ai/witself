@@ -44,6 +44,7 @@ func TestSetupBillingRequiresStripeWebhookSecret(t *testing.T) {
 	t.Setenv("WITSELF_CP_BRIDGE_URL", "https://bridge.example.invalid")
 	t.Setenv("WITSELF_CP_BRIDGE_TOKEN", "bridge-secret")
 	t.Setenv("WITSELF_CP_BILLING_PROVIDER", "stripe")
+	t.Setenv("WITSELF_CP_STRIPE_MODE", "test")
 	t.Setenv("WITSELF_CP_STRIPE_SECRET_KEY", "sk_test_hermetic")
 	t.Setenv("WITSELF_CP_STRIPE_WEBHOOK_SECRET", "")
 
@@ -100,6 +101,26 @@ func TestSetupBillingRoutesStayOffUnlessExplicitlyEnabled(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("disabled route status = %d; want 404", rec.Code)
+	}
+}
+
+func TestSetupBillingPreservesProviderlessManualMode(t *testing.T) {
+	t.Setenv("WITSELF_CP_PLAN_LIFECYCLE_ENABLED", "true")
+	t.Setenv("WITSELF_CP_BRIDGE_URL", "https://bridge.example.invalid")
+	t.Setenv("WITSELF_CP_BRIDGE_TOKEN", "bridge-secret")
+	t.Setenv("WITSELF_CP_BILLING_PROVIDER", "")
+	t.Setenv("WITSELF_CP_R2_ENDPOINT", "https://example.invalid")
+	t.Setenv("WITSELF_CP_R2_BUCKET", "b")
+	t.Setenv("WITSELF_CP_R2_ACCESS_KEY", "k")
+	t.Setenv("WITSELF_CP_R2_SECRET_KEY", "s")
+
+	// Stripe-only settings are deliberately irrelevant in manual mode.
+	t.Setenv("WITSELF_CP_STRIPE_MODE", "not-a-mode")
+	t.Setenv("WITSELF_CP_STRIPE_SECRET_KEY", "sk_live_wrong-for-test")
+	t.Setenv("WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST", "malformed, list")
+
+	if err := setupBilling(context.Background(), http.NewServeMux()); err != nil {
+		t.Fatalf("providerless setup = %v", err)
 	}
 }
 

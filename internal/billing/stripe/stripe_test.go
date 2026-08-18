@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -31,35 +32,63 @@ type checkoutReplay struct {
 	response    string
 }
 
+type stubCheckout struct {
+	customer  string
+	mode      string
+	status    string
+	operation string
+}
+
 type stubStripe struct {
-	t                   *testing.T
-	url                 string            // the stub server's base URL
-	prices              map[string]string // lookup_key -> price id
-	priceCents          map[string]int64  // lookup_key -> unit_amount
-	created             []string          // paths of POSTs received
-	lastForm            map[string]string // last POST form (flattened)
-	lastVersion         string            // Stripe-Version header seen last
-	lastIdem            string            // Idempotency-Key header seen last
-	requests            []stubRequest     // all requests, including read headers
-	checkoutSeq         int               // setup/subscription Checkout objects minted
-	checkoutOps         map[string]checkoutReplay
-	failNext            int    // when >0, respond with this status once
-	failCode            string // error code for failNext (default "boom")
-	failPath            string // when set, failNext fires only on this path
-	upcoming            bool   // whether an upcoming invoice exists
-	subActive           bool   // whether a live subscription exists
-	subArmed            bool   // cancel_at_period_end on the stub subscription
-	custDeleted         bool   // customer GETs report deleted:true
-	customerCreateKeys  []string
-	customerCreateForms []map[string]string
-	customerUpdateKeys  []string
-	customerUpdateForms []map[string]string
-	openSessions        []string // open checkout session ids
-	expired             []string // session ids expired via POST .../expire
-	refunded            bool     // charge has one successful partial refund
-	refundMore          bool     // refund list reports unsupported pagination
-	refundAmount        int      // settled amount reported by the charge
-	refundData          string   // optional refund-list JSON data override
+	t                     *testing.T
+	url                   string            // the stub server's base URL
+	prices                map[string]string // lookup_key -> price id
+	priceCents            map[string]int64  // lookup_key -> unit_amount
+	productName           string
+	productPlan           string
+	created               []string          // paths of POSTs received
+	lastForm              map[string]string // last POST form (flattened)
+	lastVersion           string            // Stripe-Version header seen last
+	lastIdem              string            // Idempotency-Key header seen last
+	requests              []stubRequest     // all requests, including read headers
+	checkoutSeq           int               // setup/subscription Checkout objects minted
+	checkoutOps           map[string]checkoutReplay
+	checkoutSessions      map[string]stubCheckout
+	failNext              int    // when >0, respond with this status once
+	failCode              string // error code for failNext (default "boom")
+	failPath              string // when set, failNext fires only on this path
+	upcoming              bool   // whether an upcoming invoice exists
+	subActive             bool   // whether a live subscription exists
+	subArmed              bool   // cancel_at_period_end on the stub subscription
+	subDowngradeOperation string
+	subCustomer           string
+	subStatus             string
+	subPeriodEnd          int64
+	advancePeriodOnArm    bool
+	preserveOwnerOnDisarm bool
+	subscriptionsJSON     string // optional exact list response override
+	custDeleted           bool   // customer GETs report deleted:true
+	customerCreateKeys    []string
+	customerCreateForms   []map[string]string
+	customerUpdateKeys    []string
+	customerUpdateForms   []map[string]string
+	openSessions          []string // open checkout session ids
+	checkoutHasMore       bool
+	expired               []string // session ids expired via POST .../expire
+	refunded              bool     // charge has one successful partial refund
+	refundMore            bool     // refund list reports unsupported pagination
+	refundAmount          int      // settled amount reported by the charge
+	refundData            string   // optional refund-list JSON data override
+}
+
+func (s *stubStripe) subscriptionMetadataJSON() string {
+	if s.subDowngradeOperation == "" {
+		return `{"witself_plan":"standard"}`
+	}
+	return fmt.Sprintf(
+		`{"witself_plan":"standard","witself_pending_downgrade_operation_id":%q}`,
+		s.subDowngradeOperation,
+	)
 }
 
 func TestDowngradeTargetCapabilityIsFreeOnly(t *testing.T) {
@@ -74,12 +103,37 @@ func TestDowngradeTargetCapabilityIsFreeOnly(t *testing.T) {
 	}
 }
 
+func TestValidateStripeCheckoutAction(t *testing.T) {
+	now := time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name, id, url string
+		expires       time.Time
+		valid         bool
+	}{
+		{name: "valid", id: "cs_test_safe", url: "https://checkout.stripe.com/c/pay/cs_test_safe", expires: now.Add(time.Hour), valid: true},
+		{name: "wrong object", id: "sub_safe", url: "https://checkout.stripe.com/c/pay/cs_test_safe", expires: now.Add(time.Hour)},
+		{name: "wrong host", id: "cs_test_safe", url: "https://checkout.stripe.example/c/pay/x", expires: now.Add(time.Hour)},
+		{name: "userinfo", id: "cs_test_safe", url: "https://user@checkout.stripe.com/c/pay/x", expires: now.Add(time.Hour)},
+		{name: "expired", id: "cs_test_safe", url: "https://checkout.stripe.com/c/pay/x", expires: now},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateStripeCheckoutAction(tc.id, tc.url, tc.expires, now)
+			if (err == nil) != tc.valid {
+				t.Fatalf("validateStripeCheckoutAction error = %v; valid=%t", err, tc.valid)
+			}
+		})
+	}
+}
+
 func newStub(t *testing.T) (*stubStripe, *Provider) {
 	t.Helper()
 	s := &stubStripe{
 		t: t, prices: map[string]string{}, priceCents: map[string]int64{},
 		lastForm: map[string]string{}, checkoutOps: map[string]checkoutReplay{},
-		subActive: true, subArmed: true, upcoming: true,
+		checkoutSessions: map[string]stubCheckout{},
+		subActive:        true, subArmed: true, upcoming: true,
+		subCustomer: "cus_stub_1", subStatus: "active",
 	}
 	srv := httptest.NewServer(http.HandlerFunc(s.handle))
 	t.Cleanup(srv.Close)
@@ -91,6 +145,10 @@ func newStub(t *testing.T) (*stubStripe, *Provider) {
 	p, err := New(Config{
 		SecretKey: "sk_test_stub", WebhookSecret: "whsec_stub",
 		Catalog: catalog, BaseURL: srv.URL,
+		PortalConfigurationID: "bpc_safe_stub",
+		Now: func() time.Time {
+			return time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+		},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -129,7 +187,11 @@ func (s *stubStripe) handle(w http.ResponseWriter, r *http.Request) {
 			s.lastForm[k] = v[0]
 		}
 	}
-	periodEnd := time.Date(2026, 8, 4, 0, 0, 0, 0, time.UTC).Unix()
+	periodEnd := s.subPeriodEnd
+	if periodEnd == 0 {
+		periodEnd = time.Date(2026, 8, 4, 0, 0, 0, 0, time.UTC).Unix()
+	}
+	checkoutExpires := time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC).Unix()
 	switch {
 	case r.URL.Path == "/v1/prices" && r.Method == http.MethodGet:
 		key := r.URL.Query().Get("lookup_keys[]")
@@ -139,7 +201,19 @@ func (s *stubStripe) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		_, _ = fmt.Fprint(w, `{"data":[]}`)
 	case r.URL.Path == "/v1/products":
+		s.productName = s.lastForm["name"]
+		s.productPlan = s.lastForm["metadata[witself_plan]"]
 		_, _ = fmt.Fprint(w, `{"id":"prod_stub"}`)
+	case r.URL.Path == "/v1/products/prod_stub" && r.Method == http.MethodGet:
+		_, _ = fmt.Fprintf(w,
+			`{"id":"prod_stub","name":%q,"metadata":{"witself_plan":%q}}`,
+			s.productName, s.productPlan)
+	case r.URL.Path == "/v1/products/prod_stub" && r.Method == http.MethodPost:
+		s.productName = s.lastForm["name"]
+		s.productPlan = s.lastForm["metadata[witself_plan]"]
+		_, _ = fmt.Fprintf(w,
+			`{"id":"prod_stub","name":%q,"metadata":{"witself_plan":%q}}`,
+			s.productName, s.productPlan)
 	case r.URL.Path == "/v1/prices":
 		key := s.lastForm["lookup_key"]
 		s.prices[key] = "price_" + key
@@ -160,13 +234,35 @@ func (s *stubStripe) handle(w http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(r.URL.Path, "/expire"):
 		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/checkout/sessions/"), "/expire")
 		s.expired = append(s.expired, id)
-		_, _ = fmt.Fprintf(w, `{"id":%q,"status":"expired"}`, id)
+		if session, ok := s.checkoutSessions[id]; ok {
+			session.status = "expired"
+			s.checkoutSessions[id] = session
+		}
+		session := s.checkoutSessions[id]
+		if session.customer == "" {
+			session.customer = "cus_stub_1"
+		}
+		_, _ = fmt.Fprintf(w,
+			`{"id":%q,"customer":%q,"status":"expired"}`,
+			id, session.customer)
+	case strings.HasPrefix(r.URL.Path, "/v1/checkout/sessions/") &&
+		r.Method == http.MethodGet:
+		id := strings.TrimPrefix(r.URL.Path, "/v1/checkout/sessions/")
+		session, ok := s.checkoutSessions[id]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = fmt.Fprintf(w,
+			`{"id":%q,"customer":%q,"mode":%q,"status":%q,"metadata":{"witself_operation_id":%q}}`,
+			id, session.customer, session.mode, session.status, session.operation)
 	case r.URL.Path == "/v1/checkout/sessions" && r.Method == http.MethodGet:
 		items := make([]string, 0, len(s.openSessions))
 		for _, id := range s.openSessions {
 			items = append(items, fmt.Sprintf(`{"id":%q,"mode":"subscription"}`, id))
 		}
-		_, _ = fmt.Fprintf(w, `{"data":[%s]}`, strings.Join(items, ","))
+		_, _ = fmt.Fprintf(w, `{"data":[%s],"has_more":%t}`,
+			strings.Join(items, ","), s.checkoutHasMore)
 	case r.URL.Path == "/v1/checkout/sessions":
 		fingerprint := r.URL.Path + "\n" + r.PostForm.Encode()
 		if s.lastIdem != "" {
@@ -180,10 +276,15 @@ func (s *stubStripe) handle(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		s.checkoutSeq++
+		id := fmt.Sprintf("cs_test_stub_%d", s.checkoutSeq)
 		response := fmt.Sprintf(
-			`{"url":"https://checkout.stripe.com/c/pay/cs_test_stub_%d"}`,
-			s.checkoutSeq,
+			`{"id":"cs_test_stub_%d","url":"https://checkout.stripe.com/c/pay/cs_test_stub_%d","expires_at":%d}`,
+			s.checkoutSeq, s.checkoutSeq, checkoutExpires,
 		)
+		s.checkoutSessions[id] = stubCheckout{
+			customer: s.lastForm["customer"], mode: s.lastForm["mode"], status: "open",
+			operation: s.lastForm["metadata[witself_operation_id]"],
+		}
 		if s.lastIdem != "" {
 			s.checkoutOps[s.lastIdem] = checkoutReplay{
 				fingerprint: fingerprint,
@@ -194,13 +295,42 @@ func (s *stubStripe) handle(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/v1/billing_portal/sessions":
 		_, _ = fmt.Fprint(w, `{"url":"https://billing.stripe.com/p/session_stub"}`)
 	case r.URL.Path == "/v1/subscriptions" && r.Method == http.MethodGet:
-		if s.subActive {
-			_, _ = fmt.Fprintf(w, `{"data":[{"id":"sub_stub","status":"active","cancel_at_period_end":%t,"items":{"data":[{"current_period_end":%d}]}}]}`, s.subArmed, periodEnd)
+		if s.subscriptionsJSON != "" {
+			_, _ = fmt.Fprint(w, s.subscriptionsJSON)
 			return
 		}
-		_, _ = fmt.Fprint(w, `{"data":[]}`)
+		if s.subActive {
+			_, _ = fmt.Fprintf(w, `{"data":[{"id":"sub_stub","customer":%q,"status":%q,"cancel_at_period_end":%t,"metadata":%s,"items":{"data":[{"current_period_end":%d,"price":{"id":"price_standard","lookup_key":"witself_standard"}}]}}],"has_more":false}`, s.subCustomer, s.subStatus, s.subArmed, s.subscriptionMetadataJSON(), periodEnd)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"data":[],"has_more":false}`)
 	case strings.HasPrefix(r.URL.Path, "/v1/subscriptions/"):
-		_, _ = fmt.Fprint(w, `{"id":"sub_stub"}`)
+		id := strings.TrimPrefix(r.URL.Path, "/v1/subscriptions/")
+		if id != "sub_stub" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method == http.MethodPost {
+			switch s.lastForm["cancel_at_period_end"] {
+			case "true":
+				if s.advancePeriodOnArm {
+					periodEnd = time.Unix(periodEnd, 0).UTC().AddDate(0, 1, 0).Unix()
+					s.subPeriodEnd = periodEnd
+				}
+				s.subArmed = true
+				if operation := s.lastForm["metadata[witself_pending_downgrade_operation_id]"]; operation != "" {
+					s.subDowngradeOperation = operation
+				}
+			case "false":
+				s.subArmed = false
+				if marker, ok := s.lastForm["metadata[witself_pending_downgrade_operation_id]"]; ok && marker == "" && !s.preserveOwnerOnDisarm {
+					s.subDowngradeOperation = ""
+				}
+			}
+		}
+		_, _ = fmt.Fprintf(w,
+			`{"id":"sub_stub","customer":%q,"status":%q,"cancel_at_period_end":%t,"metadata":%s,"items":{"data":[{"current_period_end":%d,"price":{"id":"price_standard","lookup_key":"witself_standard"}}]}}`,
+			s.subCustomer, s.subStatus, s.subArmed, s.subscriptionMetadataJSON(), periodEnd)
 	case r.URL.Path == "/v1/invoices/create_preview":
 		if !s.upcoming {
 			http.Error(w, `{"error":{"code":"invoice_upcoming_none","message":"none"}}`, http.StatusNotFound)
@@ -271,6 +401,38 @@ func TestEnsurePricesBootstrapsMissing(t *testing.T) {
 	}
 }
 
+func TestEnsurePricesReconcilesExistingProfessionalProductIdentity(t *testing.T) {
+	s, p := newStub(t)
+	s.prices["witself_standard"] = "price_existing_standard"
+	s.priceCents["witself_standard"] = 3000
+	s.productName = "Witself Standard"
+	s.productPlan = ""
+	if err := p.EnsurePrices(context.Background()); err != nil {
+		t.Fatalf("EnsurePrices: %v", err)
+	}
+	if s.productName != "Witself Professional" || s.productPlan != "standard" {
+		t.Fatalf("reconciled product = name %q plan %q",
+			s.productName, s.productPlan)
+	}
+	updates := 0
+	for _, request := range s.requests {
+		if request.method == http.MethodPost &&
+			request.path == "/v1/products/prod_stub" {
+			updates++
+		}
+	}
+	if updates != 1 {
+		t.Fatalf("product update calls = %d; want 1", updates)
+	}
+	before := len(s.requests)
+	if err := p.EnsurePrices(context.Background()); err != nil {
+		t.Fatalf("EnsurePrices replay: %v", err)
+	}
+	if len(s.requests) != before {
+		t.Fatalf("cached product lookup made %d extra requests", len(s.requests)-before)
+	}
+}
+
 // TestPriceChangePropagates pins the review's finding: a resolved lookup_key
 // whose unit_amount no longer matches the catalog must mint a REPLACEMENT
 // price (lookup_key transferred) — otherwise a plans.json price change
@@ -291,8 +453,10 @@ func TestPriceChangePropagates(t *testing.T) {
 		t.Fatalf("replacement price form = %v; want unit_amount=3000 with transfer_lookup_key", s.lastForm)
 	}
 	// The product is reused, not duplicated.
-	if strings.Contains(strings.Join(s.created, ","), "/v1/products") {
-		t.Fatalf("price change created a new product: %v", s.created)
+	for _, path := range s.created {
+		if path == "/v1/products" {
+			t.Fatalf("price change created a new product: %v", s.created)
+		}
 	}
 }
 
@@ -392,13 +556,57 @@ func TestEnsureCustomerSeparatesStableCreateFromMutableEmail(t *testing.T) {
 	}
 }
 
+func TestEnsureCustomerAttachesOnlyExplicitTestClock(t *testing.T) {
+	s, _ := newStub(t)
+	catalog, err := plans.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, err := New(Config{
+		SecretKey: "sk_test_stub", WebhookSecret: "whsec_stub",
+		Catalog: catalog, BaseURL: s.url, TestClockID: "clock_sandbox123",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.EnsureCustomer(
+		context.Background(), "acct_clock", "clock@example.test",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.customerCreateForms) != 1 ||
+		s.customerCreateForms[0]["test_clock"] != "clock_sandbox123" ||
+		s.customerCreateForms[0]["metadata[witself_account]"] != "acct_clock" {
+		t.Fatalf("customer create forms = %v", s.customerCreateForms)
+	}
+	if len(s.customerCreateKeys) != 1 ||
+		!strings.HasPrefix(s.customerCreateKeys[0], "witself-ensure-acct_clock-clock-") ||
+		strings.Contains(s.customerCreateKeys[0], "clock_sandbox123") {
+		t.Fatalf("test-clock customer key = %v", s.customerCreateKeys)
+	}
+
+	for _, tc := range []Config{
+		{SecretKey: "sk_live_stub", Catalog: catalog, TestClockID: "clock_sandbox123"},
+		{SecretKey: "sk_test_stub", Catalog: catalog, TestClockID: "clock_"},
+		{SecretKey: "sk_test_stub", Catalog: catalog, TestClockID: " clock_sandbox123"},
+	} {
+		if _, err := New(tc); err == nil {
+			t.Fatalf("New accepted unsafe test-clock config: %+v", tc)
+		}
+	}
+}
+
 func TestSubscribeBuildsCheckout(t *testing.T) {
 	s, p := newStub(t)
 	act, err := p.Subscribe(context.Background(), "cus_stub_1", "standard")
 	if err != nil || act.Done || !strings.Contains(act.URL, "checkout.stripe.com") {
 		t.Fatalf("Subscribe = %+v, %v; want a checkout URL", act, err)
 	}
-	if s.lastForm["mode"] != "subscription" || s.lastForm["customer"] != "cus_stub_1" {
+	if act.ProviderObjectID == "" || !act.ExpiresAt.After(p.cfg.Now()) {
+		t.Fatalf("Subscribe hosted action lacks exact object/expiry: %+v", act)
+	}
+	if s.lastForm["mode"] != "subscription" || s.lastForm["customer"] != "cus_stub_1" ||
+		s.lastForm["payment_method_types[]"] != "card" {
 		t.Fatalf("checkout form = %v", s.lastForm)
 	}
 	if s.lastForm["metadata[witself_plan]"] != "standard" {
@@ -437,11 +645,17 @@ func TestSetupLinkIdempotentBindsReplaysAndRejectsConflict(t *testing.T) {
 	if err != nil || first.Done || !strings.Contains(first.URL, "checkout.stripe.com") {
 		t.Fatalf("first SetupLinkIdempotent = %+v, %v", first, err)
 	}
+	if first.ProviderObjectID == "" || !first.ExpiresAt.After(p.cfg.Now()) {
+		t.Fatalf("setup hosted action lacks exact object/expiry: %+v", first)
+	}
 	if s.lastIdem != "witself-setup-bop_setup_1" {
 		t.Fatalf("Idempotency-Key = %q", s.lastIdem)
 	}
 	if s.lastForm["metadata[witself_operation_id]"] != "bop_setup_1" {
 		t.Fatalf("operation metadata missing from setup session: %v", s.lastForm)
+	}
+	if s.lastForm["payment_method_types[]"] != "card" {
+		t.Fatalf("setup accepted mutable dynamic payment methods: %v", s.lastForm)
 	}
 	second, err := p.SetupLinkIdempotent(ctx, "cus_stub_1", "bop_setup_1")
 	if err != nil || second != first {
@@ -478,6 +692,7 @@ func TestStripeStrongOperationIDShape(t *testing.T) {
 
 func TestScheduleDowngradeIdempotentKeysMutationsOnly(t *testing.T) {
 	s, p := newStub(t)
+	s.subArmed = false
 	ctx := context.Background()
 
 	first, err := p.ScheduleDowngradeIdempotent(
@@ -486,17 +701,20 @@ func TestScheduleDowngradeIdempotentKeysMutationsOnly(t *testing.T) {
 	if err != nil || first.IsZero() {
 		t.Fatalf("first ScheduleDowngradeIdempotent = %v, %v", first, err)
 	}
-	wantKey := childIdempotencyKey("bop_down_1", "downgrade", "sub_stub")
+	wantKey := childIdempotencyKey("bop_down_1", "downgrade", "prepared")
 	if wantKey == "" || len(wantKey) > 255 {
 		t.Fatalf("derived downgrade key has invalid length %d: %q", len(wantKey), wantKey)
 	}
-	if len(s.requests) != 2 {
-		t.Fatalf("downgrade requests = %+v; want one read and one mutation", s.requests)
+	if len(s.requests) != 3 {
+		t.Fatalf("downgrade requests = %+v; want discovery, exact read, and mutation", s.requests)
 	}
 	if got := s.requests[0]; got.method != http.MethodGet || got.idempotencyKey != "" {
 		t.Fatalf("downgrade discovery read carried an idempotency key: %+v", got)
 	}
-	if got := s.requests[1]; got.method != http.MethodPost || got.idempotencyKey != wantKey {
+	if got := s.requests[1]; got.method != http.MethodGet || got.idempotencyKey != "" {
+		t.Fatalf("downgrade exact read carried an idempotency key: %+v", got)
+	}
+	if got := s.requests[2]; got.method != http.MethodPost || got.idempotencyKey != wantKey {
 		t.Fatalf("downgrade mutation request = %+v; want key %q", got, wantKey)
 	}
 
@@ -507,8 +725,15 @@ func TestScheduleDowngradeIdempotentKeysMutationsOnly(t *testing.T) {
 	if err != nil || !second.Equal(first) {
 		t.Fatalf("replayed ScheduleDowngradeIdempotent = %v, %v; want %v", second, err, first)
 	}
-	if got := s.requests[start+1].idempotencyKey; got != wantKey {
-		t.Fatalf("downgrade replay key = %q; want %q", got, wantKey)
+	if got := s.requests[start:]; len(got) != 2 ||
+		got[0].method != http.MethodGet ||
+		got[1].method != http.MethodGet {
+		t.Fatalf("downgrade replay requests = %+v; want discovery and exact confirmation reads", got)
+	}
+	for _, request := range s.requests[start:] {
+		if request.method == http.MethodPost {
+			t.Fatalf("exact downgrade replay mutated Stripe: %+v", s.requests[start:])
+		}
 	}
 
 	bounded := childIdempotencyKey(
@@ -516,6 +741,59 @@ func TestScheduleDowngradeIdempotentKeysMutationsOnly(t *testing.T) {
 	)
 	if len(bounded) > 255 {
 		t.Fatalf("maximal child Idempotency-Key is %d bytes; Stripe allows 255", len(bounded))
+	}
+}
+
+func TestPreparedDowngradeRefusesPrearmedSubscriptionWithoutExactOwnership(t *testing.T) {
+	t.Run("preparation cannot adopt external cancellation", func(t *testing.T) {
+		s, p := newStub(t)
+		s.subDowngradeOperation = ""
+
+		_, err := p.PrepareDowngrade(
+			context.Background(), "cus_stub_1", plans.Free,
+		)
+		if err == nil || !strings.Contains(err.Error(), "outside this exact") {
+			t.Fatalf("external pre-armed preparation error = %v", err)
+		}
+		for _, request := range s.requests {
+			if request.method == http.MethodPost {
+				t.Fatalf("external pre-armed preparation mutated Stripe: %+v", s.requests)
+			}
+		}
+	})
+
+	for _, tc := range []struct {
+		name, owner string
+	}{
+		{name: "external cancellation", owner: ""},
+		{name: "different Witself operation", owner: "bop_other_downgrade"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, p := newStub(t)
+			s.subArmed = false
+			prepared, err := p.PrepareDowngrade(
+				context.Background(), "cus_stub_1", plans.Free,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			s.subArmed = true
+			s.subDowngradeOperation = tc.owner
+			s.requests = nil
+			_, err = p.SchedulePreparedDowngradeIdempotent(
+				context.Background(), "cus_stub_1", plans.Free,
+				"bop_expected_downgrade", prepared,
+			)
+			if err == nil || !strings.Contains(err.Error(), "outside this exact") {
+				t.Fatalf("pre-armed ownership mismatch error = %v", err)
+			}
+			if len(s.requests) != 1 ||
+				s.requests[0].method != http.MethodGet ||
+				s.requests[0].path != "/v1/subscriptions/sub_stub" {
+				t.Fatalf("pre-armed ownership mismatch requests = %+v; want exact read only", s.requests)
+			}
+		})
 	}
 }
 
@@ -562,8 +840,412 @@ func TestCancelPendingIdempotentKeysEveryMutationAndNoRead(t *testing.T) {
 	}
 }
 
+func TestExactCheckoutCancellationIsObjectScopedAndCompletionIsNotCancellation(t *testing.T) {
+	s, p := newStub(t)
+	ctx := context.Background()
+	action, err := p.SubscribeIdempotent(
+		ctx, "cus_stub_1", "standard", "bop_checkout_original",
+	)
+	if err != nil {
+		t.Fatalf("SubscribeIdempotent: %v", err)
+	}
+	target := billing.PendingCancellation{
+		Kind:                billing.PendingCancellationHostedAction,
+		ProviderObjectID:    action.ProviderObjectID,
+		OriginalOperationID: "bop_checkout_original",
+	}
+	if err := p.CancelPendingObjectIdempotent(
+		ctx, "cus_stub_1", target, "bop_checkout_cancel",
+	); err != nil {
+		t.Fatalf("exact checkout cancel: %v", err)
+	}
+	if len(s.expired) != 1 || s.expired[0] != action.ProviderObjectID {
+		t.Fatalf("expired = %v; want only %s", s.expired, action.ProviderObjectID)
+	}
+	if !s.subArmed {
+		t.Fatal("exact checkout cancellation disarmed an unrelated subscription")
+	}
+	if err := p.CancelPendingObjectIdempotent(
+		ctx, "cus_stub_1", target, "bop_checkout_cancel",
+	); err != nil {
+		t.Fatalf("expired exact checkout replay: %v", err)
+	}
+
+	completed, err := p.SubscribeIdempotent(
+		ctx, "cus_stub_1", "standard", "bop_checkout_complete",
+	)
+	if err != nil {
+		t.Fatalf("second SubscribeIdempotent: %v", err)
+	}
+	session := s.checkoutSessions[completed.ProviderObjectID]
+	session.status = "complete"
+	s.checkoutSessions[completed.ProviderObjectID] = session
+	before := len(s.expired)
+	err = p.CancelPendingObjectIdempotent(ctx, "cus_stub_1", billing.PendingCancellation{
+		Kind:                billing.PendingCancellationHostedAction,
+		ProviderObjectID:    completed.ProviderObjectID,
+		OriginalOperationID: "bop_checkout_complete",
+	}, "bop_checkout_complete_cancel")
+	if !errors.Is(err, billing.ErrPendingAlreadyResolved) {
+		t.Fatalf("completed checkout cancel error = %v; want already resolved", err)
+	}
+	if len(s.expired) != before {
+		t.Fatalf("completed Checkout was expired: %v", s.expired[before:])
+	}
+}
+
+func TestExactCheckoutCancellationRejectsMismatchedAuthority(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*stubCheckout, *billing.PendingCancellation, *string)
+	}{
+		{name: "customer", mutate: func(session *stubCheckout, _ *billing.PendingCancellation, _ *string) {
+			session.customer = "cus_other"
+		}},
+		{name: "mode", mutate: func(session *stubCheckout, _ *billing.PendingCancellation, _ *string) {
+			session.mode = "setup"
+		}},
+		{name: "operation", mutate: func(_ *stubCheckout, target *billing.PendingCancellation, _ *string) {
+			target.OriginalOperationID = "bop_wrong_original"
+		}},
+		{name: "caller customer", mutate: func(_ *stubCheckout, _ *billing.PendingCancellation, customer *string) {
+			*customer = "cus_other"
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s, p := newStub(t)
+			action, err := p.SubscribeIdempotent(
+				context.Background(), "cus_stub_1", "standard", "bop_exact_authority",
+			)
+			if err != nil {
+				t.Fatalf("SubscribeIdempotent: %v", err)
+			}
+			session := s.checkoutSessions[action.ProviderObjectID]
+			target := billing.PendingCancellation{
+				Kind:                billing.PendingCancellationHostedAction,
+				ProviderObjectID:    action.ProviderObjectID,
+				OriginalOperationID: "bop_exact_authority",
+			}
+			customer := "cus_stub_1"
+			tc.mutate(&session, &target, &customer)
+			s.checkoutSessions[action.ProviderObjectID] = session
+			if err := p.CancelPendingObjectIdempotent(
+				context.Background(), customer, target, "bop_exact_authority_cancel",
+			); err == nil {
+				t.Fatal("mismatched exact cancellation succeeded")
+			}
+			if len(s.expired) != 0 {
+				t.Fatalf("mismatched target was mutated: %v", s.expired)
+			}
+		})
+	}
+}
+
+func TestExactDowngradePersistsAndDisarmsOneSubscription(t *testing.T) {
+	s, p := newStub(t)
+	s.subArmed = false
+	ctx := context.Background()
+	scheduled, err := p.ScheduleDowngradeExactIdempotent(
+		ctx, "cus_stub_1", plans.Free, "bop_downgrade_exact",
+	)
+	if err != nil {
+		t.Fatalf("ScheduleDowngradeExactIdempotent: %v", err)
+	}
+	if scheduled.ProviderObjectID != "sub_stub" || scheduled.Effective.IsZero() ||
+		s.subDowngradeOperation != "bop_downgrade_exact" || !s.subArmed {
+		t.Fatalf("scheduled = %+v state=(%q,%t)",
+			scheduled, s.subDowngradeOperation, s.subArmed)
+	}
+	target := billing.PendingCancellation{
+		Kind:                billing.PendingCancellationPeriodEnd,
+		ProviderObjectID:    scheduled.ProviderObjectID,
+		OriginalOperationID: "bop_downgrade_exact",
+	}
+	if err := p.CancelPendingObjectIdempotent(
+		ctx, "cus_stub_1", target, "bop_downgrade_exact_cancel",
+	); err != nil {
+		t.Fatalf("exact period-end cancel: %v", err)
+	}
+	if s.subArmed {
+		t.Fatal("exact period-end cancellation left subscription armed")
+	}
+	if s.subDowngradeOperation != "" {
+		t.Fatalf("exact period-end cancellation left ownership marker %q", s.subDowngradeOperation)
+	}
+	if marker, ok := s.lastForm["metadata[witself_pending_downgrade_operation_id]"]; !ok || marker != "" {
+		t.Fatalf("exact period-end cancellation form did not atomically clear ownership: %v", s.lastForm)
+	}
+	if err := p.CancelPendingObjectIdempotent(
+		ctx, "cus_stub_1", target, "bop_downgrade_exact_cancel",
+	); err != nil {
+		t.Fatalf("exact period-end replay: %v", err)
+	}
+
+	s.subArmed = true
+	s.subDowngradeOperation = "bop_other_downgrade"
+	if err := p.CancelPendingObjectIdempotent(
+		ctx, "cus_stub_1", target, "bop_downgrade_exact_cancel_2",
+	); err == nil {
+		t.Fatal("mismatched downgrade operation was disarmed")
+	}
+	if !s.subArmed {
+		t.Fatal("mismatched downgrade target was mutated")
+	}
+
+	s.subStatus = "canceled"
+	s.subArmed = false
+	s.subDowngradeOperation = "bop_downgrade_exact"
+	postsBefore := 0
+	for _, request := range s.requests {
+		if request.method == http.MethodPost &&
+			request.path == "/v1/subscriptions/sub_stub" {
+			postsBefore++
+		}
+	}
+	err = p.CancelPendingObjectIdempotent(
+		ctx, "cus_stub_1", target, "bop_terminal_downgrade_cancel")
+	if !errors.Is(err, billing.ErrPendingAlreadyResolved) {
+		t.Fatalf("terminal period-end cancel = %v; want already resolved", err)
+	}
+	postsAfter := 0
+	for _, request := range s.requests {
+		if request.method == http.MethodPost &&
+			request.path == "/v1/subscriptions/sub_stub" {
+			postsAfter++
+		}
+	}
+	if postsAfter != postsBefore {
+		t.Fatal("terminal subscription was mutated during exact cancellation")
+	}
+}
+
+func TestExactDowngradeCancelRetryRefusesExternalRearmAfterLostFold(t *testing.T) {
+	s, p := newStub(t)
+	s.subArmed = false
+	ctx := context.Background()
+	scheduled, err := p.ScheduleDowngradeExactIdempotent(
+		ctx, "cus_stub_1", plans.Free, "bop_downgrade_lost_fold",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := billing.PendingCancellation{
+		Kind:                billing.PendingCancellationPeriodEnd,
+		ProviderObjectID:    scheduled.ProviderObjectID,
+		OriginalOperationID: "bop_downgrade_lost_fold",
+	}
+	if err := p.CancelPendingObjectIdempotent(
+		ctx, "cus_stub_1", target, "bop_cancel_lost_fold",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if s.subArmed || s.subDowngradeOperation != "" {
+		t.Fatalf("first disarm state = armed %t, owner %q", s.subArmed, s.subDowngradeOperation)
+	}
+
+	// The provider call succeeded, but lifecycle has not folded that response.
+	// An external actor then re-arms period-end cancellation without Witself's
+	// cleared ownership marker. Retrying the same local cancellation must not
+	// replay the old idempotent response and misreport the external action as
+	// disarmed.
+	s.subArmed = true
+	postsBefore := 0
+	for _, request := range s.requests {
+		if request.method == http.MethodPost &&
+			request.path == "/v1/subscriptions/sub_stub" {
+			postsBefore++
+		}
+	}
+	err = p.CancelPendingObjectIdempotent(
+		ctx, "cus_stub_1", target, "bop_cancel_lost_fold",
+	)
+	if err == nil || !strings.Contains(err.Error(), "target mismatch") {
+		t.Fatalf("external re-arm retry error = %v; want ownership mismatch", err)
+	}
+	if !s.subArmed {
+		t.Fatal("external re-arm was disarmed by a stale exact retry")
+	}
+	postsAfter := 0
+	for _, request := range s.requests {
+		if request.method == http.MethodPost &&
+			request.path == "/v1/subscriptions/sub_stub" {
+			postsAfter++
+		}
+	}
+	if postsAfter != postsBefore {
+		t.Fatalf("external re-arm retry reached mutation: before=%d after=%d", postsBefore, postsAfter)
+	}
+}
+
+func TestExactDowngradeCancelRequiresOwnershipMarkerRemoval(t *testing.T) {
+	s, p := newStub(t)
+	s.subArmed = false
+	scheduled, err := p.ScheduleDowngradeExactIdempotent(
+		context.Background(), "cus_stub_1", plans.Free,
+		"bop_downgrade_marker_confirmation",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.preserveOwnerOnDisarm = true
+	err = p.CancelPendingObjectIdempotent(
+		context.Background(), "cus_stub_1", billing.PendingCancellation{
+			Kind:                billing.PendingCancellationPeriodEnd,
+			ProviderObjectID:    scheduled.ProviderObjectID,
+			OriginalOperationID: "bop_downgrade_marker_confirmation",
+		}, "bop_cancel_marker_confirmation",
+	)
+	if err == nil || !strings.Contains(
+		err.Error(), "did not confirm exact period-end cancellation",
+	) {
+		t.Fatalf("retained ownership marker response error = %v", err)
+	}
+	if marker, ok := s.lastForm["metadata[witself_pending_downgrade_operation_id]"]; !ok || marker != "" {
+		t.Fatalf("disarm did not request atomic marker removal: %v", s.lastForm)
+	}
+}
+
+func TestPreparedDowngradeNeverRediscoversReplacementSubscription(t *testing.T) {
+	s, p := newStub(t)
+	s.subArmed = false
+	ctx := context.Background()
+	prepared, err := p.PrepareDowngrade(ctx, "cus_stub_1", plans.Free)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.ProviderObjectID != "sub_stub" || prepared.Effective.IsZero() {
+		t.Fatalf("prepared target = %+v", prepared)
+	}
+
+	// Provider projection can change after lifecycle durably records sub_stub.
+	// The mutation phase must use that exact object rather than list and select
+	// the now-current replacement.
+	s.subscriptionsJSON = fmt.Sprintf(
+		`{"data":[{"id":"sub_replacement","customer":"cus_stub_1","status":"active","metadata":{"witself_plan":"standard"},"items":{"data":[{"current_period_end":%d,"price":{"lookup_key":"witself_standard"}}]}}],"has_more":false}`,
+		prepared.Effective.Add(24*time.Hour).Unix())
+	s.requests = nil
+	confirmed, err := p.SchedulePreparedDowngradeIdempotent(
+		ctx, "cus_stub_1", plans.Free, "bop_prepared_target_a", prepared)
+	if err != nil || confirmed != prepared {
+		t.Fatalf("schedule prepared target = %+v, %v", confirmed, err)
+	}
+	if len(s.requests) != 2 ||
+		s.requests[0].method != http.MethodGet ||
+		s.requests[0].path != "/v1/subscriptions/sub_stub" ||
+		s.requests[1].method != http.MethodPost ||
+		s.requests[1].path != "/v1/subscriptions/sub_stub" {
+		t.Fatalf("prepared target requests = %+v; replacement must not be discovered", s.requests)
+	}
+
+	// If the prepared target reaches a terminal state before exact replay, fail
+	// closed. The replacement remains untouched and no mutation is attempted.
+	s.subStatus = "canceled"
+	s.requests = nil
+	_, err = p.SchedulePreparedDowngradeIdempotent(
+		ctx, "cus_stub_1", plans.Free, "bop_prepared_target_terminal", prepared)
+	if err == nil {
+		t.Fatal("terminal prepared target was silently retargeted")
+	}
+	if len(s.requests) != 1 || s.requests[0].method != http.MethodGet ||
+		s.requests[0].path != "/v1/subscriptions/sub_stub" {
+		t.Fatalf("terminal prepared target requests = %+v; want exact read only", s.requests)
+	}
+}
+
+func TestPreparedDowngradeRequiresSafeRenewalLead(t *testing.T) {
+	s, p := newStub(t)
+	s.subArmed = false
+	now := p.cfg.Now().UTC()
+	s.subPeriodEnd = now.Add(minimumDowngradeScheduleLead).Unix()
+	if _, err := p.PrepareDowngrade(
+		context.Background(), "cus_stub_1", plans.Free,
+	); err == nil || !strings.Contains(err.Error(), "too close to renewal") {
+		t.Fatalf("near-boundary preparation = %v", err)
+	}
+	for _, request := range s.requests {
+		if request.method == http.MethodPost {
+			t.Fatalf("near-boundary preparation mutated Stripe: %+v", s.requests)
+		}
+	}
+
+	s.requests = nil
+	_, err := p.SchedulePreparedDowngradeIdempotent(
+		context.Background(), "cus_stub_1", plans.Free,
+		"bop_near_boundary", billing.ScheduledDowngrade{
+			ProviderObjectID: "sub_stub",
+			Effective:        now.Add(minimumDowngradeScheduleLead - time.Second),
+		})
+	if err == nil || !strings.Contains(err.Error(), "too close to renewal") {
+		t.Fatalf("near-boundary mutation = %v", err)
+	}
+	if len(s.requests) != 0 {
+		t.Fatalf("near-boundary prepared target made provider calls: %+v", s.requests)
+	}
+}
+
+func TestPreparedDowngradeDetectsPeriodRolloverDuringMutation(t *testing.T) {
+	s, p := newStub(t)
+	s.subArmed = false
+	ctx := context.Background()
+	prepared, err := p.PrepareDowngrade(ctx, "cus_stub_1", plans.Free)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.advancePeriodOnArm = true
+	s.requests = nil
+	_, err = p.SchedulePreparedDowngradeIdempotent(
+		ctx, "cus_stub_1", plans.Free, "bop_period_rollover", prepared)
+	if err == nil || !strings.Contains(
+		err.Error(), "did not confirm exact period-end schedule",
+	) {
+		t.Fatalf("period rollover mutation = %v", err)
+	}
+	if !s.subArmed || s.subPeriodEnd == prepared.Effective.Unix() {
+		t.Fatalf("rollover fixture did not arm a changed period: armed=%t end=%d",
+			s.subArmed, s.subPeriodEnd)
+	}
+	if len(s.requests) != 2 ||
+		s.requests[0].method != http.MethodGet ||
+		s.requests[1].method != http.MethodPost {
+		t.Fatalf("period rollover requests = %+v", s.requests)
+	}
+}
+
+func TestDowngradeRejectsSubscriptionOwnedByAnotherCustomerBeforeMutation(t *testing.T) {
+	s, p := newStub(t)
+	s.subscriptionsJSON = `{"data":[{"id":"sub_stub","customer":"cus_other","status":"active","cancel_at_period_end":false,"metadata":{"witself_plan":"standard"},"items":{"data":[{"current_period_end":1785801600,"price":{"id":"price_standard","lookup_key":"witself_standard"}}]}}],"has_more":false}`
+
+	if _, err := p.ScheduleDowngradeExactIdempotent(
+		context.Background(), "cus_stub_1", plans.Free, "bop_wrong_customer",
+	); err == nil {
+		t.Fatal("subscription owned by another customer was scheduled")
+	}
+	for _, request := range s.requests {
+		if request.method == http.MethodPost &&
+			strings.HasPrefix(request.path, "/v1/subscriptions/") {
+			t.Fatalf("customer mismatch reached mutation: %+v", request)
+		}
+	}
+}
+
+func TestLegacyCancelFailsClosedOnCheckoutPagination(t *testing.T) {
+	s, p := newStub(t)
+	s.openSessions = []string{"cs_one_of_many"}
+	s.checkoutHasMore = true
+	if err := p.CancelPendingIdempotent(
+		context.Background(), "cus_stub_1", "bop_legacy_cancel",
+	); err == nil || !strings.Contains(err.Error(), "more than 100") {
+		t.Fatalf("paginated legacy cancel error = %v", err)
+	}
+	if len(s.expired) != 0 || !s.subArmed {
+		t.Fatalf("partial cancellation occurred: expired=%v armed=%t", s.expired, s.subArmed)
+	}
+}
+
 func TestScheduleDowngradeFreeOnly(t *testing.T) {
 	s, p := newStub(t)
+	s.subArmed = false
 	eff, err := p.ScheduleDowngrade(context.Background(), "cus_stub_1", "free")
 	if err != nil {
 		t.Fatalf("ScheduleDowngrade: %v", err)
@@ -577,6 +1259,96 @@ func TestScheduleDowngradeFreeOnly(t *testing.T) {
 	// Paid-to-paid: refused clearly until subscription schedules land.
 	if _, err := p.ScheduleDowngrade(context.Background(), "cus_stub_1", "standard"); err == nil {
 		t.Fatal("paid-to-paid downgrade should be refused for now")
+	}
+}
+
+func TestScheduleDowngradeValidatesProjectionBeforeMutation(t *testing.T) {
+	s, p := newStub(t)
+	s.subscriptionsJSON = `{"data":[{"id":"sub_bad","customer":"cus_stub_1","status":"active","metadata":{"witself_plan":"standard"},"items":{"data":[{"price":{"id":"price_standard","lookup_key":"witself_standard"}}]}}],"has_more":false}`
+	if _, err := p.ScheduleDowngradeIdempotent(
+		context.Background(), "cus_stub_1", plans.Free, "bop_bad_period",
+	); err == nil || !strings.Contains(err.Error(), "future current period end") {
+		t.Fatalf("ScheduleDowngradeIdempotent error = %v; want invalid period refusal", err)
+	}
+	for _, request := range s.requests {
+		if request.method == http.MethodPost &&
+			strings.HasPrefix(request.path, "/v1/subscriptions/") {
+			t.Fatalf("invalid subscription was mutated before validation: %+v", request)
+		}
+	}
+}
+
+func TestManagedSubscriptionProjectionFailsClosed(t *testing.T) {
+	t.Parallel()
+	one := `{"id":"sub_a","customer":"cus_stub_1","status":"active","metadata":{"witself_plan":"standard"},"items":{"data":[{"current_period_end":1783123200,"price":{"id":"price_a","lookup_key":"witself_standard"}}]}}`
+	tests := []struct {
+		name     string
+		response string
+		want     string
+	}{
+		{name: "pagination", response: `{"data":[],"has_more":true}`, want: "more than 100"},
+		{name: "multiple", response: `{"data":[` + one + `,` + strings.ReplaceAll(one, "sub_a", "sub_b") + `],"has_more":false}`, want: "2 live subscriptions"},
+		{name: "missing metadata", response: `{"data":[{"id":"sub_a","customer":"cus_stub_1","status":"active","items":{"data":[{"current_period_end":1783123200,"price":{"id":"price_a","lookup_key":"witself_standard"}}]}}],"has_more":false}`, want: "witself_plan"},
+		{name: "price mismatch", response: `{"data":[{"id":"sub_a","customer":"cus_stub_1","status":"active","metadata":{"witself_plan":"standard"},"items":{"data":[{"current_period_end":1783123200,"price":{"id":"price_a","lookup_key":"witself_team"}}]}}],"has_more":false}`, want: "does not match"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s, p := newStub(t)
+			s.subscriptionsJSON = tc.response
+			if _, _, err := p.managedLiveSubscription(
+				context.Background(), "cus_stub_1",
+			); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("managedLiveSubscription error = %v; want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestManagedSubscriptionAcceptsGrandfatheredPriceWithProductPlanMetadata(t *testing.T) {
+	s, p := newStub(t)
+	s.subscriptionsJSON = `{"data":[{"id":"sub_grandfathered","customer":"cus_stub_1","status":"active","metadata":{"witself_plan":"standard"},"items":{"data":[{"current_period_end":1783123200,"price":{"id":"price_old","lookup_key":"","product":{"id":"prod_standard","metadata":{"witself_plan":"standard"}}}}]}}],"has_more":false}`
+	sub, plan, err := p.managedLiveSubscription(
+		context.Background(), "cus_stub_1",
+	)
+	if err != nil || sub == nil || sub.ID != "sub_grandfathered" || plan != "standard" {
+		t.Fatalf("grandfathered projection = %+v, %q, %v", sub, plan, err)
+	}
+}
+
+func TestResolveEventUsesExactManagedSubscription(t *testing.T) {
+	_, p := newStub(t)
+	ctx := context.Background()
+	at := time.Date(2026, 7, 1, 1, 0, 0, 0, time.UTC)
+
+	unrelated, err := p.ResolveEvent(ctx, billing.Event{
+		Type: billing.EventPaymentFailed, CustomerID: "cus_stub_1", At: at,
+		SubscriptionID: "sub_unrelated",
+	})
+	if err != nil || unrelated != nil {
+		t.Fatalf("unrelated invoice resolved = %+v, %v; want ignored", unrelated, err)
+	}
+
+	managed, err := p.ResolveEvent(ctx, billing.Event{
+		Type: billing.EventPaymentFailed, CustomerID: "cus_stub_1", At: at,
+		SubscriptionID: "sub_stub",
+	})
+	if err != nil || managed == nil || managed.SubscriptionID != "sub_stub" ||
+		managed.Plan != "standard" {
+		t.Fatalf("managed invoice resolved = %+v, %v", managed, err)
+	}
+
+	staleCheckout, err := p.ResolveEvent(ctx, billing.Event{
+		Type: billing.EventSubscriptionActivated, CustomerID: "cus_stub_1",
+		Plan: "team", At: at, SubscriptionID: "sub_old",
+		OperationID: "bop_old",
+	})
+	if err != nil || staleCheckout == nil ||
+		staleCheckout.Type != billing.EventSubscriptionActivated ||
+		staleCheckout.Plan != "standard" ||
+		staleCheckout.SubscriptionID != "sub_stub" ||
+		staleCheckout.OperationID != "" {
+		t.Fatalf("stale checkout resolved = %+v, %v; want current provider projection", staleCheckout, err)
 	}
 }
 
@@ -634,6 +1406,26 @@ func TestReadPath(t *testing.T) {
 	next, err := p.NextCharge(ctx, "cus_stub_1")
 	if err != nil || next == nil || next.AmountCents != 3000 {
 		t.Fatalf("NextCharge = %+v, %v", next, err)
+	}
+}
+
+func TestPortalPinsReviewedConfiguration(t *testing.T) {
+	s, p := newStub(t)
+	portalURL, err := p.PortalLink(context.Background(), "cus_stub_1")
+	if err != nil || !strings.HasPrefix(portalURL, "https://billing.stripe.com/") {
+		t.Fatalf("PortalLink = %q, %v", portalURL, err)
+	}
+	if s.lastForm["configuration"] != "bpc_safe_stub" ||
+		s.lastForm["customer"] != "cus_stub_1" {
+		t.Fatalf("portal form = %v", s.lastForm)
+	}
+	p.cfg.PortalConfigurationID = ""
+	before := len(s.requests)
+	if _, err := p.PortalLink(context.Background(), "cus_stub_1"); err == nil {
+		t.Fatal("PortalLink accepted mutable default portal configuration")
+	}
+	if len(s.requests) != before {
+		t.Fatal("unsafe portal configuration reached Stripe")
 	}
 }
 
@@ -739,6 +1531,7 @@ func webhookStub(t *testing.T, now time.Time) (*stubStripe, *Provider) {
 		t: t, prices: map[string]string{}, priceCents: map[string]int64{},
 		lastForm: map[string]string{}, checkoutOps: map[string]checkoutReplay{},
 		subActive: true, subArmed: true, upcoming: true,
+		subCustomer: "cus_x", subStatus: "active",
 	}
 	srv := httptest.NewServer(http.HandlerFunc(s.handle))
 	t.Cleanup(srv.Close)
@@ -848,22 +1641,51 @@ func TestWebhookEventNormalization(t *testing.T) {
 		events[0].SubscriptionID != "sub_x" {
 		t.Fatalf("payment_failed = %+v", events)
 	}
+	// Basil invoice webhooks moved the subscription reference under
+	// parent.subscription_details. Both failed and recovered callbacks must
+	// retain that exact fence; outbound Stripe-Version does not version
+	// incoming webhook payloads.
+	payload = `{"id":"evt_invoice_failed_basil","type":"invoice.payment_failed","created":1751716801,"data":{"object":{"id":"in_failed_basil","customer":"cus_x","parent":{"type":"subscription_details","subscription_details":{"subscription":"sub_basil"}}}}}`
+	if events, err = deliver(t, p, payload, sgn(payload)); err != nil ||
+		len(events) != 1 || events[0].Type != billing.EventPaymentFailed ||
+		events[0].SubscriptionID != "sub_basil" {
+		t.Fatalf("Basil payment_failed = %+v, %v", events, err)
+	}
+	payload = `{"id":"evt_invoice_paid_basil","type":"invoice.paid","created":1751716802,"data":{"object":{"id":"in_paid_basil","customer":"cus_x","parent":{"type":"subscription_details","subscription_details":{"subscription":"sub_basil"}}}}}`
+	if events, err = deliver(t, p, payload, sgn(payload)); err != nil ||
+		len(events) != 1 || events[0].Type != billing.EventPaymentRecovered ||
+		events[0].SubscriptionID != "sub_basil" {
+		t.Fatalf("Basil invoice.paid = %+v, %v", events, err)
+	}
+	payload = `{"id":"evt_invoice_conflict","type":"invoice.paid","created":1751716803,"data":{"object":{"id":"in_conflict","customer":"cus_x","subscription":"sub_legacy","parent":{"type":"subscription_details","subscription_details":{"subscription":"sub_basil"}}}}}`
+	if _, err = deliver(t, p, payload, sgn(payload)); err == nil {
+		t.Fatal("conflicting legacy and Basil invoice subscription references were ACKed")
+	}
+	payload = `{"id":"evt_invoice_parent_conflict","type":"invoice.paid","created":1751716804,"data":{"object":{"id":"in_parent_conflict","customer":"cus_x","parent":{"type":"quote_details","subscription_details":{"subscription":"sub_basil"}}}}}`
+	if _, err = deliver(t, p, payload, sgn(payload)); err == nil {
+		t.Fatal("inconsistent invoice parent type was ACKed")
+	}
 	// subscription.deleted while ANOTHER live subscription remains is
-	// normalized first, then suppressed only by the post-receipt resolver — a
-	// duplicate/stale subscription's deletion must not revoke a live paid
-	// entitlement, and no Stripe read happens in HandleWebhook.
+	// normalized first, then projected back to that exact managed survivor by
+	// the post-receipt resolver. A duplicate/stale subscription's deletion must
+	// not revoke a live paid entitlement, and no Stripe read happens in
+	// HandleWebhook.
 	payload = `{"id":"evt_subscription_deleted_1","type":"customer.subscription.deleted","created":1751716800,"data":{"object":{"id":"sub_deleted","customer":"cus_x"}}}`
 	if events, err = deliver(t, p, payload, sgn(payload)); err != nil || len(events) != 1 {
 		t.Fatalf("normalize deleted subscription = %+v, %v", events, err)
 	}
 	resolved, err := p.ResolveEvent(context.Background(), events[0])
-	if err != nil || resolved != nil {
-		t.Fatalf("deleted with survivor resolved = %+v, %v; want suppressed", resolved, err)
+	if err != nil || resolved == nil ||
+		resolved.Type != billing.EventSubscriptionActivated ||
+		resolved.Plan != "standard" || resolved.SubscriptionID != "sub_stub" {
+		t.Fatalf("deleted with survivor resolved = %+v, %v; want survivor projection", resolved, err)
 	}
 	// With no live subscription left, the cancel folds.
 	s.subActive = false
 	resolved, err = p.ResolveEvent(context.Background(), events[0])
-	if err != nil || resolved == nil || resolved.Type != billing.EventSubscriptionCanceled {
+	if err != nil || resolved == nil ||
+		resolved.Type != billing.EventSubscriptionCanceled ||
+		resolved.SubscriptionID != "" {
 		t.Fatalf("subscription.deleted resolved = %+v, %v", resolved, err)
 	}
 	// And an API failure during the post-receipt survivor check must ERROR and

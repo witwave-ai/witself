@@ -528,6 +528,425 @@ async function approve(runtime, request, fields = {}) {
   });
 }
 
+test("realm-alias plan-fit aggregates commercial allocations and detects incomplete counters", async () => {
+  const fixture = registry();
+  const requested = await requestAlias(fixture.runtime, "plan-fit-alias");
+  assert.equal(requested.response.status, 202);
+  const approved = await approve(fixture.runtime, requested.body.request);
+  assert.equal(approved.response.status, 200);
+
+  const fit = await call(fixture.runtime, "/plan/fit", {
+    account_id: ACCOUNT,
+    maximum: 0,
+  });
+  assert.equal(fit.response.status, 200);
+  assert.deepEqual(fit.body, {
+    schema_version: "witself.realm-email-alias.v1",
+    account_id: ACCOUNT,
+    maximum: 0,
+    over_limit_count: 1,
+    highest_used: 1,
+  });
+
+  await fixture.storage.delete(
+    `claim-usage-account-member:${ACCOUNT}:${approved.body.assignment.claim_id}`,
+  );
+  const incomplete = await call(fixture.runtime, "/plan/fit", {
+    account_id: ACCOUNT,
+    maximum: 1,
+  });
+  assert.equal(incomplete.response.status, 503);
+  assert.match(incomplete.body.error, /counters disagree/);
+});
+
+test("realm-alias plan-fit shares the account lane with allocation mutations", async () => {
+  const fixture = registry();
+  const requested = await requestAlias(fixture.runtime, "plan-fit-lane");
+  const projection = fixture.blockNextProjection();
+  const approving = approve(fixture.runtime, requested.body.request);
+  await projection.started;
+
+  const fitting = call(fixture.runtime, "/plan/fit", {
+    account_id: ACCOUNT,
+    maximum: 0,
+  });
+  const raced = await Promise.race([
+    fitting.then(() => "finished"),
+    new Promise((resolve) => setTimeout(() => resolve("account-lane"), 20)),
+  ]);
+  assert.equal(raced, "account-lane");
+
+  projection.release();
+  assert.equal((await approving).response.status, 200);
+  const fit = await fitting;
+  assert.equal(fit.response.status, 200);
+  assert.equal(fit.body.highest_used, 1);
+  assert.equal(fit.body.over_limit_count, 1);
+});
+
+test("realm-alias prepare atomically fits, fences, replays, and compensates without route changes", async () => {
+  const fixture = registry();
+  for (const alias of ["prepare-a", "prepare-b"]) {
+    const requested = await requestAlias(fixture.runtime, alias, {
+      idempotency_key: `request-${alias}`,
+    });
+    assert.equal((await approve(fixture.runtime, requested.body.request, {
+      idempotency_key: `approve-${alias}`,
+    })).response.status, 200);
+  }
+  const blockedInput = {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    activation_enabled: false,
+    alias_limit: 1,
+    mode: "prepare",
+    plan_revision: 8,
+    plan_snapshot_hash: "8".repeat(64),
+  };
+  const beforeBlocked = structuredClone([...fixture.storage.values.entries()]);
+  const blocked = await call(fixture.runtime, "/plan/reconcile", blockedInput);
+  assert.equal(blocked.response.status, 409);
+  assert.equal(blocked.body.code, "plan_fit_failed");
+  assert.equal(blocked.body.prepared, false);
+  assert.deepEqual(blocked.body.fit, {
+    complete: true,
+    dimension: REALM_EMAIL_ALIAS_LIMIT,
+    maximum: 1,
+    highest_used: 2,
+    over_limit_count: 1,
+    scanned_subject_count: 1,
+    scanned_allocation_count: 2,
+  });
+  assert.deepEqual([...fixture.storage.values.entries()], beforeBlocked);
+
+  const input = { ...blockedInput, alias_limit: 2 };
+  const prepared = await call(fixture.runtime, "/plan/reconcile", input);
+  assert.equal(prepared.response.status, 200);
+  assert.equal(prepared.body.prepared, true);
+  assert.equal(prepared.body.pending, true);
+  assert.equal(prepared.body.fit.over_limit_count, 0);
+  assert.equal(
+    prepared.body.fit.authority_revision,
+    prepared.body.registry_revision,
+  );
+  const intent = await fixture.storage.get(`plan-intent:${ACCOUNT}`);
+  assert.equal(intent.state, "awaiting_cell");
+  assert.deepEqual(intent.prepare_fit, prepared.body.fit);
+  assert.equal((await fixture.storage.list({ prefix: "plan-due:" })).size, 0);
+  for (const alias of ["prepare-a", "prepare-b"]) {
+    assert.equal(
+      fixture.emailDirectory.value(realmEmailRouteKey(DOMAIN, alias)).state,
+      "applied",
+    );
+  }
+
+  const preparedState = structuredClone([...fixture.storage.values.entries()]);
+  const replay = await call(fixture.runtime, "/plan/reconcile", input);
+  assert.deepEqual(replay.body, prepared.body);
+  assert.deepEqual([...fixture.storage.values.entries()], preparedState);
+  const conflict = await call(fixture.runtime, "/plan/reconcile", {
+    ...input,
+    plan_snapshot_hash: "9".repeat(64),
+  });
+  assert.equal(conflict.response.status, 409);
+  assert.deepEqual([...fixture.storage.values.entries()], preparedState);
+  const entitlementConflict = await call(fixture.runtime, "/plan/reconcile", {
+    ...input,
+    alias_limit: 3,
+  });
+  assert.equal(entitlementConflict.response.status, 409);
+  assert.deepEqual([...fixture.storage.values.entries()], preparedState);
+
+  const newerSnapshot = {
+    revision: 9,
+    snapshot_hash: "a".repeat(64),
+    features: [REALM_EMAIL_ALIAS_FEATURE],
+    limits: { [REALM_EMAIL_ALIAS_LIMIT]: 2 },
+  };
+  const newer = await call(fixture.runtime, "/plan/reconcile", {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    activation_enabled: true,
+    alias_limit: 2,
+    mode: "prepare",
+    plan_revision: newerSnapshot.revision,
+    plan_snapshot_hash: newerSnapshot.snapshot_hash,
+  });
+  assert.equal(newer.response.status, 409);
+  assert.deepEqual(newer.body, {
+    schema_version: "witself.realm-email-alias.v1",
+    error: "an older realm email alias plan-fit fence is awaiting cell apply",
+    code: "plan_fit_prepared_fence_conflict",
+    account_id: ACCOUNT,
+    mode: "prepare",
+    plan_revision: 9,
+    plan_snapshot_hash: "a".repeat(64),
+    prepared: false,
+    pending: true,
+    stale: false,
+    complete: false,
+    pending_state: "awaiting_cell",
+    pending_plan_revision: 8,
+    pending_plan_snapshot_hash: "8".repeat(64),
+  });
+  assert.deepEqual([...fixture.storage.values.entries()], preparedState);
+  const newerEnvironment = {
+    ...fixture.env,
+    REALM_EMAIL_ALIASES: {
+      idFromName: (name) => name,
+      get: () => ({
+        fetch: (request, init) => fixture.runtime.fetch(
+          new Request(request, init),
+        ),
+      }),
+    },
+  };
+  assert.deepEqual(
+    await reconcileRealmEmailAliasesForPlan(
+      newerEnvironment,
+      ACCOUNT,
+      newerSnapshot,
+      "prepare",
+    ),
+    newer.body,
+  );
+  const malformedEnvironment = {
+    ...newerEnvironment,
+    REALM_EMAIL_ALIASES: {
+      idFromName: (name) => name,
+      get: () => ({
+        fetch: () => Response.json(
+          { ...newer.body, unexpected: true },
+          { status: 409 },
+        ),
+      }),
+    },
+  };
+  await assert.rejects(
+    reconcileRealmEmailAliasesForPlan(
+      malformedEnvironment,
+      ACCOUNT,
+      newerSnapshot,
+      "prepare",
+    ),
+    /older realm email alias plan-fit fence/,
+  );
+
+  await fixture.storage.put(`plan-intent:${ACCOUNT}`, {
+    ...intent,
+    state: "cell_committed",
+  });
+  const nonAwaiting = await call(fixture.runtime, "/plan/reconcile", {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    activation_enabled: true,
+    alias_limit: 2,
+    mode: "prepare",
+    plan_revision: newerSnapshot.revision,
+    plan_snapshot_hash: newerSnapshot.snapshot_hash,
+  });
+  assert.equal(nonAwaiting.response.status, 409);
+  assert.equal(nonAwaiting.body.code, undefined);
+  assert.equal(
+    (await fixture.storage.get(`plan-intent:${ACCOUNT}`)).state,
+    "cell_committed",
+  );
+
+  await fixture.storage.put(`plan-intent:${ACCOUNT}`, {
+    ...intent,
+    prepare_fit: { ...intent.prepare_fit, authority_revision: -1 },
+  });
+  const corrupt = await call(fixture.runtime, "/plan/reconcile", {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    activation_enabled: true,
+    alias_limit: 2,
+    mode: "prepare",
+    plan_revision: newerSnapshot.revision,
+    plan_snapshot_hash: newerSnapshot.snapshot_hash,
+  });
+  assert.equal(corrupt.response.status, 503);
+  assert.equal(corrupt.body.code, undefined);
+  assert.equal(
+    (await fixture.storage.get(`plan-intent:${ACCOUNT}`)).prepare_fit
+      .authority_revision,
+    -1,
+  );
+  await fixture.storage.put(`plan-intent:${ACCOUNT}`, intent);
+
+  const crossing = await requestAlias(fixture.runtime, "prepare-crossing", {
+    alias_limit: 2,
+    plan_revision: 8,
+    plan_snapshot_hash: "8".repeat(64),
+  });
+  assert.equal(crossing.response.status, 409);
+  assert.match(crossing.body.error, /converging/);
+  await fixture.runtime.alarm();
+  assert.equal(
+    fixture.emailDirectory.value(realmEmailRouteKey(DOMAIN, "prepare-b")).state,
+    "applied",
+  );
+
+  const recovered = await call(fixture.runtime, "/plan/reconcile", {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    activation_enabled: true,
+    alias_limit: 3,
+    mode: "complete",
+    plan_revision: 7,
+    plan_snapshot_hash: "7".repeat(64),
+    recover_pending_revision: 8,
+    recover_pending_snapshot_hash: "8".repeat(64),
+  });
+  assert.equal(recovered.response.status, 200);
+  assert.equal(recovered.body.recovered, true);
+  assert.equal(await fixture.storage.get(`plan-intent:${ACCOUNT}`), undefined);
+
+  fixture.env.REALM_EMAIL_ALIASES = {
+    idFromName: (name) => name,
+    get: () => ({ fetch: (request, init) => fixture.runtime.fetch(
+      new Request(request, init),
+    ) }),
+  };
+  const wrapperBlocked = await reconcileRealmEmailAliasesForPlan(
+    fixture.env,
+    ACCOUNT,
+    {
+      revision: 9,
+      snapshot_hash: "a".repeat(64),
+      features: [REALM_EMAIL_ALIAS_FEATURE],
+      limits: { [REALM_EMAIL_ALIAS_LIMIT]: 1 },
+    },
+    "prepare",
+  );
+  assert.equal(wrapperBlocked.code, "plan_fit_failed");
+  assert.equal(wrapperBlocked.prepared, false);
+
+  const finalInput = {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    activation_enabled: true,
+    alias_limit: 2,
+    mode: "prepare",
+    plan_revision: 10,
+    plan_snapshot_hash: "b".repeat(64),
+  };
+  assert.equal(
+    (await call(fixture.runtime, "/plan/reconcile", finalInput)).body.prepared,
+    true,
+  );
+  const completed = await call(fixture.runtime, "/plan/reconcile", {
+    ...finalInput,
+    mode: "complete",
+  });
+  assert.equal(completed.response.status, 200);
+  assert.equal(completed.body.complete, true);
+  assert.equal(
+    (await fixture.storage.get(`plan-fence:${ACCOUNT}`)).committed_revision,
+    10,
+  );
+});
+
+test("realm-alias plan wrapper prepares and exactly replays disabled finite and enabled unlimited targets", async () => {
+  const bind = (fixture) => {
+    fixture.env.REALM_EMAIL_ALIASES = {
+      idFromName: (name) => name,
+      get: () => ({
+        fetch: (request, init) => fixture.runtime.fetch(
+          new Request(request, init),
+        ),
+      }),
+    };
+  };
+
+  const disabled = registry();
+  bind(disabled);
+  const disabledSnapshot = {
+    revision: 8,
+    snapshot_hash: "c".repeat(64),
+    features: [],
+    limits: { [REALM_EMAIL_ALIAS_LIMIT]: 5 },
+  };
+  const disabledPrepared = await reconcileRealmEmailAliasesForPlan(
+    disabled.env,
+    ACCOUNT,
+    disabledSnapshot,
+    "prepare",
+  );
+  assert.equal(disabledPrepared.prepared, true);
+  assert.equal(disabledPrepared.fit.maximum, 0);
+  const disabledState = structuredClone([...disabled.storage.values.entries()]);
+  assert.deepEqual(
+    await reconcileRealmEmailAliasesForPlan(
+      disabled.env,
+      ACCOUNT,
+      disabledSnapshot,
+      "prepare",
+    ),
+    disabledPrepared,
+  );
+  assert.deepEqual([...disabled.storage.values.entries()], disabledState);
+
+  const unlimited = registry();
+  const requested = await requestAlias(unlimited.runtime, "prep-unlimit", {
+    alias_limit: null,
+  });
+  assert.equal(requested.response.status, 202);
+  assert.equal((await approve(unlimited.runtime, requested.body.request, {
+    alias_limit: null,
+  })).response.status, 200);
+  bind(unlimited);
+  const unlimitedSnapshot = {
+    revision: 8,
+    snapshot_hash: "d".repeat(64),
+    features: [REALM_EMAIL_ALIAS_FEATURE],
+    limits: {},
+  };
+  const unlimitedPrepared = await reconcileRealmEmailAliasesForPlan(
+    unlimited.env,
+    ACCOUNT,
+    unlimitedSnapshot,
+    "prepare",
+  );
+  assert.equal(unlimitedPrepared.prepared, true);
+  assert.equal(unlimitedPrepared.fit.maximum, null);
+  assert.equal(unlimitedPrepared.fit.highest_used, 1);
+  const unlimitedState = structuredClone([...unlimited.storage.values.entries()]);
+  assert.deepEqual(
+    await reconcileRealmEmailAliasesForPlan(
+      unlimited.env,
+      ACCOUNT,
+      unlimitedSnapshot,
+      "prepare",
+    ),
+    unlimitedPrepared,
+  );
+  assert.deepEqual([...unlimited.storage.values.entries()], unlimitedState);
+});
+
+test("realm-alias prepare fails closed on incomplete authority without a fence", async () => {
+  const fixture = registry();
+  const requested = await requestAlias(fixture.runtime, "prep-incomplete");
+  const approved = await approve(fixture.runtime, requested.body.request);
+  await fixture.storage.delete(
+    `claim-usage-account-member:${ACCOUNT}:${approved.body.assignment.claim_id}`,
+  );
+  const before = structuredClone([...fixture.storage.values.entries()]);
+  const result = await call(fixture.runtime, "/plan/reconcile", {
+    account_id: ACCOUNT,
+    feature_enabled: true,
+    activation_enabled: true,
+    alias_limit: 1,
+    mode: "prepare",
+    plan_revision: 8,
+    plan_snapshot_hash: "8".repeat(64),
+  });
+  assert.equal(result.response.status, 503);
+  assert.match(result.body.error, /counters disagree/);
+  assert.equal(await fixture.storage.get(`plan-intent:${ACCOUNT}`), undefined);
+  assert.deepEqual([...fixture.storage.values.entries()], before);
+});
+
 test("integrated journal bootstrap freezes an existing registry and later mutations are R2-first", async () => {
   const bucket = new JournalBucket();
   const fixture = registry({ journalBucket: bucket, journalEnabled: false });

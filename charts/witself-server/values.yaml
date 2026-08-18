@@ -42,6 +42,14 @@ backend:
 cell:
   name: ""
 
+# Public, provider-neutral control-plane discovery for managed account billing.
+# Empty keeps billing undiscoverable and is the portable/self-hosted default.
+# Managed production endpoints must be simple canonical HTTPS URLs; credentials,
+# query strings, fragments, encoded characters, and control characters are
+# rejected by both the values schema and the template.
+billing:
+  endpoint: ""
+
 backup:
   existingSecret:
     # Name of a Secret containing the cell's backup-only credential. Empty

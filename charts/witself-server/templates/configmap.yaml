@@ -5,9 +5,13 @@
 {{- $emailProductionHasLiteralAccounts := gt (len $emailProduction.accountIDs) 0 -}}
 {{- $emailProductionHasSecretAccounts := ne $emailProductionAccountSecret.name "" -}}
 {{- $emailProductionHasSecretRetryCanary := ne $emailProductionRetryCanarySecret.name "" -}}
+{{- $billingEndpoint := .Values.billing.endpoint -}}
 {{- $imageTag := .Values.image.tag | default .Chart.AppVersion -}}
 {{- if and .Values.backup.validation.enabled (not .Values.backup.existingSecret.name) -}}
 {{- fail "backup.validation.enabled requires backup.existingSecret.name" -}}
+{{- end -}}
+{{- if and $billingEndpoint (not (regexMatch "^https://[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*(:[0-9]{1,5})?(/[A-Za-z0-9._~!$&'()*+,;=:@-]+)*/?$" $billingEndpoint)) -}}
+{{- fail "billing.endpoint must be empty or a canonical HTTPS URL without credentials, query, fragment, encoded characters, or unsafe characters" -}}
 {{- end -}}
 {{- if and $emailPilot.enabled $emailProduction.enabled -}}
 {{- fail "agentEmail.receivePilot.enabled and agentEmail.receiveProduction.enabled cannot both be true" -}}
@@ -159,6 +163,9 @@ data:
   WITSELF_METRICS_ADDR: ":{{ .Values.metrics.port }}"
   WITSELF_BACKEND_KIND: {{ .Values.backend.kind | quote }}
   WITSELF_CELL_NAME: {{ .Values.cell.name | quote }}
+{{- if $billingEndpoint }}
+  WITSELF_BILLING_ENDPOINT: {{ $billingEndpoint | quote }}
+{{- end }}
   WITSELF_BACKUP_VALIDATION_ENABLED: {{ .Values.backup.validation.enabled | quote }}
   WITSELF_FACT_DELETION_ENABLED: {{ .Values.features.factDeletion.enabled | quote }}
   WITSELF_AGENT_EMAIL_CELL_STORAGE_ADMISSION_BYTES: {{ printf "%d" (int64 .Values.agentEmail.cellStorage.admissionBytes) | quote }}

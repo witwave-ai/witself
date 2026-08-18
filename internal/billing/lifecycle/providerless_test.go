@@ -28,6 +28,15 @@ func (a *providerlessApplier) Apply(
 	return ApplyAck{Revision: request.Revision, Hash: request.Hash}, nil
 }
 
+func (a *providerlessApplier) ApplyIfFits(
+	ctx context.Context,
+	accountID string,
+	request ApplyRequest,
+) (ConditionalApplyResult, error) {
+	ack, err := a.Apply(ctx, accountID, request)
+	return ConditionalApplyResult{Applied: err == nil, Ack: ack}, err
+}
+
 type recoveryApplier struct {
 	fence    ApplyFence
 	requests []ApplyRequest
@@ -53,6 +62,15 @@ func (a *recoveryApplier) Apply(
 	return ApplyAck{Revision: request.Revision, Hash: request.Hash}, nil
 }
 
+func (a *recoveryApplier) ApplyIfFits(
+	ctx context.Context,
+	accountID string,
+	request ApplyRequest,
+) (ConditionalApplyResult, error) {
+	ack, err := a.Apply(ctx, accountID, request)
+	return ConditionalApplyResult{Applied: err == nil, Ack: ack}, err
+}
+
 var errLostApplyAcknowledgement = errors.New("lost apply acknowledgement")
 
 // lostAcknowledgementApplier models the real cell fence: a newer request is
@@ -60,9 +78,11 @@ var errLostApplyAcknowledgement = errors.New("lost apply acknowledgement")
 // fails only after the fence advances, reproducing a lost bridge completion or
 // response after the cell has durably committed the request.
 type lostAcknowledgementApplier struct {
-	fence    ApplyFence
-	requests []ApplyRequest
-	loseNext bool
+	fence            ApplyFence
+	requests         []ApplyRequest
+	legacyCalls      int
+	conditionalCalls int
+	loseNext         bool
 }
 
 func (a *lostAcknowledgementApplier) ReadApplyFence(
@@ -77,6 +97,11 @@ func (a *lostAcknowledgementApplier) Apply(
 	_ string,
 	request ApplyRequest,
 ) (ApplyAck, error) {
+	a.legacyCalls++
+	return a.apply(request)
+}
+
+func (a *lostAcknowledgementApplier) apply(request ApplyRequest) (ApplyAck, error) {
 	if request.Revision < a.fence.Revision ||
 		(request.Revision == a.fence.Revision && request.Hash != a.fence.Hash) {
 		return ApplyAck{}, fmt.Errorf(
@@ -93,6 +118,16 @@ func (a *lostAcknowledgementApplier) Apply(
 		return ApplyAck{}, errLostApplyAcknowledgement
 	}
 	return ApplyAck{Revision: request.Revision, Hash: request.Hash}, nil
+}
+
+func (a *lostAcknowledgementApplier) ApplyIfFits(
+	_ context.Context,
+	_ string,
+	request ApplyRequest,
+) (ConditionalApplyResult, error) {
+	a.conditionalCalls++
+	ack, err := a.apply(request)
+	return ConditionalApplyResult{Applied: err == nil, Ack: ack}, err
 }
 
 func TestProviderlessManagerSeedsAndAppliesPersonalWithoutBilling(t *testing.T) {
@@ -260,6 +295,10 @@ func TestLostApplyAcknowledgementReplaysExactAcceptedFence(t *testing.T) {
 	}
 	if len(applier.requests) != 2 {
 		t.Fatalf("reconcile requests = %d; want exact retry", len(applier.requests))
+	}
+	if applier.conditionalCalls != 2 || applier.legacyCalls != 0 {
+		t.Fatalf("conditional calls=%d legacy calls=%d; exact prepared replay must stay conditional",
+			applier.conditionalCalls, applier.legacyCalls)
 	}
 	second := applier.requests[1]
 	if second.Revision != first.Revision || second.Hash != first.Hash {

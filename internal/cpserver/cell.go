@@ -69,6 +69,30 @@ func (a cellApplier) Apply(
 	return lifecycle.ApplyAck{Revision: ack.Revision, Hash: ack.SnapshotHash}, nil
 }
 
+// ApplyIfFits atomically checks and applies a downgrade in the account's
+// current cell. A blocked result contains only bounded usage dimensions; an
+// indeterminate result remains an error so the lifecycle retries fail closed.
+func (a cellApplier) ApplyIfFits(
+	ctx context.Context,
+	accountID string,
+	request lifecycle.ApplyRequest,
+) (lifecycle.ConditionalApplyResult, error) {
+	endpoint, provisionToken, err := a.resolve(ctx, accountID)
+	if err != nil {
+		return lifecycle.ConditionalApplyResult{}, fmt.Errorf(
+			"resolve cell for %s: %w", accountID, err,
+		)
+	}
+	result, err := client.ApplyAccountPlanIfFits(
+		ctx, endpoint, provisionToken, accountID,
+		planFitApplyTarget(request),
+	)
+	if err != nil {
+		return lifecycle.ConditionalApplyResult{}, err
+	}
+	return conditionalApplyResult(result)
+}
+
 func (a cellApplier) ReadApplyFence(
 	ctx context.Context,
 	accountID string,
@@ -114,6 +138,22 @@ func (a bridgeApplier) Apply(
 	return lifecycle.ApplyAck{Revision: ack.Revision, Hash: ack.SnapshotHash}, nil
 }
 
+// ApplyIfFits asks the directory bridge to prepare its alias/domain authority
+// fences and then perform the cell's atomic fit-and-apply transaction.
+func (a bridgeApplier) ApplyIfFits(
+	ctx context.Context,
+	accountID string,
+	request lifecycle.ApplyRequest,
+) (lifecycle.ConditionalApplyResult, error) {
+	result, err := client.ApplyAccountPlanIfFitsViaBridge(
+		ctx, a.url, a.token, accountID, planFitApplyTarget(request),
+	)
+	if err != nil {
+		return lifecycle.ConditionalApplyResult{}, err
+	}
+	return conditionalApplyResult(result)
+}
+
 func (a bridgeApplier) ReadApplyFence(
 	ctx context.Context,
 	accountID string,
@@ -124,6 +164,103 @@ func (a bridgeApplier) ReadApplyFence(
 		return lifecycle.ApplyFence{}, err
 	}
 	return lifecycle.ApplyFence{Revision: fence.Revision, Hash: fence.Hash}, nil
+}
+
+type bridgeFitChecker struct {
+	url   string
+	token string
+}
+
+// NewBridgeFitChecker returns the production downgrade checker. The Worker
+// resolves the active cell, reads only value-free durable usage, and merges
+// the control-plane-owned alias/domain allocation authorities before Go makes
+// a plan decision.
+func NewBridgeFitChecker(bridgeURL, bridgeToken string) lifecycle.FitChecker {
+	return bridgeFitChecker{url: bridgeURL, token: bridgeToken}
+}
+
+func (checker bridgeFitChecker) Fit(
+	ctx context.Context,
+	accountID string,
+	target lifecycle.PlanSnapshot,
+) ([]string, error) {
+	report, err := client.CheckAccountPlanFitViaBridge(
+		ctx, checker.url, checker.token, accountID,
+		client.AccountPlanFitTarget{
+			Plan: target.Plan, SnapshotHash: target.Hash,
+			Limits: target.Limits, Policies: target.Policies,
+			Features: target.Features,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("read account downgrade fit: %w", err)
+	}
+	return formatPlanFitViolations(report.Violations)
+}
+
+func planFitApplyTarget(request lifecycle.ApplyRequest) client.AccountPlanFitApplyTarget {
+	return client.AccountPlanFitApplyTarget{
+		Revision: request.Revision, Plan: request.Plan,
+		SnapshotHash: request.Hash, Limits: request.Limits,
+		Policies: request.Policies, Features: request.Features,
+	}
+}
+
+func conditionalApplyResult(
+	result client.AccountPlanFitApplyResult,
+) (lifecycle.ConditionalApplyResult, error) {
+	switch result.State {
+	case client.AccountPlanFitApplyStateApplied:
+		return lifecycle.ConditionalApplyResult{
+			Applied: true,
+			Ack: lifecycle.ApplyAck{
+				Revision: result.AppliedSnapshot.Revision,
+				Hash:     result.AppliedSnapshot.SnapshotHash,
+			},
+		}, nil
+	case client.AccountPlanFitApplyStateBlocked:
+		violations, err := formatPlanFitViolations(result.Violations)
+		if err != nil {
+			return lifecycle.ConditionalApplyResult{}, err
+		}
+		return lifecycle.ConditionalApplyResult{Violations: violations}, nil
+	default:
+		return lifecycle.ConditionalApplyResult{}, errors.New(
+			"read account downgrade fit: invalid result state",
+		)
+	}
+}
+
+func formatPlanFitViolations(
+	report []client.AccountPlanFitViolation,
+) ([]string, error) {
+	violations := make([]string, 0, len(report))
+	for _, violation := range report {
+		dimension := strings.ReplaceAll(violation.Dimension, "_", " ")
+		if violation.Code == "authority_incomplete" {
+			violations = append(violations, fmt.Sprintf(
+				"cannot verify %s because its control-plane authority is unavailable",
+				dimension,
+			))
+			continue
+		}
+		switch violation.Scope {
+		case "account":
+			violations = append(violations, fmt.Sprintf(
+				"%s usage is %d; target maximum is %d",
+				dimension, violation.Used, violation.Max,
+			))
+		case "realm", "agent":
+			violations = append(violations, fmt.Sprintf(
+				"%d %s scopes exceed the %s target maximum of %d; highest usage is %d",
+				violation.SubjectCount, violation.Scope, dimension,
+				violation.Max, violation.Used,
+			))
+		default:
+			return nil, fmt.Errorf("read account downgrade fit: invalid violation scope")
+		}
+	}
+	return violations, nil
 }
 
 // CellAccountExists verifies an admin target against cell truth before the

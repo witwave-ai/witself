@@ -116,6 +116,36 @@ function exactKeys(value, allowed, name) {
   }
 }
 
+function validateAgentEmailDomainPlanPrepareFit(value) {
+  exactKeys(value, new Set([
+    "complete",
+    "dimension",
+    "maximum",
+    "used",
+    "over_limit_count",
+    "scanned_subject_count",
+    "scanned_allocation_count",
+    "authority_revision",
+  ]), "custom domain plan prepare_fit");
+  if (Object.keys(value).length !== 8 || value.complete !== true ||
+      value.dimension !== "agent_email_custom_domains_per_account" ||
+      !(value.maximum === null ||
+        (Number.isSafeInteger(value.maximum) && value.maximum >= 0)) ||
+      !Number.isSafeInteger(value.used) || value.used < 0 ||
+      value.used > 10_000 ||
+      ![0, 1].includes(value.over_limit_count) ||
+      value.scanned_subject_count !== 1 ||
+      value.scanned_allocation_count !== value.used ||
+      (value.maximum === null && value.over_limit_count !== 0) ||
+      (value.maximum !== null &&
+        ((value.used > value.maximum) !==
+          (value.over_limit_count === 1))) ||
+      !Number.isSafeInteger(value.authority_revision) ||
+      value.authority_revision < 0) {
+    recoveryFail("recovered custom domain plan prepare_fit is invalid");
+  }
+}
+
 function canonicalize(value, depth, seen, budget) {
   if (depth > CANONICAL_MAX_DEPTH) {
     journalFail("canonical JSON exceeds the maximum depth");
@@ -816,6 +846,9 @@ function assertAuthorityTransition(state, key, desired) {
     return;
   }
   if (key.startsWith("plan-intent:")) {
+    if (desired.prepare_fit !== undefined) {
+      validateAgentEmailDomainPlanPrepareFit(desired.prepare_fit);
+    }
     if (previous.account_id !== desired.account_id ||
         desired.plan_revision < previous.plan_revision ||
         Date.parse(desired.updated_at) < Date.parse(previous.updated_at)) {
@@ -831,10 +864,14 @@ function assertAuthorityTransition(state, key, desired) {
       const previousState = stateOrder[previous.state] ?? 0;
       const desiredState = stateOrder[desired.state] ?? 0;
       const advancesPhase = desiredState > previousState;
+      const prepareFitChanged =
+        canonicalJSONString(previous.prepare_fit ?? null) !==
+          canonicalJSONString(desired.prepare_fit ?? null);
       if (previous.plan_snapshot_hash !== desired.plan_snapshot_hash ||
           previous.feature_enabled !== desired.feature_enabled ||
           previous.domain_limit !== desired.domain_limit ||
           previous.created_at !== desired.created_at ||
+          prepareFitChanged ||
           desiredState < previousState ||
           desired.position < previous.position ||
           (!advancesPhase && previous.cursor !== null &&
@@ -897,12 +934,15 @@ function applyNormalizedAfterImage(state, normalized) {
     if (key.startsWith("plan-intent:")) {
       const accountID = key.slice("plan-intent:".length);
       const fence = puts.get(`plan-fence:${accountID}`);
-      if (!intent || !fence || fence.account_id !== intent.account_id ||
+      const abandoningPrepared = intent?.state === "awaiting_cell" &&
+        intent?.prepare_fit !== undefined;
+      if (!intent || (!abandoningPrepared &&
+          (!fence || fence.account_id !== intent.account_id ||
           fence.committed_revision !== intent.plan_revision ||
           fence.committed_snapshot_hash !== intent.plan_snapshot_hash ||
           fence.feature_enabled !== intent.feature_enabled ||
           fence.domain_limit !== intent.domain_limit ||
-          Date.parse(fence.updated_at) < Date.parse(intent.updated_at)) {
+          Date.parse(fence.updated_at) < Date.parse(intent.updated_at)))) {
         journalFail("custom domain plan intent deletion lost convergence",
           "agent_email_domain_recovery_invariant_failed");
       }
@@ -1398,6 +1438,7 @@ function validPolicyRecord(key, value) {
       "account_id", "plan_revision", "plan_snapshot_hash",
       "feature_enabled", "domain_limit", "state", "cursor", "position",
       "failure_count", "retry_at_ms", "created_at", "updated_at",
+      "prepare_fit",
     ]), "custom domain plan intent");
     if (!Number.isSafeInteger(value.plan_revision) || value.plan_revision < 0 ||
         !(value.plan_revision === 0
@@ -1426,6 +1467,9 @@ function validPolicyRecord(key, value) {
     if (Date.parse(value.updated_at) < Date.parse(value.created_at)) {
       recoveryFail(`recovered custom domain plan intent time regressed: ${key}`,
         "agent_email_domain_recovery_revision_regression");
+    }
+    if (value.prepare_fit !== undefined) {
+      validateAgentEmailDomainPlanPrepareFit(value.prepare_fit);
     }
   } else if (key.startsWith("lifecycle-fence:") ||
       key.startsWith("lifecycle-intent:")) {

@@ -1079,6 +1079,10 @@ func (s *MemStore) PendingEvents(
 func clone(r Record) Record {
 	if r.Pending != nil {
 		p := *r.Pending
+		if p.CancelPreviousTarget != nil {
+			target := *p.CancelPreviousTarget
+			p.CancelPreviousTarget = &target
+		}
 		r.Pending = &p
 	}
 	if r.PastDueSince != nil {
