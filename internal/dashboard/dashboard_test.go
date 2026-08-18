@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -527,6 +528,18 @@ func TestDashboardFactCapacityRendering(t *testing.T) {
 	}
 }
 
+func TestDashboardPlanEntitlementsRendering(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not installed")
+	}
+	cmd := exec.Command(node, "--test", "testdata/plan_entitlements_test.cjs")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dashboard plan entitlements JavaScript test: %v\n%s", err, output)
+	}
+}
+
 func TestSelfProxySendsObservationalAndDegradesOn501(t *testing.T) {
 	t.Run("observational round trip", func(t *testing.T) {
 		srv, cfg := newDashboard(t, func(w http.ResponseWriter, r *http.Request) {
@@ -540,7 +553,7 @@ func TestSelfProxySendsObservationalAndDegradesOn501(t *testing.T) {
 			if query.Get("include_facts") != "false" || query.Get("include_salient") != "true" ||
 				query.Get("include_counts") != "true" || query.Get("include_checkpoint") != "true" ||
 				query.Get("include_message_checkpoint") != "true" || query.Get("include_email_checkpoint") != "true" ||
-				query.Get("include_avatar_checkpoint") != "true" {
+				query.Get("include_avatar_checkpoint") != "true" || query.Get("include_plan_entitlements") != "true" {
 				t.Errorf("unexpected include flags: %s", r.URL.RawQuery)
 			}
 			if query.Get("include_sensitive") != "false" {
@@ -590,6 +603,189 @@ func TestSelfProxySendsObservationalAndDegradesOn501(t *testing.T) {
 			t.Fatal("observational should be false after the 501 degrade")
 		}
 	})
+}
+
+func TestSelfProxyPlanEntitlementsUsesClosedBrowserAllowList(t *testing.T) {
+	t.Run("applied projection strips every forbidden upstream field", func(t *testing.T) {
+		srv, cfg := newDashboard(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("include_plan_entitlements") != "true" {
+				t.Errorf("include_plan_entitlements = %q", r.URL.Query().Get("include_plan_entitlements"))
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"schema_version":"witself.v0","identity":{"account_id":"acc_1","agent_id":"agt_dash","agent_name":"dash","realm_id":"rlm_1","realm_name":"default"},"primary_facts":[],"salient_memories":[],"plan_entitlements":{"schema_version":"witself.agent-entitlements.v1","state":"applied","source":"cell_applied_snapshot","enforced_plan_id":"standard","features":{"memory":true,"facts":true,"secrets":false,"messaging":true,"collaboration":false,"agent_email_receive":true,"agent_email_send":false,"support":true,"billing_admin":true},"retention_days":{"transcript_retention_days":90,"message_retention_days":30,"agent_email_retention_days":null,"billing_receipt_retention_days":3650},"subscription":{"status":"active"},"payment_method":"pm_secret","provider":"stripe","pending_transition":"team","portal_url":"https://example.test/secret","revision":99,"hash":"secret"},"index":{"kinds":[],"tags":[],"counts":{}},"elided":false}`)
+		}, nil)
+		resp := authedGet(t, srv, cfg, "/api/self")
+		defer func() { _ = resp.Body.Close() }()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, forbidden := range []string{
+			"support", "billing_admin", "billing_receipt_retention_days", "subscription",
+			"payment_method", "provider", "pending_transition", "portal_url", "revision", "hash", "pm_secret",
+		} {
+			if bytes.Contains(body, []byte(forbidden)) {
+				t.Fatalf("browser response contains forbidden %q: %s", forbidden, body)
+			}
+		}
+		var root map[string]json.RawMessage
+		if err := json.Unmarshal(body, &root); err != nil {
+			t.Fatal(err)
+		}
+		var block map[string]json.RawMessage
+		if err := json.Unmarshal(root["plan_entitlements"], &block); err != nil {
+			t.Fatal(err)
+		}
+		assertDashboardJSONKeys(t, block, "schema_version", "state", "source", "enforced_plan_id", "features", "retention_days")
+		var features map[string]json.RawMessage
+		if err := json.Unmarshal(block["features"], &features); err != nil {
+			t.Fatal(err)
+		}
+		assertDashboardJSONKeys(t, features, "memory", "facts", "secrets", "messaging", "collaboration", "agent_email_receive", "agent_email_send")
+		var retention map[string]json.RawMessage
+		if err := json.Unmarshal(block["retention_days"], &retention); err != nil {
+			t.Fatal(err)
+		}
+		assertDashboardJSONKeys(t, retention, "transcript_retention_days", "message_retention_days", "agent_email_retention_days")
+	})
+
+	t.Run("old-cell omission stays omitted", func(t *testing.T) {
+		srv, cfg := newDashboard(t, selfBackend(t), nil)
+		resp := authedGet(t, srv, cfg, "/api/self")
+		defer func() { _ = resp.Body.Close() }()
+		var root map[string]json.RawMessage
+		if err := json.NewDecoder(resp.Body).Decode(&root); err != nil {
+			t.Fatal(err)
+		}
+		if _, exists := root["plan_entitlements"]; exists {
+			t.Fatal("old-cell projection was invented at the browser boundary")
+		}
+	})
+
+	t.Run("unsafe applied projection becomes value-free unavailable", func(t *testing.T) {
+		bad := testSelfDigest()
+		bad.PlanEntitlements = &client.SelfAgentEntitlements{
+			SchemaVersion: "witself.agent-entitlements.v1", State: "applied", Source: "cell_applied_snapshot",
+			EnforcedPlanID: `<img src=x onerror="alert(1)">`,
+			Features:       &client.SelfAgentEntitlementFeatures{Memory: true},
+			RetentionDays:  &client.SelfAgentRetentionDays{},
+		}
+		srv, cfg := newDashboard(t, func(w http.ResponseWriter, _ *http.Request) { writeTestJSON(t, w, bad) }, nil)
+		resp := authedGet(t, srv, cfg, "/api/self")
+		defer func() { _ = resp.Body.Close() }()
+		var envelope selfEnvelope
+		if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+			t.Fatal(err)
+		}
+		got := envelope.PlanEntitlements
+		if got == nil || got.State != "unavailable" || got.EnforcedPlanID != "" ||
+			got.Features != nil || got.RetentionDays != nil {
+			t.Fatalf("unsafe projection = %#v", got)
+		}
+	})
+
+	t.Run("incomplete closed maps become unavailable instead of implied false or indefinite", func(t *testing.T) {
+		for _, body := range []string{
+			`{"schema_version":"witself.v0","identity":{"account_id":"acc_1","agent_id":"agt_dash","agent_name":"dash","realm_id":"rlm_1","realm_name":"default"},"primary_facts":[],"salient_memories":[],"plan_entitlements":{"schema_version":"witself.agent-entitlements.v1","state":"applied","source":"cell_applied_snapshot","enforced_plan_id":"standard","features":{"memory":true,"facts":true,"secrets":false,"messaging":true,"collaboration":false,"agent_email_receive":true},"retention_days":{"transcript_retention_days":90,"message_retention_days":30,"agent_email_retention_days":null}},"index":{"kinds":[],"tags":[],"counts":{}},"elided":false}`,
+			`{"schema_version":"witself.v0","identity":{"account_id":"acc_1","agent_id":"agt_dash","agent_name":"dash","realm_id":"rlm_1","realm_name":"default"},"primary_facts":[],"salient_memories":[],"plan_entitlements":{"schema_version":"witself.agent-entitlements.v1","state":"applied","source":"cell_applied_snapshot","enforced_plan_id":"standard","features":{"memory":true,"facts":true,"secrets":false,"messaging":true,"collaboration":false,"agent_email_receive":true,"agent_email_send":false},"retention_days":{"transcript_retention_days":90,"message_retention_days":30}},"index":{"kinds":[],"tags":[],"counts":{}},"elided":false}`,
+			`{"schema_version":"witself.v0","identity":{"account_id":"acc_1","agent_id":"agt_dash","agent_name":"dash","realm_id":"rlm_1","realm_name":"default"},"primary_facts":[],"salient_memories":[],"plan_entitlements":{"schema_version":"witself.agent-entitlements.v1","state":"applied","source":"cell_applied_snapshot","enforced_plan_id":"standard","features":{"memory":null,"facts":true,"secrets":false,"messaging":true,"collaboration":false,"agent_email_receive":true,"agent_email_send":false},"retention_days":{"transcript_retention_days":90,"message_retention_days":30,"agent_email_retention_days":null}},"index":{"kinds":[],"tags":[],"counts":{}},"elided":false}`,
+			`{"schema_version":"witself.v0","identity":{"account_id":"acc_1","agent_id":"agt_dash","agent_name":"dash","realm_id":"rlm_1","realm_name":"default"},"primary_facts":[],"salient_memories":[],"plan_entitlements":{"schema_version":"witself.agent-entitlements.v1","state":"applied","source":"cell_applied_snapshot","enforced_plan_id":"standard","features":{"memory":true,"facts":true,"secrets":false,"messaging":true,"collaboration":false,"agent_email_receive":true,"Agent_Email_Send":false},"retention_days":{"transcript_retention_days":90,"message_retention_days":30,"agent_email_retention_days":null}},"index":{"kinds":[],"tags":[],"counts":{}},"elided":false}`,
+			`{"schema_version":"witself.v0","identity":{"account_id":"acc_1","agent_id":"agt_dash","agent_name":"dash","realm_id":"rlm_1","realm_name":"default"},"primary_facts":[],"salient_memories":[],"plan_entitlements":{"schema_version":"witself.agent-entitlements.v1","state":"applied","source":"cell_applied_snapshot","enforced_plan_id":"standard","features":{"memory":true,"facts":true,"secrets":false,"messaging":true,"collaboration":false,"agent_email_receive":true,"agent_email_send":false},"retention_days":{"transcript_retention_days":90,"message_retention_days":"30","agent_email_retention_days":null}},"index":{"kinds":[],"tags":[],"counts":{}},"elided":false}`,
+			`{"schema_version":"witself.v0","identity":{"account_id":"acc_1","agent_id":"agt_dash","agent_name":"dash","realm_id":"rlm_1","realm_name":"default"},"primary_facts":[],"salient_memories":[],"plan_entitlements":{"schema_version":"witself.agent-entitlements.v1","state":"applied","source":"cell_applied_snapshot","enforced_plan_id":"standard","features":{"memory":true,"facts":true,"secrets":false,"messaging":true,"collaboration":false,"agent_email_receive":true,"agent_email_send":false},"retention_days":{"transcript_retention_days":90,"Message_Retention_Days":30,"agent_email_retention_days":null}},"index":{"kinds":[],"tags":[],"counts":{}},"elided":false}`,
+		} {
+			srv, cfg := newDashboard(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, body)
+			}, nil)
+			resp := authedGet(t, srv, cfg, "/api/self")
+			var envelope selfEnvelope
+			if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+				_ = resp.Body.Close()
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+			if got := envelope.PlanEntitlements; got == nil || got.State != "unavailable" ||
+				got.Features != nil || got.RetentionDays != nil {
+				t.Fatalf("incomplete projection = %#v", got)
+			}
+		}
+	})
+
+	t.Run("exact fields win over case aliases and aliases never reach the browser", func(t *testing.T) {
+		srv, cfg := newDashboard(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"schema_version":"witself.v0","identity":{"account_id":"acc_1","agent_id":"agt_dash","agent_name":"dash","realm_id":"rlm_1","realm_name":"default"},"primary_facts":[],"salient_memories":[],"plan_entitlements":{"schema_version":"witself.agent-entitlements.v1","state":"applied","source":"cell_applied_snapshot","enforced_plan_id":"standard","features":{"memory":false,"Memory":true,"facts":true,"secrets":false,"messaging":true,"collaboration":false,"agent_email_receive":true,"agent_email_send":false},"retention_days":{"transcript_retention_days":90,"message_retention_days":30,"Message_Retention_Days":999,"agent_email_retention_days":null},"State":"unmanaged","Source":"billing_provider","Enforced_Plan_ID":"team","Features":{"memory":true},"Retention_Days":{"message_retention_days":999}},"index":{"kinds":[],"tags":[],"counts":{}},"elided":false}`)
+		}, nil)
+		resp := authedGet(t, srv, cfg, "/api/self")
+		defer func() { _ = resp.Body.Close() }()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, alias := range []string{`"Memory"`, `"Message_Retention_Days"`, `"State"`, `"Source"`, `"Enforced_Plan_ID"`, `"Features"`, `"Retention_Days"`} {
+			if bytes.Contains(body, []byte(alias)) {
+				t.Fatalf("case alias %s reached browser response: %s", alias, body)
+			}
+		}
+		var envelope selfEnvelope
+		if err := json.Unmarshal(body, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		got := envelope.PlanEntitlements
+		if got == nil || got.State != "applied" || got.EnforcedPlanID != "standard" ||
+			got.Features == nil || got.Features.Memory ||
+			got.RetentionDays == nil || got.RetentionDays.MessageRetentionDays == nil ||
+			*got.RetentionDays.MessageRetentionDays != 30 {
+			t.Fatalf("case aliases influenced exact projection: %#v", got)
+		}
+	})
+
+	t.Run("case alias cannot invent the optional self block", func(t *testing.T) {
+		srv, cfg := newDashboard(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"schema_version":"witself.v0","identity":{"account_id":"acc_1","agent_id":"agt_dash","agent_name":"dash","realm_id":"rlm_1","realm_name":"default"},"primary_facts":[],"salient_memories":[],"Plan_Entitlements":{"schema_version":"witself.agent-entitlements.v1","state":"applied","source":"cell_applied_snapshot","enforced_plan_id":"team","features":{"memory":true,"facts":true,"secrets":true,"messaging":true,"collaboration":true,"agent_email_receive":true,"agent_email_send":true},"retention_days":{"transcript_retention_days":90,"message_retention_days":90,"agent_email_retention_days":90}},"index":{"kinds":[],"tags":[],"counts":{}},"elided":false}`)
+		}, nil)
+		resp := authedGet(t, srv, cfg, "/api/self")
+		defer func() { _ = resp.Body.Close() }()
+		var root map[string]json.RawMessage
+		if err := json.NewDecoder(resp.Body).Decode(&root); err != nil {
+			t.Fatal(err)
+		}
+		if _, exists := root["plan_entitlements"]; exists {
+			t.Fatal("case-folded alias invented the optional browser entitlement block")
+		}
+	})
+}
+
+func TestPlanEntitlementsAddNoBrowserRouteOrAction(t *testing.T) {
+	backendCalls := 0
+	srv, cfg := newDashboard(t, func(w http.ResponseWriter, r *http.Request) {
+		backendCalls++
+		selfBackend(t)(w, r)
+	}, nil)
+	for _, path := range []string{"/api/plan", "/api/entitlements", "/api/billing", "/api/subscription"} {
+		resp := authedGet(t, srv, cfg, path)
+		if resp.StatusCode != http.StatusNotFound {
+			_ = resp.Body.Close()
+			t.Fatalf("GET %s = %d, want 404", path, resp.StatusCode)
+		}
+		_ = resp.Body.Close()
+	}
+	if backendCalls != 0 {
+		t.Fatalf("unknown plan/action routes reached cell %d times", backendCalls)
+	}
+}
+
+func assertDashboardJSONKeys(t *testing.T, object map[string]json.RawMessage, want ...string) {
+	t.Helper()
+	if len(object) != len(want) {
+		t.Fatalf("keys = %v, want exactly %v", object, want)
+	}
+	for _, key := range want {
+		if _, ok := object[key]; !ok {
+			t.Fatalf("keys = %v, missing %q", object, key)
+		}
+	}
 }
 
 func TestAvatarServesOnlyCanonicalHashVerifiedSVG(t *testing.T) {
@@ -1291,6 +1487,77 @@ func TestEventsStreamEmitsSelfAndTranscript(t *testing.T) {
 		t.Fatalf("stream ended early: self=%v transcript=%v (%v)", sawSelf, sawTranscript, scanner.Err())
 	}
 	cancel() // disconnect; srv.Close in cleanup hangs if the handler leaks
+}
+
+func TestEventsStreamRefreshesCellAppliedPlanEntitlements(t *testing.T) {
+	var mu sync.Mutex
+	reads := 0
+	backend := func(w http.ResponseWriter, r *http.Request) {
+		if r.Method+" "+r.URL.Path != "GET /v1/self" {
+			t.Errorf("unexpected backend request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Query().Get("include_plan_entitlements") != "true" {
+			t.Errorf("self poll omitted plan entitlement opt-in: %s", r.URL.RawQuery)
+		}
+		mu.Lock()
+		reads++
+		plan := "standard"
+		if reads > 1 {
+			plan = "team"
+		}
+		mu.Unlock()
+		transcriptDays := int64(90)
+		digest := testSelfDigest()
+		digest.PlanEntitlements = &client.SelfAgentEntitlements{
+			SchemaVersion: "witself.agent-entitlements.v1", State: "applied", Source: "cell_applied_snapshot",
+			EnforcedPlanID: plan,
+			Features:       &client.SelfAgentEntitlementFeatures{Memory: true, Facts: true},
+			RetentionDays: &client.SelfAgentRetentionDays{
+				TranscriptRetentionDays: &transcriptDays,
+			},
+		}
+		writeTestJSON(t, w, digest)
+	}
+	srv, cfg := newDashboard(t, backend, nil)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	req := authedRequest(t, srv, cfg, "/api/events").WithContext(ctx)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("open events stream: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	seen := map[string]bool{}
+	event := ""
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 1<<20), 1<<20)
+	for scanner.Scan() && len(seen) < 2 {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "event: ") {
+			event = strings.TrimPrefix(line, "event: ")
+			continue
+		}
+		if event != "self" || !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var envelope selfEnvelope
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &envelope); err != nil {
+			t.Fatalf("decode self event: %v", err)
+		}
+		if envelope.PlanEntitlements == nil || envelope.PlanEntitlements.State != "applied" ||
+			envelope.PlanEntitlements.Source != "cell_applied_snapshot" {
+			t.Fatalf("self entitlement event = %#v", envelope.PlanEntitlements)
+		}
+		seen[envelope.PlanEntitlements.EnforcedPlanID] = true
+		event = ""
+	}
+	cancel()
+	if !seen["standard"] || !seen["team"] {
+		t.Fatalf("SSE plan transitions = %v, scanner error = %v", seen, scanner.Err())
+	}
 }
 
 // TestEventsStreamEmitsMessagesFromPassiveList proves the opt-in messages

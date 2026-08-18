@@ -18,6 +18,7 @@ func TestGetSelfDecodesMemoryCheckpoint(t *testing.T) {
 			r.URL.Query().Get("include_counts") != "false" || r.URL.Query().Get("include_checkpoint") != "false" ||
 			r.URL.Query().Get("include_message_checkpoint") != "false" ||
 			r.URL.Query().Get("include_email_checkpoint") != "false" ||
+			r.URL.Query().Get("include_plan_entitlements") != "false" ||
 			r.URL.Query().Get("include_sensitive") != "false" || r.URL.Query().Get("observational") != "" {
 			t.Fatalf("self query = %s", r.URL.RawQuery)
 		}
@@ -33,6 +34,48 @@ func TestGetSelfDecodesMemoryCheckpoint(t *testing.T) {
 		got.MemoryCheckpoint.RequestID != "mcrq_1" || got.MemoryCheckpoint.RequestGeneration != 5 ||
 		got.MemoryCheckpoint.DueAt == nil || !got.MemoryCheckpoint.DueAt.Equal(dueAt) {
 		t.Fatalf("memory checkpoint = %#v", got.MemoryCheckpoint)
+	}
+}
+
+func TestGetSelfRequestsAndDecodesAppliedPlanEntitlements(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("include_plan_entitlements") != "true" {
+			t.Fatalf("self query = %s", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","identity":{"account_id":"acc_1","agent_id":"agt_1","agent_name":"scott","realm_id":"rlm_1","realm_name":"default"},"primary_facts":[],"salient_memories":[],"plan_entitlements":{"schema_version":"witself.agent-entitlements.v1","state":"applied","source":"cell_applied_snapshot","enforced_plan_id":"standard","features":{"memory":true,"facts":true,"secrets":true,"messaging":true,"collaboration":true,"agent_email_receive":true,"agent_email_send":false},"retention_days":{"transcript_retention_days":90,"message_retention_days":90,"agent_email_retention_days":null}},"index":{"kinds":[],"tags":[],"counts":{}},"elided":false}`))
+	}))
+	defer srv.Close()
+
+	got, err := GetSelf(context.Background(), srv.URL, "token", SelfOptions{IncludePlanEntitlements: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PlanEntitlements == nil || got.PlanEntitlements.SchemaVersion != "witself.agent-entitlements.v1" ||
+		got.PlanEntitlements.State != "applied" || got.PlanEntitlements.Source != "cell_applied_snapshot" ||
+		got.PlanEntitlements.EnforcedPlanID != "standard" || got.PlanEntitlements.Features == nil ||
+		!got.PlanEntitlements.Features.Complete() || !got.PlanEntitlements.Features.Memory ||
+		got.PlanEntitlements.Features.AgentEmailSend ||
+		got.PlanEntitlements.RetentionDays == nil ||
+		!got.PlanEntitlements.RetentionDays.Complete() ||
+		got.PlanEntitlements.RetentionDays.TranscriptRetentionDays == nil ||
+		*got.PlanEntitlements.RetentionDays.TranscriptRetentionDays != 90 ||
+		got.PlanEntitlements.RetentionDays.AgentEmailRetentionDays != nil {
+		t.Fatalf("plan entitlements = %#v", got.PlanEntitlements)
+	}
+}
+
+func TestGetSelfAllowsOldCellToOmitPlanEntitlements(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"schema_version":"witself.v0","identity":{"account_id":"acc_1","agent_id":"agt_1","agent_name":"scott","realm_id":"rlm_1","realm_name":"default"},"primary_facts":[],"salient_memories":[],"index":{"kinds":[],"tags":[],"counts":{}},"elided":false}`))
+	}))
+	defer srv.Close()
+
+	got, err := GetSelf(context.Background(), srv.URL, "token", SelfOptions{IncludePlanEntitlements: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PlanEntitlements != nil {
+		t.Fatalf("old-cell plan entitlements = %#v, want nil", got.PlanEntitlements)
 	}
 }
 

@@ -297,6 +297,14 @@ func lockAccountForMessaging(ctx context.Context, tx pgx.Tx, accountID string) (
 }
 
 func messagingEnabledForSnapshot(appliedAt *time.Time, policies map[string]int64, features []string) bool {
+	return MessagingEnabledForPlanSnapshot(appliedAt, policies, features)
+}
+
+// MessagingEnabledForPlanSnapshot is the single production interpretation of
+// the messaging entitlement marker. Read-only projections must use this same
+// helper so they cannot disagree with the mutation gate during rollout from a
+// pre-entitlement applied snapshot.
+func MessagingEnabledForPlanSnapshot(appliedAt *time.Time, policies map[string]int64, features []string) bool {
 	if appliedAt == nil {
 		return true
 	}

@@ -1,7 +1,9 @@
 package client
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	neturl "net/url"
 	"strconv"
@@ -117,6 +119,157 @@ type SelfAvatarCheckpoint struct {
 	RetryAfter        *time.Time `json:"retry_after,omitempty"`
 }
 
+// SelfAgentEntitlements is the closed read-only projection of the plan
+// snapshot the authenticated agent's cell has actually applied. Older cells
+// omit it even when requested.
+type SelfAgentEntitlements struct {
+	SchemaVersion  string                        `json:"schema_version"`
+	State          string                        `json:"state"`
+	Source         string                        `json:"source"`
+	EnforcedPlanID string                        `json:"enforced_plan_id,omitempty"`
+	Features       *SelfAgentEntitlementFeatures `json:"features,omitempty"`
+	RetentionDays  *SelfAgentRetentionDays       `json:"retention_days,omitempty"`
+}
+
+// UnmarshalJSON decodes only the exact closed entitlement projection keys.
+func (e *SelfAgentEntitlements) UnmarshalJSON(data []byte) error {
+	*e = SelfAgentEntitlements{}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		if json.Valid(data) {
+			return nil
+		}
+		return err
+	}
+	decodeExactJSONString(fields, "schema_version", &e.SchemaVersion)
+	decodeExactJSONString(fields, "state", &e.State)
+	decodeExactJSONString(fields, "source", &e.Source)
+	decodeExactJSONString(fields, "enforced_plan_id", &e.EnforcedPlanID)
+	if raw, ok := fields["features"]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		var features SelfAgentEntitlementFeatures
+		if err := json.Unmarshal(raw, &features); err == nil {
+			e.Features = &features
+		}
+	}
+	if raw, ok := fields["retention_days"]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		var retention SelfAgentRetentionDays
+		if err := json.Unmarshal(raw, &retention); err == nil {
+			e.RetentionDays = &retention
+		}
+	}
+	return nil
+}
+
+// SelfAgentEntitlementFeatures is the closed set of agent-domain feature gates.
+type SelfAgentEntitlementFeatures struct {
+	Memory            bool `json:"memory"`
+	Facts             bool `json:"facts"`
+	Secrets           bool `json:"secrets"`
+	Messaging         bool `json:"messaging"`
+	Collaboration     bool `json:"collaboration"`
+	AgentEmailReceive bool `json:"agent_email_receive"`
+	AgentEmailSend    bool `json:"agent_email_send"`
+	complete          bool
+}
+
+// SelfAgentRetentionDays contains the closed set of agent-visible retention policies.
+type SelfAgentRetentionDays struct {
+	TranscriptRetentionDays *int64 `json:"transcript_retention_days"`
+	MessageRetentionDays    *int64 `json:"message_retention_days"`
+	AgentEmailRetentionDays *int64 `json:"agent_email_retention_days"`
+	complete                bool
+}
+
+// UnmarshalJSON decodes only exact required feature keys and types.
+func (f *SelfAgentEntitlementFeatures) UnmarshalJSON(data []byte) error {
+	*f = SelfAgentEntitlementFeatures{}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		// A syntactically valid non-object is an incomplete projection rather
+		// than a reason to fail the entire self digest. The dashboard converts
+		// incomplete projections to the value-free unavailable state.
+		if json.Valid(data) {
+			return nil
+		}
+		return err
+	}
+	f.complete = decodeRequiredJSONBool(fields, "memory", &f.Memory) &&
+		decodeRequiredJSONBool(fields, "facts", &f.Facts) &&
+		decodeRequiredJSONBool(fields, "secrets", &f.Secrets) &&
+		decodeRequiredJSONBool(fields, "messaging", &f.Messaging) &&
+		decodeRequiredJSONBool(fields, "collaboration", &f.Collaboration) &&
+		decodeRequiredJSONBool(fields, "agent_email_receive", &f.AgentEmailReceive) &&
+		decodeRequiredJSONBool(fields, "agent_email_send", &f.AgentEmailSend)
+	return nil
+}
+
+// UnmarshalJSON decodes only exact required retention keys and types.
+func (r *SelfAgentRetentionDays) UnmarshalJSON(data []byte) error {
+	*r = SelfAgentRetentionDays{}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		if json.Valid(data) {
+			return nil
+		}
+		return err
+	}
+	r.complete = decodeRequiredJSONNullableInt64(fields, "transcript_retention_days", &r.TranscriptRetentionDays) &&
+		decodeRequiredJSONNullableInt64(fields, "message_retention_days", &r.MessageRetentionDays) &&
+		decodeRequiredJSONNullableInt64(fields, "agent_email_retention_days", &r.AgentEmailRetentionDays)
+	return nil
+}
+
+// Complete reports whether every closed feature field decoded successfully.
+func (f *SelfAgentEntitlementFeatures) Complete() bool {
+	return f != nil && f.complete
+}
+
+// Complete reports whether every closed retention field decoded successfully.
+func (r *SelfAgentRetentionDays) Complete() bool {
+	return r != nil && r.complete
+}
+
+func decodeRequiredJSONBool(fields map[string]json.RawMessage, name string, dst *bool) bool {
+	raw, ok := fields[name]
+	if !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return false
+	}
+	var value bool
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return false
+	}
+	*dst = value
+	return true
+}
+
+func decodeRequiredJSONNullableInt64(fields map[string]json.RawMessage, name string, dst **int64) bool {
+	raw, ok := fields[name]
+	if !ok {
+		return false
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		*dst = nil
+		return true
+	}
+	var value int64
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return false
+	}
+	*dst = &value
+	return true
+}
+
+func decodeExactJSONString(fields map[string]json.RawMessage, name string, dst *string) {
+	raw, ok := fields[name]
+	if !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err == nil {
+		*dst = value
+	}
+}
+
 // SelfDigest is the bounded response from GET /v1/self.
 type SelfDigest struct {
 	SchemaVersion     string                 `json:"schema_version"`
@@ -129,8 +282,35 @@ type SelfDigest struct {
 	MessageCheckpoint *SelfMessageCheckpoint `json:"message_checkpoint,omitempty"`
 	EmailCheckpoint   *SelfEmailCheckpoint   `json:"email_checkpoint,omitempty"`
 	AvatarCheckpoint  *SelfAvatarCheckpoint  `json:"avatar_checkpoint,omitempty"`
+	PlanEntitlements  *SelfAgentEntitlements `json:"plan_entitlements,omitempty"`
 	Index             SelfIndex              `json:"index"`
 	Elided            bool                   `json:"elided"`
+}
+
+// UnmarshalJSON keeps the optional plan_entitlements compatibility block on
+// an exact-key boundary. encoding/json otherwise accepts case-folded struct
+// field aliases, which could let a malformed upstream alias populate or
+// override the browser's closed projection.
+func (d *SelfDigest) UnmarshalJSON(data []byte) error {
+	type wire SelfDigest
+	var decoded wire
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	decoded.PlanEntitlements = nil
+	if raw, ok := fields["plan_entitlements"]; ok {
+		var entitlements SelfAgentEntitlements
+		if err := json.Unmarshal(raw, &entitlements); err != nil {
+			return err
+		}
+		decoded.PlanEntitlements = &entitlements
+	}
+	*d = SelfDigest(decoded)
+	return nil
 }
 
 // SelfOptions controls bounded digest sections. The identity block is always
@@ -154,6 +334,10 @@ type SelfOptions struct {
 	// IncludeAvatarCheckpoint requests content-free avatar lifecycle state.
 	// Identity-only callers should leave this false to avoid avatar queries.
 	IncludeAvatarCheckpoint bool
+	// IncludePlanEntitlements opts into the cell-applied plan projection.
+	// It is false by default, and old cells ignore the unknown query key and
+	// omit the entire response block.
+	IncludePlanEntitlements bool
 	// IncludeSensitive intentionally includes authorized private fact and memory
 	// values. Sealed secrets are a separate service and are never in this digest.
 	IncludeSensitive bool
@@ -194,6 +378,7 @@ func GetSelf(ctx context.Context, endpoint, token string, opts SelfOptions) (Sel
 	params.Set("include_message_checkpoint", strconv.FormatBool(opts.IncludeMessageCheckpoint))
 	params.Set("include_email_checkpoint", strconv.FormatBool(opts.IncludeEmailCheckpoint))
 	params.Set("include_avatar_checkpoint", strconv.FormatBool(opts.IncludeAvatarCheckpoint))
+	params.Set("include_plan_entitlements", strconv.FormatBool(opts.IncludePlanEntitlements))
 	params.Set("include_sensitive", strconv.FormatBool(opts.IncludeSensitive))
 	if opts.Observational {
 		params.Set("observational", "true")

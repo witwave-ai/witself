@@ -474,6 +474,18 @@ func agentEmailReceiveEnabledForSnapshot(
 	policies map[string]int64,
 	features []string,
 ) bool {
+	return AgentEmailReceiveEnabledForPlanSnapshot(appliedAt, policies, features)
+}
+
+// AgentEmailReceiveEnabledForPlanSnapshot is the single production
+// interpretation of the inbound-email entitlement marker. Read-only
+// projections use it too, preserving the legacy missing-marker allow during a
+// control-plane convergence rollout.
+func AgentEmailReceiveEnabledForPlanSnapshot(
+	appliedAt *time.Time,
+	policies map[string]int64,
+	features []string,
+) bool {
 	if appliedAt == nil {
 		return true
 	}
