@@ -22,9 +22,12 @@ sandbox account in the explicit account cohort; it must not use a founder,
 employee, or customer account.
 
 `WITSELF_CP_STRIPE_MODE=test` is mandatory for this run. An empty
-`WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST` means zero customer mutations and is the
-required steady state before and after the canary. Route availability, a
-configured provider, or a successful read is never permission to charge.
+`WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST` means zero customer mutations at
+runtime. The stronger rollout steady-state proof requires the corresponding
+`CP_BILLING_ACCOUNT_ALLOWLIST` Worker secret to be absent before and after the
+canary; a present secret whose value is empty is not accepted by the source
+fence. Route availability, a configured provider, or a successful read is
+never permission to charge.
 
 `WITSELF_CP_STRIPE_TEST_CLOCK_ID` is an optional, temporary sandbox-acceptance
 setting. It may attach only a newly created customer for the one disposable
@@ -417,6 +420,37 @@ them to deploy an unbound image.
 Separately bind the immutable image digest and chart revision to the same target
 commit before rollout.
 
+### Canary activation blocker
+
+The repository does not yet contain a supported command that owns the complete
+billing canary secret transition. A safe implementation must hold the global
+Cloudflare mutation freeze and, as one operation:
+
+1. prove the active Worker is the exact frozen tagged target at 100%;
+2. atomically install exactly one disposable-account cohort and the optional
+   canonical Stripe test clock without putting either value in argv, logs, or
+   a temporary file;
+3. attest the one new secret-generated Worker successor has the same script,
+   runtime, non-target bindings, routes, Container application/image contract,
+   and release variables with only the intended secret-name delta;
+4. redeploy the exact tag, restart the singleton Go Container with its fresh
+   environment, and fully verify the final Worker and live Go identity before
+   handing control to the canary; and
+5. on darkening, first remove the cohort and clock atomically, restore and
+   verify the empty-cohort Container, then remove the lifecycle-gate binding,
+   stop and drain every Container writer, and complete the canonical
+   lifecycle-disabled source-fence and final zero-hazard inventory.
+
+Worker secret mutation immediately creates and deploys a successor version,
+while an already-running Go Container retains its old environment. Therefore a
+sequence of generic `secret:put:break-glass`, `wrangler secret put`, or
+`wrangler secret delete` commands cannot satisfy this boundary. Do not use
+those commands for the cohort or test clock, or for the lifecycle gate as part
+of this billing canary and darkening ceremony. The separately reviewed
+nonbilling lifecycle activation remains governed by its own runbook. Until the
+atomic transition and darkening orchestrator exists and is hermetically tested,
+stop after step 7 below and keep billing dark.
+
 ## Activation sequence
 
 1. Confirm Stripe test mode, the reviewed hosted-portal configuration, test
@@ -425,11 +459,16 @@ commit before rollout.
    satisfy the [value-free return-page contract](billing-return-pages.md); a
    syntactically valid dead URL is a blocker. Confirm Team and Enterprise remain
    unavailable in the catalog. If period-boundary acceleration is part of the
-   retained canary, set
-   `WITSELF_CP_STRIPE_TEST_CLOCK_ID` only for the fresh disposable test customer
-   and record a value-free configuration hash.
-2. Set the billing account allowlist to empty and verify mutation previews and
-   applies fail closed before receipt, provider, or account writes.
+   retained canary, select and review a Stripe test clock for a future fresh
+   disposable test customer and retain only its value-free configuration hash.
+   Do not configure `WITSELF_CP_STRIPE_TEST_CLOCK_ID` or write the corresponding
+   Worker secret while the activation blocker above remains open.
+2. Prove the billing account allowlist and lifecycle-gate Worker secrets are
+   absent, and separately prove the optional test-clock binding is absent.
+   Verify mutation previews and applies fail closed before receipt, provider,
+   or account writes. If any binding is present, abort this attempt and restore
+   the reviewed dark source state before starting a fresh capture; do not
+   mutate it inside the source-fence interval.
 3. Stop every `v0.0.254` API and plan-lifecycle reconciliation process. Verify
    both source replica counts are zero; stopping only the HTTP listener is not
    sufficient.
@@ -452,16 +491,23 @@ commit before rollout.
    `:plan` and atomic `:plan-fit-apply` protocols return the reviewed strict
    envelopes under a non-mutating refusal/replay probe. An old Worker or cell is
    a hard abort, not a compatibility mode.
-8. After every API and reconciler is on the target, add one disposable sandbox
-   account to the allowlist. Exercise setup, Personal to Professional checkout,
-   signed webhook replay, exact idempotent retry, Professional to Personal fit
-   rejection and fit success, period-boundary scheduling, test-clock advance
-   when selected, and exact pending cancellation. Retain value-free results and
-   access-controlled Stripe sandbox object evidence.
-9. Remove the account from the allowlist immediately after the canary, clear
-   `WITSELF_CP_STRIPE_TEST_CLOCK_ID`, and prove the cohort is empty before any
-   broader test cohort. Production live mode and production webhooks remain
-   disabled.
+8. **Blocked on current main.** Only the future reviewed atomic orchestrator may
+   install one disposable sandbox account and optional test clock. After it
+   proves the exact Worker and refreshed Go Container, exercise setup, Personal
+   to Professional checkout, signed webhook replay, exact idempotent retry,
+   Professional to Personal fit rejection and fit success, period-boundary
+   scheduling, test-clock advance when selected, and exact pending
+   cancellation. Retain value-free results and access-controlled Stripe
+   sandbox object evidence.
+9. That same orchestrator must darken before it returns success: atomically
+   remove the allowlist and optional test clock so customer mutations fail
+   closed, refresh and verify the empty-cohort Container, then remove
+   `CP_PLAN_LIFECYCLE_ENABLED`, stop and drain every remaining writer, and prove
+   the cohort and lifecycle-gate state through the canonical source fence. It
+   must also retain a separate exact test-clock absence attestation bound to
+   those fence observations before the final zero-hazard inventory; the current
+   source-fence artifact does not expose that secret name. Production live mode
+   and production webhooks remain disabled.
 
 Abort and return to the empty dark cohort on any unknown record, incomplete
 scan, stale inventory, unexpected provider object, response-loss ambiguity,
