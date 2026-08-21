@@ -661,8 +661,28 @@ require those CRDs for a basic install.
 
 ## Alerts And Dashboards
 
-The repo should eventually include optional example Prometheus alert rules and
-dashboard definitions for self-hosted operators.
+The repository now contains a default-off Founder/open-plane monitoring
+capability in the GitOps platform chart. It pins a trimmed
+`kube-prometheus-stack` package, disables Grafana and upstream default rules,
+and enables only Prometheus Operator, one bounded Prometheus, one bounded
+Alertmanager, kubelet/PVC collection, and kube-state-metrics. The application
+chart can label the existing server and worker ServiceMonitors for exact
+selection and restrict both metrics ports to the `monitoring` namespace.
+
+The receiver contract accepts only the name and key of an immutable Kubernetes
+Secret. Alertmanager mounts that Secret and reads the HTTPS webhook URL through
+`url_file`; the value never enters Git, Helm values, Argo Application state, or
+the retained canary artifact. All shipped Witself rules aggregate away pod,
+instance, route, account, realm, and agent identity. They expose only fixed
+service/severity labels and the worker's existing closed-set job label.
+
+This capability is not a production rollout. Shared and target-cell defaults
+remain disabled, and no feature-status gate closes until the staged GitOps
+rollout proves sustained scrapes, bounded storage and resource headroom, rule
+health, plus both firing and resolved delivery at a tested external receiver.
+The target-cell ServiceMonitors must be enabled only after the monitoring child
+Application and CRDs are Healthy; Argo sync waves in separate parent
+Applications do not establish that ordering.
 
 Initial alert candidates:
 
@@ -723,10 +743,20 @@ names, field names, TOTP material, KMS key material, raw paths, user input, or
 payment details.
 
 These email alerts are required operating controls, not a description of the
-current production installation. The v0.0.253 rollout verified the logical
-gauges only at a point in time; continuous Prometheus scraping, PVC metrics
-collection, Alertmanager routing, and a tested external receiver remain absent
-and block cohort expansion.
+current production installation. The repository contains a default-off,
+resource-bounded Prometheus/Alertmanager capability, but the v0.0.253 rollout
+verified the logical gauges only at a point in time. Continuous scraping, PVC
+metrics collection, Alertmanager routing, and a tested external receiver remain
+absent from the live cell and block cohort expansion. The rollout must install
+the null-routed stack first, converge application targets second, and activate
+the rules plus external receiver third so expected pre-activation absence does
+not create false production evidence.
+
+The first rollout is intentionally limited to the cell-local open-plane and
+Founder email storage path. Cloudflare email edge/Queue outcomes live in
+Analytics Engine rather than Prometheus and require a separate bounded bridge
+or alerting path. One monitored cell also does not close fleet-wide placement,
+restore, or capacity gates for any unmonitored accepting cell.
 
 ## CI And Release Checks
 
@@ -766,6 +796,12 @@ Required checks once the server and chart exist:
 - Helm template tests for probes and metrics values.
 - Helm template tests for ServiceMonitor and PodMonitor enabled and disabled
   paths.
+- Default-off platform render tests, exact child-chart package checksum
+  verification, Prometheus rule syntax/unit tests, receiver Secret validation,
+  private-service checks, and monitoring-only metrics ingress checks.
+- A synthetic `PrometheusRule` canary that observes local firing and resolution
+  without causing an outage. Retain separate external receiver receipts for
+  both states; local Alertmanager evidence alone is insufficient.
 - Kubernetes schema validation for rendered probe, service, and monitor
   resources.
 - Release smoke tests for `witself-server healthcheck --live`,

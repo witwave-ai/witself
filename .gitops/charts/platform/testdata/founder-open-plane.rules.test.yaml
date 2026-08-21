@@ -1,0 +1,189 @@
+rule_files:
+  - ../files/founder-open-plane.rules.yaml
+evaluation_interval: 1m
+tests:
+  - name: missing worker metrics alerts without identifying a pod
+    interval: 1m
+    input_series:
+      - series: witself_up
+        values: 1+0x10
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: WitselfWorkerMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: witself-worker
+              witself_alert: "true"
+            exp_annotations:
+              summary: Witself worker metrics are unavailable.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+  - name: logical email storage threshold is aggregate and value free
+    interval: 1m
+    input_series:
+      - series: witself_agent_email_cell_storage_retained_bytes
+        values: 81+0x20
+      - series: witself_agent_email_cell_storage_admission_bytes
+        values: 100+0x20
+      - series: witself_agent_email_cell_storage_hard_bytes
+        values: 200+0x20
+      - series: witself_agent_email_cell_storage_root_rows
+        values: 1+0x20
+      - series: witself_agent_email_cell_storage_admission_root_rows
+        values: 100+0x20
+      - series: witself_agent_email_cell_storage_counted_rows
+        values: 1+0x20
+      - series: witself_agent_email_cell_storage_hard_counted_rows
+        values: 100+0x20
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: WitselfAgentEmailStorageApproachingAdmission
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: agent-email-storage
+              witself_alert: "true"
+            exp_annotations:
+              summary: Agent-email logical storage is at or above 80 percent of a protective boundary.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+  - name: a missing logical storage gauge fails the ledger closed
+    interval: 1m
+    input_series:
+      - series: witself_agent_email_cell_storage_metrics_up
+        values: 1+0x10
+      - series: witself_agent_email_cell_storage_retained_bytes
+        values: 10+0x10
+      - series: witself_agent_email_cell_storage_admission_bytes
+        values: 100+0x10
+      - series: witself_agent_email_cell_storage_root_rows
+        values: 1+0x10
+      - series: witself_agent_email_cell_storage_admission_root_rows
+        values: 100+0x10
+      - series: witself_agent_email_cell_storage_counted_rows
+        values: 1+0x10
+      - series: witself_agent_email_cell_storage_hard_counted_rows
+        values: 100+0x10
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: WitselfAgentEmailStorageLedgerUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: agent-email-storage
+              witself_alert: "true"
+            exp_annotations:
+              summary: The schema-91 agent-email storage ledger cannot be read.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+  - name: logical email storage alerts at the exact operating threshold
+    interval: 1m
+    input_series:
+      - series: witself_agent_email_cell_storage_retained_bytes
+        values: 80+0x20
+      - series: witself_agent_email_cell_storage_admission_bytes
+        values: 100+0x20
+      - series: witself_agent_email_cell_storage_hard_bytes
+        values: 200+0x20
+      - series: witself_agent_email_cell_storage_root_rows
+        values: 1+0x20
+      - series: witself_agent_email_cell_storage_admission_root_rows
+        values: 100+0x20
+      - series: witself_agent_email_cell_storage_counted_rows
+        values: 1+0x20
+      - series: witself_agent_email_cell_storage_hard_counted_rows
+        values: 100+0x20
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: WitselfAgentEmailStorageApproachingAdmission
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: agent-email-storage
+              witself_alert: "true"
+            exp_annotations:
+              summary: Agent-email logical storage is at or above 80 percent of a protective boundary.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+  - name: postgres pvc metric absence alerts after the bounded delay
+    interval: 1m
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: WitselfPostgresPVCMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: postgres-storage
+              witself_alert: "true"
+            exp_annotations:
+              summary: PostgreSQL PVC capacity metrics are unavailable.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+  - name: one full postgres pvc cannot hide behind aggregate free space
+    interval: 1m
+    input_series:
+      - series: 'kubelet_volume_stats_capacity_bytes{namespace="witself",persistentvolumeclaim="data-postgresql-0"}'
+        values: 100+0x20
+      - series: 'kubelet_volume_stats_available_bytes{namespace="witself",persistentvolumeclaim="data-postgresql-0"}'
+        values: 10+0x20
+      - series: 'kubelet_volume_stats_capacity_bytes{namespace="witself",persistentvolumeclaim="data-postgresql-1"}'
+        values: 900+0x20
+      - series: 'kubelet_volume_stats_available_bytes{namespace="witself",persistentvolumeclaim="data-postgresql-1"}'
+        values: 900+0x20
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: WitselfPostgresPVCApproachingCapacity
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: postgres-storage
+              witself_alert: "true"
+            exp_annotations:
+              summary: PostgreSQL PVC usage is at or above 80 percent.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+  - name: postgres pvc available-only metrics fail closed
+    interval: 1m
+    input_series:
+      - series: 'kubelet_volume_stats_available_bytes{namespace="witself",persistentvolumeclaim="data-postgresql-0"}'
+        values: 10+0x20
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: WitselfPostgresPVCMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: postgres-storage
+              witself_alert: "true"
+            exp_annotations:
+              summary: PostgreSQL PVC capacity metrics are unavailable.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+  - name: postgres pvc alerts at the exact operating threshold
+    interval: 1m
+    input_series:
+      - series: 'kubelet_volume_stats_capacity_bytes{namespace="witself",persistentvolumeclaim="data-postgresql-0"}'
+        values: 100+0x20
+      - series: 'kubelet_volume_stats_available_bytes{namespace="witself",persistentvolumeclaim="data-postgresql-0"}'
+        values: 20+0x20
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: WitselfPostgresPVCApproachingCapacity
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: postgres-storage
+              witself_alert: "true"
+            exp_annotations:
+              summary: PostgreSQL PVC usage is at or above 80 percent.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
+  - name: postgres pvc capacity-only metrics fail closed
+    interval: 1m
+    input_series:
+      - series: 'kubelet_volume_stats_capacity_bytes{namespace="witself",persistentvolumeclaim="data-postgresql-0"}'
+        values: 100+0x20
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: WitselfPostgresPVCMetricsUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: postgres-storage
+              witself_alert: "true"
+            exp_annotations:
+              summary: PostgreSQL PVC capacity metrics are unavailable.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring

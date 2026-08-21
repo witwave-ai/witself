@@ -1,0 +1,230 @@
+{{- if .Values.platform.monitoring.enabled }}
+{{- $monitoring := .Values.platform.monitoring -}}
+{{- $receiver := $monitoring.receiver -}}
+{{- if $monitoring.alerting.enabled }}
+{{- if or (gt (len $receiver.secretName) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $receiver.secretName)) -}}
+{{- fail "platform.monitoring.receiver.secretName must be a valid Kubernetes Secret name when alerting is enabled; the referenced Secret must be immutable" -}}
+{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9._-]{1,253}$" $receiver.secretKey) -}}
+{{- fail "platform.monitoring.receiver.secretKey must be a valid Kubernetes Secret data key when alerting is enabled" -}}
+{{- end -}}
+{{- end -}}
+{{- if not (regexMatch "^[a-f0-9]{64}$" $monitoring.chartPackageSHA256) -}}
+{{- fail "platform.monitoring.chartPackageSHA256 must be a lowercase SHA-256" -}}
+{{- end -}}
+{{- range $name, $digest := $monitoring.images -}}
+{{- if not (regexMatch "^[a-f0-9]{64}$" $digest) -}}
+{{- fail (printf "platform.monitoring.images.%s must be a bare lowercase SHA-256 OCI digest" $name) -}}
+{{- end -}}
+{{- end -}}
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: witself-monitoring
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+    witself.io/chart-package-sha256: {{ $monitoring.chartPackageSHA256 | quote }}
+  labels:
+    witself.io/cell: {{ required "cell.name is required" .Values.cell.name | quote }}
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: {{ .Values.gitops.project | quote }}
+  source:
+    repoURL: {{ $monitoring.chartRepoURL | quote }}
+    chart: {{ $monitoring.chartName | quote }}
+    targetRevision: {{ required "platform.monitoring.chartVersion is required" $monitoring.chartVersion | quote }}
+    helm:
+      releaseName: {{ $monitoring.releaseName | quote }}
+      values: |
+        commonLabels:
+          witself.io/cell: {{ required "cell.name is required" .Values.cell.name | quote }}
+        defaultRules:
+          create: false
+        grafana:
+          enabled: false
+        nodeExporter:
+          enabled: false
+        kubeApiServer:
+          enabled: false
+        kubeControllerManager:
+          enabled: false
+        coreDns:
+          enabled: false
+        kubeDns:
+          enabled: false
+        kubeEtcd:
+          enabled: false
+        kubeScheduler:
+          enabled: false
+        kubeProxy:
+          enabled: false
+        kubelet:
+          enabled: true
+          serviceMonitor:
+            cAdvisor: false
+            probes: false
+            resource: false
+        kubeStateMetrics:
+          enabled: true
+        kube-state-metrics:
+          image:
+            sha: {{ printf "sha256:%s" $monitoring.images.kubeStateMetrics | quote }}
+          resources:
+            {{- toYaml $monitoring.kubeStateMetrics.resources | nindent 12 }}
+        prometheusOperator:
+          admissionWebhooks:
+            patch:
+              image:
+                sha: {{ $monitoring.images.admissionWebhookPatch | quote }}
+              resources:
+                {{- toYaml $monitoring.operator.admissionWebhookPatchResources | nindent 16 }}
+          prometheusConfigReloader:
+            image:
+              sha: {{ $monitoring.images.configReloader | quote }}
+            resources:
+              {{- toYaml $monitoring.operator.configReloaderResources | nindent 14 }}
+          resources:
+            {{- toYaml $monitoring.operator.resources | nindent 12 }}
+          image:
+            sha: {{ $monitoring.images.operator | quote }}
+        prometheus:
+          ingress:
+            enabled: false
+          service:
+            type: ClusterIP
+          prometheusSpec:
+            replicas: 1
+            retention: {{ $monitoring.prometheus.retention | quote }}
+            retentionSize: {{ $monitoring.prometheus.retentionSize | quote }}
+            resources:
+              {{- toYaml $monitoring.prometheus.resources | nindent 14 }}
+            image:
+              sha: {{ $monitoring.images.prometheus | quote }}
+            serviceMonitorSelector:
+              matchLabels:
+                release: {{ $monitoring.releaseName | quote }}
+            serviceMonitorNamespaceSelector:
+              matchExpressions:
+                - key: kubernetes.io/metadata.name
+                  operator: In
+                  values:
+                    - witself
+                    - {{ $monitoring.namespace | quote }}
+            podMonitorSelector:
+              matchLabels:
+                release: {{ $monitoring.releaseName | quote }}
+            podMonitorNamespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: {{ $monitoring.namespace | quote }}
+            probeSelector:
+              matchLabels:
+                release: {{ $monitoring.releaseName | quote }}
+            probeNamespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: {{ $monitoring.namespace | quote }}
+            scrapeConfigSelector:
+              matchLabels:
+                release: {{ $monitoring.releaseName | quote }}
+            scrapeConfigNamespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: {{ $monitoring.namespace | quote }}
+            ruleSelector:
+              matchLabels:
+                release: {{ $monitoring.releaseName | quote }}
+            ruleNamespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: {{ $monitoring.namespace | quote }}
+            storageSpec:
+              volumeClaimTemplate:
+                spec:
+                  accessModes:
+                    - ReadWriteOnce
+                  resources:
+                    requests:
+                      storage: {{ $monitoring.prometheus.storage | quote }}
+        alertmanager:
+          enabled: true
+          ingress:
+            enabled: false
+          service:
+            type: ClusterIP
+          networkPolicy:
+            enabled: true
+            policyTypes:
+              - Ingress
+            enableClusterRules: true
+            monitoringRules:
+              prometheus: true
+              configReloader: true
+          config:
+            global:
+              resolve_timeout: 5m
+            route:
+              receiver: "null"
+              group_by:
+                - alertname
+                - severity
+              group_wait: 30s
+              group_interval: 5m
+              repeat_interval: 4h
+{{ if $monitoring.alerting.enabled }}
+              routes:
+                - receiver: witself-external
+                  matchers:
+                    - witself_alert = "true"
+{{ else }}
+              routes: []
+{{ end }}
+            receivers:
+              - name: "null"
+{{ if $monitoring.alerting.enabled }}
+              - name: witself-external
+                webhook_configs:
+                  - url_file: /etc/alertmanager/secrets/{{ $receiver.secretName }}/{{ $receiver.secretKey }}
+                    send_resolved: true
+                    http_config:
+                      follow_redirects: false
+{{ end }}
+          alertmanagerSpec:
+            replicas: 1
+            retention: {{ $monitoring.alertmanager.retention | quote }}
+            alertmanagerConfigSelector:
+              matchLabels:
+                release: {{ $monitoring.releaseName | quote }}
+            alertmanagerConfigNamespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: {{ $monitoring.namespace | quote }}
+{{ if $monitoring.alerting.enabled }}
+            secrets:
+              - {{ $receiver.secretName | quote }}
+{{ end }}
+            resources:
+              {{- toYaml $monitoring.alertmanager.resources | nindent 14 }}
+            image:
+              sha: {{ $monitoring.images.alertmanager | quote }}
+            storage:
+              volumeClaimTemplate:
+                spec:
+                  accessModes:
+                    - ReadWriteOnce
+                  resources:
+                    requests:
+                      storage: {{ $monitoring.alertmanager.storage | quote }}
+{{ if $monitoring.alerting.enabled }}
+        additionalPrometheusRulesMap:
+          founder-open-plane:
+{{ .Files.Get "files/founder-open-plane.rules.yaml" | nindent 12 }}
+{{ end }}
+  destination:
+    server: {{ .Values.gitops.destinationServer | quote }}
+    namespace: {{ $monitoring.namespace | quote }}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+{{- end }}

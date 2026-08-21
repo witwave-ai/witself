@@ -97,3 +97,83 @@ platform:
     chartVersion: 3.13.1
     namespace: kube-system
     replicas: 2
+  monitoring:
+    # Capability only. Keep disabled in shared defaults and enable the stack in
+    # its own reviewed GitOps rollout before any application ServiceMonitor.
+    # Route/rule activation is a third, separate change after targets are up.
+    enabled: false
+    alerting:
+      enabled: false
+    chartRepoURL: https://prometheus-community.github.io/helm-charts
+    chartName: kube-prometheus-stack
+    chartVersion: 87.6.0
+    chartPackageSHA256: e8bad88c0ad0231b34314c643730ca5641f84db65d937e99a7df98133cbd9cc5
+    namespace: monitoring
+    releaseName: witself-monitoring
+    images:
+      # Multi-architecture OCI index digests resolved from the exact chart's
+      # declared tags. Store bare lowercase digests here; the template adapts
+      # the kube-state-metrics subchart's different sha value convention.
+      prometheus: f3b6aae627d96e7ad8256cdf6de5953247735117c6f577383fadb42efeeea7bc
+      alertmanager: af26fbe4dd1886ac0efd7bd55cd9027da262e105b137a376522b7c14c3626e4a
+      operator: 7d9247d2351480fc74587e24681578f815f387bafb2ee7b86a852a94c4cd3774
+      configReloader: 74550ba3e8bf93f47bc574231090d340ae9c01d25cd11ff74799e65f9fdb9a48
+      admissionWebhookPatch: 76a2170cd0c9a7758c4ac8ac5bbe9b6f73e869a15ffb77d9f684664f7d7b96b1
+      kubeStateMetrics: 85108987d044b18a098126732f98602df408888c0f7d456241f5abefb9744bc1
+    receiver:
+      # Required only when alerting.enabled is true. This immutable Secret
+      # contains one HTTPS webhook URL. The URL value never enters Git or Argo
+      # state; Alertmanager reads it from the mounted file.
+      secretName: ""
+      secretKey: url
+    prometheus:
+      retention: 7d
+      retentionSize: 4GB
+      storage: 5Gi
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: 750m
+          memory: 768Mi
+    alertmanager:
+      retention: 120h
+      storage: 1Gi
+      resources:
+        requests:
+          cpu: 25m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 192Mi
+    operator:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 250m
+          memory: 256Mi
+      configReloaderResources:
+        requests:
+          cpu: 25m
+          memory: 32Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+      admissionWebhookPatchResources:
+        requests:
+          cpu: 25m
+          memory: 32Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+    kubeStateMetrics:
+      resources:
+        requests:
+          cpu: 25m
+          memory: 32Mi
+        limits:
+          cpu: 100m
+          memory: 128Mi
