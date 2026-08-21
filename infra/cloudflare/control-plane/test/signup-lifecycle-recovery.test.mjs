@@ -29,6 +29,11 @@ class KVFake {
     this.map = new Map();
     this.ttls = new Map();
     this.failDeletes = new Set();
+    this.failPuts = []; // {prefix, skip}: fail the (skip+1)-th put matching prefix
+  }
+
+  failPutMatching(prefix, skip = 0) {
+    this.failPuts.push({ prefix, skip });
   }
 
   async get(key, opts) {
@@ -40,6 +45,16 @@ class KVFake {
   }
 
   async put(key, value, opts) {
+    for (const injected of this.failPuts) {
+      if (key.startsWith(injected.prefix)) {
+        if (injected.skip > 0) {
+          injected.skip -= 1;
+          break;
+        }
+        this.failPuts.splice(this.failPuts.indexOf(injected), 1);
+        throw new Error("injected KV put failure");
+      }
+    }
     this.map.set(key, value);
     this.ttls.set(key, opts?.expirationTtl ?? null);
   }
@@ -80,19 +95,28 @@ class EmailFake {
     this.sent = [];
     this.failSendsTo = new Set();
     this.failNextSends = 0;
+    this.failError = "injected email delivery failure";
   }
 
   async send(message) {
     if (this.failNextSends > 0) {
       this.failNextSends -= 1;
-      throw new Error("injected email delivery failure");
+      throw new Error(this.failError);
     }
     if (this.failSendsTo.has(message.to)) {
-      throw new Error("injected per-recipient email failure");
+      throw new Error(this.failError);
     }
     this.sent.push(message);
   }
 }
+
+// A provider-error fixture shaped like the worst real rejections: recipient
+// addresses, token-shaped hex, newline injection, and structured data. None
+// of it may ever reach a log line or a response body.
+const MALICIOUS_PROVIDER_ERROR =
+  `550 mailbox <victim-leak@example.test> rejected token=${"ab".repeat(32)}\n` +
+  `X-INJECTED-LOG-LINE MALICIOUS-MARKER\n` +
+  `{"provider":"evil","recipient":"victim-leak@example.test"}`;
 
 function makeEnv(overrides = {}) {
   const kv = new KVFake();
@@ -261,32 +285,48 @@ test("a recovery code send persists only hashes with the documented lifetimes", 
   assert.equal(state.code_hash, await sha256hex(code.replaceAll("-", "")));
   const msUntilExpiry = Date.parse(state.code_expires_at) - Date.now();
   assert.ok(msUntilExpiry > 13 * 60 * 1000 && msUntilExpiry <= 15 * 60 * 1000);
-  assert.equal(kv.ttls.get("recover:acct_1"), 4 * 3600);
+  const codePersistTtl = kv.ttls.get("recover:acct_1");
+  assert.ok(
+    codePersistTtl <= 4 * 3600 && codePersistTtl >= 4 * 3600 - 5,
+    `code persist ttl ${codePersistTtl} must sit at the window boundary`,
+  );
   const stored = kv.dump();
   assert.ok(!stored.includes(code), "the raw dashed code must never be stored");
   assert.ok(!stored.includes(code.replaceAll("-", "")), "the raw stripped code must never be stored");
 });
 
-test("an email outage rolls the reserved slots back and stays indistinguishable", async (t) => {
+test("a provider outage burns the slot uniformly and stays indistinguishable", async (t) => {
   const { env, kv, email } = makeEnv();
-  seedAcct(kv);
+  seedAcct(kv, "acct_real");
   seedCell(kv);
   mockCell(t, activeContactHandlers());
   email.failNextSends = 1;
-  const failed = await recover(env);
-  assert.equal(failed.status, 200);
-  const failedBody = await failed.text();
-  const state = kv.json("recover:acct_1");
-  assert.equal(state.emails_sent, 0, "the reserved slot is returned on infra failure");
-  assert.equal(state.code_hash, undefined);
-  assert.ok(state.last_email_at, "the cooldown survives so retries pace identically to success");
+  const real = await recover(env, "acct_real");
+  assert.equal(real.status, 200);
+  const realBody = await real.text();
+  const realState = kv.json("recover:acct_real");
+  assert.equal(
+    realState.emails_sent,
+    1,
+    "the slot stays spent on a send failure — refunding only observable-real requests would be an existence oracle",
+  );
+  assert.equal(realState.code_hash, undefined);
+  assert.ok(realState.last_email_at, "the cooldown paces retries identically to success");
 
-  // The outage answer is byte-identical to a successful send's answer.
-  state.last_email_at = new Date(Date.now() - 10 * 60 * 1000).toISOString();
-  kv.map.set("recover:acct_1", JSON.stringify(state));
-  const succeeded = await recover(env);
-  assert.equal(await succeeded.text(), failedBody, "outage and success must answer alike");
-  assert.equal(email.sent.length, 1, "the returned slot leaves room for the retry to send");
+  // A phantom probe during the same outage is metered exactly the same way
+  // and answers byte-identically: quota treatment never depends on whether
+  // the account exists.
+  const phantom = await recover(env, "acct_ghost");
+  assert.equal(await phantom.text(), realBody);
+  assert.equal(kv.json("recover:acct_ghost").emails_sent, 1);
+
+  // Once the provider recovers, the owner still has window quota left.
+  realState.last_email_at = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  kv.map.set("recover:acct_real", JSON.stringify(realState));
+  const retry = await recover(env, "acct_real");
+  assert.equal(await retry.text(), realBody, "outage and success answer alike");
+  assert.equal(email.sent.length, 1, "the retry sends once mail is back");
+  assert.equal(kv.json("recover:acct_real").emails_sent, 2);
 });
 
 test("an inactive account gets no code but the same generic answer", async (t) => {
@@ -870,6 +910,504 @@ test("an interrupted undo burn leaves the revert committed and the replay honest
   const replay = await run(env, `/undo-email/${UNDO_TOKEN}`);
   assert.equal(replay.status, 409);
   assert.match(await replay.text(), /recover/);
+});
+
+// ---- Email-change crash boundaries -----------------------------------------
+
+// statefulOwnerCell models the authoritative cell across the commit: the
+// account's email actually moves when :update-email lands, so replays see
+// the post-commit world exactly as production would.
+function statefulOwnerCell(t) {
+  const cellState = { email: OWNER_EMAIL, commits: 0 };
+  const calls = mockCell(t, {
+    "/v1/account": () =>
+      cellJSON({ account: { id: "acct_1", status: "active", email: cellState.email } }),
+    "/v1/whoami": () => cellJSON({ principal: { operator_id: "op_1" } }),
+    "/v1/operators": () => cellJSON({ operators: [{ id: "op_1", is_root: true }] }),
+    ":update-email": (url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.undo) {
+        if (cellState.email !== body.expected_current) {
+          return cellJSON({ error: "the email has changed since this undo link was issued" }, 409);
+        }
+        cellState.email = body.new_email;
+        return cellJSON({ email: body.new_email });
+      }
+      cellState.commits += 1;
+      cellState.email = body.new_email;
+      return cellJSON({ email: body.new_email });
+    },
+  });
+  return { cellState, calls };
+}
+
+async function issueChangeCodeStateful(t, harness) {
+  const { env, kv, email } = harness;
+  seedAcct(kv);
+  seedCell(kv);
+  const cell = statefulOwnerCell(t);
+  const resp = await changeEmail(env, { new_email: NEW_EMAIL });
+  assert.equal(resp.status, 200);
+  return { code: extractCode(email.sent[0]), ...cell };
+}
+
+function undoNotices(email) {
+  return email.sent.filter((m) => m.subject.includes("was changed"));
+}
+
+test("the arming snapshot records the committed transition's old address", async (t) => {
+  const harness = makeEnv();
+  await issueChangeCodeStateful(t, harness);
+  const state = harness.kv.json("emailchange:acct_1");
+  assert.equal(state.old_email, OWNER_EMAIL);
+  assert.equal(state.new_email, NEW_EMAIL);
+});
+
+test("a committed change whose response was lost replays into the original undo channel", async (t) => {
+  const harness = makeEnv();
+  const { env, kv, email } = harness;
+  const { code, cellState } = await issueChangeCodeStateful(t, harness);
+  kv.failDeletes.add("recover:acct_1");
+  kv.map.set("recover:acct_1", JSON.stringify({ code_hash: "cd".repeat(32) }));
+  await assert.rejects(
+    changeEmail(env, { new_email: NEW_EMAIL, code }),
+    /injected KV delete failure/,
+    "the crash lands after the cell committed",
+  );
+  assert.equal(cellState.commits, 1);
+  assert.equal(cellState.email, NEW_EMAIL, "the transition is durable on the cell");
+  assert.equal(kv.keysWithPrefix("undoemail:").length, 0, "no undo authority exists yet");
+
+  const replay = await changeEmail(env, { new_email: NEW_EMAIL, code });
+  assert.equal(replay.status, 200);
+  assert.equal((await replay.json()).email, NEW_EMAIL);
+  assert.equal(cellState.commits, 1, "the replay never re-mutates the cell");
+
+  const undoKeys = kv.keysWithPrefix("undoemail:");
+  assert.equal(undoKeys.length, 1, "exactly one undo authority");
+  const undo = kv.json(undoKeys[0]);
+  assert.equal(undo.old_email, OWNER_EMAIL, "the ORIGINAL old address is recovered");
+  assert.equal(undo.new_email, NEW_EMAIL);
+  const notices = undoNotices(email);
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0].to, OWNER_EMAIL, "the undo notice goes only to the original old inbox");
+  assert.equal(kv.json("recover:acct_1"), null, "stale recovery codes still die");
+  assert.equal(kv.json("emailchange:acct_1"), null, "the operation is terminal");
+});
+
+test("an interrupted attempt-count write fails closed before any cell mutation", async (t) => {
+  const harness = makeEnv();
+  const { env, kv } = harness;
+  const { code, cellState } = await issueChangeCodeStateful(t, harness);
+  kv.failPutMatching("emailchange:");
+  await assert.rejects(changeEmail(env, { new_email: NEW_EMAIL, code }), /injected KV put failure/);
+  assert.equal(cellState.commits, 0, "the crash precedes the cell mutation");
+  assert.equal(kv.json("emailchange:acct_1").attempts, 0, "no durable attempt was recorded");
+
+  const retry = await changeEmail(env, { new_email: NEW_EMAIL, code });
+  assert.equal(retry.status, 200);
+  assert.equal(cellState.commits, 1);
+});
+
+test("a crash before the undo-authority write recovers to exactly one valid token", async (t) => {
+  const harness = makeEnv();
+  const { env, kv, email } = harness;
+  const { code, cellState } = await issueChangeCodeStateful(t, harness);
+  // skip=2 passes the attempt-count and attempts-reset writes and fails the
+  // undo fence write.
+  kv.failPutMatching("emailchange:", 2);
+  await assert.rejects(changeEmail(env, { new_email: NEW_EMAIL, code }), /injected KV put failure/);
+  assert.equal(cellState.commits, 1, "the cell already committed");
+  assert.equal(kv.keysWithPrefix("undoemail:").length, 0, "no authority record landed");
+  assert.equal(undoNotices(email).length, 0, "no notice left before the crash");
+
+  const replay = await changeEmail(env, { new_email: NEW_EMAIL, code });
+  assert.equal(replay.status, 200);
+  assert.equal(cellState.commits, 1);
+  assert.equal(kv.keysWithPrefix("undoemail:").length, 1, "exactly one undo authority");
+  assert.equal(undoNotices(email).length, 1);
+  assert.equal(undoNotices(email)[0].to, OWNER_EMAIL);
+});
+
+test("a crash after the authority fence but before the record still converges to one token", async (t) => {
+  const harness = makeEnv();
+  const { env, kv } = harness;
+  const { code, cellState } = await issueChangeCodeStateful(t, harness);
+  kv.failPutMatching("undoemail:");
+  await assert.rejects(changeEmail(env, { new_email: NEW_EMAIL, code }), /injected KV put failure/);
+  assert.equal(cellState.commits, 1);
+  const fenced = kv.json("emailchange:acct_1");
+  assert.match(fenced.undo_key, /^[0-9a-f]{64}$/, "the fence is durable before the record");
+  assert.equal(kv.keysWithPrefix("undoemail:").length, 0);
+
+  const replay = await changeEmail(env, { new_email: NEW_EMAIL, code });
+  assert.equal(replay.status, 200);
+  const undoKeys = kv.keysWithPrefix("undoemail:");
+  assert.equal(undoKeys.length, 1, "exactly one live undo authority");
+  assert.equal(kv.json(undoKeys[0]).old_email, OWNER_EMAIL);
+});
+
+test("a notice-sent crash replays without leaving two valid undo tokens", async (t) => {
+  const harness = makeEnv();
+  const { env, kv, email } = harness;
+  const { code, cellState } = await issueChangeCodeStateful(t, harness);
+  kv.failDeletes.add("emailchange:acct_1");
+  await assert.rejects(changeEmail(env, { new_email: NEW_EMAIL, code }), /injected KV delete failure/);
+  assert.equal(cellState.commits, 1);
+  assert.equal(kv.keysWithPrefix("undoemail:").length, 1);
+  const firstKey = kv.keysWithPrefix("undoemail:")[0];
+  assert.equal(undoNotices(email).length, 1, "the first notice already left");
+
+  const replay = await changeEmail(env, { new_email: NEW_EMAIL, code });
+  assert.equal(replay.status, 200);
+  const undoKeys = kv.keysWithPrefix("undoemail:");
+  assert.equal(undoKeys.length, 1, "the crashed attempt's token was garbage-collected");
+  assert.notEqual(undoKeys[0], firstKey, "the delivered replacement is the one live token");
+  assert.equal(kv.json(undoKeys[0]).old_email, OWNER_EMAIL);
+  const notices = undoNotices(email);
+  assert.equal(notices.length, 2, "the replacement token was re-delivered");
+  assert.ok(notices.every((n) => n.to === OWNER_EMAIL));
+  assert.equal(cellState.commits, 1);
+});
+
+test("the undo revert burns the pending change so a stale code cannot re-commit", async (t) => {
+  const harness = makeEnv();
+  const { env, kv, email } = harness;
+  const { code, cellState } = await issueChangeCodeStateful(t, harness);
+  // Crash after the notice left but before the terminal delete: the code
+  // stays armed while a live undo link is in the old inbox.
+  kv.failDeletes.add("emailchange:acct_1");
+  await assert.rejects(changeEmail(env, { new_email: NEW_EMAIL, code }));
+  assert.equal(cellState.email, NEW_EMAIL);
+  const undoToken = undoNotices(email).at(-1).text.match(/undo-email\/([0-9a-f]{64})/)[1];
+
+  // The victim reverts through the undo link.
+  const revert = await run(env, `/undo-email/${undoToken}`);
+  assert.equal(revert.status, 200);
+  assert.equal(cellState.email, OWNER_EMAIL, "the revert landed on the cell");
+  assert.equal(kv.json("emailchange:acct_1"), null, "the revert burns the armed operation");
+
+  // The stolen still-valid code must not pass the old-address guard again
+  // and silently re-commit the change the owner just reverted.
+  const replay = await changeEmail(env, { new_email: NEW_EMAIL, code });
+  assert.equal(replay.status, 401);
+  assert.equal(cellState.email, OWNER_EMAIL, "the reverted address survives the replay");
+  assert.equal(cellState.commits, 1, "no second forward commit");
+});
+
+test("post-commit crash replays never exhaust the attempt budget", async (t) => {
+  const harness = makeEnv();
+  const { env, kv } = harness;
+  const { code, cellState } = await issueChangeCodeStateful(t, harness);
+  for (let round = 0; round < 6; round += 1) {
+    kv.failDeletes.add("recover:acct_1");
+    kv.map.set("recover:acct_1", JSON.stringify({ code_hash: "cd".repeat(32) }));
+    await assert.rejects(changeEmail(env, { new_email: NEW_EMAIL, code }));
+    assert.ok(
+      (kv.json("emailchange:acct_1").attempts ?? 0) <= 1,
+      "a correct code resets the durable attempt budget every round",
+    );
+  }
+  const healed = await changeEmail(env, { new_email: NEW_EMAIL, code });
+  assert.equal(healed.status, 200, "the undo channel is still recoverable after many crashes");
+  assert.equal(cellState.commits, 1);
+  const undoKeys = kv.keysWithPrefix("undoemail:");
+  assert.equal(undoKeys.length, 1);
+  assert.equal(kv.json(undoKeys[0]).old_email, OWNER_EMAIL);
+});
+
+test("a concurrent duplicate redeem converges to a single undo authority", async (t) => {
+  const harness = makeEnv();
+  const { env, kv, email } = harness;
+  seedAcct(kv);
+  seedCell(kv);
+  const cellState = { email: OWNER_EMAIL, commits: 0 };
+  let nested = null;
+  let redeemBody = null;
+  mockCell(t, {
+    "/v1/account": () =>
+      cellJSON({ account: { id: "acct_1", status: "active", email: cellState.email } }),
+    "/v1/whoami": () => cellJSON({ principal: { operator_id: "op_1" } }),
+    "/v1/operators": () => cellJSON({ operators: [{ id: "op_1", is_root: true }] }),
+    ":update-email": async (url, init) => {
+      const body = JSON.parse(init.body);
+      cellState.commits += 1;
+      cellState.email = body.new_email;
+      if (redeemBody && !nested) {
+        // A second redeem of the same operation runs to completion while
+        // the first is still inside its cell commit.
+        nested = worker.fetch(
+          new Request(`${ORIGIN}/v1/accounts/acct_1:change-email`, {
+            method: "POST",
+            headers: { Authorization: "Bearer operator-token" },
+            body: redeemBody,
+          }),
+          env,
+          { waitUntil: () => {} },
+        );
+        await nested;
+      }
+      return cellJSON({ email: body.new_email });
+    },
+  });
+  const request = await changeEmail(env, { new_email: NEW_EMAIL });
+  assert.equal(request.status, 200);
+  const code = extractCode(email.sent[0]);
+  redeemBody = JSON.stringify({ new_email: NEW_EMAIL, code });
+  const outer = await changeEmail(env, { new_email: NEW_EMAIL, code });
+  assert.equal(outer.status, 200);
+  assert.equal((await nested).status, 200);
+  assert.equal(
+    kv.keysWithPrefix("undoemail:").length,
+    1,
+    "the racing redeems converge to one live undo authority",
+  );
+  assert.equal(undoNotices(email).length, 1, "only one undo notice leaves");
+  assert.equal(kv.json("emailchange:acct_1"), null, "spent state is not resurrected");
+});
+
+test("a recovered older operation cannot clobber or revert a newer independent change", async (t) => {
+  const harness = makeEnv();
+  const { env, kv } = harness;
+  const { code, cellState } = await issueChangeCodeStateful(t, harness);
+  kv.failDeletes.add("recover:acct_1");
+  kv.map.set("recover:acct_1", JSON.stringify({ code_hash: "cd".repeat(32) }));
+  await assert.rejects(changeEmail(env, { new_email: NEW_EMAIL, code }));
+  cellState.email = "independent@example.test"; // a newer independent change lands
+
+  const replay = await changeEmail(env, { new_email: NEW_EMAIL, code });
+  assert.equal(replay.status, 409);
+  assert.match((await replay.json()).error, /changed while this request was pending/);
+  assert.equal(cellState.commits, 1, "the stale operation never touches the cell again");
+  assert.equal(cellState.email, "independent@example.test", "the newer change survives");
+  assert.equal(kv.keysWithPrefix("undoemail:").length, 0, "no undo authority for the stale operation");
+});
+
+test("a same-address redeem never mints a degenerate undo record", async (t) => {
+  const harness = makeEnv();
+  const { env, kv, email } = harness;
+  seedAcct(kv);
+  seedCell(kv);
+  const { cellState } = statefulOwnerCell(t);
+  const request = await changeEmail(env, { new_email: OWNER_EMAIL });
+  assert.equal(request.status, 200);
+  const code = extractCode(email.sent[0]);
+  const redeem = await changeEmail(env, { new_email: OWNER_EMAIL, code });
+  assert.equal(redeem.status, 200);
+  assert.equal(cellState.commits, 1);
+  assert.equal(kv.keysWithPrefix("undoemail:").length, 0, "old == new must never become an undo record");
+  assert.equal(kv.json("emailchange:acct_1"), null);
+});
+
+test("a pre-snapshot legacy state completes with the live-read fallback", async (t) => {
+  const { env, kv } = makeEnv();
+  seedAcct(kv);
+  seedCell(kv);
+  const { cellState } = statefulOwnerCell(t);
+  kv.map.set(
+    "emailchange:acct_1",
+    JSON.stringify({
+      code_hash: await sha256hex("123456789"),
+      code_expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      new_email: NEW_EMAIL,
+      attempts: 0,
+      emails_sent: 1,
+    }),
+  );
+  const resp = await changeEmail(env, { new_email: NEW_EMAIL, code: "123-456-789" });
+  assert.equal(resp.status, 200);
+  assert.equal(cellState.commits, 1);
+  const undoKeys = kv.keysWithPrefix("undoemail:");
+  assert.equal(undoKeys.length, 1);
+  assert.equal(kv.json(undoKeys[0]).old_email, OWNER_EMAIL);
+});
+
+// ---- Value-free logging -----------------------------------------------------
+
+test("malicious provider errors never reach recovery or change-email logs or responses", async (t) => {
+  const logs = [];
+  t.mock.method(console, "log", (line) => logs.push(String(line)));
+
+  // Recovery request mode: provider throws mid-send.
+  const recoverHarness = makeEnv();
+  seedAcct(recoverHarness.kv);
+  seedCell(recoverHarness.kv);
+  mockCell(t, activeContactHandlers());
+  recoverHarness.email.failError = MALICIOUS_PROVIDER_ERROR;
+  recoverHarness.email.failNextSends = 1;
+  const recoverResp = await recover(recoverHarness.env);
+  assert.equal(recoverResp.status, 200);
+  const recoverBody = await recoverResp.text();
+
+  // Change-email confirmation send, alarm send, and undo notice send.
+  const changeHarness = makeEnv();
+  seedAcct(changeHarness.kv);
+  seedCell(changeHarness.kv);
+  statefulOwnerCell(t);
+  changeHarness.email.failError = MALICIOUS_PROVIDER_ERROR;
+  changeHarness.email.failSendsTo.add(NEW_EMAIL);
+  const codeFail = await changeEmail(changeHarness.env, { new_email: NEW_EMAIL });
+  assert.equal(codeFail.status, 502);
+  changeHarness.email.failSendsTo.clear();
+  changeHarness.email.failSendsTo.add(OWNER_EMAIL);
+  const alarmFail = await changeEmail(changeHarness.env, { new_email: NEW_EMAIL });
+  assert.equal(alarmFail.status, 502);
+  changeHarness.email.failSendsTo.clear();
+  // The alarm-fail attempt durably spent quota and the cooldown; age the
+  // cooldown so the follow-up request is admitted.
+  const cooled = changeHarness.kv.json("emailchange:acct_1");
+  cooled.last_email_at = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  changeHarness.kv.map.set("emailchange:acct_1", JSON.stringify(cooled));
+  const okReq = await changeEmail(changeHarness.env, { new_email: NEW_EMAIL });
+  assert.equal(okReq.status, 200);
+  // The armed code is the admitted request's — the alarm-fail attempt's
+  // earlier code was deliberately never armed.
+  const changeCode = extractCode(changeHarness.email.sent.findLast((m) => m.to === NEW_EMAIL));
+  changeHarness.email.failSendsTo.add(OWNER_EMAIL); // undo notice fails
+  const commit = await changeEmail(changeHarness.env, { new_email: NEW_EMAIL, code: changeCode });
+  assert.equal(commit.status, 200);
+
+  const responses = [recoverBody, await codeFail.text(), await alarmFail.text()];
+  for (const marker of ["victim-leak@example.test", "ab".repeat(32), "MALICIOUS-MARKER", "X-INJECTED"]) {
+    for (const line of logs) {
+      assert.ok(!line.includes(marker), `log leaked ${marker}: ${line}`);
+    }
+    for (const body of responses) {
+      assert.ok(!body.includes(marker), `response leaked ${marker}`);
+    }
+  }
+  for (const line of logs) {
+    assert.ok(!line.includes("\n"), "logs must stay single-line against newline injection");
+  }
+  // Pin that every injected failure path actually fired: the aggregate
+  // reason-code check alone cannot tell a skipped injection from a clean one.
+  assert.ok(
+    logs.some((l) => l.startsWith("recover: recovery email send failed")),
+    "the recovery send failure fired and logged its bounded line",
+  );
+  assert.ok(
+    logs.some((l) => l.includes("phase=confirmation_send")),
+    "the confirmation send failure fired",
+  );
+  assert.ok(
+    logs.some((l) => l.includes("phase=alarm_send")),
+    "the alarm send failure fired",
+  );
+  assert.ok(
+    logs.some((l) => l.includes("phase=undo_notice_send")),
+    "the undo notice failure fired",
+  );
+});
+
+// ---- Recovery window is absolute --------------------------------------------
+
+test("the recovery quota window is absolute and wrong attempts cannot extend it", async (t) => {
+  const harness = makeEnv();
+  const { env, kv } = harness;
+  const code = await issueRecoveryCode(t, harness);
+  const state = kv.json("recover:acct_1");
+  assert.ok(state.window_expires_at, "the reservation stamps the absolute window");
+  assert.equal(kv.ttls.get("recover:acct_1"), 4 * 3600);
+
+  // Age the window to its final 10 minutes; a wrong attempt must derive a
+  // bounded remaining TTL, never reset the clock.
+  state.window_expires_at = new Date(Date.now() + 600 * 1000).toISOString();
+  kv.map.set("recover:acct_1", JSON.stringify(state));
+  assert.equal((await recover(env, "acct_1", { code: "000-000-000" })).status, 401);
+  const nearEnd = kv.ttls.get("recover:acct_1");
+  assert.ok(nearEnd <= 600 && nearEnd >= 60, `ttl ${nearEnd} must stay inside the window`);
+
+  // At the window's floor the KV minimum applies, still no extension beyond it.
+  const floored = kv.json("recover:acct_1");
+  floored.window_expires_at = new Date(Date.now() + 30 * 1000).toISOString();
+  kv.map.set("recover:acct_1", JSON.stringify(floored));
+  assert.equal((await recover(env, "acct_1", { code: "000-000-000" })).status, 401);
+  assert.equal(kv.ttls.get("recover:acct_1"), 60);
+  assert.equal(kv.json("recover:acct_1").attempts, 2, "attempts still count durably");
+
+  // The correct code still redeems inside the window and spends the state.
+  mockCell(t, { ":recover": () => cellJSON(rotatedAccount()) });
+  assert.equal((await recover(env, "acct_1", { code })).status, 200);
+  assert.equal(kv.json("recover:acct_1"), null);
+});
+
+test("a superseding admitted request re-stamps the window; an outage never rewrites it", async (t) => {
+  const harness = makeEnv();
+  const { env, kv, email } = harness;
+  await issueRecoveryCode(t, harness);
+  const first = kv.json("recover:acct_1");
+  // Age both the cooldown and the window, then admit a second send.
+  first.last_email_at = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  first.window_expires_at = new Date(Date.now() + 600 * 1000).toISOString();
+  kv.map.set("recover:acct_1", JSON.stringify(first));
+  assert.equal((await recover(env)).status, 200);
+  const second = kv.json("recover:acct_1");
+  assert.ok(
+    Date.parse(second.window_expires_at) > Date.now() + 3 * 3600 * 1000,
+    "an admitted send slides the window forward, matching the reservation's own TTL refresh",
+  );
+
+  // A provider outage burns the reserved slot without touching the window
+  // or code state again: the reservation is the only write of that request.
+  second.last_email_at = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  kv.map.set("recover:acct_1", JSON.stringify(second));
+  const sentBefore = kv.json("recover:acct_1").emails_sent;
+  email.failNextSends = 1;
+  assert.equal((await recover(env)).status, 200);
+  const afterOutage = kv.json("recover:acct_1");
+  assert.equal(afterOutage.emails_sent, sentBefore + 1, "the slot stays spent on a throw");
+  assert.equal(afterOutage.code_hash, second.code_hash, "the live code survives the failed supersede");
+});
+
+// ---- Missing EMAIL binding --------------------------------------------------
+
+test("an unconfigured email backend burns no quota and stays indistinguishable", async (t) => {
+  const { env, kv } = makeEnv({ EMAIL: undefined });
+  seedAcct(kv, "acct_real");
+  seedCell(kv);
+  mockCell(t, activeContactHandlers());
+  const real = await recover(env, "acct_real");
+  const phantom = await recover(env, "acct_ghost");
+  assert.equal(real.status, 200);
+  assert.equal(await real.text(), await phantom.text(), "real and phantom stay byte-identical");
+
+  for (const id of ["acct_real", "acct_ghost"]) {
+    const state = kv.json(`recover:${id}`);
+    assert.equal(state.emails_sent, 0, `${id}: no email attempted means no quota burned`);
+    assert.ok(state.last_email_at, `${id}: pacing survives so retry rhythm stays uniform`);
+    assert.equal(kv.json(`recover-ip:${id}:198.51.100.7`).emails_sent, 0, `${id}: per-ip refunded`);
+  }
+
+  // Concurrency/abuse bounds hold: a capped id stays capped even without a
+  // backend, and the refund path never runs for refused requests.
+  kv.map.set("recover:acct_capped", JSON.stringify({ emails_sent: 10 }));
+  const capped = await recover(env, "acct_capped");
+  assert.equal(capped.status, 429);
+  assert.equal(kv.json("recover:acct_capped").emails_sent, 10);
+});
+
+test("recovery after backend configuration has the intended quota", async (t) => {
+  const harness = makeEnv({ EMAIL: undefined });
+  const { env, kv } = harness;
+  seedAcct(kv);
+  seedCell(kv);
+  mockCell(t, activeContactHandlers());
+  assert.equal((await recover(env)).status, 200);
+  assert.equal(kv.json("recover:acct_1").emails_sent, 0);
+
+  // The backend comes online; after the cooldown the owner has full quota
+  // and the send goes out. (Absent binding refunds uniformly; a provider
+  // THROW deliberately burns uniformly instead — the shared policy is that
+  // quota treatment never depends on whether the account exists.)
+  const email = new EmailFake();
+  env.EMAIL = email;
+  const state = kv.json("recover:acct_1");
+  state.last_email_at = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  kv.map.set("recover:acct_1", JSON.stringify(state));
+  assert.equal((await recover(env)).status, 200);
+  assert.equal(email.sent.length, 1);
+  assert.equal(kv.json("recover:acct_1").emails_sent, 1);
+  assert.match(kv.json("recover:acct_1").code_hash, /^[0-9a-f]{64}$/);
 });
 
 test("undo failure pages never leak the token or either address", async (t) => {

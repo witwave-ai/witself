@@ -102,12 +102,13 @@ class EmailFake {
   constructor() {
     this.sent = [];
     this.failNextSends = 0;
+    this.failError = "injected email delivery failure";
   }
 
   async send(message) {
     if (this.failNextSends > 0) {
       this.failNextSends -= 1;
-      throw new Error("injected email delivery failure");
+      throw new Error(this.failError);
     }
     this.sent.push(message);
   }
@@ -654,6 +655,35 @@ test("a failed or unconfigured email send burns no quota", async (t) => {
     assert.equal(resp.status, 502, breakEmail);
     assert.equal(kv.json("pending:acct_1").emails_sent, 2, breakEmail);
   }
+});
+
+test("malicious provider errors never reach resend logs or responses", async (t) => {
+  const { env, kv, email } = makeEnv();
+  seedAcct(kv);
+  seedCell(kv);
+  seedPending(kv, "acct_1", { emails_sent: 2 });
+  email.failError =
+    `550 mailbox <victim-leak@example.test> rejected token=${"ab".repeat(32)}\n` +
+    `X-INJECTED-LOG-LINE MALICIOUS-MARKER\n{"recipient":"victim-leak@example.test"}`;
+  email.failNextSends = 1;
+  mockCell(t, {
+    "/v1/account": () => cellJSON({ account: { id: "acct_1", status: "pending", email: "o@x.test" } }),
+  });
+  const logs = [];
+  t.mock.method(console, "log", (line) => logs.push(String(line)));
+  const resp = await resend(env);
+  assert.equal(resp.status, 502);
+  const body = await resp.text();
+  for (const marker of ["victim-leak@example.test", "ab".repeat(32), "MALICIOUS-MARKER", "X-INJECTED"]) {
+    assert.ok(!body.includes(marker), `response leaked ${marker}`);
+    for (const line of logs) {
+      assert.ok(!line.includes(marker), `log leaked ${marker}: ${line}`);
+    }
+  }
+  for (const line of logs) {
+    assert.ok(!line.includes("\n"), "logs must stay single-line against newline injection");
+  }
+  assert.ok(logs.some((l) => l.includes("reason=email_send_error")));
 });
 
 test("concurrent resends at the cap cannot conjure extra email", async (t) => {
