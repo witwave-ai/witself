@@ -30,12 +30,20 @@
 //   verify:<sha256(token)> -> {"account_id","cell","created_at"}
 //                           email-verification token (hash only, KV TTL 7d)
 //   recover:<account_id> -> {"code_hash","code_expires_at","attempts",
-//                           "emails_sent","last_email_at"} (KV TTL 24h)
-//                           recovery code + rate-limit state, phantom ids too
+//                           "emails_sent","last_email_at","window_expires_at"}
+//                           recovery code + rate-limit state, phantom ids too.
+//                           The 4h quota window is absolute: every write after
+//                           the reservation derives its KV TTL from
+//                           window_expires_at, so attempts never extend it.
 //   emailchange:<account_id> -> {"code_hash","code_expires_at","new_email",
-//                           "attempts","emails_sent","last_email_at"} (KV TTL 24h)
-//                           pending email change + rate-limit state
-//   undoemail:<account_id> -> {"code_hash","old_email","new_email","expires_at"}
+//                           "old_email","undo_key","attempts","emails_sent",
+//                           "last_email_at"} (KV TTL 24h)
+//                           pending email change + rate-limit state; old_email
+//                           is the committed transition's authoritative source
+//                           across a post-commit crash, and undo_key fences
+//                           undo-authority minting to at most one live token
+//   undoemail:<sha256(token)> -> {"account_id","cell","old_email","new_email",
+//                           "expires_at"}
 //                           (KV TTL 48h) — undo window shipped in the notice
 //   archived:<account_id> -> {"cell","region","region_code","object",
 //                           "exported_at","size","format_version",
@@ -1870,19 +1878,24 @@ async function handleResend(request, env, accountId) {
       entry.cell,
       { resend: true, windowStartedAt: pending.created_at },
     );
-  } catch (e) {
-    console.log(`resend: verification email for ${accountId} failed: ${e}`);
+  } catch {
+    // Provider errors routinely embed recipient addresses and message
+    // content; only the bounded reason code is loggable.
+    console.log(`resend: verification email send failed for ${accountId} (reason=email_send_error)`);
   }
   if (!emailSent) {
     return err("could not send the verification email — try again shortly", 502);
   }
   // created_at is preserved deliberately: resending never resets the reap
-  // clock — the email says so.
+  // clock — the email says so. The counter reads from `pending` directly:
+  // the earlier `sent` binding lives inside the if(pending) block, and
+  // referencing it here threw after the email had already left, which both
+  // failed every successful resend and left the send cap un-advanced.
   await env.DIRECTORY.put(
     pendingKey,
     JSON.stringify({
       ...pending,
-      emails_sent: sent + 1,
+      emails_sent: (pending.emails_sent ?? 1) + 1,
       last_email_at: new Date().toISOString(),
     }),
   );
@@ -1895,8 +1908,8 @@ async function handleResend(request, env, accountId) {
   let resendCell = null;
   try {
     resendCell = await env.DIRECTORY.get(`cell:${entry.cell}`, { type: "json" });
-  } catch (e) {
-    console.log(`resend: audit cell lookup for ${accountId} failed: ${e}`);
+  } catch {
+    console.log(`resend: audit cell lookup failed for ${accountId} (reason=registry_read_error)`);
   }
   await logCellEvent(resendCell, accountId, "account.email.verify.sent",
     "control_plane", { to_masked: maskEmail(account.email) });
@@ -1917,6 +1930,22 @@ async function handleResend(request, env, accountId) {
 // to the request mode is identical whether the account exists or not, and
 // rate-limit state is kept per-id in KV — for phantom ids too, so refusals
 // leak nothing.
+// recoverStateTtlSeconds derives the KV TTL for a recover:<id> write from
+// the absolute quota window stamped at reservation time, so no later write
+// — a wrong-code attempt above all — can extend the record's lifetime past
+// the original 4-hour boundary. KV enforces a 60-second minimum TTL, so a
+// code issued in the window's final minute simply dies with the window
+// (fail-closed). State written before the window field existed falls back
+// to the full 4-hour bound.
+function recoverStateTtlSeconds(rl) {
+  const windowMs = Date.parse(rl.window_expires_at ?? "");
+  if (!Number.isFinite(windowMs)) {
+    return 4 * 3600;
+  }
+  const remaining = Math.ceil((windowMs - Date.now()) / 1000);
+  return Math.max(60, Math.min(4 * 3600, remaining));
+}
+
 async function handleRecover(request, env, accountId) {
   let body = {};
   try {
@@ -1988,14 +2017,25 @@ async function handleRecover(request, env, accountId) {
     // Reserve the slots BEFORE the expensive cell round-trip and email
     // send. This shrinks the KV read-modify-write race window from
     // ~15s (the full cell-fetch + send time) to the microseconds
-    // between get() and put(). Fail-closed on infra failures (see the
-    // send-failure branch below) restores the slots so the owner isn't
-    // punished for a mail outage. TTL is 4h so an owner who hits the
-    // cap during an incident recovers within a working day, and a
-    // burst attack's blast radius is bounded to hours not a full day.
+    // between get() and put(). The reserved slot is deliberately spent
+    // whether or not the send later succeeds: quota treatment must never
+    // depend on whether the account exists, and phantom ids cannot
+    // observe a provider failure, so refunding real accounts on a send
+    // error would turn a mail outage into an existence oracle (refunded
+    // real ids answer 200 forever while metered phantoms hit the cap).
+    // The absent-EMAIL branch below refunds UNIFORMLY instead, because a
+    // missing binding is global configuration both sides share. TTL is 4h
+    // so an owner who hits the cap during an incident recovers within a
+    // working day, and a burst attack's blast radius is bounded to hours
+    // not a full day.
     const now = new Date().toISOString();
     rl.emails_sent = (rl.emails_sent ?? 0) + 1;
     rl.last_email_at = now;
+    // Each ADMITTED send re-stamps the absolute window (sliding on sends,
+    // exactly the TTL refresh this put always performed); every later write
+    // in this window derives a bounded remaining TTL from it instead of
+    // resetting the clock.
+    rl.window_expires_at = new Date(Date.now() + 4 * 3600 * 1000).toISOString();
     rlPerIp.emails_sent = (rlPerIp.emails_sent ?? 0) + 1;
     rlPerIp.last_email_at = now;
     await Promise.all([
@@ -2028,7 +2068,6 @@ async function handleRecover(request, env, accountId) {
         contact = null;
       }
     }
-    let sent = false;
     if (contact?.email && contact.status === "active" && env.EMAIL) {
       // recovery.requested lands regardless of email outcome — someone
       // asked for a recovery, that's audit-worthy even if the email
@@ -2067,24 +2106,32 @@ async function handleRecover(request, env, accountId) {
         rl.code_hash = await sha256hex(code.replaceAll("-", ""));
         rl.code_expires_at = new Date(Date.now() + 15 * 60 * 1000).toISOString();
         rl.attempts = 0;
-        await env.DIRECTORY.put(rlKey, JSON.stringify(rl), { expirationTtl: 4 * 3600 });
-        sent = true;
+        await env.DIRECTORY.put(rlKey, JSON.stringify(rl), { expirationTtl: recoverStateTtlSeconds(rl) });
         await logCellEvent(cell, accountId, "account.email.recovery.sent",
           "control_plane", { to_masked: maskEmail(contact.email) });
-      } catch (e) {
-        console.log(`recover: email for ${accountId} failed: ${e}`);
-        // Fail-open on infrastructure failures: mail delivery blew up,
-        // that's not the owner's fault. Roll the slots back so a
-        // subsequent retry has room. Racy against concurrent
-        // increments but the direction stays consistent — the
-        // decrement compensates for the reservation we did above.
-        rl.emails_sent = Math.max(0, (rl.emails_sent ?? 1) - 1);
-        rlPerIp.emails_sent = Math.max(0, (rlPerIp.emails_sent ?? 1) - 1);
-        await Promise.all([
-          env.DIRECTORY.put(rlKey, JSON.stringify(rl), { expirationTtl: 4 * 3600 }),
-          env.DIRECTORY.put(rlPerIpKey, JSON.stringify(rlPerIp), { expirationTtl: 4 * 3600 }),
-        ]);
+      } catch {
+        console.log(`recover: recovery email send failed for ${accountId} (reason=email_send_error)`);
+        // Deliberately NO refund: a provider failure is only observable on
+        // real-account requests, so refunding here would meter phantoms
+        // while real ids ride free — a stable existence oracle during any
+        // mail outage. The spent slot expires with the 4h window.
       }
+    }
+    if (!env.EMAIL) {
+      // No send can happen for ANYONE while outbound mail is unconfigured:
+      // refund the reserved slots uniformly — real and phantom ids alike —
+      // so a configuration gap neither burns the owner's quota (no email
+      // was attempted or delivered) nor becomes an existence oracle
+      // through divergent cap behavior between refunded real accounts and
+      // still-metered phantoms. Pacing (last_email_at) survives so retry
+      // rhythm stays uniform, and the edge limiter still bounds request
+      // volume, so the missing backend opens no abuse bypass.
+      rl.emails_sent = Math.max(0, (rl.emails_sent ?? 1) - 1);
+      rlPerIp.emails_sent = Math.max(0, (rlPerIp.emails_sent ?? 1) - 1);
+      await Promise.all([
+        env.DIRECTORY.put(rlKey, JSON.stringify(rl), { expirationTtl: recoverStateTtlSeconds(rl) }),
+        env.DIRECTORY.put(rlPerIpKey, JSON.stringify(rlPerIp), { expirationTtl: 4 * 3600 }),
+      ]);
     }
     return generic();
   }
@@ -2097,8 +2144,11 @@ async function handleRecover(request, env, accountId) {
     return err("too many attempts — request a new code", 429);
   }
   // Count the attempt BEFORE comparing (fail closed on a crashed write).
+  // The TTL is derived from the absolute reservation window: a wrong-code
+  // attempt must never extend the recovery or lockout window beyond the
+  // boundary the request-mode reservation established.
   rl.attempts = (rl.attempts ?? 0) + 1;
-  await env.DIRECTORY.put(rlKey, JSON.stringify(rl), { expirationTtl: 24 * 3600 });
+  await env.DIRECTORY.put(rlKey, JSON.stringify(rl), { expirationTtl: recoverStateTtlSeconds(rl) });
   const presented = await sha256hex(String(body.code).replace(/[^0-9]/g, ""));
   if (presented !== rl.code_hash || Date.parse(rl.code_expires_at) < Date.now()) {
     return err("invalid or expired recovery code", 401);
@@ -2281,26 +2331,42 @@ async function handleChangeEmail(request, env, accountId) {
           `,
         }),
       });
-    } catch (e) {
-      console.log(`change-email: code to ${accountId}'s new address failed: ${e}`);
+    } catch {
+      console.log(`change-email: confirmation send failed for ${accountId} (phase=confirmation_send reason=email_send_error)`);
       return err("could not send the confirmation email — try again shortly", 502);
     }
     await logCellEvent(cell, accountId, "account.email.change.sent",
       "control_plane", { to_masked: maskEmail(newEmail) });
-    // Persist only after the code actually left; a send failure must not
-    // burn quota or corrupt an issued code.
-    state.code_hash = await sha256hex(code.replaceAll("-", ""));
-    state.code_expires_at = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-    state.new_email = newEmail;
-    state.attempts = 0;
+    // Persist the spent quota the moment the code leaves — a send that
+    // happened must meter — but hold the code fields back until the
+    // counter-move alarm is delivered. A crash or a failed alarm then
+    // leaves an unredeemable code (fail-closed), never a change that could
+    // commit without the current address ever having been warned.
     state.emails_sent = (state.emails_sent ?? 0) + 1;
     state.last_email_at = new Date().toISOString();
     await env.DIRECTORY.put(key, JSON.stringify(state), { expirationTtl: 24 * 3600 });
+    const armCode = async () => {
+      state.code_hash = await sha256hex(code.replaceAll("-", ""));
+      state.code_expires_at = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+      state.new_email = newEmail;
+      // Snapshot the address this operation moves AWAY from — the same one
+      // the counter-move alarm goes to. The cell's :update-email response
+      // and audit trail cannot return the original transition on a replay
+      // (the response carries only the new address; audit is masked), so
+      // this record is the authoritative source the redeem path uses to
+      // rebuild the undo channel after a post-commit crash. It lives in
+      // the same record, custody class, and 24h lifetime that already hold
+      // new_email in plaintext.
+      state.old_email = account.email;
+      state.attempts = 0;
+      await env.DIRECTORY.put(key, JSON.stringify(state), { expirationTtl: 24 * 3600 });
+    };
     // Alarm to the CURRENT address is REQUIRED — it is the only counter-move
     // channel for the stolen-token threat. A send failure must fail the
-    // request; nothing has committed yet, and the caller can retry once
-    // outbound mail recovers.
+    // request with the code left unarmed; the caller can retry for a fresh
+    // code once outbound mail recovers.
     if (account.email === newEmail) {
+      await armCode();
       return json({
         schema_version: "witself.v0",
         account_id: accountId,
@@ -2336,12 +2402,15 @@ async function handleChangeEmail(request, env, accountId) {
           `,
         }),
       });
-    } catch (e) {
-      console.log(`change-email: notice to ${accountId}'s old address failed: ${e}`);
+    } catch {
+      console.log(`change-email: alarm send failed for ${accountId} (phase=alarm_send reason=email_send_error)`);
+      // The code was never armed, so it cannot commit the change; the
+      // quota stays spent because the code send genuinely happened.
       return err("could not deliver the alarm to your current address — try again shortly", 502);
     }
     await logCellEvent(cell, accountId, "account.email.change.sent",
       "control_plane", { to_masked: maskEmail(account.email) });
+    await armCode();
     return json({
       schema_version: "witself.v0",
       account_id: accountId,
@@ -2367,46 +2436,108 @@ async function handleChangeEmail(request, env, accountId) {
   ) {
     return err("invalid or expired confirmation code", 401);
   }
+  // A correct code ends the guessing game the attempt cap exists for.
+  // Reset the budget durably so post-commit crash replays — which
+  // re-present the same correct code — can never exhaust it and strand a
+  // committed change without its undo channel.
+  if ((state.attempts ?? 0) !== 0) {
+    state.attempts = 0;
+    await env.DIRECTORY.put(key, JSON.stringify(state), { expirationTtl: 24 * 3600 });
+  }
 
-  const oldEmail = account.email;
-  let resp;
-  try {
-    resp = await fetch(`${cell.endpoint}/v1/accounts/${accountId}:update-email`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${cell.provision_token}`,
-      },
-      body: JSON.stringify({ operator_id: operatorID, new_email: newEmail }),
-      signal: AbortSignal.timeout(15000),
-    });
-  } catch {
-    return err(`cell ${entry.cell} unreachable — try again shortly`, 502);
-  }
-  let committed = null;
-  try {
-    committed = await resp.json();
-  } catch {
-    committed = null;
-  }
-  if (!resp.ok || committed?.email !== newEmail) {
-    if (resp.status === 403 && committed?.error) {
-      return err("only the account owner can change the email", 403);
+  // The committed transition's old address comes from this operation's own
+  // armed snapshot: the cell's :update-email response carries only the new
+  // address and its audit trail is masked, so after a post-commit crash the
+  // snapshot is the only authoritative source that can rebuild the undo
+  // channel toward the ORIGINAL old inbox. States armed before the snapshot
+  // existed fall back to the live read, preserving their old semantics.
+  const oldEmail = state.old_email ?? account.email;
+  // A replay after a committed-but-lost response sees the account already
+  // at the new address; the cell mutation is skipped and only the undo
+  // channel is (re)built. Anything else that moved the address is an
+  // independent change this stale operation must never clobber or revert.
+  const alreadyCommitted =
+    state.old_email !== undefined &&
+    state.old_email !== newEmail &&
+    account.email === newEmail;
+  if (!alreadyCommitted) {
+    if (state.old_email !== undefined && account.email !== state.old_email) {
+      return err("the account's email changed while this request was pending — request a new code", 409);
     }
-    return err("email change failed — try again shortly", resp.status === 409 ? 409 : 502);
+    let resp;
+    try {
+      resp = await fetch(`${cell.endpoint}/v1/accounts/${accountId}:update-email`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${cell.provision_token}`,
+        },
+        body: JSON.stringify({ operator_id: operatorID, new_email: newEmail }),
+        signal: AbortSignal.timeout(15000),
+      });
+    } catch {
+      return err(`cell ${entry.cell} unreachable — try again shortly`, 502);
+    }
+    let committed = null;
+    try {
+      committed = await resp.json();
+    } catch {
+      committed = null;
+    }
+    if (!resp.ok || committed?.email !== newEmail) {
+      if (resp.status === 403 && committed?.error) {
+        return err("only the account owner can change the email", 403);
+      }
+      return err("email change failed — try again shortly", resp.status === 409 ? 409 : 502);
+    }
   }
   // The anchor moved: any live recovery code was mailed to the OLD address,
   // which may now be compromised. Kill it. Rate-limit counters do NOT need
   // to survive an anchor move.
   await env.DIRECTORY.delete(`recover:${accountId}`);
+  if (oldEmail === newEmail) {
+    // A same-address operation (or the replay of a legacy pre-snapshot
+    // state) has no transition to revert: never mint a degenerate undo
+    // record whose old and new addresses are equal.
+    await env.DIRECTORY.delete(key); // the code is spent
+    return json({
+      schema_version: "witself.v0",
+      account_id: accountId,
+      email: newEmail,
+    });
+  }
   // Undo window: a link in the OLD inbox re-points the email for 48h,
   // matched by hash — the raw token is only ever known to the recipient.
+  // The state's undo_key fences minting: a crashed earlier attempt's
+  // authority is garbage-collected before a fresh token is issued, and the
+  // fence is durable before the record it names exists. The state is
+  // re-read first so a concurrent duplicate redeem that already finished
+  // (terminal delete) or a superseding request that replaced the operation
+  // stops minting here instead of resurrecting spent state. KV has no
+  // compare-and-swap, so this narrows rather than eliminates the duplicate
+  // window (the same accepted pattern as the invite counter); tokens are
+  // only ever delivered to the rightful old inbox and the cell's
+  // expected_current guard bounds any residue.
+  const fresh = await env.DIRECTORY.get(key, { type: "json" });
+  if (!fresh || fresh.code_hash !== state.code_hash) {
+    return json({
+      schema_version: "witself.v0",
+      account_id: accountId,
+      email: newEmail,
+    });
+  }
+  if (fresh.undo_key) {
+    await env.DIRECTORY.delete(`undoemail:${fresh.undo_key}`);
+  }
   const undoRaw = new Uint8Array(32);
   crypto.getRandomValues(undoRaw);
   const undoTok = [...undoRaw].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const undoKey = await sha256hex(undoTok);
   const undoTtl = 48 * 3600;
+  fresh.undo_key = undoKey;
+  await env.DIRECTORY.put(key, JSON.stringify(fresh), { expirationTtl: 24 * 3600 });
   await env.DIRECTORY.put(
-    `undoemail:${await sha256hex(undoTok)}`,
+    `undoemail:${undoKey}`,
     JSON.stringify({
       account_id: accountId,
       cell: entry.cell,
@@ -2447,8 +2578,8 @@ async function handleChangeEmail(request, env, accountId) {
     });
     await logCellEvent(cell, accountId, "account.email.undo.sent",
       "control_plane", { to_masked: maskEmail(oldEmail) });
-  } catch (e) {
-    console.log(`change-email: undo link to ${accountId}'s old address failed: ${e}`);
+  } catch {
+    console.log(`change-email: undo notice send failed for ${accountId} (phase=undo_notice_send reason=email_send_error)`);
   }
   await env.DIRECTORY.delete(key); // the code is spent
   return json({
@@ -2501,6 +2632,12 @@ async function handleUndoEmail(env, token) {
   }
   await env.DIRECTORY.delete(key);
   await env.DIRECTORY.delete(`recover:${undo.account_id}`);
+  // Burn any still-armed change operation too: after a post-commit crash
+  // the confirmation code stays live, and without this delete a stolen
+  // code could pass the redeem path's old-address guard again (the revert
+  // restored exactly that address) and silently re-commit the change the
+  // owner just reverted.
+  await env.DIRECTORY.delete(`emailchange:${undo.account_id}`);
   return htmlPage(200, "Email change reverted", `The account's email is back to <code>${undo.old_email}</code>. Run <code>witself account recover</code> from your terminal now to rotate the owner credentials.`);
 }
 
