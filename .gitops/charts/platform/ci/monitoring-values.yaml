@@ -1,0 +1,22 @@
+cell:
+  name: monitoring-ci
+  cloud: civo
+  region: test
+platform:
+  certManager:
+    enabled: false
+  externalDNS:
+    enabled: false
+  externalSecrets:
+    enabled: false
+  keda:
+    enabled: false
+  metricsServer:
+    enabled: false
+  monitoring:
+    enabled: true
+    alerting:
+      enabled: true
+    receiver:
+      secretName: witself-alert-receiver-v1
+      secretKey: url
