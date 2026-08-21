@@ -73,6 +73,8 @@ func run(args []string) int {
 		return eventsCmd(args[1:])
 	case "placement":
 		return placementCmd(args[1:])
+	case "backup-evidence":
+		return backupEvidenceCmd(args[1:])
 	case "dashboard", "tui":
 		return dashboardCmd(args[1:])
 	default:
@@ -100,6 +102,8 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself-admin events ...    Fleet-wide audit-event tail (list|watch)")
 	usageLine(w, "  witself-admin placement ... Rescue archived accounts blocked by hard pins")
 	usageLine(w, "                                (rescue)")
+	usageLine(w, "  witself-admin backup-evidence ... Verify retained Civo pre-migration backup")
+	usageLine(w, "                                artifacts offline; count-only output (verify)")
 	usageLine(w, "  witself-admin dashboard     Fullscreen operator dashboard (cells · support ·")
 	usageLine(w, "                                events; self-upgrades and resumes its view)")
 	usageLine(w, "  witself-admin version       Print version information")
