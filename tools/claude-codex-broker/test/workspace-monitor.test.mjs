@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
 
@@ -36,6 +37,20 @@ async function monitorFixture(t, options = {}) {
   return { root, scratchRoot, jobRoot, workspaceRoot, monitor };
 }
 
+async function assertMonitorKeepsProcessAlive(t, mode = "normal") {
+  const root = await makeTemp("claude-codex-monitor-liveness-");
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const scratchRoot = path.join(root, "scratch");
+  const jobRoot = path.join(scratchRoot, "implementation-22222222-2222-4222-8222-222222222222");
+  const workspaceRoot = path.join(jobRoot, "workspace");
+  await fs.mkdir(workspaceRoot, { recursive: true, mode: 0o700 });
+  await Promise.all([scratchRoot, jobRoot, workspaceRoot].map((directory) => fs.chmod(directory, 0o700)));
+
+  const fixture = fileURLToPath(new URL("./fixtures/workspace-monitor-liveness.mjs", import.meta.url));
+  const { stdout } = await execFileAsync(process.execPath, [fixture, scratchRoot, workspaceRoot, mode], { timeout: 5_000 });
+  assert.equal(stdout, "quota failure observed\n");
+}
+
 test("periodic monitor counts bounded roots without following outside symlink targets", async (t) => {
   const { root, jobRoot, monitor } = await monitorFixture(t);
   const outside = path.join(root, "outside-large.bin");
@@ -56,6 +71,14 @@ test("periodic monitor fails when an ignored file grows past the logical quota",
   await fs.writeFile(path.join(jobRoot, "ignored-cache.bin"), Buffer.alloc(32 * 1024, 0x62));
   await assert.rejects(monitor.failure, (error) => error?.code === "implementation_workspace_quota_exceeded");
   assert.equal(monitor.error()?.code, "implementation_workspace_quota_exceeded");
+});
+
+test("active periodic monitor keeps its process alive until a violation is observed", async (t) => {
+  await assertMonitorKeepsProcessAlive(t);
+});
+
+test("active periodic monitor remains live after a monitored root is removed", async (t) => {
+  await assertMonitorKeepsProcessAlive(t, "after-remove");
 });
 
 test("periodic monitor fails closed for special files", async (t) => {

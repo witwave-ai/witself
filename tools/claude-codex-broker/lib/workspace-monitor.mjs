@@ -228,7 +228,6 @@ export function startIsolatedWorkspaceMonitor({ handle, runtime, maxLogicalBytes
     finally { current = null; }
     if (!stopped && !failureError) {
       timer = setTimeout(() => { void tick(); }, limits.intervalMs);
-      timer.unref?.();
     }
   };
 
@@ -257,7 +256,6 @@ export function startIsolatedWorkspaceMonitor({ handle, runtime, maxLogicalBytes
     if (index >= 0) roots.splice(index, 1);
     if (!stopped && !failureError) {
       timer = setTimeout(() => { void tick(); }, limits.intervalMs);
-      timer.unref?.();
     }
   };
 
