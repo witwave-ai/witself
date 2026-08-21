@@ -846,6 +846,51 @@ freeze, a separately reviewed restore plan, and a new destination. After the
 rollout and its rollback window, retain or expire the encrypted bundle under
 the reviewed backup-retention policy; never commit it to Git.
 
+#### Scripted verification of retained pre-migration evidence
+
+`witself-admin backup-evidence verify` is the scripted, fail-closed form of
+the manifest gate above. It re-validates retained artifact directories
+offline — no network, cluster, database, or control-plane access, and it
+never decrypts an artifact:
+
+```sh
+witself-admin backup-evidence verify \
+  --release "${RELEASE_VERSION:?without the v prefix}" \
+  "$BACKUP_ROOT"/<use1-backup-id> \
+  "$BACKUP_ROOT"/<usw2-dev-backup-id>
+```
+
+The command exits 0 only when every gate property holds for both reviewed
+cells: the exact `witself.civo-pre-migration-backup.v1` schema with no
+unknown fields, duplicate keys, or trailing data; a `verified` restore
+drill whose restored schema version equals the source schema version, with
+zero invalid indexes, zero unvalidated constraints, a matching pgvector
+state, and a cleaned disposable target; the intended `target_release`; a
+ciphertext whose size and SHA-256 match both the manifest and the sidecar
+checksum file; internally consistent, non-future timestamps; and owner-only
+permissions on the artifact directory and all three files. A `pending`
+manifest, a tampered or truncated artifact, a renamed directory, an extra
+file in the artifact directory, duplicate evidence for one cell, or a
+missing cell all fail closed with a nonzero exit.
+
+Output is deliberately count-only — no path, backup id, cell name,
+checksum, or manifest value appears — so it is safe to keep with rollout
+evidence, and failure output uses only bounded classifications. Work is
+bounded by the producer's own contract: directories are streamed against
+the exact three-file layout, and an artifact or manifest claiming
+4&nbsp;GiB or more of ciphertext is rejected as contradictory evidence,
+because every verified manifest attests a restore of the complete
+disposable cluster into the backup script's fixed 4&nbsp;GiB tmpfs. `--evidence-out FILE` additionally writes the same count-only
+JSON summary create-only with mode 0600 and never overwrites an existing
+file; record it alongside the manifest's `backup_id` and
+`ciphertext_sha256` in the private rollout record. `--cell CELL` (repeatable)
+narrows the required-cell set for partial checks, and `--max-age DURATION`
+optionally rejects evidence older than an operator-chosen bound; the gate
+itself expresses currency through the exact target release, so no default
+age limit is imposed. The command verifies retained evidence; it does not
+replace running the backup script, and a passing summary is not a
+substitute for the encrypted artifacts themselves.
+
 ### GCP Cloud SQL pre-migration backup
 
 Before a managed GCP rollout can start a binary that may advance the database
