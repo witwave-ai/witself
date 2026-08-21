@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "codex-local": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "${CLAUDE_PROJECT_DIR:-.}/tools/claude-codex-broker/server.mjs",
+        "--repository",
+        "${CLAUDE_PROJECT_DIR:-.}",
+        "--ceiling",
+        "repository"
+      ],
+      "env": {}
+    }
+  }
+}

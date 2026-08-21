@@ -976,6 +976,7 @@ edge services, Helm chart, GitOps tree, release workflows, and Pulumi-based
 - [Terraform Infrastructure](docs/terraform-infrastructure.md)
 - [Cloud Targets](docs/cloud-targets.md)
 - [Memory Cloud Conformance](docs/memory-cloud-conformance.md)
+- [Claude-to-Codex Delegation](docs/claude-codex-delegation.md)
 - [Backup And Recovery](docs/backup-and-recovery.md)
 - [Billing And Limits](docs/billing-and-limits.md)
 - [Billing Transition Dark-Rollout Guard](docs/billing-transition-rollout.md)

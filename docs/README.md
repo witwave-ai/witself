@@ -156,6 +156,10 @@ deployment cells under a thin global control plane.
 - [memory-runtime-acceptance.md](memory-runtime-acceptance.md): the executable
   six-session acceptance protocol for Codex, Claude Code, Cursor, and Grok
   Build, including delivery-mode and sanitized-evidence boundaries.
+- [claude-codex-delegation.md](claude-codex-delegation.md): the constrained
+  local MCP broker and launcher that let Claude delegate GPT-5.6 Sol Ultra
+  reviews, disposable-clone implementation, or explicitly authorized
+  same-user system work under a fixed startup ceiling.
 - [memory-load-quality.md](memory-load-quality.md): the deterministic
   PostgreSQL load/quality harness, current exploratory baseline, evidence
   schema, and remaining production workload/SLO work.
