@@ -67,6 +67,11 @@ apps:
         labels: {}
         relabelings: []
         metricRelabelings: []
+    networkPolicy:
+      # Keep metrics open to in-cluster scrapers until the monitoring stack is
+      # enabled in a separate rollout. The activation overlay must narrow this
+      # to the monitoring namespace.
+      metricsFrom: []
     # Keep permanent deletion disabled through the schema-27 compatibility
     # rollout and the schema-28 activation rollout. Enable it only after every
     # writer has converged on schema-28-compatible code.
@@ -144,6 +149,8 @@ apps:
           labels: {}
           relabelings: []
           metricRelabelings: []
+      networkPolicy:
+        metricsFrom: []
       resources:
         requests:
           cpu: 100m

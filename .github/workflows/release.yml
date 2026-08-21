@@ -134,6 +134,8 @@ jobs:
 
       - name: helm lint
         run: |
+          helm lint .gitops/charts/platform
+          helm lint .gitops/charts/platform --values .gitops/charts/platform/ci/monitoring-values.yaml
           helm lint .gitops/charts/apps
           helm lint charts/witself-server
           helm lint charts/witself-server --values charts/witself-server/ci/cloud-values.yaml
@@ -141,6 +143,11 @@ jobs:
 
       - name: rollout rendering checks
         run: bash scripts/test-helm-rollout.sh
+
+      - name: monitoring rollout capability checks
+        run: |
+          bash scripts/test-monitoring-rollout.sh
+          bash scripts/test-monitoring-alert-canary.sh
 
       - name: billing transition rollout preflight checks
         run: bash scripts/test-billing-transition-rollout-preflight.sh

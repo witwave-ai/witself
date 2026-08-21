@@ -170,6 +170,9 @@
 {{- $_ := set $serverAgentEmail "receiveProduction" $serverEmailProduction -}}
 {{- end -}}
 {{- $workerValues := deepCopy .Values.apps.witselfServer.worker -}}
+{{- if eq (len .Values.apps.witselfServer.worker.networkPolicy.metricsFrom) 0 -}}
+{{- $_ := unset $workerValues "networkPolicy" -}}
+{{- end -}}
 {{- if not (semverCompare ">=0.0.224-0" .Values.apps.witselfServer.chartVersion) -}}
 {{- $_ := unset $workerValues "messageRateBucketCleanup" -}}
 {{- end -}}
@@ -198,6 +201,9 @@
 {{- $_ := set $serverValues "terminationGracePeriodSeconds" .Values.apps.witselfServer.terminationGracePeriodSeconds -}}
 {{- $_ := set $serverValues "podDisruptionBudget" .Values.apps.witselfServer.podDisruptionBudget -}}
 {{- $_ := set $serverValues "topologySpreadConstraints" .Values.apps.witselfServer.topologySpreadConstraints -}}
+{{- if gt (len .Values.apps.witselfServer.networkPolicy.metricsFrom) 0 -}}
+{{- $_ := set $serverValues "networkPolicy" (dict "enabled" true "metricsFrom" .Values.apps.witselfServer.networkPolicy.metricsFrom) -}}
+{{- end -}}
 {{- if and .Values.apps.witselfServer.awsAlbIngress.enabled (eq .Values.cell.cloud "aws") -}}
 {{- $_ := set $serverValues "ingress" .Values.apps.witselfServer.awsAlbIngress -}}
 {{- end -}}

@@ -2648,3 +2648,79 @@ the archive, issue ad hoc SQL deletes, remove `acct:` or `archived:` keys, or
 delete the R2 object while lifecycle state is ambiguous. Escalate with the
 captured ids and logs if exact acknowledgements disagree; direct database work
 requires a separately reviewed recovery plan and backups.
+
+## Founder open-plane monitoring
+
+The monitoring capability is default-off. Roll it out in three ordered GitOps
+changes. Cross-parent sync waves do not order the platform and apps children,
+so never combine stack installation, application discovery, and alert routing
+in one parent commit.
+
+1. Verify the target node's allocatable CPU, memory, and storage class can hold
+   the bounded requests plus rolling workload surge. Verify the selected
+   storage class and retain the exact chart-package digest plus the six pinned
+   multi-architecture image-index digests. The Argo Application annotation
+   records the reviewed chart SHA-256 but does not enforce package bytes:
+   immediately before sync, fetch the exact declared repository/name/version
+   and independently match the reviewed package hash. Independently resolve
+   each declared image tag and require it to match the committed digest before
+   activation; retain those checks without image registry credentials or
+   private configuration.
+2. In the first GitOps change, enable only `platform.monitoring`; keep
+   `platform.monitoring.alerting.enabled`, both Witself ServiceMonitors, and
+   both metrics NetworkPolicy peers disabled. Wait for the child Argo
+   Application, CRDs, Prometheus, null-routed Alertmanager, PVCs, kubelet
+   target, and kube-state-metrics target to become Healthy. Confirm no Witself
+   alert rule or external receiver route exists, Prometheus and Alertmanager
+   remain ClusterIP-only, Alertmanager ingress is limited to Prometheus and its
+   config reloader, AlertmanagerConfig discovery is release- and
+   monitoring-namespace-scoped, and Grafana and node exporter are absent.
+3. In the second GitOps change, enable both Witself ServiceMonitors with label
+   `release: witself-monitoring`. Set each server and worker `metricsFrom` peer
+   to the conjunction of namespace label
+   `kubernetes.io/metadata.name: monitoring` and pod label
+   `app.kubernetes.io/name: prometheus`. Wait for server, worker, kubelet, and
+   kube-state-metrics targets and every required schema-91 gauge to remain up
+   across multiple scrape intervals. Do not enable alerting while a target is
+   absent or stale; absence rules deliberately fail closed.
+4. Pre-create an immutable Secret whose one selected key contains the reviewed
+   HTTPS receiver URL. Do not print, commit, or pass the URL in argv. In the
+   third GitOps change, set the immutable Secret name/key and enable
+   `platform.monitoring.alerting.enabled`. Wait for the exact null-root plus
+   `witself_alert=true` child route and the twelve bounded rules to converge.
+   Confirm zero
+   `prometheus_rule_evaluation_failures_total`, the schema-91 logical storage
+   gauges are present, and PostgreSQL PVC capacity/available metrics match the
+   live claim. Treat missing PVC metrics as a blocker, not zero utilization.
+5. Run the synthetic canary only with explicit mutation authorization:
+
+   ```sh
+   scripts/run-monitoring-alert-canary.sh \
+     --context witself-civo-sandbox-usw2-dev \
+     --cell civo-sandbox-usw2-dev \
+     --out /private/monitoring-acceptance.json \
+     --apply
+   ```
+
+   The command creates one fixed value-free rule, observes it firing in the
+   private Alertmanager, holds it past the external route's 30-second group
+   wait, atomically changes the owned rule to false, holds the resolved state
+   past the five-minute group interval, deletes only the exact UID, and
+   atomically publishes a mode-0600 sanitized value-free artifact. A create response loss
+   leaves the fixed rule for explicit operator reconciliation; do not rerun or
+   delete it by name. The command does not inspect or claim external delivery.
+   Retain separate access-controlled receiver evidence for the firing and
+   resolved notifications before closing any production gate.
+6. Observe normal rules and storage growth for the declared acceptance window.
+   Update the canonical feature-status catalog only in a later evidence PR.
+
+Rollback alert routing first by setting `platform.monitoring.alerting.enabled`
+false, then roll back the ServiceMonitor/NetworkPolicy change. After the child
+Application has synchronized once, do **not** use
+`platform.monitoring.enabled=false` as rollback: the Argo finalizer owns the
+stack and flag removal can cascade resource deletion. Keep the Application
+enabled and forward-fix it. Stack/PVC teardown is a separate destructive
+procedure after retained evidence has been exported and the incident owner has
+approved deletion. A one-node cluster loss can also remove this alerting plane,
+so production acceptance requires an external dead-man or outside-in
+availability check in addition to the in-cluster receiver path.

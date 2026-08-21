@@ -1,0 +1,124 @@
+groups:
+  - name: witself-founder-open-plane
+    interval: 30s
+    rules:
+      - alert: WitselfServerMetricsUnavailable
+        expr: absent(witself_up) or max(witself_up) < 1
+        for: 3m
+        labels:
+          severity: critical
+          service: witself-server
+          witself_alert: "true"
+        annotations:
+          summary: Witself server metrics are unavailable.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - alert: WitselfWorkerMetricsUnavailable
+        expr: absent(witself_worker_up) or max(witself_worker_up) < 1
+        for: 3m
+        labels:
+          severity: critical
+          service: witself-worker
+          witself_alert: "true"
+        annotations:
+          summary: Witself worker metrics are unavailable.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - alert: WitselfServerHighErrorRatio
+        expr: (sum(rate(witself_http_requests_total{status_class="5xx"}[5m])) / clamp_min(sum(rate(witself_http_requests_total[5m])), 0.001)) > 0.05 and sum(rate(witself_http_requests_total[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          service: witself-server
+          witself_alert: "true"
+        annotations:
+          summary: Witself server responses exceed the bounded 5xx ratio.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - alert: WitselfWorkerJobStopped
+        expr: max by (job) (witself_worker_job_running) < 1
+        for: 5m
+        labels:
+          severity: critical
+          service: witself-worker
+          witself_alert: "true"
+        annotations:
+          summary: A closed-set Witself worker job is not running.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - alert: WitselfWorkerJobFailures
+        expr: sum by (job) (increase(witself_worker_job_failures_total[10m])) > 0
+        for: 2m
+        labels:
+          severity: warning
+          service: witself-worker
+          witself_alert: "true"
+        annotations:
+          summary: A closed-set Witself worker job reports recoverable failures.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - alert: WitselfAgentEmailOutboundStale
+        expr: (time() - max(witself_worker_agent_email_outbound_last_success_timestamp_seconds) > 600) or (sum(absent(witself_worker_agent_email_outbound_last_success_timestamp_seconds)) > 0)
+        for: 5m
+        labels:
+          severity: critical
+          service: agent-email-outbound
+          witself_alert: "true"
+        annotations:
+          summary: Agent-email outbound processing has no recent successful batch.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - alert: WitselfAgentEmailRetentionStale
+        expr: (time() - max(witself_worker_agent_email_retention_last_success_timestamp_seconds{mode="enforce"}) > 600) or (sum(absent(witself_worker_agent_email_retention_last_success_timestamp_seconds{mode="enforce"})) > 0)
+        for: 5m
+        labels:
+          severity: warning
+          service: agent-email-retention
+          witself_alert: "true"
+        annotations:
+          summary: Agent-email retention has no recent successful enforce batch.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - alert: WitselfAgentEmailStorageLedgerUnavailable
+        expr: absent(witself_agent_email_cell_storage_metrics_up) or max(witself_agent_email_cell_storage_metrics_up) < 1 or absent(witself_agent_email_cell_storage_retained_bytes) or absent(witself_agent_email_cell_storage_admission_bytes) or absent(witself_agent_email_cell_storage_hard_bytes) or absent(witself_agent_email_cell_storage_root_rows) or absent(witself_agent_email_cell_storage_admission_root_rows) or absent(witself_agent_email_cell_storage_counted_rows) or absent(witself_agent_email_cell_storage_hard_counted_rows)
+        for: 3m
+        labels:
+          severity: critical
+          service: agent-email-storage
+          witself_alert: "true"
+        annotations:
+          summary: The schema-91 agent-email storage ledger cannot be read.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - alert: WitselfAgentEmailStorageApproachingAdmission
+        expr: (max(witself_agent_email_cell_storage_retained_bytes) / clamp_min(max(witself_agent_email_cell_storage_admission_bytes), 1) >= 0.8) or (max(witself_agent_email_cell_storage_retained_bytes) / clamp_min(max(witself_agent_email_cell_storage_hard_bytes), 1) >= 0.8) or (max(witself_agent_email_cell_storage_root_rows) / clamp_min(max(witself_agent_email_cell_storage_admission_root_rows), 1) >= 0.8) or (max(witself_agent_email_cell_storage_counted_rows) / clamp_min(max(witself_agent_email_cell_storage_hard_counted_rows), 1) >= 0.8)
+        for: 15m
+        labels:
+          severity: warning
+          service: agent-email-storage
+          witself_alert: "true"
+        annotations:
+          summary: Agent-email logical storage is at or above 80 percent of a protective boundary.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - alert: WitselfPostgresPVCMetricsUnavailable
+        expr: sum(absent(kubelet_volume_stats_capacity_bytes{namespace="witself",persistentvolumeclaim=~".*postgresql.*"})) or sum(absent(kubelet_volume_stats_available_bytes{namespace="witself",persistentvolumeclaim=~".*postgresql.*"})) or count(kubelet_volume_stats_capacity_bytes{namespace="witself",persistentvolumeclaim=~".*postgresql.*"} unless on (namespace, persistentvolumeclaim) kubelet_volume_stats_available_bytes{namespace="witself",persistentvolumeclaim=~".*postgresql.*"}) > 0 or count(kubelet_volume_stats_available_bytes{namespace="witself",persistentvolumeclaim=~".*postgresql.*"} unless on (namespace, persistentvolumeclaim) kubelet_volume_stats_capacity_bytes{namespace="witself",persistentvolumeclaim=~".*postgresql.*"}) > 0
+        for: 10m
+        labels:
+          severity: critical
+          service: postgres-storage
+          witself_alert: "true"
+        annotations:
+          summary: PostgreSQL PVC capacity metrics are unavailable.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - alert: WitselfPostgresPVCApproachingCapacity
+        expr: max((1 - (kubelet_volume_stats_available_bytes{namespace="witself",persistentvolumeclaim=~".*postgresql.*"} / clamp_min(kubelet_volume_stats_capacity_bytes{namespace="witself",persistentvolumeclaim=~".*postgresql.*"}, 1))) and on (namespace, persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes{namespace="witself",persistentvolumeclaim=~".*postgresql.*"} > 0)) >= 0.8
+        for: 15m
+        labels:
+          severity: critical
+          service: postgres-storage
+          witself_alert: "true"
+        annotations:
+          summary: PostgreSQL PVC usage is at or above 80 percent.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - alert: WitselfPrometheusRuleEvaluationFailures
+        expr: sum(increase(prometheus_rule_evaluation_failures_total[10m])) > 0
+        for: 2m
+        labels:
+          severity: critical
+          service: monitoring
+          witself_alert: "true"
+        annotations:
+          summary: Prometheus reports rule-evaluation failures.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
