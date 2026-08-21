@@ -41,7 +41,23 @@ const (
 	maxSidecarBytes  = 4 * 1024
 	maxJSONDepth     = 8
 	maxCountValue    = int64(1_000_000_000_000)
-	maxArtifactBytes = int64(1) << 50
+	// maxDirEntries is the exact artifact-triple size the producer leaves
+	// behind; the directory stream is read as one bounded batch of at most
+	// maxDirEntries+1 entries, so a flooded directory is rejected without
+	// ever loading or sorting its contents.
+	maxDirEntries = 3
+	// maxArtifactBytes bounds ciphertext hashing with the producer's own
+	// contract rather than an invented policy: every VERIFIED manifest
+	// attests a restore of the complete disposable PostgreSQL cluster into
+	// the backup script's fixed 4 GiB tmpfs
+	// (scripts/civo-pre-migration-backup.sh, RESTORE_TMPFS size=4g), so a
+	// genuine verified artifact's compressed dump is necessarily below
+	// 4 GiB — and the source database volume itself is provisioned at 8Gi
+	// (.gitops/charts/apps/values.yaml, apps.civoPostgres.storage). An
+	// artifact or manifest claiming more is contradictory evidence, never
+	// data worth hashing. Only verified-status manifests reach hashing at
+	// all; pending or malformed evidence fails before any artifact IO.
+	maxArtifactBytes = int64(4) << 30
 	// The producer accepts any positive goose version id, including a
 	// possible future timestamped id such as 20260820120000, so this is a
 	// pure overflow sanity bound, not a policy fence.
@@ -269,9 +285,26 @@ func verifyOne(dir, release string, maxAge time.Duration, now time.Time) (string
 	sidecarName := base + ".sha256"
 	artifactName := base + ".dump.age"
 
-	entries, err := os.ReadDir(dir)
+	// Stream one bounded batch off the opened directory handle — never the
+	// whole listing — so a flooded directory is rejected after at most
+	// maxDirEntries+1 entries without loading or sorting the flood. The
+	// handle is pinned to the inspected inode before it is read.
+	dirHandle, err := os.Open(dir)
 	if err != nil {
 		return "", "", []Finding{{Reason: ReasonInputPathInvalid, Detail: "artifact directory unreadable"}}
+	}
+	defer func() { _ = dirHandle.Close() }()
+	dirHandleInfo, err := dirHandle.Stat()
+	if err != nil || !os.SameFile(dirInfo, dirHandleInfo) || !dirHandleInfo.IsDir() ||
+		dirHandleInfo.Mode().Perm()&0o077 != 0 {
+		return "", "", []Finding{{Reason: ReasonInputPathInvalid, Detail: "artifact directory changed during inspection"}}
+	}
+	entries, err := dirHandle.ReadDir(maxDirEntries + 1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", "", []Finding{{Reason: ReasonInputPathInvalid, Detail: "artifact directory unreadable"}}
+	}
+	if len(entries) > maxDirEntries {
+		return "", "", []Finding{{Reason: ReasonDirLayoutInvalid, Detail: "unexpected directory entry"}}
 	}
 	expected := map[string]bool{manifestName: false, sidecarName: false, artifactName: false}
 	for _, entry := range entries {
@@ -357,21 +390,62 @@ type manifestRestore struct {
 	DisposableTargetCleaned        *bool        `json:"disposable_target_cleaned"`
 }
 
-func readManifest(path string) (*manifestDoc, []Finding) {
-	info, err := os.Lstat(path)
+// Bounded, value-free classifications for handle-verified opens. They carry
+// no path or filesystem detail; callers map them onto per-file reasons.
+var (
+	errEvidenceFileUnreadable = errors.New("evidence file unreadable")
+	errEvidenceFileIrregular  = errors.New("evidence file irregular")
+	errEvidenceFileInsecure   = errors.New("evidence file mode insecure")
+	errEvidenceFileRaced      = errors.New("evidence file changed during inspection")
+)
+
+// openVerified opens one evidence file under the repository's race-safe
+// read discipline (the internal/local recovery-artifact shape): the path is
+// inspected before opening, the opened handle is inspected again, and the
+// path is re-inspected afterward; all three must agree on the same regular,
+// owner-only inode. Validation and every later read then observe the same
+// object, so a concurrent replacement or symlink swap between discovery and
+// reading fails closed instead of splitting the checked file from the
+// hashed one. The caller owns closing the returned handle.
+func openVerified(path string) (*os.File, os.FileInfo, error) {
+	before, err := os.Lstat(path)
 	if err != nil {
-		return nil, []Finding{{Reason: ReasonManifestUnreadable, Detail: "manifest missing"}}
+		return nil, nil, errEvidenceFileUnreadable
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return nil, []Finding{{Reason: ReasonManifestUnreadable, Detail: "manifest not a regular file"}}
+	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
+		return nil, nil, errEvidenceFileIrregular
 	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return nil, []Finding{{Reason: ReasonPermissionsInsecure, Detail: "manifest mode"}}
+	if before.Mode().Perm()&0o077 != 0 {
+		return nil, nil, errEvidenceFileInsecure
 	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, nil, errEvidenceFileUnreadable
+	}
+	handle, statErr := file.Stat()
+	current, currentErr := os.Lstat(path)
+	if statErr != nil || currentErr != nil ||
+		!os.SameFile(before, handle) || !os.SameFile(handle, current) ||
+		!handle.Mode().IsRegular() || handle.Mode().Perm()&0o077 != 0 {
+		_ = file.Close()
+		return nil, nil, errEvidenceFileRaced
+	}
+	return file, handle, nil
+}
+
+func readManifest(path string) (*manifestDoc, []Finding) {
+	file, info, err := openVerified(path)
+	if err != nil {
+		if errors.Is(err, errEvidenceFileInsecure) {
+			return nil, []Finding{{Reason: ReasonPermissionsInsecure, Detail: "manifest mode"}}
+		}
+		return nil, []Finding{{Reason: ReasonManifestUnreadable, Detail: "manifest file"}}
+	}
+	defer func() { _ = file.Close() }()
 	if info.Size() <= 0 || info.Size() > maxManifestBytes {
 		return nil, []Finding{{Reason: ReasonManifestUnreadable, Detail: "manifest size"}}
 	}
-	raw, err := readBounded(path, maxManifestBytes)
+	raw, err := io.ReadAll(io.LimitReader(file, maxManifestBytes+1))
 	if err != nil || int64(len(raw)) != info.Size() {
 		return nil, []Finding{{Reason: ReasonManifestUnreadable, Detail: "manifest read"}}
 	}
@@ -690,26 +764,19 @@ func validateManifest(doc *manifestDoc, dirBase, release string, maxAge time.Dur
 
 func verifyArtifactIntegrity(dir, artifactName, sidecarName string, doc *manifestDoc) []Finding {
 	artifactPath := filepath.Join(dir, artifactName)
-	info, err := os.Lstat(artifactPath)
+	file, info, err := openVerified(artifactPath)
 	if err != nil {
-		return []Finding{{Reason: ReasonArtifactMismatch, Detail: "artifact missing"}}
+		if errors.Is(err, errEvidenceFileInsecure) {
+			return []Finding{{Reason: ReasonPermissionsInsecure, Detail: "artifact mode"}}
+		}
+		return []Finding{{Reason: ReasonArtifactMismatch, Detail: "artifact file"}}
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return []Finding{{Reason: ReasonArtifactMismatch, Detail: "artifact not a regular file"}}
-	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return []Finding{{Reason: ReasonPermissionsInsecure, Detail: "artifact mode"}}
-	}
+	defer func() { _ = file.Close() }()
 	declaredBytes, err := strconv.ParseInt(doc.Artifact.Bytes.String(), 10, 64)
 	if err != nil || info.Size() != declaredBytes {
 		return []Finding{{Reason: ReasonArtifactMismatch, Detail: "artifact.bytes"}}
 	}
 
-	file, err := os.Open(artifactPath)
-	if err != nil {
-		return []Finding{{Reason: ReasonArtifactMismatch, Detail: "artifact unreadable"}}
-	}
-	defer func() { _ = file.Close() }()
 	hasher := sha256.New()
 	hashed, err := io.Copy(hasher, io.LimitReader(file, declaredBytes+1))
 	if err != nil || hashed != declaredBytes {
@@ -721,21 +788,19 @@ func verifyArtifactIntegrity(dir, artifactName, sidecarName string, doc *manifes
 	}
 
 	sidecarPath := filepath.Join(dir, sidecarName)
-	sidecarInfo, err := os.Lstat(sidecarPath)
+	sidecar, sidecarInfo, err := openVerified(sidecarPath)
 	if err != nil {
-		return []Finding{{Reason: ReasonSidecarInvalid, Detail: "sidecar missing"}}
+		if errors.Is(err, errEvidenceFileInsecure) {
+			return []Finding{{Reason: ReasonPermissionsInsecure, Detail: "sidecar mode"}}
+		}
+		return []Finding{{Reason: ReasonSidecarInvalid, Detail: "sidecar file"}}
 	}
-	if sidecarInfo.Mode()&os.ModeSymlink != 0 || !sidecarInfo.Mode().IsRegular() {
-		return []Finding{{Reason: ReasonSidecarInvalid, Detail: "sidecar not a regular file"}}
-	}
-	if sidecarInfo.Mode().Perm()&0o077 != 0 {
-		return []Finding{{Reason: ReasonPermissionsInsecure, Detail: "sidecar mode"}}
-	}
+	defer func() { _ = sidecar.Close() }()
 	if sidecarInfo.Size() <= 0 || sidecarInfo.Size() > maxSidecarBytes {
 		return []Finding{{Reason: ReasonSidecarInvalid, Detail: "sidecar size"}}
 	}
-	raw, err := readBounded(sidecarPath, maxSidecarBytes)
-	if err != nil {
+	raw, err := io.ReadAll(io.LimitReader(sidecar, maxSidecarBytes+1))
+	if err != nil || int64(len(raw)) != sidecarInfo.Size() {
 		return []Finding{{Reason: ReasonSidecarInvalid, Detail: "sidecar read"}}
 	}
 	match := sidecarLinePattern.FindSubmatch(raw)
@@ -751,43 +816,108 @@ func verifyArtifactIntegrity(dir, artifactName, sidecarName string, doc *manifes
 	return nil
 }
 
-// readBounded reads a file through a hard byte limit so a post-Lstat file
-// swap can never trigger an unbounded read; the artifact hash path applies
-// the same discipline through its own LimitReader.
-func readBounded(path string, limit int64) ([]byte, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = file.Close() }()
-	raw, err := io.ReadAll(io.LimitReader(file, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(raw)) > limit {
-		return nil, errors.New("file exceeds size bound")
-	}
-	return raw, nil
-}
+// Bounded, value-free evidence-publication outcomes. They are the ONLY
+// errors WriteEvidence returns: no path, backup id, filesystem detail, or
+// wrapped platform error ever reaches a caller, stderr, or a log line.
+var (
+	// ErrEvidenceDestinationExists means the destination is already owned —
+	// by an earlier run or a concurrent racer — and was left untouched.
+	ErrEvidenceDestinationExists = errors.New("evidence destination already exists")
+	// ErrEvidenceDestinationInvalid means the destination could not be
+	// staged at all (missing or unwritable parent, empty path).
+	ErrEvidenceDestinationInvalid = errors.New("evidence destination is not usable")
+	// ErrEvidencePublicationFailed means staging, syncing, or publishing
+	// failed after the destination was accepted; the final path holds either
+	// nothing or a fully published report, never a partial write.
+	ErrEvidencePublicationFailed = errors.New("evidence publication failed")
+)
 
 // WriteEvidence persists the count-only report as a create-only, owner-only
-// JSON file. An existing file is never overwritten.
+// JSON file using the repository's atomic-publication shape (the
+// internal/local recovery-artifact writer): the payload is staged in the
+// destination directory as an owner-only temporary, written, synced, and
+// closed, then hard-linked into place — a link can never replace a racer's
+// file — the published inode is verified, and the parent directory is
+// synced. Only this invocation's own temporary is ever removed, so a crash
+// leaves at worst an inert stale temporary and never a partial final
+// artifact, and an exact retry succeeds or reports the bounded
+// already-exists outcome.
 func WriteEvidence(report Report, path string) error {
 	if strings.TrimSpace(path) == "" {
-		return errors.New("evidence path is empty")
+		return ErrEvidenceDestinationInvalid
 	}
 	payload, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
-		return fmt.Errorf("encode evidence: %w", err)
+		return ErrEvidencePublicationFailed
 	}
 	payload = append(payload, '\n')
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if _, err := os.Lstat(path); err == nil {
+		return ErrEvidenceDestinationExists
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return ErrEvidenceDestinationInvalid
+	}
+	directory := filepath.Dir(path)
+	temporary, err := os.CreateTemp(directory, ".backup-evidence-*.tmp")
 	if err != nil {
-		return fmt.Errorf("create evidence file: %w", err)
+		return ErrEvidenceDestinationInvalid
 	}
-	if _, err := file.Write(payload); err != nil {
-		_ = file.Close()
-		return fmt.Errorf("write evidence file: %w", err)
+	temporaryPath := temporary.Name()
+	cleanupTemporary := true
+	defer func() {
+		_ = temporary.Close()
+		if cleanupTemporary {
+			_ = os.Remove(temporaryPath)
+		}
+	}()
+	if err := temporary.Chmod(0o600); err != nil {
+		return ErrEvidencePublicationFailed
 	}
-	return file.Close()
+	if written, err := temporary.Write(payload); err != nil || written != len(payload) {
+		return ErrEvidencePublicationFailed
+	}
+	if err := temporary.Sync(); err != nil {
+		return ErrEvidencePublicationFailed
+	}
+	staged, err := temporary.Stat()
+	if err != nil || staged.Size() != int64(len(payload)) {
+		return ErrEvidencePublicationFailed
+	}
+	if err := temporary.Close(); err != nil {
+		return ErrEvidencePublicationFailed
+	}
+	if err := os.Link(temporaryPath, path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			// A racer claimed the destination between the precheck and the
+			// publish; its file is preserved and only our temporary goes.
+			return ErrEvidenceDestinationExists
+		}
+		return ErrEvidencePublicationFailed
+	}
+	final, err := os.Lstat(path)
+	if err != nil || !os.SameFile(staged, final) {
+		return ErrEvidencePublicationFailed
+	}
+	if err := syncEvidenceDirectory(directory); err != nil {
+		return ErrEvidencePublicationFailed
+	}
+	if err := os.Remove(temporaryPath); err != nil {
+		return ErrEvidencePublicationFailed
+	}
+	cleanupTemporary = false
+	if err := syncEvidenceDirectory(directory); err != nil {
+		return ErrEvidencePublicationFailed
+	}
+	return nil
+}
+
+func syncEvidenceDirectory(directory string) error {
+	dir, err := os.Open(directory)
+	if err != nil {
+		return err
+	}
+	if err := dir.Sync(); err != nil {
+		_ = dir.Close()
+		return err
+	}
+	return dir.Close()
 }

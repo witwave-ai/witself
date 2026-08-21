@@ -875,7 +875,12 @@ missing cell all fail closed with a nonzero exit.
 
 Output is deliberately count-only — no path, backup id, cell name,
 checksum, or manifest value appears — so it is safe to keep with rollout
-evidence. `--evidence-out FILE` additionally writes the same count-only
+evidence, and failure output uses only bounded classifications. Work is
+bounded by the producer's own contract: directories are streamed against
+the exact three-file layout, and an artifact or manifest claiming
+4&nbsp;GiB or more of ciphertext is rejected as contradictory evidence,
+because every verified manifest attests a restore of the complete
+disposable cluster into the backup script's fixed 4&nbsp;GiB tmpfs. `--evidence-out FILE` additionally writes the same count-only
 JSON summary create-only with mode 0600 and never overwrites an existing
 file; record it alongside the manifest's `backup_id` and
 `ciphertext_sha256` in the private rollout record. `--cell CELL` (repeatable)

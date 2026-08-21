@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -746,10 +747,230 @@ func TestWriteEvidence(t *testing.T) {
 		t.Fatalf("unexpected evidence content %+v", decoded)
 	}
 	err = WriteEvidence(report, path)
-	if err == nil || !errors.Is(err, os.ErrExist) {
-		t.Fatalf("expected create-only failure, got %v", err)
+	if !errors.Is(err, ErrEvidenceDestinationExists) {
+		t.Fatalf("expected the bounded already-exists outcome, got %v", err)
 	}
-	if err := WriteEvidence(report, "  "); err == nil {
-		t.Fatal("expected empty evidence path to be rejected")
+	if err := WriteEvidence(report, "  "); !errors.Is(err, ErrEvidenceDestinationInvalid) {
+		t.Fatalf("expected empty evidence path to be rejected, got %v", err)
+	}
+}
+
+func passReport(t *testing.T) Report {
+	t.Helper()
+	a, b := makePair(t)
+	report, findings := verifyDirs([]string{a.dir, b.dir}, nil)
+	if len(findings) != 0 {
+		t.Fatalf("unexpected findings: %v", findings)
+	}
+	return report
+}
+
+func TestDirectoryFloodIsRejectedWithoutListingIt(t *testing.T) {
+	a, b := makePair(t)
+	for i := 0; i < 60; i++ {
+		writePrivate(t, filepath.Join(b.dir, fmt.Sprintf("flood-%02d", i)), []byte("x"))
+	}
+	_, findings := verifyDirs([]string{a.dir, b.dir}, nil)
+	requireReason(t, findings, ReasonDirLayoutInvalid)
+}
+
+func TestArtifactSizeBoundBoundaries(t *testing.T) {
+	// At the bound: accepted at the manifest stage (the later integrity
+	// check fails only because the real fixture file is small).
+	a, b := makePair(t)
+	b.mutate(t, func(doc map[string]any) {
+		doc["artifact"].(map[string]any)["bytes"] = json.Number(fmt.Sprint(maxArtifactBytes))
+	})
+	_, findings := verifyDirs([]string{a.dir, b.dir}, nil)
+	requireReason(t, findings, ReasonArtifactMismatch)
+	for _, f := range findings {
+		if f.Reason == ReasonManifestFieldInvalid {
+			t.Fatalf("an at-bound size must pass manifest validation: %v", findings)
+		}
+	}
+
+	// One past the bound: contradictory evidence, rejected before any
+	// artifact IO could begin.
+	a2, b2 := makePair(t)
+	b2.mutate(t, func(doc map[string]any) {
+		doc["artifact"].(map[string]any)["bytes"] = json.Number(fmt.Sprint(maxArtifactBytes + 1))
+	})
+	_, findings = verifyDirs([]string{a2.dir, b2.dir}, nil)
+	requireReason(t, findings, ReasonManifestFieldInvalid)
+}
+
+func TestSymlinkToValidContentIsStillRejected(t *testing.T) {
+	a, b := makePair(t)
+	// Even a symlink resolving to byte-identical content is refused: the
+	// discipline is no-follow, not content luck.
+	target := filepath.Join(t.TempDir(), "elsewhere.dump.age")
+	writePrivate(t, target, b.artifact)
+	artifactPath := filepath.Join(b.dir, b.backupID+".dump.age")
+	if err := os.Remove(artifactPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, artifactPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	_, findings := verifyDirs([]string{a.dir, b.dir}, nil)
+	requireReason(t, findings, ReasonDirLayoutInvalid)
+}
+
+func TestOpenVerifiedNeverSplitsCheckFromRead(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "target")
+	contentA := []byte("evidence-content-alpha")
+	contentB := []byte("evidence-content-beta-longer")
+	hashes := map[string]int64{
+		sha256hex(contentA): int64(len(contentA)),
+		sha256hex(contentB): int64(len(contentB)),
+	}
+	writePrivate(t, path, contentA)
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		flip := false
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			// Atomically swap the path between two distinct inodes.
+			source := filepath.Join(dir, "swap")
+			content := contentA
+			if flip {
+				content = contentB
+			}
+			flip = !flip
+			if err := os.WriteFile(source, content, 0o600); err != nil {
+				return
+			}
+			_ = os.Rename(source, path)
+		}
+	}()
+
+	successes := 0
+	for i := 0; i < 300; i++ {
+		file, info, err := openVerified(path)
+		if err != nil {
+			continue // a detected race fails closed — always acceptable
+		}
+		raw, readErr := io.ReadAll(io.LimitReader(file, 1024))
+		_ = file.Close()
+		if readErr != nil {
+			t.Fatalf("read from verified handle failed: %v", readErr)
+		}
+		size, known := hashes[sha256hex(raw)]
+		if !known {
+			t.Fatalf("verified handle yielded torn or foreign content (%d bytes)", len(raw))
+		}
+		if info.Size() != size || int64(len(raw)) != size {
+			t.Fatalf("validated size %d disagrees with read size %d", info.Size(), len(raw))
+		}
+		successes++
+	}
+	close(stop)
+	<-done
+	if successes == 0 {
+		t.Log("all opens raced; the fail-closed property still held")
+	}
+}
+
+func TestEvidenceDestinationRacePreservesTheRacer(t *testing.T) {
+	report := passReport(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "evidence.json")
+	racer := []byte(`{"racer":"owns this"}`)
+	if err := os.WriteFile(path, racer, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := WriteEvidence(report, path)
+	if !errors.Is(err, ErrEvidenceDestinationExists) {
+		t.Fatalf("expected the bounded already-exists outcome, got %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != string(racer) {
+		t.Fatalf("the racer's file must be preserved byte-for-byte")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".backup-evidence-") {
+			t.Fatalf("a refused publication left temporary residue: %s", entry.Name())
+		}
+	}
+}
+
+func TestEvidenceStaleTemporaryFromACrashIsPreserved(t *testing.T) {
+	report := passReport(t)
+	dir := t.TempDir()
+	stale := filepath.Join(dir, ".backup-evidence-stale.tmp")
+	if err := os.WriteFile(stale, []byte("crashed run"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "evidence.json")
+	if err := WriteEvidence(report, path); err != nil {
+		t.Fatalf("a stale temporary must not block publication: %v", err)
+	}
+	if _, err := os.Lstat(stale); err != nil {
+		t.Fatal("only this invocation's own temporary may be removed")
+	}
+	var decoded Report
+	raw, err := os.ReadFile(path)
+	if err != nil || json.Unmarshal(raw, &decoded) != nil || decoded.Result != "pass" {
+		t.Fatalf("published evidence is not the complete report")
+	}
+}
+
+func TestEvidencePublicationFailureIsBoundedAndRetryable(t *testing.T) {
+	report := passReport(t)
+	missing := filepath.Join(t.TempDir(), "absent", "evidence.json")
+	err := WriteEvidence(report, missing)
+	if !errors.Is(err, ErrEvidenceDestinationInvalid) {
+		t.Fatalf("expected the bounded destination outcome, got %v", err)
+	}
+	if strings.Contains(err.Error(), string(filepath.Separator)+"absent") {
+		t.Fatal("publication errors must never carry the destination path")
+	}
+	// The exact retry against a corrected destination succeeds cleanly.
+	good := filepath.Join(t.TempDir(), "evidence.json")
+	if err := WriteEvidence(report, good); err != nil {
+		t.Fatalf("retry after a bounded failure must succeed: %v", err)
+	}
+	info, err := os.Lstat(good)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("published mode %v, want 0600", info.Mode().Perm())
+	}
+}
+
+func TestPublicationErrorsCarryNoEvidenceValues(t *testing.T) {
+	a, b := makePair(t)
+	report, _ := verifyDirs([]string{a.dir, b.dir}, nil)
+	occupied := filepath.Join(t.TempDir(), "evidence.json")
+	if err := os.WriteFile(occupied, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, err := range []error{
+		WriteEvidence(report, occupied),
+		WriteEvidence(report, filepath.Join(t.TempDir(), "no", "such", "dir", "e.json")),
+		WriteEvidence(report, ""),
+	} {
+		if err == nil {
+			t.Fatal("expected a bounded failure")
+		}
+		text := err.Error()
+		for _, forbidden := range []string{a.dir, b.dir, a.backupID, b.backupID, os.TempDir(), "evidence.json"} {
+			if forbidden != "" && strings.Contains(text, forbidden) {
+				t.Fatalf("error leaked %q: %s", forbidden, text)
+			}
+		}
 	}
 }

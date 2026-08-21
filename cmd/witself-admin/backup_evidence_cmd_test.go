@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -178,5 +179,66 @@ func TestBackupEvidenceVerifyCmdEvidenceOut(t *testing.T) {
 	})
 	if code != 1 {
 		t.Fatalf("expected exit 1 when evidence file exists, got %d", code)
+	}
+}
+
+// captureStderr swaps os.Stderr for the duration of fn and returns what was
+// written; the CLI's failure output must stay value-free.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := os.Stderr
+	os.Stderr = write
+	defer func() { os.Stderr = previous }()
+	fn()
+	if err := write.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := io.ReadAll(read)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func TestBackupEvidenceVerifyCmdStderrCarriesNoPathsOrValues(t *testing.T) {
+	root := t.TempDir()
+	dirA := writeBackupEvidenceFixture(t, root, "civo-sandbox-use1-backup", "0.0.258", "0a1b2c3d")
+	dirB := writeBackupEvidenceFixture(t, root, "civo-sandbox-usw2-dev", "0.0.258", "4e5f6071")
+	occupied := filepath.Join(t.TempDir(), "evidence.json")
+	if err := os.WriteFile(occupied, []byte("racer"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missingInput := filepath.Join(t.TempDir(), "absent-dir")
+
+	// A publication refusal and an invalid input, both failing runs.
+	var codes []int
+	stderr := captureStderr(t, func() {
+		codes = append(codes, backupEvidenceCmd([]string{
+			"verify", "--release", "0.0.258", "--evidence-out", occupied, dirA, dirB,
+		}))
+		codes = append(codes, backupEvidenceCmd([]string{
+			"verify", "--release", "0.0.258", dirA, missingInput,
+		}))
+	})
+	if codes[0] != 1 || codes[1] != 1 {
+		t.Fatalf("expected both runs to fail closed, got %v", codes)
+	}
+	for _, forbidden := range []string{
+		root, dirA, dirB, occupied, missingInput, os.TempDir(),
+		"0a1b2c3d", "4e5f6071", "civo-sandbox-usw2-dev", "civo-sandbox-use1-backup",
+	} {
+		if forbidden != "" && strings.Contains(stderr, forbidden) {
+			t.Fatalf("stderr leaked %q:\n%s", forbidden, stderr)
+		}
+	}
+	if !strings.Contains(stderr, "evidence destination already exists") {
+		t.Fatalf("the bounded publication outcome must still be diagnosable:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "input_path_invalid") {
+		t.Fatalf("the bounded finding classification must still be diagnosable:\n%s", stderr)
 	}
 }
