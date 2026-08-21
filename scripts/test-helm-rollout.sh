@@ -67,13 +67,13 @@ helm template witself-server "$server_chart" --namespace witself \
 helm template witself-server "$server_chart" --namespace witself \
   --set-string billing.endpoint= >"$billing_empty_render"
 helm template witself-server "$server_chart" --namespace witself \
-  --set-string billing.endpoint=https://self.witwave.ai/control-plane \
+  --set-string billing.endpoint=https://self.witwave.ai \
   >"$billing_render"
 helm template witself-apps "$apps_chart" \
   --values "$civo_cell" \
   --set apps.witselfServer.chartVersion=0.0.255 \
   --set apps.witselfServer.imageTag=0.0.255 \
-  --set-string apps.witselfServer.billing.endpoint=https://self.witwave.ai/control-plane \
+  --set-string apps.witselfServer.billing.endpoint=https://self.witwave.ai \
   >"$billing_apps_render"
 helm template witself-server "$server_chart" --namespace witself \
   --set worker.enabled=true \
@@ -719,12 +719,12 @@ for dark_billing_application in \
   "$civo_server_application"; do
   reject_line "        billing:" "$dark_billing_application"
 done
-require_line '  WITSELF_BILLING_ENDPOINT: "https://self.witwave.ai/control-plane"' \
+require_line '  WITSELF_BILLING_ENDPOINT: "https://self.witwave.ai"' \
   "$billing_server_config"
 require_line '        billing:' "$billing_server_application"
-require_line '          endpoint: https://self.witwave.ai/control-plane' \
+require_line '          endpoint: https://self.witwave.ai' \
   "$billing_server_application"
-require_line '  WITSELF_BILLING_ENDPOINT: "https://self.witwave.ai/control-plane"' \
+require_line '  WITSELF_BILLING_ENDPOINT: "https://self.witwave.ai"' \
   "$billing_nested_server_config"
 if [[ "$(grep -c 'WITSELF_BILLING_ENDPOINT' "$billing_nested_render")" -ne 1 ]]; then
   echo "billing endpoint was not isolated to the server ConfigMap" >&2

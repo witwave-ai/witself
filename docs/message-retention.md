@@ -178,9 +178,10 @@ thread, message, or content value is a metric label.
 2. Legacy applied snapshots without `messaging_entitlement_version` continue to
    allow messaging; this prevents a cell-first rollout from disabling existing
    accounts.
-3. Keep `CP_PLAN_LIFECYCLE_ENABLED=false` until the new cell is converged. This
-   gate deliberately removes the lifecycle and admin-policy routes as well as
-   pausing the cron, so an override cannot be pre-seeded while it is false.
+3. Keep the `CP_PLAN_LIFECYCLE_ENABLED` Worker secret absent until the new cell
+   is converged. Absence deliberately removes the lifecycle and admin-policy
+   routes as well as pausing the cron, so an override cannot be pre-seeded
+   before activation.
 4. Just after a five-minute cron boundary, enable and activate lifecycle, then
    immediately set the founder account's explicit messaging-enabled override
    first and its explicit indefinite-retention override second. Verify both

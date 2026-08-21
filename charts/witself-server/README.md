@@ -59,8 +59,10 @@ the configured TTL as `WITSELF_BOOTSTRAP_TOKEN_TTL`.
 cells. Its empty default omits `WITSELF_BILLING_ENDPOINT`, so portable installs
 and existing cells remain providerless and billing commands stay dark. A
 non-empty value renders only into the server ConfigMap and must be a simple,
-canonical HTTPS origin or prefix, such as `https://self.witwave.ai` or
-`https://self.witwave.ai/control-plane`. Credentials, query strings, fragments,
+canonical HTTPS origin or prefix. The verified managed control-plane contract
+uses the exact root origin `https://self.witwave.ai`; do not add a path prefix
+unless that prefix is separately implemented and route-verified. Credentials,
+query strings, fragments,
 percent-encoded characters, control characters, and other non-ASCII URL forms
 are rejected during Helm validation. Changing a non-empty value participates
 in both server configuration checksums and rolls the API pods; the worker never
