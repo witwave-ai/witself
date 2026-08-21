@@ -110,6 +110,10 @@ jobs:
           go test ./...
           golangci-lint run ./...
 
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
       - name: Cloudflare agent-email Worker gates
         run: |
           npm --prefix infra/cloudflare/agent-email ci
@@ -126,6 +130,11 @@ jobs:
         run: |
           npm --prefix infra/cloudflare/control-plane ci
           npm --prefix infra/cloudflare/control-plane test
+
+      - name: Local Claude-Codex broker gates
+        run: |
+          npm --prefix tools/claude-codex-broker ci
+          npm --prefix tools/claude-codex-broker test
 
       - name: govulncheck
         run: |
