@@ -1877,12 +1877,15 @@ async function handleResend(request, env, accountId) {
     return err("could not send the verification email — try again shortly", 502);
   }
   // created_at is preserved deliberately: resending never resets the reap
-  // clock — the email says so.
+  // clock — the email says so. The counter reads from `pending` directly:
+  // the earlier `sent` binding lives inside the if(pending) block, and
+  // referencing it here threw after the email had already left, which both
+  // failed every successful resend and left the send cap un-advanced.
   await env.DIRECTORY.put(
     pendingKey,
     JSON.stringify({
       ...pending,
-      emails_sent: sent + 1,
+      emails_sent: (pending.emails_sent ?? 1) + 1,
       last_email_at: new Date().toISOString(),
     }),
   );
@@ -2287,20 +2290,27 @@ async function handleChangeEmail(request, env, accountId) {
     }
     await logCellEvent(cell, accountId, "account.email.change.sent",
       "control_plane", { to_masked: maskEmail(newEmail) });
-    // Persist only after the code actually left; a send failure must not
-    // burn quota or corrupt an issued code.
-    state.code_hash = await sha256hex(code.replaceAll("-", ""));
-    state.code_expires_at = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-    state.new_email = newEmail;
-    state.attempts = 0;
+    // Persist the spent quota the moment the code leaves — a send that
+    // happened must meter — but hold the code fields back until the
+    // counter-move alarm is delivered. A crash or a failed alarm then
+    // leaves an unredeemable code (fail-closed), never a change that could
+    // commit without the current address ever having been warned.
     state.emails_sent = (state.emails_sent ?? 0) + 1;
     state.last_email_at = new Date().toISOString();
     await env.DIRECTORY.put(key, JSON.stringify(state), { expirationTtl: 24 * 3600 });
+    const armCode = async () => {
+      state.code_hash = await sha256hex(code.replaceAll("-", ""));
+      state.code_expires_at = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+      state.new_email = newEmail;
+      state.attempts = 0;
+      await env.DIRECTORY.put(key, JSON.stringify(state), { expirationTtl: 24 * 3600 });
+    };
     // Alarm to the CURRENT address is REQUIRED — it is the only counter-move
     // channel for the stolen-token threat. A send failure must fail the
-    // request; nothing has committed yet, and the caller can retry once
-    // outbound mail recovers.
+    // request with the code left unarmed; the caller can retry for a fresh
+    // code once outbound mail recovers.
     if (account.email === newEmail) {
+      await armCode();
       return json({
         schema_version: "witself.v0",
         account_id: accountId,
@@ -2338,10 +2348,13 @@ async function handleChangeEmail(request, env, accountId) {
       });
     } catch (e) {
       console.log(`change-email: notice to ${accountId}'s old address failed: ${e}`);
+      // The code was never armed, so it cannot commit the change; the
+      // quota stays spent because the code send genuinely happened.
       return err("could not deliver the alarm to your current address — try again shortly", 502);
     }
     await logCellEvent(cell, accountId, "account.email.change.sent",
       "control_plane", { to_masked: maskEmail(account.email) });
+    await armCode();
     return json({
       schema_version: "witself.v0",
       account_id: accountId,
