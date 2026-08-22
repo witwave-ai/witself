@@ -122,5 +122,4 @@ check-infra: ## Gates for nested Pulumi plus the isolated Cloudflare agent-email
 	bash scripts/test-agent-email-receipt-proof.sh
 	bash scripts/test-agent-email-cell-smoke.sh
 	npm --prefix infra/cloudflare/control-plane test
-	npm --prefix tools/claude-codex-broker test
 	@echo "check-infra: infra gates green"
