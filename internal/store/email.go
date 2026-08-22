@@ -64,6 +64,12 @@ func (s *Store) UndoAccountEmail(ctx context.Context, accountID, expectedCurrent
 // current email — i.e. a stale undo link after a subsequent legitimate change.
 var ErrConflictingUndo = errors.New("email has changed since this undo was issued")
 
+// ErrEmailChangedSinceRequest is returned by UpdateAccountEmail when a non-empty
+// expected_current no longer matches the account's current email — a concurrent
+// change landed between the control plane arming this request and its commit, so
+// the forward move is refused rather than silently clobbering the newer address.
+var ErrEmailChangedSinceRequest = errors.New("email has changed since this change was requested")
+
 // UpdateAccountDisplayName changes the account's server-side display name —
 // cosmetic, but account-level, so it keeps the same owner-only tier as email
 // and close. (Local names are a per-machine concept and live in the CLI.)
@@ -114,7 +120,7 @@ func (s *Store) UpdateAccountDisplayName(ctx context.Context, accountID, operato
 // control plane calls this after proving the NEW inbox can receive (emailed
 // code), and it passes the acting operator so ownership is enforced here,
 // where the truth lives.
-func (s *Store) UpdateAccountEmail(ctx context.Context, accountID, operatorID, newEmail string) error {
+func (s *Store) UpdateAccountEmail(ctx context.Context, accountID, operatorID, expectedCurrent, newEmail string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -142,6 +148,9 @@ func (s *Store) UpdateAccountEmail(ctx context.Context, accountID, operatorID, n
 	}
 	if status != "active" {
 		return ErrAccountNotActive
+	}
+	if expectedCurrent != "" && (currentEmail == nil || *currentEmail != expectedCurrent) {
+		return ErrEmailChangedSinceRequest
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE accounts SET email = $2 WHERE id = $1`, accountID, newEmail); err != nil {
