@@ -404,7 +404,7 @@ ruby -ryaml -rbase64 -e '
   abort "unexpected pagerduty receiver set" unless receivers.map { |item| item.fetch("name") } == ["null", "witself-external", "witself-deadman"]
   abort "unexpected pagerduty route set" unless route.fetch("routes") == [
     {"matchers" => ["witself_alert = \"true\""], "receiver" => "witself-external"},
-    {"matchers" => ["witself_watchdog = \"true\""], "receiver" => "witself-deadman", "group_wait" => "0s", "group_interval" => "5m", "repeat_interval" => "5m"},
+    {"matchers" => ["witself_watchdog = \"true\""], "receiver" => "witself-deadman", "group_wait" => "0s", "group_interval" => "1m", "repeat_interval" => "5m"},
   ]
   abort "incident receiver must not use a webhook in pagerduty mode" if receivers[1].key?("webhook_configs")
   pd = receivers[1].fetch("pagerduty_configs").fetch(0)
@@ -421,6 +421,12 @@ ruby -ryaml -rbase64 -e '
 "$amtool_bin" check-config "$pagerduty_alertmanager_config" >/dev/null
 
 ruby -ryaml -e '
+  alertmanager_route_of = lambda do |name|
+    config = YAML.safe_load(File.read(ARGV[1]), aliases: false)
+    route = Array(config.dig("route", "routes")).find { |item| item["receiver"] == name }
+    abort "route for #{name} missing" unless route
+    route
+  end
   docs = YAML.load_stream(File.read(ARGV[0])).compact
   alertmanager = docs.find { |doc| doc["kind"] == "Alertmanager" }
   abort "Alertmanager resource missing" unless alertmanager
@@ -433,12 +439,81 @@ ruby -ryaml -e '
   abort "watchdog must always fire" unless watchdog["expr"] == "vector(1)"
   abort "watchdog must carry the dead-man label" unless watchdog.dig("labels", "witself_watchdog") == "true"
   abort "watchdog must never reach the incident route" if watchdog.dig("labels", "witself_alert")
-' "$pagerduty_child_render"
+  unlabelled = rules.reject { |rule| rule.dig("labels", "witself_alert") == "true" }.map { |rule| rule["alert"] }
+  abort "every rule except the watchdog must reach the incident route: #{unlabelled.inspect}" unless unlabelled == ["WitselfWatchdog"]
+  deadman_route = alertmanager_route_of.call("witself-deadman")
+  abort "the dead-man beat must flush faster than it repeats" unless deadman_route["group_interval"] == "1m" && deadman_route["repeat_interval"] == "5m"
+' "$pagerduty_child_render" "$pagerduty_alertmanager_config"
 
 if grep -q 'witself-deadman' "$child_render"; then
   echo "webhook-mode render leaked the dead-man receiver" >&2
   exit 1
 fi
+
+# The two receiver Secrets must be distinct, or the mount list duplicates.
+if helm template witself-platform "$platform_chart" \
+  --values "$pagerduty_values" \
+  --set platform.monitoring.receiverDeadman.secretName=witself-alert-receiver-v1 \
+  >/dev/null 2>"$tmp/invalid-deadman.err"; then
+  echo "monitoring accepted a dead-man Secret identical to the incident Secret" >&2
+  exit 1
+fi
+grep -q 'receiverDeadman.secretName' "$tmp/invalid-deadman.err"
+if helm template witself-platform "$platform_chart" \
+  --values "$pagerduty_values" \
+  --set platform.monitoring.receiverDeadman.secretKey= \
+  >/dev/null 2>"$tmp/invalid-deadman-key.err"; then
+  echo "monitoring accepted an empty dead-man Secret key" >&2
+  exit 1
+fi
+grep -q 'receiverDeadman.secretKey' "$tmp/invalid-deadman-key.err"
+
+# Every receiver/route combination must render a coherent Alertmanager config:
+# a receiver without its route (or a route without its receiver) bricks startup.
+assert_receiver_combination() {
+  combo_kind="$1"
+  combo_deadman="${2:-}"
+  combo_tag="$combo_kind${combo_deadman:+-deadman}"
+  combo_render="$tmp/platform-combo-$combo_tag.yaml"
+  combo_child_values="$tmp/combo-child-values-$combo_tag.yaml"
+  combo_child_render="$tmp/combo-child-$combo_tag.yaml"
+  combo_config="$tmp/alertmanager-combo-$combo_tag.yaml"
+  helm template witself-platform "$platform_chart" \
+    --values "$monitoring_values" \
+    --set platform.monitoring.receiver.kind="$combo_kind" \
+    --set platform.monitoring.receiverDeadman.secretName="$combo_deadman" \
+    >"$combo_render"
+  ruby -ryaml -e '
+    app = YAML.load_stream(STDIN.read).compact.find { |doc| doc["kind"] == "Application" && doc.dig("metadata", "name") == "witself-monitoring" }
+    abort "combination monitoring Application missing" unless app
+    print app.dig("spec", "source", "helm", "values")
+  ' <"$combo_render" >"$combo_child_values"
+  helm template witself-monitoring "$chart_archive" \
+    --namespace monitoring --include-crds --values "$combo_child_values" >"$combo_child_render"
+  ruby -ryaml -rbase64 -e '
+    docs = YAML.load_stream(File.read(ARGV[0])).compact
+    secret = docs.find { |doc| doc["kind"] == "Secret" && doc.dig("metadata", "name").to_s.start_with?("alertmanager-") && (doc.dig("data", "alertmanager.yaml") || doc.dig("stringData", "alertmanager.yaml")) }
+    abort "combination Alertmanager config missing" unless secret
+    raw = secret.dig("stringData", "alertmanager.yaml") || Base64.strict_decode64(secret.dig("data", "alertmanager.yaml"))
+    config = YAML.safe_load(raw, aliases: false)
+    names = config.fetch("receivers").map { |item| item.fetch("name") }
+    routed = Array(config.dig("route", "routes")).map { |item| item.fetch("receiver") }
+    abort "a routed receiver is not defined: #{(routed - names).inspect}" unless (routed - names).empty?
+    abort "a defined receiver is unrouted: #{(names - routed - ["null"]).inspect}" unless (names - routed - ["null"]).empty?
+    alertmanager = docs.find { |doc| doc["kind"] == "Alertmanager" }
+    mounted = Array(alertmanager.dig("spec", "secrets"))
+    abort "mounted Secrets must be unique" unless mounted.uniq == mounted
+    raw.scan(%r{/etc/alertmanager/secrets/([^/]+)/}).flatten.uniq.each do |name|
+      abort "receiver reads an unmounted Secret #{name}" unless mounted.include?(name)
+    end
+    File.binwrite(ARGV[1], raw)
+  ' "$combo_child_render" "$combo_config"
+  "$amtool_bin" check-config "$combo_config" >/dev/null
+}
+
+assert_receiver_combination webhook witself-deadman-v1
+assert_receiver_combination pagerduty ""
+
 
 "$promtool_bin" check rules "$rules"
 "$promtool_bin" test rules "$rule_tests"

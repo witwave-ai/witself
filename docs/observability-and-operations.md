@@ -686,9 +686,11 @@ retained canary artifact. Two receivers are configured independently:
   `witself_alert` label so it never opens an incident. An outside monitor pages
   when the heartbeat stops, which is the only signal that survives losing the
   alerting plane itself. Omitting its Secret omits the route, receiver, and
-  mount. All shipped Witself rules aggregate away pod,
-instance, route, account, realm, and agent identity. They expose only fixed
-service/severity labels and the worker's existing closed-set job label.
+  mount.
+
+All shipped Witself rules aggregate away pod, instance, route, account, realm,
+and agent identity. They expose only fixed service/severity labels and the
+worker's existing closed-set job label.
 
 This capability is not a production rollout. Shared and target-cell defaults
 remain disabled, and no feature-status gate closes until the staged GitOps

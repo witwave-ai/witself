@@ -19,6 +19,9 @@
 {{- if not (regexMatch "^[A-Za-z0-9._-]{1,253}$" $deadman.secretKey) -}}
 {{- fail "platform.monitoring.receiverDeadman.secretKey must be a valid Kubernetes Secret data key" -}}
 {{- end -}}
+{{- if eq $deadman.secretName $receiver.secretName -}}
+{{- fail "platform.monitoring.receiverDeadman.secretName must differ from receiver.secretName; the incident and dead-man endpoints are distinct immutable Secrets" -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- if not (regexMatch "^[a-f0-9]{64}$" $monitoring.chartPackageSHA256) -}}
@@ -191,7 +194,10 @@ spec:
                   matchers:
                     - witself_watchdog = "true"
                   group_wait: 0s
-                  group_interval: 5m
+                  # The group flush tick gates the repeat check, so the flush
+                  # interval must stay well below repeat_interval or the beat
+                  # lands every two intervals instead of every one.
+                  group_interval: 1m
                   repeat_interval: 5m
 {{- end }}
 {{ else }}

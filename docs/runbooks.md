@@ -2708,9 +2708,13 @@ in one parent commit.
      it deliberately carries no `witself_alert` label, so it never opens an
      incident. Configure that external monitor (PagerDuty's free tier has no
      native dead-man, so use Dead Man's Snitch, healthchecks.io, or equivalent)
-     to page the same PagerDuty service when a check-in is missed. Alertmanager
-     re-sends the heartbeat every five minutes, so a missed-check-in window of
-     roughly fifteen minutes tolerates a normal restart without flapping.
+     to page the same PagerDuty service when a check-in is missed. The route
+     flushes every minute and repeats every five, so the heartbeat arrives on a
+     five-minute beat; set the monitor's missed-check-in window to roughly
+     fifteen minutes, which is three beats of margin and tolerates a normal
+     Alertmanager restart without flapping. Do not set the repeat interval
+     equal to the group interval: the flush tick gates the repeat check, so the
+     beat would silently halve to every ten minutes.
      Leaving `receiverDeadman.secretName` empty omits the route, the receiver,
      and the mount entirely.
 
