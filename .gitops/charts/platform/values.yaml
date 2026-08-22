@@ -124,6 +124,26 @@ platform:
       # Required only when alerting.enabled is true. This immutable Secret
       # contains one HTTPS webhook URL. The URL value never enters Git or Argo
       # state; Alertmanager reads it from the mounted file.
+      #
+      # kind selects how the incident receiver is configured:
+      #   webhook   - generic HTTPS webhook; the Secret holds the full URL and
+      #               Alertmanager reads it with url_file. Keeps self-hosted and
+      #               non-PagerDuty providers working unchanged.
+      #   pagerduty - Alertmanager native PagerDuty Events API v2; the Secret
+      #               holds only the integration (routing) key, read with
+      #               routing_key_file, so firing maps to trigger and resolved
+      #               maps to resolve with the alert severity carried through.
+      # Either way the secret value never enters Git or Argo state.
+      kind: webhook
+      secretName: ""
+      secretKey: url
+    # Dead-man's switch. The always-firing Watchdog alert is routed here and
+    # nowhere else, so an external heartbeat monitor pages when Witself stops
+    # reporting. Provider-agnostic on purpose: PagerDuty's free tier has no
+    # native dead-man, so this is a heartbeat endpoint (Dead Man's Snitch,
+    # healthchecks.io, or equivalent) configured to page on a missed check-in.
+    # Leave secretName empty to omit the route, the receiver, and the mount.
+    receiverDeadman:
       secretName: ""
       secretKey: url
     prometheus:

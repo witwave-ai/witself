@@ -1,0 +1,29 @@
+# Exercises the PagerDuty Events API v2 receiver plus the dead-man heartbeat
+# route. The companion ci/monitoring-values.yaml keeps covering the generic
+# webhook receiver with no dead-man configured.
+cell:
+  name: monitoring-ci
+  cloud: civo
+  region: test
+platform:
+  certManager:
+    enabled: false
+  externalDNS:
+    enabled: false
+  externalSecrets:
+    enabled: false
+  keda:
+    enabled: false
+  metricsServer:
+    enabled: false
+  monitoring:
+    enabled: true
+    alerting:
+      enabled: true
+    receiver:
+      kind: pagerduty
+      secretName: witself-alert-receiver-v1
+      secretKey: routing-key
+    receiverDeadman:
+      secretName: witself-deadman-v1
+      secretKey: url

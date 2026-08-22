@@ -360,6 +360,161 @@ ruby -ryaml -e '
   end
 ' "$apps_child_render"
 
+# PagerDuty Events API v2 receiver plus the dead-man heartbeat route. The
+# webhook-mode assertions above stay untouched, so they keep proving that the
+# default receiver contract is unchanged.
+pagerduty_values="$platform_chart/ci/monitoring-pagerduty-values.yaml"
+pagerduty_platform_render="$tmp/platform-pagerduty.yaml"
+pagerduty_child_values="$tmp/monitoring-pagerduty-child-values.yaml"
+pagerduty_child_render="$tmp/monitoring-pagerduty-child.yaml"
+pagerduty_alertmanager_config="$tmp/alertmanager-pagerduty.yaml"
+
+helm template witself-platform "$platform_chart" \
+  --values "$pagerduty_values" >"$pagerduty_platform_render"
+if grep -Eqi 'routing_key:|https?://[^[:space:]]*(token|hook|secret|key)=' "$pagerduty_platform_render"; then
+  echo "rendered PagerDuty monitoring Application appears to contain a secret value" >&2
+  exit 1
+fi
+if helm template witself-platform "$platform_chart" \
+  --values "$pagerduty_values" \
+  --set platform.monitoring.receiver.kind=carrier-pigeon \
+  >/dev/null 2>"$tmp/invalid-kind.err"; then
+  echo "monitoring accepted an unknown receiver kind" >&2
+  exit 1
+fi
+grep -q 'receiver.kind' "$tmp/invalid-kind.err"
+
+ruby -ryaml -e '
+  app = YAML.load_stream(STDIN.read).compact.find { |doc| doc["kind"] == "Application" && doc.dig("metadata", "name") == "witself-monitoring" }
+  abort "pagerduty monitoring Application missing" unless app
+  print app.dig("spec", "source", "helm", "values")
+' <"$pagerduty_platform_render" >"$pagerduty_child_values"
+helm template witself-monitoring "$chart_archive" \
+  --namespace monitoring --include-crds --values "$pagerduty_child_values" >"$pagerduty_child_render"
+
+ruby -ryaml -rbase64 -e '
+  docs = YAML.load_stream(File.read(ARGV[0])).compact
+  secret = docs.find { |doc| doc["kind"] == "Secret" && doc.dig("metadata", "name").to_s.start_with?("alertmanager-") && (doc.dig("data", "alertmanager.yaml") || doc.dig("stringData", "alertmanager.yaml")) }
+  abort "pagerduty Alertmanager config missing" unless secret
+  raw = secret.dig("stringData", "alertmanager.yaml") || Base64.strict_decode64(secret.dig("data", "alertmanager.yaml"))
+  config = YAML.safe_load(raw, aliases: false)
+  route = config.fetch("route")
+  abort "root route must stay matcher-free" if route.key?("matchers") || route.key?("match") || route.key?("match_re")
+  receivers = config.fetch("receivers")
+  abort "unexpected pagerduty receiver set" unless receivers.map { |item| item.fetch("name") } == ["null", "witself-external", "witself-deadman"]
+  abort "unexpected pagerduty route set" unless route.fetch("routes") == [
+    {"matchers" => ["witself_alert = \"true\""], "receiver" => "witself-external"},
+    {"matchers" => ["witself_watchdog = \"true\""], "receiver" => "witself-deadman", "group_wait" => "0s", "group_interval" => "1m", "repeat_interval" => "5m"},
+  ]
+  abort "incident receiver must not use a webhook in pagerduty mode" if receivers[1].key?("webhook_configs")
+  pd = receivers[1].fetch("pagerduty_configs").fetch(0)
+  abort "pagerduty receiver must read the routing key from the mounted file" unless pd["routing_key_file"] == "/etc/alertmanager/secrets/witself-alert-receiver-v1/routing-key" && !pd.key?("routing_key")
+  abort "pagerduty receiver must target Events API v2" unless pd["url"] == "https://events.pagerduty.com/v2/enqueue"
+  abort "resolved delivery is required" unless pd["send_resolved"] == true
+  abort "pagerduty severity must carry the alert severity" unless pd["severity"] == "{{ .CommonLabels.severity }}"
+  abort "pagerduty redirects must be disabled" unless pd.dig("http_config", "follow_redirects") == false
+  dead = receivers[2].fetch("webhook_configs").fetch(0)
+  abort "dead-man receiver must use only the mounted URL file" unless dead["url_file"] == "/etc/alertmanager/secrets/witself-deadman-v1/url" && !dead.key?("url")
+  abort "dead-man heartbeat must not request resolved delivery" unless dead["send_resolved"] == false
+  File.binwrite(ARGV[1], raw)
+' "$pagerduty_child_render" "$pagerduty_alertmanager_config"
+"$amtool_bin" check-config "$pagerduty_alertmanager_config" >/dev/null
+
+ruby -ryaml -e '
+  alertmanager_route_of = lambda do |name|
+    config = YAML.safe_load(File.read(ARGV[1]), aliases: false)
+    route = Array(config.dig("route", "routes")).find { |item| item["receiver"] == name }
+    abort "route for #{name} missing" unless route
+    route
+  end
+  docs = YAML.load_stream(File.read(ARGV[0])).compact
+  alertmanager = docs.find { |doc| doc["kind"] == "Alertmanager" }
+  abort "Alertmanager resource missing" unless alertmanager
+  abort "both receiver Secrets must be mounted" unless Array(alertmanager.dig("spec", "secrets")).sort == ["witself-alert-receiver-v1", "witself-deadman-v1"]
+  rules = docs.select { |doc| doc["kind"] == "PrometheusRule" }
+    .flat_map { |doc| Array(doc.dig("spec", "groups")) }
+    .flat_map { |group| Array(group["rules"]) }
+  watchdog = rules.find { |rule| rule["alert"] == "WitselfWatchdog" }
+  abort "watchdog rule missing" unless watchdog
+  abort "watchdog must always fire" unless watchdog["expr"] == "vector(1)"
+  abort "watchdog must carry the dead-man label" unless watchdog.dig("labels", "witself_watchdog") == "true"
+  abort "watchdog must never reach the incident route" if watchdog.dig("labels", "witself_alert")
+  unlabelled = rules.reject { |rule| rule.dig("labels", "witself_alert") == "true" }.map { |rule| rule["alert"] }
+  abort "every rule except the watchdog must reach the incident route: #{unlabelled.inspect}" unless unlabelled == ["WitselfWatchdog"]
+  deadman_route = alertmanager_route_of.call("witself-deadman")
+  abort "the dead-man beat must flush faster than it repeats" unless deadman_route["group_interval"] == "1m" && deadman_route["repeat_interval"] == "5m"
+' "$pagerduty_child_render" "$pagerduty_alertmanager_config"
+
+if grep -q 'witself-deadman' "$child_render"; then
+  echo "webhook-mode render leaked the dead-man receiver" >&2
+  exit 1
+fi
+
+# The two receiver Secrets must be distinct, or the mount list duplicates.
+if helm template witself-platform "$platform_chart" \
+  --values "$pagerduty_values" \
+  --set platform.monitoring.receiverDeadman.secretName=witself-alert-receiver-v1 \
+  >/dev/null 2>"$tmp/invalid-deadman.err"; then
+  echo "monitoring accepted a dead-man Secret identical to the incident Secret" >&2
+  exit 1
+fi
+grep -q 'receiverDeadman.secretName' "$tmp/invalid-deadman.err"
+if helm template witself-platform "$platform_chart" \
+  --values "$pagerduty_values" \
+  --set platform.monitoring.receiverDeadman.secretKey= \
+  >/dev/null 2>"$tmp/invalid-deadman-key.err"; then
+  echo "monitoring accepted an empty dead-man Secret key" >&2
+  exit 1
+fi
+grep -q 'receiverDeadman.secretKey' "$tmp/invalid-deadman-key.err"
+
+# Every receiver/route combination must render a coherent Alertmanager config:
+# a receiver without its route (or a route without its receiver) bricks startup.
+assert_receiver_combination() {
+  combo_kind="$1"
+  combo_deadman="${2:-}"
+  combo_tag="$combo_kind${combo_deadman:+-deadman}"
+  combo_render="$tmp/platform-combo-$combo_tag.yaml"
+  combo_child_values="$tmp/combo-child-values-$combo_tag.yaml"
+  combo_child_render="$tmp/combo-child-$combo_tag.yaml"
+  combo_config="$tmp/alertmanager-combo-$combo_tag.yaml"
+  helm template witself-platform "$platform_chart" \
+    --values "$monitoring_values" \
+    --set platform.monitoring.receiver.kind="$combo_kind" \
+    --set platform.monitoring.receiverDeadman.secretName="$combo_deadman" \
+    >"$combo_render"
+  ruby -ryaml -e '
+    app = YAML.load_stream(STDIN.read).compact.find { |doc| doc["kind"] == "Application" && doc.dig("metadata", "name") == "witself-monitoring" }
+    abort "combination monitoring Application missing" unless app
+    print app.dig("spec", "source", "helm", "values")
+  ' <"$combo_render" >"$combo_child_values"
+  helm template witself-monitoring "$chart_archive" \
+    --namespace monitoring --include-crds --values "$combo_child_values" >"$combo_child_render"
+  ruby -ryaml -rbase64 -e '
+    docs = YAML.load_stream(File.read(ARGV[0])).compact
+    secret = docs.find { |doc| doc["kind"] == "Secret" && doc.dig("metadata", "name").to_s.start_with?("alertmanager-") && (doc.dig("data", "alertmanager.yaml") || doc.dig("stringData", "alertmanager.yaml")) }
+    abort "combination Alertmanager config missing" unless secret
+    raw = secret.dig("stringData", "alertmanager.yaml") || Base64.strict_decode64(secret.dig("data", "alertmanager.yaml"))
+    config = YAML.safe_load(raw, aliases: false)
+    names = config.fetch("receivers").map { |item| item.fetch("name") }
+    routed = Array(config.dig("route", "routes")).map { |item| item.fetch("receiver") }
+    abort "a routed receiver is not defined: #{(routed - names).inspect}" unless (routed - names).empty?
+    abort "a defined receiver is unrouted: #{(names - routed - ["null"]).inspect}" unless (names - routed - ["null"]).empty?
+    alertmanager = docs.find { |doc| doc["kind"] == "Alertmanager" }
+    mounted = Array(alertmanager.dig("spec", "secrets"))
+    abort "mounted Secrets must be unique" unless mounted.uniq == mounted
+    raw.scan(%r{/etc/alertmanager/secrets/([^/]+)/}).flatten.uniq.each do |name|
+      abort "receiver reads an unmounted Secret #{name}" unless mounted.include?(name)
+    end
+    File.binwrite(ARGV[1], raw)
+  ' "$combo_child_render" "$combo_config"
+  "$amtool_bin" check-config "$combo_config" >/dev/null
+}
+
+assert_receiver_combination webhook witself-deadman-v1
+assert_receiver_combination pagerduty ""
+
+
 "$promtool_bin" check rules "$rules"
 "$promtool_bin" test rules "$rule_tests"
 

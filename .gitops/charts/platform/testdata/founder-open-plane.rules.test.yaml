@@ -187,3 +187,22 @@ tests:
             exp_annotations:
               summary: PostgreSQL PVC capacity metrics are unavailable.
               runbook: docs/runbooks.md#founder-open-plane-monitoring
+  - name: watchdog heartbeat always fires and never reaches the incident route
+    interval: 1m
+    # Deliberately seeds only an unrelated, zero-valued series: the watchdog must
+    # fire from vector(1) alone. A watchdog rewritten to depend on any Witself
+    # metric would stop firing here instead of passing on a helpful seed.
+    input_series:
+      - series: witself_watchdog_unrelated_probe
+        values: 0+0x10
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: WitselfWatchdog
+        exp_alerts:
+          - exp_labels:
+              severity: none
+              service: monitoring
+              witself_watchdog: "true"
+            exp_annotations:
+              summary: Witself alerting pipeline heartbeat.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
