@@ -1718,7 +1718,11 @@ func TestActivateAccount(t *testing.T) {
 // token only, owner-only refusals pass through as 403, non-active as 409,
 // and the committed address echoes back normalized.
 func TestUpdateAccountEmail(t *testing.T) {
-	update := func(_ context.Context, accountID, operatorID, _ string) error {
+	var gotExpectedCurrent string
+	update := func(_ context.Context, accountID, operatorID, expectedCurrent, _ string) error {
+		if accountID == "acc_cas" {
+			gotExpectedCurrent = expectedCurrent
+		}
 		switch {
 		case accountID == "acc_missing":
 			return ErrNotFound
@@ -1726,6 +1730,8 @@ func TestUpdateAccountEmail(t *testing.T) {
 			return ErrNotAccountOwner
 		case accountID == "acc_pending":
 			return ErrConflict
+		case accountID == "acc_stale":
+			return ErrEmailChangedSinceRequest
 		}
 		return nil
 	}
@@ -1754,6 +1760,8 @@ func TestUpdateAccountEmail(t *testing.T) {
 		want     int
 	}{
 		{"acc_x", `{"operator_id":"opr_owner","new_email":"NEW@Example.com"}`, http.StatusOK},
+		{"acc_cas", `{"operator_id":"opr_owner","expected_current":"old@example.com","new_email":"NEW@Example.com"}`, http.StatusOK},
+		{"acc_stale", `{"operator_id":"opr_owner","expected_current":"old@example.com","new_email":"n@e.c"}`, http.StatusConflict},
 		{"acc_x", `{"operator_id":"opr_member","new_email":"n@e.c"}`, http.StatusForbidden},
 		{"acc_pending", `{"operator_id":"opr_owner","new_email":"n@e.c"}`, http.StatusConflict},
 		{"acc_missing", `{"operator_id":"opr_owner","new_email":"n@e.c"}`, http.StatusNotFound},
@@ -1776,6 +1784,9 @@ func TestUpdateAccountEmail(t *testing.T) {
 		if resp.StatusCode != tc.want {
 			t.Errorf("update-email %s %s = %d, want %d", tc.id, tc.body, resp.StatusCode, tc.want)
 		}
+	}
+	if gotExpectedCurrent != "old@example.com" {
+		t.Errorf("expected_current passed to update = %q, want old@example.com", gotExpectedCurrent)
 	}
 }
 

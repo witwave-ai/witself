@@ -746,7 +746,11 @@ test("a committed change spends the code, kills recovery codes, and opens the un
   const commits = calls.filter((c) => c.path.endsWith(":update-email"));
   assert.equal(commits.length, 1);
   const commitBody = JSON.parse(commits[0].init.body);
-  assert.deepEqual(commitBody, { operator_id: "op_1", new_email: NEW_EMAIL });
+  assert.deepEqual(commitBody, {
+    operator_id: "op_1",
+    expected_current: OWNER_EMAIL,
+    new_email: NEW_EMAIL,
+  });
 
   assert.equal(kv.json("emailchange:acct_1"), null, "the code is spent");
   assert.equal(kv.json("recover:acct_1"), null, "stale recovery codes die with the old anchor");
@@ -780,7 +784,12 @@ test("a cell conflict or outage keeps the confirmation code alive", async (t) =>
   const harness = makeEnv();
   const { env, kv } = harness;
   const code = await issueChangeCode(t, harness);
-  mockCell(t, commitHandlers({ ":update-email": () => cellJSON({ error: "conflict" }, 409) }));
+  mockCell(t, commitHandlers({
+    ":update-email": (url, init) => {
+      assert.equal(JSON.parse(init.body).expected_current, OWNER_EMAIL);
+      return cellJSON({ error: "conflict" }, 409);
+    },
+  }));
   assert.equal((await changeEmail(env, { new_email: NEW_EMAIL, code })).status, 409);
   assert.notEqual(kv.json("emailchange:acct_1").code_hash, undefined);
 
