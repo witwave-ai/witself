@@ -670,9 +670,23 @@ chart can label the existing server and worker ServiceMonitors for exact
 selection and restrict both metrics ports to the `monitoring` namespace.
 
 The receiver contract accepts only the name and key of an immutable Kubernetes
-Secret. Alertmanager mounts that Secret and reads the HTTPS webhook URL through
-`url_file`; the value never enters Git, Helm values, Argo Application state, or
-the retained canary artifact. All shipped Witself rules aggregate away pod,
+Secret. Alertmanager mounts that Secret and reads the value from the mounted
+file, so it never enters Git, Helm values, Argo Application state, or the
+retained canary artifact. Two receivers are configured independently:
+
+- The **incident receiver** is selected by `platform.monitoring.receiver.kind`.
+  `pagerduty` configures Alertmanager's native PagerDuty Events API v2 client
+  and reads only the integration (routing) key through `routing_key_file`, so
+  firing maps to trigger, resolved maps to resolve, and the alert `severity`
+  label is carried through. The default `webhook` keeps the provider-neutral
+  HTTPS receiver, reading a full URL through `url_file`.
+- The **dead-man receiver** (`platform.monitoring.receiverDeadman`) is a
+  deliberately provider-agnostic heartbeat webhook. The always-firing
+  `WitselfWatchdog` rule routes there and nowhere else, and carries no
+  `witself_alert` label so it never opens an incident. An outside monitor pages
+  when the heartbeat stops, which is the only signal that survives losing the
+  alerting plane itself. Omitting its Secret omits the route, receiver, and
+  mount. All shipped Witself rules aggregate away pod,
 instance, route, account, realm, and agent identity. They expose only fixed
 service/severity labels and the worker's existing closed-set job label.
 
