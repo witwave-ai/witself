@@ -376,6 +376,16 @@ rollout record. The script never writes to the source database and never leaves
 a plaintext dump; a `pending` manifest or any nonzero exit blocks the rollout.
 Do not run a live restore as part of this procedure.
 
+`scripts/roll-cell.sh` enforces this gate before it edits either values pin.
+Pass each verified artifact directory with `--backup-evidence` (one per
+reviewed cell); the helper first runs `witself-admin backup-evidence verify
+--release "$RELEASE_VERSION"` on those directories and aborts with the values
+file untouched on any nonzero exit, or when no verifier binary is executable
+(`WITSELF_ADMIN_BIN` overrides the binary resolved from `PATH`). For a release
+that cannot advance the database schema, attest that explicitly with
+`--no-schema-change` instead; the two options are mutually exclusive, and
+omitting both fails closed.
+
 ## Move and stage the `witmail.net` managed-email domain
 
 This is the retained registrar and edge-foundation procedure, not an email
