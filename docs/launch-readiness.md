@@ -1,0 +1,145 @@
+# Launch readiness — plan of record
+
+Working plan for the **general self-service** production launch. It is the
+decided execution order plus the list of things that need Scott directly. It is
+maintained by Claude (production-readiness lead) and updated as slices land.
+
+**Authority model (per Scott, 2026-08-22):** Claude decides reasonable defaults
+and executes — code, docs, config, tests, **and deploys** (there are no
+customers; Scott is the only internal user, so dogfood deploys are expected and
+must not bottleneck). Claude uses tooling already authenticated on the host and
+follows release discipline (CI green; pre-migration backup gate before
+schema-advancing rolls; `make check` before push; one coordinated tag per arc).
+**Only these still need Scott directly:** creating/revealing raw secret values,
+provisioning *new* external credentials/accounts (PagerDuty, Stripe live keys,
+new DNS/email routing), billable resource creation sign-off, and anything the
+safety rules reserve. No AWS Control Tower changes, ever.
+
+Status legend: ✅ done · 🔨 Claude-owned (build/deploy) · 🔑 needs Scott
+(credential/account/ship) · ⏳ blocked on a dependency.
+
+## Already shipped this week
+
+- ✅ roll-cell pre-migration backup gate (#235)
+- ✅ email-change `expected_current` CAS (#237) — closed the last onboarding P1
+- ✅ Codex delegation via the official plugin (#236) + deepest-effort/ultra (#238)
+- ✅ consolidated data-retention policy doc (#239)
+
+## Domain summary
+
+| Domain | State | What's left | Owner |
+|---|---|---|---|
+| **Team activation** | Team fully defined but `available:false`; realms+operators already are the org/billing unit; no seat cap exists | Add `operator_seats` limit dimension (dark), plan-fit seat check, set per-plan counts, flip Team available with honest flat pricing | 🔨 (seat counts need Scott sign-off) |
+| **Billing** | Dark Stripe stack largely complete (lifecycle, mutations, receipts, adapter) | Stripe Tax wiring, GA gate flag, paid-to-paid guard, dunning contract test, refund runbook | 🔨 code · 🔑 live keys/products/webhook/portal/cutover |
+| **Support** | Durable ticket engine built + tested | Published policy doc, AI author-kind + reserved handle, scoped AI credential, dark AI support-runner, support@ intake, entitlement sync, SLO alert | 🔨 code/docs · 🔑 support@ DNS+routing, AI credential, runner host |
+| **Monitoring** | kube-prometheus-stack templated, default-off | PagerDuty receiver (dark), dead-man watchdog, 3-phase rollout overlay, runbook | 🔨 config · 🔑 PagerDuty acct+key, dead-man monitor, cluster secrets, apply |
+| **Edge DMARC** | Inbound worker runs full SMTP txn; cell records spf/dkim/dmarc | Authenticity parser module, hard-DMARC-fail SMTP rejection (dark flag), value-free authenticity metadata (dark), migration | 🔨 code · 🔑 authserv-id from live header, worker deploy |
+| **Capacity** | Civo has no prod profile (hardcoded 1 node) | Fixed 2-node Civo profile (vary only NodeCount → in-place update), lift minimal-only gate, TUI, topology spread | 🔨 code · 🔑 billable 2-node apply (gates monitoring) |
+| **Retention** | ✅ done (#239) | — | — |
+
+## Newly surfaced launch-critical gaps (from the survey critique)
+
+These were not in the original decision list and matter for a paid, public,
+PII-collecting launch:
+
+1. **Legal pages don't exist** — no ToS, Privacy, Acceptable Use, DPA/subprocessor
+   list, refund/cancellation terms. Claude drafts skeletons; **final content +
+   legal review = 🔑**.
+2. **No ToS/consent capture at signup** — accounts schema has no consent column;
+   `accountCreate` records no acceptance. Add consent-timestamp capture (🔨) once
+   legal text exists.
+3. **Signup is invite-gated and CLI-only** — `accountCreate` requires `--invite`;
+   there is no web signup. "General self-service" needs a **product decision (🔑):**
+   open signup (relax `--invite`) vs waitlist, and web entry point vs CLI-only.
+   Claude builds the chosen path.
+4. **Abuse controls thin for open signup** — control-plane KV counters have no
+   CAS; no captcha/Turnstile; no general HTTP rate limit. Decide hardening scope
+   (🔑 product), Claude implements (DO counter authority / Turnstile / throttle).
+5. **Account deletion ≠ erasure** — `CloseAccount` only tombstones; GDPR
+   right-to-erasure is a documented accepted v0 gap. For an EU-inclusive paid
+   launch, decide posture (🔑): publicly accept the gap or fund a closed-account
+   purge/anonymize sweep. (The retention policy doc correctly claims only
+   explicit-request deletion, so it is consistent — but the erasure posture must
+   be stated in the Privacy page.)
+6. **No public status/incident page** — reasonable default: defer a full status
+   page; stand up an incident-comms channel referenced from the support policy.
+
+## Cross-cutting ordering constraints
+
+- **Paid-to-paid guard before Team flip.** The Professional→Team billing guard
+  (`billing_mutations.go`) MUST merge before `team.available` flips in
+  `web/plans/plans.json`, or `subscribe()` mints a second live subscription
+  (double-bill). The `plans.json` edits (Team available, support feature, seat
+  counts) are one cluster.
+- **Second Civo node before monitoring rollout** (Scott's sequencing; monitoring
+  needs the headroom).
+- **Monitoring receiver before support SLO alert** (support breach + dead-man
+  feed the one shared PagerDuty service + dead-man monitor — create exactly one
+  of each).
+- **Edge DMARC before support@ intake** (support@ trusts DMARC-authenticated
+  sender behind the same edge).
+- **One release per arc.** All dark code merges first; then ONE coordinated
+  CI + tag + production deploy — not a tag per domain.
+
+## Claude-owned execution order
+
+Dark, independently testable slices, delegated to Codex (gpt-5.6-sol/ultra),
+adversarially reviewed, gated, merged. Roughly in dependency order:
+
+1. **Legal-page skeletons** (ToS, Privacy incl. erasure posture, AUP, DPA,
+   refund/cancellation) — drafts for Scott/legal to finalize.
+2. **Capacity**: Civo prod node profile (fixed 2-node, vary only NodeCount) →
+   lift minimal-only gate → TUI + docs → usw2 soft topology-spread values.
+3. **Monitoring**: PagerDuty native receiver (dark) → dead-man watchdog (dark) →
+   3-phase enablement overlay (committed, not applied) → runbook.
+4. **Edge DMARC**: authenticity parser module + tests → hard-fail SMTP rejection
+   behind `AGENT_EMAIL_DMARC_REJECT_ENABLED` (dark) → authenticity metadata +
+   migration (cell-side inert first).
+5. **Team seats**: `operator_seats` dimension (dark) → plan-fit seat check.
+6. **Billing (paid-to-paid guard first)** → Stripe Tax wiring → GA gate flag
+   (fail-closed) → dunning contract test → refund runbook.
+7. **Support**: policy doc → assistant author-kind + reserved handle → admin
+   re-triage store method → AI support-runner core (dark) → scoped support_ai
+   credential/role (dark) → SLO metric + breach alert → support@ intake bridge.
+8. **plans.json cluster** (after the paid-to-paid guard): per-plan
+   `operator_seats` values → support entitlement sync → Team billing readiness →
+   **flip Team available** with honest flat pricing.
+9. **Consent capture** (after legal text) · **post-deploy** feature-status
+   reconciliation citing real monitoring evidence.
+
+## Needs-Scott packet
+
+Grouped by the interaction required. Claude does everything up to these.
+
+**Product / legal decisions**
+- Open self-service signup (relax `--invite`; web entry point vs CLI-only).
+- Approve + publish legal pages after legal review.
+- GDPR/right-to-erasure posture for GA.
+- Abuse-hardening scope before open signup.
+- Status/incident-comms channel.
+- Per-plan seat counts; whether Professional/Personal are seat-restricted.
+- Paid-to-paid transition policy (contact-guard vs in-place switch).
+
+**Capacity (gates monitoring)**
+- `witself-infra preview -cell civo-sandbox-usw2-dev -profile prod` → confirm
+  in-place NodeCount 1→2 (abort on any cluster/network/PVC replace) → `up` to
+  create the 2nd billable node. Sequence before monitoring.
+
+**Monitoring accounts + secrets**
+- One PagerDuty free service + Events API v2 key; one external dead-man monitor.
+- Pre-create the two immutable K8s secrets (PagerDuty key, dead-man URL).
+- Apply the 3-phase rollout; run the alert canary; retain evidence.
+
+**Stripe**
+- Live account + secret key; webhook endpoint + secret; Customer Portal config;
+  Stripe Tax activation; Revenue Recovery (Smart Retries → cancel → Personal);
+  14-day refund window; verify auto-provisioned prices; set launch env flags;
+  execute the cutover; one live end-to-end proof before GA.
+
+**Email edge + support**
+- Capture Cloudflare's real authserv-id; enable DMARC reject + deploy worker;
+  apply the authenticity migration; support@ DNS + Email Routing; mint the
+  support-AI credential + Claude API key; stand up the runner host.
+
+**Release**
+- One coordinated push + CI + tag + production deploy for the whole dark batch.
