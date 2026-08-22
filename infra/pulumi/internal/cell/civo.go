@@ -90,7 +90,7 @@ func provisionCivo(ctx *pulumi.Context, c civoCell) error {
 		Applications: pulumi.String("traefik2-nodeport"),
 		Pools: civo.KubernetesClusterPoolsArgs{
 			Label:     pulumi.String("development"),
-			NodeCount: pulumi.Int(1),
+			NodeCount: pulumi.Int(c.nodeCount),
 			Size:      pulumi.String(c.nodeSize),
 		},
 		Tags:            pulumi.String("witself " + c.name + " development"),
@@ -138,4 +138,11 @@ func provisionCivo(ctx *pulumi.Context, c civoCell) error {
 		return provisionCivoArgoCD(ctx, c, cluster, cellDomain, apiHost, cluster)
 	}
 	return nil
+}
+
+func civoNodeProfileFor(profile string) int {
+	if profile == "prod" {
+		return 2
+	}
+	return 1
 }

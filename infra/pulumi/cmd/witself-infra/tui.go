@@ -221,7 +221,24 @@ func effectiveSettings(e cellEntry, d *cellEntry) []settingRow {
 	// argocd is on — off means they wouldn't apply.
 	//nolint:staticcheck // Independent provider sections keep the rendered row order obvious.
 	if cloud == "civo" {
-		str("profile", "minimal development", e.Profile, func(x *cellEntry) *string { return x.Profile })
+		profile := "minimal"
+		fromEntry := false
+		if d != nil && d.Profile != nil {
+			profile = *d.Profile
+			fromEntry = true
+		}
+		if e.Profile != nil {
+			profile = *e.Profile
+			fromEntry = true
+		}
+		profileLabel := profile
+		switch profile {
+		case "", "minimal":
+			profileLabel = "minimal development"
+		case "prod":
+			profileLabel = "prod (2 nodes)"
+		}
+		out = append(out, settingRow{key: "profile", value: profileLabel, fromEntry: fromEntry})
 	} else {
 		str("sizing", "minimal", e.Profile, func(x *cellEntry) *string { return x.Profile })
 	}

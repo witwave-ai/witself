@@ -15,6 +15,7 @@ func TestProvisionCivoRegistersOnlyCivoSubstrate(t *testing.T) {
 			region:    "nyc1",
 			profile:   "minimal",
 			nodeSize:  "g4s.kube.medium",
+			nodeCount: civoNodeProfileFor("minimal"),
 			adminCIDR: "203.0.113.7/32",
 		})
 	}, pulumi.WithMocks("witself-infra", "civo-sandbox-use1-dev", mocks))
@@ -63,6 +64,74 @@ func TestProvisionCivoRegistersOnlyCivoSubstrate(t *testing.T) {
 	if got := pools["size"]; !got.IsString() || got.StringValue() != "g4s.kube.medium" {
 		t.Errorf("node size = %v, want g4s.kube.medium", got)
 	}
+	if got := pools["label"]; !got.IsString() || got.StringValue() != "development" {
+		t.Errorf("pool label = %v, want development", got)
+	}
+}
+
+func TestProvisionCivoProdProfileOnlyChangesNodeCount(t *testing.T) {
+	minimalPool := civoPoolForProfile(t, "minimal")
+	prodPool := civoPoolForProfile(t, "prod")
+
+	if got := minimalPool["nodeCount"]; !got.IsNumber() || got.NumberValue() != 1 {
+		t.Errorf("minimal node count = %v, want 1", got)
+	}
+	if got := prodPool["nodeCount"]; !got.IsNumber() || got.NumberValue() != 2 {
+		t.Errorf("prod node count = %v, want 2", got)
+	}
+	for _, key := range []resource.PropertyKey{"label", "size"} {
+		minimal := minimalPool[key]
+		prod := prodPool[key]
+		if !minimal.IsString() || !prod.IsString() || prod.StringValue() != minimal.StringValue() {
+			t.Errorf("prod pool %s = %v, want unchanged from minimal (%v)", key, prod, minimal)
+		}
+	}
+	minimalPoolShape := minimalPool.Copy()
+	prodPoolShape := prodPool.Copy()
+	delete(minimalPoolShape, "nodeCount")
+	delete(prodPoolShape, "nodeCount")
+	if !resource.NewObjectProperty(prodPoolShape).DeepEquals(resource.NewObjectProperty(minimalPoolShape)) {
+		t.Errorf("prod pool properties except nodeCount = %v, want unchanged from minimal (%v)", prodPoolShape, minimalPoolShape)
+	}
+}
+
+func civoPoolForProfile(t *testing.T, profile string) resource.PropertyMap {
+	t.Helper()
+	mocks := &civoResourceMocks{}
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		return provisionCivo(ctx, civoCell{
+			name:      "civo-sandbox-use1-dev",
+			region:    "nyc1",
+			profile:   profile,
+			nodeSize:  "g4s.kube.medium",
+			nodeCount: civoNodeProfileFor(profile),
+			adminCIDR: "203.0.113.7/32",
+		})
+	}, pulumi.WithMocks("witself-infra", "civo-sandbox-use1-dev", mocks))
+	if err != nil {
+		t.Fatalf("provision Civo with profile %q: %v", profile, err)
+	}
+	return mocks.inputs["civo:index/kubernetesCluster:KubernetesCluster"]["pools"].ObjectValue()
+}
+
+func TestCivoNodeProfileFor(t *testing.T) {
+	tests := []struct {
+		name    string
+		profile string
+		want    int
+	}{
+		{name: "prod", profile: "prod", want: 2},
+		{name: "minimal", profile: "minimal", want: 1},
+		{name: "empty", profile: "", want: 1},
+		{name: "other", profile: "other", want: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := civoNodeProfileFor(test.profile); got != test.want {
+				t.Errorf("civoNodeProfileFor(%q) = %d, want %d", test.profile, got, test.want)
+			}
+		})
+	}
 }
 
 func TestProvisionCivoPinsExplicitKubernetesVersion(t *testing.T) {
@@ -70,7 +139,7 @@ func TestProvisionCivoPinsExplicitKubernetesVersion(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		return provisionCivo(ctx, civoCell{
 			name: "civo-sandbox-use1-dev", region: "nyc1",
-			nodeSize: "g4s.kube.medium", adminCIDR: "203.0.113.7/32",
+			nodeSize: "g4s.kube.medium", nodeCount: civoNodeProfileFor("minimal"), adminCIDR: "203.0.113.7/32",
 			k8sVersion: "1.35.0-k3s1",
 		})
 	}, pulumi.WithMocks("witself-infra", "civo-sandbox-use1-dev", mocks))

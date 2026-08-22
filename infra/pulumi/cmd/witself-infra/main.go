@@ -48,6 +48,7 @@ const projectName = "witself-infra"
 // clouds are the functional provider selectors (also the name token).
 var clouds = map[string]bool{"aws": true, "gcp": true, "azure": true, "civo": true}
 var placementChannels = map[string]bool{"stable": true, "edge": true, "experimental": true}
+var civoProfiles = map[string]bool{"minimal": true, "prod": true}
 
 func defaultK8sVersion(cloud string) string {
 	switch cloud {
@@ -446,8 +447,8 @@ func run(args []string) error {
 		if *backendFlag != "local" {
 			return fmt.Errorf("-cloud civo currently requires -backend local (development state must be an explicit opt-out)")
 		}
-		if (cmd == "up" || cmd == "preview") && *profile != "minimal" {
-			return fmt.Errorf("-cloud civo currently supports only -profile minimal (the production/HA profile is not implemented)")
+		if (cmd == "up" || cmd == "preview") && !civoProfiles[*profile] {
+			return fmt.Errorf("-cloud civo supports only -profile minimal or prod")
 		}
 		if (cmd == "up" || cmd == "preview") && *channel != "experimental" {
 			return fmt.Errorf("-cloud civo currently supports only -channel experimental")
