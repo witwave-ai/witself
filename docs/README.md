@@ -175,6 +175,9 @@ deployment cells under a thin global control plane.
   realm-rolled metered dimensions, limits, and overage behavior.
 - [billing-return-pages.md](billing-return-pages.md): value-free hosted
   checkout and portal return routes that hand control back to the AI or CLI.
+- [launch-readiness.md](launch-readiness.md): the working plan of record for
+  the general self-service production launch — decided execution order and the
+  items that need Scott directly.
 - [data-retention-policy.md](data-retention-policy.md): the consolidated
   customer-facing statement of how long transcripts, messages, the audit trail,
   and raw email are kept, end-of-window actions, and the legal-hold scope.
