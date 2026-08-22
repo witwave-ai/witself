@@ -122,3 +122,17 @@ groups:
         annotations:
           summary: Prometheus reports rule-evaluation failures.
           runbook: docs/runbooks.md#founder-open-plane-monitoring
+      # Dead-man's switch. This alert always fires; it is routed only to the
+      # external heartbeat receiver and deliberately carries no witself_alert
+      # label, so it never reaches the incident route. Silence here means the
+      # alerting pipeline itself is down, and the heartbeat monitor pages.
+      - alert: WitselfWatchdog
+        expr: vector(1)
+        for: 0m
+        labels:
+          severity: none
+          service: monitoring
+          witself_watchdog: "true"
+        annotations:
+          summary: Witself alerting pipeline heartbeat.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring

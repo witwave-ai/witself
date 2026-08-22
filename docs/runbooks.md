@@ -2693,11 +2693,35 @@ in one parent commit.
    kube-state-metrics targets and every required schema-91 gauge to remain up
    across multiple scrape intervals. Do not enable alerting while a target is
    absent or stale; absence rules deliberately fail closed.
-4. Pre-create an immutable Secret whose one selected key contains the reviewed
-   HTTPS receiver URL. Do not print, commit, or pass the URL in argv. In the
-   third GitOps change, set the immutable Secret name/key and enable
+4. Pre-create the immutable receiver Secrets. Do not print, commit, or pass
+   their values in argv.
+
+   - **Incident receiver.** With `platform.monitoring.receiver.kind: pagerduty`
+     the selected key holds only the PagerDuty Events API v2 integration
+     (routing) key, which Alertmanager reads through `routing_key_file`;
+     firing maps to trigger, resolved maps to resolve, and the alert `severity`
+     label is carried through. With the default `kind: webhook` the key holds a
+     full HTTPS URL read through `url_file` instead.
+   - **Dead-man heartbeat.** Set `platform.monitoring.receiverDeadman` to a
+     second immutable Secret holding the heartbeat endpoint URL. The
+     always-firing `WitselfWatchdog` alert is routed there and nowhere else;
+     it deliberately carries no `witself_alert` label, so it never opens an
+     incident. Configure that external monitor (PagerDuty's free tier has no
+     native dead-man, so use Dead Man's Snitch, healthchecks.io, or equivalent)
+     to page the same PagerDuty service when a check-in is missed. The route
+     flushes every minute and repeats every five, so the heartbeat arrives on a
+     five-minute beat; set the monitor's missed-check-in window to roughly
+     fifteen minutes, which is three beats of margin and tolerates a normal
+     Alertmanager restart without flapping. Do not set the repeat interval
+     equal to the group interval: the flush tick gates the repeat check, so the
+     beat would silently halve to every ten minutes.
+     Leaving `receiverDeadman.secretName` empty omits the route, the receiver,
+     and the mount entirely.
+
+   In the third GitOps change, set the immutable Secret names/keys and enable
    `platform.monitoring.alerting.enabled`. Wait for the exact null-root plus
-   `witself_alert=true` child route and the twelve bounded rules to converge.
+   `witself_alert=true` incident route, the `witself_watchdog=true` dead-man
+   route, and the thirteen bounded rules to converge.
    Confirm zero
    `prometheus_rule_evaluation_failures_total`, the schema-91 logical storage
    gauges are present, and PostgreSQL PVC capacity/available metrics match the
@@ -2720,7 +2744,13 @@ in one parent commit.
    leaves the fixed rule for explicit operator reconciliation; do not rerun or
    delete it by name. The command does not inspect or claim external delivery.
    Retain separate access-controlled receiver evidence for the firing and
-   resolved notifications before closing any production gate.
+   resolved notifications before closing any production gate. Separately prove
+   the dead-man: confirm the heartbeat monitor is checking in on the five-minute
+   `WitselfWatchdog` cadence, then stop the heartbeat (silence the Watchdog or
+   pause Alertmanager delivery) and confirm the external monitor pages once its
+   window lapses. Restore delivery and confirm the monitor returns to healthy.
+   Retain that evidence too; an incident path that pages only while the cluster
+   is alive is not a dead-man.
 6. Observe normal rules and storage growth for the declared acceptance window.
    Update the canonical feature-status catalog only in a later evidence PR.
 
@@ -2732,5 +2762,6 @@ stack and flag removal can cascade resource deletion. Keep the Application
 enabled and forward-fix it. Stack/PVC teardown is a separate destructive
 procedure after retained evidence has been exported and the incident owner has
 approved deletion. A one-node cluster loss can also remove this alerting plane,
-so production acceptance requires an external dead-man or outside-in
-availability check in addition to the in-cluster receiver path.
+so production acceptance requires the external dead-man above (the
+`WitselfWatchdog` heartbeat and its outside monitor) in addition to the
+in-cluster receiver path.
