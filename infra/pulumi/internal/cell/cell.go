@@ -102,6 +102,7 @@ type civoCell struct {
 	accountAlias      string
 	role              string
 	nodeSize          string
+	nodeCount         int
 	adminCIDR         string
 	argocd            bool
 	gitopsRepo        string
@@ -237,6 +238,7 @@ func Program(ctx *pulumi.Context) error {
 			accountAlias:      w.Get("accountAlias"),
 			role:              w.Get("role"),
 			nodeSize:          nodeSize,
+			nodeCount:         civoNodeProfileFor(profile),
 			adminCIDR:         w.Get("civoAdminCIDR"),
 			argocd:            argocd,
 			gitopsRepo:        gitopsRepo,

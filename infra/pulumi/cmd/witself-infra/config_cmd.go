@@ -147,8 +147,8 @@ func configAddCell(fs *flag.FlagSet, configPath string) error {
 		if effective("backend") != "local" {
 			return fmt.Errorf("-cloud civo requires -backend local")
 		}
-		if effective("profile") != "minimal" {
-			return fmt.Errorf("-cloud civo currently supports only -profile minimal")
+		if !civoProfiles[effective("profile")] {
+			return fmt.Errorf("-cloud civo supports only -profile minimal or prod")
 		}
 		if effective("channel") != "experimental" {
 			return fmt.Errorf("-cloud civo currently supports only -channel experimental")

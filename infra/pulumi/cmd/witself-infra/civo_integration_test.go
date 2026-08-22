@@ -33,6 +33,29 @@ func TestCivoEffectiveSettingsAreProviderAware(t *testing.T) {
 	if got := values["profile"]; got != "minimal development" {
 		t.Fatalf("profile = %q", got)
 	}
+	prod := "prod"
+	prodRows := effectiveSettings(cellEntry{
+		Cloud:         &cloud,
+		Backend:       &backend,
+		Profile:       &prod,
+		CivoAdminCIDR: &adminCIDR,
+	}, nil)
+	prodValues := map[string]string{}
+	for _, row := range prodRows {
+		prodValues[row.key] = row.value
+	}
+	if got := prodValues["profile"]; got != "prod (2 nodes)" {
+		t.Fatalf("prod profile = %q", got)
+	}
+	unknown := "other"
+	unknownRows := effectiveSettings(cellEntry{Cloud: &cloud, Profile: &unknown}, nil)
+	unknownValues := map[string]string{}
+	for _, row := range unknownRows {
+		unknownValues[row.key] = row.value
+	}
+	if got := unknownValues["profile"]; got != unknown {
+		t.Fatalf("unknown profile = %q, want visible raw value", got)
+	}
 	if got := values["database"]; got != "in-cluster PostgreSQL · persistent volume" {
 		t.Fatalf("database = %q", got)
 	}
@@ -88,6 +111,7 @@ func TestConfigAddCivoCellRoundTrip(t *testing.T) {
 		"cloud":                    "civo",
 		"region":                   "nyc1",
 		"backend":                  "local",
+		"profile":                  "minimal",
 		"civo-admin-cidr":          "203.0.113.7/32",
 		"civo-node-size":           "g4s.kube.medium",
 		"civo-token-file":          tokenPath,
@@ -102,11 +126,49 @@ func TestConfigAddCivoCellRoundTrip(t *testing.T) {
 	}
 }
 
+func TestConfigAddCivoProdProfileRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "infra.yaml")
+	fs := newTestFlagSet()
+	if err := fs.Parse([]string{
+		"-cloud", "civo",
+		"-account-alias", "sandbox",
+		"-region", "nyc1",
+		"-role", "prod",
+		"-backend", "local",
+		"-profile", "prod",
+		"-civo-admin-cidr", "203.0.113.7/32",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := configAddCell(fs, path); err != nil {
+		t.Fatal(err)
+	}
+
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(contents), "profile: prod") {
+		t.Fatalf("infra.yaml did not persist prod profile:\n%s", contents)
+	}
+
+	resolved := newTestFlagSet()
+	if err := resolved.Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyCellConfig(resolved, "civo-sandbox-use1-prod", path); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolved.Lookup("profile").Value.String(); got != "prod" {
+		t.Fatalf("profile = %q, want prod", got)
+	}
+}
+
 func TestConfigAddCivoCellRejectsIncompleteProviderConfig(t *testing.T) {
 	for _, args := range [][]string{
 		{"-cloud", "civo", "-region", "nyc1", "-backend", "local"},
 		{"-cloud", "civo", "-region", "nyc1", "-civo-admin-cidr", "203.0.113.7/32"},
-		{"-cloud", "civo", "-region", "nyc1", "-backend", "local", "-civo-admin-cidr", "203.0.113.7/32", "-profile", "prod"},
+		{"-cloud", "civo", "-region", "nyc1", "-backend", "local", "-civo-admin-cidr", "203.0.113.7/32", "-profile", "other"},
 		{"-cloud", "civo", "-region", "nyc1", "-backend", "local", "-civo-admin-cidr", "203.0.113.7/32", "-channel", "stable"},
 		{"-cloud", "civo", "-region", "nyc1", "-backend", "local", "-civo-admin-cidr", "203.0.113.7/32", "-control-plane", "https://self.example.com"},
 		{"-cloud", "civo", "-region", "nyc1", "-backend", "local", "-civo-admin-cidr", "not-a-cidr"},
@@ -118,6 +180,30 @@ func TestConfigAddCivoCellRejectsIncompleteProviderConfig(t *testing.T) {
 		if err := configAddCell(fs, filepath.Join(t.TempDir(), "infra.yaml")); err == nil {
 			t.Fatalf("configAddCell(%v) unexpectedly succeeded", args)
 		}
+	}
+}
+
+func TestCivoRunAcceptsProdAndRejectsOtherProfiles(t *testing.T) {
+	err := run([]string{
+		"preview",
+		"-cloud", "civo",
+		"-region", "nyc1",
+		"-backend", "local",
+		"-profile", "prod",
+	})
+	if err == nil || !strings.Contains(err.Error(), "-civo-admin-cidr is required") {
+		t.Fatalf("prod profile reached error %v, want admin CIDR validation", err)
+	}
+
+	err = run([]string{
+		"preview",
+		"-cloud", "civo",
+		"-region", "nyc1",
+		"-backend", "local",
+		"-profile", "other",
+	})
+	if err == nil || !strings.Contains(err.Error(), "supports only -profile minimal or prod") {
+		t.Fatalf("other profile error = %v", err)
 	}
 }
 

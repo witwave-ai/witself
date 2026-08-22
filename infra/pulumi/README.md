@@ -117,9 +117,9 @@ F="-cloud aws -account-alias sandbox -region us-west-2 -role dev -aws-profile wi
 ./bin/witself-infra destroy $F
 ```
 
-### Civo development cell
+### Civo cell
 
-Civo uses one inexpensive K3s worker, native Civo DNS, Traefik NodePort
+Civo uses an inexpensive K3s worker pool, native Civo DNS, Traefik NodePort
 ingress, cert-manager, and an in-cluster PostgreSQL volume. The control plane is
 free and no managed load balancer is created. A token is read from a per-cell
 mode-0600 file (recommended for multi-account operation) or from the
@@ -150,9 +150,18 @@ install -m 600 /dev/null "$HOME/.witself/tokens/civo-sandbox.token"
 
 Omit `-k8s-version` to let Civo choose its latest stable K3s release, or
 provide a Civo version such as `1.35.0-k3s1` to pin it. Civo currently uses an
-explicit local Pulumi backend for this development tier; `bootstrap -cell
+explicit local Pulumi backend for these cells; `bootstrap -cell
 civo-sandbox-use1-dev` initializes that directory locally and performs no
 cloud-side backend work.
+
+The Civo `minimal` profile (and the default when `-profile` is omitted) uses one
+K3s node. The `prod` profile uses a fixed two-node K3s pool; no cluster
+autoscaler is wired. This fixed two-node production default reflects the Civo
+provider's inline pool model, which exposes a literal `NodeCount` rather than
+the min/max range available on AKS. Changing an existing cell from `minimal` to
+`prod` is intended to update only that inline pool's `NodeCount` in place.
+Before applying the change, run `pulumi preview` and verify that it reports a
+pool update with no cluster, pool, network, firewall, or PVC replacement.
 
 Inputs split two ways: **functional** (`-cloud`, `-region`, `-profile`) drive
 behavior; **labels** (`-account-alias`, `-role`) are free text used only in the
@@ -207,11 +216,12 @@ availability, enables PITR plus retained/final backups, and increases disk
 headroom; it is meant for persistent cells rather than nightly save-money
 teardown loops.
 
-The intended Kubernetes node envelope is `1..20` for `minimal` and `2..20` for
-`prod` across clouds. AKS exposes that envelope directly on the system node pool.
-AWS EKS Auto Mode and GKE Autopilot are currently left in their managed scaling
-modes; literal node-count min/max controls will require custom EKS Auto Mode
-NodePools and/or a future GKE Standard node-pool path.
+For the autoscaling hyperscaler paths, the intended Kubernetes node envelope is
+`1..20` for `minimal` and `2..20` for `prod`. AKS exposes that envelope directly
+on the system node pool. AWS EKS Auto Mode and GKE Autopilot are currently left
+in their managed scaling modes; literal node-count min/max controls will require
+custom EKS Auto Mode NodePools and/or a future GKE Standard node-pool path. Civo
+uses the fixed node counts described above instead of this autoscaling envelope.
 
 ```sh
 # Pulumi's GCS backend and gcpkms secrets provider use Application Default
