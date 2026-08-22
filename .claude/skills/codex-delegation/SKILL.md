@@ -28,12 +28,15 @@ When Claude drives the companion script from Bash instead of a `/codex:*`
 command, set the same environment the plugin harness would:
 
 ```bash
-CLAUDE_PLUGIN_ROOT="$HOME/.claude/plugins/cache/openai-codex/codex/<version>"
-CLAUDE_PLUGIN_DATA="$HOME/.claude/plugins/data/codex-openai-codex"
+export CLAUDE_PLUGIN_ROOT="$HOME/.claude/plugins/cache/openai-codex/codex/<version>"
+export CLAUDE_PLUGIN_DATA="$HOME/.claude/plugins/data/codex-openai-codex"
 ```
 
-`$CLAUDE_PLUGIN_DATA` is where job records and logs live; nothing is written
-inside the repository. Resolve `<version>` from
+Both must be exported (or passed inline on every `node` invocation): the
+companion reads them from `process.env`, and without `CLAUDE_PLUGIN_DATA` it
+falls back to a temporary directory, which hides direct jobs from
+`/codex:status` and `/codex:result` and risks losing results. Nothing is
+written inside the repository. Resolve `<version>` from
 `~/.claude/plugins/installed_plugins.json`.
 
 ## Lanes
