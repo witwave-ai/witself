@@ -20,8 +20,13 @@ claude plugin install codex@openai-codex
 ```
 
 Then, in a fresh Claude Code session, `/codex:setup` should report `ready`.
-Model and reasoning defaults come from `~/.codex/config.toml` (`model`,
-`model_reasoning_effort`); per-call overrides use `--model` and `--effort`.
+Model and reasoning depth come from `~/.codex/config.toml` — `model =
+"gpt-5.6-sol"` (the highest model) and `model_reasoning_effort = "ultra"` (the
+deepest level; the ladder is `minimal < low < medium < high < xhigh < max <
+ultra`). Delegated jobs deliberately do not pass `--effort`, because the
+plugin's flag caps at `xhigh` and would downgrade the `ultra` config default;
+leaving it unset inherits `ultra`. Use `--model` / `--effort` only to run a
+cheaper, shallower job on purpose.
 Leave the plugin's optional stop-time review gate disabled for this
 repository; Claude runs its own review loop.
 

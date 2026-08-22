@@ -65,15 +65,23 @@ Prefer the smallest lane that answers the question.
 
    ```bash
    cd "$WORKTREE" && node "$CLAUDE_PLUGIN_ROOT/scripts/codex-companion.mjs" task \
-     --write [--background] [--model gpt-5.6-sol] [--effort high|xhigh] --json \
+     --write [--background] --json \
      "<task text>"
    ```
 
    Foreground for small bounded work; `--background` for long work, then poll
-   `status <job-id>` (use `--wait`) and read `result <job-id>`. Default model
-   and effort come from `~/.codex/config.toml`; set `--effort high` or
-   `xhigh` explicitly for non-trivial slices (accepted values: `none`,
-   `minimal`, `low`, `medium`, `high`, `xhigh`).
+   `status <job-id>` (use `--wait`) and read `result <job-id>`.
+
+   **Model and reasoning depth — use the deepest available.** The model and
+   reasoning effort default to `~/.codex/config.toml` (`model = "gpt-5.6-sol"`,
+   the highest model; `model_reasoning_effort = "ultra"`, the deepest level).
+   The full effort ladder is `minimal < low < medium < high < xhigh < max <
+   ultra`; `gpt-5.6-sol` supports and runs `ultra`. Do NOT pass `--effort`:
+   the plugin's `--effort` flag only accepts up to `xhigh`, so passing it would
+   *cap* a job below the config's `ultra` default. Leaving it unset makes the
+   companion send `effort: null`, which inherits `ultra` from config. Only pass
+   `--effort` (or `--model`) to deliberately run a cheaper/shallower job. If the
+   config default is ever below `ultra`, raise it there rather than per-job.
 4. Treat the `touchedFiles` list and `git status` in the worktree as the only
    truth about what changed. Read the complete diff; reconcile it with the
    task and the current source; revert anything out of scope.
