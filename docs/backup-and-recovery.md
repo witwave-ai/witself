@@ -889,7 +889,10 @@ optionally rejects evidence older than an operator-chosen bound; the gate
 itself expresses currency through the exact target release, so no default
 age limit is imposed. The command verifies retained evidence; it does not
 replace running the backup script, and a passing summary is not a
-substitute for the encrypted artifacts themselves.
+substitute for the encrypted artifacts themselves. `scripts/roll-cell.sh`
+runs this command automatically on the directories passed with
+`--backup-evidence` and refuses to edit a cell's values pins on any nonzero
+exit.
 
 ### GCP Cloud SQL pre-migration backup
 

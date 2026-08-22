@@ -1304,7 +1304,7 @@
         },
         "bounds_abuse": {
           "state": "pass",
-          "summary": "Immutable digests, migration locks, bounded workers, schema floors, placement freezes, exact cohorts, and encrypted artifact permissions constrain rollout risk.",
+          "summary": "Immutable digests, migration locks, bounded workers, schema floors, placement freezes, exact cohorts, encrypted artifact permissions, and a fail-closed roll-cell gate that verifies pre-migration backup evidence before any values edit constrain rollout risk.",
           "evidence": [
             "docs/deployment-cells.md",
             "docs/release-and-build.md"

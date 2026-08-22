@@ -704,9 +704,10 @@ remains a separate real-client acceptance gate.
    For client-integration releases, also run `witself integrations --verify`
    in disposable provider profiles and distinguish that credential-free
    topology check from any separately recorded real-client or model acceptance.
-5. Roll one intended canary cell by passing `${VERSION}` to
-   `scripts/roll-cell.sh`; review, commit, and push only the two application
-   version pins.
+5. Roll one intended canary cell by passing `${VERSION}` and either the
+   verified backup-evidence directories or an explicit `--no-schema-change`
+   attestation to `scripts/roll-cell.sh`; review, commit, and push only the
+   two application version pins.
 6. Verify Argo health, replacement-pod readiness, `/v1/version`, and the
    release-specific feature smoke in that provisioned cell.
 7. Repeat the GitOps change and verification for each intended rollout wave.

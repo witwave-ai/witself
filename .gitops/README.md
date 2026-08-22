@@ -73,12 +73,18 @@ Before a release that can advance the database schema, create and verify the
 cell's pre-migration database backup and record its identifier in the private
 rollout record. For managed GCP, follow the hard on-demand Cloud SQL gate in
 [`docs/backup-and-recovery.md`](../docs/backup-and-recovery.md#gcp-cloud-sql-pre-migration-backup);
-this is mandatory even when a scheduled backup appears recent.
+this is mandatory even when a scheduled backup appears recent. The helper
+refuses to edit any pin until `witself-admin backup-evidence verify` accepts
+the Civo artifact directories passed with `--backup-evidence`, or the operator
+explicitly attests `--no-schema-change` for a release that cannot advance the
+schema; omitting both fails closed.
 
 ```sh
 VERSION="${RELEASE_VERSION:?set RELEASE_VERSION}"
 CELL="${ROLLOUT_CELL:?set ROLLOUT_CELL}"
-scripts/roll-cell.sh "$CELL" "$VERSION"
+scripts/roll-cell.sh "$CELL" "$VERSION" \
+  --backup-evidence "$BACKUP_ROOT"/<use1-backup-id> \
+  --backup-evidence "$BACKUP_ROOT"/<usw2-dev-backup-id>
 git diff -- ".gitops/cells/${CELL}/values.yaml"
 ```
 

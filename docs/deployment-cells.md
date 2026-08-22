@@ -432,13 +432,24 @@ pre-migration backup for the canary cell and record its identifier in the
 private rollout record. Managed GCP rollouts must complete the on-demand Cloud
 SQL procedure in
 [Backup And Recovery](backup-and-recovery.md#gcp-cloud-sql-pre-migration-backup)
-before `roll-cell.sh`; a recent scheduled backup is not a substitute.
+before `roll-cell.sh`; a recent scheduled backup is not a substitute. The
+helper itself fails closed: it edits no pin unless the Civo artifact
+directories passed with `--backup-evidence` pass
+[scripted verification](backup-and-recovery.md#scripted-verification-of-retained-pre-migration-evidence)
+or the operator explicitly attests `--no-schema-change`. It has no Cloud SQL
+evidence option, so never use `--no-schema-change` to stand in for a managed
+GCP backup.
 
 Then roll one provisioned canary by its exact cell-directory name:
 
 ```sh
 CELL="${CANARY_CELL:?set CANARY_CELL}"
-scripts/roll-cell.sh "$CELL" "$VERSION"
+# Schema-advancing release: both verified Civo pre-migration artifact directories.
+scripts/roll-cell.sh "$CELL" "$VERSION" \
+  --backup-evidence "$BACKUP_ROOT"/<use1-backup-id> \
+  --backup-evidence "$BACKUP_ROOT"/<usw2-dev-backup-id>
+# Release that cannot advance the schema: attest that explicitly instead.
+scripts/roll-cell.sh "$CELL" "$VERSION" --no-schema-change
 git diff -- ".gitops/cells/${CELL}/values.yaml"
 ```
 

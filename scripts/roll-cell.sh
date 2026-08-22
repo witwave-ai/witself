@@ -5,16 +5,80 @@
 # versions (cert-manager, external-dns, external-secrets, keda,
 # metrics-server) are OFF-LIMITS to this script by design.
 #
-# Usage: scripts/roll-cell.sh <cell-name> <version>
-# Example shape: scripts/roll-cell.sh CELL_NAME RELEASED_VERSION
+# Usage: scripts/roll-cell.sh <cell-name> <version> [gate options]
+# Example shape: scripts/roll-cell.sh CELL_NAME RELEASED_VERSION --no-schema-change
 set -euo pipefail
 
-if [ "$#" -ne 2 ]; then
-  echo "usage: $0 <cell-name> <version>" >&2
+usage() {
+  echo "usage: $0 <cell-name> <version> (--backup-evidence DIR [--backup-evidence DIR] | --no-schema-change)" >&2
+}
+
+die() {
+  echo "error: $*" >&2
+  exit 2
+}
+
+BACKUP_EVIDENCE=()
+NO_SCHEMA_CHANGE=false
+POSITIONAL=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --backup-evidence)
+      if [ "$#" -lt 2 ]; then
+        usage
+        die "--backup-evidence requires an artifact directory"
+      fi
+      # Never forward an option-looking token to the verifier: it could be
+      # parsed as a verifier flag (for example --cell=...) and narrow the gate.
+      case "$2" in
+        ''|-*)
+          usage
+          die "--backup-evidence requires an artifact directory path; '$2' looks like an option (prefix a relative path with ./)"
+          ;;
+      esac
+      if [ "${#BACKUP_EVIDENCE[@]}" -ge 2 ]; then
+        usage
+        die "--backup-evidence may be specified at most twice"
+      fi
+      BACKUP_EVIDENCE+=("$2")
+      shift 2
+      ;;
+    --no-schema-change)
+      NO_SCHEMA_CHANGE=true
+      shift
+      ;;
+    --)
+      shift
+      while [ "$#" -gt 0 ]; do
+        POSITIONAL+=("$1")
+        shift
+      done
+      ;;
+    -*)
+      usage
+      die "unknown option '$1'"
+      ;;
+    *)
+      POSITIONAL+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [ "${#POSITIONAL[@]}" -ne 2 ]; then
+  usage
   exit 2
 fi
-CELL="$1"
-VERSION="$2"
+CELL="${POSITIONAL[0]}"
+VERSION="${POSITIONAL[1]}"
+
+if [ "$NO_SCHEMA_CHANGE" = true ] && [ "${#BACKUP_EVIDENCE[@]}" -gt 0 ]; then
+  usage
+  die "--no-schema-change and --backup-evidence are mutually exclusive"
+fi
+if [ "$NO_SCHEMA_CHANGE" = false ] && [ "${#BACKUP_EVIDENCE[@]}" -eq 0 ]; then
+  die "rollout gate required; see docs/runbooks.md and provide --backup-evidence artifact directories for civo-sandbox-use1-backup and civo-sandbox-usw2-dev, or attest --no-schema-change"
+fi
 
 # Version must match Witself's release tag shape. Anything else and the
 # user is probably trying to bump the wrong thing with the wrong tool.
@@ -34,8 +98,23 @@ if [ ! -f "$VALUES" ]; then
 fi
 
 if ! command -v yq >/dev/null 2>&1; then
-  echo "error: yq is required (brew install yq)" >&2
-  exit 2
+  die "yq is required (brew install yq)"
+fi
+
+# This gate must complete before either values pin is edited. The verifier is
+# deliberately resolved only from the operator's override or normal PATH.
+if [ "$NO_SCHEMA_CHANGE" = true ]; then
+  echo "warning: operator attests release $VERSION cannot advance the database schema; backup evidence verification skipped" >&2
+else
+  ADMIN="${WITSELF_ADMIN_BIN:-witself-admin}"
+  ADMIN_PATH="$(command -v "$ADMIN" 2>/dev/null || true)"
+  if [ -z "$ADMIN_PATH" ] || [ ! -f "$ADMIN_PATH" ] || [ ! -x "$ADMIN_PATH" ]; then
+    die "backup evidence verifier is not executable; set WITSELF_ADMIN_BIN to an executable witself-admin binary"
+  fi
+  if ! "$ADMIN" backup-evidence verify --release "$VERSION" -- "${BACKUP_EVIDENCE[@]}"; then
+    die "backup evidence verification failed; rollout aborted before any values file edit"
+  fi
+  echo "backup evidence verified for release $VERSION (${#BACKUP_EVIDENCE[@]} artifact directories)"
 fi
 
 # The two paths this script may touch. Any other chartVersion (upstream

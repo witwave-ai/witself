@@ -371,6 +371,9 @@ jobs:
       - name: rollout rendering checks
         run: bash scripts/test-helm-rollout.sh
 
+      - name: roll cell backup gate checks
+        run: bash scripts/test-roll-cell-gate.sh
+
       - name: monitoring rollout capability checks
         run: |
           bash scripts/test-monitoring-rollout.sh
