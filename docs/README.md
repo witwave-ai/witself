@@ -175,6 +175,9 @@ deployment cells under a thin global control plane.
   realm-rolled metered dimensions, limits, and overage behavior.
 - [billing-return-pages.md](billing-return-pages.md): value-free hosted
   checkout and portal return routes that hand control back to the AI or CLI.
+- [data-retention-policy.md](data-retention-policy.md): the consolidated
+  customer-facing statement of how long transcripts, messages, the audit trail,
+  and raw email are kept, end-of-window actions, and the legal-hold scope.
 - [audit-retention.md](audit-retention.md): managed, self-hosted, and local
   audit retention defaults and audit content rules.
 - [transcript-retention.md](transcript-retention.md): account plan defaults,
