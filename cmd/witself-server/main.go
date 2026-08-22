@@ -1797,8 +1797,8 @@ func serve() int {
 				}
 				return policy, err
 			}
-			cfg.UpdateAccountEmail = func(ctx context.Context, accountID, operatorID, newEmail string) error {
-				err := st.UpdateAccountEmail(ctx, accountID, operatorID, newEmail)
+			cfg.UpdateAccountEmail = func(ctx context.Context, accountID, operatorID, expectedCurrent, newEmail string) error {
+				err := st.UpdateAccountEmail(ctx, accountID, operatorID, expectedCurrent, newEmail)
 				switch {
 				case errors.Is(err, store.ErrAccountNotFound):
 					return server.ErrNotFound
@@ -1806,6 +1806,8 @@ func serve() int {
 					return server.ErrNotAccountOwner
 				case errors.Is(err, store.ErrAccountNotActive):
 					return server.ErrConflict
+				case errors.Is(err, store.ErrEmailChangedSinceRequest):
+					return server.ErrEmailChangedSinceRequest
 				}
 				return err
 			}

@@ -2461,6 +2461,8 @@ async function handleChangeEmail(request, env, accountId) {
     state.old_email !== newEmail &&
     account.email === newEmail;
   if (!alreadyCommitted) {
+    // The cell enforces this armed-snapshot CAS atomically inside the same
+    // transaction as the update. This live-read check is only a cheap early-out.
     if (state.old_email !== undefined && account.email !== state.old_email) {
       return err("the account's email changed while this request was pending — request a new code", 409);
     }
@@ -2472,7 +2474,11 @@ async function handleChangeEmail(request, env, accountId) {
           "Content-Type": "application/json",
           Authorization: `Bearer ${cell.provision_token}`,
         },
-        body: JSON.stringify({ operator_id: operatorID, new_email: newEmail }),
+        body: JSON.stringify({
+          operator_id: operatorID,
+          expected_current: oldEmail,
+          new_email: newEmail,
+        }),
         signal: AbortSignal.timeout(15000),
       });
     } catch {

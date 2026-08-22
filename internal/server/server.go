@@ -181,7 +181,7 @@ type Config struct {
 	// ErrNotAccountOwner -> 403, ErrConflict -> 409. Also serves the undo
 	// variant ({undo:true, expected_current, new_email}) — the control plane
 	// applies it after the 48-hour undo link is clicked.
-	UpdateAccountEmail func(ctx context.Context, accountID, operatorID, newEmail string) error
+	UpdateAccountEmail func(ctx context.Context, accountID, operatorID, expectedCurrent, newEmail string) error
 	UndoAccountEmail   func(ctx context.Context, accountID, expectedCurrent, newEmail string) error
 
 	// SuspendAccountOwner, when set, enables POST /v1/account:suspend — the
@@ -1956,6 +1956,12 @@ var ErrNotAccountOwner = errors.New("only the account owner may do this")
 // longer matches what the undo token snapshotted (a subsequent legitimate
 // change ran first) so the revert must not roll back the newer state.
 var ErrEmailChangedSinceUndo = errors.New("email has changed since this undo was issued")
+
+// ErrEmailChangedSinceRequest signals that a forward email change lost a
+// compare-and-swap: the account's current email no longer matches the address
+// the control plane expected when it armed the change, so the commit is refused
+// with 409 and the caller must request a fresh confirmation code.
+var ErrEmailChangedSinceRequest = errors.New("email has changed since this change was requested")
 
 // ErrAccountNotSuspended signals a resume attempt against an account that is
 // not currently suspended.
@@ -4536,7 +4542,7 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 					writeJSONError(w, http.StatusBadRequest, "operator_id required")
 					return
 				}
-				err = cfg.UpdateAccountEmail(r.Context(), accountID, req.OperatorID, req.NewEmail)
+				err = cfg.UpdateAccountEmail(r.Context(), accountID, req.OperatorID, req.ExpectedCurrent, req.NewEmail)
 			}
 			switch {
 			case errors.Is(err, ErrNotFound):
@@ -4550,6 +4556,9 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 				return
 			case errors.Is(err, ErrEmailChangedSinceUndo):
 				writeJSONError(w, http.StatusConflict, "the email has changed since this undo link was issued")
+				return
+			case errors.Is(err, ErrEmailChangedSinceRequest):
+				writeJSONError(w, http.StatusConflict, "the email changed while this request was pending — request a new code")
 				return
 			case err != nil:
 				writeJSONError(w, http.StatusInternalServerError, "could not update email")
