@@ -162,6 +162,14 @@ func TestBridgeAdminAuthenticatorRequiresVerifiedImmutableIdentity(t *testing.T)
 			bearer: "bridge-secret", adminID: "adm_abcdefghijklmnopqrst",
 			handle: "system",
 		},
+		{
+			// The AI support assistant's fixed posting identity. A human
+			// admin authenticating under it could post replies that render
+			// as the assistant, breaking the policy's labeling promise.
+			name:   "assistant handle is reserved for the support runner",
+			bearer: "bridge-secret", adminID: "adm_abcdefghijklmnopqrst",
+			handle: "assistant",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

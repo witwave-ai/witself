@@ -497,6 +497,11 @@ var (
 	bridgeReservedHandles    = map[string]bool{
 		"system": true, "control_plane": true, "root": true, "admin": true,
 		"fleet": true, "owner": true, "operator": true,
+		// The AI support assistant's fixed posting identity. Reserved so no
+		// human admin credential can post replies that render as the
+		// assistant — the published support policy's labeling promise depends
+		// on this kind/handle pair being unforgeable in both directions.
+		"assistant": true,
 	}
 )
 
