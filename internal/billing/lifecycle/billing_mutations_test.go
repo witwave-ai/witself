@@ -1533,6 +1533,78 @@ func TestAmbiguousHostedPurchaseStaysQuarantinedAfterRetryHorizon(t *testing.T) 
 	}
 }
 
+// A paid-to-paid UPGRADE is the dangerous direction: Subscribe starts a new
+// hosted Checkout Session, so without a guard an account that already pays
+// would end up with two live subscriptions and two invoices. It must take the
+// contact path instead, while free-to-paid stays self-serve.
+func TestBillingMutationStripeRoutesPaidUpgradeToContactBeforeReceipt(t *testing.T) {
+	catalog, err := plans.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, err := stripe.New(stripe.Config{
+		SecretKey: "sk_test_preview_only",
+		Catalog:   catalog,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := &clock{t: time.Date(2026, 8, 11, 16, 0, 0, 0, time.UTC)}
+	store := NewMemStore()
+	if err := store.Put(context.Background(), Record{
+		AccountID: "acct_paid_upgrade", Provider: "stripe",
+		CustomerID: "cus_preview_only", Entitled: "standard", Applied: "standard",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(context.Background(), Record{
+		AccountID: "acct_free_upgrade", Provider: "stripe",
+		CustomerID: "cus_preview_free", Entitled: plans.Free, Applied: plans.Free,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(Config{
+		Catalog: catalog,
+		Providers: map[string]billing.Provider{
+			"stripe": provider,
+		},
+		Default: "stripe", Store: store, Applier: &recApplier{}, Now: clock.now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	paid, err := manager.PreviewBillingMutation(
+		ctx, "acct_paid_upgrade", "", BillingMutationCommand{
+			Operation: BillingMutationUpgrade, Plan: "team",
+			Reason: "Move from Professional to Team",
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paid.approval.ExecutionClass != BillingMutationExecutionUpgradeContact {
+		t.Fatalf("paid-to-paid upgrade class = %q, want %q (a purchase would double-bill)",
+			paid.approval.ExecutionClass, BillingMutationExecutionUpgradeContact)
+	}
+	if strings.Contains(strings.Join(paid.Effects, "\n"), "purchase") {
+		t.Fatalf("paid-to-paid upgrade effects = %+v; want no purchase", paid.Effects)
+	}
+
+	free, err := manager.PreviewBillingMutation(
+		ctx, "acct_free_upgrade", "", BillingMutationCommand{
+			Operation: BillingMutationUpgrade, Plan: "standard",
+			Reason: "Move from Personal to Professional",
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if free.approval.ExecutionClass != BillingMutationExecutionUpgradeSelfServe {
+		t.Fatalf("free-to-paid upgrade class = %q, want %q (the launch path must stay self-serve)",
+			free.approval.ExecutionClass, BillingMutationExecutionUpgradeSelfServe)
+	}
+}
+
 func TestBillingMutationStripeRejectsUnsupportedPaidDowngradeBeforeReceipt(t *testing.T) {
 	catalog, err := plans.Load()
 	if err != nil {

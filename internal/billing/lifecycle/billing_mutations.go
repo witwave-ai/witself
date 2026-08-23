@@ -184,6 +184,13 @@ func (m *Manager) PreviewBillingMutation(
 		case !target.Purchasable():
 			preview.Violations = append(preview.Violations,
 				fmt.Sprintf("plan %q is not purchasable", target.ID))
+		case providerErr == nil && !supportsUpgradeTransition(provider, r.Entitled, target.ID):
+			// The provider cannot switch a live subscription in place, and
+			// purchasing would leave the account paying two of them. Take the
+			// contact path rather than double-billing.
+			preview.approval.ExecutionClass = BillingMutationExecutionUpgradeContact
+			preview.Effects = append(preview.Effects,
+				fmt.Sprintf("record a contact request for the %s plan", target.ID))
 		default:
 			preview.approval = billingMutationApproval{
 				ExecutionClass:     BillingMutationExecutionUpgradeSelfServe,
@@ -1117,6 +1124,17 @@ func implementsIdempotentSetup(provider billing.Provider) bool {
 func implementsIdempotentSubscribe(provider billing.Provider) bool {
 	_, ok := provider.(billing.IdempotentSubscriber)
 	return ok
+}
+
+// supportsUpgradeTransition asks the provider whether it can actually execute
+// this exact transition. A provider that does not implement the check keeps the
+// broad Subscribe contract and is assumed capable.
+func supportsUpgradeTransition(provider billing.Provider, current, target string) bool {
+	checker, ok := provider.(billing.UpgradeTransitionChecker)
+	if !ok {
+		return true
+	}
+	return checker.SupportsUpgradeTransition(current, target)
 }
 
 func implementsIdempotentDowngrade(provider billing.Provider) bool {

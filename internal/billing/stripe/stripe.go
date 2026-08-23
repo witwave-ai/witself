@@ -805,6 +805,16 @@ func (*Provider) SupportsDowngradeTarget(plan string) bool {
 	return plan == plans.Free
 }
 
+// SupportsUpgradeTransition reports the exact self-serve upgrades this adapter
+// can execute today. Subscribe starts a NEW subscription through a hosted
+// Checkout Session, so an account that already pays for a plan would end up
+// with two live subscriptions and two invoices. Paid-to-paid therefore stays
+// unavailable — the same subscription-schedule work that gates paid-to-paid
+// downgrades — and the lifecycle routes it to a contact request instead.
+func (*Provider) SupportsUpgradeTransition(current, _ string) bool {
+	return current == "" || current == plans.Free
+}
+
 // PrepareDowngrade selects the one exact live subscription and its current
 // period boundary without mutating Stripe.
 func (p *Provider) PrepareDowngrade(
