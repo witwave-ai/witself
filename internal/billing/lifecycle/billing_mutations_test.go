@@ -1538,9 +1538,31 @@ func TestAmbiguousHostedPurchaseStaysQuarantinedAfterRetryHorizon(t *testing.T) 
 // would end up with two live subscriptions and two invoices. It must take the
 // contact path instead, while free-to-paid stays self-serve.
 func TestBillingMutationStripeRoutesPaidUpgradeToContactBeforeReceipt(t *testing.T) {
-	catalog, err := plans.Load()
+	// Team is not purchasable in the shipped catalog yet, so a shipped-catalog
+	// assertion here would pass through the unavailable-plan branch and prove
+	// nothing. Parse a catalog with Team flipped available — exactly the state
+	// this guard exists to make safe — so the guard itself is what is tested.
+	var document map[string]any
+	if err := json.Unmarshal(witself.PlansJSON, &document); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range document["plans"].([]any) {
+		plan := entry.(map[string]any)
+		if plan["id"] == "team" {
+			plan["available"] = true
+		}
+	}
+	flipped, err := json.Marshal(document)
 	if err != nil {
 		t.Fatal(err)
+	}
+	catalog, err := plans.Parse(flipped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	team, ok := catalog.Get("team")
+	if !ok || !team.Purchasable() {
+		t.Fatalf("test catalog Team = %+v ok=%v; want purchasable", team, ok)
 	}
 	provider, err := stripe.New(stripe.Config{
 		SecretKey: "sk_test_preview_only",
