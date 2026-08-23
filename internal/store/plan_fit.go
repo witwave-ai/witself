@@ -243,6 +243,15 @@ func (s *Store) checkAccountPlanFit(
 		}
 		report.addAccountViolation(plans.RealmLimit, used, maximum)
 	}
+	if maximum, finite := target.Limits[plans.OperatorSeatsLimit]; finite {
+		used, err := accountPlanFitCount(ctx, tx, `
+			SELECT count(*) FROM operators
+			 WHERE account_id=$1 AND deleted_at IS NULL`, accountID)
+		if err != nil {
+			return AccountPlanFitReport{}, fmt.Errorf("count plan-fit operator seats: %w", err)
+		}
+		report.addAccountViolation(plans.OperatorSeatsLimit, used, maximum)
+	}
 	if maximum, finite := target.Limits[plans.AgentLimit]; finite {
 		used, err := accountPlanFitCount(ctx, tx, `
 			SELECT count(*)

@@ -6280,6 +6280,12 @@ func createOperatorHandler(auth AuthFunc, create func(ctx context.Context, accou
 		}
 
 		operator, token, expiresAt, err := create(r.Context(), p.accountID, p.operatorID, displayName, tokenDisplayName, ttl)
+		if errors.Is(err, ErrPlanLimit) {
+			// The message names the cap and the plan; pass it through so the
+			// refusal explains itself, exactly like realm and agent creates.
+			writeJSONError(w, http.StatusForbidden, err.Error())
+			return
+		}
 		if errors.Is(err, ErrAccountNotActive) {
 			writeJSONError(w, http.StatusForbidden, "account is not active")
 			return

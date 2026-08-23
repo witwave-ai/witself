@@ -1368,12 +1368,13 @@
       "id": "identity-tenancy",
       "name": "Accounts, realms, agents, and tokens",
       "area": "Identity",
-      "summary": "Account, realm, agent, token, role, suspension, and transactional realm/agent capacity enforcement form the shared identity spine; current managed evidence is narrow and the legacy total-agent cap remains a compatibility floor.",
+      "summary": "Account, realm, agent, token, role, suspension, and transactional realm/agent/operator-seat capacity enforcement form the shared identity spine; current managed evidence is narrow, the operator-seat cap ships unset in the catalog, and the legacy total-agent cap remains a compatibility floor.",
       "implementation": "implemented",
       "managed_rollout": "limited",
       "plan_limit_keys": [
         "agents",
         "agents_per_realm",
+        "operator_seats",
         "realms"
       ],
       "docs": [
