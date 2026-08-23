@@ -191,6 +191,9 @@ deployment cells under a thin global control plane.
   [Terms](legal/terms-of-service.md) · [Privacy](legal/privacy-policy.md) ·
   [AUP](legal/acceptable-use.md) · [DPA](legal/data-processing-addendum.md) ·
   [Refunds](legal/refund-cancellation.md). Not in force until ratified.
+- [refund-runbook.md](refund-runbook.md): the 14-day refund policy and the
+  operator procedure for executing one (Stripe Dashboard only — no CLI verb).
+- [backup-and-recovery.md](backup-and-recovery.md): operational backups
 - [backup-and-recovery.md](backup-and-recovery.md): operational backups
   (including vector data), first-class plaintext identity export, and
   round-trippable import.
