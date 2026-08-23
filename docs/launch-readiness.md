@@ -87,7 +87,10 @@ Dark, independently testable slices, delegated to Codex (gpt-5.6-sol/ultra),
 adversarially reviewed, gated, merged. Roughly in dependency order:
 
 1. **Legal-page skeletons** (ToS, Privacy incl. erasure posture, AUP, DPA,
-   refund/cancellation) — drafts for Scott/legal to finalize.
+   refund/cancellation) — drafts for Scott/legal to finalize. *Drafted under
+   docs/legal/; every owner decision is bracketed in-page (erasure posture,
+   governing law, entity details, subprocessor confirmation, contact
+   addresses).*
 2. **Capacity**: Civo prod node profile (fixed 2-node, vary only NodeCount) →
    lift minimal-only gate → TUI + docs → usw2 soft topology-spread values.
 3. **Monitoring**: PagerDuty native receiver (dark) → dead-man watchdog (dark) →
