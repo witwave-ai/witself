@@ -76,10 +76,9 @@ func TestOperatorSeatsCapCreateAndPlanFit(t *testing.T) {
 
 	// A target that cannot hold the live seats must surface as a violation, so
 	// a downgrade is refused instead of stranding operators over the new cap.
-	report, err := st.CheckAccountPlanFit(ctx, accountID, AccountPlanFitTarget{
-		Plan:   "personal",
-		Limits: map[string]int64{plans.OperatorSeatsLimit: 1},
-	})
+	report, err := st.CheckAccountPlanFit(ctx, accountID, accountPlanFitTestTarget(
+		t, "personal", map[string]int64{plans.OperatorSeatsLimit: 1},
+	))
 	if err != nil {
 		t.Fatalf("plan fit against a one-seat target: %v", err)
 	}
@@ -91,10 +90,9 @@ func TestOperatorSeatsCapCreateAndPlanFit(t *testing.T) {
 	}
 
 	// A target that can hold them must not report a seat violation at all.
-	roomy, err := st.CheckAccountPlanFit(ctx, accountID, AccountPlanFitTarget{
-		Plan:   "team",
-		Limits: map[string]int64{plans.OperatorSeatsLimit: 25},
-	})
+	roomy, err := st.CheckAccountPlanFit(ctx, accountID, accountPlanFitTestTarget(
+		t, "team", map[string]int64{plans.OperatorSeatsLimit: 25},
+	))
 	if err != nil {
 		t.Fatalf("plan fit against a roomy target: %v", err)
 	}

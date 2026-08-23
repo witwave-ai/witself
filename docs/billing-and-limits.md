@@ -25,6 +25,17 @@ retention respectively. Account-specific admin exceptions are independent of
 billing and follow `account override > plan default > missing/indefinite`; see
 [transcript-retention.md](transcript-retention.md).
 
+Operator seats cap the people on an account — the live, non-deleted operators,
+counting the root owner. A seat is a membership cap, not a billed quantity: the
+subscription stays one flat line item, so adding a person never reprices a cycle
+mid-term. Enforcement is transactional on the create path and is mirrored in the
+downgrade fit check, so a plan change is refused while an account holds more
+seats than the target allows. The `operator_seats` key ships **unset on every
+plan**, which means unlimited exactly as an absent key does everywhere else in
+this vocabulary; setting per-plan values is a separate, deliberate change. The
+root owner is seeded by provisioning outside the cap, so no account can be
+created without a way in.
+
 Messaging is an independent feature entitlement plus an independent retention
 policy. Personal does not include messaging; Professional, Team, and Enterprise
 include it with 90-, 365-, and 365-day message-retention defaults. Personal
@@ -232,6 +243,7 @@ and byte breakers described below apply instead.
 | Capability | Personal — $0 | Professional — $30/month | Team — $250/month | Enterprise — contact us |
 |---|---:|---:|---:|---:|
 | Realms | 1 | 1 | 25 | Contracted |
+| Operator seats (people on the account, owner included) | Unset | Unset | Unset | Unset |
 | Agents per realm | 10 | 100 | 100 | Contracted |
 | Active memories per agent | 1,000 | 10,000 | 50,000 | Contracted; 250,000 default |
 | Current facts per agent | 1,000 | 10,000 | 50,000 | Contracted; 250,000 default |

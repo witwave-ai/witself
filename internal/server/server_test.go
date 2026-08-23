@@ -959,6 +959,39 @@ func TestOperatorsListCreateAndDelete(t *testing.T) {
 		t.Fatalf("created = %+v", created)
 	}
 
+	// A seat cap must refuse with the same 403 plan-limit contract as realm and
+	// agent creates, naming the dimension — not a bare 500.
+	capped := httptest.NewServer(apiMux(Config{
+		Authenticate: auth,
+		CreateOperator: func(context.Context, string, string, string, string, *time.Duration) (Operator, string, *time.Time, error) {
+			return Operator{}, "", nil, &PlanLimitError{
+				Dimension: "operator_seats", Used: 2, Max: 2, Plan: "team",
+			}
+		},
+	}))
+	defer capped.Close()
+	req, _ = http.NewRequest(http.MethodPost, capped.URL+"/v1/operators",
+		strings.NewReader(`{"display_name":"one too many"}`))
+	req.Header.Set("Authorization", "Bearer good")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("seat-capped create = %d, want 403", resp.StatusCode)
+	}
+	var refusal struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&refusal); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(refusal.Error, "operator seats") ||
+		!strings.Contains(refusal.Error, "2/2") {
+		t.Fatalf("seat refusal = %q, want it to name the cap and the usage", refusal.Error)
+	}
+
 	req, _ = http.NewRequest(http.MethodDelete, srv.URL+"/v1/operators/opr_deploy", nil)
 	req.Header.Set("Authorization", "Bearer good")
 	resp, err = http.DefaultClient.Do(req)

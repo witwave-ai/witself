@@ -1064,6 +1064,9 @@ func serve() int {
 			if errors.Is(err, store.ErrAccountNotActive) {
 				return server.Operator{}, "", nil, server.ErrAccountNotActive
 			}
+			if errors.Is(err, store.ErrPlanLimitReached) {
+				return server.Operator{}, "", nil, planLimitError(err)
+			}
 			if err != nil {
 				return server.Operator{}, "", nil, err
 			}
