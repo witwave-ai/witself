@@ -1279,6 +1279,28 @@ func TestScheduleDowngradeFreeOnly(t *testing.T) {
 	}
 }
 
+// SupportsUpgradeTransition is the symmetric guard for the upgrade direction:
+// Subscribe starts a new subscription, so only an account without one today
+// can be served self-serve.
+func TestSupportsUpgradeTransitionOnlyFromUnpaid(t *testing.T) {
+	_, p := newStub(t)
+	for _, current := range []string{"", plans.Free} {
+		if !p.SupportsUpgradeTransition(current, "standard") {
+			t.Errorf("SupportsUpgradeTransition(%q, standard) = false, want true", current)
+		}
+	}
+	for _, transition := range [][2]string{
+		{"standard", "team"},
+		{"team", "enterprise"},
+		{"standard", "enterprise"},
+	} {
+		if p.SupportsUpgradeTransition(transition[0], transition[1]) {
+			t.Errorf("SupportsUpgradeTransition(%q, %q) = true; a purchase would double-bill",
+				transition[0], transition[1])
+		}
+	}
+}
+
 func TestScheduleDowngradeValidatesProjectionBeforeMutation(t *testing.T) {
 	s, p := newStub(t)
 	s.subscriptionsJSON = `{"data":[{"id":"sub_bad","customer":"cus_stub_1","status":"active","metadata":{"witself_plan":"standard"},"items":{"data":[{"price":{"id":"price_standard","lookup_key":"witself_standard"}}]}}],"has_more":false}`

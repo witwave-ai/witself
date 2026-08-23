@@ -169,6 +169,15 @@ type DowngradeTargetChecker interface {
 	SupportsDowngradeTarget(plan string) bool
 }
 
+// UpgradeTransitionChecker lets a provider declare which self-serve upgrade
+// transitions it can actually execute, so the lifecycle refuses the ones it
+// cannot rather than issuing a purchase that collides with a live
+// subscription. Providers that omit this interface are treated as able to
+// execute every upgrade, preserving the broad Subscribe contract.
+type UpgradeTransitionChecker interface {
+	SupportsUpgradeTransition(current, target string) bool
+}
+
 // IdempotentPendingCanceller is the optional strong form of
 // Provider.CancelPending. Implementations replay successful completion for an
 // exact operation retry and reject reuse of the operation identity for another
