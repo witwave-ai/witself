@@ -63,6 +63,13 @@ const (
 	// policy remains a separately resolved, operator-overridable cell control.
 	SupportFeature = "support"
 
+	// OperatorSeatsLimit caps live (non-deleted) operators account-wide — the
+	// human seats on the account, the root owner included. A seat is a cap on
+	// membership, not a billed quantity: the subscription stays a single flat
+	// line item, so adding a seat never changes price mid-cycle. The root owner
+	// is seeded by provisioning outside this gate, so no account can be
+	// stranded without a way in. Absent key means unlimited, as everywhere else.
+	OperatorSeatsLimit = "operator_seats"
 	// RealmLimit caps live realms account-wide.
 	RealmLimit = "realms"
 	// AgentLimit is the legacy account-wide live-agent cap. Existing snapshots
@@ -303,6 +310,7 @@ var supportedLimitKeys = []string{
 	MessageDeliveredPerRealmMinuteLimit,
 	MessageDeliveredPerRecipientMinuteLimit,
 	MessageSentPerAgentMinuteLimit,
+	OperatorSeatsLimit,
 	RealmLimit,
 	StoredFactLimit,
 	StoredMemoryLimit,
