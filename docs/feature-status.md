@@ -450,12 +450,12 @@ Open gates:
 
 ### Accounts, realms, agents, and tokens
 
-Account, realm, agent, token, role, suspension, and transactional realm/agent capacity enforcement form the shared identity spine; current managed evidence is narrow and the legacy total-agent cap remains a compatibility floor.
+Account, realm, agent, token, role, suspension, and transactional realm/agent/operator-seat capacity enforcement form the shared identity spine; current managed evidence is narrow, the operator-seat cap ships unset in the catalog, and the legacy total-agent cap remains a compatibility floor.
 
 - Implementation: `implemented`
 - Managed rollout: `limited`
 - Readiness: **conditional**
-- Plan limit keys: `agents`, `agents_per_realm`, `realms`
+- Plan limit keys: `agents`, `agents_per_realm`, `operator_seats`, `realms`
 - Detailed docs: [authorization-and-roles.md](../docs/authorization-and-roles.md), [billing-and-limits.md](../docs/billing-and-limits.md), [data-model.md](../docs/data-model.md)
 
 | Gate | State | Current evidence and conclusion |

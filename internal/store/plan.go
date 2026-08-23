@@ -274,6 +274,19 @@ func countLiveRealms(ctx context.Context, tx pgx.Tx, accountID string) (int64, e
 	return n, nil
 }
 
+// countLiveOperators counts the account's live operators inside tx. The root
+// owner counts: a seat is a person on the account, and the owner is one.
+func countLiveOperators(ctx context.Context, tx pgx.Tx, accountID string) (int64, error) {
+	var n int64
+	err := tx.QueryRow(ctx,
+		`SELECT count(*) FROM operators WHERE account_id = $1 AND deleted_at IS NULL`,
+		accountID).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count operators: %w", err)
+	}
+	return n, nil
+}
+
 // countLiveAgents counts the account's live agents across all live realms
 // inside tx. This exists only for legacy AgentLimit snapshots.
 func countLiveAgents(ctx context.Context, tx pgx.Tx, accountID string) (int64, error) {

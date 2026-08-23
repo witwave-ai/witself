@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/witwave-ai/witself/internal/id"
+	"github.com/witwave-ai/witself/internal/plans"
 	tokpkg "github.com/witwave-ai/witself/internal/token"
 )
 
@@ -118,8 +119,21 @@ func (s *Store) CreateOperator(ctx context.Context, accountID, actorOperatorID, 
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if err := lockAccountForMint(ctx, tx, accountID, false); err != nil {
+	// The plan-gate lock subsumes the mint lock's active-only status check and
+	// also serializes concurrent creates, so the seat count below cannot race
+	// past the account's cap.
+	plan, limits, err := lockAccountForPlanGate(ctx, tx, accountID)
+	if err != nil {
 		return Operator{}, "", nil, err
+	}
+	if _, capped := limits[plans.OperatorSeatsLimit]; capped {
+		n, err := countLiveOperators(ctx, tx, accountID)
+		if err != nil {
+			return Operator{}, "", nil, err
+		}
+		if err := checkPlanLimit(plan, limits, plans.OperatorSeatsLimit, n); err != nil {
+			return Operator{}, "", nil, err
+		}
 	}
 
 	operatorID, err := id.New("opr")
