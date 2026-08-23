@@ -90,6 +90,14 @@ type Config struct {
 	// disables portal creation rather than falling back to Stripe's mutable
 	// account-wide default configuration.
 	PortalConfigurationID string
+	// AutomaticTax turns on Stripe Tax for the purchase Checkout and for the
+	// renewal preview, so the amount Witself quotes is the amount Stripe will
+	// charge. Stripe needs a customer address to determine jurisdiction, so
+	// enabling it also makes Checkout collect a billing address and save it
+	// back to the existing customer. It is off by default: switching it on
+	// requires an activated Stripe Tax registration set, and calculating tax
+	// without one fails the purchase rather than silently undercharging.
+	AutomaticTax bool
 	// TestClockID attaches newly created customers to one Stripe test clock so
 	// sandbox acceptance can advance renewal and period-end downgrades without
 	// waiting a month. It is rejected with non-test keys and is never inferred.
@@ -493,6 +501,15 @@ func (p *Provider) subscribe(
 		"cancel_url":                                {p.cfg.CancelURL},
 		"metadata[witself_plan]":                    {plan},
 		"subscription_data[metadata][witself_plan]": {plan},
+	}
+	if p.cfg.AutomaticTax {
+		params.Set("automatic_tax[enabled]", "true")
+		// Stripe cannot calculate tax for an existing customer without a
+		// usable address, and it will not persist the one Checkout collects
+		// unless the session is explicitly allowed to update the customer.
+		params.Set("billing_address_collection", "required")
+		params.Set("customer_update[address]", "auto")
+		params.Set("customer_update[name]", "auto")
 	}
 	idempotencyKey := ""
 	if operationID != "" {
@@ -1722,10 +1739,17 @@ func (p *Provider) NextCharge(ctx context.Context, customerID string) (*billing.
 		NextPaymentAttempt int64  `json:"next_payment_attempt"`
 		PeriodEnd          int64  `json:"period_end"`
 	}
-	err = p.call(ctx, "POST", "/v1/invoices/create_preview", url.Values{
+	previewParams := url.Values{
 		"customer":     {customerID},
 		"subscription": {sub.ID},
-	}, "", &up)
+	}
+	if p.cfg.AutomaticTax {
+		// Without this the preview quotes the untaxed amount while the renewal
+		// charges the taxed one, so the customer-facing next-charge figure
+		// would be wrong by exactly the tax.
+		previewParams.Set("automatic_tax[enabled]", "true")
+	}
+	err = p.call(ctx, "POST", "/v1/invoices/create_preview", previewParams, "", &up)
 	if err != nil {
 		var se *apiError
 		if errors.As(err, &se) && se.code == "invoice_upcoming_none" {
