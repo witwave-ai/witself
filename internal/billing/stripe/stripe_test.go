@@ -156,6 +156,94 @@ func newStub(t *testing.T) (*stubStripe, *Provider) {
 	return s, p
 }
 
+// newTaxStub is newStub with Stripe Tax switched on, so the tax-specific form
+// fields can be asserted without disturbing the default-off expectations that
+// every other test in this file relies on.
+func newTaxStub(t *testing.T) (*stubStripe, *Provider) {
+	t.Helper()
+	s, _ := newStub(t)
+	catalog, err := plans.Load()
+	if err != nil {
+		t.Fatalf("plans.Load: %v", err)
+	}
+	p, err := New(Config{
+		SecretKey: "sk_test_stub", WebhookSecret: "whsec_stub",
+		Catalog: catalog, BaseURL: s.url,
+		PortalConfigurationID: "bpc_safe_stub",
+		AutomaticTax:          true,
+		Now: func() time.Time {
+			return time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return s, p
+}
+
+// Stripe Tax must be off unless it is explicitly enabled: calculating tax
+// without an activated registration set fails the purchase outright.
+func TestAutomaticTaxIsAbsentUnlessEnabled(t *testing.T) {
+	s, p := newStub(t)
+	if _, err := p.Subscribe(context.Background(), "cus_stub_1", "standard"); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{
+		"automatic_tax[enabled]",
+		"billing_address_collection",
+		"customer_update[address]",
+		"customer_update[name]",
+	} {
+		if _, present := s.lastForm[key]; present {
+			t.Errorf("default checkout form carries %q = %q; want absent",
+				key, s.lastForm[key])
+		}
+	}
+	if _, err := p.NextCharge(context.Background(), "cus_stub_1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := s.lastForm["automatic_tax[enabled]"]; present {
+		t.Errorf("default renewal preview carries automatic tax; want absent")
+	}
+}
+
+// With Stripe Tax on, Checkout must calculate tax AND capture the address the
+// calculation depends on, saving it back to the existing customer.
+func TestAutomaticTaxCollectsTheAddressItNeeds(t *testing.T) {
+	s, p := newTaxStub(t)
+	if _, err := p.Subscribe(context.Background(), "cus_stub_1", "standard"); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{
+		"automatic_tax[enabled]":     "true",
+		"billing_address_collection": "required",
+		"customer_update[address]":   "auto",
+		"customer_update[name]":      "auto",
+	} {
+		if got := s.lastForm[key]; got != want {
+			t.Errorf("checkout form %q = %q, want %q", key, got, want)
+		}
+	}
+	// The purchase contract itself must be untouched by the tax switch.
+	if s.lastForm["mode"] != "subscription" ||
+		s.lastForm["payment_method_types[]"] != "card" ||
+		s.lastForm["line_items[0][quantity]"] != "1" {
+		t.Fatalf("tax changed the purchase contract: %v", s.lastForm)
+	}
+}
+
+// The quoted next charge must include the same tax the renewal will actually
+// charge, or the customer-facing figure is wrong by exactly the tax.
+func TestAutomaticTaxAppliesToTheRenewalPreview(t *testing.T) {
+	s, p := newTaxStub(t)
+	if _, err := p.NextCharge(context.Background(), "cus_stub_1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.lastForm["automatic_tax[enabled]"]; got != "true" {
+		t.Errorf("renewal preview automatic_tax[enabled] = %q, want true", got)
+	}
+}
+
 func TestDefaultReturnURLsStayOnOwnedValueFreeRoutes(t *testing.T) {
 	catalog, err := plans.Load()
 	if err != nil {

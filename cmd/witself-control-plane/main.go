@@ -145,6 +145,8 @@ func run() int {
 //	WITSELF_CP_STRIPE_CANCEL_URL      canonical HTTPS checkout cancel URL
 //	WITSELF_CP_STRIPE_PORTAL_RETURN_URL canonical HTTPS portal return URL
 //	WITSELF_CP_STRIPE_PORTAL_CONFIGURATION_ID reviewed safe bpc_ configuration
+//	WITSELF_CP_STRIPE_AUTOMATIC_TAX   explicit true/false Stripe Tax switch;
+//	  requires an activated Stripe Tax registration set before it is enabled
 //	WITSELF_CP_STRIPE_TEST_CLOCK_ID optional clock_ for test-mode acceptance only;
 //	                                    allows at most one cohort account
 //	WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST strict comma-separated account cohort;
@@ -353,6 +355,13 @@ func stripeControlPlaneConfig(
 	}
 	gate := billingMutationGateForAccounts(allowedAccounts)
 
+	// Stripe Tax stays off unless it is explicitly switched on, because
+	// calculating tax without an activated registration set fails the purchase.
+	automaticTax, err := explicitBoolEnv("WITSELF_CP_STRIPE_AUTOMATIC_TAX")
+	if err != nil {
+		return stripeprovider.Config{}, nil, err
+	}
+
 	return stripeprovider.Config{
 		SecretKey:             secretKey,
 		WebhookSecret:         webhookSecret,
@@ -362,6 +371,7 @@ func stripeControlPlaneConfig(
 		PortalReturnURL:       portalReturnURL,
 		PortalConfigurationID: portalConfigurationID,
 		TestClockID:           testClockID,
+		AutomaticTax:          automaticTax,
 	}, gate, nil
 }
 
