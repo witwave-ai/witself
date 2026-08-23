@@ -23,7 +23,10 @@ func TestReplyAdminTicketAsAssistantPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	// t.Cleanup, not defer: cleanups run LIFO after the test, so the row
+	// deletions registered below execute while the pool is still open and
+	// the pool closes last. A defer here would close the pool first.
+	t.Cleanup(st.Close)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
