@@ -117,7 +117,14 @@ Managed Witself Cloud support and self-hosted support are different products.
 
 Managed Witself Cloud already implements durable account-scoped support tickets
 and messages through tenant CLI/API and fleet-admin CLI/TUI surfaces, with
-audit and archive/import coverage. That mechanism is not yet a generally
+audit and archive/import coverage.
+
+The published customer-facing policy for the general self-service launch —
+entitlement by plan, channels, the first-response promise, AI-first staffing
+and its fixed human-escalation set — is [support-policy.md](support-policy.md).
+The open gates below (entitlement synchronization into `support_policy`, the
+support@ intake bridge, SLO alerting) are tracked there as explicit
+launch-status notes rather than silent claims. That mechanism is not yet a generally
 advertised support promise: its plan entitlement is not synchronized into the
 separate `support_policy`, and channels, hours, severities, response targets,
 retention, ownership, escalation, monitoring, and SLA language remain open.
