@@ -1596,24 +1596,32 @@ func TestBillingMutationPaidUpgradeIsRefusedAtExecutionNotOnlyPreview(t *testing
 			ApprovedPriceCents: team.PriceCents(),
 			ApprovedCurrency:   strings.ToLower(catalog.Currency),
 		}, now)
-	// Meanwhile the account actually became paid.
-	if err := store.Put(context.Background(), Record{
-		AccountID: "acct_stale_upgrade", Provider: "fake",
-		CustomerID:            "cus_stale_upgrade",
-		Entitled:              "standard",
-		Applied:               "standard",
-		EntitledAt:            now,
-		ManagedSubscriptionID: "sub_live_standard",
-	}); err != nil {
-		t.Fatal(err)
-	}
-
 	provider := &guardedUpgradeBillingProvider{
 		countingUpgradeBillingProvider: &countingUpgradeBillingProvider{
 			Fake: fake.New(fake.Config{
 				Prices: catalog.Prices(), Interactive: true, Now: clock.now,
 			}),
 		},
+	}
+	// Register the customer with the provider so that removing the guard really
+	// does reach the purchase, rather than failing earlier on an unknown
+	// customer. Without that, the subscribe-count assertion below would never
+	// get the chance to fire.
+	customerID, err := provider.EnsureCustomer(
+		context.Background(), "acct_stale_upgrade", "owner@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Meanwhile the account actually became paid.
+	if err := store.Put(context.Background(), Record{
+		AccountID: "acct_stale_upgrade", Provider: "fake",
+		CustomerID:            customerID,
+		Entitled:              "standard",
+		Applied:               "standard",
+		EntitledAt:            now,
+		ManagedSubscriptionID: "sub_live_standard",
+	}); err != nil {
+		t.Fatal(err)
 	}
 	manager, err := NewManager(Config{
 		Catalog: catalog,
