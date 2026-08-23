@@ -51,6 +51,8 @@ function version({
       bindings: [
         plain("AGENT_EMAIL_DOMAIN", "witmail.net"),
         plain("AGENT_EMAIL_LEGACY_DOMAINS", "agent-mail.witwave.ai"),
+        plain("AGENT_EMAIL_DMARC_REJECT_ENABLED", "false"),
+        plain("AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID", ""),
         plain("AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", ""),
         plain("AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS", keyring),
         { name: "CONTROL_PLANE_EDGE_TOKEN", type: "secret_text" },
@@ -211,6 +213,10 @@ test("rollback planning refuses handler, compatibility, storage, limiter, and fl
       mutate: (candidate) => { binding(candidate, "REALM_EMAIL_CANONICAL_DELIVERY_ENABLED").text = "TRUE"; },
       error: /not explicitly true or false/,
     },
+    {
+      mutate: (candidate) => { binding(candidate, "AGENT_EMAIL_DMARC_REJECT_ENABLED").text = "TRUE"; },
+      error: /not explicitly true or false/,
+    },
   ];
   for (const item of cases) {
     const fixture = fixtures();
@@ -278,6 +284,43 @@ test("v0.0.240 contract is eligible only as a fully dark rollback candidate", ()
       /legacy managed-delivery contract is eligible only while fully dark/,
     );
   }
+});
+
+test("pre-DMARC rollback candidates normalize only to the exact dark policy", () => {
+  const legacy = fixtures();
+  removeBinding(legacy.candidate, "AGENT_EMAIL_DMARC_REJECT_ENABLED");
+  removeBinding(legacy.candidate, "AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID");
+  const plan = createPlan(legacy);
+  assert.equal(plan.checks.includes("sender_authentication_exact"), true);
+
+  for (const missing of [
+    "AGENT_EMAIL_DMARC_REJECT_ENABLED",
+    "AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID",
+  ]) {
+    const partial = fixtures();
+    removeBinding(partial.candidate, missing);
+    assert.throws(
+      () => createPlan(partial),
+      /binding inventory did not match the dark Worker contract/,
+    );
+  }
+
+  const active = fixtures();
+  binding(active.current, "AGENT_EMAIL_DMARC_REJECT_ENABLED").text = "true";
+  removeBinding(active.candidate, "AGENT_EMAIL_DMARC_REJECT_ENABLED");
+  removeBinding(active.candidate, "AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID");
+  assert.throws(
+    () => createPlan(active),
+    /operational contract drifted/,
+  );
+
+  const malformed = fixtures();
+  binding(malformed.candidate, "AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID").text =
+    "mx.trusted.example;forged";
+  assert.throws(
+    () => createPlan(malformed),
+    /trusted authentication attester was invalid/,
+  );
 });
 
 test("rollback planning refuses route-key changes and every custom-domain binding", () => {

@@ -65,6 +65,25 @@ test("edge metrics append complete release attribution without changing indexes"
   ]);
 });
 
+test("edge metrics preserve the DMARC rejection outcome and authentication phase", () => {
+  const { env, points } = metricsEnv();
+  recordEdgeVerdict(env, {
+    outcome: "rejected_dmarc_fail",
+    phase: "authentication",
+    durationMS: 2,
+    rawSize: 512,
+    status: 550,
+  });
+
+  assert.deepEqual(points[0].indexes, ["rejected_dmarc_fail"]);
+  assert.deepEqual(points[0].blobs, [
+    EDGE_METRICS_SCHEMA,
+    "rejected_dmarc_fail",
+    "authentication",
+  ]);
+  assert.deepEqual(points[0].doubles, [1, 2, 512, 550]);
+});
+
 test("edge metrics omit incomplete or malformed release metadata", () => {
   for (const invalid of [
     {},

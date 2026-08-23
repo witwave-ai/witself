@@ -74,6 +74,14 @@ at the edge before a message body is read or a cell is contacted. The alias
 gate does not control canonical Realm-ID traffic. Legacy compatibility traffic
 is canonical-only and therefore uses the canonical-delivery gate.
 
+Sender-domain hard-fail rejection is independently dark. The edge parses
+`Authentication-Results` only when `AGENT_EMAIL_DMARC_REJECT_ENABLED` is the
+exact string `true` and `AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID` names a nonempty
+trusted attester. Only its attested `dmarc=fail` result rejects; every other
+result falls through to the existing relay behavior. Both settings default dark (`false` and the empty
+string), and authentication runs only after recipient, route, cohort, and size
+gates have admitted and buffered the message.
+
 All canonical and managed-alias traffic has a second, account-scoped fence:
 `AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST`. It is an exact sorted CSV of
 at most 100 generated `acc_[a-z2-7]{16}` IDs (2,099 bytes maximum); the empty
@@ -430,8 +438,13 @@ the renderer rejects any value other than literal `true` or `false`. Set
 canonical-route activation; it has the same exact-boolean contract. The
 renderer also requires a valid
 `AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST`; omission renders the safe
-empty cohort. The control-plane renderer uses its `CP_`-prefixed counterpart.
-The runtime remains default-off if either binding is ever absent. The renderer
+empty cohort. `AGENT_EMAIL_DMARC_REJECT_ENABLED` defaults to `false` and accepts
+only literal `true` or `false`.
+`AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID` defaults to empty and otherwise accepts
+one bounded printable non-space ASCII token without a semicolon. The
+control-plane renderer uses its `CP_`-prefixed cohort counterpart.
+Each managed-delivery gate remains default-off if its own binding is absent;
+DMARC rejection is also disabled if either DMARC setting is absent. The renderer
 refuses the KV ID bound to
 the adjacent control-plane Worker. The generated file is local operator state
 and must not be committed. The generated Worker must expose
@@ -631,6 +644,8 @@ the operator shell without printing their values:
 - `AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST`
 - `REALM_EMAIL_ALIAS_DELIVERY_ENABLED`
 - `REALM_EMAIL_CANONICAL_DELIVERY_ENABLED`
+- `AGENT_EMAIL_DMARC_REJECT_ENABLED`
+- `AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID`
 
 The token needs Workers deployment/secret access, Account Analytics Read,
 Zone Settings Read, Email Routing Rules Write, and KV read/write for the

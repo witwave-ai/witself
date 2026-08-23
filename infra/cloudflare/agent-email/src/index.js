@@ -16,6 +16,7 @@ import {
   realmRouteProjectionIsFresh,
   verifyRealmRouteProjection,
 } from "./directory.mjs";
+import { extractAuthenticationVerdicts } from "./authenticity.mjs";
 import { recordEdgeVerdict, recordRouteLookup } from "./metrics.mjs";
 import {
   managedDeliveryAccountIsAdmitted,
@@ -23,6 +24,7 @@ import {
 
 const PERMANENT_REJECTION = "recipient unavailable";
 const OVER_SIZE_REJECTION = "message too large";
+const DMARC_REJECTION = "message rejected by sender domain authentication policy";
 const TRANSIENT_ERROR = "agent email relay temporarily unavailable";
 const DEFAULT_TIMEOUT_MS = 20_000;
 const DEFAULT_DIRECTORY_TIMEOUT_MS = 3_000;
@@ -782,6 +784,20 @@ async function handleEmailTransaction(message, env, runtime = {}) {
   }
   if (raw.byteLength !== message.rawSize || raw.byteLength > RELAY_MAXIMUM_RAW_BYTES) {
     throw transient("tempfail_content", "content");
+  }
+
+  // Authentication follows every recipient, route, cohort, and size gate so
+  // non-existent or held-back recipients can never expose an authentication signal.
+  if (String(env.AGENT_EMAIL_DMARC_REJECT_ENABLED) === "true") {
+    const trustedAuthservID = env.AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID;
+    if (
+      typeof trustedAuthservID === "string" &&
+      trustedAuthservID.length > 0 &&
+      extractAuthenticationVerdicts(new Uint8Array(raw), trustedAuthservID).dmarc === "fail"
+    ) {
+      message.setReject(DMARC_REJECTION);
+      return { outcome: "rejected_dmarc_fail", phase: "authentication", status: 550 };
+    }
   }
 
   let metadata;

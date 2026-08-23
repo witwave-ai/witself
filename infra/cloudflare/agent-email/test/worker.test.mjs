@@ -29,6 +29,7 @@ const aliasAddress = `alpha.${aliasLabel}@${primaryDomain}`;
 const customAddress = `alpha.${aliasLabel}@${customDomain}`;
 const vectorNowMS = vector.metadata.timestamp * 1000;
 const rolloutAccount = "acc_aaaaaaaaaaaaaaaa";
+const trustedAuthservID = "mx.trusted.example";
 const allowLimiter = { async limit() { return { success: true }; } };
 
 function verdictPoints(points) {
@@ -145,6 +146,25 @@ function message(overrides = {}) {
     setReject(reason) { rejected.push(reason); },
     rejected,
     ...overrides,
+  };
+}
+
+function messageWithAuthenticationResults(authservID, dmarc) {
+  const rawMessage = Buffer.concat([
+    Buffer.from(`Authentication-Results: ${authservID}; dmarc=${dmarc}\r\n`, "ascii"),
+    raw,
+  ]);
+  return {
+    mail: message({
+      rawSize: rawMessage.byteLength,
+      raw: new ReadableStream({
+        start(controller) {
+          controller.enqueue(rawMessage);
+          controller.close();
+        },
+      }),
+    }),
+    rawMessage,
   };
 }
 
@@ -465,6 +485,163 @@ test("provider raw-size mismatch tempfails rather than accepting partial content
     () => handleEmail(message({ rawSize: raw.byteLength + 1 }), legacyEnv(), { fetch: async () => new Response() }),
     { message: "agent email relay temporarily unavailable" },
   );
+});
+
+test("DMARC hard-fail rejection is dark when the exact flag is unset or false", async () => {
+  for (const flag of [undefined, "false"]) {
+    const { mail, rawMessage } = messageWithAuthenticationResults(trustedAuthservID, "fail");
+    const extra = { AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: trustedAuthservID };
+    if (flag !== undefined) extra.AGENT_EMAIL_DMARC_REJECT_ENABLED = flag;
+    let relayedBody;
+    await handleEmail(mail, legacyEnv(null, extra, vectorNowMS), {
+      now: () => vectorNowMS,
+      fetch: async (_url, init) => {
+        relayedBody = Buffer.from(init.body);
+        return new Response('{"verdict":"accepted"}', { status: 200 });
+      },
+    });
+
+    assert.deepEqual(mail.rejected, [], String(flag));
+    assert.deepEqual(relayedBody, rawMessage, String(flag));
+  }
+});
+
+test("trusted DMARC hard fail rejects before signing or cell relay", async () => {
+  const points = [];
+  const metrics = { writeDataPoint(point) { points.push(point); } };
+  const { mail } = messageWithAuthenticationResults(trustedAuthservID, "fail");
+  let fetchCalls = 0;
+  await handleEmail(
+    mail,
+    legacyEnv(metrics, {
+      AGENT_EMAIL_DMARC_REJECT_ENABLED: "true",
+      AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: trustedAuthservID,
+    }, vectorNowMS),
+    {
+      now: () => vectorNowMS,
+      fetch: async () => {
+        fetchCalls++;
+        throw new Error("DMARC rejection must not reach a cell");
+      },
+    },
+  );
+
+  assert.deepEqual(mail.rejected, [
+    "message rejected by sender domain authentication policy",
+  ]);
+  const verdicts = verdictPoints(points);
+  assert.equal(verdicts.length, 1);
+  assert.deepEqual(verdicts[0].blobs, [
+    EDGE_METRICS_SCHEMA, "rejected_dmarc_fail", "authentication",
+  ]);
+  assert.equal(verdicts[0].doubles[3], 550);
+  // Rejected before signing, so nothing reaches a cell, and the value-free
+  // metric carries no authentication detail.
+  assert.equal(fetchCalls, 0);
+  assert.doesNotMatch(JSON.stringify(points), /@|address|account|realm_|agent_|dmarc=/i);
+});
+
+test("trusted DMARC pass relays normally when hard-fail rejection is enabled", async () => {
+  const { mail, rawMessage } = messageWithAuthenticationResults(trustedAuthservID, "pass");
+  let relayedBody;
+  await handleEmail(mail, legacyEnv(null, {
+    AGENT_EMAIL_DMARC_REJECT_ENABLED: "true",
+    AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: trustedAuthservID,
+  }, vectorNowMS), {
+    now: () => vectorNowMS,
+    fetch: async (_url, init) => {
+      relayedBody = Buffer.from(init.body);
+      return new Response('{"verdict":"accepted"}', { status: 200 });
+    },
+  });
+
+  assert.deepEqual(mail.rejected, []);
+  assert.deepEqual(relayedBody, rawMessage);
+});
+
+test("DMARC fail relays when no trusted authentication attester is configured", async () => {
+  const { mail } = messageWithAuthenticationResults(trustedAuthservID, "fail");
+  let fetchCalls = 0;
+  await handleEmail(mail, legacyEnv(null, {
+    AGENT_EMAIL_DMARC_REJECT_ENABLED: "true",
+    AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: "",
+  }, vectorNowMS), {
+    now: () => vectorNowMS,
+    fetch: async () => {
+      fetchCalls++;
+      return new Response('{"verdict":"accepted"}', { status: 200 });
+    },
+  });
+
+  assert.deepEqual(mail.rejected, []);
+  assert.equal(fetchCalls, 1);
+});
+
+test("forged DMARC fail from an untrusted attester relays normally", async () => {
+  const { mail } = messageWithAuthenticationResults("attacker.example", "fail");
+  let fetchCalls = 0;
+  await handleEmail(mail, legacyEnv(null, {
+    AGENT_EMAIL_DMARC_REJECT_ENABLED: "true",
+    AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: trustedAuthservID,
+  }, vectorNowMS), {
+    now: () => vectorNowMS,
+    fetch: async () => {
+      fetchCalls++;
+      return new Response('{"verdict":"accepted"}', { status: 200 });
+    },
+  });
+
+  assert.deepEqual(mail.rejected, []);
+  assert.equal(fetchCalls, 1);
+});
+
+test("recipient and declared-size gates remain ahead of DMARC authentication", async () => {
+  const authenticationEnabled = {
+    AGENT_EMAIL_DMARC_REJECT_ENABLED: "true",
+    AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: trustedAuthservID,
+  };
+
+  let unknownRawReads = 0;
+  let controlPlaneCalls = 0;
+  const unknown = message();
+  Object.defineProperty(unknown, "raw", {
+    get() {
+      unknownRawReads++;
+      throw new Error("unknown recipient must not reach authentication");
+    },
+  });
+  await handleEmail(unknown, coldRouteEnv(null, authenticationEnabled), {
+    now: () => vectorNowMS,
+    routeLookupState: createRouteLookupState(),
+    fetch: async () => {
+      controlPlaneCalls++;
+      return new Response(null, { status: 404 });
+    },
+  });
+  assert.deepEqual(unknown.rejected, ["recipient unavailable"]);
+  assert.equal(unknownRawReads, 0);
+  assert.equal(controlPlaneCalls, 1);
+
+  let oversizedRawReads = 0;
+  let relayCalls = 0;
+  const oversized = message({ rawSize: RELAY_MAXIMUM_RAW_BYTES + 1 });
+  Object.defineProperty(oversized, "raw", {
+    get() {
+      oversizedRawReads++;
+      throw new Error("oversized message must not reach authentication");
+    },
+  });
+  await handleEmail(
+    oversized,
+    legacyEnv(null, authenticationEnabled, vectorNowMS),
+    {
+      now: () => vectorNowMS,
+      fetch: async () => { relayCalls++; },
+    },
+  );
+  assert.deepEqual(oversized.rejected, ["message too large"]);
+  assert.equal(oversizedRawReads, 0);
+  assert.equal(relayCalls, 0);
 });
 
 test("edge metrics record value-free accepted, rejected, and tempfailed outcomes", async () => {

@@ -190,6 +190,8 @@ test("production deployment environments scrub poisoned Wrangler and nested Node
     CF_API_TOKEN: "wrong-token",
     CONTROL_PLANE_EDGE_TOKEN: "must-not-reach-children",
     CONTROL_PLANE_URL: "https://self.witwave.ai",
+    AGENT_EMAIL_DMARC_REJECT_ENABLED: "true",
+    AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: "mx.trusted.example",
     CLOUDFLARE_BASE_URL: "https://attacker.invalid",
     CLOUDFLARE_API_BASE_URL: "https://attacker.invalid",
     CLOUDFLARE_ENV: "staging",
@@ -245,6 +247,14 @@ test("production deployment environments scrub poisoned Wrangler and nested Node
   assert.equal(
     environments.nestedAttestation.CONTROL_PLANE_URL,
     "https://self.witwave.ai/",
+  );
+  assert.equal(
+    environments.nestedRender.AGENT_EMAIL_DMARC_REJECT_ENABLED,
+    "true",
+  );
+  assert.equal(
+    environments.nestedRender.AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID,
+    "mx.trusted.example",
   );
   assert.equal(
     Object.hasOwn(environments.wranglerMutation, "CONTROL_PLANE_URL"),
@@ -336,6 +346,8 @@ test("normal deploy validates the complete relocated production config", () => {
     AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: "",
     REALM_EMAIL_ALIAS_DELIVERY_ENABLED: "false",
     REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false",
+    AGENT_EMAIL_DMARC_REJECT_ENABLED: "false",
+    AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: "",
   };
   const configPath = "/private/config/wrangler.generated.jsonc";
   const entrypoint = "/private/source/src/index.js";
@@ -385,6 +397,8 @@ test("normal deploy validates the complete relocated production config", () => {
       WITSELF_EDGE_RELEASE_DATE: release.date,
       REALM_EMAIL_ALIAS_DELIVERY_ENABLED: "false",
       REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false",
+      AGENT_EMAIL_DMARC_REJECT_ENABLED: "false",
+      AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: "",
     },
     observability: { enabled: true },
   };

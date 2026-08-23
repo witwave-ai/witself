@@ -9,6 +9,7 @@ const OUTCOMES = new Set([
   "rejected_unknown_recipient",
   "rejected_inactive_route",
   "rejected_over_size",
+  "rejected_dmarc_fail",
   "rejected_cell_permanent",
   "rejected_retry_canary",
   "tempfail_configuration",
@@ -29,7 +30,7 @@ const OUTCOMES = new Set([
 ]);
 
 const PHASES = new Set([
-  "configuration", "recipient", "directory", "content", "signing",
+  "configuration", "recipient", "directory", "content", "authentication", "signing",
   "fetch", "response", "route", "internal",
 ]);
 

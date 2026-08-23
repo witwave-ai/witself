@@ -155,6 +155,8 @@ export async function main() {
       AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: "",
       REALM_EMAIL_ALIAS_DELIVERY_ENABLED: "false",
       REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false",
+      AGENT_EMAIL_DMARC_REJECT_ENABLED: "false",
+      AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: "",
     });
     run(process.execPath, [
       join(root, "scripts", "render-wrangler.mjs"),
