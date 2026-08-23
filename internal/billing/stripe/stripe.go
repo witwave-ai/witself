@@ -805,6 +805,8 @@ func (*Provider) SupportsDowngradeTarget(plan string) bool {
 	return plan == plans.Free
 }
 
+var _ billing.UpgradeTransitionChecker = (*Provider)(nil)
+
 // SupportsUpgradeTransition reports the exact self-serve upgrades this adapter
 // can execute today. Subscribe starts a NEW subscription through a hosted
 // Checkout Session, so an account that already pays for a plan would end up

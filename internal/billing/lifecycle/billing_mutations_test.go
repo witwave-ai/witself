@@ -1537,6 +1537,119 @@ func TestAmbiguousHostedPurchaseStaysQuarantinedAfterRetryHorizon(t *testing.T) 
 // hosted Checkout Session, so without a guard an account that already pays
 // would end up with two live subscriptions and two invoices. It must take the
 // contact path instead, while free-to-paid stays self-serve.
+// guardedUpgradeBillingProvider mirrors the Stripe adapter's capability surface
+// after the paid-to-paid guard: it can only start a subscription for an account
+// that does not already have one.
+type guardedUpgradeBillingProvider struct {
+	*countingUpgradeBillingProvider
+}
+
+func (*guardedUpgradeBillingProvider) SupportsUpgradeTransition(current, _ string) bool {
+	return current == "" || current == plans.Free
+}
+
+// A preview approval describes the account as it was when it was minted. If the
+// account becomes paid before the receipt executes — a webhook fold landing, an
+// exact retry, or the reconciler resuming unattended — replaying that approved
+// self-serve class would buy a SECOND subscription. Execution must re-assert the
+// provider capability against the freshest record and refuse.
+func TestBillingMutationPaidUpgradeIsRefusedAtExecutionNotOnlyPreview(t *testing.T) {
+	var document map[string]any
+	if err := json.Unmarshal(witself.PlansJSON, &document); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range document["plans"].([]any) {
+		plan := entry.(map[string]any)
+		if plan["id"] == "team" {
+			plan["available"] = true
+		}
+	}
+	flipped, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := plans.Parse(flipped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	team, ok := catalog.Get("team")
+	if !ok || !team.Purchasable() {
+		t.Fatalf("test catalog Team = %+v ok=%v; want purchasable", team, ok)
+	}
+
+	now := time.Date(2026, 8, 23, 9, 0, 0, 0, time.UTC)
+	clock := &clock{t: now}
+	store := NewMemStore()
+	actor := BillingActor{ID: "usr_owner_1", Role: "owner"}
+	command := BillingMutationCommand{
+		Operation: BillingMutationUpgrade, Plan: "team",
+		Reason:         "Move up to Team",
+		Confirmed:      true,
+		IdempotencyKey: "paid-upgrade-stale-approval-0001",
+	}
+	// The approval was legitimately minted while the account was still free.
+	seedPendingBillingMutationForTest(
+		t, store, billingMutationReceiptSchemaVersion,
+		"acct_stale_upgrade", "owner@example.com", actor, command,
+		billingMutationApproval{
+			ExecutionClass:     BillingMutationExecutionUpgradeSelfServe,
+			ApprovedPriceCents: team.PriceCents(),
+			ApprovedCurrency:   strings.ToLower(catalog.Currency),
+		}, now)
+	// Meanwhile the account actually became paid.
+	if err := store.Put(context.Background(), Record{
+		AccountID: "acct_stale_upgrade", Provider: "fake",
+		CustomerID:            "cus_stale_upgrade",
+		Entitled:              "standard",
+		Applied:               "standard",
+		EntitledAt:            now,
+		ManagedSubscriptionID: "sub_live_standard",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	provider := &guardedUpgradeBillingProvider{
+		countingUpgradeBillingProvider: &countingUpgradeBillingProvider{
+			Fake: fake.New(fake.Config{
+				Prices: catalog.Prices(), Interactive: true, Now: clock.now,
+			}),
+		},
+	}
+	manager, err := NewManager(Config{
+		Catalog: catalog,
+		Providers: map[string]billing.Provider{
+			"fake": provider,
+		},
+		Default: "fake", Store: store, Applier: &recApplier{}, Now: clock.now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, execErr := manager.ExecuteBillingMutation(
+		context.Background(), "acct_stale_upgrade", "owner@example.com", actor, command)
+	if !errors.Is(execErr, ErrBillingMutationApprovalDrift) {
+		t.Fatalf("execute of a stale self-serve approval = %v, want approval drift", execErr)
+	}
+	provider.mu.Lock()
+	subscribes := provider.subscribeCalls
+	provider.mu.Unlock()
+	if subscribes != 0 {
+		t.Fatalf("subscribe calls = %d, want 0; a purchase here is a second live subscription", subscribes)
+	}
+
+	// The receipt stays pending for operator resolution rather than being
+	// terminalized on a state the approval never described.
+	stored, ok, err := store.GetBillingMutation(
+		context.Background(), billingMutationOperationID("acct_stale_upgrade", command.IdempotencyKey))
+	if err != nil || !ok {
+		t.Fatalf("receipt lookup ok=%v err=%v", ok, err)
+	}
+	if stored.Status != BillingMutationPending {
+		t.Fatalf("receipt status = %q, want pending for operator resolution", stored.Status)
+	}
+}
+
 func TestBillingMutationStripeRoutesPaidUpgradeToContactBeforeReceipt(t *testing.T) {
 	// Team is not purchasable in the shipped catalog yet, so a shipped-catalog
 	// assertion here would pass through the unavailable-plan branch and prove

@@ -2136,6 +2136,18 @@ func (m *Manager) requestUpgrade(
 		if err != nil {
 			return err
 		}
+		// Re-assert the provider's transition capability against the FRESHEST
+		// record, inside the claim. A preview approval describes the account as
+		// it was when it was minted, and the dangerous case is precisely that
+		// the account became paid in between — through a webhook fold, a retry
+		// of a stale receipt, or the reconciler resuming one unattended. This
+		// check is deliberately not suppressed by pinnedUpgrade, because a
+		// pinned approval is exactly what would otherwise carry a stale
+		// self-serve class into a second live subscription. Drift keeps the
+		// receipt pending for operator resolution rather than purchasing.
+		if !supportsUpgradeTransition(provider, r.Entitled, target.ID) {
+			return ErrBillingMutationApprovalDrift
+		}
 		if _, ok := provider.(billing.IdempotentSubscriber); !ok {
 			return fmt.Errorf(
 				"billing provider %q does not support idempotent subscription operations",
