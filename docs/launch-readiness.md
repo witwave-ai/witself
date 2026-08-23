@@ -30,7 +30,7 @@ Status legend: ✅ done · 🔨 Claude-owned (build/deploy) · 🔑 needs Scott
 | Domain | State | What's left | Owner |
 |---|---|---|---|
 | **Team activation** | Team fully defined but `available:false`; realms+operators already are the org/billing unit; no seat cap exists | Add `operator_seats` limit dimension (dark), plan-fit seat check, set per-plan counts, flip Team available with honest flat pricing | 🔨 (seat counts need Scott sign-off) |
-| **Billing** | Dark Stripe stack largely complete (lifecycle, mutations, receipts, adapter) | Stripe Tax wiring, GA gate flag, paid-to-paid guard, dunning contract test, refund runbook | 🔨 code · 🔑 live keys/products/webhook/portal/cutover |
+| **Billing** | Dark Stripe stack complete: lifecycle, mutations, receipts, adapter, paid-to-paid guard (#247), Stripe Tax wiring (#248), GA gate (#249), dunning contract test, refund runbook | Live cutover only | 🔑 live keys/products/webhook/portal/Tax activation/cutover |
 | **Support** | Durable ticket engine built + tested | Published policy doc, AI author-kind + reserved handle, scoped AI credential, dark AI support-runner, support@ intake, entitlement sync, SLO alert | 🔨 code/docs · 🔑 support@ DNS+routing, AI credential, runner host |
 | **Monitoring** | kube-prometheus-stack templated, default-off | PagerDuty receiver (dark), dead-man watchdog, 3-phase rollout overlay, runbook | 🔨 config · 🔑 PagerDuty acct+key, dead-man monitor, cluster secrets, apply |
 | **Edge DMARC** | Inbound worker runs full SMTP txn; cell records spf/dkim/dmarc | Authenticity parser module, hard-DMARC-fail SMTP rejection (dark flag), value-free authenticity metadata (dark), migration | 🔨 code · 🔑 authserv-id from live header, worker deploy |
@@ -97,7 +97,9 @@ adversarially reviewed, gated, merged. Roughly in dependency order:
    migration (cell-side inert first).
 5. **Team seats**: `operator_seats` dimension (dark) → plan-fit seat check.
 6. **Billing (paid-to-paid guard first)** → Stripe Tax wiring → GA gate flag
-   (fail-closed) → dunning contract test → refund runbook.
+   (fail-closed) → dunning contract test → refund runbook. *All merged:
+   #247, #248, #249, and the dunning-contract/refund-runbook PR; what remains
+   is the keyed live cutover.*
 7. **Support**: policy doc → assistant author-kind + reserved handle → admin
    re-triage store method → AI support-runner core (dark) → scoped support_ai
    credential/role (dark) → SLO metric + breach alert → support@ intake bridge.
