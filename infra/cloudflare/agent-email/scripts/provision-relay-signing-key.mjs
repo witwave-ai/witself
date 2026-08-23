@@ -12,7 +12,10 @@ import {
 import { fileURLToPath } from "node:url";
 
 import { CloudflareAPI, cloudflareEnvironment } from "./cloudflare.mjs";
-import { verifyDeployment } from "./deployment-identity.mjs";
+import {
+  expectedDeployment,
+  verifyDeployment,
+} from "./deployment-identity.mjs";
 import { reserveJSONReceipt } from "./receipt-journal.mjs";
 import {
   activeBindings,
@@ -289,17 +292,10 @@ export function validateRelayProvisioningConfigs(controlPlaneRaw, emailEdgeRaw) 
     agent_email_directory_id: controlPlaneDirectoryID,
     managed_delivery_account_allowlist: "",
   });
-  const emailEdgeExpected = Object.freeze({
-    release: Object.freeze({ ...release, tag: `v${release.version}` }),
-    directoryID: emailEdgeDirectoryID,
-    controlPlaneURL: emailEdge.vars?.CONTROL_PLANE_URL,
-    routePublicKeys: emailEdge.vars?.AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS,
-    managedDeliveryAccountAllowlist: "",
-    managedDeliveryAccountCount: 0,
-    managedDeliveryAllowlistSHA256: sha256(""),
-    aliasDeliveryEnabled: "false",
-    canonicalDeliveryEnabled: "false",
-  });
+  const emailEdgeExpected = expectedDeployment({
+    ...emailEdge.vars,
+    EMAIL_DIRECTORY_KV_ID: emailEdgeDirectoryID,
+  }, Object.freeze({ ...release, tag: `v${release.version}` }));
   return Object.freeze({
     keyID,
     release,

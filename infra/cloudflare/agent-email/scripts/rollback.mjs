@@ -36,10 +36,18 @@ const EXPECTED_COMPATIBILITY_DATE = "2026-07-21";
 const EXPECTED_COMPATIBILITY_FLAGS = Object.freeze(["global_fetch_strictly_public"]);
 const MANAGED_DELIVERY_COHORT_BINDING =
   "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST";
+const DMARC_REJECT_BINDING = "AGENT_EMAIL_DMARC_REJECT_ENABLED";
+const AUTH_RESULTS_AUTHSERV_BINDING =
+  "AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID";
+const DMARC_BINDINGS = Object.freeze([
+  DMARC_REJECT_BINDING,
+  AUTH_RESULTS_AUTHSERV_BINDING,
+]);
 
 const REQUIRED_BINDINGS = Object.freeze([
   "AGENT_EMAIL_DOMAIN",
   "AGENT_EMAIL_LEGACY_DOMAINS",
+  ...DMARC_BINDINGS,
   MANAGED_DELIVERY_COHORT_BINDING,
   "AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS",
   "CONTROL_PLANE_EDGE_TOKEN",
@@ -120,17 +128,30 @@ function bindingMap(bindings, label, {
   }
   const actual = JSON.stringify([...result.keys()].sort());
   const current = JSON.stringify([...REQUIRED_BINDINGS].sort());
-  const legacy = JSON.stringify(REQUIRED_BINDINGS
+  const withoutManagedCohort = JSON.stringify(REQUIRED_BINDINGS
     .filter((name) => name !== MANAGED_DELIVERY_COHORT_BINDING)
     .sort());
+  const withoutDMARC = JSON.stringify(REQUIRED_BINDINGS
+    .filter((name) => !DMARC_BINDINGS.includes(name))
+    .sort());
+  const withoutManagedCohortOrDMARC = JSON.stringify(REQUIRED_BINDINGS
+    .filter((name) =>
+      name !== MANAGED_DELIVERY_COHORT_BINDING &&
+      !DMARC_BINDINGS.includes(name))
+    .sort());
   const legacyManagedDeliveryCohort =
-    allowLegacyManagedDeliveryCohort && actual === legacy;
-  if (actual !== current && !legacyManagedDeliveryCohort) {
+    allowLegacyManagedDeliveryCohort &&
+    (actual === withoutManagedCohort || actual === withoutManagedCohortOrDMARC);
+  const legacyDMARCBindings =
+    actual === withoutDMARC ||
+    (allowLegacyManagedDeliveryCohort && actual === withoutManagedCohortOrDMARC);
+  if (actual !== current && !legacyManagedDeliveryCohort && !legacyDMARCBindings) {
     throw new Error(`${label} binding inventory did not match the dark Worker contract`);
   }
   return Object.freeze({
     bindings: result,
     legacyManagedDeliveryCohort,
+    legacyDMARCBindings,
   });
 }
 
@@ -155,6 +176,20 @@ function managedBoolean(bindings, name, label) {
     throw new Error(`${label} managed binding ${name} was not explicitly true or false`);
   }
   return value;
+}
+
+function senderAuthenticationPolicy(bindings, label, legacyDMARCBindings) {
+  if (legacyDMARCBindings) {
+    return Object.freeze({ dmarc_reject_enabled: "false", authserv_id: "" });
+  }
+  const authservID = plain(bindings, AUTH_RESULTS_AUTHSERV_BINDING, label);
+  if (authservID !== "" && !/^[\x21-\x3a\x3c-\x7e]{1,255}$/.test(authservID)) {
+    throw new Error(`${label} trusted authentication attester was invalid`);
+  }
+  return Object.freeze({
+    dmarc_reject_enabled: managedBoolean(bindings, DMARC_REJECT_BINDING, label),
+    authserv_id: authservID,
+  });
 }
 
 function keyring(bindings, label) {
@@ -231,7 +266,7 @@ function inspectVersion(version, label, {
   const inventory = bindingMap(version.resources?.bindings, label, {
     allowLegacyManagedDeliveryCohort,
   });
-  const { bindings, legacyManagedDeliveryCohort } = inventory;
+  const { bindings, legacyManagedDeliveryCohort, legacyDMARCBindings } = inventory;
   const release = releaseIdentity(bindings, label);
   if (plain(bindings, "AGENT_EMAIL_DOMAIN", label) !== "witmail.net" ||
       plain(bindings, "AGENT_EMAIL_LEGACY_DOMAINS", label) !==
@@ -289,6 +324,11 @@ function inspectVersion(version, label, {
       alias: managedBoolean(bindings, "REALM_EMAIL_ALIAS_DELIVERY_ENABLED", label),
       canonical: managedBoolean(bindings, "REALM_EMAIL_CANONICAL_DELIVERY_ENABLED", label),
     },
+    sender_authentication: senderAuthenticationPolicy(
+      bindings,
+      label,
+      legacyDMARCBindings,
+    ),
     route_verification_keyring: keyring(bindings, label),
     rate_limiters: Object.fromEntries(
       Object.keys(LIMITERS).sort().map((name) => [name, limiter(bindings, name, label)]),
@@ -303,6 +343,7 @@ function inspectVersion(version, label, {
     contract,
     contractSHA256: sha256(canonicalJSON(contract)),
     legacyManagedDeliveryCohort,
+    legacyDMARCBindings,
   });
 }
 
@@ -352,6 +393,7 @@ function planBody(status, current, candidate, createdAt) {
       "metrics_dataset_exact",
       "rate_limiters_exact",
       "managed_delivery_flags_exact",
+      "sender_authentication_exact",
       "legacy_managed_delivery_candidate_dark",
       "route_verification_keyring_exact",
       "custom_domain_activation_absent",

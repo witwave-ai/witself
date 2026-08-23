@@ -74,6 +74,8 @@ function validEnvironment(relayPublicKey = Buffer.alloc(32, 9).toString("base64"
     AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: "",
     REALM_EMAIL_ALIAS_DELIVERY_ENABLED: "false",
     REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false",
+    AGENT_EMAIL_DMARC_REJECT_ENABLED: "false",
+    AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: "",
     CLOUDFLARE_API_BASE_URL: "https://attacker.invalid",
     CF_API_BASE_URL: "https://attacker.invalid",
     CF_ACCOUNT_ID: "e".repeat(32),
@@ -144,6 +146,8 @@ function renderedConfig(environment, targetRelease = release) {
       WITSELF_EDGE_RELEASE_DATE: targetRelease.date,
       REALM_EMAIL_ALIAS_DELIVERY_ENABLED: "false",
       REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false",
+      AGENT_EMAIL_DMARC_REJECT_ENABLED: "false",
+      AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: "",
     },
     observability: { enabled: true },
   }, null, 2)}\n`;
@@ -924,6 +928,8 @@ test("production bootstrap journals, deploys, attests, and cleans up end to end"
   }
   assert.equal(deployedEnvironment.WRANGLER_WRITE_LOGS, "false");
   assert.equal(deployedEnvironment.WRANGLER_LOG_SANITIZE, "true");
+  assert.equal(deployedEnvironment.AGENT_EMAIL_DMARC_REJECT_ENABLED, "false");
+  assert.equal(deployedEnvironment.AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID, "");
 });
 
 test("production bootstrap preserves the reviewed cohort preflight argument handoff", async () => {

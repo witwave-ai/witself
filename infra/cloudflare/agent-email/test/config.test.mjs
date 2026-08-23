@@ -20,6 +20,23 @@ const routePublicKeys = JSON.stringify({
   "route-2026-08": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 });
 
+function renderEnvironment(extra = {}) {
+  const environment = { ...process.env };
+  delete environment.AGENT_EMAIL_DMARC_REJECT_ENABLED;
+  delete environment.AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID;
+  return {
+    ...environment,
+    EMAIL_DIRECTORY_KV_ID: "a".repeat(32),
+    RELAY_KEY_ID: "pilot-2026-07",
+    CONTROL_PLANE_URL: controlPlaneURL,
+    AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS: routePublicKeys,
+    AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: "",
+    REALM_EMAIL_ALIAS_DELIVERY_ENABLED: "false",
+    REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false",
+    ...extra,
+  };
+}
+
 test("independent secret-put npm commands are not part of the edge surface", async () => {
   const packageJSON = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   assert.equal(Object.hasOwn(packageJSON.scripts, "secret:put"), false);
@@ -181,6 +198,14 @@ test("deployment config is email-only and cannot reuse the control-plane DIRECTO
   );
   assert.match(
     config,
+    /"AGENT_EMAIL_DMARC_REJECT_ENABLED"\s*:\s*"false"/,
+  );
+  assert.match(
+    config,
+    /"AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID"\s*:\s*""/,
+  );
+  assert.match(
+    config,
     /"AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST"\s*:\s*""/,
   );
   assert.match(
@@ -262,6 +287,59 @@ test("deployment config accepts only explicit boolean canonical gate values", ()
     assert.match(
       rendered.stderr,
       /REALM_EMAIL_CANONICAL_DELIVERY_ENABLED must be true or false/,
+    );
+  }
+});
+
+test("deployment config accepts only explicit boolean DMARC rejection values", () => {
+  for (const value of ["true", "false"]) {
+    const rendered = spawnSync(process.execPath, [script.pathname], {
+      cwd: root,
+      env: renderEnvironment({ AGENT_EMAIL_DMARC_REJECT_ENABLED: value }),
+      encoding: "utf8",
+    });
+    assert.equal(rendered.status, 0, rendered.stderr);
+  }
+
+  for (const value of ["TRUE", "1", "yes", " false "]) {
+    const rendered = spawnSync(process.execPath, [script.pathname], {
+      cwd: root,
+      env: renderEnvironment({ AGENT_EMAIL_DMARC_REJECT_ENABLED: value }),
+      encoding: "utf8",
+    });
+    assert.notEqual(rendered.status, 0, value);
+    assert.match(
+      rendered.stderr,
+      /AGENT_EMAIL_DMARC_REJECT_ENABLED must be true or false/,
+    );
+  }
+});
+
+test("deployment config validates the trusted authentication attester", () => {
+  for (const value of ["", "mx.trusted.example"]) {
+    const rendered = spawnSync(process.execPath, [script.pathname], {
+      cwd: root,
+      env: renderEnvironment({ AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: value }),
+      encoding: "utf8",
+    });
+    assert.equal(rendered.status, 0, rendered.stderr);
+  }
+
+  for (const value of [
+    "mx.trusted.example;attacker.example",
+    "mx trusted.example",
+    "mx.trusted.example\t",
+    "a".repeat(256),
+  ]) {
+    const rendered = spawnSync(process.execPath, [script.pathname], {
+      cwd: root,
+      env: renderEnvironment({ AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: value }),
+      encoding: "utf8",
+    });
+    assert.notEqual(rendered.status, 0, value);
+    assert.match(
+      rendered.stderr,
+      /AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID must be empty or a printable non-space ASCII token without semicolons/,
     );
   }
 });

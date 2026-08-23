@@ -34,6 +34,16 @@ function requiredBoolean(value, name) {
   return value;
 }
 
+function authenticationResultsAuthservID(value) {
+  const authservID = String(value ?? "");
+  if (authservID !== "" && !/^[\x21-\x3a\x3c-\x7e]{1,255}$/.test(authservID)) {
+    throw new Error(
+      "AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID must be empty or a printable non-space ASCII token without semicolons",
+    );
+  }
+  return authservID;
+}
+
 function bindingsByName(bindings) {
   if (!Array.isArray(bindings)) throw new Error("Worker version bindings were invalid");
   const result = new Map();
@@ -138,6 +148,13 @@ export function expectedDeployment(env, release) {
       env.REALM_EMAIL_CANONICAL_DELIVERY_ENABLED,
       "REALM_EMAIL_CANONICAL_DELIVERY_ENABLED",
     ),
+    dmarcRejectEnabled: requiredBoolean(
+      String(env.AGENT_EMAIL_DMARC_REJECT_ENABLED ?? "false"),
+      "AGENT_EMAIL_DMARC_REJECT_ENABLED",
+    ),
+    authenticationResultsAuthservID: authenticationResultsAuthservID(
+      env.AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID,
+    ),
   });
 }
 
@@ -179,6 +196,8 @@ export function verifyDeployment(status, version, expected, {
   const names = new Set([
     "AGENT_EMAIL_DOMAIN",
     "AGENT_EMAIL_LEGACY_DOMAINS",
+    "AGENT_EMAIL_DMARC_REJECT_ENABLED",
+    "AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID",
     "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
     "AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS",
     "CONTROL_PLANE_EDGE_TOKEN",
@@ -198,6 +217,12 @@ export function verifyDeployment(status, version, expected, {
   exactNames(bindings, names);
   plain(bindings, "AGENT_EMAIL_DOMAIN", "witmail.net");
   plain(bindings, "AGENT_EMAIL_LEGACY_DOMAINS", "agent-mail.witwave.ai");
+  plain(bindings, "AGENT_EMAIL_DMARC_REJECT_ENABLED", expected.dmarcRejectEnabled);
+  plain(
+    bindings,
+    "AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID",
+    expected.authenticationResultsAuthservID,
+  );
   plain(
     bindings,
     "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",

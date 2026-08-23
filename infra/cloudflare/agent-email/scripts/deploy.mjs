@@ -473,6 +473,8 @@ export function validateProductionDeploymentConfig(
     "CONTROL_PLANE_URL",
     "AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS",
     "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
+    "AGENT_EMAIL_DMARC_REJECT_ENABLED",
+    "AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID",
     "WITSELF_EDGE_RELEASE_VERSION",
     "WITSELF_EDGE_RELEASE_COMMIT",
     "WITSELF_EDGE_RELEASE_DATE",
@@ -492,6 +494,9 @@ export function validateProductionDeploymentConfig(
     WITSELF_EDGE_RELEASE_DATE: release.date,
     REALM_EMAIL_ALIAS_DELIVERY_ENABLED: expected.aliasDeliveryEnabled,
     REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: expected.canonicalDeliveryEnabled,
+    AGENT_EMAIL_DMARC_REJECT_ENABLED: expected.dmarcRejectEnabled,
+    AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID:
+      expected.authenticationResultsAuthservID,
   };
   const expectedRateLimits = [
     {

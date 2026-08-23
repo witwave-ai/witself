@@ -18,6 +18,12 @@ const aliasDeliveryEnabled = String(
 const canonicalDeliveryEnabled = String(
   process.env.REALM_EMAIL_CANONICAL_DELIVERY_ENABLED ?? "",
 );
+const dmarcRejectEnabled = String(
+  process.env.AGENT_EMAIL_DMARC_REJECT_ENABLED ?? "false",
+);
+const authenticationResultsAuthservID = String(
+  process.env.AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID ?? "",
+);
 const rawRoutePublicKeys = String(
   process.env.AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS ?? "",
 );
@@ -42,6 +48,17 @@ if (!["true", "false"].includes(aliasDeliveryEnabled)) {
 }
 if (!["true", "false"].includes(canonicalDeliveryEnabled)) {
   throw new Error("REALM_EMAIL_CANONICAL_DELIVERY_ENABLED must be true or false");
+}
+if (!["true", "false"].includes(dmarcRejectEnabled)) {
+  throw new Error("AGENT_EMAIL_DMARC_REJECT_ENABLED must be true or false");
+}
+if (
+  authenticationResultsAuthservID !== "" &&
+  !/^[\x21-\x3a\x3c-\x7e]{1,255}$/.test(authenticationResultsAuthservID)
+) {
+  throw new Error(
+    "AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID must be empty or a printable non-space ASCII token without semicolons",
+  );
 }
 let controlPlaneURL;
 try {
@@ -106,7 +123,9 @@ if ((template.match(/__EMAIL_DIRECTORY_KV_ID__/g) ?? []).length !== 1 ||
     (template.match(/__WITSELF_EDGE_RELEASE_COMMIT__/g) ?? []).length !== 1 ||
     (template.match(/__WITSELF_EDGE_RELEASE_DATE__/g) ?? []).length !== 1 ||
     (template.match(/__REALM_EMAIL_ALIAS_DELIVERY_ENABLED__/g) ?? []).length !== 1 ||
-    (template.match(/__REALM_EMAIL_CANONICAL_DELIVERY_ENABLED__/g) ?? []).length !== 1) {
+    (template.match(/__REALM_EMAIL_CANONICAL_DELIVERY_ENABLED__/g) ?? []).length !== 1 ||
+    (template.match(/__AGENT_EMAIL_DMARC_REJECT_ENABLED__/g) ?? []).length !== 1 ||
+    (template.match(/__AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID__/g) ?? []).length !== 1) {
   throw new Error("wrangler template placeholders are invalid");
 }
 const rendered = template
@@ -131,6 +150,14 @@ const rendered = template
   .replace(
     "__REALM_EMAIL_CANONICAL_DELIVERY_ENABLED__",
     canonicalDeliveryEnabled,
+  )
+  .replace(
+    "__AGENT_EMAIL_DMARC_REJECT_ENABLED__",
+    dmarcRejectEnabled,
+  )
+  .replace(
+    "__AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID__",
+    JSON.stringify(authenticationResultsAuthservID),
   );
 await writeFile(renderedOutput, rendered, { mode: 0o600 });
 process.stdout.write("rendered isolated email Worker configuration\n");

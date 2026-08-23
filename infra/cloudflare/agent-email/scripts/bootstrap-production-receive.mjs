@@ -475,6 +475,8 @@ export function validateBootstrapDeploymentConfig(
     "CONTROL_PLANE_URL",
     "AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS",
     "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
+    "AGENT_EMAIL_DMARC_REJECT_ENABLED",
+    "AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID",
     "WITSELF_EDGE_RELEASE_VERSION",
     "WITSELF_EDGE_RELEASE_COMMIT",
     "WITSELF_EDGE_RELEASE_DATE",
@@ -494,6 +496,9 @@ export function validateBootstrapDeploymentConfig(
     WITSELF_EDGE_RELEASE_DATE: release.date,
     REALM_EMAIL_ALIAS_DELIVERY_ENABLED: expected.aliasDeliveryEnabled,
     REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: expected.canonicalDeliveryEnabled,
+    AGENT_EMAIL_DMARC_REJECT_ENABLED: expected.dmarcRejectEnabled,
+    AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID:
+      expected.authenticationResultsAuthservID,
   };
   const exactRateLimits = [
     {
@@ -1101,7 +1106,8 @@ export async function bootstrapProductionReceive(options, dependencies = {}) {
   parseManagedDeliveryAccountAllowlist(targetAllowlist);
   if (targetAllowlist !== "" ||
       environment.REALM_EMAIL_ALIAS_DELIVERY_ENABLED !== "false" ||
-      environment.REALM_EMAIL_CANONICAL_DELIVERY_ENABLED !== "false") {
+      environment.REALM_EMAIL_CANONICAL_DELIVERY_ENABLED !== "false" ||
+      String(environment.AGENT_EMAIL_DMARC_REJECT_ENABLED ?? "false") !== "false") {
     throw new Error("production receive bootstrap requires an empty cohort and dark delivery gates");
   }
 

@@ -24,6 +24,8 @@ const env = {
   AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: "",
   REALM_EMAIL_ALIAS_DELIVERY_ENABLED: "false",
   REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false",
+  AGENT_EMAIL_DMARC_REJECT_ENABLED: "false",
+  AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: "",
 };
 const expected = expectedDeployment(env, release);
 const deploymentID = "11111111-2222-4333-8444-555555555555";
@@ -59,6 +61,8 @@ function fixtures() {
       bindings: [
         plain("AGENT_EMAIL_DOMAIN", "witmail.net"),
         plain("AGENT_EMAIL_LEGACY_DOMAINS", "agent-mail.witwave.ai"),
+        plain("AGENT_EMAIL_DMARC_REJECT_ENABLED", "false"),
+        plain("AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID", ""),
         plain("AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", ""),
         plain("AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS", env.AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS),
         { name: "CONTROL_PLANE_EDGE_TOKEN", type: "secret_text" },
@@ -239,6 +243,34 @@ test("deployment expectations require explicit managed delivery values", () => {
     assert.throws(
       () => expectedDeployment(candidate, release),
       new RegExp(`${name} must be explicitly true or false`),
+    );
+  }
+});
+
+test("deployment expectations default DMARC rejection dark and validate its attester", () => {
+  const darkEnvironment = { ...env };
+  delete darkEnvironment.AGENT_EMAIL_DMARC_REJECT_ENABLED;
+  delete darkEnvironment.AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID;
+  const dark = expectedDeployment(darkEnvironment, release);
+  assert.equal(dark.dmarcRejectEnabled, "false");
+  assert.equal(dark.authenticationResultsAuthservID, "");
+
+  for (const value of ["TRUE", " false ", "1"]) {
+    assert.throws(
+      () => expectedDeployment({
+        ...env,
+        AGENT_EMAIL_DMARC_REJECT_ENABLED: value,
+      }, release),
+      /AGENT_EMAIL_DMARC_REJECT_ENABLED must be explicitly true or false/,
+    );
+  }
+  for (const value of ["mx trusted.example", "mx.trusted.example;forged", "a".repeat(256)]) {
+    assert.throws(
+      () => expectedDeployment({
+        ...env,
+        AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: value,
+      }, release),
+      /AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID must be empty or a printable non-space ASCII token without semicolons/,
     );
   }
 });
