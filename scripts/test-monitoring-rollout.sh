@@ -404,7 +404,7 @@ ruby -ryaml -rbase64 -e '
   abort "unexpected pagerduty receiver set" unless receivers.map { |item| item.fetch("name") } == ["null", "witself-external", "witself-deadman"]
   abort "unexpected pagerduty route set" unless route.fetch("routes") == [
     {"matchers" => ["witself_alert = \"true\""], "receiver" => "witself-external"},
-    {"matchers" => ["witself_watchdog = \"true\""], "receiver" => "witself-deadman", "group_wait" => "0s", "group_interval" => "1m", "repeat_interval" => "5m"},
+    {"matchers" => ["witself_watchdog = \"true\""], "receiver" => "witself-deadman", "group_wait" => "0s", "group_interval" => "1m", "repeat_interval" => "4m"},
   ]
   abort "incident receiver must not use a webhook in pagerduty mode" if receivers[1].key?("webhook_configs")
   pd = receivers[1].fetch("pagerduty_configs").fetch(0)
@@ -442,7 +442,10 @@ ruby -ryaml -e '
   unlabelled = rules.reject { |rule| rule.dig("labels", "witself_alert") == "true" }.map { |rule| rule["alert"] }
   abort "every rule except the watchdog must reach the incident route: #{unlabelled.inspect}" unless unlabelled == ["WitselfWatchdog"]
   deadman_route = alertmanager_route_of.call("witself-deadman")
-  abort "the dead-man beat must flush faster than it repeats" unless deadman_route["group_interval"] == "1m" && deadman_route["repeat_interval"] == "5m"
+  group_seconds = deadman_route.fetch("group_interval")[/\d+/].to_i * 60
+  repeat_seconds = deadman_route.fetch("repeat_interval")[/\d+/].to_i * 60
+  abort "the dead-man beat must flush faster than it repeats, or the beat silently halves" unless group_seconds < repeat_seconds
+  abort "the dead-man beat must land on the documented five-minute cadence" unless ((repeat_seconds / group_seconds) + 1) * group_seconds == 300
 ' "$pagerduty_child_render" "$pagerduty_alertmanager_config"
 
 if grep -q 'witself-deadman' "$child_render"; then

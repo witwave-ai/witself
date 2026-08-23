@@ -194,11 +194,15 @@ spec:
                   matchers:
                     - witself_watchdog = "true"
                   group_wait: 0s
-                  # The group flush tick gates the repeat check, so the flush
-                  # interval must stay well below repeat_interval or the beat
-                  # lands every two intervals instead of every one.
+                  # The group flush tick gates the repeat check: a beat is sent
+                  # on the first tick where the last send is older than
+                  # repeat_interval. A one-minute tick with a four-minute repeat
+                  # therefore lands the beat exactly every five minutes, and a
+                  # failed delivery is retried on the next tick a minute later
+                  # rather than a whole beat later. Never set repeat_interval
+                  # equal to group_interval: the beat silently halves.
                   group_interval: 1m
-                  repeat_interval: 5m
+                  repeat_interval: 4m
 {{- end }}
 {{ else }}
               routes: []

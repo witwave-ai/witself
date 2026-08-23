@@ -2709,12 +2709,16 @@ in one parent commit.
      incident. Configure that external monitor (PagerDuty's free tier has no
      native dead-man, so use Dead Man's Snitch, healthchecks.io, or equivalent)
      to page the same PagerDuty service when a check-in is missed. The route
-     flushes every minute and repeats every five, so the heartbeat arrives on a
-     five-minute beat; set the monitor's missed-check-in window to roughly
-     fifteen minutes, which is three beats of margin and tolerates a normal
-     Alertmanager restart without flapping. Do not set the repeat interval
-     equal to the group interval: the flush tick gates the repeat check, so the
-     beat would silently halve to every ten minutes.
+     flushes every minute and repeats every four, which lands the heartbeat on
+     an exact five-minute beat: Alertmanager sends on the first flush tick
+     where the last send is older than the repeat interval. Set the monitor's
+     missed-check-in window to roughly fifteen minutes — three beats of margin,
+     which tolerates a normal Alertmanager restart without flapping. Two traps
+     to avoid when changing these numbers: never set the repeat interval equal
+     to the group interval, because the flush tick gates the repeat check and
+     the beat silently halves; and keep the group interval small, because a
+     failed delivery is only retried on the next tick, so a coarse tick turns
+     one transient 5xx into a missed window.
      Leaving `receiverDeadman.secretName` empty omits the route, the receiver,
      and the mount entirely.
 
