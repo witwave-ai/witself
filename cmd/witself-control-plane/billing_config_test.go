@@ -294,3 +294,70 @@ func TestStripeControlPlaneConfigRejectsEachUnsafeReturnURL(t *testing.T) {
 		})
 	}
 }
+
+// General availability is the deliberate end of the cohort, so it must be
+// explicit and it must fail closed: absent or false leaves the allowlist as the
+// only way in.
+func TestBillingGeneralAvailabilityIsExplicitAndFailsClosed(t *testing.T) {
+	setValidStripeControlPlaneEnv(t)
+	for _, value := range []string{"", "false"} {
+		t.Setenv("WITSELF_CP_BILLING_GENERAL_AVAILABILITY", value)
+		_, gate, err := stripeControlPlaneConfig(testCatalog(t))
+		if err != nil {
+			t.Fatalf("value %q: %v", value, err)
+		}
+		for accountID, want := range map[string]bool{
+			"acct_founder": true,
+			"acct_sandbox": true,
+			"acct_other":   false,
+			"":             false,
+		} {
+			got, gateErr := gate(context.Background(), accountID)
+			if gateErr != nil || got != want {
+				t.Fatalf("value %q gate(%q) = %t, %v; want %t",
+					value, accountID, got, gateErr, want)
+			}
+		}
+	}
+	t.Setenv("WITSELF_CP_BILLING_GENERAL_AVAILABILITY", "yes")
+	if _, _, err := stripeControlPlaneConfig(testCatalog(t)); err == nil ||
+		!strings.Contains(err.Error(), "WITSELF_CP_BILLING_GENERAL_AVAILABILITY") {
+		t.Fatalf("non-boolean general availability error = %v; want an explicit refusal", err)
+	}
+}
+
+// With general availability on, every account may mutate billing — and the two
+// configurations that would misrepresent that are refused rather than silently
+// widened.
+func TestBillingGeneralAvailabilityOpensEveryAccountAndRefusesContradictions(t *testing.T) {
+	setValidStripeControlPlaneEnv(t)
+	t.Setenv("WITSELF_CP_BILLING_GENERAL_AVAILABILITY", "true")
+
+	// A cohort alongside general availability reads as a restriction that is
+	// not being applied.
+	if _, _, err := stripeControlPlaneConfig(testCatalog(t)); err == nil ||
+		!strings.Contains(err.Error(), "WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST") {
+		t.Fatalf("allowlist with general availability error = %v; want a refusal", err)
+	}
+
+	// A test clock rewrites time for every customer attached to it.
+	t.Setenv("WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST", "")
+	t.Setenv("WITSELF_CP_STRIPE_TEST_CLOCK_ID", "clock_hermetic0000000000000")
+	if _, _, err := stripeControlPlaneConfig(testCatalog(t)); err == nil ||
+		!strings.Contains(err.Error(), "WITSELF_CP_STRIPE_TEST_CLOCK_ID") {
+		t.Fatalf("test clock with general availability error = %v; want a refusal", err)
+	}
+
+	t.Setenv("WITSELF_CP_STRIPE_TEST_CLOCK_ID", "")
+	_, gate, err := stripeControlPlaneConfig(testCatalog(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, accountID := range []string{"acct_founder", "acct_never_listed", "acct_brand_new"} {
+		enabled, gateErr := gate(context.Background(), accountID)
+		if gateErr != nil || !enabled {
+			t.Fatalf("gate(%q) = %t, %v; want every account enabled at GA",
+				accountID, enabled, gateErr)
+		}
+	}
+}

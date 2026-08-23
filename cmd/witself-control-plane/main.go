@@ -147,6 +147,8 @@ func run() int {
 //	WITSELF_CP_STRIPE_PORTAL_CONFIGURATION_ID reviewed safe bpc_ configuration
 //	WITSELF_CP_STRIPE_TEST_CLOCK_ID optional clock_ for test-mode acceptance only;
 //	                                    allows at most one cohort account
+//	WITSELF_CP_BILLING_GENERAL_AVAILABILITY explicit true/false; true opens
+//	  billing to every account and requires an empty allowlist and no test clock
 //	WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST strict comma-separated account cohort;
 //	                                         empty enables no customer mutations
 //	WITSELF_CP_R2_ENDPOINT       https://<account>.r2.cloudflarestorage.com
@@ -351,7 +353,30 @@ func stripeControlPlaneConfig(
 		return stripeprovider.Config{}, nil, errors.New(
 			"WITSELF_CP_STRIPE_TEST_CLOCK_ID requires at most one account in WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST")
 	}
-	gate := billingMutationGateForAccounts(allowedAccounts)
+	// General availability is the deliberate end of the cohort. It is explicit
+	// and fails closed: absent or false keeps the allowlist as the only way in.
+	generalAvailability, err := explicitBoolEnv("WITSELF_CP_BILLING_GENERAL_AVAILABILITY")
+	if err != nil {
+		return stripeprovider.Config{}, nil, err
+	}
+	if generalAvailability {
+		// A non-empty allowlist alongside GA is contradictory, and the
+		// dangerous reading is the reassuring one: an operator would believe
+		// billing is still restricted to that cohort when it is open to
+		// everyone. Refuse rather than silently widen.
+		if len(allowedAccounts) > 0 {
+			return stripeprovider.Config{}, nil, errors.New(
+				"WITSELF_CP_BILLING_GENERAL_AVAILABILITY=true requires an empty WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST: a cohort alongside general availability reads as a restriction that is not being applied")
+		}
+		// A test clock rewrites time for every customer it is attached to. That
+		// is an acceptance tool for a single sandbox account, never something to
+		// run while billing is open to everyone.
+		if testClockID != "" {
+			return stripeprovider.Config{}, nil, errors.New(
+				"WITSELF_CP_STRIPE_TEST_CLOCK_ID must not be set with WITSELF_CP_BILLING_GENERAL_AVAILABILITY=true")
+		}
+	}
+	gate := billingMutationGate(allowedAccounts, generalAvailability)
 
 	return stripeprovider.Config{
 		SecretKey:             secretKey,
@@ -402,7 +427,9 @@ func billingAccountAllowlistGate(
 	if err != nil {
 		return nil, err
 	}
-	return billingMutationGateForAccounts(allowed), nil
+	// Allowlist-only: this builder predates general availability and keeps
+	// meaning exactly the pre-GA cohort.
+	return billingMutationGate(allowed, false), nil
 }
 
 func parseBillingAccountAllowlist(raw string) (map[string]struct{}, error) {
@@ -429,10 +456,17 @@ func parseBillingAccountAllowlist(raw string) (map[string]struct{}, error) {
 	return allowed, nil
 }
 
-func billingMutationGateForAccounts(
+// billingMutationGate decides which accounts may mutate billing. Before general
+// availability that is exactly the reviewed cohort; after it, every account. The
+// zero configuration — no allowlist, no general availability — admits nobody.
+func billingMutationGate(
 	allowed map[string]struct{},
+	generalAvailability bool,
 ) cpserver.BillingMutationGateFunc {
 	return func(_ context.Context, accountID string) (bool, error) {
+		if generalAvailability {
+			return true, nil
+		}
 		_, ok := allowed[accountID]
 		return ok, nil
 	}
