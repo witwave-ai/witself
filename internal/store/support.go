@@ -96,7 +96,18 @@ const (
 	MessageAuthorOperator   = "operator"
 	MessageAuthorFleetAdmin = "fleet_admin"
 	MessageAuthorSystem     = "system"
+	// MessageAuthorAssistant marks a reply written by the AI support
+	// assistant. Support is AI-first with a fixed human-escalation set, and
+	// the published policy promises assistant replies are labeled, never
+	// presented as a human — the author kind is that label's source of truth.
+	MessageAuthorAssistant = "assistant"
 )
+
+// AssistantHandle is the single author_id ever used with
+// MessageAuthorAssistant. It is reserved against human admin minting in the
+// control-plane worker (RESERVED_HANDLES) and the CP bridge authenticator
+// (bridgeReservedHandles), so no person can post under the assistant's name.
+const AssistantHandle = "assistant"
 
 // Support-body size cap. 64 KiB is roomy for text, small enough that an
 // archive with many tickets stays reasonable. Enforced at the store layer;
@@ -788,6 +799,12 @@ type ReplyAdminInput struct {
 	AdminHandle string
 	TicketID    string
 	Body        string
+	// AsAssistant records the reply under the assistant author kind and the
+	// fixed AssistantHandle instead of AdminHandle. The caller (the support
+	// runner) still authenticates like any fleet-side actor; this flag only
+	// changes attribution, and the store forces the handle so a runner bug
+	// cannot post assistant messages under a person's name or vice versa.
+	AsAssistant bool
 }
 
 // ReplyAdminTicket appends a message from a fleet admin. Ticket state
@@ -851,6 +868,12 @@ func (s *Store) ReplyAdminTicket(ctx context.Context, in ReplyAdminInput) (Ticke
 	// ("When author_kind is 'fleet_admin', author_id is the admin's
 	// chosen HANDLE"). The store also asserts it in metadata for
 	// symmetry with the audit event.
+	authorKind := MessageAuthorFleetAdmin
+	authorID := in.AdminHandle
+	if in.AsAssistant {
+		authorKind = MessageAuthorAssistant
+		authorID = AssistantHandle
+	}
 	metaJSON := fmt.Sprintf(`{"admin_handle":%q}`, in.AdminHandle)
 	err = tx.QueryRow(ctx,
 		`INSERT INTO support_ticket_messages
@@ -858,7 +881,7 @@ func (s *Store) ReplyAdminTicket(ctx context.Context, in ReplyAdminInput) (Ticke
 		 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
 		 RETURNING id, ticket_id, account_id, posted_at, author_kind,
 		           COALESCE(author_id, ''), body, attachments, metadata`,
-		msgID, in.TicketID, in.AccountID, MessageAuthorFleetAdmin, in.AdminHandle, body, metaJSON,
+		msgID, in.TicketID, in.AccountID, authorKind, authorID, body, metaJSON,
 	).Scan(&m.ID, &m.TicketID, &m.AccountID, &m.PostedAt, &m.AuthorKind,
 		&m.AuthorID, &m.Body, &m.Attachments, &m.Metadata)
 	if err != nil {

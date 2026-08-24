@@ -104,6 +104,7 @@ import {
   cellMatchesPolicy,
   rescuePlacementPolicy,
 } from "./placement.mjs";
+import { validateMintHandle } from "./admin-handles.mjs";
 import { DurableAccountLifecycle } from "./account-lifecycle-runtime.mjs";
 import { DurableAccountSignup } from "./account-signup-runtime.mjs";
 import {
@@ -314,7 +315,6 @@ const ACCOUNT_BACKUP_ID = /^backup_[0-9]{8}T[0-9]{6}Z$/;
 const ADMIN_ID = /^adm_[a-z0-9]{20}$/;
 const ADMIN_PATH = /^\/v1\/admins\/(adm_[a-z0-9]{20})$/;
 const ADMIN_REVOKE_PATH = /^\/v1\/admins\/(adm_[a-z0-9]{20}):revoke$/;
-const ADMIN_HANDLE = /^[a-z][a-z0-9_-]{1,31}$/;
 // Admin-side fan-out paths (all admin-token authorized via adminAuthorized).
 // /v1/admin/whoami        — cheap round-trip that also verifies the token.
 // /v1/admin/tickets       — fleet-wide list; CP fans out to every cell.
@@ -332,18 +332,8 @@ const ADMIN_ACCOUNT_TICKET_STATE_PATH =
 // the archived-account 409 / unknown-account 404 rules.
 const ADMIN_ACCOUNT_SUPPORT_POLICY_PATH =
   /^\/v1\/admin\/accounts\/([A-Za-z0-9_-]{1,128})\/support-policy$/;
-// Handles that would collide with an existing actor_kind or role name
-// (owner / operator / control_plane / system). Reserved so a rogue mint
-// can't forge audit rows that read like a system-emitted event.
-const RESERVED_HANDLES = new Set([
-  "system",
-  "control_plane",
-  "root",
-  "admin",
-  "fleet",
-  "owner",
-  "operator",
-]);
+// Handle shape and the reserved set live in admin-handles.mjs so plain-node
+// tests can pin them (this file imports workerd-only packages).
 
 function timingSafeEqual(a, b) {
   const enc = new TextEncoder();
@@ -663,14 +653,9 @@ async function handleAdmins(request, env, url) {
       return err("invalid JSON body", 400);
     }
     const handle = String(body.handle ?? "").toLowerCase().trim();
-    if (!ADMIN_HANDLE.test(handle)) {
-      return err(
-        "invalid handle (2-32 lowercase chars; must start with a letter; letters/digits/underscore/hyphen only)",
-        400
-      );
-    }
-    if (RESERVED_HANDLES.has(handle)) {
-      return err(`handle "${handle}" is reserved`, 400);
+    const handleRefusal = validateMintHandle(handle);
+    if (handleRefusal !== null) {
+      return err(handleRefusal, 400);
     }
     const note = body.note == null ? undefined : String(body.note).trim();
     if (note !== undefined && note.length > 200) {
