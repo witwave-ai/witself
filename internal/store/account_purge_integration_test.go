@@ -41,12 +41,12 @@ func TestAccountPurgeErasesClosedPastGraceAndPreservesExcludedAccountsPostgres(
 	}
 
 	suffix := fmt.Sprint(time.Now().UnixNano())
-	target := seedAccountPurgeIntegrationContent(t, ctx, st, "target", suffix)
-	openDecoy := seedAccountPurgeIntegrationContent(t, ctx, st, "open", suffix)
-	configureAccountPurgeIntegrationTombstoneSource(t, ctx, st, target)
+	target := seedAccountPurgeIntegrationContent(ctx, t, st, "target", suffix)
+	openDecoy := seedAccountPurgeIntegrationContent(ctx, t, st, "open", suffix)
+	configureAccountPurgeIntegrationTombstoneSource(ctx, t, st, target)
 	openReceiptFingerprint := strings.Repeat("b", 64)
 	seedAccountPurgeIntegrationProvisionReceipt(
-		t, ctx, st, openDecoy.account.AccountID, openReceiptFingerprint,
+		ctx, t, st, openDecoy.account.AccountID, openReceiptFingerprint,
 	)
 	if err := st.CloseAccount(
 		ctx,
@@ -59,13 +59,13 @@ func TestAccountPurgeErasesClosedPastGraceAndPreservesExcludedAccountsPostgres(
 
 	grace := DefaultAccountPurgeWorkerConfig().Grace
 	withinGraceRow := readAccountPurgeIntegrationAccountRow(
-		t, ctx, st, target.account.AccountID,
+		ctx, t, st, target.account.AccountID,
 	)
 	withinGraceCounts := readAccountPurgeIntegrationCounts(
-		t, ctx, st, target.account.AccountID,
+		ctx, t, st, target.account.AccountID,
 	)
 	withinGraceReceiptFingerprint := readAccountPurgeIntegrationReceiptFingerprint(
-		t, ctx, st, target.account.AccountID,
+		ctx, t, st, target.account.AccountID,
 	)
 	previewWithinGrace, err := st.PreviewAccountPurgeBatch(ctx, 100, grace)
 	if err != nil {
@@ -77,16 +77,16 @@ func TestAccountPurgeErasesClosedPastGraceAndPreservesExcludedAccountsPostgres(
 		t.Fatal(err)
 	}
 	assertAccountPurgeIntegrationNoopResult(t, enforceWithinGrace, "within-grace enforce")
-	if got := readAccountPurgeIntegrationAccountRow(t, ctx, st, target.account.AccountID); !reflect.DeepEqual(got, withinGraceRow) {
+	if got := readAccountPurgeIntegrationAccountRow(ctx, t, st, target.account.AccountID); !reflect.DeepEqual(got, withinGraceRow) {
 		t.Fatalf("within-grace account mutated:\n got: %#v\nwant: %#v", got, withinGraceRow)
 	}
-	if got := readAccountPurgeIntegrationCounts(t, ctx, st, target.account.AccountID); !reflect.DeepEqual(got, withinGraceCounts) {
+	if got := readAccountPurgeIntegrationCounts(ctx, t, st, target.account.AccountID); !reflect.DeepEqual(got, withinGraceCounts) {
 		t.Fatalf("within-grace content mutated:\n got: %#v\nwant: %#v", got, withinGraceCounts)
 	}
-	if got := readAccountPurgeIntegrationReceiptFingerprint(t, ctx, st, target.account.AccountID); got != withinGraceReceiptFingerprint {
+	if got := readAccountPurgeIntegrationReceiptFingerprint(ctx, t, st, target.account.AccountID); got != withinGraceReceiptFingerprint {
 		t.Fatalf("within-grace provision receipt fingerprint = %q, want %q", got, withinGraceReceiptFingerprint)
 	}
-	assertAccountPurgeIntegrationContent(t, ctx, st, target, true)
+	assertAccountPurgeIntegrationContent(ctx, t, st, target, true)
 
 	// Give the active decoy an equally old closed_at. The exact preview result
 	// below must therefore fail if the selection page loses status='closed', even
@@ -113,7 +113,7 @@ func TestAccountPurgeErasesClosedPastGraceAndPreservesExcludedAccountsPostgres(
 	}
 
 	fenced := provisionActiveAccountPurgeIntegrationAccount(
-		t, ctx, st, "fenced", suffix,
+		ctx, t, st, "fenced", suffix,
 	)
 	if err := st.CloseAccount(
 		ctx, fenced.AccountID, fenced.OperatorID, "evacuation exclusion",
@@ -144,25 +144,25 @@ func TestAccountPurgeErasesClosedPastGraceAndPreservesExcludedAccountsPostgres(
 	}
 
 	targetBefore := readAccountPurgeIntegrationAccountRow(
-		t, ctx, st, target.account.AccountID,
+		ctx, t, st, target.account.AccountID,
 	)
 	openBefore := readAccountPurgeIntegrationAccountRow(
-		t, ctx, st, openDecoy.account.AccountID,
+		ctx, t, st, openDecoy.account.AccountID,
 	)
 	defaultBefore := readAccountPurgeIntegrationAccountRow(
-		t, ctx, st, defaultAccountID,
+		ctx, t, st, defaultAccountID,
 	)
 	fencedBefore := readAccountPurgeIntegrationAccountRow(
-		t, ctx, st, fenced.AccountID,
+		ctx, t, st, fenced.AccountID,
 	)
 	targetCountsBefore := readAccountPurgeIntegrationCounts(
-		t, ctx, st, target.account.AccountID,
+		ctx, t, st, target.account.AccountID,
 	)
 	openCountsBefore := readAccountPurgeIntegrationCounts(
-		t, ctx, st, openDecoy.account.AccountID,
+		ctx, t, st, openDecoy.account.AccountID,
 	)
 	openReceiptBefore := readAccountPurgeIntegrationReceiptFingerprint(
-		t, ctx, st, openDecoy.account.AccountID,
+		ctx, t, st, openDecoy.account.AccountID,
 	)
 	for _, table := range []string{
 		"memories", "facts", "transcript_conversations", "transcript_entries",
@@ -194,19 +194,19 @@ func TestAccountPurgeErasesClosedPastGraceAndPreservesExcludedAccountsPostgres(
 		)
 	}
 	assertAccountPurgeIntegrationStateUnchanged(
-		t, ctx, st, target.account.AccountID, targetBefore, targetCountsBefore,
+		ctx, t, st, target.account.AccountID, targetBefore, targetCountsBefore,
 		"preview target",
 	)
 	assertAccountPurgeIntegrationStateUnchanged(
-		t, ctx, st, openDecoy.account.AccountID, openBefore, openCountsBefore,
+		ctx, t, st, openDecoy.account.AccountID, openBefore, openCountsBefore,
 		"preview open decoy",
 	)
-	assertAccountPurgeIntegrationContent(t, ctx, st, target, true)
-	assertAccountPurgeIntegrationContent(t, ctx, st, openDecoy, true)
-	if got := readAccountPurgeIntegrationReceiptFingerprint(t, ctx, st, target.account.AccountID); got != withinGraceReceiptFingerprint {
+	assertAccountPurgeIntegrationContent(ctx, t, st, target, true)
+	assertAccountPurgeIntegrationContent(ctx, t, st, openDecoy, true)
+	if got := readAccountPurgeIntegrationReceiptFingerprint(ctx, t, st, target.account.AccountID); got != withinGraceReceiptFingerprint {
 		t.Fatalf("preview provision receipt fingerprint = %q, want %q", got, withinGraceReceiptFingerprint)
 	}
-	if got := readAccountPurgeIntegrationReceiptFingerprint(t, ctx, st, openDecoy.account.AccountID); got != openReceiptBefore {
+	if got := readAccountPurgeIntegrationReceiptFingerprint(ctx, t, st, openDecoy.account.AccountID); got != openReceiptBefore {
 		t.Fatalf("preview scrubbed open-account receipt = %q, want %q", got, openReceiptBefore)
 	}
 
@@ -229,12 +229,12 @@ func TestAccountPurgeErasesClosedPastGraceAndPreservesExcludedAccountsPostgres(
 	}
 
 	targetAfter := readAccountPurgeIntegrationAccountRow(
-		t, ctx, st, target.account.AccountID,
+		ctx, t, st, target.account.AccountID,
 	)
 	assertAccountPurgeIntegrationTombstone(t, targetBefore, targetAfter)
-	assertAccountPurgeIntegrationContent(t, ctx, st, target, false)
+	assertAccountPurgeIntegrationContent(ctx, t, st, target, false)
 	targetCountsAfter := readAccountPurgeIntegrationCounts(
-		t, ctx, st, target.account.AccountID,
+		ctx, t, st, target.account.AccountID,
 	)
 	for table, count := range targetCountsAfter {
 		want := int64(0)
@@ -245,26 +245,26 @@ func TestAccountPurgeErasesClosedPastGraceAndPreservesExcludedAccountsPostgres(
 			t.Errorf("post-purge %s count = %d, want %d", table, count, want)
 		}
 	}
-	assertAccountPurgeIntegrationAuditEvent(t, ctx, st, target.account.AccountID)
+	assertAccountPurgeIntegrationAuditEvent(ctx, t, st, target.account.AccountID)
 	assertAccountPurgeIntegrationRejectsPostPurgeMutations(
-		t, ctx, st, target.account.AccountID, targetBefore, targetAfter,
+		ctx, t, st, target.account.AccountID, targetBefore, targetAfter,
 	)
-	if got := readAccountPurgeIntegrationReceiptFingerprint(t, ctx, st, target.account.AccountID); got != purgedProvisionRequestFingerprint {
+	if got := readAccountPurgeIntegrationReceiptFingerprint(ctx, t, st, target.account.AccountID); got != purgedProvisionRequestFingerprint {
 		t.Fatalf("purged provision receipt fingerprint = %q, want scrub marker", got)
 	}
 
 	assertAccountPurgeIntegrationStateUnchanged(
-		t, ctx, st, openDecoy.account.AccountID, openBefore, openCountsBefore,
+		ctx, t, st, openDecoy.account.AccountID, openBefore, openCountsBefore,
 		"enforce open decoy",
 	)
-	assertAccountPurgeIntegrationContent(t, ctx, st, openDecoy, true)
-	if got := readAccountPurgeIntegrationReceiptFingerprint(t, ctx, st, openDecoy.account.AccountID); got != openReceiptBefore {
+	assertAccountPurgeIntegrationContent(ctx, t, st, openDecoy, true)
+	if got := readAccountPurgeIntegrationReceiptFingerprint(ctx, t, st, openDecoy.account.AccountID); got != openReceiptBefore {
 		t.Fatalf("enforce scrubbed open-account receipt = %q, want %q", got, openReceiptBefore)
 	}
-	if got := readAccountPurgeIntegrationAccountRow(t, ctx, st, defaultAccountID); !reflect.DeepEqual(got, defaultBefore) {
+	if got := readAccountPurgeIntegrationAccountRow(ctx, t, st, defaultAccountID); !reflect.DeepEqual(got, defaultBefore) {
 		t.Fatalf("default account was selected:\n got: %#v\nwant: %#v", got, defaultBefore)
 	}
-	if got := readAccountPurgeIntegrationAccountRow(t, ctx, st, fenced.AccountID); !reflect.DeepEqual(got, fencedBefore) {
+	if got := readAccountPurgeIntegrationAccountRow(ctx, t, st, fenced.AccountID); !reflect.DeepEqual(got, fencedBefore) {
 		t.Fatalf("evacuation-fenced account was selected:\n got: %#v\nwant: %#v", got, fencedBefore)
 	}
 
@@ -273,10 +273,10 @@ func TestAccountPurgeErasesClosedPastGraceAndPreservesExcludedAccountsPostgres(
 		t.Fatal(err)
 	}
 	assertAccountPurgeIntegrationNoopResult(t, retry, "post-purge retry")
-	if got := readAccountPurgeIntegrationAccountRow(t, ctx, st, target.account.AccountID); !reflect.DeepEqual(got, targetAfter) {
+	if got := readAccountPurgeIntegrationAccountRow(ctx, t, st, target.account.AccountID); !reflect.DeepEqual(got, targetAfter) {
 		t.Fatalf("purge retry changed tombstone:\n got: %#v\nwant: %#v", got, targetAfter)
 	}
-	assertAccountPurgeIntegrationAuditEvent(t, ctx, st, target.account.AccountID)
+	assertAccountPurgeIntegrationAuditEvent(ctx, t, st, target.account.AccountID)
 }
 
 func TestAccountPurgeDefersActiveVaultLifecyclePostgres(t *testing.T) {
@@ -293,7 +293,7 @@ func TestAccountPurgeDefersActiveVaultLifecyclePostgres(t *testing.T) {
 
 	suffix := fmt.Sprint(time.Now().UnixNano())
 	account := provisionActiveAccountPurgeIntegrationAccount(
-		t, ctx, st, "vault-deferred", suffix,
+		ctx, t, st, "vault-deferred", suffix,
 	)
 	realm, err := st.CreateRealm(ctx, account.AccountID, "account-purge-vault")
 	if err != nil {
@@ -332,8 +332,8 @@ func TestAccountPurgeDefersActiveVaultLifecyclePostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	before := readAccountPurgeIntegrationAccountRow(t, ctx, st, account.AccountID)
-	countsBefore := readAccountPurgeIntegrationCounts(t, ctx, st, account.AccountID)
+	before := readAccountPurgeIntegrationAccountRow(ctx, t, st, account.AccountID)
+	countsBefore := readAccountPurgeIntegrationCounts(ctx, t, st, account.AccountID)
 	if countsBefore["agent_vault_keys"] != 1 {
 		t.Fatalf("pending vault key count = %d, want 1", countsBefore["agent_vault_keys"])
 	}
@@ -344,7 +344,7 @@ func TestAccountPurgeDefersActiveVaultLifecyclePostgres(t *testing.T) {
 	}
 	assertAccountPurgeIntegrationDeferredResult(t, preview, "vault preview")
 	assertAccountPurgeIntegrationStateUnchanged(
-		t, ctx, st, account.AccountID, before, countsBefore, "vault preview",
+		ctx, t, st, account.AccountID, before, countsBefore, "vault preview",
 	)
 
 	enforced, err := st.ProcessAccountPurgeBatch(ctx, 100, grace)
@@ -353,7 +353,7 @@ func TestAccountPurgeDefersActiveVaultLifecyclePostgres(t *testing.T) {
 	}
 	assertAccountPurgeIntegrationDeferredResult(t, enforced, "vault enforce")
 	assertAccountPurgeIntegrationStateUnchanged(
-		t, ctx, st, account.AccountID, before, countsBefore, "vault enforce",
+		ctx, t, st, account.AccountID, before, countsBefore, "vault enforce",
 	)
 	var purgeEvents int64
 	if err := st.pool.QueryRow(ctx, `
@@ -384,21 +384,21 @@ func TestAccountPurgeSkipsAttachmentInvariantFailureAndContinuesPostgres(
 
 	suffix := fmt.Sprint(time.Now().UnixNano())
 	broken := provisionActiveAccountPurgeIntegrationAccount(
-		t, ctx, st, "attachment-broken", suffix,
+		ctx, t, st, "attachment-broken", suffix,
 	)
 	healthy := provisionActiveAccountPurgeIntegrationAccount(
-		t, ctx, st, "attachment-healthy", suffix,
+		ctx, t, st, "attachment-healthy", suffix,
 	)
 	brokenReceiptFingerprint := strings.Repeat("c", 64)
 	healthyReceiptFingerprint := strings.Repeat("d", 64)
 	seedAccountPurgeIntegrationProvisionReceipt(
-		t, ctx, st, broken.AccountID, brokenReceiptFingerprint,
+		ctx, t, st, broken.AccountID, brokenReceiptFingerprint,
 	)
 	seedAccountPurgeIntegrationProvisionReceipt(
-		t, ctx, st, healthy.AccountID, healthyReceiptFingerprint,
+		ctx, t, st, healthy.AccountID, healthyReceiptFingerprint,
 	)
 	seedAccountPurgeIntegrationAccountedEmail(
-		t, ctx, st, broken, suffix,
+		ctx, t, st, broken, suffix,
 	)
 	for _, account := range []ProvisionedAccount{broken, healthy} {
 		if err := st.CloseAccount(
@@ -425,10 +425,10 @@ func TestAccountPurgeSkipsAttachmentInvariantFailureAndContinuesPostgres(
 	}
 
 	brokenBefore := readAccountPurgeIntegrationAccountRow(
-		t, ctx, st, broken.AccountID,
+		ctx, t, st, broken.AccountID,
 	)
 	brokenCountsBefore := readAccountPurgeIntegrationCounts(
-		t, ctx, st, broken.AccountID,
+		ctx, t, st, broken.AccountID,
 	)
 	if brokenBefore.retainedAttachmentBytes != 3 ||
 		brokenCountsBefore["agent_email_messages"] != 1 {
@@ -439,10 +439,10 @@ func TestAccountPurgeSkipsAttachmentInvariantFailureAndContinuesPostgres(
 		)
 	}
 	healthyBefore := readAccountPurgeIntegrationAccountRow(
-		t, ctx, st, healthy.AccountID,
+		ctx, t, st, healthy.AccountID,
 	)
 	healthyCountsBefore := readAccountPurgeIntegrationCounts(
-		t, ctx, st, healthy.AccountID,
+		ctx, t, st, healthy.AccountID,
 	)
 
 	result, err := st.ProcessAccountPurgeBatch(
@@ -466,7 +466,7 @@ func TestAccountPurgeSkipsAttachmentInvariantFailureAndContinuesPostgres(
 		)
 	}
 	assertAccountPurgeIntegrationStateUnchanged(
-		t, ctx, st, broken.AccountID, brokenBefore, brokenCountsBefore,
+		ctx, t, st, broken.AccountID, brokenBefore, brokenCountsBefore,
 		"attachment-invariant account",
 	)
 	var brokenPurgeEvents int64
@@ -481,15 +481,15 @@ func TestAccountPurgeSkipsAttachmentInvariantFailureAndContinuesPostgres(
 	if brokenPurgeEvents != 0 {
 		t.Fatalf("attachment-invariant purge events = %d, want 0", brokenPurgeEvents)
 	}
-	if got := readAccountPurgeIntegrationReceiptFingerprint(t, ctx, st, broken.AccountID); got != brokenReceiptFingerprint {
+	if got := readAccountPurgeIntegrationReceiptFingerprint(ctx, t, st, broken.AccountID); got != brokenReceiptFingerprint {
 		t.Fatalf("attachment-invariant receipt fingerprint = %q, want %q", got, brokenReceiptFingerprint)
 	}
 	healthyAfter := readAccountPurgeIntegrationAccountRow(
-		t, ctx, st, healthy.AccountID,
+		ctx, t, st, healthy.AccountID,
 	)
 	assertAccountPurgeIntegrationTombstone(t, healthyBefore, healthyAfter)
-	assertAccountPurgeIntegrationAuditEvent(t, ctx, st, healthy.AccountID)
-	if got := readAccountPurgeIntegrationReceiptFingerprint(t, ctx, st, healthy.AccountID); got != purgedProvisionRequestFingerprint {
+	assertAccountPurgeIntegrationAuditEvent(ctx, t, st, healthy.AccountID)
+	if got := readAccountPurgeIntegrationReceiptFingerprint(ctx, t, st, healthy.AccountID); got != purgedProvisionRequestFingerprint {
 		t.Fatalf("healthy purged receipt fingerprint = %q, want scrub marker", got)
 	}
 }
@@ -505,14 +505,14 @@ type accountPurgeIntegrationContent struct {
 }
 
 func seedAccountPurgeIntegrationContent(
-	t *testing.T,
 	ctx context.Context,
+	t *testing.T,
 	st *Store,
 	label, suffix string,
 ) accountPurgeIntegrationContent {
 	t.Helper()
 	account := provisionActiveAccountPurgeIntegrationAccount(
-		t, ctx, st, label, suffix,
+		ctx, t, st, label, suffix,
 	)
 	realm, err := st.CreateRealm(ctx, account.AccountID, "account-purge-realm")
 	if err != nil {
@@ -582,8 +582,8 @@ func seedAccountPurgeIntegrationContent(
 }
 
 func provisionActiveAccountPurgeIntegrationAccount(
-	t *testing.T,
 	ctx context.Context,
+	t *testing.T,
 	st *Store,
 	label, suffix string,
 ) ProvisionedAccount {
@@ -604,8 +604,8 @@ func provisionActiveAccountPurgeIntegrationAccount(
 }
 
 func configureAccountPurgeIntegrationTombstoneSource(
-	t *testing.T,
 	ctx context.Context,
+	t *testing.T,
 	st *Store,
 	target accountPurgeIntegrationContent,
 ) {
@@ -657,13 +657,13 @@ func configureAccountPurgeIntegrationTombstoneSource(
 		t.Fatal(err)
 	}
 	seedAccountPurgeIntegrationProvisionReceipt(
-		t, ctx, st, target.account.AccountID, strings.Repeat("a", 64),
+		ctx, t, st, target.account.AccountID, strings.Repeat("a", 64),
 	)
 }
 
 func seedAccountPurgeIntegrationProvisionReceipt(
-	t *testing.T,
 	ctx context.Context,
+	t *testing.T,
 	st *Store,
 	accountID string,
 	fingerprint string,
@@ -683,8 +683,8 @@ func seedAccountPurgeIntegrationProvisionReceipt(
 }
 
 func seedAccountPurgeIntegrationAccountedEmail(
-	t *testing.T,
 	ctx context.Context,
+	t *testing.T,
 	st *Store,
 	account ProvisionedAccount,
 	suffix string,
@@ -762,8 +762,8 @@ func seedAccountPurgeIntegrationAccountedEmail(
 }
 
 func readAccountPurgeIntegrationReceiptFingerprint(
-	t *testing.T,
 	ctx context.Context,
+	t *testing.T,
 	st *Store,
 	accountID string,
 ) string {
@@ -811,8 +811,8 @@ type accountPurgeIntegrationAccountRow struct {
 }
 
 func readAccountPurgeIntegrationAccountRow(
-	t *testing.T,
 	ctx context.Context,
+	t *testing.T,
 	st *Store,
 	accountID string,
 ) accountPurgeIntegrationAccountRow {
@@ -858,8 +858,8 @@ func readAccountPurgeIntegrationAccountRow(
 }
 
 func readAccountPurgeIntegrationCounts(
-	t *testing.T,
 	ctx context.Context,
+	t *testing.T,
 	st *Store,
 	accountID string,
 ) map[string]int64 {
@@ -914,8 +914,8 @@ func assertAccountPurgeIntegrationDeferredResult(
 }
 
 func assertAccountPurgeIntegrationStateUnchanged(
-	t *testing.T,
 	ctx context.Context,
+	t *testing.T,
 	st *Store,
 	accountID string,
 	wantRow accountPurgeIntegrationAccountRow,
@@ -923,10 +923,10 @@ func assertAccountPurgeIntegrationStateUnchanged(
 	label string,
 ) {
 	t.Helper()
-	if got := readAccountPurgeIntegrationAccountRow(t, ctx, st, accountID); !reflect.DeepEqual(got, wantRow) {
+	if got := readAccountPurgeIntegrationAccountRow(ctx, t, st, accountID); !reflect.DeepEqual(got, wantRow) {
 		t.Fatalf("%s account changed:\n got: %#v\nwant: %#v", label, got, wantRow)
 	}
-	if got := readAccountPurgeIntegrationCounts(t, ctx, st, accountID); !reflect.DeepEqual(got, wantCounts) {
+	if got := readAccountPurgeIntegrationCounts(ctx, t, st, accountID); !reflect.DeepEqual(got, wantCounts) {
 		t.Fatalf("%s rows changed:\n got: %#v\nwant: %#v", label, got, wantCounts)
 	}
 }
@@ -984,8 +984,8 @@ func equalAccountPurgeIntegrationTimes(left, right *time.Time) bool {
 }
 
 func assertAccountPurgeIntegrationAuditEvent(
-	t *testing.T,
 	ctx context.Context,
+	t *testing.T,
 	st *Store,
 	accountID string,
 ) {
@@ -1024,8 +1024,8 @@ func assertAccountPurgeIntegrationAuditEvent(
 }
 
 func assertAccountPurgeIntegrationRejectsPostPurgeMutations(
-	t *testing.T,
 	ctx context.Context,
+	t *testing.T,
 	st *Store,
 	accountID string,
 	before, tombstone accountPurgeIntegrationAccountRow,
@@ -1090,7 +1090,7 @@ func assertAccountPurgeIntegrationRejectsPostPurgeMutations(
 	}
 
 	if got := readAccountPurgeIntegrationAccountRow(
-		t, ctx, st, accountID,
+		ctx, t, st, accountID,
 	); !reflect.DeepEqual(got, tombstone) {
 		t.Fatalf(
 			"post-purge mutation changed tombstone:\n got: %#v\nwant: %#v",
@@ -1098,39 +1098,39 @@ func assertAccountPurgeIntegrationRejectsPostPurgeMutations(
 			tombstone,
 		)
 	}
-	assertAccountPurgeIntegrationAuditEvent(t, ctx, st, accountID)
+	assertAccountPurgeIntegrationAuditEvent(ctx, t, st, accountID)
 }
 
 func assertAccountPurgeIntegrationContent(
-	t *testing.T,
 	ctx context.Context,
+	t *testing.T,
 	st *Store,
 	content accountPurgeIntegrationContent,
 	wantPresent bool,
 ) {
 	t.Helper()
-	assertAccountPurgeIntegrationTextRow(t, ctx, st, `
+	assertAccountPurgeIntegrationTextRow(ctx, t, st, `
 		SELECT version.content
 		  FROM memory_versions version
 		 WHERE version.account_id=$1 AND version.memory_id=$2 AND version.version=1`,
 		content.account.AccountID, content.memoryID,
 		accountPurgeIntegrationMemoryContent, wantPresent, "memory",
 	)
-	assertAccountPurgeIntegrationTextRow(t, ctx, st, `
+	assertAccountPurgeIntegrationTextRow(ctx, t, st, `
 		SELECT assertion.value::text
 		  FROM fact_assertions assertion
 		 WHERE assertion.account_id=$1 AND assertion.id=$2`,
 		content.account.AccountID, content.factAssertionID,
 		accountPurgeIntegrationFactValue, wantPresent, "fact",
 	)
-	assertAccountPurgeIntegrationTextRow(t, ctx, st, `
+	assertAccountPurgeIntegrationTextRow(ctx, t, st, `
 		SELECT entry.body
 		  FROM transcript_entries entry
 		 WHERE entry.account_id=$1 AND entry.id=$2`,
 		content.account.AccountID, content.transcriptEntryID,
 		accountPurgeIntegrationTranscriptBody, wantPresent, "transcript",
 	)
-	assertAccountPurgeIntegrationTextRow(t, ctx, st, `
+	assertAccountPurgeIntegrationTextRow(ctx, t, st, `
 		SELECT message.body
 		  FROM support_ticket_messages message
 		 WHERE message.account_id=$1 AND message.id=$2`,
@@ -1140,8 +1140,8 @@ func assertAccountPurgeIntegrationContent(
 }
 
 func assertAccountPurgeIntegrationTextRow(
-	t *testing.T,
 	ctx context.Context,
+	t *testing.T,
 	st *Store,
 	query, accountID, rowID, want string,
 	wantPresent bool,

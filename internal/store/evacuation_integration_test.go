@@ -1196,7 +1196,7 @@ func TestFinalizePurgedClosedSourcePreservesSingleErasureEventPostgres(
 	if !completed.Completed || completed.Status != "closed" {
 		t.Fatalf("purged target completion = %#v", completed)
 	}
-	assertPurgedEvacuationEventSet(t, ctx, st, source.AccountID)
+	assertPurgedEvacuationEventSet(ctx, t, st, source.AccountID)
 
 	retry, err := st.CompleteAccountEvacuation(
 		ctx, source.AccountID, evacuationID,
@@ -1207,12 +1207,12 @@ func TestFinalizePurgedClosedSourcePreservesSingleErasureEventPostgres(
 	if !retry.Completed || retry.Status != "closed" {
 		t.Fatalf("purged target completion retry = %#v", retry)
 	}
-	assertPurgedEvacuationEventSet(t, ctx, st, source.AccountID)
+	assertPurgedEvacuationEventSet(ctx, t, st, source.AccountID)
 }
 
 func assertPurgedEvacuationEventSet(
-	t *testing.T,
 	ctx context.Context,
+	t *testing.T,
 	st *Store,
 	accountID string,
 ) {
