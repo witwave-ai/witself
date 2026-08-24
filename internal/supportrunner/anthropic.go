@@ -64,10 +64,10 @@ func (a *anthropicLLM) Decide(ctx context.Context, thread ticketThread) (decisio
 		return decision{}, err
 	}
 	if message == nil {
-		return decision{}, errors.New("Anthropic response is missing")
+		return decision{}, errors.New("anthropic response is missing")
 	}
 	if message.StopReason == anthropic.StopReasonRefusal {
-		return decision{}, errors.New("Anthropic refused the support decision")
+		return decision{}, errors.New("anthropic refused the support decision")
 	}
 
 	var input any
@@ -75,16 +75,16 @@ func (a *anthropicLLM) Decide(ctx context.Context, thread ticketThread) (decisio
 	for _, block := range message.Content {
 		value, ok := block.AsAny().(anthropic.ToolUseBlock)
 		if !ok {
-			return decision{}, errors.New("Anthropic returned non-tool content")
+			return decision{}, errors.New("anthropic returned non-tool content")
 		}
 		if value.Name != decisionToolName {
-			return decision{}, errors.New("Anthropic returned an unexpected tool")
+			return decision{}, errors.New("anthropic returned an unexpected tool")
 		}
 		toolUses++
 		input = value.Input
 	}
 	if toolUses != 1 {
-		return decision{}, fmt.Errorf("Anthropic returned %d decision tools", toolUses)
+		return decision{}, fmt.Errorf("anthropic returned %d decision tools", toolUses)
 	}
 
 	raw, err := json.Marshal(input)
@@ -117,22 +117,22 @@ func decodeAnthropicDecision(raw []byte) (decision, error) {
 		return decision{}, err
 	}
 	if wire.Action == nil {
-		return decision{}, errors.New("Anthropic tool input is missing or null required field action")
+		return decision{}, errors.New("anthropic tool input is missing or null required field action")
 	}
 	if wire.ReplyBody == nil {
-		return decision{}, errors.New("Anthropic tool input is missing or null required field reply_body")
+		return decision{}, errors.New("anthropic tool input is missing or null required field reply_body")
 	}
 	if wire.Retriage == nil {
-		return decision{}, errors.New("Anthropic tool input is missing or null required field retriage")
+		return decision{}, errors.New("anthropic tool input is missing or null required field retriage")
 	}
 	if wire.Retriage.Category == nil {
-		return decision{}, errors.New("Anthropic retriage input is missing or null required field category")
+		return decision{}, errors.New("anthropic retriage input is missing or null required field category")
 	}
 	if wire.Retriage.Priority == nil {
-		return decision{}, errors.New("Anthropic retriage input is missing or null required field priority")
+		return decision{}, errors.New("anthropic retriage input is missing or null required field priority")
 	}
 	if wire.EscalateReason == nil {
-		return decision{}, errors.New("Anthropic tool input is missing or null required field escalate_reason")
+		return decision{}, errors.New("anthropic tool input is missing or null required field escalate_reason")
 	}
 	return decision{
 		Action:         *wire.Action,
@@ -146,7 +146,7 @@ func requireJSONEOF(decoder *json.Decoder) error {
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 		if err == nil {
-			return errors.New("Anthropic tool input has trailing JSON")
+			return errors.New("anthropic tool input has trailing JSON")
 		}
 		return fmt.Errorf("decode trailing Anthropic tool input: %w", err)
 	}
