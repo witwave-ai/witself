@@ -133,7 +133,7 @@ func TestSupportEmailIntakePostgres(t *testing.T) {
 			replayedTicket.ID, replayedTicket.Subject, replayedOpening.ID, replayedOpening.Body,
 			ticket.ID, ticket.Subject, opening.ID, opening.Body)
 	}
-	assertSupportEmailMessageIDCount(t, st, ctx, accountID, openInput.EmailMessageID, 1)
+	assertSupportEmailMessageIDCount(ctx, t, st, accountID, openInput.EmailMessageID, 1)
 	var ticketCount int
 	if err := st.pool.QueryRow(ctx,
 		`SELECT count(*) FROM support_tickets WHERE account_id = $1`,
@@ -191,7 +191,7 @@ func TestSupportEmailIntakePostgres(t *testing.T) {
 		t.Fatalf("replayed email reply = %s/%q, want %s/%q",
 			replayedReply.ID, replayedReply.Body, reply.ID, reply.Body)
 	}
-	assertSupportEmailMessageIDCount(t, st, ctx, accountID, replyInput.EmailMessageID, 1)
+	assertSupportEmailMessageIDCount(ctx, t, st, accountID, replyInput.EmailMessageID, 1)
 	replayedReplyInput.SenderEmail = "different@example.test"
 	if _, err := st.ReplyToTicketFromEmail(ctx, replayedReplyInput); !errors.Is(err, ErrSupportSenderMismatch) {
 		t.Fatalf("replayed reply sender mismatch = %v, want ErrSupportSenderMismatch", err)
@@ -225,7 +225,7 @@ func TestSupportEmailIntakePostgres(t *testing.T) {
 		t.Fatalf("concurrent email opens = ticket %s/%s message %s/%s, want identical ids",
 			firstOpen.ticket.ID, secondOpen.ticket.ID, firstOpen.message.ID, secondOpen.message.ID)
 	}
-	assertSupportEmailMessageIDCount(t, st, ctx, accountID, concurrentOpenInput.EmailMessageID, 1)
+	assertSupportEmailMessageIDCount(ctx, t, st, accountID, concurrentOpenInput.EmailMessageID, 1)
 
 	type replyResult struct {
 		message TicketMessage
@@ -254,7 +254,7 @@ func TestSupportEmailIntakePostgres(t *testing.T) {
 		t.Fatalf("concurrent email replies = message %s/%s, want identical ids",
 			firstReply.message.ID, secondReply.message.ID)
 	}
-	assertSupportEmailMessageIDCount(t, st, ctx, accountID, concurrentReplyInput.EmailMessageID, 1)
+	assertSupportEmailMessageIDCount(ctx, t, st, accountID, concurrentReplyInput.EmailMessageID, 1)
 
 	for _, state := range []string{TicketStateResolved, TicketStateClosed} {
 		if _, err := st.ChangeTicketState(ctx, ChangeTicketStateInput{
@@ -269,7 +269,7 @@ func TestSupportEmailIntakePostgres(t *testing.T) {
 	}
 }
 
-func assertSupportEmailMessageIDCount(t *testing.T, st *Store, ctx context.Context, accountID, messageID string, want int) {
+func assertSupportEmailMessageIDCount(ctx context.Context, t *testing.T, st *Store, accountID, messageID string, want int) {
 	t.Helper()
 	var count int
 	if err := st.pool.QueryRow(ctx,
