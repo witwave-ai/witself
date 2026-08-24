@@ -116,7 +116,8 @@ import { DurableAccountSignup } from "./account-signup-runtime.mjs";
 import {
   signupChallengeResponse,
 } from "./signup-challenge-page.mjs";
-import { verifyTurnstileToken } from "./signup-turnstile.mjs";
+import { turnstileEnabled, verifyTurnstileToken } from "./signup-turnstile.mjs";
+import { parseSignupLimit } from "./signup-counters.mjs";
 import {
   DurableTargetCellCoordinator,
 } from "./target-cell-coordinator.mjs";
@@ -1796,10 +1797,14 @@ async function handleSignup(request, env) {
     return err("account signup Durable Object is unavailable", 503);
   }
   const id = env.ACCOUNT_SIGNUP.idFromName(`provision:${provisionID}`);
+  // Positive-value semantics, not defined-checks: the template COMMITS the
+  // "0" quota vars as dark defaults, and a dark deployment must send the DO
+  // a byte-identical body — source_ip travels only when a control is
+  // actually on.
   const abuseContextConfigured =
-    env.CP_SIGNUP_TURNSTILE_ENABLED !== undefined ||
-    env.CP_SIGNUP_DAILY_LIMIT_PER_IP !== undefined ||
-    env.CP_SIGNUP_DAILY_LIMIT_GLOBAL !== undefined;
+    turnstileEnabled(env) ||
+    parseSignupLimit(env.CP_SIGNUP_DAILY_LIMIT_PER_IP) > 0 ||
+    parseSignupLimit(env.CP_SIGNUP_DAILY_LIMIT_GLOBAL) > 0;
   try {
     return await env.ACCOUNT_SIGNUP.get(id).fetch(
       new Request("https://account-signup.internal/run", {

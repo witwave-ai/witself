@@ -162,6 +162,10 @@ class SignupNamespace {
 function signupEnv(overrides = {}) {
   const env = {
     DIRECTORY: new Directory(),
+    // The template COMMITS these dark defaults; the invariance test must
+    // run in the production shape.
+    CP_SIGNUP_DAILY_LIMIT_PER_IP: "0",
+    CP_SIGNUP_DAILY_LIMIT_GLOBAL: "0",
     ...overrides,
   };
   const namespace = new SignupNamespace(env);
