@@ -606,7 +606,7 @@ func TestRunnerFreshnessDropOnStateOnlyChange(t *testing.T) {
 		ID: "tkm_1", AuthorKind: authorKindOwner, Body: "Original question",
 	}})
 	fresh := original
-	fresh.Ticket.State = ticketStateResolved
+	fresh.Ticket.State = "resolved"
 	api := newFakeTicketAPI(original)
 	api.threads["tkt_1"] = []ticketThread{original, fresh}
 	model := &fakeLLM{result: decision{Action: decisionActionReply, ReplyBody: "Stale answer"}}
@@ -627,7 +627,7 @@ func TestRunnerSkipsThreadAlreadyIneligibleOnFirstRead(t *testing.T) {
 	thread := runnerThread("tkt_1", "acc_1", []ticketMessage{{
 		ID: "tkm_1", AuthorKind: authorKindOwner, Body: "Original question",
 	}})
-	thread.Ticket.State = ticketStateResolved
+	thread.Ticket.State = "resolved"
 	api := newFakeTicketAPI(thread)
 	model := &fakeLLM{forbidden: true, t: t}
 	runner := newRunner(testRunnerConfig(), api, model, nil)
