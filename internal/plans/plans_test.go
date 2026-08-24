@@ -19,8 +19,8 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 	if len(c.Plans) != 4 {
 		t.Fatalf("catalog has %d plans; want 4", len(c.Plans))
 	}
-	if c.Updated != "2026-08-14" {
-		t.Fatalf("catalog updated = %q; want 2026-08-14", c.Updated)
+	if c.Updated != "2026-08-24" {
+		t.Fatalf("catalog updated = %q; want 2026-08-24", c.Updated)
 	}
 	if c.Currency != "USD" {
 		t.Fatalf("catalog currency = %q; want USD", c.Currency)
@@ -72,8 +72,8 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 	}
 
 	team, ok := c.Get("team")
-	if !ok || team.Available || team.Purchasable() || !team.Paid() || team.UsageBilled {
-		t.Fatalf("team = %+v; want flat-priced, not usage-billed, not available", team)
+	if !ok || !team.Available || !team.Purchasable() || !team.Paid() || team.UsageBilled {
+		t.Fatalf("team = %+v; want flat-priced, purchasable, and available", team)
 	}
 	if team.Policies[TranscriptRetentionDaysPolicy] != 365 {
 		t.Fatalf("team policies = %v; want 365-day transcript retention", team.Policies)
@@ -128,6 +128,7 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 				AgentEmailRealmAliasesPerRealmLimit:    0,
 				AgentLimit:                             10,
 				AgentPerRealmLimit:                     10,
+				OperatorSeatsLimit:                     1,
 				RealmLimit:                             1,
 				StoredFactLimit:                        1000,
 				StoredMemoryLimit:                      1000,
@@ -159,6 +160,7 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 				MessageDeliveredPerRealmMinuteLimit:     500,
 				MessageDeliveredPerRecipientMinuteLimit: 60,
 				MessageSentPerAgentMinuteLimit:          30,
+				OperatorSeatsLimit:                      3,
 				RealmLimit:                              1,
 				StoredFactLimit:                         10000,
 				StoredMemoryLimit:                       10000,
@@ -177,6 +179,7 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 		"team": {
 			name:         "Team",
 			priceMonthly: monthly(250),
+			available:    true,
 			usageBilled:  false,
 			limits: map[string]int64{
 				AgentEmailAttachmentStorageBytesLimit:   100 * 1024 * 1024 * 1024,
@@ -188,6 +191,7 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 				MessageDeliveredPerRealmMinuteLimit:     5000,
 				MessageDeliveredPerRecipientMinuteLimit: 300,
 				MessageSentPerAgentMinuteLimit:          120,
+				OperatorSeatsLimit:                      25,
 				RealmLimit:                              25,
 				StoredFactLimit:                         50000,
 				StoredMemoryLimit:                       50000,
@@ -201,7 +205,7 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 				TranscriptRetentionDaysPolicy:      365,
 			},
 			features: []string{"memory", "facts", "secrets", MessagingFeature, AgentEmailReceiveFeature, AgentEmailSendFeature, AgentEmailRealmAliasFeature, AgentEmailCustomDomainFeature, "collaboration", "support"},
-			summary:  "Coming soon. Everything in Professional for up to 100 agents per realm across 25 realms, at one flat monthly price.",
+			summary:  "Everything in Professional for up to 100 agents per realm across 25 realms, at one flat monthly price.",
 		},
 		"enterprise": {
 			name:        "Enterprise",
@@ -257,8 +261,8 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 		}
 	}
 	prices := c.Prices()
-	if len(prices) != 1 || prices["standard"] != 3000 {
-		t.Fatalf("Prices() = %v; want exactly {standard: 3000} while team/enterprise are unavailable", prices)
+	if len(prices) != 2 || prices["standard"] != 3000 || prices["team"] != 25000 {
+		t.Fatalf("Prices() = %v; want exactly standard 3000 and team 25000 while enterprise is unavailable", prices)
 	}
 }
 

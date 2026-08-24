@@ -64,11 +64,12 @@ func TestPlanListJSONCanFilterUnavailablePlans(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
 		t.Fatalf("decode output: %v\n%s", err, stdout)
 	}
-	if doc.SchemaVersion != plans.SchemaVersion || doc.Updated != "2026-08-14" || len(doc.Plans) != 2 {
+	if doc.SchemaVersion != plans.SchemaVersion || doc.Updated != "2026-08-24" || len(doc.Plans) != 3 {
 		t.Fatalf("filtered catalog = %+v", doc)
 	}
 	if doc.Plans[0].ID != plans.Free || doc.Plans[1].ID != "standard" ||
-		!doc.Plans[1].Recommended || doc.Plans[1].Badge != "Most popular" {
+		!doc.Plans[1].Recommended || doc.Plans[1].Badge != "Most popular" ||
+		doc.Plans[2].ID != "team" {
 		t.Fatalf("available plans = %+v", doc.Plans)
 	}
 }

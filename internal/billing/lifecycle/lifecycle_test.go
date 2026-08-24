@@ -436,7 +436,7 @@ func TestAgentEmailLimitOverridesResolveAndValidate(t *testing.T) {
 			"id":"free","name":"Personal","price_monthly":0,"available":true,
 			"usage_billed":false,
 			"limits":{
-				"agents":10,"agents_per_realm":10,"realms":1,
+				"agents":10,"agents_per_realm":10,"operator_seats":1,"realms":1,
 				"stored_fact":1000,"stored_memory":1000,"stored_secret":0
 			},
 			"policies":{

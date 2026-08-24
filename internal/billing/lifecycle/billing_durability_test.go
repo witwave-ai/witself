@@ -107,6 +107,17 @@ func durableManager(
 	if err != nil {
 		t.Fatal(err)
 	}
+	return durableManagerWithCatalog(t, store, provider, now, catalog)
+}
+
+func durableManagerWithCatalog(
+	t *testing.T,
+	store Store,
+	provider billing.Provider,
+	now func() time.Time,
+	catalog *plans.Catalog,
+) *Manager {
+	t.Helper()
 	manager, err := NewManager(Config{
 		Catalog: catalog,
 		Providers: map[string]billing.Provider{
@@ -751,13 +762,16 @@ func TestReplacementCancelFailureRetainsPreSubscribePhase(t *testing.T) {
 func TestReplacementSupersessionPreservesPendingCleanup(t *testing.T) {
 	ctx := context.Background()
 	ck := &clock{t: time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)}
-	catalog, _ := plans.Load()
+	// The scenario needs two DIFFERENT contact-class targets (enterprise then
+	// team) so a superseding contact request replaces the pending cleanup.
+	// Shipped Team is self-serve now, so pin a team-unavailable catalog.
+	catalog := catalogWithPlanAvailability(t, "team", false)
 	underlying := fake.New(fake.Config{Prices: catalog.Prices(), Now: ck.now})
 	provider := &cancelOnceProvider{
 		Provider: underlying, idempotent: underlying, failures: 2,
 	}
 	store := NewMemStore()
-	manager := durableManager(t, store, provider, ck.now)
+	manager := durableManagerWithCatalog(t, store, provider, ck.now, catalog)
 
 	if _, err := manager.RequestUpgrade(
 		ctx, "acct_cancel_supersede", "owner@example.com", "standard"); err != nil {
