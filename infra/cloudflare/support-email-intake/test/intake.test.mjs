@@ -110,3 +110,38 @@ test("ticket tags and mandatory bounded Message-ID use exact syntax", () => {
   assert.equal(messageIDFromHeaders(new Headers()), null);
   assert.equal(messageIDFromHeaders({ "Message-ID": "x".repeat(999) }), null);
 });
+
+// A dark deployment must be indistinguishable from no worker: the gate
+// outranks every other branch, including the size reject and loop checks.
+test("the gate outranks the size reject and every drop reason", () => {
+  for (const candidate of [
+    { to: "support@witwave.ai", size: 100 * 1024 * 1024 },
+    { to: "someone-else@witwave.ai", size: 100 },
+    { to: "support@witwave.ai", size: 100 },
+  ]) {
+    const decision = decideIntake({
+      headers: new Headers({ From: "owner@example.com" }),
+      from: "bounce@example.com",
+      verdicts: { dmarc: "pass" },
+      config: { SUPPORT_EMAIL_INTAKE_ENABLED: "false" },
+      ...candidate,
+    });
+    assert.equal(decision.action, "drop");
+    assert.equal(decision.reason, "drop_gate");
+  }
+});
+
+test("Precedence list drops like the other loop classes", () => {
+  const decision = decideIntake({
+    headers: new Headers({ From: "owner@example.com", Precedence: "list" }),
+    from: "bounce@example.com",
+    to: "support@witwave.ai",
+    size: 100,
+    verdicts: { dmarc: "pass" },
+    config: {
+      SUPPORT_EMAIL_INTAKE_ENABLED: "true",
+      SUPPORT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: "mx.example",
+    },
+  });
+  assert.equal(decision.reason, "drop_precedence");
+});

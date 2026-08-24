@@ -233,3 +233,24 @@ test("control-plane failures throw for replay and never reject the sender", asyn
   );
   assert.deepEqual(mail.rejected, []);
 });
+
+test("gate-off oversized mail is dropped silently with zero side effects", async () => {
+  let limiterCalls = 0;
+  const countingLimiter = { async limit() { limiterCalls++; return { success: true }; } };
+  let fetched = false;
+  const message = fakeMessage({ rawSize: SUPPORT_EMAIL_MAX_RAW_BYTES + 1 });
+  const result = await handleEmail(
+    message,
+    environment({
+      SUPPORT_EMAIL_INTAKE_ENABLED: "false",
+      SUPPORT_EMAIL_SENDER_LIMITER: countingLimiter,
+      SUPPORT_EMAIL_GLOBAL_LIMITER: countingLimiter,
+    }),
+    runtime(async () => { fetched = true; return new Response(null, { status: 200 }); }),
+  );
+  assert.equal(result.action, "drop");
+  assert.equal(result.reason, "drop_gate");
+  assert.deepEqual(message.rejected, []);
+  assert.equal(limiterCalls, 0);
+  assert.equal(fetched, false);
+});

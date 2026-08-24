@@ -958,7 +958,7 @@ async function handleSupportEmailIntake(request, env) {
       env.DIRECTORY.get(key),
       env.DIRECTORY.get(pendingKey),
     ]);
-    if (dedupState === "done" || dedupState === "1") {
+    if (dedupState === "done") {
       return supportEmailIntakeDisposition("duplicate");
     }
     if (dedupState !== null || pendingState !== null) {

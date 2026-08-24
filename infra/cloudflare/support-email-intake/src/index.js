@@ -139,6 +139,12 @@ function rejectOverSize(message) {
 // handleEmail accepts an injected fetch/crypto runtime so all egress and
 // rate-limit behavior can be tested without a live Cloudflare Worker.
 export async function handleEmail(message, env, runtime = {}) {
+  // Dark means dark: with the gate off, return before the rate limiters or
+  // any other binding can act, so a disabled deployment produces no rejects,
+  // no tempfails, and no limiter consumption whatsoever.
+  if (env?.SUPPORT_EMAIL_INTAKE_ENABLED !== "true") {
+    return Object.freeze({ action: "drop", reason: "drop_gate" });
+  }
   const cryptoAPI = runtime.crypto ?? globalThis.crypto;
   if (!await applyRateLimits(message, env, cryptoAPI)) {
     return Object.freeze({ action: "drop", reason: "drop_sender_rate" });

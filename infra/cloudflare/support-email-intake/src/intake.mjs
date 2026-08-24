@@ -7,7 +7,7 @@ const LOOP_SENDERS = new Set([
   "support@witwave.ai",
   "no-reply@witwave.ai",
 ]);
-const LOOP_PRECEDENCE = new Set(["bulk", "junk", "auto_reply"]);
+const LOOP_PRECEDENCE = new Set(["bulk", "junk", "auto_reply", "list"]);
 
 function objectHeaderEntries(headers) {
   if (!headers || typeof headers !== "object") return [];
@@ -104,6 +104,12 @@ function result(action, reason) {
 // decideIntake is deliberately value-free: it decides only the intake action
 // and reason. The caller separately reads the validated visible sender.
 export function decideIntake({ headers, from, to, size, verdicts, config }) {
+  // The gate comes before every other check, including the size reject: a
+  // dark deployment must be indistinguishable from no worker at all, so no
+  // reject, no distinction, and no side effect may escape while it is off.
+  if (config?.SUPPORT_EMAIL_INTAKE_ENABLED !== "true") {
+    return result("drop", "drop_gate");
+  }
   if (typeof to !== "string" || to.toLowerCase() !== SUPPORT_RECIPIENT) {
     return result("drop", "drop_wrong_recipient");
   }
@@ -133,9 +139,6 @@ export function decideIntake({ headers, from, to, size, verdicts, config }) {
   const sender = visibleSender(headers);
   if (sender === null) return result("drop", "drop_invalid_from");
   if (LOOP_SENDERS.has(sender)) return result("drop", "drop_loop_sender");
-  if (config?.SUPPORT_EMAIL_INTAKE_ENABLED !== "true") {
-    return result("drop", "drop_gate");
-  }
   if (typeof config?.SUPPORT_EMAIL_AUTH_RESULTS_AUTHSERV_ID !== "string" ||
       config.SUPPORT_EMAIL_AUTH_RESULTS_AUTHSERV_ID === "") {
     return result("drop", "drop_authserv_id");
