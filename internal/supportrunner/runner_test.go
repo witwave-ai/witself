@@ -596,3 +596,43 @@ func assertNoMutations(t *testing.T, api *fakeTicketAPI) {
 		t.Fatalf("mutations: replies=%+v retriages=%+v", api.replies, api.retriages)
 	}
 }
+
+// A fleet admin can resolve a ticket between the runner's context read and
+// its freshness re-read WITHOUT changing last_message_id (state changes do
+// not post messages). Only the state clause of the freshness fence catches
+// that; this pins it in isolation so the clause cannot be simplified away.
+func TestRunnerFreshnessDropOnStateOnlyChange(t *testing.T) {
+	original := runnerThread("tkt_1", "acc_1", []ticketMessage{{
+		ID: "tkm_1", AuthorKind: authorKindOwner, Body: "Original question",
+	}})
+	fresh := original
+	fresh.Ticket.State = ticketStateResolved
+	api := newFakeTicketAPI(original)
+	api.threads["tkt_1"] = []ticketThread{original, fresh}
+	model := &fakeLLM{result: decision{Action: decisionActionReply, ReplyBody: "Stale answer"}}
+	runner := newRunner(testRunnerConfig(), api, model, nil)
+	if err := runner.tick(context.Background()); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if model.calls != 1 || api.getCalls["tkt_1"] != 2 {
+		t.Fatalf("calls: llm=%d get=%d", model.calls, api.getCalls["tkt_1"])
+	}
+	assertNoMutations(t, api)
+}
+
+// The same race can land before the FIRST read: the listing said actionable,
+// but the thread arrives already resolved (state moved, no new message).
+// threadIsConsistent's state clause must stop it before the LLM is consulted.
+func TestRunnerSkipsThreadAlreadyIneligibleOnFirstRead(t *testing.T) {
+	thread := runnerThread("tkt_1", "acc_1", []ticketMessage{{
+		ID: "tkm_1", AuthorKind: authorKindOwner, Body: "Original question",
+	}})
+	thread.Ticket.State = ticketStateResolved
+	api := newFakeTicketAPI(thread)
+	model := &fakeLLM{forbidden: true, t: t}
+	runner := newRunner(testRunnerConfig(), api, model, nil)
+	if err := runner.tick(context.Background()); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	assertNoMutations(t, api)
+}
