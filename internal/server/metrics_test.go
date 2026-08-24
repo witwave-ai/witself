@@ -44,7 +44,7 @@ func TestRuntimeMetricsUseBoundedRouteTemplates(t *testing.T) {
 func TestAgentEmailCellStorageMetricsAreValueFreeAndBounded(t *testing.T) {
 	metrics := newRuntimeMetrics()
 	reads := 0
-	handler := metricsMuxFor(metrics, func(ctx context.Context) (AgentEmailCellStorageMetrics, error) {
+	handler := metricsMuxForCellStorageTest(metrics, func(ctx context.Context) (AgentEmailCellStorageMetrics, error) {
 		reads++
 		deadline, ok := ctx.Deadline()
 		if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > agentEmailCellStorageMetricsTimeout {
@@ -104,7 +104,7 @@ func TestAgentEmailCellStorageMetricsFailClosedWithoutErrorText(t *testing.T) {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
 			response := httptest.NewRecorder()
-			metricsMuxFor(newRuntimeMetrics(), test.read).ServeHTTP(
+			metricsMuxFor(newRuntimeMetrics(), test.read, nil).ServeHTTP(
 				response,
 				httptest.NewRequest(http.MethodGet, "/metrics", nil),
 			)
@@ -654,5 +654,43 @@ func TestRuntimeMetricsObserveMessageRateLimitRejectionsWithBoundedLabels(t *tes
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("metrics exposed %q:\n%s", forbidden, text)
 		}
+	}
+}
+
+// metricsMuxForCellStorageTest keeps the older two-argument shape for the
+// cell-storage test above.
+func metricsMuxForCellStorageTest(
+	metrics *runtimeMetrics,
+	read func(context.Context) (AgentEmailCellStorageMetrics, error),
+) http.Handler {
+	return metricsMuxFor(metrics, read, nil)
+}
+
+// The SLO gauges must separate "nothing waiting" from "read failed": a broken
+// read renders _up 0 with no gauge lines, never zeros that read healthy.
+func TestSupportSLOMetricsRenderAndFailValueFree(t *testing.T) {
+	ok := httptest.NewRecorder()
+	metricsMuxFor(newRuntimeMetrics(), nil, func(context.Context) (SupportSLOMetrics, error) {
+		return SupportSLOMetrics{UnansweredTickets: 2, OldestUnansweredSeconds: 90061}, nil
+	}).ServeHTTP(ok, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := ok.Body.String()
+	for _, want := range []string{
+		"witself_support_slo_metrics_up 1",
+		"witself_support_unanswered_tickets 2",
+		"witself_support_oldest_unanswered_seconds 90061",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics missing %q:\n%s", want, body)
+		}
+	}
+	broken := httptest.NewRecorder()
+	metricsMuxFor(newRuntimeMetrics(), nil, func(context.Context) (SupportSLOMetrics, error) {
+		return SupportSLOMetrics{}, errors.New("db down with tenant detail")
+	}).ServeHTTP(broken, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	b := broken.Body.String()
+	if !strings.Contains(b, "witself_support_slo_metrics_up 0") ||
+		strings.Contains(b, "witself_support_unanswered_tickets") ||
+		strings.Contains(b, "db down") {
+		t.Fatalf("failed read leaked or rendered gauges:\n%s", b)
 	}
 }

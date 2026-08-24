@@ -206,3 +206,22 @@ tests:
             exp_annotations:
               summary: Witself alerting pipeline heartbeat.
               runbook: docs/runbooks.md#founder-open-plane-monitoring
+  - name: support first-response breach fires only past the day boundary
+    interval: 1m
+    input_series:
+      - series: witself_support_oldest_unanswered_seconds
+        values: 86300+60x39
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: WitselfSupportFirstResponseBreach
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: WitselfSupportFirstResponseBreach
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: witself-server
+              witself_alert: "true"
+            exp_annotations:
+              summary: A support ticket has waited over 24h for its first response — the published promise is one business day.
+              runbook: docs/runbooks.md#founder-open-plane-monitoring
