@@ -111,7 +111,10 @@ Before setting the gate to `true`:
 1. Provision a dedicated single-replica host with private health and metrics
    listeners and normal process supervision.
 2. Verify every reachable cell is at this release or newer.
-3. Mount the dedicated, least-privilege admin credential and configure its file
+3. Mint the runner's credential with `scope: support_ai` (the CP refuses it
+   everywhere except the ticket surface: list, get, reply, retriage, whoami —
+   no state changes, no support-policy writes, no fleet administration),
+   mount it, and configure its file
    path.
 4. Mount the Anthropic API-key secret and configure its file path.
 5. Verify the control-plane endpoint, queue visibility, escalation fixtures,

@@ -36,3 +36,33 @@ export function validateMintHandle(handle) {
   }
   return null;
 }
+
+// Admin credential scopes. "full" (the default for every credential minted
+// before scopes existed) grants the whole admin surface. "support_ai" is the
+// AI support runner's credential: exactly the ticket surface it needs and
+// nothing else — no state changes, no support-policy writes, no fleet or
+// email-domain administration. Scope checks are default-deny: an unknown
+// scope or an unlisted action refuses, so adding a new admin route without
+// thinking about scopes fails closed for non-full credentials.
+export const ADMIN_SCOPE_FULL = "full";
+export const ADMIN_SCOPE_SUPPORT_AI = "support_ai";
+export const ADMIN_SCOPES = new Set([ADMIN_SCOPE_FULL, ADMIN_SCOPE_SUPPORT_AI]);
+
+const SUPPORT_AI_ACTIONS = new Set([
+  "whoami",
+  "list-tickets",
+  "get-ticket",
+  "reply-ticket",
+  "retriage-ticket",
+]);
+
+// adminScopeAllows decides whether a credential's scope admits one named
+// admin action. Missing scope means a pre-scope credential: full.
+export function adminScopeAllows(scope, action) {
+  const effective = scope ?? ADMIN_SCOPE_FULL;
+  if (effective === ADMIN_SCOPE_FULL) return true;
+  if (effective === ADMIN_SCOPE_SUPPORT_AI) {
+    return SUPPORT_AI_ACTIONS.has(action);
+  }
+  return false;
+}
