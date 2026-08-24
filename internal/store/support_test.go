@@ -3,8 +3,18 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
+
+func TestSupportSubjectLimitCountsCharacters(t *testing.T) {
+	if supportSubjectTooLong(strings.Repeat("🙂", maxSupportSubjectChars)) {
+		t.Fatal("exactly maxSupportSubjectChars Unicode characters were refused")
+	}
+	if !supportSubjectTooLong(strings.Repeat("🙂", maxSupportSubjectChars+1)) {
+		t.Fatal("subject above maxSupportSubjectChars Unicode characters was accepted")
+	}
+}
 
 // TestAdminHandleShape pins the admin-handle shape guard the store uses
 // to reject malformed handles from a compromised or buggy control-plane

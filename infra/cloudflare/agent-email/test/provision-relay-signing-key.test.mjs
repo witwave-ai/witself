@@ -85,6 +85,7 @@ function configs() {
       secrets: { required: [
         "AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY",
         "CONTROL_PLANE_EDGE_TOKEN",
+        "SUPPORT_EMAIL_INTAKE_TOKEN",
       ] },
       kv_namespaces: [{
         binding: "AGENT_EMAIL_DIRECTORY",
@@ -287,8 +288,10 @@ function cpVersion(id = cpVersionID, { releaseVersion = release.version } = {}) 
         plain("CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT", "64"),
         plain("CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT", "8"),
         plain("CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", ""),
+        plain("CP_SUPPORT_EMAIL_INTAKE_ENABLED", "false"),
         secret("AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY"),
         secret("CONTROL_PLANE_EDGE_TOKEN"),
+        secret("SUPPORT_EMAIL_INTAKE_TOKEN"),
         {
           name: "AGENT_EMAIL_DIRECTORY",
           type: "kv_namespace",
@@ -517,6 +520,7 @@ function fixture({
           ? [
             { name: "CONTROL_PLANE_EDGE_TOKEN" },
             { name: "AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY" },
+            { name: "SUPPORT_EMAIL_INTAKE_TOKEN" },
           ]
           : [
             { name: "CONTROL_PLANE_EDGE_TOKEN" },

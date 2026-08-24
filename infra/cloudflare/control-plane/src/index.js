@@ -165,6 +165,11 @@ import {
 import {
   billingReturnResponse,
 } from "./billing-return-pages.mjs";
+import {
+  decideDisposition,
+  dedupKey as supportEmailDedupKey,
+  validateIntakePayload,
+} from "./support-email-intake.mjs";
 
 export class Backend extends Container {
   defaultPort = 8080;
@@ -304,6 +309,9 @@ const ACCOUNT_BACKUP_RUN_PATH = "/v1/backups:run";
 const ACCOUNT_BACKUP_RESTORE_DRILL_PATH =
   "/v1/backups:restore-drill";
 const ACCOUNT_BACKUP_ID = /^backup_[0-9]{8}T[0-9]{6}Z$/;
+const SUPPORT_EMAIL_INTAKE_PATH = "/v1/intake/support-email";
+const SUPPORT_EMAIL_INTAKE_DEDUP_TTL_SECONDS = 7 * 24 * 60 * 60;
+const SUPPORT_EMAIL_INTAKE_PENDING_TTL_SECONDS = 60;
 
 // Admin identity: the audit trail only ever records a first-name handle
 // (author_id on support_ticket_messages when author_kind='fleet_admin',
@@ -357,6 +365,16 @@ function fleetAuthorized(request, env) {
   const h = request.headers.get("Authorization") || "";
   if (!h.startsWith("Bearer ")) return false;
   return timingSafeEqual(h.slice(7).trim(), env.FLEET_TOKEN);
+}
+
+function supportEmailIntakeAuthorized(request, env) {
+  if (!env.SUPPORT_EMAIL_INTAKE_TOKEN) return false;
+  const header = request.headers.get("Authorization") || "";
+  if (!header.startsWith("Bearer ")) return false;
+  return timingSafeEqual(
+    header.slice(7).trim(),
+    env.SUPPORT_EMAIL_INTAKE_TOKEN,
+  );
 }
 
 // sha256Hex returns the lowercase hex digest of s. Used to index admin
@@ -809,12 +827,25 @@ async function handleAdmins(request, env, url) {
 // array so the caller can render "3 of 4 cells reported" instead of
 // silently dropping half the fleet. Result shape per cell:
 //   { cell, status: "ok"|"error"|"timeout", http?, body?, error? }
-async function fanoutCells(env, path, jsonBody) {
-  const cells = (await listCells(env)).filter(
-    (c) => c.provision_token && c.endpoint
-  );
+async function fanoutCells(
+  env,
+  path,
+  jsonBody,
+  { requireEveryCell = false } = {},
+) {
+  const registeredCells = await listCells(env);
+  const cells = requireEveryCell
+    ? registeredCells
+    : registeredCells.filter((c) => c.provision_token && c.endpoint);
   return Promise.all(
     cells.map(async (c) => {
+      if (!c.provision_token || !c.endpoint) {
+        return {
+          cell: c.name,
+          status: "error",
+          error: "cell endpoint or provision token is missing",
+        };
+      }
       try {
         const r = await fetch(`${c.endpoint}${path}`, {
           method: "POST",
@@ -853,6 +884,189 @@ async function fanoutCells(env, path, jsonBody) {
       }
     })
   );
+}
+
+function supportEmailIntakeDisposition(disposition) {
+  // Deliberately value-free: email addresses, message identifiers, subjects,
+  // bodies, account ids, and ticket ids never enter the Worker log.
+  console.log(`support-email-intake disposition=${disposition}`);
+  return json({ schema_version: "witself.v0", disposition });
+}
+
+async function finishSupportEmailIntake(env, key, disposition) {
+  try {
+    await env.DIRECTORY.put(key, "done", {
+      expirationTtl: SUPPORT_EMAIL_INTAKE_DEDUP_TTL_SECONDS,
+    });
+  } catch {
+    // A successful cell mutation without a durable terminal marker must be
+    // retried. The cell's Message-ID idempotency makes that replay safe.
+    console.log("support-email-intake outcome=dedup_error");
+    return err("support email intake unavailable", 503);
+  }
+  return supportEmailIntakeDisposition(disposition);
+}
+
+async function postSupportEmailCell(cell, accountID, action, body) {
+  return fetch(
+    `${cell.endpoint}/v1/accounts/${accountID}/admin:${action}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${cell.provision_token}`,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15000),
+    },
+  );
+}
+
+// handleSupportEmailIntake terminates the one authenticated request emitted by
+// the dark support-email bridge. Every externally visible successful outcome
+// is a value-free disposition; the original email content only crosses the
+// provision-token-authenticated cell boundary after an exact active match.
+async function handleSupportEmailIntake(request, env) {
+  // Keep the gate first: a dark deployment does not reveal that this route or
+  // its credential exists.
+  if (env.CP_SUPPORT_EMAIL_INTAKE_ENABLED !== "true") {
+    return err("not found", 404);
+  }
+  if (request.method !== "POST") {
+    return err("method not allowed", 405);
+  }
+  if (!supportEmailIntakeAuthorized(request, env)) {
+    return err("unauthorized", 401);
+  }
+
+  let payload;
+  try {
+    payload = validateIntakePayload(await request.json());
+  } catch {
+    return err("invalid support email intake payload", 400);
+  }
+
+  let key;
+  let pendingKey;
+  try {
+    key = await supportEmailDedupKey(payload.message_id);
+    // Workers KV permits only one write per key per second. Keep the short
+    // processing lease on a distinct key so a fast terminal outcome never
+    // collides with its own seven-day dedup write.
+    pendingKey = `${key}:pending`;
+    const [dedupState, pendingState] = await Promise.all([
+      env.DIRECTORY.get(key),
+      env.DIRECTORY.get(pendingKey),
+    ]);
+    if (dedupState === "done") {
+      return supportEmailIntakeDisposition("duplicate");
+    }
+    if (dedupState !== null || pendingState !== null) {
+      // Do not acknowledge a delivery while another isolate owns the short
+      // reservation. The Email Worker will throw on this response so the
+      // provider retries after the lease either finishes or expires.
+      return err("support email intake in progress", 503);
+    }
+    // Reserve before fan-out/cell mutation, but only for a short lease. A
+    // failed or interrupted attempt therefore becomes retryable instead of
+    // turning into a seven-day false duplicate.
+    await env.DIRECTORY.put(pendingKey, "pending", {
+      expirationTtl: SUPPORT_EMAIL_INTAKE_PENDING_TTL_SECONDS,
+    });
+  } catch {
+    console.log("support-email-intake outcome=dedup_error");
+    return err("support email intake unavailable", 503);
+  }
+
+  let perCell;
+  try {
+    perCell = await fanoutCells(
+      env,
+      "/v1/support/admin:match-contact",
+      { email: payload.sender },
+      { requireEveryCell: true },
+    );
+  } catch {
+    return finishSupportEmailIntake(env, key, "drop_fanout_error");
+  }
+  const malformed = perCell.some((cell) =>
+    cell.status !== "ok" || !Array.isArray(cell.body?.matches) ||
+    cell.body.matches.some((match) =>
+      match === null || typeof match !== "object" ||
+      !ACCOUNT_ID.test(match.account_id ?? "") ||
+      typeof match.status !== "string" || match.status === ""));
+  if (malformed) {
+    return finishSupportEmailIntake(env, key, "drop_fanout_error");
+  }
+  const matches = perCell.flatMap((cell) =>
+    cell.body.matches.map((match) => ({ ...match, cell: cell.cell })));
+  const decision = decideDisposition(matches);
+  if (decision !== "proceed") {
+    return finishSupportEmailIntake(env, key, decision);
+  }
+
+  const match = matches.find((candidate) => candidate.status === "active");
+  let archived;
+  let cell;
+  try {
+    archived = await env.DIRECTORY.get(`archived:${match.account_id}`, {
+      type: "json",
+    });
+    if (!archived) {
+      cell = await cellForAccount(env, match.account_id);
+    }
+  } catch {
+    return finishSupportEmailIntake(env, key, "drop_fanout_error");
+  }
+  if (archived) {
+    return finishSupportEmailIntake(env, key, "drop_archived");
+  }
+  if (!cell?.endpoint || !cell?.provision_token) {
+    return finishSupportEmailIntake(env, key, "drop_fanout_error");
+  }
+
+  const commonBody = {
+    email: payload.sender,
+    body: payload.body,
+    email_message_id: payload.message_id,
+  };
+  try {
+    if (payload.ticket_tag) {
+      const reply = await postSupportEmailCell(
+        cell,
+        match.account_id,
+        "reply-email-ticket",
+        { ...commonBody, ticket_id: payload.ticket_tag },
+      );
+      await reply.text();
+      if (reply.ok) {
+        return finishSupportEmailIntake(env, key, "replied");
+      }
+      if (reply.status !== 404 && reply.status !== 409) {
+        console.log("support-email-intake outcome=cell_error");
+        return err("support email intake cell request failed", 502);
+      }
+    }
+
+    const opened = await postSupportEmailCell(
+      cell,
+      match.account_id,
+      "open-email-ticket",
+      {
+        ...commonBody,
+        subject: payload.subject,
+      },
+    );
+    await opened.text();
+    if (!opened.ok) {
+      console.log("support-email-intake outcome=cell_error");
+      return err("support email intake cell request failed", 502);
+    }
+    return finishSupportEmailIntake(env, key, "opened");
+  } catch {
+    console.log("support-email-intake outcome=cell_unreachable");
+    return err("support email intake cell unreachable", 502);
+  }
 }
 
 // Aggregate cap for fleet-wide fan-out result sets. Bounds the Worker
@@ -4182,6 +4396,10 @@ export default {
     // account state, or gain mutation authority from a browser redirect.
     const billingReturn = billingReturnResponse(request, url);
     if (billingReturn !== null) return billingReturn;
+
+    if (url.pathname === SUPPORT_EMAIL_INTAKE_PATH) {
+      return handleSupportEmailIntake(request, env);
+    }
 
     // Hot path: directory lookups from KV, never the container.
     const m = url.pathname.match(DIRECTORY_PATH);

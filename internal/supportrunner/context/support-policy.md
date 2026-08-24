@@ -35,7 +35,8 @@ independent operator control.
   export.
 - **Email** — support@witwave.ai reaches the same queue. *Launch status: the
   intake bridge activates at cutover; until then the in-product channel is
-  the supported path.*
+  the supported path.* Email intake requires a DMARC-authenticated sender whose
+  address matches the account contact email.
 
 ## The promise
 

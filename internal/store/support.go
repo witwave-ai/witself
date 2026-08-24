@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 
@@ -117,6 +118,10 @@ const maxSupportBodyBytes = 64 * 1024
 // Support-subject length cap. Kept modest so list views render cleanly.
 const maxSupportSubjectChars = 200
 
+func supportSubjectTooLong(subject string) bool {
+	return utf8.RuneCountInString(subject) > maxSupportSubjectChars
+}
+
 var (
 	// ErrSupportDisabled is returned when the account's support_policy
 	// forbids opening new tickets. Existing open tickets remain readable.
@@ -182,7 +187,7 @@ func (s *Store) OpenTicket(ctx context.Context, in OpenTicketInput) (Ticket, Tic
 	if subject == "" {
 		return Ticket{}, TicketMessage{}, fmt.Errorf("%w: subject required", ErrTicketInputInvalid)
 	}
-	if len(subject) > maxSupportSubjectChars {
+	if supportSubjectTooLong(subject) {
 		return Ticket{}, TicketMessage{}, fmt.Errorf("%w: subject exceeds %d characters", ErrTicketInputInvalid, maxSupportSubjectChars)
 	}
 	if body == "" {

@@ -1343,6 +1343,46 @@ func serve() int {
 			}
 			return err
 		}
+		cfg.MatchSupportContact = func(ctx context.Context, email string) ([]server.SupportContactMatch, error) {
+			matches, err := st.FindAccountsByContactEmail(ctx, email)
+			if err := mapSupportError(err); err != nil {
+				return nil, err
+			}
+			out := make([]server.SupportContactMatch, len(matches))
+			for i, match := range matches {
+				out[i] = server.SupportContactMatch{
+					AccountID: match.AccountID,
+					Status:    match.Status,
+				}
+			}
+			return out, nil
+		}
+		cfg.OpenEmailTicket = func(ctx context.Context, in server.OpenEmailTicketRequest) (server.SupportTicket, server.SupportTicketMessage, error) {
+			ticket, message, err := st.OpenTicketFromEmail(ctx, store.OpenTicketFromEmailInput{
+				AccountID:      in.AccountID,
+				SenderEmail:    in.Email,
+				Subject:        in.Subject,
+				Body:           in.Body,
+				EmailMessageID: in.EmailMessageID,
+			})
+			if err := mapSupportError(err); err != nil {
+				return server.SupportTicket{}, server.SupportTicketMessage{}, err
+			}
+			return toServerTicket(ticket), toServerMessage(message), nil
+		}
+		cfg.ReplyEmailTicket = func(ctx context.Context, in server.ReplyEmailTicketRequest) (server.SupportTicketMessage, error) {
+			message, err := st.ReplyToTicketFromEmail(ctx, store.ReplyToTicketFromEmailInput{
+				AccountID:      in.AccountID,
+				SenderEmail:    in.Email,
+				TicketID:       in.TicketID,
+				Body:           in.Body,
+				EmailMessageID: in.EmailMessageID,
+			})
+			if err := mapSupportError(err); err != nil {
+				return server.SupportTicketMessage{}, err
+			}
+			return toServerMessage(message), nil
+		}
 		cfg.OpenSupportTicket = func(ctx context.Context, in server.OpenTicketRequest) (server.SupportTicket, server.SupportTicketMessage, error) {
 			t, m, err := st.OpenTicket(ctx, store.OpenTicketInput{
 				AccountID:  in.AccountID,
@@ -2166,6 +2206,8 @@ func mapSupportError(err error) error {
 		return wrapAsSentinel(server.ErrSupportDisabled, store.ErrSupportDisabled, err)
 	case errors.Is(err, store.ErrSupportNotIncluded):
 		return wrapAsSentinel(server.ErrSupportNotIncluded, store.ErrSupportNotIncluded, err)
+	case errors.Is(err, store.ErrSupportSenderMismatch):
+		return wrapAsSentinel(server.ErrSupportSenderMismatch, store.ErrSupportSenderMismatch, err)
 	case errors.Is(err, store.ErrTicketNotFound):
 		return server.ErrTicketNotFound
 	case errors.Is(err, store.ErrTicketStateInvalid):

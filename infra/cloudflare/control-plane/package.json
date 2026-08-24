@@ -5,6 +5,7 @@
   "scripts": {
     "activate:plan-lifecycle": "node scripts/activate-plan-lifecycle.mjs",
     "assert:custom-domain-dark": "node scripts/assert-custom-domain-dark.mjs",
+    "bundle:check": "node scripts/bundle-check.mjs",
     "config": "node scripts/render-wrangler.mjs",
     "deploy": "node scripts/deploy-release.mjs",
     "deploy:plans": "npm run config && wrangler deploy --config ../../../web/plans/wrangler.toml",

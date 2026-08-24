@@ -109,7 +109,7 @@ check: ## Run CI's go gates locally (gofmt, vet, build, test -race, golangci-lin
 	$(MAKE) check-infra
 	@echo "check: all gates green"
 
-check-infra: ## Gates for nested Pulumi plus the isolated Cloudflare agent-email Worker
+check-infra: ## Gates for nested Pulumi plus the isolated Cloudflare Workers
 	cd infra/pulumi && go vet ./...
 	cd infra/pulumi && go build ./...
 	cd infra/pulumi && go test ./...
@@ -118,8 +118,12 @@ check-infra: ## Gates for nested Pulumi plus the isolated Cloudflare agent-email
 	npm --prefix infra/cloudflare/agent-email run bundle:check
 	npm --prefix infra/cloudflare/agent-email-send test
 	npm --prefix infra/cloudflare/agent-email-send run bundle:check
+	npm --prefix infra/cloudflare/support-email-intake ci
+	npm --prefix infra/cloudflare/support-email-intake test
+	npm --prefix infra/cloudflare/support-email-intake run bundle:check
 	bash scripts/test-agent-email-cell-operation.sh
 	bash scripts/test-agent-email-receipt-proof.sh
 	bash scripts/test-agent-email-cell-smoke.sh
 	npm --prefix infra/cloudflare/control-plane test
+	npm --prefix infra/cloudflare/control-plane run bundle:check
 	@echo "check-infra: infra gates green"

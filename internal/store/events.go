@@ -711,7 +711,7 @@ var verbMetadataSchema = map[string]verbSpec{
 	// (matches the tenant-visible handle shape).
 	VerbSupportTicketOpened: {
 		requiredKeys:  []string{"ticket_id", "subject"},
-		allowedKeys:   []string{"ticket_id", "subject", "category"},
+		allowedKeys:   []string{"ticket_id", "subject", "category", "channel"},
 		allowedActors: []string{ActorOwner, ActorOperator},
 	},
 	VerbSupportTicketReplied: {
