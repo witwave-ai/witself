@@ -51,6 +51,8 @@ func TestRetriageTicketAdminPostgres(t *testing.T) {
 			`DELETE FROM support_ticket_messages WHERE account_id = $1`,
 			`DELETE FROM support_tickets WHERE account_id = $1`,
 			`DELETE FROM account_events WHERE account_id = $1`,
+			`DELETE FROM tokens WHERE operator_id IN
+			   (SELECT id FROM operators WHERE account_id = $1)`,
 			`DELETE FROM operators WHERE account_id = $1`,
 			`DELETE FROM accounts WHERE id = $1`,
 		} {
