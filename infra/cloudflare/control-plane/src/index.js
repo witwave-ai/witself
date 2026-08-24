@@ -104,7 +104,12 @@ import {
   cellMatchesPolicy,
   rescuePlacementPolicy,
 } from "./placement.mjs";
-import { validateMintHandle } from "./admin-handles.mjs";
+import {
+  ADMIN_SCOPES,
+  ADMIN_SCOPE_FULL,
+  adminScopeAllows,
+  validateMintHandle,
+} from "./admin-handles.mjs";
 import { renderSupportEmail } from "./support-notify.mjs";
 import { DurableAccountLifecycle } from "./account-lifecycle-runtime.mjs";
 import { DurableAccountSignup } from "./account-signup-runtime.mjs";
@@ -399,7 +404,11 @@ async function adminAuthorized(request, env) {
   if (!idx?.admin_id) return null;
   const rec = await env.DIRECTORY.get(`admin:${idx.admin_id}`, { type: "json" });
   if (!rec || rec.disabled_at) return null;
-  return { admin_id: rec.admin_id, handle: rec.handle };
+  return {
+    admin_id: rec.admin_id,
+    handle: rec.handle,
+    scope: rec.scope ?? ADMIN_SCOPE_FULL,
+  };
 }
 
 // Revocation-tombstone TTL. Covers the KV worst-case (60s cross-region
@@ -665,6 +674,12 @@ async function handleAdmins(request, env, url) {
     if (note !== undefined && note.length > 200) {
       return err("note too long (max 200 characters)", 400);
     }
+    const scope = body.scope == null
+      ? ADMIN_SCOPE_FULL
+      : String(body.scope).trim();
+    if (!ADMIN_SCOPES.has(scope)) {
+      return err(`unknown scope "${scope}"`, 400);
+    }
     const existingIdx = await env.DIRECTORY.get(`adminh:${handle}`, {
       type: "json",
     });
@@ -683,6 +698,7 @@ async function handleAdmins(request, env, url) {
       admin_id: adminID,
       handle,
       token_hash: tokenHash,
+      ...(scope !== ADMIN_SCOPE_FULL ? { scope } : {}),
       ...(note ? { note } : {}),
       created_at: now,
       created_by: "fleet_token",
@@ -984,10 +1000,14 @@ async function handleAdminTickets(request, env, ctx, url) {
   // whoami: cheap round-trip that lets the CLI verify a token without
   // any KV list scan.
   if (url.pathname === "/v1/admin/whoami" && request.method === "GET") {
+    if (!adminScopeAllows(admin.scope, "whoami")) {
+      return err("credential scope does not allow this action", 403);
+    }
     return json({
       schema_version: "witself.v0",
       admin_id: admin.admin_id,
       handle: admin.handle,
+      scope: admin.scope,
     });
   }
 
@@ -998,6 +1018,9 @@ async function handleAdminTickets(request, env, ctx, url) {
   // and the same DO-counter upgrade path applies when it stops being
   // fine). provision tokens never leave the CP (publicCell).
   if (url.pathname === "/v1/admin/cells" && request.method === "GET") {
+    if (!adminScopeAllows(admin.scope, "cells")) {
+      return err("credential scope does not allow this action", 403);
+    }
     const cells = await listCells(env);
     const counts = new Map();
     let cursor;
@@ -1102,6 +1125,9 @@ async function handleAdminTickets(request, env, ctx, url) {
   //   since=<ISO>          last_activity_at >= since
   //   limit=<n>            per-cell limit (defaults to 100, capped at 500)
   if (url.pathname === "/v1/admin/tickets" && request.method === "GET") {
+    if (!adminScopeAllows(admin.scope, "list-tickets")) {
+      return err("credential scope does not allow this action", 403);
+    }
     const states = url.searchParams.get("state");
     const since = url.searchParams.get("since");
     const limit = Number.parseInt(
@@ -1163,6 +1189,9 @@ async function handleAdminTickets(request, env, ctx, url) {
     if (!m) continue;
     if (request.method !== route.method) {
       return err("method not allowed", 405);
+    }
+    if (!adminScopeAllows(admin.scope, route.action)) {
+      return err("credential scope does not allow this action", 403);
     }
     const accountID = m[1];
     const ticketID = m[2];
@@ -1258,6 +1287,9 @@ async function handleAdminTickets(request, env, ctx, url) {
   // and unknown-account handling from the ticket routes above.
   const spMatch = url.pathname.match(ADMIN_ACCOUNT_SUPPORT_POLICY_PATH);
   if (spMatch) {
+    if (!adminScopeAllows(admin.scope, "support-policy")) {
+      return err("credential scope does not allow this action", 403);
+    }
     const method = request.method;
     if (method !== "GET" && method !== "PATCH") {
       return err("method not allowed", 405);
@@ -4268,6 +4300,9 @@ export default {
     if (matchAdminPolicyPath(url.pathname)) {
       const admin = await adminAuthorized(request, env);
       if (!admin) return err("unauthorized", 401);
+      if (!adminScopeAllows(admin.scope, "fleet-admin-surface")) {
+        return err("credential scope does not allow this action", 403);
+      }
       return forwardAdminPolicyRequest(
         request,
         env,
@@ -4314,6 +4349,9 @@ export default {
     if (isAgentEmailDomainRecoveryAdminPath(url.pathname)) {
       const admin = await adminAuthorized(request, env);
       if (!admin) return err("unauthorized", 401);
+      if (!adminScopeAllows(admin.scope, "fleet-admin-surface")) {
+        return err("credential scope does not allow this action", 403);
+      }
       return handleAgentEmailDomainRecoveryAdminRequest(
         request,
         env,
@@ -4324,11 +4362,17 @@ export default {
     if (isAgentEmailDomainAdminPath(url.pathname)) {
       const admin = await adminAuthorized(request, env);
       if (!admin) return err("unauthorized", 401);
+      if (!adminScopeAllows(admin.scope, "fleet-admin-surface")) {
+        return err("credential scope does not allow this action", 403);
+      }
       return handleAgentEmailDomainAdminRequest(request, env, url, admin);
     }
     if (isRealmEmailAliasRecoveryAdminPath(url.pathname)) {
       const admin = await adminAuthorized(request, env);
       if (!admin) return err("unauthorized", 401);
+      if (!adminScopeAllows(admin.scope, "fleet-admin-surface")) {
+        return err("credential scope does not allow this action", 403);
+      }
       return handleRealmEmailAliasRecoveryAdminRequest(
         request,
         env,
@@ -4339,6 +4383,9 @@ export default {
     if (isRealmEmailAliasAdminPath(url.pathname)) {
       const admin = await adminAuthorized(request, env);
       if (!admin) return err("unauthorized", 401);
+      if (!adminScopeAllows(admin.scope, "fleet-admin-surface")) {
+        return err("credential scope does not allow this action", 403);
+      }
       return handleRealmEmailAliasAdminRequest(request, env, url, admin);
     }
     if (isAgentEmailOperationsLeasePath(url.pathname)) {
