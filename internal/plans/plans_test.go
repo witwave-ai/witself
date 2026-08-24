@@ -72,8 +72,8 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 	}
 
 	team, ok := c.Get("team")
-	if !ok || team.Available || team.Purchasable() || !team.Paid() || !team.UsageBilled {
-		t.Fatalf("team = %+v; want priced + usage-billed but not available", team)
+	if !ok || team.Available || team.Purchasable() || !team.Paid() || team.UsageBilled {
+		t.Fatalf("team = %+v; want flat-priced, not usage-billed, not available", team)
 	}
 	if team.Policies[TranscriptRetentionDaysPolicy] != 365 {
 		t.Fatalf("team policies = %v; want 365-day transcript retention", team.Policies)
@@ -177,7 +177,7 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 		"team": {
 			name:         "Team",
 			priceMonthly: monthly(250),
-			usageBilled:  true,
+			usageBilled:  false,
 			limits: map[string]int64{
 				AgentEmailAttachmentStorageBytesLimit:   100 * 1024 * 1024 * 1024,
 				AgentEmailCustomDomainsPerAccountLimit:  1,
@@ -201,7 +201,7 @@ func TestLoadCanonicalCatalog(t *testing.T) {
 				TranscriptRetentionDaysPolicy:      365,
 			},
 			features: []string{"memory", "facts", "secrets", MessagingFeature, AgentEmailReceiveFeature, AgentEmailSendFeature, AgentEmailRealmAliasFeature, AgentEmailCustomDomainFeature, "collaboration", "support"},
-			summary:  "Coming soon. Everything in Professional for up to 100 agents per realm across 25 realms, plus usage-based billing.",
+			summary:  "Coming soon. Everything in Professional for up to 100 agents per realm across 25 realms, at one flat monthly price.",
 		},
 		"enterprise": {
 			name:        "Enterprise",

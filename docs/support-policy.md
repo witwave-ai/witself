@@ -21,8 +21,10 @@ Support is a plan entitlement (the catalog's `support` feature):
 
 Fleet operations can additionally enable or disable ticketing per account
 (the account's `support_policy`); abuse of the support channel is grounds for
-disabling it. *Launch status: entitlement-to-policy synchronization is an
-upcoming slice; until it lands the flag is set administratively.*
+disabling it. Entitlement is enforced at ticket creation: an applied plan
+without the support feature cannot open tickets (accounts predating plan
+snapshots are not locked out), and the per-account switch remains an
+independent operator control.
 
 ## Channels
 

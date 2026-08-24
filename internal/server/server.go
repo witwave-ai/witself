@@ -2060,6 +2060,11 @@ func (e *MessageRateLimitError) Unwrap() error { return ErrMessageRateLimited }
 // default account (-> 403).
 var ErrCannotCloseDefault = errors.New("the default account cannot be closed")
 
+// ErrSupportNotIncluded signals that the account's applied plan does not
+// carry the support feature. Maps to 403: an entitlement boundary, resolved
+// by upgrading, not by retrying.
+var ErrSupportNotIncluded = errors.New("support is not included in this plan")
+
 // ErrSupportDisabled signals that the account's support_policy blocks new
 // ticket creation (-> 409). Existing threads remain readable.
 var ErrSupportDisabled = errors.New("support is not enabled for this account")
@@ -6523,6 +6528,9 @@ func openSupportTicketHandler(auth AuthFunc, open func(ctx context.Context, in O
 			return
 		case errors.Is(err, ErrSupportDisabled):
 			writeJSONError(w, http.StatusConflict, "support is not enabled for this account")
+			return
+		case errors.Is(err, ErrSupportNotIncluded):
+			writeJSONError(w, http.StatusForbidden, "support is not included in this plan")
 			return
 		case errors.Is(err, ErrNotAccountOwner):
 			// Store returns this when the operator no longer belongs

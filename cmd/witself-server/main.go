@@ -2152,6 +2152,8 @@ func mapSupportError(err error) error {
 		return nil
 	case errors.Is(err, store.ErrSupportDisabled):
 		return wrapAsSentinel(server.ErrSupportDisabled, store.ErrSupportDisabled, err)
+	case errors.Is(err, store.ErrSupportNotIncluded):
+		return wrapAsSentinel(server.ErrSupportNotIncluded, store.ErrSupportNotIncluded, err)
 	case errors.Is(err, store.ErrTicketNotFound):
 		return server.ErrTicketNotFound
 	case errors.Is(err, store.ErrTicketStateInvalid):
