@@ -550,6 +550,12 @@ func TestMapSupportErrorNoDoublePrefix(t *testing.T) {
 			wantIs:      server.ErrSupportDisabled,
 			wantMessage: "support is not enabled for this account: plan tier does not include support",
 		},
+		{
+			name:        "support sender mismatch maps to the server sentinel",
+			in:          store.ErrSupportSenderMismatch,
+			wantIs:      server.ErrSupportSenderMismatch,
+			wantMessage: "support sender email does not match account contact email",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -709,6 +709,10 @@ test("release renderer injects matching immutable container and Worker identity"
   );
   assert.match(
     config,
+    /"secrets"\s*:\s*\{[\s\S]*?"SUPPORT_EMAIL_INTAKE_TOKEN"[\s\S]*?\}/,
+  );
+  assert.match(
+    config,
     /"limits"\s*:\s*\{\s*"cpu_ms"\s*:\s*300000\s*\}/,
     "release config must preserve the CPU ceiling required for archive validation",
   );
@@ -806,6 +810,11 @@ test("release renderer injects matching immutable container and Worker identity"
     config,
     /"CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST"\s*:\s*""/,
     "release config must keep the managed account cohort dark by default",
+  );
+  assert.match(
+    config,
+    /"CP_SUPPORT_EMAIL_INTAKE_ENABLED"\s*:\s*"false"/,
+    "release config must keep support email intake dark by default",
   );
   assert.doesNotMatch(
     config,
@@ -1103,6 +1112,7 @@ function deployedVersion(overrides = {}) {
           ["CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT", "64"],
           ["CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT", "8"],
           ["CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", ""],
+          ["CP_SUPPORT_EMAIL_INTAKE_ENABLED", "false"],
         ].map(([name, text]) => ({ name, type: "plain_text", text })),
         {
           name: "AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY",
@@ -1110,6 +1120,10 @@ function deployedVersion(overrides = {}) {
         },
         {
           name: "CONTROL_PLANE_EDGE_TOKEN",
+          type: "secret_text",
+        },
+        {
+          name: "SUPPORT_EMAIL_INTAKE_TOKEN",
           type: "secret_text",
         },
         {

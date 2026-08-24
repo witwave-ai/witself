@@ -394,25 +394,26 @@ type Config struct {
 	ChangeSupportTicketState func(ctx context.Context, in ChangeTicketStateRequest) (SupportTicket, error)
 
 	// ListAdminTickets / GetAdminTicket / ReplyAdminTicket /
-	// RetriageAdminTicket / ChangeAdminTicketState / ListAdminTicketsAll,
+	// RetriageAdminTicket / ChangeAdminTicketState / ListAdminTicketsAll /
+	// MatchSupportContact / OpenEmailTicket / ReplyEmailTicket,
 	// when set (with the provisioning pair), enable the admin-side
 	// counterparts of the support-ticket endpoints. Provision-token
-	// authorized: the caller
-	// is the control plane, which has already authenticated the admin
-	// against its own credential store. admin_handle travels on every
-	// request body and is validated shape-only at the store.
+	// authorized: the caller is the control plane. Human-admin operations
+	// carry a shape-validated admin_handle; email-intake operations instead
+	// carry the authenticated sender address for transactional re-validation.
 	//
-	// The first five hang off /v1/accounts/{id}/admin:{action} —
-	// account-scoped mirrors of the tenant flow. The sixth serves
-	// /v1/support/admin:list-tickets which is cell-wide (no account
-	// id) and cursor-paginated — the CP fans this call out to every
-	// cell in parallel to build the fleet-wide admin queue.
+	// The account-scoped operations hang off
+	// /v1/accounts/{id}/admin:{action}. ListAdminTicketsAll and
+	// MatchSupportContact are cell-wide fan-out sources under /v1/support.
 	ListAdminTickets       func(ctx context.Context, accountID string) ([]SupportTicket, error)
 	GetAdminTicket         func(ctx context.Context, accountID, ticketID string) (SupportTicket, []SupportTicketMessage, error)
 	ReplyAdminTicket       func(ctx context.Context, in ReplyAdminTicketRequest) (SupportTicketMessage, error)
 	RetriageAdminTicket    func(ctx context.Context, in RetriageAdminTicketRequest) (SupportTicket, error)
 	ChangeAdminTicketState func(ctx context.Context, in ChangeAdminTicketStateRequest) (SupportTicket, error)
 	ListAdminTicketsAll    func(ctx context.Context, in ListAdminTicketsAllRequest) (ListAdminTicketsAllResult, error)
+	MatchSupportContact    func(ctx context.Context, email string) ([]SupportContactMatch, error)
+	OpenEmailTicket        func(ctx context.Context, in OpenEmailTicketRequest) (SupportTicket, SupportTicketMessage, error)
+	ReplyEmailTicket       func(ctx context.Context, in ReplyEmailTicketRequest) (SupportTicketMessage, error)
 
 	// GetAdminSupportPolicy / SetAdminSupportPolicy, when set (with
 	// the provisioning pair), enable admin-side reads and writes of
@@ -676,6 +677,33 @@ type SetAdminSupportPolicyResult struct {
 	AccountID  string
 	PolicyFrom string
 	PolicyTo   string
+}
+
+// SupportContactMatch is one active account matched by contact email for the
+// control plane's support-email intake fan-out.
+type SupportContactMatch struct {
+	AccountID string `json:"account_id"`
+	Status    string `json:"status"`
+}
+
+// OpenEmailTicketRequest is the payload for the provision-token-authorized
+// support-email ticket-opening hook.
+type OpenEmailTicketRequest struct {
+	AccountID      string
+	Email          string
+	Subject        string
+	Body           string
+	EmailMessageID string
+}
+
+// ReplyEmailTicketRequest is the payload for the provision-token-authorized
+// support-email ticket-reply hook.
+type ReplyEmailTicketRequest struct {
+	AccountID      string
+	Email          string
+	TicketID       string
+	Body           string
+	EmailMessageID string
 }
 
 // ReplyAdminTicketRequest is the payload for the admin reply hook.
@@ -2072,6 +2100,10 @@ var ErrSupportNotIncluded = errors.New("support is not included in this plan")
 // ticket creation (-> 409). Existing threads remain readable.
 var ErrSupportDisabled = errors.New("support is not enabled for this account")
 
+// ErrSupportSenderMismatch signals that the support-email sender does not
+// match the account contact email inside the store transaction (-> 403).
+var ErrSupportSenderMismatch = errors.New("support sender email does not match account contact email")
+
 // ErrTicketNotFound signals a ticket read/mutate against an id that does
 // not exist on the caller's account (-> 404).
 var ErrTicketNotFound = errors.New("ticket not found")
@@ -2379,6 +2411,7 @@ func apiMux(cfg Config) http.Handler {
 			cfg.ResumeAccountSystem != nil || cfg.LogAccountEvent != nil ||
 			cfg.SetAccountPlan != nil || cfg.CheckAccountPlanFit != nil ||
 			cfg.ApplyAccountPlanIfFits != nil ||
+			cfg.OpenEmailTicket != nil || cfg.ReplyEmailTicket != nil ||
 			cfg.ApplyAgentEmailRealmAlias != nil ||
 			cfg.ApplyAgentEmailCustomDomainRoute != nil ||
 			cfg.PrepareRealmEmailRouteRetirement != nil ||
@@ -2968,6 +3001,10 @@ func apiMux(cfg Config) http.Handler {
 	if cfg.ProvisionToken != "" && cfg.ListAdminTicketsAll != nil {
 		mux.HandleFunc("POST /v1/support/admin:list-tickets",
 			supportAdminCellHandler(cfg.ProvisionToken, cfg.ListAdminTicketsAll))
+	}
+	if cfg.ProvisionToken != "" && cfg.MatchSupportContact != nil {
+		mux.HandleFunc("POST /v1/support/admin:match-contact",
+			supportContactMatchAdminHandler(cfg.ProvisionToken, cfg.MatchSupportContact))
 	}
 	// Cell-wide audit tail for the fleet dashboard (provision-token
 	// authorized, same pattern as the ticket fan-out source above).
@@ -5160,6 +5197,80 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 			})
 			return
 		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "admin:open-email-ticket"); ok && cfg.OpenEmailTicket != nil {
+			var req struct {
+				Email          string `json:"email"`
+				Subject        string `json:"subject"`
+				Body           string `json:"body"`
+				EmailMessageID string `json:"email_message_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+				return
+			}
+			req.Email = strings.TrimSpace(req.Email)
+			if req.Email == "" {
+				writeJSONError(w, http.StatusBadRequest, "missing email")
+				return
+			}
+			ticket, message, err := cfg.OpenEmailTicket(r.Context(), OpenEmailTicketRequest{
+				AccountID:      accountID,
+				Email:          req.Email,
+				Subject:        req.Subject,
+				Body:           req.Body,
+				EmailMessageID: req.EmailMessageID,
+			})
+			if writeSupportEmailRouteError(w, err, "could not open support ticket from email") {
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version": "witself.v0",
+				"ticket_id":      ticket.ID,
+				"message_id":     message.ID,
+			})
+			return
+		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "admin:reply-email-ticket"); ok && cfg.ReplyEmailTicket != nil {
+			var req struct {
+				Email          string `json:"email"`
+				TicketID       string `json:"ticket_id"`
+				Body           string `json:"body"`
+				EmailMessageID string `json:"email_message_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+				return
+			}
+			req.Email = strings.TrimSpace(req.Email)
+			req.TicketID = strings.TrimSpace(req.TicketID)
+			if req.Email == "" {
+				writeJSONError(w, http.StatusBadRequest, "missing email")
+				return
+			}
+			if req.TicketID == "" {
+				writeJSONError(w, http.StatusBadRequest, "missing ticket_id")
+				return
+			}
+			message, err := cfg.ReplyEmailTicket(r.Context(), ReplyEmailTicketRequest{
+				AccountID:      accountID,
+				Email:          req.Email,
+				TicketID:       req.TicketID,
+				Body:           req.Body,
+				EmailMessageID: req.EmailMessageID,
+			})
+			if writeSupportEmailRouteError(w, err, "could not reply to support ticket from email") {
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version": "witself.v0",
+				"message_id":     message.ID,
+			})
+			return
+		}
 		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "admin:reply-ticket"); ok && cfg.ReplyAdminTicket != nil {
 			var req struct {
 				AdminHandle string `json:"admin_handle"`
@@ -5649,6 +5760,71 @@ func supportAdminCellHandler(provisionToken string, list func(ctx context.Contex
 			"next_page_token": result.NextPageToken,
 		})
 	}
+}
+
+// supportContactMatchAdminHandler serves the provision-token-authorized,
+// cell-wide contact-email lookup used by support-email intake fan-out.
+func supportContactMatchAdminHandler(provisionToken string, match func(ctx context.Context, email string) ([]SupportContactMatch, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token, ok := bearerToken(r)
+		if !ok || subtle.ConstantTimeCompare([]byte(token), []byte(provisionToken)) != 1 {
+			writeJSONError(w, http.StatusUnauthorized, "invalid provision token")
+			return
+		}
+		var req struct {
+			Email string `json:"email"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		req.Email = strings.TrimSpace(req.Email)
+		if req.Email == "" {
+			writeJSONError(w, http.StatusBadRequest, "missing email")
+			return
+		}
+		matches, err := match(r.Context(), req.Email)
+		switch {
+		case errors.Is(err, ErrTicketInputInvalid), errors.Is(err, ErrBadInput):
+			writeJSONError(w, http.StatusBadRequest, "invalid support contact match request")
+			return
+		case err != nil:
+			writeJSONError(w, http.StatusInternalServerError, "could not match support contact")
+			return
+		}
+		if matches == nil {
+			matches = []SupportContactMatch{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"schema_version": "witself.v0",
+			"matches":        matches,
+		})
+	}
+}
+
+func writeSupportEmailRouteError(w http.ResponseWriter, err error, internalMessage string) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, ErrTicketInputInvalid), errors.Is(err, ErrBadInput):
+		writeJSONError(w, http.StatusBadRequest, "invalid support email intake")
+	case errors.Is(err, ErrSupportSenderMismatch):
+		writeJSONError(w, http.StatusForbidden, ErrSupportSenderMismatch.Error())
+	case errors.Is(err, ErrSupportNotIncluded):
+		writeJSONError(w, http.StatusForbidden, ErrSupportNotIncluded.Error())
+	case errors.Is(err, ErrSupportDisabled):
+		writeJSONError(w, http.StatusConflict, ErrSupportDisabled.Error())
+	case errors.Is(err, ErrTicketNotFound), errors.Is(err, ErrNotFound):
+		writeJSONError(w, http.StatusNotFound, "ticket or account not found")
+	case errors.Is(err, ErrTicketStateInvalid):
+		writeJSONError(w, http.StatusConflict, "support ticket is closed")
+	case errors.Is(err, ErrAccountNotActive):
+		writeJSONError(w, http.StatusForbidden, ErrAccountNotActive.Error())
+	default:
+		writeJSONError(w, http.StatusInternalServerError, internalMessage)
+	}
+	return true
 }
 
 // suspendAccountHandler freezes every write on the account at the owner's

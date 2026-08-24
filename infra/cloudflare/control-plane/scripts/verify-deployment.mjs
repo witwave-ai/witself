@@ -62,6 +62,7 @@ const R2_BINDINGS = Object.freeze({
 const REQUIRED_SECRET_BINDINGS = Object.freeze([
   "AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY",
   "CONTROL_PLANE_EDGE_TOKEN",
+  "SUPPORT_EMAIL_INTAKE_TOKEN",
 ]);
 
 function isRecord(value) {
@@ -260,6 +261,7 @@ function assertGeneratedConfigContract(config, expectedMain) {
     "AGENT_EMAIL_ROUTE_SIGNING_KEY_ID",
     "CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT",
     "CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
+    "CP_SUPPORT_EMAIL_INTAKE_ENABLED",
     "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT",
     "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM",
     "WITSELF_EDGE_RELEASE_COMMIT",
@@ -275,7 +277,8 @@ function assertGeneratedConfigContract(config, expectedMain) {
       ) ||
       config.vars.CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM !== "8" ||
       config.vars.CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT !== "64" ||
-      config.vars.CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT !== "8") {
+      config.vars.CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT !== "8" ||
+      config.vars.CP_SUPPORT_EMAIL_INTAKE_ENABLED !== "false") {
     throw new Error("generated config Worker vars did not match the reviewed contract");
   }
   parseManagedDeliveryAccountAllowlist(
@@ -604,6 +607,7 @@ export function verifyWorkerVersion(version, expected, expectedVersionID, {
     "AGENT_EMAIL_ROUTE_SIGNING_KEY_ID",
     "CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT",
     "CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
+    "CP_SUPPORT_EMAIL_INTAKE_ENABLED",
     "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT",
     "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM",
     "DIRECTORY",
@@ -645,6 +649,7 @@ export function verifyWorkerVersion(version, expected, expectedVersionID, {
   );
   exactSecretBinding(bindings, "AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY");
   exactSecretBinding(bindings, "CONTROL_PLANE_EDGE_TOKEN");
+  exactSecretBinding(bindings, "SUPPORT_EMAIL_INTAKE_TOKEN");
 
   for (const [name, className] of Object.entries(DURABLE_OBJECT_BINDINGS)) {
     exactDurableObjectBinding(bindings, name, className);
@@ -664,6 +669,7 @@ export function verifyWorkerVersion(version, expected, expectedVersionID, {
     ["CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM", "8"],
     ["CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT", "64"],
     ["CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT", "8"],
+    ["CP_SUPPORT_EMAIL_INTAKE_ENABLED", "false"],
   ]) {
     exactPlainBinding(bindings, name, value);
   }

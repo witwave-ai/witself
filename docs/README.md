@@ -199,6 +199,8 @@ deployment cells under a thin global control plane.
 - [support-runner.md](support-runner.md): the dark, single-replica AI support
   first-responder, deterministic escalation gate, configuration, and operator
   enablement contract.
+- [support-email-intake.md](support-email-intake.md): the dark support@ email
+  intake bridge, DMARC trust boundary, drop reasons, and keyed enablement.
 - [backup-and-recovery.md](backup-and-recovery.md): operational backups
 - [backup-and-recovery.md](backup-and-recovery.md): operational backups
 - [backup-and-recovery.md](backup-and-recovery.md): operational backups

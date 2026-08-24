@@ -16,7 +16,8 @@
   "secrets": {
     "required": [
       "AGENT_EMAIL_ROUTE_ED25519_PRIVATE_KEY",
-      "CONTROL_PLANE_EDGE_TOKEN"
+      "CONTROL_PLANE_EDGE_TOKEN",
+      "SUPPORT_EMAIL_INTAKE_TOKEN"
     ]
   },
   "compatibility_date": "2026-06-01",
@@ -107,6 +108,9 @@
     // canonical and managed-alias delivery also retain their independent
     // runtime gates. The email edge must receive the identical cohort bytes.
     "CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST": "__CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST__",
+    // The support@ bridge remains undiscoverable until its independently
+    // provisioned bearer and every cell-side route are ready.
+    "CP_SUPPORT_EMAIL_INTAKE_ENABLED": "false",
     // Independent technical queue ceilings. Plans, including explicit
     // unlimited overrides, cannot raise these values; a deployment may only
     // lower them below the compiled 8-per-realm / 64-per-account maxima.

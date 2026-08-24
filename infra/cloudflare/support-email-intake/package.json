@@ -1,0 +1,17 @@
+{
+  "name": "@witwave/support-email-intake",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Dark Cloudflare Email Worker bridge for Witself support intake",
+  "scripts": {
+    "bundle:check": "node scripts/bundle-check.mjs",
+    "config": "node scripts/render-wrangler.mjs",
+    "deploy": "node scripts/deploy.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "4.120.0"
+  }
+}
+
