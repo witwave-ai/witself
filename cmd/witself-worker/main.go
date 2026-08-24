@@ -28,6 +28,7 @@ const (
 	transcriptRetentionJob         = "transcript_retention"
 	messageRetentionJob            = "message_retention"
 	agentEmailRetentionJob         = "agent_email_retention"
+	accountPurgeJob                = "account_purge"
 
 	avatarStyleRolloutEnabledEnv      = "WITSELF_AVATAR_STYLE_ROLLOUT_ENABLED"
 	avatarStyleRolloutBatchSizeEnv    = "WITSELF_AVATAR_STYLE_ROLLOUT_BATCH_SIZE"
@@ -71,6 +72,13 @@ const (
 	agentEmailRetentionBatchSizeEnv    = "WITSELF_AGENT_EMAIL_RETENTION_BATCH_SIZE"
 	agentEmailRetentionIntervalEnv     = "WITSELF_AGENT_EMAIL_RETENTION_INTERVAL"
 	agentEmailRetentionBatchTimeoutEnv = "WITSELF_AGENT_EMAIL_RETENTION_BATCH_TIMEOUT"
+
+	accountPurgeEnabledEnv      = "WITSELF_ACCOUNT_PURGE_ENABLED"
+	accountPurgeModeEnv         = "WITSELF_ACCOUNT_PURGE_MODE"
+	accountPurgeBatchSizeEnv    = "WITSELF_ACCOUNT_PURGE_BATCH_SIZE"
+	accountPurgeIntervalEnv     = "WITSELF_ACCOUNT_PURGE_INTERVAL"
+	accountPurgeBatchTimeoutEnv = "WITSELF_ACCOUNT_PURGE_BATCH_TIMEOUT"
+	accountPurgeGraceEnv        = "WITSELF_ACCOUNT_PURGE_GRACE"
 )
 
 type jobConfig struct {
@@ -89,6 +97,8 @@ type jobConfig struct {
 	messageRetention                   store.MessageRetentionWorkerConfig
 	agentEmailRetentionEnabled         bool
 	agentEmailRetention                store.AgentEmailRetentionWorkerConfig
+	accountPurgeEnabled                bool
+	accountPurge                       store.AccountPurgeWorkerConfig
 }
 
 func main() {
@@ -426,6 +436,48 @@ func serve() int {
 			os.Stderr,
 			"witself-worker: agent-email retention enabled (mode %s, batch %d, interval %s, timeout %s)\n",
 			cfg.Mode, cfg.BatchSize, cfg.Interval, cfg.BatchTimeout,
+		)
+	}
+	if jobs.accountPurgeEnabled {
+		cfg := jobs.accountPurge
+		mode := string(cfg.Mode)
+		if err := registry.Register(worker.Job{
+			Name: accountPurgeJob,
+			Run: func(jobCtx context.Context) error {
+				return st.RunAccountPurgeWorker(
+					jobCtx,
+					cfg,
+					func(result store.AccountPurgeBatchResult) {
+						metrics.ObserveAccountPurgeBatch(
+							mode,
+							accountPurgeMetricResult(result),
+							accountPurgeMetricCounts(result),
+						)
+						logAccountPurgeResult(cfg.Mode, result)
+					},
+					func(err error) {
+						metrics.RecordJobFailure(accountPurgeJob)
+						metrics.ObserveAccountPurgeBatch(
+							mode,
+							worker.RetentionResultError,
+							worker.AccountPurgeCounts{},
+						)
+						fmt.Fprintf(os.Stderr, "witself-worker: account purge: %v\n", err)
+					},
+				)
+			},
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "witself-worker: register account purge: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(
+			os.Stderr,
+			"witself-worker: account purge enabled (mode %s, batch %d, interval %s, timeout %s, grace %s)\n",
+			cfg.Mode,
+			cfg.BatchSize,
+			cfg.Interval,
+			cfg.BatchTimeout,
+			cfg.Grace,
 		)
 	}
 
@@ -776,6 +828,51 @@ func jobConfigFromEnv(lookup func(string) (string, bool)) (jobConfig, error) {
 			err,
 		)
 	}
+	accountPurgeEnabled, err := boolEnv(lookup, accountPurgeEnabledEnv, false)
+	if err != nil {
+		return jobConfig{}, err
+	}
+	accountPurge := store.DefaultAccountPurgeWorkerConfig()
+	if raw, ok := lookup(accountPurgeModeEnv); ok {
+		accountPurge.Mode = store.AccountPurgeMode(
+			strings.ToLower(strings.TrimSpace(raw)),
+		)
+	}
+	if raw, ok := lookup(accountPurgeBatchSizeEnv); ok {
+		accountPurge.BatchSize, err = parseIntEnv(accountPurgeBatchSizeEnv, raw)
+		if err != nil {
+			return jobConfig{}, err
+		}
+	}
+	if raw, ok := lookup(accountPurgeIntervalEnv); ok {
+		accountPurge.Interval, err = parseDurationEnv(accountPurgeIntervalEnv, raw)
+		if err != nil {
+			return jobConfig{}, err
+		}
+	}
+	if raw, ok := lookup(accountPurgeBatchTimeoutEnv); ok {
+		accountPurge.BatchTimeout, err = parseDurationEnv(accountPurgeBatchTimeoutEnv, raw)
+		if err != nil {
+			return jobConfig{}, err
+		}
+	}
+	if raw, ok := lookup(accountPurgeGraceEnv); ok {
+		accountPurge.Grace, err = parseDurationEnv(accountPurgeGraceEnv, raw)
+		if err != nil {
+			return jobConfig{}, err
+		}
+	}
+	if err := accountPurge.Validate(); err != nil {
+		return jobConfig{}, fmt.Errorf(
+			"%s/%s/%s/%s/%s account purge configuration: %w",
+			accountPurgeModeEnv,
+			accountPurgeBatchSizeEnv,
+			accountPurgeIntervalEnv,
+			accountPurgeBatchTimeoutEnv,
+			accountPurgeGraceEnv,
+			err,
+		)
+	}
 	return jobConfig{
 		avatarEnabled:                      avatarEnabled,
 		avatar:                             avatar,
@@ -792,6 +889,8 @@ func jobConfigFromEnv(lookup func(string) (string, bool)) (jobConfig, error) {
 		messageRetention:                   messageRetention,
 		agentEmailRetentionEnabled:         agentEmailRetentionEnabled,
 		agentEmailRetention:                agentEmailRetention,
+		accountPurgeEnabled:                accountPurgeEnabled,
+		accountPurge:                       accountPurge,
 	}, nil
 }
 
@@ -1012,6 +1111,43 @@ func agentEmailRetentionMetricCounts(
 	}
 }
 
+func accountPurgeMetricResult(result store.AccountPurgeBatchResult) worker.RetentionResult {
+	if result.Scanned == 0 &&
+		result.SkippedLocked == 0 &&
+		result.Eligible == 0 &&
+		result.PurgedAccounts == 0 &&
+		result.DeferredVaultLifecycle == 0 &&
+		result.AttachmentInvariantFailures == 0 &&
+		result.ProvisionReceiptScrubs == 0 &&
+		accountPurgeDeletedRows(result) == 0 {
+		return worker.RetentionResultNoWork
+	}
+	return worker.RetentionResultSuccess
+}
+
+func accountPurgeMetricCounts(result store.AccountPurgeBatchResult) worker.AccountPurgeCounts {
+	return worker.AccountPurgeCounts{
+		Scanned:                     result.Scanned,
+		SkippedLocked:               result.SkippedLocked,
+		Eligible:                    result.Eligible,
+		PurgedAccounts:              result.PurgedAccounts,
+		DeletedRows:                 accountPurgeDeletedRows(result),
+		DeferredVaultLifecycle:      result.DeferredVaultLifecycle,
+		AttachmentInvariantFailures: result.AttachmentInvariantFailures,
+		ProvisionReceiptScrubs:      result.ProvisionReceiptScrubs,
+	}
+}
+
+func accountPurgeDeletedRows(result store.AccountPurgeBatchResult) int64 {
+	var deletedRows int64
+	for _, count := range result.DeletedByTable {
+		if count > 0 {
+			deletedRows += count
+		}
+	}
+	return deletedRows
+}
+
 func logRetentionResult(mode store.TranscriptRetentionMode, result store.TranscriptRetentionBatchResult) {
 	if result == (store.TranscriptRetentionBatchResult{}) {
 		return
@@ -1081,6 +1217,25 @@ func logAgentEmailRetentionResult(
 		result.ScannedSuppressions,
 		result.EligibleSuppressions,
 		result.DeletedSuppressions,
+	)
+}
+
+func logAccountPurgeResult(mode store.AccountPurgeMode, result store.AccountPurgeBatchResult) {
+	if accountPurgeMetricResult(result) == worker.RetentionResultNoWork {
+		return
+	}
+	fmt.Fprintf(
+		os.Stderr,
+		"witself-worker: account purge: mode=%s scanned=%d skipped_locked=%d eligible=%d purged_accounts=%d deleted_rows=%d deferred_vault_lifecycle=%d attachment_invariant_failures=%d provision_receipt_scrubs=%d\n",
+		mode,
+		result.Scanned,
+		result.SkippedLocked,
+		result.Eligible,
+		result.PurgedAccounts,
+		accountPurgeDeletedRows(result),
+		result.DeferredVaultLifecycle,
+		result.AttachmentInvariantFailures,
+		result.ProvisionReceiptScrubs,
 	)
 }
 

@@ -90,6 +90,20 @@ type AgentEmailRetentionCounts struct {
 	ScanCapped            bool
 }
 
+// AccountPurgeCounts contains value-free closed-account purge counts. Deleted
+// rows are aggregated across tables so table or tenant data cannot create
+// metric labels.
+type AccountPurgeCounts struct {
+	Scanned                     int64
+	SkippedLocked               int64
+	Eligible                    int64
+	PurgedAccounts              int64
+	DeletedRows                 int64
+	DeferredVaultLifecycle      int64
+	AttachmentInvariantFailures int64
+	ProvisionReceiptScrubs      int64
+}
+
 // AgentEmailOutboundCounts contains value-free send-worker outcomes. It has
 // no account, realm, agent, recipient, message, or provider identifiers.
 type AgentEmailOutboundCounts struct {
@@ -135,6 +149,9 @@ type Metrics struct {
 	emailRetentionBatches                  map[retentionBatchLabels]uint64
 	emailRetentionItems                    map[retentionItemLabels]uint64
 	emailRetentionLastSuccess              map[string]float64
+	accountPurgeBatches                    map[retentionBatchLabels]uint64
+	accountPurgeItems                      map[retentionItemLabels]uint64
+	accountPurgeLastSuccess                map[string]float64
 	messageRateBucketCleanupBatches        map[RetentionResult]uint64
 	messageRateBucketCleanupDeletedRows    uint64
 	messageRateBucketCleanupLastSuccess    float64
@@ -159,6 +176,9 @@ func newMetrics() *Metrics {
 		emailRetentionBatches:       make(map[retentionBatchLabels]uint64),
 		emailRetentionItems:         make(map[retentionItemLabels]uint64),
 		emailRetentionLastSuccess:   make(map[string]float64),
+		accountPurgeBatches:         make(map[retentionBatchLabels]uint64),
+		accountPurgeItems:           make(map[retentionItemLabels]uint64),
+		accountPurgeLastSuccess:     make(map[string]float64),
 		messageRateBucketCleanupBatches: map[RetentionResult]uint64{
 			RetentionResultSuccess: 0,
 			RetentionResultNoWork:  0,
@@ -364,6 +384,44 @@ func (m *Metrics) ObserveAgentEmailRetentionBatch(
 	}
 }
 
+// ObserveAccountPurgeBatch records one value-free closed-account purge
+// attempt. Mode, result, and item kinds are process-owned bounded labels.
+func (m *Metrics) ObserveAccountPurgeBatch(
+	mode string,
+	result RetentionResult,
+	counts AccountPurgeCounts,
+) {
+	if mode != "preview" && mode != "enforce" {
+		return
+	}
+	if result != RetentionResultSuccess &&
+		result != RetentionResultNoWork &&
+		result != RetentionResultError {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.accountPurgeBatches[retentionBatchLabels{Mode: mode, Result: result}]++
+	if result == RetentionResultSuccess || result == RetentionResultNoWork {
+		m.accountPurgeLastSuccess[mode] = float64(m.now().Unix())
+	}
+	for kind, value := range map[string]int64{
+		"scanned":                       counts.Scanned,
+		"skipped_locked":                counts.SkippedLocked,
+		"eligible":                      counts.Eligible,
+		"purged_accounts":               counts.PurgedAccounts,
+		"deleted_rows":                  counts.DeletedRows,
+		"deferred_vault_lifecycle":      counts.DeferredVaultLifecycle,
+		"attachment_invariant_failures": counts.AttachmentInvariantFailures,
+		"provision_receipt_scrubs":      counts.ProvisionReceiptScrubs,
+	} {
+		if value > 0 {
+			m.accountPurgeItems[retentionItemLabels{Mode: mode, Kind: kind}] += uint64(value)
+		}
+	}
+}
+
 // ObserveMessageRateBucketCleanupBatch records one value-free rate-bucket
 // cleanup attempt. Result is a closed process enum and deleted is a count only.
 func (m *Metrics) ObserveMessageRateBucketCleanupBatch(
@@ -528,6 +586,18 @@ func (m *Metrics) writePrometheus(w io.Writer) {
 	emailLastSuccess := make(map[string]float64, len(m.emailRetentionLastSuccess))
 	for mode, value := range m.emailRetentionLastSuccess {
 		emailLastSuccess[mode] = value
+	}
+	accountPurgeBatches := make(map[retentionBatchLabels]uint64, len(m.accountPurgeBatches))
+	for labels, value := range m.accountPurgeBatches {
+		accountPurgeBatches[labels] = value
+	}
+	accountPurgeItems := make(map[retentionItemLabels]uint64, len(m.accountPurgeItems))
+	for labels, value := range m.accountPurgeItems {
+		accountPurgeItems[labels] = value
+	}
+	accountPurgeLastSuccess := make(map[string]float64, len(m.accountPurgeLastSuccess))
+	for mode, value := range m.accountPurgeLastSuccess {
+		accountPurgeLastSuccess[mode] = value
 	}
 	messageRateBucketCleanupBatches := make(
 		map[RetentionResult]uint64,
@@ -710,6 +780,37 @@ func (m *Metrics) writePrometheus(w io.Writer) {
 		_, _ = fmt.Fprintf(w,
 			"witself_worker_agent_email_retention_last_success_timestamp_seconds{mode=%q} %.0f\n",
 			mode, emailLastSuccess[mode])
+	}
+
+	_, _ = fmt.Fprintln(w, "# HELP witself_worker_account_purge_batches_total Closed-account purge batches by bounded mode and result.")
+	_, _ = fmt.Fprintln(w, "# TYPE witself_worker_account_purge_batches_total counter")
+	accountPurgeBatchLabels := sortedRetentionBatchLabels(accountPurgeBatches)
+	for _, labels := range accountPurgeBatchLabels {
+		_, _ = fmt.Fprintf(w,
+			"witself_worker_account_purge_batches_total{mode=%q,result=%q} %d\n",
+			labels.Mode, labels.Result, accountPurgeBatches[labels])
+	}
+
+	_, _ = fmt.Fprintln(w, "# HELP witself_worker_account_purge_items_total Value-free closed-account purge counts by bounded kind.")
+	_, _ = fmt.Fprintln(w, "# TYPE witself_worker_account_purge_items_total counter")
+	accountPurgeItemLabels := sortedRetentionItemLabels(accountPurgeItems)
+	for _, labels := range accountPurgeItemLabels {
+		_, _ = fmt.Fprintf(w,
+			"witself_worker_account_purge_items_total{mode=%q,kind=%q} %d\n",
+			labels.Mode, labels.Kind, accountPurgeItems[labels])
+	}
+
+	_, _ = fmt.Fprintln(w, "# HELP witself_worker_account_purge_last_success_timestamp_seconds Unix timestamp of the last successful or no-work closed-account purge batch.")
+	_, _ = fmt.Fprintln(w, "# TYPE witself_worker_account_purge_last_success_timestamp_seconds gauge")
+	accountPurgeModes := make([]string, 0, len(accountPurgeLastSuccess))
+	for mode := range accountPurgeLastSuccess {
+		accountPurgeModes = append(accountPurgeModes, mode)
+	}
+	sort.Strings(accountPurgeModes)
+	for _, mode := range accountPurgeModes {
+		_, _ = fmt.Fprintf(w,
+			"witself_worker_account_purge_last_success_timestamp_seconds{mode=%q} %.0f\n",
+			mode, accountPurgeLastSuccess[mode])
 	}
 
 	_, _ = fmt.Fprintln(w, "# HELP witself_worker_agent_email_outbound_batches_total Outbound agent-email worker batches by bounded result.")

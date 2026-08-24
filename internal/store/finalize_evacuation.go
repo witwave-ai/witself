@@ -124,11 +124,6 @@ func (s *Store) finalizeAccountEvacuationSourceOnce(
 	if err := setEvacuationAuthorityTx(ctx, tx, evacuationID); err != nil {
 		return AccountEvacuationFinalization{}, err
 	}
-	if err := rejectCrossAccountEvacuationCascadesTx(
-		ctx, tx, accountID,
-	); err != nil {
-		return AccountEvacuationFinalization{}, err
-	}
 	var schemaVersion int
 	if err := tx.QueryRow(ctx, `
 		SELECT coalesce(max(version_id), 0)
@@ -142,45 +137,10 @@ func (s *Store) finalizeAccountEvacuationSourceOnce(
 		return AccountEvacuationFinalization{},
 			fmt.Errorf("read source schema version: %w", err)
 	}
-	// The archive registry is also the deletion dependency contract: export
-	// order is parent-before-child, so reverse order removes every portable
-	// child before its parent. accounts is retained until the end so every
-	// trigger can authenticate this exact source marker. Filter by the live
-	// schema coordinate so migration downgrade rehearsals do not address a
-	// portable table introduced by a later schema. The two indirectly scoped
-	// tables use their canonical account joins.
-	archiveTables := canonicalArchiveTableNamesForSchema(schemaVersion)
-	for i := len(archiveTables) - 1; i >= 0; i-- {
-		table := archiveTables[i]
-		var query string
-		switch table {
-		case "accounts":
-			continue
-		case "agents":
-			query = `
-				DELETE FROM agents
-				 WHERE realm_id IN (
-				       SELECT id FROM realms WHERE account_id = $1
-				 )`
-		case "agent_activity":
-			query = `
-				DELETE FROM agent_activity
-				 WHERE agent_id IN (
-				       SELECT agent.id
-				         FROM agents agent
-				         JOIN realms realm ON realm.id = agent.realm_id
-				        WHERE realm.account_id = $1
-				 )`
-		default:
-			query = fmt.Sprintf(
-				"DELETE FROM %s WHERE account_id = $1",
-				pgx.Identifier{table}.Sanitize(),
-			)
-		}
-		if _, err := tx.Exec(ctx, query, accountID); err != nil {
-			return AccountEvacuationFinalization{},
-				fmt.Errorf("purge evacuated source table %s: %w", table, err)
-		}
+	if _, err := purgePortableAccountRowsTx(
+		ctx, tx, accountID, schemaVersion,
+	); err != nil {
+		return AccountEvacuationFinalization{}, err
 	}
 
 	var finalizedAt time.Time
@@ -217,6 +177,64 @@ func (s *Store) finalizeAccountEvacuationSourceOnce(
 		SourceStatus: status, FinalizedAt: finalizedAt.UTC(),
 		Finalized: true,
 	}, nil
+}
+
+// purgePortableAccountRowsTx removes every portable row for one account while
+// retaining the accounts row itself. The archive registry is also the
+// deletion dependency contract: export order is parent-before-child, so
+// reverse order removes every portable child before its parent. Keeping the
+// account row until the caller finishes lets tenant triggers authenticate the
+// locked lifecycle row. The two indirectly scoped tables use their canonical
+// account joins.
+func purgePortableAccountRowsTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	accountID string,
+	schemaVersion int,
+) (map[string]int64, error) {
+	if err := rejectCrossAccountEvacuationCascadesTx(
+		ctx, tx, accountID,
+	); err != nil {
+		return nil, err
+	}
+
+	deletedByTable := make(map[string]int64)
+	archiveTables := canonicalArchiveTableNamesForSchema(schemaVersion)
+	for i := len(archiveTables) - 1; i >= 0; i-- {
+		table := archiveTables[i]
+		var query string
+		switch table {
+		case "accounts":
+			continue
+		case "agents":
+			query = `
+				DELETE FROM agents
+				 WHERE realm_id IN (
+				       SELECT id FROM realms WHERE account_id = $1
+				 )`
+		case "agent_activity":
+			query = `
+				DELETE FROM agent_activity
+				 WHERE agent_id IN (
+				       SELECT agent.id
+				         FROM agents agent
+				         JOIN realms realm ON realm.id = agent.realm_id
+				        WHERE realm.account_id = $1
+				 )`
+		default:
+			query = fmt.Sprintf(
+				"DELETE FROM %s WHERE account_id = $1",
+				pgx.Identifier{table}.Sanitize(),
+			)
+		}
+		tag, err := tx.Exec(ctx, query, accountID)
+		if err != nil {
+			return nil,
+				fmt.Errorf("purge evacuated source table %s: %w", table, err)
+		}
+		deletedByTable[table] = tag.RowsAffected()
+	}
+	return deletedByTable, nil
 }
 
 func isEvacuationSerializationFailure(err error) bool {

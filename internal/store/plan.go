@@ -139,11 +139,12 @@ func (s *Store) SetAccountPlan(
 	var applied AccountPlanSnapshot
 	var appliedLimits, appliedPolicies, appliedFeatures []byte
 	err = s.pool.QueryRow(ctx,
-		`UPDATE accounts
+		`UPDATE accounts AS account_record
 		 SET plan = $2, plan_limits = $3, plan_policies = $4,
 		     plan_features = $5, plan_applied_at = statement_timestamp(),
 		     plan_snapshot_revision = $6, plan_snapshot_hash = $7
 		 WHERE id = $1
+		   AND (to_jsonb(account_record)->>'purged_at') IS NULL
 		   AND (
 		     ($6 = 0 AND $7 = '' AND plan_snapshot_revision = 0)
 		     OR ($6 > plan_snapshot_revision)
@@ -155,13 +156,17 @@ func (s *Store) SetAccountPlan(
 		Scan(&applied.AccountID, &applied.Revision, &applied.Hash, &applied.Plan,
 			&appliedLimits, &appliedPolicies, &appliedFeatures, &applied.AppliedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		var exists bool
+		var purged bool
 		if err := s.pool.QueryRow(ctx,
-			`SELECT EXISTS (SELECT 1 FROM accounts WHERE id = $1)`, accountID).
-			Scan(&exists); err != nil {
+			`SELECT (to_jsonb(account_record)->>'purged_at') IS NOT NULL
+			   FROM accounts AS account_record
+			  WHERE id=$1`, accountID).
+			Scan(&purged); errors.Is(err, pgx.ErrNoRows) {
+			return AccountPlanSnapshot{}, ErrAccountNotFound
+		} else if err != nil {
 			return AccountPlanSnapshot{}, fmt.Errorf("check stale plan target: %w", err)
 		}
-		if !exists {
+		if purged {
 			return AccountPlanSnapshot{}, ErrAccountNotFound
 		}
 		return AccountPlanSnapshot{}, ErrPlanSnapshotStale

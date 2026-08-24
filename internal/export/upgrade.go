@@ -67,6 +67,15 @@ var upgraders = map[int]Upgrader{
 	88: preserveSchema88Rows,
 	89: preserveSchema89Rows,
 	90: preserveSchema90Rows,
+	91: preserveSchema91Rows,
+}
+
+// preserveSchema91Rows acknowledges schema 0092's nullable account purge
+// marker and closed-account check. A schema-91 archive has no purged_at value,
+// so the destination NULL default is correct and every prior account row
+// already satisfies the new implication.
+func preserveSchema91Rows(_ string, row map[string]any) (map[string]any, error) {
+	return row, nil
 }
 
 // preserveSchema90Rows acknowledges schema 0091's cell-local retained-email
