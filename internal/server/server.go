@@ -38,6 +38,9 @@ type Config struct {
 	// cell-storage snapshot per Prometheus scrape. It is never called by API or
 	// health traffic; nil omits this database-backed metric family.
 	ReadAgentEmailCellStorageMetrics func(context.Context) (AgentEmailCellStorageMetrics, error)
+	// ReadSupportSLOMetrics supplies the value-free support first-response
+	// posture for /metrics; nil skips the gauges entirely.
+	ReadSupportSLOMetrics func(context.Context) (SupportSLOMetrics, error)
 
 	// Ready, when set, gates /readyz: it returns 200 only when Ready returns
 	// nil, else 503. nil means always-ready. Liveness/startup never gate on it.
@@ -2188,7 +2191,8 @@ func Run(ctx context.Context, cfg Config) error {
 	}{
 		{"api", cfg.APIAddr, metrics.instrument(apiMux(instrumentedConfig))},
 		{"health", cfg.HealthAddr, healthMux(cfg.Ready)},
-		{"metrics", cfg.MetricsAddr, metricsMuxFor(metrics, cfg.ReadAgentEmailCellStorageMetrics)},
+		{"metrics", cfg.MetricsAddr, metricsMuxFor(
+			metrics, cfg.ReadAgentEmailCellStorageMetrics, cfg.ReadSupportSLOMetrics)},
 	}
 
 	type running struct {
@@ -6723,12 +6727,13 @@ func healthMux(ready func(context.Context) error) http.Handler {
 }
 
 func metricsMux() http.Handler {
-	return metricsMuxFor(newRuntimeMetrics(), nil)
+	return metricsMuxFor(newRuntimeMetrics(), nil, nil)
 }
 
 func metricsMuxFor(
 	metrics *runtimeMetrics,
 	readAgentEmailCellStorage func(context.Context) (AgentEmailCellStorageMetrics, error),
+	readSupportSLO func(context.Context) (SupportSLOMetrics, error),
 ) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
@@ -6737,6 +6742,7 @@ func metricsMuxFor(
 		writeAgentEmailCellStoragePrometheus(
 			r.Context(), w, readAgentEmailCellStorage,
 		)
+		writeSupportSLOPrometheus(r.Context(), w, readSupportSLO)
 	})
 	return mux
 }

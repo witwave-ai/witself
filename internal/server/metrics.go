@@ -640,6 +640,38 @@ func writeAgentEmailCellStoragePrometheus(
 	writeIntGauge(w, "witself_agent_email_cell_storage_hard_counted_rows", "Hard counted-row boundary for this cell's email ledger.", status.HardCountedRows)
 }
 
+// SupportSLOMetrics is the value-free first-response posture: tickets still
+// waiting for their first fleet-side answer, and the oldest wait in seconds.
+type SupportSLOMetrics struct {
+	UnansweredTickets       int64
+	OldestUnansweredSeconds int64
+}
+
+// writeSupportSLOPrometheus renders the support first-response posture. The
+// _up gauge separates "nothing is waiting" from "the read failed": a broken
+// read must never render as zeros that read like a healthy queue.
+func writeSupportSLOPrometheus(
+	ctx context.Context,
+	w io.Writer,
+	read func(context.Context) (SupportSLOMetrics, error),
+) {
+	if read == nil {
+		return
+	}
+	_, _ = fmt.Fprintln(w, "# HELP witself_support_slo_metrics_up 1 when the support first-response posture was read successfully.")
+	_, _ = fmt.Fprintln(w, "# TYPE witself_support_slo_metrics_up gauge")
+	readCtx, cancel := context.WithTimeout(ctx, agentEmailCellStorageMetricsTimeout)
+	defer cancel()
+	status, err := read(readCtx)
+	if err != nil || status.UnansweredTickets < 0 || status.OldestUnansweredSeconds < 0 {
+		_, _ = fmt.Fprintln(w, "witself_support_slo_metrics_up 0")
+		return
+	}
+	_, _ = fmt.Fprintln(w, "witself_support_slo_metrics_up 1")
+	writeIntGauge(w, "witself_support_unanswered_tickets", "Tickets awaiting their first fleet-side response.", status.UnansweredTickets)
+	writeIntGauge(w, "witself_support_oldest_unanswered_seconds", "Age of the oldest ticket awaiting its first response.", status.OldestUnansweredSeconds)
+}
+
 func validAgentEmailCellStorageMetrics(status AgentEmailCellStorageMetrics) bool {
 	return status.RetainedBytes >= 0 &&
 		status.RootRows >= 0 &&

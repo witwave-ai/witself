@@ -176,6 +176,18 @@ func serve() int {
 			fmt.Fprintf(os.Stderr, "witself-server: agent-email cell storage: %v\n", err)
 			return 1
 		}
+		cfg.ReadSupportSLOMetrics = func(
+			ctx context.Context,
+		) (server.SupportSLOMetrics, error) {
+			m, err := st.ReadSupportSLOMetrics(ctx)
+			if err != nil {
+				return server.SupportSLOMetrics{}, err
+			}
+			return server.SupportSLOMetrics{
+				UnansweredTickets:       m.UnansweredTickets,
+				OldestUnansweredSeconds: m.OldestUnansweredSeconds,
+			}, nil
+		}
 		cfg.ReadAgentEmailCellStorageMetrics = func(
 			ctx context.Context,
 		) (server.AgentEmailCellStorageMetrics, error) {

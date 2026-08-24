@@ -122,6 +122,16 @@ groups:
         annotations:
           summary: Prometheus reports rule-evaluation failures.
           runbook: docs/runbooks.md#founder-open-plane-monitoring
+      - alert: WitselfSupportFirstResponseBreach
+        expr: max(witself_support_oldest_unanswered_seconds) > 86400
+        for: 15m
+        labels:
+          severity: critical
+          service: witself-server
+          witself_alert: "true"
+        annotations:
+          summary: A support ticket has waited over 24h for its first response — the published promise is one business day.
+          runbook: docs/runbooks.md#founder-open-plane-monitoring
       # Dead-man's switch. This alert always fires; it is routed only to the
       # external heartbeat receiver and deliberately carries no witself_alert
       # label, so it never reaches the incident route. Silence here means the

@@ -1410,3 +1410,35 @@ func (s *Store) GetSupportPolicyAdmin(ctx context.Context, accountID string) (st
 	}
 	return policy, nil
 }
+
+// SupportSLOMetrics is the value-free first-response posture for this cell:
+// how many tickets await their first fleet-side answer, and how old the
+// oldest wait is. The published promise is a first response within one
+// business day; the breach alert keys on the oldest age.
+type SupportSLOMetrics struct {
+	UnansweredTickets       int64
+	OldestUnansweredSeconds int64
+}
+
+// ReadSupportSLOMetrics reports the cell-wide first-response SLO posture.
+// A ticket counts while it is open or awaiting_admin with no first response
+// recorded; resolved, closed, and awaiting_customer tickets have either been
+// answered or handed back to the customer.
+func (s *Store) ReadSupportSLOMetrics(ctx context.Context) (SupportSLOMetrics, error) {
+	var m SupportSLOMetrics
+	err := s.pool.QueryRow(ctx,
+		`SELECT count(*),
+		        COALESCE(FLOOR(EXTRACT(EPOCH FROM
+		          statement_timestamp() - min(opened_at))), 0)::bigint
+		 FROM support_tickets
+		 WHERE first_response_at IS NULL
+		   AND state IN ('open', 'awaiting_admin')`,
+	).Scan(&m.UnansweredTickets, &m.OldestUnansweredSeconds)
+	if err != nil {
+		return SupportSLOMetrics{}, fmt.Errorf("read support SLO metrics: %w", err)
+	}
+	if m.UnansweredTickets == 0 {
+		m.OldestUnansweredSeconds = 0
+	}
+	return m, nil
+}
