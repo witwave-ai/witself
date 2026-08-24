@@ -193,6 +193,10 @@ deployment cells under a thin global control plane.
   [Refunds](legal/refund-cancellation.md). Not in force until ratified.
 - [refund-runbook.md](refund-runbook.md): the 14-day refund policy and the
   operator procedure for executing one (Stripe Dashboard only — no CLI verb).
+- [support-policy.md](support-policy.md): the published managed-cloud support
+  policy — entitlement, channels, the 1-business-day promise, AI-first
+  staffing with its fixed human-escalation set.
+- [backup-and-recovery.md](backup-and-recovery.md): operational backups
 - [backup-and-recovery.md](backup-and-recovery.md): operational backups
 - [backup-and-recovery.md](backup-and-recovery.md): operational backups
   (including vector data), first-class plaintext identity export, and
