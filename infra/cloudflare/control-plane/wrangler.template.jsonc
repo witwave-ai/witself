@@ -111,6 +111,11 @@
     // The support@ bridge remains undiscoverable until its independently
     // provisioned bearer and every cell-side route are ready.
     "CP_SUPPORT_EMAIL_INTAKE_ENABLED": "false",
+    // Durable signup quotas are independently disabled at the exact value 0.
+    // Positive integer limits may be selected only as part of the keyed open-
+    // signup activation procedure in docs/signup-abuse-hardening.md.
+    "CP_SIGNUP_DAILY_LIMIT_PER_IP": "0",
+    "CP_SIGNUP_DAILY_LIMIT_GLOBAL": "0",
     // Independent technical queue ceilings. Plans, including explicit
     // unlimited overrides, cannot raise these values; a deployment may only
     // lower them below the compiled 8-per-realm / 64-per-account maxima.
@@ -237,6 +242,24 @@
           "limit": 1,
           "period": 10
         }
+      },
+      {
+        "name": "PUBLIC_IP_LIMITER",
+        "type": "ratelimit",
+        "namespace_id": "1002",
+        "simple": {
+          "limit": 300,
+          "period": 60
+        }
+      },
+      {
+        "name": "SIGNUP_IP_LIMITER",
+        "type": "ratelimit",
+        "namespace_id": "1003",
+        "simple": {
+          "limit": 5,
+          "period": 60
+        }
       }
     ]
   },
@@ -275,6 +298,15 @@
   // CP_PLAN_LIFECYCLE_ENABLED=true (only
   // when intentionally activating lifecycle), CP_R2_ENDPOINT, CP_R2_BUCKET,
   // CP_R2_ACCESS_KEY, CP_R2_SECRET_KEY, and optionally CP_R2_PREFIX. To enable
+  // the signup Turnstile, mint a widget restricted to self.witwave.ai and set
+  // CP_SIGNUP_TURNSTILE_ENABLED=true, CP_SIGNUP_TURNSTILE_SECRET_KEY, and
+  // CP_SIGNUP_TURNSTILE_SITE_KEY together. These three runtime-only break-glass
+  // secrets are deliberately absent from secrets.required. Verification turns
+  // on only when the enabled value is exactly true and the secret key is
+  // present; set it last because the challenge page also requires the site key.
+  // Independently choose reviewed positive CP_SIGNUP_DAILY_LIMIT_PER_IP and
+  // CP_SIGNUP_DAILY_LIMIT_GLOBAL values before opening signup; 0 disables each
+  // durable quota. To enable
   // Stripe, also set CP_BILLING_PROVIDER=stripe, CP_STRIPE_MODE=test or live,
   // CP_STRIPE_SECRET_KEY, CP_STRIPE_WEBHOOK_SECRET,
   // CP_STRIPE_SUCCESS_URL=https://self.witwave.ai/billing/success,

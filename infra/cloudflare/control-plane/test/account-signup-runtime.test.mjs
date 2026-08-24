@@ -9,6 +9,7 @@ import {
 const PROVISION = "11111111-1111-4111-8111-111111111111";
 const ACCOUNT = "acct_signup";
 const INVITE = "early-access";
+const SIGNUP_IP_SCOPE_PATTERN = /^signup-counter:ip:[0-9a-f]{64}$/;
 
 class Storage {
   constructor() {
@@ -77,6 +78,11 @@ class Storage {
       delete: async (key) => {
         staged.delete(key);
       },
+      list: async ({ prefix = "" } = {}) => new Map(
+        [...staged]
+          .filter(([key]) => key.startsWith(prefix))
+          .map(([key, value]) => [key, structuredClone(value)]),
+      ),
     };
     const result = await callback(txn);
     this.values = staged;
@@ -291,6 +297,9 @@ function harness({
     cell("cell-b", "https://cell-b.example"),
   ],
   sendVerification = async () => false,
+  env: envOverrides = {},
+  verifyTurnstile,
+  consumeCounter,
 } = {}) {
   directory ??= new KV(Object.fromEntries(
     cells.map((entry) => [`cell:${entry.name}`, entry]),
@@ -299,7 +308,7 @@ function harness({
   let inviteReservations = 0;
   const runtime = new DurableAccountSignup(
     { id: { name: `provision:${PROVISION}` }, storage },
-    { DIRECTORY: directory },
+    { DIRECTORY: directory, ...envOverrides },
     {
       fetch: (url, init) => service.fetch(url, init),
       placeAccount: async () => ({
@@ -313,6 +322,8 @@ function harness({
         (cellName, path, payload) =>
           target.request(cellName, path, payload),
       sendVerification,
+      verifyTurnstile,
+      consumeCounter,
       now: () => new Date("2026-07-25T12:00:00.000Z"),
     },
   );
@@ -622,4 +633,334 @@ test("invite authority consumes one exact use across retries", async () => {
   );
   assert.equal(exhausted.status, 403);
   assert.equal(directory.value(`invite:${INVITE}`).uses, 1);
+});
+
+test("dark defaults preserve the exact initialized state shape", async () => {
+  const storage = new Storage();
+  storage.failPhaseOnce = "invite_reserved";
+  const setup = harness({ storage });
+
+  assert.equal((await setup.runtime.fetch(signupRequest())).status, 500);
+  const state = storage.values.get("account-signup");
+  assert.deepEqual(Object.keys(state), [
+    "schema_version",
+    "revision",
+    "phase",
+    "provision_id",
+    "request_fingerprint",
+    "cell",
+    "account",
+    "created_at",
+    "email_attempted",
+    "verification_email_sent",
+  ]);
+  assert.equal(state.phase, "initialized");
+  assert.equal(state.revision, 0);
+  assert.equal(Object.hasOwn(state, "turnstile_verified"), false);
+});
+
+test("source IP and challenge token are optional strings outside the fingerprint", async () => {
+  const setup = harness();
+  const initial = await setup.runtime.fetch(signupRequest({
+    source_ip: "203.0.113.10",
+    turnstile_token: "first-secret-token",
+  }));
+  assert.equal(initial.status, 201);
+  const stored = JSON.stringify(setup.storage.values.get("account-signup"));
+  assert.equal(stored.includes("203.0.113.10"), false);
+  assert.equal(stored.includes("first-secret-token"), false);
+
+  const replay = await setup.runtime.fetch(signupRequest({
+    source_ip: "2001:db8::99",
+    turnstile_token: "different-secret-token",
+  }));
+  assert.equal(replay.status, 201);
+  assert.equal(setup.placements(), 1);
+
+  for (const fields of [
+    { source_ip: 42 },
+    { turnstile_token: { token: "wrong shape" } },
+  ]) {
+    const isolated = harness();
+    const response = await isolated.runtime.fetch(signupRequest(fields));
+    assert.equal(response.status, 400);
+    assert.equal(isolated.storage.values.has("account-signup"), false);
+  }
+});
+
+test("invalid Turnstile requests return the safe challenge URL before invite use", async () => {
+  let verifications = 0;
+  const setup = harness({
+    env: {
+      CP_SIGNUP_TURNSTILE_ENABLED: "true",
+      CP_SIGNUP_TURNSTILE_SECRET_KEY: "server-secret",
+    },
+    verifyTurnstile: async (input) => {
+      verifications++;
+      assert.deepEqual(input, {
+        secretKey: "server-secret",
+        token: "bad-token",
+        remoteIp: "203.0.113.11",
+      });
+      return { ok: false, reason: "invalid" };
+    },
+  });
+
+  const response = await setup.runtime.fetch(signupRequest({
+    source_ip: "203.0.113.11",
+    turnstile_token: "bad-token",
+  }));
+  assert.equal(response.status, 403);
+  assert.deepEqual(await response.json(), {
+    schema_version: "witself.v0",
+    error: "turnstile challenge required",
+    challenge_url: "https://self.witwave.ai/signup/challenge",
+  });
+  assert.equal(verifications, 1);
+  assert.equal(setup.inviteReservations(), 0);
+  assert.equal(setup.storage.values.has("account-signup"), false);
+});
+
+test("Turnstile outages pause signup with an explicit retryable response", async () => {
+  const setup = harness({
+    env: {
+      CP_SIGNUP_TURNSTILE_ENABLED: "true",
+      CP_SIGNUP_TURNSTILE_SECRET_KEY: "server-secret",
+    },
+    verifyTurnstile: async () => ({
+      ok: false,
+      reason: "unavailable",
+    }),
+  });
+  const response = await setup.runtime.fetch(signupRequest({
+    turnstile_token: "token",
+  }));
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), {
+    schema_version: "witself.v0",
+    error: "turnstile verification unavailable",
+    retryable: true,
+  });
+  assert.equal(setup.inviteReservations(), 0);
+  assert.equal(setup.storage.values.has("account-signup"), false);
+});
+
+test("an ambiguous counter outcome replays its marker without re-verifying Turnstile", async () => {
+  const counterRuntimes = new Map();
+  const counterCalls = [];
+  let loseGlobalResponse = true;
+  let namespace;
+  namespace = {
+    idFromName: (name) => ({ name }),
+    get: (id) => ({
+      fetch: async (request) => {
+        let runtime = counterRuntimes.get(id.name);
+        if (!runtime) {
+          runtime = new DurableAccountSignup(
+            { id, storage: new Storage() },
+            { ACCOUNT_SIGNUP: namespace },
+            { now: () => new Date("2026-07-25T12:00:00.000Z") },
+          );
+          counterRuntimes.set(id.name, runtime);
+        }
+        const response = await runtime.fetch(request);
+        const body = await response.clone().json();
+        counterCalls.push({ scope: id.name, ...body });
+        if (id.name === "signup-counter:global" && loseGlobalResponse) {
+          loseGlobalResponse = false;
+          throw new Error("simulated lost committed counter response");
+        }
+        return response;
+      },
+    }),
+  };
+
+  let verifications = 0;
+  const setup = harness({
+    env: {
+      ACCOUNT_SIGNUP: namespace,
+      CP_SIGNUP_TURNSTILE_ENABLED: "true",
+      CP_SIGNUP_TURNSTILE_SECRET_KEY: "server-secret",
+      CP_SIGNUP_DAILY_LIMIT_PER_IP: "5",
+      CP_SIGNUP_DAILY_LIMIT_GLOBAL: "10",
+    },
+    verifyTurnstile: async () => {
+      verifications++;
+      return { ok: true };
+    },
+  });
+  const request = (sourceIP) => signupRequest({
+    source_ip: sourceIP,
+    turnstile_token: "one-time-token",
+  });
+
+  const ambiguous = await setup.runtime.fetch(request("203.0.113.12"));
+  assert.equal(ambiguous.status, 502);
+  assert.match((await ambiguous.json()).error, /counter outcome is ambiguous/);
+  assert.equal(verifications, 1);
+  assert.deepEqual(
+    setup.storage.values.get("account-signup").phase,
+    "abuse_preflight",
+  );
+
+  const replay = await setup.runtime.fetch(request("198.51.100.44"));
+  assert.equal(replay.status, 201);
+  assert.equal(verifications, 1);
+  assert.deepEqual(
+    counterCalls.map(({ scope, replayed }) => ({ scope, replayed })),
+    [
+      { scope: counterCalls[0].scope, replayed: false },
+      { scope: "signup-counter:global", replayed: false },
+      { scope: counterCalls[0].scope, replayed: true },
+      { scope: "signup-counter:global", replayed: true },
+    ],
+  );
+  assert.match(counterCalls[0].scope, /^signup-counter:ip:[0-9a-f]{64}$/);
+  assert.equal(
+    setup.storage.values.get("account-signup").turnstile_verified,
+    true,
+  );
+  assert.equal(
+    Object.hasOwn(
+      setup.storage.values.get("account-signup"),
+      "signup_ip_scope",
+    ),
+    false,
+  );
+
+  const completedReplay = await setup.runtime.fetch(signupRequest({
+    source_ip: "198.51.100.44",
+    turnstile_token: "replacement-token",
+  }));
+  assert.equal(completedReplay.status, 201);
+  assert.equal(verifications, 1);
+  assert.equal(counterCalls.length, 4);
+});
+
+test("counter-only ambiguous retry keeps its hashed IP scope across networks", async () => {
+  const markers = new Map();
+  const calls = [];
+  let loseFirstResponse = true;
+  const setup = harness({
+    env: {
+      CP_SIGNUP_DAILY_LIMIT_PER_IP: "5",
+      CP_SIGNUP_DAILY_LIMIT_GLOBAL: "0",
+    },
+    consumeCounter: async (input) => {
+      calls.push(structuredClone(input));
+      const existing = markers.get(input.scope);
+      if (existing) return { ...existing, replayed: true };
+      const verdict = { allowed: true, count: 1, replayed: false };
+      markers.set(input.scope, verdict);
+      if (loseFirstResponse) {
+        loseFirstResponse = false;
+        throw new Error("simulated lost committed counter response");
+      }
+      return verdict;
+    },
+  });
+
+  const first = await setup.runtime.fetch(signupRequest({
+    source_ip: "203.0.113.21",
+  }));
+  assert.equal(first.status, 500);
+  const checkpoint = setup.storage.values.get("account-signup");
+  assert.equal(checkpoint.phase, "abuse_preflight");
+  assert.match(checkpoint.signup_ip_scope, SIGNUP_IP_SCOPE_PATTERN);
+  assert.equal(Object.hasOwn(checkpoint, "turnstile_verified"), false);
+
+  const retry = await setup.runtime.fetch(signupRequest({
+    source_ip: "198.51.100.21",
+  }));
+  assert.equal(retry.status, 201);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].scope, calls[0].scope);
+  assert.equal(markers.size, 1);
+  assert.equal(
+    Object.hasOwn(
+      setup.storage.values.get("account-signup"),
+      "signup_ip_scope",
+    ),
+    false,
+  );
+});
+
+test("a definitive counter denial deletes preflight state and logs only scope", async (t) => {
+  const logs = [];
+  t.mock.method(console, "log", (...values) => logs.push(values.join(" ")));
+  const calls = [];
+  const setup = harness({
+    env: {
+      CP_SIGNUP_TURNSTILE_ENABLED: "true",
+      CP_SIGNUP_TURNSTILE_SECRET_KEY: "server-secret",
+      CP_SIGNUP_DAILY_LIMIT_PER_IP: "5",
+      CP_SIGNUP_DAILY_LIMIT_GLOBAL: "10",
+    },
+    verifyTurnstile: async () => ({ ok: true }),
+    consumeCounter: async (input) => {
+      calls.push(input);
+      return { allowed: input.scope !== "signup-counter:global" };
+    },
+  });
+  const response = await setup.runtime.fetch(signupRequest({
+    source_ip: "203.0.113.13",
+    turnstile_token: "must-never-be-logged",
+  }));
+  assert.equal(response.status, 429);
+  assert.deepEqual(await response.json(), {
+    schema_version: "witself.v0",
+    error: "signup rate limit exceeded",
+  });
+  assert.equal(calls.length, 2, "IP is consumed before the global counter");
+  assert.equal(setup.storage.values.has("account-signup"), false);
+  assert.equal(setup.inviteReservations(), 0);
+  assert.deepEqual(logs, [
+    "signup: daily counter denied scope signup-counter:global",
+  ]);
+  assert.equal(logs[0].includes(PROVISION), false);
+  assert.equal(logs[0].includes("203.0.113.13"), false);
+  assert.equal(logs[0].includes("must-never-be-logged"), false);
+});
+
+test("counter consume is accepted only by the signup-counter role", async () => {
+  const input = (provisionID) => new Request(
+    "https://account-signup.internal/counter/consume",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provision_id: provisionID, limit: 1 }),
+    },
+  );
+  const wrongRole = new DurableAccountSignup(
+    {
+      id: { name: `provision:${PROVISION}` },
+      storage: new Storage(),
+    },
+    {},
+  );
+  assert.equal((await wrongRole.fetch(input("counter-a"))).status, 400);
+
+  const storage = new Storage();
+  const authority = new DurableAccountSignup(
+    { id: { name: "signup-counter:global" }, storage },
+    {},
+    { now: () => new Date("2026-07-25T12:00:00.000Z") },
+  );
+  const allowed = await authority.fetch(input("counter-a"));
+  assert.equal(allowed.status, 200);
+  assert.deepEqual(await allowed.json(), {
+    ok: true,
+    scope: "signup-counter:global",
+    provision_id: "counter-a",
+    allowed: true,
+    count: 1,
+    limit: 1,
+    day: "2026-07-25",
+    replayed: false,
+  });
+  const replay = await authority.fetch(input("counter-a"));
+  assert.equal((await replay.json()).replayed, true);
+  const denied = await authority.fetch(input("counter-b"));
+  assert.equal((await denied.json()).allowed, false);
+  assert.equal(storage.values.has("account-signup"), false);
 });

@@ -261,6 +261,8 @@ function assertGeneratedConfigContract(config, expectedMain) {
     "AGENT_EMAIL_ROUTE_SIGNING_KEY_ID",
     "CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT",
     "CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
+    "CP_SIGNUP_DAILY_LIMIT_GLOBAL",
+    "CP_SIGNUP_DAILY_LIMIT_PER_IP",
     "CP_SUPPORT_EMAIL_INTAKE_ENABLED",
     "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT",
     "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM",
@@ -278,6 +280,8 @@ function assertGeneratedConfigContract(config, expectedMain) {
       config.vars.CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM !== "8" ||
       config.vars.CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT !== "64" ||
       config.vars.CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT !== "8" ||
+      config.vars.CP_SIGNUP_DAILY_LIMIT_PER_IP !== "0" ||
+      config.vars.CP_SIGNUP_DAILY_LIMIT_GLOBAL !== "0" ||
       config.vars.CP_SUPPORT_EMAIL_INTAKE_ENABLED !== "false") {
     throw new Error("generated config Worker vars did not match the reviewed contract");
   }
@@ -316,12 +320,26 @@ function assertGeneratedConfigContract(config, expectedMain) {
     }
   }
   if (!sameJSON(config.unsafe, {
-    bindings: [{
-      name: "RECOVER_LIMITER",
-      type: "ratelimit",
-      namespace_id: "1001",
-      simple: { limit: 1, period: 10 },
-    }],
+    bindings: [
+      {
+        name: "RECOVER_LIMITER",
+        type: "ratelimit",
+        namespace_id: "1001",
+        simple: { limit: 1, period: 10 },
+      },
+      {
+        name: "PUBLIC_IP_LIMITER",
+        type: "ratelimit",
+        namespace_id: "1002",
+        simple: { limit: 300, period: 60 },
+      },
+      {
+        name: "SIGNUP_IP_LIMITER",
+        type: "ratelimit",
+        namespace_id: "1003",
+        simple: { limit: 5, period: 60 },
+      },
+    ],
   }) || !sameJSON(config.observability, { enabled: true })) {
     throw new Error("generated config operational binding contract did not match");
   }
@@ -509,6 +527,15 @@ function exactPlainBinding(bindings, name, expected) {
   }
 }
 
+function exactRateLimitBinding(bindings, name, namespaceID, simple) {
+  const binding = bindings.get(name);
+  if (binding?.type !== "ratelimit" ||
+      binding.namespace_id !== namespaceID ||
+      !sameJSON(binding.simple, simple)) {
+    throw new Error(`deployed Worker version has the wrong ${name} binding`);
+  }
+}
+
 function exactDurableObjectBinding(bindings, name, className) {
   const binding = bindings.get(name);
   if (binding?.type !== "durable_object_namespace" ||
@@ -607,12 +634,16 @@ export function verifyWorkerVersion(version, expected, expectedVersionID, {
     "AGENT_EMAIL_ROUTE_SIGNING_KEY_ID",
     "CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT",
     "CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
+    "CP_SIGNUP_DAILY_LIMIT_GLOBAL",
+    "CP_SIGNUP_DAILY_LIMIT_PER_IP",
     "CP_SUPPORT_EMAIL_INTAKE_ENABLED",
     "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT",
     "CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM",
     "DIRECTORY",
     "EMAIL",
+    "PUBLIC_IP_LIMITER",
     "RECOVER_LIMITER",
+    "SIGNUP_IP_LIMITER",
     "WITSELF_EDGE_RELEASE_COMMIT",
     "WITSELF_EDGE_RELEASE_DATE",
     "WITSELF_EDGE_RELEASE_VERSION",
@@ -669,6 +700,8 @@ export function verifyWorkerVersion(version, expected, expectedVersionID, {
     ["CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM", "8"],
     ["CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT", "64"],
     ["CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT", "8"],
+    ["CP_SIGNUP_DAILY_LIMIT_PER_IP", "0"],
+    ["CP_SIGNUP_DAILY_LIMIT_GLOBAL", "0"],
     ["CP_SUPPORT_EMAIL_INTAKE_ENABLED", "false"],
   ]) {
     exactPlainBinding(bindings, name, value);
@@ -691,11 +724,24 @@ export function verifyWorkerVersion(version, expected, expectedVersionID, {
   if (bindings.get("EMAIL")?.type !== "send_email") {
     throw new Error("deployed Worker version has the wrong EMAIL send binding");
   }
-  const limiter = bindings.get("RECOVER_LIMITER");
-  if (limiter?.type !== "ratelimit" || limiter.namespace_id !== "1001" ||
-      !sameJSON(limiter.simple, { limit: 1, period: 10 })) {
-    throw new Error("deployed Worker version has the wrong RECOVER_LIMITER binding");
-  }
+  exactRateLimitBinding(
+    bindings,
+    "RECOVER_LIMITER",
+    "1001",
+    { limit: 1, period: 10 },
+  );
+  exactRateLimitBinding(
+    bindings,
+    "PUBLIC_IP_LIMITER",
+    "1002",
+    { limit: 300, period: 60 },
+  );
+  exactRateLimitBinding(
+    bindings,
+    "SIGNUP_IP_LIMITER",
+    "1003",
+    { limit: 5, period: 60 },
+  );
   return Object.freeze({
     version_id: version.id,
     script_etag: script.etag,

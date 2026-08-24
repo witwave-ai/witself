@@ -104,6 +104,99 @@ func TestAccountCreateResumesAmbiguousProvisionWithSameID(t *testing.T) {
 	}
 }
 
+func TestAccountCreateChallengeResumesSameProvision(t *testing.T) {
+	home := privateAccountCreateTestHome(t)
+	var mu sync.Mutex
+	var provisionIDs []string
+	var tokens []*string
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		request *http.Request,
+	) {
+		switch request.URL.Path {
+		case "/v1/accounts":
+			var body struct {
+				ProvisionID    string  `json:"provision_id"`
+				Email          string  `json:"email"`
+				TurnstileToken *string `json:"turnstile_token"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Error(err)
+				writer.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			provisionIDs = append(provisionIDs, body.ProvisionID)
+			tokens = append(tokens, body.TurnstileToken)
+			call := len(provisionIDs)
+			mu.Unlock()
+			if body.TurnstileToken == nil {
+				writer.WriteHeader(http.StatusForbidden)
+				_, _ = writer.Write([]byte(
+					`{"schema_version":"witself.v0",` +
+						`"error":"turnstile challenge required",` +
+						`"challenge_url":"` + server.URL + `/signup/challenge"}`,
+				))
+				return
+			}
+			writeAccountCreateTestResponse(
+				writer, server.URL, body.ProvisionID, body.Email, call,
+			)
+		case "/v1/auth/bootstrap":
+			writeAccountCreateBootstrapResponse(writer)
+		default:
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	args := accountCreateTestArgs(server.URL, "invite-private")
+	stdout, stderr, code := captureFactDeleteCLI(t, func() int {
+		return accountCreate(args)
+	})
+	if code != 1 || stdout != "" ||
+		!strings.Contains(stderr, "witself: turnstile challenge required") ||
+		!strings.Contains(
+			stderr,
+			"open "+server.URL+"/signup/challenge, complete the check, re-run with --challenge <token>",
+		) {
+		t.Fatalf("challenge run = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+	journalPath, err := local.AccountProvisionJournalPath("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(journal), "challenge") {
+		t.Fatalf("pending journal contains challenge material: %s", journal)
+	}
+
+	args = append(args, "--challenge", "challenge-response")
+	stdout, stderr, code = captureFactDeleteCLI(t, func() int {
+		return accountCreate(args)
+	})
+	if code != 0 {
+		t.Fatalf("challenge retry = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+	mu.Lock()
+	gotProvisionIDs := append([]string(nil), provisionIDs...)
+	gotTokens := append([]*string(nil), tokens...)
+	mu.Unlock()
+	if len(gotProvisionIDs) != 2 || gotProvisionIDs[0] == "" ||
+		gotProvisionIDs[1] != gotProvisionIDs[0] {
+		t.Fatalf("provision ids = %#v", gotProvisionIDs)
+	}
+	if len(gotTokens) != 2 || gotTokens[0] != nil || gotTokens[1] == nil ||
+		*gotTokens[1] != "challenge-response" {
+		t.Fatalf("turnstile tokens = %#v", gotTokens)
+	}
+	assertAccountCreateSaved(t, home)
+}
+
 func TestAccountCreateResumesAfterProvisionBeforeLogin(t *testing.T) {
 	home := privateAccountCreateTestHome(t)
 	var mu sync.Mutex

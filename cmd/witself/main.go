@@ -2493,13 +2493,14 @@ func accountCreate(args []string) int {
 	invite := fs.String("invite", "", "invite code")
 	name := fs.String("name", "", `local name for the new account (default "default")`)
 	displayName := fs.String("display-name", "", "account display name (default: the email)")
+	challenge := fs.String("challenge", "", "Turnstile challenge token")
 	endpoint := fs.String("endpoint", defaultControlPlane, "control plane URL")
 	out := fs.String("out", "", "also write the operator token to this file (0600)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if *email == "" || *invite == "" {
-		fmt.Fprintln(os.Stderr, "usage: witself account create --email EMAIL --invite CODE [--name LOCALNAME] [--display-name NAME] [--endpoint URL] [--out FILE]")
+		fmt.Fprintln(os.Stderr, "usage: witself account create --email EMAIL --invite CODE [--name LOCALNAME] [--display-name NAME] [--challenge TOKEN] [--endpoint URL] [--out FILE]")
 		return 2
 	}
 	localName := *name
@@ -2588,8 +2589,18 @@ func accountCreate(args []string) int {
 	ctx := context.Background()
 	acct, err := client.CreateAccountExact(
 		ctx, *endpoint, *email, *invite, *displayName, journal.ProvisionID,
+		*challenge,
 	)
 	if err != nil {
+		var challengeErr *client.SignupChallengeError
+		if errors.As(err, &challengeErr) {
+			fmt.Fprintf(
+				os.Stderr,
+				"witself: %v\n    open %s, complete the check, re-run with --challenge <token>\n",
+				err, challengeErr.ChallengeURL,
+			)
+			return 1
+		}
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
 		return 1
 	}

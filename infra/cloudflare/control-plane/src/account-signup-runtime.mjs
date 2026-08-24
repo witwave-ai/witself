@@ -1,12 +1,25 @@
+import {
+  consumeSignupCounter,
+  parseSignupLimit,
+  SIGNUP_GLOBAL_SCOPE,
+  signupIPScope,
+} from "./signup-counters.mjs";
+import {
+  turnstileEnabled,
+  verifyTurnstileToken,
+} from "./signup-turnstile.mjs";
+
 const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const CELL_NAME = /^[a-z0-9-]{1,64}$/;
 const INVITE_CODE = /^[a-z0-9][a-z0-9-]{2,63}$/;
 const PROVISION_ID = /^[A-Za-z0-9_-]{1,128}$/;
+const SIGNUP_IP_SCOPE = /^signup-counter:ip:[0-9a-f]{64}$/;
 const STATE_KEY = "account-signup";
 const INVITE_COUNT_KEY = "invite-count";
 const INVITE_USE_PREFIX = "invite-use:";
 
 const PHASE = {
+  abuse_preflight: -1,
   initialized: 0,
   invite_reserved: 1,
   cell_selected: 2,
@@ -27,8 +40,12 @@ function json(value, status = 200) {
   });
 }
 
-function errorResponse(message, status) {
-  return json({ schema_version: "witself.v0", error: message }, status);
+function errorResponse(message, status, fields = {}) {
+  return json({
+    schema_version: "witself.v0",
+    error: message,
+    ...fields,
+  }, status);
 }
 
 function isObject(value) {
@@ -41,6 +58,7 @@ class SignupError extends Error {
     super(message, options);
     this.name = "SignupError";
     this.status = status;
+    this.responseFields = options.responseFields ?? {};
   }
 }
 
@@ -68,6 +86,16 @@ function normalizedRequest(input) {
     ? input.display_name.trim()
     : null;
   const invite = typeof input.invite === "string" ? input.invite : "";
+  const sourceIP = input.source_ip == null
+    ? ""
+    : typeof input.source_ip === "string"
+    ? input.source_ip
+    : null;
+  const turnstileToken = input.turnstile_token == null
+    ? ""
+    : typeof input.turnstile_token === "string"
+    ? input.turnstile_token
+    : null;
   if (!PROVISION_ID.test(provisionID)) {
     fail(
       "provision_id is required and must be a nonempty opaque identifier",
@@ -83,12 +111,35 @@ function normalizedRequest(input) {
   if (!INVITE_CODE.test(invite)) {
     fail("invite code required", 403);
   }
+  if (sourceIP === null) {
+    fail("source_ip must be a string", 400);
+  }
+  if (turnstileToken === null) {
+    fail("turnstile_token must be a string", 400);
+  }
   return {
     provision_id: provisionID,
     email,
     display_name: displayName,
     invite,
+    source_ip: sourceIP,
+    turnstile_token: turnstileToken,
   };
+}
+
+function signupChallengeURL(origin) {
+  if (typeof origin !== "string" || origin.length < 1) {
+    return "/signup/challenge";
+  }
+  try {
+    const parsed = new URL(origin);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      return "/signup/challenge";
+    }
+    return `${parsed.origin}/signup/challenge`;
+  } catch {
+    return "/signup/challenge";
+  }
 }
 
 async function sha256Hex(value) {
@@ -148,8 +199,9 @@ async function responseBody(response) {
 
 /**
  * One instance named provision:<provision_id> serializes a public signup.
- * Instances named invite:<code> serialize exact invite consumption. Neither
- * role ever persists the bootstrap token returned by a cell.
+ * Instances named invite:<code> serialize exact invite consumption, and
+ * signup-counter:<scope> instances serialize daily abuse counters. No role
+ * ever persists the bootstrap token returned by a cell.
  */
 export class DurableAccountSignup {
   constructor(ctx, env, dependencies = {}) {
@@ -167,6 +219,15 @@ export class DurableAccountSignup {
     this.logVerification = dependencies.logVerification ?? (() => {});
     this.now = dependencies.now ?? (() => new Date());
     this.hash = dependencies.hash ?? sha256Hex;
+    this.verifyTurnstile =
+      dependencies.verifyTurnstile ??
+      ((input) => verifyTurnstileToken({
+        ...input,
+        fetchImpl: this.fetchImpl,
+      }));
+    this.consumeCounterImpl =
+      dependencies.consumeCounter ??
+      ((input) => this.requestCounterAuthority(input));
     this.reserveInviteImpl =
       dependencies.reserveInvite ??
       ((input) => this.requestInviteAuthority(input));
@@ -205,11 +266,15 @@ export class DurableAccountSignup {
       if (url.pathname === "/invite/reserve") {
         return await this.reserveInvite(input);
       }
+      if (url.pathname === "/counter/consume") {
+        return await this.consumeCounter(input);
+      }
       return errorResponse("account signup endpoint not found", 404);
     } catch (error) {
       return errorResponse(
         String(error?.message ?? error),
         error instanceof SignupError ? error.status : 500,
+        error instanceof SignupError ? error.responseFields : {},
       );
     }
   }
@@ -231,20 +296,137 @@ export class DurableAccountSignup {
           409,
         );
       }
-    } else {
-      state = {
-        schema_version: "witself.signup.v1",
-        revision: 0,
-        phase: "initialized",
-        provision_id: request.provision_id,
-        request_fingerprint: fingerprint,
-        cell: null,
-        account: null,
-        created_at: this.now().toISOString(),
-        email_attempted: false,
-        verification_email_sent: false,
-      };
-      await this.storage.put(STATE_KEY, state);
+      if (state.phase === "abuse_preflight") {
+        if (
+          !SIGNUP_IP_SCOPE.test(state.signup_ip_scope ?? "") ||
+          (
+            Object.hasOwn(state, "turnstile_verified") &&
+            state.turnstile_verified !== true
+          )
+        ) {
+          fail("signup abuse checkpoint is invalid", 500);
+        }
+      }
+    }
+
+    const perIPLimit = parseSignupLimit(
+      this.env.CP_SIGNUP_DAILY_LIMIT_PER_IP,
+    );
+    const globalLimit = parseSignupLimit(
+      this.env.CP_SIGNUP_DAILY_LIMIT_GLOBAL,
+    );
+    let turnstileVerified = state?.turnstile_verified === true;
+    if (!state) {
+      if (turnstileEnabled(this.env)) {
+        const verdict = await this.verifyTurnstile({
+          secretKey: this.env.CP_SIGNUP_TURNSTILE_SECRET_KEY,
+          token: request.turnstile_token,
+          remoteIp: request.source_ip,
+        });
+        if (verdict?.ok !== true) {
+          if (verdict?.reason === "invalid") {
+            fail("turnstile challenge required", 403, {
+              responseFields: {
+                challenge_url: signupChallengeURL(input.origin),
+              },
+            });
+          }
+          fail("turnstile verification unavailable", 503, {
+            responseFields: { retryable: true },
+          });
+        }
+        turnstileVerified = true;
+      }
+
+      // Persist the selected hashed IP scope before any counter self-call.
+      // A retry can then replay the exact marker even if the caller's network
+      // changes after a committed response is lost. Successful Turnstile
+      // verification shares this preflight so it is never repeated either.
+      if (perIPLimit > 0 || globalLimit > 0) {
+        state = {
+          schema_version: "witself.signup.v1",
+          revision: 0,
+          phase: "abuse_preflight",
+          provision_id: request.provision_id,
+          request_fingerprint: fingerprint,
+          cell: null,
+          account: null,
+          created_at: this.now().toISOString(),
+          email_attempted: false,
+          verification_email_sent: false,
+          signup_ip_scope: await signupIPScope(
+            request.source_ip,
+            this.hash,
+          ),
+          ...(turnstileVerified ? { turnstile_verified: true } : {}),
+        };
+        await this.storage.put(STATE_KEY, state);
+      }
+    }
+
+    if (!state || state.phase === "abuse_preflight") {
+      if (perIPLimit > 0) {
+        const scope = state?.signup_ip_scope ??
+          await signupIPScope(request.source_ip, this.hash);
+        const verdict = await this.consumeCounterImpl({
+          scope,
+          provision_id: request.provision_id,
+          limit: perIPLimit,
+        });
+        if (typeof verdict?.allowed !== "boolean") {
+          fail("signup counter returned an invalid verdict", 502);
+        }
+        if (!verdict.allowed) {
+          console.log(`signup: daily counter denied scope ${scope}`);
+          if (state?.phase === "abuse_preflight") {
+            await this.storage.delete(STATE_KEY);
+          }
+          fail("signup rate limit exceeded", 429);
+        }
+      }
+
+      if (globalLimit > 0) {
+        const verdict = await this.consumeCounterImpl({
+          scope: SIGNUP_GLOBAL_SCOPE,
+          provision_id: request.provision_id,
+          limit: globalLimit,
+        });
+        if (typeof verdict?.allowed !== "boolean") {
+          fail("signup counter returned an invalid verdict", 502);
+        }
+        if (!verdict.allowed) {
+          console.log(
+            `signup: daily counter denied scope ${SIGNUP_GLOBAL_SCOPE}`,
+          );
+          if (state?.phase === "abuse_preflight") {
+            await this.storage.delete(STATE_KEY);
+          }
+          fail("signup rate limit exceeded", 429);
+        }
+      }
+
+      if (state?.phase === "abuse_preflight") {
+        const { signup_ip_scope: _signupIPScope, ...initialized } = state;
+        state = await this.save({
+          ...initialized,
+          phase: "initialized",
+        });
+      } else {
+        state = {
+          schema_version: "witself.signup.v1",
+          revision: 0,
+          phase: "initialized",
+          provision_id: request.provision_id,
+          request_fingerprint: fingerprint,
+          cell: null,
+          account: null,
+          created_at: this.now().toISOString(),
+          email_attempted: false,
+          verification_email_sent: false,
+          ...(turnstileVerified ? { turnstile_verified: true } : {}),
+        };
+        await this.storage.put(STATE_KEY, state);
+      }
     }
 
     if (!phaseAtLeast(state, "invite_reserved")) {
@@ -569,6 +751,35 @@ export class DurableAccountSignup {
     });
   }
 
+  async consumeCounter(input) {
+    const provisionID = input?.provision_id;
+    const limit = input?.limit;
+    if (
+      !this.objectName.startsWith("signup-counter:") ||
+      !PROVISION_ID.test(provisionID ?? "") ||
+      !Number.isSafeInteger(limit) ||
+      limit < 1
+    ) {
+      fail("invalid signup counter consumption", 400);
+    }
+    if (typeof this.storage.transaction !== "function") {
+      fail("signup counter transaction is unavailable", 503);
+    }
+    const verdict = await this.storage.transaction((transaction) =>
+      consumeSignupCounter(transaction, {
+        provisionId: provisionID,
+        limit,
+        now: this.now(),
+      })
+    );
+    return json({
+      ok: true,
+      scope: this.objectName,
+      provision_id: provisionID,
+      ...verdict,
+    });
+  }
+
   async requestInviteAuthority(input) {
     if (!this.env.ACCOUNT_SIGNUP) {
       fail("account signup Durable Object is unavailable", 503);
@@ -596,6 +807,44 @@ export class DurableAccountSignup {
       fail(
         body?.error ??
           `invite reservation returned HTTP ${response.status}: ${text.slice(0, 120)}`,
+        response.ok ? 502 : response.status,
+      );
+    }
+    return body;
+  }
+
+  async requestCounterAuthority(input) {
+    if (!this.env.ACCOUNT_SIGNUP) {
+      fail("account signup Durable Object is unavailable", 503);
+    }
+    const id = this.env.ACCOUNT_SIGNUP.idFromName(input.scope);
+    let response;
+    try {
+      response = await this.env.ACCOUNT_SIGNUP.get(id).fetch(
+        new Request("https://account-signup.internal/counter/consume", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            provision_id: input.provision_id,
+            limit: input.limit,
+          }),
+        }),
+      );
+    } catch (error) {
+      fail(
+        `signup counter outcome is ambiguous: ${String(error?.message ?? error)}`,
+        502,
+      );
+    }
+    const { text, body } = await responseBody(response);
+    if (
+      !response.ok ||
+      body?.ok !== true ||
+      typeof body?.allowed !== "boolean"
+    ) {
+      fail(
+        body?.error ??
+          `signup counter returned HTTP ${response.status}: ${text.slice(0, 120)}`,
         response.ok ? 502 : response.status,
       );
     }

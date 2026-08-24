@@ -55,6 +55,7 @@ import {
   CANONICAL_EMAIL_DARK_SECRET_NAMES,
   CUSTOM_DOMAIN_DARK_SECRET_NAMES,
   inspectWorkerSecrets,
+  SIGNUP_TURNSTILE_DARK_SECRET_NAMES,
 } from "../scripts/assert-custom-domain-dark.mjs";
 import {
   createPrivateDeploymentConfig,
@@ -687,6 +688,22 @@ test("release renderer injects matching immutable container and Worker identity"
     /top-level contract/,
     "release identity stamps must not hide an extra top-level setting",
   );
+  assert.throws(
+    () => expectedBuildMetadata(config.replace(
+      '"CP_SIGNUP_DAILY_LIMIT_PER_IP": "0"',
+      '"CP_SIGNUP_DAILY_LIMIT_PER_IP": "1"',
+    )),
+    /Worker vars/,
+    "release identity stamps must not hide an enabled signup quota",
+  );
+  assert.throws(
+    () => expectedBuildMetadata(config.replace(
+      '"namespace_id": "1002"',
+      '"namespace_id": "9999"',
+    )),
+    /operational binding contract/,
+    "release identity stamps must not hide a different public rate limiter",
+  );
   assert.match(
     config,
     /"WITSELF_EDGE_RELEASE_VERSION"\s*:\s*"1\.2\.3"/,
@@ -816,6 +833,31 @@ test("release renderer injects matching immutable container and Worker identity"
     /"CP_SUPPORT_EMAIL_INTAKE_ENABLED"\s*:\s*"false"/,
     "release config must keep support email intake dark by default",
   );
+  assert.match(
+    config,
+    /"CP_SIGNUP_DAILY_LIMIT_PER_IP"\s*:\s*"0"/,
+    "release config must keep the per-IP durable signup quota disabled",
+  );
+  assert.match(
+    config,
+    /"CP_SIGNUP_DAILY_LIMIT_GLOBAL"\s*:\s*"0"/,
+    "release config must keep the global durable signup quota disabled",
+  );
+  for (const [name, namespaceID, limit, period] of [
+    ["PUBLIC_IP_LIMITER", "1002", 300, 60],
+    ["SIGNUP_IP_LIMITER", "1003", 5, 60],
+  ]) {
+    assert.match(
+      config,
+      new RegExp(
+        `"name"\\s*:\\s*"${name}"\\s*,\\s*"type"\\s*:\\s*"ratelimit"` +
+        `\\s*,\\s*"namespace_id"\\s*:\\s*"${namespaceID}"` +
+        `[\\s\\S]{0,120}?"limit"\\s*:\\s*${limit}\\s*,` +
+        `\\s*"period"\\s*:\\s*${period}`,
+      ),
+      `${name} must retain its reviewed unsafe binding contract`,
+    );
+  }
   assert.doesNotMatch(
     config,
     /"CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED"\s*:/,
@@ -847,6 +889,13 @@ test("release renderer injects matching immutable container and Worker identity"
       config,
       new RegExp(`"${gate}"\\s*:`),
       `${gate} must remain absent from ordinary deployments`,
+    );
+  }
+  for (const secret of SIGNUP_TURNSTILE_DARK_SECRET_NAMES) {
+    assert.doesNotMatch(
+      config,
+      new RegExp(`"${secret}"\\s*:`),
+      `${secret} must remain a runtime-only break-glass secret`,
     );
   }
   assert.doesNotMatch(
@@ -1112,6 +1161,8 @@ function deployedVersion(overrides = {}) {
           ["CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT", "64"],
           ["CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT", "8"],
           ["CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", ""],
+          ["CP_SIGNUP_DAILY_LIMIT_PER_IP", "0"],
+          ["CP_SIGNUP_DAILY_LIMIT_GLOBAL", "0"],
           ["CP_SUPPORT_EMAIL_INTAKE_ENABLED", "false"],
         ].map(([name, text]) => ({ name, type: "plain_text", text })),
         {
@@ -1158,6 +1209,18 @@ function deployedVersion(overrides = {}) {
           type: "ratelimit",
           namespace_id: "1001",
           simple: { limit: 1, period: 10 },
+        },
+        {
+          name: "PUBLIC_IP_LIMITER",
+          type: "ratelimit",
+          namespace_id: "1002",
+          simple: { limit: 300, period: 60 },
+        },
+        {
+          name: "SIGNUP_IP_LIMITER",
+          type: "ratelimit",
+          namespace_id: "1003",
+          simple: { limit: 5, period: 60 },
         },
         {
           name: "CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED",
@@ -1594,6 +1657,22 @@ test("Worker version verification enforces complete non-secret bindings", () => 
       },
       /wrong RECOVER_LIMITER binding/,
     ],
+    [
+      "public rate limiter",
+      (bindings) => {
+        bindings.find((binding) => binding.name === "PUBLIC_IP_LIMITER")
+          .simple.limit = 301;
+      },
+      /wrong PUBLIC_IP_LIMITER binding/,
+    ],
+    [
+      "signup rate limiter",
+      (bindings) => {
+        bindings.find((binding) => binding.name === "SIGNUP_IP_LIMITER")
+          .namespace_id = "1004";
+      },
+      /wrong SIGNUP_IP_LIMITER binding/,
+    ],
   ]) {
     const candidate = deployedVersion();
     mutate(candidate.resources.bindings);
@@ -1916,7 +1995,7 @@ test("private deployment routes normal and bootstrap Wrangler output outside the
   }
 });
 
-test("dark deployment refuses every persistent agent-email activation secret", async () => {
+test("dark deployment refuses every persistent activation secret", async () => {
   assert.doesNotThrow(() => assertCustomDomainSecretsDark([
     { name: "CP_AGENT_EMAIL_DOMAIN_AUTHORITY_JOURNAL_ENABLED", type: "secret_text" },
     { name: "CP_REALM_EMAIL_ALIAS_ACTIVATION_ENABLED", type: "secret_text" },
@@ -1924,6 +2003,7 @@ test("dark deployment refuses every persistent agent-email activation secret", a
   for (const name of [
     ...CANONICAL_EMAIL_DARK_SECRET_NAMES,
     ...CUSTOM_DOMAIN_DARK_SECRET_NAMES,
+    ...SIGNUP_TURNSTILE_DARK_SECRET_NAMES,
   ]) {
     assert.throws(
       () => assertCustomDomainSecretsDark([{ name, type: "secret_text" }]),

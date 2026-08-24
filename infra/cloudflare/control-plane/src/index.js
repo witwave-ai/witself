@@ -114,6 +114,11 @@ import { renderSupportEmail } from "./support-notify.mjs";
 import { DurableAccountLifecycle } from "./account-lifecycle-runtime.mjs";
 import { DurableAccountSignup } from "./account-signup-runtime.mjs";
 import {
+  signupChallengeResponse,
+} from "./signup-challenge-page.mjs";
+import { turnstileEnabled, verifyTurnstileToken } from "./signup-turnstile.mjs";
+import { parseSignupLimit } from "./signup-counters.mjs";
+import {
   DurableTargetCellCoordinator,
 } from "./target-cell-coordinator.mjs";
 import {
@@ -211,11 +216,12 @@ export class TargetCellCoordinator extends DurableTargetCellCoordinator {
   }
 }
 
-// One Durable Object instance exists per caller-stable provision id. It
-// serializes signup retries and also hosts per-invite exact use authorities.
+// One Durable Object instance exists per caller-stable provision id. The same
+// class also hosts per-invite exact-use and per-scope signup-counter authorities.
 export class AccountSignup extends DurableAccountSignup {
   constructor(ctx, env) {
     super(ctx, env, {
+      verifyTurnstile: (input) => verifyTurnstileToken(input),
       placeAccount: (invite) => placeAccount(env, invite),
       sendVerification: ({
         origin,
@@ -351,6 +357,25 @@ const ADMIN_ACCOUNT_SUPPORT_POLICY_PATH =
   /^\/v1\/admin\/accounts\/([A-Za-z0-9_-]{1,128})\/support-policy$/;
 // Handle shape and the reserved set live in admin-handles.mjs so plain-node
 // tests can pin them (this file imports workerd-only packages).
+
+const RATE_LIMITED_MESSAGE = "too many requests — try again later";
+
+function sourceIP(request) {
+  return request.headers.get("CF-Connecting-IP") || "unknown";
+}
+
+async function rateLimitAllows(binding, request, scope) {
+  const ip = sourceIP(request);
+  const { success } = await binding.limit({ key: ip });
+  if (!success) {
+    console.log(`rate-limit denied scope=${scope}:${await sha256Hex(ip)}`);
+  }
+  return success;
+}
+
+function rateLimited() {
+  return err(RATE_LIMITED_MESSAGE, 429);
+}
 
 function timingSafeEqual(a, b) {
   const enc = new TextEncoder();
@@ -1747,6 +1772,12 @@ async function handleCells(request, env, url) {
 // Every ambiguous retry stays pinned to the same cell and replays the exact
 // cell-side provision receipt before returning fresh credentials.
 async function handleSignup(request, env) {
+  if (
+    env.SIGNUP_IP_LIMITER &&
+    !await rateLimitAllows(env.SIGNUP_IP_LIMITER, request, "signup-ip")
+  ) {
+    return rateLimited();
+  }
   let body;
   try {
     body = await request.json();
@@ -1766,6 +1797,14 @@ async function handleSignup(request, env) {
     return err("account signup Durable Object is unavailable", 503);
   }
   const id = env.ACCOUNT_SIGNUP.idFromName(`provision:${provisionID}`);
+  // Positive-value semantics, not defined-checks: the template COMMITS the
+  // "0" quota vars as dark defaults, and a dark deployment must send the DO
+  // a byte-identical body — source_ip travels only when a control is
+  // actually on.
+  const abuseContextConfigured =
+    turnstileEnabled(env) ||
+    parseSignupLimit(env.CP_SIGNUP_DAILY_LIMIT_PER_IP) > 0 ||
+    parseSignupLimit(env.CP_SIGNUP_DAILY_LIMIT_GLOBAL) > 0;
   try {
     return await env.ACCOUNT_SIGNUP.get(id).fetch(
       new Request("https://account-signup.internal/run", {
@@ -1775,6 +1814,9 @@ async function handleSignup(request, env) {
           ...body,
           provision_id: provisionID,
           origin: new URL(request.url).origin,
+          ...(abuseContextConfigured
+            ? { source_ip: sourceIP(request) }
+            : {}),
         }),
       }),
     );
@@ -4391,11 +4433,26 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
+    // Machine lifecycle callbacks carry their own bridge authority, and the
+    // support-email intake has both a bearer and dedicated limiters. Limiting
+    // either here would turn an edge throttle into a protocol failure.
+    if (
+      env.PUBLIC_IP_LIMITER &&
+      url.pathname !== SUPPORT_EMAIL_INTAKE_PATH &&
+      !isInternalBridgePath(url.pathname) &&
+      !await rateLimitAllows(env.PUBLIC_IP_LIMITER, request, "public-ip")
+    ) {
+      return rateLimited();
+    }
+
     // Provider-hosted Checkout and portal flows return to value-free public
     // pages at this already-owned edge. They never reach the container, read
     // account state, or gain mutation authority from a browser redirect.
     const billingReturn = billingReturnResponse(request, url);
     if (billingReturn !== null) return billingReturn;
+
+    const signupChallenge = signupChallengeResponse(request, url, env);
+    if (signupChallenge !== null) return signupChallenge;
 
     if (url.pathname === SUPPORT_EMAIL_INTAKE_PATH) {
       return handleSupportEmailIntake(request, env);
