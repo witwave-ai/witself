@@ -668,6 +668,7 @@ POST /v1/support/tickets
 GET  /v1/support/tickets/{ticket_id}
 POST /v1/support/tickets/{ticket_id}:comment
 POST /v1/support/tickets/{ticket_id}:close
+PATCH /v1/admin/accounts/{account_id}/tickets/{ticket_id}/retriage
 ```
 
 This sketch is allowed to evolve during implementation, but the style should
