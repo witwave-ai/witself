@@ -59,12 +59,12 @@ PII-collecting launch:
    widget, provide its site and secret keys, choose both daily limits, then land
    the exact template/verifier activation PR. See
    [Signup Abuse Hardening](signup-abuse-hardening.md).
-5. **Account deletion ≠ erasure** — `CloseAccount` only tombstones; GDPR
-   right-to-erasure is a documented accepted v0 gap. For an EU-inclusive paid
-   launch, decide posture (🔑): publicly accept the gap or fund a closed-account
-   purge/anonymize sweep. (The retention policy doc correctly claims only
-   explicit-request deletion, so it is consistent — but the erasure posture must
-   be stated in the Privacy page.)
+5. ✅ **Closed-account erasure is implemented dark** — posture B gives every
+   closed account a 30-day reopen/export grace window, then purges its stored
+   content and leaves one value-free anonymized tombstone plus the single
+   `account.purged` audit record. Launch enablement remains keyed per cell:
+   enable the default-off worker in preview, review count-only results, then
+   switch it to enforce.
 6. **No public status/incident page** — reasonable default: defer a full status
    page; stand up an incident-comms channel referenced from the support policy.
 
@@ -92,8 +92,8 @@ adversarially reviewed, gated, merged. Roughly in dependency order:
 
 1. **Legal-page skeletons** (ToS, Privacy incl. erasure posture, AUP, DPA,
    refund/cancellation) — drafts for Scott/legal to finalize. *Drafted under
-   docs/legal/; every owner decision is bracketed in-page (erasure posture,
-   governing law, entity details, subprocessor confirmation, contact
+   docs/legal/; remaining owner decisions are bracketed in-page (governing law,
+   entity details, subprocessor confirmation, contact
    addresses).*
 2. **Capacity**: Civo prod node profile (fixed 2-node, vary only NodeCount) →
    lift minimal-only gate → TUI + docs → usw2 soft topology-spread values.
@@ -125,10 +125,11 @@ Grouped by the interaction required. Claude does everything up to these.
 **Product / legal decisions**
 - Open self-service signup (relax `--invite`; web entry point vs CLI-only).
 - Approve + publish legal pages after legal review.
-- GDPR/right-to-erasure posture for GA.
 - Signup abuse enablement: mint the `self.witwave.ai` Turnstile widget, provide
   its site and secret keys, and choose the per-IP and global daily limits; the
   follow-up template/verifier PR pins those exact values before activation.
+- Account-purge enablement: switch the default-off purge worker to preview,
+  review its count-only results, then flip it to enforce.
 - Status/incident-comms channel.
 - Per-plan seat counts; whether Professional/Personal are seat-restricted.
 - Paid-to-paid transition policy (contact-guard vs in-place switch).

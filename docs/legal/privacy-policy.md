@@ -41,13 +41,11 @@ permanent fact/memory deletion is first-class in-product.
 
 ## Account closure and erasure
 
-Closing an account revokes access and tombstones the account; backups age out
-on their fixed schedule. **[DECISION REQUIRED — erasure posture: either (a)
-publicly state that closed-account content is retained per the retention
-schedule and purged as backups roll, with per-item permanent deletion
-available before close; or (b) commit to a closed-account purge/anonymize
-sweep within N days. GDPR right-to-erasure for EU users depends on this
-choice.]**
+Closing an account starts a 30-day grace window during which the account may be
+reopened and its data exported. After that window, Witself deletes the
+account's stored content and anonymizes the account record into a value-free
+tombstone. Stripe retains financial records independently. Deleted content in
+backups ages out on the backups' fixed schedule.
 
 ## Your rights
 

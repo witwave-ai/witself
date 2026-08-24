@@ -303,6 +303,7 @@ func (s *Store) exportAccount(
 			  'id', id, 'is_default', is_default, 'display_name', display_name,
 			  'email', email, 'status', status, 'created_at', created_at,
 			  'closed_at', closed_at, 'closed_reason', closed_reason,
+			  'purged_at', purged_at,
 			  'suspended_at', suspended_at, 'suspended_for', suspended_for,
 			  'suspended_reason', suspended_reason,
 			  'evacuation_id', evacuation_id,

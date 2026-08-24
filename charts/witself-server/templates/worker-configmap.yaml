@@ -43,4 +43,10 @@ data:
   WITSELF_AGENT_EMAIL_RETENTION_BATCH_SIZE: {{ .Values.worker.agentEmailRetention.batchSize | quote }}
   WITSELF_AGENT_EMAIL_RETENTION_INTERVAL: {{ .Values.worker.agentEmailRetention.interval | quote }}
   WITSELF_AGENT_EMAIL_RETENTION_BATCH_TIMEOUT: {{ .Values.worker.agentEmailRetention.batchTimeout | quote }}
+  WITSELF_ACCOUNT_PURGE_ENABLED: {{ .Values.worker.accountPurge.enabled | quote }}
+  WITSELF_ACCOUNT_PURGE_MODE: {{ .Values.worker.accountPurge.mode | quote }}
+  WITSELF_ACCOUNT_PURGE_BATCH_SIZE: {{ .Values.worker.accountPurge.batchSize | quote }}
+  WITSELF_ACCOUNT_PURGE_INTERVAL: {{ .Values.worker.accountPurge.interval | quote }}
+  WITSELF_ACCOUNT_PURGE_BATCH_TIMEOUT: {{ .Values.worker.accountPurge.batchTimeout | quote }}
+  WITSELF_ACCOUNT_PURGE_GRACE: {{ .Values.worker.accountPurge.grace | quote }}
 {{- end }}

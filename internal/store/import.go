@@ -65,6 +65,7 @@ var importColumns = map[string]map[string]bool{
 	"accounts": {
 		"id": true, "is_default": true, "display_name": true, "email": true,
 		"status": true, "created_at": true, "closed_at": true, "closed_reason": true,
+		"purged_at":    true,
 		"suspended_at": true, "suspended_for": true, "suspended_reason": true,
 		"evacuation_id": true, "evacuation_started_at": true,
 		"evacuation_role":    true,
@@ -1032,10 +1033,14 @@ type agentActivityImportKey struct {
 type importCtx struct {
 	accountID                      string
 	accountStatus                  string
+	accountPurged                  bool
+	expectedEvacuationID           string
 	schemaVersion                  int
 	exportedAt                     time.Time
 	importedAt                     time.Time
 	accounts                       int
+	archiveRowsByTable             map[string]int64
+	valueFreeAccountPurgedEvents   int64
 	operators                      map[string]bool
 	realms                         map[string]bool
 	agents                         map[string]bool
@@ -1147,6 +1152,7 @@ func newImportCtx(accountID string) *importCtx {
 	return &importCtx{
 		accountID:                      accountID,
 		schemaVersion:                  SchemaVersion(),
+		archiveRowsByTable:             map[string]int64{},
 		operators:                      map[string]bool{},
 		realms:                         map[string]bool{},
 		agents:                         map[string]bool{},
@@ -1561,6 +1567,7 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 	badf := func(format string, args ...any) error {
 		return fmt.Errorf("%w: %s", ErrArchiveContent, fmt.Sprintf(format, args...))
 	}
+	ic.archiveRowsByTable[table]++
 	// Tables that carry account_id must have it equal the manifest's.
 	// Agents scope transitively: their realm_id lands in ic.realms only
 	// for realms this archive itself just wrote, so the realm_id check
@@ -1620,6 +1627,41 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		}
 		if status, ok := obj["status"].(string); ok {
 			ic.accountStatus = status
+		}
+		purgedAt, purged, purgeTimestampErr := importedOptionalTimestamp(
+			obj,
+			"purged_at",
+		)
+		if purgeTimestampErr != nil {
+			return badf("accounts row purged_at must be an RFC3339 timestamp")
+		}
+		if purged {
+			if ic.schemaVersion < 92 {
+				return badf("accounts row purged_at predates schema 92")
+			}
+			if ic.accountStatus != "closed" {
+				return badf("accounts row purged_at requires closed status")
+			}
+			if err := ic.requireTimestampAtOrBeforeExport(
+				"accounts purged_at",
+				*purgedAt,
+			); err != nil {
+				return badf("%v", err)
+			}
+			closedAt, closed, closedTimestampErr := importedOptionalTimestamp(
+				obj,
+				"closed_at",
+			)
+			if closedTimestampErr != nil || !closed {
+				return badf("accounts row purged_at requires closed_at")
+			}
+			if purgedAt.Before(*closedAt) {
+				return badf("accounts row purged_at precedes closed_at")
+			}
+			if err := ic.validateImportedPurgedAccountTombstone(obj); err != nil {
+				return badf("accounts row purged tombstone %v", err)
+			}
+			ic.accountPurged = true
 		}
 		// Plan-snapshot shape checks: these jsonb columns are decoded into
 		// typed Go values on every read (map[string]int64 / []string), so a
@@ -1700,7 +1742,11 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 				(revision > 0 && !validHash) {
 				return badf("accounts row plan snapshot fence is invalid")
 			}
-			if revision > 0 {
+			// A schema-92 purge intentionally clears the content-bearing plan
+			// payload while retaining its historical revision/hash fence on the
+			// value-free tombstone. Preserve strict fence syntax above, but only
+			// ordinary account rows can still prove the hash against live payload.
+			if revision > 0 && !purged {
 				plan := plans.Free
 				if importedPlan, present := obj["plan"].(string); present {
 					plan = importedPlan
@@ -2496,7 +2542,12 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		// record here. Metadata is opaque JSONB — the write-time verb
 		// contract was enforced when the event was created and doesn't
 		// need to be re-enforced at import time (an old cell may have
-		// written events under a schema this cell no longer knows).
+		// written events under a schema this cell no longer knows). The one
+		// exception is the schema-92 purged-account archive invariant, which is
+		// checked across the complete stream after every table has arrived.
+		if isImportedValueFreeAccountPurgedEvent(obj) {
+			ic.valueFreeAccountPurgedEvents++
+		}
 	case "support_tickets":
 		// Record the ticket id so incoming support_ticket_messages
 		// rows can be FK-validated against this-archive tickets only.
@@ -3634,6 +3685,126 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		ic.memoryCurationMutations[mutationID] = true
 	default:
 		return badf("table %q is not importable", table)
+	}
+	return nil
+}
+
+func (ic *importCtx) validateImportedPurgedAccountTombstone(
+	obj map[string]any,
+) error {
+	isDefault, ok := obj["is_default"].(bool)
+	if !ok || isDefault {
+		return errors.New("requires is_default=false")
+	}
+	for _, field := range []string{
+		"email",
+		"suspended_for",
+		"suspended_reason",
+	} {
+		value, present := obj[field]
+		if !present || value != nil {
+			return fmt.Errorf("requires null %s", field)
+		}
+	}
+	for _, field := range []string{"display_name", "closed_reason"} {
+		value, present := obj[field]
+		if !present || value != "" {
+			return fmt.Errorf("requires empty %s", field)
+		}
+	}
+	for _, field := range []string{"plan_limits", "plan_policies"} {
+		value, ok := obj[field].(map[string]any)
+		if !ok || len(value) != 0 {
+			return fmt.Errorf("requires empty %s", field)
+		}
+	}
+	features, ok := obj["plan_features"].([]any)
+	if !ok || len(features) != 0 {
+		return errors.New("requires empty plan_features")
+	}
+	policy, err := placement.FromAny(obj["placement_policy"])
+	if err != nil || !bytes.Equal(
+		placement.MustJSON(policy),
+		placement.MustJSON(placement.DefaultPolicy()),
+	) {
+		return errors.New("requires default placement_policy")
+	}
+	if ic.expectedEvacuationID == "" {
+		for _, field := range []string{
+			"evacuation_id",
+			"evacuation_started_at",
+			"evacuation_role",
+		} {
+			value, present := obj[field]
+			if !present || value != nil {
+				return fmt.Errorf("requires null %s", field)
+			}
+		}
+		return nil
+	}
+	evacuationID, evacuationIDPresent := obj["evacuation_id"].(string)
+	if !evacuationIDPresent || evacuationID != ic.expectedEvacuationID {
+		return errors.New("requires the exact source evacuation_id")
+	}
+	role, rolePresent := obj["evacuation_role"].(string)
+	if !rolePresent || role != "source" {
+		return errors.New("requires source evacuation_role")
+	}
+	startedAt, started, startedAtErr := importedOptionalTimestamp(
+		obj,
+		"evacuation_started_at",
+	)
+	if startedAtErr != nil || !started {
+		return errors.New("requires evacuation_started_at")
+	}
+	if err := ic.requireTimestampAtOrBeforeExport(
+		"accounts evacuation_started_at",
+		*startedAt,
+	); err != nil {
+		return err
+	}
+	return nil
+}
+
+func isImportedValueFreeAccountPurgedEvent(obj map[string]any) bool {
+	actorKind, actorKindOK := obj["actor_kind"].(string)
+	verb, verbOK := obj["verb"].(string)
+	actorID, actorIDPresent := obj["actor_id"]
+	metadata, metadataOK := obj["metadata"].(map[string]any)
+	return actorKindOK && actorKind == ActorSystem &&
+		verbOK && verb == VerbAccountPurged &&
+		actorIDPresent && actorID == nil &&
+		metadataOK && len(metadata) == 0
+}
+
+func (ic *importCtx) validateImportedPurgedAccountArchive() error {
+	if !ic.accountPurged {
+		return nil
+	}
+	childTables := make([]string, 0)
+	for table, count := range ic.archiveRowsByTable {
+		if count > 0 && table != "accounts" && table != "account_events" {
+			childTables = append(childTables, table)
+		}
+	}
+	if len(childTables) != 0 {
+		sort.Strings(childTables)
+		return fmt.Errorf(
+			"contains canonical child rows in %s",
+			strings.Join(childTables, ", "),
+		)
+	}
+	eventRows := ic.archiveRowsByTable["account_events"]
+	if eventRows != 1 {
+		return fmt.Errorf(
+			"must contain exactly one account_events row, got %d",
+			eventRows,
+		)
+	}
+	if ic.valueFreeAccountPurgedEvents != 1 {
+		return errors.New(
+			"account_events row must be a value-free system account.purged event",
+		)
 	}
 	return nil
 }
@@ -6164,6 +6335,7 @@ func (s *Store) importAccount(
 	}
 
 	ic := newImportCtx(expectedAccountID)
+	ic.expectedEvacuationID = options.evacuationID
 	var importedAt time.Time
 	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&importedAt); err != nil {
 		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf("read destination database clock: %w", err)
@@ -6352,6 +6524,13 @@ func (s *Store) importAccount(
 		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf(
 			"%w: accounts row status %q disagrees with manifest %q",
 			ErrArchiveContent, ic.accountStatus, m.Status,
+		)
+	}
+	if err := ic.validateImportedPurgedAccountArchive(); err != nil {
+		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf(
+			"%w: purged account archive %v",
+			ErrArchiveContent,
+			err,
 		)
 	}
 	if m.SchemaVersion < 50 {

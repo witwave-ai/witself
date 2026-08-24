@@ -1348,14 +1348,22 @@ func (s *Store) SetSupportPolicyAdmin(ctx context.Context, in SetSupportPolicyAd
 	// admin flip on the same account. Two admins racing get a clean
 	// serial order.
 	var currentPolicy string
+	var purged bool
 	err = tx.QueryRow(ctx,
-		`SELECT support_policy FROM accounts WHERE id = $1 FOR UPDATE`,
-		in.AccountID).Scan(&currentPolicy)
+		`SELECT support_policy,
+		        (to_jsonb(account_record)->>'purged_at') IS NOT NULL
+		   FROM accounts AS account_record
+		  WHERE id = $1
+		  FOR UPDATE`,
+		in.AccountID).Scan(&currentPolicy, &purged)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SetSupportPolicyAdminResult{}, ErrAccountNotFound
 	}
 	if err != nil {
 		return SetSupportPolicyAdminResult{}, fmt.Errorf("lock account for support-policy change: %w", err)
+	}
+	if purged {
+		return SetSupportPolicyAdminResult{}, ErrAccountNotFound
 	}
 
 	if currentPolicy == in.NewPolicy {

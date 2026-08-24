@@ -48,6 +48,42 @@ corresponding worker enabled in enforce mode; elsewhere the same windows are the
 declared policy awaiting activation. This is an operational rollout control, not
 a change to the retention windows themselves.
 
+## Account closure and erasure
+
+Closing an account starts a 30-day grace window during which the account may be
+reopened and its data exported. After the grace window, the closed-account
+purge removes the account's stored content regardless of the age windows below.
+The purge covers:
+
+- open-plane content, including memories, facts, messages, and transcripts;
+- sealed-plane ciphertext, including encrypted secrets and vault material;
+- inbound and outbound agent email and attachments;
+- support tickets and their messages;
+- usage events; and
+- every account audit event except the single value-free `account.purged`
+  record written after the other audit events are deleted.
+
+The account row remains only as a value-free tombstone. It retains the stable
+account ID, closed/default markers, creation, closure, and purge timestamps,
+any historical suspension timestamp and support-policy marker, the plan label
+and plan-application snapshot metadata, default placement policy,
+last-evacuation bookkeeping, and a zero retained-email-attachment byte count.
+Email is null; display name and closure reason are blank; suspension target and
+reason are cleared; and plan limits, features, and policies are emptied. Stripe
+retains financial records independently, and backups age deleted content out
+on their fixed schedule.
+
+The cell keeps its value-free provisioning retry receipt so a delayed request
+cannot recreate the account. Purge replaces the receipt's contact-derived
+request fingerprint with a fixed non-contact marker.
+
+Like the retention workers above, the account-purge worker is activated per
+cell. The platform chart ships it disabled and in `preview` mode by default.
+Operators first enable preview and review count-only would-delete results, then
+explicitly switch that cell to `enforce`. Until that switch, the 30-day posture
+is declared policy awaiting activation on that cell; preview deletes nothing
+and does not anonymize the account.
+
 ## Windows by data class
 
 Defaults follow the plan; every finite window is an operator-overridable account

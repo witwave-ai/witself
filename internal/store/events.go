@@ -81,6 +81,7 @@ const (
 	VerbAccountRestored          = "account.restored"
 	VerbAccountReaped            = "account.reaped"
 	VerbAccountClosed            = "account.closed"
+	VerbAccountPurged            = "account.purged"
 
 	// Realm-local agent messaging. Message bodies and payloads deliberately
 	// never enter the account audit ledger; the message id and routing metadata
@@ -380,6 +381,10 @@ var verbMetadataSchema = map[string]verbSpec{
 	VerbAccountClosed: {
 		allowedKeys:   []string{"reason"},
 		allowedActors: []string{ActorOwner, ActorOperator, ActorSystem},
+	},
+	VerbAccountPurged: {
+		allowedKeys:   []string{},
+		allowedActors: []string{ActorSystem, ActorControlPlane},
 	},
 
 	VerbMessageSent: {
@@ -866,6 +871,11 @@ type EventInput struct {
 	ActorID   string // may be empty for system/control_plane
 	Verb      string
 	Metadata  map[string]any
+
+	// accountPurgeTransition is set only by the account-purge transaction
+	// after it has removed the prior ledger. It permits that transaction to
+	// create the one canonical erasure-evidence row after purged_at is set.
+	accountPurgeTransition bool
 }
 
 // checkEventShape enforces the verb → metadata contract before any SQL
@@ -945,6 +955,47 @@ func logEventTx(ctx context.Context, tx pgx.Tx, in EventInput) error {
 	if err := checkEventShape(in); err != nil {
 		return err
 	}
+	accountPurgeTransition, err := validateAccountPurgeEventTransition(in)
+	if err != nil {
+		return err
+	}
+	var purged bool
+	err = tx.QueryRow(ctx, `
+		SELECT (to_jsonb(account_record)->>'purged_at') IS NOT NULL
+		  FROM accounts AS account_record
+		 WHERE account_record.id=$1
+		 FOR KEY SHARE OF account_record`,
+		in.AccountID,
+	).Scan(&purged)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrAccountNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("lock account event target: %w", err)
+	}
+	if accountPurgeTransition {
+		if !purged {
+			return fmt.Errorf(
+				"%w: account.purged requires a purged account",
+				ErrBadEventMetadata,
+			)
+		}
+		var eventExists bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS (
+			  SELECT 1 FROM account_events WHERE account_id=$1
+			)`, in.AccountID).Scan(&eventExists); err != nil {
+			return fmt.Errorf("check account purge event fence: %w", err)
+		}
+		if eventExists {
+			return ErrAccountNotFound
+		}
+	} else if purged {
+		// A purged tombstone is not an event-mutation target. Report it as
+		// absent to the provision-token API so delayed control-plane or Worker
+		// events cannot recreate an audit trail after erasure.
+		return ErrAccountNotFound
+	}
 	meta := in.Metadata
 	if meta == nil {
 		meta = map[string]any{}
@@ -979,6 +1030,26 @@ func logEventTx(ctx context.Context, tx pgx.Tx, in EventInput) error {
 		return fmt.Errorf("insert account_events: %w", err)
 	}
 	return nil
+}
+
+func validateAccountPurgeEventTransition(in EventInput) (bool, error) {
+	usesPurgeContract := in.accountPurgeTransition ||
+		in.Verb == VerbAccountPurged
+	if !usesPurgeContract {
+		return false, nil
+	}
+	canonical := in.accountPurgeTransition &&
+		in.Verb == VerbAccountPurged &&
+		in.ActorKind == ActorSystem &&
+		in.ActorID == "" &&
+		len(in.Metadata) == 0
+	if !canonical {
+		return false, fmt.Errorf(
+			"%w: account.purged is reserved for the account purge transition",
+			ErrBadEventMetadata,
+		)
+	}
+	return true, nil
 }
 
 // MaskEmail turns "scott@witwave.ai" into "s***@w***.ai" — the shape used

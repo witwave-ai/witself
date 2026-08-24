@@ -289,6 +289,16 @@ worker:
     batchSize: 25
     interval: 5m
     batchTimeout: 2m
+  # Closed-account purge is a separate preview-first erasure sweep. Keep it
+  # disabled through the schema rollout; enforcement requires an explicit
+  # later config-only change after reviewing value-free preview counts.
+  accountPurge:
+    enabled: false
+    mode: preview
+    batchSize: 100
+    interval: 5m
+    batchTimeout: 2m
+    grace: 720h
 
 database:
   existingSecret:

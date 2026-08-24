@@ -56,6 +56,9 @@ func TestMetricsAreBoundedAndContainRetentionCounts(t *testing.T) {
 	if err := registry.Register(Job{Name: "agent_email_outbound", Run: blockingJob}); err != nil {
 		t.Fatal(err)
 	}
+	if err := registry.Register(Job{Name: "account_purge", Run: blockingJob}); err != nil {
+		t.Fatal(err)
+	}
 	if err := registry.Register(Job{Name: "tenant/id", Run: blockingJob}); err == nil {
 		t.Fatal("registered an unsafe, unbounded job label")
 	}
@@ -66,10 +69,12 @@ func TestMetricsAreBoundedAndContainRetentionCounts(t *testing.T) {
 	metrics.setJobRunning("message_rate_bucket_cleanup", true)
 	metrics.setJobRunning("agent_email_rate_bucket_cleanup", true)
 	metrics.setJobRunning("agent_email_outbound", true)
+	metrics.setJobRunning("account_purge", true)
 	metrics.RecordJobFailure("transcript_retention")
 	metrics.RecordJobFailure("message_rate_bucket_cleanup")
 	metrics.RecordJobFailure("agent_email_rate_bucket_cleanup")
 	metrics.RecordJobFailure("agent_email_outbound")
+	metrics.RecordJobFailure("account_purge")
 	metrics.RecordJobFailure("tenant_secret")
 	metrics.ObserveRetentionBatch("enforce", RetentionResultSuccess, RetentionCounts{
 		Scanned:                7,
@@ -130,6 +135,26 @@ func TestMetricsAreBoundedAndContainRetentionCounts(t *testing.T) {
 		RetentionResultSuccess,
 		AgentEmailRetentionCounts{Deleted: 99},
 	)
+	metrics.ObserveAccountPurgeBatch("enforce", RetentionResultSuccess, AccountPurgeCounts{
+		Scanned:                     7,
+		SkippedLocked:               1,
+		Eligible:                    5,
+		PurgedAccounts:              4,
+		DeletedRows:                 12,
+		DeferredVaultLifecycle:      1,
+		AttachmentInvariantFailures: 2,
+		ProvisionReceiptScrubs:      3,
+	})
+	metrics.ObserveAccountPurgeBatch(
+		"account_private",
+		RetentionResultSuccess,
+		AccountPurgeCounts{DeletedRows: 99},
+	)
+	metrics.ObserveAccountPurgeBatch(
+		"enforce",
+		RetentionResult("account_private"),
+		AccountPurgeCounts{DeletedRows: 99},
+	)
 	metrics.ObserveMessageRateBucketCleanupBatch(RetentionResultSuccess, 7)
 	metrics.ObserveMessageRateBucketCleanupBatch(RetentionResultNoWork, 0)
 	metrics.ObserveMessageRateBucketCleanupBatch(RetentionResultError, 0)
@@ -175,6 +200,8 @@ func TestMetricsAreBoundedAndContainRetentionCounts(t *testing.T) {
 		`witself_worker_job_failures_total{job="agent_email_rate_bucket_cleanup"} 1`,
 		`witself_worker_job_running{job="agent_email_outbound"} 1`,
 		`witself_worker_job_failures_total{job="agent_email_outbound"} 1`,
+		`witself_worker_job_running{job="account_purge"} 1`,
+		`witself_worker_job_failures_total{job="account_purge"} 1`,
 		`witself_worker_retention_batches_total{mode="enforce",result="success"} 1`,
 		`witself_worker_retention_items_total{mode="enforce",kind="deleted"} 4`,
 		`witself_worker_retention_items_total{mode="enforce",kind="scan_capped_batches"} 1`,
@@ -205,6 +232,13 @@ func TestMetricsAreBoundedAndContainRetentionCounts(t *testing.T) {
 		`witself_worker_agent_email_retention_items_total{mode="enforce",kind="deleted_suppressions"} 1`,
 		`witself_worker_agent_email_retention_items_total{mode="enforce",kind="scan_capped_batches"} 1`,
 		`witself_worker_agent_email_retention_last_success_timestamp_seconds{mode="enforce"} 1234`,
+		`witself_worker_account_purge_batches_total{mode="enforce",result="success"} 1`,
+		`witself_worker_account_purge_items_total{mode="enforce",kind="purged_accounts"} 4`,
+		`witself_worker_account_purge_items_total{mode="enforce",kind="deleted_rows"} 12`,
+		`witself_worker_account_purge_items_total{mode="enforce",kind="deferred_vault_lifecycle"} 1`,
+		`witself_worker_account_purge_items_total{mode="enforce",kind="attachment_invariant_failures"} 2`,
+		`witself_worker_account_purge_items_total{mode="enforce",kind="provision_receipt_scrubs"} 3`,
+		`witself_worker_account_purge_last_success_timestamp_seconds{mode="enforce"} 1234`,
 		`witself_worker_message_rate_bucket_cleanup_batches_total{result="success"} 1`,
 		`witself_worker_message_rate_bucket_cleanup_batches_total{result="no_work"} 1`,
 		`witself_worker_message_rate_bucket_cleanup_batches_total{result="error"} 1`,
@@ -245,6 +279,7 @@ func TestRegistryRunsJobsSeparatelyAndStopsGracefully(t *testing.T) {
 		"transcript_retention",
 		"message_retention",
 		"agent_email_retention",
+		"account_purge",
 	} {
 		name := name
 		if err := registry.Register(Job{
@@ -269,7 +304,7 @@ func TestRegistryRunsJobsSeparatelyAndStopsGracefully(t *testing.T) {
 		})
 	}()
 	seen := map[string]bool{}
-	for range 7 {
+	for range 8 {
 		select {
 		case name := <-started:
 			seen[name] = true
@@ -283,7 +318,8 @@ func TestRegistryRunsJobsSeparatelyAndStopsGracefully(t *testing.T) {
 		!seen["agent_email_outbound"] ||
 		!seen["transcript_retention"] ||
 		!seen["message_retention"] ||
-		!seen["agent_email_retention"] {
+		!seen["agent_email_retention"] ||
+		!seen["account_purge"] {
 		t.Fatalf("started jobs = %#v", seen)
 	}
 	cancel()

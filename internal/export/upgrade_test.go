@@ -28,6 +28,23 @@ func TestSchema89AccountEmailRateBoundsPreserveArchivedRows(t *testing.T) {
 	}
 }
 
+func TestSchema91AccountPurgeMarkerPreservesArchivedRows(t *testing.T) {
+	upgrade := UpgraderFor(91)
+	if upgrade == nil {
+		t.Fatal("schema 91 identity upgrader is not registered")
+	}
+	input := map[string]any{
+		"id": "acc_1", "status": "closed", "closed_at": "2026-01-01T00:00:00Z",
+	}
+	want := map[string]any{
+		"id": "acc_1", "status": "closed", "closed_at": "2026-01-01T00:00:00Z",
+	}
+	got, err := upgrade("accounts", input)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("schema 91 identity upgrade changed account: %#v / %v", got, err)
+	}
+}
+
 func TestSchema25FactIdempotencyUpgrade(t *testing.T) {
 	upgrade := UpgraderFor(25)
 	if upgrade == nil {

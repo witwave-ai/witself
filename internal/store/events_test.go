@@ -54,7 +54,7 @@ func TestVerbRegistryCoverage(t *testing.T) {
 
 		VerbAccountSuspendedBySystem, VerbAccountResumedBySystem,
 		VerbAccountEvacuated, VerbAccountRestored,
-		VerbAccountReaped, VerbAccountClosed,
+		VerbAccountReaped, VerbAccountClosed, VerbAccountPurged,
 
 		VerbMessageSent, VerbMessageDelivered, VerbMessageDeliveryFailed,
 		VerbMessageRead, VerbMessageAcked,
@@ -606,6 +606,37 @@ func TestCheckEventShape(t *testing.T) {
 			},
 		},
 		{
+			name: "system actor logging value-free account purge is valid",
+			input: EventInput{
+				AccountID: "acc_x", ActorKind: ActorSystem,
+				Verb: VerbAccountPurged,
+			},
+		},
+		{
+			name: "control plane actor logging value-free account purge is valid",
+			input: EventInput{
+				AccountID: "acc_x", ActorKind: ActorControlPlane,
+				Verb: VerbAccountPurged,
+			},
+		},
+		{
+			name: "account purge metadata is refused",
+			input: EventInput{
+				AccountID: "acc_x", ActorKind: ActorSystem,
+				Verb:     VerbAccountPurged,
+				Metadata: map[string]any{"reason": "private"},
+			},
+			wantErr: `unknown key "reason"`,
+		},
+		{
+			name: "principal actor logging account purge is refused",
+			input: EventInput{
+				AccountID: "acc_x", ActorKind: ActorOwner, ActorID: "op_1",
+				Verb: VerbAccountPurged,
+			},
+			wantErr: `actor_kind "owner" not allowed`,
+		},
+		{
 			name: "principal actor without actor_id refuses",
 			input: EventInput{
 				AccountID: "acc_x", ActorKind: ActorOwner,
@@ -663,6 +694,71 @@ func TestCheckEventShape(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.wantErr) {
 				t.Errorf("error = %v, want substring %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateAccountPurgeEventTransition(t *testing.T) {
+	tests := []struct {
+		name           string
+		input          EventInput
+		wantTransition bool
+		wantError      bool
+	}{
+		{
+			name: "ordinary event",
+			input: EventInput{
+				Verb: VerbAccountClosed,
+			},
+		},
+		{
+			name: "private canonical transition",
+			input: EventInput{
+				Verb:                   VerbAccountPurged,
+				ActorKind:              ActorSystem,
+				Metadata:               map[string]any{},
+				accountPurgeTransition: true,
+			},
+			wantTransition: true,
+		},
+		{
+			name: "public purge event",
+			input: EventInput{
+				Verb:      VerbAccountPurged,
+				ActorKind: ActorSystem,
+				Metadata:  map[string]any{},
+			},
+			wantError: true,
+		},
+		{
+			name: "private flag on wrong verb",
+			input: EventInput{
+				Verb:                   VerbAccountClosed,
+				ActorKind:              ActorSystem,
+				accountPurgeTransition: true,
+			},
+			wantError: true,
+		},
+		{
+			name: "private flag with control-plane actor",
+			input: EventInput{
+				Verb:                   VerbAccountPurged,
+				ActorKind:              ActorControlPlane,
+				Metadata:               map[string]any{},
+				accountPurgeTransition: true,
+			},
+			wantError: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			transition, err := validateAccountPurgeEventTransition(test.input)
+			if (err != nil) != test.wantError {
+				t.Fatalf("error = %v, want error %t", err, test.wantError)
+			}
+			if transition != test.wantTransition {
+				t.Fatalf("transition = %t, want %t", transition, test.wantTransition)
 			}
 		})
 	}

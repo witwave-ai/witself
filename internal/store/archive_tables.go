@@ -30,6 +30,7 @@ const avatarStyleRolloutArchiveSchema = 52
 // requires every CREATE TABLE migration to be either canonical or listed here.
 var cellLocalArchiveExclusions = map[string]struct{}{
 	"account_evacuation_finalizations":         {},
+	"account_purge_sweep_state":                {},
 	"account_provision_receipts":               {},
 	"agent_email_retention_account_scan_state": {},
 	"agent_email_retention_worker_lanes":       {},

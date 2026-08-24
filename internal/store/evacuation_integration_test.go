@@ -1137,6 +1137,110 @@ func TestFinalizeClosedSourceRestoresAuthoritativeTombstonePostgres(
 	}
 }
 
+func TestFinalizePurgedClosedSourcePreservesSingleErasureEventPostgres(
+	t *testing.T,
+) {
+	ctx, st := openAccountEvacuationTestStore(t)
+	source := provisionActiveEvacuationTestAccount(ctx, t, st, "finalize-purged")
+	if err := st.CloseAccount(
+		ctx, source.AccountID, source.OperatorID, "purged before evacuation",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE accounts
+		   SET closed_at=statement_timestamp() - interval '31 days'
+		 WHERE id=$1`, source.AccountID); err != nil {
+		t.Fatal(err)
+	}
+	purged, err := st.ProcessAccountPurgeBatch(
+		ctx, 100, DefaultAccountPurgeWorkerConfig().Grace,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if purged.PurgedAccounts != 1 || purged.AttachmentInvariantFailures != 0 {
+		t.Fatalf("account purge before evacuation = %#v", purged)
+	}
+
+	const evacuationID = "evac_finalize_purged_source"
+	if _, err := st.BeginAccountEvacuation(
+		ctx, source.AccountID, evacuationID, "purged tombstone move",
+	); err != nil {
+		t.Fatal(err)
+	}
+	var archive bytes.Buffer
+	if err := st.ExportAccountEvacuation(
+		ctx, source.AccountID, evacuationID,
+		"purged-source", "test", &archive,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.FinalizeAccountEvacuationSource(
+		ctx, source.AccountID, evacuationID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.ImportAccountEvacuation(
+		ctx, source.AccountID, evacuationID,
+		bytes.NewReader(archive.Bytes()),
+	); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := st.CompleteAccountEvacuation(
+		ctx, source.AccountID, evacuationID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !completed.Completed || completed.Status != "closed" {
+		t.Fatalf("purged target completion = %#v", completed)
+	}
+	assertPurgedEvacuationEventSet(t, ctx, st, source.AccountID)
+
+	retry, err := st.CompleteAccountEvacuation(
+		ctx, source.AccountID, evacuationID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !retry.Completed || retry.Status != "closed" {
+		t.Fatalf("purged target completion retry = %#v", retry)
+	}
+	assertPurgedEvacuationEventSet(t, ctx, st, source.AccountID)
+}
+
+func assertPurgedEvacuationEventSet(
+	t *testing.T,
+	ctx context.Context,
+	st *Store,
+	accountID string,
+) {
+	t.Helper()
+	var total, canonical int64
+	if err := st.pool.QueryRow(ctx, `
+		SELECT count(*),
+		       count(*) FILTER (
+		         WHERE actor_kind=$2
+		           AND actor_id IS NULL
+		           AND verb=$3
+		           AND metadata='{}'::jsonb
+		       )
+		  FROM account_events
+		 WHERE account_id=$1`,
+		accountID, ActorSystem, VerbAccountPurged,
+	).Scan(&total, &canonical); err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || canonical != 1 {
+		t.Fatalf(
+			"purged evacuation events = total %d canonical %d, want 1/1",
+			total,
+			canonical,
+		)
+	}
+}
+
 func TestFinalizeAccountEvacuationSourceConcurrentExactRetryPostgres(
 	t *testing.T,
 ) {

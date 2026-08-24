@@ -261,10 +261,12 @@ func (s *Store) CompleteAccountEvacuation(
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var status string
+	var purged bool
 	var suspendedFor, currentID, currentRole, lastID, lastOutcome *string
 	var startedAt, completedAt *time.Time
 	err = tx.QueryRow(ctx, `
-		SELECT status, suspended_for, evacuation_id, evacuation_started_at,
+		SELECT status, purged_at IS NOT NULL, suspended_for,
+		       evacuation_id, evacuation_started_at,
 		       evacuation_role,
 		       last_evacuation_id, last_evacuation_completed_at,
 		       last_evacuation_outcome
@@ -273,7 +275,7 @@ func (s *Store) CompleteAccountEvacuation(
 		 FOR UPDATE`,
 		accountID,
 	).Scan(
-		&status, &suspendedFor, &currentID, &startedAt, &currentRole,
+		&status, &purged, &suspendedFor, &currentID, &startedAt, &currentRole,
 		&lastID, &completedAt, &lastOutcome,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -353,14 +355,18 @@ func (s *Store) CompleteAccountEvacuation(
 			return AccountEvacuation{}, err
 		}
 	}
-	// The target-side arrival is part of the same exact completion
-	// transaction as clearing its write fence. A retry returns from the
-	// receipt branch above, so the admin event is emitted exactly once.
-	if err := logEventTx(ctx, tx, EventInput{
-		AccountID: accountID, ActorKind: ActorSystem,
-		Verb: VerbAccountRestored, Metadata: map[string]any{},
-	}); err != nil {
-		return AccountEvacuation{}, err
+	// The target-side arrival is part of the same exact completion transaction
+	// as clearing its write fence. A retry returns from the receipt branch
+	// above, so the admin event is emitted exactly once. A purged tombstone must
+	// retain only its single value-free account.purged erasure record; the
+	// last_evacuation_* receipt above remains its value-free move evidence.
+	if !purged {
+		if err := logEventTx(ctx, tx, EventInput{
+			AccountID: accountID, ActorKind: ActorSystem,
+			Verb: VerbAccountRestored, Metadata: map[string]any{},
+		}); err != nil {
+			return AccountEvacuation{}, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return AccountEvacuation{}, err

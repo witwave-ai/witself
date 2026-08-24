@@ -66,6 +66,14 @@ func TestJobConfigFromEnvDefaultsAndOverrides(t *testing.T) {
 			defaults.agentEmailRetention,
 		)
 	}
+	if defaults.accountPurgeEnabled ||
+		defaults.accountPurge != store.DefaultAccountPurgeWorkerConfig() {
+		t.Fatalf(
+			"account purge defaults = enabled %t config %#v",
+			defaults.accountPurgeEnabled,
+			defaults.accountPurge,
+		)
+	}
 
 	configured, err := jobConfigFromEnv(mapLookup(map[string]string{
 		avatarStyleRolloutEnabledEnv:               "false",
@@ -104,6 +112,12 @@ func TestJobConfigFromEnvDefaultsAndOverrides(t *testing.T) {
 		agentEmailRetentionBatchSizeEnv:            "40",
 		agentEmailRetentionIntervalEnv:             "12m",
 		agentEmailRetentionBatchTimeoutEnv:         "80s",
+		accountPurgeEnabledEnv:                     "true",
+		accountPurgeModeEnv:                        "ENFORCE",
+		accountPurgeBatchSizeEnv:                   "35",
+		accountPurgeIntervalEnv:                    "20m",
+		accountPurgeBatchTimeoutEnv:                "70s",
+		accountPurgeGraceEnv:                       "1080h",
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -179,6 +193,18 @@ func TestJobConfigFromEnvDefaultsAndOverrides(t *testing.T) {
 			configured.agentEmailRetention,
 		)
 	}
+	if !configured.accountPurgeEnabled ||
+		configured.accountPurge.Mode != store.AccountPurgeModeEnforce ||
+		configured.accountPurge.BatchSize != 35 ||
+		configured.accountPurge.Interval != 20*time.Minute ||
+		configured.accountPurge.BatchTimeout != 70*time.Second ||
+		configured.accountPurge.Grace != 1080*time.Hour {
+		t.Fatalf(
+			"configured account purge = enabled %t config %#v",
+			configured.accountPurgeEnabled,
+			configured.accountPurge,
+		)
+	}
 }
 
 func TestJobConfigFromEnvRejectsNamedInvalidValues(t *testing.T) {
@@ -233,6 +259,16 @@ func TestJobConfigFromEnvRejectsNamedInvalidValues(t *testing.T) {
 		{agentEmailRetentionIntervalEnv, "30s"},
 		{agentEmailRetentionBatchTimeoutEnv, "9s"},
 		{agentEmailRetentionBatchTimeoutEnv, "6m"},
+		{accountPurgeEnabledEnv, "sometimes"},
+		{accountPurgeModeEnv, "destructive"},
+		{accountPurgeBatchSizeEnv, "0"},
+		{accountPurgeBatchSizeEnv, "1001"},
+		{accountPurgeIntervalEnv, "30s"},
+		{accountPurgeIntervalEnv, "25h"},
+		{accountPurgeBatchTimeoutEnv, "999ms"},
+		{accountPurgeBatchTimeoutEnv, "6m"},
+		{accountPurgeGraceEnv, "59s"},
+		{accountPurgeGraceEnv, "8761h"},
 	}
 	for _, test := range tests {
 		t.Run(test.key+"="+test.value, func(t *testing.T) {
@@ -444,6 +480,45 @@ func TestAgentEmailRetentionMetricMappingContainsNoIdentifiers(t *testing.T) {
 	}
 }
 
+func TestAccountPurgeMetricMappingAggregatesTables(t *testing.T) {
+	empty := store.AccountPurgeBatchResult{
+		DeletedByTable: map[string]int64{"account_private": 0},
+	}
+	if got := accountPurgeMetricResult(empty); got != worker.RetentionResultNoWork {
+		t.Fatalf("empty account purge result metric = %q", got)
+	}
+	deletedOnly := store.AccountPurgeBatchResult{
+		DeletedByTable: map[string]int64{"memories": 1},
+	}
+	if got := accountPurgeMetricResult(deletedOnly); got != worker.RetentionResultSuccess {
+		t.Fatalf("deleted-only account purge result metric = %q", got)
+	}
+	result := store.AccountPurgeBatchResult{
+		Scanned:                     8,
+		SkippedLocked:               1,
+		Eligible:                    6,
+		PurgedAccounts:              4,
+		DeletedByTable:              map[string]int64{"memories": 7, "facts": 11, "ignored": -1},
+		DeferredVaultLifecycle:      2,
+		AttachmentInvariantFailures: 3,
+		ProvisionReceiptScrubs:      1,
+	}
+	if got := accountPurgeMetricResult(result); got != worker.RetentionResultSuccess {
+		t.Fatalf("non-empty account purge result metric = %q", got)
+	}
+	counts := accountPurgeMetricCounts(result)
+	if counts.Scanned != 8 ||
+		counts.SkippedLocked != 1 ||
+		counts.Eligible != 6 ||
+		counts.PurgedAccounts != 4 ||
+		counts.DeletedRows != 18 ||
+		counts.DeferredVaultLifecycle != 2 ||
+		counts.AttachmentInvariantFailures != 3 ||
+		counts.ProvisionReceiptScrubs != 1 {
+		t.Fatalf("mapped account purge counts = %#v", counts)
+	}
+}
+
 func TestLogAgentEmailRetentionResultIncludesOutboundCleanup(t *testing.T) {
 	readEnd, writeEnd, err := os.Pipe()
 	if err != nil {
@@ -477,6 +552,52 @@ func TestLogAgentEmailRetentionResultIncludesOutboundCleanup(t *testing.T) {
 	} {
 		if !strings.Contains(string(output), want) {
 			t.Errorf("agent-email retention log missing %q: %s", want, output)
+		}
+	}
+}
+
+func TestLogAccountPurgeResultContainsCountsOnly(t *testing.T) {
+	readEnd, writeEnd, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalStderr := os.Stderr
+	os.Stderr = writeEnd
+	logAccountPurgeResult(store.AccountPurgeModeEnforce, store.AccountPurgeBatchResult{
+		Scanned:                     3,
+		PurgedAccounts:              1,
+		DeletedByTable:              map[string]int64{"account_private_table": 4},
+		DeferredVaultLifecycle:      2,
+		AttachmentInvariantFailures: 3,
+		ProvisionReceiptScrubs:      1,
+	})
+	os.Stderr = originalStderr
+	if err := writeEnd.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output, err := io.ReadAll(readEnd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := readEnd.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"mode=enforce",
+		"scanned=3",
+		"purged_accounts=1",
+		"deleted_rows=4",
+		"deferred_vault_lifecycle=2",
+		"attachment_invariant_failures=3",
+		"provision_receipt_scrubs=1",
+	} {
+		if !strings.Contains(string(output), want) {
+			t.Errorf("account purge log missing %q: %s", want, output)
+		}
+	}
+	for _, forbidden := range []string{"account_private_table", "account_id", "realm_id"} {
+		if strings.Contains(string(output), forbidden) {
+			t.Errorf("account purge log exposed %q: %s", forbidden, output)
 		}
 	}
 }

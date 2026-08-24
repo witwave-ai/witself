@@ -45,11 +45,12 @@ Worker jobs must be:
 - free of tenant identifiers or payload values in metrics and logs.
 
 The registered jobs are transcript retention, message retention, agent-email
-retention, outbound agent-email dispatch, avatar-style rollout, message-rate
-bucket cleanup, and agent-email-rate bucket cleanup. Both cleanup jobs are
-enabled whenever the worker runs unless an operator explicitly disables one.
-Outbound dispatch is independently default-off. New job types must opt in
-explicitly; the worker is not an arbitrary command runner.
+retention, closed-account purge, outbound agent-email dispatch, avatar-style
+rollout, message-rate bucket cleanup, and agent-email-rate bucket cleanup. Both
+cleanup jobs are enabled whenever the worker runs unless an operator explicitly
+disables one. Closed-account purge and outbound dispatch are independently
+default-off; when enabled, closed-account purge defaults to preview. New job
+types must opt in explicitly; the worker is not an arbitrary command runner.
 
 ## Cooperative Scaling
 
@@ -284,6 +285,14 @@ suppressions. Item kinds therefore distinguish inbound counts from the closed
 `outbound_message`, `provider_event`, and `recipient_suppression` families,
 along with deleted raw/body bytes, live-work holds, lock/oversize/budget
 deferrals, duplicate-link repairs, and bounded retry-canary cleanup.
+
+Closed-account purge has separate
+`witself_worker_account_purge_*` batch, item, and last-success families. Its
+bounded mode labels are `preview` and `enforce`; item kinds distinguish scanned,
+skipped-locked, and eligible accounts, purged accounts, aggregate deleted rows,
+vault-lifecycle deferrals, attachment-ledger invariant failures, and scrubbed
+provisioning receipts. These metrics contain counts only. Preview reports
+would-delete and would-scrub counts and never reports them as completed purges.
 
 Outbound dispatch exposes
 `witself_worker_agent_email_outbound_batches_total{result}`,

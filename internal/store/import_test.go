@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/witwave-ai/witself/internal/placement"
 	"github.com/witwave-ai/witself/internal/plans"
 )
 
@@ -1112,6 +1113,358 @@ func TestValidateAndRecordPlanShapes(t *testing.T) {
 				t.Errorf("error = %v, want substring %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestValidateAndRecordPurgedAccountTombstone(t *testing.T) {
+	const accountID = "acc_target"
+	base := func() map[string]any {
+		return map[string]any{
+			"id":                     accountID,
+			"is_default":             false,
+			"email":                  nil,
+			"display_name":           "",
+			"status":                 "closed",
+			"closed_at":              "2026-01-01T00:00:00Z",
+			"closed_reason":          "",
+			"purged_at":              "2026-02-01T00:00:00Z",
+			"suspended_for":          nil,
+			"suspended_reason":       nil,
+			"evacuation_id":          nil,
+			"evacuation_started_at":  nil,
+			"evacuation_role":        nil,
+			"plan":                   "team",
+			"plan_limits":            map[string]any{},
+			"plan_policies":          map[string]any{},
+			"plan_features":          []any{},
+			"plan_snapshot_revision": float64(7),
+			"plan_snapshot_hash":     strings.Repeat("a", 64),
+			"placement_policy":       importedDefaultPlacementPolicy(),
+		}
+	}
+
+	ic := newImportCtx(accountID)
+	ic.schemaVersion = 92
+	if err := ic.validateAndRecord("accounts", base()); err != nil {
+		t.Fatalf("valid purged tombstone: %v", err)
+	}
+
+	tests := []struct {
+		name                 string
+		schema               int
+		expectedEvacuationID string
+		edit                 func(map[string]any)
+		want                 string
+	}{
+		{
+			name: "marker predates schema", schema: 91,
+			want: "purged_at predates schema 92",
+		},
+		{
+			name: "account is not closed", schema: 92,
+			edit: func(row map[string]any) { row["status"] = "active" },
+			want: "purged_at requires closed status",
+		},
+		{
+			name: "closed timestamp absent", schema: 92,
+			edit: func(row map[string]any) { row["closed_at"] = nil },
+			want: "purged_at requires closed_at",
+		},
+		{
+			name: "purge timestamp malformed", schema: 92,
+			edit: func(row map[string]any) { row["purged_at"] = "tomorrow" },
+			want: "purged_at must be an RFC3339 timestamp",
+		},
+		{
+			name: "purge precedes closure", schema: 92,
+			edit: func(row map[string]any) { row["purged_at"] = "2025-12-31T23:59:59Z" },
+			want: "purged_at precedes closed_at",
+		},
+		{
+			name: "email retained", schema: 92,
+			edit: func(row map[string]any) { row["email"] = "private@example.com" },
+			want: "requires null email",
+		},
+		{
+			name: "default marker absent", schema: 92,
+			edit: func(row map[string]any) { delete(row, "is_default") },
+			want: "requires is_default=false",
+		},
+		{
+			name: "display name retained", schema: 92,
+			edit: func(row map[string]any) { row["display_name"] = "private" },
+			want: "requires empty display_name",
+		},
+		{
+			name: "closure reason retained", schema: 92,
+			edit: func(row map[string]any) { row["closed_reason"] = "private" },
+			want: "requires empty closed_reason",
+		},
+		{
+			name: "suspension target retained", schema: 92,
+			edit: func(row map[string]any) { row["suspended_for"] = "owner_request" },
+			want: "requires null suspended_for",
+		},
+		{
+			name: "suspension reason retained", schema: 92,
+			edit: func(row map[string]any) { row["suspended_reason"] = "private" },
+			want: "requires null suspended_reason",
+		},
+		{
+			name: "current evacuation retained", schema: 92,
+			edit: func(row map[string]any) { row["evacuation_id"] = "evac_private" },
+			want: "requires null evacuation_id",
+		},
+		{
+			name: "source evacuation fence mismatches restore epoch", schema: 92,
+			expectedEvacuationID: "evac_expected",
+			edit: func(row map[string]any) {
+				row["evacuation_id"] = "evac_other"
+				row["evacuation_started_at"] = "2026-02-02T00:00:00Z"
+				row["evacuation_role"] = "source"
+			},
+			want: "requires the exact source evacuation_id",
+		},
+		{
+			name: "plan limits retained", schema: 92,
+			edit: func(row map[string]any) { row["plan_limits"] = map[string]any{"realms": float64(1)} },
+			want: "requires empty plan_limits",
+		},
+		{
+			name: "plan policies retained", schema: 92,
+			edit: func(row map[string]any) {
+				row["plan_policies"] = map[string]any{"transcript_retention_days": float64(30)}
+			},
+			want: "requires empty plan_policies",
+		},
+		{
+			name: "plan features retained", schema: 92,
+			edit: func(row map[string]any) { row["plan_features"] = []any{"memory"} },
+			want: "requires empty plan_features",
+		},
+		{
+			name: "custom placement retained", schema: 92,
+			edit: func(row map[string]any) {
+				policy := importedDefaultPlacementPolicy()
+				policy["preferred_clouds"] = []any{"gcp"}
+				row["placement_policy"] = policy
+			},
+			want: "requires default placement_policy",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			row := base()
+			if test.edit != nil {
+				test.edit(row)
+			}
+			ic := newImportCtx(accountID)
+			ic.schemaVersion = test.schema
+			ic.expectedEvacuationID = test.expectedEvacuationID
+			err := ic.validateAndRecord("accounts", row)
+			if err == nil || !errors.Is(err, ErrArchiveContent) ||
+				!strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want ErrArchiveContent containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestValidateImportedPurgedAccountArchive(t *testing.T) {
+	const accountID = "acc_target"
+	purgedAccount := func() map[string]any {
+		return map[string]any{
+			"id":                     accountID,
+			"is_default":             false,
+			"email":                  nil,
+			"display_name":           "",
+			"status":                 "closed",
+			"closed_at":              "2026-01-01T00:00:00Z",
+			"closed_reason":          "",
+			"purged_at":              "2026-02-01T00:00:00Z",
+			"suspended_for":          nil,
+			"suspended_reason":       nil,
+			"evacuation_id":          nil,
+			"evacuation_started_at":  nil,
+			"evacuation_role":        nil,
+			"plan":                   "team",
+			"plan_limits":            map[string]any{},
+			"plan_policies":          map[string]any{},
+			"plan_features":          []any{},
+			"plan_snapshot_revision": float64(7),
+			"plan_snapshot_hash":     strings.Repeat("a", 64),
+			"placement_policy":       importedDefaultPlacementPolicy(),
+		}
+	}
+	purgedEvent := func() map[string]any {
+		return map[string]any{
+			"id":         "evt_purged",
+			"account_id": accountID,
+			"actor_kind": ActorSystem,
+			"actor_id":   nil,
+			"verb":       VerbAccountPurged,
+			"metadata":   map[string]any{},
+		}
+	}
+	tests := []struct {
+		name  string
+		setup func(*testing.T, *importCtx)
+		want  string
+	}{
+		{
+			name: "canonical tombstone and one value-free event",
+			setup: func(t *testing.T, ic *importCtx) {
+				feedImportedPurgeArchiveRow(t, ic, "accounts", purgedAccount())
+				feedImportedPurgeArchiveRow(t, ic, "account_events", purgedEvent())
+			},
+		},
+		{
+			name: "missing purge event",
+			setup: func(t *testing.T, ic *importCtx) {
+				feedImportedPurgeArchiveRow(t, ic, "accounts", purgedAccount())
+			},
+			want: "exactly one account_events row, got 0",
+		},
+		{
+			name: "multiple audit events",
+			setup: func(t *testing.T, ic *importCtx) {
+				feedImportedPurgeArchiveRow(t, ic, "accounts", purgedAccount())
+				feedImportedPurgeArchiveRow(t, ic, "account_events", purgedEvent())
+				second := purgedEvent()
+				second["id"] = "evt_extra"
+				feedImportedPurgeArchiveRow(t, ic, "account_events", second)
+			},
+			want: "exactly one account_events row, got 2",
+		},
+		{
+			name: "canonical child content",
+			setup: func(t *testing.T, ic *importCtx) {
+				feedImportedPurgeArchiveRow(t, ic, "accounts", purgedAccount())
+				feedImportedPurgeArchiveRow(t, ic, "account_events", purgedEvent())
+				feedImportedPurgeArchiveRow(t, ic, "operators", map[string]any{
+					"id": "op_private", "account_id": accountID,
+				})
+			},
+			want: "canonical child rows in operators",
+		},
+		{
+			name: "wrong purge-event verb",
+			setup: func(t *testing.T, ic *importCtx) {
+				feedImportedPurgeArchiveRow(t, ic, "accounts", purgedAccount())
+				event := purgedEvent()
+				event["verb"] = VerbAccountClosed
+				feedImportedPurgeArchiveRow(t, ic, "account_events", event)
+			},
+			want: "value-free system account.purged event",
+		},
+		{
+			name: "wrong purge-event actor",
+			setup: func(t *testing.T, ic *importCtx) {
+				feedImportedPurgeArchiveRow(t, ic, "accounts", purgedAccount())
+				event := purgedEvent()
+				event["actor_kind"] = ActorControlPlane
+				feedImportedPurgeArchiveRow(t, ic, "account_events", event)
+			},
+			want: "value-free system account.purged event",
+		},
+		{
+			name: "purge-event principal id",
+			setup: func(t *testing.T, ic *importCtx) {
+				feedImportedPurgeArchiveRow(t, ic, "accounts", purgedAccount())
+				event := purgedEvent()
+				event["actor_id"] = "op_private"
+				feedImportedPurgeArchiveRow(t, ic, "account_events", event)
+			},
+			want: "value-free system account.purged event",
+		},
+		{
+			name: "purge-event metadata",
+			setup: func(t *testing.T, ic *importCtx) {
+				feedImportedPurgeArchiveRow(t, ic, "accounts", purgedAccount())
+				event := purgedEvent()
+				event["metadata"] = map[string]any{"reason": "private"}
+				feedImportedPurgeArchiveRow(t, ic, "account_events", event)
+			},
+			want: "value-free system account.purged event",
+		},
+		{
+			name: "exact source evacuation fence is portable",
+			setup: func(t *testing.T, ic *importCtx) {
+				const evacuationID = "evac_purged_tombstone"
+				ic.expectedEvacuationID = evacuationID
+				account := purgedAccount()
+				account["evacuation_id"] = evacuationID
+				account["evacuation_started_at"] = "2026-02-02T00:00:00Z"
+				account["evacuation_role"] = "source"
+				feedImportedPurgeArchiveRow(t, ic, "accounts", account)
+				feedImportedPurgeArchiveRow(t, ic, "account_events", purgedEvent())
+			},
+		},
+		{
+			name: "ordinary schema-92 account keeps content compatibility",
+			setup: func(t *testing.T, ic *importCtx) {
+				feedImportedPurgeArchiveRow(t, ic, "accounts", map[string]any{
+					"id": accountID, "status": "closed", "purged_at": nil,
+				})
+				feedImportedPurgeArchiveRow(t, ic, "operators", map[string]any{
+					"id": "op_ordinary", "account_id": accountID,
+				})
+			},
+		},
+		{
+			name: "schema-91 account keeps content compatibility",
+			setup: func(t *testing.T, ic *importCtx) {
+				ic.schemaVersion = 91
+				feedImportedPurgeArchiveRow(t, ic, "accounts", map[string]any{
+					"id": accountID, "status": "closed",
+				})
+				feedImportedPurgeArchiveRow(t, ic, "operators", map[string]any{
+					"id": "op_legacy", "account_id": accountID,
+				})
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ic := newImportCtx(accountID)
+			ic.schemaVersion = 92
+			test.setup(t, ic)
+			err := ic.validateImportedPurgedAccountArchive()
+			if test.want == "" {
+				if err != nil {
+					t.Fatalf("purged archive validation: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
+func feedImportedPurgeArchiveRow(
+	t *testing.T,
+	ic *importCtx,
+	table string,
+	row map[string]any,
+) {
+	t.Helper()
+	if err := ic.validateAndRecord(table, row); err != nil {
+		t.Fatalf("feed %s row: %v", table, err)
+	}
+}
+
+func importedDefaultPlacementPolicy() map[string]any {
+	policy := placement.DefaultPolicy()
+	return map[string]any{
+		"preferred_clouds":   policy.PreferredClouds,
+		"preferred_regions":  policy.PreferredRegions,
+		"preferred_channels": policy.PreferredChannels,
+		"allowed_clouds":     policy.AllowedClouds,
+		"allowed_regions":    policy.AllowedRegions,
+		"allowed_channels":   policy.AllowedChannels,
+		"rebalance_on":       policy.RebalanceOn,
 	}
 }
 
