@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strings"
@@ -37,6 +38,31 @@ type CreatedAccount struct {
 	} `json:"cell"`
 }
 
+// SignupChallengeError reports that account creation requires a completed
+// browser challenge. ChallengeURL is the public page where the user can
+// complete it and obtain a token for the retry.
+type SignupChallengeError struct {
+	ChallengeURL string
+	Message      string
+}
+
+func (e *SignupChallengeError) Error() string {
+	if e != nil && strings.TrimSpace(e.Message) != "" {
+		return e.Message
+	}
+	return "signup challenge required"
+}
+
+func (e *SignupChallengeError) Unwrap() error { return ErrForbidden }
+
+type accountCreateRequest struct {
+	DisplayName    string `json:"display_name"`
+	Email          string `json:"email"`
+	Invite         string `json:"invite"`
+	ProvisionID    string `json:"provision_id"`
+	TurnstileToken string `json:"turnstile_token,omitempty"`
+}
+
 // CreateAccount signs up a new account via the control plane
 // (POST {controlPlane}/v1/accounts, invite-gated). Server-side refusals —
 // invalid invite, duplicate email, no capacity — are surfaced verbatim. The
@@ -46,17 +72,21 @@ func CreateAccount(ctx context.Context, controlPlane, email, invite, displayName
 	if err != nil {
 		return nil, fmt.Errorf("create provision id: %w", err)
 	}
-	return CreateAccountExact(ctx, controlPlane, email, invite, displayName, provisionID)
+	return CreateAccountExact(
+		ctx, controlPlane, email, invite, displayName, provisionID, "",
+	)
 }
 
 // CreateAccountExact performs one retry-safe signup using the caller's durable
 // provision id. Every transport, 5xx, malformed-success, and incomplete-success
 // retry reuses the exact normalized body and provision id. Callers that need to
 // survive a process restart must persist provisionID before invoking this
-// function.
+// function. turnstileToken is optional, omitted from the JSON body when empty,
+// and deliberately excluded from AccountCreateRequestFingerprint so a caller
+// can complete a challenge and resume the same durable request.
 func CreateAccountExact(
 	ctx context.Context,
-	controlPlane, email, invite, displayName, provisionID string,
+	controlPlane, email, invite, displayName, provisionID, turnstileToken string,
 ) (*CreatedAccount, error) {
 	if !accountProvisionIDPattern.MatchString(provisionID) {
 		return nil, fmt.Errorf("invalid provision id")
@@ -67,11 +97,12 @@ func CreateAccountExact(
 	if err != nil {
 		return nil, err
 	}
-	body, err := json.Marshal(map[string]string{
-		"provision_id": provisionID,
-		"email":        email,
-		"invite":       invite,
-		"display_name": displayName,
+	body, err := json.Marshal(accountCreateRequest{
+		DisplayName:    displayName,
+		Email:          email,
+		Invite:         invite,
+		ProvisionID:    provisionID,
+		TurnstileToken: turnstileToken,
 	})
 	if err != nil {
 		return nil, err
@@ -98,7 +129,7 @@ func CreateAccountExact(
 			continue
 		}
 		if resp.StatusCode != http.StatusCreated {
-			responseErr := responseError(
+			responseErr := accountCreateResponseError(
 				resp, "account creation failed: "+resp.Status,
 			)
 			_ = resp.Body.Close()
@@ -129,6 +160,33 @@ func CreateAccountExact(
 		}
 	}
 	return nil, lastErr
+}
+
+func accountCreateResponseError(resp *http.Response, fallback string) error {
+	if resp.StatusCode != http.StatusForbidden {
+		return responseError(resp, fallback)
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	if err != nil {
+		return responseError(resp, fallback)
+	}
+	var out struct {
+		Error        json.RawMessage `json:"error"`
+		ChallengeURL string          `json:"challenge_url"`
+	}
+	_ = json.Unmarshal(body, &out)
+	challengeURL := strings.TrimSpace(out.ChallengeURL)
+	if challengeURL == "" {
+		return responseError(resp, fallback)
+	}
+	message := ""
+	_ = json.Unmarshal(out.Error, &message)
+	return &SignupChallengeError{
+		ChallengeURL: challengeURL,
+		Message:      strings.TrimSpace(message),
+	}
 }
 
 // AccountCreateRequestFingerprint binds a durable local provision id to the

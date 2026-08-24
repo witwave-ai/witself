@@ -178,6 +178,9 @@ deployment cells under a thin global control plane.
 - [launch-readiness.md](launch-readiness.md): the working plan of record for
   the general self-service production launch — decided execution order and the
   items that need Scott directly.
+- [signup-abuse-hardening.md](signup-abuse-hardening.md): dark open-signup
+  Turnstile, edge throttles, durable daily quotas, fail-closed behavior, and the
+  keyed production enablement checklist.
 - [data-retention-policy.md](data-retention-policy.md): the consolidated
   customer-facing statement of how long transcripts, messages, the audit trail,
   and raw email are kept, end-of-window actions, and the legal-hold scope.

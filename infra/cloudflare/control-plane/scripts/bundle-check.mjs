@@ -53,6 +53,11 @@ try {
     "drop_fanout_error",
     "open-email-ticket",
     "reply-email-ticket",
+    "/signup/challenge",
+    "CP_SIGNUP_TURNSTILE_ENABLED",
+    "signup-counter:",
+    "CP_SIGNUP_DAILY_LIMIT_PER_IP",
+    "siteverify",
   ]) {
     if (!bundle.includes(marker)) {
       throw new Error(`control-plane Worker bundle omitted ${marker}`);

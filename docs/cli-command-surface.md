@@ -778,6 +778,7 @@ Flags:
 | `--display-name TEXT` | Customer account display name. |
 | `--legal-name TEXT` | Legal customer name for billing records. |
 | `--email EMAIL` | Primary account/operator email. |
+| `--challenge TOKEN` | Turnstile token copied from the signup challenge page after a challenge-required response. |
 | `--billing-email EMAIL` | Billing contact email. |
 | `--support-email EMAIL` | Support contact email. |
 | `--address-field KEY=VALUE` | Set a billing/customer address field. Repeatable. |
@@ -789,6 +790,12 @@ Flags:
 | `--no-open` | Print the hosted checkout URL without opening a browser. |
 | `--profile NAME` | Save the created account under a named profile. |
 | `--dry-run` | Validate inputs and show planned account, profile, and billing setup without creating anything. |
+
+When abuse hardening is enabled, a challenge-required `403` prints the public
+`challenge_url` and the instruction: open that URL, complete the check, then
+re-run the exact command with `--challenge <token>`. The challenge token is not
+part of the durable account-create request fingerprint, so the retry resumes
+the same `provision_id`; the CLI omits it from the JSON request when empty.
 
 When `--checkout` is used with `--json`, output should use the hosted provider
 session result from [json-contracts.md](json-contracts.md) for the payment setup

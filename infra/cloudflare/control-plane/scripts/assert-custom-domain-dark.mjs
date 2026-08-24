@@ -29,6 +29,17 @@ export const EMAIL_DARK_SECRET_NAMES = Object.freeze([
   ...CUSTOM_DOMAIN_DARK_SECRET_NAMES,
 ]);
 
+export const SIGNUP_TURNSTILE_DARK_SECRET_NAMES = Object.freeze([
+  "CP_SIGNUP_TURNSTILE_ENABLED",
+  "CP_SIGNUP_TURNSTILE_SECRET_KEY",
+  "CP_SIGNUP_TURNSTILE_SITE_KEY",
+]);
+
+export const CONTROL_PLANE_DARK_SECRET_NAMES = Object.freeze([
+  ...EMAIL_DARK_SECRET_NAMES,
+  ...SIGNUP_TURNSTILE_DARK_SECRET_NAMES,
+]);
+
 export function assertCustomDomainSecretsDark(secrets) {
   if (!Array.isArray(secrets)) {
     throw new Error("Worker secret inventory must be a JSON array");
@@ -42,10 +53,12 @@ export function assertCustomDomainSecretsDark(secrets) {
     }
     names.add(secret.name);
   }
-  const present = EMAIL_DARK_SECRET_NAMES.filter((name) => names.has(name));
+  const present = CONTROL_PLANE_DARK_SECRET_NAMES.filter(
+    (name) => names.has(name),
+  );
   if (present.length !== 0) {
     throw new Error(
-      `dark agent-email deployment refused: activation secret present (${present.join(", ")})`,
+      `dark control-plane deployment refused: activation secret present (${present.join(", ")})`,
     );
   }
 }
@@ -95,7 +108,7 @@ function main() {
   const { config } = parseArgs(process.argv.slice(2));
   assertCustomDomainSecretsDark(inspectWorkerSecrets(config));
   process.stdout.write(
-    "verified canonical and custom-domain activation secrets are absent\n",
+    "verified email and signup activation secrets are absent\n",
   );
 }
 

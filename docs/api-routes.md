@@ -393,6 +393,9 @@ GET  /healthz                # alias
 # Signed realm card, served at the well-known path (not under /v1).
 GET  /.well-known/witself-card.json
 
+# Public browser challenge page, dark unless Turnstile is enabled.
+GET  /signup/challenge
+
 # API listener, default :8080.
 GET  /v1/version
 GET  /v1/whoami
@@ -1434,6 +1437,16 @@ POST /v1/accounts/{account_id}:close
 - `POST /v1/accounts` creates a managed-service customer account
   (`witself account create`); `GET`/`PATCH /v1/accounts/{account_id}` back
   `witself account show` and `witself account update`.
+  `turnstile_token` is an optional request-body string and is deliberately
+  excluded from the durable request fingerprint. When Turnstile is enabled, a
+  missing, invalid, or duplicate token returns `403` with a public
+  `challenge_url`; the client completes `GET /signup/challenge` and retries the
+  same provision with the resulting token. A verifier outage returns retryable
+  `503`. The signup burst limiter and either enabled durable daily quota return
+  `429` before invite reservation; a daily-quota denial creates no signup
+  state. An ambiguous counter retry reuses its checkpointed hashed IP scope and
+  any committed allowance marker even when the source network changes; an
+  initialized provision resumes without repeating these controls.
 - `GET /v1/accounts/{account_id}/members` lists human operators/admins
   (`witself account members`).
 - `POST /v1/accounts/{account_id}/members:invite` invites a human

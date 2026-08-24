@@ -52,9 +52,13 @@ PII-collecting launch:
    there is no web signup. "General self-service" needs a **product decision (🔑):**
    open signup (relax `--invite`) vs waitlist, and web entry point vs CLI-only.
    Claude builds the chosen path.
-4. **Abuse controls thin for open signup** — control-plane KV counters have no
-   CAS; no captcha/Turnstile; no general HTTP rate limit. Decide hardening scope
-   (🔑 product), Claude implements (DO counter authority / Turnstile / throttle).
+4. **Open-signup abuse controls landed dark** — Turnstile, per-IP and global
+   Durable Object daily counters, and general/signup edge throttles are
+   implemented. The committed daily limits are `0` and all three Turnstile
+   secrets are absent. Enablement is keyed: 🔑 mint the `self.witwave.ai`
+   widget, provide its site and secret keys, choose both daily limits, then land
+   the exact template/verifier activation PR. See
+   [Signup Abuse Hardening](signup-abuse-hardening.md).
 5. **Account deletion ≠ erasure** — `CloseAccount` only tombstones; GDPR
    right-to-erasure is a documented accepted v0 gap. For an EU-inclusive paid
    launch, decide posture (🔑): publicly accept the gap or fund a closed-account
@@ -122,7 +126,9 @@ Grouped by the interaction required. Claude does everything up to these.
 - Open self-service signup (relax `--invite`; web entry point vs CLI-only).
 - Approve + publish legal pages after legal review.
 - GDPR/right-to-erasure posture for GA.
-- Abuse-hardening scope before open signup.
+- Signup abuse enablement: mint the `self.witwave.ai` Turnstile widget, provide
+  its site and secret keys, and choose the per-IP and global daily limits; the
+  follow-up template/verifier PR pins those exact values before activation.
 - Status/incident-comms channel.
 - Per-plan seat counts; whether Professional/Personal are seat-restricted.
 - Paid-to-paid transition policy (contact-guard vs in-place switch).
