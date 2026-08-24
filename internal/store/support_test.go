@@ -57,6 +57,31 @@ func TestIsKnownTicketState(t *testing.T) {
 	}
 }
 
+// TestAssistantAuthorIdentityIsFixed pins the assistant's posting identity.
+// The published support policy promises assistant replies are labeled and
+// never presented as a human; that promise is only as strong as this pair
+// staying exactly ("assistant", "assistant") — the author kind the renderers
+// label, and the one handle reserved against human minting in the
+// control-plane worker (RESERVED_HANDLES) and CP bridge
+// (bridgeReservedHandles).
+func TestAssistantAuthorIdentityIsFixed(t *testing.T) {
+	if MessageAuthorAssistant != "assistant" {
+		t.Fatalf("MessageAuthorAssistant = %q; renderers and reserved-handle"+
+			" lists key on the literal", MessageAuthorAssistant)
+	}
+	if AssistantHandle != "assistant" {
+		t.Fatalf("AssistantHandle = %q; the worker and bridge reserve the"+
+			" literal", AssistantHandle)
+	}
+	// The handle passes the shape check every admin handle passes — the
+	// reservation is behavioral (mint/authenticate refusals), not shape-based,
+	// so this documents that the shape gate alone is NOT the defense.
+	if !adminHandleRE.MatchString(AssistantHandle) {
+		t.Fatal("AssistantHandle no longer matches adminHandleRE; the store" +
+			" would reject the runner's own replies")
+	}
+}
+
 // TestRetriageInputRefusals pins the pure-input gate on RetriageTicketAdmin:
 // refusals fire before any database work, so a zero Store is safe here.
 func TestRetriageInputRefusals(t *testing.T) {
@@ -83,27 +108,5 @@ func TestRetriageInputRefusals(t *testing.T) {
 		if _, err := s.RetriageTicketAdmin(ctx, in); !errors.Is(err, ErrTicketInputInvalid) {
 			t.Errorf("%s: err = %v, want ErrTicketInputInvalid", name, err)
 		}
-// TestAssistantAuthorIdentityIsFixed pins the assistant's posting identity.
-// The published support policy promises assistant replies are labeled and
-// never presented as a human; that promise is only as strong as this pair
-// staying exactly ("assistant", "assistant") — the author kind the renderers
-// label, and the one handle reserved against human minting in the
-// control-plane worker (RESERVED_HANDLES) and CP bridge
-// (bridgeReservedHandles).
-func TestAssistantAuthorIdentityIsFixed(t *testing.T) {
-	if MessageAuthorAssistant != "assistant" {
-		t.Fatalf("MessageAuthorAssistant = %q; renderers and reserved-handle"+
-			" lists key on the literal", MessageAuthorAssistant)
-	}
-	if AssistantHandle != "assistant" {
-		t.Fatalf("AssistantHandle = %q; the worker and bridge reserve the"+
-			" literal", AssistantHandle)
-	}
-	// The handle passes the shape check every admin handle passes — the
-	// reservation is behavioral (mint/authenticate refusals), not shape-based,
-	// so this documents that the shape gate alone is NOT the defense.
-	if !adminHandleRE.MatchString(AssistantHandle) {
-		t.Fatal("AssistantHandle no longer matches adminHandleRE; the store" +
-			" would reject the runner's own replies")
 	}
 }
