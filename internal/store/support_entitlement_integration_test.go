@@ -73,7 +73,8 @@ func TestOpenTicketPlanEntitlementPostgres(t *testing.T) {
 		return err
 	}
 
-	// Zero-value plan (no snapshot ever applied): legacy accounts keep support.
+	// No snapshot ever applied (plan_snapshot_revision 0 — the column default
+	// plan='free' notwithstanding): pre-snapshot accounts keep support.
 	if err := open(); err != nil {
 		t.Fatalf("zero-value plan open = %v, want allowed", err)
 	}

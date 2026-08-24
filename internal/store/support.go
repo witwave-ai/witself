@@ -122,11 +122,11 @@ var (
 	// forbids opening new tickets. Existing open tickets remain readable.
 	ErrSupportDisabled = errors.New("support is not enabled for this account")
 
-	// ErrSupportNotIncluded is returned when the account's applied plan does
-	// not carry the support feature. The published policy includes support on
-	// paid plans only; an account whose cell has never received a plan
-	// snapshot (legacy zero-value plan) is not refused by this rule, and the
-	// operator kill-switch above stays independent of it.
+	// ErrSupportNotIncluded is returned when the account's applied plan
+	// snapshot does not carry the support feature. The published policy
+	// includes support on paid plans only; an account whose cell has never
+	// received a snapshot (plan_snapshot_revision 0) is not refused by this
+	// rule, and the operator kill-switch stays independent of it.
 	ErrSupportNotIncluded = errors.New("support is not included in this plan")
 
 	// ErrTicketNotFound is returned when the ticket doesn't exist on
@@ -215,18 +215,19 @@ func (s *Store) OpenTicket(ctx context.Context, in OpenTicketInput) (Ticket, Tic
 	// Verify the operator belongs to the account AND the account status
 	// AND the support policy in one query. Support is refused when the
 	// account is not active OR the policy is disabled.
-	var status, supportPolicy, plan string
+	var status, supportPolicy string
+	var planRevision int64
 	var planHasSupport bool
 	var operatorRole string
 	err = tx.QueryRow(ctx,
-		`SELECT a.status, a.support_policy, a.plan,
+		`SELECT a.status, a.support_policy, a.plan_snapshot_revision,
 		        a.plan_features ? 'support', o.role
 		 FROM accounts a
 		 JOIN operators o ON o.account_id = a.id
 		 WHERE a.id = $1 AND o.id = $2 AND o.deleted_at IS NULL
 		 FOR UPDATE OF a`,
 		in.AccountID, in.OperatorID).Scan(
-		&status, &supportPolicy, &plan, &planHasSupport, &operatorRole)
+		&status, &supportPolicy, &planRevision, &planHasSupport, &operatorRole)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Ticket{}, TicketMessage{}, ErrNotAccountOwner
 	}
@@ -239,10 +240,12 @@ func (s *Store) OpenTicket(ctx context.Context, in OpenTicketInput) (Ticket, Tic
 	if supportPolicy != "enabled" {
 		return Ticket{}, TicketMessage{}, ErrSupportDisabled
 	}
-	// Support is a plan entitlement: refuse when an applied plan lacks the
-	// feature. An empty plan means the cell never received a snapshot —
-	// legacy accounts are not locked out by this rule.
-	if plan != "" && !planHasSupport {
+	// Support is a plan entitlement: refuse when an applied plan snapshot
+	// lacks the feature. Revision 0 means the cell never received a snapshot
+	// (the accounts table defaults plan='free' with empty features, so the
+	// plan column alone cannot distinguish "no snapshot yet" from "free plan
+	// applied"); pre-snapshot accounts are not locked out by this rule.
+	if planRevision > 0 && !planHasSupport {
 		return Ticket{}, TicketMessage{}, ErrSupportNotIncluded
 	}
 
