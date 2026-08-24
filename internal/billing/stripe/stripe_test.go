@@ -46,12 +46,13 @@ type stubStripe struct {
 	priceCents            map[string]int64  // lookup_key -> unit_amount
 	productName           string
 	productPlan           string
-	created               []string          // paths of POSTs received
-	lastForm              map[string]string // last POST form (flattened)
-	lastVersion           string            // Stripe-Version header seen last
-	lastIdem              string            // Idempotency-Key header seen last
-	requests              []stubRequest     // all requests, including read headers
-	checkoutSeq           int               // setup/subscription Checkout objects minted
+	products              map[string][2]string // non-standard plans: id -> {name, plan}
+	created               []string             // paths of POSTs received
+	lastForm              map[string]string    // last POST form (flattened)
+	lastVersion           string               // Stripe-Version header seen last
+	lastIdem              string               // Idempotency-Key header seen last
+	requests              []stubRequest        // all requests, including read headers
+	checkoutSeq           int                  // setup/subscription Checkout objects minted
 	checkoutOps           map[string]checkoutReplay
 	checkoutSessions      map[string]stubCheckout
 	failNext              int    // when >0, respond with this status once
@@ -301,14 +302,36 @@ func (s *stubStripe) handle(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/v1/prices" && r.Method == http.MethodGet:
 		key := r.URL.Query().Get("lookup_keys[]")
 		if id, ok := s.prices[key]; ok {
-			_, _ = fmt.Fprintf(w, `{"data":[{"id":%q,"unit_amount":%d,"currency":"usd","product":"prod_stub"}]}`, id, s.priceCents[key])
+			_, _ = fmt.Fprintf(w, `{"data":[{"id":%q,"unit_amount":%d,"currency":"usd","product":%q}]}`, id, s.priceCents[key], stubProductID(strings.TrimPrefix(key, "witself_")))
 			return
 		}
 		_, _ = fmt.Fprint(w, `{"data":[]}`)
 	case r.URL.Path == "/v1/products":
-		s.productName = s.lastForm["name"]
-		s.productPlan = s.lastForm["metadata[witself_plan]"]
-		_, _ = fmt.Fprint(w, `{"id":"prod_stub"}`)
+		plan := s.lastForm["metadata[witself_plan]"]
+		id := stubProductID(plan)
+		if id == "prod_stub" {
+			s.productName = s.lastForm["name"]
+			s.productPlan = plan
+		} else {
+			if s.products == nil {
+				s.products = map[string][2]string{}
+			}
+			s.products[id] = [2]string{s.lastForm["name"], plan}
+		}
+		_, _ = fmt.Fprintf(w, `{"id":%q}`, id)
+	case strings.HasPrefix(r.URL.Path, "/v1/products/prod_") &&
+		r.URL.Path != "/v1/products/prod_stub":
+		id := strings.TrimPrefix(r.URL.Path, "/v1/products/")
+		if r.Method == http.MethodPost {
+			if s.products == nil {
+				s.products = map[string][2]string{}
+			}
+			s.products[id] = [2]string{s.lastForm["name"], s.lastForm["metadata[witself_plan]"]}
+		}
+		entry := s.products[id]
+		_, _ = fmt.Fprintf(w,
+			`{"id":%q,"name":%q,"metadata":{"witself_plan":%q}}`,
+			id, entry[0], entry[1])
 	case r.URL.Path == "/v1/products/prod_stub" && r.Method == http.MethodGet:
 		_, _ = fmt.Fprintf(w,
 			`{"id":"prod_stub","name":%q,"metadata":{"witself_plan":%q}}`,
@@ -475,13 +498,13 @@ func TestEnsurePricesBootstrapsMissing(t *testing.T) {
 	if err := p.EnsurePrices(context.Background()); err != nil {
 		t.Fatalf("EnsurePrices: %v", err)
 	}
-	// Only standard is purchasable today: one product + one price created.
+	// Professional and Team are purchasable: a product + price per plan.
 	joined := strings.Join(s.created, ",")
 	if !strings.Contains(joined, "/v1/products") || !strings.Contains(joined, "/v1/prices") {
 		t.Fatalf("expected product+price creation, got %v", s.created)
 	}
-	if s.prices["witself_standard"] == "" {
-		t.Fatalf("price for witself_standard not created: %v", s.prices)
+	if s.prices["witself_standard"] == "" || s.prices["witself_team"] == "" {
+		t.Fatalf("prices not created for both purchasable plans: %v", s.prices)
 	}
 	// Second run: resolves from lookup (cache) — no new creations.
 	before := len(s.created)
@@ -1641,6 +1664,16 @@ func TestNextChargeNoneIsNil(t *testing.T) {
 }
 
 // --- webhook signature + event normalization ---
+
+// stubProductID keeps the historical prod_stub identity for the Professional
+// product (every older fixture references it) and gives each other plan its
+// own stable product object.
+func stubProductID(plan string) string {
+	if plan == "standard" {
+		return "prod_stub"
+	}
+	return "prod_" + plan
+}
 
 // sign produces a valid Stripe-Signature header for payload at ts.
 func sign(secret string, ts int64, payload []byte) string {

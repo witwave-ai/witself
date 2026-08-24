@@ -30,9 +30,10 @@ counting the root owner. A seat is a membership cap, not a billed quantity: the
 subscription stays one flat line item, so adding a person never reprices a cycle
 mid-term. Enforcement is transactional on the create path and is mirrored in the
 downgrade fit check, so a plan change is refused while an account holds more
-seats than the target allows. The `operator_seats` key ships **unset on every
-plan**, which means unlimited exactly as an absent key does everywhere else in
-this vocabulary; setting per-plan values is a separate, deliberate change. The
+seats than the target allows. Seats per plan: **Personal 1, Professional 3,
+Team 25**, Enterprise unset (unlimited, custom contracts). A seat is a cap on
+membership, never a billed quantity — the subscription stays one flat line
+item regardless of headcount. The
 root owner is seeded by provisioning outside the cap, so no account can be
 created without a way in.
 

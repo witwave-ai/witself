@@ -1217,10 +1217,9 @@ func TestReconcileBillingMutationsFailsClosedWhenMutationGateErrors(
 func TestReconcileBillingMutationKeepsContactApprovalAfterAvailabilityFlip(
 	t *testing.T,
 ) {
-	initialCatalog, err := plans.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
+	// The pre-flip world: Team not yet purchasable. The shipped catalog has
+	// flipped, so the pre-flip state is the constructed one.
+	initialCatalog := catalogWithPlanAvailability(t, "team", false)
 	team, ok := initialCatalog.Get("team")
 	if !ok || team.Available {
 		t.Fatalf("initial Team fixture = %+v ok=%v; want unavailable", team, ok)
@@ -1245,7 +1244,10 @@ func TestReconcileBillingMutationKeepsContactApprovalAfterAvailabilityFlip(
 		t.Fatalf("seeded execution class = %q; want contact", seeded.ExecutionClass)
 	}
 
-	flippedCatalog := catalogWithPlanAvailability(t, "team", true)
+	flippedCatalog, err := plans.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
 	flippedTeam, ok := flippedCatalog.Get("team")
 	if !ok || !flippedTeam.Purchasable() {
 		t.Fatalf("flipped Team fixture = %+v ok=%v; want self-serve", flippedTeam, ok)
