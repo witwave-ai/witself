@@ -79,15 +79,16 @@ func TestOpenTicketPlanEntitlementPostgres(t *testing.T) {
 		t.Fatalf("zero-value plan open = %v, want allowed", err)
 	}
 
+	var planRevision int64
 	applyPlan := func(plan string, features []string) {
 		t.Helper()
 		hash, err := plans.SnapshotHash(plan, map[string]int64{}, map[string]int64{}, features)
 		if err != nil {
 			t.Fatal(err)
 		}
-		rev := time.Now().UnixNano()
+		planRevision++
 		if _, err := st.SetAccountPlan(
-			ctx, accountID, rev, hash, plan,
+			ctx, accountID, planRevision, hash, plan,
 			map[string]int64{}, map[string]int64{}, features,
 		); err != nil {
 			t.Fatal(err)
