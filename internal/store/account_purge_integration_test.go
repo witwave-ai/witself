@@ -700,12 +700,26 @@ func seedAccountPurgeIntegrationAccountedEmail(
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The legacy pilot scope requires 5-10 enrolled agents; enroll four
+	// same-account fillers alongside the owner so the fixture passes the
+	// production validator instead of a relaxed test-only shape.
+	enrolledAgents := map[string]bool{agent.ID: true}
+	for i := 0; i < 4; i++ {
+		filler, err := st.CreateAgent(
+			ctx, account.AccountID, realm.ID,
+			fmt.Sprintf("account-purge-email-filler-%d", i),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		enrolledAgents[filler.ID] = true
+	}
 	scope := AgentEmailPilotScope{
 		Enabled:  true,
 		Domain:   "agent-mail.witwave.ai",
 		Audience: "account-purge-integration",
 		RealmIDs: map[string]bool{realm.ID: true},
-		AgentIDs: map[string]bool{agent.ID: true},
+		AgentIDs: enrolledAgents,
 	}
 	address, err := st.EnsureAgentEmailMailbox(
 		ctx, scope, account.AccountID, realm.ID, agent.ID, "",
