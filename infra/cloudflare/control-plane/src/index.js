@@ -105,6 +105,7 @@ import {
   rescuePlacementPolicy,
 } from "./placement.mjs";
 import { validateMintHandle } from "./admin-handles.mjs";
+import { renderSupportEmail } from "./support-notify.mjs";
 import { DurableAccountLifecycle } from "./account-lifecycle-runtime.mjs";
 import { DurableAccountSignup } from "./account-signup-runtime.mjs";
 import {
@@ -321,12 +322,15 @@ const ADMIN_REVOKE_PATH = /^\/v1\/admins\/(adm_[a-z0-9]{20}):revoke$/;
 // /v1/admin/accounts/{a}/tickets/{t}          — GET single ticket + thread.
 // /v1/admin/accounts/{a}/tickets/{t}/messages — POST admin reply.
 // /v1/admin/accounts/{a}/tickets/{t}/state    — PATCH state transition.
+// /v1/admin/accounts/{a}/tickets/{t}/retriage — PATCH category / priority.
 const ADMIN_ACCOUNT_TICKET_PATH =
   /^\/v1\/admin\/accounts\/([A-Za-z0-9_-]{1,128})\/tickets\/(tkt_[a-z0-9]+)$/;
 const ADMIN_ACCOUNT_TICKET_MSGS_PATH =
   /^\/v1\/admin\/accounts\/([A-Za-z0-9_-]{1,128})\/tickets\/(tkt_[a-z0-9]+)\/messages$/;
 const ADMIN_ACCOUNT_TICKET_STATE_PATH =
   /^\/v1\/admin\/accounts\/([A-Za-z0-9_-]{1,128})\/tickets\/(tkt_[a-z0-9]+)\/state$/;
+const ADMIN_ACCOUNT_TICKET_RETRIAGE_PATH =
+  /^\/v1\/admin\/accounts\/([A-Za-z0-9_-]{1,128})\/tickets\/(tkt_[a-z0-9]+)\/retriage$/;
 // Support-policy read/write per account. GET returns current policy,
 // PATCH flips it. Both proxy to the cell's admin: routes and inherit
 // the archived-account 409 / unknown-account 404 rules.
@@ -936,12 +940,14 @@ async function fireSupportNotification(env, params) {
   if (!contact?.email || contact.status !== "active") return;
 
   const body = kind === "reply" ? String(parsed?.message?.body ?? "") : "";
-  const emailArgs = renderSupportEmail(kind, {
+  const emailArgs = renderSupportEmail(
+    kind,
+    parsed?.message?.author_kind,
+    admin.handle,
     accountID,
     ticketID,
-    adminHandle: admin.handle,
     body,
-  });
+  );
   await env.EMAIL.send({
     to: contact.email,
     from: "no-reply@witwave.ai",
@@ -966,68 +972,6 @@ async function fetchAccountContact(env, cell, accountID) {
   } catch {
     return null;
   }
-}
-
-// renderSupportEmail returns { subject, text, html } for one of the
-// three support notifications. Kept declarative — one object per kind
-// so wording drifts are visible in a single place.
-function renderSupportEmail(kind, params) {
-  const { accountID, ticketID, adminHandle, body } = params;
-  const showCmd = `witself account support show --ticket ${ticketID}`;
-  const replyCmd = `witself account support reply --ticket ${ticketID} --stdin`;
-  const openCmd = `witself account support open`;
-
-  const preview = (() => {
-    if (!body) return "";
-    const clean = body.replace(/\s+/g, " ").trim();
-    if (clean.length <= 400) return clean;
-    return clean.slice(0, 400) + "…";
-  })();
-
-  const variants = {
-    reply: {
-      title: "Support replied to your ticket",
-      subject: `Support replied to your ticket ${ticketID}`,
-      opening: `${adminHandle} from Witself support replied to your ticket.`,
-      cta: replyCmd,
-      ctaLabel: "Reply",
-    },
-    resolved: {
-      title: "Your support ticket was marked resolved",
-      subject: `Ticket ${ticketID} marked resolved`,
-      opening: `${adminHandle} from Witself support marked your ticket as resolved.`,
-      cta: `witself account support close --ticket ${ticketID}`,
-      ctaLabel: "Close it out",
-    },
-    closed: {
-      title: "Your support ticket was closed",
-      subject: `Ticket ${ticketID} closed`,
-      opening: `${adminHandle} from Witself support closed your ticket.`,
-      cta: openCmd,
-      ctaLabel: "Open a new ticket",
-    },
-  };
-  const v = variants[kind];
-  const previewHTML = preview
-    ? `<blockquote style="margin:0 0 20px;padding:12px 16px;border-left:3px solid ${EMAIL_BORDER};color:${EMAIL_MUTED};font-size:14px;">${escapeHTML(preview)}</blockquote>`
-    : "";
-  const html = renderEmail({
-    title: v.title,
-    preheader: v.opening,
-    body: `
-      <p style="margin:0 0 16px;">${escapeHTML(v.opening)}</p>
-      <p style="margin:0 0 8px;color:${EMAIL_MUTED};font-size:13px;">Account · Ticket</p>
-      <div style="font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;font-size:14px;color:${EMAIL_TEXT};margin:0 0 20px;">${escapeHTML(accountID)} · ${escapeHTML(ticketID)}</div>
-      ${previewHTML}
-      <p style="margin:0 0 8px;">View the full thread:</p>
-      ${cliBlock(showCmd)}
-      <p style="margin:20px 0 8px;">${escapeHTML(v.ctaLabel)}:</p>
-      ${cliBlock(v.cta)}
-    `,
-  });
-  const textPreview = preview ? `\n\n> ${preview}\n` : "";
-  const text = `${v.opening}\n\nAccount: ${accountID}\nTicket:  ${ticketID}${textPreview}\n\nView the thread:\n\n  ${showCmd}\n\n${v.ctaLabel}:\n\n  ${v.cta}\n`;
-  return { subject: v.subject, text, html };
 }
 
 // handleAdminTickets serves the admin-token-authorized fan-out routes.
@@ -1212,6 +1156,7 @@ async function handleAdminTickets(request, env, ctx, url) {
     { rx: ADMIN_ACCOUNT_TICKET_PATH, method: "GET", action: "get-ticket" },
     { rx: ADMIN_ACCOUNT_TICKET_MSGS_PATH, method: "POST", action: "reply-ticket" },
     { rx: ADMIN_ACCOUNT_TICKET_STATE_PATH, method: "PATCH", action: "change-ticket-state" },
+    { rx: ADMIN_ACCOUNT_TICKET_RETRIAGE_PATH, method: "PATCH", action: "retriage-ticket" },
   ];
   for (const route of routes) {
     const m = url.pathname.match(route.rx);
@@ -1247,8 +1192,12 @@ async function handleAdminTickets(request, env, ctx, url) {
     };
     if (route.action === "reply-ticket") {
       cellBody.body = clientBody.body ?? "";
+      cellBody.as_assistant = clientBody.as_assistant === true;
     } else if (route.action === "change-ticket-state") {
       cellBody.state = clientBody.state ?? "";
+    } else if (route.action === "retriage-ticket") {
+      cellBody.category = clientBody.category ?? "";
+      cellBody.priority = clientBody.priority ?? "";
     }
     try {
       const cellRes = await fetch(
@@ -4417,6 +4366,7 @@ export default {
       ADMIN_ACCOUNT_TICKET_PATH.test(url.pathname) ||
       ADMIN_ACCOUNT_TICKET_MSGS_PATH.test(url.pathname) ||
       ADMIN_ACCOUNT_TICKET_STATE_PATH.test(url.pathname) ||
+      ADMIN_ACCOUNT_TICKET_RETRIAGE_PATH.test(url.pathname) ||
       ADMIN_ACCOUNT_SUPPORT_POLICY_PATH.test(url.pathname)
     ) {
       return handleAdminTickets(request, env, ctx, url);

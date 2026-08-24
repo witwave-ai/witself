@@ -196,6 +196,9 @@ deployment cells under a thin global control plane.
 - [support-policy.md](support-policy.md): the published managed-cloud support
   policy — entitlement, channels, the 1-business-day promise, AI-first
   staffing with its fixed human-escalation set.
+- [support-runner.md](support-runner.md): the dark, single-replica AI support
+  first-responder, deterministic escalation gate, configuration, and operator
+  enablement contract.
 - [backup-and-recovery.md](backup-and-recovery.md): operational backups
 - [backup-and-recovery.md](backup-and-recovery.md): operational backups
 - [backup-and-recovery.md](backup-and-recovery.md): operational backups
