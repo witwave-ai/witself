@@ -29,9 +29,9 @@ Status legend: ✅ done · 🔨 Claude-owned (build/deploy) · 🔑 needs Scott
 
 | Domain | State | What's left | Owner |
 |---|---|---|---|
-| **Team activation** | Team fully defined but `available:false`; realms+operators already are the org/billing unit; no seat cap exists | Add `operator_seats` limit dimension (dark), plan-fit seat check, set per-plan counts, flip Team available with honest flat pricing | 🔨 (seat counts need Scott sign-off) |
+| **Team activation** | `operator_seats` dimension + fit check (#245); paid-to-paid guard (#247); catalog honest about flat pricing (#256) | Set per-plan seat counts and flip `available:true` — one small PR | 🔑 seat counts need Scott sign-off |
 | **Billing** | Dark Stripe stack complete: lifecycle, mutations, receipts, adapter, paid-to-paid guard (#247), Stripe Tax wiring (#248), GA gate (#249), dunning contract test, refund runbook | Live cutover only | 🔑 live keys/products/webhook/portal/Tax activation/cutover |
-| **Support** | Durable ticket engine built + tested | Published policy doc, AI author-kind + reserved handle, scoped AI credential, dark AI support-runner, support@ intake, entitlement sync, SLO alert | 🔨 code/docs · 🔑 support@ DNS+routing, AI credential, runner host |
+| **Support** | Policy published (#251); assistant author-kind + reserved handle (#252); re-triage (#253); dark AI runner + notification labeling (#255); entitlement sync (#256); scoped support_ai credential (#257) | SLO metric + breach alert, support@ intake bridge | 🔨 code · 🔑 support@ DNS+routing, runner host + API key, mint scoped credential, enable flag |
 | **Monitoring** | kube-prometheus-stack templated, default-off | PagerDuty receiver (dark), dead-man watchdog, 3-phase rollout overlay, runbook | 🔨 config · 🔑 PagerDuty acct+key, dead-man monitor, cluster secrets, apply |
 | **Edge DMARC** | Inbound worker runs full SMTP txn; cell records spf/dkim/dmarc | Authenticity parser module, hard-DMARC-fail SMTP rejection (dark flag), value-free authenticity metadata (dark), migration | 🔨 code · 🔑 authserv-id from live header, worker deploy |
 | **Capacity** | Civo has no prod profile (hardcoded 1 node) | Fixed 2-node Civo profile (vary only NodeCount → in-place update), lift minimal-only gate, TUI, topology spread | 🔨 code · 🔑 billable 2-node apply (gates monitoring) |
@@ -106,6 +106,8 @@ adversarially reviewed, gated, merged. Roughly in dependency order:
 7. **Support**: policy doc → assistant author-kind + reserved handle → admin
    re-triage store method → AI support-runner core (dark) → scoped support_ai
    credential/role (dark) → SLO metric + breach alert → support@ intake bridge.
+   *Steps 1–5 merged: #251, #252, #253, #255, #257 (+ entitlement sync in
+   #256). Remaining: the SLO alert and the support@ intake bridge.*
 8. **plans.json cluster** (after the paid-to-paid guard): per-plan
    `operator_seats` values → support entitlement sync → Team billing readiness →
    **flip Team available** with honest flat pricing.
