@@ -187,6 +187,10 @@ deployment cells under a thin global control plane.
   admin overrides, cell snapshots, and whole-conversation enforcement.
 - [message-retention.md](message-retention.md): messaging entitlement,
   independent account overrides, and whole-thread retention enforcement.
+- legal/ — DRAFT legal-page skeletons for owner/counsel review:
+  [Terms](legal/terms-of-service.md) · [Privacy](legal/privacy-policy.md) ·
+  [AUP](legal/acceptable-use.md) · [DPA](legal/data-processing-addendum.md) ·
+  [Refunds](legal/refund-cancellation.md). Not in force until ratified.
 - [refund-runbook.md](refund-runbook.md): the 14-day refund policy and the
   operator procedure for executing one (Stripe Dashboard only — no CLI verb).
 - [support-policy.md](support-policy.md): the published managed-cloud support
@@ -195,6 +199,7 @@ deployment cells under a thin global control plane.
 - [support-runner.md](support-runner.md): the dark, single-replica AI support
   first-responder, deterministic escalation gate, configuration, and operator
   enablement contract.
+- [backup-and-recovery.md](backup-and-recovery.md): operational backups
 - [backup-and-recovery.md](backup-and-recovery.md): operational backups
 - [backup-and-recovery.md](backup-and-recovery.md): operational backups
   (including vector data), first-class plaintext identity export, and
