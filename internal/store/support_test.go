@@ -1,6 +1,10 @@
 package store
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
+)
 
 // TestAdminHandleShape pins the admin-handle shape guard the store uses
 // to reject malformed handles from a compromised or buggy control-plane
@@ -75,5 +79,34 @@ func TestAssistantAuthorIdentityIsFixed(t *testing.T) {
 	if !adminHandleRE.MatchString(AssistantHandle) {
 		t.Fatal("AssistantHandle no longer matches adminHandleRE; the store" +
 			" would reject the runner's own replies")
+	}
+}
+
+// TestRetriageInputRefusals pins the pure-input gate on RetriageTicketAdmin:
+// refusals fire before any database work, so a zero Store is safe here.
+func TestRetriageInputRefusals(t *testing.T) {
+	s := &Store{}
+	ctx := context.Background()
+	cases := map[string]RetriageAdminInput{
+		"malformed handle": {
+			AccountID: "acct_x", AdminHandle: "UPPER",
+			TicketID: "tkt_x", Priority: TicketPriorityUrgent,
+		},
+		"nothing to change": {
+			AccountID: "acct_x", AdminHandle: "scott", TicketID: "tkt_x",
+		},
+		"unknown category": {
+			AccountID: "acct_x", AdminHandle: "scott",
+			TicketID: "tkt_x", Category: "gossip",
+		},
+		"unknown priority": {
+			AccountID: "acct_x", AdminHandle: "scott",
+			TicketID: "tkt_x", Priority: "asap",
+		},
+	}
+	for name, in := range cases {
+		if _, err := s.RetriageTicketAdmin(ctx, in); !errors.Is(err, ErrTicketInputInvalid) {
+			t.Errorf("%s: err = %v, want ErrTicketInputInvalid", name, err)
+		}
 	}
 }

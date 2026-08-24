@@ -1152,6 +1152,126 @@ func readTicketRow(ctx context.Context, tx pgx.Tx, accountID, ticketID string) (
 	return t, err
 }
 
+// RetriageAdminInput carries the payload for RetriageTicketAdmin. Empty
+// Category or Priority means "leave unchanged"; at least one must be set.
+type RetriageAdminInput struct {
+	AccountID   string
+	AdminHandle string
+	TicketID    string
+	Category    string
+	Priority    string
+}
+
+// RetriageTicketAdmin changes a ticket's category and/or priority on behalf
+// of a fleet-side actor (a human admin or the AI assistant's triage pass).
+// Re-triage is metadata, not conversation: it posts no message, does not
+// swing the ticket state or first_response_at, and works in any non-closed
+// state. A no-op re-triage (same values) commits without an audit event.
+func (s *Store) RetriageTicketAdmin(
+	ctx context.Context,
+	in RetriageAdminInput,
+) (Ticket, error) {
+	if !adminHandleRE.MatchString(in.AdminHandle) {
+		return Ticket{}, fmt.Errorf("%w: invalid admin_handle", ErrTicketInputInvalid)
+	}
+	if in.Category == "" && in.Priority == "" {
+		return Ticket{}, fmt.Errorf(
+			"%w: nothing to re-triage — set category and/or priority",
+			ErrTicketInputInvalid)
+	}
+	if in.Category != "" && !slices.Contains(legalCategories, in.Category) {
+		return Ticket{}, fmt.Errorf(
+			"%w: unknown category %q", ErrTicketInputInvalid, in.Category)
+	}
+	if in.Priority != "" && !slices.Contains(legalPriorities, in.Priority) {
+		return Ticket{}, fmt.Errorf(
+			"%w: unknown priority %q", ErrTicketInputInvalid, in.Priority)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Ticket{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var current Ticket
+	err = tx.QueryRow(ctx,
+		`SELECT id, state, category, priority FROM support_tickets
+		 WHERE account_id = $1 AND id = $2
+		 FOR UPDATE`,
+		in.AccountID, in.TicketID,
+	).Scan(&current.ID, &current.State, &current.Category, &current.Priority)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Ticket{}, ErrTicketNotFound
+	}
+	if err != nil {
+		return Ticket{}, fmt.Errorf("lock ticket for re-triage: %w", err)
+	}
+	if current.State == TicketStateClosed {
+		return Ticket{}, fmt.Errorf("%w: ticket is closed", ErrTicketStateInvalid)
+	}
+
+	newCategory := current.Category
+	if in.Category != "" {
+		newCategory = in.Category
+	}
+	newPriority := current.Priority
+	if in.Priority != "" {
+		newPriority = in.Priority
+	}
+	changed := newCategory != current.Category || newPriority != current.Priority
+	if changed {
+		if _, err := tx.Exec(ctx,
+			`UPDATE support_tickets
+		 SET category = $3, priority = $4
+		 WHERE account_id = $1 AND id = $2`,
+			in.AccountID, in.TicketID, newCategory, newPriority); err != nil {
+			return Ticket{}, fmt.Errorf("re-triage ticket: %w", err)
+		}
+		// Audit trail records both sides of the transition so the tenant's
+		// ledger explains a priority jump without needing fleet-side state.
+		// A no-op re-triage (same values) skips both write and event —
+		// idempotent, and re-triage never bumps last_activity_at either way
+		// (it is not customer-visible activity).
+		if err := logEventTx(ctx, tx, EventInput{
+			AccountID: in.AccountID,
+			ActorKind: ActorControlPlane,
+			Verb:      VerbSupportTicketRetriaged,
+			Metadata: map[string]any{
+				"ticket_id":     in.TicketID,
+				"admin_handle":  in.AdminHandle,
+				"category_from": current.Category,
+				"category_to":   newCategory,
+				"priority_from": current.Priority,
+				"priority_to":   newPriority,
+			},
+		}); err != nil {
+			return Ticket{}, err
+		}
+	}
+
+	var t Ticket
+	if err := tx.QueryRow(ctx,
+		`SELECT id, account_id, opened_at, opened_by_kind, opened_by_id,
+		        subject, category, state, priority,
+		        first_response_at, resolved_at, closed_at,
+		        last_activity_at, COALESCE(last_message_id, ''),
+		        correlation, metadata
+		 FROM support_tickets
+		 WHERE account_id = $1 AND id = $2`,
+		in.AccountID, in.TicketID).Scan(&t.ID, &t.AccountID, &t.OpenedAt,
+		&t.OpenedByKind, &t.OpenedByID, &t.Subject, &t.Category,
+		&t.State, &t.Priority, &t.FirstResponseAt, &t.ResolvedAt,
+		&t.ClosedAt, &t.LastActivityAt, &t.LastMessageID,
+		&t.Correlation, &t.Metadata); err != nil {
+		return Ticket{}, fmt.Errorf("read re-triaged ticket: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Ticket{}, err
+	}
+	return t, nil
+}
+
 // Support-policy values. Currently binary; when tiered support arrives
 // (basic/priority/enterprise-24h) we add named tiers and keep enabled
 // as an alias for the lowest tier that permits opening tickets.

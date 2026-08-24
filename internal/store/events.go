@@ -203,6 +203,8 @@ const (
 	VerbSupportTicketReplied      = "support.ticket.replied"
 	VerbSupportTicketStateChanged = "support.ticket.state_changed"
 	VerbSupportTicketClosed       = "support.ticket.closed"
+	// Fleet-side re-triage changed a ticket's category and/or priority.
+	VerbSupportTicketRetriaged = "support.ticket.retriaged"
 
 	// Fleet-admin flipped the account's support_policy on or off.
 	// policy_from / policy_to carry the transition; admin_handle
@@ -726,6 +728,20 @@ var verbMetadataSchema = map[string]verbSpec{
 		requiredKeys:  []string{"ticket_id"},
 		allowedKeys:   []string{"ticket_id", "subject", "admin_handle"},
 		allowedActors: []string{ActorOwner, ActorOperator, ActorControlPlane},
+	},
+	VerbSupportTicketRetriaged: {
+		requiredKeys: []string{
+			"ticket_id", "admin_handle",
+			"category_from", "category_to", "priority_from", "priority_to",
+		},
+		allowedKeys: []string{
+			"ticket_id", "admin_handle",
+			"category_from", "category_to", "priority_from", "priority_to",
+		},
+		// Re-triage is fleet-side only: tenants set category/priority at
+		// open time; only the control plane (a human admin or the AI
+		// assistant's triage pass) rewrites them afterwards.
+		allowedActors: []string{ActorControlPlane},
 	},
 	VerbAccountSupportPolicyChanged: {
 		requiredKeys:  []string{"policy_from", "policy_to", "admin_handle"},
