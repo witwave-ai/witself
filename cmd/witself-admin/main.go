@@ -91,7 +91,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself-admin whoami        Verify an admin token and print its identity")
 	usageLine(w, "  witself-admin admin ...     Manage fleet-admin credentials (requires fleet token)")
 	usageLine(w, "  witself-admin ticket ...    Read/reply/transition support tickets across the fleet")
-	usageLine(w, "                                (list|watch|show|reply|state|resolve|close|states)")
+	usageLine(w, "                                (list|watch|show|reply|retriage|state|resolve|close|states)")
 	usageLine(w, "  witself-admin account ...   Read/set per-account fleet settings")
 	usageLine(w, "                                (support-policy|transcript-retention|messaging|message-retention|email-receive|email-send|email-retention|plan-override|limit-override)")
 	usageLine(w, "  witself-admin email-alias ...  Review aliases and manage protected names")
@@ -485,7 +485,7 @@ func adminDelete(args []string) int {
 // ticketCmd handles `witself-admin ticket ...`.
 func ticketCmd(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: witself-admin ticket list|watch|show|reply|state|resolve|close|states ...")
+		fmt.Fprintln(os.Stderr, "usage: witself-admin ticket list|watch|show|reply|retriage|state|resolve|close|states ...")
 		return 2
 	}
 	switch args[0] {
@@ -497,6 +497,8 @@ func ticketCmd(args []string) int {
 		return ticketShow(args[1:])
 	case "reply":
 		return ticketReply(args[1:])
+	case "retriage":
+		return ticketRetriage(args[1:])
 	case "state":
 		return ticketState(args[1:], "")
 	case "resolve":
@@ -854,6 +856,46 @@ func ticketReply(args []string) int {
 		return printJSON(map[string]any{"message": msg})
 	}
 	fmt.Printf("posted reply on %s (message %s)\n", *ticket, msg.ID)
+	return 0
+}
+
+func ticketRetriage(args []string) int {
+	fs := flag.NewFlagSet("ticket retriage", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	endpoint := fs.String("endpoint", "", "control-plane URL")
+	token := fs.String("token", "", "admin token")
+	tokenFile := fs.String("token-file", "", "file containing the admin token")
+	account := fs.String("account", "", "account id (required)")
+	ticket := fs.String("ticket", "", "ticket id (required)")
+	category := fs.String("category", "", "new category (technical|billing|security|other)")
+	priority := fs.String("priority", "", "new priority (low|normal|high|urgent)")
+	jsonOut := jsonFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if strings.TrimSpace(*account) == "" || strings.TrimSpace(*ticket) == "" ||
+		(strings.TrimSpace(*category) == "" && strings.TrimSpace(*priority) == "") {
+		fmt.Fprintln(os.Stderr, "usage: witself-admin ticket retriage --account ACCOUNT_ID --ticket TKT_ID [--category CATEGORY] [--priority PRIORITY]")
+		return 2
+	}
+	tok, err := resolveAdminToken(*token, *tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
+		return 2
+	}
+	result, err := client.RetriageAdminTicket(
+		context.Background(), cpEndpoint(*endpoint), tok, *account, *ticket,
+		strings.TrimSpace(*category), strings.TrimSpace(*priority),
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-admin: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		return printJSON(map[string]any{"ticket": result})
+	}
+	fmt.Printf("retriaged %s (category %s, priority %s)\n",
+		result.ID, result.Category, result.Priority)
 	return 0
 }
 

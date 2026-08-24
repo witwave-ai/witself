@@ -1414,11 +1414,25 @@ func serve() int {
 				AdminHandle: in.AdminHandle,
 				TicketID:    in.TicketID,
 				Body:        in.Body,
+				AsAssistant: in.AsAssistant,
 			})
 			if err := mapSupportError(err); err != nil {
 				return server.SupportTicketMessage{}, err
 			}
 			return toServerMessage(m), nil
+		}
+		cfg.RetriageAdminTicket = func(ctx context.Context, in server.RetriageAdminTicketRequest) (server.SupportTicket, error) {
+			t, err := st.RetriageTicketAdmin(ctx, store.RetriageAdminInput{
+				AccountID:   in.AccountID,
+				AdminHandle: in.AdminHandle,
+				TicketID:    in.TicketID,
+				Category:    in.Category,
+				Priority:    in.Priority,
+			})
+			if err := mapSupportError(err); err != nil {
+				return server.SupportTicket{}, err
+			}
+			return toServerTicket(t), nil
 		}
 		cfg.ChangeAdminTicketState = func(ctx context.Context, in server.ChangeAdminTicketStateRequest) (server.SupportTicket, error) {
 			t, err := st.ChangeAdminTicketState(ctx, store.ChangeAdminStateInput{

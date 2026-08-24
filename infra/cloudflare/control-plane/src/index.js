@@ -104,7 +104,13 @@ import {
   cellMatchesPolicy,
   rescuePlacementPolicy,
 } from "./placement.mjs";
-import { validateMintHandle } from "./admin-handles.mjs";
+import {
+  ADMIN_SCOPES,
+  ADMIN_SCOPE_FULL,
+  adminScopeAllows,
+  validateMintHandle,
+} from "./admin-handles.mjs";
+import { renderSupportEmail } from "./support-notify.mjs";
 import { DurableAccountLifecycle } from "./account-lifecycle-runtime.mjs";
 import { DurableAccountSignup } from "./account-signup-runtime.mjs";
 import {
@@ -321,12 +327,15 @@ const ADMIN_REVOKE_PATH = /^\/v1\/admins\/(adm_[a-z0-9]{20}):revoke$/;
 // /v1/admin/accounts/{a}/tickets/{t}          — GET single ticket + thread.
 // /v1/admin/accounts/{a}/tickets/{t}/messages — POST admin reply.
 // /v1/admin/accounts/{a}/tickets/{t}/state    — PATCH state transition.
+// /v1/admin/accounts/{a}/tickets/{t}/retriage — PATCH category / priority.
 const ADMIN_ACCOUNT_TICKET_PATH =
   /^\/v1\/admin\/accounts\/([A-Za-z0-9_-]{1,128})\/tickets\/(tkt_[a-z0-9]+)$/;
 const ADMIN_ACCOUNT_TICKET_MSGS_PATH =
   /^\/v1\/admin\/accounts\/([A-Za-z0-9_-]{1,128})\/tickets\/(tkt_[a-z0-9]+)\/messages$/;
 const ADMIN_ACCOUNT_TICKET_STATE_PATH =
   /^\/v1\/admin\/accounts\/([A-Za-z0-9_-]{1,128})\/tickets\/(tkt_[a-z0-9]+)\/state$/;
+const ADMIN_ACCOUNT_TICKET_RETRIAGE_PATH =
+  /^\/v1\/admin\/accounts\/([A-Za-z0-9_-]{1,128})\/tickets\/(tkt_[a-z0-9]+)\/retriage$/;
 // Support-policy read/write per account. GET returns current policy,
 // PATCH flips it. Both proxy to the cell's admin: routes and inherit
 // the archived-account 409 / unknown-account 404 rules.
@@ -395,7 +404,11 @@ async function adminAuthorized(request, env) {
   if (!idx?.admin_id) return null;
   const rec = await env.DIRECTORY.get(`admin:${idx.admin_id}`, { type: "json" });
   if (!rec || rec.disabled_at) return null;
-  return { admin_id: rec.admin_id, handle: rec.handle };
+  return {
+    admin_id: rec.admin_id,
+    handle: rec.handle,
+    scope: rec.scope ?? ADMIN_SCOPE_FULL,
+  };
 }
 
 // Revocation-tombstone TTL. Covers the KV worst-case (60s cross-region
@@ -661,6 +674,12 @@ async function handleAdmins(request, env, url) {
     if (note !== undefined && note.length > 200) {
       return err("note too long (max 200 characters)", 400);
     }
+    const scope = body.scope == null
+      ? ADMIN_SCOPE_FULL
+      : String(body.scope).trim();
+    if (!ADMIN_SCOPES.has(scope)) {
+      return err(`unknown scope "${scope}"`, 400);
+    }
     const existingIdx = await env.DIRECTORY.get(`adminh:${handle}`, {
       type: "json",
     });
@@ -679,6 +698,7 @@ async function handleAdmins(request, env, url) {
       admin_id: adminID,
       handle,
       token_hash: tokenHash,
+      ...(scope !== ADMIN_SCOPE_FULL ? { scope } : {}),
       ...(note ? { note } : {}),
       created_at: now,
       created_by: "fleet_token",
@@ -936,12 +956,14 @@ async function fireSupportNotification(env, params) {
   if (!contact?.email || contact.status !== "active") return;
 
   const body = kind === "reply" ? String(parsed?.message?.body ?? "") : "";
-  const emailArgs = renderSupportEmail(kind, {
+  const emailArgs = renderSupportEmail(
+    kind,
+    parsed?.message?.author_kind,
+    admin.handle,
     accountID,
     ticketID,
-    adminHandle: admin.handle,
     body,
-  });
+  );
   await env.EMAIL.send({
     to: contact.email,
     from: "no-reply@witwave.ai",
@@ -968,68 +990,6 @@ async function fetchAccountContact(env, cell, accountID) {
   }
 }
 
-// renderSupportEmail returns { subject, text, html } for one of the
-// three support notifications. Kept declarative — one object per kind
-// so wording drifts are visible in a single place.
-function renderSupportEmail(kind, params) {
-  const { accountID, ticketID, adminHandle, body } = params;
-  const showCmd = `witself account support show --ticket ${ticketID}`;
-  const replyCmd = `witself account support reply --ticket ${ticketID} --stdin`;
-  const openCmd = `witself account support open`;
-
-  const preview = (() => {
-    if (!body) return "";
-    const clean = body.replace(/\s+/g, " ").trim();
-    if (clean.length <= 400) return clean;
-    return clean.slice(0, 400) + "…";
-  })();
-
-  const variants = {
-    reply: {
-      title: "Support replied to your ticket",
-      subject: `Support replied to your ticket ${ticketID}`,
-      opening: `${adminHandle} from Witself support replied to your ticket.`,
-      cta: replyCmd,
-      ctaLabel: "Reply",
-    },
-    resolved: {
-      title: "Your support ticket was marked resolved",
-      subject: `Ticket ${ticketID} marked resolved`,
-      opening: `${adminHandle} from Witself support marked your ticket as resolved.`,
-      cta: `witself account support close --ticket ${ticketID}`,
-      ctaLabel: "Close it out",
-    },
-    closed: {
-      title: "Your support ticket was closed",
-      subject: `Ticket ${ticketID} closed`,
-      opening: `${adminHandle} from Witself support closed your ticket.`,
-      cta: openCmd,
-      ctaLabel: "Open a new ticket",
-    },
-  };
-  const v = variants[kind];
-  const previewHTML = preview
-    ? `<blockquote style="margin:0 0 20px;padding:12px 16px;border-left:3px solid ${EMAIL_BORDER};color:${EMAIL_MUTED};font-size:14px;">${escapeHTML(preview)}</blockquote>`
-    : "";
-  const html = renderEmail({
-    title: v.title,
-    preheader: v.opening,
-    body: `
-      <p style="margin:0 0 16px;">${escapeHTML(v.opening)}</p>
-      <p style="margin:0 0 8px;color:${EMAIL_MUTED};font-size:13px;">Account · Ticket</p>
-      <div style="font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;font-size:14px;color:${EMAIL_TEXT};margin:0 0 20px;">${escapeHTML(accountID)} · ${escapeHTML(ticketID)}</div>
-      ${previewHTML}
-      <p style="margin:0 0 8px;">View the full thread:</p>
-      ${cliBlock(showCmd)}
-      <p style="margin:20px 0 8px;">${escapeHTML(v.ctaLabel)}:</p>
-      ${cliBlock(v.cta)}
-    `,
-  });
-  const textPreview = preview ? `\n\n> ${preview}\n` : "";
-  const text = `${v.opening}\n\nAccount: ${accountID}\nTicket:  ${ticketID}${textPreview}\n\nView the thread:\n\n  ${showCmd}\n\n${v.ctaLabel}:\n\n  ${v.cta}\n`;
-  return { subject: v.subject, text, html };
-}
-
 // handleAdminTickets serves the admin-token-authorized fan-out routes.
 // Every route re-runs adminAuthorized so a revoked admin's live tokens
 // stop working on the next request.
@@ -1040,10 +1000,14 @@ async function handleAdminTickets(request, env, ctx, url) {
   // whoami: cheap round-trip that lets the CLI verify a token without
   // any KV list scan.
   if (url.pathname === "/v1/admin/whoami" && request.method === "GET") {
+    if (!adminScopeAllows(admin.scope, "whoami")) {
+      return err("credential scope does not allow this action", 403);
+    }
     return json({
       schema_version: "witself.v0",
       admin_id: admin.admin_id,
       handle: admin.handle,
+      scope: admin.scope,
     });
   }
 
@@ -1054,6 +1018,9 @@ async function handleAdminTickets(request, env, ctx, url) {
   // and the same DO-counter upgrade path applies when it stops being
   // fine). provision tokens never leave the CP (publicCell).
   if (url.pathname === "/v1/admin/cells" && request.method === "GET") {
+    if (!adminScopeAllows(admin.scope, "cells")) {
+      return err("credential scope does not allow this action", 403);
+    }
     const cells = await listCells(env);
     const counts = new Map();
     let cursor;
@@ -1158,6 +1125,9 @@ async function handleAdminTickets(request, env, ctx, url) {
   //   since=<ISO>          last_activity_at >= since
   //   limit=<n>            per-cell limit (defaults to 100, capped at 500)
   if (url.pathname === "/v1/admin/tickets" && request.method === "GET") {
+    if (!adminScopeAllows(admin.scope, "list-tickets")) {
+      return err("credential scope does not allow this action", 403);
+    }
     const states = url.searchParams.get("state");
     const since = url.searchParams.get("since");
     const limit = Number.parseInt(
@@ -1212,12 +1182,16 @@ async function handleAdminTickets(request, env, ctx, url) {
     { rx: ADMIN_ACCOUNT_TICKET_PATH, method: "GET", action: "get-ticket" },
     { rx: ADMIN_ACCOUNT_TICKET_MSGS_PATH, method: "POST", action: "reply-ticket" },
     { rx: ADMIN_ACCOUNT_TICKET_STATE_PATH, method: "PATCH", action: "change-ticket-state" },
+    { rx: ADMIN_ACCOUNT_TICKET_RETRIAGE_PATH, method: "PATCH", action: "retriage-ticket" },
   ];
   for (const route of routes) {
     const m = url.pathname.match(route.rx);
     if (!m) continue;
     if (request.method !== route.method) {
       return err("method not allowed", 405);
+    }
+    if (!adminScopeAllows(admin.scope, route.action)) {
+      return err("credential scope does not allow this action", 403);
     }
     const accountID = m[1];
     const ticketID = m[2];
@@ -1247,8 +1221,12 @@ async function handleAdminTickets(request, env, ctx, url) {
     };
     if (route.action === "reply-ticket") {
       cellBody.body = clientBody.body ?? "";
+      cellBody.as_assistant = clientBody.as_assistant === true;
     } else if (route.action === "change-ticket-state") {
       cellBody.state = clientBody.state ?? "";
+    } else if (route.action === "retriage-ticket") {
+      cellBody.category = clientBody.category ?? "";
+      cellBody.priority = clientBody.priority ?? "";
     }
     try {
       const cellRes = await fetch(
@@ -1309,6 +1287,9 @@ async function handleAdminTickets(request, env, ctx, url) {
   // and unknown-account handling from the ticket routes above.
   const spMatch = url.pathname.match(ADMIN_ACCOUNT_SUPPORT_POLICY_PATH);
   if (spMatch) {
+    if (!adminScopeAllows(admin.scope, "support-policy")) {
+      return err("credential scope does not allow this action", 403);
+    }
     const method = request.method;
     if (method !== "GET" && method !== "PATCH") {
       return err("method not allowed", 405);
@@ -4319,6 +4300,9 @@ export default {
     if (matchAdminPolicyPath(url.pathname)) {
       const admin = await adminAuthorized(request, env);
       if (!admin) return err("unauthorized", 401);
+      if (!adminScopeAllows(admin.scope, "fleet-admin-surface")) {
+        return err("credential scope does not allow this action", 403);
+      }
       return forwardAdminPolicyRequest(
         request,
         env,
@@ -4365,6 +4349,9 @@ export default {
     if (isAgentEmailDomainRecoveryAdminPath(url.pathname)) {
       const admin = await adminAuthorized(request, env);
       if (!admin) return err("unauthorized", 401);
+      if (!adminScopeAllows(admin.scope, "fleet-admin-surface")) {
+        return err("credential scope does not allow this action", 403);
+      }
       return handleAgentEmailDomainRecoveryAdminRequest(
         request,
         env,
@@ -4375,11 +4362,17 @@ export default {
     if (isAgentEmailDomainAdminPath(url.pathname)) {
       const admin = await adminAuthorized(request, env);
       if (!admin) return err("unauthorized", 401);
+      if (!adminScopeAllows(admin.scope, "fleet-admin-surface")) {
+        return err("credential scope does not allow this action", 403);
+      }
       return handleAgentEmailDomainAdminRequest(request, env, url, admin);
     }
     if (isRealmEmailAliasRecoveryAdminPath(url.pathname)) {
       const admin = await adminAuthorized(request, env);
       if (!admin) return err("unauthorized", 401);
+      if (!adminScopeAllows(admin.scope, "fleet-admin-surface")) {
+        return err("credential scope does not allow this action", 403);
+      }
       return handleRealmEmailAliasRecoveryAdminRequest(
         request,
         env,
@@ -4390,6 +4383,9 @@ export default {
     if (isRealmEmailAliasAdminPath(url.pathname)) {
       const admin = await adminAuthorized(request, env);
       if (!admin) return err("unauthorized", 401);
+      if (!adminScopeAllows(admin.scope, "fleet-admin-surface")) {
+        return err("credential scope does not allow this action", 403);
+      }
       return handleRealmEmailAliasAdminRequest(request, env, url, admin);
     }
     if (isAgentEmailOperationsLeasePath(url.pathname)) {
@@ -4417,6 +4413,7 @@ export default {
       ADMIN_ACCOUNT_TICKET_PATH.test(url.pathname) ||
       ADMIN_ACCOUNT_TICKET_MSGS_PATH.test(url.pathname) ||
       ADMIN_ACCOUNT_TICKET_STATE_PATH.test(url.pathname) ||
+      ADMIN_ACCOUNT_TICKET_RETRIAGE_PATH.test(url.pathname) ||
       ADMIN_ACCOUNT_SUPPORT_POLICY_PATH.test(url.pathname)
     ) {
       return handleAdminTickets(request, env, ctx, url);

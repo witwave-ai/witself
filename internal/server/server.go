@@ -391,21 +391,23 @@ type Config struct {
 	ChangeSupportTicketState func(ctx context.Context, in ChangeTicketStateRequest) (SupportTicket, error)
 
 	// ListAdminTickets / GetAdminTicket / ReplyAdminTicket /
-	// ChangeAdminTicketState / ListAdminTicketsAll, when set (with the
-	// provisioning pair), enable the admin-side counterparts of the
-	// support-ticket endpoints. Provision-token authorized: the caller
+	// RetriageAdminTicket / ChangeAdminTicketState / ListAdminTicketsAll,
+	// when set (with the provisioning pair), enable the admin-side
+	// counterparts of the support-ticket endpoints. Provision-token
+	// authorized: the caller
 	// is the control plane, which has already authenticated the admin
 	// against its own credential store. admin_handle travels on every
 	// request body and is validated shape-only at the store.
 	//
-	// The first four hang off /v1/accounts/{id}/admin:{action} —
-	// account-scoped mirrors of the tenant flow. The fifth serves
+	// The first five hang off /v1/accounts/{id}/admin:{action} —
+	// account-scoped mirrors of the tenant flow. The sixth serves
 	// /v1/support/admin:list-tickets which is cell-wide (no account
 	// id) and cursor-paginated — the CP fans this call out to every
 	// cell in parallel to build the fleet-wide admin queue.
 	ListAdminTickets       func(ctx context.Context, accountID string) ([]SupportTicket, error)
 	GetAdminTicket         func(ctx context.Context, accountID, ticketID string) (SupportTicket, []SupportTicketMessage, error)
 	ReplyAdminTicket       func(ctx context.Context, in ReplyAdminTicketRequest) (SupportTicketMessage, error)
+	RetriageAdminTicket    func(ctx context.Context, in RetriageAdminTicketRequest) (SupportTicket, error)
 	ChangeAdminTicketState func(ctx context.Context, in ChangeAdminTicketStateRequest) (SupportTicket, error)
 	ListAdminTicketsAll    func(ctx context.Context, in ListAdminTicketsAllRequest) (ListAdminTicketsAllResult, error)
 
@@ -679,6 +681,16 @@ type ReplyAdminTicketRequest struct {
 	AdminHandle string
 	TicketID    string
 	Body        string
+	AsAssistant bool `json:"as_assistant"`
+}
+
+// RetriageAdminTicketRequest is the payload for the admin retriage hook.
+type RetriageAdminTicketRequest struct {
+	AccountID   string
+	AdminHandle string
+	TicketID    string
+	Category    string
+	Priority    string
 }
 
 // ChangeAdminTicketStateRequest is the payload for the admin state hook.
@@ -5149,6 +5161,7 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 				AdminHandle string `json:"admin_handle"`
 				TicketID    string `json:"ticket_id"`
 				Body        string `json:"body"`
+				AsAssistant bool   `json:"as_assistant"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
@@ -5167,6 +5180,7 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 				AdminHandle: req.AdminHandle,
 				TicketID:    req.TicketID,
 				Body:        req.Body,
+				AsAssistant: req.AsAssistant,
 			})
 			switch {
 			case errors.Is(err, ErrTicketInputInvalid):
@@ -5190,6 +5204,56 @@ func accountLifecycleHandler(cfg Config) http.HandlerFunc {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"schema_version": "witself.v0",
 				"message":        msg,
+			})
+			return
+		}
+		if accountID, ok := pathActionID(r.URL.Path, "/v1/accounts/", "admin:retriage-ticket"); ok && cfg.RetriageAdminTicket != nil {
+			var req struct {
+				AdminHandle string `json:"admin_handle"`
+				TicketID    string `json:"ticket_id"`
+				Category    string `json:"category"`
+				Priority    string `json:"priority"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+				return
+			}
+			if err := validateAdminHandle(req.AdminHandle); err != nil {
+				writeJSONError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			if strings.TrimSpace(req.TicketID) == "" {
+				writeJSONError(w, http.StatusBadRequest, "missing ticket_id")
+				return
+			}
+			ticket, err := cfg.RetriageAdminTicket(r.Context(), RetriageAdminTicketRequest{
+				AccountID:   accountID,
+				AdminHandle: req.AdminHandle,
+				TicketID:    req.TicketID,
+				Category:    req.Category,
+				Priority:    req.Priority,
+			})
+			switch {
+			case errors.Is(err, ErrTicketInputInvalid):
+				writeJSONError(w, http.StatusBadRequest, err.Error())
+				return
+			case errors.Is(err, ErrTicketNotFound):
+				writeJSONError(w, http.StatusNotFound, "ticket not found")
+				return
+			case errors.Is(err, ErrTicketStateInvalid):
+				writeJSONError(w, http.StatusConflict, err.Error())
+				return
+			case errors.Is(err, ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "account not found")
+				return
+			case err != nil:
+				writeJSONError(w, http.StatusInternalServerError, "could not retriage support ticket")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema_version": "witself.v0",
+				"ticket":         ticket,
 			})
 			return
 		}

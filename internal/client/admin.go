@@ -190,6 +190,54 @@ func ReplyAdminTicket(ctx context.Context, cpEndpoint, adminToken, accountID, ti
 	return &out.Message, nil
 }
 
+// ReplyAdminTicketAsAssistant posts a reply attributed to the Witself support
+// assistant rather than the authenticated fleet admin.
+func ReplyAdminTicketAsAssistant(ctx context.Context, cpEndpoint, adminToken, accountID, ticketID, body string) (*SupportTicketMessage, error) {
+	payload, err := json.Marshal(struct {
+		Body        string `json:"body"`
+		AsAssistant bool   `json:"as_assistant"`
+	}{
+		Body:        body,
+		AsAssistant: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	url := fmt.Sprintf("%s/v1/admin/accounts/%s/tickets/%s/messages",
+		strings.TrimRight(cpEndpoint, "/"), accountID, ticketID)
+	var out struct {
+		Message SupportTicketMessage `json:"message"`
+	}
+	if err := doJSON(ctx, http.MethodPost, url, adminToken, payload, &out); err != nil {
+		return nil, err
+	}
+	return &out.Message, nil
+}
+
+// RetriageAdminTicket changes a ticket's category and/or priority on behalf
+// of the authenticated fleet admin.
+func RetriageAdminTicket(ctx context.Context, cpEndpoint, adminToken, accountID, ticketID, category, priority string) (*SupportTicket, error) {
+	payload, err := json.Marshal(struct {
+		Category string `json:"category"`
+		Priority string `json:"priority"`
+	}{
+		Category: category,
+		Priority: priority,
+	})
+	if err != nil {
+		return nil, err
+	}
+	url := fmt.Sprintf("%s/v1/admin/accounts/%s/tickets/%s/retriage",
+		strings.TrimRight(cpEndpoint, "/"), accountID, ticketID)
+	var out struct {
+		Ticket SupportTicket `json:"ticket"`
+	}
+	if err := doJSON(ctx, http.MethodPatch, url, adminToken, payload, &out); err != nil {
+		return nil, err
+	}
+	return &out.Ticket, nil
+}
+
 // AdminCell is one fleet cell as the dashboard sees it: the public
 // registry entry plus the CP-directory account count and the software
 // version the cell reported at fan-out time (empty = unreachable).
