@@ -157,9 +157,9 @@ configuration saved; webhook `witself-control-plane` →
 `https://self.witwave.ai/v1/billing/webhook/stripe` active on the exact five
 consumed events; failed-payment + upcoming-renewal customer emails enabled;
 incomplete payments auto-cancel at 15 days; live product catalog empty)
-- Scott: reveal the live secret key and webhook signing secret in the
-  dashboard and run `scripts/stage-stripe-live-secrets.sh` (fetches the
-  bpc_ portal id, stages all six CP_STRIPE_* Worker secrets dark).
+- ✅ DONE 2026-08-25: live secret key + webhook signing secret revealed and all
+  six CP_STRIPE_* Worker secrets staged dark via
+  `scripts/stage-stripe-live-secrets.sh`; the superseded live key was expired.
 - At cutover: activate Stripe Tax; set CP_BILLING_PROVIDER/CP_STRIPE_MODE/
   CP_PLAN_LIFECYCLE_ENABLED(+allowlist); container picks env up only at the
   plan-lifecycle activation RPC; verify auto-provisioned prices; one live
