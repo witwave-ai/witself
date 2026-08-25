@@ -32,7 +32,7 @@ Status legend: ✅ done · 🔨 Claude-owned (build/deploy) · 🔑 needs Scott
 | **Team activation** | ✅ done — seats set (Personal 1 / Professional 3 / Team 25, ratified 2026-08-24) and Team flipped available at one flat monthly price | — | — |
 | **Billing** | Dark Stripe stack complete; live account verified (acct_1TpugQEICTDi58ec); all six CP_STRIPE_* secrets STAGED on witself-control-plane (secret key, webhook, portal bpc_, 3 URLs) — verified 2026-08-25; dunning emails on | Cutover only | 🔑 set CP_BILLING_PROVIDER/CP_STRIPE_MODE/CP_PLAN_LIFECYCLE_ENABLED(+allowlist), activate Tax, live end-to-end proof; (opt) revoke stale Jul-5 secret key |
 | **Support** | Policy published (#251); assistant author-kind + reserved handle (#252); re-triage (#253); dark AI runner + notification labeling (#255); entitlement sync (#256); scoped support_ai credential (#257); support@ intake bridge implemented dark | SLO metric + breach alert, keyed intake enablement | 🔨 code · 🔑 support@ DNS+routing, runner host + API key, mint scoped credential, enable flag |
-| **Monitoring** | Dark code merged (#231/#242/#244/#259); accounts + secrets DONE 2026-08-25: PagerDuty `witself-prod` (Events API v2) + healthchecks.io `witself-watchdog` (5m period/15m grace, pages witself-prod via native integration); both immutable Secrets banked in `monitoring` ns | 3-phase GitOps rollout + alert canary | 🔨 config/apply only — no more accounts or keys |
+| **Monitoring** | LIVE 2026-08-25: 3-phase rollout merged + verified (#264 stack, #265 targets, #266 alerting); PagerDuty `witself-prod` incident route + dead-man heartbeat active; 14 rules, zero eval failures, schema-91 + PVC metrics scraped | Alert canary + dead-man lapse proof (both page — hold for Scott's go) | 🔑 canary go only |
 | **Edge DMARC** | Inbound worker runs full SMTP txn; cell records spf/dkim/dmarc | Authenticity parser module, hard-DMARC-fail SMTP rejection (dark flag), value-free authenticity metadata (dark), migration | 🔨 code · 🔑 authserv-id from live header, worker deploy |
 | **Capacity** | ✅ done | 2-node Civo prod profile applied 2026-08-25: cell `civo-sandbox-usw2-dev` scaled 1→2 `g4s.kube.medium` in place (both ACTIVE, cluster Ready); `profile: prod` pinned in the inventory so it won't revert | — |
 | **Retention** | ✅ done (#239) | — | — |
@@ -149,8 +149,17 @@ Grouped by the interaction required. Claude does everything up to these.
   ping URL banked as immutable Secret `monitoring/witself-monitoring-deadman-v1`
   (key `url`); missed check-in pages `witself-prod` via the native PagerDuty
   integration (plus email backup). Passwordless (magic-link) account.
-- Remaining: the 3-phase GitOps enablement (stack → targets verified → alerting
-  + receiver secret names in values) and the alert canary with retained evidence.
+- ✅ 3-phase GitOps enablement DONE 2026-08-25: PR #264 (stack, 12 invariants +
+  all stack targets verified), PR #265 (ServiceMonitors + metrics ingress
+  narrowed; server/worker/kubelet/kube-state-metrics up across multiple scrape
+  intervals; schema-91 gauges fresh), PR #266 (alerting: null root,
+  `witself_alert` PagerDuty route via `routing_key_file`, `witself_watchdog`
+  dead-man route; 14 alerting rules, zero evaluation failures, PVC
+  capacity/available metrics present, Watchdog firing).
+- Remaining (both deliberately page the on-call phone — run only on Scott's
+  explicit go): the synthetic alert canary
+  (`scripts/run-monitoring-alert-canary.sh`) with retained receiver evidence,
+  and the dead-man lapse/restore proof.
 
 **Stripe** (2026-08-24: account verified for live charges; portal default
 configuration saved; webhook `witself-control-plane` →
