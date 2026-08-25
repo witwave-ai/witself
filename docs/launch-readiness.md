@@ -30,7 +30,7 @@ Status legend: ✅ done · 🔨 Claude-owned (build/deploy) · 🔑 needs Scott
 | Domain | State | What's left | Owner |
 |---|---|---|---|
 | **Team activation** | ✅ done — seats set (Personal 1 / Professional 3 / Team 25, ratified 2026-08-24) and Team flipped available at one flat monthly price | — | — |
-| **Billing** | Dark Stripe stack complete: lifecycle, mutations, receipts, adapter, paid-to-paid guard (#247), Stripe Tax wiring (#248), GA gate (#249), dunning contract test, refund runbook | Live cutover only | 🔑 live keys/products/webhook/portal/Tax activation/cutover |
+| **Billing** | Dark Stripe stack complete; live account verified (acct_1TpugQEICTDi58ec); portal config saved (bpc_ minted); webhook `witself-control-plane` active on the 5 consumed events; dunning emails on; `scripts/stage-stripe-live-secrets.sh` ready | Secret staging + cutover | 🔑 reveal sk_live+whsec into staging script, Tax activation at cutover, live end-to-end proof |
 | **Support** | Policy published (#251); assistant author-kind + reserved handle (#252); re-triage (#253); dark AI runner + notification labeling (#255); entitlement sync (#256); scoped support_ai credential (#257); support@ intake bridge implemented dark | SLO metric + breach alert, keyed intake enablement | 🔨 code · 🔑 support@ DNS+routing, runner host + API key, mint scoped credential, enable flag |
 | **Monitoring** | kube-prometheus-stack templated, default-off | PagerDuty receiver (dark), dead-man watchdog, 3-phase rollout overlay, runbook | 🔨 config · 🔑 PagerDuty acct+key, dead-man monitor, cluster secrets, apply |
 | **Edge DMARC** | Inbound worker runs full SMTP txn; cell records spf/dkim/dmarc | Authenticity parser module, hard-DMARC-fail SMTP rejection (dark flag), value-free authenticity metadata (dark), migration | 🔨 code · 🔑 authserv-id from live header, worker deploy |
@@ -144,11 +144,18 @@ Grouped by the interaction required. Claude does everything up to these.
 - Pre-create the two immutable K8s secrets (PagerDuty key, dead-man URL).
 - Apply the 3-phase rollout; run the alert canary; retain evidence.
 
-**Stripe**
-- Live account + secret key; webhook endpoint + secret; Customer Portal config;
-  Stripe Tax activation; Revenue Recovery (Smart Retries → cancel → Personal);
-  14-day refund window; verify auto-provisioned prices; set launch env flags;
-  execute the cutover; one live end-to-end proof before GA.
+**Stripe** (2026-08-24: account verified for live charges; portal default
+configuration saved; webhook `witself-control-plane` →
+`https://self.witwave.ai/v1/billing/webhook/stripe` active on the exact five
+consumed events; failed-payment + upcoming-renewal customer emails enabled;
+incomplete payments auto-cancel at 15 days; live product catalog empty)
+- Scott: reveal the live secret key and webhook signing secret in the
+  dashboard and run `scripts/stage-stripe-live-secrets.sh` (fetches the
+  bpc_ portal id, stages all six CP_STRIPE_* Worker secrets dark).
+- At cutover: activate Stripe Tax; set CP_BILLING_PROVIDER/CP_STRIPE_MODE/
+  CP_PLAN_LIFECYCLE_ENABLED(+allowlist); container picks env up only at the
+  plan-lifecycle activation RPC; verify auto-provisioned prices; one live
+  end-to-end proof (also completes the Go-live setup-guide step) before GA.
 
 **Email edge + support**
 - Capture Cloudflare's real authserv-id; enable DMARC reject + deploy worker;
