@@ -34,7 +34,7 @@ Status legend: ✅ done · 🔨 Claude-owned (build/deploy) · 🔑 needs Scott
 | **Support** | Policy published (#251); assistant author-kind + reserved handle (#252); re-triage (#253); dark AI runner + notification labeling (#255); entitlement sync (#256); scoped support_ai credential (#257); support@ intake bridge implemented dark | SLO metric + breach alert, keyed intake enablement | 🔨 code · 🔑 support@ DNS+routing, runner host + API key, mint scoped credential, enable flag |
 | **Monitoring** | kube-prometheus-stack templated, default-off | PagerDuty receiver (dark), dead-man watchdog, 3-phase rollout overlay, runbook | 🔨 config · 🔑 PagerDuty acct+key, dead-man monitor, cluster secrets, apply |
 | **Edge DMARC** | Inbound worker runs full SMTP txn; cell records spf/dkim/dmarc | Authenticity parser module, hard-DMARC-fail SMTP rejection (dark flag), value-free authenticity metadata (dark), migration | 🔨 code · 🔑 authserv-id from live header, worker deploy |
-| **Capacity** | Civo has no prod profile (hardcoded 1 node) | Fixed 2-node Civo profile (vary only NodeCount → in-place update), lift minimal-only gate, TUI, topology spread | 🔨 code · 🔑 billable 2-node apply (gates monitoring) |
+| **Capacity** | ✅ done | 2-node Civo prod profile applied 2026-08-25: cell `civo-sandbox-usw2-dev` scaled 1→2 `g4s.kube.medium` in place (both ACTIVE, cluster Ready); `profile: prod` pinned in the inventory so it won't revert | — |
 | **Retention** | ✅ done (#239) | — | — |
 
 ## Newly surfaced launch-critical gaps (from the survey critique)
@@ -75,8 +75,8 @@ PII-collecting launch:
   `web/plans/plans.json`, or `subscribe()` mints a second live subscription
   (double-bill). The `plans.json` edits (Team available, support feature, seat
   counts) are one cluster.
-- **Second Civo node before monitoring rollout** (Scott's sequencing; monitoring
-  needs the headroom).
+- ✅ **Second Civo node** applied 2026-08-25 (in-place 1→2, both nodes ACTIVE); the
+  headroom monitoring needs is now in place.
 - **Monitoring receiver before support SLO alert** (support breach + dead-man
   feed the one shared PagerDuty service + dead-man monitor — create exactly one
   of each).
@@ -134,10 +134,12 @@ Grouped by the interaction required. Claude does everything up to these.
 - Per-plan seat counts; whether Professional/Personal are seat-restricted.
 - Paid-to-paid transition policy (contact-guard vs in-place switch).
 
-**Capacity (gates monitoring)**
-- `witself-infra preview -cell civo-sandbox-usw2-dev -profile prod` → confirm
-  in-place NodeCount 1→2 (abort on any cluster/network/PVC replace) → `up` to
-  create the 2nd billable node. Sequence before monitoring.
+**Capacity (gates monitoring)** — ✅ DONE 2026-08-25
+- Applied: `witself-infra up -cell civo-sandbox-usw2-dev -profile prod`. Preview
+  showed the required in-place `~pools` NodeCount 1→2 (1 update, 15 unchanged, no
+  replace); apply matched; both `g4s.kube.medium` nodes ACTIVE and cluster Ready
+  (Civo API). `profile: prod` persisted in `~/.witself/infra.yaml` and a no-flag
+  re-preview shows 16 unchanged, so it will not revert. Monitoring is unblocked.
 
 **Monitoring accounts + secrets**
 - One PagerDuty free service + Events API v2 key; one external dead-man monitor.
