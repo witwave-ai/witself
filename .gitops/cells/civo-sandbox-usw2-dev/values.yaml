@@ -57,12 +57,41 @@ apps:
       validationEnabled: false
       targetName: witself-backup
     replicaCount: 1
+    # Phase 2 of the monitoring rollout: expose server metrics to the
+    # monitoring-namespace Prometheus only.
+    metrics:
+      serviceMonitor:
+        enabled: true
+        labels:
+          release: witself-monitoring
+    networkPolicy:
+      metricsFrom:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
     podDisruptionBudget:
       enabled: false
     topologySpreadConstraints: []
     worker:
       enabled: true
       replicaCount: 2
+      # Phase 2: worker metrics restricted to the same Prometheus peers.
+      metrics:
+        serviceMonitor:
+          enabled: true
+          labels:
+            release: witself-monitoring
+      networkPolicy:
+        metricsFrom:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: monitoring
+            podSelector:
+              matchLabels:
+                app.kubernetes.io/name: prometheus
       podDisruptionBudget:
         enabled: false
       topologySpreadConstraints: []
