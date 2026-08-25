@@ -24,12 +24,12 @@ BPC=$(curl -sf -u "$SK:" "https://api.stripe.com/v1/billing_portal/configuration
   | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]; print(d[0]["id"] if d else "")')
 case "$BPC" in bpc_*) echo "portal configuration: $BPC";; *) echo "no default portal configuration found — save the portal settings in the dashboard first" >&2; exit 1;; esac
 
-printf '%s' "$SK" | npx wrangler secret put CP_STRIPE_SECRET_KEY
-printf '%s' "$WH" | npx wrangler secret put CP_STRIPE_WEBHOOK_SECRET
-printf '%s' "$BPC" | npx wrangler secret put CP_STRIPE_PORTAL_CONFIGURATION_ID
-printf '%s' "https://self.witwave.ai/billing/success" | npx wrangler secret put CP_STRIPE_SUCCESS_URL
-printf '%s' "https://self.witwave.ai/billing/cancelled" | npx wrangler secret put CP_STRIPE_CANCEL_URL
-printf '%s' "https://self.witwave.ai/billing/portal-return" | npx wrangler secret put CP_STRIPE_PORTAL_RETURN_URL
+printf '%s' "$SK" | npx --no-install wrangler secret put CP_STRIPE_SECRET_KEY --name witself-control-plane
+printf '%s' "$WH" | npx --no-install wrangler secret put CP_STRIPE_WEBHOOK_SECRET --name witself-control-plane
+printf '%s' "$BPC" | npx --no-install wrangler secret put CP_STRIPE_PORTAL_CONFIGURATION_ID --name witself-control-plane
+printf '%s' "https://self.witwave.ai/billing/success" | npx --no-install wrangler secret put CP_STRIPE_SUCCESS_URL --name witself-control-plane
+printf '%s' "https://self.witwave.ai/billing/cancelled" | npx --no-install wrangler secret put CP_STRIPE_CANCEL_URL --name witself-control-plane
+printf '%s' "https://self.witwave.ai/billing/portal-return" | npx --no-install wrangler secret put CP_STRIPE_PORTAL_RETURN_URL --name witself-control-plane
 
 echo "Staged. Billing remains dark: CP_BILLING_PROVIDER / CP_STRIPE_MODE /"
 echo "CP_PLAN_LIFECYCLE_ENABLED / CP_BILLING_ACCOUNT_ALLOWLIST are untouched;"
