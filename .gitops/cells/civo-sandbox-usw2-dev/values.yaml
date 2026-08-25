@@ -137,11 +137,22 @@ apps:
         targetName: witself-provision
         tokenKey: token
 platform:
-  # Phase 1 of the monitoring rollout (runbook: Founder open-plane monitoring).
-  # Stack only: alerting, ServiceMonitors, and metrics NetworkPolicy peers all
-  # stay disabled until targets are verified in the later phases.
+  # Phase 3 of the monitoring rollout (runbook: Founder open-plane monitoring).
+  # Stack (phase 1) and scrape targets (phase 2) are verified; this enables
+  # alert routing: PagerDuty Events API v2 incidents plus the external
+  # dead-man heartbeat. Secret values live only in the two immutable
+  # in-cluster Secrets named here; nothing sensitive enters Git or Argo state.
   monitoring:
     enabled: true
+    alerting:
+      enabled: true
+    receiver:
+      kind: pagerduty
+      secretName: witself-monitoring-pagerduty-v1
+      secretKey: routing_key
+    receiverDeadman:
+      secretName: witself-monitoring-deadman-v1
+      secretKey: url
   awsAlbIngress:
     enabled: false
   certManager:
