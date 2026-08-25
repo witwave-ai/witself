@@ -108,6 +108,11 @@ apps:
         targetName: witself-provision
         tokenKey: token
 platform:
+  # Phase 1 of the monitoring rollout (runbook: Founder open-plane monitoring).
+  # Stack only: alerting, ServiceMonitors, and metrics NetworkPolicy peers all
+  # stay disabled until targets are verified in the later phases.
+  monitoring:
+    enabled: true
   awsAlbIngress:
     enabled: false
   certManager:

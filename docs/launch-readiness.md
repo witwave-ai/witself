@@ -30,11 +30,11 @@ Status legend: ✅ done · 🔨 Claude-owned (build/deploy) · 🔑 needs Scott
 | Domain | State | What's left | Owner |
 |---|---|---|---|
 | **Team activation** | ✅ done — seats set (Personal 1 / Professional 3 / Team 25, ratified 2026-08-24) and Team flipped available at one flat monthly price | — | — |
-| **Billing** | Dark Stripe stack complete: lifecycle, mutations, receipts, adapter, paid-to-paid guard (#247), Stripe Tax wiring (#248), GA gate (#249), dunning contract test, refund runbook | Live cutover only | 🔑 live keys/products/webhook/portal/Tax activation/cutover |
+| **Billing** | Dark Stripe stack complete; live account verified (acct_1TpugQEICTDi58ec); all six CP_STRIPE_* secrets STAGED on witself-control-plane (secret key, webhook, portal bpc_, 3 URLs) — verified 2026-08-25; dunning emails on | Cutover only | 🔑 set CP_BILLING_PROVIDER/CP_STRIPE_MODE/CP_PLAN_LIFECYCLE_ENABLED(+allowlist), activate Tax, live end-to-end proof; (opt) revoke stale Jul-5 secret key |
 | **Support** | Policy published (#251); assistant author-kind + reserved handle (#252); re-triage (#253); dark AI runner + notification labeling (#255); entitlement sync (#256); scoped support_ai credential (#257); support@ intake bridge implemented dark | SLO metric + breach alert, keyed intake enablement | 🔨 code · 🔑 support@ DNS+routing, runner host + API key, mint scoped credential, enable flag |
-| **Monitoring** | kube-prometheus-stack templated, default-off | PagerDuty receiver (dark), dead-man watchdog, 3-phase rollout overlay, runbook | 🔨 config · 🔑 PagerDuty acct+key, dead-man monitor, cluster secrets, apply |
+| **Monitoring** | Dark code merged (#231/#242/#244/#259); accounts + secrets DONE 2026-08-25: PagerDuty `witself-prod` (Events API v2) + healthchecks.io `witself-watchdog` (5m period/15m grace, pages witself-prod via native integration); both immutable Secrets banked in `monitoring` ns | 3-phase GitOps rollout + alert canary | 🔨 config/apply only — no more accounts or keys |
 | **Edge DMARC** | Inbound worker runs full SMTP txn; cell records spf/dkim/dmarc | Authenticity parser module, hard-DMARC-fail SMTP rejection (dark flag), value-free authenticity metadata (dark), migration | 🔨 code · 🔑 authserv-id from live header, worker deploy |
-| **Capacity** | Civo has no prod profile (hardcoded 1 node) | Fixed 2-node Civo profile (vary only NodeCount → in-place update), lift minimal-only gate, TUI, topology spread | 🔨 code · 🔑 billable 2-node apply (gates monitoring) |
+| **Capacity** | ✅ done | 2-node Civo prod profile applied 2026-08-25: cell `civo-sandbox-usw2-dev` scaled 1→2 `g4s.kube.medium` in place (both ACTIVE, cluster Ready); `profile: prod` pinned in the inventory so it won't revert | — |
 | **Retention** | ✅ done (#239) | — | — |
 
 ## Newly surfaced launch-critical gaps (from the survey critique)
@@ -75,8 +75,8 @@ PII-collecting launch:
   `web/plans/plans.json`, or `subscribe()` mints a second live subscription
   (double-bill). The `plans.json` edits (Team available, support feature, seat
   counts) are one cluster.
-- **Second Civo node before monitoring rollout** (Scott's sequencing; monitoring
-  needs the headroom).
+- ✅ **Second Civo node** applied 2026-08-25 (in-place 1→2, both nodes ACTIVE); the
+  headroom monitoring needs is now in place.
 - **Monitoring receiver before support SLO alert** (support breach + dead-man
   feed the one shared PagerDuty service + dead-man monitor — create exactly one
   of each).
@@ -134,21 +134,36 @@ Grouped by the interaction required. Claude does everything up to these.
 - Per-plan seat counts; whether Professional/Personal are seat-restricted.
 - Paid-to-paid transition policy (contact-guard vs in-place switch).
 
-**Capacity (gates monitoring)**
-- `witself-infra preview -cell civo-sandbox-usw2-dev -profile prod` → confirm
-  in-place NodeCount 1→2 (abort on any cluster/network/PVC replace) → `up` to
-  create the 2nd billable node. Sequence before monitoring.
+**Capacity (gates monitoring)** — ✅ DONE 2026-08-25
+- Applied: `witself-infra up -cell civo-sandbox-usw2-dev -profile prod`. Preview
+  showed the required in-place `~pools` NodeCount 1→2 (1 update, 15 unchanged, no
+  replace); apply matched; both `g4s.kube.medium` nodes ACTIVE and cluster Ready
+  (Civo API). `profile: prod` persisted in `~/.witself/infra.yaml` and a no-flag
+  re-preview shows 16 unchanged, so it will not revert. Monitoring is unblocked.
 
-**Monitoring accounts + secrets**
-- One PagerDuty free service + Events API v2 key; one external dead-man monitor.
-- Pre-create the two immutable K8s secrets (PagerDuty key, dead-man URL).
-- Apply the 3-phase rollout; run the alert canary; retain evidence.
+**Monitoring accounts + secrets** — ✅ DONE 2026-08-25
+- PagerDuty: service `witself-prod` (P9RRGZ8) with Events API v2 integration;
+  routing key banked as immutable Secret `monitoring/witself-monitoring-pagerduty-v1`
+  (key `routing_key`). Login in 1Password.
+- Dead-man: healthchecks.io check `witself-watchdog`, period 5m / grace 15m,
+  ping URL banked as immutable Secret `monitoring/witself-monitoring-deadman-v1`
+  (key `url`); missed check-in pages `witself-prod` via the native PagerDuty
+  integration (plus email backup). Passwordless (magic-link) account.
+- Remaining: the 3-phase GitOps enablement (stack → targets verified → alerting
+  + receiver secret names in values) and the alert canary with retained evidence.
 
-**Stripe**
-- Live account + secret key; webhook endpoint + secret; Customer Portal config;
-  Stripe Tax activation; Revenue Recovery (Smart Retries → cancel → Personal);
-  14-day refund window; verify auto-provisioned prices; set launch env flags;
-  execute the cutover; one live end-to-end proof before GA.
+**Stripe** (2026-08-24: account verified for live charges; portal default
+configuration saved; webhook `witself-control-plane` →
+`https://self.witwave.ai/v1/billing/webhook/stripe` active on the exact five
+consumed events; failed-payment + upcoming-renewal customer emails enabled;
+incomplete payments auto-cancel at 15 days; live product catalog empty)
+- Scott: reveal the live secret key and webhook signing secret in the
+  dashboard and run `scripts/stage-stripe-live-secrets.sh` (fetches the
+  bpc_ portal id, stages all six CP_STRIPE_* Worker secrets dark).
+- At cutover: activate Stripe Tax; set CP_BILLING_PROVIDER/CP_STRIPE_MODE/
+  CP_PLAN_LIFECYCLE_ENABLED(+allowlist); container picks env up only at the
+  plan-lifecycle activation RPC; verify auto-provisioned prices; one live
+  end-to-end proof (also completes the Go-live setup-guide step) before GA.
 
 **Email edge + support**
 - Capture Cloudflare's real authserv-id; enable DMARC reject + deploy worker;
