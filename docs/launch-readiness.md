@@ -156,10 +156,16 @@ Grouped by the interaction required. Claude does everything up to these.
   `witself_alert` PagerDuty route via `routing_key_file`, `witself_watchdog`
   dead-man route; 14 alerting rules, zero evaluation failures, PVC
   capacity/available metrics present, Watchdog firing).
-- Remaining (both deliberately page the on-call phone — run only on Scott's
-  explicit go): the synthetic alert canary
-  (`scripts/run-monitoring-alert-canary.sh`) with retained receiver evidence,
-  and the dead-man lapse/restore proof.
+- ✅ Alert canary PASSED 2026-08-26 (Scott's go): firing observed, 45s dwell,
+  rule flipped false, resolve observed after 310s dwell, canary rule deleted
+  by exact UID. PagerDuty receiver evidence retained in `~/.witself/`
+  (mode 0600): script artifact `monitoring-acceptance.json`, notification
+  counter timeline (firing 0→1 at 04:04:23Z, resolve 1→2 at 04:09:15Z, zero
+  failures), and operator receipt — Scott received and resolved the incident
+  on PagerDuty.
+- Remaining (pages the on-call phone — run only on Scott's explicit go): the
+  dead-man lapse/restore proof (silence Watchdog, confirm healthchecks.io
+  pages after the 15m grace lapses, restore, confirm recovery).
 
 **Stripe** (2026-08-24: account verified for live charges; portal default
 configuration saved; webhook `witself-control-plane` →
