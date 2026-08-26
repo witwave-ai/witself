@@ -945,6 +945,22 @@ not authenticate an external sender or classify spam. Prompt-injection and
 spoofed-verification resistance therefore remain client judgment backed by the
 untrusted-content contract, not a claim that malicious mail has been made safe.
 
+Edge-attested SPF/DKIM/DMARC verdicts (the v2 relay envelope) add a
+forged-`Authentication-Results` risk: the extractor selects the FIRST header
+whose authserv-id matches the configured trusted attester, top-down, so its
+safety rests on the provider guarantee that Cloudflare's own stamp is always
+present and first. If the provider omits its stamp or
+`AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID` drifts from the live stamp value, a
+sender-forged header claiming the trusted authserv-id can be selected, signed
+by the edge, and stored as advisory verdict columns. Mitigations: the
+operational precondition that the configured authserv-id is verified against a
+live inbound header before enabling recording; verdicts remain advisory
+domain-granularity evidence that never upgrade `sender_verification_state`,
+never authenticate a principal, and never authorize consequential automation;
+and forged trace headers inside retained raw MIME and owner archives are a
+documented residual (no current surface serves raw MIME or arbitrary parsed
+headers).
+
 ## Self-Hosted Risks
 
 Self-hosted deployments add infrastructure risks:

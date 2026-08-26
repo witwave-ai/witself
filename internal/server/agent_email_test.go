@@ -1067,6 +1067,7 @@ func testAgentEmailPilotConfig(t *testing.T) (AgentEmailPilotConfig, ed25519.Pri
 func testAgentEmailRelayMetadata(raw []byte, pilot AgentEmailPilotConfig, keyID string) agentemail.RelayMetadata {
 	digest := sha256.Sum256(raw)
 	return agentemail.RelayMetadata{
+		Version:   agentemail.RelaySignatureVersion,
 		Timestamp: pilot.Now().Unix(), KeyID: keyID, Audience: pilot.Audience,
 		EnvelopeSender:    "sender@example.com",
 		EnvelopeRecipient: "pilot.realm@agent-mail.witwave.ai",

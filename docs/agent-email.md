@@ -487,14 +487,20 @@ redefine the production tier.
   message larger than its effective byte bucket is intrinsically impossible;
   the cell returns the existing permanent verdict so the Worker rejects it
   once instead of amplifying retries.
-- The signed edge envelope covers only fields the Worker can actually observe:
-  timestamp, normalized envelope sender and recipient, destination-cell
-  audience, raw size, and body digest. Provider message id, structured
-  SPF/DKIM/DMARC results, and spam verdict are unavailable. Header-carried
-  `Authentication-Results`, `Received-SPF`, provider trace ids, and spam headers
-  remain untrusted message content and never fill those fields.
+- The signed edge envelope covers only fields the Worker can actually
+  observe: timestamp, normalized envelope sender and recipient,
+  destination-cell audience, raw size, body digest, and — on a v2 envelope —
+  the SPF/DKIM/DMARC verdicts extracted from the configured trusted
+  attester's own `Authentication-Results` stamp. Provider message id and spam
+  verdict are unavailable. Sender-supplied `Authentication-Results`,
+  `Received-SPF`, provider trace ids, and spam headers remain untrusted
+  message content and never fill any signed field; when no trusted attester
+  stamp is available the verdicts are recorded as `unknown`, never
+  synthesized.
 - Every pilot message is stored and surfaced as **sender unverified**, with
-  authentication and spam states `unknown` and no authoritative provider id.
+  no authoritative provider id, a spam state of `unknown`, and SPF/DKIM/DMARC
+  states that are `unknown` unless a v2 envelope carried the trusted
+  attester's verdicts — which stay advisory, domain-granularity evidence.
   Pilot receive is excluded from billable usage and quota enforcement. Value-
   free operational counters may still measure volume, bytes, errors, and
   latency, but they cannot become customer charges.
@@ -1360,9 +1366,13 @@ each message to the owning cell's signature-verified ingestion endpoint.
 Cloudflare evaluates SPF/DKIM/DMARC at the edge and enforces a provider
 message-size cap. The production contract requires every available edge result
 to be signed and recorded with the stored message. Cloudflare does not expose
-the structured authentication/spam results or a stable provider identity to
-the Worker, so the bounded production provider profile records those fields as
-`unknown` rather than synthesizing trust. MX and routing
+structured authentication/spam results or a stable provider identity on the
+Worker event itself; the Worker instead extracts SPF/DKIM/DMARC from the
+configured trusted attester's own `Authentication-Results` stamp
+(`AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID`) and signs them into the v2 relay
+envelope. Absent or unattested results are recorded as `unknown` rather than
+synthesizing trust, and the spam verdict and provider identity remain
+unavailable. MX and routing
 configuration follow the cell topology in
 [deployment-cells.md](deployment-cells.md); the control plane stays thin and
 never handles message content, consistent with the control-plane-only
@@ -1412,8 +1422,11 @@ The kickoff verification items were resolved on 2026-07-20:
   binding means a capture replayed at another cell never verifies. Cloudflare's
   EmailMessage event exposes no authoritative provider message id,
   SPF/DKIM/DMARC result, or spam verdict, so none appears in the signed envelope
-  and none may be synthesized from MIME headers. Stored mail therefore remains
-  sender-unverified. The private key lives as a Worker secret; cells verify
+  and none may be synthesized from arbitrary MIME headers. The single
+  carve-out is the v2 envelope's SPF/DKIM/DMARC verdict fields, extracted
+  only from the configured trusted attester's own `Authentication-Results`
+  stamp and signed for transport integrity. Stored mail remains
+  sender-unverified either way. The private key lives as a Worker secret; cells verify
   against the control-plane-published public key, cached and pinned, with a
   bounded clock-skew replay window. Rotation is a dual-key overlap: publish the
   successor, re-sign, retire the predecessor. Compromise recovery is the same
@@ -1422,8 +1435,10 @@ The kickoff verification items were resolved on 2026-07-20:
   forged-relay event. No per-cell secret fan-out; self-hosted cells verify
   their own edge's key the same way.
   The retired pilot and current production profile both sign only
-  Worker-observable fields; unavailable provider identity, authentication, and
-  spam fields are represented as absent/unknown.
+  Worker-observable fields. Unavailable provider identity and spam fields are
+  represented as absent/unknown; authentication verdicts are Worker-observable
+  only through the trusted attester's stamp and travel exclusively in the v2
+  envelope.
 - **Provider constraints recorded.** Inbound messages cap at 25 MiB, which
   bounds the Postgres raw-size cap below. Since July 2025 Cloudflare only
   forwards mail that passes SPF or DKIM, and the spike confirmed that the
@@ -1499,11 +1514,19 @@ where Cloudflare lacks the required control or metadata.
    key gives multi-recipient fan-out its dedup semantics.
 7. **Recorded authentication is signed metadata, never sender headers.** The
    SPF/DKIM/DMARC results and the provider spam verdict the cell stores come
-   only from the signed relay envelope (step added to the Ed25519 field set
-   below), never parsed from message headers. The cell strips or renames any
-   inbound `Authentication-Results`, `Received-SPF`, and `X-Spam-*` trace
-   headers before storage so a sender cannot pre-inject a forged
-   `dkim=pass header.d=github.com` that later reads as genuine evidence.
+   only from the signed relay envelope (the v2 Ed25519 field set), never
+   parsed from message headers by the cell. Raw MIME bytes are deliberately
+   retained byte-exact — the signed digest, size CHECK, suspected-duplicate
+   grouping, and retry-canary fingerprint all depend on the stored raw — so
+   forged `Authentication-Results`, `Received-SPF`, and `X-Spam-*` trace
+   headers persist inside `raw_mime` and inside owner archives. That residual
+   is acceptable because no current surface serves raw MIME or arbitrary
+   parsed headers (the parsed projection stores only from/to/subject/
+   message-id/body text) and the advisory columns are sourced exclusively
+   from the envelope. Any future surface that reads raw MIME or parsed
+   headers must redact or explicitly caveat those trace headers before
+   exposure; a sender-injected `dkim=pass header.d=github.com` must never
+   read as genuine evidence.
 8. **Feasibility bounds go to the launch spike**: the in-transaction latency
    budget, Worker CPU/subrequest limits against the 25 MiB cap, and whether
    Cloudflare invokes the Worker once per recipient or once per message.
@@ -1541,10 +1564,12 @@ Pipeline contract:
 
 The production Cloudflare provider profile is intentionally bounded:
 provider-id idempotency is replaced by non-destructive suspected-duplicate
-grouping, raw MIME is capped at 25 MiB (or a lower account plan limit),
-structured auth/spam fields are `unknown`, quarantine classification is
-unavailable, and attachment retrieval and raw-MIME reads are disabled even
-though attachment bytes remain inside the stored raw MIME.
+grouping, raw MIME is capped at 25 MiB (or a lower account plan limit), the
+spam verdict is `unknown`, SPF/DKIM/DMARC record the edge-attested verdicts
+when the trusted attester is configured (and `unknown` otherwise),
+quarantine classification is unavailable, and attachment retrieval and
+raw-MIME reads are disabled even though attachment bytes remain inside the
+stored raw MIME.
 
 ## Trust Model
 
@@ -1597,11 +1622,12 @@ blur the two:
   the stored message like any other content (see the plaintext-at-rest note
   under Abuse, Privacy, And Metering), and nothing writes a second copy into
   logs, diagnostics, or a dedicated field.
-  Sender binding remains required for consequential automation. Because the
-  Cloudflare production provider profile has no authoritative sender-auth
-  metadata, code use is limited to an already-active, expected, low-risk
-  workflow; it labels the sender unverified and prohibits financial, identity,
-  recovery, or other consequential use.
+  Sender binding remains required for consequential automation. The
+  edge-attested SPF/DKIM/DMARC verdicts are advisory domain-granularity
+  evidence and never authenticate a sender principal, so a recorded
+  `dmarc=pass` upgrades nothing: code use stays limited to an
+  already-active, expected, low-risk workflow, labels the sender unverified,
+  and prohibits financial, identity, recovery, or other consequential use.
 - **Threat model.** Inbound email is an injection surface with continuously
   arriving attacker-controlled content. The implemented controls and residual
   risks for prompt injection, harvesting/flooding, spoofed verification mail,

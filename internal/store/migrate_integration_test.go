@@ -256,7 +256,7 @@ func TestMigration59AgentEmailPostgres(t *testing.T) {
 		  ('emsg_zzzzzzzzzzzzzzzz',$1,$2,$3,$4,$5,
 		   'cloudflare_email_routing','sender@example.com',$6,'owner',$7,
 		   convert_to(E'Subject: forged posture\r\n\r\nbody','UTF8'),31,$8,'parsed',
-		   'pass','unknown','unknown','unknown','unverified',$9,clock_timestamp())`,
+		   'unknown','unknown','unknown','clean','unverified',$9,clock_timestamp())`,
 		accountID, realmID, mailboxID, ownerID, addressID, recipient, realmLabel,
 		strings.Repeat("e", 64), strings.Repeat("f", 64)); err == nil {
 		t.Fatal("Cloudflare pilot trust posture elevation was accepted")

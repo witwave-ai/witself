@@ -157,6 +157,25 @@ func TestAgentEmailPilotPostgresLifecycle(t *testing.T) {
 	if !second.PossibleDuplicate || second.PossibleDuplicateOfMessage != first.ID || second.ID == first.ID {
 		t.Fatalf("suspected duplicate = %#v", second)
 	}
+	rawV2 := []byte("Subject: v2 attested\r\n\r\nverdict body\r\n")
+	digestV2 := sha256.Sum256(rawV2)
+	attested, err := st.IngestAgentEmailPilot(ctx, scope, AgentEmailIngestInput{
+		Relay: agentemail.RelayMetadata{
+			Version:   agentemail.RelaySignatureVersionV2,
+			Timestamp: time.Now().Unix(), KeyID: "pilot-key-1", Audience: scope.Audience,
+			EnvelopeSender: "sender@example.com", EnvelopeRecipient: taggedAddress,
+			RawSize: int64(len(rawV2)), RawSHA256: hex.EncodeToString(digestV2[:]),
+			SPFResult: "pass", DKIMResult: "none", DMARCResult: "fail",
+		},
+		Raw: rawV2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attested.SPFResult != "pass" || attested.DKIMResult != "none" || attested.DMARCResult != "fail" ||
+		attested.SpamVerdict != "unknown" || attested.SenderVerificationState != AgentEmailSenderUnverified {
+		t.Fatalf("v2 attested ingest = %#v", attested)
+	}
 	if _, err := ingest("unknown."+address.RealmLabel+"@"+address.Domain, raw); !errors.Is(err, ErrAgentEmailUnknownRecipient) {
 		t.Fatalf("unknown recipient error = %v", err)
 	}
