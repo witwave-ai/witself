@@ -206,6 +206,10 @@ test("deployment config is email-only and cannot reuse the control-plane DIRECTO
   );
   assert.match(
     config,
+    /"AGENT_EMAIL_RELAY_VERSION"\s*:\s*"witself-email-relay-pilot-v1"/,
+  );
+  assert.match(
+    config,
     /"AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST"\s*:\s*""/,
   );
   assert.match(
@@ -368,5 +372,26 @@ test("deployment config requires one credential-free public HTTPS control-plane 
     });
     assert.notEqual(rendered.status, 0, value);
     assert.match(rendered.stderr, /CONTROL_PLANE_URL must be a credential-free public HTTPS origin/);
+  }
+});
+
+
+test("deployment config accepts only the two exact relay version literals", () => {
+  for (const value of ["witself-email-relay-pilot-v1", "witself-email-relay-v2"]) {
+    const rendered = spawnSync(process.execPath, [script.pathname], {
+      cwd: root,
+      env: renderEnvironment({ AGENT_EMAIL_RELAY_VERSION: value }),
+      encoding: "utf8",
+    });
+    assert.equal(rendered.status, 0, rendered.stderr);
+  }
+  for (const value of ["v2", "true", "witself-email-relay-v3", " witself-email-relay-v2"]) {
+    const rendered = spawnSync(process.execPath, [script.pathname], {
+      cwd: root,
+      env: renderEnvironment({ AGENT_EMAIL_RELAY_VERSION: value }),
+      encoding: "utf8",
+    });
+    assert.notEqual(rendered.status, 0);
+    assert.match(rendered.stderr, /AGENT_EMAIL_RELAY_VERSION/);
   }
 });

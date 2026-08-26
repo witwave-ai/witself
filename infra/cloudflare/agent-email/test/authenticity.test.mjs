@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { extractAuthenticationVerdicts } from "../src/authenticity.mjs";
+import { extractAuthenticationVerdicts, extractRecordableAuthenticationVerdicts, UNATTESTED_RESULTS } from "../src/authenticity.mjs";
 
 const TRUSTED_AUTHSERV_ID = "mx.trusted.example";
 const SAFE_DEFAULTS = {
@@ -272,4 +272,77 @@ test("malformed inputs are total and never enforce", () => {
     assert.doesNotThrow(() => extract(raw, trustedID));
     assert.deepEqual(extract(raw, trustedID), SAFE_DEFAULTS);
   }
+});
+
+
+test("recording maps every not-attested case to all-unknown", () => {
+  const forged = [
+    "Authentication-Results: mx.other.example; dmarc=pass",
+    "From: owner@example.com",
+    "",
+    "hello",
+  ].join("\r\n");
+  // No trusted header, absent/invalid attester config, malformed block.
+  assert.deepEqual(extractRecordableAuthenticationVerdicts(forged, "mx.trusted.example"), UNATTESTED_RESULTS);
+  assert.deepEqual(extractRecordableAuthenticationVerdicts(forged, ""), UNATTESTED_RESULTS);
+  assert.deepEqual(extractRecordableAuthenticationVerdicts("no headers", "mx.trusted.example"), UNATTESTED_RESULTS);
+  // The enforcement extractor keeps its dmarc "none" default for the same
+  // inputs — the recording posture must never inherit it.
+  assert.equal(extractAuthenticationVerdicts(forged, "mx.trusted.example").dmarc, "none");
+});
+
+test("recording keeps only methods the trusted attester actually carried", () => {
+  const raw = [
+    "Authentication-Results: mx.trusted.example; spf=pass",
+    "From: owner@example.com",
+    "",
+    "hello",
+  ].join("\r\n");
+  assert.deepEqual(
+    extractRecordableAuthenticationVerdicts(raw, "mx.trusted.example"),
+    { spf: "pass", dkim: "unknown", dmarc: "unknown" },
+  );
+});
+
+test("a genuinely attested dmarc none is preserved by recording", () => {
+  const raw = [
+    "Authentication-Results: mx.trusted.example; dmarc=none; spf=softfail",
+    "",
+    "hello",
+  ].join("\r\n");
+  assert.deepEqual(
+    extractRecordableAuthenticationVerdicts(raw, "mx.trusted.example"),
+    { spf: "softfail", dkim: "unknown", dmarc: "none" },
+  );
+});
+
+test("ambiguous duplicates and unrecognized tokens record unknown", () => {
+  const duplicated = [
+    "Authentication-Results: mx.trusted.example; dmarc=pass; dmarc=fail; spf=pass",
+    "",
+    "hello",
+  ].join("\r\n");
+  assert.deepEqual(
+    extractRecordableAuthenticationVerdicts(duplicated, "mx.trusted.example"),
+    { spf: "pass", dkim: "unknown", dmarc: "unknown" },
+  );
+  const unrecognized = [
+    "Authentication-Results: mx.trusted.example; dmarc=mystery; dkim=pass",
+    "",
+    "hello",
+  ].join("\r\n");
+  assert.deepEqual(
+    extractRecordableAuthenticationVerdicts(unrecognized, "mx.trusted.example"),
+    { spf: "unknown", dkim: "pass", dmarc: "unknown" },
+  );
+});
+
+test("recording an attested enforcement fail matches the reject signal", () => {
+  const failing = [
+    "Authentication-Results: mx.trusted.example; dmarc=fail header.from=example.com",
+    "",
+    "hello",
+  ].join("\r\n");
+  assert.equal(extractRecordableAuthenticationVerdicts(failing, "mx.trusted.example").dmarc, "fail");
+  assert.equal(extractAuthenticationVerdicts(failing, "mx.trusted.example").dmarc, "fail");
 });

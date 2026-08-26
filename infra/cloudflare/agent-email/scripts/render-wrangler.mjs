@@ -24,6 +24,9 @@ const dmarcRejectEnabled = String(
 const authenticationResultsAuthservID = String(
   process.env.AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID ?? "",
 );
+const relayVersion = String(
+  process.env.AGENT_EMAIL_RELAY_VERSION ?? "witself-email-relay-pilot-v1",
+);
 const rawRoutePublicKeys = String(
   process.env.AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS ?? "",
 );
@@ -58,6 +61,11 @@ if (
 ) {
   throw new Error(
     "AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID must be empty or a printable non-space ASCII token without semicolons",
+  );
+}
+if (!["witself-email-relay-pilot-v1", "witself-email-relay-v2"].includes(relayVersion)) {
+  throw new Error(
+    "AGENT_EMAIL_RELAY_VERSION must be witself-email-relay-pilot-v1 or witself-email-relay-v2",
   );
 }
 let controlPlaneURL;
@@ -125,7 +133,8 @@ if ((template.match(/__EMAIL_DIRECTORY_KV_ID__/g) ?? []).length !== 1 ||
     (template.match(/__REALM_EMAIL_ALIAS_DELIVERY_ENABLED__/g) ?? []).length !== 1 ||
     (template.match(/__REALM_EMAIL_CANONICAL_DELIVERY_ENABLED__/g) ?? []).length !== 1 ||
     (template.match(/__AGENT_EMAIL_DMARC_REJECT_ENABLED__/g) ?? []).length !== 1 ||
-    (template.match(/__AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID__/g) ?? []).length !== 1) {
+    (template.match(/__AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID__/g) ?? []).length !== 1 ||
+    (template.match(/__AGENT_EMAIL_RELAY_VERSION__/g) ?? []).length !== 1) {
   throw new Error("wrangler template placeholders are invalid");
 }
 const rendered = template
@@ -158,6 +167,10 @@ const rendered = template
   .replace(
     "__AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID__",
     JSON.stringify(authenticationResultsAuthservID),
+  )
+  .replace(
+    "__AGENT_EMAIL_RELAY_VERSION__",
+    relayVersion,
   );
 await writeFile(renderedOutput, rendered, { mode: 0o600 });
 process.stdout.write("rendered isolated email Worker configuration\n");

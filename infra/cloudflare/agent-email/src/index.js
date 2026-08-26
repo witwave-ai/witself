@@ -7,6 +7,8 @@ import {
   RELAY_MAXIMUM_RAW_BYTES,
   sha256Hex,
   signRelay,
+  RELAY_SIGNATURE_VERSION,
+  RELAY_SIGNATURE_VERSION_V2,
 } from "./relay.mjs";
 import {
   configuredAgentEmailDomains,
@@ -16,7 +18,7 @@ import {
   realmRouteProjectionIsFresh,
   verifyRealmRouteProjection,
 } from "./directory.mjs";
-import { extractAuthenticationVerdicts } from "./authenticity.mjs";
+import { extractRecordableAuthenticationVerdicts } from "./authenticity.mjs";
 import { recordEdgeVerdict, recordRouteLookup } from "./metrics.mjs";
 import {
   managedDeliveryAccountIsAdmitted,
@@ -652,9 +654,12 @@ function exactVerdict(text) {
 }
 
 function relayHeaders(metadata, signature) {
-  return new Headers({
+  // The version header is derived from the same normalized metadata the
+  // canonical signature input uses, so the wire label can never diverge from
+  // the signed bytes.
+  const headers = new Headers({
     "Content-Type": "message/rfc822",
-    "X-Witself-Email-Version": "witself-email-relay-pilot-v1",
+    "X-Witself-Email-Version": metadata.version,
     "X-Witself-Email-Timestamp": String(metadata.timestamp),
     "X-Witself-Email-Key-Id": metadata.keyId,
     "X-Witself-Email-Audience": metadata.audience,
@@ -664,6 +669,12 @@ function relayHeaders(metadata, signature) {
     "X-Witself-Email-Raw-SHA256": `sha256:${metadata.rawSHA256}`,
     "X-Witself-Email-Signature": base64Standard(signature),
   });
+  if (metadata.version === RELAY_SIGNATURE_VERSION_V2) {
+    headers.set("X-Witself-Email-SPF-Result", metadata.spfResult);
+    headers.set("X-Witself-Email-DKIM-Result", metadata.dkimResult);
+    headers.set("X-Witself-Email-DMARC-Result", metadata.dmarcResult);
+  }
+  return headers;
 }
 
 async function handleEmailTransaction(message, env, runtime = {}) {
@@ -787,22 +798,44 @@ async function handleEmailTransaction(message, env, runtime = {}) {
   }
 
   // Authentication follows every recipient, route, cohort, and size gate so
-  // non-existent or held-back recipients can never expose an authentication signal.
-  if (String(env.AGENT_EMAIL_DMARC_REJECT_ENABLED) === "true") {
-    const trustedAuthservID = env.AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID;
-    if (
-      typeof trustedAuthservID === "string" &&
-      trustedAuthservID.length > 0 &&
-      extractAuthenticationVerdicts(new Uint8Array(raw), trustedAuthservID).dmarc === "fail"
-    ) {
-      message.setReject(DMARC_REJECTION);
-      return { outcome: "rejected_dmarc_fail", phase: "authentication", status: 550 };
-    }
+  // non-existent or held-back recipients can never expose an authentication
+  // signal. One extraction feeds both the rejection decision and the v2
+  // envelope's recorded verdicts; a recordable "fail" is exactly an attested,
+  // recognized dmarc=fail from the trusted attester's own header, so the
+  // rejection semantics are unchanged.
+  const trustedAuthservID = env.AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID;
+  let recordedVerdicts = null;
+  if (typeof trustedAuthservID === "string" && trustedAuthservID.length > 0) {
+    recordedVerdicts = extractRecordableAuthenticationVerdicts(new Uint8Array(raw), trustedAuthservID);
+  }
+  if (
+    String(env.AGENT_EMAIL_DMARC_REJECT_ENABLED) === "true" &&
+    recordedVerdicts !== null &&
+    recordedVerdicts.dmarc === "fail"
+  ) {
+    message.setReject(DMARC_REJECTION);
+    return { outcome: "rejected_dmarc_fail", phase: "authentication", status: 550 };
   }
 
+  // The send version is an explicit reviewed deployment value. It defaults
+  // to v1 when the binding is absent and fails closed on any other value, so
+  // the v2 flip is a deliberate operator action after every receiving cell
+  // dual-accepts.
+  const relayVersion = String(env.AGENT_EMAIL_RELAY_VERSION ?? RELAY_SIGNATURE_VERSION);
+  if (relayVersion !== RELAY_SIGNATURE_VERSION && relayVersion !== RELAY_SIGNATURE_VERSION_V2) {
+    throw transient("tempfail_configuration", "configuration");
+  }
   let metadata;
   try {
     metadata = normalizeRelayMetadata({
+      version: relayVersion,
+      ...(relayVersion === RELAY_SIGNATURE_VERSION_V2
+        ? {
+            spfResult: recordedVerdicts?.spf ?? "unknown",
+            dkimResult: recordedVerdicts?.dkim ?? "unknown",
+            dmarcResult: recordedVerdicts?.dmarc ?? "unknown",
+          }
+        : {}),
       timestamp: Math.floor(now() / 1000),
       keyId: env.RELAY_KEY_ID,
       envelopeFrom: normalizeEnvelopeAddress(message.from ?? "", true),

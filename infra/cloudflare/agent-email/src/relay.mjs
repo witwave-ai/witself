@@ -1,5 +1,15 @@
 export const RELAY_SIGNATURE_VERSION = "witself-email-relay-pilot-v1";
+// RELAY_SIGNATURE_VERSION_V2 appends the edge-attested SPF/DKIM/DMARC
+// verdicts as three plain-token lines. Cells dual-accept both versions; the
+// edge sends v2 only behind AGENT_EMAIL_RELAY_VERSION after every receiving
+// cell accepts it (cell-side inert first).
+export const RELAY_SIGNATURE_VERSION_V2 = "witself-email-relay-v2";
 export const RELAY_MAXIMUM_RAW_BYTES = 25 * 1024 * 1024;
+
+// Signed verdict vocabularies, exactly the cell schema-0059 column CHECKs.
+const RELAY_SPF_VOCABULARY = new Set(["unknown", "none", "neutral", "pass", "fail", "softfail", "temperror", "permerror"]);
+const RELAY_DKIM_VOCABULARY = new Set(["unknown", "none", "neutral", "pass", "fail", "policy", "temperror", "permerror"]);
+const RELAY_DMARC_VOCABULARY = new Set(["unknown", "none", "pass", "fail", "temperror", "permerror"]);
 
 const textEncoder = new TextEncoder();
 const KEY_ID = /^[a-z][a-z0-9_-]{0,63}$/;
@@ -27,7 +37,12 @@ export function normalizeEnvelopeAddress(value, allowEmpty = false) {
 }
 
 export function normalizeRelayMetadata(metadata) {
+  const version = String(metadata?.version ?? "").trim() || RELAY_SIGNATURE_VERSION;
   const normalized = {
+    version,
+    spfResult: String(metadata?.spfResult ?? "").trim().toLowerCase(),
+    dkimResult: String(metadata?.dkimResult ?? "").trim().toLowerCase(),
+    dmarcResult: String(metadata?.dmarcResult ?? "").trim().toLowerCase(),
     timestamp: Number(metadata?.timestamp),
     keyId: String(metadata?.keyId ?? "").trim().toLowerCase(),
     envelopeFrom: normalizeEnvelopeAddress(String(metadata?.envelopeFrom ?? ""), true),
@@ -36,6 +51,21 @@ export function normalizeRelayMetadata(metadata) {
     rawSize: Number(metadata?.rawSize),
     rawSHA256: String(metadata?.rawSHA256 ?? "").trim().toLowerCase(),
   };
+  if (normalized.version === RELAY_SIGNATURE_VERSION) {
+    if (normalized.spfResult !== "" || normalized.dkimResult !== "" || normalized.dmarcResult !== "") {
+      throw new Error("a v1 envelope cannot carry authentication verdicts");
+    }
+  } else if (normalized.version === RELAY_SIGNATURE_VERSION_V2) {
+    if (
+      !RELAY_SPF_VOCABULARY.has(normalized.spfResult) ||
+      !RELAY_DKIM_VOCABULARY.has(normalized.dkimResult) ||
+      !RELAY_DMARC_VOCABULARY.has(normalized.dmarcResult)
+    ) {
+      throw new Error("authentication verdicts are outside the signed vocabulary");
+    }
+  } else {
+    throw new Error("unsupported envelope version");
+  }
   if (!Number.isSafeInteger(normalized.timestamp) || normalized.timestamp <= 0) {
     throw new Error("invalid relay timestamp");
   }
@@ -81,7 +111,7 @@ function base64Decode(value) {
 export function canonicalSignatureInput(metadata) {
   const value = normalizeRelayMetadata(metadata);
   const fields = [
-    RELAY_SIGNATURE_VERSION,
+    value.version,
     String(value.timestamp),
     value.keyId,
     base64URL(textEncoder.encode(value.envelopeFrom)),
@@ -90,6 +120,10 @@ export function canonicalSignatureInput(metadata) {
     String(value.rawSize),
     `sha256:${value.rawSHA256}`,
   ];
+  if (value.version === RELAY_SIGNATURE_VERSION_V2) {
+    // Plain lowercase tokens by construction; no encoding required.
+    fields.push(value.spfResult, value.dkimResult, value.dmarcResult);
+  }
   return textEncoder.encode(`${fields.join("\n")}\n`);
 }
 

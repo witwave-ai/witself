@@ -348,6 +348,7 @@ test("normal deploy validates the complete relocated production config", () => {
     REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false",
     AGENT_EMAIL_DMARC_REJECT_ENABLED: "false",
     AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: "",
+    AGENT_EMAIL_RELAY_VERSION: "witself-email-relay-pilot-v1",
   };
   const configPath = "/private/config/wrangler.generated.jsonc";
   const entrypoint = "/private/source/src/index.js";
@@ -399,6 +400,7 @@ test("normal deploy validates the complete relocated production config", () => {
       REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false",
       AGENT_EMAIL_DMARC_REJECT_ENABLED: "false",
       AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: "",
+      AGENT_EMAIL_RELAY_VERSION: "witself-email-relay-pilot-v1",
     },
     observability: { enabled: true },
   };

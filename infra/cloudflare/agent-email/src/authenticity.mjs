@@ -287,10 +287,9 @@ function parseMethodSegment(value, start, end) {
 
   if (!Object.hasOwn(RESULT_VALUES, method)) return { type: "other" };
   const token = value.slice(resultStart, index).toLowerCase();
-  const result = supportedVersion && RESULT_VALUES[method].has(token)
-    ? token
-    : RESULT_DEFAULTS[method];
-  return { type: "method", method, result };
+  const recognized = supportedVersion && RESULT_VALUES[method].has(token);
+  const result = recognized ? token : RESULT_DEFAULTS[method];
+  return { type: "method", method, result, recognized };
 }
 
 // Split only at top-level semicolons so quoted reasons, comments, and property
@@ -299,6 +298,7 @@ function methodResults(value, start) {
   const results = { ...RESULT_DEFAULTS };
   const seen = new Set();
   const ambiguous = new Set();
+  const attested = new Set();
   let segmentStart = start;
   let segmentCount = 0;
   let sawNone = false;
@@ -320,9 +320,11 @@ function methodResults(value, start) {
     if (seen.has(parsed.method)) {
       ambiguous.add(parsed.method);
       results[parsed.method] = RESULT_DEFAULTS[parsed.method];
+      attested.delete(parsed.method);
     } else {
       seen.add(parsed.method);
       results[parsed.method] = parsed.result;
+      if (parsed.recognized) attested.add(parsed.method);
     }
     return true;
   }
@@ -352,7 +354,7 @@ function methodResults(value, start) {
   if (quote || commentDepth > 0 || escaped || !consumeSegment(value.length)) return null;
   if (sawNone && segmentCount !== 1) return null;
   for (const method of ambiguous) results[method] = RESULT_DEFAULTS[method];
-  return results;
+  return { results, attested };
 }
 
 export function extractAuthenticationVerdicts(rawMessage, trustedAuthservIDValue) {
@@ -366,9 +368,52 @@ export function extractAuthenticationVerdicts(rawMessage, trustedAuthservIDValue
     if (selected === null) return DEFAULT_RESULTS;
     const start = payloadStart(selected);
     if (start < 0) return DEFAULT_RESULTS;
-    const results = methodResults(selected, start);
-    return results === null ? DEFAULT_RESULTS : Object.freeze(results);
+    const parsed = methodResults(selected, start);
+    return parsed === null ? DEFAULT_RESULTS : Object.freeze(parsed.results);
   } catch {
     return DEFAULT_RESULTS;
+  }
+}
+
+// UNATTESTED_RESULTS is the recording posture when no trusted attester
+// evaluation is available: every method is unknown, never the enforcement
+// defaults above (whose dmarc "none" is a real RFC 8601 claim).
+export const UNATTESTED_RESULTS = Object.freeze({
+  spf: "unknown",
+  dkim: "unknown",
+  dmarc: "unknown",
+});
+
+// extractRecordableAuthenticationVerdicts is the recording entry point for
+// the signed relay envelope. It records a method's verdict only when the
+// trusted attester's own selected header carried that method with a
+// recognized result token under a supported version, exactly once. Every
+// not-attested case — absent or invalid trusted id, oversized or malformed
+// header block, no matching header, malformed selected field, unparseable
+// results, unrecognized tokens, ambiguous duplicates — records "unknown"
+// rather than synthesizing an evaluation that never happened. A genuinely
+// attested result (including dmarc "none") is preserved. Enforcement keeps
+// using extractAuthenticationVerdicts; the two entry points deliberately
+// share every parsing bound.
+export function extractRecordableAuthenticationVerdicts(rawMessage, trustedAuthservIDValue) {
+  try {
+    const trustedID = trustedAuthservID(trustedAuthservIDValue);
+    const bytes = boundedBytes(rawMessage);
+    if (trustedID === null || bytes === null) return UNATTESTED_RESULTS;
+    const block = headerBlockBytes(bytes);
+    if (block === null) return UNATTESTED_RESULTS;
+    const selected = selectedAuthenticationResults(block, trustedID);
+    if (selected === null) return UNATTESTED_RESULTS;
+    const start = payloadStart(selected);
+    if (start < 0) return UNATTESTED_RESULTS;
+    const parsed = methodResults(selected, start);
+    if (parsed === null) return UNATTESTED_RESULTS;
+    const recordable = { ...UNATTESTED_RESULTS };
+    for (const method of parsed.attested) {
+      recordable[method] = parsed.results[method];
+    }
+    return Object.freeze(recordable);
+  } catch {
+    return UNATTESTED_RESULTS;
   }
 }
