@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/witwave-ai/witself/internal/id"
+	"github.com/witwave-ai/witself/internal/nulsafe"
 )
 
 // Transcript entry roles. They describe recorded content, not authentication.
@@ -151,6 +152,9 @@ func (s *Store) CreateTranscript(ctx context.Context, accountID, realmID, agentI
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			return Transcript{}, ErrTranscriptExists
+		}
+		if errors.As(err, &pgErr) && (pgErr.Code == "22P05" || pgErr.Code == "22021") {
+			return Transcript{}, fmt.Errorf("%w: transcript metadata contains characters PostgreSQL cannot store", ErrTranscriptInputInvalid)
 		}
 		return Transcript{}, fmt.Errorf("create transcript: %w", err)
 	}
@@ -315,6 +319,12 @@ func (s *Store) AppendTranscriptEntries(ctx context.Context, accountID, realmID,
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 				return nil, ErrTranscriptExists
+			}
+			if errors.As(err, &pgErr) && (pgErr.Code == "22P05" || pgErr.Code == "22021") {
+				// Belt and suspenders under the nulsafe sanitation above: any
+				// residual unstorable character is the caller's content, not a
+				// server fault, and must never wedge a client into 5xx retries.
+				return nil, fmt.Errorf("%w: entry content contains characters PostgreSQL cannot store", ErrTranscriptInputInvalid)
 			}
 			return nil, fmt.Errorf("append transcript entry: %w", err)
 		}
@@ -652,6 +662,10 @@ func verifyLiveAgentScope(ctx context.Context, tx pgx.Tx, accountID, realmID, ag
 func normalizeCreateTranscriptInput(in CreateTranscriptInput) (CreateTranscriptInput, error) {
 	in.ExternalID = strings.TrimSpace(in.ExternalID)
 	in.Title = strings.TrimSpace(in.Title)
+	if nulsafe.ContainsString(in.ExternalID) {
+		return CreateTranscriptInput{}, fmt.Errorf("%w: external_id must not contain NUL", ErrTranscriptInputInvalid)
+	}
+	in.Title = nulsafe.ReplaceString(in.Title)
 	if len(in.ExternalID) > maxTranscriptExternalIDBytes {
 		return CreateTranscriptInput{}, fmt.Errorf("%w: external_id exceeds %d bytes", ErrTranscriptInputInvalid, maxTranscriptExternalIDBytes)
 	}
@@ -672,6 +686,14 @@ func normalizeAppendTranscriptEntryInput(in AppendTranscriptEntryInput) (AppendT
 	in.Model = strings.TrimSpace(in.Model)
 	in.ReplyToEntryID = strings.TrimSpace(in.ReplyToEntryID)
 	in.ReplyToExternalID = strings.TrimSpace(in.ReplyToExternalID)
+	for _, identifier := range []string{in.ExternalID, in.Role, in.Model, in.ReplyToEntryID, in.ReplyToExternalID} {
+		if nulsafe.ContainsString(identifier) {
+			return AppendTranscriptEntryInput{}, fmt.Errorf("%w: identifiers must not contain NUL", ErrTranscriptInputInvalid)
+		}
+	}
+	// Captured terminal output legitimately contains NUL, which PostgreSQL
+	// TEXT and jsonb cannot store. Content is sanitized, never dropped.
+	in.Body = nulsafe.ReplaceString(in.Body)
 	switch in.Role {
 	case TranscriptRoleUser, TranscriptRoleAssistant, TranscriptRoleSystem, TranscriptRoleTool:
 	default:
@@ -732,6 +754,15 @@ func normalizeJSONObject(raw json.RawMessage, emptyObject bool) (json.RawMessage
 	canonical, err := json.Marshal(object)
 	if err != nil {
 		return nil, err
+	}
+	// Nested json.RawMessage values marshal verbatim, so a NUL escape deep
+	// inside the object survives to here; jsonb rejects it (SQLSTATE 22P05).
+	canonical, _, err = nulsafe.SanitizeJSON(canonical)
+	if err != nil {
+		return nil, err
+	}
+	if len(canonical) > maxTranscriptJSONBytes {
+		return nil, fmt.Errorf("exceeds %d bytes", maxTranscriptJSONBytes)
 	}
 	return canonical, nil
 }

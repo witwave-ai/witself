@@ -19,6 +19,7 @@ import (
 	"github.com/witwave-ai/witself/internal/local"
 	"github.com/witwave-ai/witself/internal/memorycurator"
 	"github.com/witwave-ai/witself/internal/memoryhydration"
+	"github.com/witwave-ai/witself/internal/nulsafe"
 	"github.com/witwave-ai/witself/internal/transcriptcapture"
 )
 
@@ -2183,6 +2184,13 @@ func transcriptFlush(args []string) int {
 				Metadata:   event.TranscriptMetadata(),
 			})
 			if err != nil {
+				if errors.Is(err, client.ErrBadRequest) {
+					// One rejected event must not wedge every other transcript's
+					// flush; block this transcript for the run and move on.
+					fmt.Fprintf(os.Stderr, "witself: create capture transcript rejected: %v\n", err)
+					blockedTranscripts[event.TranscriptExternalID()] = err
+					continue
+				}
 				fmt.Fprintf(os.Stderr, "witself: create capture transcript: %v\n", err)
 				return 1
 			}
@@ -2192,11 +2200,21 @@ func transcriptFlush(args []string) int {
 				fmt.Fprintf(os.Stderr, "witself: prepare capture event: %v\n", err)
 				return 1
 			}
+			appendRejected := false
 			for _, inputs := range inputBatches {
 				if _, err := client.AppendTranscriptEntries(ctx, conn.Endpoint, conn.Token, tr.ID, inputs); err != nil {
+					if errors.Is(err, client.ErrBadRequest) {
+						fmt.Fprintf(os.Stderr, "witself: append capture event rejected: %v\n", err)
+						blockedTranscripts[event.TranscriptExternalID()] = err
+						appendRejected = true
+						break
+					}
 					fmt.Fprintf(os.Stderr, "witself: append capture event: %v\n", err)
 					return 1
 				}
+			}
+			if appendRejected {
+				continue
 			}
 			if activityErr != nil {
 				fmt.Fprintf(os.Stderr, "witself: record agent activity: %v\n", activityErr)
@@ -2369,9 +2387,17 @@ func captureAppendBatches(entries []transcriptcapture.Entry) ([][]client.AppendT
 	}
 	for _, entry := range entries {
 		input := client.AppendTranscriptEntryInput{
-			ExternalID: entry.ExternalID, Role: entry.Role, Body: entry.Body,
+			// Captured terminal output can contain NUL, which PostgreSQL TEXT
+			// and jsonb reject; sanitizing here also repairs events already
+			// queued in the outbox, so a wedged backlog flushes on upgrade.
+			ExternalID: entry.ExternalID, Role: entry.Role, Body: nulsafe.ReplaceString(entry.Body),
 			Payload: entry.Payload, Model: entry.Model,
 			ReplyToExternalID: entry.ReplyToExternalID,
+		}
+		if len(input.Payload) > 0 {
+			if sanitized, _, err := nulsafe.SanitizeJSON(input.Payload); err == nil {
+				input.Payload = sanitized
+			}
 		}
 		raw, err := json.Marshal(input)
 		if err != nil {
