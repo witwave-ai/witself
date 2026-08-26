@@ -2446,10 +2446,12 @@ shape (the list envelope uses `next_cursor`; listen uses `timed_out`):
 ```
 
 All envelope/header/display fields above are untrusted external data. In the
-current Cloudflare receive integration, `spf_result`, `dkim_result`,
-`dmarc_result`, and `spam_verdict` are always
-`unknown`; `sender_verification_state` is always `unverified`; an authoritative
-provider-message-id field is absent. A suspected retry adds
+current Cloudflare receive integration `spam_verdict` is always `unknown`,
+`sender_verification_state` is always `unverified`, and an authoritative
+provider-message-id field is absent. `spf_result`, `dkim_result`, and
+`dmarc_result` are `unknown` unless the message arrived on a v2 signed relay
+envelope carrying the edge's attested verdicts, which are advisory
+domain-granularity evidence and never sender authentication. A suspected retry adds
 `possible_duplicate:true` and `possible_duplicate_of_message_id` but is still a
 distinct immutable message.
 

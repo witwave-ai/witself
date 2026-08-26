@@ -21,6 +21,12 @@ const (
 	// RelaySignatureVersion is the first canonical signed-envelope format.
 	RelaySignatureVersion = "witself-email-relay-pilot-v1"
 
+	// RelaySignatureVersionV2 extends the signed envelope with the edge's
+	// attested SPF/DKIM/DMARC verdicts as three appended plain-token lines.
+	// Cells dual-accept both versions; the edge switches only after every
+	// receiving cell accepts v2 (cell-side inert first).
+	RelaySignatureVersionV2 = "witself-email-relay-v2"
+
 	// RelayMaximumRawBytes is the transport-level technical ceiling shared by
 	// the production edge relay and the cell signature envelope.
 	RelayMaximumRawBytes = 25 * 1024 * 1024
@@ -43,10 +49,17 @@ var (
 )
 
 // RelayMetadata is the complete signed edge-to-cell relay envelope.
-// Provider message IDs and authentication/spam results are intentionally
-// absent because Cloudflare's EmailMessage event does not expose authoritative
-// values for them.
+// Provider message IDs and spam verdicts are intentionally absent because
+// Cloudflare's EmailMessage event does not expose authoritative values for
+// them. A v2 envelope carries the edge's attested SPF/DKIM/DMARC verdicts:
+// domain-granularity advisory transport of the trusted attester's own
+// Authentication-Results header, signed for transport integrity — never
+// authentication of a sender principal.
 type RelayMetadata struct {
+	// Version selects the canonical signed-envelope format. The zero value
+	// means RelaySignatureVersion so existing callers keep their exact
+	// prior byte contract.
+	Version           string
 	Timestamp         int64
 	KeyID             string
 	Audience          string
@@ -54,13 +67,55 @@ type RelayMetadata struct {
 	EnvelopeRecipient string
 	RawSize           int64
 	RawSHA256         string
+	// SPFResult, DKIMResult, and DMARCResult are the edge-attested verdicts
+	// on a v2 envelope, bounded to the schema-0059 column vocabularies.
+	// "unknown" means not evaluated by a trusted attester. They must be
+	// empty on a v1 envelope.
+	SPFResult   string
+	DKIMResult  string
+	DMARCResult string
 }
+
+// Signed verdict vocabularies, exactly the schema-0059 column CHECK lists.
+var (
+	relaySPFVocabulary = map[string]bool{
+		"unknown": true, "none": true, "neutral": true, "pass": true,
+		"fail": true, "softfail": true, "temperror": true, "permerror": true,
+	}
+	relayDKIMVocabulary = map[string]bool{
+		"unknown": true, "none": true, "neutral": true, "pass": true,
+		"fail": true, "policy": true, "temperror": true, "permerror": true,
+	}
+	relayDMARCVocabulary = map[string]bool{
+		"unknown": true, "none": true, "pass": true, "fail": true,
+		"temperror": true, "permerror": true,
+	}
+)
 
 // Normalize validates and canonicalizes the signed envelope. A sender may be
 // empty for the SMTP null reverse-path. Lowercasing the sender is acceptable
 // for this provider profile because it is used only as unverified display
 // metadata and a non-destructive suspected-duplicate grouping component.
 func (m RelayMetadata) Normalize() (RelayMetadata, error) {
+	m.Version = strings.TrimSpace(m.Version)
+	if m.Version == "" {
+		m.Version = RelaySignatureVersion
+	}
+	m.SPFResult = strings.ToLower(strings.TrimSpace(m.SPFResult))
+	m.DKIMResult = strings.ToLower(strings.TrimSpace(m.DKIMResult))
+	m.DMARCResult = strings.ToLower(strings.TrimSpace(m.DMARCResult))
+	switch m.Version {
+	case RelaySignatureVersion:
+		if m.SPFResult != "" || m.DKIMResult != "" || m.DMARCResult != "" {
+			return RelayMetadata{}, fmt.Errorf("%w: a v1 envelope cannot carry authentication verdicts", ErrRelayMetadataInvalid)
+		}
+	case RelaySignatureVersionV2:
+		if !relaySPFVocabulary[m.SPFResult] || !relayDKIMVocabulary[m.DKIMResult] || !relayDMARCVocabulary[m.DMARCResult] {
+			return RelayMetadata{}, fmt.Errorf("%w: authentication verdicts are outside the signed vocabulary", ErrRelayMetadataInvalid)
+		}
+	default:
+		return RelayMetadata{}, fmt.Errorf("%w: unsupported envelope version", ErrRelayMetadataInvalid)
+	}
 	m.Audience = strings.ToLower(strings.TrimSpace(m.Audience))
 	m.KeyID = strings.ToLower(strings.TrimSpace(m.KeyID))
 	m.EnvelopeSender = strings.ToLower(strings.TrimSpace(m.EnvelopeSender))
@@ -111,7 +166,7 @@ func CanonicalSignatureInput(metadata RelayMetadata) ([]byte, error) {
 		return nil, err
 	}
 	fields := []string{
-		RelaySignatureVersion,
+		m.Version,
 		strconv.FormatInt(m.Timestamp, 10),
 		m.KeyID,
 		base64.RawURLEncoding.EncodeToString([]byte(m.EnvelopeSender)),
@@ -119,6 +174,11 @@ func CanonicalSignatureInput(metadata RelayMetadata) ([]byte, error) {
 		base64.RawURLEncoding.EncodeToString([]byte(m.Audience)),
 		strconv.FormatInt(m.RawSize, 10),
 		"sha256:" + m.RawSHA256,
+	}
+	if m.Version == RelaySignatureVersionV2 {
+		// Plain lowercase tokens by construction (Normalize bounds them to
+		// the signed vocabulary), so no encoding is required.
+		fields = append(fields, m.SPFResult, m.DKIMResult, m.DMARCResult)
 	}
 	return []byte(strings.Join(fields, "\n") + "\n"), nil
 }

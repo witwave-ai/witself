@@ -68,6 +68,7 @@ var upgraders = map[int]Upgrader{
 	89: preserveSchema89Rows,
 	90: preserveSchema90Rows,
 	91: preserveSchema91Rows,
+	92: acceptEdgeAttestedAuthenticityRelaxation,
 }
 
 // preserveSchema91Rows acknowledges schema 0092's nullable account purge
@@ -608,6 +609,15 @@ func addFactDeletionDefaults(table string, row map[string]any) (map[string]any, 
 	row["deleted_candidate_revision"] = ""
 	row["recreated_at"] = nil
 	row["replacement_fact_id"] = nil
+	return row, nil
+}
+
+// acceptEdgeAttestedAuthenticityRelaxation lifts schema-92 rows across the
+// 0093 provider-posture relaxation. The migration only widens what the
+// destination accepts (edge-attested SPF/DKIM/DMARC verdicts on Cloudflare
+// pilot messages); every archived row already satisfies the new posture
+// unchanged, so this upgrader is a documented pass-through.
+func acceptEdgeAttestedAuthenticityRelaxation(_ string, row map[string]any) (map[string]any, error) {
 	return row, nil
 }
 

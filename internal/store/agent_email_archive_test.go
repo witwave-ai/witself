@@ -365,7 +365,7 @@ func TestAgentEmailArchiveRejectsHostileContentAndCrossScopeLinks(t *testing.T) 
 		raw := []byte("Subject: posture\r\n\r\nbody")
 		for name, mutate := range map[string]func(map[string]any){
 			"provider id": func(row map[string]any) { row["provider_message_id"] = "forged-provider-id" },
-			"spf pass":    func(row map[string]any) { row["spf_result"] = "pass" },
+			"spam clean":  func(row map[string]any) { row["spam_verdict"] = "clean" },
 			"verified":    func(row map[string]any) { row["sender_verification_state"] = "verified" },
 		} {
 			t.Run(name, func(t *testing.T) {

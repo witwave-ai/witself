@@ -30,6 +30,9 @@ const (
 	AgentEmailRelayHeaderRawSize           = "X-Witself-Email-Raw-Size"
 	AgentEmailRelayHeaderRawSHA256         = "X-Witself-Email-Raw-SHA256"
 	AgentEmailRelayHeaderSignature         = "X-Witself-Email-Signature"
+	AgentEmailRelayHeaderSPFResult         = "X-Witself-Email-SPF-Result"
+	AgentEmailRelayHeaderDKIMResult        = "X-Witself-Email-DKIM-Result"
+	AgentEmailRelayHeaderDMARCResult       = "X-Witself-Email-DMARC-Result"
 	defaultAgentEmailListenWaitSeconds     = 20
 	maxAgentEmailListenWaitSeconds         = 20
 	agentEmailListenPollInterval           = time.Second
@@ -769,7 +772,7 @@ func agentEmailStorageStatusHandler(
 
 func parseAgentEmailRelayHeaders(r *http.Request) (agentemail.RelayMetadata, []byte, bool) {
 	version, ok := singleAgentEmailHeader(r.Header, AgentEmailRelayHeaderVersion)
-	if !ok || version != agentemail.RelaySignatureVersion {
+	if !ok || (version != agentemail.RelaySignatureVersion && version != agentemail.RelaySignatureVersionV2) {
 		return agentemail.RelayMetadata{}, nil, false
 	}
 	timestampRaw, ok := singleAgentEmailHeader(r.Header, AgentEmailRelayHeaderTimestamp)
@@ -811,9 +814,23 @@ func parseAgentEmailRelayHeaders(r *http.Request) (agentemail.RelayMetadata, []b
 		return agentemail.RelayMetadata{}, nil, false
 	}
 	metadata := agentemail.RelayMetadata{
+		Version:   version,
 		Timestamp: timestamp, KeyID: keyID, Audience: audience,
 		EnvelopeSender: from, EnvelopeRecipient: to, RawSize: rawSize,
 		RawSHA256: strings.TrimPrefix(digestHeader, "sha256:"),
+	}
+	if version == agentemail.RelaySignatureVersionV2 {
+		// A v2 envelope must carry all three attested verdicts, single-valued
+		// and already canonical; the strict normalized-equality check below
+		// rejects any non-canonical wire form. Stray verdict headers on a v1
+		// request are unsigned and deliberately never read.
+		spf, spfOK := singleAgentEmailHeader(r.Header, AgentEmailRelayHeaderSPFResult)
+		dkim, dkimOK := singleAgentEmailHeader(r.Header, AgentEmailRelayHeaderDKIMResult)
+		dmarc, dmarcOK := singleAgentEmailHeader(r.Header, AgentEmailRelayHeaderDMARCResult)
+		if !spfOK || !dkimOK || !dmarcOK || spf == "" || dkim == "" || dmarc == "" {
+			return agentemail.RelayMetadata{}, nil, false
+		}
+		metadata.SPFResult, metadata.DKIMResult, metadata.DMARCResult = spf, dkim, dmarc
 	}
 	normalized, err := metadata.Normalize()
 	if err != nil || normalized != metadata || digestHeader != "sha256:"+metadata.RawSHA256 {

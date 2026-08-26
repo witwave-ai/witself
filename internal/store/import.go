@@ -5270,7 +5270,19 @@ func (ic *importCtx) validateImportedAgentEmailMessage(obj map[string]any) (stri
 		if hasProviderMessageID {
 			return "", agentEmailMessageImportScope{}, fmt.Errorf("pilot provider_message_id must be unavailable")
 		}
-		for _, field := range []string{"spf_result", "dkim_result", "dmarc_result", "spam_verdict"} {
+		pinnedUnknown := []string{"spf_result", "dkim_result", "dmarc_result", "spam_verdict"}
+		if ic.schemaVersion >= 93 {
+			// Schema 0093 archives may carry edge-attested SPF/DKIM/DMARC
+			// verdicts (vocabulary-validated above); the provider still
+			// exposes no spam verdict and no provider message id.
+			pinnedUnknown = pinnedUnknown[3:]
+			for _, field := range []string{"spf_result", "dkim_result", "dmarc_result"} {
+				if _, present, fieldErr := importedNullableBoundedString(obj, field, 32, false); fieldErr != nil || !present {
+					return "", agentEmailMessageImportScope{}, fmt.Errorf("pilot %s must be present", field)
+				}
+			}
+		}
+		for _, field := range pinnedUnknown {
 			value, present, fieldErr := importedNullableBoundedString(obj, field, 32, false)
 			if fieldErr != nil || !present || value != "unknown" {
 				return "", agentEmailMessageImportScope{}, fmt.Errorf("pilot %s must be unknown", field)

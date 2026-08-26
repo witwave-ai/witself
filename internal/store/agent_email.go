@@ -1621,7 +1621,7 @@ func (s *Store) IngestAgentEmailPilot(
 		    ($1,$2,$3,$4,$5,$6,$7,NULL,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
 		     $19,$20,$21,$22,$23,$24,$25,$26,
 		     $27,$28,$29,$30,$31,true,
-		     'unknown','unknown','unknown','unknown','unverified',$32,$33,
+		     $34,$35,$36,'unknown','unverified',$32,$33,
 		     clock_timestamp())
 		  RETURNING received_at,created_at`,
 		messageID, address.AccountID, address.RealmID, address.MailboxID,
@@ -1635,7 +1635,10 @@ func (s *Store) IngestAgentEmailPilot(
 		agentEmailNullableString(parsed.MIMEMessageID), parsed.MessageDate, parsed.AttachmentCount,
 		agentEmailNullableString(parsed.Text), agentEmailNullableString(parsed.TextKind),
 		attachmentStorageBytes, retainedAttachmentStorageBytes, payloadRetentionState,
-		duplicateGroup, agentEmailNullableString(possibleDuplicate)).
+		duplicateGroup, agentEmailNullableString(possibleDuplicate),
+		agentEmailVerdictOrUnknown(relay.SPFResult),
+		agentEmailVerdictOrUnknown(relay.DKIMResult),
+		agentEmailVerdictOrUnknown(relay.DMARCResult)).
 		Scan(&receivedAt, &createdAt)
 	if err != nil {
 		storedErr := fmt.Errorf("store agent email: %w", err)
@@ -1706,8 +1709,10 @@ func (s *Store) IngestAgentEmailPilot(
 		AttachmentStorageBytes:         attachmentStorageBytes,
 		RetainedAttachmentStorageBytes: retainedAttachmentStorageBytes,
 		PayloadRetentionState:          payloadRetentionState,
-		SPFResult:                      "unknown", DKIMResult: "unknown", DMARCResult: "unknown",
-		SpamVerdict: "unknown", SenderVerificationState: AgentEmailSenderUnverified,
+		SPFResult:                      agentEmailVerdictOrUnknown(relay.SPFResult),
+		DKIMResult:                     agentEmailVerdictOrUnknown(relay.DKIMResult),
+		DMARCResult:                    agentEmailVerdictOrUnknown(relay.DMARCResult),
+		SpamVerdict:                    "unknown", SenderVerificationState: AgentEmailSenderUnverified,
 		PossibleDuplicate:          possibleDuplicate != "",
 		PossibleDuplicateOfMessage: possibleDuplicate,
 		ReceivedAt:                 receivedAt, CreatedAt: createdAt, Folder: AgentEmailFolderInbox,
@@ -3425,6 +3430,16 @@ func requireAgentEmailRetryCanaryPrincipal(scope AgentEmailPilotScope, p Princip
 		return ErrAgentEmailForbidden
 	}
 	return nil
+}
+
+// agentEmailVerdictOrUnknown maps an absent (v1-envelope) attested verdict to
+// the stored "unknown" sentinel. A v2 envelope's values arrive already bounded
+// to the signed vocabulary by RelayMetadata.Normalize.
+func agentEmailVerdictOrUnknown(value string) string {
+	if value == "" {
+		return "unknown"
+	}
+	return value
 }
 
 func agentEmailDuplicateGroup(rawSHA, recipient, sender string) string {
