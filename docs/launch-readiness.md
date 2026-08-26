@@ -32,7 +32,7 @@ Status legend: ✅ done · 🔨 Claude-owned (build/deploy) · 🔑 needs Scott
 | **Team activation** | ✅ done — seats set (Personal 1 / Professional 3 / Team 25, ratified 2026-08-24) and Team flipped available at one flat monthly price | — | — |
 | **Billing** | Dark Stripe stack complete; live account verified (acct_1TpugQEICTDi58ec); all six CP_STRIPE_* secrets STAGED on witself-control-plane (secret key, webhook, portal bpc_, 3 URLs) — verified 2026-08-25; dunning emails on | Cutover only | 🔑 set CP_BILLING_PROVIDER/CP_STRIPE_MODE/CP_PLAN_LIFECYCLE_ENABLED(+allowlist), activate Tax, live end-to-end proof; (opt) revoke stale Jul-5 secret key |
 | **Support** | Policy published (#251); assistant author-kind + reserved handle (#252); re-triage (#253); dark AI runner + notification labeling (#255); entitlement sync (#256); scoped support_ai credential (#257); support@ intake bridge implemented dark | SLO metric + breach alert, keyed intake enablement | 🔨 code · 🔑 support@ DNS+routing, runner host + API key, mint scoped credential, enable flag |
-| **Monitoring** | LIVE 2026-08-25: 3-phase rollout merged + verified (#264 stack, #265 targets, #266 alerting); PagerDuty `witself-prod` incident route + dead-man heartbeat active; 14 rules, zero eval failures, schema-91 + PVC metrics scraped | Alert canary + dead-man lapse proof (both page — hold for Scott's go) | 🔑 canary go only |
+| **Monitoring** | LIVE 2026-08-25: 3-phase rollout merged + verified (#264 stack, #265 targets, #266 alerting); PagerDuty `witself-prod` incident route + dead-man heartbeat active; 14 rules, zero eval failures, schema-91 + PVC metrics scraped | — (accepted; observe normal rules/storage growth over the acceptance window) | ✅ |
 | **Edge DMARC** | Inbound worker runs full SMTP txn; cell records spf/dkim/dmarc | Authenticity parser module, hard-DMARC-fail SMTP rejection (dark flag), value-free authenticity metadata (dark), migration | 🔨 code · 🔑 authserv-id from live header, worker deploy |
 | **Capacity** | ✅ done | 2-node Civo prod profile applied 2026-08-25: cell `civo-sandbox-usw2-dev` scaled 1→2 `g4s.kube.medium` in place (both ACTIVE, cluster Ready); `profile: prod` pinned in the inventory so it won't revert | — |
 | **Retention** | ✅ done (#239) | — | — |
@@ -163,9 +163,12 @@ Grouped by the interaction required. Claude does everything up to these.
   counter timeline (firing 0→1 at 04:04:23Z, resolve 1→2 at 04:09:15Z, zero
   failures), and operator receipt — Scott received and resolved the incident
   on PagerDuty.
-- Remaining (pages the on-call phone — run only on Scott's explicit go): the
-  dead-man lapse/restore proof (silence Watchdog, confirm healthchecks.io
-  pages after the 15m grace lapses, restore, confirm recovery).
+- ✅ Dead-man lapse/restore proof PASSED 2026-08-26 (Scott's go): Watchdog
+  silenced 04:12Z (incident alerting stayed live), heartbeat flatlined 24 min
+  at counter 56, healthchecks.io paged via `witself-prod` (operator confirmed
+  04:36Z), silence deleted, heartbeat resumed 04:37:20Z with zero failed
+  notifications. Receipts + per-minute flatline log in `~/.witself/`
+  (mode 0600). Monitoring acceptance evidence is complete.
 
 **Stripe** (2026-08-24: account verified for live charges; portal default
 configuration saved; webhook `witself-control-plane` →
