@@ -24,6 +24,10 @@ type vector struct {
 		Audience     string `json:"audience"`
 		RawSize      int64  `json:"raw_size"`
 		RawSHA256    string `json:"raw_sha256"`
+		Version      string `json:"version"`
+		SPFResult    string `json:"spf_result"`
+		DKIMResult   string `json:"dkim_result"`
+		DMARCResult  string `json:"dmarc_result"`
 	} `json:"metadata"`
 	PKCS8Base64     string `json:"pkcs8_base64"`
 	PublicKeyBase64 string `json:"public_key_base64"`
@@ -41,10 +45,16 @@ func decode(name, value string) []byte {
 }
 
 func main() {
-	if len(os.Args) != 2 {
-		panic("usage: golden-go <golden-vector.json>")
+	if len(os.Args) < 2 {
+		panic("usage: golden-go <golden-vector.json> [more vectors...]")
 	}
-	data, err := os.ReadFile(os.Args[1])
+	for _, path := range os.Args[1:] {
+		verify(path)
+	}
+}
+
+func verify(path string) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		panic(err)
 	}
@@ -58,6 +68,7 @@ func main() {
 		panic("raw body does not match vector metadata")
 	}
 	metadata := agentemail.RelayMetadata{
+		Version:           v.Metadata.Version,
 		Timestamp:         v.Metadata.Timestamp,
 		KeyID:             v.Metadata.KeyID,
 		EnvelopeSender:    v.Metadata.EnvelopeFrom,
@@ -65,6 +76,9 @@ func main() {
 		Audience:          v.Metadata.Audience,
 		RawSize:           v.Metadata.RawSize,
 		RawSHA256:         v.Metadata.RawSHA256,
+		SPFResult:         v.Metadata.SPFResult,
+		DKIMResult:        v.Metadata.DKIMResult,
+		DMARCResult:       v.Metadata.DMARCResult,
 	}
 	canonical, err := agentemail.CanonicalSignatureInput(metadata)
 	if err != nil {
@@ -88,5 +102,5 @@ func main() {
 	if !ok || !ed25519.Verify(privateKey.Public().(ed25519.PublicKey), canonical, signature) {
 		panic("Go PKCS8 key does not match Worker vector")
 	}
-	fmt.Println("Go verified Cloudflare Worker relay golden vector")
+	fmt.Println("Go verified Cloudflare Worker relay golden vector: " + path)
 }

@@ -75,12 +75,23 @@ gate does not control canonical Realm-ID traffic. Legacy compatibility traffic
 is canonical-only and therefore uses the canonical-delivery gate.
 
 Sender-domain hard-fail rejection is independently dark. The edge parses
-`Authentication-Results` only when `AGENT_EMAIL_DMARC_REJECT_ENABLED` is the
-exact string `true` and `AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID` names a nonempty
-trusted attester. Only its attested `dmarc=fail` result rejects; every other
-result falls through to the existing relay behavior. Both settings default dark (`false` and the empty
-string), and authentication runs only after recipient, route, cohort, and size
-gates have admitted and buffered the message.
+`Authentication-Results` whenever `AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID` names
+a nonempty trusted attester; the parse feeds two independent consumers. The
+rejection gate additionally requires `AGENT_EMAIL_DMARC_REJECT_ENABLED` to be
+the exact string `true`, and only an attested `dmarc=fail` rejects; every
+other result falls through to the existing relay behavior. Verdict recording
+uses the same single extraction: when `AGENT_EMAIL_RELAY_VERSION` is the exact
+string `witself-email-relay-v2`, the signed envelope carries the attested
+SPF/DKIM/DMARC verdicts (every not-attested case — absent attester config, no
+matching header, malformed or ambiguous results — records `unknown`, never a
+synthesized claim). `AGENT_EMAIL_RELAY_VERSION` defaults to
+`witself-email-relay-pilot-v1` and may be flipped only after every receiving
+cell dual-accepts v2; before enabling recording, verify the configured
+authserv-id against a live inbound header — the extractor selects the first
+matching header top-down, so a stale or wrong value can select a
+sender-supplied stamp. All settings default dark, and authentication runs only
+after recipient, route, cohort, and size gates have admitted and buffered the
+message.
 
 All canonical and managed-alias traffic has a second, account-scoped fence:
 `AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST`. It is an exact sorted CSV of
@@ -441,7 +452,9 @@ renderer also requires a valid
 empty cohort. `AGENT_EMAIL_DMARC_REJECT_ENABLED` defaults to `false` and accepts
 only literal `true` or `false`.
 `AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID` defaults to empty and otherwise accepts
-one bounded printable non-space ASCII token without a semicolon. The
+one bounded printable non-space ASCII token without a semicolon.
+`AGENT_EMAIL_RELAY_VERSION` defaults to `witself-email-relay-pilot-v1` and
+accepts only that literal or `witself-email-relay-v2`. The
 control-plane renderer uses its `CP_`-prefixed cohort counterpart.
 Each managed-delivery gate remains default-off if its own binding is absent;
 DMARC rejection is also disabled if either DMARC setting is absent. The renderer
@@ -646,6 +659,7 @@ the operator shell without printing their values:
 - `REALM_EMAIL_CANONICAL_DELIVERY_ENABLED`
 - `AGENT_EMAIL_DMARC_REJECT_ENABLED`
 - `AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID`
+- `AGENT_EMAIL_RELAY_VERSION`
 
 The token needs Workers deployment/secret access, Account Analytics Read,
 Zone Settings Read, Email Routing Rules Write, and KV read/write for the

@@ -9,6 +9,8 @@ import {
   RELAY_MAXIMUM_RAW_BYTES,
   sha256Hex,
   signRelay,
+  RELAY_SIGNATURE_VERSION,
+  RELAY_SIGNATURE_VERSION_V2,
 } from "../src/relay.mjs";
 
 const vector = JSON.parse(await readFile(new URL("./golden-vector.json", import.meta.url), "utf8"));
@@ -74,4 +76,88 @@ test("relay metadata accepts exactly 25 MiB and rejects one byte more", () => {
     ...metadata,
     rawSize: RELAY_MAXIMUM_RAW_BYTES + 1,
   }), /invalid relay raw size/);
+});
+
+
+const vectorV2 = JSON.parse(
+  await readFile(new URL("./golden-vector-v2.json", import.meta.url), "utf8"),
+);
+
+test("v2 canonical bytes, deterministic signature, and verify match the v2 vector", async () => {
+  const metadata = {
+    version: vectorV2.metadata.version,
+    timestamp: vectorV2.metadata.timestamp,
+    keyId: vectorV2.metadata.key_id,
+    envelopeFrom: vectorV2.metadata.envelope_from,
+    envelopeTo: vectorV2.metadata.envelope_to,
+    audience: vectorV2.metadata.audience,
+    rawSize: vectorV2.metadata.raw_size,
+    rawSHA256: vectorV2.metadata.raw_sha256,
+    spfResult: vectorV2.metadata.spf_result,
+    dkimResult: vectorV2.metadata.dkim_result,
+    dmarcResult: vectorV2.metadata.dmarc_result,
+  };
+  const canonical = canonicalSignatureInput(metadata);
+  assert.equal(Buffer.from(canonical).toString("base64"), vectorV2.canonical_base64);
+  const privateKey = await importSigningKey(vectorV2.pkcs8_base64);
+  const { signature } = await signRelay(metadata, privateKey);
+  assert.equal(Buffer.from(signature).toString("base64"), vectorV2.signature_base64);
+});
+
+test("every v2 verdict field changes the signed bytes", () => {
+  const base = {
+    version: RELAY_SIGNATURE_VERSION_V2,
+    timestamp: vectorV2.metadata.timestamp,
+    keyId: vectorV2.metadata.key_id,
+    envelopeFrom: vectorV2.metadata.envelope_from,
+    envelopeTo: vectorV2.metadata.envelope_to,
+    audience: vectorV2.metadata.audience,
+    rawSize: vectorV2.metadata.raw_size,
+    rawSHA256: vectorV2.metadata.raw_sha256,
+    spfResult: "pass",
+    dkimResult: "none",
+    dmarcResult: "fail",
+  };
+  const baseline = Buffer.from(canonicalSignatureInput(base)).toString("base64");
+  for (const mutation of [
+    { spfResult: "fail" },
+    { dkimResult: "pass" },
+    { dmarcResult: "none" },
+  ]) {
+    const mutated = Buffer.from(canonicalSignatureInput({ ...base, ...mutation })).toString("base64");
+    assert.notEqual(mutated, baseline);
+  }
+});
+
+test("version and verdict rules fail closed", () => {
+  const base = {
+    timestamp: vectorV2.metadata.timestamp,
+    keyId: vectorV2.metadata.key_id,
+    envelopeFrom: vectorV2.metadata.envelope_from,
+    envelopeTo: vectorV2.metadata.envelope_to,
+    audience: vectorV2.metadata.audience,
+    rawSize: vectorV2.metadata.raw_size,
+    rawSHA256: vectorV2.metadata.raw_sha256,
+  };
+  // A v1 envelope cannot carry verdicts.
+  assert.throws(() => canonicalSignatureInput({ ...base, spfResult: "pass" }));
+  // Unknown versions and out-of-vocabulary verdicts are rejected.
+  assert.throws(() => canonicalSignatureInput({ ...base, version: "witself-email-relay-v3" }));
+  assert.throws(() => canonicalSignatureInput({
+    ...base,
+    version: RELAY_SIGNATURE_VERSION_V2,
+    spfResult: "pass",
+    dkimResult: "pass",
+    dmarcResult: "softfail",
+  }));
+  // Cross-version relabeling changes the signed bytes.
+  const v1Bytes = Buffer.from(canonicalSignatureInput({ ...base, version: RELAY_SIGNATURE_VERSION })).toString("base64");
+  const v2Bytes = Buffer.from(canonicalSignatureInput({
+    ...base,
+    version: RELAY_SIGNATURE_VERSION_V2,
+    spfResult: "unknown",
+    dkimResult: "unknown",
+    dmarcResult: "unknown",
+  })).toString("base64");
+  assert.notEqual(v1Bytes, v2Bytes);
 });

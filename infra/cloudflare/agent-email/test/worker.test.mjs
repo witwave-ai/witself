@@ -2600,3 +2600,115 @@ test("cell remains final recipient authority after alias routing", async () => {
   });
   assert.deepEqual(mail.rejected, ["recipient unavailable"]);
 });
+
+
+test("v2 relay version sends verdict headers with all-unknown when nothing is attested", async () => {
+  let request;
+  const mail = message();
+  await handleEmail(mail, legacyEnv(null, { AGENT_EMAIL_RELAY_VERSION: "witself-email-relay-v2" }, vectorNowMS), {
+    now: () => vector.metadata.timestamp * 1000,
+    fetch: async (url, init) => {
+      request = { url, init };
+      return new Response('{"verdict":"accepted"}', { status: 200 });
+    },
+  });
+  assert.deepEqual(mail.rejected, []);
+  const headers = request.init.headers;
+  assert.equal(headers.get("X-Witself-Email-Version"), "witself-email-relay-v2");
+  assert.equal(headers.get("X-Witself-Email-SPF-Result"), "unknown");
+  assert.equal(headers.get("X-Witself-Email-DKIM-Result"), "unknown");
+  assert.equal(headers.get("X-Witself-Email-DMARC-Result"), "unknown");
+});
+
+test("v2 relay version records the trusted attester's verdicts in the signed headers", async () => {
+  const { mail } = messageWithAuthenticationResults(trustedAuthservID, "pass");
+  let request;
+  await handleEmail(mail, legacyEnv(null, {
+    AGENT_EMAIL_RELAY_VERSION: "witself-email-relay-v2",
+    AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: trustedAuthservID,
+  }, vectorNowMS), {
+    now: () => vector.metadata.timestamp * 1000,
+    fetch: async (url, init) => {
+      request = { url, init };
+      return new Response('{"verdict":"accepted"}', { status: 200 });
+    },
+  });
+  assert.deepEqual(mail.rejected, []);
+  const headers = request.init.headers;
+  assert.equal(headers.get("X-Witself-Email-Version"), "witself-email-relay-v2");
+  assert.equal(headers.get("X-Witself-Email-DMARC-Result"), "pass");
+  assert.equal(headers.get("X-Witself-Email-SPF-Result"), "unknown");
+  assert.equal(headers.get("X-Witself-Email-DKIM-Result"), "unknown");
+});
+
+test("a sender-forged attester never fills v2 verdict headers", async () => {
+  const { mail } = messageWithAuthenticationResults("mx.forged.example", "pass");
+  let request;
+  await handleEmail(mail, legacyEnv(null, {
+    AGENT_EMAIL_RELAY_VERSION: "witself-email-relay-v2",
+    AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: trustedAuthservID,
+  }, vectorNowMS), {
+    now: () => vector.metadata.timestamp * 1000,
+    fetch: async (url, init) => {
+      request = { url, init };
+      return new Response('{"verdict":"accepted"}', { status: 200 });
+    },
+  });
+  assert.deepEqual(mail.rejected, []);
+  const headers = request.init.headers;
+  assert.equal(headers.get("X-Witself-Email-DMARC-Result"), "unknown");
+});
+
+test("a v1 relay never sends verdict headers even with an attested result", async () => {
+  const { mail } = messageWithAuthenticationResults(trustedAuthservID, "pass");
+  let request;
+  await handleEmail(mail, legacyEnv(null, {
+    AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: trustedAuthservID,
+  }, vectorNowMS), {
+    now: () => vector.metadata.timestamp * 1000,
+    fetch: async (url, init) => {
+      request = { url, init };
+      return new Response('{"verdict":"accepted"}', { status: 200 });
+    },
+  });
+  assert.deepEqual(mail.rejected, []);
+  const headers = request.init.headers;
+  assert.equal(headers.get("X-Witself-Email-Version"), "witself-email-relay-pilot-v1");
+  assert.equal(headers.get("X-Witself-Email-SPF-Result"), null);
+  assert.equal(headers.get("X-Witself-Email-DMARC-Result"), null);
+});
+
+test("an invalid relay version fails closed as a transient before any relay", async () => {
+  let fetched = false;
+  const mail = message();
+  await assert.rejects(
+    handleEmail(mail, legacyEnv(null, { AGENT_EMAIL_RELAY_VERSION: "v2" }, vectorNowMS), {
+      now: () => vector.metadata.timestamp * 1000,
+      fetch: async () => {
+        fetched = true;
+        return new Response('{"verdict":"accepted"}', { status: 200 });
+      },
+    }),
+    /temporarily unavailable/,
+  );
+  assert.equal(fetched, false);
+  assert.equal(mail.rejected.length, 0);
+});
+
+test("dmarc rejection still fires from the shared extraction on v2", async () => {
+  const { mail } = messageWithAuthenticationResults(trustedAuthservID, "fail");
+  let fetched = false;
+  await handleEmail(mail, legacyEnv(null, {
+    AGENT_EMAIL_RELAY_VERSION: "witself-email-relay-v2",
+    AGENT_EMAIL_DMARC_REJECT_ENABLED: "true",
+    AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: trustedAuthservID,
+  }, vectorNowMS), {
+    now: () => vector.metadata.timestamp * 1000,
+    fetch: async () => {
+      fetched = true;
+      return new Response('{"verdict":"accepted"}', { status: 200 });
+    },
+  });
+  assert.equal(fetched, false);
+  assert.equal(mail.rejected.length, 1);
+});

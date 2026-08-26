@@ -27,6 +27,16 @@ export function releaseMessage(release) {
   return `Witself v${release.version} agent-email edge ${release.commit}`;
 }
 
+function requiredRelayVersion(value) {
+  const version = String(value ?? "witself-email-relay-pilot-v1");
+  if (!["witself-email-relay-pilot-v1", "witself-email-relay-v2"].includes(version)) {
+    throw new Error(
+      "AGENT_EMAIL_RELAY_VERSION must be witself-email-relay-pilot-v1 or witself-email-relay-v2",
+    );
+  }
+  return version;
+}
+
 function requiredBoolean(value, name) {
   if (value !== "true" && value !== "false") {
     throw new Error(`${name} must be explicitly true or false`);
@@ -155,6 +165,7 @@ export function expectedDeployment(env, release) {
     authenticationResultsAuthservID: authenticationResultsAuthservID(
       env.AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID,
     ),
+    relayVersion: requiredRelayVersion(env.AGENT_EMAIL_RELAY_VERSION),
   });
 }
 

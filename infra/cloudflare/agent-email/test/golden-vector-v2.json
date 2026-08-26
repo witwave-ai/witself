@@ -1,0 +1,21 @@
+{
+  "canonical_base64": "d2l0c2VsZi1lbWFpbC1yZWxheS12MgoxODAwMDAwMDAwCnBpbG90LTIwMjYtMDcKYzJWdVpHVnlRR1Y0WVcxd2JHVXVZMjl0CllXeHdhR0V1WVdKalpHVm1aMmhwYW10c01qTTBOVUJoWjJWdWRDMXRZV2xzTG5kcGRIZGhkbVV1WVdrCloyTndMWEJ5YjJRdGRYTXRZMlZ1ZEhKaGJERXRZMjl5WlEKMjEyCnNoYTI1Njo3NDc2MmU2ZGE0MTExYmU5YzkwMDk3N2VmOTM4MWRjN2Y5MjM4OGZlMGZiYjgwOThjYWQzYzk3ZDdiOTY4MmY0CnBhc3MKbm9uZQpmYWlsCg==",
+  "description": "Non-secret deterministic Ed25519 cross-language relay vector (v2, attested verdicts)",
+  "metadata": {
+    "audience": "gcp-prod-us-central1-core",
+    "dkim_result": "none",
+    "dmarc_result": "fail",
+    "envelope_from": "sender@example.com",
+    "envelope_to": "alpha.abcdefghijkl2345@agent-mail.witwave.ai",
+    "key_id": "pilot-2026-07",
+    "raw_sha256": "74762e6da4111be9c900977ef9381dc7f92388fe0fbb8098cad3c97d7b9682f4",
+    "raw_size": 212,
+    "spf_result": "pass",
+    "timestamp": 1800000000,
+    "version": "witself-email-relay-v2"
+  },
+  "pkcs8_base64": "MC4CAQAwBQYDK2VwBCIEIJ1hsZ3v/VpguoRK9JLsLMREScVpezJpGXA7rAMcrn9g",
+  "public_key_base64": "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+  "raw_base64": "RnJvbTogU2VuZGVyIDxzZW5kZXJAZXhhbXBsZS5jb20+DQpUbzogUGlsb3QgPGFscGhhLmFiY2RlZmdoaWprbDIzNDVAYWdlbnQtbWFpbC53aXR3YXZlLmFpPg0KU3ViamVjdDogR29sZGVuIHZlY3RvciB2Mg0KQXV0aGVudGljYXRpb24tUmVzdWx0czogbXgudHJ1c3RlZC5leGFtcGxlOyBzcGY9cGFzczsgZGtpbT1ub25lOyBkbWFyYz1mYWlsDQoNCmNvZGUgNjU0MzIxDQo=",
+  "signature_base64": "im+OIw5yesq/6rcog4zusdmyKE9j67DpgV0FT/dElfRow6SwhwxX0rpR3B16XX/3AYeyRohdWZrpEdpuVCPbDg=="
+}

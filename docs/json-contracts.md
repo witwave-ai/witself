@@ -2572,10 +2572,25 @@ X-Witself-Email-Raw-SHA256: sha256:<lowercase-hex>
 X-Witself-Email-Signature: <standard padded base64 Ed25519 signature>
 ```
 
-`witself-email-relay-pilot-v1` is the frozen legacy wire-version identifier used
-by the production relay. It is retained for compatibility and does not mean the
-current service is a pilot; changing it requires an explicitly versioned
-protocol migration across the edge and every receiving cell.
+`witself-email-relay-pilot-v1` is the frozen legacy wire-version identifier;
+it does not mean the current service is a pilot. The versioned successor
+`witself-email-relay-v2` appends three signed verdict headers, each a plain
+lowercase token from the matching column vocabulary:
+
+```text
+X-Witself-Email-SPF-Result: <spf verdict or unknown>
+X-Witself-Email-DKIM-Result: <dkim verdict or unknown>
+X-Witself-Email-DMARC-Result: <dmarc verdict or unknown>
+```
+
+The canonical Ed25519 signature input gains the same three values as appended
+lines, so the verdicts are transport-authenticated with the rest of the
+envelope. Cells dual-accept both versions; the edge sends v2 only behind the
+reviewed `AGENT_EMAIL_RELAY_VERSION` deployment value after every receiving
+cell dual-accepts (cell-side inert first). Verdicts are advisory
+domain-granularity evidence extracted from the configured trusted attester's
+own `Authentication-Results` stamp — never sender authentication, and
+`unknown` whenever nothing was genuinely attested.
 
 Schema 88 adds no route-provenance relay header. The route-projection signature
 is verified at the edge and is not forwarded. In particular, route kind, domain
