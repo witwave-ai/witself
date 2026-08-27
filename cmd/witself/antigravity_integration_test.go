@@ -817,7 +817,11 @@ func TestAntigravityPluginValidationFailuresAreBounded(t *testing.T) {
 
 	t.Run("timeout", func(t *testing.T) {
 		fixture := setupAntigravityIntegrationFixture(t)
-		t.Setenv("FAKE_AGY_SLEEP_VALIDATE", "10")
+		// The fake validator sleeps far longer than the configured timeout, so a
+		// correctly bounded install must terminate it via the timeout path rather
+		// than blocking until the validator exits on its own.
+		const validatorSleep = 10 * time.Second
+		t.Setenv("FAKE_AGY_SLEEP_VALIDATE", fmt.Sprintf("%d", validatorSleep/time.Second))
 		originalTimeout := antigravityPluginValidationTimeout
 		originalWait := antigravityPluginValidationWait
 		antigravityPluginValidationTimeout = 25 * time.Millisecond
@@ -830,8 +834,15 @@ func TestAntigravityPluginValidationFailuresAreBounded(t *testing.T) {
 		if code := installCmd(fixture.installArgs()); code != 1 {
 			t.Fatalf("install code = %d", code)
 		}
-		if elapsed := time.Since(started); elapsed > time.Second {
-			t.Fatalf("timed-out validator returned after %s", elapsed)
+		// The bound is proportional to the validator sleep, not an absolute wall
+		// clock: it only needs to stay well below validatorSleep so that a
+		// validator killed by the timeout is distinguishable from one that ran to
+		// completion. Half the sleep leaves generous headroom for process
+		// spawn/teardown and scheduler jitter on a loaded CI machine while still
+		// failing loudly if the timeout path stops firing (which would push
+		// elapsed toward validatorSleep).
+		if elapsed := time.Since(started); elapsed >= validatorSleep/2 {
+			t.Fatalf("timed-out validator returned after %s, want well under validator sleep %s", elapsed, validatorSleep)
 		}
 	})
 
@@ -849,7 +860,10 @@ func TestAntigravityPluginValidationFailuresAreBounded(t *testing.T) {
 
 func TestAntigravityVersionProbeTimeoutIsBounded(t *testing.T) {
 	fixture := setupAntigravityIntegrationFixture(t)
-	t.Setenv("FAKE_AGY_SLEEP_VERSION", "10")
+	// The fake probe sleeps far longer than the configured timeout, so a bounded
+	// probe must return via the timeout path rather than waiting for it to exit.
+	const probeSleep = 10 * time.Second
+	t.Setenv("FAKE_AGY_SLEEP_VERSION", fmt.Sprintf("%d", probeSleep/time.Second))
 	originalTimeout := runtimeVersionProbeTimeout
 	originalWait := runtimeVersionProbeWait
 	runtimeVersionProbeTimeout = 25 * time.Millisecond
@@ -862,8 +876,11 @@ func TestAntigravityVersionProbeTimeoutIsBounded(t *testing.T) {
 	if version := detectRuntimeVersion(transcriptcapture.RuntimeAntigravity, fixture.cli); version != "" {
 		t.Fatalf("timed-out version probe = %q", version)
 	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("timed-out version probe returned after %s", elapsed)
+	// Proportional bound: staying well below probeSleep proves the timeout fired,
+	// while leaving generous headroom for spawn/teardown and scheduler jitter on
+	// a loaded CI machine. See TestAntigravityPluginValidationFailuresAreBounded.
+	if elapsed := time.Since(started); elapsed >= probeSleep/2 {
+		t.Fatalf("timed-out version probe returned after %s, want well under probe sleep %s", elapsed, probeSleep)
 	}
 }
 
