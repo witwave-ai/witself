@@ -1917,6 +1917,14 @@ EMAIL_DIRECTORY_KV_ID="${EMAIL_DIRECTORY_KV_ID:?set dedicated agent-email KV id}
   npm run deploy
 ```
 
+Since the production-receive rollout installed the two
+`CP_REALM_EMAIL_CANONICAL_*` activation secrets, every control-plane deploy
+must additionally attest that reviewed live state with the exact literal
+`CP_DEPLOY_CANONICAL_EMAIL_ACTIVE=true`; without it the dark guard refuses
+(fail closed) because an activation secret is present. The attestation frees
+only the canonical pair — custom-domain and signup-Turnstile activation
+secrets are still refused unconditionally.
+
 `npm run deploy` renders `wrangler.generated.jsonc`, deploys the Worker and its
 existing Durable Object class set, and runs deployment verification. Do not run
 `npm run deploy:plans`; this slice changes no plan matrix. Do not deploy or

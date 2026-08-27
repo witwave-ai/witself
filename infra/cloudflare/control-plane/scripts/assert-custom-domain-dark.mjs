@@ -40,7 +40,17 @@ export const CONTROL_PLANE_DARK_SECRET_NAMES = Object.freeze([
   ...SIGNUP_TURNSTILE_DARK_SECRET_NAMES,
 ]);
 
-export function assertCustomDomainSecretsDark(secrets) {
+// canonicalEmailActive is the explicit reviewed attestation that canonical
+// realm-email delivery is the ratified live production state (it has been
+// since the production-receive rollout installed the two CP_REALM_EMAIL_
+// CANONICAL secrets). Only that exact pair is freed by the attestation;
+// custom-domain and signup-Turnstile activation secrets remain refused
+// unconditionally, and the default keeps the full strict set so an
+// unattested invocation behaves exactly as before.
+export function assertCustomDomainSecretsDark(
+  secrets,
+  { canonicalEmailActive = false } = {},
+) {
   if (!Array.isArray(secrets)) {
     throw new Error("Worker secret inventory must be a JSON array");
   }
@@ -53,9 +63,10 @@ export function assertCustomDomainSecretsDark(secrets) {
     }
     names.add(secret.name);
   }
-  const present = CONTROL_PLANE_DARK_SECRET_NAMES.filter(
-    (name) => names.has(name),
-  );
+  const refused = canonicalEmailActive
+    ? [...CUSTOM_DOMAIN_DARK_SECRET_NAMES, ...SIGNUP_TURNSTILE_DARK_SECRET_NAMES]
+    : CONTROL_PLANE_DARK_SECRET_NAMES;
+  const present = refused.filter((name) => names.has(name));
   if (present.length !== 0) {
     throw new Error(
       `dark control-plane deployment refused: activation secret present (${present.join(", ")})`,

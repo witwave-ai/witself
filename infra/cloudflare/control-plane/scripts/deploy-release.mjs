@@ -55,6 +55,11 @@ const LEASE_BOOTSTRAP_TARGET_RELEASE = "0.0.242";
 const CANONICAL_CONTROL_PLANE_ORIGIN = "https://self.witwave.ai";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
+// Post-activation deploys attest the reviewed live canonical-email state
+// explicitly; anything but the exact literal keeps the strict full-dark gate.
+const CANONICAL_EMAIL_ACTIVE =
+  process.env.CP_DEPLOY_CANONICAL_EMAIL_ACTIVE === "true";
+
 const CONTROL_PLANE_DARK_BINDINGS = Object.freeze([
   "CP_REALM_EMAIL_CANONICAL_DELIVERY_ENABLED",
   "CP_REALM_EMAIL_CANONICAL_INVENTORY_ENABLED",
@@ -683,6 +688,7 @@ async function deployPrivateReleaseConfig(release, commandEnvironments) {
         reviewedEnvironmentFile: release.reviewedEnvironmentFile,
       },
     ),
+    { canonicalEmailActive: CANONICAL_EMAIL_ACTIVE },
   );
   const deploy = async (signal) => {
     await withReleaseInputIntegrity(
@@ -972,6 +978,7 @@ export async function main(argv = process.argv.slice(2)) {
           reviewedEnvironmentFile: layout.reviewedEnvironmentFile,
         },
       ),
+      { canonicalEmailActive: CANONICAL_EMAIL_ACTIVE },
     ),
   });
   return withPrivateDeploymentConfigCleanup(
