@@ -1788,9 +1788,11 @@ func serve() int {
 			cfg.ProvisionAccountExact = func(
 				ctx context.Context,
 				provisionID, email, displayName string,
+				consentTermsVersion, consentPrivacyVersion string,
 			) (server.ProvisionedAccount, error) {
 				p, err := st.ProvisionAccountExact(
 					ctx, provisionID, email, displayName,
+					consentTermsVersion, consentPrivacyVersion,
 					provisionBootstrapTTL,
 				)
 				switch {

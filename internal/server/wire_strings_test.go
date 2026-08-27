@@ -124,7 +124,7 @@ func TestWireStringsThatTheWorkerGreps(t *testing.T) {
 			// mounted so accountLifecycleHandler is registered.
 			cfg := tc.cfg
 			cfg.ProvisionToken = "witself_prv_test"
-			cfg.ProvisionAccountExact = func(context.Context, string, string, string) (ProvisionedAccount, error) {
+			cfg.ProvisionAccountExact = func(context.Context, string, string, string, string, string) (ProvisionedAccount, error) {
 				return ProvisionedAccount{}, errors.New("unused")
 			}
 			srv := httptest.NewServer(apiMux(cfg))

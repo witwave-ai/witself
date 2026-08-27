@@ -126,11 +126,15 @@ type Config struct {
 	// POST /v1/accounts:provision-exact control-plane -> cell trust link. The
 	// distinct route is intentional: an old replica knows only /v1/accounts
 	// and returns 404 before mutation instead of ignoring a new provision_id.
-	// Self-hosted cells mount neither route.
+	// Self-hosted cells mount neither route. The consent versions are the
+	// optional dark ToS/privacy capture: both-or-neither, bound into the
+	// durable provision fingerprint when present, byte-identical behavior
+	// when absent.
 	ProvisionToken        string
 	ProvisionAccountExact func(
 		ctx context.Context,
 		provisionID, email, displayName string,
+		consentTermsVersion, consentPrivacyVersion string,
 	) (ProvisionedAccount, error)
 	// ProvisionAccount is the legacy non-idempotent callback retained only to
 	// represent mixed-version routing and old deployments. New server wiring
@@ -4107,6 +4111,7 @@ func provisionAccountHandler(
 	provision func(
 		ctx context.Context,
 		provisionID, email, displayName string,
+		consentTermsVersion, consentPrivacyVersion string,
 	) (ProvisionedAccount, error),
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -4119,6 +4124,9 @@ func provisionAccountHandler(
 			ProvisionID string `json:"provision_id"`
 			Email       string `json:"email"`
 			DisplayName string `json:"display_name"`
+			// Dark ToS/privacy consent capture: optional, both-or-neither.
+			ConsentTermsVersion   string `json:"consent_terms_version,omitempty"`
+			ConsentPrivacyVersion string `json:"consent_privacy_version,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
@@ -4138,8 +4146,25 @@ func provisionAccountHandler(
 		if req.DisplayName == "" {
 			req.DisplayName = req.Email
 		}
+		if (req.ConsentTermsVersion == "") != (req.ConsentPrivacyVersion == "") {
+			writeJSONError(
+				w, http.StatusBadRequest,
+				"consent_terms_version and consent_privacy_version must be provided together",
+			)
+			return
+		}
+		if req.ConsentTermsVersion != "" &&
+			(!validConsentVersion(req.ConsentTermsVersion) ||
+				!validConsentVersion(req.ConsentPrivacyVersion)) {
+			writeJSONError(
+				w, http.StatusBadRequest,
+				"consent versions must be printable ASCII of at most 64 bytes",
+			)
+			return
+		}
 		acct, err := provision(
 			r.Context(), req.ProvisionID, req.Email, req.DisplayName,
+			req.ConsentTermsVersion, req.ConsentPrivacyVersion,
 		)
 		if errors.Is(err, ErrConflict) {
 			writeJSONError(
@@ -4162,6 +4187,27 @@ func provisionAccountHandler(
 			"account":        acct,
 		})
 	}
+}
+
+// validConsentVersion bounds one optional ToS/privacy consent version label
+// exactly like the store's write path: 1..64 bytes of printable ASCII
+// (0x20-0x7E) with at least one non-space byte. NUL and every other control
+// byte fall outside the printable range.
+func validConsentVersion(version string) bool {
+	if len(version) == 0 || len(version) > 64 {
+		return false
+	}
+	nonSpace := false
+	for i := 0; i < len(version); i++ {
+		b := version[i]
+		if b < 0x20 || b > 0x7e {
+			return false
+		}
+		if b != ' ' {
+			nonSpace = true
+		}
+	}
+	return nonSpace
 }
 
 func accountSystemGetHandler(cfg Config) http.HandlerFunc {

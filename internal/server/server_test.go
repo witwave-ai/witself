@@ -194,7 +194,7 @@ func TestPlacementPolicyEndpoints(t *testing.T) {
 
 func TestPlacementPolicySystemEndpoint(t *testing.T) {
 	const evacuationID = "evac_01J00000000000000000000000"
-	provision := func(_ context.Context, _, _, _ string) (ProvisionedAccount, error) {
+	provision := func(_ context.Context, _, _, _, _, _ string) (ProvisionedAccount, error) {
 		return ProvisionedAccount{}, errors.New("unused")
 	}
 	var saved placement.Policy
@@ -1121,12 +1121,16 @@ func mustRequest(t *testing.T, method, url string) *http.Request {
 
 func TestProvisionAccount(t *testing.T) {
 	var gotProvisionID, gotEmail, gotDisplayName string
+	var gotConsentTerms, gotConsentPrivacy string
 	provision := func(
 		_ context.Context,
 		provisionID, email, displayName string,
+		consentTermsVersion, consentPrivacyVersion string,
 	) (ProvisionedAccount, error) {
 		gotProvisionID, gotEmail, gotDisplayName =
 			provisionID, email, displayName
+		gotConsentTerms, gotConsentPrivacy =
+			consentTermsVersion, consentPrivacyVersion
 		if provisionID == "prv_conflict" {
 			return ProvisionedAccount{}, ErrConflict
 		}
@@ -1204,8 +1208,27 @@ func TestProvisionAccount(t *testing.T) {
 	if r.StatusCode != http.StatusConflict {
 		t.Errorf("provision conflict = %d, want 409", r.StatusCode)
 	}
+	// Dark consent capture: one-of-two versions is malformed input, and
+	// each present version must be a bounded printable label.
 	r = post("witself_prv_good",
-		`{"provision_id":"prv_replay","email":" Amy@Co.com ","display_name":" Amy "}`)
+		`{"provision_id":"prv_half_consent","email":"a@b.c",`+
+			`"consent_terms_version":"draft-2026-08-22"}`)
+	closeBody(t, r)
+	if r.StatusCode != http.StatusBadRequest {
+		t.Errorf("one-of-two consent = %d, want 400", r.StatusCode)
+	}
+	r = post("witself_prv_good",
+		`{"provision_id":"prv_bad_consent","email":"a@b.c",`+
+			`"consent_terms_version":"`+strings.Repeat("a", 65)+`",`+
+			`"consent_privacy_version":"draft-2026-08-22"}`)
+	closeBody(t, r)
+	if r.StatusCode != http.StatusBadRequest {
+		t.Errorf("oversized consent version = %d, want 400", r.StatusCode)
+	}
+	r = post("witself_prv_good",
+		`{"provision_id":"prv_replay","email":" Amy@Co.com ","display_name":" Amy ",`+
+			`"consent_terms_version":"draft-2026-08-22",`+
+			`"consent_privacy_version":"draft-2026-08-23"}`)
 	defer closeBody(t, r)
 	if r.StatusCode != http.StatusCreated {
 		t.Fatalf("create = %d, want 201", r.StatusCode)
@@ -1229,6 +1252,13 @@ func TestProvisionAccount(t *testing.T) {
 		t.Errorf(
 			"provision callback = id %q email %q display %q",
 			gotProvisionID, gotEmail, gotDisplayName,
+		)
+	}
+	if gotConsentTerms != "draft-2026-08-22" ||
+		gotConsentPrivacy != "draft-2026-08-23" {
+		t.Errorf(
+			"provision consent callback = terms %q privacy %q",
+			gotConsentTerms, gotConsentPrivacy,
 		)
 	}
 }
@@ -1617,7 +1647,7 @@ func TestReapAccount(t *testing.T) {
 			return false, ErrNotFound
 		}
 	}
-	provision := func(_ context.Context, _, _, _ string) (ProvisionedAccount, error) {
+	provision := func(_ context.Context, _, _, _, _, _ string) (ProvisionedAccount, error) {
 		return ProvisionedAccount{}, errors.New("unused")
 	}
 	srv := httptest.NewServer(apiMux(Config{
@@ -1690,7 +1720,7 @@ func TestActivateAccount(t *testing.T) {
 		}
 	}
 	reap := func(_ context.Context, _ string) (bool, error) { return true, nil }
-	provision := func(_ context.Context, _, _, _ string) (ProvisionedAccount, error) {
+	provision := func(_ context.Context, _, _, _, _, _ string) (ProvisionedAccount, error) {
 		return ProvisionedAccount{}, errors.New("unused")
 	}
 	srv := httptest.NewServer(apiMux(Config{
@@ -1768,7 +1798,7 @@ func TestUpdateAccountEmail(t *testing.T) {
 		}
 		return nil
 	}
-	provision := func(_ context.Context, _, _, _ string) (ProvisionedAccount, error) {
+	provision := func(_ context.Context, _, _, _, _, _ string) (ProvisionedAccount, error) {
 		return ProvisionedAccount{}, errors.New("unused")
 	}
 	srv := httptest.NewServer(apiMux(Config{
@@ -1941,7 +1971,7 @@ func TestExportAccountArchiveFailureReported(t *testing.T) {
 		_, _ = io.WriteString(w, "partial-archive")
 		return exportErr
 	}
-	provision := func(_ context.Context, _, _, _ string) (ProvisionedAccount, error) {
+	provision := func(_ context.Context, _, _, _, _, _ string) (ProvisionedAccount, error) {
 		return ProvisionedAccount{}, errors.New("unused")
 	}
 	srv := httptest.NewServer(apiMux(Config{
@@ -2020,7 +2050,7 @@ func TestExportAccountBackupRequiresDedicatedBackupToken(t *testing.T) {
 		_, _ = io.WriteString(w, "backup-archive")
 		return nil
 	}
-	provision := func(_ context.Context, _, _, _ string) (ProvisionedAccount, error) {
+	provision := func(_ context.Context, _, _, _, _, _ string) (ProvisionedAccount, error) {
 		return ProvisionedAccount{}, errors.New("unused")
 	}
 	srv := httptest.NewServer(apiMux(Config{
@@ -2114,7 +2144,7 @@ func TestExportAccountBackupRequiresDedicatedBackupToken(t *testing.T) {
 
 func TestValidateAccountBackupRequiresExplicitGateAndExactID(t *testing.T) {
 	const backupID = "bkp_01J00000000000000000000000"
-	provision := func(_ context.Context, _, _, _ string) (ProvisionedAccount, error) {
+	provision := func(_ context.Context, _, _, _, _, _ string) (ProvisionedAccount, error) {
 		return ProvisionedAccount{}, errors.New("unused")
 	}
 	var gotBody []byte
@@ -2289,7 +2319,7 @@ func TestImportAccountArchive(t *testing.T) {
 			}, nil
 		}
 	}
-	provision := func(_ context.Context, _, _, _ string) (ProvisionedAccount, error) {
+	provision := func(_ context.Context, _, _, _, _, _ string) (ProvisionedAccount, error) {
 		return ProvisionedAccount{}, errors.New("unused")
 	}
 	srv := httptest.NewServer(apiMux(Config{
@@ -2387,7 +2417,7 @@ func TestLogAccountEvent(t *testing.T) {
 			return nil
 		}
 	}
-	provision := func(_ context.Context, _, _, _ string) (ProvisionedAccount, error) {
+	provision := func(_ context.Context, _, _, _, _, _ string) (ProvisionedAccount, error) {
 		return ProvisionedAccount{}, errors.New("unused")
 	}
 	srv := httptest.NewServer(apiMux(Config{
@@ -2462,7 +2492,7 @@ func TestBeginAccountEvacuationRequiresExactID(t *testing.T) {
 			Status:       "suspended",
 		}, nil
 	}
-	provision := func(_ context.Context, _, _, _ string) (ProvisionedAccount, error) {
+	provision := func(_ context.Context, _, _, _, _, _ string) (ProvisionedAccount, error) {
 		return ProvisionedAccount{}, errors.New("unused")
 	}
 	srv := httptest.NewServer(apiMux(Config{
@@ -2530,7 +2560,7 @@ func TestBeginAccountEvacuationRequiresExactID(t *testing.T) {
 
 func TestBeginAccountEvacuationOldReplicaFailsWithoutMutation(t *testing.T) {
 	mutated := false
-	provision := func(_ context.Context, _, _, _ string) (ProvisionedAccount, error) {
+	provision := func(_ context.Context, _, _, _, _, _ string) (ProvisionedAccount, error) {
 		return ProvisionedAccount{}, errors.New("unused")
 	}
 	legacySuspend := func(
@@ -2659,7 +2689,7 @@ func TestFinalizeAccountEvacuationSource(t *testing.T) {
 			AlreadyFinalized: accountID == "acc_retry",
 		}, nil
 	}
-	provision := func(_ context.Context, _, _, _ string) (ProvisionedAccount, error) {
+	provision := func(_ context.Context, _, _, _, _, _ string) (ProvisionedAccount, error) {
 		return ProvisionedAccount{}, errors.New("unused")
 	}
 	srv := httptest.NewServer(apiMux(Config{
@@ -2762,7 +2792,7 @@ func TestResumeAccountSystem(t *testing.T) {
 			Completed:    true,
 		}, nil
 	}
-	provision := func(_ context.Context, _, _, _ string) (ProvisionedAccount, error) {
+	provision := func(_ context.Context, _, _, _, _, _ string) (ProvisionedAccount, error) {
 		return ProvisionedAccount{}, errors.New("unused")
 	}
 	srv := httptest.NewServer(apiMux(Config{

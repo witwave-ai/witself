@@ -177,7 +177,7 @@ func TestSupportEmailTicketAdminErrorMapping(t *testing.T) {
 func supportEmailAdminTestConfig(provisionToken string) Config {
 	return Config{
 		ProvisionToken: provisionToken,
-		ProvisionAccountExact: func(context.Context, string, string, string) (ProvisionedAccount, error) {
+		ProvisionAccountExact: func(context.Context, string, string, string, string, string) (ProvisionedAccount, error) {
 			return ProvisionedAccount{}, errors.New("unused")
 		},
 	}

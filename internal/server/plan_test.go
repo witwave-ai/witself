@@ -29,7 +29,7 @@ func planTestServer(
 	t.Helper()
 	srv := httptest.NewServer(apiMux(Config{
 		ProvisionToken: "witself_prv_test",
-		ProvisionAccountExact: func(context.Context, string, string, string) (ProvisionedAccount, error) {
+		ProvisionAccountExact: func(context.Context, string, string, string, string, string) (ProvisionedAccount, error) {
 			return ProvisionedAccount{}, nil
 		},
 		SetAccountPlan: setPlan,
@@ -53,7 +53,7 @@ func TestAccountPlanFitEndpointRequiresAndReturnsExactSnapshot(t *testing.T) {
 	called := 0
 	srv := httptest.NewServer(apiMux(Config{
 		ProvisionToken: "witself_prv_test",
-		ProvisionAccountExact: func(context.Context, string, string, string) (ProvisionedAccount, error) {
+		ProvisionAccountExact: func(context.Context, string, string, string, string, string) (ProvisionedAccount, error) {
 			return ProvisionedAccount{}, nil
 		},
 		CheckAccountPlanFit: func(
@@ -152,7 +152,7 @@ func TestAccountPlanFitApplyEndpointReturnsStrictAtomicOutcomes(t *testing.T) {
 		calls := 0
 		srv := httptest.NewServer(apiMux(Config{
 			ProvisionToken: "witself_prv_test",
-			ProvisionAccountExact: func(context.Context, string, string, string) (ProvisionedAccount, error) {
+			ProvisionAccountExact: func(context.Context, string, string, string, string, string) (ProvisionedAccount, error) {
 				return ProvisionedAccount{}, nil
 			},
 			ApplyAccountPlanIfFits: func(
@@ -215,7 +215,7 @@ func TestAccountPlanFitApplyEndpointReturnsStrictAtomicOutcomes(t *testing.T) {
 		}
 		srv := httptest.NewServer(apiMux(Config{
 			ProvisionToken: "witself_prv_test",
-			ProvisionAccountExact: func(context.Context, string, string, string) (ProvisionedAccount, error) {
+			ProvisionAccountExact: func(context.Context, string, string, string, string, string) (ProvisionedAccount, error) {
 				return ProvisionedAccount{}, nil
 			},
 			ApplyAccountPlanIfFits: func(
@@ -270,7 +270,7 @@ func TestAccountPlanFitApplyEndpointRejectsInvalidRequestsAndResults(t *testing.
 	called := 0
 	srv := httptest.NewServer(apiMux(Config{
 		ProvisionToken: "witself_prv_test",
-		ProvisionAccountExact: func(context.Context, string, string, string) (ProvisionedAccount, error) {
+		ProvisionAccountExact: func(context.Context, string, string, string, string, string) (ProvisionedAccount, error) {
 			return ProvisionedAccount{}, nil
 		},
 		ApplyAccountPlanIfFits: func(
