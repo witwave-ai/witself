@@ -23,7 +23,7 @@ func TestAgentEmailCustomDomainRouteSystemEndpoints(t *testing.T) {
 	applyCalls := 0
 	cfg := Config{
 		ProvisionToken: "witself_prv_test",
-		ProvisionAccountExact: func(context.Context, string, string, string) (ProvisionedAccount, error) {
+		ProvisionAccountExact: func(context.Context, string, string, string, string, string) (ProvisionedAccount, error) {
 			return ProvisionedAccount{}, nil
 		},
 		ApplyAgentEmailCustomDomainRoute: func(

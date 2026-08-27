@@ -33,22 +33,28 @@ var (
 	// ErrAccountProvisionJournalStorage means durable journal I/O failed.
 	ErrAccountProvisionJournalStorage = errors.New("account provision journal storage failed")
 
-	accountProvisionFingerprintPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	accountProvisionIDPattern          = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
-	accountProvisionAccountIDPattern   = regexp.MustCompile(`^acc_[a-z2-7]{16}$`)
+	accountProvisionFingerprintPattern    = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	accountProvisionIDPattern             = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+	accountProvisionAccountIDPattern      = regexp.MustCompile(`^acc_[a-z2-7]{16}$`)
+	accountProvisionConsentVersionPattern = regexp.MustCompile(
+		`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`,
+	)
 )
 
 // AccountProvisionJournal is the private, crash-safe handoff for one local
 // account signup. RequestFingerprint binds the endpoint, local name, and
-// normalized signup request without retaining their plaintext. AccountID and
-// OperatorToken are added only after the one-shot bootstrap exchange succeeds,
-// so a crash cannot strand the consumed credential.
+// normalized signup request without retaining their plaintext; the only
+// request values retained are the non-sensitive accepted legal version labels.
+// AccountID and OperatorToken are added only after the one-shot bootstrap
+// exchange succeeds, so a crash cannot strand the consumed credential.
 type AccountProvisionJournal struct {
-	SchemaVersion      string `json:"schema_version"`
-	RequestFingerprint string `json:"request_fingerprint"`
-	ProvisionID        string `json:"provision_id"`
-	AccountID          string `json:"account_id,omitempty"`
-	OperatorToken      string `json:"operator_token,omitempty"`
+	SchemaVersion          string `json:"schema_version"`
+	RequestFingerprint     string `json:"request_fingerprint"`
+	ProvisionID            string `json:"provision_id"`
+	AcceptedTermsVersion   string `json:"accepted_terms_version,omitempty"`
+	AcceptedPrivacyVersion string `json:"accepted_privacy_version,omitempty"`
+	AccountID              string `json:"account_id,omitempty"`
+	OperatorToken          string `json:"operator_token,omitempty"`
 }
 
 // AccountProvisionJournalPath returns the canonical private journal path for a
@@ -65,7 +71,25 @@ func AccountProvisionJournalPath(localName string) (string, error) {
 func BeginAccountProvisionJournal(
 	localName, requestFingerprint string,
 ) (AccountProvisionJournal, bool, error) {
-	if !accountProvisionFingerprintPattern.MatchString(requestFingerprint) {
+	return BeginAccountProvisionJournalWithConsent(
+		localName, requestFingerprint, "", "",
+	)
+}
+
+// BeginAccountProvisionJournalWithConsent is BeginAccountProvisionJournal for
+// a signup that also needs to retain the exact non-sensitive legal version
+// labels accepted by the user. Keeping the labels beside the fingerprint lets
+// a later CLI resume the same request after its compiled-in legal versions have
+// changed. The fields are omitted for consentless signups, so v1 journals from
+// older clients remain valid and byte-compatible in shape.
+func BeginAccountProvisionJournalWithConsent(
+	localName, requestFingerprint, acceptedTermsVersion,
+	acceptedPrivacyVersion string,
+) (AccountProvisionJournal, bool, error) {
+	if !accountProvisionFingerprintPattern.MatchString(requestFingerprint) ||
+		!validAccountProvisionConsentVersions(
+			acceptedTermsVersion, acceptedPrivacyVersion,
+		) {
 		return AccountProvisionJournal{}, false, ErrAccountProvisionJournalInvalid
 	}
 	home, path, err := accountProvisionJournalLocation(localName)
@@ -84,9 +108,23 @@ func BeginAccountProvisionJournal(
 
 	current, err := readAccountProvisionJournalLocked(home, path)
 	if err == nil {
-		if current.RequestFingerprint != requestFingerprint {
+		if current.RequestFingerprint != requestFingerprint ||
+			(current.AcceptedTermsVersion != "" &&
+				(current.AcceptedTermsVersion != acceptedTermsVersion ||
+					current.AcceptedPrivacyVersion != acceptedPrivacyVersion)) {
 			clearAccountProvisionJournal(&current)
 			return AccountProvisionJournal{}, false, ErrAccountProvisionJournalConflict
+		}
+		if current.AcceptedTermsVersion == "" && acceptedTermsVersion != "" {
+			expected := current
+			current.AcceptedTermsVersion = acceptedTermsVersion
+			current.AcceptedPrivacyVersion = acceptedPrivacyVersion
+			if err := publishAccountProvisionJournal(
+				home, path, current, &expected,
+			); err != nil {
+				clearAccountProvisionJournal(&current)
+				return AccountProvisionJournal{}, false, err
+			}
 		}
 		return current, false, nil
 	}
@@ -99,9 +137,11 @@ func BeginAccountProvisionJournal(
 		return AccountProvisionJournal{}, false, ErrAccountProvisionJournalStorage
 	}
 	record := AccountProvisionJournal{
-		SchemaVersion:      accountProvisionJournalSchema,
-		RequestFingerprint: requestFingerprint,
-		ProvisionID:        provisionID,
+		SchemaVersion:          accountProvisionJournalSchema,
+		RequestFingerprint:     requestFingerprint,
+		ProvisionID:            provisionID,
+		AcceptedTermsVersion:   acceptedTermsVersion,
+		AcceptedPrivacyVersion: acceptedPrivacyVersion,
 	}
 	if err := publishAccountProvisionJournal(home, path, record, nil); err != nil {
 		return AccountProvisionJournal{}, false, err
@@ -655,7 +695,10 @@ func accountProvisionJournalDirectories(home, directory string) []string {
 func validAccountProvisionJournal(record AccountProvisionJournal) bool {
 	if record.SchemaVersion != accountProvisionJournalSchema ||
 		!accountProvisionFingerprintPattern.MatchString(record.RequestFingerprint) ||
-		!accountProvisionIDPattern.MatchString(record.ProvisionID) {
+		!accountProvisionIDPattern.MatchString(record.ProvisionID) ||
+		!validAccountProvisionConsentVersions(
+			record.AcceptedTermsVersion, record.AcceptedPrivacyVersion,
+		) {
 		return false
 	}
 	if record.AccountID == "" && record.OperatorToken == "" {
@@ -667,6 +710,14 @@ func validAccountProvisionJournal(record AccountProvisionJournal) bool {
 	kind, _, err := token.Parse(record.OperatorToken)
 	return err == nil && kind == token.KindOperator &&
 		strings.TrimSpace(record.OperatorToken) == record.OperatorToken
+}
+
+func validAccountProvisionConsentVersions(termsVersion, privacyVersion string) bool {
+	if termsVersion == "" || privacyVersion == "" {
+		return termsVersion == "" && privacyVersion == ""
+	}
+	return accountProvisionConsentVersionPattern.MatchString(termsVersion) &&
+		accountProvisionConsentVersionPattern.MatchString(privacyVersion)
 }
 
 func clearAccountProvisionJournal(record *AccountProvisionJournal) {
@@ -681,6 +732,8 @@ func equalAccountProvisionJournal(left, right AccountProvisionJournal) bool {
 	return left.SchemaVersion == right.SchemaVersion &&
 		left.RequestFingerprint == right.RequestFingerprint &&
 		left.ProvisionID == right.ProvisionID &&
+		left.AcceptedTermsVersion == right.AcceptedTermsVersion &&
+		left.AcceptedPrivacyVersion == right.AcceptedPrivacyVersion &&
 		left.AccountID == right.AccountID &&
 		left.OperatorToken == right.OperatorToken
 }

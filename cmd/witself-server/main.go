@@ -1788,9 +1788,11 @@ func serve() int {
 			cfg.ProvisionAccountExact = func(
 				ctx context.Context,
 				provisionID, email, displayName string,
+				consentTermsVersion, consentPrivacyVersion string,
 			) (server.ProvisionedAccount, error) {
 				p, err := st.ProvisionAccountExact(
 					ctx, provisionID, email, displayName,
+					consentTermsVersion, consentPrivacyVersion,
 					provisionBootstrapTTL,
 				)
 				switch {
@@ -1801,13 +1803,15 @@ func serve() int {
 					return server.ProvisionedAccount{}, err
 				}
 				return server.ProvisionedAccount{
-					AccountID:      p.AccountID,
-					OperatorID:     p.OperatorID,
-					Email:          p.Email,
-					Status:         p.Status,
-					BootstrapToken: p.BootstrapToken,
-					ProvisionID:    p.ProvisionID,
-					Replayed:       p.Replayed,
+					AccountID:                     p.AccountID,
+					OperatorID:                    p.OperatorID,
+					Email:                         p.Email,
+					Status:                        p.Status,
+					BootstrapToken:                p.BootstrapToken,
+					ProvisionID:                   p.ProvisionID,
+					Replayed:                      p.Replayed,
+					RecordedConsentTermsVersion:   p.RecordedConsentTermsVersion,
+					RecordedConsentPrivacyVersion: p.RecordedConsentPrivacyVersion,
 				}, nil
 			}
 			cfg.ReapAccount = func(ctx context.Context, accountID string) (bool, error) {

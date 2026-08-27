@@ -1447,6 +1447,20 @@ POST /v1/accounts/{account_id}:close
   state. An ambiguous counter retry reuses its checkpointed hashed IP scope and
   any committed allowance marker even when the source network changes; an
   initialized provision resumes without repeating these controls.
+  `consent_terms_version` and `consent_privacy_version` are optional
+  request-body strings (both-or-neither; 1–64 ASCII label characters, starting
+  with an alphanumeric and otherwise limited to alphanumerics, dot,
+  underscore, and hyphen) recording dark ToS/privacy consent. Unlike
+  `turnstile_token`, present consent IS included in the durable request
+  fingerprint — a retry with drifted consent is refused as a different
+  request — and the versions are stored on the account row at creation with
+  an `account.consent.recorded` audit event. The cell's exact-provision
+  response explicitly returns
+  `recorded_consent_terms_version` and `recorded_consent_privacy_version` as
+  strings or `null`; a consentful provision succeeds only when both echo the
+  submitted labels exactly, and the control plane fails closed when either
+  echo is absent or differs. A consent-less request leaves every stored and
+  hashed byte identical to today.
 - `GET /v1/accounts/{account_id}/members` lists human operators/admins
   (`witself account members`).
 - `POST /v1/accounts/{account_id}/members:invite` invites a human

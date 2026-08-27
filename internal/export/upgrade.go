@@ -69,6 +69,16 @@ var upgraders = map[int]Upgrader{
 	90: preserveSchema90Rows,
 	91: preserveSchema91Rows,
 	92: acceptEdgeAttestedAuthenticityRelaxation,
+	93: preserveSchema93Rows,
+}
+
+// preserveSchema93Rows acknowledges schema 0094's nullable account consent
+// columns (consent_terms_version, consent_privacy_version,
+// consent_recorded_at). A schema-93 archive predates consent capture, so the
+// destination NULL defaults are correct — no consent may ever be synthesized
+// for an account whose signup never carried it.
+func preserveSchema93Rows(_ string, row map[string]any) (map[string]any, error) {
+	return row, nil
 }
 
 // preserveSchema91Rows acknowledges schema 0092's nullable account purge

@@ -29,7 +29,7 @@ func TestRealmEmailRouteSystemEndpoints(t *testing.T) {
 	var prepared, committed RealmEmailRouteRetirementRequest
 	cfg := Config{
 		ProvisionToken: token,
-		ProvisionAccountExact: func(context.Context, string, string, string) (ProvisionedAccount, error) {
+		ProvisionAccountExact: func(context.Context, string, string, string, string, string) (ProvisionedAccount, error) {
 			return ProvisionedAccount{}, nil
 		},
 		GetRealmEmailRouteLifecycle: func(_ context.Context, accountID, realmID string) (RealmEmailRouteLifecycle, error) {

@@ -161,6 +161,48 @@ func TestValidateAndRecordEnforcesAccountScoping(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			name:  "consent event with version labels is accepted",
+			table: "account_events",
+			row: map[string]any{
+				"id": "evt_consent", "account_id": acc,
+				"actor_kind": ActorControlPlane, "actor_id": nil,
+				"verb": VerbAccountConsentRecorded,
+				"metadata": map[string]any{
+					"terms_version":   "terms-2026.08",
+					"privacy_version": "privacy-2026.08",
+				},
+			},
+			wantOK: true,
+		},
+		{
+			name:  "consent event refuses an email shaped label",
+			table: "account_events",
+			row: map[string]any{
+				"id": "evt_consent_email", "account_id": acc,
+				"actor_kind": ActorControlPlane, "actor_id": nil,
+				"verb": VerbAccountConsentRecorded,
+				"metadata": map[string]any{
+					"terms_version":   "owner@example.com",
+					"privacy_version": "privacy-2026.08",
+				},
+			},
+			want: consentVersionValidationError,
+		},
+		{
+			name:  "consent event refuses an over-length label",
+			table: "account_events",
+			row: map[string]any{
+				"id": "evt_consent_long", "account_id": acc,
+				"actor_kind": ActorControlPlane, "actor_id": nil,
+				"verb": VerbAccountConsentRecorded,
+				"metadata": map[string]any{
+					"terms_version":   strings.Repeat("a", 65),
+					"privacy_version": "privacy-2026.08",
+				},
+			},
+			want: consentVersionValidationError,
+		},
+		{
 			name:  "account_events row for a different account is refused",
 			table: "account_events",
 			row: map[string]any{
@@ -1111,6 +1153,109 @@ func TestValidateAndRecordPlanShapes(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("error = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateImportedAccountConsent(t *testing.T) {
+	const accountID = "acc_target"
+	base := func() map[string]any {
+		return map[string]any{
+			"id":                      accountID,
+			"is_default":              false,
+			"status":                  "pending",
+			"consent_terms_version":   "draft-2026-08-22",
+			"consent_privacy_version": "draft-2026-08-23",
+			"consent_recorded_at":     "2026-08-01T00:00:00Z",
+		}
+	}
+
+	ic := newImportCtx(accountID)
+	ic.schemaVersion = 94
+	if err := ic.validateAndRecord("accounts", base()); err != nil {
+		t.Fatalf("valid consent row: %v", err)
+	}
+
+	// Explicit nulls are the dark shape of a schema-94 archive whose signup
+	// never carried consent — and the only legal shape below schema 94.
+	for _, schema := range []int{93, 94} {
+		nulls := base()
+		nulls["consent_terms_version"] = nil
+		nulls["consent_privacy_version"] = nil
+		nulls["consent_recorded_at"] = nil
+		ic := newImportCtx(accountID)
+		ic.schemaVersion = schema
+		if err := ic.validateAndRecord("accounts", nulls); err != nil {
+			t.Fatalf("schema %d null consent row: %v", schema, err)
+		}
+	}
+
+	tests := []struct {
+		name   string
+		schema int
+		edit   func(map[string]any)
+		want   string
+	}{
+		{
+			name: "consent predates schema", schema: 93,
+			want: "consent predates schema 94",
+		},
+		{
+			name: "terms version travels alone", schema: 94,
+			edit: func(row map[string]any) {
+				row["consent_privacy_version"] = nil
+				row["consent_recorded_at"] = nil
+			},
+			want: "consent columns must travel together",
+		},
+		{
+			name: "recorded timestamp travels alone", schema: 94,
+			edit: func(row map[string]any) {
+				row["consent_terms_version"] = nil
+				row["consent_privacy_version"] = nil
+			},
+			want: "consent columns must travel together",
+		},
+		{
+			name: "timestamp malformed", schema: 94,
+			edit: func(row map[string]any) { row["consent_recorded_at"] = "yesterday" },
+			want: "consent_recorded_at must be an RFC3339 timestamp",
+		},
+		{
+			name: "terms version oversized", schema: 94,
+			edit: func(row map[string]any) {
+				row["consent_terms_version"] = strings.Repeat("a", 65)
+			},
+			want: "consent versions must be 1 to 64 characters, starting with an alphanumeric and containing only alphanumerics, dots, underscores, or hyphens",
+		},
+		{
+			name: "privacy version is not a string", schema: 94,
+			edit: func(row map[string]any) {
+				row["consent_privacy_version"] = float64(7)
+			},
+			want: "consent versions must be 1 to 64 characters, starting with an alphanumeric and containing only alphanumerics, dots, underscores, or hyphens",
+		},
+		{
+			name: "terms version carries control bytes", schema: 94,
+			edit: func(row map[string]any) {
+				row["consent_terms_version"] = "draft\t2026"
+			},
+			want: "consent versions must be 1 to 64 characters, starting with an alphanumeric and containing only alphanumerics, dots, underscores, or hyphens",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			row := base()
+			if test.edit != nil {
+				test.edit(row)
+			}
+			ic := newImportCtx(accountID)
+			ic.schemaVersion = test.schema
+			err := ic.validateAndRecord("accounts", row)
+			if err == nil || !errors.Is(err, ErrArchiveContent) ||
+				!strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want ErrArchiveContent containing %q", err, test.want)
 			}
 		})
 	}

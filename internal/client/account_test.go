@@ -12,6 +12,33 @@ import (
 	"testing"
 )
 
+func TestValidateAccountConsentVersions(t *testing.T) {
+	for _, versions := range [][2]string{
+		{"draft-2026-08-22", "privacy_2026.08"},
+		{strings.Repeat("a", 64), "v1"},
+		{"", ""},
+	} {
+		if err := validateAccountConsentVersions(
+			versions[0], versions[1],
+		); err != nil {
+			t.Errorf("valid consent %q/%q = %v",
+				versions[0], versions[1], err)
+		}
+	}
+	for _, versions := range [][2]string{
+		{"owner@example.com", "privacy-2026.08"},
+		{strings.Repeat("a", 65), "privacy-2026.08"},
+	} {
+		if err := validateAccountConsentVersions(
+			versions[0], versions[1],
+		); err == nil || err.Error() != consentVersionValidationError {
+			t.Errorf("invalid consent %q/%q = %v, want %q",
+				versions[0], versions[1], err,
+				consentVersionValidationError)
+		}
+	}
+}
+
 func TestCreateAccount(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/accounts" {
@@ -132,6 +159,8 @@ func TestCreateAccountExactUsesCallerProvisionID(t *testing.T) {
 			Invite         string  `json:"invite"`
 			DisplayName    string  `json:"display_name"`
 			TurnstileToken *string `json:"turnstile_token"`
+			ConsentTerms   *string `json:"consent_terms_version"`
+			ConsentPrivacy *string `json:"consent_privacy_version"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
@@ -141,6 +170,9 @@ func TestCreateAccountExactUsesCallerProvisionID(t *testing.T) {
 		}
 		if body.TurnstileToken != nil {
 			t.Errorf("empty turnstile token was not omitted")
+		}
+		if body.ConsentTerms != nil || body.ConsentPrivacy != nil {
+			t.Errorf("empty consent versions were not omitted")
 		}
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(
@@ -157,7 +189,7 @@ func TestCreateAccountExactUsesCallerProvisionID(t *testing.T) {
 	account, err := CreateAccountExact(
 		context.Background(), srv.URL+"/",
 		" Owner@Example.COM ", " invite-exact ", "",
-		"prv_durableRequest1", "",
+		"prv_durableRequest1", "", "", "",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -173,6 +205,7 @@ func TestCreateAccountExactUsesCallerProvisionID(t *testing.T) {
 	}
 	if _, err := CreateAccountExact(
 		context.Background(), srv.URL, "a@b.c", "invite", "", "bad id", "",
+		"", "",
 	); err == nil || !strings.Contains(err.Error(), "invalid provision id") {
 		t.Fatalf("invalid provision id error = %v", err)
 	}
@@ -205,7 +238,7 @@ func TestCreateAccountExactSurfacesSignupChallenge(t *testing.T) {
 	_, err := CreateAccountExact(
 		context.Background(), srv.URL,
 		"owner@example.com", "invite", "Owner", "prv_challenge",
-		"challenge-response",
+		"challenge-response", "", "",
 	)
 	var challengeErr *SignupChallengeError
 	if !errors.As(err, &challengeErr) {
@@ -275,14 +308,14 @@ func TestAccountCreateResponseErrorChallenge(t *testing.T) {
 func TestAccountCreateRequestFingerprintCanonicalScope(t *testing.T) {
 	base, err := AccountCreateRequestFingerprint(
 		"https://control.example/", "default",
-		" Owner@Example.COM ", " invite-code ", "",
+		" Owner@Example.COM ", " invite-code ", "", "", "",
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	equivalent, err := AccountCreateRequestFingerprint(
 		" https://control.example ", "default",
-		"owner@example.com", "invite-code", " owner@example.com ",
+		"owner@example.com", "invite-code", " owner@example.com ", "", "",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -300,12 +333,128 @@ func TestAccountCreateRequestFingerprintCanonicalScope(t *testing.T) {
 	for _, variant := range variants {
 		got, err := AccountCreateRequestFingerprint(
 			variant[0], variant[1], variant[2], variant[3], variant[4],
+			"", "",
 		)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got == base {
 			t.Fatalf("variant %#v did not change fingerprint", variant)
+		}
+	}
+}
+
+// TestAccountCreateRequestFingerprintGolden pins the consent-less fingerprint
+// to the exact value HEAD's algorithm produced before consent capture
+// existed. This is the dark contract: journals begun by older CLIs must
+// resume under the same fingerprint after an upgrade.
+func TestAccountCreateRequestFingerprintGolden(t *testing.T) {
+	const golden = "fd32232792508d2ec5746c1a5cca6214f7d8f117b892215cc31d69362610db9a"
+	got, err := AccountCreateRequestFingerprint(
+		"https://control.example/", "default",
+		" Owner@Example.COM ", " invite-code ", "", "", "",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != golden {
+		t.Fatalf("consent-less fingerprint = %s, want pinned %s", got, golden)
+	}
+
+	withConsent, err := AccountCreateRequestFingerprint(
+		"https://control.example/", "default",
+		"owner@example.com", "invite-code", "",
+		"draft-2026-08-22", "draft-2026-08-23",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withConsent == golden {
+		t.Fatal("consent did not change the fingerprint")
+	}
+	swapped, err := AccountCreateRequestFingerprint(
+		"https://control.example/", "default",
+		"owner@example.com", "invite-code", "",
+		"draft-2026-08-23", "draft-2026-08-22",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if swapped == withConsent {
+		t.Fatal("terms/privacy positions are not domain-separated")
+	}
+}
+
+func TestCreateAccountExactSendsConsentWhenPresent(t *testing.T) {
+	var gotTerms, gotPrivacy *string
+	srv := httptest.NewServer(http.HandlerFunc(func(
+		w http.ResponseWriter,
+		r *http.Request,
+	) {
+		var body struct {
+			ProvisionID    string  `json:"provision_id"`
+			Email          string  `json:"email"`
+			ConsentTerms   *string `json:"consent_terms_version"`
+			ConsentPrivacy *string `json:"consent_privacy_version"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		gotTerms, gotPrivacy = body.ConsentTerms, body.ConsentPrivacy
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(
+			`{"schema_version":"witself.v0","provision_id":"` +
+				body.ProvisionID +
+				`","account_id":"acc_consent","operator_id":"opr_consent",` +
+				`"email":"` + body.Email +
+				`","status":"pending","bootstrap_token":"witself_boot_consent",` +
+				`"cell":{"name":"cell-consent","endpoint":"https://cell.example"}}`,
+		))
+	}))
+	defer srv.Close()
+
+	if _, err := CreateAccountExact(
+		context.Background(), srv.URL,
+		"owner@example.com", "invite-consent", "", "prv_consentRequest1", "",
+		"draft-2026-08-22", "draft-2026-08-23",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if gotTerms == nil || *gotTerms != "draft-2026-08-22" ||
+		gotPrivacy == nil || *gotPrivacy != "draft-2026-08-23" {
+		t.Fatalf("consent body = %v/%v", gotTerms, gotPrivacy)
+	}
+
+	if _, err := CreateAccountExact(
+		context.Background(), srv.URL,
+		"owner@example.com", "invite-consent", "", "prv_consentRequest2", "",
+		"draft-2026-08-22", "",
+	); err == nil || !strings.Contains(
+		err.Error(), "must be provided together",
+	) {
+		t.Fatalf("one-of-two consent error = %v", err)
+	}
+
+	for _, versions := range [][2]string{
+		{"owner@example.com", "draft-2026-08-23"},
+		{strings.Repeat("a", 65), "draft-2026-08-23"},
+	} {
+		if _, err := CreateAccountExact(
+			context.Background(), srv.URL,
+			"owner@example.com", "invite-consent", "",
+			"prv_invalidConsent", "", versions[0], versions[1],
+		); err == nil || err.Error() != consentVersionValidationError {
+			t.Fatalf("invalid consent %q/%q error = %v, want %q",
+				versions[0], versions[1], err,
+				consentVersionValidationError)
+		}
+		if _, err := AccountCreateRequestFingerprint(
+			srv.URL, "default", "owner@example.com", "invite-consent", "",
+			versions[0], versions[1],
+		); err == nil || err.Error() != consentVersionValidationError {
+			t.Fatalf("invalid consent fingerprint %q/%q error = %v, want %q",
+				versions[0], versions[1], err,
+				consentVersionValidationError)
 		}
 	}
 }

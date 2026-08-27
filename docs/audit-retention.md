@@ -409,6 +409,9 @@ See [token-lifecycle.md](token-lifecycle.md) and
 - `operator.override` (flag carried on the overridden action; standalone record
   where the override is itself the event)
 - `account.profile_changed`, `account.member_changed`, `account.role_changed`
+- `account.consent.recorded` (dark ToS/privacy consent capture at signup;
+  metadata carries only the accepted `terms_version`/`privacy_version` labels —
+  never PII)
 - `limit.decision` (warn/throttle/block outcomes; see
   [billing-and-limits.md](billing-and-limits.md))
 

@@ -62,9 +62,10 @@ const (
 	VerbAccountResumedByMe            = "account.resumed.owner"
 	VerbAccountPlacementPolicyChanged = "account.placement_policy.changed"
 
-	// Control-plane forwarded (Worker calls the cell's :events endpoint
-	// with these).
+	// Control-plane originated. Most arrive through the cell's :events
+	// endpoint; consent.recorded is transaction-inline with provisioning.
 	VerbAccountProvisioned        = "account.provisioned"
+	VerbAccountConsentRecorded    = "account.consent.recorded"
 	VerbAccountActivated          = "account.activated"
 	VerbRecoveryRequested         = "recovery.requested"
 	VerbRecoveryCompleted         = "recovery.completed"
@@ -237,6 +238,11 @@ var ErrBadEventCursor = errors.New("malformed pagination cursor")
 type verbSpec struct {
 	requiredKeys []string
 	allowedKeys  []string
+	// inlineOnly verbs are evidence for a store mutation and may only be
+	// written through logEventTx in the same transaction as that mutation.
+	// Store.LogEvent refuses them so the generic provision-token event route
+	// cannot forge or duplicate mutation evidence.
+	inlineOnly bool
 	// allowedActors is the set of ActorKind values legitimate for this
 	// verb. `recovery.requested` can only come from control_plane;
 	// `operator.created` can only come from owner/operator. Constraining
@@ -309,11 +315,18 @@ var verbMetadataSchema = map[string]verbSpec{
 		allowedActors: []string{ActorOwner, ActorSystem},
 	},
 
-	// Control-plane forwarded.
+	// Control-plane originated.
 	VerbAccountProvisioned: {
 		requiredKeys:  []string{"email_masked"},
 		allowedKeys:   []string{"email_masked", "operator_id"},
 		allowedActors: []string{ActorControlPlane},
+	},
+	// Dark ToS/privacy consent capture: version labels only, never PII.
+	VerbAccountConsentRecorded: {
+		requiredKeys:  []string{"terms_version", "privacy_version"},
+		allowedKeys:   []string{"terms_version", "privacy_version"},
+		allowedActors: []string{ActorControlPlane},
+		inlineOnly:    true,
 	},
 	VerbAccountActivated: {
 		allowedKeys:   []string{},
@@ -919,6 +932,17 @@ func checkEventShape(in EventInput) error {
 			return fmt.Errorf("%w: verb %s metadata key %q must be a non-empty string", ErrBadEventMetadata, in.Verb, k)
 		}
 	}
+	if in.Verb == VerbAccountConsentRecorded {
+		termsVersion, _ := meta["terms_version"].(string)
+		privacyVersion, _ := meta["privacy_version"].(string)
+		if !consentVersionValid(termsVersion) ||
+			!consentVersionValid(privacyVersion) {
+			return fmt.Errorf(
+				"%w: %s", ErrBadEventMetadata,
+				consentVersionValidationError,
+			)
+		}
+	}
 	// No key in metadata may be outside the allowlist — a stray key would
 	// otherwise silently accumulate into the archive without any
 	// documented meaning.
@@ -930,12 +954,31 @@ func checkEventShape(in EventInput) error {
 	return nil
 }
 
+// checkStandaloneEventShape applies the shared event contract plus the
+// entry-point fence for events that are only truthful when committed beside
+// their underlying mutation.
+func checkStandaloneEventShape(in EventInput) error {
+	if err := checkEventShape(in); err != nil {
+		return err
+	}
+	if verbMetadataSchema[in.Verb].inlineOnly {
+		return fmt.Errorf(
+			"%w: verb %s is transaction-inline only",
+			ErrBadEventMetadata, in.Verb,
+		)
+	}
+	return nil
+}
+
 // LogEvent writes one event row in its own transaction. Used from the
 // server layer for events whose cause is not a Store mutation — Worker-
 // forwarded control-plane events, out-of-band system events. The
 // mutation-inline path (logEventTx) is preferred when the caller
 // already holds a transaction.
 func (s *Store) LogEvent(ctx context.Context, in EventInput) error {
+	if err := checkStandaloneEventShape(in); err != nil {
+		return err
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err

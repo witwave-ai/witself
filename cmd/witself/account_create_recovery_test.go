@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,6 +21,14 @@ const (
 	accountCreateTestOperatorID    = "opr_abcdefghijklmnop"
 	accountCreateTestOperatorToken = "witself_opr_accountCreateRecovery"
 )
+
+type accountCreateRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn accountCreateRoundTripFunc) RoundTrip(
+	request *http.Request,
+) (*http.Response, error) {
+	return fn(request)
+}
 
 func TestAccountCreateResumesAmbiguousProvisionWithSameID(t *testing.T) {
 	home := privateAccountCreateTestHome(t)
@@ -102,6 +111,150 @@ func TestAccountCreateResumesAmbiguousProvisionWithSameID(t *testing.T) {
 	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("journal survived successful save: %v", err)
 	}
+}
+
+func TestAccountCreateResumesConsentAfterLegalVersionBump(t *testing.T) {
+	const (
+		acceptedTermsVersion   = "terms-2026.08"
+		acceptedPrivacyVersion = "privacy-2026.08"
+		bumpedTermsVersion     = "terms-2026.09"
+		bumpedPrivacyVersion   = "privacy-2026.09"
+	)
+	home := privateAccountCreateTestHome(t)
+	type provisionRequest struct {
+		ProvisionID           string `json:"provision_id"`
+		Email                 string `json:"email"`
+		ConsentTermsVersion   string `json:"consent_terms_version"`
+		ConsentPrivacyVersion string `json:"consent_privacy_version"`
+	}
+	var mu sync.Mutex
+	var requests []provisionRequest
+	const (
+		controlPlaneEndpoint = "https://control.example"
+		cellEndpoint         = "https://cell.example"
+	)
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	http.DefaultTransport = accountCreateRoundTripFunc(func(
+		request *http.Request,
+	) (*http.Response, error) {
+		response := func(status int, body string) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: status,
+				Status:     http.StatusText(status),
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Request:    request,
+			}, nil
+		}
+		switch request.URL.Path {
+		case "/v1/accounts":
+			var body provisionRequest
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Error(err)
+				return response(http.StatusBadRequest, `{}`)
+			}
+			mu.Lock()
+			requests = append(requests, body)
+			call := len(requests)
+			mu.Unlock()
+			if call <= 3 {
+				return response(
+					http.StatusBadGateway, `{"error":"ambiguous result"}`,
+				)
+			}
+			encoded, err := json.Marshal(map[string]any{
+				"schema_version":  "witself.v0",
+				"provision_id":    body.ProvisionID,
+				"replayed":        true,
+				"account_id":      accountCreateTestAccountID,
+				"operator_id":     accountCreateTestOperatorID,
+				"email":           body.Email,
+				"status":          "pending",
+				"bootstrap_token": "witself_boot_accountCreateRecovery",
+				"cell": map[string]string{
+					"name":     "civo-dev-usw1-1",
+					"endpoint": cellEndpoint,
+				},
+			})
+			if err != nil {
+				t.Error(err)
+				return response(http.StatusInternalServerError, `{}`)
+			}
+			return response(http.StatusCreated, string(encoded))
+		case "/v1/auth/bootstrap":
+			return response(
+				http.StatusOK,
+				`{"operator_id":"`+accountCreateTestOperatorID+`",`+
+					`"operator_token":"`+accountCreateTestOperatorToken+`"}`,
+			)
+		default:
+			return response(http.StatusNotFound, `{}`)
+		}
+	})
+
+	initialArgs := append(
+		accountCreateTestArgs(controlPlaneEndpoint, "invite-private"),
+		"--accept-terms",
+	)
+	if code := accountCreateWithLegalVersions(
+		initialArgs, acceptedTermsVersion, acceptedPrivacyVersion,
+	); code != 1 {
+		t.Fatalf("initial consentful account create exit = %d, want 1", code)
+	}
+	journal, err := local.ReadAccountProvisionJournal("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if journal.AcceptedTermsVersion != acceptedTermsVersion ||
+		journal.AcceptedPrivacyVersion != acceptedPrivacyVersion {
+		t.Fatalf("accepted versions in journal = %+v", journal)
+	}
+	originalFingerprint, err := client.AccountCreateRequestFingerprint(
+		controlPlaneEndpoint, "default", "owner@example.com", "invite-private",
+		"Owner Display", acceptedTermsVersion, acceptedPrivacyVersion,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bumpedFingerprint, err := client.AccountCreateRequestFingerprint(
+		controlPlaneEndpoint, "default", "owner@example.com", "invite-private",
+		"Owner Display", bumpedTermsVersion, bumpedPrivacyVersion,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if journal.RequestFingerprint != originalFingerprint ||
+		bumpedFingerprint == originalFingerprint {
+		t.Fatalf(
+			"journal fingerprint = %q, original = %q, bumped = %q",
+			journal.RequestFingerprint, originalFingerprint, bumpedFingerprint,
+		)
+	}
+
+	// Acceptance is already durable in the journal, so the retry does not need
+	// to repeat --accept-terms. Even with bumped compiled-in versions, it must
+	// reproduce the original consentful request.
+	resumeArgs := accountCreateTestArgs(controlPlaneEndpoint, "invite-private")
+	if code := accountCreateWithLegalVersions(
+		resumeArgs, bumpedTermsVersion, bumpedPrivacyVersion,
+	); code != 0 {
+		t.Fatalf("resumed consentful account create exit = %d, want 0", code)
+	}
+	mu.Lock()
+	gotRequests := append([]provisionRequest(nil), requests...)
+	mu.Unlock()
+	if len(gotRequests) != 4 || gotRequests[0].ProvisionID == "" {
+		t.Fatalf("provision requests = %#v", gotRequests)
+	}
+	for _, request := range gotRequests {
+		if request.ProvisionID != gotRequests[0].ProvisionID ||
+			request.ConsentTermsVersion != acceptedTermsVersion ||
+			request.ConsentPrivacyVersion != acceptedPrivacyVersion {
+			t.Fatalf("provision request changed across legal bump: %#v", gotRequests)
+		}
+	}
+	assertAccountCreateSaved(t, home)
 }
 
 func TestAccountCreateChallengeResumesSameProvision(t *testing.T) {
@@ -394,7 +547,7 @@ func TestAccountCreateCleansJournalAfterCompletedLocalSave(t *testing.T) {
 	args := accountCreateTestArgs(server.URL, "invite-private")
 	fingerprint, err := client.AccountCreateRequestFingerprint(
 		server.URL, "default", "owner@example.com",
-		"invite-private", "Owner Display",
+		"invite-private", "Owner Display", "", "",
 	)
 	if err != nil {
 		t.Fatal(err)

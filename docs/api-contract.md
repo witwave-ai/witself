@@ -510,6 +510,13 @@ Idempotency records must not store memory content, fact values, message
 bodies/payloads, embedding vectors, raw tokens, payment details, provider
 secrets, secret field values, TOTP seeds, generated codes, or key material.
 
+Account creation binds its durable `provision_id` to a normalized request
+fingerprint. Optional signup consent versions (`consent_terms_version` /
+`consent_privacy_version`) join that fingerprint as a conditional
+domain-separated `consent/v1` block only when present: a retry with drifted
+consent is a `409 Conflict`, while a consent-less request hashes the exact
+historical input so older clients and resumed journals are unaffected.
+
 Atomic memory supersede has one operation `Idempotency-Key` header and one
 distinct body `idempotency_key` for each replacement capsule. The operation key
 replays the complete source/replacement result only for the exact normalized

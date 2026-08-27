@@ -618,6 +618,9 @@ func (s *Store) processAccountPurgeCandidateOnce(
 		UPDATE accounts
 		   SET email=NULL,
 		       display_name='',
+		       consent_terms_version=NULL,
+		       consent_privacy_version=NULL,
+		       consent_recorded_at=NULL,
 		       closed_reason='',
 		       suspended_for=NULL,
 		       suspended_reason=NULL,

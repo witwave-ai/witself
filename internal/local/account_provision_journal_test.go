@@ -1,6 +1,7 @@
 package local
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -8,6 +9,54 @@ import (
 	"sync"
 	"testing"
 )
+
+func TestAccountProvisionJournalRejectsInvalidAcceptedVersions(t *testing.T) {
+	tests := []struct {
+		name    string
+		terms   string
+		privacy string
+	}{
+		{name: "one sided", terms: "terms-2026.08"},
+		{name: "email shaped", terms: "owner@example.com", privacy: "privacy-2026.08"},
+		{name: "over length", terms: strings.Repeat("a", 65), privacy: "privacy-2026.08"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("WITSELF_HOME", privateAccountProvisionTestHome(t))
+			if _, _, err := BeginAccountProvisionJournal(
+				"default", testAccountProvisionFingerprint,
+			); err != nil {
+				t.Fatal(err)
+			}
+			path, err := AccountProvisionJournalPath("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var record map[string]any
+			if err := json.Unmarshal(raw, &record); err != nil {
+				t.Fatal(err)
+			}
+			record["accepted_terms_version"] = test.terms
+			if test.privacy != "" {
+				record["accepted_privacy_version"] = test.privacy
+			}
+			raw, err = json.Marshal(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ReadAccountProvisionJournal("default"); !errors.Is(err, ErrAccountProvisionJournalInvalid) {
+				t.Fatalf("read invalid accepted versions = %v", err)
+			}
+		})
+	}
+}
 
 const (
 	testAccountProvisionFingerprint      = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -66,6 +115,10 @@ func TestAccountProvisionJournalLifecycle(t *testing.T) {
 			t.Fatalf("journal contains private request value %q", forbidden)
 		}
 	}
+	if strings.Contains(string(raw), "accepted_terms_version") ||
+		strings.Contains(string(raw), "accepted_privacy_version") {
+		t.Fatalf("legacy consentless journal gained optional fields: %s", raw)
+	}
 
 	if err := SaveAccountProvisionCredential(
 		"default", testAccountProvisionFingerprint, first.ProvisionID,
@@ -105,6 +158,89 @@ func TestAccountProvisionJournalLifecycle(t *testing.T) {
 		err, ErrAccountProvisionJournalUnavailable,
 	) {
 		t.Fatalf("read deleted journal = %v", err)
+	}
+}
+
+func TestAccountProvisionJournalPersistsAcceptedLegalVersions(t *testing.T) {
+	t.Setenv("WITSELF_HOME", privateAccountProvisionTestHome(t))
+
+	first, created, err := BeginAccountProvisionJournalWithConsent(
+		"default", testAccountProvisionFingerprint,
+		"terms-2026.08", "privacy-2026.08",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created || first.AcceptedTermsVersion != "terms-2026.08" ||
+		first.AcceptedPrivacyVersion != "privacy-2026.08" {
+		t.Fatalf("created consent journal = %+v, created = %v", first, created)
+	}
+
+	recovered, err := ReadAccountProvisionJournal("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.AcceptedTermsVersion != first.AcceptedTermsVersion ||
+		recovered.AcceptedPrivacyVersion != first.AcceptedPrivacyVersion {
+		t.Fatalf("recovered consent journal = %+v; first = %+v", recovered, first)
+	}
+
+	resumed, created, err := BeginAccountProvisionJournalWithConsent(
+		"default", testAccountProvisionFingerprint,
+		first.AcceptedTermsVersion, first.AcceptedPrivacyVersion,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created || resumed.ProvisionID != first.ProvisionID {
+		t.Fatalf("resumed consent journal = %+v, created = %v", resumed, created)
+	}
+}
+
+func TestAccountProvisionJournalBackfillsLegacyConsentVersions(t *testing.T) {
+	t.Setenv("WITSELF_HOME", privateAccountProvisionTestHome(t))
+
+	legacy, created, err := BeginAccountProvisionJournal(
+		"default", testAccountProvisionFingerprint,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created || legacy.AcceptedTermsVersion != "" ||
+		legacy.AcceptedPrivacyVersion != "" {
+		t.Fatalf("legacy journal = %+v, created = %v", legacy, created)
+	}
+
+	backfilled, created, err := BeginAccountProvisionJournalWithConsent(
+		"default", testAccountProvisionFingerprint,
+		"terms-2026.08", "privacy-2026.08",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created || backfilled.ProvisionID != legacy.ProvisionID ||
+		backfilled.AcceptedTermsVersion != "terms-2026.08" ||
+		backfilled.AcceptedPrivacyVersion != "privacy-2026.08" {
+		t.Fatalf("backfilled journal = %+v, created = %v", backfilled, created)
+	}
+	recovered, err := ReadAccountProvisionJournal("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered != backfilled {
+		t.Fatalf("recovered backfill = %+v; want %+v", recovered, backfilled)
+	}
+
+	if _, _, err := BeginAccountProvisionJournal(
+		"default", testAccountProvisionFingerprint,
+	); !errors.Is(err, ErrAccountProvisionJournalConflict) {
+		t.Fatalf("consentless reuse after backfill = %v", err)
+	}
+	if _, _, err := BeginAccountProvisionJournalWithConsent(
+		"default", testAccountProvisionFingerprint,
+		"terms-2026.09", "privacy-2026.09",
+	); !errors.Is(err, ErrAccountProvisionJournalConflict) {
+		t.Fatalf("mismatched consent reuse after backfill = %v", err)
 	}
 }
 

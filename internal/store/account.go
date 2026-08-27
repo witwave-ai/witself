@@ -81,6 +81,12 @@ type Account struct {
 	SuspendedFor    string
 	SuspendedReason string
 	SupportPolicy   string
+	// Dark ToS/privacy consent capture (migration 0094): set only when the
+	// provisioning signup carried consent versions; nil for every other
+	// account. Version labels only, never PII.
+	ConsentTermsVersion   *string
+	ConsentPrivacyVersion *string
+	ConsentRecordedAt     *time.Time
 	// Plan snapshot, as applied by the control plane (see migration 0017):
 	// the plan label, the resolved account-wide limits (missing key =
 	// unlimited), and the included features.
@@ -106,13 +112,15 @@ func (s *Store) GetAccount(ctx context.Context, accountID string) (Account, erro
 		        closed_at, closed_reason, suspended_at, suspended_for, suspended_reason,
 		        support_policy, plan, plan_limits, plan_policies, plan_features,
 		        plan_applied_at, plan_snapshot_revision, plan_snapshot_hash,
-		        placement_policy
+		        placement_policy,
+		        consent_terms_version, consent_privacy_version, consent_recorded_at
 		 FROM accounts WHERE id = $1`, accountID).
 		Scan(&a.ID, &email, &a.DisplayName, &a.Status, &a.CreatedAt,
 			&a.ClosedAt, &closedReason, &a.SuspendedAt, &suspendedFor, &suspendedReason,
 			&a.SupportPolicy, &a.Plan, &planLimits, &planPolicies, &planFeatures,
 			&a.PlanAppliedAt, &a.PlanSnapshotRevision, &a.PlanSnapshotHash,
-			&placementPolicy)
+			&placementPolicy,
+			&a.ConsentTermsVersion, &a.ConsentPrivacyVersion, &a.ConsentRecordedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Account{}, ErrAccountNotFound
 	}

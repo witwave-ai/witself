@@ -140,6 +140,8 @@ class CellService {
     this.ambiguousFirst = false;
     this.activated = false;
     this.exactRouteUnavailable = false;
+    this.omitConsentEcho = false;
+    this.mismatchConsentEcho = false;
     this.tokenSequence = 0;
   }
 
@@ -185,7 +187,7 @@ class CellService {
       );
     }
     this.tokenSequence++;
-    return Response.json({
+    const responseBody = {
       schema_version: "witself.v0",
       provision_id: input.provision_id,
       replayed: this.calls.length > 1,
@@ -196,7 +198,16 @@ class CellService {
         status: "pending",
         bootstrap_token: `bootstrap-${this.tokenSequence}`,
       },
-    }, { status: 201 });
+    };
+    if (!this.omitConsentEcho) {
+      responseBody.recorded_consent_terms_version =
+        this.mismatchConsentEcho && input.consent_terms_version != null
+          ? `${input.consent_terms_version}-mismatch`
+          : input.consent_terms_version ?? null;
+      responseBody.recorded_consent_privacy_version =
+        input.consent_privacy_version ?? null;
+    }
+    return Response.json(responseBody, { status: 201 });
   }
 }
 
@@ -684,6 +695,160 @@ test("source IP and challenge token are optional strings outside the fingerprint
     const isolated = harness();
     const response = await isolated.runtime.fetch(signupRequest(fields));
     assert.equal(response.status, 400);
+    assert.equal(isolated.storage.values.has("account-signup"), false);
+  }
+});
+
+test("consent-less canonical fingerprint is byte-stable (golden)", async () => {
+  // Dark contract: a signup without consent must keep the exact historical
+  // canonical bytes, or every in-flight durable provision would be refused
+  // as a different request after a deploy.
+  const setup = harness();
+  assert.equal((await setup.runtime.fetch(signupRequest())).status, 201);
+  assert.equal(
+    setup.storage.values.get("account-signup").request_fingerprint,
+    "40fe0b8eaf6a593565e96d204616a5d7c4ec4fd64d03b21b5e80de19d10f9656",
+  );
+  assert.equal(
+    Object.hasOwn(setup.service.calls[0].input, "consent_terms_version"),
+    false,
+  );
+});
+
+test("consent versions bind the durable fingerprint and reach the cell", async () => {
+  const setup = harness();
+  const consent = {
+    consent_terms_version: "draft-2026-08-22",
+    consent_privacy_version: "draft-2026-08-23",
+  };
+  const initial = await setup.runtime.fetch(signupRequest(consent));
+  assert.equal(initial.status, 201);
+  const state = setup.storage.values.get("account-signup");
+  assert.notEqual(
+    state.request_fingerprint,
+    "40fe0b8eaf6a593565e96d204616a5d7c4ec4fd64d03b21b5e80de19d10f9656",
+  );
+  // Consent lives in the fingerprint and at the cell; the durable state
+  // keeps its exact dark shape with no extra fields.
+  assert.equal(Object.hasOwn(state, "consent_terms_version"), false);
+  assert.equal(Object.hasOwn(state, "consent_privacy_version"), false);
+  assert.deepEqual(
+    setup.service.calls.map(({ input }) => [
+      input.consent_terms_version,
+      input.consent_privacy_version,
+    ]),
+    [["draft-2026-08-22", "draft-2026-08-23"]],
+  );
+
+  // Same-consent retry is the ordinary safe replay.
+  const replay = await setup.runtime.fetch(signupRequest(consent));
+  assert.equal(replay.status, 201);
+  assert.equal((await replay.json()).replayed, true);
+
+  // Drifted or dropped consent on retry is a different signup request.
+  const calls = setup.service.calls.length;
+  for (const drifted of [
+    { ...consent, consent_terms_version: "draft-2026-09-01" },
+    {},
+  ]) {
+    const conflict = await setup.runtime.fetch(signupRequest(drifted));
+    assert.equal(conflict.status, 409);
+    assert.match(
+      (await conflict.json()).error,
+      /different signup request/,
+    );
+  }
+  assert.equal(setup.service.calls.length, calls);
+});
+
+test("consentful provision refuses a cell receipt without consent echoes", async () => {
+  const service = new CellService();
+  service.omitConsentEcho = true;
+  const setup = harness({ service });
+  const response = await setup.runtime.fetch(signupRequest({
+    consent_terms_version: "draft-2026-08-22",
+    consent_privacy_version: "draft-2026-08-23",
+  }));
+
+  assert.equal(response.status, 502);
+  assert.match(
+    (await response.json()).error,
+    /did not confirm the requested consent versions/,
+  );
+  assert.equal(
+    setup.storage.values.get("account-signup").phase,
+    "target_reserved",
+  );
+});
+
+test("consentful provision refuses mismatched consent echoes", async () => {
+  const service = new CellService();
+  service.mismatchConsentEcho = true;
+  const setup = harness({ service });
+  const response = await setup.runtime.fetch(signupRequest({
+    consent_terms_version: "draft-2026-08-22",
+    consent_privacy_version: "draft-2026-08-23",
+  }));
+
+  assert.equal(response.status, 502);
+  assert.match(
+    (await response.json()).error,
+    /did not confirm the requested consent versions/,
+  );
+  assert.equal(
+    setup.storage.values.get("account-signup").phase,
+    "target_reserved",
+  );
+});
+
+test("malformed consent is rejected before any signup state exists", async () => {
+  const versionShapeError =
+    "consent versions must be 1 to 64 characters, starting with an alphanumeric and containing only alphanumerics, dots, underscores, or hyphens";
+  for (const { fields, error } of [
+    {
+      fields: { consent_terms_version: "draft-2026-08-22" },
+      error:
+        "consent_terms_version and consent_privacy_version must be provided together",
+    },
+    {
+      fields: { consent_privacy_version: "draft-2026-08-22" },
+      error:
+        "consent_terms_version and consent_privacy_version must be provided together",
+    },
+    {
+      fields: { consent_terms_version: 7, consent_privacy_version: "x" },
+      error: "consent versions must be strings",
+    },
+    {
+      fields: {
+        consent_terms_version: "a".repeat(65),
+        consent_privacy_version: "draft-2026-08-22",
+      },
+      error: versionShapeError,
+    },
+    {
+      fields: {
+        consent_terms_version: "person@example.com",
+        consent_privacy_version: "draft-2026-08-22",
+      },
+      error: versionShapeError,
+    },
+    {
+      fields: { consent_terms_version: "   ", consent_privacy_version: "x" },
+      error: versionShapeError,
+    },
+    {
+      fields: {
+        consent_terms_version: "draft\u0007bell",
+        consent_privacy_version: "x",
+      },
+      error: versionShapeError,
+    },
+  ]) {
+    const isolated = harness();
+    const response = await isolated.runtime.fetch(signupRequest(fields));
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error, error);
     assert.equal(isolated.storage.values.has("account-signup"), false);
   }
 });

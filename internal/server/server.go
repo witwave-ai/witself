@@ -126,11 +126,15 @@ type Config struct {
 	// POST /v1/accounts:provision-exact control-plane -> cell trust link. The
 	// distinct route is intentional: an old replica knows only /v1/accounts
 	// and returns 404 before mutation instead of ignoring a new provision_id.
-	// Self-hosted cells mount neither route.
+	// Self-hosted cells mount neither route. The consent versions are the
+	// optional dark ToS/privacy capture: both-or-neither, bound into the
+	// durable provision fingerprint when present, byte-identical behavior
+	// when absent.
 	ProvisionToken        string
 	ProvisionAccountExact func(
 		ctx context.Context,
 		provisionID, email, displayName string,
+		consentTermsVersion, consentPrivacyVersion string,
 	) (ProvisionedAccount, error)
 	// ProvisionAccount is the legacy non-idempotent callback retained only to
 	// represent mixed-version routing and old deployments. New server wiring
@@ -1108,13 +1112,15 @@ func planFitScopeForDimension(dimension string) (string, bool) {
 // bootstrap token is returned exactly once; the new owner exchanges it for an
 // operator token via the ordinary POST /v1/auth/bootstrap.
 type ProvisionedAccount struct {
-	AccountID      string `json:"account_id"`
-	OperatorID     string `json:"operator_id"`
-	Email          string `json:"email"`
-	Status         string `json:"status"`
-	BootstrapToken string `json:"bootstrap_token"`
-	ProvisionID    string `json:"-"`
-	Replayed       bool   `json:"-"`
+	AccountID                     string  `json:"account_id"`
+	OperatorID                    string  `json:"operator_id"`
+	Email                         string  `json:"email"`
+	Status                        string  `json:"status"`
+	BootstrapToken                string  `json:"bootstrap_token"`
+	ProvisionID                   string  `json:"-"`
+	Replayed                      bool    `json:"-"`
+	RecordedConsentTermsVersion   *string `json:"-"`
+	RecordedConsentPrivacyVersion *string `json:"-"`
 }
 
 // LoginFunc exchanges a bootstrap token for an operator token. ok is false when
@@ -4107,6 +4113,7 @@ func provisionAccountHandler(
 	provision func(
 		ctx context.Context,
 		provisionID, email, displayName string,
+		consentTermsVersion, consentPrivacyVersion string,
 	) (ProvisionedAccount, error),
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -4119,6 +4126,9 @@ func provisionAccountHandler(
 			ProvisionID string `json:"provision_id"`
 			Email       string `json:"email"`
 			DisplayName string `json:"display_name"`
+			// Dark ToS/privacy consent capture: optional, both-or-neither.
+			ConsentTermsVersion   string `json:"consent_terms_version,omitempty"`
+			ConsentPrivacyVersion string `json:"consent_privacy_version,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
@@ -4138,8 +4148,25 @@ func provisionAccountHandler(
 		if req.DisplayName == "" {
 			req.DisplayName = req.Email
 		}
+		if (req.ConsentTermsVersion == "") != (req.ConsentPrivacyVersion == "") {
+			writeJSONError(
+				w, http.StatusBadRequest,
+				"consent_terms_version and consent_privacy_version must be provided together",
+			)
+			return
+		}
+		if req.ConsentTermsVersion != "" &&
+			(!validConsentVersion(req.ConsentTermsVersion) ||
+				!validConsentVersion(req.ConsentPrivacyVersion)) {
+			writeJSONError(
+				w, http.StatusBadRequest,
+				consentVersionValidationError,
+			)
+			return
+		}
 		acct, err := provision(
 			r.Context(), req.ProvisionID, req.Email, req.DisplayName,
+			req.ConsentTermsVersion, req.ConsentPrivacyVersion,
 		)
 		if errors.Is(err, ErrConflict) {
 			writeJSONError(
@@ -4156,12 +4183,23 @@ func provisionAccountHandler(
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"schema_version": "witself.v0",
-			"provision_id":   req.ProvisionID,
-			"replayed":       acct.Replayed,
-			"account":        acct,
+			"schema_version":                   "witself.v0",
+			"provision_id":                     req.ProvisionID,
+			"replayed":                         acct.Replayed,
+			"recorded_consent_terms_version":   acct.RecordedConsentTermsVersion,
+			"recorded_consent_privacy_version": acct.RecordedConsentPrivacyVersion,
+			"account":                          acct,
 		})
 	}
+}
+
+const consentVersionValidationError = "consent versions must be 1 to 64 characters, starting with an alphanumeric and containing only alphanumerics, dots, underscores, or hyphens"
+
+var consentVersionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// validConsentVersion mirrors the control-plane and store label rule.
+func validConsentVersion(version string) bool {
+	return consentVersionPattern.MatchString(version)
 }
 
 func accountSystemGetHandler(cfg Config) http.HandlerFunc {

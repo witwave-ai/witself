@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -10,6 +11,45 @@ import (
 
 	"github.com/witwave-ai/witself/internal/placement"
 )
+
+func TestConsentRecordedEventIsTransactionInlineOnly(t *testing.T) {
+	in := EventInput{
+		AccountID: "acc_x", ActorKind: ActorControlPlane,
+		Verb: VerbAccountConsentRecorded,
+		Metadata: map[string]any{
+			"terms_version":   "draft-2026-08-22",
+			"privacy_version": "draft-2026-08-22",
+		},
+	}
+
+	// The transactional helper still accepts the shared verb/metadata shape;
+	// provisioning uses this path beside the account INSERT.
+	if err := checkEventShape(in); err != nil {
+		t.Fatalf("transaction-inline consent event shape = %v", err)
+	}
+
+	// Rejection happens before Store.LogEvent opens a transaction, so a zero
+	// Store is sufficient to prove the generic entry point is fenced.
+	err := (&Store{}).LogEvent(context.Background(), in)
+	if !errors.Is(err, ErrBadEventMetadata) ||
+		!strings.Contains(err.Error(), "transaction-inline only") {
+		t.Fatalf("standalone consent event error = %v", err)
+	}
+
+	for _, invalid := range []string{
+		"owner@example.com",
+		strings.Repeat("a", 65),
+	} {
+		bad := in
+		bad.Metadata = map[string]any{
+			"terms_version": invalid, "privacy_version": "privacy-2026.08",
+		}
+		if err := checkEventShape(bad); !errors.Is(err, ErrBadEventMetadata) ||
+			!strings.Contains(err.Error(), consentVersionValidationError) {
+			t.Fatalf("consent event version %q error = %v", invalid, err)
+		}
+	}
+}
 
 // TestMaskEmail pins the exact masking shape the whole event registry
 // depends on. Every event that carries an email in metadata does so via
@@ -46,7 +86,8 @@ func TestVerbRegistryCoverage(t *testing.T) {
 		VerbAccountSuspendedByMe, VerbAccountResumedByMe,
 		VerbAccountPlacementPolicyChanged,
 
-		VerbAccountProvisioned, VerbAccountActivated,
+		VerbAccountProvisioned, VerbAccountConsentRecorded,
+		VerbAccountActivated,
 		VerbRecoveryRequested, VerbRecoveryCompleted,
 		VerbAccountEmailChangeStarted,
 		VerbAccountEmailVerifySent, VerbAccountEmailRecoverySent,
