@@ -2777,3 +2777,24 @@ approved deletion. A one-node cluster loss can also remove this alerting plane,
 so production acceptance requires the external dead-man above (the
 `WitselfWatchdog` heartbeat and its outside monitor) in addition to the
 in-cluster receiver path.
+
+## Incident communications
+
+The public incident log is the GitHub `incident` label on
+`github.com/witwave-ai/witself`. One issue per incident; the support policy
+points customers here.
+
+1. Open a public issue titled `Incident: <short impact summary>` with the
+   `incident` label as soon as customer impact is confirmed. State impact,
+   scope, and start time in value-free operational language — never account
+   data, tokens, identifiers beyond cell names, or open-/sealed-plane content.
+2. Post timeline updates as issue comments at a cadence matched to severity
+   (`urgent`-class: hourly or better). Paste the same update into any affected
+   account's support ticket that asks.
+3. On resolution, post the resolution note (one-paragraph root cause,
+   user-visible effect, follow-up work), close the issue, and leave the label
+   attached so the history stays queryable.
+4. Security incidents stay on the private path
+   (security@witwave.ai, [security-policy.md](security-policy.md)) and get a
+   public issue only after the disclosure decision, under the same value-free
+   rules.
