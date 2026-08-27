@@ -312,12 +312,15 @@ query in the runbook before changing gates or capacity.
 
 The v0.0.253/schema-91 rollout verified a point-in-time scrape with
 `witself_agent_email_cell_storage_metrics_up 1` and all seven usage/threshold
-gauges. That verification is not continuous monitoring: the production cluster
-has no continuous Prometheus scraping, PVC metrics collection, Alertmanager
-routing, or tested external alert receiver. Database triggers enforce the
+gauges. The serving cell has since moved to continuous monitoring: at
+v0.0.258/schema 93 it runs kube-prometheus-stack scraping with PVC metrics
+collection, Alertmanager routing, and a canary-tested PagerDuty `witself-prod`
+receiver plus dead-man heartbeat, with the logical-ledger and PVC capacity
+alerts among its 14 alerting rules (alert canary and dead-man lapse/restore
+proofs passed 2026-08-26). Database triggers enforce the
 logical boundary independently.
-Continuous logical-ledger and physical-PVC alerts with a tested receiver are
-required before expanding the email cohort.
+Any additional accepting cell must meet the same continuous logical-ledger and
+physical-PVC alerting bar before joining the email cohort.
 
 The ledger is logical: deletion releases its charge transactionally but does
 not make PostgreSQL relation files or a persistent volume shrink. Monitor PVC
@@ -692,10 +695,11 @@ All shipped Witself rules aggregate away pod, instance, route, account, realm,
 and agent identity. They expose only fixed service/severity labels and the
 worker's existing closed-set job label.
 
-This capability is not a production rollout. Shared and target-cell defaults
-remain disabled, and no feature-status gate closes until the staged GitOps
-rollout proves sustained scrapes, bounded storage and resource headroom, rule
-health, plus both firing and resolved delivery at a tested external receiver.
+This capability is now live on the serving cell. Shared chart defaults remain
+disabled, and the staged GitOps rollout — stack, then targets, then alerting —
+proved sustained scrapes, bounded storage and resource headroom, rule health,
+plus both firing and resolved delivery at the tested external PagerDuty
+receiver, accepted 2026-08-26.
 The target-cell ServiceMonitors must be enabled only after the monitoring child
 Application and CRDs are Healthy; Argo sync waves in separate parent
 Applications do not establish that ordering.
@@ -758,15 +762,14 @@ content, fact values, message bodies, embedding vectors, fact names, secret
 names, field names, TOTP material, KMS key material, raw paths, user input, or
 payment details.
 
-These email alerts are required operating controls, not a description of the
-current production installation. The repository contains a default-off,
-resource-bounded Prometheus/Alertmanager capability, but the v0.0.253 rollout
-verified the logical gauges only at a point in time. Continuous scraping, PVC
-metrics collection, Alertmanager routing, and a tested external receiver remain
-absent from the live cell and block cohort expansion. The rollout must install
-the null-routed stack first, converge application targets second, and activate
-the rules plus external receiver third so expected pre-activation absence does
-not create false production evidence.
+These email alerts are now live operating controls on the serving cell. The
+default-off, resource-bounded Prometheus/Alertmanager capability was enabled
+there by the staged 3-phase GitOps rollout — null-routed stack first,
+application targets second, rules plus external receiver third — so expected
+pre-activation absence never created false production evidence. Continuous
+scraping, PVC metrics collection, Alertmanager routing, and the canary-tested
+PagerDuty `witself-prod` receiver with a dead-man heartbeat were accepted
+2026-08-26, with both Civo cells running v0.0.258 at schema 93.
 
 The first rollout is intentionally limited to the cell-local open-plane and
 Founder email storage path. Cloudflare email edge/Queue outcomes live in

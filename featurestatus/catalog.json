@@ -102,11 +102,12 @@
       "id": "account-lifecycle",
       "name": "Account lifecycle and movement",
       "area": "Platform",
-      "summary": "Activation, suspension, closure, archive/import, and deliberate whole-account evacuation and placement mechanics are implemented; broad movement remains frozen until monitoring and multi-cell drills are complete. Realm-level placement and dual-write cutover are outside this slice.",
+      "summary": "Activation, suspension, closure with dark 30-day-grace erasure, archive/import, and account evacuation/placement are implemented; serving-cell monitoring is accepted; broad movement stays frozen until destination-cell monitoring and multi-cell drills complete; realm placement and dual-write cutover stay out of scope.",
       "implementation": "implemented",
       "managed_rollout": "limited",
       "docs": [
         "docs/backup-and-recovery.md",
+        "docs/data-retention-policy.md",
         "docs/deployment-cells.md",
         "docs/governance-and-support.md"
       ],
@@ -116,6 +117,7 @@
           "summary": "Lifecycle transitions, archive/import, evacuation fences, and resumable control-plane state have transactional and crash-recovery coverage.",
           "evidence": [
             "docs/deployment-cells.md",
+            "internal/store/account_purge_integration_test.go",
             "internal/store/evacuation_integration_test.go"
           ]
         },
@@ -137,8 +139,10 @@
         },
         "observability": {
           "state": "conditional",
-          "summary": "Value-free status and metrics exist, but continuous Prometheus scraping, PVC metrics, Alertmanager routing, and a tested external receiver are not deployed.",
+          "summary": "Continuous Prometheus scraping, PVC metrics, Alertmanager routing, and a tested PagerDuty/dead-man receiver are deployed and accepted on the serving cell; other accepting and backup cells remain unmonitored, which still gates broad movement.",
           "evidence": [
+            ".gitops/cells/civo-sandbox-usw2-dev/values.yaml",
+            "docs/launch-readiness.md",
             "docs/observability-and-operations.md"
           ]
         },
@@ -172,7 +176,7 @@
         {
           "id": "continuous-capacity-alerting",
           "gate_ids": ["observability"],
-          "summary": "Deploy continuous capacity scraping and alert delivery before automatic placement resumes.",
+          "summary": "Serving-cell capacity scraping and alert delivery are deployed and accepted; extend monitoring coverage to every accepting destination cell before automatic placement resumes.",
           "ref": "docs/observability-and-operations.md"
         },
         {
@@ -187,21 +191,24 @@
       "id": "account-onboarding-recovery",
       "name": "Managed account onboarding and recovery",
       "area": "Identity",
-      "summary": "Invite-gated signup, cell placement, email verification and resend, credential recovery, email change and undo, and crash-safe CLI provisioning are implemented for managed accounts; broad abuse protection and release acceptance remain limited.",
+      "summary": "Invite-gated signup, cell placement, email verification and resend, credential recovery, CAS-guarded email change and undo, and crash-safe CLI provisioning are implemented and contract-tested for managed accounts; abuse controls are implemented dark with keyed enablement, and release acceptance remains limited.",
       "implementation": "implemented",
       "managed_rollout": "limited",
       "docs": [
         "docs/cli-command-surface.md",
-        "docs/runbooks.md"
+        "docs/runbooks.md",
+        "docs/signup-abuse-hardening.md"
       ],
       "gates": {
         "behavior": {
-        "state": "conditional",
-        "summary": "Signup, exact invite consumption, pending-account projection, and resumable CLI setup are tested; verification, resend, recovery, email change, and undo handlers lack direct Worker contract tests.",
-        "evidence": [
-          "cmd/witself/account_create_recovery_test.go",
-          "infra/cloudflare/control-plane/src/index.js",
-          "infra/cloudflare/control-plane/test/account-signup-runtime.test.mjs"
+          "state": "pass",
+          "summary": "Signup, exact invite consumption, pending-account projection, resumable CLI setup, and the verification, resend, recovery, email change, and undo handlers all have direct Worker contract tests, plus a cell-side expected_current CAS on email change.",
+          "evidence": [
+            "cmd/witself/account_create_recovery_test.go",
+            "infra/cloudflare/control-plane/src/index.js",
+            "infra/cloudflare/control-plane/test/account-signup-runtime.test.mjs",
+            "infra/cloudflare/control-plane/test/signup-lifecycle-recovery.test.mjs",
+            "infra/cloudflare/control-plane/test/signup-lifecycle-verification.test.mjs"
           ]
         },
         "entitlement_policy": {
@@ -214,27 +221,32 @@
         },
         "bounds_abuse": {
           "state": "conditional",
-          "summary": "Inputs, invite use, verification and recovery state, retries, and pending-account lifetime are bounded, but a durable account-wide signup, resend, and recovery abuse limiter is not implemented.",
+          "summary": "Inputs, invite use, verification and recovery state, retries, and pending-account lifetime are bounded, and durable signup abuse controls (Turnstile break-glass, per-IP and global daily quotas, edge IP rate limits) are implemented dark: committed limits are 0, Turnstile secrets absent, enablement keyed.",
           "evidence": [
-            "docs/post-v0-roadmap.md",
-            "infra/cloudflare/control-plane/src/account-signup-runtime.mjs"
+            "docs/signup-abuse-hardening.md",
+            "infra/cloudflare/control-plane/src/account-signup-runtime.mjs",
+            "infra/cloudflare/control-plane/src/signup-counters.mjs",
+            "infra/cloudflare/control-plane/test/signup-abuse.test.mjs"
           ]
         },
         "observability": {
           "state": "conditional",
-          "summary": "Durable phases and value-free logs are inspectable without continuous funnel, delivery, pending-age, recovery-failure, or abuse alerts and a tested receiver.",
+          "summary": "Durable phases and value-free logs are inspectable, and a tested external receiver now exists on the monitoring plane, but continuous signup funnel, delivery, pending-age, recovery-failure, and abuse signals are not yet connected to it.",
           "evidence": [
+            ".gitops/charts/platform/files/founder-open-plane.rules.yaml",
+            "docs/launch-readiness.md",
             "docs/observability-and-operations.md",
             "infra/cloudflare/control-plane/src/account-signup-runtime.mjs"
           ]
         },
         "recovery": {
-        "state": "conditional",
-        "summary": "Durable signup phases, exact idempotency, target-cell acknowledgements, and retry-safe CLI state are tested; credential-recovery and email-change undo paths still need direct recovery tests.",
-        "evidence": [
-          "cmd/witself/account_create_recovery_test.go",
-          "infra/cloudflare/control-plane/src/index.js",
-          "infra/cloudflare/control-plane/test/account-signup-runtime.test.mjs"
+          "state": "pass",
+          "summary": "Durable signup phases, exact idempotency, target-cell acknowledgements, retry-safe CLI state, and the credential-recovery and email-change undo interruption/replay paths are directly tested, including CAS-guarded forward changes.",
+          "evidence": [
+            "cmd/witself/account_create_recovery_test.go",
+            "infra/cloudflare/control-plane/src/index.js",
+            "infra/cloudflare/control-plane/test/signup-lifecycle-recovery.test.mjs",
+            "internal/store/email_change_cas_integration_test.go"
           ]
         },
         "rollout_canaries": {
@@ -254,23 +266,14 @@
         }
       },
       "open_gates": [
-    {
-      "id": "signup-abuse-limits",
+        {
+          "id": "signup-abuse-limits",
           "gate_ids": ["bounds_abuse"],
-      "summary": "Add durable account, invite, address, and source-rate controls for signup, verification resend, recovery, and email-change attempts without enabling account enumeration.",
-      "ref": "docs/post-v0-roadmap.md"
-    },
-    {
-      "id": "signup-lifecycle-contract-tests",
-      "gate_ids": [
-        "behavior",
-        "recovery"
-      ],
-      "summary": "Add direct Worker contract and interruption tests for verification, resend, credential recovery, email change, undo, and expiration behavior.",
-      "ref": "infra/cloudflare/control-plane/src/index.js"
-    },
-    {
-      "id": "signup-operations-alerting",
+          "summary": "Enable the implemented-dark signup abuse controls: mint the Turnstile widget and provide its keys, choose positive per-IP and global daily limits, and land the keyed activation change.",
+          "ref": "docs/signup-abuse-hardening.md"
+        },
+        {
+          "id": "signup-operations-alerting",
           "gate_ids": ["observability"],
           "summary": "Connect value-free phase, delivery, pending-age, recovery, and abuse signals to continuous dashboards and a tested external receiver.",
           "ref": "docs/observability-and-operations.md"
@@ -319,9 +322,11 @@
         },
         "observability": {
           "state": "conditional",
-          "summary": "Lifecycle metrics and audit events exist, but no end-to-end production alert path or avatar-specific SLO is retained.",
+          "summary": "Lifecycle metrics and audit events exist and the serving cell now has an end-to-end tested production alert path (server and generic worker-job alerts routed to PagerDuty with a dead-man heartbeat), but no avatar-specific alert rules or SLO exist.",
           "evidence": [
+            ".gitops/charts/platform/files/founder-open-plane.rules.yaml",
             "docs/agent-avatars.md",
+            "docs/launch-readiness.md",
             "docs/observability-and-operations.md"
           ]
         },
@@ -354,7 +359,7 @@
         {
           "id": "avatar-operations-alerting",
           "gate_ids": ["observability"],
-          "summary": "Connect value-free avatar lifecycle, failure, compaction, and quota metrics to an avatar SLO and tested external alert receiver.",
+          "summary": "Define an avatar SLO and add avatar-specific alert rules for lifecycle, failure, compaction, and quota metrics; the tested external alert receiver already exists.",
           "ref": "docs/observability-and-operations.md"
         },
         {
@@ -412,8 +417,10 @@
         },
         "observability": {
           "state": "conditional",
-          "summary": "Value-free message and worker metrics exist, but continuous scrape, alert routing, and a tested receiver are absent.",
+          "summary": "Value-free message and worker metrics are continuously scraped with live PagerDuty alert routing and a tested receiver; generic worker-job alerts cover the workers, but no request-graph-specific alert rules exist.",
           "evidence": [
+            ".gitops/charts/platform/files/founder-open-plane.rules.yaml",
+            "docs/launch-readiness.md",
             "docs/observability-and-operations.md"
           ]
         },
@@ -457,7 +464,7 @@
         {
           "id": "external-alert-path",
           "gate_ids": ["observability"],
-          "summary": "Connect message and worker metrics to continuous alerts with a tested receiver.",
+          "summary": "Add request-graph and message-family alert rules to the live rule set; continuous scrape, generic worker-job alerts, and the tested PagerDuty/dead-man receiver are already in place.",
           "ref": "docs/observability-and-operations.md"
         }
       ]
@@ -555,8 +562,8 @@
       "summary": "Inbound email on witmail.net is a production service for the exact Founder cohort, with account entitlements, canonical addressing, bounded storage, retention, rate gates, durable claims, and Cloudflare-to-cell route authority.",
       "implementation": "implemented",
       "managed_rollout": "limited",
-      "evidence_release": "v0.0.253",
-      "evidence_scope": "Exact Founder receive deployment and storage postflight; a fresh real-mail canary remains open.",
+      "evidence_release": "v0.0.258",
+      "evidence_scope": "Exact Founder receive deployment at v0.0.258/schema 93 on both cells with restore-verified pre-migration backups; edge attested at 0.0.259 with relay-v2/DMARC gates dark; the fresh real-mail canary evidence remains operator-retained.",
       "plan_feature_keys": [
         "agent_email_receive"
       ],
@@ -597,23 +604,25 @@
         },
         "bounds_abuse": {
           "state": "conditional",
-          "summary": "Raw-size, byte, sender, recipient, realm, account, storage-ledger, root-count, and hard-row ceilings are enforced; trusted sender authentication, spam classification, and provider-wide pressure handling remain incomplete.",
+          "summary": "Raw-size, byte, sender, recipient, realm, account, storage-ledger, root-count, and hard-row ceilings are enforced, and advisory edge-attested SPF/DKIM/DMARC verdict recording plus dark DMARC rejection landed; trusted sender authentication, spam classification, and provider-wide pressure handling remain incomplete.",
           "evidence": [
             "docs/agent-email.md",
             "docs/threat-model.md"
           ]
         },
         "observability": {
-          "state": "conditional",
-          "summary": "Workers Observability, cell metrics, storage gauges, health, logs, and audits exist, but continuous capacity alerts and a tested external receiver do not.",
+          "state": "pass",
+          "summary": "Workers Observability, cell metrics, storage gauges, health, logs, and audits exist; continuous logical-ledger and PVC capacity alerts route to a tested PagerDuty receiver with a dead-man heartbeat on the serving cell.",
           "evidence": [
+            ".gitops/charts/platform/files/founder-open-plane.rules.yaml",
             "docs/agent-email.md",
+            "docs/launch-readiness.md",
             "docs/observability-and-operations.md"
           ]
         },
         "recovery": {
           "state": "conditional",
-          "summary": "Route journals, signed projections, retry-safe ingress, claims, retention, and archive/import are implemented; a populated schema-91 email account move and restore drill remains required.",
+          "summary": "Route journals, signed projections, retry-safe ingress, claims, retention, archive/import, and restore-verified pre-migration backups are implemented; a populated schema-93 email account move and restore drill remains required.",
           "evidence": [
             "docs/agent-email.md",
             "docs/backup-and-recovery.md"
@@ -621,10 +630,11 @@
         },
         "rollout_canaries": {
           "state": "conditional",
-          "summary": "Release v0.0.253 is live for the Founder cohort with exact edge and cell gates, but broad-plan enrollment and a fresh real-mail canary remain open.",
+          "summary": "Release v0.0.258 (schema 93) is live on both cells for the Founder cohort with the edge attested at 0.0.259 and all relay-v2/DMARC gates dark, but broad-plan enrollment and a repo-recorded fresh real-mail canary remain open.",
           "evidence": [
             "docs/agent-email.md",
-            "https://github.com/witwave-ai/witself/releases/tag/v0.0.253"
+            "docs/launch-readiness.md",
+            "https://github.com/witwave-ai/witself/releases/tag/v0.0.258"
           ]
         },
         "docs_support": {
@@ -638,12 +648,6 @@
       },
       "open_gates": [
         {
-          "id": "continuous-capacity-alerting",
-          "gate_ids": ["observability"],
-          "summary": "Connect logical and PVC capacity metrics to continuous alerts and a tested external receiver.",
-          "ref": "docs/observability-and-operations.md"
-        },
-        {
           "id": "disabled-account-edge-preflight",
           "gate_ids": ["bounds_abuse"],
           "summary": "Add signed disposition/preflight so mail for disabled accounts is rejected before raw MIME is buffered or relayed.",
@@ -652,7 +656,7 @@
         {
           "id": "email-move-recovery-canary",
           "gate_ids": ["recovery"],
-          "summary": "Move and restore populated schema-91 email state, including inbound, accepted/delivered sends, provider events, suppressions, claims, and provider-started refusal.",
+          "summary": "Move and restore populated schema-93 email state, including inbound (with edge-attested verdict columns), accepted/delivered sends, provider events, suppressions, claims, and provider-started refusal.",
           "ref": "docs/cell-worker.md"
         },
         {
@@ -676,8 +680,8 @@
       "summary": "Outbound agent email is production-deployed for the Founder cohort through a signed cell adapter and isolated Cloudflare dispatch worker with receipts, provider lifecycle events, suppression, and bounded admission.",
       "implementation": "implemented",
       "managed_rollout": "limited",
-      "evidence_release": "v0.0.253",
-      "evidence_scope": "Exact Founder dispatch deployment and lifecycle postflight; a fresh provider-delivery canary remains open.",
+      "evidence_release": "v0.0.258",
+      "evidence_scope": "Exact Founder dispatch deployment at v0.0.258/schema 93 (dual-cell wave rollout postflight, outbound-staleness alerting live); a fresh provider-delivery canary remains open.",
       "plan_feature_keys": [
         "agent_email_send"
       ],
@@ -716,15 +720,17 @@
         },
         "observability": {
           "state": "conditional",
-          "summary": "Workers Observability, queue metrics, lifecycle events, cell metrics, storage gauges, logs, and health exist without continuous alert routing to a tested receiver.",
+          "summary": "Workers Observability, queue metrics, lifecycle events, cell metrics, storage gauges, logs, and health exist; cell-side outbound staleness, worker-job, storage, and PVC alerts route to a tested PagerDuty receiver, while Cloudflare dispatch queue/DLQ and delivery-outcome metrics remain unconnected to alerting.",
           "evidence": [
+            ".gitops/charts/platform/files/founder-open-plane.rules.yaml",
             "docs/agent-email.md",
+            "docs/launch-readiness.md",
             "docs/observability-and-operations.md"
           ]
         },
         "recovery": {
           "state": "conditional",
-          "summary": "Idempotent send records, queue retries, receipts, lifecycle reconciliation, DLQ, retention, and archive/import are implemented; populated schema-91 email movement and restore remain unproven.",
+          "summary": "Idempotent send records, queue retries, receipts, lifecycle reconciliation, DLQ, retention, and archive/import are implemented; populated schema-93 email movement and restore remain unproven.",
           "evidence": [
             "docs/agent-email.md",
             "infra/cloudflare/agent-email-send/README.md"
@@ -732,10 +738,11 @@
         },
         "rollout_canaries": {
           "state": "conditional",
-          "summary": "Release v0.0.253 is live for the Founder cohort with dispatch and lifecycle events enabled, but broad enrollment and a fresh end-to-end delivery canary remain open.",
+          "summary": "Release v0.0.258 (schema 93) is live on both cells for the Founder cohort with dispatch and lifecycle events enabled, but broad enrollment and a fresh end-to-end delivery canary remain open.",
           "evidence": [
             "docs/agent-email.md",
-            "https://github.com/witwave-ai/witself/releases/tag/v0.0.253"
+            "docs/launch-readiness.md",
+            "https://github.com/witwave-ai/witself/releases/tag/v0.0.258"
           ]
         },
         "docs_support": {
@@ -751,13 +758,13 @@
         {
           "id": "continuous-delivery-alerting",
           "gate_ids": ["observability"],
-          "summary": "Connect queue, outcome, storage, and worker metrics to continuous alerts and a tested external receiver.",
+          "summary": "Connect Cloudflare dispatch queue/DLQ and provider-outcome metrics to the now-live tested receiver; storage and cell-worker alerts are already routed.",
           "ref": "docs/observability-and-operations.md"
         },
         {
           "id": "email-move-recovery-canary",
           "gate_ids": ["recovery"],
-          "summary": "Move and restore populated schema-91 email state, including accepted/delivered sends, provider events, suppressions, claims, and provider-started refusal.",
+          "summary": "Move and restore populated schema-93 email state, including accepted/delivered sends, provider events, suppressions, claims, and provider-started refusal.",
           "ref": "docs/cell-worker.md"
         },
         {
@@ -867,7 +874,8 @@
       "managed_rollout": "limited",
       "docs": [
         "docs/audit-retention.md",
-        "docs/cli-command-surface.md"
+        "docs/cli-command-surface.md",
+        "docs/data-retention-policy.md"
       ],
       "gates": {
         "behavior": {
@@ -919,9 +927,10 @@
         },
         "docs_support": {
           "state": "conditional",
-          "summary": "The event registry and intended retention contract are extensive, but the document still presents unimplemented defaults, modes, export, and commands as decisions rather than separating current core from target behavior.",
+          "summary": "Unimplemented defaults, modes, export, and commands are still presented as decisions, and the data-retention policy describes the 365-day audit default, delete/archive/hold modes, and audit.retention.swept sweep as code-enforced although no audit sweeper, Helm audit-retention value, or plan audit key exists.",
           "evidence": [
-            "docs/audit-retention.md"
+            "docs/audit-retention.md",
+            "docs/data-retention-policy.md"
           ]
         }
       },
@@ -956,7 +965,7 @@
       "id": "billing-plan-transitions",
       "name": "Billing and plan transitions",
       "area": "Commercial",
-      "summary": "The Personal-to-Professional Stripe sandbox transition and exact Professional-to-Personal downgrade foundation are implemented behind an empty account cohort, but no retained end-to-end sandbox canary exists and production charging and webhooks remain dark.",
+      "summary": "The dark Stripe stack is code-complete: free-to-paid checkout for Professional and Team, exact Professional-to-Personal downgrade, a paid-to-paid contact-path guard, Stripe Tax, a fail-closed GA gate, a dunning contract test, and a refund runbook behind an empty cohort; charging and webhooks stay dark pending cutover.",
       "implementation": "building",
       "managed_rollout": "dark",
       "docs": [
@@ -966,10 +975,12 @@
       "gates": {
         "behavior": {
           "state": "conditional",
-          "summary": "Personal-to-Professional preview, setup, checkout and apply plus exact Professional-to-Personal fit, scheduling, cancellation, receipts, recovery, and reconciliation are implemented; Team, Enterprise, paid-to-paid transitions, automated dunning policy or collection mutations, and refund mutations remain out.",
+          "summary": "Free-to-paid preview, setup, checkout, and apply for Professional and Team plus Professional-to-Personal fit, scheduling, cancellation, receipts, recovery, and reconciliation are implemented; paid-to-paid upgrades refuse to a contact path; Enterprise, paid-to-paid execution, dunning, and refund mutations remain out.",
           "evidence": [
             "docs/billing-and-limits.md",
-            "internal/billing/lifecycle/billing_mutations_test.go"
+            "internal/billing/lifecycle/billing_mutations_test.go",
+            "internal/billing/lifecycle/dunning_contract_test.go",
+            "internal/billing/stripe/stripe_test.go"
           ]
         },
         "entitlement_policy": {
@@ -996,26 +1007,34 @@
         },
         "observability": {
           "state": "conditional",
-          "summary": "Value-free billing state, receipts, usage, and reconciler metrics exist; production alerts, provider event dashboards, and support escalation are not connected.",
+          "summary": "Value-free billing state, receipts, usage, and reconciler metrics exist, and a live PagerDuty-routed production alert stack now runs on the prod cell; none of its 14 rules cover billing, and billing-specific alerts, provider event dashboards, and billing support escalation remain unconnected.",
           "evidence": [
+            ".gitops/charts/platform/files/founder-open-plane.rules.yaml",
             "docs/billing-and-limits.md",
+            "docs/launch-readiness.md",
             "docs/observability-and-operations.md"
           ]
         },
         "recovery": {
           "state": "conditional",
-          "summary": "Crash-resumable exact mutation recovery and exact-subscription failed/recovered projection are implemented, but a real-provider activation/forward-fix drill, restore reconciliation, automated dunning policy or collection mutations, and terminal operator handling of ambiguous old work remain unproven.",
+          "summary": "Crash-resumable mutation recovery and failed/recovered projection exist, the dunning contract is pinned by a hermetic test, and refunds have an operator runbook; a real-provider activation/forward-fix drill, restore reconciliation, dunning/collection mutations, and ambiguous-old-work terminalization remain unproven.",
           "evidence": [
             "docs/billing-and-limits.md",
-            "internal/billing/lifecycle/billing_durability_test.go"
+            "docs/refund-runbook.md",
+            "internal/billing/lifecycle/billing_durability_test.go",
+            "internal/billing/lifecycle/dunning_contract_test.go"
           ]
         },
         "rollout_canaries": {
           "state": "conditional",
-          "summary": "The transition foundation and fenced inventory collector are deliberately dark behind an empty account cohort; real owned HTTPS return routes and a retained Personal-to-Professional-to-Personal Stripe canary are absent, and production charging and webhooks are disabled.",
+          "summary": "The transition stack stays dark behind an empty cohort and a fail-closed GA gate; owned HTTPS return routes run on the control-plane Worker and the six CP_STRIPE_* secrets are staged dark per the launch plan, but no end-to-end transition proof is retained and charging and webhooks stay disabled until the keyed cutover.",
           "evidence": [
             "docs/billing-and-limits.md",
+            "docs/billing-return-pages.md",
             "docs/billing-transition-rollout.md",
+            "docs/launch-readiness.md",
+            "infra/cloudflare/control-plane/src/billing-return-pages.mjs",
+            "scripts/stage-stripe-live-secrets.sh",
             "scripts/test-billing-transition-rollout-preflight.sh"
           ]
         },
@@ -1025,6 +1044,7 @@
           "evidence": [
             "docs/billing-and-limits.md",
             "docs/billing-transition-rollout.md",
+            "docs/refund-runbook.md",
             "docs/runbooks.md"
           ]
         }
@@ -1051,13 +1071,13 @@
         {
           "id": "full-lifecycle-reconciliation",
           "gate_ids": ["behavior", "recovery"],
-          "summary": "Complete Team and Enterprise transitions, paid-to-paid compensation, automated dunning policy or collection mutations, refund mutations, and restore reconciliation.",
+          "summary": "Complete Enterprise transitions, paid-to-paid execution and compensation (subscription schedules beyond the contact-path guard), automated dunning policy or collection mutations, refund mutations, and restore reconciliation.",
           "ref": "https://github.com/witwave-ai/witself/issues/33"
         },
         {
           "id": "stripe-sandbox-acceptance",
           "gate_ids": ["rollout_canaries"],
-          "summary": "Finish Stripe sandbox secrets, owned HTTPS return surfaces, hosted portal and webhook verification, then retain an end-to-end Personal-to-Professional-to-Personal transition and forward-fix canary; Team, Enterprise, and refund mutations remain excluded.",
+          "summary": "Return surfaces, portal, webhook endpoint, and CP_STRIPE_* secrets are staged dark; run the keyed cutover (provider/mode/lifecycle keys, allowlist, Stripe Tax) atop the reviewed atomic orchestrator and retain one transition and forward-fix proof; Enterprise, paid-to-paid, and refunds stay excluded.",
           "ref": "docs/billing-transition-rollout.md"
         }
       ]
@@ -1124,7 +1144,8 @@
           "state": "conditional",
           "summary": "All managed activation gates remain dark and no customer domain routes mail to an agent.",
           "evidence": [
-            "docs/agent-email.md"
+            "docs/agent-email.md",
+            "infra/cloudflare/control-plane/scripts/assert-custom-domain-dark.mjs"
           ]
         },
         "docs_support": {
@@ -1219,9 +1240,11 @@
         },
         "observability": {
           "state": "conditional",
-          "summary": "Value-free usage and audit records exist, but fact-specific SLOs and an external alert path are not retained.",
+          "summary": "Value-free usage and audit records exist, and the shared external alert path (PagerDuty + dead-man on the serving cell) is now live and canary-tested; fact-specific SLOs and fact metrics wired to that path are still not retained.",
           "evidence": [
+            ".gitops/charts/platform/files/founder-open-plane.rules.yaml",
             "docs/fact-service.md",
+            "docs/launch-readiness.md",
             "docs/observability-and-operations.md"
           ]
         },
@@ -1275,11 +1298,11 @@
       "id": "fleet-deployment-recovery",
       "name": "Fleet deployment, backup, and recovery",
       "area": "Platform",
-      "summary": "Signed releases, immutable images, Helm/GitOps cells, schema checks, encrypted backups, archive validation, and recovery runbooks are implemented; broad mobility and continuous monitoring remain constrained.",
+      "summary": "Signed releases, immutable images, Helm/GitOps cells, schema checks, encrypted restore-verified backups, archive validation, recovery runbooks, and continuous serving-cell monitoring with a tested external receiver are implemented; broad mobility, provider PITR, and multi-cell movement drills remain constrained.",
       "implementation": "implemented",
       "managed_rollout": "limited",
-      "evidence_release": "v0.0.253",
-      "evidence_scope": "Signed release publication plus active-cell and edge postflight; broad placement and external monitoring remain open.",
+      "evidence_release": "v0.0.258",
+      "evidence_scope": "Signed v0.0.258 release, dual-cell restore-verified pre-migration backups, waved rolls of both Civo cells to schema 93, CP and edge attested at 0.0.259, and accepted serving-cell monitoring; broad placement and movement drills remain open.",
       "docs": [
         "docs/backup-and-recovery.md",
         "docs/deployment-cells.md",
@@ -1306,14 +1329,18 @@
           "state": "pass",
           "summary": "Immutable digests, migration locks, bounded workers, schema floors, placement freezes, exact cohorts, encrypted artifact permissions, and a fail-closed roll-cell gate that verifies pre-migration backup evidence before any values edit constrain rollout risk.",
           "evidence": [
+            "cmd/witself-admin/backup_evidence_cmd.go",
             "docs/deployment-cells.md",
             "docs/release-and-build.md"
           ]
         },
         "observability": {
           "state": "conditional",
-          "summary": "Health and metrics surfaces exist, but the production cells lack continuous Prometheus scraping, PVC collection, Alertmanager routing, and a tested external receiver.",
+          "summary": "The serving cell runs continuous kube-prometheus-stack scraping with server/worker ServiceMonitors, PVC metrics, 14 alert rules, PagerDuty routing, and a dead-man watchdog, accepted via alert-canary and dead-man lapse proofs; the backup validation cell and any future accepting cell remain outside the monitored plane.",
           "evidence": [
+            ".gitops/cells/civo-sandbox-usw2-dev/values.yaml",
+            ".gitops/charts/platform/files/founder-open-plane.rules.yaml",
+            "docs/launch-readiness.md",
             "docs/observability-and-operations.md"
           ]
         },
@@ -1321,16 +1348,17 @@
           "state": "conditional",
           "summary": "Encrypted pre-migration backups and disposable restore validation exist; provider PITR, committed production restore, and multi-cell movement drills remain incomplete.",
           "evidence": [
+            "cmd/witself-admin/backup_evidence_cmd.go",
             "docs/backup-and-recovery.md",
             "docs/deployment-cells.md"
           ]
         },
         "rollout_canaries": {
           "state": "conditional",
-          "summary": "v0.0.253 passed release, active-cell, and edge postflight, while the backup cell remains a non-accepting validation target and placement stays paused.",
+          "summary": "v0.0.258 passed release and waved dual-cell rolls with restore-verified pre-migration backup evidence for both cells, converging both Civo cells at schema 93 with control plane and edge attested at 0.0.259; the backup cell remains a non-accepting validation target and placement stays paused.",
           "evidence": [
             "docs/deployment-cells.md",
-            "https://github.com/witwave-ai/witself/releases/tag/v0.0.253"
+            "https://github.com/witwave-ai/witself/releases/tag/v0.0.258"
           ]
         },
         "docs_support": {
@@ -1347,7 +1375,7 @@
         {
           "id": "continuous-platform-alerting",
           "gate_ids": ["observability"],
-          "summary": "Deploy and exercise the end-to-end metrics, alert routing, and external receiver chain.",
+          "summary": "Extend continuous monitoring and alert coverage to the backup validation cell and every future accepting cell; the serving-cell metrics, routing, and receiver chain is deployed and accepted.",
           "ref": "docs/observability-and-operations.md"
         },
         {
@@ -1368,7 +1396,7 @@
       "id": "identity-tenancy",
       "name": "Accounts, realms, agents, and tokens",
       "area": "Identity",
-      "summary": "Account, realm, agent, token, role, suspension, and transactional realm/agent/operator-seat capacity enforcement form the shared identity spine; current managed evidence is narrow, the operator-seat cap ships unset in the catalog, and the legacy total-agent cap remains a compatibility floor.",
+      "summary": "Account, realm, agent, token, role, suspension, and transactional realm/agent/operator-seat capacity enforcement form the shared identity spine; managed evidence is narrow, operator-seat caps are set per plan (1/3/25, Enterprise unlimited), and the legacy total-agent cap remains a compatibility floor.",
       "implementation": "implemented",
       "managed_rollout": "limited",
       "plan_limit_keys": [
@@ -1393,9 +1421,10 @@
         },
         "entitlement_policy": {
           "state": "pass",
-          "summary": "Resolved realms, agents, and agents-per-realm limits are transactionally enforced per account with audited overrides and explicit unlimited semantics.",
+          "summary": "Resolved realms, agents, agents-per-realm, and operator-seat limits are transactionally enforced per account (creates refuse past the seat cap; downgrades refuse while headcount exceeds the target plan) with audited overrides and explicit unlimited semantics.",
           "evidence": [
             "docs/billing-and-limits.md",
+            "internal/store/operator_seats_integration_test.go",
             "internal/store/resource_limit_integration_test.go"
           ]
         },
@@ -1409,8 +1438,10 @@
         },
         "observability": {
           "state": "conditional",
-          "summary": "Audit, usage, capacity, token, and lifecycle state are inspectable without a unified identity-capacity dashboard or tested external alert path.",
+          "summary": "Audit, usage, capacity, token, and lifecycle state are inspectable, and a tested external alert path now exists on the monitoring plane, but no unified identity-capacity dashboard or identity-specific alert rules are connected to it.",
           "evidence": [
+            ".gitops/charts/platform/files/founder-open-plane.rules.yaml",
+            "docs/launch-readiness.md",
             "docs/observability-and-operations.md"
           ]
         },
@@ -1459,7 +1490,7 @@
       "id": "managed-support",
       "name": "Managed support",
       "area": "Commercial",
-      "summary": "Durable account-scoped support tickets, messages, state transitions, tenant and fleet-admin CLI/API surfaces, TUI operations, audit, and archive/import are implemented; plan enforcement, operating policy, abuse controls, alerting, and SLA claims remain limited.",
+      "summary": "Support tickets, messages, transitions, tenant and fleet-admin surfaces, audit, and archive/import ship with a published policy, plan-entitlement admission enforcement, and a live first-response breach alert; the AI responder and support@ intake stay dark; intake-rate controls and a rollout canary stay limited.",
       "implementation": "implemented",
       "managed_rollout": "limited",
       "plan_feature_keys": [
@@ -1469,7 +1500,9 @@
         "docs/api-routes.md",
         "docs/cli-command-surface.md",
         "docs/governance-and-support.md",
-        "docs/self-host-support.md"
+        "docs/self-host-support.md",
+        "docs/support-policy.md",
+        "docs/support-runner.md"
       ],
       "gates": {
         "behavior": {
@@ -1481,28 +1514,36 @@
           ]
         },
         "entitlement_policy": {
-          "state": "conditional",
-          "summary": "Paid plans advertise support, but ticket admission checks the separate support_policy field, whose migration default is enabled and is not synchronized from resolved plan features; Personal can therefore remain enabled unless explicitly overridden.",
+          "state": "pass",
+          "summary": "Support is a plan entitlement enforced at ticket admission: an applied plan snapshot without the support feature cannot open tickets, pre-snapshot accounts are not locked out, and support_policy stays an independent audited fleet-operator switch; Personal carries no support feature and the policy documents this.",
           "evidence": [
-            "docs/billing-and-limits.md",
-            "internal/store/migrations/0015_add_support_tickets.sql",
+            "docs/support-policy.md",
+            "internal/server/support_entitlement_test.go",
+            "internal/store/support.go",
+            "internal/store/support_entitlement_integration_test.go",
             "web/plans/plans.json"
           ]
         },
         "bounds_abuse": {
           "state": "conditional",
-          "summary": "Subjects, bodies, list pages, roles, states, and value exposure are bounded, while ticket/message retention, attachment/evidence handling, and intake-rate abuse controls remain incomplete.",
+          "summary": "Subjects, bodies, pages, roles, states, and value exposure are bounded; ticket retention is defined by the dark closed-account purge, and the dark support@ channel adds sender rate limits, DMARC-matched senders, and bounded fan-out; in-product intake-rate controls, an age-out sweep, and attachment handling are absent.",
           "evidence": [
+            "docs/data-retention-policy.md",
             "docs/security-policy.md",
-            "internal/store/support.go"
+            "infra/cloudflare/support-email-intake/src/index.js",
+            "internal/store/support.go",
+            "internal/store/support_email.go"
           ]
         },
         "observability": {
-          "state": "conditional",
-          "summary": "The admin TUI exposes ticket state and age, but no continuous response-time, escalation, backlog, or SLA metric and alert path is operationally declared.",
+          "state": "pass",
+          "summary": "Value-free first-response SLO gauges (unanswered tickets, oldest unanswered age, and an up guard) render on every cell, and the WitselfSupportFirstResponseBreach rule rides the live PagerDuty-routed monitoring stack with serving-cell verification recorded in the launch plan; the admin TUI exposes ticket state and age.",
           "evidence": [
+            ".gitops/charts/platform/files/founder-open-plane.rules.yaml",
             "cmd/witself-admin/tui_model.go",
-            "docs/governance-and-support.md"
+            "docs/launch-readiness.md",
+            "internal/server/metrics.go",
+            "internal/store/support_slo_integration_test.go"
           ]
         },
         "recovery": {
@@ -1522,11 +1563,13 @@
           ]
         },
         "docs_support": {
-          "state": "conditional",
-          "summary": "Boundaries and prerequisites are documented, while the promised channels, hours, severity matrix, targets, ownership, and escalation path remain undecided.",
+          "state": "pass",
+          "summary": "The managed support policy is published: plan entitlement, channels with launch-status notes, a one-business-day first-response promise, AI-first staffing with a fixed human-escalation set, severities, refund/security/deletion paths, and incident communications; the AI runner is documented separately.",
           "evidence": [
             "docs/governance-and-support.md",
-            "docs/self-host-support.md"
+            "docs/self-host-support.md",
+            "docs/support-policy.md",
+            "docs/support-runner.md"
           ]
         }
       },
@@ -1534,26 +1577,8 @@
         {
           "id": "support-abuse-retention",
           "gate_ids": ["bounds_abuse"],
-          "summary": "Define and enforce ticket/message retention, bounded evidence attachments, intake-rate controls, and diagnostic-data handling.",
+          "summary": "Add in-product ticket-creation intake-rate controls, any bounded ticket age-out sweep, and bounded evidence-attachment handling; the email channel's dark rate limiting and the purge-path retention landed.",
           "ref": "internal/store/support.go"
-        },
-        {
-          "id": "support-entitlement-enforcement",
-          "gate_ids": ["entitlement_policy"],
-          "summary": "Resolve paid-plan support entitlement into support_policy while preserving explicit audited account overrides and disabling Personal by default.",
-          "ref": "internal/store/migrations/0015_add_support_tickets.sql"
-        },
-        {
-          "id": "support-operating-policy",
-          "gate_ids": ["docs_support"],
-          "summary": "Decide channels, hours, severities, response targets, ownership, escalation, retention, and customer-visible limitations.",
-          "ref": "docs/governance-and-support.md"
-        },
-        {
-          "id": "support-operations-alerting",
-          "gate_ids": ["observability"],
-          "summary": "Publish value-free backlog and response-time metrics, define the selected support SLOs, and connect them to a tested external escalation path.",
-          "ref": "docs/observability-and-operations.md"
         },
         {
           "id": "support-rollout-canary",
@@ -1607,8 +1632,10 @@
         },
         "observability": {
           "state": "conditional",
-          "summary": "Value-free memory, curation, worker, and quality evidence schemas exist without continuous production alerts or retained multi-environment SLO evidence.",
+          "summary": "Value-free memory, curation, worker, and quality evidence schemas exist, and the serving cell has continuous scrape plus generic server/worker alerting to a tested PagerDuty/dead-man receiver; memory/curation-specific SLO rules and retained multi-environment SLO evidence remain absent.",
           "evidence": [
+            ".gitops/charts/platform/files/founder-open-plane.rules.yaml",
+            "docs/launch-readiness.md",
             "docs/memory-load-quality.md",
             "docs/observability-and-operations.md"
           ]
@@ -1817,7 +1844,7 @@
         },
         "rollout_canaries": {
           "state": "conditional",
-          "summary": "Personal and Professional are catalog-available; Team and Enterprise remain unavailable, and repository state alone cannot prove each live account override.",
+          "summary": "Personal, Professional, and Team are catalog-available with ratified operator seats (Personal 1, Professional 3, Team 25) and Team's flat $250 monthly price; Enterprise remains unavailable (contact-only), and repository state alone cannot prove each live account override.",
           "evidence": [
             "docs/billing-and-limits.md",
             "web/plans/plans.json"
@@ -1842,13 +1869,13 @@
         {
           "id": "professional-purchase-readiness",
           "gate_ids": ["rollout_canaries"],
-          "summary": "Reconcile Professional's catalog-purchasable flag with dark billing, limited inbound email enrollment, and support-policy enforcement before customer checkout opens.",
+          "summary": "Reconcile the Professional and Team catalog-purchasable flags with dark billing, limited inbound email enrollment, and support-policy enforcement before customer checkout opens.",
           "ref": "web/plans/plans.json"
         },
         {
           "id": "team-enterprise-activation",
           "gate_ids": ["rollout_canaries"],
-          "summary": "Keep Team and Enterprise unavailable until their dependent features and billing transitions meet this scorecard's gates.",
+          "summary": "Keep Enterprise unavailable until its dependent features and billing transitions meet this scorecard's gates, and reconcile Team's 2026-08-24 purchasable flip (made after the paid-to-paid guard, seat enforcement, and flat pricing merged) with the still-dark billing cutover.",
           "ref": "web/plans/plans.json"
         }
       ]
@@ -1915,7 +1942,8 @@
           "state": "conditional",
           "summary": "The receive edge alias gate remains off and no managed customer alias delivers mail.",
           "evidence": [
-            "docs/agent-email.md"
+            "docs/agent-email.md",
+            "infra/cloudflare/control-plane/scripts/assert-custom-domain-dark.mjs"
           ]
         },
         "docs_support": {
@@ -2019,8 +2047,10 @@
         },
         "observability": {
           "state": "conditional",
-          "summary": "Value-free mailbox, rate, retention, claim, and worker metrics exist without continuous scraping and tested external alert delivery.",
+          "summary": "Value-free mailbox, rate, retention, claim, and worker metrics are continuously scraped on the serving cell with a tested PagerDuty and dead-man alert path, but no message-specific alert rules or SLO cover mailbox backlog, rates, claims, or retention.",
           "evidence": [
+            ".gitops/charts/platform/files/founder-open-plane.rules.yaml",
+            "docs/launch-readiness.md",
             "docs/observability-and-operations.md"
           ]
         },
@@ -2054,7 +2084,7 @@
         {
           "id": "continuous-message-alerting",
           "gate_ids": ["observability"],
-          "summary": "Connect mailbox backlog, rate, claim, failure, and retention metrics to a tested external alert receiver.",
+          "summary": "Add message-specific alert rules (mailbox backlog, rate, claim, failure, retention) to the live founder-open-plane rule set; the continuous scrape and tested PagerDuty/dead-man receiver already exist.",
           "ref": "docs/observability-and-operations.md"
         },
         {
@@ -2195,8 +2225,10 @@
         },
         "observability": {
           "state": "conditional",
-          "summary": "Value-free audit and lifecycle state exist, but sealed-plane SLOs, anomaly alerts, and external escalation are not connected.",
+          "summary": "Value-free audit and lifecycle state exist and a tested external escalation path (PagerDuty plus dead-man) is live on the serving cell, but sealed-plane SLOs and anomaly alerts are still not defined or connected to it.",
           "evidence": [
+            ".gitops/charts/platform/files/founder-open-plane.rules.yaml",
+            "docs/launch-readiness.md",
             "docs/observability-and-operations.md",
             "docs/sealed-plane-acceptance.md"
           ]
@@ -2248,7 +2280,7 @@
         {
           "id": "sealed-operations-alerting",
           "gate_ids": ["observability"],
-          "summary": "Define sealed-plane SLOs and connect value-free enrollment, reveal, recovery, rotation, and anomaly signals to a tested external escalation path.",
+          "summary": "Define sealed-plane SLOs and add sealed-plane alert rules for enrollment, reveal, recovery, rotation, and anomaly signals; the tested external escalation path (PagerDuty plus dead-man) already exists.",
           "ref": "docs/observability-and-operations.md"
         }
       ]
@@ -2375,10 +2407,12 @@
       "gates": {
         "behavior": {
           "state": "conditional",
-          "summary": "Append, read, tail, durable hook flush, normalized events, usage rollups, account-policy retention, preview/enforce, whole-conversation deletion, and evidence holds are implemented and tested; materializing durable evidence to release resolved holds remains unimplemented.",
+          "summary": "Append, read, tail, durable hook flush, NUL-safe normalized events (capture sanitizes unstorable content; residual Postgres errors map to typed 400s), usage rollups, retention preview/enforce, whole-conversation deletion, and evidence holds are implemented and tested; evidence materialization is still unimplemented.",
           "evidence": [
             "docs/transcript-ledger.md",
-            "docs/transcript-retention.md"
+            "docs/transcript-retention.md",
+            "internal/nulsafe/nulsafe.go",
+            "internal/store/transcript_nulsafe_test.go"
           ]
         },
         "entitlement_policy": {
@@ -2399,8 +2433,10 @@
         },
         "observability": {
           "state": "conditional",
-          "summary": "Capture, outbox, retention, failure, and worker metrics exist without continuous scrape, alert routing, or a tested external receiver.",
+          "summary": "Capture, outbox, retention, failure, and worker metrics exist, and the serving cell has continuous scrape, alert routing, and a canary-tested PagerDuty/dead-man receiver whose generic error-ratio rule caught the NUL capture incident; transcript-outbox and retention-backlog alert rules are still not wired.",
           "evidence": [
+            ".gitops/charts/platform/files/founder-open-plane.rules.yaml",
+            "docs/launch-readiness.md",
             "docs/observability-and-operations.md",
             "docs/transcript-retention.md"
           ]
@@ -2536,7 +2572,7 @@
         {
           "id": "usage-rollup-expansion",
           "gate_ids": ["rollout_canaries"],
-          "summary": "Implement and retain canaries for account and realm aggregation, billing-unit conversion, archive/restore reconciliation, and production-shaped load.",
+          "summary": "Implement and retain canaries for account and realm aggregation, billing-unit conversion, archive/restore reconciliation, and production-shaped load; Team is purchasable while Stripe usage recording remains a stub, raising this gate's urgency.",
           "ref": "docs/billing-and-limits.md"
         }
       ]

@@ -208,6 +208,11 @@ witself transcript flush --runtime grok-build
 witself transcript flush --runtime cursor
 ```
 
+Captured content is NUL-safe: NUL bytes and their JSON escape sequences are
+replaced with U+FFFD in bodies at capture (both the hook and batch-assembly
+halves sanitize) and rejected in identifiers, and residual unstorable input
+maps to a typed invalid-input error rather than a server failure.
+
 An explicit foreground flush is a full delivery fence: it keeps draining every
 currently uploadable event until the outbox is empty or a concrete delivery
 error occurs. Individual network requests remain time-bounded. Detached

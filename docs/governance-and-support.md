@@ -122,12 +122,14 @@ audit and archive/import coverage.
 The published customer-facing policy for the general self-service launch —
 entitlement by plan, channels, the first-response promise, AI-first staffing
 and its fixed human-escalation set — is [support-policy.md](support-policy.md).
-The open gates below (entitlement synchronization into `support_policy`, the
-support@ intake bridge, SLO alerting) are tracked there as explicit
-launch-status notes rather than silent claims. That mechanism is not yet a generally
-advertised support promise: its plan entitlement is not synchronized into the
-separate `support_policy`, and channels, hours, severities, response targets,
-retention, ownership, escalation, monitoring, and SLA language remain open.
+The remaining open gates (the dark support@ intake bridge, the dark AI first
+responder, and the production rollout canary) are tracked there as explicit
+launch-status notes rather than silent claims. Support is enforced as a plan
+entitlement at ticket admission — an applied plan snapshot without the support
+feature cannot open tickets — while the per-account `support_policy` remains an
+independent audited fleet-operator switch; channels, hours, severities,
+response targets, and escalation are decided in the published policy, and the
+first-response promise is backed by a live breach alert.
 
 When those gates are closed, managed support may cover:
 

@@ -25,7 +25,7 @@ deployment deliberately differs from those defaults:
 | Adapter receipt replay | Off | Off; opened only for a bounded operator proof |
 | Adapter lifecycle delivery | Off | Enabled |
 | `witself-agent-email-send-lifecycle` subscription (`email.sending` source) | Disabled | Enabled for six lifecycle event classes |
-| Agent-email retention | Off, preview defaults | Cell-wide on `civo-sandbox-usw2-dev`; originally enabled on v0.0.252/schema 90 and now running on v0.0.253/schema 91 with two replicas in enforce mode, batch 100, 1-minute interval, and 2-minute timeout; Founder's effective policy remains indefinite |
+| Agent-email retention | Off, preview defaults | Cell-wide on `civo-sandbox-usw2-dev`; originally enabled on v0.0.252/schema 90 and now running on v0.0.258/schema 93 with two replicas in enforce mode, batch 100, 1-minute interval, and 2-minute timeout; Founder's effective policy remains indefinite |
 | Cell storage ledger | Schema 91 | Live on `civo-sandbox-usw2-dev`; database-triggered 3-GiB/25,000-root admission and 4-GiB/100,000-counted-row hard boundaries |
 
 The lifecycle path uses `witself-agent-email-send-events`, its configured
@@ -35,23 +35,27 @@ provider receipt and one canonical `email_sent` usage observation. That
 observation is operational and non-billable: no invoice, overage, or
 payment-provider conversion is enabled. The original DLQ copy remains retained
 as incident evidence. The multi-account Civo cell hosting the exact Founder
-email cohort now runs application `0.0.253` at schema 91. Releases `v0.0.250`
+email cohort now runs application `0.0.258` at schema 93, with the backup
+validation cell converged at the same release and the email edge and control
+plane attested at `0.0.259`. Releases `v0.0.250`
 and `v0.0.251` were edge-only event-consumer releases; `v0.0.252` added the
 bounded traffic and retention controls, and `v0.0.253` added the independent
 cell-storage ledger and hardened public dispatch front door described below.
 
 Production scope is still intentionally narrow. There is no wildcard account
 cohort. Widening requires a new reviewed cell, account-policy, adapter, queue,
-retention, and provider-capacity decision. The live schema-91 deployment adds a
+retention, and provider-capacity decision. The schema-91 rollout added a
 transactionally maintained cell-wide retained-byte/row ledger, and its
 point-in-time metric scrape was verified with
 `witself_agent_email_cell_storage_metrics_up 1` and all seven usage/threshold
 gauges. Database triggers enforce the admission and hard
-boundaries even without a metrics collector. The production cluster does not
-yet have continuous Prometheus scraping, PVC metrics collection, Alertmanager
-routing, or a tested external alert receiver. Continuous logical-ledger and
-physical-PVC alerts with a tested receiver, plus shared sending-domain capacity
-and provider-wide backpressure, block cohort expansion.
+boundaries even without a metrics collector. The serving cell now runs
+continuous kube-prometheus-stack scraping with PVC metrics collection,
+Alertmanager routing, and a canary-tested PagerDuty `witself-prod` receiver
+plus dead-man heartbeat; its 14 alerting rules include the logical-ledger and
+physical-PVC capacity alerts (alert canary and dead-man lapse/restore proofs
+passed 2026-08-26). Shared sending-domain capacity and provider-wide
+backpressure still block cohort expansion.
 Per-account limits do not bound several accounts against one cell volume or one
 provider/domain reputation budget. Catalog entitlement alone never activates a
 provider route.
@@ -183,8 +187,8 @@ The Founder account has explicit indefinite agent-email retention, so its mail
 is not eligible for age deletion. Its attachment-storage allowance is also
 commercially unlimited, but the live schema-91 platform ledger still refuses
 new roots at 3 GiB/25,000 roots and all positive counted-row writes at
-4 GiB/100,000 rows. The v0.0.253/schema-91 production deployment runs the
-bounded `agentEmailRetention` worker in enforcement mode on both worker
+4 GiB/100,000 rows. The production deployment (now v0.0.258/schema 93) runs
+the bounded `agentEmailRetention` worker in enforcement mode on both worker
 replicas: batch 100, one-minute interval, and one shared two-minute timeout per
 run. Activation followed verification of both required pre-migration backups.
 An enforce attempt stops after 32 productive passes and
@@ -201,9 +205,10 @@ each 32 MiB database batch fits only one. These are work ceilings, not
 throughput guarantees or reserved inbound shares. They exceed one saturated
 account's rolling-minute envelope of at most 5,100 rows or 1,088 MiB, but
 database latency still requires monitoring. The storage boundary and its
-point-in-time gauges are verified, but a wider cohort remains blocked until
-continuous logical/PVC alerts reach a tested external receiver and the
-independent provider-wide budget and backpressure design are settled.
+gauges are verified and now feed continuous logical/PVC capacity alerts at a
+tested external receiver on the serving cell, but a wider cohort remains
+blocked until the independent provider-wide budget and backpressure design are
+settled.
 
 With enforcement active, a Professional or Team account later admitted to the
 production email cohort needs no worker-mode change for its 90-day or 365-day
