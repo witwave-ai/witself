@@ -688,6 +688,87 @@ test("source IP and challenge token are optional strings outside the fingerprint
   }
 });
 
+test("consent-less canonical fingerprint is byte-stable (golden)", async () => {
+  // Dark contract: a signup without consent must keep the exact historical
+  // canonical bytes, or every in-flight durable provision would be refused
+  // as a different request after a deploy.
+  const setup = harness();
+  assert.equal((await setup.runtime.fetch(signupRequest())).status, 201);
+  assert.equal(
+    setup.storage.values.get("account-signup").request_fingerprint,
+    "40fe0b8eaf6a593565e96d204616a5d7c4ec4fd64d03b21b5e80de19d10f9656",
+  );
+  assert.equal(
+    Object.hasOwn(setup.service.calls[0].input, "consent_terms_version"),
+    false,
+  );
+});
+
+test("consent versions bind the durable fingerprint and reach the cell", async () => {
+  const setup = harness();
+  const consent = {
+    consent_terms_version: "draft-2026-08-22",
+    consent_privacy_version: "draft-2026-08-23",
+  };
+  const initial = await setup.runtime.fetch(signupRequest(consent));
+  assert.equal(initial.status, 201);
+  const state = setup.storage.values.get("account-signup");
+  assert.notEqual(
+    state.request_fingerprint,
+    "40fe0b8eaf6a593565e96d204616a5d7c4ec4fd64d03b21b5e80de19d10f9656",
+  );
+  // Consent lives in the fingerprint and at the cell; the durable state
+  // keeps its exact dark shape with no extra fields.
+  assert.equal(Object.hasOwn(state, "consent_terms_version"), false);
+  assert.equal(Object.hasOwn(state, "consent_privacy_version"), false);
+  assert.deepEqual(
+    setup.service.calls.map(({ input }) => [
+      input.consent_terms_version,
+      input.consent_privacy_version,
+    ]),
+    [["draft-2026-08-22", "draft-2026-08-23"]],
+  );
+
+  // Same-consent retry is the ordinary safe replay.
+  const replay = await setup.runtime.fetch(signupRequest(consent));
+  assert.equal(replay.status, 201);
+  assert.equal((await replay.json()).replayed, true);
+
+  // Drifted or dropped consent on retry is a different signup request.
+  const calls = setup.service.calls.length;
+  for (const drifted of [
+    { ...consent, consent_terms_version: "draft-2026-09-01" },
+    {},
+  ]) {
+    const conflict = await setup.runtime.fetch(signupRequest(drifted));
+    assert.equal(conflict.status, 409);
+    assert.match(
+      (await conflict.json()).error,
+      /different signup request/,
+    );
+  }
+  assert.equal(setup.service.calls.length, calls);
+});
+
+test("malformed consent is rejected before any signup state exists", async () => {
+  for (const fields of [
+    { consent_terms_version: "draft-2026-08-22" },
+    { consent_privacy_version: "draft-2026-08-22" },
+    { consent_terms_version: 7, consent_privacy_version: "x" },
+    {
+      consent_terms_version: "a".repeat(65),
+      consent_privacy_version: "draft-2026-08-22",
+    },
+    { consent_terms_version: "   ", consent_privacy_version: "x" },
+    { consent_terms_version: "draft\u0007bell", consent_privacy_version: "x" },
+  ]) {
+    const isolated = harness();
+    const response = await isolated.runtime.fetch(signupRequest(fields));
+    assert.equal(response.status, 400);
+    assert.equal(isolated.storage.values.has("account-signup"), false);
+  }
+});
+
 test("invalid Turnstile requests return the safe challenge URL before invite use", async () => {
   let verifications = 0;
   const setup = harness({

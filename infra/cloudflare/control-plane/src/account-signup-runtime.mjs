@@ -11,6 +11,9 @@ import {
 
 const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const CELL_NAME = /^[a-z0-9-]{1,64}$/;
+// Dark ToS/privacy consent version labels mirror the cell store's bounds:
+// 1..64 bytes of printable ASCII with at least one non-space byte.
+const CONSENT_VERSION = /^(?=.*[\x21-\x7e])[\x20-\x7e]{1,64}$/;
 const INVITE_CODE = /^[a-z0-9][a-z0-9-]{2,63}$/;
 const PROVISION_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const SIGNUP_IP_SCOPE = /^signup-counter:ip:[0-9a-f]{64}$/;
@@ -96,6 +99,16 @@ function normalizedRequest(input) {
     : typeof input.turnstile_token === "string"
     ? input.turnstile_token
     : null;
+  const consentTermsVersion = input.consent_terms_version == null
+    ? ""
+    : typeof input.consent_terms_version === "string"
+    ? input.consent_terms_version
+    : null;
+  const consentPrivacyVersion = input.consent_privacy_version == null
+    ? ""
+    : typeof input.consent_privacy_version === "string"
+    ? input.consent_privacy_version
+    : null;
   if (!PROVISION_ID.test(provisionID)) {
     fail(
       "provision_id is required and must be a nonempty opaque identifier",
@@ -117,6 +130,27 @@ function normalizedRequest(input) {
   if (turnstileToken === null) {
     fail("turnstile_token must be a string", 400);
   }
+  if (consentTermsVersion === null || consentPrivacyVersion === null) {
+    fail("consent versions must be strings", 400);
+  }
+  if ((consentTermsVersion === "") !== (consentPrivacyVersion === "")) {
+    fail(
+      "consent_terms_version and consent_privacy_version must be provided together",
+      400,
+    );
+  }
+  if (
+    consentTermsVersion !== "" &&
+    (
+      !CONSENT_VERSION.test(consentTermsVersion) ||
+      !CONSENT_VERSION.test(consentPrivacyVersion)
+    )
+  ) {
+    fail(
+      "consent versions must be printable ASCII of at most 64 bytes",
+      400,
+    );
+  }
   return {
     provision_id: provisionID,
     email,
@@ -124,6 +158,8 @@ function normalizedRequest(input) {
     invite,
     source_ip: sourceIP,
     turnstile_token: turnstileToken,
+    consent_terms_version: consentTermsVersion,
+    consent_privacy_version: consentPrivacyVersion,
   };
 }
 
@@ -151,12 +187,24 @@ async function sha256Hex(value) {
 }
 
 function requestCanonical(input) {
-  return JSON.stringify([
+  const canonical = [
     input.provision_id,
     input.email,
     input.display_name,
     input.invite,
-  ]);
+  ];
+  // Dark consent capture: a consent-less request keeps the exact historical
+  // canonical bytes, so its durable fingerprint never changes across deploys.
+  // Recorded consent appends a domain-separated consent/v1 block, making a
+  // retry with drifted consent a different signup request.
+  if (input.consent_terms_version !== "") {
+    canonical.push(
+      "consent/v1",
+      input.consent_terms_version,
+      input.consent_privacy_version,
+    );
+  }
+  return JSON.stringify(canonical);
 }
 
 function inviteVerdict(invite, uses, nowMs) {
@@ -945,6 +993,12 @@ export class DurableAccountSignup {
             email: request.email,
             display_name: request.display_name,
             provision_id: state.provision_id,
+            ...(request.consent_terms_version !== ""
+              ? {
+                consent_terms_version: request.consent_terms_version,
+                consent_privacy_version: request.consent_privacy_version,
+              }
+              : {}),
           }),
           signal: AbortSignal.timeout(15_000),
         },
