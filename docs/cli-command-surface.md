@@ -779,6 +779,7 @@ Flags:
 | `--legal-name TEXT` | Legal customer name for billing records. |
 | `--email EMAIL` | Primary account/operator email. |
 | `--challenge TOKEN` | Turnstile token copied from the signup challenge page after a challenge-required response. |
+| `--accept-terms` | Record acceptance of the current Terms of Service and Privacy Policy versions with the signup. |
 | `--billing-email EMAIL` | Billing contact email. |
 | `--support-email EMAIL` | Support contact email. |
 | `--address-field KEY=VALUE` | Set a billing/customer address field. Repeatable. |
@@ -796,6 +797,13 @@ When abuse hardening is enabled, a challenge-required `403` prints the public
 re-run the exact command with `--challenge <token>`. The challenge token is not
 part of the durable account-create request fingerprint, so the retry resumes
 the same `provision_id`; the CLI omits it from the JSON request when empty.
+
+`--accept-terms` sends the CLI's compiled-in current legal versions as
+`consent_terms_version`/`consent_privacy_version` (dark consent capture).
+Unlike the challenge token, recorded consent IS part of the durable
+account-create request fingerprint, so a resumed signup must be re-run with
+the same flag; omitting the flag keeps the request byte-identical to older
+CLIs and records nothing.
 
 When `--checkout` is used with `--json`, output should use the hosted provider
 session result from [json-contracts.md](json-contracts.md) for the payment setup

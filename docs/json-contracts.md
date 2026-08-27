@@ -3515,9 +3515,15 @@ Account summary:
   "billing_email": "billing@example.com",
   "support_email": "support@example.com",
   "created_at": "2026-06-26T18:00:00Z",
-  "updated_at": "2026-06-26T18:00:00Z"
+  "updated_at": "2026-06-26T18:00:00Z",
+  "consent_terms_version": "draft-2026-08-22",
+  "consent_privacy_version": "draft-2026-08-22",
+  "consent_recorded_at": "2026-06-26T18:00:00Z"
 }
 ```
+
+The three `consent_*` fields are the dark signup consent capture and are
+omitted (`omitempty`) for accounts whose signup carried no consent.
 
 Account billing summary (implemented control-plane read surface):
 

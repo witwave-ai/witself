@@ -423,6 +423,9 @@ account is the billing target; usage rolls up by realm (see
 | `row_version` | `bigint NOT NULL DEFAULT 1` | optimistic lock |
 | `created_at` / `updated_at` | `timestamptz NOT NULL` | |
 | `deleted_at` | `timestamptz NULL` | tombstone |
+| `consent_terms_version` | `text NULL` | Terms of Service version accepted at signup (dark consent capture; `NULL` when the signup carried no consent) |
+| `consent_privacy_version` | `text NULL` | Privacy Policy version accepted at signup (always set together with `consent_terms_version`) |
+| `consent_recorded_at` | `timestamptz NULL` | when signup consent was durably recorded at account creation |
 
 Indexes: PK on `id`. Account closure interacts with the audit/PII retention
 posture (see [Account Deletion, PII, And Erasure](#account-deletion-pii-and-erasure)).

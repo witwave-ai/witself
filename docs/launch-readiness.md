@@ -45,9 +45,13 @@ PII-collecting launch:
 1. **Legal pages don't exist** — no ToS, Privacy, Acceptable Use, DPA/subprocessor
    list, refund/cancellation terms. Claude drafts skeletons; **final content +
    legal review = 🔑**.
-2. **No ToS/consent capture at signup** — accounts schema has no consent column;
-   `accountCreate` records no acceptance. Add consent-timestamp capture (🔨) once
-   legal text exists.
+2. **ToS/consent capture at signup** — ✅ implemented dark: schema 0094 adds
+   nullable consent columns, and consent ships behind the optional
+   `--accept-terms` CLI flag / `consent_terms_version` +
+   `consent_privacy_version` API fields end to end (fingerprint-bound,
+   audited as `account.consent.recorded`; consent-less signups are
+   byte-identical to before). Activation = CLI default-on + web signup once
+   the legal text is finalized (still 🔑).
 3. **Signup is invite-gated and CLI-only** — `accountCreate` requires `--invite`;
    there is no web signup. "General self-service" needs a **product decision (🔑):**
    open signup (relax `--invite`) vs waitlist, and web entry point vs CLI-only.
