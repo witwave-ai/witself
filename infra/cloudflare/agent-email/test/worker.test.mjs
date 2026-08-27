@@ -565,6 +565,7 @@ test("DMARC fail relays when no trusted authentication attester is configured", 
   await handleEmail(mail, legacyEnv(null, {
     AGENT_EMAIL_DMARC_REJECT_ENABLED: "true",
     AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: "",
+    AGENT_EMAIL_RELAY_VERSION: "witself-email-relay-pilot-v1",
   }, vectorNowMS), {
     now: () => vectorNowMS,
     fetch: async () => {

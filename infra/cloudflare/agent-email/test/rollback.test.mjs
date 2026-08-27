@@ -53,6 +53,7 @@ function version({
         plain("AGENT_EMAIL_LEGACY_DOMAINS", "agent-mail.witwave.ai"),
         plain("AGENT_EMAIL_DMARC_REJECT_ENABLED", "false"),
         plain("AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID", ""),
+        plain("AGENT_EMAIL_RELAY_VERSION", "witself-email-relay-pilot-v1"),
         plain("AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", ""),
         plain("AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS", keyring),
         { name: "CONTROL_PLANE_EDGE_TOKEN", type: "secret_text" },
@@ -290,12 +291,14 @@ test("pre-DMARC rollback candidates normalize only to the exact dark policy", ()
   const legacy = fixtures();
   removeBinding(legacy.candidate, "AGENT_EMAIL_DMARC_REJECT_ENABLED");
   removeBinding(legacy.candidate, "AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID");
+  removeBinding(legacy.candidate, "AGENT_EMAIL_RELAY_VERSION");
   const plan = createPlan(legacy);
   assert.equal(plan.checks.includes("sender_authentication_exact"), true);
 
   for (const missing of [
     "AGENT_EMAIL_DMARC_REJECT_ENABLED",
     "AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID",
+    "AGENT_EMAIL_RELAY_VERSION",
   ]) {
     const partial = fixtures();
     removeBinding(partial.candidate, missing);
@@ -309,6 +312,7 @@ test("pre-DMARC rollback candidates normalize only to the exact dark policy", ()
   binding(active.current, "AGENT_EMAIL_DMARC_REJECT_ENABLED").text = "true";
   removeBinding(active.candidate, "AGENT_EMAIL_DMARC_REJECT_ENABLED");
   removeBinding(active.candidate, "AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID");
+  removeBinding(active.candidate, "AGENT_EMAIL_RELAY_VERSION");
   assert.throws(
     () => createPlan(active),
     /operational contract drifted/,

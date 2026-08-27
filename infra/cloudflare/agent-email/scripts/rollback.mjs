@@ -39,9 +39,15 @@ const MANAGED_DELIVERY_COHORT_BINDING =
 const DMARC_REJECT_BINDING = "AGENT_EMAIL_DMARC_REJECT_ENABLED";
 const AUTH_RESULTS_AUTHSERV_BINDING =
   "AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID";
+const RELAY_VERSION_BINDING = "AGENT_EMAIL_RELAY_VERSION";
+// The #246 DMARC pair and the #270 relay-version binding first reached a
+// deployed production Worker together in the same 0.0.259 deploy, so legacy
+// rollback candidates lack all three as one group; a partial set never
+// existed and stays refused.
 const DMARC_BINDINGS = Object.freeze([
   DMARC_REJECT_BINDING,
   AUTH_RESULTS_AUTHSERV_BINDING,
+  RELAY_VERSION_BINDING,
 ]);
 
 const REQUIRED_BINDINGS = Object.freeze([
@@ -180,15 +186,25 @@ function managedBoolean(bindings, name, label) {
 
 function senderAuthenticationPolicy(bindings, label, legacyDMARCBindings) {
   if (legacyDMARCBindings) {
-    return Object.freeze({ dmarc_reject_enabled: "false", authserv_id: "" });
+    return Object.freeze({
+      dmarc_reject_enabled: "false",
+      authserv_id: "",
+      relay_version: "witself-email-relay-pilot-v1",
+    });
   }
   const authservID = plain(bindings, AUTH_RESULTS_AUTHSERV_BINDING, label);
   if (authservID !== "" && !/^[\x21-\x3a\x3c-\x7e]{1,255}$/.test(authservID)) {
     throw new Error(`${label} trusted authentication attester was invalid`);
   }
+  const relayVersion = plain(bindings, RELAY_VERSION_BINDING, label);
+  if (relayVersion !== "witself-email-relay-pilot-v1" &&
+      relayVersion !== "witself-email-relay-v2") {
+    throw new Error(`${label} relay version binding was invalid`);
+  }
   return Object.freeze({
     dmarc_reject_enabled: managedBoolean(bindings, DMARC_REJECT_BINDING, label),
     authserv_id: authservID,
+    relay_version: relayVersion,
   });
 }
 

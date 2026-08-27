@@ -192,6 +192,7 @@ test("production deployment environments scrub poisoned Wrangler and nested Node
     CONTROL_PLANE_URL: "https://self.witwave.ai",
     AGENT_EMAIL_DMARC_REJECT_ENABLED: "true",
     AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: "mx.trusted.example",
+    AGENT_EMAIL_RELAY_VERSION: "witself-email-relay-pilot-v1",
     CLOUDFLARE_BASE_URL: "https://attacker.invalid",
     CLOUDFLARE_API_BASE_URL: "https://attacker.invalid",
     CLOUDFLARE_ENV: "staging",

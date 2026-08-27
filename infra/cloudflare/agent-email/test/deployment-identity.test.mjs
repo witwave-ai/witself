@@ -62,6 +62,7 @@ function fixtures() {
         plain("AGENT_EMAIL_DOMAIN", "witmail.net"),
         plain("AGENT_EMAIL_LEGACY_DOMAINS", "agent-mail.witwave.ai"),
         plain("AGENT_EMAIL_DMARC_REJECT_ENABLED", "false"),
+        plain("AGENT_EMAIL_RELAY_VERSION", "witself-email-relay-pilot-v1"),
         plain("AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID", ""),
         plain("AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", ""),
         plain("AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS", env.AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS),
