@@ -2013,6 +2013,25 @@ test("dark deployment refuses every persistent activation secret", async () => {
   for (const malformed of [null, {}, [{ type: "secret_text" }], [{ name: " bad" }]]) {
     assert.throws(() => assertCustomDomainSecretsDark(malformed));
   }
+  // The explicit reviewed attestation frees exactly the canonical pair;
+  // custom-domain and Turnstile activation secrets remain refused, and the
+  // attestation must be the exact boolean option, not merely truthy env text.
+  assert.doesNotThrow(() => assertCustomDomainSecretsDark(
+    CANONICAL_EMAIL_DARK_SECRET_NAMES.map((name) => ({ name, type: "secret_text" })),
+    { canonicalEmailActive: true },
+  ));
+  for (const name of [
+    ...CUSTOM_DOMAIN_DARK_SECRET_NAMES,
+    ...SIGNUP_TURNSTILE_DARK_SECRET_NAMES,
+  ]) {
+    assert.throws(
+      () => assertCustomDomainSecretsDark(
+        [{ name, type: "secret_text" }],
+        { canonicalEmailActive: true },
+      ),
+      new RegExp(name),
+    );
+  }
   const packageJSON = JSON.parse(await readFile(new URL("../package.json", import.meta.url)));
   assert.equal(
     packageJSON.scripts.deploy,
