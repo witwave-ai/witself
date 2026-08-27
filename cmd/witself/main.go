@@ -2488,6 +2488,14 @@ func accountForget(args []string) int {
 // bootstrap uses — and remembers it under a local name so later commands are
 // just `witself realm create --account NAME ...`.
 func accountCreate(args []string) int {
+	return accountCreateWithLegalVersions(
+		args, legal.TermsVersion, legal.PrivacyVersion,
+	)
+}
+
+func accountCreateWithLegalVersions(
+	args []string, currentTermsVersion, currentPrivacyVersion string,
+) int {
 	fs := flag.NewFlagSet("account create", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	email := fs.String("email", "", "account owner email")
@@ -2509,29 +2517,13 @@ func accountCreate(args []string) int {
 	if localName == "" {
 		localName = "default"
 	}
-	// --accept-terms records consent to the compiled-in current legal
-	// versions. Consent participates in the durable request fingerprint so a
-	// resumed or replayed journal keeps binding the exact same consent; the
-	// dark default (flag absent) leaves the fingerprint input byte-identical
-	// to older CLIs.
-	consentTermsVersion, consentPrivacyVersion := "", ""
-	if *acceptTerms {
-		consentTermsVersion = legal.TermsVersion
-		consentPrivacyVersion = legal.PrivacyVersion
-	}
-	requestFingerprint, err := client.AccountCreateRequestFingerprint(
-		*endpoint, localName, *email, *invite, *displayName,
-		consentTermsVersion, consentPrivacyVersion,
-	)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
-		return 2
-	}
 
 	// A prior successful local save can be followed by a crash before journal
 	// cleanup. Inspect the journal before rejecting a taken name so that exact
-	// state can be reconciled and cleaned up on the next invocation.
-	_, journalErr := local.ReadAccountProvisionJournal(localName)
+	// state can be reconciled and cleaned up on the next invocation. Consentful
+	// journals also carry the accepted legal versions needed to reproduce their
+	// original request after a CLI upgrade.
+	existingJournal, journalErr := local.ReadAccountProvisionJournal(localName)
 	if errors.Is(journalErr, local.ErrAccountProvisionJournalUnavailable) {
 		// Claim the local name BEFORE creating anything remote: a taken name
 		// must not strand a freshly provisioned account's only credential.
@@ -2543,8 +2535,33 @@ func accountCreate(args []string) int {
 		fmt.Fprintf(os.Stderr, "witself: resume pending account creation: %v\n", journalErr)
 		return 1
 	}
-	journal, _, err := local.BeginAccountProvisionJournal(
+
+	// --accept-terms records consent to the compiled-in current legal
+	// versions. Consent participates in the durable request fingerprint so a
+	// resumed or replayed journal keeps binding the exact same consent. On a
+	// resume, the journal's accepted versions override newly compiled versions;
+	// the dark default (flag absent) leaves the fingerprint input byte-identical
+	// to older CLIs.
+	consentTermsVersion, consentPrivacyVersion := "", ""
+	if journalErr == nil && existingJournal.AcceptedTermsVersion != "" {
+		consentTermsVersion = existingJournal.AcceptedTermsVersion
+		consentPrivacyVersion = existingJournal.AcceptedPrivacyVersion
+	} else if *acceptTerms {
+		consentTermsVersion = currentTermsVersion
+		consentPrivacyVersion = currentPrivacyVersion
+	}
+	requestFingerprint, err := client.AccountCreateRequestFingerprint(
+		*endpoint, localName, *email, *invite, *displayName,
+		consentTermsVersion, consentPrivacyVersion,
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		return 2
+	}
+
+	journal, _, err := local.BeginAccountProvisionJournalWithConsent(
 		localName, requestFingerprint,
+		consentTermsVersion, consentPrivacyVersion,
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself: resume pending account creation: %v\n", err)

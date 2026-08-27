@@ -17,7 +17,12 @@ import (
 	"github.com/witwave-ai/witself/internal/placement"
 )
 
-var accountProvisionIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+var (
+	accountProvisionIDPattern    = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+	accountConsentVersionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+)
+
+const consentVersionValidationError = "consent versions must be 1 to 64 characters, starting with an alphanumeric and containing only alphanumerics, dots, underscores, or hyphens"
 
 // CreatedAccount is the control plane's signup result: the new account, the
 // cell it was placed on, and the one-shot bootstrap token that claims it.
@@ -103,10 +108,10 @@ func CreateAccountExact(
 	if !accountProvisionIDPattern.MatchString(provisionID) {
 		return nil, fmt.Errorf("invalid provision id")
 	}
-	if (consentTermsVersion == "") != (consentPrivacyVersion == "") {
-		return nil, fmt.Errorf(
-			"consent terms and privacy versions must be provided together",
-		)
+	if err := validateAccountConsentVersions(
+		consentTermsVersion, consentPrivacyVersion,
+	); err != nil {
+		return nil, err
 	}
 	controlPlane, email, invite, displayName, err := normalizeAccountCreateRequest(
 		controlPlane, email, invite, displayName,
@@ -219,6 +224,11 @@ func AccountCreateRequestFingerprint(
 	controlPlane, localName, email, invite, displayName string,
 	consentTermsVersion, consentPrivacyVersion string,
 ) (string, error) {
+	if err := validateAccountConsentVersions(
+		consentTermsVersion, consentPrivacyVersion,
+	); err != nil {
+		return "", err
+	}
 	controlPlane, email, invite, displayName, err := normalizeAccountCreateRequest(
 		controlPlane, email, invite, displayName,
 	)
@@ -251,6 +261,22 @@ func AccountCreateRequestFingerprint(
 		_, _ = hash.Write([]byte(value))
 	}
 	return fmt.Sprintf("%x", hash.Sum(nil)), nil
+}
+
+func validateAccountConsentVersions(
+	termsVersion, privacyVersion string,
+) error {
+	if (termsVersion == "") != (privacyVersion == "") {
+		return fmt.Errorf(
+			"consent terms and privacy versions must be provided together",
+		)
+	}
+	if termsVersion != "" &&
+		(!accountConsentVersionPattern.MatchString(termsVersion) ||
+			!accountConsentVersionPattern.MatchString(privacyVersion)) {
+		return fmt.Errorf("%s", consentVersionValidationError)
+	}
+	return nil
 }
 
 func normalizeAccountCreateRequest(

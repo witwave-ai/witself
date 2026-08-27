@@ -140,6 +140,8 @@ class CellService {
     this.ambiguousFirst = false;
     this.activated = false;
     this.exactRouteUnavailable = false;
+    this.omitConsentEcho = false;
+    this.mismatchConsentEcho = false;
     this.tokenSequence = 0;
   }
 
@@ -185,7 +187,7 @@ class CellService {
       );
     }
     this.tokenSequence++;
-    return Response.json({
+    const responseBody = {
       schema_version: "witself.v0",
       provision_id: input.provision_id,
       replayed: this.calls.length > 1,
@@ -196,7 +198,16 @@ class CellService {
         status: "pending",
         bootstrap_token: `bootstrap-${this.tokenSequence}`,
       },
-    }, { status: 201 });
+    };
+    if (!this.omitConsentEcho) {
+      responseBody.recorded_consent_terms_version =
+        this.mismatchConsentEcho && input.consent_terms_version != null
+          ? `${input.consent_terms_version}-mismatch`
+          : input.consent_terms_version ?? null;
+      responseBody.recorded_consent_privacy_version =
+        input.consent_privacy_version ?? null;
+    }
+    return Response.json(responseBody, { status: 201 });
   }
 }
 
@@ -750,21 +761,94 @@ test("consent versions bind the durable fingerprint and reach the cell", async (
   assert.equal(setup.service.calls.length, calls);
 });
 
+test("consentful provision refuses a cell receipt without consent echoes", async () => {
+  const service = new CellService();
+  service.omitConsentEcho = true;
+  const setup = harness({ service });
+  const response = await setup.runtime.fetch(signupRequest({
+    consent_terms_version: "draft-2026-08-22",
+    consent_privacy_version: "draft-2026-08-23",
+  }));
+
+  assert.equal(response.status, 502);
+  assert.match(
+    (await response.json()).error,
+    /did not confirm the requested consent versions/,
+  );
+  assert.equal(
+    setup.storage.values.get("account-signup").phase,
+    "target_reserved",
+  );
+});
+
+test("consentful provision refuses mismatched consent echoes", async () => {
+  const service = new CellService();
+  service.mismatchConsentEcho = true;
+  const setup = harness({ service });
+  const response = await setup.runtime.fetch(signupRequest({
+    consent_terms_version: "draft-2026-08-22",
+    consent_privacy_version: "draft-2026-08-23",
+  }));
+
+  assert.equal(response.status, 502);
+  assert.match(
+    (await response.json()).error,
+    /did not confirm the requested consent versions/,
+  );
+  assert.equal(
+    setup.storage.values.get("account-signup").phase,
+    "target_reserved",
+  );
+});
+
 test("malformed consent is rejected before any signup state exists", async () => {
-  for (const fields of [
-    { consent_terms_version: "draft-2026-08-22" },
-    { consent_privacy_version: "draft-2026-08-22" },
-    { consent_terms_version: 7, consent_privacy_version: "x" },
+  const versionShapeError =
+    "consent versions must be 1 to 64 characters, starting with an alphanumeric and containing only alphanumerics, dots, underscores, or hyphens";
+  for (const { fields, error } of [
     {
-      consent_terms_version: "a".repeat(65),
-      consent_privacy_version: "draft-2026-08-22",
+      fields: { consent_terms_version: "draft-2026-08-22" },
+      error:
+        "consent_terms_version and consent_privacy_version must be provided together",
     },
-    { consent_terms_version: "   ", consent_privacy_version: "x" },
-    { consent_terms_version: "draft\u0007bell", consent_privacy_version: "x" },
+    {
+      fields: { consent_privacy_version: "draft-2026-08-22" },
+      error:
+        "consent_terms_version and consent_privacy_version must be provided together",
+    },
+    {
+      fields: { consent_terms_version: 7, consent_privacy_version: "x" },
+      error: "consent versions must be strings",
+    },
+    {
+      fields: {
+        consent_terms_version: "a".repeat(65),
+        consent_privacy_version: "draft-2026-08-22",
+      },
+      error: versionShapeError,
+    },
+    {
+      fields: {
+        consent_terms_version: "person@example.com",
+        consent_privacy_version: "draft-2026-08-22",
+      },
+      error: versionShapeError,
+    },
+    {
+      fields: { consent_terms_version: "   ", consent_privacy_version: "x" },
+      error: versionShapeError,
+    },
+    {
+      fields: {
+        consent_terms_version: "draft\u0007bell",
+        consent_privacy_version: "x",
+      },
+      error: versionShapeError,
+    },
   ]) {
     const isolated = harness();
     const response = await isolated.runtime.fetch(signupRequest(fields));
     assert.equal(response.status, 400);
+    assert.equal((await response.json()).error, error);
     assert.equal(isolated.storage.values.has("account-signup"), false);
   }
 });

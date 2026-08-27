@@ -69,9 +69,10 @@ any historical suspension timestamp and support-policy marker, the plan label
 and plan-application snapshot metadata, default placement policy,
 last-evacuation bookkeeping, and a zero retained-email-attachment byte count.
 Email is null; display name and closure reason are blank; suspension target and
-reason are cleared; and plan limits, features, and policies are emptied. Stripe
-retains financial records independently, and backups age deleted content out
-on their fixed schedule.
+reason are cleared; and plan limits, features, and policies are emptied. Consent
+version labels and their recording timestamp are cleared with the rest of the
+account content. Stripe retains financial records independently, and backups
+age deleted content out on their fixed schedule.
 
 The cell keeps its value-free provisioning retry receipt so a delayed request
 cannot recreate the account. Purge replaces the receipt's contact-derived

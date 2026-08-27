@@ -12,6 +12,33 @@ import (
 	"testing"
 )
 
+func TestValidateAccountConsentVersions(t *testing.T) {
+	for _, versions := range [][2]string{
+		{"draft-2026-08-22", "privacy_2026.08"},
+		{strings.Repeat("a", 64), "v1"},
+		{"", ""},
+	} {
+		if err := validateAccountConsentVersions(
+			versions[0], versions[1],
+		); err != nil {
+			t.Errorf("valid consent %q/%q = %v",
+				versions[0], versions[1], err)
+		}
+	}
+	for _, versions := range [][2]string{
+		{"owner@example.com", "privacy-2026.08"},
+		{strings.Repeat("a", 65), "privacy-2026.08"},
+	} {
+		if err := validateAccountConsentVersions(
+			versions[0], versions[1],
+		); err == nil || err.Error() != consentVersionValidationError {
+			t.Errorf("invalid consent %q/%q = %v, want %q",
+				versions[0], versions[1], err,
+				consentVersionValidationError)
+		}
+	}
+}
+
 func TestCreateAccount(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/accounts" {
@@ -406,5 +433,28 @@ func TestCreateAccountExactSendsConsentWhenPresent(t *testing.T) {
 		err.Error(), "must be provided together",
 	) {
 		t.Fatalf("one-of-two consent error = %v", err)
+	}
+
+	for _, versions := range [][2]string{
+		{"owner@example.com", "draft-2026-08-23"},
+		{strings.Repeat("a", 65), "draft-2026-08-23"},
+	} {
+		if _, err := CreateAccountExact(
+			context.Background(), srv.URL,
+			"owner@example.com", "invite-consent", "",
+			"prv_invalidConsent", "", versions[0], versions[1],
+		); err == nil || err.Error() != consentVersionValidationError {
+			t.Fatalf("invalid consent %q/%q error = %v, want %q",
+				versions[0], versions[1], err,
+				consentVersionValidationError)
+		}
+		if _, err := AccountCreateRequestFingerprint(
+			srv.URL, "default", "owner@example.com", "invite-consent", "",
+			versions[0], versions[1],
+		); err == nil || err.Error() != consentVersionValidationError {
+			t.Fatalf("invalid consent fingerprint %q/%q error = %v, want %q",
+				versions[0], versions[1], err,
+				consentVersionValidationError)
+		}
 	}
 }

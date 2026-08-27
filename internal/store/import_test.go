@@ -161,6 +161,48 @@ func TestValidateAndRecordEnforcesAccountScoping(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			name:  "consent event with version labels is accepted",
+			table: "account_events",
+			row: map[string]any{
+				"id": "evt_consent", "account_id": acc,
+				"actor_kind": ActorControlPlane, "actor_id": nil,
+				"verb": VerbAccountConsentRecorded,
+				"metadata": map[string]any{
+					"terms_version":   "terms-2026.08",
+					"privacy_version": "privacy-2026.08",
+				},
+			},
+			wantOK: true,
+		},
+		{
+			name:  "consent event refuses an email shaped label",
+			table: "account_events",
+			row: map[string]any{
+				"id": "evt_consent_email", "account_id": acc,
+				"actor_kind": ActorControlPlane, "actor_id": nil,
+				"verb": VerbAccountConsentRecorded,
+				"metadata": map[string]any{
+					"terms_version":   "owner@example.com",
+					"privacy_version": "privacy-2026.08",
+				},
+			},
+			want: consentVersionValidationError,
+		},
+		{
+			name:  "consent event refuses an over-length label",
+			table: "account_events",
+			row: map[string]any{
+				"id": "evt_consent_long", "account_id": acc,
+				"actor_kind": ActorControlPlane, "actor_id": nil,
+				"verb": VerbAccountConsentRecorded,
+				"metadata": map[string]any{
+					"terms_version":   strings.Repeat("a", 65),
+					"privacy_version": "privacy-2026.08",
+				},
+			},
+			want: consentVersionValidationError,
+		},
+		{
 			name:  "account_events row for a different account is refused",
 			table: "account_events",
 			row: map[string]any{
@@ -1185,21 +1227,21 @@ func TestValidateImportedAccountConsent(t *testing.T) {
 			edit: func(row map[string]any) {
 				row["consent_terms_version"] = strings.Repeat("a", 65)
 			},
-			want: "consent_terms_version must be a bounded printable version label",
+			want: "consent versions must be 1 to 64 characters, starting with an alphanumeric and containing only alphanumerics, dots, underscores, or hyphens",
 		},
 		{
 			name: "privacy version is not a string", schema: 94,
 			edit: func(row map[string]any) {
 				row["consent_privacy_version"] = float64(7)
 			},
-			want: "consent_privacy_version must be a bounded printable version label",
+			want: "consent versions must be 1 to 64 characters, starting with an alphanumeric and containing only alphanumerics, dots, underscores, or hyphens",
 		},
 		{
 			name: "terms version carries control bytes", schema: 94,
 			edit: func(row map[string]any) {
 				row["consent_terms_version"] = "draft\t2026"
 			},
-			want: "consent_terms_version must be a bounded printable version label",
+			want: "consent versions must be 1 to 64 characters, starting with an alphanumeric and containing only alphanumerics, dots, underscores, or hyphens",
 		},
 	}
 	for _, test := range tests {

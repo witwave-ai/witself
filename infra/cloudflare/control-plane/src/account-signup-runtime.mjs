@@ -12,8 +12,8 @@ import {
 const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const CELL_NAME = /^[a-z0-9-]{1,64}$/;
 // Dark ToS/privacy consent version labels mirror the cell store's bounds:
-// 1..64 bytes of printable ASCII with at least one non-space byte.
-const CONSENT_VERSION = /^(?=.*[\x21-\x7e])[\x20-\x7e]{1,64}$/;
+// 1..64 ASCII label characters, starting with an alphanumeric.
+const CONSENT_VERSION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const INVITE_CODE = /^[a-z0-9][a-z0-9-]{2,63}$/;
 const PROVISION_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const SIGNUP_IP_SCOPE = /^signup-counter:ip:[0-9a-f]{64}$/;
@@ -147,7 +147,7 @@ function normalizedRequest(input) {
     )
   ) {
     fail(
-      "consent versions must be printable ASCII of at most 64 bytes",
+      "consent versions must be 1 to 64 characters, starting with an alphanumeric and containing only alphanumerics, dots, underscores, or hyphens",
       400,
     );
   }
@@ -1042,6 +1042,20 @@ export class DurableAccountSignup {
     ) {
       fail(
         `cell ${cell.name} returned an invalid provision receipt: ${text.slice(0, 120)}`,
+        502,
+      );
+    }
+    if (
+      request.consent_terms_version !== "" &&
+      (
+        body.recorded_consent_terms_version !==
+          request.consent_terms_version ||
+        body.recorded_consent_privacy_version !==
+          request.consent_privacy_version
+      )
+    ) {
+      fail(
+        `cell ${cell.name} did not confirm the requested consent versions`,
         502,
       );
     }

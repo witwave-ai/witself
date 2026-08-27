@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/legal"
 )
 
 func TestProvisionAccountExactCommittedReplayRotatesBootstrapPostgres(
@@ -483,6 +485,12 @@ func TestProvisionReceiptMigrationDowngradePostgres(t *testing.T) {
 			)
 		}
 
+		// ProvisionAccountExact targets the current binary schema, so restore it
+		// after the deliberate downgrade before exercising the replay path.
+		if err := st.Migrate(); err != nil {
+			t.Fatal(err)
+		}
+
 		replayed, err := st.ProvisionAccountExact(
 			ctx, provisionID,
 			"downgrade-receipt@witwave.ai", "Downgrade Receipt",
@@ -575,7 +583,8 @@ func TestValidateProvisionConsent(t *testing.T) {
 	valid := [][2]string{
 		{"", ""},
 		{"draft-2026-08-22", "draft-2026-08-22"},
-		{"v1.0", "privacy 2026"},
+		{"v1.0", "privacy_2026"},
+		{legal.TermsVersion, legal.PrivacyVersion},
 		{strings.Repeat("a", 64), "b"},
 	}
 	for _, pair := range valid {
@@ -594,13 +603,22 @@ func TestValidateProvisionConsent(t *testing.T) {
 		{"non-ascii-é", "b"},
 		{"   ", "b"},
 		{"a", " "},
+		{"owner@example.com", "b"},
+		{"-leading", "b"},
+		{"a", "privacy/version"},
 	}
 	for _, pair := range invalid {
-		if err := validateProvisionConsent(
+		err := validateProvisionConsent(
 			pair[0], pair[1],
-		); !errors.Is(err, ErrProvisionRequestInvalid) {
+		)
+		if !errors.Is(err, ErrProvisionRequestInvalid) {
 			t.Errorf("validateProvisionConsent(%q, %q) = %v, want %v",
 				pair[0], pair[1], err, ErrProvisionRequestInvalid)
+		}
+		if pair[0] != "" && pair[1] != "" &&
+			!strings.Contains(err.Error(), consentVersionValidationError) {
+			t.Errorf("validateProvisionConsent(%q, %q) error = %v, want %q",
+				pair[0], pair[1], err, consentVersionValidationError)
 		}
 	}
 }
@@ -653,6 +671,12 @@ func TestProvisionAccountExactConsentBindingPostgres(t *testing.T) {
 		account.ConsentRecordedAt == nil {
 		t.Fatalf("GetAccount consent = %+v", account)
 	}
+	if first.RecordedConsentTermsVersion == nil ||
+		*first.RecordedConsentTermsVersion != termsVersion ||
+		first.RecordedConsentPrivacyVersion == nil ||
+		*first.RecordedConsentPrivacyVersion != privacyVersion {
+		t.Fatalf("provisioned consent echo = %#v", first)
+	}
 
 	var consentEvents int
 	var metadata string
@@ -671,6 +695,30 @@ func TestProvisionAccountExactConsentBindingPostgres(t *testing.T) {
 		strings.Contains(metadata, "consent@witwave.ai") {
 		t.Fatalf("consent events = %d, metadata = %s", consentEvents, metadata)
 	}
+	if err := st.LogEvent(ctx, EventInput{
+		AccountID: first.AccountID, ActorKind: ActorControlPlane,
+		Verb: VerbAccountConsentRecorded,
+		Metadata: map[string]any{
+			"terms_version":   termsVersion,
+			"privacy_version": privacyVersion,
+		},
+	}); !errors.Is(err, ErrBadEventMetadata) {
+		t.Fatalf("standalone consent event = %v, want %v",
+			err, ErrBadEventMetadata)
+	}
+	if err := st.pool.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM account_events
+		 WHERE account_id = $1
+		   AND verb = $2`,
+		first.AccountID, VerbAccountConsentRecorded,
+	).Scan(&consentEvents); err != nil {
+		t.Fatal(err)
+	}
+	if consentEvents != 1 {
+		t.Fatalf("consent events after standalone refusal = %d, want 1",
+			consentEvents)
+	}
 
 	// Replay with the exact same consent is the ordinary safe replay.
 	replay, err := st.ProvisionAccountExact(
@@ -682,6 +730,12 @@ func TestProvisionAccountExactConsentBindingPostgres(t *testing.T) {
 	}
 	if !replay.Replayed || replay.AccountID != first.AccountID {
 		t.Fatalf("same-consent replay = %#v", replay)
+	}
+	if replay.RecordedConsentTermsVersion == nil ||
+		*replay.RecordedConsentTermsVersion != termsVersion ||
+		replay.RecordedConsentPrivacyVersion == nil ||
+		*replay.RecordedConsentPrivacyVersion != privacyVersion {
+		t.Fatalf("replayed consent echo = %#v", replay)
 	}
 
 	// Consent drift on retry is a different request: refused, no mutation.
@@ -727,6 +781,10 @@ func TestProvisionAccountExactConsentBindingPostgres(t *testing.T) {
 		darkConsentEvents != 0 {
 		t.Fatalf("dark consent row = %v/%v/%v events=%d",
 			darkTerms, darkPrivacy, darkRecordedAt, darkConsentEvents)
+	}
+	if dark.RecordedConsentTermsVersion != nil ||
+		dark.RecordedConsentPrivacyVersion != nil {
+		t.Fatalf("consent-less provision echo = %#v", dark)
 	}
 	if _, err := st.ProvisionAccountExact(
 		ctx, darkID, "consent-dark@witwave.ai", "Dark Account",

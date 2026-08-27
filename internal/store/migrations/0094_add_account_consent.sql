@@ -13,6 +13,27 @@ ALTER TABLE accounts
   ADD COLUMN consent_recorded_at TIMESTAMPTZ;
 
 -- +goose Down
+-- Recorded consent cannot be discarded while its value-free audit event
+-- survives; refuse the downgrade instead of silently erasing the accepted
+-- legal versions and timestamp.
+LOCK TABLE accounts IN ACCESS EXCLUSIVE MODE;
+
+-- +goose StatementBegin
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM accounts
+     WHERE consent_terms_version IS NOT NULL
+        OR consent_privacy_version IS NOT NULL
+        OR consent_recorded_at IS NOT NULL
+  ) THEN
+    RAISE EXCEPTION
+      'cannot downgrade schema 0094 while recorded account consent exists';
+  END IF;
+END;
+$$;
+-- +goose StatementEnd
+
 ALTER TABLE accounts
   DROP COLUMN consent_terms_version,
   DROP COLUMN consent_privacy_version,

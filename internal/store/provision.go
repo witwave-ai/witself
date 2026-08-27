@@ -42,14 +42,18 @@ var (
 // carry a newly minted plaintext token; plaintext is returned once and never
 // persisted.
 type ProvisionedAccount struct {
-	ProvisionID    string
-	AccountID      string
-	OperatorID     string
-	Email          string
-	Status         string
-	BootstrapToken string
-	Replayed       bool
+	ProvisionID                   string
+	AccountID                     string
+	OperatorID                    string
+	Email                         string
+	Status                        string
+	BootstrapToken                string
+	Replayed                      bool
+	RecordedConsentTermsVersion   *string
+	RecordedConsentPrivacyVersion *string
 }
+
+const consentVersionValidationError = "consent versions must be 1 to 64 characters, starting with an alphanumeric and containing only alphanumerics, dots, underscores, or hyphens"
 
 // ProvisionAccount creates a distinct provisioning operation for local and
 // test callers that do not cross an ambiguous HTTP boundary. Production
@@ -201,24 +205,23 @@ func provisionRequestFingerprint(
 	return hex.EncodeToString(hasher.Sum(nil))
 }
 
-// consentVersionValid bounds one ToS/privacy version label: 1..64 bytes of
-// printable ASCII (0x20-0x7E) with at least one non-space byte. NUL and every
-// other control byte fall outside the printable range and are rejected.
+// consentVersionValid accepts one 1..64-byte ASCII version label. The first
+// byte is alphanumeric; every remaining byte is alphanumeric, dot, underscore,
+// or hyphen. Because non-ASCII bytes are excluded, byte and character counts
+// are identical.
 func consentVersionValid(version string) bool {
 	if len(version) == 0 || len(version) > 64 {
 		return false
 	}
-	nonSpace := false
 	for i := 0; i < len(version); i++ {
 		b := version[i]
-		if b < 0x20 || b > 0x7e {
+		alphanumeric := b >= 'a' && b <= 'z' ||
+			b >= 'A' && b <= 'Z' || b >= '0' && b <= '9'
+		if !alphanumeric && (i == 0 || b != '.' && b != '_' && b != '-') {
 			return false
 		}
-		if b != ' ' {
-			nonSpace = true
-		}
 	}
-	return nonSpace
+	return true
 }
 
 // validateProvisionConsent enforces the both-or-neither consent contract:
@@ -229,11 +232,17 @@ func validateProvisionConsent(termsVersion, privacyVersion string) error {
 		return nil
 	}
 	if termsVersion == "" || privacyVersion == "" {
-		return ErrProvisionRequestInvalid
+		return fmt.Errorf(
+			"%w: consent terms and privacy versions must be provided together",
+			ErrProvisionRequestInvalid,
+		)
 	}
 	if !consentVersionValid(termsVersion) ||
 		!consentVersionValid(privacyVersion) {
-		return ErrProvisionRequestInvalid
+		return fmt.Errorf(
+			"%w: %s", ErrProvisionRequestInvalid,
+			consentVersionValidationError,
+		)
 	}
 	return nil
 }
@@ -277,15 +286,20 @@ func createProvisionedAccountTx(
 	// accounts start pending: nothing works until activation gates pass.
 	// Consent columns are written only when the signup carried consent; a
 	// consent-less signup keeps today's exact row (dark contract).
+	var recordedConsentTermsVersion, recordedConsentPrivacyVersion *string
 	if consentTermsVersion != "" {
-		if _, err := tx.Exec(ctx,
+		if err := tx.QueryRow(ctx,
 			`INSERT INTO accounts (
 				id, is_default, display_name, email, status,
 				consent_terms_version, consent_privacy_version,
 				consent_recorded_at
-			 ) VALUES ($1, false, $2, $3, 'pending', $4, $5, now())`,
+			 ) VALUES ($1, false, $2, $3, 'pending', $4, $5, now())
+			 RETURNING consent_terms_version, consent_privacy_version`,
 			acctID, displayName, email,
 			consentTermsVersion, consentPrivacyVersion,
+		).Scan(
+			&recordedConsentTermsVersion,
+			&recordedConsentPrivacyVersion,
 		); err != nil {
 			return ProvisionedAccount{}, fmt.Errorf("create account: %w", err)
 		}
@@ -359,6 +373,8 @@ func createProvisionedAccountTx(
 	return ProvisionedAccount{
 		ProvisionID: provisionID, AccountID: acctID, OperatorID: oprID,
 		Email: email, Status: "pending", BootstrapToken: bootTok,
+		RecordedConsentTermsVersion:   recordedConsentTermsVersion,
+		RecordedConsentPrivacyVersion: recordedConsentPrivacyVersion,
 	}, nil
 }
 
@@ -368,16 +384,21 @@ func replayProvisionedAccountTx(
 	provisionID, accountID, priorTokenID, email, displayName string,
 	bootstrapTTL time.Duration,
 ) (ProvisionedAccount, error) {
-	var accountEmail *string
+	var accountEmail, recordedConsentTermsVersion,
+		recordedConsentPrivacyVersion *string
 	var accountDisplayName, status string
 	var isDefault bool
 	err := tx.QueryRow(ctx, `
-		SELECT email, display_name, status, is_default
+		SELECT email, display_name, status, is_default,
+		       consent_terms_version, consent_privacy_version
 		  FROM accounts
 		 WHERE id = $1
 		 FOR UPDATE`,
 		accountID,
-	).Scan(&accountEmail, &accountDisplayName, &status, &isDefault)
+	).Scan(
+		&accountEmail, &accountDisplayName, &status, &isDefault,
+		&recordedConsentTermsVersion, &recordedConsentPrivacyVersion,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ProvisionedAccount{}, ErrProvisionReplayUnsafe
 	}
@@ -517,6 +538,8 @@ func replayProvisionedAccountTx(
 		ProvisionID: provisionID, AccountID: accountID,
 		OperatorID: operatorID, Email: email, Status: status,
 		BootstrapToken: newBootstrap, Replayed: true,
+		RecordedConsentTermsVersion:   recordedConsentTermsVersion,
+		RecordedConsentPrivacyVersion: recordedConsentPrivacyVersion,
 	}, nil
 }
 

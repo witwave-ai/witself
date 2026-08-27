@@ -2578,11 +2578,31 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 		// The account_id scoping check already ran in the first switch;
 		// no downstream table references account_events, so nothing to
 		// record here. Metadata is opaque JSONB — the write-time verb
-		// contract was enforced when the event was created and doesn't
-		// need to be re-enforced at import time (an old cell may have
-		// written events under a schema this cell no longer knows). The one
-		// exception is the schema-92 purged-account archive invariant, which is
-		// checked across the complete stream after every table has arrived.
+		// contract generally is not re-enforced at import time (an old cell
+		// may have written events under a schema this cell no longer knows).
+		// Consent evidence is the narrow exception: its version labels share
+		// the current PII-excluding account-row rule and must not reintroduce
+		// private content through an evacuation archive.
+		verb, _ := stringField(obj, "verb")
+		if verb == VerbAccountConsentRecorded {
+			actorKind, err := requireStringField(obj, "actor_kind")
+			if err != nil {
+				return badf("account_events consent actor_kind is invalid")
+			}
+			actorID, _ := optionalStringField(obj, "actor_id")
+			metadata, ok := obj["metadata"].(map[string]any)
+			if !ok {
+				return badf("account_events consent metadata is invalid")
+			}
+			if err := checkEventShape(EventInput{
+				AccountID: ic.accountID, ActorKind: actorKind, ActorID: actorID,
+				Verb: verb, Metadata: metadata,
+			}); err != nil {
+				return badf("account_events consent evidence is invalid: %v", err)
+			}
+		}
+		// The schema-92 purged-account archive invariant is checked across the
+		// complete stream after every table has arrived.
 		if isImportedValueFreeAccountPurgedEvent(obj) {
 			ic.valueFreeAccountPurgedEvents++
 		}
@@ -5868,7 +5888,7 @@ func importedOptionalConsentVersion(
 	value, ok := raw.(string)
 	if !ok || !consentVersionValid(value) {
 		return false, fmt.Errorf(
-			"accounts row %s must be a bounded printable version label", key,
+			"accounts row %s: %s", key, consentVersionValidationError,
 		)
 	}
 	return true, nil

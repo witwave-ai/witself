@@ -1112,13 +1112,15 @@ func planFitScopeForDimension(dimension string) (string, bool) {
 // bootstrap token is returned exactly once; the new owner exchanges it for an
 // operator token via the ordinary POST /v1/auth/bootstrap.
 type ProvisionedAccount struct {
-	AccountID      string `json:"account_id"`
-	OperatorID     string `json:"operator_id"`
-	Email          string `json:"email"`
-	Status         string `json:"status"`
-	BootstrapToken string `json:"bootstrap_token"`
-	ProvisionID    string `json:"-"`
-	Replayed       bool   `json:"-"`
+	AccountID                     string  `json:"account_id"`
+	OperatorID                    string  `json:"operator_id"`
+	Email                         string  `json:"email"`
+	Status                        string  `json:"status"`
+	BootstrapToken                string  `json:"bootstrap_token"`
+	ProvisionID                   string  `json:"-"`
+	Replayed                      bool    `json:"-"`
+	RecordedConsentTermsVersion   *string `json:"-"`
+	RecordedConsentPrivacyVersion *string `json:"-"`
 }
 
 // LoginFunc exchanges a bootstrap token for an operator token. ok is false when
@@ -4158,7 +4160,7 @@ func provisionAccountHandler(
 				!validConsentVersion(req.ConsentPrivacyVersion)) {
 			writeJSONError(
 				w, http.StatusBadRequest,
-				"consent versions must be printable ASCII of at most 64 bytes",
+				consentVersionValidationError,
 			)
 			return
 		}
@@ -4181,33 +4183,23 @@ func provisionAccountHandler(
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"schema_version": "witself.v0",
-			"provision_id":   req.ProvisionID,
-			"replayed":       acct.Replayed,
-			"account":        acct,
+			"schema_version":                   "witself.v0",
+			"provision_id":                     req.ProvisionID,
+			"replayed":                         acct.Replayed,
+			"recorded_consent_terms_version":   acct.RecordedConsentTermsVersion,
+			"recorded_consent_privacy_version": acct.RecordedConsentPrivacyVersion,
+			"account":                          acct,
 		})
 	}
 }
 
-// validConsentVersion bounds one optional ToS/privacy consent version label
-// exactly like the store's write path: 1..64 bytes of printable ASCII
-// (0x20-0x7E) with at least one non-space byte. NUL and every other control
-// byte fall outside the printable range.
+const consentVersionValidationError = "consent versions must be 1 to 64 characters, starting with an alphanumeric and containing only alphanumerics, dots, underscores, or hyphens"
+
+var consentVersionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// validConsentVersion mirrors the control-plane and store label rule.
 func validConsentVersion(version string) bool {
-	if len(version) == 0 || len(version) > 64 {
-		return false
-	}
-	nonSpace := false
-	for i := 0; i < len(version); i++ {
-		b := version[i]
-		if b < 0x20 || b > 0x7e {
-			return false
-		}
-		if b != ' ' {
-			nonSpace = true
-		}
-	}
-	return nonSpace
+	return consentVersionPattern.MatchString(version)
 }
 
 func accountSystemGetHandler(cfg Config) http.HandlerFunc {

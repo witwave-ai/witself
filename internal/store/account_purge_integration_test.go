@@ -24,6 +24,8 @@ const (
 	accountPurgeIntegrationSupportSubject    = "shared account-purge support subject"
 	accountPurgeIntegrationSupportBody       = "shared account-purge support body"
 	accountPurgeIntegrationTargetCloseReason = "private account-purge close reason"
+	accountPurgeIntegrationConsentTerms      = "terms-2026.08"
+	accountPurgeIntegrationConsentPrivacy    = "privacy-2026.08"
 )
 
 func TestAccountPurgeErasesClosedPastGraceAndPreservesExcludedAccountsPostgres(
@@ -146,6 +148,13 @@ func TestAccountPurgeErasesClosedPastGraceAndPreservesExcludedAccountsPostgres(
 	targetBefore := readAccountPurgeIntegrationAccountRow(
 		ctx, t, st, target.account.AccountID,
 	)
+	if targetBefore.consentTermsVersion == nil ||
+		*targetBefore.consentTermsVersion != accountPurgeIntegrationConsentTerms ||
+		targetBefore.consentPrivacyVersion == nil ||
+		*targetBefore.consentPrivacyVersion != accountPurgeIntegrationConsentPrivacy ||
+		targetBefore.consentRecordedAt == nil {
+		t.Fatalf("pre-purge account did not carry consent evidence: %#v", targetBefore)
+	}
 	openBefore := readAccountPurgeIntegrationAccountRow(
 		ctx, t, st, openDecoy.account.AccountID,
 	)
@@ -650,10 +659,16 @@ func configureAccountPurgeIntegrationTombstoneSource(
 		   SET suspended_at=statement_timestamp() - interval '60 days',
 		       suspended_for='owner_request',
 		       suspended_reason='private suspension reason',
+		       consent_terms_version=$2,
+		       consent_privacy_version=$3,
+		       consent_recorded_at=statement_timestamp() - interval '60 days',
 		       last_evacuation_id='evac_prior_account_purge',
 		       last_evacuation_completed_at=statement_timestamp() - interval '45 days',
 		       last_evacuation_outcome='completed'
-		 WHERE id=$1`, target.account.AccountID); err != nil {
+		 WHERE id=$1`, target.account.AccountID,
+		accountPurgeIntegrationConsentTerms,
+		accountPurgeIntegrationConsentPrivacy,
+	); err != nil {
 		t.Fatal(err)
 	}
 	seedAccountPurgeIntegrationProvisionReceipt(
@@ -791,6 +806,9 @@ type accountPurgeIntegrationAccountRow struct {
 	suspendedAt               *time.Time
 	suspendedFor              *string
 	suspendedReason           *string
+	consentTermsVersion       *string
+	consentPrivacyVersion     *string
+	consentRecordedAt         *time.Time
 	supportPolicy             string
 	plan                      string
 	planLimits                map[string]int64
@@ -822,6 +840,7 @@ func readAccountPurgeIntegrationAccountRow(
 	if err := st.pool.QueryRow(ctx, `
 		SELECT email,is_default,display_name,status,created_at,
 		       closed_at,closed_reason,suspended_at,suspended_for,suspended_reason,
+		       consent_terms_version,consent_privacy_version,consent_recorded_at,
 		       support_policy,plan,plan_limits,plan_policies,plan_features,
 		       plan_applied_at,plan_snapshot_revision,plan_snapshot_hash,
 		       placement_policy,evacuation_id,evacuation_started_at,evacuation_role,
@@ -831,7 +850,9 @@ func readAccountPurgeIntegrationAccountRow(
 		 WHERE id=$1`, accountID).Scan(
 		&out.email, &out.isDefault, &out.displayName, &out.status, &out.createdAt,
 		&out.closedAt, &out.closedReason, &out.suspendedAt, &out.suspendedFor,
-		&out.suspendedReason, &out.supportPolicy, &out.plan, &planLimits,
+		&out.suspendedReason, &out.consentTermsVersion,
+		&out.consentPrivacyVersion, &out.consentRecordedAt, &out.supportPolicy,
+		&out.plan, &planLimits,
 		&planPolicies, &planFeatures, &out.planAppliedAt,
 		&out.planSnapshotRevision, &out.planSnapshotHash, &placementPolicy,
 		&out.evacuationID, &out.evacuationStartedAt, &out.evacuationRole,
@@ -937,7 +958,9 @@ func assertAccountPurgeIntegrationTombstone(
 ) {
 	t.Helper()
 	if after.email != nil || after.displayName != "" || after.closedReason != "" ||
-		after.suspendedFor != nil || after.suspendedReason != nil {
+		after.suspendedFor != nil || after.suspendedReason != nil ||
+		after.consentTermsVersion != nil || after.consentPrivacyVersion != nil ||
+		after.consentRecordedAt != nil {
 		t.Errorf("content-bearing tombstone fields were retained: %#v", after)
 	}
 	if after.purgedAt == nil || after.closedAt == nil ||

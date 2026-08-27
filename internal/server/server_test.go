@@ -1134,45 +1134,49 @@ func TestProvisionAccount(t *testing.T) {
 		if provisionID == "prv_conflict" {
 			return ProvisionedAccount{}, ErrConflict
 		}
+		var recordedTerms, recordedPrivacy *string
+		if consentTermsVersion != "" {
+			recordedTerms = &consentTermsVersion
+			recordedPrivacy = &consentPrivacyVersion
+		}
 		return ProvisionedAccount{
 			AccountID: "acc_new", OperatorID: "opr_new", Email: email,
 			Status: "active", BootstrapToken: "witself_boot_x",
 			ProvisionID: provisionID, Replayed: provisionID == "prv_replay",
+			RecordedConsentTermsVersion:   recordedTerms,
+			RecordedConsentPrivacyVersion: recordedPrivacy,
 		}, nil
 	}
 
 	// Route absent entirely when no provision token is configured.
-	bare := httptest.NewServer(apiMux(Config{ProvisionAccountExact: provision}))
-	defer bare.Close()
-	resp, err := http.Post(
-		bare.URL+"/v1/accounts:provision-exact",
-		"application/json",
+	bare := apiMux(Config{ProvisionAccountExact: provision})
+	bareRequest := httptest.NewRequest(
+		http.MethodPost, "/v1/accounts:provision-exact",
 		strings.NewReader(`{"email":"a@b.c"}`),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	bareRecorder := httptest.NewRecorder()
+	bare.ServeHTTP(bareRecorder, bareRequest)
+	resp := bareRecorder.Result()
 	closeBody(t, resp)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("unmounted provisioning = %d, want 404", resp.StatusCode)
 	}
 
-	srv := httptest.NewServer(apiMux(Config{ProvisionToken: "witself_prv_good", ProvisionAccountExact: provision}))
-	defer srv.Close()
+	srv := apiMux(Config{
+		ProvisionToken: "witself_prv_good", ProvisionAccountExact: provision,
+	})
 	post := func(tok, body string) *http.Response {
-		req, _ := http.NewRequest(
+		req := httptest.NewRequest(
 			http.MethodPost,
-			srv.URL+"/v1/accounts:provision-exact",
+			"/v1/accounts:provision-exact",
 			strings.NewReader(body),
 		)
 		if tok != "" {
 			req.Header.Set("Authorization", "Bearer "+tok)
 		}
-		r, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return r
+		recorder := httptest.NewRecorder()
+		srv.ServeHTTP(recorder, req)
+		return recorder.Result()
 	}
 
 	r := post("", `{"email":"a@b.c"}`)
@@ -1209,7 +1213,7 @@ func TestProvisionAccount(t *testing.T) {
 		t.Errorf("provision conflict = %d, want 409", r.StatusCode)
 	}
 	// Dark consent capture: one-of-two versions is malformed input, and
-	// each present version must be a bounded printable label.
+	// each present version must satisfy the strict version-label shape.
 	r = post("witself_prv_good",
 		`{"provision_id":"prv_half_consent","email":"a@b.c",`+
 			`"consent_terms_version":"draft-2026-08-22"}`)
@@ -1221,10 +1225,57 @@ func TestProvisionAccount(t *testing.T) {
 		`{"provision_id":"prv_bad_consent","email":"a@b.c",`+
 			`"consent_terms_version":"`+strings.Repeat("a", 65)+`",`+
 			`"consent_privacy_version":"draft-2026-08-22"}`)
-	closeBody(t, r)
 	if r.StatusCode != http.StatusBadRequest {
 		t.Errorf("oversized consent version = %d, want 400", r.StatusCode)
 	}
+	var validationError struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&validationError); err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, r)
+	if validationError.Error != consentVersionValidationError {
+		t.Errorf("oversized consent error = %q, want %q",
+			validationError.Error, consentVersionValidationError)
+	}
+	r = post("witself_prv_good",
+		`{"provision_id":"prv_email_consent","email":"a@b.c",`+
+			`"consent_terms_version":"owner@example.com",`+
+			`"consent_privacy_version":"draft-2026-08-22"}`)
+	validationError.Error = ""
+	if err := json.NewDecoder(r.Body).Decode(&validationError); err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, r)
+	if r.StatusCode != http.StatusBadRequest ||
+		validationError.Error != consentVersionValidationError {
+		t.Errorf("email-shaped consent = %d/%q, want 400/%q",
+			r.StatusCode, validationError.Error,
+			consentVersionValidationError)
+	}
+
+	// Consent-less exact provisioning still emits explicit null echoes so the
+	// wire shape is unambiguous to a newer control plane.
+	r = post("witself_prv_good",
+		`{"provision_id":"prv_dark","email":"dark@co.com"}`)
+	if r.StatusCode != http.StatusCreated {
+		t.Fatalf("consent-less create = %d, want 201", r.StatusCode)
+	}
+	var darkOut struct {
+		RecordedTerms   json.RawMessage `json:"recorded_consent_terms_version"`
+		RecordedPrivacy json.RawMessage `json:"recorded_consent_privacy_version"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&darkOut); err != nil {
+		t.Fatal(err)
+	}
+	closeBody(t, r)
+	if string(darkOut.RecordedTerms) != "null" ||
+		string(darkOut.RecordedPrivacy) != "null" {
+		t.Fatalf("consent-less echoes = %s/%s, want null/null",
+			darkOut.RecordedTerms, darkOut.RecordedPrivacy)
+	}
+
 	r = post("witself_prv_good",
 		`{"provision_id":"prv_replay","email":" Amy@Co.com ","display_name":" Amy ",`+
 			`"consent_terms_version":"draft-2026-08-22",`+
@@ -1234,9 +1285,11 @@ func TestProvisionAccount(t *testing.T) {
 		t.Fatalf("create = %d, want 201", r.StatusCode)
 	}
 	var out struct {
-		ProvisionID string             `json:"provision_id"`
-		Replayed    bool               `json:"replayed"`
-		Account     ProvisionedAccount `json:"account"`
+		ProvisionID     string             `json:"provision_id"`
+		Replayed        bool               `json:"replayed"`
+		RecordedTerms   *string            `json:"recorded_consent_terms_version"`
+		RecordedPrivacy *string            `json:"recorded_consent_privacy_version"`
+		Account         ProvisionedAccount `json:"account"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&out); err != nil {
 		t.Fatal(err)
@@ -1246,6 +1299,12 @@ func TestProvisionAccount(t *testing.T) {
 	}
 	if out.ProvisionID != "prv_replay" || !out.Replayed {
 		t.Errorf("provision acknowledgement = %+v", out)
+	}
+	if out.RecordedTerms == nil || *out.RecordedTerms != "draft-2026-08-22" ||
+		out.RecordedPrivacy == nil ||
+		*out.RecordedPrivacy != "draft-2026-08-23" {
+		t.Errorf("recorded consent echo = %v/%v",
+			out.RecordedTerms, out.RecordedPrivacy)
 	}
 	if gotProvisionID != "prv_replay" || gotEmail != "amy@co.com" ||
 		gotDisplayName != "Amy" {
@@ -1272,23 +1331,21 @@ func TestProvisionAccountExactOldReplicaFailsWithoutMutation(t *testing.T) {
 		mutated = true
 		return ProvisionedAccount{}, nil
 	}
-	srv := httptest.NewServer(apiMux(Config{
+	srv := apiMux(Config{
 		ProvisionToken:   "witself_prv_good",
 		ProvisionAccount: legacyProvision,
-	}))
-	defer srv.Close()
-	req, _ := http.NewRequest(
+	})
+	req := httptest.NewRequest(
 		http.MethodPost,
-		srv.URL+"/v1/accounts:provision-exact",
+		"/v1/accounts:provision-exact",
 		strings.NewReader(
 			`{"provision_id":"prv_mixed_replica","email":"a@b.c"}`,
 		),
 	)
 	req.Header.Set("Authorization", "Bearer witself_prv_good")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
+	recorder := httptest.NewRecorder()
+	srv.ServeHTTP(recorder, req)
+	resp := recorder.Result()
 	closeBody(t, resp)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("old replica exact provision = %d, want 404",
@@ -2407,6 +2464,10 @@ func TestImportAccountArchive(t *testing.T) {
 // registry-refused shapes, ErrNotFound → 404 for missing accounts.
 func TestLogAccountEvent(t *testing.T) {
 	log := func(_ context.Context, accountID, verb, actorKind string, _ map[string]any) error {
+		if verb == "account.consent.recorded" {
+			return fmt.Errorf("%w: verb %s is transaction-inline only",
+				ErrBadInput, verb)
+		}
 		switch accountID {
 		case "acc_missing":
 			return ErrNotFound
@@ -2420,23 +2481,20 @@ func TestLogAccountEvent(t *testing.T) {
 	provision := func(_ context.Context, _, _, _, _, _ string) (ProvisionedAccount, error) {
 		return ProvisionedAccount{}, errors.New("unused")
 	}
-	srv := httptest.NewServer(apiMux(Config{
+	srv := apiMux(Config{
 		ProvisionToken:        "witself_prv_test",
 		ProvisionAccountExact: provision,
 		LogAccountEvent:       log,
-	}))
-	defer srv.Close()
+	})
 
 	do := func(path, token, body string) *http.Response {
-		req, _ := http.NewRequest(http.MethodPost, srv.URL+path, strings.NewReader(body))
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return resp
+		recorder := httptest.NewRecorder()
+		srv.ServeHTTP(recorder, req)
+		return recorder.Result()
 	}
 
 	for _, tc := range []struct {
@@ -2450,6 +2508,7 @@ func TestLogAccountEvent(t *testing.T) {
 		{"/v1/accounts/acc_x:events", "witself_prv_test", ``, http.StatusBadRequest},                              // invalid JSON
 		{"/v1/accounts/acc_missing:events", "witself_prv_test", `{"verb":"recovery.requested","actor_kind":"control_plane","metadata":{}}`, http.StatusNotFound},
 		{"/v1/accounts/acc_baddata:events", "witself_prv_test", `{"verb":"sneaky.action","actor_kind":"control_plane","metadata":{}}`, http.StatusBadRequest},
+		{"/v1/accounts/acc_x:events", "witself_prv_test", `{"verb":"account.consent.recorded","actor_kind":"control_plane","metadata":{"terms_version":"draft-2026-08-22","privacy_version":"draft-2026-08-22"}}`, http.StatusBadRequest},
 	} {
 		resp := do(tc.path, tc.token, tc.body)
 		closeBody(t, resp)
