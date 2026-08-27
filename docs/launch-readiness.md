@@ -188,5 +188,10 @@ incomplete payments auto-cancel at 15 days; live product catalog empty)
   apply the authenticity migration; support@ DNS + Email Routing; mint the
   support-AI credential + Claude API key; stand up the runner host.
 
-**Release**
-- One coordinated push + CI + tag + production deploy for the whole dark batch.
+**Release** — ✅ DONE 2026-08-26/27: v0.0.258 (42-commit dark batch) + v0.0.259
+(deploy-tooling fixes) released; dual-cell restore-verified pre-migration
+backups; both Civo cells rolled in waves to 0.0.258 at schema 93 (8/8 checks
+each, zero restarts, no alerts); control plane deployed+attested at 0.0.259
+(canonical-live attestation, SUPPORT_EMAIL_INTAKE_TOKEN minted+sealed+installed
+dark); email edge deployed+attested at 0.0.259 (all delivery/DMARC/relay-v2
+gates dark).

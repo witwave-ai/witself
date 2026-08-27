@@ -120,6 +120,7 @@ function configs() {
         AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: "",
         AGENT_EMAIL_DMARC_REJECT_ENABLED: "false",
         AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: "",
+        AGENT_EMAIL_RELAY_VERSION: "witself-email-relay-pilot-v1",
         CONTROL_PLANE_URL: "https://self.witwave.ai/",
         REALM_EMAIL_ALIAS_DELIVERY_ENABLED: "false",
         REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false",
@@ -189,6 +190,7 @@ function edgeVersion(id = edgeVersionID, {
         plain("AGENT_EMAIL_LEGACY_DOMAINS", "agent-mail.witwave.ai"),
         plain("AGENT_EMAIL_DMARC_REJECT_ENABLED", "false"),
         plain("AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID", ""),
+        plain("AGENT_EMAIL_RELAY_VERSION", "witself-email-relay-pilot-v1"),
         plain("AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", ""),
         plain("AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS", JSON.stringify({
           [routeKeyID]: routePublicKey,

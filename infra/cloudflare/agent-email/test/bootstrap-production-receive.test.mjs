@@ -76,6 +76,7 @@ function validEnvironment(relayPublicKey = Buffer.alloc(32, 9).toString("base64"
     REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false",
     AGENT_EMAIL_DMARC_REJECT_ENABLED: "false",
     AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: "",
+    AGENT_EMAIL_RELAY_VERSION: "witself-email-relay-pilot-v1",
     CLOUDFLARE_API_BASE_URL: "https://attacker.invalid",
     CF_API_BASE_URL: "https://attacker.invalid",
     CF_ACCOUNT_ID: "e".repeat(32),
@@ -148,6 +149,7 @@ function renderedConfig(environment, targetRelease = release) {
       REALM_EMAIL_CANONICAL_DELIVERY_ENABLED: "false",
       AGENT_EMAIL_DMARC_REJECT_ENABLED: "false",
       AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID: "",
+      AGENT_EMAIL_RELAY_VERSION: "witself-email-relay-pilot-v1",
     },
     observability: { enabled: true },
   }, null, 2)}\n`;

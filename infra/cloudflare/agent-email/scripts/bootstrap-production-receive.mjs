@@ -477,6 +477,7 @@ export function validateBootstrapDeploymentConfig(
     "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
     "AGENT_EMAIL_DMARC_REJECT_ENABLED",
     "AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID",
+    "AGENT_EMAIL_RELAY_VERSION",
     "WITSELF_EDGE_RELEASE_VERSION",
     "WITSELF_EDGE_RELEASE_COMMIT",
     "WITSELF_EDGE_RELEASE_DATE",
@@ -499,6 +500,7 @@ export function validateBootstrapDeploymentConfig(
     AGENT_EMAIL_DMARC_REJECT_ENABLED: expected.dmarcRejectEnabled,
     AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID:
       expected.authenticationResultsAuthservID,
+    AGENT_EMAIL_RELAY_VERSION: expected.relayVersion,
   };
   const exactRateLimits = [
     {

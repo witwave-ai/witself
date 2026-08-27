@@ -210,6 +210,7 @@ export function verifyDeployment(status, version, expected, {
     "AGENT_EMAIL_DMARC_REJECT_ENABLED",
     "AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID",
     "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
+    "AGENT_EMAIL_RELAY_VERSION",
     "AGENT_EMAIL_ROUTE_ED25519_PUBLIC_KEYS",
     "CONTROL_PLANE_EDGE_TOKEN",
     "CONTROL_PLANE_URL",
@@ -234,6 +235,7 @@ export function verifyDeployment(status, version, expected, {
     "AGENT_EMAIL_AUTH_RESULTS_AUTHSERV_ID",
     expected.authenticationResultsAuthservID,
   );
+  plain(bindings, "AGENT_EMAIL_RELAY_VERSION", expected.relayVersion);
   plain(
     bindings,
     "AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST",
