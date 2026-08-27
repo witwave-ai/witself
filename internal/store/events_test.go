@@ -46,7 +46,8 @@ func TestVerbRegistryCoverage(t *testing.T) {
 		VerbAccountSuspendedByMe, VerbAccountResumedByMe,
 		VerbAccountPlacementPolicyChanged,
 
-		VerbAccountProvisioned, VerbAccountActivated,
+		VerbAccountProvisioned, VerbAccountConsentRecorded,
+		VerbAccountActivated,
 		VerbRecoveryRequested, VerbRecoveryCompleted,
 		VerbAccountEmailChangeStarted,
 		VerbAccountEmailVerifySent, VerbAccountEmailRecoverySent,

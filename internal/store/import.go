@@ -65,8 +65,11 @@ var importColumns = map[string]map[string]bool{
 	"accounts": {
 		"id": true, "is_default": true, "display_name": true, "email": true,
 		"status": true, "created_at": true, "closed_at": true, "closed_reason": true,
-		"purged_at":    true,
-		"suspended_at": true, "suspended_for": true, "suspended_reason": true,
+		"purged_at":               true,
+		"consent_terms_version":   true,
+		"consent_privacy_version": true,
+		"consent_recorded_at":     true,
+		"suspended_at":            true, "suspended_for": true, "suspended_reason": true,
 		"evacuation_id": true, "evacuation_started_at": true,
 		"evacuation_role":    true,
 		"last_evacuation_id": true, "last_evacuation_completed_at": true,
@@ -1662,6 +1665,41 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 				return badf("accounts row purged tombstone %v", err)
 			}
 			ic.accountPurged = true
+		}
+		// Dark consent capture (schema 0094): the three nullable columns
+		// travel together or not at all, and version labels obey the same
+		// bounds as the store's write path so a content-hostile stream
+		// cannot smuggle arbitrary bytes into a compliance column.
+		consentTermsPresent, consentTermsErr := importedOptionalConsentVersion(
+			obj, "consent_terms_version",
+		)
+		if consentTermsErr != nil {
+			return badf("%v", consentTermsErr)
+		}
+		consentPrivacyPresent, consentPrivacyErr := importedOptionalConsentVersion(
+			obj, "consent_privacy_version",
+		)
+		if consentPrivacyErr != nil {
+			return badf("%v", consentPrivacyErr)
+		}
+		consentRecordedAt, consentRecorded, consentRecordedErr := importedOptionalTimestamp(
+			obj, "consent_recorded_at",
+		)
+		if consentRecordedErr != nil {
+			return badf("accounts row consent_recorded_at must be an RFC3339 timestamp")
+		}
+		if consentTermsPresent || consentPrivacyPresent || consentRecorded {
+			if ic.schemaVersion < 94 {
+				return badf("accounts row consent predates schema 94")
+			}
+			if !consentTermsPresent || !consentPrivacyPresent || !consentRecorded {
+				return badf("accounts row consent columns must travel together")
+			}
+			if err := ic.requireTimestampAtOrBeforeExport(
+				"accounts consent_recorded_at", *consentRecordedAt,
+			); err != nil {
+				return badf("%v", err)
+			}
 		}
 		// Plan-snapshot shape checks: these jsonb columns are decoded into
 		// typed Go values on every read (map[string]int64 / []string), so a
@@ -5815,6 +5853,25 @@ func validateImportedFactMutationTombstone(obj map[string]any) error {
 		return fmt.Errorf("deleted_at must be an RFC3339 timestamp")
 	}
 	return nil
+}
+
+// importedOptionalConsentVersion reports whether an accounts row carries the
+// named consent version column with a non-null value and refuses any value
+// that the store's write-path bounds (consentVersionValid) would refuse.
+func importedOptionalConsentVersion(
+	obj map[string]any, key string,
+) (bool, error) {
+	raw, present := obj[key]
+	if !present || raw == nil {
+		return false, nil
+	}
+	value, ok := raw.(string)
+	if !ok || !consentVersionValid(value) {
+		return false, fmt.Errorf(
+			"accounts row %s must be a bounded printable version label", key,
+		)
+	}
+	return true, nil
 }
 
 func importedOptionalTimestamp(obj map[string]any, key string) (*time.Time, bool, error) {

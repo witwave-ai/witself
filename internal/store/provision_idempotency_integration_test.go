@@ -24,7 +24,7 @@ func TestProvisionAccountExactCommittedReplayRotatesBootstrapPostgres(
 
 	first, err := st.ProvisionAccountExact(
 		ctx, provisionID, " Replay@Witwave.AI ", " Replay Account ",
-		time.Hour,
+		"", "", time.Hour,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -39,7 +39,7 @@ func TestProvisionAccountExactCommittedReplayRotatesBootstrapPostgres(
 
 	replay, err := st.ProvisionAccountExact(
 		ctx, provisionID, "replay@witwave.ai", "Replay Account",
-		time.Hour,
+		"", "", time.Hour,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -69,7 +69,7 @@ func TestProvisionAccountExactCommittedReplayRotatesBootstrapPostgres(
 	}
 	if _, err := st.ProvisionAccountExact(
 		ctx, provisionID, "replay@witwave.ai", "Replay Account",
-		time.Hour,
+		"", "", time.Hour,
 	); !errors.Is(err, ErrProvisionReplayUnsafe) {
 		t.Fatalf("claimed receipt replay = %v, want %v",
 			err, ErrProvisionReplayUnsafe)
@@ -114,7 +114,7 @@ func TestProvisionAccountExactConflictPrivacyAndDuplicateEmailPostgres(
 	)
 
 	first, err := st.ProvisionAccountExact(
-		ctx, firstID, "same@witwave.ai", "Same Account", time.Hour,
+		ctx, firstID, "same@witwave.ai", "Same Account", "", "", time.Hour,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -127,7 +127,7 @@ func TestProvisionAccountExactConflictPrivacyAndDuplicateEmailPostgres(
 		{email: "same@witwave.ai", displayName: "Different Account"},
 	} {
 		if _, err := st.ProvisionAccountExact(
-			ctx, firstID, request.email, request.displayName, time.Hour,
+			ctx, firstID, request.email, request.displayName, "", "", time.Hour,
 		); !errors.Is(err, ErrProvisionRequestConflict) {
 			t.Fatalf(
 				"conflicting reuse %q/%q = %v, want %v",
@@ -137,7 +137,7 @@ func TestProvisionAccountExactConflictPrivacyAndDuplicateEmailPostgres(
 		}
 	}
 	second, err := st.ProvisionAccountExact(
-		ctx, secondID, "same@witwave.ai", "Same Account", time.Hour,
+		ctx, secondID, "same@witwave.ai", "Same Account", "", "", time.Hour,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -213,7 +213,7 @@ func TestProvisionAccountExactConcurrentSameIDPostgres(t *testing.T) {
 			account, err := st.ProvisionAccountExact(
 				ctx, provisionID,
 				"concurrent@witwave.ai", "Concurrent",
-				time.Hour,
+				"", "", time.Hour,
 			)
 			results <- result{account: account, err: err}
 		}()
@@ -288,7 +288,7 @@ func TestProvisionReceiptSurvivesFinalizationAndIsNotPortablePostgres(
 	source, err := st.ProvisionAccountExact(
 		ctx, provisionID,
 		"finalize-provision@witwave.ai", "Finalize Provision",
-		time.Hour,
+		"draft-2026-08-22", "draft-2026-08-23", time.Hour,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -302,7 +302,7 @@ func TestProvisionReceiptSurvivesFinalizationAndIsNotPortablePostgres(
 	if _, err := st.ProvisionAccountExact(
 		ctx, provisionID,
 		"finalize-provision@witwave.ai", "Finalize Provision",
-		time.Hour,
+		"draft-2026-08-22", "draft-2026-08-23", time.Hour,
 	); !errors.Is(err, ErrProvisionReplayUnsafe) {
 		t.Fatalf("active provision replay = %v, want %v",
 			err, ErrProvisionReplayUnsafe)
@@ -360,7 +360,7 @@ func TestProvisionReceiptSurvivesFinalizationAndIsNotPortablePostgres(
 	if _, err := st.ProvisionAccountExact(
 		ctx, provisionID,
 		"finalize-provision@witwave.ai", "Finalize Provision",
-		time.Hour,
+		"draft-2026-08-22", "draft-2026-08-23", time.Hour,
 	); !errors.Is(err, ErrProvisionReplayUnsafe) {
 		t.Fatalf("finalized provision replay = %v, want %v",
 			err, ErrProvisionReplayUnsafe)
@@ -381,10 +381,27 @@ func TestProvisionReceiptSurvivesFinalizationAndIsNotPortablePostgres(
 	); err != nil {
 		t.Fatal(err)
 	}
+	// The archive carries the dark consent columns through export -> import.
+	restored, err := st.GetAccount(ctx, source.AccountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.ConsentTermsVersion == nil ||
+		*restored.ConsentTermsVersion != "draft-2026-08-22" ||
+		restored.ConsentPrivacyVersion == nil ||
+		*restored.ConsentPrivacyVersion != "draft-2026-08-23" ||
+		restored.ConsentRecordedAt == nil {
+		t.Fatalf(
+			"restored consent = %v/%v/%v",
+			restored.ConsentTermsVersion,
+			restored.ConsentPrivacyVersion,
+			restored.ConsentRecordedAt,
+		)
+	}
 	if _, err := st.ProvisionAccountExact(
 		ctx, provisionID,
 		"finalize-provision@witwave.ai", "Finalize Provision",
-		time.Hour,
+		"draft-2026-08-22", "draft-2026-08-23", time.Hour,
 	); !errors.Is(err, ErrProvisionReplayUnsafe) {
 		t.Fatalf("restored-target provision replay = %v, want %v",
 			err, ErrProvisionReplayUnsafe)
@@ -427,7 +444,7 @@ func TestProvisionReceiptMigrationDowngradePostgres(t *testing.T) {
 		created, err := st.ProvisionAccountExact(
 			ctx, provisionID,
 			"downgrade-receipt@witwave.ai", "Downgrade Receipt",
-			time.Hour,
+			"", "", time.Hour,
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -469,7 +486,7 @@ func TestProvisionReceiptMigrationDowngradePostgres(t *testing.T) {
 		replayed, err := st.ProvisionAccountExact(
 			ctx, provisionID,
 			"downgrade-receipt@witwave.ai", "Downgrade Receipt",
-			time.Hour,
+			"", "", time.Hour,
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -511,4 +528,221 @@ func registerProvisionCleanup(
 			}
 		}
 	})
+}
+
+// TestProvisionRequestFingerprintGolden pins the consent-less fingerprint to
+// the exact value HEAD's algorithm produced before consent capture existed.
+// This is the dark contract: a request without consent must hash to the same
+// bytes forever, or every in-flight durable signup would be refused as a
+// conflicting request after a deploy.
+func TestProvisionRequestFingerprintGolden(t *testing.T) {
+	const golden = "9cddb86b0cce1c65ee5aa6b71b5c27c3de5d8156873009a5f5b97072a354e248"
+	if got := provisionRequestFingerprint(
+		"prv_golden", "owner@example.com", "Owner", "", "",
+	); got != golden {
+		t.Fatalf("consent-less fingerprint = %s, want pinned %s", got, golden)
+	}
+
+	withConsent := provisionRequestFingerprint(
+		"prv_golden", "owner@example.com", "Owner",
+		"draft-2026-08-22", "draft-2026-08-22",
+	)
+	if withConsent == golden {
+		t.Fatal("consent did not change the request fingerprint")
+	}
+	swapped := provisionRequestFingerprint(
+		"prv_golden", "owner@example.com", "Owner",
+		"terms-a", "privacy-b",
+	)
+	if swapped == provisionRequestFingerprint(
+		"prv_golden", "owner@example.com", "Owner",
+		"privacy-b", "terms-a",
+	) {
+		t.Fatal("terms/privacy positions are not domain-separated")
+	}
+	// The length-prefix encoding must keep the consent block unambiguous:
+	// shifting a byte between the two versions is a different fingerprint.
+	if provisionRequestFingerprint(
+		"prv_golden", "owner@example.com", "Owner", "ab", "c",
+	) == provisionRequestFingerprint(
+		"prv_golden", "owner@example.com", "Owner", "a", "bc",
+	) {
+		t.Fatal("consent versions are not length-prefixed independently")
+	}
+}
+
+func TestValidateProvisionConsent(t *testing.T) {
+	valid := [][2]string{
+		{"", ""},
+		{"draft-2026-08-22", "draft-2026-08-22"},
+		{"v1.0", "privacy 2026"},
+		{strings.Repeat("a", 64), "b"},
+	}
+	for _, pair := range valid {
+		if err := validateProvisionConsent(pair[0], pair[1]); err != nil {
+			t.Errorf("validateProvisionConsent(%q, %q) = %v, want nil",
+				pair[0], pair[1], err)
+		}
+	}
+	invalid := [][2]string{
+		{"draft-2026-08-22", ""},
+		{"", "draft-2026-08-22"},
+		{strings.Repeat("a", 65), "b"},
+		{"a", strings.Repeat("b", 65)},
+		{"with" + string(rune(0)) + "nul", "b"},
+		{"tab\tcontrol", "b"},
+		{"non-ascii-é", "b"},
+		{"   ", "b"},
+		{"a", " "},
+	}
+	for _, pair := range invalid {
+		if err := validateProvisionConsent(
+			pair[0], pair[1],
+		); !errors.Is(err, ErrProvisionRequestInvalid) {
+			t.Errorf("validateProvisionConsent(%q, %q) = %v, want %v",
+				pair[0], pair[1], err, ErrProvisionRequestInvalid)
+		}
+	}
+}
+
+func TestProvisionAccountExactConsentBindingPostgres(t *testing.T) {
+	ctx, st := openAccountEvacuationTestStore(t)
+	suffix := time.Now().UnixNano()
+	consentID := fmt.Sprintf("prv_consent_%d", suffix)
+	darkID := fmt.Sprintf("prv_consent_dark_%d", suffix)
+	var accountIDs []string
+	registerProvisionCleanup(
+		t, st, &accountIDs, []string{consentID, darkID},
+	)
+	const termsVersion = "draft-2026-08-22"
+	const privacyVersion = "draft-2026-08-23"
+
+	first, err := st.ProvisionAccountExact(
+		ctx, consentID, "consent@witwave.ai", "Consent Account",
+		termsVersion, privacyVersion, time.Hour,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountIDs = append(accountIDs, first.AccountID)
+
+	var storedTerms, storedPrivacy *string
+	var recordedAt *time.Time
+	if err := st.pool.QueryRow(ctx, `
+		SELECT consent_terms_version, consent_privacy_version,
+		       consent_recorded_at
+		  FROM accounts
+		 WHERE id = $1`,
+		first.AccountID,
+	).Scan(&storedTerms, &storedPrivacy, &recordedAt); err != nil {
+		t.Fatal(err)
+	}
+	if storedTerms == nil || *storedTerms != termsVersion ||
+		storedPrivacy == nil || *storedPrivacy != privacyVersion ||
+		recordedAt == nil || recordedAt.IsZero() {
+		t.Fatalf("stored consent = %v/%v/%v", storedTerms, storedPrivacy, recordedAt)
+	}
+	account, err := st.GetAccount(ctx, first.AccountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.ConsentTermsVersion == nil ||
+		*account.ConsentTermsVersion != termsVersion ||
+		account.ConsentPrivacyVersion == nil ||
+		*account.ConsentPrivacyVersion != privacyVersion ||
+		account.ConsentRecordedAt == nil {
+		t.Fatalf("GetAccount consent = %+v", account)
+	}
+
+	var consentEvents int
+	var metadata string
+	if err := st.pool.QueryRow(ctx, `
+		SELECT count(*), coalesce(min(metadata::text), '')
+		  FROM account_events
+		 WHERE account_id = $1
+		   AND verb = $2`,
+		first.AccountID, VerbAccountConsentRecorded,
+	).Scan(&consentEvents, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if consentEvents != 1 ||
+		!strings.Contains(metadata, termsVersion) ||
+		!strings.Contains(metadata, privacyVersion) ||
+		strings.Contains(metadata, "consent@witwave.ai") {
+		t.Fatalf("consent events = %d, metadata = %s", consentEvents, metadata)
+	}
+
+	// Replay with the exact same consent is the ordinary safe replay.
+	replay, err := st.ProvisionAccountExact(
+		ctx, consentID, "consent@witwave.ai", "Consent Account",
+		termsVersion, privacyVersion, time.Hour,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !replay.Replayed || replay.AccountID != first.AccountID {
+		t.Fatalf("same-consent replay = %#v", replay)
+	}
+
+	// Consent drift on retry is a different request: refused, no mutation.
+	for _, drifted := range [][2]string{
+		{"draft-2026-09-01", privacyVersion},
+		{termsVersion, "draft-2026-09-01"},
+		{"", ""},
+	} {
+		if _, err := st.ProvisionAccountExact(
+			ctx, consentID, "consent@witwave.ai", "Consent Account",
+			drifted[0], drifted[1], time.Hour,
+		); !errors.Is(err, ErrProvisionRequestConflict) {
+			t.Fatalf("consent drift %q/%q = %v, want %v",
+				drifted[0], drifted[1], err, ErrProvisionRequestConflict)
+		}
+	}
+
+	// A consent-less signup keeps today's exact row: NULL columns, no
+	// consent audit event — and later replaying it WITH consent conflicts.
+	dark, err := st.ProvisionAccountExact(
+		ctx, darkID, "consent-dark@witwave.ai", "Dark Account",
+		"", "", time.Hour,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountIDs = append(accountIDs, dark.AccountID)
+	var darkTerms, darkPrivacy *string
+	var darkRecordedAt *time.Time
+	var darkConsentEvents int
+	if err := st.pool.QueryRow(ctx, `
+		SELECT consent_terms_version, consent_privacy_version,
+		       consent_recorded_at,
+		       (SELECT count(*) FROM account_events
+		         WHERE account_id = accounts.id AND verb = $2)
+		  FROM accounts
+		 WHERE id = $1`,
+		dark.AccountID, VerbAccountConsentRecorded,
+	).Scan(&darkTerms, &darkPrivacy, &darkRecordedAt, &darkConsentEvents); err != nil {
+		t.Fatal(err)
+	}
+	if darkTerms != nil || darkPrivacy != nil || darkRecordedAt != nil ||
+		darkConsentEvents != 0 {
+		t.Fatalf("dark consent row = %v/%v/%v events=%d",
+			darkTerms, darkPrivacy, darkRecordedAt, darkConsentEvents)
+	}
+	if _, err := st.ProvisionAccountExact(
+		ctx, darkID, "consent-dark@witwave.ai", "Dark Account",
+		termsVersion, privacyVersion, time.Hour,
+	); !errors.Is(err, ErrProvisionRequestConflict) {
+		t.Fatalf("consent added on replay = %v, want %v",
+			err, ErrProvisionRequestConflict)
+	}
+
+	// One of two versions is malformed input, refused before any SQL.
+	if _, err := st.ProvisionAccountExact(
+		ctx, fmt.Sprintf("prv_consent_half_%d", suffix),
+		"consent-half@witwave.ai", "Half Consent",
+		termsVersion, "", time.Hour,
+	); !errors.Is(err, ErrProvisionRequestInvalid) {
+		t.Fatalf("one-of-two consent = %v, want %v",
+			err, ErrProvisionRequestInvalid)
+	}
 }

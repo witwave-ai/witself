@@ -54,7 +54,9 @@ type ProvisionedAccount struct {
 // ProvisionAccount creates a distinct provisioning operation for local and
 // test callers that do not cross an ambiguous HTTP boundary. Production
 // control-plane requests must call ProvisionAccountExact with their
-// caller-stable provision id.
+// caller-stable provision id. This legacy path deliberately records no
+// ToS/privacy consent: consent capture rides the exact-provision receipt,
+// and local/test signups have no consent to bind.
 func (s *Store) ProvisionAccount(
 	ctx context.Context,
 	email, displayName string,
@@ -79,7 +81,7 @@ func (s *Store) ProvisionAccount(
 	// exercise older schemas, while every production request that can cross an
 	// ambiguous HTTP boundary uses ProvisionAccountExact below.
 	return createProvisionedAccountTx(
-		ctx, tx, "", "", email, displayName, bootstrapTTL, false,
+		ctx, tx, "", "", email, displayName, "", "", bootstrapTTL, false,
 	)
 }
 
@@ -89,9 +91,17 @@ func (s *Store) ProvisionAccount(
 // atomically revokes the prior unclaimed bootstrap and mints a fresh one so a
 // committed response lost in transit is recoverable without storing plaintext
 // credentials.
+//
+// consentTermsVersion and consentPrivacyVersion are optional and must be
+// provided together (dark ToS/privacy consent capture). When present they are
+// bound into the durable request fingerprint — so a retry with drifted
+// consent is refused as a different request — and stored on the accounts row
+// at creation. When absent, the fingerprint input stays byte-identical to the
+// historical consent-less algorithm and no consent column is written.
 func (s *Store) ProvisionAccountExact(
 	ctx context.Context,
 	provisionID, email, displayName string,
+	consentTermsVersion, consentPrivacyVersion string,
 	bootstrapTTL time.Duration,
 ) (ProvisionedAccount, error) {
 	provisionID = strings.TrimSpace(provisionID)
@@ -102,11 +112,17 @@ func (s *Store) ProvisionAccountExact(
 	if err != nil {
 		return ProvisionedAccount{}, err
 	}
+	if err := validateProvisionConsent(
+		consentTermsVersion, consentPrivacyVersion,
+	); err != nil {
+		return ProvisionedAccount{}, err
+	}
 	if bootstrapTTL <= 0 {
 		return ProvisionedAccount{}, ErrProvisionRequestInvalid
 	}
 	requestFingerprint := provisionRequestFingerprint(
 		provisionID, email, displayName,
+		consentTermsVersion, consentPrivacyVersion,
 	)
 
 	tx, err := s.pool.Begin(ctx)
@@ -142,7 +158,9 @@ func (s *Store) ProvisionAccountExact(
 	case errors.Is(err, pgx.ErrNoRows):
 		return createProvisionedAccountTx(
 			ctx, tx, provisionID, requestFingerprint,
-			email, displayName, bootstrapTTL, true,
+			email, displayName,
+			consentTermsVersion, consentPrivacyVersion,
+			bootstrapTTL, true,
 		)
 	case err != nil:
 		return ProvisionedAccount{},
@@ -159,15 +177,65 @@ func (s *Store) ProvisionAccountExact(
 
 func provisionRequestFingerprint(
 	provisionID, email, displayName string,
+	consentTermsVersion, consentPrivacyVersion string,
 ) string {
 	hasher := sha256.New()
-	for _, value := range []string{provisionID, email, displayName} {
+	values := []string{provisionID, email, displayName}
+	// Dark contract: a consent-less request hashes the exact historical
+	// input. A consent-carrying request appends a domain-separated block —
+	// the literal marker then both versions, each with the same length
+	// prefix — so consent is bound to the durable receipt and can never
+	// collide with a consent-less request.
+	if consentTermsVersion != "" || consentPrivacyVersion != "" {
+		values = append(
+			values, "consent/v1",
+			consentTermsVersion, consentPrivacyVersion,
+		)
+	}
+	for _, value := range values {
 		var length [8]byte
 		binary.BigEndian.PutUint64(length[:], uint64(len(value)))
 		_, _ = hasher.Write(length[:])
 		_, _ = hasher.Write([]byte(value))
 	}
 	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+// consentVersionValid bounds one ToS/privacy version label: 1..64 bytes of
+// printable ASCII (0x20-0x7E) with at least one non-space byte. NUL and every
+// other control byte fall outside the printable range and are rejected.
+func consentVersionValid(version string) bool {
+	if len(version) == 0 || len(version) > 64 {
+		return false
+	}
+	nonSpace := false
+	for i := 0; i < len(version); i++ {
+		b := version[i]
+		if b < 0x20 || b > 0x7e {
+			return false
+		}
+		if b != ' ' {
+			nonSpace = true
+		}
+	}
+	return nonSpace
+}
+
+// validateProvisionConsent enforces the both-or-neither consent contract:
+// absent consent is valid (dark default), exactly one version is malformed
+// input, and each present version must satisfy consentVersionValid.
+func validateProvisionConsent(termsVersion, privacyVersion string) error {
+	if termsVersion == "" && privacyVersion == "" {
+		return nil
+	}
+	if termsVersion == "" || privacyVersion == "" {
+		return ErrProvisionRequestInvalid
+	}
+	if !consentVersionValid(termsVersion) ||
+		!consentVersionValid(privacyVersion) {
+		return ErrProvisionRequestInvalid
+	}
+	return nil
 }
 
 func normalizeProvisionRequest(
@@ -188,6 +256,7 @@ func createProvisionedAccountTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	provisionID, requestFingerprint, email, displayName string,
+	consentTermsVersion, consentPrivacyVersion string,
 	bootstrapTTL time.Duration,
 	recordReceipt bool,
 ) (ProvisionedAccount, error) {
@@ -206,7 +275,21 @@ func createProvisionedAccountTx(
 
 	// Emails may repeat across accounts (contact info, not identity). New
 	// accounts start pending: nothing works until activation gates pass.
-	if _, err := tx.Exec(ctx,
+	// Consent columns are written only when the signup carried consent; a
+	// consent-less signup keeps today's exact row (dark contract).
+	if consentTermsVersion != "" {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO accounts (
+				id, is_default, display_name, email, status,
+				consent_terms_version, consent_privacy_version,
+				consent_recorded_at
+			 ) VALUES ($1, false, $2, $3, 'pending', $4, $5, now())`,
+			acctID, displayName, email,
+			consentTermsVersion, consentPrivacyVersion,
+		); err != nil {
+			return ProvisionedAccount{}, fmt.Errorf("create account: %w", err)
+		}
+	} else if _, err := tx.Exec(ctx,
 		`INSERT INTO accounts (id, is_default, display_name, email, status)
 		 VALUES ($1, false, $2, $3, 'pending')`,
 		acctID, displayName, email,
@@ -255,6 +338,20 @@ func createProvisionedAccountTx(
 		},
 	}); err != nil {
 		return ProvisionedAccount{}, err
+	}
+	// Consent, when present, gets its own value-free audit entry beside the
+	// provisioning event: version labels only, never PII.
+	if consentTermsVersion != "" {
+		if err := logEventTx(ctx, tx, EventInput{
+			AccountID: acctID, ActorKind: ActorControlPlane,
+			Verb: VerbAccountConsentRecorded,
+			Metadata: map[string]any{
+				"terms_version":   consentTermsVersion,
+				"privacy_version": consentPrivacyVersion,
+			},
+		}); err != nil {
+			return ProvisionedAccount{}, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return ProvisionedAccount{}, err

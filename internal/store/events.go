@@ -65,6 +65,7 @@ const (
 	// Control-plane forwarded (Worker calls the cell's :events endpoint
 	// with these).
 	VerbAccountProvisioned        = "account.provisioned"
+	VerbAccountConsentRecorded    = "account.consent.recorded"
 	VerbAccountActivated          = "account.activated"
 	VerbRecoveryRequested         = "recovery.requested"
 	VerbRecoveryCompleted         = "recovery.completed"
@@ -313,6 +314,12 @@ var verbMetadataSchema = map[string]verbSpec{
 	VerbAccountProvisioned: {
 		requiredKeys:  []string{"email_masked"},
 		allowedKeys:   []string{"email_masked", "operator_id"},
+		allowedActors: []string{ActorControlPlane},
+	},
+	// Dark ToS/privacy consent capture: version labels only, never PII.
+	VerbAccountConsentRecorded: {
+		requiredKeys:  []string{"terms_version", "privacy_version"},
+		allowedKeys:   []string{"terms_version", "privacy_version"},
 		allowedActors: []string{ActorControlPlane},
 	},
 	VerbAccountActivated: {
