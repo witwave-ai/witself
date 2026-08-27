@@ -394,7 +394,7 @@ func TestAccountCreateCleansJournalAfterCompletedLocalSave(t *testing.T) {
 	args := accountCreateTestArgs(server.URL, "invite-private")
 	fingerprint, err := client.AccountCreateRequestFingerprint(
 		server.URL, "default", "owner@example.com",
-		"invite-private", "Owner Display",
+		"invite-private", "Owner Display", "", "",
 	)
 	if err != nil {
 		t.Fatal(err)

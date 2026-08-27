@@ -61,6 +61,11 @@ type accountCreateRequest struct {
 	Invite         string `json:"invite"`
 	ProvisionID    string `json:"provision_id"`
 	TurnstileToken string `json:"turnstile_token,omitempty"`
+	// Dark ToS/privacy consent capture: omitted entirely when the caller
+	// records no consent so the wire request stays byte-identical to
+	// consent-less clients.
+	ConsentTermsVersion   string `json:"consent_terms_version,omitempty"`
+	ConsentPrivacyVersion string `json:"consent_privacy_version,omitempty"`
 }
 
 // CreateAccount signs up a new account via the control plane
@@ -73,7 +78,7 @@ func CreateAccount(ctx context.Context, controlPlane, email, invite, displayName
 		return nil, fmt.Errorf("create provision id: %w", err)
 	}
 	return CreateAccountExact(
-		ctx, controlPlane, email, invite, displayName, provisionID, "",
+		ctx, controlPlane, email, invite, displayName, provisionID, "", "", "",
 	)
 }
 
@@ -84,12 +89,24 @@ func CreateAccount(ctx context.Context, controlPlane, email, invite, displayName
 // function. turnstileToken is optional, omitted from the JSON body when empty,
 // and deliberately excluded from AccountCreateRequestFingerprint so a caller
 // can complete a challenge and resume the same durable request.
+//
+// consentTermsVersion and consentPrivacyVersion are the optional dark
+// ToS/privacy consent capture: both-or-neither, omitted from the JSON body
+// when empty, and — unlike turnstileToken — INCLUDED in
+// AccountCreateRequestFingerprint when present, because recorded consent is
+// part of the request the durable provision id must keep binding on resume.
 func CreateAccountExact(
 	ctx context.Context,
 	controlPlane, email, invite, displayName, provisionID, turnstileToken string,
+	consentTermsVersion, consentPrivacyVersion string,
 ) (*CreatedAccount, error) {
 	if !accountProvisionIDPattern.MatchString(provisionID) {
 		return nil, fmt.Errorf("invalid provision id")
+	}
+	if (consentTermsVersion == "") != (consentPrivacyVersion == "") {
+		return nil, fmt.Errorf(
+			"consent terms and privacy versions must be provided together",
+		)
 	}
 	controlPlane, email, invite, displayName, err := normalizeAccountCreateRequest(
 		controlPlane, email, invite, displayName,
@@ -98,11 +115,13 @@ func CreateAccountExact(
 		return nil, err
 	}
 	body, err := json.Marshal(accountCreateRequest{
-		DisplayName:    displayName,
-		Email:          email,
-		Invite:         invite,
-		ProvisionID:    provisionID,
-		TurnstileToken: turnstileToken,
+		DisplayName:           displayName,
+		Email:                 email,
+		Invite:                invite,
+		ProvisionID:           provisionID,
+		TurnstileToken:        turnstileToken,
+		ConsentTermsVersion:   consentTermsVersion,
+		ConsentPrivacyVersion: consentPrivacyVersion,
 	})
 	if err != nil {
 		return nil, err
@@ -192,9 +211,13 @@ func accountCreateResponseError(resp *http.Response, fallback string) error {
 // AccountCreateRequestFingerprint binds a durable local provision id to the
 // exact effective signup request and local destination name without persisting
 // the email, invite, display name, or control-plane endpoint. The length-prefixed
-// encoding avoids delimiter ambiguity.
+// encoding avoids delimiter ambiguity. Recorded consent versions, when present,
+// are appended as a domain-separated consent/v1 block so a resumed journal
+// keeps binding the same consent; when absent the hashed input stays
+// byte-identical to the historical consent-less algorithm (dark contract).
 func AccountCreateRequestFingerprint(
 	controlPlane, localName, email, invite, displayName string,
+	consentTermsVersion, consentPrivacyVersion string,
 ) (string, error) {
 	controlPlane, email, invite, displayName, err := normalizeAccountCreateRequest(
 		controlPlane, email, invite, displayName,
@@ -206,15 +229,22 @@ func AccountCreateRequestFingerprint(
 	if localName == "" {
 		return "", fmt.Errorf("local account name is required")
 	}
-	hash := sha256.New()
-	for _, value := range []string{
+	values := []string{
 		"witself.account-create.v1",
 		controlPlane,
 		localName,
 		email,
 		invite,
 		displayName,
-	} {
+	}
+	if consentTermsVersion != "" || consentPrivacyVersion != "" {
+		values = append(
+			values, "consent/v1",
+			consentTermsVersion, consentPrivacyVersion,
+		)
+	}
+	hash := sha256.New()
+	for _, value := range values {
 		var size [8]byte
 		binary.BigEndian.PutUint64(size[:], uint64(len(value)))
 		_, _ = hash.Write(size[:])
