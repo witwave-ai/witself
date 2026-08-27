@@ -45,6 +45,23 @@ func TestSchema91AccountPurgeMarkerPreservesArchivedRows(t *testing.T) {
 	}
 }
 
+func TestSchema93AccountConsentColumnsPreserveArchivedRows(t *testing.T) {
+	upgrade := UpgraderFor(93)
+	if upgrade == nil {
+		t.Fatal("schema 93 identity upgrader is not registered")
+	}
+	input := map[string]any{
+		"id": "acc_1", "status": "pending", "email": "owner@example.com",
+	}
+	want := map[string]any{
+		"id": "acc_1", "status": "pending", "email": "owner@example.com",
+	}
+	got, err := upgrade("accounts", input)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("schema 93 identity upgrade changed account: %#v / %v", got, err)
+	}
+}
+
 func TestSchema25FactIdempotencyUpgrade(t *testing.T) {
 	upgrade := UpgraderFor(25)
 	if upgrade == nil {
