@@ -586,7 +586,10 @@ func (liveDataSource) load(ctx context.Context, configPath string) (loadResult, 
 				info.hasAccounts = true
 				info.liveAccts = ps.Live.Total
 				info.archived = ps.Archived.Total
-				info.blocked = len(ps.Archived.Blocked)
+				// Blocked is a bounded sample (capped by the limit
+				// param — 1 here); Unplaced is the scalar total of
+				// archives no eligible cell can accept.
+				info.blocked = ps.Archived.Unplaced
 			}
 		} else {
 			info.err = ferr
