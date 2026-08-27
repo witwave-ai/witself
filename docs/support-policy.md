@@ -92,3 +92,22 @@ tools, and anything on the self-hosted side (see
   human-escalated.
 - **Data deletion** — human-escalated by rule; the erasure posture is
   documented in the [data-retention policy](data-retention-policy.md).
+
+## Incident communications
+
+When a managed-service incident affects your account, the durable public
+record is the incident log: GitHub issues labeled
+[`incident`](https://github.com/witwave-ai/witself/issues?q=label%3Aincident)
+on the public repository. Each incident issue carries timeline updates and
+the resolution note; watch the repository (or that label) to be notified as
+updates post.
+
+During an incident, the in-product support channel remains the right place to
+report impact and ask about your account; `urgent` tickets are worked first.
+A full hosted status page is deliberately deferred until after launch — the
+incident label is the canonical channel until one exists.
+
+Security incidents follow the private path in
+[Security Reporting](governance-and-support.md#security-reporting). Public
+incident issues never carry account data, tokens, or any open- or
+sealed-plane content — value-free operational language only.

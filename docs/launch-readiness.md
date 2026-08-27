@@ -31,9 +31,9 @@ Status legend: ✅ done · 🔨 Claude-owned (build/deploy) · 🔑 needs Scott
 |---|---|---|---|
 | **Team activation** | ✅ done — seats set (Personal 1 / Professional 3 / Team 25, ratified 2026-08-24) and Team flipped available at one flat monthly price | — | — |
 | **Billing** | Dark Stripe stack complete; live account verified (acct_1TpugQEICTDi58ec); all six CP_STRIPE_* secrets STAGED on witself-control-plane (secret key, webhook, portal bpc_, 3 URLs) — verified 2026-08-25; dunning emails on | Cutover only | 🔑 set CP_BILLING_PROVIDER/CP_STRIPE_MODE/CP_PLAN_LIFECYCLE_ENABLED(+allowlist), activate Tax, live end-to-end proof; (opt) revoke stale Jul-5 secret key |
-| **Support** | Policy published (#251); assistant author-kind + reserved handle (#252); re-triage (#253); dark AI runner + notification labeling (#255); entitlement sync (#256); scoped support_ai credential (#257); support@ intake bridge implemented dark | SLO metric + breach alert, keyed intake enablement | 🔨 code · 🔑 support@ DNS+routing, runner host + API key, mint scoped credential, enable flag |
+| **Support** | Policy published (#251); assistant author-kind + reserved handle (#252); re-triage (#253); dark AI runner + notification labeling (#255); entitlement sync (#256); scoped support_ai credential (#257); SLO metric + breach alert live (#259 — `witself_support_slo_metrics_up 1` and `WitselfSupportFirstResponseBreach` loaded/ok verified on the serving cell 2026-08-27); support@ intake bridge implemented dark; incident-comms channel published | Keyed intake enablement | 🔑 support@ DNS+routing, runner host + API key, mint scoped credential, enable flag |
 | **Monitoring** | LIVE 2026-08-25: 3-phase rollout merged + verified (#264 stack, #265 targets, #266 alerting); PagerDuty `witself-prod` incident route + dead-man heartbeat active; 14 rules, zero eval failures, schema-91 + PVC metrics scraped | — (accepted; observe normal rules/storage growth over the acceptance window) | ✅ |
-| **Edge DMARC** | Inbound worker runs full SMTP txn; cell records spf/dkim/dmarc | Authenticity parser module, hard-DMARC-fail SMTP rejection (dark flag), value-free authenticity metadata (dark), migration | 🔨 code · 🔑 authserv-id from live header, worker deploy |
+| **Edge DMARC** | CODE-COMPLETE + deployed dark: cell relay v2 dual-accept + verdict columns at schema 93 (#269), edge authenticity parser + `AGENT_EMAIL_RELAY_VERSION` gate (#270); edge attested at 0.0.259; live receive smoke passed 2026-08-27 | Enablement flips only | 🔑 authserv-id from live header, then the reviewed DMARC-reject + relay-v2 flips |
 | **Capacity** | ✅ done | 2-node Civo prod profile applied 2026-08-25: cell `civo-sandbox-usw2-dev` scaled 1→2 `g4s.kube.medium` in place (both ACTIVE, cluster Ready); `profile: prod` pinned in the inventory so it won't revert | — |
 | **Retention** | ✅ done (#239) | — | — |
 
@@ -65,8 +65,10 @@ PII-collecting launch:
    `account.purged` audit record. Launch enablement remains keyed per cell:
    enable the default-off worker in preview, review count-only results, then
    switch it to enforce.
-6. **No public status/incident page** — reasonable default: defer a full status
-   page; stand up an incident-comms channel referenced from the support policy.
+6. ✅ **Incident comms stood up; status page deferred** — the public GitHub
+   `incident` label is the canonical incident log, referenced from the support
+   policy (Incident communications section) with the operator procedure in
+   runbooks.md. A full hosted status page stays deliberately post-launch.
 
 ## Cross-cutting ordering constraints
 
@@ -77,7 +79,7 @@ PII-collecting launch:
   counts) are one cluster.
 - ✅ **Second Civo node** applied 2026-08-25 (in-place 1→2, both nodes ACTIVE); the
   headroom monitoring needs is now in place.
-- **Monitoring receiver before support SLO alert** (support breach + dead-man
+- ✅ **Monitoring receiver before support SLO alert** — satisfied; both live (support breach + dead-man
   feed the one shared PagerDuty service + dead-man monitor — create exactly one
   of each).
 - **Edge DMARC before support@ intake** (support@ trusts DMARC-authenticated
@@ -101,7 +103,8 @@ adversarially reviewed, gated, merged. Roughly in dependency order:
    3-phase enablement overlay (committed, not applied) → runbook.
 4. **Edge DMARC**: authenticity parser module + tests → hard-fail SMTP rejection
    behind `AGENT_EMAIL_DMARC_REJECT_ENABLED` (dark) → authenticity metadata +
-   migration (cell-side inert first).
+   migration (cell-side inert first). *All merged and deployed dark: #269
+   (cells, schema 93) + #270 (edge, 0.0.259). Remaining: keyed enablement.*
 5. **Team seats**: `operator_seats` dimension (dark) → plan-fit seat check.
 6. **Billing (paid-to-paid guard first)** → Stripe Tax wiring → GA gate flag
    (fail-closed) → dunning contract test → refund runbook. *All merged:
@@ -110,8 +113,9 @@ adversarially reviewed, gated, merged. Roughly in dependency order:
 7. **Support**: policy doc → assistant author-kind + reserved handle → admin
    re-triage store method → AI support-runner core (dark) → scoped support_ai
    credential/role (dark) → SLO metric + breach alert → support@ intake bridge.
-   *Steps 1–5 merged: #251, #252, #253, #255, #257 (+ entitlement sync in
-   #256). Remaining: the SLO alert and the support@ intake bridge.*
+   *All merged: #251–#253, #255–#257, the SLO metric + breach alert (#259,
+   live-verified 2026-08-27), and the dark support@ intake bridge. Remaining:
+   keyed enablement only.*
 8. **plans.json cluster** (after the paid-to-paid guard): per-plan
    `operator_seats` values → support entitlement sync → Team billing readiness →
    **flip Team available** with honest flat pricing.
