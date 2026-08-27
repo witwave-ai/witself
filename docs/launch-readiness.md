@@ -184,9 +184,14 @@ incomplete payments auto-cancel at 15 days; live product catalog empty)
   end-to-end proof (also completes the Go-live setup-guide step) before GA.
 
 **Email edge + support**
-- Capture Cloudflare's real authserv-id; enable DMARC reject + deploy worker;
-  apply the authenticity migration; support@ DNS + Email Routing; mint the
-  support-AI credential + Claude API key; stand up the runner host.
+- Capture Cloudflare's real authserv-id (one Gmail→agent-address email), then
+  the reviewed enablement flips: DMARC reject, and relay v2 after cells
+  dual-accept (cells and worker are already deployed; the authenticity
+  migration shipped at schema 93). Support intake token is minted+installed
+  dark (sealed sec_k4k7xglepstg6mej). Remaining Scott-keyed: support@ DNS +
+  Email Routing (one destination-verification click); mint the support-AI
+  Claude API key; stand up the runner host. Turnstile: API token has read but
+  not write scope — dashboard mint (or a Turnstile-scoped token) still needed.
 
 **Release** — ✅ DONE 2026-08-26/27: v0.0.258 (42-commit dark batch) + v0.0.259
 (deploy-tooling fixes) released; dual-cell restore-verified pre-migration
