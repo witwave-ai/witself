@@ -45,7 +45,8 @@ PII-collecting launch:
 1. **Legal pages don't exist** — no ToS, Privacy, Acceptable Use, DPA/subprocessor
    list, refund/cancellation terms. Claude drafts skeletons; **final content +
    legal review = 🔑**.
-2. **ToS/consent capture at signup** — ✅ implemented dark: schema 0094 adds
+2. **ToS/consent capture at signup** — ✅ DEPLOYED dark in v0.0.260
+   (2026-08-28, both cells at schema 94 + CP verified): schema 0094 adds
    nullable consent columns, and consent ships behind the optional
    `--accept-terms` CLI flag / `consent_terms_version` +
    `consent_privacy_version` API fields end to end (fingerprint-bound,
@@ -201,7 +202,14 @@ incomplete payments auto-cancel at 15 days; live product catalog empty)
   Claude API key; stand up the runner host. Turnstile: API token has read but
   not write scope — dashboard mint (or a Turnstile-scoped token) still needed.
 
-**Release** — ✅ DONE 2026-08-26/27: v0.0.258 (42-commit dark batch) + v0.0.259
+**Release** — ✅ v0.0.260 DONE 2026-08-28: consent capture (schema 0094) +
+support/incident-comms close-out + feature-status truth-up + gate tooling
+released and deployed; dual-cell restore-verified pre-migration backups
+(evidence 2/2); both cells rolled in waves to 0.0.260 at schema 94 (8/8
+checks each, zero restarts); control plane deployed + deployment-verified
+at 0.0.260 (consent binding live, all activation gates dark); edge
+unchanged at 0.0.259 (no edge src changes). Previous train — ✅ DONE
+2026-08-26/27: v0.0.258 (42-commit dark batch) + v0.0.259
 (deploy-tooling fixes) released; dual-cell restore-verified pre-migration
 backups; both Civo cells rolled in waves to 0.0.258 at schema 93 (8/8 checks
 each, zero restarts, no alerts); control plane deployed+attested at 0.0.259
