@@ -2016,7 +2016,7 @@ test("control-plane deployment isolates Wrangler and nested Node environments", 
     ]);
     assert.equal(command[2].cwd, reviewedDirectory);
     assert.equal(command[2].signal, signal);
-    assert.equal(command[2].timeoutMs, 5 * 60_000);
+    assert.equal(command[2].timeoutMs, 15 * 60_000);
     assertSanitizedWranglerEnvironment(command[2].env);
   } finally {
     await rm(reviewedDirectory, { recursive: true, force: true });
