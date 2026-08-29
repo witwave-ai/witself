@@ -10,6 +10,7 @@ import {
 import {
   parseManagedDeliveryAccountAllowlist,
 } from "../src/agent-email-managed-delivery-cohort.mjs";
+import { parseSignupLimit } from "../src/signup-counters.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -64,6 +65,27 @@ const managedDeliveryAccountAllowlist = String(
 parseManagedDeliveryAccountAllowlist(managedDeliveryAccountAllowlist);
 
 const template = await readFile(join(root, "wrangler.template.jsonc"), "utf8");
+function committedPlainTextVar(name) {
+  const matches = [...template.matchAll(
+    new RegExp(`"${name}"\\s*:\\s*"([^"\\r\\n]*)"`, "g"),
+  )];
+  if (matches.length !== 1) {
+    throw new Error(`wrangler template must contain ${name} exactly once`);
+  }
+  return matches[0][1];
+}
+
+if (committedPlainTextVar("CP_SIGNUP_OPEN") === "true" &&
+    (parseSignupLimit(committedPlainTextVar(
+      "CP_SIGNUP_DAILY_LIMIT_PER_IP",
+    )) === 0 ||
+      parseSignupLimit(committedPlainTextVar(
+        "CP_SIGNUP_DAILY_LIMIT_GLOBAL",
+      )) === 0)) {
+  throw new Error(
+    "CP_SIGNUP_OPEN=true requires both committed signup daily limits to be positive integers",
+  );
+}
 const controlPlaneDirectory =
   /"binding"\s*:\s*"DIRECTORY"[\s\S]{0,200}?"id"\s*:\s*"([0-9a-f]{32})"/
     .exec(template);

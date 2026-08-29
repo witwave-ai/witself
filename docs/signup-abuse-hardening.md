@@ -1,16 +1,31 @@
 # Signup Abuse Hardening
 
-Status: implemented dark for the future open-signup path. The committed daily
-quotas are disabled at `0`, and the Turnstile runtime-only secrets are absent.
-The two Cloudflare rate-limit bindings are safe-always-on in the production
-template and guarded for tests and development environments where the bindings
-are absent. This slice does not relax the existing invite requirement.
+Status: implemented dark for the open-signup path. The committed
+`CP_SIGNUP_OPEN` gate is `false`, the daily quotas are disabled at `0`, and the
+Turnstile runtime-only secrets are absent. The two Cloudflare rate-limit
+bindings are safe-always-on in the production template and guarded for tests
+and development environments where the bindings are absent.
 
 The controls run before invite reservation. They therefore protect the public
 entry point before signup opens and do not spend or disclose an invite when a
 request fails an abuse check.
 
 ## Controls
+
+### Open-signup gate
+
+`CP_SIGNUP_OPEN` is a committed plain-text gate. Only the exact value `true`
+makes an invite optional; every other value preserves the established
+invite-required behavior. An invite-carrying request always follows that
+established path.
+
+An invite-less request fails closed unless Turnstile is enabled with its secret
+key configured and both committed daily limits are positive integers. It must
+then pass Turnstile verification, the per-IP and global daily counters, and
+provide both valid consent-version fields. A missing runtime prerequisite
+returns one value-free `503` configuration refusal without identifying the
+missing control. Flipping this gate is a reviewed activation step performed
+only as described below.
 
 ### Cloudflare edge rate limits
 
@@ -85,33 +100,39 @@ request fingerprint.
 ## Keyed enablement checklist
 
 These steps are **needs-Scott** wherever they require a new external resource,
-raw secret value, or product limit decision. Keep the invite gate in place
-until the complete acceptance check passes.
+raw secret value, or product limit decision. Keep `CP_SIGNUP_OPEN=false` until
+the complete pre-activation check passes.
 
 1. Mint a Cloudflare Turnstile widget restricted to the exact production host
    `self.witwave.ai`.
-2. Provide its site key and secret key for installation as the runtime-only
+2. Install its site key and secret key as the runtime-only
    `CP_SIGNUP_TURNSTILE_SITE_KEY` and
    `CP_SIGNUP_TURNSTILE_SECRET_KEY` break-glass secrets. Do not commit, print,
    or log either value.
 3. Choose positive daily per-IP and global signup limits. Review the interaction
    with the fixed 5-per-minute signup burst limit and expected launch volume.
-4. Land a separate template-and-verifier activation PR that replaces both `0`
-   defaults with the chosen exact values and updates every pinned control-plane
-   deployed-binding fixture. Deploy and attest that release while all three
-   Turnstile activation secrets are still absent.
-5. Install the site and secret keys through the reviewed break-glass path, then
-   set `CP_SIGNUP_TURNSTILE_ENABLED=true` last with
+4. With `CP_SIGNUP_OPEN` still `false`, set
+   `CP_SIGNUP_TURNSTILE_ENABLED=true` last through the reviewed break-glass
+   path with
    `npm run secret:put:break-glass -- CP_SIGNUP_TURNSTILE_ENABLED`.
-6. Verify `/signup/challenge` renders without account data, complete one
-   challenge, and create one canary account with
+5. Verify `/signup/challenge` renders without account data, complete one
+   challenge, and create one invited canary account with
    `witself account create ... --challenge <token>`. Confirm an invalid token
-   returns `403`, a forced verifier outage returns `503`, and burst and daily
-   denials return `429` without creating signup state or reserving an invite.
-7. Retain value-free deployment and canary evidence before relaxing the invite
-   requirement. If verification becomes unhealthy, remove or make the enabled
-   gate non-`true` immediately; a verifier outage pauses signup only while the
-   exact gate remains active.
+   returns `403` and a forced verifier outage returns `503` while the invite
+   gate remains closed.
+6. Only after all three runtime Turnstile values are staged and verified, land
+   one reviewed activation PR that replaces both committed `0` daily limits
+   with the chosen positive values **and** flips `CP_SIGNUP_OPEN` to `true`.
+   Never split the open-signup flip from the positive-limit pins. Update every
+   pinned control-plane deployed-binding fixture in that same PR.
+7. Deploy and attest that release, then create one invite-less canary with both
+   consent versions and a challenge token. Confirm invalid challenges return
+   `403`, forced verifier or configuration failures return value-free `503`,
+   and burst and daily denials return `429` without creating signup state.
+   Retain value-free evidence. If verification becomes unhealthy, restore
+   `CP_SIGNUP_OPEN=false` immediately to close invite-less signup. Separately
+   disable the runtime Turnstile gate through the break-glass path if invited
+   signup must continue during verifier trouble.
 
 The dark deployment assertion refuses any persistent Turnstile activation
 secret during this slice. Future ordinary deployments must update that

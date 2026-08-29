@@ -74,9 +74,10 @@ type accountCreateRequest struct {
 }
 
 // CreateAccount signs up a new account via the control plane
-// (POST {controlPlane}/v1/accounts, invite-gated). Server-side refusals —
-// invalid invite, duplicate email, no capacity — are surfaced verbatim. The
-// generous timeout covers placement plus the cell round trip.
+// (POST {controlPlane}/v1/accounts). The server decides whether an invite is
+// required. Server-side refusals — invalid invite, duplicate email, no capacity
+// — are surfaced verbatim. The generous timeout covers placement plus the cell
+// round trip.
 func CreateAccount(ctx context.Context, controlPlane, email, invite, displayName string) (*CreatedAccount, error) {
 	provisionID, err := id.New("prv")
 	if err != nil {
@@ -294,8 +295,6 @@ func normalizeAccountCreateRequest(
 		return "", "", "", "", fmt.Errorf("control plane endpoint is required")
 	case email == "":
 		return "", "", "", "", fmt.Errorf("account email is required")
-	case invite == "":
-		return "", "", "", "", fmt.Errorf("invite code is required")
 	default:
 		return controlPlane, email, invite, displayName, nil
 	}

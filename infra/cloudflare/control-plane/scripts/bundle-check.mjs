@@ -56,6 +56,7 @@ try {
     "/signup/challenge",
     "CP_SIGNUP_TURNSTILE_ENABLED",
     "signup-counter:",
+    "CP_SIGNUP_OPEN",
     "CP_SIGNUP_DAILY_LIMIT_PER_IP",
     "siteverify",
   ]) {

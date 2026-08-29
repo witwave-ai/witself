@@ -113,6 +113,72 @@ func TestAccountCreateResumesAmbiguousProvisionWithSameID(t *testing.T) {
 	}
 }
 
+func TestAccountCreateAllowsOmittedInvite(t *testing.T) {
+	home := privateAccountCreateTestHome(t)
+	const (
+		termsVersion   = "terms-2026.08"
+		privacyVersion = "privacy-2026.08"
+	)
+	var gotInvite *string
+	var gotChallenge, gotTerms, gotPrivacy string
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		request *http.Request,
+	) {
+		switch request.URL.Path {
+		case "/v1/accounts":
+			var body struct {
+				ProvisionID    string  `json:"provision_id"`
+				Email          string  `json:"email"`
+				Invite         *string `json:"invite"`
+				TurnstileToken string  `json:"turnstile_token"`
+				ConsentTerms   string  `json:"consent_terms_version"`
+				ConsentPrivacy string  `json:"consent_privacy_version"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Error(err)
+				writer.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			gotInvite = body.Invite
+			gotChallenge = body.TurnstileToken
+			gotTerms = body.ConsentTerms
+			gotPrivacy = body.ConsentPrivacy
+			writeAccountCreateTestResponse(
+				writer, server.URL, body.ProvisionID, body.Email, 1,
+			)
+		case "/v1/auth/bootstrap":
+			writeAccountCreateBootstrapResponse(writer)
+		default:
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	args := []string{
+		"--email", "owner@example.com",
+		"--display-name", "Owner Display",
+		"--accept-terms",
+		"--challenge", "challenge-response",
+		"--endpoint", server.URL,
+	}
+	if code := accountCreateWithLegalVersions(
+		args, termsVersion, privacyVersion,
+	); code != 0 {
+		t.Fatalf("invite-less account create exit = %d, want 0", code)
+	}
+	if gotInvite == nil || *gotInvite != "" ||
+		gotChallenge != "challenge-response" ||
+		gotTerms != termsVersion || gotPrivacy != privacyVersion {
+		t.Fatalf(
+			"open signup request invite=%v challenge=%q consent=%q/%q",
+			gotInvite, gotChallenge, gotTerms, gotPrivacy,
+		)
+	}
+	assertAccountCreateSaved(t, home)
+}
+
 func TestAccountCreateResumesConsentAfterLegalVersionBump(t *testing.T) {
 	const (
 		acceptedTermsVersion   = "terms-2026.08"

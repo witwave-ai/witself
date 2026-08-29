@@ -2499,7 +2499,7 @@ func accountCreateWithLegalVersions(
 	fs := flag.NewFlagSet("account create", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	email := fs.String("email", "", "account owner email")
-	invite := fs.String("invite", "", "invite code")
+	invite := fs.String("invite", "", "optional invite code (server decides whether required)")
 	name := fs.String("name", "", `local name for the new account (default "default")`)
 	displayName := fs.String("display-name", "", "account display name (default: the email)")
 	challenge := fs.String("challenge", "", "Turnstile challenge token")
@@ -2509,8 +2509,8 @@ func accountCreateWithLegalVersions(
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *email == "" || *invite == "" {
-		fmt.Fprintln(os.Stderr, "usage: witself account create --email EMAIL --invite CODE [--name LOCALNAME] [--display-name NAME] [--accept-terms] [--challenge TOKEN] [--endpoint URL] [--out FILE]")
+	if *email == "" {
+		fmt.Fprintln(os.Stderr, "usage: witself account create --email EMAIL [--invite CODE] [--name LOCALNAME] [--display-name NAME] [--accept-terms] [--challenge TOKEN] [--endpoint URL] [--out FILE]")
 		return 2
 	}
 	localName := *name
@@ -4170,7 +4170,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself version              Print version information")
 	usageLine(w, "  witself gen-bootstrap-token  Generate an operator bootstrap token")
 	usageLine(w, "  witself auth login           Exchange a bootstrap token for an operator token")
-	usageLine(w, "  witself account create       Create a Witself Cloud account (invite required)")
+	usageLine(w, "  witself account create       Create a Witself Cloud account")
 	usageLine(w, "  witself account adopt        Bind an existing account (id + token) to a local name")
 	usageLine(w, "  witself account list         List this machine's local account names")
 	usageLine(w, "  witself account status       Show an account's lifecycle status")
