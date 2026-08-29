@@ -614,7 +614,12 @@ export function runProductionWranglerDeploy(
       cwd,
       env: sanitizedWranglerEnvironment(environment),
       signal,
-      timeoutMs: 5 * 60_000,
+      // Container deploys push image layers to Cloudflare's registry inside
+      // this command; under provider-side degradation a healthy push can
+      // exceed five minutes of silence. The lease client renews under long
+      // commands, and the read-only inspection path already runs at twelve
+      // minutes — give mutations the same headroom plus margin.
+      timeoutMs: 15 * 60_000,
     },
   );
 }
