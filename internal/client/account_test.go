@@ -39,6 +39,26 @@ func TestValidateAccountConsentVersions(t *testing.T) {
 	}
 }
 
+func TestAccountCreateRequestMarshalsExplicitEmptyInvite(t *testing.T) {
+	encoded, err := json.Marshal(accountCreateRequest{
+		DisplayName: "Owner",
+		Email:       "owner@example.com",
+		Invite:      "",
+		ProvisionID: "prv_openSignupMarshal1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(encoded, &body); err != nil {
+		t.Fatal(err)
+	}
+	invite, present := body["invite"]
+	if !present || invite != "" {
+		t.Fatalf("invite field present=%v value=%v", present, invite)
+	}
+}
+
 func TestCreateAccount(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/accounts" {
@@ -211,6 +231,45 @@ func TestCreateAccountExactUsesCallerProvisionID(t *testing.T) {
 	}
 }
 
+func TestCreateAccountExactSendsExplicitEmptyInvite(t *testing.T) {
+	var invite *string
+	srv := httptest.NewServer(http.HandlerFunc(func(
+		w http.ResponseWriter,
+		r *http.Request,
+	) {
+		var body struct {
+			ProvisionID string  `json:"provision_id"`
+			Email       string  `json:"email"`
+			Invite      *string `json:"invite"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		invite = body.Invite
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(
+			`{"schema_version":"witself.v0","provision_id":"` +
+				body.ProvisionID +
+				`","account_id":"acc_open","operator_id":"opr_open",` +
+				`"email":"` + body.Email +
+				`","status":"pending","bootstrap_token":"witself_boot_open",` +
+				`"cell":{"name":"cell-open","endpoint":"https://cell.example"}}`,
+		))
+	}))
+	defer srv.Close()
+
+	if _, err := CreateAccountExact(
+		context.Background(), srv.URL,
+		"owner@example.com", "", "Owner", "prv_openSignupClient1",
+		"challenge-response", "terms-2026.08", "privacy-2026.08",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if invite == nil || *invite != "" {
+		t.Fatalf("invite field = %v, want explicit empty string", invite)
+	}
+}
+
 func TestCreateAccountExactSurfacesSignupChallenge(t *testing.T) {
 	var attempts int
 	srv := httptest.NewServer(http.HandlerFunc(func(
@@ -341,6 +400,27 @@ func TestAccountCreateRequestFingerprintCanonicalScope(t *testing.T) {
 		if got == base {
 			t.Fatalf("variant %#v did not change fingerprint", variant)
 		}
+	}
+}
+
+func TestAccountCreateRequestFingerprintAllowsEmptyInvite(t *testing.T) {
+	first, err := AccountCreateRequestFingerprint(
+		"https://control.example/", "default",
+		" Owner@Example.COM ", "", "", "terms-2026.08", "privacy-2026.08",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := AccountCreateRequestFingerprint(
+		"https://control.example", "default",
+		"owner@example.com", "", "owner@example.com",
+		"terms-2026.08", "privacy-2026.08",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatalf("empty-invite fingerprints differ: %s != %s", first, second)
 	}
 }
 

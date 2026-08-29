@@ -111,6 +111,9 @@
     // The support@ bridge remains undiscoverable until its independently
     // provisioned bearer and every cell-side route are ready.
     "CP_SUPPORT_EMAIL_INTAKE_ENABLED": "false",
+    // Open signup is disabled at the exact value false. Flipping it is a
+    // reviewed activation step per docs/signup-abuse-hardening.md.
+    "CP_SIGNUP_OPEN": "false",
     // Durable signup quotas are independently disabled at the exact value 0.
     // Positive integer limits may be selected only as part of the keyed open-
     // signup activation procedure in docs/signup-abuse-hardening.md.

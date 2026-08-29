@@ -778,6 +778,7 @@ Flags:
 | `--display-name TEXT` | Customer account display name. |
 | `--legal-name TEXT` | Legal customer name for billing records. |
 | `--email EMAIL` | Primary account/operator email. |
+| `--invite CODE` | Optional invite code; the server decides whether one is required. |
 | `--challenge TOKEN` | Turnstile token copied from the signup challenge page after a challenge-required response. |
 | `--accept-terms` | Record acceptance of the current Terms of Service and Privacy Policy versions with the signup. |
 | `--billing-email EMAIL` | Billing contact email. |
@@ -791,6 +792,13 @@ Flags:
 | `--no-open` | Print the hosted checkout URL without opening a browser. |
 | `--profile NAME` | Save the created account under a named profile. |
 | `--dry-run` | Validate inputs and show planned account, profile, and billing setup without creating anything. |
+
+The CLI permits `--invite` to be omitted and sends an empty invite for the
+server to evaluate. An invite-less open signup requires `--accept-terms` and a
+challenge token. The first attempt may omit `--challenge` to receive the public
+challenge URL; after completing it, retry the exact command with
+`--challenge TOKEN`. A deployment whose open-signup gate or required abuse
+controls are not active refuses the request.
 
 When abuse hardening is enabled, a challenge-required `403` prints the public
 `challenge_url` and the instruction: open that URL, complete the check, then

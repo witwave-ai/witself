@@ -73,7 +73,32 @@ function phaseAtLeast(state, phase) {
   return PHASE[state.phase] >= PHASE[phase];
 }
 
-function normalizedRequest(input) {
+function consentVersionError(
+  consentTermsVersion,
+  consentPrivacyVersion,
+) {
+  if (consentTermsVersion === null || consentPrivacyVersion === null) {
+    return "consent versions must be strings";
+  }
+  if ((consentTermsVersion === "") !== (consentPrivacyVersion === "")) {
+    return "consent_terms_version and consent_privacy_version must be provided together";
+  }
+  if (
+    consentTermsVersion !== "" &&
+    (
+      !CONSENT_VERSION.test(consentTermsVersion) ||
+      !CONSENT_VERSION.test(consentPrivacyVersion)
+    )
+  ) {
+    return "consent versions must be 1 to 64 characters, starting with an alphanumeric and containing only alphanumerics, dots, underscores, or hyphens";
+  }
+  return null;
+}
+
+function normalizedRequest(input, {
+  inviteOptional = false,
+  deferConsentValidation = false,
+} = {}) {
   if (!isObject(input)) {
     fail("invalid signup request", 400);
   }
@@ -121,7 +146,7 @@ function normalizedRequest(input) {
   if (displayName === null || displayName.length > 200) {
     fail("display_name must be a string of at most 200 characters", 400);
   }
-  if (!INVITE_CODE.test(invite)) {
+  if (!INVITE_CODE.test(invite) && !(inviteOptional && invite === "")) {
     fail("invite code required", 403);
   }
   if (sourceIP === null) {
@@ -130,26 +155,14 @@ function normalizedRequest(input) {
   if (turnstileToken === null) {
     fail("turnstile_token must be a string", 400);
   }
-  if (consentTermsVersion === null || consentPrivacyVersion === null) {
-    fail("consent versions must be strings", 400);
-  }
-  if ((consentTermsVersion === "") !== (consentPrivacyVersion === "")) {
-    fail(
-      "consent_terms_version and consent_privacy_version must be provided together",
-      400,
+  if (!deferConsentValidation) {
+    const consentError = consentVersionError(
+      consentTermsVersion,
+      consentPrivacyVersion,
     );
-  }
-  if (
-    consentTermsVersion !== "" &&
-    (
-      !CONSENT_VERSION.test(consentTermsVersion) ||
-      !CONSENT_VERSION.test(consentPrivacyVersion)
-    )
-  ) {
-    fail(
-      "consent versions must be 1 to 64 characters, starting with an alphanumeric and containing only alphanumerics, dots, underscores, or hyphens",
-      400,
-    );
+    if (consentError !== null) {
+      fail(consentError, 400);
+    }
   }
   return {
     provision_id: provisionID,
@@ -328,7 +341,29 @@ export class DurableAccountSignup {
   }
 
   async run(input) {
-    const request = normalizedRequest(input);
+    const openSignup = this.env.CP_SIGNUP_OPEN === "true" &&
+      isObject(input) &&
+      (input.invite == null || input.invite === "");
+    const request = normalizedRequest(input, {
+      inviteOptional: openSignup,
+      deferConsentValidation: openSignup,
+    });
+    const perIPLimit = parseSignupLimit(
+      this.env.CP_SIGNUP_DAILY_LIMIT_PER_IP,
+    );
+    const globalLimit = parseSignupLimit(
+      this.env.CP_SIGNUP_DAILY_LIMIT_GLOBAL,
+    );
+    if (
+      openSignup &&
+      (
+        !turnstileEnabled(this.env) ||
+        perIPLimit < 1 ||
+        globalLimit < 1
+      )
+    ) {
+      fail("open signup configuration is invalid", 503);
+    }
     if (this.objectName !== `provision:${request.provision_id}`) {
       fail("signup Durable Object identity mismatch", 400);
     }
@@ -357,12 +392,6 @@ export class DurableAccountSignup {
       }
     }
 
-    const perIPLimit = parseSignupLimit(
-      this.env.CP_SIGNUP_DAILY_LIMIT_PER_IP,
-    );
-    const globalLimit = parseSignupLimit(
-      this.env.CP_SIGNUP_DAILY_LIMIT_GLOBAL,
-    );
     let turnstileVerified = state?.turnstile_verified === true;
     if (!state) {
       if (turnstileEnabled(this.env)) {
@@ -453,6 +482,21 @@ export class DurableAccountSignup {
         }
       }
 
+      if (openSignup) {
+        const consentError = consentVersionError(
+          request.consent_terms_version,
+          request.consent_privacy_version,
+        ) ?? (request.consent_terms_version === ""
+          ? "consent_terms_version and consent_privacy_version are required for open signup"
+          : null);
+        if (consentError !== null) {
+          if (state?.phase === "abuse_preflight") {
+            await this.storage.delete(STATE_KEY);
+          }
+          fail(consentError, 400);
+        }
+      }
+
       if (state?.phase === "abuse_preflight") {
         const { signup_ip_scope: _signupIPScope, ...initialized } = state;
         state = await this.save({
@@ -478,14 +522,20 @@ export class DurableAccountSignup {
     }
 
     if (!phaseAtLeast(state, "invite_reserved")) {
-      const invite = await this.reserveInviteImpl({
-        invite: request.invite,
-        provision_id: state.provision_id,
-        request_fingerprint: state.request_fingerprint,
-      });
-      state = await this.advance(state, "invite_reserved", {
-        placement: invite.snapshot,
-      });
+      if (openSignup) {
+        state = await this.advance(state, "invite_reserved", {
+          placement: {},
+        });
+      } else {
+        const invite = await this.reserveInviteImpl({
+          invite: request.invite,
+          provision_id: state.provision_id,
+          request_fingerprint: state.request_fingerprint,
+        });
+        state = await this.advance(state, "invite_reserved", {
+          placement: invite.snapshot,
+        });
+      }
     }
 
     if (!phaseAtLeast(state, "cell_selected")) {

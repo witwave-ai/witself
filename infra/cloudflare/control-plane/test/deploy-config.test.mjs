@@ -90,6 +90,7 @@ function hostileWranglerEnvironment() {
     EMAIL_DIRECTORY_KV_ID: agentEmailDirectoryID,
     AGENT_EMAIL_ROUTE_SIGNING_KEY_ID: routeSigningKeyID,
     CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST: cohortAccount,
+    CP_SIGNUP_OPEN: "true",
     CF_ACCOUNT_ID: "redirected-account",
     CF_API_TOKEN: "redirected-token",
     CONTROL_PLANE_EDGE_TOKEN: "lease-secret",
@@ -132,6 +133,7 @@ function assertSanitizedWranglerEnvironment(environment, inspection = false) {
     "WRANGLER_OUTPUT_FILE_PATH",
     "WRANGLER_CI_OVERRIDE_NAME",
     "NODE_OPTIONS",
+    "CP_SIGNUP_OPEN",
   ]) {
     assert.equal(Object.hasOwn(environment, name), false, name);
   }
@@ -592,6 +594,111 @@ test("only the exact dark v0.0.242 recovery may bootstrap the operations lease",
   assert.equal(isFirstManagedCohortProtocolBootstrap("0.0.242", dark, null), false);
 });
 
+function replaceCommittedVar(source, name, value) {
+  let matches = 0;
+  const replaced = source.replace(
+    new RegExp(`("${name}"\\s*:\\s*")[^"]*(")`, "g"),
+    (_match, prefix, suffix) => {
+      matches += 1;
+      return `${prefix}${value}${suffix}`;
+    },
+  );
+  assert.equal(matches, 1, name);
+  return replaced;
+}
+
+async function isolatedSignupRenderer(t, { open, perIP, global }) {
+  const temporary = await mkdtemp(join(tmpdir(), "witself-cp-signup-render-"));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  for (const relativePath of [
+    "scripts/render-wrangler.mjs",
+    "scripts/source-identity.mjs",
+    "src/agent-email-managed-delivery-cohort.mjs",
+    "src/signup-counters.mjs",
+  ]) {
+    const destination = join(temporary, relativePath);
+    await mkdir(dirname(destination), { recursive: true });
+    await writeFile(
+      destination,
+      await readFile(new URL(`../${relativePath}`, import.meta.url)),
+    );
+  }
+  let template = await readFile(
+    new URL("../wrangler.template.jsonc", import.meta.url),
+    "utf8",
+  );
+  template = replaceCommittedVar(template, "CP_SIGNUP_OPEN", open);
+  template = replaceCommittedVar(
+    template,
+    "CP_SIGNUP_DAILY_LIMIT_PER_IP",
+    perIP,
+  );
+  template = replaceCommittedVar(
+    template,
+    "CP_SIGNUP_DAILY_LIMIT_GLOBAL",
+    global,
+  );
+  await writeFile(join(temporary, "wrangler.template.jsonc"), template);
+  return {
+    renderer: join(temporary, "scripts", "render-wrangler.mjs"),
+    output: join(temporary, "wrangler.generated.jsonc"),
+  };
+}
+
+function runIsolatedRenderer(paths) {
+  return spawnSync(process.execPath, [
+    paths.renderer,
+    "--version", version,
+    "--commit", commit,
+    "--date", date,
+    "--output", paths.output,
+  ], {
+    encoding: "utf8",
+    env: {
+      PATH: process.env.PATH,
+      EMAIL_DIRECTORY_KV_ID: agentEmailDirectoryID,
+      AGENT_EMAIL_ROUTE_SIGNING_KEY_ID: routeSigningKeyID,
+    },
+  });
+}
+
+test("release renderer refuses open signup unless both committed daily limits are positive", async (t) => {
+  for (const limits of [
+    { perIP: "0", global: "5" },
+    { perIP: "5", global: "0" },
+    { perIP: "01", global: "5" },
+  ]) {
+    const paths = await isolatedSignupRenderer(t, {
+      open: "true",
+      ...limits,
+    });
+    const rendered = runIsolatedRenderer(paths);
+    assert.notEqual(rendered.status, 0, JSON.stringify(limits));
+    assert.match(
+      rendered.stderr,
+      /CP_SIGNUP_OPEN=true requires both committed signup daily limits to be positive integers/,
+    );
+    await assert.rejects(
+      readFile(paths.output),
+      (error) => error?.code === "ENOENT",
+    );
+  }
+});
+
+test("release renderer accepts open signup with positive committed daily limits", async (t) => {
+  const paths = await isolatedSignupRenderer(t, {
+    open: "true",
+    perIP: "5",
+    global: "100",
+  });
+  const rendered = runIsolatedRenderer(paths);
+  assert.equal(rendered.status, 0, rendered.stderr);
+  const config = await readFile(paths.output, "utf8");
+  assert.match(config, /"CP_SIGNUP_OPEN"\s*:\s*"true"/);
+  assert.match(config, /"CP_SIGNUP_DAILY_LIMIT_PER_IP"\s*:\s*"5"/);
+  assert.match(config, /"CP_SIGNUP_DAILY_LIMIT_GLOBAL"\s*:\s*"100"/);
+});
+
 test("release renderer injects matching immutable container and Worker identity", async (t) => {
   const temp = await mkdtemp(join(tmpdir(), "witself-cp-config-"));
   t.after(() => rm(temp, { recursive: true, force: true }));
@@ -695,6 +802,14 @@ test("release renderer injects matching immutable container and Worker identity"
     )),
     /Worker vars/,
     "release identity stamps must not hide an enabled signup quota",
+  );
+  assert.throws(
+    () => expectedBuildMetadata(config.replace(
+      '"CP_SIGNUP_OPEN": "false"',
+      '"CP_SIGNUP_OPEN": "true"',
+    )),
+    /Worker vars/,
+    "release identity stamps must not hide an enabled open-signup gate",
   );
   assert.throws(
     () => expectedBuildMetadata(config.replace(
@@ -842,6 +957,11 @@ test("release renderer injects matching immutable container and Worker identity"
     config,
     /"CP_SIGNUP_DAILY_LIMIT_GLOBAL"\s*:\s*"0"/,
     "release config must keep the global durable signup quota disabled",
+  );
+  assert.match(
+    config,
+    /"CP_SIGNUP_OPEN"\s*:\s*"false"/,
+    "release config must keep open signup dark by default",
   );
   for (const [name, namespaceID, limit, period] of [
     ["PUBLIC_IP_LIMITER", "1002", 300, 60],
@@ -1163,6 +1283,7 @@ function deployedVersion(overrides = {}) {
           ["CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", ""],
           ["CP_SIGNUP_DAILY_LIMIT_PER_IP", "0"],
           ["CP_SIGNUP_DAILY_LIMIT_GLOBAL", "0"],
+          ["CP_SIGNUP_OPEN", "false"],
           ["CP_SUPPORT_EMAIL_INTAKE_ENABLED", "false"],
         ].map(([name, text]) => ({ name, type: "plain_text", text })),
         {

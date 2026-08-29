@@ -853,6 +853,341 @@ test("malformed consent is rejected before any signup state exists", async () =>
   }
 });
 
+test("closed signup still requires an invite with valid public controls", async () => {
+  for (const openValue of [undefined, "false", "TRUE"]) {
+    let verifications = 0;
+    let counterCalls = 0;
+    const env = {
+      CP_SIGNUP_TURNSTILE_ENABLED: "true",
+      CP_SIGNUP_TURNSTILE_SECRET_KEY: "server-secret",
+      CP_SIGNUP_DAILY_LIMIT_PER_IP: "5",
+      CP_SIGNUP_DAILY_LIMIT_GLOBAL: "10",
+    };
+    if (openValue !== undefined) env.CP_SIGNUP_OPEN = openValue;
+    const setup = harness({
+      env,
+      verifyTurnstile: async () => {
+        verifications++;
+        return { ok: true };
+      },
+      consumeCounter: async () => {
+        counterCalls++;
+        return { allowed: true };
+      },
+    });
+
+    const response = await setup.runtime.fetch(signupRequest({
+      invite: "",
+      source_ip: "203.0.113.30",
+      turnstile_token: "valid-token",
+      consent_terms_version: "terms-2026-08-28",
+      consent_privacy_version: "privacy-2026-08-28",
+    }));
+    assert.equal(response.status, 403, String(openValue));
+    assert.deepEqual(await response.json(), {
+      schema_version: "witself.v0",
+      error: "invite code required",
+    });
+    assert.equal(verifications, 0);
+    assert.equal(counterCalls, 0);
+    assert.equal(setup.inviteReservations(), 0);
+    assert.equal(setup.storage.values.has("account-signup"), false);
+  }
+});
+
+test("open signup configuration fails closed without affecting invites", async () => {
+  for (const scenario of [
+    {
+      name: "zero limits",
+      env: {
+        CP_SIGNUP_OPEN: "true",
+        CP_SIGNUP_TURNSTILE_ENABLED: "true",
+        CP_SIGNUP_TURNSTILE_SECRET_KEY: "server-secret",
+        CP_SIGNUP_DAILY_LIMIT_PER_IP: "0",
+        CP_SIGNUP_DAILY_LIMIT_GLOBAL: "0",
+      },
+      invitedVerifications: 1,
+      invitedCounters: 0,
+    },
+    {
+      name: "Turnstile off",
+      env: {
+        CP_SIGNUP_OPEN: "true",
+        CP_SIGNUP_TURNSTILE_ENABLED: "false",
+        CP_SIGNUP_TURNSTILE_SECRET_KEY: "server-secret",
+        CP_SIGNUP_DAILY_LIMIT_PER_IP: "5",
+        CP_SIGNUP_DAILY_LIMIT_GLOBAL: "10",
+      },
+      invitedVerifications: 0,
+      invitedCounters: 2,
+    },
+  ]) {
+    let verifications = 0;
+    const counters = [];
+    const setup = harness({
+      env: scenario.env,
+      verifyTurnstile: async () => {
+        verifications++;
+        return { ok: true };
+      },
+      consumeCounter: async (input) => {
+        counters.push(structuredClone(input));
+        return { allowed: true };
+      },
+    });
+
+    const refused = await setup.runtime.fetch(signupRequest({
+      invite: "",
+      source_ip: "203.0.113.31",
+      turnstile_token: "must-not-be-verified",
+    }));
+    assert.equal(refused.status, 503, scenario.name);
+    assert.deepEqual(await refused.json(), {
+      schema_version: "witself.v0",
+      error: "open signup configuration is invalid",
+    });
+    assert.equal(verifications, 0);
+    assert.equal(counters.length, 0);
+    assert.equal(setup.storage.values.has("account-signup"), false);
+
+    const invited = await setup.runtime.fetch(signupRequest({
+      source_ip: "203.0.113.31",
+      turnstile_token: "valid-invite-token",
+    }));
+    assert.equal(invited.status, 201, scenario.name);
+    assert.equal(verifications, scenario.invitedVerifications);
+    assert.equal(counters.length, scenario.invitedCounters);
+    assert.equal(setup.inviteReservations(), 1);
+  }
+});
+
+test("configured open signup provisions without reserving an invite", async () => {
+  const verifications = [];
+  const counters = [];
+  const setup = harness({
+    env: {
+      CP_SIGNUP_OPEN: "true",
+      CP_SIGNUP_TURNSTILE_ENABLED: "true",
+      CP_SIGNUP_TURNSTILE_SECRET_KEY: "server-secret",
+      CP_SIGNUP_DAILY_LIMIT_PER_IP: "5",
+      CP_SIGNUP_DAILY_LIMIT_GLOBAL: "10",
+    },
+    verifyTurnstile: async (input) => {
+      verifications.push(structuredClone(input));
+      return { ok: true };
+    },
+    consumeCounter: async (input) => {
+      counters.push(structuredClone(input));
+      return { allowed: true };
+    },
+  });
+  const fields = {
+    invite: "",
+    source_ip: "203.0.113.32",
+    turnstile_token: "one-time-token",
+    consent_terms_version: "terms-2026-08-28",
+    consent_privacy_version: "privacy-2026-08-28",
+  };
+
+  const response = await setup.runtime.fetch(signupRequest(fields));
+  assert.equal(response.status, 201);
+  assert.deepEqual(verifications, [{
+    secretKey: "server-secret",
+    token: "one-time-token",
+    remoteIp: "203.0.113.32",
+  }]);
+  assert.equal(counters.length, 2);
+  assert.match(counters[0].scope, SIGNUP_IP_SCOPE_PATTERN);
+  assert.equal(counters[0].limit, 5);
+  assert.equal(counters[1].scope, "signup-counter:global");
+  assert.equal(counters[1].limit, 10);
+  assert.equal(setup.inviteReservations(), 0);
+  assert.equal(setup.placements(), 1);
+  assert.deepEqual(
+    setup.service.calls.map(({ input }) => ({
+      consent_terms_version: input.consent_terms_version,
+      consent_privacy_version: input.consent_privacy_version,
+    })),
+    [{
+      consent_terms_version: "terms-2026-08-28",
+      consent_privacy_version: "privacy-2026-08-28",
+    }],
+  );
+  assert.equal(
+    setup.storage.values.get("account-signup").request_fingerprint,
+    "646adc4ef9171944ef38d199d363f783e902ff78827aba441245da929a072461",
+  );
+
+  const replay = await setup.runtime.fetch(signupRequest({
+    ...fields,
+    invite: null,
+    source_ip: "198.51.100.32",
+    turnstile_token: "replacement-token",
+  }));
+  assert.equal(replay.status, 201);
+  assert.equal(verifications.length, 1);
+  assert.equal(counters.length, 2);
+  assert.equal(setup.inviteReservations(), 0);
+  assert.equal(setup.placements(), 1);
+});
+
+test("open signup checks both allowances before requiring consent", async () => {
+  for (const { fields, error } of [
+    {
+      fields: {},
+      error:
+        "consent_terms_version and consent_privacy_version are required for open signup",
+    },
+    {
+      fields: { consent_terms_version: "terms-2026-08-28" },
+      error:
+        "consent_terms_version and consent_privacy_version must be provided together",
+    },
+  ]) {
+    const events = [];
+    const setup = harness({
+      env: {
+        CP_SIGNUP_OPEN: "true",
+        CP_SIGNUP_TURNSTILE_ENABLED: "true",
+        CP_SIGNUP_TURNSTILE_SECRET_KEY: "server-secret",
+        CP_SIGNUP_DAILY_LIMIT_PER_IP: "5",
+        CP_SIGNUP_DAILY_LIMIT_GLOBAL: "10",
+      },
+      verifyTurnstile: async () => {
+        events.push("turnstile");
+        return { ok: true };
+      },
+      consumeCounter: async (input) => {
+        events.push(input.scope === "signup-counter:global"
+          ? "global"
+          : "ip");
+        return { allowed: true };
+      },
+    });
+
+    const response = await setup.runtime.fetch(signupRequest({
+      invite: "",
+      source_ip: "203.0.113.33",
+      turnstile_token: "valid-token",
+      ...fields,
+    }));
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error, error);
+    assert.deepEqual(events, ["turnstile", "ip", "global"]);
+    assert.equal(setup.storage.values.has("account-signup"), false);
+    assert.equal(setup.inviteReservations(), 0);
+  }
+});
+
+test("open signup refuses a failed Turnstile before counters", async () => {
+  let counterCalls = 0;
+  const setup = harness({
+    env: {
+      CP_SIGNUP_OPEN: "true",
+      CP_SIGNUP_TURNSTILE_ENABLED: "true",
+      CP_SIGNUP_TURNSTILE_SECRET_KEY: "server-secret",
+      CP_SIGNUP_DAILY_LIMIT_PER_IP: "5",
+      CP_SIGNUP_DAILY_LIMIT_GLOBAL: "10",
+    },
+    verifyTurnstile: async () => ({ ok: false, reason: "invalid" }),
+    consumeCounter: async () => {
+      counterCalls++;
+      return { allowed: true };
+    },
+  });
+
+  const response = await setup.runtime.fetch(signupRequest({
+    invite: "",
+    source_ip: "203.0.113.34",
+    turnstile_token: "bad-token",
+    consent_terms_version: "terms-2026-08-28",
+    consent_privacy_version: "privacy-2026-08-28",
+  }));
+  assert.equal(response.status, 403);
+  assert.deepEqual(await response.json(), {
+    schema_version: "witself.v0",
+    error: "turnstile challenge required",
+    challenge_url: "https://self.witwave.ai/signup/challenge",
+  });
+  assert.equal(counterCalls, 0);
+  assert.equal(setup.storage.values.has("account-signup"), false);
+  assert.equal(setup.inviteReservations(), 0);
+});
+
+test("open signup refuses per-IP and global daily exhaustion", async (t) => {
+  const logs = [];
+  t.mock.method(console, "log", (...values) => logs.push(values.join(" ")));
+  for (const deniedScope of ["ip", "global"]) {
+    const calls = [];
+    const setup = harness({
+      env: {
+        CP_SIGNUP_OPEN: "true",
+        CP_SIGNUP_TURNSTILE_ENABLED: "true",
+        CP_SIGNUP_TURNSTILE_SECRET_KEY: "server-secret",
+        CP_SIGNUP_DAILY_LIMIT_PER_IP: "5",
+        CP_SIGNUP_DAILY_LIMIT_GLOBAL: "10",
+      },
+      verifyTurnstile: async () => ({ ok: true }),
+      consumeCounter: async (input) => {
+        calls.push(structuredClone(input));
+        const isGlobal = input.scope === "signup-counter:global";
+        return {
+          allowed: deniedScope === "global" ? !isGlobal : isGlobal,
+        };
+      },
+    });
+
+    const response = await setup.runtime.fetch(signupRequest({
+      invite: "",
+      source_ip: "203.0.113.35",
+      turnstile_token: "must-not-leak",
+      consent_terms_version: "terms-2026-08-28",
+      consent_privacy_version: "privacy-2026-08-28",
+    }));
+    assert.equal(response.status, 429);
+    assert.deepEqual(await response.json(), {
+      schema_version: "witself.v0",
+      error: "signup rate limit exceeded",
+    });
+    assert.equal(calls.length, deniedScope === "ip" ? 1 : 2);
+    assert.match(calls[0].scope, SIGNUP_IP_SCOPE_PATTERN);
+    if (deniedScope === "global") {
+      assert.equal(calls[1].scope, "signup-counter:global");
+    }
+    assert.equal(setup.storage.values.has("account-signup"), false);
+    assert.equal(setup.inviteReservations(), 0);
+  }
+  assert.equal(logs.length, 2);
+  assert.equal(logs.some((line) => line.includes(PROVISION)), false);
+  assert.equal(logs.some((line) => line.includes("203.0.113.35")), false);
+  assert.equal(logs.some((line) => line.includes("must-not-leak")), false);
+});
+
+test("an invited request is byte-identical when open signup is enabled", async () => {
+  const closed = harness({ env: { CP_SIGNUP_OPEN: "false" } });
+  const open = harness({ env: { CP_SIGNUP_OPEN: "true" } });
+
+  const closedResponse = await closed.runtime.fetch(signupRequest());
+  const openResponse = await open.runtime.fetch(signupRequest());
+  assert.equal(openResponse.status, closedResponse.status);
+  assert.equal(
+    openResponse.headers.get("Content-Type"),
+    closedResponse.headers.get("Content-Type"),
+  );
+  assert.deepEqual(
+    new Uint8Array(await openResponse.arrayBuffer()),
+    new Uint8Array(await closedResponse.arrayBuffer()),
+  );
+  assert.deepEqual(
+    open.storage.values.get("account-signup"),
+    closed.storage.values.get("account-signup"),
+  );
+  assert.deepEqual(open.service.calls, closed.service.calls);
+  assert.deepEqual(open.target.calls, closed.target.calls);
+  assert.equal(open.inviteReservations(), closed.inviteReservations());
+  assert.equal(open.placements(), closed.placements());
+});
+
 test("invalid Turnstile requests return the safe challenge URL before invite use", async () => {
   let verifications = 0;
   const setup = harness({

@@ -1436,7 +1436,12 @@ POST /v1/accounts/{account_id}:close
 
 - `POST /v1/accounts` creates a managed-service customer account
   (`witself account create`); `GET`/`PATCH /v1/accounts/{account_id}` back
-  `witself account show` and `witself account update`.
+  `witself account show` and `witself account update`. The `invite` is optional
+  only when the exact committed `CP_SIGNUP_OPEN=true` gate is active. An
+  invite-less request must provide `turnstile_token` and both
+  `consent_terms_version` and `consent_privacy_version`; it fails closed with a
+  value-free `503` unless Turnstile and both positive daily limits are fully
+  configured. Invite-carrying requests retain the established invite path.
   `turnstile_token` is an optional request-body string and is deliberately
   excluded from the durable request fingerprint. When Turnstile is enabled, a
   missing, invalid, or duplicate token returns `403` with a public
@@ -1447,10 +1452,11 @@ POST /v1/accounts/{account_id}:close
   state. An ambiguous counter retry reuses its checkpointed hashed IP scope and
   any committed allowance marker even when the source network changes; an
   initialized provision resumes without repeating these controls.
-  `consent_terms_version` and `consent_privacy_version` are optional
+  `consent_terms_version` and `consent_privacy_version` are optional for the
+  established invite path and required for an invite-less open signup. They are
   request-body strings (both-or-neither; 1–64 ASCII label characters, starting
-  with an alphanumeric and otherwise limited to alphanumerics, dot,
-  underscore, and hyphen) recording dark ToS/privacy consent. Unlike
+  with an alphanumeric and otherwise limited to alphanumerics, dot, underscore,
+  and hyphen) recording dark ToS/privacy consent. Unlike
   `turnstile_token`, present consent IS included in the durable request
   fingerprint — a retry with drifted consent is refused as a different
   request — and the versions are stored on the account row at creation with
@@ -1459,8 +1465,8 @@ POST /v1/accounts/{account_id}:close
   `recorded_consent_terms_version` and `recorded_consent_privacy_version` as
   strings or `null`; a consentful provision succeeds only when both echo the
   submitted labels exactly, and the control plane fails closed when either
-  echo is absent or differs. A consent-less request leaves every stored and
-  hashed byte identical to today.
+  echo is absent or differs. A consent-less request on the established
+  invite-carrying path leaves every stored and hashed byte identical to today.
 - `GET /v1/accounts/{account_id}/members` lists human operators/admins
   (`witself account members`).
 - `POST /v1/accounts/{account_id}/members:invite` invites a human

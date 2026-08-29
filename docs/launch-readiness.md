@@ -50,19 +50,23 @@ PII-collecting launch:
    nullable consent columns, and consent ships behind the optional
    `--accept-terms` CLI flag / `consent_terms_version` +
    `consent_privacy_version` API fields end to end (fingerprint-bound,
-   audited as `account.consent.recorded`; consent-less signups are
-   byte-identical to before). Activation = CLI default-on + web signup once
-   the legal text is finalized (still 🔑).
-3. **Signup is invite-gated and CLI-only** — `accountCreate` requires `--invite`;
-   there is no web signup. "General self-service" needs a **product decision (🔑):**
-   open signup (relax `--invite`) vs waitlist, and web entry point vs CLI-only.
-   Claude builds the chosen path.
+   audited as `account.consent.recorded`; consent-less invite signups are
+   byte-identical to before). Activation = CLI default-on + web signup once the
+   legal text is finalized (still 🔑).
+3. ✅ **Open-signup path BUILT DARK** behind committed
+   `CP_SIGNUP_OPEN=false`. Invite-less requests fail closed against a missing
+   Turnstile enablement/secret or non-positive per-IP/global daily limits, then
+   require a valid challenge, both quota allowances, and both consent fields.
+   Remaining 🔑: stage the runtime Turnstile values, land one reviewed
+   activation PR that pins the chosen positive limits and flips
+   `CP_SIGNUP_OPEN=true`, and decide the web entry point. CLI-first works today.
 4. **Open-signup abuse controls landed dark** — Turnstile, per-IP and global
    Durable Object daily counters, and general/signup edge throttles are
    implemented. The committed daily limits are `0` and all three Turnstile
    secrets are absent. Enablement is keyed: 🔑 mint the `self.witwave.ai`
-   widget, provide its site and secret keys, choose both daily limits, then land
-   the exact template/verifier activation PR. See
+   widget, stage its runtime Turnstile values, choose both daily limits, then
+   land the single activation PR that pins those limits and flips
+   `CP_SIGNUP_OPEN`. See
    [Signup Abuse Hardening](signup-abuse-hardening.md).
 5. ✅ **Closed-account erasure is implemented dark** — posture B gives every
    closed account a 30-day reopen/export grace window, then purges its stored
@@ -132,11 +136,12 @@ adversarially reviewed, gated, merged. Roughly in dependency order:
 Grouped by the interaction required. Claude does everything up to these.
 
 **Product / legal decisions**
-- Open self-service signup (relax `--invite`; web entry point vs CLI-only).
+- Decide the web signup entry point (CLI-first already works).
 - Approve + publish legal pages after legal review.
 - Signup abuse enablement: mint the `self.witwave.ai` Turnstile widget, provide
-  its site and secret keys, and choose the per-IP and global daily limits; the
-  follow-up template/verifier PR pins those exact values before activation.
+  and stage its runtime values, and choose the per-IP and global daily limits;
+  one reviewed activation PR pins those exact values and flips
+  `CP_SIGNUP_OPEN=true`.
 - Account-purge enablement: switch the default-off purge worker to preview,
   review its count-only results, then flip it to enforce.
 - Status/incident-comms channel.
