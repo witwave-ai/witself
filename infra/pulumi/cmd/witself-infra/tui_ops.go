@@ -208,10 +208,7 @@ func (o *opRun) snapshot(n int) []string {
 // operator's mental model ("I'm running from code, so my ops run from
 // code too").
 func startOp(program *tea.Program, kind opKind, cell string, configPath string) (*opRun, error) {
-	args := []string{kind.verb(), "-cell", cell}
-	if configPath != "" {
-		args = append(args, "-config", configPath)
-	}
+	args := opCommandArgs(kind, cell, configPath)
 	// Auto-bootstrap the state backend for preview/up. First-run cells
 	// otherwise fail with "state backend does not exist — run bootstrap
 	// first," which is a jarring detour from the dashboard for what's
@@ -257,6 +254,20 @@ func startOp(program *tea.Program, kind opKind, cell string, configPath string) 
 	go op.pump(stderr)
 	go op.wait()
 	return op, nil
+}
+
+func opCommandArgs(kind opKind, cell, configPath string) []string {
+	args := []string{kind.verb(), "-cell", cell}
+	if configPath != "" {
+		args = append(args, "-config", configPath)
+	}
+	if kind == opDestroy {
+		// The dashboard already collected an exact typed-cell confirmation.
+		// Its child has no terminal stdin, so carry that confirmation through
+		// the CLI's mandatory non-interactive gate.
+		args = append(args, "--yes-cell="+cell)
+	}
+	return args
 }
 
 // openOpLog creates the log file for one op run. Returns the resolved
@@ -349,17 +360,12 @@ type opDoneMsg struct {
 	err  error
 }
 
-// destroyConfirmWord is what the operator types (plus enter) to fire
-// a destroy. The dialog title already names the target cell; the
-// typed word guards against reflex keypresses, not wrong-cell aim.
-const destroyConfirmWord = "yes"
-
 // confirmDialog names what the operator is being asked to confirm.
 type confirmDialog struct {
 	kind        opKind
 	cell        string
 	previewSeen bool   // for up: a successful preview must precede
-	typed       string // for destroy: the operator must type destroyConfirmWord
+	typed       string // for destroy: the operator must type cell exactly
 	err         string // shown on a typed mismatch
 }
 
@@ -383,7 +389,7 @@ func (c *confirmDialog) canConfirm() bool {
 	case opUp:
 		return c.previewSeen
 	case opDestroy:
-		return c.typed == destroyConfirmWord
+		return c.typed == c.cell
 	}
 	return true
 }
@@ -401,7 +407,7 @@ func (c *confirmDialog) render() string {
 		}
 	case opDestroy:
 		b.WriteString("destroy will DRAIN the cell, EVACUATE every account to R2, then DELETE the fleet entry and tear down every cloud resource.\n\n")
-		b.WriteString("type `" + destroyConfirmWord + "` then enter to confirm:\n")
+		b.WriteString("type `" + c.cell + "` then enter to confirm:\n")
 		b.WriteString("  " + c.typed + "▏\n")
 		// Always reserve the err slot so toggling it on/off doesn't
 		// change the dialog height — otherwise overlayCenter recenters

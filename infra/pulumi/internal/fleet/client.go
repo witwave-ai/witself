@@ -542,6 +542,39 @@ type PlacementStatusCell struct {
 	HasProvisionToken bool    `json:"has_provision_token"`
 	AccountCount      int     `json:"account_count"`
 	ArchivedCount     int     `json:"archived_count"`
+	accountCountSet   bool
+	archivedCountSet  bool
+}
+
+// UnmarshalJSON records whether both destructive-safety counts were actually
+// present. Plain int fields alone cannot distinguish an explicit zero from an
+// older or malformed response that omitted the field and decoded to zero.
+func (c *PlacementStatusCell) UnmarshalJSON(data []byte) error {
+	type withoutMethods PlacementStatusCell
+	*c = PlacementStatusCell{}
+	wire := struct {
+		*withoutMethods
+		AccountCount  *int `json:"account_count"`
+		ArchivedCount *int `json:"archived_count"`
+	}{withoutMethods: (*withoutMethods)(c)}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if wire.AccountCount != nil {
+		c.AccountCount = *wire.AccountCount
+		c.accountCountSet = true
+	}
+	if wire.ArchivedCount != nil {
+		c.ArchivedCount = *wire.ArchivedCount
+		c.archivedCountSet = true
+	}
+	return nil
+}
+
+// ReportsAccountCounts is true only when the control plane explicitly sent
+// both per-cell counts, including explicit zeroes.
+func (c PlacementStatusCell) ReportsAccountCounts() bool {
+	return c.accountCountSet && c.archivedCountSet
 }
 
 // PlacementArchiveStatus summarizes the R2 archive: how many accounts

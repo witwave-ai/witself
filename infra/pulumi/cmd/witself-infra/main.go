@@ -207,6 +207,14 @@ flags:
   -destroy-accounts  with destroy: SKIP evacuation and force-purge this
                   cell's accounts from the control-plane directory. The
                   data dies with the cell — sandbox/development override
+  -allow-unknown-cell  with destroy: bypass phantom-stack protection when
+                  the target cell is absent from the current inventory
+  -force-with-accounts  with destroy: proceed after placement status reports
+                  live or archived accounts still assigned to the target
+  -skip-account-check  with destroy: bypass placement verification when the
+                  control plane is unavailable (also required for self-host)
+  -yes-cell NAME  non-interactive destroy confirmation; NAME must exactly
+                  match the target cell
   -restore-archives  with up: after the cell registers, restore every
                   archived account whose region matches this cell's region
                   from Cloudflare R2. Loops until none remain. Requires
@@ -319,6 +327,10 @@ func run(args []string) error {
 	controlPlane := fs.String("control-plane", "", "fleet control plane URL (up registers the cell; destroy drains+removes it)")
 	fleetTokenFile := fs.String("fleet-token-file", "", "fleet token file (default: WITSELF_FLEET_TOKEN, then ~/.witself/tokens/fleet.token)")
 	destroyAccounts := fs.Bool("destroy-accounts", false, "with destroy: SKIP evacuation and force-purge accounts (they die with the cell)")
+	allowUnknownCell := fs.Bool("allow-unknown-cell", false, "with destroy: bypass phantom-stack protection for a cell absent from inventory")
+	forceWithAccounts := fs.Bool("force-with-accounts", false, "with destroy: proceed when live or archived accounts are still placed on the cell")
+	skipAccountCheck := fs.Bool("skip-account-check", false, "with destroy: bypass the fail-closed control-plane account check")
+	yesCell := fs.String("yes-cell", "", "non-interactive destroy confirmation; must exactly match the target cell")
 	restoreArchives := fs.Bool("restore-archives", false, "with up: pull every archived account in this cell's region from R2 after registration")
 	restoreAnyRegion := fs.Bool("restore-any-region", false, "with -restore-archives: pull every archived account from R2, ignoring stored region")
 	rebalanceBatch := fs.Int("batch", 1, "with rebalance: accounts to move per control-plane call")
@@ -373,17 +385,29 @@ func run(args []string) error {
 	if cmd == "dashboard" || cmd == "tui" {
 		return runDashboard(fs)
 	}
+	if cmd != "destroy" {
+		switch {
+		case *allowUnknownCell:
+			return fmt.Errorf("-allow-unknown-cell is only valid with `destroy`")
+		case *forceWithAccounts:
+			return fmt.Errorf("-force-with-accounts is only valid with `destroy`")
+		case *skipAccountCheck:
+			return fmt.Errorf("-skip-account-check is only valid with `destroy`")
+		case *yesCell != "":
+			return fmt.Errorf("-yes-cell is only valid with `destroy`")
+		}
+	}
 	// Identity pre-flight: any command that will TOUCH cloud state
 	// runs whoami first when the cell has expected_account_id / tenant
 	// pins in its security_context. A wrong profile that resolves to a
-	// different account must fail HERE, before EnsureAWSSession or a
-	// stack Upsert lets a fresh state backend appear in the wrong
-	// account. Only fires for -cell (bare-flag invocations preserve
-	// today's zero-safety-net behavior; the safety net is opt-in via
-	// the config file).
+	// different account must fail before EnsureAWSSession or a stack Upsert
+	// lets a fresh state backend appear in the wrong account. Destroy defers
+	// this provider read until its three safety guards pass below. Only fires
+	// for -cell (bare-flag invocations preserve today's zero-safety-net
+	// behavior; the safety net is opt-in via the config file).
 	if *cellSelector != "" {
 		switch cmd {
-		case "up", "preview", "destroy", "refresh", "bootstrap":
+		case "up", "preview", "refresh", "bootstrap":
 			// Civo bootstrap initializes only local Pulumi state. It
 			// performs no provider call, so it must not require a token.
 			if cmd != "bootstrap" || *cloud != "civo" {
@@ -469,7 +493,7 @@ func run(args []string) error {
 				return fmt.Errorf("-civo-admin-cidr %q is not a valid CIDR", *civoAdminCIDR)
 			}
 		}
-		if cmd != "outputs" && cmd != "cell-health" && cmd != "bootstrap" {
+		if cmd != "outputs" && cmd != "cell-health" && cmd != "bootstrap" && cmd != "destroy" {
 			token, err := resolveCivoToken(*civoTokenFile)
 			if err != nil {
 				return err
@@ -512,7 +536,7 @@ func run(args []string) error {
 	// operation doesn't fail on credentials mid-flight. Read-only verbs
 	// (outputs, cell-health) skip it — a background health probe must
 	// never pop an interactive login.
-	if *cloud == "aws" && cmd != "outputs" && cmd != "cell-health" {
+	if *cloud == "aws" && cmd != "outputs" && cmd != "cell-health" && cmd != "destroy" {
 		backend.EnsureAWSSession(context.Background(), *awsProfile)
 	}
 
@@ -534,6 +558,52 @@ func run(args []string) error {
 
 	// Compose the cell name: it is the Pulumi stack name and the resource prefix.
 	cellName := strings.Join([]string{*cloud, *accountAlias, regionCode, *role}, "-")
+	ctx := context.Background()
+	if cmd == "destroy" {
+		if err := runDestroySafety(ctx, cellName, destroySafetyOptions{
+			ConfigPath:        *configPath,
+			ControlPlane:      *controlPlane,
+			FleetTokenFile:    *fleetTokenFile,
+			AllowUnknownCell:  *allowUnknownCell,
+			ForceWithAccounts: *forceWithAccounts,
+			SkipAccountCheck:  *skipAccountCheck,
+			YesCell:           *yesCell,
+			Input:             os.Stdin,
+			Output:            os.Stderr,
+			Interactive:       stdinIsTerminal(os.Stdin),
+		}); err != nil {
+			return err
+		}
+
+		// Destructive operations defer provider identity work until every
+		// destroy-safety gate has passed. Other provisioning verbs retain their
+		// earlier identity preflight above.
+		if *cellSelector != "" {
+			if err := requireIdentityMatch(ctx, *cellSelector, *configPath); err != nil {
+				return err
+			}
+		}
+		if *cloud == "civo" && *civoExpectedAccountID != "" && *cellSelector == "" {
+			token, err := resolveCivoToken(*civoTokenFile)
+			if err != nil {
+				return err
+			}
+			expected := *civoExpectedAccountID
+			id, err := whoamiCivoWithToken(ctx, cellEntry{
+				Region:          region,
+				SecurityContext: &securityContext{Civo: &civoContext{ExpectedAccountID: &expected}},
+			}, token)
+			if err != nil {
+				return err
+			}
+			if !id.OK {
+				return fmt.Errorf("%s", strings.Join(id.Notes, "; "))
+			}
+		}
+		if *cloud == "aws" {
+			backend.EnsureAWSSession(ctx, *awsProfile)
+		}
+	}
 	if *gitopsValuesPath == "" {
 		*gitopsValuesPath = cell.DefaultGitopsValuesPath(cellName)
 	}
@@ -541,8 +611,6 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve default bootstrap token path: %w", err)
 	}
-
-	ctx := context.Background()
 
 	// A profile NAME is not a secret, so it is safe to pass as a flag; when
 	// omitted, the AWS provider uses the ambient credential chain (AWS_PROFILE
