@@ -14,6 +14,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,6 +28,23 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
 )
 
+// The dashboard's cell-health child has six sequential operations with their
+// own timeout (outputs, database, client setup, readyz, nodes, and workloads).
+// Two extra slots bound stack setup and process teardown without turning the
+// per-probe setting into an incorrectly short whole-command deadline.
+const cellHealthCommandProbeSlots = 8
+
+func cellHealthCommandTimeout(perProbe time.Duration) time.Duration {
+	if perProbe <= 0 {
+		perProbe = defaultHealthProbeTimeout
+	}
+	const maxDuration = time.Duration(1<<63 - 1)
+	if perProbe > maxDuration/cellHealthCommandProbeSlots {
+		return maxDuration
+	}
+	return perProbe * cellHealthCommandProbeSlots
+}
+
 // healthNames is the wire form of each level — the JSON the CLI emits
 // and the dashboard parses uses these strings, not the int values.
 var healthNames = map[healthLevel]string{
@@ -34,6 +52,7 @@ var healthNames = map[healthLevel]string{
 	healthGood:     "good",
 	healthWarn:     "warn",
 	healthDegraded: "degraded",
+	healthTimeout:  "timeout",
 	healthBad:      "bad",
 }
 
@@ -98,53 +117,96 @@ type argoClusterProber interface {
 // process for a probe that couldn't run — an unreachable subsystem is
 // data (level bad/unknown), not an error — so the dashboard always
 // gets a parseable report.
-func printCellHealth(ctx context.Context, stack auto.Stack, cloud, region, awsProfile string, argocd bool) error {
+func printCellHealth(ctx context.Context, stack auto.Stack, cloud, region, awsProfile string, argocd bool, timeout time.Duration) error {
 	report := cellHealthReport{
 		Kubernetes: sh(healthUnknown, "not probed"),
 		Database:   sh(healthUnknown, "not probed"),
 		Argo:       sh(healthUnknown, "argocd not enabled for this cell"),
 	}
 
-	outs, err := stack.Outputs(ctx)
+	outputsCtx, cancelOutputs := context.WithTimeout(ctx, timeout)
+	outs, err := stack.Outputs(outputsCtx)
+	outputsErr := outputsCtx.Err()
+	cancelOutputs()
 	if err != nil {
+		if errors.Is(outputsErr, context.DeadlineExceeded) {
+			timedOut := timeoutHealth("stack outputs", timeout)
+			report.Kubernetes = timedOut
+			report.Database = timedOut
+			if argocd {
+				report.Argo = timedOut
+			}
+			return emitHealth(report)
+		}
 		report.Kubernetes = sh(healthBad, "read stack outputs: "+oneLine(err.Error()))
 		return emitHealth(report)
 	}
 
 	// Database status — available for every cloud (provider status API),
 	// independent of the cluster path.
-	report.Database = probeDatabase(ctx, cloud, region, awsProfile, outs)
+	databaseCtx, cancelDatabase := context.WithTimeout(ctx, timeout)
+	report.Database = probeDatabase(databaseCtx, cloud, region, awsProfile, outs)
+	databaseErr := databaseCtx.Err()
+	cancelDatabase()
+	if errors.Is(databaseErr, context.DeadlineExceeded) {
+		report.Database = timeoutHealth("database probe", timeout)
+	}
 
 	var prober argoClusterProber
 	var namespace string
+	clientCtx, cancelClient := context.WithTimeout(ctx, timeout)
 	switch cloud {
 	case "gcp":
 		prober, namespace, err = newGCPArgoListerFromOutputs(outs)
 	case "azure":
-		prober, namespace, err = newAzureArgoListerFromOutputs(ctx, outs)
+		prober, namespace, err = newAzureArgoListerFromOutputs(clientCtx, outs)
 	case "aws":
-		prober, namespace, err = newAWSArgoListerFromOutputs(ctx, outs, region, awsProfile)
+		prober, namespace, err = newAWSArgoListerFromOutputs(clientCtx, outs, region, awsProfile)
 	case "civo":
 		prober, namespace, err = newCivoArgoListerFromOutputs(outs)
 	default:
+		cancelClient()
 		report.Kubernetes = sh(healthUnknown, "cluster probe not yet wired for "+cloud)
 		return emitHealth(report)
 	}
+	clientErr := clientCtx.Err()
+	cancelClient()
 	if err != nil {
+		if errors.Is(clientErr, context.DeadlineExceeded) {
+			report.Kubernetes = timeoutHealth("cluster client", timeout)
+			if argocd {
+				report.Argo = timeoutHealth("workload probe", timeout)
+			}
+			return emitHealth(report)
+		}
 		report.Kubernetes = sh(healthBad, "build cluster client: "+oneLine(err.Error()))
 		return emitHealth(report)
 	}
 
 	// Kubernetes: apiserver readiness, with a node ready/total gauge.
 	k8s := sh(healthGood, "apiserver ready")
-	if ready, why := prober.clusterReadyz(ctx); !ready {
+	readyCtx, cancelReady := context.WithTimeout(ctx, timeout)
+	ready, why := prober.clusterReadyz(readyCtx)
+	readyErr := readyCtx.Err()
+	cancelReady()
+	if errors.Is(readyErr, context.DeadlineExceeded) {
+		k8s = timeoutHealth("Kubernetes readiness probe", timeout)
+	} else if !ready {
 		if why == "" {
 			k8s = sh(healthBad, "apiserver unreachable")
 		} else {
 			k8s = sh(healthDegraded, oneLine(why))
 		}
 	}
-	if total, nready, ok := prober.clusterNodes(ctx); ok {
+	nodesCtx, cancelNodes := context.WithTimeout(ctx, timeout)
+	total, nready, nodesOK := prober.clusterNodes(nodesCtx)
+	nodesErr := nodesCtx.Err()
+	cancelNodes()
+	if errors.Is(nodesErr, context.DeadlineExceeded) {
+		if k8s.Level != healthBad {
+			k8s = timeoutHealth("Kubernetes node probe", timeout)
+		}
+	} else if nodesOK {
 		k8s.Have, k8s.Total = nready, total
 		if k8s.Level == healthGood {
 			// Cluster is up but a node is down → degrade and say so. The
@@ -165,8 +227,16 @@ func printCellHealth(ctx context.Context, stack auto.Stack, cloud, region, awsPr
 
 	// Workloads: Argo application health (only when the cell runs Argo).
 	if argocd {
-		apps, aerr := prober.ListArgoApplications(ctx, namespace)
-		if aerr != nil {
+		argoCtx, cancelArgo := context.WithTimeout(ctx, timeout)
+		apps, aerr := prober.ListArgoApplications(argoCtx, namespace)
+		argoErr := argoCtx.Err()
+		cancelArgo()
+		if errors.Is(argoErr, context.DeadlineExceeded) {
+			report.Argo = timeoutHealth("workload probe", timeout)
+			if cloud == "civo" {
+				report.Database = timeoutHealth("PostgreSQL health probe", timeout)
+			}
+		} else if aerr != nil {
 			report.Argo = sh(healthBad, oneLine(aerr.Error()))
 		} else {
 			report.Argo = argoHealth(apps)
@@ -200,6 +270,10 @@ func civoPostgresArgoHealth(apps []argoApplication) subsystemHealth {
 // sh is a keyed-literal shorthand for a countless subsystem line.
 func sh(l healthLevel, detail string) subsystemHealth {
 	return subsystemHealth{Level: l, Detail: detail}
+}
+
+func timeoutHealth(probe string, timeout time.Duration) subsystemHealth {
+	return sh(healthTimeout, fmt.Sprintf("%s timed out after %s", probe, timeout))
 }
 
 func emitHealth(r cellHealthReport) error {

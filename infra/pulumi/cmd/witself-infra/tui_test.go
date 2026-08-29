@@ -42,6 +42,34 @@ type fakeSource struct {
 	rec       *fakeRunnerRecorder
 }
 
+// deadlineProbeSource models an endpoint (and the heavy child probe) that
+// never completes on its own. It returns only when the command's context
+// deadline fires. The fast cell proves one hung target does not hold up a
+// sibling command.
+type deadlineProbeSource struct {
+	fakeSource
+	started chan string
+}
+
+func (f deadlineProbeSource) probe(ctx context.Context, _, cell string) (reachResult, error) {
+	if cell == "fast" {
+		return reachResult{ok: true, version: "test"}, nil
+	}
+	if f.started != nil {
+		f.started <- "reach:" + cell
+	}
+	<-ctx.Done()
+	return reachResult{}, fmt.Errorf("blocked reach probe: %w", ctx.Err())
+}
+
+func (f deadlineProbeSource) probeHealth(ctx context.Context, _, cell string) (cellHealthReport, error) {
+	if f.started != nil {
+		f.started <- "health:" + cell
+	}
+	<-ctx.Done()
+	return cellHealthReport{}, fmt.Errorf("blocked health probe: %w", ctx.Err())
+}
+
 // fakeRunnerRecorder captures writes across the by-value fakeSource
 // copies the model holds.
 type fakeRunnerRecorder struct {
@@ -394,6 +422,105 @@ func TestReachProbeFiresAndRenders(t *testing.T) {
 	}
 }
 
+func TestDashboardProbeCommandsTimeoutIndependentlyAndClearInflight(t *testing.T) {
+	const timeout = 100 * time.Millisecond
+	started := make(chan string, 2)
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	m := dashboardModel{
+		ctx:          context.Background(),
+		cli:          deadlineProbeSource{started: started},
+		probeTimeout: timeout,
+		now:          func() time.Time { return now },
+		reach:        map[string]cellReach{"hung": {inflight: true}},
+		health:       map[string]cellHealthState{"hung": {inflight: true}},
+	}
+
+	// Start the hung target first, then prove a sibling command can finish
+	// while that target is still waiting for its own deadline.
+	hungReach := make(chan probeResultMsg, 1)
+	go func() {
+		hungReach <- m.probeCmd("hung")().(probeResultMsg)
+	}()
+	if got := <-started; got != "reach:hung" {
+		t.Fatalf("started probe = %q", got)
+	}
+	fast := m.probeCmd("fast")().(probeResultMsg)
+	if fast.err != nil || !fast.res.ok {
+		t.Fatalf("fast sibling = %#v, err %v", fast.res, fast.err)
+	}
+
+	var reachMsg probeResultMsg
+	select {
+	case reachMsg = <-hungReach:
+	case <-time.After(2 * time.Second):
+		t.Fatal("hung reach probe did not return after its deadline")
+	}
+	if !errors.Is(reachMsg.err, context.DeadlineExceeded) {
+		t.Fatalf("reach error = %v, want deadline", reachMsg.err)
+	}
+	next, _ := m.Update(reachMsg)
+	m = next.(dashboardModel)
+	if m.reach["hung"].inflight {
+		t.Fatal("timed-out reach result must clear inflight")
+	}
+	if lvl, detail := m.cellReachHealth(cellState{name: "hung"}); lvl != healthTimeout || !strings.Contains(detail, "timeout after 100ms") {
+		t.Fatalf("reach timeout health = %d / %q", lvl, detail)
+	}
+
+	hungHealth := make(chan healthResultMsg, 1)
+	go func() {
+		hungHealth <- m.healthCmd("hung")().(healthResultMsg)
+	}()
+	if got := <-started; got != "health:hung" {
+		t.Fatalf("started probe = %q", got)
+	}
+	var healthMsg healthResultMsg
+	select {
+	case healthMsg = <-hungHealth:
+	case <-time.After(2 * time.Second):
+		t.Fatal("hung health probe did not return after its deadline")
+	}
+	if !errors.Is(healthMsg.err, context.DeadlineExceeded) {
+		t.Fatalf("health error = %v, want deadline", healthMsg.err)
+	}
+	next, _ = m.Update(healthMsg)
+	m = next.(dashboardModel)
+	if m.health["hung"].inflight {
+		t.Fatal("timed-out health result must clear inflight")
+	}
+	sh := m.cellSubsystem(cellState{name: "hung"}, func(cellHealthReport) subsystemHealth {
+		return subsystemHealth{Level: healthGood, Detail: "unexpected"}
+	})
+	if sh.Level != healthTimeout || !strings.Contains(sh.Detail, "timeout after 800ms") {
+		t.Fatalf("subsystem timeout health = %#v", sh)
+	}
+}
+
+func TestDashboardProbeTimeoutDefault(t *testing.T) {
+	if got := (dashboardModel{}).resolvedProbeTimeout(); got != defaultHealthProbeTimeout {
+		t.Fatalf("zero-value timeout = %s, want %s", got, defaultHealthProbeTimeout)
+	}
+	if got := (dashboardModel{probeTimeout: 17 * time.Millisecond}).resolvedProbeTimeout(); got != 17*time.Millisecond {
+		t.Fatalf("configured timeout = %s", got)
+	}
+	if got := cellHealthCommandTimeout(17 * time.Millisecond); got != 136*time.Millisecond {
+		t.Fatalf("aggregate cell-health timeout = %s", got)
+	}
+}
+
+func TestControlPlaneHeaderRendersTimeoutDistinctly(t *testing.T) {
+	m := dashboardModel{controlPlanes: map[string]controlPlaneInfo{
+		"https://cp.test": {url: "https://cp.test", err: fmt.Errorf("list cells: %w", context.DeadlineExceeded)},
+	}}
+	v := stripANSIForTest(strings.Join(m.renderCPContext(row{kind: rowHeader, cp: "https://cp.test"}, 120), "\n"))
+	if !strings.Contains(v, "timeout") {
+		t.Fatalf("control-plane timeout label missing: %q", v)
+	}
+	if strings.Contains(v, "unreachable") {
+		t.Fatalf("control-plane timeout must not be conflated with unreachable: %q", v)
+	}
+}
+
 // TestHealthReportProbeAndRender pins the subsystem lines: landing on
 // the Health tab kicks the cell-health subprocess, and the returned
 // report drives the Kubernetes/Database/Workloads lines.
@@ -474,6 +601,15 @@ func TestHealthBoardVisuals(t *testing.T) {
 	}
 	if got := rollupLevel(healthUnknown, healthUnknown); got != healthUnknown {
 		t.Fatalf("all-unknown rollup must stay unknown, got %d", got)
+	}
+	if got := rollupLevel(healthGood, healthDegraded, healthTimeout); got != healthTimeout {
+		t.Fatalf("timeout must outrank degraded, got %d", got)
+	}
+	if got := rollupLevel(healthTimeout, healthBad); got != healthBad {
+		t.Fatalf("confirmed down must outrank timeout, got %d", got)
+	}
+	if got := overallWord(healthTimeout); got != "timed out" {
+		t.Fatalf("timeout verdict = %q", got)
 	}
 
 	// Pip strip: one dot per subsystem (6 rows) appears in the board.
@@ -659,8 +795,10 @@ func TestReachHealthLevels(t *testing.T) {
 	}{
 		{"unprobed", cellReach{}, healthUnknown},
 		{"checking", cellReach{inflight: true}, healthUnknown},
+		{"timeout", cellReach{probed: time.Now(), err: fmt.Errorf("request: %w", context.DeadlineExceeded)}, healthTimeout},
 		{"transport error", cellReach{probed: time.Now(), err: errFake("no route")}, healthBad},
 		{"reachable", cellReach{probed: time.Now(), res: reachResult{ok: true}}, healthGood},
+		{"control-plane upstream timeout", cellReach{probed: time.Now(), res: reachResult{reason: "The operation timed out"}}, healthTimeout},
 		{"not serving", cellReach{probed: time.Now(), res: reachResult{ok: false, reason: "TLS handshake"}}, healthDegraded},
 	}
 	for _, tc := range cases {
