@@ -111,14 +111,16 @@
     // The support@ bridge remains undiscoverable until its independently
     // provisioned bearer and every cell-side route are ready.
     "CP_SUPPORT_EMAIL_INTAKE_ENABLED": "false",
-    // Open signup is disabled at the exact value false. Flipping it is a
-    // reviewed activation step per docs/signup-abuse-hardening.md.
-    "CP_SIGNUP_OPEN": "false",
-    // Durable signup quotas are independently disabled at the exact value 0.
-    // Positive integer limits may be selected only as part of the keyed open-
-    // signup activation procedure in docs/signup-abuse-hardening.md.
-    "CP_SIGNUP_DAILY_LIMIT_PER_IP": "0",
-    "CP_SIGNUP_DAILY_LIMIT_GLOBAL": "0",
+    // Open self-service signup is ACTIVE (ratified 2026-08-29 per the keyed
+    // procedure in docs/signup-abuse-hardening.md). Invite-less signups
+    // require Turnstile plus the daily quotas below; setting this back to
+    // the exact value false restores the invite-only gate.
+    "CP_SIGNUP_OPEN": "true",
+    // Reviewed daily signup quotas (ratified 2026-08-29): 10 per IP, 500
+    // global. The exact value 0 disables a quota and, with open signup
+    // active, makes every invite-less signup fail closed at render time.
+    "CP_SIGNUP_DAILY_LIMIT_PER_IP": "10",
+    "CP_SIGNUP_DAILY_LIMIT_GLOBAL": "500",
     // Independent technical queue ceilings. Plans, including explicit
     // unlimited overrides, cannot raise these values; a deployment may only
     // lower them below the compiled 8-per-realm / 64-per-account maxima.

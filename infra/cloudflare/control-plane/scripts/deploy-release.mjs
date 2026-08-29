@@ -59,6 +59,8 @@ const SHA256 = /^[0-9a-f]{64}$/;
 // explicitly; anything but the exact literal keeps the strict full-dark gate.
 const CANONICAL_EMAIL_ACTIVE =
   process.env.CP_DEPLOY_CANONICAL_EMAIL_ACTIVE === "true";
+const SIGNUP_OPEN_ACTIVE =
+  process.env.CP_DEPLOY_SIGNUP_OPEN_ACTIVE === "true";
 
 const CONTROL_PLANE_DARK_BINDINGS = Object.freeze([
   "CP_REALM_EMAIL_CANONICAL_DELIVERY_ENABLED",
@@ -693,7 +695,7 @@ async function deployPrivateReleaseConfig(release, commandEnvironments) {
         reviewedEnvironmentFile: release.reviewedEnvironmentFile,
       },
     ),
-    { canonicalEmailActive: CANONICAL_EMAIL_ACTIVE },
+    { canonicalEmailActive: CANONICAL_EMAIL_ACTIVE, signupOpenActive: SIGNUP_OPEN_ACTIVE },
   );
   const deploy = async (signal) => {
     await withReleaseInputIntegrity(
@@ -983,7 +985,7 @@ export async function main(argv = process.argv.slice(2)) {
           reviewedEnvironmentFile: layout.reviewedEnvironmentFile,
         },
       ),
-      { canonicalEmailActive: CANONICAL_EMAIL_ACTIVE },
+      { canonicalEmailActive: CANONICAL_EMAIL_ACTIVE, signupOpenActive: SIGNUP_OPEN_ACTIVE },
     ),
   });
   return withPrivateDeploymentConfigCleanup(
