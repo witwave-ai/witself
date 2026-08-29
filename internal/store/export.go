@@ -21,6 +21,11 @@ import (
 // survive their cell's decommissioning (accounts live forever).
 var ErrAccountNotExportable = errors.New("account must be suspended (or closed) to export")
 
+// ErrExportSchemaAhead prevents an older server from writing an archive whose
+// explicit projections would omit columns added by the live database schema.
+// The message is intentionally value-free so callers can surface it safely.
+var ErrExportSchemaAhead = errors.New("server binary is older than the database schema; upgrade the server before exporting")
+
 // ErrVaultLifecycleInProgress prevents one vault-key lifecycle from crossing a
 // mutually exclusive operation or a cell move from silently abandoning active
 // enrollment or rotation work. It also fences orphan pending key epochs that
@@ -62,6 +67,25 @@ func SchemaVersion() int {
 		}
 	}
 	return highest
+}
+
+func ensureExportSchemaCompatibleTx(ctx context.Context, tx pgx.Tx) error {
+	var liveSchemaVersion int64
+	if err := tx.QueryRow(ctx, `
+		SELECT coalesce(max(version_id), 0)
+		  FROM (
+		        SELECT DISTINCT ON (version_id)
+		               version_id, is_applied
+		          FROM goose_db_version
+		         ORDER BY version_id, id DESC
+		       ) AS latest_version
+		 WHERE is_applied`).Scan(&liveSchemaVersion); err != nil {
+		return fmt.Errorf("read database schema before export: %w", err)
+	}
+	if liveSchemaVersion > int64(SchemaVersion()) {
+		return ErrExportSchemaAhead
+	}
+	return nil
 }
 
 // ExportAccount streams the account's complete logical archive to w. The
@@ -141,6 +165,9 @@ func (s *Store) exportAccount(
 		return fmt.Errorf("begin export snapshot: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := ensureExportSchemaCompatibleTx(ctx, tx); err != nil {
+		return err
+	}
 	// PostgreSQL's bytea_output setting is role/session configurable. Archives
 	// are a portable wire format, so force the canonical hex representation
 	// instead of allowing a role configured for legacy escape output to produce

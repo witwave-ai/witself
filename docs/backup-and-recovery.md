@@ -535,6 +535,12 @@ closed. It streams all tables from one PostgreSQL `REPEATABLE READ` transaction
 and holds a shared lock on the account row, so a concurrent resume cannot create
 a torn archive.
 
+Before any ordinary, evacuation, or periodic-backup account archive writes
+bytes, the exporter compares the live Goose migration version with the schema
+embedded in its server binary. An out-of-date replica fails closed when the
+database is newer and must be upgraded before retrying, rather than writing a
+lossy archive whose manifest hides columns that replica cannot project.
+
 Local development exports use the same `witself export`/`witself import` paths
 for fixtures, demos, backup, and migration, so the local backend exercises the
 real export contract rather than a parallel format. See
