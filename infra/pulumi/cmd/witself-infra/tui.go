@@ -355,17 +355,18 @@ type dashboardModel struct {
 	now           func() time.Time
 
 	// Slice 4 ops state.
-	program        *tea.Program
-	op             *opRun
-	lastOp         *opRun // the most recently completed op; kept so its tail is still scrollable
-	opsScroll      int    // rows scrolled back from the live tail; 0 = follow
-	pending        *confirmDialog
-	previewSeen    map[string]planEntry // cell → its last passed preview (time + config fingerprint)
-	planPath       string               // persisted plan state; "" disables persistence (tests)
-	configFinger   string               // fingerprint of the loaded config; binds armed plans to it
-	interruptModal bool                 // ctrl+c while op running: keep/cancel/detach
-	spinnerFrame   int                  // advances every spinnerInterval while m.op != nil
-	opGen          int                  // increments on each launchOp; ticks tag their generation
+	program         *tea.Program
+	op              *opRun
+	lastOp          *opRun // the most recently completed op; kept so its tail is still scrollable
+	opsScroll       int    // rows scrolled back from the live tail; 0 = follow
+	pending         *confirmDialog
+	destroyChecking string               // cell whose phantom/account preflight is in flight
+	previewSeen     map[string]planEntry // cell → its last passed preview (time + config fingerprint)
+	planPath        string               // persisted plan state; "" disables persistence (tests)
+	configFinger    string               // fingerprint of the loaded config; binds armed plans to it
+	interruptModal  bool                 // ctrl+c while op running: keep/cancel/detach
+	spinnerFrame    int                  // advances every spinnerInterval while m.op != nil
+	opGen           int                  // increments on each launchOp; ticks tag their generation
 
 	// Context-pane tabs. focus governs which pane the arrow keys drive;
 	// activeTab is global state so it sticks as the operator moves the
@@ -531,6 +532,7 @@ type reachResult struct {
 type cellDataSource interface {
 	load(ctx context.Context, configPath string) (loadResult, error)
 	probe(ctx context.Context, configPath, cell string) (reachResult, error)
+	destroyPreflight(ctx context.Context, configPath, cell string) error
 	// probeHealth runs the cell-health subprocess and returns its
 	// per-subsystem report (Kubernetes / Database / Argo). Heavier than
 	// probe — it selects the Pulumi stack and reaches the cluster — so
@@ -743,6 +745,11 @@ type healthResultMsg struct {
 	err    error
 }
 
+type destroyPreflightMsg struct {
+	cell string
+	err  error
+}
+
 // healthAnimTickMsg drives the "checking…" animation on the Health tab.
 type healthAnimTickMsg struct{ gen int }
 
@@ -829,6 +836,13 @@ func (m dashboardModel) healthCmd(cell string) tea.Cmd {
 	return func() tea.Msg {
 		rep, err := cli.probeHealth(ctx, path, cell)
 		return healthResultMsg{cell: cell, report: rep, err: err}
+	}
+}
+
+func (m dashboardModel) destroyPreflightCmd(cell string) tea.Cmd {
+	ctx, cli, path := m.ctx, m.cli, m.configPath
+	return func() tea.Msg {
+		return destroyPreflightMsg{cell: cell, err: cli.destroyPreflight(ctx, path, cell)}
 	}
 }
 
@@ -1047,6 +1061,26 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.health = map[string]cellHealthState{}
 		}
 		m.health[msg.cell] = cellHealthState{probed: m.now(), report: msg.report, err: msg.err}
+		return m, nil
+	case destroyPreflightMsg:
+		if m.destroyChecking != msg.cell {
+			return m, nil
+		}
+		m.destroyChecking = ""
+		if msg.err != nil {
+			m.status = "destroy refused: " + oneLine(msg.err.Error())
+			return m, nil
+		}
+		if m.op != nil {
+			m.status = "destroy checks passed, but another op started — retry when it finishes"
+			return m, nil
+		}
+		if m.selectedCell() != msg.cell {
+			m.status = "destroy checks passed for " + msg.cell + " — reselect it and press D to confirm"
+			return m, nil
+		}
+		m.pending = startConfirm(opDestroy, msg.cell, false)
+		m.status = "destroy safety checks passed for " + msg.cell + " — exact-name confirmation required"
 		return m, nil
 	case bgProbeTickMsg:
 		return m.backgroundSweep()
@@ -1584,6 +1618,10 @@ func (m dashboardModel) startOpKey(key string) (tea.Model, tea.Cmd) {
 		m.status = "another op is running — wait or ctrl+c to cancel"
 		return m, nil
 	}
+	if m.destroyChecking != "" {
+		m.status = "destroy safety checks are already running for " + m.destroyChecking
+		return m, nil
+	}
 	var kind opKind
 	switch key {
 	case "p":
@@ -1611,25 +1649,31 @@ func (m dashboardModel) startOpKey(key string) (tea.Model, tea.Cmd) {
 	if kind == opPreview {
 		return m.launchOp(kind, cell)
 	}
+	if kind == opDestroy {
+		m.destroyChecking = cell
+		m.status = "checking inventory and account placement for " + cell + "…"
+		return m, m.destroyPreflightCmd(cell)
+	}
 	m.pending = startConfirm(kind, cell, m.planArmed(cell))
 	return m, nil
 }
 
 func (m dashboardModel) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	s := msg.String()
-	// esc / ctrl+c / q always dismiss — operators habitually press q
-	// to quit a dialog, and none of them collide with the destroy
-	// confirmation word ("yes" has no q).
-	if s == "esc" || s == "ctrl+c" || s == "q" {
+	// esc / ctrl+c always dismiss. q still dismisses the up dialog, but it
+	// must remain typeable during destroy because a valid cell name may
+	// contain q.
+	if s == "esc" || s == "ctrl+c" || (s == "q" && m.pending.kind != opDestroy) {
 		m.pending = nil
 		m.status = "confirmation dismissed"
 		return m, nil
 	}
-	// Fire: `y` clears the up-confirm; destroy needs the typed word
-	// plus enter (the extra beat is deliberate for the irreversible
-	// verb). A bare first `y` on destroy falls through to the typing
-	// branch below — canConfirm is false until the word is complete.
-	if (s == "y" || s == "enter") && m.pending.canConfirm() {
+	// Fire: up accepts y/enter after its preview gate. Destroy accepts only
+	// enter after the exact target cell has been typed; no final character
+	// can double as a launch shortcut for the irreversible verb.
+	fire := m.pending.kind == opUp && (s == "y" || s == "enter")
+	fire = fire || m.pending.kind == opDestroy && s == "enter"
+	if fire && m.pending.canConfirm() {
 		kind, cell := m.pending.kind, m.pending.cell
 		m.pending = nil
 		return m.launchOp(kind, cell)
@@ -1643,8 +1687,8 @@ func (m dashboardModel) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case len(s) == 1: // single printable char
 			m.pending.typed += s
 		}
-		if len(m.pending.typed) > 0 && !strings.HasPrefix(destroyConfirmWord, m.pending.typed) {
-			m.pending.err = "type `" + destroyConfirmWord + "` to confirm — esc to cancel"
+		if len(m.pending.typed) > 0 && !strings.HasPrefix(m.pending.cell, m.pending.typed) {
+			m.pending.err = "type `" + m.pending.cell + "` to confirm — esc to cancel"
 		} else {
 			m.pending.err = ""
 		}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -29,6 +30,8 @@ type fakeSource struct {
 	reachErr      error
 	health        cellHealthReport
 	healthErr     error
+	destroyErr    error
+	destroyChecks *int
 
 	// CP-settings fakes. write/run record their inputs on the shared
 	// recorder so tests can assert what was written.
@@ -57,6 +60,13 @@ func (f fakeSource) probe(_ context.Context, _, _ string) (reachResult, error) {
 
 func (f fakeSource) probeHealth(_ context.Context, _, _ string) (cellHealthReport, error) {
 	return f.health, f.healthErr
+}
+
+func (f fakeSource) destroyPreflight(_ context.Context, _, _ string) error {
+	if f.destroyChecks != nil {
+		(*f.destroyChecks)++
+	}
+	return f.destroyErr
 }
 
 func (f fakeSource) readCPConfig(_ context.Context, _, _ string) (cpConfig, error) {
@@ -840,44 +850,79 @@ func TestUpRequiresPreview(t *testing.T) {
 	}
 }
 
-// TestDestroyRequiresTypedYes pins the destroy safety rule: the
-// dialog only becomes confirmable once the operator has typed the
-// confirmation word in full — no single-key shortcut for the
-// irreversible verb.
-func TestDestroyRequiresTypedYes(t *testing.T) {
-	c := startConfirm(opDestroy, "aws-sandbox-usw2-dev", false)
+// TestDestroyRequiresTypedCellName pins the destroy safety rule: the dialog
+// only becomes confirmable once the exact target cell is present in full.
+func TestDestroyRequiresTypedCellName(t *testing.T) {
+	const cellName = "aws-sandbox-usw2-dev"
+	c := startConfirm(opDestroy, cellName, false)
 	if c.canConfirm() {
 		t.Fatal("destroy must not be confirmable with an empty typed field")
 	}
-	c.typed = "ye"
+	c.typed = "aws-sandbox-usw2-de"
 	if c.canConfirm() {
-		t.Fatal("destroy must not be confirmable on a partial word")
+		t.Fatal("destroy must not be confirmable on a partial cell name")
 	}
-	c.typed = destroyConfirmWord
+	c.typed = "yes"
+	if c.canConfirm() {
+		t.Fatal("a generic confirmation word must not confirm a cell destroy")
+	}
+	c.typed = cellName
 	if !c.canConfirm() {
-		t.Fatal("destroy must be confirmable once the word is complete")
-	}
-	// The cell name is NOT the confirmation word anymore.
-	c.typed = "aws-sandbox-usw2-dev"
-	if c.canConfirm() {
-		t.Fatal("typing the cell name must not confirm — the word is `yes`")
+		t.Fatal("destroy must be confirmable once the exact cell name is complete")
 	}
 }
 
-// TestDestroyTypedFlowThroughKeys pins the key-by-key path: y → ye →
-// yes arms the dialog without firing (enter fires), a wrong char sets
-// the inline error, and backspace recovers.
-func TestDestroyTypedFlowThroughKeys(t *testing.T) {
-	states := []cellState{{name: "aws-sandbox-usw2-dev", entry: cellEntry{Cloud: strPtr("aws")}}}
+func TestDestroyDashboardChecksBeforeTypedConfirmation(t *testing.T) {
+	states := []cellState{{name: destroyTestCell}}
+	checks := 0
 	m := seedModel(states, 120, 30)
-	m.pending = startConfirm(opDestroy, "aws-sandbox-usw2-dev", false)
+	m.cli = fakeSource{destroyChecks: &checks}
 
-	type step struct {
-		key     string
-		typed   string
-		hasErr  bool
-		canFire bool
+	next, cmd := m.startOpKey("D")
+	m = next.(dashboardModel)
+	if cmd == nil {
+		t.Fatal("D must start the read-only destroy preflight")
 	}
+	if m.pending != nil {
+		t.Fatal("typed confirmation must not open before inventory/account checks pass")
+	}
+	if m.destroyChecking != destroyTestCell {
+		t.Fatalf("destroy check target = %q", m.destroyChecking)
+	}
+
+	msg := cmd()
+	if checks != 1 {
+		t.Fatalf("destroy preflight calls = %d, want 1", checks)
+	}
+	next, _ = m.Update(msg)
+	m = next.(dashboardModel)
+	if m.pending == nil || m.pending.kind != opDestroy || m.pending.cell != destroyTestCell {
+		t.Fatalf("passed preflight must open exact-cell confirmation: %+v", m.pending)
+	}
+
+	m = seedModel(states, 120, 30)
+	m.cli = fakeSource{destroyErr: errors.New("live-accounts protection refused destroy")}
+	next, cmd = m.startOpKey("D")
+	m = next.(dashboardModel)
+	next, _ = m.Update(cmd())
+	m = next.(dashboardModel)
+	if m.pending != nil {
+		t.Fatal("failed account check must not open confirmation")
+	}
+	if !strings.Contains(m.status, "destroy refused") || !strings.Contains(m.status, "live-accounts protection") {
+		t.Fatalf("refusal status = %q", m.status)
+	}
+}
+
+// TestDestroyTypedFlowThroughKeys pins the key-by-key path: the exact cell
+// arms the dialog without firing, a wrong character sets the inline error,
+// backspace recovers, and q remains typeable in valid cell labels.
+func TestDestroyTypedFlowThroughKeys(t *testing.T) {
+	const cellName = "aws-sandbox-usw2-qa"
+	states := []cellState{{name: cellName, entry: cellEntry{Cloud: strPtr("aws")}}}
+	m := seedModel(states, 120, 30)
+	m.pending = startConfirm(opDestroy, cellName, false)
+
 	press := func(key string) {
 		var msg tea.KeyMsg
 		if key == "backspace" {
@@ -888,31 +933,48 @@ func TestDestroyTypedFlowThroughKeys(t *testing.T) {
 		next, _ := m.handleConfirmKey(msg)
 		m = next.(dashboardModel)
 	}
-	for _, st := range []step{
-		{key: "y", typed: "y", hasErr: false, canFire: false},
-		{key: "e", typed: "ye", hasErr: false, canFire: false},
-		{key: "x", typed: "yex", hasErr: true, canFire: false},
-		{key: "backspace", typed: "ye", hasErr: false, canFire: false},
-		{key: "s", typed: "yes", hasErr: false, canFire: true},
-	} {
-		press(st.key)
+	typed := ""
+	for i, r := range cellName {
+		if i == 3 {
+			press("x")
+			if m.pending == nil || m.pending.err == "" {
+				t.Fatal("wrong character must keep the dialog open and show an error")
+			}
+			press("backspace")
+			if m.pending == nil || m.pending.err != "" || m.pending.typed != typed {
+				t.Fatalf("backspace did not restore the valid prefix: %+v", m.pending)
+			}
+		}
+		key := string(r)
+		press(key)
+		typed += key
 		if m.pending == nil {
-			t.Fatalf("after %q: dialog must stay open until enter", st.key)
+			t.Fatalf("after %q: dialog must stay open until enter", key)
 		}
-		if m.pending.typed != st.typed {
-			t.Fatalf("after %q: typed = %q, want %q", st.key, m.pending.typed, st.typed)
+		if m.pending.typed != typed {
+			t.Fatalf("after %q: typed = %q, want %q", key, m.pending.typed, typed)
 		}
-		if (m.pending.err != "") != st.hasErr {
-			t.Fatalf("after %q: err = %q, wanted hasErr=%t", st.key, m.pending.err, st.hasErr)
+		if m.pending.err != "" {
+			t.Fatalf("after %q: err = %q", key, m.pending.err)
 		}
-		if m.pending.canConfirm() != st.canFire {
-			t.Fatalf("after %q: canConfirm = %t, want %t", st.key, m.pending.canConfirm(), st.canFire)
+		if m.pending.canConfirm() != (typed == cellName) {
+			t.Fatalf("after %q: canConfirm = %t", key, m.pending.canConfirm())
 		}
 	}
-	// q now dismisses destroy too — it's no longer a typing character.
-	press("q")
+	press("esc")
 	if m.pending != nil {
-		t.Fatal("q must dismiss the destroy dialog")
+		t.Fatal("esc must dismiss the destroy dialog")
+	}
+}
+
+func TestDestroyOpArgsCarryExactNonInteractiveConfirmation(t *testing.T) {
+	got := strings.Join(opCommandArgs(opDestroy, destroyTestCell, "/tmp/infra.yaml"), "|")
+	want := "destroy|-cell|" + destroyTestCell + "|-config|/tmp/infra.yaml|--yes-cell=" + destroyTestCell
+	if got != want {
+		t.Fatalf("destroy args = %q, want %q", got, want)
+	}
+	if got := strings.Join(opCommandArgs(opPreview, destroyTestCell, ""), "|"); strings.Contains(got, "yes-cell") {
+		t.Fatalf("preview args unexpectedly carry destroy confirmation: %q", got)
 	}
 }
 
@@ -1787,10 +1849,8 @@ func TestDestroyDialogHeightStableAcrossErr(t *testing.T) {
 	}
 }
 
-// TestConfirmKeysDismissOnQAndCtrlC pins the input-trap fix: pressing
-// q, esc, or ctrl+c during ANY confirmation dismisses the dialog
-// instead of being silently swallowed. Since the destroy confirmation
-// word became `yes`, q is no longer a typing character anywhere.
+// TestConfirmKeysDismissOnQAndCtrlC pins the input-trap fix while preserving
+// q as a valid destroy-confirmation character in canonical cell labels.
 func TestConfirmKeysDismissOnQAndCtrlC(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -1803,7 +1863,7 @@ func TestConfirmKeysDismissOnQAndCtrlC(t *testing.T) {
 		{"up: esc dismisses", opUp, "esc", true},
 		{"destroy: ctrl+c dismisses", opDestroy, "ctrl+c", true},
 		{"destroy: esc dismisses", opDestroy, "esc", true},
-		{"destroy: q dismisses", opDestroy, "q", true},
+		{"destroy: q is typed", opDestroy, "q", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

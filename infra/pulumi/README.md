@@ -422,6 +422,10 @@ control plane forgets them.
 | `-control-plane URL` | `destroy` | drain, evacuate every account to R2, then remove the cell from the fleet before teardown |
 | `-fleet-token-file PATH` | both | read the fleet token from this file (default: `WITSELF_FLEET_TOKEN` env, then `~/.witself/tokens/fleet.token`) |
 | `-destroy-accounts` | `destroy` | with `-control-plane`: SKIP evacuation and force-purge accounts — sandbox/dev override, the data dies with the cell |
+| `--allow-unknown-cell` | `destroy` | bypass the phantom-stack refusal when the exact target is absent from the current inventory |
+| `--force-with-accounts` | `destroy` | proceed after the control plane reports live or archived accounts still placed on the target; does not imply purge |
+| `--skip-account-check` | `destroy` | bypass an unavailable placement-status read; required for an intentional self-host destroy with no control plane |
+| `--yes-cell=NAME` | non-interactive `destroy` | confirm only when `NAME` exactly matches the target cell; interactive runs prompt for the exact name instead |
 | `-restore-archives` | `up` | after registration, restore archived accounts whose stored region matches this cell's region |
 | `-restore-any-region` | `up` | with `-restore-archives`: bypass the provider-region guard for legacy archives; policy-aware hard pins remain authoritative |
 

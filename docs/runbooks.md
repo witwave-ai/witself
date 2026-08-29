@@ -291,6 +291,18 @@ witself-infra destroy \
   -domain cells.witself.witwave.ai
 ```
 
+Destroy safety runs three fail-closed guards in order before provider or Pulumi
+work. First, the exact cell/stack name must exist in the current
+`~/.witself/infra.yaml` inventory; `--allow-unknown-cell` is the explicit
+phantom-stack override. Second, the control plane must report zero live and
+zero archived accounts still placed on that cell; use `--force-with-accounts`
+to acknowledge known nonzero counts, or `--skip-account-check` when placement
+status cannot be checked (including an intentional self-hosted destroy with no
+control plane). Finally, an interactive operator must type the exact cell name;
+a non-interactive invocation must instead pass `--yes-cell=NAME`, with `NAME`
+exactly matching the target. The account flags do not imply `-destroy-accounts`,
+which remains the separate data-purge choice.
+
 You'll see one line per account: `evacuated acc_… from <cell>` for real users,
 `reaped pending acc_… on <cell> (no archive)` for signups that hadn't yet
 verified their email (those die with the cell — incomplete signups are not
