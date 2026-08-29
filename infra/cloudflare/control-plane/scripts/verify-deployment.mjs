@@ -281,9 +281,9 @@ function assertGeneratedConfigContract(config, expectedMain) {
       config.vars.CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM !== "8" ||
       config.vars.CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT !== "64" ||
       config.vars.CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT !== "8" ||
-      config.vars.CP_SIGNUP_DAILY_LIMIT_PER_IP !== "0" ||
-      config.vars.CP_SIGNUP_DAILY_LIMIT_GLOBAL !== "0" ||
-      config.vars.CP_SIGNUP_OPEN !== "false" ||
+      config.vars.CP_SIGNUP_DAILY_LIMIT_PER_IP !== "10" ||
+      config.vars.CP_SIGNUP_DAILY_LIMIT_GLOBAL !== "500" ||
+      config.vars.CP_SIGNUP_OPEN !== "true" ||
       config.vars.CP_SUPPORT_EMAIL_INTAKE_ENABLED !== "false") {
     throw new Error("generated config Worker vars did not match the reviewed contract");
   }
@@ -703,9 +703,9 @@ export function verifyWorkerVersion(version, expected, expectedVersionID, {
     ["CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_REALM", "8"],
     ["CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT", "64"],
     ["CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT", "8"],
-    ["CP_SIGNUP_DAILY_LIMIT_PER_IP", "0"],
-    ["CP_SIGNUP_DAILY_LIMIT_GLOBAL", "0"],
-    ["CP_SIGNUP_OPEN", "false"],
+    ["CP_SIGNUP_DAILY_LIMIT_PER_IP", "10"],
+    ["CP_SIGNUP_DAILY_LIMIT_GLOBAL", "500"],
+    ["CP_SIGNUP_OPEN", "true"],
     ["CP_SUPPORT_EMAIL_INTAKE_ENABLED", "false"],
   ]) {
     exactPlainBinding(bindings, name, value);

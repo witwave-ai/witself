@@ -797,7 +797,7 @@ test("release renderer injects matching immutable container and Worker identity"
   );
   assert.throws(
     () => expectedBuildMetadata(config.replace(
-      '"CP_SIGNUP_DAILY_LIMIT_PER_IP": "0"',
+      '"CP_SIGNUP_DAILY_LIMIT_PER_IP": "10"',
       '"CP_SIGNUP_DAILY_LIMIT_PER_IP": "1"',
     )),
     /Worker vars/,
@@ -805,11 +805,11 @@ test("release renderer injects matching immutable container and Worker identity"
   );
   assert.throws(
     () => expectedBuildMetadata(config.replace(
-      '"CP_SIGNUP_OPEN": "false"',
       '"CP_SIGNUP_OPEN": "true"',
+      '"CP_SIGNUP_OPEN": "false"',
     )),
     /Worker vars/,
-    "release identity stamps must not hide an enabled open-signup gate",
+    "release identity stamps must not hide a silently closed signup gate",
   );
   assert.throws(
     () => expectedBuildMetadata(config.replace(
@@ -950,18 +950,18 @@ test("release renderer injects matching immutable container and Worker identity"
   );
   assert.match(
     config,
-    /"CP_SIGNUP_DAILY_LIMIT_PER_IP"\s*:\s*"0"/,
-    "release config must keep the per-IP durable signup quota disabled",
+    /"CP_SIGNUP_DAILY_LIMIT_PER_IP"\s*:\s*"10"/,
+    "release config must pin the reviewed per-IP daily signup quota",
   );
   assert.match(
     config,
-    /"CP_SIGNUP_DAILY_LIMIT_GLOBAL"\s*:\s*"0"/,
-    "release config must keep the global durable signup quota disabled",
+    /"CP_SIGNUP_DAILY_LIMIT_GLOBAL"\s*:\s*"500"/,
+    "release config must pin the reviewed global daily signup quota",
   );
   assert.match(
     config,
-    /"CP_SIGNUP_OPEN"\s*:\s*"false"/,
-    "release config must keep open signup dark by default",
+    /"CP_SIGNUP_OPEN"\s*:\s*"true"/,
+    "release config must pin the ratified open-signup gate",
   );
   for (const [name, namespaceID, limit, period] of [
     ["PUBLIC_IP_LIMITER", "1002", 300, 60],
@@ -1281,9 +1281,9 @@ function deployedVersion(overrides = {}) {
           ["CP_REALM_EMAIL_ALIAS_MAX_PENDING_PER_ACCOUNT", "64"],
           ["CP_AGENT_EMAIL_CUSTOM_DOMAIN_MAX_OPEN_PER_ACCOUNT", "8"],
           ["CP_AGENT_EMAIL_MANAGED_DELIVERY_ACCOUNT_ALLOWLIST", ""],
-          ["CP_SIGNUP_DAILY_LIMIT_PER_IP", "0"],
-          ["CP_SIGNUP_DAILY_LIMIT_GLOBAL", "0"],
-          ["CP_SIGNUP_OPEN", "false"],
+          ["CP_SIGNUP_DAILY_LIMIT_PER_IP", "10"],
+          ["CP_SIGNUP_DAILY_LIMIT_GLOBAL", "500"],
+          ["CP_SIGNUP_OPEN", "true"],
           ["CP_SUPPORT_EMAIL_INTAKE_ENABLED", "false"],
         ].map(([name, text]) => ({ name, type: "plain_text", text })),
         {
@@ -2150,6 +2150,31 @@ test("dark deployment refuses every persistent activation secret", async () => {
         [{ name, type: "secret_text" }],
         { canonicalEmailActive: true },
       ),
+      new RegExp(name),
+    );
+  }
+  // The open-signup attestation frees exactly the Turnstile trio; the
+  // custom-domain set and the canonical pair stay refused without their own
+  // attestations, and an unattested call still refuses everything.
+  assert.doesNotThrow(() => assertCustomDomainSecretsDark(
+    SIGNUP_TURNSTILE_DARK_SECRET_NAMES.map((name) => ({ name, type: "secret_text" })),
+    { signupOpenActive: true },
+  ));
+  for (const name of [
+    ...CUSTOM_DOMAIN_DARK_SECRET_NAMES,
+    ...CANONICAL_EMAIL_DARK_SECRET_NAMES,
+  ]) {
+    assert.throws(
+      () => assertCustomDomainSecretsDark(
+        [{ name, type: "secret_text" }],
+        { signupOpenActive: true },
+      ),
+      new RegExp(name),
+    );
+  }
+  for (const name of SIGNUP_TURNSTILE_DARK_SECRET_NAMES) {
+    assert.throws(
+      () => assertCustomDomainSecretsDark([{ name, type: "secret_text" }]),
       new RegExp(name),
     );
   }

@@ -47,9 +47,14 @@ export const CONTROL_PLANE_DARK_SECRET_NAMES = Object.freeze([
 // custom-domain and signup-Turnstile activation secrets remain refused
 // unconditionally, and the default keeps the full strict set so an
 // unattested invocation behaves exactly as before.
+// signupOpenActive is the explicit reviewed attestation that open
+// self-service signup is the ratified live production state (committed
+// CP_SIGNUP_OPEN=true with positive daily limits, Turnstile keys staged).
+// Only the three signup-Turnstile secrets are freed by it; the
+// custom-domain set remains refused unconditionally.
 export function assertCustomDomainSecretsDark(
   secrets,
-  { canonicalEmailActive = false } = {},
+  { canonicalEmailActive = false, signupOpenActive = false } = {},
 ) {
   if (!Array.isArray(secrets)) {
     throw new Error("Worker secret inventory must be a JSON array");
@@ -63,9 +68,11 @@ export function assertCustomDomainSecretsDark(
     }
     names.add(secret.name);
   }
-  const refused = canonicalEmailActive
-    ? [...CUSTOM_DOMAIN_DARK_SECRET_NAMES, ...SIGNUP_TURNSTILE_DARK_SECRET_NAMES]
-    : CONTROL_PLANE_DARK_SECRET_NAMES;
+  const refused = [
+    ...CUSTOM_DOMAIN_DARK_SECRET_NAMES,
+    ...(canonicalEmailActive ? [] : CANONICAL_EMAIL_DARK_SECRET_NAMES),
+    ...(signupOpenActive ? [] : SIGNUP_TURNSTILE_DARK_SECRET_NAMES),
+  ];
   const present = refused.filter((name) => names.has(name));
   if (present.length !== 0) {
     throw new Error(
