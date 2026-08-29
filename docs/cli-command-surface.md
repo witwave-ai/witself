@@ -225,6 +225,45 @@ Rules:
 - AI-assisted account management must use the same commands and credentials as
   human operators; it should not require a separate AI-only backend.
 
+### Operator-only signup invite administration
+
+The implemented `witself-admin invite` surface manages signup invite codes
+directly through the control plane; it does not contact individual cells.
+Invite codes grant signup access and appear in list and show output so an
+operator can distribute and audit them. Treat that output as semi-sensitive
+even though invite codes are not secrets-plane values.
+
+```sh
+witself-admin invite list
+witself-admin invite show CODE
+witself-admin invite create \
+  [--code CODE] [--max-uses N] \
+  [--not-before TIMESTAMP] [--expires TIMESTAMP] \
+  [--cell CELL] [--region REGION] [--note TEXT]
+witself-admin invite disable CODE
+witself-admin invite enable CODE
+witself-admin invite delete CODE
+```
+
+`create` generates a code when `--code` is omitted and upserts the named code
+when it is supplied. `--max-uses` sets a positive total-use cap;
+`--not-before` and `--expires` bound the acceptance window; `--cell` pins
+placement to one cell; `--region` constrains placement to a region; and
+`--note` records operator context. Upserts retain the invite's original
+creation time and live use count.
+
+The default `list` table shows `code`, `enabled`, `uses/max`, `window`,
+`cell/region`, and `note`. `show` includes the live use count and the current
+enabled, exhausted, expired, and not-yet-valid verdict state. `enable` and
+`disable` change the admission state without resetting usage. `delete` is
+idempotent and hard-removes only the invite entry; its historical use records
+remain available as audit history.
+
+Every invite command accepts `--endpoint` and the established fleet-credential
+selection (`--fleet-token`, `WITSELF_FLEET_TOKEN`, or the managed fleet-token
+file). Read and mutation results also support `--json`. Error messages do not
+echo the requested invite code.
+
 ### Operator-only throughput overrides
 
 `witself-admin account limit-override` is the implemented generic operator

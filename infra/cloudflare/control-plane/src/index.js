@@ -112,7 +112,10 @@ import {
 } from "./admin-handles.mjs";
 import { renderSupportEmail } from "./support-notify.mjs";
 import { DurableAccountLifecycle } from "./account-lifecycle-runtime.mjs";
-import { DurableAccountSignup } from "./account-signup-runtime.mjs";
+import {
+  DurableAccountSignup,
+  inviteVerdict,
+} from "./account-signup-runtime.mjs";
 import {
   signupChallengeResponse,
 } from "./signup-challenge-page.mjs";
@@ -559,21 +562,54 @@ function genInviteCode() {
   return `${chars.slice(0, 4).join("")}-${chars.slice(4, 8).join("")}-${chars.slice(8).join("")}`;
 }
 
-// validateInvite is the check the signup path runs. Returns {valid, reason}.
-function validateInvite(entry) {
-  if (!entry) return { valid: false, reason: "unknown code" };
-  if (entry.enabled === false) return { valid: false, reason: "disabled" };
-  const now = Date.now();
-  if (entry.not_before && now < Date.parse(entry.not_before)) {
-    return { valid: false, reason: "not yet valid" };
+function projectedInviteUses(entry) {
+  return Number.isSafeInteger(entry?.uses) && entry.uses >= 0
+    ? entry.uses
+    : 0;
+}
+
+function publicInvite(code, entry, uses = projectedInviteUses(entry)) {
+  return {
+    code,
+    ...entry,
+    uses,
+    ...inviteVerdict(entry, uses, Date.now()),
+  };
+}
+
+async function liveInviteUses(env, code, entry) {
+  if (!env.ACCOUNT_SIGNUP) return null;
+  let response;
+  try {
+    const id = env.ACCOUNT_SIGNUP.idFromName(`invite:${code}`);
+    response = await env.ACCOUNT_SIGNUP.get(id).fetch(
+      new Request("https://account-signup.internal/invite/status"),
+    );
+  } catch {
+    return null;
   }
-  if (entry.expires_at && now >= Date.parse(entry.expires_at)) {
-    return { valid: false, reason: "expired" };
+  const body = await response.json().catch(() => null);
+  if (
+    !response.ok ||
+    body?.schema_version !== "witself.v0" ||
+    typeof body.initialized !== "boolean"
+  ) {
+    return null;
   }
-  if (Number.isFinite(entry.max_uses) && (entry.uses ?? 0) >= entry.max_uses) {
-    return { valid: false, reason: "fully used" };
+  if (!body.initialized) {
+    return projectedInviteUses(entry);
   }
-  return { valid: true };
+  if (!Number.isSafeInteger(body.uses) || body.uses < 0) {
+    return null;
+  }
+  if (body.generation !== (entry.created_at ?? "legacy")) {
+    // A hard-deleted code may be deliberately minted again. The authority's
+    // prior-generation state and invite-use records remain audit history;
+    // the new KV generation starts from its own projection until its first
+    // reservation rebases the authoritative count.
+    return projectedInviteUses(entry);
+  }
+  return body.uses;
 }
 
 async function handleInvites(request, env, url) {
@@ -589,7 +625,7 @@ async function handleInvites(request, env, url) {
       for (const k of page.keys) {
         const entry = await env.DIRECTORY.get(k.name, { type: "json" });
         if (entry) {
-          out.push({ code: k.name.slice(7), ...entry, ...validateInvite(entry) });
+          out.push(publicInvite(k.name.slice(7), entry));
         }
       }
       cursor = page.list_complete ? undefined : page.cursor;
@@ -604,31 +640,66 @@ async function handleInvites(request, env, url) {
     } catch {
       return err("invalid JSON body", 400);
     }
-    const code = body.code ?? genInviteCode();
-    if (!INVITE_CODE.test(code)) {
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      return err("invite body must be a JSON object", 400);
+    }
+    const code = Object.hasOwn(body, "code") ? body.code : genInviteCode();
+    if (typeof code !== "string" || !INVITE_CODE.test(code)) {
       return err("invalid code (lowercase letters/digits/hyphens, 3-64 chars)", 400);
     }
+    if (
+      Object.hasOwn(body, "enabled") &&
+      typeof body.enabled !== "boolean"
+    ) {
+      return err("enabled must be a boolean", 400);
+    }
     for (const f of ["not_before", "expires_at"]) {
-      if (body[f] != null && !Number.isFinite(Date.parse(body[f]))) {
+      if (
+        body[f] != null &&
+        (typeof body[f] !== "string" || !Number.isFinite(Date.parse(body[f])))
+      ) {
         return err(`${f} must be an ISO-8601 timestamp`, 400);
       }
     }
-    if (body.max_uses != null && (!Number.isInteger(body.max_uses) || body.max_uses < 1)) {
+    if (
+      body.max_uses != null &&
+      (!Number.isSafeInteger(body.max_uses) || body.max_uses < 1)
+    ) {
       return err("max_uses must be a positive integer", 400);
     }
-    if (body.cell != null && !CELL_NAME.test(body.cell)) {
+    if (
+      body.cell != null &&
+      (typeof body.cell !== "string" || !CELL_NAME.test(body.cell))
+    ) {
       return err("cell must be a valid cell name", 400);
     }
-    if (body.region != null && !REGION_NAME.test(body.region)) {
+    if (
+      body.region != null &&
+      (typeof body.region !== "string" || !REGION_NAME.test(body.region))
+    ) {
       return err("region must be a region name like us-west-2", 400);
+    }
+    if (body.note != null && typeof body.note !== "string") {
+      return err("note must be a string", 400);
+    }
+    if (typeof body.note === "string" && body.note.length > 200) {
+      return err("note too long (max 200 characters)", 400);
     }
     const key = `invite:${code}`;
     const existing = await env.DIRECTORY.get(key, { type: "json" });
     const entry = {
-      enabled: body.enabled !== false,
-      not_before: body.not_before ?? null,
-      expires_at: body.expires_at ?? null,
-      max_uses: body.max_uses ?? null,
+      enabled: Object.hasOwn(body, "enabled")
+        ? body.enabled !== false
+        : existing?.enabled !== false,
+      not_before: Object.hasOwn(body, "not_before")
+        ? body.not_before ?? null
+        : existing?.not_before ?? null,
+      expires_at: Object.hasOwn(body, "expires_at")
+        ? body.expires_at ?? null
+        : existing?.expires_at ?? null,
+      max_uses: Object.hasOwn(body, "max_uses")
+        ? body.max_uses ?? null
+        : existing?.max_uses ?? null,
       // Placement constraints: cell = hard pin, region = hard constraint.
       cell: body.cell ?? existing?.cell ?? null,
       region: body.region ?? existing?.region ?? null,
@@ -637,9 +708,18 @@ async function handleInvites(request, env, url) {
       note: body.note ?? existing?.note ?? "",
       created_at: existing?.created_at ?? new Date().toISOString(),
     };
+    if (
+      (Object.hasOwn(body, "not_before") ||
+        Object.hasOwn(body, "expires_at")) &&
+      entry.not_before &&
+      entry.expires_at &&
+      Date.parse(entry.not_before) >= Date.parse(entry.expires_at)
+    ) {
+      return err("not_before must be earlier than expires_at", 400);
+    }
     await env.DIRECTORY.put(key, JSON.stringify(entry));
     return json(
-      { schema_version: "witself.v0", invite: { code, ...entry, ...validateInvite(entry) } },
+      { schema_version: "witself.v0", invite: publicInvite(code, entry) },
       existing ? 200 : 201,
     );
   }
@@ -650,18 +730,22 @@ async function handleInvites(request, env, url) {
     if (!entry) {
       return err("unknown invite", 404);
     }
+    const uses = await liveInviteUses(env, m[1], entry);
+    if (uses === null) {
+      return err("invite status unavailable", 503);
+    }
     return json({
       schema_version: "witself.v0",
-      invite: { code: m[1], ...entry, ...validateInvite(entry) },
+      invite: publicInvite(m[1], entry, uses),
     });
   }
   if (m && request.method === "DELETE") {
     const key = `invite:${m[1]}`;
-    if ((await env.DIRECTORY.get(key)) === null) {
-      return err("unknown invite", 404);
+    const deleted = (await env.DIRECTORY.get(key)) !== null;
+    if (deleted) {
+      await env.DIRECTORY.delete(key);
     }
-    await env.DIRECTORY.delete(key);
-    return new Response(null, { status: 204 });
+    return json({ schema_version: "witself.v0", deleted });
   }
 
   return err("method not allowed", 405);

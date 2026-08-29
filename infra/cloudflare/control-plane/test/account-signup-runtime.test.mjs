@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { DurableAccountSignup } from "../src/account-signup-runtime.mjs";
+import {
+  DurableAccountSignup,
+  inviteVerdict,
+} from "../src/account-signup-runtime.mjs";
 import {
   DurableTargetCellCoordinator,
 } from "../src/target-cell-coordinator.mjs";
@@ -296,6 +299,46 @@ test("default signup fetch preserves the platform receiver", async (t) => {
   });
 
   assert.equal(receiver, globalThis);
+});
+
+test("invite authority failures never echo the invite code", async () => {
+  const attempt = (binding) => new DurableAccountSignup(
+    { id: { name: `provision:${PROVISION}` }, storage: new Storage() },
+    { ACCOUNT_SIGNUP: binding },
+    { now: () => new Date("2026-07-25T12:00:00.000Z") },
+  ).fetch(signupRequest());
+
+  const throwing = await attempt({
+    idFromName(name) {
+      throw new Error(`binding failed for ${name}`);
+    },
+  });
+  assert.equal(throwing.status, 502);
+  const throwingText = await throwing.text();
+  assert.equal(throwingText.includes(INVITE), false);
+  assert.equal(throwingText.includes("invite:"), false);
+  assert.equal(
+    JSON.parse(throwingText).error,
+    "invite reservation outcome is ambiguous",
+  );
+
+  const providerFailure = await attempt({
+    idFromName: (name) => ({ name }),
+    get: (id) => ({
+      fetch: async () => new Response(
+        `internal failure for ${id.name}`,
+        { status: 500 },
+      ),
+    }),
+  });
+  assert.equal(providerFailure.status, 500);
+  const providerText = await providerFailure.text();
+  assert.equal(providerText.includes(INVITE), false);
+  assert.equal(providerText.includes("invite:"), false);
+  assert.equal(
+    JSON.parse(providerText).error,
+    "invite reservation failed (HTTP 500)",
+  );
 });
 
 function harness({
@@ -644,6 +687,265 @@ test("invite authority consumes one exact use across retries", async () => {
   );
   assert.equal(exhausted.status, 403);
   assert.equal(directory.value(`invite:${INVITE}`).uses, 1);
+});
+
+test("replaying an earlier reservation cannot regress the live projection", async () => {
+  const generation = "2026-07-25T00:00:00.000Z";
+  const storage = new Storage();
+  const directory = new KV({
+    [`invite:${INVITE}`]: {
+      enabled: true,
+      max_uses: 3,
+      uses: 0,
+      created_at: generation,
+    },
+  });
+  const authority = new DurableAccountSignup(
+    { id: { name: `invite:${INVITE}` }, storage },
+    { DIRECTORY: directory },
+    { now: () => new Date("2026-07-25T12:00:00.000Z") },
+  );
+  const fingerprint = "a".repeat(64);
+  const reserve = (provisionID) => authority.fetch(
+    new Request("https://account-signup.internal/invite/reserve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        invite: INVITE,
+        provision_id: provisionID,
+        request_fingerprint: fingerprint,
+      }),
+    }),
+  );
+  const secondProvision = "22222222-2222-4222-8222-222222222222";
+
+  assert.equal((await reserve(PROVISION)).status, 200);
+  assert.equal((await reserve(secondProvision)).status, 200);
+  assert.equal(directory.value(`invite:${INVITE}`).uses, 2);
+  const replay = await reserve(PROVISION);
+  assert.equal(replay.status, 200);
+  assert.equal((await replay.json()).uses, 2);
+  assert.equal(directory.value(`invite:${INVITE}`).uses, 2);
+});
+
+test("legacy invite count states keep unversioned retry keys", async () => {
+  const generation = "2026-07-25T00:00:00.000Z";
+  const fingerprint = "a".repeat(64);
+  const storage = new Storage();
+  await storage.put("invite-count", { generation, count: 1 });
+  await storage.put(`invite-use:${PROVISION}`, {
+    provision_id: PROVISION,
+    request_fingerprint: fingerprint,
+    snapshot: {},
+    reserved_at: "2026-07-25T01:00:00.000Z",
+  });
+  const directory = new KV({
+    [`invite:${INVITE}`]: {
+      enabled: true,
+      max_uses: 3,
+      uses: 1,
+      created_at: generation,
+    },
+  });
+  const authority = new DurableAccountSignup(
+    { id: { name: `invite:${INVITE}` }, storage },
+    { DIRECTORY: directory },
+    { now: () => new Date("2026-07-25T12:00:00.000Z") },
+  );
+  const reserve = (provisionID) => authority.fetch(
+    new Request("https://account-signup.internal/invite/reserve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        invite: INVITE,
+        provision_id: provisionID,
+        request_fingerprint: fingerprint,
+      }),
+    }),
+  );
+
+  assert.equal((await reserve(PROVISION)).status, 200);
+  const nextProvision = "22222222-2222-4222-8222-222222222222";
+  assert.equal((await reserve(nextProvision)).status, 200);
+  assert.ok(storage.values.has(`invite-use:${PROVISION}`));
+  assert.ok(storage.values.has(`invite-use:${nextProvision}`));
+  assert.equal(
+    [...storage.values.keys()].some((key) =>
+      key.startsWith(`invite-use:${generation}:`)
+    ),
+    false,
+  );
+  assert.deepEqual(storage.values.get("invite-count"), {
+    generation,
+    count: 2,
+  });
+});
+
+test("a committed reservation replays after the invite is deleted", async () => {
+  const generation = "2026-07-25T00:00:00.000Z";
+  const fingerprint = "a".repeat(64);
+  const storage = new Storage();
+  const directory = new KV({
+    [`invite:${INVITE}`]: {
+      enabled: true,
+      max_uses: 3,
+      uses: 0,
+      created_at: generation,
+    },
+  });
+  const authority = new DurableAccountSignup(
+    { id: { name: `invite:${INVITE}` }, storage },
+    { DIRECTORY: directory },
+    { now: () => new Date("2026-07-25T12:00:00.000Z") },
+  );
+  const reserve = (requestFingerprint = fingerprint) => authority.fetch(
+    new Request("https://account-signup.internal/invite/reserve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        invite: INVITE,
+        provision_id: PROVISION,
+        request_fingerprint: requestFingerprint,
+      }),
+    }),
+  );
+
+  assert.equal((await reserve()).status, 200);
+  const useKey = `invite-use:${generation}:${PROVISION}`;
+  const committedUse = structuredClone(storage.values.get(useKey));
+  await directory.delete(`invite:${INVITE}`);
+
+  const replay = await reserve();
+  assert.equal(replay.status, 200);
+  assert.equal((await replay.json()).uses, 1);
+  assert.deepEqual(storage.values.get(useKey), committedUse);
+  assert.deepEqual(storage.values.get("invite-count"), {
+    generation,
+    count: 1,
+    use_key_version: 1,
+  });
+  assert.equal(directory.value(`invite:${INVITE}`), null);
+  assert.equal((await reserve("b".repeat(64))).status, 409);
+});
+
+test("a recreated code replays the old provision and counts a new one", async () => {
+  const firstGeneration = "2026-07-25T00:00:00.000Z";
+  const secondGeneration = "2026-08-28T00:00:00.000Z";
+  const fingerprint = "a".repeat(64);
+  const storage = new Storage();
+  const directory = new KV({
+    [`invite:${INVITE}`]: {
+      enabled: true,
+      max_uses: 3,
+      uses: 0,
+      created_at: firstGeneration,
+    },
+  });
+  const authority = new DurableAccountSignup(
+    { id: { name: `invite:${INVITE}` }, storage },
+    { DIRECTORY: directory },
+    { now: () => new Date("2026-08-28T12:00:00.000Z") },
+  );
+  const reserve = (provisionID, requestFingerprint = fingerprint) => authority.fetch(
+    new Request("https://account-signup.internal/invite/reserve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        invite: INVITE,
+        provision_id: provisionID,
+        request_fingerprint: requestFingerprint,
+      }),
+    }),
+  );
+
+  assert.equal((await reserve(PROVISION)).status, 200);
+  const firstUseKey = `invite-use:${firstGeneration}:${PROVISION}`;
+  assert.ok(storage.values.has(firstUseKey));
+  const committedUse = structuredClone(storage.values.get(firstUseKey));
+
+  await directory.delete(`invite:${INVITE}`);
+  await directory.put(`invite:${INVITE}`, JSON.stringify({
+    enabled: true,
+    max_uses: 3,
+    uses: 0,
+    created_at: secondGeneration,
+  }));
+
+  const replay = await reserve(PROVISION);
+  assert.equal(replay.status, 200);
+  assert.equal((await replay.json()).uses, 1);
+  assert.ok(storage.values.has(firstUseKey));
+  assert.deepEqual(storage.values.get(firstUseKey), committedUse);
+  assert.equal(
+    storage.values.has(`invite-use:${secondGeneration}:${PROVISION}`),
+    false,
+  );
+  assert.equal(directory.value(`invite:${INVITE}`).uses, 0);
+  assert.equal((await reserve(PROVISION, "b".repeat(64))).status, 409);
+
+  const nextProvision = "22222222-2222-4222-8222-222222222222";
+  assert.equal((await reserve(nextProvision)).status, 200);
+  const secondUseKey = `invite-use:${secondGeneration}:${nextProvision}`;
+  assert.ok(storage.values.has(secondUseKey));
+  assert.deepEqual(storage.values.get(firstUseKey), committedUse);
+  assert.deepEqual(storage.values.get("invite-count"), {
+    generation: secondGeneration,
+    count: 1,
+    use_key_version: 1,
+  });
+  assert.equal(directory.value(`invite:${INVITE}`).uses, 1);
+});
+
+test("invite authority reports its live generation count without mutation", async () => {
+  const storage = new Storage();
+  const authority = new DurableAccountSignup(
+    { id: { name: `invite:${INVITE}` }, storage },
+    { DIRECTORY: new KV() },
+  );
+  const status = () => authority.fetch(
+    new Request("https://account-signup.internal/invite/status"),
+  );
+
+  const uninitialized = await status();
+  assert.equal(uninitialized.status, 200);
+  assert.deepEqual(await uninitialized.json(), {
+    schema_version: "witself.v0",
+    initialized: false,
+  });
+
+  await storage.put("invite-count", {
+    generation: "2026-08-28T00:00:00.000Z",
+    count: 7,
+  });
+  const initialized = await status();
+  assert.equal(initialized.status, 200);
+  assert.deepEqual(await initialized.json(), {
+    schema_version: "witself.v0",
+    initialized: true,
+    generation: "2026-08-28T00:00:00.000Z",
+    uses: 7,
+  });
+  assert.deepEqual(storage.values.get("invite-count"), {
+    generation: "2026-08-28T00:00:00.000Z",
+    count: 7,
+  });
+});
+
+test("invite verdict exposes independent operator flags", () => {
+  const now = Date.parse("2026-08-28T12:00:00.000Z");
+  assert.deepEqual(inviteVerdict({
+    enabled: false,
+    not_before: "2026-08-29T00:00:00.000Z",
+    expires_at: "2026-08-28T00:00:00.000Z",
+    max_uses: 2,
+  }, 2, now), {
+    enabled: false,
+    exhausted: true,
+    expired: true,
+    not_yet_valid: true,
+    valid: false,
+    reason: "disabled",
+  });
 });
 
 test("dark defaults preserve the exact initialized state shape", async () => {
