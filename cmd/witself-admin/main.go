@@ -5,9 +5,10 @@
 //
 // Two credential surfaces live in this binary:
 //
-//   - Fleet token (WITSELF_FLEET_TOKEN / --fleet-token) authorizes the
-//     admin registry: mint, list, revoke, delete admins. It is the same
-//     shared secret used by every other fleet-level operation.
+//   - Fleet token (WITSELF_FLEET_TOKEN / --fleet-token) authorizes invite
+//     administration and the admin registry: mint, list, revoke, delete
+//     admins. It is the same shared secret used by every other fleet-level
+//     operation.
 //
 //   - Admin token (WITSELF_ADMIN_TOKEN / --token / --token-file)
 //     authenticates a specific admin against the ticket routes. Minted
@@ -59,6 +60,8 @@ func run(args []string) int {
 		return whoamiCmd(args[1:])
 	case "admin":
 		return adminCmd(args[1:])
+	case "invite":
+		return inviteAdminCmd(args[1:])
 	case "ticket":
 		return ticketCmd(args[1:])
 	case "account":
@@ -90,6 +93,7 @@ func usage(w io.Writer) {
 	usageLine(w, "Usage:")
 	usageLine(w, "  witself-admin whoami        Verify an admin token and print its identity")
 	usageLine(w, "  witself-admin admin ...     Manage fleet-admin credentials (requires fleet token)")
+	usageLine(w, "  witself-admin invite ...    Manage signup invite codes (list|show|create|disable|enable|delete)")
 	usageLine(w, "  witself-admin ticket ...    Read/reply/transition support tickets across the fleet")
 	usageLine(w, "                                (list|watch|show|reply|retriage|state|resolve|close|states)")
 	usageLine(w, "  witself-admin account ...   Read/set per-account fleet settings")

@@ -9,8 +9,20 @@ accounts, add `--name NAME` at create and `--account NAME` everywhere after.
 
 Requires an invite code.
 
+Before launch, a platform operator can mint a named, capped code and inspect
+its live use count through the control plane. Disable it immediately when the
+cohort should stop accepting signups; disabling does not reset the count or
+remove historical use records.
+
 ```sh
-witself account create --email scott@witwave.ai --invite friends-2026
+witself-admin invite create --code launch-2026 --max-uses 100 \
+  --expires 2026-09-30T23:59:59Z --note "launch cohort"
+witself-admin invite show launch-2026
+witself-admin invite disable launch-2026
+```
+
+```sh
+witself account create --email scott@witwave.ai --invite launch-2026
 ```
 
 The account is remembered locally as `default` (binding in

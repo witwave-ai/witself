@@ -20,6 +20,20 @@ const SIGNUP_IP_SCOPE = /^signup-counter:ip:[0-9a-f]{64}$/;
 const STATE_KEY = "account-signup";
 const INVITE_COUNT_KEY = "invite-count";
 const INVITE_USE_PREFIX = "invite-use:";
+const INVITE_USE_INDEX_PREFIX = "invite-use-index:";
+const SAFE_INVITE_AUTHORITY_ERRORS = new Set([
+  "invalid invite reservation",
+  "invalid invite: unknown code",
+  "invalid invite: disabled",
+  "invalid invite: not yet valid",
+  "invalid invite: expired",
+  "invalid invite: fully used",
+  "invite reservation transaction is unavailable",
+  "invite reservation is unavailable",
+  "invite count is unavailable",
+  "invite generation changed; use a new provision_id",
+  "provision_id conflicts with an existing invite reservation",
+]);
 
 const PHASE = {
   abuse_preflight: -1,
@@ -220,24 +234,38 @@ function requestCanonical(input) {
   return JSON.stringify(canonical);
 }
 
-function inviteVerdict(invite, uses, nowMs) {
-  if (!invite) return { valid: false, reason: "unknown code" };
-  if (invite.enabled === false) {
-    return { valid: false, reason: "disabled" };
-  }
-  if (invite.not_before && nowMs < Date.parse(invite.not_before)) {
-    return { valid: false, reason: "not yet valid" };
-  }
-  if (invite.expires_at && nowMs >= Date.parse(invite.expires_at)) {
-    return { valid: false, reason: "expired" };
-  }
-  if (
+export function inviteVerdict(invite, uses, nowMs) {
+  const enabled = Boolean(invite) && invite.enabled !== false;
+  const notYetValid = Boolean(invite?.not_before) &&
+    nowMs < Date.parse(invite.not_before);
+  const expired = Boolean(invite?.expires_at) &&
+    nowMs >= Date.parse(invite.expires_at);
+  const exhausted = Boolean(invite) &&
     Number.isFinite(invite.max_uses) &&
-    uses >= invite.max_uses
-  ) {
-    return { valid: false, reason: "fully used" };
+    uses >= invite.max_uses;
+  const derived = {
+    enabled,
+    exhausted,
+    expired,
+    not_yet_valid: notYetValid,
+  };
+
+  if (!invite) {
+    return { ...derived, valid: false, reason: "unknown code" };
   }
-  return { valid: true };
+  if (!enabled) {
+    return { ...derived, valid: false, reason: "disabled" };
+  }
+  if (notYetValid) {
+    return { ...derived, valid: false, reason: "not yet valid" };
+  }
+  if (expired) {
+    return { ...derived, valid: false, reason: "expired" };
+  }
+  if (exhausted) {
+    return { ...derived, valid: false, reason: "fully used" };
+  }
+  return { ...derived, valid: true };
 }
 
 function inviteSnapshot(invite) {
@@ -245,6 +273,12 @@ function inviteSnapshot(invite) {
     ...(typeof invite.cell === "string" ? { cell: invite.cell } : {}),
     ...(typeof invite.region === "string" ? { region: invite.region } : {}),
   };
+}
+
+function inviteUseKey(generation, provisionID, version) {
+  return version === 1
+    ? `${INVITE_USE_PREFIX}${generation}:${provisionID}`
+    : `${INVITE_USE_PREFIX}${provisionID}`;
 }
 
 async function responseBody(response) {
@@ -311,6 +345,17 @@ export class DurableAccountSignup {
 
   async handleFetch(request) {
     const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname === "/invite/status") {
+      try {
+        return await this.inviteStatus();
+      } catch (error) {
+        return errorResponse(
+          String(error?.message ?? error),
+          error instanceof SignupError ? error.status : 500,
+          error instanceof SignupError ? error.responseFields : {},
+        );
+      }
+    }
     if (request.method !== "POST") {
       return errorResponse("account signup endpoint not found", 404);
     }
@@ -338,6 +383,36 @@ export class DurableAccountSignup {
         error instanceof SignupError ? error.responseFields : {},
       );
     }
+  }
+
+  async inviteStatus() {
+    const code = this.objectName.startsWith("invite:")
+      ? this.objectName.slice("invite:".length)
+      : "";
+    if (!INVITE_CODE.test(code)) {
+      fail("invalid invite status request", 400);
+    }
+    const countState = await this.storage.get(INVITE_COUNT_KEY);
+    if (countState == null) {
+      return json({
+        schema_version: "witself.v0",
+        initialized: false,
+      });
+    }
+    if (
+      !isObject(countState) ||
+      typeof countState.generation !== "string" ||
+      !Number.isSafeInteger(countState.count) ||
+      countState.count < 0
+    ) {
+      fail("invite status is unavailable", 503);
+    }
+    return json({
+      schema_version: "witself.v0",
+      initialized: true,
+      generation: countState.generation,
+      uses: countState.count,
+    });
   }
 
   async run(input) {
@@ -779,7 +854,120 @@ export class DurableAccountSignup {
       fail("invite reservation transaction is unavailable", 503);
     }
     const outcome = await this.storage.transaction(async (txn) => {
-      const useKey = `${INVITE_USE_PREFIX}${provisionID}`;
+      const indexKey = `${INVITE_USE_INDEX_PREFIX}${provisionID}`;
+      const indexed = await txn.get(indexKey);
+      if (indexed) {
+        if (
+          !isObject(indexed) ||
+          typeof indexed.generation !== "string" ||
+          ![0, 1].includes(indexed.use_key_version) ||
+          typeof indexed.request_fingerprint !== "string"
+        ) {
+          fail("invite reservation is unavailable", 503);
+        }
+        if (indexed.request_fingerprint !== fingerprint) {
+          fail(
+            "provision_id conflicts with an existing invite reservation",
+            409,
+          );
+        }
+        const indexedUseKey = inviteUseKey(
+          indexed.generation,
+          provisionID,
+          indexed.use_key_version,
+        );
+        const existing = await txn.get(indexedUseKey);
+        if (
+          !isObject(existing) ||
+          existing.request_fingerprint !== indexed.request_fingerprint ||
+          !Number.isSafeInteger(existing.uses) ||
+          existing.uses < 1
+        ) {
+          fail("invite reservation is unavailable", 503);
+        }
+        const currentCountState = await txn.get(INVITE_COUNT_KEY);
+        const projectionCount =
+          currentCountState?.generation === indexed.generation &&
+            Number.isSafeInteger(currentCountState.count) &&
+            currentCountState.count >= existing.uses
+            ? currentCountState.count
+            : null;
+        return {
+          count: projectionCount ?? existing.uses,
+          snapshot: existing.snapshot,
+          generation: indexed.generation,
+          projection_count: projectionCount,
+        };
+      }
+
+      // Pre-index deployments used one stable unversioned record per
+      // provision id. Check it before touching current-generation count state
+      // so an ambiguous old reservation can still replay after delete/recreate.
+      const legacyUseKey = inviteUseKey(generation, provisionID, 0);
+      const legacyExisting = await txn.get(legacyUseKey);
+      if (legacyExisting) {
+        if (legacyExisting.request_fingerprint !== fingerprint) {
+          fail(
+            "provision_id conflicts with an existing invite reservation",
+            409,
+          );
+        }
+        const legacyCountState = await txn.get(INVITE_COUNT_KEY);
+        const legacyGeneration = typeof legacyExisting.generation === "string"
+          ? legacyExisting.generation
+          : legacyCountState?.use_key_version !== 1 &&
+              typeof legacyCountState?.generation === "string"
+          ? legacyCountState.generation
+          : null;
+        const legacyCount = Number.isSafeInteger(legacyExisting.uses) &&
+            legacyExisting.uses >= 1
+          ? legacyExisting.uses
+          : legacyGeneration !== null &&
+              legacyCountState?.generation === legacyGeneration &&
+              Number.isSafeInteger(legacyCountState.count) &&
+              legacyCountState.count >= 1
+          ? legacyCountState.count
+          : 0;
+        const projectionCount =
+          legacyGeneration !== null &&
+            legacyCountState?.generation === legacyGeneration &&
+            Number.isSafeInteger(legacyCountState.count) &&
+            legacyCountState.count >= legacyCount
+            ? legacyCountState.count
+            : null;
+        return {
+          count: projectionCount ?? legacyCount,
+          snapshot: legacyExisting.snapshot,
+          generation: legacyGeneration,
+          projection_count: projectionCount,
+        };
+      }
+
+      let countState = await txn.get(INVITE_COUNT_KEY);
+      let useKeyVersion;
+      if (!countState || countState.generation !== generation) {
+        countState = {
+          generation,
+          count:
+            Number.isSafeInteger(invite?.uses) && invite.uses >= 0
+              ? invite.uses
+              : 0,
+          use_key_version: 1,
+        };
+        useKeyVersion = 1;
+      } else {
+        // Count states created before generation-scoped keys keep reading and
+        // writing their unversioned records so retries remain idempotent after
+        // deployment. Fresh states and every later generation use v1 keys.
+        useKeyVersion = countState.use_key_version === 1 ? 1 : 0;
+      }
+      if (
+        !Number.isSafeInteger(countState.count) ||
+        countState.count < 0
+      ) {
+        fail("invite count is unavailable", 503);
+      }
+      const useKey = inviteUseKey(generation, provisionID, useKeyVersion);
       const existing = await txn.get(useKey);
       if (existing) {
         if (existing.request_fingerprint !== fingerprint) {
@@ -788,28 +976,14 @@ export class DurableAccountSignup {
             409,
           );
         }
-        const countState = await txn.get(INVITE_COUNT_KEY);
         return {
-          count: countState?.count ?? 0,
+          count: countState.count,
           snapshot: existing.snapshot,
+          generation,
+          projection_count: countState.count,
         };
       }
 
-      let countState = await txn.get(INVITE_COUNT_KEY);
-      if (!countState) {
-        countState = {
-          generation,
-          count:
-            Number.isSafeInteger(invite?.uses) && invite.uses >= 0
-              ? invite.uses
-              : 0,
-        };
-      } else if (countState.generation !== generation) {
-        fail(
-          "invite generation changed; use a new provision_id",
-          409,
-        );
-      }
       const verdict = inviteVerdict(invite, countState.count, nowMs);
       if (!verdict.valid) {
         fail(`invalid invite: ${verdict.reason}`, 403);
@@ -821,12 +995,25 @@ export class DurableAccountSignup {
         request_fingerprint: fingerprint,
         snapshot,
         reserved_at: this.now().toISOString(),
+        generation,
+        uses: nextCount,
+      });
+      await txn.put(indexKey, {
+        generation,
+        use_key_version: useKeyVersion,
+        request_fingerprint: fingerprint,
       });
       await txn.put(INVITE_COUNT_KEY, {
         generation,
         count: nextCount,
+        ...(useKeyVersion === 1 ? { use_key_version: 1 } : {}),
       });
-      return { count: nextCount, snapshot };
+      return {
+        count: nextCount,
+        snapshot,
+        generation,
+        projection_count: nextCount,
+      };
     });
 
     // KV remains an admin/read projection. A retry repairs an interrupted
@@ -834,10 +1021,15 @@ export class DurableAccountSignup {
     const fresh = await this.env.DIRECTORY.get(inviteKey, {
       type: "json",
     });
-    if (fresh && (fresh.created_at ?? "legacy") === generation) {
+    if (
+      outcome.generation !== null &&
+      outcome.projection_count !== null &&
+      fresh &&
+      (fresh.created_at ?? "legacy") === outcome.generation
+    ) {
       await this.env.DIRECTORY.put(
         inviteKey,
-        JSON.stringify({ ...fresh, uses: outcome.count }),
+        JSON.stringify({ ...fresh, uses: outcome.projection_count }),
       );
     }
     return json({
@@ -882,11 +1074,11 @@ export class DurableAccountSignup {
     if (!this.env.ACCOUNT_SIGNUP) {
       fail("account signup Durable Object is unavailable", 503);
     }
-    const id = this.env.ACCOUNT_SIGNUP.idFromName(
-      `invite:${input.invite}`,
-    );
     let response;
     try {
+      const id = this.env.ACCOUNT_SIGNUP.idFromName(
+        `invite:${input.invite}`,
+      );
       response = await this.env.ACCOUNT_SIGNUP.get(id).fetch(
         new Request("https://account-signup.internal/invite/reserve", {
           method: "POST",
@@ -894,17 +1086,19 @@ export class DurableAccountSignup {
           body: JSON.stringify(input),
         }),
       );
-    } catch (error) {
-      fail(
-        `invite reservation outcome is ambiguous: ${String(error?.message ?? error)}`,
-        502,
-      );
+    } catch {
+      fail("invite reservation outcome is ambiguous", 502);
     }
-    const { text, body } = await responseBody(response);
+    const { body } = await responseBody(response);
     if (!response.ok || body?.ok !== true) {
+      const authorityError = typeof body?.error === "string" &&
+          SAFE_INVITE_AUTHORITY_ERRORS.has(body.error)
+        ? body.error
+        : response.ok
+        ? "invite reservation returned an invalid response"
+        : `invite reservation failed (HTTP ${response.status})`;
       fail(
-        body?.error ??
-          `invite reservation returned HTTP ${response.status}: ${text.slice(0, 120)}`,
+        authorityError,
         response.ok ? 502 : response.status,
       );
     }
