@@ -14,6 +14,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net/url"
@@ -44,7 +45,8 @@ var (
 	styOrange = lipgloss.NewStyle().Foreground(lipgloss.Color("208"))
 )
 
-// healthLevel is the four-plus-unknown scale the Health tab paints.
+// healthLevel is the Health-tab scale. Timeout is separate from both
+// degraded (the target answered but is impaired) and bad (confirmed down).
 // The ordering matters: worst wins when a line aggregates several
 // sub-signals.
 type healthLevel int
@@ -54,6 +56,7 @@ const (
 	healthGood                        // green — healthy
 	healthWarn                        // yellow — transitional / in flight
 	healthDegraded                    // orange — degraded but serving
+	healthTimeout                     // yellow — probe deadline expired; state unknown
 	healthBad                         // red — down / failed
 )
 
@@ -61,7 +64,7 @@ func (l healthLevel) style() lipgloss.Style {
 	switch l {
 	case healthGood:
 		return styOK
-	case healthWarn:
+	case healthWarn, healthTimeout:
 		return styWarn
 	case healthDegraded:
 		return styOrange
@@ -73,11 +76,15 @@ func (l healthLevel) style() lipgloss.Style {
 }
 
 // dot is the colored bullet for a health line. Unknown uses a hollow
-// ring to read as "no reading yet" rather than a lit indicator.
+// ring to read as "no reading yet"; timeout uses a clock-like shape so
+// it remains distinct from an ordinary warning in monochrome terminals.
 func (l healthLevel) dot() string {
 	glyph := "●"
-	if l == healthUnknown {
+	switch l {
+	case healthUnknown:
 		glyph = "◌"
+	case healthTimeout:
+		glyph = "◷"
 	}
 	return l.style().Render(glyph)
 }
@@ -345,6 +352,7 @@ type dashboardModel struct {
 	ctx           context.Context
 	cli           cellDataSource
 	configPath    string
+	probeTimeout  time.Duration // deadline for each independent health probe
 	states        []cellState
 	controlPlanes map[string]controlPlaneInfo
 	cursor        int
@@ -433,6 +441,16 @@ type cellReach struct {
 // re-entry or cursor move re-probes. Short — this is a live health
 // view — but long enough to avoid re-probing on every keystroke.
 const reachTTL = 15 * time.Second
+
+// resolvedProbeTimeout keeps directly-constructed test models and older
+// callers safe: a zero-value dashboard still gets the same explicit probe
+// deadline as the CLI flag's default.
+func (m dashboardModel) resolvedProbeTimeout() time.Duration {
+	if m.probeTimeout > 0 {
+		return m.probeTimeout
+	}
+	return defaultHealthProbeTimeout
+}
 
 // healthReportTTL is the cadence for the heavier cell-health
 // subprocess. Longer than reachTTL because each run selects a Pulumi
@@ -549,9 +567,18 @@ type cellDataSource interface {
 
 // liveDataSource reads infra.yaml, then the control plane, then runs
 // whoami on each configured cell.
-type liveDataSource struct{}
+type liveDataSource struct {
+	probeTimeout time.Duration
+}
 
-func (liveDataSource) load(ctx context.Context, configPath string) (loadResult, error) {
+func (s liveDataSource) resolvedProbeTimeout() time.Duration {
+	if s.probeTimeout > 0 {
+		return s.probeTimeout
+	}
+	return defaultHealthProbeTimeout
+}
+
+func (s liveDataSource) load(ctx context.Context, configPath string) (loadResult, error) {
 	cfg, _, err := loadInfraConfig(configPath)
 	if err != nil {
 		return loadResult{}, err
@@ -572,19 +599,49 @@ func (liveDataSource) load(ctx context.Context, configPath string) (loadResult, 
 	if controlPlane != "" {
 		info := controlPlaneInfo{url: controlPlane, tokenFile: tokenFile}
 		if fc, ferr := fleet.NewClient(controlPlane, tokenFile); ferr == nil {
-			cells, ferr := fc.ListCells(ctx)
-			if ferr == nil {
-				registered = cells
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			type listResult struct {
+				cells []fleet.Cell
+				err   error
+			}
+			type placementResult struct {
+				status fleet.PlacementStatus
+				err    error
+			}
+			listDone := make(chan listResult, 1)
+			placementDone := make(chan placementResult, 1)
+			go func() {
+				probeCtx, cancel := context.WithTimeout(ctx, s.resolvedProbeTimeout())
+				cells, err := fc.ListCells(probeCtx)
+				err = preserveProbeDeadline(probeCtx, err)
+				cancel()
+				listDone <- listResult{cells: cells, err: err}
+			}()
+			go func() {
+				probeCtx, cancel := context.WithTimeout(ctx, s.resolvedProbeTimeout())
+				status, err := fc.GetPlacementStatus(probeCtx, 1)
+				err = preserveProbeDeadline(probeCtx, err)
+				cancel()
+				placementDone <- placementResult{status: status, err: err}
+			}()
+
+			listed := <-listDone
+			if listed.err == nil {
+				registered = listed.cells
 				info.reachable = true
-				info.registered = len(cells)
+				info.registered = len(listed.cells)
 			} else {
-				info.err = ferr
+				info.err = listed.err
 			}
 			// Placement status: live/archived/blocked account counts
 			// across the CP. limit=1 keeps the sample lists tiny —
 			// we only want the totals for the header context view.
 			// Non-fatal on error; the header just shows "—".
-			if ps, perr := fc.GetPlacementStatus(ctx, 1); perr == nil {
+			placed := <-placementDone
+			if placed.err == nil {
+				ps := placed.status
 				info.hasAccounts = true
 				info.liveAccts = ps.Live.Total
 				info.archived = ps.Archived.Total
@@ -678,9 +735,14 @@ func (liveDataSource) probe(ctx context.Context, configPath, cell string) (reach
 			tokenFile = *d.FleetTokenFile
 		}
 	}
-	// A per-cell control-plane override wins over the default.
-	if e, ok := cfg.Cells[cell]; ok && e.ControlPlane != nil {
-		cp = *e.ControlPlane
+	// Per-cell connection overrides win over the defaults as a pair.
+	if e, ok := cfg.Cells[cell]; ok {
+		if e.ControlPlane != nil {
+			cp = *e.ControlPlane
+		}
+		if e.FleetTokenFile != nil {
+			tokenFile = *e.FleetTokenFile
+		}
 	}
 	if cp == "" {
 		return reachResult{}, fmt.Errorf("cell has no control plane — nothing to probe")
@@ -701,8 +763,11 @@ func (liveDataSource) probe(ctx context.Context, configPath, cell string) (reach
 // stack-select + cluster reach; the dashboard just orchestrates it.
 // A non-zero exit with un-parseable stdout surfaces as an error the
 // Health lines render as "probe failed".
-func (liveDataSource) probeHealth(ctx context.Context, configPath, cell string) (cellHealthReport, error) {
-	cmd, err := spawnCommand(ctx, []string{"cell-health", "-cell", cell, "-config", configPath})
+func (s liveDataSource) probeHealth(ctx context.Context, configPath, cell string) (cellHealthReport, error) {
+	cmd, err := spawnCommand(ctx, []string{
+		"cell-health", "-cell", cell, "-config", configPath,
+		"-timeout", s.resolvedProbeTimeout().String(),
+	})
 	if err != nil {
 		return cellHealthReport{}, err
 	}
@@ -824,17 +889,29 @@ func (m dashboardModel) loadCmd() tea.Cmd {
 }
 
 func (m dashboardModel) probeCmd(cell string) tea.Cmd {
-	ctx, cli, path := m.ctx, m.cli, m.configPath
+	baseCtx, cli, path, timeout := m.ctx, m.cli, m.configPath, m.resolvedProbeTimeout()
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
 	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(baseCtx, timeout)
+		defer cancel()
 		res, err := cli.probe(ctx, path, cell)
+		err = preserveProbeDeadline(ctx, err)
 		return probeResultMsg{cell: cell, res: res, err: err}
 	}
 }
 
 func (m dashboardModel) healthCmd(cell string) tea.Cmd {
-	ctx, cli, path := m.ctx, m.cli, m.configPath
+	baseCtx, cli, path, timeout := m.ctx, m.cli, m.configPath, m.resolvedProbeTimeout()
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
 	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(baseCtx, cellHealthCommandTimeout(timeout))
+		defer cancel()
 		rep, err := cli.probeHealth(ctx, path, cell)
+		err = preserveProbeDeadline(ctx, err)
 		return healthResultMsg{cell: cell, report: rep, err: err}
 	}
 }
@@ -844,6 +921,23 @@ func (m dashboardModel) destroyPreflightCmd(cell string) tea.Cmd {
 	return func() tea.Msg {
 		return destroyPreflightMsg{cell: cell, err: cli.destroyPreflight(ctx, path, cell)}
 	}
+}
+
+// preserveProbeDeadline makes timeout classification reliable even when a
+// lower layer (notably exec.CommandContext) returns only its own exit error.
+// The original error remains available while errors.Is can still identify the
+// deadline sentinel.
+func preserveProbeDeadline(ctx context.Context, err error) error {
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return err
+	}
+	if err == nil {
+		return context.DeadlineExceeded
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return errors.Join(err, context.DeadlineExceeded)
 }
 
 // maybeHealthProbe kicks the probes the Health tab needs for the
@@ -1973,11 +2067,15 @@ func (m dashboardModel) renderCPContext(r row, w int) []string {
 		lines = ctxPut(lines, w, "token file", info.tokenFile)
 		reach := styOK.Render("✓ reachable")
 		if !info.reachable {
-			reach = styErr.Render("✗ unreachable")
+			if errors.Is(info.err, context.DeadlineExceeded) {
+				reach = healthTimeout.style().Render("◷ timeout")
+			} else {
+				reach = styErr.Render("✗ unreachable")
+			}
 		}
 		lines = append(lines, fitLine("  "+reach, w))
 		if !info.reachable && info.err != nil {
-			lines = append(lines, fitLine(styWarn.Render("  · "+oneLine(info.err.Error())), w))
+			lines = append(lines, fitLine(healthErrorStyle(info.err).Render("  · "+oneLine(info.err.Error())), w))
 		}
 	} else {
 		lines = append(lines, fitLine(styDim.Render("  (no control plane — plain self-hosted deploys)"), w))
@@ -2218,8 +2316,8 @@ func (m dashboardModel) renderHealthTab(st cellState, w int) []string {
 
 // cellSubsystem reads one subsystem line (with its gauge counts) from
 // the cached cell-health report: unknown/"checking…" before or during
-// a probe, red if the subprocess itself failed, else the report's own
-// reading.
+// a probe, timeout-specific if its deadline expired, red if the subprocess
+// otherwise failed, else the report's own reading.
 func (m dashboardModel) cellSubsystem(st cellState, pick func(cellHealthReport) subsystemHealth) subsystemHealth {
 	h := m.health[st.name]
 	switch {
@@ -2227,6 +2325,8 @@ func (m dashboardModel) cellSubsystem(st cellState, pick func(cellHealthReport) 
 		return subsystemHealth{Level: healthUnknown, Detail: m.spinGlyph() + " checking…"}
 	case h.probed.IsZero():
 		return subsystemHealth{Level: healthUnknown, Detail: "— not probed yet"}
+	case errors.Is(h.err, context.DeadlineExceeded):
+		return subsystemHealth{Level: healthTimeout, Detail: timeoutDetail(cellHealthCommandTimeout(m.resolvedProbeTimeout()))}
 	case h.err != nil:
 		return subsystemHealth{Level: healthBad, Detail: "✗ probe failed: " + oneLine(h.err.Error())}
 	default:
@@ -2254,6 +2354,8 @@ func overallWord(l healthLevel) string {
 		return "settling"
 	case healthDegraded:
 		return "degraded"
+	case healthTimeout:
+		return "timed out"
 	case healthBad:
 		return "needs attention"
 	default:
@@ -2311,9 +2413,9 @@ func gaugeBar(have, total, width int, style lipgloss.Style) string {
 
 // cellReachHealth turns the cached reachability probe into a health
 // line. No probe yet reads unknown; an in-flight probe reads
-// "checking…"; a transport error (or unreachable-cell reason) reads
-// red/orange with the diagnostic; a clean probe reads green with the
-// witself-server version the Worker saw.
+// "checking…"; a deadline reads yellow/timeout; another transport error
+// (or unreachable-cell reason) reads red/orange with the diagnostic; a clean
+// probe reads green with the witself-server version the Worker saw.
 func (m dashboardModel) cellReachHealth(st cellState) (healthLevel, string) {
 	r := m.reach[st.name] // zero value when never probed
 	switch {
@@ -2321,6 +2423,8 @@ func (m dashboardModel) cellReachHealth(st cellState) (healthLevel, string) {
 		return healthUnknown, m.spinGlyph() + " checking…"
 	case r.probed.IsZero():
 		return healthUnknown, "— not probed yet"
+	case errors.Is(r.err, context.DeadlineExceeded):
+		return healthTimeout, timeoutDetail(m.resolvedProbeTimeout())
 	case r.err != nil:
 		return healthBad, "✗ " + oneLine(r.err.Error())
 	case r.res.ok:
@@ -2329,6 +2433,12 @@ func (m dashboardModel) cellReachHealth(st cellState) (healthLevel, string) {
 			v += " · witself-server " + r.res.version
 		}
 		return healthGood, "✓ " + v
+	case probeResultTimedOut(r.res.status, r.res.reason):
+		reason := r.res.reason
+		if reason == "" {
+			reason = fmt.Sprintf("HTTP %d", r.res.status)
+		}
+		return healthTimeout, oneLine(reason)
 	default:
 		// The control plane reached the fleet but the cell isn't serving
 		// yet — DNS/TLS/HTTP not ready. Degraded, not dead.
@@ -2338,6 +2448,17 @@ func (m dashboardModel) cellReachHealth(st cellState) (healthLevel, string) {
 		}
 		return healthDegraded, oneLine(reason)
 	}
+}
+
+func timeoutDetail(timeout time.Duration) string {
+	return "timeout after " + timeout.String()
+}
+
+func healthErrorStyle(err error) lipgloss.Style {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return healthTimeout.style()
+	}
+	return styWarn
 }
 
 // cellCredentialHealth reads the cloud identity check that runs every
@@ -2663,16 +2784,28 @@ func oneLine(s string) string {
 // runDashboard is the `dashboard` subcommand.
 func runDashboard(fs *flag.FlagSet) error {
 	configPath := fs.Lookup("config").Value.String()
+	probeTimeout := defaultHealthProbeTimeout
+	if timeoutFlag := fs.Lookup("timeout"); timeoutFlag != nil {
+		parsed, err := time.ParseDuration(timeoutFlag.Value.String())
+		if err != nil {
+			return fmt.Errorf("parse -timeout: %w", err)
+		}
+		if parsed <= 0 {
+			return fmt.Errorf("-timeout must be greater than zero")
+		}
+		probeTimeout = parsed
+	}
 	planPath := planStatePath()
 	m := dashboardModel{
-		ctx:         context.Background(),
-		cli:         liveDataSource{},
-		configPath:  configPath,
-		now:         time.Now,
-		loading:     true,
-		status:      "loading inventory…",
-		planPath:    planPath,
-		previewSeen: loadPlanState(planPath, time.Now()),
+		ctx:          context.Background(),
+		cli:          liveDataSource{probeTimeout: probeTimeout},
+		configPath:   configPath,
+		probeTimeout: probeTimeout,
+		now:          time.Now,
+		loading:      true,
+		status:       "loading inventory…",
+		planPath:     planPath,
+		previewSeen:  loadPlanState(planPath, time.Now()),
 		// Seed the fingerprint eagerly so persisted plans validate on the
 		// very first render, before the async load's loadedMsg arrives.
 		configFinger: configFileFingerprint(configPath),

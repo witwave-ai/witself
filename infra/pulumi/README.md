@@ -96,6 +96,19 @@ registration, and Civo token authentication.
 phase events on stderr (`{"ts","phase","state","cell","note"}`) for
 machine consumers.
 
+## Health probes and alerting
+
+`witself-infra health --json` probes configured cells and their control planes
+concurrently. Each target has its own `-timeout` deadline (default `5s`), so a
+hung endpoint is emitted as `timeout` without blocking sibling probes. The
+command writes one NDJSON object per target with exactly `name`, `state`
+(`ok`, `degraded`, `timeout`, or `down`), `latency_ms`, and `checked_at`. It
+exits zero only when every target is `ok`, and exits nonzero after emitting all
+records otherwise. Piping this command into cron or a monitoring agent and
+alerting on its exit status or records is the intended hook; `witself-infra`
+does not integrate directly with PagerDuty or any other external alerting
+service.
+
 ## Run it
 
 ```sh

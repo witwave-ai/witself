@@ -102,7 +102,7 @@ func TestWaitForCellHealthy(t *testing.T) {
 			// gets several iterations if the test's response list has
 			// several transients.
 			pollEvery := max(tc.maxWait/5, 5*time.Millisecond)
-			err := waitForCellHealthy(ctx, prober, "aws-sandbox-usw2-dev", tc.maxWait, pollEvery)
+			err := waitForCellHealthy(ctx, prober, "aws-sandbox-usw2-dev", tc.maxWait, pollEvery, 25*time.Millisecond)
 
 			if tc.wantCalls > 0 && int(prober.calls.Load()) != tc.wantCalls {
 				t.Errorf("calls = %d, want %d", prober.calls.Load(), tc.wantCalls)
@@ -123,6 +123,20 @@ func TestWaitForCellHealthy(t *testing.T) {
 	}
 }
 
+func TestWaitForCellHealthyBoundsEachProbe(t *testing.T) {
+	prober := &deadlineRecordingProber{}
+	err := waitForCellHealthy(context.Background(), prober, "cell-test", time.Second, time.Millisecond, 25*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "not registered") {
+		t.Fatalf("wait error = %v, want not registered", err)
+	}
+	if !prober.hadDeadline {
+		t.Fatal("Probe context had no deadline")
+	}
+	if prober.budget <= 0 || prober.budget > 25*time.Millisecond {
+		t.Fatalf("Probe deadline budget = %s, want within 25ms", prober.budget)
+	}
+}
+
 // probeResponse is one scripted answer for the fake prober: either a
 // ProbeResult (probe succeeded, cell may or may not be ready) or an err
 // (the probe itself failed — network, auth, unknown cell).
@@ -137,6 +151,20 @@ type probeResponse struct {
 type fakeProber struct {
 	responses []probeResponse
 	calls     atomic.Int32
+}
+
+type deadlineRecordingProber struct {
+	hadDeadline bool
+	budget      time.Duration
+}
+
+func (p *deadlineRecordingProber) Probe(ctx context.Context, _ string) (fleet.ProbeResult, error) {
+	deadline, ok := ctx.Deadline()
+	p.hadDeadline = ok
+	if ok {
+		p.budget = time.Until(deadline)
+	}
+	return fleet.ProbeResult{}, fleet.ErrNotRegistered
 }
 
 func (f *fakeProber) Probe(_ context.Context, _ string) (fleet.ProbeResult, error) {

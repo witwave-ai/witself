@@ -126,6 +126,23 @@ func TestHealthLevelJSONRoundTrip(t *testing.T) {
 	}
 }
 
+func TestHealthTimeoutJSONRoundTrip(t *testing.T) {
+	raw, err := json.Marshal(healthTimeout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != `"timeout"` {
+		t.Fatalf("timeout wire name = %s", raw)
+	}
+	var back healthLevel
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back != healthTimeout {
+		t.Fatalf("timeout round trip = %d", back)
+	}
+}
+
 func TestCivoPostgresArgoHealth(t *testing.T) {
 	app := argoApplication{}
 	app.Metadata.Name = "witself-postgresql"

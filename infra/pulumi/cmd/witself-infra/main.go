@@ -134,6 +134,7 @@ commands:
   destroy   tear the cell down
   refresh   reconcile state with the real cloud
   outputs   print the cell's stack outputs
+  health    probe configured control planes and cells for automation
   rebalance move live accounts to better eligible cells by placement policy
   placement-runner show, enable, disable, or trigger scheduled placement work
   placement-status show fleet placement, archive, and rebalance status
@@ -165,6 +166,8 @@ flags:
                   else ~/.witself/infra.yaml)
   -progress-json  with up/preview/destroy: emit NDJSON phase events on
                   stderr ({"ts","phase","state","cell","note"} lines)
+  -json           with health: emit one JSON object per target
+  -timeout        per health probe timeout (default 5s)
   -cloud          provider (functional): aws|gcp|azure|civo   (default "aws")
   -account-alias  free-text account label for the name        (default "sandbox")
   -region         real cloud region (functional)              (default "us-west-2")
@@ -261,10 +264,20 @@ func versionLine() string {
 }
 
 func main() {
-	if err := run(os.Args[1:]); err != nil {
+	err := run(os.Args[1:])
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "witself-infra: "+err.Error())
-		os.Exit(1)
 	}
+	if code := commandExitCode(err); code != 0 {
+		os.Exit(code)
+	}
+}
+
+func commandExitCode(err error) int {
+	if err != nil {
+		return 1
+	}
+	return 0
 }
 
 func run(args []string) error {
@@ -342,14 +355,22 @@ func run(args []string) error {
 	cellSelector := fs.String("cell", "", "cell name from infra.yaml — fills every unset flag from the config entry")
 	configPath := fs.String("config", "", "config file path (default: $WITSELF_HOME/infra.yaml, else ~/.witself/infra.yaml)")
 	progressJSON := fs.Bool("progress-json", false, "emit NDJSON phase events on stderr alongside the plain-text output (dashboard-friendly)")
+	healthJSON := fs.Bool("json", false, "with health: emit one JSON object per target")
+	probeTimeout := fs.Duration("timeout", defaultHealthProbeTimeout, "per health probe timeout")
 	if err := fs.Parse(fsArgs); err != nil {
 		return err
+	}
+	if *probeTimeout <= 0 {
+		return fmt.Errorf("-timeout must be greater than zero")
 	}
 	operatorExplicit := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { operatorExplicit[f.Name] = true })
 
 	if cmd == "config" {
 		return runConfigCmd(configSub, fs, *configPath)
+	}
+	if cmd == "health" {
+		return runHealthCommand(context.Background(), *configPath, *cellSelector, *probeTimeout, *healthJSON, os.Stdout)
 	}
 	// -cell presets flags from the config file BEFORE any validation or
 	// cloud work; an explicit flag still wins over the file. Fleet-wide
@@ -901,7 +922,7 @@ func run(args []string) error {
 					err = fmt.Errorf("read Civo outputs before registration: %w", outputErr)
 				} else {
 					host, _ := outs["apiHost"].Value.(string)
-					err = waitForPublicHTTPS(ctx, host, 20*time.Minute, 15*time.Second)
+					err = waitForPublicHTTPS(ctx, host, 20*time.Minute, 15*time.Second, *probeTimeout)
 				}
 			}
 		}
@@ -920,7 +941,7 @@ func run(args []string) error {
 				var cl *fleet.Client
 				cl, err = fleet.NewClient(*controlPlane, *fleetTokenFile)
 				if err == nil {
-					if err = waitForCellHealthy(ctx, cl, cellName, 20*time.Minute, 20*time.Second); err == nil {
+					if err = waitForCellHealthy(ctx, cl, cellName, 20*time.Minute, 20*time.Second, *probeTimeout); err == nil {
 						err = restoreCell(ctx, cl, cellName, *restoreAnyRegion)
 					}
 				}
@@ -964,34 +985,51 @@ func run(args []string) error {
 	case "outputs":
 		return printOutputs(ctx, stack)
 	case "cell-health":
-		return printCellHealth(ctx, stack, *cloud, *region, *awsProfile, *argocd)
+		return printCellHealth(ctx, stack, *cloud, *region, *awsProfile, *argocd, *probeTimeout)
 	default:
 		return fmt.Errorf("unknown command %q (see: witself-infra help)", cmd)
 	}
 	return err
 }
 
-func waitForPublicHTTPS(ctx context.Context, host string, maxWait, pollEvery time.Duration) error {
+func waitForPublicHTTPS(ctx context.Context, host string, maxWait, pollEvery, probeTimeout time.Duration) error {
 	if host == "" {
 		return fmt.Errorf("cell exports no apiHost; cannot verify public HTTPS")
 	}
+	if probeTimeout <= 0 {
+		return fmt.Errorf("probe timeout must be greater than zero")
+	}
 	url := "https://" + host + "/v1/version"
-	client := &http.Client{Timeout: 20 * time.Second}
+	client := &http.Client{Timeout: probeTimeout}
 	deadline := time.Now().Add(maxWait)
+	var probeErr error
 	for {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return fmt.Errorf("cell HTTPS at %s did not become ready within %s (last: %v)", url, maxWait, probeErr)
+		}
+		requestTimeout := min(probeTimeout, remaining)
+		probeCtx, cancelProbe := context.WithTimeout(ctx, requestTimeout)
+		req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, url, nil)
 		if err != nil {
+			cancelProbe()
 			return err
 		}
-		resp, probeErr := client.Do(req)
-		if probeErr == nil {
+		resp, requestErr := client.Do(req)
+		probeErr = requestErr
+		if requestErr == nil {
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
+				cancelProbe()
 				fmt.Fprintf(os.Stderr, "cell HTTPS ready at %s\n", url)
 				return nil
 			}
 			probeErr = fmt.Errorf("HTTP %d", resp.StatusCode)
 		}
+		if probeCtxErr := probeCtx.Err(); probeCtxErr != nil {
+			probeErr = errors.Join(probeErr, probeCtxErr)
+		}
+		cancelProbe()
 		if time.Now().After(deadline) {
 			return fmt.Errorf("cell HTTPS at %s did not become ready within %s (last: %v)", url, maxWait, probeErr)
 		}
@@ -1148,14 +1186,27 @@ type cellProber interface {
 // check passed, TLS certificate deployed, witself-server pod running
 // with DB migrations applied — is transitively true when the Worker's
 // GET on <cell>/v1/version returns witself-server-shaped JSON.
-func waitForCellHealthy(ctx context.Context, cl cellProber, cellName string, maxWait, pollEvery time.Duration) error {
+func waitForCellHealthy(ctx context.Context, cl cellProber, cellName string, maxWait, pollEvery, probeTimeout time.Duration) error {
+	if probeTimeout <= 0 {
+		return fmt.Errorf("probe timeout must be greater than zero")
+	}
 	deadline := time.Now().Add(maxWait)
 	started := time.Now()
+	lastReason := "probe not attempted"
 
 	fmt.Fprintf(os.Stderr, "waiting for cell %s to be reachable via the control plane (up to %s)…\n", cellName, maxWait)
 
 	for {
-		result, err := cl.Probe(ctx, cellName)
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return fmt.Errorf("cell %s did not become reachable within %s (last: %s)", cellName, maxWait, lastReason)
+		}
+		probeCtx, cancelProbe := context.WithTimeout(ctx, min(probeTimeout, remaining))
+		result, err := cl.Probe(probeCtx, cellName)
+		if probeCtxErr := probeCtx.Err(); probeCtxErr != nil {
+			err = errors.Join(err, probeCtxErr)
+		}
+		cancelProbe()
 		var fullReason string
 		if err == nil && result.OK {
 			verInfo := ""
@@ -1182,6 +1233,7 @@ func waitForCellHealthy(ctx context.Context, cl cellProber, cellName string, max
 				fullReason = fmt.Sprintf("HTTP %d", result.CellStatus)
 			}
 		}
+		lastReason = fullReason
 		shortReason := fullReason
 		if len(shortReason) > 120 {
 			shortReason = shortReason[:117] + "..."
