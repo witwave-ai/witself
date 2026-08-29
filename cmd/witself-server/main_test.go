@@ -452,6 +452,20 @@ func TestConfigureFactMutationsDeletionGate(t *testing.T) {
 	}
 }
 
+func TestSelfInventoryFactCountOptionsCoverAllSubjects(t *testing.T) {
+	hydration := selfHydrationFactListOptions(50)
+	if hydration.Subject != "self" {
+		t.Fatalf("hydration subject = %q, want self", hydration.Subject)
+	}
+	count := selfInventoryFactCountOptions(hydration)
+	if count.Subject != "" {
+		t.Fatalf("inventory count subject = %q, want unscoped: facts about other subjects must be counted", count.Subject)
+	}
+	if !count.IncludeSensitive || count.Limit != hydration.Limit {
+		t.Fatalf("count options must otherwise mirror hydration options: %#v", count)
+	}
+}
+
 func TestSelfHydrationFactListOptionsLoadsSensitiveValuesForHandlerPolicy(t *testing.T) {
 	opts := selfHydrationFactListOptions(17)
 	if opts.Subject != "self" || opts.Limit != 17 || !opts.IncludeSensitive || !opts.OrderByUsage ||

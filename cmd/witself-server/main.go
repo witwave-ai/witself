@@ -535,7 +535,11 @@ func serve() int {
 			}
 			total := len(facts)
 			if includeCount {
-				total, err = st.CountFacts(ctx, principal, opts)
+				// The digest hydrates only self-subject primary facts, but the
+				// index advertises the whole resolved inventory — count without
+				// the subject scope so facts about other subjects (people,
+				// projects, places) are not invisibly excluded from the total.
+				total, err = st.CountFacts(ctx, principal, selfInventoryFactCountOptions(opts))
 				if err != nil {
 					return nil, 0, mapFactError(err)
 				}
@@ -2032,6 +2036,15 @@ func validateFactDeletionFeature(enabled bool, schemaVersion int) error {
 		)
 	}
 	return nil
+}
+
+// selfInventoryFactCountOptions widens hydration options for the digest's
+// inventory count: the hydrated primary facts stay scoped to the self
+// subject, but the advertised total covers every resolved subject so facts
+// about people, projects, and places are not invisibly excluded.
+func selfInventoryFactCountOptions(opts store.FactListOptions) store.FactListOptions {
+	opts.Subject = ""
+	return opts
 }
 
 func selfHydrationFactListOptions(limit int) store.FactListOptions {
