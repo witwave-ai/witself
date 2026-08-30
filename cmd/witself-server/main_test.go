@@ -466,6 +466,22 @@ func TestSelfInventoryFactCountOptionsCoverAllSubjects(t *testing.T) {
 	}
 }
 
+// TestSelfCountOnlyFactOptionsCoverAllSubjects pins the count-only hook's
+// scope. The 2026-08-28 fix (#285) widened the hydration-path count but the
+// count-only hook kept its self-subject pin, so the dashboard — which asks
+// for counts without facts — still reported zero for an inventory whose only
+// fact was about another subject.
+func TestSelfCountOnlyFactOptionsCoverAllSubjects(t *testing.T) {
+	opts := selfCountOnlyFactOptions()
+	if opts.Subject != "" {
+		t.Fatalf("count-only subject = %q, want unscoped: facts about other subjects must be counted", opts.Subject)
+	}
+	want := selfInventoryFactCountOptions(selfHydrationFactListOptions(0))
+	if opts != want {
+		t.Fatalf("count-only options = %#v, want the inventory scope %#v", opts, want)
+	}
+}
+
 func TestSelfHydrationFactListOptionsLoadsSensitiveValuesForHandlerPolicy(t *testing.T) {
 	opts := selfHydrationFactListOptions(17)
 	if opts.Subject != "self" || opts.Limit != 17 || !opts.IncludeSensitive || !opts.OrderByUsage ||

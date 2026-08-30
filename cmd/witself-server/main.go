@@ -564,7 +564,7 @@ func serve() int {
 			return getSelfFacts(ctx, p, limit, includeCount, true)
 		}
 		cfg.CountSelfFacts = func(ctx context.Context, p server.DomainPrincipal) (int, error) {
-			count, err := st.CountFacts(ctx, toStorePrincipal(p), store.FactListOptions{Subject: "self"})
+			count, err := st.CountFacts(ctx, toStorePrincipal(p), selfCountOnlyFactOptions())
 			if err != nil {
 				return 0, mapFactError(err)
 			}
@@ -2045,6 +2045,16 @@ func validateFactDeletionFeature(enabled bool, schemaVersion int) error {
 func selfInventoryFactCountOptions(opts store.FactListOptions) store.FactListOptions {
 	opts.Subject = ""
 	return opts
+}
+
+// selfCountOnlyFactOptions is the count-only self-index hook's filter — the
+// digest branch the dashboard takes (include_facts=false, include_counts=true).
+// It derives from the exact hydration-path inventory scope so the two digest
+// branches can never disagree about how many facts exist; a self-subject pin
+// here is the bug that kept the console inventory tile at zero while the
+// capacity panel said one.
+func selfCountOnlyFactOptions() store.FactListOptions {
+	return selfInventoryFactCountOptions(selfHydrationFactListOptions(0))
 }
 
 func selfHydrationFactListOptions(limit int) store.FactListOptions {
