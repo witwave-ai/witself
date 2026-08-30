@@ -224,6 +224,10 @@ export function containerEnvVars(env) {
       "WITSELF_CP_STRIPE_PORTAL_CONFIGURATION_ID",
     ],
     ["CP_STRIPE_TEST_CLOCK_ID", "WITSELF_CP_STRIPE_TEST_CLOCK_ID"],
+    // Absent means Stripe Tax stays off (explicitBoolEnv treats empty as
+    // false); staging "true" is the tax activation flip once registrations
+    // exist in the dashboard.
+    ["CP_STRIPE_AUTOMATIC_TAX", "WITSELF_CP_STRIPE_AUTOMATIC_TAX"],
     [
       "CP_BILLING_ACCOUNT_ALLOWLIST",
       "WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST",
