@@ -100,6 +100,7 @@ test("container env projection is explicit, runtime-only, and opt-in", () => {
     CP_STRIPE_PORTAL_RETURN_URL: "https://app.example/billing",
     CP_STRIPE_PORTAL_CONFIGURATION_ID: "bpc_reviewed",
     CP_STRIPE_TEST_CLOCK_ID: "clock_sandbox",
+    CP_STRIPE_AUTOMATIC_TAX: "true",
     CP_BILLING_ACCOUNT_ALLOWLIST: "acct_sandbox",
     ARCHIVES: archiveBinding,
     FLEET_TOKEN: "must-not-cross",
@@ -122,6 +123,7 @@ test("container env projection is explicit, runtime-only, and opt-in", () => {
     WITSELF_CP_STRIPE_PORTAL_RETURN_URL: "https://app.example/billing",
     WITSELF_CP_STRIPE_PORTAL_CONFIGURATION_ID: "bpc_reviewed",
     WITSELF_CP_STRIPE_TEST_CLOCK_ID: "clock_sandbox",
+    WITSELF_CP_STRIPE_AUTOMATIC_TAX: "true",
     WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST: "acct_sandbox",
   });
 
@@ -138,6 +140,7 @@ test("container env projection is explicit, runtime-only, and opt-in", () => {
     CP_STRIPE_PORTAL_RETURN_URL: "",
     CP_STRIPE_PORTAL_CONFIGURATION_ID: "",
     CP_STRIPE_TEST_CLOCK_ID: "",
+    CP_STRIPE_AUTOMATIC_TAX: "",
     CP_BILLING_ACCOUNT_ALLOWLIST: "",
   }), {
     WITSELF_CP_BRIDGE_URL: "https://self.witwave.ai",
