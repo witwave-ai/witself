@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -1483,6 +1484,8 @@ func TestManagedSubscriptionProjectionFailsClosed(t *testing.T) {
 		{name: "missing metadata", response: `{"data":[{"id":"sub_a","customer":"cus_stub_1","status":"active","items":{"data":[{"current_period_end":1783123200,"price":{"id":"price_a","lookup_key":"witself_standard","product":"prod_stub"}}]}}],"has_more":false}`, read: `{"id":"sub_a","customer":"cus_stub_1","status":"active","items":{"data":[{"current_period_end":1783123200,"price":{"id":"price_a","lookup_key":"witself_standard","product":{"id":"prod_stub","metadata":{}}}}]}}`, want: "witself_plan"},
 		{name: "price mismatch", response: `{"data":[{"id":"sub_a","customer":"cus_stub_1","status":"active","metadata":{"witself_plan":"standard"},"items":{"data":[{"current_period_end":1783123200,"price":{"id":"price_a","lookup_key":"witself_team","product":"prod_stub"}}]}}],"has_more":false}`, read: `{"id":"sub_a","customer":"cus_stub_1","status":"active","metadata":{"witself_plan":"standard"},"items":{"data":[{"current_period_end":1783123200,"price":{"id":"price_a","lookup_key":"witself_team","product":{"id":"prod_stub","metadata":{}}}}]}}`, want: "does not match"},
 		{name: "changed between list and read", response: `{"data":[` + one + `],"has_more":false}`, read: `{"id":"sub_a","customer":"cus_stub_1","status":"canceled","metadata":{"witself_plan":"standard"},"items":{"data":[{"current_period_end":1783123200,"price":{"id":"price_a","lookup_key":"witself_standard","product":"prod_stub"}}]}}`, want: "changed between list and read"},
+		{name: "wrong subscription on read", response: `{"data":[` + one + `],"has_more":false}`, read: strings.ReplaceAll(one, "sub_a", "sub_other"), want: "changed between list and read"},
+		{name: "wrong customer on read", response: `{"data":[` + one + `],"has_more":false}`, read: strings.ReplaceAll(one, "cus_stub_1", "cus_other"), want: "changed between list and read"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1731,6 +1734,30 @@ func TestNextChargeNoneIsNil(t *testing.T) {
 // stubProductID keeps the historical prod_stub identity for the Professional
 // product (every older fixture references it) and gives each other plan its
 // own stable product object.
+// TestStubEnforcesExpansionDepthCap pins the stub's depth guard itself. The
+// suite's regression story for the 2026-08-29 cutover failure rests on an
+// over-deep expand[] turning red here, so the guard must be proven to fire —
+// on the query encoding and on the POST form encoding.
+func TestStubEnforcesExpansionDepthCap(t *testing.T) {
+	_, p := newStub(t)
+	var out struct{}
+	var apiErr *apiError
+	overDeep := url.Values{}
+	overDeep.Set("expand[]", "a.b.c.d.e")
+	err := p.call(context.Background(), "GET",
+		"/v1/subscriptions?"+overDeep.Encode(), nil, "", &out)
+	if !errors.As(err, &apiErr) || apiErr.status != http.StatusBadRequest ||
+		apiErr.code != "property_expansion_max_depth" {
+		t.Fatalf("query expand error = %v; want 400 property_expansion_max_depth", err)
+	}
+	err = p.call(context.Background(), "POST", "/v1/checkout/sessions",
+		overDeep, "", &out)
+	if !errors.As(err, &apiErr) || apiErr.status != http.StatusBadRequest ||
+		apiErr.code != "property_expansion_max_depth" {
+		t.Fatalf("form expand error = %v; want 400 property_expansion_max_depth", err)
+	}
+}
+
 func stubProductID(plan string) string {
 	if plan == "standard" {
 		return "prod_stub"
