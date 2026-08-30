@@ -30,7 +30,7 @@ Status legend: ✅ done · 🔨 Claude-owned (build/deploy) · 🔑 needs Scott
 | Domain | State | What's left | Owner |
 |---|---|---|---|
 | **Team activation** | ✅ done — seats set (Personal 1 / Professional 3 / Team 25, ratified 2026-08-24) and Team flipped available at one flat monthly price | — | — |
-| **Billing** | Dark Stripe stack complete; live account verified (acct_1TpugQEICTDi58ec); all six CP_STRIPE_* secrets STAGED on witself-control-plane (secret key, webhook, portal bpc_, 3 URLs) — verified 2026-08-25; dunning emails on | Cutover only | 🔑 set CP_BILLING_PROVIDER/CP_STRIPE_MODE/CP_PLAN_LIFECYCLE_ENABLED(+allowlist), activate Tax, live end-to-end proof; (opt) revoke stale Jul-5 secret key |
+| **Billing** | ✅ LIVE CUTOVER (read path) 2026-08-29/30: CP_BILLING_PROVIDER=stripe, CP_STRIPE_MODE=live, CP_PLAN_LIFECYCLE_ENABLED=true, allowlist=founder account; plan lifecycle activated+verified; cells advertise the billing endpoint (#296); founder payment method on file via live setup Checkout (link ****0000); first-live-read expansion-depth bug found via Stripe request logs and fixed same-night (#297, CP 0.0.264) — billing show fully green | Charge proof + GA | 🔑 live plan-purchase proof (founder card, Scott); then GA flag (needs empty allowlist) + Stripe Tax (registrations + bridge mapping PR); (opt) revoke stale Jul-5 secret key |
 | **Support** | Policy published (#251); assistant author-kind + reserved handle (#252); re-triage (#253); dark AI runner + notification labeling (#255); entitlement sync (#256); scoped support_ai credential (#257); SLO metric + breach alert live (#259 — `witself_support_slo_metrics_up 1` and `WitselfSupportFirstResponseBreach` loaded/ok verified on the serving cell 2026-08-27); support@ intake bridge implemented dark; incident-comms channel published | Keyed intake enablement | 🔑 support@ DNS+routing, runner host + API key, mint scoped credential, enable flag |
 | **Monitoring** | LIVE 2026-08-25: 3-phase rollout merged + verified (#264 stack, #265 targets, #266 alerting); PagerDuty `witself-prod` incident route + dead-man heartbeat active; 14 rules, zero eval failures, schema-91 + PVC metrics scraped | — (accepted; observe normal rules/storage growth over the acceptance window) | ✅ |
 | **Edge DMARC** | ✅ LIVE 2026-08-29: authserv-id `mx.cloudflare.net` captured from a live Gmail probe; edge deployed from v0.0.262 with `AGENT_EMAIL_DMARC_REJECT_ENABLED=true` + relay v2; production proof — real `dkim=pass` recorded in the cell columns, `dmarc=none` mail correctly not rejected | — | ✅ |
@@ -207,7 +207,14 @@ incomplete payments auto-cancel at 15 days; live product catalog empty)
   Claude API key; stand up the runner host. Turnstile: API token has read but
   not write scope — dashboard mint (or a Turnstile-scoped token) still needed.
 
-**Release** — ✅ v0.0.260 DONE 2026-08-28: consent capture (schema 0094) +
+**Release** — ✅ v0.0.264/v0.0.265 DONE 2026-08-30 (overnight): v0.0.264
+(Stripe subscription-read expansion-depth fix) released and CP
+deployed+verified at 0.0.264; v0.0.265 (count-only self-digest inventory
+fix #298 + installer uninstall-deadlock fix #299) released and both cells
+rolled in waves (use1-backup then usw2-dev, all Argo apps synced/healthy,
+zero restarts, no schema change — migration head stays 0094); count-only
+digest branch verified returning the full inventory on the serving cell.
+Previous train — ✅ v0.0.260 DONE 2026-08-28: consent capture (schema 0094) +
 support/incident-comms close-out + feature-status truth-up + gate tooling
 released and deployed; dual-cell restore-verified pre-migration backups
 (evidence 2/2); both cells rolled in waves to 0.0.260 at schema 94 (8/8
