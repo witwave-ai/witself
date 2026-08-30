@@ -27,8 +27,8 @@ apps:
     namespace: witself
     # The apps chart emits worker.agentEmailRetention settings, which require
     # the v0.0.211+ server chart schema.
-    chartVersion: 0.0.261
-    imageTag: 0.0.261
+    chartVersion: 0.0.265
+    imageTag: 0.0.265
     backendKind: managed
     billing:
       endpoint: https://self.witwave.ai
