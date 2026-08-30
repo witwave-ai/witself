@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -67,7 +68,9 @@ type stubStripe struct {
 	subPeriodEnd          int64
 	advancePeriodOnArm    bool
 	preserveOwnerOnDisarm bool
+	subProductPlan        string // expanded product witself_plan; "" = standard
 	subscriptionsJSON     string // optional exact list response override
+	subscriptionJSON      string // optional exact single-subscription GET override
 	custDeleted           bool   // customer GETs report deleted:true
 	customerCreateKeys    []string
 	customerCreateForms   []map[string]string
@@ -80,6 +83,15 @@ type stubStripe struct {
 	refundMore            bool     // refund list reports unsupported pagination
 	refundAmount          int      // settled amount reported by the charge
 	refundData            string   // optional refund-list JSON data override
+}
+
+// subscriptionProductPlan is the witself_plan metadata served on the stub
+// subscription's expanded product; empty means the matching "standard".
+func (s *stubStripe) subscriptionProductPlan() string {
+	if s.subProductPlan == "" {
+		return "standard"
+	}
+	return s.subProductPlan
 }
 
 func (s *stubStripe) subscriptionMetadataJSON() string {
@@ -293,6 +305,21 @@ func (s *stubStripe) handle(w http.ResponseWriter, r *http.Request) {
 			s.lastForm[k] = v[0]
 		}
 	}
+	// Stripe caps property expansion at 4 levels; enforcing the cap here
+	// turns an over-deep expand[] into a red test instead of a live-only
+	// 400 — the exact seam that broke the first real billing read after
+	// the 2026-08-29 cutover (data.items.data.price.product is 5 levels).
+	for _, expandPath := range append(
+		append([]string{}, r.URL.Query()["expand[]"]...),
+		r.PostForm["expand[]"]...,
+	) {
+		if strings.Count(expandPath, ".") >= 4 {
+			http.Error(w, fmt.Sprintf(
+				`{"error":{"code":"property_expansion_max_depth","message":"You cannot expand more than 4 levels of a property. Property: %s","type":"invalid_request_error"}}`,
+				expandPath), http.StatusBadRequest)
+			return
+		}
+	}
 	periodEnd := s.subPeriodEnd
 	if periodEnd == 0 {
 		periodEnd = time.Date(2026, 8, 4, 0, 0, 0, 0, time.UTC).Unix()
@@ -428,15 +455,29 @@ func (s *stubStripe) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if s.subActive {
-			_, _ = fmt.Fprintf(w, `{"data":[{"id":"sub_stub","customer":%q,"status":%q,"cancel_at_period_end":%t,"metadata":%s,"items":{"data":[{"current_period_end":%d,"price":{"id":"price_standard","lookup_key":"witself_standard"}}]}}],"has_more":false}`, s.subCustomer, s.subStatus, s.subArmed, s.subscriptionMetadataJSON(), periodEnd)
+			// List reads cannot expand this deep, so product is always
+			// the bare id string here — same as live Stripe.
+			_, _ = fmt.Fprintf(w, `{"data":[{"id":"sub_stub","customer":%q,"status":%q,"cancel_at_period_end":%t,"metadata":%s,"items":{"data":[{"current_period_end":%d,"price":{"id":"price_standard","lookup_key":"witself_standard","product":"prod_stub"}}]}}],"has_more":false}`, s.subCustomer, s.subStatus, s.subArmed, s.subscriptionMetadataJSON(), periodEnd)
 			return
 		}
 		_, _ = fmt.Fprint(w, `{"data":[],"has_more":false}`)
 	case strings.HasPrefix(r.URL.Path, "/v1/subscriptions/"):
+		if s.subscriptionJSON != "" && r.Method == http.MethodGet {
+			_, _ = fmt.Fprint(w, s.subscriptionJSON)
+			return
+		}
 		id := strings.TrimPrefix(r.URL.Path, "/v1/subscriptions/")
 		if id != "sub_stub" {
 			http.NotFound(w, r)
 			return
+		}
+		// product is the bare id string unless this single-subscription
+		// read expanded items.data.price.product (4 levels, legal).
+		productJSON := `"prod_stub"`
+		if r.URL.Query().Get("expand[]") == "items.data.price.product" {
+			productJSON = fmt.Sprintf(
+				`{"id":"prod_stub","metadata":{"witself_plan":%q}}`,
+				s.subscriptionProductPlan())
 		}
 		if r.Method == http.MethodPost {
 			switch s.lastForm["cancel_at_period_end"] {
@@ -457,8 +498,8 @@ func (s *stubStripe) handle(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		_, _ = fmt.Fprintf(w,
-			`{"id":"sub_stub","customer":%q,"status":%q,"cancel_at_period_end":%t,"metadata":%s,"items":{"data":[{"current_period_end":%d,"price":{"id":"price_standard","lookup_key":"witself_standard"}}]}}`,
-			s.subCustomer, s.subStatus, s.subArmed, s.subscriptionMetadataJSON(), periodEnd)
+			`{"id":"sub_stub","customer":%q,"status":%q,"cancel_at_period_end":%t,"metadata":%s,"items":{"data":[{"current_period_end":%d,"price":{"id":"price_standard","lookup_key":"witself_standard","product":%s}}]}}`,
+			s.subCustomer, s.subStatus, s.subArmed, s.subscriptionMetadataJSON(), periodEnd, productJSON)
 	case r.URL.Path == "/v1/invoices/create_preview":
 		if !s.upcoming {
 			http.Error(w, `{"error":{"code":"invoice_upcoming_none","message":"none"}}`, http.StatusNotFound)
@@ -833,16 +874,15 @@ func TestScheduleDowngradeIdempotentKeysMutationsOnly(t *testing.T) {
 	if wantKey == "" || len(wantKey) > 255 {
 		t.Fatalf("derived downgrade key has invalid length %d: %q", len(wantKey), wantKey)
 	}
-	if len(s.requests) != 3 {
-		t.Fatalf("downgrade requests = %+v; want discovery, exact read, and mutation", s.requests)
+	if len(s.requests) != 4 {
+		t.Fatalf("downgrade requests = %+v; want discovery, managed read, exact read, and mutation", s.requests)
 	}
-	if got := s.requests[0]; got.method != http.MethodGet || got.idempotencyKey != "" {
-		t.Fatalf("downgrade discovery read carried an idempotency key: %+v", got)
+	for _, got := range s.requests[:3] {
+		if got.method != http.MethodGet || got.idempotencyKey != "" {
+			t.Fatalf("downgrade read carried an idempotency key: %+v", got)
+		}
 	}
-	if got := s.requests[1]; got.method != http.MethodGet || got.idempotencyKey != "" {
-		t.Fatalf("downgrade exact read carried an idempotency key: %+v", got)
-	}
-	if got := s.requests[2]; got.method != http.MethodPost || got.idempotencyKey != wantKey {
+	if got := s.requests[3]; got.method != http.MethodPost || got.idempotencyKey != wantKey {
 		t.Fatalf("downgrade mutation request = %+v; want key %q", got, wantKey)
 	}
 
@@ -853,10 +893,11 @@ func TestScheduleDowngradeIdempotentKeysMutationsOnly(t *testing.T) {
 	if err != nil || !second.Equal(first) {
 		t.Fatalf("replayed ScheduleDowngradeIdempotent = %v, %v; want %v", second, err, first)
 	}
-	if got := s.requests[start:]; len(got) != 2 ||
+	if got := s.requests[start:]; len(got) != 3 ||
 		got[0].method != http.MethodGet ||
-		got[1].method != http.MethodGet {
-		t.Fatalf("downgrade replay requests = %+v; want discovery and exact confirmation reads", got)
+		got[1].method != http.MethodGet ||
+		got[2].method != http.MethodGet {
+		t.Fatalf("downgrade replay requests = %+v; want discovery, managed, and exact confirmation reads", got)
 	}
 	for _, request := range s.requests[start:] {
 		if request.method == http.MethodPost {
@@ -1414,7 +1455,8 @@ func TestSupportsUpgradeTransitionOnlyFromUnpaid(t *testing.T) {
 
 func TestScheduleDowngradeValidatesProjectionBeforeMutation(t *testing.T) {
 	s, p := newStub(t)
-	s.subscriptionsJSON = `{"data":[{"id":"sub_bad","customer":"cus_stub_1","status":"active","metadata":{"witself_plan":"standard"},"items":{"data":[{"price":{"id":"price_standard","lookup_key":"witself_standard"}}]}}],"has_more":false}`
+	s.subscriptionsJSON = `{"data":[{"id":"sub_bad","customer":"cus_stub_1","status":"active","metadata":{"witself_plan":"standard"},"items":{"data":[{"price":{"id":"price_standard","lookup_key":"witself_standard","product":"prod_stub"}}]}}],"has_more":false}`
+	s.subscriptionJSON = `{"id":"sub_bad","customer":"cus_stub_1","status":"active","metadata":{"witself_plan":"standard"},"items":{"data":[{"price":{"id":"price_standard","lookup_key":"witself_standard","product":"prod_stub"}}]}}`
 	if _, err := p.ScheduleDowngradeIdempotent(
 		context.Background(), "cus_stub_1", plans.Free, "bop_bad_period",
 	); err == nil || !strings.Contains(err.Error(), "future current period end") {
@@ -1430,22 +1472,27 @@ func TestScheduleDowngradeValidatesProjectionBeforeMutation(t *testing.T) {
 
 func TestManagedSubscriptionProjectionFailsClosed(t *testing.T) {
 	t.Parallel()
-	one := `{"id":"sub_a","customer":"cus_stub_1","status":"active","metadata":{"witself_plan":"standard"},"items":{"data":[{"current_period_end":1783123200,"price":{"id":"price_a","lookup_key":"witself_standard"}}]}}`
+	one := `{"id":"sub_a","customer":"cus_stub_1","status":"active","metadata":{"witself_plan":"standard"},"items":{"data":[{"current_period_end":1783123200,"price":{"id":"price_a","lookup_key":"witself_standard","product":"prod_stub"}}]}}`
 	tests := []struct {
 		name     string
 		response string
+		read     string
 		want     string
 	}{
 		{name: "pagination", response: `{"data":[],"has_more":true}`, want: "more than 100"},
 		{name: "multiple", response: `{"data":[` + one + `,` + strings.ReplaceAll(one, "sub_a", "sub_b") + `],"has_more":false}`, want: "2 live subscriptions"},
-		{name: "missing metadata", response: `{"data":[{"id":"sub_a","customer":"cus_stub_1","status":"active","items":{"data":[{"current_period_end":1783123200,"price":{"id":"price_a","lookup_key":"witself_standard"}}]}}],"has_more":false}`, want: "witself_plan"},
-		{name: "price mismatch", response: `{"data":[{"id":"sub_a","customer":"cus_stub_1","status":"active","metadata":{"witself_plan":"standard"},"items":{"data":[{"current_period_end":1783123200,"price":{"id":"price_a","lookup_key":"witself_team"}}]}}],"has_more":false}`, want: "does not match"},
+		{name: "missing metadata", response: `{"data":[{"id":"sub_a","customer":"cus_stub_1","status":"active","items":{"data":[{"current_period_end":1783123200,"price":{"id":"price_a","lookup_key":"witself_standard","product":"prod_stub"}}]}}],"has_more":false}`, read: `{"id":"sub_a","customer":"cus_stub_1","status":"active","items":{"data":[{"current_period_end":1783123200,"price":{"id":"price_a","lookup_key":"witself_standard","product":{"id":"prod_stub","metadata":{}}}}]}}`, want: "witself_plan"},
+		{name: "price mismatch", response: `{"data":[{"id":"sub_a","customer":"cus_stub_1","status":"active","metadata":{"witself_plan":"standard"},"items":{"data":[{"current_period_end":1783123200,"price":{"id":"price_a","lookup_key":"witself_team","product":"prod_stub"}}]}}],"has_more":false}`, read: `{"id":"sub_a","customer":"cus_stub_1","status":"active","metadata":{"witself_plan":"standard"},"items":{"data":[{"current_period_end":1783123200,"price":{"id":"price_a","lookup_key":"witself_team","product":{"id":"prod_stub","metadata":{}}}}]}}`, want: "does not match"},
+		{name: "changed between list and read", response: `{"data":[` + one + `],"has_more":false}`, read: `{"id":"sub_a","customer":"cus_stub_1","status":"canceled","metadata":{"witself_plan":"standard"},"items":{"data":[{"current_period_end":1783123200,"price":{"id":"price_a","lookup_key":"witself_standard","product":"prod_stub"}}]}}`, want: "changed between list and read"},
+		{name: "wrong subscription on read", response: `{"data":[` + one + `],"has_more":false}`, read: strings.ReplaceAll(one, "sub_a", "sub_other"), want: "changed between list and read"},
+		{name: "wrong customer on read", response: `{"data":[` + one + `],"has_more":false}`, read: strings.ReplaceAll(one, "cus_stub_1", "cus_other"), want: "changed between list and read"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			s, p := newStub(t)
 			s.subscriptionsJSON = tc.response
+			s.subscriptionJSON = tc.read
 			if _, _, err := p.managedLiveSubscription(
 				context.Background(), "cus_stub_1",
 			); err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -1455,9 +1502,28 @@ func TestManagedSubscriptionProjectionFailsClosed(t *testing.T) {
 	}
 }
 
+// TestManagedSubscriptionRefusesMismatchedExpandedProduct proves the exact
+// read really requests items.data.price.product and folds the result into
+// validation: the stub only serves product metadata when that expansion is
+// present, so a mismatched product plan can only refuse if the expansion
+// happened. Guards both the expansion and the dual lookup/product check.
+func TestManagedSubscriptionRefusesMismatchedExpandedProduct(t *testing.T) {
+	s, p := newStub(t)
+	s.subActive = true
+	s.subCustomer = "cus_stub_1"
+	s.subStatus = "active"
+	s.subProductPlan = "team"
+	if _, _, err := p.managedLiveSubscription(
+		context.Background(), "cus_stub_1",
+	); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("managedLiveSubscription error = %v; want mismatched product refusal", err)
+	}
+}
+
 func TestManagedSubscriptionAcceptsGrandfatheredPriceWithProductPlanMetadata(t *testing.T) {
 	s, p := newStub(t)
-	s.subscriptionsJSON = `{"data":[{"id":"sub_grandfathered","customer":"cus_stub_1","status":"active","metadata":{"witself_plan":"standard"},"items":{"data":[{"current_period_end":1783123200,"price":{"id":"price_old","lookup_key":"","product":{"id":"prod_standard","metadata":{"witself_plan":"standard"}}}}]}}],"has_more":false}`
+	s.subscriptionsJSON = `{"data":[{"id":"sub_grandfathered","customer":"cus_stub_1","status":"active","metadata":{"witself_plan":"standard"},"items":{"data":[{"current_period_end":1783123200,"price":{"id":"price_old","lookup_key":"","product":"prod_standard"}}]}}],"has_more":false}`
+	s.subscriptionJSON = `{"id":"sub_grandfathered","customer":"cus_stub_1","status":"active","metadata":{"witself_plan":"standard"},"items":{"data":[{"current_period_end":1783123200,"price":{"id":"price_old","lookup_key":"","product":{"id":"prod_standard","metadata":{"witself_plan":"standard"}}}}]}}`
 	sub, plan, err := p.managedLiveSubscription(
 		context.Background(), "cus_stub_1",
 	)
@@ -1668,6 +1734,30 @@ func TestNextChargeNoneIsNil(t *testing.T) {
 // stubProductID keeps the historical prod_stub identity for the Professional
 // product (every older fixture references it) and gives each other plan its
 // own stable product object.
+// TestStubEnforcesExpansionDepthCap pins the stub's depth guard itself. The
+// suite's regression story for the 2026-08-29 cutover failure rests on an
+// over-deep expand[] turning red here, so the guard must be proven to fire —
+// on the query encoding and on the POST form encoding.
+func TestStubEnforcesExpansionDepthCap(t *testing.T) {
+	_, p := newStub(t)
+	var out struct{}
+	var apiErr *apiError
+	overDeep := url.Values{}
+	overDeep.Set("expand[]", "a.b.c.d.e")
+	err := p.call(context.Background(), "GET",
+		"/v1/subscriptions?"+overDeep.Encode(), nil, "", &out)
+	if !errors.As(err, &apiErr) || apiErr.status != http.StatusBadRequest ||
+		apiErr.code != "property_expansion_max_depth" {
+		t.Fatalf("query expand error = %v; want 400 property_expansion_max_depth", err)
+	}
+	err = p.call(context.Background(), "POST", "/v1/checkout/sessions",
+		overDeep, "", &out)
+	if !errors.As(err, &apiErr) || apiErr.status != http.StatusBadRequest ||
+		apiErr.code != "property_expansion_max_depth" {
+		t.Fatalf("form expand error = %v; want 400 property_expansion_max_depth", err)
+	}
+}
+
 func stubProductID(plan string) string {
 	if plan == "standard" {
 		return "prod_stub"
