@@ -197,7 +197,10 @@ func validateGenericProviderPreviousSelection(desired, previous transcriptcaptur
 	}
 	switch {
 	case previous.RuntimeCLICommand != desired.RuntimeCLICommand:
-		return fmt.Errorf("%s CLI changed from %s to %s; restore the installed CLI selection before reinstalling", previous.Runtime, previous.RuntimeCLICommand, desired.RuntimeCLICommand)
+		return fmt.Errorf(
+			"%s CLI changed from %s to %s; set %s=%s to keep the installed selection, or uninstall then reinstall to adopt the new CLI",
+			previous.Runtime, previous.RuntimeCLICommand, desired.RuntimeCLICommand,
+			genericProviderCLIPathEnv(previous.Runtime), previous.RuntimeCLICommand)
 	case previous.RuntimeConfigRoot != desired.RuntimeConfigRoot:
 		return fmt.Errorf("%s config root changed from %s to %s; restore the installed selector before reinstalling", previous.Runtime, previous.RuntimeConfigRoot, desired.RuntimeConfigRoot)
 	case previous.RuntimeMCPConfigPath != desired.RuntimeMCPConfigPath:
@@ -233,6 +236,42 @@ func validateGenericProviderCurrentRoots(cfg transcriptcapture.Config) error {
 		}
 	}
 	return nil
+}
+
+// genericProviderCLIPathEnv is the environment selector that overrides CLI
+// discovery for a generic-provider runtime (see findRuntimeCLIWithEnvironment).
+func genericProviderCLIPathEnv(runtimeName string) string {
+	switch runtimeName {
+	case transcriptcapture.RuntimeCodex:
+		return "CODEX_CLI_PATH"
+	case transcriptcapture.RuntimeClaudeCode:
+		return "CLAUDE_CLI_PATH"
+	case transcriptcapture.RuntimeGrokBuild:
+		return "GROK_CLI_PATH"
+	case transcriptcapture.RuntimeCursor:
+		return "CURSOR_CLI_PATH"
+	default:
+		return ""
+	}
+}
+
+// genericProviderRemovalCLI resolves the CLI used to remove an installed
+// generic-provider binding. Removal targets the integration that was
+// actually installed, so a pinned CLI selection wins even when the ambient
+// PATH or CLI env var now resolves a different binary: the install guard
+// refuses such a switch, and re-resolving here too used to deadlock it —
+// the switch could be neither accepted (install refused) nor undone
+// (uninstall refused). Config-root and WITSELF_HOME drift still fail
+// closed, and a legacy unpinned config still resolves and validates the
+// ambient CLI exactly as before.
+func genericProviderRemovalCLI(cfg transcriptcapture.Config) (string, error) {
+	if genericProviderConfigIsPinned(cfg) && cfg.RuntimeCLICommand != "" {
+		if err := validateGenericProviderCurrentRoots(cfg); err != nil {
+			return "", err
+		}
+		return cleanGenericInvocationPath(cfg.Runtime+" CLI", cfg.RuntimeCLICommand)
+	}
+	return validateGenericProviderCurrentSelection(cfg)
 }
 
 func validateGenericProviderCurrentSelection(cfg transcriptcapture.Config) (string, error) {
