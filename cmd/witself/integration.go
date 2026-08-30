@@ -1501,7 +1501,7 @@ func uninstallCmd(args []string) int {
 			fmt.Fprintf(os.Stderr, "witself: locate current executable for %s ownership verification: %v\n", runtime, err)
 			return 1
 		}
-		currentCLI, selectionErr := validateGenericProviderCurrentSelection(cfg)
+		currentCLI, selectionErr := genericProviderRemovalCLI(cfg)
 		if selectionErr != nil {
 			fmt.Fprintf(os.Stderr, "witself: %v\n", selectionErr)
 			return 1

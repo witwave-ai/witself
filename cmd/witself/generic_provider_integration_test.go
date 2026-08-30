@@ -743,6 +743,66 @@ func TestGenericProviderLegacyMigrationAndUninstall(t *testing.T) {
 	}
 }
 
+// TestGenericProviderRemovalCLIUsesPinnedSelection pins the uninstall
+// direction of the CLI-drift guard: removal targets the integration that was
+// installed, so ambient CLI drift must not block it — otherwise a CLI switch
+// can be neither accepted (install refuses) nor undone (uninstall refuses),
+// the deadlock hit live on 2026-08-29 when Homebrew's codex appeared ahead
+// of the pinned ChatGPT.app binary.
+func TestGenericProviderRemovalCLIUsesPinnedSelection(t *testing.T) {
+	for _, runtimeName := range genericProviderTestRuntimes {
+		t.Run(runtimeName, func(t *testing.T) {
+			fixture := newGenericProviderTestFixture(t, runtimeName)
+
+			alternateCLI := filepath.Join(fixture.root, "alternate-provider")
+			if runtime.GOOS == "windows" {
+				alternateCLI += ".exe"
+			}
+			rawCLI, err := os.ReadFile(fixture.cli)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(alternateCLI, rawCLI, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(fixture.cliEnv, alternateCLI)
+
+			if _, err := validateGenericProviderCurrentSelection(fixture.cfg); err == nil ||
+				!strings.Contains(err.Error(), "CLI changed") && !strings.Contains(err.Error(), "CLI selection changed") {
+				t.Fatalf("install-direction guard must stay fail-closed under drift, got %v", err)
+			}
+			got, err := genericProviderRemovalCLI(fixture.cfg)
+			if err != nil {
+				t.Fatalf("removal CLI under ambient drift: %v", err)
+			}
+			if got != fixture.cfg.RuntimeCLICommand {
+				t.Fatalf("removal CLI = %q, want the pinned %q", got, fixture.cfg.RuntimeCLICommand)
+			}
+
+			legacy := fixture.cfg
+			legacy.RuntimeCLICommand = ""
+			legacy.MCPCommand = ""
+			legacy.MCPEnvironment = nil
+			legacy.RuntimeConfigRoot = ""
+			legacy.RuntimeMCPConfigPath = ""
+			t.Setenv(fixture.cliEnv, fixture.cli)
+			ambient, err := genericProviderRemovalCLI(legacy)
+			if err != nil {
+				t.Fatalf("legacy removal CLI: %v", err)
+			}
+			if ambient != fixture.cli {
+				t.Fatalf("legacy removal CLI = %q, want ambient %q", ambient, fixture.cli)
+			}
+
+			missing := fixture.cfg
+			missing.RuntimeCLICommand = filepath.Join(fixture.root, "gone-provider")
+			if _, err := genericProviderRemovalCLI(missing); err == nil {
+				t.Fatal("removal with a missing pinned CLI must fail closed")
+			}
+		})
+	}
+}
+
 func TestGenericProviderSelectorCLIHomeAndSymlinkDriftFailClosed(t *testing.T) {
 	for _, runtimeName := range genericProviderTestRuntimes {
 		t.Run(runtimeName, func(t *testing.T) {
