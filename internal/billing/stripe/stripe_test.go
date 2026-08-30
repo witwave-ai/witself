@@ -778,6 +778,9 @@ func TestSubscribeBuildsCheckout(t *testing.T) {
 		s.lastForm["payment_method_types[]"] != "card" {
 		t.Fatalf("checkout form = %v", s.lastForm)
 	}
+	if s.lastForm["allow_promotion_codes"] != "true" {
+		t.Fatalf("checkout must accept promotion codes: %v", s.lastForm)
+	}
 	if s.lastForm["metadata[witself_plan]"] != "standard" {
 		t.Fatalf("witself_plan metadata missing: %v — the activation webhook depends on it", s.lastForm)
 	}

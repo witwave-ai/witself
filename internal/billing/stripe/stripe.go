@@ -494,13 +494,17 @@ func (p *Provider) subscribe(
 		// Pin the purchase flow to synchronous cards. Leaving this absent lets
 		// mutable Dashboard settings add delayed-notification methods; a
 		// completed-but-unpaid Checkout cannot be safely reported cancelled.
-		"payment_method_types[]":                    {"card"},
-		"customer":                                  {customerID},
-		"line_items[0][price]":                      {priceID},
-		"line_items[0][quantity]":                   {"1"},
-		"success_url":                               {p.cfg.SuccessURL},
-		"cancel_url":                                {p.cfg.CancelURL},
-		"metadata[witself_plan]":                    {plan},
+		"payment_method_types[]":  {"card"},
+		"customer":                {customerID},
+		"line_items[0][price]":    {priceID},
+		"line_items[0][quantity]": {"1"},
+		// Let Checkout accept operator-minted promotion codes (launch
+		// proofs, future discounts). Entering no code keeps full price;
+		// code redemption limits and expiry stay dashboard-governed.
+		"allow_promotion_codes":  {"true"},
+		"success_url":            {p.cfg.SuccessURL},
+		"cancel_url":             {p.cfg.CancelURL},
+		"metadata[witself_plan]": {plan},
 		"subscription_data[metadata][witself_plan]": {plan},
 	}
 	if p.cfg.AutomaticTax {
