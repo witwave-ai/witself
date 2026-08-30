@@ -174,7 +174,9 @@ helm template witself-server "$server_chart" --namespace witself \
   --set image.tag=0.0.241 >"$email_production_render"
 helm template witself-apps "$apps_chart" \
   --values "$civo_cell" \
-  --values "$apps_email_production_profile" >"$email_production_apps_render"
+  --values "$apps_email_production_profile" \
+  --set-string apps.witselfServer.billing.endpoint= \
+  >"$email_production_apps_render"
 helm template witself-apps "$apps_chart" \
   --values "$civo_cell" \
   --values "$apps_email_production_profile" \
@@ -182,6 +184,7 @@ helm template witself-apps "$apps_chart" \
   --set apps.witselfServer.imageTag=0.0.244 \
   --set apps.witselfServer.worker.agentEmailOutbound.enabled=false \
   --set apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name= \
+  --set-string apps.witselfServer.billing.endpoint= \
   >"$email_production_pre245_apps_render"
 helm template witself-server "$server_chart" --namespace witself \
   --values "$gcp_profile" \
@@ -710,15 +713,22 @@ fi
 for dark_billing_config in \
   "$default_server_config" \
   "$gcp_server_config" \
-  "$live_nested_server_config" \
-  "$civo_server_config"; do
+  "$live_nested_server_config"; do
   reject_line "  WITSELF_BILLING_ENDPOINT:" "$dark_billing_config"
 done
-for dark_billing_application in \
-  "$live_server_application" \
-  "$civo_server_application"; do
-  reject_line "        billing:" "$dark_billing_application"
-done
+reject_line "        billing:" "$live_server_application"
+# The Stripe cutover made managed billing part of the committed serving state
+# on both civo cells. Guard the live direction: a change that silently drops
+# the billing endpoint from a serving cell must fail here, not be discovered
+# as a missing capability in production.
+require_line '  WITSELF_BILLING_ENDPOINT: "https://self.witwave.ai"' \
+  "$civo_server_config"
+require_line '        billing:' "$civo_server_application"
+require_line '          endpoint: https://self.witwave.ai' \
+  "$civo_server_application"
+require_line '        billing:' "$civo_backup_server_application"
+require_line '          endpoint: https://self.witwave.ai' \
+  "$civo_backup_server_application"
 require_line '  WITSELF_BILLING_ENDPOINT: "https://self.witwave.ai"' \
   "$billing_server_config"
 require_line '        billing:' "$billing_server_application"
@@ -1558,6 +1568,7 @@ for unsafe_pin in chartVersion imageTag; do
     --values "$apps_email_production_profile" \
     --set "apps.witselfServer.${unsafe_pin}=0.0.240" \
     --set apps.witselfServer.worker.agentEmailOutbound.enabled=false \
+    --set-string apps.witselfServer.billing.endpoint= \
     >/dev/null 2>&1; then
     echo "app-of-apps enabled a retry-canary Secret with pre-v0.0.245 ${unsafe_pin}" >&2
     exit 1
@@ -1571,6 +1582,7 @@ expect_apps_template_failure \
   --set apps.witselfServer.chartVersion=0.0.240 \
   --set apps.witselfServer.imageTag=0.0.240 \
   --set apps.witselfServer.worker.agentEmailOutbound.enabled=false \
+  --set-string apps.witselfServer.billing.endpoint= \
   --set apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name=
 expect_apps_template_failure \
   "app-of-apps pre-v0.0.245 retry-canary Secret" \
@@ -1579,18 +1591,21 @@ expect_apps_template_failure \
   --values "$apps_email_production_profile" \
   --set apps.witselfServer.chartVersion=0.0.244 \
   --set apps.witselfServer.imageTag=0.0.244 \
-  --set apps.witselfServer.worker.agentEmailOutbound.enabled=false
+  --set apps.witselfServer.worker.agentEmailOutbound.enabled=false \
+  --set-string apps.witselfServer.billing.endpoint=
 expect_apps_template_failure \
   "app-of-apps retry-canary with an invalid Secret name" \
   "apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name must be a valid Kubernetes Secret name" \
   --values "$civo_cell" \
   --values "$apps_email_production_profile" \
+  --set-string apps.witselfServer.billing.endpoint= \
   --set apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name=Invalid_Secret
 expect_apps_template_failure \
   "app-of-apps retry-canary with an invalid Secret key" \
   "apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.key must be a valid Kubernetes Secret data key" \
   --values "$civo_cell" \
   --values "$apps_email_production_profile" \
+  --set-string apps.witselfServer.billing.endpoint= \
   --set apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.key=bad/key
 expect_apps_template_failure \
   "app-of-apps retry-canary Secret without a Secret-backed cohort" \
@@ -1598,6 +1613,7 @@ expect_apps_template_failure \
   --values "$civo_cell" \
   --set apps.witselfServer.chartVersion=0.0.245 \
   --set apps.witselfServer.imageTag=0.0.245 \
+  --set-string apps.witselfServer.billing.endpoint= \
   --set apps.witselfServer.agentEmail.receiveProduction.accountIDsExistingSecret.name= \
   --set apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name=retry-canary-v1
 expect_apps_template_failure \
@@ -1605,6 +1621,7 @@ expect_apps_template_failure \
   "apps.witselfServer.agentEmail.receiveProduction retry-canary and account-cohort Secrets must have distinct names" \
   --values "$civo_cell" \
   --values "$apps_email_production_profile" \
+  --set-string apps.witselfServer.billing.endpoint= \
   --set apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentIDExistingSecret.name=witself-agent-email-receive-cohort-v1
 expect_apps_template_failure \
   "app-of-apps dark literal retry canary" \
@@ -1614,6 +1631,7 @@ expect_apps_template_failure \
 if helm template witself-apps "$apps_chart" \
   --values "$civo_cell" \
   --values "$apps_email_production_profile" \
+  --set-string apps.witselfServer.billing.endpoint= \
   --set apps.witselfServer.agentEmail.receiveProduction.accountIDsExistingSecret.name= \
   --set-json 'apps.witselfServer.agentEmail.receiveProduction.accountIDs=["acc_bbbbbbbbbbbbbbbb","acc_aaaaaaaaaaaaaaaa"]' \
   >/dev/null 2>&1; then
@@ -1623,6 +1641,7 @@ fi
 if helm template witself-apps "$apps_chart" \
   --values "$civo_cell" \
   --values "$apps_email_production_profile" \
+  --set-string apps.witselfServer.billing.endpoint= \
   --set-json 'apps.witselfServer.agentEmail.receiveProduction.accountIDs=["acc_aaaaaaaaaaaaaaaa"]' \
   >/dev/null 2>&1; then
   echo "app-of-apps accepted a literal cohort alongside its Secret reference" >&2
@@ -1631,6 +1650,7 @@ fi
 if helm template witself-apps "$apps_chart" \
   --values "$civo_cell" \
   --values "$apps_email_production_profile" \
+  --set-string apps.witselfServer.billing.endpoint= \
   --set apps.witselfServer.agentEmail.receiveProduction.accountIDsExistingSecret.name= \
   >/dev/null 2>&1; then
   echo "app-of-apps accepted enabled production receive without a cohort source" >&2
@@ -1639,6 +1659,7 @@ fi
 if helm template witself-apps "$apps_chart" \
   --values "$civo_cell" \
   --values "$apps_email_production_profile" \
+  --set-string apps.witselfServer.billing.endpoint= \
   --set apps.witselfServer.agentEmail.receiveProduction.retryCanaryAgentID=agent_aaaaaaaaaaaaaaaa \
   >/dev/null 2>&1; then
   echo "app-of-apps exposed a retry canary with a Secret-backed production cohort" >&2

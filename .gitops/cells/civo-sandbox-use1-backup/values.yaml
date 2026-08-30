@@ -27,6 +27,8 @@ apps:
     chartVersion: 0.0.261
     imageTag: 0.0.261
     backendKind: managed
+    billing:
+      endpoint: https://self.witwave.ai
     backup:
       enabled: true
       validationEnabled: true
