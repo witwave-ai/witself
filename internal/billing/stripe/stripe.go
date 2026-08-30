@@ -34,6 +34,7 @@
 package stripe
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -614,6 +615,25 @@ func (p *Provider) PortalLink(ctx context.Context, customerID string) (string, e
 	return session.URL, nil
 }
 
+// stripeProductRef is a price's product reference. Stripe serializes it as a
+// bare "prod_..." ID string unless the read expanded the product; only an
+// expanded read carries metadata. Both shapes must decode: expansion depth is
+// capped at 4 levels, so list reads (whose paths start at "data.") can never
+// reach the product object and always see the string form.
+type stripeProductRef struct {
+	ID       string            `json:"id"`
+	Metadata map[string]string `json:"metadata"`
+}
+
+func (p *stripeProductRef) UnmarshalJSON(raw []byte) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		return json.Unmarshal(trimmed, &p.ID)
+	}
+	type bare stripeProductRef
+	return json.Unmarshal(trimmed, (*bare)(p))
+}
+
 // stripeSubscription is the slice of the subscription object read here. As
 // of API 2025-03-31.basil, current_period_end lives on subscription ITEMS —
 // it was removed from the subscription top level.
@@ -627,12 +647,9 @@ type stripeSubscription struct {
 		Data []struct {
 			CurrentPeriodEnd int64 `json:"current_period_end"`
 			Price            struct {
-				ID        string `json:"id"`
-				LookupKey string `json:"lookup_key"`
-				Product   struct {
-					ID       string            `json:"id"`
-					Metadata map[string]string `json:"metadata"`
-				} `json:"product"`
+				ID        string           `json:"id"`
+				LookupKey string           `json:"lookup_key"`
+				Product   stripeProductRef `json:"product"`
 			} `json:"price"`
 		} `json:"data"`
 	} `json:"items"`
@@ -708,10 +725,12 @@ func (p *Provider) liveSubscriptions(ctx context.Context, customerID string) ([]
 		Data    []stripeSubscription `json:"data"`
 		HasMore bool                 `json:"has_more"`
 	}
-	q := url.Values{
-		"customer": {customerID}, "limit": {"100"},
-		"expand[]": {"data.items.data.price.product"},
-	}
+	// No product expansion here: list paths start at "data.", so reaching
+	// the product object would need 5 expansion levels and Stripe caps
+	// expansion at 4 (property_expansion_max_depth). The one chosen
+	// subscription is re-read with items.data.price.product expanded in
+	// managedLiveSubscription before any plan validation.
+	q := url.Values{"customer": {customerID}, "limit": {"100"}}
 	if err := p.call(ctx, "GET", "/v1/subscriptions?"+q.Encode(), nil, "", &list); err != nil {
 		return nil, err
 	}
@@ -755,11 +774,31 @@ func (p *Provider) managedLiveSubscription(
 			"stripe: customer %s has %d live subscriptions; refusing ambiguous billing state",
 			customerID, len(subs))
 	}
-	planID, err := p.subscriptionPlan(subs[0])
+	// Re-read the one live subscription with its product expanded (a legal
+	// 4-level path on a single retrieve) so subscriptionPlan can check
+	// price.product metadata as well as the lookup key; the list response
+	// only carries the product id.
+	if err := validateStripeResourceID(subs[0].ID, "sub_"); err != nil {
+		return nil, "", fmt.Errorf("stripe: invalid live subscription id: %w", err)
+	}
+	var sub stripeSubscription
+	path := "/v1/subscriptions/" + url.PathEscape(subs[0].ID)
+	if err := p.call(
+		ctx, "GET", path+"?expand[]=items.data.price.product", nil, "", &sub,
+	); err != nil {
+		return nil, "", err
+	}
+	if sub.ID != subs[0].ID || sub.Customer != customerID ||
+		!liveStripeSubscriptionStatus(sub.Status) {
+		return nil, "", fmt.Errorf(
+			"stripe: subscription %s changed between list and read; refusing stale billing state",
+			subs[0].ID)
+	}
+	planID, err := p.subscriptionPlan(sub)
 	if err != nil {
 		return nil, "", err
 	}
-	return &subs[0], planID, nil
+	return &sub, planID, nil
 }
 
 // ScheduleDowngrade implements billing.Provider. Today's only downgrade

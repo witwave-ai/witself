@@ -38,12 +38,34 @@ func (s *dunningStripeStub) handler(t *testing.T) http.HandlerFunc {
 		live := s.live
 		s.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
+		// Single-subscription re-read: only here can product arrive
+		// expanded (list paths would exceed Stripe's 4-level cap).
+		if r.URL.Path == "/v1/subscriptions/sub_dunned_1" {
+			if !live {
+				http.Error(w,
+					`{"error":{"code":"resource_missing","message":"gone"}}`,
+					http.StatusNotFound)
+				return
+			}
+			_, _ = fmt.Fprint(w, `{
+				"id":"sub_dunned_1","customer":"cus_dunned_1","status":"past_due",
+				"cancel_at_period_end":false,
+				"metadata":{"witself_plan":"standard"},
+				"items":{"data":[{
+					"current_period_end":1790000000,
+					"price":{"id":"price_standard","lookup_key":"witself_standard",
+						"product":{"id":"prod_standard","metadata":{"witself_plan":"standard"}}}
+				}]}
+			}`)
+			return
+		}
 		if !live {
 			_, _ = fmt.Fprint(w, `{"data":[],"has_more":false}`)
 			return
 		}
 		// Mid-dunning shape: Smart Retries keeps the subscription live with
-		// status past_due while it retries the charge.
+		// status past_due while it retries the charge. Unexpanded list
+		// reads carry the product as its bare id, as live Stripe does.
 		_, _ = fmt.Fprint(w, `{"data":[{
 			"id":"sub_dunned_1","customer":"cus_dunned_1","status":"past_due",
 			"cancel_at_period_end":false,
@@ -51,7 +73,7 @@ func (s *dunningStripeStub) handler(t *testing.T) http.HandlerFunc {
 			"items":{"data":[{
 				"current_period_end":1790000000,
 				"price":{"id":"price_standard","lookup_key":"witself_standard",
-					"product":{"id":"prod_standard","metadata":{"witself_plan":"standard"}}}
+					"product":"prod_standard"}
 			}]}
 		}],"has_more":false}`)
 	}
