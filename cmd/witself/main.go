@@ -139,6 +139,8 @@ func run(args []string) int {
 		return planCmd(args[1:])
 	case "legal":
 		return legalCmd(args[1:])
+	case "export":
+		return exportCmd(args[1:])
 	case "billing":
 		return billingCmd(args[1:])
 	case "operator":
@@ -4197,6 +4199,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself agent create|list|peers|delete")
 	usageLine(w, "  witself plan list|status|upgrade|downgrade|cancel  Inspect catalog and effective account policy")
 	usageLine(w, "  witself legal [DOCUMENT]    Read the published legal documents and versions")
+	usageLine(w, "  witself export              Download and verify a self-service account archive")
 	usageLine(w, "  witself billing show|invoices|payments|portal|setup  Inspect provider billing and open hosted flows")
 	usageLine(w, "  witself operator list|create|delete")
 	usageLine(w, "  witself token create|revoke  Mint or revoke agent/operator tokens")

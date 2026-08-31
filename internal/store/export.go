@@ -144,10 +144,31 @@ func (s *Store) ExportAccountBackup(
 	)
 }
 
+// ExportAccountSelf streams a customer-requested point-in-time account
+// archive without changing account lifecycle state. Active, suspended, and
+// closed accounts are exportable. PostgreSQL REPEATABLE READ supplies one
+// relational snapshot while ReadOnly prevents reconciliation or repair writes;
+// unlike an evacuation export, this path does not lock the account row.
+//
+// Self exports retain the schema and vault-lifecycle portability guards. An
+// in-progress or damaged vault lifecycle is therefore refused rather than
+// captured in an archive the customer could not restore safely.
+func (s *Store) ExportAccountSelf(
+	ctx context.Context,
+	accountID, cellName, serverVersion string,
+	w io.Writer,
+) error {
+	return s.exportAccount(
+		ctx, accountID, cellName, serverVersion, w,
+		accountExportOptions{self: true},
+	)
+}
+
 type accountExportOptions struct {
 	evacuationID string
 	backupID     string
 	backup       bool
+	self         bool
 }
 
 func (s *Store) exportAccount(
@@ -156,8 +177,9 @@ func (s *Store) exportAccount(
 	w io.Writer,
 	options accountExportOptions,
 ) error {
+	readOnlySnapshot := options.backup || options.self
 	txOptions := pgx.TxOptions{IsoLevel: pgx.RepeatableRead}
-	if options.backup {
+	if readOnlySnapshot {
 		txOptions.AccessMode = pgx.ReadOnly
 	}
 	tx, err := s.pool.BeginTx(ctx, txOptions)
@@ -189,7 +211,7 @@ func (s *Store) exportAccount(
 	accountQuery := `SELECT status, evacuation_id, evacuation_role
 		   FROM accounts
 		  WHERE id = $1`
-	if !options.backup {
+	if !readOnlySnapshot {
 		accountQuery += ` FOR UPDATE`
 	}
 	err = tx.QueryRow(ctx,
@@ -212,14 +234,14 @@ func (s *Store) exportAccount(
 			*currentEvacuationRole != "source") {
 		return ErrAccountEvacuationMismatch
 	}
-	if options.backup {
+	if readOnlySnapshot {
 		if status != "active" && status != "suspended" && status != "closed" {
 			return ErrAccountNotExportable
 		}
 	} else if status != "suspended" && status != "closed" {
 		return ErrAccountNotExportable
 	}
-	if !options.backup {
+	if !readOnlySnapshot {
 		if err := expireAccountVaultKeyEnrollmentsTx(
 			ctx, tx, accountID,
 		); err != nil {
@@ -293,7 +315,7 @@ func (s *Store) exportAccount(
 	// write, so repair those nullable application-derived digests in bounded
 	// memory before streaming a current-schema portable archive. A compacted row
 	// without a digest is unrecoverable and fails the export closed.
-	if !options.backup {
+	if !readOnlySnapshot {
 		if _, err := backfillAvatarLockedLayerDigestsTx(ctx, tx,
 			avatarLockedLayerDigestBackfillFilter{
 				accountID: accountID,
@@ -304,7 +326,7 @@ func (s *Store) exportAccount(
 	// Export itself is a legitimate lazy-expiry touch. Materialize every due
 	// request and cancel its active fences before the snapshot streams, so an
 	// archive can never carry time-expired authority as state=open.
-	if !options.backup {
+	if !readOnlySnapshot {
 		if _, _, err := drainMessageRequestReconciliationTx(
 			ctx, tx, accountID,
 		); err != nil {
@@ -1432,6 +1454,8 @@ func (s *Store) exportAccount(
 	if options.backup {
 		m.Purpose = export.PurposeBackup
 		m.BackupID = options.backupID
+	} else if options.self {
+		m.Purpose = export.PurposeSelf
 	}
 	if err := export.Write(ctx, w, m, sources); err != nil {
 		return err

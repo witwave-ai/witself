@@ -1329,6 +1329,23 @@ func serve() int {
 			}
 			return err
 		}
+		cfg.StreamAccountSelf = func(
+			ctx context.Context,
+			accountID string,
+			w io.Writer,
+		) error {
+			cellName := os.Getenv("WITSELF_CELL_NAME")
+			err := st.ExportAccountSelf(
+				ctx, accountID, cellName, version.Version, w,
+			)
+			switch {
+			case errors.Is(err, store.ErrVaultLifecycleInProgress):
+				return server.ErrVaultLifecycleInProgress
+			case errors.Is(err, store.ErrExportSchemaAhead):
+				return server.ErrExportSchemaAhead
+			}
+			return err
+		}
 		cfg.ReportAccountExportFailure = func(_ context.Context, accountID string, err error) {
 			logAccountExportFailure(os.Stderr,
 				accountID, os.Getenv("WITSELF_CELL_NAME"), err)

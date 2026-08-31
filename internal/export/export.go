@@ -41,6 +41,10 @@ const (
 	// archives are independent recovery artifacts: they never carry an
 	// evacuation epoch and must not drive placement or source cleanup.
 	PurposeBackup = "backup"
+
+	// PurposeSelf marks a customer-requested account archive. Self-service
+	// archives contain no backup or evacuation identity.
+	PurposeSelf = "self"
 )
 
 // chunkSize bounds how many NDJSON bytes are buffered per tar entry. Tar
