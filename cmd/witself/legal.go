@@ -68,7 +68,7 @@ func legalHTTPGet(rawURL, accept string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, err
@@ -137,7 +137,7 @@ func legalShow(base, document string) int {
 		fmt.Fprintf(os.Stderr, "witself: fetch %s: %v\n", slug, err)
 		return 1
 	}
-	os.Stdout.Write(body)
+	_, _ = os.Stdout.Write(body)
 	if len(body) > 0 && body[len(body)-1] != '\n' {
 		fmt.Println()
 	}

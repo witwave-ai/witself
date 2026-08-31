@@ -59,7 +59,7 @@ upgrade and complete checkout.
 
 Failed renewals are retried; if payment ultimately fails the subscription is
 cancelled and the account continues on the free plan — content is retained
-per the [data-retention policy](../data-retention-policy.md), subject to the
+per the [data-retention policy](https://github.com/witwave-ai/witself/blob/main/docs/data-retention-policy.md), subject to the
 free plan's retention windows, not deleted for non-payment itself. Refunds:
 see [Refund & Cancellation](refund-cancellation.md).
 
@@ -71,7 +71,7 @@ transmitting your content as you direct (for example, agent email you
 send), and abuse protection. Value-free operational records (audit events
 and usage counters) contain no content and survive content deletion. We do not train models on your content and we do not sell it.
 Retention and deletion behavior is the published
-[data-retention policy](../data-retention-policy.md). You may request a full
+[data-retention policy](https://github.com/witwave-ai/witself/blob/main/docs/data-retention-policy.md). You may request a full
 export of your open-plane data at any time by contacting
 legal@witwave.ai; sealed-plane data exports only as ciphertext. A
 self-service export command is on the roadmap.
@@ -86,7 +86,7 @@ follows the [Privacy Policy](privacy-policy.md)'s closure and erasure terms.
 ## 7. Support and availability
 
 Support is provided per the published
-[support policy](../support-policy.md). The Service is provided without an
+[support policy](https://github.com/witwave-ai/witself/blob/main/docs/support-policy.md). The Service is provided without an
 uptime SLA at launch. Incidents affecting the managed service are published
 as GitHub issues labeled `incident` on the public repository.
 

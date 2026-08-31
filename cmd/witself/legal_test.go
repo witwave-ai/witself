@@ -33,7 +33,7 @@ func captureStdout(t *testing.T, run func()) string {
 		done <- total
 	}()
 	run()
-	w.Close()
+	_ = w.Close()
 	os.Stdout = old
 	return <-done
 }
@@ -42,14 +42,14 @@ func newLegalStub(t *testing.T) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/versions.json", func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `{"terms":{"title":"Terms of Service","version":"2026-08-31","path":"/legal/terms"},"privacy":{"title":"Privacy Policy","version":"2026-08-31","path":"/legal/privacy"}}`)
+		_, _ = fmt.Fprint(w, `{"terms":{"title":"Terms of Service","version":"2026-08-31","path":"/legal/terms"},"privacy":{"title":"Privacy Policy","version":"2026-08-31","path":"/legal/privacy"}}`)
 	})
 	mux.HandleFunc("/terms", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("format") != "md" {
 			t.Errorf("document fetch must request markdown, got query %q", r.URL.RawQuery)
 		}
 		w.Header().Set("content-type", "text/markdown")
-		fmt.Fprint(w, "# Witself Terms of Service\n\n**Version 2026-08-31**\n")
+		_, _ = fmt.Fprint(w, "# Witself Terms of Service\n\n**Version 2026-08-31**\n")
 	})
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
