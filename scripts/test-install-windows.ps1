@@ -535,6 +535,121 @@ try {
         throw '1177 partial File.Replace layout did not restore the old target conservatively'
     }
 
+    # Defender-style on-access scans hold freshly written executables open
+    # without delete sharing just long enough for File.Replace to fail with a
+    # transient sharing violation. Drive the production Install-StagedFile path
+    # from parsed installer bodies against a held target, stubbing Start-Sleep
+    # so the bounded backoff schedule is observable and release timing is
+    # deterministic: the hold clears only during the second backoff, so success
+    # proves the third attempt performed the replacement.
+    $mutationFunctionNames = @(
+        'Assert-ReplaceableTarget',
+        'Invoke-StagedFileMutation',
+        'Install-StagedFile'
+    )
+    foreach ($name in $mutationFunctionNames) {
+        Set-Item -LiteralPath "Function:$name" -Value (Get-InstallerFunctionBody $installer $name)
+    }
+    $script:retryObservedDelays = @()
+    $script:retryHold = $null
+    # Functions shadow cmdlets during command resolution, so the parsed
+    # production bodies observe this stub instead of the real Start-Sleep.
+    Set-Item -LiteralPath 'Function:Start-Sleep' -Value {
+        param([int]$Milliseconds)
+        $script:retryObservedDelays += $Milliseconds
+        if ($script:retryObservedDelays.Count -eq 2 -and $null -ne $script:retryHold) {
+            $script:retryHold.Dispose()
+            $script:retryHold = $null
+        }
+    }
+    try {
+        $retryRoot = Join-Path $temporaryRoot 'replace-retry'
+        New-Item -ItemType Directory -Path $retryRoot | Out-Null
+        $retryTarget = Join-Path $retryRoot 'witself.exe'
+        $retryBackup = Join-Path $retryRoot '.witself.exe.backup'
+        $retryStage = Join-Path $retryRoot '.witself.exe.stage'
+        [IO.File]::WriteAllText($retryTarget, 'installed original', [Text.Encoding]::ASCII)
+        [IO.File]::WriteAllText($retryStage, 'staged replacement', [Text.Encoding]::ASCII)
+        $retryExpectedOriginalHash = (Get-FileHash -LiteralPath $retryTarget -Algorithm SHA256).Hash.ToLowerInvariant()
+        $script:retryHold = [IO.File]::Open(
+            $retryTarget,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::Read
+        )
+        $retryHadOriginal = $false
+        $retryChanged = $false
+        $retryOriginalHash = $null
+        Install-StagedFile `
+            $retryStage `
+            $retryTarget `
+            $retryBackup `
+            ([ref]$retryHadOriginal) `
+            ([ref]$retryChanged) `
+            ([ref]$retryOriginalHash)
+        if (@($script:retryObservedDelays).Count -ne 2 -or
+            $script:retryObservedDelays[0] -ne 250 -or
+            $script:retryObservedDelays[1] -ne 500) {
+            throw 'transient-hold replacement did not follow the bounded 250ms/500ms backoff schedule'
+        }
+        if ((Get-Content -LiteralPath $retryTarget -Raw) -ne 'staged replacement' -or
+            (Get-Content -LiteralPath $retryBackup -Raw) -ne 'installed original' -or
+            (Test-Path -LiteralPath $retryStage) -or
+            -not $retryHadOriginal -or
+            -not $retryChanged -or
+            $retryOriginalHash -ne $retryExpectedOriginalHash) {
+            throw 'transient-hold replacement did not complete after the hold cleared'
+        }
+
+        # A hold that never clears must exhaust the bounded schedule and
+        # surface the in-use failure with the untouched layout preserved.
+        $exhaustRoot = Join-Path $temporaryRoot 'replace-retry-exhausted'
+        New-Item -ItemType Directory -Path $exhaustRoot | Out-Null
+        $exhaustTarget = Join-Path $exhaustRoot 'witself.exe'
+        $exhaustBackup = Join-Path $exhaustRoot '.witself.exe.backup'
+        $exhaustStage = Join-Path $exhaustRoot '.witself.exe.stage'
+        [IO.File]::WriteAllText($exhaustTarget, 'installed original', [Text.Encoding]::ASCII)
+        [IO.File]::WriteAllText($exhaustStage, 'staged replacement', [Text.Encoding]::ASCII)
+        $script:retryObservedDelays = @()
+        $exhaustHold = [IO.File]::Open(
+            $exhaustTarget,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::Read
+        )
+        $exhaustFailure = $null
+        try {
+            Invoke-StagedFileMutation $exhaustStage $exhaustTarget $exhaustBackup
+        } catch {
+            $exhaustFailure = $_.Exception.Message
+        } finally {
+            $exhaustHold.Dispose()
+        }
+        if ($null -eq $exhaustFailure) {
+            throw 'a persistent hold did not fail the staged replacement'
+        }
+        if (@($script:retryObservedDelays).Count -ne 3 -or
+            $script:retryObservedDelays[0] -ne 250 -or
+            $script:retryObservedDelays[1] -ne 500 -or
+            $script:retryObservedDelays[2] -ne 1000) {
+            throw 'persistent-hold replacement did not exhaust the bounded 250ms/500ms/1s schedule'
+        }
+        if ((Get-Content -LiteralPath $exhaustTarget -Raw) -ne 'installed original' -or
+            (Get-Content -LiteralPath $exhaustStage -Raw) -ne 'staged replacement' -or
+            (Test-Path -LiteralPath $exhaustBackup)) {
+            throw 'exhausted replacement retries did not leave the untouched pre-mutation layout'
+        }
+    } finally {
+        if ($null -ne $script:retryHold) {
+            $script:retryHold.Dispose()
+            $script:retryHold = $null
+        }
+        Remove-Item -LiteralPath 'Function:Start-Sleep'
+        foreach ($name in $mutationFunctionNames) {
+            Remove-Item -LiteralPath "Function:$name"
+        }
+    }
+
     # A second installer must not enter the mutation transaction while the
     # install-directory lock is held, and a timeout must leave the pair intact.
     $installLockPath = Join-Path $installDir '.witself-install.lock'
