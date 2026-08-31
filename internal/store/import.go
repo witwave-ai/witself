@@ -40,6 +40,13 @@ var ErrArchiveAccountMismatch = errors.New("archive is for a different account")
 // not retry it.
 var ErrArchiveContent = errors.New("archive content is not importable")
 
+// ErrImportAuditContradiction prevents an archive whose audit events claim
+// account lifecycle state that its projected account row omitted from being
+// committed. This is the import-side backstop for archives written by an
+// out-of-date server after the shared database schema advanced (issue #276).
+// The message is intentionally value-free so callers can surface it safely.
+var ErrImportAuditContradiction = errors.New("archive audit events contradict its column state; archive was likely written by an out-of-date server")
+
 // A small allowance prevents harmless cell clock skew from invalidating a
 // portable archive, while still rejecting a manifest that claims to come from
 // a materially future state. Rows remain bounded by the manifest's exact
@@ -1037,6 +1044,9 @@ type importCtx struct {
 	accountID                      string
 	accountStatus                  string
 	accountPurged                  bool
+	accountConsentRecorded         bool
+	hasAccountConsentRecordedEvent bool
+	accountPurgedEvents            int64
 	expectedEvacuationID           string
 	schemaVersion                  int
 	exportedAt                     time.Time
@@ -1701,6 +1711,7 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 				return badf("%v", err)
 			}
 		}
+		ic.accountConsentRecorded = consentRecorded
 		// Plan-snapshot shape checks: these jsonb columns are decoded into
 		// typed Go values on every read (map[string]int64 / []string), so a
 		// malformed value would import fine and then poison the account —
@@ -2600,6 +2611,10 @@ func (ic *importCtx) validateAndRecord(table string, obj map[string]any) error {
 			}); err != nil {
 				return badf("account_events consent evidence is invalid: %v", err)
 			}
+			ic.hasAccountConsentRecordedEvent = true
+		}
+		if verb == VerbAccountPurged {
+			ic.accountPurgedEvents++
 		}
 		// The schema-92 purged-account archive invariant is checked across the
 		// complete stream after every table has arrived.
@@ -3852,16 +3867,15 @@ func (ic *importCtx) validateImportedPurgedAccountArchive() error {
 			strings.Join(childTables, ", "),
 		)
 	}
-	eventRows := ic.archiveRowsByTable["account_events"]
-	if eventRows != 1 {
+	// The purge worker deletes every portable audit row before recording its
+	// single fresh transition event, so a faithful tombstone archive carries
+	// exactly one account_events row and it is the canonical purge event.
+	if ic.archiveRowsByTable["account_events"] != 1 ||
+		ic.valueFreeAccountPurgedEvents != 1 {
 		return fmt.Errorf(
-			"must contain exactly one account_events row, got %d",
-			eventRows,
-		)
-	}
-	if ic.valueFreeAccountPurgedEvents != 1 {
-		return errors.New(
-			"account_events row must be a value-free system account.purged event",
+			"must contain exactly one value-free system account.purged event and no other audit rows (rows %d, canonical %d)",
+			ic.archiveRowsByTable["account_events"],
+			ic.valueFreeAccountPurgedEvents,
 		)
 	}
 	return nil
@@ -6322,6 +6336,56 @@ func validateImportedFactCandidateContent(obj map[string]any) error {
 	return nil
 }
 
+// validateImportedAccountAuditConsistency checks the archive's own account
+// row and event stream in constant space. This path also protects evacuation
+// retries whose rows are deliberately validated but not replayed.
+//
+// The consent rule has no purged-tombstone escape on purpose: consent columns
+// are written transaction-inline with the consent event, and the purge worker
+// deletes the portable audit stream in the same transaction that scrubs the
+// columns, so no faithful archive can carry a consent event without its
+// column state.
+func (ic *importCtx) validateImportedAccountAuditConsistency() error {
+	if ic.hasAccountConsentRecordedEvent && !ic.accountConsentRecorded {
+		return ErrImportAuditContradiction
+	}
+	if ic.accountPurgedEvents > 0 && !ic.accountPurged {
+		return ErrImportAuditContradiction
+	}
+	return nil
+}
+
+// validateImportedAccountAuditConsistencyTx confirms the replayed account
+// row's actual column state inside the import transaction. Event presence is
+// already known from the bounded archive scan, so the database query reads
+// only the imported accounts row by primary key regardless of audit history
+// size.
+func validateImportedAccountAuditConsistencyTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	accountID string,
+	hasConsentRecordedEvent bool,
+	purgedEventCount int64,
+) error {
+	var consentRecordedIsNull, purgedIsNull bool
+	if err := tx.QueryRow(ctx, `
+		SELECT consent_recorded_at IS NULL,
+		       purged_at IS NULL
+		  FROM accounts
+		 WHERE id = $1`,
+		accountID,
+	).Scan(&consentRecordedIsNull, &purgedIsNull); err != nil {
+		return fmt.Errorf("cross-check imported account audit state: %w", err)
+	}
+	if hasConsentRecordedEvent && consentRecordedIsNull {
+		return ErrImportAuditContradiction
+	}
+	if purgedEventCount > 0 && purgedIsNull {
+		return ErrImportAuditContradiction
+	}
+	return nil
+}
+
 // ImportAccount restores one account's logical archive from r into this cell.
 // The entire restore is a single transaction committed only after the
 // archive's trailing checksums verify AND every row's account/FK scoping
@@ -6621,6 +6685,20 @@ func (s *Store) importAccount(
 			ErrArchiveContent,
 			err,
 		)
+	}
+	if err := ic.validateImportedAccountAuditConsistency(); err != nil {
+		return export.Manifest{}, AccountImportDisposition{}, err
+	}
+	if !disposition.AlreadyImported {
+		if err := validateImportedAccountAuditConsistencyTx(
+			ctx,
+			tx,
+			m.AccountID,
+			ic.hasAccountConsentRecordedEvent,
+			ic.accountPurgedEvents,
+		); err != nil {
+			return export.Manifest{}, AccountImportDisposition{}, err
+		}
 	}
 	if m.SchemaVersion < 50 {
 		if !disposition.AlreadyImported {

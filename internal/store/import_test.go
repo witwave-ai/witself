@@ -1261,6 +1261,181 @@ func TestValidateImportedAccountConsent(t *testing.T) {
 	}
 }
 
+func TestValidateImportedAccountAuditConsistency(t *testing.T) {
+	tests := []struct {
+		name              string
+		consentRecorded   bool
+		purged            bool
+		hasConsentEvent   bool
+		purgedEventCount  int64
+		wantContradiction bool
+	}{
+		{
+			name:              "consent event without column state",
+			hasConsentEvent:   true,
+			wantContradiction: true,
+		},
+		{
+			name:            "recorded consent matches event",
+			consentRecorded: true,
+			hasConsentEvent: true,
+		},
+		{
+			// The purge worker deletes the portable audit stream while
+			// scrubbing consent columns, so no faithful archive pairs a
+			// consent event with a scrubbed row — purged or not.
+			name:              "purged archive cannot carry a consent event",
+			purged:            true,
+			hasConsentEvent:   true,
+			wantContradiction: true,
+		},
+		{
+			name:              "purge event without column state",
+			purgedEventCount:  1,
+			wantContradiction: true,
+		},
+		{
+			name:             "purged tombstone matches purge event",
+			purged:           true,
+			purgedEventCount: 1,
+		},
+		{
+			name: "pre-consent archive has neither state nor event",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ic := newImportCtx("acc_target")
+			ic.accountConsentRecorded = test.consentRecorded
+			ic.accountPurged = test.purged
+			ic.hasAccountConsentRecordedEvent = test.hasConsentEvent
+			ic.accountPurgedEvents = test.purgedEventCount
+
+			err := ic.validateImportedAccountAuditConsistency()
+			if got := errors.Is(err, ErrImportAuditContradiction); got != test.wantContradiction {
+				t.Fatalf(
+					"contradiction = %t, error = %v, want %t",
+					got, err, test.wantContradiction,
+				)
+			}
+		})
+	}
+}
+
+// TestAccountAuditConsistencyWiringThroughValidateAndRecord feeds real archive
+// rows through validateAndRecord instead of assigning importCtx flags by hand,
+// so deleting any of the flag-recording lines (consent column parse, consent
+// event mark, purge event count) fails this DB-free test rather than only the
+// Postgres-gated integration suite.
+func TestAccountAuditConsistencyWiringThroughValidateAndRecord(t *testing.T) {
+	const accountID = "acc_target"
+	snapshotHash, err := plans.SnapshotHash(
+		"team", map[string]int64{}, map[string]int64{}, []string{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeAccount := func(consented bool) map[string]any {
+		row := map[string]any{
+			"id":                     accountID,
+			"is_default":             false,
+			"email":                  "wiring@witwave.ai",
+			"display_name":           "wiring",
+			"status":                 "active",
+			"closed_at":              nil,
+			"closed_reason":          "",
+			"purged_at":              nil,
+			"suspended_for":          nil,
+			"suspended_reason":       nil,
+			"evacuation_id":          nil,
+			"evacuation_started_at":  nil,
+			"evacuation_role":        nil,
+			"plan":                   "team",
+			"plan_limits":            map[string]any{},
+			"plan_policies":          map[string]any{},
+			"plan_features":          []any{},
+			"plan_snapshot_revision": float64(7),
+			"plan_snapshot_hash":     snapshotHash,
+			"placement_policy":       importedDefaultPlacementPolicy(),
+		}
+		if consented {
+			row["consent_terms_version"] = "terms-wiring"
+			row["consent_privacy_version"] = "privacy-wiring"
+			row["consent_recorded_at"] = "2026-08-01T00:00:00Z"
+		}
+		return row
+	}
+	consentEvent := func() map[string]any {
+		return map[string]any{
+			"id":         "evt_wiring_consent",
+			"account_id": accountID,
+			"actor_kind": ActorControlPlane,
+			"actor_id":   nil,
+			"verb":       VerbAccountConsentRecorded,
+			"metadata": map[string]any{
+				"terms_version":   "terms-wiring",
+				"privacy_version": "privacy-wiring",
+			},
+		}
+	}
+	purgedEvent := func() map[string]any {
+		return map[string]any{
+			"id":         "evt_wiring_purged",
+			"account_id": accountID,
+			"actor_kind": ActorSystem,
+			"actor_id":   nil,
+			"verb":       VerbAccountPurged,
+			"metadata":   map[string]any{},
+		}
+	}
+
+	t.Run("consent event without column state contradicts", func(t *testing.T) {
+		ic := newImportCtx(accountID)
+		ic.schemaVersion = SchemaVersion()
+		feedImportedPurgeArchiveRow(t, ic, "accounts", activeAccount(false))
+		feedImportedPurgeArchiveRow(t, ic, "account_events", consentEvent())
+		if !ic.hasAccountConsentRecordedEvent {
+			t.Fatal("consent event did not set hasAccountConsentRecordedEvent")
+		}
+		if ic.accountConsentRecorded {
+			t.Fatal("unconsented accounts row set accountConsentRecorded")
+		}
+		if err := ic.validateImportedAccountAuditConsistency(); !errors.Is(
+			err, ErrImportAuditContradiction,
+		) {
+			t.Fatalf("error = %v, want ErrImportAuditContradiction", err)
+		}
+	})
+
+	t.Run("consent event with column state passes", func(t *testing.T) {
+		ic := newImportCtx(accountID)
+		ic.schemaVersion = SchemaVersion()
+		feedImportedPurgeArchiveRow(t, ic, "accounts", activeAccount(true))
+		feedImportedPurgeArchiveRow(t, ic, "account_events", consentEvent())
+		if !ic.accountConsentRecorded {
+			t.Fatal("consented accounts row did not set accountConsentRecorded")
+		}
+		if err := ic.validateImportedAccountAuditConsistency(); err != nil {
+			t.Fatalf("consistent archive rejected: %v", err)
+		}
+	})
+
+	t.Run("purge event without column state contradicts", func(t *testing.T) {
+		ic := newImportCtx(accountID)
+		ic.schemaVersion = SchemaVersion()
+		feedImportedPurgeArchiveRow(t, ic, "accounts", activeAccount(false))
+		feedImportedPurgeArchiveRow(t, ic, "account_events", purgedEvent())
+		if ic.accountPurgedEvents != 1 {
+			t.Fatalf("accountPurgedEvents = %d, want 1", ic.accountPurgedEvents)
+		}
+		if err := ic.validateImportedAccountAuditConsistency(); !errors.Is(
+			err, ErrImportAuditContradiction,
+		) {
+			t.Fatalf("error = %v, want ErrImportAuditContradiction", err)
+		}
+	})
+}
+
 func TestValidateAndRecordPurgedAccountTombstone(t *testing.T) {
 	const accountID = "acc_target"
 	base := func() map[string]any {
@@ -1451,6 +1626,19 @@ func TestValidateImportedPurgedAccountArchive(t *testing.T) {
 			"metadata":   map[string]any{},
 		}
 	}
+	consentEvent := func() map[string]any {
+		return map[string]any{
+			"id":         "evt_consent",
+			"account_id": accountID,
+			"actor_kind": ActorControlPlane,
+			"actor_id":   nil,
+			"verb":       VerbAccountConsentRecorded,
+			"metadata": map[string]any{
+				"terms_version":   "terms-import-audit",
+				"privacy_version": "privacy-import-audit",
+			},
+		}
+	}
 	tests := []struct {
 		name  string
 		setup func(*testing.T, *importCtx)
@@ -1464,14 +1652,26 @@ func TestValidateImportedPurgedAccountArchive(t *testing.T) {
 			},
 		},
 		{
+			// Purge deletes every prior audit row, so a tombstone archive
+			// carrying a consent event alongside the purge event is lossy or
+			// fabricated, never faithful.
+			name: "tombstone with extra consent event row",
+			setup: func(t *testing.T, ic *importCtx) {
+				feedImportedPurgeArchiveRow(t, ic, "accounts", purgedAccount())
+				feedImportedPurgeArchiveRow(t, ic, "account_events", purgedEvent())
+				feedImportedPurgeArchiveRow(t, ic, "account_events", consentEvent())
+			},
+			want: "exactly one value-free system account.purged event",
+		},
+		{
 			name: "missing purge event",
 			setup: func(t *testing.T, ic *importCtx) {
 				feedImportedPurgeArchiveRow(t, ic, "accounts", purgedAccount())
 			},
-			want: "exactly one account_events row, got 0",
+			want: "exactly one value-free system account.purged event",
 		},
 		{
-			name: "multiple audit events",
+			name: "multiple purge events",
 			setup: func(t *testing.T, ic *importCtx) {
 				feedImportedPurgeArchiveRow(t, ic, "accounts", purgedAccount())
 				feedImportedPurgeArchiveRow(t, ic, "account_events", purgedEvent())
@@ -1479,7 +1679,19 @@ func TestValidateImportedPurgedAccountArchive(t *testing.T) {
 				second["id"] = "evt_extra"
 				feedImportedPurgeArchiveRow(t, ic, "account_events", second)
 			},
-			want: "exactly one account_events row, got 2",
+			want: "exactly one value-free system account.purged event",
+		},
+		{
+			name: "malformed extra purge event",
+			setup: func(t *testing.T, ic *importCtx) {
+				feedImportedPurgeArchiveRow(t, ic, "accounts", purgedAccount())
+				feedImportedPurgeArchiveRow(t, ic, "account_events", purgedEvent())
+				extra := purgedEvent()
+				extra["id"] = "evt_extra"
+				extra["actor_kind"] = ActorControlPlane
+				feedImportedPurgeArchiveRow(t, ic, "account_events", extra)
+			},
+			want: "exactly one value-free system account.purged event",
 		},
 		{
 			name: "canonical child content",
