@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/witwave-ai/witself/internal/server"
 	"github.com/witwave-ai/witself/internal/store"
@@ -205,7 +204,7 @@ func mapMemoryCurationError(err error) error {
 	}
 	switch {
 	case errors.Is(err, store.ErrMemoryCurationInputInvalid):
-		return fmt.Errorf("%w: %v", server.ErrBadInput, err)
+		return wrapAsSentinel(server.ErrBadInput, store.ErrMemoryCurationInputInvalid, err)
 	case errors.Is(err, store.ErrMemoryCurationNotFound):
 		return server.ErrNotFound
 	case errors.Is(err, store.ErrMemoryCurationForbidden),

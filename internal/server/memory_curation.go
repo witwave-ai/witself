@@ -775,7 +775,7 @@ func writeMemoryCurationError(w http.ResponseWriter, err error) bool {
 			"schema_version": "witself.v0", "error": blocked.Error(), "blockers": blocked.Blockers,
 		})
 	case errors.Is(err, ErrBadInput):
-		writeJSONError(w, http.StatusBadRequest, "invalid memory curation request")
+		writeJSONError(w, http.StatusBadRequest, badInputMessage("invalid memory curation request", err))
 	case errors.Is(err, ErrForbidden):
 		writeJSONError(w, http.StatusForbidden, "memory curation access forbidden")
 	case errors.Is(err, ErrNotFound):

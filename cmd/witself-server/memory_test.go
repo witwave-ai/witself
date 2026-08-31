@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -171,6 +172,15 @@ func TestMemoryAdapterErrorsAndSnippet(t *testing.T) {
 	}
 	if !errors.Is(mapMemoryError(store.ErrMemoryInputInvalid), server.ErrBadInput) {
 		t.Fatal("invalid memory input was not mapped to bad input")
+	}
+	detailed := mapMemoryError(fmt.Errorf(
+		"%w: resolved kind does not match source", store.ErrMemoryInputInvalid,
+	))
+	if !errors.Is(detailed, server.ErrBadInput) {
+		t.Fatalf("detailed input error lost the sentinel: %v", detailed)
+	}
+	if want := server.ErrBadInput.Error() + ": resolved kind does not match source"; detailed.Error() != want {
+		t.Fatalf("detailed input error = %q, want %q", detailed.Error(), want)
 	}
 	if !errors.Is(mapMemoryError(store.ErrMemoryEvidenceConflict), server.ErrConflict) {
 		t.Fatal("evidence conflict was not mapped to conflict")

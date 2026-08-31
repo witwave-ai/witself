@@ -872,7 +872,7 @@ func writeDeleteMemoryError(w http.ResponseWriter, err error) bool {
 	case err == nil:
 		return false
 	case errors.Is(err, ErrBadInput):
-		writeJSONError(w, http.StatusBadRequest, "invalid memory deletion request")
+		writeJSONError(w, http.StatusBadRequest, badInputMessage("invalid memory deletion request", err))
 	case errors.Is(err, ErrForbidden):
 		writeJSONError(w, http.StatusForbidden, "memory deletion forbidden")
 	case errors.Is(err, ErrNotFound):
@@ -1001,7 +1001,7 @@ func writeMemoryError(w http.ResponseWriter, err error, operation string) bool {
 	case errors.Is(err, ErrMemoryLimitReached):
 		writeMemoryLimitError(w, err)
 	case errors.Is(err, ErrBadInput):
-		writeJSONError(w, http.StatusBadRequest, "invalid memory request")
+		writeJSONError(w, http.StatusBadRequest, badInputMessage("invalid memory request", err))
 	case errors.Is(err, ErrForbidden):
 		writeJSONError(w, http.StatusForbidden, "memory access forbidden")
 	case errors.Is(err, ErrNotFound):

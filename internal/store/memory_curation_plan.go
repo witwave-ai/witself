@@ -968,6 +968,24 @@ func memoryCurationInvalidf(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrMemoryInputInvalid, fmt.Sprintf(format, args...))
 }
 
+// memoryCurationInputInvalid keeps the specific plan-validation detail behind
+// the curation input sentinel so a caller can repair the draft without
+// guessing. The detail is always a bounded validation message that at most
+// echoes the caller's own identifiers, never stored memory content.
+func memoryCurationInputInvalid(err error) error {
+	detail := err.Error()
+	for _, sentinel := range []error{ErrMemoryInputInvalid, ErrFactInputInvalid} {
+		if trimmed := strings.TrimPrefix(detail, sentinel.Error()); trimmed != detail {
+			detail = strings.TrimPrefix(trimmed, ": ")
+			break
+		}
+	}
+	if strings.TrimSpace(detail) == "" {
+		return ErrMemoryCurationInputInvalid
+	}
+	return fmt.Errorf("%w: %s", ErrMemoryCurationInputInvalid, detail)
+}
+
 // canonicalMemoryCurationJSON implements RFC 8785 ordering and primitive
 // serialization for the deliberately restricted accepted-plan schema. JSON
 // numbers are interpreted as IEEE-754 binary64, as required by I-JSON/JCS.
