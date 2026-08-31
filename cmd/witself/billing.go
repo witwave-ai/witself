@@ -196,7 +196,7 @@ func billingSetup(args []string) int {
 		return 2
 	}
 	if !validBillingMutationCLIFlags(
-		*reason, *idempotencyKey, *confirmed, *dryRun, usage,
+		*reason, *idempotencyKey, *confirmed, *dryRun, usage, true,
 	) {
 		return 2
 	}

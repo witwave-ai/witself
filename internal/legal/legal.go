@@ -2,17 +2,22 @@
 // documents the CLI can record consent to at signup.
 //
 // These constants MUST be bumped whenever the content under docs/legal/
-// changes materially, and at general-availability cutover they MUST match the
-// version labels shown on the published Terms of Service and Privacy Policy
-// pages — the recorded consent is only meaningful if it names the exact text
-// the user saw. The pages are currently DRAFTS, so the versions say so
-// honestly rather than implying final legal review happened.
+// changes materially, and they MUST match the version labels shown on the
+// published pages at https://self.witwave.ai/legal — the recorded consent is
+// only meaningful if it names the exact text the user saw. The pages were
+// ratified and published as Version 2026-08-31; `witself legal` reads them
+// from the terminal, and /legal/versions.json is the canonical manifest.
 package legal
 
-// TermsVersion is the version label of the Terms of Service draft that
+// TermsVersion is the version label of the published Terms of Service that
 // `witself account create --accept-terms` records consent to.
-const TermsVersion = "draft-2026-08-22"
+const TermsVersion = "2026-08-31"
 
-// PrivacyVersion is the version label of the Privacy Policy draft that
+// PrivacyVersion is the version label of the published Privacy Policy that
 // `witself account create --accept-terms` records consent to.
-const PrivacyVersion = "draft-2026-08-22"
+const PrivacyVersion = "2026-08-31"
+
+// BaseURL is where the published legal pages are served. Each document is
+// BaseURL/<slug>; ?format=md returns the raw markdown, and
+// BaseURL/versions.json is the version manifest.
+const BaseURL = "https://self.witwave.ai/legal"

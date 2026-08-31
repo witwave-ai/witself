@@ -331,14 +331,21 @@ func planChangeCLI(verb string, args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	usage := fmt.Sprintf("usage: witself plan %s --reason TEXT (--dry-run | --idempotency-key KEY --yes) [--account NAME] [--endpoint CELL_URL] [--email E] [--json] TARGET_PLAN", verb)
+	reasonSpec := "--reason TEXT"
+	if verb == "downgrade" {
+		reasonSpec = "[--reason TEXT]"
+	}
+	usage := fmt.Sprintf("usage: witself plan %s %s (--dry-run | --idempotency-key KEY --yes) [--account NAME] [--endpoint CELL_URL] [--email E] [--json] TARGET_PLAN", verb, reasonSpec)
 	if fs.NArg() != 1 || !validBillingMutationCLIFlags(
-		*reason, *idempotencyKey, *confirmed, *dryRun, usage,
+		*reason, *idempotencyKey, *confirmed, *dryRun, usage, verb != "downgrade",
 	) {
 		if fs.NArg() != 1 {
 			fmt.Fprintln(os.Stderr, usage)
 		}
 		return 2
+	}
+	if verb == "downgrade" && strings.TrimSpace(*reason) == "" {
+		*reason = "customer requested cancellation"
 	}
 	target := fs.Arg(0)
 	ctx := context.Background()
@@ -420,9 +427,12 @@ func planCancelCLI(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	const usage = "usage: witself plan cancel --reason TEXT (--dry-run | --idempotency-key KEY --yes) [--account NAME] [--endpoint CELL_URL] [--json]"
+	const usage = "usage: witself plan cancel [--reason TEXT] (--dry-run | --idempotency-key KEY --yes) [--account NAME] [--endpoint CELL_URL] [--json]"
+	if strings.TrimSpace(*reason) == "" {
+		*reason = "customer requested cancellation of the pending change"
+	}
 	if fs.NArg() != 0 || !validBillingMutationCLIFlags(
-		*reason, *idempotencyKey, *confirmed, *dryRun, usage,
+		*reason, *idempotencyKey, *confirmed, *dryRun, usage, false,
 	) {
 		if fs.NArg() != 0 {
 			fmt.Fprintln(os.Stderr, usage)
@@ -464,7 +474,8 @@ func printPlanCancelOutcome(out client.PlanOutcome) int {
 	if out.Kind == "resolved" {
 		fmt.Println("pending change was already resolved; no cancellation was applied")
 	} else {
-		fmt.Println("cancelled")
+		fmt.Println("cancelled the pending plan change — your current subscription continues and will keep renewing monthly")
+		fmt.Println("(to stop renewal: witself plan downgrade free)")
 	}
 	return 0
 }
@@ -473,8 +484,9 @@ func validBillingMutationCLIFlags(
 	reason, idempotencyKey string,
 	confirmed, dryRun bool,
 	usage string,
+	reasonRequired bool,
 ) bool {
-	if strings.TrimSpace(reason) == "" {
+	if reasonRequired && strings.TrimSpace(reason) == "" {
 		fmt.Fprintln(os.Stderr, "witself: --reason is required")
 		fmt.Fprintln(os.Stderr, usage)
 		return false
@@ -570,7 +582,7 @@ func printPlanStatus(s client.PlanStatus, full bool) {
 			if p.Effective != nil {
 				fmt.Printf("  effective: %s\n", p.Effective.Format(time.RFC3339))
 			}
-			fmt.Println("  cancel:  witself plan cancel --reason TEXT --idempotency-key KEY --yes")
+			fmt.Println("  resume paid plan (undo this scheduled downgrade): witself plan cancel --idempotency-key KEY --yes")
 		case "contact":
 			fmt.Printf("pending:  interest in %s recorded — we'll be in touch\n",
 				formatPlanIdentity(p.Plan, p.PlanName))
@@ -746,9 +758,11 @@ func printPlanOutcome(out client.PlanOutcome, targetName string) {
 	case "action":
 		fmt.Printf("complete your %s upgrade at:\n  %s\n", plan, planCLIColumn(out.URL))
 		fmt.Println("(this link expires; re-run to get a new one)")
+		fmt.Println("this is an automatically renewing monthly subscription at the price shown at checkout;")
+		fmt.Println("cancel anytime with `witself plan downgrade free` — see https://self.witwave.ai/legal/refunds")
 	case "scheduled":
 		fmt.Printf("downgrade to %s scheduled for %s\n", plan, out.Effective.Format(time.RFC3339))
-		fmt.Println("run witself plan cancel with --reason, --idempotency-key, and --yes to undo before then")
+		fmt.Println("no further charges will occur; to undo and resume the paid plan before then: witself plan cancel --idempotency-key KEY --yes")
 	case "contact":
 		fmt.Printf("interest in %s recorded — we'll be in touch\n", plan)
 	default:
