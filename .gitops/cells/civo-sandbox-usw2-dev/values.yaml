@@ -87,7 +87,7 @@ apps:
       # chart default 720h - the privacy policy's 30 days.
       accountPurge:
         enabled: true
-        mode: preview
+        mode: enforce
       replicaCount: 2
       # Phase 2: worker metrics restricted to the same Prometheus peers.
       metrics:
