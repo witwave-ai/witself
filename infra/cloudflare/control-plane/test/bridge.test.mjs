@@ -102,6 +102,7 @@ test("container env projection is explicit, runtime-only, and opt-in", () => {
     CP_STRIPE_TEST_CLOCK_ID: "clock_sandbox",
     CP_STRIPE_AUTOMATIC_TAX: "true",
     CP_BILLING_ACCOUNT_ALLOWLIST: "acct_sandbox",
+    CP_BILLING_GENERAL_AVAILABILITY: "true",
     ARCHIVES: archiveBinding,
     FLEET_TOKEN: "must-not-cross",
     WITSELF_CP_STRIPE_SECRET_KEY: "must-not-cross-directly",
@@ -125,6 +126,7 @@ test("container env projection is explicit, runtime-only, and opt-in", () => {
     WITSELF_CP_STRIPE_TEST_CLOCK_ID: "clock_sandbox",
     WITSELF_CP_STRIPE_AUTOMATIC_TAX: "true",
     WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST: "acct_sandbox",
+    WITSELF_CP_BILLING_GENERAL_AVAILABILITY: "true",
   });
 
   assert.deepEqual(containerEnvVars({}), {
@@ -142,6 +144,7 @@ test("container env projection is explicit, runtime-only, and opt-in", () => {
     CP_STRIPE_TEST_CLOCK_ID: "",
     CP_STRIPE_AUTOMATIC_TAX: "",
     CP_BILLING_ACCOUNT_ALLOWLIST: "",
+    CP_BILLING_GENERAL_AVAILABILITY: "",
   }), {
     WITSELF_CP_BRIDGE_URL: "https://self.witwave.ai",
   });

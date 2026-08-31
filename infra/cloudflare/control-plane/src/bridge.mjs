@@ -232,6 +232,13 @@ export function containerEnvVars(env) {
       "CP_BILLING_ACCOUNT_ALLOWLIST",
       "WITSELF_CP_BILLING_ACCOUNT_ALLOWLIST",
     ],
+    // The deliberate end of the allowlist cohort. The container refuses
+    // true alongside a non-empty allowlist or a test clock, so the flip
+    // is: delete the allowlist secret, stage this true, re-activate.
+    [
+      "CP_BILLING_GENERAL_AVAILABILITY",
+      "WITSELF_CP_BILLING_GENERAL_AVAILABILITY",
+    ],
   ];
   for (const [binding, variable] of mappings) {
     if (typeof env[binding] === "string" && env[binding] !== "") {
