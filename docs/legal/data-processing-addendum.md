@@ -1,35 +1,52 @@
 # Witself Data Processing Addendum
 
-> **DRAFT — not yet in force.** Skeleton drafted for owner and counsel
-> review; not legal advice. Bracketed items are decisions or facts the owner
-> must confirm. This page becomes binding only when ratified and published.
+**Version 2026-08-31 · Effective 2026-08-31**
 
-This DPA applies where Witwave processes personal data in your content on
-your behalf. [Counsel: full GDPR Art. 28 terms, SCC incorporation, audit
-rights, breach-notice window (72h to customer), deletion-on-termination
-aligned with the published erasure posture.]
+This DPA applies where Witwave LLC processes personal data in your content
+on your behalf. It is incorporated into the
+[Terms of Service](terms-of-service.md) for every account. Customers who
+require EU Standard Contractual Clauses or a countersigned DPA should
+contact legal@witwave.ai.
 
 ## Processing details
 
-- **Subject matter/duration**: operation of the Service for the account term.
-- **Nature/purpose**: storage, retrieval, replication, backup, serving of
-  agent state on documented instructions.
-- **Data categories**: whatever personal data your agents store (you control
-  this); account/operator contact data.
-- **Security measures**: per-plane encryption posture (sealed plane
-  client-encrypted, ciphertext-only at the server), infrastructure
-  encryption, audit ledger, access controls, bounded retention sweeps.
+- **Subject matter/duration**: operation of the Service for the account
+  term.
+- **Nature/purpose**: storage, retrieval, replication, backup, and serving
+  of agent state on documented instructions (your API/CLI/MCP calls and
+  configuration).
+- **Data categories**: whatever personal data your agents store (you
+  control this) — including memories, facts, transcripts, messages, support
+  tickets, and agent email received from third parties; plus
+  account/operator contact data.
+- **Security measures**: sealed-plane content is client-encrypted (we hold
+  ciphertext only and cannot decrypt); all traffic is encrypted in transit;
+  backups are encrypted with keys held offline by the operator; access is
+  audited in an append-style audit ledger with access controls. Open-plane
+  content is stored on managed provider infrastructure.
+- **Deletion on termination**: on account closure, stored content is
+  deleted within 30 days as described in the
+  [Privacy Policy](privacy-policy.md); encrypted backups expire on the
+  backup retention schedule (up to 90 days).
+- **Breach notice**: we notify affected customers without undue delay after
+  confirming a breach affecting their personal data.
+- **Audit**: we make available the information reasonably necessary to
+  demonstrate compliance with this DPA on written request.
 
 ## Subprocessors
 
-| Subprocessor | Role | Confirm |
+| Subprocessor | Entity / region | Role |
 |---|---|---|
-| Cloudflare | Control plane (Workers/KV/R2), inbound/outbound agent email edge | ✔ in use |
-| Civo | Kubernetes cells (compute + in-cell Postgres) | ✔ in use |
-| Stripe | Billing and payments | ✔ in use |
-| GitHub | Source hosting and CI | ✔ in use (no tenant content) |
-| PagerDuty | Operational alerting (no tenant content) | [pending activation] |
-| [AWS] | [confirm: any production role, or sandbox only] | [confirm] |
+| Cloudflare, Inc. | US (global network) | Control plane (Workers/KV/R2/Durable Objects), account metadata, encrypted backups and archives, inbound/outbound agent-email edge, signup Turnstile |
+| Civo Ltd | US regions (Phoenix, AZ; New York, NY) | Kubernetes deployment cells: compute and in-cell PostgreSQL holding agent content |
+| Stripe, Inc. | US | Billing and payments (card data goes directly to Stripe) |
+| GitHub, Inc. | US | Source hosting, CI, and public incident-comms issues (no tenant content) |
+| PagerDuty, Inc. | US | Operational alerting (alert metadata only, no tenant content) |
+| SIA Monkey See Monkey Do (Healthchecks.io) | EU | Dead-man heartbeat monitoring (ping timestamps only, no tenant content) |
 
-[Confirm the list, add legal entity names + regions; notice mechanism for
-subprocessor changes (email, 30 days).]
+AWS is used for isolated infrastructure tooling in a sandbox account only
+and has no production role and no tenant content.
+
+**Subprocessor changes**: we will update this list and notify account
+emails at least 30 days before adding a subprocessor that processes tenant
+content.

@@ -1,0 +1,16 @@
+# Cloudflare Worker serving the ratified Witself legal pages from docs/legal/.
+# Git is the source of truth; `wrangler deploy` publishes. Deploy from
+# infra/cloudflare/control-plane with its committed Wrangler lock:
+#   npm ci && npm run deploy:legal
+name = "witself-legal"
+main = "index.js"
+compatibility_date = "2026-06-01"
+
+routes = [
+  { pattern = "self.witwave.ai/legal*", zone_name = "witwave.ai" },
+]
+
+[[rules]]
+type = "Text"
+globs = ["**/*.md"]
+fallthrough = true
