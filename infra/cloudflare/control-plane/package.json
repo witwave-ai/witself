@@ -9,6 +9,7 @@
     "config": "node scripts/render-wrangler.mjs",
     "deploy": "node scripts/deploy-release.mjs",
     "deploy:plans": "npm run config && wrangler deploy --config ../../../web/plans/wrangler.toml",
+    "deploy:legal": "npm run config && wrangler deploy --config ../../../web/legal/wrangler.toml",
     "dev": "wrangler dev --config wrangler.template.jsonc",
     "secret:put:break-glass": "npm run config && wrangler secret put --config wrangler.generated.jsonc",
     "test": "node --test test/*.test.mjs",

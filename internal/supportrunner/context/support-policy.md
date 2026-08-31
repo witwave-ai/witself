@@ -41,8 +41,11 @@ independent operator control.
 ## The promise
 
 **First response within 1 business day** (Monday–Friday, excluding US federal
-holidays). Responses usually arrive much sooner, at any hour — the first
-responder is an AI assistant on duty around the clock.
+holidays). *Launch status: the AI first responder described below activates
+with the support runner; until then tickets are answered by a human within
+the same 1-business-day promise.* Once active, responses usually arrive much
+sooner, at any hour — the first responder is an AI assistant on duty around
+the clock.
 
 ## How it is staffed: AI-first, humans for what matters
 
