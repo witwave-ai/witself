@@ -177,6 +177,55 @@ function Open-InstallDirectoryLock {
     }
 }
 
+# Defender and other on-access scanners briefly hold freshly written
+# executables open without delete sharing, so File.Replace and File.Move can
+# fail with an in-use error that clears within a second. Retry only that
+# signature, and only after verifying that the failed call left the untouched
+# pre-mutation layout. Any other failure, and any other layout (for example
+# the documented 1177 partial-replace state), must surface the original error
+# unmodified so Restore-InstalledFile can reason about recovery.
+function Invoke-StagedFileMutation {
+    param(
+        [string]$Stage,
+        [string]$Target,
+        [string]$Backup
+    )
+    $retryDelaysMilliseconds = @(250, 500, 1000)
+    for ($attempt = 0; ; $attempt++) {
+        try {
+            if ([string]::IsNullOrEmpty($Backup)) {
+                [IO.File]::Move($Stage, $Target)
+            } else {
+                [IO.File]::Replace($Stage, $Target, $Backup, $true)
+            }
+            return
+        } catch [IO.IOException] {
+            if ($attempt -ge $retryDelaysMilliseconds.Count) {
+                throw
+            }
+            # ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION, and ReplaceFile's
+            # ERROR_UNABLE_TO_REMOVE_REPLACED and ERROR_UNABLE_TO_MOVE_REPLACEMENT
+            # report a hold that left both files under their original names.
+            $transientInUse = @(0x80070020, 0x80070021, 0x80070497, 0x80070498)
+            if ($transientInUse -notcontains $_.Exception.GetBaseException().HResult) {
+                throw
+            }
+            $untouched = if ([string]::IsNullOrEmpty($Backup)) {
+                (Test-Path -LiteralPath $Stage -PathType Leaf) -and
+                    -not (Test-Path -LiteralPath $Target)
+            } else {
+                (Test-Path -LiteralPath $Stage -PathType Leaf) -and
+                    (Test-Path -LiteralPath $Target -PathType Leaf) -and
+                    -not (Test-Path -LiteralPath $Backup)
+            }
+            if (-not $untouched) {
+                throw
+            }
+            Start-Sleep -Milliseconds $retryDelaysMilliseconds[$attempt]
+        }
+    }
+}
+
 function Install-StagedFile {
     param(
         [string]$Stage,
@@ -191,9 +240,9 @@ function Install-StagedFile {
         $HadOriginal.Value = $true
         $OriginalHash.Value = (Get-FileHash -LiteralPath $Target -Algorithm SHA256).Hash.ToLowerInvariant()
         $Changed.Value = $true
-        [IO.File]::Replace($Stage, $Target, $Backup, $true)
+        Invoke-StagedFileMutation $Stage $Target $Backup
     } else {
-        [IO.File]::Move($Stage, $Target)
+        Invoke-StagedFileMutation $Stage $Target ''
         $Changed.Value = $true
     }
 }
