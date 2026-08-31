@@ -354,3 +354,9 @@ select {
 }
 .statusbar .upstream { color: var(--danger); }
 .statusbar .upstream:empty { display: none; }
+.statusbar .legal-link {
+  margin-left: auto;
+  color: var(--fg-dim);
+  text-decoration: none;
+}
+.statusbar .legal-link:hover { text-decoration: underline; }

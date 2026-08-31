@@ -15,7 +15,7 @@
   refund requests are accepted from **every** account, including accounts
   already back on the free plan. A refund ends paid service immediately; the
   account continues on the free plan and content is retained per the
-  [data-retention policy](../data-retention-policy.md).
+  [data-retention policy](https://github.com/witwave-ai/witself/blob/main/docs/data-retention-policy.md).
 - **A note on `witself plan cancel`**: that command does not cancel your
   subscription — it undoes a pending scheduled plan change. If the pending
   change was your cancellation, running it resumes monthly renewal. To stop
@@ -28,4 +28,4 @@
   windows then apply to content as described in the data-retention policy.
 - One refund per account per plan. Disputes/chargebacks supersede refunds.
 
-Operator-side procedure: [refund runbook](../refund-runbook.md).
+Operator-side procedure: [refund runbook](https://github.com/witwave-ai/witself/blob/main/docs/refund-runbook.md).

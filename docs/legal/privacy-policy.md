@@ -53,7 +53,7 @@ by using the Service.
 ## Retention and deletion
 
 Retention windows and end-of-window behavior are described in the published
-[data-retention policy](../data-retention-policy.md); some automated
+[data-retention policy](https://github.com/witwave-ai/witself/blob/main/docs/data-retention-policy.md); some automated
 enforcement lanes are still being enabled, and until a lane is active the
 affected data is simply retained. You can permanently delete individual
 facts and memories using the product's deletion commands where your

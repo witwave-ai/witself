@@ -137,6 +137,8 @@ func run(args []string) int {
 		return agentCmd(args[1:])
 	case "plan":
 		return planCmd(args[1:])
+	case "legal":
+		return legalCmd(args[1:])
 	case "billing":
 		return billingCmd(args[1:])
 	case "operator":
@@ -2550,6 +2552,14 @@ func accountCreateWithLegalVersions(
 		consentTermsVersion = currentTermsVersion
 		consentPrivacyVersion = currentPrivacyVersion
 	}
+	if consentTermsVersion != "" {
+		// Say exactly which texts the consent record will name; the pages
+		// are the authoritative copies and `witself legal` reads them here.
+		fmt.Printf("recording consent to Terms of Service v%s and Privacy Policy v%s\n",
+			consentTermsVersion, consentPrivacyVersion)
+		fmt.Printf("  %s/terms · %s/privacy · read in-terminal: witself legal terms\n",
+			legal.BaseURL, legal.BaseURL)
+	}
 	requestFingerprint, err := client.AccountCreateRequestFingerprint(
 		*endpoint, localName, *email, *invite, *displayName,
 		consentTermsVersion, consentPrivacyVersion,
@@ -4186,6 +4196,7 @@ func usage(w io.Writer) {
 	usageLine(w, "  witself realm create|list|delete|email-alias")
 	usageLine(w, "  witself agent create|list|peers|delete")
 	usageLine(w, "  witself plan list|status|upgrade|downgrade|cancel  Inspect catalog and effective account policy")
+	usageLine(w, "  witself legal [DOCUMENT]    Read the published legal documents and versions")
 	usageLine(w, "  witself billing show|invoices|payments|portal|setup  Inspect provider billing and open hosted flows")
 	usageLine(w, "  witself operator list|create|delete")
 	usageLine(w, "  witself token create|revoke  Mint or revoke agent/operator tokens")
