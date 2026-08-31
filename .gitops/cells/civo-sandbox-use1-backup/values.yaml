@@ -27,6 +27,9 @@ apps:
     chartVersion: 0.0.265
     imageTag: 0.0.265
     backendKind: managed
+    # Schema-28's compatibility hold expired long ago (cells run schema 94);
+    # in-product permanent fact deletion backs the published privacy policy.
+    factDeletionEnabled: true
     billing:
       endpoint: https://self.witwave.ai
     backup:
@@ -39,6 +42,12 @@ apps:
     topologySpreadConstraints: []
     worker:
       enabled: true
+      # Preview-first per the chart's own rollout contract: value-free
+      # counts only until a config-only flip to enforce. grace stays the
+      # chart default 720h - the privacy policy's 30 days.
+      accountPurge:
+        enabled: true
+        mode: preview
       replicaCount: 2
       podDisruptionBudget:
         enabled: false
