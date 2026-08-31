@@ -124,13 +124,19 @@ func exportCmd(args []string) int {
 	}
 
 	// Recheck after the potentially long download so a destination created in
-	// the meantime is not silently replaced unless --force was explicit.
+	// the meantime is not silently replaced unless --force was explicit. A
+	// failure past this point never deletes the verified archive: it was
+	// downloaded and checksum-verified, and that work belongs to the user.
 	if err := validateExportDestination(outPath, *force); err != nil {
+		keepTemp = true
 		fmt.Fprintf(os.Stderr, "witself: %v\n", err)
+		fmt.Fprintf(os.Stderr, "witself: the verified archive was kept at %s\n", tmpPath)
 		return 1
 	}
 	if err := installVerifiedExport(tmpPath, outPath, *force); err != nil {
+		keepTemp = true
 		fmt.Fprintf(os.Stderr, "witself: install verified export at %s: %v\n", outPath, err)
+		fmt.Fprintf(os.Stderr, "witself: the verified archive was kept at %s\n", tmpPath)
 		return 1
 	}
 	keepTemp = true
@@ -290,6 +296,29 @@ func readExportManifest(path string) (archiveexport.Manifest, error) {
 	return manifest, nil
 }
 
+func copyFileExclusive(srcPath, dstPath string) error {
+	src, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = src.Close() }()
+	dst, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		_ = dst.Close()
+		_ = os.Remove(dstPath)
+		return err
+	}
+	if err := dst.Sync(); err != nil {
+		_ = dst.Close()
+		_ = os.Remove(dstPath)
+		return err
+	}
+	return dst.Close()
+}
+
 func preserveUnverifiedExport(tmpPath, outPath string) (string, error) {
 	for attempt := 0; attempt < 1000; attempt++ {
 		candidate := outPath + ".unverified"
@@ -305,7 +334,10 @@ func preserveUnverifiedExport(tmpPath, outPath string) (string, error) {
 			if _, statErr := os.Lstat(candidate); statErr == nil {
 				continue
 			}
-			return "", err
+			// Link-less filesystems still deserve their partial download.
+			if copyErr := copyFileExclusive(tmpPath, candidate); copyErr != nil {
+				return "", fmt.Errorf("link failed (%v); exclusive-copy fallback failed: %w", err, copyErr)
+			}
 		}
 		if err := os.Remove(tmpPath); err != nil {
 			_ = os.Remove(candidate)
@@ -326,7 +358,11 @@ func installVerifiedExport(tmpPath, outPath string, force bool) error {
 			if _, statErr := os.Lstat(outPath); statErr == nil {
 				return fmt.Errorf("refusing to overwrite existing file %s without --force", outPath)
 			}
-			return err
+			// Filesystems without hard links (exFAT, FAT32, many SMB mounts)
+			// get an O_EXCL copy: still no-clobber, just not single-inode.
+			if copyErr := copyFileExclusive(tmpPath, outPath); copyErr != nil {
+				return fmt.Errorf("link install failed (%v); exclusive-copy fallback failed: %w", err, copyErr)
+			}
 		}
 		if err := os.Remove(tmpPath); err != nil {
 			return fmt.Errorf("remove temporary export after installation: %w", err)

@@ -248,11 +248,20 @@ func (s *Store) exportAccount(
 			return fmt.Errorf("expire vault key enrollments before export: %w", err)
 		}
 	}
+	// The read-only self path cannot reap lazily-expired enrollments the way
+	// the write paths do, so it must not count them as blocking either: an
+	// abandoned enrollment whose expires_at has passed is already dead, and
+	// counting it would refuse the customer's export forever. The exported
+	// row still carries expires_at, so an importer never treats it as live.
+	enrollmentBlockingFilter := ""
+	if options.self {
+		enrollmentBlockingFilter = " AND (expires_at IS NULL OR expires_at > now())"
+	}
 	var activeEnrollments, openRotations, orphanPendingKeys int64
 	if err := tx.QueryRow(ctx, `
 		SELECT
 		  (SELECT count(*) FROM agent_vault_key_enrollments
-		    WHERE account_id=$1 AND lifecycle_state IN ('pending','approved')),
+		    WHERE account_id=$1 AND lifecycle_state IN ('pending','approved')`+enrollmentBlockingFilter+`),
 		  (SELECT count(*) FROM agent_vault_key_rotations
 		    WHERE account_id=$1 AND lifecycle_state='open'),
 		  (SELECT count(*) FROM agent_vault_keys k

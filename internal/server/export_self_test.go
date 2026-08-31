@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -249,4 +250,59 @@ func selfExportTestArchive(t *testing.T, accountID string) []byte {
 		t.Fatal(err)
 	}
 	return archive.Bytes()
+}
+
+// TestAccountSelfExportSpoolsBeforeStreaming pins the review fix for the
+// customer-paced-transaction hazard: the store phase completes into a
+// server-side spool before any response byte, so a mid-export store failure
+// — even one after bytes were produced — still yields a clean typed error,
+// and a successful response carries an exact Content-Length (impossible if
+// the archive streamed straight out of the transaction).
+func TestAccountSelfExportSpoolsBeforeStreaming(t *testing.T) {
+	auth := func(_ context.Context, token string) (string, string, string, bool, error) {
+		return "opr_export", "acc_export", "active", token == "operator-token", nil
+	}
+	request := func() *http.Request {
+		req := httptest.NewRequest(http.MethodGet, "/v1/export", nil)
+		req.Header.Set("Authorization", "Bearer operator-token")
+		return req
+	}
+
+	failing := apiMux(Config{
+		Authenticate: auth,
+		StreamAccountSelf: func(_ context.Context, _ string, w io.Writer) error {
+			if _, err := w.Write([]byte("partial archive bytes")); err != nil {
+				return err
+			}
+			return ErrVaultLifecycleInProgress
+		},
+	})
+	rec := httptest.NewRecorder()
+	failing.ServeHTTP(rec, request())
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("post-write failure status = %d, want 409", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "vault_lifecycle_in_progress") {
+		t.Fatalf("post-write failure body = %q, want typed vault_lifecycle_in_progress error", body)
+	}
+
+	payload := []byte("complete archive payload")
+	succeeding := apiMux(Config{
+		Authenticate: auth,
+		StreamAccountSelf: func(_ context.Context, _ string, w io.Writer) error {
+			_, err := w.Write(payload)
+			return err
+		},
+	})
+	rec = httptest.NewRecorder()
+	succeeding.ServeHTTP(rec, request())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("success status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Length"); got != strconv.Itoa(len(payload)) {
+		t.Fatalf("Content-Length = %q, want %d (spooled size)", got, len(payload))
+	}
+	if rec.Body.String() != string(payload) {
+		t.Fatal("response body does not match the spooled archive")
+	}
 }

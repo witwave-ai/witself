@@ -185,3 +185,109 @@ func readSelfExportManifestFields(t *testing.T, archive []byte) map[string]json.
 	}
 	return fields
 }
+
+// TestExportAccountSelfIgnoresExpiredEnrollmentsPostgres pins the review fix:
+// the read-only self path cannot reap lazily-expired vault-key enrollments,
+// so a time-expired pending enrollment must not refuse the export forever,
+// while a live pending enrollment still fails closed.
+func TestExportAccountSelfIgnoresExpiredEnrollmentsPostgres(t *testing.T) {
+	baseDSN := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if baseDSN == "" {
+		t.Skip("WITSELF_TEST_DATABASE_URL is not set")
+	}
+
+	ctx := context.Background()
+	st, _ := newMigrationTestStore(t, baseDSN)
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	provisioned, err := st.ProvisionAccount(
+		ctx, "self-export-enrollment@witwave.ai", "self export enrollment", time.Hour,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Build the minimal real hierarchy the enrollment FKs demand — realm,
+	// agent, current vault key — then seed the pending enrollment directly
+	// and age it past expiry. Direct SQL for the leaf rows keeps the fixture
+	// independent of the full enrollment handshake.
+	if activated, err := st.ActivateAccount(ctx, provisioned.AccountID); err != nil || !activated {
+		t.Fatalf("activate = %v / %v", activated, err)
+	}
+	realm, err := st.CreateRealm(ctx, provisioned.AccountID, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := st.CreateAgent(ctx, provisioned.AccountID, realm.ID, "exporter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO agent_vault_keys
+		  (id, account_id, realm_id, owner_agent_id, key_version,
+		   algorithm, fingerprint, lifecycle_state)
+		VALUES ('avk_selfexportabcd22', $1, $2, $3, 1,
+		        'AES_256_GCM_RANDOM_NONCE_V1', 'abababababababababababababababababababababababababababababababab', 'current')`,
+		provisioned.AccountID, realm.ID, agent.ID); err != nil {
+		t.Fatal(err)
+	}
+	var enrollmentID string
+	if err := st.pool.QueryRow(ctx, `
+		INSERT INTO agent_vault_key_enrollments
+		  (id, account_id, realm_id, owner_agent_id, vault_key_id,
+		   vault_key_version, target_location_id, target_public_key,
+		   target_key_algorithm, pairing_commitment, lifecycle_state,
+		   expires_at)
+		VALUES ('enr_selfexportabcd22', $1, $2, $3, 'avk_selfexportabcd22',
+		        1, 'loc_selfexportabcd22', 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+		        'X25519_RAW_32_BASE64URL_V1', 'cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd', 'pending',
+		        now() + interval '1 hour')
+		RETURNING id`,
+		provisioned.AccountID, realm.ID, agent.ID).Scan(&enrollmentID); err != nil {
+		t.Fatalf("seed enrollment fixture: %v", err)
+	}
+
+	var live bytes.Buffer
+	err = st.ExportAccountSelf(ctx, provisioned.AccountID, "self-export-cell", "test", &live)
+	if err == nil || !errorsIsVaultLifecycleInProgress(err) {
+		t.Fatalf("live pending enrollment: export err = %v, want ErrVaultLifecycleInProgress", err)
+	}
+
+	if _, err := st.pool.Exec(ctx, `
+		UPDATE agent_vault_key_enrollments
+		   SET created_at = now() - interval '2 hours',
+		       expires_at = now() - interval '1 hour'
+		 WHERE id = $1`, enrollmentID); err != nil {
+		t.Fatal(err)
+	}
+
+	var expired bytes.Buffer
+	if err := st.ExportAccountSelf(
+		ctx, provisioned.AccountID, "self-export-cell", "test", &expired,
+	); err != nil {
+		t.Fatalf("expired enrollment must not block self export: %v", err)
+	}
+	if expired.Len() == 0 {
+		t.Fatal("expired-enrollment export produced no archive bytes")
+	}
+}
+
+func errorsIsVaultLifecycleInProgress(err error) bool {
+	return err != nil && errorsIs(err, ErrVaultLifecycleInProgress)
+}
+
+func errorsIs(err, target error) bool {
+	for e := err; e != nil; {
+		if e == target {
+			return true
+		}
+		type unwrapper interface{ Unwrap() error }
+		u, ok := e.(unwrapper)
+		if !ok {
+			return false
+		}
+		e = u.Unwrap()
+	}
+	return false
+}
