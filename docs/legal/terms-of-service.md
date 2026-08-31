@@ -71,10 +71,10 @@ transmitting your content as you direct (for example, agent email you
 send), and abuse protection. Value-free operational records (audit events
 and usage counters) contain no content and survive content deletion. We do not train models on your content and we do not sell it.
 Retention and deletion behavior is the published
-[data-retention policy](https://github.com/witwave-ai/witself/blob/main/docs/data-retention-policy.md). You may request a full
-export of your open-plane data at any time by contacting
-legal@witwave.ai; sealed-plane data exports only as ciphertext. A
-self-service export command is on the roadmap.
+[data-retention policy](https://github.com/witwave-ai/witself/blob/main/docs/data-retention-policy.md). You may export a full
+checksum-verified archive of your open-plane data at any time with the
+self-service `witself export` command, or request one by contacting
+legal@witwave.ai; sealed-plane data exports only as ciphertext.
 
 ## 6. Acceptable use and suspension
 
