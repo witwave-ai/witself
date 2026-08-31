@@ -242,6 +242,13 @@ type Config struct {
 		w io.Writer,
 	) error
 
+	// StreamAccountSelf enables the customer-facing GET /v1/export route.
+	// The route is authorized with the cell's account-scoped operator token,
+	// not a realm-scoped agent token, and exports the authenticated account.
+	// Implementations stream a read-only point-in-time archive without changing
+	// account lifecycle or placement.
+	StreamAccountSelf func(ctx context.Context, accountID string, w io.Writer) error
+
 	// BackupValidationEnabled is an explicit safety gate for the
 	// POST /v1/accounts/{id}:validate-backup route. Validation exercises a
 	// complete semantic import in a transaction that is deliberately rolled
@@ -2457,6 +2464,13 @@ func apiMux(cfg Config) http.Handler {
 		})
 	}
 	if cfg.Authenticate != nil {
+		if cfg.StreamAccountSelf != nil {
+			mux.HandleFunc("GET /v1/export", accountSelfExportHandler(
+				cfg.Authenticate,
+				cfg.StreamAccountSelf,
+				cfg.ReportAccountExportFailure,
+			))
+		}
 		whoami := whoamiHandler(cfg.Authenticate, cfg.GetOperatorAccountRole)
 		mux.HandleFunc("GET /v1/whoami", whoami)
 		mux.HandleFunc("GET /v1/auth/whoami", whoami)

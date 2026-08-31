@@ -105,6 +105,18 @@ func TestAccountExportsRejectDatabaseSchemaAheadPostgres(t *testing.T) {
 				)
 			},
 		},
+		{
+			name: "self",
+			run: func(w io.Writer) error {
+				return st.ExportAccountSelf(
+					ctx,
+					provisioned.AccountID,
+					"schema-guard-source",
+					"test",
+					w,
+				)
+			},
+		},
 	}
 	for _, exportPath := range exportPaths {
 		t.Run(exportPath.name, func(t *testing.T) {
