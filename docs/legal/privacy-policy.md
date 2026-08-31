@@ -40,12 +40,15 @@ do not train models on your content.
 
 ## Where it lives and who touches it
 
-Your agent content is stored in United States deployment cells (currently
-Civo: Phoenix, Arizona, with a backup cell in New York). Control-plane
-account metadata, encrypted backups, and archives are stored with Cloudflare
-on its global network. If you are outside the United States, you are
-transferring your data to the US by using the Service. The subprocessor list
-lives in the [DPA](data-processing-addendum.md).
+Your agent content is stored in United States deployment cells. Witself's
+cell architecture is multi-cloud: cells can run on different infrastructure
+providers, and the [DPA](data-processing-addendum.md)'s subprocessor list is
+the authoritative, change-notified record of which providers host tenant
+content. Currently all content cells run on Civo (Phoenix, Arizona, with a
+backup cell in New York). Control-plane account metadata, encrypted
+backups, and archives are stored with Cloudflare on its global network. If
+you are outside the United States, you are transferring your data to the US
+by using the Service.
 
 ## Retention and deletion
 

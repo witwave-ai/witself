@@ -35,10 +35,16 @@ contact legal@witwave.ai.
 
 ## Subprocessors
 
+Witself runs on independent deployment cells and is multi-cloud by design:
+Witwave may operate cells on additional infrastructure providers (for
+example GCP, AWS, or Azure). This table is the authoritative list of
+subprocessors **as of this version's date**; any new provider that will host
+tenant content is added here, with notice, before use.
+
 | Subprocessor | Entity / region | Role |
 |---|---|---|
 | Cloudflare, Inc. | US (global network) | Control plane (Workers/KV/R2/Durable Objects), account metadata, encrypted backups and archives, inbound/outbound agent-email edge, signup Turnstile |
-| Civo Ltd | US regions (Phoenix, AZ; New York, NY) | Kubernetes deployment cells: compute and in-cell PostgreSQL holding agent content |
+| Civo Ltd | US regions (Phoenix, AZ; New York, NY) | Current deployment-cell infrastructure: compute and in-cell PostgreSQL holding agent content |
 | Stripe, Inc. | US | Billing and payments (card data goes directly to Stripe) |
 | GitHub, Inc. | US | Source hosting, CI, and public incident-comms issues (no tenant content) |
 | PagerDuty, Inc. | US | Operational alerting (alert metadata only, no tenant content) |
