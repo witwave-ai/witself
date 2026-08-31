@@ -1620,6 +1620,8 @@ func serve() int {
 				return server.ImportSummary{}, server.ErrConflict
 			case errors.Is(err, export.ErrArchiveTooNew):
 				return server.ImportSummary{}, server.ErrArchiveTooNew
+			case errors.Is(err, store.ErrImportAuditContradiction):
+				return server.ImportSummary{}, server.ErrBadArchive
 			case errors.Is(err, store.ErrArchiveAccountMismatch),
 				errors.Is(err, store.ErrArchiveContent),
 				errors.Is(err, export.ErrCorrupt):
@@ -1656,6 +1658,8 @@ func serve() int {
 					return server.ImportSummary{}, server.ErrConflict
 				case errors.Is(err, export.ErrArchiveTooNew):
 					return server.ImportSummary{}, server.ErrArchiveTooNew
+				case errors.Is(err, store.ErrImportAuditContradiction):
+					return server.ImportSummary{}, server.ErrBadArchive
 				case errors.Is(err, store.ErrArchiveAccountMismatch),
 					errors.Is(err, store.ErrArchiveContent),
 					errors.Is(err, export.ErrCorrupt):
